@@ -160,16 +160,26 @@ func transferRelPath(task *CloudTask) (string, error) {
 		// 共享卷：<owner>/user/<taskID>/<file>（OwnerPrefix 已由 transferDone 按 shared
 		// 强制）；独享卷：user/<taskID>/<file>（无 owner 前缀，path.Join 折叠空段）。
 		rel = path.Join(prefix, "user", task.ID, sanitizeTransferName(task.Filename))
-	} else if task.Transfer.OwnerPrefix != "" {
-		rel = path.Join(task.Transfer.OwnerPrefix, rel)
+	} else {
+		// 显式路径也落 `user/` 桶（与自动派生/普通上传同键空间，I-1 收口）：
+		// 读端 resolveExternalDownload 恒按 user/ 桶重算键——若显式分支不拼 user/，
+		// /download 对显式路径产物 404。共享卷仍先强制 owner 前缀。
+		rel = path.Join(task.Transfer.OwnerPrefix, "user", rel)
 	}
 	rel = path.Clean("/" + rel)
 	rel = rel[1:] // 去前导 /
-	if task.Transfer.OwnerPrefix != "" && task.Transfer.Path != "" {
-		expected := path.Clean("/" + task.Transfer.OwnerPrefix + "/")
-		expected = strings.TrimPrefix(expected, "/")
-		if rel != expected && !strings.HasPrefix(rel, expected) {
-			return "", fmt.Errorf("transfer: 共享卷路径 %q 逃逸 owner 前缀（拒绝，防跨 owner 覆写）", task.Transfer.Path)
+	if task.Transfer.Path != "" {
+		// 桶约束：折叠后必须仍落在 `user/` 桶内（NH2 升级）——`..` 只能折叠用户 path
+		// 内的相对段，不得逃逸出桶（path.Join(prefix, "user", "../x.pdf") = "<prefix>/x.pdf"
+		// 会把产物写到 user/ 桶外，与读端键空间不一致且共享卷跨桶覆写）。共享卷另须
+		// 含 owner 前缀（防跨 owner 覆写）。
+		bucket := path.Clean("/user/")
+		bucket = strings.TrimPrefix(bucket, "/")
+		if task.Transfer.OwnerPrefix != "" {
+			bucket = path.Join(task.Transfer.OwnerPrefix, "user")
+		}
+		if rel != bucket && !strings.HasPrefix(rel, bucket+"/") {
+			return "", fmt.Errorf("transfer: 转存路径 %q 逃逸 user/ 桶（拒绝：仅 user/ 桶内可写）", task.Transfer.Path)
 		}
 	}
 	return rel, nil

@@ -452,8 +452,8 @@ func TestTransferDone_SharedVolume_ExplicitPathOwnerPrefix(t *testing.T) {
 	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	// 显式 path 也强制 owner 前缀：bob/my/movie.mp4
-	wantRel := "bob/my/movie.mp4"
+	// 显式 path 也强制 owner 前缀 + user 桶（I-1：读端恒按 user/ 桶重算键）：bob/user/my/movie.mp4
+	wantRel := "bob/user/my/movie.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("共享卷显式 path 应加 owner 前缀 %s，实际: %v", wantRel, keys(fs.files))
 	}
@@ -494,7 +494,7 @@ func TestTransferDone_SharedVolume_PrefixEscapeRejected(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "a.mp4")
 	_ = os.WriteFile(dest, []byte("data"), 0o600)
 	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err == nil {
-		t.Fatal(".. 逃逸 owner 前缀应拒绝（防跨 owner 覆写）")
+		t.Fatal(".. 逃逸 user/ 桶（NH2 升级）应拒绝——path.Join(bob, user, ../x.pdf) 折叠出桶")
 	}
 	// 合法显式 path（含前缀后不逃逸）→ 成功
 	task2 := &CloudTask{ID: "task-e2", Filename: "b.mp4", Owner: "bob",
@@ -974,3 +974,67 @@ func keysOf(m *memFS) []string {
 	}
 	return ks
 }
+
+// TestTransferDone_InternalVolumeQuotaGate Finding 2 回归：**内部/本地卷**（实现
+// syncpkg.LocalVolume → IsLocalVolume true）转存走用户配额探测——配额不足即拒绝
+// （fail-closed），外部卷（未实现 LocalVolume，默认远程）跳过配额。
+// 此前 transfer 测试均不装配 QuotaFor + LocalVolume=true FS，用户配额分支零执行。
+func TestTransferDone_InternalVolumeQuotaGate(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	mgr, env := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
+		MaxConcurrent: 3, TaskTTL: time.Hour, AllowPrivate: true,
+	})
+	// 装配 transferFSFor：内部卷（LocalVolume true → 走用户配额）。
+	local := &localVolumeFS{inner: newMemFS()}
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
+		return local, "secretdata", false
+	}
+	t.Cleanup(mgr.Close)
+
+	// owner 配额极低：转存 8 字节也超（内部卷走配额 → TryReserve 拒）。
+	env.setOwnerQuota("alice", 4)
+	task := &CloudTask{ID: "task-quota-internal", Filename: "q.mp4", Owner: "alice",
+		Transfer: &TransferSpec{Volume: "my-vault"}}
+	dest := filepath.Join(t.TempDir(), "q.mp4")
+	_ = os.WriteFile(dest, []byte("quota-data"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	_, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Size: 10}, nil)
+	if err == nil {
+		t.Fatal("内部卷（LocalVolume true）转存应走用户配额——配额不足应拒绝")
+	}
+	if !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("配额拒绝应归 ErrTransferTarget，got %v", err)
+	}
+	if len(local.inner.files) != 0 {
+		t.Fatalf("内部卷配额不足不应写入目标卷，实际 %d 文件", len(local.inner.files))
+	}
+}
+
+// localVolumeFS 包装 memFS 并实现 syncpkg.LocalVolume==true（模拟内部/本地卷）。
+type localVolumeFS struct {
+	inner *memFS
+}
+
+func (l *localVolumeFS) IsLocalVolume() bool { return true }
+func (l *localVolumeFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return l.inner.ListDir(ctx, p)
+}
+func (l *localVolumeFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return l.inner.Stat(ctx, p)
+}
+func (l *localVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return l.inner.OpenRead(ctx, p)
+}
+func (l *localVolumeFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return l.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (l *localVolumeFS) Rename(ctx context.Context, f, t string) error {
+	return l.inner.Rename(ctx, f, t)
+}
+func (l *localVolumeFS) Delete(ctx context.Context, p string) error  { return l.inner.Delete(ctx, p) }
+func (l *localVolumeFS) MakeDir(ctx context.Context, p string) error { return l.inner.MakeDir(ctx, p) }

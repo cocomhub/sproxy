@@ -206,6 +206,67 @@ func TestMultiTarget_ReplicaRead(t *testing.T) {
 	if !bytes.Equal(got, content) {
 		t.Fatalf("多 target 副本读取内容不一致：len(got)=%d", len(got))
 	}
+	// LocalVolume 委派（Finding 1 回归）：多 target 本地加密卷 = 内部（IsLocalVolume true），
+	// 不被误报外部（否则转存用户配额被绕过）。primary 是 LocalFS → true。
+	if !fs.IsLocalVolume() {
+		t.Fatal("multiplicas 多 target 本地卷应委派主 target 为内部（IsLocalVolume true）")
+	}
+}
+
+// TestMultiTarget_ReplicaLocalVolumeDelegation 委派细节：多 target 中主 target 是外部 FS
+// （未实现 LocalVolume → 默认外部）→ 整体外部；本地主 target → 内部。验证「只要一层
+// 外部就是外部」的层层委派在 replicaFS 上成立（Finding 1 修复验证）。
+func TestMultiTarget_ReplicaLocalVolumeDelegation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	// 主 target = 未实现 LocalVolume 的外部 FS（默认外部）。
+	external := &noLocalVolumeFS{inner: mkLocalFS(t, "ext")}
+	replica := mkLocalFS(t, "rep")
+	fs, err := NewFSMultiplicas(external, []syncpkg.FS{replica}, Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+		Targets:   []string{"replica"},
+	})
+	if err != nil {
+		t.Fatalf("NewFSMultiplicas: %v", err)
+	}
+	if fs.IsLocalVolume() {
+		t.Fatal("多 target 主 target 外部（未实现 LocalVolume）→ 整体应外部（IsLocalVolume false）")
+	}
+	// 写读确认副本机制仍工作。
+	if err := fs.WriteFile(ctx, "m.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	rc, rerr := fs.OpenRead(ctx, "m.bin")
+	if rerr != nil {
+		t.Fatalf("OpenRead: %v", rerr)
+	}
+	rc.Close()
+}
+
+// noLocalVolumeFS 包装 LocalFS 但不实现 syncpkg.LocalVolume（模拟默认外部卷）。
+type noLocalVolumeFS struct{ inner syncpkg.FS }
+
+func (n *noLocalVolumeFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return n.inner.ListDir(ctx, p)
+}
+func (n *noLocalVolumeFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return n.inner.Stat(ctx, p)
+}
+func (n *noLocalVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return n.inner.OpenRead(ctx, p)
+}
+func (n *noLocalVolumeFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return n.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (n *noLocalVolumeFS) Rename(ctx context.Context, f, t string) error {
+	return n.inner.Rename(ctx, f, t)
+}
+func (n *noLocalVolumeFS) Delete(ctx context.Context, p string) error { return n.inner.Delete(ctx, p) }
+func (n *noLocalVolumeFS) MakeDir(ctx context.Context, p string) error {
+	return n.inner.MakeDir(ctx, p)
 }
 
 // TestErasure_OffByDefault 验证纠错（Erasure）默认关闭：单卷普通写不生成 parity 引用

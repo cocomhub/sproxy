@@ -98,3 +98,16 @@ func (r *replicaFS) Delete(ctx context.Context, path string) error {
 	}
 	return r.targets[0].Delete(ctx, path)
 }
+
+// IsLocalVolume 封装卷委派（syncpkg.LocalVolume，用户裁定 2026-10-05）：multiplicas
+// 副本视图委派主 target——**任一副本外部即外部**（targets[0] 即主 target；多 target
+// 本地加密卷 = 内部 → 转存走用户配额）。漏委派会让多副本本地卷被误报外部（配额绕过）。
+func (r *replicaFS) IsLocalVolume() bool {
+	if len(r.targets) == 0 {
+		return false
+	}
+	if lv, ok := r.targets[0].(syncpkg.LocalVolume); ok {
+		return lv.IsLocalVolume()
+	}
+	return false
+}
