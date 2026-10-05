@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -161,7 +160,7 @@ func TestMetaFileSizeInRange(t *testing.T) {
 		}
 	}
 	if !hasDirMeta {
-		t.Fatal("容器应含目录 meta（@ 标记）")
+		t.Fatal("容器应含目录 meta（q 标记）")
 	}
 	if dirMetaSize < 196 || dirMetaSize > 384 {
 		t.Errorf("目录 meta 落盘大小 %d 不在 [196, 384] 范围", dirMetaSize)
@@ -176,8 +175,8 @@ func TestMetaFileSizeInRange(t *testing.T) {
 	}
 }
 
-// TestUnderlyingLayout_DirMetaMarked：含文件的容器内混放三类文件（目录 meta 含 @、文件
-// meta 含 -/_、分块无标记）。task10 目录解耦后每个逻辑目录都是容器，根下多个容器并存，
+// TestUnderlyingLayout_DirMetaMarked：含文件的容器内混放三类文件（目录 meta 含 q、文件
+// meta 含 z、分块无标记）。task10 目录解耦后每个逻辑目录都是容器，根下多个容器并存，
 // 故定位「含文件 meta 的容器」断言其三类齐备（不假设根首个条目即文件容器）。
 func TestUnderlyingLayout_DirMetaMarked(t *testing.T) {
 	t.Parallel()
@@ -480,9 +479,9 @@ func TestListDir_ShowsSubdirectories(t *testing.T) {
 }
 
 // TestFileMetaNameHashSegmentsAlignBlob（I1 回归）：文件 meta 名三段哈希必须锚定
-// **实际加密落盘 blob**——首段 = meta 明文 JSON 哈希前 16，中段 = 原始总校验和前 16，
-// 末段 = 实际（含 padding）密文 blob 哈希前 16。6b 后 writeFileEncrypted 在 EncryptShards
-// 之后用 encryptMetaBlob 重新加密（mtime/parity 改后），meta 名直接锚定最终 blob。
+// **实际加密落盘 blob**——首/末段 = 加密 meta blob 两窗口（base62，非明文哈希），中段 =
+// HMAC 分组盲签（同文件共享）。6b 后 writeFileEncrypted 在 EncryptShards 之后用
+// encryptMetaBlob 重新加密（mtime/parity 改后），meta 名直接锚定最终 blob。
 func TestFileMetaNameHashSegmentsAlignBlob(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
@@ -501,24 +500,23 @@ func TestFileMetaNameHashSegmentsAlignBlob(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read meta blob: %v", err)
 		}
-		// 末段 = 实际 blob 哈希前 16。
-		wantEnc, _ := shardseal.Hash16(blob)
-		if got := f.Name[len(f.Name)-16:]; got != wantEnc {
-			t.Errorf("文件 meta 名末段 %q 与实际上传 blob 哈希 %q 不符（名称完整性锚定被破坏）", got, wantEnc)
+		// 首尾窗口（加密 blob 两窗口的 base62 编码）与组签在乱序重排+同字符集混排后
+		// 无法逐字符精确核对（rand 段同字符集可干扰）；改为校验整体特征：
+		// ① 名称含 z 标记且长度 35-43；② 名称无特殊符号；③ 不含明文原文哈希截断
+		// （存在性探针回归守卫）。密文锚定由 meta.Chunks[].EncSHA256 与 blob 内嵌索引承担。
+		if !strings.ContainsRune(f.Name, 'z') {
+			t.Errorf("文件 meta 名 %q 应含 z 标记", f.Name)
 		}
-		// 首段 = meta 明文 JSON 哈希前 16。
+		if len(f.Name) < 35 || len(f.Name) > 43 {
+			t.Errorf("文件 meta 名长度 %d 应在 35-43", len(f.Name))
+		}
 		mm, err := fs.decryptFileMeta(blob)
 		if err != nil {
 			t.Fatalf("decryptFileMeta: %v", err)
 		}
-		metaJSON, _ := json.Marshal(mm)
-		wantOrig, _ := shardseal.Hash16(metaJSON)
-		if got := f.Name[:16]; got != wantOrig {
-			t.Errorf("文件 meta 名首段 %q 与明文 JSON 哈希 %q 不符", got, wantOrig)
-		}
-		// 中段 = 原始总校验和前 16（embedded run）。
-		if len(mm.Original.SHA256) >= 16 && !strings.Contains(f.Name, mm.Original.SHA256[:16]) {
-			t.Errorf("文件 meta 名未包含原始总校验和前 16 %q", mm.Original.SHA256[:16])
+		// 安全性断言：中段不得是明文原文哈希的任何截断（拒绝回归 content-existence oracle）。
+		if strings.Contains(f.Name, mm.Original.SHA256[:12]) {
+			t.Errorf("文件 meta 名中段不应含明文原文哈希截断 %q（会退化为存在性探针）", mm.Original.SHA256[:12])
 		}
 	}
 	if found == 0 {

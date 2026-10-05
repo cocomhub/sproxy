@@ -8,8 +8,8 @@
 // 卷内布局（无顶层 data/meta 结构词，全随机容器）：
 //
 //	<secretdata根>/<randDir 5-30>/           # 一个逻辑目录 = 一个随机命名容器目录
-//	      目录meta（@ 标记，含逻辑 path，加密）
-//	      文件meta（-/_ 标记，含文件根信息，加密）
+//	      目录meta（q 标记，含逻辑 path，加密）
+//	      文件meta（z 标记，含文件根信息，加密）
 //	      加密分块（无标记）
 //
 // 寻址 `secretdata://<卷名>/<path>`；旧卷加载 = 扫描容器目录 meta → path、文件 meta →
@@ -76,11 +76,8 @@ type Options struct {
 	// （卷级内容池），meta 引用计数管理，归零物理删。跨 secret 卷共享由底层 blob 自包含
 	// 保证（不必跨实例）。
 	//
-	// **已知边界（M-6）**：去重内容池键 = Hash16（整文件 SHA-256 前 16 hex = **64-bit
-	// 熵**）作内容寻址。64 位碰撞概率在单实例文件数量级（≤10^8）下可忽略（生日界
-	// ~2^32），但碰撞即静默复用错误内容（两不同文件命中间一池键 → 引用同一 blob）。
-	// 未来若支持跨实例大规模共享/内容寻址，应升级为完整 256-bit 键（meta.Extra 已可
-	// 容纳）；当前单实例数量级保留 64-bit 权衡（键长与命名格式兼容）。
+	// **已知边界（M-6，2026-10-05 升级）**：去重内容池键 = 整文件完整 SHA-256（**256-bit**，
+	// 不再 48/64bit 截断——完整熵消除内容寻址碰撞歧义；键即 Chunks[0].OrigSHA256，重启可重建）。
 	Dedup bool
 
 	// GCInterval 周期孤儿/墓碑 GC 间隔（0=默认禁用，GC 为**可选维护工具**：仅在远程卷 /
@@ -129,7 +126,7 @@ type metaEntry struct {
 	size     int64
 	mtime    int64  // 逻辑层 mtime（meta 内原始值，不被 blob mtime 打散影响）
 	dirSeg   string // 随机容器目录名（5-30）
-	metaName string // 文件 meta 加密 blob 名（含 -/_ 标记）
+	metaName string // 文件 meta 加密 blob 名（含 z 标记）
 	meta     *shardseal.Meta
 	// dataDir 是数据分块所在的容器目录。默认 = dirSeg（自包含 blob）；去重引用文件时
 	// 指向卷级去重容器（分块在该容器，meta blob 仍在 dirSeg）。"" = 与 dirSeg 相同。
@@ -147,7 +144,7 @@ type dedupBlob struct {
 	meta *shardseal.Meta
 }
 
-// dirMeta 是目录 meta 的加密 JSON（@ 标记，记录本目录逻辑名与父目录 dir_id；目录移动/改名
+// dirMeta 是目录 meta 的加密 JSON（q 标记，记录本目录逻辑名与父目录 dir_id；目录移动/改名
 // 仅重写本容器 meta 的 Name/ParentDirID 一个文件，子树零改动——目录间完全解耦）。
 // 旧格式（存完整逻辑 path，耦合父目录）loadIndex fail-closed（未上线，见 decryptDirMeta）。
 type dirMeta struct {
@@ -157,7 +154,7 @@ type dirMeta struct {
 	Type        string `json:"type"`                    // "dir"
 	Name        string `json:"name"`                    // 本目录逻辑名（不含路径；根容器为空串）
 	ParentDirID string `json:"parent_dir_id,omitempty"` // 父目录 dir_id（根为空）
-	DirID       string `json:"dir_id"`                  // 本目录唯一 ID（16 hex）
+	DirID       string `json:"dir_id"`                  // 本目录唯一 ID（base62 9 字符，与文件名中段同字符集）
 	MTime       string `json:"mtime"`
 }
 
@@ -688,7 +685,7 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	return nil
 }
 
-// MakeDir 创建逻辑空目录：递归创建随机容器目录 + 目录 meta（@ 标记，{name, parent_dir_id}
+// MakeDir 创建逻辑空目录：递归创建随机容器目录 + 目录 meta（q 标记，{name, parent_dir_id}
 // 父引用模型），不再提若干层（旧 inner.MakeDir(rel) 会向底层泄漏目录名，违背目录名保密）。
 func (s *SecretdataFS) MakeDir(ctx context.Context, rel string) error {
 	key := strings.TrimPrefix(rel, "/")
@@ -1221,7 +1218,7 @@ func scanContainerDirMetaBlob(ctx context.Context, s *SecretdataFS, container st
 	return nil, false
 }
 
-// hasFileMeta 报告容器内是否存在文件 meta（-/_ 标记）条目。
+// hasFileMeta 报告容器内是否存在文件 meta（z 标记）条目。
 func hasFileMeta(entries []syncpkg.Entry) bool {
 	for _, f := range entries {
 		if !f.IsDir && shardseal.ClassifyName(f.Name) == shardseal.KindFileMeta {
@@ -1538,7 +1535,7 @@ func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string
 	if cerr != nil {
 		return "", nil, cerr
 	}
-	dirID, iderr := shardseal.RandIDHex()
+	dirID, iderr := shardseal.RandID62()
 	if iderr != nil {
 		return "", nil, iderr
 	}
@@ -1560,9 +1557,11 @@ func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string
 	if berr != nil {
 		return "", nil, berr
 	}
-	origHex, _ := shardseal.Hash16(dmJSON)
-	encHex, _ := shardseal.Hash16(blob)
-	name := shardseal.DirMetaName(origHex, dirID, encHex)
+	// 新命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62，
+	// 自包含可不解密验证密文完整；中段 = 目录随机 id（base62 9 字符，匿名性一致）。
+	blobA, _ := shardseal.Hash48(blob, 0)
+	blobB, _ := shardseal.Hash48(blob, 16)
+	name := shardseal.DirMetaName(blobA, dirID, blobB)
 	if werr := s.inner.WriteFile(ctx, path.Join(c, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
 		return "", nil, fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
@@ -1826,7 +1825,7 @@ func (s *SecretdataFS) pruneEmptyDirsLocked(ctx context.Context, from string) {
 	}
 }
 
-// findDirMetaBlob 定位容器内的目录 meta（@ 标记）并读回其加密 blob。
+// findDirMetaBlob 定位容器内的目录 meta（q 标记）并读回其加密 blob。
 func findDirMetaBlob(ctx context.Context, inner syncpkg.FS, container string) (string, []byte, error) {
 	entries, err := inner.ListDir(ctx, container)
 	if err != nil {
@@ -1863,9 +1862,11 @@ func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string,
 	if berr != nil {
 		return "", berr
 	}
-	origHex, _ := shardseal.Hash16(dmJSON)
-	encHex, _ := shardseal.Hash16(blob)
-	name := shardseal.DirMetaName(origHex, dm.DirID, encHex)
+	// 新命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62；
+	// 中段 = 目录随机 id（base62 9 字符，与生成端一致）。
+	blobA, _ := shardseal.Hash48(blob, 0)
+	blobB, _ := shardseal.Hash48(blob, 16)
+	name := shardseal.DirMetaName(blobA, dm.DirID, blobB)
 	mt := dirMetaMTime(dm.MTime)
 	if werr := s.inner.WriteFile(ctx, path.Join(container, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mt)); werr != nil {
 		return "", fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)

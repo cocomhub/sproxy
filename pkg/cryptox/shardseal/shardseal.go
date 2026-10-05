@@ -159,10 +159,10 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 		return nil, err
 	}
 
-	totalHex, err := hash16(data)
-	if err != nil {
-		return nil, err
-	}
+	// 分组盲签：同一原始文件的全部分块/meta 共享（中段），供无 meta 时盲分组恢复；
+	// 基于 HMAC(secret, 整文件SHA256)，无 secret 无法反推明文或探测内容存在性。
+	fullSum := sha256.Sum256(data)
+	group := GroupSig(secret, fullSum[:])
 
 	res := &EncryptionResult{Meta: &Meta{
 		Version:     metaVersion,
@@ -181,7 +181,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner, srcPath: src.path}, data, key, salt, totalHex, outDir, v)
+	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner, srcPath: src.path}, data, key, salt, group, outDir, v)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -198,7 +198,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 		}
 	}
 
-	metaName, merr := encryptWriteMeta(res, key, salt, totalHex, outDir, padTarget)
+	metaName, merr := encryptWriteMeta(res, key, salt, group, outDir, padTarget)
 	if merr != nil {
 		return nil, merr
 	}
@@ -209,28 +209,23 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 // encryptWriteMeta 把 meta 明文 JSON 整体加密到 padTarget 落盘并返回 meta 文件名
 // （EncryptShards 的 meta 处理，抽方法控制认知复杂度 #727 gocognit=15）。meta 明文 =
 // [4B jsonLen][metaJSON][rand padding 到 padTarget]，整体加密为统一格式
-// [R][8B 密文长][salt][nonce][ct+tag]。meta 名三段真实并锚定最终 blob：首段 = meta
-// 明文哈希前 16，中段 = 原始总校验和前 16，末段 = MetaBlob 哈希前 16——磁盘上不出
-// 现明文 meta JSON。
-func encryptWriteMeta(res *EncryptionResult, key, salt []byte, totalHex, outDir string, padTarget int) (string, error) {
+// [R][8B 密文长][salt][nonce][ct+tag]。meta 名三段锚定最终 blob：首/末段 = 同一加密
+// meta blob 的两窗口（offset 0/16）base62，中段 = HMAC 分组盲签——磁盘上不出现明文
+// meta JSON，也不出现 meta 明文哈希（明文哈希可被内容存在性探测，匿名性收敛）。
+func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group, outDir string, padTarget int) (string, error) {
 	metaJSON, err := json.Marshal(res.Meta)
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 序列化失败: %w", err)
-	}
-	metaOrigHex, err := hash16(metaJSON)
-	if err != nil {
-		return "", err
 	}
 	metaBlob, err := encryptMetaJSON(key, salt, metaJSON, padTarget)
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 加密失败: %w", err)
 	}
 	res.MetaBlob = metaBlob
-	metaEncHex, err := hash16(metaBlob)
-	if err != nil {
-		return "", err
-	}
-	metaName := MetaName(metaOrigHex, totalHex, metaEncHex)
+	// 新命名：首/末段 = 同一加密 meta blob 的不同窗口（offset 0/16）base62 编码，
+	// 自包含可不解密验证密文完整；中段 = HMAC 分组盲签（与分块一致）。
+	// 磁盘上不出现明文 meta JSON，也不出现 meta 明文哈希（明文哈希可被内容存在性探测）。
+	metaName := MetaName(hash48(metaBlob, 0), group, hash48(metaBlob, 16))
 	if err := os.WriteFile(filepath.Join(outDir, metaName), metaBlob, 0o600); err != nil {
 		return "", fmt.Errorf("shardseal: 写 meta %s 失败: %w", metaName, err)
 	}
@@ -268,7 +263,7 @@ func injectPlannerSrcPath(plan *chunkPlan, blockOffset int64) {
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
 // 分块处理，抽方法控制认知复杂度 #727 gocognit=15）。Index 为 0 基顺序号；每块按
 // blocklet 规划细分并记录 BlockletInfo（随机访问索引）。
-func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex, outDir string, v AlgoVersion) ([]string, []ChunkInfo, error) {
+func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, outDir string, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo
 	for _, b := range plan.blocks {
@@ -282,9 +277,11 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 		if cerr != nil {
 			return nil, nil, cerr
 		}
-		origBlockHex, _ := hash16(chunk)
-		encBlockHex, _ := hash16(enc)
-		name := ChunkName(origBlockHex, totalHex, encBlockHex)
+		// 新命名：首尾段 = 同一加密 blob 的不同窗口（offset 0/16）base62 编码，无明文哈希外泄；
+		// 中段 = HMAC 分组盲签（同文件共享）。注意 ChunkName 签名 (encA, group, encB)。
+		encA := hash48(enc, 0)
+		encB := hash48(enc, 16)
+		name := ChunkName(encA, group, encB)
 		if werr := os.WriteFile(filepath.Join(outDir, name), enc, 0o600); werr != nil {
 			return nil, nil, fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
 		}
@@ -316,9 +313,9 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, totalHex
 			FileName:   name,
 			Offset:     b.Offset,
 			OrigSize:   int64(len(chunk)),
-			OrigSHA256: origBlockHex,
+			OrigSHA256: sha256Hex64(chunk), // 完整 64 hex（256-bit，审计/校验强度），不复用 48bit 截断
 			EncSize:    int64(len(enc)),
-			EncSHA256:  encBlockHex,
+			EncSHA256:  sha256Hex64(enc),
 			Blocklets:  blInfos,
 		}
 		// 解析失败信息是**文件级**共享的（planner 生命周期内失败记录，非单块专属）；因

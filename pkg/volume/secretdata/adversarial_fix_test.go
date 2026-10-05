@@ -267,7 +267,7 @@ func assertOldVersionPreserved(t *testing.T, fs *SecretdataFS, oldMeta string, u
 // 被回滚删除）、索引仍指向旧条目、usage/版本不变。
 //
 // 注入点选在 **meta 上传**（chunk 已全部上传后的最后一个 WriteFile）：faultWriteFS 仅对
-// 文件 meta blob 路径（含 -/_ 标记）失败——全部分块先落盘 → rollbackWrite 必须把已上传的
+// 文件 meta blob 路径（含 z 标记）失败——全部分块先落盘 → rollbackWrite 必须把已上传的
 // 新分块 + 新 meta 一并回滚删除（否则即为孤儿残留）。
 func TestOverwrite_Failure_RollsBackNewKeepsOld(t *testing.T) {
 	t.Parallel()
@@ -277,7 +277,7 @@ func TestOverwrite_Failure_RollsBackNewKeepsOld(t *testing.T) {
 	}
 	inner := &faultWriteFS{
 		wrap: syncpkg.NewLocalFS(root, nil),
-		// 仅对文件 meta blob（含 -/_ 标记）路径失败——覆盖写的 meta 上传点。
+		// 仅对文件 meta blob（含 z 标记）路径失败——覆盖写的 meta 上传点。
 		match: func(p string) bool {
 			return shardseal.ClassifyName(path.Base(p)) == shardseal.KindFileMeta
 		},
@@ -305,7 +305,7 @@ func TestOverwrite_Failure_RollsBackNewKeepsOld(t *testing.T) {
 	// 旧数据完好：索引仍指向旧条目、meta 名不变、可读回 v1 内容、usage/版本不变。
 	assertOldVersionPreserved(t, fs, oldMeta, usage0, ver0)
 	// 无新残留：容器内除旧条目 meta+分块外，无新增 v2 分块 / meta（rollbackWrite 已删已上传）。
-	// 目录 meta（@ 标记）恒保留，不计残留。
+	// 目录 meta（q 标记）恒保留，不计残留。
 	oldChunks := map[string]struct{}{}
 	for _, ci := range oldEntry.meta.Chunks {
 		oldChunks[ci.FileName] = struct{}{}
@@ -343,7 +343,7 @@ func TestDelete_MetaDeleteFailure_PreservesChunksNoGhost(t *testing.T) {
 	}
 	inner := &faultDeleteFS{
 		wrap: syncpkg.NewLocalFS(root, nil),
-		// 仅使文件 meta blob（含 -/_ 标记）删除失败——验证「meta 删失败时分块保留」。
+		// 仅使文件 meta blob（含 z 标记）删除失败——验证「meta 删失败时分块保留」。
 		match: func(p string) bool {
 			return shardseal.ClassifyName(path.Base(p)) == shardseal.KindFileMeta
 		},

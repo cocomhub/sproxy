@@ -46,11 +46,11 @@ type ChunkInfo struct {
 	Offset int64 `json:"offset"`
 	// OrigSize 是块的原始明文大小。
 	OrigSize int64 `json:"orig_size"`
-	// OrigSHA256 是块原始内容 SHA-256 前 16 hex。
+	// OrigSHA256 是块原始内容的完整 SHA-256（64 hex，256-bit；审计/校验强度，M-6 升级）。
 	OrigSHA256 string `json:"orig_sha256"`
 	// EncSize 是块的密文大小。
 	EncSize int64 `json:"enc_size"`
-	// EncSHA256 是块密文内容 SHA-256 前 16 hex（可校验密文完整）。
+	// EncSHA256 是块密文的完整 SHA-256（64 hex，256-bit；可校验密文完整）。
 	EncSHA256 string `json:"enc_sha256"`
 	// Nonce 是块 nonce（base64；当前块内联 nonce，字段为向后兼容/审计）。
 	Nonce string `json:"nonce,omitempty"`
@@ -73,7 +73,8 @@ type BlockletInfo struct {
 	Size int64 `json:"size"`
 	// EncSize 是 blocklet 密文段大小（含段头+nonce+tag，定位段长用）。
 	EncSize int64 `json:"enc_size"`
-	// OrigSHA256 是 blocklet 原始内容 SHA-256 前 16 hex（审计/校验用）。
+	// OrigSHA256 是 blocklet 原始内容的 SHA-256 前 16 hex（64-bit，审计/校验用；
+	// 块级已用完整 256-bit，blocklet 粒度保持 64-bit 截断，不引入额外熵成本）。
 	OrigSHA256 string `json:"orig_sha256"`
 	// EncOffset 是 blocklet 密文在 blob 内的起始偏移（nonce 起点；随机访问跳读用）。
 	EncOffset int64 `json:"enc_offset"`
@@ -206,8 +207,8 @@ type ParityInfo struct {
 type EncryptionResult struct {
 	// ChunkNames 是加密分块文件名列表（写入 outDir）。
 	ChunkNames []string
-	// MetaName 是 meta 文件名（写入 outDir）。三段哈希锚定 MetaBlob：首段 =
-	// hash16(metaJSON)、中段 = 原始总校验和前 16、末段 = hash16(MetaBlob)。
+	// MetaName 是 meta 文件名（写入 outDir）。三段锚定 MetaBlob：首/末段 = 加密
+	// meta blob 两窗口（base62），中段 = HMAC 分组盲签（匿名性收敛，见命名规则）。
 	MetaName string
 	// MetaBlob 是最终可上传的加密 meta（含 padding），与落盘文件一致。
 	MetaBlob []byte

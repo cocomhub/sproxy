@@ -39,8 +39,8 @@ cmd/sclient/tunnel_xfer_pinning_test.go	1
 cmd/sclient/turn_rest_test.go	3
 cmd/sclient/upload_test.go	3
 cmd/sclient/volumes_cmd_test.go	5
-cmd/sproxy/mesh_carrier_test.go	5
 cmd/sproxy/keyframe_register_test.go	2
+cmd/sproxy/mesh_carrier_test.go	5
 cmd/sproxy/mesh_node_test.go	5
 cmd/sproxy/mesh_sync_test.go	8
 cmd/sproxy/root_extra_test.go	4

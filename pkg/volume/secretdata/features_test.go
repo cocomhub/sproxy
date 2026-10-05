@@ -254,7 +254,7 @@ func TestDelete_ImmediatePhysicalCleanup(t *testing.T) {
 		t.Error("删除后 Stat 应 nil")
 	}
 	// 即时物理删：删除前出现的非目录文件（meta + 分块）不再残留磁盘（无墓碑保留）；
-	// 目录 meta（@ 标记）恒保留（容器结构锚点），不计残留。
+	// 目录 meta（q 标记）恒保留（容器结构锚点），不计残留。
 	// 容器可能因成空触发 pruneEmptyDirs 整体回收（ListDir 报错 = 无残留，同样通过）。
 	after, aerr := fs.inner.ListDir(ctx, container)
 	if aerr == nil {
@@ -414,7 +414,7 @@ func TestGC_ReusesIndex_NoMetaReread(t *testing.T) {
 	}
 }
 
-// countingFS 包装底层 FS，统计 GC 期间对「文件 meta blob」（文件名含 -/_ 标记、
+// countingFS 包装底层 FS，统计 GC 期间对「文件 meta blob」（文件名含 z 标记、
 // shardseal.ClassifyName == KindFileMeta）的 OpenRead 次数——Imp-3 断言用。
 type countingFS struct {
 	mu   sync.Mutex
@@ -451,7 +451,7 @@ func (c *countingFS) Rename(ctx context.Context, from, to string) error {
 func (c *countingFS) Delete(ctx context.Context, p string) error  { return c.wrap.Delete(ctx, p) }
 func (c *countingFS) MakeDir(ctx context.Context, p string) error { return c.wrap.MakeDir(ctx, p) }
 func (c *countingFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
-	// 仅统计读文件 meta（文件名基段含 -/_ 标记 = 密文 meta）。
+	// 仅统计读文件 meta（文件名基段含 z 标记 = 密文 meta）。
 	if shardseal.ClassifyName(path.Base(p)) == shardseal.KindFileMeta {
 		c.mu.Lock()
 		if c.read == nil {

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,7 +45,7 @@ func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err err
 			s.pruneCreatedDirs(ctx, wc.created)
 		}
 	}()
-	key, _ := shardseal.Hash16(wc.data) // 整文件内容 SHA-16hex（== 单分块 OrigSHA256，重启后可重建）
+	key, _ := shardseal.Hash256(wc.data) // 整文件内容完整 SHA-256（256-bit，== 单分块 Chunks[0].OrigSHA256，重启后可重建）
 	dir, err := s.ensureDedupDir()
 	if err != nil {
 		return err
@@ -291,13 +292,19 @@ func (s *SecretdataFS) encryptMetaBlob(m *shardseal.Meta) (string, []byte, error
 	if berr != nil {
 		return "", nil, berr
 	}
-	orig, _ := shardseal.Hash16(metaJSON)
-	enc, _ := shardseal.Hash16(blob)
-	total := ""
-	if len(m.Original.SHA256) >= 16 {
-		total = m.Original.SHA256[:16]
+	// 新命名：首/末段 = 同一加密 meta blob 的不同窗口（offset 0/16）base62，自包含可
+	// 不解密验证密文完整；中段 = HMAC 分组盲签（同文件共享；无明文哈希外泄）。
+	// 组签输入 = meta.Original.SHA256 解码为 raw 32 字节（与 shardseal 内部 GroupSig(secret, fullSum)
+	// 一致——此前直接用 hex 字符串作 HMAC 输入，导致 chunk 组签（raw32）与 meta 组签（hex64）
+	// 不一致，破坏无 meta 盲分组恢复）。
+	fullSHA, derr := hex.DecodeString(m.Original.SHA256)
+	if derr != nil || len(fullSHA) != 32 {
+		return "", nil, fmt.Errorf("secretdata: meta 原文 SHA256 非法（须 64 hex）: %w", derr)
 	}
-	return shardseal.MetaName(orig, total, enc), blob, nil
+	encA, _ := shardseal.Hash48(blob, 0)
+	encB, _ := shardseal.Hash48(blob, 16)
+	group := shardseal.GroupSig(s.secret, fullSHA)
+	return shardseal.MetaName(encA, group, encB), blob, nil
 }
 
 // cloneMeta 浅拷贝 meta（Chunks 切片独立；内容只读不共享变更）。
