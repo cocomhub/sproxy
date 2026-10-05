@@ -507,6 +507,17 @@ func TestRegisterBaidupcsBackend(t *testing.T) {
 	}
 }
 
+// TestRegisterBaidupcsBackend_ProductionProtocol A1 守护：生产注册（registerBaidupcsBackend
+// → "baidupcs" 类型声明 "baidupcs" 协议）必须保持——若有人删掉协议参数（M7 原始缺陷回退），
+// ResolveURL/SchemeOf 对生产类型即失效、转存 URL 不可取用。此断言让回退 CI 必红。
+func TestRegisterBaidupcsBackend_ProductionProtocol(t *testing.T) {
+	t.Parallel()
+	registerBaidupcsBackend() // sync.Once 幂等；测试进程无生产装配时执行
+	if got := registry.SchemeOf("baidupcs"); got != "baidupcs" {
+		t.Fatalf("A1: 生产注册必须声明 baidupcs 协议（SchemeOf 反查 = %q, want baidupcs）——删协议参数会断转存 URL 寻址", got)
+	}
+}
+
 // TestNewBaidupcsBackend_ExtraLocalRootWins 验证 backend 读 extra.local_root（优先于
 // v.RootDir）作为本地中间态基目录——T7 的 local_root 语义迁移到 volumes[].extra 后，
 // 配置的中间态目录必须生效（V3 框架外部卷 RootDir="" 不承载该语义）。

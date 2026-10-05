@@ -1129,3 +1129,17 @@ func (c *Config) OwnerQuotaFor(owner string) int64 {
 	}
 	return int64(c.OwnerQuotas["*"])
 }
+
+// transferConcurrencyEffective 返回转存并发的**实际生效值**：配置 0/缺省 → 与
+// cloud_max_concurrent 相同（与 manager applyCloudConfigDefaults 归一一致）。供
+// GET /api/config 可观测暴露实际值（B1——默认配置下原始零值 0 会误导运维）。
+func transferConcurrencyEffective(c *Config) int {
+	if c.CloudTransferConcurrency < 1 {
+		max := c.CloudMaxConcurrent
+		if max < 1 {
+			max = 3
+		}
+		return max
+	}
+	return c.CloudTransferConcurrency
+}

@@ -272,13 +272,16 @@ func TestRun_StalledCommandIsReportedAndKilled(t *testing.T) {
 // TestRun_SilentStartupIsNotKilled 钉住**双窗口**语义：首个字节之前用 -startup（编译/冷缓存期
 // 无输出是正常的），已开始输出后才用 -limit。
 //
-// 判别力前提：静默期（2s）必须**长于 limit（1.5s）**且短于 startup（5s）——否则「去掉 startup
+// 判别力前提：静默期（2s）必须**长于 limit（1.5s）**且短于 startup——否则「去掉 startup
 // 窗口」这个变异测不出来（实测过：静默期短于 limit 时该变异仍绿）。
+// startup 取 8s 而非 5s：并行 8 + -race 全量下 helper 子进程启动可被拖至 >5s（进程 spawn +
+// Go 运行时初始化），首字节晚于 startup 窗口会被误判卡死（rc=66 flaky，2026-10-05 实测）；
+// 2s 静默 < 8s 的判别力不受影响。
 func TestRun_SilentStartupIsNotKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
 	var out, errBuf syncBuf
-	args := append([]string{"-startup", "5s", "-limit", "1500ms", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
+	args := append([]string{"-startup", "8s", "-limit", "1500ms", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
 		helperArgs("late")...)
 
 	rc := runGuarded(t, args, &out, &errBuf, 30*time.Second)

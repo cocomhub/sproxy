@@ -399,9 +399,26 @@ func (f *FTPFS) Stat(ctx context.Context, relPath string) (*syncpkg.Entry, error
 		size, _ := strconv.ParseInt(sizeMsg, 10, 64)
 		return &syncpkg.Entry{Path: strings.TrimPrefix(relPath, "/"), Name: name, Size: size}, nil
 	}
-	// SIZE 非 213 且命令成功：550 = 不存在（幂等判定目标缺失）；其它码同样视为不存在
-	// （FTP 服务端对缺失文件统一返 550/450 类负响应，无「命令执行失败」歧义）。
-	return nil, nil
+	// SIZE 负回复：仅明确的「550 + not found/no such 类文案」映射缺失（幂等判定目标缺失）；
+	// 其余负回复（500/502 命令不支持、530 未登录、450/451 瞬时忙、550 权限拒绝等）必须
+	// fail-closed 返回 err——SIZE 不被支持的服务器上 500 回复若被当缺失，降级写会 STOR
+	// 无条件覆盖已存在目标（I1 声称要关的向量，只关传输错误不完整）。
+	if code == 550 && ftpIsNotFoundMsg(sizeMsg) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("ftp: SIZE %q 负回复 %d: %s", abs, code, sizeMsg)
+}
+
+// ftpIsNotFoundMsg 判定 SIZE 负回复文案是否为「文件不存在」（550 同时承载 not found 与
+// permission denied 语义，须按文案区分——缺失才放行降级写，权限拒绝必须 fail-closed）。
+func ftpIsNotFoundMsg(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, frag := range []string{"no such file", "not found", "no such", "does not exist", "missing"} {
+		if strings.Contains(lower, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 // OpenRead 读取文件（RETR）→ io.ReadCloser。

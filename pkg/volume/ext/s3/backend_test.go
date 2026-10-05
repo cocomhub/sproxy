@@ -101,6 +101,7 @@ func TestRegisterS3Backend(t *testing.T) {
 	t.Parallel()
 	typ := "s3-test-unique-" + randSuffix()
 	registerS3BackendWithFactory(typ)
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	be, err := registry.NewBackend(context.Background(), volume.Volume{
 		Name: "v", Type: typ,
 		Extra: map[string]any{"endpoint": "127.0.0.1:9000", "bucket": "b", "access_key": "ak", "secret_key": "sk"},
