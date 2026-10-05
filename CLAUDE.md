@@ -777,6 +777,7 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 - **测试认知复杂度**（go:S3776）：表驱动断言抽 `assert*` helper；mock 路由 switch 抽独立 handler 函数（实测 transfer_test/account_test/hybrid_multiaccount_test 命中）。
 - **大函数/并发测试拆子函数**（go:S3776）：长并发/阶段测试把「执行」与「断言」分开（如 runLockstepWorkers + assertConcurrentDayUsed）。
 - **测试复杂度可直接豁免（2026-10-05 用户明示）**：测试内 mock 路由 switch / 复杂断言等 S3776 **允许直接双标记豁免**（`//nolint:gocognit` 行首 + 行尾 `// NOSONAR: S3776`）——测试非生产逻辑，**不为解决而解决**、不做无谓重构（拆多函数伤可读性）。生产代码才须真正拆分。
+- **测试文件 issue 收紧（2026-10-05 用户裁定）**：Sonar 对 `*_test.go` 的分析只关心 bugs/vulnerabilities 与正确性（race、mock 契约、断言有效性）；**code smells（S3776/S8196/S978/S8193）在测试文件上直接忽略**——本仓实测测试文件 bugs/vuln 恒 0，正确性由 `-race`/archcheck/e2e 保障，Sonar 测试 code smells 无增量价值。
 - **硬编码盐**（go:S2053）：KDF 盐必须版本/随机派生（`secretExportKey` 单一 helper，禁字面量散落）。
 
 ### PR title 纪律（2026-10-05 用户明示）
