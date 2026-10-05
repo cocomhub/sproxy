@@ -1098,7 +1098,10 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	fullSum := sha256.Sum256(want)
 	group := GroupSig(secret, fullSum[:])
 	encA, encB := Hash48Pair(newBlob, 0, 16)
-	newName := ChunkName(encA, group, encB)
+	newName, nerr := ChunkName(encA, group, encB)
+	if nerr != nil {
+		t.Fatalf("ChunkName: %v", nerr)
+	}
 	if werr := os.WriteFile(filepath.Join(outDir, newName), newBlob, 0o600); werr != nil {
 		t.Fatalf("写新分块: %v", werr)
 	}

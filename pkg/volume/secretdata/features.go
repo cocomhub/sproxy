@@ -303,7 +303,11 @@ func (s *SecretdataFS) encryptMetaBlob(m *shardseal.Meta) (string, []byte, error
 	}
 	encA, encB := shardseal.Hash48Pair(blob, 0, 16)
 	group := shardseal.GroupSig(s.secret, fullSHA)
-	return shardseal.MetaName(encA, group, encB), blob, nil
+	metaName, nerr := shardseal.MetaName(encA, group, encB)
+	if nerr != nil {
+		return "", nil, nerr
+	}
+	return metaName, blob, nil
 }
 
 // cloneMeta 浅拷贝 meta（Chunks 切片独立；内容只读不共享变更）。

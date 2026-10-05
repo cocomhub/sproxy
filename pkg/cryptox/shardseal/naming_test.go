@@ -122,13 +122,19 @@ func TestSplitRandSegmentsRoundtrip(t *testing.T) {
 		encA := encode62([]byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc})
 		group := encode62([]byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x01})
 		encB := encode62([]byte{0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa})
-		name := ChunkName(encA, group, encB)
+		name, nerr := ChunkName(encA, group, encB)
+		if nerr != nil {
+			t.Fatalf("ChunkName: %v", nerr)
+		}
 		core, err := SplitRandSegments(name)
 		if err != nil {
 			t.Fatalf("SplitRandSegments: %v", err)
 		}
 		// core 必须 = interleaveCore(encA, group, encB)（与写侧同参重建一致）。
-		want := interleaveCore(encA, group, encB)
+		want, werr := interleaveCore(encA, group, encB)
+		if werr != nil {
+			t.Fatalf("interleaveCore: %v", werr)
+		}
 		if core != want {
 			t.Errorf("往返还原 core 不一致：got=%q want=%q", core, want)
 		}
@@ -183,7 +189,10 @@ func TestGroupSig(t *testing.T) {
 func TestInterleaveCore_SegmentLengthGuard(t *testing.T) {
 	t.Parallel()
 	// 9-char 输入正常通过（写侧同参重建路径）。
-	core := interleaveCore("aaaaaaaaa", "bbbbbbbbb", "ccccccccc")
+	core, err := interleaveCore("aaaaaaaaa", "bbbbbbbbb", "ccccccccc")
+	if err != nil {
+		t.Fatalf("interleaveCore 合法输入应无错: %v", err)
+	}
 	if len(core) != 27 {
 		t.Fatalf("core 长度=%d，应为 27", len(core))
 	}
@@ -197,17 +206,10 @@ func TestInterleaveCore_SegmentLengthGuard(t *testing.T) {
 		{name: "c 段空串", a: "aaaaaaaaa", b: "bbbbbbbbb", c: ""},
 		{name: "a 段超长", a: strings.Repeat("a", 10), b: "bbbbbbbbb", c: "ccccccccc"},
 	} {
-		if !panics(func() { interleaveCore(bad.a, bad.b, bad.c) }) {
-			t.Errorf("%s：非 9 字符段应 panic（拒绝静默截断）", bad.name)
+		if _, err := interleaveCore(bad.a, bad.b, bad.c); err == nil {
+			t.Errorf("%s：非 9 字符段应返回 error（拒绝静默截断、不 panic）", bad.name)
 		}
 	}
-}
-
-// panics 报告 fn 是否 panic。
-func panics(fn func()) (p bool) {
-	defer func() { p = recover() != nil }()
-	fn()
-	return false
 }
 
 func TestRandomSegmentCharSet(t *testing.T) {
@@ -263,7 +265,10 @@ func TestChunkNameStructure(t *testing.T) {
 	encA := strings.Repeat("a", 9)
 	encB := strings.Repeat("b", 9)
 	group := strings.Repeat("c", 9)
-	name := ChunkName(encA, group, encB)
+	name, nerr := ChunkName(encA, group, encB)
+	if nerr != nil {
+		t.Fatalf("ChunkName: %v", nerr)
+	}
 	// 结构：core27（三段 9 字符按 permute27 乱序重排）+ rand(4-8) 插入在 9/18 处。
 	// 总长 35-43。
 	if len(name) < 35 || len(name) > 43 {
@@ -314,7 +319,10 @@ func TestMetaNameStructure(t *testing.T) {
 	blobA := strings.Repeat("a", 9)
 	group := strings.Repeat("b", 9)
 	blobB := strings.Repeat("c", 9)
-	name := MetaName(blobA, group, blobB)
+	name, nerr := MetaName(blobA, group, blobB)
+	if nerr != nil {
+		t.Fatalf("MetaName: %v", nerr)
+	}
 	count := func(r rune) int { return strings.Count(name, string(r)) }
 	if count('a') < 9 || count('b') < 9 || count('c') < 9 {
 		t.Errorf("三段 9 字符未完整包含（a=%d b=%d c=%d）", count('a'), count('b'), count('c'))
@@ -329,7 +337,10 @@ func TestMetaNameStructure(t *testing.T) {
 
 func TestDirMetaNameStructure(t *testing.T) {
 	t.Parallel()
-	name := DirMetaName("aaaaaaaaa", "bbbbbbbbb", "ccccccccc")
+	name, nerr := DirMetaName("aaaaaaaaa", "bbbbbbbbb", "ccccccccc")
+	if nerr != nil {
+		t.Fatalf("DirMetaName: %v", nerr)
+	}
 	if !strings.ContainsRune(name, 'q') {
 		t.Errorf("目录 meta 名应含 q 标记：%q", name)
 	}
@@ -398,9 +409,13 @@ func TestClassifyName(t *testing.T) {
 func TestNameLengthUniform(t *testing.T) {
 	t.Parallel()
 	// 三类文件名长度同分布 35-43：批量生成，断言三者 min/max 完全一致。
-	build := func(fn func() string) (minLen, maxLen int) {
+	build := func(fn func() (string, error)) (minLen, maxLen int) {
 		for range 200 {
-			l := len(fn())
+			name, err := fn()
+			if err != nil {
+				t.Fatalf("命名构造: %v", err)
+			}
+			l := len(name)
 			if l < minLen || minLen == 0 {
 				minLen = l
 			}
@@ -411,9 +426,9 @@ func TestNameLengthUniform(t *testing.T) {
 		return minLen, maxLen
 	}
 	a, b, c := "aaaaaaaaa", "bbbbbbbbb", "ccccccccc"
-	chunkMin, chunkMax := build(func() string { return ChunkName(a, c, b) }) // (encA, group, encB)
-	fmMin, fmMax := build(func() string { return MetaName(a, c, b) })        // (blobA, group, blobB)
-	dmMin, dmMax := build(func() string { return DirMetaName(a, b, c) })     // (blobA, dirID, blobB)
+	chunkMin, chunkMax := build(func() (string, error) { return ChunkName(a, c, b) }) // (encA, group, encB)
+	fmMin, fmMax := build(func() (string, error) { return MetaName(a, c, b) })        // (blobA, group, blobB)
+	dmMin, dmMax := build(func() (string, error) { return DirMetaName(a, b, c) })     // (blobA, dirID, blobB)
 	if chunkMin != fmMin || chunkMin != dmMin || chunkMax != fmMax || chunkMax != dmMax {
 		t.Errorf("三类文件名长度范围不一致：chunk %d-%d fileMeta %d-%d dirMeta %d-%d",
 			chunkMin, chunkMax, fmMin, fmMax, dmMin, dmMax)
@@ -428,10 +443,13 @@ func TestNameLengthUniform(t *testing.T) {
 // hex——锁住「meta/dir 名不再喂 hex 段」的匿名性回归（命名匿名性收敛）。
 func TestHexDensityLow(t *testing.T) {
 	t.Parallel()
-	measure := func(fn func() string) float64 {
+	measure := func(fn func() (string, error)) float64 {
 		total, hexTotal := 0, 0
 		for range 500 {
-			name := fn()
+			name, err := fn()
+			if err != nil {
+				t.Fatalf("命名构造: %v", err)
+			}
 			total += len(name)
 			for j := 0; j < len(name); j++ {
 				ch := name[j]
@@ -443,19 +461,19 @@ func TestHexDensityLow(t *testing.T) {
 		return float64(hexTotal) / float64(total)
 	}
 	secret := []byte("hex-density-secret")
-	chunk := func() string {
+	chunk := func() (string, error) {
 		blob := []byte("chunk" + fmt.Sprint(time.Now().UnixNano()))
 		sum := sha256.Sum256(blob)
 		encA, encB := Hash48Pair(blob, 0, 16)
 		return ChunkName(encA, GroupSig(secret, sum[:]), encB)
 	}
-	meta := func() string {
+	meta := func() (string, error) {
 		blob := []byte("meta" + fmt.Sprint(time.Now().UnixNano()))
 		sum := sha256.Sum256(blob)
 		encA, encB := Hash48Pair(blob, 0, 16)
 		return MetaName(encA, GroupSig(secret, sum[:]), encB)
 	}
-	dir := func() string {
+	dir := func() (string, error) {
 		blob := []byte("dir" + fmt.Sprint(time.Now().UnixNano()))
 		encA, encB := Hash48Pair(blob, 0, 16)
 		return DirMetaName(encA, "AAAAAAAAA", encB)

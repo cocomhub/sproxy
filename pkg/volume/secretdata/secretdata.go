@@ -1567,7 +1567,10 @@ func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string
 	// 新命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62，
 	// 自包含可不解密验证密文完整；中段 = 目录随机 id（base62 9 字符，匿名性一致）。
 	blobA, blobB := shardseal.Hash48Pair(blob, 0, 16)
-	name := shardseal.DirMetaName(blobA, dirID, blobB)
+	name, nerr := shardseal.DirMetaName(blobA, dirID, blobB)
+	if nerr != nil {
+		return "", nil, nerr
+	}
 	if werr := s.inner.WriteFile(ctx, path.Join(c, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
 		return "", nil, fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
@@ -1871,7 +1874,10 @@ func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string,
 	// 新命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62；
 	// 中段 = 目录随机 id（base62 9 字符，与生成端一致）。
 	blobA, blobB := shardseal.Hash48Pair(blob, 0, 16)
-	name := shardseal.DirMetaName(blobA, dm.DirID, blobB)
+	name, nerr := shardseal.DirMetaName(blobA, dm.DirID, blobB)
+	if nerr != nil {
+		return "", nerr
+	}
 	mt := dirMetaMTime(dm.MTime)
 	if werr := s.inner.WriteFile(ctx, path.Join(container, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mt)); werr != nil {
 		return "", fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)

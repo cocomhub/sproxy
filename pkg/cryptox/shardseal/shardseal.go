@@ -227,11 +227,30 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group, outDir str
 	// 自包含可不解密验证密文完整；中段 = HMAC 分组盲签（与分块一致）。
 	// 磁盘上不出现明文 meta JSON，也不出现 meta 明文哈希（明文哈希可被内容存在性探测）。
 	metaA, metaB := Hash48Pair(metaBlob, 0, 16)
-	metaName := MetaName(metaA, group, metaB)
+	metaName, nerr := MetaName(metaA, group, metaB)
+	if nerr != nil {
+		return "", nerr
+	}
 	if err := os.WriteFile(filepath.Join(outDir, metaName), metaBlob, 0o600); err != nil {
 		return "", fmt.Errorf("shardseal: 写 meta %s 失败: %w", metaName, err)
 	}
 	return metaName, nil
+}
+
+// chunkBlobNameAndWrite 计算加密分块 blob 名并写盘（encryptWriteChunks 循环体内步骤，
+// 抽方法控制认知复杂度 #727 gocognit=15）。首尾段 = 同一加密 blob 的不同窗口
+// （offset 0/16）base62 编码，中段 = HMAC 分组盲签；ChunkName 段长非法返回 error
+// （不 panic，fail-closed）。
+func chunkBlobNameAndWrite(enc []byte, group, outDir string) (string, error) {
+	encA, encB := Hash48Pair(enc, 0, 16) // 单次 SHA-256 取两窗口（大块省一次哈希）
+	name, nerr := ChunkName(encA, group, encB)
+	if nerr != nil {
+		return "", nerr
+	}
+	if werr := os.WriteFile(filepath.Join(outDir, name), enc, 0o600); werr != nil {
+		return "", fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
+	}
+	return name, nil
 }
 
 // chunkPlan 是 encryptShards 的分块规划结果（块 + blocklet 规划器；S107 收敛：blocks/blp
@@ -281,10 +300,9 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, o
 		}
 		// 新命名：首尾段 = 同一加密 blob 的不同窗口（offset 0/16）base62 编码，无明文哈希外泄；
 		// 中段 = HMAC 分组盲签（同文件共享）。注意 ChunkName 签名 (encA, group, encB)。
-		encA, encB := Hash48Pair(enc, 0, 16) // 单次 SHA-256 取两窗口（大块省一次哈希）
-		name := ChunkName(encA, group, encB)
-		if werr := os.WriteFile(filepath.Join(outDir, name), enc, 0o600); werr != nil {
-			return nil, nil, fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
+		name, nerr := chunkBlobNameAndWrite(enc, group, outDir)
+		if nerr != nil {
+			return nil, nil, nerr
 		}
 		var blInfos []BlockletInfo
 		for i, bl := range blocklets {

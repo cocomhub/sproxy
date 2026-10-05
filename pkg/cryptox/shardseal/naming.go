@@ -202,11 +202,13 @@ var permute27 = [...]int{
 // interleaveCore 把三段 9 字符按 permute27 乱序重排为 27 字符 core。
 // 每段必须恰为 nameChars 字符——**长度守卫**：曾有调用方喂 16-hex/12-hex 串，经
 // interleaveCore 静默截断成前 9 字符 → meta/dir 名 hash 段仍是 hex，匿名性回归
-// （实测 hex 占比 55-89%）。此处长度不符即 panic（fail-fast，杜绝静默截断重演）。
-func interleaveCore(a, b, c string) string {
+// （实测 hex 占比 55-89%）。此处长度不符返回 error（fail-closed，拒绝构造非法名、
+// 杜绝静默截断重演——不 panic：解密/重写路径的段长来自运行时数据，panic 会崩整个
+// 服务进程，error 让上层 fail-closed 优雅拒绝）。
+func interleaveCore(a, b, c string) (string, error) {
 	if len(a) != nameChars || len(b) != nameChars || len(c) != nameChars {
-		panic(fmt.Sprintf("shardseal: interleaveCore 段长非法（应各 %d 字符，got %d/%d/%d）",
-			nameChars, len(a), len(b), len(c)))
+		return "", fmt.Errorf("shardseal: interleaveCore 段长非法（应各 %d 字符，got %d/%d/%d）",
+			nameChars, len(a), len(b), len(c))
 	}
 	var out strings.Builder
 	out.Grow(27)
@@ -220,24 +222,30 @@ func interleaveCore(a, b, c string) string {
 			out.WriteByte(c[i-18])
 		}
 	}
-	return out.String()
+	return out.String(), nil
 }
 
 // ChunkName 构造分块文件名：三段 9 字符（encA/组签/encB）按 permute27 乱序重排成 27 字符
 // core，插入两个随机段（总长 8-16，均等拆半）在固定位置：
 //
 //	core[0:9] + rand1 + core[9:18] + rand2 + core[18:27]   （总长 35-43）
-func ChunkName(encA, group, encB string) string {
-	core := interleaveCore(encA, group, encB)
+func ChunkName(encA, group, encB string) (string, error) {
+	core, err := interleaveCore(encA, group, encB)
+	if err != nil {
+		return "", err
+	}
 	r1, r2 := randPairLen()
 	seg1, _ := randomSegment(r1)
 	seg2, _ := randomSegment(r2)
-	return core[:9] + seg1 + core[9:18] + seg2 + core[18:]
+	return core[:9] + seg1 + core[9:18] + seg2 + core[18:], nil
 }
 
 // MetaName 构造 file meta 文件名：同 ChunkName 的交错结构，两个随机段中随机一个注入 'z'。
-func MetaName(blobA, group, blobB string) string {
-	core := interleaveCore(blobA, group, blobB)
+func MetaName(blobA, group, blobB string) (string, error) {
+	core, err := interleaveCore(blobA, group, blobB)
+	if err != nil {
+		return "", err
+	}
 	r1, r2 := randPairLen()
 	seg1, _ := randomSegment(r1)
 	seg2, _ := randomSegment(r2)
@@ -246,13 +254,16 @@ func MetaName(blobA, group, blobB string) string {
 	} else {
 		seg2 = injectMark(seg2, 'z')
 	}
-	return core[:9] + seg1 + core[9:18] + seg2 + core[18:]
+	return core[:9] + seg1 + core[9:18] + seg2 + core[18:], nil
 }
 
 // DirMetaName 构造目录 meta 文件名：同 ChunkName 的交错结构（blobA/目录id/blobB 乱序重排），
 // 两个随机段中随机一个注入 'q'。长度与分块/file meta 一致（35-43）。
-func DirMetaName(blobA, dirID, blobB string) string {
-	core := interleaveCore(blobA, dirID, blobB)
+func DirMetaName(blobA, dirID, blobB string) (string, error) {
+	core, err := interleaveCore(blobA, dirID, blobB)
+	if err != nil {
+		return "", err
+	}
 	r1, r2 := randPairLen()
 	seg1, _ := randomSegment(r1)
 	seg2, _ := randomSegment(r2)
@@ -261,7 +272,7 @@ func DirMetaName(blobA, dirID, blobB string) string {
 	} else {
 		seg2 = injectMark(seg2, 'q')
 	}
-	return core[:9] + seg1 + core[9:18] + seg2 + core[18:]
+	return core[:9] + seg1 + core[9:18] + seg2 + core[18:], nil
 }
 
 // NameKind 是三文件名类型。
