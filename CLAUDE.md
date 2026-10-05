@@ -341,6 +341,7 @@ type Conn interface {
 | `hub.transports.ws.enabled` / `.listen`（预留，未消费）/ `.path`（已废弃，固定 `/ws`，非默认值仅告警忽略） | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
 | `cloud_max_concurrent` | int | 3 | 云端下载并发数 |
+| `cloud_transfer_concurrency` | int | 3 | 转存并发上限（独立于下载槽；0/缺省 = 与 cloud_max_concurrent 相同） |
 | `cloud_sync_threshold` | size | 20MiB | 同步阈值（handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
 | `cloud_max_batch_urls` | int | 100 | 批量/组下载单次最大 URL 数；超过服务端返回 400 使创建失败 |
 | `cloud_download_timeout` / `cloud_download_idle_timeout` | duration | 30m / 1m | 单次下载整体/空闲超时 |

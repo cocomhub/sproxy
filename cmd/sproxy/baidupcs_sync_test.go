@@ -101,6 +101,9 @@ func TestSetupBaidupcsFSFactory_NoBaidupcsVolumes(t *testing.T) {
 func setupBaidupcsTestSet(t *testing.T, typ string, factory baidupcsStorageFactory, names ...string) *registry.Set {
 	t.Helper()
 	registerBaidupcsBackendWithFactory(typ, factory)
+	// flaky 修复：register 后必须 t.Cleanup 解绑——否则 -count=2 第二遍重复注册同类型
+	// panic（registry 全局表；单遍 count=1 因进程单次不暴露）。
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	external := make(map[string]registry.ExternalBackend, len(names))
 	volumes := make([]volume.Volume, 0, len(names))
 	for _, name := range names {
@@ -183,6 +186,54 @@ func TestSetupBaidupcsFSFactory_VolumeMissing(t *testing.T) {
 	}
 }
 
+// TestBaidupcs_OpenURL_ProtocolRegistered M7/C1 回归：baidupcs 卷声明协议 → SchemeOf 反查
+// 命中 + ResolveURL 取用转存产物。此前 baidupcs 注册不传 protocols（ResolveURL 查表失败、
+// transferURL 无法取用——M7 闭环断链），修复后生产注册传 "baidupcs" 协议。本测试用独立
+// 类型 + 独立 scheme 验证「协议声明→寻址」机制（避免与生产注册的 "baidupcs" 协议冲突：
+// cmd/sproxy 全量跑时 registerBaidupcsBackend 已声明该协议，重复声明同 scheme 会
+// fail-fast panic——与 s3 的 TestResolveURL_S3ProtocolRegistered 同思路，但生产注册在
+// 本包内故用自定义 scheme）。
+func TestBaidupcs_OpenURL_ProtocolRegistered(t *testing.T) {
+	t.Parallel()
+	// 独立类型名 + 独立 scheme 避免与生产注册冲突。
+	const typ = "baidupcs-c1-openurl"
+	const scheme = "baidupcs-test-openurl"
+	registerBaidupcsBackendWithFactory(typ, func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
+		return newFakeBaidupcsStorage(), nil
+	}, scheme)
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
+
+	// 经 backend 构造拿 StorageFS（fake 内存网盘），写入转存产物。
+	// Extra.bduss 必需（构造 fail-closed：bduss 或 binary_path 至少其一）。
+	st := newFakeBaidupcsStorage()
+	be, err := newBaidupcsBackendWithFactory(context.Background(),
+		volume.Volume{Name: "vault", Type: typ, RootDir: t.TempDir(), Extra: map[string]any{"bduss": "test-bduss"}},
+		func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) { return st, nil })
+	if err != nil {
+		t.Fatalf("newBaidupcsBackendWithFactory: %v", err)
+	}
+	if werr := be.FS().WriteFile(context.Background(), "pikpak/o.bin", bytes.NewReader([]byte("baidupcs-openurl-content")), 24, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	set := registry.NewSet(nil, nil, nil, nil, "")
+	if aerr := set.AddExternalVolume(volume.Volume{Name: "vault", Type: typ}, be); aerr != nil {
+		t.Fatalf("AddExternalVolume: %v", aerr)
+	}
+
+	if got := registry.SchemeOf(typ); got != scheme {
+		t.Fatalf("SchemeOf(%s) = %q, want %q（协议未声明则转存 URL 不可寻址）", typ, got, scheme)
+	}
+	rc, err := set.ResolveURL(context.Background(), scheme+"://vault/pikpak/o.bin")
+	if err != nil {
+		t.Fatalf("ResolveURL(%s://...) 失败: %v", scheme, err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if string(got) != "baidupcs-openurl-content" {
+		t.Fatalf("ResolveURL 内容 = %q, want 写入内容", got)
+	}
+}
+
 // TestSetupBaidupcsFSFactory_AllVolumesFailed 全部卷 backend 构造失败（Set.External 空）→ 工厂注入但查卷报错（fail-closed 在调用点）。
 func TestSetupBaidupcsFSFactory_AllVolumesFailed(t *testing.T) {
 	t.Parallel()
@@ -192,6 +243,7 @@ func TestSetupBaidupcsFSFactory_AllVolumesFailed(t *testing.T) {
 	registerBaidupcsBackendWithFactory(typ, func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error) {
 		return nil, baidupcs.ErrInvalidParam
 	})
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	v := volume.Volume{Name: "bad", Type: typ, RootDir: t.TempDir(), Extra: map[string]any{"bduss": "x"}}
 	if _, err := registry.NewBackend(context.Background(), v); err == nil {
 		t.Fatal("构造失败的 backend 应报错")
@@ -229,6 +281,7 @@ func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 	}
 	typ := "baidupcs-t3-multi"
 	registerBaidupcsBackendWithFactory(typ, factory)
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	external := make(map[string]registry.ExternalBackend, 2)
 	volumes := make([]volume.Volume, 0, 2)
 	for _, name := range []string{"disk1", "disk2"} {
@@ -292,6 +345,7 @@ func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
 	}
 	typ := "baidupcs-t3-partial"
 	registerBaidupcsBackendWithFactory(typ, factory)
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	// 盘1 成功进 external；盘2 构造失败 → 不进 external。
 	v1 := volume.Volume{Name: "disk1", Type: typ, RootDir: t.TempDir(), Extra: map[string]any{"bduss": "bduss-1"}}
 	be1, err := registry.NewBackend(context.Background(), v1)
@@ -434,6 +488,7 @@ func TestRegisterBaidupcsBackend(t *testing.T) {
 		return newFakeBaidupcsStorage(), nil
 	}
 	registerBaidupcsBackendWithFactory(typ, factory)
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	v := volume.Volume{
 		Name:    "sys-baidu-1",
 		Type:    typ,

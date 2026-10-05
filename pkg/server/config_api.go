@@ -64,12 +64,15 @@ type configResponse struct {
 	VersioningEnabled  bool   `json:"versioning_enabled"`
 	VersioningMax      int    `json:"versioning_max_versions"`
 	CloudMaxConcurrent int    `json:"cloud_max_concurrent"`
-	CloudSyncThreshold int64  `json:"cloud_sync_threshold"`
-	HubEnabled         bool   `json:"hub_enabled"`
-	TLSEnabled         bool   `json:"tls_enabled"`
-	Addr               string `json:"addr"`
-	StorageRoot        string `json:"storage_root"` // 相对路径；若配置为绝对路径则返回原值
-	WebTunnel          bool   `json:"web_tunnel"`   // web.tunnel：Web UI 领域方法是否默认走加密隧道
+	// CloudTransferConcurrency 转存并发上限（NM5 独立限流；可观测——运维经
+	// GET /api/config / sclient config remote 确认实际生效值）。
+	CloudTransferConcurrency int    `json:"cloud_transfer_concurrency"`
+	CloudSyncThreshold       int64  `json:"cloud_sync_threshold"`
+	HubEnabled               bool   `json:"hub_enabled"`
+	TLSEnabled               bool   `json:"tls_enabled"`
+	Addr                     string `json:"addr"`
+	StorageRoot              string `json:"storage_root"` // 相对路径；若配置为绝对路径则返回原值
+	WebTunnel                bool   `json:"web_tunnel"`   // web.tunnel：Web UI 领域方法是否默认走加密隧道
 }
 
 // configHandler 处理 GET /api/config，返回当前运行时配置（脱敏）。
@@ -77,26 +80,27 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 
 	resp := configResponse{
-		LogLevel:           cfg.LogLevel,
-		LogFormat:          cfg.LogFormat,
-		AccessKeysSet:      h.credentialRing != nil && h.credentialRing.Len() > 0,
-		RateLimitRequests:  cfg.RateLimit.Requests,
-		RateLimitWindow:    cfg.RateLimit.Window.String(),
-		BandwidthEnabled:   cfg.RateLimit.Bandwidth.Enabled,
-		BandwidthOwnerBPS:  cfg.RateLimit.Bandwidth.PerOwnerBPS,
-		MaxStorageBytes:    cfg.MaxStorageBytes,
-		MaxUploadBytes:     int64(cfg.MaxUploadBytes),
-		ChunkSize:          cfg.ChunkSize,
-		UploadSessionTTL:   cfg.UploadSessionTTL.String(),
-		VersioningEnabled:  cfg.Versioning.Enabled,
-		VersioningMax:      cfg.Versioning.MaxVersions,
-		CloudMaxConcurrent: cfg.CloudMaxConcurrent,
-		CloudSyncThreshold: cfg.CloudSyncThreshold,
-		HubEnabled:         cfg.Hub.Enabled,
-		TLSEnabled:         cfg.TLS.Enabled,
-		Addr:               cfg.Addr,
-		StorageRoot:        resolveDefaultVolumeRoot(cfg),
-		WebTunnel:          cfg.Web.Tunnel,
+		LogLevel:                 cfg.LogLevel,
+		LogFormat:                cfg.LogFormat,
+		AccessKeysSet:            h.credentialRing != nil && h.credentialRing.Len() > 0,
+		RateLimitRequests:        cfg.RateLimit.Requests,
+		RateLimitWindow:          cfg.RateLimit.Window.String(),
+		BandwidthEnabled:         cfg.RateLimit.Bandwidth.Enabled,
+		BandwidthOwnerBPS:        cfg.RateLimit.Bandwidth.PerOwnerBPS,
+		MaxStorageBytes:          cfg.MaxStorageBytes,
+		MaxUploadBytes:           int64(cfg.MaxUploadBytes),
+		ChunkSize:                cfg.ChunkSize,
+		UploadSessionTTL:         cfg.UploadSessionTTL.String(),
+		VersioningEnabled:        cfg.Versioning.Enabled,
+		VersioningMax:            cfg.Versioning.MaxVersions,
+		CloudMaxConcurrent:       cfg.CloudMaxConcurrent,
+		CloudTransferConcurrency: cfg.CloudTransferConcurrency,
+		CloudSyncThreshold:       cfg.CloudSyncThreshold,
+		HubEnabled:               cfg.Hub.Enabled,
+		TLSEnabled:               cfg.TLS.Enabled,
+		Addr:                     cfg.Addr,
+		StorageRoot:              resolveDefaultVolumeRoot(cfg),
+		WebTunnel:                cfg.Web.Tunnel,
 	}
 
 	sendJSONResponse(w, resp, http.StatusOK)

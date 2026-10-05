@@ -183,6 +183,7 @@ func TestRegisterSecretsBackendWithFS(t *testing.T) {
 	registerSecretsBackendWithFS(typ, func(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 		return secretsLocalFS(root), nil
 	})
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	v := volume.Volume{Name: "sv", Type: typ, RootDir: root, Extra: map[string]any{"target": "local", "root": root}}
 	be, err := registry.NewBackend(context.Background(), v)
 	if err != nil {

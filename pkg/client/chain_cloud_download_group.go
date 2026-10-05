@@ -218,6 +218,12 @@ func (c *CloudDownloadGroupChain) runGroupStage(ctx context.Context, reportFn Pr
 
 	case PhaseArchiving:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
+		// F2 幂等复查：改版前遗留状态（download_local 未持久化、Phase 已停在 Archiving/
+		// Downloading）恢复后 DownloadLocal 归零 false → 在此兜底直接完成，不漏跳下载
+		// （新代码自身产出的状态机在 Waiting 阶段就写完 Completed，无「false+Archiving」态）。
+		if c.skipLocalDownload(ctx) {
+			return true, nil
+		}
 		if err := c.archiveGroup(ctx); err != nil {
 			return false, err
 		}

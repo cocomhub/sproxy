@@ -242,7 +242,8 @@ func (f *TextFormatter) PrintConfig(cfg *client.ConfigResponse) {
 	fmt.Fprintf(f.w, "  chunk_size:             %d\n", cfg.ChunkSize)
 	fmt.Fprintf(f.w, "  upload_session_ttl:     %s\n", cfg.UploadSessionTTL)
 	fmt.Fprintf(f.w, "  versioning_enabled:     %v\n", cfg.VersioningEnabled)
-	fmt.Fprintf(f.w, "  cloud_max_concurrent:   %d\n", cfg.CloudMaxConcurrent)
+	fmt.Fprintf(f.w, "  cloud_max_concurrent:    %d\n", cfg.CloudMaxConcurrent)
+	fmt.Fprintf(f.w, "  cloud_transfer_concurrency: %d\n", cfg.CloudTransferConcurrency)
 	fmt.Fprintf(f.w, "  addr:                   %s\n", cfg.Addr)
 	fmt.Fprintf(f.w, "  storage_root:           %s\n", cfg.StorageRoot)
 }
