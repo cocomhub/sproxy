@@ -231,25 +231,28 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 	d.log.Info("pikpak share target", "name", target.Name, "size", target.Size)
 
 	// 多账号池装配 → 轮换下载（Select 真实 size 预检 + Use 包住转存+下载）；否则当前登录态。
+	// round-10 用户裁决：转存副本释放收归 RestoreLease（单一机制，DeletePermanent）——
+	// 旧下载器不再自行实现 AutoDelete/batchTrash（不释放空间），与 hybrid 共用同一释放语义。
+	lease := NewRestoreLease(d.api, d.autoDelete, d.log)
 	if d.pool != nil {
 		// 运行时对账：CLI 运行期 add/remove 生效（F5/接线 Critical）；List 失败用现有列表。
 		if rerr := d.pool.RefreshAccounts(ctx); rerr != nil {
 			d.log.Warn("pikpak refresh accounts", "err", rerr)
 		}
 		if len(d.pool.Accounts()) > 0 {
-			return d.downloadViaPool(ctx, shareID, target, destPath, onProgress, sinkFactory)
+			return d.downloadViaPool(ctx, shareID, target, destPath, onProgress, sinkFactory, lease)
 		}
 		// 空池（无账号配置）：回落当前 CLI 登录态（与装配期 pool==nil 语义一致）。
 	}
 	size, checksum, fileID, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
-	return d.finalizeDownload(ctx, size, checksum, fileID, owned, derr)
+	return d.finalizeDownload(ctx, size, checksum, fileID, owned, derr, lease)
 }
 
 // downloadViaPool 多账号轮换下载：先按**目标文件真实大小**选账号（配额预检 C2），随后
 // Use 包住转存+下载**全程**——转存必须落在下载账号自己的网盘，否则切会话后 CLI 在该账号
 // 网盘里找不到转存文件（C1）。失败 MarkFailed 冷却（ctx 取消不冷却，非账号过错）；成功
 // RecordUsage 记账。
-func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
+func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory, lease *RestoreLease) (*Result, error) {
 	acct, serr := d.pool.Select(ctx, target.Size)
 	if serr != nil {
 		return nil, fmt.Errorf("pikpak download: %w", serr)
@@ -266,9 +269,12 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 		if derr != nil {
 			return derr
 		}
-		// AutoDelete 在**选中账号会话内**执行（F9：若在 Use 锁外执行，并发 Use 可能已把
-		// 会话切到另一账号，删除按错误账号会话发请求）。owned=true 不删（源文件）。
-		d.deleteRestoredIfAuto(ctx, fid, owned)
+		// 释放经 RestoreLease 在**选中账号会话内**执行（F9：若在 Use 锁外执行，并发 Use
+		// 可能已把会话切到另一账号，删除按错误账号会话发请求）。owned=true 不 Track（源文件）。
+		if !owned && fid != "" {
+			lease.Track(fid)
+		}
+		lease.Release(ctx)
 		return nil
 	})
 	if useErr != nil {
@@ -286,28 +292,24 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
 	}
 	// fileID 传空：AutoDelete 已在 fn 内（选中账号会话）执行，finalizeDownload 不再重复删。
-	return d.finalizeDownload(ctx, size, checksum, "", false, nil)
+	return d.finalizeDownload(ctx, size, checksum, "", false, nil, lease)
 }
 
-// deleteRestoredIfAuto 按配置 AutoDelete 删除网盘转存文件（仅精确命中的转存文件，杜绝
-// 误删网盘旧文件；须在**选中账号会话内**执行——F9）。
-// owned=true（file_restore_own：文件是用户网盘已有源文件，非本次 restore 副本）→ 跳过
-// 删除（NH-P1：否则 AutoDelete 删用户原始文件 = 数据丢失）。
-func (d *PikpakDownloader) deleteRestoredIfAuto(ctx context.Context, fileID string, owned ...bool) {
-	if d.autoDelete && fileID != "" && (len(owned) == 0 || !owned[0]) {
-		if err := d.api.Delete(ctx, []string{fileID}); err != nil {
-			d.log.Warn("pikpak auto-delete failed", "err", err, "id", fileID)
-		}
-	}
-}
+// 注：转存副本释放已收归 RestoreLease（restore.go，round-10 用户裁决）——旧下载器
+// 不再自行实现 AutoDelete/batchTrash（batchTrash 只移回收站不释放空间）；删除语义统一为
+// DeletePermanent，F9 会话约束由调用点（Use 块内）保证。
 
 // finalizeDownload 处理下载尾部：错误短路 / AutoDelete（仅删精确命中的转存文件，杜绝误删
 // 网盘旧文件）/ Result 组装（download 两分支共用，控制认知复杂度）。
-func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, owned bool, derr error) (*Result, error) {
+func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, owned bool, derr error, lease *RestoreLease) (*Result, error) {
 	if derr != nil {
 		return nil, derr
 	}
-	d.deleteRestoredIfAuto(ctx, fileID, owned)
+	// 释放经 RestoreLease 单一语义（DeletePermanent）；owned=true 不 Track（源文件）。
+	if !owned && fileID != "" {
+		lease.Track(fileID)
+	}
+	lease.Release(ctx)
 	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
 }
 

@@ -90,20 +90,20 @@ type HybridDownloader struct {
 	metrics     *HybridMetrics
 	fallback    downloader.Downloader // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
-	// **只保留只读配置**；单次下载私有状态（restoredIDs/currentTotal）放 downloadCtx，
+	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
 }
 
 // downloadCtx 是单次下载的私有状态（每次 Download 调用独立，非实例共享）。
-// 修复：并发任务共享单例实例时，restoredIDs/currentTotal 跨任务污染
+// 修复：并发任务共享单例实例时，restore 释放/currentTotal 跨任务污染
 // （任务 B 账号区拿走任务 A 的转存文件 → 静默混合损坏）。
 type downloadCtx struct {
-	currentTotal int64      // 本次下载总大小（进度回调）
-	restoredIDs  []string   // 本次转存的全部文件 ID（完成后永久删）
-	restoredMu   sync.Mutex // 保护 restoredIDs（并发 chunk 串行转存）
-	reusedID     string     // 缓存 idempotent/owned **未登记**命中的文件 ID（round-7 性能：
+	currentTotal int64         // 本次下载总大小（进度回调）
+	lease        *RestoreLease // 转存副本释放（单一机制，round-10：收归 deleteRestoredPermanent）
+	reusedID     string        // 缓存 idempotent/owned **未登记**命中的文件 ID（round-7 性能：
 	// 避免每账号 chunk 重跑全盘 walk；round-8 改为 ID 而非直链——每次 DownloadLink 重取
 	// 新链接防 TTL 过期。不登记即不删，NH-P1 不变）
+	manifestMu sync.Mutex // manifest 写串行化（markChunkDone）
 }
 
 // NewHybridDownloader 创建混合下载器。
@@ -206,7 +206,8 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 			fmt.Errorf("hybrid: unknown total size for %s", shareID))
 	}
 	// ②-⑥ 分片规划/预分配/并行下载/校验/删除
-	return d.runHybrid(ctx, &downloadCtx{currentTotal: total}, shareID, target, total, destPath, onProgress, sinkFactory)
+	dc := &downloadCtx{currentTotal: total, lease: NewRestoreLease(d.api, d.autoDelete, d.log)}
+	return d.runHybrid(ctx, dc, shareID, target, total, destPath, onProgress, sinkFactory)
 }
 
 // fallbackDownload 匿名路径整体失败时委托降级下载器（设计 §1.2）；无降级则返回原错误。
@@ -238,7 +239,7 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, share
 	manifest := d.loadValidManifest(destPath, shareID, target)
 	if err := d.runChunks(ctx, dc, chunks, shareEnd, shareID, target, destPath, manifest, onProgress); err != nil {
 		// G4：失败路径也清理已转存副本（AutoDelete 语义——失败任务不留 6GB 空间占用）。
-		d.deleteRestoredPermanent(ctx, dc)
+		dc.lease.Release(ctx)
 		return nil, err
 	}
 	d.log.Info("hybrid chunks done")
@@ -256,7 +257,7 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, share
 		}
 		if !strings.EqualFold(sha1Hex, strings.ToLower(target.Hash)) {
 			// G4：校验失败也清理转存副本（AutoDelete 语义）。
-			d.deleteRestoredPermanent(ctx, dc)
+			dc.lease.Release(ctx)
 			return nil, fmt.Errorf("hybrid integrity check failed: file sha1 %s != target %s", sha1Hex, target.Hash)
 		}
 		d.log.Info("hybrid integrity verified (sha1 match)", "sha1", sha1Hex)
@@ -273,12 +274,12 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, share
 		}
 		if replayErr := replayFileIntoSink(destPath, sink); replayErr != nil {
 			sink.Finish(false, 0)
-			d.deleteRestoredPermanent(ctx, dc) // 🟡：sink 重放失败也清理转存（AutoDelete 语义）
+			dc.lease.Release(ctx) // 🟡：sink 重放失败也清理转存（AutoDelete 语义）
 			return nil, replayErr
 		}
 		sink.Finish(true, 0)
 	}
-	d.deleteRestoredPermanent(ctx, dc)
+	dc.lease.Release(ctx)
 	// 注意：Checksum 是**本地落盘文件的 SHA-256**（自证文件未被篡改/续传拼错），
 	// 不是源身份哈希（源身份校验用 SHA-1 与 target.Hash 比对，已在上方 verify 完成）。
 	// 消费方若拿本字段比对源 hash 会误判——仅作本地完整性指纹。
@@ -413,7 +414,7 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadC
 }
 
 // downloadAccountChunk 账号区 chunk：转存（幂等一次）→ 定位 → FETCH 直链 → Range 下载。
-// 转存经 d.restoredMu 串行化（多账号 chunk 并行时只转存一次）+ FindInDrive 幂等检查。
+// 转存经 RestoreLease 内部锁串行化（多账号 chunk 并行时只转存一次）+ FindInDrive 幂等检查。
 func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloadCtx, c chunk, shareID string, target *ShareFile, destPath string, prog *atomic.Int64, onProgress downloader.ProgressFunc) error {
 	// 🟡 账号区 chunk 韧性：失败重试 1 次（FETCH 链接每次新取，瞬时网络抖动可恢复）——
 	// 与分享区重试对称，避免单次抖动整段放弃（manager 外层整任务重试兜底不够 chunk 级）。
@@ -438,11 +439,9 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloa
 // 跳过 RestoreShare 直接复用（避免多次 restore 累积同名副本占满 6GB 空间）；
 // 未命中才 restore（restore 返回文件夹时进文件夹找文件）。
 func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, shareID string, target *ShareFile) (string, error) {
-	dc.restoredMu.Lock()
-	defer dc.restoredMu.Unlock()
-	if len(dc.restoredIDs) > 0 {
-		// 已转存：直接用记录的文件 id 拿直链（最后一个）
-		last := dc.restoredIDs[len(dc.restoredIDs)-1]
+	if dc.lease.HasTracked() {
+		// 已转存：直接用记录的文件 id 拿直链（最近一个；每次 DownloadLink 重取新链接防 TTL 过期）
+		last := dc.lease.LastID()
 		link, err := d.api.DownloadLink(ctx, last)
 		if err != nil {
 			return "", fmt.Errorf("hybrid fetch link (cached): %w", err)
@@ -450,7 +449,7 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 		return link, nil
 	}
 	// round-7 性能：idempotent/owned **未登记**命中缓存文件 ID——避免每账号 chunk 重跑
-	// FindInDrive 全盘 walk（不登记即不删，NH-P1 语义不变）。与 restoredIDs 一致：每次经
+	// FindInDrive 全盘 walk（不登记即不删，NH-P1 语义不变）。与 lease 缓存路径一致：每次经
 	// DownloadLink 重取**新 FETCH 直链**（round-8 修正：缓存直链会在 TTL 过期后让长下载
 	// 全部后续账号 chunk 失败——链接必须按 chunk 刷新）。
 	if dc.reusedID != "" {
@@ -476,11 +475,11 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 		return "", err
 	}
 	if owned {
-		// file_restore_own（源文件已在个人网盘，NH-P1）：不记入 restoredIDs——
+		// file_restore_own（源文件已在个人网盘，NH-P1）：不记入 lease——
 		// AutoDelete 永久删只清本次 restore 副本，**绝不得删除用户自己的源文件**。
 		d.log.Info("hybrid restore owned (skip delete registration)", "id", driveFile.ID)
 	} else {
-		dc.restoredIDs = append(dc.restoredIDs, driveFile.ID)
+		dc.lease.Track(driveFile.ID) // 本次 restore 副本（AutoDelete 时 Release 永久删）
 	}
 	link, err := d.api.DownloadLink(ctx, driveFile.ID)
 	if err != nil {
@@ -532,23 +531,8 @@ func hasVideoExt(name string) bool {
 	return false
 }
 
-// deleteRestoredPermanent 永久删除本次转存（AutoDelete 时；释放 6GB 空间）。
-func (d *HybridDownloader) deleteRestoredPermanent(ctx context.Context, dc *downloadCtx) {
-	if !d.autoDelete {
-		return
-	}
-	dc.restoredMu.Lock()
-	ids := dc.restoredIDs
-	dc.restoredIDs = nil
-	dc.restoredMu.Unlock()
-	if len(ids) > 0 {
-		if err := d.api.DeletePermanent(ctx, ids); err != nil {
-			d.log.Warn("hybrid delete restored failed", "ids", ids, "err", err)
-		} else {
-			d.log.Info("hybrid restored files deleted (permanent)", "count", len(ids))
-		}
-	}
-}
+// 注：转存副本释放已收归 RestoreLease（restore.go，round-10 用户裁决）——
+// 单一删除语义 DeletePermanent，hybrid/旧下载器/未来扩展共用，不再各自实现。
 
 // downloadChunkRange 单个 chunk Range 下载 → WriteAt(offset)。
 // 校验：206/200 + 写入字节数 == chunk 长度（数据正确性保障）。
@@ -872,8 +856,8 @@ func (m *hybridManifest) Has(offset int64) bool {
 
 // markChunkDone 原子记录 chunk 完成（追加到 manifest；首次记录源身份）。
 func (d *HybridDownloader) markChunkDone(dc *downloadCtx, destPath string, c chunk, src manifestSource) {
-	dc.restoredMu.Lock()
-	defer dc.restoredMu.Unlock()
+	dc.manifestMu.Lock()
+	defer dc.manifestMu.Unlock()
 	m := loadManifest(destPath)
 	// 🟠4 加固：磁盘 manifest 源与本次不一致（异常路径残留旧源）→ 重建空 manifest（不合并旧 chunk）。
 	if m != nil && !m.SourceMatches(src.ShareID, &ShareFile{ID: src.FileID, Size: src.Size, Hash: src.Hash}) {
@@ -960,7 +944,7 @@ func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadC
 	// 用户的自有文件（数据丢失，round-6 对抗评审）。判别：restore 副本位于「Pack From Shared」
 	// 文件夹（实测），用户自有文件在普通位置——parent 不是 Pack From Shared 的只复用、不登记。
 	if d.isRestoreCopy(ctx, existing) {
-		dc.restoredIDs = append(dc.restoredIDs, existing.ID)
+		dc.lease.Track(existing.ID) // restore 副本（AutoDelete 时 Release 永久删）
 	} else {
 		d.log.Info("hybrid restore reuse (non-restore-copy, skip delete registration)",
 			"id", existing.ID, "name", existing.Name)
