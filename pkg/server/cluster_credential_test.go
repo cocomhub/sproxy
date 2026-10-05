@@ -159,7 +159,9 @@ func TestClusterCredentialSet_BadSign(t *testing.T) {
 	}
 }
 
-// TestClusterCredentialSet_Expired：过期凭证装配即拒绝（时效下发端控制生效）。
+// TestClusterCredentialSet_Expired（评审 I1 修复）：过期凭证装配**不**拒绝（装配期只验
+// 格式+签名，时效是运行期下发控制点）——否则短效凭证过期重启即击穿整个服务启动
+// （自 DoS）；过期在请求时 credentialFor 逐请求拒绝。
 func TestClusterCredentialSet_Expired(t *testing.T) {
 	t.Parallel()
 	sk := clusterCredTestSK(t)
@@ -168,7 +170,32 @@ func TestClusterCredentialSet_Expired(t *testing.T) {
 	cred.Sign(sk)
 	enc, _ := cred.Marshal()
 	cfg := newClusterCredentialConfig(t, sk, []ClusterCredentialConfig{{Encoded: enc}})
-	if _, err := newClusterCredentialSet(cfg, testLogger()); err == nil {
-		t.Fatal("过期凭证装配应拒绝（时效 fail-closed）")
+	s, err := newClusterCredentialSet(cfg, testLogger())
+	if err != nil {
+		t.Fatalf("过期凭证应可装配（装配期只验签名/格式，防篡改）: %v", err)
+	}
+	// 请求时过期 → 拒绝（时效是运行期控制点）。
+	if _, ok := s.credentialFor("main", "eg-fp-e"); ok {
+		t.Fatal("过期凭证请求时 credentialFor 应拒绝（时效运行期失效）")
+	}
+}
+
+// TestClusterCredentialSet_RecipientTrimmed（评审 I3 修复）：写侧与查询侧统一 Trim——
+// 签发侧 Recipient 带首尾空白（如下发端手抄）不再致查询恒 miss（此前写侧用原始键，
+// 查询 Trim 恒 miss → 凭证静默 deny）。
+func TestClusterCredentialSet_RecipientTrimmed(t *testing.T) {
+	t.Parallel()
+	sk := clusterCredTestSK(t)
+	// 签发时 Recipient 带空白（签名含该值；写侧装配 Trim 后索引、查询侧 Trim 命中）。
+	cred := signTestCredential(t, sk, " eg-fp-t ", "main")
+	enc, _ := cred.Marshal()
+	cfg := newClusterCredentialConfig(t, sk, []ClusterCredentialConfig{{Encoded: enc}})
+	s, err := newClusterCredentialSet(cfg, testLogger())
+	if err != nil {
+		t.Fatalf("装配: %v", err)
+	}
+	// 查询指纹无空白 → 命中（写侧 Trim 键 == 查询 Trim 键）。
+	if _, ok := s.credentialFor("main", "eg-fp-t"); !ok {
+		t.Fatal("写侧 Trim 后按无空白指纹应命中（双侧 Trim 归一）")
 	}
 }

@@ -6,8 +6,10 @@ package cluster
 // fs.go 是集群出口卷（type: egress）的 sync.FS 适配：底层 = 凭证指向的持有节点
 // 真实卷（经 federated.FS 挂 remoteFS，RandomAccess 经 RangeReader 透传）。
 //
-// 用户裁定（2026-10-05）：一个出口卷获取**所有可访问节点卷**（凭证池），避免每卷
-// 配对应出口卷——clusterFS 按请求动态解析目标 (node, volume)，从凭证池选路。
+// **实现现状（评审 I7 措辞校准）**：一出口卷 = 一持有节点卷（NewBackend 绑定单
+// holder_node/volume/fingerprint/owner）。“一个出口卷获取所有可访问节点卷”通过
+// **多 egress 卷**（每卷一条凭证）实现，而非按请求动态选路——egress_node/
+// egress_volume 查询参数无消费者（已删除，勿据此断言动态选路）。
 
 import (
 	"context"
@@ -35,6 +37,10 @@ type clusterFS struct {
 //
 // **剥边界（评审 I1 修复）**：用**第一个** "/user/" 切（owner 是单段不含 /，首个即
 // 桶边界）——此前 LastIndex 命中内层同名段（如 docs/user/tutorial.mp4）会剥错。
+//
+// **HolderPath 子树限定（评审 I4 修复）**：配置 holder_path 后请求落在
+// `<holder_path>/<rel>`（限制子树）——此前解析进 remote.Ref.Path 但被 Root() 丢弃
+// （死配置），用户按文档配了以为限子树、实际暴露整卷。
 func (f *clusterFS) holderRel(ownerKey string) (string, error) {
 	rel := ownerKey
 	// 剥 <owner>/ 前缀（出口 owner key 形态：<owner>/user/<rel>）——首个 /user/ 是桶边界。
@@ -45,6 +51,10 @@ func (f *clusterFS) holderRel(ownerKey string) (string, error) {
 	rel = strings.TrimPrefix(rel, "user/")
 	if rel == "" {
 		return "", fmt.Errorf("cluster: 路径 %q 剥前缀后为空（非法 owner key）", ownerKey)
+	}
+	// 子树前缀（可选）：请求 rel 落在 <holder_path>/<rel>（空 = 全卷）。
+	if prefix := strings.Trim(f.cfg.HolderPath, "/"); prefix != "" {
+		rel = prefix + "/" + rel
 	}
 	return rel, nil
 }
@@ -128,8 +138,6 @@ func (f *clusterFS) DirectURL(ctx context.Context, relPath string) (string, bool
 	if f.cfg.EgressBaseURL != "" {
 		return f.cfg.EgressBaseURL + "/download?filename=" + url.QueryEscape(rel) +
 			"&volume=" + url.QueryEscape(f.volName) +
-			"&egress_node=" + url.QueryEscape(f.cfg.HolderNode) +
-			"&egress_volume=" + url.QueryEscape(f.cfg.HolderVolume) +
 			"&egress_forward=1", true, nil
 	}
 	return "", false, nil

@@ -251,8 +251,6 @@ func (h *Handlers) externalFSFor(volName string) (syncpkg.FS, bool) {
 	return fsys, fsys != nil
 }
 
-var _ = syncpkg.FS(nil)
-
 // toFilesHTTPError 把带 HTTP 状态码的 pkg/server 错误（下载路径解析错误 / 卷路由错误）
 // 映射为子包的 HTTPError；非该形态返回原错误（子包按各调用点的兜底状态码处理）。
 func toFilesHTTPError(err error) error {

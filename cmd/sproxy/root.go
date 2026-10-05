@@ -1389,6 +1389,12 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 		// 不持有签发 SK（评审 I1：此前传 64-hex 串致装配恒失败，且扩大 SK 泄露面）。
 		if id, idErr := server.LoadXferIdentity(cfg); idErr == nil {
 			cluster.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName), id)
+		} else {
+			// **评审 I8（静默不注册）**：身份加载失败时 egress 后端不注册，随后任何
+			// `type: egress` 卷会在装配层以混乱错误失败——显式告警，避免运维把
+			// 「无出口能力」当成「未配置出口卷」。
+			slog.Error("集群出口装配失败：加载本端 xfer 身份失败（egress 卷后端未注册）",
+				"error", idErr)
 		}
 	}
 }

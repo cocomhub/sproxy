@@ -82,8 +82,10 @@ func newClusterCredentialSet(cfg *Config, log *slog.Logger) (*clusterCredentialS
 		if perr != nil {
 			return nil, perr
 		}
-		// 验签（装配期即发现伪造/篡改凭证，fail-fast）。
-		if verr := c.Verify(sk, time.Now()); verr != nil {
+		// 验签（装配期 fail-fast 防伪造/篡改；**只验格式+签名**——评审 I1：此前 Verify
+		// 含时效检查，短效凭证过期即击穿服务启动（自 DoS）；时效/scope 是运行期下发
+		// 控制点，推迟到请求时 credentialFor 逐请求 Verify）。
+		if verr := c.VerifyStatic(sk); verr != nil {
 			return nil, verr
 		}
 		if c.Node == "" || c.Owner == "" || c.Recipient == "" {
@@ -91,14 +93,17 @@ func newClusterCredentialSet(cfg *Config, log *slog.Logger) (*clusterCredentialS
 		}
 		// 按 Recipient（对端 xfer 指纹）索引——与 credentialFor 查询键一致
 		// （评审 C1 修复：此前按 c.Node 索引，查恒 miss，凭证授权恒死代码）。
-		// 同 Recipient 多条凭证 → 装配期冲突拒绝（fail-closed，不静默覆盖）。
-		if _, dup := creds[c.Recipient]; dup {
+		// **双侧 Trim（评审 I3 修复）**：写侧与查询侧（strings.TrimSpace(fingerprint)）
+		// 统一 Trim——此前写侧用原始 Recipient，配置带首尾空白即查询恒 miss（凭证恒
+		// deny，功能静默断开）。dup 检测同样用 Trim 后值。
+		recipient := strings.TrimSpace(c.Recipient)
+		if recipient == "" {
+			return nil, errClusterCredentialMalformed
+		}
+		if _, dup := creds[recipient]; dup {
 			return nil, errClusterCredentialDup
 		}
-		creds[c.Recipient] = c
-	}
-	if len(creds) == 0 {
-		return nil, errClusterCredentialEmpty
+		creds[recipient] = c
 	}
 	return &clusterCredentialSet{signKey: sk, creds: creds, log: log}, nil
 }
@@ -108,5 +113,4 @@ var (
 	errClusterCredentialSignKey   = errors.New("cluster: 凭证签发密钥需 32B hex（cluster.credential_sign_key）")
 	errClusterCredentialMalformed = errors.New("cluster: 凭证缺 node/owner/recipient（cluster.credentials）")
 	errClusterCredentialDup       = errors.New("cluster: 凭证池中同一出口节点指纹重复（cluster.credentials）")
-	errClusterCredentialEmpty     = errors.New("cluster: 凭证池为空（cluster.credentials）")
 )

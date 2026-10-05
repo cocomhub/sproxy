@@ -12,7 +12,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"strings"
@@ -70,9 +69,10 @@ func egressVolume(name string, extra map[string]any) volume.Volume {
 func TestParseEgressConfig_MissingRejected(t *testing.T) {
 	t.Parallel()
 	cases := []map[string]any{
-		{"holder_volume": "v", "holder_fingerprint": "fp"}, // 缺 node
-		{"holder_node": "n", "holder_fingerprint": "fp"},   // 缺 volume
-		{"holder_node": "n", "holder_volume": "v"},         // 缺 fingerprint
+		{"holder_volume": "v", "holder_fingerprint": "fp", "holder_owner": "alice"}, // 缺 node
+		{"holder_node": "n", "holder_fingerprint": "fp", "holder_owner": "alice"},   // 缺 volume
+		{"holder_node": "n", "holder_volume": "v", "holder_owner": "alice"},         // 缺 fingerprint
+		{"holder_node": "n", "holder_volume": "v", "holder_fingerprint": "fp"},      // 缺 holder_owner（评审 I2：必填）
 		{}, // 全缺
 	}
 	for _, extra := range cases {
@@ -89,6 +89,7 @@ func TestNewBackend_FSAssertions(t *testing.T) {
 	v := egressVolume("eg1", map[string]any{
 		"holder_node": "holder-a", "holder_volume": "main",
 		"holder_fingerprint": "sha256:abcdef",
+		"holder_owner":       "alice",
 		"egress_base_url":    "https://eg.example.com",
 	})
 	be, err := NewBackend(context.Background(), v, memDialer(), id)
@@ -111,6 +112,7 @@ func TestHolderRel_Bridge(t *testing.T) {
 	id := newTestIdentity(t)
 	v := egressVolume("eg1", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
+		"holder_owner": "alice",
 	})
 	be, err := NewBackend(context.Background(), v, memDialer(), id)
 	if err != nil {
@@ -151,6 +153,7 @@ func TestDirectURL_ThreeStates(t *testing.T) {
 	id := newTestIdentity(t)
 	v1 := egressVolume("eg1", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
+		"holder_owner":    "alice",
 		"egress_base_url": "https://eg.example.com",
 	})
 	be1, err := NewBackend(context.Background(), v1, memDialer(), id)
@@ -183,6 +186,7 @@ func TestDirectURL_ThreeStates(t *testing.T) {
 	// 2. holder_public_base_url → 直跳持有（B2）。
 	v2 := egressVolume("eg2", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
+		"holder_owner":           "alice",
 		"holder_public_base_url": "https://holder.example.com",
 	})
 	be2, err := NewBackend(context.Background(), v2, memDialer(), newTestIdentity(t))
@@ -211,6 +215,7 @@ func TestDirectURL_ThreeStates(t *testing.T) {
 	// 3. 两 base 空 → (false, nil) 回落 A 态。
 	v3 := egressVolume("eg3", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
+		"holder_owner": "alice",
 	})
 	be3, err := NewBackend(context.Background(), v3, memDialer(), newTestIdentity(t))
 	if err != nil {
@@ -229,6 +234,7 @@ func TestClusterFS_WriteReadOnly(t *testing.T) {
 	id := newTestIdentity(t)
 	v := egressVolume("eg1", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
+		"holder_owner": "alice",
 	})
 	be, err := NewBackend(context.Background(), v, memDialer(), id)
 	if err != nil {
@@ -254,6 +260,7 @@ func TestRegisterBackend(t *testing.T) {
 	defer registry.UnregisterBackendForTest(clustercred.TypeEgress)
 	be, err := registry.NewBackend(context.Background(), egressVolume("eg1", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
+		"holder_owner": "alice",
 	}))
 	if err != nil {
 		t.Fatalf("registry.NewBackend: %v", err)
@@ -263,5 +270,3 @@ func TestRegisterBackend(t *testing.T) {
 		t.Fatal("FS 不应为 nil")
 	}
 }
-
-var _ = errors.Is

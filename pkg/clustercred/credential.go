@@ -97,16 +97,8 @@ func (c *Credential) Sign(sk []byte) {
 // Verify 在目标节点验签：签名 + 时效 + scope + 路径范围（下发端控制）。
 // 验证通过返回 nil；篡改/过期/scope 不符/路径越界 → 对应哨兵错误。
 func (c Credential) Verify(sk []byte, now time.Time) error {
-	// 1. 载荷完备性。
-	if c.Node == "" || c.Volume == "" || c.Owner == "" || c.Recipient == "" || c.Scope == "" {
-		return ErrCredentialMalformed
-	}
-	if c.ExpiresAt <= c.IssuedAt {
-		return ErrCredentialMalformed
-	}
-	// 2. 签名（防篡改/伪造——目标节点持签发方 SK）。
-	if !hmac.Equal([]byte(c.Sig), []byte(c.sign(sk))) {
-		return ErrCredentialBadSignature
+	if err := c.VerifyStatic(sk); err != nil {
+		return err
 	}
 	// 3. 时效（下发端控制：过期即失效）。
 	nowSec := now.Unix()
@@ -119,6 +111,28 @@ func (c Credential) Verify(sk []byte, now time.Time) error {
 	// 4. scope（read；扩展点：write/rw 时校验请求操作）。
 	if c.Scope != "read" {
 		return ErrCredentialScope
+	}
+	return nil
+}
+
+// VerifyStatic 只验载荷完备性 + 签名（防篡改/伪造，fail-fast）——**不含时效/scope**。
+//
+// **装配期用途（评审 I1 修复）**：newClusterCredentialSet 此前装配即 Verify（含时效），
+// 短效凭证一旦过期重启，即使静态 mesh_readers 授权仍在，整个服务也因凭证过期起不来
+// （fail-closed 过头 = 自 DoS）。装配期只需「格式 + 签名」防伪造/篡改（fail-fast），
+// 时效/scope 是运行期下发控制点，推迟到请求时 credentialFor（逐请求 Verify，过期即
+// 逐请求 deny）。
+func (c Credential) VerifyStatic(sk []byte) error {
+	// 1. 载荷完备性。
+	if c.Node == "" || c.Volume == "" || c.Owner == "" || c.Recipient == "" || c.Scope == "" {
+		return ErrCredentialMalformed
+	}
+	if c.ExpiresAt <= c.IssuedAt {
+		return ErrCredentialMalformed
+	}
+	// 2. 签名（防篡改/伪造——目标节点持签发方 SK）。
+	if !hmac.Equal([]byte(c.Sig), []byte(c.sign(sk))) {
+		return ErrCredentialBadSignature
 	}
 	return nil
 }

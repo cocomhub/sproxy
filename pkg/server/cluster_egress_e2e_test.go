@@ -22,7 +22,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/remote"
-	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -42,6 +41,7 @@ func TestClusterEgress_CredentialEndToEnd(t *testing.T) {
 	egVol := volume.Volume{Name: "eg1", Type: clustercred.TypeEgress, Extra: map[string]any{
 		"holder_node": testReaderNodeA, "holder_volume": testDualVol,
 		"holder_fingerprint": bFP,
+		"holder_owner":       "alice",
 		"egress_base_url":    "https://eg.example.com",
 	}}
 	be, err := cluster.NewBackend(context.Background(), egVol,
@@ -121,7 +121,8 @@ func TestClusterEgress_DirectURL_302NoLoop(t *testing.T) {
 
 	egVol := volume.Volume{Name: "eg1", Type: clustercred.TypeEgress, DirectLink: true, Extra: map[string]any{
 		"holder_node": testReaderNodeA, "holder_volume": testDualVol,
-		"holder_fingerprint": bFP, "egress_base_url": "https://eg.example.com",
+		"holder_fingerprint": bFP,
+		"holder_owner":       "alice", "egress_base_url": "https://eg.example.com",
 	}}
 	be, err := cluster.NewBackend(context.Background(), egVol,
 		remote.DialerFunc(func(ctx context.Context, node string) (net.Conn, error) {
@@ -165,6 +166,7 @@ func TestClusterEgress_StatSize(t *testing.T) {
 	egVol := volume.Volume{Name: "eg1", Type: clustercred.TypeEgress, Extra: map[string]any{
 		"holder_node": testReaderNodeA, "holder_volume": testDualVol,
 		"holder_fingerprint": bFP,
+		"holder_owner":       "alice",
 	}}
 	be, err := cluster.NewBackend(context.Background(), egVol,
 		remote.DialerFunc(func(ctx context.Context, node string) (net.Conn, error) {
@@ -194,6 +196,3 @@ func TestClusterEgress_StatSize(t *testing.T) {
 		t.Fatalf("出口 Stat size=%d want %d", info.Size(), len(body))
 	}
 }
-
-var _ = files.DownloadPath{}
-var _ = syncpkg.FS(nil)

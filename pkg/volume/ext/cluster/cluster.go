@@ -27,16 +27,18 @@ import (
 type egressConfig struct {
 	// HolderNode / HolderVolume / HolderFingerprint：本凭证指向的持有节点+真实卷+指纹。
 	// （多凭证场景可拆多个 egress 卷，或后续按请求 egress_node 动态选路。）
-	HolderNode          string
-	HolderVolume        string
-	HolderFingerprint   string
+	HolderNode        string
+	HolderVolume      string
+	HolderFingerprint string
+	HolderOwner       string // **必填**：凭证授的持有侧 owner（评审 I2 隔离）——
+	// 本出口卷只代表该 owner 的持有数据，本地请求 owner 必须匹配
 	HolderPath          string // 卷内根路径前缀（可选，对齐 federated 语义）
 	EgressBaseURL       string // 出口公网 base（B 态自转发 302）
 	HolderPublicBaseURL string // 持有公网 base（B2 直跳持有，需同认证域）
 }
 
 // parseEgressConfig 从卷 Extra 解析 egress 配置。fail-closed：holder_node/
-// holder_volume/holder_fingerprint 任一缺失 → 装配拒绝（不静默半配置）。
+// holder_volume/holder_fingerprint/holder_owner 任一缺失 → 装配拒绝（不静默半配置）。
 func parseEgressConfig(v volume.Volume) (egressConfig, error) {
 	get := func(key string) string {
 		s, _ := v.Extra[key].(string)
@@ -46,6 +48,7 @@ func parseEgressConfig(v volume.Volume) (egressConfig, error) {
 		HolderNode:          get("holder_node"),
 		HolderVolume:        get("holder_volume"),
 		HolderFingerprint:   get("holder_fingerprint"),
+		HolderOwner:         get("holder_owner"),
 		HolderPath:          get("holder_path"),
 		EgressBaseURL:       get("egress_base_url"),
 		HolderPublicBaseURL: get("holder_public_base_url"),
@@ -53,6 +56,11 @@ func parseEgressConfig(v volume.Volume) (egressConfig, error) {
 	if cfg.HolderNode == "" || cfg.HolderVolume == "" || cfg.HolderFingerprint == "" {
 		return egressConfig{}, fmt.Errorf(
 			"cluster: 卷 %q 缺 holder_node/holder_volume/holder_fingerprint（Extra 配置，fail-closed）", v.Name)
+	}
+	if cfg.HolderOwner == "" {
+		return egressConfig{}, fmt.Errorf(
+			"cluster: 卷 %q 缺 holder_owner（凭证授的持有侧 owner——本地请求 owner 必须匹配，"+
+				"防跨 owner 越权读；fail-closed）", v.Name)
 	}
 	return cfg, nil
 }

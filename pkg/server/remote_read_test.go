@@ -297,12 +297,14 @@ func TestRemoteRead_WriteMethodsRejected(t *testing.T) {
 
 func TestRemoteRead_PathTraversalRejected(t *testing.T) {
 	h, _, _ := newRemoteReadFixture(t, testReaderFP)
-	// 末两项专钉「路径归一化没有吃掉 ..」：TrimLeft 只剥前导斜杠，`..` 仍须被
-	// ValidateFilePath 拒（归一化不得成为穿越的旁路）。
+	// 末两项专钉「路径归一化没有吃掉 ..」：TrimLeft 只剥前导斜杠，`..` 仍须被拒。
+	// **评审 C1 修复**：authorize 现对 relPath 先 ValidateFilePath 统一清洗（授权路径==
+	// 实际读路径，防凭证 PathPrefix 被 `..` 顶穿）——`..`/空字节在授权层即被拒，
+	// deny 统一 404（原 delegate 层 400；提前拒绝更安全、不泄路径信息）。
 	for _, p := range []string{"/../../etc/passwd", "/docs/../../secret", "../../etc", "/a\x00b", "/../etc", "//../etc"} {
 		rec := doRemote(t, h, http.MethodGet, "/remote/download?volume=main&path="+url.QueryEscape(p))
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("路径 %q 应 400, got %d", p, rec.Code)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("路径 %q 应 404（授权层清洗拒绝）, got %d", p, rec.Code)
 		}
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,12 +26,21 @@ import (
 
 // newCredentialedReadHandler 装配一个带 main 卷（无 mesh_readers）+ 凭证池的只读面 handler。
 // 凭证授：volume=main, owner=alice, recipient=egFP, path_prefix=docs。
-func newCredentialedReadHandler(t *testing.T, peerFP string) (http.Handler, error) {
+// 返回 (handler, cfg) 供写盘断言（评审 I6：授权成功须落到真实文件内容）。
+func newCredentialedReadHandler(t *testing.T, peerFP string) (http.Handler, *Config, error) {
 	t.Helper()
-	// 装配 cfg：单卷 main + ACL（无 mesh_readers → 凭证分支才可达）。
+	// 装配 cfg：单卷 main + 额外 other 卷（CrossVolumeRejected 用真实失配卷测凭证卷范围，
+	// 而非「卷不存在」的 ByName miss）+ ACL（无 mesh_readers → 凭证分支才可达）。
 	cfg := remoteReadTestConfigACL(t, &VolumeACLConfig{
 		Mode: VolumeACLAllow, Owners: []string{testReaderOwner},
 	})
+	cfg.Volumes = append(cfg.Volumes, VolumeConfig{
+		Name: "other", Root: filepath.Join(t.TempDir(), "vol-other"),
+	})
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("加 other 卷后 cfg 校验失败: %v", err)
+	}
 	// 构造凭证池（签发 + 装配）。
 	sk := clusterCredTestSK(t)
 	now := time.Now().Unix()
@@ -46,34 +56,39 @@ func newCredentialedReadHandler(t *testing.T, peerFP string) (http.Handler, erro
 	credCfg.Cluster.CredentialSignKey = hex.EncodeToString(sk)
 	set, err := newClusterCredentialSet(credCfg, testLogger())
 	if err != nil {
-		return nil, fmt.Errorf("newClusterCredentialSet: %w", err)
+		return nil, nil, fmt.Errorf("newClusterCredentialSet: %w", err)
 	}
 	// 装配 Handlers（main 卷入 volSet）。
 	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
-	return h.newRemoteReadHandler(fakePeerFingerprint{fp: peerFP}, set), nil
+	return h.newRemoteReadHandler(fakePeerFingerprint{fp: peerFP}, set), cfg, nil
 }
 
-// TestRemoteRead_CredentialAuthorized：合法凭证 → 授权（owner 取凭证.Owner）。
+// TestRemoteRead_CredentialAuthorized：合法凭证 → 授权并**委派出真实内容**（body 全等）——
+// 评审 I6：此前只断言「非 401」弱断言，404 deny 与委派后文件不存在不可区分；现写盘
+// 真实文件断言实际内容，钉住「凭证分支真实委派」。
 func TestRemoteRead_CredentialAuthorized(t *testing.T) {
 	t.Parallel()
-	rh, err := newCredentialedReadHandler(t, "eg-fp")
+	rh, cfg, err := newCredentialedReadHandler(t, "eg-fp")
 	if err != nil {
 		t.Fatalf("构造: %v", err)
 	}
+	// 写盘凭证 owner（alice）的 docs/f.bin——凭证 PathPrefix=docs 范围内。
+	writeRemoteUserFile(t, cfg, "alice", "docs/f.bin", "cred-body-ok")
 	req := httptest.NewRequest(http.MethodGet, "/remote/download?volume=main&path=docs/f.bin", nil)
 	rec := httptest.NewRecorder()
-	// 直接调 handleDownload（走 authorize + 委托），应当委派成功（文件不存在 → 非授权类错误）
-	// 或 404——但绝不能返回授权类 401/403（证明凭证被认可、进入委派）。
 	rh.ServeHTTP(rec, req)
-	if rec.Code == http.StatusUnauthorized || rec.Code == 0 {
-		t.Fatalf("凭证授权请求不应 401（应进入委派层）, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("凭证授权请求应 200（真实委派）, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "cred-body-ok" {
+		t.Fatalf("委派内容应 == 持有侧原件, got %q", rec.Body.String())
 	}
 }
 
 // TestCredential_WhiteListReject：对端指纹不在凭证白名单 → deny（404，不泄信息）。
 func TestCredential_WhiteListReject(t *testing.T) {
 	t.Parallel()
-	rh, err := newCredentialedReadHandler(t, "unlisted-fp")
+	rh, _, err := newCredentialedReadHandler(t, "unlisted-fp")
 	if err != nil {
 		t.Fatalf("构造: %v", err)
 	}
@@ -88,7 +103,7 @@ func TestCredential_WhiteListReject(t *testing.T) {
 // TestCredential_CrossVolumeRejected：凭证授 main，请求其它卷 → deny（越权面）。
 func TestCredential_CrossVolumeRejected(t *testing.T) {
 	t.Parallel()
-	rh, err := newCredentialedReadHandler(t, "eg-fp")
+	rh, _, err := newCredentialedReadHandler(t, "eg-fp")
 	if err != nil {
 		t.Fatalf("构造: %v", err)
 	}
@@ -103,7 +118,7 @@ func TestCredential_CrossVolumeRejected(t *testing.T) {
 // TestCredential_PathOutOfPrefixRejected：凭证授 path_prefix=docs，请求卷内其它路径 → deny。
 func TestCredential_PathOutOfPrefixRejected(t *testing.T) {
 	t.Parallel()
-	rh, err := newCredentialedReadHandler(t, "eg-fp")
+	rh, _, err := newCredentialedReadHandler(t, "eg-fp")
 	if err != nil {
 		t.Fatalf("构造: %v", err)
 	}
@@ -112,6 +127,37 @@ func TestCredential_PathOutOfPrefixRejected(t *testing.T) {
 	rh.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("路径越出凭证前缀应 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCredential_ParentRefCannotPiercePrefix（评审 C1 回归）：凭证授 path_prefix=docs，
+// 请求 `docs/../secret.txt`——authorize 统一清洗后路径为 `secret.txt`（落在 docs 外），
+// 必须 deny。此前 authorize 对原始路径做前缀判定（HasPrefix("docs/") 通过）而读取侧
+// Clean 消融 `..` 读 `secret.txt`——PathPrefix 可被顶穿（越权读任意文件）。
+func TestCredential_ParentRefCannotPiercePrefix(t *testing.T) {
+	t.Parallel()
+	rh, _, err := newCredentialedReadHandler(t, "eg-fp")
+	if err != nil {
+		t.Fatalf("构造: %v", err)
+	}
+	for _, path := range []string{
+		"docs/../secret.txt",    // 清洗后 secret.txt，越出 docs
+		"docs/../../secret.txt", // 清洗后 ../secret.txt（ValidateFilePath 拒绝 ..）
+		"docs2/../docs/f.bin",   // 清洗后 docs/f.bin——在 docs 内，应通过（非 deny 目标，仅对照）
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/remote/download?volume=main&path="+path, nil)
+		rec := httptest.NewRecorder()
+		rh.ServeHTTP(rec, req)
+		if path == "docs2/../docs/f.bin" {
+			// 清洗后落回 docs 内：不是授权类拒绝（应进入委派层，非 401/404 均属「已授权」）。
+			if rec.Code == http.StatusUnauthorized || rec.Code == 0 {
+				t.Fatalf("docs2/../docs/f.bin 清洗后应在 docs 内（非 401）, got %d", rec.Code)
+			}
+			continue
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("path=%q 顶穿前缀应 404（越权面）, got %d body=%s", path, rec.Code, rec.Body.String())
+		}
 	}
 }
 

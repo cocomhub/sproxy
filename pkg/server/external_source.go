@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -104,6 +105,13 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 			// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
 			continue
 		}
+		// **评审 I2 修复（跨 owner 隔离）**：egress 卷代表凭证授的持有侧 owner——本地
+		// 请求 owner 必须与 holder_owner 一致。否则默认 ACL 开放下任一本地 owner 经
+		// 出口卷剥自己的前缀、按凭证 Owner 读持有侧数据（跨 owner 越权读）。
+		// 装配期已强制 holder_owner 必填（NewBackend fail-closed），此处请求时校验。
+		if !egressOwnerMatch(v, owner) {
+			continue // 非该 owner 请求 egress 卷 → 不命中（404，不泄卷存在性）
+		}
 		e, err := fsys.Stat(r.Context(), ownerKey)
 		if err != nil || e == nil || e.IsDir {
 			continue // 该卷无此文件/目录 → 下一候选
@@ -115,6 +123,16 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		}
 	}
 	return nil
+}
+
+// egressOwnerMatch 判定本地请求 owner 是否匹配 egress 卷的 holder_owner（评审 I2）：
+// egress 卷代表凭证授的持有侧 owner，装配期强制 holder_owner 必填；非 egress 卷恒 true。
+func egressOwnerMatch(v volume.Volume, owner string) bool {
+	if v.Type != clustercred.TypeEgress {
+		return true
+	}
+	ho, _ := v.Extra["holder_owner"].(string)
+	return strings.TrimSpace(ho) == owner
 }
 
 // externalStateFor 分 A/B/C 态（gocognit 收敛）：私密/egress_forward → A 态服务端转发；
