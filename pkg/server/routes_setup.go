@@ -26,7 +26,6 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
-	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -488,8 +487,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 				return be.FS(), "", false
 			}
 			// 共享判定（用户裁定）：ModeAllow + 多 owner 白名单 = 共享；ModeDeny/零值
-			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。
-			shared := vol.ACL.Mode == volume.ModeDeny || vol.ACL.Mode == "" || len(vol.ACL.Owners) > 1
+			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。单一
+			// 事实源：volume.Shared()（2026-10-05，写/读/转存三侧共用）。
+			shared := vol.Shared()
 			return be.FS(), registry.SchemeOf(vol.Type), shared
 		},
 	})

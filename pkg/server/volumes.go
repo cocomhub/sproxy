@@ -570,8 +570,8 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 }
 
 // externalSinkFor 返回外部卷的写入源（External FS 包装为 files.UploadSink）；
-// 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。owner 用于键隔离
-// （评审 M3：外部卷键 `<owner>/user/<rel>`，与读路径同一约定）。
+// 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。持卷描述（ResolveOwnerPath
+// 按共享性自动适配 owner 前缀——评审 M3 + 用户裁定统一入口）。
 func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if h.volSet == nil {
 		return nil
@@ -584,7 +584,11 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if fsys == nil {
 		return nil
 	}
-	return &externalUploadSink{fs: fsys, owner: normalizeOwner(owner)}
+	v, ok := h.volSet.ByName(volName)
+	if !ok {
+		return nil
+	}
+	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
 }
 
 // volumeTenant 返回指定卷上 owner 的租户（写盘 root）。默认卷委托 h.tenantFor（既有

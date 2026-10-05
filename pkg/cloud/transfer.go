@@ -115,14 +115,25 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	return nil, env.result, lerr
 }
 
-// transferRelPath 派生转存目标路径：自动（pikpak/<owner>/<taskID>/<file>）或显式；
-// 共享卷强制 owner 前缀并校验结果仍含前缀（NH2：path.Join 折叠 .. 可逃逸前缀跨 owner
-// 覆写，校验失败 fail-closed）。
+// transferRelPath 派生转存目标路径：
+//   - 显式指定（task.Transfer.Path 非空，用户可控路径+文件名）→ 用显式路径；共享卷
+//     自动加 `<owner>/` 前缀隔离；
+//   - 未指定 → 自动派生 `user/<taskID>/<file>`（共享卷）或 `user/<taskID>/<file>`
+//     （独享卷，无 owner 前缀）——<taskID>/<file> 兜底语义。
+//
+// **键空间统一（2026-10-05 用户裁定：自动适配、用户不感知前缀、路径可控制）**：
+// 转存产物落 `user/` 桶 + owner 前缀（共享卷）——与普通上传同一键空间
+// （`<owner>/user/<rel>`），读路径 resolveExternalDownload 按 Shared() 自动加
+// `<owner>/` 前缀，用户 /download 传相对路径即可命中，不感知前缀；不同用户靠
+// 机制隔离互不感知。共享卷强制 owner 前缀并校验结果仍含前缀（NH2：path.Join
+// 折叠 .. 可逃逸前缀跨 owner 覆写，校验失败 fail-closed）。
 func transferRelPath(task *CloudTask) (string, error) {
 	rel := task.Transfer.Path
 	if rel == "" {
 		prefix := task.Transfer.OwnerPrefix
-		rel = path.Join("pikpak", prefix, task.ID, sanitizeTransferName(task.Filename))
+		// 共享卷：<owner>/user/<taskID>/<file>（OwnerPrefix 已由 transferDone 按 shared
+		// 强制）；独享卷：user/<taskID>/<file>（无 owner 前缀，path.Join 折叠空段）。
+		rel = path.Join(prefix, "user", task.ID, sanitizeTransferName(task.Filename))
 	} else if task.Transfer.OwnerPrefix != "" {
 		rel = path.Join(task.Transfer.OwnerPrefix, rel)
 	}

@@ -104,13 +104,13 @@ func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	if tr == nil || tr.URL == "" {
 		t.Fatal("转存应返回 URL")
 	}
-	// 目标路径自动派生 pikpak/<taskID>/<filename>
-	wantRel := "pikpak/task-1/movie.mp4"
+	// 目标路径自动派生 user/<taskID>/<filename>
+	wantRel := "user/task-1/movie.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("目标卷应收到 %s，实际文件: %v", wantRel, keys(fs.files))
 	}
-	// 目录自动生成（pikpak + pikpak/task-1）
-	if !fs.dirs["pikpak"] || !fs.dirs["pikpak/task-1"] {
+	// 目录自动生成（user + user/task-1）
+	if !fs.dirs["user"] || !fs.dirs["user/task-1"] {
 		t.Fatalf("目标目录应自动生成，实际 dirs: %v", fs.dirs)
 	}
 	if !strings.HasPrefix(tr.URL, "secretdata://secretdata-main/") {
@@ -394,8 +394,8 @@ func TestTransferDone_SharedVolume_OwnerPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 自动派生：pikpak/<owner>/<taskID>/<file>（共享卷强制 owner 前缀）
-	wantRel := "pikpak/alice/task-s1/movie.mp4"
+	// 自动派生：<owner>/user/<taskID>/<file>（共享卷强制 owner 前缀）
+	wantRel := "alice/user/task-s1/movie.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("共享卷应加 owner 前缀落盘 %s，实际: %v", wantRel, keys(fs.files))
 	}
@@ -437,8 +437,8 @@ func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	// 独享卷不加前缀：pikpak/task-p1/c.mp4
-	wantRel := "pikpak/task-p1/c.mp4"
+	// 独享卷不加前缀：user/task-p1/c.mp4
+	wantRel := "user/task-p1/c.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("独享卷不应加 owner 前缀 %s，实际: %v", wantRel, keys(fs.files))
 	}
@@ -474,7 +474,7 @@ func TestTransferDone_SharedVolume_PrefixEscapeRejected(t *testing.T) {
 // （#/% 文件名可往返，url.Parse 不截断/不报 invalid escape）。
 func TestTransferURL_EscapesSpecial(t *testing.T) {
 	t.Parallel()
-	u := transferURL("secretdata", "vault", "pikpak/task-1/a#b%c.mp4")
+	u := transferURL("secretdata", "vault", "user/task-1/a#b%c.mp4")
 	// 原始 # 必须被 encode（URL 字符串不含裸 #）；% 必须 encode 成 %25
 	if strings.Contains(u, "a#b") {
 		t.Fatalf("# 应被 percent-encode，got %q", u)

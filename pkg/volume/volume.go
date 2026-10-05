@@ -284,6 +284,17 @@ func AllowedVolumes(vols []Volume, owner string) []Volume {
 	return out
 }
 
+// Shared 判定卷是否多用户共享（2026-10-05 用户裁定：共享卷键加 owner 前缀隔离，
+// 独享卷——用户外部网盘——无前缀直接路径存取）。
+//
+// 判定（与既有转存 shared 判定同源）：
+//   - ACL ModeDeny / 零值（默认开放）：任何 owner 可写 → 共享；
+//   - ModeAllow + 多 owner 白名单 → 共享；
+//   - ModeAllow + 单 owner（用户自己的外部网盘）→ 独享（键无 owner 前缀）。
+func (v Volume) Shared() bool {
+	return v.ACL.Mode == "" || v.ACL.Mode == ModeDeny || len(v.ACL.Owners) > 1
+}
+
 // DefaultVolume 返回默认卷（首个）。空列表返回零值 Volume{Name:"<none>"}。
 func DefaultVolume(vols []Volume) Volume {
 	if len(vols) == 0 {

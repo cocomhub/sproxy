@@ -7,6 +7,7 @@ import (
 	"context"
 	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -81,11 +82,9 @@ func newExternalSource(fsys syncpkg.FS, rel string, e *syncpkg.Entry) *externalD
 // 返回 nil = 未命中任何外部卷（调用方走既有 404/回落默认租户语义）。
 func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename, explicitVol string) *downloadPath {
 	candidates := h.externalCandidates(r, owner, explicitVol)
-	// **owner 隔离键（评审 M3 修复，2026-10-05）**：外部卷键对齐本地卷布局
-	// `<root>/<owner>/user/<name>`——本地卷 owner 在租户根隔离，外部卷无租户根，
-	// 故在键前加 `<owner>/` 前缀（`<owner>/user/<name>`），防止跨 owner 互读
-	// （ACL 默认开放时任意授权用户读到全卷其它 owner 的文件）。读写两侧同一约定。
-	ownerKey := normalizeOwner(owner) + "/" + rel
+	// 域侧 rel 形如 user/<name>；剥桶后经 v.ResolveOwnerPath 统一计算最终键
+	// （共享卷自动加 <owner>/ 前缀隔离，独享卷无前缀——评审 M3 + 用户裁定统一入口）。
+	stripped := strings.TrimPrefix(rel, "user/")
 	for _, v := range candidates {
 		be := h.volSet.External(v.Name)
 		if be == nil {
@@ -94,6 +93,11 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		fsys := be.FS()
 		if fsys == nil {
 			// 后端已登记但 FS 视图未就绪（评审 Minor：nil 接口解引用 panic 防御）。
+			continue
+		}
+		ownerKey, kerr := v.ResolveUserPath(owner, stripped)
+		if kerr != nil {
+			// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
 			continue
 		}
 		e, err := fsys.Stat(r.Context(), ownerKey)
