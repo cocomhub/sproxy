@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -37,6 +39,9 @@ type peerFingerprintProvider interface {
 type remoteReadHandler struct {
 	h    *Handlers
 	peer peerFingerprintProvider
+	// creds 是集群出口凭证池（2026-10-05 用户裁定凭证下发）：持有节点签发、装配注入；
+	// authorize 在静态 mesh_readers 未命中时按对端指纹验签授权（时效/scope 下发端控制）。
+	creds *clusterCredentialSet
 }
 
 // remoteTarget 是一次已授权远程读的目标上下文。
@@ -48,8 +53,9 @@ type remoteTarget struct {
 }
 
 // newRemoteReadHandler 构造只读路由表（每连接一个：指纹是连接级属性）。
-func (h *Handlers) newRemoteReadHandler(peer peerFingerprintProvider) http.Handler {
-	rh := &remoteReadHandler{h: h, peer: peer}
+// creds 是集群出口凭证池（可 nil = 未装配凭证，仅静态 mesh_readers 授权，零回归）。
+func (h *Handlers) newRemoteReadHandler(peer peerFingerprintProvider, creds *clusterCredentialSet) http.Handler {
+	rh := &remoteReadHandler{h: h, peer: peer, creds: creds}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /remote/list", rh.handleList)
 	mux.HandleFunc("HEAD /remote/stat", rh.handleStat)
@@ -113,11 +119,8 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 	volName := strings.TrimSpace(r.URL.Query().Get("volume"))
 	// path 允许远端「以 / 开头的绝对写法」（如 /docs/a.txt，与 sclient `cd /` 的
 	// 根语义一致）；此处归一为 owner user 桶内相对路径。
-	//
-	// 用 TrimLeft 而非 TrimPrefix：//docs 与 /docs 必须一致（只去一个斜杠会残留首
-	// 斜杠，被 ValidateFilePath 判为绝对路径而 400，语义分叉）。归一后
-	// ValidateFilePath 仍在路径上（见 delegate → 既有 handler），`..` 等穿越照旧被拒。
-	relPath := strings.TrimLeft(strings.TrimSpace(r.URL.Query().Get("path")), "/")
+	rawPath := r.URL.Query().Get("path")
+	relPath := strings.TrimLeft(strings.TrimSpace(rawPath), "/")
 
 	// deny 记审计 + 写错误响应。status 区分「授权类拒绝」（404/401，一律不泄露卷与
 	// 文件存在性）与服务端自身错误（500）——后者若冒充 404 会误导排障。
@@ -128,6 +131,17 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 		})
 		writeRemoteError(w, status, remoteErrorMessage(status))
 		return nil, false
+	}
+
+	// **评审 C1 修复（凭证 PathPrefix `..` 顶穿）**：授权与读取必须用**同一清洗后路径**。
+	// 此前 authorize 对原始 relPath 做凭证 Authorizes 前缀判定，而 delegate 内部
+	// pathguard 先 Clean 消融 `..`（docs/../secret → secret）——PathPrefix=docs 的出口
+	// 节点可越权读卷内任意文件。此处统一清洗（normalizeRemoteRelPath），授权路径 ==
+	// 实际读路径，前缀判定与读取键一致。空 path（list/stats 不依赖文件路径）跳过清洗。
+	if cleaned, cerr := normalizeRemoteRelPath(rawPath); cerr != nil {
+		return deny(http.StatusNotFound, AuditResultDenied, "路径非法")
+	} else {
+		relPath = cleaned
 	}
 
 	fp := ""
@@ -151,14 +165,64 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 	if !ok {
 		return deny(http.StatusNotFound, AuditResultDenied, "卷不存在")
 	}
-	mr, ok := vol.MeshReaderFor(fp)
+	if mr, ok := vol.MeshReaderFor(fp); ok {
+		if !vol.AuthorizeMeshRead(mr.Node, fp, mr.Owner) {
+			return deny(http.StatusNotFound, AuditResultDenied, "授权三元组未通过 node="+mr.Node)
+		}
+		return &remoteTarget{vol: vol, node: mr.Node, owner: mr.Owner, path: relPath}, true
+	}
+	// 静态 mesh_readers 未命中 → 集群出口凭证授权分支（2026-10-05 用户裁定凭证下发）。
+	return rh.authorizeCredential(deny, vol, volName, relPath, fp)
+}
+
+// normalizeRemoteRelPath 归一远端 path：剥前导斜杠（TrimLeft：//docs 与 /docs 一致）
+// + **C1 清洗**（authorize 与读取用同一清洗后路径，防凭证 PathPrefix 被 `..` 顶穿——
+// 此前 authorize 对原始 relPath 做前缀判定而读取侧 Clean 消融 `..`，docs/../secret 可
+// 越权读卷内任意文件）。空 path（list/stats 等不依赖文件路径的操作）保留原样——拒绝
+// 会把 quota 查询打成 404（回归）。
+func normalizeRemoteRelPath(raw string) (string, error) {
+	relPath := strings.TrimLeft(strings.TrimSpace(raw), "/")
+	if relPath == "" {
+		return "", nil
+	}
+	cleaned, cerr := pathguard.ValidateFilePath(relPath)
+	if cerr != nil {
+		return "", cerr
+	}
+	return cleaned, nil
+}
+
+// authorizeCredential 是 authorize 的凭证授权分支（静态 mesh_readers 未命中时）：
+// 持有节点签发的短效凭证替代静态指纹绑定——白名单（AuthorizedFor）+ 范围
+// （Authorizes 卷/path 双校验，评审 C2）+ 映射 (node=cred.Node, owner=cred.Owner)。
+func (rh *remoteReadHandler) authorizeCredential(
+	deny func(int, string, string) (*remoteTarget, bool),
+	vol volume.Volume, volName, relPath, fp string,
+) (*remoteTarget, bool) {
+	cred, ok := rh.credentialFor(volName, fp)
 	if !ok {
-		return deny(http.StatusNotFound, AuditResultDenied, "指纹未列入本卷 mesh_readers")
+		return deny(http.StatusNotFound, AuditResultDenied, "指纹未列入本卷 mesh_readers 且无有效凭证")
 	}
-	if !vol.AuthorizeMeshRead(mr.Node, fp, mr.Owner) {
-		return deny(http.StatusNotFound, AuditResultDenied, "授权三元组未通过 node="+mr.Node)
+	// 白名单：连接对端指纹 == 凭证 Recipient（只对签发的出口节点有效）。
+	if aerr := cred.AuthorizedFor(fp); aerr != nil {
+		return deny(http.StatusNotFound, AuditResultDenied, "凭证白名单未命中对端指纹")
 	}
-	return &remoteTarget{vol: vol, node: mr.Node, owner: mr.Owner, path: relPath}, true
+	// 范围校验（评审 C2 修复）：凭证限定的 Volume / PathPrefix 必须生效——此前凭证
+	// 分支不调用 Authorizes，凭证授 (volume,path_prefix) 的出口节点可读同持有节点
+	// 任意卷/任意路径（越权读）。此处强制：请求卷==凭证卷、路径落在 PathPrefix 内。
+	if aerr := cred.Authorizes(cred.Node, volName, cred.Owner, relPath); aerr != nil {
+		return deny(http.StatusNotFound, AuditResultDenied, "凭证授权范围未命中（volume/path）")
+	}
+	return &remoteTarget{vol: vol, node: cred.Node, owner: cred.Owner, path: relPath}, true
+}
+
+// credentialFor 按对端指纹在凭证池中验签并返回有效凭证（目标节点侧集群出口授权）。
+// creds nil（未装配凭证）→ (zero, false)（仅静态 mesh_readers，零回归）。
+func (rh *remoteReadHandler) credentialFor(volName, fingerprint string) (clustercred.Credential, bool) {
+	if rh.creds == nil {
+		return clustercred.Credential{}, false
+	}
+	return rh.creds.credentialFor(volName, fingerprint)
 }
 
 // delegate 在**已完成授权**的前提下执行读操作：**直调 pkg/files 的域操作**，自行写响应。
@@ -200,7 +264,7 @@ func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, svc *files.Serv
 
 // delegateStat 执行远端 stat：元信息用 X-File-* 头回传。
 func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
-	dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
+	dp, err := rh.h.downloadPathForRemote(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
@@ -223,7 +287,7 @@ func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, r *http.Request
 
 // delegateDownload 执行远端下载：走 http.ServeContent（Range/206 由它承担）。
 func (rh *remoteReadHandler) delegateDownload(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
-	dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
+	dp, err := rh.h.downloadPathForRemote(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return

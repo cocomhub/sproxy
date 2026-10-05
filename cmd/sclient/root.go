@@ -158,6 +158,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdMkdir(factory, ios, cliState))
 	root.AddCommand(NewCmdRmdir(factory, ios, cliState))
 	root.AddCommand(NewCmdGenkey(ios))
+	root.AddCommand(newClusterCredentialCmd(ios))
 	root.AddCommand(NewCmdTrust(factory, ios, cfgSvc, &cfgFile))
 	root.AddCommand(NewCmdSecret(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdIdentity(ios))

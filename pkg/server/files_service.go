@@ -24,6 +24,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // filesStorageManager 把 *capacity.StorageManager 适配为 files.StorageManager。
@@ -188,7 +189,7 @@ func (h *Handlers) routeUploadForFiles(owner, rel, explicitVol string, size int6
 //   - pathguard 校验路径（穿越/内部前缀一律拒 → 400）；
 //   - 卷租户由 volumeTenant 解析（卷已由远程面授权，此处不再做 ACL 判定）；
 //   - UserRel 映射到 user 桶内相对路径（功能桶不可达 → 400）。
-func (h *Handlers) downloadPathForRemote(owner, volName, remotePath string) (files.DownloadPath, error) {
+func (h *Handlers) downloadPathForRemote(ctx context.Context, owner, volName, remotePath string) (files.DownloadPath, error) {
 	rel0, err := pathguard.ValidateFilePath(remotePath)
 	if err != nil {
 		msg := errMsgInvalidFilename
@@ -198,14 +199,56 @@ func (h *Handlers) downloadPathForRemote(owner, volName, remotePath string) (fil
 		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusBadRequest, Message: msg}
 	}
 	tnt := h.volumeTenant(volName, owner)
+	// **外部卷远程读（2026-10-05 用户裁定：本期含 secretdata 持有者）**：持有节点
+	// 数据可能是 secretdata 等外部卷（无 *storage.Tenant）——经装配层服务端读取源
+	// （externalDownloadSource）构造 DownloadPath.Source，OpenPath/StatPath 的 Source
+	// 分支解密转发（#735 已实现）。
 	if tnt == nil || tnt.Root() == nil {
-		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+		return h.externalRemotePath(ctx, owner, volName, rel0, remotePath)
 	}
 	rel, ok := tnt.UserRel(rel0)
 	if !ok {
 		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	return files.DownloadPath{Filename: remotePath, Tenant: tnt, Rel: rel}, nil
+}
+
+// externalRemotePath 是 downloadPathForRemote 的外部卷分支（持有节点数据是 secretdata
+// 等外部卷时）：经装配层服务端读取源构造 DownloadPath.Source（解密转发）。
+func (h *Handlers) externalRemotePath(ctx context.Context, owner, volName, rel0, remotePath string) (files.DownloadPath, error) {
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok {
+		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	ownerKey, kerr := v.ResolveUserPath(owner, rel0)
+	if kerr != nil {
+		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	e, serr := fsys.Stat(ctx, ownerKey)
+	if serr != nil || e == nil || e.IsDir {
+		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	return files.DownloadPath{
+		Filename: remotePath, VolumeName: volName,
+		Rel: ownerKey, Source: newExternalSource(fsys, ownerKey, e),
+	}, nil
+}
+
+// externalFSFor 返回外部卷的 FS 视图（未装配/无 FS → (nil,false)）。
+func (h *Handlers) externalFSFor(volName string) (syncpkg.FS, bool) {
+	if h.volSet == nil {
+		return nil, false
+	}
+	be := h.volSet.External(volName)
+	if be == nil {
+		return nil, false
+	}
+	fsys := be.FS()
+	return fsys, fsys != nil
 }
 
 // toFilesHTTPError 把带 HTTP 状态码的 pkg/server 错误（下载路径解析错误 / 卷路由错误）

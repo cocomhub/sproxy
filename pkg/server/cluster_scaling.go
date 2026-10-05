@@ -77,6 +77,19 @@ type ClusterConfig struct {
 	NodeID         string        `yaml:"node_id" mapstructure:"node_id"`                             // 必填（Enabled 时）；跨节点唯一
 	Role           string        `yaml:"role" mapstructure:"role"`                                   // master | replica；默认 master
 	ResyncInterval time.Duration `yaml:"index_resync_interval" mapstructure:"index_resync_interval"` // 索引 resync 兜底周期（默认 5m；0 = 关闭）
+
+	// CredentialSignKey 是集群出口凭证签发方 SK（32B，2026-10-05 用户裁定凭证下发）：
+	// 持有节点用它签发自包含短效凭证；目标节点侧持同 key 验签授权出口节点。
+	CredentialSignKey string `yaml:"credential_sign_key,omitempty" mapstructure:"credential_sign_key"`
+	// Credentials 是集群出口凭证池（目标节点侧装配）：多条凭证，每条指向不同出口节点
+	// 指纹（签发后经配置下发到目标节点）。
+	Credentials []ClusterCredentialConfig `yaml:"credentials,omitempty" mapstructure:"credentials"`
+}
+
+// ClusterCredentialConfig 是一条集群出口凭证的配置载体（目标节点装配用）。
+// Encoded 是签发方 Marshal 的 Credential 串（含 Sig；目标节点验签授权）。
+type ClusterCredentialConfig struct {
+	Encoded string `yaml:"encoded" mapstructure:"encoded"`
 }
 
 // Validate 校验集群段（未启用 → 恒通过零回归）。

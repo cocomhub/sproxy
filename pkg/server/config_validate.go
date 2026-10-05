@@ -713,7 +713,7 @@ func (c *Config) validateRemoteRead() error {
 	if c.RemoteRead.HandshakeTimeout <= 0 {
 		return fmt.Errorf("remote_read.handshake_timeout 必须为正，当前 %v", c.RemoteRead.HandshakeTimeout)
 	}
-	if len(meshReaderFingerprints(c)) == 0 {
+	if len(readListenerPins(c)) == 0 {
 		return fmt.Errorf("remote_read.enabled 但未配置任何 volumes[].acl.mesh_readers —— 无 pin 将接受任意对端，拒绝启动（fail-closed）")
 	}
 	return nil

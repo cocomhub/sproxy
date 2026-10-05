@@ -62,6 +62,7 @@ func TestExternalUploadReadRoundtrip(t *testing.T) {
 	res, werr := svc.WriteFile(context.Background(), files.WriteFileInput{
 		Owner:            "alice",
 		RemotePath:       "movie.bin",
+		ExplicitVol:      "secret", // 显式外部卷（此前隐式依赖"唯一外部卷=Default"）
 		ExpectedChecksum: testutil.SHA256Hex([]byte("hello world\n")),
 		ClientSize:       12,
 	}, strings.NewReader("hello world\n"))

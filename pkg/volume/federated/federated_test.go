@@ -41,6 +41,52 @@ func (m *mockReader) OpenRead(_ context.Context, path string) (io.ReadCloser, er
 	return io.NopCloser(strings.NewReader(m.files[path])), nil
 }
 
+// rangeReader 是带 OpenRangeRead 的 mockReader（测试 RangeReader 透传）。
+type rangeReader struct {
+	mockReader
+}
+
+func (r *rangeReader) OpenRangeRead(_ context.Context, path string, offset, size int64) (io.ReadCloser, error) {
+	if _, ok := r.files[path]; !ok {
+		return nil, os.ErrNotExist
+	}
+	data := r.files[path]
+	if offset < 0 || offset+size > int64(len(data)) {
+		return nil, os.ErrInvalid
+	}
+	return io.NopCloser(strings.NewReader(data[offset : offset+size])), nil
+}
+
+// TestFS_OpenRangeRead_Passthrough（集群出口地基回归 2026-10-05）：底层 Reader 实现
+// RangeReader 时透传；无 RangeReader 的 Reader → 报错（fail-closed）。
+func TestFS_OpenRangeRead_Passthrough(t *testing.T) {
+	t.Parallel()
+	// 1) 底层带 RangeReader → 透传区间读。
+	rr := &rangeReader{files: map[string]string{"docs/a.bin": "0123456789"}}
+	fs, err := New(rr)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rc, rerr := fs.OpenRangeRead(context.Background(), "docs/a.bin", 2, 5)
+	if rerr != nil {
+		t.Fatalf("OpenRangeRead: %v", rerr)
+	}
+	got, gerr := io.ReadAll(rc)
+	rc.Close()
+	if gerr != nil {
+		t.Fatalf("ReadAll: %v", gerr)
+	}
+	if string(got) != "23456" {
+		t.Fatalf("Range 段=%q want 23456", got)
+	}
+	// 2) 底层无 RangeReader → 报错（fail-closed）。
+	plain := &mockReader{files: map[string]string{"x": "y"}}
+	fs2, _ := New(plain)
+	if _, err := fs2.OpenRangeRead(context.Background(), "x", 0, 1); err == nil {
+		t.Fatal("无 RangeReader 底层应报错")
+	}
+}
+
 // TestFS_ReadForwarding 读方法转发注入 Reader。
 func TestFS_ReadForwarding(t *testing.T) {
 	t.Parallel()

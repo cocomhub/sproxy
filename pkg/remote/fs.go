@@ -5,6 +5,7 @@ package remote
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -86,6 +87,27 @@ func (f *remoteFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, er
 	}
 	return f.c.Open(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p})
 }
+
+// OpenRangeRead 实现 syncpkg.RangeReader（集群出口/联邦卷随机访问地基，
+// 2026-10-05）：经 /remote/download + Range 头定点读取 [offset, offset+size)。
+// 只拉含目标区间的段，不下载整文件——播放器 seek 随机访问的 mesh 侧数据面。
+func (f *remoteFS) OpenRangeRead(ctx context.Context, path string, offset, size int64) (io.ReadCloser, error) {
+	p, err := normalizeRelPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if offset < 0 {
+		return nil, fmt.Errorf("remote: 负区间偏移 %d", offset)
+	}
+	if size <= 0 {
+		return nil, fmt.Errorf("remote: 非法区间长度 %d", size)
+	}
+	return f.c.Open(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p},
+		WithRange(offset, offset+size-1))
+}
+
+// 编译期断言：接口形状即最终形态（含 4 个写方法）。
+var _ syncpkg.FS = (*remoteFS)(nil)
 
 // 写方法（Y 二期 P3-c 已实现）：只做「路径归一 → 调 Client 写面方法」，**不实现写语义**
 // （checksum 门禁/原子改名/版本/配额/文件锁/卷路由全在对端 `pkg/files` 的域方法里）。

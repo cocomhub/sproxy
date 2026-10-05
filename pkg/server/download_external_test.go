@@ -9,13 +9,17 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -97,21 +101,30 @@ func newExternalTestEnv(t *testing.T, v volume.Volume, fs *extFS) *Handlers {
 	t.Helper()
 	be := &extBackend{fs: fs}
 
-	// 用 registry.NewSet 装配（volumes 空 + AddExternalVolume 注入外部卷）。
-	vs := registry.NewSet(nil, nil, nil, nil, "")
-	if aerr := vs.AddExternalVolume(v, be); aerr != nil {
-		t.Fatalf("AddExternalVolume: %v", aerr)
-	}
+	// 用 registry.NewSet 装配（本地默认卷 main + AddExternalVolume 注入外部卷）。
+	// **默认卷注入（评审 I5 修正）**：此前 NewSet 全 nil，AddExternalVolume 使唯一外部卷
+	// 成为 volumes[0] → Default()=外部卷名，volumeTenant 对 `volName==Default().Name`
+	// 走本地默认卷分支（tenantFor），downloadPathForRemote 的外部卷分支被本地分支吞掉。
+	// 注入本地默认卷 main（roots 同步）使外部卷非默认，语义与生产装配一致。
 	root, rerr := storage.OpenRoot(t.TempDir())
 	if rerr != nil {
 		t.Fatalf("OpenRoot: %v", rerr)
+	}
+	vs := registry.NewSet(
+		[]volume.Volume{{Name: "main"}},
+		map[string]*storage.Root{"main": root},
+		nil, nil, "main",
+	)
+	if aerr := vs.AddExternalVolume(v, be); aerr != nil {
+		t.Fatalf("AddExternalVolume: %v", aerr)
 	}
 	tenants := storage.NewTenantCache(root)
 	t.Cleanup(func() { _ = tenants.Close() })
 	t.Cleanup(func() { _ = root.Close() })
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(&Config{})
-	return &Handlers{volSet: vs, logger: testLogger(), tenants: tenants, cfgPtr: &cfgPtr}
+	return &Handlers{volSet: vs, logger: testLogger(), tenants: tenants, cfgPtr: &cfgPtr,
+		checksumStores: make(map[string]*checksum.ChecksumStore)}
 }
 
 // TestResolveExternalDownload_BState302：明文外部卷 direct_link:true → 302 直链。
@@ -130,6 +143,36 @@ func TestResolveExternalDownload_BState302(t *testing.T) {
 	}
 	if dp.source == nil {
 		t.Fatal("B 态应同时携带 source（Stat 回元信息）")
+	}
+}
+
+// TestResolveExternalDownload_EgressForwardForcesA：`egress_forward=1` 强制 A 态
+// （集群出口 302 环打破——B 态 DirectURL 返回带 egress_forward 的出口 URL，二次进入
+// 必须走服务端转发）。只收紧（强制转发），无提权面。
+func TestResolveExternalDownload_EgressForwardForcesA(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "eg", Type: clustercred.TypeEgress, DirectLink: true, Extra: map[string]any{
+		"holder_owner": "alice",
+	}}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://eg.example.com/download?egress_forward=1"}
+	h := newExternalTestEnv(t, v, fs)
+
+	// 无 egress_forward → B 态（302 直链）。
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
+	if dp == nil || dp.redirectURL == "" {
+		t.Fatal("无 egress_forward 应 B 态 302")
+	}
+	// 带 egress_forward=1 → 强制 A 态（source，无 redirectURL——环打破）。
+	req := httptest.NewRequest(http.MethodGet, "/download?egress_forward=1", nil)
+	dp2 := h.resolveExternalDownload(req, "alice", "user/f.bin", "f.bin", "")
+	if dp2 == nil {
+		t.Fatal("egress_forward 命中应返回 downloadPath")
+	}
+	if dp2.redirectURL != "" {
+		t.Fatalf("egress_forward 应强制 A 态（无 redirectURL），got %q", dp2.redirectURL)
+	}
+	if dp2.source == nil {
+		t.Fatal("egress_forward 应携带 source（服务端转发）")
 	}
 }
 
@@ -190,6 +233,96 @@ func TestResolveExternalDownload_DLinkUnavailableFallsBack(t *testing.T) {
 	}
 	if dp.source == nil {
 		t.Fatal("回落应携带 source")
+	}
+}
+
+// TestResolveExternalDownload_EgressOwnerIsolation（评审 I2 回归）：egress 卷代表凭证授
+// 的持有侧 owner——本地请求 owner ≠ holder_owner → 不命中（404，跨 owner 越权读堵死）。
+func TestResolveExternalDownload_EgressOwnerIsolation(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "eg", Type: clustercred.TypeEgress, DirectLink: true, Extra: map[string]any{
+		"holder_owner": "alice", // 凭证授的持有侧 owner（装配必填）
+	}}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}}
+	h := newExternalTestEnv(t, v, fs)
+
+	// bob 请求 → 不命中（owner 与 holder_owner 不匹配，防跨 owner 读 alice 凭证数据）。
+	if dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil),
+		"bob", "user/f.bin", "f.bin", ""); dp != nil {
+		t.Fatalf("bob 请求 egress 卷应不命中（跨 owner 越权面）, got %+v", dp)
+	}
+	// alice（持有 owner）请求 → 命中（服务端转发）。
+	dp2 := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil),
+		"alice", "user/f.bin", "f.bin", "")
+	if dp2 == nil || dp2.source == nil {
+		t.Fatal("alice（holder_owner）请求应命中 source")
+	}
+}
+
+// TestDownloadPathForRemote_ExternalSecretdata（评审 I5 回归）：持有节点数据是 secretdata
+// 等外部卷时，remote 面 downloadPathForRemote 走外部卷分支——构造 Source 服务端解密转发
+// （此前该分支零测试，全链路未验证）。此处用 extFS 模拟 secretdata 密文卷，断言路由
+// 分支真实产出 Source 且 OpenPath 可读回内容。
+func TestDownloadPathForRemote_ExternalSecretdata(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "secret", Type: volume.TypeSecretdata}
+	fs := &extFS{files: map[string]string{"alice/user/docs/movie.bin": "ciphertext"}}
+	h := newExternalTestEnv(t, v, fs)
+
+	dp, err := h.downloadPathForRemote(context.Background(), "alice", "secret", "docs/movie.bin")
+	if err != nil {
+		t.Fatalf("downloadPathForRemote(外部卷): %v", err)
+	}
+	if dp.Source == nil {
+		t.Fatal("secretdata 持有者应走 Source（服务端解密转发）分支")
+	}
+	if dp.VolumeName != "secret" || dp.Rel != "alice/user/docs/movie.bin" {
+		t.Fatalf("DownloadPath 卷/键错: vol=%q rel=%q", dp.VolumeName, dp.Rel)
+	}
+	// Source 分支 OpenPath 真实可读（#735 解密转发语义）。
+	rc, oerr := h.fileService().OpenPath(context.Background(), dp)
+	if oerr != nil {
+		t.Fatalf("OpenPath(Source 分支): %v", oerr)
+	}
+	defer rc.File.Close()
+	body, _ := io.ReadAll(rc.File)
+	if string(body) != "ciphertext" {
+		t.Fatalf("Source 读取内容 != 持有侧原件, got %q", string(body))
+	}
+}
+
+// TestVolumesAPI_List_EgressVisibleOnlyToHolderOwner（评审可见性）：egress 卷代表凭证授
+// 的持有侧 owner 真实数据——**非 holder_owner 的普通用户不可见**（卷列表不泄露存在性），
+// holder_owner 可见并可访问已授权内容。
+func TestVolumesAPI_List_EgressVisibleOnlyToHolderOwner(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "eg", Type: clustercred.TypeEgress, Extra: map[string]any{"holder_owner": "alice"}}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}}
+	h := newExternalTestEnv(t, v, fs)
+
+	list := func(owner string) []string {
+		req := httptest.NewRequest(http.MethodGet, "/api/volumes", nil).
+			WithContext(withActor(context.Background(), owner))
+		rec := httptest.NewRecorder()
+		h.listVolumesHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("owner=%s /api/volumes status=%d", owner, rec.Code)
+		}
+		var out volumesListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+		}
+		names := make([]string, 0, len(out.Volumes))
+		for _, vs := range out.Volumes {
+			names = append(names, vs.Name)
+		}
+		return names
+	}
+	if names := list("alice"); !slices.Contains(names, "eg") {
+		t.Fatalf("holder_owner 应可见 egress 卷: %v", names)
+	}
+	if names := list("bob"); slices.Contains(names, "eg") {
+		t.Fatalf("普通用户（非 holder_owner）不应见 egress 卷（存在性不泄露）: %v", names)
 	}
 }
 

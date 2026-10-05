@@ -47,6 +47,7 @@ import (
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/federated"
 	"github.com/cocomhub/sproxy/pkg/volume/ftp"
@@ -1382,6 +1383,19 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 		// 联邦卷回写（roadmap P2）：写面走独立服务名 volwrite（#494 写面会话）。
 		federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),
 			remote.WithWriteDialer(remote.NewRelayDialer(hubC, remote.ServiceNameWrite)))
+		// **集群出口（2026-10-05 用户裁定凭证下发）**：出口节点装配 type: egress 卷——
+		// 访问持有节点真实卷（本端 Ed25519 身份 + 持有指纹 pin）。凭证签发/验签仅
+		// 在持有节点本地（cluster.credentials + cluster.credential_sign_key），出口侧
+		// 不持有签发 SK（评审 I1：此前传 64-hex 串致装配恒失败，且扩大 SK 泄露面）。
+		if id, idErr := server.LoadXferIdentity(cfg); idErr == nil {
+			cluster.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName), id)
+		} else {
+			// **评审 I8（静默不注册）**：身份加载失败时 egress 后端不注册，随后任何
+			// `type: egress` 卷会在装配层以混乱错误失败——显式告警，避免运维把
+			// 「无出口能力」当成「未配置出口卷」。
+			slog.Error("集群出口装配失败：加载本端 xfer 身份失败（egress 卷后端未注册）",
+				"error", idErr)
+		}
 	}
 }
 
