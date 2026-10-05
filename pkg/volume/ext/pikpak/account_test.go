@@ -521,11 +521,11 @@ func TestAccountPool_Synctest_ConcurrentOps_CrossMidnight(t *testing.T) {
 		release := make(chan struct{})
 		errs := make(chan error, workers*iters)
 		var wg sync.WaitGroup
-		for w := 0; w < workers; w++ {
+		for w := range workers {
 			wg.Add(1)
 			go func(w int) {
 				defer wg.Done()
-				for it := 0; it < iters; it++ {
+				for it := range iters {
 					acct, err := p.Select(context.Background(), chunk)
 					if err != nil {
 						errs <- fmt.Errorf("worker %d step %d select: %w", w, it, err)
@@ -537,7 +537,7 @@ func TestAccountPool_Synctest_ConcurrentOps_CrossMidnight(t *testing.T) {
 			}(w)
 		}
 		for range iters {
-			for w := 0; w < workers; w++ {
+			for range workers {
 				release <- struct{}{}
 			}
 		}
