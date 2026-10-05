@@ -62,7 +62,7 @@ func (r *rangeReader) OpenRangeRead(_ context.Context, path string, offset, size
 func TestFS_OpenRangeRead_Passthrough(t *testing.T) {
 	t.Parallel()
 	// 1) 底层带 RangeReader → 透传区间读。
-	rr := &rangeReader{mockReader: mockReader{files: map[string]string{"docs/a.bin": "0123456789"}}}
+	rr := &rangeReader{files: map[string]string{"docs/a.bin": "0123456789"}}
 	fs, err := New(rr)
 	if err != nil {
 		t.Fatalf("New: %v", err)
