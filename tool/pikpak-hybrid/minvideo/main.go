@@ -36,20 +36,20 @@ func main() {
 		fmt.Printf("[%d] %-40s size=%-10d kind=%s\n    link=%s\n", i, f.Name, f.Size, f.Kind, f.DirectLink)
 	}
 	// 挑最小视频（kind=drive#file 且名字像视频；无 kind 标记时按 size 升序找最小非空文件）
-	var min *pikpak.ShareFile
+	var minFile *pikpak.ShareFile
 	for i := range meta.Files {
 		f := &meta.Files[i]
 		if f.Kind == "drive#folder" {
 			continue
 		}
-		if min == nil || f.Size < min.Size {
-			min = f
+		if minFile == nil || f.Size < minFile.Size {
+			minFile = f
 		}
 	}
-	if min == nil {
+	if minFile == nil {
 		cancel()
 		log.Fatalf("no file found")
 	}
-	fmt.Printf("== MIN video: %s size=%d ==\n", min.Name, min.Size)
-	fmt.Printf("%s\n", min.DirectLink)
+	fmt.Printf("== MIN video: %s size=%d ==\n", minFile.Name, minFile.Size)
+	fmt.Printf("%s\n", minFile.DirectLink)
 }
