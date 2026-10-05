@@ -47,6 +47,7 @@ import (
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/federated"
 	"github.com/cocomhub/sproxy/pkg/volume/ftp"
@@ -1382,7 +1383,20 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 		// 联邦卷回写（roadmap P2）：写面走独立服务名 volwrite（#494 写面会话）。
 		federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),
 			remote.WithWriteDialer(remote.NewRelayDialer(hubC, remote.ServiceNameWrite)))
+		// **集群出口（2026-10-05 用户裁定凭证下发）**：出口节点装配 type: egress 卷——
+		// 凭证池访问持有节点真实卷（本端 Ed25519 身份 + 持有指纹 pin + 签发方 SK 验签）。
+		// identity 复用 xfer 身份（指纹供持有侧 mesh_readers/凭证白名单 pin）。
+		if id, idErr := server.LoadXferIdentity(cfg); idErr == nil {
+			cluster.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName), id,
+				[]byte(clusterSignKeyFromConfig(cfg)))
+		}
 	}
+}
+
+// clusterSignKeyFromConfig 解析集群出口凭证签发方 SK（cluster.credential_sign_key，
+// 32B hex → 字节；未配置 → 空（装配 fail-closed 由 cluster.NewBackend 拒绝））。
+func clusterSignKeyFromConfig(cfg *server.Config) string {
+	return cfg.Cluster.CredentialSignKey
 }
 
 // setupSyncUserStore 装配用户卷 store 并恢复重启前的用户卷（单卷失败跳过 + 告警）。
