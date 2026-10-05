@@ -494,8 +494,18 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 }
 
 // rangeReadBytes 逐块只下载/解密含 [offset,end) 的 blocklet 段并拼接覆盖区间明文。
-func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) ([]byte, error) {
-	var out []byte
+// 审计：Range 读取侧 decrypt 阶段 span（读取/播放侧解密路径——视频关键帧 seek 时每段独立
+// 解密，aggregate 到单次 range 读；Bytes = 返回明文段总长）。无 ctx logger 时 no-op
+// （与写入侧 encrypt span 对称）。
+func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) (out []byte, err error) {
+	decSpan := audit.From(ctx).Begin("decrypt")
+	defer func() {
+		if err != nil {
+			decSpan.Fail(err)
+			return
+		}
+		decSpan.End("bytes", int64(len(out)))
+	}()
 	for _, ci := range e.meta.Chunks {
 		if ci.Offset >= end || ci.Offset+ci.OrigSize <= offset {
 			continue // 该块与目标区间不相交 → 不下载
@@ -791,8 +801,9 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 			encSpan.Fail(err)
 			return
 		}
-		// applyKV 把 "bytes"→Bytes，"encrypted"/"cipher_bytes" 进 Meta。
-		encSpan.End("bytes", int64(len(wc.data)), "encrypted", true, "cipher_bytes", cipherBytes)
+		// applyKV 把 "bytes"→Bytes，"encrypted"/"cipher_bytes"/"algorithm" 进 Meta。
+		encSpan.End("bytes", int64(len(wc.data)), "encrypted", true, "cipher_bytes", cipherBytes,
+			"algorithm", s.auditAlgoName())
 	}()
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
@@ -847,6 +858,17 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 	return s.commitEntry(ctx, wc, &metaEntry{
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
 	}, uploaded)
+}
+
+// auditAlgoName 返回本卷加密算法的注册标识（含档位后缀，如 shardseal/aes-256-gcm、
+// -high、-low），供审计 Meta 的 algorithm 字段（公文明密文对比埋点的算法档位）。从
+// s.algoVer 经注册表读权威名；注册表异常回落 opts.Algorithm（NewFS 恒把空值归一为
+// 已注册名，该回落理论不可达，仅防御）。
+func (s *SecretdataFS) auditAlgoName() string {
+	if alg, ok := shardseal.AlgoByVersion(s.algoVer); ok {
+		return alg.Name
+	}
+	return s.opts.Algorithm
 }
 
 // sumDirFileBytes 递归统计 dir 下所有常规文件字节和（审计密文体积用；目录不存在/不可读显式
