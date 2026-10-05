@@ -179,6 +179,8 @@ func normalizeEndpoint(raw string, useSSL bool) (string, bool) {
 // 避免与生产 "s3" 重复 panic）。重复注册 → registry panic（编程错误）。
 // protocols 变参：生产注册传 "s3"（M7 协议声明，转存可生成 URL）；测试用唯一类型名
 // 时不传协议——避免与生产 s3 的 "s3" 协议在并行测试中冲突（协议冲突 registry fail-fast）。
+// 远程性自述（2026-10-05 用户裁定）：s3 是外部卷，**不实现** syncpkg.LocalVolume 接口
+// → 默认视为远程（容量/配额由卷自身管理）；内部/封装卷才实现 IsLocalVolume 声明内部。
 func registerS3BackendWithFactory(typ string, protocols ...string) {
 	registry.RegisterBackend(typ, newS3Backend, protocols...)
 }

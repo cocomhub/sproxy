@@ -52,7 +52,9 @@ type transferEnv struct {
 	task          *CloudTask
 	result        *downloader.Result
 	retryDownload func(context.Context) (*downloader.Result, error)
-	// remote 标记目标卷是否远程网盘（NH1：远程卷用户配额直接通过，容量卷自管）。
+	// remote 标记目标卷是否外部/远程网盘（NH1：远程卷用户配额直接通过，容量卷自管）。
+	// 判定由目标 FS 自述（syncpkg.LocalVolume 能力接口，用户裁定 2026-10-05）：实现
+	// IsLocalVolume()==true → 内部/本地卷（走用户配额）；否则默认外部（远程跳过）。
 	remote bool
 	// writeCount 是本次转存已执行的卷写次数（transferOnce 每写 +1）。
 	// W1/W3：首写（=0 时进入 transferOnce）用 WriteIfAbsent 拒绝静默覆盖；
@@ -81,7 +83,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if task.Transfer == nil {
 		return nil, result, nil // 无转存要求（仅下载）
 	}
-	targetFS, scheme, shared, remote := m.transferFS(task.Transfer.Volume)
+	targetFS, scheme, shared := m.transferFS(task.Transfer.Volume)
 	if targetFS == nil {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
 	}
@@ -103,6 +105,12 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if rerr != nil {
 		return nil, result, rerr
 	}
+
+	// NH1：远程性由**目标 FS 自述**（syncpkg.LocalVolume 能力接口）——未实现接口的 FS
+	// 默认视为外部卷（远程，容量/配额由卷自身管理），仅实现 IsLocalVolume()==true 的
+	// 内部/本地卷走用户配额。装配层不再透传（#735 收敛 3 返回；secretdata 封装卷委派
+	// 底层自动正确）。
+	remote := !isLocalVolumeFS(targetFS)
 
 	// 转存执行上下文（S107 收敛）：目标卷/路径/产物/结果/重下回调全程不变。
 	env := &transferEnv{
@@ -488,12 +496,23 @@ func sanitizeTransferName(name string) string {
 
 // transferFS 解析转存目标卷的 (FS 视图, 协议 scheme)。
 // 由装配层注入 resolver（pkg/server 不 import registry；经 CloudManagerOptions）。
-func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string, bool, bool) {
+func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string, bool) {
 	if m.transferFSFor == nil {
-		return nil, "", false, false
+		return nil, "", false
 	}
 	return m.transferFSFor(volume)
-}// isFsNotFound 判断文件系统错误是否为「路径不存在」：errors.Is 匹配 os.ErrNotExist /
+}
+
+// isLocalVolumeFS 经 syncpkg.LocalVolume 能力接口判定目标 FS 是否**内部/本地卷**：
+// 实现 IsLocalVolume()==true → 内部（走用户配额）；未实现或返回 false → 外部/远程
+// （容量/配额由卷自身管理，用户通用配额跳过）。外部卷零配置，内部/封装卷自述
+// （用户裁定 2026-10-05）。
+func isLocalVolumeFS(fs syncpkg.FS) bool {
+	if lv, ok := fs.(syncpkg.LocalVolume); ok {
+		return lv.IsLocalVolume()
+	}
+	return false
+} // isFsNotFound 判断文件系统错误是否为「路径不存在」：errors.Is 匹配 os.ErrNotExist /
 // fs.ErrNotExist，另兜底常见 NotFound 文案（s3/baidupcs 等远程卷用自定义错误）。
 // 存在性判断模糊（非 nil 且非「不存在」）→ 返回 false：调用方把存在性检查失败当
 // 目标卷异常重试（fail-closed，防把未确认状态当不存在继续写而覆盖）。

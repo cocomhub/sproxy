@@ -62,6 +62,19 @@ type ReserveSpace interface {
 	ReserveSpace(ctx context.Context, relPath string, size int64) error
 }
 
+// LocalVolume 是 FS 的**本地性自述能力**（用户裁定 2026-10-05）：
+//   - **未实现该接口的 FS 默认视为外部卷**（false）——registry 域内注册的都是外部卷
+//     后端，外部新增零配置自动扩展；**内部/本地卷必须实现** `IsLocalVolume()==true`，
+//     以显式声明自己是内部卷（走用户配额 + 提供本地化便利）；
+//   - **封装卷**（secretdata/secrets 等 wrapper）实现时委派给被封装的底层卷——「只要
+//     有一层是外部就是外部」，层层判断，不靠类型名硬编码（secretdata 封装 s3 → 外部、
+//     封装本地 → 内部自动正确）；
+//   - 使用方（pkg/cloud 转存配额）经类型断言查询：实现且返回 true → 内部/本地卷（用户
+//     配额生效）；否则 → 外部卷（容量/配额由卷自身管理，用户通用配额跳过）。
+type LocalVolume interface {
+	IsLocalVolume() bool
+}
+
 // maxWalkDepth 限制目录递归深度（符号链接环的 fail-closed 兜底）。
 // 合法超深目录（>128 层）会因此被误判为疑似环而报错；对绝大多数真实目录树足够，
 // 且环检测比放任无限递归更安全（审查 M11：保持 fail-closed）。

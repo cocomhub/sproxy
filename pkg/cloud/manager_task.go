@@ -1139,7 +1139,7 @@ func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSp
 	if transfer == nil {
 		return nil
 	}
-	tfs, scheme, _, _ := m.transferFS(transfer.Volume)
+	tfs, scheme, _ := m.transferFS(transfer.Volume)
 	if tfs == nil {
 		return fmt.Errorf("cloud download: 转存目标卷 %q 未装配（创建即拒，避免浪费下载）", transfer.Volume)
 	}

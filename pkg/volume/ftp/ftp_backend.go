@@ -97,6 +97,7 @@ func newFTPBackend(ctx context.Context, v volume.Volume) (registry.ExternalBacke
 
 // registerFTPBackendWithFactory 注册 ftp 后端类型构造器（测试可用唯一类型名注册，
 // 避免与生产 "ftp" 重复 panic）。重复注册 → registry panic（编程错误）。
+
 func registerFTPBackendWithFactory(typ string) {
 	registry.RegisterBackend(typ, newFTPBackend, "ftp")
 }

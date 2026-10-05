@@ -477,23 +477,24 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		}},
 		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
 		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
-		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool, bool) {
+		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool) {
 			be := vs.External(volumeName)
 			if be == nil {
-				return nil, "", false, false
+				return nil, "", false
 			}
 			// scheme 从卷 Type 反查（secretdata/secrets/baidupcs/s3 等声明协议）。
 			vol, ok := vs.ByName(volumeName)
 			if !ok {
-				return be.FS(), "", false, false
+				return be.FS(), "", false
 			}
 			// 共享判定（用户裁定）：ModeAllow + 多 owner 白名单 = 共享；ModeDeny/零值
 			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。单一
 			// 事实源：volume.Shared()（2026-10-05，#735 收敛：写/读/转存三侧共用）。
 			shared := vol.Shared()
-			// NH1：远程卷判定由**卷自己回答**（Volume.IsRemote()）——装配层不维护类型清单。
-			// 远程网盘卷用户配额直接通过（容量由卷自身 ReserveSpace 管理）。
-			return be.FS(), registry.SchemeOf(vol.Type), shared, vol.IsRemote()
+			// 远程性判定不在装配层：目标 FS 自述（syncpkg.LocalVolume 能力接口，transfer.go
+			// 查询）——外部卷零配置（未实现默认远程），内部/封装卷实现 IsLocalVolume()
+			// 自述（用户裁定 2026-10-05：不靠类型名硬编码，层层委派）。
+			return be.FS(), registry.SchemeOf(vol.Type), shared
 		},
 	})
 	h.storageMgr = sm

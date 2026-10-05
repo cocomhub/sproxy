@@ -556,6 +556,19 @@ func (s *SecretdataFS) WriteFile(ctx context.Context, rel string, r io.Reader, s
 	return s.writeFile(ctx, strings.TrimPrefix(rel, "/"), r, size, mtime, -1)
 }
 
+// IsLocalVolume 封装卷本地性自述（syncpkg.LocalVolume 能力接口，用户裁定 2026-10-05）：
+// **封装卷必须实现并委派被封装的底层卷**——「只要有一层是外部就是外部」。底层卷
+// 实现 `IsLocalVolume()==true`（内部，如 LocalFS）→ 本卷内部（走用户配额）；否则
+// 默认外部（远程，容量/配额由底层自管）。**不靠类型名硬编码**——secretdata 封装 s3
+// 即外部、封装本地即内部，层层判断自动正确。
+func (s *SecretdataFS) IsLocalVolume() bool {
+	if rv, ok := s.inner.(syncpkg.LocalVolume); ok {
+		return rv.IsLocalVolume()
+	}
+	// 底层未自述 → 默认外部（registry 域内未实现接口的都是外部卷后端）。
+	return false
+}
+
 // WriteIfAbsent 实现 pkg/sync.WriteIfAbsent（W1/W3：转存目标须唯一、拒绝静默覆盖）。
 // 存在性判定与写入在**同一把锁**内（commitEntry 持锁时校验 ifAbsent），无 TOCTOU 窗口；
 // 并发双写者恰好一胜一败——败者在提交时刻发现 rel 已被他人写入，回滚本次上传的

@@ -85,7 +85,7 @@ func (m *memFS) MakeDir(ctx context.Context, path string) error {
 }
 
 // newTransferTestMgr 构造带转存 FS resolver 的 CloudDownloadManager。
-func newTransferTestMgr(t *testing.T, fsFor func(volume string) (syncpkg.FS, string, bool, bool)) *CloudDownloadManager {
+func newTransferTestMgr(t *testing.T, fsFor func(volume string) (syncpkg.FS, string, bool)) *CloudDownloadManager {
 	t.Helper()
 	mgr, _ := newCloudTestManager(t, t.TempDir(), nil, &CloudDownloadConfig{
 		MaxConcurrent: 3, TaskTTL: time.Hour,
@@ -99,11 +99,11 @@ func newTransferTestMgr(t *testing.T, fsFor func(volume string) (syncpkg.FS, str
 func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) {
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
 		if vol == "secretdata-main" {
-			return fs, "secretdata", false, false
+			return fs, "secretdata", false
 		}
-		return nil, "", false, false
+		return nil, "", false
 	})
 	task := &CloudTask{ID: "task-1", Filename: "movie.mp4", Transfer: &TransferSpec{Volume: "secretdata-main"}}
 	result := &downloader.Result{Size: 5, Checksum: ""}
@@ -138,7 +138,7 @@ func TestTransferDone_TargetVolumeError_RetriesExhausted(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
 	fs.writeFn = func(rel string) error { return errors.New("write failed: volume offline") }
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-2", Filename: "a.mp4", Transfer: &TransferSpec{Volume: "vol-x"}}
 	dest := filepath.Join(t.TempDir(), "a.mp4")
 	_ = os.WriteFile(dest, []byte("data"), 0o600)
@@ -167,7 +167,7 @@ func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 	fs := newMemFS()
 	// 卷写失败（目标卷 I/O 异常）→ 3 次指数重试耗尽 → 目标卷异常终止（TransferTargetErrors）
 	fs.writeFn = func(rel string) error { return errors.New("volume io error") }
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-3", Filename: "b.mp4", Transfer: &TransferSpec{Volume: "vol-y"}}
 	dest := filepath.Join(t.TempDir(), "b.mp4")
 	_ = os.WriteFile(dest, []byte("corrupt-data"), 0o600)
@@ -201,7 +201,7 @@ func TestTransferDone_FileCorrupt_RetryTwiceFails(t *testing.T) {
 func TestTransferAfterDownload_SaveFalse_AutoCleansCloud(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-4", Filename: "c.mp4", Transfer: &TransferSpec{Volume: "vol-z"}, Save: false}
 	dest := filepath.Join(t.TempDir(), "c.mp4")
 	_ = os.WriteFile(dest, []byte("xyz"), 0o600)
@@ -229,7 +229,7 @@ func TestTransferAfterDownload_SaveFalse_AutoCleansCloud(t *testing.T) {
 func TestTransferAfterDownload_SaveTrue_KeepsCloud(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-5", Filename: "d.mp4", Transfer: &TransferSpec{Volume: "vol-z"}, Save: true}
 	dest := filepath.Join(t.TempDir(), "d.mp4")
 	_ = os.WriteFile(dest, []byte("xyz"), 0o600)
@@ -280,11 +280,11 @@ func TestCreateTask_VoidSemantics(t *testing.T) {
 	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
 	// 转存卷 resolver：v → 可解析 FS（前置校验需卷装配 + 协议声明）
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool, bool) {
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
 		if vol == "v" {
-			return newMemFS(), "secretdata", false, false
+			return newMemFS(), "secretdata", false
 		}
-		return nil, "", false, false
+		return nil, "", false
 	}
 	t.Cleanup(mgr.Close)
 	_, err := mgr.CreateTask("url", "https://example.com/v.mp4", "v.mp4", 100, "", TaskParams{})
@@ -313,11 +313,11 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
 	// 转存卷 resolver：v → 可解析 FS（前置校验需卷装配 + 协议声明）
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool, bool) {
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
 		if vol == "v" {
-			return newMemFS(), "secretdata", false, false
+			return newMemFS(), "secretdata", false
 		}
-		return nil, "", false, false
+		return nil, "", false
 	}
 	t.Cleanup(mgr.Close)
 	task, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", TaskParams{Save: true})
@@ -366,11 +366,11 @@ func TestCreateTask_TransferVolumePrecheck(t *testing.T) {
 	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr.Close)
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool, bool) {
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
 		if vol == "ready" {
-			return newMemFS(), "secretdata", false, false
+			return newMemFS(), "secretdata", false
 		}
-		return nil, "", false, false // 未装配
+		return nil, "", false // 未装配
 	}
 	// 卷未装配 → 创建即拒
 	if _, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", TaskParams{Transfer: &TransferSpec{Volume: "missing"}}); err == nil {
@@ -417,8 +417,8 @@ func TestTransferDone_SharedVolume_OwnerPrefix(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
 	// shared=true 模拟共享卷
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) {
-		return fs, "secretdata", true, false
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return fs, "secretdata", true
 	})
 	task := &CloudTask{ID: "task-s1", Filename: "movie.mp4", Owner: "alice",
 		Transfer: &TransferSpec{Volume: "shared-vault"}}
@@ -442,8 +442,8 @@ func TestTransferDone_SharedVolume_OwnerPrefix(t *testing.T) {
 func TestTransferDone_SharedVolume_ExplicitPathOwnerPrefix(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) {
-		return fs, "secretdata", true, false
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return fs, "secretdata", true
 	})
 	task := &CloudTask{ID: "task-s2", Filename: "b.mp4", Owner: "bob",
 		Transfer: &TransferSpec{Volume: "shared-vault", Path: "my/movie.mp4"}}
@@ -463,8 +463,8 @@ func TestTransferDone_SharedVolume_ExplicitPathOwnerPrefix(t *testing.T) {
 func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) {
-		return fs, "secretdata", false, false // 独享
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return fs, "secretdata", false // 独享
 	})
 	task := &CloudTask{ID: "task-p1", Filename: "c.mp4", Owner: "carol",
 		Transfer: &TransferSpec{Volume: "my-vault"}}
@@ -485,8 +485,8 @@ func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 func TestTransferDone_SharedVolume_PrefixEscapeRejected(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) {
-		return fs, "secretdata", true, false // 共享卷
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return fs, "secretdata", true // 共享卷
 	})
 	// 显式 path 用 .. 逃逸前缀：path.Join(bob, ../x.pdf) = x.pdf → 落卷根（跨 owner）
 	task := &CloudTask{ID: "task-e1", Filename: "a.mp4", Owner: "bob",
@@ -548,7 +548,7 @@ func TestCleanupCloudIfNotNeeded(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fs := newMemFS()
-			mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+			mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 			id := "job-" + tc.name
 			task := &CloudTask{ID: id, Filename: "f.bin", Save: tc.save, DownloadLocal: tc.dlLocal}
 			dest := filepath.Join(t.TempDir(), "f.bin")
@@ -591,7 +591,7 @@ func TestTransferDone_DuplicateRel_RejectsOverwrite(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
 	fs.writeFn = nil
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-w3", Filename: "w3.mp4", Transfer: &TransferSpec{Volume: "vol-w"}}
 	dest := filepath.Join(t.TempDir(), "w3.mp4")
 	_ = os.WriteFile(dest, []byte("first"), 0o600)
@@ -614,7 +614,7 @@ func TestTransferDone_DuplicateRel_RejectsOverwrite(t *testing.T) {
 		t.Fatalf("覆盖拒绝应归目标卷异常（ErrTransferTarget），got %v", err2)
 	}
 	// 卷中内容仍是首次（未被覆盖）
-	if got := string(fs.files["pikpak/task-w3/w3.mp4"]); got != "first" {
+	if got := string(fs.files["user/task-w3/w3.mp4"]); got != "first" {
 		t.Fatalf("卷内内容应保持首次 %q，got %q（被静默覆盖）", "first", got)
 	}
 }
@@ -714,7 +714,7 @@ func TestFailTaskWithTransfer_SaveFalse_CleansCloud(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
 	fs.writeFn = func(rel string) error { return errors.New("volume io error") } // 转存必失败
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-w5", Filename: "w5.mp4", Transfer: &TransferSpec{Volume: "vol-w5"}, Save: false, DownloadLocal: false}
 	dest := filepath.Join(t.TempDir(), "w5.mp4")
 	_ = os.WriteFile(dest, []byte("w5data"), 0o600)
@@ -756,7 +756,7 @@ func TestTransferDone_AbortedOnCancel(t *testing.T) {
 		}
 		return nil
 	}
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-m2", Filename: "m2.mp4", Transfer: &TransferSpec{Volume: "vol-m2"}}
 	dest := filepath.Join(t.TempDir(), "m2.mp4")
 	_ = os.WriteFile(dest, []byte("m2data"), 0o600)
@@ -794,7 +794,7 @@ func TestTransferDone_AbortedOnCancel(t *testing.T) {
 func TestTransferDone_VolumeQuotaDenied(t *testing.T) {
 	t.Parallel()
 	fs := &quotaDenyFS{inner: newMemFS()}
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "s3", false, true })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "s3", false })
 	task := &CloudTask{ID: "task-nh1", Filename: "q.mp4", Transfer: &TransferSpec{Volume: "vol-q"}}
 	dest := filepath.Join(t.TempDir(), "q.mp4")
 	_ = os.WriteFile(dest, []byte("nh1data"), 0o600)
@@ -815,6 +815,8 @@ func TestTransferDone_VolumeQuotaDenied(t *testing.T) {
 }
 
 // quotaDenyFS 包装 memFS：实现 ReserveSpace 恒拒绝（模拟外部网盘配额不足）。
+// 不实现 syncpkg.LocalVolume → 默认视为外部卷（远程，容量/配额由卷自身管理），
+// 与「外部卷零配置」的用户裁定一致（用户裁定 2026-10-05）。
 type quotaDenyFS struct {
 	inner *memFS
 }
@@ -863,11 +865,11 @@ func TestTransferFullChain_ResolveURLRoundTrip(t *testing.T) {
 	cfg := &CloudDownloadConfig{SyncThreshold: 20 * 1024 * 1024, MaxConcurrent: 3, TaskTTL: 24 * time.Hour, FailedTaskTTL: 1 * time.Hour, AllowPrivate: true, TransferConcurrency: 2}
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	vaultFS := newMemFS() // 单一实例：转存写入与取用读同一 FS
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool, bool) {
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
 		if vol == "vault" {
-			return vaultFS, "secretdata", false, false
+			return vaultFS, "secretdata", false
 		}
-		return nil, "", false, false
+		return nil, "", false
 	}
 	t.Cleanup(mgr.Close)
 
@@ -909,7 +911,7 @@ func TestTransferFullChain_ResolveURLRoundTrip(t *testing.T) {
 func TestTransferDone_IdempotentSameContent(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-imp1", Filename: "imp1.mp4", Transfer: &TransferSpec{Volume: "vol-i"}}
 	dest := filepath.Join(t.TempDir(), "imp1.mp4")
 	_ = os.WriteFile(dest, []byte("identical-content"), 0o600)
@@ -932,7 +934,7 @@ func TestTransferDone_IdempotentSameContent(t *testing.T) {
 		t.Fatalf("幂等重放应返回同 URL，tr2=%v tr1=%v", tr2, tr1)
 	}
 	// 卷内内容未被改写（仍是首次内容）
-	if got := string(fs.files["pikpak/task-imp1/imp1.mp4"]); got != "identical-content" {
+	if got := string(fs.files["user/task-imp1/imp1.mp4"]); got != "identical-content" {
 		t.Fatalf("幂等重放不应改写卷内容，got %q", got)
 	}
 }
@@ -942,7 +944,7 @@ func TestTransferDone_IdempotentSameContent(t *testing.T) {
 func TestTransferDone_IdempotentSameContent_NoChecksum(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
 	task := &CloudTask{ID: "task-imp2", Filename: "imp2.mp4", Transfer: &TransferSpec{Volume: "vol-i2"}}
 	dest := filepath.Join(t.TempDir(), "imp2.mp4")
 	_ = os.WriteFile(dest, []byte("identical-nochecksum"), 0o600)

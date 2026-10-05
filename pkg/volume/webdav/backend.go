@@ -101,6 +101,7 @@ func newWebDAVBackend(ctx context.Context, v volume.Volume) (registry.ExternalBa
 
 // registerWebDAVBackendWithFactory 注册 webdav 后端类型构造器（测试可用唯一类型名注册，
 // 避免与生产 "webdav" 重复 panic）。重复注册 → registry panic（编程错误）。
+
 func registerWebDAVBackendWithFactory(typ string) {
 	registry.RegisterBackend(typ, newWebDAVBackend, "webdav")
 }

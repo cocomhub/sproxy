@@ -1061,18 +1061,18 @@ func TestCloudHandler_CreateGroup_TransferParam(t *testing.T) {
 		Storage: cloudStorageManager{m: sm},
 		Logger:  testLogger(),
 		Config:  defaultCloudDownloadConfig(),
-		// transferFSFor 用 volSet 装配：public-vault 开放卷 → (FS, scheme, shared, remote)
-		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool, bool) {
+		// transferFSFor 用 volSet 装配：public-vault 开放卷 → (FS, scheme, shared)
+		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool) {
 			be := vs.External(volumeName)
 			if be == nil {
-				return nil, "", false, false
+				return nil, "", false
 			}
 			vol, ok := vs.ByName(volumeName)
 			if !ok {
-				return be.FS(), "", false, false
+				return be.FS(), "", false
 			}
 			shared := vol.ACL.Mode == volume.ModeDeny || vol.ACL.Mode == "" || len(vol.ACL.Owners) > 1
-			return be.FS(), registry.SchemeOf(vol.Type), shared, false
+			return be.FS(), registry.SchemeOf(vol.Type), shared
 		},
 	})
 	h.cloudMgr = mgr
