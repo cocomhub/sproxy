@@ -45,6 +45,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
+- **文档维护与归档纪律（2026-10-06 用户明示，与根 AGENTS.md 对齐）**：功能完成后把实现/决策提炼更新到**权威文档**（现行事实源：`docs/` 根级文档、CLAUDE.md、代码本身）；有价值的探索/决策精简归档到 `docs/archive/`（按功能维度：做了什么/踩过什么坑/哪些判断仍有效），**不保留操作步骤等无效过时信息**（判断标准：归档应作「背景知识」复用，而非操作日志）。历史规划文档（`docs/superpowers/plans/`）保留原设计作阶段记录。
 
 ## 工程原则（必须遵守）
 
