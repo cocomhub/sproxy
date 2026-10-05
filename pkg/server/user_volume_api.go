@@ -47,82 +47,93 @@ type userVolumesListResponse struct {
 // validateWrapperVolumeReq 校验封装卷建卷请求（防成环 fail-closed，不落盘）：
 //
 //  1. type 的 schema 中 volume-select 必填字段逐一校验 Extra[key] 非空；
-//  2. 底层卷必须已装配（volSet.ByName 命中，含本地 config 卷与既有外部卷）；
+//  2. 底层卷必须存在且为**本 owner 可用**（volume.AllowedVolumes 命中，含本地 config 卷
+//     与既有外部卷；无权/不存在统一文案不区分——防枚举 + 防跨 owner 封装他人私有卷）；
 //  3. AllowWrapper=false 的 volume-select 目标不得再是 wrapper（链必须终止于叶子）；
-//  4. 沿 target 链向上遍历，若回落自身/已访问节点 → errVolumeCycle。
+//  4. 沿 target 链向上遍历（仅遍历 owner 可用的卷），若回落自身/已访问节点 → errVolumeCycle。
 //
-// 卷名全局唯一（AddExternalVolume 强约束），防环判定无需 owner 维度。未注册 type / 无
-// schema（后端未实现 SchemaProvider）→ 跳过校验（既有行为零回归；未注册 type 由后续
-// NewBackend fail-fast 拦截）。
-func validateWrapperVolumeReq(name, typ string, extra map[string]any, vs *registry.Set) error {
-	for _, info := range registry.BackendSchemas() {
-		if info.Type == typ {
-			return validateWrapperFields(name, info.Fields, extra, vs)
-		}
+// 未注册 type / 无 schema（后端未实现 SchemaProvider 且未登记静态 schema）→ 若该类型是
+// wrapper category（secretdata/secrets/egress）则兜底强制 target 必填（否则防环空转）；
+// 非 wrapper 无 schema → 跳过（type 未注册由后续 NewBackend fail-fast 拦截）。
+func validateWrapperVolumeReq(owner, name, typ string, extra map[string]any, vs *registry.Set) error {
+	var allowed []volume.Volume
+	if vs != nil {
+		allowed = volume.AllowedVolumes(vs.All(), owner)
 	}
-	return nil
+	fields := registry.BackendSchema(typ)
+	if len(fields) == 0 && registry.CategoryOf(typ) == "wrapper" {
+		// 兜底：wrapper 类型即使未登记 schema 也强制 target 校验（fail-closed 防环）。
+		fields = []registry.FieldSchema{{Key: "target", Type: "volume-select", Required: true, AllowWrapper: true}}
+	}
+	return validateWrapperFields(name, fields, extra, allowed)
 }
 
 // validateWrapperFields 逐一校验类型 schema 的 volume-select 必填字段。
-func validateWrapperFields(name string, fields []registry.FieldSchema, extra map[string]any, vs *registry.Set) error {
+func validateWrapperFields(name string, fields []registry.FieldSchema, extra map[string]any, allowed []volume.Volume) error {
 	for _, f := range fields {
 		if f.Type != "volume-select" || !f.Required {
 			continue
 		}
-		if err := validateWrapperTarget(name, f, extra, vs); err != nil {
+		if err := validateWrapperTarget(name, f, extra, allowed); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// validateWrapperTarget 校验单个 volume-select 字段：Extra 非空 + 底层卷存在 +
-// AllowWrapper 约束 + 防环。
-func validateWrapperTarget(name string, f registry.FieldSchema, extra map[string]any, vs *registry.Set) error {
+// validateWrapperTarget 校验单个 volume-select 字段：Extra 非空 + 底层卷存在且 owner
+// 可用 + AllowWrapper 约束 + 防环。
+func validateWrapperTarget(name string, f registry.FieldSchema, extra map[string]any, allowed []volume.Volume) error {
 	target, _ := extra[f.Key].(string)
 	if strings.TrimSpace(target) == "" {
 		return fmt.Errorf("volume: 底层卷字段 %s 必填", f.Key)
 	}
-	if vs == nil {
-		return fmt.Errorf("volume: 底层卷 %q 不存在", target)
-	}
-	if _, ok := vs.ByName(target); !ok {
-		return fmt.Errorf("volume: 底层卷 %q 不存在", target)
+	if !volumeInSet(allowed, target) {
+		// 统一文案：不存在 / 无权限不区分（防跨 owner 探测私有卷存在性）。
+		return fmt.Errorf("volume: 底层卷 %q 不存在或无权访问", target)
 	}
 	if !f.AllowWrapper {
-		if _, isWrapper := targetOfWrapper(vs, target); isWrapper {
+		if _, isWrapper := wrapperTargetOfSet(allowed, target); isWrapper {
 			return fmt.Errorf("volume: 底层卷 %q 不允许再套封装卷", target)
 		}
 	}
-	return detectWrapperCycle(vs, name, target)
+	return detectWrapperCycle(name, target, allowed)
 }
 
-// targetOfWrapper 返回卷的 Extra["target"]（该卷是封装卷且已设底层卷时）；非 wrapper /
-// 无 target → ok=false（链在此终止）。
-func targetOfWrapper(vs *registry.Set, name string) (string, bool) {
-	if vs == nil {
-		return "", false
+// volumeInSet 判定卷是否在给定（owner 可访问）集合中。
+func volumeInSet(vols []volume.Volume, name string) bool {
+	for _, v := range vols {
+		if v.Name == name {
+			return true
+		}
 	}
-	v, ok := vs.ByName(name)
-	if !ok {
-		return "", false
-	}
-	t, ok := v.Extra["target"].(string)
-	return t, ok && strings.TrimSpace(t) != ""
+	return false
 }
 
-// detectWrapperCycle 沿 target 链向上遍历：从新卷的底层卷 start 出发，把新卷名预置为
-// 已访问，链上任何节点回落已访问集合 → errVolumeCycle（fail-closed）。链深防御上限
-// 1000（防恶意超长链耗尽 CPU）；上限外同样按环处理。
-func detectWrapperCycle(vs *registry.Set, name, start string) error {
+// wrapperTargetOfSet 返回 owner 可访问集合中卷的 Extra["target"]（该卷是封装卷且已设底层
+// 卷时）；非 wrapper / 无 target / 不在集合（他人私有卷不可见）→ ok=false（链在此终止）。
+func wrapperTargetOfSet(vols []volume.Volume, name string) (string, bool) {
+	for _, v := range vols {
+		if v.Name != name {
+			continue
+		}
+		t, ok := v.Extra["target"].(string)
+		return t, ok && strings.TrimSpace(t) != ""
+	}
+	return "", false
+}
+
+// detectWrapperCycle 沿 target 链向上遍历（仅 owner 可访问卷）：从新卷的底层卷 start
+// 出发，把新卷名预置为已访问，链上任何节点回落已访问集合 → errVolumeCycle（fail-closed）。
+// 链深防御上限 1000（防恶意超长链耗尽 CPU）；上限外同样按环处理。
+func detectWrapperCycle(name, start string, allowed []volume.Volume) error {
 	visited := map[string]bool{name: true}
-	cur := start
-	for i := 0; i < 1000; i++ {
+	for cur, i := start, 0; i < 1000; i++ {
 		if visited[cur] {
 			return errVolumeCycle
 		}
 		visited[cur] = true
-		next, ok := targetOfWrapper(vs, cur)
+		next, ok := wrapperTargetOfSet(allowed, cur)
 		if !ok {
 			return nil // 叶子/非 wrapper 卷 → 链终止，无环。
 		}
@@ -153,7 +164,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// 封装卷校验（防成环，fail-closed）：schema 中 volume-select 必填字段逐一校验
 	// Extra 非空 + 底层卷存在 + AllowWrapper=false 目标非 wrapper + 沿 target 链防环。
 	// 不落盘、不注册 Set，失败在 NewBackend 前返回。
-	if err := validateWrapperVolumeReq(req.Name, req.Type, req.Extra, h.volSet); err != nil {
+	if err := validateWrapperVolumeReq(owner, req.Name, req.Type, req.Extra, h.volSet); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}

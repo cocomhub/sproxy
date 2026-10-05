@@ -409,6 +409,7 @@ var secretDataSet = atomic.Pointer[registry.Set]{}
 // ——config 声明的 type:secretdata 卷可真正装配（config.example vault 示例可用）。
 func registerSecretVolumeBackends() {
 	registerSecretsBackend()
+	registerSecretSchemas()
 	registry.MarkDeferredType("secretdata")
 	setupSecretdataOnce.Do(func() {
 		registerSecretdataBackendWithFS("secretdata", func(ctx context.Context, v volume.Volume) ([]byte, error) {
@@ -419,6 +420,26 @@ func registerSecretVolumeBackends() {
 			}
 			return defaultSecretdataSecret(ctx, v, set)
 		}, "secretdata")
+	})
+}
+
+// registerSecretSchemasOnce 守卫静态 schema 登记（registerSecretVolumeBackends 无条件
+// 多次调用——root 装配 + 多测试；RegisterBackendSchema 重复登记即 panic，须 Once）。
+var registerSecretSchemasOnce sync.Once
+
+// registerSecretSchemas 登记 secrets + secretdata 的**静态**创建表单 schema：两者都是
+// wrapper 卷，仅声明 volume-select 必填字段 `target`（底层卷，allow_wrapper=true 允许
+// 嵌套封装）。静态登记不依赖构造后端实例（secretdata 构造需已装配卷集/密钥，空 Extra
+// 直接失败）——建卷 API 与 /api/backends 靠它做防环字段校验。协议 scheme 不可作建卷
+// 字段（是注册期元数据，非用户可填），故不在此 schema 声明。
+func registerSecretSchemas() {
+	registerSecretSchemasOnce.Do(func() {
+		for _, typ := range []string{"secrets", "secretdata"} {
+			registry.RegisterBackendSchema(typ, []registry.FieldSchema{{
+				Key: "target", Label: "底层卷", Type: "volume-select",
+				Required: true, AllowWrapper: true,
+			}})
+		}
 	})
 }
 

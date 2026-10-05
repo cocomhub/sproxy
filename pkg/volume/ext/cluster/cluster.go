@@ -143,4 +143,10 @@ func RegisterBackend(dialer remote.Dialer, identity *tunnel.Identity) {
 	registry.RegisterBackend(clustercred.TypeEgress, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		return NewBackend(ctx, v, dialer, identity)
 	})
+	// egress 是 wrapper 卷（backendCategory → "wrapper"）：登记静态 schema（volume-select
+	// 必填字段 `target` = 底层卷，allow_wrapper=true 允许嵌套），建卷 API 防环校验依赖它。
+	// 静态登记不依赖构造后端实例（egress 构造需 dialer/identity，非 scheme 语义）。
+	registry.RegisterBackendSchema(clustercred.TypeEgress, []registry.FieldSchema{{
+		Key: "target", Label: "出口底层卷", Type: "volume-select", Required: true, AllowWrapper: true,
+	}})
 }

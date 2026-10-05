@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -319,5 +321,99 @@ func TestCreateUserVolume_Wrapper_CycleRejected(t *testing.T) {
 	}
 	if v, _ := store.Get("alice", "cyc-new"); v != nil {
 		t.Fatal("成环卷仍落盘（应 fail-closed 不落盘）")
+	}
+}
+
+// userVolFallbackWrapType 是「wrapper 但未登记任何 schema」的 fake 后端类型（用 wrapper
+// category 名 "secrets"）。pkg/server 测试进程无 cmd/sproxy 的 secrets 生产注册（package
+// main 不可 import），且 pkg/server 无其它测试用它（"secretdata" 被
+// TestCloudHandler_CreateGroup_TransferParam 以 per-test 注册占用，不宜并发冲突；"egress"
+// 同理）。注册一次、不注销（仿 registerUserVolTestBackend 模式）。
+const userVolFallbackWrapType = "secrets"
+
+// noSchemaBackend 不实现 SchemaProvider（无 schema），亦响应 NewBackend。
+type noSchemaBackend struct{}
+
+func (n *noSchemaBackend) FS() syncpkg.FS { return nil }
+func (n *noSchemaBackend) Close() error   { return nil }
+
+var registerUserVolFallbackOnce sync.Once
+
+// registerUserVolFallbackBackend 注册未登记 schema 的 wrapper fake backend。
+func registerUserVolFallbackBackend() {
+	registerUserVolFallbackOnce.Do(func() {
+		registry.RegisterBackend(userVolFallbackWrapType, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
+			return &noSchemaBackend{}, nil
+		})
+	})
+}
+
+// TestCreateUserVolume_Wrapper_SchemaFallback 兜底：wrapper 类型即使未登记 schema
+// （无 SchemaProvider、无静态表）也强制 target 校验——防环不空转（R1-C1 修复）。
+func TestCreateUserVolume_Wrapper_SchemaFallback(t *testing.T) {
+	t.Parallel()
+	registerUserVolFallbackBackend()
+	h, store := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+
+	// 缺 target → 400（兜底强制 volume-select 必填）。
+	rec := postUserVolume(t, mux, map[string]any{"name": "sf1", "type": userVolFallbackWrapType, "extra": map[string]any{}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("缺 target POST = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if v, _ := store.Get("alice", "sf1"); v != nil {
+		t.Fatal("缺 target 的卷仍落盘（应不落盘）")
+	}
+	// target 不存在 → 400 统一文案。
+	rec = postUserVolume(t, mux, map[string]any{"name": "sf2", "type": userVolFallbackWrapType, "extra": map[string]any{"target": "no-such"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("target 不存在 POST = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	// 合法.target=main → 200。
+	rec = postUserVolume(t, mux, map[string]any{"name": "sf3", "type": userVolFallbackWrapType, "extra": map[string]any{"target": "main"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sf3→main = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCreateUserVolume_Wrapper_OwnerIsolation owner 隔离：目标底层卷仅限本 owner 可用卷
+// （volume.AllowedVolumes）；无权/不存在统一文案（防枚举 + 防跨 owner 封装他人私有卷）。
+func TestCreateUserVolume_Wrapper_OwnerIsolation(t *testing.T) {
+	t.Parallel()
+	registerUserVolWrapBackend()
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Volumes = []VolumeConfig{
+		{Name: "main", Root: cfg.StorageRoot},
+		{Name: "bob-private", Root: filepath.Join(cfg.StorageRoot, "bobp"),
+			ACL: &VolumeACLConfig{Mode: VolumeACLAllow, Owners: []string{"bob"}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("cfg.Validate: %v", err)
+	}
+	h := buildVolSetHandlers(t, cfg)
+	store := NewUserVolumeStore(cfg.StorageRoot)
+	h.SetUserVolumeStore(store)
+	muxAlice := userVolWrap(h, "alice")
+	muxBob := userVolWrap(h, "bob")
+
+	// alice 无权封装 bob-private → 400 统一文案（不区分「不存在/无权」，防枚举）。
+	rec := postUserVolume(t, muxAlice, map[string]any{"name": "a1", "type": userVolWrapTestType, "extra": map[string]any{"target": "bob-private"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("alice wrap bob-private = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "不存在或无权") {
+		t.Fatalf("应统一文案（不泄露存在性）: %s", rec.Body.String())
+	}
+	if v, _ := store.Get("alice", "a1"); v != nil {
+		t.Fatal("越权卷不应落盘")
+	}
+	// bob 封装自己的私有卷 → 200。
+	rec = postUserVolume(t, muxBob, map[string]any{"name": "b1", "type": userVolWrapTestType, "extra": map[string]any{"target": "bob-private"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bob wrap own = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if v, _ := store.Get("bob", "b1"); v == nil {
+		t.Fatal("bob 的合法封装应落盘")
 	}
 }

@@ -295,3 +295,68 @@ func TestBackendSchemas_Provider_Only(t *testing.T) {
 		t.Fatalf("%q 未实现 SchemaProvider，fields 应为空数组 []，got %+v", plainTyp, p.Fields)
 	}
 }
+
+// TestBackendSchema_Static_Preferred 钉住：BackendSchema 优先读静态表
+// （RegisterBackendSchema），不回落构造后端实例（工厂设 panic 证明未被构造）。
+func TestBackendSchema_Static_Preferred(t *testing.T) {
+	t.Parallel()
+	const typ = "wrap-static"
+	RegisterBackendSchema(typ, []FieldSchema{{Key: "target", Type: "volume-select", Required: true, AllowWrapper: true}})
+	t.Cleanup(func() { UnregisterBackendSchemaForTest(typ) })
+	RegisterBackend(typ, func(context.Context, volume.Volume) (ExternalBackend, error) {
+		panic("BackendSchema 优先读静态表，不应构造后端实例")
+	})
+	t.Cleanup(func() { UnregisterBackendForTest(typ) })
+
+	fields := BackendSchema(typ)
+	if len(fields) != 1 || fields[0].Key != "target" || !fields[0].Required || !fields[0].AllowWrapper {
+		t.Fatalf("BackendSchema(%q) = %+v, want 静态 target(volume-select,必填,allow_wrapper) 字段", typ, fields)
+	}
+}
+
+// TestBackendSchema_Construction_Fallback 钉住：未登记静态表时回落构造读 SchemaProvider。
+func TestBackendSchema_Construction_Fallback(t *testing.T) {
+	t.Parallel()
+	const typ = "sb-construct"
+	RegisterBackend(typ, func(context.Context, volume.Volume) (ExternalBackend, error) {
+		return &schemaBackend{fields: []FieldSchema{{Key: "endpoint", Type: "text", Required: true}}}, nil
+	})
+	t.Cleanup(func() { UnregisterBackendForTest(typ) })
+
+	fields := BackendSchema(typ)
+	if len(fields) != 1 || fields[0].Key != "endpoint" {
+		t.Fatalf("回落构造 BackendSchema(%q) = %+v, want endpoint", typ, fields)
+	}
+}
+
+// TestRegisterBackendSchema_DuplicatePanics 重复登记静态 schema → panic（fail-fast）。
+func TestRegisterBackendSchema_DuplicatePanics(t *testing.T) {
+	t.Parallel()
+	const typ = "sdup"
+	RegisterBackendSchema(typ, []FieldSchema{{Key: "target", Type: "volume-select"}})
+	t.Cleanup(func() { UnregisterBackendSchemaForTest(typ) })
+	defer func() {
+		if recover() == nil {
+			t.Fatal("重复登记静态 schema 应 panic")
+		}
+	}()
+	RegisterBackendSchema(typ, []FieldSchema{{Key: "target2", Type: "volume-select"}})
+}
+
+// TestCategoryOf_WrapperNames 钉住 wrapper/mt-local/linked 三分类（build 兜底依赖）。
+func TestCategoryOf_WrapperNames(t *testing.T) {
+	t.Parallel()
+	for _, typ := range []string{"secrets", "secretdata", "egress"} {
+		if got := CategoryOf(typ); got != "wrapper" {
+			t.Fatalf("CategoryOf(%q) = %q, want wrapper", typ, got)
+		}
+	}
+	for _, typ := range []string{"", "local"} {
+		if got := CategoryOf(typ); got != "mt-local" {
+			t.Fatalf("CategoryOf(%q) = %q, want mt-local", typ, got)
+		}
+	}
+	if got := CategoryOf("baidupcs"); got != "linked" {
+		t.Fatalf("CategoryOf(baidupcs) = %q, want linked", got)
+	}
+}
