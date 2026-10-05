@@ -1212,10 +1212,7 @@ func (m *CloudDownloadManager) releaseDownloadedBytes(task *CloudTask, size int6
 	m.mu.Lock()
 	if task.ReservedSize > 0 {
 		// 占位归还：以磁盘删除的 size 为准（占位可能大于实际）。
-		rel := task.ReservedSize
-		if rel > size {
-			rel = size
-		}
+		rel := min(task.ReservedSize, size)
 		task.ReservedSize -= rel
 		m.mu.Unlock()
 		m.storage.ReleaseCloud(rel)

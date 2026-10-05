@@ -1787,7 +1787,7 @@ func TestWriteIfAbsent_RealFSConcurrentExactlyOneWinner(t *testing.T) {
 	results := make([]bool, writers)
 	errs := make([]error, writers)
 	var wg sync.WaitGroup
-	for i := 0; i < writers; i++ {
+	for i := range writers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
