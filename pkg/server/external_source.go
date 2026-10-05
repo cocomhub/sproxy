@@ -82,6 +82,10 @@ func newExternalSource(fsys syncpkg.FS, rel string, e *syncpkg.Entry) *externalD
 // 返回 nil = 未命中任何外部卷（调用方走既有 404/回落默认租户语义）。
 func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename, explicitVol string) *downloadPath {
 	candidates := h.externalCandidates(r, owner, explicitVol)
+	// **集群出口环打破（2026-10-05）**：B 态 302 到出口自身时带 `egress_forward=1`，
+	// 二次进入强制 A 态（服务端转发）——否则 DirectURL 无条件命中 → 无限 302 环。
+	// 只收紧（强制转发），无提权面。
+	forceForward := r.URL.Query().Get("egress_forward") == "1"
 	// 域侧 rel 形如 user/<name>；剥桶后经 v.ResolveOwnerPath 统一计算最终键
 	// （共享卷自动加 <owner>/ 前缀隔离，独享卷无前缀——评审 M3 + 用户裁定统一入口）。
 	stripped := strings.TrimPrefix(rel, "user/")
@@ -106,19 +110,27 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		}
 		// 命中卷：分 A/B/C 态（volumePrivate 见 volumes.go：secretdata 恒 true）。
 		src := newExternalSource(fsys, ownerKey, e)
-		if volumePrivate(v) {
-			// A/C 态：服务端转发（解密/整流）。filename 用用户原始名（无 user/ 前缀）。
-			return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, source: src}
+		if resolved := h.externalStateFor(v, forceForward, fsys, r, ownerKey, filename, src); resolved != nil {
+			return resolved
 		}
-		// B 态：明文外部卷未私密 → 尝试 302 直链；失败回落服务端转发。
-		if d, ok, derr := syncpkg.AssertDirectURL(fsys).DirectURL(r.Context(), ownerKey); derr == nil && ok && d != "" {
-			// 直链与 source 并存：Download 走 302；Stat 经 source 回元信息。
-			return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, redirectURL: d, source: src}
-		}
-		// 直链不可得（adapter 不支持 / 定位失败）：回落服务端转发，绝不半截 302。
-		return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, source: src}
 	}
 	return nil
+}
+
+// externalStateFor 分 A/B/C 态（gocognit 收敛）：私密/egress_forward → A 态服务端转发；
+// 明文未私密 → B 态 302 直链（失败回落 A）；返回 nil = 未命中（调用方继续下一候选）。
+func (h *Handlers) externalStateFor(v volume.Volume, forceForward bool, fsys syncpkg.FS, r *http.Request, ownerKey, filename string, src files.DownloadSource) *downloadPath {
+	if volumePrivate(v) || forceForward {
+		// A/C 态：服务端转发（解密/整流）。filename 用用户原始名（无 user/ 前缀）。
+		return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, source: src}
+	}
+	// B 态：明文外部卷未私密 → 尝试 302 直链；失败回落服务端转发。
+	if d, ok, derr := syncpkg.AssertDirectURL(fsys).DirectURL(r.Context(), ownerKey); derr == nil && ok && d != "" {
+		// 直链与 source 并存：Download 走 302；Stat 经 source 回元信息。
+		return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, redirectURL: d, source: src}
+	}
+	// 直链不可得（adapter 不支持 / 定位失败）：回落服务端转发，绝不半截 302。
+	return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, source: src}
 }
 
 // externalCandidates 返回 owner 可见的外部卷候选（External 非 nil；显式卷只取指定卷）。

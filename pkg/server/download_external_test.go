@@ -19,6 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -130,6 +131,34 @@ func TestResolveExternalDownload_BState302(t *testing.T) {
 	}
 	if dp.source == nil {
 		t.Fatal("B 态应同时携带 source（Stat 回元信息）")
+	}
+}
+
+// TestResolveExternalDownload_EgressForwardForcesA：`egress_forward=1` 强制 A 态
+// （集群出口 302 环打破——B 态 DirectURL 返回带 egress_forward 的出口 URL，二次进入
+// 必须走服务端转发）。只收紧（强制转发），无提权面。
+func TestResolveExternalDownload_EgressForwardForcesA(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "eg", Type: cluster.TypeEgress, DirectLink: true}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://eg.example.com/download?egress_forward=1"}
+	h := newExternalTestEnv(t, v, fs)
+
+	// 无 egress_forward → B 态（302 直链）。
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
+	if dp == nil || dp.redirectURL == "" {
+		t.Fatal("无 egress_forward 应 B 态 302")
+	}
+	// 带 egress_forward=1 → 强制 A 态（source，无 redirectURL——环打破）。
+	req := httptest.NewRequest(http.MethodGet, "/download?egress_forward=1", nil)
+	dp2 := h.resolveExternalDownload(req, "alice", "user/f.bin", "f.bin", "")
+	if dp2 == nil {
+		t.Fatal("egress_forward 命中应返回 downloadPath")
+	}
+	if dp2.redirectURL != "" {
+		t.Fatalf("egress_forward 应强制 A 态（无 redirectURL），got %q", dp2.redirectURL)
+	}
+	if dp2.source == nil {
+		t.Fatal("egress_forward 应携带 source（服务端转发）")
 	}
 }
 
