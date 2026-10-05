@@ -5,11 +5,15 @@ package pikpak
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -184,5 +188,477 @@ func TestHybridDownload_MultiAccountSingleAccountFallback(t *testing.T) {
 	}
 	if restoreCalls.Load() != 1 {
 		t.Fatalf("restore calls = %d, want 1 (single account restores once)", restoreCalls.Load())
+	}
+}
+
+// TestMultiAccountLink_SessionAffinity 锁定 round-13 Critical：accounted 命中路径的
+// DownloadLink 必须在 Use（会话）内执行。顺序驱动：预置 accounted 后先取 acct-a 再取
+// acct-b 的直链——旧实现第二次调用用 acct-a 缓存 token 签 fid-b（或首次用空会话），
+// fake 按 fid 断言所需 Bearer token，错账号请求即 wrongAuth 计数。
+func TestMultiAccountLink_SessionAffinity(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	pool, _ := newTestPool(t, 1<<30, &now)
+	addAcct(t, pool, "acct-a", `{"access_token":"tok-a"}`, 1<<30)
+	addAcct(t, pool, "acct-b", `{"access_token":"tok-b"}`, 1<<30)
+
+	var wrongAuth atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/drive/v1/files/fid-a":
+			if !strings.HasPrefix(auth, "Bearer tok-a") {
+				wrongAuth.Add(1)
+			}
+			writeJSON(w, map[string]any{"web_content_link": srv.URL + "/dl-a"})
+		case "/drive/v1/files/fid-b":
+			if !strings.HasPrefix(auth, "Bearer tok-b") {
+				wrongAuth.Add(1)
+			}
+			writeJSON(w, map[string]any{"web_content_link": srv.URL + "/dl-b"})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// API 凭据路径指向池的会话目录（生产默认同为 ~/.pikpak/.credentials.json；
+	// 测试池 credDir 是临时目录须显式对齐，否则 ensureToken 读到本机真实 ~/.pikpak token）。
+	api := NewAPI(APIConfig{Host: srv.URL, CredentialPath: filepath.Join(pool.credDir, ".credentials.json"), HTTPClient: srv.Client()}, nil)
+	// 直接驱动 multiAccountLink（单元级，不跑完整下载）：只依赖 d.api + d.pool。
+	hd := &HybridDownloader{
+		api: api, pool: pool,
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	ctx := context.Background()
+	// 预置：两账号均已转存（restore/定位阶段已过，只测直链的会话亲和）。
+	dc := &downloadCtx{accounted: map[string]string{"acct-a": "fid-a", "acct-b": "fid-b"}}
+	acctA, err := pool.Select(ctx, 1)
+	if err != nil {
+		t.Fatalf("select a: %v", err)
+	}
+	linkA, err := hd.multiAccountLink(ctx, dc, acctA)
+	if err != nil {
+		t.Fatalf("link a: %v", err)
+	}
+	acctB, err := pool.Select(ctx, 1)
+	if err != nil {
+		t.Fatalf("select b: %v", err)
+	}
+	linkB, err := hd.multiAccountLink(ctx, dc, acctB)
+	if err != nil {
+		t.Fatalf("link b: %v", err)
+	}
+	if linkA != srv.URL+"/dl-a" || linkB != srv.URL+"/dl-b" {
+		t.Fatalf("unexpected links: %q %q", linkA, linkB)
+	}
+	if wrongAuth.Load() != 0 {
+		t.Fatalf("session-affinity violated: %d request(s) signed with wrong account token", wrongAuth.Load())
+	}
+}
+
+// TestHybridDownload_MultiAccountOwned 锁定 round-4 Critical：owned（file_restore_own，源文件
+// 已在网盘）分支先前把文件 ID 直接当下载 URL → downloadChunkRange(GET "share-f1") 必然失败
+// → 整任务失败。必须与单账号路径一致：经 DownloadLink 取真实直链。自分享（share 自己的文件
+// 再下载）是 PikPak 常见场景。同时锁定 NH-P1：owned 的普通 restor 不登记删除（batchDelete=0）。
+func TestHybridDownload_MultiAccountOwned(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 4<<20)
+	for i := range payload {
+		payload[i] = byte(i % 47)
+	}
+	chunkLen := int64(len(payload) / 2) // 2 chunks → 分享区 1 + 账号区 1
+
+	var batchDelete atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case "/share/dl":
+			serveRange(w, r, payload)
+		case "/drive/v1/share/restore":
+			// 自分享：源文件已在个人网盘（file_restore_own，错误码 9）
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error_code":9,"error":"file_restore_own"}`))
+		case "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			// 源文件（自分享 owned）在个人网盘根目录：locateRestored → FindByID 经
+			// ListRecursive 全盘查找必须能命中，否则「file not found」。
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case "/drive/v1/files/share-f1":
+			writeJSON(w, map[string]any{"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/drive/dl"})
+		case "/drive/dl":
+			serveRange(w, r, payload)
+		case "/drive/v1/files:batchDelete":
+			batchDelete.Add(1)
+			writeJSON(w, map[string]any{"task_id": "del-1"})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	now := time.Now()
+	pool, _ := newTestPool(t, 1<<30, &now)
+	addAcct(t, pool, "acct-a", `{"access_token":"tok-a"}`, 1<<30)
+	addAcct(t, pool, "acct-b", `{"access_token":"tok-b"}`, 1<<30)
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 2,
+		AutoDelete: true, AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download: %v (owned 分支误用文件 ID 当直链 → 本处红)", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch: got %d want %d bytes", len(got), len(payload))
+	}
+	if batchDelete.Load() != 0 {
+		t.Fatalf("owned（源文件已在网盘）不得被 AutoDelete 删除: batchDelete=%d", batchDelete.Load())
+	}
+}
+
+// TestHybridDownload_MultiAccount_AutoDelete_PerAccountRelease 锁定 round-4 Critical：
+// 多账号下载的转存副本分属 N 个账号，Release 必须逐账号在对应会话内永久删除——此前单次
+// batchDelete 用最后一个会话账号的 token 删全部 → 其余账号副本 403 永久泄漏（占满免费账号
+// 空间，AutoDelete 默认 true）。断言：每个账号副本都用自己 token 删、删除请求按账号分组（2 次）。
+func TestHybridDownload_MultiAccount_AutoDelete_PerAccountRelease(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 8<<20)
+	for i := range payload {
+		payload[i] = byte(i % 73)
+	}
+	chunkLen := int64(len(payload) / 4) // 4 chunks → 分享区 2 + 账号区 2（a、b 各一）
+
+	var deleteCalls, wrongAuth atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl":
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/share/restore":
+			// 按请求账号返回该账号自己的转存 fid（不同账号不同 fid）。
+			fid := "restored-a"
+			if strings.HasPrefix(auth, "Bearer tok-b") {
+				fid = "restored-b"
+			}
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": fid})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			// 两账号 restore 副本都在各自网盘根目录：FindByID（全盘查找）需命中。
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-a", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+				{"kind": "drive#file", "id": "restored-b", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/files/restored-a" || r.URL.Path == "/drive/v1/files/restored-b":
+			fid := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+			writeJSON(w, map[string]any{"id": fid, "name": "movie.mp4", "web_content_link": srv.URL + "/dl-" + fid})
+		case strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/files:batchDelete":
+			deleteCalls.Add(1)
+			var body struct {
+				IDs []string `json:"ids"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, id := range body.IDs {
+				want := "tok-a"
+				if id == "restored-b" {
+					want = "tok-b"
+				}
+				if !strings.HasPrefix(auth, "Bearer "+want) {
+					wrongAuth.Add(1)
+				}
+			}
+			writeJSON(w, map[string]any{"task_id": "del-1"})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	pool, _ := newTestPool(t, 1<<30, &now)
+	addAcct(t, pool, "acct-a", `{"access_token":"tok-a"}`, 1<<30)
+	addAcct(t, pool, "acct-b", `{"access_token":"tok-b"}`, 1<<30)
+	// API 凭据路径指向池的会话目录：batchDelete 鉴权断言需读真实账号 token（cfgToken 恒
+	// fakeServerToken 会掩盖会话切换，Release 逐账号删便不可验证）。
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, CredentialPath: filepath.Join(pool.credDir, ".credentials.json"), HTTPClient: srv.Client()}, nil)
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 4,
+		AutoDelete: true, AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch: got %d want %d bytes", len(got), len(payload))
+	}
+	if deleteCalls.Load() != 2 {
+		t.Fatalf("release calls = %d, want 2 (逐账号分组删除；此前单次混删 → 1)", deleteCalls.Load())
+	}
+	if wrongAuth.Load() != 0 {
+		t.Fatalf("cross-account delete leak: %d deleted with wrong account token", wrongAuth.Load())
+	}
+}
+
+// TestHybridDownload_MultiAccount_SelectByChunkQuota 锁定 round-4 Important：Select 预检此前
+// 按整文件大小——文件大于单账号剩余配额时池总量充足也 ErrNoAccountAvailable → 整任务失败。
+// 按 chunk 预检后 round-robin 按剩余配额自平衡。800B 文件、chunk 200B、每账号配额 300B：
+// 旧实现 Select(800) 直接失败；新实现 Select(200) 分摊成功。
+func TestHybridDownload_MultiAccount_SelectByChunkQuota(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 800)
+	for i := range payload {
+		payload[i] = byte(i % 31)
+	}
+	chunkLen := int64(200) // 4 chunks → 分享区 2 + 账号区 2（每账号 1）
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl" || strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/share/restore":
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-a"})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			// restore 副本在账号网盘根目录：FindByID（全盘查找）需命中。
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-a", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case strings.HasPrefix(r.URL.Path, "/drive/v1/files/restored"):
+			writeJSON(w, map[string]any{"id": "restored-a", "name": "movie.mp4", "web_content_link": srv.URL + "/dl-restored-a"})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	now := time.Now()
+	pool, _ := newTestPool(t, 400, &now)
+	addAcct(t, pool, "acct-a", `{"access_token":"tok-a"}`, 300)
+	addAcct(t, pool, "acct-b", `{"access_token":"tok-b"}`, 300)
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 4,
+		AutoDelete: false, AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download: %v (旧实现按整文件 Select(800) 在本处红)", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch")
+	}
+}
+
+// TestHybridDownload_MultiAccount_RuntimeAddedAccount 锁定 round-14：CLI 运行期 add 的账号
+// 经 RefreshAccounts 对账后对 hybrid 生效（旧下载器已有，hybrid 此前缺失 → F5 不对称）。
+// 模拟：池装配后 0 账号；另一进程直接把凭据写入 secrets 卷（不经池 Add）；下载开始前
+// RefreshAccounts 拾取 → 下载成功。无修复时池恒空 → Select no-account → 下载失败。
+func TestHybridDownload_MultiAccount_RuntimeAddedAccount(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 41)
+	}
+	chunkLen := int64(len(payload) / 2) // 2 chunks → 分享区 1 + 账号区 1
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl" || strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/share/restore":
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			// restore 副本在账号网盘根目录：FindByID（全盘查找）需命中。
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case strings.HasPrefix(r.URL.Path, "/drive/v1/files/restored"):
+			writeJSON(w, map[string]any{"id": "restored-1", "name": "movie.mp4", "web_content_link": srv.URL + "/dl-restored-1"})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	pool, sec := newTestPool(t, 1<<30, &now)
+	// 模拟另一进程（CLI `sproxy pikpak account add`）直接写 secrets 卷：池内无账号。
+	if err := sec.Write(context.Background(), "pikpak-cli-added.json",
+		[]byte(`{"access_token":"tok-runtime"}`)); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, CredentialPath: filepath.Join(pool.credDir, ".credentials.json"), HTTPClient: srv.Client()}, nil)
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 2,
+		AutoDelete: false, AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download: %v (缺 RefreshAccounts → 池空 no-account 红)", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch: got %d want %d bytes", len(got), len(payload))
+	}
+	if len(pool.Accounts()) != 1 {
+		t.Fatalf("RefreshAccounts 应拾取运行时添加的账号，got %d", len(pool.Accounts()))
+	}
+}
+
+// TestHybridDownload_MultiAccount_EmptyPoolFallsBackToSingle 锁定 round-14：已装配池但账号
+// 为空时 hybrid 回退当前 CLI 登录态单账号（与旧下载器语义一致），不报「no account」硬错。
+// 无修复时 d.pool != nil → 多账号路由 → Select 空池 no-account → 下载失败。
+func TestHybridDownload_MultiAccount_EmptyPoolFallsBackToSingle(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 53)
+	}
+	chunkLen := int64(len(payload) / 2) // 2 chunks → 分享区 1 + 账号区 1
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl" || strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/share/restore":
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case strings.HasPrefix(r.URL.Path, "/drive/v1/files/restored"):
+			writeJSON(w, map[string]any{"id": "restored-1", "name": "movie.mp4", "web_content_link": srv.URL + "/dl-restored-1"})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	pool, _ := newTestPool(t, 1<<30, &now) // 空池（未添加任何账号）
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	// 单账号路径用当前登录态（cfgToken）：空池回落时走 restoreAndLink。
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 2,
+		AutoDelete: false, AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download: %v (空池应回落单账号，此处红)", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch: got %d want %d bytes", len(got), len(payload))
 	}
 }

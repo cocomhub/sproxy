@@ -556,7 +556,13 @@ func TestHybridManifest_Resume(t *testing.T) {
 	if _, err := hd2.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
 		t.Fatalf("resume download error: %v", err)
 	}
-	_ = servedOffsets // 首次下载已请求；重跑跳过（manifest 删除在 runChunks 后）——此处验证不 panic
+	// 首次下载已请求；重跑跳过（manifest 删除在 runChunks 后）——此处验证不 panic。
+	// 读必须与 /share/dl handler 的 append 同步（race 修复，2026-10-05 CI #37285601215）：
+	// probeRangeOK 只读 probeSize 就返回、客户端随即关闭连接，handler 的 append 可能在
+	// 请求返回后才执行——无锁读 servedOffsets 是 data race（handler goroutine 晚于测试体）。
+	mu.Lock()
+	_ = servedOffsets
+	mu.Unlock()
 	got, _ := os.ReadFile(dest)
 	if string(got) != string(payload) {
 		t.Error("content mismatch after resume")
