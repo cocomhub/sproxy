@@ -18,4 +18,5 @@ const (
 	flagTransferPath   = "transfer-path"
 	flagDownloadLocal  = "download-local"
 	flagSave           = "save"
+	flagForceIntegrity = "force-integrity"
 )

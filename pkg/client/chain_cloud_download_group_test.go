@@ -767,6 +767,7 @@ func TestCloudDownloadGroupChain_PassesTransferOpts(t *testing.T) {
 	sv := false
 	opts.save = &sv
 	opts.downloadLocal = true
+	opts.forceIntegrity = true
 
 	chain, err := NewCloudDownloadGroupChain(client, "gm6", entries, "ga", dir, opts)
 	if err != nil {
@@ -791,5 +792,8 @@ func TestCloudDownloadGroupChain_PassesTransferOpts(t *testing.T) {
 	}
 	if body["download_local"] == nil {
 		t.Fatalf("组创建缺 download_local（M6），body=%v", body)
+	}
+	if body["force_integrity"] == nil {
+		t.Fatalf("组创建缺 force_integrity（任务5），body=%v", body)
 	}
 }

@@ -50,13 +50,15 @@ type CloudDownloadChain struct {
 	// Save 保留 cloud 桶副本（nil = 默认 true）。
 	Save *bool `json:"save,omitempty"`
 	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。
-	DownloadLocal bool      `json:"download_local,omitempty"`
-	Completed     int       `json:"completed"`
-	Failed        int       `json:"failed"`
-	Total         int       `json:"total"`
-	Error         string    `json:"error,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	DownloadLocal bool `json:"download_local,omitempty"`
+	// ForceIntegrity 强制源文件完整性（语义校验失败阻断；透传服务端）。
+	ForceIntegrity bool      `json:"force_integrity,omitempty"`
+	Completed      int       `json:"completed"`
+	Failed         int       `json:"failed"`
+	Total          int       `json:"total"`
+	Error          string    `json:"error,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -95,23 +97,24 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		}
 	}
 	return &CloudDownloadChain{
-		ChainID:       chainID,
-		CurrentPhase:  "",
-		CurStatus:     StatusRunning,
-		URLs:          urls, // 兼容旧持久化状态；新状态以 Entries 为准
-		Entries:       entries,
-		ArchiveName:   archiveName,
-		LocalDir:      localDir,
-		KeepFiles:     opts.keepFiles,
-		Transfer:      opts.transfer,
-		Save:          opts.save,
-		DownloadLocal: opts.downloadLocal,
-		Total:         len(entries),
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		PollInterval:  fixPollInterval(opts.pollInterval),
-		Timeout:       opts.timeout,
-		client:        client,
+		ChainID:        chainID,
+		CurrentPhase:   "",
+		CurStatus:      StatusRunning,
+		URLs:           urls, // 兼容旧持久化状态；新状态以 Entries 为准
+		Entries:        entries,
+		ArchiveName:    archiveName,
+		LocalDir:       localDir,
+		KeepFiles:      opts.keepFiles,
+		Transfer:       opts.transfer,
+		Save:           opts.save,
+		DownloadLocal:  opts.downloadLocal,
+		ForceIntegrity: opts.forceIntegrity,
+		Total:          len(entries),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		PollInterval:   fixPollInterval(opts.pollInterval),
+		Timeout:        opts.timeout,
+		client:         client,
 	}, nil
 }
 
@@ -120,29 +123,30 @@ func (c *CloudDownloadChain) Phase() string  { return c.CurrentPhase }
 func (c *CloudDownloadChain) Status() string { return c.CurStatus }
 func (c *CloudDownloadChain) State() map[string]any {
 	return map[string]any{
-		"type":           TypeCloudDownload,
-		"chain_id":       c.ChainID,
-		"phase":          c.CurrentPhase,
-		"status":         c.CurStatus,
-		"urls":           c.URLs,
-		"entries":        c.Entries,
-		"task_ids":       c.TaskIDs,
-		"archive_name":   c.ArchiveName,
-		"local_dir":      c.LocalDir,
-		"local_path":     c.LocalPath,
-		"local_verified": c.LocalVerified,
-		"keep_files":     c.KeepFiles,
-		"completed":      c.Completed,
-		"failed":         c.Failed,
-		"total":          c.Total,
-		"error":          c.Error,
-		"created_at":     c.CreatedAt,
-		"updated_at":     c.UpdatedAt,
-		"poll_interval":  c.PollInterval,
-		"timeout":        c.Timeout,
-		"transfer":       c.Transfer,
-		"save":           c.Save,
-		"download_local": c.DownloadLocal,
+		"type":            TypeCloudDownload,
+		"chain_id":        c.ChainID,
+		"phase":           c.CurrentPhase,
+		"status":          c.CurStatus,
+		"urls":            c.URLs,
+		"entries":         c.Entries,
+		"task_ids":        c.TaskIDs,
+		"archive_name":    c.ArchiveName,
+		"local_dir":       c.LocalDir,
+		"local_path":      c.LocalPath,
+		"local_verified":  c.LocalVerified,
+		"keep_files":      c.KeepFiles,
+		"completed":       c.Completed,
+		"failed":          c.Failed,
+		"total":           c.Total,
+		"error":           c.Error,
+		"created_at":      c.CreatedAt,
+		"updated_at":      c.UpdatedAt,
+		"poll_interval":   c.PollInterval,
+		"timeout":         c.Timeout,
+		"transfer":        c.Transfer,
+		"save":            c.Save,
+		"download_local":  c.DownloadLocal,
+		"force_integrity": c.ForceIntegrity,
 	}
 }
 
@@ -171,6 +175,7 @@ func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
 	c.Transfer = opts.transfer
 	c.Save = opts.save
 	c.DownloadLocal = opts.downloadLocal
+	c.ForceIntegrity = opts.forceIntegrity
 }
 
 // fixPollInterval 确保轮询间隔不为零，零值时使用默认值（5s）。
@@ -332,6 +337,9 @@ func cloudDownloadTransferOpts(c *CloudDownloadChain) []CloudDownloadOption {
 	}
 	if c.DownloadLocal {
 		opts = append(opts, WithCloudDownloadLocal(true))
+	}
+	if c.ForceIntegrity {
+		opts = append(opts, WithCloudDownloadForceIntegrity(true))
 	}
 	return opts
 }

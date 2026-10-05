@@ -51,6 +51,8 @@ type CloudDownloadGroupChain struct {
 	Transfer      *TransferSpec `json:"transfer,omitempty"`
 	Save          *bool         `json:"save,omitempty"`
 	DownloadLocal bool          `json:"download_local,omitempty"`
+	// ForceIntegrity 强制源文件完整性（透传服务端；组内每个子任务）。
+	ForceIntegrity bool `json:"force_integrity,omitempty"`
 
 	// 持久化字段
 	PollInterval time.Duration `json:"poll_interval"`
@@ -94,10 +96,11 @@ func NewCloudDownloadGroupChain(client *FileClient, groupName string, entries []
 		PollInterval: fixPollInterval(opts.pollInterval),
 		Timeout:      opts.timeout,
 		// M6：三参从 opts 接入（与 CloudDownloadChain 同源函数式 API）。
-		Transfer:      opts.transfer,
-		Save:          opts.save,
-		DownloadLocal: opts.downloadLocal,
-		client:        client,
+		Transfer:       opts.transfer,
+		Save:           opts.save,
+		DownloadLocal:  opts.downloadLocal,
+		ForceIntegrity: opts.forceIntegrity,
+		client:         client,
 	}, nil
 }
 
@@ -129,9 +132,10 @@ func (c *CloudDownloadGroupChain) State() map[string]any {
 		"timeout":       c.Timeout,
 		// 三参（transfer/save/download_local）持久化：恢复/resume 后保持原语义
 		// （F3：曾缺失导致 resume 重建为纯下载——组在服务端被重建成无 transfer/save）。
-		"transfer":       c.Transfer,
-		"save":           c.Save,
-		"download_local": c.DownloadLocal,
+		"transfer":        c.Transfer,
+		"save":            c.Save,
+		"download_local":  c.DownloadLocal,
+		"force_integrity": c.ForceIntegrity,
 	}
 }
 
@@ -162,6 +166,7 @@ func (c *CloudDownloadGroupChain) SetOptions(opts chainOptions) {
 	c.Transfer = opts.transfer
 	c.Save = opts.save
 	c.DownloadLocal = opts.downloadLocal
+	c.ForceIntegrity = opts.forceIntegrity
 }
 
 func (c *CloudDownloadGroupChain) SetChainManager(mgr *ChainManager) {
@@ -457,6 +462,9 @@ func groupTransferOpts(c *CloudDownloadGroupChain) []CloudDownloadOption {
 	}
 	if c.DownloadLocal {
 		opts = append(opts, WithCloudDownloadLocal(true))
+	}
+	if c.ForceIntegrity {
+		opts = append(opts, WithCloudDownloadForceIntegrity(true))
 	}
 	return opts
 }

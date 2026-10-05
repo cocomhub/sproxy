@@ -163,14 +163,15 @@ func (r *ChainResult) DownloadedLocal() bool {
 
 // chainOptions 链式操作选项。
 type chainOptions struct {
-	pollInterval  time.Duration
-	timeout       time.Duration
-	keepFiles     bool
-	progressFn    ProgressFunc
-	entries       []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
-	transfer      *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
-	save          *bool                 // 保留 cloud 桶副本（nil = 默认 true）
-	downloadLocal bool                  // 客户端是否下载本地（链式拉取）
+	pollInterval   time.Duration
+	timeout        time.Duration
+	keepFiles      bool
+	progressFn     ProgressFunc
+	entries        []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
+	transfer       *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
+	save           *bool                 // 保留 cloud 桶副本（nil = 默认 true）
+	downloadLocal  bool                  // 客户端是否下载本地（链式拉取）
+	forceIntegrity bool                  // 强制源文件完整性（语义校验失败阻断）
 }
 
 // ChainOption 链式操作选项函数。
@@ -226,6 +227,13 @@ func WithChainSave(save bool) ChainOption {
 func WithChainDownloadLocal(local bool) ChainOption {
 	return func(o *chainOptions) {
 		o.downloadLocal = local
+	}
+}
+
+// WithChainForceIntegrity 链式云端下载强制源文件完整性校验（透传服务端）。
+func WithChainForceIntegrity(v bool) ChainOption {
+	return func(o *chainOptions) {
+		o.forceIntegrity = v
 	}
 }
 

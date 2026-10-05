@@ -640,6 +640,7 @@ func TestCloudDownloadChain_StorageFullRetry_PassesTransferOpts(t *testing.T) {
 	chain.Transfer = &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"}
 	sv := false
 	chain.Save = &sv
+	chain.ForceIntegrity = true
 	// DownloadLocal 继承 opts.downloadLocal=true（默认下载本地）→ body 带 download_local=true
 	chain.backoffFn = func(int) time.Duration { return 5 * time.Millisecond }
 
@@ -666,6 +667,10 @@ func TestCloudDownloadChain_StorageFullRetry_PassesTransferOpts(t *testing.T) {
 		}
 		if body["download_local"] == nil {
 			t.Fatalf("第 %d 次提交缺 download_local（M5 重试透传），body=%v", i, body)
+		}
+		// 任务5：force_integrity 与三参同源透传（初始 + storage-full 重试都带）。
+		if body["force_integrity"] == nil {
+			t.Fatalf("第 %d 次提交缺 force_integrity（M5 重试透传），body=%v", i, body)
 		}
 	}
 }

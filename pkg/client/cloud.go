@@ -61,11 +61,12 @@ const (
 type CloudDownloadOption func(*cloudDownloadOptions)
 
 type cloudDownloadOptions struct {
-	filename      string
-	maxBatchURLs  int
-	transfer      *TransferSpec
-	save          *bool
-	downloadLocal bool
+	filename       string
+	maxBatchURLs   int
+	transfer       *TransferSpec
+	save           *bool
+	downloadLocal  bool
+	forceIntegrity bool
 }
 
 // WithCloudDownloadFilename 设置云端下载的文件名（覆盖 URL 自动提取的文件名）。
@@ -101,6 +102,16 @@ func WithCloudDownloadSave(save bool) CloudDownloadOption {
 func WithCloudDownloadLocal(local bool) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		o.downloadLocal = local
+	}
+}
+
+// WithCloudDownloadForceIntegrity 强制源文件完整性校验（透传服务端 TaskParams.ForceIntegrity）。
+// true = 下载内容语义校验失败（如有）时任务直接失败阻断，不放行；
+// false（默认） = 服务端默认处置（两次校验一致的损坏文件放行标记 damaged）。
+// 客户端仅在 true 时发送 force_integrity 字段（零回归：默认 false 不发）。
+func WithCloudDownloadForceIntegrity(v bool) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.forceIntegrity = v
 	}
 }
 
@@ -154,6 +165,9 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	if cfg.downloadLocal {
 		body["download_local"] = true
 	}
+	if cfg.forceIntegrity {
+		body["force_integrity"] = true
+	}
 
 	var task CloudTask
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/download", body, &task); err != nil {
@@ -201,6 +215,9 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	}
 	if cfg.downloadLocal {
 		body["download_local"] = true
+	}
+	if cfg.forceIntegrity {
+		body["force_integrity"] = true
 	}
 
 	var result struct {
@@ -391,6 +408,9 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 	}
 	if cfg.downloadLocal {
 		body["download_local"] = true
+	}
+	if cfg.forceIntegrity {
+		body["force_integrity"] = true
 	}
 	var group CloudGroup
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/groups", body, &group); err != nil {
