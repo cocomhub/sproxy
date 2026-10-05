@@ -98,8 +98,9 @@ type downloadCtx struct {
 	currentTotal int64      // 本次下载总大小（进度回调）
 	restoredIDs  []string   // 本次转存的全部文件 ID（完成后永久删）
 	restoredMu   sync.Mutex // 保护 restoredIDs（并发 chunk 串行转存）
-	reusedLink   string     // 缓存 idempotent/owned **未登记**命中的直链（round-7 性能：
-	// 避免每账号 chunk 重跑 FindInDrive 全盘 walk——不登记即不删，NH-P1 不变）
+	reusedID     string     // 缓存 idempotent/owned **未登记**命中的文件 ID（round-7 性能：
+	// 避免每账号 chunk 重跑全盘 walk；round-8 改为 ID 而非直链——每次 DownloadLink 重取
+	// 新链接防 TTL 过期。不登记即不删，NH-P1 不变）
 }
 
 // NewHybridDownloader 创建混合下载器。
@@ -444,15 +445,21 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 		}
 		return link, nil
 	}
-	// round-7 性能：idempotent/owned **未登记**命中缓存直链——避免每账号 chunk 重跑
-	// FindInDrive 全盘 walk（不登记即不删，NH-P1 语义不变）。
-	if dc.reusedLink != "" {
-		return dc.reusedLink, nil
+	// round-7 性能：idempotent/owned **未登记**命中缓存文件 ID——避免每账号 chunk 重跑
+	// FindInDrive 全盘 walk（不登记即不删，NH-P1 语义不变）。与 restoredIDs 一致：每次经
+	// DownloadLink 重取**新 FETCH 直链**（round-8 修正：缓存直链会在 TTL 过期后让长下载
+	// 全部后续账号 chunk 失败——链接必须按 chunk 刷新）。
+	if dc.reusedID != "" {
+		link, err := d.api.DownloadLink(ctx, dc.reusedID)
+		if err != nil {
+			return "", fmt.Errorf("hybrid fetch link (reused): %w", err)
+		}
+		return link, nil
 	}
 	// 幂等：先查同名同大小已存在的转存文件（避免重复 restore 累积副本），
 	// 命中且 hash 一致则复用（抽取 helper 控制复杂度）。
-	if link, ok := d.idempotentRestored(ctx, dc, target); ok {
-		dc.reusedLink = link
+	if link, id, ok := d.idempotentRestored(ctx, dc, target); ok {
+		dc.reusedID = id
 		return link, nil
 	}
 	fid, owned, err := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
@@ -476,7 +483,7 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx, 
 		return "", fmt.Errorf("hybrid fetch link: %w", err)
 	}
 	if owned {
-		dc.reusedLink = link // round-7 性能：owned 命中缓存（后续账号 chunk 不再重跑 walk）
+		dc.reusedID = driveFile.ID // round-7 性能 + round-8 修正：缓存文件 ID（每 chunk 重取新直链）
 	}
 	return link, nil
 }
@@ -947,15 +954,15 @@ func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *S
 
 // idempotentRestored 幂等检查：网盘已有同名同大小且 hash 一致的转存 → 复用并记录，返回 (link, true)。
 // 无 hash 可比对（目标/网盘 hash 缺失）时保守返回 false（不信任 size 匹配，走 restore）。
-func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, target *ShareFile) (string, bool) {
+func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, target *ShareFile) (link, id string, ok bool) {
 	existing, err := d.api.FindInDrive(ctx, target.Name, target.Size)
 	if err != nil || existing == nil {
-		return "", false
+		return "", "", false
 	}
 	if target.Hash == "" || existing.Hash == "" || existing.Hash != target.Hash {
 		d.log.Warn("hybrid restore skip rejected: hash mismatch (or missing)",
 			"id", existing.ID, "target_hash", target.Hash, "drive_hash", existing.Hash)
-		return "", false
+		return "", "", false
 	}
 	// NH-P1 加固（2026-10-05）：**只登记确认是 restore 副本的文件**供 AutoDelete 删除。
 	// FindInDrive 匹配的是「同名+同大小+同 hash」——无法区分「上次 hybrid 遗留的 restore 副本」
@@ -970,9 +977,9 @@ func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadC
 	}
 	link, lerr := d.api.DownloadLink(ctx, existing.ID)
 	if lerr != nil {
-		return "", false
+		return "", "", false
 	}
-	return link, true
+	return link, existing.ID, true
 }
 
 // isRestoreCopy 判断网盘文件是否为 hybrid restore 副本：parent 是「Pack From Shared」文件夹。
