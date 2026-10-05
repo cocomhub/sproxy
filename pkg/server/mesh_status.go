@@ -89,7 +89,7 @@ func (h *Handlers) meshStatus() MeshStatus {
 		st.RemoteRead = &MeshFaceStatus{
 			Enabled: true,
 			Addr:    addr,
-			Pinned:  len(meshReaderFingerprints(cfg)),
+			Pinned:  len(readListenerPins(cfg)),
 		}
 	}
 	if cfg.RemoteWrite.Enabled {

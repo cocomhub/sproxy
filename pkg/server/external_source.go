@@ -135,6 +135,20 @@ func egressOwnerMatch(v volume.Volume, owner string) bool {
 	return strings.TrimSpace(ho) == owner
 }
 
+// egressVisibleView 过滤 owner 可见卷视图：egress 卷**仅对 holder_owner 可见**（评审/
+// 用户裁定可见性）——非 holder_owner 的普通用户不可见（连卷名/存在性都不泄露；数据面
+// 已由 egressOwnerMatch 堵 404）。holder_owner（凭证授的已授权者）可见并可访问已授权
+// 内容（管理员视角 = 凭证 scope 内）。
+func egressVisibleView(view []volume.Volume, owner string) []volume.Volume {
+	filtered := view[:0]
+	for _, v := range view {
+		if egressOwnerMatch(v, owner) {
+			filtered = append(filtered, v)
+		}
+	}
+	return filtered
+}
+
 // externalStateFor 分 A/B/C 态（gocognit 收敛）：私密/egress_forward → A 态服务端转发；
 // 明文未私密 → B 态 302 直链（失败回落 A）；返回 nil = 未命中（调用方继续下一候选）。
 func (h *Handlers) externalStateFor(v volume.Volume, forceForward bool, fsys syncpkg.FS, r *http.Request, ownerKey, filename string, src files.DownloadSource) *downloadPath {

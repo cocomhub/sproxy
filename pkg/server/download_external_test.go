@@ -9,9 +9,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -286,6 +288,41 @@ func TestDownloadPathForRemote_ExternalSecretdata(t *testing.T) {
 	body, _ := io.ReadAll(rc.File)
 	if string(body) != "ciphertext" {
 		t.Fatalf("Source 读取内容 != 持有侧原件, got %q", string(body))
+	}
+}
+
+// TestVolumesAPI_List_EgressVisibleOnlyToHolderOwner（评审可见性）：egress 卷代表凭证授
+// 的持有侧 owner 真实数据——**非 holder_owner 的普通用户不可见**（卷列表不泄露存在性），
+// holder_owner 可见并可访问已授权内容。
+func TestVolumesAPI_List_EgressVisibleOnlyToHolderOwner(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "eg", Type: clustercred.TypeEgress, Extra: map[string]any{"holder_owner": "alice"}}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}}
+	h := newExternalTestEnv(t, v, fs)
+
+	list := func(owner string) []string {
+		req := httptest.NewRequest(http.MethodGet, "/api/volumes", nil).
+			WithContext(withActor(context.Background(), owner))
+		rec := httptest.NewRecorder()
+		h.listVolumesHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("owner=%s /api/volumes status=%d", owner, rec.Code)
+		}
+		var out volumesListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+		}
+		names := make([]string, 0, len(out.Volumes))
+		for _, vs := range out.Volumes {
+			names = append(names, vs.Name)
+		}
+		return names
+	}
+	if names := list("alice"); !slices.Contains(names, "eg") {
+		t.Fatalf("holder_owner 应可见 egress 卷: %v", names)
+	}
+	if names := list("bob"); slices.Contains(names, "eg") {
+		t.Fatalf("普通用户（非 holder_owner）不应见 egress 卷（存在性不泄露）: %v", names)
 	}
 }
 

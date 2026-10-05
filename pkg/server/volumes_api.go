@@ -64,7 +64,7 @@ func (h *Handlers) listVolumesHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, volumesListResponse{Volumes: []VolumeStatus{}}, http.StatusOK)
 		return
 	}
-	view := volume.AllowedVolumes(h.volSet.All(), owner)
+	view := egressVisibleView(volume.AllowedVolumes(h.volSet.All(), owner), owner)
 	out := make([]VolumeStatus, 0, len(view))
 	for _, v := range view {
 		var usage int64

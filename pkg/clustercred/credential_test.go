@@ -125,6 +125,78 @@ func TestCredential_PathPrefixScope(t *testing.T) {
 	}
 }
 
+// TestCredential_PathPrefixSegmentBoundary（评审 M1 边界直测）：前缀按**段**切分——
+// `docs`（无尾斜杠）不得放行 `docs2/...`/`docstring`（相邻段名绕过）；带尾斜杠同。
+func TestCredential_PathPrefixSegmentBoundary(t *testing.T) {
+	t.Parallel()
+	sk := []byte("0123456789abcdef0123456789abcdef")
+	now := time.Now()
+	for _, tc := range []struct {
+		prefix string
+		rel    string
+		wantOK bool
+	}{
+		{"docs", "docs", true},          // 前缀本身（无尾斜杠）放行
+		{"docs", "docs/a.bin", true},    // 前缀内
+		{"docs", "docs2/a.bin", false},  // 相邻段名（docs2）不得放行
+		{"docs", "docstring", false},    // 相邻段名（docstring）
+		{"docs/", "docs/a.bin", true},   // 带尾斜杠前缀
+		{"docs/", "docs2/a.bin", false}, // 带尾斜杠下相邻段仍拒
+	} {
+		c := Credential{
+			Node: "h", Volume: "v", Owner: "o", Recipient: "fp", Scope: "read",
+			PathPrefix: tc.prefix,
+			IssuedAt:   now.Add(-time.Minute).Unix(),
+			ExpiresAt:  now.Add(time.Hour).Unix(),
+		}
+		c.Sign(sk)
+		if err := c.Authorizes("h", "v", "o", tc.rel); (err == nil) != tc.wantOK {
+			t.Fatalf("prefix=%q rel=%q wantOK=%v got err=%v", tc.prefix, tc.rel, tc.wantOK, err)
+		}
+	}
+}
+
+// TestCredential_AuthorizedFor_Trim（评审 M1）：白名单双侧 Trim——对端指纹/Recipient
+// 带首尾空白一致命中；不一致拒绝。
+func TestCredential_AuthorizedFor_Trim(t *testing.T) {
+	t.Parallel()
+	sk := []byte("0123456789abcdef0123456789abcdef")
+	now := time.Now()
+	c := Credential{
+		Node: "h", Volume: "v", Owner: "o", Recipient: " eg-fp ", Scope: "read",
+		IssuedAt: now.Add(-time.Minute).Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+	}
+	c.Sign(sk)
+	if err := c.AuthorizedFor("eg-fp"); err != nil {
+		t.Fatalf("双侧 Trim 应命中: %v", err)
+	}
+	if err := c.AuthorizedFor("other-fp"); err == nil {
+		t.Fatal("非白名单指纹应拒绝")
+	}
+}
+
+// TestCredential_ExpiryEdge（边界）：iat==exp（零有效期）与 exp<iat（倒置）→ malformed；
+// 过期临界（now==exp）拒绝。
+func TestCredential_ExpiryEdge(t *testing.T) {
+	t.Parallel()
+	sk := []byte("0123456789abcdef0123456789abcdef")
+	now := time.Now().Unix()
+	c := Credential{Node: "h", Volume: "v", Owner: "o", Recipient: "fp", Scope: "read",
+		IssuedAt: now, ExpiresAt: now, // iat==exp：零有效期
+	}
+	c.Sign(sk)
+	if err := c.Verify(sk, time.Now()); err == nil {
+		t.Fatal("iat==exp 应 malformed（零有效期）")
+	}
+	c2 := Credential{Node: "h", Volume: "v", Owner: "o", Recipient: "fp", Scope: "read",
+		IssuedAt: now, ExpiresAt: now - 1, // 倒置
+	}
+	c2.Sign(sk)
+	if err := c2.Verify(sk, time.Now()); err == nil {
+		t.Fatal("exp<iat 应 malformed（倒置）")
+	}
+}
+
 // TestCredential_MalformedRejected：缺字段载荷 → 拒绝。
 func TestCredential_MalformedRejected(t *testing.T) {
 	t.Parallel()
