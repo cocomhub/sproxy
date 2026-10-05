@@ -113,6 +113,11 @@ test('buildFileRowHtml 文件行卷 badge：有 volume 显示、无 volume 不�
   assert.ok(xssVol.includes('&lt;img&gt;'));
 });
 
+test('volBadge includes category class for wrapper volumes', () => {
+  const html = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume: 'vault', volume_category: 'wrapper' });
+  assert.match(html, /vol-badge-wrapper/);
+});
+
 test('buildFileTableHtml 空 / 多行', () => {
   assert.ok(r.buildFileTableHtml([], 'x').includes('</tbody></table>'));
   const html = r.buildFileTableHtml([{ name: 'f1', size: 10, is_dir: false }, { name: 'd2', is_dir: true }], 'sub');

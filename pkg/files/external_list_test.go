@@ -118,6 +118,11 @@ func TestList_ExternalVolume_PlainMeta(t *testing.T) {
 			if f.Checksum != "" || f.Volume != "" {
 				t.Fatalf("movie.mp4 泄漏 checksum/volume 字段: %+v", f)
 			}
+			// 任务 9：wrapper 加密卷（Type=secretdata）的条目补 category 标注（供 Web UI
+			// 卷徽标细化），目录条目不填。
+			if f.VolumeCategory != "wrapper" {
+				t.Fatalf("movie.mp4 卷分类 = %q, 期望 wrapper（secretdata 是 wrapper 卷）", f.VolumeCategory)
+			}
 		}
 	}
 	if !found {
@@ -126,6 +131,29 @@ func TestList_ExternalVolume_PlainMeta(t *testing.T) {
 	// ListDir 收到 owner 限定的键空间（共享卷带 owner 前缀）。
 	if got, _ := fake.gotRel.Load().(string); got != "ownerA/user" {
 		t.Fatalf("ListDir rel = %q, 期望 ownerA/user（owner 限定）", got)
+	}
+}
+
+// TestList_ExternalVolume_CategoryOnlyWrapper 钉住任务 9：非 wrapper 外部卷（如 baidupcs，
+// 普通 linked 类型）的列表条目不填 volume_category（零值 omitempty，避免误标 🔒）。
+func TestList_ExternalVolume_CategoryOnlyWrapper(t *testing.T) {
+	t.Parallel()
+	e := newDirsEnv(t)
+	fake := &fakeExternalVolume{entries: []ExternalEntry{{Name: "a.bin", Size: 10}}}
+	e.enableExternalVolume(t, volume.Volume{Name: "linked-x", Type: "baidupcs"}, fake)
+
+	rec := listFiles(e.svc, "ownerA", "?volume=linked-x&subdir=")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/files?volume=linked-x 状态码 = %d, 期望 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp ListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v; body=%s", err, rec.Body.String())
+	}
+	for _, f := range resp.Files {
+		if f.VolumeCategory != "" {
+			t.Fatalf("linked 类型外部卷不应填 volume_category: %+v", f)
+		}
 	}
 }
 

@@ -135,7 +135,10 @@
     }
     const cs = fi.checksum || '';
     const csDisplay = cs ? '<span class="checksum-cell" data-checksum="' + escHtml(cs) + '" title="' + escHtml(cs) + '">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
-    const volBadge = fi.volume ? ' <span class="vol-badge" title="卷 ' + escHtml(fi.volume) + '">' + escHtml(fi.volume) + '</span>' : '';
+    // 卷徽标按 category 细化：wrapper（加密/封装卷）加 vol-badge-wrapper 类 + 🔒 图标；
+    // 其余卷保持既有 vol-badge 形态（零回归）。
+    const volCat = fi.volume_category === 'wrapper';
+    const volBadge = fi.volume ? ' <span class="vol-badge' + (volCat ? ' vol-badge-wrapper' : '') + '" title="卷 ' + escHtml(fi.volume) + '">' + (volCat ? '🔒 ' : '') + escHtml(fi.volume) + '</span>' : '';
     return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + volBadge + '</td>' +
       '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
       '<td>' + csDisplay + '</td>' +

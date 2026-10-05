@@ -41,6 +41,9 @@
   --tab-active: #4a90d9;
   --tab-border: #e0e0e0;
   --stats-summary: #f0f8ff;
+  /* 卷徽标（wrapper 加密卷）：亮色底 + 深紫字（7.7:1） */
+  --badge-wrapper-bg: #ece5f5;
+  --badge-wrapper-fg: #4a3d75;
 }
 
 /* 暗色模式（系统偏好）—— 改进对比度，确保 WCAG AA 合规 */
@@ -85,6 +88,9 @@
     --tab-active: #5a9fd4;
     --tab-border: #3a3a60;
     --stats-summary: #1a1a3e;
+    /* 卷徽标（wrapper 加密卷）：暗色紫底 + 白字，对比度 9.5:1（≥4.5:1 白字 AA） */
+    --badge-wrapper-bg: #4a3d75;
+    --badge-wrapper-fg: #fff;
   }
 }
 
@@ -129,6 +135,9 @@
   --tab-active: #5a9fd4;
   --tab-border: #3a3a60;
   --stats-summary: #1a1a3e;
+  /* 卷徽标（wrapper 加密卷）：暗色紫底 + 白字，对比度 9.5:1（≥4.5:1 白字 AA） */
+  --badge-wrapper-bg: #4a3d75;
+  --badge-wrapper-fg: #fff;
 }
 
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; padding: 20px; background: var(--bg-page); color: var(--text-primary); }
@@ -184,6 +193,7 @@ tr:hover td { background: var(--bg-hover); }
 .toast-info { background: var(--toast-info); }
 .size-cell { white-space: nowrap; }
 .vol-badge { display:inline-block; margin-left:6px; padding:0 6px; border-radius:8px; font-size:11px; font-weight:600; line-height:16px; background: var(--bg-auth); color: var(--text-secondary); border:1px solid var(--border-color); vertical-align:1px; white-space:nowrap; }
+.vol-badge-wrapper { background: var(--badge-wrapper-bg); color: var(--badge-wrapper-fg); border-color: var(--badge-wrapper-bg); }
 .breadcrumb-btn { background: none; border: none; color: var(--text-link); cursor: pointer; padding: 0; font: inherit; }
 .chunk-progress-text { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 .resume-btn { margin: 4px 0; padding: 2px 8px; font-size: 12px; background: var(--toast-success); color: #fff; border: none; border-radius: 3px; cursor: pointer; }

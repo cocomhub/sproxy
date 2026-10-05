@@ -27,6 +27,9 @@ let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
 let _searchActive = false;
 let _currentOffset = 0;
 let _hasMore = false;
+// 文件页「过滤卷」下拉（#volume-filter）当前值：空 = 全部卷（不发送 ?volume=，零回归）。
+// 仅当用户选中某卷才非空；refreshList/loadMore 据此透传 volume 给 sc.files.list。
+let _volumeFilter = '';
 const PAGE_LIMIT = 500;
 
 // 传输层由 sclient 领域库统一（隧道/直连协商 + SproxySig 签名），页面级
@@ -191,6 +194,37 @@ async function initUploadVolumeSelect() {
   } catch (e) { /* 无凭据/未授权/无卷 API：保持 auto，不破坏无认证浏览 */ }
 }
 
+// --- 文件页「过滤卷」下拉（工具栏「过滤卷」；独立于上传卷下拉 #upload-volume）---
+// 选项来源 /api/volumes（owner 可见卷，含 secretdata/egress 等加密卷）。选中某卷后
+// refreshList({volume}) 切到该卷明文目录；首项「全部卷」（value=""）= 不发送 ?volume=
+// （零回归：未过滤时列表为全部可见卷聚合）。
+function populateVolumeFilterSelect(vols) {
+  const sel = document.getElementById('volume-filter');
+  if (!sel) return;
+  const cur = sel.value || '';
+  while (sel.options.length > 1) sel.remove(1);
+  for (const v of vols || []) {
+    if (!(v?.name)) continue;
+    const opt = document.createElement('option');
+    opt.value = v.name;
+    opt.textContent = v.name;
+    sel.appendChild(opt);
+  }
+  // 恢复原选择；原选择已不在可见卷内则回落「全部卷」。
+  let found = false;
+  for (const opt of sel.options) {
+    if (opt.value === cur) { found = true; break; }
+  }
+  sel.value = found ? cur : '';
+}
+
+async function initVolumeFilter() {
+  try {
+    const data = await sc.files.volumes();
+    populateVolumeFilterSelect(data?.volumes);
+  } catch (e) { /* 无凭据/未授权/无卷 API：保持「全部卷」，不破坏无认证浏览 */ }
+}
+
 // --- UI 工具 ---
 function showToast(msg, type) {
   const el = document.getElementById('toast');
@@ -217,14 +251,18 @@ function copyChecksum(cs) {
 }
 
 // --- 文件列表 ---
-async function refreshList() {
+async function refreshList(opts) {
+  const o = opts || {};
+  // 支持 {volume} 参数：显式传入时同步模块级 _volumeFilter（「过滤卷」change 走此路径，
+  // 后续 refreshList/loadMore 沿用当前过滤）。volume 为空字符串 = 全部卷（不发送）。
+  if (o.volume !== undefined) _volumeFilter = o.volume || '';
   const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
   updateBreadcrumb();
   _currentOffset = 0;
   _hasMore = false;
   try {
-    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT });
+    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT, volume: _volumeFilter || undefined });
     let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset = files.length;
     _hasMore = (data.total || 0) > _currentOffset;
@@ -239,7 +277,7 @@ async function refreshList() {
 async function loadMore() {
   const el = document.getElementById('file-list');
   try {
-    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT });
+    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT, volume: _volumeFilter || undefined });
     let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset += files.length;
     _hasMore = (data.total || 0) > _currentOffset;
@@ -2777,6 +2815,16 @@ document.addEventListener('DOMContentLoaded', function() {
     uploadFiles(this.files);
   });
   void initUploadVolumeSelect();
+
+  // 文件页「过滤卷」下拉（独立于上传卷下拉 #upload-volume）：选中 → 切到该卷明文目录。
+  // 首项「全部卷」（value=""）→ refreshList({volume:''}) 回落聚合视图（不发送 ?volume=）。
+  const volumeFilterSel = document.getElementById('volume-filter');
+  if (volumeFilterSel) {
+    volumeFilterSel.addEventListener('change', function() {
+      void refreshList({ volume: volumeFilterSel.value });
+    });
+  }
+  void initVolumeFilter();
 
   // 工具栏
   document.getElementById('refresh-btn').addEventListener('click', refreshList);
