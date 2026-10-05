@@ -19,7 +19,10 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	// 注：不用 defer cancel——gocritic exitAfterDefer（Fatalf 分支跳过 defer）；
 	// 改为所有退出点（含正常收尾）显式 cancel。
-	shareURL := "https://mypikpak.com/s/VOBPsU81UtRgtQWgnsq5iKwto1/AAAAAGtjkiq-YAYmx_GX5qGyo1_VOB"
+	shareURL := os.Getenv("PIKPAK_SHARE_URL")
+	if shareURL == "" {
+		log.Fatal("PIKPAK_SHARE_URL 必填（真实分享 URL 禁止入库，运行期经环境变量传入）")
+	}
 	resolver := pikpak.NewShareResolver(pikpak.ShareResolverConfig{
 		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})

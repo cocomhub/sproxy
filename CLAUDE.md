@@ -36,6 +36,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - **绝对禁止跳过检查直接 commit / push**（2026-10-02 用户明示）：严禁 `--no-verify`；pre-commit（增量轻量）
 >   与 pre-push（全量：fmt-all → lint-all → check-ci）必须真实跑通，日志落盘 `build/hooks/*.log`；
 >   **出现环境问题或脚本故障时直接修复环境/脚本，不得以「CI 会兜底」为由绕过**（绕过只是把失败推迟到 CI）。
+> - **PR 绝对禁止泄露真实数据（2026-10-05 用户明示）**：代码/配置/文档/commit 信息/PR body 一律
+>   禁止携带真实外部数据（真实分享 URL 含子路径 token、凭据/token、密钥/指纹、日志片段）；
+>   需真实数据验证时用**环境变量或 CLI flag 运行期传入**（默认留空/占位），禁止硬编码入库；
+>   合并前 `git grep` 扫描。详见 `AGENTS.md` 硬规则 21。
 
 ## 执行偏好
 

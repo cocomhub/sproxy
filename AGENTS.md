@@ -147,6 +147,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
       实现回归 → 修实现，文档不动。
     目标：**外部行为变化可见、可追踪、有锁，绝不让其静默改变行为**（教训：PikPak 分享直链
     416 边界/expire 签名/keepshare 301 等若无锁，实现漂移会静默损坏下载）。
+21. **PR 绝对禁止泄露真实数据（2026-10-05 用户明示，强制）**：创建 PR 时，代码、配置、文档、
+    commit 信息与 **PR body** 一律禁止携带真实外部数据——真实分享 URL/链接（含子路径 token）、
+    账号凭据/token、密钥/指纹、真实日志片段等。需要真实数据验证的场景：**用环境变量或 CLI flag
+    在运行期传入**（默认值留空/占位），禁止硬编码入库。合并前用 `git grep` 扫描真实 URL/凭据
+    模式；CI/Sonar 不豁免，泄露即数据事故。教训（#734）：tool/pikpak-hybrid 三个诊断工具曾
+    硬编码真实分享 URL（含子路径 token），已改 `PIKPAK_SHARE_URL` 环境变量 + 强制校验。
 
 
 

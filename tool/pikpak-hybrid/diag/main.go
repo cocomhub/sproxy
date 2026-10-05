@@ -14,9 +14,12 @@ import (
 )
 
 func main() {
+	shareURL := os.Getenv("PIKPAK_SHARE_URL")
+	if shareURL == "" {
+		log.Fatal("PIKPAK_SHARE_URL 必填（真实分享 URL 禁止入库，运行期经环境变量传入）")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	shareURL := "https://mypikpak.com/s/VP2z2zzw5oC9h71F8p8jGVq1o2"
 	resolver := pikpak.NewShareResolver(pikpak.ShareResolverConfig{})
 	api := pikpak.NewAPI(pikpak.APIConfig{}, nil)
 	metrics := &pikpak.HybridMetrics{}
@@ -27,9 +30,9 @@ func main() {
 	})
 	log.Println("=== resolve 先行 ===")
 	meta, err := resolver.Resolve(ctx, shareURL)
-	log.Printf("resolve: files=%d err=%v", len(meta.Files), err)
+	log.Printf("resolve: files=%d err=%v", len(meta.Files), err) //nolint:gosec // G706 诊断工具日志（操作者自己的分享数据）
 	if err == nil && len(meta.Files) > 0 {
-		log.Printf("target: %s size=%d", meta.Files[0].Name, meta.Files[0].Size)
+		log.Printf("target: %s size=%d", meta.Files[0].Name, meta.Files[0].Size) //nolint:gosec // G706 诊断工具日志
 	}
 	log.Println("=== Download（阶段日志在 hybrid.go）===")
 	_, err = hd.Download(ctx, shareURL, "build/hybrid-e2e/diag_share.mp4", nil)
