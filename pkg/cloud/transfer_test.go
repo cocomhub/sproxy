@@ -660,6 +660,53 @@ func (b *baseCapableFS) Rename(ctx context.Context, f, t string) error {
 func (b *baseCapableFS) Delete(ctx context.Context, p string) error  { return b.inner.Delete(ctx, p) }
 func (b *baseCapableFS) MakeDir(ctx context.Context, p string) error { return b.inner.MakeDir(ctx, p) }
 
+// nilNilFS 包装 baseCapableFS，Stat 恒返 (nil,nil)（真实卷契约：local/sftp/webdav/secretdata
+// 对缺失路径统一返 (nil,nil)，与 memFS 的 (nil, os.ErrNotExist) 不同）——覆盖降级写路径
+// 对真实卷契约的判定（Critical-2 修复：首写不被误判已存在）。
+type nilNilFS struct{ inner *baseCapableFS }
+
+func (q *nilNilFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return q.inner.ListDir(ctx, p)
+}
+func (q *nilNilFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return nil, nil // 真实卷缺失契约：Entry nil + err nil
+}
+func (q *nilNilFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return q.inner.OpenRead(ctx, p)
+}
+func (q *nilNilFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return q.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (q *nilNilFS) Rename(ctx context.Context, f, t string) error { return q.inner.Rename(ctx, f, t) }
+func (q *nilNilFS) Delete(ctx context.Context, p string) error    { return q.inner.Delete(ctx, p) }
+func (q *nilNilFS) MakeDir(ctx context.Context, p string) error   { return q.inner.MakeDir(ctx, p) }
+
+// TestWriteTargetUnique_Fallback_NilNilStatContract 降级写路径对「真实卷 (nil,nil) 缺失契约」
+// 的正确性（Critical-2/第 2 轮 Minor-2）：Stat 返 (nil,nil) = 缺失 → 应放行写；此前旧判据
+// serr==nil 当「已存在」会误拒普通卷首写。memFS 返 os.ErrNotExist 已覆盖，但 (nil,nil)
+// 契约分支此前无测试触达。
+func TestWriteTargetUnique_Fallback_NilNilStatContract(t *testing.T) {
+	t.Parallel()
+	fs := &nilNilFS{inner: &baseCapableFS{inner: newMemFS()}}
+	env := &transferEnv{ctx: context.Background(), targetFS: fs, rel: "r/y"}
+	written, err := writeTargetUnique(env, strings.NewReader("nilnil"), 6, 0)
+	if err != nil || !written {
+		t.Fatalf("(nil,nil)=缺失契约下首写应成功, written=%v err=%v", written, err)
+	}
+	// 第二次（内容已存在但 Stat 仍返 nil,nil 会怎样？真实卷对已存在返 (*Entry,nil)——此处
+	// fake 恒 nil,nil 模拟缺失，验证「已存在返回 Entry」分支由 memFS 测试覆盖；此处只断言
+	// 缺失契约放行写。内容写入确认。
+	rc, oerr := fs.OpenRead(context.Background(), "r/y")
+	if oerr != nil {
+		t.Fatalf("OpenRead: %v", oerr)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(got) != "nilnil" {
+		t.Fatalf("内容 = %q, want nilnil", got)
+	}
+}
+
 // TestFailTaskWithTransfer_SaveFalse_CleansCloud W5 回归：转存失败（目标卷异常）+ save=false
 // → 服务端删 cloud 桶文件并记录 CleanupStatus（save 控制 cloud 副本存在性，与成败无关）。
 // 清理须是最后一步（删除后无桶文件操作）。
@@ -887,6 +934,34 @@ func TestTransferDone_IdempotentSameContent(t *testing.T) {
 	// 卷内内容未被改写（仍是首次内容）
 	if got := string(fs.files["pikpak/task-imp1/imp1.mp4"]); got != "identical-content" {
 		t.Fatalf("幂等重放不应改写卷内容，got %q", got)
+	}
+}
+
+// TestTransferDone_IdempotentSameContent_NoChecksum I2 回归：空 checksum 下载器（pikpak
+// 等非主下载器）崩溃重放——卷内已是相同内容（按本地产物哈希比对）→ 幂等成功，不永久 fail。
+func TestTransferDone_IdempotentSameContent_NoChecksum(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool, bool) { return fs, "secretdata", false, false })
+	task := &CloudTask{ID: "task-imp2", Filename: "imp2.mp4", Transfer: &TransferSpec{Volume: "vol-i2"}}
+	dest := filepath.Join(t.TempDir(), "imp2.mp4")
+	_ = os.WriteFile(dest, []byte("identical-nochecksum"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// 首次转存成功（Checksum 为空 = 下载器未提供）
+	tr1, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
+	if err != nil || tr1 == nil {
+		t.Fatalf("首次转存应成功，tr=%v err=%v", tr1, err)
+	}
+	// 崩溃重放：同 rel 再次转存，卷内已是相同内容 → 幂等成功（I2：不再永久 fail）
+	tr2, _, err2 := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
+	if err2 != nil {
+		t.Fatalf("空 checksum 同内容重放应幂等成功，got err %v", err2)
+	}
+	if tr2 == nil || tr2.URL != tr1.URL {
+		t.Fatalf("幂等重放应返回同 URL，tr2=%v tr1=%v", tr2, tr1)
 	}
 }
 

@@ -630,6 +630,20 @@ func TestFTPFS_Stat_Missing(t *testing.T) {
 	}
 }
 
+// TestFTPFS_Stat_ExecError_FailClosed I1 回归：SIZE 命令执行错误（网络/会话故障）必须
+// 返回 err（fail-closed），不能吞成 (nil,nil) 当「缺失」——否则降级写路径（Stat 预检
+// 放行 STOR 覆盖）会把已存在目标在瞬态错误后静默覆盖（W1/W3 绕过）。
+func TestFTPFS_Stat_ExecError_FailClosed(t *testing.T) {
+	t.Parallel()
+	fs := newTestFTPFS(t, nil)
+	// 关闭底层会话使 SIZE 命令执行失败（readReply 出错），模拟网络/会话故障。
+	fs.conn.Close()
+	_, err := fs.Stat(context.Background(), "x.txt")
+	if err == nil {
+		t.Fatal("I1: SIZE 执行错误应 fail-closed 返回 err，不能当缺失 (nil,nil)")
+	}
+}
+
 // TestFTPFS_DeleteMissing_Idempotent 验证删除不存在 → 幂等 nil。
 func TestFTPFS_DeleteMissing_Idempotent(t *testing.T) {
 	t.Parallel()

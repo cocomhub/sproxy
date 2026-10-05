@@ -70,7 +70,10 @@ type CloudTask struct {
 	// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常也不残留，
 	// 清理状态记入 CleanupStatus 供审计。
 	Save bool `json:"save"`
-	// CleanupStatus 是 cloud 桶文件清理状态（审计）：pending | cleaned | skipped | failed。
+	// CleanupStatus 是 cloud 桶文件清理状态（审计）。当前实现只写两值（见 cleanupTaskCloud）：
+	//   - cleaned：Save=false 任务完成后 cloud 桶文件已删除（成功）；
+	//   - failed：删除失败（文件仍在盘，CleanupErr 供告警；前端据此保留下载按钮）。
+	// pending/skipped 为预留枚举（尚无生产者；前端把非 cleaned 一律视为「文件存在」）。
 	CleanupStatus string `json:"cleanup_status,omitempty"`
 	// CleanupAt 清理时间（审计）。
 	CleanupAt time.Time `json:"cleanup_at"`

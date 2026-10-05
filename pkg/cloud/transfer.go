@@ -551,14 +551,19 @@ func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 		if !written {
 			// W1/W3 目标已存在。**幂等判定**（Important-1 崩溃恢复）：进程在写卷成功、
 			// TransferURL 落盘前崩溃 → 重启重放转存 → 目标已存在但内容完整正确。
-			// 此时读回卷内内容与下载 checksum 比对：一致 = 上次已交付成功，幂等完成
+			// 此时读回卷内内容与「本地产物」比对：一致 = 上次已交付成功，幂等完成
 			// （返回 done，任务保持 completed 并回写 TransferURL）；不一致 = 真冲突
 			// （他人/旧文件）→ 拒绝覆写。
-			if env.result.Checksum != "" {
-				if same, cerr := idempotentMatch(env); cerr == nil && same {
-					// 幂等命中：目标卷已持有相同内容（崩溃窗口已交付成功），直接视为成功。
-					return true, nil
-				}
+			// I2：比对目标与本地产物哈希而非 result.Checksum——空 checksum 下载器
+			// （pikpak 等非主下载器）崩溃重放也能幂等恢复，不会永久 fail。
+			same, cerr := idempotentMatch(env)
+			if cerr != nil {
+				// 幂等读回失败（卷抖动）→ fail-closed 拒绝并带上读回错误（可观测）。
+				return false, fmt.Errorf("%w: 转存目标 %q 已存在且幂等判定失败: %v", ErrTransferTarget, env.rel, cerr)
+			}
+			if same {
+				// 幂等命中：目标卷已持有相同内容（崩溃窗口已交付成功），直接视为成功。
+				return true, nil
 			}
 			return false, fmt.Errorf("%w: 转存目标 %q 已存在（拒绝覆写，W1/W3）", ErrTransferTarget, env.rel)
 		}
@@ -571,8 +576,10 @@ func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 	return false, nil
 }
 
-// idempotentMatch 读回目标卷 rel 内容并与下载 checksum 比对，判定「目标已持有相同内容」
-// （幂等命中——崩溃窗口已交付成功）。返回 (是否一致, 读回/哈希错误)。
+// idempotentMatch 判定「目标已持有相同内容」（幂等命中——崩溃窗口已交付成功）：
+// 读回目标卷 rel 内容与**本地产物 destPath** 哈希比对。比对本地产物而非 result.Checksum：
+// 空 checksum 下载器（pikpak 等非主下载器）崩溃重放也能幂等恢复（I2——只认 checksum
+// 会让这些下载器的崩溃重放永久 fail）。返回 (是否一致, 读回/哈希错误)。
 func idempotentMatch(env *transferEnv) (bool, error) {
 	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
 	if rerr != nil {
@@ -583,7 +590,11 @@ func idempotentMatch(env *transferEnv) (bool, error) {
 	if herr != nil {
 		return false, fmt.Errorf("幂等判定哈希失败: %w", herr)
 	}
-	return got == env.result.Checksum, nil
+	want, werr := sha256File(env.destPath)
+	if werr != nil {
+		return false, fmt.Errorf("幂等判定本地产物哈希失败: %w", werr)
+	}
+	return got == want, nil
 }
 
 // errTransferAborted 转存因任务取消/删除而中止（非失败——不记 TransferErr/不计数）。

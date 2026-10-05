@@ -390,12 +390,17 @@ func (f *FTPFS) Stat(ctx context.Context, relPath string) (*syncpkg.Entry, error
 	// 文件：SIZE 成功 → 文件条目。
 	code, sizeMsg, err := f.exec("SIZE " + abs)
 	if err != nil {
-		return nil, nil
+		// I1：执行错误（网络断开/超时/命令失败）必须 fail-closed 返回 err——不能吞成
+		// (nil,nil) 当「缺失」：降级写路径（writeTargetUnique Stat 预检）把 (nil,nil)
+		// 判为缺失放行 STOR（无条件覆盖），瞬态错误后会把已存在目标静默覆盖（W1/W3 绕过）。
+		return nil, err
 	}
 	if code == 213 {
 		size, _ := strconv.ParseInt(sizeMsg, 10, 64)
 		return &syncpkg.Entry{Path: strings.TrimPrefix(relPath, "/"), Name: name, Size: size}, nil
 	}
+	// SIZE 非 213 且命令成功：550 = 不存在（幂等判定目标缺失）；其它码同样视为不存在
+	// （FTP 服务端对缺失文件统一返 550/450 类负响应，无「命令执行失败」歧义）。
 	return nil, nil
 }
 
