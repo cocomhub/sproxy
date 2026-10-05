@@ -5,10 +5,13 @@ package pikpak
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestCaptchaSign_Deterministic 验证 captcha 签名算法确定性与格式（与 gopeed 扩展
@@ -88,5 +91,94 @@ func TestShareResolver_Resolve(t *testing.T) {
 	}
 	if !strings.HasPrefix(meta.Files[0].DirectLink, "https://dl.mypikpak.com/") {
 		t.Errorf("direct link wrong: %q", meta.Files[0].DirectLink)
+	}
+}
+
+// TestShareResolver_CaptchaRefreshOnStaleness 锁定 round-8：token 超过 2/3 TTL 主动刷新
+// （长下载中途 re-resolve 不再用陈旧 token 触发不必要降级）。
+func TestShareResolver_CaptchaRefreshOnStaleness(t *testing.T) {
+	t.Parallel()
+	var initCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		initCalls.Add(1)
+		writeJSON(w, map[string]any{"captcha_token": fmt.Sprint("cap-", initCalls.Load()), "expires_in": 3600})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+			{"id": "share-f1", "name": "movie.mp4", "size": "100"},
+		}})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"file_info": map[string]any{
+			"id": "share-f1", "name": "movie.mp4", "web_content_link": "https://dl.example/f",
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+
+	if _, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123"); err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	if initCalls.Load() != 1 {
+		t.Fatalf("captcha init calls = %d, want 1", initCalls.Load())
+	}
+	// 模拟 token 已过期（TTL 1h，2/3 = 40min；制造 2h 前获取）
+	r.mu.Lock()
+	r.captchaFetchedAt = time.Now().Add(-2 * time.Hour)
+	r.captchaTTL = time.Hour
+	r.mu.Unlock()
+	if _, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123"); err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if initCalls.Load() != 2 {
+		t.Fatalf("stale token should trigger refresh, captcha init calls = %d, want 2", initCalls.Load())
+	}
+}
+
+// TestShareResolver_RefreshLink 锁定 round-8：轻量重取单文件直链（shareDetail 一次 + 单 file_info，
+// 不全量重列）。
+func TestShareResolver_RefreshLink(t *testing.T) {
+	t.Parallel()
+	var shareCalls, fileInfoCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap", "expires_in": 3600})
+	})
+	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+		shareCalls.Add(1)
+		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+			{"id": "share-f1", "name": "movie.mp4", "size": "100"},
+			{"id": "share-f2", "name": "sub.srt", "size": "50"},
+		}})
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		fileInfoCalls.Add(1)
+		fid := r.URL.Query().Get("file_id")
+		if fid != "share-f1" {
+			t.Errorf("file_info should only query share-f1, got %q", fid)
+		}
+		writeJSON(w, map[string]any{"file_info": map[string]any{
+			"id": fid, "name": "movie.mp4", "hash": "h1", "web_content_link": "https://dl.example/new",
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+
+	link, hash, err := r.RefreshLink(context.Background(), "abc123", "share-f1")
+	if err != nil {
+		t.Fatalf("RefreshLink: %v", err)
+	}
+	if link != "https://dl.example/new" || hash != "h1" {
+		t.Errorf("link=%q hash=%q", link, hash)
+	}
+	if shareCalls.Load() != 1 || fileInfoCalls.Load() != 1 {
+		t.Errorf("shareDetail=%d fileInfo=%d, want 1/1 (轻量，非全量重列)", shareCalls.Load(), fileInfoCalls.Load())
+	}
+	// 分享被换（fileID 消失）→ 报错
+	if _, _, err := r.RefreshLink(context.Background(), "abc123", "gone-file"); err == nil {
+		t.Fatal("gone file should error (share changed)")
 	}
 }

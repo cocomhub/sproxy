@@ -36,8 +36,10 @@ type HybridMetrics struct {
 	ShareSegmentFailed   atomic.Int64 // 分享段 chunk 失败（转账号段）
 	AccountSegmentFailed atomic.Int64 // 账号段 chunk 失败
 	DowngradeTotal       atomic.Int64 // 分享段 → 账号段 降级次数
-	ShareBytesSaved      atomic.Int64 // 分享区实际下载字节（免账号配额）
-	BoundaryOvershoot    atomic.Int64 // 416 边界误判（分享区超限）
+	FallbackTotal        atomic.Int64 // **整任务**委托降级下载器次数（round-8：与 chunk 级
+	// 降级区分，运维可观测「匿名路径整体失效」）
+	ShareBytesSaved   atomic.Int64 // 分享区实际下载字节（免账号配额）
+	BoundaryOvershoot atomic.Int64 // 416 边界误判（分享区超限）
 }
 
 // HybridCounters 返回 hybrid 计数指标（供 cloud Prometheus 导出）。
@@ -50,6 +52,7 @@ func (m *HybridMetrics) HybridCounters() map[string]int64 {
 		"pikpak_hybrid_share_segment_failed":   m.ShareSegmentFailed.Load(),
 		"pikpak_hybrid_account_segment_failed": m.AccountSegmentFailed.Load(),
 		"pikpak_hybrid_downgrade_total":        m.DowngradeTotal.Load(),
+		"pikpak_hybrid_fallback_total":         m.FallbackTotal.Load(),
 		"pikpak_hybrid_share_bytes_saved":      m.ShareBytesSaved.Load(),
 		"pikpak_hybrid_boundary_overshoot":     m.BoundaryOvershoot.Load(),
 	}
@@ -211,6 +214,7 @@ func (d *HybridDownloader) fallbackDownload(ctx context.Context, source, destPat
 	if d.fallback == nil {
 		return nil, err
 	}
+	d.metricsInc(func(m *HybridMetrics) { m.FallbackTotal.Add(1) }) // round-8：整任务降级可观测
 	d.log.Warn("hybrid anonymous path failed, delegating to fallback downloader", "err", err)
 	if wd, ok := d.fallback.(downloader.WriterDownloader); ok {
 		return wd.DownloadWithWriter(ctx, source, destPath, onProgress, sinkFactory)
@@ -722,11 +726,6 @@ func largestAnyFile(files []ShareFile) *ShareFile {
 	return best
 }
 
-// shareURLOf 构造分享 URL（重 resolve 用）。
-func shareURLOf(shareID string) string {
-	return "https://mypikpak.com/s/" + shareID
-}
-
 // sha1FileHex 计算文件 SHA-1（PikPak file hash 为 40-hex SHA-1，用于最终完整性校验）。
 func sha1FileHex(path string) (string, error) {
 	f, err := os.Open(path)
@@ -900,28 +899,19 @@ func removeManifest(destPath string) {
 // reResolveLink 重新 resolve 拿新直链，并核对新目标与首次 target 一致（C3）。
 // 返回新直链；不一致（ID/hash/size 变化）返回空（调用方放弃重试）。
 func (d *HybridDownloader) reResolveLink(ctx context.Context, shareID string, target *ShareFile) string {
-	meta, err := d.resolver.Resolve(ctx, shareURLOf(shareID))
-	if err != nil || meta == nil {
+	// round-8 Minor：RefreshLink 轻量重取**单文件**直链（shareDetail 一次 + 单 file_info），
+	// 不再全量重列所有文件（大分享每次 chunk 重试 O(N)）。
+	link, hash, err := d.resolver.RefreshLink(ctx, shareID, target.ID)
+	if err != nil {
+		d.log.Warn("hybrid re-resolve failed, abort retry", "share", shareID, "file", target.ID, "err", err)
 		return ""
 	}
-	nt := pickLargestShareFile(meta.Files)
-	if nt == nil || nt.DirectLink == "" {
+	// C3：重取后核对新直链内容一致（分享被换 → 拒绝重试，防与已成功 chunk 拼接混合损坏）。
+	if target.Hash != "" && hash != "" && hash != target.Hash {
+		d.log.Warn("hybrid re-resolve hash changed, abort retry", "old_hash", target.Hash, "new_hash", hash)
 		return ""
 	}
-	// C3：重取后核对新直链指向同一文件（防分享被换 → 与已成功 chunk 拼接混合损坏）。
-	if nt.ID != target.ID {
-		d.log.Warn("hybrid re-resolve file changed, abort retry", "old_id", target.ID, "new_id", nt.ID)
-		return ""
-	}
-	if nt.Size != target.Size {
-		d.log.Warn("hybrid re-resolve size changed, abort retry", "old_size", target.Size, "new_size", nt.Size)
-		return ""
-	}
-	if target.Hash != "" && nt.Hash != "" && nt.Hash != target.Hash {
-		d.log.Warn("hybrid re-resolve hash changed, abort retry", "old_hash", target.Hash, "new_hash", nt.Hash)
-		return ""
-	}
-	return nt.DirectLink
+	return link
 }
 
 // computeShareEnd 计算分享区边界：min(416 探测边界, total×shareRatio)。

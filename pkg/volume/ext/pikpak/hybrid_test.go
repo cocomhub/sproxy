@@ -1035,11 +1035,13 @@ func TestHybridDownload_ResolveFail_FallbackDelegates(t *testing.T) {
 	defer srv.Close()
 
 	var called atomic.Int64
+	metrics := &HybridMetrics{}
 	fallback := &fallbackFake{called: &called}
 	hd, err := NewHybridDownloader(HybridConfig{
 		Resolver: NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()}),
 		API:      NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil),
 		Fallback: fallback,
+		Metrics:  metrics,
 	})
 	if err != nil {
 		t.Fatalf("NewHybridDownloader: %v", err)
@@ -1051,6 +1053,9 @@ func TestHybridDownload_ResolveFail_FallbackDelegates(t *testing.T) {
 	}
 	if called.Load() != 1 {
 		t.Fatalf("fallback should be called once, got %d", called.Load())
+	}
+	if metrics.FallbackTotal.Load() != 1 {
+		t.Errorf("FallbackTotal = %d, want 1（round-8 整任务降级可观测）", metrics.FallbackTotal.Load())
 	}
 	got, _ := os.ReadFile(dest)
 	if string(got) != "fallback-content" {

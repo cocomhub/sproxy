@@ -101,6 +101,11 @@ type ShareResolver struct {
 	mu           sync.Mutex
 	deviceID     string
 	captchaToken string
+	// captchaFetchedAt / captchaTTL：token 年龄追踪（round-8 Minor——长下载中途 re-resolve
+	// 用陈旧 token 会不必要地降级；超过 2/3 TTL 主动刷新）。TTL 来自 captcha/init 的
+	// expires_in（秒），缺省保守 1h。
+	captchaFetchedAt time.Time
+	captchaTTL       time.Duration
 }
 
 // NewShareResolver 创建匿名分享解析器。
@@ -154,7 +159,7 @@ func (r *ShareResolver) Resolve(ctx context.Context, shareURL string) (*ShareMet
 		return nil, err
 	}
 	r.mu.Lock()
-	if r.captchaToken == "" {
+	if r.captchaToken == "" || time.Since(r.captchaFetchedAt) > r.captchaTTL*2/3 {
 		if capErr := r.refreshCaptchaLocked(ctx); capErr != nil {
 			r.mu.Unlock()
 			return nil, capErr
@@ -204,6 +209,7 @@ func (r *ShareResolver) refreshCaptchaLocked(ctx context.Context) error {
 		CaptchaToken string `json:"captcha_token"`
 		ErrorCode    int    `json:"error_code"`
 		ErrorDesc    string `json:"error_description"`
+		ExpiresIn    int64  `json:"expires_in"` // 秒；缺省 0 → 保守 1h
 	}
 	if err := r.doJSONPost(ctx, r.userHost+"/v1/shield/captcha/init", body, &out); err != nil {
 		return fmt.Errorf("pikpak captcha init: %w", err)
@@ -212,8 +218,48 @@ func (r *ShareResolver) refreshCaptchaLocked(ctx context.Context) error {
 		return fmt.Errorf("pikpak captcha init: code=%d desc=%q", out.ErrorCode, out.ErrorDesc)
 	}
 	r.captchaToken = out.CaptchaToken
-	r.log.Debug("pikpak captcha refreshed", "device", r.deviceID[:8])
+	r.captchaFetchedAt = time.Now()
+	r.captchaTTL = time.Duration(out.ExpiresIn) * time.Second
+	if r.captchaTTL <= 0 {
+		r.captchaTTL = time.Hour // 缺省保守 1h（与分享直链 expire 实测同量级）
+	}
+	r.log.Debug("pikpak captcha refreshed", "device", r.deviceID[:8], "ttl", r.captchaTTL)
 	return nil
+}
+
+// RefreshLink 轻量重取单个分享文件的直链（round-8 Minor：reResolve 不再全量重列）。
+// 校验分享仍存在（shareDetail 一次，O(1) 列表）+ 单文件 file_info；分享被换（fileID 消失）
+// 或 token 陈旧时返回错误/自动刷新。返回 (新直链, hash, err)。
+func (r *ShareResolver) RefreshLink(ctx context.Context, shareID, fileID string) (string, string, error) {
+	r.mu.Lock()
+	if r.captchaToken == "" || time.Since(r.captchaFetchedAt) > r.captchaTTL*2/3 {
+		if capErr := r.refreshCaptchaLocked(ctx); capErr != nil {
+			r.mu.Unlock()
+			return "", "", capErr
+		}
+	}
+	tok, dev := r.captchaToken, r.deviceID
+	r.mu.Unlock()
+
+	files, err := r.shareDetail(ctx, shareID, tok, dev)
+	if err != nil {
+		return "", "", err
+	}
+	found := false
+	for _, f := range files {
+		if f.ID == fileID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", "", fmt.Errorf("pikpak share file %s not found (share changed?)", fileID)
+	}
+	link, hash, err := r.fileInfo(ctx, shareID, fileID, tok, dev)
+	if err != nil {
+		return "", "", err
+	}
+	return link, hash, nil
 }
 
 // shareDetail 列分享文件（/drive/v1/share?share_id=...）。
