@@ -45,6 +45,7 @@ type HybridMetrics struct {
 	FallbackTotal        atomic.Int64 // **整任务**委托降级下载器次数（round-8：与 chunk 级
 	// 降级区分，运维可观测「匿名路径整体失效」）
 	ShareBytesSaved   atomic.Int64 // 分享区实际下载字节（免账号配额）
+	AccountBytesUsed  atomic.Int64 // 账号区实际下载字节（多账号分片总量，运维可观测配额分摊）
 	BoundaryOvershoot atomic.Int64 // 416 边界误判（分享区超限）
 }
 
@@ -60,6 +61,7 @@ func (m *HybridMetrics) HybridCounters() map[string]int64 {
 		"pikpak_hybrid_downgrade_total":        m.DowngradeTotal.Load(),
 		"pikpak_hybrid_fallback_total":         m.FallbackTotal.Load(),
 		"pikpak_hybrid_share_bytes_saved":      m.ShareBytesSaved.Load(),
+		"pikpak_hybrid_account_bytes_used":     m.AccountBytesUsed.Load(),
 		"pikpak_hybrid_boundary_overshoot":     m.BoundaryOvershoot.Load(),
 	}
 }
@@ -75,6 +77,10 @@ type HybridConfig struct {
 	AutoDelete  bool    // 完成后永久删转存（释放 6GB 空间）
 	Logger      *slog.Logger
 	Metrics     *HybridMetrics
+	// AccountPool 是多账号会话文件池（配额轮换 + 转存副本按账号分摊）。
+	// nil = 单账号现状（账号区全部 chunk 走当前登录态/单 API）。非 nil 时账号区
+	// chunk 按 Select round-robin 分配到多账号，每账号转存一次副本后并行 FETCH 下载。
+	AccountPool *AccountPool
 	// Fallback 是**匿名分享路径整体失败**时的降级下载器（如旧 PikpakDownloader 完整账号下载）。
 	// 设计 §1.2：分享直链任何失败不阻断任务——resolve 失败/无直链/未知大小时委托降级
 	// （chunk 级降级已内建：分享段失败转账号段）。nil = 无降级（失败如实上报）。
@@ -94,6 +100,7 @@ type HybridDownloader struct {
 	autoDelete  bool
 	log         *slog.Logger
 	metrics     *HybridMetrics
+	pool        *AccountPool          // 多账号会话池（nil = 单账号现状）
 	fallback    downloader.Downloader // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
@@ -120,6 +127,10 @@ type downloadCtx struct {
 	destPath   string
 	prog       atomic.Int64
 	onProgress downloader.ProgressFunc
+	// 多账号分片（round-12）：accounted 记录已转存副本的账号（name→转存文件 ID），
+	// 每账号首次选中时 Use 转存一次，后续该账号的 chunk 复用直链（避免 N×重复转存占空间）。
+	accounted map[string]string
+	acctMu    sync.Mutex // 保护 accounted
 }
 
 // NewHybridDownloader 创建混合下载器。
@@ -162,7 +173,7 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 	return &HybridDownloader{
 		resolver: cfg.Resolver, api: cfg.API, client: client,
 		chunkSize: chunk, shareRatio: ratio, concurrency: conc, autoDelete: cfg.AutoDelete,
-		log: log, metrics: cfg.Metrics, fallback: cfg.Fallback,
+		log: log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
 	}, nil
 }
 
@@ -223,11 +234,20 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	}
 	// ②-⑥ 分片规划/预分配/并行下载/校验/删除
 	dc := &downloadCtx{
-		currentTotal: total, lease: NewRestoreLease(d.api, d.autoDelete, d.log),
+		currentTotal: total, lease: NewRestoreLease(d.api, d.pool, d.autoDelete, d.log),
 		shareID: shareID, target: target, destPath: destPath, onProgress: onProgress,
+		accounted: make(map[string]string),
 	}
 	if _, tok := parseShareIDWithToken(source); tok != "" {
 		dc.shareToken = tok // round-11：token 分享的 re-resolve 需带 token
+	}
+	// 多账号运行时对账（round-14）：CLI 运行期 `sproxy pikpak account add/remove` 写入 secrets
+	// 卷后经 RefreshAccounts 生效——与旧下载器 download() 一致（否则 hybrid 池固定为启动快照，
+	// F5/接线不对称：CLI 添加账号后旧下载器可用、hybrid 不识别）。List 失败用现有列表继续。
+	if d.pool != nil {
+		if rerr := d.pool.RefreshAccounts(ctx); rerr != nil {
+			d.log.Warn("hybrid refresh accounts", "err", rerr)
+		}
 	}
 	return d.runHybrid(ctx, dc, sinkFactory)
 }
@@ -436,7 +456,17 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadC
 
 // downloadAccountChunk 账号区 chunk：转存（幂等一次）→ 定位 → FETCH 直链 → Range 下载。
 // 转存经 RestoreLease 内部锁串行化（多账号 chunk 并行时只转存一次）+ FindInDrive 幂等检查。
+//
+// 多账号分片（round-12）：d.pool 非 nil 时，每 chunk 经 pool.Select（round-robin + 配额预检）
+// 选一个账号；该账号首次选中时 Use 内转存一次（dc.accounted 去重），后续该账号的 chunk
+// 复用已转存 fid 的 FETCH 直链（每 chunk 重取新直链防 TTL）。不同账号的 chunk 天然并行。
 func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloadCtx, c chunk) error {
+	// 多账号分片（round-12+）：d.pool 非 nil 且池内有账号时走多账号路由。
+	// 空池回退单账号路径（round-14：与旧下载器语义一致——已装配池但未添加账号时
+	// 用当前 CLI 登录态，不报「no account」硬错；池非空但配额不足才如实报错）。
+	if d.pool != nil && len(d.pool.Accounts()) > 0 {
+		return d.downloadAccountChunkMulti(ctx, dc, c)
+	}
 	// 🟡 账号区 chunk 韧性：失败重试 1 次（FETCH 链接每次新取，瞬时网络抖动可恢复）——
 	// 与分享区重试对称，避免单次抖动整段放弃（manager 外层整任务重试兜底不够 chunk 级）。
 	for attempt := 1; ; attempt++ {
@@ -453,6 +483,116 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloa
 			return err
 		}
 	}
+}
+
+// downloadAccountChunkMulti 多账号分片：Select 选账号 → Use 内转存（去重）+ FETCH 下载。
+// 失败重试 1 次；账号级失败 MarkFailed 冷却 + 重 Select（换账号）。
+func (d *HybridDownloader) downloadAccountChunkMulti(ctx context.Context, dc *downloadCtx, c chunk) error {
+	for attempt := 1; ; attempt++ {
+		// 配额预检按**chunk 长度**（round-13）：账号只下载其分到的 chunk——转存整文件占的是
+		// 该账号**网盘空间**（不占每日下载配额），Select 的 neededBytes 语义是「本次要下的字节」。
+		// 此前按整文件大小预检，文件大于单账号剩余配额时池能力充沛也 ErrNoAccountAvailable，
+		// 多账号分摊大文件的核心场景被自己堵死；按 chunk 预检让 round-robin 按剩余配额自平衡，
+		// 某账号配额耗尽后 Select 自动跳过换下一账号。
+		acct, serr := d.pool.Select(ctx, c.length)
+		if serr != nil {
+			return fmt.Errorf("hybrid multi-account: no account available: %w", serr)
+		}
+		err := d.tryMultiAccountChunk(ctx, dc, c, acct)
+		if err == nil {
+			return nil
+		}
+		if attempt == 2 {
+			return err
+		}
+	}
+}
+
+// tryMultiAccountChunk 单次尝试：取账号直链 + 下载 chunk + 记账。失败按过错分类：
+// 取链失败（转存/直链——账号级过错）MarkFailed 冷却；下载失败不冷却（网络抖动可重试，
+// 重试时 Select 按最新用量自动换账号——其他任务并发扣减使剩余不足时会跳过）。
+func (d *HybridDownloader) tryMultiAccountChunk(ctx context.Context, dc *downloadCtx, c chunk, acct *Account) error {
+	link, linkErr := d.multiAccountLink(ctx, dc, acct)
+	if linkErr != nil {
+		if ctx.Err() == nil {
+			_ = d.pool.MarkFailed(ctx, acct.Name)
+		}
+		d.log.Warn("hybrid multi-account use/link failed", "acct", acct.Name, "err", linkErr)
+		return linkErr
+	}
+	if err := d.downloadChunkRange(ctx, dc, c, link); err != nil {
+		d.log.Warn("hybrid multi-account chunk attempt failed", "acct", acct.Name, "offset", c.offset, "err", err)
+		return err
+	}
+	// 成功记账（配额扣减；persist 失败仅配额缓存漂移，下次 Select 预检兜底）
+	if rerr := d.pool.RecordUsage(ctx, acct.Name, c.length); rerr != nil {
+		d.log.Warn("hybrid multi-account record usage", "acct", acct.Name, "err", rerr)
+	}
+	d.metricsInc(func(m *HybridMetrics) { m.AccountBytesUsed.Add(c.length) }) // 账号区字节可观测
+	return nil
+}
+
+// multiAccountLink 为 chunk 获取账号直链。round-13 Critical 修复：**全部会话相关 API 调用
+// 都放在 Use（sessionMu）内**——此前 accounted 命中路径的 DownloadLink 在 Use 外执行，
+// 并发 Use 切换会话后 API 缓存的是上一账号 token，以错账号 token 签名请求正确 fid → 403
+// → MarkFailed 冤枉健康账号 + 重试链可能双双失败导致整任务失败。Use 串行化后每次重读
+// 当前账号凭证，会话亲和。
+//
+// 该账号已转存（accounted 命中）→ 复用 fid 直链；否则 Use 内转存一次并拿直链
+// （每次重取新直链防 TTL）。accounted 去重回答「每账号只转存一次」（避免 N×重复转存占空间）。
+func (d *HybridDownloader) multiAccountLink(ctx context.Context, dc *downloadCtx, acct *Account) (string, error) {
+	var link string
+	useErr := d.pool.Use(ctx, acct.Name, func() error {
+		// 会话已切到 acct：清 token 缓存，让后续 REST 从新账号凭据文件重读（C1；含 accounted
+		// 命中路径——上一次 Use 缓存的可能是其他账号 token）。
+		d.api.ResetToken()
+		// 锁内二次确认：并发 chunk 同账号首转存时只转一次（Use 串行化保证第二份读到已写入值）。
+		dc.acctMu.Lock()
+		f, ok := dc.accounted[acct.Name]
+		dc.acctMu.Unlock()
+		if !ok {
+			var rerr error
+			f, rerr = d.restoreForAccount(ctx, dc, acct.Name)
+			if rerr != nil {
+				return rerr
+			}
+			dc.acctMu.Lock()
+			dc.accounted[acct.Name] = f
+			dc.acctMu.Unlock()
+		}
+		l, lerr := d.api.DownloadLink(ctx, f)
+		if lerr != nil {
+			return fmt.Errorf("hybrid multi-account link %s: %w", acct.Name, lerr)
+		}
+		link = l
+		return nil
+	})
+	if useErr != nil {
+		return "", useErr
+	}
+	return link, nil
+}
+
+// restoreForAccount 在 Use 会话内转存分享 + 定位转存文件，返回转存文件 ID（该账号网盘内）。
+// 复用单账号 restoreAndLink 的幂等逻辑（FindInDrive 命中 + RestoreShare + locateRestored）。
+// 转存副本的 AutoDelete 登记按账号 TrackIn（Release 逐账号会话删除，round-13 Critical）。
+func (d *HybridDownloader) restoreForAccount(ctx context.Context, dc *downloadCtx, acctName string) (string, error) {
+	// 幂等：先查同名同大小同 hash 已存在的转存文件（该账号网盘内）
+	if _, id, ok := d.idempotentRestored(ctx, dc, acctName); ok {
+		return id, nil
+	}
+	fid, owned, err := d.api.RestoreShare(ctx, dc.shareID, []string{dc.target.ID}, "")
+	if err != nil {
+		return "", fmt.Errorf("hybrid restore %s: %w", dc.shareID, err)
+	}
+	driveFile, err := d.locateRestored(ctx, fid)
+	if err != nil {
+		return "", err
+	}
+	if !owned {
+		dc.lease.TrackIn(acctName, driveFile.ID) // AutoDelete 释放时按该账号会话永久删
+	}
+	return driveFile.ID, nil
 }
 
 // restoreAndLink 转存（幂等）+ 定位转存文件 + 拿 FETCH 直链。
@@ -484,8 +624,8 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx) 
 	}
 	dc.reusedMu.Unlock()
 	// 幂等：先查同名同大小已存在的转存文件（避免重复 restore 累积副本），
-	// 命中且 hash 一致则复用（抽取 helper 控制复杂度）。
-	if link, id, ok := d.idempotentRestored(ctx, dc); ok {
+	// 命中且 hash 一致则复用（抽取 helper 控制复杂度；"" = 当前会话/单账号）。
+	if link, id, ok := d.idempotentRestored(ctx, dc, ""); ok {
 		dc.reusedMu.Lock()
 		dc.reusedID = id
 		dc.reusedMu.Unlock()
@@ -956,7 +1096,8 @@ func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *S
 
 // idempotentRestored 幂等检查：网盘已有同名同大小且 hash 一致的转存 → 复用并记录，返回 (link, true)。
 // 无 hash 可比对（目标/网盘 hash 缺失）时保守返回 false（不信任 size 匹配，走 restore）。
-func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx) (link, id string, ok bool) {
+// acctName 为账号名（"" = 当前会话/单账号），用于按账号登记 AutoDelete 副本（多账号 Release 逐会话删）。
+func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, acctName string) (link, id string, ok bool) {
 	existing, err := d.api.FindInDrive(ctx, dc.target.Name, dc.target.Size)
 	if err != nil || existing == nil {
 		return "", "", false
@@ -972,7 +1113,22 @@ func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadC
 	// 用户的自有文件（数据丢失，round-6 对抗评审）。判别：restore 副本位于「Pack From Shared」
 	// 文件夹（实测），用户自有文件在普通位置——parent 不是 Pack From Shared 的只复用、不登记。
 	if d.isRestoreCopy(ctx, existing) {
-		dc.lease.Track(existing.ID) // restore 副本（AutoDelete 时 Release 永久删）
+		dc.lease.TrackIn(acctName, existing.ID) // restore 副本（AutoDelete 时按账号会话 Release 永久删）
+		// 已知限制（2026-10-05 评审记录，非本轮引入）：并发任务共享同一分享时，两任务可能
+		// 都 idempotent 命中同一 restore 副本并各自 Track——先完成方 Release 删除后，
+		// 后完成方在途 chunk 会失败。属跨任务协调问题（需 per-task 租约/删除引用计数），
+		// 待「单一内部类型 + 策略路由」统一架构时一并解决（单账号路径同样存在）。
+		//
+		// 配额**咨询性**语义（2026-10-05 追加）：Select 的每日配额预检是软预留——基于当时
+		// DailyUsed 判断「剩余 ≥ 本 chunk」，但预留不占用，chunk 下载成功后才 RecordUsage 事后
+		// 提交。因此并发任务共享同一账号池时，多个任务可能在同一账号的软预留窗口内都被选中、
+		// 并行拉取，该账号本地记账 DailyUsed 会较估算短暂**超过**当日配额（本 ID 为每次 Select
+		// 的软预检结果，非原子预留）。这是刻意为之——日配额是**真实网盘流量的 advisory 估算**
+		// 而非硬性限流：超额只是本地记账超、不损坏数据，也不改变每账号真实可达的流量上限。故
+		// 不加预留（reserve/decrement 机制）——引入它就需账号级预留计数 + 失败释放，跨 Use 锁上
+		// 有饥饿/死锁风险，且对 advisory 语义无收益。会计精确性（并发 RecordUsage 无丢更新）由
+		// TestAccountPool_Synctest_ConcurrentOps_CrossMidnight 与
+		// TestHybridDownload_MultiAccount_ConcurrentSharedPool 锁定。
 	} else {
 		d.log.Info("hybrid restore reuse (non-restore-copy, skip delete registration)",
 			"id", existing.ID, "name", existing.Name)

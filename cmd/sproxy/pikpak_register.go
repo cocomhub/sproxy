@@ -111,7 +111,7 @@ func registerPikpakDownloader(cfg *server.Config) {
 		})
 		slog.Info("pikpak downloader registered", "priority", 10)
 
-		registerHybridIfEnabled(cfg, api, dl)
+		registerHybridIfEnabled(cfg, api, dl, pool)
 	})
 }
 
@@ -119,7 +119,7 @@ func registerPikpakDownloader(cfg *server.Config) {
 // 默认启用（Disable 零值 false=开；true 才显式禁用）：分享 URL 优先 hybrid。
 // 注册走 RegisterHybridDownloader（可测试化的全局能力：注册表经参数注入，
 // 生产传全局 DefaultRegistry，测试传本地 NewRegistry() 实例——R18 策略 2026-10-05）。
-func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.PikpakDownloader) {
+func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.PikpakDownloader, pool *pikpak.AccountPool) {
 	if cfg.Pikpak.Hybrid.Disable {
 		return
 	}
@@ -132,6 +132,8 @@ func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.Pik
 		AutoDelete:  cfg.Pikpak.Hybrid.AutoDelete,
 		Logger:      slog.Default(),
 		Metrics:     &pikpak.HybridMetrics{},
+		// 多账号分片（round-12）：非 nil 时账号区 chunk 分摊到多账号并行（转存串行+下载并行）
+		AccountPool: pool,
 		// Fallback：匿名分享路径整体失败时降级到旧 PikpakDownloader 完整账号下载
 		// （设计 §1.2——resolve 失败/无直链不阻断任务）。
 		Fallback: dl,

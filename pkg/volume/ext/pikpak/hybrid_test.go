@@ -470,7 +470,9 @@ func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
 	}
 }
 
-// TestHybridManifest_Resume 验证：manifest 记录已完成 chunk → 重跑跳过（崩溃恢复）。
+// TestHybridManifest_Resume 验证 manifest 崩溃恢复语义：失败路径保留 manifest（成功路径
+// removeManifest），二次下载内容一致。manifest 跳过已完成 chunk 的断言见多账号版
+// TestHybridDownload_MultiAccount_CrashResume（分享区完成 + 账号区失败 → 重跑跳过分享区）。
 func TestHybridManifest_Resume(t *testing.T) {
 	t.Parallel()
 	payload := make([]byte, 8<<20)
@@ -551,12 +553,21 @@ func TestHybridManifest_Resume(t *testing.T) {
 	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
 		t.Fatalf("first download error: %v", err)
 	}
-	// 第二次：重跑 → manifest 存在但 runChunks 完成后删除 → 应全部跳过（无新 Range 请求）
+	// 第二次：重跑。注意：**成功下载会在 runHybrid 尾部 removeManifest**（manifest 只用于
+	// 崩溃恢复——失败路径保留、成功路径清理），因此二次重跑是全量重下（内容仍一致）。
+	// manifest 跳过语义由失败路径（中途失败留 manifest）的真实崩溃场景验证——
+	// 见 TestHybridDownload_MultiAccount_CrashResume（多账号版）与失败路径测试。
 	hd2 := mkDownloader()
 	if _, err := hd2.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
 		t.Fatalf("resume download error: %v", err)
 	}
-	_ = servedOffsets // 首次下载已请求；重跑跳过（manifest 删除在 runChunks 后）——此处验证不 panic
+	// 首次下载已请求（读与 /share/dl handler 的 append 同步，见下）。
+	// 读必须与 /share/dl handler 的 append 同步（race 修复，2026-10-05 CI #37285601215）：
+	// probeRangeOK 只读 probeSize 就返回、客户端随即关闭连接，handler 的 append 可能在
+	// 请求返回后才执行——无锁读 servedOffsets 是 data race（handler goroutine 晚于测试体）。
+	mu.Lock()
+	_ = servedOffsets
+	mu.Unlock()
 	got, _ := os.ReadFile(dest)
 	if string(got) != string(payload) {
 		t.Error("content mismatch after resume")

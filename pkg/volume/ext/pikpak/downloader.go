@@ -233,7 +233,10 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 	// 多账号池装配 → 轮换下载（Select 真实 size 预检 + Use 包住转存+下载）；否则当前登录态。
 	// round-10 用户裁决：转存副本释放收归 RestoreLease（单一机制，DeletePermanent）——
 	// 旧下载器不再自行实现 AutoDelete/batchTrash（不释放空间），与 hybrid 共用同一释放语义。
-	lease := NewRestoreLease(d.api, d.autoDelete, d.log)
+	// round-13：pool 传 nil——旧下载器把 Release 包在自己的 Use 块内调用（下方
+	// downloadViaPool 的 Use 闭包里 lease.Release(ctx)），current 会话即该账号，
+	// finalizeDownload 也走当前会话；传 pool 会嵌套 Use（sessionMu 非重入）→ 死锁。
+	lease := NewRestoreLease(d.api, nil, d.autoDelete, d.log)
 	if d.pool != nil {
 		// 运行时对账：CLI 运行期 add/remove 生效（F5/接线 Critical）；List 失败用现有列表。
 		if rerr := d.pool.RefreshAccounts(ctx); rerr != nil {
