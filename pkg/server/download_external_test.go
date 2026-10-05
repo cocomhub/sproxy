@@ -16,10 +16,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
-	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -139,7 +139,7 @@ func TestResolveExternalDownload_BState302(t *testing.T) {
 // 必须走服务端转发）。只收紧（强制转发），无提权面。
 func TestResolveExternalDownload_EgressForwardForcesA(t *testing.T) {
 	t.Parallel()
-	v := volume.Volume{Name: "eg", Type: cluster.TypeEgress, DirectLink: true}
+	v := volume.Volume{Name: "eg", Type: clustercred.TypeEgress, DirectLink: true}
 	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://eg.example.com/download?egress_forward=1"}
 	h := newExternalTestEnv(t, v, fs)
 

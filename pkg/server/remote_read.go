@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/volume"
-	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 )
 
 // peerFingerprintProvider 抽象「已认证对端指纹」的来源。
@@ -179,9 +179,9 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 
 // credentialFor 按对端指纹在凭证池中验签并返回有效凭证（目标节点侧集群出口授权）。
 // creds nil（未装配凭证）→ (zero, false)（仅静态 mesh_readers，零回归）。
-func (rh *remoteReadHandler) credentialFor(volName, fingerprint string) (cluster.Credential, bool) {
+func (rh *remoteReadHandler) credentialFor(volName, fingerprint string) (clustercred.Credential, bool) {
 	if rh.creds == nil {
-		return cluster.Credential{}, false
+		return clustercred.Credential{}, false
 	}
 	return rh.creds.credentialFor(volName, fingerprint)
 }

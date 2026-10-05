@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -62,7 +63,7 @@ func newTestIdentity(t *testing.T) *tunnel.Identity {
 
 // egressVolume 构造 type: egress 卷（Extra 携带归属映射）。
 func egressVolume(name string, extra map[string]any) volume.Volume {
-	return volume.Volume{Name: name, Type: TypeEgress, Extra: extra}
+	return volume.Volume{Name: name, Type: clustercred.TypeEgress, Extra: extra}
 }
 
 // TestParseEgressConfig_MissingRejected：缺 holder_node/volume/fingerprint → 拒绝。
@@ -223,7 +224,7 @@ func TestClusterFS_WriteReadOnly(t *testing.T) {
 func TestRegisterBackend(t *testing.T) {
 	t.Parallel()
 	RegisterBackend(memDialer(), newTestIdentity(t), []byte("0123456789abcdef0123456789abcdef"))
-	defer registry.UnregisterBackendForTest(TypeEgress)
+	defer registry.UnregisterBackendForTest(clustercred.TypeEgress)
 	be, err := registry.NewBackend(context.Background(), egressVolume("eg1", map[string]any{
 		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
 	}))

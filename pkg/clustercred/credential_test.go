@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package cluster
+package clustercred
 
 // credential_test.go 验证凭证签发/验签（集群出口核心安全件，用户裁定凭证下发）：
 // 签发→验签成功；篡改/过期/scope/路径越界/载荷缺失 → fail-closed 哨兵错误。

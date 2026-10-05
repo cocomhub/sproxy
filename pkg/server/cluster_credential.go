@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 )
 
 // clusterCredentialSet 是目标节点持有的集群出口凭证池（装配期解析，运行期只读）。
@@ -26,26 +26,26 @@ type clusterCredentialSet struct {
 	// signKey 是签发方 SK（验签本节点签发的全部凭证；32B）。
 	signKey []byte
 	// creds 是凭证池（多条凭证，每条指向不同出口节点指纹）。
-	creds map[string]cluster.Credential // 对端指纹 → 凭证
+	creds map[string]clustercred.Credential // 对端指纹 → 凭证
 	log   *slog.Logger
 }
 
 // credentialFor 按对端指纹返回有效凭证（验签 + 时效 + scope）。
 // 返回 (凭证, true) 表示该对端已被持有节点授权（替代静态 mesh_readers）。
-func (s *clusterCredentialSet) credentialFor(volName, fingerprint string) (cluster.Credential, bool) {
+func (s *clusterCredentialSet) credentialFor(volName, fingerprint string) (clustercred.Credential, bool) {
 	if s == nil {
-		return cluster.Credential{}, false
+		return clustercred.Credential{}, false
 	}
 	cred, ok := s.creds[strings.TrimSpace(fingerprint)]
 	if !ok {
-		return cluster.Credential{}, false
+		return clustercred.Credential{}, false
 	}
 	if verr := cred.Verify(s.signKey, time.Now()); verr != nil {
 		// 凭证过期/签名不符 → 视为未授权（fail-closed，不泄露原因）。
 		if s.log != nil {
 			s.log.Debug("集群出口凭证验签失败", "fingerprint", fingerprint, "err", verr)
 		}
-		return cluster.Credential{}, false
+		return clustercred.Credential{}, false
 	}
 	return cred, true
 }
@@ -68,9 +68,9 @@ func newClusterCredentialSet(cfg *Config, log *slog.Logger) (*clusterCredentialS
 	if _, derr := hex.Decode(sk, []byte(skHex)); derr != nil {
 		return nil, errClusterCredentialSignKey
 	}
-	creds := make(map[string]cluster.Credential, len(cfg.Cluster.Credentials))
+	creds := make(map[string]clustercred.Credential, len(cfg.Cluster.Credentials))
 	for _, ec := range cfg.Cluster.Credentials {
-		c, perr := cluster.ParseCredential(ec.Encoded)
+		c, perr := clustercred.ParseCredential(ec.Encoded)
 		if perr != nil {
 			return nil, perr
 		}

@@ -7,7 +7,7 @@
 // 凭证模式（用户裁定 2026-10-05）：持有节点签发**自包含短效凭证**（HMAC 签名 +
 // 时效 + scope + 路径范围），出口节点凭凭证访问指定真实卷——下发端控制时效/白名单/
 // 范围。凭证替代静态 mesh_readers 指纹绑定（目标节点授权层动态验签）。
-package cluster
+package clustercred
 
 import (
 	"crypto/hmac"

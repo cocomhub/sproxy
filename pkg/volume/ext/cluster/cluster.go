@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -71,7 +72,7 @@ type clusterBackend struct {
 // 签发；目标节点侧验签）。
 func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer,
 	identity *tunnel.Identity, signKey []byte, opts ...remote.Option) (registry.ExternalBackend, error) {
-	if v.Type != TypeEgress {
+	if v.Type != clustercred.TypeEgress {
 		return nil, fmt.Errorf("cluster backend: 卷 %q 类型 %q 不是 egress 卷", v.Name, v.Type)
 	}
 	if dialer == nil {
@@ -136,7 +137,7 @@ func RegisterBackend(dialer remote.Dialer, identity *tunnel.Identity, signKey []
 	default:
 		close(registerOnce)
 	}
-	registry.RegisterBackend(TypeEgress, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
+	registry.RegisterBackend(clustercred.TypeEgress, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		return NewBackend(ctx, v, dialer, identity, signKey)
 	})
 }

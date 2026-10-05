@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -38,7 +39,7 @@ func TestClusterEgress_CredentialEndToEnd(t *testing.T) {
 	writeBFileInServer(t, cfg, "docs/video.bin", body)
 
 	// 出口侧（A）：cluster.NewBackend（凭证 → remote.Client：本端 aID + 持有指纹 pin bFP）。
-	egVol := volume.Volume{Name: "eg1", Type: cluster.TypeEgress, Extra: map[string]any{
+	egVol := volume.Volume{Name: "eg1", Type: clustercred.TypeEgress, Extra: map[string]any{
 		"holder_node": testReaderNodeA, "holder_volume": testDualVol,
 		"holder_fingerprint": bFP,
 		"egress_base_url":    "https://eg.example.com",
@@ -118,7 +119,7 @@ func TestClusterEgress_DirectURL_302NoLoop(t *testing.T) {
 	body := []byte("egress-direct-url-body")
 	writeBFileInServer(t, cfg, "docs/f.bin", body)
 
-	egVol := volume.Volume{Name: "eg1", Type: cluster.TypeEgress, DirectLink: true, Extra: map[string]any{
+	egVol := volume.Volume{Name: "eg1", Type: clustercred.TypeEgress, DirectLink: true, Extra: map[string]any{
 		"holder_node": testReaderNodeA, "holder_volume": testDualVol,
 		"holder_fingerprint": bFP, "egress_base_url": "https://eg.example.com",
 	}}
@@ -161,7 +162,7 @@ func TestClusterEgress_StatSize(t *testing.T) {
 	body := []byte("stat-size-check")
 	writeBFileInServer(t, cfg, "docs/stat.bin", body)
 
-	egVol := volume.Volume{Name: "eg1", Type: cluster.TypeEgress, Extra: map[string]any{
+	egVol := volume.Volume{Name: "eg1", Type: clustercred.TypeEgress, Extra: map[string]any{
 		"holder_node": testReaderNodeA, "holder_volume": testDualVol,
 		"holder_fingerprint": bFP,
 	}}
