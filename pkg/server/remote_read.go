@@ -13,6 +13,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 )
 
 // peerFingerprintProvider 抽象「已认证对端指纹」的来源。
@@ -37,6 +38,9 @@ type peerFingerprintProvider interface {
 type remoteReadHandler struct {
 	h    *Handlers
 	peer peerFingerprintProvider
+	// creds 是集群出口凭证池（2026-10-05 用户裁定凭证下发）：持有节点签发、装配注入；
+	// authorize 在静态 mesh_readers 未命中时按对端指纹验签授权（时效/scope 下发端控制）。
+	creds *clusterCredentialSet
 }
 
 // remoteTarget 是一次已授权远程读的目标上下文。
@@ -48,8 +52,9 @@ type remoteTarget struct {
 }
 
 // newRemoteReadHandler 构造只读路由表（每连接一个：指纹是连接级属性）。
-func (h *Handlers) newRemoteReadHandler(peer peerFingerprintProvider) http.Handler {
-	rh := &remoteReadHandler{h: h, peer: peer}
+// creds 是集群出口凭证池（可 nil = 未装配凭证，仅静态 mesh_readers 授权，零回归）。
+func (h *Handlers) newRemoteReadHandler(peer peerFingerprintProvider, creds *clusterCredentialSet) http.Handler {
+	rh := &remoteReadHandler{h: h, peer: peer, creds: creds}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /remote/list", rh.handleList)
 	mux.HandleFunc("HEAD /remote/stat", rh.handleStat)
@@ -153,12 +158,32 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 	}
 	mr, ok := vol.MeshReaderFor(fp)
 	if !ok {
-		return deny(http.StatusNotFound, AuditResultDenied, "指纹未列入本卷 mesh_readers")
+		// **集群出口凭证授权（2026-10-05 用户裁定）**：静态 mesh_readers 未命中时，
+		// 尝试凭证验签——持有节点签发的自包含短效凭证（HMAC+时效+scope+范围）替代
+		// 静态指纹绑定。验签通过 = 该对端已被持有节点授权（下发端控制时效/白名单）。
+		if cred, ok := rh.credentialFor(volName, fp); ok {
+			// 白名单：连接对端指纹 == 凭证 Recipient（只对签发的出口节点有效）。
+			if aerr := cred.AuthorizedFor(fp); aerr != nil {
+				return deny(http.StatusNotFound, AuditResultDenied, "凭证白名单未命中对端指纹")
+			}
+			// 映射为 (node=凭证.Node, owner=凭证.Owner)。
+			return &remoteTarget{vol: vol, node: cred.Node, owner: cred.Owner, path: relPath}, true
+		}
+		return deny(http.StatusNotFound, AuditResultDenied, "指纹未列入本卷 mesh_readers 且无有效凭证")
 	}
 	if !vol.AuthorizeMeshRead(mr.Node, fp, mr.Owner) {
 		return deny(http.StatusNotFound, AuditResultDenied, "授权三元组未通过 node="+mr.Node)
 	}
 	return &remoteTarget{vol: vol, node: mr.Node, owner: mr.Owner, path: relPath}, true
+}
+
+// credentialFor 按对端指纹在凭证池中验签并返回有效凭证（目标节点侧集群出口授权）。
+// creds nil（未装配凭证）→ (zero, false)（仅静态 mesh_readers，零回归）。
+func (rh *remoteReadHandler) credentialFor(volName, fingerprint string) (cluster.Credential, bool) {
+	if rh.creds == nil {
+		return cluster.Credential{}, false
+	}
+	return rh.creds.credentialFor(volName, fingerprint)
 }
 
 // delegate 在**已完成授权**的前提下执行读操作：**直调 pkg/files 的域操作**，自行写响应。

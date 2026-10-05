@@ -18,6 +18,7 @@ func newTestCredential(t *testing.T, sk []byte) Credential {
 		Node:       "holder-a",
 		Volume:     "main",
 		Owner:      "alice",
+		Recipient:  "egress-fp",
 		Scope:      "read",
 		PathPrefix: "",
 		IssuedAt:   time.Now().Add(-time.Minute).Unix(),
@@ -92,7 +93,7 @@ func TestCredential_ExpiredRejected(t *testing.T) {
 	t.Parallel()
 	sk := []byte("0123456789abcdef0123456789abcdef")
 	c := Credential{
-		Node: "h", Volume: "v", Owner: "o", Scope: "read",
+		Node: "h", Volume: "v", Owner: "o", Recipient: "fp", Scope: "read",
 		IssuedAt:  time.Now().Add(-2 * time.Hour).Unix(),
 		ExpiresAt: time.Now().Add(-time.Hour).Unix(), // 已过期
 	}
@@ -107,7 +108,7 @@ func TestCredential_PathPrefixScope(t *testing.T) {
 	t.Parallel()
 	sk := []byte("0123456789abcdef0123456789abcdef")
 	c := Credential{
-		Node: "h", Volume: "v", Owner: "o", Scope: "read",
+		Node: "h", Volume: "v", Owner: "o", Recipient: "fp", Scope: "read",
 		PathPrefix: "docs/",
 		IssuedAt:   time.Now().Add(-time.Minute).Unix(),
 		ExpiresAt:  time.Now().Add(time.Hour).Unix(),
@@ -128,7 +129,7 @@ func TestCredential_PathPrefixScope(t *testing.T) {
 func TestCredential_MalformedRejected(t *testing.T) {
 	t.Parallel()
 	sk := []byte("0123456789abcdef0123456789abcdef")
-	c := Credential{Node: "h"} // 缺 Volume/Owner/Scope
+	c := Credential{Node: "h"} // 缺 Volume/Owner/Recipient/Scope
 	c.Sign(sk)
 	if err := c.Verify(sk, time.Now()); err != ErrCredentialMalformed {
 		t.Fatalf("缺字段应 ErrCredentialMalformed, got %v", err)

@@ -27,6 +27,9 @@ type RemoteReadListener struct {
 	logger *slog.Logger
 	cfg    *Config
 	h      *Handlers
+	// creds 是集群出口凭证池（2026-10-05 用户裁定凭证下发；nil = 未装配，仅静态
+	// mesh_readers 授权，零回归）。
+	creds *clusterCredentialSet
 
 	// acceptDone 在 acceptLoop 退出时关闭（确定性信号：accept 已停止）。
 	acceptDone chan struct{}
@@ -92,7 +95,15 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 		return nil, fmt.Errorf("remote_read 拒绝启动：无任何 mesh_readers 指纹（fail-closed，无 pin 将接受任意对端）")
 	}
 
-	l := &RemoteReadListener{ln: ln, logger: log, cfg: cfg, h: h, acceptDone: make(chan struct{})}
+	// 集群出口凭证池（2026-10-05 用户裁定）：持有节点签发凭证，目标节点验签授权
+	// 出口节点（静态 mesh_readers 之外的白名单）。解析失败 → 装配 fail-closed。
+	creds, cerr := newClusterCredentialSet(cfg, log)
+	if cerr != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("remote_read 拒绝启动：集群出口凭证配置非法（fail-closed）: %w", cerr)
+	}
+
+	l := &RemoteReadListener{ln: ln, logger: log, cfg: cfg, h: h, creds: creds, acceptDone: make(chan struct{})}
 	staticKey := tunnel.DeriveRemoteStaticKey(id.Fingerprint())
 	log.Info("remote_read 只读面已启动",
 		"listen", ln.Addr().String(), "fingerprint", id.Fingerprint(), "pinned_readers", len(pins),
@@ -183,7 +194,7 @@ func (l *RemoteReadListener) serveReadConn(ctx context.Context, c net.Conn, id *
 		tunnel.WithPeerFingerprints(pins),
 		tunnel.WithHandshakeTimeout(l.cfg.RemoteRead.HandshakeTimeout),
 	)
-	handler := l.h.newRemoteReadHandler(tun)
+	handler := l.h.newRemoteReadHandler(tun, l.creds)
 	if sErr := tun.Serve(ctx, handler); sErr != nil {
 		if ctx.Err() == nil {
 			l.logger.Warn("remote_read 连接结束", "remote", c.RemoteAddr().String(), "error", sErr)

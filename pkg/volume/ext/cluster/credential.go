@@ -53,6 +53,9 @@ type Credential struct {
 	Volume string `json:"volume"`
 	// Owner 是数据归属 owner（目标节点据此限定命名空间）。
 	Owner string `json:"owner"`
+	// Recipient 是**出口节点**的 xfer 身份指纹（白名单：只对指定出口节点有效；
+	// 目标节点授权时校验连接指纹 == Recipient）。
+	Recipient string `json:"recipient"`
 	// Scope 是授权范围（"read"；复用 mesh scope 归一语义）。
 	Scope string `json:"scope"`
 	// PathPrefix 是路径范围前缀（可空 = 全卷）；请求 rel 必须以其开头。
@@ -71,6 +74,7 @@ func (c Credential) Canonical() string {
 		c.Node,
 		c.Volume,
 		c.Owner,
+		c.Recipient,
 		c.Scope,
 		c.PathPrefix,
 		strconv.FormatInt(c.IssuedAt, 10),
@@ -95,7 +99,7 @@ func (c *Credential) Sign(sk []byte) {
 // 验证通过返回 nil；篡改/过期/scope 不符/路径越界 → 对应哨兵错误。
 func (c Credential) Verify(sk []byte, now time.Time) error {
 	// 1. 载荷完备性。
-	if c.Node == "" || c.Volume == "" || c.Owner == "" || c.Scope == "" {
+	if c.Node == "" || c.Volume == "" || c.Owner == "" || c.Recipient == "" || c.Scope == "" {
 		return ErrCredentialMalformed
 	}
 	if c.ExpiresAt <= c.IssuedAt {
@@ -116,6 +120,15 @@ func (c Credential) Verify(sk []byte, now time.Time) error {
 	// 4. scope（read；扩展点：write/rw 时校验请求操作）。
 	if c.Scope != "read" {
 		return ErrCredentialScope
+	}
+	return nil
+}
+
+// AuthorizedFor 判定目标节点侧的**连接对端指纹**是否被本凭证授权（白名单：
+// Recipient 精确匹配——只对签发的出口节点有效）。在 Verify 之后调用。
+func (c Credential) AuthorizedFor(peerFingerprint string) error {
+	if c.Recipient != strings.TrimSpace(peerFingerprint) {
+		return fmt.Errorf("%w: 对端指纹不在凭证白名单", ErrCredentialScope)
 	}
 	return nil
 }

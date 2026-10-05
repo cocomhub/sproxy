@@ -101,7 +101,7 @@ func newRemoteReadFixture(t *testing.T, peerFP string) (http.Handler, *Config, *
 	cfg := remoteReadTestConfig(t)
 	auditBuf := &bytes.Buffer{}
 	h := newRemoteReadHandlers(t, cfg, auditBuf)
-	return h.newRemoteReadHandler(fakePeerFingerprint{fp: peerFP}), cfg, auditBuf
+	return h.newRemoteReadHandler(fakePeerFingerprint{fp: peerFP}, nil), cfg, auditBuf
 }
 
 func doRemote(t *testing.T, h http.Handler, method, target string) *httptest.ResponseRecorder {
@@ -211,7 +211,7 @@ func TestRemoteRead_UnassembledVolSetIs500(t *testing.T) {
 	if h.volSet != nil {
 		t.Fatal("前提不成立：零值 Handlers 的 volSet 应为 nil")
 	}
-	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP})
+	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP}, nil)
 	rec := doRemote(t, rh, http.MethodGet, "/remote/list?volume=main&path=/docs")
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("卷集合未装配应 500（服务端错误，非 404）, got %d body=%s", rec.Code, rec.Body.String())
@@ -264,7 +264,7 @@ func TestRemoteRead_MeshReaderForAloneIsInsufficient(t *testing.T) {
 		t.Fatal("AuthorizeMeshRead 不应放行 ACL 白名单外的 owner")
 	}
 
-	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP})
+	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP}, nil)
 	rec := doRemote(t, rh, http.MethodGet, "/remote/list?volume=main&path=/docs")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("ACL 外 owner 的绑定应 404（不泄命名空间）, got %d body=%s", rec.Code, rec.Body.String())
@@ -340,7 +340,7 @@ func TestRemoteRead_OwnerFromConfigNotRequest(t *testing.T) {
 		t.Fatalf("前提不成立：bob 的文件应存在且为 %q, err=%v", testBobBody, err)
 	}
 
-	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP})
+	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP}, nil)
 	rec := doRemote(t, rh, http.MethodGet,
 		"/remote/download?volume=main&path=/secret.txt&owner="+testBobOwner+"&actor="+testBobOwner)
 	if rec.Code != http.StatusNotFound {
