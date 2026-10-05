@@ -67,10 +67,7 @@ func NewRangeSeeker(ctx context.Context, fs FS, rel string, size int64) (*RangeS
 			if off < 0 || off > size {
 				return nil, fmt.Errorf("sync: RangeSeeker 区间偏移 %d 越出 [0,%d]", off, size)
 			}
-			want := size - off
-			if want > rangeWindow {
-				want = rangeWindow
-			}
+			want := min(size-off, rangeWindow)
 			return rr.OpenRangeRead(ctx, rel, off, want)
 		},
 		size:   size,
@@ -153,10 +150,7 @@ func (s *RangeSeeker) open() error {
 		return fmt.Errorf("sync: RangeSeeker 打开区间 [%d,%d) 失败: %w", s.off, s.off+s.window, err)
 	}
 	s.rc = rc
-	end := s.off + s.window
-	if end > s.size {
-		end = s.size
-	}
+	end := min(s.off+s.window, s.size)
 	s.rcEnd = end
 	return nil
 }
