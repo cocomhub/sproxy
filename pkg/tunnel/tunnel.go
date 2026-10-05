@@ -49,7 +49,6 @@
 package tunnel
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -291,35 +290,6 @@ func isRelativePath(urlStr string) bool {
 type noopCloseReader struct{ io.Reader }
 
 func (noopCloseReader) Close() error { return nil }
-
-type bufferedResponseWriter struct {
-	buf      *bytes.Buffer
-	code     *int
-	hdrs     *http.Header
-	mu       sync.Mutex
-	wroteHdr bool
-}
-
-func (rw *bufferedResponseWriter) Header() http.Header { return *rw.hdrs }
-
-func (rw *bufferedResponseWriter) WriteHeader(code int) {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-	if !rw.wroteHdr {
-		*rw.code = code
-		rw.wroteHdr = true
-	}
-}
-
-func (rw *bufferedResponseWriter) Write(data []byte) (int, error) {
-	rw.mu.Lock()
-	if !rw.wroteHdr {
-		*rw.code = http.StatusOK
-		rw.wroteHdr = true
-	}
-	rw.mu.Unlock()
-	return rw.buf.Write(data)
-}
 
 // streamRecorder 是一个自定义 http.ResponseWriter，将 handler 的输出通过 Pipe 流式输出，
 // 供 EncryptStream 消费。状态码和响应头在首次 Write 时确定并通知给加密 goroutine。
