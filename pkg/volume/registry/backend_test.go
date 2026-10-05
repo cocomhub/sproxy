@@ -9,6 +9,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -51,9 +52,12 @@ func unregisterBackendForTest(typ string) {
 func TestRegisterBackend_Dispatch(t *testing.T) {
 	t.Parallel()
 	const typ = "fake-dispatch"
-	calls := 0
+	// calls 用原子计数：BackendSchemas()（schema 提取）会并发构造已注册后端，闭包内的
+	// 可变计数器必须原子化，否则 -race 触发数据竞争。本测试只钉「NewBackend 按类型分派
+	// 到构造器」——只要构造器被调过（≥1）即证明分派发生；并发路径额外构造不属分派错误。
+	var calls atomic.Int32
 	RegisterBackend(typ, func(_ context.Context, v volume.Volume) (ExternalBackend, error) {
-		calls++
+		calls.Add(1)
 		got, _ := v.Extra["key"].(string)
 		if got != "val" {
 			return nil, errors.New("Extra.key 未透传")
@@ -70,8 +74,8 @@ func TestRegisterBackend_Dispatch(t *testing.T) {
 	if be == nil {
 		t.Fatal("NewBackend 返回 nil，want 非 nil")
 	}
-	if calls != 1 {
-		t.Fatalf("构造器被调 %d 次，want 1", calls)
+	if calls.Load() < 1 {
+		t.Fatalf("构造器从未被调（NewBackend 未按类型分派）")
 	}
 	_ = be.Close()
 }
@@ -224,5 +228,70 @@ func TestSchemeOf_AfterProtocolRegistration(t *testing.T) {
 	t.Cleanup(func() { UnregisterBackendForTest(typ) })
 	if got := SchemeOf(typ); got != scheme {
 		t.Fatalf("SchemeOf(%q)=%q want %q（普通卷须声明协议供转存寻址）", typ, got, scheme)
+	}
+}
+
+// ---- BackendSchemas：SchemaProvider 可选接口（建卷表单 schema 驱动）----
+
+// schemaBackend 是带 Schema() 的 fake backend（BackendSchemas 测试）。
+type schemaBackend struct {
+	fs     syncpkg.FS
+	fields []FieldSchema
+}
+
+func (b *schemaBackend) FS() syncpkg.FS { return b.fs }
+func (b *schemaBackend) Close() error   { return nil }
+func (b *schemaBackend) Schema() []FieldSchema {
+	return b.fields
+}
+
+// TestBackendSchemas_Provider_Only 钉住：BackendSchemas 为实现 SchemaProvider 的后端
+// 返回其 fields（非 nil，序列化为 []）；未实现者 fields 为空数组（非 nil——前端依赖该键）。
+func TestBackendSchemas_Provider_Only(t *testing.T) {
+	t.Parallel()
+	const schemaTyp = "fake-schema-provider"
+	const plainTyp = "fake-schema-plain"
+	RegisterBackend(schemaTyp, func(context.Context, volume.Volume) (ExternalBackend, error) {
+		return &schemaBackend{fields: []FieldSchema{
+			{Key: "endpoint", Label: "端点", Type: "text", Required: true},
+		}}, nil
+	})
+	t.Cleanup(func() { UnregisterBackendForTest(schemaTyp) })
+	RegisterBackend(plainTyp, func(context.Context, volume.Volume) (ExternalBackend, error) {
+		return &fakeExternal{}, nil
+	})
+	t.Cleanup(func() { UnregisterBackendForTest(plainTyp) })
+
+	schemas := BackendSchemas()
+	if len(schemas) == 0 {
+		t.Fatal("BackendSchemas 返回空，want 至少含注册类型")
+	}
+	byType := make(map[string]BackendSchemaInfo, len(schemas))
+	for _, e := range schemas {
+		byType[e.Type] = e
+	}
+	s, ok := byType[schemaTyp]
+	if !ok {
+		got := make([]string, 0, len(byType))
+		for t := range byType {
+			got = append(got, t)
+		}
+		t.Fatalf("BackendSchemas 应含 %q，got types=%v", schemaTyp, got)
+	}
+	if s.Category != "linked" {
+		t.Fatalf("%q category = %q, want linked（普通外部类型）", schemaTyp, s.Category)
+	}
+	if s.Fields == nil {
+		t.Fatalf("%q 实现 SchemaProvider，fields 应为非 nil（JSON 序列化为 []）", schemaTyp)
+	}
+	if len(s.Fields) != 1 || s.Fields[0].Key != "endpoint" || !s.Fields[0].Required {
+		t.Fatalf("%q fields = %+v, want 含 endpoint 必填字段", schemaTyp, s.Fields)
+	}
+	p, ok := byType[plainTyp]
+	if !ok {
+		t.Fatalf("BackendSchemas 应含 %q", plainTyp)
+	}
+	if p.Fields == nil || len(p.Fields) != 0 {
+		t.Fatalf("%q 未实现 SchemaProvider，fields 应为空数组 []，got %+v", plainTyp, p.Fields)
 	}
 }

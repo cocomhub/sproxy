@@ -239,6 +239,96 @@ func BackendTypes() []string {
 	return out
 }
 
+// FieldSchema 声明后端创建表单的一个字段（前端 schema 驱动渲染）。
+type FieldSchema struct {
+	Key          string   `json:"key"`
+	Label        string   `json:"label"`
+	Type         string   `json:"type"` // text|volume-select|enum|bool|number
+	Required     bool     `json:"required"`
+	Options      []string `json:"options,omitempty"`
+	AllowWrapper bool     `json:"allow_wrapper,omitempty"` // volume-select 是否可选封装卷底层
+}
+
+// SchemaProvider 是 ExternalBackend 的**可选**扩展：声明本后端的创建表单 schema。
+//
+// 与 VolumeStatsProvider/HealthProbe 同模式——后端实现它则以本 schema 驱动前端建卷表单
+// （字段渲染；NewBackend 侧可用 schema 校验 Extra）。断言失败（未实现）不失败——调用方
+// 按「无字段」处理，前端仅展示 {type, category}，表单只填 name。
+type SchemaProvider interface {
+	Schema() []FieldSchema
+}
+
+// BackendSchemaInfo 是 backend 列表 API 单个后端的 schema 条目（type → category + fields）。
+type BackendSchemaInfo struct {
+	Type     string        `json:"type"`
+	Category string        `json:"category"`
+	Label    string        `json:"label,omitempty"`
+	Fields   []FieldSchema `json:"fields"`
+}
+
+// backendCategory 由后端类型推导 schema category：
+//   - "secrets"/"secretdata"/"egress"（封装/密钥卷）→ "wrapper"；
+//   - 本地卷 → "mt-local"；
+//   - 其余外部类型 → "linked"。
+//
+// 注册表内不会出现本地类型（RegisterBackend 拒绝空串与 TypeLocal），"mt-local" 分支为
+// 防御性覆盖（该分支仅对未注册的本地类型概念成立）。
+func backendCategory(typ string) string {
+	switch typ {
+	case "secrets", "secretdata", "egress":
+		return "wrapper"
+	case "", "local":
+		return "mt-local"
+	default:
+		return "linked"
+	}
+}
+
+// backendSchema 尝试构造后端实例读取创建表单 schema（可选 SchemaProvider 断言）。
+// 构造失败 / 后端 nil / 未实现 → 返回 nil（调用方回退空 fields）。构造仅用于读取静态
+// schema（与 backendPresignHandler 同一「构造实例断言能力」模式）；读毕立即 Close 释放。
+// 未注册类型经 NewBackend 返回错误 → 空 fields（不 fail-closed——schema 非关键路径）。
+func backendSchema(ctx context.Context, typ string) []FieldSchema {
+	be, err := NewBackend(ctx, volume.Volume{Type: typ})
+	if err != nil || be == nil {
+		return nil
+	}
+	defer be.Close()
+	sp, ok := be.(SchemaProvider)
+	if !ok {
+		return nil
+	}
+	return sp.Schema()
+}
+
+// BackendSchemas 返回已注册后端的 type→(category, fields) 映射（V4 backend 列表 schema
+// 驱动建卷表单）。category 由协议推导（backendCategory）；fields 来自后端可选
+// SchemaProvider——未实现者为空数组（json:"fields" 无 omitempty，前端依赖该键恒为 []）。
+// 顺序不承诺稳定（map 遍历）；调用方不得依赖顺序。空注册表 → 空切片（非 nil）。
+func BackendSchemas() []BackendSchemaInfo {
+	backendMu.RLock()
+	types := make([]string, 0, len(backendFactories))
+	for typ := range backendFactories {
+		types = append(types, typ)
+	}
+	backendMu.RUnlock()
+
+	out := make([]BackendSchemaInfo, 0, len(types))
+	for _, typ := range types {
+		info := BackendSchemaInfo{
+			Type:     typ,
+			Category: backendCategory(typ),
+		}
+		if flds := backendSchema(context.Background(), typ); flds != nil {
+			info.Fields = flds
+		} else {
+			info.Fields = []FieldSchema{}
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
 // UnregisterBackendForTest 移除测试注册的后端（测试辅助：跨包测试（如 pkg/server）注册
 // fake backend 后清理，防污染共享注册表）。生产代码不得调用。
 func UnregisterBackendForTest(typ string) {
