@@ -2510,4 +2510,13 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup_SemanticMismatch(t *testing.T
 	if t3.ID != t1.ID {
 		t.Fatalf("语义一致的同 URL 应去重吸收，t3=%q t1=%q t1status=%q", t3.ID, t1.ID, t1snap.Status)
 	}
+	// 任务5 审查：同 URL 但 ForceIntegrity 不同（t1 默认 false，t4 显式 true）→ 不吸收，
+	// 各自独立（force=true 请求不得被 force=false 任务吸收而丢失阻断语义）。
+	t4, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 0, nil, "", TaskParams{Save: true, ForceIntegrity: true})
+	if err != nil {
+		t.Fatalf("force submit: %v", err)
+	}
+	if t4.ID == t1.ID {
+		t.Fatalf("force 不同的同 URL 不应去重吸收，t4==t1==%q", t1.ID)
+	}
 }

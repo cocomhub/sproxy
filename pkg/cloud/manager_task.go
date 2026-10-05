@@ -1318,6 +1318,11 @@ func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 	if existing.Save != params.Save || existing.DownloadLocal != params.DownloadLocal {
 		return false
 	}
+	// 任务5 审查 Important：ForceIntegrity 语义一致才吸收（force=true 请求不得被
+	// force=false 任务吸收而丢失阻断语义——损坏源文件会被静默放行标记 damaged）。
+	if existing.ForceIntegrity != params.ForceIntegrity {
+		return false
+	}
 	return true
 }
 
