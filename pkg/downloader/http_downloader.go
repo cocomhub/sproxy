@@ -44,6 +44,13 @@ type HTTPDownloader struct {
 	IdleTimeout time.Duration
 }
 
+// 编译期断言：HTTPDownloader 声明其 Result.Checksum 为下载器自算（② 态）。
+var _ IntegrityProvider = (*HTTPDownloader)(nil)
+
+// IntegrityMode 返回 HTTP 下载器的完整性归属：自算 checksum（② 态）。
+// HTTP 下载完成时自算 SHA-256 并比对 Content-Length，无服务端带外对账。
+func (d *HTTPDownloader) IntegrityMode() IntegrityMode { return ModeSelfVerified }
+
 // NewHTTPDownloader 创建 HTTPDownloader（默认 http.Client）。
 // 注入现状（审计结论（原待办）——已定，2026-09-14）：自定义注入**已存在**，只是不是 functional
 // options 形式——HTTPDownloader 的 ValidateURLAfterDo / Timeout / IdleTimeout 字段供装配期

@@ -58,6 +58,13 @@ type PikpakDownloader struct {
 	log         *slog.Logger
 }
 
+// 编译期断言：PikPak 下载器声明其 Result.Checksum 为仅本地自洽（② 态）。
+var _ downloader.IntegrityProvider = (*PikpakDownloader)(nil)
+
+// IntegrityMode 返回 PikPak 下载器的完整性归属：仅本地 checksum+size（② 态）。
+// 官方 CLI 无内部 hash/verify 校验，Checksum 为本地全文件自算，无服务端带外对账。
+func (d *PikpakDownloader) IntegrityMode() downloader.IntegrityMode { return downloader.ModeLocalOnly }
+
 // newPikpakStagingDir 返回一次性下载/中转暂存目录：os.MkdirTemp 在用户缓存目录下创建
 // 随机命名、0700、exclusive-create 防符号链接的子目录（形如 pikpak-<use>-<随机>）。
 // 两个调用方（downloadViaCLI 的 CLI 落盘目录、转存的中转目录）均只在**本进程内**共享同一
@@ -313,7 +320,7 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, che
 		lease.Track(fileID)
 	}
 	lease.Release(ctx)
-	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
+	return &Result{Size: size, Checksum: checksum, ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}, nil
 }
 
 // restoreAndDownload 转存分享到个人网盘 → 定位转存文件 → CLI 完整下载。
