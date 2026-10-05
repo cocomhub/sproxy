@@ -83,7 +83,7 @@ func TestHybridDownload_ShareAndAccount(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -211,7 +211,7 @@ func TestHybridDownload_ShareChunkFails_DowngradesToAccount(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -312,7 +312,7 @@ func TestHybridDownload_RestoreIdempotent(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -393,7 +393,7 @@ func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -484,7 +484,7 @@ func TestHybridManifest_Resume(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -583,7 +583,7 @@ func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -671,7 +671,7 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -769,7 +769,7 @@ func TestHybridDownload_SinkAccounting(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -866,7 +866,7 @@ func TestHybridManifest_SourceMismatch(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -1100,7 +1100,7 @@ func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -1183,7 +1183,7 @@ func TestHybridDownload_ReResolveFileChanged(t *testing.T) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
 	// share 列表：第一次 file-A，后续 file-B（分享被换）
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		resolveCount++
 		fileID := "share-f1"
 		if resolveCount > 1 {
@@ -1275,7 +1275,7 @@ func TestHybridDownload_ParallelPools(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -1363,7 +1363,7 @@ func TestHybridDownload_ProgressTotal(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -1468,7 +1468,7 @@ func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap-1"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
@@ -1563,7 +1563,7 @@ func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
 			{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
 		}})
@@ -1640,7 +1640,7 @@ func mkHybridFake(payload []byte, driveFiles []map[string]any, restoreOwned bool
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
 			{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
 		}})

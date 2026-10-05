@@ -31,7 +31,7 @@ func TestScratch_SharedInstance_ConcurrentTasks(t *testing.T) {
 	})
 	// share 列表按 share_id **精确匹配**——不得对 RawQuery 做子串匹配（query 含随机
 	// device_id，hex 子串 "aaa"/"bbb" 会误判路由，round-9 flake 根因）。
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		fid, size := "share-a", len(payloadA)
 		switch r.URL.Query().Get("share_id") {
 		case "aaa":

@@ -44,12 +44,12 @@ func TestCaptchaSign_DiffersByInput(t *testing.T) {
 // captcha/init（user host）→ share detail（api host）→ file_info（拿直链）。
 func TestShareResolver_Resolve(t *testing.T) {
 	t.Parallel()
-	// fake server：captcha/init + /drive/v1/share + /drive/v1/share/file_info
+	// fake server：captcha/init + /drive/v1/share/detail + /drive/v1/share/file_info
 	var mux http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/shield/captcha/init":
 			writeJSON(w, map[string]any{"captcha_token": "cap-tok-1", "expires_in": 3600})
-		case r.URL.Path == "/drive/v1/share" && r.Method == http.MethodGet:
+		case r.URL.Path == "/drive/v1/share/detail" && r.Method == http.MethodGet:
 			writeJSON(w, map[string]any{
 				"share_status": "OK",
 				"files": []map[string]any{
@@ -104,7 +104,7 @@ func TestShareResolver_CaptchaRefreshOnStaleness(t *testing.T) {
 		initCalls.Add(1)
 		writeJSON(w, map[string]any{"captcha_token": fmt.Sprint("cap-", initCalls.Load()), "expires_in": 3600})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
 			{"id": "share-f1", "name": "movie.mp4", "size": "100"},
 		}})
@@ -146,7 +146,7 @@ func TestShareResolver_RefreshLink(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap", "expires_in": 3600})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		shareCalls.Add(1)
 		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
 			{"id": "share-f1", "name": "movie.mp4", "size": "100"},
@@ -180,5 +180,119 @@ func TestShareResolver_RefreshLink(t *testing.T) {
 	// 分享被换（fileID 消失）→ 报错
 	if _, _, err := r.RefreshLink(context.Background(), "abc123", "gone-file"); err == nil {
 		t.Fatal("gone file should error (share changed)")
+	}
+}
+
+// TestShareResolver_SubfolderRecursive 锁定分享子目录递归（/drive/v1/share/detail + parent_id）：
+// 根返回 folder → 递归 parent_id 列子文件 → 每个文件拿直链（免转存免配额）。
+func TestShareResolver_SubfolderRecursive(t *testing.T) {
+	t.Parallel()
+	var parentQueries []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap", "expires_in": 3600})
+	})
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
+		pid := r.URL.Query().Get("parent_id")
+		parentQueries = append(parentQueries, pid)
+		switch pid {
+		case "": // 根：返回 folder
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"kind": "drive#folder", "id": "folder-1", "name": "avsa", "size": "0"},
+			}})
+		case "folder-1": // 子目录：返回视频
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"kind": "drive#file", "id": "f-mini", "name": "small.mp4", "size": "14000000"},
+				{"kind": "drive#file", "id": "f-big", "name": "avsa.mp4", "size": "5600000000"},
+			}})
+		default:
+			t.Errorf("unexpected parent_id %q", pid)
+		}
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		fid := r.URL.Query().Get("file_id")
+		writeJSON(w, map[string]any{"file_info": map[string]any{
+			"id": fid, "web_content_link": "https://dl.example/" + fid,
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+
+	meta, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123")
+	if err != nil {
+		t.Fatalf("Resolve error: %v", err)
+	}
+	// 4 = folder + 2 视频 + folder 路径前缀（folder 本身也进 out，子文件带父路径前缀）
+	if len(meta.Files) != 3 {
+		t.Fatalf("files = %d, want 3 (folder + 2 video)", len(meta.Files))
+	}
+	// 子文件带路径前缀
+	foundMini, foundBig := false, false
+	for _, f := range meta.Files {
+		if f.Name == "folder-1/small.mp4" && f.DirectLink == "https://dl.example/f-mini" {
+			foundMini = true
+		}
+		if f.Name == "folder-1/avsa.mp4" && f.DirectLink == "https://dl.example/f-big" {
+			foundBig = true
+		}
+	}
+	if !foundMini || !foundBig {
+		t.Errorf("subfolder files not resolved: %+v", meta.Files)
+	}
+	// parent_id 应被正确传递："" 根 → folder-1 子目录
+	if len(parentQueries) < 2 || parentQueries[0] != "" || parentQueries[1] != "folder-1" {
+		t.Errorf("parent_id queries = %v, want ['', 'folder-1']", parentQueries)
+	}
+}
+
+// TestShareResolver_SubfolderDedup 锁定 API 重复返回同一 folder 时去重（防死循环）。
+func TestShareResolver_SubfolderDedup(t *testing.T) {
+	t.Parallel()
+	var detailCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"captcha_token": "cap", "expires_in": 3600})
+	})
+	// 根返回 folder-1；folder-1 的 parent_id 查询也返回 folder-1 自身（API 重复）→ 应去重不死循环
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
+		detailCalls.Add(1)
+		pid := r.URL.Query().Get("parent_id")
+		if pid == "" || pid == "folder-1" {
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"kind": "drive#folder", "id": "folder-1", "name": "f", "size": "0"},
+			}})
+			return
+		}
+		t.Errorf("unexpected parent_id %q", pid)
+	})
+	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("file_id") == "folder-1" {
+			http.Error(w, "folder has no direct link", http.StatusBadRequest) // 真实 API 行为
+			return
+		}
+		writeJSON(w, map[string]any{"file_info": map[string]any{
+			"id": r.URL.Query().Get("file_id"), "web_content_link": "https://dl.example/f",
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+
+	start := time.Now()
+	meta, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	// 去重核心：shareDetail 只调 2 次（根 + folder-1 一次）——无去重会无限次（死循环）
+	if calls := detailCalls.Load(); calls > 2 {
+		t.Fatalf("shareDetail calls = %d, want <=2 (dedup missing → infinite recursion?)", calls)
+	}
+	if dur := time.Since(start); dur > 2*time.Second {
+		t.Fatalf("Resolve took %v (too slow → recursion?)", dur)
+	}
+	// folder 无直链，fileInfo 对其失败被跳过 → 最终 0 文件（正确：folder 不产出直链条目）
+	if len(meta.Files) != 0 {
+		t.Fatalf("files = %d, want 0 (folder has no direct link)", len(meta.Files))
 	}
 }

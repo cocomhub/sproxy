@@ -31,7 +31,7 @@ func TestHybridDownload_ResumeKeepsCompletedChunks(t *testing.T) {
 	mux.HandleFunc("/v1/shield/captcha/init", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"captcha_token": "cap"})
 	})
-	mux.HandleFunc("/drive/v1/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/drive/v1/share/detail", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
 			{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
 		}})
