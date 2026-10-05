@@ -75,6 +75,10 @@ type HybridConfig struct {
 	AutoDelete  bool    // 完成后永久删转存（释放 6GB 空间）
 	Logger      *slog.Logger
 	Metrics     *HybridMetrics
+	// AccountPool 是多账号会话文件池（配额轮换 + 转存副本按账号分摊）。
+	// nil = 单账号现状（账号区全部 chunk 走当前登录态/单 API）。非 nil 时账号区
+	// chunk 按 Select round-robin 分配到多账号，每账号转存一次副本后并行 FETCH 下载。
+	AccountPool *AccountPool
 	// Fallback 是**匿名分享路径整体失败**时的降级下载器（如旧 PikpakDownloader 完整账号下载）。
 	// 设计 §1.2：分享直链任何失败不阻断任务——resolve 失败/无直链/未知大小时委托降级
 	// （chunk 级降级已内建：分享段失败转账号段）。nil = 无降级（失败如实上报）。
@@ -94,6 +98,7 @@ type HybridDownloader struct {
 	autoDelete  bool
 	log         *slog.Logger
 	metrics     *HybridMetrics
+	pool        *AccountPool          // 多账号会话池（nil = 单账号现状）
 	fallback    downloader.Downloader // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
@@ -120,6 +125,10 @@ type downloadCtx struct {
 	destPath   string
 	prog       atomic.Int64
 	onProgress downloader.ProgressFunc
+	// 多账号分片（round-12）：accounted 记录已转存副本的账号（name→转存文件 ID），
+	// 每账号首次选中时 Use 转存一次，后续该账号的 chunk 复用直链（避免 N×重复转存占空间）。
+	accounted map[string]string
+	acctMu    sync.Mutex // 保护 accounted
 }
 
 // NewHybridDownloader 创建混合下载器。
@@ -162,7 +171,7 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 	return &HybridDownloader{
 		resolver: cfg.Resolver, api: cfg.API, client: client,
 		chunkSize: chunk, shareRatio: ratio, concurrency: conc, autoDelete: cfg.AutoDelete,
-		log: log, metrics: cfg.Metrics, fallback: cfg.Fallback,
+		log: log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
 	}, nil
 }
 
@@ -225,6 +234,7 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	dc := &downloadCtx{
 		currentTotal: total, lease: NewRestoreLease(d.api, d.autoDelete, d.log),
 		shareID: shareID, target: target, destPath: destPath, onProgress: onProgress,
+		accounted: make(map[string]string),
 	}
 	if _, tok := parseShareIDWithToken(source); tok != "" {
 		dc.shareToken = tok // round-11：token 分享的 re-resolve 需带 token
@@ -436,7 +446,14 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadC
 
 // downloadAccountChunk 账号区 chunk：转存（幂等一次）→ 定位 → FETCH 直链 → Range 下载。
 // 转存经 RestoreLease 内部锁串行化（多账号 chunk 并行时只转存一次）+ FindInDrive 幂等检查。
+//
+// 多账号分片（round-12）：d.pool 非 nil 时，每 chunk 经 pool.Select（round-robin + 配额预检）
+// 选一个账号；该账号首次选中时 Use 内转存一次（dc.accounted 去重），后续该账号的 chunk
+// 复用已转存 fid 的 FETCH 直链（每 chunk 重取新直链防 TTL）。不同账号的 chunk 天然并行。
 func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloadCtx, c chunk) error {
+	if d.pool != nil {
+		return d.downloadAccountChunkMulti(ctx, dc, c)
+	}
 	// 🟡 账号区 chunk 韧性：失败重试 1 次（FETCH 链接每次新取，瞬时网络抖动可恢复）——
 	// 与分享区重试对称，避免单次抖动整段放弃（manager 外层整任务重试兜底不够 chunk 级）。
 	for attempt := 1; ; attempt++ {
@@ -453,6 +470,101 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloa
 			return err
 		}
 	}
+}
+
+// downloadAccountChunkMulti 多账号分片：Select 选账号 → Use 内转存（去重）+ FETCH 下载。
+// 失败重试 1 次；账号级失败 MarkFailed 冷却 + 重 Select（换账号）。
+func (d *HybridDownloader) downloadAccountChunkMulti(ctx context.Context, dc *downloadCtx, c chunk) error {
+	for attempt := 1; ; attempt++ {
+		acct, serr := d.pool.Select(ctx, dc.target.Size) // 配额预检：账号需能放整个转存副本
+		if serr != nil {
+			return fmt.Errorf("hybrid multi-account: no account available: %w", serr)
+		}
+		link, linkErr := d.multiAccountLink(ctx, dc, acct)
+		if linkErr != nil {
+			if ctx.Err() == nil {
+				_ = d.pool.MarkFailed(ctx, acct.Name)
+			}
+			d.log.Warn("hybrid multi-account use/link failed", "acct", acct.Name, "err", linkErr)
+			if attempt == 2 {
+				return linkErr
+			}
+			continue
+		}
+		err := d.downloadChunkRange(ctx, dc, c, link)
+		if err == nil {
+			// 成功记账（配额扣减）
+			_ = d.pool.RecordUsage(ctx, acct.Name, c.length)
+			return nil
+		}
+		d.log.Warn("hybrid multi-account chunk attempt failed", "acct", acct.Name, "offset", c.offset, "attempt", attempt, "err", err)
+		if attempt == 2 {
+			return err
+		}
+	}
+}
+
+// multiAccountLink 为 chunk 获取账号直链：该账号已转存（accounted 命中）→ 复用 fid 直链；
+// 否则 Use 内转存一次并拿直链（每次重取新直链防 TTL）。
+func (d *HybridDownloader) multiAccountLink(ctx context.Context, dc *downloadCtx, acct *Account) (string, error) {
+	dc.acctMu.Lock()
+	fid, ok := dc.accounted[acct.Name]
+	dc.acctMu.Unlock()
+	if ok {
+		l, lerr := d.api.DownloadLink(ctx, fid)
+		if lerr != nil {
+			return "", fmt.Errorf("hybrid multi-account link %s: %w", acct.Name, lerr)
+		}
+		return l, nil
+	}
+	var link string
+	useErr := d.pool.Use(ctx, acct.Name, func() error {
+		d.api.ResetToken() // 切会话后重新读新账号 token（C1）
+		f, owned, rerr := d.restoreForAccount(ctx, dc)
+		if rerr != nil {
+			return rerr
+		}
+		dc.acctMu.Lock()
+		dc.accounted[acct.Name] = f
+		dc.acctMu.Unlock()
+		if owned {
+			// 源文件已在网盘：不登记删除（NH-P1）；复用该 fid
+			link = f
+			return nil
+		}
+		l, lerr := d.api.DownloadLink(ctx, f)
+		if lerr != nil {
+			return fmt.Errorf("hybrid multi-account link %s: %w", acct.Name, lerr)
+		}
+		link = l
+		return nil
+	})
+	if useErr != nil {
+		return "", useErr
+	}
+	return link, nil
+}
+
+// restoreForAccount 在 Use 会话内转存分享 + 定位转存文件，返回转存文件 ID。
+// 复用单账号 restoreAndLink 的幂等逻辑（FindInDrive 命中 + RestoreShare + locateRestored）。
+func (d *HybridDownloader) restoreForAccount(ctx context.Context, dc *downloadCtx) (string, bool, error) {
+	// 幂等：先查同名同大小已存在的转存文件（该账号网盘内）
+	if link, id, ok := d.idempotentRestored(ctx, dc); ok {
+		_ = link
+		return id, false, nil
+	}
+	fid, owned, err := d.api.RestoreShare(ctx, dc.shareID, []string{dc.target.ID}, "")
+	if err != nil {
+		return "", false, fmt.Errorf("hybrid restore %s: %w", dc.shareID, err)
+	}
+	driveFile, err := d.locateRestored(ctx, fid)
+	if err != nil {
+		return "", false, err
+	}
+	if !owned {
+		dc.lease.Track(driveFile.ID) // AutoDelete 释放时永久删（该账号会话内）
+	}
+	return driveFile.ID, owned, nil
 }
 
 // restoreAndLink 转存（幂等）+ 定位转存文件 + 拿 FETCH 直链。
