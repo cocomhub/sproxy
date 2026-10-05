@@ -777,3 +777,7 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 - **测试认知复杂度**（go:S3776）：表驱动断言抽 `assert*` helper；mock 路由 switch 抽独立 handler 函数（实测 transfer_test/account_test/hybrid_multiaccount_test 命中）。
 - **大函数/并发测试拆子函数**（go:S3776）：长并发/阶段测试把「执行」与「断言」分开（如 runLockstepWorkers + assertConcurrentDayUsed）。
 - **硬编码盐**（go:S2053）：KDF 盐必须版本/随机派生（`secretExportKey` 单一 helper，禁字面量散落）。
+
+### PR title 纪律（2026-10-05 用户明示）
+- **title 只含功能维度**：`type(scope): 能力描述`——禁止携带「rebase / 审核 / sonar 修复 / 代码评审 / 第二轮」等**功能无关信息**（这些是过程，不是交付物）。squash 合并后 title 会成为 changelog 条目，只描述交付了什么能力。
+- 过程信息（rebase 复核、评审轮次、Sonar 清理）写进 body（背景段），不进 title。
