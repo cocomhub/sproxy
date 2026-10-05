@@ -1474,6 +1474,13 @@ func (s *SecretdataFS) decryptDirMeta(blob []byte) (*dirMeta, error) {
 	if dm.Type != "dir" {
 		return nil, fmt.Errorf("secretdata: 目录 meta type=%q，应为 dir", dm.Type)
 	}
+	// DirID 校验（fail-closed）：DirID 用作 DirMetaName 的中段（base62 9 字符，见命名规则）。
+	// 长度/字符集不符的 DirID 会在后续写路径 interleaveCore 处 panic——这里在解密边界
+	// 提前拒绝（旧格式/损坏/外来数据，未上线无兼容负担；拒绝即跳过该容器）。
+	if len(dm.DirID) != shardseal.NameCharsLen || !shardseal.IsBase62ID(dm.DirID) {
+		return nil, fmt.Errorf("secretdata: 目录 meta dir_id 非法（应为 %d 字符 base62，got %q）",
+			shardseal.NameCharsLen, dm.DirID)
+	}
 	return &dm, nil
 }
 

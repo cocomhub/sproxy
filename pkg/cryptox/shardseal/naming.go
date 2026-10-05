@@ -37,6 +37,24 @@ import (
 // 略高于 48bit 下限，满足密文/损坏校验强度）。
 const nameChars = 9
 
+// NameCharsLen 导出 nameChars（供 secretdata 校验 dir_id 长度等跨包使用）。
+const NameCharsLen = nameChars
+
+// IsBase62ID 报告 s 是否为恰 nameChars 字符的 [A-Za-z0-9] 串（dir_id 等 ID 段格式校验）。
+func IsBase62ID(s string) bool {
+	if len(s) != nameChars {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // Hash48 返回 blob SHA-256 从 off 起的 6 字节（48bit）的 9 字符 base62 编码
 // （命名首/末段通用窗口；错误恒为 nil，仅对齐签名，调用方可安全丢弃）。
 func Hash48(blob []byte, off int) (string, error) {

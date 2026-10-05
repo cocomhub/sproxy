@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1156,6 +1157,52 @@ func TestLoadIndex_CyclicDirMeta_DoesNotCrash(t *testing.T) {
 	}
 	if ent, _ := fs2.Stat(ctx, "ok/f2.bin"); ent == nil {
 		t.Error("非成环容器文件应正常恢复")
+	}
+}
+
+// TestDecryptDirMeta_DirIDFailClosed：dir_id 非 9 字符 base62 的目录 meta 解密必须
+// fail-closed（防旧格式/损坏/外来数据经 interleaveCore 段长守卫 panic——解密边界提前
+// 拒绝，容器被跳过而非崩进程）。手工加密 bad-DirID blob（不经过 writeDirMetaLocked，
+// 后者对非法 DirID 会在 interleaveCore 处 panic，正是本校验要拦截的路径）。
+func TestDecryptDirMeta_DirIDFailClosed(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	ctx := context.Background()
+	writeContent(t, fs, ctx, "dir/f.bin", 100) // 建一个真实容器
+	seg := fs.index["dir/f.bin"].dirSeg
+	_, blob, err := findDirMetaBlob(ctx, fs.inner, seg)
+	if err != nil {
+		t.Fatalf("findDirMetaBlob: %v", err)
+	}
+	dm, derr := fs.decryptDirMeta(blob)
+	if derr != nil {
+		t.Fatalf("decryptDirMeta 正常卷应成功: %v", derr)
+	}
+	if !shardseal.IsBase62ID(dm.DirID) || len(dm.DirID) != shardseal.NameCharsLen {
+		t.Fatalf("正常 DirID 应恰 %d 字符 base62，got %q", shardseal.NameCharsLen, dm.DirID)
+	}
+	// 篡改为非法 DirID → 手工加密 blob → 解密必须 fail-closed。
+	encryptBad := func(dm *dirMeta) []byte {
+		t.Helper()
+		salt, _ := shardseal.RandSalt()
+		key, _ := shardseal.DeriveKey(fs.secret, salt, fs.algoVer)
+		dmJSON, _ := json.Marshal(dm)
+		b, _ := shardseal.EncryptMetaJSON(key, salt, dmJSON, 0)
+		return b
+	}
+	for _, bad := range []string{
+		"",            // 空
+		"short",       // 长度不足
+		"abcdefghijk", // 超长
+		"abc_12345",   // 含非法字符（8 字符 + _）
+		"ABCdef!23",   // 含非法字符
+		"abc-def-gh",  // 含非法字符
+	} {
+		cp := *dm
+		cp.DirID = bad
+		if _, derr2 := fs.decryptDirMeta(encryptBad(&cp)); derr2 == nil {
+			t.Errorf("非法 dir_id %q 解密应 fail-closed", bad)
+		}
 	}
 }
 
