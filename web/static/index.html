@@ -249,6 +249,20 @@
   <div id="video-player-body" style="width:100%;max-width:960px;"></div>
 </div>
 
+<!-- 任务审计弹窗（传输页云任务「审计」行 → auditRowsHtml 渲染） -->
+<div id="audit-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:760px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:16px;">任务审计</h3>
+      <button type="button" id="audit-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
+    </div>
+    <div id="audit-body" style="max-height:56vh;overflow-y:auto;"></div>
+    <div style="margin-top:16px;text-align:right;">
+      <button type="button" id="audit-close-modal-btn" class="btn btn-primary">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script src="sclient/sha256.js"></script>
 <script src="sclient/crypto.js"></script>
 <script src="sclient/sig.js"></script>
@@ -286,6 +300,7 @@
 <script src="credentials-format.js"></script>
 <script src="secrets-format.js"></script>
 <script src="vol-manage-format.js"></script>
+<script src="audit-rows-format.js"></script>
 <script src="sync-conflicts-format.js"></script>
 <script src="mesh-status-format.js"></script>
 <script src="trash-format.js"></script>

@@ -6,6 +6,7 @@
 // global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件三处经 typeof 守卫引用：
 //   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
 // global: volManageFormHtml / volManageListHtml（vol-manage-format.js，「卷管理」tab 渲染）
+// global: auditRowsHtml（audit-rows-format.js，任务「审计」弹窗行渲染；经 showTaskAudit 调用）
 
 const BASE = '';
 // SproxySig 请求签名认证（AccessKey/AccessKeySecret/AccessKeyID）。Secret 只存本端计算签名，
@@ -2797,6 +2798,27 @@ function hideVideoPlayer() {
   document.getElementById('video-player-modal').style.display = 'none';
 }
 
+// --- 任务审计弹窗（传输页「审计」按钮 → 云任务 audit 行渲染） ---
+// showTaskAudit(id)：data-id 携带展示 id（'cloud-task-<id>'），剥前缀还原服务端真实 id 后
+// 到 _cloudTasks 取该任务快照的 audit 行（SnapshotTask 自动携带），经 auditRowsHtml 渲染到
+// #audit-body 并显示 #audit-modal。fallback：任务已从列表移除 / 无 audit → 占位文案。
+function showTaskAudit(id) {
+  const realId = stripCloudId(id);
+  const task = (_cloudTasks || []).find(function (t) { return String(t && t.id) === realId; }) || null;
+  const rows = task && Array.isArray(task.audit) ? task.audit : null;
+  const body = document.getElementById('audit-body');
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<div class="empty-msg">该任务无审计记录</div>';
+  } else {
+    body.innerHTML = auditRowsHtml({ rows: rows });
+  }
+  document.getElementById('audit-modal').style.display = 'flex';
+}
+
+function hideTaskAudit() {
+  document.getElementById('audit-modal').style.display = 'none';
+}
+
 // --- 云端下载组管理 ---
 // toggleGroupTasks 展开/收起组内子任务详情（组详情行 id = 'group-detail-' + 展示 id，
 // 展示 id 保留前缀）；getGroup 等 API 必须用剥前缀后的真实 id。
@@ -3044,6 +3066,12 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('share-create-btn').addEventListener('click', createShare);
   document.getElementById('share-list-refresh-btn').addEventListener('click', refreshShareList);
 
+  // 任务审计弹窗（关闭按钮；内容由 auditRowsHtml 渲染进 #audit-body）
+  const auditCloseBtn = document.getElementById('audit-close-btn');
+  if (auditCloseBtn) auditCloseBtn.addEventListener('click', hideTaskAudit);
+  const auditCloseModalBtn = document.getElementById('audit-close-modal-btn');
+  if (auditCloseModalBtn) auditCloseModalBtn.addEventListener('click', hideTaskAudit);
+
   // 事件委托：动态内容
   initDynamicEventDelegation();
 
@@ -3058,6 +3086,7 @@ function cloudSyncBtnAction(btn) {
   if (btn.classList.contains('cloud-download-btn')) { void downloadCloudFile(btn.dataset.id, btn.dataset.filename, btn.dataset.checksum); return true; }
 
   if (btn.classList.contains('cloud-remove-btn')) { void removeCloudTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('cloud-audit-btn')) { void showTaskAudit(btn.dataset.id); return true; }
   if (btn.classList.contains('cloud-cancel-btn')) { void cancelCloudTask(btn.dataset.id); return true; }
   if (btn.classList.contains('cloud-resume-btn')) { void resumeCloudTask(btn.dataset.id); return true; }
   if (btn.classList.contains('group-archive-btn')) { void archiveCloudGroup(btn.dataset.id); return true; }

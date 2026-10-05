@@ -594,6 +594,13 @@
     const filename = it.filename || raw.filename || '';
     const checksum = raw.checksum || it.checksum || '';
     let a = '';
+    // 审计入口：任务快照随行携带 audit 行（SnapshotTask 自动带）才显示「审计」按钮；
+    // 无 audit 行（旧后端/无审计任务）不显示，避免空按钮误导。data-id = 展示 id
+    // （cloud-task-<id>），委托侧经 stripCloudId 还原后到 _cloudTasks 取 audit 渲染。
+    const auditRows = raw.audit;
+    if (Array.isArray(auditRows) && auditRows.length > 0) {
+      a += '<button class="btn btn-sm btn-secondary cloud-audit-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">审计</button>';
+    }
     if (st === 'completed') {
       // W2：cloud 桶可能已被服务端清理（save=false + CleanupStatus=cleaned）——此时
       // 「下载到本地」会 404；若任务已转存（transfer_url），展示「转存产物」入口
