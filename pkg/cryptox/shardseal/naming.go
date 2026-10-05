@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"strings"
 )
 
@@ -84,13 +83,17 @@ const dirAlnumCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 // 62^9 ≈ 1.35e16 ≥ 2^48，无信息损失；输出字符分布与普通随机 base62 串同域。
 // 用完整字符集（非剔除集）：标记字符在 hash 段正常出现，避免「某字符从未出现」的指纹。
 func encode62(b []byte) string {
-	v := new(big.Int).SetBytes(b)
+	// 48-bit 大端值完全落在 uint64 内，用整数除法逐位编码（避免 big.Int 分配与
+	// 大数除法开销——Hash48Pair 双窗口每次哈希各编码一次，块命名热路径每块 2 次）。
+	// 与 big.Int 实现逐位等价（对 0/1/2^48-1 边界及随机样本对照验证 0 mismatch）。
+	var v uint64
+	for _, x := range b { // b 恒为 6 字节（48-bit 窗口，所有调用点均传 sum[off:off+6]）
+		v = v<<8 | uint64(x)
+	}
 	out := make([]byte, nameChars)
-	base := big.NewInt(62)
-	mod := new(big.Int)
 	for i := nameChars - 1; i >= 0; i-- {
-		v.QuoRem(v, base, mod)
-		out[i] = fullCharset[mod.Int64()]
+		out[i] = fullCharset[v%62]
+		v /= 62
 	}
 	return string(out)
 }
