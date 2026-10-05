@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -290,9 +291,14 @@ func (m *CloudDownloadManager) retryTransferFile(env *transferEnv) (*downloader.
 
 // transferOnce 执行一次转存：生成目标目录 → 配额预检 → 复制 destPath 到目标卷 → 返回 URL。
 func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
+	// 审计：transfer 阶段 span（audit.From 经 env.ctx 取用；无 ctx logger 时 no-op）。
+	// 加密卷目标的 WriteFile 在 secretdata 包内独立记 encrypt span（此处不感知加密）。
+	trAudit := audit.From(env.ctx)
+	trSpan := trAudit.Begin("transfer")
 	dir := path.Dir(env.rel)
 	if dir != "." && dir != "/" {
 		if err := ensureTransferDir(env.ctx, env.targetFS, dir); err != nil {
+			trSpan.Fail(err)
 			return "", err
 		}
 	}
@@ -302,15 +308,18 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	//   - 用户配额：非远程网盘卷（secretdata/本地）→ 走 cloud 桶租户 Scope 探测；
 	//     远程网盘卷（s3/baidupcs 等）用户配额直接通过（容量由卷自身管）。
 	if err := m.transferQuotaGate(env); err != nil {
+		trSpan.Fail(err)
 		return "", err
 	}
 	f, err := os.Open(env.destPath)
 	if err != nil {
+		trSpan.Fail(err)
 		return "", fmt.Errorf("transfer: 打开本地产物: %w", err)
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
+		trSpan.Fail(err)
 		return "", fmt.Errorf("transfer: 本地产物 stat: %w", err)
 	}
 	// W1/W3：转存目标须唯一、拒绝静默覆盖。优先用卷的 WriteIfAbsent 原子能力（若实现）
@@ -320,14 +329,18 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	// 否则常规路径写后读回校验。
 	done, werr := writeTransferOnce(env, f, st.Size(), st.ModTime().Unix())
 	if werr != nil {
+		trSpan.Fail(werr)
 		return "", werr
 	}
 	if done {
+		trSpan.End("bytes", st.Size())
 		return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
 	}
 	if err := m.readbackVerify(env); err != nil {
+		trSpan.Fail(err)
 		return "", err
 	}
+	trSpan.End("bytes", st.Size())
 	return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
 }
 

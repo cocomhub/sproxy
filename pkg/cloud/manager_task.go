@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -445,6 +446,12 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	dlCtx, cancel := context.WithCancel(context.Background()) // NOSONAR: S8239 — 刻意从 Background 派生：客户端断连后下载任务继续异步重试（见上注释）
 	defer cancel()
 
+	// 审计作用域：为任务创建独立 sink（FileSink），经 WithContext 注入 ctx/dlCtx，供
+	// download/transfer/以及加密卷 WriteFile 的 encrypt 阶段经 audit.From 取用。
+	// sink 不可写/NewScope 失败时审计整体降级为 no-op，绝不阻塞下载（inject 内部处理）。
+	ctx, dlCtx, auditClose := m.injectTaskAudit(ctx, dlCtx, task)
+	defer auditClose()
+
 	// cleanupRunning 清理 running/cancelFuncs 标记。
 	// 拆为独立函数，让 panic recovery 可先调用 failTask 再清理。
 	// 同时在此释放「已放弃」任务的租户配额（取消/删除）：释放必须发生在**最后一次
@@ -522,10 +529,10 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	}
 	destPath := filepath.Join(taskDir, task.Filename)
 
-	// 执行下载（带重试）。下载并发槽由 runRetryLoop 每次尝试 acquire/立即释放——
-	// markDownloading（置 downloading 状态）也在取得槽后执行，保证「downloading 状态
-	// ≤ 持槽数」不变量（并发上限断言依赖）；完整性校验与转存均在槽外执行，不阻塞其它下载。
-	result, downloadErr := m.runRetryLoop(ctx, dlCtx, task, destPath)
+	// 执行下载（带重试）。审计：download 阶段 span 由 runDownloadWithAudit 包裹（收敛复杂度）——
+	// 其内部 runRetryLoop（含 #743 完整性校验管道 + 并发槽 acquire/释放）逐次执行，完整性与
+	// 审计双语义并集保留。
+	result, downloadErr := m.runDownloadWithAudit(ctx, dlCtx, task, destPath)
 	// downloadDone 段：任务删除竞态守卫 + 失败路径分派（异步继续 / 取消 / failTask）。
 	// 返回 handled=true 表示已由本函数处理终态（调用方直接返回）；异步转交分支经
 	// handedOff 指针置位（旧 goroutine 的 defer 不清除 running/cancelFuncs）。
@@ -557,6 +564,94 @@ func (m *CloudDownloadManager) cleanupCloudIfNotNeeded(task *CloudTask, destPath
 		return
 	}
 	m.cleanupTaskCloud(task, destPath)
+}
+
+// newTaskAuditScope 构造任务级审计作用域（Logger + 收口 func）：
+//   - sink 落 `<TMPDIR>/sproxy-audit/<taskID>.audit.log`（无配置的临时目录回落，见
+//     auditSinkDir）；NodeID 暂不注入（云任务无节点身份概念，空即省略）。
+//   - 任意失败（sink 建不了/NewScope 错）返回 (nil, noop)——审计是可降级能力，绝不阻塞下载。
+//
+// 返回的 close 函数需在下载 goroutine 收尾（defer）调用：Flush + 把 sink 中全部行复制进
+// task.Audit（终态任务持久化）+ 关闭底层 FileSink。
+func (m *CloudDownloadManager) newTaskAuditScope(task *CloudTask) (*audit.Logger, func()) {
+	sink, serr := audit.NewScopeSink(m.auditSinkDir(), task.ID)
+	if serr != nil {
+		m.logger.Warn("audit sink unavailable, audit disabled for task",
+			"task_id", task.ID, "error", serr)
+		return nil, func() {}
+	}
+	l, lerr := audit.NewScope(task.ID, audit.ScopeOpts{Sink: sink})
+	if lerr != nil {
+		_ = sink.Close()
+		m.logger.Warn("audit scope unavailable, audit disabled for task",
+			"task_id", task.ID, "error", lerr)
+		return nil, func() {}
+	}
+	return l, func() { m.finalizeTaskAudit(l, sink, task) }
+}
+
+// auditSinkDir 返回审计 sink 目录（无配置时回落系统临时目录，避免扰动 storage 桶布局）。
+func (m *CloudDownloadManager) auditSinkDir() string {
+	return filepath.Join(os.TempDir(), "sproxy-audit")
+}
+
+// injectTaskAudit 为任务创建一个审计作用域并注入 ctx/dlCtx，返回 (新ctx, 新dlCtx, close)。
+// 审计不可用时返回原样 ctx 与 noop close（绝不影响下载）。同时注入外层 ctx 与 dlCtx：
+// transferAfterDownload 的转存路径用的是外层 ctx（既有语义，不改为 dlCtx 以免改变取消
+// 传播），审计 logger 必须两端可达。close 需在下载 goroutine 收尾（defer）调用。
+func (m *CloudDownloadManager) injectTaskAudit(ctx, dlCtx context.Context, task *CloudTask) (context.Context, context.Context, func()) {
+	l, close := m.newTaskAuditScope(task)
+	if l == nil {
+		return ctx, dlCtx, close
+	}
+	return audit.WithContext(ctx, l), audit.WithContext(dlCtx, l), close
+}
+
+// runDownloadWithAudit 以审计 span 包裹 runRetryLoop（Begin("download") → End/Fail），
+// 返回 (result, err) 与裸调用等价。抽出收敛 executeDownload 认知复杂度（gocognit 门禁）；
+// 无审计 logger（audit.From 返回 nil）时等价于裸调用。带宽 = size / 耗时（近似，供监控）。
+func (m *CloudDownloadManager) runDownloadWithAudit(ctx, dlCtx context.Context, task *CloudTask, destPath string) (*downloader.Result, error) {
+	dlSpan := audit.From(dlCtx).Begin("download")
+	dlStart := time.Now()
+	result, downloadErr := m.runRetryLoop(ctx, dlCtx, task, destPath)
+	if downloadErr == nil && result != nil {
+		var bw int64
+		if dur := time.Since(dlStart); dur > 0 && result.Size > 0 {
+			bw = int64(float64(result.Size) / dur.Seconds())
+		}
+		dlSpan.End("bytes", result.Size, "bw_bps", bw)
+	} else {
+		dlSpan.Fail(downloadErr)
+	}
+	return result, downloadErr
+}
+
+// finalizeTaskAudit 任务收尾的审计收口：Flush（聚合 append 错误）→ 把 sink 中全部行复制进
+// task.Audit（终态任务再 saveTask 落盘，审计随任务持久化）→ 关闭底层 sink。任何失败只记
+// 日志、不阻断终态（审计为可增强能力）。
+func (m *CloudDownloadManager) finalizeTaskAudit(l *audit.Logger, sink audit.Sink, task *CloudTask) {
+	if err := l.Flush(); err != nil {
+		m.logger.Warn("audit flush failed", "task_id", task.ID, "error", err)
+	}
+	rows := sink.Recent(audit.Filter{})
+	if len(rows) == 0 {
+		_ = sink.Close()
+		return
+	}
+	var save bool
+	m.mu.Lock()
+	if stored, ok := m.tasks[task.ID]; ok {
+		stored.Audit = rows
+		// 仅终态才值得重存（中间态 downloading 由后续 saveTask 覆盖，原子写整任务）。
+		save = stored.Status == "completed" || stored.Status == "failed" || stored.Status == "cancelled"
+	}
+	m.mu.Unlock()
+	if save {
+		if err := m.saveTask(task); err != nil {
+			m.logger.Error("persist task audit failed", "task_id", task.ID, "error", err)
+		}
+	}
+	_ = sink.Close()
 }
 
 // runRetryLoop 执行带重试的下载主循环：每次尝试独立超时（超时可重试续传，用户取消

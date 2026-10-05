@@ -173,6 +173,7 @@ func (l *Logger) Begin(step string, kv ...any) *Span {
 		step:  step,
 		typ:   stepType(step),
 		level: LevelInfo,
+		start: time.Now(),
 		kv:    kv,
 	}
 }

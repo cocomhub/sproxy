@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
+	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
@@ -83,6 +84,10 @@ type CloudTask struct {
 	CleanupAt time.Time `json:"cleanup_at"`
 	// CleanupErr 清理失败原因（后续告警接入）。
 	CleanupErr string `json:"cleanup_err,omitempty"`
+	// Audit 是本任务执行阶段（download/transfer，以及加密卷写路径的 encrypt）的审计行，
+	// 终态收口时由 executeDownload 从审计 sink 复制并经 saveTask 随任务持久化。
+	// 不泄密：Row.Meta 与持久化不含原始凭据/口令/secret 明文。
+	Audit []audit.Row `json:"audit,omitempty"`
 
 	// IntegrityStatus 是下载完整性判定结果（校验管道写入；"" = 未校验/未生效）：
 	//   - verified：权威匹配（下载器 ModeAuthority）或语义校验通过；
