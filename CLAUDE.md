@@ -767,3 +767,13 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
   ctx context.Context // NOSONAR: S8242 — 同理由
   ```
 - **铁律**：排除必须成对（Sonar Sxxx + golangci linter 名），缺一即漂移；复杂度>15 先拆不排除。
+
+### Sonar 高频反模式速查（写代码直接避免，2026-10-05 沉淀）
+> 完整清单见根 `AGENTS.md`「Sonar 质量门禁常见反模式」；本文件记 sproxy 实测反复命中的：
+
+- **禁止 `max`/`min`/`cap`/`len` 作局部变量**（go:S978）——用 `mx`/`mn`/`n`（实测 config.go transferConcurrencyEffective 命中）。
+- **测试 err 不赋局部变量**（godre:S8193/S4144 族）：`if err := f(); err != nil { t.Fatalf }` 直写；测试断言与既有用例完全相同 → 合并/参数化，不复制。
+- **单方法接口命名**（godre:S8196）：能力接口（`WriteIfAbsent`/`ReserveSpace`/`LocalVolume`）命名表达能力语义 = 设计保留，行尾 `// NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留`。
+- **测试认知复杂度**（go:S3776）：表驱动断言抽 `assert*` helper；mock 路由 switch 抽独立 handler 函数（实测 transfer_test/account_test/hybrid_multiaccount_test 命中）。
+- **大函数/并发测试拆子函数**（go:S3776）：长并发/阶段测试把「执行」与「断言」分开（如 runLockstepWorkers + assertConcurrentDayUsed）。
+- **硬编码盐**（go:S2053）：KDF 盐必须版本/随机派生（`secretExportKey` 单一 helper，禁字面量散落）。
