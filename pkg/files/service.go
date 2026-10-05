@@ -195,6 +195,37 @@ type VolumeSet interface {
 	Pool(name string) *quota.Pool
 }
 
+// ExternalEntry 是外部卷（非本地后端）目录条目的领域视图（逻辑目录浏览的明文信息）：
+// 只含 Name/Size/IsDir，不暴露底层分片名与加密 meta。装配层（pkg/server）在适配
+// sync.FS 的 ListDir 结果时转换为本类型。
+type ExternalEntry struct {
+	Name  string
+	IsDir bool
+	Size  int64
+}
+
+// ExternalVolume 是外部卷的**目录浏览能力**（非本地后端 ListDir 透传）。
+//
+// 为什么是本接口而不是直接 import `*registry.Set` / `pkg/sync`：门禁 R2（子包可见性）
+// 与既有设计约定（见 DownloadSource / UploadSink 注释）都要求 files 域不 import
+// pkg/volume/registry 与 pkg/sync——装配层把 `registry.Set.External(name).FS()`（sync.FS）
+// 的 ListDir 适配为本接口，文件模型由领域持有。
+type ExternalVolume interface {
+	// ListDir 列出外部卷逻辑目录 rel 的直接子项（明文视图，隐藏底层分片与加密 meta）。
+	// rel 是卷根相对的键空间路径（owner 已由调用方限定；共享卷带 owner 前缀隔离）。
+	ListDir(ctx context.Context, rel string) ([]ExternalEntry, error)
+}
+
+// ExternalVolumeSource 是 VolumeSet 的**可选扩展**：按卷名返回外部卷的目录浏览能力。
+// 未知卷名/非外部卷（本地卷）→ nil。files 域用类型断言探测（`volSet.(ExternalVolumeSource)`）
+// ——断言失败 = 装配层未提供外部卷能力，List 的 `?volume=` 走既有本地卷路径（零回归）。
+//
+// 与 registry.Presigner / URLResolver 等可选能力同模式：装配层适配器（pkg/server 的
+// filesVolumeSet）在注入时实现本接口，领域侧只按需断言消费。
+type ExternalVolumeSource interface {
+	ExternalVolume(name string) ExternalVolume
+}
+
 // StorageManager 是本域需要的**容量核算**能力（P5 回退预留路径：quota 未装配时按字节
 // 预留/释放，超限拒绝上传）。
 //

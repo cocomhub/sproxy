@@ -174,7 +174,7 @@ func (s *Service) ListFiles(w http.ResponseWriter, r *http.Request) {
 	if sortOrder != "desc" {
 		sortOrder = "asc"
 	}
-	res, err := s.List(ListQuery{
+	res, err := s.List(r.Context(), ListQuery{
 		Owner:     s.rt.actorOf(r),
 		VolName:   r.URL.Query().Get("volume"),
 		Subdir:    r.URL.Query().Get("subdir"),

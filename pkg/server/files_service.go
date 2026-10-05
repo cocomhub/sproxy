@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // filesStorageManager 把 *capacity.StorageManager 适配为 files.StorageManager。
@@ -56,7 +57,44 @@ func (r filesRuntime) Volumes() files.VolumeSet {
 	if r.h.volSet == nil {
 		return nil
 	}
-	return r.h.volSet
+	return filesVolumeSet{Set: r.h.volSet}
+}
+
+// filesVolumeSet 把 *registry.Set 适配为 files.VolumeSet + files.ExternalVolumeSource：
+// 外部卷目录浏览能力经 registry.Set.External(name).FS()（sync.FS）适配为领域接口。
+// 嵌入 *registry.Set 继承 VolumeSet 方法（Default/All/ByName/Root/Pool），外部能力新增。
+type filesVolumeSet struct {
+	*registry.Set
+}
+
+// ExternalVolume 实现 files.ExternalVolumeSource：按卷名返回外部卷目录浏览能力。
+// 未知/非外部卷（本地卷）→ nil（List 的 `?volume=` 回落既有本地聚合，零回归）。
+func (a filesVolumeSet) ExternalVolume(name string) files.ExternalVolume {
+	be := a.External(name)
+	if be == nil {
+		return nil
+	}
+	fsys := be.FS()
+	if fsys == nil {
+		return nil
+	}
+	return filesExternalVolume{fs: fsys}
+}
+
+// filesExternalVolume 把 sync.FS 的 ListDir 适配为 files.ExternalVolume
+// （[]syncpkg.Entry → []files.ExternalEntry，只保留 Name/IsDir/Size 明文视图）。
+type filesExternalVolume struct{ fs syncpkg.FS }
+
+func (a filesExternalVolume) ListDir(ctx context.Context, rel string) ([]files.ExternalEntry, error) {
+	entries, err := a.fs.ListDir(ctx, rel)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]files.ExternalEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, files.ExternalEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size})
+	}
+	return out, nil
 }
 
 func (r filesRuntime) Tenant(volName, owner string) *storage.Tenant {

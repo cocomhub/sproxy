@@ -238,7 +238,7 @@ func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tg
 	svc := rh.h.fileService()
 	switch op {
 	case "list":
-		rh.delegateList(w, svc, tgt)
+		rh.delegateList(w, r, svc, tgt)
 	case "stat":
 		rh.delegateStat(w, r, svc, tgt)
 	case "download":
@@ -249,8 +249,8 @@ func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tg
 }
 
 // delegateList 执行远端 list：复用 files.List 域操作，回 ListResponse JSON。
-func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, svc *files.Service, tgt *remoteTarget) {
-	res, err := svc.List(files.ListQuery{
+func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
+	res, err := svc.List(r.Context(), files.ListQuery{
 		Owner:   tgt.owner,
 		VolName: tgt.vol.Name,
 		Subdir:  tgt.path,
