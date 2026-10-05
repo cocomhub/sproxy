@@ -16,12 +16,20 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
+
+// errVolumeCycle 是封装卷底层卷成环引用哨兵错误：建卷时沿 target 链向上遍历，若回落到
+// 自身/已访问节点 → 400（fail-closed，不落盘）。环的成因是装配期/config 绕过本校验的历史
+// 遗留（建卷校验保证 API 自建的链恒无环），本检测兜底拒绝把新卷链入已存在的环。
+var errVolumeCycle = errors.New("volume: 底层卷成环引用")
 
 // createUserVolumeRequest 是 POST /api/volumes/user 请求体。
 type createUserVolumeRequest struct {
@@ -34,6 +42,93 @@ type createUserVolumeRequest struct {
 // userVolumesListResponse 是 GET /api/volumes/user 响应。
 type userVolumesListResponse struct {
 	Volumes []UserVolume `json:"volumes"`
+}
+
+// validateWrapperVolumeReq 校验封装卷建卷请求（防成环 fail-closed，不落盘）：
+//
+//  1. type 的 schema 中 volume-select 必填字段逐一校验 Extra[key] 非空；
+//  2. 底层卷必须已装配（volSet.ByName 命中，含本地 config 卷与既有外部卷）；
+//  3. AllowWrapper=false 的 volume-select 目标不得再是 wrapper（链必须终止于叶子）；
+//  4. 沿 target 链向上遍历，若回落自身/已访问节点 → errVolumeCycle。
+//
+// 卷名全局唯一（AddExternalVolume 强约束），防环判定无需 owner 维度。未注册 type / 无
+// schema（后端未实现 SchemaProvider）→ 跳过校验（既有行为零回归；未注册 type 由后续
+// NewBackend fail-fast 拦截）。
+func validateWrapperVolumeReq(name, typ string, extra map[string]any, vs *registry.Set) error {
+	for _, info := range registry.BackendSchemas() {
+		if info.Type == typ {
+			return validateWrapperFields(name, info.Fields, extra, vs)
+		}
+	}
+	return nil
+}
+
+// validateWrapperFields 逐一校验类型 schema 的 volume-select 必填字段。
+func validateWrapperFields(name string, fields []registry.FieldSchema, extra map[string]any, vs *registry.Set) error {
+	for _, f := range fields {
+		if f.Type != "volume-select" || !f.Required {
+			continue
+		}
+		if err := validateWrapperTarget(name, f, extra, vs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateWrapperTarget 校验单个 volume-select 字段：Extra 非空 + 底层卷存在 +
+// AllowWrapper 约束 + 防环。
+func validateWrapperTarget(name string, f registry.FieldSchema, extra map[string]any, vs *registry.Set) error {
+	target, _ := extra[f.Key].(string)
+	if strings.TrimSpace(target) == "" {
+		return fmt.Errorf("volume: 底层卷字段 %s 必填", f.Key)
+	}
+	if vs == nil {
+		return fmt.Errorf("volume: 底层卷 %q 不存在", target)
+	}
+	if _, ok := vs.ByName(target); !ok {
+		return fmt.Errorf("volume: 底层卷 %q 不存在", target)
+	}
+	if !f.AllowWrapper {
+		if _, isWrapper := targetOfWrapper(vs, target); isWrapper {
+			return fmt.Errorf("volume: 底层卷 %q 不允许再套封装卷", target)
+		}
+	}
+	return detectWrapperCycle(vs, name, target)
+}
+
+// targetOfWrapper 返回卷的 Extra["target"]（该卷是封装卷且已设底层卷时）；非 wrapper /
+// 无 target → ok=false（链在此终止）。
+func targetOfWrapper(vs *registry.Set, name string) (string, bool) {
+	if vs == nil {
+		return "", false
+	}
+	v, ok := vs.ByName(name)
+	if !ok {
+		return "", false
+	}
+	t, ok := v.Extra["target"].(string)
+	return t, ok && strings.TrimSpace(t) != ""
+}
+
+// detectWrapperCycle 沿 target 链向上遍历：从新卷的底层卷 start 出发，把新卷名预置为
+// 已访问，链上任何节点回落已访问集合 → errVolumeCycle（fail-closed）。链深防御上限
+// 1000（防恶意超长链耗尽 CPU）；上限外同样按环处理。
+func detectWrapperCycle(vs *registry.Set, name, start string) error {
+	visited := map[string]bool{name: true}
+	cur := start
+	for i := 0; i < 1000; i++ {
+		if visited[cur] {
+			return errVolumeCycle
+		}
+		visited[cur] = true
+		next, ok := targetOfWrapper(vs, cur)
+		if !ok {
+			return nil // 叶子/非 wrapper 卷 → 链终止，无环。
+		}
+		cur = next
+	}
+	return errVolumeCycle
 }
 
 // createUserVolumeHandler 处理 POST /api/volumes/user。
@@ -53,6 +148,13 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	}
 	if req.Name == "" || req.Type == "" {
 		sendJSONResponse(w, map[string]string{"error": "name/type 必填"}, http.StatusBadRequest)
+		return
+	}
+	// 封装卷校验（防成环，fail-closed）：schema 中 volume-select 必填字段逐一校验
+	// Extra 非空 + 底层卷存在 + AllowWrapper=false 目标非 wrapper + 沿 target 链防环。
+	// 不落盘、不注册 Set，失败在 NewBackend 前返回。
+	if err := validateWrapperVolumeReq(req.Name, req.Type, req.Extra, h.volSet); err != nil {
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
 	// fail-fast 试构造：type 已注册 + extra 合法（registry.NewBackend 分派）。

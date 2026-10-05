@@ -56,6 +56,7 @@ var registerUserVolTestBackendOnce sync.Once
 func newUserVolumeAPIHandlers(t *testing.T, withSync bool) (*Handlers, *UserVolumeStore) {
 	t.Helper()
 	registerUserVolTestBackend()
+	registerUserVolWrapBackend()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.Volumes = []VolumeConfig{{Name: "main", Root: cfg.StorageRoot}}
@@ -83,6 +84,36 @@ func newUserVolTestManager(t *testing.T, storageRoot string) *syncmgr.Manager {
 	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: nil, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
 	t.Cleanup(mgr.Stop)
 	return mgr
+}
+
+// userVolWrapTestType 是「封装类」测试后端（Schema 声明必填 volume-select 底层卷字段）。
+// 与 base 的 userVolumeTestType 区分：后者无 Schema（不触发封装校验），零回归既有用例。
+const userVolWrapTestType = "user-vol-wrap"
+
+// wrapperSchemaBackend 实现 SchemaProvider：声明单字段 `target`（volume-select，必填，
+// AllowWrapper=true）——封装卷语义，供建卷校验消费。
+type wrapperSchemaBackend struct{}
+
+func (w *wrapperSchemaBackend) FS() syncpkg.FS  { return nil }
+func (w *wrapperSchemaBackend) Close() error    { return nil }
+func (w *wrapperSchemaBackend) Usage() int64    { return 0 }
+func (w *wrapperSchemaBackend) Capacity() int64 { return 0 }
+func (w *wrapperSchemaBackend) Schema() []registry.FieldSchema {
+	return []registry.FieldSchema{{
+		Key: "target", Label: "底层卷", Type: "volume-select",
+		Required: true, AllowWrapper: true,
+	}}
+}
+
+var registerUserVolWrapBackendOnce sync.Once
+
+// registerUserVolWrapBackend 注册封装 fake backend（重复注册 panic；sync.Once 保证唯一）。
+func registerUserVolWrapBackend() {
+	registerUserVolWrapBackendOnce.Do(func() {
+		registry.RegisterBackend(userVolWrapTestType, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
+			return &wrapperSchemaBackend{}, nil
+		})
+	})
 }
 
 // userVolWrap 绑定用户卷 API handler 到固定 actor。
@@ -220,5 +251,73 @@ func TestUserVolumeAPI_Delete_OwnerMismatch(t *testing.T) {
 	muxBob.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("bob DELETE alice-disk = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCreateUserVolume_Wrapper_RequiresTarget 封装卷建卷缺失/非法底层卷 → 400、不落盘。
+func TestCreateUserVolume_Wrapper_RequiresTarget(t *testing.T) {
+	t.Parallel()
+	h, store := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+
+	// 缺 target 字段 → 400（schema volume-select 必填）。
+	rec := postUserVolume(t, mux, map[string]any{
+		"name": "v1", "type": userVolWrapTestType, "extra": map[string]any{},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("缺 target POST = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if v, _ := store.Get("alice", "v1"); v != nil {
+		t.Fatal("缺 target 的卷仍落盘（应不落盘）")
+	}
+
+	// target 指向不存在的卷 → 400。
+	rec = postUserVolume(t, mux, map[string]any{
+		"name": "v2", "type": userVolWrapTestType, "extra": map[string]any{"target": "nonexistent"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("target 不存在 POST = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if v, _ := store.Get("alice", "v2"); v != nil {
+		t.Fatal("底层卷不存在的卷仍落盘（应不落盘）")
+	}
+}
+
+// TestCreateUserVolume_Wrapper_CycleRejected 封装卷底层卷成环 → 400、不落盘。
+//
+// 场景：合法链（leaf v1→main；wrapper v2→v1 允许）成立；预先登记相互成环的 cyc-x/cyc-y，
+// 新建指向其中任意一者的卷 → 环检测命中 → 400 errVolumeCycle、不落盘。
+func TestCreateUserVolume_Wrapper_CycleRejected(t *testing.T) {
+	t.Parallel()
+	h, store := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+
+	// 合法：v1 底层 main（默认本地叶卷）。
+	if rec := postUserVolume(t, mux, map[string]any{"name": "v1", "type": userVolWrapTestType, "extra": map[string]any{"target": "main"}}); rec.Code != http.StatusOK {
+		t.Fatalf("v1→main = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	// 合法：v2→v1（wrapper 可作底层，链继续；v1→main 终止）。
+	if rec := postUserVolume(t, mux, map[string]any{"name": "v2", "type": userVolWrapTestType, "extra": map[string]any{"target": "v1"}}); rec.Code != http.StatusOK {
+		t.Fatalf("v2→v1 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// 预置相互成环的既有卷（cyc-x.target=cyc-y，cyc-y.target=cyc-x）——模拟装配期绕过
+	// 建卷校验的历史/config 遗留，用于验证新卷追链命中环。
+	be := &wrapperSchemaBackend{}
+	if err := h.volSet.AddExternalVolume(volume.Volume{Name: "cyc-x", Type: userVolWrapTestType, Extra: map[string]any{"target": "cyc-y"}}, be); err != nil {
+		t.Fatalf("预置 cyc-x: %v", err)
+	}
+	if err := h.volSet.AddExternalVolume(volume.Volume{Name: "cyc-y", Type: userVolWrapTestType, Extra: map[string]any{"target": "cyc-x"}}, be); err != nil {
+		t.Fatalf("预置 cyc-y: %v", err)
+	}
+	// 新建卷指向环上任意节点 → 追链回落已访问节点 → 400 防环、不落盘。
+	rec := postUserVolume(t, mux, map[string]any{
+		"name": "cyc-new", "type": userVolWrapTestType, "extra": map[string]any{"target": "cyc-x"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("成环 POST = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if v, _ := store.Get("alice", "cyc-new"); v != nil {
+		t.Fatal("成环卷仍落盘（应 fail-closed 不落盘）")
 	}
 }
