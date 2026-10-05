@@ -9,6 +9,7 @@ use (
 	./pkg/media/ext/mp4
 	./pkg/volume/ext/baidupcs
 	./pkg/volume/ext/pikpak
+	./tool/pikpak-hybrid
 	./pkg/certmgr/ext/dnspod
 	./pkg/state/ext/mongo
 	./pkg/telemetry/ext/otel

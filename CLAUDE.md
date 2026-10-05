@@ -21,12 +21,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - **R18 测试并发注册门禁**：新增测试默认必须 `t.Parallel()`；无法并发者须显式登记
 >   （`t.Setenv/t.Chdir` 自动豁免、或函数体标注 `// sproxy:serial: <理由>`、或计入
 >   `internal/archcheck/serial_budgets.tsv` 白名单棘轮，只减不增）；门禁**扫描全仓**并带覆盖探针。
+> - **全局能力可测试化策略（2026-10-05 用户明示）**：测试不得依赖全局可变状态凑并行——凡全局能力
+>   （注册表/共享 provider 等），生产代码提供三件套使其可测试化：内部类型 opt（参数化全局行为，
+>   如 `*downloader.Registry`）+ 内部全局变量（真实全局留生产）+ 可导出全局方法（`NewRegistry()`
+>   本地实例构造、`RegisterXxx(reg, cfg)` 按参注册入口，包内结构内部方法直接接收内部类型变量控制
+>   全局行为）；测试传本地实例不触碰全局 → 可 `t.Parallel()`。**新测试先问「能否并行」，不得默认
+>   登记串行**（教训 #734：30+ 一次性串行登记吃光棘轮 slack，CI merge 树红灯）。详见 `AGENTS.md` R18。
+> - **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为必须逐项
+>   测试锁定；新增外部依赖先在 `docs/external-dependencies.md` 分类登记 + 补测试锁定；测试红先对照
+>   该文档判「依赖变化 vs 实现回归」，禁止静默改实现适配未登记的变化。详见 `AGENTS.md` 硬规则 19。
 > - **测试网络客户端隔离**：禁止 `http.DefaultClient`/共享 `http.DefaultTransport`
 >   （并行用例的 `httptest.Server.Close()` 会打断其它用例在途 idle 连接）。
 > - **本地先过后触发 CI**：lint / test / e2e / 各门禁本地全绿后才 push。
 > - **绝对禁止跳过检查直接 commit / push**（2026-10-02 用户明示）：严禁 `--no-verify`；pre-commit（增量轻量）
 >   与 pre-push（全量：fmt-all → lint-all → check-ci）必须真实跑通，日志落盘 `build/hooks/*.log`；
 >   **出现环境问题或脚本故障时直接修复环境/脚本，不得以「CI 会兜底」为由绕过**（绕过只是把失败推迟到 CI）。
+> - **PR 绝对禁止泄露真实数据（2026-10-05 用户明示）**：代码/配置/文档/commit 信息/PR body 一律
+>   禁止携带真实外部数据（真实分享 URL 含子路径 token、凭据/token、密钥/指纹、日志片段）；
+>   需真实数据验证时用**环境变量或 CLI flag 运行期传入**（默认留空/占位），禁止硬编码入库；
+>   合并前 `git grep` 扫描。详见 `AGENTS.md` 硬规则 21。
 
 ## 执行偏好
 

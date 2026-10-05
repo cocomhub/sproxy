@@ -438,6 +438,7 @@ type fakeServer struct {
 	driveFiles  []FileMeta
 	downloadURL string
 	deleted     []string
+	permDeleted []string
 	srv         *httptest.Server
 	// restoreOwned 模拟 file_restore_own（源文件已在网盘，restore 返回 owned）。
 	restoreOwned bool
@@ -545,7 +546,8 @@ func (f *fakeServer) restoreShare(fileIDs []string, token string) string {
 	return restoredID
 }
 
-func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
+//nolint:gocognit // S3776：测试 fake 路由分发表（test 文件双引擎豁免按例，Sonar PR 扫描显式抑制）
+func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) { // NOSONAR: S3776 — 测试 fake 路由 switch，非生产逻辑
 	token, ok := f.authorize(w, r)
 	if !ok {
 		return
@@ -591,6 +593,13 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.deleted = append(f.deleted, body.IDs...)
 		f.deleteCalled = true
 		writeJSON(w, map[string]any{"ok": true})
+	case r.URL.Path == "/drive/v1/files:batchDelete" && r.Method == http.MethodPost:
+		var body struct {
+			IDs []string `json:"ids"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.permDeleted = append(f.permDeleted, body.IDs...)
+		writeJSON(w, map[string]any{"task_id": "del-task-1"})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -937,8 +946,77 @@ func TestPikpakDownloader_AutoDelete_SkipsOwnedFile(t *testing.T) {
 	if _, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil); err != nil {
 		t.Fatal(err)
 	}
-	// AutoDelete=true 但 owned → 不调 Delete（源文件不删）
+	// AutoDelete=true 但 owned → 不调 DeletePermanent（源文件不删；释放经 RestoreLease 单一语义）
+	if len(fsrv.permDeleted) != 0 {
+		t.Fatal("file_restore_own（源文件）时 AutoDelete 不得永久删除源文件（NH-P1 数据丢失）")
+	}
 	if fsrv.deleteCalled {
-		t.Fatal("file_restore_own（源文件）时 AutoDelete 不得调用 Delete（NH-P1 数据丢失）")
+		t.Fatal("owned 时不得走 batchTrash 删除（旧路径已收归 RestoreLease，本断言防回退）")
+	}
+}
+
+// TestPikpakDownloader_AutoDelete_PermanentDeletesRestore round-10 回归：非 owned 转存副本
+// 下载完成后经 RestoreLease **永久删除**（batchDelete 释放空间，不再 batchTrash）。
+func TestPikpakDownloader_AutoDelete_PermanentDeletesRestore(t *testing.T) {
+	t.Parallel()
+	const payload = "sample-content"
+	share := []FileMeta{
+		{ID: "share-vid-1", Name: "SAMPLE-123-full.mp4", Kind: "drive#file", Size: 1000000, MimeType: "video/mp4"},
+	}
+	fsrv := newFakeTokenServer(share, "https://dl.example.com/download?fid=x")
+	defer fsrv.Close()
+	// restore 返回普通副本（非 owned）——AutoDelete 应永久删
+	fsrv.restoreOwned = false
+	fsrv.tokenDrives["tA"] = []FileMeta{}
+
+	credDir := t.TempDir()
+	cli, err := NewCli(CliConfig{
+		BinaryPath: fakeTokenCLIBin(t, payload),
+		HTTPClient: fsrv.srv.Client(),
+		CommandFactory: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			cmd := exec.CommandContext(ctx, name, args...)
+			cmd.Env = append(os.Environ(), "PIKPAK_TEST_CRED_DIR="+credDir)
+			return cmd
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credPath := filepath.Join(credDir, ".credentials.json")
+	if werr := os.WriteFile(credPath, []byte(`{"access_token":"tA","refresh_token":"rA"}`), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	api := NewAPI(APIConfig{Host: fsrv.srv.URL, HTTPClient: fsrv.srv.Client(), CredentialPath: credPath}, cli)
+	dl, err := NewPikpakDownloader(DownloaderConfig{Cli: cli, API: api, DownloadDir: t.TempDir(), Timeout: 5 * time.Minute, AutoDelete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fsrv.permDeleted) != 1 {
+		t.Fatalf("非 owned 转存副本应被永久删除（batchDelete），permDeleted=%v", fsrv.permDeleted)
+	}
+	if fsrv.deleteCalled {
+		t.Fatal("释放应走 batchDelete（permanent），不得走 batchTrash（不释放空间）")
+	}
+}
+
+// TestAPI_DeletePermanent 验证永久删除走 batchDelete（释放空间）而非 batchTrash。
+func TestAPI_DeletePermanent(t *testing.T) {
+	t.Parallel() // 自有 fakeServer，无全局依赖
+	fs := newFakeServer(nil, "")
+	defer fs.Close()
+	a := NewAPI(APIConfig{Host: fs.srv.URL, AccessToken: fakeServerToken}, nil)
+
+	if err := a.DeletePermanent(t.Context(), []string{"f1", "f2"}); err != nil {
+		t.Fatalf("DeletePermanent error: %v", err)
+	}
+	if len(fs.permDeleted) != 2 || fs.permDeleted[0] != "f1" || fs.permDeleted[1] != "f2" {
+		t.Fatalf("permDeleted = %v, want [f1 f2]", fs.permDeleted)
+	}
+	if len(fs.deleted) != 0 {
+		t.Errorf("batchTrash should not be called, got deleted=%v", fs.deleted)
 	}
 }

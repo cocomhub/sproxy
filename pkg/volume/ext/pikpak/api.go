@@ -392,13 +392,32 @@ func (a *API) FindByID(ctx context.Context, fileID string) (*FileMeta, error) {
 	return nil, fmt.Errorf("%w: file id %s", ErrFileNotFound, fileID)
 }
 
-// Delete 删除网盘文件/文件夹（移到回收站）。
+// Delete 删除网盘文件/文件夹（移到回收站 batchTrash）。
+// 注意：batchTrash 只移回收站，**不释放配额空间**（quota.usage 不降）——
+// 免费账号 6GB 空间场景应优先用 DeletePermanent（永久删）释放空间。
 func (a *API) Delete(ctx context.Context, fileIDs []string) error {
 	body := map[string]any{"ids": fileIDs}
 	var out map[string]any
 	if err := a.doJSON(ctx, http.MethodPost, "/drive/v1/files:batchTrash", nil, body, &out); err != nil {
 		return err
 	}
+	return nil
+}
+
+// DeletePermanent 永久删除网盘文件/文件夹（/drive/v1/files:batchDelete）。
+// 与 Delete（batchTrash 移回收站）不同：batchDelete 直接释放配额空间
+// （实测 quota.usage 归 0）——免费账号空间仅 6GB，转存后必须及时永久删。
+// 注意：删除是**异步任务**（返回 task_id），PikPak 端清理需要数秒；
+// 调用方可在需要时轮询 quota 确认释放。
+func (a *API) DeletePermanent(ctx context.Context, fileIDs []string) error {
+	body := map[string]any{"ids": fileIDs}
+	var out struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := a.doJSON(ctx, http.MethodPost, "/drive/v1/files:batchDelete", nil, body, &out); err != nil {
+		return err
+	}
+	a.log.Debug("pikpak permanent delete", "task_id", out.TaskID, "files", len(fileIDs))
 	return nil
 }
 
@@ -420,20 +439,47 @@ func (a *API) DownloadLink(ctx context.Context, fileID string) (string, error) {
 
 // parseShareID 从 mypikpak.com/s/<share_id>（或 mypikpak.net / keepshare）URL 提取 share id。
 // 校验 Host 属于支持域名（与 Supports 同一判据，避免伪冒域名 /s/<id> 被误转发到官方 REST）。
-func parseShareID(raw string) (string, error) {
+// parseShareIDWithToken 解析分享 URL 并提取 share id 与子路径 token（/s/<id>/<token>）。
+// 返回 (shareID, token)；无 token 段时 token 为空。
+// 支持：mypikpak.com/s/<id>/[token]、keepshare.org/<id>/magnet:...（镜像）。
+func parseShareIDWithToken(raw string) (string, string) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return "", err
+		return "", ""
 	}
 	host := strings.ToLower(u.Hostname())
 	if !supportedShareHost(host) {
-		return "", fmt.Errorf("%w: host %s", ErrUnsupported, u.Host)
+		return "", ""
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) < 2 || parts[0] != "s" {
+	// mypikpak.com/s/<id>/<token>：parts[0]=s, parts[1]=id, parts[2]=token（可选）
+	if parts[0] == "s" {
+		if len(parts) < 2 || parts[1] == "" {
+			return "", ""
+		}
+		tok := ""
+		if len(parts) > 2 {
+			tok = parts[2]
+		}
+		return parts[1], tok
+	}
+	// keepshare.org/<id>/magnet:...（镜像 301 → mypikpak）：parts[0] 直接是分享 id
+	if strings.Contains(host, "keepshare") {
+		if parts[0] == "" {
+			return "", ""
+		}
+		return parts[0], ""
+	}
+	return "", ""
+}
+
+// parseShareID 从分享 URL 提取 share id（忽略子路径 token，维持旧调用语义）。
+func parseShareID(raw string) (string, error) {
+	id, _ := parseShareIDWithToken(raw)
+	if id == "" {
 		return "", fmt.Errorf("%w: %s", ErrUnsupported, raw)
 	}
-	return parts[1], nil
+	return id, nil
 }
 
 // supportedShareHost 判断 host 是否属于支持的分享域名。
@@ -441,7 +487,8 @@ func supportedShareHost(host string) bool {
 	switch host {
 	case "mypikpak.com", "www.mypikpak.com",
 		"mypikpak.net", "www.mypikpak.net",
-		"keepshare.org", "www.keepshare.org":
+		"keepshare.org", "www.keepshare.org",
+		"keepshare.cc", "www.keepshare.cc": // 实测 keepshare 301 → keepshare.cc
 		return true
 	}
 	return false

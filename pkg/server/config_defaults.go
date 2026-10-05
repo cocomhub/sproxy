@@ -125,6 +125,14 @@ func Default() *Config {
 		CloudDownloadIdleTimeout:  1 * time.Minute,
 		CloudMaxRetries:           10,
 		CloudRetryDelay:           10 * time.Second,
+		Pikpak: PikpakConfig{
+			// Hybrid.AutoDelete 默认 true（2026-10-05 修正：与 config.go 注释一致）——
+			// 免费账号仅 6GB，下载后必须永久删转存释放空间；idempotent 复用只删
+			// 「Pack From Shared」restore 副本（NH-P1 加固），不会误删用户自有文件。
+			Hybrid: PikpakHybridConfig{
+				AutoDelete: true,
+			},
+		},
 	}
 }
 

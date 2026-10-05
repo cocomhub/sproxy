@@ -91,7 +91,10 @@ func registerPikpakDownloader(cfg *server.Config) {
 			API:         api,
 			DownloadDir: cfg.Pikpak.DownloadDir,
 			Timeout:     cfg.Pikpak.Timeout,
-			AutoDelete:  cfg.Pikpak.AutoDelete,
+			// round-10 用户裁决：释放流程收归 RestoreLease（DeletePermanent）——旧下载器
+			// 与 hybrid 对齐空间释放（免费账号 6GB；hybrid AutoDelete 默认 true）。该下载器
+			// 兼作 hybrid 的 Fallback（匿名路径失败时委托），此时也须释放转存副本。
+			AutoDelete:  cfg.Pikpak.AutoDelete || cfg.Pikpak.Hybrid.AutoDelete,
 			AccountPool: pool,
 		})
 		if err != nil {
@@ -107,7 +110,36 @@ func registerPikpakDownloader(cfg *server.Config) {
 			Priority: 10, // 高于内置 HTTP（0）：分享 URL 优先走 PikPak 完整下载
 		})
 		slog.Info("pikpak downloader registered", "priority", 10)
+
+		registerHybridIfEnabled(cfg, api, dl)
 	})
+}
+
+// registerHybridIfEnabled 按配置注册 hybrid 下载器（gocognit 收敛：从 registerPikpakDownloader 拆出）。
+// 默认启用（Disable 零值 false=开；true 才显式禁用）：分享 URL 优先 hybrid。
+// 注册走 RegisterHybridDownloader（可测试化的全局能力：注册表经参数注入，
+// 生产传全局 DefaultRegistry，测试传本地 NewRegistry() 实例——R18 策略 2026-10-05）。
+func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.PikpakDownloader) {
+	if cfg.Pikpak.Hybrid.Disable {
+		return
+	}
+	if herr := pikpak.RegisterHybridDownloader(downloader.DefaultRegistry, pikpak.HybridConfig{
+		Resolver:    pikpak.NewShareResolver(pikpak.ShareResolverConfig{}),
+		API:         api,
+		ChunkSize:   cfg.Pikpak.Hybrid.ChunkSize,
+		ShareRatio:  cfg.Pikpak.Hybrid.ShareRatio,
+		Concurrency: cfg.Pikpak.Hybrid.Concurrency,
+		AutoDelete:  cfg.Pikpak.Hybrid.AutoDelete,
+		Logger:      slog.Default(),
+		Metrics:     &pikpak.HybridMetrics{},
+		// Fallback：匿名分享路径整体失败时降级到旧 PikpakDownloader 完整账号下载
+		// （设计 §1.2——resolve 失败/无直链不阻断任务）。
+		Fallback: dl,
+	}); herr != nil {
+		slog.Warn("pikpak hybrid downloader not registered", "err", herr)
+	} else {
+		slog.Info("pikpak hybrid downloader registered", "priority", 11)
+	}
 }
 
 // registerPikpakOnce 保证只注册一次。

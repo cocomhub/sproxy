@@ -90,6 +90,18 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**两层**：逐文件计数 + 全仓总数，**只减不增**； 上行须同步
     `docs/testing/virtual-time-conversions.md` 登记理由）。另设覆盖探针：扫描面被改窄（扫到的文件数/串行数低于下限）即红。
     历史教训：一次 +975 处 t.Parallel 的批量修补花费一个完整周期——**不要让下一次出现同类二次返工**。
+    全局能力可测试化策略（2026-10-05 用户明示，长期有效）：测试**不得依赖全局可变状态**
+    （包级全局注册表/共享 provider 等）来凑并行——凡全局能力，生产代码提供三件套使其可测试化：
+      - **内部类型 opt**：把全局行为参数化（如 `*downloader.Registry` 等内部类型）；
+      - **内部全局变量**：真实全局（如 `downloader.DefaultRegistry`）保留给生产路径；
+      - **可导出全局方法**：提供取**本地实例**的构造器（`NewRegistry()`）与**按参注册**的入口
+        （`RegisterXxx(reg, cfg)`——注册目标经参数注入，生产传全局、测试传本地）；包内结构提供
+        内部方法直接接收内部类型变量控制全局行为。
+    效果：测试用本地实例注入，不触碰全局 → 可 `t.Parallel()`。**新测试默认先问「能否并行」，
+    不得默认登记串行**——只有真写共享全局/真实端口/进程外资源的才放弃 `t.Parallel()` 并登记
+    `serial_budgets.tsv`。教训（#734）：一次性登记 30+ 串行把棘轮基线顶到 1810，CI merge 树
+    （pull_request 合并 master 侧新增串行）因 master 侧未显式登记、slack 被吃光而红灯——
+    并行化 + 同步 master + 补登记后归位到 1781。
 14. **本地先过后触发 CI**：CI 里所有可本地执行的 job（lint / test / test-cover / e2e / web-test /
     notest / deadcode-check / check-loopback / 棘轮与并发门禁 )**必须在本地全绿后才 push 触发 GitHub CI**；
     逐 job 失败根因从 `gh api repos/{owner}/{repo}/actions/jobs/<id>/logs` 精确取证后修复，禁止靠猜。
@@ -124,7 +136,24 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；
     时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config.go` 的
     `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循。
-    
+20. **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为
+    （第三方 CLI/REST/直链/CDN、网络边界、外部服务语义等）必须**逐项测试锁定**——每项外部契约
+    行为在对应测试中显式断言（fake/mock 或真实链路）。维护时：
+    - 新增外部依赖 → 先在 `docs/external-dependencies.md` 按分类登记条目 + 补测试锁定
+      （TDD 红灯 → 实现 → 绿）；绝不允许「外部行为无锁、改了也不红」；
+    - 测试红时**先对照该文档**判断「外部行为变化（依赖变更）」还是「实现回归」，禁止静默改
+      实现适配未登记的依赖变化；
+    - 外部行为确实变化 → 更新 `docs/external-dependencies.md` + 适配实现（测试继续锁）；
+      实现回归 → 修实现，文档不动。
+    目标：**外部行为变化可见、可追踪、有锁，绝不让其静默改变行为**（教训：PikPak 分享直链
+    416 边界/expire 签名/keepshare 301 等若无锁，实现漂移会静默损坏下载）。
+21. **PR 绝对禁止泄露真实数据（2026-10-05 用户明示，强制）**：创建 PR 时，代码、配置、文档、
+    commit 信息与 **PR body** 一律禁止携带真实外部数据——真实分享 URL/链接（含子路径 token）、
+    账号凭据/token、密钥/指纹、真实日志片段等。需要真实数据验证的场景：**用环境变量或 CLI flag
+    在运行期传入**（默认值留空/占位），禁止硬编码入库。合并前用 `git grep` 扫描真实 URL/凭据
+    模式；CI/Sonar 不豁免，泄露即数据事故。教训（#734）：tool/pikpak-hybrid 三个诊断工具曾
+    硬编码真实分享 URL（含子路径 token）；URL 类真实数据按常见规范用 **CLI flag 运行期传入**
+    （`-share`，默认留空 + 强制校验），凭据/密钥类用环境变量。
 
 
 
