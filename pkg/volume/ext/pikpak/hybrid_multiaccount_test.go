@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -660,5 +661,315 @@ func TestHybridDownload_MultiAccount_EmptyPoolFallsBackToSingle(t *testing.T) {
 	got, _ := os.ReadFile(dest)
 	if string(got) != string(payload) {
 		t.Fatalf("content mismatch: got %d want %d bytes", len(got), len(payload))
+	}
+}
+
+// TestHybridDownload_MultiAccount_ShareDowngrade 多账号路径的分享区→账号区降级：
+// /share/dl 恒 500（分享直链失效），probe 失败回落 ratio 边界 → 分享区 chunk 连续失败
+// → 降级到账号区（经账号池 Select 分摊）。断言：下载成功 + 内容一致 + DowngradeTotal≥1 +
+// 账号区字节记账（AccountBytesUsed == 全文件）。
+func TestHybridDownload_MultiAccount_ShareDowngrade(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 61)
+	}
+	chunkLen := int64(len(payload) / 2) // 2 chunks → 分享区 1 + 账号区 1（分享区失败全降级）
+
+	var restoreCalls atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl":
+			// 探针（短 Range ≤1KB）返回 206 → shareEnd 保持 ratio，分享区 chunk 被规划；
+			// chunk 请求（长 Range）返回 500 → 分享区 chunk 连续失败 → 降级账号区。
+			var s, e int64
+			fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &s, &e)
+			if e-s+1 <= 1024 {
+				serveRange(w, r, payload)
+				return
+			}
+			http.Error(w, "share chunk dead", http.StatusInternalServerError)
+		case r.URL.Path == "/drive/v1/share/restore":
+			restoreCalls.Add(1)
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case strings.HasPrefix(r.URL.Path, "/drive/v1/files/restored"):
+			writeJSON(w, map[string]any{"id": "restored-1", "name": "movie.mp4", "web_content_link": srv.URL + "/dl-restored-1"})
+		case strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			serveRange(w, r, payload)
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	pool, _ := newTestPool(t, 1<<30, &now)
+	addAcct(t, pool, "acct-a", `{"access_token":"tok-a"}`, 1<<30)
+	addAcct(t, pool, "acct-b", `{"access_token":"tok-b"}`, 1<<30)
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	metrics := &HybridMetrics{}
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 2,
+		AutoDelete: false, AccountPool: pool, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch: got %d want %d bytes", len(got), len(payload))
+	}
+	if metrics.DowngradeTotal.Load() < 1 {
+		t.Fatalf("downgrade_total = %d, want >=1 (share chunk failed → account)", metrics.DowngradeTotal.Load())
+	}
+	if metrics.AccountBytesUsed.Load() != int64(len(payload)) {
+		t.Fatalf("account_bytes_used = %d, want %d (全部字节经账号区)", metrics.AccountBytesUsed.Load(), len(payload))
+	}
+	if restoreCalls.Load() < 1 {
+		t.Fatalf("restore calls = %d, want >=1", restoreCalls.Load())
+	}
+}
+
+// TestHybridDownload_MultiAccount_CrashResume 多账号 + 崩溃恢复真实场景：首次下载分享区
+// chunk 完成（写 manifest）、账号区 chunk 失败（模拟中途失败，成功路径会 removeManifest，
+// 失败路径保留 manifest）→ 二次重跑：分享区 chunk 被 manifest 跳过（无长 Range 请求），
+// 账号区 chunk 重新转存下载（失败下载的副本已被 Release 清理），最终文件完整。
+// 锁定：manifest 不记账号分配、accounted 每次下载独立重建，resume 语义不受多账号影响。
+func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 59)
+	}
+	chunkLen := int64(len(payload) / 2) // 2 chunks → 分享区 1 + 账号区 1（shareEnd = 0.5 total）
+
+	var restoreCalls, longShareCalls, acctDLFails atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl":
+			var s, e int64
+			fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &s, &e)
+			if e-s+1 <= 1024 {
+				serveRange(w, r, payload) // 探针（短 Range）
+				return
+			}
+			longShareCalls.Add(1) // 分享区 chunk（长 Range）
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/share/restore":
+			restoreCalls.Add(1)
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case strings.HasPrefix(r.URL.Path, "/drive/v1/files/restored"):
+			writeJSON(w, map[string]any{"id": "restored-1", "name": "movie.mp4", "web_content_link": srv.URL + "/dl-restored-1"})
+		case strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			// 账号区 Range：首次下载恒 500（模拟中途失败，重试也失败）；重跑时恢复成功。
+			if acctDLFails.Add(1) <= 2 {
+				http.Error(w, "transient account dl failure", http.StatusInternalServerError)
+				return
+			}
+			serveRange(w, r, payload)
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	pool, _ := newTestPool(t, 1<<30, &now)
+	addAcct(t, pool, "acct-a", `{"access_token":"tok-a"}`, 1<<30)
+	addAcct(t, pool, "acct-b", `{"access_token":"tok-b"}`, 1<<30)
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 2,
+		AutoDelete: false, AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+
+	// 第一次：分享区 chunk 完成（manifest 记录），账号区 chunk 失败（2 次重试均失败）→ 报错。
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err == nil {
+		t.Fatalf("first download should fail (account chunk transient failure)")
+	}
+	// 第二次：重跑 → 分享区 chunk 被 manifest 跳过（longShareCalls 不再增长），
+	// 账号区 chunk 重新转存下载成功 → 文件完整。
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("resume download: %v", err)
+	}
+	if longShareCalls.Load() != 1 {
+		t.Fatalf("share chunk long-range calls = %d, want 1 (第二次应跳过分享区 chunk)", longShareCalls.Load())
+	}
+	// 转存计数：首次下载两次尝试各在 a、b 转存一次副本（每次尝试新账号需新副本，失败
+	// 下载 Release 已清理）→ 2；重跑再转存 1 次 → 共 3。账号区 chunk 必然重新转存。
+	if restoreCalls.Load() != 3 {
+		t.Fatalf("restore calls = %d, want 3 (首次 2 次尝试 + 重跑 1 次)", restoreCalls.Load())
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch after crash resume")
+	}
+}
+
+// TestHybridDownload_MultiAccount_ConcurrentSharedPool 并发多任务共享**同一** HybridDownloader
+// 单例 + 同一账号池下载（注册制 cloud manager 并发任务共享形态）：分享直链恒 500（probe 失败
+// → shareEnd=0），全程走账号区。两路并发 Download，锁定：
+//  1. 每任务文件与 payload 逐字节一致（共享单例 + 每个 downloadCtx 独立状态，不跨任务污染）；
+//  2. 账号字节记账精确：metrics.AccountBytesUsed == 2×len(payload)，且池内各账号 DailyUsed 之和
+//     亦 == 2×len(payload)（跨任务并发 RecordUsage 无丢更新）；
+//  3. -race 探测共享单例下载器的数据竞争。
+//
+// 用 AutoDelete=false：Release 不删转存副本，规避「跨任务同一分享副本删除干扰」这一已文档化
+// 限制（注释见 idempotentRestored），专注断言并发共享单例的记账与内容完整性。
+func TestHybridDownload_MultiAccount_ConcurrentSharedPool(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 67)
+	}
+	chunkLen := int64(len(payload) / 2)
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl":
+			http.Error(w, "share link dead", http.StatusInternalServerError) // probe 失败 → shareEnd=0
+		case r.URL.Path == "/drive/v1/share/restore":
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case strings.HasPrefix(r.URL.Path, "/drive/v1/files/restored"):
+			writeJSON(w, map[string]any{"id": "restored-1", "name": "movie.mp4", "web_content_link": srv.URL + "/dl-restored-1"})
+		case strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			serveRange(w, r, payload)
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	pool, _ := newTestPool(t, 1<<30, &now)
+	addAcct(t, pool, "acct-a", `{"access_token":"tok-a"}`, 1<<30)
+	addAcct(t, pool, "acct-b", `{"access_token":"tok-b"}`, 1<<30)
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	metrics := &HybridMetrics{}
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 2,
+		AutoDelete: false, AccountPool: pool, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+
+	const tasks = 2
+	dests := make([]string, tasks)
+	var wg sync.WaitGroup
+	errs := make(chan error, tasks)
+	for i := range tasks {
+		dests[i] = filepath.Join(t.TempDir(), fmt.Sprintf("out%d.mp4", i))
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dests[i], nil); derr != nil {
+				errs <- fmt.Errorf("task %d: %w", i, derr)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatalf("并发下载失败: %v", e)
+	}
+
+	// 内容完整性：每任务 dest 与 payload 逐字节一致（共享单例并发不跨任务污染）。
+	for i, d := range dests {
+		got, rerr := os.ReadFile(d)
+		if rerr != nil {
+			t.Fatalf("read task %d: %v", i, rerr)
+		}
+		if string(got) != string(payload) {
+			t.Fatalf("content mismatch task %d: got %d want %d bytes", i, len(got), len(payload))
+		}
+	}
+
+	// 会计精确：shareEnd=0 全走账号区 → 每任务账号区字节 == len(payload)，两任务合计 2×。
+	want := int64(tasks) * int64(len(payload))
+	if got := metrics.AccountBytesUsed.Load(); got != want {
+		t.Fatalf("account_bytes_used = %d, want %d (跨任务共享池并发无丢更新)", got, want)
+	}
+	// 池内各账号日用量之和亦 == 2×len(payload)（跨任务并发 RecordUsage 无丢更新）。
+	var poolSum int64
+	for _, a := range pool.Accounts() {
+		poolSum += a.DailyUsed
+	}
+	if poolSum != want {
+		t.Fatalf("pool daily used sum = %d, want %d (跨任务并发记账无丢更新)", poolSum, want)
 	}
 }

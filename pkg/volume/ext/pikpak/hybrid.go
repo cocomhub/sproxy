@@ -1118,6 +1118,17 @@ func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadC
 		// 都 idempotent 命中同一 restore 副本并各自 Track——先完成方 Release 删除后，
 		// 后完成方在途 chunk 会失败。属跨任务协调问题（需 per-task 租约/删除引用计数），
 		// 待「单一内部类型 + 策略路由」统一架构时一并解决（单账号路径同样存在）。
+		//
+		// 配额**咨询性**语义（2026-10-05 追加）：Select 的每日配额预检是软预留——基于当时
+		// DailyUsed 判断「剩余 ≥ 本 chunk」，但预留不占用，chunk 下载成功后才 RecordUsage 事后
+		// 提交。因此并发任务共享同一账号池时，多个任务可能在同一账号的软预留窗口内都被选中、
+		// 并行拉取，该账号本地记账 DailyUsed 会较估算短暂**超过**当日配额（本 ID 为每次 Select
+		// 的软预检结果，非原子预留）。这是刻意为之——日配额是**真实网盘流量的 advisory 估算**
+		// 而非硬性限流：超额只是本地记账超、不损坏数据，也不改变每账号真实可达的流量上限。故
+		// 不加预留（reserve/decrement 机制）——引入它就需账号级预留计数 + 失败释放，跨 Use 锁上
+		// 有饥饿/死锁风险，且对 advisory 语义无收益。会计精确性（并发 RecordUsage 无丢更新）由
+		// TestAccountPool_Synctest_ConcurrentOps_CrossMidnight 与
+		// TestHybridDownload_MultiAccount_ConcurrentSharedPool 锁定。
 	} else {
 		d.log.Info("hybrid restore reuse (non-restore-copy, skip delete registration)",
 			"id", existing.ID, "name", existing.Name)
