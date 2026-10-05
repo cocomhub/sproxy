@@ -19,7 +19,7 @@ type fakeRunner struct {
 	failErr error  // 非 nil 时模拟子进程失败
 }
 
-func (f *fakeRunner) Run(_ context.Context, _ io.Reader) ([]byte, error) {
+func (f *fakeRunner) Run(_ context.Context, _ string, _ io.Reader) ([]byte, error) {
 	if f.failErr != nil {
 		return nil, f.failErr
 	}

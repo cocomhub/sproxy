@@ -26,6 +26,16 @@ type libraryFallback interface {
 	Download(ctx context.Context, remotePath, localPath string) error
 }
 
+// directLinkProvider 是可选直链能力接口：底层 adapter 若实现（库 adapter 持有
+// *Client 可 LocateDownload / 测试 fake），Storage.DirectURL 走它；否则 ok=false
+// （binaryAdapter 无 BDUSS 会话 → 不支持直链）。保持最小侵入：不扩展 Adapter
+// 接口，用 type assertion 探测——与 metadataProvider 同构。
+type directLinkProvider interface {
+	// DirectLink 返回 remotePath 的下载直链（自包含签名、短时有效、支持 Range）。
+	// ok=false = 不支持（无会话）；err = 定位失败。
+	DirectLink(ctx context.Context, remotePath string) (string, bool, error)
+}
+
 // AdapterConfig 是 binaryAdapter 配置。
 type AdapterConfig struct {
 	// BinaryPath 是 BaiduPCS-Go 可执行文件路径；空 = PATH 查找。
@@ -190,6 +200,30 @@ func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath str
 	}
 	a.log.Info("baidupcs 库兜底 Download（Downloader + 断点）", "remote", remotePath, "local", localPath)
 	return downloadViaDownloader(ctx, a.pcs, remotePath, localPath, layout)
+}
+
+// DirectLink 实现 directLinkProvider：用 LocateDownload 获取 remotePath 的下载直链。
+// 只选 Encrypt==0 的 URL（加密链接不可直接用于 302/浏览器）；dlink 自包含签名、
+// 短时有效（分钟级）、支持 Range——每次调用实时签发（不可缓存复用）。
+// pcs 为 nil（无会话）→ ok=false（调用方回落服务端转发）。
+func (a *libraryAdapter) DirectLink(ctx context.Context, remotePath string) (string, bool, error) {
+	if a.pcs == nil {
+		return "", false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", true, mapPCSError(err)
+	}
+	urlInfo, pcsErr := a.pcs.PCS().LocateDownload(remotePath)
+	if pcsErr != nil {
+		return "", true, fmt.Errorf("baidupcs: locate download %q: %w", remotePath, mapPCSError(pcsErr))
+	}
+	// 只取 Encrypt==0 的非加密直链（过滤逻辑与上游 URLStrings 一致）。
+	for _, u := range urlInfo.URLs {
+		if u.Encrypt == 0 && u.URL != "" {
+			return u.URL, true, nil
+		}
+	}
+	return "", true, fmt.Errorf("baidupcs: no non-encrypted download url for %q", remotePath)
 }
 
 // List 用 fork 库 FilesDirectoriesList 返回 remotePath 下的单层条目（目录+文件，不递归）。

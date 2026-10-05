@@ -46,19 +46,19 @@ type VideoKeyframeBlockletPlanner struct {
 // NewVideoKeyframeBlockletPlanner 构造视频关键帧规划器：fixed 退化规划器**构造期初始化**
 // （评审 I-2 修复：消除 fixedPlan 懒初始化的潜在数据竞争——当前写路径串行不触发，但显式
 // 初始化彻底杜绝隐患，未来并发调用也安全）。fallback 链透传（主解析失败时按序尝试）。
-func NewVideoKeyframeBlockletPlanner(min, max int64, indexer KeyframeIndexer, fallback ...KeyframeIndexer) *VideoKeyframeBlockletPlanner {
-	if min <= 0 {
-		min = 64 << 10
+func NewVideoKeyframeBlockletPlanner(blockMin, blockMax int64, indexer KeyframeIndexer, fallback ...KeyframeIndexer) *VideoKeyframeBlockletPlanner {
+	if blockMin <= 0 {
+		blockMin = 64 << 10
 	}
-	if max < min {
-		max = min
+	if blockMax < blockMin {
+		blockMax = blockMin
 	}
 	return &VideoKeyframeBlockletPlanner{
-		Min:      min,
-		Max:      max,
+		Min:      blockMin,
+		Max:      blockMax,
 		Indexer:  indexer,
 		Fallback: fallback,
-		fixed:    &FixedBlockletPlanner{Min: min, Max: max},
+		fixed:    &FixedBlockletPlanner{Min: blockMin, Max: blockMax},
 	}
 }
 

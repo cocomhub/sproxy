@@ -146,7 +146,7 @@ func (h *Handlers) resolveDownloadPathForFiles(r *http.Request) (files.DownloadP
 	if err != nil {
 		return files.DownloadPath{}, toFilesHTTPError(err)
 	}
-	return files.DownloadPath{Filename: dp.filename, VolumeName: dp.volName, Tenant: dp.tnt, Rel: dp.rel}, nil
+	return files.DownloadPath{Filename: dp.filename, VolumeName: dp.volName, Tenant: dp.tnt, Rel: dp.rel, RedirectURL: dp.redirectURL, Source: dp.source}, nil
 }
 
 // locateOwnerFileForFiles 把 locateOwnerFile 的结果适配为子包的值类型。
@@ -168,6 +168,7 @@ func (h *Handlers) routeUploadForFiles(owner, rel, explicitVol string, size int6
 	return files.UploadRoute{
 		VolumeName: route.volumeName,
 		Tenant:     route.tenant,
+		Sink:       route.sink,
 		Scope:      route.scope,
 		ScopeRes:   route.scopeRes,
 		Pool:       route.pool,

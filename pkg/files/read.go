@@ -306,7 +306,17 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	of, err := s.OpenPath(dp)
+	// **302 直链（2026-10-05 B 态）**：装配层已判定明文外部卷未私密 → RedirectURL
+	// 非空。流量不经服务端，直接 302 到后端直链；指标按卷记成功。
+	if dp.RedirectURL != "" {
+		if mr := s.rt.metricsRecorder(); mr != nil {
+			mr.RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
+		}
+		http.Redirect(w, r, dp.RedirectURL, http.StatusFound)
+		return
+	}
+
+	of, err := s.OpenPath(r.Context(), dp)
 	if err != nil {
 		if he := asHTTPError(err); he != nil {
 			s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
@@ -366,7 +376,7 @@ func (s *Service) Stat(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTPPathError(w, err)
 		return
 	}
-	st, err := s.StatPath(dp)
+	st, err := s.StatPath(r.Context(), dp)
 	if err != nil {
 		if he := asHTTPError(err); he != nil {
 			http.Error(w, he.Message, he.Status)

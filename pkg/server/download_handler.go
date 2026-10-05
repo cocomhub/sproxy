@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -91,6 +92,12 @@ type downloadPath struct {
 	volName  string          // 文件所在卷名（locate 命中时；空 = 旧路径/回落默认租户）
 	tnt      *storage.Tenant // 非 nil = 经 Tenant.Root 定位（防符号链接逃逸）
 	rel      string          // 租户根内相对路径（如 user/dir/f.txt、cloud/<taskID>/<file>、archive/<name>）
+	// redirectURL 是 302 直链目标（B 态：明文外部卷且未私密，2026-10-05 通用文件获取）。
+	// 非空时 Download/DownloadChunk 打开前直接 302；Stat 不据此重定向（经 source）。
+	redirectURL string
+	// source 是外部卷服务端读取源（A/C 态：secretdata 加密卷 / 私密明文外部卷）。
+	// 非 nil 时 OpenPath/StatPath 经它打开/stat（绕过 Tenant.Root）。
+	source files.DownloadSource
 }
 
 // resolveDownloadPath 解析 /download、/download/chunk 与 /api/files/stat 的文件路径。
@@ -153,6 +160,13 @@ func (h *Handlers) resolveDownloadPathDefault(r *http.Request, name string) (*do
 	explicitVol := r.URL.Query().Get("volume")
 	loc, found := h.locateForRead(owner, rel, explicitVol)
 	if !found {
+		// **外部卷读路由（2026-10-05 通用文件获取）**：本地卷定位未命中后，尝试
+		// secretdata/baidupcs 等外部卷（它们没有 *storage.Root，locateForRead 恒 nil）。
+		// 命中 → 按 A/B/C 态分化（302 直链 / 服务端解密转发）。filename 用用户原始
+		// remotePath（评审 Minor：Content-Disposition 不得带 user/ 内部前缀）。
+		if ext := h.resolveExternalDownload(r, owner, rel, remotePath, explicitVol); ext != nil {
+			return ext, nil
+		}
 		if explicitVol != "" {
 			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
 		}

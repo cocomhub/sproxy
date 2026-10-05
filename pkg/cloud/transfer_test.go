@@ -104,13 +104,13 @@ func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	if tr == nil || tr.URL == "" {
 		t.Fatal("转存应返回 URL")
 	}
-	// 目标路径自动派生 pikpak/<taskID>/<filename>
-	wantRel := "pikpak/task-1/movie.mp4"
+	// 目标路径自动派生 user/<taskID>/<filename>
+	wantRel := "user/task-1/movie.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("目标卷应收到 %s，实际文件: %v", wantRel, keys(fs.files))
 	}
-	// 目录自动生成（pikpak + pikpak/task-1）
-	if !fs.dirs["pikpak"] || !fs.dirs["pikpak/task-1"] {
+	// 目录自动生成（user + user/task-1）
+	if !fs.dirs["user"] || !fs.dirs["user/task-1"] {
 		t.Fatalf("目标目录应自动生成，实际 dirs: %v", fs.dirs)
 	}
 	if !strings.HasPrefix(tr.URL, "secretdata://secretdata-main/") {
@@ -375,6 +375,31 @@ func TestCreateTask_TransferVolumePrecheck(t *testing.T) {
 	}
 }
 
+// TestTransferDone_SharedVolume_EmptyOwnerNormalized（真实链路修复回归 2026-10-05）：
+// 共享卷 + 空 owner（loopback 免签 actor=""）→ 归一为 anonymous 加前缀落盘
+// anonymous/user/<taskID>/<file>——此前 `task.Owner != ""` 跳过前缀落盘
+// user/<taskID>/<file>，与读路径 ResolveOwnerPath 的 anonymous 前缀 404 断连。
+func TestTransferDone_SharedVolume_EmptyOwnerNormalized(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return fs, "secretdata", true
+	})
+	task := &CloudTask{ID: "task-e0", Filename: "movie.mp4", // Owner 空（loopback 免签）
+		Transfer: &TransferSpec{Volume: "shared-vault"}}
+	dest := filepath.Join(t.TempDir(), "movie.mp4")
+	_ = os.WriteFile(dest, []byte("hello"), 0o600)
+
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// 空 owner 归一 anonymous → 共享卷落盘 anonymous/user/<taskID>/<file>。
+	wantRel := "anonymous/user/task-e0/movie.mp4"
+	if _, ok := fs.files[wantRel]; !ok {
+		t.Fatalf("共享卷空 owner 应归一 anonymous 加前缀落盘 %s，实际: %v", wantRel, keys(fs.files))
+	}
+}
+
 // TestTransferDone_SharedVolume_OwnerPrefix 共享卷（内容不共享）：落盘路径加 owner 前缀
 // 隔离（自动派生 + 显式 path 均强制）——防跨 owner 覆写共享卷（M8，用户裁定 2026-10-04）。
 func TestTransferDone_SharedVolume_OwnerPrefix(t *testing.T) {
@@ -394,8 +419,8 @@ func TestTransferDone_SharedVolume_OwnerPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 自动派生：pikpak/<owner>/<taskID>/<file>（共享卷强制 owner 前缀）
-	wantRel := "pikpak/alice/task-s1/movie.mp4"
+	// 自动派生：<owner>/user/<taskID>/<file>（共享卷强制 owner 前缀）
+	wantRel := "alice/user/task-s1/movie.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("共享卷应加 owner 前缀落盘 %s，实际: %v", wantRel, keys(fs.files))
 	}
@@ -437,8 +462,8 @@ func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	// 独享卷不加前缀：pikpak/task-p1/c.mp4
-	wantRel := "pikpak/task-p1/c.mp4"
+	// 独享卷不加前缀：user/task-p1/c.mp4
+	wantRel := "user/task-p1/c.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("独享卷不应加 owner 前缀 %s，实际: %v", wantRel, keys(fs.files))
 	}
@@ -474,7 +499,7 @@ func TestTransferDone_SharedVolume_PrefixEscapeRejected(t *testing.T) {
 // （#/% 文件名可往返，url.Parse 不截断/不报 invalid escape）。
 func TestTransferURL_EscapesSpecial(t *testing.T) {
 	t.Parallel()
-	u := transferURL("secretdata", "vault", "pikpak/task-1/a#b%c.mp4")
+	u := transferURL("secretdata", "vault", "user/task-1/a#b%c.mp4")
 	// 原始 # 必须被 encode（URL 字符串不含裸 #）；% 必须 encode 成 %25
 	if strings.Contains(u, "a#b") {
 		t.Fatalf("# 应被 percent-encode，got %q", u)

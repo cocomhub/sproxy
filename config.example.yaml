@@ -27,6 +27,10 @@ storage_root: "./storage"
 #                               #   外部后端（如 baidupcs）用各自类型字面量，需后端已注册（plugin）
 #     root: "./storage"         # 物理根目录（首卷 root 缺省/占位形态时用 storage_root 建根，F1 门禁）
 #     extra: {}                 # 类型特有配置（V3）：本地卷恒空；外部后端构造器读取（如 baidupcs 的 bduss/baidu_root）
+#     direct_link: false        # 「允许明文外部卷 302 直链」开关（2026-10-05 通用文件获取）：
+#                               #   零值 false = 私密（外部卷经服务端转发，不暴露原始存储 URL）；
+#                               #   显式 true = 下载时 302 跳到后端直链（流量不经服务端，需后端支持直链）。
+#                               #   仅明文外部卷（baidupcs 等）消费；secretdata 密文卷恒服务端解密（忽略本字段）。
 #   # 外部后端示例（type=baidupcs / webdav / s3，需后端已注册）：
 #   #   - name: "mydisk"          # type=baidupcs：百度网盘（独立 module pkg/volume/ext/baidupcs）
 #   #     type: "baidupcs"

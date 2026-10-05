@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 )
 
 // TestKeyframeOffsets_RealFFprobe：真实 ffprobe 解析真实 MP4（ffmpeg 可用时）→ 关键帧
@@ -45,6 +47,39 @@ func TestKeyframeOffsets_RealFFprobe(t *testing.T) {
 		}
 	}
 	t.Logf("真实 MP4 关键帧=%v", got)
+}
+
+// TestKeyframeOffsets_RealFFprobe_PathMode：Path 模式（评审 I1 修复回归）——有真实路径时
+// runner 传 `-i <path>`（可 seek，大文件降级不存在），解析关键帧正确。此前 bug：只是打开
+// 文件仍 stdin 喂入，文件模式名不副实。本机无 ffprobe → Skip。
+func TestKeyframeOffsets_RealFFprobe_PathMode(t *testing.T) {
+	// sproxy:serial: 依赖系统 ffprobe/ffmpeg（外部二进制），与注入式用例隔离。
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("本机无 ffprobe（外部依赖跳过）")
+	}
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("本机无 ffmpeg（无法生成测试视频）")
+	}
+	video := makeTempVideo(t)
+	defer os.Remove(video)
+	st, _ := os.Stat(video)
+
+	got, kerr := Indexer{}.KeyframeOffsets(shardseal.KeyframeRequest{Path: video, Size: st.Size()})
+	if kerr != nil {
+		t.Fatalf("KeyframeOffsets(Path 模式): %v", kerr)
+	}
+	if len(got) == 0 {
+		t.Fatal("Path 模式真实 MP4 应解析出 ≥1 个关键帧")
+	}
+	for i, pos := range got {
+		if pos < 0 || pos >= st.Size() {
+			t.Errorf("关键帧[%d]=%d 越出文件 [0,%d)", i, pos, st.Size())
+		}
+		if i > 0 && got[i] <= got[i-1] {
+			t.Errorf("关键帧未升序: %v", got)
+		}
+	}
+	t.Logf("Path 模式真实 MP4 关键帧=%v", got)
 }
 
 // TestKeyframeOffsets_RealFragmentedMP4：真实 fMP4（ffmpeg -movflags frag_keyframe 生成）

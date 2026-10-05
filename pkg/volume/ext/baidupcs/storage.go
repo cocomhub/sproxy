@@ -10,10 +10,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // maxPutAttempts 限制上传后 ETag 复核不匹配时的重试次数，避免 Baidu PCS
@@ -55,6 +58,10 @@ type Storage struct {
 	temp    string
 	adapter Adapter
 	log     *slog.Logger
+	// httpc 是 Range GET 专用客户端（评审 I4 修复：禁 http.DefaultClient/共享
+	// DefaultTransport——dlink 拉取无 per-host 超时/连接池上限会占住全局池拖累
+	// 同进程其它外部请求）。per-instance 独立连接池 + ResponseHeaderTimeout 兜底。
+	httpc *http.Client
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -96,7 +103,17 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 		})
 	}
 
-	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger}, nil
+	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient()}, nil
+}
+
+// newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4 + R19 门禁：per-instance 独立
+// 连接池 + ResponseHeaderTimeout 兜底；禁共享 DefaultClient/DefaultTransport，也用
+// netutil.IsolatedTransport() 基座 + 覆写定制字段而非裸 Transport 构造）。
+func newRangeHTTPClient() *http.Client {
+	tr := netutil.IsolatedTransport()
+	tr.ResponseHeaderTimeout = 30 * time.Second
+	tr.IdleConnTimeout = 90 * time.Second
+	return &http.Client{Transport: tr}
 }
 
 // Put 上传内容到网盘（本地临时文件 + adapter.Upload + ETag 复核有界重试）。
@@ -261,6 +278,38 @@ func (s *Storage) Exists(ctx context.Context, key string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// directLinker 是可选直链能力断言（DirectURL 用；照 metadata() 模式透传 Fallback）。
+func (s *Storage) directLinker() directLinkProvider {
+	if dl, ok := s.adapter.(directLinkProvider); ok {
+		return dl
+	}
+	// binaryAdapter 可能透传 Fallback 的库直链能力。
+	if ba, ok := s.adapter.(*binaryAdapter); ok && ba.cfg.Fallback != nil {
+		if dl, ok := ba.cfg.Fallback.(directLinkProvider); ok {
+			return dl
+		}
+	}
+	return nil
+}
+
+// DirectURL 返回 key 的下载直链（明文外部卷 302 跳转用）。ok=false = 底层不支持
+// （无库会话/二进制-only）——调用方回落服务端转发；err = 定位失败（同样回落，
+// 绝不暴露半截 URL）。dlink 自包含签名、短时有效、支持 Range，每次实时签发。
+func (s *Storage) DirectURL(ctx context.Context, key string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", true, mapPCSError(err)
+	}
+	dl := s.directLinker()
+	if dl == nil {
+		return "", false, nil
+	}
+	remote, err := s.remotePath(key)
+	if err != nil {
+		return "", true, err
+	}
+	return dl.DirectLink(ctx, remote)
 }
 
 // List 列 prefix 下的单层条目（目录+文件混合，不递归子目录）。

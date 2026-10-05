@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -80,6 +81,68 @@ func (s *Service) readFromStream(r io.Reader, length int64) (data []byte, checks
 	return data, hex.EncodeToString(chunkHash[:]), nil
 }
 
+// serveExternalChunk 服务外部卷（secretdata/私密外部卷）的分块下载：经服务端读取源
+// Seek 到 offset 后读 length 字节（RangeSeeker 明文逻辑 offset，段级解密）。外部卷
+// 无 per-tenant checksum 台账，X-File-Checksum 不回（与本地卷语义差异，文档明示）。
+func (s *Service) serveExternalChunk(w http.ResponseWriter, r *http.Request, dp DownloadPath, offset, length int64) {
+	start := time.Now()
+	info, serr := dp.Source.Stat(r.Context())
+	if serr != nil {
+		s.rt.logger().Error("外部卷 chunk stat 失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", serr.Error())
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
+		return
+	}
+	if info.IsDir() {
+		s.sendJSON(w, UploadResponse{Success: false, Message: "不能下载目录"}, http.StatusBadRequest)
+		return
+	}
+	fileSize := info.Size()
+	if offset >= fileSize {
+		if fileSize == 0 && offset == 0 {
+			setChunkResponseHeaders(w, dp.Filename, 0, 0, 0)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		s.sendJSON(w, UploadResponse{Success: false, Message: "offset 超出文件大小"}, http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	if offset+length > fileSize {
+		length = fileSize - offset
+	}
+	if length > size.MaxChunkHashBuf {
+		length = size.MaxChunkHashBuf
+	}
+	seeker, oerr := dp.Source.Open(r.Context())
+	if oerr != nil {
+		s.rt.logger().Error("外部卷 chunk 打开失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", oerr.Error())
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
+		return
+	}
+	defer seeker.Close()
+	if _, serr := seeker.Seek(offset, io.SeekStart); serr != nil {
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
+		return
+	}
+	data, rerr := io.ReadAll(io.LimitReader(seeker, length))
+	if rerr != nil {
+		s.rt.logger().Error(errMsgOpenFileFailed, "error", rerr, "file_name", dp.Filename)
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
+		return
+	}
+	// 外部卷无 checksum 台账：仅回本块 X-Chunk-Checksum（本地计算）。
+	chunkHash := sha256.Sum256(data)
+	setChunkResponseHeaders(w, dp.Filename, offset, length, fileSize)
+	w.Header().Set("X-Chunk-Checksum", hex.EncodeToString(chunkHash[:]))
+	cw := &countingWriter{ResponseWriter: w}
+	limited := limitResponseWriter(s.rt.bandwidthLimiter(), normalizeOwner(s.rt.actorOf(r)), cw)
+	w.WriteHeader(http.StatusOK)
+	_, _ = limited.Write(data)
+	if mr := s.rt.metricsRecorder(); mr != nil {
+		mr.RecordDownload(cw.count.Load())
+		mr.RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
+	}
+}
+
 // setChunkResponseHeaders 设置分块下载的响应头。
 func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, length, fileSize int64) {
 	w.Header().Set(headerContentType, contentTypeOctetStream)
@@ -111,6 +174,21 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	offset, length, ok := parseChunkRange(r, s.rt.chunkSize())
 	if !ok {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "无效的 offset 或 length"}, http.StatusBadRequest)
+		return
+	}
+
+	// **外部卷分块（2026-10-05 评审 Critical 修复）**：外部卷命中时 dp.Tenant 为 nil
+	// （无 *storage.Root），原 `root := dp.Tenant.Root()` 会 nil panic。按 A/B/C 态：
+	//   - RedirectURL 非空（明文外部卷未私密）→ 302 直链（客户端跟随后 Range 直取）。
+	//   - Source 非 nil（secretdata 加密卷 / 私密外部卷）→ 经服务端读取源 Seek+Read
+	//     指定段（RangeSeeker 明文逻辑 offset，段级解密）。
+	//   - 否则（本地卷）→ 走既有 Tenant.Root() 路径。
+	if dp.RedirectURL != "" {
+		http.Redirect(w, r, dp.RedirectURL, http.StatusFound)
+		return
+	}
+	if dp.Source != nil {
+		s.serveExternalChunk(w, r, dp, offset, length)
 		return
 	}
 

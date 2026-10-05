@@ -41,7 +41,15 @@ func registerKeyframeBackend() {
 	registerKeyframeOnce.Do(func() {
 		has := ffprobeAvailable()
 		// 双注册共存：go-mp4 精确 + （有 ffprobe 时）ffprobe 通配。
-		registerKeyframeProvider(keyframeProviderFor(false))
+		// go-mp4 提供者的 fallback 由装配层显式注入（`has` 决定是否可用 ffprobe 兜底——
+		// **用户裁定 2026-10-04**：应该判断存在 ffprobe 才能用 ffprobe；而非在
+		// keyframeProviderFor(false) 内部二次探测（那里 hasFFprobe 恒 false 导致死代码，
+		// 四轮评审独立命中 Critical C1）。
+		gp := keyframeProviderFor(false)
+		if has {
+			gp.Fallback = []shardseal.KeyframeIndexer{ffprobe.Indexer{}}
+		}
+		registerKeyframeProvider(gp)
 		if has {
 			registerKeyframeProvider(keyframeProviderFor(true))
 		}
@@ -98,9 +106,8 @@ func keyframeProviderFor(hasFFprobe bool) shardseal.BlockletModeProvider {
 		Manager: "go-mp4",
 		Indexer: mp4.Indexer{},
 	}
-	// go-mp4 精确提供者带 ffprobe fallback（有 ffmpeg 环境时兜底伪装/截断容器）。
-	if hasFFprobe {
-		gp.Fallback = []shardseal.KeyframeIndexer{ffprobe.Indexer{}}
-	}
+	// **Fallback 由装配层注入（评审 C1 修复 + 用户裁定 2026-10-04）**：keyframeProviderFor
+	// 是纯函数，fallback 是否可用 ffprobe 由装配层（registerKeyframeBackend 的 `has`）决定
+	// ——函数内不二次探测（否则 false 分支恒不可达 = 死代码，四轮评审命中）。
 	return gp
 }

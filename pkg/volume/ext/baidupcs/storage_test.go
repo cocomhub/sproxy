@@ -19,6 +19,7 @@ import (
 type fakeStorageAdapter struct {
 	files map[string]string   // remote path → content
 	dirs  map[string]struct{} // 目录标记（remote path → exists）
+	dlink string              // canned 直链（DirectLink 返回）；空 = 不支持直链
 }
 
 func newFakeStorageAdapter() *fakeStorageAdapter {
@@ -140,6 +141,22 @@ func (f *fakeStorageAdapter) Meta(ctx context.Context, remotePath string) (*Obje
 }
 
 var _ metadataProvider = (*fakeStorageAdapter)(nil)
+
+// DirectLink 实现 directLinkProvider（fake 版）：返回 canned dlink（空 = 不支持）。
+func (f *fakeStorageAdapter) DirectLink(ctx context.Context, remotePath string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", true, err
+	}
+	if f.dlink == "" {
+		return "", false, nil
+	}
+	if _, ok := f.files[remotePath]; !ok {
+		return "", true, errNotFound
+	}
+	return f.dlink, true, nil
+}
+
+var _ directLinkProvider = (*fakeStorageAdapter)(nil)
 
 // errAlreadyExists / errNotFound 是 fake 内部哨兵（storage 层映射为公开错误）。
 var (

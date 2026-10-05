@@ -160,6 +160,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"time"
 
@@ -235,15 +236,47 @@ type Metrics interface {
 
 // DownloadPath 是 `ResolveDownloadPath` 的解析结果：目标租户 + 租户根内相对路径 + 用户可见名。
 // 所有下载 kind（普通 / cloud_task / cloud_archive）都被装配层解析为同一形状后交进来。
+//
+// **外部卷读分化（2026-10-05 通用文件获取）**：secretdata/baidupcs 等外部卷没有
+// *storage.Tenant（Tenant 为 nil），装配层经 RedirectURL / Source 两个可选字段分化——
+// `files` 域只消费分化好的值，不经 registry 接触外部后端（R2 门禁）。
 type DownloadPath struct {
 	// Filename 是用户可见文件名（Content-Disposition / 日志用）。
 	Filename string
 	// VolumeName 是文件所在卷名（空 = 卷未装配/默认卷旧路径；卷 IO 指标用）。
 	VolumeName string
 	// Tenant 是文件所属租户（经 Tenant.Root() 打开，os.Root 防符号链接逃逸）。
+	// 外部卷（secretdata/baidupcs）为 nil——走 RedirectURL/Source 分支。
 	Tenant *storage.Tenant
 	// Rel 是租户根内相对路径（如 user/dir/f.txt、cloud/<taskID>/<file>、archive/<name>）。
 	Rel string
+	// RedirectURL 是 302 直链目标（B 态：明文外部卷且未私密）。非空时 Download /
+	// DownloadChunk 在打开文件前 http.Redirect(302)，流量不经服务端；Stat 不据此
+	// 重定向（仍回元信息，经 Source）。
+	RedirectURL string
+	// Source 是可选的「服务端读取源」（A/C 态：secretdata 加密卷 / 私密外部卷）。
+	// 非 nil 时 OpenPath/StatPath 改经它打开/stat，绕过 dp.Tenant.Root()（本地卷
+	// 恒 nil → 零回归）。
+	Source DownloadSource
+}
+
+// SeekReadCloser 是服务端读取流形态（2026-10-05）：同时满足 io.ReadSeeker（http.
+// ServeContent 消费）与 io.ReadCloser（OpenedFile.File 关闭语义）。实现方把
+// OpenRangeRead 适配为此形态（如 syncpkg.RangeSeeker：Read/Seek/Close）。
+type SeekReadCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+}
+
+// DownloadSource 是装配层提供的服务端读取源消费者接口（2026-10-05）：
+// `files` 域用它在不 import pkg/volume/registry / pkg/sync 的前提下读取外部卷
+// （secretdata 加密卷解密转发 / 私密明文外部卷整流）。本地卷恒 nil（走 Tenant.Root()）。
+type DownloadSource interface {
+	// Stat 返回文件元信息（size/modtime；Dir 判定供「不能下载目录」）。
+	Stat(ctx context.Context) (fs.FileInfo, error)
+	// Open 打开服务端读取流（SeekReadCloser——http.ServeContent 消费；调用方 Close）。
+	Open(ctx context.Context) (SeekReadCloser, error)
 }
 
 // FileLocation 是 `LocateOwnerFile` 的定位结果：目标文件所在卷名（空 = 默认卷）与该卷租户。
@@ -252,11 +285,32 @@ type FileLocation struct {
 	Tenant     *storage.Tenant
 }
 
+// UploadSink 是装配层提供的「外部卷写入源」消费者接口（2026-10-05 用户裁定：
+// 普通上传进外部卷 + 统一 user/ 前缀）。`files` 域用它在不 import pkg/sync 的前提
+// 下把文件写入外部卷（baidupcs / secretdata 等无 *storage.Tenant 的后端）。
+// 本地卷恒 nil（走 route.Tenant.Root()）。
+//
+// 语义（外部卷是远程后端）：无原子写（临时文件+rename）、无硬链接去重、无版本
+// 管理——这些是本地 inode 语义，外部卷天然不适用，域侧对 Sink 非 nil 跳过。
+type UploadSink interface {
+	// MakeDir 创建目录（含中间目录语义；已存在幂等）。
+	MakeDir(ctx context.Context, path string) error
+	// WriteFile 写入文件（整流；size 为预期大小，mtime 为 mod time）。
+	WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error
+	// Stat 返回路径大小；不存在 → (0, false, nil)（覆盖写差分用）。
+	Stat(ctx context.Context, path string) (size int64, exists bool, err error)
+	// Remove 删除路径（checksum 校验失败清理用）。
+	Remove(ctx context.Context, path string) error
+}
+
 // UploadRoute 是 `RouteUpload` 的结果：目标卷租户 + owner 全局 Scope 预留 + 卷容量池预留
 // （双账本，AD-7；未装配卷集合/配额时对应字段为 nil）。
 type UploadRoute struct {
 	VolumeName string
 	Tenant     *storage.Tenant
+	// Sink 是外部卷写入源（2026-10-05）：非 nil = 目标卷是外部后端（baidupcs/
+	// secretdata），WriteFile 经它写（无原子/去重/版本）；nil = 本地卷走 Tenant.Root()。
+	Sink UploadSink
 	// Scope 是预留所依据的 owner 全局/user 桶 Scope（与 ScopeRes 同源；覆盖写用它的
 	// Adjust 做差分结算）。必须由 RouteUpload 一并交回：装配层按同一 (owner, rel) 解析出的
 	// 就是本预留使用的那个 Scope，领域侧重解析（QuotaScopeFor）在配置热更新下不保证同对象。

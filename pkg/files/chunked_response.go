@@ -134,12 +134,17 @@ const (
 	errMsgDestExists       = "目标路径已存在"
 	errMsgFileChecksum     = "文件校验失败"
 	errMsgOpenFile         = "打开文件失败"
-	errMsgDeleteFile       = "删除文件失败"
-	errMsgCreateSession    = "创建上传会话失败"
-	errMsgReadChunk        = "读取分块失败"
-	errMsgAccessFile       = "访问文件失败"
-	errMsgDedupPersist     = "dedup 存储持久化失败"
-	errMsgRetryPersist     = "重试持久化失败"
+	// errMsgChecksumMismatch 是上传 SHA-256 比对不一致响应文案（本地/外部卷共用，
+	// Sonar S1192 收敛：此前散落 "文件 SHA-256 校验失败" 3 处）。
+	errMsgChecksumMismatch = "文件 SHA-256 校验失败"
+	// errMsgStatFailed 是 stat 失败响应文案（Sonar S1192 收敛：此前散落 "stat 失败" 3 处）。
+	errMsgStatFailed    = "stat 失败"
+	errMsgDeleteFile    = "删除文件失败"
+	errMsgCreateSession = "创建上传会话失败"
+	errMsgReadChunk     = "读取分块失败"
+	errMsgAccessFile    = "访问文件失败"
+	errMsgDedupPersist  = "dedup 存储持久化失败"
+	errMsgRetryPersist  = "重试持久化失败"
 
 	headerContentType  = "Content-Type"
 	headerFileChecksum = "X-File-Checksum"

@@ -79,7 +79,7 @@ func TestDecryptBlockletSegmentStandalone_Tamper(t *testing.T) {
 		t.Error("段长不符应 fail-closed")
 	}
 	// salt 不一致 fail-closed（VerifyBlockSalt 独立校验）。
-	if verr := VerifyBlockSalt(bytes.Repeat([]byte{0x99}, SaltLen), salt); verr == nil {
+	if VerifyBlockSalt(bytes.Repeat([]byte{0x99}, SaltLen), salt) == nil {
 		t.Error("salt 不一致应 fail-closed")
 	}
 }

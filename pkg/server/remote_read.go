@@ -176,7 +176,7 @@ func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tg
 	case "list":
 		rh.delegateList(w, svc, tgt)
 	case "stat":
-		rh.delegateStat(w, svc, tgt)
+		rh.delegateStat(w, r, svc, tgt)
 	case "download":
 		rh.delegateDownload(w, r, svc, tgt)
 	default:
@@ -199,13 +199,13 @@ func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, svc *files.Serv
 }
 
 // delegateStat 执行远端 stat：元信息用 X-File-* 头回传。
-func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, svc *files.Service, tgt *remoteTarget) {
+func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
 	dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
 	}
-	st, err := svc.StatPath(dp)
+	st, err := svc.StatPath(r.Context(), dp)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
@@ -228,7 +228,7 @@ func (rh *remoteReadHandler) delegateDownload(w http.ResponseWriter, r *http.Req
 		writeRemoteFilesError(w, err)
 		return
 	}
-	of, err := svc.OpenPath(dp)
+	of, err := svc.OpenPath(r.Context(), dp)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
