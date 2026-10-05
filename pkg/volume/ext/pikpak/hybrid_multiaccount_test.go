@@ -27,7 +27,11 @@ import (
 //  1. restore 调用次数 == 账号数（每账号一次转存副本）
 //  2. 文件内容与 payload 一致（多账号分片不损坏）
 //  3. 单账号路径（pool=nil）零回归（现有测试覆盖）
-func TestHybridDownload_MultiAccountSharding(t *testing.T) {
+//
+// TestHybridDownload_MultiAccountSharding 多账号分片：分享区 + 账号区 chunk 分摊并行下载。
+//
+//nolint:gocognit // S3776：测试 fake 路由分发表（test 文件双引擎豁免按例，Sonar PR 扫描显式抑制）
+func TestHybridDownload_MultiAccountSharding(t *testing.T) { // NOSONAR: S3776 — 测试 mock 路由 switch，非生产逻辑
 	t.Parallel()
 	payload := make([]byte, 8<<20) // 8MB
 	for i := range payload {
@@ -704,7 +708,9 @@ func TestHybridDownload_MultiAccount_ShareDowngrade(t *testing.T) {
 // 失败路径保留 manifest）→ 二次重跑：分享区 chunk 被 manifest 跳过（无长 Range 请求），
 // 账号区 chunk 重新转存下载（失败下载的副本已被 Release 清理），最终文件完整。
 // 锁定：manifest 不记账号分配、accounted 每次下载独立重建，resume 语义不受多账号影响。
-func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) {
+//
+//nolint:gocognit // S3776：测试 fake 路由分发表（test 文件双引擎豁免按例）
+func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) { // NOSONAR: S3776 — 测试 mock 路由 switch，非生产逻辑
 	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
@@ -811,7 +817,9 @@ func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) {
 //
 // 用 AutoDelete=false：Release 不删转存副本，规避「跨任务同一分享副本删除干扰」这一已文档化
 // 限制（注释见 idempotentRestored），专注断言并发共享单例的记账与内容完整性。
-func TestHybridDownload_MultiAccount_ConcurrentSharedPool(t *testing.T) {
+//
+//nolint:gocognit // S3776：测试 fake 路由分发表（test 文件双引擎豁免按例）
+func TestHybridDownload_MultiAccount_ConcurrentSharedPool(t *testing.T) { // NOSONAR: S3776 — 测试 mock 路由 switch，非生产逻辑
 	t.Parallel()
 	payload := make([]byte, 2<<20)
 	for i := range payload {
@@ -922,7 +930,9 @@ func TestHybridDownload_MultiAccount_ConcurrentSharedPool(t *testing.T) {
 // 账号 token（跨账号混删 → wrongAuth 计数）。baseURL 经 r.Host 推导（httptest server
 // 请求 Host 即其地址），避免 handler 闭包依赖 srv 变量（S3776 收敛：路由 switch 抽为
 // 独立函数，测试函数复杂度显著降低）。
-func perAccountReleaseHandler(payload []byte, deleteCalls, wrongAuth *atomic.Int64) http.Handler {
+//
+//nolint:gocognit // S3776：测试 fake 路由分发表（test 文件双引擎豁免按例）
+func perAccountReleaseHandler(payload []byte, deleteCalls, wrongAuth *atomic.Int64) http.Handler { // NOSONAR: S3776 — 测试 mock 路由 switch，非生产逻辑
 	base := func(r *http.Request) string { return "http://" + r.Host }
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
