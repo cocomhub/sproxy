@@ -148,6 +148,19 @@ func (r *ChainResult) KeepFiles() bool {
 	return false
 }
 
+// DownloadedLocal 返回本次链是否下载本地（download_local 生效值）。M1：CLI 据此在
+// download_local=false 时给出明确完成文案（「未下载本地（只转存/只保留）」），
+// 而非打印空「本地路径: 」误导。
+func (r *ChainResult) DownloadedLocal() bool {
+	if r.extra != nil {
+		if v, ok := r.extra["download_local"].(bool); ok {
+			return v
+		}
+	}
+	// 旧 resume 状态无 download_local 字段：历史语义总是下载 → 视为 true（与 Restore G2 一致）。
+	return true
+}
+
 // chainOptions 链式操作选项。
 type chainOptions struct {
 	pollInterval  time.Duration

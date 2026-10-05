@@ -42,6 +42,10 @@ type CloudTask struct {
 	TransferURL string `json:"transfer_url,omitempty"`
 	// TransferErr 转存失败原因（重试耗尽；服务端填写）。
 	TransferErr string `json:"transfer_err,omitempty"`
+	// CleanupStatus 服务端 cloud 桶清理状态（审计：cleaned 已删 / failed 删失败）。
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	// CleanupErr 清理失败原因（CleanupStatus=failed 时）。
+	CleanupErr string `json:"cleanup_err,omitempty"`
 }
 
 // CloudTask 状态常量。

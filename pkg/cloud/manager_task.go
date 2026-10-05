@@ -89,15 +89,18 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	}
 
 	task := &CloudTask{
-		ID:            newTaskID(),
-		Owner:         owner,
-		URL:           url,
-		Method:        method,
-		Filename:      filename,
-		Status:        "pending",
-		TotalSize:     totalSize,
-		ReservedSize:  reserved,
-		Transfer:      params.Transfer,
+		ID:           newTaskID(),
+		Owner:        owner,
+		URL:          url,
+		Method:       method,
+		Filename:     filename,
+		Status:       "pending",
+		TotalSize:    totalSize,
+		ReservedSize: reserved,
+		// 浅拷贝 Transfer：组内多子任务共享同一请求指针时，各任务独立持有副本——
+		// 否则 transferDone 的 OwnerPrefix 原地写（共享卷）对并发组转存构成 write-write
+		// 数据竞争（同值写入，-race 可报）。深度只拷贝顶层字段（Volume/Path/OwnerPrefix）。
+		Transfer:      cloneTransferSpec(params.Transfer),
 		DownloadLocal: params.DownloadLocal,
 		Save:          params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
 		CreatedAt:     time.Now(),
@@ -1164,6 +1167,15 @@ func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, destPath st
 	// 注意：清理须是最后一步（删除后不再有桶文件操作）。用户裁定还要求：若要归档，
 	// 必须先归档再删除——此处为失败路径无归档，harvest 直接删。
 	m.cleanupCloudIfNotNeeded(task, destPath)
+}
+
+// cloneTransferSpec 浅拷贝 TransferSpec（供 CreateTask 存储副本；顶层三字段无指针）。
+func cloneTransferSpec(t *TransferSpec) *TransferSpec {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
 }
 
 // sameTaskParams 判断既有任务与本次请求的三参语义一致（transfer/save/download_local）。

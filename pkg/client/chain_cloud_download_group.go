@@ -137,7 +137,16 @@ func (c *CloudDownloadGroupChain) State() map[string]any {
 
 func (c *CloudDownloadGroupChain) Restore(state map[string]any) error {
 	codec := StructCodec{}
-	return codec.FromMap(state, c)
+	if err := codec.FromMap(state, c); err != nil {
+		return err
+	}
+	// G2：旧版持久化状态无 download_local 字段（三参是新增的）——恢复为 false 会被 F2
+	// 守卫当「显式跳过」直接完成（静默丢本地下载）。历史语义是组链**总是**下载到本地，
+	// 故 key 缺失时应视为 true（与旧状态升级兼容），只有新版显式持久化的 false 才跳过。
+	if _, ok := state["download_local"]; !ok {
+		c.DownloadLocal = true
+	}
+	return nil
 }
 
 func (c *CloudDownloadGroupChain) SetClient(client *FileClient) {
@@ -218,12 +227,10 @@ func (c *CloudDownloadGroupChain) runGroupStage(ctx context.Context, reportFn Pr
 
 	case PhaseArchiving:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
-		// F2 幂等复查：改版前遗留状态（download_local 未持久化、Phase 已停在 Archiving/
-		// Downloading）恢复后 DownloadLocal 归零 false → 在此兜底直接完成，不漏跳下载
-		// （新代码自身产出的状态机在 Waiting 阶段就写完 Completed，无「false+Archiving」态）。
-		if c.skipLocalDownload(ctx) {
-			return true, nil
-		}
+		// 注意：此处不需要 skipLocalDownload 复查——DownloadLocal=false 的链在 Waiting
+		// 阶段就已直接完成（永不进入 Archiving）；旧版持久化状态缺 download_local 键由
+		// Restore 置为 true（历史语义总是下载本地，G2 规则），因此「false+Archiving」态
+		// 不可达。若未来有人删除 Restore 的 G2 规则，须在此处补复查（防静默丢下载）。
 		if err := c.archiveGroup(ctx); err != nil {
 			return false, err
 		}
@@ -243,7 +250,11 @@ func (c *CloudDownloadGroupChain) runGroupStage(ctx context.Context, reportFn Pr
 
 	case PhaseCleaning:
 		slog.Debug("cloud group chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
-		_ = c.cleanupGroup(ctx)
+		if err := c.cleanupGroup(ctx); err != nil {
+			// G1：清理失败显式报错（与单链一致，禁止静默吞错报「完成」）——
+			// 否则云端组/桶残留却打印「组链式操作完成!」误导。
+			return false, fmt.Errorf("清理云端组失败，已保留云端: %w", err)
+		}
 
 	default:
 		return false, fmt.Errorf("unknown phase: %s", c.CurrentPhase)

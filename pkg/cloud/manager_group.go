@@ -151,11 +151,14 @@ func (m *CloudDownloadManager) createGroupEntry(entry cloudfilename.Entry, owner
 	if err != nil {
 		return nil, false, fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
 	}
-	// 该 URL 已有**对请求者可见**的活跃任务 → 本次是去重吸收既有任务，回滚时不删除。
-	// 跨 owner 的同 URL 任务不可见，不吸收（各自独立下载，防组归属性混乱）。
-	// M3：吸收仅当既有任务三参与本次一致（sameTaskParams 在 CreateTask 内判定）——
-	// 否则同 URL 不同转存/保留意图的任务不被吞掉。
-	absorbed := m.findByURL(entry.URL, owner) != nil
+	// 该 URL 已有**对请求者可见**的活跃任务，且三参与本次一致 → 本次是去重吸收既有任务，
+	// 回滚时不删除（参数不匹配时 CreateTask 会新建，须按新建回滚删除——C1 I-1：吸收
+	// 分类必须与 CreateTask 内部的 sameTaskParams 判定一致，否则参数不匹配的重建任务
+	// 被误归 absorbed，回滚只清 GroupID 不删除 → 孤儿 pending 泄漏 1GiB 占位）。
+	absorbed := false
+	if existing := m.findByURL(entry.URL, owner); existing != nil && sameTaskParams(existing, params) {
+		absorbed = true
+	}
 
 	task, err := m.CreateTask("url", entry.URL, fn, -1, owner, params)
 	if err != nil {

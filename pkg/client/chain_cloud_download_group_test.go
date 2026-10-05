@@ -525,7 +525,8 @@ func TestCloudDownloadGroupChain_CleanupRemoteError(t *testing.T) {
 			Success: true, File: "cleanup-archive.tar.gz", Size: 7,
 		})
 	})
-	// 删除组失败：cleanupGroup 应容忍（Run 仍成功）
+	// 删除组失败：cleanupGroup 返回 err（G1：Run 的 PhaseCleaning 显式报错——组链不再
+	// 静默吞清理失败报「完成」，与单链一致；云端组/桶残留必须可见）。
 	mux.HandleFunc("DELETE /api/cloud/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})

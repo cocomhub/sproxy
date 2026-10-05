@@ -563,6 +563,9 @@ func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 			}
 			if same {
 				// 幂等命中：目标卷已持有相同内容（崩溃窗口已交付成功），直接视为成功。
+				// 语义注记（M2）：空 checksum 时「内容即身份」——若目标卷恰有字节级相同的
+				// 他人文件会被判为本任务已交付（TransferURL 指向它、不写盘）。字节一致无数据
+				// 损坏，属无 checksum 下载器的固有同义反复（设计可接受，注释明示）。
 				return true, nil
 			}
 			return false, fmt.Errorf("%w: 转存目标 %q 已存在（拒绝覆写，W1/W3）", ErrTransferTarget, env.rel)

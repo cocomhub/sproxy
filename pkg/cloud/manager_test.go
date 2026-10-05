@@ -1760,6 +1760,39 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 	}
 }
 
+// TestCloudDownloadManager_CreateGroup_RollbackParamMismatchAbsorbed C1 I-1 回归：
+// 同 URL 既有任务参数不匹配（吸收失败 → CreateTask 新建）时，createGroupEntry 必须返回
+// absorbed=false（新建任务归 newTaskIDs → 组创建失败回滚时删除），而非旧实现的
+// absorbed=true（只看 URL 不看参数 → 新建任务被误归 absorbed → 回滚只清 GroupID 不
+// 删除 → 孤儿 pending 泄漏 1GiB 占位）。
+func TestCloudDownloadManager_CreateGroup_RollbackParamMismatchAbsorbed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
+		SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true,
+	})
+	t.Cleanup(func() { mgr.Close() })
+
+	// 既有任务 X：Save:true + DownloadLocal:false + 无 transfer（非空洞）——
+	// 与组内 Save:false + DownloadLocal:true 参数不匹配。
+	if _, err := mgr.CreateTask("url", "https://example.com/i1.bin", "i1.bin", -1, "", TaskParams{Save: true}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// 组内同 URL 参数不匹配 → createGroupEntry 应返回 absorbed=false（新建任务须回滚删除）。
+	entry := cloudfilename.Entry{URL: "https://example.com/i1.bin", Filename: "i1.bin"}
+	seen := map[string]bool{}
+	_, absorbed, err := mgr.createGroupEntry(entry, "", "g2", seen, TaskParams{Save: false, DownloadLocal: true})
+	if err != nil {
+		t.Fatalf("createGroupEntry: %v", err)
+	}
+	if absorbed {
+		t.Fatal("C1 I-1: 参数不匹配的新建任务必须 absorbed=false（否则回滚只清 GroupID 不删除 → 孤儿泄漏）")
+	}
+}
+
 // TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion 验证任务完成后
 // 组状态自动刷新（无需显式调用 UpdateGroupStatus）——Important #6 回归。
 func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
