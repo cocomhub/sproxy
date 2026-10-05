@@ -152,7 +152,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     账号凭据/token、密钥/指纹、真实日志片段等。需要真实数据验证的场景：**用环境变量或 CLI flag
     在运行期传入**（默认值留空/占位），禁止硬编码入库。合并前用 `git grep` 扫描真实 URL/凭据
     模式；CI/Sonar 不豁免，泄露即数据事故。教训（#734）：tool/pikpak-hybrid 三个诊断工具曾
-    硬编码真实分享 URL（含子路径 token），已改 `PIKPAK_SHARE_URL` 环境变量 + 强制校验。
+    硬编码真实分享 URL（含子路径 token）；URL 类真实数据按常见规范用 **CLI flag 运行期传入**
+    （`-share`，默认留空 + 强制校验），凭据/密钥类用环境变量。
 
 
 

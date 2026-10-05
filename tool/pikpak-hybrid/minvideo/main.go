@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -16,17 +17,18 @@ import (
 )
 
 func main() {
+	shareURL := flag.String("share", "", "分享 URL（真实数据禁止入库，运行期经 -share 传入）")
+	flag.Parse()
+	if *shareURL == "" {
+		log.Fatal("-share 必填（真实分享 URL 禁止入库，运行期经 flag 传入）")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	// 注：不用 defer cancel——gocritic exitAfterDefer（Fatalf 分支跳过 defer）；
 	// 改为所有退出点（含正常收尾）显式 cancel。
-	shareURL := os.Getenv("PIKPAK_SHARE_URL")
-	if shareURL == "" {
-		log.Fatal("PIKPAK_SHARE_URL 必填（真实分享 URL 禁止入库，运行期经环境变量传入）")
-	}
 	resolver := pikpak.NewShareResolver(pikpak.ShareResolverConfig{
 		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
-	meta, err := resolver.Resolve(ctx, shareURL)
+	meta, err := resolver.Resolve(ctx, *shareURL)
 	if err != nil {
 		cancel()
 		log.Fatalf("resolve: %v", err)

@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	shareURL = flag.String("share", "", "分享 URL（默认读 PIKPAK_SHARE_URL 环境变量；真实数据禁止入库）")
+	shareURL = flag.String("share", "", "分享 URL（真实数据禁止入库，运行期经 -share 传入）")
 	outDir   = flag.String("out", "build/hybrid-e2e", "输出目录")
 	chunkMB  = flag.Int64("chunk", 64, "分片大小 MB")
 )
@@ -30,10 +30,7 @@ var (
 func main() {
 	flag.Parse()
 	if *shareURL == "" {
-		*shareURL = os.Getenv("PIKPAK_SHARE_URL")
-	}
-	if *shareURL == "" {
-		log.Fatal("分享 URL 必填：--share 或 PIKPAK_SHARE_URL（真实数据禁止入库，运行期传入）")
+		log.Fatal("-share 必填（真实分享 URL 禁止入库，运行期经 flag 传入）")
 	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		log.Fatal(err)
