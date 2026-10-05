@@ -225,7 +225,7 @@ func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, svc *files.Serv
 
 // delegateStat 执行远端 stat：元信息用 X-File-* 头回传。
 func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
-	dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
+	dp, err := rh.h.downloadPathForRemote(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
@@ -248,7 +248,7 @@ func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, r *http.Request
 
 // delegateDownload 执行远端下载：走 http.ServeContent（Range/206 由它承担）。
 func (rh *remoteReadHandler) delegateDownload(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
-	dp, err := rh.h.downloadPathForRemote(tgt.owner, tgt.vol.Name, tgt.path)
+	dp, err := rh.h.downloadPathForRemote(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
