@@ -16,8 +16,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/mxschmitt/playwright-go"
 )
 
@@ -219,6 +221,65 @@ func TestCloudDownload_Cancel(t *testing.T) {
 	}
 
 	waitTextVisible(t, page, "#transfer-body", "已取消", 12000)
+}
+
+// TestCloudDownload_DamagedBadge_RealLink 完整性徽章**真实链路**：损坏 png 源 →
+// 服务端 ImageChecker 语义校验失败 → completed+damaged → 真实 GET /api/cloud/tasks
+// 返回 integrity_status=damaged → DOM 渲染「完整性异常」徽章。区别于 ui_e2e_test.go
+// 的注入伪造对象变体（绕过服务端），本用例端到端验证「服务端判定 → API → DOM」接线。
+func TestCloudDownload_DamagedBadge_RealLink(t *testing.T) {
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+	})
+	defer cleanup()
+
+	// 损坏 png：名为 .png 但内容非图片 → ImageChecker 语义解码失败 → damaged。
+	srcContent := []byte("corrupt-integrity-e2e-payload-not-a-real-png")
+	srcURL, stopSrc := startFileSource(t, "damaged.png", srcContent)
+	defer stopSrc()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	openTransferPage(t, page)
+	previewCloudURL(t, page, srcURL, "damaged.png")
+	confirmCloudDownload(t, page)
+
+	// 轮询等完成 + 真实 API 的 integrity_status=damaged（服务端语义判定）。
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		tresp, err := http.Get(baseURL + "/api/cloud/tasks")
+		if err != nil {
+			return false
+		}
+		defer tresp.Body.Close()
+		var tasksPayload struct {
+			Tasks []struct {
+				Filename        string `json:"filename"`
+				Status          string `json:"status"`
+				IntegrityStatus string `json:"integrity_status"`
+			} `json:"tasks"`
+		}
+		if jerr := json.NewDecoder(tresp.Body).Decode(&tasksPayload); jerr != nil {
+			return false
+		}
+		for _, it := range tasksPayload.Tasks {
+			if it.Filename == "damaged.png" && it.Status == "completed" && it.IntegrityStatus == "damaged" {
+				return true
+			}
+		}
+		return false
+	}, func() string { return "服务端应判 completed+damaged" })
+
+	// DOM 徽章（真实 API → normalizeCloudTaskItem → buildIntegrityBadge → 「完整性异常」）。
+	// completed 任务被折叠在分组 <details> 内（summary 文本可读、行文本不可读），先展开
+	// 分组再断言徽章（同 ui_e2e_test.go 注入变体的展开模式）。
+	waitTextVisible(t, page, "#transfer-body", "已完成", 15000)
+	if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
+		t.Fatalf("展开已完成分组: %v", cerr)
+	}
+	waitTextVisible(t, page, "#transfer-body", "damaged.png", 15000)
+	waitTextVisible(t, page, "#transfer-body", "完整性异常", 15000)
 }
 
 // TestAudit_RendersSeededEvent 审计面板：Go 侧真实 config_update 事件 seed → 点审计 tab

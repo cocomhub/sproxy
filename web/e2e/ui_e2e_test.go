@@ -340,8 +340,9 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 // 注入走真实归一：getAllTransferItems 对 _cloudTasks 成员调用 normalizeCloudTaskItem
 // （表带 integrity_status）+ 原始对象 → meta.raw，与云端 API 数据同一渲染路径（表带
 // normalize 不复制 integrity_status，故注入原始源对象）；node 单测
-// （transfer-render.test.js）构造 meta.raw 直接测渲染分支。真实 API→DOM 接线由
-// cloud_audit_e2e_test.go 佐证。
+// （transfer-render.test.js）构造 meta.raw 直接测渲染分支。**真实 API→DOM 接线**
+// （损坏源 → 服务端语义判定 damaged → GET /api/cloud/tasks → 徽章）由
+// cloud_audit_e2e_test.go TestCloudDownload_DamagedBadge_RealLink 端到端佐证。
 // （注入模式：window.transferStore.upsertItem 仅持久化 localStorage 项，对云任务渲染
 // 无效果——见 P0 修复注释。）
 func TestCloudDownloadIntegrityBadge(t *testing.T) {

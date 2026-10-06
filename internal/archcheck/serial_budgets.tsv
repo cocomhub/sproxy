@@ -59,7 +59,7 @@ internal/archcheck/xfer_send_atomicity_test.go	1
 pkg/client/events_test.go	4
 pkg/cloud/manager_test.go	3
 pkg/files/version_id_test.go	3
-pkg/integrity/ext/video/video_test.go	2
+pkg/integrity/ext/video/video_test.go	3
 pkg/server/accept_retry_test.go	5
 pkg/server/archive_test.go	1
 pkg/server/audit_handler_test.go	13
@@ -252,7 +252,7 @@ test/e2e_tunnel_accesskey_test.go	1
 test/e2e_xfer_tls_test.go	2
 web/e2e/audit_export_notify_test_e2e_test.go	2
 web/e2e/auth_config_e2e_test.go	4
-web/e2e/cloud_audit_e2e_test.go	3
+web/e2e/cloud_audit_e2e_test.go	4
 web/e2e/credentials_sync_mesh_e2e_test.go	3
 web/e2e/events_e2e_test.go	2
 web/e2e/files_e2e_test.go	9
