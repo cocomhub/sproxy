@@ -658,6 +658,29 @@ test('隧道外层 403 → E_SERVER 透传 body（修复前 E_AUTH 吞文案）'
   }
 });
 
+test('C3：文件写面 403/507 服务端回 {message} 也透传（非仅 {error}）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    // 文件写面（upload/chunk-complete/delete/mkdir 等）错误体为 {success:false, message: …}——
+    // serverErrorMessage 现兼容 message 字段，507 「存储配额不足」与 403 「占用只读」真实文案可透传。
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    // 403：写保护占用目录
+    globalThis.fetch = async () => new Response(JSON.stringify({ success: false, message: 'volume: 目录已被封装卷占用，只读（main/videos 被封装卷 videos 占用）' }), { status: 403 });
+    let caught403 = null;
+    try { await transport.coreRequest('POST', '/delete', {}); } catch (e) { caught403 = e; }
+    assert.ok(caught403 && caught403.code === 'E_SERVER' && caught403.status === 403, JSON.stringify(caught403));
+    assert.ok(caught403.message.includes('目录已被封装卷占用'), '403 {message} 应透传, got: ' + caught403.message);
+    // 507：存储配额不足
+    globalThis.fetch = async () => new Response(JSON.stringify({ success: false, message: '存储配额不足' }), { status: 507 });
+    let caught507 = null;
+    try { await transport.coreRequest('POST', '/upload', {}); } catch (e) { caught507 = e; }
+    assert.ok(caught507 && caught507.code === 'E_SERVER' && caught507.status === 507, JSON.stringify(caught507));
+    assert.ok(caught507.message.includes('存储配额不足'), '507 {message} 应透传, got: ' + caught507.message);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('隧道响应帧解密失败 → E_DECRYPT', async () => {
   const origFetch = globalThis.fetch;
   try {

@@ -658,13 +658,14 @@ async function showTrash() {
 // --- 监控 ---
 // statsRefresh 刷新当前活动监控 tab：读激活的 .stats-tab id，按活动 tab 刷新
 // （审计 tab 在 tunnel/无凭据场景刷不到实时操作，但保持「刷新=重拉当前视图」语义统一）。
-// 复用 switchStatsTab 的重载语义（showAudit/showStats），不改 switchStatsTab 内部实现。
+// 复用 switchStatsTab 的重载语义（showAudit/showStats/...），不改 switchStatsTab 内部实现。
+// 全量 tab 特判：非 stats 的活动 tab 一律委托 switchStatsTab 重拉自身（vol-manage/secret/
+// credentials/sync/mesh 等 tab 不再跳回 stats 面板）。
 function statsRefresh() {
   const active = document.querySelector('.stats-tab.active');
   const id = active ? active.id : 'stats-tab';
   const tab = id.replace('-tab', '');
-  if (tab === 'audit') { switchStatsTab('audit'); return; }
-  if (tab === 'volumes') { switchStatsTab('volumes'); return; }
+  if (tab !== 'stats') { switchStatsTab(tab); return; }
   void showStats();
 }
 
@@ -1011,7 +1012,9 @@ async function onSubmitVolManage() {
   }
 }
 
-// onVolManageListClick 列表事件委托：删除按钮（确认后 DELETE；409 引用中 → toast「有任务引用」）。
+// onVolManageListClick 列表事件委托：删除按钮（确认后 DELETE）。
+// 409（有任务引用）由 transport 抛错走 catch（E_SERVER 含服务端 409 文案）——此前的
+// `res.status === 409` 分支是死代码（transport 对非 2xx 恒抛错），已删除，catch 侧透传真实文案。
 async function onVolManageListClick(ev) {
   const btn = ev.target.closest('[data-delete-volume]');
   if (!btn) return;
@@ -1021,8 +1024,6 @@ async function onVolManageListClick(ev) {
     const res = await sc.files.deleteUserVolume(name);
     if (res && res.success) {
       showToast('卷 ' + name + ' 已删除', 'success');
-    } else if (res && res.status === 409) {
-      showToast('「' + name + '」有任务引用，无法删除', 'error');
     } else {
       showToast('删除失败：' + (res && res.error ? res.error : 'HTTP ' + (res && res.status)), 'error');
     }

@@ -92,16 +92,19 @@
     return err;
   }
 
-  // serverErrorMessage 尝试从非 2xx 响应体解析服务端 error 字段（统一 {error: msg} 格式），
-  // 有则拼进错误信息（如 "type 未注册或 extra 非法: ..."）；解析失败（非 JSON/空 body）
-  // fallback 到传入的原始信息（"请求失败（HTTP xxx）"）。
+  // serverErrorMessage 尝试从非 2xx 响应体解析服务端 error/message 字段（统一 {error: msg}
+  // 与文件写面 {success, message: msg} 两种契约），有则拼进错误信息（如 "type 未注册或 extra
+  // 非法: ..." 或 "目录已被封装卷占用，只读（…）"）；解析失败（非 JSON/空 body）fallback 到
+  // 传入的原始信息（"请求失败（HTTP xxx）"）。401 在调用前已单独保留「认证失败」，不落到这里。
   async function serverErrorMessage(resp, fallback) {
     try {
       const text = await resp.text();
       if (!text) return fallback;
       const parsed = JSON.parse(text);
-      if (parsed && typeof parsed.error === 'string' && parsed.error) {
-        return fallback + ': ' + parsed.error;
+      const msg = (parsed && typeof parsed.error === 'string' && parsed.error) ? parsed.error
+        : (parsed && typeof parsed.message === 'string' && parsed.message) ? parsed.message : '';
+      if (msg) {
+        return fallback + ': ' + msg;
       }
       return fallback;
     } catch (e) {

@@ -244,5 +244,14 @@ test('appRender.parseSizeText 解析各单位（容量单位下拉对应）', ()
   assert.equal(ar.parseSizeText('1TiB'), 1024 * 1024 * 1024 * 1024);
   assert.equal(ar.parseSizeText('100GiB'), 100 * 1024 * 1024 * 1024);
   assert.equal(ar.parseSizeText('2.5TB'), Math.round(2.5 * 1000 * 1000 * 1000 * 1000));
+  // M4：裸 K/M/G/T（与 Go sizex.ParseSize 对齐，1000·based）+ 裸 Ki/Mi/Gi/Ti（1024·based）。
+  assert.equal(ar.parseSizeText('100G'), 100 * 1000 * 1000 * 1000);
+  assert.equal(ar.parseSizeText('1K'), 1000);
+  assert.equal(ar.parseSizeText('1M'), 1000 * 1000);
+  assert.equal(ar.parseSizeText('1T'), 1000 * 1000 * 1000 * 1000);
+  assert.equal(ar.parseSizeText('1Ki'), 1024);
+  assert.equal(ar.parseSizeText('1Mi'), 1024 * 1024);
+  assert.equal(ar.parseSizeText('1Gi'), 1024 * 1024 * 1024);
+  assert.equal(ar.parseSizeText('2Ti'), 2 * 1024 * 1024 * 1024 * 1024);
   assert.throws(() => ar.parseSizeText('abc'), /无法解析大小/);
 });

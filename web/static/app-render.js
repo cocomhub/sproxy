@@ -52,19 +52,24 @@
   }
 
   // parseSizeText 人类可读容量 → 字节（"100GiB"/"2GB"/纯数字字节）。非法/空抛错。
-  // 单位支持 B / KB·KiB / MB·MiB / GB·GiB / TB·TiB（建卷容量单位下拉 MB/GB/TB/MiB/GiB/TiB
-  // 提交的 `100GiB` 形态在此解析；纯数字 = 字节）。空串 → 0（容量留空 = 不限）。
+  // 单位支持 B / K·KB·KiB / M·MB·MiB / G·GB·GiB / T·TB·TiB（与 Go sizex.ParseSize 对齐——
+  // 裸 K/M/G/T 后缀同义 KB/MB/GB/TB，1000·based；Ki/Mi/Gi/Ti 为 1024·based；建卷容量单位
+  // 下拉 MB/GB/TB/MiB/GiB/TiB 提交的 `100GiB` 形态在此解析）。空串 → 0（容量留空 = 不限）。
   function parseSizeText(text) {
     const t = String(text).trim();
     if (t === '') return 0;
-    const m = /^([\d.]+)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?$/i.exec(t);
+    const m = /^([\d.]+)\s*(B|K|M|G|T|KB|MB|GB|TB|Ki|Mi|Gi|Ti|KiB|MiB|GiB|TiB)?$/i.exec(t);
     if (!m) throw new Error('无法解析大小: ' + t);
     const n = Number.parseFloat(m[1]);
     const unit = (m[2] || '').toUpperCase();
     const mult = {
       '': 1, B: 1,
-      KB: 1000, MB: 1000 * 1000, GB: 1000 * 1000 * 1000, TB: 1000 * 1000 * 1000 * 1000,
-      KIB: 1024, MIB: 1024 * 1024, GIB: 1024 * 1024 * 1024, TIB: 1024 * 1024 * 1024 * 1024,
+      K: 1000, KB: 1000, M: 1000 * 1000, MB: 1000 * 1000,
+      G: 1000 * 1000 * 1000, GB: 1000 * 1000 * 1000, T: 1000 * 1000 * 1000 * 1000,
+      TB: 1000 * 1000 * 1000 * 1000,
+      KI: 1024, KIB: 1024, MI: 1024 * 1024, MIB: 1024 * 1024,
+      GI: 1024 * 1024 * 1024, GIB: 1024 * 1024 * 1024, TI: 1024 * 1024 * 1024 * 1024,
+      TIB: 1024 * 1024 * 1024 * 1024,
     }[unit];
     return Math.round(n * (mult || 1));
   }

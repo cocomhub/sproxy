@@ -46,6 +46,11 @@ function volManageFormHtml(opts) {
   });
   m += fieldWrapHtml('容量（留空不限，如 100GiB）', false,
     capacityInputHtml());
+  // M2（2026-10-06）：非封装（linked/mt-local 等）类型的容量字段被存储展示但**不强制**
+  // （无委托层）。显式提示「仅封装卷生效」，避免「配额可设且生效」的误导暗示。
+  if (o.category && o.category !== 'wrapper') {
+    m += '<div style="font-size:12px;color:var(--text-muted);margin-top:-4px;">注：容量仅对封装卷生效（内置/直连后端不强制配额）</div>';
+  }
   m += '<div style="display:flex;gap:8px;align-items:center;margin-top:4px;">' +
     '<button type="button" id="vm-create-btn" class="btn btn-sm btn-primary">创建卷</button>' +
     '<span id="vm-msg" style="font-size:12px;color:var(--text-muted);"></span></div>';
