@@ -48,6 +48,7 @@ import (
 	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
+	_ "github.com/cocomhub/sproxy/pkg/integrity/ext/video" // 注册视频语义校验器（ffprobe）
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/federated"
 	"github.com/cocomhub/sproxy/pkg/volume/ftp"

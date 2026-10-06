@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 )
 
 // DownloaderConfig 是 PikPak 下载器配置。
@@ -255,7 +256,7 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 		// 空池（无账号配置）：回落当前 CLI 登录态（与装配期 pool==nil 语义一致）。
 	}
 	size, checksum, fileID, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
-	return d.finalizeDownload(ctx, size, checksum, fileID, owned, derr, lease)
+	return d.finalizeDownload(ctx, size, checksum, fileID, owned, derr, target, destPath, lease)
 }
 
 // downloadViaPool 多账号轮换下载：先按**目标文件真实大小**选账号（配额预检 C2），随后
@@ -302,7 +303,7 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
 	}
 	// fileID 传空：AutoDelete 已在 fn 内（选中账号会话）执行，finalizeDownload 不再重复删。
-	return d.finalizeDownload(ctx, size, checksum, "", false, nil, lease)
+	return d.finalizeDownload(ctx, size, checksum, "", false, nil, target, destPath, lease)
 }
 
 // 注：转存副本释放已收归 RestoreLease（restore.go，round-10 用户裁决）——旧下载器
@@ -311,7 +312,13 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 
 // finalizeDownload 处理下载尾部：错误短路 / AutoDelete（仅删精确命中的转存文件，杜绝误删
 // 网盘旧文件）/ Result 组装（download 两分支共用，控制认知复杂度）。
-func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, owned bool, derr error, lease *RestoreLease) (*Result, error) {
+//
+// GCID 权威复算（spec §6）：下载完成后读 destPath 文件，按候选分块（256KB~4MB）
+// 复算 GCID，命中官方 FileMeta.Hash（服务端带外权威值）→ Integrity=ModeAuthority +
+// AuthorityHash=官方 hash；未命中 → ModeLocalOnly（② 态语义校验兜底）。
+// 余量说明：小文件实测 256KB 分块复算命中官方 hash；大文件分块粒度非固定
+// （随上传/离线任务变化）→ 候选集合自适应，未命中不误报权威（Review Focus 5）。
+func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, owned bool, derr error, target *FileMeta, destPath string, lease *RestoreLease) (*Result, error) {
 	if derr != nil {
 		return nil, derr
 	}
@@ -320,7 +327,19 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, che
 		lease.Track(fileID)
 	}
 	lease.Release(ctx)
-	return &Result{Size: size, Checksum: checksum, ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}, nil
+	// GCID 权威复算（spec §6）：文件大小非 0 且官方 hash 非空时，用候选分块复算 GCID，
+	// 命中官方 hash → ModeAuthority（① 态）；否则 ModeLocalOnly（② 态语义校验兜底）。
+	// 复算失败（文件读/destPath 为空）不阻断下载，回落 ModeLocalOnly。
+	res := &Result{Size: size, Checksum: checksum, ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}
+	if size > 0 && target != nil && target.Hash != "" && destPath != "" {
+		if gcid, ok, err := integrity.RecomputeGCIDFile(destPath, integrity.GCIDCandidates); err == nil && ok {
+			if strings.EqualFold(gcid, target.Hash) {
+				res.Integrity = downloader.ModeAuthority
+				res.AuthorityHash = target.Hash
+			}
+		}
+	}
+	return res, nil
 }
 
 // restoreAndDownload 转存分享到个人网盘 → 定位转存文件 → CLI 完整下载。

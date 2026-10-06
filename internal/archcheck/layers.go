@@ -50,6 +50,10 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/checksum":      0,
 	"github.com/cocomhub/sproxy/pkg/cli":           0,
 	"github.com/cocomhub/sproxy/pkg/cloudfilename": 0,
+	// 本工作新增（cloud 完整性域）：语义校验器注册表 + 字节级校验器（image/tar）+ GCID
+	// 复算（PikPak 官方 hash）。零 pkg/* 内部依赖（crypto/sha1 标准库）⇒ G0；带外部依赖的
+	// 校验器（ext/video ffprobe）走独立 module，不在本表。
+	"github.com/cocomhub/sproxy/pkg/integrity": 0,
 	// 本工作新增（cloud 域抽取 S4-A）：可插拔下载器机制（P6① 可复用工具集合），从
 	// pkg/server 的子包提升为顶层。只依赖 pkg/plugin，故 G0。
 	// 注：S4-A 曾漏登本行——R3 只在**依赖**未登记时报红，Managed 包自身缺 Levels 不会被

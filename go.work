@@ -6,6 +6,7 @@ use (
 	./cmd/sproxy
 	./cmd/sproxy-mcp
 	./pkg/authn/ext/oidcldap
+	./pkg/integrity/ext/video
 	./pkg/media/ext/mp4
 	./pkg/volume/ext/baidupcs
 	./pkg/volume/ext/pikpak
