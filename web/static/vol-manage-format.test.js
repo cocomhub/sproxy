@@ -74,6 +74,64 @@ test('volManageFormHtml volume-select allowWrapper=true 时含 wrapper 卷', () 
   assert.match(html, /value="outer"/);
 });
 
+test('volManageFormHtml volume-select 候选含本地 config 卷（allow_wrapper=false 仍保留本地卷）', () => {
+  // I1/D3 修复契约：底层卷候选源改 GET /api/volumes（全量可见卷，含本地 config 卷——
+  // 默认安装只有本地基座卷时 secretdata/secrets 建卷的 target 必须能选中 main）。
+  const html = volManageFormHtml({
+    type: 'secretdata',
+    category: 'wrapper',
+    fields: [{ key: 'target', label: '底层卷', type: 'volume-select', allow_wrapper: true }],
+    volumes: [
+      { name: 'main', type: 'local', category: 'mt-local' },
+      { name: 'vault', type: 'secretdata', category: 'wrapper' },
+    ],
+  });
+  assert.match(html, /value="main"/, '本地 config 卷 main 应在底层卷候选');
+  assert.match(html, /value="vault"/, 'allow_wrapper=true 时封装卷 vault 应保留在候选');
+});
+
+test('volManageFormHtml volume-select allow_wrapper=false 时本地卷保留、wrapper 卷过滤', () => {
+  const html = volManageFormHtml({
+    type: 'foo',
+    category: 'linked',
+    fields: [{ key: 'target', label: '底层卷', type: 'volume-select' }],
+    volumes: [
+      { name: 'main', type: 'local', category: 'mt-local' },
+      { name: 'outer', type: 'secretdata', category: 'wrapper' },
+    ],
+  });
+  assert.match(html, /value="main"/);
+  assert.ok(!html.includes('value="outer"'), 'allow_wrapper=false 不应包含 wrapper 卷 outer');
+});
+
+test('volManageFormHtml 渲染 secret_url 文本字段（D1：secretdata 建卷 schema 补密钥引用）', () => {
+  const html = volManageFormHtml({
+    type: 'secretdata',
+    category: 'wrapper',
+    fields: [
+      { key: 'target', label: '底层卷', type: 'volume-select', required: true, allow_wrapper: true },
+      { key: 'secret_url', label: '密钥引用', type: 'text', required: true },
+    ],
+  });
+  assert.match(html, /name="secret_url"/);
+  assert.match(html, /type="text"/);
+  assert.match(html, /密钥引用/);
+});
+
+test('volManageFormHtml 渲染 linked 后端 url 文本字段（D2：sftp/webdav 建卷表单有 url 输入）', () => {
+  const html = volManageFormHtml({
+    type: 'sftp',
+    category: 'linked',
+    fields: [
+      { key: 'url', label: 'SFTP 地址', type: 'text', required: true },
+      { key: 'password', label: '密码', type: 'text' },
+    ],
+  });
+  assert.match(html, /name="url"/);
+  assert.match(html, /required/);
+  assert.match(html, /name="password"/);
+});
+
 test('volManageListHtml 含卷名 + 类型 + category + 删除按钮', () => {
   const html = volManageListHtml({
     volumes: [{ name: 'vault', type: 'secretdata', category: 'wrapper', capacity: 0 }],

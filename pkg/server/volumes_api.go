@@ -43,6 +43,7 @@ import (
 // 列表本身只含允许卷，字段保留给客户端/未来扩展）。
 type VolumeStatus struct {
 	Name     string `json:"name"`
+	Type     string `json:"type"`     // 卷类型（"local"/外部类型；前端据 type 派生 category 过滤封装候选）
 	Mode     string `json:"mode"`     // 卷 ACL 模式（allow|deny）
 	Capacity int64  `json:"capacity"` // 卷容量上限（0 = 不限）
 	Usage    int64  `json:"usage"`    // 卷容量池当前已用字节
@@ -83,6 +84,7 @@ func (h *Handlers) listVolumesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, VolumeStatus{
 			Name:     v.Name,
+			Type:     v.Type,
 			Mode:     string(v.ACL.Mode),
 			Capacity: v.Capacity,
 			Usage:    usage,

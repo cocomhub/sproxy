@@ -877,20 +877,11 @@ async function showVolManage() {
   if (!panel) return;
   panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
-    const bdRes = await sc.files.backends();
-    const uvRes = await sc.files.userVolumes();
-    const backends = (bdRes && bdRes.backends) || [];
-    const vols = (uvRes && uvRes.volumes) || [];
-    // type → {category, label, fields} 映射；并给卷补 category（列表 category 列 + 表单过滤）。
-    const meta = {};
-    backends.forEach(function (b) {
-      meta[b.type] = { category: b.category || '', label: b.label || '', fields: b.fields || [] };
-    });
-    const types = Object.keys(meta);
-    const volsWithCat = vols.map(function (v) {
-      const m = meta[v.type];
-      return Object.assign({}, v, { category: (m && m.category) || v.category || '' });
-    });
+    const data = await loadVolManageData();
+    const meta = data.meta;
+    const types = data.types;
+    const volsWithCat = data.volsWithCat;
+    const candsWithCat = data.candsWithCat;
     let selHtml = '';
     types.forEach(function (t) {
       selHtml += '<option value="' + appRender.escHtml(t) + '">' + appRender.escHtml(t) + '</option>';
@@ -909,13 +900,13 @@ async function showVolManage() {
     const formArea = document.getElementById('vm-form-area');
     const selEl = document.getElementById('vm-type-select');
     const type = types.length ? types[0] : '';
-    if (formArea) renderVolManageForm(formArea, type, meta, volsWithCat);
+    if (formArea) renderVolManageForm(formArea, type, meta, candsWithCat);
     const listEl = document.getElementById('vm-list');
     if (listEl) listEl.innerHTML = volManageListHtml({ volumes: volsWithCat });
     if (selEl && types.length) {
       selEl.addEventListener('change', function () {
         const fa = document.getElementById('vm-form-area');
-        if (fa) renderVolManageForm(fa, selEl.value, meta, volsWithCat);
+        if (fa) renderVolManageForm(fa, selEl.value, meta, candsWithCat);
       });
     }
     if (listEl && !listEl.dataset.bound) {
@@ -925,6 +916,35 @@ async function showVolManage() {
   } catch (e) {
     panel.innerHTML = '<div class="empty-msg">卷管理不可用：' + appRender.escHtml(e?.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试。</span></div>';
   }
+}
+
+// loadVolManageData 拉取 backend 类型 schema / 全量可见卷（含本地 config 卷 + 外部卷）/
+// 我的用户卷，返回 {meta, types, volsWithCategory, candsWithCategory}。底层卷候选源用
+// GET /api/volumes（owner 可见全量，含本地 config 卷——服务端 validateWrapperTarget 允许
+// target 指向任意 owner 可见卷）；「我的卷」列表用 GET /api/volumes/user。两者都经
+// withCat 补 category（据 type → /api/backends 的 category）。
+async function loadVolManageData() {
+  const bdRes = await sc.files.backends();
+  const uvRes = await sc.files.userVolumes();
+  const allRes = await sc.files.volumes();
+  const backends = (bdRes && bdRes.backends) || [];
+  const vols = (uvRes && uvRes.volumes) || [];
+  const allVols = (allRes && allRes.volumes) || [];
+  // type → {category, label, fields} 映射；并给卷补 category（列表 category 列 + 表单过滤）。
+  const meta = {};
+  backends.forEach(function (b) {
+    meta[b.type] = { category: b.category || '', label: b.label || '', fields: b.fields || [] };
+  });
+  const withCat = function (vlt) {
+    const m = meta[vlt.type];
+    return Object.assign({}, vlt, { category: (m && m.category) || vlt.category || '' });
+  };
+  return {
+    meta: meta,
+    types: Object.keys(meta),
+    volsWithCat: vols.map(withCat),       // 「我的卷」列表（有 type）
+    candsWithCat: allVols.map(withCat),   // 底层卷候选（含本地 config 卷）
+  };
 }
 
 // renderVolManageForm 把指定类型的 schema 表单渲染进容器，并绑定创建按钮。

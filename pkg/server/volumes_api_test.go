@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // volumesAPIWrap 绑定卷 API + 配套文件操作 handler 到固定 actor（volSet 生效）。
@@ -158,6 +159,33 @@ func TestVolumesAPI_List_SingleVolumeReturnsOne(t *testing.T) {
 	}
 	if out.Volumes[0].Usage != 0 || out.Volumes[0].Allowed != true {
 		t.Fatalf("单卷 info=%+v want usage=0 allowed=true", out.Volumes[0])
+	}
+}
+
+// TestVolumesAPI_List_IncludesType（I1/D3，2026-10-06）：GET /api/volumes 每卷带 type 字段——
+// Web UI「卷管理」底层卷候选改用它做封装/本地卷分类过滤（前端据 type 派生 category），
+// 默认安装只有本地 config 卷（main）时 secretdata/secrets 建卷能选中底层卷。本地卷 type
+// 为空（Type==local 概念），外部卷 type 为该后端类型。
+func TestVolumesAPI_List_IncludesType(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "baidu", Type: "baidupcs"}
+	h := newExternalTestEnv(t, v, &extFS{})
+	ts := httptest.NewServer(volumesAPIWrap(h, "alice"))
+	t.Cleanup(ts.Close)
+
+	status, out := listVolumes(t, ts.URL)
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/volumes status=%d want 200", status)
+	}
+	got := make(map[string]string, len(out.Volumes))
+	for _, vs := range out.Volumes {
+		got[vs.Name] = vs.Type
+	}
+	if got["main"] != "" {
+		t.Errorf("本地卷 main type=应为空（本地卷），got %q", got["main"])
+	}
+	if got["baidu"] != "baidupcs" {
+		t.Errorf("外部卷 baidu type=%q want baidupcs", got["baidu"])
 	}
 }
 
