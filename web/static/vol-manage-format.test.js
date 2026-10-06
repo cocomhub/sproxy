@@ -12,7 +12,7 @@ const path = require('node:path');
 // node 环境下 app-render.js 以 module 形态提供，须先注入全局。
 global.appRender = require(path.join(__dirname, 'app-render.js'));
 
-const { volManageFormHtml, volManageListHtml } = require('./vol-manage-format.js');
+const { volManageFormHtml, volManageListHtml, composeNestedTarget } = require('./vol-manage-format.js');
 
 test('volManageFormHtml 按 schema 渲染字段', () => {
   const html = volManageFormHtml({
@@ -146,6 +146,26 @@ test('volManageListHtml 空列表显示空提示', () => {
   const html = volManageListHtml({ volumes: [] });
   assert.ok(html.includes('暂无用户卷'));
   assert.ok(volManageListHtml(null).includes('暂无用户卷'));
+});
+
+test('volManageFormHtml volume-select 渲染嵌套子目录输入（target_subdir）', () => {
+  const html = volManageFormHtml({
+    type: 'secretdata',
+    category: 'wrapper',
+    fields: [{ key: 'target', label: '底层卷', type: 'volume-select', required: true, allow_wrapper: true }],
+    volumes: [{ name: 'main', category: 'mt-local' }],
+  });
+  assert.match(html, /name="target_subdir"/);
+  assert.match(html, /嵌套子目录/);
+});
+
+test('composeNestedTarget 卷/子目录 拼装（嵌套封装 target）', () => {
+  assert.equal(composeNestedTarget('main', 'videos'), 'main/videos');
+  assert.equal(composeNestedTarget('main', ''), 'main'); // 子目录空 → 传统整卷语义
+  assert.equal(composeNestedTarget('', 'videos'), ''); // 未选底层卷 → 空（必填由后端兜底）
+  assert.equal(composeNestedTarget('main', 'a/b'), 'main/a/b'); // 多级子目录
+  assert.equal(composeNestedTarget(' main ', ' videos '), 'main/videos'); // 去空白
+  assert.equal(composeNestedTarget(null, 'x'), ''); // 卷名缺失
 });
 
 test('volManageListHtml 卷名转义（防 XSS）', () => {

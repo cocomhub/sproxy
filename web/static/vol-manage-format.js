@@ -74,6 +74,10 @@ function formFieldHtml(f, vols) {
       ctrl += '<option value="' + nm + '">' + nm + '</option>';
     });
     ctrl += '</select>';
+    // 嵌套封装：底层卷 + 「新空子目录」→ 提交时拼成 `<卷>/<子目录>`（互斥占用/须不存在由
+    // 服务端校验，前端仅回显 409 错误文案）。子目录留空 = 传统整卷语义（仅 local+root 装配）。
+    ctrl += '<input type="text" name="' + key + '_subdir" placeholder="嵌套子目录（可选：底层卷新空子目录）"' +
+      ' style="margin-top:4px;' + inputStyle + '">';
   } else if (f.type === 'enum') {
     ctrl = '<select name="' + key + '"' + reqAttr + ' style="' + inputStyle + '">';
     (f.options || []).forEach(function (opt) {
@@ -134,5 +138,17 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     volManageFormHtml: volManageFormHtml,
     volManageListHtml: volManageListHtml,
+    composeNestedTarget: composeNestedTarget,
   };
+}
+
+// composeNestedTarget(vol, subdir) → 嵌套封装 target 拼装：`<卷>/<子目录>`。
+// 子目录为空 → 返回卷名（传统整卷语义）；卷名为空 → 空串（先选底层卷）。
+// 前端纯函数（node --test 覆盖；提交时把 volume-select 值与其子目录输入合并）。
+function composeNestedTarget(vol, subdir) {
+  const v = String(vol == null ? '' : vol).trim();
+  const s = String(subdir == null ? '' : subdir).trim();
+  if (!s) return v;
+  if (!v) return '';
+  return v + '/' + s;
 }

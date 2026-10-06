@@ -5,7 +5,7 @@
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
 // global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件三处经 typeof 守卫引用：
 //   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
-// global: volManageFormHtml / volManageListHtml（vol-manage-format.js，「卷管理」tab 渲染）
+// global: volManageFormHtml / volManageListHtml / composeNestedTarget（vol-manage-format.js，「卷管理」tab 渲染）
 // global: auditRowsHtml（audit-rows-format.js，任务「审计」弹窗行渲染；经 showTaskAudit 调用）
 
 const BASE = '';
@@ -980,9 +980,18 @@ async function onSubmitVolManage() {
   area.querySelectorAll('[name]').forEach(function (el) {
     const k = el.getAttribute('name');
     if (k === 'name' || k === 'type' || k === 'capacity') return;
+    if (k && k.endsWith('_subdir')) return; // 子目录由 composeNestedTarget 合并进 target
     if (el.type === 'checkbox') extra[k] = el.checked;
     else if (el.type === 'number') extra[k] = el.value === '' ? 0 : Number(el.value);
     else extra[k] = el.value;
+  });
+  // 嵌套封装：volume-select 的值与其 `_subdir` 输入合并成 `<卷>/<子目录>`。
+  area.querySelectorAll('input[name$="_subdir"]').forEach(function (inp) {
+    const k = inp.getAttribute('name');
+    if (!k) return;
+    const fk = k.replace(/_subdir$/, '');
+    const sub = inp.value ? inp.value.trim() : '';
+    if (sub) extra[fk] = composeNestedTarget(String(extra[fk] || ''), sub);
   });
   try {
     const res = await sc.files.createUserVolume({ name: name, type: type, capacity: capacity, extra: extra });
