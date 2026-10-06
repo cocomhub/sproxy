@@ -1562,15 +1562,16 @@ func (s *Service) deleteExternalFile(ctx context.Context, ext ExternalDeleter, v
 //   - ExpectedChecksum 为空 → nil（无门禁）；
 //   - 实现侧提供 ExternalFileChecksum → 计算实际明文 SHA-256：计算失败 → 500 保留；
 //     与实际不符 → 400 保留（对齐本地删除契约）；
-//   - 未实现（未来非 FS 后端）→ size 弱锚并告警（记录取舍：强内容校验由实现侧提供，
-//     缺失即降级为尺寸级弱校验）。
+//   - 未实现 ExternalFileChecksum 的后端 → **强内容校验缺失**：删除仅凭客户端
+//     ExpectedChecksum 非空 + 文件存在性放行（记录 Warn），调用路径并不对 size 作
+//     弱比对——实现侧补 ExternalFileChecksum 后启用强校验（非 FS 后端降级，无尺寸级弱锚）。
 func (s *Service) verifyExternalDeleteChecksum(ctx context.Context, ext ExternalDeleter, volName, owner, rel, remotePath string, size int64, input DeleteFileInput) error {
 	if input.ExpectedChecksum == "" {
 		return nil
 	}
 	v, ok := ext.(ExternalFileChecksum)
 	if !ok {
-		s.rt.logger().WarnContext(ctx, "外部卷删除：后端未实现内容校验，回落 size 弱锚（checksum 门禁降级）",
+		s.rt.logger().WarnContext(ctx, "外部卷删除：后端未实现内容校验（ExternalFileChecksum），强校验缺失——仅凭客户端 ExpectedChecksum 非空 + 存在性放行（不比对 size）",
 			"file_name", remotePath, "volume", volName, "size", size)
 		return nil
 	}
