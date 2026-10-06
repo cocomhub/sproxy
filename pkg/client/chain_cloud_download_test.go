@@ -586,6 +586,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	chain.backoffFn = func(int) time.Duration { return 10 * time.Millisecond }
 
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	t.Logf("taskIDs after run: %v", chain.TaskIDs)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -644,8 +645,10 @@ func TestCloudDownloadChain_StorageFullRetry_PassesTransferOpts(t *testing.T) {
 	// DownloadLocal 继承 opts.downloadLocal=true（默认下载本地）→ body 带 download_local=true
 	chain.backoffFn = func(int) time.Duration { return 5 * time.Millisecond }
 
+	t.Logf("PRE-RUN taskIDs: %v", chain.TaskIDs)
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err != nil {
+		t.Logf("ERR-RUN taskIDs: %v", chain.TaskIDs)
 		t.Fatalf("Run failed: %v", err)
 	}
 	if chain.Phase() != PhaseCompleted {
@@ -1362,5 +1365,73 @@ func TestCloudDownloadChain_NoDownloadLocal_SkipsArchive(t *testing.T) {
 	}
 	if archiveCalled {
 		t.Fatal("DownloadLocal=false 不应进入 archive（跳过拉取本地）")
+	}
+}
+
+// TestCloudDownloadChain_StorageFullRetry_DamagedNotDoubleCount R6-I1 回归：
+// storage-full 重试轮次后 Damaged 计数不重复累计（每轮归零）。
+// 模拟：首轮一任务 completed+damaged + 一任务 storage-full；重试轮后 Damaged 仍为 1。
+func TestCloudDownloadChain_StorageFullRetry_DamagedNotDoubleCount(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var batchBodies int
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		batchBodies++
+		mu.Unlock()
+		tasks := []CloudTask{
+			{ID: "dmg-1", Status: "pending"},
+			{ID: "sf-1", Status: "pending"},
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
+	})
+	// task 轮询：dmg-1 → completed+damaged；sf-1 → storage-full（首轮）→ completed（重试轮）
+	var pollCount atomic.Int32
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
+		if taskID == "dmg-1" {
+			json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "completed", IntegrityStatus: "damaged", URL: "http://example.com/d"})
+			return
+		}
+		if taskID == "sf-1" {
+			if pollCount.Add(1) <= 1 {
+				json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "failed", Error: "storage full", URL: "http://example.com/sf"})
+				return
+			}
+			json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "completed", URL: "http://example.com/sf"})
+			return
+		}
+		json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "completed", URL: "http://example.com/x"})
+	})
+	mux.HandleFunc("POST /api/cloud/archive", storageFullRetryArchiveHandler(archiveDir))
+	mux.HandleFunc("HEAD /api/files/stat", storageFullRetryStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", storageFullRetryChunkHandler(t, dir))
+	mux.HandleFunc("DELETE /api/cloud/tasks/", storageFullRetryDeleteHandler())
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := chainOptions{pollInterval: 20 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true}
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/d", "http://example.com/sf"}, "ra", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain: %v", err)
+	}
+	chain.backoffFn = func(int) time.Duration { return 5 * time.Millisecond }
+	_ = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	// storage-full 重试发生（batch 提交 ≥2 轮）
+	mu.Lock()
+	rounds := batchBodies
+	mu.Unlock()
+	if rounds < 2 {
+		t.Fatalf("应触发 storage-full 重试（≥2 轮 batch），实际 %d", rounds)
+	}
+	if chain.Damaged != 1 {
+		t.Fatalf("R6-I1: Damaged 应 1（不跨轮重复累计），实际 %d", chain.Damaged)
 	}
 }

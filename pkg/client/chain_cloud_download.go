@@ -57,10 +57,13 @@ type CloudDownloadChain struct {
 	Failed         int  `json:"failed"`
 	Total          int  `json:"total"`
 	// Damaged 完整性损坏但放行完成的任务数（R3-I3：损坏副本不应被当可靠成功）。
-	Damaged   int       `json:"damaged,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Damaged int `json:"damaged,omitempty"`
+	// seenCompleted 已计数的 completed 任务 ID（R6-I1：防 storage-full 重试轮重复累计；
+	// 非持久化，链实例生命周期内有效）。
+	seenCompleted map[string]bool `json:"-"`
+	Error         string          `json:"error,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -100,6 +103,7 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 	}
 	return &CloudDownloadChain{
 		ChainID:        chainID,
+		seenCompleted:  make(map[string]bool),
 		CurrentPhase:   "",
 		CurStatus:      StatusRunning,
 		URLs:           urls, // 兼容旧持久化状态；新状态以 Entries 为准
@@ -409,7 +413,8 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		// 每次重试前归零计数器，基于本次轮询结果重新统计
 		c.Completed = 0
 		c.Failed = 0
-		c.Damaged = 0 // R6-I1：跨轮归零，防 storage-full 重试时 damaged 重复累计
+		// R6-I1：Damaged 不归零——seenCompleted 已防跨轮重复计（completed 终态计一次），
+		// 归零会让重试轮丢失计数（dmg-1 continue 后 Damaged 被清零）。
 		submitFailedCount = 0
 
 		results, err := c.pollAllTasks(ctx)
@@ -443,6 +448,11 @@ func (c *CloudDownloadChain) tallyResults(results []*CloudTask) (storageFullURLs
 	for _, r := range results {
 		switch r.Status {
 		case TaskStatusCompleted:
+			// R6-I1 根因：storage-full 重试轮重复轮询已完成任务 → Completed/Damaged
+			// 每轮累加虚高。用 seenCompleted 防重复计（不移除 TaskIDs——archive 阶段仍需）。
+			if !c.markCompletedSeen(r.ID) {
+				continue
+			}
 			c.Completed++
 			// R3-I3：completed 但完整性损坏（damaged）——默认放行语义，不当作可靠成功。
 			if r.IntegrityStatus == "damaged" {
@@ -749,4 +759,18 @@ func isStorageFullError(errMsg string) bool {
 		strings.Contains(lower, "存储已满") ||
 		strings.Contains(lower, "超出配额") ||
 		strings.Contains(lower, "磁盘空间")
+}
+
+// markCompletedSeen 标记 completed 任务已计数（防 storage-full 重试轮重复累计）。
+// 返回 false = 该 ID 已计过（跳过）；true = 首次（继续计数）。延迟初始化（Restore
+// 恢复的链 seenCompleted 非持久化为 nil）。
+func (c *CloudDownloadChain) markCompletedSeen(id string) bool {
+	if c.seenCompleted == nil {
+		c.seenCompleted = make(map[string]bool)
+	}
+	if c.seenCompleted[id] {
+		return false
+	}
+	c.seenCompleted[id] = true
+	return true
 }
