@@ -226,6 +226,23 @@ type ExternalVolumeSource interface {
 	ExternalVolume(name string) ExternalVolume
 }
 
+// ExternalDeleter 是外部卷删除能力（C2，2026-10-06）：files 域用它在不 import pkg/sync
+// 的前提下删除外部卷文件（secretdata 等无 *storage.Tenant 的后端）。rel 为用户桶内相对
+// 路径（如 user/videos/x）——实现侧负责 owner 前缀/键空间适配（ResolveUserPath）。
+type ExternalDeleter interface {
+	// StatSize 返回卷上 owner 的 rel 文件大小与存在性（删除前计量；目录 → (0,true,nil)）。
+	StatSize(ctx context.Context, volumeName, owner, rel string) (int64, bool, error)
+	// Delete 删除卷上 owner 的 rel 文件（整流，外部卷无原子 quarantine；失败原样返回）。
+	Delete(ctx context.Context, volumeName, owner, rel string) error
+}
+
+// ExternalVolumeDeleter 是 VolumeSet 的**可选扩展**：按卷名返回外部卷删除能力。
+// 未知卷名/非外部卷（本地卷）→ nil。files 域在删除路径用类型断言探测——
+// 断言失败 = 未提供外部删除能力，delete 走既有本地卷路径（零回归）。
+type ExternalVolumeDeleter interface {
+	ExternalDeleter(name string) ExternalDeleter
+}
+
 // StorageManager 是本域需要的**容量核算**能力（P5 回退预留路径：quota 未装配时按字节
 // 预留/释放，超限拒绝上传）。
 //

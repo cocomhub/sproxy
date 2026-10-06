@@ -68,31 +68,52 @@ func (h *Handlers) listVolumesHandler(w http.ResponseWriter, r *http.Request) {
 	view := egressVisibleView(volume.AllowedVolumes(h.volSet.All(), owner), owner)
 	out := make([]VolumeStatus, 0, len(view))
 	for _, v := range view {
-		var usage int64
-		if p := h.volSet.Pool(v.Name); p != nil {
-			usage = p.Usage()
-		}
-		// C3：外部卷（type != local）优先用卷级计数（UsageProvider）；Pool 是本地卷容量池。
-		state := volumeStateHealthy // 本地卷恒 healthy
-		if v.Type != "" && v.Type != volume.TypeLocal {
-			if be := h.volSet.External(v.Name); be != nil {
-				if up, ok := be.(registry.UsageProvider); ok {
-					usage = up.Usage()
-				}
-				state = h.externalVolumeState(v.Name, be)
-			}
-		}
+		usage, state := h.volumeStatusMeta(v, owner)
 		out = append(out, VolumeStatus{
 			Name:     v.Name,
 			Type:     v.Type,
 			Mode:     string(v.ACL.Mode),
-			Capacity: v.Capacity,
+			Capacity: volumeDisplayCapacity(h.volSet, v),
 			Usage:    usage,
 			Allowed:  true,
 			State:    state,
 		})
 	}
 	sendJSONResponse(w, volumesListResponse{Volumes: out}, http.StatusOK)
+}
+
+// volumeStatusMeta 返回单卷的 usage + 健康状态（列表循环内收敛 gocognit）：
+// usage 优先取容量池；外部卷（type != local）优先卷级计数（UsageProvider），状态走探针缓存。
+func (h *Handlers) volumeStatusMeta(v volume.Volume, owner string) (int64, string) {
+	var usage int64
+	if p := h.volSet.Pool(v.Name); p != nil {
+		usage = p.Usage()
+	}
+	state := volumeStateHealthy // 本地卷恒 healthy
+	if v.Type != "" && v.Type != volume.TypeLocal {
+		if be := h.volSet.External(v.Name); be != nil {
+			if up, ok := be.(registry.UsageProvider); ok {
+				usage = up.Usage()
+			}
+			state = h.externalVolumeState(v.Name, be)
+		}
+	}
+	return usage, state
+}
+
+// volumeDisplayCapacity 返回卷的展示容量（B3-I1，2026-10-06）：委托卷 = Pool.MaxBytes()
+// （底层池子 Scope 上限，不再恒报「不限」）；本地卷 pool.MaxBytes == v.Capacity 双一致；
+// 普通外部卷无独立池（Pool nil）回落 v.Capacity。
+func volumeDisplayCapacity(vs *registry.Set, v volume.Volume) int64 {
+	if vs == nil {
+		return v.Capacity
+	}
+	if p := vs.Pool(v.Name); p != nil {
+		if mb := p.MaxBytes(); mb > 0 {
+			return mb
+		}
+	}
+	return v.Capacity
 }
 
 // 外部卷健康状态字面量。
@@ -381,9 +402,18 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 		return moveErrResp(http.StatusBadRequest, errMsgInvalidPath)
 	}
 	toRoot := toTnt.Root()
+	// I2（2026-10-06）：写保护源侧——from 卷该 rel 落在被封装卷占用的子目录 → 禁止搬出
+	// （占目录「只读」语义对「move 搬走 = 删源」同样成立，否则密文可经 move 从源侧被搬出/
+	// 删除，破坏封装卷）。rebalance 逐文件复用本函数，自动继承此守卫。
+	if err := h.checkWrapperOccupiedWrite(fromVol, userVisibleRelOf(rel)); err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "volume_move", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "源卷目录已被封装卷占用，禁止搬出",
+		})
+		return moveErrResp(http.StatusForbidden, err.Error())
+	}
 	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：目标卷 toVol 该 rel 命中被封装卷占用的
 	// 子目录 → 拒绝 move（跨卷 move 经 crossVolumeCopy 直写目标卷，不经 files 域 guard）。
-	// 只拦目标侧写；删除源侧（from 卷）不拦。
 	if err := h.checkWrapperOccupiedWrite(toVol, userVisibleRelOf(rel)); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "volume_move", ObjectType: "file", Object: remotePath,

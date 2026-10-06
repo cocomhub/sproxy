@@ -10,6 +10,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -178,6 +179,13 @@ func (h *Handlers) tryRestoreLinks() {
 		if !ok {
 			continue
 		}
+		// I3（2026-10-06）：恢复登记前复查 wrapper 仍存在于 store——ScanRestore 快照与登记
+		// 之间并发删 wrapper（已从内存 unregister）会把已删占关联复加回内存 → 已删卷的子目录
+		// 误判占用、写保护 false-403 直到再次重启。Get 失败/不存在 → 跳过该条（store 是当前
+		// 事实源，快照已过期）。
+		if cur, gErr := h.userVolumes.Get(v.Owner, v.Name); gErr != nil || cur == nil {
+			continue
+		}
 		h.volumeLinks.register(volumeLink{Base: base, Subdir: subdir, Wrapper: v.Name, Owner: v.Owner})
 	}
 	h.linksRestored.Store(true)
@@ -231,6 +239,41 @@ func (h *Handlers) registerWrapperLink(owner, wrapper string, extra map[string]a
 		return true // 非嵌套 target：无关联可登记（视为成功）。
 	}
 	return h.links().register(volumeLink{Base: base, Subdir: subdir, Wrapper: wrapper, Owner: owner})
+}
+
+// WireConfigNestedWrappers 装配 config 声明的嵌套封装卷（C4，2026-10-06 用户裁决）：
+// 对 config `volumes:` 段声明 `target: <卷>/<子目录>` 的封装卷，登记互斥占用 + 写保护
+// （links）+ 配额委托（DelegatePool）——与运行时 /api/volumes/user 创建一致，否则 config
+// 声明的嵌套封装不接线写保护/配额。fail-closed：任一声明卷登记冲突 → 返回错误（启动失败，
+// 报错引导经 POST /api/volumes/user 或 Web UI 创建）；已登记（用户卷 restore 或先前声明）
+// → 跳过幂等。
+//
+// 完整性检查（用户方向）：config 声明封装卷必须真正登记成功（links 可查）；登记失败即
+// 启动失败，杜绝「声明了但不生效」的静默语义不一致。
+func (h *Handlers) WireConfigNestedWrappers() error {
+	if h == nil || h.volSet == nil {
+		return nil
+	}
+	for _, v := range h.volSet.All() {
+		base, subdir, ok := volume.SplitNestedTarget(extraTargetStr(v.Extra))
+		if !ok {
+			continue
+		}
+		if hit, occupied := h.links().conflicts(base, subdir); occupied {
+			if hit.Wrapper == v.Name {
+				continue // 已由本卷登记（幂等跳过）
+			}
+			return fmt.Errorf("config 声明封装卷 %q（target=%s/%s）装配失败：子目录已被封装卷 %q 占用（如需嵌套封装请经 POST /api/volumes/user 或 Web UI 创建）",
+				v.Name, base, subdir, hit.Wrapper)
+		}
+		if !h.registerWrapperLink("config", v.Name, v.Extra) {
+			return fmt.Errorf("config 声明封装卷 %q 登记占用失败（target=%s/%s 互斥占用冲突，启动 fail-closed）", v.Name, base, subdir)
+		}
+		if err := h.registerWrapperQuota(v.Name, v.Extra, v.Capacity); err != nil {
+			return fmt.Errorf("config 声明封装卷 %q 配额委托失败（target=%s/%s）: %w", v.Name, base, subdir, err)
+		}
+	}
+	return nil
 }
 
 // ---- 封装卷配额委托（方案B，2026-10-06）----
@@ -319,6 +362,31 @@ func (h *Handlers) checkWrapperOccupiedWrite(baseVolName, userVisibleRel string)
 // clearWrapperLinks 在封装卷删除成功后清除其占用关联。
 func (h *Handlers) clearWrapperLinks(wrapper string) {
 	h.links().unregisterByWrapper(wrapper)
+}
+
+// cleanupWrapperBaseDir 删封装卷后清理其自建的空占用子目录残留（C5/M3，2026-10-06）：
+// 嵌套 target 创建时由 resolveNestedTargetFS 在底层卷 MakeDir 留下子目录；删除封装卷时
+// 若该目录已空则删除（重建同目录不再 409「目录已存在」）。有内容（封装卷数据仍在）或
+// 删除失败 → 保留（重建会 409 提示先清理，fail-closed 不误删数据）。非嵌套/无底层 → 空操作。
+func (h *Handlers) cleanupWrapperBaseDir(extra map[string]any) {
+	if h == nil || h.volSet == nil {
+		return
+	}
+	base, subdir, ok := volume.SplitNestedTarget(extraTargetStr(extra))
+	if !ok {
+		return
+	}
+	fsys, ok2 := h.volSet.FSFor(base)
+	if !ok2 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// LocalFS.Delete = os.Remove：空目录才成功；有内容报错 → 保留（fail-closed 不误删数据）。
+	if err := fsys.Delete(ctx, subdir); err != nil {
+		h.logger.Info("封装卷删除后清理占用子目录残留跳过（有内容/失败，重建同目录将 409）",
+			"base", base, "subdir", subdir)
+	}
 }
 
 // defaultVolumeName 返回默认卷名（volSet 未装配 → ""；checkWrapperOccupiedWrite 对空名

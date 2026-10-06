@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -25,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -79,6 +81,72 @@ func (a filesVolumeSet) ExternalVolume(name string) files.ExternalVolume {
 		return nil
 	}
 	return filesExternalVolume{fs: fsys}
+}
+
+// ExternalDeleter 实现 files.ExternalVolumeDeleter（C2，2026-10-06）：按卷名返回外部卷删除
+// 能力。未知/非外部卷（本地卷）/FS 不可用 → nil（delete 走既有本地卷路径，零回归）。
+// key 语义与上传 externalUploadSink 一致：ResolveUserPath 统一计算（owner 前缀/键空间适配）。
+func (a filesVolumeSet) ExternalDeleter(name string) files.ExternalDeleter {
+	be := a.External(name)
+	if be == nil {
+		return nil
+	}
+	fsys := be.FS()
+	if fsys == nil {
+		return nil
+	}
+	v, ok := a.ByName(name)
+	if !ok {
+		return nil
+	}
+	return filesExternalDeleter{fs: fsys, v: v}
+}
+
+// filesExternalDeleter 把 sync.FS + 卷描述适配为 files.ExternalDeleter。
+type filesExternalDeleter struct {
+	fs syncpkg.FS
+	v  volume.Volume
+}
+
+// ownerKey 把域侧 rel（user/<name>）映射为外部卷键（与 externalUploadSink 同一算法：
+// 桶目录自身 "user" → 桶内空路径，防 "user/user" 残留）。
+func (a filesExternalDeleter) ownerKey(owner, rel string) (string, error) {
+	stripped := rel
+	switch {
+	case rel == "user":
+		stripped = ""
+	case strings.HasPrefix(rel, "user/"):
+		stripped = strings.TrimPrefix(rel, "user/")
+	}
+	return a.v.ResolveUserPath(owner, stripped)
+}
+
+// StatSize 实现 files.ExternalDeleter。
+func (a filesExternalDeleter) StatSize(ctx context.Context, _, owner, rel string) (int64, bool, error) {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return 0, false, err
+	}
+	e, serr := a.fs.Stat(ctx, key)
+	if serr != nil {
+		return 0, false, serr
+	}
+	if e == nil {
+		return 0, false, nil
+	}
+	if e.IsDir {
+		return 0, true, nil
+	}
+	return e.Size, true, nil
+}
+
+// Delete 实现 files.ExternalDeleter。
+func (a filesExternalDeleter) Delete(ctx context.Context, _, owner, rel string) error {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return err
+	}
+	return a.fs.Delete(ctx, key)
 }
 
 // filesExternalVolume 把 sync.FS 的 ListDir 适配为 files.ExternalVolume

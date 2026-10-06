@@ -373,14 +373,21 @@ func (vs *Set) DelegatePool(wrapper, base, subdir string, maxBytes int64) (*quot
 }
 
 // ClearDelegatedPool 移除封装卷的委托容量池登记（删封装卷时调用）。无登记 → 空操作。
-// 子 Scope 挂载后无法从底层池卸载（quota 无显式删子池），清除登记后 Scope 留在父池但
-// 不再被消费（无写入即 0 占用，不影响底层池）；文档注明该可接受语义。
+// C5/M8（2026-10-06）：移除登记的同时**归还配额**（把委托子 Scope 的 committed 释放回
+// 底层卷池父链——删封装卷后该份额归还原卷）并**摘除 children 留桩**（Unmount，防反复
+// 建删同子目录让底层池 children 无限累积）。
 func (vs *Set) ClearDelegatedPool(wrapper string) {
 	vs.delegatedMu.Lock()
 	defer vs.delegatedMu.Unlock()
-	if vs.delegated != nil {
-		delete(vs.delegated, wrapper)
+	if vs.delegated == nil {
+		return
 	}
+	if p := vs.delegated[wrapper]; p != nil {
+		// C5/M8（2026-10-06）：归还配额（委托子 Scope committed 释放回底层卷池父链）+ 摘除
+		// children 留桩（防反复建删同子目录让底层池 children 无限累积）。
+		p.ReleaseCommittedAndUnmount()
+	}
+	delete(vs.delegated, wrapper)
 }
 
 // Close 关闭全部卷上租户子根、卷根句柄与外部卷句柄（幂等：重复调用安全，nil/已关跳过）。

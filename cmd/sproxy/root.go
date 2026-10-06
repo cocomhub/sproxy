@@ -1159,6 +1159,16 @@ func (rt *runServerRuntime) setupServerCore() error {
 	if err := setupSecretBackends(ctx, h.Volumes(), cfg.StorageRoot, logger); err != nil {
 		return fmt.Errorf("secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w", err)
 	}
+	// C4（2026-10-06 用户裁决）：config 声明嵌套封装卷接线 + 完整性检查 + 运行时写回。
+	//  1. WireConfigNestedWrappers：对 config volumes 段声明 `target: <卷>/<子目录>` 的封装卷
+	//     登记互斥占用 + 写保护 + 配额委托（fail-closed，登记失败即启动失败，杜绝声明不生效）；
+	//  2. SetConfigWriter：/api/volumes/user 创建/删除后写回 config volumes 段（重启不丢卷）。
+	if err := h.WireConfigNestedWrappers(); err != nil {
+		return err
+	}
+	if cfgFile != "" {
+		h.SetConfigWriter(server.NewFileConfigWriter(cfgFile))
+	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
 	registerPikpakDownloader(cfg)

@@ -1307,6 +1307,13 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 		defer release()
 	}
 
+	// C2（2026-10-06）：外部封装卷删除——wrapper（secretdata 等无 *storage.Tenant）内文件
+	// 无法经 storage.Root 定位（locateForRead 要求租户根，封装卷内文件标准 delete 404），
+	// 走外部 FS 整流删除 + 委托子 Scope 配额释放（Pool(volName) = 委托子池，父链归还底层卷池）。
+	if handled, res, derr := s.deleteExternalVolumeTarget(ctx, owner, rel, remotePath, input); handled {
+		return res, derr
+	}
+
 	homeVol, root, handled, res, locErr := s.locateDeleteTarget(ctx, owner, rel, input)
 	if handled {
 		return res, locErr
@@ -1422,6 +1429,103 @@ func (s *Service) locateDeleteTarget(ctx context.Context, owner, rel string, inp
 		return "", nil, true, DeleteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	return "", tnt.Root(), false, DeleteFileResult{}, nil
+}
+
+// deleteExternalVolumeTarget 尝试外部卷删除（C2，2026-10-06）：检测外部卷（显式 ?volume 或
+// 全视图扫描）+ 整流删除。返回 (handled, result, err)——handled=true 表示已产出最终结果
+// （外部卷命中并处理/删除失败）；false = 无外部卷能力/未命中 → 调用方回落既有本地路径。
+func (s *Service) deleteExternalVolumeTarget(ctx context.Context, owner, rel, remotePath string, input DeleteFileInput) (bool, DeleteFileResult, error) {
+	ext, ok := s.rt.volSet().(ExternalVolumeDeleter)
+	if !ok {
+		return false, DeleteFileResult{}, nil
+	}
+	volName, found := s.locateExternalDeleteTarget(ctx, ext, owner, rel, input.ExplicitVol)
+	if !found {
+		return false, DeleteFileResult{}, nil
+	}
+	d := ext.ExternalDeleter(volName)
+	if d == nil {
+		return false, DeleteFileResult{}, nil
+	}
+	res, derr := s.deleteExternalFile(ctx, d, volName, owner, rel, input, remotePath)
+	return true, res, derr
+}
+
+// locateExternalDeleteTarget 定位外部卷上的删除目标（C2，2026-10-06）：
+//   - 显式 explicitVol → 该卷是外部卷且存在 rel → 命中（不在外部卷/不存在 → 未命中，
+//     回落既有本地路径语义）；
+//   - 空 explicitVol → 遍历视图外部卷 stat 探测（与 locateOwnerFile 的本地扫描同构）。
+//
+// stat 探测失败（非不存在）视同未命中——调用方回落本地路径（既有 404/500 语义兜底）。
+func (s *Service) locateExternalDeleteTarget(ctx context.Context, ext ExternalVolumeDeleter, owner, rel, explicitVol string) (string, bool) {
+	if explicitVol != "" {
+		d := ext.ExternalDeleter(explicitVol)
+		if d == nil {
+			return "", false
+		}
+		if _, exists, _ := d.StatSize(ctx, explicitVol, owner, rel); exists {
+			return explicitVol, true
+		}
+		return "", false
+	}
+	for _, v := range s.rt.volSet().All() {
+		d := ext.ExternalDeleter(v.Name)
+		if d == nil {
+			continue
+		}
+		if _, exists, _ := d.StatSize(ctx, v.Name, owner, rel); exists {
+			return v.Name, true
+		}
+	}
+	return "", false
+}
+
+// deleteExternalFile 外部卷整流删除（C2，2026-10-06）：stat 计量 → 写保护预检（链式嵌套：
+// 本卷被其它封装卷占用其子目录时拒绝）→ 外部 FS 删除 → owner 全局 Scope + 委托子 Scope
+// 配额释放（Pool(volName) 对封装卷返回委托子池，父链聚合归还底层卷池）→ 台账/索引/计量/
+// 审计/事件收尾（与本地删除路径一致）。外部卷无原子 quarantine/去重/软删语义。
+func (s *Service) deleteExternalFile(ctx context.Context, ext ExternalDeleter, volName, owner, rel string, input DeleteFileInput, remotePath string) (DeleteFileResult, error) {
+	size, exists, serr := ext.StatSize(ctx, volName, owner, rel)
+	if serr != nil {
+		s.rt.logger().ErrorContext(ctx, "外部卷删除：stat 失败", "file_name", remotePath, "volume", volName, "error", serr)
+		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile, Reason: reasonRemoveFailed}
+	}
+	if !exists {
+		if input.AllowMissing {
+			return s.idempotentMissingDelete(ctx, remotePath)
+		}
+		return DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
+	}
+	// 写保护（用户语义 #6，C2 兜底）：链式嵌套下本卷子目录被其它封装卷占用 → 拒绝删除。
+	if err := s.rejectOccupiedWrite(volName, userVisibleRel(rel)); err != nil {
+		return DeleteFileResult{}, err
+	}
+	if derr := ext.Delete(ctx, volName, owner, rel); derr != nil {
+		s.rt.logger().ErrorContext(ctx, "外部卷删除：删除失败", "file_name", remotePath, "volume", volName, "error", derr)
+		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile, Reason: reasonRemoveFailed}
+	}
+	// P4 配额对账：删除即释放已确认占用（owner 全局 Scope 按 rel 解析，父链聚合）。
+	if scope := s.rt.quotaScope(owner, rel); scope != nil {
+		scope.ReleaseUsage(size)
+	}
+	// 卷容量池释放（AD-7）：封装卷 Pool(volName) = 底层池委托子 Scope——释放走**委托子池**
+	// 而非底层根池（C2：删除归还 wrapper 配额，不滞留幽灵占用）。
+	if pool := s.rt.volSet().Pool(volName); pool != nil {
+		pool.ReleaseCommitted(size)
+	}
+	// 台账/索引/计量/审计/事件收尾（与本地删除路径一致）。
+	if csStore := s.rt.checksumStore(owner); csStore != nil {
+		csStore.Delete(rel)
+	}
+	if s.index != nil {
+		s.index.remove(owner, strings.TrimPrefix(rel, "user/"))
+	}
+	if s.rt.metricsRecorder() != nil {
+		s.rt.metricsRecorder().RecordDelete()
+	}
+	s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "")
+	s.rt.publishFileEvent(EventDelete, owner, rel, size)
+	return DeleteFileResult{RemotePath: remotePath, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
 }
 
 // verifyDeleteQuarantine 基于 fd 校验 quarantine 内容（打开失败 → 恢复 rel 并 500）。

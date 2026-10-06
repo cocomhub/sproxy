@@ -108,5 +108,34 @@ func (h *Handlers) davWriteGuard(w http.ResponseWriter, r *http.Request, volName
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return true
 	}
+	// I2（2026-10-06）：MOVE/COPY 源侧——Destination 头是源路径，命中占用子目录 → 403
+	// （「move 搬走 = 删源」同「只读」语义；防把封装卷密文经 MOVE/COPY 搬出破坏）。
+	if r.Method == "MOVE" || r.Method == "COPY" {
+		if src := davDestinationRel(r); src != "" {
+			if err := h.checkWrapperOccupiedWrite(volName, src); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return true
+			}
+		}
+	}
 	return false
+}
+
+// davDestinationRel 从 MOVE/COPY 的 Destination 头提取卷内相对路径（去 /dav 前缀；
+// 无法解析 → ""，调用方按不拦截处理——davWriteGuard 的目标侧检查已兜底）。
+func davDestinationRel(r *http.Request) string {
+	dest := r.Header.Get("Destination")
+	if dest == "" {
+		return ""
+	}
+	// 兼容绝对 URI（http://host/dav/...）与相对（/dav/...）两种形态。
+	if i := strings.Index(dest, "/dav"); i >= 0 {
+		dest = dest[i:]
+	}
+	u := strings.TrimPrefix(dest, "/dav")
+	u = strings.TrimPrefix(u, "/")
+	if u == "" || u == "." {
+		return ""
+	}
+	return u
 }

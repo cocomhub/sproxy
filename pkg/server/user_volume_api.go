@@ -202,7 +202,10 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	acl := volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{owner: {}}}
 	// fail-fast 试构造：type 已注册 + extra 合法（registry.NewBackend 分派）。
 	// 失败 → 400（未注册 backend / 凭据缺失等），不落盘。
-	v := volume.Volume{Name: req.Name, Type: req.Type, Extra: req.Extra, ACL: acl}
+	// Capacity 回填（B3-I1）：委托配额经底层池子 Scope 生效，Volume.Capacity 一并带配额，
+	// 使 /api/volumes（卷仪表）与 /api/volumes/user（卷管理）对封装卷显示一致容量——此前
+	// 建卷不加 Capacity，仪表读 v.Capacity 恒 0 显示「不限」与实际 507 冲突。
+	v := volume.Volume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
 	be, err := registry.NewBackend(r.Context(), v)
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": "type 未注册或 extra 非法: " + err.Error()}, http.StatusBadRequest)
@@ -237,6 +240,19 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		h.clearWrapperLinks(req.Name)
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
+	}
+	// C4 config 写回（2026-10-06 用户裁决）：创建成功后把卷追加到 config volumes 段，
+	// 重启后卷不丢。写回失败 → 回滚已建卷（Set/store/links/配额），保持一致性。
+	if h.configWriter != nil {
+		if err := h.configWriter.AppendVolume(uv); err != nil {
+			h.logger.Error("用户卷创建：config 写回失败，回滚建卷", "volume", req.Name, "owner", owner, "error", err)
+			_ = h.volSet.RemoveExternalVolume(req.Name)
+			_ = h.userVolumes.Delete(owner, req.Name)
+			h.clearWrapperLinks(req.Name)
+			h.clearWrapperQuota(req.Name)
+			sendJSONResponse(w, map[string]string{"error": "卷已创建但 config 写回失败，已回滚（config 文件不可写或格式非法）"}, http.StatusInternalServerError)
+			return
+		}
 	}
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
@@ -313,13 +329,28 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	// 删除成功：若本卷是封装卷（曾占用底层子目录），清除其占用关联与配额委托（生命周期闭环）。
+	// 删除成功：若本卷是封装卷（曾占用底层子目录），清除其占用关联与配额委托（生命周期闭环）
+	// + 清理自建的空占用子目录残留（C5：配额归还底层池 + 重建同目录不 409）。
 	h.clearWrapperLinks(name)
 	h.clearWrapperQuota(name)
+	h.cleanupWrapperBaseDir(v.Extra)
+	// C4 config 写回（2026-10-06）：从 config volumes 段移除该卷（重启后不再装配）。
+	// store 已删无法无损回滚 → 写回失败仅告警（记录取舍：卷已删、config 残留由运维清理）。
+	if h.configWriter != nil {
+		if err := h.configWriter.RemoveVolume(name); err != nil {
+			h.logger.Error("用户卷删除：config 写回失败（卷已删除，config 残留需手动清理）", "volume", name, "owner", owner, "error", err)
+		}
+	}
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 
 // SetUserVolumeStore 注入用户卷 store（装配层 new 后调用；nil 清除，路由返回 400）。
 func (h *Handlers) SetUserVolumeStore(s *UserVolumeStore) {
 	h.userVolumes = s
+}
+
+// SetConfigWriter 注入 config 写回能力（C4，2026-10-06）：/api/volumes/user 创建/删除后
+// 把卷写回 config 文件 volumes 段（重启不丢）。nil = 不写回（零回归）。
+func (h *Handlers) SetConfigWriter(w ConfigWriter) {
+	h.configWriter = w
 }
