@@ -77,8 +77,9 @@ func listFiles(svc *Service, actor, query string) *httptest.ResponseRecorder {
 }
 
 // TestList_ExternalVolume_PlainMeta 钉住：?volume=<外部卷> 时 List 透传到该卷 ListDir，
-// 返回明文目录视图（movie.mp4 明文大小 2048、dir 目录条目），且不带 checksum/volume
-// 字段；ListDir 收到的 rel 是 owner 限定的键空间（共享卷 owner 前缀隔离）。
+// 返回明文目录视图（movie.mp4 明文大小 2048、dir 目录条目），且不带 checksum 字段
+// （外部卷目录视图不暴露加密元数据；卷名标注 v.Name 供 Web UI 卷徽标）；ListDir 收到
+// 的 rel 是 owner 限定的键空间（共享卷 owner 前缀隔离）。
 func TestList_ExternalVolume_PlainMeta(t *testing.T) {
 	t.Parallel()
 	e := newDirsEnv(t)
@@ -99,7 +100,8 @@ func TestList_ExternalVolume_PlainMeta(t *testing.T) {
 	if resp.Total != 2 {
 		t.Fatalf("total = %d, 期望 2; files=%+v", resp.Total, resp.Files)
 	}
-	// movie.mp4：明文大小 + 无 checksum/volume（外部卷目录视图不暴露加密元数据）。
+	// movie.mp4：明文大小 + 卷名标注（供 Web UI 卷徽标）+ 无 checksum（外部卷目录
+	// 视图不暴露加密元数据）。
 	found := false
 	for _, f := range resp.Files {
 		switch f.Name {
@@ -115,8 +117,11 @@ func TestList_ExternalVolume_PlainMeta(t *testing.T) {
 			if f.Size != 2048 {
 				t.Fatalf("movie.mp4 明文大小 = %d, 期望 2048", f.Size)
 			}
-			if f.Checksum != "" || f.Volume != "" {
-				t.Fatalf("movie.mp4 泄漏 checksum/volume 字段: %+v", f)
+			if f.Checksum != "" {
+				t.Fatalf("movie.mp4 泄漏 checksum 字段: %+v", f)
+			}
+			if f.Volume != "secrets-x" {
+				t.Fatalf("movie.mp4 卷 = %q, 期望 secrets-x（外部卷目录视图标注卷名供徽标）", f.Volume)
 			}
 			// 任务 9：wrapper 加密卷（Type=secretdata）的条目补 category 标注（供 Web UI
 			// 卷徽标细化），目录条目不填。

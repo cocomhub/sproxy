@@ -113,9 +113,20 @@ test('buildFileRowHtml 文件行卷 badge：有 volume 显示、无 volume 不�
   assert.ok(xssVol.includes('&lt;img&gt;'));
 });
 
-test('volBadge includes category class for wrapper volumes', () => {
+test('volBadge wrapper 按 category 渲染：volume 缺失/空仍输出 vol-badge-wrapper（过滤视图真实场景）', () => {
+  // 常规：volume 非空 + wrapper → vol-badge-wrapper 类 + 🔒 卷名。
   const html = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume: 'vault', volume_category: 'wrapper' });
   assert.match(html, /vol-badge-wrapper/);
+  assert.ok(html.includes('>🔒 vault<'), 'wrapper 徽标应显示 🔒 + 卷名');
+  // 过滤视图真实场景：外部卷目录视图条目 volume 空但 volume_category 在 → 徽标按
+  // category 渲染而非 volume，仍输出 vol-badge-wrapper（≤ 早期数据 / 防御路径）。
+  const noVol = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume_category: 'wrapper' });
+  assert.match(noVol, /vol-badge-wrapper/);
+  const emptyVol = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume: '', volume_category: 'wrapper' });
+  assert.match(emptyVol, /vol-badge-wrapper/);
+  // 非 wrapper 且无 volume → 仍无 badge（零回归）。
+  const plain = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10 });
+  assert.ok(!plain.includes('vol-badge'), '无 volume 且非 wrapper 不显示 badge');
 });
 
 test('buildFileTableHtml 空 / 多行', () => {

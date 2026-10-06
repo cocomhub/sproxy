@@ -145,9 +145,12 @@
     const cs = fi.checksum || '';
     const csDisplay = cs ? '<span class="checksum-cell" data-checksum="' + escHtml(cs) + '" title="' + escHtml(cs) + '">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
     // 卷徽标按 category 细化：wrapper（加密/封装卷）加 vol-badge-wrapper 类 + 🔒 图标；
-    // 其余卷保持既有 vol-badge 形态（零回归）。
+    // 其余卷保持既有 vol-badge 形态（零回归）。wrapper 徽标按 category 渲染而非 volume：
+    // 外部卷目录视图条目 volume 可能为空，此时仍输出 vol-badge-wrapper（卷名缺失回退
+    // 「加密卷」文案，不吞掉 🔒 标识）。
     const volCat = fi.volume_category === 'wrapper';
-    const volBadge = fi.volume ? ' <span class="vol-badge' + (volCat ? ' vol-badge-wrapper' : '') + '" title="卷 ' + escHtml(fi.volume) + '">' + (volCat ? '🔒 ' : '') + escHtml(fi.volume) + '</span>' : '';
+    const volName = fi.volume || (volCat ? '加密卷' : '');
+    const volBadge = (fi.volume || volCat) ? ' <span class="vol-badge' + (volCat ? ' vol-badge-wrapper' : '') + '" title="卷 ' + escHtml(volName) + '">' + (volCat ? '🔒 ' : '') + escHtml(volName) + '</span>' : '';
     // 视频行「▶ 播放」入口：only 非目录视频文件（扩展名 ∈ VIDEO_EXT）。data-volume 为空
     // 时不发送（视频页走服务端 auto 路由）——与 videoPlayerUrl 空 volume 省略一致。
     const playBtn = !fi.is_dir && isVideoName(fi.name)

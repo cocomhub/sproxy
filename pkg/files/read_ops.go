@@ -199,10 +199,10 @@ func (s *Service) listExternalVolume(ctx context.Context, owner, subdir string, 
 	cat := volumeCategoryFor(v.Type)
 	allFiles := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
-		// 外部卷目录条目：明文字段（Name/Size/IsDir），无 checksum/volume——外部卷目录
-		// 视图不暴露加密元数据；卷名已由请求的 ?volume= 限定，无需逐条标注。仅补展示
-		// 分类（wrapper 加密卷 → "wrapper"，供 Web UI 卷徽标细化；本地卷不填）。
-		allFiles = append(allFiles, FileInfo{Name: e.Name, IsDir: e.IsDir, Size: e.Size, VolumeCategory: cat})
+		// 外部卷目录条目：明文字段（Name/Size/IsDir）+ 卷名（v.Name，供 Web UI 卷徽标
+		// 显示），无 checksum——外部卷目录视图不暴露加密元数据。另补展示分类
+		// （wrapper 加密卷 → "wrapper"，供 Web UI 卷徽标细化；本地卷不填）。
+		allFiles = append(allFiles, FileInfo{Name: e.Name, IsDir: e.IsDir, Size: e.Size, Volume: v.Name, VolumeCategory: cat})
 	}
 	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
 	return ListResult{
