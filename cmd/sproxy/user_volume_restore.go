@@ -34,6 +34,7 @@ func volumeFromUserVolume(uv server.UserVolume) volume.Volume {
 		Type:     uv.Type,
 		Capacity: uv.Capacity,
 		Extra:    uv.Extra,
+		ACL:      uv.ACL, // 保留持久化 ACL（新卷 owner-only；已存卷零值 = 开放，兼容不收紧）
 	}
 }
 

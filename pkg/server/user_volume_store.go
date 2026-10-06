@@ -25,6 +25,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // UserVolume 是用户自有卷的持久化描述（JSON 友好）。
@@ -39,6 +40,11 @@ type UserVolume struct {
 	// ExtraEnc 是 Extra 的加密信封（base64：nonce || AES-256-GCM 密文）。
 	// masterKey 启用时落盘（明文 Extra 不落盘）；旧文件/未启用时为空（读明文 Extra）。
 	ExtraEnc string `json:"extra_enc,omitempty"`
+	// ACL 是卷访问控制（2026-10-06 S1 修复）：新创建/恢复的用户卷**强制**注入
+	// Mode=Allow + 单 owner 白名单（owner-only，防跨 owner 数据面越权）。**已存卷零值
+	// 兼容**：旧文件无该字段读回零值 ACL（Mode=="" = 默认开放），维持现状不静默收紧
+	// 既有共享卷；新卷 owner-only 语义由创建/恢复路径注入保证。
+	ACL volume.ACL `json:"acl,omitempty"`
 }
 
 // UserVolumeStore 把每 owner 的卷元数据持久化到

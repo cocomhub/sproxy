@@ -168,16 +168,21 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// 用户卷强制 owner-only ACL（评审 S1，2026-10-06）：新卷注入 Mode=Allow + 单 owner
+	// 白名单，使 data 面（列表/下载/wrapper 底层/转存目标）对非 owner fail-closed——此前
+	// 注入零值 ACL（Mode==""）令 volume.Authorize 对**任意 owner** 恒 true，跨 owner 枚举
+	// /写滥用/封装成链。已存卷（旧 store 文件）零值兼容不静默收紧，仅新卷 owner-only。
+	acl := volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{owner: {}}}
 	// fail-fast 试构造：type 已注册 + extra 合法（registry.NewBackend 分派）。
 	// 失败 → 400（未注册 backend / 凭据缺失等），不落盘。
-	v := volume.Volume{Name: req.Name, Type: req.Type, Extra: req.Extra}
+	v := volume.Volume{Name: req.Name, Type: req.Type, Extra: req.Extra, ACL: acl}
 	be, err := registry.NewBackend(r.Context(), v)
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": "type 未注册或 extra 非法: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
 	// store 落盘（重名拒绝）。
-	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra}
+	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
 	if err := h.userVolumes.Create(owner, uv); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 		return
@@ -253,8 +258,8 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := h.userVolumes.Delete(owner, name); err != nil {
-		// Set 已移除但 store 删除失败：回滚 Add（尽力恢复一致性）。
-		_ = h.volSet.AddExternalVolume(volume.Volume{Name: name, Type: v.Type, Extra: v.Extra}, nil)
+		// Set 已移除但 store 删除失败：回滚 Add（尽力恢复一致性）。保留 ACL（v 来自 store.Get）。
+		_ = h.volSet.AddExternalVolume(volume.Volume{Name: name, Type: v.Type, Extra: v.Extra, ACL: v.ACL}, nil)
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}

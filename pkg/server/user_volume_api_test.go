@@ -417,3 +417,53 @@ func TestCreateUserVolume_Wrapper_OwnerIsolation(t *testing.T) {
 		t.Fatal("bob 的合法封装应落盘")
 	}
 }
+
+// TestUserVolumeAPI_ACL_CrossOwnerDenied（评审 S1 回归）：新建用户卷强制 owner-only ACL——
+// 非 owner（bob）经 ?volume=<alice卷> 的数据面候选一律不命中（404 语义、不泄存在性），
+// alice 自可访问。此前零值 ACL（Mode==""）令 volume.Authorize 对**任意 owner** 恒 true，
+// 绕过 I2 隔离（列表/下载/封装成链/转存目标跨 owner 滥用）。
+func TestUserVolumeAPI_ACL_CrossOwnerDenied(t *testing.T) {
+	t.Parallel()
+	h, store := newUserVolumeAPIHandlers(t, false)
+	muxAlice := userVolWrap(h, "alice")
+
+	rec := postUserVolume(t, muxAlice, map[string]any{
+		"name": "userdisk1", "type": userVolumeTestType, "extra": map[string]any{"bduss": "test"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	// 持久化 ACL（owner-only）：store 落盘即携带，重启恢复据此重建。
+	uv, err := store.Get("alice", "userdisk1")
+	if err != nil || uv == nil {
+		t.Fatalf("store.Get = %v/%v, want 存在", uv, err)
+	}
+	if uv.ACL.Mode != volume.ModeAllow {
+		t.Fatalf("新建用户卷 ACL.Mode = %q, want %q", uv.ACL.Mode, volume.ModeAllow)
+	}
+	if _, ok := uv.ACL.Owners["alice"]; !ok {
+		t.Fatalf("新建用户卷 ACL.Owners 缺 alice: %v", uv.ACL.Owners)
+	}
+	// registry 注册的卷同样带 ACL（Authorize 据此 fail-closed）。
+	rv, ok := h.volSet.ByName("userdisk1")
+	if !ok {
+		t.Fatal("ByName(userdisk1) 未命中")
+	}
+	if !rv.Authorize("alice") {
+		t.Fatal("alice 对自己卷应授权")
+	}
+	if rv.Authorize("bob") {
+		t.Fatal("bob 对 alice 卷应 fail-closed（零值 ACL 修复前恒 true）")
+	}
+	// 数据面统一入口 externalCandidates：显式 ?volume= 非 owner 不命中（404 语义）。
+	reqBob := httptest.NewRequest(http.MethodGet, "/api/files?volume=userdisk1", nil).
+		WithContext(withActor(context.Background(), "bob"))
+	if got := h.externalCandidates(reqBob, "bob", "userdisk1"); len(got) != 0 {
+		t.Fatalf("bob ?volume=alice 卷 candidates = %+v, want 空（不泄存在性）", got)
+	}
+	reqAlice := httptest.NewRequest(http.MethodGet, "/api/files?volume=userdisk1", nil).
+		WithContext(withActor(context.Background(), "alice"))
+	if got := h.externalCandidates(reqAlice, "alice", "userdisk1"); len(got) != 1 {
+		t.Fatalf("alice ?volume=自己卷 candidates = %d, want 1", len(got))
+	}
+}
