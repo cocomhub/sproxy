@@ -16,7 +16,7 @@
 - tar 校验器用标准库 `archive/tar` + `compressx`（不加依赖）
 - 图片校验移植 cocom `pkg/imaging` 语义（`image.DecodeConfig`+`Decode`+Bounds 非空），不引入 cocom 依赖
 - 校验点嵌入 `runRetryLoop`（runDownloadAttempt 成功分支），不单独循环
-- 默认 `ForceIntegrity=false` 放行 + 标记 `IntegrityStatus="damaged"`；`true` 阻断（failTask）
+- 默认 `IntegrityMustPass=false` 放行 + 标记 `IntegrityStatus="damaged"`；`true` 阻断（failTask）
 - 两次本地 checksum 一致仍异常 = 原始文件问题（不重下，按任务处置）
 - 所有测试只绑 `127.0.0.1`；提交身份 `suixibing <suixibing@gmail.com>`，不加署名行
 
@@ -25,7 +25,7 @@
 1. 未知类型文件（无校验器）→ 仅字节级校验，不误报 damaged（`Lookup` 返回 nil 视为通过）
 2. 空文件/0 字节 → image/tar 校验器应判失败（Bounds 0 / tar 无条目），但字节级校验通过
 3. 校验失败但重试耗尽 → 不无限重下（两次 checksum 一致即停，防死循环）
-4. `ForceIntegrity=true` 但校验器不存在（未知类型）→ 视为通过（无语义校验可执行），不误阻断
+4. `IntegrityMustPass=true` 但校验器不存在（未知类型）→ 视为通过（无语义校验可执行），不误阻断
 5. PikPak GCID 复算未命中（大文件分块自适应失败）→ 回落 ② 态（语义校验兜底），不误报权威
 
 ---
@@ -268,7 +268,7 @@ git add pkg/downloader/ pkg/volume/ext/pikpak/ && git commit -m "feat(downloader
 ### 任务 4：`pkg/cloud` 校验点嵌入（完整性判定 + 语义校验 + 重下 + 状态）
 
 **文件：**
-- 修改：`pkg/cloud/manager.go`（CloudTask 加 IntegrityStatus/ForceIntegrity + TaskParams 加 ForceIntegrity）
+- 修改：`pkg/cloud/manager.go`（CloudTask 加 IntegrityStatus/IntegrityMustPass + TaskParams 加 IntegrityMustPass）
 - 修改：`pkg/cloud/manager_task.go`（runRetryLoop 成功分支加完整性判定；CreateTask 参数透传；状态写入）
 - 测试：`pkg/cloud/integrity_test.go`
 
@@ -278,11 +278,11 @@ git add pkg/downloader/ pkg/volume/ext/pikpak/ && git commit -m "feat(downloader
 func TestDownloadIntegrity_DamagedAllowsContinue(t *testing.T) {
     // 语义校验失败（损坏文件）→ 默认放行 + IntegrityStatus="damaged" + 任务 completed
     mgr, srv := newIntegrityTestMgr(t, corruptPayload) // 下载损坏 png（bytes 非图片）
-    task, _ := mgr.SubmitAndStart("url", srv.URL, "bad.png", size, t.Context(), "", TaskParams{Save: true, ForceIntegrity: false})
+    task, _ := mgr.SubmitAndStart("url", srv.URL, "bad.png", size, t.Context(), "", TaskParams{Save: true, IntegrityMustPass: false})
     // 轮询到 completed；task.IntegrityStatus == "damaged"
 }
 func TestDownloadIntegrity_ForceBlocks(t *testing.T) {
-    // ForceIntegrity=true + 语义校验失败 → 任务 failed（原因含 integrity）
+    // IntegrityMustPass=true + 语义校验失败 → 任务 failed（原因含 integrity）
 }
 func TestDownloadIntegrity_AuthoritySkipsSemantic(t *testing.T) {
     // 下载器 ModeAuthority + AuthorityHash 匹配 → 跳过语义校验 → verified
@@ -301,9 +301,9 @@ func TestDownloadIntegrity_TwiceConsistentStillDamaged(t *testing.T) {
 
 ```go
 IntegrityStatus string `json:"integrity_status,omitempty"` // "" | verified | damaged
-ForceIntegrity  bool   `json:"force_integrity,omitempty"`
+IntegrityMustPass  bool   `json:"integrity_must_pass,omitempty"`
 ```
-TaskParams 加 `ForceIntegrity bool`；CreateTask 透传。
+TaskParams 加 `IntegrityMustPass bool`；CreateTask 透传。
 
 - [ ] **步骤 4：`manager_task.go` 加完整性判定 helper + 嵌入点**
 
@@ -313,7 +313,7 @@ TaskParams 加 `ForceIntegrity bool`；CreateTask 透传。
 //   → 返回 errIntegrityFail（非「两次一致」）→ 继续 retry 循环（shouldRetryDownload 认可）
 //   → 返回 errIntegrityPermanent（两次 checksum 一致仍异常）→ 按任务处置：
 //       默认 → IntegrityStatus="damaged" + 放行（downloadErr=nil 继续完成）
-//       ForceIntegrity → failTask（错误含 integrity）
+//       IntegrityMustPass → failTask（错误含 integrity）
 
 func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task *CloudTask, destPath string, result *downloader.Result) error {
     // ① 权威匹配（ModeAuthority + AuthorityHash 已由下载器确认）→ verified，跳过语义
@@ -347,17 +347,17 @@ git add pkg/cloud/ && git commit -m "feat(cloud): 下载完整性判定嵌入 ru
 ### 任务 5：客户端 flag + API 暴露
 
 **文件：**
-- 修改：`cmd/sclient/cloud_download.go`（--force-integrity flag + 透传）
-- 修改：`pkg/client/cloud.go`（CloudDownloadOption WithCloudDownloadForceIntegrity + body 字段）
-- 修改：`pkg/server/cloud_download_handler.go`（请求解析 ForceIntegrity + TaskParams）
+- 修改：`cmd/sclient/cloud_download.go`（--integrity-must-pass flag + 透传）
+- 修改：`pkg/client/cloud.go`（CloudDownloadOption WithCloudDownloadIntegrityMustPass + body 字段）
+- 修改：`pkg/server/cloud_download_handler.go`（请求解析 IntegrityMustPass + TaskParams）
 - 测试：`pkg/client/chain_cloud_download_test.go`、`cmd/sclient/cloud_download_test.go`
 
 - [ ] **步骤 1：编写失败的测试**
 
 ```go
 // client_test.go
-func TestCloudDownloadForceIntegrityOption(t *testing.T) {
-    opts := []CloudDownloadOption{WithCloudDownloadForceIntegrity(true)}
+func TestCloudDownloadIntegrityMustPassOption(t *testing.T) {
+    opts := []CloudDownloadOption{WithCloudDownloadIntegrityMustPass(true)}
     cfg := &cloudDownloadOptions{}
     for _, o := range opts { o(cfg) }
     if !cfg.forceIntegrity { t.Fatal("force 选项应生效") }
@@ -366,14 +366,14 @@ func TestCloudDownloadForceIntegrityOption(t *testing.T) {
 
 - [ ] **步骤 2：运行测试验证失败**
 
-运行：`go test ./pkg/client/ -run TestCloudDownloadForceIntegrity`
+运行：`go test ./pkg/client/ -run TestCloudDownloadIntegrityMustPass`
 预期：FAIL
 
 - [ ] **步骤 3：实现**
 
-- `pkg/client/cloud.go`：`WithCloudDownloadForceIntegrity(v bool)` → cfg.forceIntegrity；batch/single body 加 `force_integrity`
-- `cmd/sclient/cloud_download.go`：`--force-integrity` flag（默认 false）+ `WithChainForceIntegrity` + submit 透传（对齐既有三参链式）
-- `pkg/server/cloud_download_handler.go`：请求 struct 加 `ForceIntegrity bool` → TaskParams.ForceIntegrity
+- `pkg/client/cloud.go`：`WithCloudDownloadIntegrityMustPass(v bool)` → cfg.forceIntegrity；batch/single body 加 `integrity_must_pass`
+- `cmd/sclient/cloud_download.go`：`--integrity-must-pass` flag（默认 false）+ `WithChainIntegrityMustPass` + submit 透传（对齐既有三参链式）
+- `pkg/server/cloud_download_handler.go`：请求 struct 加 `IntegrityMustPass bool` → TaskParams.IntegrityMustPass
 
 - [ ] **步骤 4：运行测试验证通过**
 
@@ -383,7 +383,7 @@ func TestCloudDownloadForceIntegrityOption(t *testing.T) {
 - [ ] **步骤 5：Commit**
 
 ```bash
-git add pkg/client/ cmd/sclient/ pkg/server/ && git commit -m "feat(client): --force-integrity flag 透传服务端（默认 false 零回归）"
+git add pkg/client/ cmd/sclient/ pkg/server/ && git commit -m "feat(client): --integrity-must-pass flag 透传服务端（默认 false 零回归）"
 ```
 
 ---
