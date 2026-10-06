@@ -214,8 +214,6 @@ func TestCloudDownloadCmd_IntegrityMustPassFlag(t *testing.T) {
 	// TestCloudDownload_IntegrityMustPassBody + 链式测试覆盖。
 
 	// submit 子命令：旗标存在且默认 false
-
-	// submit 子命令：旗标存在且默认 false
 	sub := findSubCommand(cmd, "submit")
 	if sub == nil || sub.Flags().Lookup(flagIntegrityMustPass) == nil {
 		t.Fatalf("expected --%s flag on cloud-download submit", flagIntegrityMustPass)
