@@ -12,7 +12,7 @@ const path = require('node:path');
 // node 环境下 app-render.js 以 module 形态提供，须先注入全局。
 global.appRender = require(path.join(__dirname, 'app-render.js'));
 
-const { volManageFormHtml, volManageListHtml, composeNestedTarget } = require('./vol-manage-format.js');
+const { volManageFormHtml, volManageListHtml, volOccupiedText, composeNestedTarget } = require('./vol-manage-format.js');
 
 test('volManageFormHtml 按 schema 渲染字段', () => {
   const html = volManageFormHtml({
@@ -173,4 +173,26 @@ test('volManageListHtml 卷名转义（防 XSS）', () => {
   assert.ok(html.includes('&quot;'));
   assert.ok(html.includes('&lt;script&gt;'));
   assert.ok(!html.includes('<script>'));
+});
+
+test('volManageListHtml 占用列显示嵌套封装 target（底层卷+子目录，占用只读可见）', () => {
+  const html = volManageListHtml({
+    volumes: [
+      { name: 'vault', type: 'secretdata', category: 'wrapper', capacity: 0, extra: { target: 'main/videos' } },
+      { name: 'plain', type: 'baidupcs', category: 'linked', capacity: 0 },
+      { name: 'empty', type: 'secretdata', category: 'wrapper', capacity: 0, extra: {} },
+    ],
+  });
+  assert.match(html, /底层 main\/videos/, '嵌套封装 target 应显示「底层 <卷>/<子目录>」占用');
+  assert.match(html, /占用/, '列表应有「占用」列头');
+  assert.ok(html.includes('>main/videos</span>') || html.includes('底层 main/videos'), '占用列含 main/videos');
+});
+
+test('volOccupiedText 纯函数：嵌套 target → 底层文案；非嵌套/无 target → 空', () => {
+  assert.equal(volOccupiedText({ extra: { target: 'main/videos' } }), '底层 main/videos');
+  assert.equal(volOccupiedText({ extra: { target: 'main' } }), 'main'); // 非嵌套 wrapper target 显示卷名
+  assert.equal(volOccupiedText({ extra: {} }), '');
+  assert.equal(volOccupiedText({}), '');
+  assert.equal(volOccupiedText({ extra: { target: '  main/videos  ' } }), '底层 main/videos'); // 去空白
+  assert.equal(volOccupiedText(null), '');
 });

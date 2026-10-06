@@ -101,9 +101,10 @@ function fieldWrapHtml(labelTxt, star, control) {
     (star ? appRender.escHtml(star) : '') + '</label>' + control + '</div>';
 }
 
-// volManageListHtml(opts) → 「我的卷」列表表格（名称 / 类型 / category / 容量 / 操作-删除）。
-// opts.volumes: [{name, type, category, capacity, usage}]。category 缺失时回落 type。
-// 删除按钮 data-delete-volume=<name>（app.js 事件委托；409 → toast「有任务引用」）。
+// volManageListHtml(opts) → 「我的卷」列表表格（名称 / 类型 / category / 占用 / 容量 / 操作-删除）。
+// opts.volumes: [{name, type, category, capacity, usage, extra}]。category 缺失时回落 type。
+// 「占用」列显示嵌套封装 target（如 `main/videos` = 底层卷 main + 子目录 videos，占用只读）；
+// 无 target 显示 `-`。删除按钮 data-delete-volume=<name>（app.js 事件委托；409 → toast「有任务引用」）。
 function volManageListHtml(opts) {
   const o = opts || {};
   const vols = o.volumes || [];
@@ -115,16 +116,20 @@ function volManageListHtml(opts) {
   h += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">卷名</th>';
   h += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">类型</th>';
   h += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">category</th>';
+  h += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">占用</th>';
   h += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">容量</th>';
   h += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">操作</th>';
   h += '</tr></thead><tbody>';
   vols.forEach(function (v) {
     const cat = (v && (v.category || v.type)) || '-';
     const capTxt = v && v.capacity > 0 ? appRender.formatSize(v.capacity) : '不限';
+    // 占用：嵌套封装 target（`<底层卷>/<子目录>`）→ 显示占用关系；无 target → '-'
+    const occTxt = volOccupiedText(v);
     h += '<tr>';
     h += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-weight:600;">' + appRender.escHtml(v.name) + '</td>';
     h += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;color:var(--text-secondary);">' + appRender.escHtml(v.type || '-') + '</td>';
     h += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;">' + appRender.escHtml(cat) + '</td>';
+    h += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;color:var(--text-muted);">' + appRender.escHtml(occTxt) + '</td>';
     h += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + capTxt + '</td>';
     h += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">' +
       '<button type="button" class="btn btn-sm btn-danger" data-delete-volume="' + appRender.escHtml(v.name) + '" style="padding:2px 8px;font-size:12px;">删除</button></td>';
@@ -134,10 +139,22 @@ function volManageListHtml(opts) {
   return h;
 }
 
+// volOccupiedText(v) → 卷的占用显示文案：extra.target 为嵌套封装形态（`<卷>/<子目录>`，含
+// `/`）→ 返回 `底层 <卷>/<子目录>`（该底层卷子目录被本卷封装占用、只读）；非嵌套/无 target
+// → 空串（显示 '-'）。纯函数可 node --test。
+function volOccupiedText(v) {
+  if (!v || !v.extra || typeof v.extra.target !== 'string') return '';
+  const t = String(v.extra.target).trim();
+  if (!t) return '';
+  if (t.indexOf('/') >= 0) return '底层 ' + t;
+  return t;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     volManageFormHtml: volManageFormHtml,
     volManageListHtml: volManageListHtml,
+    volOccupiedText: volOccupiedText,
     composeNestedTarget: composeNestedTarget,
   };
 }

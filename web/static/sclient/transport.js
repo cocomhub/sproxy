@@ -333,8 +333,13 @@
       if (err.code) { err.cause = e; }
       throw err;
     }
-    if (resp.status === 401 || resp.status === 403) {
-      throw SclientError('E_AUTH', '认证失败（HTTP ' + resp.status + '）', resp.status);
+    if (resp.status === 401) {
+      throw SclientError('E_AUTH', '认证失败（HTTP 401）', resp.status);
+    }
+    if (resp.status === 403) {
+      // 403 可能是业务拒绝（写保护/占用目录只读）——走 serverErrorMessage 透传 body 真实文案
+      // （与 409 同路径），仅 401 保留「认证失败」（评审 C2/Important 2 修复）。
+      throw SclientError('E_SERVER', await serverErrorMessage(resp, '隧道请求被拒绝（HTTP 403）'), resp.status);
     }
     if (!resp.ok) {
       throw SclientError('E_SERVER', await serverErrorMessage(resp, '隧道请求失败（HTTP ' + resp.status + '）'), resp.status);
@@ -465,8 +470,13 @@
       if (err.code) { err.cause = e; }
       throw err;
     }
-    if (resp.status === 401 || resp.status === 403) {
-      throw SclientError('E_AUTH', '认证失败（HTTP ' + resp.status + '）', resp.status);
+    if (resp.status === 401) {
+      throw SclientError('E_AUTH', '认证失败（HTTP 401）', resp.status);
+    }
+    if (resp.status === 403) {
+      // 403 可能是业务拒绝（写保护/占用目录只读）——走 serverErrorMessage 透传 body 真实文案
+      // （与 409 同路径），仅 401 保留「认证失败」（评审 C2/Important 2 修复）。
+      throw SclientError('E_SERVER', await serverErrorMessage(resp, '请求被拒绝（HTTP 403）'), resp.status);
     }
     if (!resp.ok) {
       throw SclientError('E_SERVER', await serverErrorMessage(resp, '请求失败（HTTP ' + resp.status + '）'), resp.status);

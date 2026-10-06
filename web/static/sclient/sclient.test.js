@@ -626,6 +626,38 @@ test('错误路径：401 → E_AUTH 且保留 status；网络错误 → E_NETWOR
   }
 });
 
+test('直连 403 → E_SERVER 且透传 body error（写保护文案，非认证失败）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: 'volume: 目录已被封装卷占用，只读' }), { status: 403 });
+    let caught = null;
+    try {
+      await transport.coreRequest('GET', '/api/files', {});
+    } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_SERVER' && caught.status === 403, JSON.stringify(caught));
+    assert.ok(caught.message.includes('目录已被封装卷占用'), '403 应透传服务端 body 真实文案, got: ' + caught.message);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('隧道外层 403 → E_SERVER 透传 body（修复前 E_AUTH 吞文案）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: '签名校验失败' }), { status: 403 });
+    let caught = null;
+    try {
+      await transport.coreRequest('GET', '/tunnel', {});
+    } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_SERVER' && caught.status === 403, JSON.stringify(caught));
+    assert.ok(caught.message.includes('签名校验失败'), '隧道外层 403 应透传 body, got: ' + caught.message);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('隧道响应帧解密失败 → E_DECRYPT', async () => {
   const origFetch = globalThis.fetch;
   try {

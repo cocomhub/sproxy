@@ -3068,7 +3068,9 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
   document.getElementById('audit-tab').addEventListener('click', function() { switchStatsTab('audit'); });
   document.getElementById('volumes-tab').addEventListener('click', function() { switchStatsTab('volumes'); });
+  document.getElementById('vol-manage-tab').addEventListener('click', function() { switchStatsTab('vol-manage'); });
   document.getElementById('credentials-tab').addEventListener('click', function() { switchStatsTab('credentials'); });
+  document.getElementById('secret-tab').addEventListener('click', function() { switchStatsTab('secret'); });
   document.getElementById('sync-tab').addEventListener('click', function() { switchStatsTab('sync'); });
   document.getElementById('mesh-tab').addEventListener('click', function() { switchStatsTab('mesh'); });
 
