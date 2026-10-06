@@ -1377,6 +1377,10 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()
 	s3ext.RegisterS3Backend()
+	// linked（外部）类型基础建卷 schema（D2）：这些后端未实现 SchemaProvider，登记静态
+	// **建卷表单** schema（url/凭据字段）使 Web UI「卷管理」建卷表单可提交（后端自带
+	// fail-fast 校验 extra）。与类型注册同步，/api/backends 恒先见类型后有正常表单。
+	registerLinkedBackendSchemas()
 	// 注：secret 加密卷装配已从本函数移出——见 setupServerCore（registerSecretVolumeBackends
 	// 早于 RegisterRoutes 注册后端类型 + RegisterRoutes 后无条件 setupSecretBackends 确保
 	// 默认 secrets 卷），不再被 setupSync 早退门控（Imp-1 装配门控修复）。
