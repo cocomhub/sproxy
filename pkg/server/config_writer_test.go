@@ -13,6 +13,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -154,5 +155,66 @@ func TestWireConfigNestedWrappers_ConflictFailClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "子目录已被封装卷") {
 		t.Fatalf("错误应引导互斥占用: %v", err)
+	}
+}
+
+// TestFileConfigWriter_PreservesCommentsAndOrder（评审 I-3，2026-10-07）：FileConfigWriter 用
+// yaml.Node 只改 `volumes:` 段——追加/移除用户卷后，其余键序与注释必须保留（整 doc round-trip
+// 曾毁掉 config 全部注释 + 键序重整）。权限保留：原 config 权限不因原子写收窄。
+func TestFileConfigWriter_PreservesCommentsAndOrder(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "sproxy.yaml")
+	initial := "# 运维配置（注释必须保留）\n" +
+		"addr: :18083\n" +
+		"log_level: info\n" +
+		"# 卷声明\n" +
+		"volumes:\n" +
+		"  - name: main\n" +
+		"    type: local\n" +
+		"    root: ./storage\n"
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	w := NewFileConfigWriter(path)
+	if err := w.AppendVolume(UserVolume{Name: "videos", Type: "secretdata", Capacity: 1 << 20, Extra: map[string]any{"target": "main/videos"}}); err != nil {
+		t.Fatalf("AppendVolume: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	body := string(data)
+	// 注释与键序保留（Append 只在末尾追加 volumes 条目，不触碰既有内容）。
+	if !strings.Contains(body, "# 运维配置（注释必须保留）") {
+		t.Fatalf("config 首部注释丢失: %s", body)
+	}
+	if !strings.Contains(body, "# 卷声明") {
+		t.Fatalf("volumes 注释丢失: %s", body)
+	}
+	// 键序保留（addr 在 log_level 前；top 级键未被 yaml 字典序重整）。
+	if !strings.Contains(body, "addr: :18083\nlog_level: info") {
+		t.Fatalf("键序被重整（应 addr 先于 log_level）: %s", body)
+	}
+	if !strings.Contains(body, "name: main\n") || !strings.Contains(body, "name: videos\n") {
+		t.Fatalf("main/videos 条目应都在 volumes 段: %s", body)
+	}
+	// 权限保留（原 0644 不因原子写收窄为 0600；Windows 不建模 Unix 权限位，跳过该断言）。
+	if runtime.GOOS != "windows" {
+		if fi, serr := os.Stat(path); serr != nil {
+			t.Fatalf("stat config: %v", serr)
+		} else if fi.Mode().Perm() != 0o644 {
+			t.Fatalf("config 权限被原子写收窄：mode=%o want 644", fi.Mode().Perm())
+		}
+	}
+	// RemoveVolume 同样只动 volumes 段，注释仍保留。
+	if err := w.RemoveVolume("videos"); err != nil {
+		t.Fatalf("RemoveVolume: %v", err)
+	}
+	data, _ = os.ReadFile(path)
+	if strings.Contains(string(data), "name: videos") {
+		t.Fatalf("移除后 videos 不应存在: %s", data)
+	}
+	if !strings.Contains(string(data), "# 卷声明") {
+		t.Fatalf("RemoveVolume 后 volumes 注释仍应保留: %s", data)
 	}
 }

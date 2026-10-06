@@ -270,6 +270,11 @@ func (h *Handlers) listUserVolumesHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// C3：每卷带本系统已用/限额（外部卷容量纳管查询）。
+	// 来源说明（评审 B4 Minor #5）：/api/volumes/user 的 usage 取后端 UsageProvider（外部卷
+	// 计数），/api/volumes（卷仪表）取容量池 Pool.Usage()（委托子 Scope）——两条链对封装卷
+	// 来源不同（仪表读委托池、本列表读后端计数，后端非 UsageProvider 时 0）。当前 UI 卷管理
+	// 列表不渲染 usage 列、仪表/进度条只消费 /api/volumes，无用户影响；将来在本列表加 usage
+	// 列须先统一来源（封装卷读 Pool.Usage() 与仪表一致）。
 	for i := range vols {
 		if h.volSet != nil {
 			if be := h.volSet.External(vols[i].Name); be != nil {
@@ -318,6 +323,18 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "卷是封装卷的底层卷（存在嵌套封装引用），请先删除引用它的封装卷"}, http.StatusConflict)
 		return
 	}
+	// I-4（评审，2026-10-07）：config 写回**先行**（任何删除副作用前）——失败即终止删除
+	// （500，卷原样保留）。否则「store 已删 + config 写回失败」→ config 残留使已删封装卷
+	// 重启复活并重占子目录（僵尸卷 + 409 阻塞重建），运维须手工清 config 行。config 先行
+	// 保证「删除成功 ⇒ config 已一致移除」；其后任一步失败卷仍在 store → 重启由
+	// restoreUserVolumes 恢复（store 是权威，非僵尸；RemoveVolume 对未声明卷 no-op）。
+	if h.configWriter != nil {
+		if err := h.configWriter.RemoveVolume(name); err != nil {
+			h.logger.Error("用户卷删除：config 写回失败，删除终止（卷保留）", "volume", name, "owner", owner, "error", err)
+			sendJSONResponse(w, map[string]string{"error": "删除终止：config 文件不可写或格式非法（卷保留，请修复 config 后重试）"}, http.StatusInternalServerError)
+			return
+		}
+	}
 	// Set 移除（Close 后端）+ store 删文件。
 	if err := h.volSet.RemoveExternalVolume(name); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
@@ -330,17 +347,11 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// 删除成功：若本卷是封装卷（曾占用底层子目录），清除其占用关联与配额委托（生命周期闭环）
-	// + 清理自建的空占用子目录残留（C5：配额归还底层池 + 重建同目录不 409）。
+	// + 清理占用子目录残留（C5：配额归还底层池 + 重建同目录不 409；I-③：先整流删除卷内
+	// 数据再删目录——带数据封装卷不留密文残留、子目录可复用）。
 	h.clearWrapperLinks(name)
 	h.clearWrapperQuota(name)
 	h.cleanupWrapperBaseDir(v.Extra)
-	// C4 config 写回（2026-10-06）：从 config volumes 段移除该卷（重启后不再装配）。
-	// store 已删无法无损回滚 → 写回失败仅告警（记录取舍：卷已删、config 残留由运维清理）。
-	if h.configWriter != nil {
-		if err := h.configWriter.RemoveVolume(name); err != nil {
-			h.logger.Error("用户卷删除：config 写回失败（卷已删除，config 残留需手动清理）", "volume", name, "owner", owner, "error", err)
-		}
-	}
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 

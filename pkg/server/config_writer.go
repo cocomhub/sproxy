@@ -7,12 +7,14 @@ package server
 //
 //   - /api/volumes/user 创建卷成功后，把新卷追加到 config 文件 `volumes:` 段（重启后卷不丢）；
 //   - 删除卷成功后，从 config 文件的 `volumes:` 段移除；
-//   - config 写回失败 → 创建侧回滚（Set/store/links/配额一并回滚，保持一致性）；删除侧告警
-//     （store 已删无法无损回滚，记录取舍）。
+//   - config 写回失败 → 创建侧回滚（Set/store/links/配额一并回滚，保持一致性）；删除侧
+//     **先写回 config 再删卷**（失败即终止删除，卷保留——I-4，杜绝「已删卷被 config 残留
+//     复活」僵尸卷）。
 //
-// 实现（FileConfigWriter）用 gopkg.in/yaml.v3 读改写（仓库唯一第三方依赖），保持 UTF-8 无
-// BOM；原子写（临时文件 + fsync + rename）。round-trip 不保留注释/锚点（yaml.v3 语义），
-// 配置语义（volumes 声明序、默认卷为首卷）由列表顺序保留。
+// 实现（FileConfigWriter）用 gopkg.in/yaml.v3 的 **yaml.Node** 只改 `volumes:` 段
+// （评审 I-3，2026-10-07：整 doc round-trip 曾毁掉 config 全部注释 + 键序重整；Node 级
+// 局部改写保留其余键序、注释与标量形态）。原子写（临时文件 + fsync + rename），UTF-8 无
+// BOM；权限保留（原文件权限或新建 0644，不因 CreateTemp 0600 静默收窄）。
 
 import (
 	"fmt"
@@ -31,7 +33,7 @@ type ConfigWriter interface {
 	RemoveVolume(name string) error
 }
 
-// FileConfigWriter 是 ConfigWriter 的 YAML 文件实现（gopkg.in/yaml.v3）。
+// FileConfigWriter 是 ConfigWriter 的 YAML 文件实现（gopkg.in/yaml.v3，Node 局部改写）。
 // path 为 config 文件路径（main 的 cfgFile）。
 type FileConfigWriter struct {
 	path string
@@ -42,92 +44,190 @@ func NewFileConfigWriter(path string) *FileConfigWriter {
 	return &FileConfigWriter{path: path}
 }
 
-// AppendVolume 实现 ConfigWriter。
+// AppendVolume 实现 ConfigWriter：只改 volumes 段（追加/原地更新卷条目），保留其余键序
+// 与注释（评审 I-3）。
 func (w *FileConfigWriter) AppendVolume(v UserVolume) error {
 	if w == nil || w.path == "" {
 		return nil
 	}
-	root, err := w.load()
+	root, err := w.loadNode()
 	if err != nil {
 		return err
 	}
-	vols, _ := root["volumes"].([]any)
-	entry := w.volumeEntry(v)
-	for i, item := range vols {
-		if m, ok := item.(map[string]any); ok {
-			if name, _ := m["name"].(string); name == v.Name {
-				vols[i] = entry
-				root["volumes"] = vols
-				return w.save(root)
-			}
+	seq, ok, err := findVolumesSeq(root)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		seq = &yaml.Node{Kind: yaml.SequenceNode}
+		mapping := rootMapping(root)
+		mapping.Content = append(mapping.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "volumes"}, seq)
+	}
+	entry, err := volumeEntryNode(v)
+	if err != nil {
+		return err
+	}
+	for i, item := range seq.Content {
+		if nameOfVolumeEntry(item) == v.Name {
+			seq.Content[i] = entry // 原地替换（保持条目位置），不重复。
+			return w.saveNode(root)
 		}
 	}
-	root["volumes"] = append(vols, entry)
-	return w.save(root)
+	seq.Content = append(seq.Content, entry)
+	return w.saveNode(root)
 }
 
-// RemoveVolume 实现 ConfigWriter。
+// RemoveVolume 实现 ConfigWriter：只移除 volumes 段中 name 匹配的条目（无 volumes 段 /
+// 不存在 → no-op 成功，不新增空段）。
 func (w *FileConfigWriter) RemoveVolume(name string) error {
 	if w == nil || w.path == "" {
 		return nil
 	}
-	root, err := w.load()
+	root, err := w.loadNode()
 	if err != nil {
 		return err
 	}
-	vols, _ := root["volumes"].([]any)
-	out := make([]any, 0, len(vols))
+	seq, ok, err := findVolumesSeq(root)
+	if err != nil || !ok {
+		return err
+	}
+	out := seq.Content[:0]
 	removed := false
-	for _, item := range vols {
-		if m, ok := item.(map[string]any); ok {
-			if n, _ := m["name"].(string); n == name {
-				removed = true
-				continue
-			}
+	for _, item := range seq.Content {
+		if nameOfVolumeEntry(item) == name {
+			removed = true
+			continue
 		}
 		out = append(out, item)
 	}
 	if !removed {
-		return nil // 不存在 → no-op（卷名笔误/已移除）
+		return nil // 不存在 → no-op（卷名笔误/已移除）。
 	}
-	root["volumes"] = out
-	return w.save(root)
+	seq.Content = out
+	return w.saveNode(root)
 }
 
-// volumeEntry 把 UserVolume 映射为 config `volumes:` 段条目（只写非空字段）。
-// capacity 写为 vol_capacity（ByteSize 纯数字字节，yaml.v3 对命名 int 走数值）。
-func (w *FileConfigWriter) volumeEntry(v UserVolume) map[string]any {
-	entry := map[string]any{"name": v.Name, "type": v.Type}
+// volumeEntryNode 把 UserVolume 映射为 config `volumes:` 段条目 mapping 节点
+// （只写非空字段；capacity 写为 vol_capacity 数值节点）。
+func volumeEntryNode(v UserVolume) (*yaml.Node, error) {
+	n := &yaml.Node{Kind: yaml.MappingNode}
+	put := func(k string, val any) error {
+		vn, err := anyToNode(val)
+		if err != nil {
+			return err
+		}
+		n.Content = append(n.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: k}, vn)
+		return nil
+	}
+	if err := put("name", v.Name); err != nil {
+		return nil, err
+	}
+	if err := put("type", v.Type); err != nil {
+		return nil, err
+	}
 	if v.Capacity > 0 {
-		entry["vol_capacity"] = v.Capacity
+		if err := put("vol_capacity", v.Capacity); err != nil {
+			return nil, err
+		}
 	}
 	if len(v.Extra) > 0 {
-		entry["extra"] = v.Extra
+		if err := put("extra", v.Extra); err != nil {
+			return nil, err
+		}
 	}
-	return entry
+	return n, nil
 }
 
-// load 读 config 文件为 map（不存在 → 空 map，新建写回）。
-func (w *FileConfigWriter) load() (map[string]any, error) {
+// nameOfVolumeEntry 返回 volumes 序列条目的 name 字段（非 mapping/无 name → ""）。
+func nameOfVolumeEntry(n *yaml.Node) string {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return ""
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == "name" {
+			return n.Content[i+1].Value
+		}
+	}
+	return ""
+}
+
+// anyToNode 把任意标量/结构值编码为 yaml 节点（yaml.Marshal → Unmarshal 进 Node，
+// 取文档首内容节点）。
+func anyToNode(val any) (*yaml.Node, error) {
+	b, err := yaml.Marshal(val)
+	if err != nil {
+		return nil, fmt.Errorf("config 写回：编码 %T 失败: %w", val, err)
+	}
+	var n yaml.Node
+	if err := yaml.Unmarshal(b, &n); err != nil {
+		return nil, fmt.Errorf("config 写回：解析编码结果失败: %w", err)
+	}
+	if len(n.Content) == 0 {
+		return &yaml.Node{Kind: yaml.ScalarNode, Value: "null"}, nil
+	}
+	return n.Content[0], nil
+}
+
+// loadNode 读 config 文件为 yaml.Node（DocumentNode；不存在 → 空 mapping 文档，新建写回）。
+func (w *FileConfigWriter) loadNode() (*yaml.Node, error) {
 	data, err := os.ReadFile(w.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]any{}, nil
+			return &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}, nil
 		}
 		return nil, fmt.Errorf("config 写回：读取 %s 失败: %w", w.path, err)
 	}
-	var root map[string]any
+	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("config 写回：解析 %s 失败: %w", w.path, err)
 	}
-	if root == nil {
-		root = map[string]any{}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}, nil
 	}
-	return root, nil
+	return &root, nil
 }
 
-// save 原子写回（临时文件 + fsync + rename），UTF-8 无 BOM。
-func (w *FileConfigWriter) save(root map[string]any) error {
+// findVolumesSeq 在文档 mapping 下定位 `volumes:` 序列节点。无 mapping / 无 volumes 键 →
+// (nil,false,nil)；volumes 键非序列 → 错误（config 非法 fail-closed）。
+func findVolumesSeq(root *yaml.Node) (*yaml.Node, bool, error) {
+	m := rootMapping(root)
+	if m == nil {
+		return nil, false, nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != "volumes" {
+			continue
+		}
+		seq := m.Content[i+1]
+		if seq.Kind != yaml.SequenceNode {
+			return nil, false, fmt.Errorf("config 写回：volumes 键应为列表（got %v）", seq.Kind)
+		}
+		return seq, true, nil
+	}
+	return nil, false, nil
+}
+
+// rootMapping 返回文档的顶层 mapping 节点（DocumentNode → 首内容；非文档/空 → nil）。
+func rootMapping(root *yaml.Node) *yaml.Node {
+	if root == nil {
+		return nil
+	}
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return nil
+		}
+		return root.Content[0]
+	}
+	if root.Kind == yaml.MappingNode {
+		return root
+	}
+	return nil
+}
+
+// saveNode 原子写回（临时文件 + fsync + rename），UTF-8 无 BOM；保留原 config 权限
+// （CreateTemp 默认 0600 会把运维 config 静默收窄——原文件存在则继承其权限，新建用 0644）。
+func (w *FileConfigWriter) saveNode(root *yaml.Node) error {
 	out, err := yaml.Marshal(root)
 	if err != nil {
 		return fmt.Errorf("config 写回：序列化失败: %w", err)
@@ -142,6 +242,11 @@ func (w *FileConfigWriter) save(root map[string]any) error {
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
+	if fi, serr := os.Stat(w.path); serr == nil {
+		_ = tmp.Chmod(fi.Mode().Perm())
+	} else {
+		_ = tmp.Chmod(0o644)
+	}
 	if _, err := tmp.Write(out); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("config 写回：写入临时文件失败: %w", err)
