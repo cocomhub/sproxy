@@ -153,3 +153,27 @@ func (b blockingIndexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64
 	<-b.ch
 	return nil, nil
 }
+
+// TestVideoChecker_EstimateMem 估算：小文件（<2GiB）→ 仅进程 64MiB；大文件（100GiB）
+// → 64MiB + JSON 估算（0.5MB/GB×2 上浮：100GiB→50MiB），且 JSON 封顶 256MiB。
+func TestVideoChecker_EstimateMem(t *testing.T) {
+	// 共享 testSeamIndexer？不——EstimateMem 用 os.Stat 不碰注入缝，可并行
+	t.Parallel()
+	c := VideoChecker{}
+	if est := c.EstimateMem("", 1024*1024); est != 64<<20 {
+		t.Fatalf("小文件估算应=64MiB（进程），got %d", est)
+	}
+	// 100GiB = 107374182400 B → jsonEst = 107374182400/(2<<30)*(1<<20) = 50MiB
+	const big = int64(100) * (1 << 30)
+	est := c.EstimateMem("", big)
+	wantJSON := big / (2 << 30) * (1 << 20)
+	if est != 64<<20+wantJSON {
+		t.Fatalf("100GiB 估算应=64MiB+50MiB，got %d", est)
+	}
+	// JSON 封顶：1TB 视频 → jsonEst 应为 256MiB（封顶）
+	const tb = int64(1024) * (1 << 30)
+	estTB := c.EstimateMem("", tb)
+	if estTB != 64<<20+256<<20 {
+		t.Fatalf("1TB 视频 JSON 应封顶 256MiB，got %d", estTB)
+	}
+}

@@ -34,11 +34,25 @@ func init() {
 // 按任务配置放行/标记；本校验器不阻断未知环境，仅报告语义结果）。
 type VideoChecker struct{}
 
-// EstimateMem 预估一次 Check 的峰值内存：ffprobe 子进程输出写临时文件（不占内存），
-// 进程自身约 64MB 常驻（保守固定估算）。子进程内存由 OS 管理不占用进程堆，但配额
-// 治理按并发子进程数折算（MaxCheckMemBytes 控制同时 ffprobe 数量）。
+// EstimateMem 预估一次 Check 的峰值内存（保守高估，防低估 OOM）：
+//   - ffprobe 子进程常驻 ~64MiB（OS 管理，不占 Go 堆）；
+//   - **关键**：ffprobe 输出（-show_packets JSON）经 os.ReadFile 全读进 Go 堆再
+//     json.Unmarshal（parseKeyframes 需完整数组）——JSON 大小随视频帧数增长：
+//     实测 4.6GB/24958 帧 ≈ 2.5MB JSON（~0.5MB/GB 帧密度），更大视频（100GB）
+//     ~50MB JSON。配额信号量若只按 64MiB 估会被实际占用突破（低估）。
+//   - 修正：JSON 按 size×1MiB/2GB 折算（0.5MB/GB 保守上浮 2×）+ 进程 64MiB。
+//   - 文件本身由 ffprobe 子进程流式读（OS 页缓存，不进 Go 堆）——不计。
 func (VideoChecker) EstimateMem(path string, size int64) int64 {
-	return 64 << 20 // 64MiB 固定估算（ffprobe 子进程）
+	if size <= 0 {
+		if fi, err := os.Stat(path); err == nil {
+			size = fi.Size()
+		}
+	}
+	jsonEst := size / (2 << 30) * (1 << 20) // 0.5MB/GB 上浮 2×：1MiB per 2GiB
+	if jsonEst > 256<<20 {
+		jsonEst = 256 << 20 // JSON 上限 256MiB（超长视频防御）
+	}
+	return 64<<20 + jsonEst
 }
 
 // Kind 返回类型标识（注册键，全局唯一）。
