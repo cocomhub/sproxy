@@ -48,6 +48,11 @@ const (
 // ErrNotFound 表示请求的资源不存在（HTTP 404）。
 var ErrNotFound = errors.New("not found")
 
+// ErrUnauthorized 表示请求未经认证（HTTP 401）。
+// 供调用方 errors.Is 精确判断签名失效 / 凭据过期，仅 401 才触发 SK 轮换（避免
+// 5xx/网络错误误触发凭据轮换风暴）。
+var ErrUnauthorized = errors.New("unauthorized")
+
 // UploadResult 表示上传操作的响应结果。
 type UploadResult struct {
 	Success  bool   `json:"success"`

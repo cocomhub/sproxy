@@ -191,3 +191,23 @@ func TestHubNodeInfo_HasCapabilities(t *testing.T) {
 		t.Fatalf("HubNodeInfo.Capabilities 解析失败: %+v", nodes)
 	}
 }
+
+// TestGetCloudTask_Unauthorized 验证 401 → ErrUnauthorized 哨兵（供 dm 轮换判别）。
+func TestGetCloudTask_Unauthorized(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/cloud/tasks/task-unauth", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad credentials", http.StatusUnauthorized)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewFileClient(srv.URL)
+	_, err := c.GetCloudTask(t.Context(), "task-unauth")
+	if err == nil {
+		t.Fatal("expected error for 401")
+	}
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}
