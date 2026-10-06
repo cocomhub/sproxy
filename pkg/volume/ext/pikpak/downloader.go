@@ -332,10 +332,16 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, che
 	// 复算失败（文件读/destPath 为空）不阻断下载，回落 ModeLocalOnly。
 	res := &Result{Size: size, Checksum: checksum, ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}
 	if size > 0 && target != nil && target.Hash != "" && destPath != "" {
-		if gcid, ok, err := integrity.RecomputeGCIDFile(destPath, integrity.GCIDCandidates); err == nil && ok {
-			if strings.EqualFold(gcid, target.Hash) {
-				res.Integrity = downloader.ModeAuthority
-				res.AuthorityHash = target.Hash
+		// R3-I1：全部整除候选的 GCID 逐一与官方 hash 比对（官方分块粒度未知，
+		// 任一候选命中即权威——提升命中率，非首整除即返）。
+		gcids, err := integrity.RecomputeGCIDAll(destPath, integrity.GCIDCandidates)
+		if err == nil {
+			for _, gcid := range gcids {
+				if strings.EqualFold(gcid, target.Hash) {
+					res.Integrity = downloader.ModeAuthority
+					res.AuthorityHash = target.Hash
+					break
+				}
 			}
 		}
 	}

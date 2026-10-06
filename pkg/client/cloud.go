@@ -22,21 +22,24 @@ type TransferSpec struct {
 
 // CloudTask 表示一个云端下载任务。
 type CloudTask struct {
-	ID         string    `json:"id"`
-	URL        string    `json:"url"`
-	Method     string    `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
-	Filename   string    `json:"filename"`
-	Status     string    `json:"status"`
-	TotalSize  int64     `json:"total_size"`
-	Downloaded int64     `json:"downloaded"`
-	Checksum   string    `json:"checksum"`
-	ETag       string    `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
-	Error      string    `json:"error"`
-	GroupID    string    `json:"group_id,omitempty"` // 所属下载组 ID（可选）
-	FileMTime  int64     `json:"file_mtime,omitempty"`
-	CreatedAt  time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
-	UpdatedAt  time.Time `json:"updated_at"` // 更新时间（同上）
-	ExpiresAt  time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
+	ID         string `json:"id"`
+	URL        string `json:"url"`
+	Method     string `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
+	Filename   string `json:"filename"`
+	Status     string `json:"status"`
+	TotalSize  int64  `json:"total_size"`
+	Downloaded int64  `json:"downloaded"`
+	Checksum   string `json:"checksum"`
+	ETag       string `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
+	Error      string `json:"error"`
+	GroupID    string `json:"group_id,omitempty"` // 所属下载组 ID（可选）
+	// IntegrityStatus 完整性校验状态（R3-I3）："" 未校验 / verified 通过 / damaged 损坏。
+	// 客户端透传供链式/CLI 识别损坏文件（默认放行时 completed+damaged 不应被当可靠成功）。
+	IntegrityStatus string    `json:"integrity_status,omitempty"`
+	FileMTime       int64     `json:"file_mtime,omitempty"`
+	CreatedAt       time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
+	UpdatedAt       time.Time `json:"updated_at"` // 更新时间（同上）
+	ExpiresAt       time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
 	// TransferURL 转存成功后的目标引用（<scheme>://<卷>/<rel>，服务端填写；
 	// 客户端可经卷协议取用）。仅 transfer 任务有值。
 	TransferURL string `json:"transfer_url,omitempty"`

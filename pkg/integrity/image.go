@@ -5,10 +5,12 @@ package integrity
 
 import (
 	"context"
+	"fmt"
 	"image"
 	_ "image/gif"  // 注册 GIF 格式
 	_ "image/jpeg" // 注册 JPEG 格式
 	_ "image/png"  // 注册 PNG 格式
+	"io"
 	"os"
 	"strings"
 )
@@ -50,6 +52,21 @@ func (ImageChecker) Check(ctx context.Context, path string, size int64) (*Report
 	}
 	defer f.Close()
 
+	// R3-C2：解压炸弹防护（移植 cocom pkg/imaging V2）——Decode 前先 DecodeConfig
+	// 读尺寸，像素总数超上限（1e8）即判语义异常（不完整解码分配像素缓冲，防 OOM/DoS）。
+	// 下载源用户可控，恶意超大 PNG 全量解码可达 GB 级缓冲。
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return &Report{OK: false, Reason: err.Error()}, nil
+	}
+	if cfg.Width > 0 && cfg.Height > 0 {
+		if maxPixels := int64(100000000); int64(cfg.Width)*int64(cfg.Height) > maxPixels {
+			return &Report{OK: false, Reason: fmt.Sprintf("image 像素超限 %dx%d", cfg.Width, cfg.Height)}, nil
+		}
+	}
+	if _, serr := f.Seek(0, io.SeekStart); serr != nil {
+		return nil, serr
+	}
 	img, _, err := image.Decode(f)
 	if err != nil {
 		return &Report{OK: false, Reason: err.Error()}, nil

@@ -52,13 +52,15 @@ type CloudDownloadChain struct {
 	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。
 	DownloadLocal bool `json:"download_local,omitempty"`
 	// ForceIntegrity 强制源文件完整性（语义校验失败阻断；透传服务端）。
-	ForceIntegrity bool      `json:"force_integrity,omitempty"`
-	Completed      int       `json:"completed"`
-	Failed         int       `json:"failed"`
-	Total          int       `json:"total"`
-	Error          string    `json:"error,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ForceIntegrity bool `json:"force_integrity,omitempty"`
+	Completed      int  `json:"completed"`
+	Failed         int  `json:"failed"`
+	Total          int  `json:"total"`
+	// Damaged 完整性损坏但放行完成的任务数（R3-I3：损坏副本不应被当可靠成功）。
+	Damaged   int       `json:"damaged,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -441,6 +443,10 @@ func (c *CloudDownloadChain) tallyResults(results []*CloudTask) (storageFullURLs
 		switch r.Status {
 		case TaskStatusCompleted:
 			c.Completed++
+			// R3-I3：completed 但完整性损坏（damaged）——默认放行语义，不当作可靠成功。
+			if r.IntegrityStatus == "damaged" {
+				c.Damaged++
+			}
 		case TaskStatusCancelled:
 			cancelled++
 		case TaskStatusFailed:
@@ -463,6 +469,10 @@ func (c *CloudDownloadChain) waitFailure(cancelled, submitFailedCount int) error
 				c.Failed+cancelled+submitFailedCount, cancelled, c.Total+submitFailedCount)
 		}
 		return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
+	}
+	// R3-I3：完整性损坏放行（damaged）→ 明确提示（非失败，但不应被当可靠成功）。
+	if c.Damaged > 0 {
+		return fmt.Errorf("%d 个云端下载任务完整性损坏（damaged，已放行）", c.Damaged)
 	}
 	return nil
 }
