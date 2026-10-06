@@ -381,6 +381,16 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 		return moveErrResp(http.StatusBadRequest, errMsgInvalidPath)
 	}
 	toRoot := toTnt.Root()
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：目标卷 toVol 该 rel 命中被封装卷占用的
+	// 子目录 → 拒绝 move（跨卷 move 经 crossVolumeCopy 直写目标卷，不经 files 域 guard）。
+	// 只拦目标侧写；删除源侧（from 卷）不拦。
+	if err := h.checkWrapperOccupiedWrite(toVol, userVisibleRelOf(rel)); err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "volume_move", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "目标卷目录已被封装卷占用，只读",
+		})
+		return moveErrResp(http.StatusForbidden, err.Error())
+	}
 	mc := &moveFileCtx{
 		r: r, owner: owner, remotePath: remotePath,
 		fromVol: fromVol, toVol: toVol, rel: rel,

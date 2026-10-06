@@ -1333,6 +1333,9 @@ func (rt *runServerRuntime) setupSync(h *server.Handlers) error {
 	exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
 	exec.SetScopeResolver(h.SyncScopeFor())
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：同步本地写侧（pull/双向）直写默认卷 user
+	// 桶，不经 files 域 guard——注入默认卷占用写保护（命中被封装卷占用子目录 → 该文件失败）。
+	exec.SetWriteGuard(h.DefaultVolumeWriteGuard())
 	rt.setupSyncConflictIndex(exec, h, logger)
 	setupMeshFSFactory(exec, cfg, h, logger)
 	rt.setupSyncVolumeBackends(exec, h, logger)

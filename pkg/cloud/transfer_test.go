@@ -1073,3 +1073,47 @@ func (l *localVolumeFS) Rename(ctx context.Context, f, t string) error {
 }
 func (l *localVolumeFS) Delete(ctx context.Context, p string) error  { return l.inner.Delete(ctx, p) }
 func (l *localVolumeFS) MakeDir(ctx context.Context, p string) error { return l.inner.MakeDir(ctx, p) }
+
+// TestTransferDone_OccupiedWriteGuard_Rejects 写保护旁路闭环（B2 fail-open 场景）：转存目标
+// 命中被封装卷占用的底层子目录 → 写前 guard 拒绝（不落盘不留钉子文件）；非占用路径正常转存。
+func TestTransferDone_OccupiedWriteGuard_Rejects(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		if vol == "main" {
+			return fs, "secretdata", false
+		}
+		return nil, "", false
+	})
+	// 注入占用写保护：main 卷 videos 子目录被封装卷占用（只读）。
+	mgr.occupiedWriteGuard = func(volName, userVisibleRel string) error {
+		if volName == "main" && (userVisibleRel == "videos" || strings.HasPrefix(userVisibleRel, "videos/")) {
+			return errors.New("volume: 目录已被封装卷占用，只读")
+		}
+		return nil
+	}
+	dest := filepath.Join(t.TempDir(), "a.mp4")
+	if err := os.WriteFile(dest, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 反例：显式转存路径 videos/x.mp4 → guard 拒绝（写前预检，卷内零写入）。
+	task := &CloudTask{ID: "task-g", Filename: "a.mp4", Transfer: &TransferSpec{Volume: "main", Path: "videos/x.mp4"}}
+	_, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Size: 4, Checksum: ""}, nil)
+	if err == nil || !strings.Contains(err.Error(), "占用") {
+		t.Fatalf("占用子目录转存应被 guard 拒绝, got %v", err)
+	}
+	if len(fs.files) != 0 {
+		t.Fatalf("guard 拒绝不应写卷（写前预检）, files=%v", fs.files)
+	}
+
+	// 正例：非占用路径 free/b.mp4 → 正常转存 + URL。
+	okTask := &CloudTask{ID: "task-g2", Filename: "b.mp4", Transfer: &TransferSpec{Volume: "main", Path: "free/b.mp4"}}
+	tr, _, err := mgr.transferDone(context.Background(), okTask, dest, &downloader.Result{Size: 4, Checksum: ""}, nil)
+	if err != nil {
+		t.Fatalf("非占用路径转存应成功, got %v", err)
+	}
+	if tr == nil || tr.URL == "" {
+		t.Fatal("正例应返回转存 URL")
+	}
+}

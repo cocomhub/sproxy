@@ -7,11 +7,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
+
+// 旁路写面占用检查（用户语义 #6 写保护，2026-10-06 闭环）：
+// files 域（上传/分块 complete/删除/重命名/mkdir/rmdir）+ 版本 restore 已接 guard；
+// 云转存（pkg/cloud transfer）/跨卷 move-rebalance / S3 / WebDAV / sync / 备份恢复等
+// 直写卷根的旁路面，各自接入 checkWrapperOccupiedWrite（同坐标判定），否则「只读」语义
+// 对加密数据无实际保护。读路径一律不拦。
 
 // volume_links.go 是嵌套封装（秘密用「已创建卷 + 新子目录」作为底层根）的**互斥占用 +
 // 关联标注**模型（用户 2026-10-06 确认的最终语义）：
@@ -54,12 +62,18 @@ func newVolumeLinksRegistry() *volumeLinksRegistry {
 	return &volumeLinksRegistry{}
 }
 
-// register 登记一条占用关联。重复登记（同 wrapper 已占）→ false（不覆盖）。
+// register 登记一条占用关联。重复登记（同 wrapper 已占）→ false（不覆盖）；
+// 与既有占用**路径重叠**（互斥占用，volume.PathsOverlap）→ false（拒绝——防并发建卷
+// 重叠子目录的 TOCTOU：validate 预检与 register 登记之间无跨请求锁，register 内再做
+// 一次互斥判定 fail-closed，后到者回滚）。
 func (r *volumeLinksRegistry) register(l volumeLink) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, e := range r.links {
 		if e.Wrapper == l.Wrapper && e.Base == l.Base && e.Subdir == l.Subdir {
+			return false
+		}
+		if e.Base == l.Base && volume.PathsOverlap(e.Subdir, l.Subdir) {
 			return false
 		}
 	}
@@ -125,33 +139,48 @@ func (r *volumeLinksRegistry) hasRefs(base string) bool {
 	return false
 }
 
-// links 返回嵌套封装关联索引（懒创建 + 装配期一次性从用户卷 store 重建）。
+// links 返回嵌套封装关联索引（懒创建 + 装配期从用户卷 store 重建）。
 // 重建防重启丢失：扫描全部用户卷中 target 为 `<卷>/<子目录>` 形态的封装卷并登记。
 //
-// 并发安全：注册表**创建也纳入 rebuildLinksOnce**（同一 sync.Once 内先建后扫）——避免
+// 并发安全：注册表**创建也纳入 rebuildLinksOnce**（同一 sync.Once 内先建——避免
 // `if h.volumeLinks == nil` 裸检查在并发首次访问（上传路由 guard / 建卷校验等）下对指针的
-// 数据竞争（-race 实测：并发上传同时触达 links()）。Once 保证恰一次建表+重建，且仅登记
-// 底层卷引用；运行时新建封装卷由 registerWrapperLink 追加登记（与 Once 重建互不冲突——
-// register 按 wrapper 去重）。
+// 数据竞争）。重建扫描是**每次调用幂等重试**（tryRestoreLinks，restored 原子标记）：
+//   - store 未装配（userVolumes nil，进程启动竞序）→ 本次只建空表，不标记；store Set 后
+//     下次调用再恢复（不再因 Once 首次空重建缓存而永久丢失已持久化占用）；
+//   - ScanRestore 失败（读盘错误）→ 不标记，下次调用重试（救回旧占用，非仅补新 wrapper）。
 func (h *Handlers) links() *volumeLinksRegistry {
 	h.rebuildLinksOnce.Do(func() {
 		h.volumeLinks = newVolumeLinksRegistry()
-		if h.userVolumes == nil {
-			return
-		}
-		vols, err := h.userVolumes.ScanRestore()
-		if err != nil {
-			return // 扫描失败不阻断（后续运行时创建会重新登记）
-		}
-		for _, v := range vols {
-			base, subdir, ok := volume.SplitNestedTarget(extraTargetStr(v.Extra))
-			if !ok {
-				continue
-			}
-			h.volumeLinks.register(volumeLink{Base: base, Subdir: subdir, Wrapper: v.Name, Owner: v.Owner})
-		}
 	})
+	h.tryRestoreLinks()
 	return h.volumeLinks
+}
+
+// tryRestoreLinks 幂等地从用户卷 store 重建占用关联（见 links 头注释；原子标记幂等）。
+func (h *Handlers) tryRestoreLinks() {
+	if h.linksRestored.Load() {
+		return
+	}
+	if h.userVolumes == nil {
+		return // store 未装配（启动竞序）：链表空、不标记，待 Set 后下次 links() 调用恢复。
+	}
+	h.restoreLinksMu.Lock()
+	defer h.restoreLinksMu.Unlock()
+	if h.linksRestored.Load() {
+		return
+	}
+	vols, err := h.userVolumes.ScanRestore()
+	if err != nil {
+		return // 扫描失败不标记，下次 links() 调用重试（不因 Once 丢失旧占用恢复）。
+	}
+	for _, v := range vols {
+		base, subdir, ok := volume.SplitNestedTarget(extraTargetStr(v.Extra))
+		if !ok {
+			continue
+		}
+		h.volumeLinks.register(volumeLink{Base: base, Subdir: subdir, Wrapper: v.Name, Owner: v.Owner})
+	}
+	h.linksRestored.Store(true)
 }
 
 // extraTargetStr 从卷 Extra 读 target 字段（统一 nil 安全）。
@@ -194,13 +223,14 @@ func (h *Handlers) validateNestedWrapperTarget(ctx context.Context, extra map[st
 }
 
 // registerWrapperLink 在封装卷创建成功后登记「底层卷 → {subdir, wrapper}」占用关联
-// （仅嵌套 target）。关联生命周期：删底层卷查引用 409、删封装卷清关联。
-func (h *Handlers) registerWrapperLink(owner, wrapper string, extra map[string]any) {
+// （仅嵌套 target）。互斥占用冲突（register 内重叠判定，防并发建卷 TOCTOU）→ false；
+// 非嵌套 target 视为成功（无关联可登记）。调用方据返回值回滚已建卷。
+func (h *Handlers) registerWrapperLink(owner, wrapper string, extra map[string]any) bool {
 	base, subdir, ok := volume.SplitNestedTarget(extraTargetStr(extra))
 	if !ok {
-		return
+		return true // 非嵌套 target：无关联可登记（视为成功）。
 	}
-	h.links().register(volumeLink{Base: base, Subdir: subdir, Wrapper: wrapper, Owner: owner})
+	return h.links().register(volumeLink{Base: base, Subdir: subdir, Wrapper: wrapper, Owner: owner})
 }
 
 // userVisibleRelOf 把租户根内相对路径（user/<path>）归一为用户可见相对路径（<path>），
@@ -233,4 +263,96 @@ func (h *Handlers) checkWrapperOccupiedWrite(baseVolName, userVisibleRel string)
 // clearWrapperLinks 在封装卷删除成功后清除其占用关联。
 func (h *Handlers) clearWrapperLinks(wrapper string) {
 	h.links().unregisterByWrapper(wrapper)
+}
+
+// defaultVolumeName 返回默认卷名（volSet 未装配 → ""；checkWrapperOccupiedWrite 对空名
+// 自行回落默认卷语义）。供默认卷写面（sync 等）绑定占用检查。
+func (h *Handlers) defaultVolumeName() string {
+	if h.volSet != nil {
+		if def := h.volSet.Default(); def.Name != "" {
+			return def.Name
+		}
+	}
+	return ""
+}
+
+// occupiedGuardFS 是 sync.FS 装饰器：写方法（WriteFile/MakeDir/Rename 目标/Delete）委托前按
+// 「目标卷 + FS 根相对路径」做占用写保护判定。FS 根即卷 user 桶 → 方法 path 即用户可见坐标
+// （与 checkWrapperOccupiedWrite 的 userVisibleRel 一致）。读方法（ListDir/Stat/OpenRead）
+// 透传不拦。check 为 nil 或 volName 空 → 直写（零回归）。供 WebDAV / 备份恢复 / sync 写面
+// 等「直写卷 root、不经 files 域 guard」的旁路写面统一接入。
+type occupiedGuardFS struct {
+	inner   syncpkg.FS
+	volName string
+	check   func(volName, userVisibleRel string) error
+}
+
+func (g *occupiedGuardFS) guard(rel string) error {
+	if g.check == nil || g.volName == "" {
+		return nil
+	}
+	return g.check(g.volName, rel)
+}
+
+func (g *occupiedGuardFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return g.inner.ListDir(ctx, p)
+}
+
+func (g *occupiedGuardFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return g.inner.Stat(ctx, p)
+}
+
+func (g *occupiedGuardFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return g.inner.OpenRead(ctx, p)
+}
+
+func (g *occupiedGuardFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+	if err := g.guard(p); err != nil {
+		return err
+	}
+	return g.inner.WriteFile(ctx, p, r, size, mtime)
+}
+
+func (g *occupiedGuardFS) Rename(ctx context.Context, from, to string) error {
+	if err := g.guard(to); err != nil {
+		return err
+	}
+	return g.inner.Rename(ctx, from, to)
+}
+
+func (g *occupiedGuardFS) Delete(ctx context.Context, p string) error {
+	if err := g.guard(p); err != nil {
+		return err
+	}
+	return g.inner.Delete(ctx, p)
+}
+
+func (g *occupiedGuardFS) MakeDir(ctx context.Context, p string) error {
+	if err := g.guard(p); err != nil {
+		return err
+	}
+	return g.inner.MakeDir(ctx, p)
+}
+
+// _ 编译期断言：occupiedGuardFS 实现 sync.FS。
+var _ syncpkg.FS = (*occupiedGuardFS)(nil)
+
+// wrapOccupiedGuard 把「卷 user 桶根」sync.FS 包上写保护装饰器（volName 为目标卷名）。
+// volSet 未装配 / check 不可用 → 原样返回（零回归）。
+func (h *Handlers) wrapOccupiedGuard(fs syncpkg.FS, volName string) syncpkg.FS {
+	if h == nil || h.volSet == nil {
+		return fs
+	}
+	return &occupiedGuardFS{inner: fs, volName: volName, check: h.checkWrapperOccupiedWrite}
+}
+
+// DefaultVolumeWriteGuard 返回绑定默认卷的占用写保护判定回调（供装配层注入默认卷写面——
+// 同步本地写侧等）。签名 userRel 为用户可见相对路径（如 videos/x）；命中被封装卷占用的
+// 底层子目录 → errVolumeOccupiedReadOnly 包装错误。volSet 未装配 → 回调内默认卷名空、
+// checkWrapperOccupiedWrite 无引用不命中（直写，零回归）。不如 wrapOccupiedGuard 传卷名
+// 灵活，仅用于「确定写默认卷」的旁路面（sync pull 本地端）。
+func (h *Handlers) DefaultVolumeWriteGuard() func(userRel string) error {
+	return func(userRel string) error {
+		return h.checkWrapperOccupiedWrite(h.defaultVolumeName(), userRel)
+	}
 }

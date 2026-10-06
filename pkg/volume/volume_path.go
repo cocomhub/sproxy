@@ -82,3 +82,26 @@ func (v Volume) ResolveOwnerPath(owner, bucket, rel string) (string, error) {
 func (v Volume) ResolveUserPath(owner, userPath string) (string, error) {
 	return v.ResolveOwnerPath(owner, "user", userPath)
 }
+
+// UserVisibleRel 把卷键空间路径归一为用户可见相对路径（占用写保护/子目录坐标比较用）：
+//   - 独享卷键 `user/<rel>` → `<rel>`；
+//   - 共享卷键 `<owner>/user/<rel>` → `<rel>`（跳过 owner 段）；
+//   - 无法识别格式（非 user 桶前缀形态）→ 原样返回（占用比较仅字符串匹配，不误伤正常路径）。
+//
+// 与 files 域 `user/<rel>`（租户根相对）归一结果一致（两者最终都指向卷 user 桶内用户可见
+// 坐标）。pkg/cloud 转存与 pkg/server 转存预检共用本入口，避免复制键算法。
+func UserVisibleRel(key string) string {
+	if key == "" {
+		return ""
+	}
+	key = strings.TrimPrefix(key, "/")
+	if after, ok := strings.CutPrefix(key, "user/"); ok {
+		return after
+	}
+	if _, after, ok := strings.Cut(key, "/"); ok {
+		if after2, ok2 := strings.CutPrefix(after, "user/"); ok2 {
+			return after2
+		}
+	}
+	return key
+}

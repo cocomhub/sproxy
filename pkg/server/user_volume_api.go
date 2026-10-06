@@ -215,7 +215,14 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// 创建成功后登记嵌套封装占用关联（互斥占用生命周期：删底层卷查引用 409、删封装卷清关联）。
-	h.registerWrapperLink(owner, req.Name, req.Extra)
+	// register 内做互斥重叠判定（防并发建卷重叠子目录 TOCTOU，fail-close）：冲突 → 回滚
+	// 已建卷（Set 移除 + store 删除，尽力一致），返回占用 409。
+	if !h.registerWrapperLink(owner, req.Name, req.Extra) {
+		_ = h.volSet.RemoveExternalVolume(req.Name)
+		_ = h.userVolumes.Delete(owner, req.Name)
+		sendJSONResponse(w, map[string]string{"error": errVolumeDirOccupied.Error()}, http.StatusConflict)
+		return
+	}
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 

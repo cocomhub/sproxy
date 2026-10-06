@@ -280,6 +280,10 @@ type CloudDownloadManager struct {
 	checkMemSem *semaphore.Weighted
 	// checkMemMax 校验内存配额总预算（构造时快照 cfg.MaxCheckMemBytes；Weighted 无 size 查询）。
 	checkMemMax int64
+	// occupiedWriteGuard 是转存目标写的占用写保护判定（见 CloudManagerOptions.OccupiedWriteGuard；
+	// nil = 不启用）。
+	occupiedWriteGuard func(volName, userVisibleRel string) error
+
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -366,6 +370,13 @@ type CloudManagerOptions struct {
 	// opt（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam）**：构造时
 	// 注入结构体内部变量，运行期不可变。生产装配不传（零回归）。
 	RemoveFile func(string) error
+	// OccupiedWriteGuard 判定转存目标写是否命中被封装卷占用的底层子目录（嵌套封装写保护，
+	// fail-closed，2026-10-06 旁路闭环）：签名 (卷名, 用户可见相对路径)——与服务端
+	// checkWrapperOccupiedWrite 一致。装配层注入（pkg/server 提供）；nil = 不启用（旧行为）。
+	// 转存直写目标卷 FS、不经 files 域 guard，必须在此收口（否则「占用目录只读」对加密数据
+	// 无实际保护）。写前调用（transferDone 起点，不写卷不留钉子文件）。
+	OccupiedWriteGuard func(volName, userVisibleRel string) error
+
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -406,32 +417,34 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 	applyCloudConfigDefaults(cfg)
 
 	mgr := &CloudDownloadManager{
-		tasks:            make(map[string]*CloudTask),
-		uploadsDir:       uploadsDir,
-		tenantFor:        tenantFor,
-		checksumStoreFor: checksumStoreFor,
-		quotaFor:         qf,
-		listTenants:      listTenants,
-		storage:          sm,
-		logger:           slogutil.Default(logger),
-		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
-		transferSem:      make(chan struct{}, cfg.TransferConcurrency),
-		checkMemSem:      newCheckMemSem(int64(cfg.MaxCheckMemBytes)),
-		checkMemMax:      int64(cfg.MaxCheckMemBytes),
-		config:           cfg,
-		dl:               newDefaultDownloader(cfg),
-		transferFSFor:    opts.TransferFSFor,
-		volumeFor:        opts.VolumeFor,
-		integrityLookup:  opts.IntegrityLookup,
-		removeFile:       opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
-		cancelFuncs:      make(map[string]context.CancelFunc),
-		running:          make(map[string]bool),
-		metrics:          &CloudMetrics{},
-		dirtyTasks:       make(map[string]struct{}),
-		flushNow:         make(chan struct{}, 1),
-		stopFlush:        make(chan struct{}),
-		stopCleanup:      make(chan struct{}),
-		groups:           make(map[string]*CloudTaskGroup),
+		tasks:              make(map[string]*CloudTask),
+		uploadsDir:         uploadsDir,
+		tenantFor:          tenantFor,
+		checksumStoreFor:   checksumStoreFor,
+		quotaFor:           qf,
+		listTenants:        listTenants,
+		storage:            sm,
+		logger:             slogutil.Default(logger),
+		semaphore:          make(chan struct{}, cfg.MaxConcurrent),
+		transferSem:        make(chan struct{}, cfg.TransferConcurrency),
+		checkMemSem:        newCheckMemSem(int64(cfg.MaxCheckMemBytes)),
+		checkMemMax:        int64(cfg.MaxCheckMemBytes),
+		config:             cfg,
+		dl:                 newDefaultDownloader(cfg),
+		transferFSFor:      opts.TransferFSFor,
+		volumeFor:          opts.VolumeFor,
+		integrityLookup:    opts.IntegrityLookup,
+		removeFile:         opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
+		occupiedWriteGuard: opts.OccupiedWriteGuard,
+		cancelFuncs:        make(map[string]context.CancelFunc),
+		running:            make(map[string]bool),
+		metrics:            &CloudMetrics{},
+		dirtyTasks:         make(map[string]struct{}),
+		flushNow:           make(chan struct{}, 1),
+		stopFlush:          make(chan struct{}),
+		stopCleanup:        make(chan struct{}),
+		groups:             make(map[string]*CloudTaskGroup),
+
 	}
 
 	mgr.logger.Info("cloud download manager initialized",
