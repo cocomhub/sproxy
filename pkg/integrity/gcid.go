@@ -34,7 +34,7 @@ func ComputeGCID(data []byte, blockSize int64) string {
 		if end > int64(len(data)) {
 			end = int64(len(data))
 		}
-		chunkHash := sha1.Sum(data[off:end])
+		chunkHash := sha1.Sum(data[off:end]) //nolint:gosec // G401: GCID 算法必须 sha1
 		h.Write(chunkHash[:])
 	}
 	return hex.EncodeToString(h.Sum(nil))
