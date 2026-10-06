@@ -265,7 +265,7 @@ func (f *S3FS) Stat(ctx context.Context, relPath string) (*sync.Entry, error) {
 	info, err := f.client.StatObject(ctx, f.bucket, f.keyFor(clean), minio.StatObjectOptions{})
 
 	if err == nil {
-		return &sync.Entry{
+		e := &sync.Entry{
 			Name: path.Base(clean),
 
 			Path: clean,
@@ -275,7 +275,17 @@ func (f *S3FS) Stat(ctx context.Context, relPath string) (*sync.Entry, error) {
 			MTime: info.LastModified.UnixNano(),
 
 			IsDir: false,
-		}, nil
+		}
+		// S3 校验和信息（用户裁定：每个 entry 提供已知的所有校验和数据）：
+		// ETag 是服务端对象标识（单 PUT = 内容 MD5；分片 = 片 MD5 组合，非权威整文件
+		// 哈希）——作为 "etag" 算法值提供，供 Equal 按可用算法比对；无 sha256（S3
+		// 不返回整文件内容哈希）。
+		if info.ETag != "" {
+			e.Checksum = info.ETag
+			e.ChecksumType = "etag"
+			e.Checksums = map[string]string{"etag": info.ETag}
+		}
+		return e, nil
 	}
 
 	if !isNotFound(err) {
