@@ -71,8 +71,13 @@ func (TarChecker) Check(ctx context.Context, path string, size int64) (*Report, 
 
 	tr := tar.NewReader(reader)
 	count := 0
+	// R4-P2：解压炸弹防护——gzip 极端压缩比（几百字节 → GB 明文）全量解压无上限会
+	// 撑爆内存。遍历时统计条目累计解压字节，超参考 size（源文件大小放大系数）即判
+	// 异常（不继续解压）。
+	var inflated int64
+	const inflateRatio = 100 // 解压膨胀比参考（tar 常规 <10，100 为安全上界）
 	for {
-		_, err := tr.Next()
+		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
@@ -80,6 +85,11 @@ func (TarChecker) Check(ctx context.Context, path string, size int64) (*Report, 
 			return &Report{OK: false, Reason: err.Error()}, nil
 		}
 		count++
+		inflated += hdr.Size
+		// 源文件大小已知时：解压总量超 size×ratio 即疑似炸弹。
+		if size > 0 && inflated > size*inflateRatio {
+			return &Report{OK: false, Reason: "tar 解压膨胀超限（疑似炸弹）"}, nil
+		}
 	}
 	if count == 0 {
 		return &Report{OK: false, Reason: "empty tar"}, nil

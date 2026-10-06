@@ -47,7 +47,7 @@ type CloudDownloadGroupChain struct {
 	CreatedAt    time.Time             `json:"created_at"`
 	UpdatedAt    time.Time             `json:"updated_at"`
 
-	// M6：组下载三参（transfer/save/download_local）——与单条/batch 语义对齐。
+	// M6：组下载四参（transfer/save/download_local/force_integrity）——与单条/batch 语义对齐。
 	Transfer      *TransferSpec `json:"transfer,omitempty"`
 	Save          *bool         `json:"save,omitempty"`
 	DownloadLocal bool          `json:"download_local,omitempty"`
@@ -130,7 +130,7 @@ func (c *CloudDownloadGroupChain) State() map[string]any {
 		"updated_at":    c.UpdatedAt,
 		"poll_interval": c.PollInterval,
 		"timeout":       c.Timeout,
-		// 三参（transfer/save/download_local）持久化：恢复/resume 后保持原语义
+		// 四参（transfer/save/download_local/force_integrity）持久化：恢复/resume 后保持原语义
 		// （F3：曾缺失导致 resume 重建为纯下载——组在服务端被重建成无 transfer/save）。
 		"transfer":        c.Transfer,
 		"save":            c.Save,
@@ -451,7 +451,7 @@ func (c *CloudDownloadGroupChain) cleanupGroup(ctx context.Context) error {
 	return nil
 }
 
-// groupTransferOpts 组装组下载三参透传选项（M6：与单条/batch 同语义收口）。
+// groupTransferOpts 组装组下载四参透传选项（M6：与单条/batch 同语义收口）。
 func groupTransferOpts(c *CloudDownloadGroupChain) []CloudDownloadOption {
 	var opts []CloudDownloadOption
 	if c.Transfer != nil {

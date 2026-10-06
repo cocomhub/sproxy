@@ -56,6 +56,8 @@ var defaultRegistry = NewRegistry()
 func Register(kind string, f CheckerFactory) { defaultRegistry.Register(kind, f) }
 
 // Lookup 在**默认**注册表按文件名分发；未命中返回 nil（未知类型仅字节级校验）。
+// 前提：注册的 Kind 扩展名族互斥（同一扩展名只被一个 Kind 匹配）——否则 map 迭代
+// 无序会破坏分发确定性。扩展新类型时须保证扩展名不重叠。
 func Lookup(name string) Checker { return defaultRegistry.Lookup(name) }
 
 // Register 在 r 上注册校验器工厂（Kind 全局唯一）。重复 Kind → panic（fail-fast）；

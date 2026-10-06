@@ -157,7 +157,7 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	if cfg.filename != "" {
 		body["filename"] = cfg.filename
 	}
-	// C1/M6：单 URL 入口同样透传三参（transfer/save/download_local）——此前 body 为
+	// C1/M6：单 URL 入口同样透传四参（transfer/save/download_local/force_integrity）——此前 body 为
 	// map[string]string 丢三参，与批量入口不一致（服务端收不到 → 三行为此处不成立）。
 	if cfg.transfer != nil {
 		body["transfer"] = cfg.transfer
@@ -401,7 +401,7 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 		"name": name,
 		"urls": entries,
 	}
-	// M6：组创建透传三参（transfer/save/download_local）——此前 cfg 已解析但 body 未带，
+	// M6：组创建透传四参（transfer/save/download_local/force_integrity）——此前 cfg 已解析但 body 未带，
 	// 死参数面：组下载无法声明转存目标（语义与单条/batch 对齐）。
 	if cfg.transfer != nil {
 		body["transfer"] = cfg.transfer

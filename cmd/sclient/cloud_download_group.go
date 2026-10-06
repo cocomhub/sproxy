@@ -110,7 +110,7 @@ func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	urlFile, _ := cmd.Flags().GetString(flagURLFile)
 
-	// 三参（transfer/save/download_local）：与单条 chain 语义对齐（C1/M6）。
+	// 四参（transfer/save/download_local/force_integrity）：与单条 chain 语义对齐（C1/M6）。
 	var transfer *client.TransferSpec
 	if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
 		p, _ := cmd.Flags().GetString(flagTransferPath)
@@ -160,7 +160,7 @@ func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 	if p.keepFiles {
 		opts = append(opts, client.WithChainKeepFiles())
 	}
-	// 三参透传（transfer/save/download_local）：组链与单条 chain 语义对齐（M6/F1）。
+	// 四参透传（transfer/save/download_local）：组链与单条 chain 语义对齐（M6/F1）。
 	if p.transfer != nil {
 		opts = append(opts, client.WithChainTransfer(p.transfer))
 	}
@@ -243,7 +243,7 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 				return preflightErr
 			}
 
-			// 三参透传（C1/F1）：submit 子命令同样可声明转存/保留/下载本地——
+			// 四参透传（C1/F1）：submit 子命令同样可声明转存/保留/下载本地——
 			// 父命令 flag 非 persistent，子命令须自注册同款旗标（否则 --transfer-volume
 			// 在 submit 下是 unknown flag，组转存入口不可达）。
 			opts := []client.CloudDownloadOption{}
