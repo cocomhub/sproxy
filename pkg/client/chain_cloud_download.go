@@ -409,6 +409,7 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		// 每次重试前归零计数器，基于本次轮询结果重新统计
 		c.Completed = 0
 		c.Failed = 0
+		c.Damaged = 0 // R6-I1：跨轮归零，防 storage-full 重试时 damaged 重复累计
 		submitFailedCount = 0
 
 		results, err := c.pollAllTasks(ctx)
