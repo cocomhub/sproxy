@@ -17,9 +17,17 @@ type Entry struct {
 	Path      string // 相对路径（正斜杠，不含根）
 	Size      int64
 	MTime     int64  // UnixNano
-	Checksum  string // SHA-256 hex；空=未知（调用方按需计算）
+	Checksum  string // 首选校验和（默认 SHA-256 hex）；空=未知（调用方按需计算）
 	IsDir     bool
 	IsSymlink bool
+
+	// ChecksumType 是首选校验和的算法标识（"sha256"/"md5"/"etag" 等；Checksum 非空时
+	// 自述算法，空 = 未知/沿用历史默认 sha256）。供 Equal/校验比对按算法取值。
+	ChecksumType string `json:"checksum_type,omitempty"`
+	// Checksums 是**全部已知校验和**（算法名 → 值），Stat/ListDir 尽可能填全
+	// （如 LocalFS: sha256；baidupcs: sha256+md5；s3: etag+sha256）——比对方按可用
+	// 算法取交集（用户裁定：每个 entry 提供已知的所有校验和数据，便于比较）。
+	Checksums map[string]string `json:"checksums,omitempty"`
 }
 
 // FS 抽象文件系统操作，供 LocalFS 与后续远程传输实现。
@@ -73,6 +81,27 @@ type ReserveSpace interface { // NOSONAR: S8196 — 能力接口（非 -er 角�
 //     配额生效）；否则 → 外部卷（容量/配额由卷自身管理，用户通用配额跳过）。
 type LocalVolume interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
 	IsLocalVolume() bool
+}
+
+// Mover 是 FS 的可选**同卷移动**能力（卷自身提供；`pkg/sync` 引擎不关心 Move 语义——
+// 引擎是复制语义，Move 供 cloud save 等明确"源移除"调用方用）。同卷原子移动、源移除；
+// 跨物理卷/文件系统返回 EXDEV 类错误由调用方回退复制。
+type Mover interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Move(ctx context.Context, from, to string) error
+}
+
+// Copier 是 FS 的可选**同卷复制**能力（源保留、目标新写；覆盖语义下用于保留旧目标）。
+// 跨卷返回 EXDEV 类错误由调用方回退常规复制。实现可用底层服务端复制（如 s3 CopyObject、
+// baidupcs 服务端 copy），零流量。
+type Copier interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Copy(ctx context.Context, from, to string) error
+}
+
+// Linker 是 FS 的可选**硬链接**能力（源保留、两个名字共享同一 inode）。跨卷返回 EXDEV
+// 类错误由调用方回退复制。实现可用底层文件系统硬链接（LocalFS os.Link）或卷内 blob
+// 复用（secretdata dedup 池、去重引用）。
+type Linker interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Link(ctx context.Context, from, to string) error
 }
 
 // maxWalkDepth 限制目录递归深度（符号链接环的 fail-closed 兜底）。
