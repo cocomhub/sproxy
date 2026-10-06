@@ -4,6 +4,8 @@
 package integrity
 
 import (
+	//nolint:gosec // G505: GCID 是 PikPak 官方 hash 算法（sha1(concat(sha1(分块)))，算法定义必须
+	// 用 SHA-1，非安全用途——复算权威 hash 需与官方一致，不可替换。
 	"crypto/sha1"
 	"encoding/hex"
 	"io"
@@ -26,7 +28,7 @@ func ComputeGCID(data []byte, blockSize int64) string {
 	if len(data) == 0 {
 		return ""
 	}
-	h := sha1.New()
+	h := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 	for off := int64(0); off < int64(len(data)); off += blockSize {
 		end := off + blockSize
 		if end > int64(len(data)) {
@@ -84,9 +86,9 @@ func RecomputeGCIDFile(path string, candidates []int64) (string, bool, error) {
 		if bs <= 0 || size%bs != 0 {
 			continue
 		}
-		outer := sha1.New()
+		outer := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 		block := make([]byte, bs)
-		inner := sha1.New()
+		inner := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 		for off := int64(0); off < size; off += bs {
 			if _, rerr := f.ReadAt(block, off); rerr != nil && rerr != io.EOF {
 				return "", false, rerr
