@@ -210,6 +210,12 @@ func (h *Handlers) reconcileVolumesFromDisk() {
 	vols := h.volSet.All()
 	volumeBuckets := make(map[string]map[string]map[string]int64, len(vols))
 	for _, v := range vols {
+		// M10（2026-10-06）：外部卷/封装卷（RootDir 空，无本地 user 桶）跳过——ScanStorageDir("")
+		// 会扫错根，且封装卷容量经底层池**委托子 Scope** 计（adjustVolumePool 若校准委托子池
+		// 会与底层池 reconcile 双计）。只有本地卷（有 RootDir）参与卷池磁盘校准。
+		if v.RootDir == "" {
+			continue
+		}
 		buckets, _, err := capacity.ScanStorageDir(v.RootDir)
 		if err != nil {
 			h.logger.Error("逐卷扫描失败，跳过该卷校准", "volume", v.Name, "error", err)

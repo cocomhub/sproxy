@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -107,5 +108,61 @@ func TestRestoreUserVolumes(t *testing.T) {
 	// （Set 不存 owner——SetUserVolumeOwner 查 store.Get(owner,name)）。
 	if v, ok := set.ByName("disk-1"); !ok || v.Type != uvRestoreTestType || v.Capacity != 100 {
 		t.Fatalf("disk-1 元数据 = %+v, want type=%s cap=100", v, uvRestoreTestType)
+	}
+}
+
+// TestRestoreUserVolumes_NestedRebuildsDelegatePool（C1，2026-10-06）：嵌套封装卷重启后
+// 重建配额委托——此前仅建卷写内存，重启后 Pool(wrapper)=nil → 配额上限静默失效。本测试
+// 钉住 restore 路径重建 DelegatePool（容量=UserVolume.Capacity）+ 父链聚合。
+func TestRestoreUserVolumes_NestedRebuildsDelegatePool(t *testing.T) {
+	registerUVRestoreBackend()
+
+	root := t.TempDir()
+	store := server.NewUserVolumeStore(root)
+	if err := store.Create("alice", server.UserVolume{
+		Name: "wrap", Type: uvRestoreTestType, Capacity: 50,
+		Extra: map[string]any{"target": "base/xyz"},
+	}); err != nil {
+		t.Fatalf("store.Create(wrap): %v", err)
+	}
+	// 非嵌套用户卷（容量计数器包装路径不回归）。
+	if err := store.Create("alice", server.UserVolume{Name: "plain", Type: uvRestoreTestType, Capacity: 30}); err != nil {
+		t.Fatalf("store.Create(plain): %v", err)
+	}
+
+	basePool := quota.NewPool(1000)
+	set := registry.NewSet(
+		[]volume.Volume{{Name: "base"}},
+		nil,
+		map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"base": basePool},
+		"base",
+	)
+	if err := restoreUserVolumes(set, store, discardLoggerMain()); err != nil {
+		t.Fatalf("restoreUserVolumes: %v", err)
+	}
+	// C1：嵌套封装卷重启后委托池已重建（Pool(wrap) = 底层池子 Scope，MaxBytes=50）。
+	p := set.Pool("wrap")
+	if p == nil {
+		t.Fatal("wrap 委托池未重建（Pool(wrap) = nil）——配额上限重启后失效")
+	}
+	if p.MaxBytes() != 50 {
+		t.Fatalf("wrap 委托池 MaxBytes=%d want 50", p.MaxBytes())
+	}
+	// 父链聚合：子池入账自动传播到底层池。
+	res, rerr := p.TryReserve(10)
+	if rerr != nil {
+		t.Fatalf("TryReserve: %v", rerr)
+	}
+	res.Commit(10)
+	if p.Usage() != 10 {
+		t.Fatalf("wrap 子池 Usage=%d want 10", p.Usage())
+	}
+	if basePool.Usage() != 10 {
+		t.Fatalf("base 底层池 Usage=%d want 10（委托父链聚合）", basePool.Usage())
+	}
+	// 非嵌套卷不挂委托（Pool(plain) 回落 pools——本 set 无该卷池 → nil；不被误挂子 Scope）。
+	if set.Pool("plain") != nil {
+		t.Fatalf("plain 不应有委托池（非嵌套 target 不 DelegatePool）")
 	}
 }
