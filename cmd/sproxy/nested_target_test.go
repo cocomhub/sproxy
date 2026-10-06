@@ -267,3 +267,73 @@ func TestResolveNestedTargetFS_Adopt_MixedReject(t *testing.T) {
 		t.Fatal("文件+目录混合既有子目录重启收养应 fail-closed 拒绝")
 	}
 }
+
+// TestIsSelfBuiltNestedEntry 收养判定跳过的本卷自建结构条目（LAYOUT_VERSION 标记文件 + meta
+// 桶）命名识别；真实内容（user / secrets 钥匙）不在此列，留给仅同态收养判定。
+func TestIsSelfBuiltNestedEntry(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"LAYOUT_VERSION", true},
+		{"meta", true},
+		{"user", false},      // files 层用户桶（容器形态），不跳过。
+		{"datakey", false},   // secrets 卷钥匙文件（纯文件形态），不跳过。
+		{"README.md", false}, // 普通用户文件，绝不跳过（混合保护核心）。
+	}
+	for _, c := range cases {
+		if got := isSelfBuiltNestedEntry(c.name); got != c.want {
+			t.Errorf("isSelfBuiltNestedEntry(%q)=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestResolveNestedTargetFS_Adopt_SecretdataOwnLayout secretdata 卷**自身**落盘结构（嵌套根写
+// LAYOUT_VERSION 标记文件 + meta 桶目录 + user 桶）→ 顶层 1 文件 + 多目录 = 混合形态；排除
+// 本卷自建结构（LAYOUT_VERSION/meta）后剩余纯目录（user 桶）→ 应收养成功。修复「重启收养误判
+// secretdata 卷自身结构 → config 声明嵌套封装卷重启 boot-fail」（复测 CRITICAL）。
+func TestResolveNestedTargetFS_Adopt_SecretdataOwnLayout(t *testing.T) {
+	// sproxy:serial: 全局 secretDataSet 单例，不并行。
+	storeTempSet(t)
+	ctx := adoptNestedDir(context.Background())
+	root := secretDataSet.Load().Default().RootDir
+	base := filepath.Join(root, "vault")
+	for _, d := range []string{"meta", "user"} {
+		if err := os.MkdirAll(filepath.Join(base, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// storage.OpenRoot 布局版本标记文件（嵌套 secretdata root 首次启动写）。
+	if err := os.WriteFile(filepath.Join(base, "LAYOUT_VERSION"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v := volume.Volume{Name: "sd", Extra: map[string]any{"target": "default/vault"}}
+	if _, err := resolveTargetFS(ctx, v); err != nil {
+		t.Fatalf("secretdata 本卷结构（LAYOUT_VERSION+meta+user）重启收养应成功（修复 boot-fail）: %v", err)
+	}
+}
+
+// TestResolveNestedTargetFS_Adopt_MixedWithLayoutReject LAYOUT_VERSION + 普通用户文件 + 目录：
+// 跳过 LAYOUT_VERSION 后仍「文件+目录混合」→ fail-closed 拒绝（防误删保护对含自建结构条目的
+// 普通目录不豁免——用户确实把数据放进子目录时不能因多了个 LAYOUT_VERSION 就被误收养清空）。
+func TestResolveNestedTargetFS_Adopt_MixedWithLayoutReject(t *testing.T) {
+	// sproxy:serial: 全局 secretDataSet 单例，不并行。
+	storeTempSet(t)
+	ctx := adoptNestedDir(context.Background())
+	root := secretDataSet.Load().Default().RootDir
+	base := filepath.Join(root, "w5")
+	if err := os.MkdirAll(filepath.Join(base, "photos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "LAYOUT_VERSION"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "README.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v := volume.Volume{Name: "sd", Extra: map[string]any{"target": "default/w5"}}
+	if _, err := resolveTargetFS(ctx, v); err == nil {
+		t.Fatal("LAYOUT_VERSION + 普通文件 + 目录混合既有子目录重启收养应 fail-closed 拒绝（防误删）")
+	}
+}

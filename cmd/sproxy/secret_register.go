@@ -193,12 +193,30 @@ func adoptNestedDir(ctx context.Context) context.Context {
 	return context.WithValue(ctx, adoptNestedDirKey{}, true)
 }
 
+// isSelfBuiltNestedEntry 报告嵌套子目录顶层条目名是否为本封装卷**自建的结构条目**（非用户
+// 外部内容，收养判定时应排除）：`LAYOUT_VERSION`（storage.OpenRoot 布局版本标记文件）+ `meta`
+// （多租户存储 tenant 布局的 meta 桶目录）。secretdata/secrets 卷自身 root 首次启动即写
+// LAYOUT_VERSION + meta（vault 嵌套根落盘结构），不应算作「外部内容」令混合判定误拒收养——
+// 否则 config 声明嵌套封装卷重启时其自建子目录「文件+目录混合」被判普通用户目录 → boot-fail
+// （复测 CRITICAL）。密钥文件等**真实内容**（secrets 钥匙 / secretdata 随机容器）不在此列，
+// 留给下方「仅文件/仅目录 → 收养」判定。
+func isSelfBuiltNestedEntry(name string) bool {
+	switch name {
+	case "LAYOUT_VERSION", "meta":
+		return true
+	}
+	return false
+}
+
 // adoptableNestedDir 判定「重启收养」的目标子目录是否确为本封装卷自建（空性/来源校验，Minor1）：
 // 本层封装卷数据落子目录顶层为**单一形态**——纯目录容器（secretdata 随机容器 / files 层 user
-// 桶）/ 纯秘密文件（secrets 钥匙卷）。子目录顶层为空（本卷尚未落数据）→ 可收养；非空但全目录
-// 或全文件（本卷专属存储结构）→ 可收养；**文件+目录混合** = 普通用户目录特征（文档/项目混放，
-// 典型「config 误指向既有非 wrapper 目录」）→ 不可收养，fail-closed 拒绝装配并引导人工——否则
-// 删除封装卷时 deleteFSContents 整流删会连带清空误指目录（数据损失窗口）。
+// 桶/ storage meta 桶）/ 纯秘密文件（secrets 钥匙卷）。遍历顶层条目时**先跳过本卷自建的结构**
+// （LAYOUT_VERSION 标记文件 + meta 桶目录，isSelfBuiltNestedEntry）；剩余条目：
+//   - 空（全部都是本卷自建结构）→ 可收养；
+//   - 仅目录（桶/容器）或仅文件（secrets 钥匙）→ 可收养；
+//   - **文件+目录混合** = 普通用户目录特征（文档/项目混放，典型「config 误指向既有非 wrapper
+//     目录」）→ 不可收养，fail-closed 拒绝装配并引导人工——否则删除封装卷时整流删会连带清空
+//     误指目录（数据损失窗口）。
 func adoptableNestedDir(ctx context.Context, inner syncpkg.FS, subdir string) (bool, error) {
 	entries, err := inner.ListDir(ctx, subdir)
 	if err != nil {
@@ -209,13 +227,16 @@ func adoptableNestedDir(ctx context.Context, inner syncpkg.FS, subdir string) (b
 	}
 	var dirs, files int
 	for _, e := range entries {
+		if isSelfBuiltNestedEntry(e.Name) {
+			continue // 本卷自建结构（LAYOUT_VERSION 标记 / meta 桶）不计入混合判定。
+		}
 		if e.IsDir {
 			dirs++
 		} else {
 			files++
 		}
 	}
-	// 全目录（容器/桶）或全文件（秘密文件）→ 本卷专属形态；混合 → 拒绝（普通目录特征）。
+	// 剩余全目录（容器/桶）或全文件（秘密文件）或全为本卷自建结构 → 可收养；混合 → 拒绝。
 	return dirs == 0 || files == 0, nil
 }
 
