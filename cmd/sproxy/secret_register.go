@@ -428,18 +428,22 @@ func registerSecretVolumeBackends() {
 var registerSecretSchemasOnce sync.Once
 
 // registerSecretSchemas 登记 secrets + secretdata 的**静态**创建表单 schema：两者都是
-// wrapper 卷，仅声明 volume-select 必填字段 `target`（底层卷，allow_wrapper=true 允许
-// 嵌套封装）。静态登记不依赖构造后端实例（secretdata 构造需已装配卷集/密钥，空 Extra
-// 直接失败）——建卷 API 与 /api/backends 靠它做防环字段校验。协议 scheme 不可作建卷
-// 字段（是注册期元数据，非用户可填），故不在此 schema 声明。
+// wrapper 卷，均声明 volume-select 必填字段 `target`（底层卷，allow_wrapper=true 允许
+// 嵌套封装）；secretdata 额外声明必填 text 字段 `secret_url`（密钥引用，后端工厂
+// defaultSecretdataSecret 缺此键 fail-closed），使 UI 表单能提交到后端做校验。静态登记
+// 不依赖构造后端实例（secretdata 构造需已装配卷集/密钥，空 Extra 直接失败）——建卷 API
+// 与 /api/backends 靠它做防环字段校验。协议 scheme 不可作建卷字段（是注册期元数据，
+// 非用户可填），故不在此 schema 声明。
 func registerSecretSchemas() {
 	registerSecretSchemasOnce.Do(func() {
-		for _, typ := range []string{"secrets", "secretdata"} {
-			registry.RegisterBackendSchema(typ, []registry.FieldSchema{{
-				Key: "target", Label: "底层卷", Type: "volume-select",
-				Required: true, AllowWrapper: true,
-			}})
-		}
+		registry.RegisterBackendSchema("secrets", []registry.FieldSchema{{
+			Key: "target", Label: "底层卷", Type: "volume-select",
+			Required: true, AllowWrapper: true,
+		}})
+		registry.RegisterBackendSchema("secretdata", []registry.FieldSchema{
+			{Key: "target", Label: "底层卷", Type: "volume-select", Required: true, AllowWrapper: true},
+			{Key: "secret_url", Label: "密钥引用", Type: "text", Required: true},
+		})
 	})
 }
 

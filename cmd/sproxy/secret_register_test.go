@@ -340,6 +340,31 @@ func TestRegisterSecretVolumeBackends_Unconditional(t *testing.T) {
 	})
 }
 
+// TestRegisterSecretSchemas_SecretURLField（D1，2026-10-06）：secretdata 建卷 schema 补
+// secret_url（text 必填）——UI 表单渲染该字段后建卷可提交到后端（后端 defaultSecretdataSecret
+// 缺 secret_url fail-closed）；secrets 类型仍仅 target。钉住静态 schema 内容：
+//   - secretdata.fields = [target(volume-select,required), secret_url(text,required)]；
+//   - secrets.fields = [target(volume-select,required)]。
+func TestRegisterSecretSchemas_SecretURLField(t *testing.T) {
+	// sproxy:serial: 生产注册路径全局单例（生产类型 Once 已消费，读取共享静态表）。
+	registerSecretVolumeBackends()
+
+	sd := registry.BackendSchema("secretdata")
+	if len(sd) != 2 {
+		t.Fatalf("secretdata schema 应含 2 字段（target + secret_url），got %+v", sd)
+	}
+	if sd[0].Key != "target" || sd[0].Type != "volume-select" || !sd[0].Required || !sd[0].AllowWrapper {
+		t.Fatalf("secretdata schema[0] 应为 target(volume-select,required,allow_wrapper)，got %+v", sd[0])
+	}
+	if sd[1].Key != "secret_url" || sd[1].Type != "text" || !sd[1].Required {
+		t.Fatalf("secretdata schema[1] 应为 secret_url(text,required)，got %+v", sd[1])
+	}
+	sec := registry.BackendSchema("secrets")
+	if len(sec) != 1 || sec[0].Key != "target" || sec[0].Type != "volume-select" || !sec[0].Required {
+		t.Fatalf("secrets schema 应仅含 target(volume-select,required)，got %+v", sec)
+	}
+}
+
 // TestSetupSecretBackends_Secretdata_MultiTarget（任务 9d 修复轮 Imp-1）：extra.targets
 // 多 local root → 生产多 target 装配生效——装配层解析副本 local root 构造副本底层 FS →
 // 写后主/副本两 root 都有同一容器（副本复制运行，非仅记账）。跨外部卷接线留后续片。
