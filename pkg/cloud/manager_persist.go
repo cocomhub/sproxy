@@ -364,6 +364,18 @@ func (m *CloudDownloadManager) removeGroupFile(groupID, owner string) {
 	_ = os.Remove(filepath.Join(dir, groupID+".json"))
 }
 
+// removeTaskAuditFile 删除任务对应的审计 sink 文件（任务删除/TTL 过期清理路径调用，防
+// <TMPDIR>/sproxy-audit/<taskID>.audit.log 每任务一文件无限累积——评审 R1）。
+// 文件命名与 newTaskAuditScope 的 sink 一致：<auditSinkDir()>/<taskID>.audit.log。
+// 删除失败容忍（_ =，失败仅残留磁盘卫生、不阻断删除/过期清理）：删除成功与否都不影响
+// 任务状态与账本。有界重试（removeWithRetry）缓解 Windows 句柄共享违规瞬时占用。
+func (m *CloudDownloadManager) removeTaskAuditFile(taskID string) {
+	if taskID == "" {
+		return
+	}
+	_ = removeWithRetry(func() error { return os.Remove(filepath.Join(m.auditSinkDir(), taskID+".audit.log")) })
+}
+
 // cleanupExpiredOnce 执行一次性的过期任务清理，返回清理的任务数量。
 // 不包含循环，供测试直接调用。
 //
@@ -481,6 +493,8 @@ func (m *CloudDownloadManager) cleanupExpiredCloudItem(item expiredCloudTask) {
 		relKey := filepath.ToSlash(filepath.Join("cloud", item.taskID, item.filename))
 		cs.Delete(relKey)
 	}
+	// 清理审计 sink 文件（R1：过期清理路径同步清，防 <TMPDIR>/sproxy-audit/ 无限累积）。
+	m.removeTaskAuditFile(item.taskID)
 }
 
 // cleanupExpiredGroups 清理引用已全部过期任务的空组，并保存被裁剪引用组的更新状态。
