@@ -145,6 +145,22 @@ log_level: "info"
 log_format: "text"
 max_header_bytes: 1048576
 
+# ---- 审计（audit）----
+# 服务端写路径审计（GET /api/audit 回看最近操作，落盘 <默认卷根>/audit/audit.log）。
+# audit:
+#   buffer_size: 2048         # 有界内存环形缓冲条数；0 = 关闭（返回空表）；负值非法
+#   max_size: ""              # 审计日志轮转大小（ByteSize，如 "10MiB"）；0/缺省 = 关闭轮转
+#   max_archives: 3           # 轮转保留归档份数（audit.log.1 … audit.log.N；0 = 轮转即删）
+#   # ---- 通用 span 审计（云下载/转存/加密阶段耗时与字节，pkg/audit）----
+#   # 每任务独立 sink 文件（每行一行 JSON）；当前 sink 目录未配置化（默认系统临时目录），
+#   # 下述字段为规格 §4.5 预留（接口已定义，配置暂未接线）：
+#   enabled: false            # 预留：span 审计开关（默认关，未接线）
+#   dir: ""                   # 预留：span 审计 sink 根目录（未接线）
+#   archive:                  # 预留：把 span 审计归档到所选卷——**默认不归档**
+#     enabled: false          #   开启需选卷 + 路径（未来接线后生效）
+#     volume: ""              #   归档目标卷（如 secretdata://audit）
+#     path: ""                #   归档目标卷内路径
+
 # Web 领域方法传输行为（默认隧道）。
 # web:
 #   tunnel: true   # true=Web 领域方法默认走加密隧道（由 SK 派生密钥）；false=走直连 SproxySig
