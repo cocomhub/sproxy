@@ -488,6 +488,9 @@ func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size
 		}
 		route, err := h.reserveVolume(owner, rel, v.Name, size)
 		if err == nil {
+			// M7（2026-10-06）：自动路由跳过被占用候选后落到其它卷——Warn 提示
+			// 「目录已被封装卷占用」（行为不变：落到可用候选；全部候选被占用时由 403 透传文案）。
+			h.noteAutoRouteOccupiedSkip(owner, rel, v.Name, occupiedErr)
 			return route, nil
 		}
 		var re *routeError
@@ -504,6 +507,17 @@ func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size
 		return nil, volFullErr
 	}
 	return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, quota.ErrStorageFull)
+}
+
+// noteAutoRouteOccupiedSkip 记录「自动路由跳过被封装卷占用的候选卷」的 Warn（M7，2026-10-06）：
+// 用户不带 volume 上传命中被占用子目录（如 main/videos 被封装卷占用）时，自动路由跳过该候选
+// 落到其它卷——日志提示，避免「静默落无关卷」无痕。occupiedErr nil → 空操作。
+func (h *Handlers) noteAutoRouteOccupiedSkip(owner, rel, targetVol string, occupiedErr error) {
+	if occupiedErr == nil {
+		return
+	}
+	h.logger.Warn("自动路由：跳过被封装卷占用的候选卷（用户可指定 volume 上传）",
+		"owner", owner, "rel", rel, "target_volume", targetVol, "occupied", occupiedErr.Error())
 }
 
 // routeUploadLegacy 旧装配路径（volSet nil）预留：默认租户 + owner 全局 Scope 预留（单卷零回归）。
