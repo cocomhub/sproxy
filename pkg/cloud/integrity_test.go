@@ -272,3 +272,43 @@ func TestDownloadIntegrity_ResumeResetsState(t *testing.T) {
 			got.integritySames, got.integrityLastChecksum, got.IntegrityStatus)
 	}
 }
+
+// TestDownloadIntegrity_ConcurrentChecks 并发校验 race 验证：多任务并发下载+校验，
+// setTaskIntegrityStatus/integritySames 持锁写与 SnapshotTask 读无 data race。
+func TestDownloadIntegrity_ConcurrentChecks(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	mgr.integrityLookup = integrity.Lookup
+	// 并发提交多个损坏/正常任务
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			var payload []byte
+			name := "ok.png"
+			if idx%2 == 0 {
+				payload = corruptPNGF
+				name = "bad.png"
+			} else {
+				payload = validPNG1x1
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write(payload)
+			}))
+			defer srv.Close()
+			task, err := mgr.SubmitAndStart("url", srv.URL, name, int64(len(payload)), t.Context(), "", TaskParams{Save: true})
+			if err != nil {
+				t.Errorf("submit %d: %v", idx, err)
+				return
+			}
+			// 轮询快照（读路径与写并发）
+			testutil.WaitFor(t, 10*time.Second, func() bool {
+				cur, _ := mgr.SnapshotTask(task.ID, "")
+				return cur != nil && cur.Status == "completed"
+			}, "任务应完成")
+			_, _ = mgr.SnapshotTask(task.ID, "")
+		}(i)
+	}
+	wg.Wait()
+}
