@@ -65,10 +65,9 @@ func registerSecretsBackend() {
 }
 
 // defaultSecretsFS 是默认 secrets 目标解析：Extra.target 为空/本地 → 本地默认卷
-// secrets/ 目录；外部 target（baidupcs/s3/加密卷嵌套）→ 需装配层显式解析注入
-// （当前返回错误提示，嵌套封装留**后续片**——设计 §6.1「底层亦可为 secret_data 加密卷
-// （嵌套）」未在当前实现兑现，仅 local 子集可用；config 声明 secrets 卷使用外部 target
-// 会在此 fail-closed 报错，不会静默降级）。
+// secrets/ 目录；嵌套 target（`<卷>/<新子目录>`，用户 2026-10-06 确认语义）→ 引用已创建
+// 卷的新空子目录作封装根（resolveNestedTargetFS）；其余外部 target（baidupcs/s3/加密卷
+// 整卷）→ fail-closed 报错（需装配层显式解析注入）。
 func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 	t, _ := v.Extra["target"].(string)
 	switch t {
@@ -82,6 +81,9 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 		}
 		return secretsLocalFS(root), nil
 	default:
+		if _, _, ok := volume.SplitNestedTarget(t); ok {
+			return resolveNestedTargetFS(ctx, v.Name, t)
+		}
 		return nil, fmt.Errorf("secrets backend: 卷 %q target=%q 需由装配层解析注入（外部卷 secrets/ 视图）", v.Name, t)
 	}
 }
@@ -179,7 +181,49 @@ func defaultSecretdataSecret(ctx context.Context, v volume.Volume, set *registry
 	return data, nil
 }
 
-// resolveTargetFS 解析 secretdata 的底层卷 FS：Extra.target（默认 local → 本地根）。
+// resolveNestedTargetFS 解析嵌套封装 target（`<卷>/<新子目录>`）为可写封装子视图（SubFS）。
+// 供 secretdata（resolveTargetFS）与 secrets（defaultSecretsFS）共用：
+//
+//  1. 经卷集（secretDataSet）取底层卷 FS（本地卷 → LocalFS，外部卷 → External(name).FS()）；
+//  2. 确认子目录当前不存在（防与底层卷既有数据混合；已存在 fail-closed）；
+//  3. MakeDir 创建空目录 → SubFS 包装（密文/secret 文件落 <卷>/<子目录>/ 下）。
+//
+// 只读保护（占用目录禁改）由互斥占用（pkg/server/volume_links）+ 写保护视图
+// （pkg/sync.ReadonlySubFS）承担。
+func resolveNestedTargetFS(ctx context.Context, name, target string) (syncpkg.FS, error) {
+	base, subdir, ok := volume.SplitNestedTarget(target)
+	if !ok {
+		return nil, fmt.Errorf("secret backend: 卷 %q target=%q 非嵌套形态（需 <卷>/<新子目录> 或 local+root）", name, target)
+	}
+	set := secretDataSet.Load()
+	if set == nil {
+		return nil, fmt.Errorf("secret backend: 卷 %q 嵌套 target=%q 但卷集未就绪", name, target)
+	}
+	inner, ok := set.FSFor(base)
+	if !ok {
+		return nil, fmt.Errorf("secret backend: 卷 %q 底层卷 %q 不可用", name, base)
+	}
+	if e, serr := inner.Stat(ctx, subdir); serr != nil {
+		return nil, fmt.Errorf("secret backend: 检查底层子目录 %s/%s 失败: %w", base, subdir, serr)
+	} else if e != nil {
+		return nil, fmt.Errorf("secret backend: 底层子目录 %s/%s 已存在（需新空子目录）", base, subdir)
+	}
+	if err := inner.MakeDir(ctx, subdir); err != nil {
+		return nil, fmt.Errorf("secret backend: 创建底层子目录 %s/%s 失败: %w", base, subdir, err)
+	}
+	wrap, err := syncpkg.NewSubFS(inner, subdir)
+	if err != nil {
+		return nil, fmt.Errorf("secret backend: 封装嵌套底层 %s/%s 失败: %w", base, subdir, err)
+	}
+	return wrap, nil
+}
+
+// resolveTargetFS 解析 secretdata 的底层卷 FS：
+//
+//   - `target: ""/local` + extra.root（config/CLI 历史路径）：本地根整卷，不进互斥占用校验，
+//     保持原行为（零回归）；
+//   - `target: <卷名>/<新子目录>`（用户 2026-10-06 确认的嵌套语义）：见 resolveNestedTargetFS；
+//   - 其余 target 形态 → fail-closed 报错（需外部装配/嵌套形态）。
 func resolveTargetFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 	t, _ := v.Extra["target"].(string)
 	switch t {
@@ -190,9 +234,7 @@ func resolveTargetFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 		}
 		return syncpkg.NewLocalFS(root, nil), nil
 	default:
-		// 外部 target（baidupcs/s3/webdav/secretdata 嵌套）：由装配层在依赖解析后
-		// 注入。简化版直接报错提示需外部装配（嵌套封装留后续片）。
-		return nil, fmt.Errorf("secretdata backend: 卷 %q target=%q 需外部装配（嵌套封装后续片）", v.Name, t)
+		return resolveNestedTargetFS(ctx, v.Name, t)
 	}
 }
 

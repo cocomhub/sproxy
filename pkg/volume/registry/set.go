@@ -24,6 +24,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -152,6 +153,29 @@ func (vs *Set) External(name string) ExternalBackend {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
 	return vs.external[name]
+}
+
+// FSFor 返回指定卷名的同步 FS 视图（统一底层层解析入口，嵌套封装/写保护复用）：
+//   - 外部卷 → External(name).FS()（未知/无 FS → (nil,false)）；
+//   - 本地卷 → 以 RootDir 构造 LocalFS（RootDir 空 → (nil,false)）。
+//
+// 对本方法做**读**（RLock）：BottomFS 由外部句柄/Cache 持有，装配分离，读到即用（不常驻副本）。
+func (vs *Set) FSFor(name string) (syncpkg.FS, bool) {
+	vs.mu.RLock()
+	be := vs.external[name]
+	vs.mu.RUnlock()
+	if be != nil {
+		fs := be.FS()
+		return fs, fs != nil
+	}
+	v, ok := vs.ByName(name)
+	if !ok {
+		return nil, false
+	}
+	if v.RootDir == "" {
+		return nil, false
+	}
+	return syncpkg.NewLocalFS(v.RootDir, nil), true
 }
 
 // ResolveURL 按 URL 寻址内容：`scheme://<卷名>/<路径>`。
