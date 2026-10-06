@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // setupAuditServices 装配审计服务：有界内存环形缓冲 + 落盘存储。
@@ -497,7 +498,13 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// 远程性判定不在装配层：目标 FS 自述（syncpkg.LocalVolume 能力接口，transfer.go
 			// 查询）——外部卷零配置（未实现默认远程），内部/封装卷实现 IsLocalVolume()
 			// 自述（用户裁定 2026-10-05：不靠类型名硬编码，层层委派）。
-			return be.FS(), registry.SchemeOf(vol.Type), shared
+			// 可信卷（trusted_volume.disable 缺省 false）：外部卷 FS 经 trusted.Wrap 包一层，
+			// 转存写后自动生成隐藏 .meta（FileMeta 总/分块 sha256+md5）——目标成为可信卷。
+			fsys := be.FS()
+			if !h.trustedDisabled() {
+				fsys = trusted.Wrap(fsys, trusted.Options{})
+			}
+			return fsys, registry.SchemeOf(vol.Type), shared
 		},
 		// VolumeFor：转存键空间经 volume.ResolveOwnerPath 计算（权限门/路径安全/共享前缀
 		// 由 volume 唯一入口承担，用户裁定 2026-10-05）——装配层提供 vs.ByName 解析。

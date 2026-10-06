@@ -31,6 +31,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // resolveDefaultVolumeRoot 裁决默认卷（Volumes[0]）的物理挂载根（F1 合入门禁）。
@@ -572,6 +573,8 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 // externalSinkFor 返回外部卷的写入源（External FS 包装为 files.UploadSink）；
 // 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。持卷描述（ResolveOwnerPath
 // 按共享性自动适配 owner 前缀——评审 M3 + 用户裁定统一入口）。
+// 可信卷（trusted_volume.disable 缺省 false）：外部卷 FS 经 trusted.Wrap 包一层——
+// 写路径自动生成隐藏 .meta（FileMeta 总/分块 sha256+md5），上传/转存目标成为可信卷。
 func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if h.volSet == nil {
 		return nil
@@ -588,7 +591,21 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if !ok {
 		return nil
 	}
+	if !h.trustedDisabled() {
+		fsys = trusted.Wrap(fsys, trusted.Options{})
+	}
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
+}
+
+// trustedDisabled 报告可信卷是否显式禁用（trusted_volume.disable；缺省 false = 启用）。
+func (h *Handlers) trustedDisabled() bool {
+	if h.cfgPtr == nil {
+		return false
+	}
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		return cfg.TrustedVolume.Disable
+	}
+	return false
 }
 
 // volumeTenant 返回指定卷上 owner 的租户（写盘 root）。默认卷委托 h.tenantFor（既有

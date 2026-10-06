@@ -1072,8 +1072,26 @@ type Config struct {
 	// CloudArchiveMaxBytes 单次云归档允许的最大字节数（原始文件大小总和），0 = 不限制（仍受 max_storage_bytes 与 TryReserve 兜底）。
 	CloudArchiveMaxBytes int64 `yaml:"cloud_archive_max_bytes" mapstructure:"cloud_archive_max_bytes"`
 
+	// TrustedVolume 是可信卷配置（trusted_volume 段，2026-10-07 新增）：
+	//   - Disable 缺省 false = 外部卷上传/转存默认包 TrustedVolumeFS 装饰器（写后生成
+	//     隐藏 .meta 文件、按 FileMeta 总哈希+分块哈希逐分片校验），解决跨信任边界
+	//     的静默损坏；true = 显式关闭（零回归，外部卷不落 meta）。
+	//   - DisableDoubleDownloadVerify 缺省 false = 源无权威 checksum 且跨第三方信任
+	//     边界时启用双下比对构造一致 meta；true = 跳过（大文件/流量贵场景读回懒校验
+	//     兜底）。
+	TrustedVolume TrustedVolumeConfig `yaml:"trusted_volume" mapstructure:"trusted_volume"`
+
 	// Pikpak 是 PikPak 网盘中转后端配置（分享转存 + 官方 CLI 完整下载）。
 	Pikpak PikpakConfig `yaml:"pikpak" mapstructure:"pikpak"`
+}
+
+// TrustedVolumeConfig 是可信卷配置（默认全关零回归；Disable 语义为「显式禁用」简化
+// 默认配置管理——用户裁定 DisableXxx 默认 false = 功能默认打开）。
+type TrustedVolumeConfig struct {
+	// Disable 缺省 false = 可信卷默认启用（外部卷写后落 meta + 校验）；true = 显式关闭。
+	Disable bool `yaml:"disable" mapstructure:"disable"`
+	// DisableDoubleDownloadVerify 缺省 false = 无权威 checksum 源启用双下比对；true = 跳过。
+	DisableDoubleDownloadVerify bool `yaml:"disable_double_download_verify" mapstructure:"disable_double_download_verify"`
 }
 
 // PikpakConfig 是 PikPak 网盘中转后端配置。
