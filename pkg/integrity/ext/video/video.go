@@ -51,11 +51,14 @@ type VideoChecker struct{}
 // EstimateMem 预估一次 Check 的峰值内存（保守高估，防低估 OOM）：
 //   - ffprobe 子进程常驻 ~64MiB（OS 管理，不占 Go 堆）；
 //   - **关键**：ffprobe 输出（-show_packets JSON）经 os.ReadFile 全读进 Go 堆再
-//     json.Unmarshal（parseKeyframes 需完整数组）——JSON 大小随视频帧数增长：
-//     实测 4.6GB/24958 帧 ≈ 2.5MB JSON（~0.5MB/GB 帧密度），更大视频（100GB）
-//     ~50MB JSON。配额信号量若只按 64MiB 估会被实际占用突破（低估）。
-//   - 修正：JSON 按 size×1MiB/2GB 折算（0.5MB/GB 保守上浮 2×）+ 进程 64MiB。
-//   - 文件本身由 ffprobe 子进程流式读（OS 页缓存，不进 Go 堆）——不计。
+//     json.Unmarshal（parseKeyframes 需完整数组）——JSON 大小随视频**帧数**增长
+//     （低码率高帧率视频同字节数帧数可高 1-2 个数量级），**与文件字节数无固定比例**；
+//     实测 4.6GB/24958 帧 ≈ 2.5MB JSON（~0.5MB/GB 样本密度）。
+//   - 估算：JSON 按 size×1MiB/2GB 折算（样本密度的保守上浮 2×）+ 进程 64MiB；但
+//     读入端已由 maxFFprobeOutputBytes（256MiB）硬封顶（超限 fail-closed 放行）——
+//     实际占用最坏 = 64MiB 进程 + 256MiB JSON，此估算在低码率高帧率极端场景仍可能
+//     低于实际（配额信号量按实际读入约束，非估算）。文件本身由 ffprobe 子进程流式
+//     读（OS 页缓存，不进 Go 堆）——不计。
 func (VideoChecker) EstimateMem(path string, size int64) int64 {
 	if size <= 0 {
 		if fi, err := os.Stat(path); err == nil {
@@ -64,7 +67,7 @@ func (VideoChecker) EstimateMem(path string, size int64) int64 {
 	}
 	jsonEst := size / (2 << 30) * (1 << 20) // 0.5MB/GB 上浮 2×：1MiB per 2GiB
 	if jsonEst > 256<<20 {
-		jsonEst = 256 << 20 // JSON 上限 256MiB（超长视频防御）
+		jsonEst = 256 << 20 // JSON 上限 256MiB（与 maxFFprobeOutputBytes 对齐）
 	}
 	return 64<<20 + jsonEst
 }
@@ -147,7 +150,10 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 		return &integrity.Report{OK: false, Reason: fmt.Sprintf("video: ffprobe 解析失败: %v", kerr)}, nil
 	}
 	if len(offs) == 0 {
-		return &integrity.Report{OK: false, Reason: "video: 容器无可解析关键帧（无视频流或空文件）"}, nil
+		// M3-I1：仅音频轨的合法容器（如音频以 .mp4 命名，m4a 常见）——-select_streams v:0
+		// 无视频流输出空 → OK=false 会把合法音频误判 damaged/重下。有内容但非视频 ≠ 损坏：
+		// 返回「跳过」Reason（OK=true），与「未知类型无校验器放行」同语义。
+		return &integrity.Report{OK: true, Reason: "video: 容器无视频流（仅音频或空流），跳过语义校验"}, nil
 	}
 	return &integrity.Report{OK: true}, nil
 }

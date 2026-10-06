@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -85,17 +86,21 @@ func (TarChecker) Check(ctx context.Context, path string, size int64) (*Report, 
 		defer gz.Close()
 		reader = gz
 	}
+	return checkTarEntries(ctx, reader, size)
+}
 
+// checkTarEntries 遍历 tar 条目并做解压炸弹防护（Check 的子步骤，抽方法控 gocognit）。
+// ctx 取消：多 GB 归档可耗时数分钟，任务取消后须能提前中止（与 video 校验器一致）。
+// R4-P2：解压炸弹防护——gzip 极端压缩比全量解压无上限会撑爆内存，统计条目累计
+// 解压字节，超 size×inflateRatioMax（500，纯文本合法高压缩可达百倍）即判异常。
+func checkTarEntries(ctx context.Context, reader io.Reader, size int64) (*Report, error) {
 	tr := tar.NewReader(reader)
 	count := 0
-	// R4-P2：解压炸弹防护——gzip 极端压缩比（几百字节 → GB 明文）全量解压无上限会
-	// 撑爆内存。遍历时统计条目累计解压字节，超参考 size（源文件大小放大系数）即判
-	// 异常（不继续解压）。
 	var inflated int64
-	// F2（对抗评审）：膨胀比上界 500（纯文本/日志类合法高压缩归档可达百倍以上，
-	// 100 会误伤；极端 gzip 炸弹仍 >500 被拦截）。
-
 	for {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("tar check cancelled: %w", ctx.Err())
+		}
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -105,7 +110,6 @@ func (TarChecker) Check(ctx context.Context, path string, size int64) (*Report, 
 		}
 		count++
 		inflated += hdr.Size
-		// 源文件大小已知时：解压总量超 size×ratio 即疑似炸弹。
 		if size > 0 && inflated > size*inflateRatioMax {
 			return &Report{OK: false, Reason: "tar 解压膨胀超限（疑似炸弹）"}, nil
 		}

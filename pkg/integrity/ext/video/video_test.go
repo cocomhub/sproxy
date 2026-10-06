@@ -146,6 +146,32 @@ func TestVideoChecker_CtxCancel(t *testing.T) {
 	}
 }
 
+// emptyIndexer 返回空关键帧列表的索引器（模拟容器无视频流——仅音频轨/空流）。
+type emptyIndexer struct{}
+
+func (emptyIndexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error) {
+	return nil, nil
+}
+
+// TestVideoChecker_AudioOnlyPasses M3-I1：仅音频轨容器（-select_streams v:0 输出空）→
+// OK=true 放行（有内容但非视频 ≠ 损坏，不误判 damaged/重下）。
+func TestVideoChecker_AudioOnlyPasses(t *testing.T) {
+	// 共享 testSeamIndexer 包级注入缝（空索引器模拟无视频流）——此测试与另外两个
+	// 注入缝测试共享包级 seam 变量，须串行（同文件已登记 serial budget）。
+	prev := testSeamIndexer
+	setTestSeamIndexer(emptyIndexer{})
+	t.Cleanup(func() { setTestSeamIndexer(prev) })
+
+	path := writeBytes(t, "audio.m4a", []byte("audio-data"))
+	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("audio-data")))
+	if err != nil {
+		t.Fatalf("仅音频轨应 OK=true 放行（非 error），got %v", err)
+	}
+	if !rep.OK {
+		t.Fatalf("仅音频轨应 OK=true（有内容但非视频 ≠ 损坏），got Reason=%q", rep.Reason)
+	}
+}
+
 // blockingIndexer 永不返回的索引器（测试取消路径；ch 关闭可解除）。
 type blockingIndexer struct{ ch chan struct{} }
 

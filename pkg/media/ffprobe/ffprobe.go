@@ -115,6 +115,18 @@ func (realRunner) Run(ctx context.Context, path string, file io.Reader) ([]byte,
 		outTmp.Close()
 		return nil, fmt.Errorf("ffprobe 执行失败: %w", runErr)
 	}
+	// M5-I2：ffprobe 输出 JSON 大小 ∝ 帧数（低码率高帧率视频同字节数帧数可高 1-2 个
+	// 数量级），无界 ReadFile 会把数百 MB JSON 全读进 Go 堆——估算（EstimateMem 按
+	// 字节折算）在低码率场景严重低估，配额信号量被实际占用突破 → OOM。先 Stat 探测
+	// 输出大小（在 Close 前），超上限 fail-closed（解析失败 → 调用方按「无校验器可用」
+	// 放行，不误判 damaged）；同时避免超大 JSON 撑爆内存。
+	if fi, ferr := outTmp.Stat(); ferr != nil {
+		outTmp.Close()
+		return nil, fmt.Errorf("ffprobe: stat 输出文件失败: %w", ferr)
+	} else if fi.Size() > maxFFprobeOutputBytes {
+		outTmp.Close()
+		return nil, fmt.Errorf("ffprobe: 输出超上限 %d 字节（size=%d，帧数异常多）", maxFFprobeOutputBytes, fi.Size())
+	}
 	if serr := outTmp.Close(); serr != nil {
 		return nil, fmt.Errorf("ffprobe: 关闭输出文件失败: %w", serr)
 	}
@@ -124,6 +136,11 @@ func (realRunner) Run(ctx context.Context, path string, file io.Reader) ([]byte,
 	}
 	return out, nil
 }
+
+// maxFFprobeOutputBytes 是 ffprobe 输出 JSON 的字节上限（低码率高帧率视频防撑爆内存；
+// 超限 fail-closed 解析失败 → 校验放行，不误判 damaged）。与 VideoChecker.EstimateMem
+// 的 JSON 封顶对齐（256MiB）。
+const maxFFprobeOutputBytes = int64(256 << 20)
 
 // Indexer 是 shardseal.KeyframeIndexer 的装配实例（ffprobe 子进程解析器）。
 type Indexer struct{}

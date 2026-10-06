@@ -69,6 +69,8 @@ const maxCheckPixels = int64(25000000)
 // Check 解码 path 指向的图片：解码失败或 Bounds 为空（0x0）→ OK=false（内容异常）；
 // 文件打开失败 → error（校验执行错误，非语义判定）。Review Focus 2：空文件/0 字节
 // 的图片解码必然失败，判 damaged（字节级校验另管，不冲突）。
+// ctx 取消：解码为 CPU 有界操作（像素钳制 ≤ maxCheckPixels），时延有限；此处不轮询
+// ctx（解码器非可中断，轮询只能检查前后点）——与 tar 长遍历不同，无需中途中止。
 func (ImageChecker) Check(ctx context.Context, path string, size int64) (*Report, error) {
 	f, err := os.Open(path)
 	if err != nil {
