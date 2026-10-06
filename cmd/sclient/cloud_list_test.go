@@ -160,3 +160,34 @@ func TestCloudListCmd_ServerError(t *testing.T) {
 		t.Error("expected error when server returns 500")
 	}
 }
+
+// TestCloudListCmd_DamagedStatusFilter 验证 --status damaged 透传给服务端（服务端
+// ListTasks 按 IntegrityStatus==damaged 过滤）并展示 damaged 任务。
+func TestCloudListCmd_DamagedStatusFilter(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status := r.URL.Query().Get("status")
+		if status != "damaged" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "expected status=damaged"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []cloudTaskInfo{
+			{ID: "task-dmg", Filename: "bad.png", Status: "completed", IntegrityStatus: "damaged"},
+		}, "total": 1})
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd.SetArgs([]string{"--status", "damaged"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "task-dmg") {
+		t.Fatalf("expected output to contain task-dmg, got: %s", buf.String())
+	}
+}

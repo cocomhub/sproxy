@@ -405,7 +405,57 @@ func TestCloudDownloadIntegrityBadge(t *testing.T) {
 	waitTextVisible(t, page, "#transfer-body", "完整性异常", 8000)
 }
 
-// noTransferText 提供云任务频道空态文案（避免断言依赖字面量被重构牵连）。
+// TestCloudDownloadUnverifiedBadge 验证 IntegrityStatus=unverified（超内存配额跳过校验）
+// 的灰色「未校验」标记（与 damaged「完整性异常」区分）。注入模式同 damaged 变体。
+func TestCloudDownloadUnverifiedBadge(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
+	}
+	if err := waitLoc(page, "#transfer-body", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("transfer-body not visible: %v", err)
+	}
+	waitTextVisible(t, page, "#transfer-body", noTransferText(), 10000)
+	// 等首拉回调归零
+	waitCloudTasksIdle := `(() => {
+	  const deadline = Date.now() + 5000;
+	  return new Promise((resolve) => {
+	    const tick = () => {
+	      if (!window._cloudTasksInFlight) { resolve(true); return; }
+	      if (Date.now() > deadline) { resolve(false); return; }
+	      setTimeout(tick, 50);
+	    };
+	    tick();
+	  });
+	})()`
+	if v, err := page.Evaluate(waitCloudTasksIdle); err != nil || v != true {
+		t.Fatalf("等待 _cloudTasksInFlight 归零失败: v=%v err=%v", v, err)
+	}
+	if _, err := page.Evaluate(`(() => { stopCloudPolling(); return true; })()`); err != nil {
+		t.Fatalf("stopCloudPolling: %v", err)
+	}
+	script := `(() => {
+	  _cloudTasks.push({ id: 'integrity-unv', filename: 'u.bin',
+	    status: 'completed', integrity_status: 'unverified' });
+	  switchTransferChannel('cloud_tasks');
+	  return true;
+	})()`
+	if _, err := page.Evaluate(script); err != nil {
+		t.Fatalf("注入 unverified 云任务失败: %v", err)
+	}
+	if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
+		t.Fatalf("展开已完成分组: %v", cerr)
+	}
+	waitTextVisible(t, page, "#transfer-body", "未校验", 8000)
+}
+
+// noCloudComText 提供云任务频道空态文案（避免断言依赖字面量被重构牵连）。
 func noTransferText() string { return "暂无传输记录" }
 
 // TestCloudDownloadTaskList 验证云任务列表渲染（进入传输页云任务频道）。

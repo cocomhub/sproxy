@@ -19,18 +19,18 @@ func newCheckMemSem(maxBytes int64) *semaphore.Weighted {
 }
 
 // acquireCheckMem 在 Check 前按估算内存占用排队获取配额（Weighted 信号量：
-// 并发校验的总估算内存 ≤ MaxCheckMemBytes；不足等待释放）。返回 release 释放函数。
-// 排序：FIFO？Weighted 不保证 FIFO——但按字节计数本身即「等待释放」语义，顺序
-// 不关键（校验是短操作）。估算 <=0 → nil（无内存需求，直接执行）。
-func (m *CloudDownloadManager) acquireCheckMem(ctx context.Context, est int64) func() {
+// 并发校验的总估算内存 ≤ MaxCheckMemBytes；不足等待释放）。返回 (release, ok)：
+// ok=false 表示排队期间 ctx 取消（任务取消/删除）——调用方应**跳过 Check**（结果
+// 无意义且避免启动 ffprobe 子进程残留；最终由 finalizeCompleted 丢弃取消结果）。
+// 估算 <=0 → ok=true no-op（无内存需求，直接执行）。
+func (m *CloudDownloadManager) acquireCheckMem(ctx context.Context, est int64) (release func(), ok bool) {
 	if m.checkMemSem == nil || est <= 0 {
-		return func() {}
+		return func() {}, true
 	}
-	// 等待期间任务取消/删除（ctx=dlCtx 取消）则中止
 	if err := m.checkMemSem.Acquire(ctx, est); err != nil {
-		return func() {}
+		return func() {}, false
 	}
-	return func() { m.checkMemSem.Release(est) }
+	return func() { m.checkMemSem.Release(est) }, true
 }
 
 // checkMemEstimate 估算校验器一次 Check 的峰值内存占用（MemEstimator 可选接口；

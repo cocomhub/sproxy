@@ -340,7 +340,13 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 		m.setTaskIntegrityStatus(task, "unverified")
 		return nil
 	}
-	release := m.acquireCheckMem(ctx, est)
+	release, acquired := m.acquireCheckMem(ctx, est)
+	if !acquired {
+		// 排队期间任务取消/删除（dlCtx 取消）：校验结果无意义（finalize 会丢弃取消
+		// 结果），且跳过可避免启动 ffprobe 子进程残留；返回 nil 放行路径，最终由
+		// finalizeCompleted 按取消/删除丢弃。
+		return nil
+	}
 	defer release()
 	rpt, err := checker.Check(ctx, destPath, result.Size)
 	if err != nil {

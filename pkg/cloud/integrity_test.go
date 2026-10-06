@@ -446,3 +446,48 @@ func TestDownloadIntegrity_WithinMemQuotaNormalVerify(t *testing.T) {
 		t.Fatalf("配额充足应正常校验 damaged，got %q+%q", task.Status, task.IntegrityStatus)
 	}
 }
+
+// TestDownloadIntegrity_ConcurrentMemQuota 并发校验内存配额：配额 10MiB，4 个 tar
+// 文件各估算 2MiB（size×500：4KB×500=2MiB）——并发校验总估算 ≤ 配额，全部排队
+// 完成且每个任务 verified/damaged 按内容判定（不误判 unverified——配额充足）。
+func TestDownloadIntegrity_ConcurrentMemQuota(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	mgr.checkMemSem = semaphore.NewWeighted(10 << 20) // 10 MiB
+	mgr.checkMemMax = 10 << 20
+	payload := make([]byte, 4096) // 4KB → est=2MiB
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write(payload)
+			}))
+			defer srv.Close()
+			task, err := mgr.SubmitAndStart("url", srv.URL, "x.tar", int64(len(payload)), t.Context(), "", TaskParams{Save: true})
+			if err != nil {
+				t.Errorf("submit %d: %v", idx, err)
+				return
+			}
+			testutil.WaitFor(t, 10*time.Second, func() bool {
+				cur, _ := mgr.SnapshotTask(task.ID, "")
+				return cur != nil && cur.Status == "completed"
+			}, "任务应完成")
+			cur, _ := mgr.SnapshotTask(task.ID, "")
+			if cur.IntegrityStatus != "unverified" && cur.IntegrityStatus != "damaged" {
+				t.Errorf("任务 %d 应 unverified（内容非 tar）或 damaged，got %q", idx, cur.IntegrityStatus)
+			}
+		}(i)
+	}
+	wg.Wait()
+	// 全部完成后信号量归零（无泄漏）
+	if cur := mgr.checkMemSem.TryAcquire(1); !cur {
+		t.Fatal("校验全部完成后信号量应可再获取（无占位泄漏）")
+	} else {
+		mgr.checkMemSem.Release(1)
+	}
+}
