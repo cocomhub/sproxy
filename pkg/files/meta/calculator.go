@@ -117,15 +117,24 @@ func (c *Calculator) ReadFrom(r io.Reader) (int64, error) {
 }
 
 // Finish 产出完整 FileMeta（整文件 + 全部分块，含尾块收尾）。之后禁止继续 Write。
+// size 构造时未知（<=0）时用分块累计和兜底（调用方未提前知道总大小的流式计算）。
 // 零大小文件：无数据块，产出空分块列表（调用方特判零文件不落 meta 或空 meta）。
 func (c *Calculator) Finish() *FileMeta {
 	c.done = true
 	if c.curSize > 0 {
 		c.flushChunk() // 尾块收尾（TeeReader 等直接 Write 路径下尾块不足 chunkSize）
 	}
+	size := c.size
+	if size < 0 {
+		var sum int64
+		for _, cm := range c.chunks {
+			sum += cm.Size
+		}
+		size = sum
+	}
 	return &FileMeta{
 		Version:     metaVersion,
-		Size:        c.size,
+		Size:        size,
 		TotalSHA256: hex.EncodeToString(c.totalSHA.Sum(nil)),
 		TotalMD5:    hex.EncodeToString(c.totalMD5.Sum(nil)),
 		ChunkSize:   c.chunkSize,

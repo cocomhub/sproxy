@@ -13,6 +13,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 )
 
 // ProgressFunc 是下载进度回调函数。
@@ -44,6 +46,9 @@ type Result struct {
 	ETag          string        // 服务器 ETag（用于 If-Range 续传一致性校验）
 	Integrity     IntegrityMode // 结果的完整性可信度（②/① 态）
 	AuthorityHash string        // 服务端带外权威 hash（如 pikpak GCID；可空）
+	// Meta 是下载流顺便计算的 FileMeta（可信卷；全量路径计算，续传路径为 nil 由
+	// 调用方经 meta.FromFile 补算）。整文件/分块 sha256+md5，零额外 I/O 遍数。
+	Meta *meta.FileMeta `json:"-"` // 不序列化（运行时伴随产物）
 }
 
 // IntegrityProvider 供调度侧/校验管道查询下载器声明的完整性归属。
