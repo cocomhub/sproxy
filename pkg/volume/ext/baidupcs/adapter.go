@@ -15,15 +15,30 @@ import (
 )
 
 // Adapter 是百度网盘底层执行器接口（二进制优先 + 库兜底双路径的抽象）。
+// Move/Copy 是服务端 filemanager 能力（库路径 pcs.Move/pcs.Copy；二进制 CLI
+// `mv`/`cp` 可用时二进制优先、失败回退库）。无直接能力 → 明确 ErrUnsupported。
 type Adapter interface {
 	Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error
 	Download(ctx context.Context, remotePath, localPath string) error
+	// Move 服务端移动（源移除）；不支持返回 ErrUnsupported。
+	Move(ctx context.Context, from, to string) error
+	// Copy 服务端复制（源保留）；不支持返回 ErrUnsupported。
+	Copy(ctx context.Context, from, to string) error
 }
 
 // libraryFallback 是库兜底的最小接口（真实库 adapter 与测试 fake 都实现）。
 type libraryFallback interface {
 	Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error
 	Download(ctx context.Context, remotePath, localPath string) error
+	Move(ctx context.Context, from, to string) error
+	Copy(ctx context.Context, from, to string) error
+	Delete(ctx context.Context, remotePath string) error
+}
+
+// deleter 是可选删除能力（Adapter 主接口不含 Delete——二进制模式可能无会话；
+// 实现者：libraryAdapter pcs.Remove / binaryAdapter `rm` CLI）。
+type deleter interface {
+	Delete(ctx context.Context, remotePath string) error
 }
 
 // directLinkProvider 是可选直链能力接口：底层 adapter 若实现（库 adapter 持有
@@ -135,6 +150,51 @@ func (a *binaryAdapter) Download(ctx context.Context, remotePath, localPath stri
 	return fmt.Errorf("baidupcs download 失败且无库兜底")
 }
 
+// Move 服务端移动（源移除）：二进制 `mv` 优先、失败回退库；无兜底明确 ErrUnsupported。
+func (a *binaryAdapter) Move(ctx context.Context, from, to string) error {
+	ok, err := a.runBinary(ctx, "mv", from, to)
+	if ok {
+		return nil
+	}
+	if a.cfg.Fallback != nil {
+		if fbErr := a.cfg.Fallback.Move(ctx, from, to); fbErr != nil {
+			return fmt.Errorf("baidupcs move: 二进制失败(%v) 且库兜底也失败: %w", err, fbErr)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: baidupcs 无会话执行 Move（需库兜底）", ErrUnsupported)
+}
+
+// Copy 服务端复制（源保留）：二进制 `cp` 优先、失败回退库；无兜底明确 ErrUnsupported。
+func (a *binaryAdapter) Copy(ctx context.Context, from, to string) error {
+	ok, err := a.runBinary(ctx, "cp", from, to)
+	if ok {
+		return nil
+	}
+	if a.cfg.Fallback != nil {
+		if fbErr := a.cfg.Fallback.Copy(ctx, from, to); fbErr != nil {
+			return fmt.Errorf("baidupcs copy: 二进制失败(%v) 且库兜底也失败: %w", err, fbErr)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: baidupcs 无会话执行 Copy（需库兜底）", ErrUnsupported)
+}
+
+// Delete 服务端删除（二进制 `rm` 优先、失败回退库）；无兜底明确 ErrUnsupported。
+func (a *binaryAdapter) Delete(ctx context.Context, remotePath string) error {
+	ok, err := a.runBinary(ctx, "rm", remotePath)
+	if ok {
+		return nil
+	}
+	if dl, ok := a.cfg.Fallback.(deleter); ok {
+		if fbErr := dl.Delete(ctx, remotePath); fbErr != nil {
+			return fmt.Errorf("baidupcs delete: 二进制失败(%v) 且库兜底也失败: %w", err, fbErr)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: baidupcs 无会话执行 Delete（需库兜底）", ErrUnsupported)
+}
+
 // discard 是 io.Writer 的静默实现（slog 无日志时用）。
 type discard struct{}
 
@@ -200,6 +260,42 @@ func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath str
 	}
 	a.log.Info("baidupcs 库兜底 Download（Downloader + 断点）", "remote", remotePath, "local", localPath)
 	return downloadViaDownloader(ctx, a.pcs, remotePath, localPath, layout)
+}
+
+// Move 库路径服务端移动（源移除，pcs.Move 服务端 filemanager）。
+func (a *libraryAdapter) Move(ctx context.Context, from, to string) error {
+	if a.pcs == nil {
+		return fmt.Errorf("baidupcs: library adapter without client")
+	}
+	if err := ctx.Err(); err != nil {
+		return mapPCSError(err)
+	}
+	a.log.Info("baidupcs 库服务端 Move", "from", from, "to", to)
+	return mapPCSError(a.pcs.PCS().Move(&bdlib.CpMvJSON{From: from, To: to}))
+}
+
+// Copy 库路径服务端复制（源保留，pcs.Copy 服务端 filemanager）。
+func (a *libraryAdapter) Copy(ctx context.Context, from, to string) error {
+	if a.pcs == nil {
+		return fmt.Errorf("baidupcs: library adapter without client")
+	}
+	if err := ctx.Err(); err != nil {
+		return mapPCSError(err)
+	}
+	a.log.Info("baidupcs 库服务端 Copy", "from", from, "to", to)
+	return mapPCSError(a.pcs.PCS().Copy(&bdlib.CpMvJSON{From: from, To: to}))
+}
+
+// Delete 库路径服务端删除（pcs.Remove）。
+func (a *libraryAdapter) Delete(ctx context.Context, remotePath string) error {
+	if a.pcs == nil {
+		return fmt.Errorf("baidupcs: library adapter without client")
+	}
+	if err := ctx.Err(); err != nil {
+		return mapPCSError(err)
+	}
+	a.log.Info("baidupcs 库服务端 Delete", "path", remotePath)
+	return mapPCSError(a.pcs.PCS().Remove(remotePath))
 }
 
 // DirectLink 实现 directLinkProvider：用 LocateDownload 获取 remotePath 的下载直链。

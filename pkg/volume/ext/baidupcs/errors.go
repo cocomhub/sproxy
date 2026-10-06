@@ -21,6 +21,9 @@ var (
 	ErrInvalidParam = errors.New("baidupcs: invalid param")
 	// ErrTransient 表示可重试的瞬时错误（网络/超时/接口抖动）。
 	ErrTransient = errors.New("baidupcs: transient error")
+	// ErrUnsupported 表示该能力无直接支持（如无会话/二进制模式执行服务端 Move/Copy）。
+	// 用户裁定：无直接能力则明确报错不支持（fail-closed），不静默降级。
+	ErrUnsupported = errors.New("baidupcs: unsupported operation")
 )
 
 // mapPCSError 把 BaiduPCS 库错误归类为哨兵错误。

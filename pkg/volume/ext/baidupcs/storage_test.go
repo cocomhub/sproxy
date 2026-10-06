@@ -5,6 +5,8 @@ package baidupcs
 
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // 测试双算法校验
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -49,6 +51,38 @@ func (f *fakeStorageAdapter) Download(ctx context.Context, remotePath, localPath
 		return errNotFound
 	}
 	return os.WriteFile(localPath, []byte(data), 0o644)
+}
+
+// Move 服务端移动（源移除、目标覆盖）。
+func (f *fakeStorageAdapter) Move(ctx context.Context, from, to string) error {
+	data, ok := f.files[from]
+	if !ok {
+		return errNotFound
+	}
+	delete(f.files, from)
+	f.files[to] = data
+	f.markDirs(to)
+	return nil
+}
+
+// Copy 服务端复制（源保留）。
+func (f *fakeStorageAdapter) Copy(ctx context.Context, from, to string) error {
+	data, ok := f.files[from]
+	if !ok {
+		return errNotFound
+	}
+	f.files[to] = data
+	f.markDirs(to)
+	return nil
+}
+
+// Delete 服务端删除（幂等：不存在不报错）。
+func (f *fakeStorageAdapter) Delete(ctx context.Context, remotePath string) error {
+	if _, ok := f.files[remotePath]; !ok {
+		return nil // 幂等：缺失不报错
+	}
+	delete(f.files, remotePath)
+	return nil
 }
 
 // markDirs 为 remotePath 的所有父路径建目录标记。
@@ -126,6 +160,7 @@ func (f *fakeStorageAdapter) listDirsLocked(prefix, remotePath string, seen map[
 }
 
 // Meta 返回单个路径元信息（目录/文件）。实现 metadataProvider。
+// ETag = 内容 md5（对齐百度 ETag 语义；供 Put 的 md5 刷新复核通过）。
 func (f *fakeStorageAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -137,7 +172,13 @@ func (f *fakeStorageAdapter) Meta(ctx context.Context, remotePath string) (*Obje
 	if !ok {
 		return nil, errNotFound
 	}
-	return &ObjectMeta{Key: remotePath, Size: int64(len(data)), ModTime: time.Now()}, nil
+	h := md5.Sum([]byte(data)) //nolint:gosec // 测试双算法校验
+	return &ObjectMeta{
+		Key:     remotePath,
+		Size:    int64(len(data)),
+		ModTime: time.Now(),
+		ETag:    hex.EncodeToString(h[:]),
+	}, nil
 }
 
 var _ metadataProvider = (*fakeStorageAdapter)(nil)
@@ -281,6 +322,13 @@ func (e *statMissingAdapter) Upload(ctx context.Context, localPath, targetPath s
 
 func (e *statMissingAdapter) Download(ctx context.Context, remotePath, localPath string) error {
 	return errNotFound
+}
+
+func (e *statMissingAdapter) Move(ctx context.Context, from, to string) error {
+	return e.inner.Move(ctx, from, to)
+}
+func (e *statMissingAdapter) Copy(ctx context.Context, from, to string) error {
+	return e.inner.Copy(ctx, from, to)
 }
 
 // newTestStorage 构造测试用 Storage（temp 指向 t.TempDir()）。

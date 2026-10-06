@@ -23,6 +23,7 @@ package baidupcs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -65,6 +66,9 @@ type StorageAPI interface {
 	List(ctx context.Context, prefix string) ([]ObjectMeta, error)
 	Delete(ctx context.Context, key string) error
 	Copy(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error)
+	// Move 服务端移动（sync.Mover 能力；零流量）。服务端不可用返回 ErrUnsupported，
+	// 调用方（StorageFS.Rename）回退 Copy+Delete。
+	Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error)
 }
 
 // NewStorageFS 构造 StorageFS 适配层。temp 为本地中间态目录（默认 os.TempDir()）。
@@ -182,15 +186,38 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 	return nil
 }
 
-// Rename 重命名/移动（网盘无原子 MOVE → Copy + Delete 两步）。
+// Rename 重命名/移动：服务端 Move（源移除、零流量）；服务端不可用回退 Copy+Delete。
 func (f *StorageFS) Rename(ctx context.Context, from, to string) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if _, err := f.s.Move(ctx, from, to); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrUnsupported) {
+		return mapPCSError(err)
 	}
 	if _, err := f.s.Copy(ctx, from, to); err != nil {
 		return mapPCSError(err)
 	}
 	return f.Delete(ctx, from)
+}
+
+// Move 同卷服务端移动（sync.Mover 能力）：源移除、零流量（百度 filemanager move）。
+func (f *StorageFS) Move(ctx context.Context, from, to string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := f.s.Move(ctx, from, to)
+	return mapPCSError(err)
+}
+
+// Copy 同卷服务端复制（sync.Copier 能力）：源保留、零流量（百度 filemanager copy）。
+func (f *StorageFS) Copy(ctx context.Context, from, to string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := f.s.Copy(ctx, from, to)
+	return mapPCSError(err)
 }
 
 // Delete 删除文件（幂等：不存在不报错）。
@@ -229,8 +256,12 @@ func entryFromMeta(m ObjectMeta) syncpkg.Entry {
 	if !m.ModTime.IsZero() {
 		e.MTime = m.ModTime.UnixNano()
 	}
+	// 校验和信息（用户裁定：每个 entry 提供已知的所有校验和数据，便于比较）：
+	// 百度 ETag = 整文件 md5（单次上传后经 Put 的 md5 刷新复核真实可信）。
 	if m.ETag != "" {
 		e.Checksum = m.ETag
+		e.ChecksumType = "md5"
+		e.Checksums = map[string]string{"md5": m.ETag}
 	}
 	return e
 }

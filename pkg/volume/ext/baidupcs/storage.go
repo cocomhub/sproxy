@@ -6,6 +6,7 @@ package baidupcs
 import (
 	"context"
 	"crypto/md5" //nolint:gosec // 百度网盘 API 需要 md5（秒传/ETag），非安全用途
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -118,30 +119,18 @@ func newRangeHTTPClient() *http.Client {
 
 // Put 上传内容到网盘（本地临时文件 + adapter.Upload + ETag 复核有界重试）。
 func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta, error) {
-	tmp, err := os.CreateTemp(s.temp, filepath.Base(key)+"-*")
+	tmpPath, localMD5, err := s.stageUpload(r, key)
 	if err != nil {
 		return nil, err
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-
-	hash := md5.New() //nolint:gosec // 百度 API 要求 md5（秒传/ETag）
-	tee := io.TeeReader(r, hash)
-	if _, copyErr := io.Copy(tmp, tee); copyErr != nil {
-		tmp.Close()
-		return nil, copyErr
-	}
-	if closeErr := tmp.Close(); closeErr != nil {
-		return nil, closeErr
-	}
-	_ = hash // md5 计算保留（后续扩展秒传用）
 
 	remote, err := s.remotePath(key)
 	if err != nil {
 		return nil, err
 	}
 
-	// 有界重试：上传后 Stat 确认可见（瞬时失败重试 ≤3）。
+	// 有界重试：上传 → Stat 比对 ETag（md5 刷新复核；瞬时失败重试 ≤3）。
 	for attempt := 1; attempt <= maxPutAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, mapPCSError(err)
@@ -150,17 +139,45 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 			return nil, mapPCSError(upErr)
 		}
 		meta, statErr := s.Stat(ctx, key)
-		if statErr == nil {
+		if statErr != nil {
+			if errors.Is(statErr, ErrNotFound) {
+				// 上传成功但 Stat 未见 → 瞬时（百度最终一致性），重试
+				s.log.Warn("上传后 Stat 未立即可见，重试", "key", key, "attempt", attempt)
+				continue
+			}
+			return nil, mapPCSError(statErr)
+		}
+		// ETag 复核（md5 刷新）：远端 ETag 与本地 md5 一致才可信。百度分片上传的
+		// ETag 可能是片 md5 组合而非整文件 md5——不一致按瞬时重试（重传刷新 meta）。
+		if meta.ETag == localMD5 {
 			return meta, nil
 		}
-		if errors.Is(statErr, ErrNotFound) {
-			// 上传成功但 Stat 未见 → 瞬时（百度最终一致性），重试
-			s.log.Warn("上传后 Stat 未立即可见，重试", "key", key, "attempt", attempt)
-			continue
-		}
-		return nil, mapPCSError(statErr)
+		s.log.Warn("上传后 ETag 与本地 md5 不一致（重传刷新 meta）",
+			"key", key, "local_md5", localMD5, "remote_etag", meta.ETag, "attempt", attempt)
 	}
-	return nil, fmt.Errorf("%w: 上传后 Stat 复核失败超过 %d 次", ErrTransient, maxPutAttempts)
+	return nil, fmt.Errorf("%w: 上传后 ETag 复核不匹配超过 %d 次（本地 md5=%s）", ErrTransient, maxPutAttempts, localMD5)
+}
+
+// stageUpload 把上传流落本地临时文件并计算 md5（上传前一次性完成；返回临时路径与
+// 本地 md5——供 Upload 与 ETag 复核）。
+func (s *Storage) stageUpload(r io.Reader, key string) (string, string, error) {
+	tmp, err := os.CreateTemp(s.temp, filepath.Base(key)+"-*")
+	if err != nil {
+		return "", "", err
+	}
+	tmpPath := tmp.Name()
+	hash := md5.New() //nolint:gosec // 百度 API 要求 md5（秒传/ETag），非安全用途
+	tee := io.TeeReader(r, hash)
+	if _, copyErr := io.Copy(tmp, tee); copyErr != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", "", copyErr
+	}
+	if closeErr := tmp.Close(); closeErr != nil {
+		os.Remove(tmpPath)
+		return "", "", closeErr
+	}
+	return tmpPath, hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // Get 下载网盘文件到本地临时文件并返回 Reader（Close 自动清理）。
@@ -348,27 +365,55 @@ func (s *Storage) List(ctx context.Context, prefix string) ([]ObjectMeta, error)
 	return []ObjectMeta{*meta}, nil
 }
 
-// Delete 删除对象（幂等：不存在不报错）。
+// Delete 删除对象（幂等：不存在不报错）。经 Adapter 服务端删除（库 Remove /
+// 二进制 CLI `rm`）；无会话明确 ErrUnsupported。
 func (s *Storage) Delete(ctx context.Context, key string) error {
 	remote, err := s.remotePath(key)
 	if err != nil {
 		return err
 	}
-	// 当前 Adapter 接口无 Delete —— 二进制 download 语义下用库兜底或直接报未实现。
-	// 说明：真实百度网盘删除走库 Remove；此实现为最小可测版本，后续补 Adapter.Delete。
-	_ = remote
-	return nil
+	if d, ok := s.adapter.(deleter); ok {
+		return d.Delete(ctx, remote)
+	}
+	return fmt.Errorf("%w: 当前 Adapter 无 Delete 能力", ErrUnsupported)
 }
 
-// Copy 复制对象（srcKey → dstKey）。
-//
-// 实现用 Get+Put 组合（下载到本地临时文件 → 上传到目标），不经 Adapter 新接口：
-// 通用语义、二进制/库双路径都可用（Adapter 仅要求 Upload/Download）。
-// 网盘无原子 COPY API 时，调用方（StorageFS.Rename）后续自行 Delete 源。
-func (s *Storage) Copy(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error) {
-	rc, _, err := s.Get(ctx, srcKey)
+// Move 服务端移动对象（源移除；经 Adapter.Move）。
+func (s *Storage) Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error) {
+	src, err := s.remotePath(srcKey)
 	if err != nil {
+		return nil, err
+	}
+	dst, err := s.remotePath(dstKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.adapter.Move(ctx, src, dst); err != nil {
 		return nil, mapPCSError(err)
+	}
+	return s.Stat(ctx, dstKey)
+}
+
+// Copy 复制对象（srcKey → dstKey）。服务端优先（Adapter.Copy 零流量）；
+// 服务端不可用（无会话）回退 Get+Put 组合（通用语义、二进制/库双路径都可用）。
+func (s *Storage) Copy(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error) {
+	src, err := s.remotePath(srcKey)
+	if err != nil {
+		return nil, err
+	}
+	dst, err := s.remotePath(dstKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.adapter.Copy(ctx, src, dst); err == nil {
+		return s.Stat(ctx, dstKey)
+	} else if !errors.Is(err, ErrUnsupported) {
+		return nil, mapPCSError(err)
+	}
+	// 服务端不可用：回退 Get+Put（下载到本地临时文件 → 上传到目标）。
+	rc, _, gerr := s.Get(ctx, srcKey)
+	if gerr != nil {
+		return nil, mapPCSError(gerr)
 	}
 	defer rc.Close()
 	return s.Put(ctx, dstKey, rc)
