@@ -82,22 +82,30 @@ func validateWrapperFields(name string, fields []registry.FieldSchema, extra map
 }
 
 // validateWrapperTarget 校验单个 volume-select 字段：Extra 非空 + 底层卷存在且 owner
-// 可用 + AllowWrapper 约束 + 防环。
+// 可用 + AllowWrapper 约束 + 防环。target 支持两种形态：
+//   - 裸卷名（如 `main`）；
+//   - 嵌套封装 `卷名/新子目录`（如 `main/videos`，用户 2026-10-06 确认语义）——取卷名段
+//     校验存在性/防环，子目录段的互斥占用与「须不存在」由 validateNestedWrapperTarget 负责。
 func validateWrapperTarget(name string, f registry.FieldSchema, extra map[string]any, allowed []volume.Volume) error {
 	target, _ := extra[f.Key].(string)
 	if strings.TrimSpace(target) == "" {
 		return fmt.Errorf("volume: 底层卷字段 %s 必填", f.Key)
 	}
-	if !volumeInSet(allowed, target) {
+	// 嵌套形态：校验对象为卷名段（子目录不是卷）。
+	base := target
+	if b, _, ok := volume.SplitNestedTarget(target); ok {
+		base = b
+	}
+	if !volumeInSet(allowed, base) {
 		// 统一文案：不存在 / 无权限不区分（防跨 owner 探测私有卷存在性）。
-		return fmt.Errorf("volume: 底层卷 %q 不存在或无权访问", target)
+		return fmt.Errorf("volume: 底层卷 %q 不存在或无权访问", base)
 	}
 	if !f.AllowWrapper {
-		if _, isWrapper := wrapperTargetOfSet(allowed, target); isWrapper {
-			return fmt.Errorf("volume: 底层卷 %q 不允许再套封装卷", target)
+		if _, isWrapper := wrapperTargetOfSet(allowed, base); isWrapper {
+			return fmt.Errorf("volume: 底层卷 %q 不允许再套封装卷", base)
 		}
 	}
-	return detectWrapperCycle(name, target, allowed)
+	return detectWrapperCycle(name, base, allowed)
 }
 
 // volumeInSet 判定卷是否在给定（owner 可访问）集合中。
@@ -112,13 +120,20 @@ func volumeInSet(vols []volume.Volume, name string) bool {
 
 // wrapperTargetOfSet 返回 owner 可访问集合中卷的 Extra["target"]（该卷是封装卷且已设底层
 // 卷时）；非 wrapper / 无 target / 不在集合（他人私有卷不可见）→ ok=false（链在此终止）。
+// 嵌套 target（`卷/子目录`）归一为卷名段（子目录不是卷，链上节点以卷为单位判环）。
 func wrapperTargetOfSet(vols []volume.Volume, name string) (string, bool) {
 	for _, v := range vols {
 		if v.Name != name {
 			continue
 		}
 		t, ok := v.Extra["target"].(string)
-		return t, ok && strings.TrimSpace(t) != ""
+		if !ok || strings.TrimSpace(t) == "" {
+			return "", false
+		}
+		if base, _, nested := volume.SplitNestedTarget(t); nested {
+			return base, true
+		}
+		return t, true
 	}
 	return "", false
 }
@@ -168,6 +183,12 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// 嵌套封装 target（`<卷>/<子目录>`）额外校验：互斥占用 + 子目录必须不存在（409）。
+	// 非嵌套 target（local+root 等）零回归。
+	if err := h.validateNestedWrapperTarget(r.Context(), req.Extra); err != nil {
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
+		return
+	}
 	// 用户卷强制 owner-only ACL（评审 S1，2026-10-06）：新卷注入 Mode=Allow + 单 owner
 	// 白名单，使 data 面（列表/下载/wrapper 底层/转存目标）对非 owner fail-closed——此前
 	// 注入零值 ACL（Mode==""）令 volume.Authorize 对**任意 owner** 恒 true，跨 owner 枚举
@@ -193,6 +214,8 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "register failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
+	// 创建成功后登记嵌套封装占用关联（互斥占用生命周期：删底层卷查引用 409、删封装卷清关联）。
+	h.registerWrapperLink(owner, req.Name, req.Extra)
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 
@@ -252,6 +275,11 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "卷被活跃同步任务引用，请先取消任务"}, http.StatusConflict)
 		return
 	}
+	// 嵌套封装关联：本卷是其它封装卷的底层且仍有引用 → 409（先删引用方，防占用悬空）。
+	if h.links().hasRefs(name) {
+		sendJSONResponse(w, map[string]string{"error": "卷是封装卷的底层卷（存在嵌套封装引用），请先删除引用它的封装卷"}, http.StatusConflict)
+		return
+	}
 	// Set 移除（Close 后端）+ store 删文件。
 	if err := h.volSet.RemoveExternalVolume(name); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
@@ -263,6 +291,8 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
+	// 删除成功：若本卷是封装卷（曾占用底层子目录），清除其占用关联（关联生命周期闭环）。
+	h.clearWrapperLinks(name)
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 
