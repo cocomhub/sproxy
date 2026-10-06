@@ -94,21 +94,32 @@
 
   // serverErrorMessage 尝试从非 2xx 响应体解析服务端 error/message 字段（统一 {error: msg}
   // 与文件写面 {success, message: msg} 两种契约），有则拼进错误信息（如 "type 未注册或 extra
-  // 非法: ..." 或 "目录已被封装卷占用，只读（…）"）；解析失败（非 JSON/空 body）fallback 到
-  // 传入的原始信息（"请求失败（HTTP xxx）"）。401 在调用前已单独保留「认证失败」，不落到这里。
+  // 非法: ..." 或 "目录已被封装卷占用，只读（…）"）；非 JSON 但非空**平文本**响应体也透传
+  // （评审 B4 Minor #4：api_keys role-forbidden 的 "permission denied" 平文本此前被泛化为
+  // 「请求被拒绝（HTTP 403）」，用户拿不到真实信息）；空 body / body 已消费 → fallback 原始
+  // 信息（"请求失败（HTTP xxx）"）。401 在调用前已单独保留「认证失败」，不落到这里。
   async function serverErrorMessage(resp, fallback) {
     try {
       const text = await resp.text();
       if (!text) return fallback;
-      const parsed = JSON.parse(text);
-      const msg = (parsed && typeof parsed.error === 'string' && parsed.error) ? parsed.error
-        : (parsed && typeof parsed.message === 'string' && parsed.message) ? parsed.message : '';
-      if (msg) {
-        return fallback + ': ' + msg;
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+      if (parsed) {
+        const msg = (typeof parsed.error === 'string' && parsed.error) ? parsed.error
+          : (typeof parsed.message === 'string' && parsed.message) ? parsed.message : '';
+        if (msg) {
+          return fallback + ': ' + msg;
+        }
+        return fallback;
+      }
+      const plain = text.trim();
+      if (plain) {
+        // 长度上限防日志/UI 注入（服务端平文本错误通常一行）。
+        return fallback + ': ' + (plain.length > 200 ? plain.slice(0, 200) + '…' : plain);
       }
       return fallback;
     } catch (e) {
-      return fallback; // 非 JSON 响应体 / body 已消费
+      return fallback; // body 已消费
     }
   }
 

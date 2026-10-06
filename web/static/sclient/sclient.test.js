@@ -1577,3 +1577,18 @@ test('util.buildMultipart 片段断言（boundary/字段/文件存在性）', ()
   assert.ok(text.indexOf('[object Uint8Array]') < 0, '文件内容应为原始字节非字符串化');
   assert.ok(text.indexOf('hello' + String.fromCharCode(13) + String.fromCharCode(10)) >= 0, '文件字节与 CRLF 相邻');
 });
+
+test('B4#4：非 JSON 平文本 403 也透传（api_keys permission denied 不再泛化）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    // api_keys role-forbidden 返回 http.Error("permission denied") 平文本 → 应透传原文。
+    globalThis.fetch = async () => new Response('permission denied', { status: 403, headers: { 'Content-Type': 'text/plain' } });
+    let caught = null;
+    try { await transport.coreRequest('POST', '/delete', {}); } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_SERVER' && caught.status === 403, JSON.stringify(caught));
+    assert.ok(caught.message.includes('permission denied'), '平文本 403 应透传原文, got: ' + caught.message);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
