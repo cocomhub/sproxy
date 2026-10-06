@@ -10,6 +10,7 @@
 package meta
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -145,6 +146,17 @@ func ChunkSizeForSize(size int64) int64 {
 	default:
 		return 32 * miB
 	}
+}
+
+// Provider 是 FS 的**自带 meta 提供能力**（用户裁定 2026-10-07：卷自身提供正确 meta
+// 接口的无需 trusted 封装——如 secretdata 已有 shardseal.Meta 加密 meta，内含总
+// sha256 + 分块 sha256，直接转换即完整 FileMeta）。实现者：secretdata 等封装卷。
+// 使用方（trusted.Wrap）经类型断言探测：实现 Provider 的卷**不包装饰器**（交给卷
+// 处理），未实现才兜底封装。
+type Provider interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	// FileMeta 返回 rel 对应文件的完整 FileMeta（fail-closed：文件不存在/不可解析
+	// 返回错误；卷自带 meta 缺失时也应能计算或明确错误）。
+	FileMeta(ctx context.Context, rel string) (*FileMeta, error)
 }
 
 // nowRFC3339 供 CTime/MTime 使用（测试可注入可变时钟）。

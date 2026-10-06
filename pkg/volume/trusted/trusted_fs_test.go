@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
@@ -29,6 +30,51 @@ func refSHA(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
 }
+
+// TestWrap_ProviderShortCircuit 卷实现 meta.Provider → Wrap 返回原 fs（零封装，
+// 交给卷处理——用户裁定 2026-10-07）。LocalFS 未实现 Provider → 返回装饰器。
+func TestWrap_ProviderShortCircuit(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	got := Wrap(inner, Options{})
+	if _, ok := got.(*TrustedVolumeFS); !ok {
+		t.Fatal("LocalFS 未实现 Provider → Wrap 应返回装饰器")
+	}
+	prov := &providerFS{inner: inner}
+	if got2 := Wrap(prov, Options{}); got2 != prov {
+		t.Fatalf("实现 Provider 的卷 → Wrap 应返回原 fs（零封装），got %T", got2)
+	}
+}
+
+// providerFS 是最小 meta.Provider 实现（用于 Wrap 短路断言）。
+type providerFS struct{ inner syncpkg.FS }
+
+func (p *providerFS) ListDir(ctx context.Context, path string) ([]syncpkg.Entry, error) {
+	return p.inner.ListDir(ctx, path)
+}
+func (p *providerFS) Stat(ctx context.Context, path string) (*syncpkg.Entry, error) {
+	return p.inner.Stat(ctx, path)
+}
+func (p *providerFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
+	return p.inner.OpenRead(ctx, path)
+}
+func (p *providerFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+	return p.inner.WriteFile(ctx, path, r, size, mtime)
+}
+func (p *providerFS) Rename(ctx context.Context, from, to string) error {
+	return p.inner.Rename(ctx, from, to)
+}
+func (p *providerFS) Delete(ctx context.Context, path string) error {
+	return p.inner.Delete(ctx, path)
+}
+func (p *providerFS) MakeDir(ctx context.Context, path string) error {
+	return p.inner.MakeDir(ctx, path)
+}
+func (p *providerFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	return &meta.FileMeta{Version: 1, Size: 0, TotalSHA256: strings.Repeat("a", 64), ChunkSize: 1}, nil
+}
+
+var _ meta.Provider = (*providerFS)(nil)
 
 // TestWrite_GeneratesMeta 写文件 → .meta 生成（隐藏、占配额、可反序列化校验）。
 func TestWrite_GeneratesMeta(t *testing.T) {

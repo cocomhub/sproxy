@@ -42,7 +42,14 @@ type TrustedVolumeFS struct {
 }
 
 // Wrap 包装 fs 为可信卷。
-func Wrap(fs syncpkg.FS, opts Options) *TrustedVolumeFS {
+//
+// **用户裁定 2026-10-07：卷自身提供正确 meta 接口的无需封装，交给卷处理**——
+// fs 实现 meta.Provider（如 secretdata 已有 shardseal.Meta）时返回**原 fs**（零封装），
+// 卷自己负责提供与校验 FileMeta；未实现才包装饰器兜底。装配层因此无需感知卷类型。
+func Wrap(fs syncpkg.FS, opts Options) syncpkg.FS {
+	if _, ok := fs.(meta.Provider); ok {
+		return fs // 卷自带 meta（secretdata 等）：不封装，交给卷处理
+	}
 	return &TrustedVolumeFS{inner: fs, opts: opts}
 }
 
