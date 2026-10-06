@@ -111,11 +111,14 @@ func RecomputeGCIDAll(path string, candidates []int64) ([]string, error) {
 		block := make([]byte, bs)
 		inner := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 		for off := int64(0); off < size; off += bs {
-			if _, rerr := f.ReadAt(block, off); rerr != nil && rerr != io.EOF {
+			n, rerr := f.ReadAt(block, off)
+			if rerr != nil && rerr != io.EOF {
 				return nil, rerr
 			}
+			// R7-F1：短读（Stat 与 Read 间被并发截断/IO 异常）时只写实际读到的 n 字节
+			// （block 尾部残留旧数据/零填充会产出脏 GCID——命中率极低但属正确性隐患）。
 			inner.Reset()
-			inner.Write(block)
+			inner.Write(block[:n])
 			outer.Write(inner.Sum(nil))
 		}
 		out = append(out, hex.EncodeToString(outer.Sum(nil)))
