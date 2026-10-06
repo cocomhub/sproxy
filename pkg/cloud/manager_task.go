@@ -323,6 +323,12 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 	}
 	checker := m.integrityLookup(filepath.Ext(destPath))
 	if checker == nil {
+		// R2-P2：未知类型（无校验器）默认放行；force=true 时记录审计日志（显式强制
+		// 校验对未覆盖类型名不副实——不阻断，但可审计覆盖缺口）。
+		if task.ForceIntegrity {
+			m.logger.Warn("force-integrity: 类型无校验器，跳过语义校验（覆盖范围外）",
+				"task_id", task.ID, "ext", filepath.Ext(destPath))
+		}
 		return nil
 	}
 	rpt, err := checker.Check(ctx, destPath, result.Size)
@@ -608,6 +614,13 @@ retryLoop:
 		if !shouldRetryDownload(downloadErr, timedOut, attempt, maxRetries) {
 			break
 		}
+	}
+	// R2-P2：完整性校验失败重试耗尽（errIntegrityFail 已不可重试）且任务非 force →
+	// 按规格「默认放行标记 damaged」处理（而非 failTask——动态源每次内容不同时，
+	// checksum 不一致永不触 permanent，耗尽后应放行标记而非失败）。
+	if errors.Is(downloadErr, errIntegrityFail) && !task.ForceIntegrity {
+		m.setTaskIntegrityStatus(task, "damaged")
+		return result, nil
 	}
 	return result, downloadErr
 }

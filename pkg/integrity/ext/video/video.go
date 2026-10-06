@@ -59,7 +59,27 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 	var indexer interface {
 		KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
 	} = ffprobe.Indexer{}
-	offs, kerr := indexer.KeyframeOffsets(shardseal.KeyframeRequest{Path: path, Size: size})
+	// R2-P1：ffprobe 内部用 context.Background()（无 ctx 参数），不随调用方取消——
+	// 用户取消任务后 ffprobe 子进程仍跑完（最长 5min），下载槽/配额释放被推迟。
+	// 用 goroutine + select 包裹：外层 ctx 取消即中止等待（子进程由 ffprobe 内部
+	// timeout 兜底，进程残留由其自有超时清理；此处保证调用方不阻塞）。
+	type offsRes struct {
+		offs []int64
+		err  error
+	}
+	resCh := make(chan offsRes, 1)
+	go func() {
+		offs, kerr := indexer.KeyframeOffsets(shardseal.KeyframeRequest{Path: path, Size: size})
+		resCh <- offsRes{offs: offs, err: kerr}
+	}()
+	var offs []int64
+	var kerr error
+	select {
+	case <-ctx.Done():
+		return &integrity.Report{OK: false, Reason: "video: 校验被取消（任务取消/删除）"}, nil
+	case r := <-resCh:
+		offs, kerr = r.offs, r.err
+	}
 	if kerr != nil {
 		return &integrity.Report{OK: false, Reason: fmt.Sprintf("video: ffprobe 解析失败: %v", kerr)}, nil
 	}
