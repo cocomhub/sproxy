@@ -3,12 +3,12 @@
 
 // audit-rows-format.js —— WebUI「任务审计」渲染纯函数（传输页云任务行「审计」弹窗）。
 // 服务端数据源：CloudTask.audit → []audit.Row（SnapshotTask 自动携带）：
-//   Row{type, level, dim, step, start_ms, dur_ms, err, bw_bps, bytes, meta:{cipher_bytes?,algorithm?}, node_id}
+//   Row{type, level, dim, step, start_ms, dur_ms, err, bw_bps, bytes, meta:{cipher_bytes?,algorithm?}, node}
 // 渲染口径（spec）：
 //   - 通用列：type / level / step / dur_ms / bytes / bw_bps；
 //   - 加密行（type==='encrypt'）并排「明文 bytes」 vs 「密文 meta.cipher_bytes」+ algorithm（放「说明」列）；
 //   - download/transfer 行显示 dur_ms / bytes / bw_bps；
-//   - err（异常说明）与 algorithm / node_id 归入「说明」列。
+//   - err（异常说明）与 algorithm / node 归入「说明」列。
 // 纯函数可 node --test，不依赖 DOM。样式统一 var(--…) 禁内联亮色 hex；HTML 转义复用
 // appRender.escHtml（禁自建 escHtml）；字节大小复用 appRender.formatSize（禁自建 formatSize）。
 // 非 UMD：顶层 function + 底部 module.exports（Node require），浏览器靠 script 顺序挂全局。
@@ -31,14 +31,14 @@ function _escHtml(s) {
   return appRender.escHtml(s);
 }
 
-// _detailText(r) → 「说明」列：encrypt 行优先 algorithm；否则 err；再退 node_id；空 → ''。
+// _detailText(r) → 「说明」列：encrypt 行优先 algorithm；否则 err；再退 node；空 → ''。
 function _detailText(r) {
   const m = r && r.meta;
   if (r && r.type === 'encrypt' && m && m.algorithm) {
     return '算法: ' + appRender.escHtml(String(m.algorithm));
   }
   if (r && r.err) return appRender.escHtml(String(r.err));
-  if (r && r.node_id) return 'node: ' + appRender.escHtml(String(r.node_id));
+  if (r && r.node) return 'node: ' + appRender.escHtml(String(r.node));
   return '';
 }
 

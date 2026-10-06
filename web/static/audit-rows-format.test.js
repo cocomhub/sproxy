@@ -41,3 +41,14 @@ test('auditRowsHtml escapes untrusted type/step/detail', () => {
   assert.match(html, /&lt;script&gt;/);
   assert.ok(html.indexOf('a&b') === -1, 'step 的 & 必须转义');
 });
+
+test('auditRowsHtml 说明列展示 node（契约对齐 Row.NodeID json tag = "node"）', () => {
+  const html = auditRowsHtml({ rows: [{ type: 'download', step: 'x', dur_ms: 1, node: 'node-9' }] });
+  assert.match(html, /node: node-9/, 'node 应进说明列');
+  // 缺 node/err/algorithm → 说明列空，不出现 undefined。
+  const noNode = auditRowsHtml({ rows: [{ type: 'download', step: 'x', dur_ms: 1 }] });
+  assert.ok(noNode.indexOf('undefined') === -1, '缺 node 不渲染 undefined');
+  // node 转义（防 XSS）。
+  const xss = auditRowsHtml({ rows: [{ type: 'download', step: 'x', dur_ms: 1, node: '<img src=x>' }] });
+  assert.ok(xss.indexOf('<img') === -1, 'node 必须转义');
+});
