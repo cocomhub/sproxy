@@ -14,7 +14,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -138,6 +141,26 @@ func (a filesExternalDeleter) StatSize(ctx context.Context, _, owner, rel string
 		return 0, true, nil
 	}
 	return e.Size, true, nil
+}
+
+// FileChecksum 实现 files.ExternalFileChecksum（评审 CRIT-1）：从外部卷 FS 流式读取明文
+// 内容计算 SHA-256（hex）。外部卷（secretdata 等）的 FS 读即解密密文 → 明文指纹，与上传
+// 时的客户端 checksum 可比。不可用/目录 → 返回错误（调用方 500 保留，不静默删）。
+func (a filesExternalDeleter) FileChecksum(ctx context.Context, _, owner, rel string) (string, error) {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return "", err
+	}
+	rc, oerr := a.fs.OpenRead(ctx, key)
+	if oerr != nil {
+		return "", oerr
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, cerr := io.Copy(h, rc); cerr != nil {
+		return "", cerr
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Delete 实现 files.ExternalDeleter。

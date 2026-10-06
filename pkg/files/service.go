@@ -162,6 +162,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -241,6 +242,17 @@ type ExternalDeleter interface {
 // 断言失败 = 未提供外部删除能力，delete 走既有本地卷路径（零回归）。
 type ExternalVolumeDeleter interface {
 	ExternalDeleter(name string) ExternalDeleter
+}
+
+// ExternalFileChecksum 是 ExternalDeleter 的**可选扩展**（评审 CRIT-1，2026-10-07）：
+// 返回卷上 owner 的 rel 文件的实际内容 SHA-256（hex，明文）。deleteExternalFile 用它
+// 做「ExpectedChecksum 非空且与实际不符 → 保留文件 + 400」门禁（对齐本地删除契约——
+// 否则外部封装卷删除完全绕过 checksum 校验，客户端随手带错 checksum 即删）。
+//
+// 未实现（未来非 FS 后端）→ 删除路径在 ExpectedChecksum 非空时**无法校验**，回落
+// StatSize 的 size 锚做弱校验并告警（记录取舍：强内容校验由实现侧提供，缺失即降级）。
+type ExternalFileChecksum interface {
+	FileChecksum(ctx context.Context, volumeName, owner, rel string) (string, error)
 }
 
 // StorageManager 是本域需要的**容量核算**能力（P5 回退预留路径：quota 未装配时按字节
@@ -465,6 +477,25 @@ func (s *Service) SaveIndexSnapshots() int {
 	// 未装配 sync → publishDirty no-op（零回归）。
 	s.index.publishDirty(context.Background())
 	return n
+}
+
+// IndexMove 跨卷移动成功后同步搜索索引（旁路面 /api/volumes/move、rebalance 物理搬移后
+// 调用）：移除源卷条目 + 写入目标卷条目（评审 I-②，2026-10-07：move 旁路索引更新，否则
+// 源卷列表 stale 幽灵文件、目标卷缺失/错位）。rel 为租户根相对路径（user/<name>）；size
+// 为已搬字节；toRoot 为目标卷租户根（取 mtime，跨卷复制后非原值也可录真值）。index nil → 零操作。
+func (s *Service) IndexMove(owner, rel string, size int64, toVol string, toRoot *storage.Root) {
+	if s.index == nil {
+		return
+	}
+	usr := strings.TrimPrefix(rel, "user/")
+	s.index.remove(owner, usr)
+	var modTime int64
+	if toRoot != nil {
+		if fi, err := toRoot.Stat(rel); err == nil {
+			modTime = fi.ModTime().UnixNano()
+		}
+	}
+	s.index.upsert(owner, usr, size, modTime, toVol, toRoot, "user/"+usr)
 }
 
 // AttachIndexSync 挂载集群索引同步钩子（装配层调用；nil = 不装配零回归）。

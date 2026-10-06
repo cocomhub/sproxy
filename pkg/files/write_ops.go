@@ -961,8 +961,13 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 		return RenameFileResult{}, locErr
 	}
 
-	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——目标（写侧）路径命中占用子目录
-	// → 拒绝重命名。
+	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——源侧命中占用子目录 → 拒绝重命名
+	// （评审 CRIT-2：同卷 rename 源侧仅目标侧守卫曾漏——把占用子目录密文同卷 rename 出占用
+	// 目录 = 从占用目录「搬走/删源」，与跨卷 move 源侧守卫同构，破坏封装）。
+	if err := s.rejectOccupiedWrite(homeVol, userVisibleRel(fromRel)); err != nil {
+		return RenameFileResult{}, err
+	}
+	// 写保护（用户语义 #6）：目标（写侧）路径命中占用子目录 → 拒绝重命名。
 	if err := s.rejectOccupiedWrite(homeVol, userVisibleRel(toRel)); err != nil {
 		return RenameFileResult{}, err
 	}
@@ -1452,13 +1457,19 @@ func (s *Service) deleteExternalVolumeTarget(ctx context.Context, owner, rel, re
 }
 
 // locateExternalDeleteTarget 定位外部卷上的删除目标（C2，2026-10-06）：
-//   - 显式 explicitVol → 该卷是外部卷且存在 rel → 命中（不在外部卷/不存在 → 未命中，
-//     回落既有本地路径语义）；
-//   - 空 explicitVol → 遍历视图外部卷 stat 探测（与 locateOwnerFile 的本地扫描同构）。
+//   - 显式 explicitVol → 该卷是外部卷、owner 被 ACL 放行且存在 rel → 命中（不在外部卷/
+//     无 ACL/不存在 → 未命中，回落既有本地路径语义）；
+//   - 空 explicitVol → 遍历 owner **ACL 放行**的视图外部卷 stat 探测（I-5，2026-10-07：
+//     外部删除候选按 volume.AllowedVolumes 过滤——既不越权删 ACL 排除卷内文件，也不对
+//     未授权卷 StatSize 做跨卷存在性 oracle）。
 //
 // stat 探测失败（非不存在）视同未命中——调用方回落本地路径（既有 404/500 语义兜底）。
 func (s *Service) locateExternalDeleteTarget(ctx context.Context, ext ExternalVolumeDeleter, owner, rel, explicitVol string) (string, bool) {
+	allowed := allowedVolumeSet(s.rt.volSet().All(), owner)
 	if explicitVol != "" {
+		if !allowed[explicitVol] {
+			return "", false
+		}
 		d := ext.ExternalDeleter(explicitVol)
 		if d == nil {
 			return "", false
@@ -1469,6 +1480,9 @@ func (s *Service) locateExternalDeleteTarget(ctx context.Context, ext ExternalVo
 		return "", false
 	}
 	for _, v := range s.rt.volSet().All() {
+		if !allowed[v.Name] {
+			continue
+		}
 		d := ext.ExternalDeleter(v.Name)
 		if d == nil {
 			continue
@@ -1478,6 +1492,16 @@ func (s *Service) locateExternalDeleteTarget(ctx context.Context, ext ExternalVo
 		}
 	}
 	return "", false
+}
+
+// allowedVolumeSet 返回 owner 可用的卷名集合（volume.AllowedVolumes；nil volSet → 空）。
+// 外部删除候选的 per-owner ACL 门（I-5）与删除/列表路径的 AD-6 语义一致。
+func allowedVolumeSet(vols []volume.Volume, owner string) map[string]bool {
+	out := make(map[string]bool)
+	for _, v := range volume.AllowedVolumes(vols, owner) {
+		out[v.Name] = true
+	}
+	return out
 }
 
 // deleteExternalFile 外部卷整流删除（C2，2026-10-06）：stat 计量 → 写保护预检（链式嵌套：
@@ -1499,6 +1523,12 @@ func (s *Service) deleteExternalFile(ctx context.Context, ext ExternalDeleter, v
 	// 写保护（用户语义 #6，C2 兜底）：链式嵌套下本卷子目录被其它封装卷占用 → 拒绝删除。
 	if err := s.rejectOccupiedWrite(volName, userVisibleRel(rel)); err != nil {
 		return DeleteFileResult{}, err
+	}
+	// 评审 CRIT-1（2026-10-07）：外部删除比对实际内容 checksum——ExpectedChecksum 非空且
+	// 与实际不符 → **保留文件 + 400**（对齐本地删除契约，杜绝外部封装卷绕过 checksum 门禁
+	// 静默删）。
+	if oerr := s.verifyExternalDeleteChecksum(ctx, ext, volName, owner, rel, remotePath, size, input); oerr != nil {
+		return DeleteFileResult{}, oerr
 	}
 	if derr := ext.Delete(ctx, volName, owner, rel); derr != nil {
 		s.rt.logger().ErrorContext(ctx, "外部卷删除：删除失败", "file_name", remotePath, "volume", volName, "error", derr)
@@ -1526,6 +1556,35 @@ func (s *Service) deleteExternalFile(ctx context.Context, ext ExternalDeleter, v
 	s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "")
 	s.rt.publishFileEvent(EventDelete, owner, rel, size)
 	return DeleteFileResult{RemotePath: remotePath, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
+}
+
+// verifyExternalDeleteChecksum 外部删除前比对实际内容 checksum（评审 CRIT-1）：
+//   - ExpectedChecksum 为空 → nil（无门禁）；
+//   - 实现侧提供 ExternalFileChecksum → 计算实际明文 SHA-256：计算失败 → 500 保留；
+//     与实际不符 → 400 保留（对齐本地删除契约）；
+//   - 未实现（未来非 FS 后端）→ size 弱锚并告警（记录取舍：强内容校验由实现侧提供，
+//     缺失即降级为尺寸级弱校验）。
+func (s *Service) verifyExternalDeleteChecksum(ctx context.Context, ext ExternalDeleter, volName, owner, rel, remotePath string, size int64, input DeleteFileInput) error {
+	if input.ExpectedChecksum == "" {
+		return nil
+	}
+	v, ok := ext.(ExternalFileChecksum)
+	if !ok {
+		s.rt.logger().WarnContext(ctx, "外部卷删除：后端未实现内容校验，回落 size 弱锚（checksum 门禁降级）",
+			"file_name", remotePath, "volume", volName, "size", size)
+		return nil
+	}
+	cs, cErr := v.FileChecksum(ctx, volName, owner, rel)
+	if cErr != nil {
+		s.rt.logger().ErrorContext(ctx, "外部卷删除：计算内容 checksum 失败（保留文件）", "file_name", remotePath, "volume", volName, "error", cErr)
+		return &HTTPError{Status: http.StatusInternalServerError, Message: errMsgFileChecksum}
+	}
+	if !checksum.Equal(cs, input.ExpectedChecksum) {
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
+		s.rt.logger().WarnContext(ctx, errMsgFileChecksum, "file_name", remotePath, "volume", volName)
+		return &HTTPError{Status: http.StatusBadRequest, Message: errMsgFileChecksum}
+	}
+	return nil
 }
 
 // verifyDeleteQuarantine 基于 fd 校验 quarantine 内容（打开失败 → 恢复 rel 并 500）。
