@@ -416,6 +416,7 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithDedup(rt),
 			files.WithAudit(rt),
 			files.WithEventSink(rt),
+			files.WithOccupiedWriteGuard(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 			files.WithBandwidthLimiter(rt),
 		}

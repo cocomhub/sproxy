@@ -34,6 +34,26 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
+// userVisibleRel 把租户根内相对路径（user/<path>）归一为用户可见相对路径（<path>），
+// 与占用 Subdir（卷根相对的用户可见坐标）对齐比较。
+func userVisibleRel(rel string) string {
+	return strings.TrimPrefix(rel, "user/")
+}
+
+// rejectOccupiedWrite 判定写目标（volName 卷 + userRel 用户可见相对路径）是否命中被封装卷
+// 占用的子目录（用户语义 #6 写保护：原始底层卷该子目录禁止写、只能读）。命中返回
+// HTTPError{403}（错误文案即对外回包）；未命中 / 未装配写保护返回 nil。
+func (s *Service) rejectOccupiedWrite(volName, userRel string) error {
+	g := s.rt.occupiedWriteGuard()
+	if g == nil {
+		return nil
+	}
+	if err := g.CheckOccupiedWrite(volName, userRel); err != nil {
+		return &HTTPError{Status: http.StatusForbidden, Message: err.Error()}
+	}
+	return nil
+}
+
 // WriteFileInput 是上传（写文件）的领域入参。**不含任何 HTTP 类型**：`Mtime` 由调用方从
 // `X-File-MTime` 头解析后传入（0 = 不设置）。
 type WriteFileInput struct {
@@ -585,6 +605,34 @@ func (s *Service) volumeNameForRoot(root *storage.Root) string {
 	return ""
 }
 
+// volumeNameForTenant 返回 tnt 所在卷名（多卷）。判定：比对租户根物理绝对路径与各卷根
+// <卷根>/<owner>（卷上租户由 volumeTenant 恰以该路径 OpenRoot 建立，clean 后精确相等）。
+// volSet nil / 租户不可用 / 未命中任何卷 → 空。O(n)（n = 卷数，个位数），低频路径可接受。
+func (s *Service) volumeNameForTenant(tnt *storage.Tenant) string {
+	if tnt == nil || tnt.Root() == nil || s.rt.volSet() == nil {
+		return ""
+	}
+	tenantAbs, ok := tnt.Root().Abs("")
+	if !ok {
+		return ""
+	}
+	tenantAbs = filepath.Clean(tenantAbs)
+	for _, v := range s.rt.volSet().All() {
+		rt := s.rt.volSet().Root(v.Name)
+		if rt == nil {
+			continue
+		}
+		volOwnerAbs, ok2 := rt.Abs(tnt.ID)
+		if !ok2 {
+			continue
+		}
+		if filepath.Clean(volOwnerAbs) == tenantAbs {
+			return v.Name
+		}
+	}
+	return ""
+}
+
 // ---- 目录族域操作（mkdir / rmdir）----
 //
 // 命名说明：域操作用 MakeDir / RemoveDir（与 sync.FS.MakeDir 同词），HTTP 处理器仍叫
@@ -622,6 +670,10 @@ func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
 	target := s.primaryViewTenant(owner)
 	if target == nil || target.Root() == nil {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
+	}
+	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——目标目录命中占用子目录 → 拒绝创建。
+	if err := s.rejectOccupiedWrite(s.volumeNameForTenant(target), userVisibleRel(rel)); err != nil {
+		return MakeDirResult{}, err
 	}
 	if mkErr := target.Root().MkdirAll(rel, 0755); mkErr != nil {
 		s.rt.logger().Error(errMsgCreateDirFailed, "dir", remotePath, "error", mkErr)
@@ -682,6 +734,14 @@ func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult,
 	targets := s.collectRmdirTargets(owner, rel, tnt0)
 	if len(targets) == 0 {
 		return RemoveDirResult{}, &HTTPError{Status: http.StatusNotFound, Message: "目录不存在"}
+	}
+
+	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——任一命中卷的该目录路径命中
+	// 占用子目录 → 拒绝 rmdir（fail-closed，占用目录禁止删）。
+	for _, tg := range targets {
+		if err := s.rejectOccupiedWrite(tg.volName, userVisibleRel(rel)); err != nil {
+			return RemoveDirResult{}, err
+		}
 	}
 
 	// 符号链接 / 非目录检查与 TOCTOU 二次检查：在首个命中卷（默认卷优先）执行，错误语义与
@@ -899,6 +959,12 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 	homeVol, root, locErr := s.resolveRenameHome(ctx, owner, fromRel, input.ExplicitVol, tnt)
 	if locErr != nil {
 		return RenameFileResult{}, locErr
+	}
+
+	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——目标（写侧）路径命中占用子目录
+	// → 拒绝重命名。
+	if err := s.rejectOccupiedWrite(homeVol, userVisibleRel(toRel)); err != nil {
+		return RenameFileResult{}, err
 	}
 
 	// AD-4 唯一性：目标 rel 不得已存在于 owner 视图其它卷（否则 rename 后同逻辑路径跨卷
@@ -1244,6 +1310,10 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	homeVol, root, handled, res, locErr := s.locateDeleteTarget(ctx, owner, rel, input)
 	if handled {
 		return res, locErr
+	}
+	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——目标路径命中占用子目录 → 拒绝删除。
+	if err := s.rejectOccupiedWrite(homeVol, userVisibleRel(rel)); err != nil {
+		return DeleteFileResult{}, err
 	}
 
 	// ---- TOCTOU 加固（2026-09-17）：rename-to-quarantine ----

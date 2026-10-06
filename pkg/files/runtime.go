@@ -56,6 +56,7 @@ type runtime struct {
 	bandwidth     BandwidthLimiter
 	eventSink     EventListener
 	contentIndex  bool
+	occupiedGuard OccupiedWriteGuard
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
@@ -84,23 +85,24 @@ func New(tenants TenantResolver, opts ...Option) (*Service, error) {
 // newRuntime 把 config 折叠为 runtime，并为未注入项装配默认实现。
 func newRuntime(tenants TenantResolver, cfg config) runtime {
 	rt := runtime{
-		tenants:      tenants,
-		loggerFn:     cfg.logger,
-		actor:        cfg.actor,
-		volumes:      cfg.volumes,
-		quota:        cfg.quota,
-		ledger:       cfg.ledger,
-		chunkSizeFn:  cfg.chunkSize,
-		uploadLimit:  cfg.uploadLimit,
-		versioning:   cfg.versioning,
-		chunked:      cfg.chunked,
-		dedup:        cfg.dedup,
-		locks:        cfg.locks,
-		metrics:      cfg.metrics,
-		audit:        cfg.audit,
-		bandwidth:    cfg.bandwidth,
-		eventSink:    cfg.eventSink,
-		contentIndex: cfg.contentIndex,
+		tenants:       tenants,
+		loggerFn:      cfg.logger,
+		actor:         cfg.actor,
+		volumes:       cfg.volumes,
+		quota:         cfg.quota,
+		ledger:        cfg.ledger,
+		chunkSizeFn:   cfg.chunkSize,
+		uploadLimit:   cfg.uploadLimit,
+		versioning:    cfg.versioning,
+		chunked:       cfg.chunked,
+		dedup:         cfg.dedup,
+		locks:         cfg.locks,
+		metrics:       cfg.metrics,
+		audit:         cfg.audit,
+		bandwidth:     cfg.bandwidth,
+		eventSink:     cfg.eventSink,
+		contentIndex:  cfg.contentIndex,
+		occupiedGuard: cfg.occupiedGuard,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default
@@ -223,6 +225,9 @@ func (r *runtime) storageManager() StorageManager {
 func (r *runtime) fileLocks() FileLocks { return r.locks }
 
 func (r *runtime) metricsRecorder() Metrics { return r.metrics }
+
+// occupiedWriteGuard 返回写保护判定能力（未装配 → nil，调用点按放行处理）。
+func (r *runtime) occupiedWriteGuard() OccupiedWriteGuard { return r.occupiedGuard }
 
 func (r *runtime) resolveDownloadPath(req *http.Request) (DownloadPath, error) {
 	return r.downloadPaths.Resolve(req)

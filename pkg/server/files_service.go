@@ -109,6 +109,13 @@ func (r filesRuntime) Route(owner, rel, explicitVol string, size int64, forceHom
 	return r.h.routeUploadForFiles(owner, rel, explicitVol, size, forceHomeVol)
 }
 
+// CheckOccupiedWrite 实现 files.OccupiedWriteGuard：判定 volName 卷上 userRel（用户可见相对
+// 路径，如 videos/x）的写是否命中被封装卷占用的子目录（用户语义 #6 写保护）。命中返回
+// errVolumeOccupiedReadOnly（装配层映射 403）；未命中返回 nil。
+func (r filesRuntime) CheckOccupiedWrite(volName, userRel string) error {
+	return r.h.checkWrapperOccupiedWrite(volName, userRel)
+}
+
 func (r filesRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.h.quotaScopeFor(owner, rel) }
 
 func (r filesRuntime) ChecksumStoreFor(owner string) *checksum.ChecksumStore {

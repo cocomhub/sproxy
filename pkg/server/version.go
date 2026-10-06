@@ -169,6 +169,17 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	dstTnt, dstVol := h.resolveRestoreDestination(owner, targetRel, verLoc)
 	dstRoot := dstTnt.Root()
 
+	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——恢复目标路径命中占用子目录
+	// → 拒绝 restore（恢复是写回 user 桶）。
+	if err := h.checkWrapperOccupiedWrite(dstVol, userVisibleRelOf(targetRel)); err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "目录已被封装卷占用，只读",
+		})
+		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusForbidden)
+		return
+	}
+
 	// 先保存当前版本（回滚前备份）到目标卷（文件所在卷），备份失败时返回 500 拒绝执行恢复
 	if !h.backupBeforeRestore(w, r, remotePath, versionIDStr, owner, dstTnt) {
 		return

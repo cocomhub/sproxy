@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -24,6 +25,11 @@ import (
 
 // errVolumeDirOccupied 是互斥占用冲突哨兵错误（建卷校验返回，409）。
 var errVolumeDirOccupied = errors.New("volume: 底层卷子目录已被封装卷占用")
+
+// errVolumeOccupiedReadOnly 是普通写路径对「被封装卷占用的底层子目录」的写保护拦截哨兵错误
+// （用户语义 #6：原始底层卷该子目录禁止写、只能读；封装卷自身不受影响——不同卷不冲突）。
+// 普通文件写操作（上传/分块完成/删除/批量删除/重命名/mkdir/rmdir/版本 restore）命中 → 403。
+var errVolumeOccupiedReadOnly = errors.New("volume: 目录已被封装卷占用，只读")
 
 // errVolumeDirExists 是嵌套封装子目录已存在哨兵错误（建卷校验返回，409「目录已存在」，
 // 防与底层卷既有数据混合）。
@@ -121,11 +127,15 @@ func (r *volumeLinksRegistry) hasRefs(base string) bool {
 
 // links 返回嵌套封装关联索引（懒创建 + 装配期一次性从用户卷 store 重建）。
 // 重建防重启丢失：扫描全部用户卷中 target 为 `<卷>/<子目录>` 形态的封装卷并登记。
+//
+// 并发安全：注册表**创建也纳入 rebuildLinksOnce**（同一 sync.Once 内先建后扫）——避免
+// `if h.volumeLinks == nil` 裸检查在并发首次访问（上传路由 guard / 建卷校验等）下对指针的
+// 数据竞争（-race 实测：并发上传同时触达 links()）。Once 保证恰一次建表+重建，且仅登记
+// 底层卷引用；运行时新建封装卷由 registerWrapperLink 追加登记（与 Once 重建互不冲突——
+// register 按 wrapper 去重）。
 func (h *Handlers) links() *volumeLinksRegistry {
-	if h.volumeLinks == nil {
-		h.volumeLinks = newVolumeLinksRegistry()
-	}
 	h.rebuildLinksOnce.Do(func() {
+		h.volumeLinks = newVolumeLinksRegistry()
 		if h.userVolumes == nil {
 			return
 		}
@@ -191,6 +201,33 @@ func (h *Handlers) registerWrapperLink(owner, wrapper string, extra map[string]a
 		return
 	}
 	h.links().register(volumeLink{Base: base, Subdir: subdir, Wrapper: wrapper, Owner: owner})
+}
+
+// userVisibleRelOf 把租户根内相对路径（user/<path>）归一为用户可见相对路径（<path>），
+// 与占用 Subdir（卷内用户可见坐标，如 videos，不含 user/<owner> 前缀）对齐比较。
+func userVisibleRelOf(rel string) string {
+	return strings.TrimPrefix(rel, "user/")
+}
+
+// checkWrapperOccupiedWrite 判定 baseVolName 卷上 userVisibleRel（相对用户桶的可见路径，如
+// videos/x）的写是否命中被封装卷占用的子目录（用户语义 #6 写保护：原始底层卷该子目录禁止写、
+// 只能读）。命中 → errVolumeOccupiedReadOnly；未命中 → nil。
+//
+// baseVolName 为空（无卷语义旧装配回落默认租户）时归一为默认卷名（占用在默认卷时同样拦截）。
+// 坐标说明：占用 Subdir 是卷根相对的用户可见坐标（如 main/videos → videos）；传入的
+// userVisibleRel 同为该坐标（调用方用 userVisibleRelOf(rel) 归一）。比较用定向包含
+// （relPath == subdir || HasPrefix(relPath, subdir+"/")），即「写目标落在占用子目录内/自身」
+// → 拦截；写父目录/兄弟路径不拦（与互斥占用的对称 PathsOverlap 区分——写保护是定向的）。
+func (h *Handlers) checkWrapperOccupiedWrite(baseVolName, userVisibleRel string) error {
+	if baseVolName == "" && h.volSet != nil {
+		baseVolName = h.volSet.Default().Name
+	}
+	for _, l := range h.links().refsOfBase(baseVolName) {
+		if userVisibleRel == l.Subdir || strings.HasPrefix(userVisibleRel, l.Subdir+"/") {
+			return fmt.Errorf("%w（%s/%s 被封装卷 %s 占用）", errVolumeOccupiedReadOnly, baseVolName, l.Subdir, l.Wrapper)
+		}
+	}
+	return nil
 }
 
 // clearWrapperLinks 在封装卷删除成功后清除其占用关联。
