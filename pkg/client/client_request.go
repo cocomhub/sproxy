@@ -479,6 +479,11 @@ func doJSONStatusError(resp *http.Response) error {
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%w: %s", ErrNotFound, err.Error())
 	}
+	// 未认证（401）映射为 ErrUnauthorized 哨兵：仅此错误才应触发 SK 轮换
+	// （签名失效 / 凭据过期），5xx / 网络错误不触发（评审 P1-A：误轮换风暴）。
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("%w: %s", ErrUnauthorized, err.Error())
+	}
 	// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
 	// （链式操作的存储满退避重试依赖此判断，不再退化为脆弱的字符串匹配）
 	if resp.StatusCode == http.StatusInsufficientStorage {
