@@ -6,7 +6,6 @@ package cloud
 import (
 	"context"
 
-	"github.com/cocomhub/sproxy/pkg/integrity"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -31,12 +30,6 @@ func (m *CloudDownloadManager) acquireCheckMem(ctx context.Context, est int64) (
 		return func() {}, false
 	}
 	return func() { m.checkMemSem.Release(est) }, true
-}
-
-// checkMemEstimate 估算校验器一次 Check 的峰值内存占用（MemEstimator 可选接口；
-// 未实现返回 0 = 无内存需求）。
-func checkMemEstimate(c integrity.Checker, path string, size int64) int64 {
-	return integrity.MemEstimateOf(c, path, size)
 }
 
 // checkMemOverQuote 判断估算是否超配额（> MaxCheckMemBytes）：超配额 → 跳过校验

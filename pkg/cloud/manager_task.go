@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
 )
 
@@ -333,7 +334,7 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 	}
 	// 内存配额治理（用户裁定 2026-10-06）：Check 前按估算内存占用排队（不足等待释放）；
 	// 单文件估算超配额 → 跳过校验标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
-	est := checkMemEstimate(checker, destPath, result.Size)
+	est := integrity.MemEstimateOf(checker, destPath, result.Size)
 	if m.checkMemOverQuote(est) {
 		m.logger.Warn("integrity check skipped: estimate exceeds memory quota",
 			"task_id", task.ID, "ext", filepath.Ext(destPath), "estimate_bytes", est)
@@ -615,6 +616,12 @@ func (m *CloudDownloadManager) runRetryLoop(ctx context.Context, dlCtx context.C
 		if !shouldRetryDownload(downloadErr, timedOut, attempt, maxRetries) {
 			break
 		}
+		// 完整性重下（errIntegrityFail 可重试分支）：回拨本次已下载字节（account
+		// committed + 全局账本），否则重下覆盖写时同一 QuotaWriter account 再 commit
+		// 一次 → 租户 Scope committed 虚高一倍（与 transfer 重下路径 NM2 对齐）。
+		// 按磁盘真值回拨（stat destPath）而非 result.Size：动态源重下后尺寸可能不同。
+		// 不回拨会误触同租户其它下载 ErrStorageFull（owner 配额接近上限时）。
+		m.releaseIntegrityRetryBytes(task, result, destPath, downloadErr)
 	}
 	// R2-P2：完整性校验失败重试耗尽（errIntegrityFail 已不可重试）且任务非 must-pass →
 	// 按规格「默认放行标记 damaged」处理（而非 failTask——动态源每次内容不同时，
@@ -1435,4 +1442,20 @@ func (m *CloudDownloadManager) releaseDownloadedBytes(task *CloudTask, size int6
 	if task.account != nil {
 		task.account.ReleaseCommitted(size)
 	}
+}
+
+// releaseIntegrityRetryBytes 完整性重下前的账本回拨（MAJOR-1 修复）：errIntegrityFail
+// 可重试分支调用——回拨本次已下载字节（account committed + 全局账本占位），否则重下
+// 覆盖写时同一 QuotaWriter account 再 commit 一次 → 租户 Scope committed 虚高一倍。
+// 按磁盘真值（stat destPath）而非 result.Size（动态源重下后尺寸可能不同）。磁盘文件
+// **不删**（damaged 放行需保留产物；覆盖写天然重写）。
+func (m *CloudDownloadManager) releaseIntegrityRetryBytes(task *CloudTask, result *downloader.Result, destPath string, downloadErr error) {
+	if !errors.Is(downloadErr, errIntegrityFail) {
+		return
+	}
+	diskSize := result.Size
+	if st, serr := os.Stat(destPath); serr == nil {
+		diskSize = st.Size()
+	}
+	m.releaseDownloadedBytes(task, diskSize)
 }

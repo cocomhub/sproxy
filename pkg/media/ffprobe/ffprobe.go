@@ -38,6 +38,13 @@ var ErrFFprobeMissing = errors.New("ffprobe: 未找到 ffprobe 可执行文件�
 // （ext/video）与 ErrFFprobeMissing 同分支放行。
 var ErrFFprobeOutputLimit = errors.New("ffprobe: 输出超上限（帧数异常多）")
 
+// ErrFFprobeExec 是哨兵错误：ffprobe 子进程**未正常产出**（exec 启动失败/非零退出/
+// IO 失败）——环境/资源限制 ≠ 文件损坏。语义与 ErrFFprobeMissing/ErrFFprobeOutputLimit
+// 同级：视频校验器（ext/video）fail-open 放行。**仅 ffprobe 正常执行但解析结果语义
+// 异常**（如容器非法）保留为内容异常（OK=false）——该判定在 parseKeyframes 层（有 JSON
+// 输出才算内容可解析），非本哨兵。
+var ErrFFprobeExec = errors.New("ffprobe: 执行/读取失败（环境或资源限制）")
+
 // onFragmentedMP4 是 fMP4 检测统计 hook（atomic.Pointer 保证读写无数据竞争——装配期
 // SetOnFragmentedMP4 与运行期 notify 可跨 goroutine 并发，显式内存屏障）。
 // ffprobe 对 fMP4 是**正常解析**（不降级），此统计供真实场景量化 fMP4 使用量（多数环境
@@ -111,7 +118,8 @@ func (realRunner) Run(ctx context.Context, path string, file io.Reader) ([]byte,
 	// 大文件可能产生数 MB 至数百 MB JSON——Buffer 无界占内存，临时文件可控（读回后删除）。
 	outTmp, terr := os.CreateTemp("", "sproxy-ffprobe-*.json")
 	if terr != nil {
-		return nil, fmt.Errorf("ffprobe: 创建临时输出文件失败: %w", terr)
+		// 环境/资源错误（TMPDIR 满/无权限）≠ 文件损坏：归 ErrFFprobeExec 供调用方 fail-open。
+		return nil, fmt.Errorf("%w: 创建临时输出文件失败: %v", ErrFFprobeExec, terr)
 	}
 	defer os.Remove(outTmp.Name())
 	cmd.Stdout = outTmp
@@ -119,7 +127,17 @@ func (realRunner) Run(ctx context.Context, path string, file io.Reader) ([]byte,
 	cmd.Stderr = &stderr
 	if runErr := cmd.Run(); runErr != nil {
 		outTmp.Close()
-		return nil, fmt.Errorf("ffprobe 执行失败: %w", runErr)
+		// **区分内容异常 vs 环境/资源错误**（第二轮回合评审 I1）：
+		//   - *exec.ExitError（ffprobe 正常启动并退出非零，如容器非法/截断 → 内容异常）
+		//     → 原样返回（video Check 判 OK=false，真异常）；
+		//   - 其余（启动失败/OOM kill/超时被杀/exec 权限）→ ErrFFprobeExec 哨兵
+		//     （环境/资源限制 ≠ 文件损坏，video Check fail-open 放行——慢盘上超时的
+		//     合法大视频不误判 damaged）。
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) && exitErr.ExitCode() >= 0 {
+			return nil, fmt.Errorf("ffprobe 执行失败（exit %d）: %v", exitErr.ExitCode(), runErr)
+		}
+		return nil, fmt.Errorf("%w: ffprobe 执行失败: %v", ErrFFprobeExec, runErr)
 	}
 	// M5-I2：ffprobe 输出 JSON 大小 ∝ 帧数（低码率高帧率视频同字节数帧数可高 1-2 个
 	// 数量级），无界 ReadFile 会把数百 MB JSON 全读进 Go 堆——估算（EstimateMem 按
@@ -128,17 +146,17 @@ func (realRunner) Run(ctx context.Context, path string, file io.Reader) ([]byte,
 	// 放行，不误判 damaged）；同时避免超大 JSON 撑爆内存。
 	if fi, ferr := outTmp.Stat(); ferr != nil {
 		outTmp.Close()
-		return nil, fmt.Errorf("ffprobe: stat 输出文件失败: %w", ferr)
+		return nil, fmt.Errorf("%w: stat 输出文件失败: %v", ErrFFprobeExec, ferr)
 	} else if fi.Size() > maxFFprobeOutputBytes {
 		outTmp.Close()
 		return nil, fmt.Errorf("%w（size=%d）", ErrFFprobeOutputLimit, fi.Size())
 	}
 	if serr := outTmp.Close(); serr != nil {
-		return nil, fmt.Errorf("ffprobe: 关闭输出文件失败: %w", serr)
+		return nil, fmt.Errorf("%w: 关闭输出文件失败: %v", ErrFFprobeExec, serr)
 	}
 	out, rerr := os.ReadFile(outTmp.Name())
 	if rerr != nil {
-		return nil, fmt.Errorf("ffprobe: 读输出文件失败: %w", rerr)
+		return nil, fmt.Errorf("%w: 读输出文件失败: %v", ErrFFprobeExec, rerr)
 	}
 	return out, nil
 }

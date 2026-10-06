@@ -54,18 +54,18 @@ type VideoChecker struct{}
 //     json.Unmarshal（parseKeyframes 需完整数组）——JSON 大小随视频**帧数**增长
 //     （低码率高帧率视频同字节数帧数可高 1-2 个数量级），**与文件字节数无固定比例**；
 //     实测 4.6GB/24958 帧 ≈ 2.5MB JSON（~0.5MB/GB 样本密度）。
-//   - 估算：JSON 按 size×1MiB/2GB 折算（样本密度的保守上浮 2×）+ 进程 64MiB；但
-//     读入端已由 maxFFprobeOutputBytes（256MiB）硬封顶（超限 fail-closed 放行）——
-//     实际占用最坏 = 64MiB 进程 + 256MiB JSON，此估算在低码率高帧率极端场景仍可能
-//     低于实际（配额信号量按实际读入约束，非估算）。文件本身由 ffprobe 子进程流式
-//     读（OS 页缓存，不进 Go 堆）——不计。
+//   - 估算：JSON 按 size×1MiB/2GB 折算（0.5MB/GB 样本密度，非上浮）+ 进程 64MiB；
+//     注意 <2GiB 文件整数除法后 jsonEst=0（预留仅 64MiB）——低码率高帧率小文件是残余
+//     低估窗口；但读入端已由 maxFFprobeOutputBytes（256MiB）硬封顶（超限 fail-closed
+//     放行），实际占用最坏 = 64MiB 进程 + 256MiB JSON（配额信号量按实际读入约束，非
+//     估算）。文件本身由 ffprobe 子进程流式读（OS 页缓存，不进 Go 堆）——不计。
 func (VideoChecker) EstimateMem(path string, size int64) int64 {
 	if size <= 0 {
 		if fi, err := os.Stat(path); err == nil {
 			size = fi.Size()
 		}
 	}
-	jsonEst := size / (2 << 30) * (1 << 20) // 0.5MB/GB 上浮 2×：1MiB per 2GiB
+	jsonEst := size / (2 << 30) * (1 << 20) // 0.5MB/GB 样本密度折算（1MiB per 2GiB）
 	if jsonEst > 256<<20 {
 		jsonEst = 256 << 20 // JSON 上限 256MiB（与 maxFFprobeOutputBytes 对齐）
 	}
@@ -143,11 +143,14 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 	if kerr != nil {
 		// R5-I1：环境缺 ffprobe（ErrFFprobeMissing）≠ 文件损坏——视为通过（无校验器
 		// 可用，与 plan §5「无校验器 → 视为通过」对齐），避免无 ffmpeg 部署对每个
-		// 视频误判 damaged。**输出超上限（ErrFFprobeOutputLimit）同级放行**：合法视频
-		// 帧数异常多时校验无能力完成（资源限制 ≠ 文件损坏），不误判 damaged。
+		// 视频误判 damaged。**输出超上限（ErrFFprobeOutputLimit）与执行/IO 失败
+		// （ErrFFprobeExec）同级放行**：合法视频帧数异常多 / 慢盘超时 / 临时文件失败时
+		// 校验无能力完成（环境/资源限制 ≠ 文件损坏），不误判 damaged。
 		// 其他解析失败（容器非法/无视频流）→ OK=false（真异常）。
-		if errors.Is(kerr, ffprobe.ErrFFprobeMissing) || errors.Is(kerr, ffprobe.ErrFFprobeOutputLimit) {
-			return &integrity.Report{OK: true, Reason: "video: ffprobe 无法解析（未安装或输出超限），跳过语义校验"}, nil
+		if errors.Is(kerr, ffprobe.ErrFFprobeMissing) ||
+			errors.Is(kerr, ffprobe.ErrFFprobeOutputLimit) ||
+			errors.Is(kerr, ffprobe.ErrFFprobeExec) {
+			return &integrity.Report{OK: true, Reason: "video: ffprobe 无法解析（未安装/输出超限/执行失败），跳过语义校验"}, nil
 		}
 		return &integrity.Report{OK: false, Reason: fmt.Sprintf("video: ffprobe 解析失败: %v", kerr)}, nil
 	}

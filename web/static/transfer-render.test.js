@@ -158,8 +158,10 @@ test('buildTransferRowHtml failed/ paused 项：恢复/取消按钮', () => {
 // ---- 云行按钮组（任务 5：kind 感知 _rowActions 分派 _cloudTaskActions / _cloudGroupActions） ----
 
 // ---- 云任务 integrity 标记（任务 7：IntegrityStatus 展示） ----
-// 服务端 IntegrityStatus 取值："" | "verified" | "damaged"（pkg/cloud/manager.go）。
-// 渲染语义：damaged → 黄色「完整性异常」标记（--text-warning）；verified/缺省 → 无标记。
+// 服务端 IntegrityStatus 取值："" | "verified" | "damaged" | "unverified"（pkg/cloud/manager.go；
+// unverified = 超内存配额跳过校验）。
+// 渲染语义：damaged → 黄色「完整性异常」标记（--text-warning）；unverified → 灰色「未校验」
+// （--text-muted）；verified/缺省 → 无标记。
 
 test('buildTransferRowHtml 云任务 integrity_status=damaged 渲染完整性标记', () => {
   const html = r.buildTransferRowHtml({
@@ -170,6 +172,15 @@ test('buildTransferRowHtml 云任务 integrity_status=damaged 渲染完整性标
   assert.ok(html.includes('--text-warning'), '标记应使用黄色系警告色');
   assert.ok(html.includes('cloud-task-INT'), '行 id 可寻址');
   assert.ok(!html.includes('<script'), '无 XSS');
+});
+
+test('buildTransferRowHtml 云任务 integrity_status=unverified 渲染未校验标记', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'cloud-task-UNV', kind: 'cloud_task', filename: 'u.png', status: 'completed',
+    meta: { raw: { integrity_status: 'unverified' } },
+  });
+  assert.ok(html.includes('未校验'), 'unverified 应展示未校验标记');
+  assert.ok(html.includes('--text-muted'), '未校验标记应使用灰色系');
 });
 
 test('buildTransferRowHtml 云任务 integrity verified/缺省 不渲染完整性标记', () => {

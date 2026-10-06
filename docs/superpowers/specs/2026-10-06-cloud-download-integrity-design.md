@@ -68,7 +68,7 @@ runRetryLoop（下载尝试）
           └─ 异常 → 重下（同次循环 retry；两次本地 checksum 一致仍异常）
                 → 原始文件问题 → 按任务配置：
                     ├─ 默认：允许继续 + IntegrityStatus="damaged"（人工审计）
-                    └─ force_integrity=true：阻断（failTask）
+                    └─ integrity_must_pass=true：阻断（failTask）
   → 语义校验通过/权威匹配 → 转存（读回校验已有）→ 取用
 ```
 
@@ -112,9 +112,9 @@ cmd/sproxy/               装配 ext 插件（空白导入注册）
 ```go
 // CloudTask 新增
 IntegrityStatus string `json:"integrity_status,omitempty"` // "" | verified | damaged
-ForceIntegrity  bool   `json:"force_integrity,omitempty"`  // true = 校验失败阻断（默认 false 放行标记）
+IntegrityMustPass  bool   `json:"integrity_must_pass,omitempty"`  // true = 校验失败阻断（默认 false 放行标记）
 ```
-- 客户端 flag：`--force-integrity`（默认 false 零回归）
+- 客户端 flag：`--integrity-must-pass`（默认 false 零回归）
 - API 暴露 + WebUI 展示 IntegrityStatus（审计）
 - 创建时校验参数合法性（force 需校验器存在？——否，未知类型 force 时按 ② 语义校验，无校验器 → 视为通过）
 

@@ -139,6 +139,24 @@ func TestVideoChecker_OutputLimitPasses(t *testing.T) {
 	}
 }
 
+// TestVideoChecker_ExecFailPasses I1 回归：ffprobe 执行/IO 失败（ErrFFprobeExec，如慢盘
+// 超时/OOM kill/临时文件失败）→ OK=true 放行——环境/资源限制 ≠ 文件损坏，不误判 damaged。
+func TestVideoChecker_ExecFailPasses(t *testing.T) {
+	// 共享 testSeamIndexer 包级注入缝（执行失败哨兵）——须串行（同文件 serial budget）。
+	prev := testSeamIndexer
+	setTestSeamIndexer(fakeIndexer{err: ffprobe.ErrFFprobeExec})
+	t.Cleanup(func() { setTestSeamIndexer(prev) })
+
+	path := writeBytes(t, "exec.mp4", []byte("whatever"))
+	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("whatever")))
+	if err != nil {
+		t.Fatalf("执行失败应 OK=true（放行），而非 error，got %v", err)
+	}
+	if !rep.OK {
+		t.Fatalf("执行失败应 OK=true（环境≠损坏），got Reason=%q", rep.Reason)
+	}
+}
+
 // TestVideoChecker_CtxCancel 取消路径：ctx 取消 → 返回 error（非 OK:false——调用方
 // 按「校验执行出错→放行」处理，不当语义异常累计）。
 func TestVideoChecker_CtxCancel(t *testing.T) {

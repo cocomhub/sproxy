@@ -1058,7 +1058,8 @@ type Config struct {
 	CloudDownloadIdleTimeout  time.Duration `yaml:"cloud_download_idle_timeout" mapstructure:"cloud_download_idle_timeout"`
 	CloudMaxRetries           int           `yaml:"cloud_max_retries" mapstructure:"cloud_max_retries"`
 	CloudRetryDelay           time.Duration `yaml:"cloud_retry_delay" mapstructure:"cloud_retry_delay"`
-	// CloudCheckMemBytes 完整性校验内存配额（ByteSize 语义；0/缺省 = 512 MiB）。
+	// CloudCheckMemBytes 完整性校验内存配额（ByteSize 语义；**缺省 512 MiB**——Default
+	// 显式填；显式 0 = 禁用不排队；负值按 512 MiB fail-safe）。
 	// 校验器按 Check 前估算内存占用排队（并发校验总估算 ≤ 配額）；单文件估算超配额
 	// → 跳过校验标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
 	CloudCheckMemBytes sizex.ByteSize `yaml:"cloud_check_mem_bytes" mapstructure:"cloud_check_mem_bytes"`

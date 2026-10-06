@@ -79,8 +79,8 @@ func (ImageChecker) Check(ctx context.Context, path string, size int64) (*Report
 	defer f.Close()
 
 	// R3-C2：解压炸弹防护（移植 cocom pkg/imaging V2）——Decode 前先 DecodeConfig
-	// 读尺寸，像素总数超上限（1e8）即判语义异常（不完整解码分配像素缓冲，防 OOM/DoS）。
-	// 下载源用户可控，恶意超大 PNG 全量解码可达 GB 级缓冲。
+	// 读尺寸，像素总数超上限（maxCheckPixels=2500 万）即跳过解码（不完整解码分配像素
+	// 缓冲，防 OOM/DoS）。下载源用户可控，恶意超大 PNG 全量解码可达 GB 级缓冲。
 	cfg, _, err := image.DecodeConfig(f)
 	if err != nil {
 		return &Report{OK: false, Reason: err.Error()}, nil
@@ -88,8 +88,11 @@ func (ImageChecker) Check(ctx context.Context, path string, size int64) (*Report
 	if cfg.Width > 0 && cfg.Height > 0 {
 		// F6（对抗评审）+ 用户裁定：像素上限是**语义层安全上界**（配合 MaxCheckMemBytes
 		// 内存配额治理——超配额跳过校验而非误判损坏）；合法超 2500 万像素大图极罕见。
+		// 超上限 = 校验无能力安全解码（防 OOM/DoS），**不是内容损坏**——与 video 校验器
+		// 「ffprobe 输出超限放行」同策略（资源限制 ≠ 损坏）：跳过语义校验（OK=true），
+		// 不误判 damaged（8K/大扫描图合法）。
 		if int64(cfg.Width)*int64(cfg.Height) > maxCheckPixels {
-			return &Report{OK: false, Reason: fmt.Sprintf("image 像素超限 %dx%d", cfg.Width, cfg.Height)}, nil
+			return &Report{OK: true, Reason: fmt.Sprintf("image 像素超限 %dx%d，跳过语义校验（无能力安全解码）", cfg.Width, cfg.Height)}, nil
 		}
 	}
 	if _, serr := f.Seek(0, io.SeekStart); serr != nil {

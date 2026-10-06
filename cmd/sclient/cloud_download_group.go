@@ -246,7 +246,7 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 			// 四参透传（C1/F1）：submit 子命令同样可声明转存/保留/下载本地/完整性必须通过——
 			// 父命令 flag 非 persistent，子命令须自注册同款旗标（否则 --transfer-volume
 			// 在 submit 下是 unknown flag，组转存入口不可达）。
-			opts := cloudSubmitOptions(cmd)
+			opts := cloudDownloadSubmitOpts(cmd)
 
 			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries, opts...)
 			if err != nil {
@@ -671,31 +671,4 @@ func NewCmdCloudGroupDelete(factory clientfactory.Factory, ios cli.IOStreams, cf
 	}
 	cmd.Flags().Bool("yes", false, "确认永久删除（组与所有关联文件）")
 	return cmd
-}
-
-// cloudSubmitOptions 组 submit 子命令的下载参数透传（转存/保留/下载本地/完整性必须通过）。
-// 抽独立函数控制认知复杂度（gocognit=15；flag 解析分支多，R 组入口同款四参共用）。
-func cloudSubmitOptions(cmd *cobra.Command) []client.CloudDownloadOption {
-	opts := []client.CloudDownloadOption{}
-	if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
-		p, _ := cmd.Flags().GetString(flagTransferPath)
-		opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{Volume: vol, Path: p}))
-	}
-	if cmd.Flags().Changed(flagSave) {
-		s, _ := cmd.Flags().GetBool(flagSave)
-		opts = append(opts, client.WithCloudDownloadSave(s))
-	}
-	// I-1（组 submit 同款）：download_local 未显式传 → 按 flag 默认 true 发送，与链式
-	// 入口一致——否则 --save=false 下 submit 判真空洞 400、链式却成功。
-	if cmd.Flags().Changed(flagDownloadLocal) {
-		l, _ := cmd.Flags().GetBool(flagDownloadLocal)
-		opts = append(opts, client.WithCloudDownloadLocal(l))
-	} else {
-		opts = append(opts, client.WithCloudDownloadLocal(true))
-	}
-	if cmd.Flags().Changed(flagIntegrityMustPass) {
-		f, _ := cmd.Flags().GetBool(flagIntegrityMustPass)
-		opts = append(opts, client.WithCloudDownloadIntegrityMustPass(f))
-	}
-	return opts
 }

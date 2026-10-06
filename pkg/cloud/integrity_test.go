@@ -240,6 +240,17 @@ func TestDownloadIntegrity_TransientCorruptionRetries(t *testing.T) {
 	if cur.IntegrityStatus != "verified" {
 		t.Fatalf("瞬态损坏重试后应 verified，got %q", cur.IntegrityStatus)
 	}
+	// MAJOR-1 回归：完整性重下后租户 Scope committed 不得虚高（重下前回拨已下载
+	// 字节——否则同一 QuotaWriter account 再 commit 一次，committed=2×文件大小，
+	// 同租户其它下载误触 ErrStorageFull）。
+	mgr.mu.Lock()
+	acc := task.account
+	mgr.mu.Unlock()
+	if acc != nil {
+		if committed := acc.Committed(); committed != int64(len(validPNG1x1)) {
+			t.Fatalf("完整性重下后 committed=%d，应等于最终文件大小 %d（虚高=双计）", committed, len(validPNG1x1))
+		}
+	}
 }
 
 // validPNG1x1 是 1x1 有效 PNG（image/png 可解码，Bounds 1x1 非空）。
@@ -479,18 +490,16 @@ func TestDownloadIntegrity_WithinMemQuotaNormalVerify(t *testing.T) {
 	}
 }
 
-// TestDownloadIntegrity_ConcurrentMemQuota 并发校验内存配额：配额 10MiB，4 个 tar
-// 文件各估算 2MiB（size×500：4KB×500=2MiB）——并发校验总估算 ≤ 配额，全部排队
-// 完成且每个任务 verified/damaged 按内容判定（不误判 unverified——配额充足）。
+// TestDownloadIntegrity_ConcurrentMemQuota 并发校验内存配额：配额 10MiB，4 个 image
+// 文件各估算 4MiB（1000×1000 PNG = 1M 像素 ×4 = 4MiB）——4×4MiB=16MiB > 10MiB 配额，
+// 排队（不足等待释放）→ 全部完成；信号量归零（无泄漏）。注：tar 估算已改为固定 64KiB
+// （header 遍历不膨胀分配），不再能触发排队路径，改用 image 恢复排队覆盖。
 func TestDownloadIntegrity_ConcurrentMemQuota(t *testing.T) {
 	t.Parallel()
 	mgr := newIntegrityTestMgr(t, 3)
 	mgr.checkMemSem = semaphore.NewWeighted(10 << 20) // 10 MiB
 	mgr.checkMemMax = 10 << 20
-	payload := make([]byte, 4096) // 4KB → est=2MiB
-	for i := range payload {
-		payload[i] = byte('a' + i%26)
-	}
+	payload := largePNG(t, 1000, 1000) // 1M 像素 → est=4MiB（×4=16MiB > 10MiB 触发排队）
 	var wg sync.WaitGroup
 	for i := range 4 {
 		wg.Add(1)
@@ -500,7 +509,7 @@ func TestDownloadIntegrity_ConcurrentMemQuota(t *testing.T) {
 				w.Write(payload)
 			}))
 			defer srv.Close()
-			task, err := mgr.SubmitAndStart("url", srv.URL, "x.tar", int64(len(payload)), t.Context(), "", TaskParams{Save: true})
+			task, err := mgr.SubmitAndStart("url", srv.URL, "x.png", int64(len(payload)), t.Context(), "", TaskParams{Save: true})
 			if err != nil {
 				t.Errorf("submit %d: %v", idx, err)
 				return
@@ -510,8 +519,11 @@ func TestDownloadIntegrity_ConcurrentMemQuota(t *testing.T) {
 				return cur != nil && cur.Status == "completed"
 			}, "任务应完成")
 			cur, _ := mgr.SnapshotTask(task.ID, "")
-			if cur.IntegrityStatus != "unverified" && cur.IntegrityStatus != "damaged" {
-				t.Errorf("任务 %d 应 unverified（内容非 tar）或 damaged，got %q", idx, cur.IntegrityStatus)
+			// 有效 PNG（ImageChecker 解码通过）→ verified；配额排队后仍校验（不误判
+			// unverified——4×4MiB=16MiB 超 10MiB 但按估算排队非 overQuote，单文件 4MiB
+			// < 10MiB 不触发单文件跳过）。
+			if cur.IntegrityStatus != "verified" {
+				t.Errorf("任务 %d 配额排队后应 verified，got %q", idx, cur.IntegrityStatus)
 			}
 		}(i)
 	}

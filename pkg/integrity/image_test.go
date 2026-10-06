@@ -6,6 +6,8 @@ package integrity_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/png"
 	"os"
@@ -59,6 +61,31 @@ func writeBytes(t *testing.T, data []byte) string {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	return path
+}
+
+// buildOversizedPNGHeader 构造仅含 PNG 签名 + IHDR（尺寸 w×h）的最小 PNG 字节：
+// DecodeConfig 读尺寸即触发超像素分支，不写 IDAT/不触发完整解码（防超大缓冲）。
+// crc 用真实 zlib CRC（png 解码校验 IHDR chunk crc），否则 DecodeConfig 报 crc error
+// 而非走到像素超限分支。
+func buildOversizedPNGHeader(w, h int) []byte {
+	var buf bytes.Buffer
+	buf.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], uint32(w))
+	binary.BigEndian.PutUint32(ihdr[4:8], uint32(h))
+	ihdr[8], ihdr[9], ihdr[10] = 8, 6, 0 // bit depth 8, color type 6 (RGBA), compression/filter/interlace 0
+	// PNG chunk：4B 长度 + 4B 类型 + 数据 + 4B CRC（CRC 覆盖 type+data）。
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], 13)
+	buf.Write(lenBuf[:])
+	buf.WriteString("IHDR")
+	buf.Write(ihdr)
+	crc := crc32.NewIEEE()
+	_, _ = crc.Write([]byte("IHDR"))
+	_, _ = crc.Write(ihdr)
+	sum := crc.Sum32()
+	buf.Write([]byte{byte(sum >> 24), byte(sum >> 16), byte(sum >> 8), byte(sum)})
+	return buf.Bytes()
 }
 
 // TestCheckImage_ValidPNG：1x1 有效 PNG（image/png 编码）应 OK。
@@ -137,9 +164,28 @@ func TestCheckImage_EstimateMem(t *testing.T) {
 		t.Fatalf("1x1 PNG 估算应 4B，got %d", est)
 	}
 	// 钳制常量：maxCheckPixels(2500 万)×4 = 100,000,000 字节（100MB 十进制）——超限图按此估算
-	// （不会因 est 无限大而误触 overQuote 跳 unverified；Check 内部对超限直接 OK=false 语义异常）。
+	// （不会因 est 无限大而误触 overQuote 跳 unverified；Check 对超限跳过校验 OK=true）。
 	const maxPixelsX4 = int64(25000000) * 4
 	if maxPixelsX4 != 100000000 {
 		t.Fatalf("钳制常量应=100000000 字节，got %d", maxPixelsX4)
+	}
+}
+
+// TestCheckImage_OverPixelsSkips I2 回归：合法超 2500 万像素大图（8K/大扫描图）→
+// OK=true 跳过语义校验（无能力安全解码 ≠ 损坏）——不误判 damaged（与 video 校验器
+// 「ffprobe 输出超限放行」同策略）。不物理实例化超大图：用超大 WHDR 构造仅需尺寸
+// header 的 PNG（DecodeConfig 读尺寸即触发超限分支，不完整解码）。
+func TestCheckImage_OverPixelsSkips(t *testing.T) {
+	t.Parallel()
+	// 构造 PNG IHDR 尺寸 6000×5000 = 30M 像素 > 2500 万：写入最小 PNG header（IHDR
+	// 尺寸块）即够 DecodeConfig 读取尺寸；不写 IDAT（不触发完整解码）。
+	big := buildOversizedPNGHeader(6000, 5000)
+	path := writeBytes(t, big)
+	rep, err := integrity.ImageChecker{}.Check(context.Background(), path, int64(len(big)))
+	if err != nil {
+		t.Fatalf("超像素图 Check 应无 error，got %v", err)
+	}
+	if !rep.OK {
+		t.Fatalf("超像素应 OK=true 跳过（无能力解码≠损坏），got Reason=%q", rep.Reason)
 	}
 }
