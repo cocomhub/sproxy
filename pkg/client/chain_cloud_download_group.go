@@ -411,9 +411,11 @@ func countGroupTasks(tasks []CloudTask) (completed, failed, cancelled, active, d
 // 其余（空 tasks 或未刷新到 completed）返回 (false,nil) 继续轮询。
 func (c *CloudDownloadGroupChain) finishGroupRound(detail *CloudGroupDetail, completed, failed, cancelled, damaged int) (bool, error) {
 	if detail.Group.Status == "completed" && failed+cancelled == 0 {
-		// R3-I3 组链延伸：damaged 子任务明确提示（非失败，但不应被当可靠成功）。
+		// R3-I3 组链延伸：damaged 子任务警告（用户裁定 2026-10-06：警告继续——不整链
+		// 阻断，正常文件可归档/下载，damaged 项审计可见）。
 		if damaged > 0 {
-			return true, fmt.Errorf("下载组 %s 有 %d 个子任务完整性损坏（damaged，已放行）", c.GroupID, damaged)
+			slog.Warn("cloud group chain: 子任务完整性损坏（damaged，已放行）",
+				"chain_id", c.ChainID, "group_id", c.GroupID, "damaged", damaged)
 		}
 		return true, nil
 	}

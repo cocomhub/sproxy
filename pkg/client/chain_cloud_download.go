@@ -471,10 +471,8 @@ func (c *CloudDownloadChain) waitFailure(cancelled, submitFailedCount int) error
 		}
 		return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
 	}
-	// R3-I3：完整性损坏放行（damaged）→ 明确提示（非失败，但不应被当可靠成功）。
-	if c.Damaged > 0 {
-		return fmt.Errorf("%d 个云端下载任务完整性损坏（damaged，已放行）", c.Damaged)
-	}
+	// R3-I3：完整性损坏放行（damaged）→ 警告但继续（用户裁定 2026-10-06：警告继续——
+	// 不整链阻断，正常文件可得，damaged 项审计可见）。
 	return nil
 }
 
