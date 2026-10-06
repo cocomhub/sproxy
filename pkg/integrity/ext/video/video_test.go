@@ -5,11 +5,14 @@ package video
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/integrity"
+	"github.com/cocomhub/sproxy/pkg/media/ffprobe"
 )
 
 // writeBytes 写原始字节到临时文件（扩展名由参数指定，供 Matches 判定）。
@@ -91,4 +94,62 @@ func TestVideoChecker_RegistryLookup(t *testing.T) {
 	if got := c.Kind(); got != "video/*" {
 		t.Fatalf("Lookup Kind = %q, want video/*", got)
 	}
+}
+
+// fakeIndexer 是 KeyframeOffsets 的测试实现：err 固定返回（模拟缺 ffprobe/解析失败）。
+type fakeIndexer struct{ err error }
+
+func (f fakeIndexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error) {
+	return nil, f.err
+}
+
+// TestVideoChecker_MissingFFprobe R5-I1：缺 ffprobe（ErrFFprobeMissing）→ OK=true 放行
+// （无校验器 ≠ 损坏，无 ffmpeg 部署不误判 damaged）。
+func TestVideoChecker_MissingFFprobe(t *testing.T) {
+	// 共享 testSeamIndexer 包级注入缝——不可并行（其他测试并发写）
+	prev := testSeamIndexer
+	testSeamIndexer = fakeIndexer{err: ffprobe.ErrFFprobeMissing}
+	t.Cleanup(func() { testSeamIndexer = prev })
+
+	path := writeBytes(t, "m.mp4", []byte("whatever"))
+	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("whatever")))
+	if err != nil {
+		t.Fatalf("缺 ffprobe 应返回 OK=true（放行），而非 error，got %v", err)
+	}
+	if !rep.OK {
+		t.Fatalf("缺 ffprobe 应 OK=true 放行，got Reason=%q", rep.Reason)
+	}
+}
+
+// TestVideoChecker_CtxCancel 取消路径：ctx 取消 → 返回 error（非 OK:false——调用方
+// 按「校验执行出错→放行」处理，不当语义异常累计）。
+func TestVideoChecker_CtxCancel(t *testing.T) {
+	// 共享 testSeamIndexer 包级注入缝——不可并行
+	prev := testSeamIndexer
+	// 阻塞索引器（不返回）——select 等 ctx.Done
+	blocking := make(chan struct{})
+	testSeamIndexer = blockingIndexer{ch: blocking}
+	t.Cleanup(func() {
+		testSeamIndexer = prev
+		close(blocking)
+	})
+
+	path := writeBytes(t, "c.mp4", []byte("data"))
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消
+	_, err := VideoChecker{}.Check(cancelCtx, path, 0)
+	if err == nil {
+		t.Fatal("ctx 取消应返回 error（中止哨兵），而非 nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消错误应包含 context.Canceled，got %v", err)
+	}
+}
+
+// blockingIndexer 永不返回的索引器（测试取消路径；ch 关闭可解除）。
+type blockingIndexer struct{ ch chan struct{} }
+
+func (b blockingIndexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error) {
+	<-b.ch
+	return nil, nil
 }

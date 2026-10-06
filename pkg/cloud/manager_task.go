@@ -570,6 +570,12 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// NM5：下载完成释放下载并发槽——转存写卷（远程卷上传慢）不应继续占 MaxConcurrent
 	// 槽阻塞后续下载；转存并发由独立 transferSem 限流（防风暴）。置 acquiredSlot=false
 	// 防 defer 双释（channel 空取 panic）。
+	// 注意（对抗评审 R3-Impt-2 记录）：**完整性校验**（postDownloadCheck 内含于
+	// runRetryLoop 成功分支）仍在持槽内执行——video ffprobe 校验最长 5min 会短暂
+	// 占用 MaxConcurrent 槽（默认 3）。这是刻意取舍：校验失败需在同一 attempt 循环
+	// 内重下（errIntegrityFail → shouldRetryDownload），移出会破坏重试语义；且用户
+	// 裁定「校验必须阻塞等待结果」。缓解：ffprobeTimeout 有界（≤5min）、配额信号量
+	// 限并发、默认 MaxConcurrent 小（3×64MiB=192MiB<512MiB 配额不触发排队阻塞）。
 	if acquiredSlot {
 		<-m.semaphore
 		acquiredSlot = false
@@ -653,6 +659,13 @@ retryLoop:
 
 // handleIntegrityExhausted 处理完整性校验失败重试耗尽：errIntegrityFail + 非 force →
 // damaged 放行（completed + 标记）；否则原样返回（force 阻断 / 其他错误上行）。
+//
+// 口径（对抗评审 R1-F1 记录）：本函数只可能接到两种 errIntegrityFail 耗尽场景——
+// ① checksum 每轮不同（动态源，integritySames 恒为 1，永不触 permanent）→ 耗尽后
+// damaged 放行（用户裁定：默认放行标记，可 M2 重下自愈）；② MaxRetries=1 单失败
+// （sames=1，checksum 稳定）→ 单次校验失败即 damaged（偏激进但非致命——damaged
+// 允许重下修复，且任务仍 completed 可用）。两次 checksum 一致的场景（sames>=2）由
+// resolveIntegrityTaskErr 在 permanent 分支提前出循环，不会走到本函数。
 func (m *CloudDownloadManager) handleIntegrityExhausted(result *downloader.Result, downloadErr error, task *CloudTask) (*downloader.Result, error) {
 	if errors.Is(downloadErr, errIntegrityFail) && !task.ForceIntegrity {
 		m.setTaskIntegrityStatus(task, "damaged")

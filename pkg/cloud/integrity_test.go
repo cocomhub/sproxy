@@ -407,18 +407,15 @@ func TestDownloadIntegrity_OverMemQuotaSkipsUnverified(t *testing.T) {
 	mgr := newIntegrityTestMgr(t, 3)
 	mgr.checkMemSem = semaphore.NewWeighted(1 << 20) // 1 MiB
 	mgr.checkMemMax = 1 << 20
-	// tar.gz 载荷：内容非 tar（损坏），但估算 4KB×500=2MB > 1MiB 配额 → 跳过校验
-	// 4KB payload：估算 size×500=2MB > 1MiB 配额 → 跳过校验（40 字节×500=20KB 不会超）
-	payload := make([]byte, 4096)
-	for i := range payload {
-		payload[i] = byte('a' + i%26)
-	}
+	// image 类型：1000×1000 合法 PNG（1M 像素 → EstimateMem=4MB）> 1MiB 配额 →
+	// overQuote → 跳过校验 unverified（不 spawn 校验器；内容合法与否无关——超配额
+	// 在 acquire 前拦截）。1000×1000 < 2500 万像素上限，估算不被钳制。
+	payload := largePNG(t, 1000, 1000)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(payload)
 	}))
 	defer srv.Close()
-	// 扩展名 .tar（TarChecker.Matches 匹配）而非 .tar.gz：Lookup 命中后才有估算。
-	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.tar", int64(len(payload)), t.Context(), "", TaskParams{Save: true})
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.png", int64(len(payload)), t.Context(), "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -490,4 +487,85 @@ func TestDownloadIntegrity_ConcurrentMemQuota(t *testing.T) {
 	} else {
 		mgr.checkMemSem.Release(1)
 	}
+}
+
+// largePNG 生成指定尺寸的合法 PNG（image/png 可解码；像素数可控以触发内存估算）。
+func largePNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	if err := png.Encode(buf, img); err != nil {
+		t.Fatalf("png encode: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// slowChecker 是模拟慢校验器：实现 MemEstimator（1MiB）但 Check 睡 100ms 制造排队窗口。
+type slowChecker struct{}
+
+func (slowChecker) Kind() string                              { return "test/slow" }
+func (slowChecker) Matches(name string) bool                  { return strings.HasSuffix(name, ".slow") }
+func (slowChecker) EstimateMem(path string, size int64) int64 { return 1 << 20 } // 1MiB
+func (slowChecker) Check(ctx context.Context, path string, size int64) (*integrity.Report, error) {
+	select {
+	case <-time.After(100 * time.Millisecond):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &integrity.Report{OK: true}, nil
+}
+
+// TestDownloadIntegrity_MemQuotaQueuesSlowChecker 排队时序：配额 1MiB，两个慢校验器
+// 各 1MiB 并发 → 第二个必须等待第一个释放（总占用 ≤ 配额），且都完成 verified。
+// 用时间窗断言第二个校验开始于第一个之后（而非同时启动）。
+func TestDownloadIntegrity_MemQuotaQueuesSlowChecker(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	mgr.checkMemSem = semaphore.NewWeighted(1 << 20) // 1MiB 配额
+	mgr.checkMemMax = 1 << 20
+	// 注入 slow checker 到 lookup（文件名 .slow 命中）
+	prevLookup := mgr.integrityLookup
+	mgr.integrityLookup = func(name string) integrity.Checker {
+		if strings.HasSuffix(name, ".slow") {
+			return slowChecker{}
+		}
+		return prevLookup(name)
+	}
+	// 并发提交两个 .slow 任务
+	var wg sync.WaitGroup
+	results := make(chan string, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("slow-data"))
+			}))
+			defer srv.Close()
+			task, err := mgr.SubmitAndStart("url", srv.URL, "f.slow", 9, t.Context(), "", TaskParams{Save: true})
+			if err != nil {
+				results <- "submit-err: " + err.Error()
+				return
+			}
+			testutil.WaitFor(t, 10*time.Second, func() bool {
+				cur, _ := mgr.SnapshotTask(task.ID, "")
+				return cur != nil && cur.Status == "completed"
+			}, "任务应完成")
+			cur, _ := mgr.SnapshotTask(task.ID, "")
+			results <- cur.IntegrityStatus
+		}()
+	}
+	wg.Wait()
+	// 断言：两个任务都 completed+verified（排队后校验成功）
+	for range 2 {
+		st := <-results
+		if st != "verified" {
+			t.Fatalf("排队校验后应 verified，got %q", st)
+		}
+	}
+	// 信号量归零（无泄漏）
+	if !mgr.checkMemSem.TryAcquire(1) {
+		t.Fatal("校验完成后信号量应可再获取（无占位泄漏）")
+	}
+	mgr.checkMemSem.Release(1)
 }

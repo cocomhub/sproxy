@@ -15,6 +15,13 @@ import (
 	"github.com/cocomhub/sproxy/pkg/media/ffprobe"
 )
 
+// testSeamIndexer 是 KeyframeOffsets 索引器的注入缝（生产 nil → 用 ffprobe.Indexer{}；
+// 测试替换以模拟缺 ffprobe/取消/超时，避免真实 ffprobe 依赖）。可变全局变量仅测试
+// 场景使用；生产路径不触碰（并发校验共享同一 Indexer{} 实例——KeyframeOffsets 无状态）。
+var testSeamIndexer interface {
+	KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
+}
+
 // init 把 VideoChecker 装配进 pkg/integrity 包级默认注册表（插件模式：cmd/sproxy
 // 空白导入触发本 init；重复注册同 Kind 由 Registry fail-fast panic——见 Register）。
 func init() {
@@ -64,9 +71,12 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 			size = fi.Size()
 		}
 	}
-	var indexer interface {
-		KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
-	} = ffprobe.Indexer{}
+	// testSeamIndexer 是测试注入缝（生产恒 ffprobe.Indexer{}；测试可替换 fakeRunner 模拟
+	// 缺 ffprobe/取消/超时场景，见 video_test.go）。
+	if testSeamIndexer == nil {
+		testSeamIndexer = ffprobe.Indexer{}
+	}
+	indexer := testSeamIndexer
 	// ffprobe 必须**阻塞等待结果**（用户裁定 2026-10-06）：校验结果必须可得才能决定
 	// 后续流程（放行/重下/标记 damaged）——非阻塞会丢失校验语义（取消即 OK:false 被当
 	// 语义异常）。子进程由 ffprobe 内部 timeout 兜底（30s~5min 按文件大小），进程不会

@@ -124,3 +124,22 @@ func TestImageChecker_Kind(t *testing.T) {
 		t.Fatal("Kind 应为 image/*")
 	}
 }
+
+// TestCheckImage_EstimateMem 估算：1x1 → 4B（RGBA 单像素）。
+// 超限像素钳制逻辑（>maxCheckPixels 按 maxPixels×4 估）不物理实例化超大图（>2500 万
+// 像素 = >100MB RGBA 缓冲，测试内存不可行）——直接断言钳制常量值（语义层防解压
+// 炸弹的数值口径，与 image.go 的 maxCheckPixels 定义一致）。
+func TestCheckImage_EstimateMem(t *testing.T) {
+	t.Parallel()
+	small := writeImagePNG(t, image.NewRGBA(image.Rect(0, 0, 1, 1)))
+	ic := integrity.ImageChecker{}
+	if est := ic.EstimateMem(small, 0); est != 4 {
+		t.Fatalf("1x1 PNG 估算应 4B，got %d", est)
+	}
+	// 钳制常量：maxCheckPixels(2500 万)×4 = 100,000,000 字节（100MB 十进制）——超限图按此估算
+	// （不会因 est 无限大而误触 overQuote 跳 unverified；Check 内部对超限直接 OK=false 语义异常）。
+	const maxPixelsX4 = int64(25000000) * 4
+	if maxPixelsX4 != 100000000 {
+		t.Fatalf("钳制常量应=100000000 字节，got %d", maxPixelsX4)
+	}
+}

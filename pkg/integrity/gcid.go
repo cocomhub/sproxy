@@ -88,6 +88,10 @@ func RecomputeGCIDFile(path string, candidates []int64) (string, bool, error) {
 
 // RecomputeGCIDAll 返回**全部整除候选**的 GCID 值（R3-I1：官方分块粒度未知，调用方
 // 逐一与官方 hash 比对，任一命中即权威——提升命中率，非首整除即返）。
+// I/O 成本说明（对抗评审 R3-Minor）：每个整除候选需全文件扫描一次（size 同时整除
+// 全部 5 个候选时 ~5× 全读）。PikPak 官方分块粒度未实证（大文件非固定 256KB），
+// 全候选是正确性优先（小候选不命中不代表大候选不命中）；视频下载后核对属低频路径，
+// 5×GB I/O 相对下载带宽可接受。需要严格省 I/O 时可改为「逐候选算一比对一、命中即返」。
 func RecomputeGCIDAll(path string, candidates []int64) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {

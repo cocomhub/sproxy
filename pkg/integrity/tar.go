@@ -23,23 +23,16 @@ func init() {
 // 不引入压缩外部依赖；扩展名匹配与注册表规则（设计 §77）保持一致。
 type TarChecker struct{}
 
-// EstimateMem 预估一次 Check 的峰值内存：tar 遍历逐条 header（小内存），gzip 解压
-// 缓冲与文件大小成正比——按 size×inflateRatio 估算（保守高估，对齐 Check 的膨胀比上限）。
-// 无法打开/读取尺寸时返回 0（调度层按无内存需求）。
+// EstimateMem 预估一次 Check 的峰值内存。
+//
+// **关键修正（对抗评审 R3-Impt-1）**：TarChecker.Check **只遍历 header**（tar.Reader.Next()
+// 逐条读取 512B header 块，不读文件内容）——峰值内存是常量级（每 header 小分配），
+// 与文件大小/解压膨胀比**无关**。此前按 size×inflateRatioMax 估算会把 >1MiB 的合法
+// tar.gz 高估到 ≥500MiB → 误触内存配额跳过校验标记 unverified，覆盖率系统性下降。
+// 膨胀比上限（inflateRatioMax）只用于 Check 遍历时的 gzip 炸弹拦截，不参与内存估算。
+// 返回固定小值（tar header 缓冲 ~512B × 少量 + 运行时余量）。
 func (TarChecker) EstimateMem(path string, size int64) int64 {
-	if size <= 0 {
-		f, err := os.Open(path)
-		if err != nil {
-			return 0
-		}
-		defer f.Close()
-		if fi, serr := f.Stat(); serr == nil {
-			size = fi.Size()
-		} else {
-			return 0
-		}
-	}
-	return size * inflateRatioMax
+	return 64 << 10 // 64KiB 固定常量：仅 header 遍历，不读内容，无膨胀分配
 }
 
 // Kind 返回类型独立 key（注册键，全局唯一）。
