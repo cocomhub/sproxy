@@ -44,7 +44,7 @@ type UserVolume struct {
 	// Mode=Allow + 单 owner 白名单（owner-only，防跨 owner 数据面越权）。**已存卷零值
 	// 兼容**：旧文件无该字段读回零值 ACL（Mode=="" = 默认开放），维持现状不静默收紧
 	// 既有共享卷；新卷 owner-only 语义由创建/恢复路径注入保证。
-	ACL volume.ACL `json:"acl,omitempty"`
+	ACL volume.ACL `json:"acl"`
 }
 
 // UserVolumeStore 把每 owner 的卷元数据持久化到
