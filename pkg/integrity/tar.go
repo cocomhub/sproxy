@@ -29,7 +29,9 @@ func (TarChecker) Kind() string { return "archive/tar" }
 // Matches 按扩展名族判定归属：.tar/.tar.gz/.tgz/.tar.zst/.tar.br（不区分大小写）。
 func (TarChecker) Matches(name string) bool {
 	lower := strings.ToLower(name)
-	for _, ext := range []string{".tar", ".tar.gz", ".tgz", ".tar.zst", ".tar.br"} {
+	// R1-I2：仅匹配本实现可解压的（纯 tar / gzip）。.tar.zst/.tar.br 需 zstd/brotli 解压器
+	// （未引入外部依赖），声明即误报 damaged → 不匹配。
+	for _, ext := range []string{".tar", ".tar.gz", ".tgz"} {
 		if strings.HasSuffix(lower, ext) {
 			return true
 		}

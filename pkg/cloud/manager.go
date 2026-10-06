@@ -91,6 +91,9 @@ type CloudTask struct {
 	// integritySames 是「本地 checksum 一致但语义校验仍失败」的累计次数（跨 attempt 保留，
 	// 判定永久损坏用）。2 次 → 不再重下（permanent）。运行时状态，不持久化。
 	integritySames int
+	// integrityLastChecksum 是上次校验失败 attempt 的本地 checksum（R1-C2：仅当两次
+	// checksum 一致才累计 integritySames；不同 = 瞬态损坏可恢复 → 重置重试）。
+	integrityLastChecksum string
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），

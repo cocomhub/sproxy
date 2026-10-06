@@ -308,10 +308,11 @@ const maxIntegritySames = 2
 // 返回 nil 表示校验通过/跳过（继续完成路径）；errIntegrityFail/errIntegrityPermanent 由调用方
 // 按错误处置段分派。destPath 供 Check 校验落盘文件；result.Checksum 作本地一致性累计依据。
 func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task *CloudTask, destPath string, result *downloader.Result) error {
-	// ① 权威匹配（下载器已权威确认，如 pikpak GCID）：跳过语义校验，直接 verified。
-	// 完整性模式判定经 IntegrityProvider 接口断言（跨任务契约：Result.Integrity 恒零值，
-	// 不可作判定依据）。
-	if ip, ok := m.downloaderFor(task.URL).(downloader.IntegrityProvider); ok && ip.IntegrityMode() == downloader.ModeAuthority {
+	// ① 权威匹配（下载器已权威确认，如 pikpak GCID 复算命中官方 hash）：跳过语义校验，
+	// 直接 verified。判据用 **result.Integrity（本次下载产物级）**——pikpak finalizeDownload
+	// 在 GCID 复算命中时置 ModeAuthority + AuthorityHash；IntegrityProvider 接口仅表达
+	// 下载器类型声明（HTTP=self_verified / pikpak=local_only），不表达单次产物命中（R1-C1）。
+	if result.Integrity == downloader.ModeAuthority && result.AuthorityHash != "" {
 		m.setTaskIntegrityStatus(task, "verified")
 		return nil
 	}
@@ -334,10 +335,16 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 		m.setTaskIntegrityStatus(task, "verified")
 		return nil
 	}
-	// 语义异常：累计「本地 checksum 一致仍异常」次数（跨 attempt 保留，持锁防 data race）。
-	// 连续两次校验失败且 checksum 一致 → 判定永久（源损坏或类型误判）。
+	// 语义异常：仅当本次 checksum 与上次校验失败 attempt 一致才累计（R1-C2——「两次
+	// 本地 checksum 一致仍异常」= 源损坏/类型误判 → 永久；不同 = 瞬态损坏可恢复 → 重置
+	// 重试，不误判 damaged）。持锁防 data race（跨 attempt 保留）。
 	m.mu.Lock()
-	task.integritySames++
+	if result.Checksum != "" && result.Checksum == task.integrityLastChecksum {
+		task.integritySames++
+	} else {
+		task.integritySames = 1
+	}
+	task.integrityLastChecksum = result.Checksum
 	permanent := task.integritySames >= maxIntegritySames
 	m.mu.Unlock()
 	if permanent {

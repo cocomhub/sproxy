@@ -104,7 +104,8 @@ func TestCheckImage_ZeroBounds(t *testing.T) {
 func TestImageChecker_Matches(t *testing.T) {
 	t.Parallel()
 	c := integrity.ImageChecker{}
-	for _, name := range []string{"a.png", "b.jpg", "c.jpeg", "d.gif", "e.webp", "f.bmp", "u.PNG"} {
+	// R1-I1：webp/bmp 无标准库解码器，不匹配（避免误报 damaged）。
+	for _, name := range []string{"a.png", "b.jpg", "c.jpeg", "d.gif", "u.PNG"} {
 		if !c.Matches(name) {
 			t.Errorf("Matches(%q) = false, want true", name)
 		}

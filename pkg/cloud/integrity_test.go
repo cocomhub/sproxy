@@ -4,15 +4,19 @@
 package cloud
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +24,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // corruptPNGF 是"名为 .png 但内容非图片"的损坏载荷：ImageChecker 语义解码必然失败。
@@ -192,3 +197,50 @@ func (d *fakeAuthorityDownloader) Download(ctx context.Context, source string, d
 		AuthorityHash: d.authHash,
 	}, nil
 }
+
+// TestDownloadIntegrity_TransientCorruptionRetries R1-C2 回归：瞬态损坏（两次下载
+// checksum 不同）→ 不累计 permanent（不误判 damaged）——首次失败重试，内容变化后
+// 校验通过 → completed + verified。
+func TestDownloadIntegrity_TransientCorruptionRetries(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	serveCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		serveCount++
+		n := serveCount
+		mu.Unlock()
+		if n == 1 {
+			w.Write([]byte("corrupt-not-image")) // 首次：损坏内容
+			return
+		}
+		// 后续：有效 PNG（1x1）
+		w.Write(validPNG1x1)
+	}))
+	defer srv.Close()
+
+	mgr := newIntegrityTestMgr(t, 3)       // MaxRetries=3：首次失败 + 重试成功
+	mgr.integrityLookup = integrity.Lookup // 真实注册表（image checker）
+	task, err := mgr.SubmitAndStart("url", srv.URL, "t.png", 0, t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		cur, _ := mgr.SnapshotTask(task.ID, "")
+		return cur != nil && cur.Status == "completed"
+	}, "任务应完成")
+	cur, _ := mgr.SnapshotTask(task.ID, "")
+	if cur.IntegrityStatus != "verified" {
+		t.Fatalf("瞬态损坏重试后应 verified，got %q", cur.IntegrityStatus)
+	}
+}
+
+// validPNG1x1 是 1x1 有效 PNG（image/png 可解码，Bounds 1x1 非空）。
+var validPNG1x1 = func() []byte {
+	buf := &bytes.Buffer{}
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	if err := png.Encode(buf, img); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}()

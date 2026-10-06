@@ -134,7 +134,8 @@ func TestCheckTar_CorruptGz(t *testing.T) {
 func TestTarChecker_Matches(t *testing.T) {
 	t.Parallel()
 	c := integrity.TarChecker{}
-	for _, name := range []string{"a.tar", "b.tar.gz", "c.tgz", "d.tar.zst", "e.tar.br", "f.TAR.GZ"} {
+	// R1-I2：zst/br 无解压器（未引入外部依赖），不匹配（避免误报 damaged）。
+	for _, name := range []string{"a.tar", "b.tar.gz", "c.tgz", "f.TAR.GZ"} {
 		if !c.Matches(name) {
 			t.Errorf("Matches(%q) = false, want true", name)
 		}

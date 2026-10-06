@@ -30,7 +30,9 @@ func (ImageChecker) Kind() string { return "image/*" }
 // Matches 按扩展名族判定归属：.png/.jpg/.jpeg/.gif/.webp/.bmp（不区分大小写）。
 func (ImageChecker) Matches(name string) bool {
 	lower := strings.ToLower(name)
-	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"} {
+	// R1-I1：仅匹配标准库 image 有解码器的格式（png/jpg/jpeg/gif）。webp/bmp 无标准库
+	// 解码器（需 x/image），声明即误报 damaged（force 下误阻断）→ 不匹配。
+	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif"} {
 		if strings.HasSuffix(lower, ext) {
 			return true
 		}
