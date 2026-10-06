@@ -16,11 +16,13 @@ import (
 // 直接复用：256KB / 512KB / 1MB / 2MB / 4MB。
 var GCIDCandidates = []int64{262144, 524288, 1048576, 2097152, 4194304}
 
-// gcidDefaultCandidates 是 ComputeGCID 的默认分块（内部，向后兼容）。
+// gcidDefaultCandidates 是 ComputeGCID 单分块模式下的默认分块大小（blockSize<=0 时用
+// 最大候选 4MB——单分块复算语义，供外部已知分块的调用方）。
 var gcidDefaultCandidates = GCIDCandidates
 
 // ComputeGCID 计算 PikPak GCID：sha1(concat(sha1(每个 blockSize 分块)))。
-// blockSize <= 0 时退回 gcidDefaultCandidates；空数据返回空串（调用方判 ok 前先验 size）。
+// blockSize <= 0 时退回 gcidDefaultCandidates（取最大候选）；空数据返回空串（调用方
+// 判 ok 前先验 size）。
 func ComputeGCID(data []byte, blockSize int64) string {
 	if blockSize <= 0 {
 		blockSize = gcidDefaultCandidates[len(gcidDefaultCandidates)-1]
