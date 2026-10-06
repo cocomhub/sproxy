@@ -20,6 +20,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -502,6 +503,10 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		VolumeFor: func(volumeName string) (volume.Volume, bool) {
 			return vs.ByName(volumeName)
 		},
+		// IntegrityLookup：完整性语义校验器分发（image/tar 标准库 + ext/video ffprobe，
+		// 经 pkg/integrity 注册表）。nil = 语义校验跳过（生产必须装配，否则 --force-integrity
+		// 无效果——P1-1 最终审查修复）。
+		IntegrityLookup: integrity.Lookup,
 	})
 	h.storageMgr = sm
 }
