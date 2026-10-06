@@ -405,6 +405,35 @@ func TestDownloadIntegrity_ListDamagedFilter(t *testing.T) {
 	}
 }
 
+// TestDownloadIntegrity_FailClearsDamagedStatus：failed 终态必须清除 IntegrityStatus
+// （damaged 语义是「completed 但内容异常可重下」，与 failed 不可恢复冲突——转存失败后
+// 任务 failed 却残留 integrity_status=damaged 会误导 API 消费者，口径不一）。
+func TestDownloadIntegrity_FailClearsDamagedStatus(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	// 源返回损坏 png → damaged 放行（completed+damaged）
+	srv, _ := corruptServe(t)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.png", int64(len(corruptPNGF)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if task.IntegrityStatus != "damaged" {
+		t.Fatalf("前置：应 completed+damaged，got %q", task.IntegrityStatus)
+	}
+	// 直接验证 failTask 守卫后清理：模拟「failed 前状态非终态」→ 直接调 failTask
+	// 验证 IntegrityStatus 被清除。为避开 completed 终态守卫，先回退 Status 为
+	// downloading（模拟转存失败路径——transferAfterDownload 在 completed 前调用
+	// failTaskWithTransfer，此时 Status 仍是 downloading）。
+	task.Status = "downloading"
+	mgr.failTaskWithTransfer(task, t.TempDir()+"/bad.png", fmt.Errorf("target volume unavailable"))
+	if task.Status != "failed" {
+		t.Fatalf("转存失败应置 failed，got %q", task.Status)
+	}
+	if task.IntegrityStatus != "" {
+		t.Fatalf("failed 任务不应残留 IntegrityStatus=damaged，got %q", task.IntegrityStatus)
+	}
+}
+
 // TestDownloadIntegrity_OverMemQuotaSkipsUnverified 用户裁定（内存配额治理）：
 // MaxCheckMemBytes 过小（1MiB）→ tar 估算（size×500）超配额 → 跳过校验标记
 // unverified（不误判 damaged；无校验能力 ≠ 损坏）。

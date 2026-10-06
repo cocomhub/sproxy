@@ -378,20 +378,20 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 	return errIntegrityFail
 }
 
-// resolveIntegrityTaskErr 把完整性判定的哨兵错误解析为 retry 循环需要的 downloadErr。
-//   - errIntegrityFail（1 次异常）→ 返回哨兵（继续循环，下方 shouldRetryDownload 重下）；
-//   - errIntegrityPermanent（两次一致仍异常）：
-//   - IntegrityMustPass → 返回哨兵（错误上行 handleDownloadDone → failTask，阻断）；
-//   - 默认 → 置 IntegrityStatus="damaged" 并返回 nil（放行，按成功完成）。
-func (m *CloudDownloadManager) resolveIntegrityTaskErr(task *CloudTask, ierr error) error {
+// resolveIntegrityTaskErr 分派完整性校验失败（postDownloadCheck 调用）：
+//   - errIntegrityFail（1 次异常）→ 返回 (false, 哨兵)——调用方 shouldRetryDownload 重下；
+//   - errIntegrityPermanent（两次一致仍异常）+ must-pass → (false, 哨兵)——阻断上行 failTask；
+//   - errIntegrityPermanent + 默认 → 置 damaged 返回 (true, nil)——直接按完成处理，
+//     **不再重下**（防 timedOut 边界下已标 damaged 任务被超时重试语义多下一次）。
+func (m *CloudDownloadManager) resolveIntegrityTaskErr(task *CloudTask, ierr error) (bool, error) {
 	if !errors.Is(ierr, errIntegrityPermanent) {
-		return ierr
+		return false, ierr
 	}
 	if task.IntegrityMustPass {
-		return ierr
+		return false, ierr
 	}
 	m.setTaskIntegrityStatus(task, "damaged")
-	return nil
+	return true, nil
 }
 
 // setTaskIntegrityStatus 持锁写 task.IntegrityStatus（与 SnapshotTask/saveTask 的
@@ -405,8 +405,8 @@ func (m *CloudDownloadManager) setTaskIntegrityStatus(task *CloudTask, status st
 // postDownloadCheck 是 runRetryLoop 成功分支的收尾判定：记录 ETag + 完整性校验。
 // 返回 (是否已到终态完成, 最终 downloadErr)：
 //   - 本次尝试失败（downloadErr != nil）→ (false, 原错误)（继续循环或终止由调用方判定）；
-//   - 成功但完整性校验失败 → resolveIntegrityTaskErr 分派（fail→重下哨兵 / force→阻断哨兵 /
-//     默认 permanent→damaged 放行 nil），返回 (false, 哨兵)（仍需循环判定）；
+//   - 成功但完整性校验失败 → resolveIntegrityTaskErr 分派（fail→重下哨兵继续循环 /
+//     must-pass→阻断哨兵 / 默认 permanent→damaged 放行 **done=true** 直接完成）；
 //   - 成功且校验通过/放行 → (true, nil)：调用方 break 按完成处理。
 func (m *CloudDownloadManager) postDownloadCheck(ctx context.Context, task *CloudTask, destPath string, result *downloader.Result, downloadErr error) (bool, error) {
 	if downloadErr != nil {
@@ -424,9 +424,9 @@ func (m *CloudDownloadManager) postDownloadCheck(ctx context.Context, task *Clou
 		}
 	}
 	// 完整性判定嵌入点：成功下载后校验内容语义可用性（重下 / 放行 damaged /
-	// Force 阻断三向分派在 resolveIntegrityTaskErr）。
+	// must-pass 阻断三向分派在 resolveIntegrityTaskErr——damaged 放行直接 done）。
 	if ierr := m.checkDownloadIntegrity(ctx, task, destPath, result); ierr != nil {
-		return false, m.resolveIntegrityTaskErr(task, ierr)
+		return m.resolveIntegrityTaskErr(task, ierr)
 	}
 	return true, nil
 }
@@ -1085,6 +1085,12 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFile
 	task.ReservedSize = actual
 	task.Status = "failed"
 	task.Error = errMsg
+	// 终态为 failed 时清除 IntegrityStatus：damaged 语义是「completed 但内容异常可重下」，
+	// 与 failed（不可恢复）冲突——failed 任务残留 damaged 会误导 API 消费者（子 agent
+	// I2 发现：转存失败后 task=failed 仍带 integrity_status=damaged，口径不一）。
+	task.IntegrityStatus = ""
+	task.integritySames = 0
+	task.integrityLastChecksum = ""
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 	m.mu.Unlock()

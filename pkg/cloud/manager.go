@@ -203,7 +203,9 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	if cfg.Downloader == "" {
 		cfg.Downloader = "http"
 	}
-	if cfg.MaxCheckMemBytes <= 0 {
+	// MaxCheckMemBytes=0 语义「不限制」→ 配额禁用（newCheckMemSem nil，校验不排队）。
+	// 负值（非法配置）按缺省 512MiB 处理（fail-safe，不用病态负值构造信号量）。
+	if cfg.MaxCheckMemBytes < 0 {
 		cfg.MaxCheckMemBytes = sizex.ByteSize(512) * (1 << 20) // 默认 512 MiB（ByteSize 语义）
 	}
 }
