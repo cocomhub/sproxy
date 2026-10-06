@@ -363,6 +363,23 @@ func TestCloudDownloadIntegrityBadge(t *testing.T) {
 		t.Fatalf("transfer-body not visible: %v", err)
 	}
 	waitTextVisible(t, page, "#transfer-body", noTransferText(), 10000)
+	// 任务7 审查 Minor 修复：注入前等首拉回调落回（_cloudTasksInFlight===false），
+	// 消除「refreshCloudTasks 在途 fetch 覆盖注入对象」的窄竞态（CI 慢机偶发 flake）。
+	// 空态文案可由频道+空数组先生成，不代表首拉 fetch 已落回——必须显式等 in-flight 归零。
+	waitCloudTasksIdle := `(() => {
+	  const deadline = Date.now() + 5000;
+	  return new Promise((resolve) => {
+	    const tick = () => {
+	      if (!window._cloudTasksInFlight) { resolve(true); return; }
+	      if (Date.now() > deadline) { resolve(false); return; }
+	      setTimeout(tick, 50);
+	    };
+	    tick();
+	  });
+	})()`
+	if v, err := page.Evaluate(waitCloudTasksIdle); err != nil || v != true {
+		t.Fatalf("等待 _cloudTasksInFlight 归零失败: v=%v err=%v", v, err)
+	}
 	scriptStop := `(() => { stopCloudPolling(); return true; })()`
 	if _, err := page.Evaluate(scriptStop); err != nil {
 		t.Fatalf("stopCloudPolling: %v", err)
