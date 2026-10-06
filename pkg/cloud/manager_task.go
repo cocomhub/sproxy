@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -621,9 +622,43 @@ func (m *CloudDownloadManager) runDownloadWithAudit(ctx, dlCtx context.Context, 
 		}
 		dlSpan.End("bytes", result.Size, "bw_bps", bw)
 	} else {
-		dlSpan.Fail(downloadErr)
+		dlSpan.Fail(sanitizeAuditError(downloadErr))
 	}
 	return result, downloadErr
+}
+
+// sanitizeAuditError 把错误脱敏为可安全持久化审计的错误（Row.Err = 脱敏文本）；nil 原样返回。
+// 供 audit span 的 Fail 落盘——URL query（token/签名）不得进审计行（task.Audit + 磁盘审计文件
+// 双持久化，且 TMPDIR 审计文件永不旋转，见 removeTaskAuditFile）。
+func sanitizeAuditError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return auditSanitizedErr{text: sanitizeAuditErr(err)}
+}
+
+// auditSanitizedErr 是脱敏后错误文本的 error 载体（Error() 返回 sanitizeAuditErr 的结果）。
+type auditSanitizedErr struct{ text string }
+
+func (e auditSanitizedErr) Error() string { return e.text }
+
+// sanitizeAuditErr 把错误文本脱敏为适合审计落盘的 Err（S2，评审 Important）：
+//   - 优先沿错误链提取 *url.Error（http.Client.Do 失败即此形态），以其 URL 重建
+//     scheme://host/path（剥 RawQuery/Fragment——query 常携 token/签名凭据），避免完整
+//     URL 明文 + query 落入审计行；
+//   - 错误链无可解析的 *url.Error（如 context 取消、状态码等）→ 保持原样（文本不含 URL
+//     结构即无此类凭据暴露面）。
+func sanitizeAuditErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	var uerr *url.Error
+	if errors.As(err, &uerr) && uerr.URL != "" {
+		if u, perr := url.Parse(uerr.URL); perr == nil && u.Scheme != "" && u.Host != "" {
+			return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+		}
+	}
+	return err.Error()
 }
 
 // finalizeTaskAudit 任务收尾的审计收口：Flush（聚合 append 错误）→ 把 sink 中全部行复制进
