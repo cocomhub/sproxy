@@ -639,3 +639,82 @@ func TestSetupSecretBackends_DefaultSecretsFail_NotFatal(t *testing.T) {
 		t.Fatalf("默认 secrets 卷失败应仅降级（WARN，不阻断 boot），got %v", err)
 	}
 }
+
+// TestSetupSecretBackends_NestedWrapper_RestartAdopt（评审 CRIT-①，2026-10-07）：config 声明
+// 嵌套封装卷重启时其自建底层子目录已存在——二次补装应**收养复用**（adoptNestedDir ctx 标记）
+// 而非「需新空子目录」boot-fail。同一 storage root 首次装配创建 default/videos + backend，随后
+// 「重启」用同一 config 新建 set 再补装 → 应成功且 backend 可寻址；不带标记的普通 ctx 对
+// 已存在子目录仍 fail-closed（fresh 运行时建卷语义）。
+func TestSetupSecretBackends_NestedWrapper_RestartAdopt(t *testing.T) {
+	// sproxy:serial: 依赖生产注册路径全局单例（secretDataSet + 生产类型 Once）。
+	ctx := context.Background()
+	registerSecretVolumeBackends()
+	t.Cleanup(func() { secretDataSet.Store(nil) })
+
+	localRoot := t.TempDir()
+	dataRoot := t.TempDir()
+	root := filepath.Join(t.TempDir(), "default")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir default: %v", err)
+	}
+	rt, rerr := storage.OpenRoot(root)
+	if rerr != nil {
+		t.Fatalf("OpenRoot: %v", rerr)
+	}
+	mkVault := func() volume.Volume {
+		return volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot,
+			Capacity: 100,
+			Extra: map[string]any{
+				"target":     "default/videos", // 嵌套封装：底层 default 的新子目录
+				"secret_url": "secrets://default/datakey",
+			}}
+	}
+	newSet := func() *registry.Set {
+		return registry.NewSet(
+			[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, mkVault()},
+			map[string]*storage.Root{"default": rt},
+			map[string]registry.ExternalBackend{},
+			map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
+			"default",
+		)
+	}
+
+	// 首次装配：建默认 secrets 卷 + 密钥 + 补装 vault（创建嵌套子目录 default/videos）。
+	set := newSet()
+	t.Cleanup(func() { _ = set.Close() })
+	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, nil); err != nil {
+		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
+	}
+	if mgr := secrets.ManagerOfExternal(set.External("default-secrets")); mgr != nil {
+		if _, err := mgr.Create(ctx, "datakey"); err != nil {
+			t.Fatalf("Create datakey: %v", err)
+		}
+	} else {
+		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
+	}
+	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
+		t.Fatalf("首次 setupSecretBackends: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "videos")); err != nil {
+		t.Fatalf("首次装配应创建 default/videos 子目录: %v", err)
+	}
+
+	// 重启收养：同一 config 声明、子目录已存在——setupSecretBackends 应成功（收养而非 boot-fail）。
+	set2 := newSet()
+	t.Cleanup(func() { _ = set2.Close() })
+	if _, err := ensureDefaultSecretsVolume(ctx, set2, localRoot, nil); err != nil {
+		t.Fatalf("重启 ensureDefaultSecretsVolume: %v", err)
+	}
+	if err := setupSecretBackends(ctx, set2, localRoot, nil); err != nil {
+		t.Fatalf("重启收养应成功（CRIT-①，不得「需新空子目录」boot-fail）: %v", err)
+	}
+	if be := set2.External("vault"); be == nil || be.FS() == nil {
+		t.Fatal("重启收养后 vault backend 应可寻址且 FS 可用")
+	}
+
+	// fresh 语义守护：不带 adoptNestedDir 标记的普通 ctx 对已存在子目录仍 fail-closed
+	// （运行时 POST /api/volumes/user 新建不会吞掉冲突目录）。
+	if _, err := resolveNestedTargetFS(ctx, "vault", "default/videos"); err == nil {
+		t.Fatal("无收养标记的 resolveNestedTargetFS 对已存在子目录应报错（TOCTOU/fresh 建卷语义）")
+	}
+}

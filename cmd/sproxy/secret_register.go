@@ -181,11 +181,25 @@ func defaultSecretdataSecret(ctx context.Context, v volume.Volume, set *registry
 	return data, nil
 }
 
+// adoptNestedDirKey 是装配 ctx 标记：config 补装 / 用户卷重启 restore 重装**既有**封装卷时
+// 置 true，使 resolveNestedTargetFS 对「已存在子目录」执行**重启收养**（前次本卷自建 →
+// 复用，而非 fail-closed「需新空子目录」——否则 config 声明封装卷重启即 boot-fail，评审
+// CRIT-①）。**未置标记**（运行时 POST /api/volumes/user 新建）→ 子目录已存在按冲突拒绝
+// （与 validateNestedWrapperTarget 预检契约一致，TOCTOU 闭合）。
+type adoptNestedDirKey struct{}
+
+// adoptNestedDir 在 ctx 上置「重启收养」标记（幂等，同键覆盖）。
+func adoptNestedDir(ctx context.Context) context.Context {
+	return context.WithValue(ctx, adoptNestedDirKey{}, true)
+}
+
 // resolveNestedTargetFS 解析嵌套封装 target（`<卷>/<新子目录>`）为可写封装子视图（SubFS）。
 // 供 secretdata（resolveTargetFS）与 secrets（defaultSecretsFS）共用：
 //
 //  1. 经卷集（secretDataSet）取底层卷 FS（本地卷 → LocalFS，外部卷 → External(name).FS()）；
-//  2. 确认子目录当前不存在（防与底层卷既有数据混合；已存在 fail-closed）；
+//  2. 确认子目录当前不存在（防与底层卷既有数据混合；已存在 fail-closed）——**重启收养**
+//     （ctx 带 adoptNestedDirKey）：子目录已存在且为前次本卷自建（config/store 声明再次
+//     装配）→ 复用包装，不报「已存在」；
 //  3. MakeDir 创建空目录 → SubFS 包装（密文/secret 文件落 <卷>/<子目录>/ 下）。
 //
 // 只读保护（占用目录禁改）由互斥占用（pkg/server/volume_links）+ 写保护视图
@@ -203,10 +217,20 @@ func resolveNestedTargetFS(ctx context.Context, name, target string) (syncpkg.FS
 	if !ok {
 		return nil, fmt.Errorf("secret backend: 卷 %q 底层卷 %q 不可用", name, base)
 	}
-	if e, serr := inner.Stat(ctx, subdir); serr != nil {
+	e, serr := inner.Stat(ctx, subdir)
+	if serr != nil {
 		return nil, fmt.Errorf("secret backend: 检查底层子目录 %s/%s 失败: %w", base, subdir, serr)
-	} else if e != nil {
-		return nil, fmt.Errorf("secret backend: 底层子目录 %s/%s 已存在（需新空子目录）", base, subdir)
+	}
+	if e != nil {
+		if adopt, _ := ctx.Value(adoptNestedDirKey{}).(bool); !adopt {
+			return nil, fmt.Errorf("secret backend: 底层子目录 %s/%s 已存在（需新空子目录）", base, subdir)
+		}
+		// 重启收养：子目录为前次本封装卷自建（config/store 声明再次装配）→ 复用包装。
+		wrap, werr := syncpkg.NewSubFS(inner, subdir)
+		if werr != nil {
+			return nil, fmt.Errorf("secret backend: 收养封装嵌套底层 %s/%s 失败: %w", base, subdir, werr)
+		}
+		return wrap, nil
 	}
 	if err := inner.MakeDir(ctx, subdir); err != nil {
 		return nil, fmt.Errorf("secret backend: 创建底层子目录 %s/%s 失败: %w", base, subdir, err)
@@ -519,6 +543,9 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	// 补装 config 声明的 secretdata 卷：assembleVolumes 已把卷元数据登记进 set
 	// （deferred 类型跳过 backend 构造），此处 set 已就绪、secretdata 工厂可解析密钥。
 	// 任一卷补装失败 → 返回错误（boot fail，fail-closed）。
+	// **重启收养（CRIT-①，2026-10-07）**：config 声明封装卷重启时其自建子目录已存在——
+	// 补装 ctx 置 adoptNestedDir 标记，使 resolveNestedTargetFS 收养复用而非「需新空子目录」
+	// boot-fail（首次装配自建目录、二次启动必然命中该拒绝）。fresh 运行时建卷不受影响。
 	for _, v := range set.All() {
 		if v.Type != volume.TypeSecretdata {
 			continue
@@ -526,7 +553,7 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 		if set.External(v.Name) != nil {
 			continue // 已装配（测试自注册类型等）
 		}
-		be, berr := registry.NewBackend(ctx, v)
+		be, berr := registry.NewBackend(adoptNestedDir(ctx), v)
 		if berr != nil {
 			return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败（boot fail）: %w", v.Name, berr)
 		}

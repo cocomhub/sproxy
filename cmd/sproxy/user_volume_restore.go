@@ -38,8 +38,13 @@ func volumeFromUserVolume(uv server.UserVolume) volume.Volume {
 	}
 }
 
-// restoreUserVolumes 扫描全部 owner 的用户卷并恢复进 set（运行时外部卷注册）。
-// 单卷失败跳过 + 告警；store 扫描本身失败 → 返回错误（装配 fail-closed）。
+// restoreUserVolumes 扫描全部 owner 的用户卷并恢复进 set（运行时外部卷注册）。单卷失败
+// 跳过 + 告警；store 扫描本身失败 → 返回错误（装配 fail-closed）。
+//
+// **链式委托依赖排序（评审 G，2026-10-07）**：嵌套封装卷恢复需要其底层卷先恢复（DelegatePool
+// 依赖底层池就绪）。原实现依赖 ScanRestore 的 (owner,name) 序，base 名序在 wrapper 后时
+// DelegatePool 早失败 → 配额委托静默不生效。现按依赖分轮：每轮只恢复「底层已就绪」的卷，
+// 无进展轮对剩余卷逐卷落旧行为（单卷跳过 + 告警，避免死循环）。
 func restoreUserVolumes(set *registry.Set, store *server.UserVolumeStore, log *slog.Logger) error {
 	if set == nil || store == nil {
 		return nil // 防御：未装配卷集合/用户卷 store 时不恢复
@@ -48,18 +53,59 @@ func restoreUserVolumes(set *registry.Set, store *server.UserVolumeStore, log *s
 	if err != nil {
 		return err
 	}
-	for i := range uvs {
-		restoreOneUserVolume(set, store, log, uvs[i])
+	pending := uvs
+	for {
+		var next []server.UserVolume
+		progress := restoreReadyRound(set, store, log, pending, &next)
+		if len(next) == 0 {
+			return nil
+		}
+		if !progress {
+			// 无进展：剩余卷底层不可恢复（被跳过/缺失）→ 逐个落位（单卷失败即告警跳过），
+			// 避免死循环（兼容旧行为，装配容忍单盘坏）。
+			for _, uv := range next {
+				restoreOneUserVolume(set, store, log, uv)
+			}
+			return nil
+		}
+		pending = next
 	}
-	return nil
+}
+
+// restoreReadyRound 处理一轮链式恢复：把「底层已就绪」的卷恢复进 set，底层未就绪（嵌套依赖）
+// 的卷放入 next 待下轮。返回本轮是否有进展（任一卷被处理）。
+func restoreReadyRound(set *registry.Set, store *server.UserVolumeStore, log *slog.Logger, pending []server.UserVolume, next *[]server.UserVolume) bool {
+	progress := false
+	for _, uv := range pending {
+		base, _, nested := splitNestedUVTarget(uv)
+		if nested && !setVolumeReady(set, base) {
+			*next = append(*next, uv) // 底层未就绪 → 暂缓本轮（依赖后置）。
+			continue
+		}
+		restoreOneUserVolume(set, store, log, uv)
+		progress = true
+	}
+	return progress
+}
+
+// setVolumeReady 判定底层卷 base 已装配进 set（DelegatePool 依赖其存在）。
+func setVolumeReady(set *registry.Set, base string) bool {
+	_, ok := set.ByName(base)
+	return ok
 }
 
 // restoreOneUserVolume 恢复单卷（C1，2026-10-06）：后端构造 → 嵌套分支不包 CapacityFS 计数器
 // （计量统一走委托子 Scope）→ AddExternalVolume → 嵌套卷重建 DelegatePool（配额委托重启恢复）。
-// 返回是否恢复成功（false = 单卷跳过，不阻塞其余卷）。
+// **重启收养（CRIT-①）**：嵌套卷自建底层子目录重启时已存在——构造 ctx 置 adoptNestedDir 标记
+// （store 记录即「本卷声明占用」）使 resolveNestedTargetFS 复用，而非「已存在（需新空子目录）」
+// 跳过。返回是否恢复成功（false = 单卷跳过，不阻塞其余卷）。
 func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log *slog.Logger, uv server.UserVolume) bool {
 	v := volumeFromUserVolume(uv)
-	be, bErr := registry.NewBackend(context.Background(), v)
+	ctx := context.Background()
+	if _, _, nested := splitNestedUVTarget(uv); nested {
+		ctx = adoptNestedDir(ctx)
+	}
+	be, bErr := registry.NewBackend(ctx, v)
 	if bErr != nil {
 		log.Warn("用户卷恢复跳过（后端构造失败）", "volume", uv.Name, "owner", uv.Owner, "error", bErr)
 		return false
