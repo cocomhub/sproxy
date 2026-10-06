@@ -233,6 +233,62 @@ func (h *Handlers) registerWrapperLink(owner, wrapper string, extra map[string]a
 	return h.links().register(volumeLink{Base: base, Subdir: subdir, Wrapper: wrapper, Owner: owner})
 }
 
+// ---- 封装卷配额委托（方案B，2026-10-06）----
+//
+// 语义：封装卷配额 = 底层卷池的占用子目录 Scope（quota.Pool.Scope(subdir, maxBytes)，父链聚合
+// 天然保障整体不超底层配额）——不建独立池、不从底层池扣减。
+//   - 设 capacity → 在底层池挂 Scope(占用子目录, capacity)，建卷前置校验 capacity ≤ 底层池余量
+//     （MaxBytes - Usage - Reserved；底层池不限或余量足够则过，超 → 400「超出底层卷可用配额」）；
+//   - 不设（0）→ Scope(subdir, 0) 不限制（父链聚合，最终由原始卷反向管理）。
+// 上传封装卷经 reserveVolume 的 pool 取委托子 Scope 池（Pool(wrapper) 委托返回），自动父链聚合
+// 到原始卷池——底层池满 → 封装卷上传 507（整体拦截）。
+
+// validateWrapperQuotaCapacity 前置校验封装卷 capacity 不超底层卷池余量（建卷 400）：
+//   - 非嵌套 target → nil（传统整卷配额不介入）；
+//   - capacity<=0 → nil（不限；由底层卷兜底）；
+//   - 底层池不限（MaxBytes<=0）→ nil；
+//   - capacity > MaxBytes−Usage−Reserved → 「超出底层卷可用配额」。
+func (h *Handlers) validateWrapperQuotaCapacity(extra map[string]any, capacity int64) error {
+	base, _, ok := volume.SplitNestedTarget(extraTargetStr(extra))
+	if !ok || h.volSet == nil || capacity <= 0 {
+		return nil
+	}
+	pool := h.volSet.Pool(base)
+	if pool == nil {
+		return nil
+	}
+	mx := pool.MaxBytes()
+	if mx <= 0 {
+		return nil
+	}
+	avail := mx - pool.Usage() - pool.Reserved()
+	if capacity > avail {
+		return fmt.Errorf("超出底层卷可用配额（capacity=%d > 余量=%d，底层卷 %q）", capacity, avail, base)
+	}
+	return nil
+}
+
+// registerWrapperQuota 为嵌套封装卷挂配额委托（方案B）：在底层卷容量池挂占用子目录 Scope。
+// 非嵌套 target / 底层卷无容量池 → nil（不委托，与历史 wrapper 无独立池一致）。调用时机：
+// 建封装卷成功 + registerWrapperLink 成功后（失败回滚已建卷与关联）。
+func (h *Handlers) registerWrapperQuota(wrapper string, extra map[string]any, capacity int64) error {
+	base, subdir, ok := volume.SplitNestedTarget(extraTargetStr(extra))
+	if !ok || h.volSet == nil || h.volSet.Pool(base) == nil {
+		return nil
+	}
+	_, err := h.volSet.DelegatePool(wrapper, base, subdir, capacity)
+	return err
+}
+
+// clearWrapperQuota 移除封装卷的委托配额登记（删封装卷时；无登记空操作）。子 Scope 挂载后
+// 无法从底层池卸载（quota 无显式删子池），清除登记后 Scope 留在父池但不被消费（无写入即
+// 0 占用，不影响底层池），见 Set.ClearDelegatedPool 注释。
+func (h *Handlers) clearWrapperQuota(wrapper string) {
+	if h.volSet != nil {
+		h.volSet.ClearDelegatedPool(wrapper)
+	}
+}
+
 // userVisibleRelOf 把租户根内相对路径（user/<path>）归一为用户可见相对路径（<path>），
 // 与占用 Subdir（卷内用户可见坐标，如 videos，不含 user/<owner> 前缀）对齐比较。
 func userVisibleRelOf(rel string) string {

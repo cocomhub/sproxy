@@ -5,7 +5,7 @@
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
 // global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件三处经 typeof 守卫引用：
 //   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
-// global: volManageFormHtml / volManageListHtml / composeNestedTarget（vol-manage-format.js，「卷管理」tab 渲染）
+// global: volManageFormHtml / volManageListHtml / composeNestedTarget / composeCapacityText（vol-manage-format.js，「卷管理」tab 渲染 + 容量单位拼接）
 // global: auditRowsHtml（audit-rows-format.js，任务「审计」弹窗行渲染；经 showTaskAudit 调用）
 
 const BASE = '';
@@ -971,7 +971,12 @@ async function onSubmitVolManage() {
   let capacity = 0;
   const capStr = capEl ? capEl.value.trim() : '';
   if (capStr) {
-    try { capacity = parseSizeText(capStr); } catch (e) {
+    // 单位下拉（vol-manage-format.js）：数字 + 单位（如 100 + GiB）拼接成 `100GiB` 提交；
+    // 输入已带单位/非纯数字时原样透传（parseSizeText 支持既有形态）。
+    const unitEl = area.querySelector('[name="capacity_unit"]');
+    const unit = unitEl ? unitEl.value : '';
+    const combined = composeCapacityText(capStr, unit);
+    try { capacity = appRender.parseSizeText(combined); } catch (e) {
       showToast('容量格式非法：' + (e?.message ? e.message : String(e)), 'error');
       return;
     }
@@ -979,7 +984,7 @@ async function onSubmitVolManage() {
   const extra = {};
   area.querySelectorAll('[name]').forEach(function (el) {
     const k = el.getAttribute('name');
-    if (k === 'name' || k === 'type' || k === 'capacity') return;
+    if (k === 'name' || k === 'type' || k === 'capacity' || k === 'capacity_unit') return;
     if (k && k.endsWith('_subdir')) return; // 子目录由 composeNestedTarget 合并进 target
     if (el.type === 'checkbox') extra[k] = el.checked;
     else if (el.type === 'number') extra[k] = el.value === '' ? 0 : Number(el.value);
@@ -1242,7 +1247,7 @@ function validateCreateVolumeForm(form) {
   let capacity = 0;
   if (form.capStr === '') return { ok: true, capacity: capacity, extra: extra };
   try {
-    capacity = parseSizeText(form.capStr);
+    capacity = appRender.parseSizeText(form.capStr);
   } catch (e) {
     return { error: '容量格式非法：' + (e?.message ? e.message : String(e)) };
   }
@@ -1349,17 +1354,9 @@ async function onUserVolumeListClick(ev) {
   }
 }
 
-// parseSizeText 人类可读容量 → 字节（"100GiB"/"2GB"/纯数字）。非法抛错。
-function parseSizeText(text) {
-  const t = String(text).trim();
-  if (t === '') return 0;
-  const m = /^([\d.]+)\s*(B|KB|MB|GB|KiB|MiB|GiB)?$/i.exec(t);
-  if (!m) throw new Error('无法解析大小: ' + t);
-  const n = Number.parseFloat(m[1]);
-  const unit = (m[2] || '').toUpperCase();
-  const mult = { '': 1, B: 1, KB: 1000, MB: 1000 * 1000, GB: 1000 * 1000 * 1000, KIB: 1024, MIB: 1024 * 1024, GIB: 1024 * 1024 * 1024 }[unit];
-  return Math.round(n * (mult || 1));
-}
+// parseSizeText 已下沉 appRender.parseSizeText（含 TB/TiB 单位解析，供建卷容量单位下拉复用）。
+// 此处不再定义同名函数（禁跨文件隐式全局重复定义，见 CLAUDE.md 记录）——调用一律走
+// appRender.parseSizeText，浏览器运行时 appRender 先加载、随 onClick 事件触发时已就绪。
 
 async function showConfig() {
   document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';

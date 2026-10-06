@@ -51,6 +51,24 @@
     return (n / 1073741824).toFixed(2) + ' GB';
   }
 
+  // parseSizeText 人类可读容量 → 字节（"100GiB"/"2GB"/纯数字字节）。非法/空抛错。
+  // 单位支持 B / KB·KiB / MB·MiB / GB·GiB / TB·TiB（建卷容量单位下拉 MB/GB/TB/MiB/GiB/TiB
+  // 提交的 `100GiB` 形态在此解析；纯数字 = 字节）。空串 → 0（容量留空 = 不限）。
+  function parseSizeText(text) {
+    const t = String(text).trim();
+    if (t === '') return 0;
+    const m = /^([\d.]+)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?$/i.exec(t);
+    if (!m) throw new Error('无法解析大小: ' + t);
+    const n = Number.parseFloat(m[1]);
+    const unit = (m[2] || '').toUpperCase();
+    const mult = {
+      '': 1, B: 1,
+      KB: 1000, MB: 1000 * 1000, GB: 1000 * 1000 * 1000, TB: 1000 * 1000 * 1000 * 1000,
+      KIB: 1024, MIB: 1024 * 1024, GIB: 1024 * 1024 * 1024, TIB: 1024 * 1024 * 1024 * 1024,
+    }[unit];
+    return Math.round(n * (mult || 1));
+  }
+
   // stripCloudId：把云项展示 id（'cloud-task-<id>' / 'cloud-group-<id>'）还原为服务端真实 id。
   // 云行按钮 data-id 携带展示 id（含前缀）；凡要调 sc.cloud.* API 或拼 '.__cloud__/<id>/' 路径，
   // 必须先剥前缀，否则后端 404/组 not found。非云 id 原样返回。双实现同源同行为：
@@ -1021,7 +1039,7 @@
   }
 
   return {
-    escHtml, formatSize, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
+    escHtml, formatSize, parseSizeText, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
     stripCloudId, isVideoName,
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,

@@ -45,12 +45,29 @@ function volManageFormHtml(opts) {
     m += formFieldHtml(f, vols);
   });
   m += fieldWrapHtml('容量（留空不限，如 100GiB）', false,
-    '<input type="text" name="capacity" placeholder="可选" style="margin-top:4px;padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;background:var(--bg-input,var(--bg-container));color:var(--text-primary);font-size:13px;">');
+    capacityInputHtml());
   m += '<div style="display:flex;gap:8px;align-items:center;margin-top:4px;">' +
     '<button type="button" id="vm-create-btn" class="btn btn-sm btn-primary">创建卷</button>' +
     '<span id="vm-msg" style="font-size:12px;color:var(--text-muted);"></span></div>';
   m += '</div></div>';
   return m;
+}
+
+// capacityInputHtml → 容量输入 + 单位下拉（MB/GB/TB/MiB/GiB/TiB，与 parseSizeText 支持的单位
+// 一致）。用户填数字 + 选单位 → 提交时拼成 `100GiB`（app.js onSubmitVolManage composeCapacityText）；
+// 数字留空/直接填带单位文本也可（parseSizeText 解析既有形态）。
+function capacityInputHtml() {
+  const box = 'margin-top:4px;padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;background:var(--bg-input,var(--bg-container));color:var(--text-primary);font-size:13px;';
+  const units = ['MB', 'GB', 'TB', 'MiB', 'GiB', 'TiB'];
+  let sel = '<select name="capacity_unit" style="margin-top:4px;' + box + '">';
+  sel += '<option value="">（单位）</option>';
+  for (let i = 0; i < units.length; i++) {
+    sel += '<option value="' + units[i] + '">' + units[i] + '</option>';
+  }
+  sel += '</select>';
+  return '<input type="text" name="capacity" placeholder="可选" style="margin-top:4px;' + box + '">' +
+    '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;">' +
+    '<span style="font-size:12px;color:var(--text-muted);">容量+单位：</span>' + sel + '</div>';
 }
 
 // formFieldHtml(f, vols) → 单个 schema 字段的控件 HTML（label + input/select）。
@@ -156,6 +173,8 @@ if (typeof module !== 'undefined' && module.exports) {
     volManageListHtml: volManageListHtml,
     volOccupiedText: volOccupiedText,
     composeNestedTarget: composeNestedTarget,
+    composeCapacityText: composeCapacityText,
+    capacityInputHtml: capacityInputHtml,
   };
 }
 
@@ -168,4 +187,18 @@ function composeNestedTarget(vol, subdir) {
   if (!s) return v;
   if (!v) return '';
   return v + '/' + s;
+}
+
+// composeCapacityText(numText, unit) → 容量文本拼装：数字 + 单位 → `100GiB`（提交给
+// parseSizeText 解析；纯数字 + 空单位 → 原数字 = 字节）。数字为空 → 空串（容量留空不限）。
+// 输入已带单位/非纯数字（如 `100GiB`/`10_000`）→ 忽略下拉原样透传（parseSizeText 支持既有
+// 形态，且不得覆盖用户手写的单位）。纯函数，node --test 覆盖。
+const _CAP_NUM_RE = /^\d+(\.\d+)?$/;
+function composeCapacityText(numText, unit) {
+  const t = String(numText == null ? '' : numText).trim();
+  const u = String(unit == null ? '' : unit).trim();
+  if (!t) return '';
+  if (!u) return t;
+  if (!_CAP_NUM_RE.test(t)) return t;
+  return t + u;
 }

@@ -382,6 +382,11 @@ func (s *Scope) Adjust(prev, next int64) {
 	s.pool.adjustUp(next - prev)
 }
 
+// Pool 返回该作用域的底层配额账本（引用场景：把子作用域当作 *Pool 上交上层统一入账——
+// 嵌套封装配额委托（方案B）经它把封装卷容量 Pool 挂到底层卷池的子 Scope，Set.Pool(wrapper)
+// 返回该底池让消费方直接 TryReserve/Adjust/释放，父链聚合天然保障整体不超底层配额）。
+func (s *Scope) Pool() *Pool { return s.pool }
+
 // Usage 返回已确认占用。
 func (s *Scope) Usage() int64 { return s.pool.Usage() }
 

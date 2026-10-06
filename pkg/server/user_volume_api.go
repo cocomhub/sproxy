@@ -189,6 +189,12 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 		return
 	}
+	// 配额委托容量预检（方案B，2026-10-06）：封装卷设 capacity 须 ≤ 底层卷池余量
+	// （超出 → 400「超出底层卷可用配额」；不设则 Scope 0 不限、由底层卷反向管理）。
+	if err := h.validateWrapperQuotaCapacity(req.Extra, req.Capacity); err != nil {
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+		return
+	}
 	// 用户卷强制 owner-only ACL（评审 S1，2026-10-06）：新卷注入 Mode=Allow + 单 owner
 	// 白名单，使 data 面（列表/下载/wrapper 底层/转存目标）对非 owner fail-closed——此前
 	// 注入零值 ACL（Mode==""）令 volume.Authorize 对**任意 owner** 恒 true，跨 owner 枚举
@@ -221,6 +227,15 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		_ = h.volSet.RemoveExternalVolume(req.Name)
 		_ = h.userVolumes.Delete(owner, req.Name)
 		sendJSONResponse(w, map[string]string{"error": errVolumeDirOccupied.Error()}, http.StatusConflict)
+		return
+	}
+	// 配额委托挂载（方案B）：在底层卷容量池挂占用子目录 Scope（capacity 已前置校验 ≤ 底层
+	// 余量，此处失败仅底层池不可用/重复委托等防御路径）→ 回滚已建卷 + 清关联，尽力一致。
+	if err := h.registerWrapperQuota(req.Name, req.Extra, req.Capacity); err != nil {
+		_ = h.volSet.RemoveExternalVolume(req.Name)
+		_ = h.userVolumes.Delete(owner, req.Name)
+		h.clearWrapperLinks(req.Name)
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
@@ -298,8 +313,9 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	// 删除成功：若本卷是封装卷（曾占用底层子目录），清除其占用关联（关联生命周期闭环）。
+	// 删除成功：若本卷是封装卷（曾占用底层子目录），清除其占用关联与配额委托（生命周期闭环）。
 	h.clearWrapperLinks(name)
+	h.clearWrapperQuota(name)
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 

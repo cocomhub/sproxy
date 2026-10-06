@@ -12,7 +12,7 @@ const path = require('node:path');
 // node 环境下 app-render.js 以 module 形态提供，须先注入全局。
 global.appRender = require(path.join(__dirname, 'app-render.js'));
 
-const { volManageFormHtml, volManageListHtml, volOccupiedText, composeNestedTarget } = require('./vol-manage-format.js');
+const { volManageFormHtml, volManageListHtml, volOccupiedText, composeNestedTarget, composeCapacityText, capacityInputHtml } = require('./vol-manage-format.js');
 
 test('volManageFormHtml 按 schema 渲染字段', () => {
   const html = volManageFormHtml({
@@ -195,4 +195,54 @@ test('volOccupiedText 纯函数：嵌套 target → 底层文案；非嵌套/无
   assert.equal(volOccupiedText({}), '');
   assert.equal(volOccupiedText({ extra: { target: '  main/videos  ' } }), '底层 main/videos'); // 去空白
   assert.equal(volOccupiedText(null), '');
+});
+
+// ---- 容量单位下拉（方案B 前端，2026-10-06）----
+
+test('volManageFormHtml 容量字段含单位下拉（MB/GB/TB/MiB/GiB/TiB）', () => {
+  const html = volManageFormHtml({
+    type: 'foo', category: 'linked',
+    fields: [{ key: 'target', label: '底层卷', type: 'volume-select' }],
+    volumes: [{ name: 'main', category: 'mt-local' }],
+  });
+  assert.match(html, /name="capacity"/);
+  assert.match(html, /name="capacity_unit"/);
+  ['MB', 'GB', 'TB', 'MiB', 'GiB', 'TiB'].forEach(function (u) {
+    assert.ok(html.indexOf('value="' + u + '"') >= 0, '单位下拉缺 ' + u);
+  });
+});
+
+test('capacityInputHtml 含容量输入 + 单位下拉', () => {
+  const html = capacityInputHtml();
+  assert.match(html, /name="capacity"/);
+  assert.match(html, /name="capacity_unit"/);
+  assert.match(html, /value="GiB"/);
+  assert.match(html, /value="TiB"/);
+});
+
+test('composeCapacityText 数字 + 单位拼接', () => {
+  assert.equal(composeCapacityText('100', 'GiB'), '100GiB');
+  assert.equal(composeCapacityText('2.5', 'TB'), '2.5TB');
+  assert.equal(composeCapacityText('100', ''), '100'); // 无单位 → 纯数字字节
+  assert.equal(composeCapacityText('', 'GiB'), ''); // 数字空 → 空串（容量留空不限）
+  assert.equal(composeCapacityText('  100 ', ' GiB '), '100GiB'); // 去空白
+  assert.equal(composeCapacityText(' 100GiB ', 'MB'), '100GiB'); // 已带单位：不覆盖原输入
+  assert.equal(composeCapacityText('abc', 'GiB'), 'abc'); // 非数字：原样透传（parse 兜底报错）
+  assert.equal(composeCapacityText(null, 'MB'), ''); // 未填
+});
+
+test('appRender.parseSizeText 解析各单位（容量单位下拉对应）', () => {
+  const ar = global.appRender;
+  assert.equal(ar.parseSizeText(''), 0);
+  assert.equal(ar.parseSizeText('100'), 100); // 纯数字字节
+  assert.equal(ar.parseSizeText('1KB'), 1000);
+  assert.equal(ar.parseSizeText('1MB'), 1000 * 1000);
+  assert.equal(ar.parseSizeText('1GB'), 1000 * 1000 * 1000);
+  assert.equal(ar.parseSizeText('1TB'), 1000 * 1000 * 1000 * 1000);
+  assert.equal(ar.parseSizeText('1MiB'), 1024 * 1024);
+  assert.equal(ar.parseSizeText('1GiB'), 1024 * 1024 * 1024);
+  assert.equal(ar.parseSizeText('1TiB'), 1024 * 1024 * 1024 * 1024);
+  assert.equal(ar.parseSizeText('100GiB'), 100 * 1024 * 1024 * 1024);
+  assert.equal(ar.parseSizeText('2.5TB'), Math.round(2.5 * 1000 * 1000 * 1000 * 1000));
+  assert.throws(() => ar.parseSizeText('abc'), /无法解析大小/);
 });
