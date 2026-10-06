@@ -817,7 +817,14 @@
     const titleHtml = kind === 'cloud_group' ? (item.name || item.id || '-') : title;
     const badgeText = kind === 'sync_task' ? syncStatusText(item.status) : statusText(item.status);
     // 审查 M-1：状态文本来自服务端，转义防注入（纵深防御；sync 行至少转义）。
-    const badge = '<span style="font-size:12px;font-weight:600;margin-left:8px;padding:1px 8px;border-radius:10px;background:var(--bg-hover);color:var(--text-secondary);white-space:nowrap;">' + escHtml(badgeText) + '</span>';
+    let badge = '<span style="font-size:12px;font-weight:600;margin-left:8px;padding:1px 8px;border-radius:10px;background:var(--bg-hover);color:var(--text-secondary);white-space:nowrap;">' + escHtml(badgeText) + '</span>';
+    // 云任务完整性标记（任务 7）：服务端 IntegrityStatus ∈ {"", "verified", "damaged"}
+    // （pkg/cloud/manager.go）。damaged → 黄色「完整性异常」标记（--text-warning）；
+    // verified/缺省 → 无标记（正常）。status 为服务端固定枚举值，直接字符串字面量最安全。
+    const integrityRaw = (item.meta && item.meta.raw) || {};
+    if (kind === 'cloud_task' && integrityRaw.integrity_status === 'damaged') {
+      badge += '<span style="font-size:11px;color:var(--text-warning);margin-left:6px;font-weight:600;">完整性异常</span>';
+    }
     const cached = _cachedChunksOf(item.meta);
     const totalChunks = item.meta && item.meta.totalChunks ? item.meta.totalChunks : 0;
     const cachedHtml = cached > 0 ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">已缓存 ' + cached + '/' + totalChunks + ' 块</span>' : '';

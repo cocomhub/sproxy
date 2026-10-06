@@ -157,6 +157,37 @@ test('buildTransferRowHtml failed/ paused 项：恢复/取消按钮', () => {
 
 // ---- 云行按钮组（任务 5：kind 感知 _rowActions 分派 _cloudTaskActions / _cloudGroupActions） ----
 
+// ---- 云任务 integrity 标记（任务 7：IntegrityStatus 展示） ----
+// 服务端 IntegrityStatus 取值："" | "verified" | "damaged"（pkg/cloud/manager.go）。
+// 渲染语义：damaged → 黄色「完整性异常」标记（--text-warning）；verified/缺省 → 无标记。
+
+test('buildTransferRowHtml 云任务 integrity_status=damaged 渲染完整性标记', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'cloud-task-INT', kind: 'cloud_task', filename: 'i.png', status: 'completed',
+    meta: { raw: { integrity_status: 'damaged' } },
+  });
+  assert.ok(html.includes('完整性异常'), 'damaged 应展示完整性标记');
+  assert.ok(html.includes('--text-warning'), '标记应使用黄色系警告色');
+  assert.ok(html.includes('cloud-task-INT'), '行 id 可寻址');
+  assert.ok(!html.includes('<script'), '无 XSS');
+});
+
+test('buildTransferRowHtml 云任务 integrity verified/缺省 不渲染完整性标记', () => {
+  const verified = r.buildTransferRowHtml({
+    id: 'cloud-task-V', kind: 'cloud_task', filename: 'v.png', status: 'completed',
+    meta: { raw: { integrity_status: 'verified' } },
+  });
+  assert.ok(!verified.includes('完整性异常'), 'verified 不展示标记');
+  const none = r.buildTransferRowHtml({
+    id: 'cloud-task-N', kind: 'cloud_task', filename: 'n.png', status: 'completed', meta: { raw: {} },
+  });
+  assert.ok(!none.includes('完整性异常'), '缺省不展示标记');
+  const noMeta = r.buildTransferRowHtml({
+    id: 'cloud-task-NM', kind: 'cloud_task', filename: 'nm.png', status: 'completed',
+  });
+  assert.ok(!noMeta.includes('完整性异常'), '无 meta 不 panic、不展示标记');
+});
+
 test('buildTransferRowHtml 云任务行按 status 渲染云按钮（completed 下载到本地 + 删除）', () => {
   const html = r.buildTransferRowHtml({
     id: 'cloud-task-T1', kind: 'cloud_task', filename: 'a.bin', status: 'completed',
