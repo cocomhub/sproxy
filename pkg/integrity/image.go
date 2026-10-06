@@ -60,7 +60,10 @@ func (ImageChecker) Check(ctx context.Context, path string, size int64) (*Report
 		return &Report{OK: false, Reason: err.Error()}, nil
 	}
 	if cfg.Width > 0 && cfg.Height > 0 {
-		if maxPixels := int64(100000000); int64(cfg.Width)*int64(cfg.Height) > maxPixels {
+		// F6（对抗评审）：上限降到 2500 万像素（~100MB 分配）——并发放大 MaxConcurrent×
+		// 100MB 降低 OOM 风险；合法超 2500 万像素大图极罕见。用户裁定按内存配额治理
+		// （ByteSize + 排队）记设计待办，此为临时安全上界。
+		if maxPixels := int64(25000000); int64(cfg.Width)*int64(cfg.Height) > maxPixels {
 			return &Report{OK: false, Reason: fmt.Sprintf("image 像素超限 %dx%d", cfg.Width, cfg.Height)}, nil
 		}
 	}

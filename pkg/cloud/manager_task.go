@@ -396,6 +396,14 @@ func (m *CloudDownloadManager) postDownloadCheck(ctx context.Context, task *Clou
 	// 立即记录 ETag 到 task：续传重试时可通过 task.ETag 做二次校验，
 	// 完成后客户端也可通过 API 读取 ETag 确认版本。
 	m.recordTaskETag(task, result)
+	// M3/F5（对抗评审）：IntegrityProvider 类型声明兜底到 result.Integrity——下载器
+	// 未在 Result 填 Integrity 时（HTTP 三路径恒零值），用其声明补全（消除声明未消费
+	// 死码；pikpak 已填 GCID 命中 ModeAuthority 则不改）。
+	if result.Integrity == downloader.ModeUnknown {
+		if ip, ok := m.downloaderFor(task.URL).(downloader.IntegrityProvider); ok {
+			result.Integrity = ip.IntegrityMode()
+		}
+	}
 	// 完整性判定嵌入点：成功下载后校验内容语义可用性（重下 / 放行 damaged /
 	// Force 阻断三向分派在 resolveIntegrityTaskErr）。
 	if ierr := m.checkDownloadIntegrity(ctx, task, destPath, result); ierr != nil {

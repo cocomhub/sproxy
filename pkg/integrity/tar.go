@@ -75,7 +75,9 @@ func (TarChecker) Check(ctx context.Context, path string, size int64) (*Report, 
 	// 撑爆内存。遍历时统计条目累计解压字节，超参考 size（源文件大小放大系数）即判
 	// 异常（不继续解压）。
 	var inflated int64
-	const inflateRatio = 100 // 解压膨胀比参考（tar 常规 <10，100 为安全上界）
+	// F2（对抗评审）：膨胀比上界 500（纯文本/日志类合法高压缩归档可达百倍以上，
+	// 100 会误伤；极端 gzip 炸弹仍 >500 被拦截）。
+	const inflateRatio = 500
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {

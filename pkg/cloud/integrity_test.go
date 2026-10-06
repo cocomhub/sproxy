@@ -244,3 +244,31 @@ var validPNG1x1 = func() []byte {
 	}
 	return buf.Bytes()
 }()
+
+// TestDownloadIntegrity_ResumeResetsState M1 回归：resume 重置 integrity 运行时累计
+// （integritySames/LastChecksum/IntegrityStatus）——新下载会话从零判定。
+func TestDownloadIntegrity_ResumeResetsState(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	mgr.integrityLookup = integrity.Lookup
+	task := &CloudTask{ID: "t-resume", Filename: "r.bin", Status: "failed", Save: true}
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+	// 预置 stale 累计（模拟上次会话残留）
+	mgr.mu.Lock()
+	task.integritySames = 2
+	task.integrityLastChecksum = "stale-checksum"
+	task.IntegrityStatus = "damaged"
+	mgr.mu.Unlock()
+	if err := mgr.ResumeTask(task.ID, false, ""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	mgr.mu.RLock()
+	got := mgr.tasks[task.ID]
+	mgr.mu.RUnlock()
+	if got.integritySames != 0 || got.integrityLastChecksum != "" || got.IntegrityStatus != "" {
+		t.Fatalf("M1: resume 应重置 integrity 状态，got sames=%d last=%q status=%q",
+			got.integritySames, got.integrityLastChecksum, got.IntegrityStatus)
+	}
+}

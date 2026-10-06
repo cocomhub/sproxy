@@ -136,6 +136,12 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	task.Error = ""
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
+	// M1（对抗评审）：resume 重置完整性运行时累计（integritySames/LastChecksum）——
+	// 新下载会话从零累计，防 stale 跨 resume 累计导致首轮即误判 permanent。
+	// IntegrityStatus 一并清空（重下后重新判定）。
+	task.integritySames = 0
+	task.integrityLastChecksum = ""
+	task.IntegrityStatus = ""
 
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	// resumeReserved 记录**本次调用**新落的占位（0 = 未新增，此时 task.ReservedSize 是任务失败时
