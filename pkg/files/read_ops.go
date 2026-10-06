@@ -127,6 +127,12 @@ func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 		volFilter = q.VolName
 	}
 
+	// 注（评审 C4-⑥，2026-10-07）：被封装卷占用的底层子目录直查（?volume=main&subdir=videos）
+	// 保持**读路径不拦**（只读可查：返回基础卷可见条目，封装卷数据不在该视图 → 通常空 200）。
+	// 这是既有写保护契约的读侧（volume_links_write_test 钉住 200+legacy 内容）；占用目录的
+	// 语义由 WebUI 从基础卷列表隐藏表达，API 直查空 200 属可接受语义（不作 404——与读路径
+	// 契约冲突）。若未来要区分「目录不存在」与「占用目录空」，需引入单独提示字段（契约变更）。
+
 	// 列表走索引：dirRel = rel 去 user/ 前缀（索引 key 空间；"" = 根目录）。
 	dirRel := strings.TrimPrefix(rel, tnt0.UserRoot()+"/")
 	if dirRel == rel {

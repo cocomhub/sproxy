@@ -364,10 +364,16 @@ func (h *Handlers) clearWrapperLinks(wrapper string) {
 	h.links().unregisterByWrapper(wrapper)
 }
 
-// cleanupWrapperBaseDir 删封装卷后清理其自建的空占用子目录残留（C5/M3，2026-10-06）：
-// 嵌套 target 创建时由 resolveNestedTargetFS 在底层卷 MakeDir 留下子目录；删除封装卷时
-// 若该目录已空则删除（重建同目录不再 409「目录已存在」）。有内容（封装卷数据仍在）或
-// 删除失败 → 保留（重建会 409 提示先清理，fail-closed 不误删数据）。非嵌套/无底层 → 空操作。
+// cleanupWrapperBaseDir 删封装卷后清理其占用子目录残留（C5/M3，2026-10-06；I-③ 扩展，2026-10-07）：
+// 嵌套 target 创建时由 resolveNestedTargetFS 在底层卷 MakeDir 留下子目录；删除封装卷时先
+// **整流删除该子目录全部内容**（封装卷密文数据——删带数据封装卷不留密文、子目录可复用重建），
+// 再删空目录。删除失败 → 保留（重建会 409 提示先清理，fail-closed 不误删底层卷其它数据）。
+// 非嵌套/无底层 → 空操作。
+//
+// 坐标说明（评审 A4 核验）：`FSFor(base)` 对本地底层卷返回**卷根** LocalFS（RootDir，无 owner
+// 前缀）；占用子目录 subdir 存在于 `<baseRoot>/<subdir>`，封装卷文件落其 `user/<owner>/...` 下——
+// 与 resolveNestedTargetFS（MakeDir at baseRoot/subdir）一致，无坐标偏差（重插入经
+// volume_wrapper_delete_test 的 `<baseRoot>/videos` 清理断言钉住）。
 func (h *Handlers) cleanupWrapperBaseDir(extra map[string]any) {
 	if h == nil || h.volSet == nil {
 		return
@@ -380,13 +386,47 @@ func (h *Handlers) cleanupWrapperBaseDir(extra map[string]any) {
 	if !ok2 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// LocalFS.Delete = os.Remove：空目录才成功；有内容报错 → 保留（fail-closed 不误删数据）。
-	if err := fsys.Delete(ctx, subdir); err != nil {
-		h.logger.Info("封装卷删除后清理占用子目录残留跳过（有内容/失败，重建同目录将 409）",
-			"base", base, "subdir", subdir)
+	if err := deleteFSContents(ctx, fsys, subdir); err != nil {
+		h.logger.Info("封装卷删除后清理占用子目录残留跳过（有内容删除失败，重建同目录将 409）",
+			"base", base, "subdir", subdir, "error", err)
+		return
 	}
+	// LocalFS.Delete = os.Remove：删空目录（recursive 后应已空）。
+	if err := fsys.Delete(ctx, subdir); err != nil {
+		h.logger.Info("封装卷删除后移除空占用子目录失败（重建同目录可能 409）",
+			"base", base, "subdir", subdir, "error", err)
+	}
+}
+
+// deleteFSContents 递归删除 FS 路径下的全部内容（自底向上：先删除文件/子目录内容，再删
+// 子目录）。路径不存在/不可列 → 视为无内容返回 nil（调用方随后 Delete 判定）。任一删除
+// 失败 → 返回错误（fail-closed：不静默丢目录，调用方记录残留待人工清理）。
+func deleteFSContents(ctx context.Context, fsys syncpkg.FS, path string) error {
+	entries, err := fsys.ListDir(ctx, path)
+	if err != nil {
+		return nil // 路径不存在/不可列 → 无内容（父目录删除由调用方判定）。
+	}
+	for _, e := range entries {
+		child := e.Name
+		if path != "" {
+			child = path + "/" + e.Name
+		}
+		if e.IsDir {
+			if derr := deleteFSContents(ctx, fsys, child); derr != nil {
+				return derr
+			}
+			if err := fsys.Delete(ctx, child); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := fsys.Delete(ctx, child); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // defaultVolumeName 返回默认卷名（volSet 未装配 → ""；checkWrapperOccupiedWrite 对空名
