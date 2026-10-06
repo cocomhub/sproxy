@@ -39,6 +39,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -276,6 +277,9 @@ func (w *volumeUserWalker) walk(rel string, depth int) error {
 	}
 	for _, e := range entries {
 		childRel := filepath.ToSlash(filepath.Join(rel, e.Name()))
+		if meta.IsMetaName(e.Name()) {
+			continue // 可信卷 FileMeta sidecar 隐藏：不导出（服务端内部文件）
+		}
 		if e.IsDir() {
 			if err := w.walk(childRel, depth+1); err != nil {
 				return err

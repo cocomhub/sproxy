@@ -56,10 +56,24 @@ type runtime struct {
 	bandwidth     BandwidthLimiter
 	eventSink     EventListener
 	contentIndex  bool
+	fileMeta      FileMetaPolicy
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
 func (rt runtime) contentIndexEnabled() bool { return rt.contentIndex }
+
+// fileMetaEnabled 报告可信卷 meta 能力是否装配且启用（缺省 false 零回归）。
+func (rt runtime) fileMetaEnabled() bool {
+	return rt.fileMeta != nil && rt.fileMeta.Enabled()
+}
+
+// writeMetaSidecar 委托装配层实现写配套 .meta（本地卷上传到达即建；未装配 = 无操作）。
+func (rt runtime) writeMetaSidecar(ctx context.Context, root *storage.Root, rel string) error {
+	if rt.fileMeta == nil {
+		return nil
+	}
+	return rt.fileMeta.WriteMeta(ctx, root, rel)
+}
 
 // New 构造文件服务实例：**唯一必需项**是租户解析，其余能力由 Option 注入，未注入的
 // 回落内建「最小可用」默认（单卷、无配额、无台账、无版本、无审计、无计量、内建锁池）。
@@ -101,6 +115,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		bandwidth:    cfg.bandwidth,
 		eventSink:    cfg.eventSink,
 		contentIndex: cfg.contentIndex,
+		fileMeta:     cfg.fileMeta,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default

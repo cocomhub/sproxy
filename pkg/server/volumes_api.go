@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -654,6 +655,9 @@ func walkVolumeUserDir(root *storage.Root, userRoot, rel string, depth int, out 
 		return err
 	}
 	for _, e := range entries {
+		if meta.IsMetaName(e.Name()) {
+			continue // 可信卷 FileMeta sidecar 隐藏：不参与 rebalance（服务端内部文件）
+		}
 		childRel := filepath.ToSlash(filepath.Join(rel, e.Name()))
 		if err := appendVolumeUserEntry(root, userRoot, childRel, e, depth, out); err != nil {
 			return err

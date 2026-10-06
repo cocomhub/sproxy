@@ -15,11 +15,16 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -261,6 +266,84 @@ func toFilesHTTPError(err error) error {
 		return &files.HTTPError{Status: re.status, Message: re.msg}
 	}
 	return err
+}
+
+// filesMetaPolicy 实现 files.FileMetaPolicy（可信卷 meta 能力装配）：本地卷上传
+// 到达即建配套 .meta（隐藏、占配额）。由 trusted_volume.disable 开关控制
+// （缺省 false = 启用）。WriteMeta 从已落盘文件计算 FileMeta（总/分块 sha256+md5）
+// 并原子写 `.meta` sidecar（经 root，占配额计入底层账本）。
+type filesMetaPolicy struct{ h *Handlers }
+
+var _ files.FileMetaPolicy = filesMetaPolicy{}
+
+// Enabled 报告可信卷 meta 是否启用（trusted_volume.disable 缺省 false）。
+func (p filesMetaPolicy) Enabled() bool { return !p.h.trustedDisabled() }
+
+// WriteMeta 计算并写入配套 .meta（本地卷上传到达即建；失败返回错误由调用方 Warn 兜底，
+// 读路径 Stat 直算不依赖 meta 存在）。
+func (p filesMetaPolicy) WriteMeta(ctx context.Context, root *storage.Root, rel string) error {
+	// 计算 FileMeta：从已落盘文件（root 相对 rel）读取计算总 sha256+md5 + 分块。
+	fm, err := p.computeMeta(ctx, root, rel)
+	if err != nil {
+		return err
+	}
+	data, err := meta.Marshal(fm)
+	if err != nil {
+		return err
+	}
+	// 原子写 `.meta` sidecar（同目录隐藏文件；占配额——经 root 写，底层账本计入）。
+	mrel := meta.MetaPath(rel)
+	dir := path.Dir(rel)
+	if dir != "." && dir != "" {
+		if mkErr := root.MkdirAll(dir, 0o755); mkErr != nil {
+			return mkErr
+		}
+	}
+	// 复用存储层原子写（root 相对 + fsync + rename）：与主文件同语义。
+	tmpRel := mrel + ".tmp"
+	_ = root.Remove(tmpRel)
+	f, ferr := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if ferr != nil {
+		return ferr
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil {
+		_ = root.Remove(tmpRel)
+		return werr
+	}
+	if cerr != nil {
+		_ = root.Remove(tmpRel)
+		return cerr
+	}
+	if rerr := root.Rename(tmpRel, mrel); rerr != nil {
+		_ = root.Remove(tmpRel)
+		return rerr
+	}
+	return nil
+}
+
+// computeMeta 从 root 相对 rel 的文件计算完整 FileMeta（流式读一遍，双算法 + 分块）。
+func (p filesMetaPolicy) computeMeta(ctx context.Context, root *storage.Root, rel string) (*meta.FileMeta, error) {
+	rc, err := root.Open(rel)
+	if err != nil {
+		return nil, fmt.Errorf("可信卷 meta 打开文件 %s: %w", rel, err)
+	}
+	defer rc.Close()
+	fi, serr := rc.Stat()
+	if serr != nil {
+		return nil, fmt.Errorf("可信卷 meta stat %s: %w", rel, serr)
+	}
+	c, cerr := meta.NewCalculator(fi.Size(), 0)
+	if cerr != nil {
+		return nil, cerr
+	}
+	if _, cerr := c.ReadFrom(rc); cerr != nil {
+		return nil, fmt.Errorf("可信卷 meta 计算 %s: %w", rel, cerr)
+	}
+	fm := c.Finish()
+	fm.Name = path.Base(strings.ReplaceAll(rel, "\\", "/"))
+	return fm, nil
 }
 
 // ---- 路由注册引用的薄适配（路由 pattern 与处理器名逐字不变） ----

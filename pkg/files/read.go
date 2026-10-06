@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 )
 
@@ -139,6 +140,11 @@ func (s *Service) buildFileListEntries(entries []os.DirEntry, csMap map[string]s
 		// 任务 8 O-2：分块在途临时文件（.inflight-<hash16>-<upload_id>.part）是服务端内部
 		// 文件，列表不对外可见（complete 后随会话清理；中断残留由会话过期清理）。
 		if IsInflightTempName(e.Name()) {
+			continue
+		}
+		// 可信卷（trusted_volume）：FileMeta 配套 `.meta` 文件隐藏——用户不可见
+		// （但大小占配额，删除/移动随主文件联动）。
+		if meta.IsMetaName(e.Name()) {
 			continue
 		}
 		info, err := e.Info()

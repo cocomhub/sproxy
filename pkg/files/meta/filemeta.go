@@ -159,6 +159,19 @@ type Provider interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命
 	FileMeta(ctx context.Context, rel string) (*FileMeta, error)
 }
 
+// metaSuffix 是 FileMeta sidecar 文件后缀（隐藏、占配额、用户不可见）。
+const metaSuffix = ".meta"
+
+// IsMetaName 判定文件名/路径是否为 FileMeta sidecar（列表隐藏过滤用）。
+func IsMetaName(name string) bool {
+	return strings.HasSuffix(name, metaSuffix)
+}
+
+// MetaPath 返回文件对应的 FileMeta sidecar 路径（同目录 `<rel>.meta`）。
+func MetaPath(rel string) string {
+	return rel + metaSuffix
+}
+
 // nowRFC3339 供 CTime/MTime 使用（测试可注入可变时钟）。
 var nowRFC3339 = func() string { return time.Now().UTC().Format(time.RFC3339) }
 

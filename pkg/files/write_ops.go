@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -269,6 +270,14 @@ func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input Write
 		// 新文件与覆盖写都登记新 checksum 引用（覆盖写已在上方 prev>0 分支摘除旧引用；
 		// 本处登记新内容引用，使后续去重可命中）。幂等/409 提前返回不经过此处。
 		ds.Add(rel, route.VolumeName, serverChecksum)
+	}
+	// 可信卷（本地卷到达即建 meta）：写入成功后生成配套 FileMeta（从已落盘文件
+	// 计算总 sha256+md5 + 分块）并落隐藏 `.meta`（占配额——经装配层实现写入计入账本）。
+	// 失败不阻断主写成功（meta 缺失时读路径直算/Stat 兜底；用户裁定新文件保障立刻创建）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(f.ctx, f.root, rel); mErr != nil {
+			f.logger.Warn("可信卷 meta 落盘失败（读路径直算兜底）", "file_name", rel, "error", mErr)
+		}
 	}
 
 	return WriteFileResult{Checksum: serverChecksum, Size: written, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, nil
@@ -1145,6 +1154,12 @@ func (s *Service) renameChecksumIndex(a renameHomeArgs) {
 	if s.index != nil {
 		s.index.rename(a.owner, strings.TrimPrefix(a.fromRel, "user/"), strings.TrimPrefix(a.toRel, "user/"))
 	}
+	// 可信卷：重命名主文件联动移动配套 .meta（服务端内部文件随主文件一起动）。
+	if s.rt.fileMetaEnabled() {
+		if a.root != nil {
+			_ = a.root.Rename(meta.MetaPath(a.fromRel), meta.MetaPath(a.toRel))
+		}
+	}
 }
 
 // ---- 删除族域操作（delete）----
@@ -1394,6 +1409,10 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 // 引用计数（仍有其它引用时只 unlink，配额不减）；引用归零 → 软删到回收站 / 硬删 +
 // 配额与卷池释放；再统一收尾（checksum 台账 / 索引 / 计量 / 审计 / 事件）。
 func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string, info os.FileInfo, cs string, input DeleteFileInput) (DeleteFileResult, error) {
+	// 可信卷：删除主文件联动删除配套 .meta（服务端内部文件随主文件一起删，防残留）。
+	if s.rt.fileMetaEnabled() {
+		_ = f.root.Remove(meta.MetaPath(rel))
+	}
 	refCount := 0
 	if ds := s.rt.dedupStore(f.owner); s.rt.dedupEnabled() && ds != nil {
 		refCount = ds.RemoveRef(rel, homeVol, cs)

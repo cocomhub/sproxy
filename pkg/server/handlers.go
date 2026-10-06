@@ -414,6 +414,7 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithEventSink(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 			files.WithBandwidthLimiter(rt),
+			files.WithFileMeta(filesMetaPolicy{h: h}),
 		}
 		if h.metrics != nil {
 			opts = append(opts, files.WithMetrics(h.metrics))

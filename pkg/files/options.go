@@ -156,6 +156,7 @@ type config struct {
 	dedup         DedupPolicy
 	bandwidth     BandwidthLimiter
 	contentIndex  bool
+	fileMeta      FileMetaPolicy
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -420,4 +421,23 @@ const (
 // 构建文件索引时对文本文件首 4KiB 抽样抽取词元，搜索命中正文词元也返回文件。
 func WithContentIndex(enabled bool) Option {
 	return func(cfg *config) { cfg.contentIndex = enabled }
+}
+
+// FileMetaPolicy 是**可信卷 meta 能力**（用户裁定 2026-10-07：本地卷上传到达即建
+// meta——新文件到达系统立刻计算 sha256/md5（含分块）并创建配套 .meta 文件，隐藏
+// 占配额）。默认：未装配（零回归，不落 .meta）。装配层（pkg/server）注入实现
+// （经 trusted_volume.disable 开关控制；secretdata 等自带 Provider 的卷不在本地
+// 写路径）。
+type FileMetaPolicy interface {
+	// Enabled 返回是否写入 FileMeta sidecar（trusted_volume.disable 缺省 false）。
+	Enabled() bool
+	// WriteMeta 在文件落盘成功后生成并写入配套 .meta（隐藏、占配额）。实现方负责
+	// 计算 FileMeta（从已落盘文件计算总/分块 sha256+md5）与失败兜底（读路径直算）。
+	// root 为文件所在租户根；rel 为根内相对路径（含 user/ 前缀）。
+	WriteMeta(ctx context.Context, root *storage.Root, rel string) error
+}
+
+// WithFileMeta 注入可信卷 meta 能力。默认：不装配（零回归）。
+func WithFileMeta(p FileMetaPolicy) Option {
+	return func(c *config) { c.fileMeta = p }
 }
