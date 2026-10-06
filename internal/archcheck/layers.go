@@ -73,7 +73,13 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/store":      0,
 	"github.com/cocomhub/sproxy/pkg/telemetry":  0,
 	"github.com/cocomhub/sproxy/pkg/testutil":   0,
-	"github.com/cocomhub/sproxy/pkg/volume":     0,
+	// 字节大小单位抽象（用户裁决 2026-10-03）：配置中人类可读字节大小统一走
+	// pkg/units/sizex.ByteSize（"512MiB"）；零 pkg/* 内部依赖 ⇒ G0。
+	// 注：sizex 曾被 server 直接引用却未登记——R3 只在**依赖**未登记时报红，Managed 包
+	// 自身缺 Levels 不会被现有规则发现（与 downloader 同教训）；本工作 pkg/cloud 改用
+	// sizex 后 R3 才暴露（2026-10-07 登记）。
+	"github.com/cocomhub/sproxy/pkg/units/sizex": 0,
+	"github.com/cocomhub/sproxy/pkg/volume":      0,
 	// 本工作新增（server 域抽取 S1）：同步任务管理器，从 pkg/server 的子包提升为顶层。
 	// 零 pkg/* 内部依赖（实测），故 G0。
 	"github.com/cocomhub/sproxy/pkg/syncmgr": 0,
