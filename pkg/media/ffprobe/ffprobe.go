@@ -32,6 +32,12 @@ import (
 // ErrFFprobeMissing 是哨兵错误：PATH 中找不到 ffprobe（无 ffmpeg 环境，调用方回落）。
 var ErrFFprobeMissing = errors.New("ffprobe: 未找到 ffprobe 可执行文件（需安装 ffmpeg）")
 
+// ErrFFprobeOutputLimit 是哨兵错误：ffprobe 输出 JSON 超 maxFFprobeOutputBytes 上限。
+// 语义与 ErrFFprobeMissing 同级——**环境/资源限制 ≠ 文件损坏**：合法视频帧数异常多时
+// 校验无能力完成，调用方应视为「无校验器可用」放行（不误判 damaged）。视频校验器
+// （ext/video）与 ErrFFprobeMissing 同分支放行。
+var ErrFFprobeOutputLimit = errors.New("ffprobe: 输出超上限（帧数异常多）")
+
 // onFragmentedMP4 是 fMP4 检测统计 hook（atomic.Pointer 保证读写无数据竞争——装配期
 // SetOnFragmentedMP4 与运行期 notify 可跨 goroutine 并发，显式内存屏障）。
 // ffprobe 对 fMP4 是**正常解析**（不降级），此统计供真实场景量化 fMP4 使用量（多数环境
@@ -125,7 +131,7 @@ func (realRunner) Run(ctx context.Context, path string, file io.Reader) ([]byte,
 		return nil, fmt.Errorf("ffprobe: stat 输出文件失败: %w", ferr)
 	} else if fi.Size() > maxFFprobeOutputBytes {
 		outTmp.Close()
-		return nil, fmt.Errorf("ffprobe: 输出超上限 %d 字节（size=%d，帧数异常多）", maxFFprobeOutputBytes, fi.Size())
+		return nil, fmt.Errorf("%w（size=%d）", ErrFFprobeOutputLimit, fi.Size())
 	}
 	if serr := outTmp.Close(); serr != nil {
 		return nil, fmt.Errorf("ffprobe: 关闭输出文件失败: %w", serr)

@@ -143,9 +143,11 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 	if kerr != nil {
 		// R5-I1：环境缺 ffprobe（ErrFFprobeMissing）≠ 文件损坏——视为通过（无校验器
 		// 可用，与 plan §5「无校验器 → 视为通过」对齐），避免无 ffmpeg 部署对每个
-		// 视频误判 damaged。其他解析失败（容器非法/无视频流）→ OK=false（真异常）。
-		if errors.Is(kerr, ffprobe.ErrFFprobeMissing) {
-			return &integrity.Report{OK: true, Reason: "video: ffprobe 未安装，跳过语义校验"}, nil
+		// 视频误判 damaged。**输出超上限（ErrFFprobeOutputLimit）同级放行**：合法视频
+		// 帧数异常多时校验无能力完成（资源限制 ≠ 文件损坏），不误判 damaged。
+		// 其他解析失败（容器非法/无视频流）→ OK=false（真异常）。
+		if errors.Is(kerr, ffprobe.ErrFFprobeMissing) || errors.Is(kerr, ffprobe.ErrFFprobeOutputLimit) {
+			return &integrity.Report{OK: true, Reason: "video: ffprobe 无法解析（未安装或输出超限），跳过语义校验"}, nil
 		}
 		return &integrity.Report{OK: false, Reason: fmt.Sprintf("video: ffprobe 解析失败: %v", kerr)}, nil
 	}
