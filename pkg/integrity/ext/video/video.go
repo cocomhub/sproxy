@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/integrity"
@@ -16,10 +17,23 @@ import (
 )
 
 // testSeamIndexer 是 KeyframeOffsets 索引器的注入缝（生产 nil → 用 ffprobe.Indexer{}；
-// 测试替换以模拟缺 ffprobe/取消/超时，避免真实 ffprobe 依赖）。可变全局变量仅测试
-// 场景使用；生产路径不触碰（并发校验共享同一 Indexer{} 实例——KeyframeOffsets 无状态）。
+// 测试替换以模拟缺 ffprobe/取消/超时，避免真实 ffprobe 依赖）。测试通过
+// setTestSeamIndexer（持锁）替换；生产 Check 只读它并做**局部回落**——绝不写全局
+// （并发首次校验对 nil 的懒加载写会产生数据竞争）。KeyframeOffsets 无状态，共享安全。
 var testSeamIndexer interface {
 	KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
+}
+
+// testSeamMu 保护 testSeamIndexer 的替换（测试专用；生产只读 + 局部回落不竞争）。
+var testSeamMu sync.RWMutex
+
+// setTestSeamIndexer 是测试替换注入缝的入口（持写锁）；测试 t.Cleanup 恢复原值。
+func setTestSeamIndexer(idx interface {
+	KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
+}) {
+	testSeamMu.Lock()
+	defer testSeamMu.Unlock()
+	testSeamIndexer = idx
 }
 
 // init 把 VideoChecker 装配进 pkg/integrity 包级默认注册表（插件模式：cmd/sproxy
@@ -85,12 +99,16 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 			size = fi.Size()
 		}
 	}
-	// testSeamIndexer 是测试注入缝（生产恒 ffprobe.Indexer{}；测试可替换 fakeRunner 模拟
-	// 缺 ffprobe/取消/超时场景，见 video_test.go）。
-	if testSeamIndexer == nil {
-		testSeamIndexer = ffprobe.Indexer{}
+	// testSeamIndexer 是测试注入缝（生产 nil → 局部回落 ffprobe.Indexer{}；测试经
+	// setTestSeamIndexer 持锁替换）。**只读 + 局部回落**，绝不写全局——并发首次校验
+	// 对 nil 的懒加载写会构成数据竞争（实测 -race 命中）。
+	testSeamMu.RLock()
+	seam := testSeamIndexer
+	testSeamMu.RUnlock()
+	indexer := seam
+	if indexer == nil {
+		indexer = ffprobe.Indexer{}
 	}
-	indexer := testSeamIndexer
 	// ffprobe 必须**阻塞等待结果**（用户裁定 2026-10-06）：校验结果必须可得才能决定
 	// 后续流程（放行/重下/标记 damaged）——非阻塞会丢失校验语义（取消即 OK:false 被当
 	// 语义异常）。子进程由 ffprobe 内部 timeout 兜底（30s~5min 按文件大小），进程不会

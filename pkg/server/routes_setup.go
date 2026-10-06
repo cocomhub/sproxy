@@ -505,7 +505,7 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			return vs.ByName(volumeName)
 		},
 		// IntegrityLookup：完整性语义校验器分发（image/tar 标准库 + ext/video ffprobe，
-		// 经 pkg/integrity 注册表）。nil = 语义校验跳过（生产必须装配，否则 --force-integrity
+		// 经 pkg/integrity 注册表）。nil = 语义校验跳过（生产必须装配，否则 --integrity-must-pass
 		// 无效果——P1-1 最终审查修复）。
 		IntegrityLookup: integrity.Lookup,
 	})

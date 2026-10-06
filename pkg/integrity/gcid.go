@@ -44,6 +44,10 @@ func ComputeGCID(data []byte, blockSize int64) string {
 
 // RecomputeGCID 对内存数据尝试候选分块集合复算 GCID：返回**首个整除候选**的命中值
 // + ok（兼容测试/外部调用；文件流式用 RecomputeGCIDAll 取全候选）。
+// RecomputeGCID 对内存数据尝试候选分块集合复算 GCID：返回**首个整除候选**的命中值
+// + ok（兼容测试/外部调用；文件流式用 RecomputeGCIDAll 取全候选）。
+// 注意：此处保留整除限制是「候选预筛」（与 RecomputeGCIDAll 尾块语义的差异）——调用方
+// 应优先用 RecomputeGCIDAll（文件流式，尾块正确计入）。本函数为测试基准/小数据入口。
 func RecomputeGCID(data []byte, candidates []int64) (string, bool) {
 	for _, bs := range candidates {
 		if bs <= 0 || len(data) == 0 || int64(len(data))%bs != 0 {
@@ -108,19 +112,29 @@ func RecomputeGCIDAll(path string, candidates []int64) ([]string, error) {
 	}
 	var out []string
 	for _, bs := range candidates {
-		if bs <= 0 || size%bs != 0 {
+		if bs <= 0 {
 			continue
 		}
+		// 尾块语义与内存版 ComputeGCID 对齐（end=min，余量尾块参与计算）——不再要求
+		// size%bs==0（真实文件尺寸几乎不可能恰为候选整数倍，整除限制使权威复算对多数
+		// 文件失效，恒回落 ModeLocalOnly，权威匹配形同虚设）。官方 GCID 对小文件按
+		// 256KB 分块，余量尾块必须计入。
 		outer := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 		block := make([]byte, bs)
 		inner := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 		for off := int64(0); off < size; off += bs {
-			n, rerr := f.ReadAt(block, off)
+			end := off + bs
+			if end > size {
+				end = size
+			}
+			n, rerr := f.ReadAt(block[:end-off], off)
 			if rerr != nil && rerr != io.EOF {
 				return nil, rerr
 			}
 			// R7-F1：短读（Stat 与 Read 间被并发截断/IO 异常）时只写实际读到的 n 字节
 			// （block 尾部残留旧数据/零填充会产出脏 GCID——命中率极低但属正确性隐患）。
+			// 尾块（EOF）也是合法输入：n 即尾块实际长度，参与计算（不再有"EOF 后继续
+			// 空块累积 sha1('')"的问题——循环按 off<size 推进，尾块即最后一块）。
 			inner.Reset()
 			inner.Write(block[:n])
 			outer.Write(inner.Sum(nil))

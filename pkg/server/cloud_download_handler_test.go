@@ -99,14 +99,14 @@ func TestCloudHandler_CreateDownloadTask(t *testing.T) {
 	}
 }
 
-// TestCloudHandler_CreateDownloadTask_ForceIntegrity 任务5：POST /api/cloud/download 的
-// force_integrity 字段解析 → TaskParams.ForceIntegrity（服务端接收链路最后一跳）。
-func TestCloudHandler_CreateDownloadTask_ForceIntegrity(t *testing.T) {
+// TestCloudHandler_CreateDownloadTask_IntegrityMustPass 任务5：POST /api/cloud/download 的
+// integrity_must_pass 字段解析 → TaskParams.IntegrityMustPass（服务端接收链路最后一跳）。
+func TestCloudHandler_CreateDownloadTask_IntegrityMustPass(t *testing.T) {
 	t.Parallel()
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	body := strings.NewReader(`{"url": "https://example.com/force.png", "force_integrity": true}`)
+	body := strings.NewReader(`{"url": "https://example.com/force.png", "integrity_must_pass": true}`)
 	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
@@ -122,13 +122,13 @@ func TestCloudHandler_CreateDownloadTask_ForceIntegrity(t *testing.T) {
 	if task.ID == "" {
 		t.Fatal("expected non-empty task ID")
 	}
-	// 落点断言：请求 struct 的 ForceIntegrity 必须进入 TaskParams → task 字段。
+	// 落点断言：请求 struct 的 IntegrityMustPass 必须进入 TaskParams → task 字段。
 	taskInMgr, ok := mgr.GetTask(task.ID, "")
 	if !ok {
 		t.Fatalf("task %s not found in manager", task.ID)
 	}
-	if !taskInMgr.ForceIntegrity {
-		t.Fatalf("force_integrity=true 未落到 TaskParams.ForceIntegrity（task=%+v）", taskInMgr)
+	if !taskInMgr.IntegrityMustPass {
+		t.Fatalf("integrity_must_pass=true 未落到 TaskParams.IntegrityMustPass（task=%+v）", taskInMgr)
 	}
 }
 

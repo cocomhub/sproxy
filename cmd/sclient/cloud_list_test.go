@@ -64,6 +64,54 @@ func TestCloudListCmd_ListTasks(t *testing.T) {
 	}
 }
 
+// TestCloudListCmd_DamagedTextMark：文本面必须把 damaged 与 completed 区分——
+// damaged 任务（内容损坏/重下）不应被当可靠成功渲染（JSON 输出带 integrity_status，
+// 文本格式须追加 damaged 标记）。
+func TestCloudListCmd_DamagedTextMark(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/tasks" && r.Method == http.MethodGet {
+			tasks := []map[string]any{
+				{"id": "ok-1", "url": "https://example.com/ok.zip", "filename": "ok.zip", "status": "completed", "total_size": 1000},
+				{"id": "bad-2", "url": "https://example.com/bad.zip", "filename": "bad.zip", "status": "completed", "total_size": 1000, "integrity_status": "damaged"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"tasks": tasks, "total": len(tasks)})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	lines := strings.Split(buf.String(), "\n")
+	var okLine, badLine string
+	for _, ln := range lines {
+		if strings.Contains(ln, "ok.zip") {
+			okLine = ln
+		}
+		if strings.Contains(ln, "bad-2") {
+			badLine = ln
+		}
+	}
+	if okLine == "" || badLine == "" {
+		t.Fatalf("输出缺少任务行，got: %s", buf.String())
+	}
+	if strings.Contains(okLine, "damaged") {
+		t.Fatalf("正常任务不应带 damaged 标记，got line: %q", okLine)
+	}
+	if !strings.Contains(badLine, "completed (damaged)") {
+		t.Fatalf("damaged 任务文本面应带 (damaged) 标记，got line: %q", badLine)
+	}
+}
+
 func TestCloudListCmd_EmptyList(t *testing.T) {
 	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

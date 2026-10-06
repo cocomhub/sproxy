@@ -91,24 +91,24 @@ func TestDownloadIntegrity_DamagedAllowsContinue(t *testing.T) {
 	}
 }
 
-// TestDownloadIntegrity_ForceBlocks：ForceIntegrity=true + 语义校验失败 → 任务 failed（原因含 integrity）。
+// TestDownloadIntegrity_ForceBlocks：IntegrityMustPass=true + 语义校验失败 → 任务 failed（原因含 integrity）。
 func TestDownloadIntegrity_ForceBlocks(t *testing.T) {
 	mgr := newIntegrityTestMgr(t, 3)
 	srv, _ := corruptServe(t)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.png", int64(len(corruptPNGF)), t.Context(), "", TaskParams{Save: true, ForceIntegrity: true})
+	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.png", int64(len(corruptPNGF)), t.Context(), "", TaskParams{Save: true, IntegrityMustPass: true})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	if task.Status != "failed" {
-		t.Fatalf("ForceIntegrity 语义：损坏文件应失败，got %q", task.Status)
+		t.Fatalf("IntegrityMustPass 语义：损坏文件应失败，got %q", task.Status)
 	}
 	if !strings.Contains(task.Error, "integrity") {
 		t.Fatalf("failed 错误应含 integrity 关键字，got %q", task.Error)
 	}
 	// Force parity：阻断路径不放行（IntegrityStatus 保持未设/未放行）。
 	if task.IntegrityStatus == "damaged" {
-		t.Fatalf("ForceIntegrity 失败路径不应置 damaged（放行标记），got %q", task.IntegrityStatus)
+		t.Fatalf("IntegrityMustPass 失败路径不应置 damaged（放行标记），got %q", task.IntegrityStatus)
 	}
 }
 

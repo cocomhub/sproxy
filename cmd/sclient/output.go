@@ -105,7 +105,7 @@ func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
 		fmt.Fprintln(f.w, i18n.T("暂无云端下载任务"))
 		return
 	}
-	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n",
+	fmt.Fprintf(f.w, "%-36s  %-20s  %-18s  %-20s  %-8s  %s\n",
 		i18n.T("任务ID"), i18n.T("文件名"), i18n.T("状态"), "ETag", i18n.T("组ID"), "URL")
 	for _, t := range tasks {
 		fmt.Fprint(f.w, formatCloudTaskRow(t)) // formatCloudTaskRow 已含尾部 \n，Fprintln 会双重换行
@@ -142,7 +142,13 @@ func formatCloudTaskRow(t cloudTaskInfo) string {
 	if len(shortURL) > 40 {
 		shortURL = shortURL[:37] + "..."
 	}
-	return fmt.Sprintf("%-36s  %-20s  %-12s  %-20s  %-8s  %s\n", shortID, shortName, status, etag, groupID, shortURL)
+	// IntegrityStatus 完整性问题：damaged 在文本面必须与 completed 区分——
+	// damaged 意味着内容损坏/重下（不应被当可靠成功）；verified/unverified 不追加
+	// （成功任务默认无标记，JSON 输出仍有 integrity_status 供脚本消费）。
+	if t.IntegrityStatus == "damaged" {
+		status += " (damaged)"
+	}
+	return fmt.Sprintf("%-36s  %-20s  %-18s  %-20s  %-8s  %s\n", shortID, shortName, status, etag, groupID, shortURL)
 }
 
 func (f *TextFormatter) PrintCloudTaskCancelResult(taskID string, success bool, message string) {

@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"golang.org/x/sync/semaphore"
 )
@@ -87,8 +88,8 @@ type CloudTask struct {
 	//   - verified：权威匹配（下载器 ModeAuthority）或语义校验通过；
 	//   - damaged：语义校验两次一致仍异常（默认放行，文件标记损坏）。
 	IntegrityStatus string `json:"integrity_status,omitempty"`
-	// ForceIntegrity 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
-	ForceIntegrity bool `json:"force_integrity,omitempty"`
+	// IntegrityMustPass 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
+	IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
 	// integritySames 是「本地 checksum 一致但语义校验仍失败」的累计次数（跨 attempt 保留，
 	// 判定永久损坏用）。2 次 → 不再重下（permanent）。运行时状态，不持久化。
 	integritySames int
@@ -143,7 +144,7 @@ type CloudDownloadConfig struct {
 	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；0=不限制，默认 512 MiB）。
 	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验
 	// 标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
-	MaxCheckMemBytes int64
+	MaxCheckMemBytes sizex.ByteSize
 	// ExitDial 是下载器出站拨号函数注入（装配层构造）：nil = 默认直连。
 	// 非 nil 时覆写下载器 http.Transport.DialContext（本地直连优先 → 失败回退经 mesh 出口）。
 	// 领域包不依赖 mesh（R1 分层）——函数字段注入解耦，对齐 downloader 的 httpClient 注入模式。
@@ -203,7 +204,7 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 		cfg.Downloader = "http"
 	}
 	if cfg.MaxCheckMemBytes <= 0 {
-		cfg.MaxCheckMemBytes = 512 * 1024 * 1024
+		cfg.MaxCheckMemBytes = sizex.ByteSize(512) * (1 << 20) // 默认 512 MiB（ByteSize 语义）
 	}
 }
 
@@ -396,8 +397,8 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		logger:           slogutil.Default(logger),
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
 		transferSem:      make(chan struct{}, cfg.TransferConcurrency),
-		checkMemSem:      newCheckMemSem(cfg.MaxCheckMemBytes),
-		checkMemMax:      cfg.MaxCheckMemBytes,
+		checkMemSem:      newCheckMemSem(int64(cfg.MaxCheckMemBytes)),
+		checkMemMax:      int64(cfg.MaxCheckMemBytes),
 		config:           cfg,
 		dl:               newDefaultDownloader(cfg),
 		transferFSFor:    opts.TransferFSFor,
@@ -774,6 +775,6 @@ type TaskParams struct {
 	Transfer      *TransferSpec
 	DownloadLocal bool
 	Save          bool
-	// ForceIntegrity 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
-	ForceIntegrity bool
+	// IntegrityMustPass 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
+	IntegrityMustPass bool
 }

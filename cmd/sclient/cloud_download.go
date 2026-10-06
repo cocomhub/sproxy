@@ -61,9 +61,9 @@ func buildCloudDownloadChainOpts(cmd *cobra.Command, pollInterval time.Duration,
 		l, _ := cmd.Flags().GetBool(flagDownloadLocal)
 		opts = append(opts, client.WithChainDownloadLocal(l))
 	}
-	if cmd.Flags().Changed(flagForceIntegrity) {
-		f, _ := cmd.Flags().GetBool(flagForceIntegrity)
-		opts = append(opts, client.WithChainForceIntegrity(f))
+	if cmd.Flags().Changed(flagIntegrityMustPass) {
+		f, _ := cmd.Flags().GetBool(flagIntegrityMustPass)
+		opts = append(opts, client.WithChainIntegrityMustPass(f))
 	}
 	return opts
 }
@@ -159,7 +159,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
 	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
 	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
-	cmd.Flags().Bool(flagForceIntegrity, false, "强制源文件完整性校验（语义校验失败则任务阻断，不放行标记 damaged）")
+	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudSubmit(factory, ios, cfgSvc))
@@ -230,7 +230,7 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
 	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
 	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
-	cmd.Flags().Bool(flagForceIntegrity, false, "强制源文件完整性校验（语义校验失败则任务阻断）")
+	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
 	return cmd
 }
 
@@ -451,9 +451,9 @@ func cloudDownloadSubmitOpts(cmd *cobra.Command) []client.CloudDownloadOption {
 	} else {
 		opts = append(opts, client.WithCloudDownloadLocal(true))
 	}
-	if cmd.Flags().Changed(flagForceIntegrity) {
-		f, _ := cmd.Flags().GetBool(flagForceIntegrity)
-		opts = append(opts, client.WithCloudDownloadForceIntegrity(f))
+	if cmd.Flags().Changed(flagIntegrityMustPass) {
+		f, _ := cmd.Flags().GetBool(flagIntegrityMustPass)
+		opts = append(opts, client.WithCloudDownloadIntegrityMustPass(f))
 	}
 	return opts
 }

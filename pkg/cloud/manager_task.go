@@ -100,13 +100,13 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		// 浅拷贝 Transfer：组内多子任务共享同一请求指针时，各任务独立持有副本——
 		// 否则 transferDone 的 OwnerPrefix 原地写（共享卷）对并发组转存构成 write-write
 		// 数据竞争（同值写入，-race 可报）。深度只拷贝顶层字段（Volume/Path/OwnerPrefix）。
-		Transfer:       cloneTransferSpec(params.Transfer),
-		DownloadLocal:  params.DownloadLocal,
-		Save:           params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
-		ForceIntegrity: params.ForceIntegrity,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-		ExpiresAt:      time.Now().Add(m.config.TaskTTL),
+		Transfer:          cloneTransferSpec(params.Transfer),
+		DownloadLocal:     params.DownloadLocal,
+		Save:              params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
+		IntegrityMustPass: params.IntegrityMustPass,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+		ExpiresAt:         time.Now().Add(m.config.TaskTTL),
 	}
 
 	m.mu.Lock()
@@ -287,7 +287,7 @@ func cleanupFailureClass(err error) string {
 var errIntegrityFail = errors.New("integrity: 语义校验失败，重下重试")
 
 // errIntegrityPermanent 是完整性判定「永久」哨兵：两次本地 checksum 一致仍语义异常
-// （源文件损坏或类型误判）。按任务处置：默认放行标记 damaged / ForceIntegrity 阻断。
+// （源文件损坏或类型误判）。按任务处置：默认放行标记 damaged / IntegrityMustPass 阻断。
 var errIntegrityPermanent = errors.New("integrity: 两次校验一致仍异常，源损坏或类型误判")
 
 // maxIntegritySames 是「本地 checksum 一致但语义校验仍失败」的收敛阈值：2 次后不再重下
@@ -325,8 +325,8 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 	if checker == nil {
 		// R2-P2：未知类型（无校验器）默认放行；force=true 时记录审计日志（显式强制
 		// 校验对未覆盖类型名不副实——不阻断，但可审计覆盖缺口）。
-		if task.ForceIntegrity {
-			m.logger.Warn("force-integrity: 类型无校验器，跳过语义校验（覆盖范围外）",
+		if task.IntegrityMustPass {
+			m.logger.Warn("integrity-must-pass: 类型无校验器，跳过语义校验（覆盖范围外）",
 				"task_id", task.ID, "ext", filepath.Ext(destPath))
 		}
 		return nil
@@ -381,13 +381,13 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 // resolveIntegrityTaskErr 把完整性判定的哨兵错误解析为 retry 循环需要的 downloadErr。
 //   - errIntegrityFail（1 次异常）→ 返回哨兵（继续循环，下方 shouldRetryDownload 重下）；
 //   - errIntegrityPermanent（两次一致仍异常）：
-//   - ForceIntegrity → 返回哨兵（错误上行 handleDownloadDone → failTask，阻断）；
+//   - IntegrityMustPass → 返回哨兵（错误上行 handleDownloadDone → failTask，阻断）；
 //   - 默认 → 置 IntegrityStatus="damaged" 并返回 nil（放行，按成功完成）。
 func (m *CloudDownloadManager) resolveIntegrityTaskErr(task *CloudTask, ierr error) error {
 	if !errors.Is(ierr, errIntegrityPermanent) {
 		return ierr
 	}
-	if task.ForceIntegrity {
+	if task.IntegrityMustPass {
 		return ierr
 	}
 	m.setTaskIntegrityStatus(task, "damaged")
@@ -505,44 +505,6 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		return
 	}
 
-	// 排队等待信号量（排队期间可取消）。NM5：槽下载完成后释放（转存不占槽），
-	// 故 defer 条件释放（acquiredSlot 标记），转存前手动 release 后不再双释。
-	var acquiredSlot bool
-	defer func() {
-		if acquiredSlot {
-			<-m.semaphore
-		}
-	}()
-	select {
-	case m.semaphore <- struct{}{}:
-		acquiredSlot = true
-	case <-dlCtx.Done():
-		// 排队期间被取消：CancelTask 已（或即将）置 cancelled 并释放存储。
-		// 这里不 failTask——把"已取消"标成 failed 会与 CancelTask 的终态打架，
-		// 让用户看到错误的失败状态；直接退出，终态由 CancelTask 写入。
-		m.logger.Info("queued download cancelled", "task_id", task.ID)
-		return
-	}
-
-	// 取得信号量后复查一次：CancelTask 可能恰在 acquire 与这里之间执行
-	m.mu.RLock()
-	cancelled = task.Status == "cancelled"
-	m.mu.RUnlock()
-	if cancelled {
-		m.logger.Info("download skipped, task cancelled while acquiring slot", "task_id", task.ID)
-		return
-	}
-
-	m.metrics.ActiveDownloads.Add(1)
-	defer m.metrics.ActiveDownloads.Add(-1)
-
-	// 复查任务状态与存在性并置 downloading：CancelTask/DeleteTask 可能在信号量获取与
-	// 此处之间执行（详见 markDownloading）。状态已非 pending/downloading → 放弃下载。
-	if !m.markDownloading(task) {
-		return
-	}
-	_ = m.saveTask(task)
-
 	m.logger.Info("download started", "task_id", task.ID, "url", task.URL, "filename", task.Filename)
 
 	// 构建目标文件路径（按任务 owner 落租户 cloud 桶）
@@ -559,26 +521,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	}
 	destPath := filepath.Join(taskDir, task.Filename)
 
-	// 执行下载（带重试）
+	// 执行下载（带重试）。下载并发槽由 runRetryLoop 每次尝试 acquire/立即释放——
+	// markDownloading（置 downloading 状态）也在取得槽后执行，保证「downloading 状态
+	// ≤ 持槽数」不变量（并发上限断言依赖）；完整性校验与转存均在槽外执行，不阻塞其它下载。
 	result, downloadErr := m.runRetryLoop(ctx, dlCtx, task, destPath)
 	// downloadDone 段：任务删除竞态守卫 + 失败路径分派（异步继续 / 取消 / failTask）。
 	// 返回 handled=true 表示已由本函数处理终态（调用方直接返回）；异步转交分支经
 	// handedOff 指针置位（旧 goroutine 的 defer 不清除 running/cancelFuncs）。
 	if m.handleDownloadDone(ctx, dlCtx, task, destPath, result, downloadErr, &handedOff) {
 		return
-	}
-	// NM5：下载完成释放下载并发槽——转存写卷（远程卷上传慢）不应继续占 MaxConcurrent
-	// 槽阻塞后续下载；转存并发由独立 transferSem 限流（防风暴）。置 acquiredSlot=false
-	// 防 defer 双释（channel 空取 panic）。
-	// 注意（对抗评审 R3-Impt-2 记录）：**完整性校验**（postDownloadCheck 内含于
-	// runRetryLoop 成功分支）仍在持槽内执行——video ffprobe 校验最长 5min 会短暂
-	// 占用 MaxConcurrent 槽（默认 3）。这是刻意取舍：校验失败需在同一 attempt 循环
-	// 内重下（errIntegrityFail → shouldRetryDownload），移出会破坏重试语义；且用户
-	// 裁定「校验必须阻塞等待结果」。缓解：ffprobeTimeout 有界（≤5min）、配额信号量
-	// 限并发、默认 MaxConcurrent 小（3×64MiB=192MiB<512MiB 配额不触发排队阻塞）。
-	if acquiredSlot {
-		<-m.semaphore
-		acquiredSlot = false
 	}
 	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
 	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
@@ -610,35 +561,49 @@ func (m *CloudDownloadManager) cleanupCloudIfNotNeeded(task *CloudTask, destPath
 // runRetryLoop 执行带重试的下载主循环：每次尝试独立超时（超时可重试续传，用户取消
 // 不可重试）。外层 ctx（同步下载的请求 ctx）已取消而内层未取消 = 客户端断连：立即
 // 交还，由 downloadDone 处转入异步继续，避免阻塞 handler 至重试耗尽。
+// acquireDownloadSlot 排队获取下载并发槽（排队期间可取消）。返回 true 表示已持有槽，
+// 调用方负责在**下载完成后**立即释放（完整性校验在槽外执行，不阻塞其它下载）。
+// 排队期间被取消不 failTask——终态由 CancelTask 写入。
+func (m *CloudDownloadManager) acquireDownloadSlot(dlCtx context.Context, task *CloudTask) bool {
+	select {
+	case m.semaphore <- struct{}{}:
+		return true
+	case <-dlCtx.Done():
+		m.logger.Info("queued download cancelled", "task_id", task.ID)
+		return false
+	}
+}
+
+// releaseDownloadSlot 释放下载并发槽（runDownloadAttempt 完成后立即调用——校验/转存
+// 不占 MaxConcurrent 槽阻塞后续下载）。
+func (m *CloudDownloadManager) releaseDownloadSlot() { <-m.semaphore }
+
+// runRetryLoop 执行带重试的下载主循环：每次尝试独立超时（超时可重试续传，用户取消
+// 不可重试）。外层 ctx（同步下载的请求 ctx）已取消而内层未取消 = 客户端断连：立即
+// 交还，由 downloadDone 处转入异步继续，避免阻塞 handler 至重试耗尽。
 func (m *CloudDownloadManager) runRetryLoop(ctx context.Context, dlCtx context.Context, task *CloudTask, destPath string) (*downloader.Result, error) {
 	maxRetries := m.config.MaxRetries
 	var result *downloader.Result
 	var downloadErr error
 	var timedOut bool
-retryLoop:
 	for attempt := range maxRetries {
 		// 外层 ctx（同步下载的请求 ctx）已取消而内层未取消 = 客户端断连：
 		// 立即交还，由 downloadDone 处转入异步继续，避免阻塞 handler 至重试耗尽。
 		if outerCtxCancelled(ctx, dlCtx) {
 			downloadErr = ctx.Err()
-			break retryLoop
+			break
 		}
 		if stopped, waitErr := m.retryAttemptWait(ctx, dlCtx, attempt, task, maxRetries); stopped {
 			downloadErr = waitErr
-			break retryLoop
+			break
 		}
 
-		result, downloadErr, timedOut = m.runDownloadAttempt(ctx, dlCtx, task, destPath)
-
-		// 成功分支收尾：记录 ETag + 完整性判定（fail→重下哨兵继续循环；force→阻断哨兵；
-		// 默认 permanent→damaged 放行 nil → done=true 直接 break 按完成处理）。
-		// 完整性校验绑定 **dlCtx（任务生命周期）**而非外层 ctx（请求生命周期）：
-		// 客户端断连（outerCtxCancelled 交还）后异步继续时校验仍须完成；仅任务被
-		// 取消/删除（dlCtx 取消）才中止校验（video ffprobe 阻塞等待结果，内部超时兜底）。
-		if done, dErr := m.postDownloadCheck(dlCtx, task, destPath, result, downloadErr); done {
+		// 单次尝试：下载（持槽）→ 释放槽 → 校验（槽外）。aborted=true 表示尝试被
+		// 取消/槽获取失败（终态由调用方分派），或校验 done（成功/阻断）要求退出循环。
+		var aborted bool
+		result, timedOut, aborted, downloadErr = m.runSingleAttempt(ctx, dlCtx, task, destPath)
+		if aborted {
 			break
-		} else {
-			downloadErr = dErr
 		}
 
 		// 用户取消/任务删除：停止重试
@@ -651,10 +616,54 @@ retryLoop:
 			break
 		}
 	}
-	// R2-P2：完整性校验失败重试耗尽（errIntegrityFail 已不可重试）且任务非 force →
+	// R2-P2：完整性校验失败重试耗尽（errIntegrityFail 已不可重试）且任务非 must-pass →
 	// 按规格「默认放行标记 damaged」处理（而非 failTask——动态源每次内容不同时，
 	// checksum 不一致永不触 permanent，耗尽后应放行标记而非失败）。
 	return m.handleIntegrityExhausted(result, downloadErr, task)
+}
+
+// runSingleAttempt 单次下载尝试：acquire 下载槽 → 置 downloading → 下载 → 释放槽
+// → 完整性校验（槽外）。返回 (result, timedOut, aborted, err)——aborted=true 表示尝试
+// 被取消/槽获取失败（终态由调用方分派），或校验 done（成功/阻断）要求退出循环。
+// error 置于最后（ST1008）。
+func (m *CloudDownloadManager) runSingleAttempt(ctx context.Context, dlCtx context.Context, task *CloudTask, destPath string) (*downloader.Result, bool, bool, error) {
+	// 每次尝试独立获取下载槽（下载完成后释放——完整性校验在槽外执行，不阻塞
+	// 其它下载；重下时重新 acquire）。
+	if !m.acquireDownloadSlot(dlCtx, task) {
+		return nil, false, true, dlCtx.Err()
+	}
+	// 取得槽后复查取消：CancelTask 可能在 acquire 与这里之间执行。
+	m.mu.RLock()
+	cancelled := task.Status == "cancelled"
+	m.mu.RUnlock()
+	if cancelled {
+		m.releaseDownloadSlot()
+		return nil, false, true, dlCtx.Err()
+	}
+	// 置 downloading（幂等：重试 attempt 状态已 downloading 仍通过）——必须持槽后
+	// 才置，保证「downloading 状态 ≤ 持槽数」并发上限不变量。置位失败（任务被
+	// 取消/删除）→ 放弃本 attempt，终态由调用方分派。
+	if !m.markDownloading(task) {
+		m.releaseDownloadSlot()
+		return nil, false, true, dlCtx.Err()
+	}
+	_ = m.saveTask(task)
+	m.metrics.ActiveDownloads.Add(1)
+	result, downloadErr, timedOut := m.runDownloadAttempt(ctx, dlCtx, task, destPath)
+	m.metrics.ActiveDownloads.Add(-1)
+	m.releaseDownloadSlot()
+
+	// 成功分支收尾：记录 ETag + 完整性判定（fail→重下哨兵继续循环；must-pass→阻断哨兵；
+	// 默认 permanent→damaged 放行 nil → done=true 直接 break 按完成处理）。
+	// 完整性校验绑定 **dlCtx（任务生命周期）**而非外层 ctx（请求生命周期）：
+	// 客户端断连（outerCtxCancelled 交还）后异步继续时校验仍须完成；仅任务被
+	// 取消/删除（dlCtx 取消）才中止校验（video ffprobe 阻塞等待结果，内部超时兜底）。
+	if done, dErr := m.postDownloadCheck(dlCtx, task, destPath, result, downloadErr); done {
+		return result, timedOut, true, dErr
+	} else {
+		downloadErr = dErr
+	}
+	return result, timedOut, false, downloadErr
 }
 
 // handleIntegrityExhausted 处理完整性校验失败重试耗尽：errIntegrityFail + 非 force →
@@ -667,7 +676,7 @@ retryLoop:
 // 允许重下修复，且任务仍 completed 可用）。两次 checksum 一致的场景（sames>=2）由
 // resolveIntegrityTaskErr 在 permanent 分支提前出循环，不会走到本函数。
 func (m *CloudDownloadManager) handleIntegrityExhausted(result *downloader.Result, downloadErr error, task *CloudTask) (*downloader.Result, error) {
-	if errors.Is(downloadErr, errIntegrityFail) && !task.ForceIntegrity {
+	if errors.Is(downloadErr, errIntegrityFail) && !task.IntegrityMustPass {
 		m.setTaskIntegrityStatus(task, "damaged")
 		return result, nil
 	}
@@ -1373,8 +1382,8 @@ func cloneTransferSpec(t *TransferSpec) *TransferSpec {
 }
 
 // sameTaskParams 判断既有任务与本次请求的四参语义一致（transfer/save/download_local/
-// force_integrity）。去重吸收仅限语义一致者（M3：URL 相同但转存/保留/阻断意图不同 →
-// 各自独立任务，不吞参数；任务5 审查补 ForceIntegrity）。
+// integrity_must_pass）。去重吸收仅限语义一致者（M3：URL 相同但转存/保留/阻断意图不同 →
+// 各自独立任务，不吞参数；任务5 审查补 IntegrityMustPass）。
 func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 	if (existing.Transfer == nil) != (params.Transfer == nil) {
 		return false
@@ -1388,9 +1397,9 @@ func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 	if existing.Save != params.Save || existing.DownloadLocal != params.DownloadLocal {
 		return false
 	}
-	// 任务5 审查 Important：ForceIntegrity 语义一致才吸收（force=true 请求不得被
+	// 任务5 审查 Important：IntegrityMustPass 语义一致才吸收（force=true 请求不得被
 	// force=false 任务吸收而丢失阻断语义——损坏源文件会被静默放行标记 damaged）。
-	if existing.ForceIntegrity != params.ForceIntegrity {
+	if existing.IntegrityMustPass != params.IntegrityMustPass {
 		return false
 	}
 	return true

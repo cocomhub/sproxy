@@ -108,11 +108,11 @@ func WithCloudDownloadLocal(local bool) CloudDownloadOption {
 	}
 }
 
-// WithCloudDownloadForceIntegrity 强制源文件完整性校验（透传服务端 TaskParams.ForceIntegrity）。
+// WithCloudDownloadIntegrityMustPass 强制源文件完整性校验（透传服务端 TaskParams.IntegrityMustPass）。
 // true = 下载内容语义校验失败（如有）时任务直接失败阻断，不放行；
 // false（默认） = 服务端默认处置（两次校验一致的损坏文件放行标记 damaged）。
-// 客户端仅在 true 时发送 force_integrity 字段（零回归：默认 false 不发）。
-func WithCloudDownloadForceIntegrity(v bool) CloudDownloadOption {
+// 客户端仅在 true 时发送 integrity_must_pass 字段（零回归：默认 false 不发）。
+func WithCloudDownloadIntegrityMustPass(v bool) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		o.forceIntegrity = v
 	}
@@ -157,7 +157,7 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	if cfg.filename != "" {
 		body["filename"] = cfg.filename
 	}
-	// C1/M6：单 URL 入口同样透传四参（transfer/save/download_local/force_integrity）——此前 body 为
+	// C1/M6：单 URL 入口同样透传四参（transfer/save/download_local/integrity_must_pass）——此前 body 为
 	// map[string]string 丢三参，与批量入口不一致（服务端收不到 → 三行为此处不成立）。
 	if cfg.transfer != nil {
 		body["transfer"] = cfg.transfer
@@ -169,7 +169,7 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 		body["download_local"] = true
 	}
 	if cfg.forceIntegrity {
-		body["force_integrity"] = true
+		body["integrity_must_pass"] = true
 	}
 
 	var task CloudTask
@@ -220,7 +220,7 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 		body["download_local"] = true
 	}
 	if cfg.forceIntegrity {
-		body["force_integrity"] = true
+		body["integrity_must_pass"] = true
 	}
 
 	var result struct {
@@ -401,7 +401,7 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 		"name": name,
 		"urls": entries,
 	}
-	// M6：组创建透传四参（transfer/save/download_local/force_integrity）——此前 cfg 已解析但 body 未带，
+	// M6：组创建透传四参（transfer/save/download_local/integrity_must_pass）——此前 cfg 已解析但 body 未带，
 	// 死参数面：组下载无法声明转存目标（语义与单条/batch 对齐）。
 	if cfg.transfer != nil {
 		body["transfer"] = cfg.transfer
@@ -413,7 +413,7 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 		body["download_local"] = true
 	}
 	if cfg.forceIntegrity {
-		body["force_integrity"] = true
+		body["integrity_must_pass"] = true
 	}
 	var group CloudGroup
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/groups", body, &group); err != nil {

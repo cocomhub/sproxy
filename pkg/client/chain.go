@@ -230,8 +230,8 @@ func WithChainDownloadLocal(local bool) ChainOption {
 	}
 }
 
-// WithChainForceIntegrity 链式云端下载强制源文件完整性校验（透传服务端）。
-func WithChainForceIntegrity(v bool) ChainOption {
+// WithChainIntegrityMustPass 链式云端下载强制源文件完整性校验（透传服务端）。
+func WithChainIntegrityMustPass(v bool) ChainOption {
 	return func(o *chainOptions) {
 		o.forceIntegrity = v
 	}

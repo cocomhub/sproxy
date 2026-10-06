@@ -6,6 +6,8 @@ package integrity_test
 import (
 	"bytes"
 	"crypto/sha1"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/integrity"
@@ -148,5 +150,30 @@ func TestRecomputeGCID_InvalidCandidates(t *testing.T) {
 	// 非零数据 + 全非法候选 → 未命中不 panic。
 	if _, ok := integrity.RecomputeGCID(bytes.Repeat([]byte{0xab}, 262144), []int64{0, -1, 3}); ok {
 		t.Fatal("非法候选不应命中")
+	}
+}
+
+// TestRecomputeGCIDAll_TailBlock：文件流式权威复算必须计入余量尾块（与内存版
+// ComputeGCID 语义一致）——回归：原实现强制 size%bs==0，带尾块文件对全部候选
+// 整除失败 → 权威匹配恒失效（真实文件几乎不可能恰为候选整数倍）。
+func TestRecomputeGCIDAll_TailBlock(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const block = int64(262144)
+	data := make([]byte, block*2+12345) // 带余量尾块
+	for i := range data {
+		data[i] = byte((i*11 + 7) & 0xff)
+	}
+	path := filepath.Join(dir, "tail.bin")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := integrity.RecomputeGCIDAll(path, []int64{block})
+	if err != nil {
+		t.Fatalf("RecomputeGCIDAll: %v", err)
+	}
+	want := gcidCompute(data, block)
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("尾块文件应命中（got=%v want=%s）——整除限制会跳过尾块导致权威复算失效", got, want)
 	}
 }

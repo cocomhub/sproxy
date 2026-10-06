@@ -793,7 +793,7 @@ func TestCloudDownloadGroupChain_PassesTransferOpts(t *testing.T) {
 	if body["download_local"] == nil {
 		t.Fatalf("组创建缺 download_local（M6），body=%v", body)
 	}
-	if body["force_integrity"] == nil {
-		t.Fatalf("组创建缺 force_integrity（任务5），body=%v", body)
+	if body["integrity_must_pass"] == nil {
+		t.Fatalf("组创建缺 integrity_must_pass（任务5），body=%v", body)
 	}
 }

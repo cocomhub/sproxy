@@ -106,10 +106,10 @@ func (f fakeIndexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, er
 // TestVideoChecker_MissingFFprobe R5-I1：缺 ffprobe（ErrFFprobeMissing）→ OK=true 放行
 // （无校验器 ≠ 损坏，无 ffmpeg 部署不误判 damaged）。
 func TestVideoChecker_MissingFFprobe(t *testing.T) {
-	// 共享 testSeamIndexer 包级注入缝——不可并行（其他测试并发写）
+	// 共享 testSeamIndexer 包级注入缝——经 setTestSeamIndexer 持锁替换（生产路径只读+局部回落）
 	prev := testSeamIndexer
-	testSeamIndexer = fakeIndexer{err: ffprobe.ErrFFprobeMissing}
-	t.Cleanup(func() { testSeamIndexer = prev })
+	setTestSeamIndexer(fakeIndexer{err: ffprobe.ErrFFprobeMissing})
+	t.Cleanup(func() { setTestSeamIndexer(prev) })
 
 	path := writeBytes(t, "m.mp4", []byte("whatever"))
 	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("whatever")))
@@ -124,13 +124,13 @@ func TestVideoChecker_MissingFFprobe(t *testing.T) {
 // TestVideoChecker_CtxCancel 取消路径：ctx 取消 → 返回 error（非 OK:false——调用方
 // 按「校验执行出错→放行」处理，不当语义异常累计）。
 func TestVideoChecker_CtxCancel(t *testing.T) {
-	// 共享 testSeamIndexer 包级注入缝——不可并行
+	// 共享 testSeamIndexer 包级注入缝——经 setTestSeamIndexer 持锁替换
 	prev := testSeamIndexer
 	// 阻塞索引器（不返回）——select 等 ctx.Done
 	blocking := make(chan struct{})
-	testSeamIndexer = blockingIndexer{ch: blocking}
+	setTestSeamIndexer(blockingIndexer{ch: blocking})
 	t.Cleanup(func() {
-		testSeamIndexer = prev
+		setTestSeamIndexer(prev)
 		close(blocking)
 	})
 

@@ -21,7 +21,7 @@ import (
 
 // CreateGroup 创建下载任务组。
 // owner 是请求认证派生的组归属，子任务写入同 owner（组级多租户隔离）。
-// 校验文件名冲突，创建子任务。params 透传组级四参（transfer/save/download_local/force_integrity）——
+// 校验文件名冲突，创建子任务。params 透传组级四参（transfer/save/download_local/integrity_must_pass）——
 // 组内每个子任务与单条/batch 同语义（服务端组创建曾硬编码 Save:true + 无 transfer）。
 func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Entry, owner string, params TaskParams) (*CloudTaskGroup, error) {
 	if len(urls) == 0 {
@@ -143,7 +143,7 @@ func validateGroupFilenameConflicts(urls []cloudfilename.Entry) error {
 
 // createGroupEntry 为组创建一个 URL 条目对应的子任务（可能去重吸收既有任务）。
 // seen 用于同组内 URL 去重；err 时由调用方回滚。返回存储任务与是否吸收既有任务（absorbed）。
-// params 透传组级四参（transfer/save/download_local/force_integrity）：组内每个子任务与单条/batch 同语义
+// params 透传组级四参（transfer/save/download_local/integrity_must_pass）：组内每个子任务与单条/batch 同语义
 // （服务端组创建曾硬编码 Save:true + 无 transfer，组链三参最后一跳丢失——修复后
 // --transfer-volume/--save 对组真实生效）。
 func (m *CloudDownloadManager) createGroupEntry(entry cloudfilename.Entry, owner, groupID string, seen map[string]bool, params TaskParams) (*CloudTask, bool, error) {
