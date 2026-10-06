@@ -618,6 +618,12 @@ retryLoop:
 	// R2-P2：完整性校验失败重试耗尽（errIntegrityFail 已不可重试）且任务非 force →
 	// 按规格「默认放行标记 damaged」处理（而非 failTask——动态源每次内容不同时，
 	// checksum 不一致永不触 permanent，耗尽后应放行标记而非失败）。
+	return m.handleIntegrityExhausted(result, downloadErr, task)
+}
+
+// handleIntegrityExhausted 处理完整性校验失败重试耗尽：errIntegrityFail + 非 force →
+// damaged 放行（completed + 标记）；否则原样返回（force 阻断 / 其他错误上行）。
+func (m *CloudDownloadManager) handleIntegrityExhausted(result *downloader.Result, downloadErr error, task *CloudTask) (*downloader.Result, error) {
 	if errors.Is(downloadErr, errIntegrityFail) && !task.ForceIntegrity {
 		m.setTaskIntegrityStatus(task, "damaged")
 		return result, nil
