@@ -69,7 +69,13 @@
   // 空列表 → 空字符串（调用方保留静态默认下拉）。
   function backendOptionsHtml(types) {
     const t = types || [];
-    return t.map(function (x) { return '<option value="' + escHtml(x) + '">' + escHtml(x) + '</option>'; }).join('');
+    return t.map(function (x) {
+      // V4 适配（Task 5 破坏性变更）：/api/backends 现返回 {type, category, fields}
+      // 对象数组（此前为 []string）——对对象取 x.type；兼容字符串形态（默认回落与
+      // 历史调用零回归），保证下拉 value/text 恒为类型字符串而非 "[object Object]"。
+      const name = (x && typeof x === 'object' && !Array.isArray(x)) ? (x.type || '') : x;
+      return '<option value="' + escHtml(name) + '">' + escHtml(name) + '</option>';
+    }).join('');
   }
 
   function createUserVolumeFormHtml(types) {

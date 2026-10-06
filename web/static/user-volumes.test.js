@@ -91,6 +91,25 @@ test('backendOptionsHtml 渲染类型选项', () => {
   assert.ok(html.includes('<option value="webdav">webdav</option>'));
 });
 
+// Task 5 破坏性变更回归：/api/backends 返回 {type, category, fields} 对象数组，
+// backendOptionsHtml 必须取 x.type，否则下拉渲染成 "[object Object]"（既有 user_volumes
+// e2e 用例 TestUserVolumesE2E_BadType 等待「下拉恰为 [baidupcs]」超时即此根因）。
+test('backendOptionsHtml 适配 /api/backends 对象数组（取 x.type，非 [object Object]）', () => {
+  const html = r.backendOptionsHtml([
+    { type: 'baidupcs', category: 'linked', fields: [] },
+    { type: 's3', category: 'linked', fields: [] },
+  ]);
+  assert.ok(html.includes('<option value="baidupcs">baidupcs</option>'));
+  assert.ok(html.includes('<option value="s3">s3</option>'));
+  assert.ok(!html.includes('object Object'), '对象数组不应渲染为 "[object Object]"');
+});
+
+test('backendOptionsHtml 对象与字符串混合形态兼容', () => {
+  const html = r.backendOptionsHtml(['webdav', { type: 'baidupcs', category: 'linked', fields: [] }]);
+  assert.ok(html.includes('<option value="webdav">webdav</option>'));
+  assert.ok(html.includes('<option value="baidupcs">baidupcs</option>'));
+});
+
 test('backendOptionsHtml 空列表返回空串', () => {
   assert.strictEqual(r.backendOptionsHtml([]), '');
   assert.strictEqual(r.backendOptionsHtml(null), '');
