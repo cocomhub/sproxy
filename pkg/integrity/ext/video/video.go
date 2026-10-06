@@ -5,6 +5,7 @@ package video
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -81,6 +82,12 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 		offs, kerr = r.offs, r.err
 	}
 	if kerr != nil {
+		// R5-I1：环境缺 ffprobe（ErrFFprobeMissing）≠ 文件损坏——视为通过（无校验器
+		// 可用，与 plan §5「无校验器 → 视为通过」对齐），避免无 ffmpeg 部署对每个
+		// 视频误判 damaged。其他解析失败（容器非法/无视频流）→ OK=false（真异常）。
+		if errors.Is(kerr, ffprobe.ErrFFprobeMissing) {
+			return &integrity.Report{OK: true, Reason: "video: ffprobe 未安装，跳过语义校验"}, nil
+		}
 		return &integrity.Report{OK: false, Reason: fmt.Sprintf("video: ffprobe 解析失败: %v", kerr)}, nil
 	}
 	if len(offs) == 0 {
