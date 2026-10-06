@@ -463,3 +463,15 @@ test('buildTransferRowHtml：同步行显示载体信息（无载体信息的行
   const uploadRow = r.buildTransferRowHtml({ id: 'u1', kind: 'upload', filename: 'a.txt', status: 'uploading', total: 10, loaded: 5 });
   assert.ok(!uploadRow.includes('直连×'), '非同步行不受影响');
 });
+
+test('buildIntegrityBadge：damaged 黄色 / unverified 灰色 / verified 与缺省 空', () => {
+  const mk = (st) => ({ kind: 'cloud_task', meta: { raw: { integrity_status: st } } });
+  assert.match(r.buildIntegrityBadge('cloud_task', mk('damaged')), /完整性异常/);
+  assert.match(r.buildIntegrityBadge('cloud_task', mk('unverified')), /未校验/);
+  assert.equal(r.buildIntegrityBadge('cloud_task', mk('verified')), '');
+  assert.equal(r.buildIntegrityBadge('cloud_task', mk('')), '');
+  assert.equal(r.buildIntegrityBadge('cloud_task', null), '');
+  assert.equal(r.buildIntegrityBadge('cloud_task', {}), '');
+  // 非云任务类型无标记
+  assert.equal(r.buildIntegrityBadge('sync_task', mk('damaged')), '');
+});

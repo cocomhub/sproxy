@@ -1058,6 +1058,10 @@ type Config struct {
 	CloudDownloadIdleTimeout  time.Duration `yaml:"cloud_download_idle_timeout" mapstructure:"cloud_download_idle_timeout"`
 	CloudMaxRetries           int           `yaml:"cloud_max_retries" mapstructure:"cloud_max_retries"`
 	CloudRetryDelay           time.Duration `yaml:"cloud_retry_delay" mapstructure:"cloud_retry_delay"`
+	// CloudCheckMemBytes 完整性校验内存配额（ByteSize 语义；0/缺省 = 512 MiB）。
+	// 校验器按 Check 前估算内存占用排队（并发校验总估算 ≤ 配額）；单文件估算超配额
+	// → 跳过校验标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
+	CloudCheckMemBytes int64 `yaml:"cloud_check_mem_bytes" mapstructure:"cloud_check_mem_bytes"`
 	// CloudDownloadExitNode 是云端下载经 mesh 出口的节点 ID（空 = 服务端本地直连下载）。
 	// 非空时下载器 Transport.DialContext 指向「本地直连优先 → 失败回退经该出口节点
 	// （hub 中继 RelayStream）」的拨号函数——服务端本地被墙（无法直连外网 URL）时

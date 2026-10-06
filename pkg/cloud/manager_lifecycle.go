@@ -217,8 +217,14 @@ func (m *CloudDownloadManager) resumeTaskLookupLocked(taskID, owner string, chec
 	if !ok || (owner != "" && !ownerVisible(task.Owner, owner)) {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
-	if status := task.Status; status != "failed" && status != "cancelled" {
-		return nil, fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
+	// M2（damaged 重下入口）：completed+IntegrityStatus==damaged 也允许恢复——
+	// damaged 是「警告继续」放行后的完成态，任务可显式重下修复。其余完成态
+	// （verified/未校验）不可恢复（无重下诉求，防误操作）。
+	status := task.Status
+	resumable := status == "failed" || status == "cancelled" ||
+		(status == "completed" && task.IntegrityStatus == "damaged")
+	if !resumable {
+		return nil, fmt.Errorf("task %s is in status %q, only failed/cancelled (or damaged) tasks can be resumed", taskID, status)
 	}
 	if checkRunning && m.running[taskID] {
 		return nil, fmt.Errorf("task %s is still running, cannot resume now", taskID)

@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"golang.org/x/sync/semaphore"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -139,6 +140,10 @@ type CloudDownloadConfig struct {
 	MaxRetries          int           // 失败重试次数，默认 10
 	RetryDelay          time.Duration // 重试间隔，默认 10s
 	Downloader          string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
+	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；0=不限制，默认 512 MiB）。
+	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验
+	// 标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
+	MaxCheckMemBytes int64
 	// ExitDial 是下载器出站拨号函数注入（装配层构造）：nil = 默认直连。
 	// 非 nil 时覆写下载器 http.Transport.DialContext（本地直连优先 → 失败回退经 mesh 出口）。
 	// 领域包不依赖 mesh（R1 分层）——函数字段注入解耦，对齐 downloader 的 httpClient 注入模式。
@@ -197,6 +202,9 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	if cfg.Downloader == "" {
 		cfg.Downloader = "http"
 	}
+	if cfg.MaxCheckMemBytes <= 0 {
+		cfg.MaxCheckMemBytes = 512 * 1024 * 1024
+	}
 }
 
 // TenantResolver 按 owner 返回租户（空 owner → anonymous；非法 owner 或存储根不可用返回 nil）。
@@ -251,6 +259,11 @@ type CloudDownloadManager struct {
 	// integrityLookup 按文件名分发完整性校验器（装配层注入 integrity.Lookup 代理；
 	// nil = 无校验器，语义校验跳过视为通过——Review Focus 1）。
 	integrityLookup func(name string) integrity.Checker
+	// checkMemSem 完整性校验内存配额信号量（Weighted，按 Check 前估算字节排队等待释放；
+	// nil = 配额禁用。单文件估算超配额 → 跳过校验标记 unverified，不误判 damaged）。
+	checkMemSem *semaphore.Weighted
+	// checkMemMax 校验内存配额总预算（构造时快照 cfg.MaxCheckMemBytes；Weighted 无 size 查询）。
+	checkMemMax int64
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -383,6 +396,8 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		logger:           slogutil.Default(logger),
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
 		transferSem:      make(chan struct{}, cfg.TransferConcurrency),
+		checkMemSem:      newCheckMemSem(cfg.MaxCheckMemBytes),
+		checkMemMax:      cfg.MaxCheckMemBytes,
 		config:           cfg,
 		dl:               newDefaultDownloader(cfg),
 		transferFSFor:    opts.TransferFSFor,

@@ -23,7 +23,26 @@ func init() {
 // 不引入压缩外部依赖；扩展名匹配与注册表规则（设计 §77）保持一致。
 type TarChecker struct{}
 
-// Kind 返回类型标识（注册键，全局唯一）。
+// EstimateMem 预估一次 Check 的峰值内存：tar 遍历逐条 header（小内存），gzip 解压
+// 缓冲与文件大小成正比——按 size×inflateRatio 估算（保守高估，对齐 Check 的膨胀比上限）。
+// 无法打开/读取尺寸时返回 0（调度层按无内存需求）。
+func (TarChecker) EstimateMem(path string, size int64) int64 {
+	if size <= 0 {
+		f, err := os.Open(path)
+		if err != nil {
+			return 0
+		}
+		defer f.Close()
+		if fi, serr := f.Stat(); serr == nil {
+			size = fi.Size()
+		} else {
+			return 0
+		}
+	}
+	return size * inflateRatioMax
+}
+
+// Kind 返回类型独立 key（注册键，全局唯一）。
 func (TarChecker) Kind() string { return "archive/tar" }
 
 // Matches 按扩展名族判定归属：.tar/.tar.gz/.tgz/.tar.zst/.tar.br（不区分大小写）。
@@ -45,6 +64,11 @@ func (TarChecker) Matches(name string) bool {
 //
 // gzip 判定按魔数 0x1f 0x8b 探测而非 gzip.NewReader 失败回退：NewReader 在解析
 // 失败时会把整个流的读取位置推进到 EOF，导致紧随其后的纯 tar 遍历直接读到空。
+// inflateRatioMax 是 gzip 解压膨胀比安全上界（Check 用 inflated>x*ratio 判超额异常；
+// EstimateMem 用同值估算内存配额）。F2（对抗评审）：100 → 500——txt/log 等高压缩文件
+// 解压可超百倍，100 会误伤合法高压缩。
+const inflateRatioMax = int64(500)
+
 func (TarChecker) Check(ctx context.Context, path string, size int64) (*Report, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -77,7 +101,7 @@ func (TarChecker) Check(ctx context.Context, path string, size int64) (*Report, 
 	var inflated int64
 	// F2（对抗评审）：膨胀比上界 500（纯文本/日志类合法高压缩归档可达百倍以上，
 	// 100 会误伤；极端 gzip 炸弹仍 >500 被拦截）。
-	const inflateRatio = 500
+
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -89,7 +113,7 @@ func (TarChecker) Check(ctx context.Context, path string, size int64) (*Report, 
 		count++
 		inflated += hdr.Size
 		// 源文件大小已知时：解压总量超 size×ratio 即疑似炸弹。
-		if size > 0 && inflated > size*inflateRatio {
+		if size > 0 && inflated > size*inflateRatioMax {
 			return &Report{OK: false, Reason: "tar 解压膨胀超限（疑似炸弹）"}, nil
 		}
 	}

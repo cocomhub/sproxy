@@ -331,9 +331,22 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 		}
 		return nil
 	}
+	// 内存配额治理（用户裁定 2026-10-06）：Check 前按估算内存占用排队（不足等待释放）；
+	// 单文件估算超配额 → 跳过校验标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
+	est := checkMemEstimate(checker, destPath, result.Size)
+	if m.checkMemOverQuote(est) {
+		m.logger.Warn("integrity check skipped: estimate exceeds memory quota",
+			"task_id", task.ID, "ext", filepath.Ext(destPath), "estimate_bytes", est)
+		m.setTaskIntegrityStatus(task, "unverified")
+		return nil
+	}
+	release := m.acquireCheckMem(ctx, est)
+	defer release()
 	rpt, err := checker.Check(ctx, destPath, result.Size)
 	if err != nil {
 		// 校验执行本身出错（文件打开失败等）——不是语义异常，放行（不重下不误报）。
+		// video Check 的 ctx 取消（任务取消/删除）也走此路径——后续 dlCtx.Err() 判定
+		// 按取消处理，不当语义异常。
 		m.logger.Warn("integrity check execution failed, treating as passed", "task_id", task.ID, "error", err)
 		return nil
 	}
@@ -607,7 +620,10 @@ retryLoop:
 
 		// 成功分支收尾：记录 ETag + 完整性判定（fail→重下哨兵继续循环；force→阻断哨兵；
 		// 默认 permanent→damaged 放行 nil → done=true 直接 break 按完成处理）。
-		if done, dErr := m.postDownloadCheck(ctx, task, destPath, result, downloadErr); done {
+		// 完整性校验绑定 **dlCtx（任务生命周期）**而非外层 ctx（请求生命周期）：
+		// 客户端断连（outerCtxCancelled 交还）后异步继续时校验仍须完成；仅任务被
+		// 取消/删除（dlCtx 取消）才中止校验（video ffprobe 阻塞等待结果，内部超时兜底）。
+		if done, dErr := m.postDownloadCheck(dlCtx, task, destPath, result, downloadErr); done {
 			break
 		} else {
 			downloadErr = dErr

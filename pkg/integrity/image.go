@@ -26,6 +26,25 @@ func init() {
 // 不引入 cocom 依赖（标准库 image/gif、jpeg、png 空白导入；webp 留后续独立 module）。
 type ImageChecker struct{}
 
+// EstimateMem 预估一次 Check 的峰值内存：完整解码分配 w*h*4 字节缓冲
+// （RGBA），DecodeConfig 先读尺寸后按上限钳制。保守高估（防低估 OOM）。
+func (ImageChecker) EstimateMem(path string, size int64) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0
+	}
+	pixels := int64(cfg.Width) * int64(cfg.Height)
+	if pixels > maxCheckPixels {
+		pixels = maxCheckPixels // 超上限按上限估算（Check 本身会拒）
+	}
+	return pixels * 4 // RGBA
+}
+
 // Kind 返回类型标识（注册键，全局唯一）。
 func (ImageChecker) Kind() string { return "image/*" }
 
@@ -41,6 +60,11 @@ func (ImageChecker) Matches(name string) bool {
 	}
 	return false
 }
+
+// maxCheckPixels 是语义校验的像素安全上界（DecodeConfig 预检防解压炸弹/OOM 分配）。
+// 与内存配额治理（MaxCheckMemBytes）配合：超配额的文件由调度层跳过校验标记 unverified，
+// 本上界是校验器自身防分配过大的最后防线。
+const maxCheckPixels = int64(25000000)
 
 // Check 解码 path 指向的图片：解码失败或 Bounds 为空（0x0）→ OK=false（内容异常）；
 // 文件打开失败 → error（校验执行错误，非语义判定）。Review Focus 2：空文件/0 字节
@@ -60,10 +84,9 @@ func (ImageChecker) Check(ctx context.Context, path string, size int64) (*Report
 		return &Report{OK: false, Reason: err.Error()}, nil
 	}
 	if cfg.Width > 0 && cfg.Height > 0 {
-		// F6（对抗评审）：上限降到 2500 万像素（~100MB 分配）——并发放大 MaxConcurrent×
-		// 100MB 降低 OOM 风险；合法超 2500 万像素大图极罕见。用户裁定按内存配额治理
-		// （ByteSize + 排队）记设计待办，此为临时安全上界。
-		if maxPixels := int64(25000000); int64(cfg.Width)*int64(cfg.Height) > maxPixels {
+		// F6（对抗评审）+ 用户裁定：像素上限是**语义层安全上界**（配合 MaxCheckMemBytes
+		// 内存配额治理——超配额跳过校验而非误判损坏）；合法超 2500 万像素大图极罕见。
+		if int64(cfg.Width)*int64(cfg.Height) > maxCheckPixels {
 			return &Report{OK: false, Reason: fmt.Sprintf("image 像素超限 %dx%d", cfg.Width, cfg.Height)}, nil
 		}
 	}

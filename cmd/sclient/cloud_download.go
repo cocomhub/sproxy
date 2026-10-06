@@ -411,7 +411,7 @@ func NewCmdCloudDeleteTask(factory clientfactory.Factory, ios cli.IOStreams, cfg
 func NewCmdCloudResumeDownload(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "resume-download <task-id>",
-		Short: "恢复云端下载任务（续传或重新下载）",
+		Short: "恢复云端下载任务（续传/重新下载；completed+damaged 任务重下修复）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)

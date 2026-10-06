@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/testutil"
+	"golang.org/x/sync/semaphore"
 )
 
 // corruptPNGF 是"名为 .png 但内容非图片"的损坏载荷：ImageChecker 语义解码必然失败。
@@ -311,4 +312,137 @@ func TestDownloadIntegrity_ConcurrentChecks(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestDownloadIntegrity_DamagedTaskCanResumeRedownload M2（damaged 重下入口）：
+// completed+damaged 任务可显式恢复重下（服务端 resumeTaskLookupLocked 放行）。
+// 重下后 integrity 运行态已重置（M1），若源已修复则恢复为 completed+verified。
+func TestDownloadIntegrity_DamagedTaskCanResumeRedownload(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	// 首轮恒损坏 → damaged 放行
+	srv, _ := corruptServe(t)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.png", int64(len(corruptPNGF)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if task.Status != "completed" || task.IntegrityStatus != "damaged" {
+		t.Fatalf("前置：应 completed+damaged，got %q+%q", task.Status, task.IntegrityStatus)
+	}
+	// 换源为有效 png（重下后应 verified）
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(validPNG1x1)
+	}))
+	defer srv2.Close()
+	task.URL = srv2.URL
+	mgr.mu.Lock()
+	mgr.tasks[task.ID].URL = srv2.URL
+	mgr.mu.Unlock()
+
+	if err := mgr.ResumeTask(task.ID, false, ""); err != nil {
+		t.Fatalf("damaged 任务应可 resume 重下，got %v", err)
+	}
+	// 轮询重下完成（WaitFor 超时自动 Fatal）
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		cur, _ := mgr.SnapshotTask(task.ID, "")
+		return cur != nil && cur.Status == "completed" && cur.IntegrityStatus == "verified"
+	}, "重下后应 completed+verified")
+}
+
+// TestDownloadIntegrity_NonDamagedCompletedCannotResume：非 damaged 的 completed 任务
+// 不可 resume（M2 语义：仅 failed/cancelled/damaged 可恢复，verified 完成态不提供重下）。
+func TestDownloadIntegrity_NonDamagedCompletedCannotResume(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(validPNG1x1)
+	}))
+	defer srv.Close()
+	task, err := mgr.SubmitAndStart("url", srv.URL, "ok.png", int64(len(validPNG1x1)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if task.Status != "completed" || task.IntegrityStatus != "verified" {
+		t.Fatalf("前置：应 completed+verified，got %q+%q", task.Status, task.IntegrityStatus)
+	}
+	err = mgr.ResumeTask(task.ID, false, "")
+	if err == nil {
+		t.Fatal("verified 完成态不应可 resume（无重下诉求），应报错")
+	}
+}
+
+// TestDownloadIntegrity_ListDamagedFilter：ListTasks("damaged") 只返回 completed+damaged 任务。
+func TestDownloadIntegrity_ListDamagedFilter(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	// 一个 damaged 任务
+	srv, _ := corruptServe(t)
+	dmg, err := mgr.SubmitAndStart("url", srv.URL, "bad.png", int64(len(corruptPNGF)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit damaged: %v", err)
+	}
+	// 一个 verified 任务
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(validPNG1x1)
+	}))
+	defer srv2.Close()
+	ok, err := mgr.SubmitAndStart("url", srv2.URL, "ok.png", int64(len(validPNG1x1)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit ok: %v", err)
+	}
+	if dmg.IntegrityStatus != "damaged" || ok.IntegrityStatus != "verified" {
+		t.Fatalf("前置状态错：dmg=%q ok=%q", dmg.IntegrityStatus, ok.IntegrityStatus)
+	}
+	damaged, _ := mgr.ListTasks("damaged", -1, 0, "")
+	if len(damaged) != 1 || damaged[0].ID != dmg.ID {
+		t.Fatalf("damaged 过滤应只返回 1 个 damaged 任务，got %d", len(damaged))
+	}
+}
+
+// TestDownloadIntegrity_OverMemQuotaSkipsUnverified 用户裁定（内存配额治理）：
+// MaxCheckMemBytes 过小（1MiB）→ tar 估算（size×500）超配额 → 跳过校验标记
+// unverified（不误判 damaged；无校验能力 ≠ 损坏）。
+func TestDownloadIntegrity_OverMemQuotaSkipsUnverified(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	mgr.checkMemSem = semaphore.NewWeighted(1 << 20) // 1 MiB
+	mgr.checkMemMax = 1 << 20
+	// tar.gz 载荷：内容非 tar（损坏），但估算 4KB×500=2MB > 1MiB 配额 → 跳过校验
+	// 4KB payload：估算 size×500=2MB > 1MiB 配额 → 跳过校验（40 字节×500=20KB 不会超）
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(payload)
+	}))
+	defer srv.Close()
+	// 扩展名 .tar（TarChecker.Matches 匹配）而非 .tar.gz：Lookup 命中后才有估算。
+	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.tar", int64(len(payload)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if task.Status != "completed" {
+		t.Fatalf("超配额跳过校验应放行 completed，got %q", task.Status)
+	}
+	if task.IntegrityStatus != "unverified" {
+		t.Fatalf("超配额应标记 unverified（非 damaged），got %q", task.IntegrityStatus)
+	}
+}
+
+// TestDownloadIntegrity_WithinMemQuotaNormalVerify 配额充足（默认 512MiB）→ 正常校验：
+// 损坏图片仍 damaged（配额不改变语义判定，只是调度）。
+func TestDownloadIntegrity_WithinMemQuotaNormalVerify(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	mgr.checkMemSem = semaphore.NewWeighted(512 << 20) // 512 MiB（默认）
+	mgr.checkMemMax = 512 << 20
+	srv, _ := corruptServe(t)
+	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.png", int64(len(corruptPNGF)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if task.Status != "completed" || task.IntegrityStatus != "damaged" {
+		t.Fatalf("配额充足应正常校验 damaged，got %q+%q", task.Status, task.IntegrityStatus)
+	}
 }

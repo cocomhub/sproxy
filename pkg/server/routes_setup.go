@@ -462,6 +462,7 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		MaxRetries:          cfg.CloudMaxRetries,
 		RetryDelay:          cfg.CloudRetryDelay,
 		Downloader:          cfg.CloudDownloader,
+		MaxCheckMemBytes:    cfg.CloudCheckMemBytes,
 	}
 	// 云端下载经 mesh 出口：由装配层（cmd/sproxy）构造 CloudExitDial 注入
 	// （pkg/server 不 import pkg/client——client 测试 import server 构成包级环，

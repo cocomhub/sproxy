@@ -27,6 +27,13 @@ func init() {
 // 按任务配置放行/标记；本校验器不阻断未知环境，仅报告语义结果）。
 type VideoChecker struct{}
 
+// EstimateMem 预估一次 Check 的峰值内存：ffprobe 子进程输出写临时文件（不占内存），
+// 进程自身约 64MB 常驻（保守固定估算）。子进程内存由 OS 管理不占用进程堆，但配额
+// 治理按并发子进程数折算（MaxCheckMemBytes 控制同时 ffprobe 数量）。
+func (VideoChecker) EstimateMem(path string, size int64) int64 {
+	return 64 << 20 // 64MiB 固定估算（ffprobe 子进程）
+}
+
 // Kind 返回类型标识（注册键，全局唯一）。
 func (VideoChecker) Kind() string { return "video/*" }
 
@@ -60,10 +67,15 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 	var indexer interface {
 		KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
 	} = ffprobe.Indexer{}
-	// R2-P1：ffprobe 内部用 context.Background()（无 ctx 参数），不随调用方取消——
-	// 用户取消任务后 ffprobe 子进程仍跑完（最长 5min），下载槽/配额释放被推迟。
-	// 用 goroutine + select 包裹：外层 ctx 取消即中止等待（子进程由 ffprobe 内部
-	// timeout 兜底，进程残留由其自有超时清理；此处保证调用方不阻塞）。
+	// ffprobe 必须**阻塞等待结果**（用户裁定 2026-10-06）：校验结果必须可得才能决定
+	// 后续流程（放行/重下/标记 damaged）——非阻塞会丢失校验语义（取消即 OK:false 被当
+	// 语义异常）。子进程由 ffprobe 内部 timeout 兜底（30s~5min 按文件大小），进程不会
+	// 无限残留。外层 ctx（任务取消/删除）取消时中止等待：ffprobe 走 context.Background
+	// 无法被中断，但 goroutine+select 保证调用方不悬挂——取消任务后的 ffprobe 残留在
+	// 其内部 timeout 后自行结束（配额/槽位释放最多推迟 timeout 时长，可接受）。
+	//
+	// 此前「取消即返回 OK:false」是错误的：调用方把 OK:false 当语义异常累计，导致用户
+	// 取消任务被误判为文件损坏（errIntegrityFail 重下/标记 damaged）。
 	type offsRes struct {
 		offs []int64
 		err  error
@@ -77,7 +89,9 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 	var kerr error
 	select {
 	case <-ctx.Done():
-		return &integrity.Report{OK: false, Reason: "video: 校验被取消（任务取消/删除）"}, nil
+		// 任务取消/删除：校验无意义，返回「中止」哨兵——调用方识别后按取消处理，
+		// 不得当语义异常累计。ffprobe 残留由内部 timeout 兜底。
+		return nil, fmt.Errorf("video check cancelled: %w", ctx.Err())
 	case r := <-resCh:
 		offs, kerr = r.offs, r.err
 	}
