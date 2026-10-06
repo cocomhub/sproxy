@@ -10,6 +10,7 @@ import (
 )
 
 func TestIntegrityModeConstants(t *testing.T) {
+	t.Parallel()
 	if downloader.ModeLocalOnly == downloader.ModeAuthority {
 		t.Fatal("模式须互斥")
 	}
@@ -19,6 +20,7 @@ func TestIntegrityModeConstants(t *testing.T) {
 }
 
 func TestResultIntegrityField(t *testing.T) {
+	t.Parallel()
 	r := downloader.Result{Integrity: downloader.ModeLocalOnly}
 	if r.Integrity != downloader.ModeLocalOnly {
 		t.Fatalf("Result 应含 Integrity 字段，got %v", r.Integrity)
@@ -30,6 +32,7 @@ func TestResultIntegrityField(t *testing.T) {
 }
 
 func TestHTTPDownloaderMode(t *testing.T) {
+	t.Parallel()
 	d := downloader.NewHTTPDownloader()
 	// HTTPDownloader 是具体类型（非接口），先经 any 再做接口断言。
 	if ip, ok := any(d).(downloader.IntegrityProvider); ok {

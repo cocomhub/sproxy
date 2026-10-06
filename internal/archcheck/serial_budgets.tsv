@@ -59,6 +59,7 @@ internal/archcheck/xfer_send_atomicity_test.go	1
 pkg/client/events_test.go	4
 pkg/cloud/manager_test.go	3
 pkg/files/version_id_test.go	3
+pkg/integrity/ext/video/video_test.go	2
 pkg/server/accept_retry_test.go	5
 pkg/server/archive_test.go	1
 pkg/server/audit_handler_test.go	13
@@ -265,6 +266,3 @@ web/e2e/ui_e2e_test.go	23
 web/e2e/volume_ops_preview_e2e_test.go	2
 web/e2e/volumes_e2e_test.go	4
 web/embed_test.go	2
-pkg/cloud/integrity_test.go	4
-pkg/downloader/downloader_test.go	3
-pkg/volume/ext/pikpak/downloader_test.go	4

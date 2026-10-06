@@ -15,6 +15,7 @@ import (
 )
 
 func TestPikpakDownloaderIntegrityMode(t *testing.T) {
+	t.Parallel()
 	d, err := NewPikpakDownloader(DownloaderConfig{
 		Cli:        &Cli{},
 		API:        &API{},
@@ -37,6 +38,7 @@ func TestPikpakDownloaderIntegrityMode(t *testing.T) {
 // TestFinalizeDownloadResultIntegrity 验证 finalizeDownload 产出的 Result 声明 local_only 完整性
 // （无权威 hash → ② 态）。
 func TestFinalizeDownloadResultIntegrity(t *testing.T) {
+	t.Parallel()
 	lease := &RestoreLease{}
 	d := &PikpakDownloader{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	r, err := d.finalizeDownload(t.Context(), 1024, "checksum", "", false, nil, nil, "", lease)
@@ -50,6 +52,7 @@ func TestFinalizeDownloadResultIntegrity(t *testing.T) {
 
 // TestFinalizeDownload_GCIDAuthorityHit：候选分块复算命中官方 hash → ModeAuthority + AuthorityHash。
 func TestFinalizeDownload_GCIDAuthorityHit(t *testing.T) {
+	t.Parallel()
 	// 256KB 整数倍文件，官方 hash 设为 256KB 复算值 → 权威命中。
 	block := int64(262144)
 	data := make([]byte, block*2)
@@ -80,6 +83,7 @@ func TestFinalizeDownload_GCIDAuthorityHit(t *testing.T) {
 // TestFinalizeDownload_GCIDMissFallback：复算值不命中官方 hash → ModeLocalOnly（② 态），
 // 不为不存在权威误报。
 func TestFinalizeDownload_GCIDMissFallback(t *testing.T) {
+	t.Parallel()
 	block := int64(262144)
 	data := make([]byte, block*2)
 	for i := range data {

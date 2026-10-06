@@ -78,20 +78,17 @@ func (r *Registry) Register(kind string, f CheckerFactory) {
 }
 
 // Lookup 从 r 返回第一个 Matches(name) 命中的校验器**实例**（工厂构造）；无命中返回 nil。
+// **确定性前提**：注册的 Kind 扩展名族互斥（image/*、archive/tar、video/* 当前互斥），
+// 单命中等价于全收集——map 无序迭代取首个命中不影响结果（注释如实描述，不夸大）。
+// 未来注册重叠扩展名族的 Kind 时须改为收集后按稳定序分发（本函数当前不承诺）。
 func (r *Registry) Lookup(name string) Checker {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	// map 迭代无序：先收集所有命中的 Kind 再做稳定分发（同扩展命中唯一则等价）。
-	var first *Checker
 	for _, f := range r.m {
 		c := f()
 		if c.Matches(name) {
-			first = &c
-			break
+			return c
 		}
 	}
-	if first == nil {
-		return nil
-	}
-	return *first
+	return nil
 }

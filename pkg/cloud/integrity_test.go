@@ -23,6 +23,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"golang.org/x/sync/semaphore"
@@ -70,6 +71,7 @@ func corruptServe(t *testing.T) (*httptest.Server, *atomic.Int64) {
 // TestDownloadIntegrity_DamagedAllowsContinue：语义校验失败（损坏文件）→ 默认放行 +
 // IntegrityStatus="damaged" + 任务 completed。两次 sames 一致仍异常即收敛（hits==2，不无限重下）。
 func TestDownloadIntegrity_DamagedAllowsContinue(t *testing.T) {
+	t.Parallel()
 	mgr := newIntegrityTestMgr(t, 3)
 	srv, hits := corruptServe(t)
 
@@ -93,6 +95,7 @@ func TestDownloadIntegrity_DamagedAllowsContinue(t *testing.T) {
 
 // TestDownloadIntegrity_ForceBlocks：IntegrityMustPass=true + 语义校验失败 → 任务 failed（原因含 integrity）。
 func TestDownloadIntegrity_ForceBlocks(t *testing.T) {
+	t.Parallel()
 	mgr := newIntegrityTestMgr(t, 3)
 	srv, _ := corruptServe(t)
 
@@ -115,6 +118,7 @@ func TestDownloadIntegrity_ForceBlocks(t *testing.T) {
 // TestDownloadIntegrity_AuthoritySkipsSemantic：下载器 ModeAuthority + 权威匹配 → 跳过语义校验 → verified。
 // 载荷仍为损坏 png（若走语义校验必 damaged），但权威下载器已确认 → 必须 verified。
 func TestDownloadIntegrity_AuthoritySkipsSemantic(t *testing.T) {
+	t.Parallel()
 	mgr := newIntegrityTestMgr(t, 2)
 	srv, _ := corruptServe(t)
 
@@ -138,6 +142,7 @@ func TestDownloadIntegrity_AuthoritySkipsSemantic(t *testing.T) {
 // TestDownloadIntegrity_TwiceConsistentStillDamaged：重下两次本地 checksum 一致仍异常 → damaged 放行
 // （不因 MaxRetries 大而无限重下——Review Focus 3：2 次即收敛）。
 func TestDownloadIntegrity_TwiceConsistentStillDamaged(t *testing.T) {
+	t.Parallel()
 	mgr := newIntegrityTestMgr(t, 5)
 	srv, hits := corruptServe(t)
 
@@ -172,7 +177,8 @@ func (d *fakeAuthorityDownloader) Download(ctx context.Context, source string, d
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
