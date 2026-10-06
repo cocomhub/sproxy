@@ -166,6 +166,7 @@ func rangeGET(t *testing.T, url, rangeHdr string) (int, http.Header, []byte) {
 // 建卷（POST /api/volumes/user）→ 文件页切到加密卷 → 明文列表（API 响应 + DOM 行）→
 // ▶ 播放弹窗 <video src> 接线 → rawHTTP Range 206 + 解密明文段一致。
 func TestAuditWebUI_CreateVault_SwitchList_PlayRange(t *testing.T) {
+	// sproxy:serial: 全局后端注册表 UnregisterBackendForTest 需串行（防污染并行 user_volumes 用例）
 	vaultRoot := filepath.Join(t.TempDir(), "vault")
 	if err := os.MkdirAll(vaultRoot, 0o700); err != nil {
 		t.Fatal(err)

@@ -250,6 +250,7 @@ test/e2e_relay_test.go	4
 test/e2e_tunnel_accesskey_test.go	1
 test/e2e_xfer_tls_test.go	2
 web/e2e/audit_export_notify_test_e2e_test.go	2
+web/e2e/audit_webui_e2e_test.go	1
 web/e2e/auth_config_e2e_test.go	4
 web/e2e/cloud_audit_e2e_test.go	4
 web/e2e/credentials_sync_mesh_e2e_test.go	3
