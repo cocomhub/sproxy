@@ -190,3 +190,80 @@ func TestNestedSecretdata_EndToEnd(t *testing.T) {
 		t.Fatalf("密文逃出子目录（根下出现 %q）", e.Name())
 	}
 }
+
+// 重启收养（adoptNestedDir 标记）空性/来源校验（Minor1）：
+// 空子目录 / 仅本层卷专属形态（纯目录容器、纯秘密文件）→ 收养成功；文件+目录混合（普通
+// 用户目录特征，config 误指向既有非 wrapper 目录）→ fail-closed 拒绝，防删除封装卷整流删连带
+// 清空误指目录（数据损失窗口）。
+
+// TestResolveNestedTargetFS_Adopt_EmptySubdir 空子目录（本卷无数据）→ 收养成功。
+func TestResolveNestedTargetFS_Adopt_EmptySubdir(t *testing.T) {
+	// sproxy:serial: 全局 secretDataSet 单例（resolveTargetFS 读取），不并发。
+	storeTempSet(t)
+	ctx := adoptNestedDir(context.Background())
+	root := secretDataSet.Load().Default().RootDir
+	if err := os.MkdirAll(filepath.Join(root, "w1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	v := volume.Volume{Name: "sd", Extra: map[string]any{"target": "default/w1"}}
+	if _, err := resolveTargetFS(ctx, v); err != nil {
+		t.Fatalf("空子目录重启收养应成功: %v", err)
+	}
+}
+
+// TestResolveNestedTargetFS_Adopt_ContainerDirsOnly 纯目录容器（secretdata 随机容器 / files
+// user 桶形态）→ 收养成功。
+func TestResolveNestedTargetFS_Adopt_ContainerDirsOnly(t *testing.T) {
+	// sproxy:serial: 全局 secretDataSet 单例，不并发。
+	storeTempSet(t)
+	ctx := adoptNestedDir(context.Background())
+	root := secretDataSet.Load().Default().RootDir
+	for _, c := range []string{"c1", "c2"} {
+		if err := os.MkdirAll(filepath.Join(root, "w2", c), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v := volume.Volume{Name: "sd", Extra: map[string]any{"target": "default/w2"}}
+	if _, err := resolveTargetFS(ctx, v); err != nil {
+		t.Fatalf("纯目录容器子目录重启收养应成功: %v", err)
+	}
+}
+
+// TestResolveNestedTargetFS_Adopt_SecretFilesOnly 纯秘密文件（secrets 钥匙卷形态）→ 收养成功。
+func TestResolveNestedTargetFS_Adopt_SecretFilesOnly(t *testing.T) {
+	// sproxy:serial: 全局 secretDataSet 单例，不并发。
+	storeTempSet(t)
+	ctx := adoptNestedDir(context.Background())
+	root := secretDataSet.Load().Default().RootDir
+	base := filepath.Join(root, "w4")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "datakey"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v := volume.Volume{Name: "sd", Extra: map[string]any{"target": "default/w4"}}
+	if _, err := resolveTargetFS(ctx, v); err != nil {
+		t.Fatalf("纯秘密文件子目录重启收养应成功: %v", err)
+	}
+}
+
+// TestResolveNestedTargetFS_Adopt_MixedReject 文件+目录混合（普通用户目录，config 误指向既有
+// 非 wrapper 目录）→ fail-closed 拒绝装配，防止删除封装卷整流删连带清空误指目录。
+func TestResolveNestedTargetFS_Adopt_MixedReject(t *testing.T) {
+	// sproxy:serial: 全局 secretDataSet 单例，不并发。
+	storeTempSet(t)
+	ctx := adoptNestedDir(context.Background())
+	root := secretDataSet.Load().Default().RootDir
+	base := filepath.Join(root, "w3")
+	if err := os.MkdirAll(filepath.Join(base, "photos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "README.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v := volume.Volume{Name: "sd", Extra: map[string]any{"target": "default/w3"}}
+	if _, err := resolveTargetFS(ctx, v); err == nil {
+		t.Fatal("文件+目录混合既有子目录重启收养应 fail-closed 拒绝")
+	}
+}
