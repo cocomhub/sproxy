@@ -645,10 +645,8 @@ func TestCloudDownloadChain_StorageFullRetry_PassesTransferOpts(t *testing.T) {
 	// DownloadLocal 继承 opts.downloadLocal=true（默认下载本地）→ body 带 download_local=true
 	chain.backoffFn = func(int) time.Duration { return 5 * time.Millisecond }
 
-	t.Logf("PRE-RUN taskIDs: %v", chain.TaskIDs)
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err != nil {
-		t.Logf("ERR-RUN taskIDs: %v", chain.TaskIDs)
 		t.Fatalf("Run failed: %v", err)
 	}
 	if chain.Phase() != PhaseCompleted {
