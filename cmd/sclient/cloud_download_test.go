@@ -197,6 +197,7 @@ func TestCloudDownloadCmd_ChainOperation(t *testing.T) {
 // TestCloudDownloadCmd_ForceIntegrityFlag 验证 --force-integrity 旗标注册（chain + submit）
 // 且默认 false 时不干扰既有行为（Changed 才透传，零回归）。
 func TestCloudDownloadCmd_ForceIntegrityFlag(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 

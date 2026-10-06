@@ -102,6 +102,7 @@ func TestCloudHandler_CreateDownloadTask(t *testing.T) {
 // TestCloudHandler_CreateDownloadTask_ForceIntegrity 任务5：POST /api/cloud/download 的
 // force_integrity 字段解析 → TaskParams.ForceIntegrity（服务端接收链路最后一跳）。
 func TestCloudHandler_CreateDownloadTask_ForceIntegrity(t *testing.T) {
+	t.Parallel()
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
