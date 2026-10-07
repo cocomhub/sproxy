@@ -753,9 +753,10 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 	// C2 修复：rmdir 删除 user 子树后联动删除各文件 meta sidecar（meta 功能桶）并
 	// 释放其 meta 桶配额——否则 meta/<rel>.meta 成孤儿、meta 桶 Scope 永久虚高。
 	// 软删（trash）场景保留 meta 供恢复（DeleteFile SoftDelete 分支不删 meta）。
-	if s.rt.fileMetaEnabled() {
-		s.cleanupRemovedDirMeta(owner, allFiles)
-	}
+	// C5 修复：删除联动不闸 fileMetaEnabled——disable 只停新建不停清理（enable 期写入的
+	// 存量 sidecar 在 disable 后删除主文件仍须清理，否则孤儿+配额永久泄漏）。内部按
+	// sidecar 是否存在判断，无 meta 时 no-op（一次多余 stat，可接受）。
+	s.cleanupRemovedDirMeta(owner, allFiles)
 	if cs := s.rt.checksumStore(owner); cs != nil {
 		cs.DeletePrefix(rel + "/")
 		// 清理目录自身的 checksum 记录（如果存在）
@@ -1510,7 +1511,9 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	// 防残留；此时主文件已确认删除/软删成功——软删场景保留 meta 供恢复，见下）。
 	// C1 修复：删除 meta 时按实际大小释放其 meta 桶配额（写侧 WriteMeta 已 Commit，
 	// 删除须对称 ReleaseUsage——否则 owner meta 桶 Scope 随删除永久虚高/假 507）。
-	if s.rt.fileMetaEnabled() && !input.SoftDelete {
+	// C5 修复：不闸 fileMetaEnabled——disable 只停新建不停清理（enable 期写入的存量
+	// sidecar 在 disable 后删除主文件仍须清理；内部按存在性判断，无 meta no-op）。
+	if !input.SoftDelete {
 		s.removeFileMeta(f, rel)
 	}
 	s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
