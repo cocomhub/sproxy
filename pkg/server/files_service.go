@@ -229,10 +229,12 @@ func (h *Handlers) externalRemotePath(ctx context.Context, owner, volName, rel0,
 	if !ok {
 		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 	}
-	ownerKey, kerr := v.ResolveUserPath(owner, rel0)
+	loc, kerr := v.ResolveUserLocation(owner, rel0)
 	if kerr != nil {
 		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 	}
+	// 基于 locator：FS 键仅在此经 FSPath 拼接（唯一拼接点）。
+	ownerKey := v.FSPath(loc)
 	e, serr := fsys.Stat(ctx, ownerKey)
 	if serr != nil || e == nil || e.IsDir {
 		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}

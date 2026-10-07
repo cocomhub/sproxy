@@ -24,24 +24,27 @@ func privateVolume() Volume {
 // TestResolveUserPath_SharedVolume_OwnerPrefix：共享卷 → <owner>/user/<rel>（隔离）。
 func TestResolveUserPath_SharedVolume_OwnerPrefix(t *testing.T) {
 	t.Parallel()
-	got, err := sharedVolume().ResolveUserPath("alice", "dir/movie.bin")
+	loc, err := sharedVolume().ResolveUserLocation("alice", "dir/movie.bin")
 	if err != nil {
-		t.Fatalf("ResolveUserPath: %v", err)
+		t.Fatalf("ResolveUserLocation: %v", err)
 	}
-	if want := "alice/user/dir/movie.bin"; got != want {
-		t.Fatalf("共享卷键=%q want %q", got, want)
+	if want := "alice/user/dir/movie.bin"; sharedVolume().FSPath(loc) != want {
+		t.Fatalf("共享卷键=%q want %q", sharedVolume().FSPath(loc), want)
+	}
+	if loc.Owner() != "alice" || loc.Bucket() != "user" || loc.Path() != "dir/movie.bin" {
+		t.Fatalf("Location 字段不符: owner=%q bucket=%q path=%q", loc.Owner(), loc.Bucket(), loc.Path())
 	}
 }
 
 // TestResolveUserPath_PrivateVolume_NoPrefix：独享卷 → user/<rel>（无 owner 前缀）。
 func TestResolveUserPath_PrivateVolume_NoPrefix(t *testing.T) {
 	t.Parallel()
-	got, err := privateVolume().ResolveUserPath("alice", "movie.bin")
+	loc, err := privateVolume().ResolveUserLocation("alice", "movie.bin")
 	if err != nil {
-		t.Fatalf("ResolveUserPath: %v", err)
+		t.Fatalf("ResolveUserLocation: %v", err)
 	}
-	if want := "user/movie.bin"; got != want {
-		t.Fatalf("独享卷键=%q want %q", got, want)
+	if want := "user/movie.bin"; privateVolume().FSPath(loc) != want {
+		t.Fatalf("独享卷键=%q want %q", privateVolume().FSPath(loc), want)
 	}
 }
 
@@ -49,7 +52,7 @@ func TestResolveUserPath_PrivateVolume_NoPrefix(t *testing.T) {
 func TestResolveUserPath_NotAuthorized(t *testing.T) {
 	t.Parallel()
 	// 独享卷只允许 alice；bob 无权。
-	_, err := privateVolume().ResolveUserPath("bob", "movie.bin")
+	_, err := privateVolume().ResolveUserLocation("bob", "movie.bin")
 	if !errors.Is(err, ErrVolumeNotAuthorized) {
 		t.Fatalf("bob 访问独享卷应 ErrVolumeNotAuthorized, got %v", err)
 	}
@@ -71,57 +74,152 @@ func TestResolveUserPath_InvalidPath(t *testing.T) {
 	}
 	for _, p := range bad {
 		// 反斜杠用例：NormalizeRemote 把 \ 转 / 后若剩余合法段则**应成功**（兼容 Windows 输入）——
-		// 空串用例：ResolveUserPath 语义是「桶内文件路径」，空 = 仅桶自身（mkdir user 场景，
-		// ResolveOwnerPath 允许）；经 ResolveUserPath（文件路径）也接受（返回桶根）。
+		// 空串用例：ResolveUserLocation 语义是「桶内文件路径」，空 = 仅桶自身（mkdir user 场景，
+		// ResolveLocation 允许）；经 ResolveUserLocation（文件路径）也接受（返回桶根）。
 		// 其余用例必须拒绝。此处只断言「逃逸/绝对/保留名」类必然拒绝。
 		if p == `a\b` || p == "" {
 			continue // Windows 反斜杠兼容 / 桶根（行为由实现语义保证）
 		}
-		if _, err := sharedVolume().ResolveUserPath("alice", p); err == nil {
+		if _, err := sharedVolume().ResolveUserLocation("alice", p); err == nil {
 			t.Errorf("非法路径 %q 应报错", p)
 		}
 	}
 	// 反斜杠归一：a\b → a/b 合法（Windows 输入兼容）。
-	if got, err := sharedVolume().ResolveUserPath("alice", `a\b`); err != nil || got != "alice/user/a/b" {
-		t.Errorf("反斜杠归一 got=%q err=%v want alice/user/a/b", got, err)
+	if loc, err := sharedVolume().ResolveUserLocation("alice", `a\b`); err != nil || sharedVolume().FSPath(loc) != "alice/user/a/b" {
+		t.Errorf("反斜杠归一 got=%q err=%v want alice/user/a/b", sharedVolume().FSPath(loc), err)
 	}
 }
 
-// TestResolveOwnerPath_MetaBucket：meta 桶（ResolveOwnerPath 通用——非 user 桶）。
-func TestResolveOwnerPath_MetaBucket(t *testing.T) {
+// TestResolveLocation_MetaBucket：meta 桶（ResolveLocation 通用——非 user 桶）。
+func TestResolveLocation_MetaBucket(t *testing.T) {
 	t.Parallel()
-	got, err := sharedVolume().ResolveOwnerPath("alice", "meta", "credentials.json")
+	loc, err := sharedVolume().ResolveLocation("alice", "meta", "credentials.json")
 	if err != nil {
-		t.Fatalf("ResolveOwnerPath(meta): %v", err)
+		t.Fatalf("ResolveLocation(meta): %v", err)
 	}
-	if want := "alice/meta/credentials.json"; got != want {
-		t.Fatalf("meta 桶键=%q want %q", got, want)
+	if want := "alice/meta/credentials.json"; sharedVolume().FSPath(loc) != want {
+		t.Fatalf("meta 桶键=%q want %q", sharedVolume().FSPath(loc), want)
 	}
 	// 独享卷 meta 无前缀。
-	got2, err2 := privateVolume().ResolveOwnerPath("alice", "meta", "credentials.json")
-	if err2 != nil || got2 != "meta/credentials.json" {
-		t.Fatalf("独享 meta 键=%q err=%v want meta/credentials.json", got2, err2)
+	loc2, err2 := privateVolume().ResolveLocation("alice", "meta", "credentials.json")
+	if err2 != nil || privateVolume().FSPath(loc2) != "meta/credentials.json" {
+		t.Fatalf("独享 meta 键=%q err=%v want meta/credentials.json", privateVolume().FSPath(loc2), err2)
 	}
 }
 
-// TestResolveOwnerPath_EmptyRel_OnlyBucket：空 rel = 仅桶自身（mkdir user 场景）。
-func TestResolveOwnerPath_EmptyRel_OnlyBucket(t *testing.T) {
+// TestResolveLocation_EmptyRel_OnlyBucket：空 rel = 仅桶自身（mkdir user 场景）。
+func TestResolveLocation_EmptyRel_OnlyBucket(t *testing.T) {
 	t.Parallel()
-	got, err := sharedVolume().ResolveOwnerPath("alice", "user", "")
+	loc, err := sharedVolume().ResolveLocation("alice", "user", "")
 	if err != nil {
-		t.Fatalf("ResolveOwnerPath(空 rel): %v", err)
+		t.Fatalf("ResolveLocation(空 rel): %v", err)
 	}
-	if want := "alice/user"; got != want {
-		t.Fatalf("仅桶键=%q want %q", got, want)
+	if want := "alice/user"; sharedVolume().FSPath(loc) != want {
+		t.Fatalf("仅桶键=%q want %q", sharedVolume().FSPath(loc), want)
 	}
 }
 
-// TestResolveOwnerPath_BucketInjection：多段/非法桶名拒绝（防桶名注入）。
-func TestResolveOwnerPath_BucketInjection(t *testing.T) {
+// TestResolveLocation_BucketInjection：多段/非法桶名拒绝（防桶名注入）。
+func TestResolveLocation_BucketInjection(t *testing.T) {
 	t.Parallel()
 	for _, b := range []string{"a/b", "..", "/", "user/../meta"} {
-		if _, err := sharedVolume().ResolveOwnerPath("alice", b, "x"); err == nil {
+		if _, err := sharedVolume().ResolveLocation("alice", b, "x"); err == nil {
 			t.Errorf("非法桶名 %q 应报错", b)
+		}
+	}
+}
+
+// TestRebucket_Location 换桶：默认实现 Rebucket 保持 owner/path、换 bucket（sidecar）。
+func TestRebucket_Location(t *testing.T) {
+	t.Parallel()
+	loc := sharedVolume().MustLocation("alice", "user", "x.bin")
+	meta := loc.Rebucket("meta")
+	if meta.Owner() != "alice" || meta.Bucket() != "meta" || meta.Path() != "x.bin" {
+		t.Fatalf("Rebucket 字段不符: %+v", meta)
+	}
+	if want := "alice/meta/x.bin"; sharedVolume().FSPath(meta) != want {
+		t.Fatalf("meta 桶键=%q want %q", sharedVolume().FSPath(meta), want)
+	}
+}
+
+// MustLocation 便捷：解析成功否则 panic（测试用）。
+func (v Volume) MustLocation(owner, bucket, rel string) Location {
+	loc, err := v.ResolveLocation(owner, bucket, rel)
+	if err != nil {
+		panic(err)
+	}
+	return loc
+}
+
+// TestBucketOf_UserBucket 独享卷 `user/...` → 桶段=user；用户目录可叫保留名（不误判）。
+func TestBucketOf_UserBucket(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		key, bucket, rest string
+		ok                bool
+	}{
+		{"user/x.bin", "user", "x.bin", true},
+		{"user/dir/meta/x.bin", "user", "dir/meta/x.bin", true}, // 用户目录 meta 是 user 桶内子目录
+		{"user/user/x.bin", "user", "user/x.bin", true},         // 用户目录 user 同理
+		{"meta/x.bin.meta", "meta", "x.bin.meta", true},         // sidecar 已落 meta 桶
+		{"user", "user", "", true},
+	}
+	for _, tc := range cases {
+		b, rest, ok := BucketOf(tc.key)
+		if ok != tc.ok || b != tc.bucket || rest != tc.rest {
+			t.Errorf("BucketOf(%q) = (%q,%q,%v), want (%q,%q,%v)", tc.key, b, rest, ok, tc.bucket, tc.rest, tc.ok)
+		}
+	}
+}
+
+// TestBucketOf_SharedOwnerPrefix 共享卷 `<owner>/user/...` → 桶段=user（owner 非桶名）。
+func TestBucketOf_SharedOwnerPrefix(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		key, bucket, rest string
+		ok                bool
+	}{
+		{"alice/user/x.bin", "user", "x.bin", true},
+		{"alice/user/dir/meta/y.bin", "user", "dir/meta/y.bin", true},
+		{"bob/meta/x.bin.meta", "meta", "x.bin.meta", true},
+	}
+	for _, tc := range cases {
+		b, rest, ok := BucketOf(tc.key)
+		if ok != tc.ok || b != tc.bucket || rest != tc.rest {
+			t.Errorf("BucketOf(%q) = (%q,%q,%v), want (%q,%q,%v)", tc.key, b, rest, ok, tc.bucket, tc.rest, tc.ok)
+		}
+	}
+}
+
+// TestBucketOf_NoBucket 无桶段键 → ok=false。
+func TestBucketOf_NoBucket(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"", "x.bin", "alice/notes.txt", "alice/sub/x.txt"} {
+		if _, _, ok := BucketOf(key); ok {
+			t.Errorf("BucketOf(%q) 应无桶段", key)
+		}
+	}
+}
+
+// TestRebucketTo_UserToMeta 换桶：user → meta，独享/共享前缀/用户目录同名段均正确。
+func TestRebucketTo_UserToMeta(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		key, want string
+		ok        bool
+	}{
+		{"user/x.bin", "meta/x.bin", true},
+		{"user/dir/meta/x.bin", "meta/dir/meta/x.bin", true}, // 用户目录 meta 保留（只换桶段）
+		{"user/user/x.bin", "meta/user/x.bin", true},         // 用户目录 user 保留
+		{"alice/user/x.bin", "alice/meta/x.bin", true},       // 共享卷前缀保留
+		{"alice/user/dir/meta/y", "alice/meta/dir/meta/y", true},
+		{"meta/x.bin.meta", "meta/x.bin.meta", true}, // 已在 meta 桶：换 user→meta 不变
+		{"x.bin", "x.bin", false},                    // 无桶段
+	}
+	for _, tc := range cases {
+		got, ok := RebucketTo(tc.key, "meta")
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("RebucketTo(%q) = (%q,%v), want (%q,%v)", tc.key, got, ok, tc.want, tc.ok)
 		}
 	}
 }

@@ -60,12 +60,12 @@ func TestExternalSinkFor_TrustedWrap(t *testing.T) {
 		t.Fatalf("sink.WriteFile: %v", err)
 	}
 	// 外部卷键：ModeDeny（共享）→ ResolveOwnerPath 加 owner 前缀 → alice/user/uploaded.bin。
-	// 数据文件旁 .meta 应存在（trusted 装饰器写后生成）。
-	e, err := inner.Stat(ctx, "alice/user/uploaded.bin.meta")
+	// sidecar 独立 meta 桶（RebucketTo：user 桶段→meta）→ alice/meta/uploaded.bin.meta。
+	e, err := inner.Stat(ctx, "alice/meta/uploaded.bin.meta")
 	if err != nil || e == nil {
 		t.Fatalf("可信卷上传应生成 .meta: %v %v", e, err)
 	}
-	rc, rerr := inner.OpenRead(ctx, "alice/user/uploaded.bin.meta")
+	rc, rerr := inner.OpenRead(ctx, "alice/meta/uploaded.bin.meta")
 	if rerr != nil {
 		t.Fatalf("OpenRead meta: %v", rerr)
 	}

@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"strings"
+	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -31,9 +31,6 @@ type Options struct {
 	// Extra 是写入 meta 的自定义扩展信息（创建人/email 等任意数据）。
 	Extra map[string]any
 }
-
-// metaSuffix 是配套 meta 文件后缀（隐藏、占配额）。
-const metaSuffix = ".meta"
 
 // TrustedVolumeFS 包装任意 syncpkg.FS，提供 meta sidecar + 校验能力。
 type TrustedVolumeFS struct {
@@ -109,20 +106,24 @@ func (t *TrustedVolumeFS) Link(ctx context.Context, from, to string) error {
 	return fmt.Errorf("trusted: 底层卷未实现 Link")
 }
 
-// metaPath 返回文件对应的 meta sidecar 路径（同目录 `<name>.meta`）。
+// metaPath 返回文件对应的 meta sidecar 路径（经 meta.MetaPath 统一映射到 meta 桶——
+// 用户裁定 2026-10-07 sidecar 移出 user/ 桶；外部卷共享 rel `alice/user/x` →
+// `alice/meta/x.meta`、独享 `user/x` → `meta/x.meta`，与本地卷同构）。
 func metaPath(rel string) string {
-	return rel + metaSuffix
+	return meta.MetaPath(rel)
 }
 
-// isMetaName 判定路径是否为 meta sidecar（隐藏过滤用）。
-func isMetaName(rel string) bool {
-	return strings.HasSuffix(rel, metaSuffix)
+// isMetaPath 判定路径是否落在 meta 桶（sidecar 或 meta 桶目录，隐藏过滤用）。
+// 结构解析（meta.IsMetaPath → volume.BucketOf）：sidecar 独立桶后，用户真实 `*.meta`
+// 文件在 user 桶合法可见（不再误隐藏）；仅 meta 桶路径（桶段=="meta"）隐藏。
+// **不靠 `strings.Contains(p,"/meta/")` 子串匹配**——用户真实目录 `user/dir/meta/x.bin`
+// 的 meta 是 user 桶内子目录，桶段是 "user"，不应隐藏（用户裁定：用户目录可叫保留名）。
+func isMetaPath(p string) bool {
+	return meta.IsMetaPath(p)
 }
 
-// ListDir 列目录：过滤隐藏 .meta 文件；条目带回全部校验和（来自 meta 若存在，
-// 否则 Stat 直算）。**外部卷场景**：sidecar 用 `.meta` 后缀在用户可见名空间内，
-// 过滤它同时会隐藏用户真实 `.meta` 文件——这是本地卷移桶后装饰器侧已知取舍
-// （外部卷无功能桶隔离；B1 已由写入口拒绝 `.meta` 保留名缓解）。
+// ListDir 列目录：过滤 meta 桶（sidecar 独立桶用户不可见）；user 桶内真实 `.meta`
+// 用户文件合法可见（sidecar 移桶后不再冲突）。
 func (t *TrustedVolumeFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
 	es, err := t.inner.ListDir(ctx, p)
 	if err != nil {
@@ -130,18 +131,18 @@ func (t *TrustedVolumeFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entr
 	}
 	out := es[:0]
 	for _, e := range es {
-		if isMetaName(e.Path) {
-			continue // 隐藏 meta 文件用户不可见
+		if isMetaPath(e.Path) {
+			continue // 隐藏 meta 桶条目（sidecar 用户不可见）
 		}
 		out = append(out, e)
 	}
 	return out, nil
 }
 
-// Stat 返回条目（过滤 meta；附 Checksums）。
+// Stat 返回条目（过滤 meta 桶；附 Checksums）。
 func (t *TrustedVolumeFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
-	if isMetaName(p) {
-		return nil, nil // meta 文件对用户不可见
+	if isMetaPath(p) {
+		return nil, nil // meta 桶对用户不可见
 	}
 	return t.inner.Stat(ctx, p)
 }
@@ -154,12 +155,9 @@ func (t *TrustedVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser
 
 // WriteFile 写入 + 计算并落 .meta（若启用）。meta 大小计入底层配额（WriteFile 经
 // 底层 CapacityFS/账本时自然计入——meta 也经 WriteFile 写）。
+// sidecar 统一独立 meta 桶后：用户写 `x.meta` 落 user 桶、sidecar 落 meta 桶不冲突，
+// **无需保留 `.meta` 后缀禁用**（用户真实 `.meta` 文件合法，与本地卷一致）。
 func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
-	// B1 缓解：`.meta` 是保留后缀——拒绝用户写真实 `x.meta`（否则覆盖他人 sidecar
-	// 或被 ListDir 隐藏成不可管理文件）。保留名冲突 fail-closed。
-	if isMetaName(rel) {
-		return fmt.Errorf("trusted: 保留后缀 %q 不允许作为用户文件名（防覆盖 meta sidecar）", metaSuffix)
-	}
 	if t.opts.DisableMetaFile {
 		return t.inner.WriteFile(ctx, rel, r, size, mtime)
 	}
@@ -183,7 +181,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 		_ = t.inner.Delete(ctx, rel)
 		return fmt.Errorf("trusted: 写入后 meta 校验失败: %w", err)
 	}
-	fm.Name = path.Base(strings.ReplaceAll(rel, "\\", "/"))
+	fm.Name = path.Base(filepath.ToSlash(rel))
 	fm.Extra = t.opts.Extra
 	data, merr := meta.Marshal(fm)
 	if merr != nil {

@@ -16,6 +16,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // metaVersion 是 FileMeta 结构版本。
@@ -163,22 +165,34 @@ type Provider interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命
 // metaSuffix 是 FileMeta sidecar 文件后缀。
 const metaSuffix = ".meta"
 
-// IsMetaName 判定文件名/路径是否为 FileMeta sidecar。
+// IsMetaName 判定文件名/路径是否为 FileMeta sidecar（`.meta` 后缀）。
+// 注：sidecar 已独立 meta 桶，user 桶内用户真实 `.meta` 文件合法可见——本判定仅供
+// 显式识别 sidecar 名（如删除/移动联动），**不用于列表/搜索隐藏过滤**（隐藏过滤走
+// IsMetaPath 结构解析，防误判用户目录）。
 func IsMetaName(name string) bool {
 	return strings.HasSuffix(name, metaSuffix)
 }
 
 // MetaPath 返回文件对应的 FileMeta sidecar 路径。
 //
-// **sidecar 移出 user/ 桶（用户裁定 2026-10-07）**：本地卷 rel 恒以 `user/` 开头，
-// sidecar 落 **meta 功能桶** `meta/<sub>.meta`——物理隔离，杜绝与用户真实 `.meta`
-// 文件名冲突（曾被误判隐藏/覆盖破坏）；所有读面只扫 user 桶天然不含 sidecar。
-// 非 user/ 桶 rel（外部卷装饰器场景，无桶概念）回落同目录 `<rel>.meta`。
+// **sidecar 移出 user/ 桶（用户裁定 2026-10-07）**：经 volume.RebucketTo 把键的
+// user 桶段替换为 **meta 功能桶** `…/meta/<sub>.meta`——物理隔离，杜绝与用户真实
+// `.meta` 文件名冲突。volume.BucketOf/RebucketTo 是**结构解析单一权威**（首段命中
+// 桶 → 桶段=首段；共享卷 owner 前缀 → 桶段=次段），不靠字符串子串匹配——用户真实
+// 目录 `user/dir/meta/x.bin`、`user/user/x.bin` 不会被误判（内层段是用户子目录）。
 func MetaPath(rel string) string {
-	if after, ok := strings.CutPrefix(rel, "user/"); ok {
-		return "meta/" + after + metaSuffix
+	if rebucketed, ok := volume.RebucketTo(rel, "meta"); ok {
+		return rebucketed + metaSuffix
 	}
-	return rel + metaSuffix
+	return rel + metaSuffix // 无 user 桶段：同目录兜底（外部卷罕见场景）
+}
+
+// IsMetaPath 判定路径是否落在 meta 桶（sidecar 或 meta 桶目录，隐藏过滤用）。
+// 结构解析（volume.BucketOf）而非后缀/子串匹配：sidecar 独立桶后，用户真实 `*.meta`
+// 文件在 user 桶合法可见（不再误隐藏）；仅 meta 桶路径（桶段=="meta"）隐藏。
+func IsMetaPath(p string) bool {
+	bucket, _, ok := volume.BucketOf(p)
+	return ok && bucket == "meta"
 }
 
 // nowRFC3339 供 CTime/MTime 使用（测试可注入可变时钟）。

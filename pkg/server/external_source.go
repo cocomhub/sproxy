@@ -87,7 +87,7 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 	// 二次进入强制 A 态（服务端转发）——否则 DirectURL 无条件命中 → 无限 302 环。
 	// 只收紧（强制转发），无提权面。
 	forceForward := r.URL.Query().Get("egress_forward") == "1"
-	// 域侧 rel 形如 user/<name>；剥桶后经 v.ResolveOwnerPath 统一计算最终键
+	// 域侧 rel 形如 user/<name>；剥桶后经 v.ResolveUserLocation + FSPath 统一计算最终键
 	// （共享卷自动加 <owner>/ 前缀隔离，独享卷无前缀——评审 M3 + 用户裁定统一入口）。
 	stripped := strings.TrimPrefix(rel, "user/")
 	for _, v := range candidates {
@@ -100,7 +100,7 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 			// 后端已登记但 FS 视图未就绪（评审 Minor：nil 接口解引用 panic 防御）。
 			continue
 		}
-		ownerKey, kerr := v.ResolveUserPath(owner, stripped)
+		loc, kerr := v.ResolveUserLocation(owner, stripped)
 		if kerr != nil {
 			// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
 			continue
@@ -112,6 +112,8 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		if !egressOwnerMatch(v, owner) {
 			continue // 非该 owner 请求 egress 卷 → 不命中（404，不泄卷存在性）
 		}
+		// 基于 locator 操作：FS 键仅在调用 FS 方法时经 FSPath 拼接（唯一拼接点）。
+		ownerKey := v.FSPath(loc)
 		e, err := fsys.Stat(r.Context(), ownerKey)
 		if err != nil || e == nil || e.IsDir {
 			continue // 该卷无此文件/目录 → 下一候选

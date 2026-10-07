@@ -571,7 +571,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 }
 
 // externalSinkFor 返回外部卷的写入源（External FS 包装为 files.UploadSink）；
-// 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。持卷描述（ResolveOwnerPath
+// 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。持卷描述（ResolveLocation
 // 按共享性自动适配 owner 前缀——评审 M3 + 用户裁定统一入口）。
 // 可信卷（trusted_volume.disable 缺省 false）：外部卷 FS 经 trusted.Wrap 包一层——
 // 写路径自动生成隐藏 .meta（FileMeta 总/分块 sha256+md5），上传/转存目标成为可信卷。

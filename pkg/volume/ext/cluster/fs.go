@@ -124,7 +124,7 @@ func (f *clusterFS) DirectURL(ctx context.Context, relPath string) (string, bool
 	// **持有侧相对路径（评审 I2 修复）**：入参是出口侧 ownerKey（<owner>/user/<rel> 或
 	// user/<rel>，来自 externalStateFor），但 302 的 filename 必须是持有侧相对路径——
 	// 此前直接拼 ownerKey，B 态自转发/持有侧 404。统一经 holderRel 剥到持有侧相对路径，
-	// 二次进入出口 /download 时 ResolveUserPath 抵消前缀、环打破后仍归位（见 resolveExternalDownload）。
+	// 二次进入出口 /download 时 ResolveUserLocation 抵消前缀、环打破后仍归位（见 resolveExternalDownload）。
 	rel, herr := f.holderRel(relPath)
 	if herr != nil {
 		return "", false, herr // 非法路径 → 回落 A 态（fail-closed，不产出病态 302）

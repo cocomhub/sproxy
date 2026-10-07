@@ -83,16 +83,16 @@ func TestWrite_GeneratesMeta(t *testing.T) {
 	tv := Wrap(inner, Options{})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("trusted content 可信内容 "), 200) // ~4KB
-	if err := tv.WriteFile(ctx, "dir/a.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, "user/dir/a.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	// .meta 落盘（inner 可见——占配额语义：meta 是底层文件之一）。
-	e, err := inner.Stat(ctx, "dir/a.bin.meta")
+	// .meta 落 meta 桶（inner 可见——占配额语义：meta 是底层文件之一）。
+	e, err := inner.Stat(ctx, "meta/dir/a.bin.meta")
 	if err != nil || e == nil {
 		t.Fatalf("meta sidecar 应存在: %v %v", e, err)
 	}
 	// meta 可读 + 反序列化校验（值独立重算比对）。
-	rc, rerr := inner.OpenRead(ctx, "dir/a.bin.meta")
+	rc, rerr := inner.OpenRead(ctx, "meta/dir/a.bin.meta")
 	if rerr != nil {
 		t.Fatalf("OpenRead meta: %v", rerr)
 	}
@@ -108,8 +108,8 @@ func TestWrite_GeneratesMeta(t *testing.T) {
 	if fm.Size != int64(len(data)) {
 		t.Fatalf("meta Size = %d, want %d", fm.Size, len(data))
 	}
-	// 隐藏过滤：ListDir 不含 .meta。
-	es, lerr := tv.ListDir(ctx, "dir")
+	// 隐藏过滤：ListDir 不含 meta 桶。
+	es, lerr := tv.ListDir(ctx, "user/dir")
 	if lerr != nil {
 		t.Fatalf("ListDir: %v", lerr)
 	}
@@ -117,7 +117,7 @@ func TestWrite_GeneratesMeta(t *testing.T) {
 		t.Fatalf("ListDir 应只含 a.bin（meta 隐藏），got %+v", es)
 	}
 	// Stat 也过滤 meta。
-	if e, serr := tv.Stat(ctx, "dir/a.bin.meta"); serr != nil || e != nil {
+	if e, serr := tv.Stat(ctx, "meta/dir/a.bin.meta"); serr != nil || e != nil {
 		t.Fatalf("Stat(meta) 应隐藏: %v %v", e, serr)
 	}
 }

@@ -46,7 +46,8 @@ type transferEnv struct {
 	ctx           context.Context // NOSONAR: S8242 — 单次操作作用域共享 ctx（设计保留）
 	targetFS      syncpkg.FS
 	scheme        string
-	rel           string
+	loc           volume.OwnerBucketLocator // 强类型位置（owner/bucket/path 未拼接）
+	rel           string                    // loc 的 FS 键（Volume.FSPath 唯一拼接点）
 	destPath      string
 	task          *CloudTask
 	result        *downloader.Result
@@ -89,14 +90,14 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if scheme == "" {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 协议未声明（无法生成 ResolveURL 可解析的 URL）", task.Transfer.Volume)
 	}
-	// 目标路径派生：经 volume.ResolveOwnerPath 唯一入口（权限门 + 路径安全 + 键空间
+	// 目标路径派生：经 volume.ResolveLocation 唯一入口（权限门 + 路径安全 + 键空间
 	// 自动适配）——共享卷自动加 owner 前缀、独享卷无前缀；../ 逃逸/绝对路径/非法段
 	// 由 volume 包 fail-closed 拒绝（用户裁定 2026-10-05：转存层不自己拼键/校验）。
 	vol, vok := m.volumeFor(task.Transfer.Volume)
 	if !vok {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 元信息不可解析", task.Transfer.Volume)
 	}
-	rel, rerr := transferRelPath(task, vol)
+	loc, rel, rerr := transferRelPath(task, vol)
 	if rerr != nil {
 		return nil, result, rerr
 	}
@@ -108,8 +109,9 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	remote := !isLocalVolumeFS(targetFS)
 
 	// 转存执行上下文（S107 收敛）：目标卷/路径/产物/结果/重下回调全程不变。
+	// loc 是强类型位置（owner/bucket/path 未拼接），rel 是其 FS 键（FSPath 唯一拼接点）。
 	env := &transferEnv{
-		ctx: ctx, targetFS: targetFS, scheme: scheme, rel: rel, remote: remote,
+		ctx: ctx, targetFS: targetFS, scheme: scheme, loc: loc, rel: rel, remote: remote,
 		destPath: destPath, task: task, result: result, retryDownload: retryDownload,
 	}
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
@@ -136,24 +138,24 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	return nil, env.result, lerr
 }
 
-// transferRelPath 派生转存目标路径：经 **volume.ResolveOwnerPath 唯一入口**计算
-// （用户裁定 2026-10-05：转存层不自己拼键/校验）。
+// transferRelPath 派生转存目标路径：经 **volume.ResolveLocation 唯一入口**计算
+// （用户裁定 2026-10-07：转存层不自己拼键/校验）。返回 `(Location, FS 键)`——
+// Location 持有 owner/bucket/path 未拼接字段，FS 键经 vol.FSPath 拼接（拼接唯一发生点）。
 //   - 自动派生：rel = `<taskID>/<sanitized filename>`（桶内相对路径）；
 //   - 显式指定：rel = task.Transfer.Path（用户可控路径+文件名）；
-//   - volume.ResolveOwnerPath 承担：权限门（owner 无权 → 拒）、路径安全（../ 逃逸/
-//     绝对路径/空段/非法段 fail-closed）、键空间自动适配（共享卷加 `<owner>/` 前缀、
-//     独享卷无前缀）——与上传/下载/读路径同一权威，杜绝领域层复制键算法。
-//   - 空 owner 经 storage.NormalizeOwner 归一（与读路径 ResolveOwnerPath 同源）。
-func transferRelPath(task *CloudTask, vol volume.Volume) (string, error) {
+//   - volume.ResolveLocation 承担：权限门（owner 无权 → 拒）、路径安全（../ 逃逸/
+//     绝对路径/空段/非法段 fail-closed）；
+//   - 空 owner 经 storage.NormalizeOwner 归一（FSPath 内完成）。
+func transferRelPath(task *CloudTask, vol volume.Volume) (volume.OwnerBucketLocator, string, error) {
 	rel := task.Transfer.Path
 	if rel == "" {
 		rel = path.Join(task.ID, sanitizeTransferName(task.Filename))
 	}
-	key, err := vol.ResolveOwnerPath(task.Owner, "user", rel)
+	loc, err := vol.ResolveLocation(task.Owner, "user", rel)
 	if err != nil {
-		return "", fmt.Errorf("transfer: 转存路径 %q 非法: %w", rel, err)
+		return nil, "", fmt.Errorf("transfer: 转存路径 %q 非法: %w", rel, err)
 	}
-	return key, nil
+	return loc, vol.FSPath(loc), nil
 }
 
 // transferLoop 转存主循环：3 次尝试，目标卷异常指数退避重试；文件异常删本地重下载

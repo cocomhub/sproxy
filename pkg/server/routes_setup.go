@@ -506,7 +506,7 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			}
 			return fsys, registry.SchemeOf(vol.Type), shared
 		},
-		// VolumeFor：转存键空间经 volume.ResolveOwnerPath 计算（权限门/路径安全/共享前缀
+		// VolumeFor：转存键空间经 volume.ResolveLocation 计算（权限门/路径安全/共享前缀
 		// 由 volume 唯一入口承担，用户裁定 2026-10-05）——装配层提供 vs.ByName 解析。
 		VolumeFor: func(volumeName string) (volume.Volume, bool) {
 			return vs.ByName(volumeName)
