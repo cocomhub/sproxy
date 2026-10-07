@@ -67,9 +67,6 @@ type Storage struct {
 	// DefaultTransport——dlink 拉取无 per-host 超时/连接池上限会占住全局池拖累
 	// 同进程其它外部请求）。per-instance 独立连接池 + ResponseHeaderTimeout 兜底。
 	httpc *http.Client
-	// lastETag 是最近一次上传后 Stat 看到的远端 ETag（putAttempt 记录，供终态报错
-	// 文案；非并发共享——Put 调用方串行）。
-	lastETag string
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -158,22 +155,24 @@ func (s *Storage) putRetryLoop(ctx context.Context, key, remote string, st *stag
 				return nil, err
 			}
 		}
-		meta, err := s.putAttempt(ctx, key, remote, st, attempt)
+		meta, remoteETag, err := s.putAttempt(ctx, key, remote, st, attempt)
 		if err != nil {
 			return nil, err
 		}
 		if meta != nil {
 			return meta, nil // 秒传命中 / ETag 复核一致 / readback 内容一致
 		}
-		if e := s.lastETag; e != "" {
-			lastRemoteETag = e
+		if remoteETag != "" {
+			lastRemoteETag = remoteETag
 		}
 	}
 	return nil, fmt.Errorf("%w: 上传后内容复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, st.md5, lastRemoteETag)
 }
 
-// backoffBeforeRetry 轮间指数退避（attempt 2 → 300ms，3 → 700ms，4 → 1.5s）：
-// 让百度最终一致性窗口（上传后 Stat 暂不可见/分片 md5 未刷新）落定，避免无谓整文件重传。
+// backoffBeforeRetry 轮间指数退避（attempt 2 → 300ms，3 → 1.2s）：让百度最终一致性
+// 窗口（上传后 Stat 暂不可见/分片 md5 未刷新）落定，避免无谓整文件重传。
+// D-M2 修复：ctx 取消返回原样 context.Canceled（不清洗成 ErrTransient——上层 transfer
+// 层按 ctx 取消识别为任务中止，而非目标卷异常）。
 func (s *Storage) backoffBeforeRetry(ctx context.Context, attempt int) error {
 	delay := time.Duration(300) * time.Millisecond
 	if attempt >= 3 {
@@ -183,7 +182,7 @@ func (s *Storage) backoffBeforeRetry(ctx context.Context, attempt int) error {
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return mapPCSError(ctx.Err())
+		return ctx.Err()
 	case <-timer.C:
 		return nil
 	}
@@ -193,32 +192,31 @@ func (s *Storage) backoffBeforeRetry(ctx context.Context, attempt int) error {
 // 刷新（M4 实测：分片上传后远端 md5 是片组合/服务端"可能不正确"，仅 rapidupload 命中
 // 或小文件单传得到权威整文件 md5）→ 严格复核一致才成功（cocom 行为：必须一致才算上传
 // 成功，绝不 readback 接受捷径）。
-// 返回 (meta, nil) = 本轮成功（秒传命中/复核一致/rapidupload 刷新后一致）；
-// (nil, nil) = 需下一轮重试；(nil, err) = fail-closed。
-func (s *Storage) putAttempt(ctx context.Context, key, remote string, st *stagedUpload, attempt int) (*ObjectMeta, error) {
+// 返回 (meta, remoteETag, err)：meta 非 nil = 本轮成功；remoteETag 供终态报错文案
+// （A-MAJOR-3 修复：lastETag 从 Storage 字段改为返回值——Storage 单例被并发 Put 共享，
+// 字段写有数据竞争）；(nil, _, nil) = 需下一轮重试；(nil, _, err) = fail-closed。
+func (s *Storage) putAttempt(ctx context.Context, key, remote string, st *stagedUpload, attempt int) (*ObjectMeta, string, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, mapPCSError(err)
+		return nil, "", mapPCSError(err)
 	}
 	meta, proceed, perr := s.putCheckExisting(ctx, key, st.md5, attempt)
 	if perr != nil {
-		return nil, perr
+		return nil, "", perr
 	}
 	if !proceed {
-		return meta, nil // 秒传命中：目标已存在且 ETag == 本地 md5
+		return meta, "", nil // 秒传命中：目标已存在且 ETag == 本地 md5
 	}
 	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
-		return nil, mapPCSError(upErr)
+		return nil, "", mapPCSError(upErr)
 	}
 	meta, done, werr := s.putCheckAfterUpload(ctx, key, st.md5, attempt)
 	if werr != nil {
-		return nil, werr
+		return nil, "", werr
 	}
 	if done {
-		return meta, nil // 上传后 ETag 复核一致（小文件单传/已秒传命中）
+		return meta, "", nil // 上传后 ETag 复核一致（小文件单传/已秒传命中）
 	}
-	s.lastETag = "" // 每轮重置（避免陈旧值）
 	if meta != nil {
-		s.lastETag = meta.ETag
 		// M4 修复（cocom 行为）：ETag mismatch → **rapidupload 秒传刷新**——分片上传后
 		// 内容已在网盘，秒传命中会把目标 md5 刷新为权威整文件 md5（实测 v2/v3：秒传后
 		// md5 从"可能不正确"的片组合变为正确整文件 md5）。命中后再次 Stat 复核一致 →
@@ -226,36 +224,37 @@ func (s *Storage) putAttempt(ctx context.Context, key, remote string, st *staged
 		return s.refreshByRapidUpload(ctx, key, remote, st, attempt)
 	}
 	// meta == nil（上传后 Stat 未见，最终一致性）→ 下一轮重试。
-	return nil, nil
+	return nil, "", nil
 }
 
 // refreshByRapidUpload 在 ETag 复核不匹配时尝试 rapidupload 秒传刷新（adapter 支持时）：
-// 命中 → 再次复核一致则返回 meta；未命中/刷新后仍不一致 → (nil, nil) 下一轮重试。
-func (s *Storage) refreshByRapidUpload(ctx context.Context, key, remote string, st *stagedUpload, attempt int) (*ObjectMeta, error) {
+// 命中 → 再次复核一致则返回 meta；未命中/刷新后仍不一致 → (nil, "", nil) 下一轮重试。
+// 返回 (meta, remoteETag, err)：remoteETag 供终态报错文案（A-MAJOR-3：非 Storage 字段）。
+func (s *Storage) refreshByRapidUpload(ctx context.Context, key, remote string, st *stagedUpload, attempt int) (*ObjectMeta, string, error) {
 	ru, ok := s.adapter.(rapidUploader)
 	if !ok {
-		return nil, nil // adapter 无秒传能力（binary-only）→ 下一轮重传
+		return nil, "", nil // adapter 无秒传能力（binary-only）→ 下一轮重传
 	}
 	hit, rerr := ru.RapidUpload(ctx, remote, st)
 	if rerr != nil {
-		return nil, mapPCSError(rerr)
+		return nil, "", mapPCSError(rerr)
 	}
 	if !hit {
-		return nil, nil // 未命中（内容不在网盘）→ 下一轮上传
+		return nil, "", nil // 未命中（内容不在网盘）→ 下一轮上传
 	}
 	m2, d2, e2 := s.putCheckAfterUpload(ctx, key, st.md5, attempt)
 	if e2 != nil {
-		return nil, e2
+		return nil, "", e2
 	}
 	if d2 {
-		return m2, nil // rapidupload 刷新后 ETag 一致 → 权威 md5
+		return m2, "", nil // rapidupload 刷新后 ETag 一致 → 权威 md5
 	}
 	// A-CRITICAL 修复：putCheckAfterUpload 在 Stat 落入最终一致性窗口时返回
-	// (nil, false, nil)——m2 为 nil，必须判空再记录 lastETag，否则 nil 解引用 panic。
+	// (nil, false, nil)——m2 为 nil，必须判空再记录 remoteETag，否则 nil 解引用 panic。
 	if m2 != nil {
-		s.lastETag = m2.ETag
+		return nil, m2.ETag, nil // 刷新后仍不一致/Stat 未见 → 下一轮（带回远端 ETag 供文案）
 	}
-	return nil, nil // 刷新后仍不一致/Stat 未见 → 下一轮
+	return nil, "", nil
 }
 
 // putCheckExisting 每轮上传前的存在性检查：目标已存在且 ETag 与本地 md5 一致 →

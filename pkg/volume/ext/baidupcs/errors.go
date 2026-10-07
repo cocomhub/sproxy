@@ -4,6 +4,7 @@
 package baidupcs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -32,8 +33,13 @@ func mapPCSError(err error) error {
 	if err == nil {
 		return nil
 	}
+	// D-M2 修复：ctx 取消原样透传（context.Canceled/DeadlineExceeded 非百度语义错误）——
+	// 上层按 ctx 取消识别为任务中止，不归 ErrTransient/目标卷异常。
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	msg := err.Error()
-	lower := toLower(msg)
+	lower := strings.ToLower(msg)
 
 	switch {
 	case containsAny(lower, "not found", "no such file", "does not exist", "文件不存在", "目录不存在"):
@@ -42,8 +48,7 @@ func mapPCSError(err error) error {
 		return fmt.Errorf("%w: %v", ErrAlreadyExists, err)
 	case containsAny(lower, "permission denied", "access denied", "未登录", "cookie", "权限", "登录"):
 		return fmt.Errorf("%w: %v", ErrPermissionDenied, err)
-	case containsAny(lower, "deadline exceeded", "timeout", "timed out", "超时", "请稍后再试"),
-		errors.Is(err, errTimeout), errors.Is(err, errNotExist):
+	case containsAny(lower, "deadline exceeded", "timeout", "timed out", "超时", "请稍后再试"):
 		return fmt.Errorf("%w: %v", ErrTransient, err)
 	}
 	return err
@@ -57,14 +62,3 @@ func containsAny(s string, subs ...string) bool {
 	}
 	return false
 }
-
-// 内部辅助（避免依赖标准库别名冲突）。
-func toLower(s string) string {
-	return strings.ToLower(s)
-}
-
-// errTimeout / errNotExist 是哨兵（供 mapPCSError 分类）。
-var (
-	errTimeout  = fmt.Errorf("timeout")
-	errNotExist = fmt.Errorf("not exist")
-)

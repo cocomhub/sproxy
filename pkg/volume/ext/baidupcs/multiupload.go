@@ -138,7 +138,28 @@ func uploadViaMultiUploader(ctx context.Context, pcs *Client, localPath, targetP
 		muer.SetInstanceState(&uploader.InstanceState{})
 	}
 
+	// A-MAJOR-4 修复：MultiUploader.Execute 错误只进 onErrorEvent 不返回——注册 onError
+	// 上抛 + ctx 取消经 Cancel 中断在途分片上传（否则用户取消 Put 不终止、网络失败被吞，
+	// 靠后续 Stat 复核兜底但代价是整文件重传）。uploadErr 通道收集首错。
+	uploadErr := make(chan error, 1)
+	muer.OnError(func(err error) {
+		select {
+		case uploadErr <- err:
+		default:
+		}
+	})
+	go func() {
+		<-ctx.Done()
+		muer.Cancel()
+	}()
+
 	muer.Execute()
+
+	select {
+	case err := <-uploadErr:
+		return fmt.Errorf("baidupcs: 分片上传失败: %w", err)
+	default:
+	}
 
 	// 执行完持久化最新断点（供失败恢复）或删除（成功）。
 	if resumeKey != "" {
@@ -146,6 +167,5 @@ func uploadViaMultiUploader(ctx context.Context, pcs *Client, localPath, targetP
 			return fmt.Errorf("baidupcs: save resume %q: %w", resumeKey, err)
 		}
 	}
-	_ = ctx
 	return nil
 }
