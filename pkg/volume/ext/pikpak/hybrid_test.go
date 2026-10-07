@@ -1898,3 +1898,65 @@ func TestHybridManifest_InitAtStart(t *testing.T) {
 		t.Fatalf(".hybrid.downloading should be renamed away after completion: %v", err)
 	}
 }
+
+// TestHybridChunkProgress_PerChunkEvents 验证 per-chunk 回调：
+// 每个 chunk 收到 pending（注册）→ downloading（开始+字节）→ done（完成）。
+func TestHybridChunkProgress_PerChunkEvents(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 4<<20) // 4MB，chunk 1MB → 4 chunks（分享区 2 + 账号区 2）
+	for i := range payload {
+		payload[i] = byte(i % 71)
+	}
+	srvURL, closeFn := mkHybridFake(payload, []map[string]any{
+		{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload), "parent_id": "pack-folder"},
+		{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+	}, false, nil)
+	defer closeFn()
+
+	// 用 ChunkProgress 装配
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srvURL, UserHost: srvURL, HTTPClient: &http.Client{}})
+	api := NewAPI(APIConfig{Host: srvURL, AccessToken: fakeServerToken, HTTPClient: &http.Client{}}, nil)
+	var mu sync.Mutex
+	var events []ChunkInfo
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: &http.Client{},
+		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 2, AutoDelete: true,
+		ChunkProgress: func(info ChunkInfo) {
+			mu.Lock()
+			events = append(events, info)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	// 每个 chunk 都有 pending（注册）+ done（完成）
+	byIdx := map[int][]ChunkInfo{}
+	for _, e := range events {
+		byIdx[e.Index] = append(byIdx[e.Index], e)
+	}
+	if len(byIdx) != 4 {
+		t.Fatalf("expected 4 chunks, got %d: %+v", len(byIdx), byIdx)
+	}
+	for idx, evs := range byIdx {
+		hasPending, hasDone := false, false
+		for _, e := range evs {
+			if e.Phase == "pending" {
+				hasPending = true
+			}
+			if e.Phase == "done" {
+				hasDone = true
+				if e.Done != e.Total {
+					t.Fatalf("chunk %d done=%d total=%d", idx, e.Done, e.Total)
+				}
+			}
+		}
+		if !hasPending || !hasDone {
+			t.Fatalf("chunk %d missing pending/done: %+v", idx, evs)
+		}
+	}
+}

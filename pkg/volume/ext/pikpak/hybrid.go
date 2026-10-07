@@ -77,6 +77,9 @@ type HybridConfig struct {
 	AutoDelete  bool    // 完成后永久删转存（释放 6GB 空间）
 	Logger      *slog.Logger
 	Metrics     *HybridMetrics
+	// ChunkProgress 是 per-chunk 进度回调（nil = 不回调）。pikget 用它逐行显示每个分片
+	// （编号/来源链/状态/进度/速率）。下载开始前会为每个 chunk 发一次 pending 事件。
+	ChunkProgress ChunkProgressFunc
 	// AccountPool 是多账号会话文件池（配额轮换 + 转存副本按账号分摊）。
 	// nil = 单账号现状（账号区全部 chunk 走当前登录态/单 API）。非 nil 时账号区
 	// chunk 按 Select round-robin 分配到多账号，每账号转存一次副本后并行 FETCH 下载。
@@ -91,17 +94,18 @@ type HybridConfig struct {
 // 分片并行：分享区 [0, shareEnd) 匿名直链下载 + 账号区 [shareEnd, total) 转存后 FETCH 直链下载。
 // 每 chunk 独立 Range → os.WriteAt 写入预分配文件 → 全部成功 = 文件完整。
 type HybridDownloader struct {
-	resolver    *ShareResolver
-	api         *API
-	client      *http.Client
-	chunkSize   int64
-	shareRatio  float64
-	concurrency int
-	autoDelete  bool
-	log         *slog.Logger
-	metrics     *HybridMetrics
-	pool        *AccountPool          // 多账号会话池（nil = 单账号现状）
-	fallback    downloader.Downloader // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
+	resolver      *ShareResolver
+	api           *API
+	client        *http.Client
+	chunkSize     int64
+	shareRatio    float64
+	concurrency   int
+	autoDelete    bool
+	log           *slog.Logger
+	metrics       *HybridMetrics
+	chunkProgress ChunkProgressFunc     // per-chunk 进度回调（pikget 逐行显示；nil=不回调）
+	pool          *AccountPool          // 多账号会话池（nil = 单账号现状）
+	fallback      downloader.Downloader // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
@@ -130,10 +134,13 @@ type downloadCtx struct {
 	// 好处：文件未完成时直观可见（.hybrid.downloading 后缀），中断/失败不会残留看似完整的文件；
 	// 成功 rename 原子完成（同目录 rename，跨文件系统时回退 copy+remove）。
 	// 崩溃恢复：manifest 与预分配都作用在 .hybrid.downloading 临时文件上（续传天然对齐）。
-	destPath   string
-	working    string // 下载期写盘目标 = destPath + ".hybrid.downloading"（见 openWorking）
-	prog       atomic.Int64
-	onProgress downloader.ProgressFunc
+	destPath      string
+	working       string // 下载期写盘目标 = destPath + ".hybrid.downloading"（见 openWorking）
+	prog          atomic.Int64
+	onProgress    downloader.ProgressFunc
+	chunkProgress ChunkProgressFunc // per-chunk 回调（pikget 逐行显示每个分片）
+	chunkOffsets  []int64           // 所有 chunk offset（升序，编号映射）
+	shareEnd      int64             // 分享区边界（chunk 来源判定）
 	// 多账号分片（round-12）：accounted 记录已转存副本的账号（name→转存文件 ID），
 	// 每账号首次选中时 Use 转存一次，后续该账号的 chunk 复用直链（避免 N×重复转存占空间）。
 	accounted map[string]string
@@ -181,6 +188,7 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 		resolver: cfg.Resolver, api: cfg.API, client: client,
 		chunkSize: chunk, shareRatio: ratio, concurrency: conc, autoDelete: cfg.AutoDelete,
 		log: log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
+		chunkProgress: cfg.ChunkProgress,
 	}, nil
 }
 
@@ -243,7 +251,8 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	dc := &downloadCtx{
 		currentTotal: total, lease: NewRestoreLease(d.api, d.pool, d.autoDelete, d.log),
 		shareID: shareID, target: target, destPath: destPath, onProgress: onProgress,
-		accounted: make(map[string]string),
+		chunkProgress: d.chunkProgress,
+		accounted:     make(map[string]string),
 	}
 	// 续传进度基准：读 .hybrid manifest 累计已完成 chunk 字节，预置 prog——
 	// 恢复时已完成 chunk 被 filterChunks 跳过，若 prog 从 0 起进度回调会从头计数
@@ -291,6 +300,11 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	}
 	chunks := planChunks(0, dc.currentTotal, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
+	dc.chunkOffsets = make([]int64, 0, len(chunks))
+	dc.shareEnd = shareEnd
+	for _, c := range chunks {
+		dc.chunkOffsets = append(dc.chunkOffsets, c.offset)
+	}
 	// 崩溃恢复：读 manifest，**校验源身份一致**（C4：同一分享/文件才跳过已完成）。
 	// manifest 记录在 destPath+".hybrid"（与临时文件同目录），恢复时跳过已完成 chunk。
 	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
@@ -371,6 +385,16 @@ func (d *HybridDownloader) runChunks(ctx context.Context, dc *downloadCtx, chunk
 		firstErr error
 	)
 	chunks = filterChunks(chunks, manifest) // 崩溃恢复：跳过已完成
+	// 每个未完成 chunk 先发 pending 事件（per-chunk 回调，pikget 注册所有分片行）。
+	// 索引用 dc.chunkIndex(offset)（全量编号），与 downloadOneChunk 一致。
+	if dc.chunkProgress != nil {
+		for _, c := range chunks {
+			dc.chunkProgress(ChunkInfo{
+				Index: dc.chunkIndex(c.offset), Offset: c.offset, Length: c.length,
+				Source: d.chunkSource(dc, c), Phase: "pending", Done: 0, Total: c.length,
+			})
+		}
+	}
 	// 分池：分享区 pool 与账号区 pool 各 d.concurrency/2（最少 1）。
 	poolSize := max(d.concurrency/2, 1)
 	shareSem := make(chan struct{}, poolSize)
@@ -405,7 +429,10 @@ func (d *HybridDownloader) runChunks(ctx context.Context, dc *downloadCtx, chunk
 
 // downloadOneChunk 单个 chunk：分享区（含降级）或账号区。
 func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx, c chunk, shareEnd int64) error {
+	idx := dc.chunkIndex(c.offset)
 	var cerr error
+	// 标记 downloading（per-chunk 回调，pikget 显示该分片开始下载）
+	d.chunkPhase(dc, idx, c, "downloading", 0, nil)
 	if c.offset >= shareEnd {
 		cerr = d.downloadAccountChunk(ctx, dc, c)
 	} else {
@@ -421,8 +448,48 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx
 		d.markChunkDone(dc, c, manifestSource{
 			ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size,
 		})
+		d.chunkPhase(dc, idx, c, "done", c.length, nil)
+	} else {
+		d.chunkPhase(dc, idx, c, "failed", 0, cerr)
 	}
 	return cerr
+}
+
+// chunkIndex 返回 chunk offset 对应的编号（0 起，按 offset 升序）。
+// 简化：runChunks 里 chunks 已是 offset 升序，记录在 dc.chunkOrder 里。
+func (dc *downloadCtx) chunkIndex(offset int64) int {
+	for i, off := range dc.chunkOffsets {
+		if off == offset {
+			return i
+		}
+	}
+	return 0
+}
+
+// chunkPhase 发 per-chunk 事件（pikget 逐行显示）。
+// src 标识来源链：share（匿名分享直链）/ acct（账号直链，多账号时选中账号名在
+// tryMultiAccountChunk 内更新为 acct:<name>）。
+
+// chunkSource 返回 chunk 的来源链标识（share=匿名分享直链；acct=账号直链）。
+func (d *HybridDownloader) chunkSource(dc *downloadCtx, c chunk) string {
+	if c.offset < dc.shareEnd {
+		return "share"
+	}
+	return "acct"
+}
+
+func (d *HybridDownloader) chunkPhase(dc *downloadCtx, idx int, c chunk, phase string, done int64, cerr error) {
+	if dc.chunkProgress == nil {
+		return
+	}
+	src := "acct"
+	if c.offset < dc.shareEnd {
+		src = "share"
+	}
+	dc.chunkProgress(ChunkInfo{
+		Index: idx, Offset: c.offset, Length: c.length,
+		Source: src, Phase: phase, Done: done, Total: c.length, Err: cerr,
+	})
 }
 
 // filterChunks 过滤掉 manifest 已完成的 chunk（崩溃恢复跳过，分享区免配额不浪费）。
@@ -466,6 +533,17 @@ func planChunks(start, total, shareEnd, chunkSize int64) []chunk {
 // downloadShareChunk 分享段 chunk：直链下载，失败重取直链重试一次，连续两错 → 转账号段。
 // 简化：分享区 chunk 已 < shareEnd（416 探测保证 206），不再为 416 重试；
 // 仅网络/直链过期错误重试（重新 resolve 新直链）。
+
+// logChunkFail 区分「中断取消」与「服务器真实异常」：
+// ctx 已取消（Ctrl-C/超时）→ Debug（不吵）；否则 Warn（真异常才告警）。
+func (d *HybridDownloader) logChunkFail(ctx context.Context, msg string, attrs ...any) {
+	if ctx.Err() != nil {
+		d.log.Debug(msg, attrs...)
+		return
+	}
+	d.log.Warn(msg, attrs...)
+}
+
 func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadCtx, c chunk) error {
 	link := dc.target.DirectLink
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -474,7 +552,7 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadC
 			d.metricsInc(func(m *HybridMetrics) { m.ShareBytesSaved.Add(c.length) })
 			return nil
 		}
-		d.log.Warn("hybrid share chunk attempt failed", "offset", c.offset, "attempt", attempt, "err", err)
+		d.logChunkFail(ctx, "hybrid share chunk attempt failed", "offset", c.offset, "attempt", attempt, "err", err)
 		if attempt == 2 {
 			return err // 连续两次失败 → 转账号段
 		}
@@ -511,7 +589,7 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloa
 		if err == nil {
 			return nil
 		}
-		d.log.Warn("hybrid acct chunk attempt failed", "share", dc.shareID, "offset", c.offset, "attempt", attempt, "err", err)
+		d.logChunkFail(ctx, "hybrid acct chunk attempt failed", "share", dc.shareID, "offset", c.offset, "attempt", attempt, "err", err)
 		if attempt == 2 {
 			return err
 		}
@@ -550,11 +628,11 @@ func (d *HybridDownloader) tryMultiAccountChunk(ctx context.Context, dc *downloa
 		if ctx.Err() == nil {
 			_ = d.pool.MarkFailed(ctx, acct.Name)
 		}
-		d.log.Warn("hybrid multi-account use/link failed", "acct", acct.Name, "err", linkErr)
+		d.logChunkFail(ctx, "hybrid multi-account use/link failed", "acct", acct.Name, "err", linkErr)
 		return linkErr
 	}
 	if err := d.downloadChunkRange(ctx, dc, c, link); err != nil {
-		d.log.Warn("hybrid multi-account chunk attempt failed", "acct", acct.Name, "offset", c.offset, "err", err)
+		d.logChunkFail(ctx, "hybrid multi-account chunk attempt failed", "acct", acct.Name, "offset", c.offset, "err", err)
 		return err
 	}
 	// 成功记账（配额扣减；persist 失败仅配额缓存漂移，下次 Select 预检兜底）
@@ -812,7 +890,21 @@ func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, dc *down
 		return err
 	}
 	defer f.Close()
-	written, werr := copyRangeToFile(resp.Body, f, c.offset, c.length, &dc.prog, dc.currentTotal, dc.onProgress)
+	// per-chunk 进度：下载中字节实时回调（pikget 每分片一行显示进度）
+	idx := dc.chunkIndex(c.offset)
+	progWithChunk := func(downloaded, total int64) {
+		if dc.onProgress != nil {
+			dc.onProgress(downloaded, total)
+		}
+		if dc.chunkProgress != nil {
+			dc.chunkProgress(ChunkInfo{
+				Index: idx, Offset: c.offset, Length: c.length,
+				Source: d.chunkSource(dc, c), Phase: "downloading",
+				Done: downloaded, Total: c.length,
+			})
+		}
+	}
+	written, werr := copyRangeToFile(resp.Body, f, c.offset, c.length, &dc.prog, dc.currentTotal, progWithChunk)
 	if werr != nil {
 		return werr
 	}
@@ -996,6 +1088,23 @@ func (d *HybridDownloader) probeRangeOK(ctx context.Context, link string, offset
 
 // probeSize 是边界探测请求的探测字节数（1KB，足够拿状态码）。
 const probeSize = 1024
+
+// ChunkInfo 是单个分片（worker）的进度信息，per-chunk 回调传递。
+// Source 标识该 chunk 由哪条链下载：share（匿名分享直链）/ acct:<name>（账号直链）。
+// Phase: pending / downloading / done / failed。
+type ChunkInfo struct {
+	Index  int    // chunk 编号（0 起，按 offset 排序）
+	Offset int64  // 文件偏移
+	Length int64  // chunk 大小
+	Source string // share / acct:<账号名> / acct（单账号）
+	Phase  string // pending / downloading / done / failed
+	Done   int64  // 该 chunk 已下字节
+	Total  int64  // 该 chunk 总字节
+	Err    error  // failed 时错误（nil 表示非失败）
+}
+
+// ChunkProgressFunc 是 per-chunk 进度回调（pikget 用于逐行显示每个分片）。
+type ChunkProgressFunc func(info ChunkInfo)
 
 // hybridManifest 是分片下载完成清单（崩溃恢复用）。
 type hybridManifest struct {
