@@ -45,6 +45,15 @@ type deleter interface {
 	Delete(ctx context.Context, remotePath string) error
 }
 
+// rapidUploader 是可选秒传能力（M4：分片上传后远端 md5 是片组合/服务端"可能不正确"，
+// 仅 rapidupload 命中或小文件单传得到权威整文件 md5——Put 复核不匹配时经它秒传刷新）。
+// 实现者：libraryAdapter（pcs.RapidUploadNoCheckDir）；binaryAdapter 无会话不实现。
+// 返回 (hit, err)：hit=true = 秒传命中（内容已在网盘，目标 md5 刷新为权威整文件 md5）；
+// hit=false = 未命中（md5 not found，errno 31079）——调用方下一轮重传；err = 其它错误。
+type rapidUploader interface {
+	RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error)
+}
+
 // directLinkProvider 是可选直链能力接口：底层 adapter 若实现（库 adapter 持有
 // *Client 可 LocateDownload / 测试 fake），Storage.DirectURL 走它；否则 ok=false
 // （binaryAdapter 无 BDUSS 会话 → 不支持直链）。保持最小侵入：不扩展 Adapter
@@ -308,6 +317,33 @@ func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath str
 	a.log.Info("baidupcs 库兜底 Download（Downloader + 断点）", "remote", remotePath, "local", localPath)
 	return downloadViaDownloader(ctx, a.pcs, remotePath, localPath, layout)
 }
+
+// RapidUpload 库路径秒传（rapidUploader 能力）：用本地整文件 md5/前 256KB sliceMD5/crc32
+// 请求秒传——内容已在网盘（含刚分片上传的）→ 命中，目标 md5 刷新为权威整文件 md5。
+// 未命中（errno 31079 md5 not found）→ (false, nil) 由调用方下一轮重传。
+func (a *libraryAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, mapPCSError(err)
+	}
+	if a.pcs == nil {
+		return false, fmt.Errorf("baidupcs: library adapter without client")
+	}
+	a.log.Info("baidupcs 库秒传刷新（rapidupload）", "remote", remotePath, "size", st.size)
+	pcsErr := a.pcs.PCS().RapidUploadNoCheckDir(remotePath, st.md5, st.sliceMD5, st.crc32, st.size)
+	if pcsErr == nil {
+		return true, nil // 秒传命中：目标关联到已存在内容，md5 权威
+	}
+	if pcsErr.GetRemoteErrCode() == rapidUploadMissErrno {
+		// md5 not found → 内容不在网盘，未命中（下一轮上传）。
+		return false, nil
+	}
+	return false, mapPCSError(pcsErr)
+}
+
+// rapidUploadMissErrno 是百度秒传未命中的错误码（md5 not found，应改用上传 API）。
+const rapidUploadMissErrno = 31079
+
+var _ rapidUploader = (*libraryAdapter)(nil)
 
 // Move 库路径服务端移动（源移除，pcs.Move 服务端 filemanager）。
 func (a *libraryAdapter) Move(ctx context.Context, from, to string) error {

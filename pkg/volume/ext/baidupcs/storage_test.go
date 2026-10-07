@@ -483,3 +483,81 @@ func TestStorage_Copy_GetPutCombo(t *testing.T) {
 		t.Fatalf("复制内容 = %q, want %q", got, "copy-me")
 	}
 }
+
+// TestStorage_Put_MultipartETagRefresh M4 回归（cocom 行为）：分片上传后远端 ETag 是
+// 片组合/服务端"可能不正确"（非整文件 md5）→ Put 复核不匹配 → rapidupload 秒传刷新
+// （内容已在网盘）→ 目标 md5 刷新为权威整文件 md5 → 严格复核一致才成功（无 readback
+// 接受捷径）。
+func TestStorage_Put_MultipartETagRefresh(t *testing.T) {
+	t.Parallel()
+	ad := &multipartETagAdapter{inner: newFakeStorageAdapter(), multipart: true}
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("multipart-md5-refresh-content-", 100)
+	if _, err := s.Put(context.Background(), "big.bin", strings.NewReader(content)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !ad.rapidHit {
+		t.Fatal("分片上传 ETag 不匹配应触发 rapidupload 秒传刷新")
+	}
+	// 最终远端内容与本地一致 + ETag 权威（假 adapter 秒传后 ETag 用整文件 md5）。
+	m, err := s.Stat(context.Background(), "big.bin")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	want := md5Hex(content)
+	if m.ETag != want {
+		t.Fatalf("秒传刷新后 ETag 应权威整文件 md5 %s, got %s", want, m.ETag)
+	}
+}
+
+// multipartETagAdapter 模拟百度分片上传：Upload 后 Stat 返回片组合 ETag（非整文件 md5），
+// RapidUpload 命中后把 ETag 刷新为整文件 md5。
+type multipartETagAdapter struct {
+	inner     *fakeStorageAdapter
+	multipart bool // 分片语义：上传后 ETag 是片组合
+	rapidHit  bool
+}
+
+func (e *multipartETagAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	return e.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (e *multipartETagAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return e.inner.Download(ctx, remotePath, localPath)
+}
+func (e *multipartETagAdapter) Move(ctx context.Context, from, to string) error {
+	return e.inner.Move(ctx, from, to)
+}
+func (e *multipartETagAdapter) Copy(ctx context.Context, from, to string) error {
+	return e.inner.Copy(ctx, from, to)
+}
+func (e *multipartETagAdapter) Delete(ctx context.Context, remotePath string) error {
+	return e.inner.Delete(ctx, remotePath)
+}
+func (e *multipartETagAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return e.inner.List(ctx, remotePath)
+}
+func (e *multipartETagAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	m, err := e.inner.Meta(ctx, remotePath)
+	if err != nil {
+		return nil, err
+	}
+	if e.multipart && !e.rapidHit && m != nil {
+		// 分片语义：真实 md5 算好前 Stat 返回"片组合"（伪造值，≠ 整文件 md5）。
+		return &ObjectMeta{Key: m.Key, Size: m.Size, ETag: "slicemd5-combo-not-whole"}, nil
+	}
+	return m, nil
+}
+func (e *multipartETagAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
+	e.rapidHit = true
+	e.multipart = false // 秒传命中后 Stat 返回真实整文件 md5
+	return true, nil
+}
+
+var _ Adapter = (*multipartETagAdapter)(nil)
+var _ rapidUploader = (*multipartETagAdapter)(nil)
+
+// md5Hex 计算字符串的十六进制 md5。
+func md5Hex(s string) string {
+	h := md5.Sum([]byte(s))
+	return hex.EncodeToString(h[:])
+}

@@ -9,13 +9,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
@@ -128,26 +132,26 @@ func newRangeHTTPClient() *http.Client {
 // 对齐 cocom 循环结构：**每轮先 Stat**——远端已存在且 ETag 与本地 md5 一致（内容未
 // 变/秒传命中）直接返回（零额外上传）；否则上传 → 再 Stat 复核。
 func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta, error) {
-	tmpPath, localMD5, err := s.stageUpload(r, key)
+	st, err := s.stageUpload(r, key)
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpPath)
+	defer os.Remove(st.tmpPath)
 
 	remote, err := s.remotePath(key)
 	if err != nil {
 		return nil, err
 	}
-	return s.putRetryLoop(ctx, key, remote, tmpPath, localMD5)
+	return s.putRetryLoop(ctx, key, remote, st)
 }
 
 // putRetryLoop 有界重试主循环（cocom 对齐）：每轮先 Stat（秒传命中直接返回）→ 未命中
 // 上传 → Stat 复核 ETag 与本地 md5（md5 刷新），不匹配重传；超限 ErrTransient（内容
 // 即使正确也强制验证，绝不静默放行未验证内容）。
-func (s *Storage) putRetryLoop(ctx context.Context, key, remote, tmpPath, localMD5 string) (*ObjectMeta, error) {
+func (s *Storage) putRetryLoop(ctx context.Context, key, remote string, st *stagedUpload) (*ObjectMeta, error) {
 	lastRemoteETag := ""
 	for attempt := 1; attempt <= maxPutAttempts; attempt++ {
-		meta, err := s.putAttempt(ctx, key, remote, tmpPath, localMD5, attempt)
+		meta, err := s.putAttempt(ctx, key, remote, st, attempt)
 		if err != nil {
 			return nil, err
 		}
@@ -158,81 +162,72 @@ func (s *Storage) putRetryLoop(ctx context.Context, key, remote, tmpPath, localM
 			lastRemoteETag = e
 		}
 	}
-	return nil, fmt.Errorf("%w: 上传后内容复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, localMD5, lastRemoteETag)
+	return nil, fmt.Errorf("%w: 上传后内容复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, st.md5, lastRemoteETag)
 }
 
-// putAttempt 单轮上传尝试：存在性检查 → 上传 → ETag 复核 → 必要时读回内容校验。
-// 返回 (meta, nil) = 本轮成功（秒传命中/复核一致/读回一致）；(nil, nil) = 需下一轮重试；
-// (nil, err) = fail-closed。
-func (s *Storage) putAttempt(ctx context.Context, key, remote, tmpPath, localMD5 string, attempt int) (*ObjectMeta, error) {
+// putAttempt 单轮上传尝试：存在性检查 → 上传 → ETag 复核 → 不匹配则 rapidupload 秒传
+// 刷新（M4 实测：分片上传后远端 md5 是片组合/服务端"可能不正确"，仅 rapidupload 命中
+// 或小文件单传得到权威整文件 md5）→ 严格复核一致才成功（cocom 行为：必须一致才算上传
+// 成功，绝不 readback 接受捷径）。
+// 返回 (meta, nil) = 本轮成功（秒传命中/复核一致/rapidupload 刷新后一致）；
+// (nil, nil) = 需下一轮重试；(nil, err) = fail-closed。
+func (s *Storage) putAttempt(ctx context.Context, key, remote string, st *stagedUpload, attempt int) (*ObjectMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, mapPCSError(err)
 	}
-	meta, proceed, perr := s.putCheckExisting(ctx, key, localMD5, attempt)
+	meta, proceed, perr := s.putCheckExisting(ctx, key, st.md5, attempt)
 	if perr != nil {
 		return nil, perr
 	}
 	if !proceed {
 		return meta, nil // 秒传命中：目标已存在且 ETag == 本地 md5
 	}
-	if upErr := s.adapter.Upload(ctx, tmpPath, remote, true); upErr != nil {
+	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
 		return nil, mapPCSError(upErr)
 	}
-	meta, done, werr := s.putCheckAfterUpload(ctx, key, localMD5, attempt)
+	meta, done, werr := s.putCheckAfterUpload(ctx, key, st.md5, attempt)
 	if werr != nil {
 		return nil, werr
 	}
 	if done {
-		return meta, nil // 上传后 ETag 复核一致
+		return meta, nil // 上传后 ETag 复核一致（小文件单传/已秒传命中）
 	}
 	s.lastETag = "" // 每轮重置（避免陈旧值）
 	if meta != nil {
 		s.lastETag = meta.ETag
-		// C5 修复：ETag mismatch（能看到目标但字段不一致）不盲目重传——先**读回内容**
-		// 做真实校验。百度分片上传的 ETag 可能是片 md5 组合/整文件 md5 字段为空（注释
-		// 自认），此时元数据字段永不等本地 md5，重传也刷新不了 → 恒 3× 整文件重传后
-		// ErrTransient。读回内容（下载目标 → 重算 md5）与本地一致 = 内容正确，接受；
-		// 不一致（真传输损坏）才重传刷新（≤maxPutAttempts）。
-		if s.acceptByReadback(ctx, key, localMD5, meta.ETag, attempt) {
-			return meta, nil
-		}
+		// M4 修复（cocom 行为）：ETag mismatch → **rapidupload 秒传刷新**——分片上传后
+		// 内容已在网盘，秒传命中会把目标 md5 刷新为权威整文件 md5（实测 v2/v3：秒传后
+		// md5 从"可能不正确"的片组合变为正确整文件 md5）。命中后再次 Stat 复核一致 →
+		// 成功。移除了原 readback 接受捷径（用户裁定：必须 md5 一致才算上传成功）。
+		return s.refreshByRapidUpload(ctx, key, remote, st, attempt)
 	}
-	// meta == nil（上传后 Stat 未见，最终一致性）→ 下一轮重试，不读回。
+	// meta == nil（上传后 Stat 未见，最终一致性）→ 下一轮重试。
 	return nil, nil
 }
 
-// acceptByReadback ETag 不匹配时读回内容做真实校验：内容与本地 md5 一致 → 接受
-// （返回 true，分片 ETag 组合/字段为空场景内容仍正确）；不一致 → 记录并重传。
-func (s *Storage) acceptByReadback(ctx context.Context, key, localMD5, remoteETag string, attempt int) bool {
-	ok, rerr := s.readbackVerifyMD5(ctx, key, localMD5)
+// refreshByRapidUpload 在 ETag 复核不匹配时尝试 rapidupload 秒传刷新（adapter 支持时）：
+// 命中 → 再次复核一致则返回 meta；未命中/刷新后仍不一致 → (nil, nil) 下一轮重试。
+func (s *Storage) refreshByRapidUpload(ctx context.Context, key, remote string, st *stagedUpload, attempt int) (*ObjectMeta, error) {
+	ru, ok := s.adapter.(rapidUploader)
+	if !ok {
+		return nil, nil // adapter 无秒传能力（binary-only）→ 下一轮重传
+	}
+	hit, rerr := ru.RapidUpload(ctx, remote, st)
 	if rerr != nil {
-		s.log.Warn("上传后内容读回校验失败（重传刷新 meta）",
-			"key", key, "local_md5", localMD5, "remote_etag", remoteETag, "attempt", attempt, "error", rerr)
-		return false
+		return nil, mapPCSError(rerr)
 	}
-	if ok {
-		s.log.Info("上传后 ETag 不一致但内容读回一致（分片 ETag 组合/字段为空），接受",
-			"key", key, "local_md5", localMD5, "remote_etag", remoteETag, "attempt", attempt)
-		return true
+	if !hit {
+		return nil, nil // 未命中（内容不在网盘）→ 下一轮上传
 	}
-	s.log.Warn("上传后内容读回不一致（重传刷新 meta）",
-		"key", key, "local_md5", localMD5, "remote_etag", remoteETag, "attempt", attempt)
-	return false
-}
-
-// readbackVerifyMD5 读回目标文件并计算整文件 md5，与 localMD5 比对（内容级真实校验）。
-// Get 返回自动清理的临时读流；读回一致 = 内容正确（即使元数据 ETag 字段语义不同）。
-func (s *Storage) readbackVerifyMD5(ctx context.Context, key, localMD5 string) (bool, error) {
-	rc, _, gerr := s.Get(ctx, key)
-	if gerr != nil {
-		return false, mapPCSError(gerr)
+	m2, d2, e2 := s.putCheckAfterUpload(ctx, key, st.md5, attempt)
+	if e2 != nil {
+		return nil, e2
 	}
-	defer rc.Close()
-	h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传/ETag），非安全用途
-	if _, cerr := io.Copy(h, rc); cerr != nil {
-		return false, fmt.Errorf("baidupcs: 读回内容校验失败（md5）: %w", cerr)
+	if d2 {
+		return m2, nil // rapidupload 刷新后 ETag 一致 → 权威 md5
 	}
-	return hex.EncodeToString(h.Sum(nil)) == localMD5, nil
+	s.lastETag = m2.ETag
+	return nil, nil // 刷新后仍不一致/Stat 未见 → 下一轮
 }
 
 // putCheckExisting 每轮上传前的存在性检查：目标已存在且 ETag 与本地 md5 一致 →
@@ -273,26 +268,66 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key, localMD5 string,
 	return meta, false, nil
 }
 
-// stageUpload 把上传流落本地临时文件并计算 md5（上传前一次性完成；返回临时路径与
-// 本地 md5——供 Upload 与 ETag 复核）。
-func (s *Storage) stageUpload(r io.Reader, key string) (string, string, error) {
+// stageUpload 把上传流落本地临时文件并计算 md5/sliceMD5/crc32（上传前一次性完成）——
+// 供 Upload 与 ETag 复核，以及 rapidupload 秒传刷新（内容已在网盘时秒传命中 → 远端
+// md5 刷新为权威整文件 md5，M4 实测：分片上传后 md5 为片组合/服务端"可能不正确"，
+// 仅秒传刷新或小文件单传得到权威 md5）。
+type stagedUpload struct {
+	tmpPath  string
+	md5      string // 整文件 md5（ETag 复核基准）
+	sliceMD5 string // 前 256KB md5（rapidupload 秒传参数）
+	crc32    string // 整文件 CRC32 IEEE（rapidupload 秒传参数）
+	size     int64  // 文件大小（rapidupload length 参数）
+}
+
+func (s *Storage) stageUpload(r io.Reader, key string) (*stagedUpload, error) {
 	tmp, err := os.CreateTemp(s.temp, filepath.Base(key)+"-*")
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	tmpPath := tmp.Name()
-	hash := md5.New() //nolint:gosec // 百度 API 要求 md5（秒传/ETag），非安全用途
-	tee := io.TeeReader(r, hash)
-	if _, copyErr := io.Copy(tmp, tee); copyErr != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return "", "", copyErr
+	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
+	md5h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传/ETag），非安全用途
+	crc := crc32.NewIEEE()
+	// 单遍拷贝：tmp 落盘 + 整文件 md5 + crc32 同步累计。
+	tee := io.MultiWriter(tmp, md5h, crc)
+	size, copyErr := io.Copy(tee, r)
+	if copyErr != nil {
+		cleanup()
+		return nil, copyErr
 	}
 	if closeErr := tmp.Close(); closeErr != nil {
 		os.Remove(tmpPath)
-		return "", "", closeErr
+		return nil, closeErr
 	}
-	return tmpPath, hex.EncodeToString(hash.Sum(nil)), nil
+	// sliceMD5：从 tmp 读回前 256KB（百度 rapidupload 秒传的前 256KB 切片参数）。
+	sliceMD5, slErr := sliceMD5Of(tmpPath)
+	if slErr != nil {
+		os.Remove(tmpPath)
+		return nil, slErr
+	}
+	return &stagedUpload{
+		tmpPath:  tmpPath,
+		md5:      hex.EncodeToString(md5h.Sum(nil)),
+		sliceMD5: sliceMD5,
+		crc32:    strconv.FormatUint(uint64(crc.Sum32()), 10),
+		size:     size,
+	}, nil
+}
+
+// sliceMD5Of 计算本地文件前 bdlib.SliceMD5Size 字节的 md5（不足则整文件；空文件 → 空串）。
+func sliceMD5Of(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传），非安全用途
+	_, cerr := io.Copy(h, io.LimitReader(f, bdlib.SliceMD5Size))
+	if cerr != nil {
+		return "", cerr
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Get 下载网盘文件到本地临时文件并返回 Reader（Close 自动清理）。
