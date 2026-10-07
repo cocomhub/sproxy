@@ -118,8 +118,8 @@ func mockGroupChainServerStatHandler(t *testing.T, dir string) http.HandlerFunc 
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		os.MkdirAll(filepath.Dir(archiveFile), 0755) // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
-		if _, err := os.Stat(archiveFile); err != nil {
+		os.MkdirAll(filepath.Dir(archiveFile), 0755)    // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
+		if _, err := os.Stat(archiveFile); err != nil { // NOSONAR: S6549 + S2083 — mock 镜像生产 stat 路由；archiveFile 测试自控
 			os.WriteFile(archiveFile, []byte("group-archive-content"), 0644) // NOSONAR: S2083 — 同上（测试自控路径）
 		}
 		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
@@ -129,7 +129,7 @@ func mockGroupChainServerStatHandler(t *testing.T, dir string) http.HandlerFunc 
 			return
 		}
 		sum := testutil.SHA256Hex(data)
-		info, err := os.Stat(archiveFile)
+		info, err := os.Stat(archiveFile) // NOSONAR: S6549 — mock 镜像生产 stat 路由；archiveFile 测试自控
 		if err != nil {
 			t.Error("Stat:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
