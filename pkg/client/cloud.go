@@ -22,21 +22,24 @@ type TransferSpec struct {
 
 // CloudTask 表示一个云端下载任务。
 type CloudTask struct {
-	ID         string    `json:"id"`
-	URL        string    `json:"url"`
-	Method     string    `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
-	Filename   string    `json:"filename"`
-	Status     string    `json:"status"`
-	TotalSize  int64     `json:"total_size"`
-	Downloaded int64     `json:"downloaded"`
-	Checksum   string    `json:"checksum"`
-	ETag       string    `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
-	Error      string    `json:"error"`
-	GroupID    string    `json:"group_id,omitempty"` // 所属下载组 ID（可选）
-	FileMTime  int64     `json:"file_mtime,omitempty"`
-	CreatedAt  time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
-	UpdatedAt  time.Time `json:"updated_at"` // 更新时间（同上）
-	ExpiresAt  time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
+	ID         string `json:"id"`
+	URL        string `json:"url"`
+	Method     string `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
+	Filename   string `json:"filename"`
+	Status     string `json:"status"`
+	TotalSize  int64  `json:"total_size"`
+	Downloaded int64  `json:"downloaded"`
+	Checksum   string `json:"checksum"`
+	ETag       string `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
+	Error      string `json:"error"`
+	GroupID    string `json:"group_id,omitempty"` // 所属下载组 ID（可选）
+	// IntegrityStatus 完整性校验状态（R3-I3）："" 未校验 / verified 通过 / damaged 损坏。
+	// 客户端透传供链式/CLI 识别损坏文件（默认放行时 completed+damaged 不应被当可靠成功）。
+	IntegrityStatus string    `json:"integrity_status,omitempty"`
+	FileMTime       int64     `json:"file_mtime,omitempty"`
+	CreatedAt       time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
+	UpdatedAt       time.Time `json:"updated_at"` // 更新时间（同上）
+	ExpiresAt       time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
 	// TransferURL 转存成功后的目标引用（<scheme>://<卷>/<rel>，服务端填写；
 	// 客户端可经卷协议取用）。仅 transfer 任务有值。
 	TransferURL string `json:"transfer_url,omitempty"`
@@ -61,11 +64,12 @@ const (
 type CloudDownloadOption func(*cloudDownloadOptions)
 
 type cloudDownloadOptions struct {
-	filename      string
-	maxBatchURLs  int
-	transfer      *TransferSpec
-	save          *bool
-	downloadLocal bool
+	filename       string
+	maxBatchURLs   int
+	transfer       *TransferSpec
+	save           *bool
+	downloadLocal  bool
+	forceIntegrity bool
 }
 
 // WithCloudDownloadFilename 设置云端下载的文件名（覆盖 URL 自动提取的文件名）。
@@ -101,6 +105,16 @@ func WithCloudDownloadSave(save bool) CloudDownloadOption {
 func WithCloudDownloadLocal(local bool) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		o.downloadLocal = local
+	}
+}
+
+// WithCloudDownloadIntegrityMustPass 强制源文件完整性校验（透传服务端 TaskParams.IntegrityMustPass）。
+// true = 下载内容语义校验失败（如有）时任务直接失败阻断，不放行；
+// false（默认） = 服务端默认处置（两次校验一致的损坏文件放行标记 damaged）。
+// 客户端仅在 true 时发送 integrity_must_pass 字段（零回归：默认 false 不发）。
+func WithCloudDownloadIntegrityMustPass(v bool) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.forceIntegrity = v
 	}
 }
 
@@ -143,7 +157,7 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	if cfg.filename != "" {
 		body["filename"] = cfg.filename
 	}
-	// C1/M6：单 URL 入口同样透传三参（transfer/save/download_local）——此前 body 为
+	// C1/M6：单 URL 入口同样透传四参（transfer/save/download_local/integrity_must_pass）——此前 body 为
 	// map[string]string 丢三参，与批量入口不一致（服务端收不到 → 三行为此处不成立）。
 	if cfg.transfer != nil {
 		body["transfer"] = cfg.transfer
@@ -153,6 +167,9 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	}
 	if cfg.downloadLocal {
 		body["download_local"] = true
+	}
+	if cfg.forceIntegrity {
+		body["integrity_must_pass"] = true
 	}
 
 	var task CloudTask
@@ -201,6 +218,9 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	}
 	if cfg.downloadLocal {
 		body["download_local"] = true
+	}
+	if cfg.forceIntegrity {
+		body["integrity_must_pass"] = true
 	}
 
 	var result struct {
@@ -381,7 +401,7 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 		"name": name,
 		"urls": entries,
 	}
-	// M6：组创建透传三参（transfer/save/download_local）——此前 cfg 已解析但 body 未带，
+	// M6：组创建透传四参（transfer/save/download_local/integrity_must_pass）——此前 cfg 已解析但 body 未带，
 	// 死参数面：组下载无法声明转存目标（语义与单条/batch 对齐）。
 	if cfg.transfer != nil {
 		body["transfer"] = cfg.transfer
@@ -391,6 +411,9 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 	}
 	if cfg.downloadLocal {
 		body["download_local"] = true
+	}
+	if cfg.forceIntegrity {
+		body["integrity_must_pass"] = true
 	}
 	var group CloudGroup
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/groups", body, &group); err != nil {

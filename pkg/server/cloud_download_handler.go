@@ -63,6 +63,8 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。false = 服务端
 		// 可转存后即删。创建期真空洞校验（不下载+不转存+不保留）以此消歧。
 		DownloadLocal bool `json:"download_local,omitempty"`
+		// IntegrityMustPass 强制源文件完整性（语义校验失败阻断任务，不放行标记 damaged）。
+		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -92,7 +94,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	// 服务端继续异步下载，不阻塞 handler。
 	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
 	owner := ActorFrom(r.Context())
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save)})
+	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass})
 	if err != nil {
 		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
 		if isStorageFull(err) {
@@ -147,6 +149,8 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		Save *bool `json:"save,omitempty"`
 		// DownloadLocal 批量：客户端是否下载本地（同单条语义）。
 		DownloadLocal bool `json:"download_local,omitempty"`
+		// IntegrityMustPass 强制源文件完整性（同单条语义；batch 统一 apply）。
+		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -189,7 +193,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 
 		// 批量始终异步：nil context。transfer/save/download_local 批量统一 apply；
 		// 真空洞（不下载+无 transfer+save=false）由 CreateTask fail-closed 拒绝。
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save)})
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass})
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,
@@ -338,6 +342,8 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		Transfer      *cloud.TransferSpec `json:"transfer,omitempty"`
 		Save          *bool               `json:"save,omitempty"`
 		DownloadLocal bool                `json:"download_local,omitempty"`
+		// IntegrityMustPass 强制源文件完整性（同单条语义；组内每个子任务）。
+		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -373,7 +379,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()), cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save)})
+	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()), cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass})
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, groupErrorStatus(err))
 		return

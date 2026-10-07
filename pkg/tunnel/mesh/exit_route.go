@@ -27,9 +27,10 @@ import (
 // DefaultLocalDialTimeout 是本地直连探测默认超时（被墙 TCP 黑洞可感知的合理上界）。
 const DefaultLocalDialTimeout = 3 * time.Second
 
-// localDialFunc 是本地直连拨号函数（包级可注入，测试替换为慢桩模拟黑洞；
-// 对齐 webrtc.SetSTUN 的包级全局模式）。
-var localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
+// defaultLocalDial 是默认本地直连实现（net.Dialer 直连）。**私有、运行期不可变**——
+// 非 seam（用户裁定 2026-10-07：禁止测试依赖/修改包级全局；测试经 NewLocalOrExitDial
+// localDial 参数注入 slowLocalDial，不触碰本变量）。
+func defaultLocalDial(ctx context.Context, addr string) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, "tcp", addr)
 }
@@ -107,15 +108,19 @@ func closeLoserConn(ch chan result) {
 
 // NewLocalOrExitDial 构造「本地直连优先 → 回退出口」拨号函数。
 // localTimeout 是本地直连探测超时（0 = 不试本地，直接 exit）；exit 为 nil 时退化为纯本地直连
-// （等价 Config.Dial=nil，本机出口语义）。
+// （等价 Config.Dial=nil，本机出口语义）。localDial 是本地拨号实现（nil = 默认 net.Dialer
+// 直连）——**构造参数注入**（用户裁定 2026-10-07：禁止测试依赖全局函数/并发修改包级
+// seam；调用方在创建时传入，运行期不可变；测试传 slowLocalDial 模拟本地黑洞）。
 // 本地被墙（黑洞挂起直到超时）时**并行竞速**：exit 无需等待 localTimeout 满，先成功者胜
 // （收益：每新连接省下最多 localTimeout 的等待）。本地快时 local 立即胜出（零额外开销）。
-func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
-	// 构造时捕获一次包级 localDialFunc（不可变快照）：raceDial 会在子 goroutine 中调用
-	// local 闭包，若闭包内再读包级变量，会与测试 t.Cleanup 恢复（Write）形成 data race
-	// （CI Test Sub-Modules 实证：TestLocalOrExitDial_Race_ExitWinsWhileLocalBlackholed）。
-	// 捕获后闭包只引用本快照，不再读包级状态。
-	local := localDialFunc
+func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Context, addr string) (net.Conn, error), localDial ...func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
+	// 构造时捕获一次 local 实现（不可变快照）：raceDial 会在子 goroutine 中调用
+	// local 闭包，若闭包内再读包级变量，会与测试替换形成 data race。捕获后闭包只引用
+	// 本快照，不再读包级状态。**不再有包级 localDialFunc seam**。
+	local := defaultLocalDial
+	if len(localDial) > 0 && localDial[0] != nil {
+		local = localDial[0]
+	}
 	if exit == nil {
 		return func(ctx context.Context, addr string) (net.Conn, error) {
 			return local(ctx, addr)

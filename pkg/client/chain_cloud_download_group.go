@@ -43,14 +43,18 @@ type CloudDownloadGroupChain struct {
 	Completed    int                   `json:"completed"`
 	Failed       int                   `json:"failed"`
 	Cancelled    int                   `json:"cancelled"`
-	Error        string                `json:"error,omitempty"`
-	CreatedAt    time.Time             `json:"created_at"`
-	UpdatedAt    time.Time             `json:"updated_at"`
+	// Damaged 完整性损坏但放行完成的子任务数（R3-I3 组链延伸）。
+	Damaged   int       `json:"damaged,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
-	// M6：组下载三参（transfer/save/download_local）——与单条/batch 语义对齐。
+	// M6：组下载四参（transfer/save/download_local/integrity_must_pass）——与单条/batch 语义对齐。
 	Transfer      *TransferSpec `json:"transfer,omitempty"`
 	Save          *bool         `json:"save,omitempty"`
 	DownloadLocal bool          `json:"download_local,omitempty"`
+	// IntegrityMustPass 强制源文件完整性（透传服务端；组内每个子任务）。
+	IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
 
 	// 持久化字段
 	PollInterval time.Duration `json:"poll_interval"`
@@ -94,10 +98,11 @@ func NewCloudDownloadGroupChain(client *FileClient, groupName string, entries []
 		PollInterval: fixPollInterval(opts.pollInterval),
 		Timeout:      opts.timeout,
 		// M6：三参从 opts 接入（与 CloudDownloadChain 同源函数式 API）。
-		Transfer:      opts.transfer,
-		Save:          opts.save,
-		DownloadLocal: opts.downloadLocal,
-		client:        client,
+		Transfer:          opts.transfer,
+		Save:              opts.save,
+		DownloadLocal:     opts.downloadLocal,
+		IntegrityMustPass: opts.forceIntegrity,
+		client:            client,
 	}, nil
 }
 
@@ -127,11 +132,12 @@ func (c *CloudDownloadGroupChain) State() map[string]any {
 		"updated_at":    c.UpdatedAt,
 		"poll_interval": c.PollInterval,
 		"timeout":       c.Timeout,
-		// 三参（transfer/save/download_local）持久化：恢复/resume 后保持原语义
+		// 四参（transfer/save/download_local/integrity_must_pass）持久化：恢复/resume 后保持原语义
 		// （F3：曾缺失导致 resume 重建为纯下载——组在服务端被重建成无 transfer/save）。
-		"transfer":       c.Transfer,
-		"save":           c.Save,
-		"download_local": c.DownloadLocal,
+		"transfer":            c.Transfer,
+		"save":                c.Save,
+		"download_local":      c.DownloadLocal,
+		"integrity_must_pass": c.IntegrityMustPass,
 	}
 }
 
@@ -162,6 +168,7 @@ func (c *CloudDownloadGroupChain) SetOptions(opts chainOptions) {
 	c.Transfer = opts.transfer
 	c.Save = opts.save
 	c.DownloadLocal = opts.downloadLocal
+	c.IntegrityMustPass = opts.forceIntegrity
 }
 
 func (c *CloudDownloadGroupChain) SetChainManager(mgr *ChainManager) {
@@ -362,11 +369,12 @@ func (c *CloudDownloadGroupChain) pollGroupRound(ctx context.Context) (bool, err
 	}
 	// 以子任务列表实际状态为准计数（而非仅依赖 group.TotalTasks），
 	// 防御服务端在极早期轮询返回空 tasks 的边界（此时按 pending 处理）。
-	completed, failed, cancelled, active := countGroupTasks(detail.Tasks)
+	completed, failed, cancelled, active, damaged := countGroupTasks(detail.Tasks)
 	c.TotalTasks = detail.Group.TotalTasks
 	c.Completed = completed
 	c.Failed = failed
 	c.Cancelled = cancelled
+	c.Damaged = damaged
 
 	// 不提前中断：即使已有任务失败/取消，仍继续轮询等待所有活跃任务进入终态，
 	// 与 batch 链 waitForTasks 语义一致（等全部终态后整体判定，不打包缺文件的归档）。
@@ -374,15 +382,20 @@ func (c *CloudDownloadGroupChain) pollGroupRound(ctx context.Context) (bool, err
 	if active > 0 {
 		return false, nil
 	}
-	return c.finishGroupRound(detail, completed, failed, cancelled)
+	return c.finishGroupRound(detail, completed, failed, cancelled, damaged)
 }
 
-// countGroupTasks 按任务状态统计 completed/failed/cancelled/active 计数。
-func countGroupTasks(tasks []CloudTask) (completed, failed, cancelled, active int) {
+// countGroupTasks 按任务状态统计 completed/failed/cancelled/active/damaged 计数。
+// damaged（R3-I3 组链延伸）：completed 但 IntegrityStatus=="damaged" 的子任务——
+// 默认放行语义，不应被当可靠成功（与 batch 链 Damaged 一致）。
+func countGroupTasks(tasks []CloudTask) (completed, failed, cancelled, active, damaged int) {
 	for _, t := range tasks {
 		switch t.Status {
 		case TaskStatusCompleted:
 			completed++
+			if t.IntegrityStatus == "damaged" {
+				damaged++
+			}
 		case TaskStatusFailed:
 			failed++
 		case TaskStatusCancelled:
@@ -391,13 +404,19 @@ func countGroupTasks(tasks []CloudTask) (completed, failed, cancelled, active in
 			active++
 		}
 	}
-	return completed, failed, cancelled, active
+	return completed, failed, cancelled, active, damaged
 }
 
 // finishGroupRound 在无活跃任务时判定组终态：成功返回 (true,nil)，异常返回错误，
 // 其余（空 tasks 或未刷新到 completed）返回 (false,nil) 继续轮询。
-func (c *CloudDownloadGroupChain) finishGroupRound(detail *CloudGroupDetail, completed, failed, cancelled int) (bool, error) {
+func (c *CloudDownloadGroupChain) finishGroupRound(detail *CloudGroupDetail, completed, failed, cancelled, damaged int) (bool, error) {
 	if detail.Group.Status == "completed" && failed+cancelled == 0 {
+		// R3-I3 组链延伸：damaged 子任务警告（用户裁定 2026-10-06：警告继续——不整链
+		// 阻断，正常文件可归档/下载，damaged 项审计可见）。
+		if damaged > 0 {
+			slog.Warn("cloud group chain: 子任务完整性损坏（damaged，已放行）",
+				"chain_id", c.ChainID, "group_id", c.GroupID, "damaged", damaged)
+		}
 		return true, nil
 	}
 	// 组状态为 failed/cancelled 且无活跃任务 → 终态，视为异常报错，避免转圈到超时（C7）。
@@ -446,7 +465,7 @@ func (c *CloudDownloadGroupChain) cleanupGroup(ctx context.Context) error {
 	return nil
 }
 
-// groupTransferOpts 组装组下载三参透传选项（M6：与单条/batch 同语义收口）。
+// groupTransferOpts 组装组下载四参透传选项（M6：与单条/batch 同语义收口）。
 func groupTransferOpts(c *CloudDownloadGroupChain) []CloudDownloadOption {
 	var opts []CloudDownloadOption
 	if c.Transfer != nil {
@@ -457,6 +476,9 @@ func groupTransferOpts(c *CloudDownloadGroupChain) []CloudDownloadOption {
 	}
 	if c.DownloadLocal {
 		opts = append(opts, WithCloudDownloadLocal(true))
+	}
+	if c.IntegrityMustPass {
+		opts = append(opts, WithCloudDownloadIntegrityMustPass(true))
 	}
 	return opts
 }

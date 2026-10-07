@@ -25,10 +25,13 @@ import (
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"golang.org/x/sync/semaphore"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -81,6 +84,19 @@ type CloudTask struct {
 	// CleanupErr 清理失败原因（后续告警接入）。
 	CleanupErr string `json:"cleanup_err,omitempty"`
 
+	// IntegrityStatus 是下载完整性判定结果（校验管道写入；"" = 未校验/未生效）：
+	//   - verified：权威匹配（下载器 ModeAuthority）或语义校验通过；
+	//   - damaged：语义校验两次一致仍异常（默认放行，文件标记损坏）。
+	IntegrityStatus string `json:"integrity_status,omitempty"`
+	// IntegrityMustPass 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
+	IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
+	// integritySames 是「本地 checksum 一致但语义校验仍失败」的累计次数（跨 attempt 保留，
+	// 判定永久损坏用）。2 次 → 不再重下（permanent）。运行时状态，不持久化。
+	integritySames int
+	// integrityLastChecksum 是上次校验失败 attempt 的本地 checksum（R1-C2：仅当两次
+	// checksum 一致才累计 integritySames；不同 = 瞬态损坏可恢复 → 重置重试）。
+	integrityLastChecksum string
+
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
 	// 由 downloadSinkFactory 创建/复用（跨重试/续传保留同一 account），终态/删除时
@@ -125,6 +141,11 @@ type CloudDownloadConfig struct {
 	MaxRetries          int           // 失败重试次数，默认 10
 	RetryDelay          time.Duration // 重试间隔，默认 10s
 	Downloader          string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
+	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；**<=0（含 0/负值/缺省）一律按
+	// 默认 512 MiB**——用户裁定 2026-10-07：0 处理成默认大小，配额治理默认生效）。
+	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验
+	// 标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
+	MaxCheckMemBytes sizex.ByteSize
 	// ExitDial 是下载器出站拨号函数注入（装配层构造）：nil = 默认直连。
 	// 非 nil 时覆写下载器 http.Transport.DialContext（本地直连优先 → 失败回退经 mesh 出口）。
 	// 领域包不依赖 mesh（R1 分层）——函数字段注入解耦，对齐 downloader 的 httpClient 注入模式。
@@ -183,6 +204,13 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	if cfg.Downloader == "" {
 		cfg.Downloader = "http"
 	}
+	// MaxCheckMemBytes<=0（含 0/负值/缺省）一律按默认 512 MiB 处理（用户裁定 2026-10-07：
+	// **0 处理成默认大小，保证服务默认行为安全可用**——完整性校验内存配额治理默认生效，
+	// 不因缺省/显式 0 而禁用，防并发校验 OOM）。配额信号量由 newCheckMemSem 构造，
+	// 永不因配置缺省而 nil（nil 仅防御性保留：直接构造 manager 时）。
+	if cfg.MaxCheckMemBytes <= 0 {
+		cfg.MaxCheckMemBytes = sizex.ByteSize(512) * (1 << 20) // 默认 512 MiB（ByteSize 语义）
+	}
 }
 
 // TenantResolver 按 owner 返回租户（空 owner → anonymous；非法 owner 或存储根不可用返回 nil）。
@@ -234,6 +262,19 @@ type CloudDownloadManager struct {
 	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveOwnerPath 键空间计算）。
 	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
 	volumeFor func(volume string) (volume.Volume, bool)
+	// integrityLookup 按文件名分发完整性校验器（装配层注入 integrity.Lookup 代理；
+	// nil = 无校验器，语义校验跳过视为通过——Review Focus 1）。
+	integrityLookup func(name string) integrity.Checker
+	// removeFile 是任务产物删除的单次尝试实现（nil = os.Remove 默认）。**测试注入
+	// opt（2026-10-07 用户裁定：绝对禁止测试依赖全局函数——包级 seam 可被并发替换/恢复
+	// 制造 race）**：结构体内部变量，只能在**创建时**注入，运行期不可变（无外部修改行为）。
+	// 测试用 newCloudTestManager 等构造点注入本地实现模拟删除失败/钉住时序。
+	removeFile func(string) error
+	// checkMemSem 完整性校验内存配额信号量（Weighted，按 Check 前估算字节排队等待释放；
+	// nil = 配额禁用。单文件估算超配额 → 跳过校验标记 unverified，不误判 damaged）。
+	checkMemSem *semaphore.Weighted
+	// checkMemMax 校验内存配额总预算（构造时快照 cfg.MaxCheckMemBytes；Weighted 无 size 查询）。
+	checkMemMax int64
 	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
 	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
 	registry    *downloader.Registry
@@ -313,6 +354,13 @@ type CloudManagerOptions struct {
 	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
 	// nil = 转存不可用（与 TransferFSFor 同门）。
 	VolumeFor func(volume string) (volume.Volume, bool)
+	// IntegrityLookup 按文件名分发完整性校验器（integrity.Lookup 代理）。
+	// nil = 无校验器（语义校验跳过视为通过——Review Focus 1：未装配不误报 damaged）。
+	IntegrityLookup func(name string) integrity.Checker
+	// RemoveFile 是任务产物删除的单次尝试实现（nil = os.Remove 默认）。**测试注入
+	// opt（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam）**：构造时
+	// 注入结构体内部变量，运行期不可变。生产装配不传（零回归）。
+	RemoveFile func(string) error
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -363,10 +411,14 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		logger:           slogutil.Default(logger),
 		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
 		transferSem:      make(chan struct{}, cfg.TransferConcurrency),
+		checkMemSem:      newCheckMemSem(int64(cfg.MaxCheckMemBytes)),
+		checkMemMax:      int64(cfg.MaxCheckMemBytes),
 		config:           cfg,
 		dl:               newDefaultDownloader(cfg),
 		transferFSFor:    opts.TransferFSFor,
 		volumeFor:        opts.VolumeFor,
+		integrityLookup:  opts.IntegrityLookup,
+		removeFile:       opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
 		cancelFuncs:      make(map[string]context.CancelFunc),
 		running:          make(map[string]bool),
 		metrics:          &CloudMetrics{},
@@ -738,4 +790,6 @@ type TaskParams struct {
 	Transfer      *TransferSpec
 	DownloadLocal bool
 	Save          bool
+	// IntegrityMustPass 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
+	IntegrityMustPass bool
 }

@@ -49,6 +49,10 @@ type Handlers struct {
 	version       string
 	buildAt       string
 	tunnelHandler http.Handler
+	// removeMovedSource 是 move 删源实现（nil = 默认 storage.Root.Remove）。**测试注入
+	// opt（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam）**：RegisterRoutes
+	// 构造时经 opts.RemoveMovedSource 注入实例字段，运行期不可变（无包级 seam 并发替换）。
+	removeMovedSource func(root *storage.Root, rel string) error
 	// localHandler 是隧道内层本地文件 API handler（localMux + 中间件链，不含外层
 	// 帧解密/密钥检查）。供 xfer listener（阶段 5 工作项 1）直接路由解密后的隧道
 	// 请求；与 tunnelHandler（传统 POST /tunnel 外层帧解密器）互补。

@@ -21,7 +21,7 @@ import (
 
 // CreateGroup 创建下载任务组。
 // owner 是请求认证派生的组归属，子任务写入同 owner（组级多租户隔离）。
-// 校验文件名冲突，创建子任务。params 透传组级三参（transfer/save/download_local）——
+// 校验文件名冲突，创建子任务。params 透传组级四参（transfer/save/download_local/integrity_must_pass）——
 // 组内每个子任务与单条/batch 同语义（服务端组创建曾硬编码 Save:true + 无 transfer）。
 func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Entry, owner string, params TaskParams) (*CloudTaskGroup, error) {
 	if len(urls) == 0 {
@@ -143,7 +143,7 @@ func validateGroupFilenameConflicts(urls []cloudfilename.Entry) error {
 
 // createGroupEntry 为组创建一个 URL 条目对应的子任务（可能去重吸收既有任务）。
 // seen 用于同组内 URL 去重；err 时由调用方回滚。返回存储任务与是否吸收既有任务（absorbed）。
-// params 透传组级三参（transfer/save/download_local）：组内每个子任务与单条/batch 同语义
+// params 透传组级四参（transfer/save/download_local/integrity_must_pass）：组内每个子任务与单条/batch 同语义
 // （服务端组创建曾硬编码 Save:true + 无 transfer，组链三参最后一跳丢失——修复后
 // --transfer-volume/--save 对组真实生效）。
 func (m *CloudDownloadManager) createGroupEntry(entry cloudfilename.Entry, owner, groupID string, seen map[string]bool, params TaskParams) (*CloudTask, bool, error) {
@@ -151,7 +151,7 @@ func (m *CloudDownloadManager) createGroupEntry(entry cloudfilename.Entry, owner
 	if err != nil {
 		return nil, false, fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
 	}
-	// 该 URL 已有**对请求者可见**的活跃任务，且三参与本次一致 → 本次是去重吸收既有任务，
+	// 该 URL 已有**对请求者可见**的活跃任务，且四参与本次一致 → 本次是去重吸收既有任务，
 	// 回滚时不删除（参数不匹配时 CreateTask 会新建，须按新建回滚删除——C1 I-1：吸收
 	// 分类必须与 CreateTask 内部的 sameTaskParams 判定一致，否则参数不匹配的重建任务
 	// 被误归 absorbed，回滚只清 GroupID 不删除 → 孤儿 pending 泄漏 1GiB 占位）。
@@ -185,7 +185,7 @@ func (m *CloudDownloadManager) createGroupEntry(entry cloudfilename.Entry, owner
 	return stored, absorbed, nil
 }
 
-// SubmitAndStartGroup 创建组并启动所有子任务下载。params 透传组级三参
+// SubmitAndStartGroup 创建组并启动所有子任务下载。params 透传组级四参
 // （transfer/save/download_local）——与单条/batch 同语义（C1 修复：此前服务端组
 // 创建硬编码 Save:true + 无 transfer，组链三参在最后一跳被丢弃）。
 func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfilename.Entry, owner string, params TaskParams) (*CloudTaskGroup, error) {

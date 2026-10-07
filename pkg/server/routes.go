@@ -27,6 +27,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/web"
@@ -108,6 +109,10 @@ type RegisterRoutesOpts struct {
 	// StateStore 是状态存储后端（statestore.md §5.2）：非 nil 时分享/索引适配器切
 	// StateStore 后端（双读单写零回归）；nil = 未装配（分享/索引走原本地 JSON 落盘）。
 	StateStore state.StateStore
+	// RemoveMovedSource 是 move 删源实现（nil = 默认 storage.Root.Remove）。**测试注入
+	// opt（用户裁定 2026-10-07：禁止测试依赖全局函数/并发修改包级 seam）**：构造时注入
+	// Handlers 实例字段，运行期不可变；测试模拟「并发 delete 已删源」的 IsNotExist 竞态。
+	RemoveMovedSource func(root *storage.Root, rel string) error
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -146,26 +151,27 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 
 	h := &Handlers{
-		cfgPtr:        opts.CfgPtr,
-		version:       opts.Version,
-		buildAt:       opts.BuildAt,
-		logger:        log,
-		auditLogger:   auditLogger,
-		metrics:       NewMetrics(),
-		rebalanceProg: newRebalanceProgress(),
-		shareStore:    NewShareStore(log.With("component", "share")),
-		routeTable:    opts.RouteTable,
-		signalBroker:  NewSignalBroker(opts.RouteTable),
-		hubPersist:    opts.HubPersist,
-		hubID:         cfg.Hub.NodeID,
-		uploadingStop: make(chan struct{}),
-		noncePool:     sproxysig.NewNoncePool(),
-		totpNoncePool: newTotpNoncePool(),
-		tracer:        opts.Tracer,
-		auditRing:     auditRing,
-		auditStore:    auditStore,
-		notifyCenter:  newNotifyCenterFromConfig(cfg.Notify, log),
-		alertEngine:   newAlertEngineFromConfig(cfg.Alerts, log),
+		cfgPtr:            opts.CfgPtr,
+		version:           opts.Version,
+		buildAt:           opts.BuildAt,
+		logger:            log,
+		auditLogger:       auditLogger,
+		metrics:           NewMetrics(),
+		rebalanceProg:     newRebalanceProgress(),
+		shareStore:        NewShareStore(log.With("component", "share")),
+		routeTable:        opts.RouteTable,
+		signalBroker:      NewSignalBroker(opts.RouteTable),
+		hubPersist:        opts.HubPersist,
+		hubID:             cfg.Hub.NodeID,
+		removeMovedSource: opts.RemoveMovedSource, // 测试注入 opt；nil = 默认 storage.Root.Remove
+		uploadingStop:     make(chan struct{}),
+		noncePool:         sproxysig.NewNoncePool(),
+		totpNoncePool:     newTotpNoncePool(),
+		tracer:            opts.Tracer,
+		auditRing:         auditRing,
+		auditStore:        auditStore,
+		notifyCenter:      newNotifyCenterFromConfig(cfg.Notify, log),
+		alertEngine:       newAlertEngineFromConfig(cfg.Alerts, log),
 		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见
 		// loginFailTracker 注释）。
 		loginFailTracker: newLoginFailTracker(),

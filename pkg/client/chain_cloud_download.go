@@ -50,13 +50,20 @@ type CloudDownloadChain struct {
 	// Save 保留 cloud 桶副本（nil = 默认 true）。
 	Save *bool `json:"save,omitempty"`
 	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。
-	DownloadLocal bool      `json:"download_local,omitempty"`
-	Completed     int       `json:"completed"`
-	Failed        int       `json:"failed"`
-	Total         int       `json:"total"`
-	Error         string    `json:"error,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	DownloadLocal bool `json:"download_local,omitempty"`
+	// IntegrityMustPass 强制源文件完整性（语义校验失败阻断；透传服务端）。
+	IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
+	Completed         int  `json:"completed"`
+	Failed            int  `json:"failed"`
+	Total             int  `json:"total"`
+	// Damaged 完整性损坏但放行完成的任务数（R3-I3：损坏副本不应被当可靠成功）。
+	Damaged int `json:"damaged,omitempty"`
+	// seenCompleted 已计数的 completed 任务 ID（R6-I1：防 storage-full 重试轮重复累计；
+	// 非持久化，链实例生命周期内有效）。
+	seenCompleted map[string]bool `json:"-"`
+	Error         string          `json:"error,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -95,23 +102,25 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		}
 	}
 	return &CloudDownloadChain{
-		ChainID:       chainID,
-		CurrentPhase:  "",
-		CurStatus:     StatusRunning,
-		URLs:          urls, // 兼容旧持久化状态；新状态以 Entries 为准
-		Entries:       entries,
-		ArchiveName:   archiveName,
-		LocalDir:      localDir,
-		KeepFiles:     opts.keepFiles,
-		Transfer:      opts.transfer,
-		Save:          opts.save,
-		DownloadLocal: opts.downloadLocal,
-		Total:         len(entries),
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		PollInterval:  fixPollInterval(opts.pollInterval),
-		Timeout:       opts.timeout,
-		client:        client,
+		ChainID:           chainID,
+		seenCompleted:     make(map[string]bool),
+		CurrentPhase:      "",
+		CurStatus:         StatusRunning,
+		URLs:              urls, // 兼容旧持久化状态；新状态以 Entries 为准
+		Entries:           entries,
+		ArchiveName:       archiveName,
+		LocalDir:          localDir,
+		KeepFiles:         opts.keepFiles,
+		Transfer:          opts.transfer,
+		Save:              opts.save,
+		DownloadLocal:     opts.downloadLocal,
+		IntegrityMustPass: opts.forceIntegrity,
+		Total:             len(entries),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		PollInterval:      fixPollInterval(opts.pollInterval),
+		Timeout:           opts.timeout,
+		client:            client,
 	}, nil
 }
 
@@ -120,29 +129,30 @@ func (c *CloudDownloadChain) Phase() string  { return c.CurrentPhase }
 func (c *CloudDownloadChain) Status() string { return c.CurStatus }
 func (c *CloudDownloadChain) State() map[string]any {
 	return map[string]any{
-		"type":           TypeCloudDownload,
-		"chain_id":       c.ChainID,
-		"phase":          c.CurrentPhase,
-		"status":         c.CurStatus,
-		"urls":           c.URLs,
-		"entries":        c.Entries,
-		"task_ids":       c.TaskIDs,
-		"archive_name":   c.ArchiveName,
-		"local_dir":      c.LocalDir,
-		"local_path":     c.LocalPath,
-		"local_verified": c.LocalVerified,
-		"keep_files":     c.KeepFiles,
-		"completed":      c.Completed,
-		"failed":         c.Failed,
-		"total":          c.Total,
-		"error":          c.Error,
-		"created_at":     c.CreatedAt,
-		"updated_at":     c.UpdatedAt,
-		"poll_interval":  c.PollInterval,
-		"timeout":        c.Timeout,
-		"transfer":       c.Transfer,
-		"save":           c.Save,
-		"download_local": c.DownloadLocal,
+		"type":                TypeCloudDownload,
+		"chain_id":            c.ChainID,
+		"phase":               c.CurrentPhase,
+		"status":              c.CurStatus,
+		"urls":                c.URLs,
+		"entries":             c.Entries,
+		"task_ids":            c.TaskIDs,
+		"archive_name":        c.ArchiveName,
+		"local_dir":           c.LocalDir,
+		"local_path":          c.LocalPath,
+		"local_verified":      c.LocalVerified,
+		"keep_files":          c.KeepFiles,
+		"completed":           c.Completed,
+		"failed":              c.Failed,
+		"total":               c.Total,
+		"error":               c.Error,
+		"created_at":          c.CreatedAt,
+		"updated_at":          c.UpdatedAt,
+		"poll_interval":       c.PollInterval,
+		"timeout":             c.Timeout,
+		"transfer":            c.Transfer,
+		"save":                c.Save,
+		"download_local":      c.DownloadLocal,
+		"integrity_must_pass": c.IntegrityMustPass,
 	}
 }
 
@@ -171,6 +181,7 @@ func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
 	c.Transfer = opts.transfer
 	c.Save = opts.save
 	c.DownloadLocal = opts.downloadLocal
+	c.IntegrityMustPass = opts.forceIntegrity
 }
 
 // fixPollInterval 确保轮询间隔不为零，零值时使用默认值（5s）。
@@ -333,6 +344,9 @@ func cloudDownloadTransferOpts(c *CloudDownloadChain) []CloudDownloadOption {
 	if c.DownloadLocal {
 		opts = append(opts, WithCloudDownloadLocal(true))
 	}
+	if c.IntegrityMustPass {
+		opts = append(opts, WithCloudDownloadIntegrityMustPass(true))
+	}
 	return opts
 }
 
@@ -399,6 +413,8 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		// 每次重试前归零计数器，基于本次轮询结果重新统计
 		c.Completed = 0
 		c.Failed = 0
+		// R6-I1：Damaged 不归零——seenCompleted 已防跨轮重复计（completed 终态计一次），
+		// 归零会让重试轮丢失计数（dmg-1 continue 后 Damaged 被清零）。
 		submitFailedCount = 0
 
 		results, err := c.pollAllTasks(ctx)
@@ -432,7 +448,16 @@ func (c *CloudDownloadChain) tallyResults(results []*CloudTask) (storageFullURLs
 	for _, r := range results {
 		switch r.Status {
 		case TaskStatusCompleted:
+			// R6-I1 根因：storage-full 重试轮重复轮询已完成任务 → Completed/Damaged
+			// 每轮累加虚高。用 seenCompleted 防重复计（不移除 TaskIDs——archive 阶段仍需）。
+			if !c.markCompletedSeen(r.ID) {
+				continue
+			}
 			c.Completed++
+			// R3-I3：completed 但完整性损坏（damaged）——默认放行语义，不当作可靠成功。
+			if r.IntegrityStatus == "damaged" {
+				c.Damaged++
+			}
 		case TaskStatusCancelled:
 			cancelled++
 		case TaskStatusFailed:
@@ -456,6 +481,8 @@ func (c *CloudDownloadChain) waitFailure(cancelled, submitFailedCount int) error
 		}
 		return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
 	}
+	// R3-I3：完整性损坏放行（damaged）→ 警告但继续（用户裁定 2026-10-06：警告继续——
+	// 不整链阻断，正常文件可得，damaged 项审计可见）。
 	return nil
 }
 
@@ -545,7 +572,7 @@ func (c *CloudDownloadChain) resubmitStorageFull(ctx context.Context, storageFul
 	for _, u := range storageFullURLs {
 		retryEntries = append(retryEntries, c.entryForURL(u))
 	}
-	// M5：storage-full 重试透传三参（transfer/save/download_local）——与 submitTasks
+	// M5：storage-full 重试透传四参（transfer/save/download_local/integrity_must_pass）——与 submitTasks
 	// 同一收口 cloudDownloadTransferOpts(c)，避免重试条目丢失转存/保存语义（此前
 	// 仅 URL+filename 重提交 → 转存后任务被当成纯下载，save=false 语义不落地）。
 	tasks, err := c.client.CloudDownloadBatchEntries(retryCtx, retryEntries, cloudDownloadTransferOpts(c)...)
@@ -732,4 +759,18 @@ func isStorageFullError(errMsg string) bool {
 		strings.Contains(lower, "存储已满") ||
 		strings.Contains(lower, "超出配额") ||
 		strings.Contains(lower, "磁盘空间")
+}
+
+// markCompletedSeen 标记 completed 任务已计数（防 storage-full 重试轮重复累计）。
+// 返回 false = 该 ID 已计过（跳过）；true = 首次（继续计数）。延迟初始化（Restore
+// 恢复的链 seenCompleted 非持久化为 nil）。
+func (c *CloudDownloadChain) markCompletedSeen(id string) bool {
+	if c.seenCompleted == nil {
+		c.seenCompleted = make(map[string]bool)
+	}
+	if c.seenCompleted[id] {
+		return false
+	}
+	c.seenCompleted[id] = true
+	return true
 }

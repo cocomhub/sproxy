@@ -27,6 +27,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >   本地实例构造、`RegisterXxx(reg, cfg)` 按参注册入口，包内结构内部方法直接接收内部类型变量控制
 >   全局行为）；测试传本地实例不触碰全局 → 可 `t.Parallel()`。**新测试先问「能否并行」，不得默认
 >   登记串行**（教训 #734：30+ 一次性串行登记吃光棘轮 slack，CI merge 树红灯）。详见 `AGENTS.md` R18。
+> - **测试注入纪律（2026-10-07 用户明示，加强版）**：**绝对禁止测试依赖全局可变函数/变量做 seam
+>   替换**（`var removeX = os.Remove` 包级 seam + 测试 t.Cleanup 恢复，运行期替换/并发恢复即 data
+>   race，且影响其它读该 seam 的用例）。一切测试注入一律走**结构体内部私有变量，只能在创建时经
+>   构造函数/opts 注入**（`VideoChecker.indexer`、`CloudDownloadManager.removeFile`、
+>   `NewLocalOrExitDial(...localDial)`、`Handlers.removeMovedSource`）：运行期不可变 → 并发安全 →
+>   测试可 `t.Parallel()`。判断标准：测试里出现「替换包级 var + t.Cleanup 恢复」即违规，须改为构造
+>   注入实例字段（参考本分支 removeTaskFile/localDialFunc/removeMovedSource 改造）。
+> - **配置默认值纪律（2026-10-07 用户明示，加强版）**：**绝对禁止特化的默认配置行为**——bool
+>   配置字段**必须默认 false**、string 配置字段**必须默认空字符串**；一切配置必须有**安全可靠的
+>   默认行为**。需要「默认开启某能力」时**禁止 bool 默认 true**（默认 true 使「显式 false 关闭」
+>   与「未配置」语义混淆）——**直接反转语义**：flag 表达「关闭某能力」（`disable_xxx`/`no_xxx`，
+>   默认 false = 能力默认开启），或默认值本身即安全路径（如 `cloud_check_mem_bytes` 默认 512MiB
+>   非零保证配额治理默认生效——用户裁定 2026-10-07：0 处理成默认大小）。判断标准：新增 bool 默认
+>   true / string 默认非空 → 违反本条（参考本分支 `--integrity-must-pass` 默认 false：校验默认
+>   嵌入主链，must-pass 仅反转 damaged 阻断语义）。
 > - **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为必须逐项
 >   测试锁定；新增外部依赖先在 `docs/external-dependencies.md` 分类登记 + 补测试锁定；测试红先对照
 >   该文档判「依赖变化 vs 实现回归」，禁止静默改实现适配未登记的变化。详见 `AGENTS.md` 硬规则 19。
@@ -775,6 +790,10 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 
 - **禁止 `max`/`min`/`cap`/`len` 作局部变量**（go:S978）——用 `mx`/`mn`/`n`（实测 config.go transferConcurrencyEffective 命中）。
 - **测试 err 不赋局部变量**（godre:S8193/S4144 族）：`if err := f(); err != nil { t.Fatalf }` 直写；测试断言与既有用例完全相同 → 合并/参数化，不复制。
+  **S8193 判据补充（2026-10-07 实测）**：变量声明后**只在条件里用一次**（`if x := f(); x != nil { return }` 且 x 在分支内不再用）→ 内联 `if f() != nil`；**若 x 在分支体内复用（如 `t.Fatalf("... %v", jerr)`）必须保留声明**——两处 `json.Decode` 分别处理（断言 Fatalf 保留 / WaitFor 闭包 return false 内联）。
+- **空函数必须括号内注释**（go:S1186）：`func() {}` 返回空闭包（no-op release 等）→ 在 `{}` **内部**写 `func() { /* 理由 */ }`——函数体外行注释 Sonar 不识别（2026-10-07 实测 acquireCheckMem 空 release 命中）。
+- **字符串字面量重复**（go:S1192）：同一字面量（如 Kind 注册键 `"archive/tar"`）≥3 处 → 提包级常量（`const TarKind = "archive/tar"`，Register/Kind 共用）。
+- **参数过多**（go:S107）：>7 参函数 → 相关参数归组 struct（本仓先例 srcMeta/finalizeRequest；ctx 保持首参——containedctx 纪律）。
 - **单方法接口命名**（godre:S8196）：能力接口（`WriteIfAbsent`/`ReserveSpace`/`LocalVolume`）命名表达能力语义 = 设计保留，行尾 `// NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留`。
 - **测试认知复杂度**（go:S3776）：表驱动断言抽 `assert*` helper；mock 路由 switch 抽独立 handler 函数（实测 transfer_test/account_test/hybrid_multiaccount_test 命中）。
 - **大函数/并发测试拆子函数**（go:S3776）：长并发/阶段测试把「执行」与「断言」分开（如 runLockstepWorkers + assertConcurrentDayUsed）。

@@ -19,6 +19,22 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
+  // buildIntegrityBadge 构造云任务完整性标记 HTML（kind in {cloud_task, ...}）。
+  // integrity_status ∈ {"", "verified", "damaged", "unverified"}：
+  // damaged → 黄色「完整性异常」；unverified（超内存配额跳过校验）→ 灰色「未校验」；
+  // verified/缺省 → 空串（正常）。服务端固定枚举，字符串字面量防注入。
+  function buildIntegrityBadge(kind, item) {
+    const integrityRaw = (item && item.meta && item.meta.raw) || {};
+    const st = integrityRaw.integrity_status;
+    if (kind === 'cloud_task' && st === 'damaged') {
+      return '<span style="font-size:11px;color:var(--text-warning);margin-left:6px;font-weight:600;">完整性异常</span>';
+    }
+    if (kind === 'cloud_task' && st === 'unverified') {
+      return '<span style="font-size:11px;color:var(--text-muted);margin-left:6px;">未校验</span>';
+    }
+    return '';
+  }
+
   // ---- 基础工具（纯） ----
 
   function escHtml(s) {
@@ -817,7 +833,11 @@
     const titleHtml = kind === 'cloud_group' ? (item.name || item.id || '-') : title;
     const badgeText = kind === 'sync_task' ? syncStatusText(item.status) : statusText(item.status);
     // 审查 M-1：状态文本来自服务端，转义防注入（纵深防御；sync 行至少转义）。
-    const badge = '<span style="font-size:12px;font-weight:600;margin-left:8px;padding:1px 8px;border-radius:10px;background:var(--bg-hover);color:var(--text-secondary);white-space:nowrap;">' + escHtml(badgeText) + '</span>';
+    let badge = '<span style="font-size:12px;font-weight:600;margin-left:8px;padding:1px 8px;border-radius:10px;background:var(--bg-hover);color:var(--text-secondary);white-space:nowrap;">' + escHtml(badgeText) + '</span>';
+    // 云任务完整性标记（任务 7）：服务端 IntegrityStatus ∈ {"", "verified", "damaged", "unverified"}
+    // （pkg/cloud/manager.go）。damaged → 双色「完整性异常」（--text-warning）；unverified
+    // （超内存配额跳过校验）→ 灰色「未校验」；verified/缺省 → 无标记。纯函数便于单测。
+    badge += buildIntegrityBadge(kind, item);
     const cached = _cachedChunksOf(item.meta);
     const totalChunks = item.meta && item.meta.totalChunks ? item.meta.totalChunks : 0;
     const cachedHtml = cached > 0 ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">已缓存 ' + cached + '/' + totalChunks + ' 块</span>' : '';
@@ -940,7 +960,7 @@
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
     auditTableHtml, volumesTableHtml, topologyEdgeColor, topologySvg,
     federationNodesHtml, federationServicesHtml,
-    statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
+    statusText, buildIntegrityBadge, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
     syncStatusText, buildSyncRowMeta, syncCarrierText, meshStatusHtml,
     TRANSFER_CHANNELS, filterTransferItems, buildTransferRowHtml, buildTransferListHtml,

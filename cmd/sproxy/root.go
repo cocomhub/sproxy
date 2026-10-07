@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/files"
+	_ "github.com/cocomhub/sproxy/pkg/integrity/ext/video" // 注册视频语义校验器（ffprobe）
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"

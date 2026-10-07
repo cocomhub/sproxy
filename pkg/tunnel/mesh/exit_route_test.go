@@ -44,7 +44,7 @@ func TestLocalOrExitDial_LocalSucceeds_NoExit(t *testing.T) {
 		exitCalls.Add(1)
 		return nil, errors.New("exit should not be used")
 	}
-	dial := NewLocalOrExitDial(500*time.Millisecond, exit)
+	dial := NewLocalOrExitDial(500*time.Millisecond, exit) // 默认 localDial：本地直连 echo
 	// 本地直连到 echo：竞速模式下 exit 可能被启动，但**结果不被使用**——
 	// 返回的连接必须是本地 echo（拨通即验证）；且不等待 localTimeout（本地快）。
 	start := time.Now()
@@ -213,15 +213,13 @@ func slowLocalDial(ctx context.Context, addr string) (net.Conn, error) {
 }
 
 func TestLocalOrExitDial_Race_ExitWinsWhileLocalBlackholed(t *testing.T) {
-	// sproxy:serial: 竞速测试替换包级 localDialFunc（数据竞争），串行执行
-	orig := localDialFunc
-	localDialFunc = slowLocalDial // 本地黑洞：挂起直到超时
-	t.Cleanup(func() { localDialFunc = orig })
+	// slowLocalDial 经构造参数注入（localDial 参数）——无包级 seam，可 t.Parallel。
+	t.Parallel()
 	ln := startEcho(t)
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
 		return net.Dial("tcp", ln.Addr().String())
 	}
-	dial := NewLocalOrExitDial(500*time.Millisecond, exit)
+	dial := NewLocalOrExitDial(500*time.Millisecond, exit, slowLocalDial)
 	start := time.Now()
 	conn, err := dial(context.Background(), "127.0.0.1:1")
 	if err != nil {
@@ -235,13 +233,8 @@ func TestLocalOrExitDial_Race_ExitWinsWhileLocalBlackholed(t *testing.T) {
 }
 
 func TestLocalOrExitDial_Race_LocalWinsFast(t *testing.T) {
-	// sproxy:serial: 竞速测试替换包级 localDialFunc（数据竞争），串行执行
-	orig := localDialFunc
-	localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "tcp", addr)
-	}
-	t.Cleanup(func() { localDialFunc = orig })
+	// 默认 localDial（net.Dialer 直连）——不注入（默认实现可直连本机 echo）。
+	t.Parallel()
 	ln := startEcho(t)
 	// exit 阻塞等 ctx 取消（模拟慢出口）；竞速下 local 胜出应触发 raceCancel 使
 	// exit 被取消（而非等待 exit 完成）。验证取消机制，不依赖耗时断言（并行下
@@ -268,13 +261,8 @@ func TestLocalOrExitDial_Race_LocalWinsFast(t *testing.T) {
 }
 
 func TestLocalOrExitDial_Race_BothFail_Aggregate(t *testing.T) {
-	// sproxy:serial: 竞速测试替换包级 localDialFunc（数据竞争），串行执行
-	orig := localDialFunc
-	localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "tcp", addr)
-	}
-	t.Cleanup(func() { localDialFunc = orig })
+	// 默认 localDial（本机 127.0.0.1:1 拒绝）+ exit 失败 → 聚合错误。无 seam 注入。
+	t.Parallel()
 	exit := func(ctx context.Context, addr string) (net.Conn, error) {
 		return nil, errors.New("exit down")
 	}

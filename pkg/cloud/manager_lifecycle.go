@@ -136,6 +136,12 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	task.Error = ""
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
+	// M1（对抗评审）：resume 重置完整性运行时累计（integritySames/LastChecksum）——
+	// 新下载会话从零累计，防 stale 跨 resume 累计导致首轮即误判 permanent。
+	// IntegrityStatus 一并清空（重下后重新判定）。
+	task.integritySames = 0
+	task.integrityLastChecksum = ""
+	task.IntegrityStatus = ""
 
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	// resumeReserved 记录**本次调用**新落的占位（0 = 未新增，此时 task.ReservedSize 是任务失败时
@@ -211,8 +217,14 @@ func (m *CloudDownloadManager) resumeTaskLookupLocked(taskID, owner string, chec
 	if !ok || (owner != "" && !ownerVisible(task.Owner, owner)) {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
-	if status := task.Status; status != "failed" && status != "cancelled" {
-		return nil, fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
+	// M2（damaged 重下入口）：completed+IntegrityStatus==damaged 也允许恢复——
+	// damaged 是「警告继续」放行后的完成态，任务可显式重下修复。其余完成态
+	// （verified/未校验）不可恢复（无重下诉求，防误操作）。
+	status := task.Status
+	resumable := status == "failed" || status == "cancelled" ||
+		(status == "completed" && task.IntegrityStatus == "damaged")
+	if !resumable {
+		return nil, fmt.Errorf("task %s is in status %q, only failed/cancelled (or damaged) tasks can be resumed", taskID, status)
 	}
 	if checkRunning && m.running[taskID] {
 		return nil, fmt.Errorf("task %s is still running, cannot resume now", taskID)
@@ -237,7 +249,7 @@ func (m *CloudDownloadManager) reserveCloudResumeLocked(task *CloudTask) (int64,
 // discardForceResumeFiles force 续传时丢弃旧产物（结果文件 + .partial + .partial.etag）并回拨
 // Scope 占用（逻辑见 ResumeTask 的 force 分支注释）。
 func (m *CloudDownloadManager) discardForceResumeFiles(task *CloudTask, destPath string) {
-	discarded := removeDiscardedTaskFiles(destPath, removeTaskFile)
+	discarded := removeDiscardedTaskFiles(destPath, m.removeFileOrDefault())
 	m.mu.Lock()
 	// 不得释放超过本任务记录的占用：删除的字节多于本任务记的账时，超出部分属同桶邻居的
 	// 份额，直接 ReleaseUsage 会吃掉它们（层内无归属，见 pkg/quota 的逐层钳制）。

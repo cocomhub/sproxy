@@ -333,6 +333,132 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 //   - 注意：normalizeCloudTaskItem（app.js meta.raw=t）这一跳无直接测试——node 单测构造
 //     meta.raw 绕过它；未来若此处被改坏，node 单测抓不到（与"硬编码 meta.raw={}"事故同类）。
 
+// TestCloudDownloadIntegrityBadge 验证云任务 IntegrityStatus=damaged 的行内完整性标记
+// （任务 7）。渲染源是 _cloudTasks（服务端 API 拉取，不读 transfer store）——真实
+// damaged 状态需服务端装配损坏下载（物理不可达），故直接向 _cloudTasks 内存数组注入
+// damaged 云任务（原始服务端对象，不经 localStorage 持久化）。
+// 注入走真实归一：getAllTransferItems 对 _cloudTasks 成员调用 normalizeCloudTaskItem
+// （表带 integrity_status）+ 原始对象 → meta.raw，与云端 API 数据同一渲染路径（表带
+// normalize 不复制 integrity_status，故注入原始源对象）；node 单测
+// （transfer-render.test.js）构造 meta.raw 直接测渲染分支。**真实 API→DOM 接线**
+// （损坏源 → 服务端语义判定 damaged → GET /api/cloud/tasks → 徽章）由
+// cloud_audit_e2e_test.go TestCloudDownload_DamagedBadge_RealLink 端到端佐证。
+// （注入模式：window.transferStore.upsertItem 仅持久化 localStorage 项，对云任务渲染
+// 无效果——见 P0 修复注释。）
+func TestCloudDownloadIntegrityBadge(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 点击云按钮进入传输页（showTransferPage → refreshCloudTasks + 渲染）
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
+	}
+
+	// 等初始列表落定（首拉 API 渲染空态/无任务），再停轮询防被 3s 重拉覆盖注入。
+	if err := waitLoc(page, "#transfer-body", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("transfer-body not visible: %v", err)
+	}
+	waitTextVisible(t, page, "#transfer-body", noTransferText(), 10000)
+	// 任务7 审查 Minor 修复：注入前等首拉回调落回（_cloudTasksInFlight===false），
+	// 消除「refreshCloudTasks 在途 fetch 覆盖注入对象」的窄竞态（CI 慢机偶发 flake）。
+	// 空态文案可由频道+空数组先生成，不代表首拉 fetch 已落回——必须显式等 in-flight 归零。
+	waitCloudTasksIdle := `(() => {
+	  const deadline = Date.now() + 5000;
+	  return new Promise((resolve) => {
+	    const tick = () => {
+	      if (!window._cloudTasksInFlight) { resolve(true); return; }
+	      if (Date.now() > deadline) { resolve(false); return; }
+	      setTimeout(tick, 50);
+	    };
+	    tick();
+	  });
+	})()`
+	if v, err := page.Evaluate(waitCloudTasksIdle); err != nil || v != true {
+		t.Fatalf("等待 _cloudTasksInFlight 归零失败: v=%v err=%v", v, err)
+	}
+	scriptStop := `(() => { stopCloudPolling(); return true; })()`
+	if _, err := page.Evaluate(scriptStop); err != nil {
+		t.Fatalf("stopCloudPolling: %v", err)
+	}
+
+	// 注入 damaged 云任务（原始服务端对象，经 getAllTransferItems 归一一次）并切到云任务频道重渲染。
+	script := `(() => {
+	  _cloudTasks.push({ id: 'integrity-dmg', filename: 'i.bin',
+	    status: 'completed', integrity_status: 'damaged' });
+	  switchTransferChannel('cloud_tasks');
+	  return true;
+	})()`
+	if _, err := page.Evaluate(script); err != nil {
+		t.Fatalf("注入 damaged 云任务失败: %v", err)
+	}
+
+	// 轮询断言完整性标记可见：注入项 completed 被折叠在分组 <details> 内，先展开分组
+	// （summary 文本出现在 InnerText、行文本不可读），再断言「完整性异常」。（同
+	// cloud_audit_e2e_test.go 的展开模式。）
+	if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
+		t.Fatalf("展开已完成分组: %v", cerr)
+	}
+	waitTextVisible(t, page, "#transfer-body", "完整性异常", 8000)
+}
+
+// TestCloudDownloadUnverifiedBadge 验证 IntegrityStatus=unverified（超内存配额跳过校验）
+// 的灰色「未校验」标记（与 damaged「完整性异常」区分）。注入模式同 damaged 变体。
+func TestCloudDownloadUnverifiedBadge(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
+	}
+	if err := waitLoc(page, "#transfer-body", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("transfer-body not visible: %v", err)
+	}
+	waitTextVisible(t, page, "#transfer-body", noTransferText(), 10000)
+	// 等首拉回调归零
+	waitCloudTasksIdle := `(() => {
+	  const deadline = Date.now() + 5000;
+	  return new Promise((resolve) => {
+	    const tick = () => {
+	      if (!window._cloudTasksInFlight) { resolve(true); return; }
+	      if (Date.now() > deadline) { resolve(false); return; }
+	      setTimeout(tick, 50);
+	    };
+	    tick();
+	  });
+	})()`
+	if v, err := page.Evaluate(waitCloudTasksIdle); err != nil || v != true {
+		t.Fatalf("等待 _cloudTasksInFlight 归零失败: v=%v err=%v", v, err)
+	}
+	if _, err := page.Evaluate(`(() => { stopCloudPolling(); return true; })()`); err != nil {
+		t.Fatalf("stopCloudPolling: %v", err)
+	}
+	script := `(() => {
+	  _cloudTasks.push({ id: 'integrity-unv', filename: 'u.bin',
+	    status: 'completed', integrity_status: 'unverified' });
+	  switchTransferChannel('cloud_tasks');
+	  return true;
+	})()`
+	if _, err := page.Evaluate(script); err != nil {
+		t.Fatalf("注入 unverified 云任务失败: %v", err)
+	}
+	if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
+		t.Fatalf("展开已完成分组: %v", cerr)
+	}
+	waitTextVisible(t, page, "#transfer-body", "未校验", 8000)
+}
+
+// noCloudComText 提供云任务频道空态文案（避免断言依赖字面量被重构牵连）。
+func noTransferText() string { return "暂无传输记录" }
+
 // TestCloudDownloadTaskList 验证云任务列表渲染（进入传输页云任务频道）。
 func TestCloudDownloadTaskList(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)

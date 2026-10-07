@@ -67,7 +67,14 @@ func (m *CloudDownloadManager) ListTasks(status string, offset, limit int, owner
 
 	var all []*CloudTask
 	for _, t := range m.tasks {
-		if (status == "" || t.Status == status) && ownerVisible(t.Owner, owner) {
+		// damaged 是完整性状态过滤（completed 任务的子集），非任务状态：
+		// status=="damaged" 匹配 IntegrityStatus==damaged（含未完成态？不——damaged
+		// 只在完成态写入，见 resolveIntegrityTaskErr/handleIntegrityExhausted）。
+		match := status == "" || t.Status == status
+		if status == "damaged" {
+			match = t.Status == "completed" && t.IntegrityStatus == "damaged"
+		}
+		if match && ownerVisible(t.Owner, owner) {
 			c := *t
 			c.account = nil // 快照不暴露运行时配额句柄（同 SnapshotTask）
 			all = append(all, &c)

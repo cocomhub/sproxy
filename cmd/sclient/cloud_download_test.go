@@ -194,6 +194,35 @@ func TestCloudDownloadCmd_ChainOperation(t *testing.T) {
 	}
 }
 
+// TestCloudDownloadCmd_IntegrityMustPassFlag 验证 --integrity-must-pass 旗标注册（chain + submit）
+// 且默认 false 时不干扰既有行为（Changed 才透传，零回归）。
+func TestCloudDownloadCmd_IntegrityMustPassFlag(t *testing.T) {
+	t.Parallel()
+	svc := client.NewFileClient("http://test.local")
+	factory := clientfactory.NewMock(svc, nil)
+
+	// chain 入口：旗标存在且默认 false
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
+	if cmd.Flags().Lookup(flagIntegrityMustPass) == nil {
+		t.Fatalf("expected --%s flag on cloud-download", flagIntegrityMustPass)
+	}
+	if v, _ := cmd.Flags().GetBool(flagIntegrityMustPass); v {
+		t.Fatalf("default --%s should be false（零回归）", flagIntegrityMustPass)
+	}
+	// 未显式传时 buildCloudDownloadChainOpts 不追加 force option（Changed 模式）
+	// ——chainOptions 未导出，无法直接断言字段；透传正确性由 pkg/client 层
+	// TestCloudDownload_IntegrityMustPassBody + 链式测试覆盖。
+
+	// submit 子命令：旗标存在且默认 false
+	sub := findSubCommand(cmd, "submit")
+	if sub == nil || sub.Flags().Lookup(flagIntegrityMustPass) == nil {
+		t.Fatalf("expected --%s flag on cloud-download submit", flagIntegrityMustPass)
+	}
+	if v, _ := sub.Flags().GetBool(flagIntegrityMustPass); v {
+		t.Fatalf("default --%s on submit should be false", flagIntegrityMustPass)
+	}
+}
+
 func TestCloudDownloadCmd_KeepFiles(t *testing.T) {
 	tasks := []map[string]any{
 		{
@@ -279,7 +308,7 @@ func TestCloudDownloadCmd_NewFlags(t *testing.T) {
 		}
 	}
 
-	newFlags := []string{"keep-files", "timeout", "archive-name", flagOutputDir, flagPollInterval, flagURLFile}
+	newFlags := []string{"keep-files", "timeout", "archive-name", flagOutputDir, flagPollInterval, flagURLFile, flagIntegrityMustPass}
 	for _, name := range newFlags {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected new flag --%s to exist", name)

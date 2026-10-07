@@ -176,16 +176,20 @@ func (a cloudTestStorageManager) MaxBytes() int64      { return a.m.MaxBytes() }
 // newCloudTestManager 创建领域管理器（等价于 pkg/server 的同名测试辅助，但只依赖本环境的
 // 窄函数，不经过 Handlers）。签名刻意与装配层版本一致（接收真实 `*capacity.StorageManager`
 // 并在此包装），使迁入的用例零改动。返回 (manager, 环境)。
-func newCloudTestManager(t *testing.T, storageRoot string, sm *capacity.StorageManager, cfg *CloudDownloadConfig) (*CloudDownloadManager, *cloudTestEnv) {
+// newCloudTestManager 创建测试 CloudDownloadManager（env 自动装配）。
+// opts 可选：测试注入构造 opt（如 RemoveFile）——**只能在创建时注入**（用户裁定
+// 2026-10-07：禁止测试依赖全局函数/并发修改包级 seam，注入走结构体内部变量）。
+func newCloudTestManager(t *testing.T, storageRoot string, sm *capacity.StorageManager, cfg *CloudDownloadConfig, opts ...CloudManagerOptions) (*CloudDownloadManager, *cloudTestEnv) {
 	t.Helper()
 	env := newCloudTestEnv(t, storageRoot)
-	return newCloudTestManagerInEnv(t, env, sm, env.tenantFor, cfg), env
+	return newCloudTestManagerInEnv(t, env, sm, env.tenantFor, cfg, opts...), env
 }
 
 // newCloudTestManagerInEnv 与 newCloudTestManager 同构，但把租户解析器作为参数暴露：
 // 用例可包装 env.tenantFor（例如「需要时返回 nil」）以确定性地制造「租户在任务存活期间
 // 变不可用」这类状态，而不必依赖真实目录故障或时序。tenantFor 为 nil 时退回 env.tenantFor。
-func newCloudTestManagerInEnv(t *testing.T, env *cloudTestEnv, sm *capacity.StorageManager, tenantFor TenantResolver, cfg *CloudDownloadConfig) *CloudDownloadManager {
+// opts 透传构造 opt（测试注入 RemoveFile 等实例字段，创建时一次性设置）。
+func newCloudTestManagerInEnv(t *testing.T, env *cloudTestEnv, sm *capacity.StorageManager, tenantFor TenantResolver, cfg *CloudDownloadConfig, opts ...CloudManagerOptions) *CloudDownloadManager {
 	t.Helper()
 	if tenantFor == nil {
 		tenantFor = env.tenantFor
@@ -194,7 +198,17 @@ func newCloudTestManagerInEnv(t *testing.T, env *cloudTestEnv, sm *capacity.Stor
 	if sm != nil {
 		storageCap = cloudTestStorageManager{m: sm}
 	}
-	mgr := NewCloudDownloadManager(CloudManagerOptions{UploadsDir: env.root, Storage: storageCap, TenantFor: tenantFor, ChecksumStoreFor: env.checksumStoreFor, ListTenants: env.listTenantIDs, Logger: testLogger(), Config: cfg, QuotaFor: []QuotaResolver{func(owner string) *quota.Scope { return env.quotaBucketFor(owner, "cloud") }}})
+	o := CloudManagerOptions{
+		UploadsDir: env.root, Storage: storageCap, TenantFor: tenantFor,
+		ChecksumStoreFor: env.checksumStoreFor, ListTenants: env.listTenantIDs,
+		Logger: testLogger(), Config: cfg,
+		QuotaFor: []QuotaResolver{func(owner string) *quota.Scope { return env.quotaBucketFor(owner, "cloud") }},
+	}
+	if len(opts) > 0 && opts[0].RemoveFile != nil {
+		// RemoveFile 构造 opt（测试注入）：随构造器一次性设置，运行期不可变。
+		o.RemoveFile = opts[0].RemoveFile
+	}
+	mgr := NewCloudDownloadManager(o)
 	t.Cleanup(func() { mgr.Close() })
 	return mgr
 }

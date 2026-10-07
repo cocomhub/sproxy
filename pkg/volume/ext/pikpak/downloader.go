@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 )
 
 // DownloaderConfig 是 PikPak 下载器配置。
@@ -57,6 +58,13 @@ type PikpakDownloader struct {
 	pool        *AccountPool
 	log         *slog.Logger
 }
+
+// 编译期断言：PikPak 下载器声明其 Result.Checksum 为仅本地自洽（② 态）。
+var _ downloader.IntegrityProvider = (*PikpakDownloader)(nil)
+
+// IntegrityMode 返回 PikPak 下载器的完整性归属：仅本地 checksum+size（② 态）。
+// 官方 CLI 无内部 hash/verify 校验，Checksum 为本地全文件自算，无服务端带外对账。
+func (d *PikpakDownloader) IntegrityMode() downloader.IntegrityMode { return downloader.ModeLocalOnly }
 
 // newPikpakStagingDir 返回一次性下载/中转暂存目录：os.MkdirTemp 在用户缓存目录下创建
 // 随机命名、0700、exclusive-create 防符号链接的子目录（形如 pikpak-<use>-<随机>）。
@@ -248,7 +256,10 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 		// 空池（无账号配置）：回落当前 CLI 登录态（与装配期 pool==nil 语义一致）。
 	}
 	size, checksum, fileID, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
-	return d.finalizeDownload(ctx, size, checksum, fileID, owned, derr, lease)
+	return d.finalizeDownload(ctx, finalizeRequest{
+		size: size, checksum: checksum, fileID: fileID, owned: owned,
+		derr: derr, target: target, destPath: destPath, lease: lease,
+	})
 }
 
 // downloadViaPool 多账号轮换下载：先按**目标文件真实大小**选账号（配额预检 C2），随后
@@ -295,7 +306,10 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
 	}
 	// fileID 传空：AutoDelete 已在 fn 内（选中账号会话）执行，finalizeDownload 不再重复删。
-	return d.finalizeDownload(ctx, size, checksum, "", false, nil, lease)
+	return d.finalizeDownload(ctx, finalizeRequest{
+		size: size, checksum: checksum, fileID: "", owned: false,
+		derr: nil, target: target, destPath: destPath, lease: lease,
+	})
 }
 
 // 注：转存副本释放已收归 RestoreLease（restore.go，round-10 用户裁决）——旧下载器
@@ -304,16 +318,54 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 
 // finalizeDownload 处理下载尾部：错误短路 / AutoDelete（仅删精确命中的转存文件，杜绝误删
 // 网盘旧文件）/ Result 组装（download 两分支共用，控制认知复杂度）。
-func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, owned bool, derr error, lease *RestoreLease) (*Result, error) {
-	if derr != nil {
-		return nil, derr
+//
+// GCID 权威复算（spec §6）：下载完成后读 destPath 文件，按候选分块（256KB~4MB）
+// 复算 GCID，命中官方 FileMeta.Hash（服务端带外权威值）→ Integrity=ModeAuthority +
+// AuthorityHash=官方 hash；未命中 → ModeLocalOnly（② 态语义校验兜底）。
+// 余量说明：小文件实测 256KB 分块复算命中官方 hash；大文件分块粒度非固定
+// （随上传/离线任务变化）→ 候选集合自适应，未命中不误报权威（Review Focus 5）。
+//
+// 参数归组（S107：9 参 > 7 上限收敛）：finalizeRequest 承载下载产物/来源/目标元数据，
+// 调用方（download/pool 分支）构造后传入——ctx 保持首参（containedctx 纪律）。
+type finalizeRequest struct {
+	size     int64
+	checksum string
+	fileID   string
+	owned    bool
+	derr     error
+	target   *FileMeta
+	destPath string
+	lease    *RestoreLease
+}
+
+func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeRequest) (*Result, error) {
+	if req.derr != nil {
+		return nil, req.derr
 	}
 	// 释放经 RestoreLease 单一语义（DeletePermanent）；owned=true 不 Track（源文件）。
-	if !owned && fileID != "" {
-		lease.Track(fileID)
+	if !req.owned && req.fileID != "" {
+		req.lease.Track(req.fileID)
 	}
-	lease.Release(ctx)
-	return &Result{Size: size, Checksum: checksum, ModTime: time.Now()}, nil
+	req.lease.Release(ctx)
+	// GCID 权威复算（spec §6）：文件大小非 0 且官方 hash 非空时，用候选分块复算 GCID，
+	// 命中官方 hash → ModeAuthority（① 态）；否则 ModeLocalOnly（② 态语义校验兜底）。
+	// 复算失败（文件读/destPath 为空）不阻断下载，回落 ModeLocalOnly。
+	res := &Result{Size: req.size, Checksum: req.checksum, ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}
+	if req.size > 0 && req.target != nil && req.target.Hash != "" && req.destPath != "" {
+		// R3-I1：全部整除候选的 GCID 逐一与官方 hash 比对（官方分块粒度未知，
+		// 任一候选命中即权威——提升命中率，非首整除即返）。
+		gcids, err := integrity.RecomputeGCIDAll(req.destPath, integrity.GCIDCandidates)
+		if err == nil {
+			for _, gcid := range gcids {
+				if strings.EqualFold(gcid, req.target.Hash) {
+					res.Integrity = downloader.ModeAuthority
+					res.AuthorityHash = req.target.Hash
+					break
+				}
+			}
+		}
+	}
+	return res, nil
 }
 
 // restoreAndDownload 转存分享到个人网盘 → 定位转存文件 → CLI 完整下载。

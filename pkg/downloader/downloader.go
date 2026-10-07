@@ -19,12 +19,38 @@ import (
 // downloaded 是已下载字节数，total 是总大小（-1 表示未知）。
 type ProgressFunc func(downloaded, total int64)
 
+// IntegrityMode 描述下载结果的完整性可信度（checksum 三态）。
+// 值含义见 README/设计规格：越往高越接近「权威」①态。
+type IntegrityMode int
+
+const (
+	// ModeUnknown 是零值：未声明完整性（未实现校验或下载器未标识）。
+	ModeUnknown IntegrityMode = iota
+	// ModeLocalOnly 仅本地 checksum+size（② 态，可能含外部校验）：
+	// 校验值源自下载器自身写盘结果或本地重算，无服务端带外对账。
+	ModeLocalOnly
+	// ModeSelfVerified 下载器自算 checksum（② 态）：
+	// 下载器下网后自行计算并比对（如 HTTP 对 Content-Length/自算哈希）。
+	ModeSelfVerified
+	// ModeAuthority 权威匹配：本地 == 服务端带外值（① 态）。
+	ModeAuthority
+)
+
 // Result 是下载完成的结果。
 type Result struct {
-	Size     int64     // 实际下载大小
-	Checksum string    // SHA-256 十六进制
-	ModTime  time.Time // 原始文件修改时间（从 HTTP Last-Modified 提取）
-	ETag     string    // 服务器 ETag（用于 If-Range 续传一致性校验）
+	Size          int64         // 实际下载大小
+	Checksum      string        // SHA-256 十六进制
+	ModTime       time.Time     // 原始文件修改时间（从 HTTP Last-Modified 提取）
+	ETag          string        // 服务器 ETag（用于 If-Range 续传一致性校验）
+	Integrity     IntegrityMode // 结果的完整性可信度（②/① 态）
+	AuthorityHash string        // 服务端带外权威 hash（如 pikpak GCID；可空）
+}
+
+// IntegrityProvider 供调度侧/校验管道查询下载器声明的完整性归属。
+// 下载器实现后，消费者可用类型断言判断其 checksum 的三态归属（ModeLocalOnly / ModeSelfVerified）。
+type IntegrityProvider interface {
+	// IntegrityMode 返回该下载器产出的 Result.Integrity 默认声明。
+	IntegrityMode() IntegrityMode
 }
 
 // QuotaSink 是可选写盘记账 sink：io.Writer + 本次下载（写盘会话）结束时回调。

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -545,6 +546,86 @@ func TestCloudArchive_ArchiveTasks(t *testing.T) {
 }
 
 // ---- CloudDownloadOption functions ----
+
+// TestCloudDownloadIntegrityMustPassOption 验证 WithCloudDownloadIntegrityMustPass 选项把
+// cloudDownloadOptions.forceIntegrity 置位（任务5：--integrity-must-pass 透传链路第一跳）。
+func TestCloudDownloadIntegrityMustPassOption(t *testing.T) {
+	t.Parallel()
+	opts := []CloudDownloadOption{WithCloudDownloadIntegrityMustPass(true)}
+	cfg := &cloudDownloadOptions{}
+	for _, o := range opts {
+		o(cfg)
+	}
+	if !cfg.forceIntegrity {
+		t.Fatal("integrity-must-pass 选项应生效")
+	}
+}
+
+// TestCloudDownload_IntegrityMustPassBody 验证单条/批量创建请求体在 integrity_must_pass=true 时
+// 才发送该字段，默认（false）不发送（零回归：omitempty 模式）。
+func TestCloudDownload_IntegrityMustPassBody(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	defaultBodyCount := 0
+	forceBodyCount := 0
+	gotForce := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := body["integrity_must_pass"]; ok {
+			forceBodyCount++
+			gotForce, _ = body["integrity_must_pass"].(bool)
+		} else {
+			defaultBodyCount++
+		}
+		json.NewEncoder(w).Encode(CloudTask{ID: "t1", Status: TaskStatusPending})
+	})
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := body["integrity_must_pass"]; !ok {
+			t.Errorf("batch force=true 时应发 integrity_must_pass，body=%v", body)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{{ID: "t1", Status: TaskStatusPending}}})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	c := NewFileClient(ts.URL)
+
+	// 默认 false：不发字段
+	if _, err := c.CloudDownload(t.Context(), "https://example.com/a.zip"); err != nil {
+		t.Fatalf("CloudDownload(默认): %v", err)
+	}
+	// force=true：单条 + 批量都发
+	if _, err := c.CloudDownload(t.Context(), "https://example.com/b.zip", WithCloudDownloadIntegrityMustPass(true)); err != nil {
+		t.Fatalf("CloudDownload(force): %v", err)
+	}
+	if _, err := c.CloudDownloadBatch(t.Context(), []string{"https://example.com/c.zip"}, WithCloudDownloadIntegrityMustPass(true)); err != nil {
+		t.Fatalf("CloudDownloadBatch(force): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if defaultBodyCount != 1 {
+		t.Fatalf("force=false 应恰好 1 次不带 integrity_must_pass，实际 defaultBodyCount=%d", defaultBodyCount)
+	}
+	if forceBodyCount != 1 || !gotForce {
+		t.Fatalf("force=true 应带 integrity_must_pass=true，forceBodyCount=%d gotForce=%v", forceBodyCount, gotForce)
+	}
+}
 
 func TestWithCloudDownloadMaxBatchURLs(t *testing.T) {
 	t.Parallel()

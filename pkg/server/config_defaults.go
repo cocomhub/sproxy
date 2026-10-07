@@ -112,14 +112,18 @@ func Default() *Config {
 			Listen:           "127.0.0.1:19001",
 			HandshakeTimeout: 10 * time.Second,
 		},
-		ChunkSize:                 size.DefaultChunkSize,
-		UploadSessionTTL:          24 * time.Hour,
-		CloudSyncThreshold:        20 * 1024 * 1024, // 20 MiB
-		CloudDownloader:           "http",
-		CloudTaskTTL:              24 * time.Hour,
-		CloudFailedTaskTTL:        1 * time.Hour,
-		CloudMaxConcurrent:        3,
-		CloudMaxBatchURLs:         100,
+		ChunkSize:          size.DefaultChunkSize,
+		UploadSessionTTL:   24 * time.Hour,
+		CloudSyncThreshold: 20 * 1024 * 1024, // 20 MiB
+		CloudDownloader:    "http",
+		CloudTaskTTL:       24 * time.Hour,
+		CloudFailedTaskTTL: 1 * time.Hour,
+		CloudMaxConcurrent: 3,
+		CloudMaxBatchURLs:  100,
+		// CloudCheckMemBytes 完整性校验内存配额：**缺省 512 MiB（Default 显式填——配额
+		// 治理默认生效，防并发校验 OOM）；显式 0 = 禁用（不排队不限制）；负值按 512MiB
+		// fail-safe**。与 config.go/manager.go/example.yaml 注释统一口径。
+		CloudCheckMemBytes:        ByteSize(512) * (1 << 20),
 		CloudDownloadAllowPrivate: false,
 		CloudDownloadTimeout:      30 * time.Minute,
 		CloudDownloadIdleTimeout:  1 * time.Minute,

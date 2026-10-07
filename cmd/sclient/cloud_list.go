@@ -57,7 +57,7 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 		},
 	}
 
-	cmd.Flags().String("status", "", "按状态过滤（pending/downloading/completed/failed/cancelled）")
+	cmd.Flags().String("status", "", "按状态过滤（pending/downloading/completed/failed/cancelled/damaged——damaged 列出完整性损坏放行的已完成任务）")
 	cmd.Flags().Int("offset", -1, "跳过前 N 条（默认 -1 不偏移）")
 	cmd.Flags().Int("limit", 0, "返回条数上限（默认 0 返回全部）")
 

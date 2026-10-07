@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
+	github.com/cocomhub/sproxy/pkg/integrity/ext/video v0.0.0
 	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0
 	github.com/cocomhub/sproxy/pkg/telemetry/ext/otel v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad v0.0.0-00010101000000-000000000000
@@ -135,6 +136,8 @@ require (
 )
 
 replace github.com/cocomhub/sproxy => ../../
+
+replace github.com/cocomhub/sproxy/pkg/integrity/ext/video => ../../pkg/integrity/ext/video
 
 replace github.com/cocomhub/sproxy/pkg/media/ext/mp4 => ../../pkg/media/ext/mp4
 
