@@ -241,8 +241,8 @@ func TestGCIDOrdered_SizeGuided(t *testing.T) {
 	if hitGCID != target {
 		t.Fatalf("hitGCID mismatch")
 	}
-	if stats.FirstHit.Load() != 1 || stats.SecondHit.Load() != 0 {
-		t.Fatalf("stats: first=%d second=%d, want first=1 second=0", stats.FirstHit.Load(), stats.SecondHit.Load())
+	if stats.HitByRound[1].Load() != 1 || stats.HitByRound[2].Load() != 0 {
+		t.Fatalf("stats: round1=%d round2=%d, want round1=1 round2=0", stats.HitByRound[1].Load(), stats.HitByRound[2].Load())
 	}
 	// 首轮命中：无不一致详情
 	if stats.MismatchFirst.Load() != 0 {

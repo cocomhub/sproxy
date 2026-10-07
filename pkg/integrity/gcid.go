@@ -8,6 +8,7 @@ import (
 	// 必须用 SHA-1，非安全用途——复算权威 hash 需与官方一致，不可替换。
 	"crypto/sha1"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"sort"
@@ -198,11 +199,10 @@ func gcidRangeFor(size int64) []int64 {
 // GCIDVerifyStats 是 GCID 权威校验命中统计（供决策：官方分块粒度规律）。
 // 线程安全（原子计数）——多下载器并发复用。
 type GCIDVerifyStats struct {
-	FirstHit      atomic.Int64 // 首次推荐候选命中
-	SecondHit     atomic.Int64 // 第二次（推荐内第二候选或全候选补位首试）命中
-	LaterHit      atomic.Int64 // 后续候选命中（第 3+ 次尝试）
-	MissTotal     atomic.Int64 // 全候选最终未命中
-	MismatchFirst atomic.Int64 // 实际命中 ≠ 首次推荐候选的文件数（需记录详情）
+	// 命中轮次计数（round 1-5：候选最多 5 个）——用户明示 1-5 次命中都要统计。
+	HitByRound    [6]atomic.Int64 // HitByRound[1..5] 第 N 轮命中；[0] 未用
+	MissTotal     atomic.Int64    // 全候选最终未命中
+	MismatchFirst atomic.Int64    // 实际命中 ≠ 首次推荐候选的文件数（需记录详情）
 	// 详情缓冲（实际命中与首次不一致的文件）：大小/期望/最终（上限防膨胀）
 	detailsMu sync.Mutex
 	details   []GCIDMismatchDetail
@@ -271,13 +271,8 @@ func RecomputeGCIDOrdered(path string, targetHash string, stats *GCIDVerifyStats
 		if targetHash != "" && strings.EqualFold(gcid, targetHash) {
 			// 命中：统计轮次 + 记录不一致详情
 			if stats != nil {
-				switch round {
-				case 1:
-					stats.FirstHit.Add(1)
-				case 2:
-					stats.SecondHit.Add(1)
-				default:
-					stats.LaterHit.Add(1)
+				if round >= 1 && round <= 5 {
+					stats.HitByRound[round].Add(1)
 				}
 				if round > 1 && firstGCID != "" && !strings.EqualFold(firstGCID, gcid) {
 					stats.MismatchFirst.Add(1)
@@ -323,13 +318,14 @@ func (s *GCIDVerifyStats) GCIDStatsSnapshot() map[string]int64 {
 	if s == nil {
 		return nil
 	}
-	return map[string]int64{
-		"first_hit":      s.FirstHit.Load(),
-		"second_hit":     s.SecondHit.Load(),
-		"later_hit":      s.LaterHit.Load(),
+	out := map[string]int64{
 		"miss_total":     s.MissTotal.Load(),
 		"mismatch_first": s.MismatchFirst.Load(),
 	}
+	for r := 1; r <= 5; r++ {
+		out[fmt.Sprintf("round%d_hit", r)] = s.HitByRound[r].Load()
+	}
+	return out
 }
 
 // GCIDMismatchDetails 返回不一致详情（供审计）。
