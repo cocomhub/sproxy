@@ -890,21 +890,24 @@ func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, dc *down
 		return err
 	}
 	defer f.Close()
-	// per-chunk 进度：下载中字节实时回调（pikget 每分片一行显示进度）
+	// per-chunk 进度：下载中字节实时回调。**该 chunk 的 Done 必须是本地累计**（written），
+	// 不能是全局 prog（否则每个 chunk 都显示全局累计 → 超出 64MB + 全部一起涨）。
 	idx := dc.chunkIndex(c.offset)
 	progWithChunk := func(downloaded, total int64) {
 		if dc.onProgress != nil {
 			dc.onProgress(downloaded, total)
 		}
+	}
+	chunkLocal := func(chunkDone int64) {
 		if dc.chunkProgress != nil {
 			dc.chunkProgress(ChunkInfo{
 				Index: idx, Offset: c.offset, Length: c.length,
 				Source: d.chunkSource(dc, c), Phase: "downloading",
-				Done: downloaded, Total: c.length,
+				Done: chunkDone, Total: c.length,
 			})
 		}
 	}
-	written, werr := copyRangeToFile(resp.Body, f, c.offset, c.length, &dc.prog, dc.currentTotal, progWithChunk)
+	written, werr := copyRangeToFile(resp.Body, f, c.offset, c.length, &dc.prog, dc.currentTotal, progWithChunk, chunkLocal)
 	if werr != nil {
 		return werr
 	}
@@ -916,7 +919,7 @@ func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, dc *down
 }
 
 // copyRangeToFile 把 Range 响应体按偏移写入文件（WriteAt），返回写入字节数。
-func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *atomic.Int64, total int64, onProgress downloader.ProgressFunc) (int64, error) {
+func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *atomic.Int64, total int64, onProgress downloader.ProgressFunc, onChunkLocal func(chunkDone int64)) (int64, error) {
 	buf := make([]byte, 1<<20)
 	var written int64
 	for {
@@ -928,7 +931,10 @@ func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *at
 			written += int64(n)
 			prog.Add(int64(n))
 			if onProgress != nil {
-				onProgress(prog.Load(), total) // I1：传 total（非 -1），UI 总进度可显示
+				onProgress(prog.Load(), total) // I1：全局进度（总文件）
+			}
+			if onChunkLocal != nil {
+				onChunkLocal(written) // per-chunk 进度（该 chunk 本地累计，非全局）
 			}
 		}
 		if rerr == io.EOF {
