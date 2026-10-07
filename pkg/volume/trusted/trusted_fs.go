@@ -213,10 +213,17 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	// 尾块已由 Finish 收尾（Write 路径不足 chunkSize 的尾块 Finish 内 flush）。
 	fm := calc.Finish()
 	if err := meta.Validate(fm); err != nil {
-		// C6：不 Delete(rel)（防删既有覆盖目标）。底层写入若成功但 meta 与内容不符
-		// （size 声明错误），主文件已落盘但无可信 sidecar——调用方 Warn 兜底，读路径
-		// 直算（不校验）；下次覆盖写自愈。保留错误回报（调用方可选择回滚策略）。
-		return fmt.Errorf("trusted: 写入后 meta 校验失败（size %d vs 实写，sidecar 未落）: %w", size, err)
+		// m1 修复：size 声明失真（调用方 Content-Length 撒谎/传输截断）时按实写自愈——
+		// 分块哈希是实写内容的真实累计（TotalSHA256/各块 SHA256 必真），唯一可能是 Size
+		// 字段（声明值）与分块覆盖和不符 → 重设 Size=分块覆盖和再 Validate，产出基于实写
+		// 的正确 meta 并落盘（而非报错留半途文件，客户端重试见已存在 → putCheckExisting
+		// 覆盖，重复上传）。仍失败（非 size 类）才返回错误。
+		if ok := meta.FixSizeFromChunks(fm); !ok || meta.Validate(fm) != nil {
+			// C6：不 Delete(rel)（防删既有覆盖目标）。底层写入已成功但 meta 无法自愈
+			// （罕见——非 size 类校验失败），主文件已落盘但无可信 sidecar——调用方
+			// Warn 兜底，读路径直算；下次覆盖写自愈。
+			return fmt.Errorf("trusted: 写入后 meta 校验失败（size %d vs 实写，sidecar 未落）: %w", size, err)
+		}
 	}
 	fm.Name = path.Base(filepath.ToSlash(rel))
 	fm.Extra = t.opts.Extra

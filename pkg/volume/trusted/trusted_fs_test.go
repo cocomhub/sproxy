@@ -305,3 +305,42 @@ func TestMoveCopyLink_MetaLinkage(t *testing.T) {
 		t.Fatalf("Link 后源 sidecar 应保留: %v %v", e, err)
 	}
 }
+
+// TestWrite_SizeDeclaredWrong_SelfHeals m1 修复：调用方 size 声明失真（小于实写）→
+// 装饰器按实写分块覆盖和重设 Size，产出正确 meta 落盘（而非报错留半途文件）。
+func TestWrite_SizeDeclaredWrong_SelfHeals(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv := Wrap(inner, Options{})
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("m1-selfheal "), 100) // ~1.1KB
+	// 声明 size 远小于实写（如 Content-Length 撒谎/传输截断误报）——WriteFile 应自愈
+	// 产出基于实写的正确 meta，而非返回错误。
+	if err := tv.WriteFile(ctx, "user/s.bin", bytes.NewReader(data), 10, 0); err != nil {
+		t.Fatalf("size 声明失真应自愈（产出实写 meta 而非报错）: %v", err)
+	}
+	// 主文件实写完整。
+	if e, err := inner.Stat(ctx, "user/s.bin"); err != nil || e == nil || e.Size != int64(len(data)) {
+		t.Fatalf("主文件应完整落盘: %+v %v", e, err)
+	}
+	// meta 以实写 Size 落盘（分块覆盖和，非声明值）。
+	rc, rerr := inner.OpenRead(ctx, "meta/s.bin.meta")
+	if rerr != nil {
+		t.Fatalf("meta 应落盘: %v", rerr)
+	}
+	raw, _ := io.ReadAll(rc)
+	rc.Close()
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("meta 反序列化: %v", uerr)
+	}
+	if fm.Size != int64(len(data)) {
+		t.Fatalf("meta Size 应修正为实写 %d, got %d", len(data), fm.Size)
+	}
+	if fm.TotalSHA256 != refSHA(data) {
+		t.Fatalf("meta TotalSHA256 应为实写内容哈希: got %s", fm.TotalSHA256)
+	}
+	if err := meta.Validate(fm); err != nil {
+		t.Fatalf("自愈后的 meta 应通过 Validate: %v", err)
+	}
+}

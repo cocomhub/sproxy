@@ -64,6 +64,22 @@ func Validate(m *FileMeta) error {
 	return validateChunkCoverage(m)
 }
 
+// FixSizeFromChunks 把 FileMeta.Size 重设为分块覆盖和（m1 修复：流式计算 size 声明失真
+// 时，分块哈希是实写内容的真实累计，唯一可能错的字段是 Size——调用方 Content-Length
+// 撒谎/传输截断时按实写自愈，产出正确 meta 而非报错留半途文件）。返回 ok=false =
+// 无分块（零字节，无需修正）。
+func FixSizeFromChunks(m *FileMeta) bool {
+	if len(m.Chunks) == 0 {
+		return false
+	}
+	var sum int64
+	for _, c := range m.Chunks {
+		sum += c.Size
+	}
+	m.Size = sum
+	return true
+}
+
 // validateHeader 校验 meta 头部字段（nil/版本/size/总哈希/分块大小/非空分块）。
 func validateHeader(m *FileMeta) error {
 	if m == nil {

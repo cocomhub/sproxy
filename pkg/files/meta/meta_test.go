@@ -175,6 +175,26 @@ func TestValidate_FailClosed(t *testing.T) {
 	}
 }
 
+// TestFixSizeFromChunks m1 修复：Size 声明失真 → 重设分块覆盖和（自愈产出正确 meta）。
+func TestFixSizeFromChunks(t *testing.T) {
+	t.Parallel()
+	// 覆盖和 == Size（无需修正，幂等）。
+	fm := &FileMeta{Size: 2048, Chunks: []ChunkMeta{{Size: 1024}, {Size: 1024}}}
+	if ok := FixSizeFromChunks(fm); !ok || fm.Size != 2048 {
+		t.Fatalf("覆盖和=Size 应幂等, ok=%v size=%d", ok, fm.Size)
+	}
+	// Size 声明失真（< 覆盖和）→ 修正为覆盖和。
+	fm2 := &FileMeta{Size: 1024, Chunks: []ChunkMeta{{Size: 1024}, {Size: 1024}}}
+	if ok := FixSizeFromChunks(fm2); !ok || fm2.Size != 2048 {
+		t.Fatalf("Size 失真应修正为覆盖和, ok=%v size=%d", ok, fm2.Size)
+	}
+	// 无分块（零字节）→ 不修正（ok=false）。
+	fm3 := &FileMeta{Size: 0}
+	if ok := FixSizeFromChunks(fm3); ok {
+		t.Fatal("无分块应 ok=false（零字节不修正）")
+	}
+}
+
 // TestMarshalUnmarshal Roundtrip：JSON 序列化 + 反序列化校验（Extra map[string]any 保真）。
 func TestMarshalUnmarshal(t *testing.T) {
 	t.Parallel()
