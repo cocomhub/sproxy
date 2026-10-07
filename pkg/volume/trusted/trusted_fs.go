@@ -57,18 +57,18 @@ func (t *TrustedVolumeFS) Inner() syncpkg.FS { return t.inner }
 // 已算并落盘 meta sidecar，读侧经它取回 FileMeta 供转存校验/可信卷读校验逐分块比对。
 // sidecar 缺失（未启用/旁路写/落盘失败兜底）→ 返回错误，调用方回落 Stat 直算/流式。
 func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
-	rc, err := t.inner.OpenRead(ctx, metaPath(rel))
+	rc, err := t.inner.OpenRead(ctx, meta.MetaPath(rel))
 	if err != nil {
-		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", metaPath(rel), err)
+		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", meta.MetaPath(rel), err)
 	}
 	defer rc.Close()
 	raw, rerr := io.ReadAll(rc)
 	if rerr != nil {
-		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", metaPath(rel), rerr)
+		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", meta.MetaPath(rel), rerr)
 	}
 	fm, uerr := meta.Unmarshal(raw)
 	if uerr != nil {
-		return nil, fmt.Errorf("trusted: 解析 meta %s: %w", metaPath(rel), uerr)
+		return nil, fmt.Errorf("trusted: 解析 meta %s: %w", meta.MetaPath(rel), uerr)
 	}
 	return fm, nil
 }
@@ -80,11 +80,59 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 
 // WriteIfAbsent 委托 inner（转存唯一性原子写；inner 未实现 → 返回 ErrUnsupported，
 // 调用方 errors.Is 识别后回落 Stat 检查+WriteFile——与裸 FS 断言失败语义一致）。
+// B-MAJOR-2 修复：inner 实现且写成功 → 补写 meta sidecar（「到达即建」不变量——
+// 首写转存经此路径也带可信 meta，否则 readbackVerify 的 FileMeta 分块校验不可达）。
 func (t *TrustedVolumeFS) WriteIfAbsent(ctx context.Context, path string, r io.Reader, size, mtime int64) (bool, error) {
-	if pia, ok := t.inner.(syncpkg.WriteIfAbsent); ok {
-		return pia.WriteIfAbsent(ctx, path, r, size, mtime)
+	pia, ok := t.inner.(syncpkg.WriteIfAbsent)
+	if !ok {
+		return false, fmt.Errorf("trusted: 底层卷未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
 	}
-	return false, fmt.Errorf("trusted: 底层卷未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
+	written, err := pia.WriteIfAbsent(ctx, path, r, size, mtime)
+	if err != nil || !written {
+		return written, err
+	}
+	// 写成功（新文件）→ 补写 meta（从已落盘文件读回计算；失败仅影响校验精度——
+	// 读路径直算兜底，不阻断主写）。
+	t.writeMetaAfter(ctx, path, size)
+	return written, nil
+}
+
+// writeMetaAfter 在写成功路径补建 meta sidecar（WriteIfAbsent 首写专用；WriteFile
+// 已内嵌流式计算）。从已落盘文件读回计算（与 filesMetaPolicy.computeMeta 同语义）。
+// 失败静默（与 WriteFile meta 落盘失败吞错同语义——meta 缺失读路径直算兜底）。
+func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size int64) {
+	if t.opts.DisableMetaFile {
+		return
+	}
+	chunkSize := t.opts.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = meta.ChunkSizeForSize(size)
+	}
+	rc, err := t.inner.OpenRead(ctx, rel)
+	if err != nil {
+		return // 读回失败：meta 不落（直算兜底）
+	}
+	calc, cerr := meta.NewCalculator(size, chunkSize)
+	if cerr != nil {
+		rc.Close()
+		return
+	}
+	_, rerr := calc.ReadFrom(rc)
+	rc.Close()
+	if rerr != nil {
+		return
+	}
+	fm := calc.Finish()
+	if !meta.FixSizeFromChunks(fm) || meta.Validate(fm) != nil {
+		return
+	}
+	fm.Name = path.Base(filepath.ToSlash(rel))
+	fm.Extra = t.opts.Extra
+	data, merr := meta.Marshal(fm)
+	if merr != nil {
+		return
+	}
+	_ = t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0)
 }
 
 // ReserveSpace 委托 inner（卷容量预检；inner 未实现 → 返回 ErrUnsupported，调用方
@@ -112,7 +160,7 @@ func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
 			return err
 		}
 		// 联动 meta（best-effort：源 meta 不存在则跳过）。
-		_ = t.inner.Rename(ctx, metaPath(from), metaPath(to))
+		_ = t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to))
 		return nil
 	}
 	return fmt.Errorf("trusted: 底层卷未实现 Move: %w", syncpkg.ErrUnsupported)
@@ -148,30 +196,14 @@ func (t *TrustedVolumeFS) Link(ctx context.Context, from, to string) error {
 
 // copyMeta 复制 sidecar（读源 meta 字节流写目标；失败静默——best-effort，读路径直算兜底）。
 func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
-	src := metaPath(from)
-	dst := metaPath(to)
+	src := meta.MetaPath(from)
+	dst := meta.MetaPath(to)
 	rc, err := t.inner.OpenRead(ctx, src)
 	if err != nil {
 		return // 源 meta 不存在（读路径直算兜底）
 	}
 	defer rc.Close()
 	_ = t.inner.WriteFile(ctx, dst, rc, -1, 0)
-}
-
-// metaPath 返回文件对应的 meta sidecar 路径（经 meta.MetaPath 统一映射到 meta 桶——
-// 用户裁定 2026-10-07 sidecar 移出 user/ 桶；外部卷共享 rel `alice/user/x` →
-// `alice/meta/x.meta`、独享 `user/x` → `meta/x.meta`，与本地卷同构）。
-func metaPath(rel string) string {
-	return meta.MetaPath(rel)
-}
-
-// isMetaPath 判定路径是否落在 meta 桶（sidecar 或 meta 桶目录，隐藏过滤用）。
-// 结构解析（meta.IsMetaPath → volume.BucketOf）：sidecar 独立桶后，用户真实 `*.meta`
-// 文件在 user 桶合法可见（不再误隐藏）；仅 meta 桶路径（桶段=="meta"）隐藏。
-// **不靠 `strings.Contains(p,"/meta/")` 子串匹配**——用户真实目录 `user/dir/meta/x.bin`
-// 的 meta 是 user 桶内子目录，桶段是 "user"，不应隐藏（用户裁定：用户目录可叫保留名）。
-func isMetaPath(p string) bool {
-	return meta.IsMetaPath(p)
 }
 
 // ListDir 列目录：过滤 meta 桶（sidecar 独立桶用户不可见）；user 桶内真实 `.meta`
@@ -183,7 +215,7 @@ func (t *TrustedVolumeFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entr
 	}
 	out := es[:0]
 	for _, e := range es {
-		if isMetaPath(e.Path) {
+		if meta.IsMetaPath(e.Path) {
 			continue // 隐藏 meta 桶条目（sidecar 用户不可见）
 		}
 		out = append(out, e)
@@ -193,7 +225,7 @@ func (t *TrustedVolumeFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entr
 
 // Stat 返回条目（过滤 meta 桶；附 Checksums）。
 func (t *TrustedVolumeFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
-	if isMetaPath(p) {
+	if meta.IsMetaPath(p) {
 		return nil, nil // meta 桶对用户不可见
 	}
 	return t.inner.Stat(ctx, p)
@@ -252,7 +284,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
 	}
 	// meta 落盘（隐藏同目录 sidecar；占配额——经 inner.WriteFile 计入底层账本）。
-	if werr := t.inner.WriteFile(ctx, metaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		// meta 落盘失败：主文件已成功——不失败主写（meta 可下次读时补），记日志语义
 		// 由调用方/审计处理；此处返回主写成功（meta 缺失时 Stat 直算兜底）。
 		return nil
@@ -264,7 +296,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 func (t *TrustedVolumeFS) Delete(ctx context.Context, rel string) error {
 	err := t.inner.Delete(ctx, rel)
 	// 联动 meta（best-effort：主文件删除为主，meta 残留由 GC/Stat 兜底忽略）。
-	_ = t.inner.Delete(ctx, metaPath(rel))
+	_ = t.inner.Delete(ctx, meta.MetaPath(rel))
 	return err
 }
 
@@ -280,7 +312,7 @@ func (t *TrustedVolumeFS) Rename(ctx context.Context, from, to string) error {
 		return err
 	}
 	// 联动 meta（best-effort：源 meta 不存在则跳过——rename 目标 meta 若无源也不报错）。
-	_ = t.inner.Rename(ctx, metaPath(from), metaPath(to))
+	_ = t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to))
 	return nil
 }
 

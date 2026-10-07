@@ -393,31 +393,29 @@ func verifyByFileMeta(env *transferEnv) error {
 	if rerr != nil {
 		return fmt.Errorf("%w: 读回分块校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
 	}
-	calc, cerr := meta.NewCalculator(fm.Size, fm.ChunkSize)
-	if cerr != nil {
-		rc.Close()
-		return fmt.Errorf("transfer: 分块校验初始化: %w", cerr)
-	}
-	_, rerr2 := calc.ReadFrom(rc)
-	rc.Close()
-	if rerr2 != nil {
-		return fmt.Errorf("transfer: 分块校验读回失败: %w", rerr2)
-	}
-	got := calc.Finish()
-	if verr := meta.Validate(got); verr != nil {
-		return fmt.Errorf("%w: 转存后分块校验失败（meta 无效）: %v", ErrTransferTarget, verr)
-	}
-	if got.TotalSHA256 != fm.TotalSHA256 {
-		return fmt.Errorf("%w: 转存后内容与 meta 不一致（TotalSHA256 %s ≠ %s，卷静默损坏？）",
-			ErrTransferTarget, got.TotalSHA256, fm.TotalSHA256)
-	}
-	if len(got.Chunks) != len(fm.Chunks) {
-		return fmt.Errorf("%w: 转存后分块数不一致 %d ≠ %d", ErrTransferTarget, len(got.Chunks), len(fm.Chunks))
-	}
-	for i := range got.Chunks {
-		if got.Chunks[i].SHA256 != fm.Chunks[i].SHA256 {
+	defer rc.Close()
+	// B/E-CRITICAL 修复：**按 meta 记录的实际分块边界（Offset/Size）逐块流式重算比对**
+	// ——secretdata 随机分块（1-200MB 均匀随机）用固定 ChunkSize 重切必然错位，恒误报
+	// 损坏。此处逐块按 Size 读回窗口重算该块 SHA256，同时喂整文件 TotalSHA256 累计：
+	// 随机分块与等长分块都精确。
+	totalSHA := sha256.New()
+	for i, c := range fm.Chunks {
+		blockHash := sha256.New()
+		// 每块窗口：MultiWriter 同时喂块哈希与整文件哈希（块连续覆盖 [0,Size)，
+		// 流位置顺序推进即正确）。
+		mw := io.MultiWriter(blockHash, totalSHA)
+		if _, ierr := io.CopyN(mw, rc, c.Size); ierr != nil {
+			return fmt.Errorf("%w: 分块 %d 读回失败（目标卷 %q）: %v", ErrTransferTarget, i, env.task.Transfer.Volume, ierr)
+		}
+		gotSHA := hex.EncodeToString(blockHash.Sum(nil))
+		if gotSHA != c.SHA256 {
 			return fmt.Errorf("%w: 转存后分块 %d 不一致（卷静默损坏？）", ErrTransferTarget, i)
 		}
+	}
+	// 整文件 TotalSHA256 与 meta 一致（权威认证：内容整体没被篡改，与分块粒度无关）。
+	if total := hex.EncodeToString(totalSHA.Sum(nil)); total != fm.TotalSHA256 {
+		return fmt.Errorf("%w: 转存后内容与 meta 不一致（TotalSHA256 %s ≠ %s，卷静默损坏？）",
+			ErrTransferTarget, total, fm.TotalSHA256)
 	}
 	// 分块校验通过 → 内容与写侧 meta 一致（跨信任边界无静默损坏）。
 	return nil

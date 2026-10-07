@@ -801,7 +801,11 @@ func (s *Service) removeFileMeta(f *fileOp, rel string) {
 		metaSize = e.Size()
 	}
 	if rerr := f.root.Remove(mrel); rerr != nil && !os.IsNotExist(rerr) {
-		f.logger.WarnContext(f.ctx, "删除 meta sidecar 失败", "file_name", f.remotePath, "meta", mrel, "error", rerr)
+		// C-MAJOR-5 修复：删除失败（IO 瞬时/独占）→ **不释放配额**（磁盘 meta 仍在，
+		// 配额保留与磁盘一致；下次删除/重写时再对账）。记 Error 供运维可见。
+		f.logger.ErrorContext(f.ctx, "删除 meta sidecar 失败（配额保留）",
+			"file_name", f.remotePath, "meta", mrel, "error", rerr.Error())
+		return
 	}
 	if metaSize > 0 {
 		if scope := s.rt.quotaScope(f.owner, mrel); scope != nil {

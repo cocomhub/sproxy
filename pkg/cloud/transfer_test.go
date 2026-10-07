@@ -4,7 +4,10 @@
 package cloud
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -1163,4 +1167,79 @@ func TestTransferDone_FileMetaChunkVerify(t *testing.T) {
 	} else if !errors.Is(err, ErrTransferTarget) {
 		t.Fatalf("篡改应归 ErrTransferTarget, got %v", err)
 	}
+}
+
+// TestVerifyByFileMeta_RandomChunks B/E-CRITICAL 回归：secretdata 随机分块（1-200MB
+// 均匀随机，fm.Chunks 各块 Size 不同）——verifyByFileMeta 必须按 meta 实际分块边界
+// 逐块比对通过（原固定 ChunkSize 重切恒误报损坏）。
+func TestVerifyByFileMeta_RandomChunks(t *testing.T) {
+	t.Parallel()
+	// 构造随机分块 meta（三块不同大小）与对应内容：块1="a"*10、块2="b"*20、块3="c"*30。
+	chunks := []meta.ChunkMeta{
+		{Index: 0, Offset: 0, Size: 10, SHA256: refSHA256([]byte(strings.Repeat("a", 10)))},
+		{Index: 1, Offset: 10, Size: 20, SHA256: refSHA256([]byte(strings.Repeat("b", 20)))},
+		{Index: 2, Offset: 30, Size: 30, SHA256: refSHA256([]byte(strings.Repeat("c", 30)))},
+	}
+	var full []byte
+	full = append(full, strings.Repeat("a", 10)...)
+	full = append(full, strings.Repeat("b", 20)...)
+	full = append(full, strings.Repeat("c", 30)...)
+	fm := &meta.FileMeta{Version: 1, Size: 60, TotalSHA256: refSHA256(full), ChunkSize: 10, Chunks: chunks}
+	if err := meta.Validate(fm); err != nil {
+		t.Fatalf("fixture meta 应合法: %v", err)
+	}
+	fs := &staticMetaFS{data: full, fm: fm}
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-random", Filename: "r.bin", Transfer: &TransferSpec{Volume: "vol-r"}}
+	dest := filepath.Join(t.TempDir(), "r.bin")
+	_ = os.WriteFile(dest, full, 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// 正确内容 → 分块校验通过（随机分块边界精确比对）。
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: refSHA256(full), Size: int64(len(full)),
+	}, nil)
+	if err != nil {
+		t.Fatalf("B/E-CRITICAL: 随机分块 meta 校验应通过, got %v", err)
+	}
+	if tr == nil {
+		t.Fatal("转存应返回成功结果")
+	}
+}
+
+// staticMetaFS 是最小 Provider FS：OpenRead 返回固定内容；FileMeta 返回预设 meta。
+type staticMetaFS struct {
+	data []byte
+	fm   *meta.FileMeta
+}
+
+func (s *staticMetaFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return nil, nil
+}
+func (s *staticMetaFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return &syncpkg.Entry{Name: "r.bin", Path: p, Size: int64(len(s.data))}, nil
+}
+func (s *staticMetaFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.data)), nil
+}
+func (s *staticMetaFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	b, _ := io.ReadAll(r)
+	s.data = b
+	return nil
+}
+func (s *staticMetaFS) Rename(ctx context.Context, f, t string) error { return nil }
+func (s *staticMetaFS) Delete(ctx context.Context, p string) error    { return nil }
+func (s *staticMetaFS) MakeDir(ctx context.Context, p string) error   { return nil }
+func (s *staticMetaFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	return s.fm, nil
+}
+
+var _ syncpkg.FS = (*staticMetaFS)(nil)
+
+// refSHA256 独立重算（防与实现同源错误）。
+func refSHA256(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }

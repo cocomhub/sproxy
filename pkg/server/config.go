@@ -1090,8 +1090,6 @@ type Config struct {
 type TrustedVolumeConfig struct {
 	// Disable 缺省 false = 可信卷默认启用（外部卷写后落 meta + 校验）；true = 显式关闭。
 	Disable bool `yaml:"disable" mapstructure:"disable"`
-	// DisableDoubleDownloadVerify 缺省 false = 无权威 checksum 源启用双下比对；true = 跳过。
-	DisableDoubleDownloadVerify bool `yaml:"disable_double_download_verify" mapstructure:"disable_double_download_verify"`
 }
 
 // PikpakConfig 是 PikPak 网盘中转后端配置。

@@ -250,7 +250,11 @@ func (s *Storage) refreshByRapidUpload(ctx context.Context, key, remote string, 
 	if d2 {
 		return m2, nil // rapidupload 刷新后 ETag 一致 → 权威 md5
 	}
-	s.lastETag = m2.ETag
+	// A-CRITICAL 修复：putCheckAfterUpload 在 Stat 落入最终一致性窗口时返回
+	// (nil, false, nil)——m2 为 nil，必须判空再记录 lastETag，否则 nil 解引用 panic。
+	if m2 != nil {
+		s.lastETag = m2.ETag
+	}
 	return nil, nil // 刷新后仍不一致/Stat 未见 → 下一轮
 }
 
