@@ -742,6 +742,12 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 			scope.ReleaseUsage(f.size)
 		}
 	}
+	// C2 修复：rmdir 删除 user 子树后联动删除各文件 meta sidecar（meta 功能桶）并
+	// 释放其 meta 桶配额——否则 meta/<rel>.meta 成孤儿、meta 桶 Scope 永久虚高。
+	// 软删（trash）场景保留 meta 供恢复（DeleteFile SoftDelete 分支不删 meta）。
+	if s.rt.fileMetaEnabled() {
+		s.cleanupRemovedDirMeta(owner, allFiles)
+	}
 	if cs := s.rt.checksumStore(owner); cs != nil {
 		cs.DeletePrefix(rel + "/")
 		// 清理目录自身的 checksum 记录（如果存在）
@@ -750,6 +756,45 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 	// 搜索索引同步删除子树（roadmap P0）：rmdir 后子树不可见。
 	if s.index != nil {
 		s.index.removePrefix(owner, strings.TrimPrefix(rel, "user/"))
+	}
+}
+
+// cleanupRemovedDirMeta 删除目录内各文件 meta sidecar 并释放其 meta 桶配额
+// （rmdir 联动；与写侧 WriteMeta 的 Commit 对称——防 meta 桶 Scope 虚高/孤儿）。
+func (s *Service) cleanupRemovedDirMeta(owner string, allFiles []rmdirFileStat) {
+	for _, f := range allFiles {
+		if f.root == nil {
+			continue
+		}
+		mrel := meta.MetaPath(f.rel)
+		metaSize := int64(0)
+		if e, serr := f.root.Stat(mrel); serr == nil && e != nil {
+			metaSize = e.Size()
+		}
+		_ = f.root.Remove(mrel)
+		if metaSize > 0 {
+			if scope := s.rt.quotaScope(owner, mrel); scope != nil {
+				scope.ReleaseUsage(metaSize)
+			}
+		}
+	}
+}
+
+// removeFileMeta 删除单文件配套 .meta sidecar 并释放其 meta 桶配额（删除联动；
+// 与写侧 WriteMeta Commit 对称）。主文件已确认删除/软删成功才调用（软删保留）。
+func (s *Service) removeFileMeta(f *fileOp, rel string) {
+	mrel := meta.MetaPath(rel)
+	metaSize := int64(0)
+	if e, serr := f.root.Stat(mrel); serr == nil && e != nil {
+		metaSize = e.Size()
+	}
+	if rerr := f.root.Remove(mrel); rerr != nil && !os.IsNotExist(rerr) {
+		f.logger.WarnContext(f.ctx, "删除 meta sidecar 失败", "file_name", f.remotePath, "meta", mrel, "error", rerr)
+	}
+	if metaSize > 0 {
+		if scope := s.rt.quotaScope(f.owner, mrel); scope != nil {
+			scope.ReleaseUsage(metaSize)
+		}
 	}
 }
 
@@ -1445,8 +1490,10 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	}
 	// 可信卷：**删除成功收尾**联动删除配套 .meta（服务端内部文件随主文件一起删，
 	// 防残留；此时主文件已确认删除/软删成功——软删场景保留 meta 供恢复，见下）。
+	// C1 修复：删除 meta 时按实际大小释放其 meta 桶配额（写侧 WriteMeta 已 Commit，
+	// 删除须对称 ReleaseUsage——否则 owner meta 桶 Scope 随删除永久虚高/假 507）。
 	if s.rt.fileMetaEnabled() && !input.SoftDelete {
-		_ = f.root.Remove(meta.MetaPath(rel))
+		s.removeFileMeta(f, rel)
 	}
 	s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
 	f.logger.InfoContext(f.ctx, "文件已删除", "file_name", f.remotePath)

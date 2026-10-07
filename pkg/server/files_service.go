@@ -285,6 +285,10 @@ func (p filesMetaPolicy) Enabled() bool { return !p.h.trustedDisabled() }
 
 // WriteMeta 计算并写入配套 .meta（本地卷上传到达即建；失败返回错误由调用方 Warn 兜底，
 // 读路径 Stat 直算不依赖 meta 存在）。
+// 配额记账（C1 修复：覆盖写做 Adjust 差分、不重复累计）：
+//   - 写前 stat 旧 sidecar 大小 prev——覆盖写（rename 替换旧 inode）时先释放旧 committed，
+//     再 Commit 新字节（net = new - prev，杜绝 owner meta 桶 Scope 随覆盖次数通胀）；
+//   - 删除联动处（deleteQuarantinedFile）按 sidecar 实际大小 ReleaseUsage（见 write_ops.go）。
 func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error {
 	// 计算 FileMeta：从已落盘文件（root 相对 rel）读取计算总 sha256+md5 + 分块。
 	fm, err := p.computeMeta(ctx, root, rel)
@@ -300,8 +304,13 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *stor
 	if dirErr := p.prepareMetaDir(root, mrel); dirErr != nil {
 		return dirErr
 	}
+	// 写前 stat 旧 sidecar（覆盖写差分：prev 是旧 committed，先释放再落新）。
+	prev := int64(0)
+	if fi, serr := root.Stat(mrel); serr == nil && fi != nil {
+		prev = fi.Size()
+	}
 	// 配额预留（owner 的 meta 桶 Scope）：不足 fail-closed（调用方 Warn 兜底，不落盘不超配额）。
-	reservation, err := p.reserveMetaQuota(owner, mrel, int64(len(data)))
+	scope, reservation, err := p.reserveMetaQuota(owner, mrel, int64(len(data)))
 	if err != nil {
 		return err
 	}
@@ -313,7 +322,11 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *stor
 	if err := p.atomicWriteMeta(root, mrel, data); err != nil {
 		return err
 	}
-	// 配额落地：写成功 Commit(actual)（TryReserve 已沿父链逐级校验；Commit 原子一次）。
+	// 配额落地：覆盖写先释放旧 committed（rename 替换旧 inode，旧字节不再占盘），
+	// 再 Commit 新字节——差分 Adjust，防 owner meta 桶 Scope 随覆盖次数永久通胀。
+	if scope != nil && prev > 0 {
+		scope.ReleaseUsage(prev)
+	}
 	if reservation != nil {
 		reservation.Commit(int64(len(data)))
 		reservation = nil // 防止 defer Release 双放（Commit/Release 二选一）
@@ -331,16 +344,17 @@ func (p filesMetaPolicy) prepareMetaDir(root *storage.Root, mrel string) error {
 }
 
 // reserveMetaQuota 在 owner 的 meta 桶 Scope 预留 sidecar 字节（不足 fail-closed）。
-func (p filesMetaPolicy) reserveMetaQuota(owner, mrel string, size int64) (*quota.Reservation, error) {
+// 返回 (scope, reservation)：scope 供覆盖写差分（ReleaseUsage(prev)），reservation 供 Commit。
+func (p filesMetaPolicy) reserveMetaQuota(owner, mrel string, size int64) (*quota.Scope, *quota.Reservation, error) {
 	scope := p.h.quotaScopeFor(owner, mrel)
 	if scope == nil {
-		return nil, nil // 无配额能力：不记账（与既有无配额部署一致）
+		return nil, nil, nil // 无配额能力：不记账（与既有无配额部署一致）
 	}
 	res, rerr := scope.TryReserve(size)
 	if rerr != nil {
-		return nil, rerr
+		return nil, nil, rerr
 	}
-	return res, nil
+	return scope, res, nil
 }
 
 // atomicWriteMeta 复用存储层原子写（root 相对 + fsync + rename）：与主文件同语义。

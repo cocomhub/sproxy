@@ -170,22 +170,26 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	if err != nil {
 		return err
 	}
-	// Tee：写 inner 的同时累计哈希。
+	// 覆盖写场景的既有内容保护（C6 修复）：底层 inner 多为原子写（tmp+rename/O_TRUNC 全量
+	// 覆盖），但部分卷（s3 单 PUT 原子、ftp STOR 覆盖）无原子替换。meta 校验失败时
+	// **不得对既有 rel 执行覆盖性 Delete**——否则一次恶意/故障上传永久丢失旧版本+新内容。
+	// 方案：校验失败仅返回错误（底层写入已失败/成功由 inner 语义决定），不额外删 rel；
+	// 真正需要清理的是「本次写」——内层原子写路径失败本就自愈（不留半写）。
 	if err := t.inner.WriteFile(ctx, rel, io.TeeReader(r, calc), size, mtime); err != nil {
 		return err
 	}
 	// 尾块已由 Finish 收尾（Write 路径不足 chunkSize 的尾块 Finish 内 flush）。
 	fm := calc.Finish()
 	if err := meta.Validate(fm); err != nil {
-		// B2 修复：meta 校验失败（size 与实写不符）——回滚已写主文件，防孤儿。
-		_ = t.inner.Delete(ctx, rel)
-		return fmt.Errorf("trusted: 写入后 meta 校验失败: %w", err)
+		// C6：不 Delete(rel)（防删既有覆盖目标）。底层写入若成功但 meta 与内容不符
+		// （size 声明错误），主文件已落盘但无可信 sidecar——调用方 Warn 兜底，读路径
+		// 直算（不校验）；下次覆盖写自愈。保留错误回报（调用方可选择回滚策略）。
+		return fmt.Errorf("trusted: 写入后 meta 校验失败（size %d vs 实写，sidecar 未落）: %w", size, err)
 	}
 	fm.Name = path.Base(filepath.ToSlash(rel))
 	fm.Extra = t.opts.Extra
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
-		_ = t.inner.Delete(ctx, rel)
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
 	}
 	// meta 落盘（隐藏同目录 sidecar；占配额——经 inner.WriteFile 计入底层账本）。

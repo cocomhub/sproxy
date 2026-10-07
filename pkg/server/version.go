@@ -13,6 +13,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
+
+// filesMetaWriteAfterRestore 版本恢复落盘后重算配套 meta sidecar（C3 修复）：
+// 复用 filesMetaPolicy.WriteMeta（与上传 writeFileSettle 同一入口——owner 配额
+// 记账 + 覆盖写 Adjust 差分 + sidecar 落 meta 桶）。
+func (h *Handlers) filesMetaWriteAfterRestore(dstRoot *storage.Root, owner, targetRel string) error {
+	policy := filesMetaPolicy{h: h}
+	if !policy.Enabled() {
+		return nil
+	}
+	return policy.WriteMeta(context.Background(), owner, dstRoot, targetRel)
+}
 
 // VersionInfo 版本信息。
 type VersionInfo struct {
@@ -204,6 +216,15 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	checksum, ok := h.updateRestoredChecksum(w, r, dstRoot, targetRel, remotePath, versionIDStr)
 	if !ok {
 		return
+	}
+
+	// C3 修复：版本恢复覆盖/新写目标文件后，重算配套 meta sidecar（主文件内容已变，
+	// meta/<rel>.meta 须同步——否则 meta 描述旧版哈希/内容、主文件与 meta 永久不一致）。
+	// 与上传 writeFileSettle 的到达即建同一入口（WriteMeta 幂等覆盖 + 配额 Adjust）。
+	if !h.trustedDisabled() {
+		if mErr := h.filesMetaWriteAfterRestore(dstRoot, owner, targetRel); mErr != nil {
+			h.logger.Warn("版本恢复后 meta 重算失败（读路径直算兜底）", "file_name", remotePath, "error", mErr)
+		}
 	}
 
 	h.RecordAudit(r.Context(), AuditEvent{
