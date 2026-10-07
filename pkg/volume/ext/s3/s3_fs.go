@@ -166,10 +166,6 @@ func (f *S3FS) keyFor(rel string) string {
 	if f.prefix == "" {
 		return rel
 	}
-
-	if f.prefix == "" {
-		return rel
-	}
 	return f.prefix + "/" + rel
 }
 
