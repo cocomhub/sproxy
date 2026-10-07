@@ -48,6 +48,11 @@ func (h *Handlers) listTrashHandler(w http.ResponseWriter, r *http.Request) {
 	for _, e := range entries {
 		name := e.Name()
 		if idx := strings.Index(name, files.TrashDeletedSuffix()); idx >= 0 {
+			// 跳过 meta sidecar 条目（软删随迁的服务端内部文件；trashMetaMarker
+			// 在删除标记前命中 → 不含主文件条目——主文件条目名无 .meta 段）。
+			if strings.Contains(name[:idx], files.TrashMetaMarker()) {
+				continue
+			}
 			out = append(out, trashEntry{
 				TrashRel: "trash/" + name,
 				Name:     strings.ReplaceAll(name[:idx], "_", "/"),

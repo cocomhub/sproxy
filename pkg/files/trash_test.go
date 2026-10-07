@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -108,5 +109,77 @@ func TestTrash_TTL(t *testing.T) {
 	}
 	if cleaned != 1 {
 		t.Fatalf("应清理 1 条, got %d", cleaned)
+	}
+}
+
+// TestTrash_MetaFollowsFile M2 回归：软删时 meta sidecar 随主文件移入 trash 桶 →
+// 恢复时一起回 meta 桶 → 清空/清理时随条目一起删（无孤儿，生命周期一致）。
+func TestTrash_MetaFollowsFile(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	env.fileMeta = true // 注入 testMetaPolicy（可信卷 meta 能力）
+	env.enableWriteDefaults()
+	tnt := env.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("tenant 不可用")
+	}
+	root := tnt.Root()
+	userAbs, _ := root.Abs("user")
+	_ = os.MkdirAll(userAbs, 0o755)
+	// 上传经 writeFileSettle → 自动建 meta（fileMeta 装配生效）。
+	cs := testutil.SHA256Hex([]byte("hello"))
+	if _, err := env.svc.WriteFile(context.Background(), WriteFileInput{
+		Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: cs, ClientSize: 5,
+	}, strings.NewReader("hello")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	metaPath := filepath.Join(userAbs, "..", "meta", "a.txt.meta") // meta/<rel>.meta
+	if _, err := os.Stat(filepath.Clean(metaPath)); err != nil {
+		t.Fatalf("上传应建 meta sidecar: %v", err)
+	}
+	// 软删 → meta 随迁 trash 桶。
+	if _, err := env.svc.DeleteFile(context.Background(), DeleteFileInput{
+		Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: cs, SoftDelete: true,
+	}); err != nil {
+		t.Fatalf("DeleteFile soft: %v", err)
+	}
+	if _, err := os.Stat(filepath.Clean(metaPath)); !os.IsNotExist(err) {
+		t.Fatalf("软删后 meta 应随迁（原 meta 桶无 sidecar）: %v", err)
+	}
+	// trash 桶有 2 条（主文件 + meta sidecar）。
+	trashAbs, _ := root.Abs("trash")
+	entries, _ := os.ReadDir(trashAbs)
+	if len(entries) != 2 {
+		t.Fatalf("trash 应 2 条（主文件+meta）, got %d", len(entries))
+	}
+	// 恢复 → meta 回 meta 桶（用实际 trash 条目名——时间戳后缀由软删生成，扫描获得）。
+	trashRel := ""
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "user_a.txt"+trashDeletedSuffix) && !strings.Contains(e.Name(), trashMetaMarker) {
+			trashRel = trashPrefix + e.Name()
+			break
+		}
+	}
+	if trashRel == "" {
+		t.Fatal("trash 缺主文件条目")
+	}
+	if err := env.svc.RestoreTrash(context.Background(), "alice", trashRel); err != nil {
+		t.Fatalf("RestoreTrash: %v", err)
+	}
+	if _, err := os.Stat(filepath.Clean(metaPath)); err != nil {
+		t.Fatalf("恢复后 meta 应回 meta 桶: %v", err)
+	}
+	// 再软删 + 清空 → trash 条目（含 meta）全部删除，无孤儿。
+	if _, err := env.svc.DeleteFile(context.Background(), DeleteFileInput{
+		Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: cs, SoftDelete: true,
+	}); err != nil {
+		t.Fatalf("DeleteFile soft 2nd: %v", err)
+	}
+	if err := env.svc.EmptyTrash(context.Background(), "alice"); err != nil {
+		t.Fatalf("EmptyTrash: %v", err)
+	}
+	entries2, _ := os.ReadDir(trashAbs)
+	if len(entries2) != 0 {
+		t.Fatalf("EmptyTrash 后 trash 应空, got %d", len(entries2))
 	}
 }

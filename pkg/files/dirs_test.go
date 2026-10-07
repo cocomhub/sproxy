@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -84,6 +85,9 @@ type dirsEnv struct {
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
+	// fileMeta 为 true 时注入可信卷 meta 能力（WithFileMeta testMetaPolicy）——软删
+	// 随迁 meta/恢复/清理联动用例需要它；默认 false 零回归（不落 .meta）。
+	fileMeta bool
 	// uploading 是替身锁池（TryMark/Acquire 共用，rebuild 时重置——与旧 deps() 每次新建
 	// &sync.Map{} 同语义）。
 	uploading sync.Map
@@ -158,6 +162,9 @@ func (e *dirsEnv) newService() *Service {
 		WithEventSink(e.eventSink),
 		WithAudit(rt),
 		WithContentIndex(e.contentIndex),
+	}
+	if e.fileMeta {
+		opts = append(opts, WithFileMeta(testMetaPolicy{}))
 	}
 	if e.metrics != nil {
 		opts = append(opts, WithMetrics(e.metrics))
@@ -267,6 +274,32 @@ type auditRow struct {
 
 func (r testRuntime) Record(_ context.Context, action, object, result, detail string) {
 	r.e.audits = append(r.e.audits, auditRow{action: action, object: object, result: result, detail: detail})
+}
+
+// testMetaPolicy 是最小 FileMetaPolicy 替身：Enabled 恒 true；WriteMeta 写入 meta 桶
+// 的 `meta/<rel>.meta` 占位文件（内容无关——软删随迁/恢复/清理联动只关心 sidecar
+// 文件的落点与存在性，不校验 JSON 语义）。配额：按 meta 实际字节 ReleaseUsage 对称
+// 释放由被测生命周期代码处理（软删/恢复/清 trash 各自联动）。
+type testMetaPolicy struct{}
+
+var _ FileMetaPolicy = testMetaPolicy{}
+
+func (testMetaPolicy) Enabled() bool { return true }
+
+func (testMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error {
+	mrel := meta.MetaPath(rel)
+	if dir := filepath.ToSlash(filepath.Dir(mrel)); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	f, ferr := root.OpenFile(mrel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if ferr != nil {
+		return ferr
+	}
+	_, werr := f.Write([]byte("test-meta"))
+	_ = f.Close()
+	return werr
 }
 
 // findAudit 返回首条匹配 action/object 的审计行（未命中 ok=false）。

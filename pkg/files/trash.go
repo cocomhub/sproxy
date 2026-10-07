@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -31,8 +32,18 @@ const trashDeletedSuffix = ".__deleted__"
 // TrashDeletedSuffix 导出删除标记（server 侧列表解析用）。
 func TrashDeletedSuffix() string { return trashDeletedSuffix }
 
-// SoftDelete 软删：校验成功后把 quarantine 移到 trash 桶（非 Remove）。
+// trashMetaMarker 是 trash 桶内 meta sidecar 条目的文件名标记（软删时随主文件入 trash，
+// 供恢复/清理识别——EmptyTrash/CleanupTrash 逐条目删除自然一并清理，无孤儿）。
+const trashMetaMarker = ".meta"
+
+// TrashMetaMarker 导出 trash 桶内 meta sidecar 条目标记（server 侧列表解析过滤用）。
+func TrashMetaMarker() string { return trashMetaMarker }
+
+// softDeleteToTrash 软删：校验成功后把 quarantine 移到 trash 桶（非 Remove）。
 // 在 DeleteFile 的 checksum 匹配分支调用；返回 (trashRel, err)。
+// M2 修复：meta sidecar 随主文件一起移到 trash 桶（生命周期一致）——软删保留 meta
+// 供恢复；trash 条目随清理一起删（无孤儿）；同 rel 新文件不受影响（其 meta 是新的，
+// 不在此路径移动）。
 func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, quarRel, rel string, info os.FileInfo) (string, error) {
 	// trash 桶相对路径：trash/<rel 斜杠转点>.__deleted__<nano>（顶层扁平，防嵌套目录）。
 	flatRel := strings.ReplaceAll(rel, "/", "_")
@@ -44,6 +55,9 @@ func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, qua
 	if err := atomicRenameRoot(root, quarRel, trashRel); err != nil {
 		return "", fmt.Errorf("trash rename: %w", err)
 	}
+	// meta sidecar 随迁（best-effort：源 meta 不存在则跳过——读路径直算兜底；恢复时
+	// 随主文件一起回 meta 桶）。
+	_ = atomicRenameRoot(root, meta.MetaPath(rel), trashPrefix+flatRel+trashMetaMarker+trashDeletedSuffix+strconv.FormatInt(time.Now().UnixNano(), 10))
 	_ = info // 保留（未来恢复时用大小）
 	return trashRel, nil
 }
@@ -87,7 +101,33 @@ func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) erro
 		}
 		return fmt.Errorf("恢复失败: %w", err)
 	}
+	// M2 修复：meta sidecar 随主文件一起恢复（软删时已随迁 trash 桶；这里回 meta 桶）。
+	if mt := restoreTrashMetaSuffix(root, flat); mt != "" {
+		_ = atomicRenameRoot(root, trashPrefix+flat+trashMetaMarker+trashDeletedSuffix+mt, meta.MetaPath(origRel))
+	}
 	return nil
+}
+
+// restoreTrashMetaSuffix 定位 trash 桶中对应 flat 的 meta 条目（软删随迁命名
+// trash/<flat>.meta.__deleted__<nano>）并返回其删除后缀段。找不到返回空（读路径直算兜底）。
+// 实现：遍历 trash 桶顶层，匹配前缀 <flat>.meta.__deleted__。
+func restoreTrashMetaSuffix(root *storage.Root, flat string) string {
+	trashAbs, ok := root.Abs("trash")
+	if !ok {
+		return ""
+	}
+	entries, err := os.ReadDir(trashAbs)
+	if err != nil {
+		return ""
+	}
+	prefix := flat + trashMetaMarker + trashDeletedSuffix
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, prefix) {
+			return strings.TrimPrefix(name, flat+trashMetaMarker+trashDeletedSuffix)
+		}
+	}
+	return ""
 }
 
 // EmptyTrash 清空回收站（删除全部 trash 桶文件）。
