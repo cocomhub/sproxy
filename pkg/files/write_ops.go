@@ -275,7 +275,7 @@ func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input Write
 	// 计算总 sha256+md5 + 分块）并落隐藏 `.meta`（占配额——经装配层实现写入计入账本）。
 	// 失败不阻断主写成功（meta 缺失时读路径直算/Stat 兜底；用户裁定新文件保障立刻创建）。
 	if s.rt.fileMetaEnabled() {
-		if mErr := s.rt.writeMetaSidecar(f.ctx, f.root, rel); mErr != nil {
+		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
 			f.logger.Warn("可信卷 meta 落盘失败（读路径直算兜底）", "file_name", rel, "error", mErr)
 		}
 	}
@@ -369,7 +369,7 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 		s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
 		// 可信卷：去重回退复制路径也建 meta（C-MAJOR-3 修复——去重 rel 与普通上传一致有 sidecar）。
 		if s.rt.fileMetaEnabled() {
-			if mErr := s.rt.writeMetaSidecar(f.ctx, f.root, rel); mErr != nil {
+			if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
 				f.logger.Warn("可信卷 meta 落盘失败（去重回退复制）", "file_name", rel, "error", mErr)
 			}
 		}

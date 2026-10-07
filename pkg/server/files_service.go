@@ -285,7 +285,7 @@ func (p filesMetaPolicy) Enabled() bool { return !p.h.trustedDisabled() }
 
 // WriteMeta 计算并写入配套 .meta（本地卷上传到达即建；失败返回错误由调用方 Warn 兜底，
 // 读路径 Stat 直算不依赖 meta 存在）。
-func (p filesMetaPolicy) WriteMeta(ctx context.Context, root *storage.Root, rel string) error {
+func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error {
 	// 计算 FileMeta：从已落盘文件（root 相对 rel）读取计算总 sha256+md5 + 分块。
 	fm, err := p.computeMeta(ctx, root, rel)
 	if err != nil {
@@ -300,8 +300,8 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, root *storage.Root, rel 
 	if dirErr := p.prepareMetaDir(root, mrel); dirErr != nil {
 		return dirErr
 	}
-	// 配额预留（meta 桶 Scope）：不足 fail-closed（调用方 Warn 兜底，不落盘不超配额）。
-	reservation, err := p.reserveMetaQuota(mrel, int64(len(data)))
+	// 配额预留（owner 的 meta 桶 Scope）：不足 fail-closed（调用方 Warn 兜底，不落盘不超配额）。
+	reservation, err := p.reserveMetaQuota(owner, mrel, int64(len(data)))
 	if err != nil {
 		return err
 	}
@@ -330,9 +330,9 @@ func (p filesMetaPolicy) prepareMetaDir(root *storage.Root, mrel string) error {
 	return root.MkdirAll(dir, 0o755)
 }
 
-// reserveMetaQuota 在 meta 桶 Scope 预留 sidecar 字节（不足 fail-closed）。
-func (p filesMetaPolicy) reserveMetaQuota(mrel string, size int64) (*quota.Reservation, error) {
-	scope := p.h.quotaScopeFor("", mrel)
+// reserveMetaQuota 在 owner 的 meta 桶 Scope 预留 sidecar 字节（不足 fail-closed）。
+func (p filesMetaPolicy) reserveMetaQuota(owner, mrel string, size int64) (*quota.Reservation, error) {
+	scope := p.h.quotaScopeFor(owner, mrel)
 	if scope == nil {
 		return nil, nil // 无配额能力：不记账（与既有无配额部署一致）
 	}

@@ -68,11 +68,12 @@ func (rt runtime) fileMetaEnabled() bool {
 }
 
 // writeMetaSidecar 委托装配层实现写配套 .meta（本地卷上传到达即建；未装配 = 无操作）。
-func (rt runtime) writeMetaSidecar(ctx context.Context, root *storage.Root, rel string) error {
+// owner 为文件归属（配额记账按 owner 的 meta 桶 Scope）。
+func (rt runtime) writeMetaSidecar(ctx context.Context, owner string, root *storage.Root, rel string) error {
 	if rt.fileMeta == nil {
 		return nil
 	}
-	return rt.fileMeta.WriteMeta(ctx, root, rel)
+	return rt.fileMeta.WriteMeta(ctx, owner, root, rel)
 }
 
 // New 构造文件服务实例：**唯一必需项**是租户解析，其余能力由 Option 注入，未注入的

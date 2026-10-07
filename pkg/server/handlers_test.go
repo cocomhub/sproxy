@@ -24,6 +24,10 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 	t.Helper()
 	cfg := Default()
 	cfg.StorageRoot = storageRoot
+	// 存量语义测试默认关闭可信卷（trusted_volume.disable=true）：不生成 .meta sidecar，
+	// 避免配额/统计/账本断言被 sidecar 字节干扰（零回归——可信卷行为由
+	// trusted_volume_test.go 显式启用验证）。
+	cfg.TrustedVolume.Disable = true
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
