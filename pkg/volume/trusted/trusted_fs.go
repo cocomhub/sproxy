@@ -73,6 +73,31 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 	return fm, nil
 }
 
+// UpdateMetaExtra 更新已落盘 meta sidecar 的 Extra（旁路记录能力——如源完整性
+// damaged 标记 source_integrity=damaged；失败返回错误由调用方 Warn 兜底，不阻断）。
+// 供转存层在任务携带旁路语义时（IntegrityStatus=damaged）把标记写入目标卷 meta，
+// 消费者读 FileMeta.Extra 可见。sidecar 缺失 → 错误（调用方跳过）。
+func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
+	fm, err := t.FileMeta(ctx, rel)
+	if err != nil {
+		return err
+	}
+	if fm.Extra == nil {
+		fm.Extra = make(map[string]any, len(extra))
+	}
+	for k, v := range extra {
+		fm.Extra[k] = v
+	}
+	data, merr := meta.Marshal(fm)
+	if merr != nil {
+		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
+	}
+	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+		return fmt.Errorf("trusted: meta 更新落盘失败: %w", werr)
+	}
+	return nil
+}
+
 // ---- 能力接口回显（B-A2 修复）：装饰器必须委托底层能力，否则包装后
 // WriteIfAbsent/LocalVolume/ReserveSpace/Mover/Copier/Linker 等断言全落空——转存
 // 唯一性/配额/容量语义降级。逐一委托 inner（inner 未实现该接口时返回 false/错误

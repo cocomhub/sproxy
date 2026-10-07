@@ -96,6 +96,11 @@ type CloudTask struct {
 	// integrityLastChecksum 是上次校验失败 attempt 的本地 checksum（R1-C2：仅当两次
 	// checksum 一致才累计 integritySames；不同 = 瞬态损坏可恢复 → 重置重试）。
 	integrityLastChecksum string
+	// resumeSelfOverwrite 是 ResumeTask 恢复 completed+damaged 任务时置的运行时标记
+	// （E-M2 修复，不持久化）：damaged 任务重下自愈——目标卷旧损坏副本允许被本任务
+	// 覆盖（W1/W3 拒绝覆写只对他人/外部存在生效，任务自愈语义）。executeDownload
+	// 的转存路径读取后清除。
+	resumeSelfOverwrite bool
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），

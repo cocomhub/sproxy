@@ -1276,3 +1276,39 @@ func TestVerifyByFileMeta_LocalTamperDetected(t *testing.T) {
 		t.Fatalf("篡改应归 ErrTransferTarget, got %v", err)
 	}
 }
+
+// TestTransferDone_DamagedResumeSelfOverwrite E-M2 回归：damaged 任务 Resume 重下后
+// 允许覆盖目标卷旧损坏副本（resumeSelfOverwrite）——W1/W3 拒绝覆写只对他人生效。
+func TestTransferDone_DamagedResumeSelfOverwrite(t *testing.T) {
+	t.Parallel()
+	inner := newMemFS()
+	wrapped := trusted.Wrap(inner, trusted.Options{})
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return wrapped, "s3", false })
+	task := &CloudTask{
+		ID: "task-damaged-resume", Filename: "d.bin",
+		Transfer: &TransferSpec{Volume: "vol-dr"}, resumeSelfOverwrite: true,
+	}
+	dest := filepath.Join(t.TempDir(), "d.bin")
+	content := []byte(strings.Repeat("damaged-resume-", 50))
+	// 目标卷已有旧损坏副本（不同内容）。
+	rel := "anonymous/user/task-damaged-resume/d.bin"
+	inner.files[rel] = []byte("stale-corrupt-copy")
+	_ = os.WriteFile(dest, content, 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// resumeSelfOverwrite=true → 首写直接覆盖旧副本（不拒绝）。
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: testutil.SHA256Hex(content), Size: int64(len(content)),
+	}, nil)
+	if err != nil {
+		t.Fatalf("E-M2: damaged Resume 应覆盖旧副本（自愈）, got %v", err)
+	}
+	if tr == nil {
+		t.Fatal("转存应成功")
+	}
+	if got := string(inner.files[rel]); got != string(content) {
+		t.Fatalf("覆盖后内容应为新下载产物, got %q", got)
+	}
+}

@@ -122,6 +122,13 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		return err
 	}
 
+	// E-M2（damaged 自愈）：恢复 completed+damaged 任务（重下修复）→ 置运行时标记允许
+	// 转存覆盖本任务先前写过的目标卷副本（W1/W3 拒绝覆写只对他人生效）。failed/
+	// cancelled 续传不置——目标卷若已存在（先前转存成功）幂等命中仍走 WriteIfAbsent。
+	if task.Status == "completed" && task.IntegrityStatus == "damaged" {
+		task.resumeSelfOverwrite = true
+	}
+
 	// resume 前的终态快照：租户不可用（下方 taskDir 早退）时据此整体回滚，使内存状态
 	// 与磁盘上已有的终态一致。
 	prevStatus, prevError := task.Status, task.Error
