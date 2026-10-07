@@ -257,11 +257,16 @@ func entryFromMeta(m ObjectMeta) syncpkg.Entry {
 		e.MTime = m.ModTime.UnixNano()
 	}
 	// 校验和信息（用户裁定：每个 entry 提供已知的所有校验和数据，便于比较）：
-	// 百度 ETag = 整文件 md5（单次上传后经 Put 的 md5 刷新复核真实可信）。
+	// **百度 ETag 不能无条件标注为整文件 md5**（M3 实测：分片上传后百度 Stat.MD5 是
+	// 片 md5 组合/服务端标记"可能不正确"，非整文件 md5；仅小文件单传（<4MB）ETag 恰为
+	// 整文件 md5，但 Stat 无法区分来源）。标 "etag"（与 s3 一致，诚实表达服务端对象
+	// 标识）——Equal 的 commonChecksumAlgo 只看 sha256/md5，baidupcs 无交集 → 强制
+	// 流式分段自算（跨信任边界不信任远端自报 hash，C2 方向）。Put 路径自身已 readback
+	// 验证内容（C5），不受影响。
 	if m.ETag != "" {
 		e.Checksum = m.ETag
-		e.ChecksumType = "md5"
-		e.Checksums = map[string]string{"md5": m.ETag}
+		e.ChecksumType = "etag"
+		e.Checksums = map[string]string{"etag": m.ETag}
 	}
 	return e
 }
