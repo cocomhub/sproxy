@@ -3,9 +3,10 @@
 
 package server
 
-// backends_api.go 实现 backend 列表 API（V4）：GET /api/backends 返回已注册卷后端类型
-// （registry.BackendTypes()），供 Web UI「我的用户卷」创建表单 type 下拉动态感知——
-// 未来任何新 backend（S3/…）只 RegisterBackend 注册即自动出现在前端，无需改前端代码。
+// backends_api.go 实现 backend 列表 API（V4）：GET /api/backends 返回已注册卷后端类型 +
+// per-type schema（registry.BackendSchemas()），供 Web UI「我的用户卷」创建表单 type 下拉
+// 动态感知 + schema 驱动字段渲染——未来任何新 backend（S3/…）只 RegisterBackend 注册
+// （并按需实现 SchemaProvider）即自动出现在前端，无需改前端代码。
 
 import (
 	"net/http"
@@ -17,13 +18,15 @@ import (
 )
 
 type backendsListResponse struct {
-	Backends []string `json:"backends"`
+	Backends []registry.BackendSchemaInfo `json:"backends"`
 }
 
-// backendsHandler 处理 GET /api/backends。返回 registry 已注册后端类型列表（动态）。
-// 不依赖 volSet（注册表是包级状态，与卷集合装配无关）——未装配卷集合也返回已注册类型。
+// backendsHandler 处理 GET /api/backends。返回 registry 已注册后端类型的
+// type→(category, fields) schema 列表（动态）。Label 留空缺省（前端按 type 显示）；
+// 未实现 SchemaProvider 的类型 fields 为空数组。不依赖 volSet（注册表是包级状态，
+// 与卷集合装配无关）——未装配卷集合也返回已注册类型。
 func (h *Handlers) backendsHandler(w http.ResponseWriter, r *http.Request) {
-	sendJSONResponse(w, backendsListResponse{Backends: registry.BackendTypes()}, http.StatusOK)
+	sendJSONResponse(w, backendsListResponse{Backends: registry.BackendSchemas()}, http.StatusOK)
 }
 
 // backendPresignHandler 处理 POST /api/backends/{type}/presign?path=&method=&expires=：

@@ -81,6 +81,12 @@ type dirsEnv struct {
 	volSet      *registry.Set           // nil = 单卷（旧装配语义）
 	volDirs     map[string]string       // 卷名 → 卷根绝对路径（断言磁盘副作用用）
 	pools       map[string]*quota.Pool
+	// volRoots 是 enableVolumes 为本地卷建好的根句柄（enableExternalVolume 重建卷集时
+	// 复用，registry.NewSet 需要完整 roots 表）。与 volSet.roots 同源。
+	volRoots map[string]*storage.Root
+	// externalVols 是卷名 → 外部卷目录浏览能力（任务 7 fake）：testRuntime.Volumes()
+	// 经 dirsExternalSet 包装成 ExternalVolumeSource，供 List 的 ?volume=<外部卷> 路由。
+	externalVols map[string]ExternalVolume
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
@@ -95,12 +101,13 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 	t.Helper()
 	root := t.TempDir()
 	e := &dirsEnv{
-		root:     root,
-		logger:   testLogger(),
-		pool:     quota.NewPool(0),
-		tenants:  map[string]*storage.Tenant{},
-		checksum: map[string]*checksum.ChecksumStore{},
-		buckets:  map[string]*quota.Scope{},
+		root:         root,
+		logger:       testLogger(),
+		pool:         quota.NewPool(0),
+		tenants:      map[string]*storage.Tenant{},
+		checksum:     map[string]*checksum.ChecksumStore{},
+		buckets:      map[string]*quota.Scope{},
+		externalVols: map[string]ExternalVolume{},
 	}
 	e.rebuild()
 	t.Cleanup(func() {
@@ -188,7 +195,7 @@ func (r testRuntime) Volumes() VolumeSet {
 	if r.e.volSet == nil {
 		return nil
 	}
-	return r.e.volSet
+	return dirsExternalSet{Set: r.e.volSet, ext: r.e.externalVols}
 }
 
 func (r testRuntime) Tenant(volName, owner string) *storage.Tenant {
@@ -293,6 +300,7 @@ func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 	roots := map[string]*storage.Root{}
 	e.volDirs = map[string]string{}
 	e.pools = map[string]*quota.Pool{}
+	e.volRoots = map[string]*storage.Root{}
 	for i, name := range names {
 		dir := e.root
 		if i > 0 {
@@ -303,6 +311,7 @@ func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 			t.Fatalf("OpenRoot(%s): %v", name, err)
 		}
 		roots[name] = rt
+		e.volRoots[name] = rt
 		e.volDirs[name] = dir
 		e.pools[name] = quota.NewPool(0)
 		vols = append(vols, volume.Volume{Name: name, RootDir: dir})

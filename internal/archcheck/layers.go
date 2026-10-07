@@ -12,6 +12,7 @@ package archcheck
 // 「必须登记依赖」的范围，登记一个包就会拖出它整条子图（pkg/tunnel →
 // xfer / mux / hub / …），门禁根本落不了地。
 var Managed = map[string]bool{
+	"github.com/cocomhub/sproxy/pkg/audit":                true, // 本工作新增（audit 域）：通用审计日志包
 	"github.com/cocomhub/sproxy/pkg/pathguard":            true,
 	"github.com/cocomhub/sproxy/pkg/checksum":             true,
 	"github.com/cocomhub/sproxy/pkg/storage/capacity":     true, // NOSONAR: S1192 — 层规则以 import path 为键，多表天然重复
@@ -45,7 +46,9 @@ var Managed = map[string]bool{
 // 确有正当理由的跨组新边，改表并在提交说明里写明理由即可。
 var Levels = map[string]int{
 	// ---- G0 基础库（零 pkg/* 内部依赖，实测）----
-	"github.com/cocomhub/sproxy/pkg/accesskey":     0,
+	"github.com/cocomhub/sproxy/pkg/accesskey": 0,
+	// 本工作新增（audit 域）：通用审计日志包，零 pkg/* 依赖（仅标准库），故 G0。
+	"github.com/cocomhub/sproxy/pkg/audit":         0,
 	"github.com/cocomhub/sproxy/pkg/certmgr":       0,
 	"github.com/cocomhub/sproxy/pkg/checksum":      0,
 	"github.com/cocomhub/sproxy/pkg/cli":           0,

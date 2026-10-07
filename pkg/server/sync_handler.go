@@ -379,6 +379,11 @@ func (h *Handlers) writeConflictFile(rel string, content []byte) error {
 	if cerr != nil {
 		return cerr
 	}
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：冲突写回直写默认卷 user 桶（os.WriteFile），
+	// 不经 files 域 guard——命中被封装卷占用的子目录 → 拒绝。
+	if err := h.checkWrapperOccupiedWrite(h.defaultVolumeName(), userVisibleRelOf(clean)); err != nil {
+		return err
+	}
 	full := filepath.Join(userRoot, filepath.FromSlash(clean))
 	if dir := filepath.Dir(full); dir != "" {
 		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {

@@ -230,7 +230,9 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 	if !ok {
 		return nil, fmt.Errorf("备份目标卷 %q 根不可用", target)
 	}
-	return syncpkg.NewLocalFS(filepath.ToSlash(userAbs), h.logger), nil
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：备份恢复直写目标卷 user 桶，不经 files 域
+	// guard——包上占用写保护装饰器（命中被封装卷占用子目录 → 该文件计失败，不中止整体）。
+	return h.wrapOccupiedGuard(syncpkg.NewLocalFS(filepath.ToSlash(userAbs), h.logger), target), nil
 }
 
 // backupQuotaFS 是备份目标写面的配额记账装饰器：WriteFile 前对文件 size 在

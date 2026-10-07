@@ -89,7 +89,7 @@ type OpenedFile struct {
 //   - `*HTTPError{400}`：owner 不可用 / 派生 user 桶失败 / subdir 非法（同 List 的 subdir 分支）
 //   - `*HTTPError{404}`：`?volume=` 未知或不在 owner 视图（fail-closed，不泄露存在性）
 //   - 其他 error：目录读取失败（仅旧装配路径会走到）
-func (s *Service) List(q ListQuery) (ListResult, error) {
+func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 	owner := normalizeOwner(q.Owner)
 	subdir := strings.TrimPrefix(q.Subdir, "/")
 	empty := ListResult{Files: []FileInfo{}, Offset: q.Offset, Limit: q.Limit}
@@ -118,8 +118,20 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 		if !ok || !v.Authorize(owner) {
 			return empty, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 		}
+		// **外部卷列表透传（任务 7）**：装配层提供 ExternalVolumeSource 且该卷是外部
+		// 后端（ExternalVolume 非 nil）→ 路由到外部 ListDir（明文目录视图）。本地卷
+		// 该能力返回 nil → 回落既有本地聚合（零回归）。
+		if res, routed, err := s.tryExternalList(ctx, owner, subdir, v, q); routed {
+			return res, err
+		}
 		volFilter = q.VolName
 	}
+
+	// 注（评审 C4-⑥，2026-10-07）：被封装卷占用的底层子目录直查（?volume=main&subdir=videos）
+	// 保持**读路径不拦**（只读可查：返回基础卷可见条目，封装卷数据不在该视图 → 通常空 200）。
+	// 这是既有写保护契约的读侧（volume_links_write_test 钉住 200+legacy 内容）；占用目录的
+	// 语义由 WebUI 从基础卷列表隐藏表达，API 直查空 200 属可接受语义（不作 404——与读路径
+	// 契约冲突）。若未来要区分「目录不存在」与「占用目录空」，需引入单独提示字段（契约变更）。
 
 	// 列表走索引：dirRel = rel 去 user/ 前缀（索引 key 空间；"" = 根目录）。
 	dirRel := strings.TrimPrefix(rel, tnt0.UserRoot()+"/")
@@ -134,6 +146,69 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 	if allFiles == nil {
 		// 索引不可用（index nil：零值构造的 Service 不触达列表时）→ 回落实时扫描。
 		allFiles = s.listFallback(owner, subdir, q.VolName, rel, csMap)
+	}
+	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
+	return ListResult{
+		Files: paginateEntries(allFiles, q.Offset, q.Limit), Total: len(allFiles),
+		Offset: q.Offset, Limit: q.Limit,
+	}, nil
+}
+
+// tryExternalList 尝试把 `?volume=<外部卷>` 路由到该外部卷 ListDir：
+// 装配层未提供 ExternalVolumeSource，或该卷不是外部后端（ExternalVolume nil）→
+// (res, false, nil) 回落既有本地聚合（零回归）；命中外部卷 → (res, true, err)。
+func (s *Service) tryExternalList(ctx context.Context, owner, subdir string, v volume.Volume, q ListQuery) (ListResult, bool, error) {
+	src, ok := s.rt.volSet().(ExternalVolumeSource)
+	if !ok {
+		return ListResult{}, false, nil
+	}
+	be := src.ExternalVolume(q.VolName)
+	if be == nil {
+		return ListResult{}, false, nil
+	}
+	res, err := s.listExternalVolume(ctx, owner, subdir, v, be, q)
+	return res, true, err
+}
+
+// volumeCategoryFor 从卷后端类型推导展示分类：wrapper 加密/封装卷（secretdata/secrets/
+// egress）→ "wrapper"，其余类型 → ""（不填，omitempty 不出现）。与
+// pkg/volume/registry.backendCategory 的 wrapper 命名集保持一致（R2 门禁禁止本包
+// import pkg/volume/registry，故按字面量判等——见 service.go 领域边界注释）。
+func volumeCategoryFor(typ string) string {
+	switch typ {
+	case "secretdata", "secrets", "egress":
+		return "wrapper"
+	}
+	return ""
+}
+
+// listExternalVolume 列出外部卷的逻辑目录视图（`?volume=<外部卷>` 时，任务 7）。
+//
+// rel 经 v.ResolveUserPath(owner, subdir) 归一为**该 owner 的键空间**（共享卷加 owner
+// 前缀隔离、独享卷直连）——与下载路径 externalRemotePath 的 ResolveUserPath 同源，列表
+// 与 stat/download 看到同一份明文视图，多租户**不互泄**。
+//
+// 错误语义：*HTTPError{400} rel 非法；*HTTPError{500} 后端 ListDir 失败（不泄内容，
+// 与 StatPath / openExternalSource 的外部卷失败语义一致）。
+func (s *Service) listExternalVolume(ctx context.Context, owner, subdir string, v volume.Volume, be ExternalVolume, q ListQuery) (ListResult, error) {
+	rel, kerr := v.ResolveUserPath(owner, subdir)
+	if kerr != nil {
+		return ListResult{Files: []FileInfo{}, Offset: q.Offset, Limit: q.Limit},
+			&HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	entries, lerr := be.ListDir(ctx, rel)
+	if lerr != nil {
+		s.rt.logger().Warn("列出外部卷目录失败", "volume", v.Name, "dir", subdir, "error", lerr.Error())
+		return ListResult{Files: []FileInfo{}, Offset: q.Offset, Limit: q.Limit},
+			&HTTPError{Status: http.StatusInternalServerError, Message: errMsgStatFailed}
+	}
+	cat := volumeCategoryFor(v.Type)
+	allFiles := make([]FileInfo, 0, len(entries))
+	for _, e := range entries {
+		// 外部卷目录条目：明文字段（Name/Size/IsDir）+ 卷名（v.Name，供 Web UI 卷徽标
+		// 显示），无 checksum——外部卷目录视图不暴露加密元数据。另补展示分类
+		// （wrapper 加密卷 → "wrapper"，供 Web UI 卷徽标细化；本地卷不填）。
+		allFiles = append(allFiles, FileInfo{Name: e.Name, IsDir: e.IsDir, Size: e.Size, Volume: v.Name, VolumeCategory: cat})
 	}
 	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
 	return ListResult{

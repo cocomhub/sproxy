@@ -20,6 +20,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
@@ -37,12 +38,24 @@ func isStorageFull(err error) bool {
 
 // checkTransferACL 校验转存目标卷对 owner 的 ACL（H2/R1：防跨租户覆写）。
 // transfer 为 nil 或卷放行 → 返回 ""；卷未装配/ACL 拒绝 → 返回错误文案（调用方 403）。
+// 写保护（用户语义 #6，旁路闭环 2026-10-06）：显式转存路径命中被封装卷占用的底层子目录 →
+// 同样返回错误文案（创建时即拒绝，避免下载完成才撞 403）。自动派生路径（Path 空，首段为
+// 任务 ID 不可预判）由转存写前 guard（CloudDownloadManager.OccupiedWriteGuard）兜底。
 func (h *Handlers) checkTransferACL(owner string, transfer *cloud.TransferSpec) string {
 	if transfer == nil {
 		return ""
 	}
 	if !h.volumeAllowedFor(owner, transfer.Volume) {
 		return fmt.Sprintf("转存目标卷 %q 对当前用户不可用（ACL 拒绝）", transfer.Volume)
+	}
+	if transfer.Path != "" && h.volSet != nil {
+		if v, ok := h.volSet.ByName(transfer.Volume); ok {
+			if key, kerr := v.ResolveOwnerPath(owner, "user", transfer.Path); kerr == nil {
+				if occErr := h.checkWrapperOccupiedWrite(transfer.Volume, volume.UserVisibleRel(key)); occErr != nil {
+					return occErr.Error()
+				}
+			}
+		}
 	}
 	return ""
 }

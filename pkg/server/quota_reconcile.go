@@ -210,6 +210,17 @@ func (h *Handlers) reconcileVolumesFromDisk() {
 	vols := h.volSet.All()
 	volumeBuckets := make(map[string]map[string]map[string]int64, len(vols))
 	for _, v := range vols {
+		// M10（2026-10-06）：外部卷/封装卷（RootDir 空，无本地 user 桶）跳过——ScanStorageDir("")
+		// 会扫错根，且封装卷容量经底层池**委托子 Scope** 计（adjustVolumePool 若校准委托子池
+		// 会与底层池 reconcile 双计）。只有本地卷（有 RootDir）参与卷池磁盘校准。
+		// 记录取舍（评审 A4 Minor #1）：wrapper 委托池 committed 恒 0 不随 reconcile 校准——
+		// 删「重启前任一 wrapper 文件」后委托池 release 钳 0 → base 池不降、overcharge 到下次
+		// 重启（方向保守「宁可拒绝」，仅在 base 有容量上限时可见）。委托池物理字节已计入底层池
+		// 校准（封装卷数据落底层卷根内），校准委托子池需按容器拆分子目录字节且与底层池双计，
+		// 复杂度/风险高于收益，按可记录取舍保留跳过。
+		if v.RootDir == "" {
+			continue
+		}
 		buckets, _, err := capacity.ScanStorageDir(v.RootDir)
 		if err != nil {
 			h.logger.Error("逐卷扫描失败，跳过该卷校准", "volume", v.Name, "error", err)

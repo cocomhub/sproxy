@@ -1230,6 +1230,15 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 多卷（AD-5）：init 定卷，temp + rename + version 全在目标卷（session.Volume 空 = 默认卷）。
 	tnt, rel := s.completeTargetTenant(session, owner)
 
+	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——会话目标路径命中占用子目录 →
+	// 拒绝 complete（init 已定卷，此处纵深防御：wrapper 可能在 init 与 complete 之间创建）。
+	if rel != "" {
+		if err := s.rejectOccupiedWrite(session.Volume, userVisibleRel(rel)); err != nil {
+			s.sendJSON(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: err.Error()}, http.StatusForbidden)
+			return
+		}
+	}
+
 	// 文件级互斥（T6c move 锁架构延伸）：complete 会把 temp 原子 rename 为最终文件，与并发
 	// move（复制→删源）共用同 rel 锁——无锁时 move 删源后 complete 仍可把文件落回源卷，与
 	// 目标卷副本并存（AD-4 破坏）；持锁后 move 期间 complete 409（客户端可稍后重试，

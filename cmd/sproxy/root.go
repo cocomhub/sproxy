@@ -1159,6 +1159,16 @@ func (rt *runServerRuntime) setupServerCore() error {
 	if err := setupSecretBackends(ctx, h.Volumes(), cfg.StorageRoot, logger); err != nil {
 		return fmt.Errorf("secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w", err)
 	}
+	// C4（2026-10-06 用户裁决）：config 声明嵌套封装卷接线 + 完整性检查 + 运行时写回。
+	//  1. WireConfigNestedWrappers：对 config volumes 段声明 `target: <卷>/<子目录>` 的封装卷
+	//     登记互斥占用 + 写保护 + 配额委托（fail-closed，登记失败即启动失败，杜绝声明不生效）；
+	//  2. SetConfigWriter：/api/volumes/user 创建/删除后写回 config volumes 段（重启不丢卷）。
+	if err := h.WireConfigNestedWrappers(); err != nil {
+		return err
+	}
+	if cfgFile != "" {
+		h.SetConfigWriter(server.NewFileConfigWriter(cfgFile))
+	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
 	registerPikpakDownloader(cfg)
@@ -1333,6 +1343,9 @@ func (rt *runServerRuntime) setupSync(h *server.Handlers) error {
 	exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
 	exec.SetScopeResolver(h.SyncScopeFor())
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：同步本地写侧（pull/双向）直写默认卷 user
+	// 桶，不经 files 域 guard——注入默认卷占用写保护（命中被封装卷占用子目录 → 该文件失败）。
+	exec.SetWriteGuard(h.DefaultVolumeWriteGuard())
 	rt.setupSyncConflictIndex(exec, h, logger)
 	setupMeshFSFactory(exec, cfg, h, logger)
 	rt.setupSyncVolumeBackends(exec, h, logger)
@@ -1377,6 +1390,10 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()
 	s3ext.RegisterS3Backend()
+	// linked（外部）类型基础建卷 schema（D2）：这些后端未实现 SchemaProvider，登记静态
+	// **建卷表单** schema（url/凭据字段）使 Web UI「卷管理」建卷表单可提交（后端自带
+	// fail-fast 校验 extra）。与类型注册同步，/api/backends 恒先见类型后有正常表单。
+	registerLinkedBackendSchemas()
 	// 注：secret 加密卷装配已从本函数移出——见 setupServerCore（registerSecretVolumeBackends
 	// 早于 RegisterRoutes 注册后端类型 + RegisterRoutes 后无条件 setupSecretBackends 确保
 	// 默认 secrets 卷），不再被 setupSync 早退门控（Imp-1 装配门控修复）。

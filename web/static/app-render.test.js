@@ -113,6 +113,22 @@ test('buildFileRowHtml 文件行卷 badge：有 volume 显示、无 volume 不�
   assert.ok(xssVol.includes('&lt;img&gt;'));
 });
 
+test('volBadge wrapper 按 category 渲染：volume 缺失/空仍输出 vol-badge-wrapper（过滤视图真实场景）', () => {
+  // 常规：volume 非空 + wrapper → vol-badge-wrapper 类 + 🔒 卷名。
+  const html = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume: 'vault', volume_category: 'wrapper' });
+  assert.match(html, /vol-badge-wrapper/);
+  assert.ok(html.includes('>🔒 vault<'), 'wrapper 徽标应显示 🔒 + 卷名');
+  // 过滤视图真实场景：外部卷目录视图条目 volume 空但 volume_category 在 → 徽标按
+  // category 渲染而非 volume，仍输出 vol-badge-wrapper（≤ 早期数据 / 防御路径）。
+  const noVol = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume_category: 'wrapper' });
+  assert.match(noVol, /vol-badge-wrapper/);
+  const emptyVol = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume: '', volume_category: 'wrapper' });
+  assert.match(emptyVol, /vol-badge-wrapper/);
+  // 非 wrapper 且无 volume → 仍无 badge（零回归）。
+  const plain = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10 });
+  assert.ok(!plain.includes('vol-badge'), '无 volume 且非 wrapper 不显示 badge');
+});
+
 test('buildFileTableHtml 空 / 多行', () => {
   assert.ok(r.buildFileTableHtml([], 'x').includes('</tbody></table>'));
   const html = r.buildFileTableHtml([{ name: 'f1', size: 10, is_dir: false }, { name: 'd2', is_dir: true }], 'sub');
@@ -215,6 +231,20 @@ test('volumesTableHtml 空列表 + 多卷仪表', () => {
   const xss = r.volumesTableHtml([{ name: '<svg onload=1>', mode: 'x', capacity: 0, usage: 0, allowed: true }]);
   assert.ok(!xss.includes('<svg'));
   assert.ok(xss.includes('&lt;svg onload=1&gt;'));
+});
+
+// ---- 云端下载三行为表单 ----
+test('cloudDownloadFormHtml includes transfer volume selector + three behaviors', () => {
+  const html = r.cloudDownloadFormHtml({ volumes: ['local', 'vault'], current: 'vault' });
+  assert.match(html, /name="transfer-volume"/);
+  assert.match(html, /name="save"/);
+  assert.match(html, /name="download-local"/);
+  // integrity_must_pass 复选框默认不勾（无 checked 属性），样式走 var(--…)（暗色兼容）。
+  assert.match(html, /name="integrity-must-pass"/);
+  assert.ok(!/name="integrity-must-pass"\s+checked/.test(html), 'integrity-must-pass 默认不勾选');
+  assert.match(html, /var\(--text-primary\)/);
+  assert.match(html, /var\(--bg-container\)/);
+  assert.match(html, /vault/);
 });
 
 // ---- 审计面板 ----

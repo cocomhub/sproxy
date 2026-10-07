@@ -118,6 +118,12 @@ var (
 	// secretDataSet 未就绪而装配失败），卷集返回后由 cmd/sproxy setupSecretBackends
 	// 逐个 AddExternalVolume 补装（含 config 声明的 secretdata/secrets 卷）。
 	deferredBackends = map[string]bool{}
+	// staticSchemas 是后端类型的**静态**创建表单 schema 表（RegisterBackendSchema 登记；
+	// backendMu 同临界区守卫）。静态表不依赖构造后端实例——生产 wrapper 类型
+	// （secretdata/secrets/egress）的构造依赖已装配卷集/密钥（空 Extra 直接失败），
+	// 无法经「构造读 SchemaProvider」得到 schema，故装配期登记静态表（BackendSchemas /
+	// BackendSchema 优先读静态表，未登记才回落构造读 SchemaProvider）。
+	staticSchemas = map[string][]FieldSchema{}
 )
 
 // MarkDeferredType 把后端类型标记为「推迟装配」：assembleVolumes 对 config 声明该类型
@@ -239,12 +245,156 @@ func BackendTypes() []string {
 	return out
 }
 
+// FieldSchema 声明后端创建表单的一个字段（前端 schema 驱动渲染）。
+type FieldSchema struct {
+	Key          string   `json:"key"`
+	Label        string   `json:"label"`
+	Type         string   `json:"type"` // text|volume-select|enum|bool|number
+	Required     bool     `json:"required"`
+	Options      []string `json:"options,omitempty"`
+	AllowWrapper bool     `json:"allow_wrapper,omitempty"` // volume-select 是否可选封装卷底层
+}
+
+// SchemaProvider 是 ExternalBackend 的**可选**扩展：声明本后端的创建表单 schema。
+//
+// 与 VolumeStatsProvider/HealthProbe 同模式——后端实现它则以本 schema 驱动前端建卷表单
+// （字段渲染；NewBackend 侧可用 schema 校验 Extra）。断言失败（未实现）不失败——调用方
+// 按「无字段」处理，前端仅展示 {type, category}，表单只填 name。
+type SchemaProvider interface {
+	Schema() []FieldSchema
+}
+
+// BackendSchemaInfo 是 backend 列表 API 单个后端的 schema 条目（type → category + fields）。
+type BackendSchemaInfo struct {
+	Type     string        `json:"type"`
+	Category string        `json:"category"`
+	Label    string        `json:"label,omitempty"`
+	Fields   []FieldSchema `json:"fields"`
+}
+
+// backendCategory 由后端类型推导 schema category：
+//   - "secrets"/"secretdata"/"egress"（封装/密钥卷）→ "wrapper"；
+//   - 本地卷 → "mt-local"；
+//   - 其余外部类型 → "linked"。
+//
+// 注册表内不会出现本地类型（RegisterBackend 拒绝空串与 TypeLocal），"mt-local" 分支为
+// 防御性覆盖（该分支仅对未注册的本地类型概念成立）。
+func backendCategory(typ string) string {
+	switch typ {
+	case "secrets", "secretdata", "egress":
+		return "wrapper"
+	case "", "local":
+		return "mt-local"
+	default:
+		return "linked"
+	}
+}
+
+// backendSchema 尝试构造后端实例读取创建表单 schema（可选 SchemaProvider 断言）。
+// 构造失败 / 后端 nil / 未实现 → 返回 nil（调用方回退空 fields）。构造仅用于读取静态
+// schema（与 backendPresignHandler 同一「构造实例断言能力」模式）；读毕立即 Close 释放。
+// 未注册类型经 NewBackend 返回错误 → 空 fields（不 fail-closed——schema 非关键路径）。
+func backendSchema(ctx context.Context, typ string) []FieldSchema {
+	be, err := NewBackend(ctx, volume.Volume{Type: typ})
+	if err != nil || be == nil {
+		return nil
+	}
+	defer be.Close()
+	sp, ok := be.(SchemaProvider)
+	if !ok {
+		return nil
+	}
+	return sp.Schema()
+}
+
+// RegisterBackendSchema 登记后端类型的**静态**创建表单 schema（装配期；不依赖构造后端
+// 实例）。生产 wrapper 类型（secretdata/secrets/egress）构造依赖已装配卷集/密钥，空 Extra
+// 无法构造 → 无法经 SchemaProvider 读 schema，故在装配处登记静态表（防环校验依赖它）。
+//
+// 重复登记同一类型 → panic（仿 RegisterBackend：重复登记 = 两个装配点声明类型 schema
+// 所有权，装配期应 fail-fast 而非静默覆盖）。空类型名 → panic。空字段列表 → panic
+// （登记空 schema 无意义——该类型应按不登记处理，由调用方走构造回落或无字段）。
+func RegisterBackendSchema(typ string, fields []FieldSchema) {
+	if typ == "" || typ == volume.TypeLocal {
+		panic(fmt.Sprintf("registry: 非法后端 schema 类型 %q（空串与 %q 保留给本地卷）", typ, volume.TypeLocal))
+	}
+	if len(fields) == 0 {
+		panic(fmt.Sprintf("registry: 后端类型 %q 的静态 schema 为空（无意义登记）", typ))
+	}
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	if _, dup := staticSchemas[typ]; dup {
+		panic(fmt.Sprintf("registry: 后端类型 %q 的静态 schema 重复登记", typ))
+	}
+	staticSchemas[typ] = append([]FieldSchema(nil), fields...)
+}
+
+// UnregisterBackendSchemaForTest 移除测试登记的静态 schema（测试辅助：清理污染共享注册
+// 表；镜像 UnregisterBackendForTest 语义）。生产代码不得调用。
+func UnregisterBackendSchemaForTest(typ string) {
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	delete(staticSchemas, typ)
+}
+
+// CategoryOf 返回后端类型的 schema category（backendCategory：wrapper|linked|mt-local）。
+// 导出供建卷校验兜底使用（wrapper 类型空 schema 时强制 target 校验）。
+func CategoryOf(typ string) string {
+	return backendCategory(typ)
+}
+
+// BackendSchema 返回单后端类型的创建表单 schema（副本；nil = 无字段）。
+//
+// 读取顺序：先查静态表（RegisterBackendSchema——构造无关、装配期登记，生产 wrapper 类型
+// 走此路径）；未登记静态表 → 回落构造后端实例读 SchemaProvider（注册期即可读的类型，
+// 如测试 fake）。构造失败/未实现 → nil。**不构造全注册表**（高频建卷校验调用此单类型
+// 访问器，避免 BackendSchemas 的全量构造开销）。
+func BackendSchema(typ string) []FieldSchema {
+	backendMu.RLock()
+	if flds, ok := staticSchemas[typ]; ok {
+		backendMu.RUnlock()
+		return append([]FieldSchema(nil), flds...)
+	}
+	backendMu.RUnlock()
+	return backendSchema(context.Background(), typ)
+}
+
+// BackendSchemas 返回已注册后端的 type→(category, fields) 映射（V4 backend 列表 schema
+// 驱动建卷表单）。category 由协议推导（backendCategory）；fields 优先读静态表
+// （RegisterBackendSchema，构造无关），未登记的类型回落构造读 SchemaProvider——未实现者
+// 为空数组（json:"fields" 无 omitempty，前端依赖该键恒为 []）。
+// 顺序不承诺稳定（map 遍历）；调用方不得依赖顺序。空注册表 → 空切片（非 nil）。
+func BackendSchemas() []BackendSchemaInfo {
+	backendMu.RLock()
+	types := make([]string, 0, len(backendFactories))
+	for typ := range backendFactories {
+		types = append(types, typ)
+	}
+	backendMu.RUnlock()
+
+	out := make([]BackendSchemaInfo, 0, len(types))
+	for _, typ := range types {
+		info := BackendSchemaInfo{
+			Type:     typ,
+			Category: backendCategory(typ),
+		}
+		if flds := BackendSchema(typ); flds != nil {
+			info.Fields = flds
+		} else {
+			info.Fields = []FieldSchema{}
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
 // UnregisterBackendForTest 移除测试注册的后端（测试辅助：跨包测试（如 pkg/server）注册
 // fake backend 后清理，防污染共享注册表）。生产代码不得调用。
 func UnregisterBackendForTest(typ string) {
 	backendMu.Lock()
 	defer backendMu.Unlock()
 	delete(backendFactories, typ)
+	delete(staticSchemas, typ) // 同删静态 schema（防 stale 掩盖重注册类型的 schema）
 	// 同删该类型声明的协议（schemeBackends：scheme→typ 反向清理），
 	// 否则 -count=2/并发测试重注册同 scheme 触发协议冲突 panic（CI 复现）。
 	for sc, t := range schemeBackends {

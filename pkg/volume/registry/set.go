@@ -24,6 +24,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -47,6 +48,12 @@ type Set struct {
 	// pools 是 name → 卷容量池。Capacity<=0 仍建池（上限 0 = 不限量），便于统一入账与
 	// T4 的 used(name) 活用量闭包（OrderCandidates spread）。外部卷同样建池（入账统一）。
 	pools map[string]*quota.Pool
+	// delegated 是 name → 封装卷委托到「其 target 底层卷池的占用子目录 Scope」的底层账本
+	// （方案B：封装卷不建独立容量池，配额 = 底层池子 Scope，父链聚合保障整体不超底层配额）。
+	// 建封装卷时挂载（DelegatePool），删封装卷时清除（ClearDelegatedPool）；Pool(name) 命中
+	// 委托时返回子 Scope 池，否则回落 pools。动态写，delegatedMu 守卫（Pool 高频读）。
+	delegated   map[string]*quota.Pool
+	delegatedMu sync.RWMutex
 	// defaultName 是默认卷名（cfg.Volumes[0].Name）。恒等于 Default().Name（构造方由
 	// assembleVolumes 保证：i==0 时取 volumes[0]）；跨包调用方一律走既有 Default().Name，
 	// 故本字段不导出。
@@ -83,6 +90,7 @@ func NewSet(
 		roots:       roots,
 		external:    external,
 		pools:       pools,
+		delegated:   map[string]*quota.Pool{},
 		defaultName: defaultName,
 		caches:      map[string]*storage.TenantCache{},
 	}
@@ -152,6 +160,29 @@ func (vs *Set) External(name string) ExternalBackend {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
 	return vs.external[name]
+}
+
+// FSFor 返回指定卷名的同步 FS 视图（统一底层层解析入口，嵌套封装/写保护复用）：
+//   - 外部卷 → External(name).FS()（未知/无 FS → (nil,false)）；
+//   - 本地卷 → 以 RootDir 构造 LocalFS（RootDir 空 → (nil,false)）。
+//
+// 对本方法做**读**（RLock）：BottomFS 由外部句柄/Cache 持有，装配分离，读到即用（不常驻副本）。
+func (vs *Set) FSFor(name string) (syncpkg.FS, bool) {
+	vs.mu.RLock()
+	be := vs.external[name]
+	vs.mu.RUnlock()
+	if be != nil {
+		fs := be.FS()
+		return fs, fs != nil
+	}
+	v, ok := vs.ByName(name)
+	if !ok {
+		return nil, false
+	}
+	if v.RootDir == "" {
+		return nil, false
+	}
+	return syncpkg.NewLocalFS(v.RootDir, nil), true
 }
 
 // ResolveURL 按 URL 寻址内容：`scheme://<卷名>/<路径>`。
@@ -299,8 +330,64 @@ func (vs *Set) AttachExternal(name string, be ExternalBackend) error {
 }
 
 // Pool 返回指定卷名的容量池（未知卷名返回 nil）。
+//
+// 委托语义（方案B）：封装卷（嵌套 target，已 DelegatePool 登记）返回其**底层卷池的占用
+// 子目录 Scope 底账本**——消费方（reserveVolume/路由排序/metrics/reconcile 等）经本方法
+// 统一拿到子 Scope 池，TryReserve/Adjust/释放自动父链聚合到原始卷池，整体不超底层配额。
+// 未委托的卷返回 pools 的独立容量池。
 func (vs *Set) Pool(name string) *quota.Pool {
+	vs.delegatedMu.RLock()
+	if vs.delegated != nil {
+		if p := vs.delegated[name]; p != nil {
+			vs.delegatedMu.RUnlock()
+			return p
+		}
+	}
+	vs.delegatedMu.RUnlock()
 	return vs.pools[name]
+}
+
+// DelegatePool 为封装卷登记委托容量池（方案B）：不建独立池，把封装卷配额挂到其 target
+// 底层卷容量池的**占用子目录 Scope**（basePool.Scope(subdir, maxBytes)，父链聚合天然保障
+// 整体不超底层配额）。maxBytes<=0 = 子 Scope 不限（最终由底层卷反向管理）。
+//
+// 返回子 Scope 的底层 *Pool（即后续 Pool(wrapper) 的返回值）。底层卷无容量池 → 明确错误
+// （fail-closed：无法挂委托时不得静默回落独立池语义，调用方按其业务回滚）。
+func (vs *Set) DelegatePool(wrapper, base, subdir string, maxBytes int64) (*quota.Pool, error) {
+	// 底层池经 vs.Pool(base) 解析（而非裸读 vs.pools[base]）：base 本身是嵌套封装卷时返回其
+	// 委托的子 Scope 池——链式嵌套（wrapA 占 main/videos → wrapB 占 wrapA/xyz）挂载在上级子
+	// Scope 下，父链继续聚合到原始卷池（整体保障不超配额）。须在取得锁之前解析，
+	// 避免 delegatedMu 不可重入（RWMutex 内再入即死锁）。
+	basePool := vs.Pool(base)
+	if basePool == nil {
+		return nil, fmt.Errorf("registry: 封装卷 %q 底层卷 %q 无容量池，无法挂配额委托", wrapper, base)
+	}
+	sub := basePool.Scope(subdir, maxBytes)
+	vs.delegatedMu.Lock()
+	defer vs.delegatedMu.Unlock()
+	if vs.delegated == nil {
+		vs.delegated = map[string]*quota.Pool{}
+	}
+	vs.delegated[wrapper] = sub.Pool()
+	return sub.Pool(), nil
+}
+
+// ClearDelegatedPool 移除封装卷的委托容量池登记（删封装卷时调用）。无登记 → 空操作。
+// C5/M8（2026-10-06）：移除登记的同时**归还配额**（把委托子 Scope 的 committed 释放回
+// 底层卷池父链——删封装卷后该份额归还原卷）并**摘除 children 留桩**（Unmount，防反复
+// 建删同子目录让底层池 children 无限累积）。
+func (vs *Set) ClearDelegatedPool(wrapper string) {
+	vs.delegatedMu.Lock()
+	defer vs.delegatedMu.Unlock()
+	if vs.delegated == nil {
+		return
+	}
+	if p := vs.delegated[wrapper]; p != nil {
+		// C5/M8（2026-10-06）：归还配额（委托子 Scope committed 释放回底层卷池父链）+ 摘除
+		// children 留桩（防反复建删同子目录让底层池 children 无限累积）。
+		p.ReleaseCommittedAndUnmount()
+	}
+	delete(vs.delegated, wrapper)
 }
 
 // Close 关闭全部卷上租户子根、卷根句柄与外部卷句柄（幂等：重复调用安全，nil/已关跳过）。

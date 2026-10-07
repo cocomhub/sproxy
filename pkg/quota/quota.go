@@ -88,6 +88,20 @@ func (p *Pool) UsageByBucket() map[string]int64 {
 	return m
 }
 
+// ReleaseCommittedAndUnmount 释放本池 committed 到父链并摘除本池对应的子 Scope（删封装卷时
+// 归还配额给底层池 + 清 children 留桩；C5/M8，2026-10-06）。根池（parent nil）只释放不摘除；
+// 已卸载/无占用 → 幂等空操作。释放先于摘除：父池 committed 含本子池已传播的占用，先 release
+// 到父链再摘除使父池账本不虚增。
+func (p *Pool) ReleaseCommittedAndUnmount() {
+	if used := p.Usage(); used > 0 {
+		p.releaseCommittedUp(used)
+	}
+	if p.parent == nil {
+		return
+	}
+	(&Scope{pool: p}).Unmount()
+}
+
 // Adjust 调整本池已确认占用（reconcile 收敛用，diff 语义）：committed += (next − prev)，
 // 可正可负（防下溢归零），不经过 reserved。
 // 与 Scope.Adjust 的差异：Scope.Adjust 沿父链向上传播（子桶 diff 聚合到根池）；本方法
@@ -380,6 +394,31 @@ func (s *Scope) ReleaseUsage(n int64) {
 // 实际扣掉的量，不连带扣减祖先层中其它子桶的占用（详见 releaseCommittedUp）。
 func (s *Scope) Adjust(prev, next int64) {
 	s.pool.adjustUp(next - prev)
+}
+
+// Pool 返回该作用域的底层配额账本（引用场景：把子作用域当作 *Pool 上交上层统一入账——
+// 嵌套封装配额委托（方案B）经它把封装卷容量 Pool 挂到底层卷池的子 Scope，Set.Pool(wrapper)
+// 返回该底池让消费方直接 TryReserve/Adjust/释放，父链聚合天然保障整体不超底层配额）。
+func (s *Scope) Pool() *Pool { return s.pool }
+
+// Unmount 从父池 children 摘除本作用域（删封装卷时清「子 Scope 留桩」，M8，2026-10-06）。
+// 摘除后本 Scope 不再被父池 Resolve/UsageByBucket 看到；其自身账本独立存在（committed 残留
+// 由调用方先归零——见 Set.ClearDelegatedPool：先释放 committed 到父链再摘除）。根池自身
+// （parent nil）或已卸载 → 空操作（幂等）。并发安全：父池 children 锁内摘除。
+func (s *Scope) Unmount() {
+	p := s.pool
+	if p.parent == nil {
+		return
+	}
+	parent := p.parent
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	for i, c := range parent.children {
+		if c.pool == p {
+			parent.children = append(parent.children[:i], parent.children[i+1:]...)
+			return
+		}
+	}
 }
 
 // Usage 返回已确认占用。

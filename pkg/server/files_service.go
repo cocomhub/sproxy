@@ -14,8 +14,12 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -25,6 +29,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // filesStorageManager 把 *capacity.StorageManager 适配为 files.StorageManager。
@@ -56,7 +62,130 @@ func (r filesRuntime) Volumes() files.VolumeSet {
 	if r.h.volSet == nil {
 		return nil
 	}
-	return r.h.volSet
+	return filesVolumeSet{Set: r.h.volSet}
+}
+
+// filesVolumeSet 把 *registry.Set 适配为 files.VolumeSet + files.ExternalVolumeSource：
+// 外部卷目录浏览能力经 registry.Set.External(name).FS()（sync.FS）适配为领域接口。
+// 嵌入 *registry.Set 继承 VolumeSet 方法（Default/All/ByName/Root/Pool），外部能力新增。
+type filesVolumeSet struct {
+	*registry.Set
+}
+
+// ExternalVolume 实现 files.ExternalVolumeSource：按卷名返回外部卷目录浏览能力。
+// 未知/非外部卷（本地卷）→ nil（List 的 `?volume=` 回落既有本地聚合，零回归）。
+func (a filesVolumeSet) ExternalVolume(name string) files.ExternalVolume {
+	be := a.External(name)
+	if be == nil {
+		return nil
+	}
+	fsys := be.FS()
+	if fsys == nil {
+		return nil
+	}
+	return filesExternalVolume{fs: fsys}
+}
+
+// ExternalDeleter 实现 files.ExternalVolumeDeleter（C2，2026-10-06）：按卷名返回外部卷删除
+// 能力。未知/非外部卷（本地卷）/FS 不可用 → nil（delete 走既有本地卷路径，零回归）。
+// key 语义与上传 externalUploadSink 一致：ResolveUserPath 统一计算（owner 前缀/键空间适配）。
+func (a filesVolumeSet) ExternalDeleter(name string) files.ExternalDeleter {
+	be := a.External(name)
+	if be == nil {
+		return nil
+	}
+	fsys := be.FS()
+	if fsys == nil {
+		return nil
+	}
+	v, ok := a.ByName(name)
+	if !ok {
+		return nil
+	}
+	return filesExternalDeleter{fs: fsys, v: v}
+}
+
+// filesExternalDeleter 把 sync.FS + 卷描述适配为 files.ExternalDeleter。
+type filesExternalDeleter struct {
+	fs syncpkg.FS
+	v  volume.Volume
+}
+
+// ownerKey 把域侧 rel（user/<name>）映射为外部卷键（与 externalUploadSink 同一算法：
+// 桶目录自身 "user" → 桶内空路径，防 "user/user" 残留）。
+func (a filesExternalDeleter) ownerKey(owner, rel string) (string, error) {
+	stripped := rel
+	switch {
+	case rel == "user":
+		stripped = ""
+	case strings.HasPrefix(rel, "user/"):
+		stripped = strings.TrimPrefix(rel, "user/")
+	}
+	return a.v.ResolveUserPath(owner, stripped)
+}
+
+// StatSize 实现 files.ExternalDeleter。
+func (a filesExternalDeleter) StatSize(ctx context.Context, _, owner, rel string) (int64, bool, error) {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return 0, false, err
+	}
+	e, serr := a.fs.Stat(ctx, key)
+	if serr != nil {
+		return 0, false, serr
+	}
+	if e == nil {
+		return 0, false, nil
+	}
+	if e.IsDir {
+		return 0, true, nil
+	}
+	return e.Size, true, nil
+}
+
+// FileChecksum 实现 files.ExternalFileChecksum（评审 CRIT-1）：从外部卷 FS 流式读取明文
+// 内容计算 SHA-256（hex）。外部卷（secretdata 等）的 FS 读即解密密文 → 明文指纹，与上传
+// 时的客户端 checksum 可比。不可用/目录 → 返回错误（调用方 500 保留，不静默删）。
+func (a filesExternalDeleter) FileChecksum(ctx context.Context, _, owner, rel string) (string, error) {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return "", err
+	}
+	rc, oerr := a.fs.OpenRead(ctx, key)
+	if oerr != nil {
+		return "", oerr
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, cerr := io.Copy(h, rc); cerr != nil {
+		return "", cerr
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// Delete 实现 files.ExternalDeleter。
+func (a filesExternalDeleter) Delete(ctx context.Context, _, owner, rel string) error {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return err
+	}
+	return a.fs.Delete(ctx, key)
+}
+
+// filesExternalVolume 把 sync.FS 的 ListDir 适配为 files.ExternalVolume
+// （[]syncpkg.Entry → []files.ExternalEntry，只保留 Name/IsDir/Size 明文视图）。
+type filesExternalVolume struct{ fs syncpkg.FS }
+
+func (a filesExternalVolume) ListDir(ctx context.Context, rel string) ([]files.ExternalEntry, error) {
+	entries, err := a.fs.ListDir(ctx, rel)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]files.ExternalEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, files.ExternalEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size})
+	}
+	return out, nil
 }
 
 func (r filesRuntime) Tenant(volName, owner string) *storage.Tenant {
@@ -69,6 +198,13 @@ func (r filesRuntime) Locate(owner, rel string) (files.FileLocation, bool) {
 
 func (r filesRuntime) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (files.UploadRoute, error) {
 	return r.h.routeUploadForFiles(owner, rel, explicitVol, size, forceHomeVol)
+}
+
+// CheckOccupiedWrite 实现 files.OccupiedWriteGuard：判定 volName 卷上 userRel（用户可见相对
+// 路径，如 videos/x）的写是否命中被封装卷占用的子目录（用户语义 #6 写保护）。命中返回
+// errVolumeOccupiedReadOnly（装配层映射 403）；未命中返回 nil。
+func (r filesRuntime) CheckOccupiedWrite(volName, userRel string) error {
+	return r.h.checkWrapperOccupiedWrite(volName, userRel)
 }
 
 func (r filesRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.h.quotaScopeFor(owner, rel) }

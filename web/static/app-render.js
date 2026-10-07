@@ -51,6 +51,29 @@
     return (n / 1073741824).toFixed(2) + ' GB';
   }
 
+  // parseSizeText 人类可读容量 → 字节（"100GiB"/"2GB"/纯数字字节）。非法/空抛错。
+  // 单位支持 B / K·KB·KiB / M·MB·MiB / G·GB·GiB / T·TB·TiB（与 Go sizex.ParseSize 对齐——
+  // 裸 K/M/G/T 后缀同义 KB/MB/GB/TB，1000·based；Ki/Mi/Gi/Ti 为 1024·based；建卷容量单位
+  // 下拉 MB/GB/TB/MiB/GiB/TiB 提交的 `100GiB` 形态在此解析）。空串 → 0（容量留空 = 不限）。
+  function parseSizeText(text) {
+    const t = String(text).trim();
+    if (t === '') return 0;
+    const m = /^([\d.]+)\s*(B|K|M|G|T|KB|MB|GB|TB|Ki|Mi|Gi|Ti|KiB|MiB|GiB|TiB)?$/i.exec(t);
+    if (!m) throw new Error('无法解析大小: ' + t);
+    const n = Number.parseFloat(m[1]);
+    const unit = (m[2] || '').toUpperCase();
+    const mult = {
+      '': 1, B: 1,
+      K: 1000, KB: 1000, M: 1000 * 1000, MB: 1000 * 1000,
+      G: 1000 * 1000 * 1000, GB: 1000 * 1000 * 1000, T: 1000 * 1000 * 1000 * 1000,
+      TB: 1000 * 1000 * 1000 * 1000,
+      KI: 1024, KIB: 1024, MI: 1024 * 1024, MIB: 1024 * 1024,
+      GI: 1024 * 1024 * 1024, GIB: 1024 * 1024 * 1024, TI: 1024 * 1024 * 1024 * 1024,
+      TIB: 1024 * 1024 * 1024 * 1024,
+    }[unit];
+    return Math.round(n * (mult || 1));
+  }
+
   // stripCloudId：把云项展示 id（'cloud-task-<id>' / 'cloud-group-<id>'）还原为服务端真实 id。
   // 云行按钮 data-id 携带展示 id（含前缀）；凡要调 sc.cloud.* API 或拼 '.__cloud__/<id>/' 路径，
   // 必须先剥前缀，否则后端 404/组 not found。非云 id 原样返回。双实现同源同行为：
@@ -104,6 +127,15 @@
   // previewKind(name)：扩展名 → 'image' | 'text' | 'download'（previewFile 的归类逻辑）。
   const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
   const TEXT_EXT = ['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'];
+  // 视频扩展名集合（文件行「▶ 播放」入口判定，标准 <video> Range 播放）——唯一实现点。
+  const VIDEO_EXT = ['mp4', 'mkv', 'webm', 'avi', 'mov', 'ts', 'm4v'];
+  // isVideoName(name)：文件名是否视频（扩展名 ∈ VIDEO_EXT，大小写不敏感）。
+  function isVideoName(name) {
+    if (typeof name !== 'string' || !name) return false;
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) return false;
+    return VIDEO_EXT.indexOf(name.slice(dot + 1).toLowerCase()) >= 0;
+  }
   function previewKind(name) {
     if (typeof name !== 'string' || !name) return 'download';
     const dot = name.lastIndexOf('.');
@@ -135,12 +167,24 @@
     }
     const cs = fi.checksum || '';
     const csDisplay = cs ? '<span class="checksum-cell" data-checksum="' + escHtml(cs) + '" title="' + escHtml(cs) + '">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
-    const volBadge = fi.volume ? ' <span class="vol-badge" title="卷 ' + escHtml(fi.volume) + '">' + escHtml(fi.volume) + '</span>' : '';
+    // 卷徽标按 category 细化：wrapper（加密/封装卷）加 vol-badge-wrapper 类 + 🔒 图标；
+    // 其余卷保持既有 vol-badge 形态（零回归）。wrapper 徽标按 category 渲染而非 volume：
+    // 外部卷目录视图条目 volume 可能为空，此时仍输出 vol-badge-wrapper（卷名缺失回退
+    // 「加密卷」文案，不吞掉 🔒 标识）。
+    const volCat = fi.volume_category === 'wrapper';
+    const volName = fi.volume || (volCat ? '加密卷' : '');
+    const volBadge = (fi.volume || volCat) ? ' <span class="vol-badge' + (volCat ? ' vol-badge-wrapper' : '') + '" title="卷 ' + escHtml(volName) + '">' + (volCat ? '🔒 ' : '') + escHtml(volName) + '</span>' : '';
+    // 视频行「▶ 播放」入口：only 非目录视频文件（扩展名 ∈ VIDEO_EXT）。data-volume 为空
+    // 时不发送（视频页走服务端 auto 路由）——与 videoPlayerUrl 空 volume 省略一致。
+    const playBtn = !fi.is_dir && isVideoName(fi.name)
+      ? '<button class="btn btn-sm btn-secondary file-video-play-btn" data-video-play data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '">▶ 播放</button>'
+      : '';
     return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + volBadge + '</td>' +
       '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
       '<td>' + csDisplay + '</td>' +
       '<td class="file-actions">' +
       '<button class="btn btn-primary btn-sm file-download-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">下载</button>' +
+      playBtn +
       '<button class="btn btn-sm btn-secondary file-preview-btn" data-filename="' + escHtml(fullName) + '">预览</button>' +
       '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
       '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
@@ -514,11 +558,14 @@
   // ---- 传输渲染（纯函数，只读 TransferItem 数组 → HTML 字符串） ----
 
   // 频道条定义（spec 字面值，顺序不可打乱）。id 全小写下划线；label 为 UI 标签。
+  // cloud_damaged（受损）频道：仅 integrity_status="damaged" 的云任务（B5-M1 完整性筛选，
+  // 对齐后端 ListTasks("damaged")；客户端过滤已加载的全量云任务列表）。
   const TRANSFER_CHANNELS = [
     { id: 'all', label: '全部' },
     { id: 'uploading', label: '上传中' },
     { id: 'downloading', label: '下载中' },
     { id: 'cloud_tasks', label: '云任务' },
+    { id: 'cloud_damaged', label: '受损' },
     { id: 'cloud_groups', label: '云组' },
     { id: 'sync', label: '同步' },
     { id: 'completed', label: '已完成' },
@@ -527,12 +574,14 @@
   // 频道谓词：predicate(item) → boolean（供 filterTransferItems 分发）。
   // 语义与 spec 分节 1 一致：uploading 仅 upload 类（hashing/uploading/paused/failed/cancelled）；
   // downloading 仅 download 类（含 archive）；cloud_tasks/cloud_groups 按 kind 全量透传；
-  // completed 按 status==='completed' 全 kind 命中。
+  // cloud_damaged 仅 integrity_status="damaged" 的云任务（B5-M1）；completed 按 status==='completed'
+  // 全 kind 命中。
   const _channelPredicates = {
     all: function () { return true; },
     uploading: function (it) { return it.kind === 'upload' && ['hashing', 'uploading', 'paused', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
     downloading: function (it) { return it.kind === 'download' && ['downloading', 'paused', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
     cloud_tasks: function (it) { return it.kind === 'cloud_task'; },
+    cloud_damaged: function (it) { return it.kind === 'cloud_task' && !!(it.meta && it.meta.raw) && it.meta.raw.integrity_status === 'damaged'; },
     cloud_groups: function (it) { return it.kind === 'cloud_group'; },
     sync: function (it) { return it.kind === 'sync_task' && ['pending', 'syncing', 'completed', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
     completed: function (it) { return it.status === 'completed'; },
@@ -576,6 +625,13 @@
     const filename = it.filename || raw.filename || '';
     const checksum = raw.checksum || it.checksum || '';
     let a = '';
+    // 审计入口：任务快照随行携带 audit 行（SnapshotTask 自动带）才显示「审计」按钮；
+    // 无 audit 行（旧后端/无审计任务）不显示，避免空按钮误导。data-id = 展示 id
+    // （cloud-task-<id>），委托侧经 stripCloudId 还原后到 _cloudTasks 取 audit 渲染。
+    const auditRows = raw.audit;
+    if (Array.isArray(auditRows) && auditRows.length > 0) {
+      a += '<button class="btn btn-sm btn-secondary cloud-audit-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">审计</button>';
+    }
     if (st === 'completed') {
       // W2：cloud 桶可能已被服务端清理（save=false + CleanupStatus=cleaned）——此时
       // 「下载到本地」会 404；若任务已转存（transfer_url），展示「转存产物」入口
@@ -595,6 +651,12 @@
         // P1：clipboard 非 HTTPS 源会拒绝——必须 await + 失败回退提示，否则静默显示
         // 「已复制」误导（review 4：clipboard.writeText 未 await 无 catch）。
         a += '<span title="' + escHtml(transferURL) + '" style="font-size:11px;color:var(--text-secondary);margin-right:4px;cursor:pointer;" class="cloud-transfer-url-text" data-url="' + escHtml(transferURL) + '">转存:' + escHtml(transferURL) + '</span>';
+      }
+      // B5-M3：completed+damaged 可经后端 ResumeTask 重下自愈（manager_lifecycle.go 放行
+      // damaged）——UI 暴露「重下」，复用 cloud-resume-btn 事件委托（对齐 failed/cancelled
+      // 恢复路径）。
+      if (raw.integrity_status === 'damaged') {
+        a += '<button class="btn btn-sm btn-secondary cloud-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">重下</button>';
       }
       a += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
     } else if (st === 'failed' || st === 'cancelled') {
@@ -838,6 +900,14 @@
     // （pkg/cloud/manager.go）。damaged → 双色「完整性异常」（--text-warning）；unverified
     // （超内存配额跳过校验）→ 灰色「未校验」；verified/缺省 → 无标记。纯函数便于单测。
     badge += buildIntegrityBadge(kind, item);
+    // B5-M2：failed 云任务内联透传 task.error（must-pass 完整性阻断等原因即时可见，
+    // 不必点开审计弹窗）。raw.error 来自服务端 CloudTask.Error，escHtml 防注入；
+    // 超长省略号 + title 全显。
+    const rawMeta = (item.meta && item.meta.raw) || {};
+    const errText = kind === 'cloud_task' && item.status === 'failed' ? (rawMeta.error || '') : '';
+    const errHtml = errText
+      ? '<span style="font-size:11px;color:var(--text-danger);margin-left:8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;" title="' + escHtml(errText) + '">' + escHtml(errText) + '</span>'
+      : '';
     const cached = _cachedChunksOf(item.meta);
     const totalChunks = item.meta && item.meta.totalChunks ? item.meta.totalChunks : 0;
     const cachedHtml = cached > 0 ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">已缓存 ' + cached + '/' + totalChunks + ' 块</span>' : '';
@@ -849,7 +919,7 @@
       : '';
     return '<div class="transfer-row" data-item-id="' + escHtml(item.id) + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border-color);background:var(--bg-container);">' +
       '<span style="font-size:16px;">' + _kindIcon(kind) + '</span>' +
-      '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(title) + '">' + escHtml(titleHtml) + badge + cachedHtml + carrierHtml + '</span>' +
+      '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(title) + '">' + escHtml(titleHtml) + badge + errHtml + cachedHtml + carrierHtml + '</span>' +
       '<span style="white-space:nowrap;">' + _progressHtml(item) + '</span>' +
       '<span class="transfer-actions" style="white-space:nowrap;">' + actions + '</span>' +
       '</div>' + detail;
@@ -887,7 +957,9 @@
     const filtered = filterTransferItems(items, channel);
     if (filtered.length === 0) return '<div class="empty-msg">暂无传输记录</div>';
     const completed = filtered.filter(function (it) { return it.status === 'completed'; });
-    if (completed.length === 0) {
+    if (completed.length === 0 || channel === 'cloud_damaged') {
+      // cloud_damaged 频道元素全是「受损」完成项——折叠反而不达筛选目的（需展开才见），
+      // 平铺展示以便一键重下（B5-M1）。
       return filtered.map(buildTransferRowHtml).join('');
     }
     const running = filtered.filter(function (it) { return it.status !== 'completed'; });
@@ -924,6 +996,48 @@
     return html;
   }
 
+  // ---- 云端下载「三行为」表单 ----
+  // cloudDownloadFormHtml({volumes, current}) → HTML 字符串。渲染云端下载预览中的
+  // 下载行为配置区：转存目标卷下拉（name="transfer-volume"，空选项 = 不转存）+
+  // 转存路径输入（name="transfer-path"，可选）+ 「保留服务端副本(save)」「下载到本地
+  // (download-local)」复选框。volumes 为卷名字符串数组（或 {name} 对象数组）；
+  // current 为预选卷名（高亮）。纯函数，不碰 DOM；值一律 escHtml 转义、
+  // 样式走 var(--…) 禁内联亮色 hex（暗色兼容）。
+  function cloudDownloadFormHtml(opts) {
+    const o = opts || {};
+    const vols = Array.isArray(o.volumes) ? o.volumes : [];
+    const current = o.current == null ? '' : String(o.current);
+    let html = '<div class="cloud-behavior-form" style="margin:12px 0;padding:10px 12px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-container);">';
+    html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">下载行为配置（留空 = 保持默认：不转存、保留服务端副本）</div>';
+    // 转存目标卷下拉
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
+    html += '<label for="transfer-volume" style="flex-shrink:0;font-size:13px;color:var(--text-primary);">转存目标卷:</label>';
+    html += '<select id="transfer-volume" name="transfer-volume" style="flex:1;min-width:160px;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;background:var(--bg-container);color:var(--text-primary);">';
+    html += '<option value="">不转存</option>';
+    for (const v of vols) {
+      const name = (typeof v === 'string') ? v : (v && v.name);
+      if (!name) continue;
+      const sel = (name === current) ? ' selected' : '';
+      html += '<option value="' + escHtml(name) + '"' + sel + '>' + escHtml(name) + '</option>';
+    }
+    html += '</select>';
+    html += '</div>';
+    // 转存路径输入
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
+    html += '<label for="transfer-path" style="flex-shrink:0;font-size:13px;color:var(--text-primary);">转存路径:</label>';
+    html += '<input type="text" id="transfer-path" name="transfer-path" placeholder="可选，留空自动派生" style="flex:1;min-width:180px;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;font-family:monospace;background:var(--bg-container);color:var(--text-primary);">';
+    html += '</div>';
+    // 三行为复选框（save 默认勾选 = 保留服务端副本，与后端 save 缺省 true 零回归一致）
+    // + integrity-must-pass（默认不勾 = 完整性校验失败默认放行标记，对齐客户端 must-pass 行为）
+    html += '<div style="display:flex;gap:16px;flex-wrap:wrap;">';
+    html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;"><input type="checkbox" name="save" checked>保留服务端副本</label>';
+    html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;"><input type="checkbox" name="download-local">下载到本地</label>';
+    html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;"><input type="checkbox" name="integrity-must-pass">强制完整性校验</label>';
+    html += '</div>';
+    html += '</div>';
+    return html;
+  }
+
   // ---- 批量操作结果 ----
   // batchOpSummary(results, actionLabel) → {ok, message}。
   //
@@ -953,8 +1067,8 @@
   }
 
   return {
-    escHtml, formatSize, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
-    stripCloudId,
+    escHtml, formatSize, parseSizeText, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
+    stripCloudId, isVideoName,
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
@@ -964,6 +1078,6 @@
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
     syncStatusText, buildSyncRowMeta, syncCarrierText, meshStatusHtml,
     TRANSFER_CHANNELS, filterTransferItems, buildTransferRowHtml, buildTransferListHtml,
-    batchOpSummary,
+    batchOpSummary, cloudDownloadFormHtml,
   };
 });

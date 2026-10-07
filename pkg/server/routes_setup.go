@@ -508,6 +508,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		// 经 pkg/integrity 注册表）。nil = 语义校验跳过（生产必须装配，否则 --integrity-must-pass
 		// 无效果——P1-1 最终审查修复）。
 		IntegrityLookup: integrity.Lookup,
+		// OccupiedWriteGuard：转存写前占用检查（嵌套封装占用子目录只读，旁路闭环）——转存
+		// 直写目标卷 FS、不经 files 域 guard，占用判定在此注入（nil = 不启用）。
+		OccupiedWriteGuard: h.checkWrapperOccupiedWrite,
 	})
 	h.storageMgr = sm
 }

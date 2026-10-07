@@ -96,6 +96,13 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `rate_limit.bandwidth.coord_backend` | string | `local` | 带宽限速跨实例协调后端：`local`（每实例独立 token 桶，默认，零回归）/ `file`（storage 根下 `bandwidth/` 目录原子计数文件，多实例共享 per-owner 字节配额）。**等待语义**：配额耗尽时传输等待窗口刷新（有界 5s，超时按未限速继续，不拒绝请求——与单实例 token 桶慢速行为一致）。跨进程协调在 Linux 上验证，Windows 降级为尽力而为 |
 | **审计** |  |  |  |
 | `audit.buffer_size` | int | `2048` | 有界内存环形审计缓冲条数（`GET /api/audit` 回看最近操作）；`0` = 关闭（返回空表）；负值非法 |
+| `audit.max_size` | ByteSize | `0`（关闭） | 审计日志轮转阈值（roadmap 11.5-⑥，如 `"10MiB"`）：>0 时按文件大小轮转（`audit.log` → `audit.log.1` … `audit.log.N`，保留 `max_archives` 份归档）；`0`/缺省 = 关闭轮转（零回归） |
+| `audit.max_archives` | int | `3` | 轮转保留归档份数（`audit.log.1` … `audit.log.N`）；`0` = 轮转即删不留档 |
+| `audit.enabled` | bool | `false` | **预留（未接线）**：通用 span 审计开关（`pkg/audit`，云下载/转存/加密阶段）；默认关。当前 span sink 目录未配置化（默认 `<系统临时目录>/sproxy-audit/`） |
+| `audit.dir` | string | (空) | **预留（未接线）**：通用 span 审计 sink 根目录 |
+| `audit.archive.enabled` | bool | `false` | **预留**：span 审计**归档默认关**（规格 §4.5 未来扩展——`Archiver` 接口已预留、配置暂未接线）；开启需同时配置 `volume` + `path` |
+| `audit.archive.volume` | string | (空) | **预留**：归档目标卷（如 `secretdata://audit`） |
+| `audit.archive.path` | string | (空) | **预留**：归档目标卷内路径 |
 | `notify.enabled` | bool | `false` | 通知中心开关（roadmap P0）：`true` + 至少一条 rules 时装配（事件 → 渠道路由 + 去抖 + 重试 + 历史）。默认关零回归 |
 | `alerts.enabled` | bool | `false` | 阈值告警引擎开关：`true` + 至少一条 rules 时装配（复用 NotifyCenter 渠道；规则 source 匹配 → 状态机去抖 + 恢复通知）。默认关零回归 |
 | `alerts.rules[]` | array |  | 告警规则：`{source: "disk_watermark"\|\"volume_degraded\"\|\"sync_failed\"\|\"login_locked\"\|\"nat_failure\", threshold: 80, channels: ["wecom"]}`——source 精确匹配事件源；`nat_failure`（roadmap 11.1-①）= NAT/中继拨号失败（hub/relay/webrtc 打洞或出口拨号失败，per-peer 去抖，同 peer 后续拨号成功自动发恢复通知）。`threshold` 仅磁盘/配额水位用；`channels` 名对应 notify.channels.* |
@@ -118,6 +125,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `notify.feed_max` | int | `20` | `/api/notify/feed` 最大条目数（roadmap 11.7-⑦）：`<=0` 默认 20，上限 50 |
 | `notify.feed_token` | string | (空) | `/api/notify/feed` 可选访问令牌（roadmap 11.7-⑦）：空 = 公开可读（默认零回归）；非空 = GET /api/notify/feed 必须带 `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401 空 body（防 token 枚举）。feed 会暴露审计信息——生产建议配置。token 不随 SIGHUP 重载（重启生效） |
 > 审计**默认落盘**：`RecordAudit` append JSON lines 到 `<默认卷根>/audit/audit.log`（合适位置自动选择，无需配置目录），重启后 `/api/audit` 可查历史；打开失败降级为仅内存（审计绝不阻断启动）。明文 JSON（审计行不含密钥/凭据）
+> 通用 span 审计（`pkg/audit`，云下载/转存/加密阶段耗时与字节）与上表并列：每任务独立 sink 文件（`<scopeID>.audit.log` 每行一行 JSON，权限 0600），随任务持久化（`CloudTask.audit`）；当前 sink 目录无配置、归档默认关（`audit.archive.*` 预留未接线，见上表）
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |
 | `max_chunk_size` | int64 | `0` | 仅客户端配置，服务端忽略 |

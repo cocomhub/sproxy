@@ -46,6 +46,10 @@ type FileInfo struct {
 	// Volume 是条目所在卷名（多卷聚合列表新增字段；向后兼容——旧客户端忽略未知键。
 	// 目录条目为聚合视图下的逻辑目录（可跨卷并存），不绑定单卷，Volume 为空）。
 	Volume string `json:"volume"`
+	// VolumeCategory 是条目所在卷的展示分类（任务 9：外部卷 ListDir 透传时按卷类型标注，
+	// wrapper 加密/封装卷填 "wrapper"；本地卷/其余类型不填 = 零值 omitempty 不出现在 JSON）。
+	// 供 Web UI 文件行卷徽标按 category 细化（wrapper 显示 🔒）。
+	VolumeCategory string `json:"volume_category,omitempty"`
 }
 
 // ListResponse 是文件列表的响应结构（GET /api/files 与 GET /api/files/search 共用）。
@@ -174,7 +178,7 @@ func (s *Service) ListFiles(w http.ResponseWriter, r *http.Request) {
 	if sortOrder != "desc" {
 		sortOrder = "asc"
 	}
-	res, err := s.List(ListQuery{
+	res, err := s.List(r.Context(), ListQuery{
 		Owner:     s.rt.actorOf(r),
 		VolName:   r.URL.Query().Get("volume"),
 		Subdir:    r.URL.Query().Get("subdir"),

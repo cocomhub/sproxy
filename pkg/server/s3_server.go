@@ -317,6 +317,11 @@ func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key str
 		http.Error(w, "s3: 路径非法", http.StatusBadRequest)
 		return
 	}
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：PUT/DELETE 目标命中被封装卷占用的子目录
+	// → 403（s3PutObject/s3DeleteObject 直写卷根，不经 files 域 guard）。读（HEAD/GET）不拦。
+	if h.s3OccupiedWriteGuard(w, r, rel) {
+		return
+	}
 	root := tnt.Root()
 	// HeadObject（HEAD /s3/<key>）。
 	if r.Method == http.MethodHead {
@@ -414,4 +419,36 @@ func (h *Handlers) s3TenantFor(owner string, r *http.Request) *storage.Tenant {
 		}
 	}
 	return h.tenantFor(owner)
+}
+
+// s3BucketVolName 返回 S3 请求的目标卷名：ctx 中 bucket 卷段已装配卷 → 该卷名；否则默认卷名
+// （volSet 未装配 → ""，占用检查回落空卷语义不拦截）。
+func (h *Handlers) s3BucketVolName(r *http.Request) string {
+	if vol, _ := r.Context().Value(s3BucketCtxKey{}).(string); vol != "" && h.volSet != nil {
+		if _, ok := h.volSet.ByName(vol); ok {
+			return vol
+		}
+	}
+	if h.volSet != nil {
+		return h.volSet.Default().Name
+	}
+	return ""
+}
+
+// s3OccupiedWriteGuard 对 S3 写方法（PUT/DELETE）做占用写保护预检：目标 rel 命中被封装卷
+// 占用的底层子目录 → 写 403 并返回 true（已处理）；读方法/未命中 → false（放行）。
+// 独立方法收敛 gocognit（s3ServeObject 复杂度门禁）。
+func (h *Handlers) s3OccupiedWriteGuard(w http.ResponseWriter, r *http.Request, rel string) bool {
+	if r.Method != http.MethodPut && r.Method != http.MethodDelete {
+		return false
+	}
+	volName := h.s3BucketVolName(r)
+	if volName == "" {
+		return false
+	}
+	if err := h.checkWrapperOccupiedWrite(volName, userVisibleRelOf(rel)); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return true
+	}
+	return false
 }

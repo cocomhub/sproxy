@@ -5,6 +5,8 @@
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
 // global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件三处经 typeof 守卫引用：
 //   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
+// global: volManageFormHtml / volManageListHtml / composeNestedTarget / composeCapacityText（vol-manage-format.js，「卷管理」tab 渲染 + 容量单位拼接）
+// global: auditRowsHtml（audit-rows-format.js，任务「审计」弹窗行渲染；经 showTaskAudit 调用）
 
 const BASE = '';
 // SproxySig 请求签名认证（AccessKey/AccessKeySecret/AccessKeyID）。Secret 只存本端计算签名，
@@ -27,6 +29,9 @@ let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
 let _searchActive = false;
 let _currentOffset = 0;
 let _hasMore = false;
+// 文件页「过滤卷」下拉（#volume-filter）当前值：空 = 全部卷（不发送 ?volume=，零回归）。
+// 仅当用户选中某卷才非空；refreshList/loadMore 据此透传 volume 给 sc.files.list。
+let _volumeFilter = '';
 const PAGE_LIMIT = 500;
 
 // 传输层由 sclient 领域库统一（隧道/直连协商 + SproxySig 签名），页面级
@@ -191,6 +196,37 @@ async function initUploadVolumeSelect() {
   } catch (e) { /* 无凭据/未授权/无卷 API：保持 auto，不破坏无认证浏览 */ }
 }
 
+// --- 文件页「过滤卷」下拉（工具栏「过滤卷」；独立于上传卷下拉 #upload-volume）---
+// 选项来源 /api/volumes（owner 可见卷，含 secretdata/egress 等加密卷）。选中某卷后
+// refreshList({volume}) 切到该卷明文目录；首项「全部卷」（value=""）= 不发送 ?volume=
+// （零回归：未过滤时列表为全部可见卷聚合）。
+function populateVolumeFilterSelect(vols) {
+  const sel = document.getElementById('volume-filter');
+  if (!sel) return;
+  const cur = sel.value || '';
+  while (sel.options.length > 1) sel.remove(1);
+  for (const v of vols || []) {
+    if (!(v?.name)) continue;
+    const opt = document.createElement('option');
+    opt.value = v.name;
+    opt.textContent = v.name;
+    sel.appendChild(opt);
+  }
+  // 恢复原选择；原选择已不在可见卷内则回落「全部卷」。
+  let found = false;
+  for (const opt of sel.options) {
+    if (opt.value === cur) { found = true; break; }
+  }
+  sel.value = found ? cur : '';
+}
+
+async function initVolumeFilter() {
+  try {
+    const data = await sc.files.volumes();
+    populateVolumeFilterSelect(data?.volumes);
+  } catch (e) { /* 无凭据/未授权/无卷 API：保持「全部卷」，不破坏无认证浏览 */ }
+}
+
 // --- UI 工具 ---
 function showToast(msg, type) {
   const el = document.getElementById('toast');
@@ -217,14 +253,18 @@ function copyChecksum(cs) {
 }
 
 // --- 文件列表 ---
-async function refreshList() {
+async function refreshList(opts) {
+  const o = opts || {};
+  // 支持 {volume} 参数：显式传入时同步模块级 _volumeFilter（「过滤卷」change 走此路径，
+  // 后续 refreshList/loadMore 沿用当前过滤）。volume 为空字符串 = 全部卷（不发送）。
+  if (o.volume !== undefined) _volumeFilter = o.volume || '';
   const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
   updateBreadcrumb();
   _currentOffset = 0;
   _hasMore = false;
   try {
-    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT });
+    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT, volume: _volumeFilter || undefined });
     let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset = files.length;
     _hasMore = (data.total || 0) > _currentOffset;
@@ -239,7 +279,7 @@ async function refreshList() {
 async function loadMore() {
   const el = document.getElementById('file-list');
   try {
-    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT });
+    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT, volume: _volumeFilter || undefined });
     let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset += files.length;
     _hasMore = (data.total || 0) > _currentOffset;
@@ -618,13 +658,14 @@ async function showTrash() {
 // --- 监控 ---
 // statsRefresh 刷新当前活动监控 tab：读激活的 .stats-tab id，按活动 tab 刷新
 // （审计 tab 在 tunnel/无凭据场景刷不到实时操作，但保持「刷新=重拉当前视图」语义统一）。
-// 复用 switchStatsTab 的重载语义（showAudit/showStats），不改 switchStatsTab 内部实现。
+// 复用 switchStatsTab 的重载语义（showAudit/showStats/...），不改 switchStatsTab 内部实现。
+// 全量 tab 特判：非 stats 的活动 tab 一律委托 switchStatsTab 重拉自身（vol-manage/secret/
+// credentials/sync/mesh 等 tab 不再跳回 stats 面板）。
 function statsRefresh() {
   const active = document.querySelector('.stats-tab.active');
   const id = active ? active.id : 'stats-tab';
   const tab = id.replace('-tab', '');
-  if (tab === 'audit') { switchStatsTab('audit'); return; }
-  if (tab === 'volumes') { switchStatsTab('volumes'); return; }
+  if (tab !== 'stats') { switchStatsTab(tab); return; }
   void showStats();
 }
 
@@ -685,6 +726,7 @@ function switchStatsTab(tab) {
   document.getElementById('sync-panel').style.display = tab === 'sync' ? 'block' : 'none';
   document.getElementById('mesh-panel').style.display = tab === 'mesh' ? 'block' : 'none';
   document.getElementById('secret-panel').style.display = tab === 'secret' ? 'block' : 'none';
+  document.getElementById('vol-manage-panel').style.display = tab === 'vol-manage' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
     const on = el.id === tab + '-tab';
     el.classList.toggle('active', on);
@@ -699,6 +741,7 @@ function switchStatsTab(tab) {
   if (tab === 'sync') void showSyncConflicts();
   if (tab === 'mesh') void showMeshStatus();
   if (tab === 'secret') void showSecrets();
+  if (tab === 'vol-manage') void showVolManage();
 }
 
 // --- 凭据管理（B2：/api/credentials admin 面板） ---
@@ -823,6 +866,171 @@ async function secretExport(name) {
     if (closeBtn) closeBtn.addEventListener('click', function () { info.remove(); });
     showToast('secret ' + name + ' 已导出', 'success');
   } catch (e) { showToast('导出失败: ' + e.message, 'error'); }
+}
+
+// --- 卷管理（/api/backends schema 驱动建卷表单 + /api/volumes/user 列表/删除） ---
+// showVolManage 拉取 backend 类型 schema + 我的用户卷 → 渲染类型下拉 + 动态表单 + 列表。
+// 卷类型/字段全部由 GET /api/backends 驱动（前端不硬编码类型）；volume-select 候选为
+// 我的用户卷（allow_wrapper 过滤由 volManageFormHtml 处理）；防环/必填校验由服务端负责，
+// 前端透传 400/409 错误文案。
+async function showVolManage() {
+  const panel = document.getElementById('vol-manage-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const data = await loadVolManageData();
+    const meta = data.meta;
+    const types = data.types;
+    const volsWithCat = data.volsWithCat;
+    const candsWithCat = data.candsWithCat;
+    let selHtml = '';
+    types.forEach(function (t) {
+      selHtml += '<option value="' + appRender.escHtml(t) + '">' + appRender.escHtml(t) + '</option>';
+    });
+    panel.innerHTML =
+      '<div style="font-weight:600;margin:4px 0 8px;">卷管理（schema 动态建卷）</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">' +
+        '<label for="vm-type-select" style="font-size:13px;color:var(--text-secondary);">类型：</label>' +
+        '<select id="vm-type-select" style="padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;background:var(--bg-container);color:var(--text-primary);font-size:13px;">' + selHtml + '</select>' +
+      '</div>' +
+      '<div id="vm-form-area"></div>' +
+      '<div style="margin-top:16px;border-top:1px solid var(--border-color);padding-top:10px;">' +
+        '<div style="font-weight:600;margin-bottom:6px;">我的卷</div>' +
+        '<div id="vm-list"></div>' +
+      '</div>';
+    const formArea = document.getElementById('vm-form-area');
+    const selEl = document.getElementById('vm-type-select');
+    const type = types.length ? types[0] : '';
+    if (formArea) renderVolManageForm(formArea, type, meta, candsWithCat);
+    const listEl = document.getElementById('vm-list');
+    if (listEl) listEl.innerHTML = volManageListHtml({ volumes: volsWithCat });
+    if (selEl && types.length) {
+      selEl.addEventListener('change', function () {
+        const fa = document.getElementById('vm-form-area');
+        if (fa) renderVolManageForm(fa, selEl.value, meta, candsWithCat);
+      });
+    }
+    if (listEl && !listEl.dataset.bound) {
+      listEl.dataset.bound = '1';
+      listEl.addEventListener('click', onVolManageListClick);
+    }
+  } catch (e) {
+    panel.innerHTML = '<div class="empty-msg">卷管理不可用：' + appRender.escHtml(e?.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试。</span></div>';
+  }
+}
+
+// loadVolManageData 拉取 backend 类型 schema / 全量可见卷（含本地 config 卷 + 外部卷）/
+// 我的用户卷，返回 {meta, types, volsWithCategory, candsWithCategory}。底层卷候选源用
+// GET /api/volumes（owner 可见全量，含本地 config 卷——服务端 validateWrapperTarget 允许
+// target 指向任意 owner 可见卷）；「我的卷」列表用 GET /api/volumes/user。两者都经
+// withCat 补 category（据 type → /api/backends 的 category）。
+async function loadVolManageData() {
+  const bdRes = await sc.files.backends();
+  const uvRes = await sc.files.userVolumes();
+  const allRes = await sc.files.volumes();
+  const backends = (bdRes && bdRes.backends) || [];
+  const vols = (uvRes && uvRes.volumes) || [];
+  const allVols = (allRes && allRes.volumes) || [];
+  // type → {category, label, fields} 映射；并给卷补 category（列表 category 列 + 表单过滤）。
+  const meta = {};
+  backends.forEach(function (b) {
+    meta[b.type] = { category: b.category || '', label: b.label || '', fields: b.fields || [] };
+  });
+  const withCat = function (vlt) {
+    const m = meta[vlt.type];
+    return Object.assign({}, vlt, { category: (m && m.category) || vlt.category || '' });
+  };
+  return {
+    meta: meta,
+    types: Object.keys(meta),
+    volsWithCat: vols.map(withCat),       // 「我的卷」列表（有 type）
+    candsWithCat: allVols.map(withCat),   // 底层卷候选（含本地 config 卷）
+  };
+}
+
+// renderVolManageForm 把指定类型的 schema 表单渲染进容器，并绑定创建按钮。
+function renderVolManageForm(el, type, meta, vols) {
+  const m = meta[type] || { category: '', label: '', fields: [] };
+  el.innerHTML = volManageFormHtml({
+    type: type, category: m.category, label: m.label, fields: m.fields, volumes: vols,
+  });
+  const btn = el.querySelector('#vm-create-btn');
+  if (btn) btn.addEventListener('click', onSubmitVolManage);
+}
+
+// onSubmitVolManage 读取卷管理表单（name/type/capacity + schema 字段）→ POST /api/volumes/user。
+// extra 按字段 key 组装：volume-select/enum/text → 字符串；number → 数值；bool → 布尔。
+async function onSubmitVolManage() {
+  const area = document.getElementById('vm-form-area');
+  if (!area) return;
+  const typeEl = area.querySelector('[name="type"]');
+  const nameEl = area.querySelector('[name="name"]');
+  const capEl = area.querySelector('[name="capacity"]');
+  const type = typeEl ? typeEl.value : '';
+  const name = nameEl ? nameEl.value.trim() : '';
+  if (!name || !type) { showToast('卷名与类型必填', 'error'); return; }
+  let capacity = 0;
+  const capStr = capEl ? capEl.value.trim() : '';
+  if (capStr) {
+    // 单位下拉（vol-manage-format.js）：数字 + 单位（如 100 + GiB）拼接成 `100GiB` 提交；
+    // 输入已带单位/非纯数字时原样透传（parseSizeText 支持既有形态）。
+    const unitEl = area.querySelector('[name="capacity_unit"]');
+    const unit = unitEl ? unitEl.value : '';
+    const combined = composeCapacityText(capStr, unit);
+    try { capacity = appRender.parseSizeText(combined); } catch (e) {
+      showToast('容量格式非法：' + (e?.message ? e.message : String(e)), 'error');
+      return;
+    }
+  }
+  const extra = {};
+  area.querySelectorAll('[name]').forEach(function (el) {
+    const k = el.getAttribute('name');
+    if (k === 'name' || k === 'type' || k === 'capacity' || k === 'capacity_unit') return;
+    if (k && k.endsWith('_subdir')) return; // 子目录由 composeNestedTarget 合并进 target
+    if (el.type === 'checkbox') extra[k] = el.checked;
+    else if (el.type === 'number') extra[k] = el.value === '' ? 0 : Number(el.value);
+    else extra[k] = el.value;
+  });
+  // 嵌套封装：volume-select 的值与其 `_subdir` 输入合并成 `<卷>/<子目录>`。
+  area.querySelectorAll('input[name$="_subdir"]').forEach(function (inp) {
+    const k = inp.getAttribute('name');
+    if (!k) return;
+    const fk = k.replace(/_subdir$/, '');
+    const sub = inp.value ? inp.value.trim() : '';
+    if (sub) extra[fk] = composeNestedTarget(String(extra[fk] || ''), sub);
+  });
+  try {
+    const res = await sc.files.createUserVolume({ name: name, type: type, capacity: capacity, extra: extra });
+    if (res && res.success) {
+      showToast('卷 ' + name + ' 已创建', 'success');
+      void showVolManage();
+    } else {
+      showToast('创建失败：' + (res && res.error ? res.error : 'HTTP ' + (res && res.status)), 'error');
+    }
+  } catch (e) {
+    showToast('创建失败：' + (e?.message ? e.message : String(e)), 'error');
+  }
+}
+
+// onVolManageListClick 列表事件委托：删除按钮（确认后 DELETE）。
+// 409（有任务引用）由 transport 抛错走 catch（E_SERVER 含服务端 409 文案）——此前的
+// `res.status === 409` 分支是死代码（transport 对非 2xx 恒抛错），已删除，catch 侧透传真实文案。
+async function onVolManageListClick(ev) {
+  const btn = ev.target.closest('[data-delete-volume]');
+  if (!btn) return;
+  const name = btn.dataset.deleteVolume;
+  if (!name || !window.confirm('确认删除卷 ' + name + '？')) return;
+  try {
+    const res = await sc.files.deleteUserVolume(name);
+    if (res && res.success) {
+      showToast('卷 ' + name + ' 已删除', 'success');
+    } else {
+      showToast('删除失败：' + (res && res.error ? res.error : 'HTTP ' + (res && res.status)), 'error');
+    }
+  } catch (e) {
+    showToast('删除失败：' + (e?.message ? e.message : String(e)), 'error');
+  }
+  void showVolManage();
 }
 
 // --- 同步冲突（B3：/api/sync/conflicts 面板） ---
@@ -1040,7 +1248,7 @@ function validateCreateVolumeForm(form) {
   let capacity = 0;
   if (form.capStr === '') return { ok: true, capacity: capacity, extra: extra };
   try {
-    capacity = parseSizeText(form.capStr);
+    capacity = appRender.parseSizeText(form.capStr);
   } catch (e) {
     return { error: '容量格式非法：' + (e?.message ? e.message : String(e)) };
   }
@@ -1147,17 +1355,9 @@ async function onUserVolumeListClick(ev) {
   }
 }
 
-// parseSizeText 人类可读容量 → 字节（"100GiB"/"2GB"/纯数字）。非法抛错。
-function parseSizeText(text) {
-  const t = String(text).trim();
-  if (t === '') return 0;
-  const m = /^([\d.]+)\s*(B|KB|MB|GB|KiB|MiB|GiB)?$/i.exec(t);
-  if (!m) throw new Error('无法解析大小: ' + t);
-  const n = Number.parseFloat(m[1]);
-  const unit = (m[2] || '').toUpperCase();
-  const mult = { '': 1, B: 1, KB: 1000, MB: 1000 * 1000, GB: 1000 * 1000 * 1000, KIB: 1024, MIB: 1024 * 1024, GIB: 1024 * 1024 * 1024 }[unit];
-  return Math.round(n * (mult || 1));
-}
+// parseSizeText 已下沉 appRender.parseSizeText（含 TB/TiB 单位解析，供建卷容量单位下拉复用）。
+// 此处不再定义同名函数（禁跨文件隐式全局重复定义，见 CLAUDE.md 记录）——调用一律走
+// appRender.parseSizeText，浏览器运行时 appRender 先加载、随 onClick 事件触发时已就绪。
 
 async function showConfig() {
   document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
@@ -2203,6 +2403,17 @@ async function showCloudDownloadPreview(action) {
   }
   previewHtml += '</div>';
 
+  // 「三行为」配置区：转存目标卷/路径 + save/download_local（restoreCloudUrlRow 会把
+  // 预览整个还原为输入行，故行为必须在 confirm 前读取，不得在 doXxx 内查 DOM）。卷列表
+  // 拉取失败不阻塞提交（留空 = 不转存 = 零回归）。
+  let behaviorFormOpts = { volumes: [], current: '' };
+  try {
+    const volRes = await sc.files.volumes();
+    behaviorFormOpts.volumes = (volRes && Array.isArray(volRes.volumes) ? volRes.volumes : [])
+      .map(function (v) { return v && v.name; }).filter(Boolean);
+  } catch (e) { /* 卷面失败不阻断：不转存仍可提交 */ }
+  previewHtml += appRender.cloudDownloadFormHtml(behaviorFormOpts);
+
   previewHtml += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
   previewHtml += '<button type="button" id="cloud-preview-cancel-btn" class="btn btn-secondary">取消</button>';
   previewHtml += '<button type="button" id="cloud-preview-confirm-btn" class="btn btn-primary">确认提交</button>';
@@ -2247,19 +2458,43 @@ async function showCloudDownloadPreview(action) {
     }
     // 提交前立即恢复输入行，使"确认提交"按钮消失，防止链式等待（最长 20 分钟）期间
     // 用户重复点击同一批 URL；doXxx 使用已收集的 lines/filenames 局部变量，不受影响。
+    // 三行为（transfer/save/download_local）必须在 restore 前从表单读取（恢复后表单
+    // 已从 DOM 移除），连同行为一并传给 doXxx 透传给后端 create 方法。
+    const behavior = collectCloudBehavior();
     restoreCloudUrlRow();
     const restoredInput = document.getElementById('cloud-url');
     if (restoredInput) restoredInput.value = '';
     if (act === 'submit') {
-      void doSubmitCloudTasks(sel.urls, sel.filenames);
+      void doSubmitCloudTasks(sel.urls, sel.filenames, behavior);
     } else if (act === 'group') {
-      void doCreateCloudGroup(sel.urls, sel.filenames);
+      void doCreateCloudGroup(sel.urls, sel.filenames, behavior);
     } else if (act === 'chain') {
-      void doChainDownloadCloud(sel.urls, sel.filenames);
+      void doChainDownloadCloud(sel.urls, sel.filenames, behavior);
     } else if (act === 'chain_group') {
-      void doChainDownloadCloudGroup(sel.urls, sel.filenames);
+      void doChainDownloadCloudGroup(sel.urls, sel.filenames, behavior);
     }
   });
+}
+
+// collectCloudBehavior 读取云端下载预览「三行为」配置（转存目标卷/路径 + save +
+// download_local + integrity_must_pass 复选框）→ {transfer:{volume,path}, save,
+// downloadLocal, integrityMustPass}。元素缺省/未选时返回 {}（三行为不发 → 后端空语义
+// = 不转存/不强制完整性，既有调用零回归）。
+function collectCloudBehavior() {
+  const volEl = document.querySelector('.cloud-behavior-form [name="transfer-volume"]');
+  const pathEl = document.querySelector('.cloud-behavior-form [name="transfer-path"]');
+  const saveEl = document.querySelector('.cloud-behavior-form [name="save"]');
+  const dlEl = document.querySelector('.cloud-behavior-form [name="download-local"]');
+  const impEl = document.querySelector('.cloud-behavior-form [name="integrity-must-pass"]');
+  const opts = {};
+  if (volEl && volEl.value) {
+    opts.transfer = { volume: volEl.value };
+    if (pathEl && pathEl.value) opts.transfer.path = pathEl.value;
+  }
+  if (saveEl) opts.save = saveEl.checked;
+  if (dlEl) opts.downloadLocal = dlEl.checked;
+  if (impEl) opts.integrityMustPass = impEl.checked;
+  return opts;
 }
 
 // triggerBrowserDownload 触发浏览器保存（下载型归档等）。
@@ -2310,14 +2545,14 @@ async function cleanupTaskIds(taskIds) {
   }));
 }
 
-async function doChainDownloadCloud(lines, filenames) {
+async function doChainDownloadCloud(lines, filenames, behavior) {
   // 防重入：链式等待期间不允许再次启动（模态关闭后后台继续跑，重复点击会并发两轮）
   if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
   window._busyChain = true;
   try {
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
     showToast('提交任务中...', 'info');
-    const tasks = await sc.cloud.createBatch(urls);
+    const tasks = await sc.cloud.createBatch(urls, behavior);
     refreshCloudTasks();
     showToast((tasks?.tasks ? tasks.tasks.length : 0) + ' 个任务已提交', 'success');
     showToast('等待任务完成...', 'info');
@@ -2395,7 +2630,7 @@ async function waitGroupSettled(groupId) {
 
 // doChainDownloadCloudGroup 执行组链式下载完整流程：创建组→等待→组级打包→下载→删除组。
 // 与 batch chain 的语义一致：任一子任务 failed/cancelled → 整体失败。
-async function doChainDownloadCloudGroup(urls, filenames) {
+async function doChainDownloadCloudGroup(urls, filenames, behavior) {
   // 防重入：链式等待期间不允许再次启动
   if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
   window._busyChain = true;
@@ -2410,7 +2645,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
 
     // 阶段 1: 创建组
     const entries = urls.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    const groupData = await sc.cloud.createGroup(name, entries);
+    const groupData = await sc.cloud.createGroup(name, entries, behavior);
     groupId = groupData.id;
     const totalTasks = groupData.total_tasks || urls.length;
     refreshCloudGroups();
@@ -2471,16 +2706,16 @@ async function createCloudTask() {
   void showCloudDownloadPreview('submit');
 }
 
-async function doSubmitCloudTasks(lines, filenames) {
+async function doSubmitCloudTasks(lines, filenames, behavior) {
   try {
     if (lines.length === 1) {
-      // 单 URL：使用原有 API，携带 filename
-      const task = await sc.cloud.createDownload(lines[0], filenames[0]);
+      // 单 URL：使用原有 API，携带 filename + 三行为（可选，空对象 = 不发）
+      const task = await sc.cloud.createDownload(lines[0], filenames[0], behavior);
       showToast('任务已创建: ' + task.id, 'success');
     } else {
-      // 多 URL：使用批量 API，携带每个 URL 的 filename
+      // 多 URL：使用批量 API，携带每个 URL 的 filename + 三行为
       const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-      const data = await sc.cloud.createBatch(urls);
+      const data = await sc.cloud.createBatch(urls, behavior);
       const tasks = data?.tasks || [];
       const failed = tasks.filter(function(t) { return t.status === 'failed'; });
       const succeeded = tasks.filter(function(t) { return t.status !== 'failed'; });
@@ -2499,13 +2734,13 @@ async function createCloudGroup() {
   void showCloudDownloadPreview('group');
 }
 
-async function doCreateCloudGroup(lines, filenames) {
+async function doCreateCloudGroup(lines, filenames, behavior) {
   const name = prompt('组名称（可选）:', 'group-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
   if (name === null) return;
 
   try {
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    await sc.cloud.createGroup(name, urls);
+    await sc.cloud.createGroup(name, urls, behavior);
     showToast('下载组已创建', 'success');
     switchTransferChannel('cloud_groups');
     refreshCloudGroups();
@@ -2575,6 +2810,43 @@ function showVersioning() {
 
 function hideVersioning() {
   document.getElementById('version-modal').style.display = 'none';
+}
+
+// --- 视频播放器（标准 Range 播放弹窗） ---
+// showVideoPlayer：渲染 videoPlayerModalHtml（含 <video src> + 标题 + data-close 关闭钮）
+// 到 #video-player-modal 容器并显示；关闭时暂停并卸载 video（避免播放续留内存/声音）。
+function showVideoPlayer(filename, volume) {
+  const body = document.getElementById('video-player-body');
+  body.innerHTML = videoPlayerModalHtml({ filename: filename, volume: volume || '' });
+  document.getElementById('video-player-modal').style.display = 'flex';
+}
+
+function hideVideoPlayer() {
+  const body = document.getElementById('video-player-body');
+  const video = body.querySelector('video');
+  if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
+  document.getElementById('video-player-modal').style.display = 'none';
+}
+
+// --- 任务审计弹窗（传输页「审计」按钮 → 云任务 audit 行渲染） ---
+// showTaskAudit(id)：data-id 携带展示 id（'cloud-task-<id>'），剥前缀还原服务端真实 id 后
+// 到 _cloudTasks 取该任务快照的 audit 行（SnapshotTask 自动携带），经 auditRowsHtml 渲染到
+// #audit-body 并显示 #audit-modal。fallback：任务已从列表移除 / 无 audit → 占位文案。
+function showTaskAudit(id) {
+  const realId = stripCloudId(id);
+  const task = (_cloudTasks || []).find(function (t) { return String(t && t.id) === realId; }) || null;
+  const rows = task && Array.isArray(task.audit) ? task.audit : null;
+  const body = document.getElementById('audit-body');
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<div class="empty-msg">该任务无审计记录</div>';
+  } else {
+    body.innerHTML = auditRowsHtml({ rows: rows });
+  }
+  document.getElementById('audit-modal').style.display = 'flex';
+}
+
+function hideTaskAudit() {
+  document.getElementById('audit-modal').style.display = 'none';
 }
 
 // --- 云端下载组管理 ---
@@ -2746,6 +3018,16 @@ document.addEventListener('DOMContentLoaded', function() {
   });
   void initUploadVolumeSelect();
 
+  // 文件页「过滤卷」下拉（独立于上传卷下拉 #upload-volume）：选中 → 切到该卷明文目录。
+  // 首项「全部卷」（value=""）→ refreshList({volume:''}) 回落聚合视图（不发送 ?volume=）。
+  const volumeFilterSel = document.getElementById('volume-filter');
+  if (volumeFilterSel) {
+    volumeFilterSel.addEventListener('change', function() {
+      void refreshList({ volume: volumeFilterSel.value });
+    });
+  }
+  void initVolumeFilter();
+
   // 工具栏
   document.getElementById('refresh-btn').addEventListener('click', refreshList);
   document.getElementById('search-input').addEventListener('keydown', function(e) {
@@ -2787,7 +3069,9 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
   document.getElementById('audit-tab').addEventListener('click', function() { switchStatsTab('audit'); });
   document.getElementById('volumes-tab').addEventListener('click', function() { switchStatsTab('volumes'); });
+  document.getElementById('vol-manage-tab').addEventListener('click', function() { switchStatsTab('vol-manage'); });
   document.getElementById('credentials-tab').addEventListener('click', function() { switchStatsTab('credentials'); });
+  document.getElementById('secret-tab').addEventListener('click', function() { switchStatsTab('secret'); });
   document.getElementById('sync-tab').addEventListener('click', function() { switchStatsTab('sync'); });
   document.getElementById('mesh-tab').addEventListener('click', function() { switchStatsTab('mesh'); });
 
@@ -2814,6 +3098,12 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('share-create-btn').addEventListener('click', createShare);
   document.getElementById('share-list-refresh-btn').addEventListener('click', refreshShareList);
 
+  // 任务审计弹窗（关闭按钮；内容由 auditRowsHtml 渲染进 #audit-body）
+  const auditCloseBtn = document.getElementById('audit-close-btn');
+  if (auditCloseBtn) auditCloseBtn.addEventListener('click', hideTaskAudit);
+  const auditCloseModalBtn = document.getElementById('audit-close-modal-btn');
+  if (auditCloseModalBtn) auditCloseModalBtn.addEventListener('click', hideTaskAudit);
+
   // 事件委托：动态内容
   initDynamicEventDelegation();
 
@@ -2828,6 +3118,7 @@ function cloudSyncBtnAction(btn) {
   if (btn.classList.contains('cloud-download-btn')) { void downloadCloudFile(btn.dataset.id, btn.dataset.filename, btn.dataset.checksum); return true; }
 
   if (btn.classList.contains('cloud-remove-btn')) { void removeCloudTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('cloud-audit-btn')) { void showTaskAudit(btn.dataset.id); return true; }
   if (btn.classList.contains('cloud-cancel-btn')) { void cancelCloudTask(btn.dataset.id); return true; }
   if (btn.classList.contains('cloud-resume-btn')) { void resumeCloudTask(btn.dataset.id); return true; }
   if (btn.classList.contains('group-archive-btn')) { void archiveCloudGroup(btn.dataset.id); return true; }
@@ -2971,6 +3262,11 @@ function initDynamicEventDelegation() {
         previewFile(btn.dataset.filename);
         return;
       }
+      // 视频行「▶ 播放」→ 标准 <video> Range 播放弹窗（data-volume 空 = 服务端 auto 路由）。
+      if (btn.hasAttribute('data-video-play')) {
+        showVideoPlayer(btn.dataset.filename, btn.dataset.volume || '');
+        return;
+      }
 
       // 目录操作按钮（需要阻止冒泡到行点击事件）
       if (btn.classList.contains('dir-enter-btn')) {
@@ -3023,6 +3319,13 @@ function initDynamicEventDelegation() {
     const cell = e.target.closest('.checksum-cell');
     if (cell) {
       copyChecksum(cell.dataset.checksum);
+    }
+  });
+
+  // 视频播放器关闭按钮（data-close 由 videoPlayerModalHtml 动态生成，走委托）。
+  document.addEventListener('click', function(e) {
+    if (e.target.closest('#video-player-modal [data-close]')) {
+      hideVideoPlayer();
     }
   });
 

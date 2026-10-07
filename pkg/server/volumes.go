@@ -464,7 +464,8 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 }
 
 // routeUploadAuto 自动路由（新文件，forceHomeVol 空）：按 placement 排序候选依序双预留；
-// owner 全局满不换卷、卷满换下一候选。
+// owner 全局满不换卷、卷满换下一候选。写保护（用户语义 #6）：候选卷该 rel 命中被封装卷
+// 占用的子目录 → 跳过该候选（不静默落到占用目录）；全部候选被占用 → 403 直接拒绝。
 func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size int64) (*volumeRoute, error) {
 	cfg := h.cfgPtr.Load()
 	placement := volume.ModePreferDefault
@@ -478,9 +479,18 @@ func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size
 		return 0
 	})
 	var volFullErr error
+	var occupiedErr error
 	for _, v := range ordered {
+		// 写保护：候选卷该 rel 命中占用子目录 → 跳过该候选（安全优先，不静默落到占用目录）。
+		if err := h.checkWrapperOccupiedWrite(v.Name, userVisibleRelOf(rel)); err != nil {
+			occupiedErr = err
+			continue
+		}
 		route, err := h.reserveVolume(owner, rel, v.Name, size)
 		if err == nil {
+			// M7（2026-10-06）：自动路由跳过被占用候选后落到其它卷——Warn 提示
+			// 「目录已被封装卷占用」（行为不变：落到可用候选；全部候选被占用时由 403 透传文案）。
+			h.noteAutoRouteOccupiedSkip(owner, rel, v.Name, occupiedErr)
 			return route, nil
 		}
 		var re *routeError
@@ -490,10 +500,24 @@ func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size
 		}
 		return nil, err // owner 全局满 / 其它：直接返回
 	}
+	if occupiedErr != nil && volFullErr == nil {
+		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, occupiedErr.Error(), occupiedErr)
+	}
 	if volFullErr != nil {
 		return nil, volFullErr
 	}
 	return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, quota.ErrStorageFull)
+}
+
+// noteAutoRouteOccupiedSkip 记录「自动路由跳过被封装卷占用的候选卷」的 Warn（M7，2026-10-06）：
+// 用户不带 volume 上传命中被占用子目录（如 main/videos 被封装卷占用）时，自动路由跳过该候选
+// 落到其它卷——日志提示，避免「静默落无关卷」无痕。occupiedErr nil → 空操作。
+func (h *Handlers) noteAutoRouteOccupiedSkip(owner, rel, targetVol string, occupiedErr error) {
+	if occupiedErr == nil {
+		return
+	}
+	h.logger.Warn("自动路由：跳过被封装卷占用的候选卷（用户可指定 volume 上传）",
+		"owner", owner, "rel", rel, "target_volume", targetVol, "occupied", occupiedErr.Error())
 }
 
 // routeUploadLegacy 旧装配路径（volSet nil）预留：默认租户 + owner 全局 Scope 预留（单卷零回归）。
@@ -515,11 +539,16 @@ func (h *Handlers) routeUploadLegacy(owner, rel string, size int64) (*volumeRout
 }
 
 // routeUploadSingle 单候选卷预留（forceHome 或显式 volume）：视图内校验（不在视图 → 403）
-// + 可选唯一性查重（仅显式 volume）+ 单卷双预留。
+// + 可选唯一性查重（仅显式 volume）+ 单卷双预留。写保护（用户语义 #6）：目标卷该 rel
+// 命中被封装卷占用的子目录 → 403（占用目录只读，禁止写）。
 func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, checkUnique bool, view []volume.Volume) (*volumeRoute, error) {
 	v, ok := h.volSet.ByName(volName)
 	if !ok || !v.Authorize(owner) {
 		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
+	}
+	// 写保护：被封装卷占用的底层子目录只读——显式卷/forceHome 目标命中占用子目录 → 403。
+	if err := h.checkWrapperOccupiedWrite(volName, userVisibleRelOf(rel)); err != nil {
+		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, err.Error(), err)
 	}
 	if checkUnique {
 		if err := h.checkVolumeUniqueness(owner, rel, v.Name, view); err != nil {

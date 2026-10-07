@@ -31,9 +31,17 @@ type externalUploadSink struct {
 }
 
 // ownerKey 映射域侧 rel → 外部卷键（ResolveOwnerPath 统一计算；域侧 rel 形如
-// user/<name>，剥桶前缀后传 user 桶相对路径）。
+// user/<name>，剥桶前缀后传 user 桶相对路径）。桶目录自身（"user"）剥桶前缀为空 → 键 = user
+// 桶自身（2026-10-06 修复：TrimPrefix("user","user/") 不命中会把 "user" 当桶内路径，产生
+// "user/user" 残留空目录）。
 func (s *externalUploadSink) ownerKey(rel string) (string, error) {
-	stripped := strings.TrimPrefix(rel, "user/")
+	stripped := rel
+	switch {
+	case rel == "user":
+		stripped = ""
+	case strings.HasPrefix(rel, "user/"):
+		stripped = strings.TrimPrefix(rel, "user/")
+	}
 	return s.v.ResolveUserPath(s.owner, stripped)
 }
 

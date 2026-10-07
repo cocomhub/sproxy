@@ -41,6 +41,11 @@ type Executor struct {
 	// 最长前缀命中 bucket_limits 子目录）。优先于 TenantScope：逐文件预留时按文件实际
 	// 路径路由，子目录配额对 sync pull 生效；未装配时退化为 nil（直写，由占位对账兜底）。
 	ScopeFor func(owner, rel string) *quota.Scope
+	// WriteGuard 是**装配层注入**的本地写侧占用写保护（嵌套封装占用子目录只读，用户语义 #6，
+	// 2026-10-06 旁路闭环）：签名 relPath = 相对本地 user 根的**用户可见**路径（如 videos/x）。
+	// pull/双向的本地写侧 FS（quotaLocalFS.inner）包上 guardedLocalFS 逐写方法判定——命中被
+	// 封装卷占用的底层子目录 → 该文件失败（不中止整体同步）。nil = 不启用（旧行为，零回归）。
+	WriteGuard func(relPath string) error
 	// Logger 是执行日志。
 	Logger *slog.Logger
 	// ConflictIndex 是冲突索引存储（merge3 冲突登记回调落库；nil = 不登记——
@@ -90,6 +95,9 @@ func (e *Executor) SetMeshFSFactory(f MeshFSFactory) { e.MeshFS = f }
 // SetBaidupcsFSFactory 注入 baidupcs 载体工厂（装配层在 newExecutor 后调用；未注入时
 // kind=baidupcs 远端 fail-closed）。
 func (e *Executor) SetBaidupcsFSFactory(f BaidupcsFSFactory) { e.BaidupcsFS = f }
+
+// SetWriteGuard 注入本地写侧占用写保护（见 Executor.WriteGuard 注释；nil = 不启用）。
+func (e *Executor) SetWriteGuard(f func(relPath string) error) { e.WriteGuard = f }
 
 // SetTenantScopeResolver 注入 user 桶配额 Scope 解析器（装配层在 newExecutor 后调用；
 // 测试用独立 quota.Pool 建 Scope）。未注入时逐文件预留关闭。
@@ -203,6 +211,68 @@ func (q *quotaLocalFS) examScope(relPath string) *quota.Scope {
 
 var _ syncpkg.FS = (*quotaLocalFS)(nil)
 
+// guardedLocalFS 是本地写侧的占用写保护装饰器（写方法委托前按 relPath 判定；guard nil →
+// 直写，零回归）。读方法透传不拦。供 pull/双向的本地写侧 FS 接入（WriteGuard 注入）。
+type guardedLocalFS struct {
+	inner syncpkg.FS
+	guard func(relPath string) error
+}
+
+func (g *guardedLocalFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return g.inner.ListDir(ctx, p)
+}
+func (g *guardedLocalFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return g.inner.Stat(ctx, p)
+}
+func (g *guardedLocalFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return g.inner.OpenRead(ctx, p)
+}
+func (g *guardedLocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+	if g.guard != nil {
+		if err := g.guard(relPath); err != nil {
+			return err
+		}
+	}
+	return g.inner.WriteFile(ctx, relPath, r, size, mtime)
+}
+func (g *guardedLocalFS) Rename(ctx context.Context, from, to string) error {
+	if g.guard != nil {
+		if err := g.guard(to); err != nil {
+			return err
+		}
+	}
+	return g.inner.Rename(ctx, from, to)
+}
+func (g *guardedLocalFS) Delete(ctx context.Context, p string) error {
+	if g.guard != nil {
+		if err := g.guard(p); err != nil {
+			return err
+		}
+	}
+	return g.inner.Delete(ctx, p)
+}
+func (g *guardedLocalFS) MakeDir(ctx context.Context, p string) error {
+	if g.guard != nil {
+		if err := g.guard(p); err != nil {
+			return err
+		}
+	}
+	return g.inner.MakeDir(ctx, p)
+}
+
+var _ syncpkg.FS = (*guardedLocalFS)(nil)
+
+// localWriteFS 构造 pull/双向的本地写侧 FS：占用写保护（WriteGuard）+ 配额感知（quotaLocalFS）
+// 双层装饰 LocalFS。guard 为 nil 时退化仅 quota（零回归）。返回 *quotaLocalFS 使调用方
+// （runBoth verify）可读 .inner 作纯读源。
+func (e *Executor) localWriteFS(localRoot, owner string) *quotaLocalFS {
+	var inner syncpkg.FS = syncpkg.NewLocalFS(localRoot, e.logger())
+	if e.WriteGuard != nil {
+		inner = &guardedLocalFS{inner: inner, guard: e.WriteGuard}
+	}
+	return &quotaLocalFS{inner: inner, owner: owner, scopeFor: e.scopeFor}
+}
+
 // scopeFor 是 Executor 的 resolver：优先按 (owner, rel) 路由（bucket_limits 子目录），
 // 未注册时回落 e.TenantScope（仅按 owner 取 user 桶）。
 func (e *Executor) scopeFor(owner, rel string) *quota.Scope {
@@ -284,14 +354,7 @@ func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTas
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	dstFS := &quotaLocalFS{
-		inner: syncpkg.NewLocalFS(localRoot, e.logger()),
-		owner: task.Owner,
-		// 解析器按 (owner, rel) 路由 bucket_limits 子目录配额；e.tenantScope 仅按 owner
-		// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
-		// 该租户无配额，退化为直写）。装配层注入的 ParseScope 见 Handlers.SyncQuotaScope。
-		scopeFor: e.scopeFor,
-	}
+	dstFS := e.localWriteFS(localRoot, task.Owner)
 	return remoteFS, dstFS, []func(){closeRemote}, nil
 }
 
@@ -562,11 +625,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
 	}
 	// pull 写侧配额感知（对齐单向 pull）。
-	pullJobDst := &quotaLocalFS{
-		inner:    syncpkg.NewLocalFS(localRoot, e.logger()),
-		owner:    task.Owner,
-		scopeFor: e.scopeFor,
-	}
+	pullJobDst := e.localWriteFS(localRoot, task.Owner)
 	pullErr := engine.Sync(ctx, remoteFS, pullJobDst, pullJob)
 	if ctx.Err() != nil {
 		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()

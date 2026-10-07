@@ -62,14 +62,14 @@ volumes:
 
 | extra 键 | 默认 | 说明 |
 |----------|------|------|
-| `target` | `local` | 底层卷名；`local` = 本地 `<root>/secrets/` 目录。外部 target（baidupcs/s3/webdav/加密卷嵌套）为预留片，当前仅 local 子集可用 |
+| `target` | `local` | 底层卷名；`local` = 本地 `<root>/secrets/` 目录。**嵌套封装（2026-10-06）**：`<卷名>/<新子目录>`（如 `main/videos`）引用已创建卷的**新空子目录**作封装根——子目录须当前不存在，同卷路径重叠互斥占用（见 §3.4）。其余外部 target（baidupcs/s3/webdav/加密卷整卷）为预留片 |
 | `root` | 卷根 | `target=local` 时的本地根目录 |
 
 ### 3.2 secretdata 卷（`type: "secretdata"`）
 
 | extra 键 | 默认 | 说明 |
 |----------|------|------|
-| `target` | `local` | 底层卷根（secretdata 物理落盘处）。外部 target（baidupcs/s3/webdav/嵌套）为预留片 |
+| `target` | `local` | 底层卷根（secretdata 物理落盘处）。**嵌套封装（2026-10-06）**：`<卷名>/<新子目录>`（如 `main/videos`）引用已创建卷的新空子目录作封装根——MakeDir 创建空目录 + 可写封装子视图，密文落 `<卷>/<子目录>/`；子目录须不存在，互斥占用防重复选底层（§3.4）。其余外部 target（baidupcs/s3/webdav/加密卷整卷）为预留片 |
 | `root` | 卷根 | `target=local` 时的本地根 |
 | `secret_url` | 必填 | `secrets://<卷>/<name>`，从 secrets 卷读密钥；引用的 secrets 卷须先装配 |
 | `algorithm` | `shardseal/aes-256-gcm` | **KDF 阶段档位**，见 §3.3 |
@@ -129,6 +129,22 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 `erasure: true` 启用 k-of-k+1 纠错：对 ≥2 个数据分块按最大长度补零对齐后逐字节 XOR 生成 parity
 段（独立加密分块文件），任一分块丢失/损坏可由其余分块 XOR 复原。纯 stdlib，**未生产验证**，默认关
 闭。
+
+### 3.8 嵌套封装（`target: <卷名>/<新子目录>`，2026-10-06 用户确认语义）
+
+封装卷（secretdata/secrets）支持以「已创建卷 + **新空子目录**」作为底层根，**不新建底层卷**：
+
+- **target 语法**：`<卷名>/<新子目录>`（如 `main/videos`，子目录可多级 `a/b`）；必须含子目录。
+- **子目录必须不存在**：建卷校验确认当前不存在 → 409「目录已存在」（防与底层卷既有数据混合）；
+  校验通过后 `MakeDir` 创建空目录，再套可写封装子视图（密文/secret 文件落 `<卷>/<子目录>/`）。
+- **互斥占用**：底层卷某目录被占用后，该目录及父/子目录（路径重叠，`pathsOverlap`：
+  `a==b || b 以 a/ 开头 || a 以 b/ 开头`）均不可再被其它封装卷选作底层 → 409。同卷不同分支
+  （`main/photos` vs `main/movies`）、跨卷互不影响。
+- **关联标注**：建封装卷登记「底层卷 → {subdir, wrapper}」；删底层卷有引用 → 409；删封装卷清
+  关联；重启经用户卷 store 装配期重建（防丢失）。
+- **写保护**：被占用目录**只读可查、禁止修改**（`sync.ReadonlySubFS`：WriteFile/Rename/Delete/
+  MakeDir fail-closed，ListDir/Stat/OpenRead 透传）。
+- **历史路径零回归**：`target: local + extra.root`（config/CLI）为本地根整卷，不进互斥占用校验。
 
 ## 4. 寻址
 

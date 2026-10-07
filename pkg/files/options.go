@@ -131,6 +131,24 @@ func WithDedup(d DedupPolicy) Option {
 	return func(c *config) { c.dedup = d }
 }
 
+// OccupiedWriteGuard 判定普通写目标是否被封装占用子目录拦截（嵌套封装写保护，fail-closed）。
+//
+// 消费方：文件写操作（上传路由 / 删除 / 重命名 / mkdir / rmdir / 分块 complete / 版本
+// restore）在目标卷 + 用户可见路径已知时调用 Check；返回非 nil error 表示拒绝该写
+// （错误文案即对外回包，装配层通常映射 403/409）。nil 实现 = 未装配（零回归，不拦截）。
+//
+// volName 为目标卷名（空 = 无卷语义旧装配，实现应直接放行）；userRel 为用户可见相对路径
+// （如 `videos/x`，不含 user/<owner> 前缀——与占用 Subdir 坐标一致）。
+type OccupiedWriteGuard interface {
+	// CheckOccupiedWrite 返回 nil 放行；非 nil error 表示该卷该路径禁止写。
+	CheckOccupiedWrite(volName, userRel string) error
+}
+
+// WithOccupiedWriteGuard 注入写保护判定能力（嵌套封装占用子目录只读）。默认：不拦截。
+func WithOccupiedWriteGuard(g OccupiedWriteGuard) Option {
+	return func(c *config) { c.occupiedGuard = g }
+}
+
 // ---- Option 构造 ----
 
 // Option 是文件服务的构造选项。零个 Option 即得到「最小可用」实例（单卷、无配额、
@@ -156,6 +174,7 @@ type config struct {
 	dedup         DedupPolicy
 	bandwidth     BandwidthLimiter
 	contentIndex  bool
+	occupiedGuard OccupiedWriteGuard
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。

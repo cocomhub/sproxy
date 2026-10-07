@@ -380,6 +380,15 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	if !ok {
 		return
 	}
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：complete 把 parts 组装写入对象键——目标键
+	// 命中被封装卷占用的子目录 → 403（complete 直写卷根，不经 files 域 guard；分块上传的
+	// init/part 阶段落 chunk 桶不拦，仅 final 写面拦截）。
+	if volName := h.s3BucketVolName(r); volName != "" {
+		if err := h.checkWrapperOccupiedWrite(volName, userVisibleRelOf(plan.rel)); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+	}
 	// 8. 配额双账本（设计文档 2026-09-24-s3-complete-quota.md）。
 	total, resv, ok := h.s3CompleteReserve(w, plan)
 	if !ok {
