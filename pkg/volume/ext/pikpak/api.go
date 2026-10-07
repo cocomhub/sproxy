@@ -396,16 +396,18 @@ func (a *API) FindByID(ctx context.Context, fileID string) (*FileMeta, error) {
 	if fileID == "" {
 		return nil, fmt.Errorf("%w: empty file id", ErrFileNotFound)
 	}
-	all, err := a.ListRecursive(ctx, "")
-	if err != nil {
-		return nil, err
+	// 直接用 GET /drive/v1/files/{id}（轻量单查）——不再 ListRecursive 全盘遍历
+	// （全盘 walk 在网盘大/空间满时慢/超时，是去重/定位失效根因之一）。
+	var out struct {
+		FileMeta
 	}
-	for i := range all {
-		if all[i].ID == fileID {
-			return &all[i], nil
-		}
+	if err := a.doJSON(ctx, http.MethodGet, "/drive/v1/files/"+fileID, nil, nil, &out); err != nil {
+		return nil, fmt.Errorf("%w: file id %s: %v", ErrFileNotFound, fileID, err)
 	}
-	return nil, fmt.Errorf("%w: file id %s", ErrFileNotFound, fileID)
+	if out.ID == "" {
+		return nil, fmt.Errorf("%w: file id %s", ErrFileNotFound, fileID)
+	}
+	return &out.FileMeta, nil
 }
 
 // Delete 删除网盘文件/文件夹（移到回收站 batchTrash）。

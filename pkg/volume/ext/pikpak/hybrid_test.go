@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1139,13 +1140,19 @@ func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		// 文件夹递归终止 + 建模「Pack From Shared」restore 副本 parent（NH-P1 判别器用）。
-		if r.URL.Query().Get("parent_id") != "" {
+		// 文件夹递归：parent_id=pack-folder → 返回其内文件（restored-1 副本）
+		pid := r.URL.Query().Get("parent_id")
+		if pid != "" {
+			if pid == "pack-folder" {
+				writeJSON(w, map[string]any{"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
+				}})
+				return
+			}
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}
 		writeJSON(w, map[string]any{"files": []map[string]any{
-			{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
 			{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
 		}})
 	})
@@ -1507,20 +1514,30 @@ func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		// 文件夹递归终止 + 建模「Pack From Shared」restore 副本 parent（NH-P1 判别器用）。
-		if r.URL.Query().Get("parent_id") != "" {
+		// 文件夹递归：parent_id=pack-folder → 返回其内文件（restored-1 副本）
+		pid := r.URL.Query().Get("parent_id")
+		if pid != "" {
+			if pid == "pack-folder" {
+				writeJSON(w, map[string]any{"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
+				}})
+				return
+			}
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}
 		writeJSON(w, map[string]any{"files": []map[string]any{
-			{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
 			{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
 		}})
 	})
 	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		kind, name := "drive#file", "movie.mp4"
+		if id == "pack-folder" {
+			kind, name = "drive#folder", "Pack From Shared"
+		}
 		writeJSON(w, map[string]any{
-			"id": id, "name": "movie.mp4",
+			"id": id, "name": name, "kind": kind,
 			"web_content_link": srvURL + "/drive/dl",
 		})
 	})
@@ -1676,9 +1693,24 @@ func mkHybridFake(payload []byte, driveFiles []map[string]any, restoreOwned bool
 			http.Error(w, "m", http.StatusMethodNotAllowed)
 			return
 		}
-		// 文件夹递归终止：子目录（parent_id 非空）返回空列表——否则 ListRecursive
-		// 无限递归（fake 同一列表 → 循环 walk 文件夹）。
-		if r.URL.Query().Get("parent_id") != "" {
+		pid := r.URL.Query().Get("parent_id")
+		if pid != "" {
+			// 文件夹递归：仅当 pid 是 driveFiles 里的 folder 时列出其子文件
+			// （ListRecursive 语义）；其它 pid（非本 fake 已知文件夹）返回空终止递归。
+			for i := range driveFiles {
+				f := driveFiles[i]
+				if f["kind"] == "drive#folder" && f["id"] == pid {
+					// 该 folder 下的文件 = parent_id == pid 的 driveFiles 项
+					children := []map[string]any{}
+					for j := range driveFiles {
+						if driveFiles[j]["parent_id"] == pid {
+							children = append(children, driveFiles[j])
+						}
+					}
+					writeJSON(w, map[string]any{"files": children})
+					return
+				}
+			}
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}
@@ -1686,7 +1718,11 @@ func mkHybridFake(payload []byte, driveFiles []map[string]any, restoreOwned bool
 	})
 	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
-		writeJSON(w, map[string]any{"id": id, "name": "movie.mp4", "web_content_link": srvURLOut + "/drive/dl"})
+		kind, name := "drive#file", "movie.mp4"
+		if id == "pack-folder" {
+			kind, name = "drive#folder", "Pack From Shared"
+		}
+		writeJSON(w, map[string]any{"id": id, "name": name, "kind": kind, "web_content_link": srvURLOut + "/drive/dl"})
 	})
 	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) { serveRange(w, r, payload) })
 	mux.HandleFunc("/drive/v1/files:batchDelete", func(w http.ResponseWriter, r *http.Request) {
@@ -1707,6 +1743,7 @@ func mkHybridDownloader(srvURL string, chunkLen int64, autoDelete bool) (*Hybrid
 	hd, err := NewHybridDownloader(HybridConfig{
 		Resolver: resolver, API: api, HTTPClient: &http.Client{},
 		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 1, AutoDelete: autoDelete,
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	return hd, err
 }

@@ -1320,9 +1320,12 @@ func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadC
 	// 全盘 ListRecursive 在网盘大/空间满时慢/超时是去重失效、重复保存的根因）。
 	existing, found := d.findInPackShared(ctx, dc.target.Name, dc.target.Size)
 	// pack 文件夹 miss → 回退 FindInDrive 全盘（兼容旧网盘/无 pack 文件夹场景）。
+	// **强判据**：兜底要求 hash 双方都有且一致才复用（避免把【restore 响应预置的文件】
+	// 误当既有副本——restore 前网盘本无该副本，应走 RestoreShare）。
+	// FindInDrive 慢的问题在 pack 优先后缓解（pack 命中不再全盘 walk）。
 	if !found || existing == nil {
 		existing2, err := d.api.FindInDrive(ctx, dc.target.Name, dc.target.Size)
-		if err != nil || existing2 == nil {
+		if err != nil || existing2 == nil || existing2.Hash == "" || dc.target.Hash == "" || existing2.Hash != dc.target.Hash {
 			return "", "", false
 		}
 		existing = existing2
