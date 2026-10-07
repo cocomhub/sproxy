@@ -267,18 +267,16 @@ func entryFromMeta(m ObjectMeta) syncpkg.Entry {
 }
 
 // isNotFound 判断错误是否为「不存在」语义（哨兵或文本）。
+// M6 修复：用 stdlib errors.Is（%w 包装的 ErrNotFound 也能沿 Unwrap 链识别）替代
+// 本地恒等比较——errorsIs = err == target 对 fmt.Errorf("%w:...") 包装的错误恒判
+// false（文案兜底掩盖了大部分场景，但属错误处理坏味道 + 未来隐患）。
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errorsIs(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) {
 		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "不存在")
-}
-
-// errorsIs 避免与标准库 errors 冲突的本地包装。
-func errorsIs(err, target error) bool {
-	return err == target
 }
