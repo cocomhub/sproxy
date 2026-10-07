@@ -137,13 +137,13 @@ func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	if tr == nil || tr.URL == "" {
 		t.Fatal("转存应返回 URL")
 	}
-	// 目标路径自动派生 user/<taskID>/<filename>
-	wantRel := "user/task-1/movie.mp4"
+	// 目标路径自动派生 <owner>/user/<taskID>/<filename>（空 owner → anonymous）
+	wantRel := "anonymous/user/task-1/movie.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("目标卷应收到 %s，实际文件: %v", wantRel, keys(fs.files))
 	}
-	// 目录自动生成（user + user/task-1）
-	if !fs.dirs["user"] || !fs.dirs["user/task-1"] {
+	// 目录自动生成（anonymous/user + anonymous/user/task-1）
+	if !fs.dirs["anonymous/user"] || !fs.dirs["anonymous/user/task-1"] {
 		t.Fatalf("目标目录应自动生成，实际 dirs: %v", fs.dirs)
 	}
 	if !strings.HasPrefix(tr.URL, "secretdata://secretdata-main/") {
@@ -496,10 +496,10 @@ func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	// 独享卷不加前缀：user/task-p1/c.mp4
-	wantRel := "user/task-p1/c.mp4"
+	// 独享卷也恒加 owner 前缀（2026-10-07 废弃区分）：carol/user/task-p1/c.mp4
+	wantRel := "carol/user/task-p1/c.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
-		t.Fatalf("独享卷不应加 owner 前缀 %s，实际: %v", wantRel, keys(fs.files))
+		t.Fatalf("独享卷应加 owner 前缀 %s，实际: %v", wantRel, keys(fs.files))
 	}
 }
 
@@ -638,7 +638,7 @@ func TestTransferDone_DuplicateRel_RejectsOverwrite(t *testing.T) {
 		t.Fatalf("覆盖拒绝应归目标卷异常（ErrTransferTarget），got %v", err2)
 	}
 	// 卷中内容仍是首次（未被覆盖）
-	if got := string(fs.files["user/task-w3/w3.mp4"]); got != "first" {
+	if got := string(fs.files["anonymous/user/task-w3/w3.mp4"]); got != "first" {
 		t.Fatalf("卷内内容应保持首次 %q，got %q（被静默覆盖）", "first", got)
 	}
 }
@@ -963,7 +963,7 @@ func TestTransferDone_IdempotentSameContent(t *testing.T) {
 		t.Fatalf("幂等重放应返回同 URL，tr2=%v tr1=%v", tr2, tr1)
 	}
 	// 卷内内容未被改写（仍是首次内容）
-	if got := string(fs.files["user/task-imp1/imp1.mp4"]); got != "identical-content" {
+	if got := string(fs.files["anonymous/user/task-imp1/imp1.mp4"]); got != "identical-content" {
 		t.Fatalf("幂等重放不应改写卷内容，got %q", got)
 	}
 }

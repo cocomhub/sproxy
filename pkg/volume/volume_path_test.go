@@ -36,14 +36,15 @@ func TestResolveUserPath_SharedVolume_OwnerPrefix(t *testing.T) {
 	}
 }
 
-// TestResolveUserPath_PrivateVolume_NoPrefix：独享卷 → user/<rel>（无 owner 前缀）。
-func TestResolveUserPath_PrivateVolume_NoPrefix(t *testing.T) {
+// TestResolveUserPath_PrivateVolume_OwnerPrefix：独享卷也恒 owner 前缀（2026-10-07
+// 废弃「独享无前缀」约定，所有卷按 owner 维度操作）。
+func TestResolveUserPath_PrivateVolume_OwnerPrefix(t *testing.T) {
 	t.Parallel()
 	loc, err := privateVolume().ResolveUserLocation("alice", "movie.bin")
 	if err != nil {
 		t.Fatalf("ResolveUserLocation: %v", err)
 	}
-	if want := "user/movie.bin"; privateVolume().FSPath(loc) != want {
+	if want := "alice/user/movie.bin"; privateVolume().FSPath(loc) != want {
 		t.Fatalf("独享卷键=%q want %q", privateVolume().FSPath(loc), want)
 	}
 }
@@ -100,10 +101,10 @@ func TestResolveLocation_MetaBucket(t *testing.T) {
 	if want := "alice/meta/credentials.json"; sharedVolume().FSPath(loc) != want {
 		t.Fatalf("meta 桶键=%q want %q", sharedVolume().FSPath(loc), want)
 	}
-	// 独享卷 meta 无前缀。
+	// 独享卷 meta 也恒 owner 前缀（2026-10-07 废弃区分）。
 	loc2, err2 := privateVolume().ResolveLocation("alice", "meta", "credentials.json")
-	if err2 != nil || privateVolume().FSPath(loc2) != "meta/credentials.json" {
-		t.Fatalf("独享 meta 键=%q err=%v want meta/credentials.json", privateVolume().FSPath(loc2), err2)
+	if err2 != nil || privateVolume().FSPath(loc2) != "alice/meta/credentials.json" {
+		t.Fatalf("独享 meta 键=%q err=%v want alice/meta/credentials.json", privateVolume().FSPath(loc2), err2)
 	}
 }
 
@@ -221,5 +222,59 @@ func TestRebucketTo_UserToMeta(t *testing.T) {
 		if ok != tc.ok || got != tc.want {
 			t.Errorf("RebucketTo(%q) = (%q,%v), want (%q,%v)", tc.key, got, ok, tc.want, tc.ok)
 		}
+	}
+}
+
+// TestLocation_StringParse_Roundtrip Location String()/ParseLocation() 序列化往返。
+// 废弃共享/独享区分后：所有卷恒含 owner 段。
+func TestLocation_StringParse_Roundtrip(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		v      Volume
+		owner  Owner
+		bucket Bucket
+		path   Path
+		want   string
+	}{
+		{privateVolume(), "alice", "user", "dir/movie.bin", "volume://mydisk/alice/user/dir/movie.bin"},
+		{sharedVolume(), "alice", "user", "dir/movie.bin", "volume://shared/alice/user/dir/movie.bin"},
+		{sharedVolume(), "alice", "meta", "x.bin.meta", "volume://shared/alice/meta/x.bin.meta"},
+		{sharedVolume(), "bob", "user", "", "volume://shared/bob/user"},
+	}
+	for _, tc := range cases {
+		loc := tc.v.MustLocation(tc.owner, tc.bucket, tc.path)
+		if got := loc.String(); got != tc.want {
+			t.Errorf("String() = %q, want %q", got, tc.want)
+		}
+		// Parse 往返：注入卷上下文后字段一致（owner 恒含）。
+		back, perr := tc.v.ParseLocation(tc.want)
+		if perr != nil {
+			t.Fatalf("ParseLocation(%q): %v", tc.want, perr)
+		}
+		if back.Owner() != tc.owner || back.Bucket() != tc.bucket || back.Path() != tc.path {
+			t.Errorf("roundtrip 字段不符: got (%q,%q,%q) want (%q,%q,%q)",
+				back.Owner(), back.Bucket(), back.Path(), tc.owner, tc.bucket, tc.path)
+		}
+	}
+}
+
+// TestParseLocation_FailClosed 非法定位拒绝（scheme 错/卷名不一致/无路径/缺 owner/逃逸）。
+func TestParseLocation_FailClosed(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{
+		"http://mydisk/user/x",     // scheme 错
+		"volume://other/user/x",    // 卷名不一致
+		"volume://mydisk",          // 无路径
+		"volume://mydisk/user",     // 缺 owner 段（废弃独享无前缀后 owner 必填）
+		"volume://mydisk/alice",    // 缺桶段
+		"volume://mydisk/../etc/x", // 逃逸
+	} {
+		if _, err := privateVolume().ParseLocation(s); err == nil {
+			t.Errorf("非法定位 %q 应报错", s)
+		}
+	}
+	// 仅桶（path 空）合法：`volume://<卷>/<owner>/<bucket>`（owner/桶必填，path 可空）。
+	if _, err := sharedVolume().ParseLocation("volume://shared/alice/user"); err != nil {
+		t.Errorf("仅桶定位应通过: %v", err)
 	}
 }

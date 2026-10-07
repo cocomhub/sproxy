@@ -26,6 +26,8 @@ package volume
 
 import (
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -70,15 +72,16 @@ type OwnerBucketLocator interface { // NOSONAR: S8196 — 定位语义接口（�
 	WithPath(path Path) OwnerBucketLocator
 	// WithOwner 返回同 bucket/path、新 owner 的定位（跨 owner 重定位）。
 	WithOwner(owner Owner) OwnerBucketLocator
-	// FSPath 返回该定位在卷内的最终 FS 键（**拼接唯一发生点**，owner 归一 + 卷共享性，
-	// 由构造方注入卷上下文——调用方不自行拼接 owner/bucket/path）。
+	// FSPath 返回该定位在卷内的最终 FS 键（**拼接唯一发生点**：恒 `<归一 owner>/<bucket>/<path>`——
+	// 用户裁定 2026-10-07 废弃「独享卷无 owner 前缀」约定，所有卷按 owner 维度操作，不再
+	// 区分共享/独享，简化维护。调用方不自行拼接 owner/bucket/path）。
 	FSPath() string
 }
 
 // Location 是 OwnerBucketLocator 的**完整默认实现**（结构体，导出）。
 // **volume 名称与卷指针也内化**（用户裁定 2026-10-07）：构造方（Volume.ResolveLocation）
-// 注入 vol+name，locator 完全自足——FS 键经 `FSPath()` 拼接（owner 归一 + 卷共享性），
-// 调用方不需要外部 Volume 上下文。字段私有，访问经导出方法。
+// 注入 vol+name，locator 完全自足——FS 键经 `FSPath()` 拼接（恒 owner 前缀），调用方
+// 不需要外部 Volume 上下文。字段私有，访问经导出方法。
 type Location struct {
 	vol    Volume
 	name   string // 卷名（装配元数据；可由 vol.Name 派生，保留独立避免依赖 vol 零值）
@@ -87,8 +90,8 @@ type Location struct {
 	path   Path
 }
 
-// NewLocation 构造 Location（默认绑定零值 Volume——独享语义；共享卷场景请经
-// Volume.ResolveLocation 构造（注入 vol+name+shared），不要直接 NewLocation）。
+// NewLocation 构造 Location（owner/bucket/path 三字段；owner 恒参与键空间，空 → anonymous
+// 由 FSPath 归一。构造时卷上下文未注入——需 FSPath/共享语义时经 Volume.ResolveLocation）。
 func NewLocation(owner Owner, bucket Bucket, path Path) *Location {
 	return &Location{owner: owner, bucket: bucket, path: path}
 }
@@ -99,15 +102,13 @@ func (l Location) Path() Path     { return l.path }
 func (l Location) Name() string   { return l.name }
 func (l Location) Volume() Volume { return l.vol }
 func (l Location) FSPath() string {
+	// 恒 owner 前缀（废弃共享/独享区分）：`<归一 owner>/<bucket>/<path>`。
 	owner := storage.NormalizeOwner(l.owner)
 	base := l.bucket
 	if l.path != "" {
 		base = l.bucket + "/" + l.path
 	}
-	if l.vol.Shared() {
-		return owner + "/" + base
-	}
-	return base
+	return owner + "/" + base
 }
 func (l Location) Rebucket(bucket Bucket) OwnerBucketLocator {
 	return &Location{vol: l.vol, name: l.name, owner: l.owner, bucket: bucket, path: l.path}
@@ -197,6 +198,114 @@ func (v Volume) ResolveUserLocation(owner Owner, userPath Path) (Location, error
 	return v.ResolveLocation(owner, "user", userPath)
 }
 
+// locationScheme 是 Location 序列化 URL 的 scheme（与既有 transferURL `<scheme>://<卷>/<rel>`
+// 形态对齐；Location 用统一 "volume" scheme 表达卷内定位）。
+const locationScheme = "volume"
+
+// String 把 Location 序列化为 URL 形态（**字符串边界**——供持久化/审计/跨进程传输；
+// 内部操作仍用强类型 OwnerBucketLocator 方法，不经字符串往返）。
+// 形态：`volume://<卷名>/<owner>/<bucket>/<path>`（owner 空 → 省略；path 空 → 省略）。
+// 各段经 url.PathEscape（防 #/% 等破坏 URL 语义——与 transferURL 同规约）。
+func (l Location) String() string {
+	var b strings.Builder
+	b.WriteString(locationScheme + "://" + l.name)
+	// 恒含 owner 段（废弃共享/独享区分——所有卷按 owner 维度操作）。
+	if o := l.owner; o != "" {
+		b.WriteString("/" + url.PathEscape(o))
+	}
+	if bk := l.bucket; bk != "" {
+		b.WriteString("/" + url.PathEscape(bk))
+		if p := l.path; p != "" {
+			for seg := range strings.SplitSeq(p, "/") {
+				b.WriteString("/" + url.PathEscape(seg))
+			}
+		}
+	}
+	return b.String()
+}
+
+// ParseLocation 从 URL 形态字符串解析为 Location（**字符串边界**；注入卷上下文——
+// 卷名来自调用方卷，调用方须保证 v.Name 与字符串 authority 一致，否则 fail-closed）。
+// 形态与 String() 对称：`volume://<卷名>/<owner>/<bucket>/[<path>]`（owner 必填——
+// 废弃共享/独享区分，所有卷按 owner 维度操作）。
+// **纯定位解析（不跑权限门）**：调用方已处授权上下文；仅做语法 + 路径安全校验
+// （逃逸/注入/非法段 → ErrInvalidUserPath）。
+func (v Volume) ParseLocation(s string) (Location, error) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return Location{}, fmt.Errorf("volume: 解析定位 %q: %w", s, err)
+	}
+	if u.Scheme != locationScheme {
+		return Location{}, fmt.Errorf("%w: scheme 须为 %q，got %q", ErrInvalidUserPath, locationScheme, u.Scheme)
+	}
+	if u.Host != "" && u.Host != v.Name {
+		return Location{}, fmt.Errorf("%w: 卷名 %q 与定位 %q 不一致", ErrInvalidUserPath, u.Host, s)
+	}
+	// path 段（去前导 /）：`<owner>/<bucket>/[<path>]`。
+	rawPath := strings.TrimPrefix(u.EscapedPath(), "/")
+	if rawPath == "" {
+		return Location{}, fmt.Errorf("%w: 定位无路径", ErrInvalidUserPath)
+	}
+	segs := strings.Split(rawPath, "/")
+	if len(segs) < 2 {
+		return Location{}, fmt.Errorf("%w: 定位缺少 owner/桶段", ErrInvalidUserPath)
+	}
+	owner := mustUnescape(segs[0], s)
+	if !storage.ValidSegmentName(owner) {
+		return Location{}, fmt.Errorf("%w: 非法 owner %q", ErrInvalidUserPath, owner)
+	}
+	bucket := segs[1]
+	if !storage.ValidSegmentName(bucket) {
+		return Location{}, fmt.Errorf("%w: 非法桶名 %q", ErrInvalidUserPath, bucket)
+	}
+	path, perr := parsePathSegs(segs[2:])
+	if perr != nil {
+		return Location{}, perr
+	}
+	return Location{vol: v, name: v.Name, owner: Owner(owner), bucket: Bucket(bucket), path: Path(path)}, nil
+}
+
+// parsePathSegs 校验并归一 path 段（逃逸/非法段 → ErrInvalidUserPath）。纯定位解析
+// 不跑权限门；调用方已处授权上下文。
+func parsePathSegs(segs []string) (string, error) {
+	if len(segs) == 0 {
+		return "", nil
+	}
+	decoded := escapeDecodeAll(segs)
+	norm, ok := storage.NormalizeRemote(strings.Join(decoded, "/"))
+	if !ok {
+		return "", ErrInvalidUserPath
+	}
+	for seg := range strings.SplitSeq(norm, "/") {
+		if !storage.ValidSegmentName(seg) {
+			return "", ErrInvalidUserPath
+		}
+	}
+	return norm, nil
+}
+
+// escapeDecodeAll 逐段 PathUnescape（防 % 注入；非法 % → 原样保留——与 cloudfilename
+// Go/JS 对齐：仅校验 path 段，query 原样）。
+func escapeDecodeAll(segs []string) []string {
+	out := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		if dec, err := url.PathUnescape(seg); err == nil {
+			out = append(out, dec)
+		} else {
+			out = append(out, seg)
+		}
+	}
+	return out
+}
+
+// mustUnescape 对 owner 段 PathUnescape（非法 % → 原样；Parse 已 fail-closed）。
+func mustUnescape(seg, _ string) string {
+	if dec, err := url.PathUnescape(seg); err == nil {
+		return dec
+	}
+	return seg
+}
+
 // BucketOf 解析卷内键的**功能桶段**（用户裁定 2026-10-07：桶解析收敛到 volume 包，
 // 避免外部靠字符串匹配误判）。结构识别（非字符串子串匹配，防用户真实目录误判）：
 //
@@ -251,7 +360,7 @@ func RebucketTo(key, toBucket string) (string, bool) {
 // splitSegsVolume 按 / 拆键段（去空段；键已由 ResolveOwnerPath/NormalizeRemote 校验）。
 func splitSegsVolume(key string) []string {
 	var out []string
-	for _, s := range strings.Split(key, "/") {
+	for s := range strings.SplitSeq(key, "/") {
 		if s != "" {
 			out = append(out, s)
 		}
