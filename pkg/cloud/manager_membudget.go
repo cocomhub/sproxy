@@ -9,7 +9,9 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-// newCheckMemSem 构造校验内存配额信号量；maxBytes<=0 返回 nil（配额禁用）。
+// newCheckMemSem 构造校验内存配额信号量；maxBytes<=0 防御性返回 nil（nil 表示无配额
+// 约束——配置层 applyCloudConfigDefaults 已把 <=0 归为默认 512MiB，此处 nil 仅覆盖
+// 直接构造 manager 的测试/非常规路径）。
 func newCheckMemSem(maxBytes int64) *semaphore.Weighted {
 	if maxBytes <= 0 {
 		return nil

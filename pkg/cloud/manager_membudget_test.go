@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -75,4 +76,34 @@ func TestAcquireCheckMem_CancelReturnsNotOk(t *testing.T) {
 		t.Fatal("释放后应可 acquire（检查无占位泄漏）")
 	}
 	mgr.checkMemSem.Release(10)
+}
+
+// TestApplyDefaults_CheckMemZeroToDefault 用户裁定（2026-10-07）：MaxCheckMemBytes<=0
+// （含 0/负值/缺省）一律按默认 512MiB 处理——配额治理默认生效，服务默认行为安全可用。
+func TestApplyDefaults_CheckMemZeroToDefault(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		in   sizex.ByteSize
+		want sizex.ByteSize
+	}{
+		{name: "零值（缺省）", in: 0, want: 512 << 20},
+		{name: "显式 0", in: 0, want: 512 << 20},
+		{name: "负值（非法配置）", in: -1, want: 512 << 20},
+		{name: "显式配置保留", in: 64 << 20, want: 64 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &CloudDownloadConfig{MaxCheckMemBytes: tc.in}
+			applyCloudConfigDefaults(cfg)
+			if cfg.MaxCheckMemBytes != tc.want {
+				t.Fatalf("MaxCheckMemBytes=%d 应归为 %d，got %d", tc.in, tc.want, cfg.MaxCheckMemBytes)
+			}
+		})
+	}
+	// 构造后信号量非 nil（配额治理生效）
+	cfg := &CloudDownloadConfig{}
+	applyCloudConfigDefaults(cfg)
+	if sem := newCheckMemSem(int64(cfg.MaxCheckMemBytes)); sem == nil {
+		t.Fatal("<=0 归默认后信号量应非 nil（配额治理默认生效）")
+	}
 }

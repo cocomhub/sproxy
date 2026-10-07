@@ -141,12 +141,14 @@ IntegrityMustPass  bool   `json:"integrity_must_pass,omitempty"`  // true = 校�
 执行（重下时重新 acquire）。markDownloading（置 downloading）在持槽后置，保证
 「downloading 状态 ≤ 持槽数」并发上限不变量。
 
-**校验内存配额排队**（`cloud_check_mem_bytes`，ByteSize 语义，默认 512MiB，0=不限制）：
-- 校验器 `EstimateMem` 在 Check 前估算峰值内存（image=像素×4 钳制 2500 万；tar=size×500
-  膨胀比；video=ffprobe 进程 64MiB + JSON 估算封顶 256MiB）；
+**校验内存配额排队**（`cloud_check_mem_bytes`，ByteSize 语义，默认 512MiB；**<=0（含
+0/负值/缺省）一律按默认 512MiB**——用户裁定 2026-10-07：0 处理成默认大小，保证服务
+默认行为安全可用，配额治理默认生效防并发校验 OOM）：
+- 校验器 `EstimateMem` 在 Check 前估算峰值内存（image=像素×4 钳制 2500 万；tar=64KiB
+  固定；video=ffprobe 进程 64MiB + JSON 估算封顶 256MiB）；
 - `checkMemSem`（semaphore.Weighted）按估算字节排队（并发校验总估算 ≤ 配额，不足等待）；
 - 单文件估算超配额 → **跳过校验标记 unverified**（无校验能力 ≠ 损坏，不误判 damaged）；
-- 负值配置按缺省 512MiB fail-safe；0 = 配额禁用（校验不排队）。
+- 配额信号量由配置层保证非 nil（<=0 归默认），永不因缺省而禁用。
 
 **不同流程隔离**：下载（`semaphore`）→ 校验（`checkMemSem` 内存配额）→ 转存
 （`transferSem`）各独立限流，按各自资源（磁盘/内存/CPU）排队，互不 head-of-line 阻塞。

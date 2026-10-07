@@ -141,7 +141,8 @@ type CloudDownloadConfig struct {
 	MaxRetries          int           // 失败重试次数，默认 10
 	RetryDelay          time.Duration // 重试间隔，默认 10s
 	Downloader          string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
-	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；0=不限制，默认 512 MiB）。
+	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；**<=0（含 0/负值/缺省）一律按
+	// 默认 512 MiB**——用户裁定 2026-10-07：0 处理成默认大小，配额治理默认生效）。
 	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验
 	// 标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
 	MaxCheckMemBytes sizex.ByteSize
@@ -203,9 +204,11 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	if cfg.Downloader == "" {
 		cfg.Downloader = "http"
 	}
-	// MaxCheckMemBytes=0 语义「不限制」→ 配额禁用（newCheckMemSem nil，校验不排队）。
-	// 负值（非法配置）按缺省 512MiB 处理（fail-safe，不用病态负值构造信号量）。
-	if cfg.MaxCheckMemBytes < 0 {
+	// MaxCheckMemBytes<=0（含 0/负值/缺省）一律按默认 512 MiB 处理（用户裁定 2026-10-07：
+	// **0 处理成默认大小，保证服务默认行为安全可用**——完整性校验内存配额治理默认生效，
+	// 不因缺省/显式 0 而禁用，防并发校验 OOM）。配额信号量由 newCheckMemSem 构造，
+	// 永不因配置缺省而 nil（nil 仅防御性保留：直接构造 manager 时）。
+	if cfg.MaxCheckMemBytes <= 0 {
 		cfg.MaxCheckMemBytes = sizex.ByteSize(512) * (1 << 20) // 默认 512 MiB（ByteSize 语义）
 	}
 }
