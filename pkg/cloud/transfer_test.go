@@ -1243,3 +1243,36 @@ func refSHA256(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
+
+// TestVerifyByFileMeta_LocalTamperDetected D-C2 回归：本地产物在下载后被篡改（metaProvider
+// 卷写的是篡改内容，meta 也按篡改生成自洽）——verifyByFileMeta 必须与 result.Checksum
+// （下载权威）最终比对，否则损坏内容被静默转存。篡改 → 报 ErrTransferTarget。
+func TestVerifyByFileMeta_LocalTamperDetected(t *testing.T) {
+	t.Parallel()
+	// 目标卷是 metaProvider（secretdata 短路语义）：写侧 meta 按**写入内容**生成。
+	full := []byte(strings.Repeat("dc2-original-", 30)) // ~360B 单分块
+	fm := &meta.FileMeta{
+		Version: 1, Size: int64(len(full)),
+		TotalSHA256: refSHA256(full), ChunkSize: 1024,
+		Chunks: []meta.ChunkMeta{{Index: 0, Offset: 0, Size: int64(len(full)), SHA256: refSHA256(full)}},
+	}
+	fs := &staticMetaFS{data: full, fm: fm}
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-dc2", Filename: "d.bin", Transfer: &TransferSpec{Volume: "vol-d"}}
+	dest := filepath.Join(t.TempDir(), "d.bin")
+	tampered := []byte(strings.Repeat("dc2-tampered-", 30)) // 下载后被篡改的本地产物
+	_ = os.WriteFile(dest, tampered, 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// dest 是篡改内容、result.Checksum 是原始权威值、目标卷 meta 按写入内容（篡改）生成——
+	// verifyByFileMeta 必须用 result.Checksum 捕获（否则静默入库）。
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: refSHA256(full), Size: int64(len(full)),
+	}, nil); err == nil {
+		t.Fatal("D-C2: 本地产物被篡改但 metaProvider 卷自洽 → 必须与 result.Checksum 比对报错")
+	} else if !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("篡改应归 ErrTransferTarget, got %v", err)
+	}
+}

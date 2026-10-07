@@ -183,3 +183,75 @@ func TestTrash_MetaFollowsFile(t *testing.T) {
 		t.Fatalf("EmptyTrash 后 trash 应空, got %d", len(entries2))
 	}
 }
+
+// TestFlattenRel_UnderscoreRoundtrip D-C1 回归：rel 文件名含 `_` 时 flatten→unflatten
+// 必须互逆（`user/a_b/c.txt` 不得还原成 `user/a/b/c.txt`——原 ReplaceAll 双射破坏致
+// 恢复路径错位/409 永久丢失）。
+func TestFlattenRel_UnderscoreRoundtrip(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"user/a.txt",
+		"user/a_b/c.txt",     // 文件名含 _
+		"user/dir_a/x_y.bin", // 目录+文件都含 _
+		"user/a__b/c.txt",    // 文件名本身含 __
+		"user/单级/中文名.txt",    // 中文
+		"user/x/y/z.bin",
+	}
+	for _, rel := range cases {
+		if back := unflattenRel(flattenRel(rel)); back != rel {
+			t.Errorf("flatten/unflatten(%q) → %q，应互逆", rel, back)
+		}
+	}
+	// 不同 rel 不得映射到同一 flat（双射不破坏的额外断言）。
+	seen := map[string]string{}
+	for _, rel := range cases {
+		flat := flattenRel(rel)
+		if prev, ok := seen[flat]; ok && prev != rel {
+			t.Errorf("flat 冲突: %q 与 %q 同映射 %q", prev, rel, flat)
+		}
+		seen[flat] = rel
+	}
+}
+
+// TestTrash_SoftDeleteRestore_Underscore D-C1 端到端：软删含 _ 的文件 → 恢复回到原
+// 路径（不落到错位目录）。
+func TestTrash_SoftDeleteRestore_Underscore(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	root := tnt.Root()
+	userAbs, _ := root.Abs("user")
+	_ = os.MkdirAll(filepath.Join(userAbs, "a_b"), 0o755) // 目录名含 _
+	if err := os.WriteFile(filepath.Join(userAbs, "a_b", "c.txt"), []byte("u"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := testutil.SHA256Hex([]byte("u"))
+	if _, err := env.svc.DeleteFile(context.Background(), DeleteFileInput{
+		Owner: "alice", RemotePath: "a_b/c.txt", ExpectedChecksum: cs, SoftDelete: true,
+	}); err != nil {
+		t.Fatalf("软删: %v", err)
+	}
+	// 恢复（扫描 trash 主条目——flat 编码：rel=user/a_b/c.txt → user_a__b_c.txt）。
+	trashAbs, _ := root.Abs("trash")
+	entries, _ := os.ReadDir(trashAbs)
+	trashRel := ""
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "user_a__b_c.txt"+trashDeletedSuffix) {
+			trashRel = trashPrefix + e.Name()
+			break
+		}
+	}
+	if trashRel == "" {
+		t.Fatal("trash 缺主条目")
+	}
+	if err := env.svc.RestoreTrash(context.Background(), "alice", trashRel); err != nil {
+		t.Fatalf("恢复: %v", err)
+	}
+	// 恢复后必须在原路径 a_b/c.txt（不是 a/b/c.txt）。
+	if _, err := os.Stat(filepath.Join(userAbs, "a_b", "c.txt")); err != nil {
+		t.Fatalf("恢复应回原路径 a_b/c.txt: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(userAbs, "a", "b", "c.txt")); err == nil {
+		t.Fatal("不得落到错位目录 a/b/c.txt")
+	}
+}

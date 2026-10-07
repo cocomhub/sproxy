@@ -413,9 +413,19 @@ func verifyByFileMeta(env *transferEnv) error {
 		}
 	}
 	// 整文件 TotalSHA256 与 meta 一致（权威认证：内容整体没被篡改，与分块粒度无关）。
-	if total := hex.EncodeToString(totalSHA.Sum(nil)); total != fm.TotalSHA256 {
+	totalHex := hex.EncodeToString(totalSHA.Sum(nil))
+	if totalHex != fm.TotalSHA256 {
 		return fmt.Errorf("%w: 转存后内容与 meta 不一致（TotalSHA256 %s ≠ %s，卷静默损坏？）",
-			ErrTransferTarget, total, fm.TotalSHA256)
+			ErrTransferTarget, totalHex, fm.TotalSHA256)
+	}
+	// D-C2 修复：**与下载权威校验和最终比对**——分块/整文件校验只证明「目标卷内容 ==
+	// 写侧 meta」，但 meta 由**写入流**生成（本地产物被篡改/截断时 meta 也按篡改内容
+	// 生成，自洽却错误入库）。必须与 result.Checksum（下载器权威 sha256）比对，否则
+	// 本地产物损坏被静默转存（metaProvider 卷——secretdata 短路不包装饰器——尤其
+	// 此路径，原流式回落有此比对而 verifyByFileMeta 缺失）。
+	if env.result.Checksum != "" && totalHex != env.result.Checksum {
+		return fmt.Errorf("%w: 转存后内容与下载校验和不一致 %s ≠ %s（本地产物损坏/截断？）",
+			ErrTransferTarget, totalHex, env.result.Checksum)
 	}
 	// 分块校验通过 → 内容与写侧 meta 一致（跨信任边界无静默损坏）。
 	return nil

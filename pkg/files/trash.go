@@ -41,12 +41,50 @@ func TrashMetaMarker() string { return trashMetaMarker }
 
 // softDeleteToTrash 软删：校验成功后把 quarantine 移到 trash 桶（非 Remove）。
 // 在 DeleteFile 的 checksum 匹配分支调用；返回 (trashRel, err)。
+// flattenRel / unflattenRel 是 trash 桶条目原 rel 的可逆编解码（D-C1 修复）：
+// 顶层扁平命名需把 `/` 转单字符，但 `strings.ReplaceAll(rel,"/","_")` 对文件名含 `_`
+// 的 rel（`user/a_b/c.txt`）双射破坏——恢复时 `_`→`/` 会把 a_b 还原成 a/b 两级目录
+// （数据错位/409 永久丢失）。可逆规则：`/` → `_`；`_` → `__`（转义）。解码先合并
+// `__`→`_` 再单 `_`→`/`，与编码互逆。
+func flattenRel(rel string) string {
+	var b strings.Builder
+	for i := 0; i < len(rel); i++ {
+		switch rel[i] {
+		case '_':
+			b.WriteString("__")
+		case '/':
+			b.WriteByte('_')
+		default:
+			b.WriteByte(rel[i])
+		}
+	}
+	return b.String()
+}
+
+// unflattenRel 把扁平条目还原为原 rel（与 flattenRel 互逆）。
+func unflattenRel(flat string) string {
+	var b strings.Builder
+	for i := 0; i < len(flat); i++ {
+		if flat[i] != '_' {
+			b.WriteByte(flat[i])
+			continue
+		}
+		if i+1 < len(flat) && flat[i+1] == '_' {
+			b.WriteByte('_') // `__` → `_`（转义的下划线）
+			i++
+		} else {
+			b.WriteByte('/') // 单 `_` → `/`
+		}
+	}
+	return b.String()
+}
+
 // M2 修复：meta sidecar 随主文件一起移到 trash 桶（生命周期一致）——软删保留 meta
 // 供恢复；trash 条目随清理一起删（无孤儿）；同 rel 新文件不受影响（其 meta 是新的，
 // 不在此路径移动）。
 func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, quarRel, rel string, info os.FileInfo) (string, error) {
-	// trash 桶相对路径：trash/<rel 斜杠转点>.__deleted__<nano>（顶层扁平，防嵌套目录）。
-	flatRel := strings.ReplaceAll(rel, "/", "_")
+	// trash 桶相对路径：trash/<rel 扁平编码>.__deleted__<nano>（顶层扁平，防嵌套目录）。
+	flatRel := flattenRel(rel)
 	trashRel := trashPrefix + flatRel + trashDeletedSuffix + strconv.FormatInt(time.Now().UnixNano(), 10)
 	// trash 桶顶层目录确保存在（rename 目标目录必须已建）。
 	if err := root.MkdirAll("trash", 0o755); err != nil {
@@ -56,7 +94,7 @@ func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, qua
 		return "", fmt.Errorf("trash rename: %w", err)
 	}
 	// meta sidecar 随迁（best-effort：源 meta 不存在则跳过——读路径直算兜底；恢复时
-	// 随主文件一起回 meta 桶）。
+	// 随主文件一起回 meta 桶）。meta 条目与主文件用同一 flat 前缀（+.meta 标记）。
 	_ = atomicRenameRoot(root, meta.MetaPath(rel), trashPrefix+flatRel+trashMetaMarker+trashDeletedSuffix+strconv.FormatInt(time.Now().UnixNano(), 10))
 	_ = info // 保留（未来恢复时用大小）
 	return trashRel, nil
@@ -79,9 +117,10 @@ func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) erro
 	if !ok {
 		return &HTTPError{Status: 400, Message: "无效的回收站条目"}
 	}
-	flat := before // 形如 user_a.txt（_ 分隔原 rel 段）
-	// flat → 原 rel（下划线恢复为斜杠；只转文件名字符，原 rel 的 / 全转 _）。
-	origRel := strings.ReplaceAll(flat, "_", "/")
+	flat := before // 形如 user_a__b_c.txt（_ 分隔原 rel 段；`__` 是文件名中的 `_` 转义）
+	// flat → 原 rel（可逆解码：`__`→`_`、单 `_`→`/`——D-C1 修复：文件名含 `_` 的 rel
+	// 不再被还原成多级目录）。
+	origRel := unflattenRel(flat)
 	if !strings.HasPrefix(origRel, "user/") {
 		return &HTTPError{Status: 400, Message: "无效的回收站条目"}
 	}
