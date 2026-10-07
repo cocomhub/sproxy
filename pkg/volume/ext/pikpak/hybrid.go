@@ -81,6 +81,8 @@ type HybridConfig struct {
 	// ChunkProgress 是 per-chunk 进度回调（nil = 不回调）。pikget 用它逐行显示每个分片
 	// （编号/来源链/状态/进度/速率）。下载开始前会为每个 chunk 发一次 pending 事件。
 	ChunkProgress ChunkProgressFunc
+	// GCIDStats 是 GCID 校验命中统计（决策用：官方分块粒度规律）。nil=不统计。
+	GCIDStats *integrity.GCIDVerifyStats
 	// AccountPool 是多账号会话文件池（配额轮换 + 转存副本按账号分摊）。
 	// nil = 单账号现状（账号区全部 chunk 走当前登录态/单 API）。非 nil 时账号区
 	// chunk 按 Select round-robin 分配到多账号，每账号转存一次副本后并行 FETCH 下载。
@@ -104,11 +106,12 @@ type HybridDownloader struct {
 	autoDelete    bool
 	log           *slog.Logger
 	metrics       *HybridMetrics
-	chunkProgress ChunkProgressFunc        // per-chunk 进度回调（pikget 逐行显示；nil=不回调）
-	pool          *AccountPool             // 多账号会话池（nil = 单账号现状）
-	acctSems      map[string]chan struct{} // 每账号 1 个 sem（同账号串行，不同账号并发）
-	acctSemMu     sync.Mutex               // 保护 acctSems
-	fallback      downloader.Downloader    // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
+	chunkProgress ChunkProgressFunc          // per-chunk 进度回调（pikget 逐行显示；nil=不回调）
+	pool          *AccountPool               // 多账号会话池（nil = 单账号现状）
+	acctSems      map[string]chan struct{}   // 每账号 1 个 sem（同账号串行，不同账号并发）
+	acctSemMu     sync.Mutex                 // 保护 acctSems
+	gcidStats     *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
+	fallback      downloader.Downloader      // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
@@ -192,6 +195,7 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 		chunkSize: chunk, shareRatio: ratio, concurrency: conc, autoDelete: cfg.AutoDelete,
 		log: log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
 		chunkProgress: cfg.ChunkProgress,
+		gcidStats:     cfg.GCIDStats,
 		acctSems:      make(map[string]chan struct{}),
 	}, nil
 }
@@ -208,6 +212,9 @@ func (d *HybridDownloader) HybridCounters() map[string]int64 {
 
 // Name 返回下载器名（注册表用）。
 func (d *HybridDownloader) Name() string { return "pikpak-hybrid" }
+
+// GCIDStats 返回 GCID 校验统计（metrics 导出用；nil=未装配）。
+func (d *HybridDownloader) GCIDStats() *integrity.GCIDVerifyStats { return d.gcidStats }
 
 // IntegrityMode 声明完整性归属：hybrid 走 GCID 权威复算（① 态），
 // 未命中时回落本地自洽（② 态）——与旧 PikpakDownloader 语义一致。
@@ -346,7 +353,7 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	// 非整文件 sha1——旧 sha1 全文件比对恒失败）。用 pkg/integrity.RecomputeGCIDAll 按
 	// 候选分块（256KB~4MB）复算，命中官方 hash → verified；未命中 → 报错（不冒充成功）。
 	if dc.target.Hash != "" {
-		matched, gerr := integrity.VerifyGCID(dc.working, integrity.GCIDCandidates, dc.target.Hash)
+		matched, gerr := integrity.VerifyGCIDStats(dc.working, integrity.GCIDCandidates, dc.target.Hash, d.gcidStats)
 		if gerr != nil {
 			return nil, fmt.Errorf("hybrid gcid verify: %w", gerr)
 		}

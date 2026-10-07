@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/pikpak"
 )
@@ -65,6 +66,9 @@ func buildAccountPool(cfg *server.Config, log *slog.Logger) (*pikpak.AccountPool
 //
 // 注意：下载器需已登录 CLI（binary_path 或 PATH 中的 pikpak 登录态）。
 // 未登录时 API 调用返回 ErrNotLoggedIn 明确错误（不静默降级、不假绿）。
+// pikpakGCIDStats 是 GCID 校验命中统计（cloud 装配共享实例，决策用）。
+var pikpakGCIDStats = &integrity.GCIDVerifyStats{}
+
 func registerPikpakDownloader(cfg *server.Config) {
 	registerPikpakOnce.Do(func() {
 		cli2, err := pikpak.NewCli(pikpak.CliConfig{
@@ -96,6 +100,7 @@ func registerPikpakDownloader(cfg *server.Config) {
 			// 兼作 hybrid 的 Fallback（匿名路径失败时委托），此时也须释放转存副本。
 			AutoDelete:  cfg.Pikpak.AutoDelete || cfg.Pikpak.Hybrid.AutoDelete,
 			AccountPool: pool,
+			GCIDStats:   pikpakGCIDStats,
 		})
 		if err != nil {
 			slog.Warn("pikpak downloader not registered", "err", err)
@@ -132,6 +137,7 @@ func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.Pik
 		AutoDelete:  cfg.Pikpak.Hybrid.AutoDelete,
 		Logger:      slog.Default(),
 		Metrics:     &pikpak.HybridMetrics{},
+		GCIDStats:   pikpakGCIDStats,
 		// 多账号分片（round-12）：非 nil 时账号区 chunk 分摊到多账号并行（转存串行+下载并行）
 		AccountPool: pool,
 		// Fallback：匿名分享路径整体失败时降级到旧 PikpakDownloader 完整账号下载

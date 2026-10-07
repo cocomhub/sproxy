@@ -10,7 +10,10 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // GCIDCandidates 是 PikPak GCID 复算的候选分块集合（字节），供外部（如 pikpak 下载器）
@@ -144,17 +147,197 @@ func RecomputeGCIDAll(path string, candidates []int64) ([]string, error) {
 // **所有下载器（PikpakDownloader / HybridDownloader / 未来扩展）共用此入口**，
 // 避免 GCID 算法/候选集合多处维护。
 func VerifyGCID(path string, candidates []int64, targetHash string) (bool, error) {
+	return VerifyGCIDStats(path, candidates, targetHash, nil)
+}
+
+// VerifyGCIDStats 按【文件大小引导候选 + 大→小计算】复算 GCID 比对（用户规则 2026-10-07）：
+//   - 推荐候选（<256M→256K；256M~1G→512K/1M；1G~4G→1M/2M；>4G→4M）优先，从大到小；
+//   - 范围内未命中 → 其余候选从大到小补齐；
+//   - 命中即返；统计首次/二次/后续/未命中率 + 记录「实际命中≠首次」文件详情。
+//
+// stats 为 nil 时退化为全候选顺序（无统计）。
+func VerifyGCIDStats(path string, candidates []int64, targetHash string, stats *GCIDVerifyStats) (bool, error) {
 	if targetHash == "" || path == "" {
 		return false, nil // 无权威 hash/无文件：无法校验
 	}
-	gcids, err := RecomputeGCIDAll(path, candidates)
+	hitRound, _, _, err := RecomputeGCIDOrdered(path, targetHash, stats)
 	if err != nil {
 		return false, err
 	}
-	for _, gcid := range gcids {
-		if strings.EqualFold(gcid, targetHash) {
-			return true, nil
+	return hitRound > 0, nil
+}
+
+// gcidRange 是按文件大小推荐的候选分块区间（用户规则 2026-10-07）：
+//
+//	<256MiB   → [256KiB]
+//	256MiB~1G → [512KiB, 1MiB]
+//	1G~4G     → [1MiB, 2MiB]
+//	>4G       → [4MiB]
+//
+// 范围内推荐不一致 → 从其余所有候选从大到小补齐（命中即返）。
+var gcidRanges = []struct {
+	minSize    int64
+	candidates []int64
+}{
+	{minSize: 0, candidates: []int64{262144}},                  // <256MiB
+	{minSize: 256 << 20, candidates: []int64{524288, 1048576}}, // 256M~1G
+	{minSize: 1 << 30, candidates: []int64{1048576, 2097152}},  // 1G~4G
+	{minSize: 4 << 30, candidates: []int64{4194304}},           // >4G
+}
+
+// gcidRangeFor 返回文件大小对应的推荐候选（按大小升序，计算时反转为大→小）。
+func gcidRangeFor(size int64) []int64 {
+	for i := len(gcidRanges) - 1; i >= 0; i-- {
+		if size >= gcidRanges[i].minSize {
+			return gcidRanges[i].candidates
 		}
 	}
-	return false, nil
+	return gcidRanges[0].candidates
+}
+
+// GCIDVerifyStats 是 GCID 权威校验命中统计（供决策：官方分块粒度规律）。
+// 线程安全（原子计数）——多下载器并发复用。
+type GCIDVerifyStats struct {
+	FirstHit      atomic.Int64 // 首次推荐候选命中
+	SecondHit     atomic.Int64 // 第二次（推荐内第二候选或全候选补位首试）命中
+	LaterHit      atomic.Int64 // 后续候选命中（第 3+ 次尝试）
+	MissTotal     atomic.Int64 // 全候选最终未命中
+	MismatchFirst atomic.Int64 // 实际命中 ≠ 首次推荐候选的文件数（需记录详情）
+	// 详情缓冲（实际命中与首次不一致的文件）：大小/期望/最终（上限防膨胀）
+	detailsMu sync.Mutex
+	details   []GCIDMismatchDetail
+}
+
+// GCIDMismatchDetail 记录「实际命中与首次推荐候选不一致」的文件详情（供决策）。
+type GCIDMismatchDetail struct {
+	Size         int64  `json:"size"`
+	FirstGCID    string `json:"first_gcid"`    // 首次推荐候选复算值（期望）
+	MatchedGCID  string `json:"matched_gcid"`  // 最终命中候选复算值
+	MatchedBlock int64  `json:"matched_block"` // 最终命中分块大小
+}
+
+// RecomputeGCIDOrdered 按【文件大小引导 + 大→小】顺序复算候选，返回 (gcid 列表, 命中轮次, 实际分块)。
+// 推荐候选（gcidRangeFor）优先；范围内未命中 → 其余候选从大到小补齐。
+// 返回命中轮次（0=未命中）与实际命中分块，供统计与详情记录。
+func RecomputeGCIDOrdered(path string, targetHash string, stats *GCIDVerifyStats) (hitRound int, hitBlock int64, hitGCID string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, 0, "", err
+	}
+	size := fi.Size()
+	if size == 0 {
+		return 0, 0, "", nil
+	}
+	// 推荐候选 + 其余候选（去重，全从大到小）
+	recommended := gcidRangeFor(size)
+	all := append([]int64{}, GCIDCandidates...)
+	// 其余 = 全候选 - 推荐（保留从大到小）
+	rest := make([]int64, 0, len(all))
+	for _, c := range all {
+		inRec := false
+		for _, rc := range recommended {
+			if rc == c {
+				inRec = true
+				break
+			}
+		}
+		if !inRec {
+			rest = append(rest, c)
+		}
+	}
+	// 顺序：**推荐候选降序在前，rest 降序在后**（用户规则：推荐优先，范围内未命中
+	// 才补其余候选；各自内部从大到小）——不全局 sort（会把 rest 的大块插到推荐前）。
+	recommendedDesc := append([]int64{}, recommended...)
+	sort.SliceStable(recommendedDesc, func(i, j int) bool { return recommendedDesc[i] > recommendedDesc[j] })
+	sort.SliceStable(rest, func(i, j int) bool { return rest[i] > rest[j] })
+	order := append(recommendedDesc, rest...)
+	// 逐候选计算比对
+	round := 0
+	firstGCID := ""
+	for _, bs := range order {
+		round++
+		gcid, gerr := computeGCIDFile(path, f, bs, size)
+		if gerr != nil {
+			return 0, 0, "", gerr
+		}
+		if round == 1 {
+			firstGCID = gcid
+		}
+		if targetHash != "" && strings.EqualFold(gcid, targetHash) {
+			// 命中：统计轮次 + 记录不一致详情
+			if stats != nil {
+				switch round {
+				case 1:
+					stats.FirstHit.Add(1)
+				case 2:
+					stats.SecondHit.Add(1)
+				default:
+					stats.LaterHit.Add(1)
+				}
+				if round > 1 && firstGCID != "" && !strings.EqualFold(firstGCID, gcid) {
+					stats.MismatchFirst.Add(1)
+					stats.detailsMu.Lock()
+					if len(stats.details) < 1000 {
+						stats.details = append(stats.details, GCIDMismatchDetail{
+							Size: size, FirstGCID: firstGCID, MatchedGCID: gcid, MatchedBlock: bs,
+						})
+					}
+					stats.detailsMu.Unlock()
+				}
+			}
+			return round, bs, gcid, nil
+		}
+	}
+	// 全候选未命中
+	if stats != nil {
+		stats.MissTotal.Add(1)
+	}
+	return 0, 0, "", nil
+}
+
+// computeGCIDFile 对文件按固定块复算 GCID（复用 RecomputeGCIDAll 单候选逻辑）。
+func computeGCIDFile(path string, f *os.File, bs, size int64) (string, error) {
+	outer := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
+	block := make([]byte, bs)
+	inner := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
+	for off := int64(0); off < size; off += bs {
+		end := min(off+bs, size)
+		n, rerr := f.ReadAt(block[:end-off], off)
+		if rerr != nil && rerr != io.EOF {
+			return "", rerr
+		}
+		inner.Reset()
+		inner.Write(block[:n])
+		outer.Write(inner.Sum(nil))
+	}
+	return hex.EncodeToString(outer.Sum(nil)), nil
+}
+
+// GCIDStatsSnapshot 返回统计快照（供导出/日志）。
+func (s *GCIDVerifyStats) GCIDStatsSnapshot() map[string]int64 {
+	if s == nil {
+		return nil
+	}
+	return map[string]int64{
+		"first_hit":      s.FirstHit.Load(),
+		"second_hit":     s.SecondHit.Load(),
+		"later_hit":      s.LaterHit.Load(),
+		"miss_total":     s.MissTotal.Load(),
+		"mismatch_first": s.MismatchFirst.Load(),
+	}
+}
+
+// GCIDMismatchDetails 返回不一致详情（供审计）。
+func (s *GCIDVerifyStats) GCIDMismatchDetails() []GCIDMismatchDetail {
+	if s == nil {
+		return nil
+	}
+	s.detailsMu.Lock()
+	defer s.detailsMu.Unlock()
+	return append([]GCIDMismatchDetail{}, s.details...)
 }
