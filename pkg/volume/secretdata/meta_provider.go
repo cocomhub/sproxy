@@ -54,9 +54,16 @@ func shardsealMetaToFileMeta(m *shardseal.Meta) *meta.FileMeta {
 		TotalSHA256: m.Original.SHA256,
 		Name:        m.Original.Name,
 		MTime:       m.Original.MTime,
-		Extra:       m.Extra,
 		BaseVersion: m.BaseVersion,
 		Signature:   m.Signature,
+	}
+	// m9 修复：Extra 深拷贝（转换结果独立于卷内 metaEntry.meta.Extra 共享 map——
+	// 调用方修改返回 FileMeta.Extra 不得污染卷内存态）。
+	if m.Extra != nil {
+		fm.Extra = make(map[string]any, len(m.Extra))
+		for k, v := range m.Extra {
+			fm.Extra[k] = v
+		}
 	}
 	// 分块大小：secretdata 不定长分块——取首块 OrigSize 作 ChunkSize 表达；
 	// 实际逐块校验以各块 SHA256 为准（ChunkSize 仅元信息，非校验粒度）。

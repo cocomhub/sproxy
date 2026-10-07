@@ -354,8 +354,11 @@ func (h *Handlers) s3WriteMetaAfter(r *http.Request, owner string, root *storage
 
 // s3DeleteMetaAfter 在 s3 DELETE 成功后清理配套 meta（防孤儿 + 释放 meta 桶配额）。
 // 不闸 trustedDisabled——disable 只停新建不停清理（C5 语义与 files.Service 一致）。
+// m4 修复：一并清理同目录旧 meta tmp 孤儿（sweepMetaTmp——文件删除后孤儿常驻，
+// 下次写同 rel 才 sweep；删除路径也自愈）。
 func (h *Handlers) s3DeleteMetaAfter(r *http.Request, owner string, root *storage.Root, rel string) {
 	mrel := meta.MetaPath(rel)
+	(filesMetaPolicy{h: h}).sweepMetaTmp(root, mrel)
 	metaSize := int64(0)
 	if e, serr := root.Stat(mrel); serr == nil && e != nil {
 		metaSize = e.Size()

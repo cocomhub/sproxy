@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -74,6 +75,23 @@ func (rt runtime) writeMetaSidecar(ctx context.Context, owner string, root *stor
 		return nil
 	}
 	return rt.fileMeta.WriteMeta(ctx, owner, root, rel)
+}
+
+// sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（`.tmp.<nano>` 前缀，崩溃残留）。
+// best-effort：删除失败仅忽略（下次写同 rel 再试）；目录不可读无孤儿可清。删除联动
+// 调用（m4：文件删除后孤儿常驻，删除路径也自愈）。
+func (rt runtime) sweepMetaTmp(root *storage.Root, mrel string) {
+	dir := path.Dir(mrel)
+	base := path.Base(mrel) + ".tmp."
+	es, err := root.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range es {
+		if strings.HasPrefix(e.Name(), base) {
+			_ = root.Remove(path.Join(dir, e.Name()))
+		}
+	}
 }
 
 // New 构造文件服务实例：**唯一必需项**是租户解析，其余能力由 Option 注入，未注入的

@@ -791,8 +791,11 @@ func (s *Service) cleanupRemovedDirMeta(owner string, allFiles []rmdirFileStat) 
 
 // removeFileMeta 删除单文件配套 .meta sidecar 并释放其 meta 桶配额（删除联动；
 // 与写侧 WriteMeta Commit 对称）。主文件已确认删除/软删成功才调用（软删保留）。
+// m4 修复：删除时一并清理同目录旧 meta tmp 孤儿（崩溃残留 `.tmp.<nano>`——原只在
+// 下次同 rel 写时 sweep，文件删除后孤儿常驻 + 配额/磁盘漂移）。
 func (s *Service) removeFileMeta(f *fileOp, rel string) {
 	mrel := meta.MetaPath(rel)
+	s.rt.sweepMetaTmp(f.root, mrel)
 	metaSize := int64(0)
 	if e, serr := f.root.Stat(mrel); serr == nil && e != nil {
 		metaSize = e.Size()

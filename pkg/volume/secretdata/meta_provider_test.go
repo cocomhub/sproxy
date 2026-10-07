@@ -70,6 +70,14 @@ func TestFileMeta_FromWrittenFile(t *testing.T) {
 	if e.meta.Original.SHA256 != fm.TotalSHA256 {
 		t.Fatal("FileMeta 应源自卷内 shardseal.Meta.Original.SHA256")
 	}
+	// m9 修复：Extra 深拷贝——转换结果不共享卷内 meta 的 map（修改返回的 Extra 不得
+	// 污染卷内状态）。
+	if e.meta.Extra != nil && fm.Extra != nil {
+		fm.Extra["tamper"] = "pwned"
+		if _, still := e.meta.Extra["tamper"]; still {
+			t.Fatal("FileMeta.Extra 修改不应污染卷内 shardseal.Meta.Extra（须深拷贝）")
+		}
+	}
 }
 
 // TestFileMeta_MissingFailClosed 文件不存在 / 目录 → 明确错误（fail-closed）。

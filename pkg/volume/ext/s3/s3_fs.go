@@ -31,6 +31,8 @@ import (
 
 	"context"
 
+	"errors"
+
 	"fmt"
 
 	"io"
@@ -417,27 +419,34 @@ func joinRel(dir, name string) string {
 }
 
 // isNotFound 判定 S3 错误是否为不存在（对象/桶不存在）。
-
+// m8 修复：errors.As 沿包装链找 *minio.ErrorResponse（任一层 %w 包装仍可判定）；
+// 未命中时回退 minio.ToErrorResponse（minio 内部从 resp 解析，处理错误链语义），最后
+// 字符串兜底。原实现用精确类型断言（err.(*minio.ErrorResponse)），任一 %w 包装后
+// 断言失败 → 把「不存在」误判为真失败（Stat 重试循环烧请求）。
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	var respErr minio.ErrorResponse
-
-	if asErr, ok := err.(minio.ErrorResponse); ok {
-		respErr = asErr
-	} else if ok2, ok3 := err.(*minio.ErrorResponse); ok2 != nil && ok3 {
-		respErr = *ok2
+	var target *minio.ErrorResponse
+	if errors.As(err, &target) && target != nil {
+		return isNotFoundCode(target.Code) || notFoundText(err)
 	}
+	// 非 *ErrorResponse 链：minio.ToErrorResponse 提取（包装内部错误时仍能解出 Code）。
+	parsed := minio.ToErrorResponse(err)
+	return isNotFoundCode(parsed.Code) || notFoundText(err)
+}
 
-	if respErr.Code == "NoSuchKey" || respErr.Code == "NoSuchBucket" || respErr.Code == "NotFound" {
-		return true
-	}
+// isNotFoundCode 判定错误码是否为「不存在」族。
+func isNotFoundCode(code string) bool {
+	return code == "NoSuchKey" || code == "NoSuchBucket" || code == "NotFound"
+}
 
-	// minio 对 StatObject 不存在常返回 "The specified key does not exist."（NoSuchKey）。
-
-	return strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "NoSuchBucket")
+// notFoundText 字符串兜底（minio 对 StatObject 不存在常返回
+// "The specified key does not exist."，Code 解析可能为空）。
+func notFoundText(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "NoSuchKey") || strings.Contains(msg, "NoSuchBucket")
 }
 
 // _ 编译期断言：S3FS 实现 sync.FS。

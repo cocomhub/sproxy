@@ -90,12 +90,6 @@ type Location struct {
 	path   Path
 }
 
-// NewLocation 构造 Location（owner/bucket/path 三字段；owner 恒参与键空间，空 → anonymous
-// 由 FSPath 归一。构造时卷上下文未注入——需 FSPath/共享语义时经 Volume.ResolveLocation）。
-func NewLocation(owner Owner, bucket Bucket, path Path) *Location {
-	return &Location{owner: owner, bucket: bucket, path: path}
-}
-
 func (l Location) Owner() Owner   { return l.owner }
 func (l Location) Bucket() Bucket { return l.bucket }
 func (l Location) Path() Path     { return l.path }
