@@ -561,3 +561,23 @@ func md5Hex(s string) string {
 	h := md5.Sum([]byte(s))
 	return hex.EncodeToString(h[:])
 }
+
+// TestBackoffBeforeRetry M4 退避：轮间等待递增（第二次 ≥300ms），ctx 取消立即中断。
+func TestBackoffBeforeRetry(t *testing.T) {
+	t.Parallel()
+	s := newTestStorage(t, newFakeStorageAdapter())
+	// 第二次轮间退避 300ms。
+	start := time.Now()
+	if err := s.backoffBeforeRetry(context.Background(), 2); err != nil {
+		t.Fatalf("backoff(2): %v", err)
+	}
+	if el := time.Since(start); el < 250*time.Millisecond {
+		t.Fatalf("第 2 轮退避应 ≥300ms, got %v", el)
+	}
+	// ctx 取消立即中断。
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.backoffBeforeRetry(cctx, 2); err == nil {
+		t.Fatal("ctx 取消应中断退避")
+	}
+}

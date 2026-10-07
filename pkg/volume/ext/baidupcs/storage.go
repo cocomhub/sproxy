@@ -148,21 +148,45 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 // putRetryLoop 有界重试主循环（cocom 对齐）：每轮先 Stat（秒传命中直接返回）→ 未命中
 // 上传 → Stat 复核 ETag 与本地 md5（md5 刷新），不匹配重传；超限 ErrTransient（内容
 // 即使正确也强制验证，绝不静默放行未验证内容）。
+// M4：轮间指数退避（300ms/700ms/1.5s）——百度上传后 Stat 有最终一致性窗口，立即重传
+// 大概率仍未见/仍片组合 md5，白白整文件重传；退避让秒传索引/meta 刷新落定再复核。
 func (s *Storage) putRetryLoop(ctx context.Context, key, remote string, st *stagedUpload) (*ObjectMeta, error) {
 	lastRemoteETag := ""
 	for attempt := 1; attempt <= maxPutAttempts; attempt++ {
+		if attempt > 1 {
+			if err := s.backoffBeforeRetry(ctx, attempt); err != nil {
+				return nil, err
+			}
+		}
 		meta, err := s.putAttempt(ctx, key, remote, st, attempt)
 		if err != nil {
 			return nil, err
 		}
 		if meta != nil {
-			return meta, nil // 秒传命中 / ETag 复核一致 / 读回内容一致
+			return meta, nil // 秒传命中 / ETag 复核一致 / readback 内容一致
 		}
 		if e := s.lastETag; e != "" {
 			lastRemoteETag = e
 		}
 	}
 	return nil, fmt.Errorf("%w: 上传后内容复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, st.md5, lastRemoteETag)
+}
+
+// backoffBeforeRetry 轮间指数退避（attempt 2 → 300ms，3 → 700ms，4 → 1.5s）：
+// 让百度最终一致性窗口（上传后 Stat 暂不可见/分片 md5 未刷新）落定，避免无谓整文件重传。
+func (s *Storage) backoffBeforeRetry(ctx context.Context, attempt int) error {
+	delay := time.Duration(300) * time.Millisecond
+	if attempt >= 3 {
+		delay = time.Duration(300*(1<<(attempt-1))) * time.Millisecond // 2^2=1.2s 起
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return mapPCSError(ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 // putAttempt 单轮上传尝试：存在性检查 → 上传 → ETag 复核 → 不匹配则 rapidupload 秒传
