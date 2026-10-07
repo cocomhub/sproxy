@@ -117,7 +117,13 @@ func newRangeHTTPClient() *http.Client {
 	return &http.Client{Transport: tr}
 }
 
-// Put 上传内容到网盘（本地临时文件 + adapter.Upload + ETag 复核有界重试）。
+// Put 上传内容到网盘（本地临时文件 + adapter.Upload + **ETag md5 复核有界重试**）。
+//
+// **用户裁定 2026-10-07 + 参考 cocom**：必须**重复上传直到云端原生 meta MD5 与本地
+// 一致**——每次上传后 Stat 复核远端 ETag（= 百度原生文件 MD5）与本地 md5，不一致
+// 重传刷新 meta，≤maxPutAttempts 次超限才 ErrTransient（绝不静默放行未验证内容）。
+// 对齐 cocom 循环结构：**每轮先 Stat**——远端已存在且 ETag 与本地 md5 一致（内容未
+// 变/秒传命中）直接返回（零额外上传）；否则上传 → 再 Stat 复核。
 func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta, error) {
 	tmpPath, localMD5, err := s.stageUpload(r, key)
 	if err != nil {
@@ -129,33 +135,79 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 	if err != nil {
 		return nil, err
 	}
+	return s.putRetryLoop(ctx, key, remote, tmpPath, localMD5)
+}
 
-	// 有界重试：上传 → Stat 比对 ETag（md5 刷新复核；瞬时失败重试 ≤3）。
+// putRetryLoop 有界重试主循环（cocom 对齐）：每轮先 Stat（秒传命中直接返回）→ 未命中
+// 上传 → Stat 复核 ETag 与本地 md5（md5 刷新），不匹配重传；超限 ErrTransient（内容
+// 即使正确也强制验证，绝不静默放行未验证内容）。
+func (s *Storage) putRetryLoop(ctx context.Context, key, remote, tmpPath, localMD5 string) (*ObjectMeta, error) {
+	lastRemoteETag := ""
 	for attempt := 1; attempt <= maxPutAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, mapPCSError(err)
 		}
+		meta, proceed, perr := s.putCheckExisting(ctx, key, localMD5, attempt)
+		if perr != nil {
+			return nil, perr
+		}
+		if !proceed {
+			return meta, nil // 秒传命中：目标已存在且 ETag == 本地 md5
+		}
+
 		if upErr := s.adapter.Upload(ctx, tmpPath, remote, true); upErr != nil {
 			return nil, mapPCSError(upErr)
 		}
-		meta, statErr := s.Stat(ctx, key)
-		if statErr != nil {
-			if errors.Is(statErr, ErrNotFound) {
-				// 上传成功但 Stat 未见 → 瞬时（百度最终一致性），重试
-				s.log.Warn("上传后 Stat 未立即可见，重试", "key", key, "attempt", attempt)
-				continue
-			}
-			return nil, mapPCSError(statErr)
+		meta, done, werr := s.putCheckAfterUpload(ctx, key, localMD5, attempt)
+		if werr != nil {
+			return nil, werr
 		}
-		// ETag 复核（md5 刷新）：远端 ETag 与本地 md5 一致才可信。百度分片上传的
-		// ETag 可能是片 md5 组合而非整文件 md5——不一致按瞬时重试（重传刷新 meta）。
-		if meta.ETag == localMD5 {
-			return meta, nil
+		if done {
+			return meta, nil // 上传后 ETag 复核一致
 		}
-		s.log.Warn("上传后 ETag 与本地 md5 不一致（重传刷新 meta）",
-			"key", key, "local_md5", localMD5, "remote_etag", meta.ETag, "attempt", attempt)
+		if meta != nil {
+			lastRemoteETag = meta.ETag
+		}
 	}
-	return nil, fmt.Errorf("%w: 上传后 ETag 复核不匹配超过 %d 次（本地 md5=%s）", ErrTransient, maxPutAttempts, localMD5)
+	return nil, fmt.Errorf("%w: 上传后 ETag 复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, localMD5, lastRemoteETag)
+}
+
+// putCheckExisting 每轮上传前的存在性检查：目标已存在且 ETag 与本地 md5 一致 →
+// 返回 (meta, proceed=false)（秒传命中直接返回）；不存在 → (nil, proceed=true) 直接上传；
+// 已存在但 ETag 不一致 → proceed=true 重传刷新。stat 错误 fail-closed 返回 err。
+func (s *Storage) putCheckExisting(ctx context.Context, key, localMD5 string, attempt int) (*ObjectMeta, bool, error) {
+	meta, statErr := s.Stat(ctx, key)
+	switch {
+	case statErr == nil && meta != nil && meta.ETag == localMD5:
+		s.log.Info("put: 目标已存在且 ETag 与本地 md5 一致，直接返回", "key", key, "attempt", attempt)
+		return meta, false, nil
+	case statErr == nil && meta != nil:
+		return meta, true, nil // 已存在但 ETag 不一致（内容变/分片组合）：重传刷新 meta
+	case errors.Is(statErr, ErrNotFound):
+		return nil, true, nil // 不存在：直接上传
+	default:
+		return nil, true, mapPCSError(statErr)
+	}
+}
+
+// putCheckAfterUpload 上传后的 ETag 复核（md5 刷新）：远端 ETag 与本地 md5 一致 →
+// (meta, done=true) 完成；Stat 未见（瞬时最终一致性）→ (nil, false) 重试；Stat 错误
+// fail-closed。返回 done=false 且 meta 非 nil = 复核不匹配（调用方重传）。
+func (s *Storage) putCheckAfterUpload(ctx context.Context, key, localMD5 string, attempt int) (*ObjectMeta, bool, error) {
+	meta, statErr := s.Stat(ctx, key)
+	if statErr != nil {
+		if errors.Is(statErr, ErrNotFound) {
+			s.log.Warn("上传后 Stat 未立即可见，重试", "key", key, "attempt", attempt)
+			return nil, false, nil
+		}
+		return nil, false, mapPCSError(statErr)
+	}
+	if meta.ETag == localMD5 {
+		return meta, true, nil
+	}
+	s.log.Warn("上传后 ETag 与本地 md5 不一致（重传刷新 meta）",
+		"key", key, "local_md5", localMD5, "remote_etag", meta.ETag, "attempt", attempt)
+	return meta, false, nil
 }
 
 // stageUpload 把上传流落本地临时文件并计算 md5（上传前一次性完成；返回临时路径与

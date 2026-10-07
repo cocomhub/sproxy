@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -150,10 +149,6 @@ func walkUploadStatsEntry(h *Handlers, root, path string, d os.DirEntry, err err
 	if d.Name() == "checksums.json" {
 		return nil
 	}
-	if meta.IsMetaName(d.Name()) {
-		// 可信卷 FileMeta sidecar 隐藏：不计入用户文件统计（服务端内部文件）。
-		return nil
-	}
 	info, err := d.Info()
 	if err != nil {
 		h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
@@ -213,10 +208,6 @@ func walkUploadStatsCategoryEntry(h *Handlers, root, path string, d os.DirEntry,
 		return nil
 	}
 	if d.Name() == "checksums.json" {
-		return nil
-	}
-	if meta.IsMetaName(d.Name()) {
-		// 可信卷 FileMeta sidecar 隐藏：不计入配额分类（服务端内部文件）。
 		return nil
 	}
 	info, err := d.Info()

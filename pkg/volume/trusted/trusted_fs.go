@@ -56,6 +56,59 @@ func Wrap(fs syncpkg.FS, opts Options) syncpkg.FS {
 // Inner 返回底层 FS（装配层需要原始能力如 Move/Copy/Link 时取用）。
 func (t *TrustedVolumeFS) Inner() syncpkg.FS { return t.inner }
 
+// ---- 能力接口回显（B-A2 修复）：装饰器必须委托底层能力，否则包装后
+// WriteIfAbsent/LocalVolume/ReserveSpace/Mover/Copier/Linker 等断言全落空——转存
+// 唯一性/配额/容量语义降级。逐一委托 inner（inner 未实现该接口时返回 false/错误
+// 由断言方回落，与直接使用 inner 行为一致）。----
+
+// WriteIfAbsent 委托 inner（转存唯一性原子写；inner 未实现 → 断言失败回落 Stat 检查）。
+func (t *TrustedVolumeFS) WriteIfAbsent(ctx context.Context, path string, r io.Reader, size, mtime int64) (bool, error) {
+	if pia, ok := t.inner.(syncpkg.WriteIfAbsent); ok {
+		return pia.WriteIfAbsent(ctx, path, r, size, mtime)
+	}
+	return false, fmt.Errorf("trusted: 底层卷未实现 WriteIfAbsent")
+}
+
+// ReserveSpace 委托 inner（卷容量预检；inner 未实现 → 断言失败跳过）。
+func (t *TrustedVolumeFS) ReserveSpace(ctx context.Context, relPath string, size int64) error {
+	if rs, ok := t.inner.(syncpkg.ReserveSpace); ok {
+		return rs.ReserveSpace(ctx, relPath, size)
+	}
+	return fmt.Errorf("trusted: 底层卷未实现 ReserveSpace")
+}
+
+// IsLocalVolume 委托 inner（内部/外部卷判定；inner 未实现 → 默认外部，与直接使用一致）。
+func (t *TrustedVolumeFS) IsLocalVolume() bool {
+	if lv, ok := t.inner.(syncpkg.LocalVolume); ok {
+		return lv.IsLocalVolume()
+	}
+	return false
+}
+
+// Move 委托 inner（同卷移动；inner 未实现 → 错误由调用方回落复制）。
+func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
+	if mv, ok := t.inner.(syncpkg.Mover); ok {
+		return mv.Move(ctx, from, to)
+	}
+	return fmt.Errorf("trusted: 底层卷未实现 Move")
+}
+
+// Copy 委托 inner（同卷复制；inner 未实现 → 错误由调用方回落常规复制）。
+func (t *TrustedVolumeFS) Copy(ctx context.Context, from, to string) error {
+	if cp, ok := t.inner.(syncpkg.Copier); ok {
+		return cp.Copy(ctx, from, to)
+	}
+	return fmt.Errorf("trusted: 底层卷未实现 Copy")
+}
+
+// Link 委托 inner（硬链接；inner 未实现 → 错误由调用方回落复制）。
+func (t *TrustedVolumeFS) Link(ctx context.Context, from, to string) error {
+	if lk, ok := t.inner.(syncpkg.Linker); ok {
+		return lk.Link(ctx, from, to)
+	}
+	return fmt.Errorf("trusted: 底层卷未实现 Link")
+}
+
 // metaPath 返回文件对应的 meta sidecar 路径（同目录 `<name>.meta`）。
 func metaPath(rel string) string {
 	return rel + metaSuffix
@@ -67,7 +120,9 @@ func isMetaName(rel string) bool {
 }
 
 // ListDir 列目录：过滤隐藏 .meta 文件；条目带回全部校验和（来自 meta 若存在，
-// 否则 Stat 直算）。
+// 否则 Stat 直算）。**外部卷场景**：sidecar 用 `.meta` 后缀在用户可见名空间内，
+// 过滤它同时会隐藏用户真实 `.meta` 文件——这是本地卷移桶后装饰器侧已知取舍
+// （外部卷无功能桶隔离；B1 已由写入口拒绝 `.meta` 保留名缓解）。
 func (t *TrustedVolumeFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
 	es, err := t.inner.ListDir(ctx, p)
 	if err != nil {
@@ -100,6 +155,11 @@ func (t *TrustedVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser
 // WriteFile 写入 + 计算并落 .meta（若启用）。meta 大小计入底层配额（WriteFile 经
 // 底层 CapacityFS/账本时自然计入——meta 也经 WriteFile 写）。
 func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
+	// B1 缓解：`.meta` 是保留后缀——拒绝用户写真实 `x.meta`（否则覆盖他人 sidecar
+	// 或被 ListDir 隐藏成不可管理文件）。保留名冲突 fail-closed。
+	if isMetaName(rel) {
+		return fmt.Errorf("trusted: 保留后缀 %q 不允许作为用户文件名（防覆盖 meta sidecar）", metaSuffix)
+	}
 	if t.opts.DisableMetaFile {
 		return t.inner.WriteFile(ctx, rel, r, size, mtime)
 	}
@@ -119,12 +179,15 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	// 尾块已由 Finish 收尾（Write 路径不足 chunkSize 的尾块 Finish 内 flush）。
 	fm := calc.Finish()
 	if err := meta.Validate(fm); err != nil {
+		// B2 修复：meta 校验失败（size 与实写不符）——回滚已写主文件，防孤儿。
+		_ = t.inner.Delete(ctx, rel)
 		return fmt.Errorf("trusted: 写入后 meta 校验失败: %w", err)
 	}
 	fm.Name = path.Base(strings.ReplaceAll(rel, "\\", "/"))
 	fm.Extra = t.opts.Extra
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
+		_ = t.inner.Delete(ctx, rel)
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
 	}
 	// meta 落盘（隐藏同目录 sidecar；占配额——经 inner.WriteFile 计入底层账本）。

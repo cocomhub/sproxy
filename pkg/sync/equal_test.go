@@ -43,10 +43,6 @@ func TestEqual_SameChecksum(t *testing.T) {
 	if !ok {
 		t.Fatal("同内容经校验和路径应 equal")
 	}
-	ok2, _ := IsSame(ctx, src, "a.bin", dst, "b.bin")
-	if !ok2 {
-		t.Fatal("IsSame 应一致")
-	}
 }
 
 // TestEqual_DiffContent 内容不同（同尺寸）→ false（校验和路径）。

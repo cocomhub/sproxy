@@ -17,6 +17,11 @@ import (
 
 // Calculator 流式累计 FileMeta：整文件 sha256+md5，按 ChunkSize 边界分块各算
 // sha256+md5。Write/ReadFrom 驱动数据，Finish 产出完整 FileMeta。
+//
+// **并发约束（2026-10-07 评审固化）**：Calculator 无锁，**非并发安全**——单写者
+// 串行（装饰器 TeeReader、下载器 TeeReader、FromFile/ReadFrom 均单 goroutine）；
+// 多 goroutine 同时 Write 会数据竞争。调用方不得并发喂数据（WrapReader 若挂到
+// 并发读须外部串行化）。
 type Calculator struct {
 	size      int64 // 文件总大小（ChunkSizeForSize 依据 + Validate 覆盖）
 	chunkSize int64
@@ -94,6 +99,7 @@ func (c *Calculator) flushChunk() {
 func (c *Calculator) ReadFrom(r io.Reader) (int64, error) {
 	buf := make([]byte, 64<<10) // 64KiB 读缓冲（分块切分在 Write 内完成）
 	var total int64
+	emptyReads := 0 // (0,nil) 反复返回的无限循环防护（合规 reader 不触发）
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
@@ -101,12 +107,18 @@ func (c *Calculator) ReadFrom(r io.Reader) (int64, error) {
 				return total, werr
 			}
 			total += int64(n)
+			emptyReads = 0
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return total, err
+		}
+		// 零字节无错读：允许少数（缓冲对齐），持续即判损坏防死循环。
+		emptyReads++
+		if emptyReads > 100 {
+			return total, fmt.Errorf("meta: reader 持续返回空读（疑似损坏）")
 		}
 	}
 	// 末块（不足 chunkSize 的尾块）收尾。

@@ -367,6 +367,12 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 		route.Commit(0, size)
 		ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 		s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
+		// 可信卷：去重回退复制路径也建 meta（C-MAJOR-3 修复——去重 rel 与普通上传一致有 sidecar）。
+		if s.rt.fileMetaEnabled() {
+			if mErr := s.rt.writeMetaSidecar(f.ctx, f.root, rel); mErr != nil {
+				f.logger.Warn("可信卷 meta 落盘失败（去重回退复制）", "file_name", rel, "error", mErr)
+			}
+		}
 		return WriteFileResult{Checksum: input.ExpectedChecksum, Size: size, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, true, nil
 	}
 	// 硬链接成功：零拷贝不占新配额 → 回滚预留。
@@ -1409,10 +1415,9 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 // 引用计数（仍有其它引用时只 unlink，配额不减）；引用归零 → 软删到回收站 / 硬删 +
 // 配额与卷池释放；再统一收尾（checksum 台账 / 索引 / 计量 / 审计 / 事件）。
 func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string, info os.FileInfo, cs string, input DeleteFileInput) (DeleteFileResult, error) {
-	// 可信卷：删除主文件联动删除配套 .meta（服务端内部文件随主文件一起删，防残留）。
-	if s.rt.fileMetaEnabled() {
-		_ = f.root.Remove(meta.MetaPath(rel))
-	}
+	// 可信卷：**删除成功后**联动删除配套 .meta（C-MINOR-3 修复：主文件删除失败/软删
+	// 时 meta 保留——先在成功路径统一删；此处只删当次 rel 的 sidecar，防止软删可恢复
+	// 场景丢失校验凭证）。
 	refCount := 0
 	if ds := s.rt.dedupStore(f.owner); s.rt.dedupEnabled() && ds != nil {
 		refCount = ds.RemoveRef(rel, homeVol, cs)
@@ -1437,6 +1442,11 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	}
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDelete()
+	}
+	// 可信卷：**删除成功收尾**联动删除配套 .meta（服务端内部文件随主文件一起删，
+	// 防残留；此时主文件已确认删除/软删成功——软删场景保留 meta 供恢复，见下）。
+	if s.rt.fileMetaEnabled() && !input.SoftDelete {
+		_ = f.root.Remove(meta.MetaPath(rel))
 	}
 	s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
 	f.logger.InfoContext(f.ctx, "文件已删除", "file_name", f.remotePath)

@@ -197,3 +197,19 @@ func TestDisableMetaFile(t *testing.T) {
 		t.Fatalf("DisableMetaFile 下不应落 meta: %v %v", e, err)
 	}
 }
+
+// TestWrite_ZeroByte 零字节文件写可信卷成功（A-CRITICAL 修复：空文件无分块，
+// Validate 放行——touch/.gitkeep 场景不再失败）。
+func TestWrite_ZeroByte(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv := Wrap(inner, Options{})
+	ctx := context.Background()
+	if err := tv.WriteFile(ctx, "empty.bin", bytes.NewReader(nil), 0, 0); err != nil {
+		t.Fatalf("0 字节文件写入可信卷应成功: %v", err)
+	}
+	e, err := inner.Stat(ctx, "empty.bin")
+	if err != nil || e == nil {
+		t.Fatalf("0 字节文件应落盘: %v %v", e, err)
+	}
+}

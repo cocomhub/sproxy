@@ -271,7 +271,9 @@ func toFilesHTTPError(err error) error {
 // filesMetaPolicy 实现 files.FileMetaPolicy（可信卷 meta 能力装配）：本地卷上传
 // 到达即建配套 .meta（隐藏、占配额）。由 trusted_volume.disable 开关控制
 // （缺省 false = 启用）。WriteMeta 从已落盘文件计算 FileMeta（总/分块 sha256+md5）
-// 并原子写 `.meta` sidecar（经 root，占配额计入底层账本）。
+// 并原子写 `.meta` sidecar 到 **meta 功能桶**（`meta/<rel>.meta`，移出 user/ 桶——
+// 用户裁定 2026-10-07：杜绝与用户真实 `.meta` 文件名冲突），配额记入 owner 的
+// meta 桶子 Scope（与主文件同账本体系，防磁盘超配额）。
 type filesMetaPolicy struct{ h *Handlers }
 
 var _ files.FileMetaPolicy = filesMetaPolicy{}
@@ -291,17 +293,58 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, root *storage.Root, rel 
 	if err != nil {
 		return err
 	}
-	// 原子写 `.meta` sidecar（同目录隐藏文件；占配额——经 root 写，底层账本计入）。
+	// sidecar 落 meta 功能桶（`meta/<rel>.meta`）：与用户文件命名空间隔离。
 	mrel := meta.MetaPath(rel)
-	dir := path.Dir(rel)
-	if dir != "." && dir != "" {
-		if mkErr := root.MkdirAll(dir, 0o755); mkErr != nil {
-			return mkErr
-		}
+	if dirErr := p.prepareMetaDir(root, mrel); dirErr != nil {
+		return dirErr
 	}
-	// 复用存储层原子写（root 相对 + fsync + rename）：与主文件同语义。
-	tmpRel := mrel + ".tmp"
-	_ = root.Remove(tmpRel)
+	// 配额预留（meta 桶 Scope）：不足 fail-closed（调用方 Warn 兜底，不落盘不超配额）。
+	reservation, err := p.reserveMetaQuota(mrel, int64(len(data)))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if reservation != nil {
+			reservation.Release() // 仅未 Commit 时生效（Reservation 原子至多一次）
+		}
+	}()
+	if err := p.atomicWriteMeta(root, mrel, data); err != nil {
+		return err
+	}
+	// 配额落地：写成功 Commit(actual)（TryReserve 已沿父链逐级校验；Commit 原子一次）。
+	if reservation != nil {
+		reservation.Commit(int64(len(data)))
+		reservation = nil // 防止 defer Release 双放（Commit/Release 二选一）
+	}
+	return nil
+}
+
+// prepareMetaDir 确保 sidecar 目标父目录存在。
+func (p filesMetaPolicy) prepareMetaDir(root *storage.Root, mrel string) error {
+	dir := path.Dir(mrel)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	return root.MkdirAll(dir, 0o755)
+}
+
+// reserveMetaQuota 在 meta 桶 Scope 预留 sidecar 字节（不足 fail-closed）。
+func (p filesMetaPolicy) reserveMetaQuota(mrel string, size int64) (*quota.Reservation, error) {
+	scope := p.h.quotaScopeFor("", mrel)
+	if scope == nil {
+		return nil, nil // 无配额能力：不记账（与既有无配额部署一致）
+	}
+	res, rerr := scope.TryReserve(size)
+	if rerr != nil {
+		return nil, rerr
+	}
+	return res, nil
+}
+
+// atomicWriteMeta 复用存储层原子写（root 相对 + fsync + rename）：与主文件同语义。
+// tmp 名带纳秒后缀防同 rel 并发写撞 O_EXCL（MINOR-2 修复）。
+func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data []byte) error {
+	tmpRel := mrel + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
 	f, ferr := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if ferr != nil {
 		return ferr

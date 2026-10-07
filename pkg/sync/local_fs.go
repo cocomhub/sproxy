@@ -206,6 +206,8 @@ func (l *LocalFS) Stat(ctx context.Context, relPath string) (*Entry, error) {
 			return nil, err
 		}
 		e.Checksum = cs
+		e.ChecksumType = "sha256"
+		e.Checksums = map[string]string{"sha256": cs}
 	}
 	return e, nil
 }

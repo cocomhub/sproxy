@@ -30,7 +30,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -410,9 +409,6 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 		name := e.Name()
 		if IsInflightTempName(name) {
 			continue // 在途临时文件不参与（与列表/搜索旧语义一致）
-		}
-		if meta.IsMetaName(name) {
-			continue // 可信卷 FileMeta sidecar 隐藏（用户不可见）
 		}
 		child := dirRel
 		if child != "" {

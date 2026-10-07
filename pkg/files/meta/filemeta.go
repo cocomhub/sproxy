@@ -50,10 +50,14 @@ type FileMeta struct {
 
 // Validate 校验 meta 字段完备性（fail-closed：残缺即不可信）。
 // 校验依据与 shardseal.validateMeta 对齐：Version/Size/TotalSHA256/分块非空/分块
-// 覆盖 [0, Size) 连续无空洞。
+// 覆盖 [0, Size) 连续无空洞。**零字节文件**（Size==0）无分块（空文件天然无 chunk），
+// 放行——只要求总哈希非空（空文件 sha256 恒 e3b0c442...，校验可用）。
 func Validate(m *FileMeta) error {
 	if err := validateHeader(m); err != nil {
 		return err
+	}
+	if m.Size == 0 {
+		return nil // 零字节文件：无分块合法（A-CRITICAL 修复——装饰器写 0 字节不再失败）
 	}
 	return validateChunkCoverage(m)
 }
@@ -74,9 +78,6 @@ func validateHeader(m *FileMeta) error {
 	}
 	if m.ChunkSize <= 0 {
 		return fmt.Errorf("meta: 分块大小非法 %d", m.ChunkSize)
-	}
-	if len(m.Chunks) == 0 {
-		return fmt.Errorf("meta: 无分块")
 	}
 	return nil
 }
@@ -159,16 +160,24 @@ type Provider interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命
 	FileMeta(ctx context.Context, rel string) (*FileMeta, error)
 }
 
-// metaSuffix 是 FileMeta sidecar 文件后缀（隐藏、占配额、用户不可见）。
+// metaSuffix 是 FileMeta sidecar 文件后缀。
 const metaSuffix = ".meta"
 
-// IsMetaName 判定文件名/路径是否为 FileMeta sidecar（列表隐藏过滤用）。
+// IsMetaName 判定文件名/路径是否为 FileMeta sidecar。
 func IsMetaName(name string) bool {
 	return strings.HasSuffix(name, metaSuffix)
 }
 
-// MetaPath 返回文件对应的 FileMeta sidecar 路径（同目录 `<rel>.meta`）。
+// MetaPath 返回文件对应的 FileMeta sidecar 路径。
+//
+// **sidecar 移出 user/ 桶（用户裁定 2026-10-07）**：本地卷 rel 恒以 `user/` 开头，
+// sidecar 落 **meta 功能桶** `meta/<sub>.meta`——物理隔离，杜绝与用户真实 `.meta`
+// 文件名冲突（曾被误判隐藏/覆盖破坏）；所有读面只扫 user 桶天然不含 sidecar。
+// 非 user/ 桶 rel（外部卷装饰器场景，无桶概念）回落同目录 `<rel>.meta`。
 func MetaPath(rel string) string {
+	if after, ok := strings.CutPrefix(rel, "user/"); ok {
+		return "meta/" + after + metaSuffix
+	}
 	return rel + metaSuffix
 }
 
