@@ -5,11 +5,19 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 )
+
+// ErrUnsupported 是可选能力「未实现」的哨兵错误（B1 修复契约）：能力接口用类型断言
+// 查询（ok=false = 未实现），但**装饰器/封装层为委托底层能力必须实现接口方法**——此时
+// 底层未实现能力无法用断言表达，只能返回本哨兵。使用方（如 pkg/cloud 转存）经
+// errors.Is(err, ErrUnsupported) 识别后回落降级分支，语义与直接使用裸 FS 的
+// 断言失败一致（不把「未实现」当配额拒绝/写失败）。
+var ErrUnsupported = errors.New("sync: 底层未实现该可选能力")
 
 // Entry 表示一个文件系统条目。
 type Entry struct {

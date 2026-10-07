@@ -58,20 +58,22 @@ func (t *TrustedVolumeFS) Inner() syncpkg.FS { return t.inner }
 // 唯一性/配额/容量语义降级。逐一委托 inner（inner 未实现该接口时返回 false/错误
 // 由断言方回落，与直接使用 inner 行为一致）。----
 
-// WriteIfAbsent 委托 inner（转存唯一性原子写；inner 未实现 → 断言失败回落 Stat 检查）。
+// WriteIfAbsent 委托 inner（转存唯一性原子写；inner 未实现 → 返回 ErrUnsupported，
+// 调用方 errors.Is 识别后回落 Stat 检查+WriteFile——与裸 FS 断言失败语义一致）。
 func (t *TrustedVolumeFS) WriteIfAbsent(ctx context.Context, path string, r io.Reader, size, mtime int64) (bool, error) {
 	if pia, ok := t.inner.(syncpkg.WriteIfAbsent); ok {
 		return pia.WriteIfAbsent(ctx, path, r, size, mtime)
 	}
-	return false, fmt.Errorf("trusted: 底层卷未实现 WriteIfAbsent")
+	return false, fmt.Errorf("trusted: 底层卷未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
 }
 
-// ReserveSpace 委托 inner（卷容量预检；inner 未实现 → 断言失败跳过）。
+// ReserveSpace 委托 inner（卷容量预检；inner 未实现 → 返回 ErrUnsupported，调用方
+// errors.Is 识别后跳过预检——与裸 FS 断言失败一致）。
 func (t *TrustedVolumeFS) ReserveSpace(ctx context.Context, relPath string, size int64) error {
 	if rs, ok := t.inner.(syncpkg.ReserveSpace); ok {
 		return rs.ReserveSpace(ctx, relPath, size)
 	}
-	return fmt.Errorf("trusted: 底层卷未实现 ReserveSpace")
+	return fmt.Errorf("trusted: 底层卷未实现 ReserveSpace: %w", syncpkg.ErrUnsupported)
 }
 
 // IsLocalVolume 委托 inner（内部/外部卷判定；inner 未实现 → 默认外部，与直接使用一致）。
@@ -82,28 +84,58 @@ func (t *TrustedVolumeFS) IsLocalVolume() bool {
 	return false
 }
 
-// Move 委托 inner（同卷移动；inner 未实现 → 错误由调用方回落复制）。
+// Move 委托 inner（同卷移动；inner 未实现 → ErrUnsupported，调用方回落复制）。
+// 成功后联动移动 sidecar（C1 修复：与 Rename 一致，防目标无 meta、源 meta 成孤儿）。
 func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
 	if mv, ok := t.inner.(syncpkg.Mover); ok {
-		return mv.Move(ctx, from, to)
+		if err := mv.Move(ctx, from, to); err != nil {
+			return err
+		}
+		// 联动 meta（best-effort：源 meta 不存在则跳过）。
+		_ = t.inner.Rename(ctx, metaPath(from), metaPath(to))
+		return nil
 	}
-	return fmt.Errorf("trusted: 底层卷未实现 Move")
+	return fmt.Errorf("trusted: 底层卷未实现 Move: %w", syncpkg.ErrUnsupported)
 }
 
-// Copy 委托 inner（同卷复制；inner 未实现 → 错误由调用方回落常规复制）。
+// Copy 委托 inner（同卷复制；inner 未实现 → ErrUnsupported，调用方回落常规复制）。
+// 成功后复制 sidecar（C1 修复：目标文件也带可信 meta）。
 func (t *TrustedVolumeFS) Copy(ctx context.Context, from, to string) error {
 	if cp, ok := t.inner.(syncpkg.Copier); ok {
-		return cp.Copy(ctx, from, to)
+		if err := cp.Copy(ctx, from, to); err != nil {
+			return err
+		}
+		// 复制 meta（best-effort：源 meta 不存在则跳过——目标无 meta 由读路径直算兜底）。
+		t.copyMeta(ctx, from, to)
+		return nil
 	}
-	return fmt.Errorf("trusted: 底层卷未实现 Copy")
+	return fmt.Errorf("trusted: 底层卷未实现 Copy: %w", syncpkg.ErrUnsupported)
 }
 
-// Link 委托 inner（硬链接；inner 未实现 → 错误由调用方回落复制）。
+// Link 委托 inner（硬链接；inner 未实现 → ErrUnsupported，调用方回落复制）。
+// 成功后复制 sidecar（C1 修复：Link 语义源保留——不能 Rename 源 meta，须复制；
+// 同 inode 内容必同，目标名共享源 meta）。
 func (t *TrustedVolumeFS) Link(ctx context.Context, from, to string) error {
 	if lk, ok := t.inner.(syncpkg.Linker); ok {
-		return lk.Link(ctx, from, to)
+		if err := lk.Link(ctx, from, to); err != nil {
+			return err
+		}
+		t.copyMeta(ctx, from, to)
+		return nil
 	}
-	return fmt.Errorf("trusted: 底层卷未实现 Link")
+	return fmt.Errorf("trusted: 底层卷未实现 Link: %w", syncpkg.ErrUnsupported)
+}
+
+// copyMeta 复制 sidecar（读源 meta 字节流写目标；失败静默——best-effort，读路径直算兜底）。
+func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
+	src := metaPath(from)
+	dst := metaPath(to)
+	rc, err := t.inner.OpenRead(ctx, src)
+	if err != nil {
+		return // 源 meta 不存在（读路径直算兜底）
+	}
+	defer rc.Close()
+	_ = t.inner.WriteFile(ctx, dst, rc, -1, 0)
 }
 
 // metaPath 返回文件对应的 meta sidecar 路径（经 meta.MetaPath 统一映射到 meta 桶——

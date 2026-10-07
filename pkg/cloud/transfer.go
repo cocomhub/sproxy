@@ -520,9 +520,14 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 	if pia, ok := env.targetFS.(syncpkg.WriteIfAbsent); ok {
 		written, err := pia.WriteIfAbsent(env.ctx, env.rel, r, size, mtime)
 		if err != nil {
-			return false, err
+			// B1 修复：ErrUnsupported（装饰器包装的无能力底层）→ 回落降级分支，与裸 FS
+			// 断言失败语义一致（不把「未实现」当写失败）。
+			if !errors.Is(err, syncpkg.ErrUnsupported) {
+				return false, err
+			}
+		} else {
+			return written, nil
 		}
-		return written, nil
 	}
 	// 降级：写前 Stat 尽力存在性检查 + 写。卷的 Stat 契约：目标存在返回 (*Entry, nil)，
 	// 缺失返回 (nil,nil)（全仓统一）——故以「Entry 非 nil」判定存在，而非 err==nil
@@ -650,8 +655,9 @@ func (m *CloudDownloadManager) transferAbortGate(task *CloudTask) error {
 // 的先行请求，不承诺最终不超。卷实现 ReserveSpace 时以卷自身 API 为最终配额权威。
 func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
 	// 1. 卷自身容量：目标卷实现 ReserveSpace → 预检（外部网盘配额 API）。
+	//    B1 修复：ErrUnsupported（装饰器包装的无能力底层）→ 跳过（与裸 FS 断言失败一致）。
 	if rs, ok := env.targetFS.(syncpkg.ReserveSpace); ok {
-		if err := rs.ReserveSpace(env.ctx, env.rel, env.result.Size); err != nil {
+		if err := rs.ReserveSpace(env.ctx, env.rel, env.result.Size); err != nil && !errors.Is(err, syncpkg.ErrUnsupported) {
 			return fmt.Errorf("%w: 目标卷 %q 容量不足（ReserveSpace 拒绝）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
 		}
 	}

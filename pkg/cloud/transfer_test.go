@@ -23,6 +23,7 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // memFS 是测试用内存 sync.FS（记录写入/目录生成/校验和判定）。
@@ -1073,3 +1074,54 @@ func (l *localVolumeFS) Rename(ctx context.Context, f, t string) error {
 }
 func (l *localVolumeFS) Delete(ctx context.Context, p string) error  { return l.inner.Delete(ctx, p) }
 func (l *localVolumeFS) MakeDir(ctx context.Context, p string) error { return l.inner.MakeDir(ctx, p) }
+
+// TestTransferToWrappedNoCapFS B1 回归：转存目标是被 trusted.Wrap 装饰的**无能力 FS**
+// （模拟默认装配下 baidupcs/s3 被 Wrap：不实现 WriteIfAbsent/ReserveSpace）——装饰器
+// 桩方法返回 ErrUnsupported → transferQuotaGate 跳过、writeTargetUnique 回落 Stat+WriteFile，
+// 转存成功且落盘。此场景此前恒失败（装饰器硬错误 + 断言恒命中）。
+func TestTransferToWrappedNoCapFS(t *testing.T) {
+	t.Parallel()
+	inner := newMemFS() // 不实现 ReserveSpace；WriteIfAbsent 由装饰器吞掉（inner 未实现？）
+	// memFS 实现 WriteIfAbsent；为测「未实现回落」，
+	// 构造 noCapMemFS（去掉 WriteIfAbsent 能力）——ReserveSpace 同样未实现。
+	nc := &noCapMemFS{inner: inner}
+	wrapped := trusted.Wrap(nc, trusted.Options{})
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return wrapped, "s3", false })
+	task := &CloudTask{ID: "task-wrapped", Filename: "w.mp4", Transfer: &TransferSpec{Volume: "vol-w"}}
+	dest := filepath.Join(t.TempDir(), "w.mp4")
+	_ = os.WriteFile(dest, []byte("wrapped-data"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Size: int64(len("wrapped-data"))}, nil)
+	if err != nil {
+		t.Fatalf("B1: 转存到被 Wrap 的无能力卷应成功（ErrUnsupported 回落）, got %v", err)
+	}
+	if tr == nil {
+		t.Fatal("转存应返回成功结果")
+	}
+	// 自动派生 rel = <taskID>/<filename>；空 owner 归一 anonymous → 键 anonymous/user/task-wrapped/w.mp4。
+	if got := inner.files["anonymous/user/task-wrapped/w.mp4"]; string(got) != "wrapped-data" {
+		t.Fatalf("转存内容落盘不符: got %q", got)
+	}
+}
+
+// noCapMemFS 是 memFS 的无 WriteIfAbsent 变体（模拟 s3/baidupcs 裸卷能力面）。
+type noCapMemFS struct{ inner *memFS }
+
+func (n *noCapMemFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return n.inner.ListDir(ctx, p)
+}
+func (n *noCapMemFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return n.inner.Stat(ctx, p)
+}
+func (n *noCapMemFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return n.inner.OpenRead(ctx, p)
+}
+func (n *noCapMemFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return n.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (n *noCapMemFS) Rename(ctx context.Context, f, t string) error { return n.inner.Rename(ctx, f, t) }
+func (n *noCapMemFS) Delete(ctx context.Context, p string) error    { return n.inner.Delete(ctx, p) }
+func (n *noCapMemFS) MakeDir(ctx context.Context, p string) error   { return n.inner.MakeDir(ctx, p) }

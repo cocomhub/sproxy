@@ -381,8 +381,11 @@ func (l *LocalFS) writeFileAtomic(ctx context.Context, full string, r io.Reader,
 	return nil
 }
 
-// WriteIfAbsent 原子拒绝已存在写入（W1/W3 转存唯一语义）：O_EXCL 创建——目标已存在
-// 返回 (false, nil)；写失败清理临时文件。并发安全（O_EXCL 原子存在性判定）。
+// WriteIfAbsent 原子拒绝已存在写入（W1/W3 转存唯一语义）：
+// 同目录 tmp + fsync + **硬链接安装**（os.Link 到最终路径：目标已存在 → EEXIST → 返回
+// (false, nil)，原子判定无 TOCTOU；tmp 与目标同目录保证同卷可 link）。崩溃只留可清理的
+// `.tmp-*` 残留，**最终路径从不出现半写**（与 writeFileAtomic 自愈语义一致——修复 B1-C3：
+// 原 O_EXCL 直写目标崩溃留截断文件且被"已存在"永久拦截，无法自愈）。
 func (l *LocalFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Reader, size, mtime int64) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -400,29 +403,47 @@ func (l *LocalFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Reader
 	if cerr != nil {
 		return false, cerr
 	}
-	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(full), "."+filepath.Base(full)+".tmp-*")
 	if err != nil {
+		return false, err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
+	if err := writeIfAbsentToTmp(ctx, tmp, r, mtime); err != nil {
+		cleanup()
+		return false, err
+	}
+	// 硬链接安装：目标已存在 → EEXIST → (false, nil)（原子拒绝，不覆盖）；成功 → 删 tmp。
+	if err := os.Link(tmpPath, full); err != nil {
+		os.Remove(tmpPath)
 		if os.IsExist(err) {
 			return false, nil
 		}
 		return false, err
 	}
-	if _, err := fsutil.CopyWithCtx(ctx, f, r); err != nil {
-		f.Close()
-		os.Remove(full)
-		return false, err
+	os.Remove(tmpPath)
+	return true, nil
+}
+
+// writeIfAbsentToTmp 写 tmp 文件：流式拷贝 + fsync + close + 可选 mtime（WriteIfAbsent
+// 唯一写路径的原子写核心——崩溃只留可清理 tmp，目标从不半写）。
+func writeIfAbsentToTmp(ctx context.Context, tmp *os.File, r io.Reader, mtime int64) error {
+	if _, err := fsutil.CopyWithCtx(ctx, tmp, r); err != nil {
+		return err
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(full)
-		return false, err
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
 	}
 	if mtime != 0 {
 		t := time.Unix(0, mtime)
-		if cerr := os.Chtimes(full, t, t); cerr != nil {
-			return false, cerr
+		if cerr := os.Chtimes(tmp.Name(), t, t); cerr != nil {
+			return cerr
 		}
 	}
-	return true, nil
+	return nil
 }
 
 // Rename 重命名/移动文件/目录（from/to 均须落在 Root 内，防符号链接逃逸）。

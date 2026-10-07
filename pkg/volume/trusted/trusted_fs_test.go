@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -211,5 +212,96 @@ func TestWrite_ZeroByte(t *testing.T) {
 	e, err := inner.Stat(ctx, "empty.bin")
 	if err != nil || e == nil {
 		t.Fatalf("0 字节文件应落盘: %v %v", e, err)
+	}
+}
+
+// TestUnimplementedCapability_ErrUnsupported B1 修复：装饰器桩方法在 inner 未实现
+// 可选能力时返回 ErrUnsupported（非硬错误）——调用方经 errors.Is 识别后回落，
+// 与裸 FS 断言失败（ok=false）语义一致。
+func TestUnimplementedCapability_ErrUnsupported(t *testing.T) {
+	t.Parallel()
+	inner := &noCapsFS{} // 仅实现 FS 基础方法，不实现任何可选能力
+	tv, ok := Wrap(inner, Options{}).(*TrustedVolumeFS)
+	if !ok {
+		t.Fatalf("Wrap(noCapsFS) 应返回装饰器, got %T", tv)
+	}
+	ctx := context.Background()
+	if _, err := tv.WriteIfAbsent(ctx, "x", bytes.NewReader(nil), 0, 0); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("WriteIfAbsent 未实现应 ErrUnsupported, got %v", err)
+	}
+	if err := tv.ReserveSpace(ctx, "x", 0); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("ReserveSpace 未实现应 ErrUnsupported, got %v", err)
+	}
+	if err := tv.Move(ctx, "a", "b"); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("Move 未实现应 ErrUnsupported, got %v", err)
+	}
+	if err := tv.Copy(ctx, "a", "b"); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("Copy 未实现应 ErrUnsupported, got %v", err)
+	}
+	if err := tv.Link(ctx, "a", "b"); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("Link 未实现应 ErrUnsupported, got %v", err)
+	}
+}
+
+// noCapsFS 是最小 FS 基础实现（不实现任何可选能力：WriteIfAbsent/ReserveSpace/
+// Mover/Copier/Linker/LocalVolume），供装饰器桩"未实现"路径断言用。
+type noCapsFS struct{}
+
+var _ syncpkg.FS = (*noCapsFS)(nil)
+
+func (*noCapsFS) ListDir(context.Context, string) ([]syncpkg.Entry, error)         { return nil, nil }
+func (*noCapsFS) Stat(context.Context, string) (*syncpkg.Entry, error)             { return nil, nil }
+func (*noCapsFS) OpenRead(context.Context, string) (io.ReadCloser, error)          { return nil, nil }
+func (*noCapsFS) WriteFile(context.Context, string, io.Reader, int64, int64) error { return nil }
+func (*noCapsFS) Rename(context.Context, string, string) error                     { return nil }
+func (*noCapsFS) Delete(context.Context, string) error                             { return nil }
+func (*noCapsFS) MakeDir(context.Context, string) error                            { return nil }
+
+// TestMoveCopyLink_MetaLinkage C1 修复：Move/Copy 成功后联动 sidecar（目标带可信
+// meta、源 meta 不孤儿）；Link 复制 sidecar。
+func TestMoveCopyLink_MetaLinkage(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv, ok := Wrap(inner, Options{}).(*TrustedVolumeFS)
+	if !ok {
+		t.Fatalf("Wrap(LocalFS) 应返回装饰器, got %T", tv)
+	}
+	ctx := context.Background()
+	data := []byte("meta-linkage")
+	if err := tv.WriteFile(ctx, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if e, err := inner.Stat(ctx, "meta/f.bin.meta"); err != nil || e == nil {
+		t.Fatalf("写后应有 sidecar: %v %v", e, err)
+	}
+	// Move：目标带 sidecar、源 sidecar 迁移（不再孤儿）。
+	if err := tv.Move(ctx, "user/f.bin", "user/g.bin"); err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	if e, err := inner.Stat(ctx, "meta/g.bin.meta"); err != nil || e == nil {
+		t.Fatalf("Move 后目标应有 sidecar: %v %v", e, err)
+	}
+	if e, err := inner.Stat(ctx, "meta/f.bin.meta"); err != nil || e != nil {
+		t.Fatalf("Move 后源 sidecar 应随迁（不残留）: %v %v", e, err)
+	}
+	// Copy：目标带复制的 sidecar、源保留。
+	if err := tv.Copy(ctx, "user/g.bin", "user/h.bin"); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if e, err := inner.Stat(ctx, "meta/h.bin.meta"); err != nil || e == nil {
+		t.Fatalf("Copy 后目标应有 sidecar: %v %v", e, err)
+	}
+	if e, err := inner.Stat(ctx, "meta/g.bin.meta"); err != nil || e == nil {
+		t.Fatalf("Copy 后源 sidecar 应保留: %v %v", e, err)
+	}
+	// Link：目标复制源 sidecar、源保留。
+	if err := tv.Link(ctx, "user/g.bin", "user/i.bin"); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if e, err := inner.Stat(ctx, "meta/i.bin.meta"); err != nil || e == nil {
+		t.Fatalf("Link 后目标应有 sidecar: %v %v", e, err)
+	}
+	if e, err := inner.Stat(ctx, "meta/g.bin.meta"); err != nil || e == nil {
+		t.Fatalf("Link 后源 sidecar 应保留: %v %v", e, err)
 	}
 }
