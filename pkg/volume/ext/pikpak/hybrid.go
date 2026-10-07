@@ -103,9 +103,11 @@ type HybridDownloader struct {
 	autoDelete    bool
 	log           *slog.Logger
 	metrics       *HybridMetrics
-	chunkProgress ChunkProgressFunc     // per-chunk 进度回调（pikget 逐行显示；nil=不回调）
-	pool          *AccountPool          // 多账号会话池（nil = 单账号现状）
-	fallback      downloader.Downloader // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
+	chunkProgress ChunkProgressFunc        // per-chunk 进度回调（pikget 逐行显示；nil=不回调）
+	pool          *AccountPool             // 多账号会话池（nil = 单账号现状）
+	acctSems      map[string]chan struct{} // 每账号 1 个 sem（同账号串行，不同账号并发）
+	acctSemMu     sync.Mutex               // 保护 acctSems
+	fallback      downloader.Downloader    // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
@@ -189,6 +191,7 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 		chunkSize: chunk, shareRatio: ratio, concurrency: conc, autoDelete: cfg.AutoDelete,
 		log: log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
 		chunkProgress: cfg.ChunkProgress,
+		acctSems:      make(map[string]chan struct{}),
 	}, nil
 }
 
@@ -395,13 +398,15 @@ func (d *HybridDownloader) runChunks(ctx context.Context, dc *downloadCtx, chunk
 			})
 		}
 	}
-	// 分池：分享区 pool 与账号区 pool 各 d.concurrency/2（最少 1）。
-	poolSize := max(d.concurrency/2, 1)
-	shareSem := make(chan struct{}, poolSize)
-	acctSem := make(chan struct{}, poolSize)
-	// C5：**先 spawn 全部 goroutine**，各自在 goroutine 内 acquire 对应池——
-	// 循环内同步 acquire（FIFO 阻塞）会把账号 chunk 排在分享 chunk 之后（顺序化）。
-	// 现在 share 满时循环立即推进到账号 chunk，双池真正并行（总时长 ≈ max(分享, 账号)）。
+	// **每 source 单 worker 并发**（用户明示）：同一 source（share 匿名直链/单账号直链）
+	// 内部限速（CDN/账号级），并发无叠加收益；**不同 source 之间真正并行**。
+	// 实现：share 源 sem(1) + acct 源 sem(1)（单账号/未细分账号）；多账号时
+	// downloadAccountChunkMulti 内再按账号 Select 后 per-account 串行（不同账号并发）。
+	shareSem := make(chan struct{}, 1)
+	acctSem := make(chan struct{}, 1)
+	// **先 spawn 全部 goroutine**，各自在 goroutine 内 acquire 对应池——循环内同步
+	// acquire（FIFO 阻塞）会把账号 chunk 排在分享 chunk 之后（顺序化）。
+	// 现在 share 满时循环立即推进到账号 chunk，双源真正并行（总时长 ≈ max(分享, 账号)）。
 	for _, c := range chunks {
 		wg.Add(1)
 		sem := shareSem
@@ -609,7 +614,12 @@ func (d *HybridDownloader) downloadAccountChunkMulti(ctx context.Context, dc *do
 		if serr != nil {
 			return fmt.Errorf("hybrid multi-account: no account available: %w", serr)
 		}
+		// **每账号单 worker**：同账号 chunk 串行（账号级限速，并发无叠加）；
+		// 不同账号之间并发（各自限速独立）。
+		acctSem := d.acctSem(acct.Name)
+		acctSem <- struct{}{}
 		err := d.tryMultiAccountChunk(ctx, dc, c, acct)
+		<-acctSem
 		if err == nil {
 			return nil
 		}
@@ -641,6 +651,18 @@ func (d *HybridDownloader) tryMultiAccountChunk(ctx context.Context, dc *downloa
 	}
 	d.metricsInc(func(m *HybridMetrics) { m.AccountBytesUsed.Add(c.length) }) // 账号区字节可观测
 	return nil
+}
+
+// acctSem 返回某账号的 per-account semaphore（容量 1：同账号 chunk 串行，不同账号并发）。
+func (d *HybridDownloader) acctSem(name string) chan struct{} {
+	d.acctSemMu.Lock()
+	defer d.acctSemMu.Unlock()
+	if sem, ok := d.acctSems[name]; ok {
+		return sem
+	}
+	sem := make(chan struct{}, 1)
+	d.acctSems[name] = sem
+	return sem
 }
 
 // multiAccountLink 为 chunk 获取账号直链。round-13 Critical 修复：**全部会话相关 API 调用
