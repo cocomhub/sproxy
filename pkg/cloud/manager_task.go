@@ -317,11 +317,13 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 	// 下载器类型声明（HTTP=self_verified / pikpak=local_only），不表达单次产物命中（R1-C1）。
 	if result.Integrity == downloader.ModeAuthority && result.AuthorityHash != "" {
 		m.setTaskIntegrityStatus(task, "verified")
+		m.auditIntegrityDecision(ctx, "pass", "reason", "authority")
 		return nil
 	}
 	// ② 语义校验（本地自洽）：Lookup 未命中（未知类型/无校验器装配）视为通过——
 	// 不误报 damaged（Review Focus 1）。
 	if m.integrityLookup == nil {
+		m.auditIntegrityDecision(ctx, "pass", "reason", "no_checker")
 		return nil
 	}
 	checker := m.integrityLookup(filepath.Ext(destPath))
@@ -332,15 +334,20 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 			m.logger.Warn("integrity-must-pass: 类型无校验器，跳过语义校验（覆盖范围外）",
 				"task_id", task.ID, "ext", filepath.Ext(destPath))
 		}
+		m.auditIntegrityDecision(ctx, "pass", "reason", "unknown_type", "ext", filepath.Ext(destPath))
 		return nil
 	}
+	checkerKind := checker.Kind()
 	// 内存配额治理（用户裁定 2026-10-06）：Check 前按估算内存占用排队（不足等待释放）；
 	// 单文件估算超配额 → 跳过校验标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
+	// 注：acquireCheckMem 的 Weighted 排队等待仍计入外层 download span DurMS（设计取舍：
+	// 配额竞争属下载收尾环节，此处以 integrity_check_ms 单独隔离 Check 本体耗时）。
 	est := integrity.MemEstimateOf(checker, destPath, result.Size)
 	if m.checkMemOverQuote(est) {
 		m.logger.Warn("integrity check skipped: estimate exceeds memory quota",
 			"task_id", task.ID, "ext", filepath.Ext(destPath), "estimate_bytes", est)
 		m.setTaskIntegrityStatus(task, "unverified")
+		m.auditIntegrityDecision(ctx, "skip", "reason", "mem_quota", "integrity_checker", checkerKind, "estimate_bytes", est)
 		return nil
 	}
 	release, acquired := m.acquireCheckMem(ctx, est)
@@ -348,24 +355,52 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 		// 排队期间任务取消/删除（dlCtx 取消）：校验结果无意义（finalize 会丢弃取消
 		// 结果），且跳过可避免启动 ffprobe 子进程残留；返回 nil 放行路径，最终由
 		// finalizeCompleted 按取消/删除丢弃。
+		m.auditIntegrityDecision(ctx, "skip", "reason", "cancelled", "integrity_checker", checkerKind)
 		return nil
 	}
 	defer release()
+	checkStart := time.Now()
 	rpt, err := checker.Check(ctx, destPath, result.Size)
+	checkMS := time.Since(checkStart).Milliseconds()
 	if err != nil {
 		// 校验执行本身出错（文件打开失败等）——不是语义异常，放行（不重下不误报）。
 		// video Check 的 ctx 取消（任务取消/删除）也走此路径——后续 dlCtx.Err() 判定
 		// 按取消处理，不当语义异常。
 		m.logger.Warn("integrity check execution failed, treating as passed", "task_id", task.ID, "error", err)
+		m.auditIntegrityDecision(ctx, "error", "reason", "check_exec", "integrity_checker", checkerKind, "integrity_check_ms", checkMS)
 		return nil
 	}
 	if rpt.OK {
 		m.setTaskIntegrityStatus(task, "verified")
+		m.auditIntegrityDecision(ctx, "pass", "reason", "verified", "integrity_checker", checkerKind, "integrity_check_ms", checkMS)
 		return nil
 	}
-	// 语义异常：仅当本次 checksum 与上次校验失败 attempt 一致才累计（R1-C2——「两次
-	// 本地 checksum 一致仍异常」= 源损坏/类型误判 → 永久；不同 = 瞬态损坏可恢复 → 重置
-	// 重试，不误判 damaged）。持锁防 data race（跨 attempt 保留）。
+	// 语义异常：累计「本地 checksum 一致仍异常」次数并分派 retry/release/block（跨 attempt）。
+	return m.handleIntegrityMismatch(ctx, task, result, checkerKind, checkMS)
+}
+
+// auditIntegrityDecision 记一行逐次决策审计（A5-I1）：step="integrity"，decision 显式表达
+// 本分支裁决——retry=重下 / release=放行 damaged / block=must-pass 阻断 / pass=通过 /
+// error=校验执行错误 / skip=跳过未校验（reason 区分 mem_quota 与 cancelled）。附
+// integrity_checker（校验器 Kind 类型标识）与 integrity_check_ms（语义校验单独计时——
+// 区分「下载慢」vs「校验慢」）。logger 已注入 dlCtx（executeDownload:453），nil 时
+// no-op 绝不阻塞下载（audit.From 链式安全）。
+func (m *CloudDownloadManager) auditIntegrityDecision(ctx context.Context, decision string, kv ...any) {
+	l := audit.From(ctx)
+	if l == nil {
+		return
+	}
+	args := make([]any, 0, 2+len(kv))
+	args = append(args, "decision", decision)
+	args = append(args, kv...)
+	l.Log(audit.TypeResource, audit.LevelInfo, "integrity", args...)
+}
+
+// handleIntegrityMismatch 处理语义校验失败的收敛判定：累计「本地 checksum 一致仍异常」
+// 次数（task.integritySames，跨 attempt 保留，持锁防 data race）。2 次 →
+// errIntegrityPermanent，按任务配置把逐次决策记 block（must-pass 阻断）/ release（默认
+// 放行 damaged，A5-I2）；1 次 → errIntegrityFail（重下）。
+func (m *CloudDownloadManager) handleIntegrityMismatch(ctx context.Context, task *CloudTask, result *downloader.Result, checkerKind string, checkMS int64) error {
 	m.mu.Lock()
 	if result.Checksum != "" && result.Checksum == task.integrityLastChecksum {
 		task.integritySames++
@@ -376,8 +411,16 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 	permanent := task.integritySames >= maxIntegritySames
 	m.mu.Unlock()
 	if permanent {
+		// A5-I2 语义区分：同一 errIntegrityPermanent 哨兵按任务配置分派——must-pass 阻断
+		// （任务 failed）记 block；默认放行（任务 completed+damaged）记 release。
+		if task.IntegrityMustPass {
+			m.auditIntegrityDecision(ctx, "block", "integrity_checker", checkerKind, "integrity_check_ms", checkMS)
+		} else {
+			m.auditIntegrityDecision(ctx, "release", "integrity_checker", checkerKind, "integrity_check_ms", checkMS)
+		}
 		return errIntegrityPermanent
 	}
+	m.auditIntegrityDecision(ctx, "retry", "integrity_checker", checkerKind, "integrity_check_ms", checkMS)
 	return errIntegrityFail
 }
 
@@ -611,19 +654,34 @@ func (m *CloudDownloadManager) injectTaskAudit(ctx, dlCtx context.Context, task 
 // runDownloadWithAudit 以审计 span 包裹 runRetryLoop（Begin("download") → End/Fail），
 // 返回 (result, err) 与裸调用等价。抽出收敛 executeDownload 认知复杂度（gocognit 门禁）；
 // 无审计 logger（audit.From 返回 nil）时等价于裸调用。带宽 = size / 耗时（近似，供监控）。
-// 完整性判定结果（三态 ""/verified/damaged/unverified + 重下一致次数 integrity_sames）
+// 完整性判定结果（四态 ""/verified/damaged/unverified + 重下一致次数 integrity_sames）
 // 随 End/Fail 双分支写入审计行 Meta，供完整性判定可审计（#743 下载完整性校验接入）。
 // 失败分支对 errIntegrityPermanent（两次一致仍异常）把状态归一为 damaged（must-pass 阻断
 // 路径 task.IntegrityStatus 未置，此处补全）；task.IntegrityStatus 已置则用之。runRetryLoop
 // 返回后读 task 字段——manager 内单 goroutine 下载链（setTaskIntegrityStatus/checkDownloadIntegrity
-// 的写与这里读同 goroutine，程序序 happens-before，无 data race）。
+// 的写与这里读同 goroutine，程序序 happens-before 成立）；读侧仍取 RLock 与写侧对称
+// （A5-Minor：与 SnapshotTask/saveTask 的 RLock 读一致，固化显式不变量）。
+// integrity_decision 区分 damaged 语义（A5-I2）：released = 默认放行（任务 completed）；
+// blocked = must-pass 阻断（任务 failed）。二者均以 integrity_status="damaged" 聚合，
+// 决策列消除「已释放损坏」与「强制阻断」的过滤歧义。
 func (m *CloudDownloadManager) runDownloadWithAudit(ctx, dlCtx context.Context, task *CloudTask, destPath string) (*downloader.Result, error) {
 	dlSpan := audit.From(dlCtx).Begin("download")
 	dlStart := time.Now()
 	result, downloadErr := m.runRetryLoop(ctx, dlCtx, task, destPath)
+	m.mu.RLock()
 	integrityStatus := task.IntegrityStatus
+	integritySames := task.integritySames
+	m.mu.RUnlock()
 	if integrityStatus == "" && errors.Is(downloadErr, errIntegrityPermanent) {
 		integrityStatus = "damaged"
+	}
+	integrityDecision := ""
+	if integrityStatus == "damaged" {
+		if downloadErr == nil && result != nil {
+			integrityDecision = "released"
+		} else if task.IntegrityMustPass {
+			integrityDecision = "blocked"
+		}
 	}
 	if downloadErr == nil && result != nil {
 		var bw int64
@@ -631,10 +689,12 @@ func (m *CloudDownloadManager) runDownloadWithAudit(ctx, dlCtx context.Context, 
 			bw = int64(float64(result.Size) / dur.Seconds())
 		}
 		dlSpan.End("bytes", result.Size, "bw_bps", bw,
-			"integrity_status", integrityStatus, "integrity_sames", task.integritySames)
+			"integrity_status", integrityStatus, "integrity_sames", integritySames,
+			"integrity_decision", integrityDecision)
 	} else {
 		dlSpan.Fail(sanitizeAuditError(downloadErr),
-			"integrity_status", integrityStatus, "integrity_sames", task.integritySames)
+			"integrity_status", integrityStatus, "integrity_sames", integritySames,
+			"integrity_decision", integrityDecision)
 	}
 	return result, downloadErr
 }

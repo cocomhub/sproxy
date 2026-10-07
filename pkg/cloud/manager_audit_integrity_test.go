@@ -10,6 +10,8 @@ package cloud
 // damaged——must-pass 阻断路径 task.IntegrityStatus 未置（放行标记不写），此处补全供审计。
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/testutil"
+	"golang.org/x/sync/semaphore"
 )
 
 // waitAuditRows 轮询任务审计行非空（finalizeTaskAudit 在 executeDownload 收尾时把 sink
@@ -143,5 +146,182 @@ func TestCloudTask_Audit_DownloadFail_IntegrityDamaged(t *testing.T) {
 	}
 	if got := metaInt64(meta, "integrity_sames"); got != 2 {
 		t.Fatalf("Fail 行 integrity_sames 应为 2（两次一致收敛），got %d", got)
+	}
+}
+
+// integrityDecisionRows 返回 Type=resource + Step="integrity" 的逐次决策审计行
+// （checkDownloadIntegrity 各裁决分支经 audit.From(dlCtx).Log 写入）。
+func integrityDecisionRows(rows []audit.Row) []audit.Row {
+	var out []audit.Row
+	for i := range rows {
+		if rows[i].Type == audit.TypeResource && rows[i].Step == "integrity" {
+			out = append(out, rows[i])
+		}
+	}
+	return out
+}
+
+// integrityDecisionsOf 汇总各行 decision Meta 值（供 assertHasIntegrityDecision 报错展示）。
+func integrityDecisionsOf(rows []audit.Row) []string {
+	var out []string
+	for i := range rows {
+		if m, ok := rows[i].Meta.(map[string]any); ok {
+			out = append(out, metaString(m, "decision"))
+		}
+	}
+	return out
+}
+
+// assertHasIntegrityDecision 断言逐次决策审计行中存在指定 decision 值。
+func assertHasIntegrityDecision(t *testing.T, rows []audit.Row, want string) {
+	t.Helper()
+	for i := range rows {
+		if m, ok := rows[i].Meta.(map[string]any); ok && metaString(m, "decision") == want {
+			return
+		}
+	}
+	t.Fatalf("应含 integrity 决策 decision=%q，实际 decisions: %v", want, integrityDecisionsOf(rows))
+}
+
+// findIntegrityDecisionRow 返回指定 decision 的首条决策行（无则 nil）。
+func findIntegrityDecisionRow(rows []audit.Row, decision string) *audit.Row {
+	for i := range rows {
+		if m, ok := rows[i].Meta.(map[string]any); ok && metaString(m, "decision") == decision {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+// TestCloudTask_Audit_IntegrityDecision_Released：默认放行 damaged 路径——download End 行
+// Meta 携带 integrity_status=damaged + integrity_decision=released（消除「已释放损坏」与
+// 「强制阻断」二义，A5-I2）；逐次决策审计行含 retry（attempt1 语义异常）与 release
+// （attempt2 checksum 一致仍异常 → permanent → 放行），且 release 行带 integrity_checker
+// （ImageChecker.Kind()="image/*"）与 integrity_check_ms（单独计时的校验耗时）。
+func TestCloudTask_Audit_IntegrityDecision_Released(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	srv, _ := corruptServe(t)
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.png", int64(len(corruptPNGF)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if task.Status != "completed" || task.IntegrityStatus != "damaged" {
+		t.Fatalf("前置：应 completed+damaged，got %q+%q", task.Status, task.IntegrityStatus)
+	}
+
+	rows := waitAuditRows(t, mgr, task.ID)
+	dlRow := findAuditRowByType(rows, audit.TypeDownload)
+	if dlRow == nil {
+		t.Fatalf("应含 download 行，实际 %+v", rows)
+	}
+	meta, _ := dlRow.Meta.(map[string]any)
+	if got := metaString(meta, "integrity_status"); got != "damaged" {
+		t.Fatalf("download 行 integrity_status 应为 damaged，got %q", got)
+	}
+	if got := metaString(meta, "integrity_decision"); got != "released" {
+		t.Fatalf("默认放行 download 行 integrity_decision 应为 released，got %q", got)
+	}
+	if got := metaInt64(meta, "integrity_sames"); got != 2 {
+		t.Fatalf("download 行 integrity_sames 应为 2，got %d", got)
+	}
+	// 逐次决策审计行：retry（attempt 1 语义异常）/ release（attempt 2 permanent 放行）。
+	decRows := integrityDecisionRows(rows)
+	assertHasIntegrityDecision(t, decRows, "retry")
+	assertHasIntegrityDecision(t, decRows, "release")
+	rel := findIntegrityDecisionRow(decRows, "release")
+	if rel == nil {
+		t.Fatal("应含 release 决策行")
+	}
+	rmeta, _ := rel.Meta.(map[string]any)
+	if got := metaString(rmeta, "integrity_checker"); got != "image/*" {
+		t.Fatalf("release 决策行 integrity_checker 应为 image/*，got %q", got)
+	}
+	if got := metaInt64(rmeta, "integrity_check_ms"); got < 0 {
+		t.Fatalf("release 决策行应带 integrity_check_ms（独立计时的校验耗时），got %d", got)
+	}
+}
+
+// TestCloudTask_Audit_IntegrityDecision_Blocked：must-pass 阻断实例——download Fail 行
+// Meta 把 integrity_status 归一为 damaged + integrity_decision=blocked（与 released 区分）；
+// 逐次决策行含 block（permanent + must-pass 阻断）。
+func TestCloudTask_Audit_IntegrityDecision_Blocked(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	srv, _ := corruptServe(t)
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "bad.png", int64(len(corruptPNGF)), t.Context(), "", TaskParams{Save: true, IntegrityMustPass: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if task.Status != "failed" {
+		t.Fatalf("must-pass 完整性异常应失败，got %q", task.Status)
+	}
+
+	rows := waitAuditRows(t, mgr, task.ID)
+	dlRow := findAuditRowByType(rows, audit.TypeDownload)
+	if dlRow == nil {
+		t.Fatalf("应含 download 行，实际 %+v", rows)
+	}
+	meta, _ := dlRow.Meta.(map[string]any)
+	if got := metaString(meta, "integrity_status"); got != "damaged" {
+		t.Fatalf("阻断 Fail 行 integrity_status 应归一 damaged，got %q", got)
+	}
+	if got := metaString(meta, "integrity_decision"); got != "blocked" {
+		t.Fatalf("must-pass 阻断 integrity_decision 应为 blocked，got %q", got)
+	}
+	decRows := integrityDecisionRows(rows)
+	assertHasIntegrityDecision(t, decRows, "retry")
+	assertHasIntegrityDecision(t, decRows, "block")
+}
+
+// TestCloudTask_Audit_IntegrityUnverified：内存配额超限跳过校验——download 行 End status=
+// unverified（不误判 damaged），integrity_decision 留空（非 damaged）；逐次决策行独立记录
+// decision=skip + reason=mem_quota + checker 类型（A5-I1-4 单独审计行）。
+func TestCloudTask_Audit_IntegrityUnverified(t *testing.T) {
+	t.Parallel()
+	mgr := newIntegrityTestMgr(t, 3)
+	mgr.checkMemSem = semaphore.NewWeighted(1 << 20) // 1 MiB
+	mgr.checkMemMax = 1 << 20
+	// 1000×1000 合法 PNG → EstimateMem=4MiB > 1MiB 配额 → overQuote 跳过校验 unverified。
+	payload := largePNG(t, 1000, 1000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.png", int64(len(payload)), t.Context(), "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if task.Status != "completed" || task.IntegrityStatus != "unverified" {
+		t.Fatalf("超配额应放行 completed+unverified，got %q+%q", task.Status, task.IntegrityStatus)
+	}
+
+	rows := waitAuditRows(t, mgr, task.ID)
+	dlRow := findAuditRowByType(rows, audit.TypeDownload)
+	if dlRow == nil {
+		t.Fatalf("应含 download 行，实际 %+v", rows)
+	}
+	meta, _ := dlRow.Meta.(map[string]any)
+	if got := metaString(meta, "integrity_status"); got != "unverified" {
+		t.Fatalf("download 行 integrity_status 应为 unverified，got %q", got)
+	}
+	if got := metaString(meta, "integrity_decision"); got != "" {
+		t.Fatalf("unverified 非 damaged，integrity_decision 应留空，got %q", got)
+	}
+	// 跳过路径独立审计行：skip + reason=mem_quota（A5-I1-4）。
+	decRows := integrityDecisionRows(rows)
+	skip := findIntegrityDecisionRow(decRows, "skip")
+	if skip == nil {
+		t.Fatalf("应含 skip 决策行，实际 decisions: %v", integrityDecisionsOf(decRows))
+	}
+	skmeta, _ := skip.Meta.(map[string]any)
+	if got := metaString(skmeta, "reason"); got != "mem_quota" {
+		t.Fatalf("skip 决策行 reason 应为 mem_quota，got %q", got)
+	}
+	if got := metaString(skmeta, "integrity_checker"); got != "image/*" {
+		t.Fatalf("skip 行 integrity_checker 应为 image/*，got %q", got)
 	}
 }
