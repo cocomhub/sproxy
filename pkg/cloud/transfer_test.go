@@ -1125,3 +1125,42 @@ func (n *noCapMemFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, m
 func (n *noCapMemFS) Rename(ctx context.Context, f, t string) error { return n.inner.Rename(ctx, f, t) }
 func (n *noCapMemFS) Delete(ctx context.Context, p string) error    { return n.inner.Delete(ctx, p) }
 func (n *noCapMemFS) MakeDir(ctx context.Context, p string) error   { return n.inner.MakeDir(ctx, p) }
+
+// TestTransferDone_FileMetaChunkVerify C4 落地：转存目标是被 trusted.Wrap 装饰的卷
+// （写侧已落 meta）→ 转存后 readbackVerify 走 **FileMeta 分块级校验**（Calculator 流式
+// 重算 TotalSHA256 + 逐分块 SHA256 与写侧 meta 比对），而非整文件流式单哈希。回归：
+// 内容正确 → 通过；目标被篡改（分块 SHA 变）→ 报 ErrTransferTarget（卷损坏）。
+func TestTransferDone_FileMetaChunkVerify(t *testing.T) {
+	t.Parallel()
+	inner := newMemFS()
+	wrapped := trusted.Wrap(inner, trusted.Options{})
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return wrapped, "s3", false })
+	task := &CloudTask{ID: "task-meta", Filename: "m.bin", Transfer: &TransferSpec{Volume: "vol-m"}}
+	dest := filepath.Join(t.TempDir(), "m.bin")
+	content := strings.Repeat("filemeta-chunk-verify-", 100) // ~2KB
+	_ = os.WriteFile(dest, []byte(content), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// 目标卷实现 meta.Provider（装饰器 FileMeta）→ 分块校验通过。
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: testutil.SHA256Hex([]byte(content)), Size: int64(len(content)),
+	}, nil)
+	if err != nil {
+		t.Fatalf("C4: 转存+FileMeta 分块校验应通过, got %v", err)
+	}
+	if tr == nil {
+		t.Fatal("转存应返回成功结果")
+	}
+	// 篡改目标内容（meta 桶 sidecar 不动）→ 分块校验应报卷损坏。
+	rel := "anonymous/user/task-meta/m.bin"
+	inner.files[rel] = []byte(content + "-tampered")
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: testutil.SHA256Hex([]byte(content)), Size: int64(len(content)),
+	}, nil); err == nil {
+		t.Fatal("目标被篡改（内容变但 meta 未变）→ FileMeta 分块校验应报 ErrTransferTarget")
+	} else if !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("篡改应归 ErrTransferTarget, got %v", err)
+	}
+}

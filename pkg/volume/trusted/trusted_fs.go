@@ -53,6 +53,26 @@ func Wrap(fs syncpkg.FS, opts Options) syncpkg.FS {
 // Inner 返回底层 FS（装配层需要原始能力如 Move/Copy/Link 时取用）。
 func (t *TrustedVolumeFS) Inner() syncpkg.FS { return t.inner }
 
+// FileMeta 实现 meta.Provider（读侧消费 FileMeta 的读端入口——C4 落地）：装饰器写侧
+// 已算并落盘 meta sidecar，读侧经它取回 FileMeta 供转存校验/可信卷读校验逐分块比对。
+// sidecar 缺失（未启用/旁路写/落盘失败兜底）→ 返回错误，调用方回落 Stat 直算/流式。
+func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	rc, err := t.inner.OpenRead(ctx, metaPath(rel))
+	if err != nil {
+		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", metaPath(rel), err)
+	}
+	defer rc.Close()
+	raw, rerr := io.ReadAll(rc)
+	if rerr != nil {
+		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", metaPath(rel), rerr)
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		return nil, fmt.Errorf("trusted: 解析 meta %s: %w", metaPath(rel), uerr)
+	}
+	return fm, nil
+}
+
 // ---- 能力接口回显（B-A2 修复）：装饰器必须委托底层能力，否则包装后
 // WriteIfAbsent/LocalVolume/ReserveSpace/Mover/Copier/Linker 等断言全落空——转存
 // 唯一性/配额/容量语义降级。逐一委托 inner（inner 未实现该接口时返回 false/错误

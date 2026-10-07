@@ -19,9 +19,16 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
+
+// metaProvider 是读端消费 FileMeta 的最小接口（C4/用户裁定读端接 FileMeta 为主）：
+// 目标卷实现（TrustedVolumeFS/secretdata 经 meta.Provider 断言）→ 分块级校验。
+type metaProvider interface {
+	FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error)
+}
 
 // 转存失败分类哨兵（NH-P3：统一用哨兵而非字符串匹配，避免同错双计）。
 var (
@@ -335,11 +342,21 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 
 // readbackVerify 转存写后读回卷内内容校验（与下载 checksum 一致；不一致 = 文件损坏/传输
 // 异常 → 文件异常重下载）。无参考 checksum（下载器未提供）→ 跳过（信任写盘成功）。
-// 抽离 transferOnce 以控制 gocognit（gocognit=15 门禁）。
+// **C4 落地（用户裁定读端接 FileMeta 为主）**：目标卷实现 meta.Provider（装饰器/
+// secretdata）时，读回其 FileMeta 做**分块级校验**（Calculator 流式重算 TotalSHA256 +
+// 逐分块 SHA256，与写侧落盘 meta 比对——跨信任边界静默损坏逐分块定位）；无 Provider
+// 回落整文件流式 sha256 对 result.Checksum。抽离 transferOnce 以控制 gocognit。
 func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
 	if env.result.Checksum == "" {
 		return nil
 	}
+	if verr := verifyByFileMeta(env); verr == nil {
+		return nil // 目标卷有 meta：分块级校验通过
+	} else if !errors.Is(verr, errNoProviderMeta) {
+		// meta 读/解析/校验失败（真损坏）→ 文件异常；其余回落流式。
+		return verr
+	}
+	// 无 Provider meta：流式整文件 sha256 对 result.Checksum。
 	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
 	if rerr != nil {
 		return fmt.Errorf("%w: 读回校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
@@ -352,6 +369,57 @@ func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
 	if got != env.result.Checksum {
 		return fmt.Errorf("%w: 转存后校验和不一致 %s ≠ %s（先按卷损坏重试）", ErrTransferTarget, got, env.result.Checksum)
 	}
+	return nil
+}
+
+// errNoProviderMeta 是目标卷无 meta.Provider（不可分块校验）的回落哨兵。
+var errNoProviderMeta = errors.New("transfer: 目标卷无 Provider meta，回落流式校验")
+
+// verifyByFileMeta 读端 FileMeta 分块校验（C4/用户裁定）：目标卷实现 meta.Provider →
+// 取 FileMeta，读回内容用 Calculator 流式重算 TotalSHA256 + 逐分块 SHA256 比对——
+// 跨信任边界静默损坏逐分块定位（比整文件单哈希精确）；无 Provider → errNoProviderMeta
+// 由调用方回落流式。校验通过返回 nil。
+func verifyByFileMeta(env *transferEnv) error {
+	pv, ok := env.targetFS.(metaProvider)
+	if !ok {
+		return errNoProviderMeta
+	}
+	fm, err := pv.FileMeta(env.ctx, env.rel)
+	if err != nil {
+		// meta 读失败（sidecar 缺失/未启用）→ 回落流式（不误报损坏）。
+		return errNoProviderMeta
+	}
+	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
+	if rerr != nil {
+		return fmt.Errorf("%w: 读回分块校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
+	}
+	calc, cerr := meta.NewCalculator(fm.Size, fm.ChunkSize)
+	if cerr != nil {
+		rc.Close()
+		return fmt.Errorf("transfer: 分块校验初始化: %w", cerr)
+	}
+	_, rerr2 := calc.ReadFrom(rc)
+	rc.Close()
+	if rerr2 != nil {
+		return fmt.Errorf("transfer: 分块校验读回失败: %w", rerr2)
+	}
+	got := calc.Finish()
+	if verr := meta.Validate(got); verr != nil {
+		return fmt.Errorf("%w: 转存后分块校验失败（meta 无效）: %v", ErrTransferTarget, verr)
+	}
+	if got.TotalSHA256 != fm.TotalSHA256 {
+		return fmt.Errorf("%w: 转存后内容与 meta 不一致（TotalSHA256 %s ≠ %s，卷静默损坏？）",
+			ErrTransferTarget, got.TotalSHA256, fm.TotalSHA256)
+	}
+	if len(got.Chunks) != len(fm.Chunks) {
+		return fmt.Errorf("%w: 转存后分块数不一致 %d ≠ %d", ErrTransferTarget, len(got.Chunks), len(fm.Chunks))
+	}
+	for i := range got.Chunks {
+		if got.Chunks[i].SHA256 != fm.Chunks[i].SHA256 {
+			return fmt.Errorf("%w: 转存后分块 %d 不一致（卷静默损坏？）", ErrTransferTarget, i)
+		}
+	}
+	// 分块校验通过 → 内容与写侧 meta 一致（跨信任边界无静默损坏）。
 	return nil
 }
 
