@@ -87,6 +87,37 @@ func TestLogger_Err_LevelError(t *testing.T) {
 	}
 }
 
+// TestSpan_Fail_KV 锁定 Fail 的 kv 附加键值对能力：失败 span 的 Meta 携带附加字段
+// （完整性三态等），与 End 的 kv 语义一致（bytes/bw_bps 映射字段、其余进 Meta）。
+func TestSpan_Fail_KV(t *testing.T) {
+	t.Parallel()
+	var got []Row
+	sink := &memSink{append: func(r Row) { got = append(got, r) }}
+	l, err := NewScope("task-1", ScopeOpts{Sink: sink, NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := l.Begin("download")
+	s.Fail(errors.New("boom"), "integrity_status", "damaged", "integrity_sames", 2)
+	if err := l.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 row, got %d", len(got))
+	}
+	r := got[0]
+	if r.Level != LevelError || r.Err != "boom" {
+		t.Fatalf("fail 行应为 LevelError+Err，got %+v", r)
+	}
+	meta, ok := r.Meta.(map[string]any)
+	if !ok {
+		t.Fatalf("Meta 应为 map，got %T", r.Meta)
+	}
+	if meta["integrity_status"] != "damaged" || meta["integrity_sames"] != 2 {
+		t.Fatalf("Fail kv 应进 Meta: %+v", meta)
+	}
+}
+
 // memSink 是 Sink 的内存测试实现：append 字段（可选）逐行回调，rows 保存全部已追加行。
 type memSink struct {
 	mu     sync.Mutex

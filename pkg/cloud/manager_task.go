@@ -611,18 +611,30 @@ func (m *CloudDownloadManager) injectTaskAudit(ctx, dlCtx context.Context, task 
 // runDownloadWithAudit 以审计 span 包裹 runRetryLoop（Begin("download") → End/Fail），
 // 返回 (result, err) 与裸调用等价。抽出收敛 executeDownload 认知复杂度（gocognit 门禁）；
 // 无审计 logger（audit.From 返回 nil）时等价于裸调用。带宽 = size / 耗时（近似，供监控）。
+// 完整性判定结果（三态 ""/verified/damaged/unverified + 重下一致次数 integrity_sames）
+// 随 End/Fail 双分支写入审计行 Meta，供完整性判定可审计（#743 下载完整性校验接入）。
+// 失败分支对 errIntegrityPermanent（两次一致仍异常）把状态归一为 damaged（must-pass 阻断
+// 路径 task.IntegrityStatus 未置，此处补全）；task.IntegrityStatus 已置则用之。runRetryLoop
+// 返回后读 task 字段——manager 内单 goroutine 下载链（setTaskIntegrityStatus/checkDownloadIntegrity
+// 的写与这里读同 goroutine，程序序 happens-before，无 data race）。
 func (m *CloudDownloadManager) runDownloadWithAudit(ctx, dlCtx context.Context, task *CloudTask, destPath string) (*downloader.Result, error) {
 	dlSpan := audit.From(dlCtx).Begin("download")
 	dlStart := time.Now()
 	result, downloadErr := m.runRetryLoop(ctx, dlCtx, task, destPath)
+	integrityStatus := task.IntegrityStatus
+	if integrityStatus == "" && errors.Is(downloadErr, errIntegrityPermanent) {
+		integrityStatus = "damaged"
+	}
 	if downloadErr == nil && result != nil {
 		var bw int64
 		if dur := time.Since(dlStart); dur > 0 && result.Size > 0 {
 			bw = int64(float64(result.Size) / dur.Seconds())
 		}
-		dlSpan.End("bytes", result.Size, "bw_bps", bw)
+		dlSpan.End("bytes", result.Size, "bw_bps", bw,
+			"integrity_status", integrityStatus, "integrity_sames", task.integritySames)
 	} else {
-		dlSpan.Fail(sanitizeAuditError(downloadErr))
+		dlSpan.Fail(sanitizeAuditError(downloadErr),
+			"integrity_status", integrityStatus, "integrity_sames", task.integritySames)
 	}
 	return result, downloadErr
 }

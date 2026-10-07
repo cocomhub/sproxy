@@ -197,8 +197,9 @@ func (s *Span) End(kv ...any) {
 	l.appendRow(&r)
 }
 
-// Fail 以错误收尾 span：级别置为 LevelError 并携带 err，落库。
-func (s *Span) Fail(err error) {
+// Fail 以错误收尾 span：级别置为 LevelError 并携带 err，落库。kv 为附加键值对
+// （与 End 同语义：bytes/bw_bps 映射到对应字段，其余汇聚进 Meta；可为空）。
+func (s *Span) Fail(err error, kv ...any) {
 	if s == nil || s.l == nil {
 		return
 	}
@@ -213,6 +214,7 @@ func (s *Span) Fail(err error) {
 		DurMS:   time.Since(s.start).Milliseconds(),
 	}
 	applyKV(&r, s.kv)
+	applyKV(&r, kv)
 	l.appendRow(&r)
 }
 
