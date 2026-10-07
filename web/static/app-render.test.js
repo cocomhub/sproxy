@@ -239,6 +239,11 @@ test('cloudDownloadFormHtml includes transfer volume selector + three behaviors'
   assert.match(html, /name="transfer-volume"/);
   assert.match(html, /name="save"/);
   assert.match(html, /name="download-local"/);
+  // integrity_must_pass 复选框默认不勾（无 checked 属性），样式走 var(--…)（暗色兼容）。
+  assert.match(html, /name="integrity-must-pass"/);
+  assert.ok(!/name="integrity-must-pass"\s+checked/.test(html), 'integrity-must-pass 默认不勾选');
+  assert.match(html, /var\(--text-primary\)/);
+  assert.match(html, /var\(--bg-container\)/);
   assert.match(html, /vault/);
 });
 

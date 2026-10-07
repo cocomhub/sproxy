@@ -1007,9 +1007,11 @@
     html += '<input type="text" id="transfer-path" name="transfer-path" placeholder="可选，留空自动派生" style="flex:1;min-width:180px;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;font-family:monospace;background:var(--bg-container);color:var(--text-primary);">';
     html += '</div>';
     // 三行为复选框（save 默认勾选 = 保留服务端副本，与后端 save 缺省 true 零回归一致）
+    // + integrity-must-pass（默认不勾 = 完整性校验失败默认放行标记，对齐客户端 must-pass 行为）
     html += '<div style="display:flex;gap:16px;flex-wrap:wrap;">';
     html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;"><input type="checkbox" name="save" checked>保留服务端副本</label>';
     html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;"><input type="checkbox" name="download-local">下载到本地</label>';
+    html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;"><input type="checkbox" name="integrity-must-pass">强制完整性校验</label>';
     html += '</div>';
     html += '</div>';
     return html;

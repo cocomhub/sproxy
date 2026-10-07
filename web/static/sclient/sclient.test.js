@@ -1287,6 +1287,31 @@ test('cloud 任务映射（create/batch/list/get/cancel/delete/resume/archive）
   assert.deepStrictEqual(jsonBody(core.calls[8].opts.bodyBytes), { task_ids: ['a', 'b'] });
 });
 
+// cloud 四行为透传：integrityMustPass 仅在 true 时发送 JSON 键 integrity_must_pass
+// （snake_case）；false/未传不发 = 后端默认不强制，既有调用零回归。
+test('cloud 任务 integrityMustPass 透传（true 发送 / false 与缺省不发）', async () => {
+  const core = makeMockCore([
+    okResp({ id: 't1' }),
+    okResp({ id: 't2' }),
+    okResp({ tasks: [] }),
+    okResp({ id: 'g1' }),
+    okResp({ id: 't0' }),
+  ]);
+  const api = makeApi(core);
+  // true → integrity_must_pass: true（三入口 createDownload/createBatch/createGroup）。
+  await api.cloud.createDownload('http://x/a', 'a.jpg', { integrityMustPass: true });
+  assert.strictEqual(jsonBody(core.calls[0].opts.bodyBytes).integrity_must_pass, true);
+  await api.cloud.createBatch([{ url: 'http://x/b', filename: 'b.jpg' }], { integrityMustPass: true });
+  assert.strictEqual(jsonBody(core.calls[1].opts.bodyBytes).integrity_must_pass, true);
+  await api.cloud.createGroup('grp', [{ url: 'http://x/c', filename: 'c.jpg' }], { integrityMustPass: true });
+  assert.strictEqual(jsonBody(core.calls[2].opts.bodyBytes).integrity_must_pass, true);
+  // false / 缺省 → 不发（JSON 键不存在 = 后端默认，零回归）。
+  await api.cloud.createDownload('http://x/d', 'd.jpg', { integrityMustPass: false });
+  assert.ok(!('integrity_must_pass' in jsonBody(core.calls[3].opts.bodyBytes)));
+  await api.cloud.createDownload('http://x/e', 'e.jpg');
+  assert.ok(!('integrity_must_pass' in jsonBody(core.calls[4].opts.bodyBytes)));
+});
+
 test('cloud 组映射（create/list/get/cancel/delete/resume/archive）', async () => {
   const core = makeMockCore([
     okResp({ id: 'g1', total_tasks: 1 }),

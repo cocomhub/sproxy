@@ -9,8 +9,9 @@
  * 端点语义对齐 server handlers（cloud_download_handler.go / cloud_archive_handler.go）：
  *   - createDownload(url, filename, opts)  POST /api/cloud/download
  *   - createBatch(urls, opts)            POST /api/cloud/download/batch  urls=[{url,filename}]
- *   opts 可选，透传三行为（均缺省不发送 = 零回归）：transfer:{volume,path}、
- *   save:bool、downloadLocal:bool（JSON 键 download_local）。
+ *   opts 可选，透传四行为（均缺省不发送 = 零回归）：transfer:{volume,path}、
+ *   save:bool、downloadLocal:bool（JSON 键 download_local）、integrityMustPass:bool
+ *   （JSON 键 integrity_must_pass）。
  *   - listTasks(opts)                 GET  /api/cloud/tasks?status=&offset=&limit=
  *   - getTask(id)                    GET  /api/cloud/tasks/{id}
  *   - cancelTask(id)                 POST /api/cloud/tasks/{id}/cancel
@@ -79,9 +80,11 @@
     }
 
     // ---- 任务 ----
-    // 三行为透传（对齐后端 TransferSpec/TaskParams，三行为正交）：opts.transfer
+    // 三行为透传（对齐后端 TransferSpec/TaskParams，四行为正交）：opts.transfer
     // （{volume,path}，缺省 undefined 不发送 = 不转存）、opts.save（布尔）、
-    // opts.downloadLocal（布尔→JSON 键 download_local）。啥都不传 = 既有行为零回归。
+    // opts.downloadLocal（布尔→JSON 键 download_local）、opts.integrityMustPass
+    // （布尔→JSON 键 integrity_must_pass，false/undefined 不发送 = 后端默认不强制）。
+    // 啥都不传 = 既有行为零回归。
     function mergeBehaviorOpts(data, opts) {
       const o = opts || {};
       const t = o.transfer;
@@ -92,6 +95,7 @@
       if (o.save === true) data.save = true;
       if (o.save === false) data.save = false;
       if (o.downloadLocal === true) data.download_local = true;
+      if (o.integrityMustPass === true) data.integrity_must_pass = true;
     }
 
     function createDownload(url, filename, opts) {

@@ -2477,13 +2477,15 @@ async function showCloudDownloadPreview(action) {
 }
 
 // collectCloudBehavior 读取云端下载预览「三行为」配置（转存目标卷/路径 + save +
-// download_local 复选框）→ {transfer:{volume,path}, save, downloadLocal}。
-// 元素缺省/未选时返回 {}（三行为不发 → 后端空语义 = 不转存，既有调用零回归）。
+// download_local + integrity_must_pass 复选框）→ {transfer:{volume,path}, save,
+// downloadLocal, integrityMustPass}。元素缺省/未选时返回 {}（三行为不发 → 后端空语义
+// = 不转存/不强制完整性，既有调用零回归）。
 function collectCloudBehavior() {
   const volEl = document.querySelector('.cloud-behavior-form [name="transfer-volume"]');
   const pathEl = document.querySelector('.cloud-behavior-form [name="transfer-path"]');
   const saveEl = document.querySelector('.cloud-behavior-form [name="save"]');
   const dlEl = document.querySelector('.cloud-behavior-form [name="download-local"]');
+  const impEl = document.querySelector('.cloud-behavior-form [name="integrity-must-pass"]');
   const opts = {};
   if (volEl && volEl.value) {
     opts.transfer = { volume: volEl.value };
@@ -2491,6 +2493,7 @@ function collectCloudBehavior() {
   }
   if (saveEl) opts.save = saveEl.checked;
   if (dlEl) opts.downloadLocal = dlEl.checked;
+  if (impEl) opts.integrityMustPass = impEl.checked;
   return opts;
 }
 
