@@ -294,6 +294,12 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	// 崩溃恢复：读 manifest，**校验源身份一致**（C4：同一分享/文件才跳过已完成）。
 	// manifest 记录在 destPath+".hybrid"（与临时文件同目录），恢复时跳过已完成 chunk。
 	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
+	// 两文件配套出现：**开始下载立刻创建 manifest**（空 Chunks）——即使首 chunk 尚未
+	// 完成、立刻中断，.hybrid.downloading 与 .hybrid 也成对存在（直观可续）。
+	// 已有同源 manifest（崩溃续传）则保留原样。
+	if manifest == nil {
+		manifest = d.initManifest(dc, shareEnd)
+	}
 	// 续传进度基准：已完成 chunk 字节预置进 prog（进度从已完成处继续，不从头计数）。
 	if manifest != nil {
 		var done int64
@@ -1047,6 +1053,20 @@ func (m *hybridManifest) Has(offset int64) bool {
 	}
 	_, ok := m.Chunks[offset]
 	return ok
+}
+
+// initManifest 创建并落盘初始 manifest（空 Chunks + 源身份）——
+// 下载开始即与 .hybrid.downloading 配套出现，中断/立即退出也两个文件都在。
+func (d *HybridDownloader) initManifest(dc *downloadCtx, shareEnd int64) *hybridManifest {
+	m := &hybridManifest{
+		Total: dc.currentTotal, ShareEnd: shareEnd,
+		Chunks: map[int64]int64{},
+		Source: manifestSource{ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size},
+	}
+	if data, err := json.Marshal(m); err == nil {
+		_ = os.WriteFile(manifestPath(dc.destPath), data, 0o644)
+	}
+	return m
 }
 
 // markChunkDone 原子记录 chunk 完成（追加到 manifest；首次记录源身份）。

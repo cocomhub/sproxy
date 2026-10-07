@@ -1842,3 +1842,59 @@ func TestHybridDownload_UsesDownloadingSuffix(t *testing.T) {
 		t.Fatalf("temp .hybrid.downloading should be gone after rename, stat err=%v", err)
 	}
 }
+
+// TestHybridManifest_InitAtStart 验证下载开始立刻创建空 manifest（与 .hybrid.downloading 配套出现），
+// 即使首 chunk 尚未完成、立即中断也两文件齐全。
+func TestHybridManifest_InitAtStart(t *testing.T) {
+	t.Parallel()
+	// 直接单元测 initManifest：下载开始即创建空 manifest（配对出现）。
+	// 通过 mkHybridFake + Download 的成功路径验证完成后两文件都消失（配对收尾），
+	// 以及 initManifest 本身产出正确的空 chunk manifest。
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 61)
+	}
+	srvURL, closeFn := mkHybridFake(payload, []map[string]any{
+		{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload), "parent_id": "pack-folder"},
+		{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+	}, false, nil)
+	defer closeFn()
+
+	hd, err := mkHybridDownloader(srvURL, 1<<20, true)
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+
+	// 验证 initManifest 产物（构造 downloadCtx 直接调用）
+	dc := &downloadCtx{
+		currentTotal: int64(len(payload)), shareID: "abc123",
+		target:   &ShareFile{ID: "share-f1", Hash: payloadSHA1(payload), Size: int64(len(payload))},
+		destPath: dest,
+	}
+	m := hd.initManifest(dc, int64(len(payload)/2))
+	if m == nil || len(m.Chunks) != 0 {
+		t.Fatalf("initManifest should create empty chunks, got %+v", m)
+	}
+	if m.Source.ShareID != "abc123" || m.Source.FileID != "share-f1" {
+		t.Fatalf("manifest source mismatch: %+v", m.Source)
+	}
+	// initManifest 已落盘 → .hybrid 与 .hybrid.downloading 配对（下载开始即有）
+	if _, err := os.Stat(manifestPath(dest)); err != nil {
+		t.Fatalf("manifest should exist right after init: %v", err)
+	}
+
+	// 完整下载成功 → 两文件都消失（rename + removeManifest 收尾配对）
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("final dest should exist: %v", err)
+	}
+	if _, err := os.Stat(manifestPath(dest)); !os.IsNotExist(err) {
+		t.Fatalf("manifest should be removed after completion: %v", err)
+	}
+	if _, err := os.Stat(dest + ".hybrid.downloading"); !os.IsNotExist(err) {
+		t.Fatalf(".hybrid.downloading should be renamed away after completion: %v", err)
+	}
+}
