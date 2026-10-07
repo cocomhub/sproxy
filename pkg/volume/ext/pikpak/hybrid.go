@@ -245,6 +245,9 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 		shareID: shareID, target: target, destPath: destPath, onProgress: onProgress,
 		accounted: make(map[string]string),
 	}
+	// 续传进度基准：读 .hybrid manifest 累计已完成 chunk 字节，预置 prog——
+	// 恢复时已完成 chunk 被 filterChunks 跳过，若 prog 从 0 起进度回调会从头计数
+	//（实际续传是生效的，只是显示从 0 开始）。预置后进度从已完成处继续。
 	if _, tok := parseShareIDWithToken(source); tok != "" {
 		dc.shareToken = tok // round-11：token 分享的 re-resolve 需带 token
 	}
@@ -291,6 +294,14 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	// 崩溃恢复：读 manifest，**校验源身份一致**（C4：同一分享/文件才跳过已完成）。
 	// manifest 记录在 destPath+".hybrid"（与临时文件同目录），恢复时跳过已完成 chunk。
 	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
+	// 续传进度基准：已完成 chunk 字节预置进 prog（进度从已完成处继续，不从头计数）。
+	if manifest != nil {
+		var done int64
+		for _, ln := range manifest.Chunks {
+			done += ln
+		}
+		dc.prog.Store(done)
+	}
 	if err := d.runChunks(ctx, dc, chunks, shareEnd, manifest); err != nil {
 		// G4：失败路径也清理已转存副本（AutoDelete 语义——失败任务不留 6GB 空间占用）。
 		dc.lease.Release(ctx)
