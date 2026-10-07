@@ -1807,3 +1807,38 @@ func TestHybridDownload_OwnedRestore_NotDeleted(t *testing.T) {
 		t.Fatalf("owned（源文件已在网盘）不得被 AutoDelete 删除: batchDelete=%d", batchDelete)
 	}
 }
+
+// TestHybridDownload_UsesDownloadingSuffix 验证写盘目标为 dest+".hybrid.downloading"，
+// 成功后 rename 到最终 destPath（未完成/中断不留看似完整文件）。
+func TestHybridDownload_UsesDownloadingSuffix(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 67)
+	}
+	srvURL, closeFn := mkHybridFake(payload, []map[string]any{
+		{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload), "parent_id": "pack-folder"},
+		{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+	}, false, nil)
+	defer closeFn()
+	hd, err := mkHybridDownloader(srvURL, 1<<20, true)
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	// 最终文件存在
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Error("content mismatch")
+	}
+	// 临时文件已 rename（不存在）
+	if _, err := os.Stat(dest + ".hybrid.downloading"); !os.IsNotExist(err) {
+		t.Fatalf("temp .hybrid.downloading should be gone after rename, stat err=%v", err)
+	}
+}

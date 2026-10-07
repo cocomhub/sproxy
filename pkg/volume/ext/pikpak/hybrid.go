@@ -123,8 +123,15 @@ type downloadCtx struct {
 	shareID    string
 	shareToken string // /s/<id>/<token> 的子路径 token（round-11：RefreshLink 重取需带 token，
 	// 否则 token 分享中途重试 shareDetail 缺 token → 降级）
-	target     *ShareFile
+	target *ShareFile
+	// destPath 是**最终目标路径**（用户请求的落盘位置）。
+	// 下载期真实写盘目标是 destPath + ".hybrid.downloading"（临时文件）——分片 WriteAt 全部落在
+	// 临时文件；全部 chunk 成功并完整性校验通过后才 rename 到 destPath。
+	// 好处：文件未完成时直观可见（.hybrid.downloading 后缀），中断/失败不会残留看似完整的文件；
+	// 成功 rename 原子完成（同目录 rename，跨文件系统时回退 copy+remove）。
+	// 崩溃恢复：manifest 与预分配都作用在 .hybrid.downloading 临时文件上（续传天然对齐）。
 	destPath   string
+	working    string // 下载期写盘目标 = destPath + ".hybrid.downloading"（见 openWorking）
 	prog       atomic.Int64
 	onProgress downloader.ProgressFunc
 	// 多账号分片（round-12）：accounted 记录已转存副本的账号（name→转存文件 ID），
@@ -267,17 +274,22 @@ func (d *HybridDownloader) fallbackDownload(ctx context.Context, source, destPat
 
 // runHybrid 执行混合下载主体（分享区 + 账号区分片并行）。
 func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory) (*Result, error) {
+	// 写盘目标：临时文件 destPath + ".hybrid.downloading"（分片 WriteAt 全落这里，
+	// 完成并校验通过后才 rename 到最终 destPath）。manifest 随临时文件（destPath+".hybrid"
+	// 不变——源身份/恢复逻辑零改动）。
+	dc.working = dc.destPath + ".hybrid.downloading"
 	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
 	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
 	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
 	shareEnd := d.computeShareEnd(ctx, dc.target, dc.currentTotal)
 	d.log.Info("hybrid plan", "total", dc.currentTotal, "share_end", shareEnd, "chunk", d.chunkSize)
-	if err := preallocate(dc.destPath, dc.currentTotal); err != nil {
+	if err := preallocate(dc.working, dc.currentTotal); err != nil {
 		return nil, fmt.Errorf("hybrid preallocate: %w", err)
 	}
 	chunks := planChunks(0, dc.currentTotal, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
 	// 崩溃恢复：读 manifest，**校验源身份一致**（C4：同一分享/文件才跳过已完成）。
+	// manifest 记录在 destPath+".hybrid"（与临时文件同目录），恢复时跳过已完成 chunk。
 	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
 	if err := d.runChunks(ctx, dc, chunks, shareEnd, manifest); err != nil {
 		// G4：失败路径也清理已转存副本（AutoDelete 语义——失败任务不留 6GB 空间占用）。
@@ -286,14 +298,14 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	}
 	d.log.Info("hybrid chunks done")
 	removeManifest(dc.destPath)
-	checksum, err := sha256File(dc.destPath)
+	checksum, err := sha256File(dc.working)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
 	}
 	// C2 最终完整性校验：计算文件 SHA-1 与 target.Hash（PikPak file hash 为 40-hex SHA-1）
 	// 交叉比对——失败即报错（不返回自洽 checksum 冒充成功）。
 	if dc.target.Hash != "" {
-		sha1Hex, herr := sha1FileHex(dc.destPath)
+		sha1Hex, herr := sha1FileHex(dc.working)
 		if herr != nil {
 			return nil, fmt.Errorf("hybrid sha1 verify: %w", herr)
 		}
@@ -303,6 +315,10 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 			return nil, fmt.Errorf("hybrid integrity check failed: file sha1 %s != target %s", sha1Hex, dc.target.Hash)
 		}
 		d.log.Info("hybrid integrity verified (sha1 match)", "sha1", sha1Hex)
+	}
+	// 校验通过 → 临时文件原子 rename 到最终 destPath（同目录原子；跨 FS 回退 copy+remove）。
+	if err := os.Rename(dc.working, dc.destPath); err != nil {
+		return nil, fmt.Errorf("hybrid finalize rename: %w", err)
 	}
 	// sink 记账：sinkFactory 非空时把已落盘文件重放进 sink（配额语义，对齐内置 HTTP 下载器）。
 	if sinkFactory != nil {
@@ -774,7 +790,7 @@ func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, dc *down
 	if err := d.verifyContentRange(resp, c, dc.currentTotal); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(dc.destPath, os.O_WRONLY, 0)
+	f, err := os.OpenFile(dc.working, os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}

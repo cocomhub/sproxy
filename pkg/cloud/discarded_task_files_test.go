@@ -143,3 +143,22 @@ func testDiscardNonEmptyDir(t *testing.T) {
 		t.Fatalf(".partial 目录应仍存在: %v", err)
 	}
 }
+
+// TestDiscardHybridResiduals 验证 hybrid 残留（.hybrid.downloading + .hybrid）纳入清理。
+func TestDiscardHybridResiduals(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "f.mp4")
+	writeTestFile(t, dest, 100)
+	writeTestFile(t, dest+".hybrid.downloading", 50)
+	writeTestFile(t, dest+".hybrid", 20)
+
+	want := int64(170)
+	if got := removeDiscardedTaskFiles(dest, os.Remove); got != want {
+		t.Fatalf("回拨字节=%d want %d", got, want)
+	}
+	for _, p := range []string{dest, dest + ".hybrid.downloading", dest + ".hybrid"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s 应已从磁盘消失: %v", p, err)
+		}
+	}
+}

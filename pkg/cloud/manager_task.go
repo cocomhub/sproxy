@@ -224,7 +224,15 @@ func removeWithRetry(remove func() error) error {
 // remove 以参数注入（生产传 removeTaskFile）：os.Remove 的失败无法在测试里跨平台确定性制造。
 func removeDiscardedTaskFiles(destPath string, remove func(string) error) int64 {
 	var removed int64
-	for _, path := range []string{destPath, destPath + ".partial", destPath + ".partial.etag"} {
+	// .partial/.partial.etag：内置 HTTP 下载器断点续传残留。
+	// .hybrid.downloading/.hybrid：PikPak hybrid 分片下载临时文件 + manifest 残留。
+	for _, path := range []string{
+		destPath,
+		destPath + ".partial",
+		destPath + ".partial.etag",
+		destPath + ".hybrid.downloading",
+		destPath + ".hybrid",
+	} {
 		if n, gone := removeDiscardedFile(path, remove); gone {
 			removed += n
 		}

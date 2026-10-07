@@ -71,8 +71,11 @@ func TestHybridDownload_ResumeKeepsCompletedChunks(t *testing.T) {
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 
-	// ① 模拟"崩溃后"状态：dest 已含 chunk 0 数据（已完成块），manifest 记录 chunk 0 done。
-	f, _ := os.Create(dest)
+	// ① 模拟"崩溃后"状态：临时文件 dest+".hybrid.downloading" 已含 chunk 0 数据
+	// （完成块），manifest 记录 chunk 0 done。**注意**：现在下载期写盘目标已是
+	// 临时文件（destPath+".hybrid.downloading"），崩溃恢复也作用在该临时文件上。
+	working := dest + ".hybrid.downloading"
+	f, _ := os.Create(working)
 	_, _ = f.Write(payload[:chunkLen])
 	_ = f.Truncate(int64(len(payload)))
 	f.Close()
