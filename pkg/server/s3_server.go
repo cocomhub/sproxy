@@ -27,9 +27,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/volume"
-
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // s3ServiceName 是 SigV4 签名服务名（S3）。
@@ -327,11 +327,46 @@ func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key str
 	case http.MethodGet:
 		h.s3GetObject(w, root, rel)
 	case http.MethodPut:
+		// M1 修复：s3PutObject 写后补建 meta sidecar（旁路写「到达即建」不变量——
+		// 与 files.Service 上传一致；失败 Warn 兜底不阻断主写）。
 		h.s3PutObject(w, root, rel, body)
+		h.s3WriteMetaAfter(r, owner, root, rel)
 	case http.MethodDelete:
+		// M1 修复：删除联动清理 meta（与 files.Service delete 一致；disable 后存量也清理）。
 		h.s3DeleteObject(w, root, rel)
+		h.s3DeleteMetaAfter(r, owner, root, rel)
 	default:
 		http.Error(w, "s3: 方法不支持", http.StatusMethodNotAllowed)
+	}
+}
+
+// s3WriteMetaAfter 在 s3 PUT 成功后补建 meta sidecar（本地旁路写：root 直写不经
+// files.Service，故此处补「到达即建」——与上传 writeFileSettle 同源）。失败 Warn 兜底
+// （读路径直算），不阻断对象写入成功。
+func (h *Handlers) s3WriteMetaAfter(r *http.Request, owner string, root *storage.Root, rel string) {
+	if h.trustedDisabled() {
+		return // disable 只停新建（存量清理仍走删除联动）
+	}
+	if mErr := (filesMetaPolicy{h: h}).WriteMeta(r.Context(), owner, root, rel); mErr != nil {
+		h.logger.Warn("s3 写后 meta 落盘失败（读路径直算兜底）", "key", rel, "error", mErr)
+	}
+}
+
+// s3DeleteMetaAfter 在 s3 DELETE 成功后清理配套 meta（防孤儿 + 释放 meta 桶配额）。
+// 不闸 trustedDisabled——disable 只停新建不停清理（C5 语义与 files.Service 一致）。
+func (h *Handlers) s3DeleteMetaAfter(r *http.Request, owner string, root *storage.Root, rel string) {
+	mrel := meta.MetaPath(rel)
+	metaSize := int64(0)
+	if e, serr := root.Stat(mrel); serr == nil && e != nil {
+		metaSize = e.Size()
+	}
+	if rerr := root.Remove(mrel); rerr != nil && !os.IsNotExist(rerr) {
+		h.logger.Warn("s3 删除 meta sidecar 失败", "key", rel, "error", rerr)
+	}
+	if metaSize > 0 {
+		if scope := h.quotaScopeFor(owner, mrel); scope != nil {
+			scope.ReleaseUsage(metaSize)
+		}
 	}
 }
 
