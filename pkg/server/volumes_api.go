@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -606,6 +607,11 @@ func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quot
 	if fromPool := h.volSet.Pool(mc.fromVol); fromPool != nil {
 		fromPool.ReleaseCommitted(written)
 	}
+	// M3 修复：跨卷 move 成功后在目标卷**重建 meta sidecar**、删除源卷 meta 并释放
+	// 其配额——否则源卷留孤儿 .meta（磁盘+配额双泄漏）、目标卷文件无 sidecar。
+	// 重建复用 filesMetaPolicy.WriteMeta（与上传到达即建同一入口，覆盖差分 + 配额记账）；
+	// 源侧删除 + ReleaseUsage 与单文件删除联动同构。软删/并发删除路径不在此（moveCommitConcurrentDeleted）。
+	h.moveMetaAfterVolumeMove(mc)
 
 	h.RecordAudit(mc.r.Context(), AuditEvent{
 		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
@@ -613,6 +619,30 @@ func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quot
 	})
 	h.logger.Info("跨卷移动成功", "file_name", mc.remotePath, "from", mc.fromVol, "to", mc.toVol)
 	return moveOKResp(fmt.Sprintf("文件已移动: %s (%s → %s)", mc.remotePath, mc.fromVol, mc.toVol))
+}
+
+// moveMetaAfterVolumeMove 跨卷移动后 meta sidecar 重建/清理：目标卷重建（复用
+// filesMetaPolicy.WriteMeta 覆盖差分 + 配额记账）、源卷删除 meta + 释放 meta 桶配额。
+func (h *Handlers) moveMetaAfterVolumeMove(mc *moveFileCtx) {
+	if h.trustedDisabled() {
+		return
+	}
+	// 目标卷重建（WriteMeta 幂等覆盖：同 rel 目标已有 meta 则 Adjust 差分；无则新 Commit）。
+	if mErr := h.filesMetaWriteAfterRestore(mc.toRoot, mc.owner, mc.rel); mErr != nil {
+		h.logger.Warn("跨卷移动后目标卷 meta 重建失败（读路径直算兜底）", "file_name", mc.remotePath, "error", mErr)
+	}
+	// 源卷删除 meta + 释放 meta 桶配额（与单文件删除联动同构）。
+	srcMeta := meta.MetaPath(mc.rel)
+	metaSize := int64(0)
+	if e, serr := mc.fromRoot.Stat(srcMeta); serr == nil && e != nil {
+		metaSize = e.Size()
+	}
+	_ = mc.fromRoot.Remove(srcMeta)
+	if metaSize > 0 {
+		if scope := h.quotaScopeFor(mc.owner, srcMeta); scope != nil {
+			scope.ReleaseUsage(metaSize)
+		}
+	}
 }
 
 // rebalanceFileEntry 是 rebalance 候选文件（user 桶内，递归收集）。
