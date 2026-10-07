@@ -212,7 +212,11 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// store 落盘（重名拒绝）。
-	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
+	// Owner 一并设置（C4 CRITICAL 复测补直）：owner 以参数为准，使本链产出的 UserVolume
+	// 同时携带正确 Owner 与 ACL。config 写回（下方 AppendVolume(uv)）已改以 ACL.Owners 为
+	// 准（见 config_writer.volumeEntryNode），Owner 字段是冗余保底（store.Create 内部亦按
+	// owner 参数回填，二者一致），供任何以 UserVolume.Owner 为键的消费方读取不改。
+	uv := UserVolume{Name: req.Name, Type: req.Type, Owner: owner, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
 	if err := h.userVolumes.Create(owner, uv); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 		return

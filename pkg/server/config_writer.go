@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 )
@@ -136,18 +137,38 @@ func volumeEntryNode(v UserVolume) (*yaml.Node, error) {
 			return nil, err
 		}
 	}
-	// C4 CRITICAL（2026-10-07 真实浏览器复测）：运行时建卷（POST /api/volumes/user）注入
-	// owner-only ACL（Mode=Allow + 单 owner）使键空间为独享 `user/<rel>`；若写回不落 ACL，
-	// 重启后 config 声明卷 ACL 零值（parseVolumeACL 归 deny）→ Shared()==true → 键空间翻转
-	// 成 `<owner>/user/<rel>` → 旧数据不可见。故有 Owner 的 UserVolume 必须补写 owner-only
-	// ACL 段（对齐 config 卷 ACL 结构 VolumeACLConfig：mode allow + owners [<owner>]）。
-	// Owner 空（config 声明卷无 owner）→ 不写 acl 段（保持现状，零回归）。
-	if v.Owner != "" {
-		if err := put("acl", VolumeACLConfig{Mode: VolumeACLAllow, Owners: []string{v.Owner}}); err != nil {
+	// C4 CRITICAL（2026-10-07 真实浏览器复测第二回）：运行时建卷（POST /api/volumes/user）
+	// 注入 owner-only ACL（Mode=Allow + 单 owner）使键空间为独享 `user/<rel>`；若写回不落
+	// ACL，重启后 config 声明卷 ACL 零值（parseVolumeACL 归 deny）→ Shared()==true → 键空间
+	// 翻转成 `<owner>/user/<rel>` → 旧数据不可见。**驱动条件以 ACL.Owners 为准，不依赖
+	// UserVolume.Owner**：真实建卷链 UserVolume.Owner 恒空（store.Create(owner,uv) 内部才补
+	// owner，写回前的 uv 不携带 Owner）——复测证实以 Owner 字段驱动导致修复分支永不触发，
+	// 且既有测试手填 Owner 绕过了调用链。无 ACL.Owners（config 声明卷无 owner）→ 不写 acl 段
+	// （保持现状，零回归）。
+	if owners := sortedACLOwners(v.ACL.Owners); len(owners) > 0 {
+		mode := VolumeACLMode(v.ACL.Mode)
+		if mode == "" {
+			mode = VolumeACLAllow
+		}
+		if err := put("acl", VolumeACLConfig{Mode: mode, Owners: owners}); err != nil {
 			return nil, err
 		}
 	}
 	return n, nil
+}
+
+// sortedACLOwners 把 ACL.Owners 集合排序为确定性 owner 列表（写回 config 用：
+// map 遍历顺序不确定，排序保证写回稳定、测试可断言）。
+func sortedACLOwners(m map[string]struct{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(m))
+	for o := range m {
+		names = append(names, o)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // nameOfVolumeEntry 返回 volumes 序列条目的 name 字段（非 mapping/无 name → ""）。
