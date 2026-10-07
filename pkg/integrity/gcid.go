@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
+	"strings"
 )
 
 // GCIDCandidates 是 PikPak GCID 复算的候选分块集合（字节），供外部（如 pikpak 下载器）
@@ -135,4 +136,25 @@ func RecomputeGCIDAll(path string, candidates []int64) ([]string, error) {
 		out = append(out, hex.EncodeToString(outer.Sum(nil)))
 	}
 	return out, nil
+}
+
+// VerifyGCID 对文件复算 GCID 并与目标官方 hash 比对（通用校验入口）。
+// 任一候选分块命中（官方分块粒度未知，全候选比对）→ 返回 (true, nil)；
+// 全候选均未命中 → (false, nil)；复算失败（文件读错）→ (false, err)。
+// **所有下载器（PikpakDownloader / HybridDownloader / 未来扩展）共用此入口**，
+// 避免 GCID 算法/候选集合多处维护。
+func VerifyGCID(path string, candidates []int64, targetHash string) (bool, error) {
+	if targetHash == "" || path == "" {
+		return false, nil // 无权威 hash/无文件：无法校验
+	}
+	gcids, err := RecomputeGCIDAll(path, candidates)
+	if err != nil {
+		return false, err
+	}
+	for _, gcid := range gcids {
+		if strings.EqualFold(gcid, targetHash) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

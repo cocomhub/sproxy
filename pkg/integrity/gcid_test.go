@@ -174,3 +174,32 @@ func TestRecomputeGCIDAll_TailBlock(t *testing.T) {
 		t.Fatalf("尾块文件应命中（got=%v want=%s）——整除限制会跳过尾块导致权威复算失效", got, want)
 	}
 }
+
+// TestVerifyGCID 验证通用 GCID 校验入口（全候选比对命中/未命中/无权威）。
+func TestVerifyGCID(t *testing.T) {
+	payload := bytes.Repeat([]byte("gcid-verify-"), 30000) // 大小保证 256KB 整除
+	if len(payload)%262144 != 0 {
+		// 调整到整除 256KB
+		payload = bytes.Repeat([]byte("gcid-verify-"), 262144/12)
+	}
+	path := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := integrity.ComputeGCID(payload, 262144)
+	// 命中
+	ok, err := integrity.VerifyGCID(path, integrity.GCIDCandidates, target)
+	if err != nil || !ok {
+		t.Fatalf("VerifyGCID hit: ok=%v err=%v", ok, err)
+	}
+	// 未命中
+	ok, err = integrity.VerifyGCID(path, integrity.GCIDCandidates, "0000000000000000000000000000000000000000")
+	if err != nil || ok {
+		t.Fatalf("VerifyGCID miss: ok=%v err=%v", ok, err)
+	}
+	// 无权威 hash → false 无 err
+	ok, err = integrity.VerifyGCID(path, integrity.GCIDCandidates, "")
+	if err != nil || ok {
+		t.Fatalf("VerifyGCID empty: ok=%v err=%v", ok, err)
+	}
+}

@@ -354,15 +354,10 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeReq
 	if req.size > 0 && req.target != nil && req.target.Hash != "" && req.destPath != "" {
 		// R3-I1：全部整除候选的 GCID 逐一与官方 hash 比对（官方分块粒度未知，
 		// 任一候选命中即权威——提升命中率，非首整除即返）。
-		gcids, err := integrity.RecomputeGCIDAll(req.destPath, integrity.GCIDCandidates)
-		if err == nil {
-			for _, gcid := range gcids {
-				if strings.EqualFold(gcid, req.target.Hash) {
-					res.Integrity = downloader.ModeAuthority
-					res.AuthorityHash = req.target.Hash
-					break
-				}
-			}
+		matched, err := integrity.VerifyGCID(req.destPath, integrity.GCIDCandidates, req.target.Hash)
+		if err == nil && matched {
+			res.Integrity = downloader.ModeAuthority
+			res.AuthorityHash = req.target.Hash
 		}
 	}
 	return res, nil
