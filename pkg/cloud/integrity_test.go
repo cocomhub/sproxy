@@ -529,7 +529,7 @@ func TestDownloadIntegrity_ConcurrentMemQuota(t *testing.T) {
 	}
 	wg.Wait()
 	// 全部完成后信号量归零（无泄漏）
-	if cur := mgr.checkMemSem.TryAcquire(1); !cur {
+	if !mgr.checkMemSem.TryAcquire(1) {
 		t.Fatal("校验全部完成后信号量应可再获取（无占位泄漏）")
 	} else {
 		mgr.checkMemSem.Release(1)

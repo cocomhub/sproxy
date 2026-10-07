@@ -41,7 +41,7 @@ func TestFinalizeDownloadResultIntegrity(t *testing.T) {
 	t.Parallel()
 	lease := &RestoreLease{}
 	d := &PikpakDownloader{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	r, err := d.finalizeDownload(t.Context(), 1024, "checksum", "", false, nil, nil, "", lease)
+	r, err := d.finalizeDownload(t.Context(), finalizeRequest{size: 1024, checksum: "checksum", lease: lease})
 	if err != nil {
 		t.Fatalf("finalizeDownload error: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestFinalizeDownload_GCIDAuthorityHit(t *testing.T) {
 		t.Fatalf("RecomputeGCIDFile: ok=%v err=%v", ok, err)
 	}
 	d := &PikpakDownloader{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	r, err := d.finalizeDownload(t.Context(), int64(len(data)), "sha256", "", false, nil, &FileMeta{Hash: gcid}, path, &RestoreLease{})
+	r, err := d.finalizeDownload(t.Context(), finalizeRequest{size: int64(len(data)), checksum: "sha256", target: &FileMeta{Hash: gcid}, destPath: path, lease: &RestoreLease{}})
 	if err != nil {
 		t.Fatalf("finalizeDownload error: %v", err)
 	}
@@ -106,5 +106,7 @@ func TestFinalizeDownload_GCIDMissFallback(t *testing.T) {
 
 // finalizeCheck 包装 finalizeDownload（GCID 变体），避免测试签名连写。
 func (d *PikpakDownloader) finalizeCheck(ctx context.Context, size int64, checksum string, target *FileMeta, path string, lease *RestoreLease) (*Result, error) {
-	return d.finalizeDownload(ctx, size, checksum, "", false, nil, target, path, lease)
+	return d.finalizeDownload(ctx, finalizeRequest{
+		size: size, checksum: checksum, target: target, destPath: path, lease: lease,
+	})
 }

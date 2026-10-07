@@ -15,8 +15,11 @@ import (
 
 // init 把 TarChecker 装配进包级默认注册表（shardseal 模式：Kind 全局唯一）。
 func init() {
-	Register("archive/tar", func() Checker { return TarChecker{} })
+	Register(TarKind, func() Checker { return TarChecker{} })
 }
+
+// TarKind 是 tar 校验器的注册键/类型标识（全局唯一；Register/Kind 共用——S1192 去重字面量）。
+const TarKind = "archive/tar"
 
 // TarChecker 校验 tar 归档语义可用性：可被标准库 archive/tar 遍历且至少含一个条目。
 // gzip 包装可选：`.tar.gz`/`.tgz` 等文件若 gzip 头可解析则先解压再遍历（纯标准库）。
@@ -37,7 +40,7 @@ func (TarChecker) EstimateMem(path string, size int64) int64 {
 }
 
 // Kind 返回类型独立 key（注册键，全局唯一）。
-func (TarChecker) Kind() string { return "archive/tar" }
+func (TarChecker) Kind() string { return TarKind }
 
 // Matches 按扩展名族判定归属：.tar/.tar.gz/.tgz/.tar.zst/.tar.br（不区分大小写）。
 func (TarChecker) Matches(name string) bool {

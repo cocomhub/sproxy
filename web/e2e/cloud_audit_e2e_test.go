@@ -260,7 +260,7 @@ func TestCloudDownload_DamagedBadge_RealLink(t *testing.T) {
 				IntegrityStatus string `json:"integrity_status"`
 			} `json:"tasks"`
 		}
-		if jerr := json.NewDecoder(tresp.Body).Decode(&tasksPayload); jerr != nil {
+		if json.NewDecoder(tresp.Body).Decode(&tasksPayload) != nil {
 			return false
 		}
 		for _, it := range tasksPayload.Tasks {

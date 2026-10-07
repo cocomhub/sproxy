@@ -103,7 +103,7 @@ func TestApplyDefaults_CheckMemZeroToDefault(t *testing.T) {
 	// 构造后信号量非 nil（配额治理生效）
 	cfg := &CloudDownloadConfig{}
 	applyCloudConfigDefaults(cfg)
-	if sem := newCheckMemSem(int64(cfg.MaxCheckMemBytes)); sem == nil {
+	if newCheckMemSem(int64(cfg.MaxCheckMemBytes)) == nil {
 		t.Fatal("<=0 归默认后信号量应非 nil（配额治理默认生效）")
 	}
 }

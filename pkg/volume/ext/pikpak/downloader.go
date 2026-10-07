@@ -256,7 +256,10 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 		// 空池（无账号配置）：回落当前 CLI 登录态（与装配期 pool==nil 语义一致）。
 	}
 	size, checksum, fileID, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
-	return d.finalizeDownload(ctx, size, checksum, fileID, owned, derr, target, destPath, lease)
+	return d.finalizeDownload(ctx, finalizeRequest{
+		size: size, checksum: checksum, fileID: fileID, owned: owned,
+		derr: derr, target: target, destPath: destPath, lease: lease,
+	})
 }
 
 // downloadViaPool 多账号轮换下载：先按**目标文件真实大小**选账号（配额预检 C2），随后
@@ -303,7 +306,10 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
 	}
 	// fileID 传空：AutoDelete 已在 fn 内（选中账号会话）执行，finalizeDownload 不再重复删。
-	return d.finalizeDownload(ctx, size, checksum, "", false, nil, target, destPath, lease)
+	return d.finalizeDownload(ctx, finalizeRequest{
+		size: size, checksum: checksum, fileID: "", owned: false,
+		derr: nil, target: target, destPath: destPath, lease: lease,
+	})
 }
 
 // 注：转存副本释放已收归 RestoreLease（restore.go，round-10 用户裁决）——旧下载器
@@ -318,28 +324,42 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 // AuthorityHash=官方 hash；未命中 → ModeLocalOnly（② 态语义校验兜底）。
 // 余量说明：小文件实测 256KB 分块复算命中官方 hash；大文件分块粒度非固定
 // （随上传/离线任务变化）→ 候选集合自适应，未命中不误报权威（Review Focus 5）。
-func (d *PikpakDownloader) finalizeDownload(ctx context.Context, size int64, checksum, fileID string, owned bool, derr error, target *FileMeta, destPath string, lease *RestoreLease) (*Result, error) {
-	if derr != nil {
-		return nil, derr
+//
+// 参数归组（S107：9 参 > 7 上限收敛）：finalizeRequest 承载下载产物/来源/目标元数据，
+// 调用方（download/pool 分支）构造后传入——ctx 保持首参（containedctx 纪律）。
+type finalizeRequest struct {
+	size     int64
+	checksum string
+	fileID   string
+	owned    bool
+	derr     error
+	target   *FileMeta
+	destPath string
+	lease    *RestoreLease
+}
+
+func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeRequest) (*Result, error) {
+	if req.derr != nil {
+		return nil, req.derr
 	}
 	// 释放经 RestoreLease 单一语义（DeletePermanent）；owned=true 不 Track（源文件）。
-	if !owned && fileID != "" {
-		lease.Track(fileID)
+	if !req.owned && req.fileID != "" {
+		req.lease.Track(req.fileID)
 	}
-	lease.Release(ctx)
+	req.lease.Release(ctx)
 	// GCID 权威复算（spec §6）：文件大小非 0 且官方 hash 非空时，用候选分块复算 GCID，
 	// 命中官方 hash → ModeAuthority（① 态）；否则 ModeLocalOnly（② 态语义校验兜底）。
 	// 复算失败（文件读/destPath 为空）不阻断下载，回落 ModeLocalOnly。
-	res := &Result{Size: size, Checksum: checksum, ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}
-	if size > 0 && target != nil && target.Hash != "" && destPath != "" {
+	res := &Result{Size: req.size, Checksum: req.checksum, ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}
+	if req.size > 0 && req.target != nil && req.target.Hash != "" && req.destPath != "" {
 		// R3-I1：全部整除候选的 GCID 逐一与官方 hash 比对（官方分块粒度未知，
 		// 任一候选命中即权威——提升命中率，非首整除即返）。
-		gcids, err := integrity.RecomputeGCIDAll(destPath, integrity.GCIDCandidates)
+		gcids, err := integrity.RecomputeGCIDAll(req.destPath, integrity.GCIDCandidates)
 		if err == nil {
 			for _, gcid := range gcids {
-				if strings.EqualFold(gcid, target.Hash) {
+				if strings.EqualFold(gcid, req.target.Hash) {
 					res.Integrity = downloader.ModeAuthority
-					res.AuthorityHash = target.Hash
+					res.AuthorityHash = req.target.Hash
 					break
 				}
 			}

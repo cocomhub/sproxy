@@ -94,7 +94,7 @@ func TestRegisterEmptyKindPanics(t *testing.T) {
 	t.Parallel()
 	reg := integrity.NewRegistry()
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("空 Kind 注册应 panic")
 		}
 	}()

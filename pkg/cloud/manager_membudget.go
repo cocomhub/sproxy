@@ -25,11 +25,13 @@ func newCheckMemSem(maxBytes int64) *semaphore.Weighted {
 // 无意义且避免启动 ffprobe 子进程残留；最终由 finalizeCompleted 丢弃取消结果）。
 // 估算 <=0 → ok=true no-op（无内存需求，直接执行）。
 func (m *CloudDownloadManager) acquireCheckMem(ctx context.Context, est int64) (release func(), ok bool) {
+	// 配额禁用/无内存需求：no-op release（调用方统一调 release()，空实现不释配额）。
 	if m.checkMemSem == nil || est <= 0 {
-		return func() {}, true
+		return func() { /* no-op：未 acquire，无需释放 */ }, true
 	}
 	if err := m.checkMemSem.Acquire(ctx, est); err != nil {
-		return func() {}, false
+		// 排队被取消：返回空 release——**未 acquire 成功不释放**（no-op，防配额双释）。
+		return func() { /* no-op：未 acquire 成功，不释放 */ }, false
 	}
 	return func() { m.checkMemSem.Release(est) }, true
 }
