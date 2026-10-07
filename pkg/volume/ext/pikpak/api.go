@@ -255,6 +255,17 @@ func (a *API) ListRecursive(ctx context.Context, parentID string) ([]FileMeta, e
 // RestoreShare 转存分享文件到个人网盘根目录（或指定 parentID）。
 // 返回 (转存任务/文件 ID, owned)——owned=true 表示该文件是**用户自己网盘已有源文件**
 // （file_restore_own，错误码 9），非本次 restore 的副本（NH-P1：AutoDelete 不得删源文件）。
+
+// isStorageFullError 判断错误是否为账号空间不足（drive 响应含 storage/quota/space 满）。
+func isStorageFullError(err error) bool {
+	if err == nil {
+		return false
+	}
+	low := strings.ToLower(err.Error())
+	return strings.Contains(low, "storage") && (strings.Contains(low, "full") || strings.Contains(low, "exceed") || strings.Contains(low, "space")) ||
+		strings.Contains(low, "quota exceeded") || strings.Contains(low, "no space") ||
+		strings.Contains(low, "存储空间")
+}
 func (a *API) RestoreShare(ctx context.Context, shareID string, fileIDs []string, parentID string) (string, bool, error) {
 	body := map[string]any{
 		"share_id":    shareID,
@@ -273,6 +284,11 @@ func (a *API) RestoreShare(ctx context.Context, shareID string, fileIDs []string
 		// AutoDelete 跳过（源文件非 restore 副本，NH-P1 防数据丢失）。
 		if strings.Contains(err.Error(), "file_restore_own") && len(fileIDs) > 0 {
 			return fileIDs[0], true, nil
+		}
+		// 空间不足（drive 返回 storage/quota/space 满错误）：立即映射为 ErrStorageFull
+		// 哨兵——调用方直接失败，不再重试/降级拖沓（用户明示：保存账号空间失败立刻报错）。
+		if isStorageFullError(err) {
+			return "", false, fmt.Errorf("%w: %v", ErrStorageFull, err)
 		}
 		return "", false, err
 	}

@@ -1271,13 +1271,67 @@ func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *S
 // idempotentRestored 幂等检查：网盘已有同名同大小且 hash 一致的转存 → 复用并记录，返回 (link, true)。
 // 无 hash 可比对（目标/网盘 hash 缺失）时保守返回 false（不信任 size 匹配，走 restore）。
 // acctName 为账号名（"" = 当前会话/单账号），用于按账号登记 AutoDelete 副本（多账号 Release 逐会话删）。
-func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, acctName string) (link, id string, ok bool) {
-	existing, err := d.api.FindInDrive(ctx, dc.target.Name, dc.target.Size)
-	if err != nil || existing == nil {
-		return "", "", false
+
+// findInPackShared 在「Pack From Shared」文件夹内查找同名/同大小转存副本（转存副本固定
+// 落这里）。**不全盘 walk**（FindInDrive 全盘 ListRecursive 慢/超时是去重失效根因）。
+// 命中 → 返回 (FileMeta, ok)。优先 size 精确匹配（强判据），回退 name 匹配（弱判据）。
+func (d *HybridDownloader) findInPackShared(ctx context.Context, wantName string, wantSize int64) (*FileMeta, bool) {
+	// 1. 找 Pack From Shared 文件夹（根目录下列出）
+	root, err := d.api.List(ctx, "")
+	if err != nil {
+		return nil, false
 	}
-	if dc.target.Hash == "" || existing.Hash == "" || existing.Hash != dc.target.Hash {
-		d.log.Warn("hybrid restore skip rejected: hash mismatch (or missing)",
+	var packID string
+	for i := range root {
+		if root[i].Kind == driveKindFolder && strings.EqualFold(root[i].Name, "Pack From Shared") {
+			packID = root[i].ID
+			break
+		}
+	}
+	if packID == "" {
+		return nil, false // 无转存文件夹 = 从无转存，直接走 RestoreShare
+	}
+	// 2. 列该文件夹内文件，按 size/name 匹配
+	files, err := d.api.List(ctx, packID)
+	if err != nil {
+		return nil, false
+	}
+	for i := range files {
+		f := &files[i]
+		if f.Kind != driveKindFile {
+			continue
+		}
+		if wantSize > 0 && f.Size == wantSize {
+			return f, true // size 精确（强判据）
+		}
+	}
+	// 回退 name 子串（弱判据，hash 缺失时兜底）
+	for i := range files {
+		f := &files[i]
+		if f.Kind == driveKindFile && strings.Contains(f.Name, wantName) {
+			return f, true
+		}
+	}
+	return nil, false
+}
+
+func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, acctName string) (link, id string, ok bool) {
+	// **优先在 Pack From Shared 文件夹内查**（转存副本固定落这里，不全盘 walk——
+	// 全盘 ListRecursive 在网盘大/空间满时慢/超时是去重失效、重复保存的根因）。
+	existing, found := d.findInPackShared(ctx, dc.target.Name, dc.target.Size)
+	// pack 文件夹 miss → 回退 FindInDrive 全盘（兼容旧网盘/无 pack 文件夹场景）。
+	if !found || existing == nil {
+		existing2, err := d.api.FindInDrive(ctx, dc.target.Name, dc.target.Size)
+		if err != nil || existing2 == nil {
+			return "", "", false
+		}
+		existing = existing2
+	}
+	// hash 双方都有且不等 → 拒绝复用（不同文件，防内容错配）。
+	// hash 缺失（分享 file_info 无 hash）→ 降级按「同名+同大小」复用（弱判据，
+	// 避免每次 RestoreShare 新副本撑爆空间——用户明示去重必须生效）。
+	if dc.target.Hash != "" && existing.Hash != "" && existing.Hash != dc.target.Hash {
+		d.log.Warn("hybrid restore skip rejected: hash mismatch",
 			"id", existing.ID, "target_hash", dc.target.Hash, "drive_hash", existing.Hash)
 		return "", "", false
 	}

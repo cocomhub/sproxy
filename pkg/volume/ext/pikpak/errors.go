@@ -28,6 +28,8 @@ var (
 	ErrDuplicateAccount = errors.New("pikpak: duplicate account name")
 	// ErrAccountNotFound 表示账号不存在。
 	ErrAccountNotFound = errors.New("pikpak: account not found")
+	// ErrStorageFull 表示账号网盘空间不足（转存失败）——立即报错，不重试拖沓。
+	ErrStorageFull = errors.New("pikpak: account storage full")
 )
 
 // truncate 截断字符串（日志/错误信息），按 rune 截断避免劈开 UTF-8 多字节字符
