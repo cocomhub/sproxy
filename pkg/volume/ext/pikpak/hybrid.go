@@ -384,11 +384,16 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	// 不是源身份哈希（源身份校验用 GCID 与 target.Hash 比对，已在上方 verify 完成）。
 	// 消费方若拿本字段比对源 hash 会误判——仅作本地完整性指纹。
 	res := &Result{Size: dc.currentTotal, Checksum: checksum, ModTime: time.Now()}
-	// GCID 权威命中（① 态）：标记 ModeAuthority + 带外权威 hash——语义校验管道
-	// （cloud/integrity 校验器注册表）据此识别 hybrid 产出为权威可信，不再重复复算。
+	// 完整性三态（与旧 PikpakDownloader finalizeDownload 一致）：
+	//   GCID 权威命中（① 态）→ ModeAuthority + 带外权威 hash——语义校验管道据此
+	//   识别 hybrid 产出为权威可信，不再重复复算；
+	//   未命中 → 显式 ModeLocalOnly（② 态本地自洽，由语义校验器兜底）——
+	//   不保持零值 ModeUnknown（语义不明，审计面不一致）。
 	if dc.target.Hash != "" && integrityVerified {
 		res.Integrity = downloader.ModeAuthority
 		res.AuthorityHash = dc.target.Hash
+	} else {
+		res.Integrity = downloader.ModeLocalOnly
 	}
 	return res, nil
 }
