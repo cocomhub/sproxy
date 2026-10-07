@@ -27,6 +27,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >   本地实例构造、`RegisterXxx(reg, cfg)` 按参注册入口，包内结构内部方法直接接收内部类型变量控制
 >   全局行为）；测试传本地实例不触碰全局 → 可 `t.Parallel()`。**新测试先问「能否并行」，不得默认
 >   登记串行**（教训 #734：30+ 一次性串行登记吃光棘轮 slack，CI merge 树红灯）。详见 `AGENTS.md` R18。
+> - **测试注入纪律（2026-10-07 用户明示，加强版）**：**绝对禁止测试依赖全局可变函数/变量做 seam
+>   替换**（`var removeX = os.Remove` 包级 seam + 测试 t.Cleanup 恢复，运行期替换/并发恢复即 data
+>   race，且影响其它读该 seam 的用例）。一切测试注入一律走**结构体内部私有变量，只能在创建时经
+>   构造函数/opts 注入**（`VideoChecker.indexer`、`CloudDownloadManager.removeFile`、
+>   `NewLocalOrExitDial(...localDial)`、`Handlers.removeMovedSource`）：运行期不可变 → 并发安全 →
+>   测试可 `t.Parallel()`。判断标准：测试里出现「替换包级 var + t.Cleanup 恢复」即违规，须改为构造
+>   注入实例字段（参考本分支 removeTaskFile/localDialFunc/removeMovedSource 改造）。
 > - **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为必须逐项
 >   测试锁定；新增外部依赖先在 `docs/external-dependencies.md` 分类登记 + 补测试锁定；测试红先对照
 >   该文档判「依赖变化 vs 实现回归」，禁止静默改实现适配未登记的变化。详见 `AGENTS.md` 硬规则 19。

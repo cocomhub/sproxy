@@ -57,9 +57,8 @@ internal/archcheck/upload_side_effect_test.go	1
 internal/archcheck/web_assets_test.go	2
 internal/archcheck/xfer_send_atomicity_test.go	1
 pkg/client/events_test.go	4
-pkg/cloud/manager_test.go	3
+pkg/cloud/manager_test.go	2
 pkg/files/version_id_test.go	3
-pkg/integrity/ext/video/video_test.go	5
 pkg/server/accept_retry_test.go	5
 pkg/server/archive_test.go	1
 pkg/server/audit_handler_test.go	13
@@ -145,10 +144,10 @@ pkg/server/tlsgen_test.go	2
 pkg/server/totp_e2e_test.go	14
 pkg/server/upload_owner_test.go	1
 pkg/server/upload_volume_test.go	10
-pkg/server/uploading_lock_test.go	6
+pkg/server/uploading_lock_test.go	5
 pkg/server/version_crossvolume_test.go	1
 pkg/server/version_test.go	3
-pkg/server/volumes_api_test.go	15
+pkg/server/volumes_api_test.go	14
 pkg/server/volumes_test.go	12
 pkg/server/xfer_listener_test.go	12
 pkg/telemetry/ext/otel/provider_test.go	4

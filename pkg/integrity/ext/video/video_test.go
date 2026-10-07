@@ -54,11 +54,9 @@ func TestVideoChecker_Kind(t *testing.T) {
 // 哨兵区分——CI 无 ffmpeg 环境也须确定性地测到「真解析失败→OK=false」分支）。
 func TestVideoChecker_Corrupt(t *testing.T) {
 	t.Parallel()
-	prev := testSeamIndexer
-	setTestSeamIndexer(fakeIndexer{err: errors.New("ffprobe: 容器非法（模拟）")})
-	t.Cleanup(func() { setTestSeamIndexer(prev) })
+	checker := NewVideoChecker(fakeIndexer{err: errors.New("ffprobe: 容器非法（模拟）")})
 	path := writeBytes(t, "corrupt.mp4", []byte("not-a-video"))
-	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("not-a-video")))
+	rep, err := checker.Check(context.Background(), path, int64(len("not-a-video")))
 	if err != nil {
 		t.Fatalf("损坏视频应返回 OK=false 语义而非 error，got %v", err)
 	}
@@ -109,15 +107,13 @@ func (f fakeIndexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, er
 }
 
 // TestVideoChecker_MissingFFprobe R5-I1：缺 ffprobe（ErrFFprobeMissing）→ OK=true 放行
-// （无校验器 ≠ 损坏，无 ffmpeg 部署不误判 damaged）。
+// （无校验器 ≠ 损坏，无 ffmpeg 部署不误判 damaged）。Indexer 在**构造时**注入本地 fake
+// 实例（不触碰全局，可 t.Parallel）。
 func TestVideoChecker_MissingFFprobe(t *testing.T) {
-	// 共享 testSeamIndexer 包级注入缝——经 setTestSeamIndexer 持锁替换（生产路径只读+局部回落）
-	prev := testSeamIndexer
-	setTestSeamIndexer(fakeIndexer{err: ffprobe.ErrFFprobeMissing})
-	t.Cleanup(func() { setTestSeamIndexer(prev) })
-
+	t.Parallel()
+	checker := NewVideoChecker(fakeIndexer{err: ffprobe.ErrFFprobeMissing})
 	path := writeBytes(t, "m.mp4", []byte("whatever"))
-	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("whatever")))
+	rep, err := checker.Check(context.Background(), path, int64(len("whatever")))
 	if err != nil {
 		t.Fatalf("缺 ffprobe 应返回 OK=true（放行），而非 error，got %v", err)
 	}
@@ -129,13 +125,10 @@ func TestVideoChecker_MissingFFprobe(t *testing.T) {
 // TestVideoChecker_OutputLimitPasses M5-I2：ffprobe 输出超上限（ErrFFprobeOutputLimit）
 // → OK=true 放行——合法视频帧数异常多属**资源限制 ≠ 文件损坏**，不误判 damaged。
 func TestVideoChecker_OutputLimitPasses(t *testing.T) {
-	// 共享 testSeamIndexer 包级注入缝（输出超限哨兵）——须串行（同文件 serial budget）。
-	prev := testSeamIndexer
-	setTestSeamIndexer(fakeIndexer{err: ffprobe.ErrFFprobeOutputLimit})
-	t.Cleanup(func() { setTestSeamIndexer(prev) })
-
+	t.Parallel()
+	checker := NewVideoChecker(fakeIndexer{err: ffprobe.ErrFFprobeOutputLimit})
 	path := writeBytes(t, "big.mp4", []byte("whatever"))
-	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("whatever")))
+	rep, err := checker.Check(context.Background(), path, int64(len("whatever")))
 	if err != nil {
 		t.Fatalf("输出超限应 OK=true（放行），而非 error，got %v", err)
 	}
@@ -147,13 +140,10 @@ func TestVideoChecker_OutputLimitPasses(t *testing.T) {
 // TestVideoChecker_ExecFailPasses I1 回归：ffprobe 执行/IO 失败（ErrFFprobeExec，如慢盘
 // 超时/OOM kill/临时文件失败）→ OK=true 放行——环境/资源限制 ≠ 文件损坏，不误判 damaged。
 func TestVideoChecker_ExecFailPasses(t *testing.T) {
-	// 共享 testSeamIndexer 包级注入缝（执行失败哨兵）——须串行（同文件 serial budget）。
-	prev := testSeamIndexer
-	setTestSeamIndexer(fakeIndexer{err: ffprobe.ErrFFprobeExec})
-	t.Cleanup(func() { setTestSeamIndexer(prev) })
-
+	t.Parallel()
+	checker := NewVideoChecker(fakeIndexer{err: ffprobe.ErrFFprobeExec})
 	path := writeBytes(t, "exec.mp4", []byte("whatever"))
-	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("whatever")))
+	rep, err := checker.Check(context.Background(), path, int64(len("whatever")))
 	if err != nil {
 		t.Fatalf("执行失败应 OK=true（放行），而非 error，got %v", err)
 	}
@@ -165,20 +155,16 @@ func TestVideoChecker_ExecFailPasses(t *testing.T) {
 // TestVideoChecker_CtxCancel 取消路径：ctx 取消 → 返回 error（非 OK:false——调用方
 // 按「校验执行出错→放行」处理，不当语义异常累计）。
 func TestVideoChecker_CtxCancel(t *testing.T) {
-	// 共享 testSeamIndexer 包级注入缝——经 setTestSeamIndexer 持锁替换
-	prev := testSeamIndexer
-	// 阻塞索引器（不返回）——select 等 ctx.Done
+	t.Parallel()
+	// 阻塞索引器（不返回）——select 等 ctx.Done；构造时注入本地实例。
 	blocking := make(chan struct{})
-	setTestSeamIndexer(blockingIndexer{ch: blocking})
-	t.Cleanup(func() {
-		setTestSeamIndexer(prev)
-		close(blocking)
-	})
+	checker := NewVideoChecker(blockingIndexer{ch: blocking})
+	t.Cleanup(func() { close(blocking) })
 
 	path := writeBytes(t, "c.mp4", []byte("data"))
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	cancel() // 立即取消
-	_, err := VideoChecker{}.Check(cancelCtx, path, 0)
+	_, err := checker.Check(cancelCtx, path, 0)
 	if err == nil {
 		t.Fatal("ctx 取消应返回 error（中止哨兵），而非 nil")
 	}
@@ -197,14 +183,10 @@ func (emptyIndexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, err
 // TestVideoChecker_AudioOnlyPasses M3-I1：仅音频轨容器（-select_streams v:0 输出空）→
 // OK=true 放行（有内容但非视频 ≠ 损坏，不误判 damaged/重下）。
 func TestVideoChecker_AudioOnlyPasses(t *testing.T) {
-	// 共享 testSeamIndexer 包级注入缝（空索引器模拟无视频流）——此测试与另外两个
-	// 注入缝测试共享包级 seam 变量，须串行（同文件已登记 serial budget）。
-	prev := testSeamIndexer
-	setTestSeamIndexer(emptyIndexer{})
-	t.Cleanup(func() { setTestSeamIndexer(prev) })
-
+	t.Parallel()
+	checker := NewVideoChecker(emptyIndexer{})
 	path := writeBytes(t, "audio.m4a", []byte("audio-data"))
-	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("audio-data")))
+	rep, err := checker.Check(context.Background(), path, int64(len("audio-data")))
 	if err != nil {
 		t.Fatalf("仅音频轨应 OK=true 放行（非 error），got %v", err)
 	}
@@ -224,7 +206,7 @@ func (b blockingIndexer) KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64
 // TestVideoChecker_EstimateMem 估算：小文件（<2GiB）→ 仅进程 64MiB；大文件（100GiB）
 // → 64MiB + JSON 估算（0.5MB/GB×2 上浮：100GiB→50MiB），且 JSON 封顶 256MiB。
 func TestVideoChecker_EstimateMem(t *testing.T) {
-	// 共享 testSeamIndexer？不——EstimateMem 用 os.Stat 不碰注入缝，可并行
+	// EstimateMem 用 os.Stat 不碰 Indexer 注入，可并行
 	t.Parallel()
 	c := VideoChecker{}
 	if est := c.EstimateMem("", 1024*1024); est != 64<<20 {

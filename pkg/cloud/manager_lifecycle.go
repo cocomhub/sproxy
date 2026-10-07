@@ -249,7 +249,7 @@ func (m *CloudDownloadManager) reserveCloudResumeLocked(task *CloudTask) (int64,
 // discardForceResumeFiles force 续传时丢弃旧产物（结果文件 + .partial + .partial.etag）并回拨
 // Scope 占用（逻辑见 ResumeTask 的 force 分支注释）。
 func (m *CloudDownloadManager) discardForceResumeFiles(task *CloudTask, destPath string) {
-	discarded := removeDiscardedTaskFiles(destPath, removeTaskFile)
+	discarded := removeDiscardedTaskFiles(destPath, m.removeFileOrDefault())
 	m.mu.Lock()
 	// 不得释放超过本任务记录的占用：删除的字节多于本任务记的账时，超出部分属同桶邻居的
 	// 份额，直接 ReleaseUsage 会吃掉它们（层内无归属，见 pkg/quota 的逐层钳制）。

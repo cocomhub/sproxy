@@ -344,6 +344,7 @@ func TestVolumesAPI_LocalMuxRegistered(t *testing.T) {
 // 预置「并发 delete 已完成 from 侧释放」的账本态（owner 全局 + main 卷池各 -S），断言 move 后
 // 不因第二次 IsNotExist 再减（owner 全局 = S+T、main 池 = T、disk2 池 = S）。
 func TestVolumesAPI_Move_ConcurrentDeleteIsNotExistReleasesOnce(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -364,13 +365,13 @@ func TestVolumesAPI_Move_ConcurrentDeleteIsNotExistReleasesOnce(t *testing.T) {
 	}
 
 	// 模拟并发 delete 已完成 a.txt 的 from 侧释放（owner 全局 + main 卷池各 -S）；源文件仍物理
-	// 在盘使 move 的 stat 通过、复制成功。Remove seam 返回 IsNotExist 模拟「delete 在 stat 与
-	// Remove 间删源」。
+	// 在盘使 move 的 stat 通过、复制成功。RemoveMovedSource 构造注入返回 IsNotExist 模拟
+	// 「delete 在 stat 与 Remove 间删源」（2026-10-07 用户裁定：禁止测试依赖全局函数/并发
+	// 修改包级 seam——经实例字段创建时注入，运行期不可变）。
 	h.quotaBucketFor("alice", "user").ReleaseUsage(sA)
 	h.volSet.Pool("main").ReleaseCommitted(sA)
-	orig := removeMovedSource
-	removeMovedSource = func(*storage.Root, string) error { return os.ErrNotExist }
-	t.Cleanup(func() { removeMovedSource = orig })
+	h.removeMovedSource = func(*storage.Root, string) error { return os.ErrNotExist }
+	t.Cleanup(func() { h.removeMovedSource = nil })
 
 	status, respBody := moveVolume(t, url, "main", "disk2", "a.txt")
 	if status != http.StatusOK {

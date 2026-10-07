@@ -169,14 +169,14 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 	return task, nil
 }
 
-// removeTaskFile 是任务产物删除的**单次尝试** seam：默认委托 os.Remove。生产路径不替换。
-//
-// 存在的意义是确定性验证「先清理文件、后发布终态」的顺序不变量：观察者（API /
-// SnapshotTask / 测试轮询）一旦读到 failed，就不应再看到该任务的文件残留。真实文件系统
-// 时序跨平台不可确定（Windows 还受句柄共享冲突影响），故用 seam 让测试能在删除发生的
-// 那一刻读取任务状态来钉住顺序（见 TestCloudDownloadManager_StorageFullAfterDownload_
-// DeletesAndReleases），也能注入「首次失败、再次成功」的故障来验证有界重试。
-var removeTaskFile = os.Remove
+// removeFileOrDefault 返回任务产物删除实现：实例字段 removeFile（测试构造时注入）优先，
+// nil → os.Remove 默认。**运行期不可变**——无包级 seam，并发安全（用户裁定 2026-10-07）。
+func (m *CloudDownloadManager) removeFileOrDefault() func(string) error {
+	if m.removeFile != nil {
+		return m.removeFile
+	}
+	return os.Remove
+}
 
 // removeRetries / removeRetryDelay 是任务产物清理的有界重试预算（见 removeWithRetry）。
 const (
@@ -1010,7 +1010,7 @@ func (m *CloudDownloadManager) completeStorageFull(stored *CloudTask, destPath s
 	m.releaseTaskScope(stored)
 	m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
 	stored.ReservedSize = 0
-	removeErr := removeWithRetry(func() error { return removeTaskFile(destPath) })
+	removeErr := removeWithRetry(func() error { return m.removeFileOrDefault()(destPath) })
 	if removeErr != nil {
 		m.logger.Error("storage full after download, remove file failed",
 			"task_id", stored.ID, "path", destPath, "error", removeErr)

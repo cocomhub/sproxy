@@ -240,28 +240,32 @@ func TestUploadComplete_BlockedWhenFileLocked(t *testing.T) {
 // TestMoveVsDelete_LockSerializes 真并发（seam 确定性阻塞）：move 持锁期间 delete 409，
 // 释放后 move 完成；文件最终只存在于目标卷（无跨卷双份 / 无账本错配）。
 func TestMoveVsDelete_LockSerializes(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
 		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
 	}
-	baseURL, _, _ := uploadingLockServer(t, "alice", volumes, nil)
+	baseURL, h, _ := uploadingLockServer(t, "alice", volumes, nil)
 
 	content := []byte("move-vs-delete payload")
 	if status, _, body := volumeUpload(t, baseURL, "mvdel.txt", content, ""); status != http.StatusOK {
 		t.Fatalf("上传应 200, got %d %s", status, body)
 	}
 
-	// seam：move 复制完成后、删源前阻塞，暴露「持锁窗口」供并发 delete 观测。
+	// removeMovedSource 实例字段注入：move 复制完成后、删源前阻塞，暴露「持锁窗口」供
+	// 并发 delete 观测（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam——
+	// 经 Handlers 实例字段创建时注入，运行期不可变）。构造前捕获默认实现（闭包内不读
+	// 实例字段——防止重入/并发修改读到 nil）。
 	reached := make(chan struct{})
 	proceed := make(chan struct{})
-	orig := removeMovedSource
-	removeMovedSource = func(root *storage.Root, rel string) error {
+	defaultRemove := h.removeMovedSourceOrDefault()
+	h.removeMovedSource = func(root *storage.Root, rel string) error {
 		close(reached)
 		<-proceed
-		return orig(root, rel)
+		return defaultRemove(root, rel)
 	}
-	t.Cleanup(func() { removeMovedSource = orig })
+	t.Cleanup(func() { h.removeMovedSource = nil })
 
 	moveDone := make(chan int, 1)
 	go func() {

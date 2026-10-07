@@ -2058,6 +2058,7 @@ func TestCloudDownloadManager_ListTasksLimitOverflow(t *testing.T) {
 // `TryReserve(result.Size-reserved)` 失败分支 → 任务 failed("storage full after download") +
 // 文件删除 + sm.Usage()==0 + Scope 精确归零（不泄漏）。
 func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *testing.T) {
+	t.Parallel()
 	content := make([]byte, 100)
 	for i := range content {
 		content[i] = byte(i % 251)
@@ -2081,25 +2082,26 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 		DownloadTimeout: 30 * time.Second,
 		MaxRetries:      1,
 	}
-	mgr, env := newCloudTestManager(t, dir, sm, cfg)
-	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
-
 	// 顺序钉（确定性、跨平台）：删除钩子在删除发生的**那一刻**读取任务状态，断言此刻终态尚未
 	// 发布——即「文件清理必先于 failed 对观察者可见」。若删除被放在 m.mu.Unlock() 之后（原实现），
 	// 观察者（包括下面的 waitTaskDone + os.Stat）可能读到 failed 而文件仍在盘上（CI Windows
 	// 上本测试 `stat err=<nil>` 的 flake 根因）。钩子在持锁临界区内被调用（同一 goroutine），
-	// 直接读 mgr.tasks 即可，无需加锁；本测试不并行（seam 为包级变量）。
+	// 直接读 mgr.tasks 即可，无需加锁。**RemoveFile 构造注入**（用户裁定 2026-10-07：
+	// 禁止测试依赖全局函数/并发修改包级 seam，只能在创建时注入实例字段）。
 	var statusAtRemove string
 	var lastRemoveErr error
-	origRemoveTaskFile := removeTaskFile
-	removeTaskFile = func(path string) error {
-		for _, tsk := range mgr.tasks { // 本测试的管理器只有本任务
-			statusAtRemove = tsk.Status
-		}
-		lastRemoveErr = os.Remove(path)
-		return lastRemoveErr
-	}
-	t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
+	var mgr *CloudDownloadManager
+	var env *cloudTestEnv
+	mgr, env = newCloudTestManager(t, dir, sm, cfg, CloudManagerOptions{
+		RemoveFile: func(path string) error {
+			for _, tsk := range mgr.tasks { // 本测试的管理器只有本任务
+				statusAtRemove = tsk.Status
+			}
+			lastRemoveErr = os.Remove(path)
+			return lastRemoveErr
+		},
+	})
+	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
 
 	// 已知大小 10 创建任务（预留 10），实际下载 100 → 完成路径补齐预留失败。
 	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice", TaskParams{Save: true})
@@ -2213,16 +2215,11 @@ func assertStorageFullDeleteIdempotent(t *testing.T, mgr *CloudDownloadManager, 
 // 创建期声明 10 字节、实际响应 100 字节，使完成路径 TryReserve(90) 必然失败并进入
 // storage-full-after-download 的「删文件 + failed」分支。
 //
-// remove 是删除 seam（removeTaskFile）的替换实现（nil 表示保留真实 os.Remove）：seam 必须在
-// **创建 manager 之前**装好——下载 goroutine 由 SubmitAndStart 启动，若在其之后才替换 seam，
-// goroutine 可能已经调用过真实 os.Remove（用例确定性受损：注入的失败是否生效取决于调度）。
+// remove 是删除实现（nil 表示保留真实 os.Remove）：**构造时注入**（RemoveFile opt，
+// 用户裁定 2026-10-07）——下载 goroutine 由 SubmitAndStart 启动，创建时已固定删除
+// 实现，用例确定性不受调度影响。
 func newStorageFullAfterDownloadFixture(t *testing.T, remove func(string) error) (*CloudDownloadManager, *cloudTestEnv, *capacity.StorageManager, *CloudTask) {
 	t.Helper()
-	if remove != nil {
-		origRemoveTaskFile := removeTaskFile
-		removeTaskFile = remove
-		t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
-	}
 	content := make([]byte, 100)
 	for i := range content {
 		content[i] = byte(i % 251)
@@ -2246,7 +2243,11 @@ func newStorageFullAfterDownloadFixture(t *testing.T, remove func(string) error)
 		DownloadTimeout: 30 * time.Second,
 		MaxRetries:      1,
 	}
-	mgr, env := newCloudTestManager(t, dir, sm, cfg)
+	opts := []CloudManagerOptions{}
+	if remove != nil {
+		opts = append(opts, CloudManagerOptions{RemoveFile: remove})
+	}
+	mgr, env := newCloudTestManager(t, dir, sm, cfg, opts...)
 	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
 	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice", TaskParams{Save: true})
 	if err != nil {
@@ -2261,7 +2262,8 @@ func newStorageFullAfterDownloadFixture(t *testing.T, remove func(string) error)
 // 随后发布 failed ⇒ 观察者看到「任务 failed 但文件仍在盘上」。本用例注入「首次失败、
 // 再次成功」的删除 seam，断言生产代码做了有界重试、重试后文件确实不存在。
 func TestCloudDownloadManager_StorageFullAfterDownload_RemoveRetriesTransientFailure(t *testing.T) {
-	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与其他读该 seam 的用例互斥。
+	t.Parallel()
+	// RemoveFile 构造注入（实例字段，运行期不可变）——无包级 seam，可 t.Parallel。
 	var attempts atomic.Int32
 	// seam 在 fixture 内、创建 manager 之前安装：从下载 goroutine 启动那一刻起，所有删除都
 	// 必须经过它（否则 goroutine 可能走真实 os.Remove，注入的瞬时失败不会被触发）。
@@ -2298,7 +2300,8 @@ func TestCloudDownloadManager_StorageFullAfterDownload_RemoveRetriesTransientFai
 // 时的可观测性：删除最终失败必须把「清理未完成」并入 task.Error，否则用户只看到 failed，
 // 无从得知文件仍占着磁盘。
 func TestCloudDownloadManager_StorageFullAfterDownload_RemoveFailureSurfaced(t *testing.T) {
-	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与其他读该 seam 的用例互斥。
+	t.Parallel()
+	// RemoveFile 构造注入（实例字段，运行期不可变）——无包级 seam，可 t.Parallel。
 	var attempts atomic.Int32
 	mgr, _, _, task := newStorageFullAfterDownloadFixture(t, func(path string) error {
 		attempts.Add(1)

@@ -9,44 +9,41 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/media/ffprobe"
 )
 
-// testSeamIndexer 是 KeyframeOffsets 索引器的注入缝（生产 nil → 用 ffprobe.Indexer{}；
-// 测试替换以模拟缺 ffprobe/取消/超时，避免真实 ffprobe 依赖）。测试通过
-// setTestSeamIndexer（持锁）替换；生产 Check 只读它并做**局部回落**——绝不写全局
-// （并发首次校验对 nil 的懒加载写会产生数据竞争）。KeyframeOffsets 无状态，共享安全。
-var testSeamIndexer interface {
-	KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
-}
-
-// testSeamMu 保护 testSeamIndexer 的替换（测试专用；生产只读 + 局部回落不竞争）。
-var testSeamMu sync.RWMutex
-
-// setTestSeamIndexer 是测试替换注入缝的入口（持写锁）；测试 t.Cleanup 恢复原值。
-func setTestSeamIndexer(idx interface {
-	KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
-}) {
-	testSeamMu.Lock()
-	defer testSeamMu.Unlock()
-	testSeamIndexer = idx
-}
-
 // init 把 VideoChecker 装配进 pkg/integrity 包级默认注册表（插件模式：cmd/sproxy
 // 空白导入触发本 init；重复注册同 Kind 由 Registry fail-fast panic——见 Register）。
 func init() {
-	integrity.Register("video/*", func() integrity.Checker { return VideoChecker{} })
+	integrity.Register("video/*", func() integrity.Checker { return NewVideoChecker(nil) })
+}
+
+// keyframeIndexer 是 KeyframeOffsets 索引器抽象（生产 ffprobe.Indexer；测试 fake 注入）。
+type keyframeIndexer interface {
+	KeyframeOffsets(req shardseal.KeyframeRequest) ([]int64, error)
 }
 
 // VideoChecker 校验视频语义可用性：ffprobe 可解析容器且含视频流关键帧 → OK。
 // 复用 pkg/media/ffprobe（go-mp4 只认 ISO-BMFF；ffprobe 覆盖全部容器 MP4/MKV/WebM/TS/
 // AVI/FLV…）。ffprobe 缺失或解析失败 → OK=false（内容异常或环境不含 ffmpeg——下游
 // 按任务配置放行/标记；本校验器不阻断未知环境，仅报告语义结果）。
-type VideoChecker struct{}
+//
+// **构造注入 opt（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam）**：
+// indexer 是**私有**字段，只能在 NewVideoChecker **创建时**注入，运行期不可变（外部无法
+// 修改 → 无并发写 race）；nil = 生产 ffprobe.Indexer{}。测试传本地 fake 实例不触碰全局，
+// 可 t.Parallel()（替代旧包级 testSeamIndexer 注入缝 + 持锁 setter 方案）。
+type VideoChecker struct {
+	indexer keyframeIndexer
+}
+
+// NewVideoChecker 创建 VideoChecker（indexer nil = 生产 ffprobe.Indexer{}）。
+// 测试经此构造注入 fake（KeyframeOffsets 模拟缺 ffprobe/取消/超时/容器非法）。
+func NewVideoChecker(indexer keyframeIndexer) *VideoChecker {
+	return &VideoChecker{indexer: indexer}
+}
 
 // EstimateMem 预估一次 Check 的峰值内存（保守高估，防低估 OOM）：
 //   - ffprobe 子进程常驻 ~64MiB（OS 管理，不占 Go 堆）；
@@ -90,7 +87,7 @@ func (VideoChecker) Matches(name string) bool {
 // Check 用 ffprobe 解析 path 指向的视频：KeyframeOffsets 无 err 且返回 ≥1 关键帧
 // （有视频流）→ OK=true；否则（无 ffprobe / 容器非法 / 无视频流 / 文件打开失败）
 // → OK=false。文件打开失败（路径不存在等）→ error（校验执行错误，非语义判定）。
-func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integrity.Report, error) {
+func (v VideoChecker) Check(ctx context.Context, path string, size int64) (*integrity.Report, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("video check open %s: %w", path, err)
@@ -103,13 +100,9 @@ func (VideoChecker) Check(ctx context.Context, path string, size int64) (*integr
 			size = fi.Size()
 		}
 	}
-	// testSeamIndexer 是测试注入缝（生产 nil → 局部回落 ffprobe.Indexer{}；测试经
-	// setTestSeamIndexer 持锁替换）。**只读 + 局部回落**，绝不写全局——并发首次校验
-	// 对 nil 的懒加载写会构成数据竞争（实测 -race 命中）。
-	testSeamMu.RLock()
-	seam := testSeamIndexer
-	testSeamMu.RUnlock()
-	indexer := seam
+	// indexer 私有字段（构造时注入）：nil = 生产 ffprobe.Indexer{}。运行期不可变——
+	// 无包级 seam/无持锁 setter，并发 Check 只读私有字段天然安全（用户裁定 2026-10-07）。
+	indexer := v.indexer
 	if indexer == nil {
 		indexer = ffprobe.Indexer{}
 	}

@@ -265,6 +265,11 @@ type CloudDownloadManager struct {
 	// integrityLookup 按文件名分发完整性校验器（装配层注入 integrity.Lookup 代理；
 	// nil = 无校验器，语义校验跳过视为通过——Review Focus 1）。
 	integrityLookup func(name string) integrity.Checker
+	// removeFile 是任务产物删除的单次尝试实现（nil = os.Remove 默认）。**测试注入
+	// opt（2026-10-07 用户裁定：绝对禁止测试依赖全局函数——包级 seam 可被并发替换/恢复
+	// 制造 race）**：结构体内部变量，只能在**创建时**注入，运行期不可变（无外部修改行为）。
+	// 测试用 newCloudTestManager 等构造点注入本地实现模拟删除失败/钉住时序。
+	removeFile func(string) error
 	// checkMemSem 完整性校验内存配额信号量（Weighted，按 Check 前估算字节排队等待释放；
 	// nil = 配额禁用。单文件估算超配额 → 跳过校验标记 unverified，不误判 damaged）。
 	checkMemSem *semaphore.Weighted
@@ -352,6 +357,10 @@ type CloudManagerOptions struct {
 	// IntegrityLookup 按文件名分发完整性校验器（integrity.Lookup 代理）。
 	// nil = 无校验器（语义校验跳过视为通过——Review Focus 1：未装配不误报 damaged）。
 	IntegrityLookup func(name string) integrity.Checker
+	// RemoveFile 是任务产物删除的单次尝试实现（nil = os.Remove 默认）。**测试注入
+	// opt（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam）**：构造时
+	// 注入结构体内部变量，运行期不可变。生产装配不传（零回归）。
+	RemoveFile func(string) error
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -409,6 +418,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		transferFSFor:    opts.TransferFSFor,
 		volumeFor:        opts.VolumeFor,
 		integrityLookup:  opts.IntegrityLookup,
+		removeFile:       opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
 		cancelFuncs:      make(map[string]context.CancelFunc),
 		running:          make(map[string]bool),
 		metrics:          &CloudMetrics{},

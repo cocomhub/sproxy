@@ -470,7 +470,6 @@ func startStallingThenRangeSource(t *testing.T, full []byte, prefix int) (*httpt
 // 桶只剩 90，而成功路径把 QuotaCommitted 绝对覆盖为 result.Size=100 ⇒ 10 字节差额再无释放
 // 路径可抹平，只能等周期扫描。
 func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
-	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与同包其它替换该 seam 的用例互斥。
 	full := resequencedContent(100)
 	srv, seenRange := startStallingThenRangeSource(t, full, 10)
 
@@ -485,7 +484,13 @@ func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
 		DownloadTimeout: 2 * time.Second,
 		MaxRetries:      1,
 	}
-	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	// 删除 opt：模拟「删除永久失败」（产物仍在盘上）——**构造时注入**（RemoveFile 实例
+	// 字段，运行期不可变，无包级 seam/并发修改）。
+	mgr, h := newCloudTestManager(t, dir, sm, cfg, CloudManagerOptions{
+		RemoveFile: func(path string) error {
+			return &os.PathError{Op: "remove", Path: path, Err: errors.New("sharing violation")}
+		},
+	})
 	h.setOwnerQuota("alice", 1000)
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice", TaskParams{Save: true})
@@ -500,13 +505,8 @@ func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
 		t.Fatalf("失败后 cloud 桶 Usage()=%d want 10（.partial 占账）", got)
 	}
 
-	// 删除 seam：模拟「删除永久失败」（产物仍在盘上）。必须在 ResumeTask 之前装好——
-	// force 分支在 ResumeTask 内同步执行。
-	origRemoveTaskFile := removeTaskFile
-	removeTaskFile = func(path string) error {
-		return &os.PathError{Op: "remove", Path: path, Err: errors.New("sharing violation")}
-	}
-	t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
+	// 删除失败模拟已随构造注入（RemoveFile opt，见上方 newCloudTestManager 调用）——
+	// force 分支在 ResumeTask 内同步执行，删除实现为构造时固定的「永久失败」。
 
 	if rerr := mgr.ResumeTask(task.ID, true, "alice"); rerr != nil {
 		t.Fatal(rerr)

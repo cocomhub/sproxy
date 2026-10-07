@@ -145,10 +145,20 @@ const externalHealthTTL = 30 * time.Second
 // externalProbeTimeout 是单次健康探测超时（拨号/握手有界，防列表挂起）。
 const externalProbeTimeout = 5 * time.Second
 
-// removeMovedSource 是 move 删源的可替换测试 seam：默认直接委托 storage.Root.Remove。
-// 测试可临时替换以确定性模拟「并发 delete 在 move stat 与 Remove 之间已删源」的 IsNotExist
-// 竞态（真实并发时序跨平台不可确定——Windows 上源文件在 move 复制期间被打开，并发 Remove
-// 通常共享冲突失败而非 IsNotExist）。生产路径不替换。
+// removeMovedSourceOrDefault 返回 move 删源实现：实例字段（构造时注入）优先，nil → 默认
+// storage.Root.Remove。**运行期不可变**——无包级 seam，并发安全（用户裁定 2026-10-07）。
+func (h *Handlers) removeMovedSourceOrDefault() func(root *storage.Root, rel string) error {
+	if h.removeMovedSource != nil {
+		return h.removeMovedSource
+	}
+	return removeMovedSource
+}
+
+// removeMovedSource 是 move 删源的默认实现（storage.Root.Remove）。**非 seam**——
+// 测试经 Handlers 实例字段 removeMovedSource（构造时注入）模拟「并发 delete 在 move stat
+// 与 Remove 之间已删源」的 IsNotExist 竞态（真实并发时序跨平台不可确定——Windows 上源
+// 文件在 move 复制期间被打开，并发 Remove 通常共享冲突失败而非 IsNotExist）。
+// 用户裁定 2026-10-07：禁止测试依赖/并发修改包级全局——实例字段运行期不可变。
 var removeMovedSource = func(root *storage.Root, rel string) error {
 	return root.Remove(rel)
 }
@@ -533,7 +543,7 @@ func (h *Handlers) moveCopyToTarget(mc *moveFileCtx, size int64, scopeRes, poolR
 //     全局 + from 卷池各欠计 S，PR-D F1）；回包按成功（源消失但数据已落目标卷，移动语义完成）；
 //   - 其它错误 → 回滚 to 侧（删目标 + 释放预留），源保留。
 func (h *Handlers) moveDeleteSource(mc *moveFileCtx, written int64, scope *quota.Scope, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
-	rmErr := removeMovedSource(mc.fromRoot, mc.rel)
+	rmErr := h.removeMovedSourceOrDefault()(mc.fromRoot, mc.rel)
 	if rmErr != nil {
 		// IsNotExist = 并发 delete 已先删源 → 只 commit to 侧（语义见 moveCommitConcurrentDeleted）。
 		if errors.Is(rmErr, os.ErrNotExist) {
