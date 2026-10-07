@@ -539,16 +539,6 @@ func planChunks(start, total, shareEnd, chunkSize int64) []chunk {
 // 简化：分享区 chunk 已 < shareEnd（416 探测保证 206），不再为 416 重试；
 // 仅网络/直链过期错误重试（重新 resolve 新直链）。
 
-// logChunkFail 区分「中断取消」与「服务器真实异常」：
-// ctx 已取消（Ctrl-C/超时）→ Debug（不吵）；否则 Warn（真异常才告警）。
-func (d *HybridDownloader) logChunkFail(ctx context.Context, msg string, attrs ...any) {
-	if ctx.Err() != nil {
-		d.log.Debug(msg, attrs...)
-		return
-	}
-	d.log.Warn(msg, attrs...)
-}
-
 func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadCtx, c chunk) error {
 	link := dc.target.DirectLink
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -557,7 +547,7 @@ func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadC
 			d.metricsInc(func(m *HybridMetrics) { m.ShareBytesSaved.Add(c.length) })
 			return nil
 		}
-		d.logChunkFail(ctx, "hybrid share chunk attempt failed", "offset", c.offset, "attempt", attempt, "err", err)
+		d.log.Warn("hybrid share chunk attempt failed", "offset", c.offset, "attempt", attempt, "err", err)
 		if attempt == 2 {
 			return err // 连续两次失败 → 转账号段
 		}
@@ -594,7 +584,7 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloa
 		if err == nil {
 			return nil
 		}
-		d.logChunkFail(ctx, "hybrid acct chunk attempt failed", "share", dc.shareID, "offset", c.offset, "attempt", attempt, "err", err)
+		d.log.Warn("hybrid acct chunk attempt failed", "share", dc.shareID, "offset", c.offset, "attempt", attempt, "err", err)
 		if attempt == 2 {
 			return err
 		}
@@ -638,11 +628,11 @@ func (d *HybridDownloader) tryMultiAccountChunk(ctx context.Context, dc *downloa
 		if ctx.Err() == nil {
 			_ = d.pool.MarkFailed(ctx, acct.Name)
 		}
-		d.logChunkFail(ctx, "hybrid multi-account use/link failed", "acct", acct.Name, "err", linkErr)
+		d.log.Warn("hybrid multi-account use/link failed", "acct", acct.Name, "err", linkErr)
 		return linkErr
 	}
 	if err := d.downloadChunkRange(ctx, dc, c, link); err != nil {
-		d.logChunkFail(ctx, "hybrid multi-account chunk attempt failed", "acct", acct.Name, "offset", c.offset, "err", err)
+		d.log.Warn("hybrid multi-account chunk attempt failed", "acct", acct.Name, "offset", c.offset, "err", err)
 		return err
 	}
 	// 成功记账（配额扣减；persist 失败仅配额缓存漂移，下次 Select 预检兜底）
