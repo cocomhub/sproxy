@@ -35,7 +35,7 @@ const (
 const hybridShareRatioMax = 0.5
 
 // defaultHybridChunkSize 是分片大小（默认 64MB，平衡并发与恢复粒度）。
-const defaultHybridChunkSize = 64 << 20
+const defaultHybridChunkSize = 32 << 20 // 32MiB（分片更细，中断恢复粒度更小；与 pikget 对齐）
 
 // HybridMetrics 是混合下载指标（并入 CloudMetrics）。
 type HybridMetrics struct {
@@ -209,6 +209,10 @@ func (d *HybridDownloader) HybridCounters() map[string]int64 {
 // Name 返回下载器名（注册表用）。
 func (d *HybridDownloader) Name() string { return "pikpak-hybrid" }
 
+// IntegrityMode 声明完整性归属：hybrid 走 GCID 权威复算（① 态），
+// 未命中时回落本地自洽（② 态）——与旧 PikpakDownloader 语义一致。
+func (d *HybridDownloader) IntegrityMode() downloader.IntegrityMode { return downloader.ModeLocalOnly }
+
 // Supports 判断是否支持该 source（mypikpak/keepshare 分享 URL）。
 func (d *HybridDownloader) Supports(source string) bool {
 	_, err := parseShareID(source)
@@ -290,6 +294,7 @@ func (d *HybridDownloader) fallbackDownload(ctx context.Context, source, destPat
 
 // runHybrid 执行混合下载主体（分享区 + 账号区分片并行）。
 func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory) (*Result, error) {
+	integrityVerified := false // GCID 权威复算命中标记（Result 三态用）
 	// 写盘目标：临时文件 destPath + ".hybrid.downloading"（分片 WriteAt 全落这里，
 	// 完成并校验通过后才 rename 到最终 destPath）。manifest 随临时文件（destPath+".hybrid"
 	// 不变——源身份/恢复逻辑零改动）。
@@ -350,6 +355,7 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 			dc.lease.Release(ctx)
 			return nil, fmt.Errorf("hybrid integrity check failed: file gcid != target %s", dc.target.Hash)
 		}
+		integrityVerified = true // GCID 权威命中 → Result 标记 ModeAuthority（语义管道态）
 		d.log.Info("hybrid integrity verified (gcid match)")
 	}
 	// 校验通过 → 临时文件原子 rename 到最终 destPath（同目录原子；跨 FS 回退 copy+remove）。
@@ -375,9 +381,16 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	}
 	dc.lease.Release(ctx)
 	// 注意：Checksum 是**本地落盘文件的 SHA-256**（自证文件未被篡改/续传拼错），
-	// 不是源身份哈希（源身份校验用 SHA-1 与 target.Hash 比对，已在上方 verify 完成）。
+	// 不是源身份哈希（源身份校验用 GCID 与 target.Hash 比对，已在上方 verify 完成）。
 	// 消费方若拿本字段比对源 hash 会误判——仅作本地完整性指纹。
-	return &Result{Size: dc.currentTotal, Checksum: checksum, ModTime: time.Now()}, nil
+	res := &Result{Size: dc.currentTotal, Checksum: checksum, ModTime: time.Now()}
+	// GCID 权威命中（① 态）：标记 ModeAuthority + 带外权威 hash——语义校验管道
+	// （cloud/integrity 校验器注册表）据此识别 hybrid 产出为权威可信，不再重复复算。
+	if dc.target.Hash != "" && integrityVerified {
+		res.Integrity = downloader.ModeAuthority
+		res.AuthorityHash = dc.target.Hash
+	}
+	return res, nil
 }
 
 // runChunks 并行执行所有 chunk：**分享区与账号区分池并行**（互不阻塞）——
