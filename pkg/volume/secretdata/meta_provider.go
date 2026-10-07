@@ -13,6 +13,7 @@ package secretdata
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -61,9 +62,7 @@ func shardsealMetaToFileMeta(m *shardseal.Meta) *meta.FileMeta {
 	// 调用方修改返回 FileMeta.Extra 不得污染卷内存态）。
 	if m.Extra != nil {
 		fm.Extra = make(map[string]any, len(m.Extra))
-		for k, v := range m.Extra {
-			fm.Extra[k] = v
-		}
+		maps.Copy(fm.Extra, m.Extra)
 	}
 	// 分块大小：secretdata 不定长分块——取首块 OrigSize 作 ChunkSize 表达；
 	// 实际逐块校验以各块 SHA256 为准（ChunkSize 仅元信息，非校验粒度）。
