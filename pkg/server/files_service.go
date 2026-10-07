@@ -359,7 +359,10 @@ func (p filesMetaPolicy) reserveMetaQuota(owner, mrel string, size int64) (*quot
 
 // atomicWriteMeta 复用存储层原子写（root 相对 + fsync + rename）：与主文件同语义。
 // tmp 名带纳秒后缀防同 rel 并发写撞 O_EXCL（MINOR-2 修复）。
+// m8 修复：写前清扫同 rel 旧 `.tmp.*` 孤儿（此前崩溃在 rename 前残留的 tmp 会常驻
+// meta 桶占磁盘；下次 WriteMeta 自愈清理，防孤儿累积）。
 func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data []byte) error {
+	p.sweepMetaTmp(root, mrel)
 	tmpRel := mrel + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
 	f, ferr := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if ferr != nil {
@@ -380,6 +383,22 @@ func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data [
 		return rerr
 	}
 	return nil
+}
+
+// sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（`.tmp.<nano>` 前缀，崩溃残留）。
+// best-effort：删除失败仅日志语义（下次写再试）。
+func (p filesMetaPolicy) sweepMetaTmp(root *storage.Root, mrel string) {
+	dir := path.Dir(mrel)
+	base := path.Base(mrel) + ".tmp."
+	es, err := root.ReadDir(dir)
+	if err != nil {
+		return // 目录不存在/不可读：无孤儿可清
+	}
+	for _, e := range es {
+		if strings.HasPrefix(e.Name(), base) {
+			_ = root.Remove(path.Join(dir, e.Name()))
+		}
+	}
 }
 
 // computeMeta 从 root 相对 rel 的文件计算完整 FileMeta（流式读一遍，双算法 + 分块）。
