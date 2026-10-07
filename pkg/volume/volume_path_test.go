@@ -59,6 +59,25 @@ func TestResolveUserPath_NotAuthorized(t *testing.T) {
 	}
 }
 
+// TestResolveLocation_OwnerValidation M1 修复：owner=保留桶名/含分隔符 → 拒绝；
+// 空 owner（匿名）放行（FSPath 归一 anonymous）。
+func TestResolveLocation_OwnerValidation(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []Owner{"user", "meta", "cloud", "archive", "chunk", "version", "trash", "a/b", "..", "./x"} {
+		if _, err := sharedVolume().ResolveUserLocation(bad, "f.txt"); err == nil {
+			t.Errorf("owner %q 应被拒绝（保留桶名/非法段）", bad)
+		}
+	}
+	// 空 owner：匿名归一（FSPath 产出 anonymous/user/...），合法。
+	loc, err := sharedVolume().ResolveUserLocation("", "f.txt")
+	if err != nil {
+		t.Fatalf("空 owner 应放行（匿名）: %v", err)
+	}
+	if want := "anonymous/user/f.txt"; sharedVolume().FSPath(loc) != want {
+		t.Fatalf("空 owner 键=%q want %q", sharedVolume().FSPath(loc), want)
+	}
+}
+
 // TestResolveUserPath_InvalidPath：路径逃逸/注入拒绝（绝对路径/../空段/非法段）。
 func TestResolveUserPath_InvalidPath(t *testing.T) {
 	t.Parallel()

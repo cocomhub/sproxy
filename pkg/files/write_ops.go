@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -379,6 +380,13 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 	route.Release()
 	ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 	s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
+	// 可信卷：去重硬链接路径同样建 meta（M2 修复——回退复制分支有、硬链接分支此前
+	// 漏建，违反「新文件到达立刻建 meta」不变量；与 srcRel 内容一致，读路径直算兜底）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
+			f.logger.Warn("可信卷 meta 落盘失败（去重硬链接）", "file_name", rel, "error", mErr)
+		}
+	}
 	// 引用文件大小 = 已存首份大小（从硬链接目标 stat）。
 	var linkedSize int64
 	if fi, statErr := f.root.Stat(rel); statErr == nil {
@@ -1206,9 +1214,19 @@ func (s *Service) renameChecksumIndex(a renameHomeArgs) {
 		s.index.rename(a.owner, strings.TrimPrefix(a.fromRel, "user/"), strings.TrimPrefix(a.toRel, "user/"))
 	}
 	// 可信卷：重命名主文件联动移动配套 .meta（服务端内部文件随主文件一起动）。
-	if s.rt.fileMetaEnabled() {
-		if a.root != nil {
-			_ = a.root.Rename(meta.MetaPath(a.fromRel), meta.MetaPath(a.toRel))
+	// M4 修复：搬 meta 前先确保 meta 目标父目录存在（rename 到新目录时 meta/<新dir>
+	// 不存在 → 裸 Rename 失败被吞 → 孤儿 + 目标无 sidecar）；失败记 Warn（非阻断）。
+	if s.rt.fileMetaEnabled() && a.root != nil {
+		fromMeta := meta.MetaPath(a.fromRel)
+		toMeta := meta.MetaPath(a.toRel)
+		if dir := path.Dir(toMeta); dir != "." && dir != "" {
+			if mkErr := a.root.MkdirAll(dir, 0o755); mkErr != nil {
+				a.logger.Warn("重命名创建 meta 目标父目录失败", "meta", toMeta, "error", mkErr)
+				return
+			}
+		}
+		if rerr := a.root.Rename(fromMeta, toMeta); rerr != nil {
+			a.logger.Warn("重命名联动 meta 失败", "from", fromMeta, "to", toMeta, "error", rerr)
 		}
 	}
 }

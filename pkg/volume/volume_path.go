@@ -169,6 +169,15 @@ func (v Volume) ResolveLocation(owner Owner, bucket Bucket, rel Path) (Location,
 	if !v.Authorize(owner) {
 		return Location{}, ErrVolumeNotAuthorized
 	}
+	// 1b. owner 合法性（R1-MAJOR-1 修复）：与 NewTenant 同款保护——owner 须为合法段名
+	// 且**不得为内部保留功能桶名**（user/meta/cloud/archive/chunk/version/trash）。
+	// 否则 `<owner>/user/...` 与 `user/...` 在 BucketOf/RebucketTo 结构解析时歧义
+	// （owner=user 撞车 → sidecar 桶段判错），且 owner 含 `/` 会跨 owner 键交错。
+	// 转存/上传经卷键空间唯一入口 ResolveLocation——此处是纵深防御（注册口未拦）。
+	// **空 owner 放行**：空 = 匿名（FSPath 归一 anonymous），既有转存/上传语义合法。
+	if owner != "" && (!storage.ValidSegmentName(owner) || storage.IsReservedBucketName(owner)) {
+		return Location{}, ErrInvalidUserPath
+	}
 	// 2. bucket 校验（单段合法名——防桶名注入/多段拼写）。
 	if !storage.ValidSegmentName(bucket) {
 		return Location{}, ErrInvalidUserPath
