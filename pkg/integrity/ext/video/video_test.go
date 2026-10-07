@@ -50,8 +50,13 @@ func TestVideoChecker_Kind(t *testing.T) {
 }
 
 // TestVideoChecker_Corrupt：非视频字节（即使 .mp4 扩展名）→ OK=false（不回 error）。
+// 用 fakeIndexer 返回**非哨兵**解析错误模拟 ffprobe 正常执行但容器非法（与缺 ffprobe
+// 哨兵区分——CI 无 ffmpeg 环境也须确定性地测到「真解析失败→OK=false」分支）。
 func TestVideoChecker_Corrupt(t *testing.T) {
 	t.Parallel()
+	prev := testSeamIndexer
+	setTestSeamIndexer(fakeIndexer{err: errors.New("ffprobe: 容器非法（模拟）")})
+	t.Cleanup(func() { setTestSeamIndexer(prev) })
 	path := writeBytes(t, "corrupt.mp4", []byte("not-a-video"))
 	rep, err := VideoChecker{}.Check(context.Background(), path, int64(len("not-a-video")))
 	if err != nil {
