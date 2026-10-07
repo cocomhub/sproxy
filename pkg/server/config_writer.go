@@ -136,6 +136,17 @@ func volumeEntryNode(v UserVolume) (*yaml.Node, error) {
 			return nil, err
 		}
 	}
+	// C4 CRITICAL（2026-10-07 真实浏览器复测）：运行时建卷（POST /api/volumes/user）注入
+	// owner-only ACL（Mode=Allow + 单 owner）使键空间为独享 `user/<rel>`；若写回不落 ACL，
+	// 重启后 config 声明卷 ACL 零值（parseVolumeACL 归 deny）→ Shared()==true → 键空间翻转
+	// 成 `<owner>/user/<rel>` → 旧数据不可见。故有 Owner 的 UserVolume 必须补写 owner-only
+	// ACL 段（对齐 config 卷 ACL 结构 VolumeACLConfig：mode allow + owners [<owner>]）。
+	// Owner 空（config 声明卷无 owner）→ 不写 acl 段（保持现状，零回归）。
+	if v.Owner != "" {
+		if err := put("acl", VolumeACLConfig{Mode: VolumeACLAllow, Owners: []string{v.Owner}}); err != nil {
+			return nil, err
+		}
+	}
 	return n, nil
 }
 
