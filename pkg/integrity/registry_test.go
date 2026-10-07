@@ -106,7 +106,7 @@ func TestRegisterNilFactoryPanics(t *testing.T) {
 	t.Parallel()
 	reg := integrity.NewRegistry()
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("nil 工厂注册应 panic")
 		}
 	}()
