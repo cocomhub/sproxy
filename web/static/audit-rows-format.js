@@ -3,11 +3,12 @@
 
 // audit-rows-format.js —— WebUI「任务审计」渲染纯函数（传输页云任务行「审计」弹窗）。
 // 服务端数据源：CloudTask.audit → []audit.Row（SnapshotTask 自动携带）：
-//   Row{type, level, dim, step, start_ms, dur_ms, err, bw_bps, bytes, meta:{cipher_bytes?,algorithm?}, node}
+//   Row{type, level, dim, step, start_ms, dur_ms, err, bw_bps, bytes, meta:{cipher_bytes?,algorithm?,integrity_status?,integrity_sames?,integrity_decision?}, node}
 // 渲染口径（spec）：
 //   - 通用列：type / level / step / dur_ms / bytes / bw_bps；
 //   - 加密行（type==='encrypt'）并排「明文 bytes」 vs 「密文 meta.cipher_bytes」+ algorithm（放「说明」列）；
-//   - download/transfer 行显示 dur_ms / bytes / bw_bps；
+//   - download 行：dur_ms / bytes / bw_bps；完整性判定（meta.integrity_status + integrity_sames，
+//     非空才显示；verified/damaged/unverified 中文文案，damaged ×N 附重下一致次数）进「说明」列；
 //   - err（异常说明）与 algorithm / node 归入「说明」列。
 // 纯函数可 node --test，不依赖 DOM。样式统一 var(--…) 禁内联亮色 hex；HTML 转义复用
 // appRender.escHtml（禁自建 escHtml）；字节大小复用 appRender.formatSize（禁自建 formatSize）。
@@ -31,15 +32,40 @@ function _escHtml(s) {
   return appRender.escHtml(s);
 }
 
-// _detailText(r) → 「说明」列：encrypt 行优先 algorithm；否则 err；再退 node；空 → ''。
+// _integrityStatusText(m)：download 行完整性判定文案（B5-I1——审计面板渲染完整性状态，
+// 承接后端 download span Meta 写入的 integrity_status/integrity_sames，见
+// pkg/cloud/manager_task.go runDownloadWithAudit）。
+// integrity_status ∈ {"", "verified", "damaged", "unverified"}（服务端固定枚举）：
+// damaged → 完整性异常；unverified → 未校验；verified → 已验证；未知值原样转义（防注入）。
+// integrity_sames（重下一致次数）>0 时附 ×N。status 非空才渲染（verified 也展示，供溯源）。
+function _integrityStatusText(m) {
+  const st = m.integrity_status;
+  let label;
+  if (st === 'damaged') label = '完整性异常';
+  else if (st === 'unverified') label = '未校验';
+  else if (st === 'verified') label = '已验证';
+  else label = String(st);
+  let txt = '完整性: ' + appRender.escHtml(label);
+  const same = m.integrity_sames;
+  if (typeof same === 'number' && same > 0) txt += ' ×' + same;
+  return txt;
+}
+
+// _detailText(r) → 「说明」列：encrypt 行 algorithm；download 行完整性判定；err；node；空 → ''。
+// 完整性字段非空才渲染（damaged ×N 附重下一致次数）；多段用「；」连接（如 damaged 行同时
+// 带 err 时 integrity 与 err 并存）。
 function _detailText(r) {
   const m = r && r.meta;
+  const parts = [];
   if (r && r.type === 'encrypt' && m && m.algorithm) {
-    return '算法: ' + appRender.escHtml(String(m.algorithm));
+    parts.push('算法: ' + appRender.escHtml(String(m.algorithm)));
   }
-  if (r && r.err) return appRender.escHtml(String(r.err));
-  if (r && r.node) return 'node: ' + appRender.escHtml(String(r.node));
-  return '';
+  if (r && r.type === 'download' && m && m.integrity_status) {
+    parts.push(_integrityStatusText(m));
+  }
+  if (r && r.err) parts.push(appRender.escHtml(String(r.err)));
+  if (r && r.node) parts.push('node: ' + appRender.escHtml(String(r.node)));
+  return parts.join('；');
 }
 
 // _cell(content) → 单个 <td>（共享样式 token，禁内联亮色）。

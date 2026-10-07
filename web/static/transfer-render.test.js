@@ -45,13 +45,27 @@ function sampleItems() {
 
 test('TRANSFER_CHANNELS 频道顺序与 label 精确取值', () => {
   assert.deepStrictEqual(r.TRANSFER_CHANNELS.map((c) => c.id),
-    ['all', 'uploading', 'downloading', 'cloud_tasks', 'cloud_groups', 'sync', 'completed']);
+    ['all', 'uploading', 'downloading', 'cloud_tasks', 'cloud_damaged', 'cloud_groups', 'sync', 'completed']);
   const labels = {};
   for (const c of r.TRANSFER_CHANNELS) labels[c.id] = c.label;
   assert.deepStrictEqual(labels, {
     all: '全部', uploading: '上传中', downloading: '下载中',
-    cloud_tasks: '云任务', cloud_groups: '云组', sync: '同步', completed: '已完成',
+    cloud_tasks: '云任务', cloud_damaged: '受损', cloud_groups: '云组', sync: '同步', completed: '已完成',
   });
+});
+
+test('filterTransferItems: cloud_damaged 频道只含 integrity_status=damaged 的云任务（B5-M1）', () => {
+  const items = [
+    { id: 'dm1', kind: 'cloud_task', status: 'completed', meta: { raw: { integrity_status: 'damaged' } } },
+    { id: 'vf1', kind: 'cloud_task', status: 'completed', meta: { raw: { integrity_status: 'verified' } } },
+    { id: 'uv1', kind: 'cloud_task', status: 'completed', meta: { raw: { integrity_status: 'unverified' } } },
+    { id: 'ct1', kind: 'cloud_task', status: 'completed', meta: { raw: {} } },
+    { id: 'other', kind: 'cloud_group', status: 'completed', meta: { raw: { integrity_status: 'damaged' } } },
+  ];
+  const out = r.filterTransferItems(items, 'cloud_damaged');
+  assert.deepStrictEqual(out.map((i) => i.id), ['dm1'], '仅 damaged 云任务命中');
+  assert.deepStrictEqual(r.filterTransferItems(items, 'cloud_tasks').map((i) => i.id),
+    ['dm1', 'vf1', 'uv1', 'ct1'], 'cloud_tasks 频道不受影响全量透传');
 });
 
 // ---- filterTransferItems ----
@@ -221,6 +235,54 @@ test('buildTransferRowHtml 云任务 failed/cancelled → 恢复 + 删除；pend
   assert.ok(!dlHtml.includes('cloud-resume-btn'));
   const pendHtml = r.buildTransferRowHtml({ id: 'cloud-task-P', kind: 'cloud_task', filename: 'p.bin', status: 'pending', meta: { raw: {} } });
   assert.ok(pendHtml.includes('cloud-cancel-btn'));
+});
+
+test('buildTransferRowHtml 云任务 failed 内联透传 task.error（B5-M2：must-pass 阻断等原因即时可见）', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'cloud-task-FE', kind: 'cloud_task', filename: 'f.bin', status: 'failed',
+    meta: { raw: { error: 'integrity: 语义校验失败，重下重试' } },
+  });
+  assert.ok(html.includes('integrity: 语义校验失败，重下重试'), 'failed 行应内联展示 task.error');
+  assert.ok(html.includes('--text-danger'), '错误文案用危险色 token');
+  // 非 failed 不显示；无 error 不 panic 不显示
+  const running = r.buildTransferRowHtml({ id: 'cloud-task-RE', kind: 'cloud_task', filename: 'r.bin', status: 'downloading', meta: { raw: { error: 'x' } } });
+  assert.ok(!running.includes('integrity: 语义校验失败'), '非 failed 不显示错误');
+  const noErr = r.buildTransferRowHtml({ id: 'cloud-task-NE', kind: 'cloud_task', filename: 'n.bin', status: 'failed', meta: { raw: {} } });
+  assert.ok(!noErr.includes('--text-danger'), '无 error 不渲染错误段');
+  // 错误文本必须转义（防 XSS）
+  const xss = r.buildTransferRowHtml({ id: 'cloud-task-XE', kind: 'cloud_task', filename: 'x.bin', status: 'failed', meta: { raw: { error: '<script>alert(1)</script>' } } });
+  assert.ok(xss.indexOf('<script>alert(1)</script>') === -1, 'error 必须转义');
+  assert.match(xss, /&lt;script&gt;/);
+});
+
+test('buildTransferRowHtml 云任务 completed+damaged → 重下按钮（B5-M3，复用 cloud-resume-btn 委托）', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'cloud-task-DM', kind: 'cloud_task', filename: 'd.png', status: 'completed',
+    meta: { raw: { integrity_status: 'damaged', checksum: 'c9' } },
+  });
+  assert.ok(html.includes('class="btn btn-sm btn-secondary cloud-resume-btn"'), 'completed+damaged 应提供重下按钮');
+  assert.ok(html.includes('>重下</button>'), '按钮文案为重下');
+  assert.ok(html.includes('完整性异常'), '完整性标记仍在');
+  assert.ok(html.includes('cloud-download-btn'), '下载到本地按钮仍保留');
+  // 非 damaged 的 completed 不出现重下
+  const normal = r.buildTransferRowHtml({ id: 'cloud-task-VR', kind: 'cloud_task', filename: 'v.bin', status: 'completed', meta: { raw: { integrity_status: 'verified' } } });
+  assert.ok(!normal.includes('>重下</button>'), 'verified 不出现重下');
+  const none = r.buildTransferRowHtml({ id: 'cloud-task-NR', kind: 'cloud_task', filename: 'n.bin', status: 'completed', meta: { raw: {} } });
+  assert.ok(!none.includes('>重下</button>'), '无 status 不出现重下');
+});
+
+test('buildTransferListHtml cloud_damaged 频道平铺不折叠（B5-M1：筛出受损直接重下）', () => {
+  const damagedItems = [
+    { id: 'cloud-task-D1', kind: 'cloud_task', filename: 'a.png', status: 'completed', meta: { raw: { integrity_status: 'damaged' } } },
+    { id: 'cloud-task-D2', kind: 'cloud_task', filename: 'b.png', status: 'completed', meta: { raw: { integrity_status: 'damaged' } } },
+  ];
+  const html = r.buildTransferListHtml(damagedItems, 'cloud_damaged');
+  assert.ok(html.includes('cloud-task-D1') && html.includes('cloud-task-D2'), '受损项平铺展示');
+  assert.ok(!html.includes('<details'), 'cloud_damaged 频道不折叠成 details（避免筛出后仍需展开）');
+  assert.ok(!html.includes('group-detail-cloud_task'), '无 completed 折叠组');
+  // 普通频道仍折叠（回归）
+  const allHtml = r.buildTransferListHtml(damagedItems, 'all');
+  assert.ok(allHtml.includes('group-detail-cloud_task') && allHtml.includes('<details'), 'all 频道 damaged 完成项仍按 completed 折叠（既有行为）');
 });
 
 test('buildTransferRowHtml 云组行按钮按 status 渲染（打包/恢复/取消/删除/展开 + 详情行）', () => {

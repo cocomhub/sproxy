@@ -558,11 +558,14 @@
   // ---- 传输渲染（纯函数，只读 TransferItem 数组 → HTML 字符串） ----
 
   // 频道条定义（spec 字面值，顺序不可打乱）。id 全小写下划线；label 为 UI 标签。
+  // cloud_damaged（受损）频道：仅 integrity_status="damaged" 的云任务（B5-M1 完整性筛选，
+  // 对齐后端 ListTasks("damaged")；客户端过滤已加载的全量云任务列表）。
   const TRANSFER_CHANNELS = [
     { id: 'all', label: '全部' },
     { id: 'uploading', label: '上传中' },
     { id: 'downloading', label: '下载中' },
     { id: 'cloud_tasks', label: '云任务' },
+    { id: 'cloud_damaged', label: '受损' },
     { id: 'cloud_groups', label: '云组' },
     { id: 'sync', label: '同步' },
     { id: 'completed', label: '已完成' },
@@ -571,12 +574,14 @@
   // 频道谓词：predicate(item) → boolean（供 filterTransferItems 分发）。
   // 语义与 spec 分节 1 一致：uploading 仅 upload 类（hashing/uploading/paused/failed/cancelled）；
   // downloading 仅 download 类（含 archive）；cloud_tasks/cloud_groups 按 kind 全量透传；
-  // completed 按 status==='completed' 全 kind 命中。
+  // cloud_damaged 仅 integrity_status="damaged" 的云任务（B5-M1）；completed 按 status==='completed'
+  // 全 kind 命中。
   const _channelPredicates = {
     all: function () { return true; },
     uploading: function (it) { return it.kind === 'upload' && ['hashing', 'uploading', 'paused', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
     downloading: function (it) { return it.kind === 'download' && ['downloading', 'paused', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
     cloud_tasks: function (it) { return it.kind === 'cloud_task'; },
+    cloud_damaged: function (it) { return it.kind === 'cloud_task' && !!(it.meta && it.meta.raw) && it.meta.raw.integrity_status === 'damaged'; },
     cloud_groups: function (it) { return it.kind === 'cloud_group'; },
     sync: function (it) { return it.kind === 'sync_task' && ['pending', 'syncing', 'completed', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
     completed: function (it) { return it.status === 'completed'; },
@@ -646,6 +651,12 @@
         // P1：clipboard 非 HTTPS 源会拒绝——必须 await + 失败回退提示，否则静默显示
         // 「已复制」误导（review 4：clipboard.writeText 未 await 无 catch）。
         a += '<span title="' + escHtml(transferURL) + '" style="font-size:11px;color:var(--text-secondary);margin-right:4px;cursor:pointer;" class="cloud-transfer-url-text" data-url="' + escHtml(transferURL) + '">转存:' + escHtml(transferURL) + '</span>';
+      }
+      // B5-M3：completed+damaged 可经后端 ResumeTask 重下自愈（manager_lifecycle.go 放行
+      // damaged）——UI 暴露「重下」，复用 cloud-resume-btn 事件委托（对齐 failed/cancelled
+      // 恢复路径）。
+      if (raw.integrity_status === 'damaged') {
+        a += '<button class="btn btn-sm btn-secondary cloud-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">重下</button>';
       }
       a += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
     } else if (st === 'failed' || st === 'cancelled') {
@@ -889,6 +900,14 @@
     // （pkg/cloud/manager.go）。damaged → 双色「完整性异常」（--text-warning）；unverified
     // （超内存配额跳过校验）→ 灰色「未校验」；verified/缺省 → 无标记。纯函数便于单测。
     badge += buildIntegrityBadge(kind, item);
+    // B5-M2：failed 云任务内联透传 task.error（must-pass 完整性阻断等原因即时可见，
+    // 不必点开审计弹窗）。raw.error 来自服务端 CloudTask.Error，escHtml 防注入；
+    // 超长省略号 + title 全显。
+    const rawMeta = (item.meta && item.meta.raw) || {};
+    const errText = kind === 'cloud_task' && item.status === 'failed' ? (rawMeta.error || '') : '';
+    const errHtml = errText
+      ? '<span style="font-size:11px;color:var(--text-danger);margin-left:8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;" title="' + escHtml(errText) + '">' + escHtml(errText) + '</span>'
+      : '';
     const cached = _cachedChunksOf(item.meta);
     const totalChunks = item.meta && item.meta.totalChunks ? item.meta.totalChunks : 0;
     const cachedHtml = cached > 0 ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">已缓存 ' + cached + '/' + totalChunks + ' 块</span>' : '';
@@ -900,7 +919,7 @@
       : '';
     return '<div class="transfer-row" data-item-id="' + escHtml(item.id) + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border-color);background:var(--bg-container);">' +
       '<span style="font-size:16px;">' + _kindIcon(kind) + '</span>' +
-      '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(title) + '">' + escHtml(titleHtml) + badge + cachedHtml + carrierHtml + '</span>' +
+      '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(title) + '">' + escHtml(titleHtml) + badge + errHtml + cachedHtml + carrierHtml + '</span>' +
       '<span style="white-space:nowrap;">' + _progressHtml(item) + '</span>' +
       '<span class="transfer-actions" style="white-space:nowrap;">' + actions + '</span>' +
       '</div>' + detail;
@@ -938,7 +957,9 @@
     const filtered = filterTransferItems(items, channel);
     if (filtered.length === 0) return '<div class="empty-msg">暂无传输记录</div>';
     const completed = filtered.filter(function (it) { return it.status === 'completed'; });
-    if (completed.length === 0) {
+    if (completed.length === 0 || channel === 'cloud_damaged') {
+      // cloud_damaged 频道元素全是「受损」完成项——折叠反而不达筛选目的（需展开才见），
+      // 平铺展示以便一键重下（B5-M1）。
       return filtered.map(buildTransferRowHtml).join('');
     }
     const running = filtered.filter(function (it) { return it.status !== 'completed'; });
