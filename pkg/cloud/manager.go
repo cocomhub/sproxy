@@ -376,7 +376,6 @@ type CloudManagerOptions struct {
 	// 转存直写目标卷 FS、不经 files 域 guard，必须在此收口（否则「占用目录只读」对加密数据
 	// 无实际保护）。写前调用（transferDone 起点，不写卷不留钉子文件）。
 	OccupiedWriteGuard func(volName, userVisibleRel string) error
-
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -444,7 +443,6 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		stopFlush:          make(chan struct{}),
 		stopCleanup:        make(chan struct{}),
 		groups:             make(map[string]*CloudTaskGroup),
-
 	}
 
 	mgr.logger.Info("cloud download manager initialized",
