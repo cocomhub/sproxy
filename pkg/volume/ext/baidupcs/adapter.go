@@ -5,10 +5,14 @@ package baidupcs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
@@ -132,22 +136,65 @@ func (a *binaryAdapter) Upload(ctx context.Context, localPath, targetPath string
 }
 
 // Download 二进制优先下载，失败（缺失/超时/非零退出）回退库。
+//
+// C4 修复（--saveto 目录语义适配）：fork 库 `download --saveto <dir>` 的 saveto 是
+// **目录**（内容落到 `<dir>/<basename>`）——而调用方（Storage.Get/Stat 回退）传入的是
+// 预创建的**文件路径** localPath。直接传 localPath 会让二进制写 `<localPath>/<basename>`
+// 时父路径是 0 字节文件 → ENOTDIR 恒失败。修复：内部 MkdirTemp 临时目录传 saveto，
+// 下载成功后把目录内产物（basename 对应 remotePath 末段）rename 到 localPath（覆盖
+// 调用方预创建的空文件），再清理目录——对外保持"下载到文件"契约，与库 fallback 一致。
 func (a *binaryAdapter) Download(ctx context.Context, remotePath, localPath string) error {
-	ok, err := a.runBinary(ctx, "download", "--saveto", localPath, remotePath)
-	if ok {
+	if err := a.downloadViaBinary(ctx, remotePath, localPath); err == nil {
 		return nil
+	} else if !errors.Is(err, errBinaryDownloadFailed) {
+		return err
 	}
 	if a.cfg.Fallback != nil {
 		fbErr := a.cfg.Fallback.Download(ctx, remotePath, localPath)
 		if fbErr != nil {
-			return fmt.Errorf("baidupcs download: 二进制失败(%v) 且库兜底也失败: %w", err, fbErr)
+			return fmt.Errorf("baidupcs download: 二进制失败且库兜底也失败: %w", fbErr)
 		}
 		return nil
 	}
-	if err != nil {
-		return err
+	return fmt.Errorf("%w: baidupcs download 失败且无库兜底", errBinaryDownloadFailed)
+}
+
+// errBinaryDownloadFailed 是二进制下载失败的哨兵（回退库判定用）。
+var errBinaryDownloadFailed = errors.New("baidupcs: binary download failed")
+
+// downloadViaBinary 二进制路径：临时目录 saveto → 定位产物 → rename 到 localPath。
+func (a *binaryAdapter) downloadViaBinary(ctx context.Context, remotePath, localPath string) error {
+	dir, mkErr := os.MkdirTemp("", "baidupcs-dl-*")
+	if mkErr != nil {
+		return fmt.Errorf("baidupcs: 创建下载临时目录: %w", mkErr)
 	}
-	return fmt.Errorf("baidupcs download 失败且无库兜底")
+	defer os.RemoveAll(dir)
+	ok, _ := a.runBinary(ctx, "download", "--saveto", dir, remotePath)
+	if !ok {
+		return errBinaryDownloadFailed // 回退库
+	}
+	// 定位目录内产物（basename = remotePath 末段；saveto 目录语义下内容落 `<dir>/<basename>`）。
+	base := path.Base(strings.TrimSuffix(remotePath, "/"))
+	prod := filepath.Join(dir, base)
+	if fi, ferr := os.Stat(prod); ferr != nil || fi.IsDir() {
+		// 产物名与 remotePath 不一致（罕见）：取目录内唯一普通文件。
+		es, derr := os.ReadDir(dir)
+		if derr != nil || len(es) == 0 || es[0].IsDir() {
+			return fmt.Errorf("%w: 下载成功但未在临时目录定位产物（dir=%s base=%s）", errBinaryDownloadFailed, dir, base)
+		}
+		prod = filepath.Join(dir, es[0].Name())
+	}
+	if rerr := os.Rename(prod, localPath); rerr != nil {
+		// rename 覆盖失败（Windows 预创建文件存在时可能拒绝）→ 回退复制。
+		data, rerr2 := os.ReadFile(prod)
+		if rerr2 != nil {
+			return fmt.Errorf("baidupcs: 移动下载产物失败（read %s）: %w", prod, rerr2)
+		}
+		if werr := os.WriteFile(localPath, data, 0o600); werr != nil {
+			return fmt.Errorf("baidupcs: 移动下载产物失败（write %s）: %w", localPath, werr)
+		}
+	}
+	return nil
 }
 
 // Move 服务端移动（源移除）：二进制 `mv` 优先、失败回退库；无兜底明确 ErrUnsupported。

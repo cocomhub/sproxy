@@ -63,6 +63,9 @@ type Storage struct {
 	// DefaultTransport——dlink 拉取无 per-host 超时/连接池上限会占住全局池拖累
 	// 同进程其它外部请求）。per-instance 独立连接池 + ResponseHeaderTimeout 兜底。
 	httpc *http.Client
+	// lastETag 是最近一次上传后 Stat 看到的远端 ETag（putAttempt 记录，供终态报错
+	// 文案；非并发共享——Put 调用方串行）。
+	lastETag string
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -144,32 +147,92 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 func (s *Storage) putRetryLoop(ctx context.Context, key, remote, tmpPath, localMD5 string) (*ObjectMeta, error) {
 	lastRemoteETag := ""
 	for attempt := 1; attempt <= maxPutAttempts; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, mapPCSError(err)
-		}
-		meta, proceed, perr := s.putCheckExisting(ctx, key, localMD5, attempt)
-		if perr != nil {
-			return nil, perr
-		}
-		if !proceed {
-			return meta, nil // 秒传命中：目标已存在且 ETag == 本地 md5
-		}
-
-		if upErr := s.adapter.Upload(ctx, tmpPath, remote, true); upErr != nil {
-			return nil, mapPCSError(upErr)
-		}
-		meta, done, werr := s.putCheckAfterUpload(ctx, key, localMD5, attempt)
-		if werr != nil {
-			return nil, werr
-		}
-		if done {
-			return meta, nil // 上传后 ETag 复核一致
+		meta, err := s.putAttempt(ctx, key, remote, tmpPath, localMD5, attempt)
+		if err != nil {
+			return nil, err
 		}
 		if meta != nil {
-			lastRemoteETag = meta.ETag
+			return meta, nil // 秒传命中 / ETag 复核一致 / 读回内容一致
+		}
+		if e := s.lastETag; e != "" {
+			lastRemoteETag = e
 		}
 	}
-	return nil, fmt.Errorf("%w: 上传后 ETag 复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, localMD5, lastRemoteETag)
+	return nil, fmt.Errorf("%w: 上传后内容复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, localMD5, lastRemoteETag)
+}
+
+// putAttempt 单轮上传尝试：存在性检查 → 上传 → ETag 复核 → 必要时读回内容校验。
+// 返回 (meta, nil) = 本轮成功（秒传命中/复核一致/读回一致）；(nil, nil) = 需下一轮重试；
+// (nil, err) = fail-closed。
+func (s *Storage) putAttempt(ctx context.Context, key, remote, tmpPath, localMD5 string, attempt int) (*ObjectMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, mapPCSError(err)
+	}
+	meta, proceed, perr := s.putCheckExisting(ctx, key, localMD5, attempt)
+	if perr != nil {
+		return nil, perr
+	}
+	if !proceed {
+		return meta, nil // 秒传命中：目标已存在且 ETag == 本地 md5
+	}
+	if upErr := s.adapter.Upload(ctx, tmpPath, remote, true); upErr != nil {
+		return nil, mapPCSError(upErr)
+	}
+	meta, done, werr := s.putCheckAfterUpload(ctx, key, localMD5, attempt)
+	if werr != nil {
+		return nil, werr
+	}
+	if done {
+		return meta, nil // 上传后 ETag 复核一致
+	}
+	s.lastETag = "" // 每轮重置（避免陈旧值）
+	if meta != nil {
+		s.lastETag = meta.ETag
+		// C5 修复：ETag mismatch（能看到目标但字段不一致）不盲目重传——先**读回内容**
+		// 做真实校验。百度分片上传的 ETag 可能是片 md5 组合/整文件 md5 字段为空（注释
+		// 自认），此时元数据字段永不等本地 md5，重传也刷新不了 → 恒 3× 整文件重传后
+		// ErrTransient。读回内容（下载目标 → 重算 md5）与本地一致 = 内容正确，接受；
+		// 不一致（真传输损坏）才重传刷新（≤maxPutAttempts）。
+		if s.acceptByReadback(ctx, key, localMD5, meta.ETag, attempt) {
+			return meta, nil
+		}
+	}
+	// meta == nil（上传后 Stat 未见，最终一致性）→ 下一轮重试，不读回。
+	return nil, nil
+}
+
+// acceptByReadback ETag 不匹配时读回内容做真实校验：内容与本地 md5 一致 → 接受
+// （返回 true，分片 ETag 组合/字段为空场景内容仍正确）；不一致 → 记录并重传。
+func (s *Storage) acceptByReadback(ctx context.Context, key, localMD5, remoteETag string, attempt int) bool {
+	ok, rerr := s.readbackVerifyMD5(ctx, key, localMD5)
+	if rerr != nil {
+		s.log.Warn("上传后内容读回校验失败（重传刷新 meta）",
+			"key", key, "local_md5", localMD5, "remote_etag", remoteETag, "attempt", attempt, "error", rerr)
+		return false
+	}
+	if ok {
+		s.log.Info("上传后 ETag 不一致但内容读回一致（分片 ETag 组合/字段为空），接受",
+			"key", key, "local_md5", localMD5, "remote_etag", remoteETag, "attempt", attempt)
+		return true
+	}
+	s.log.Warn("上传后内容读回不一致（重传刷新 meta）",
+		"key", key, "local_md5", localMD5, "remote_etag", remoteETag, "attempt", attempt)
+	return false
+}
+
+// readbackVerifyMD5 读回目标文件并计算整文件 md5，与 localMD5 比对（内容级真实校验）。
+// Get 返回自动清理的临时读流；读回一致 = 内容正确（即使元数据 ETag 字段语义不同）。
+func (s *Storage) readbackVerifyMD5(ctx context.Context, key, localMD5 string) (bool, error) {
+	rc, _, gerr := s.Get(ctx, key)
+	if gerr != nil {
+		return false, mapPCSError(gerr)
+	}
+	defer rc.Close()
+	h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传/ETag），非安全用途
+	if _, cerr := io.Copy(h, rc); cerr != nil {
+		return false, fmt.Errorf("baidupcs: 读回内容校验失败（md5）: %w", cerr)
+	}
+	return hex.EncodeToString(h.Sum(nil)) == localMD5, nil
 }
 
 // putCheckExisting 每轮上传前的存在性检查：目标已存在且 ETag 与本地 md5 一致 →
