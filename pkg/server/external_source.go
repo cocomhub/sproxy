@@ -113,7 +113,7 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 			continue // 非该 owner 请求 egress 卷 → 不命中（404，不泄卷存在性）
 		}
 		// 基于 locator 操作：FS 键仅在调用 FS 方法时经 FSPath 拼接（唯一拼接点）。
-		ownerKey := v.FSPath(loc)
+		ownerKey := loc.FSPath()
 		e, err := fsys.Stat(r.Context(), ownerKey)
 		if err != nil || e == nil || e.IsDir {
 			continue // 该卷无此文件/目录 → 下一候选

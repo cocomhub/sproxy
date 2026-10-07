@@ -140,7 +140,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 
 // transferRelPath 派生转存目标路径：经 **volume.ResolveLocation 唯一入口**计算
 // （用户裁定 2026-10-07：转存层不自己拼键/校验）。返回 `(Location, FS 键)`——
-// Location 持有 owner/bucket/path 未拼接字段，FS 键经 vol.FSPath 拼接（拼接唯一发生点）。
+// Location 持有 owner/bucket/path 未拼接字段，FS 键经 loc.FSPath() 拼接（拼接唯一发生点）。
 //   - 自动派生：rel = `<taskID>/<sanitized filename>`（桶内相对路径）；
 //   - 显式指定：rel = task.Transfer.Path（用户可控路径+文件名）；
 //   - volume.ResolveLocation 承担：权限门（owner 无权 → 拒）、路径安全（../ 逃逸/
@@ -155,7 +155,7 @@ func transferRelPath(task *CloudTask, vol volume.Volume) (volume.OwnerBucketLoca
 	if err != nil {
 		return nil, "", fmt.Errorf("transfer: 转存路径 %q 非法: %w", rel, err)
 	}
-	return loc, vol.FSPath(loc), nil
+	return loc, loc.FSPath(), nil
 }
 
 // transferLoop 转存主循环：3 次尝试，目标卷异常指数退避重试；文件异常删本地重下载

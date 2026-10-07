@@ -50,8 +50,8 @@ type Path = string
 // owner+bucket 定位维度，完整默认实现见 Location 结构体）。
 //
 // **强制所有卷相关函数/方法使用 OwnerBucketLocator 作为 src/dst**——owner 是否已拼接
-// 进路径的歧义根除：中间过程 path 绝对未拼接 owner 和 bucket；拼接只发生在 Volume 层
-// `v.FSPath(loc)`（按共享性决定是否加 owner 前缀）。FS 无变化，正常提供底层能力。
+// 进路径的歧义根除：中间过程 path 绝对未拼接 owner 和 bucket；拼接只发生在 locator 的
+// `FSPath()` 方法（恒含归一 owner 前缀）。FS 无变化，正常提供底层能力。
 //
 // 默认实现是 `Owner/Bucket/Path` 三字段结构体（见 Location）；接口化便于扩展——后续
 // 新卷/新定位方式（如不含 owner 的纯桶定位）可实现本接口，**不需要的调整方法内部
@@ -147,16 +147,6 @@ func (l NoopLocation) WithOwner(Owner) OwnerBucketLocator { return l }
 // _ 断言两种实现都满足 OwnerBucketLocator。
 var _ OwnerBucketLocator = NoopLocation{}
 var _ OwnerBucketLocator = (*Location)(nil)
-
-// FSPath 返回 Location 在卷内的最终 FS 键（**拼接唯一发生点**）。
-//   - 共享卷：`<归一 owner>/<bucket>/<path>`（owner 前缀隔离，不同 owner 靠机制隔离）；
-//   - 独享卷：`<bucket>/<path>`（无前缀直接存取）。
-//
-// 已内化到 locator（Location.FSPath()）——本方法是兼容便捷入口（内部转调 loc.FSPath()，
-// 卷共享性由 locator 构造时注入），供已持有 string locator 的旧调用方平滑迁移。
-func (v Volume) FSPath(loc OwnerBucketLocator) string {
-	return loc.FSPath()
-}
 
 // ResolveLocation 把 owner 相对路径解析为强类型 Location（权限门 + 路径安全）。
 // bucket 为桶名（"user"/"meta"/...）；rel 为桶内相对路径（可空）。

@@ -28,8 +28,8 @@ func TestResolveUserPath_SharedVolume_OwnerPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveUserLocation: %v", err)
 	}
-	if want := "alice/user/dir/movie.bin"; sharedVolume().FSPath(loc) != want {
-		t.Fatalf("共享卷键=%q want %q", sharedVolume().FSPath(loc), want)
+	if want := "alice/user/dir/movie.bin"; loc.FSPath() != want {
+		t.Fatalf("共享卷键=%q want %q", loc.FSPath(), want)
 	}
 	if loc.Owner() != "alice" || loc.Bucket() != "user" || loc.Path() != "dir/movie.bin" {
 		t.Fatalf("Location 字段不符: owner=%q bucket=%q path=%q", loc.Owner(), loc.Bucket(), loc.Path())
@@ -44,8 +44,8 @@ func TestResolveUserPath_PrivateVolume_OwnerPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveUserLocation: %v", err)
 	}
-	if want := "alice/user/movie.bin"; privateVolume().FSPath(loc) != want {
-		t.Fatalf("独享卷键=%q want %q", privateVolume().FSPath(loc), want)
+	if want := "alice/user/movie.bin"; loc.FSPath() != want {
+		t.Fatalf("独享卷键=%q want %q", loc.FSPath(), want)
 	}
 }
 
@@ -73,8 +73,8 @@ func TestResolveLocation_OwnerValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("空 owner 应放行（匿名）: %v", err)
 	}
-	if want := "anonymous/user/f.txt"; sharedVolume().FSPath(loc) != want {
-		t.Fatalf("空 owner 键=%q want %q", sharedVolume().FSPath(loc), want)
+	if want := "anonymous/user/f.txt"; loc.FSPath() != want {
+		t.Fatalf("空 owner 键=%q want %q", loc.FSPath(), want)
 	}
 }
 
@@ -105,8 +105,8 @@ func TestResolveUserPath_InvalidPath(t *testing.T) {
 		}
 	}
 	// 反斜杠归一：a\b → a/b 合法（Windows 输入兼容）。
-	if loc, err := sharedVolume().ResolveUserLocation("alice", `a\b`); err != nil || sharedVolume().FSPath(loc) != "alice/user/a/b" {
-		t.Errorf("反斜杠归一 got=%q err=%v want alice/user/a/b", sharedVolume().FSPath(loc), err)
+	if loc, err := sharedVolume().ResolveUserLocation("alice", `a\b`); err != nil || loc.FSPath() != "alice/user/a/b" {
+		t.Errorf("反斜杠归一 got=%q err=%v want alice/user/a/b", loc.FSPath(), err)
 	}
 }
 
@@ -117,13 +117,13 @@ func TestResolveLocation_MetaBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveLocation(meta): %v", err)
 	}
-	if want := "alice/meta/credentials.json"; sharedVolume().FSPath(loc) != want {
-		t.Fatalf("meta 桶键=%q want %q", sharedVolume().FSPath(loc), want)
+	if want := "alice/meta/credentials.json"; loc.FSPath() != want {
+		t.Fatalf("meta 桶键=%q want %q", loc.FSPath(), want)
 	}
 	// 独享卷 meta 也恒 owner 前缀（2026-10-07 废弃区分）。
 	loc2, err2 := privateVolume().ResolveLocation("alice", "meta", "credentials.json")
-	if err2 != nil || privateVolume().FSPath(loc2) != "alice/meta/credentials.json" {
-		t.Fatalf("独享 meta 键=%q err=%v want alice/meta/credentials.json", privateVolume().FSPath(loc2), err2)
+	if err2 != nil || loc2.FSPath() != "alice/meta/credentials.json" {
+		t.Fatalf("独享 meta 键=%q err=%v want alice/meta/credentials.json", loc2.FSPath(), err2)
 	}
 }
 
@@ -134,8 +134,8 @@ func TestResolveLocation_EmptyRel_OnlyBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveLocation(空 rel): %v", err)
 	}
-	if want := "alice/user"; sharedVolume().FSPath(loc) != want {
-		t.Fatalf("仅桶键=%q want %q", sharedVolume().FSPath(loc), want)
+	if want := "alice/user"; loc.FSPath() != want {
+		t.Fatalf("仅桶键=%q want %q", loc.FSPath(), want)
 	}
 }
 
@@ -157,8 +157,8 @@ func TestRebucket_Location(t *testing.T) {
 	if meta.Owner() != "alice" || meta.Bucket() != "meta" || meta.Path() != "x.bin" {
 		t.Fatalf("Rebucket 字段不符: %+v", meta)
 	}
-	if want := "alice/meta/x.bin"; sharedVolume().FSPath(meta) != want {
-		t.Fatalf("meta 桶键=%q want %q", sharedVolume().FSPath(meta), want)
+	if want := "alice/meta/x.bin"; meta.FSPath() != want {
+		t.Fatalf("meta 桶键=%q want %q", meta.FSPath(), want)
 	}
 }
 

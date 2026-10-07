@@ -39,7 +39,7 @@ func (s *externalUploadSink) ownerKey(rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return s.v.FSPath(loc), nil
+	return loc.FSPath(), nil
 }
 
 // MakeDir 实现 files.UploadSink：创建目录（含中间目录；后端幂等语义）。
