@@ -259,6 +259,8 @@ func TestLocation_StringParse_Roundtrip(t *testing.T) {
 		{sharedVolume(), "alice", "user", "dir/movie.bin", "volume://shared/alice/user/dir/movie.bin"},
 		{sharedVolume(), "alice", "meta", "x.bin.meta", "volume://shared/alice/meta/x.bin.meta"},
 		{sharedVolume(), "bob", "user", "", "volume://shared/bob/user"},
+		// R1-MAJOR-2：空 owner 归一 anonymous（与 FSPath 同），往返幂等。
+		{sharedVolume(), "anonymous", "user", "f.txt", "volume://shared/anonymous/user/f.txt"},
 	}
 	for _, tc := range cases {
 		loc := tc.v.MustLocation(tc.owner, tc.bucket, tc.path)

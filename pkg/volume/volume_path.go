@@ -209,9 +209,10 @@ func (l Location) String() string {
 	var b strings.Builder
 	b.WriteString(locationScheme + "://" + l.name)
 	// 恒含 owner 段（废弃共享/独享区分——所有卷按 owner 维度操作）。
-	if o := l.owner; o != "" {
-		b.WriteString("/" + url.PathEscape(o))
-	}
+	// R1-MAJOR-2 修复：空 owner 归一为 anonymous（与 FSPath 的 NormalizeOwner 一致），
+	// 否则空 owner 的 Location 序列化 `volume://卷/user/x` 被 ParseLocation 读成
+	// owner="user"（桶段错位，往返非幂等）。
+	b.WriteString("/" + url.PathEscape(storage.NormalizeOwner(l.owner)))
 	if bk := l.bucket; bk != "" {
 		b.WriteString("/" + url.PathEscape(bk))
 		if p := l.path; p != "" {
@@ -249,11 +250,14 @@ func (v Volume) ParseLocation(s string) (Location, error) {
 	if len(segs) < 2 {
 		return Location{}, fmt.Errorf("%w: 定位缺少 owner/桶段", ErrInvalidUserPath)
 	}
+	// m1 修复：owner/桶段都 PathUnescape（与 String() 的 PathEscape 对称——否则含
+	// %/# 的合法段名往返不一致；bucket 段原样使用会导致 %2F 等编码字符绕过
+	// ValidSegmentName 校验后进入 FSPath，与 BucketOf/RebucketTo 结构识别错位）。
 	owner := mustUnescape(segs[0], s)
 	if !storage.ValidSegmentName(owner) {
 		return Location{}, fmt.Errorf("%w: 非法 owner %q", ErrInvalidUserPath, owner)
 	}
-	bucket := segs[1]
+	bucket := mustUnescape(segs[1], s)
 	if !storage.ValidSegmentName(bucket) {
 		return Location{}, fmt.Errorf("%w: 非法桶名 %q", ErrInvalidUserPath, bucket)
 	}
