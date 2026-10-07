@@ -90,19 +90,6 @@ func TestHTTPDownloader_Download_Success(t *testing.T) {
 	if result.Size != int64(len(content)) {
 		t.Fatalf("expected size %d, got %d", len(content), result.Size)
 	}
-	// 可信卷：全量下载顺便算 FileMeta（整文件/分块 sha256+md5，值独立重算比对）。
-	if result.Meta == nil {
-		t.Fatal("全量下载应顺便计算 FileMeta（Result.Meta 非 nil）")
-	}
-	if result.Meta.TotalSHA256 != expectedChecksum {
-		t.Fatalf("meta TotalSHA256 = %s, want 下载 checksum %s", result.Meta.TotalSHA256, expectedChecksum)
-	}
-	if result.Meta.Size != int64(len(content)) {
-		t.Fatalf("meta Size = %d, want %d", result.Meta.Size, len(content))
-	}
-	if len(result.Meta.Chunks) == 0 {
-		t.Fatal("meta 应有分块")
-	}
 }
 
 func TestHTTPDownloader_Download_404(t *testing.T) {

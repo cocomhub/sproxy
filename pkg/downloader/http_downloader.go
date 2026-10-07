@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -471,15 +470,10 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	}
 	done := func(success bool, oldSize int64) { fin(success, oldSize) }
 
-	// 全量下载路径顺便计算 FileMeta（可信卷）：整文件 sha256+md5 + 按 ChunkSize
-	// 分块 sha256+md5，零额外 I/O 遍数（TeeReader 一次流式同时累计）。续传路径
-	// （handleRangeResume/finalizePartial）不在此计算，由调用方经 meta.FromFile 补。
+	// 流式整文件 SHA-256（M5 修复：Result.Meta 已移除——可信卷 meta 由写路径
+	// 装饰器/本地卷到达即建自算，下载器无需额外双哈希；此处保持原 sha256 计算）。
 	h := sha256.New()
-	calc, cerr := meta.NewCalculator(totalSize, 0)
-	if cerr != nil {
-		return nil, cerr
-	}
-	tee := io.TeeReader(resp.Body, io.MultiWriter(h, calc))
+	tee := io.TeeReader(resp.Body, h)
 
 	// 写入带进度回调的文件；中断可重试，写失败不可重试
 	downloaded, loopErr := copyBodyWithProgress(tee, sink, onProgress, 0, totalSize, done, "write file: %w")
@@ -505,7 +499,7 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	}
 	// 落定成功：释放未用 reserve + 释放被丢弃的既有 partial 占用（discardedSize，无则为 0）。
 	done(true, discardedSize)
-	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag, Meta: calc.Finish()}, nil
+	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag}, nil
 }
 
 // wrapSink 用 sinkFactory 包装写盘 writer 并返回 sink 与其终态回调。
