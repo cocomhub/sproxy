@@ -582,9 +582,7 @@ func TestDownloadIntegrity_MemQuotaQueuesSlowChecker(t *testing.T) {
 	var wg sync.WaitGroup
 	results := make(chan string, 2)
 	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Write([]byte("slow-data"))
 			}))
@@ -600,7 +598,7 @@ func TestDownloadIntegrity_MemQuotaQueuesSlowChecker(t *testing.T) {
 			}, "任务应完成")
 			cur, _ := mgr.SnapshotTask(task.ID, "")
 			results <- cur.IntegrityStatus
-		}()
+		})
 	}
 	wg.Wait()
 	// 断言：两个任务都 completed+verified（排队后校验成功）

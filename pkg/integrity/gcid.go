@@ -32,10 +32,7 @@ func ComputeGCID(data []byte, blockSize int64) string {
 	}
 	h := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 	for off := int64(0); off < int64(len(data)); off += blockSize {
-		end := off + blockSize
-		if end > int64(len(data)) {
-			end = int64(len(data))
-		}
+		end := min(off+blockSize, int64(len(data)))
 		chunkHash := sha1.Sum(data[off:end]) //nolint:gosec // G401: GCID 算法必须 sha1
 		h.Write(chunkHash[:])
 	}
@@ -67,10 +64,7 @@ func indexedBlockGCID(data []byte, blockSize int64) (string, bool) {
 	}
 	h := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 	for off := int64(0); off < int64(len(data)); off += blockSize {
-		end := off + blockSize
-		if end > int64(len(data)) {
-			end = int64(len(data))
-		}
+		end := min(off+blockSize, int64(len(data)))
 		chunkHash := sha1.Sum(data[off:end]) //nolint:gosec // G401: GCID 算法必须 sha1
 		h.Write(chunkHash[:])
 	}
@@ -125,10 +119,7 @@ func RecomputeGCIDAll(path string, candidates []int64) ([]string, error) {
 		block := make([]byte, bs)
 		inner := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 		for off := int64(0); off < size; off += bs {
-			end := off + bs
-			if end > size {
-				end = size
-			}
+			end := min(off+bs, size)
 			n, rerr := f.ReadAt(block[:end-off], off)
 			if rerr != nil && rerr != io.EOF {
 				return nil, rerr

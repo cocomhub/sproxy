@@ -65,10 +65,11 @@ func (VideoChecker) EstimateMem(path string, size int64) int64 {
 			size = fi.Size()
 		}
 	}
-	jsonEst := size / (2 << 30) * (1 << 20) // 0.5MB/GB 样本密度折算（1MiB per 2GiB）
-	if jsonEst > 256<<20 {
-		jsonEst = 256 << 20 // JSON 上限 256MiB（与 maxFFprobeOutputBytes 对齐）
-	}
+	jsonEst := min(
+		// 0.5MB/GB 样本密度折算（1MiB per 2GiB）
+		size/(2<<30)*(1<<20),
+		// JSON 上限 256MiB（与 maxFFprobeOutputBytes 对齐）
+		256<<20)
 	return 64<<20 + jsonEst
 }
 

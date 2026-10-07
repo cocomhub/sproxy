@@ -18,10 +18,7 @@ import (
 func gcidCompute(data []byte, blockSize int64) string {
 	h := sha1.New()
 	for off := int64(0); off < int64(len(data)); off += blockSize {
-		end := off + blockSize
-		if end > int64(len(data)) {
-			end = int64(len(data))
-		}
+		end := min(off+blockSize, int64(len(data)))
 		chunkHash := sha1.Sum(data[off:end])
 		h.Write(chunkHash[:])
 	}

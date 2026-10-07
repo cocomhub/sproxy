@@ -38,10 +38,9 @@ func (ImageChecker) EstimateMem(path string, size int64) int64 {
 	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
 		return 0
 	}
-	pixels := int64(cfg.Width) * int64(cfg.Height)
-	if pixels > maxCheckPixels {
-		pixels = maxCheckPixels // 超上限按上限估算（Check 本身会拒）
-	}
+	pixels := min(int64(cfg.Width)*int64(cfg.Height),
+		// 超上限按上限估算（Check 本身会拒）
+		maxCheckPixels)
 	return pixels * 4 // RGBA
 }
 
