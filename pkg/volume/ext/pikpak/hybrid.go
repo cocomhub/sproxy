@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -336,19 +337,28 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
 	}
-	// C2 最终完整性校验：计算文件 SHA-1 与 target.Hash（PikPak file hash 为 40-hex SHA-1）
-	// 交叉比对——失败即报错（不返回自洽 checksum 冒充成功）。
+	// C2 最终完整性校验：**GCID 权威复算**（PikPak file hash 是 GCID = sha1(concat(sha1(分块)))，
+	// 非整文件 sha1——旧 sha1 全文件比对恒失败）。用 pkg/integrity.RecomputeGCIDAll 按
+	// 候选分块（256KB~4MB）复算，命中官方 hash → verified；未命中 → 报错（不冒充成功）。
 	if dc.target.Hash != "" {
-		sha1Hex, herr := sha1FileHex(dc.working)
-		if herr != nil {
-			return nil, fmt.Errorf("hybrid sha1 verify: %w", herr)
+		gcids, gerr := integrity.RecomputeGCIDAll(dc.working, integrity.GCIDCandidates)
+		if gerr != nil {
+			return nil, fmt.Errorf("hybrid gcid verify: %w", gerr)
 		}
-		if !strings.EqualFold(sha1Hex, strings.ToLower(dc.target.Hash)) {
+		// 任一候选分块复算命中官方 hash → verified（R3：全候选比对，官方分块粒度未知）
+		matched := false
+		for _, gcid := range gcids {
+			if strings.EqualFold(gcid, dc.target.Hash) {
+				matched = true
+				d.log.Info("hybrid integrity verified (gcid match)", "gcid", gcid)
+				break
+			}
+		}
+		if !matched {
 			// G4：校验失败也清理转存副本（AutoDelete 语义）。
 			dc.lease.Release(ctx)
-			return nil, fmt.Errorf("hybrid integrity check failed: file sha1 %s != target %s", sha1Hex, dc.target.Hash)
+			return nil, fmt.Errorf("hybrid integrity check failed: file gcid %v != target %s", gcids, dc.target.Hash)
 		}
-		d.log.Info("hybrid integrity verified (sha1 match)", "sha1", sha1Hex)
 	}
 	// 校验通过 → 临时文件原子 rename 到最终 destPath（同目录原子；跨 FS 回退 copy+remove）。
 	if err := os.Rename(dc.working, dc.destPath); err != nil {

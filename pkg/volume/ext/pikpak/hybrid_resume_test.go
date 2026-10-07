@@ -38,7 +38,7 @@ func TestHybridDownload_ResumeKeepsCompletedChunks(t *testing.T) {
 	})
 	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"file_info": map[string]any{
-			"id": "share-f1", "name": "movie.mp4", "hash": payloadSHA1(payload),
+			"id": "share-f1", "name": "movie.mp4", "hash": payloadGCID(payload),
 			"web_content_link": srvURL + "/share/dl",
 		}})
 	})
@@ -79,7 +79,7 @@ func TestHybridDownload_ResumeKeepsCompletedChunks(t *testing.T) {
 	_, _ = f.Write(payload[:chunkLen])
 	_ = f.Truncate(int64(len(payload)))
 	f.Close()
-	m := &hybridManifest{Total: int64(len(payload)), ShareEnd: chunkLen, Chunks: map[int64]int64{0: chunkLen}, Source: manifestSource{ShareID: "abc123", FileID: "share-f1", Hash: payloadSHA1(payload), Size: int64(len(payload))}}
+	m := &hybridManifest{Total: int64(len(payload)), ShareEnd: chunkLen, Chunks: map[int64]int64{0: chunkLen}, Source: manifestSource{ShareID: "abc123", FileID: "share-f1", Hash: payloadGCID(payload), Size: int64(len(payload))}}
 	data, _ := json.Marshal(m)
 	_ = os.WriteFile(manifestPath(dest), data, 0o644)
 
