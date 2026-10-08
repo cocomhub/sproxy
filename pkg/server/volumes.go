@@ -592,9 +592,19 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 		return nil
 	}
 	if !h.trustedDisabled() {
-		fsys = trusted.Wrap(fsys, trusted.Options{})
+		fsys = trusted.Wrap(fsys, h.trustedWrapOpts())
 	}
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
+}
+
+// trustedWrapOpts 装配可信卷装饰器配置（C-MAJOR-4：ChunkSize 从 trusted_volume
+// 配置接线——缺省 0 自适应 ChunkSizeForSize；Logger 随装配层注入可观测 meta 失败）。
+func (h *Handlers) trustedWrapOpts() trusted.Options {
+	cfg := h.cfgPtr.Load()
+	return trusted.Options{
+		ChunkSize: int64(cfg.TrustedVolume.ChunkSize),
+		Logger:    h.logger,
+	}
 }
 
 // trustedDisabled 报告可信卷是否显式禁用（trusted_volume.disable；缺省 false = 启用）。

@@ -502,7 +502,7 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// 转存写后自动生成隐藏 .meta（FileMeta 总/分块 sha256+md5）——目标成为可信卷。
 			fsys := be.FS()
 			if !h.trustedDisabled() {
-				fsys = trusted.Wrap(fsys, trusted.Options{})
+				fsys = trusted.Wrap(fsys, h.trustedWrapOpts())
 			}
 			return fsys, registry.SchemeOf(vol.Type), shared
 		},

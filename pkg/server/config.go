@@ -1090,6 +1090,9 @@ type Config struct {
 type TrustedVolumeConfig struct {
 	// Disable 缺省 false = 可信卷默认启用（外部卷写后落 meta + 校验）；true = 显式关闭。
 	Disable bool `yaml:"disable" mapstructure:"disable"`
+	// ChunkSize 分块校验大小（缺省 0 = 按文件大小自适应 ChunkSizeForSize；显式设置固定
+	// 分块粒度，sizex.ByteSize 字节配置——C-MAJOR-4：Options.ChunkSize 接线到配置）。
+	ChunkSize ByteSize `yaml:"chunk_size" mapstructure:"chunk_size"`
 }
 
 // PikpakConfig 是 PikPak 网盘中转后端配置。
