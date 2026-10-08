@@ -567,6 +567,10 @@ func (h *Handlers) moveCommitConcurrentDeleted(mc *moveFileCtx, written int64, s
 	if poolRes != nil {
 		poolRes.Commit(written)
 	}
+	// B-M3 修复：并发删除分支目标卷已持数据但无 meta sidecar（正常路径的
+	// moveMetaAfterVolumeMove 不在此分支）——补目标卷 meta 重建；源 meta 已由并发
+	// delete 的 removeFileMeta 清理，源清理 stat 不到自然 no-op。
+	h.moveMetaAfterVolumeMove(mc)
 	h.RecordAudit(mc.r.Context(), AuditEvent{
 		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
 		Result: AuditResultSuccess, Detail: "源已被并发删除，目标卷已持数据（from 侧账本由并发 delete 释放）",
@@ -623,15 +627,19 @@ func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quot
 
 // moveMetaAfterVolumeMove 跨卷移动后 meta sidecar 重建/清理：目标卷重建（复用
 // filesMetaPolicy.WriteMeta 覆盖差分 + 配额记账）、源卷删除 meta + 释放 meta 桶配额。
+// B-M4 修复：**目标重建闸 disable（disable 不新建），源清理不闸**——disable 只停新建
+// 不停清理（C5 语义）：enable 期写入的源 meta 在 disable 后移动仍须清理（防孤儿 +
+// 配额泄漏），与单文件删除联动同构。
 func (h *Handlers) moveMetaAfterVolumeMove(mc *moveFileCtx) {
-	if h.trustedDisabled() {
-		return
+	// 目标卷重建（WriteMeta 幂等覆盖：同 rel 目标已有 meta 则 Adjust 差分；无则新
+	// Commit）。trustedDisabled → 不新建（目标卷文件保持无 meta，读路径直算兜底）。
+	if !h.trustedDisabled() {
+		if mErr := h.filesMetaWriteAfterRestore(mc.toRoot, mc.owner, mc.rel); mErr != nil {
+			h.logger.Warn("跨卷移动后目标卷 meta 重建失败（读路径直算兜底）", "file_name", mc.remotePath, "error", mErr)
+		}
 	}
-	// 目标卷重建（WriteMeta 幂等覆盖：同 rel 目标已有 meta 则 Adjust 差分；无则新 Commit）。
-	if mErr := h.filesMetaWriteAfterRestore(mc.toRoot, mc.owner, mc.rel); mErr != nil {
-		h.logger.Warn("跨卷移动后目标卷 meta 重建失败（读路径直算兜底）", "file_name", mc.remotePath, "error", mErr)
-	}
-	// 源卷删除 meta + 释放 meta 桶配额（与单文件删除联动同构）。
+	// 源卷删除 meta + 释放 meta 桶配额（与单文件删除联动同构；不闸 disable——
+	// 存量 sidecar 在 disable 后移动仍须清理）。
 	srcMeta := meta.MetaPath(mc.rel)
 	metaSize := int64(0)
 	if e, serr := mc.fromRoot.Stat(srcMeta); serr == nil && e != nil {
