@@ -149,7 +149,3 @@ func (s *sectionHasher) next() (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
-
-// IsSame 是 Equal 的别名。**2026-10-07 评审：命中「禁止无意义薄封装/同名双函数」
-// 规范（equal_test 只覆盖 Equal）——删除别名，调用方统一用 Equal**。
-// （保留原 IsSame 调用点的兼容已无需：功能未上线，直接迁移即可。）

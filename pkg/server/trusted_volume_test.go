@@ -152,6 +152,8 @@ func TestDelete_AfterDisable_CleansLegacyMeta(t *testing.T) {
 }
 
 // postUpload 向测试服务器 multipart 上传（带 X-File-Checksum）。
+// C-MAJOR-6 修复：用隔离 Transport 的测试客户端（禁 http.DefaultClient——并行用例
+// 的 httptest.Server.Close() 会打断共享 DefaultTransport 的在途 idle 连接）。
 func postUpload(url, filename string, body []byte) (int, string) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -161,7 +163,7 @@ func postUpload(url, filename string, body []byte) (int, string) {
 	req, _ := http.NewRequest("POST", url+"/upload", &buf)
 	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClientAt().Do(req)
 	if err != nil {
 		return 0, err.Error()
 	}
@@ -171,10 +173,11 @@ func postUpload(url, filename string, body []byte) (int, string) {
 }
 
 // postDelete 向测试服务器删除文件（带 X-File-Checksum）。
+// C-MAJOR-6 修复：隔离 Transport 测试客户端（禁 http.DefaultClient——并行用例隔离）。
 func postDelete(url, filename string, body []byte) int {
 	req, _ := http.NewRequest("POST", url+"/delete?filename="+filename, nil)
 	req.Header.Set(headerFileChecksum, sha256hex(body))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testHTTPClientAt().Do(req)
 	if err != nil {
 		return 0
 	}

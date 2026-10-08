@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"path"
 	"path/filepath"
 
@@ -30,6 +31,9 @@ type Options struct {
 	DisableMetaFile bool
 	// Extra 是写入 meta 的自定义扩展信息（创建人/email 等任意数据）。
 	Extra map[string]any
+	// Logger 是 meta 落盘/校验失败的可观测日志器（C-MAJOR-7；nil = 静默——默认装配
+	// 不传 Logger 保持现状，运维可注入看 meta 丢失/校验异常）。
+	Logger *slog.Logger
 }
 
 // TrustedVolumeFS 包装任意 syncpkg.FS，提供 meta sidecar + 校验能力。
@@ -157,7 +161,19 @@ func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size i
 	if merr != nil {
 		return
 	}
-	_ = t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0)
+	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+		t.logMetaWarn("writeMetaAfter", rel, werr)
+	}
+}
+
+// logMetaWarn 记 meta 落盘/校验失败的可观测日志（C-MAJOR-7：Options.Logger 注入时
+// Warn；nil = 静默现状——默认装配不传 Logger 保持零噪音）。meta 失败不阻断主写
+// （读路径直算兜底），但运维可经 Logger 看到 meta 丢失/校验异常。
+func (t *TrustedVolumeFS) logMetaWarn(stage, rel string, err error) {
+	if t.opts.Logger == nil {
+		return
+	}
+	t.opts.Logger.Warn("trusted: meta 落盘失败（读路径直算兜底）", "stage", stage, "path", rel, "error", err)
 }
 
 // ReserveSpace 委托 inner（卷容量预检；inner 未实现 → 返回 ErrUnsupported，调用方
@@ -312,6 +328,8 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		// meta 落盘失败：主文件已成功——不失败主写（meta 可下次读时补），记日志语义
 		// 由调用方/审计处理；此处返回主写成功（meta 缺失时 Stat 直算兜底）。
+		// C-MAJOR-7：经 Options.Logger 可观测（注入时 Warn），默认装配 nil 静默。
+		t.logMetaWarn("WriteFile", rel, werr)
 		return nil
 	}
 	return nil

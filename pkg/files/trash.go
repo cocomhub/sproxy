@@ -170,6 +170,9 @@ func restoreTrashMetaSuffix(root *storage.Root, flat string) string {
 }
 
 // EmptyTrash 清空回收站（删除全部 trash 桶文件）。
+// B-MAJOR-3 修复：删除条目时按**原 rel** 释放配额——软删时主文件/meta 配额保留
+// （可恢复），清空即永久删除，磁盘字节释放但配额键仍在原 user/meta 路径 → 必须
+// ReleaseUsage 对称（否则 owner Scope 永久虚高直至重启）。
 func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 	owner = normalizeOwner(owner)
 	tnt := s.rt.tenantOf(owner)
@@ -189,9 +192,47 @@ func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 		return err
 	}
 	for _, e := range entries {
+		rel := filepath.Join(trashAbs, e.Name())
+		info, ierr := os.Stat(rel)
+		if ierr == nil {
+			s.releaseTrashEntryQuota(owner, root, e.Name(), info.Size())
+		}
 		_ = root.Remove(trashPrefix + filepath.ToSlash(e.Name()))
 	}
 	return nil
+}
+
+// releaseTrashEntryQuota 按 trash 条目名还原原 rel 并释放对应配额（B-MAJOR-3）：
+// 主条目 `trash/<flat>.__deleted__` → 原 rel=user/...（ReleaseUsage user 桶）；
+// meta 条目 `trash/<flat>.meta.__deleted__` → meta/<origRel>.meta（ReleaseUsage meta 桶）。
+// 解析失败（flat 编码异常）跳过——配额由 reconcile 自愈。
+func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entryName string, size int64) {
+	if size <= 0 {
+		return
+	}
+	if !strings.HasPrefix(entryName, trashPrefix) {
+		return
+	}
+	inner := strings.TrimPrefix(entryName, trashPrefix)
+	before, _, ok := strings.Cut(inner, trashDeletedSuffix)
+	if !ok {
+		return
+	}
+	// meta 条目（软删随迁命名 <flat>.meta.__deleted__）→ 释放 meta/<origRel>.meta。
+	if strings.HasSuffix(before, trashMetaMarker) {
+		flat := strings.TrimSuffix(before, trashMetaMarker)
+		origRel := unflattenRel(flat)
+		mrel := meta.MetaPath(origRel)
+		if scope := s.rt.quotaScope(owner, mrel); scope != nil {
+			scope.ReleaseUsage(size)
+		}
+		return
+	}
+	// 主条目 → 释放 user 桶原 rel。
+	origRel := unflattenRel(before)
+	if scope := s.rt.quotaScope(owner, origRel); scope != nil {
+		scope.ReleaseUsage(size)
+	}
 }
 
 // CleanupTrash 清理过期回收站条目（保留期 ttl；0 = 立即全部清理）。
@@ -223,6 +264,8 @@ func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Durat
 			continue
 		}
 		if ttl <= 0 || now.Sub(info.ModTime()) > ttl {
+			// B-MAJOR-3：清空即永久删除——先释放原 rel 配额（与 EmptyTrash 对称）。
+			s.releaseTrashEntryQuota(owner, root, e.Name(), info.Size())
 			if root.Remove(trashPrefix+filepath.ToSlash(e.Name())) == nil {
 				cleaned++
 			}

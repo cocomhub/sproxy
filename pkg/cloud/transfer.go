@@ -358,16 +358,19 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 // 逐分块 SHA256，与写侧落盘 meta 比对——跨信任边界静默损坏逐分块定位）；无 Provider
 // 回落整文件流式 sha256 对 result.Checksum。抽离 transferOnce 以控制 gocognit。
 func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
-	if env.result.Checksum == "" {
-		return nil
-	}
+	// E-m1 修复：Checksum=="" 门禁只对**流式回落**有意义（比对基准是 result.Checksum）；
+	// verifyByFileMeta 比对的完全是卷内 meta（与源 checksum 无关），无 checksum 下载器
+	// 转存到可信卷时也应执行写完整性校验。门禁下移到流式分支。
 	if verr := verifyByFileMeta(env); verr == nil {
 		return nil // 目标卷有 meta：分块级校验通过
 	} else if !errors.Is(verr, errNoProviderMeta) {
 		// meta 读/解析/校验失败（真损坏）→ 文件异常；其余回落流式。
 		return verr
 	}
-	// 无 Provider meta：流式整文件 sha256 对 result.Checksum。
+	// 无 Provider meta：流式整文件 sha256 对 result.Checksum（需参考 checksum）。
+	if env.result.Checksum == "" {
+		return nil // 无参考值（下载器未提供）→ 信任写盘成功
+	}
 	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
 	if rerr != nil {
 		return fmt.Errorf("%w: 读回校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
@@ -559,18 +562,15 @@ func checksumMatches(destPath, want string) bool {
 	return got == want
 }
 
-// sha256File 计算文件 SHA-256（hex）。
+// sha256File 计算文件 SHA-256（hex）。E-m2：委托 hashReader（同一能力收敛——不再
+// 重复 os.Open+io.Copy 流式哈希，与 hashReader 单一实现）。
 func sha256File(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hashReader(f)
 }
 
 // hashReader 计算 reader 的 SHA-256（hex）。
