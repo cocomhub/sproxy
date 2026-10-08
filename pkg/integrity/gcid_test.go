@@ -216,10 +216,7 @@ func TestGCIDOrdered_SizeGuided(t *testing.T) {
 	h := sha1.New()
 	inner := sha1.New()
 	for off := int64(0); off < size; off += block {
-		end := off + block
-		if end > size {
-			end = size
-		}
+		end := min(off+block, size)
 		inner.Reset()
 		inner.Write(payload[off:end])
 		h.Write(inner.Sum(nil))
