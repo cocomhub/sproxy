@@ -298,6 +298,11 @@ func TestDownloadIntegrity_ResumeResetsState(t *testing.T) {
 		t.Fatalf("M1: resume 应重置 integrity 状态，got sames=%d last=%q status=%q",
 			sames, last, istatus)
 	}
+	// D-CRITICAL 回归：failed 任务 resume 不置 resumeSelfOverwrite（且旧标记被清除——
+	// 若任务先前 damaged→resume 置过 true，之后 failed 再 resume 不得残留盲覆标记）。
+	if got.resumeSelfOverwrite {
+		t.Fatal("D-CRITICAL: 非 damaged resume 应清 resumeSelfOverwrite（防盲覆他人同 rel）")
+	}
 }
 
 // TestDownloadIntegrity_ConcurrentChecks 并发校验 race 验证：多任务并发下载+校验，
