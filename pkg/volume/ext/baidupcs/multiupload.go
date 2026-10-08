@@ -8,11 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
-	"time"
-
-	"github.com/cocomhub/sproxy/pkg/netutil"
 
 	"github.com/qjfoidnh/BaiduPCS-Go/baidupcs/pcserror"
+	"github.com/qjfoidnh/BaiduPCS-Go/requester"
 	"github.com/qjfoidnh/BaiduPCS-Go/requester/multipartreader"
 	"github.com/qjfoidnh/BaiduPCS-Go/requester/rio"
 	"github.com/qjfoidnh/BaiduPCS-Go/requester/uploader"
@@ -43,15 +41,19 @@ func newBaiduMultiUpload(pcs *Client, targetPath string, uploadMu *sync.Mutex) *
 	return &baiduMultiUpload{pcs: pcs, targetPath: targetPath, uploadMu: uploadMu}
 }
 
-// uploadClient 是分片上传专用 HTTP 客户端（正文传输无整体超时，由 ctx 约束）。
-// 每实例独立连接池（禁共享 http.DefaultClient——仓库硬规则）。
-func (u *baiduMultiUpload) uploadClient(jar http.CookieJar) *http.Client {
-	tr := netutil.IsolatedTransport()
-	tr.ResponseHeaderTimeout = 30 * time.Second
-	return &http.Client{
-		Jar:       jar,
-		Transport: tr,
+// uploadClient 返回分片上传用 HTTP 客户端（性能修复 e2e 实测 2026-10-08）：
+// **复用 pcs 底层 requester.HTTPClient**（与 Stat/Precreate/CLI 同 HTTP 栈——50s
+// 整体 Timeout + 正确 transport/proxy 配置 + keep-alive 连接复用 + requester.Req
+// 自动 UA/Content-Type/ContentLength 处理）。原自建 netutil.IsolatedTransport 每分片
+// 新建连接池且无整体超时、裸 http.Client.Do 缺 requester 层 header 处理——百度分片
+// 接口挂起（响应 body 无限等待）且分片间零连接复用（C-M2）。jar 参数保留兼容（实际
+// 复用 pcs client 已带 cookie jar）。
+func (u *baiduMultiUpload) uploadClient(jar http.CookieJar) *requester.HTTPClient {
+	c := u.pcs.PCS().GetClient()
+	if jar != nil {
+		c.SetCookiejar(jar) // 兼容调用方传入的 cookie jar（pcs 默认已带；显式设置不冲突）
 	}
+	return c
 }
 
 // Precreate 上传前准备：随机取一个 PCS 服务器（返回原始地址供 CreateSuperFile 恢复）。
@@ -70,6 +72,10 @@ func (u *baiduMultiUpload) Precreate() (string, pcserror.Error) {
 }
 
 // TmpFile 上传单个分片。uploadURL 由 BaiduPCS 的 PrepareUploadSuperfile2 生成。
+// 性能修复（e2e 实测 2026-10-08）：挂起根因是**请求构造路径差异**——CLI 分片上传用
+// `pcsconfig.PCSHTTPClient().Req`（requester 层：自动 User-Agent/Content-Type/ContentLength
+// 处理 + keep-alive 连接复用），sproxy 原用裸 `http.Client.Do`（无 requester 层的 UA/
+// header 处理 → 百度分片接口挂起）。此处改用 `pcs.GetClient().Req` 与 CLI 完全一致。
 func (u *baiduMultiUpload) TmpFile(ctx context.Context, uploadID, targetPath string, partSeq int, partOffset int64, r rio.ReaderLen64) (string, error) {
 	pcs := u.pcs.PCS()
 	md5, pcsErr := pcs.UploadTmpFile(uploadID, targetPath, partSeq, partOffset, func(uploadURL string, jar http.CookieJar) (*http.Response, error) {
@@ -86,16 +92,11 @@ func (u *baiduMultiUpload) TmpFile(ctx context.Context, uploadID, targetPath str
 		}
 		done := make(chan result, 1)
 		go func() {
-			req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, mr)
-			if reqErr != nil {
-				done <- result{err: reqErr}
-				return
-			}
-			req.Header.Set("Content-Type", mr.ContentType())
-			req.Header.Set("User-Agent", "BaiduPCS-Go")
-			req.ContentLength = mr.Len()
+			// 与 CLI 同构：requester.HTTPClient.Req + **显式空 UA**（百度分片接口对
+			// Chrome/Netdisk UA 挂起——CLI 的 preparePCSHeader 用 pcsUA 默认空覆盖；
+			// header 传 User-Agent="" 与 CLI 完全一致）。
 			cli := u.uploadClient(jar)
-			resp, err := cli.Do(req)
+			resp, err := cli.Req(http.MethodPost, uploadURL, mr, map[string]string{"User-Agent": ""})
 			done <- result{resp: resp, err: err}
 		}()
 		select {
