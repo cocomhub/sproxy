@@ -358,6 +358,9 @@ func (t *TrustedVolumeFS) Delete(ctx context.Context, rel string) error {
 
 // Rename 重命名/移动 + 联动 .meta。目标父目录自动创建（与 WriteFile 行为一致——
 // 移动文件到未建子目录时避免裸 os.Rename 报"路径不存在"）。
+// A-MAJOR-2 修复：meta 目标父目录也确保存在（Move/Copy 的 ensureMetaDir 对 Rename
+// 缺位——重命名到全新子目录时 meta sidecar rename 底层失败被静默丢弃，目标无 meta、
+// 源 meta 孤儿）。
 func (t *TrustedVolumeFS) Rename(ctx context.Context, from, to string) error {
 	if dir := path.Dir(to); dir != "." && dir != "" {
 		if err := t.MakeDir(ctx, dir); err != nil {
@@ -368,6 +371,7 @@ func (t *TrustedVolumeFS) Rename(ctx context.Context, from, to string) error {
 		return err
 	}
 	// 联动 meta（best-effort：源 meta 不存在则跳过——rename 目标 meta 若无源也不报错）。
+	t.ensureMetaDir(ctx, meta.MetaPath(to))
 	_ = t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to))
 	return nil
 }

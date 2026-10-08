@@ -54,11 +54,16 @@ type FileMeta struct {
 // 校验依据与 shardseal.validateMeta 对齐：Version/Size/TotalSHA256/分块非空/分块
 // 覆盖 [0, Size) 连续无空洞。**零字节文件**（Size==0）无分块（空文件天然无 chunk），
 // 放行——只要求总哈希非空（空文件 sha256 恒 e3b0c442...，校验可用）。
+// A-MAJOR-1 加固：Size==0 但 Chunks 非空（size 声明失真产物）→ 拒绝（不短路放行，
+// 否则失真 meta 落盘且 FixSizeFromChunks 不触发）。
 func Validate(m *FileMeta) error {
 	if err := validateHeader(m); err != nil {
 		return err
 	}
 	if m.Size == 0 {
+		if len(m.Chunks) > 0 {
+			return fmt.Errorf("meta: Size==0 但分块非空（size 声明失真，须按实写修正）")
+		}
 		return nil // 零字节文件：无分块合法（A-CRITICAL 修复——装饰器写 0 字节不再失败）
 	}
 	return validateChunkCoverage(m)

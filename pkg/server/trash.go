@@ -55,7 +55,7 @@ func (h *Handlers) listTrashHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			out = append(out, trashEntry{
 				TrashRel: "trash/" + name,
-				Name:     strings.ReplaceAll(name[:idx], "_", "/"),
+				Name:     files.UnflattenTrashRel(name[:idx]),
 			})
 		}
 	}

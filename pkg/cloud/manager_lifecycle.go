@@ -125,6 +125,9 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	// E-M2（damaged 自愈）：恢复 completed+damaged 任务（重下修复）→ 置运行时标记允许
 	// 转存覆盖本任务先前写过的目标卷副本（W1/W3 拒绝覆写只对他人生效）。failed/
 	// cancelled 续传不置——目标卷若已存在（先前转存成功）幂等命中仍走 WriteIfAbsent。
+	// D-CRITICAL 修复：每次 resume **先清再按当前状态置**——否则 completed+damaged→
+	// resume(置 true)→failed→再 resume（不再置位但旧标记仍 true）→ 转存盲覆他人同 rel。
+	task.resumeSelfOverwrite = false
 	if task.Status == "completed" && task.IntegrityStatus == "damaged" {
 		task.resumeSelfOverwrite = true
 	}

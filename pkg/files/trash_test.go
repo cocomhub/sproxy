@@ -155,7 +155,7 @@ func TestTrash_MetaFollowsFile(t *testing.T) {
 	// 恢复 → meta 回 meta 桶（用实际 trash 条目名——时间戳后缀由软删生成，扫描获得）。
 	trashRel := ""
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "user_a.txt"+trashDeletedSuffix) && !strings.Contains(e.Name(), trashMetaMarker) {
+		if strings.HasPrefix(e.Name(), flattenRel("user/a.txt")+trashDeletedSuffix) && !strings.Contains(e.Name(), trashMetaMarker) {
 			trashRel = trashPrefix + e.Name()
 			break
 		}
@@ -231,12 +231,12 @@ func TestTrash_SoftDeleteRestore_Underscore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("软删: %v", err)
 	}
-	// 恢复（扫描 trash 主条目——flat 编码：rel=user/a_b/c.txt → user_a__b_c.txt）。
+	// 恢复（扫描 trash 主条目——flat 编码 base64(rel)，无  字面歧义）。
 	trashAbs, _ := root.Abs("trash")
 	entries, _ := os.ReadDir(trashAbs)
 	trashRel := ""
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "user_a__b_c.txt"+trashDeletedSuffix) {
+		if strings.HasPrefix(e.Name(), flattenRel("user/a_b/c.txt")+trashDeletedSuffix) {
 			trashRel = trashPrefix + e.Name()
 			break
 		}

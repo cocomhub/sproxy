@@ -129,7 +129,9 @@ func (c *Calculator) ReadFrom(r io.Reader) (int64, error) {
 }
 
 // Finish 产出完整 FileMeta（整文件 + 全部分块，含尾块收尾）。之后禁止继续 Write。
-// size 构造时未知（<=0）时用分块累计和兜底（调用方未提前知道总大小的流式计算）。
+// size 构造时未知（<=0）时用分块累计和兜底（调用方未提前知道总大小的流式计算；
+// A-MAJOR-1 修复：size==0 与 size<0 同为"未知"——原实现仅 <0 重算，size=0 声明带
+// 内容时产出 Size=0+非空 Chunks，Validate 的 Size==0 短路放行导致 meta 失真）。
 // 零大小文件：无数据块，产出空分块列表（调用方特判零文件不落 meta 或空 meta）。
 func (c *Calculator) Finish() *FileMeta {
 	c.done = true
@@ -137,7 +139,7 @@ func (c *Calculator) Finish() *FileMeta {
 		c.flushChunk() // 尾块收尾（TeeReader 等直接 Write 路径下尾块不足 chunkSize）
 	}
 	size := c.size
-	if size < 0 {
+	if size <= 0 {
 		var sum int64
 		for _, cm := range c.chunks {
 			sum += cm.Size

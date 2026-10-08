@@ -12,6 +12,7 @@ package files
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +33,11 @@ const trashDeletedSuffix = ".__deleted__"
 // TrashDeletedSuffix 导出删除标记（server 侧列表解析用）。
 func TrashDeletedSuffix() string { return trashDeletedSuffix }
 
+// UnflattenTrashRel 导出扁平条目 → 原 rel 的解码（server 侧列表展示用；与
+// RestoreTrash 同解码——B-m3 修复：列表名不得用裸 ReplaceAll，否则含 `_` 的
+// 文件名展示错位/歧义）。
+func UnflattenTrashRel(flat string) string { return unflattenRel(flat) }
+
 // trashMetaMarker 是 trash 桶内 meta sidecar 条目的文件名标记（软删时随主文件入 trash，
 // 供恢复/清理识别——EmptyTrash/CleanupTrash 逐条目删除自然一并清理，无孤儿）。
 const trashMetaMarker = ".meta"
@@ -46,37 +52,23 @@ func TrashMetaMarker() string { return trashMetaMarker }
 // 的 rel（`user/a_b/c.txt`）双射破坏——恢复时 `_`→`/` 会把 a_b 还原成 a/b 两级目录
 // （数据错位/409 永久丢失）。可逆规则：`/` → `_`；`_` → `__`（转义）。解码先合并
 // `__`→`_` 再单 `_`→`/`，与编码互逆。
+// flattenRel 把 user/ 相对路径编码为 trash 顶层扁平条目名（**严格双射**）。
+// B-C2/B-C3 修复：原 `/`→`_`、`_`→`__` 编码对「段首下划线」不可逆（`user/_a/b` 与
+// `user/a_/b` 碰撞/错位 → 软删永久不可恢复）；且 flat 含字面 `_` 与 `.meta` 标记、
+// 用户真实 `.meta` 文件名空间冲突。改用 base64 RawURLEncoding（字符集 A-Za-z0-9-_，
+// 不含 `/` 与 `.`）：任何 rel 唯一映射、无 `_`/`.` 歧义、与 sidecar `.meta` 标记天然
+// 隔离（base64 产物永不以 `.` 结尾；用户 rel 的 flat 也永不含 `.`）。
 func flattenRel(rel string) string {
-	var b strings.Builder
-	for i := 0; i < len(rel); i++ {
-		switch rel[i] {
-		case '_':
-			b.WriteString("__")
-		case '/':
-			b.WriteByte('_')
-		default:
-			b.WriteByte(rel[i])
-		}
-	}
-	return b.String()
+	return base64.RawURLEncoding.EncodeToString([]byte(rel))
 }
 
-// unflattenRel 把扁平条目还原为原 rel（与 flattenRel 互逆）。
+// unflattenRel 把扁平条目还原为原 rel（与 flattenRel 互逆；非法编码返回 ""）。
 func unflattenRel(flat string) string {
-	var b strings.Builder
-	for i := 0; i < len(flat); i++ {
-		if flat[i] != '_' {
-			b.WriteByte(flat[i])
-			continue
-		}
-		if i+1 < len(flat) && flat[i+1] == '_' {
-			b.WriteByte('_') // `__` → `_`（转义的下划线）
-			i++
-		} else {
-			b.WriteByte('/') // 单 `_` → `/`
-		}
+	b, err := base64.RawURLEncoding.DecodeString(flat)
+	if err != nil {
+		return ""
 	}
-	return b.String()
+	return string(b)
 }
 
 // M2 修复：meta sidecar 随主文件一起移到 trash 桶（生命周期一致）——软删保留 meta
@@ -195,7 +187,9 @@ func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 		rel := filepath.Join(trashAbs, e.Name())
 		info, ierr := os.Stat(rel)
 		if ierr == nil {
-			s.releaseTrashEntryQuota(owner, root, e.Name(), info.Size())
+			// B-C1 修复：传含 trash/ 前缀的完整条目路径（releaseTrashEntryQuota 的
+			// TrimPrefix 契约）——裸 e.Name() 会让 guard 恒早退（配额释放死代码）。
+			s.releaseTrashEntryQuota(owner, root, trashPrefix+filepath.ToSlash(e.Name()), info.Size())
 		}
 		_ = root.Remove(trashPrefix + filepath.ToSlash(e.Name()))
 	}
@@ -206,11 +200,11 @@ func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 // 主条目 `trash/<flat>.__deleted__` → 原 rel=user/...（ReleaseUsage user 桶）；
 // meta 条目 `trash/<flat>.meta.__deleted__` → meta/<origRel>.meta（ReleaseUsage meta 桶）。
 // 解析失败（flat 编码异常）跳过——配额由 reconcile 自愈。
+// B-C1 修复：入参 entryName 是**含 trash/ 前缀的完整条目路径**（与软删命名一致）——
+// 原实现传裸 e.Name() 与 guard HasPrefix("trash/") 不匹配 → 恒早退（配额释放死代码）。
+// 调用方（EmptyTrash/CleanupTrash）传 `trashPrefix + e.Name()`。
 func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entryName string, size int64) {
 	if size <= 0 {
-		return
-	}
-	if !strings.HasPrefix(entryName, trashPrefix) {
 		return
 	}
 	inner := strings.TrimPrefix(entryName, trashPrefix)
@@ -265,7 +259,8 @@ func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Durat
 		}
 		if ttl <= 0 || now.Sub(info.ModTime()) > ttl {
 			// B-MAJOR-3：清空即永久删除——先释放原 rel 配额（与 EmptyTrash 对称）。
-			s.releaseTrashEntryQuota(owner, root, e.Name(), info.Size())
+			// B-C1 修复：传含 trash/ 前缀完整条目路径（TrimPrefix 契约）。
+			s.releaseTrashEntryQuota(owner, root, trashPrefix+filepath.ToSlash(e.Name()), info.Size())
 			if root.Remove(trashPrefix+filepath.ToSlash(e.Name())) == nil {
 				cleaned++
 			}
