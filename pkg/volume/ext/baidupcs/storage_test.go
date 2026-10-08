@@ -581,3 +581,41 @@ func TestBackoffBeforeRetry(t *testing.T) {
 		t.Fatal("ctx 取消应中断退避")
 	}
 }
+
+// TestBlockMD5ListOf C-C1 回归：分块 md5 列表按 uploadBlockSize（4MiB）切分——
+// >4MiB 文件多块、<4MiB 单块（= 整文件 md5）、空文件空列表。
+func TestBlockMD5ListOf(t *testing.T) {
+	t.Parallel()
+	// <4MiB：单块 = 整文件 md5。
+	small := strings.Repeat("s", 100)
+	sp := filepath.Join(t.TempDir(), "small.bin")
+	_ = os.WriteFile(sp, []byte(small), 0o600)
+	list, err := blockMD5ListOf(sp, int64(len(small)))
+	if err != nil {
+		t.Fatalf("blockMD5ListOf: %v", err)
+	}
+	if len(list) != 1 || list[0] != md5Hex(small) {
+		t.Fatalf("小文件应单块=整文件 md5, got %v", list)
+	}
+	// >4MiB：多块（每块 md5 独立，非整文件 md5）。
+	big := []byte(strings.Repeat("b", 4<<20+100)) // 4MiB+100
+	bp := filepath.Join(t.TempDir(), "big.bin")
+	_ = os.WriteFile(bp, big, 0o600)
+	blist, berr := blockMD5ListOf(bp, int64(len(big)))
+	if berr != nil {
+		t.Fatalf("blockMD5ListOf big: %v", berr)
+	}
+	if len(blist) != 2 {
+		t.Fatalf("4MiB+100 应 2 块, got %d", len(blist))
+	}
+	if blist[0] == md5Hex(string(big)) {
+		t.Fatal("分块 md5 不得等于整文件 md5（否则秒传仍 miss）")
+	}
+	// 空文件 → 空列表。
+	empty := filepath.Join(t.TempDir(), "empty.bin")
+	_ = os.WriteFile(empty, nil, 0o600)
+	elist, eerr := blockMD5ListOf(empty, 0)
+	if eerr != nil || elist != nil {
+		t.Fatalf("空文件应空列表, got %v %v", elist, eerr)
+	}
+}

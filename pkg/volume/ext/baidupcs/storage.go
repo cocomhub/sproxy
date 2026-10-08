@@ -296,17 +296,25 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key, localMD5 string,
 	return meta, false, nil
 }
 
-// stageUpload 把上传流落本地临时文件并计算 md5/sliceMD5/crc32（上传前一次性完成）——
-// 供 Upload 与 ETag 复核，以及 rapidupload 秒传刷新（内容已在网盘时秒传命中 → 远端
-// md5 刷新为权威整文件 md5，M4 实测：分片上传后 md5 为片组合/服务端"可能不正确"，
-// 仅秒传刷新或小文件单传得到权威 md5）。
+// stageUpload 把上传流落本地临时文件并计算 md5/sliceMD5/crc32/分块 md5 列表（上传前
+// 一次性完成）——供 Upload 与 ETag 复核，以及 rapidupload 秒传刷新（内容已在网盘时秒传
+// 命中 → 远端 md5 刷新为权威整文件 md5，M4 实测：分片上传后 md5 为片组合/服务端"可能
+// 不正确"，仅秒传刷新或小文件单传得到权威 md5）。
+// C-C1 修复：分块 md5 列表（blockMD5s）——百度秒传索引按**块 md5 列表**匹配（非整文件
+// md5），>4MB 文件用整文件 md5 秒传恒 miss。blockMD5s 按上传分块大小（4MB）从 tmp 读回
+// 计算，供 RapidUpload 完整版（blockListMD5 参数）命中秒传。
 type stagedUpload struct {
-	tmpPath  string
-	md5      string // 整文件 md5（ETag 复核基准）
-	sliceMD5 string // 前 256KB md5（rapidupload 秒传参数）
-	crc32    string // 整文件 CRC32 IEEE（rapidupload 秒传参数）
-	size     int64  // 文件大小（rapidupload length 参数）
+	tmpPath   string
+	md5       string   // 整文件 md5（ETag 复核基准）
+	sliceMD5  string   // 前 256KB md5（rapidupload 秒传参数）
+	crc32     string   // 整文件 CRC32 IEEE（rapidupload 秒传参数）
+	size      int64    // 文件大小（rapidupload length 参数）
+	blockMD5s []string // 按 uploadBlockSize 分块的 md5 列表（秒传 blockListMD5 参数，C-C1）
 }
+
+// uploadBlockSize 是分片上传的块大小（与 multiupload.go 的 MultiUploader BlockSize
+// 4MiB 对齐——秒传 block 列表须与上传块一致才能命中索引）。
+const uploadBlockSize = 4 * 1024 * 1024
 
 func (s *Storage) stageUpload(r io.Reader, key string) (*stagedUpload, error) {
 	tmp, err := os.CreateTemp(s.temp, filepath.Base(key)+"-*")
@@ -334,13 +342,76 @@ func (s *Storage) stageUpload(r io.Reader, key string) (*stagedUpload, error) {
 		os.Remove(tmpPath)
 		return nil, slErr
 	}
+	// C-C1：分块 md5 列表（按 uploadBlockSize 从 tmp 读回逐块计算——秒传 block_list 参数）。
+	blockMD5s, blErr := blockMD5ListOf(tmpPath, size)
+	if blErr != nil {
+		os.Remove(tmpPath)
+		return nil, blErr
+	}
 	return &stagedUpload{
-		tmpPath:  tmpPath,
-		md5:      hex.EncodeToString(md5h.Sum(nil)),
-		sliceMD5: sliceMD5,
-		crc32:    strconv.FormatUint(uint64(crc.Sum32()), 10),
-		size:     size,
+		tmpPath:   tmpPath,
+		md5:       hex.EncodeToString(md5h.Sum(nil)),
+		sliceMD5:  sliceMD5,
+		crc32:     strconv.FormatUint(uint64(crc.Sum32()), 10),
+		size:      size,
+		blockMD5s: blockMD5s,
 	}, nil
+}
+
+// blockMD5ListOf 按 uploadBlockSize（4MiB，与上传分块一致）读回文件逐块计算 md5 列表。
+// 空文件 → 空列表（秒传对 0 字节无意义，RapidUpload 跳过）。
+func blockMD5ListOf(path string, size int64) ([]string, error) {
+	if size <= 0 {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, 64<<10) // 64KiB 读缓冲
+	var out []string
+	remaining := size
+	for remaining > 0 {
+		block := int64(uploadBlockSize)
+		if remaining < block {
+			block = remaining
+		}
+		sum, read, rerr := hashBlockMD5(f, buf, block)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if read == 0 {
+			return nil, io.ErrUnexpectedEOF // 块读不到数据（文件被并发改小）
+		}
+		out = append(out, sum)
+		remaining -= read
+	}
+	return out, nil
+}
+
+// hashBlockMD5 读最多 block 字节计算 md5（返回哈希、实际读字节数、错误——gocognit 拆分）。
+func hashBlockMD5(f *os.File, buf []byte, block int64) (string, int64, error) {
+	h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传），非安全用途
+	read := int64(0)
+	for read < block {
+		want := block - read
+		if int64(len(buf)) < want {
+			want = int64(len(buf))
+		}
+		n, rerr := f.Read(buf[:want])
+		if n > 0 {
+			_, _ = h.Write(buf[:n])
+			read += int64(n)
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return "", read, rerr
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), read, nil
 }
 
 // sliceMD5Of 计算本地文件前 bdlib.SliceMD5Size 字节的 md5（不足则整文件）。空文件 →

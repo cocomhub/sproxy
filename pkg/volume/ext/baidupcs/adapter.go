@@ -327,12 +327,12 @@ func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath str
 // 请求秒传——内容已在网盘（含刚分片上传的）→ 命中，目标 md5 刷新为权威整文件 md5。
 // 未命中（errno 31079 md5 not found）→ (false, nil) 由调用方下一轮重传。
 //
-// **D-M1 风险明示**：fork 库 RapidUploadNoCheckDir 只把 `block_list=[整文件md5]`、
-// path、size、rtype=3 发到 xpan/file/create——sliceMD5/crc32 参数未被端点消费，
-// 匹配仅按**整文件 md5 + size**（理论碰撞概率极低但非零，且内容寻址在百度全网
-// 空间命中）。命中后 Stat 复核的 ETag 即本地 md5（百度对 block_list 匹配记录），
-// 形同自证——碰撞场景下转存目标会是网盘已有同 md5 不同内容。主要用途是「本账号
-// 刚上传内容刷新」场景（内容自证成立）；跨账号碰撞为残余理论风险，可接受。
+// **C-C1 修复 + D-M1 风险明示**：改用 fork 完整 `RapidUpload`（带 blockListMD5）——
+// 原 `RapidUploadNoCheckDir` 只把 `block_list=[整文件md5]` 发到 xpan/file/create，
+// 匹配仅按**整文件 md5 + size**（>4MB 分片文件秒传索引按块 md5 列表匹配 → 恒 miss：
+// 3 轮整文件重传后 ErrTransient，内容实际正确却判失败）。block_list 传真实分块 md5
+// （与上传块一致，stageUpload.blockMD5s）即命中刚上传的块索引；整文件 md5 + size 组合
+// 碰撞概率极低但非零（残余理论风险可接受），主要用途是「本账号刚上传内容刷新」场景。
 func (a *libraryAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, mapPCSError(err)
@@ -340,8 +340,10 @@ func (a *libraryAdapter) RapidUpload(ctx context.Context, remotePath string, st 
 	if a.pcs == nil {
 		return false, fmt.Errorf("baidupcs: library adapter without client")
 	}
-	a.log.Info("baidupcs 库秒传刷新（rapidupload）", "remote", remotePath, "size", st.size)
-	pcsErr := a.pcs.PCS().RapidUploadNoCheckDir(remotePath, st.md5, st.sliceMD5, st.crc32, st.size)
+	a.log.Info("baidupcs 库秒传刷新（rapidupload）", "remote", remotePath, "size", st.size, "blocks", len(st.blockMD5s))
+	pcsErr, _ := a.pcs.PCS().RapidUpload(
+		remotePath, "overwrite", "", st.md5, st.sliceMD5, "", st.crc32,
+		0, st.size, st.size, 0, st.blockMD5s)
 	if pcsErr == nil {
 		return true, nil // 秒传命中：目标关联到已存在内容，md5 权威
 	}
