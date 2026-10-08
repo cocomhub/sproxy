@@ -178,6 +178,7 @@ func TestRecomputeGCIDAll_TailBlock(t *testing.T) {
 
 // TestVerifyGCID 验证通用 GCID 校验入口（全候选比对命中/未命中/无权威）。
 func TestVerifyGCID(t *testing.T) {
+	t.Parallel()
 	payload := bytes.Repeat([]byte("gcid-verify-"), 30000) // 大小保证 256KB 整除
 	if len(payload)%262144 != 0 {
 		// 调整到整除 256KB
@@ -208,6 +209,7 @@ func TestVerifyGCID(t *testing.T) {
 // TestGCIDOrdered_SizeGuided 验证大小引导候选 + 大→小计算 + 命中轮次统计。
 // 构造 300MB 文件（256M~1G 区间推荐 512K/1M），用 1M 分块 GCID 命中 → 应第 2 轮命中。
 func TestGCIDOrdered_SizeGuided(t *testing.T) {
+	t.Parallel()
 	// 300MB 文件（256M~1G 区间）
 	size := int64(300 << 20)
 	payload := make([]byte, size)
