@@ -201,3 +201,38 @@ func TestMultiUploader_Resume_SkipCompleted(t *testing.T) {
 		t.Fatalf("CreateSuperFile checksumMap = %d 项, want 4（含断点恢复的）", len(mu.checkSums))
 	}
 }
+
+// TestMultiUpload_HostLockSerializes C-C2 回归：共享上传锁串行化 Precreate↔
+// CreateSuperFile 生命周期——并发上传不得交错 host（防 -race 数据竞争）。
+func TestMultiUpload_HostLockSerializes(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	pcs, perr := NewClient("dummy-bduss", "") // 非 nil pcs（Precreate 需 PCS().GetPCSAddr）
+	if perr != nil {
+		t.Fatalf("NewClient: %v", perr)
+	}
+	// 并发两个上传会话：各自 Precreate→CreateSuperFile，host 生命周期全程持锁。
+	// 断言：锁内操作不交错（held 互斥）。
+	var wg sync.WaitGroup
+	active := 0
+	lock := &sync.Mutex{}
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			up := newBaiduMultiUpload(pcs, "/t.bin", &mu)
+			up.Precreate()
+			lock.Lock()
+			active++
+			if active != 1 {
+				t.Error("并发上传会话应串行（host 生命周期互斥）")
+			}
+			lock.Unlock()
+			_ = up.CreateSuperFile("orig", "skip", "uid", 100, nil)
+			lock.Lock()
+			active--
+			lock.Unlock()
+		}()
+	}
+	wg.Wait()
+}

@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
@@ -269,6 +270,10 @@ type libraryAdapter struct {
 	pcs    *Client
 	log    *slog.Logger
 	layout *Layout // 断点/暂存布局；nil = 断点不持久化
+	// uploadMu 是共享上传锁（C-C2：并发上传交错 host 生命周期——Precreate 对共享
+	// pcsAddr 做 Set/恢复、TmpFile 经 generatePCSURL 读 pcsAddr；串行化上传会话，
+	// 单会话内分片并发不受锁）。
+	uploadMu sync.Mutex
 }
 
 // newLibraryAdapter 创建库兜底 adapter。
@@ -288,7 +293,7 @@ func (a *libraryAdapter) Upload(ctx context.Context, localPath, targetPath strin
 	if a.layout != nil {
 		resumeKey = a.layout.SanitizeKey(targetPath) + ":" + sanitizeRemotePathSize(localPath)
 	}
-	return uploadViaMultiUploader(ctx, a.pcs, localPath, targetPath, overwrite, resumeKey)
+	return uploadViaMultiUploader(ctx, a.pcs, &a.uploadMu, localPath, targetPath, overwrite, resumeKey)
 }
 
 // Download 用 fork 库的 Downloader（Range 并行 + 断点恢复）下载网盘文件到本地。

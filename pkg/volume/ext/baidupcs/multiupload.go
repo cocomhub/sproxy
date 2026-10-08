@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
@@ -23,14 +24,23 @@ import (
 // 与上游 CLI 层（internal/pcsfunctions/pcsupload）同构，但：
 //   - 不使用上游全局 client（pcsconfig）——每实例自建上传客户端（隔离连接池）
 //   - 不依赖 UploadingDatabase（断点持久化由本包 Layout.Resume 承担）
+//
+// C-C2 并发修复：共享 `*Client`（libraryAdapter 持单实例，sync 并发 3 转存同卷）下，
+// Precreate 对 pcsAddr 做 Set/恢复、TmpFile 经 generatePCSURL 读 pcsAddr——并发上传
+// 交错会把分片发往错误 PCS 主机（数据竞争，-race 必报）。uploadMu（libraryAdapter
+// 每实例一把，跨上传会话共享）串行化 Precreate↔CreateSuperFile 生命周期：锁在
+// Precreate 获取、CreateSuperFile 恢复后释放，中间 TmpFile 并发分片读稳定 host 不受锁。
 type baiduMultiUpload struct {
 	pcs        *Client
 	targetPath string
+	uploadMu   *sync.Mutex // 共享上传锁（保护 host 生命周期；nil = 无并发保护旧行为）
+	held       bool
 }
 
-// newBaiduMultiUpload 构造 MultiUpload 实现。
-func newBaiduMultiUpload(pcs *Client, targetPath string) *baiduMultiUpload {
-	return &baiduMultiUpload{pcs: pcs, targetPath: targetPath}
+// newBaiduMultiUpload 构造 MultiUpload 实现。uploadMu 为库 adapter 的共享上传锁
+// （防并发 host 竞态）；nil = 单会话无并发（测试 fake 场景）。
+func newBaiduMultiUpload(pcs *Client, targetPath string, uploadMu *sync.Mutex) *baiduMultiUpload {
+	return &baiduMultiUpload{pcs: pcs, targetPath: targetPath, uploadMu: uploadMu}
 }
 
 // uploadClient 是分片上传专用 HTTP 客户端（正文传输无整体超时，由 ctx 约束）。
@@ -46,7 +56,12 @@ func (u *baiduMultiUpload) uploadClient(jar http.CookieJar) *http.Client {
 
 // Precreate 上传前准备：随机取一个 PCS 服务器（返回原始地址供 CreateSuperFile 恢复）。
 // 与上游 PCSUpload.Precreate 同构。
+// C-C2：上传会话全程持共享锁（CreateSuperFile 恢复后释放）——防并发上传交错 host。
 func (u *baiduMultiUpload) Precreate() (string, pcserror.Error) {
+	if u.uploadMu != nil {
+		u.uploadMu.Lock()
+		u.held = true
+	}
 	pcs := u.pcs.PCS()
 	originHost := pcs.GetPCSAddr()
 	_, newHost := pcs.GetRandomPCSHost()
@@ -98,9 +113,16 @@ func (u *baiduMultiUpload) TmpFile(ctx context.Context, uploadID, targetPath str
 }
 
 // CreateSuperFile 合并全部分片（恢复原始 PCS 地址）。
+// C-C2：恢复地址后释放共享锁（上传会话结束）。
 func (u *baiduMultiUpload) CreateSuperFile(pcsHost, policy, uploadID string, fileSize int64, checksumMap map[int]string) error {
 	pcs := u.pcs.PCS()
 	pcs.SetPCSAddr(pcsHost) // 恢复默认 PCS 服务器
+	defer func() {
+		if u.held {
+			u.uploadMu.Unlock()
+			u.held = false
+		}
+	}()
 	if err := pcs.UploadCreateSuperFile(uploadID, policy, fileSize, u.targetPath, checksumMap); err != nil {
 		return fmt.Errorf("baidupcs: create super file: %w", err)
 	}
@@ -109,7 +131,8 @@ func (u *baiduMultiUpload) CreateSuperFile(pcsHost, policy, uploadID string, fil
 
 // uploadViaMultiUploader 用上游 MultiUploader 上传本地文件（分片 + 断点）。
 // resumeKey 是断点状态在 Layout.Resume 下的标识（空 = 不持久化断点）。
-func uploadViaMultiUploader(ctx context.Context, pcs *Client, localPath, targetPath string, overwrite bool, resumeKey string) error {
+// uploadMu 为共享上传锁（libraryAdapter 每实例一把，跨上传会话串行化 host 生命周期）。
+func uploadViaMultiUploader(ctx context.Context, pcs *Client, uploadMu *sync.Mutex, localPath, targetPath string, overwrite bool, resumeKey string) error {
 	file, err := openLocalFile(localPath)
 	if err != nil {
 		return err
@@ -121,7 +144,7 @@ func uploadViaMultiUploader(ctx context.Context, pcs *Client, localPath, targetP
 		policy = "overwrite"
 	}
 
-	mu := newBaiduMultiUpload(pcs, targetPath)
+	mu := newBaiduMultiUpload(pcs, targetPath, uploadMu)
 	muer := uploader.NewMultiUploader(mu, rio.NewFileReaderAtLen64(file), &uploader.MultiUploaderConfig{
 		Parallel:  4,
 		BlockSize: 4 * 1024 * 1024,
