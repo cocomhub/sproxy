@@ -142,6 +142,85 @@ func RecomputeGCIDAll(path string, candidates []int64) ([]string, error) {
 	return out, nil
 }
 
+// GCIDBlockedResult 是「分块大小 → GCID」对（pikget hash 标注块大小用）。
+type GCIDBlockedResult struct {
+	Block int64  // 分块大小（字节）
+	GCID  string // 该分块复算的 GCID
+}
+
+// RecomputeGCIDBlocked 返回全候选（按 GCIDCandidates 顺序）的 (块大小, GCID) 列表，
+// 供人工校验工具标注每个 GCID 对应的分块大小（如 256KiB / 512KiB / 1MiB）。
+func RecomputeGCIDBlocked(path string) ([]GCIDBlockedResult, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := fi.Size()
+	if size == 0 {
+		return nil, nil
+	}
+	out := make([]GCIDBlockedResult, 0, len(GCIDCandidates))
+	for _, bs := range GCIDCandidates {
+		gcid, gerr := computeGCIDFile(path, f, bs, size)
+		if gerr != nil {
+			return nil, gerr
+		}
+		out = append(out, GCIDBlockedResult{Block: bs, GCID: gcid})
+	}
+	return out, nil
+}
+
+// RecomputeGCIDBlock 对文件按指定分块大小复算 GCID（pikget hash --block 用）。
+func RecomputeGCIDBlock(path string, block int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := fi.Size()
+	if size == 0 || block <= 0 {
+		return "", nil
+	}
+	return computeGCIDFile(path, f, block, size)
+}
+
+// RecomputeGCIDBlockedRecommended 按【文件大小推荐候选】复算 GCID（大小引导，
+// 同下载校验 RecomputeGCIDOrdered 的推荐规则）——pikget hash 默认输出。
+func RecomputeGCIDBlockedRecommended(path string) ([]GCIDBlockedResult, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := fi.Size()
+	if size == 0 {
+		return nil, nil
+	}
+	rec := gcidRangeFor(size)
+	out := make([]GCIDBlockedResult, 0, len(rec))
+	for _, bs := range rec {
+		gcid, gerr := computeGCIDFile(path, f, bs, size)
+		if gerr != nil {
+			return nil, gerr
+		}
+		out = append(out, GCIDBlockedResult{Block: bs, GCID: gcid})
+	}
+	return out, nil
+}
+
 // VerifyGCID 对文件复算 GCID 并与目标官方 hash 比对（通用校验入口）。
 // 任一候选分块命中（官方分块粒度未知，全候选比对）→ 返回 (true, nil)；
 // 全候选均未命中 → (false, nil)；复算失败（文件读错）→ (false, err)。
