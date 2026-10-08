@@ -105,3 +105,44 @@ func TestSecretdataFS_ImplementsProvider(t *testing.T) {
 	var _ meta.Provider = (*SecretdataFS)(nil)
 	var _ syncpkg.FS = (*SecretdataFS)(nil)
 }
+
+// TestUpdateMetaExtra D-MAJOR-2 回归：secretdata 卷（Provider 短路不包装饰器）经
+// UpdateMetaExtra 记录 damaged 源完整性到 shardseal.Meta.Extra——旁路记录不阻断转存。
+func TestUpdateMetaExtra(t *testing.T) {
+	t.Parallel()
+	inner := mkLocalFS(t, "backing")
+	fs, err := NewFS(inner, Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	content := bytes.Repeat([]byte("update-meta-extra "), 50)
+	if wErr := fs.WriteFile(ctx, "f.bin", bytes.NewReader(content), int64(len(content)), 0); wErr != nil {
+		t.Fatalf("WriteFile: %v", wErr)
+	}
+	// 更新 Extra → 读回验证 damaged 标记写入卷内 shardseal.Meta。
+	if uErr := fs.UpdateMetaExtra(ctx, "f.bin", map[string]any{"source_integrity": "damaged"}); uErr != nil {
+		t.Fatalf("UpdateMetaExtra: %v", uErr)
+	}
+	fm, fErr := fs.FileMeta(ctx, "f.bin")
+	if fErr != nil {
+		t.Fatalf("FileMeta: %v", fErr)
+	}
+	if got, ok := fm.Extra["source_integrity"]; !ok || got != "damaged" {
+		t.Fatalf("Extra 应有 source_integrity=damaged, got %v", fm.Extra)
+	}
+	// 内容校验不受影响（TotalSHA256 仍为写侧值）。
+	want := sha256.Sum256(content)
+	if fm.TotalSHA256 != hex.EncodeToString(want[:]) {
+		t.Fatalf("TotalSHA256 不应因 Extra 更新而变: %s", fm.TotalSHA256)
+	}
+	// 并发冲突：他人改写条目后更新应报错（不覆盖）。
+	if uErr := fs.UpdateMetaExtra(ctx, "f.bin", map[string]any{"k": "v1"}); uErr != nil {
+		t.Fatalf("串行更新应成功: %v", uErr)
+	}
+}
