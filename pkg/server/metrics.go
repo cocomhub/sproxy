@@ -945,6 +945,7 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_cloud_transfer_file_errors", "counter", "Transfer file content errors", cmMetrics.TransferFileErrors.Load())
 	}
 	writeHybridMetrics(&b)
+	writeGCIDMetrics(&b)
 
 	_, _ = w.Write([]byte(b.String()))
 }

@@ -313,24 +313,9 @@ func RecomputeGCIDOrdered(path string, targetHash string, stats *GCIDVerifyStats
 	if size == 0 {
 		return 0, 0, "", nil
 	}
-	// 推荐候选 + 其余候选（去重，全从大到小）
-	recommended := gcidRangeFor(size)
-	all := append([]int64{}, GCIDCandidates...)
-	// 其余 = 全候选 - 推荐（保留从大到小）
-	rest := make([]int64, 0, len(all))
-	for _, c := range all {
-		inRec := slices.Contains(recommended, c)
-		if !inRec {
-			rest = append(rest, c)
-		}
-	}
-	// 顺序：**推荐候选降序在前，rest 降序在后**（用户规则：推荐优先，范围内未命中
-	// 才补其余候选；各自内部从大到小）——不全局 sort（会把 rest 的大块插到推荐前）。
-	recommendedDesc := append([]int64{}, recommended...)
-	sort.SliceStable(recommendedDesc, func(i, j int) bool { return recommendedDesc[i] > recommendedDesc[j] })
-	sort.SliceStable(rest, func(i, j int) bool { return rest[i] > rest[j] })
-	order := append(recommendedDesc, rest...)
-	// 逐候选计算比对
+	// 候选顺序：推荐候选降序在前 + 其余候选降序在后（用户规则：推荐优先，范围内
+	// 未命中才补其余候选；各自内部从大到小）——命中即返，统计轮次。
+	order := gcidOrderFor(size)
 	round := 0
 	firstGCID := ""
 	for _, bs := range order {
@@ -343,22 +328,7 @@ func RecomputeGCIDOrdered(path string, targetHash string, stats *GCIDVerifyStats
 			firstGCID = gcid
 		}
 		if targetHash != "" && strings.EqualFold(gcid, targetHash) {
-			// 命中：统计轮次 + 记录不一致详情
-			if stats != nil {
-				if round >= 1 && round <= 5 {
-					stats.HitByRound[round].Add(1)
-				}
-				if round > 1 && firstGCID != "" && !strings.EqualFold(firstGCID, gcid) {
-					stats.MismatchFirst.Add(1)
-					stats.detailsMu.Lock()
-					if len(stats.details) < 1000 {
-						stats.details = append(stats.details, GCIDMismatchDetail{
-							Size: size, FirstGCID: firstGCID, MatchedGCID: gcid, MatchedBlock: bs,
-						})
-					}
-					stats.detailsMu.Unlock()
-				}
-			}
+			recordGCIDHit(stats, round, size, firstGCID, gcid, bs)
 			return round, bs, gcid, nil
 		}
 	}
@@ -369,7 +339,45 @@ func RecomputeGCIDOrdered(path string, targetHash string, stats *GCIDVerifyStats
 	return 0, 0, "", nil
 }
 
-// computeGCIDFile 对文件按固定块复算 GCID（复用 RecomputeGCIDAll 单候选逻辑）。
+// gcidOrderFor 返回文件大小对应的候选计算顺序（推荐降序 + rest 降序，命中即返优先）。
+func gcidOrderFor(size int64) []int64 {
+	recommended := gcidRangeFor(size)
+	all := slices.Clone(GCIDCandidates)
+	// 其余 = 全候选 - 推荐
+	rest := make([]int64, 0, len(all))
+	for _, c := range all {
+		if !slices.Contains(recommended, c) {
+			rest = append(rest, c)
+		}
+	}
+	// 各自降序（不全局 sort：推荐优先，rest 大块不插到推荐前）
+	recommendedDesc := slices.Clone(recommended)
+	sort.SliceStable(recommendedDesc, func(i, j int) bool { return recommendedDesc[i] > recommendedDesc[j] })
+	sort.SliceStable(rest, func(i, j int) bool { return rest[i] > rest[j] })
+	return append(recommendedDesc, rest...)
+}
+
+// recordGCIDHit 记录命中轮次统计 + 不一致详情（实际命中 ≠ 首次推荐候选）。
+func recordGCIDHit(stats *GCIDVerifyStats, round int, size int64, firstGCID, gcid string, bs int64) {
+	if stats == nil {
+		return
+	}
+	if round >= 1 && round <= 5 {
+		stats.HitByRound[round].Add(1)
+	}
+	if round > 1 && firstGCID != "" && !strings.EqualFold(firstGCID, gcid) {
+		stats.MismatchFirst.Add(1)
+		stats.detailsMu.Lock()
+		if len(stats.details) < 1000 {
+			stats.details = append(stats.details, GCIDMismatchDetail{
+				Size: size, FirstGCID: firstGCID, MatchedGCID: gcid, MatchedBlock: bs,
+			})
+		}
+		stats.detailsMu.Unlock()
+	}
+}
+
+// RecomputeGCIDBlock 对文件按指定分块大小复算 GCID（pikget hash --block 用）。
 func computeGCIDFile(path string, f *os.File, bs, size int64) (string, error) {
 	outer := sha1.New() //nolint:gosec // G401: GCID 算法必须 sha1（官方定义）
 	block := make([]byte, bs)
