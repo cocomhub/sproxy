@@ -566,7 +566,7 @@ func md5Hex(s string) string {
 func TestBackoffBeforeRetry(t *testing.T) {
 	t.Parallel()
 	s := newTestStorage(t, newFakeStorageAdapter())
-	// 第二次轮间退避 300ms。
+	// 第二次轮间退避 300ms（C-MINOR-10：真实 sleep 已 t.Parallel 可接受，只验下限）。
 	start := time.Now()
 	if err := s.backoffBeforeRetry(context.Background(), 2); err != nil {
 		t.Fatalf("backoff(2): %v", err)
