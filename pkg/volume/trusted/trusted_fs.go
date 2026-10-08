@@ -60,15 +60,21 @@ func (t *TrustedVolumeFS) Inner() syncpkg.FS { return t.inner }
 // FileMeta 实现 meta.Provider（读侧消费 FileMeta 的读端入口——C4 落地）：装饰器写侧
 // 已算并落盘 meta sidecar，读侧经它取回 FileMeta 供转存校验/可信卷读校验逐分块比对。
 // sidecar 缺失（未启用/旁路写/落盘失败兜底）→ 返回错误，调用方回落 Stat 直算/流式。
+// A-MAJOR-4 修复：sidecar 读上限 maxMetaSidecarBytes（防被注入超大 JSON 的 OOM DoS——
+// meta 是可信卷信任根，超限按"meta 缺失"回落直算而非崩溃）。
 func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
 	rc, err := t.inner.OpenRead(ctx, meta.MetaPath(rel))
 	if err != nil {
 		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", meta.MetaPath(rel), err)
 	}
 	defer rc.Close()
-	raw, rerr := io.ReadAll(rc)
+	raw, rerr := io.ReadAll(io.LimitReader(rc, maxMetaSidecarBytes+1))
 	if rerr != nil {
 		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", meta.MetaPath(rel), rerr)
+	}
+	if int64(len(raw)) > maxMetaSidecarBytes {
+		return nil, fmt.Errorf("trusted: meta sidecar %s 超限（>%d B，疑似注入），回落直算",
+			meta.MetaPath(rel), maxMetaSidecarBytes)
 	}
 	fm, uerr := meta.Unmarshal(raw)
 	if uerr != nil {
@@ -77,10 +83,17 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 	return fm, nil
 }
 
+// maxMetaSidecarBytes 是 meta sidecar 读取上限（64MiB——合理 FileMeta 远小于此，
+// 防被注入超大 JSON 的 OOM；超限视为 meta 缺失回落直算）。
+const maxMetaSidecarBytes = 64 << 20
+
 // UpdateMetaExtra 更新已落盘 meta sidecar 的 Extra（旁路记录能力——如源完整性
 // damaged 标记 source_integrity=damaged；失败返回错误由调用方 Warn 兜底，不阻断）。
 // 供转存层在任务携带旁路语义时（IntegrityStatus=damaged）把标记写入目标卷 meta，
 // 消费者读 FileMeta.Extra 可见。sidecar 缺失 → 错误（调用方跳过）。
+// A-MAJOR-3 修复：读-改-写非原子在并发覆盖窗口会拿旧哈希 meta 覆盖新 meta——更新后
+// 重读校验 TotalSHA256 仍与磁盘文件一致（检测到并发覆盖则返回错误，调用方跳过而非
+// 污染新 meta）。
 func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	fm, err := t.FileMeta(ctx, rel)
 	if err != nil {
@@ -98,6 +111,28 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	}
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		return fmt.Errorf("trusted: meta 更新落盘失败: %w", werr)
+	}
+	// A-MAJOR-3：写后重读校验——若写盘期间主文件被并发覆盖（WriteFile 重算并落新 meta），
+	// 此处读回的 meta 是旧哈希（拿旧覆盖了新），重读比对磁盘文件内容不一致 → 返回错误
+	// 由调用方跳过（不污染新 meta）。
+	rc, oerr := t.inner.OpenRead(ctx, rel)
+	if oerr != nil {
+		return nil // 主文件不可读（并发删除等）→ 不误报，调用方跳过
+	}
+	calc, cerr := meta.NewCalculator(fm.Size, fm.ChunkSize)
+	if cerr != nil {
+		rc.Close()
+		return nil
+	}
+	_, rerr := calc.ReadFrom(rc)
+	rc.Close()
+	if rerr != nil {
+		return nil
+	}
+	got := calc.Finish()
+	if got.TotalSHA256 != fm.TotalSHA256 {
+		return fmt.Errorf("trusted: meta 更新期间主文件并发覆盖（旧哈希 %s ≠ 新 %s，跳过避免污染）",
+			fm.TotalSHA256, got.TotalSHA256)
 	}
 	return nil
 }

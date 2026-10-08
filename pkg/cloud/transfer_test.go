@@ -1312,3 +1312,42 @@ func TestTransferDone_DamagedResumeSelfOverwrite(t *testing.T) {
 		t.Fatalf("覆盖后内容应为新下载产物, got %q", got)
 	}
 }
+
+// TestVerifyByFileMeta_TrailingGarbage D-MAJOR-1 回归：目标卷内容 = 合法前缀+尾部垃圾
+// ——分块哈希/TotalSHA256 只覆盖 meta 窗口（合法前缀），尾部追加的损坏文件原被判
+// 「可信」（循环不 drain 余量、无实读==fm.Size 断言）。修复后应报 ErrTransferTarget。
+func TestVerifyByFileMeta_TrailingGarbage(t *testing.T) {
+	t.Parallel()
+	// 复用随机分块 fixture：meta 覆盖前 60B（3 块），目标内容 = 前 60B + 尾部垃圾。
+	chunks := []meta.ChunkMeta{
+		{Index: 0, Offset: 0, Size: 10, SHA256: refSHA256([]byte(strings.Repeat("a", 10)))},
+		{Index: 1, Offset: 10, Size: 20, SHA256: refSHA256([]byte(strings.Repeat("b", 20)))},
+		{Index: 2, Offset: 30, Size: 30, SHA256: refSHA256([]byte(strings.Repeat("c", 30)))},
+	}
+	var prefix []byte
+	prefix = append(prefix, strings.Repeat("a", 10)...)
+	prefix = append(prefix, strings.Repeat("b", 20)...)
+	prefix = append(prefix, strings.Repeat("c", 30)...)
+	fm := &meta.FileMeta{Version: 1, Size: 60, TotalSHA256: refSHA256(prefix), ChunkSize: 10, Chunks: chunks}
+	if err := meta.Validate(fm); err != nil {
+		t.Fatalf("fixture meta 应合法: %v", err)
+	}
+	// 目标内容 = 合法前缀 + 尾部垃圾（原实现三哈希全过 → 误判可信）。
+	tampered := append(append([]byte{}, prefix...), []byte("TRAILING-GARBAGE")...)
+	fs := &staticMetaFS{data: tampered, fm: fm}
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-trailing", Filename: "t.bin", Transfer: &TransferSpec{Volume: "vol-t"}}
+	dest := filepath.Join(t.TempDir(), "t.bin")
+	_ = os.WriteFile(dest, prefix, 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+	_, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: refSHA256(prefix), Size: int64(len(prefix)),
+	}, nil)
+	if err == nil {
+		t.Fatal("D-MAJOR-1: 目标卷尾部追加垃圾（合法前缀+垃圾）应判卷静默损坏，原实现误判可信")
+	} else if !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("尾追加应归 ErrTransferTarget, got %v", err)
+	}
+}

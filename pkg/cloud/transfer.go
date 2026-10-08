@@ -430,6 +430,19 @@ func verifyByFileMeta(env *transferEnv) error {
 			return fmt.Errorf("%w: 转存后分块 %d 不一致（卷静默损坏？）", ErrTransferTarget, i)
 		}
 	}
+	// D-MAJOR-1 修复：**drain 余量 + 断言实读 == fm.Size**——原循环按 fm.Chunks 覆盖
+	// 窗口读（合法前缀即通过），目标卷内容 = 合法前缀+尾部垃圾时，分块哈希/TotalSHA256/
+	// result.Checksum 三对都只覆盖前缀 → 尾追加的损坏文件被判可信。此处读尽余量：
+	// 若目标比 meta 长（尾部追加）→ 余量非空 → 拒绝（卷静默损坏）。
+	var trailing int64
+	if n, terr := io.Copy(io.Discard, rc); terr != nil {
+		return fmt.Errorf("%w: 读回尾排检查失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, terr)
+	} else {
+		trailing = n
+	}
+	if trailing != 0 {
+		return fmt.Errorf("%w: 转存后内容长于 meta（尾部追加 %d B，卷静默损坏？）", ErrTransferTarget, trailing)
+	}
 	// 整文件 TotalSHA256 与 meta 一致（权威认证：内容整体没被篡改，与分块粒度无关）。
 	totalHex := hex.EncodeToString(totalSHA.Sum(nil))
 	if totalHex != fm.TotalSHA256 {
