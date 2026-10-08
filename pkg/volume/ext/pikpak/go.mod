@@ -20,6 +20,5 @@ module github.com/cocomhub/sproxy/pkg/volume/ext/pikpak
 
 go 1.27
 
-replace github.com/cocomhub/sproxy => ../../../..
 
-require github.com/cocomhub/sproxy v0.0.0
+require github.com/cocomhub/sproxy v0.0.0-20261008134855-8b2a42ff4439
