@@ -5,7 +5,6 @@ package pikpak
 
 import (
 	"context"
-	"crypto/sha1" // #nosec G505 -- PikPak file hash 协议是 SHA-1（完整性校验，非安全用途）
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -271,7 +270,7 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	}
 	// 续传进度基准：读 .hybrid manifest 累计已完成 chunk 字节，预置 prog——
 	// 恢复时已完成 chunk 被 filterChunks 跳过，若 prog 从 0 起进度回调会从头计数
-	//（实际续传是生效的，只是显示从 0 开始）。预置后进度从已完成处继续。
+	// （实际续传是生效的，只是显示从 0 开始）。预置后进度从已完成处继续。
 	if _, tok := parseShareIDWithToken(source); tok != "" {
 		dc.shareToken = tok // round-11：token 分享的 re-resolve 需带 token
 	}
@@ -300,6 +299,61 @@ func (d *HybridDownloader) fallbackDownload(ctx context.Context, source, destPat
 }
 
 // runHybrid 执行混合下载主体（分享区 + 账号区分片并行）。
+
+// hybridSinkReplay 把已落盘文件重放进 sink（配额记账；失败清理转存副本）。
+func (d *HybridDownloader) hybridSinkReplay(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory) error {
+	fi, statErr := os.Stat(dc.destPath)
+	if statErr != nil {
+		return fmt.Errorf("hybrid stat for sink: %w", statErr)
+	}
+	sink, sinkErr := sinkFactory(discardWriter{}, fi.Size(), false)
+	if sinkErr != nil {
+		return sinkErr
+	}
+	if replayErr := replayFileIntoSink(dc.destPath, sink); replayErr != nil {
+		sink.Finish(false, 0)
+		dc.lease.Release(ctx) // 🟡：sink 重放失败也清理转存（AutoDelete 语义）
+		return replayErr
+	}
+	sink.Finish(true, 0)
+	return nil
+}
+
+// prepareManifest 加载/创建 manifest 并预置续传进度基准（已完成 chunk 字节入 prog）。
+func (d *HybridDownloader) prepareManifest(dc *downloadCtx, shareEnd int64) *hybridManifest {
+	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
+	// 两文件配套出现：开始下载立刻创建空 manifest——中断/退出也 .hybrid 与
+	// .hybrid.downloading 成对存在（直观可续）。已有同源 manifest 保留（崩溃续传）。
+	if manifest == nil {
+		manifest = d.initManifest(dc, shareEnd)
+	}
+	// 续传进度基准：已完成 chunk 字节预置进 prog（进度从已完成处继续，不从头计数）。
+	var done int64
+	for _, ln := range manifest.Chunks {
+		done += ln
+	}
+	dc.prog.Store(done)
+	return manifest
+}
+
+// verifyHybridGCID 对临时文件做 GCID 权威复算（候选分块命中官方 hash → true）。
+// 未命中 → 清理转存副本（G4：失败不留 6GB 空间）并返回错误（不冒充成功）。
+func (d *HybridDownloader) verifyHybridGCID(ctx context.Context, dc *downloadCtx) (bool, error) {
+	if dc.target.Hash == "" {
+		return false, nil // 无权威 hash：不校验（回落本地自洽）
+	}
+	matched, gerr := integrity.VerifyGCIDStats(dc.working, integrity.GCIDCandidates, dc.target.Hash, d.gcidStats)
+	if gerr != nil {
+		return false, fmt.Errorf("hybrid gcid verify: %w", gerr)
+	}
+	if !matched {
+		dc.lease.Release(ctx) // G4：校验失败也清理转存副本（AutoDelete 语义）
+		return false, fmt.Errorf("hybrid integrity check failed: file gcid != target %s", dc.target.Hash)
+	}
+	d.log.Info("hybrid integrity verified (gcid match)")
+	return true, nil
+}
+
 func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory) (*Result, error) {
 	integrityVerified := false // GCID 权威复算命中标记（Result 三态用）
 	// 写盘目标：临时文件 destPath + ".hybrid.downloading"（分片 WriteAt 全落这里，
@@ -321,23 +375,9 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	for _, c := range chunks {
 		dc.chunkOffsets = append(dc.chunkOffsets, c.offset)
 	}
-	// 崩溃恢复：读 manifest，**校验源身份一致**（C4：同一分享/文件才跳过已完成）。
-	// manifest 记录在 destPath+".hybrid"（与临时文件同目录），恢复时跳过已完成 chunk。
-	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
-	// 两文件配套出现：**开始下载立刻创建 manifest**（空 Chunks）——即使首 chunk 尚未
-	// 完成、立刻中断，.hybrid.downloading 与 .hybrid 也成对存在（直观可续）。
-	// 已有同源 manifest（崩溃续传）则保留原样。
-	if manifest == nil {
-		manifest = d.initManifest(dc, shareEnd)
-	}
-	// 续传进度基准：已完成 chunk 字节预置进 prog（进度从已完成处继续，不从头计数）。
-	if manifest != nil {
-		var done int64
-		for _, ln := range manifest.Chunks {
-			done += ln
-		}
-		dc.prog.Store(done)
-	}
+	// 崩溃恢复：读 manifest（源身份一致校验），缺失则创建空 manifest（两文件配套），
+	// 续传进度基准预置 prog。抽 helper 控制认知复杂度。
+	manifest := d.prepareManifest(dc, shareEnd)
 	if err := d.runChunks(ctx, dc, chunks, shareEnd, manifest); err != nil {
 		// G4：失败路径也清理已转存副本（AutoDelete 语义——失败任务不留 6GB 空间占用）。
 		dc.lease.Release(ctx)
@@ -349,42 +389,22 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
 	}
-	// C2 最终完整性校验：**GCID 权威复算**（PikPak file hash 是 GCID = sha1(concat(sha1(分块)))，
-	// 非整文件 sha1——旧 sha1 全文件比对恒失败）。用 pkg/integrity.RecomputeGCIDAll 按
-	// 候选分块（256KB~4MB）复算，命中官方 hash → verified；未命中 → 报错（不冒充成功）。
-	if dc.target.Hash != "" {
-		matched, gerr := integrity.VerifyGCIDStats(dc.working, integrity.GCIDCandidates, dc.target.Hash, d.gcidStats)
-		if gerr != nil {
-			return nil, fmt.Errorf("hybrid gcid verify: %w", gerr)
-		}
-		if !matched {
-			// G4：校验失败也清理转存副本（AutoDelete 语义）。
-			dc.lease.Release(ctx)
-			return nil, fmt.Errorf("hybrid integrity check failed: file gcid != target %s", dc.target.Hash)
-		}
-		integrityVerified = true // GCID 权威命中 → Result 标记 ModeAuthority（语义管道态）
-		d.log.Info("hybrid integrity verified (gcid match)")
+	// C2 最终完整性校验：**GCID 权威复算**（PikPak file hash 是 GCID = sha1(concat(sha1(分块)))）。
+	// 抽 helper 控制认知复杂度（gocognit）——命中权威 → ModeAuthority；未命中 → 报错。
+	var verifyErr error
+	integrityVerified, verifyErr = d.verifyHybridGCID(ctx, dc)
+	if verifyErr != nil {
+		return nil, verifyErr
 	}
 	// 校验通过 → 临时文件原子 rename 到最终 destPath（同目录原子；跨 FS 回退 copy+remove）。
 	if err := os.Rename(dc.working, dc.destPath); err != nil {
 		return nil, fmt.Errorf("hybrid finalize rename: %w", err)
 	}
-	// sink 记账：sinkFactory 非空时把已落盘文件重放进 sink（配额语义，对齐内置 HTTP 下载器）。
+	// sink 记账：sinkFactory 非空时把已落盘文件重放进 sink（配额语义）。
 	if sinkFactory != nil {
-		fi, statErr := os.Stat(dc.destPath)
-		if statErr != nil {
-			return nil, fmt.Errorf("hybrid stat for sink: %w", statErr)
+		if serr := d.hybridSinkReplay(ctx, dc, sinkFactory); serr != nil {
+			return nil, serr
 		}
-		sink, sinkErr := sinkFactory(discardWriter{}, fi.Size(), false)
-		if sinkErr != nil {
-			return nil, sinkErr
-		}
-		if replayErr := replayFileIntoSink(dc.destPath, sink); replayErr != nil {
-			sink.Finish(false, 0)
-			dc.lease.Release(ctx) // 🟡：sink 重放失败也清理转存（AutoDelete 语义）
-			return nil, replayErr
-		}
-		sink.Finish(true, 0)
 	}
 	dc.lease.Release(ctx)
 	// 注意：Checksum 是**本地落盘文件的 SHA-256**（自证文件未被篡改/续传拼错），
@@ -964,17 +984,12 @@ func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *at
 	for {
 		n, rerr := r.Read(buf)
 		if n > 0 {
-			if _, werr := f.WriteAt(buf[:n], offset+written); werr != nil {
+			// 写盘 + 进度（全局 prog + per-chunk 本地）；写错返回错误
+			wn, werr := writeChunkBytes(f, buf[:n], offset, written, prog, total, onProgress, onChunkLocal)
+			if werr != nil {
 				return written, werr
 			}
-			written += int64(n)
-			prog.Add(int64(n))
-			if onProgress != nil {
-				onProgress(prog.Load(), total) // I1：全局进度（总文件）
-			}
-			if onChunkLocal != nil {
-				onChunkLocal(written) // per-chunk 进度（该 chunk 本地累计，非全局）
-			}
+			written = wn
 		}
 		if rerr == io.EOF {
 			break
@@ -984,6 +999,22 @@ func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *at
 		}
 	}
 	return written, nil
+}
+
+// writeChunkBytes 写一个缓冲块并更新进度（全局 + per-chunk），返回新 written。
+func writeChunkBytes(f *os.File, p []byte, offset, base int64, prog *atomic.Int64, total int64, onProgress downloader.ProgressFunc, onChunkLocal func(chunkDone int64)) (int64, error) {
+	if _, werr := f.WriteAt(p, offset+base); werr != nil {
+		return 0, werr
+	}
+	base += int64(len(p))
+	prog.Add(int64(len(p)))
+	if onProgress != nil {
+		onProgress(prog.Load(), total)
+	}
+	if onChunkLocal != nil {
+		onChunkLocal(base)
+	}
+	return base, nil
 }
 
 // discardWriter 是 sink 包装目标（文件已直接写盘，sink 只做记账，无需实际写）。
@@ -1046,20 +1077,6 @@ func largestAnyFile(files []ShareFile) *ShareFile {
 		}
 	}
 	return best
-}
-
-// sha1FileHex 计算文件 SHA-1（PikPak file hash 为 40-hex SHA-1，用于最终完整性校验）。
-func sha1FileHex(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha1.New() // #nosec G401 -- PikPak hash 协议要求 SHA-1
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // newSHA256 创建 SHA-256 hash（结果 hex）。
@@ -1302,21 +1319,26 @@ func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *S
 // findInPackShared 在「Pack From Shared」文件夹内查找同名/同大小转存副本（转存副本固定
 // 落这里）。**不全盘 walk**（FindInDrive 全盘 ListRecursive 慢/超时是去重失效根因）。
 // 命中 → 返回 (FileMeta, ok)。优先 size 精确匹配（强判据），回退 name 匹配（弱判据）。
-func (d *HybridDownloader) findInPackShared(ctx context.Context, wantName string, wantSize int64) (*FileMeta, bool) {
-	// 1. 找 Pack From Shared 文件夹（根目录下列出）
+
+// findPackFolderID 在网盘根目录找「Pack From Shared」文件夹（转存副本固定落这里）。
+func (d *HybridDownloader) findPackFolderID(ctx context.Context) (string, error) {
 	root, err := d.api.List(ctx, "")
 	if err != nil {
-		return nil, false
+		return "", err
 	}
-	var packID string
 	for i := range root {
 		if root[i].Kind == driveKindFolder && strings.EqualFold(root[i].Name, "Pack From Shared") {
-			packID = root[i].ID
-			break
+			return root[i].ID, nil
 		}
 	}
-	if packID == "" {
-		return nil, false // 无转存文件夹 = 从无转存，直接走 RestoreShare
+	return "", nil
+}
+
+func (d *HybridDownloader) findInPackShared(ctx context.Context, wantName string, wantSize int64) (*FileMeta, bool) {
+	// 1. 找 Pack From Shared 文件夹（根目录下列出）；无则直接走 RestoreShare
+	packID, err := d.findPackFolderID(ctx)
+	if err != nil || packID == "" {
+		return nil, false
 	}
 	// 2. 列该文件夹内文件，按 size/name 匹配
 	files, err := d.api.List(ctx, packID)

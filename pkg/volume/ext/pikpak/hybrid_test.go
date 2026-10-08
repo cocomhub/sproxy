@@ -1891,7 +1891,7 @@ func TestHybridDownload_UsesDownloadingSuffix(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); derr != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	// 最终文件存在
