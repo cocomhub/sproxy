@@ -56,16 +56,15 @@ func (u *baiduMultiUpload) uploadClient(jar http.CookieJar) *requester.HTTPClien
 	return c
 }
 
-// Precreate 上传前准备：随机取一个 PCS 服务器（返回原始地址供 CreateSuperFile 恢复）。
-// 与上游 PCSUpload.Precreate 同构。
-// C-C2/C3：host 生命周期锁由 uploadViaMultiUploader Execute 入口持有（defer 释放），
-// 此处仅切换 host 不再自行持锁。
+// Precreate 上传前准备：与上游 PCSUpload.Precreate 同构。
+// C4 修复：**不再随机切换 PCS host**——原实现 SetPCSAddr(newHost) 写 fork 库裸字段
+// pcsAddr，与并发 metaop（Stat/List/Move/Copy/Delete/LocateDownload 读 pcsAddr）构成
+// 数据竞争（-race 必报；功能 benign 因随机 host 均合法）。默认 pcs_addr 节点即可用
+// （CLI/e2e 同节点），保持恒稳定 host 消除写竞争。返回 originHost（当前 host）供
+// CreateSuperFile 恢复兼容（值不变，no-op 语义）。
 func (u *baiduMultiUpload) Precreate() (string, pcserror.Error) {
 	pcs := u.pcs.PCS()
-	originHost := pcs.GetPCSAddr()
-	_, newHost := pcs.GetRandomPCSHost()
-	pcs.SetPCSAddr(newHost)
-	return originHost, nil
+	return pcs.GetPCSAddr(), nil
 }
 
 // TmpFile 上传单个分片。uploadURL 由 BaiduPCS 的 PrepareUploadSuperfile2 生成。
@@ -109,11 +108,10 @@ func (u *baiduMultiUpload) TmpFile(ctx context.Context, uploadID, targetPath str
 	return md5, nil
 }
 
-// CreateSuperFile 合并全部分片（恢复原始 PCS 地址）。
-// C-C2/C3：锁由 uploadViaMultiUploader 外层持有，此处只恢复 host 不再释放锁。
+// CreateSuperFile 合并全部分片。
+// C4 修复：不再恢复 PCS host（Precreate 已不切换——恒默认节点，恢复 no-op）。
 func (u *baiduMultiUpload) CreateSuperFile(pcsHost, policy, uploadID string, fileSize int64, checksumMap map[int]string) error {
 	pcs := u.pcs.PCS()
-	pcs.SetPCSAddr(pcsHost) // 恢复默认 PCS 服务器
 	if err := pcs.UploadCreateSuperFile(uploadID, policy, fileSize, u.targetPath, checksumMap); err != nil {
 		return fmt.Errorf("baidupcs: create super file: %w", err)
 	}
