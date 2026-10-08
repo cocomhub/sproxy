@@ -374,3 +374,43 @@ func TestWrite_ChunkSizeFloor(t *testing.T) {
 		t.Fatalf("meta Size = %d, want %d", fm.Size, len(data))
 	}
 }
+
+// TestUpdateMetaExtra_C5 回归：UpdateMetaExtra 先读回校验主文件与旧 meta 一致才落盘
+// （C5/E-MAJOR-2 修复——原先写旧哈希 meta 再读回比对，顺序反：并发覆盖时旧 meta
+// 已覆盖新 meta 且不回滚）。测试：主文件与 meta 一致 → Extra 更新成功；主文件被
+// 篡改（与 meta 不一致）→ 更新跳过（不覆盖 meta，无污染）。
+func TestUpdateMetaExtra_C5(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv, ok := Wrap(inner, Options{}).(*TrustedVolumeFS)
+	if !ok {
+		t.Fatalf("Wrap(LocalFS) 应返回装饰器, got %T", tv)
+	}
+	ctx := context.Background()
+	data := []byte("update-meta-extra-c5")
+	if err := tv.WriteFile(ctx, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// 一致 → 更新成功，Extra 写入。
+	if err := tv.UpdateMetaExtra(ctx, "user/f.bin", map[string]any{"source_integrity": "damaged"}); err != nil {
+		t.Fatalf("UpdateMetaExtra: %v", err)
+	}
+	fm, ferr := tv.FileMeta(ctx, "user/f.bin")
+	if ferr != nil {
+		t.Fatalf("FileMeta: %v", ferr)
+	}
+	if got, ok := fm.Extra["source_integrity"]; !ok || got != "damaged" {
+		t.Fatalf("Extra 应有 source_integrity=damaged, got %v", fm.Extra)
+	}
+	// 篡改主文件（内容变、meta 未变）→ 更新跳过（不覆盖 meta）。
+	if err := inner.WriteFile(ctx, "user/f.bin", bytes.NewReader(append([]byte("tampered-"), data...)), int64(len(data))+8, 0); err != nil {
+		t.Fatalf("篡改写入: %v", err)
+	}
+	if err := tv.UpdateMetaExtra(ctx, "user/f.bin", map[string]any{"k": "v"}); err != nil {
+		t.Fatalf("篡改时更新应跳过（nil）而非报错, got %v", err)
+	}
+	fm2, _ := tv.FileMeta(ctx, "user/f.bin")
+	if _, has := fm2.Extra["k"]; has {
+		t.Fatal("篡改时 Extra 更新应被跳过（不污染 meta）")
+	}
+}

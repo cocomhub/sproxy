@@ -104,22 +104,11 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	if err != nil {
 		return err
 	}
-	if fm.Extra == nil {
-		fm.Extra = make(map[string]any, len(extra))
-	}
-	for k, v := range extra {
-		fm.Extra[k] = v
-	}
-	data, merr := meta.Marshal(fm)
-	if merr != nil {
-		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
-	}
-	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
-		return fmt.Errorf("trusted: meta 更新落盘失败: %w", werr)
-	}
-	// A-MAJOR-3：写后重读校验——若写盘期间主文件被并发覆盖（WriteFile 重算并落新 meta），
-	// 此处读回的 meta 是旧哈希（拿旧覆盖了新），重读比对磁盘文件内容不一致 → 返回错误
-	// 由调用方跳过（不污染新 meta）。
+	// C5 修复（E-MAJOR-2）：**先读回校验、通过后再落盘**——原实现先写旧哈希 meta
+	// 再读回比对（A-MAJOR-3），顺序反了：并发覆盖时旧 meta 已覆盖新 meta、读回发现
+	// 不一致却**不回滚**，正确新 meta 已丢失（readbackVerify 此后恒失配）。校验前置：
+	// 主文件当前内容必须仍与旧 meta 一致（fm.TotalSHA256），一致才允许写入（合并
+	// Extra 的 meta 仍描述当前内容，天然无污染）。
 	rc, oerr := t.inner.OpenRead(ctx, rel)
 	if oerr != nil {
 		return nil // 主文件不可读（并发删除等）→ 不误报，调用方跳过
@@ -136,8 +125,21 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	}
 	got := calc.Finish()
 	if got.TotalSHA256 != fm.TotalSHA256 {
-		return fmt.Errorf("trusted: meta 更新期间主文件并发覆盖（旧哈希 %s ≠ 新 %s，跳过避免污染）",
-			fm.TotalSHA256, got.TotalSHA256)
+		// 主文件已被并发覆盖（旧 meta 描述旧内容）→ 跳过，不覆盖新 meta（无污染）。
+		return nil
+	}
+	if fm.Extra == nil {
+		fm.Extra = make(map[string]any, len(extra))
+	}
+	for k, v := range extra {
+		fm.Extra[k] = v
+	}
+	data, merr := meta.Marshal(fm)
+	if merr != nil {
+		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
+	}
+	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+		return fmt.Errorf("trusted: meta 更新落盘失败: %w", werr)
 	}
 	return nil
 }
@@ -173,10 +175,9 @@ func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size i
 	if t.opts.DisableMetaFile {
 		return
 	}
-	chunkSize := t.opts.ChunkSize
-	if chunkSize <= 0 {
-		chunkSize = meta.ChunkSizeForSize(size)
-	}
+	// C2 修复：与 WriteFile 共用 chunkSizeFor（含 minMetaChunkSize 钳制）——原实现只用
+	// <=0 默认，配置 ChunkSize=1B + 大文件 → 10 亿 ChunkMeta OOM/爆配额。
+	chunkSize := t.chunkSizeFor(size)
 	rc, err := t.inner.OpenRead(ctx, rel)
 	if err != nil {
 		return // 读回失败：meta 不落（直算兜底）
@@ -342,6 +343,24 @@ func (t *TrustedVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser
 // 底层 CapacityFS/账本时自然计入——meta 也经 WriteFile 写）。
 // sidecar 统一独立 meta 桶后：用户写 `x.meta` 落 user 桶、sidecar 落 meta 桶不冲突，
 // **无需保留 `.meta` 后缀禁用**（用户真实 `.meta` 文件合法，与本地卷一致）。
+// chunkSizeFor 计算可信卷分块大小（WriteFile 与 writeMetaAfter 共用——C2 修复防
+// 双实现漂移）：配置 >0 且 >= minMetaChunkSize 用配置值，否则按 size 自适应
+// （ChunkSizeForSize）；配置 < minMetaChunkSize 钳到下界（A-MAJOR-5 防百万分块 DoS）。
+func (t *TrustedVolumeFS) chunkSizeFor(size int64) int64 {
+	cs := t.opts.ChunkSize
+	if cs <= 0 {
+		return meta.ChunkSizeForSize(size)
+	}
+	if cs < minMetaChunkSize {
+		return minMetaChunkSize
+	}
+	return cs
+}
+
+// WriteFile 写入 + 计算并落 .meta（若启用）。meta 大小计入底层配额（WriteFile 经
+// 底层 CapacityFS/账本时自然计入——meta 也经 WriteFile 写）。
+// sidecar 统一独立 meta 桶后：用户写 `x.meta` 落 user 桶、sidecar 落 meta 桶不冲突，
+// **无需保留 `.meta` 后缀禁用**（用户真实 `.meta` 文件合法，与本地卷一致）。
 // A-MAJOR-5 修复：chunkSize 下界钳制——配置极小 chunk_size（如 1B）大文件按 1B 分块
 // 产生数百万 ChunkMeta（meta JSON GB 级：落盘爆配额/读侧 OOM）。钳到
 // minMetaChunkSize（1MiB）保 chunk 数上限；同时按 size 自适应的上限天然（ChunkSizeForSize
@@ -351,12 +370,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 		return t.inner.WriteFile(ctx, rel, r, size, mtime)
 	}
 	// 计算 meta：读一遍流（同时喂给 inner 写）。
-	chunkSize := t.opts.ChunkSize
-	if chunkSize <= 0 {
-		chunkSize = meta.ChunkSizeForSize(size)
-	} else if chunkSize < minMetaChunkSize {
-		chunkSize = minMetaChunkSize // A-MAJOR-5：下界钳制防百万分块 DoS
-	}
+	chunkSize := t.chunkSizeFor(size)
 	calc, err := meta.NewCalculator(size, chunkSize)
 	if err != nil {
 		return err
