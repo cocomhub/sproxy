@@ -77,33 +77,32 @@ func (u *baiduMultiUpload) TmpFile(ctx context.Context, uploadID, targetPath str
 		mr.AddFormFile("uploadedfile", "", r)
 		_ = mr.CloseMultipart()
 
-		doneChan := make(chan struct{}, 1)
-		var (
+		// C-M1 修复：resp/err 经 channel 单点发布（取消分支不触碰共享变量——原 goroutine
+		// 写 resp/err 与主 select 的 ctx.Done 分支读 resp 并发，-race 数据竞争；HTTP 请求
+		// 已随 ctx 取消终止，取消分支只返回 ctx.Err() 不读 resp）。
+		type result struct {
 			resp *http.Response
 			err  error
-		)
+		}
+		done := make(chan result, 1)
 		go func() {
 			req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, mr)
 			if reqErr != nil {
-				err = reqErr
-				doneChan <- struct{}{}
+				done <- result{err: reqErr}
 				return
 			}
 			req.Header.Set("Content-Type", mr.ContentType())
 			req.Header.Set("User-Agent", "BaiduPCS-Go")
 			req.ContentLength = mr.Len()
 			cli := u.uploadClient(jar)
-			resp, err = cli.Do(req)
-			doneChan <- struct{}{}
+			resp, err := cli.Do(req)
+			done <- result{resp: resp, err: err}
 		}()
 		select {
 		case <-ctx.Done():
-			if resp != nil {
-				_ = resp.Body.Close()
-			}
-			return resp, ctx.Err()
-		case <-doneChan:
-			return resp, err
+			return nil, ctx.Err()
+		case r := <-done:
+			return r.resp, r.err
 		}
 	})
 	if pcsErr != nil {
