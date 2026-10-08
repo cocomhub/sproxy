@@ -282,12 +282,28 @@ func TestDownloadIntegrity_ResumeResetsState(t *testing.T) {
 	if err := mgr.ResumeTask(task.ID, false, ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	mgr.mu.RLock()
-	got := mgr.tasks[task.ID]
-	mgr.mu.RUnlock()
-	if got.integritySames != 0 || got.integrityLastChecksum != "" || got.IntegrityStatus != "" {
+	// ResumeTask 异步启动 executeDownload（goroutine）—— 轮询等待终态（failed），
+	// 避免与 failTask 并发写字段的 race（-parallel 下 CI 实测触发）。
+	deadline := time.Now().Add(5 * time.Second)
+	var sames int
+	var last, istatus, status string
+	for {
+		mgr.mu.RLock()
+		got := mgr.tasks[task.ID]
+		status = got.Status
+		sames, last, istatus = got.integritySames, got.integrityLastChecksum, got.IntegrityStatus
+		mgr.mu.RUnlock()
+		if status == "failed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("resume 后任务应达 failed，got %q", status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if sames != 0 || last != "" || istatus != "" {
 		t.Fatalf("M1: resume 应重置 integrity 状态，got sames=%d last=%q status=%q",
-			got.integritySames, got.integrityLastChecksum, got.IntegrityStatus)
+			sames, last, istatus)
 	}
 }
 
