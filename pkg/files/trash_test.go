@@ -13,6 +13,7 @@ package files
 import (
 	"context"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,14 +49,16 @@ func TestTrash_SoftDeleteAndRestore(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(userAbs, "a.txt")); !os.IsNotExist(err) {
 		t.Fatalf("原路径应删除: %v", err)
 	}
-	// trash 桶有文件。
+	// trash 桶分层树（C-MAJOR-2）：trash/<user 段>/<文件段>.__deleted__<nano>。
 	trashAbs, _ := tnt.Root().Abs("trash")
-	entries, _ := os.ReadDir(trashAbs)
+	flat := flattenRel("user/a.txt")
+	dirAbs := filepath.Join(trashAbs, filepath.FromSlash(path.Dir(flat)))
+	entries, _ := os.ReadDir(dirAbs)
 	if len(entries) != 1 {
 		t.Fatalf("trash 应 1 条, got %d", len(entries))
 	}
 	// 恢复。
-	trashRel := trashPrefix + entries[0].Name()
+	trashRel := trashPrefix + path.Dir(flat) + "/" + entries[0].Name()
 	if err := env.svc.RestoreTrash(context.Background(), "alice", trashRel); err != nil {
 		t.Fatalf("RestoreTrash: %v", err)
 	}
@@ -146,17 +149,20 @@ func TestTrash_MetaFollowsFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Clean(metaPath)); !os.IsNotExist(err) {
 		t.Fatalf("软删后 meta 应随迁（原 meta 桶无 sidecar）: %v", err)
 	}
-	// trash 桶有 2 条（主文件 + meta sidecar）。
+	// trash 分层树（C-MAJOR-2）：trash/<user 段>/<a.txt 段>.__deleted__<nano> +
+	// meta 条目同目录。读目录断言 2 条（主文件 + meta）。
 	trashAbs, _ := root.Abs("trash")
-	entries, _ := os.ReadDir(trashAbs)
+	flat := flattenRel("user/a.txt")
+	dirAbs := filepath.Join(trashAbs, filepath.FromSlash(path.Dir(flat)))
+	entries, _ := os.ReadDir(dirAbs)
 	if len(entries) != 2 {
 		t.Fatalf("trash 应 2 条（主文件+meta）, got %d", len(entries))
 	}
 	// 恢复 → meta 回 meta 桶（用实际 trash 条目名——时间戳后缀由软删生成，扫描获得）。
 	trashRel := ""
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), flattenRel("user/a.txt")+trashDeletedSuffix) && !strings.Contains(e.Name(), trashMetaMarker) {
-			trashRel = trashPrefix + e.Name()
+		if strings.HasPrefix(e.Name(), path.Base(flat)+trashDeletedSuffix) && !strings.Contains(e.Name(), trashMetaMarker) {
+			trashRel = trashPrefix + path.Dir(flat) + "/" + e.Name()
 			break
 		}
 	}
@@ -231,13 +237,15 @@ func TestTrash_SoftDeleteRestore_Underscore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("软删: %v", err)
 	}
-	// 恢复（扫描 trash 主条目——flat 编码 base64(rel)，无  字面歧义）。
+	// 恢复（扫描 trash 分层主条目——flat 逐段 base64，无 `_` 字面歧义）。
 	trashAbs, _ := root.Abs("trash")
-	entries, _ := os.ReadDir(trashAbs)
+	flat := flattenRel("user/a_b/c.txt")
+	dirAbs := filepath.Join(trashAbs, filepath.FromSlash(path.Dir(flat)))
+	entries, _ := os.ReadDir(dirAbs)
 	trashRel := ""
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), flattenRel("user/a_b/c.txt")+trashDeletedSuffix) {
-			trashRel = trashPrefix + e.Name()
+		if strings.HasPrefix(e.Name(), path.Base(flat)+trashDeletedSuffix) {
+			trashRel = trashPrefix + path.Dir(flat) + "/" + e.Name()
 			break
 		}
 	}

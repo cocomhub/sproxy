@@ -14,7 +14,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -52,41 +54,52 @@ func TrashMetaMarker() string { return trashMetaMarker }
 // 的 rel（`user/a_b/c.txt`）双射破坏——恢复时 `_`→`/` 会把 a_b 还原成 a/b 两级目录
 // （数据错位/409 永久丢失）。可逆规则：`/` → `_`；`_` → `__`（转义）。解码先合并
 // `__`→`_` 再单 `_`→`/`，与编码互逆。
-// flattenRel 把 user/ 相对路径编码为 trash 顶层扁平条目名（**严格双射**）。
-// B-C2/B-C3 修复：原 `/`→`_`、`_`→`__` 编码对「段首下划线」不可逆（`user/_a/b` 与
-// `user/a_/b` 碰撞/错位 → 软删永久不可恢复）；且 flat 含字面 `_` 与 `.meta` 标记、
-// 用户真实 `.meta` 文件名空间冲突。改用 base64 RawURLEncoding（字符集 A-Za-z0-9-_，
-// 不含 `/` 与 `.`）：任何 rel 唯一映射、无 `_`/`.` 歧义、与 sidecar `.meta` 标记天然
-// 隔离（base64 产物永不以 `.` 结尾；用户 rel 的 flat 也永不含 `.`）。
+// flattenRel 把 user/ 相对路径编码为 trash 内条目路径（用户裁定 2026-10-09：
+// **目录镜像 + 文件名编码**）：
+//   - 目录段**保留原文**（`trash/user/dir1/dir2/` 镜像 user 树——目录名本来合法、
+//     天然不超 NAME_MAX，且恢复时直接拼接、可读）；
+//   - 仅**文件名 base64**（字符集 A-Za-z0-9-_，无 `/` 与 `.`——防与 sidecar `.meta`
+//     标记、`__deleted__` 后缀、用户真实 `.meta` 文件名冲突）。
+//
+// C-MAJOR-2 修复：原整条 rel 单文件 base64 深路径（100 段×5 字 → ~670 字符）超
+// NAME_MAX(255) → ENAMETOOLONG 软删半途失败。目录镜像后单段恒 ≤255（文件名本身
+// 受 ValidSegmentName 约束），无超长风险。
+// 例：user/a/b.txt → `user/a/<base64(b.txt)>`。
 func flattenRel(rel string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(rel))
+	dir, file := path.Split(rel)
+	return strings.TrimSuffix(dir, "/") + "/" + base64.RawURLEncoding.EncodeToString([]byte(file))
 }
 
-// unflattenRel 把扁平条目还原为原 rel（与 flattenRel 互逆；非法编码返回 ""）。
+// unflattenRel 把 trash 条目路径还原为原 rel（与 flattenRel 互逆；文件名段非法编码
+// 返回 ""）。目录段原样拼接、仅最后一段 base64 解码。
 func unflattenRel(flat string) string {
-	b, err := base64.RawURLEncoding.DecodeString(flat)
+	dir, file := path.Split(flat)
+	b, err := base64.RawURLEncoding.DecodeString(file)
 	if err != nil {
 		return ""
 	}
-	return string(b)
+	return strings.TrimSuffix(dir, "/") + "/" + string(b)
 }
 
 // M2 修复：meta sidecar 随主文件一起移到 trash 桶（生命周期一致）——软删保留 meta
 // 供恢复；trash 条目随清理一起删（无孤儿）；同 rel 新文件不受影响（其 meta 是新的，
 // 不在此路径移动）。
 func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, quarRel, rel string, info os.FileInfo) (string, error) {
-	// trash 桶相对路径：trash/<rel 扁平编码>.__deleted__<nano>（顶层扁平，防嵌套目录）。
+	// trash 桶相对路径：trash/<分层扁平>.__deleted__<nano>（C-MAJOR-2：逐段 base64 保留
+	// 目录层级，单文件名不超 NAME_MAX——整条 rel 编码深路径会 ENAMETOOLONG）。
 	flatRel := flattenRel(rel)
 	trashRel := trashPrefix + flatRel + trashDeletedSuffix + strconv.FormatInt(time.Now().UnixNano(), 10)
-	// trash 桶顶层目录确保存在（rename 目标目录必须已建）。
-	if err := root.MkdirAll("trash", 0o755); err != nil {
-		return "", fmt.Errorf("trash 目录: %w", err)
+	// trash 条目父目录逐级创建（分层树：trash/<dir1>/<dir2>/...——rename 目标父目录必须已建）。
+	if dir := filepath.ToSlash(filepath.Dir(trashRel)); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return "", fmt.Errorf("trash 目录: %w", err)
+		}
 	}
 	if err := atomicRenameRoot(root, quarRel, trashRel); err != nil {
 		return "", fmt.Errorf("trash rename: %w", err)
 	}
 	// meta sidecar 随迁（best-effort：源 meta 不存在则跳过——读路径直算兜底；恢复时
-	// 随主文件一起回 meta 桶）。meta 条目与主文件用同一 flat 前缀（+.meta 标记）。
+	// 随主文件一起回 meta 桶）。meta 条目与主文件同 flat 目录（+.meta 标记）。
 	_ = atomicRenameRoot(root, meta.MetaPath(rel), trashPrefix+flatRel+trashMetaMarker+trashDeletedSuffix+strconv.FormatInt(time.Now().UnixNano(), 10))
 	_ = info // 保留（未来恢复时用大小）
 	return trashRel, nil
@@ -109,9 +122,8 @@ func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) erro
 	if !ok {
 		return &HTTPError{Status: 400, Message: "无效的回收站条目"}
 	}
-	flat := before // 形如 user_a__b_c.txt（_ 分隔原 rel 段；`__` 是文件名中的 `_` 转义）
-	// flat → 原 rel（可逆解码：`__`→`_`、单 `_`→`/`——D-C1 修复：文件名含 `_` 的 rel
-	// 不再被还原成多级目录）。
+	flat := before // 分层扁平（逐段 base64，含 user 段；C-MAJOR-2：保留目录层级防单名超长）
+	// flat → 原 rel（逐段可逆解码）。
 	origRel := unflattenRel(flat)
 	if !strings.HasPrefix(origRel, "user/") {
 		return &HTTPError{Status: 400, Message: "无效的回收站条目"}
@@ -140,10 +152,19 @@ func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) erro
 }
 
 // restoreTrashMetaSuffix 定位 trash 桶中对应 flat 的 meta 条目（软删随迁命名
-// trash/<flat>.meta.__deleted__<nano>）并返回其删除后缀段。找不到返回空（读路径直算兜底）。
-// 实现：遍历 trash 桶顶层，匹配前缀 <flat>.meta.__deleted__。
+// trash/<flat>.meta.__deleted__<nano>，flat 含分层路径段）并返回其删除后缀段。
+// 找不到返回空（读路径直算兜底）。实现：在 trash/<flat 父目录> 下找
+// `<basename>.meta.__deleted__`。
 func restoreTrashMetaSuffix(root *storage.Root, flat string) string {
-	trashAbs, ok := root.Abs("trash")
+	// flat 可能是 user/<...>/<base>（分层）——meta 条目与主文件同目录，basename 前加 .meta。
+	base := path.Base(flat)
+	dir := path.Dir(flat)
+	if dir == "." || dir == "" {
+		dir = "trash"
+	} else {
+		dir = "trash/" + dir
+	}
+	trashAbs, ok := root.Abs(dir)
 	if !ok {
 		return ""
 	}
@@ -151,11 +172,11 @@ func restoreTrashMetaSuffix(root *storage.Root, flat string) string {
 	if err != nil {
 		return ""
 	}
-	prefix := flat + trashMetaMarker + trashDeletedSuffix
+	prefix := base + trashMetaMarker + trashDeletedSuffix
 	for _, e := range entries {
 		name := e.Name()
 		if strings.HasPrefix(name, prefix) {
-			return strings.TrimPrefix(name, flat+trashMetaMarker+trashDeletedSuffix)
+			return strings.TrimPrefix(name, base+trashMetaMarker+trashDeletedSuffix)
 		}
 	}
 	return ""
@@ -165,6 +186,7 @@ func restoreTrashMetaSuffix(root *storage.Root, flat string) string {
 // B-MAJOR-3 修复：删除条目时按**原 rel** 释放配额——软删时主文件/meta 配额保留
 // （可恢复），清空即永久删除，磁盘字节释放但配额键仍在原 user/meta 路径 → 必须
 // ReleaseUsage 对称（否则 owner Scope 永久虚高直至重启）。
+// C-MAJOR-2：trash 条目为**分层树**（逐段 base64 保留目录层级）——递归遍历清理。
 func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 	owner = normalizeOwner(owner)
 	tnt := s.rt.tenantOf(owner)
@@ -176,24 +198,41 @@ func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 	if !ok {
 		return nil
 	}
-	entries, err := os.ReadDir(trashAbs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	// 递归清理（分层树：目录先递归删内容，文件删除条目 + 释放配额）。
+	err := filepath.WalkDir(trashAbs, func(absPath string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
 		}
+		if d.IsDir() {
+			return nil // 目录内容由子条目处理，目录自身由 RemoveAll 收尾
+		}
+		entryRel := trashEntryRel(trashAbs, absPath)
+		info, ierr := os.Stat(absPath)
+		if ierr == nil {
+			s.releaseTrashEntryQuota(owner, root, entryRel, info.Size())
+		}
+		_ = root.Remove(entryRel)
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	for _, e := range entries {
-		rel := filepath.Join(trashAbs, e.Name())
-		info, ierr := os.Stat(rel)
-		if ierr == nil {
-			// B-C1 修复：传含 trash/ 前缀的完整条目路径（releaseTrashEntryQuota 的
-			// TrimPrefix 契约）——裸 e.Name() 会让 guard 恒早退（配额释放死代码）。
-			s.releaseTrashEntryQuota(owner, root, trashPrefix+filepath.ToSlash(e.Name()), info.Size())
-		}
-		_ = root.Remove(trashPrefix + filepath.ToSlash(e.Name()))
-	}
+	// 删除后清空可能残留的空目录（分层树剪枝）。
+	_ = os.RemoveAll(trashAbs)
 	return nil
+}
+
+// trashEntryRel 把 WalkDir 的绝对路径映射为「含 trash/ 前缀的完整条目相对路径」
+// （releaseTrashEntryQuota 的 TrimPrefix 契约）。
+func trashEntryRel(trashAbs, absPath string) string {
+	rel, err := filepath.Rel(trashAbs, absPath)
+	if err != nil {
+		return trashPrefix + filepath.ToSlash(filepath.Base(absPath))
+	}
+	return trashPrefix + filepath.ToSlash(rel)
 }
 
 // releaseTrashEntryQuota 按 trash 条目名还原原 rel 并释放对应配额（B-MAJOR-3）：
@@ -231,6 +270,7 @@ func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entry
 
 // CleanupTrash 清理过期回收站条目（保留期 ttl；0 = 立即全部清理）。
 // 返回清理条数。按 mtime 判定（软删时的 mtime 由 rename 保持）。
+// C-MAJOR-2：trash 条目为**分层树**——递归遍历，过期条目（文件）删除 + 释放配额。
 func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Duration) (int, error) {
 	owner = normalizeOwner(owner)
 	tnt := s.rt.tenantOf(owner)
@@ -242,29 +282,40 @@ func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Durat
 	if !ok {
 		return 0, nil
 	}
-	entries, err := os.ReadDir(trashAbs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
 	now := time.Now()
 	cleaned := 0
-	for _, e := range entries {
-		full := filepath.Join(trashAbs, e.Name())
-		info, serr := os.Stat(full)
-		if serr != nil {
-			continue
-		}
-		if ttl <= 0 || now.Sub(info.ModTime()) > ttl {
-			// B-MAJOR-3：清空即永久删除——先释放原 rel 配额（与 EmptyTrash 对称）。
-			// B-C1 修复：传含 trash/ 前缀完整条目路径（TrimPrefix 契约）。
-			s.releaseTrashEntryQuota(owner, root, trashPrefix+filepath.ToSlash(e.Name()), info.Size())
-			if root.Remove(trashPrefix+filepath.ToSlash(e.Name())) == nil {
-				cleaned++
-			}
-		}
+	err := filepath.WalkDir(trashAbs, s.cleanupTrashWalk(owner, root, trashAbs, ttl, now, &cleaned))
+	if err != nil && !os.IsNotExist(err) {
+		return 0, err
 	}
 	return cleaned, nil
+}
+
+// cleanupTrashWalk 是 CleanupTrash 的 WalkDir 回调（S107 拆分降 gocognit）：过期文件
+// 删除 + 释放原 rel 配额（与 EmptyTrash 对称）；目录跳过（内容由子条目处理）。
+func (s *Service) cleanupTrashWalk(owner string, root *storage.Root, trashAbs string, ttl time.Duration, now time.Time, cleaned *int) fs.WalkDirFunc {
+	return func(absPath string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, serr := os.Stat(absPath)
+		if serr != nil {
+			return nil
+		}
+		if ttl > 0 && now.Sub(info.ModTime()) <= ttl {
+			return nil // 未过期
+		}
+		entryRel := trashEntryRel(trashAbs, absPath)
+		s.releaseTrashEntryQuota(owner, root, entryRel, info.Size())
+		if root.Remove(entryRel) == nil {
+			*cleaned++
+		}
+		return nil
+	}
 }
