@@ -133,7 +133,7 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(st.tmpPath)
+	defer os.RemoveAll(filepath.Dir(st.tmpPath)) // 清理独立临时子目录（含 tmp 文件）
 
 	remote, err := s.remotePath(key)
 	if err != nil {
@@ -327,12 +327,22 @@ type stagedUpload struct {
 const uploadBlockSize = 4 * 1024 * 1024
 
 func (s *Storage) stageUpload(r io.Reader, key string) (*stagedUpload, error) {
-	tmp, err := os.CreateTemp(s.temp, filepath.Base(key)+"-*")
+	// 临时文件放独立随机子目录、用**目标 basename 精确命名**（e2e 实测修复）：CLI
+	// 二进制 upload 的保存名 = 本地文件 basename（`<dir>/<basename>` 目录语义）——若 tmp
+	// basename 带随机后缀（原 CreateTemp `basename-*`），CLI 保存到 `<dir>/cli.bin-<rand>`
+	// ≠ 目标 `cli.bin` → Stat 恒 NotFound → 3 轮复核失败 ErrTransient。独立子目录隔离
+	// 并发同 basename 上传，精确 basename 保证 CLI/库两路径保存名一致。
+	sub, mkErr := os.MkdirTemp(s.temp, "stage-*")
+	if mkErr != nil {
+		return nil, mkErr
+	}
+	tmpPath := filepath.Join(sub, filepath.Base(key))
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
+		os.RemoveAll(sub)
 		return nil, err
 	}
-	tmpPath := tmp.Name()
-	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
+	cleanup := func() { tmp.Close(); os.RemoveAll(sub) }
 	md5h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传/ETag），非安全用途
 	crc := crc32.NewIEEE()
 	// 单遍拷贝：tmp 落盘 + 整文件 md5 + crc32 同步累计。
@@ -343,19 +353,19 @@ func (s *Storage) stageUpload(r io.Reader, key string) (*stagedUpload, error) {
 		return nil, copyErr
 	}
 	if closeErr := tmp.Close(); closeErr != nil {
-		os.Remove(tmpPath)
+		os.RemoveAll(sub)
 		return nil, closeErr
 	}
 	// sliceMD5：从 tmp 读回前 256KB（百度 rapidupload 秒传的前 256KB 切片参数）。
 	sliceMD5, slErr := sliceMD5Of(tmpPath)
 	if slErr != nil {
-		os.Remove(tmpPath)
+		os.RemoveAll(sub)
 		return nil, slErr
 	}
 	// C-C1：分块 md5 列表（按 uploadBlockSize 从 tmp 读回逐块计算——秒传 block_list 参数）。
 	blockMD5s, blErr := blockMD5ListOf(tmpPath, size)
 	if blErr != nil {
-		os.Remove(tmpPath)
+		os.RemoveAll(sub)
 		return nil, blErr
 	}
 	return &stagedUpload{

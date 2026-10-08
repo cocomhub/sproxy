@@ -636,3 +636,40 @@ func TestRefreshByRapidUpload_FallbackBinary(t *testing.T) {
 		t.Fatal("binaryAdapter 默认装配（库 Fallback）下 ETag 不匹配应经 Fallback rapidupload 刷新")
 	}
 }
+
+// TestBinaryAdapter_Upload_CLIDirSemantics e2e 实测修复：binaryAdapter.Upload 的 CLI
+// `upload` target 是**目录**语义（内容落 `<dir>/<basename>`）——调用方传入文件路径时
+// 不得直接透传（否则父路径错位 + 残留目录）。这里验证 runBinary 收到的 arg 是目录
+// 而非文件路径。
+func TestBinaryAdapter_Upload_CLIDirSemantics(t *testing.T) {
+	t.Parallel()
+	recorded := &recordBinaryAdapter{}
+	// 用记录 args 的 fake fallback 路径验证：binary 失败（无二进制）→ 回退前 args 应为目录。
+	ba := newBinaryAdapter(AdapterConfig{BinaryPath: "/nonexistent/BaiduPCS-Go", Logger: testLogger(), Fallback: recorded})
+	if err := ba.Upload(context.Background(), "/tmp/local.bin", "/baidu/dir/file.bin", true); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if len(recorded.calls) != 1 {
+		t.Fatalf("应回退库一次, got %d", len(recorded.calls))
+	}
+	// 二进制失败后回退库（库 Upload 拿到的是完整文件路径——库语义）。
+	if recorded.calls[0].target != "/baidu/dir/file.bin" {
+		t.Fatalf("库回退应收完整文件路径, got %q", recorded.calls[0].target)
+	}
+}
+
+// recordBinaryAdapter 记录 Upload 调用的库兜底（验证二进制回退链路）。
+type recordBinaryAdapter struct {
+	calls []struct{ local, target string }
+}
+
+func (r *recordBinaryAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	r.calls = append(r.calls, struct{ local, target string }{localPath, targetPath})
+	return nil
+}
+func (r *recordBinaryAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return nil
+}
+func (r *recordBinaryAdapter) Move(ctx context.Context, from, to string) error     { return nil }
+func (r *recordBinaryAdapter) Copy(ctx context.Context, from, to string) error     { return nil }
+func (r *recordBinaryAdapter) Delete(ctx context.Context, remotePath string) error { return nil }

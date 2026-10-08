@@ -93,6 +93,20 @@
 | **manifest**（destPath.hybrid）记录完成 chunk | 崩溃恢复跳过已完成（分享区免配额不浪费） | `TestHybridManifest_Resume` / `TestHybridDownload_ResumeKeepsCompletedChunks` |
 | **sink 配额记账**（DownloadWithWriter 完成后重放） | 对齐内置 HTTP 下载器配额语义 | `TestHybridDownload_SinkAccounting` |
 
+### 7.4 BaiduPCS-Go 上传路径（真实网盘，e2e 门控）
+
+> **入口**：`cd pkg/volume/ext/baidupcs && go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v`
+> **前置**：WSL 已登录 BaiduPCS-Go（`~/.config/BaiduPCS-Go/pcs_config.json`）且二进制可用
+> （PATH 或 `~/go/bin/BaiduPCS-Go`，经 `os.UserHomeDir()` 动态解析不硬编码用户名）；
+> 前置不满足 t.Skip。**凭据运行时读取、不经转录/落库**。
+
+| 行为 | 说明 | 锁定测试 |
+|---|---|---|
+| >4MB 文件分片上传后 `Stat.MD5` 是片组合/服务端"可能不正确"（非整文件 md5） | 分片上传 ETag 语义（C-C1 前提，WSL 实测 2026-10-07：9MB 本地 `8f566ecd` vs 远端 `18df0a1a`） | `TestE2E_CompareUploadPaths`（两条路径最终都须收敛 ETag==本地 md5） |
+| CLI 二进制 `upload`：内部自动完整块列表秒传 → 收敛快 | 二进制路径性能基准 | 同上（对比结果输出：耗时/上传次数/ETag 权威） |
+| 库兜底（libraryAdapter + refreshByRapidUpload）：秒传刷新用**真实分块 md5 列表**（blockMD5s）→ 命中刚上传块索引 → md5 权威 | 库路径收敛机制（C-C1 修复：原 `RapidUploadNoCheckDir` 只发整文件 md5，>4MB 恒 miss） | 同上（对比结果输出） |
+| 生产默认装配（binaryAdapter 二进制优先 + 库 Fallback）：refreshByRapidUpload **透传 Fallback** 秒传能力 | 默认路径大文件收敛（C-C1 深化，与 metadata() 透传同构） | `TestRefreshByRapidUpload_FallbackBinary`（单测锁定） |
+
 ## 维护指引
 
 - **新增外部依赖**：先在本文档对应分类补条目 + 测试锁定（TDD 红灯 → 实现 → 绿）

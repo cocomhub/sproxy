@@ -122,12 +122,23 @@ func (a *binaryAdapter) runBinary(ctx context.Context, args ...string) (bool, er
 }
 
 // Upload 二进制优先上传，失败（缺失/超时/非零退出）回退库。
+//
+// **CLI target 目录语义适配（e2e 实测 2026-10-08）**：`BaiduPCS-Go upload <local> <dir>`
+// 的第二个参数是**目标目录**（内容落到 `<dir>/<basename(local)>`），而调用方（Storage.Put）
+// 传入的是**文件路径** targetPath。直接传 targetPath 会让内容保存到
+// `<targetPath>/<basename(local)>`（父路径错位 + 残留目录 → 后续 Stat 见目录报
+// "不可覆盖目录"）。修复：传 `path.Dir(targetPath)` 作 CLI 目标目录——CLI 用本地文件
+// basename 保存，与库路径语义对齐（同目录同 basename）。
 func (a *binaryAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
 	policy := "skip"
 	if overwrite {
 		policy = "overwrite"
 	}
-	ok, err := a.runBinary(ctx, "upload", "--policy", policy, localPath, targetPath)
+	dir := path.Dir(targetPath)
+	if dir == "" || dir == "." {
+		dir = "/"
+	}
+	ok, err := a.runBinary(ctx, "upload", "--policy", policy, localPath, dir)
 	if ok {
 		return nil
 	}
