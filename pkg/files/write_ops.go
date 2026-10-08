@@ -1493,16 +1493,20 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	if ds := s.rt.dedupStore(f.owner); s.rt.dedupEnabled() && ds != nil {
 		refCount = ds.RemoveRef(rel, homeVol, cs)
 	}
-	if refCount == 0 {
-		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
-		if res, handled, rmErr := s.removeOrSoftDelete(f, homeVol, rel, quarRel, info, input); handled {
-			return res, rmErr
-		}
-	} else {
+	// B-M5 修复：摘除目录项（unlink）失败 → 主文件仍在卷上，**不得删 meta**——
+	// 否则主文件失去校验凭证（读路径直算兜底，但可信卷承诺"每文件必有隐藏 meta"
+	// 被打破）。unlink 失败记错误后返回失败（主文件保留，不继续收尾）。
+	if refCount > 0 {
 		// 仍有其它引用：unlink 本 rel 目录项（inode 链接数-1，其余引用仍指向同一 inode），
 		// 配额不减。硬链接下 Remove(quarRel) 即 unlink——另一引用（b.txt）的 inode 保留。
 		if err := f.root.Remove(quarRel); err != nil {
 			f.logger.ErrorContext(f.ctx, "摘除去重引用失败", "file_name", f.remotePath, "error", err.Error())
+			return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile}
+		}
+	} else if refCount == 0 {
+		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
+		if res, handled, rmErr := s.removeOrSoftDelete(f, homeVol, rel, quarRel, info, input); handled {
+			return res, rmErr
 		}
 	}
 	if csStore := s.rt.checksumStore(f.owner); csStore != nil {

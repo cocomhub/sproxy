@@ -243,7 +243,11 @@ func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
 		// 联动 meta（best-effort：源 meta 不存在则跳过；目标父目录先建——B-MINOR
 		// 与 Copy 一致，Move 到新子目录时 meta/<新dir> 可能不存在）。
 		t.ensureMetaDir(ctx, meta.MetaPath(to))
-		_ = t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to))
+		if rerr := t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to)); rerr != nil {
+			// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——源 meta 不存在（未启用/
+			// 旁路写）是正常 skip，其余失败可观测（读路径直算兜底，不阻断主 Move）。
+			t.logMetaWarn("Move", to, rerr)
+		}
 		return nil
 	}
 	return fmt.Errorf("trusted: 底层卷未实现 Move: %w", syncpkg.ErrUnsupported)
@@ -289,7 +293,10 @@ func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 	// B-MINOR：目标父目录先建（与 Rename 的 MakeDir 一致——Copy 到新子目录时
 	// meta/<新dir> 可能不存在，直接 WriteFile 会失败被吞成无 meta 孤儿）。
 	t.ensureMetaDir(ctx, dst)
-	_ = t.inner.WriteFile(ctx, dst, rc, -1, 0)
+	if werr := t.inner.WriteFile(ctx, dst, rc, -1, 0); werr != nil {
+		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——可观测，读路径直算兜底。
+		t.logMetaWarn("Copy", to, werr)
+	}
 }
 
 // ensureMetaDir 确保 sidecar 目标父目录存在（best-effort：失败跳过——WriteFile 失败
@@ -418,7 +425,11 @@ func (t *TrustedVolumeFS) Rename(ctx context.Context, from, to string) error {
 	}
 	// 联动 meta（best-effort：源 meta 不存在则跳过——rename 目标 meta 若无源也不报错）。
 	t.ensureMetaDir(ctx, meta.MetaPath(to))
-	_ = t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to))
+	if rerr := t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to)); rerr != nil {
+		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——源 meta 不存在是正常 skip，
+		// 其余失败可观测（读路径直算兜底，不阻断主 Rename）。
+		t.logMetaWarn("Rename", to, rerr)
+	}
 	return nil
 }
 
