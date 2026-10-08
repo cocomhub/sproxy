@@ -23,22 +23,22 @@ import (
 //   - 不使用上游全局 client（pcsconfig）——每实例自建上传客户端（隔离连接池）
 //   - 不依赖 UploadingDatabase（断点持久化由本包 Layout.Resume 承担）
 //
-// C-C2 并发修复：共享 `*Client`（libraryAdapter 持单实例，sync 并发 3 转存同卷）下，
+// C-C2/C3 并发修复：共享 `*Client`（libraryAdapter 持单实例，sync 并发 3 转存同卷）下，
 // Precreate 对 pcsAddr 做 Set/恢复、TmpFile 经 generatePCSURL 读 pcsAddr——并发上传
 // 交错会把分片发往错误 PCS 主机（数据竞争，-race 必报）。uploadMu（libraryAdapter
-// 每实例一把，跨上传会话共享）串行化 Precreate↔CreateSuperFile 生命周期：锁在
-// Precreate 获取、CreateSuperFile 恢复后释放，中间 TmpFile 并发分片读稳定 host 不受锁。
+// 每实例一把，跨上传会话共享）串行化 Precreate↔CreateSuperFile 生命周期：**锁在
+// uploadViaMultiUploader 的 Execute 入口获取、defer 释放**（C3 修复：原设计只在
+// CreateSuperFile 的 defer 释放，ctx 取消/"Terminated"分片错误/Precreate 后返回等
+// 上游路径不调 CreateSuperFile → 锁永久 hold 死锁；收敛到 Execute 全程持有，中间
+// TmpFile 并发分片读稳定 host 不受锁影响）。
 type baiduMultiUpload struct {
 	pcs        *Client
 	targetPath string
-	uploadMu   *sync.Mutex // 共享上传锁（保护 host 生命周期；nil = 无并发保护旧行为）
-	held       bool
 }
 
-// newBaiduMultiUpload 构造 MultiUpload 实现。uploadMu 为库 adapter 的共享上传锁
-// （防并发 host 竞态）；nil = 单会话无并发（测试 fake 场景）。
-func newBaiduMultiUpload(pcs *Client, targetPath string, uploadMu *sync.Mutex) *baiduMultiUpload {
-	return &baiduMultiUpload{pcs: pcs, targetPath: targetPath, uploadMu: uploadMu}
+// newBaiduMultiUpload 构造 MultiUpload 实现。
+func newBaiduMultiUpload(pcs *Client, targetPath string) *baiduMultiUpload {
+	return &baiduMultiUpload{pcs: pcs, targetPath: targetPath}
 }
 
 // uploadClient 返回分片上传用 HTTP 客户端（性能修复 e2e 实测 2026-10-08）：
@@ -58,12 +58,9 @@ func (u *baiduMultiUpload) uploadClient(jar http.CookieJar) *requester.HTTPClien
 
 // Precreate 上传前准备：随机取一个 PCS 服务器（返回原始地址供 CreateSuperFile 恢复）。
 // 与上游 PCSUpload.Precreate 同构。
-// C-C2：上传会话全程持共享锁（CreateSuperFile 恢复后释放）——防并发上传交错 host。
+// C-C2/C3：host 生命周期锁由 uploadViaMultiUploader Execute 入口持有（defer 释放），
+// 此处仅切换 host 不再自行持锁。
 func (u *baiduMultiUpload) Precreate() (string, pcserror.Error) {
-	if u.uploadMu != nil {
-		u.uploadMu.Lock()
-		u.held = true
-	}
 	pcs := u.pcs.PCS()
 	originHost := pcs.GetPCSAddr()
 	_, newHost := pcs.GetRandomPCSHost()
@@ -113,16 +110,10 @@ func (u *baiduMultiUpload) TmpFile(ctx context.Context, uploadID, targetPath str
 }
 
 // CreateSuperFile 合并全部分片（恢复原始 PCS 地址）。
-// C-C2：恢复地址后释放共享锁（上传会话结束）。
+// C-C2/C3：锁由 uploadViaMultiUploader 外层持有，此处只恢复 host 不再释放锁。
 func (u *baiduMultiUpload) CreateSuperFile(pcsHost, policy, uploadID string, fileSize int64, checksumMap map[int]string) error {
 	pcs := u.pcs.PCS()
 	pcs.SetPCSAddr(pcsHost) // 恢复默认 PCS 服务器
-	defer func() {
-		if u.held {
-			u.uploadMu.Unlock()
-			u.held = false
-		}
-	}()
 	if err := pcs.UploadCreateSuperFile(uploadID, policy, fileSize, u.targetPath, checksumMap); err != nil {
 		return fmt.Errorf("baidupcs: create super file: %w", err)
 	}
@@ -144,13 +135,23 @@ func uploadViaMultiUploader(ctx context.Context, pcs *Client, uploadMu *sync.Mut
 		policy = "overwrite"
 	}
 
-	mu := newBaiduMultiUpload(pcs, targetPath, uploadMu)
+	mu := newBaiduMultiUpload(pcs, targetPath)
 	muer := uploader.NewMultiUploader(mu, rio.NewFileReaderAtLen64(file), &uploader.MultiUploaderConfig{
 		Parallel:  4,
 		BlockSize: 4 * 1024 * 1024,
 		MaxRate:   0,
 		Policy:    policy,
 	}, targetPath)
+
+	// C3 修复：uploadMu 释放收敛到本函数 defer（Execute 返回即解开）——原设计只在
+	// CreateSuperFile 的 defer 释放；上游 MultiUploader 在 ctx 取消/"Terminated"分片
+	// 错误/Precreate 后返回等路径**不调用 CreateSuperFile** → 锁被永久 hold，之后该卷
+	// 所有上传在 Precreate 的 Lock() 死锁。此处 Execute 全程持有（Precreate host 切换
+	// 与 CreateSuperFile 恢复都在锁内），结束统一释放。
+	if uploadMu != nil {
+		uploadMu.Lock()
+		defer uploadMu.Unlock()
+	}
 
 	// 断点恢复（resumeKey 非空时查本地 Layout.Resume）。
 	// 修复：不调用上游 muer.InstanceState()——其实现解引用 muer.instanceState，而

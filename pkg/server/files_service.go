@@ -320,6 +320,11 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *stor
 		}
 	}()
 	if err := p.atomicWriteMeta(root, mrel, data); err != nil {
+		// C1 修复：覆盖写 meta 落盘失败 → 删旧 sidecar（best-effort）——残留描述旧
+		// 内容的陈旧 meta 会使读路径按旧分块校验新内容恒失配（硬失败固化）；删后
+		// 退化为 missing（读路径直算兜底）。配额侧：旧 meta 未 commit（prev 仍占），
+		// 主文件已换新内容、旧 sidecar 删除 → 下次 WriteMeta 会按新内容重算并差分。
+		_ = root.Remove(mrel)
 		return err
 	}
 	// 配额落地：覆盖写先释放旧 committed（rename 替换旧 inode，旧字节不再占盘），

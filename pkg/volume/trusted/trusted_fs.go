@@ -379,8 +379,12 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 		// 覆盖，重复上传）。仍失败（非 size 类）才返回错误。
 		if ok := meta.FixSizeFromChunks(fm); !ok || meta.Validate(fm) != nil {
 			// C6：不 Delete(rel)（防删既有覆盖目标）。底层写入已成功但 meta 无法自愈
-			// （罕见——非 size 类校验失败），主文件已落盘但无可信 sidecar——调用方
-			// Warn 兜底，读路径直算；下次覆盖写自愈。
+			// （罕见——非 size 类校验失败），主文件已落盘新内容但无可信 sidecar。
+			// C1 修复：**删旧 sidecar**（best-effort）——残留描述旧内容的陈旧 meta 会使
+			// 读路径 FileMeta 成功解析旧哈希、按旧分块校验新内容恒失配（硬失败，与
+			// missing 直算兜底不同，文件被固化不可读）。删后退化为 missing（直算兜底，
+			// 下次覆盖写自愈）。
+			_ = t.inner.Delete(ctx, meta.MetaPath(rel))
 			return fmt.Errorf("trusted: 写入后 meta 校验失败（size %d vs 实写，sidecar 未落）: %w", size, err)
 		}
 	}
@@ -394,7 +398,10 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		// meta 落盘失败：主文件已成功——不失败主写（meta 可下次读时补），记日志语义
 		// 由调用方/审计处理；此处返回主写成功（meta 缺失时 Stat 直算兜底）。
+		// C1 修复：**删旧 sidecar**（best-effort）——覆盖写场景旧 meta 描述旧内容，
+		// 残留会使读路径按旧分块校验新内容恒失配（硬失败固化）；删后退化为 missing。
 		// C-MAJOR-7：经 Options.Logger 可观测（注入时 Warn），默认装配 nil 静默。
+		_ = t.inner.Delete(ctx, meta.MetaPath(rel))
 		t.logMetaWarn("WriteFile", rel, werr)
 		return nil
 	}
