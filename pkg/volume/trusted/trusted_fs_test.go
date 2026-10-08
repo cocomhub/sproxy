@@ -344,3 +344,33 @@ func TestWrite_SizeDeclaredWrong_SelfHeals(t *testing.T) {
 		t.Fatalf("自愈后的 meta 应通过 Validate: %v", err)
 	}
 }
+
+// TestWrite_ChunkSizeFloor A-MAJOR-5 回归：配置极小 chunk_size（1B）→ 钳到下界 1MiB，
+// 大文件按 1B 分块会产生数百万 ChunkMeta（meta JSON GB 级 DoS）——防分块数爆炸。
+func TestWrite_ChunkSizeFloor(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv := Wrap(inner, Options{ChunkSize: 1}) // 1B 分块（恶意配置）
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("floor-chunk-"), 1000) // ~12KB
+	if err := tv.WriteFile(ctx, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	rc, rerr := inner.OpenRead(ctx, "meta/f.bin.meta")
+	if rerr != nil {
+		t.Fatalf("meta 应落盘: %v", rerr)
+	}
+	raw, _ := io.ReadAll(rc)
+	rc.Close()
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("meta 解析: %v", uerr)
+	}
+	// 钳到 1MiB 后 ~12KB 文件仅 1 块（非 12k 块）。
+	if len(fm.Chunks) > 4 {
+		t.Fatalf("1B 配置应钳到 1MiB 分块（~12KB 应 ≤4 块）, got %d", len(fm.Chunks))
+	}
+	if fm.Size != int64(len(data)) {
+		t.Fatalf("meta Size = %d, want %d", fm.Size, len(data))
+	}
+}

@@ -87,6 +87,11 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 // 防被注入超大 JSON 的 OOM；超限视为 meta 缺失回落直算）。
 const maxMetaSidecarBytes = 64 << 20
 
+// minMetaChunkSize 是可信卷分块大小下界（1MiB，A-MAJOR-5：配置极小 chunk_size 时
+// 大文件按 1B 分块会产生数百万 ChunkMeta → meta JSON GB 级 DoS）。ChunkSizeForSize
+// 自适应上限天然（最大 32MiB），无需额外上限钳制。
+const minMetaChunkSize = 1 << 20
+
 // UpdateMetaExtra 更新已落盘 meta sidecar 的 Extra（旁路记录能力——如源完整性
 // damaged 标记 source_integrity=damaged；失败返回错误由调用方 Warn 兜底，不阻断）。
 // 供转存层在任务携带旁路语义时（IntegrityStatus=damaged）把标记写入目标卷 meta，
@@ -330,6 +335,10 @@ func (t *TrustedVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser
 // 底层 CapacityFS/账本时自然计入——meta 也经 WriteFile 写）。
 // sidecar 统一独立 meta 桶后：用户写 `x.meta` 落 user 桶、sidecar 落 meta 桶不冲突，
 // **无需保留 `.meta` 后缀禁用**（用户真实 `.meta` 文件合法，与本地卷一致）。
+// A-MAJOR-5 修复：chunkSize 下界钳制——配置极小 chunk_size（如 1B）大文件按 1B 分块
+// 产生数百万 ChunkMeta（meta JSON GB 级：落盘爆配额/读侧 OOM）。钳到
+// minMetaChunkSize（1MiB）保 chunk 数上限；同时按 size 自适应的上限天然（ChunkSizeForSize
+// 最大 32MiB）不设额外上限。
 func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
 	if t.opts.DisableMetaFile {
 		return t.inner.WriteFile(ctx, rel, r, size, mtime)
@@ -338,6 +347,8 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	chunkSize := t.opts.ChunkSize
 	if chunkSize <= 0 {
 		chunkSize = meta.ChunkSizeForSize(size)
+	} else if chunkSize < minMetaChunkSize {
+		chunkSize = minMetaChunkSize // A-MAJOR-5：下界钳制防百万分块 DoS
 	}
 	calc, err := meta.NewCalculator(size, chunkSize)
 	if err != nil {
