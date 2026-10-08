@@ -12,6 +12,49 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.24.0](https://github.com/cocomhub/sproxy/compare/v0.23.0...v0.24.0) (2026-10-08)
+
+
+### Added
+
+* **client:** 401 → ErrUnauthorized 哨兵——供调用方精确区分签名失效（仅 401 触发 SK 轮换） ([#742](https://github.com/cocomhub/sproxy/issues/742)) ([56210e2](https://github.com/cocomhub/sproxy/commit/56210e27a2da501a9b0127c9eafc469dd53c6c55))
+* **cloud:** 云端下载后转存（transfer 到目标卷——secretdata 自动加密/普通卷纯上传 + 三行为正交）([#732](https://github.com/cocomhub/sproxy/issues/732)) ([e7588b2](https://github.com/cocomhub/sproxy/commit/e7588b23efde4c67967ba285459c72437a73974a))
+* **cluster:** 集群出口——凭证下发 + 出口卷访问持有节点真实卷（mesh 转发）([#739](https://github.com/cocomhub/sproxy/issues/739)) ([8706c1f](https://github.com/cocomhub/sproxy/commit/8706c1f84c6bb8dede6cb93f954419876e2fac93))
+* **integrity:** 云端下载完整性校验——checksum 三态 + 语义校验管道 + 资源配额隔离 + damaged 重下闭环（[#743](https://github.com/cocomhub/sproxy/issues/743)） ([6504dc6](https://github.com/cocomhub/sproxy/commit/6504dc6e5b87e1a23306fd2bd79234bf772a3b9b))
+* **lint:** 新增 containedctx + gocognit=15 双引擎对齐，落地 lint+Sonar 双排除纪律 ([#727](https://github.com/cocomhub/sproxy/issues/727)) ([1dc9140](https://github.com/cocomhub/sproxy/commit/1dc91401a35a297b67137f56cb7d2a98a301a552))
+* **pikpak:** hybrid 多账号分片——账号区 chunk 分摊多账号并行下载（[#737](https://github.com/cocomhub/sproxy/issues/737)） ([d66927c](https://github.com/cocomhub/sproxy/commit/d66927c116230322248493cf63c562d16f358f92))
+* **pikpak:** hybrid 混合下载器——分享直链+账号流量分片并行（[#734](https://github.com/cocomhub/sproxy/issues/734)） ([d5571dc](https://github.com/cocomhub/sproxy/commit/d5571dcf14f3470424996565f478c7a82a821d02))
+* **pikpak:** hybrid 混合下载增强——.hybrid.downloading 临时文件/GCID 大小引导校验+命中轮次统计/去重增强/每 source 并发/32MiB ([#744](https://github.com/cocomhub/sproxy/issues/744)) ([8b2a42f](https://github.com/cocomhub/sproxy/commit/8b2a42ff4439e69c80d44b54d52975d5f09efbb3))
+* **pikpak:** PikPak 网盘中转后端（官方 CLI 完整下载 + 分享自动发现） ([c36db9b](https://github.com/cocomhub/sproxy/commit/c36db9bcf9933041a5eb38ecbcbc3b684f27a1aa))
+* **pikpak:** 多账号会话文件池——配额轮换 + 加密凭据卷（secretdata/shardseal）+ 账号管理命令 ([#725](https://github.com/cocomhub/sproxy/issues/725)) ([b46d36c](https://github.com/cocomhub/sproxy/commit/b46d36c3b67121d14f7d2ea2255e8684b29a40b6))
+* **secret:** secret 加密卷 blob 命名匿名性收敛——base62 窗口 + HMAC 组签 + 256-bit 校验（[#740](https://github.com/cocomhub/sproxy/issues/740)） ([75fe1d2](https://github.com/cocomhub/sproxy/commit/75fe1d256d003ff26a4730eab5eaa65ea66cf6c8))
+* **secret:** secret 加密卷——shardseal 分块加密 + secret_data/secrets 封装卷 + 目录保密/即时删/冗余扩展 ([#723](https://github.com/cocomhub/sproxy/issues/723)) ([4736424](https://github.com/cocomhub/sproxy/commit/473642435ac357c5f9f8eafd99035bbfa65c9155))
+* **secrets:** secret 卷管理接线——双口令派生 + /api/secrets 端点 + CLI/WebUI ([#731](https://github.com/cocomhub/sproxy/issues/731)) ([7d12416](https://github.com/cocomhub/sproxy/commit/7d12416a7e7ab0955ef93007b143b9a82bb3f40a))
+* **secret:** 加密卷 HTTP Range 随机访问播放 + 通用文件获取三态（共享/独享自动适配）([#735](https://github.com/cocomhub/sproxy/issues/735)) ([776c79d](https://github.com/cocomhub/sproxy/commit/776c79d3e4776ddf302805b00128634a36b01ad5))
+* **secret:** 视频关键帧分块——加密卷 seek 只解目标段（边缓冲边播地基）([#733](https://github.com/cocomhub/sproxy/issues/733)) ([8c492a1](https://github.com/cocomhub/sproxy/commit/8c492a1a421ab4d96fab4472799043a8134cd782))
+
+
+### Fixed
+
+* **cloud:** 云端下载三行为全链可靠收口 ([#738](https://github.com/cocomhub/sproxy/issues/738)) ([f9e9f07](https://github.com/cocomhub/sproxy/commit/f9e9f07fbb45582c81dfd62e674cc63ccece5975))
+* **kad:** FlushPersist join 在途回调根治 TempDir 清理竞态 + sonar 排除体系 ([#716](https://github.com/cocomhub/sproxy/issues/716)) ([0913767](https://github.com/cocomhub/sproxy/commit/09137671eb6dca18474c003bcefbb2037de4b293))
+* **pikpak:** REST 鉴权 token 改读会话凭据文件 + 真实 API 兼容（size string/自分享免 restore）([#729](https://github.com/cocomhub/sproxy/issues/729)) ([84d517a](https://github.com/cocomhub/sproxy/commit/84d517a2dd5cc43eeac7b59a1c4f508385ba0c23))
+* **sonar:** JS NOSONAR 改裸格式 + kad_test S8193——SonarJS 不支持规则号后缀 ([#718](https://github.com/cocomhub/sproxy/issues/718)) ([defd9ae](https://github.com/cocomhub/sproxy/commit/defd9ae2212c520f16f9afbc43a5e2b1194e1d37))
+* **sonar:** master 非 JS issue 清零——S1192 flag 常量 + S107 参数收敛 + S3776 handle 深收敛 ([#730](https://github.com/cocomhub/sproxy/issues/730)) ([36f15b1](https://github.com/cocomhub/sproxy/commit/36f15b166af3c41a4e6da8cc371df242b849fd28))
+* **test:** SignalShutdown/GoroutineLeak 收敛判据——根治 [#584](https://github.com/cocomhub/sproxy/issues/584)/[#585](https://github.com/cocomhub/sproxy/issues/585) flake ([#736](https://github.com/cocomhub/sproxy/issues/736)) ([e26713f](https://github.com/cocomhub/sproxy/commit/e26713f0701a5b081d16cdb474b016145bf07d05))
+
+
+### Changed
+
+* **deps:** bump actions/download-artifact from 7.0.0 to 8.0.1 ([#721](https://github.com/cocomhub/sproxy/issues/721)) ([093f3ed](https://github.com/cocomhub/sproxy/commit/093f3edf6d34db0db243a043c49b433568af06dd))
+* **deps:** bump benchmark-action/github-action-benchmark ([#719](https://github.com/cocomhub/sproxy/issues/719)) ([45151c9](https://github.com/cocomhub/sproxy/commit/45151c9b80de28ba6526d69cf5e9fda3928752f3))
+* **deps:** bump codecov/codecov-action from 7.0.0 to 7.1.1 ([#722](https://github.com/cocomhub/sproxy/issues/722)) ([d72e245](https://github.com/cocomhub/sproxy/commit/d72e245f29b5719da8835080b9e1837086636fa0))
+* **deps:** bump sonarsource/sonarqube-scan-action from 8.2.1 to 8.2.2 ([#720](https://github.com/cocomhub/sproxy/issues/720)) ([131ec9f](https://github.com/cocomhub/sproxy/commit/131ec9f373b4f7e722ad6e2c969304fe9fbc4c33))
+* **hooks:** pre-commit 增量轻量化 + 新增 pre-push 全量门禁 + 错误落盘回归锁定 ([#726](https://github.com/cocomhub/sproxy/issues/726)) ([bf9f705](https://github.com/cocomhub/sproxy/commit/bf9f7058325d09d9d0806b4331e2741565d0a473))
+* **pikpak:** 子模块 go.mod 去 replace——支持外部直接 import 特定 commit ([#745](https://github.com/cocomhub/sproxy/issues/745)) ([cb55fb4](https://github.com/cocomhub/sproxy/commit/cb55fb4dd0bea053f93618dd8052e50a23fc4c2d))
+* **sclient:** cmd/sclient 23 处复杂度设计修复 + 移除 lint 豁免 ([#728](https://github.com/cocomhub/sproxy/issues/728)) ([d6145ea](https://github.com/cocomhub/sproxy/commit/d6145ea6ada190af387f8d0c064dc3b243eae704))
+* **volume:** migrate pkg/baidupcs to pkg/volume/ext/baidupcs ([#724](https://github.com/cocomhub/sproxy/issues/724)) ([39a7864](https://github.com/cocomhub/sproxy/commit/39a7864cb1414e5450cd84ea9311ffe689edd3d2))
+
 ## [0.23.0](https://github.com/cocomhub/sproxy/compare/v0.22.0...v0.23.0) (2026-10-01)
 
 
