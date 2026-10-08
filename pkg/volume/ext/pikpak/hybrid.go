@@ -5,7 +5,6 @@ package pikpak
 
 import (
 	"context"
-	"crypto/sha1" // #nosec G505 -- PikPak file hash 协议是 SHA-1（完整性校验，非安全用途）
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -34,7 +34,7 @@ const (
 const hybridShareRatioMax = 0.5
 
 // defaultHybridChunkSize 是分片大小（默认 64MB，平衡并发与恢复粒度）。
-const defaultHybridChunkSize = 64 << 20
+const defaultHybridChunkSize = 32 << 20 // 32MiB（分片更细，中断恢复粒度更小；与 pikget 对齐）
 
 // HybridMetrics 是混合下载指标（并入 CloudMetrics）。
 type HybridMetrics struct {
@@ -77,6 +77,11 @@ type HybridConfig struct {
 	AutoDelete  bool    // 完成后永久删转存（释放 6GB 空间）
 	Logger      *slog.Logger
 	Metrics     *HybridMetrics
+	// ChunkProgress 是 per-chunk 进度回调（nil = 不回调）。pikget 用它逐行显示每个分片
+	// （编号/来源链/状态/进度/速率）。下载开始前会为每个 chunk 发一次 pending 事件。
+	ChunkProgress ChunkProgressFunc
+	// GCIDStats 是 GCID 校验命中统计（决策用：官方分块粒度规律）。nil=不统计。
+	GCIDStats *integrity.GCIDVerifyStats
 	// AccountPool 是多账号会话文件池（配额轮换 + 转存副本按账号分摊）。
 	// nil = 单账号现状（账号区全部 chunk 走当前登录态/单 API）。非 nil 时账号区
 	// chunk 按 Select round-robin 分配到多账号，每账号转存一次副本后并行 FETCH 下载。
@@ -91,17 +96,21 @@ type HybridConfig struct {
 // 分片并行：分享区 [0, shareEnd) 匿名直链下载 + 账号区 [shareEnd, total) 转存后 FETCH 直链下载。
 // 每 chunk 独立 Range → os.WriteAt 写入预分配文件 → 全部成功 = 文件完整。
 type HybridDownloader struct {
-	resolver    *ShareResolver
-	api         *API
-	client      *http.Client
-	chunkSize   int64
-	shareRatio  float64
-	concurrency int
-	autoDelete  bool
-	log         *slog.Logger
-	metrics     *HybridMetrics
-	pool        *AccountPool          // 多账号会话池（nil = 单账号现状）
-	fallback    downloader.Downloader // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
+	resolver      *ShareResolver
+	api           *API
+	client        *http.Client
+	chunkSize     int64
+	shareRatio    float64
+	concurrency   int
+	autoDelete    bool
+	log           *slog.Logger
+	metrics       *HybridMetrics
+	chunkProgress ChunkProgressFunc          // per-chunk 进度回调（pikget 逐行显示；nil=不回调）
+	pool          *AccountPool               // 多账号会话池（nil = 单账号现状）
+	acctSems      map[string]chan struct{}   // 每账号 1 个 sem（同账号串行，不同账号并发）
+	acctSemMu     sync.Mutex                 // 保护 acctSems
+	gcidStats     *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
+	fallback      downloader.Downloader      // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
@@ -123,10 +132,20 @@ type downloadCtx struct {
 	shareID    string
 	shareToken string // /s/<id>/<token> 的子路径 token（round-11：RefreshLink 重取需带 token，
 	// 否则 token 分享中途重试 shareDetail 缺 token → 降级）
-	target     *ShareFile
-	destPath   string
-	prog       atomic.Int64
-	onProgress downloader.ProgressFunc
+	target *ShareFile
+	// destPath 是**最终目标路径**（用户请求的落盘位置）。
+	// 下载期真实写盘目标是 destPath + ".hybrid.downloading"（临时文件）——分片 WriteAt 全部落在
+	// 临时文件；全部 chunk 成功并完整性校验通过后才 rename 到 destPath。
+	// 好处：文件未完成时直观可见（.hybrid.downloading 后缀），中断/失败不会残留看似完整的文件；
+	// 成功 rename 原子完成（同目录 rename，跨文件系统时回退 copy+remove）。
+	// 崩溃恢复：manifest 与预分配都作用在 .hybrid.downloading 临时文件上（续传天然对齐）。
+	destPath      string
+	working       string // 下载期写盘目标 = destPath + ".hybrid.downloading"（见 openWorking）
+	prog          atomic.Int64
+	onProgress    downloader.ProgressFunc
+	chunkProgress ChunkProgressFunc // per-chunk 回调（pikget 逐行显示每个分片）
+	chunkOffsets  []int64           // 所有 chunk offset（升序，编号映射）
+	shareEnd      int64             // 分享区边界（chunk 来源判定）
 	// 多账号分片（round-12）：accounted 记录已转存副本的账号（name→转存文件 ID），
 	// 每账号首次选中时 Use 转存一次，后续该账号的 chunk 复用直链（避免 N×重复转存占空间）。
 	accounted map[string]string
@@ -174,6 +193,9 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 		resolver: cfg.Resolver, api: cfg.API, client: client,
 		chunkSize: chunk, shareRatio: ratio, concurrency: conc, autoDelete: cfg.AutoDelete,
 		log: log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
+		chunkProgress: cfg.ChunkProgress,
+		gcidStats:     cfg.GCIDStats,
+		acctSems:      make(map[string]chan struct{}),
 	}, nil
 }
 
@@ -189,6 +211,13 @@ func (d *HybridDownloader) HybridCounters() map[string]int64 {
 
 // Name 返回下载器名（注册表用）。
 func (d *HybridDownloader) Name() string { return "pikpak-hybrid" }
+
+// GCIDStats 返回 GCID 校验统计（metrics 导出用；nil=未装配）。
+func (d *HybridDownloader) GCIDStats() *integrity.GCIDVerifyStats { return d.gcidStats }
+
+// IntegrityMode 声明完整性归属：hybrid 走 GCID 权威复算（① 态），
+// 未命中时回落本地自洽（② 态）——与旧 PikpakDownloader 语义一致。
+func (d *HybridDownloader) IntegrityMode() downloader.IntegrityMode { return downloader.ModeLocalOnly }
 
 // Supports 判断是否支持该 source（mypikpak/keepshare 分享 URL）。
 func (d *HybridDownloader) Supports(source string) bool {
@@ -236,8 +265,12 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	dc := &downloadCtx{
 		currentTotal: total, lease: NewRestoreLease(d.api, d.pool, d.autoDelete, d.log),
 		shareID: shareID, target: target, destPath: destPath, onProgress: onProgress,
-		accounted: make(map[string]string),
+		chunkProgress: d.chunkProgress,
+		accounted:     make(map[string]string),
 	}
+	// 续传进度基准：读 .hybrid manifest 累计已完成 chunk 字节，预置 prog——
+	// 恢复时已完成 chunk 被 filterChunks 跳过，若 prog 从 0 起进度回调会从头计数
+	// （实际续传是生效的，只是显示从 0 开始）。预置后进度从已完成处继续。
 	if _, tok := parseShareIDWithToken(source); tok != "" {
 		dc.shareToken = tok // round-11：token 分享的 re-resolve 需带 token
 	}
@@ -266,19 +299,85 @@ func (d *HybridDownloader) fallbackDownload(ctx context.Context, source, destPat
 }
 
 // runHybrid 执行混合下载主体（分享区 + 账号区分片并行）。
+
+// hybridSinkReplay 把已落盘文件重放进 sink（配额记账；失败清理转存副本）。
+func (d *HybridDownloader) hybridSinkReplay(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory) error {
+	fi, statErr := os.Stat(dc.destPath)
+	if statErr != nil {
+		return fmt.Errorf("hybrid stat for sink: %w", statErr)
+	}
+	sink, sinkErr := sinkFactory(discardWriter{}, fi.Size(), false)
+	if sinkErr != nil {
+		return sinkErr
+	}
+	if replayErr := replayFileIntoSink(dc.destPath, sink); replayErr != nil {
+		sink.Finish(false, 0)
+		dc.lease.Release(ctx) // 🟡：sink 重放失败也清理转存（AutoDelete 语义）
+		return replayErr
+	}
+	sink.Finish(true, 0)
+	return nil
+}
+
+// prepareManifest 加载/创建 manifest 并预置续传进度基准（已完成 chunk 字节入 prog）。
+func (d *HybridDownloader) prepareManifest(dc *downloadCtx, shareEnd int64) *hybridManifest {
+	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
+	// 两文件配套出现：开始下载立刻创建空 manifest——中断/退出也 .hybrid 与
+	// .hybrid.downloading 成对存在（直观可续）。已有同源 manifest 保留（崩溃续传）。
+	if manifest == nil {
+		manifest = d.initManifest(dc, shareEnd)
+	}
+	// 续传进度基准：已完成 chunk 字节预置进 prog（进度从已完成处继续，不从头计数）。
+	var done int64
+	for _, ln := range manifest.Chunks {
+		done += ln
+	}
+	dc.prog.Store(done)
+	return manifest
+}
+
+// verifyHybridGCID 对临时文件做 GCID 权威复算（候选分块命中官方 hash → true）。
+// 未命中 → 清理转存副本（G4：失败不留 6GB 空间）并返回错误（不冒充成功）。
+func (d *HybridDownloader) verifyHybridGCID(ctx context.Context, dc *downloadCtx) (bool, error) {
+	if dc.target.Hash == "" {
+		return false, nil // 无权威 hash：不校验（回落本地自洽）
+	}
+	matched, gerr := integrity.VerifyGCIDStats(dc.working, integrity.GCIDCandidates, dc.target.Hash, d.gcidStats)
+	if gerr != nil {
+		return false, fmt.Errorf("hybrid gcid verify: %w", gerr)
+	}
+	if !matched {
+		dc.lease.Release(ctx) // G4：校验失败也清理转存副本（AutoDelete 语义）
+		return false, fmt.Errorf("hybrid integrity check failed: file gcid != target %s", dc.target.Hash)
+	}
+	d.log.Info("hybrid integrity verified (gcid match)")
+	return true, nil
+}
+
 func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory) (*Result, error) {
+	integrityVerified := false // GCID 权威复算命中标记（Result 三态用）
+	// 写盘目标：临时文件 destPath + ".hybrid.downloading"（分片 WriteAt 全落这里，
+	// 完成并校验通过后才 rename 到最终 destPath）。manifest 随临时文件（destPath+".hybrid"
+	// 不变——源身份/恢复逻辑零改动）。
+	dc.working = dc.destPath + ".hybrid.downloading"
 	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
 	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
 	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
 	shareEnd := d.computeShareEnd(ctx, dc.target, dc.currentTotal)
 	d.log.Info("hybrid plan", "total", dc.currentTotal, "share_end", shareEnd, "chunk", d.chunkSize)
-	if err := preallocate(dc.destPath, dc.currentTotal); err != nil {
+	if err := preallocate(dc.working, dc.currentTotal); err != nil {
 		return nil, fmt.Errorf("hybrid preallocate: %w", err)
 	}
 	chunks := planChunks(0, dc.currentTotal, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
-	// 崩溃恢复：读 manifest，**校验源身份一致**（C4：同一分享/文件才跳过已完成）。
-	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
+	dc.chunkOffsets = make([]int64, 0, len(chunks))
+	dc.shareEnd = shareEnd
+	for _, c := range chunks {
+		dc.chunkOffsets = append(dc.chunkOffsets, c.offset)
+	}
+	// 崩溃恢复：读 manifest（源身份一致校验），缺失则创建空 manifest（两文件配套），
+	// 续传进度基准预置 prog。抽 helper 控制认知复杂度。
+	manifest := d.prepareManifest(dc, shareEnd)
 	if err := d.runChunks(ctx, dc, chunks, shareEnd, manifest); err != nil {
 		// G4：失败路径也清理已转存副本（AutoDelete 语义——失败任务不留 6GB 空间占用）。
 		dc.lease.Release(ctx)
@@ -286,46 +385,44 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	}
 	d.log.Info("hybrid chunks done")
 	removeManifest(dc.destPath)
-	checksum, err := sha256File(dc.destPath)
+	checksum, err := sha256File(dc.working)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
 	}
-	// C2 最终完整性校验：计算文件 SHA-1 与 target.Hash（PikPak file hash 为 40-hex SHA-1）
-	// 交叉比对——失败即报错（不返回自洽 checksum 冒充成功）。
-	if dc.target.Hash != "" {
-		sha1Hex, herr := sha1FileHex(dc.destPath)
-		if herr != nil {
-			return nil, fmt.Errorf("hybrid sha1 verify: %w", herr)
-		}
-		if !strings.EqualFold(sha1Hex, strings.ToLower(dc.target.Hash)) {
-			// G4：校验失败也清理转存副本（AutoDelete 语义）。
-			dc.lease.Release(ctx)
-			return nil, fmt.Errorf("hybrid integrity check failed: file sha1 %s != target %s", sha1Hex, dc.target.Hash)
-		}
-		d.log.Info("hybrid integrity verified (sha1 match)", "sha1", sha1Hex)
+	// C2 最终完整性校验：**GCID 权威复算**（PikPak file hash 是 GCID = sha1(concat(sha1(分块)))）。
+	// 抽 helper 控制认知复杂度（gocognit）——命中权威 → ModeAuthority；未命中 → 报错。
+	var verifyErr error
+	integrityVerified, verifyErr = d.verifyHybridGCID(ctx, dc)
+	if verifyErr != nil {
+		return nil, verifyErr
 	}
-	// sink 记账：sinkFactory 非空时把已落盘文件重放进 sink（配额语义，对齐内置 HTTP 下载器）。
+	// 校验通过 → 临时文件原子 rename 到最终 destPath（同目录原子；跨 FS 回退 copy+remove）。
+	if err := os.Rename(dc.working, dc.destPath); err != nil {
+		return nil, fmt.Errorf("hybrid finalize rename: %w", err)
+	}
+	// sink 记账：sinkFactory 非空时把已落盘文件重放进 sink（配额语义）。
 	if sinkFactory != nil {
-		fi, statErr := os.Stat(dc.destPath)
-		if statErr != nil {
-			return nil, fmt.Errorf("hybrid stat for sink: %w", statErr)
+		if serr := d.hybridSinkReplay(ctx, dc, sinkFactory); serr != nil {
+			return nil, serr
 		}
-		sink, sinkErr := sinkFactory(discardWriter{}, fi.Size(), false)
-		if sinkErr != nil {
-			return nil, sinkErr
-		}
-		if replayErr := replayFileIntoSink(dc.destPath, sink); replayErr != nil {
-			sink.Finish(false, 0)
-			dc.lease.Release(ctx) // 🟡：sink 重放失败也清理转存（AutoDelete 语义）
-			return nil, replayErr
-		}
-		sink.Finish(true, 0)
 	}
 	dc.lease.Release(ctx)
 	// 注意：Checksum 是**本地落盘文件的 SHA-256**（自证文件未被篡改/续传拼错），
-	// 不是源身份哈希（源身份校验用 SHA-1 与 target.Hash 比对，已在上方 verify 完成）。
+	// 不是源身份哈希（源身份校验用 GCID 与 target.Hash 比对，已在上方 verify 完成）。
 	// 消费方若拿本字段比对源 hash 会误判——仅作本地完整性指纹。
-	return &Result{Size: dc.currentTotal, Checksum: checksum, ModTime: time.Now()}, nil
+	res := &Result{Size: dc.currentTotal, Checksum: checksum, ModTime: time.Now()}
+	// 完整性三态（与旧 PikpakDownloader finalizeDownload 一致）：
+	//   GCID 权威命中（① 态）→ ModeAuthority + 带外权威 hash——语义校验管道据此
+	//   识别 hybrid 产出为权威可信，不再重复复算；
+	//   未命中 → 显式 ModeLocalOnly（② 态本地自洽，由语义校验器兜底）——
+	//   不保持零值 ModeUnknown（语义不明，审计面不一致）。
+	if dc.target.Hash != "" && integrityVerified {
+		res.Integrity = downloader.ModeAuthority
+		res.AuthorityHash = dc.target.Hash
+	} else {
+		res.Integrity = downloader.ModeLocalOnly
+	}
+	return res, nil
 }
 
 // runChunks 并行执行所有 chunk：**分享区与账号区分池并行**（互不阻塞）——
@@ -338,13 +435,25 @@ func (d *HybridDownloader) runChunks(ctx context.Context, dc *downloadCtx, chunk
 		firstErr error
 	)
 	chunks = filterChunks(chunks, manifest) // 崩溃恢复：跳过已完成
-	// 分池：分享区 pool 与账号区 pool 各 d.concurrency/2（最少 1）。
-	poolSize := max(d.concurrency/2, 1)
-	shareSem := make(chan struct{}, poolSize)
-	acctSem := make(chan struct{}, poolSize)
-	// C5：**先 spawn 全部 goroutine**，各自在 goroutine 内 acquire 对应池——
-	// 循环内同步 acquire（FIFO 阻塞）会把账号 chunk 排在分享 chunk 之后（顺序化）。
-	// 现在 share 满时循环立即推进到账号 chunk，双池真正并行（总时长 ≈ max(分享, 账号)）。
+	// 每个未完成 chunk 先发 pending 事件（per-chunk 回调，pikget 注册所有分片行）。
+	// 索引用 dc.chunkIndex(offset)（全量编号），与 downloadOneChunk 一致。
+	if dc.chunkProgress != nil {
+		for _, c := range chunks {
+			dc.chunkProgress(ChunkInfo{
+				Index: dc.chunkIndex(c.offset), Offset: c.offset, Length: c.length,
+				Source: d.chunkSource(dc, c), Phase: "pending", Done: 0, Total: c.length,
+			})
+		}
+	}
+	// **每 source 单 worker 并发**（用户明示）：同一 source（share 匿名直链/单账号直链）
+	// 内部限速（CDN/账号级），并发无叠加收益；**不同 source 之间真正并行**。
+	// 实现：share 源 sem(1) + acct 源 sem(1)（单账号/未细分账号）；多账号时
+	// downloadAccountChunkMulti 内再按账号 Select 后 per-account 串行（不同账号并发）。
+	shareSem := make(chan struct{}, 1)
+	acctSem := make(chan struct{}, 1)
+	// **先 spawn 全部 goroutine**，各自在 goroutine 内 acquire 对应池——循环内同步
+	// acquire（FIFO 阻塞）会把账号 chunk 排在分享 chunk 之后（顺序化）。
+	// 现在 share 满时循环立即推进到账号 chunk，双源真正并行（总时长 ≈ max(分享, 账号)）。
 	for _, c := range chunks {
 		wg.Add(1)
 		sem := shareSem
@@ -372,7 +481,10 @@ func (d *HybridDownloader) runChunks(ctx context.Context, dc *downloadCtx, chunk
 
 // downloadOneChunk 单个 chunk：分享区（含降级）或账号区。
 func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx, c chunk, shareEnd int64) error {
+	idx := dc.chunkIndex(c.offset)
 	var cerr error
+	// 标记 downloading（per-chunk 回调，pikget 显示该分片开始下载）
+	d.chunkPhase(dc, idx, c, "downloading", 0, nil)
 	if c.offset >= shareEnd {
 		cerr = d.downloadAccountChunk(ctx, dc, c)
 	} else {
@@ -388,8 +500,48 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx
 		d.markChunkDone(dc, c, manifestSource{
 			ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size,
 		})
+		d.chunkPhase(dc, idx, c, "done", c.length, nil)
+	} else {
+		d.chunkPhase(dc, idx, c, "failed", 0, cerr)
 	}
 	return cerr
+}
+
+// chunkIndex 返回 chunk offset 对应的编号（0 起，按 offset 升序）。
+// 简化：runChunks 里 chunks 已是 offset 升序，记录在 dc.chunkOrder 里。
+func (dc *downloadCtx) chunkIndex(offset int64) int {
+	for i, off := range dc.chunkOffsets {
+		if off == offset {
+			return i
+		}
+	}
+	return 0
+}
+
+// chunkPhase 发 per-chunk 事件（pikget 逐行显示）。
+// src 标识来源链：share（匿名分享直链）/ acct（账号直链，多账号时选中账号名在
+// tryMultiAccountChunk 内更新为 acct:<name>）。
+
+// chunkSource 返回 chunk 的来源链标识（share=匿名分享直链；acct=账号直链）。
+func (d *HybridDownloader) chunkSource(dc *downloadCtx, c chunk) string {
+	if c.offset < dc.shareEnd {
+		return "share"
+	}
+	return "acct"
+}
+
+func (d *HybridDownloader) chunkPhase(dc *downloadCtx, idx int, c chunk, phase string, done int64, cerr error) {
+	if dc.chunkProgress == nil {
+		return
+	}
+	src := "acct"
+	if c.offset < dc.shareEnd {
+		src = "share"
+	}
+	dc.chunkProgress(ChunkInfo{
+		Index: idx, Offset: c.offset, Length: c.length,
+		Source: src, Phase: phase, Done: done, Total: c.length, Err: cerr,
+	})
 }
 
 // filterChunks 过滤掉 manifest 已完成的 chunk（崩溃恢复跳过，分享区免配额不浪费）。
@@ -433,6 +585,7 @@ func planChunks(start, total, shareEnd, chunkSize int64) []chunk {
 // downloadShareChunk 分享段 chunk：直链下载，失败重取直链重试一次，连续两错 → 转账号段。
 // 简化：分享区 chunk 已 < shareEnd（416 探测保证 206），不再为 416 重试；
 // 仅网络/直链过期错误重试（重新 resolve 新直链）。
+
 func (d *HybridDownloader) downloadShareChunk(ctx context.Context, dc *downloadCtx, c chunk) error {
 	link := dc.target.DirectLink
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -498,7 +651,12 @@ func (d *HybridDownloader) downloadAccountChunkMulti(ctx context.Context, dc *do
 		if serr != nil {
 			return fmt.Errorf("hybrid multi-account: no account available: %w", serr)
 		}
+		// **每账号单 worker**：同账号 chunk 串行（账号级限速，并发无叠加）；
+		// 不同账号之间并发（各自限速独立）。
+		acctSem := d.acctSem(acct.Name)
+		acctSem <- struct{}{}
 		err := d.tryMultiAccountChunk(ctx, dc, c, acct)
+		<-acctSem
 		if err == nil {
 			return nil
 		}
@@ -530,6 +688,18 @@ func (d *HybridDownloader) tryMultiAccountChunk(ctx context.Context, dc *downloa
 	}
 	d.metricsInc(func(m *HybridMetrics) { m.AccountBytesUsed.Add(c.length) }) // 账号区字节可观测
 	return nil
+}
+
+// acctSem 返回某账号的 per-account semaphore（容量 1：同账号 chunk 串行，不同账号并发）。
+func (d *HybridDownloader) acctSem(name string) chan struct{} {
+	d.acctSemMu.Lock()
+	defer d.acctSemMu.Unlock()
+	if sem, ok := d.acctSems[name]; ok {
+		return sem
+	}
+	sem := make(chan struct{}, 1)
+	d.acctSems[name] = sem
+	return sem
 }
 
 // multiAccountLink 为 chunk 获取账号直链。round-13 Critical 修复：**全部会话相关 API 调用
@@ -774,12 +944,29 @@ func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, dc *down
 	if err := d.verifyContentRange(resp, c, dc.currentTotal); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(dc.destPath, os.O_WRONLY, 0)
+	f, err := os.OpenFile(dc.working, os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	written, werr := copyRangeToFile(resp.Body, f, c.offset, c.length, &dc.prog, dc.currentTotal, dc.onProgress)
+	// per-chunk 进度：下载中字节实时回调。**该 chunk 的 Done 必须是本地累计**（written），
+	// 不能是全局 prog（否则每个 chunk 都显示全局累计 → 超出 64MB + 全部一起涨）。
+	idx := dc.chunkIndex(c.offset)
+	progWithChunk := func(downloaded, total int64) {
+		if dc.onProgress != nil {
+			dc.onProgress(downloaded, total)
+		}
+	}
+	chunkLocal := func(chunkDone int64) {
+		if dc.chunkProgress != nil {
+			dc.chunkProgress(ChunkInfo{
+				Index: idx, Offset: c.offset, Length: c.length,
+				Source: d.chunkSource(dc, c), Phase: "downloading",
+				Done: chunkDone, Total: c.length,
+			})
+		}
+	}
+	written, werr := copyRangeToFile(resp.Body, f, c.offset, c.length, &dc.prog, dc.currentTotal, progWithChunk, chunkLocal)
 	if werr != nil {
 		return werr
 	}
@@ -791,20 +978,18 @@ func (d *HybridDownloader) writeChunkBody(resp *http.Response, c chunk, dc *down
 }
 
 // copyRangeToFile 把 Range 响应体按偏移写入文件（WriteAt），返回写入字节数。
-func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *atomic.Int64, total int64, onProgress downloader.ProgressFunc) (int64, error) {
+func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *atomic.Int64, total int64, onProgress downloader.ProgressFunc, onChunkLocal func(chunkDone int64)) (int64, error) {
 	buf := make([]byte, 1<<20)
 	var written int64
 	for {
 		n, rerr := r.Read(buf)
 		if n > 0 {
-			if _, werr := f.WriteAt(buf[:n], offset+written); werr != nil {
+			// 写盘 + 进度（全局 prog + per-chunk 本地）；写错返回错误
+			wn, werr := writeChunkBytes(f, buf[:n], offset, written, prog, total, onProgress, onChunkLocal)
+			if werr != nil {
 				return written, werr
 			}
-			written += int64(n)
-			prog.Add(int64(n))
-			if onProgress != nil {
-				onProgress(prog.Load(), total) // I1：传 total（非 -1），UI 总进度可显示
-			}
+			written = wn
 		}
 		if rerr == io.EOF {
 			break
@@ -814,6 +999,22 @@ func copyRangeToFile(r io.Reader, f *os.File, offset int64, want int64, prog *at
 		}
 	}
 	return written, nil
+}
+
+// writeChunkBytes 写一个缓冲块并更新进度（全局 + per-chunk），返回新 written。
+func writeChunkBytes(f *os.File, p []byte, offset, base int64, prog *atomic.Int64, total int64, onProgress downloader.ProgressFunc, onChunkLocal func(chunkDone int64)) (int64, error) {
+	if _, werr := f.WriteAt(p, offset+base); werr != nil {
+		return 0, werr
+	}
+	base += int64(len(p))
+	prog.Add(int64(len(p)))
+	if onProgress != nil {
+		onProgress(prog.Load(), total)
+	}
+	if onChunkLocal != nil {
+		onChunkLocal(base)
+	}
+	return base, nil
 }
 
 // discardWriter 是 sink 包装目标（文件已直接写盘，sink 只做记账，无需实际写）。
@@ -876,20 +1077,6 @@ func largestAnyFile(files []ShareFile) *ShareFile {
 		}
 	}
 	return best
-}
-
-// sha1FileHex 计算文件 SHA-1（PikPak file hash 为 40-hex SHA-1，用于最终完整性校验）。
-func sha1FileHex(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha1.New() // #nosec G401 -- PikPak hash 协议要求 SHA-1
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // newSHA256 创建 SHA-256 hash（结果 hex）。
@@ -964,6 +1151,23 @@ func (d *HybridDownloader) probeRangeOK(ctx context.Context, link string, offset
 // probeSize 是边界探测请求的探测字节数（1KB，足够拿状态码）。
 const probeSize = 1024
 
+// ChunkInfo 是单个分片（worker）的进度信息，per-chunk 回调传递。
+// Source 标识该 chunk 由哪条链下载：share（匿名分享直链）/ acct:<name>（账号直链）。
+// Phase: pending / downloading / done / failed。
+type ChunkInfo struct {
+	Index  int    // chunk 编号（0 起，按 offset 排序）
+	Offset int64  // 文件偏移
+	Length int64  // chunk 大小
+	Source string // share / acct:<账号名> / acct（单账号）
+	Phase  string // pending / downloading / done / failed
+	Done   int64  // 该 chunk 已下字节
+	Total  int64  // 该 chunk 总字节
+	Err    error  // failed 时错误（nil 表示非失败）
+}
+
+// ChunkProgressFunc 是 per-chunk 进度回调（pikget 用于逐行显示每个分片）。
+type ChunkProgressFunc func(info ChunkInfo)
+
 // hybridManifest 是分片下载完成清单（崩溃恢复用）。
 type hybridManifest struct {
 	Total    int64           `json:"total"`
@@ -1020,6 +1224,20 @@ func (m *hybridManifest) Has(offset int64) bool {
 	}
 	_, ok := m.Chunks[offset]
 	return ok
+}
+
+// initManifest 创建并落盘初始 manifest（空 Chunks + 源身份）——
+// 下载开始即与 .hybrid.downloading 配套出现，中断/立即退出也两个文件都在。
+func (d *HybridDownloader) initManifest(dc *downloadCtx, shareEnd int64) *hybridManifest {
+	m := &hybridManifest{
+		Total: dc.currentTotal, ShareEnd: shareEnd,
+		Chunks: map[int64]int64{},
+		Source: manifestSource{ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size},
+	}
+	if data, err := json.Marshal(m); err == nil {
+		_ = os.WriteFile(manifestPath(dc.destPath), data, 0o644)
+	}
+	return m
 }
 
 // markChunkDone 原子记录 chunk 完成（追加到 manifest；首次记录源身份）。
@@ -1097,13 +1315,75 @@ func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *S
 // idempotentRestored 幂等检查：网盘已有同名同大小且 hash 一致的转存 → 复用并记录，返回 (link, true)。
 // 无 hash 可比对（目标/网盘 hash 缺失）时保守返回 false（不信任 size 匹配，走 restore）。
 // acctName 为账号名（"" = 当前会话/单账号），用于按账号登记 AutoDelete 副本（多账号 Release 逐会话删）。
-func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, acctName string) (link, id string, ok bool) {
-	existing, err := d.api.FindInDrive(ctx, dc.target.Name, dc.target.Size)
-	if err != nil || existing == nil {
-		return "", "", false
+
+// findInPackShared 在「Pack From Shared」文件夹内查找同名/同大小转存副本（转存副本固定
+// 落这里）。**不全盘 walk**（FindInDrive 全盘 ListRecursive 慢/超时是去重失效根因）。
+// 命中 → 返回 (FileMeta, ok)。优先 size 精确匹配（强判据），回退 name 匹配（弱判据）。
+
+// findPackFolderID 在网盘根目录找「Pack From Shared」文件夹（转存副本固定落这里）。
+func (d *HybridDownloader) findPackFolderID(ctx context.Context) (string, error) {
+	root, err := d.api.List(ctx, "")
+	if err != nil {
+		return "", err
 	}
-	if dc.target.Hash == "" || existing.Hash == "" || existing.Hash != dc.target.Hash {
-		d.log.Warn("hybrid restore skip rejected: hash mismatch (or missing)",
+	for i := range root {
+		if root[i].Kind == driveKindFolder && strings.EqualFold(root[i].Name, "Pack From Shared") {
+			return root[i].ID, nil
+		}
+	}
+	return "", nil
+}
+
+func (d *HybridDownloader) findInPackShared(ctx context.Context, wantName string, wantSize int64) (*FileMeta, bool) {
+	// 1. 找 Pack From Shared 文件夹（根目录下列出）；无则直接走 RestoreShare
+	packID, err := d.findPackFolderID(ctx)
+	if err != nil || packID == "" {
+		return nil, false
+	}
+	// 2. 列该文件夹内文件，按 size/name 匹配
+	files, err := d.api.List(ctx, packID)
+	if err != nil {
+		return nil, false
+	}
+	for i := range files {
+		f := &files[i]
+		if f.Kind != driveKindFile {
+			continue
+		}
+		if wantSize > 0 && f.Size == wantSize {
+			return f, true // size 精确（强判据）
+		}
+	}
+	// 回退 name 子串（弱判据，hash 缺失时兜底）
+	for i := range files {
+		f := &files[i]
+		if f.Kind == driveKindFile && strings.Contains(f.Name, wantName) {
+			return f, true
+		}
+	}
+	return nil, false
+}
+
+func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, acctName string) (link, id string, ok bool) {
+	// **优先在 Pack From Shared 文件夹内查**（转存副本固定落这里，不全盘 walk——
+	// 全盘 ListRecursive 在网盘大/空间满时慢/超时是去重失效、重复保存的根因）。
+	existing, found := d.findInPackShared(ctx, dc.target.Name, dc.target.Size)
+	// pack 文件夹 miss → 回退 FindInDrive 全盘（兼容旧网盘/无 pack 文件夹场景）。
+	// **强判据**：兜底要求 hash 双方都有且一致才复用（避免把【restore 响应预置的文件】
+	// 误当既有副本——restore 前网盘本无该副本，应走 RestoreShare）。
+	// FindInDrive 慢的问题在 pack 优先后缓解（pack 命中不再全盘 walk）。
+	if !found || existing == nil {
+		existing2, err := d.api.FindInDrive(ctx, dc.target.Name, dc.target.Size)
+		if err != nil || existing2 == nil || existing2.Hash == "" || dc.target.Hash == "" || existing2.Hash != dc.target.Hash {
+			return "", "", false
+		}
+		existing = existing2
+	}
+	// hash 双方都有且不等 → 拒绝复用（不同文件，防内容错配）。
+	// hash 缺失（分享 file_info 无 hash）→ 降级按「同名+同大小」复用（弱判据，
+	// 避免每次 RestoreShare 新副本撑爆空间——用户明示去重必须生效）。
+	if dc.target.Hash != "" && existing.Hash != "" && existing.Hash != dc.target.Hash {
+		d.log.Warn("hybrid restore skip rejected: hash mismatch",
 			"id", existing.ID, "target_hash", dc.target.Hash, "drive_hash", existing.Hash)
 		return "", "", false
 	}

@@ -34,6 +34,8 @@ type DownloaderConfig struct {
 	DownloadDir string
 	// TempSuffix 是下载中间文件后缀（默认 .download）。
 	TempSuffix string
+	// GCIDStats 是 GCID 校验命中统计（决策用）。nil=不统计。
+	GCIDStats *integrity.GCIDVerifyStats
 	// Timeout 是下载总超时（默认 2h；免费账号限速 ~1.15MB/s，4.5GB≈1h）。
 	Timeout time.Duration
 	// AutoDelete 下载完成后是否删除网盘转存文件（节省网盘空间）。
@@ -53,6 +55,7 @@ type PikpakDownloader struct {
 	api         *API
 	downloadDir string
 	tempSuffix  string
+	gcidStats   *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
 	timeout     time.Duration
 	autoDelete  bool
 	pool        *AccountPool
@@ -178,6 +181,7 @@ func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 	return &PikpakDownloader{
 		cli: cfg.Cli, api: cfg.API, downloadDir: dir,
 		tempSuffix: suffix, timeout: timeout, autoDelete: cfg.AutoDelete, pool: cfg.AccountPool, log: log,
+		gcidStats: cfg.GCIDStats,
 	}, nil
 }
 
@@ -354,15 +358,10 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeReq
 	if req.size > 0 && req.target != nil && req.target.Hash != "" && req.destPath != "" {
 		// R3-I1：全部整除候选的 GCID 逐一与官方 hash 比对（官方分块粒度未知，
 		// 任一候选命中即权威——提升命中率，非首整除即返）。
-		gcids, err := integrity.RecomputeGCIDAll(req.destPath, integrity.GCIDCandidates)
-		if err == nil {
-			for _, gcid := range gcids {
-				if strings.EqualFold(gcid, req.target.Hash) {
-					res.Integrity = downloader.ModeAuthority
-					res.AuthorityHash = req.target.Hash
-					break
-				}
-			}
+		matched, err := integrity.VerifyGCIDStats(req.destPath, integrity.GCIDCandidates, req.target.Hash, d.gcidStats)
+		if err == nil && matched {
+			res.Integrity = downloader.ModeAuthority
+			res.AuthorityHash = req.target.Hash
 		}
 	}
 	return res, nil

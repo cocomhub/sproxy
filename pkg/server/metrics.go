@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -944,6 +945,7 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_cloud_transfer_file_errors", "counter", "Transfer file content errors", cmMetrics.TransferFileErrors.Load())
 	}
 	writeHybridMetrics(&b)
+	writeGCIDMetrics(&b)
 
 	_, _ = w.Write([]byte(b.String()))
 }
@@ -1195,6 +1197,22 @@ func (h *Handlers) MetricsAuth(next http.Handler) http.Handler {
 
 // writeHybridMetrics 写 PikPak hybrid 指标（从默认注册表 Active() 断言透出）。
 // 独立 helper 控制 MetricsHandler 认知复杂度（gocognit）。
+// writeGCIDMetrics 写 PikPak GCID 校验命中统计（大小引导候选 + 大→小计算 + 首次/二次/未命中率，
+// 供决策官方分块粒度）。从默认注册表 Active() 断言 GCIDStatsProvider 透出。
+func writeGCIDMetrics(b *strings.Builder) {
+	d := downloader.DefaultRegistry.Active()
+	if d == nil {
+		return
+	}
+	if p, ok := d.(interface {
+		GCIDStats() *integrity.GCIDVerifyStats
+	}); ok && p.GCIDStats() != nil {
+		for name, val := range p.GCIDStats().GCIDStatsSnapshot() {
+			writeMetric(b, "sproxy_gcid_"+name, "counter", "PikPak GCID verify "+name, val)
+		}
+	}
+}
+
 func writeHybridMetrics(b *strings.Builder) {
 	d := downloader.DefaultRegistry.Active()
 	if d == nil {

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -198,6 +199,34 @@ func payloadSHA1(b []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// payloadGCID 计算 payload 的 GCID（PikPak hash 算法）——用于测试 fake 的 target.Hash，
+// 使 hybrid 的 GCID 复算校验通过。按候选分块（256KB 起整除者）分块：sha1(concat(sha1(块)))。
+func payloadGCID(b []byte) string {
+	// 与 pkg/integrity.ComputeGCID 对齐：用最大整除候选块
+	var block int64
+	for _, c := range []int64{262144, 524288, 1048576, 2097152, 4194304} {
+		if len(b) > 0 && int64(len(b))%c == 0 {
+			block = c // 取第一个整除候选（256KB 起，与 RecomputeGCIDAll 候选序一致）
+			break
+		}
+	}
+	if block == 0 || len(b) == 0 {
+		block = int64(len(b)) // 无整除候选：整块（单块 sha1）
+	}
+	h := sha1.New()
+	if block == int64(len(b)) {
+		_, _ = h.Write(b)
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	concat := sha1.New()
+	for i := int64(0); i < int64(len(b)); i += block {
+		blk := b[i : i+block]
+		bh := sha1.Sum(blk)
+		_, _ = concat.Write(bh[:])
+	}
+	return hex.EncodeToString(concat.Sum(nil))
+}
+
 // TestHybridDownload_ShareChunkFails_DowngradesToAccount 验证：分享段 chunk 连续失败 → 转账号段。
 func TestHybridDownload_ShareChunkFails_DowngradesToAccount(t *testing.T) {
 	t.Parallel()
@@ -324,7 +353,7 @@ func TestHybridDownload_RestoreIdempotent(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload), // hash 用于幂等校验
+				"hash":             payloadGCID(payload), // GCID（PikPak hash）用于幂等校验
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -341,7 +370,7 @@ func TestHybridDownload_RestoreIdempotent(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "existing-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "existing-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -405,7 +434,7 @@ func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -424,7 +453,7 @@ func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
 				{"kind": "drive#file", "id": "existing-old", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": "ffffffffffffffffffffffffffffffffffffffff"},
 			}
 			if restoreCalls > 0 {
-				items = append(items, map[string]any{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)})
+				items = append(items, map[string]any{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)})
 			}
 			writeJSON(w, map[string]any{"files": items})
 			return
@@ -498,7 +527,7 @@ func TestHybridManifest_Resume(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -516,7 +545,7 @@ func TestHybridManifest_Resume(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -606,7 +635,7 @@ func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -627,7 +656,7 @@ func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
 		if r.URL.Query().Get("parent_id") == "restored-folder-1" {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-file-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "restored-file-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -694,7 +723,7 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -711,7 +740,7 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -792,7 +821,7 @@ func TestHybridDownload_SinkAccounting(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -807,7 +836,7 @@ func TestHybridDownload_SinkAccounting(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -889,7 +918,7 @@ func TestHybridManifest_SourceMismatch(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -904,7 +933,7 @@ func TestHybridManifest_SourceMismatch(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -1139,13 +1168,19 @@ func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		// 文件夹递归终止 + 建模「Pack From Shared」restore 副本 parent（NH-P1 判别器用）。
-		if r.URL.Query().Get("parent_id") != "" {
+		// 文件夹递归：parent_id=pack-folder → 返回其内文件（restored-1 副本）
+		pid := r.URL.Query().Get("parent_id")
+		if pid != "" {
+			if pid == "pack-folder" {
+				writeJSON(w, map[string]any{"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
+				}})
+				return
+			}
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}
 		writeJSON(w, map[string]any{"files": []map[string]any{
-			{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
 			{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
 		}})
 	})
@@ -1212,7 +1247,7 @@ func TestHybridDownload_ReResolveFileChanged(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": fid, "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -1234,7 +1269,7 @@ func TestHybridDownload_ReResolveFileChanged(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -1298,7 +1333,7 @@ func TestHybridDownload_ParallelPools(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -1319,7 +1354,7 @@ func TestHybridDownload_ParallelPools(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -1386,7 +1421,7 @@ func TestHybridDownload_ProgressTotal(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"file_info": map[string]any{
 				"id": "share-f1", "name": "movie.mp4",
-				"hash":             payloadSHA1(payload),
+				"hash":             payloadGCID(payload),
 				"web_content_link": srvURL + "/share/dl",
 			},
 		})
@@ -1401,7 +1436,7 @@ func TestHybridDownload_ProgressTotal(t *testing.T) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{
 				"files": []map[string]any{
-					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 				},
 			})
 			return
@@ -1507,20 +1542,30 @@ func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		// 文件夹递归终止 + 建模「Pack From Shared」restore 副本 parent（NH-P1 判别器用）。
-		if r.URL.Query().Get("parent_id") != "" {
+		// 文件夹递归：parent_id=pack-folder → 返回其内文件（restored-1 副本）
+		pid := r.URL.Query().Get("parent_id")
+		if pid != "" {
+			if pid == "pack-folder" {
+				writeJSON(w, map[string]any{"files": []map[string]any{
+					{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
+				}})
+				return
+			}
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}
 		writeJSON(w, map[string]any{"files": []map[string]any{
-			{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": wrongHash, "parent_id": "pack-folder"},
 			{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
 		}})
 	})
 	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
+		kind, name := "drive#file", "movie.mp4"
+		if id == "pack-folder" {
+			kind, name = "drive#folder", "Pack From Shared"
+		}
 		writeJSON(w, map[string]any{
-			"id": id, "name": "movie.mp4",
+			"id": id, "name": name, "kind": kind,
 			"web_content_link": srvURL + "/drive/dl",
 		})
 	})
@@ -1581,7 +1626,7 @@ func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
 	})
 	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"file_info": map[string]any{
-			"id": "share-f1", "name": "movie.mp4", "hash": payloadSHA1(payload),
+			"id": "share-f1", "name": "movie.mp4", "hash": payloadGCID(payload),
 			"web_content_link": srvURL + "/share/dl",
 		}})
 	})
@@ -1594,7 +1639,7 @@ func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
 	mux.HandleFunc("/drive/v1/files", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			writeJSON(w, map[string]any{"files": []map[string]any{
-				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload)},
+				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload)},
 			}})
 			return
 		}
@@ -1658,7 +1703,7 @@ func mkHybridFake(payload []byte, driveFiles []map[string]any, restoreOwned bool
 	})
 	mux.HandleFunc("/drive/v1/share/file_info", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"file_info": map[string]any{
-			"id": "share-f1", "name": "movie.mp4", "hash": payloadSHA1(payload),
+			"id": "share-f1", "name": "movie.mp4", "hash": payloadGCID(payload),
 			"web_content_link": srvURLOut + "/share/dl",
 		}})
 	})
@@ -1676,9 +1721,24 @@ func mkHybridFake(payload []byte, driveFiles []map[string]any, restoreOwned bool
 			http.Error(w, "m", http.StatusMethodNotAllowed)
 			return
 		}
-		// 文件夹递归终止：子目录（parent_id 非空）返回空列表——否则 ListRecursive
-		// 无限递归（fake 同一列表 → 循环 walk 文件夹）。
-		if r.URL.Query().Get("parent_id") != "" {
+		pid := r.URL.Query().Get("parent_id")
+		if pid != "" {
+			// 文件夹递归：仅当 pid 是 driveFiles 里的 folder 时列出其子文件
+			// （ListRecursive 语义）；其它 pid（非本 fake 已知文件夹）返回空终止递归。
+			for i := range driveFiles {
+				f := driveFiles[i]
+				if f["kind"] == "drive#folder" && f["id"] == pid {
+					// 该 folder 下的文件 = parent_id == pid 的 driveFiles 项
+					children := []map[string]any{}
+					for j := range driveFiles {
+						if driveFiles[j]["parent_id"] == pid {
+							children = append(children, driveFiles[j])
+						}
+					}
+					writeJSON(w, map[string]any{"files": children})
+					return
+				}
+			}
 			writeJSON(w, map[string]any{"files": []any{}})
 			return
 		}
@@ -1686,7 +1746,11 @@ func mkHybridFake(payload []byte, driveFiles []map[string]any, restoreOwned bool
 	})
 	mux.HandleFunc("/drive/v1/files/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/drive/v1/files/")
-		writeJSON(w, map[string]any{"id": id, "name": "movie.mp4", "web_content_link": srvURLOut + "/drive/dl"})
+		kind, name := "drive#file", "movie.mp4"
+		if id == "pack-folder" {
+			kind, name = "drive#folder", "Pack From Shared"
+		}
+		writeJSON(w, map[string]any{"id": id, "name": name, "kind": kind, "web_content_link": srvURLOut + "/drive/dl"})
 	})
 	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) { serveRange(w, r, payload) })
 	mux.HandleFunc("/drive/v1/files:batchDelete", func(w http.ResponseWriter, r *http.Request) {
@@ -1707,6 +1771,7 @@ func mkHybridDownloader(srvURL string, chunkLen int64, autoDelete bool) (*Hybrid
 	hd, err := NewHybridDownloader(HybridConfig{
 		Resolver: resolver, API: api, HTTPClient: &http.Client{},
 		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 1, AutoDelete: autoDelete,
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	return hd, err
 }
@@ -1722,7 +1787,7 @@ func TestHybridDownload_IdempotentHit_UserFileNotDeleted(t *testing.T) {
 	}
 	var batchDelete int
 	drive := []map[string]any{
-		{"kind": "drive#file", "id": "existing-user", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload), "parent_id": "user-folder"},
+		{"kind": "drive#file", "id": "existing-user", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload), "parent_id": "user-folder"},
 		{"kind": "drive#folder", "id": "user-folder", "name": "My Files", "size": "0"},
 	}
 	srvURL, closeFn := mkHybridFake(payload, drive, false, &batchDelete)
@@ -1754,7 +1819,7 @@ func TestHybridDownload_IdempotentHit_RestoreCopyDeleted(t *testing.T) {
 	}
 	var batchDelete int
 	drive := []map[string]any{
-		{"kind": "drive#file", "id": "existing-copy", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadSHA1(payload), "parent_id": "pack-folder"},
+		{"kind": "drive#file", "id": "existing-copy", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload), "parent_id": "pack-folder"},
 		{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
 	}
 	srvURL, closeFn := mkHybridFake(payload, drive, false, &batchDelete)
@@ -1805,5 +1870,158 @@ func TestHybridDownload_OwnedRestore_NotDeleted(t *testing.T) {
 	}
 	if batchDelete != 0 {
 		t.Fatalf("owned（源文件已在网盘）不得被 AutoDelete 删除: batchDelete=%d", batchDelete)
+	}
+}
+
+// TestHybridDownload_UsesDownloadingSuffix 验证写盘目标为 dest+".hybrid.downloading"，
+// 成功后 rename 到最终 destPath（未完成/中断不留看似完整文件）。
+func TestHybridDownload_UsesDownloadingSuffix(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 67)
+	}
+	srvURL, closeFn := mkHybridFake(payload, []map[string]any{
+		{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload), "parent_id": "pack-folder"},
+		{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+	}, false, nil)
+	defer closeFn()
+	hd, err := mkHybridDownloader(srvURL, 1<<20, true)
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); derr != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	// 最终文件存在
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Error("content mismatch")
+	}
+	// 临时文件已 rename（不存在）
+	if _, err := os.Stat(dest + ".hybrid.downloading"); !os.IsNotExist(err) {
+		t.Fatalf("temp .hybrid.downloading should be gone after rename, stat err=%v", err)
+	}
+}
+
+// TestHybridManifest_InitAtStart 验证下载开始立刻创建空 manifest（与 .hybrid.downloading 配套出现），
+// 即使首 chunk 尚未完成、立即中断也两文件齐全。
+func TestHybridManifest_InitAtStart(t *testing.T) {
+	t.Parallel()
+	// 直接单元测 initManifest：下载开始即创建空 manifest（配对出现）。
+	// 通过 mkHybridFake + Download 的成功路径验证完成后两文件都消失（配对收尾），
+	// 以及 initManifest 本身产出正确的空 chunk manifest。
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 61)
+	}
+	srvURL, closeFn := mkHybridFake(payload, []map[string]any{
+		{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload), "parent_id": "pack-folder"},
+		{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+	}, false, nil)
+	defer closeFn()
+
+	hd, err := mkHybridDownloader(srvURL, 1<<20, true)
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+
+	// 验证 initManifest 产物（构造 downloadCtx 直接调用）
+	dc := &downloadCtx{
+		currentTotal: int64(len(payload)), shareID: "abc123",
+		target:   &ShareFile{ID: "share-f1", Hash: payloadSHA1(payload), Size: int64(len(payload))},
+		destPath: dest,
+	}
+	m := hd.initManifest(dc, int64(len(payload)/2))
+	if m == nil || len(m.Chunks) != 0 {
+		t.Fatalf("initManifest should create empty chunks, got %+v", m)
+	}
+	if m.Source.ShareID != "abc123" || m.Source.FileID != "share-f1" {
+		t.Fatalf("manifest source mismatch: %+v", m.Source)
+	}
+	// initManifest 已落盘 → .hybrid 与 .hybrid.downloading 配对（下载开始即有）
+	if _, err := os.Stat(manifestPath(dest)); err != nil {
+		t.Fatalf("manifest should exist right after init: %v", err)
+	}
+
+	// 完整下载成功 → 两文件都消失（rename + removeManifest 收尾配对）
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("final dest should exist: %v", err)
+	}
+	if _, err := os.Stat(manifestPath(dest)); !os.IsNotExist(err) {
+		t.Fatalf("manifest should be removed after completion: %v", err)
+	}
+	if _, err := os.Stat(dest + ".hybrid.downloading"); !os.IsNotExist(err) {
+		t.Fatalf(".hybrid.downloading should be renamed away after completion: %v", err)
+	}
+}
+
+// TestHybridChunkProgress_PerChunkEvents 验证 per-chunk 回调：
+// 每个 chunk 收到 pending（注册）→ downloading（开始+字节）→ done（完成）。
+func TestHybridChunkProgress_PerChunkEvents(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 4<<20) // 4MB，chunk 1MB → 4 chunks（分享区 2 + 账号区 2）
+	for i := range payload {
+		payload[i] = byte(i % 71)
+	}
+	srvURL, closeFn := mkHybridFake(payload, []map[string]any{
+		{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)), "hash": payloadGCID(payload), "parent_id": "pack-folder"},
+		{"kind": "drive#folder", "id": "pack-folder", "name": "Pack From Shared", "size": "0"},
+	}, false, nil)
+	defer closeFn()
+
+	// 用 ChunkProgress 装配
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srvURL, UserHost: srvURL, HTTPClient: &http.Client{}})
+	api := NewAPI(APIConfig{Host: srvURL, AccessToken: fakeServerToken, HTTPClient: &http.Client{}}, nil)
+	var mu sync.Mutex
+	var events []ChunkInfo
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: &http.Client{},
+		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 2, AutoDelete: true,
+		ChunkProgress: func(info ChunkInfo) {
+			mu.Lock()
+			events = append(events, info)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	// 每个 chunk 都有 pending（注册）+ done（完成）
+	byIdx := map[int][]ChunkInfo{}
+	for _, e := range events {
+		byIdx[e.Index] = append(byIdx[e.Index], e)
+	}
+	if len(byIdx) != 4 {
+		t.Fatalf("expected 4 chunks, got %d: %+v", len(byIdx), byIdx)
+	}
+	for idx, evs := range byIdx {
+		hasPending, hasDone := false, false
+		for _, e := range evs {
+			if e.Phase == "pending" {
+				hasPending = true
+			}
+			if e.Phase == "done" {
+				hasDone = true
+				if e.Done != e.Total {
+					t.Fatalf("chunk %d done=%d total=%d", idx, e.Done, e.Total)
+				}
+			}
+		}
+		if !hasPending || !hasDone {
+			t.Fatalf("chunk %d missing pending/done: %+v", idx, evs)
+		}
 	}
 }
