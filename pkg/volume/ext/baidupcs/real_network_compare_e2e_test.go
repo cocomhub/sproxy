@@ -105,6 +105,11 @@ func TestE2E_CompareUploadPaths(t *testing.T) {
 	localMD5 := md5Hex(string(content))
 	tmpRoot := filepath.Join(dir, "tmp")
 	_ = os.MkdirAll(tmpRoot, 0o755)
+	// 唯一远端 key（时间戳后缀防残留目录覆盖冲突）；测试前尽力清理。
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	keyCLI := "compare/" + uniq + "/cli.bin"
+	keyLib := "compare/" + uniq + "/lib.bin"
+	_ = exec.Command(binPath, "rm", "-f", "/来自：本地电脑/compare/"+uniq).Run()
 
 	// 两条路径各自独立 Storage 实例（独立临时目录/远端路径防互相影响）。
 	// 每条路径独立 ctx 超时 120s（库路径 fork 库 HTTP 栈无 body 超时，真实网络挂起
@@ -112,12 +117,12 @@ func TestE2E_CompareUploadPaths(t *testing.T) {
 	results := []uploadPathResult{
 		runUploadPath(t, "CLI 二进制", uploadPathSpec{
 			bduss: bduss, binPath: binPath, tmpRoot: tmpRoot + "/cli",
-			content: content, path: path, localMD5: localMD5, key: "compare/cli.bin",
+			content: content, path: path, localMD5: localMD5, key: keyCLI,
 			timeout: 2 * time.Minute,
 		}),
 		runUploadPath(t, "库兜底", uploadPathSpec{
 			bduss: bduss, binPath: "", tmpRoot: tmpRoot + "/lib",
-			content: content, path: path, localMD5: localMD5, key: "compare/lib.bin",
+			content: content, path: path, localMD5: localMD5, key: keyLib,
 			forceLibrary: true, timeout: 2 * time.Minute,
 		}),
 	}
@@ -206,8 +211,8 @@ func runUploadPath(t *testing.T, name string, sp uploadPathSpec) uploadPathResul
 }
 
 // countingAdapter 包装 Adapter 计数 Upload 调用（attempt 轮数观测），并透传
-// rapidUploader/metadataProvider/deleter 能力（否则 refreshByRapidUpload 断言落空，
-// 收敛观测失真——必须与原 adapter 行为一致）。
+// rapidUploader/metadataProvider 能力（否则 refreshByRapidUpload 断言落空，收敛观测
+// 失真——必须与原 adapter 行为一致，含 binaryAdapter→Fallback 透传）。
 type countingAdapter struct {
 	inner   Adapter
 	uploads int
@@ -227,24 +232,41 @@ func (c *countingAdapter) Copy(ctx context.Context, from, to string) error {
 	return c.inner.Copy(ctx, from, to)
 }
 
-// RapidUpload 透传 inner 的 rapidUploader（C-C1：秒传刷新观测真实性）。
+// RapidUpload 透传 inner 的 rapidUploader（C-C1：秒传刷新观测真实性）。binaryAdapter
+// 透传 Fallback（与 Storage.refreshByRapidUpload 同构）。
 func (c *countingAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
 	if ru, ok := c.inner.(rapidUploader); ok {
 		return ru.RapidUpload(ctx, remotePath, st)
+	}
+	if ba, ok := c.inner.(*binaryAdapter); ok && ba.cfg.Fallback != nil {
+		if ru, ok := ba.cfg.Fallback.(rapidUploader); ok {
+			return ru.RapidUpload(ctx, remotePath, st)
+		}
 	}
 	return false, fmt.Errorf("countingAdapter: inner 无 rapidUploader")
 }
 
 // List/Meta 透传 inner 的 metadataProvider（Stat/List 走元数据而非回退下载）。
+// binaryAdapter 透传 Fallback（与 Storage.metadata() 同构）。
 func (c *countingAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
 	if mp, ok := c.inner.(metadataProvider); ok {
 		return mp.List(ctx, remotePath)
+	}
+	if ba, ok := c.inner.(*binaryAdapter); ok && ba.cfg.Fallback != nil {
+		if mp, ok := ba.cfg.Fallback.(metadataProvider); ok {
+			return mp.List(ctx, remotePath)
+		}
 	}
 	return nil, fmt.Errorf("countingAdapter: inner 无 metadataProvider")
 }
 func (c *countingAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
 	if mp, ok := c.inner.(metadataProvider); ok {
 		return mp.Meta(ctx, remotePath)
+	}
+	if ba, ok := c.inner.(*binaryAdapter); ok && ba.cfg.Fallback != nil {
+		if mp, ok := ba.cfg.Fallback.(metadataProvider); ok {
+			return mp.Meta(ctx, remotePath)
+		}
 	}
 	return nil, fmt.Errorf("countingAdapter: inner 无 metadataProvider")
 }
