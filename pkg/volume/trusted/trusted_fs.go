@@ -200,7 +200,9 @@ func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
 		if err := mv.Move(ctx, from, to); err != nil {
 			return err
 		}
-		// 联动 meta（best-effort：源 meta 不存在则跳过）。
+		// 联动 meta（best-effort：源 meta 不存在则跳过；目标父目录先建——B-MINOR
+		// 与 Copy 一致，Move 到新子目录时 meta/<新dir> 可能不存在）。
+		t.ensureMetaDir(ctx, meta.MetaPath(to))
 		_ = t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to))
 		return nil
 	}
@@ -244,7 +246,18 @@ func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 		return // 源 meta 不存在（读路径直算兜底）
 	}
 	defer rc.Close()
+	// B-MINOR：目标父目录先建（与 Rename 的 MakeDir 一致——Copy 到新子目录时
+	// meta/<新dir> 可能不存在，直接 WriteFile 会失败被吞成无 meta 孤儿）。
+	t.ensureMetaDir(ctx, dst)
 	_ = t.inner.WriteFile(ctx, dst, rc, -1, 0)
+}
+
+// ensureMetaDir 确保 sidecar 目标父目录存在（best-effort：失败跳过——WriteFile 失败
+// 由调用方读路径直算兜底）。
+func (t *TrustedVolumeFS) ensureMetaDir(ctx context.Context, mrel string) {
+	if dir := path.Dir(mrel); dir != "." && dir != "" {
+		_ = t.inner.MakeDir(ctx, dir)
+	}
 }
 
 // ListDir 列目录：过滤 meta 桶（sidecar 独立桶用户不可见）；user 桶内真实 `.meta`

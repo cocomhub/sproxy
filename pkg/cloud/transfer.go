@@ -24,11 +24,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// metaProvider 是读端消费 FileMeta 的最小接口（C4/用户裁定读端接 FileMeta 为主）：
-// 目标卷实现（TrustedVolumeFS/secretdata 经 meta.Provider 断言）→ 分块级校验。
-type metaProvider interface {
-	FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error)
-}
+// verifyByFileMeta 直接断言 meta.Provider（复用公共接口——B-MINOR：本地 metaProvider
+// 重复定义与 meta.Provider 签名完全一致，两处断言源漂移风险；收敛到公共接口）。
+// 目标卷实现 Provider（装饰器/secretdata）→ 分块级校验。
 
 // 转存失败分类哨兵（NH-P3：统一用哨兵而非字符串匹配，避免同错双计）。
 var (
@@ -400,7 +398,7 @@ var ErrTransferContentMismatch = errors.New("transfer: content checksum mismatch
 // 跨信任边界静默损坏逐分块定位（比整文件单哈希精确）；无 Provider → errNoProviderMeta
 // 由调用方回落流式。校验通过返回 nil。
 func verifyByFileMeta(env *transferEnv) error {
-	pv, ok := env.targetFS.(metaProvider)
+	pv, ok := env.targetFS.(meta.Provider)
 	if !ok {
 		return errNoProviderMeta
 	}

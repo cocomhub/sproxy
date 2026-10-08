@@ -321,6 +321,13 @@ func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath str
 // RapidUpload 库路径秒传（rapidUploader 能力）：用本地整文件 md5/前 256KB sliceMD5/crc32
 // 请求秒传——内容已在网盘（含刚分片上传的）→ 命中，目标 md5 刷新为权威整文件 md5。
 // 未命中（errno 31079 md5 not found）→ (false, nil) 由调用方下一轮重传。
+//
+// **D-M1 风险明示**：fork 库 RapidUploadNoCheckDir 只把 `block_list=[整文件md5]`、
+// path、size、rtype=3 发到 xpan/file/create——sliceMD5/crc32 参数未被端点消费，
+// 匹配仅按**整文件 md5 + size**（理论碰撞概率极低但非零，且内容寻址在百度全网
+// 空间命中）。命中后 Stat 复核的 ETag 即本地 md5（百度对 block_list 匹配记录），
+// 形同自证——碰撞场景下转存目标会是网盘已有同 md5 不同内容。主要用途是「本账号
+// 刚上传内容刷新」场景（内容自证成立）；跨账号碰撞为残余理论风险，可接受。
 func (a *libraryAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, mapPCSError(err)

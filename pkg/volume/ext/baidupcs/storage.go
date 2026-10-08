@@ -169,8 +169,9 @@ func (s *Storage) putRetryLoop(ctx context.Context, key, remote string, st *stag
 	return nil, fmt.Errorf("%w: 上传后内容复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, st.md5, lastRemoteETag)
 }
 
-// backoffBeforeRetry 轮间指数退避（attempt 2 → 300ms，3 → 1.2s）：让百度最终一致性
-// 窗口（上传后 Stat 暂不可见/分片 md5 未刷新）落定，避免无谓整文件重传。
+// backoffBeforeRetry 轮间指数退避：attempt 2 → 300ms，attempt 3 → 1.2s（maxPutAttempts=3
+// 无第 4 轮）。让百度最终一致性窗口（上传后 Stat 暂不可见/分片 md5 未刷新）落定，
+// 避免无谓整文件重传。
 // D-M2 修复：ctx 取消返回原样 context.Canceled（不清洗成 ErrTransient——上层 transfer
 // 层按 ctx 取消识别为任务中止，而非目标卷异常）。
 func (s *Storage) backoffBeforeRetry(ctx context.Context, attempt int) error {
@@ -342,7 +343,8 @@ func (s *Storage) stageUpload(r io.Reader, key string) (*stagedUpload, error) {
 	}, nil
 }
 
-// sliceMD5Of 计算本地文件前 bdlib.SliceMD5Size 字节的 md5（不足则整文件；空文件 → 空串）。
+// sliceMD5Of 计算本地文件前 bdlib.SliceMD5Size 字节的 md5（不足则整文件）。空文件 →
+// 空串的 md5（d41d8c…，即空内容哈希，非空串）。A-MINOR-8：注释修正（此前称空串）。
 func sliceMD5Of(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
