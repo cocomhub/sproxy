@@ -619,3 +619,20 @@ func TestBlockMD5ListOf(t *testing.T) {
 		t.Fatalf("空文件应空列表, got %v %v", elist, eerr)
 	}
 }
+
+// TestRefreshByRapidUpload_FallbackBinary C-C1 生产默认路径回归：binaryAdapter（二进制
+// 优先 + 库 Fallback）下 refreshByRapidUpload 必须透传 Fallback 的 rapidUploader——
+// 否则大文件分片上传后 ETag 恒错，默认装配路径无秒传刷新 → 3 轮重传 ErrTransient。
+func TestRefreshByRapidUpload_FallbackBinary(t *testing.T) {
+	t.Parallel()
+	inner := &multipartETagAdapter{inner: newFakeStorageAdapter(), multipart: true}
+	ba := newBinaryAdapter(AdapterConfig{Logger: testLogger(), Fallback: inner})
+	s := newTestStorage(t, ba)
+	content := strings.Repeat("fallback-rapid-", 100)
+	if _, err := s.Put(context.Background(), "big.bin", strings.NewReader(content)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !inner.rapidHit {
+		t.Fatal("binaryAdapter 默认装配（库 Fallback）下 ETag 不匹配应经 Fallback rapidupload 刷新")
+	}
+}

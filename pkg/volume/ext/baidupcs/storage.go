@@ -231,10 +231,20 @@ func (s *Storage) putAttempt(ctx context.Context, key, remote string, st *staged
 // refreshByRapidUpload 在 ETag 复核不匹配时尝试 rapidupload 秒传刷新（adapter 支持时）：
 // 命中 → 再次复核一致则返回 meta；未命中/刷新后仍不一致 → (nil, "", nil) 下一轮重试。
 // 返回 (meta, remoteETag, err)：remoteETag 供终态报错文案（A-MAJOR-3：非 Storage 字段）。
+// C-C1 修复：透传 binaryAdapter→Fallback 的 rapidUploader（与 metadata() 同构）——
+// 生产默认装配是 binaryAdapter（二进制优先 + 库兜底），若不透传则大文件（>4MB 分片
+// 上传后 ETag 恒"可能不正确"）在默认路径下永远无法秒传刷新 → 3 轮整文件重传后
+// ErrTransient（内容正确却判失败）。
 func (s *Storage) refreshByRapidUpload(ctx context.Context, key, remote string, st *stagedUpload, attempt int) (*ObjectMeta, string, error) {
 	ru, ok := s.adapter.(rapidUploader)
 	if !ok {
-		return nil, "", nil // adapter 无秒传能力（binary-only）→ 下一轮重传
+		// binaryAdapter 透传 Fallback 的库秒传能力（与 metadata() 同构）。
+		if ba, bok := s.adapter.(*binaryAdapter); bok && ba.cfg.Fallback != nil {
+			ru, ok = ba.cfg.Fallback.(rapidUploader)
+		}
+	}
+	if !ok {
+		return nil, "", nil // 无秒传能力（binary-only 无库兜底）→ 下一轮重传
 	}
 	hit, rerr := ru.RapidUpload(ctx, remote, st)
 	if rerr != nil {

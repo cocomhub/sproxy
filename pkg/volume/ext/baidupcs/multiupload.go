@@ -152,11 +152,16 @@ func uploadViaMultiUploader(ctx context.Context, pcs *Client, uploadMu *sync.Mut
 	}, targetPath)
 
 	// 断点恢复（resumeKey 非空时查本地 Layout.Resume）。
+	// 修复：不调用上游 muer.InstanceState()——其实现解引用 muer.instanceState，而
+	// Execute 前该字段未初始化（nil）→ 真实分片上传 panic（单测用 fake 未暴露）。
+	// resumeKey 空直接设置空 state；非空加载失败也设置空 state（从零开始）。
 	if resumeKey != "" {
 		if st, loadErr := loadUploadResume(resumeKey); loadErr == nil {
 			muer.SetInstanceState(st)
+		} else {
+			muer.SetInstanceState(&uploader.InstanceState{})
 		}
-	} else if muer.InstanceState() == nil {
+	} else {
 		muer.SetInstanceState(&uploader.InstanceState{})
 	}
 
