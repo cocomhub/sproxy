@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -267,9 +268,9 @@ var gcidRanges = []struct {
 
 // gcidRangeFor 返回文件大小对应的推荐候选（按大小升序，计算时反转为大→小）。
 func gcidRangeFor(size int64) []int64 {
-	for i := len(gcidRanges) - 1; i >= 0; i-- {
-		if size >= gcidRanges[i].minSize {
-			return gcidRanges[i].candidates
+	for _, gcidRange := range slices.Backward(gcidRanges) {
+		if size >= gcidRange.minSize {
+			return gcidRange.candidates
 		}
 	}
 	return gcidRanges[0].candidates
@@ -318,13 +319,7 @@ func RecomputeGCIDOrdered(path string, targetHash string, stats *GCIDVerifyStats
 	// 其余 = 全候选 - 推荐（保留从大到小）
 	rest := make([]int64, 0, len(all))
 	for _, c := range all {
-		inRec := false
-		for _, rc := range recommended {
-			if rc == c {
-				inRec = true
-				break
-			}
-		}
+		inRec := slices.Contains(recommended, c)
 		if !inRec {
 			rest = append(rest, c)
 		}
