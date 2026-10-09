@@ -259,3 +259,8 @@ func FromFile(path string, chunkSize int64, extra map[string]any) (*FileMeta, er
 	m.Extra = extra
 	return m, nil
 }
+
+// MaxMetaSidecarBytes 是 meta sidecar 读取上限（64MiB——合理 FileMeta 远小于此，
+// 防被注入超大 JSON 的 OOM DoS；超限视为 meta 缺失回落直算）。
+// 供 trusted 装饰器与装配层下载校验（filesMetaPolicy.VerifyDownload）复用同一防护口径。
+func MaxMetaSidecarBytes() int64 { return 64 << 20 }

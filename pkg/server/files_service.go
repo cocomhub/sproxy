@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
@@ -285,6 +286,38 @@ var _ files.FileMetaPolicy = filesMetaPolicy{}
 // Enabled 恒 true（用户裁定：meta 恒生成——只关校验不关 meta；sidecar 是完整性证据，
 // 写入路径必落。skip_verify 只关读侧校验，不关本写侧 meta 生成）。
 func (p filesMetaPolicy) Enabled() bool { return true }
+
+// VerifyDownload 返回下载流的逐分块校验包装（信任保证演进：普通下载读回比对 meta，
+// 异常 fail-closed——跨信任边界静默损坏在下发客户端前被拦截）。
+// 装配层未注入 / skip_verify（显式放宽） / meta sidecar 缺失 → 返回 nil（直通零回归）。
+// 实现：读 meta/<rel>.meta（root 相对）→ meta.VerifyReadSeeker 包装 r。
+func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root, rel string, r files.SeekReadCloser) (files.SeekReadCloser, error) {
+	if p.h.verifySkipped() {
+		return nil, nil // 显式跳过下载校验（极端性能场景；meta 仍恒生成）
+	}
+	mrel := meta.MetaPath(rel)
+	rc, err := root.Open(mrel)
+	if err != nil {
+		return nil, nil // meta 缺失（旁路写/未启用）：直通（读路径直算兜底，不阻断下载）
+	}
+	defer rc.Close()
+	raw, rerr := io.ReadAll(io.LimitReader(rc, meta.MaxMetaSidecarBytes()+1))
+	if rerr != nil {
+		return nil, nil // meta 读失败：直通（不阻断下载）
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		return nil, nil // meta 解析失败：直通（不阻断）
+	}
+	// 包装为逐分块校验流（ServeContent 消费，Seek 语义保持）。具体类型实现 Close——
+	// 断言回 SeekReadCloser（底层 r 可 Close，包装透传）。
+	v := meta.VerifyReadSeeker(r, fm)
+	sr, ok := v.(files.SeekReadCloser)
+	if !ok {
+		return nil, nil // 防御：不可 Close 断言失败直通（正常不可达）
+	}
+	return sr, nil
+}
 
 // WriteMeta 计算并写入配套 .meta（本地卷上传到达即建；失败返回错误由调用方 Warn 兜底，
 // 读路径 Stat 直算不依赖 meta 存在）。

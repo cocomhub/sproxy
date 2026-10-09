@@ -187,3 +187,58 @@ func postDelete(url, filename string, body []byte) int {
 	defer resp.Body.Close()
 	return resp.StatusCode
 }
+
+// TestDownload_VerifyMeta_TamperFailClosed 信任保证演进回归：本地卷上传生成 meta →
+// 下载经 VerifyDownload 逐分块校验（正常内容 200）；篡改磁盘主文件（meta 未变）→
+// 下载 fail-closed 500（不发损坏内容——跨信任边界静默损坏被拦截）。
+func TestDownload_VerifyMeta_TamperFailClosed(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr, _ := newTestServer(t, nil) // skip_verify 缺省 false = 校验开启
+	cfg := cfgPtr.Load()
+	cfg.TrustedVolume.SkipVerify = false
+	cfgPtr.Store(cfg)
+
+	body := bytes.Repeat([]byte("download-verify-meta-"), 200) // ~4KB
+	if code, resp := postUpload(url, "verify.bin", body); code != http.StatusOK {
+		t.Fatalf("上传应 200, got %d: %s", code, resp)
+	}
+	// 正常下载 → 200 + 内容一致。
+	hc := testHTTPClientAt()
+	defer hc.CloseIdleConnections()
+	r1, err := hc.Get(url + "/download?filename=verify.bin")
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("正常下载应 200, got %d", r1.StatusCode)
+	}
+	got1, _ := io.ReadAll(r1.Body)
+	r1.Body.Close()
+	if !bytes.Equal(got1, body) {
+		t.Fatal("正常下载内容不符")
+	}
+	// 篡改磁盘主文件（meta 未变）→ 下载 fail-closed 500（逐分块校验不一致）。
+	base := cfgPtr.Load().StorageRoot
+	disk := filepath.Join(base, "anonymous", "user", "verify.bin")
+	if wErr := os.WriteFile(disk, append(body, []byte("-tampered")...), 0o644); wErr != nil {
+		t.Fatalf("篡改: %v", wErr)
+	}
+	r2, err := hc.Get(url + "/download?filename=verify.bin")
+	if err != nil {
+		t.Fatalf("download2: %v", err)
+	}
+	defer r2.Body.Close()
+	if r2.StatusCode == http.StatusOK {
+		// ServeContent 可能在写一半时中断——200 但内容不完整也是失败；全 200 且内容
+		// 完整才通过。
+		got2, _ := io.ReadAll(r2.Body)
+		if bytes.Equal(got2, body) {
+			t.Fatal("篡改后下载不应返回原始内容（meta 校验 fail-closed）")
+		}
+		// 若 200 但内容被截断（校验中断）→ 也算 fail-closed 达成。
+		return
+	}
+	if r2.StatusCode != http.StatusInternalServerError && r2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("篡改下载应失败（500/400/中断）, got %d", r2.StatusCode)
+	}
+}

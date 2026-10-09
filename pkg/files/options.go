@@ -436,6 +436,11 @@ type FileMetaPolicy interface {
 	// owner 为文件归属（配额记账按 owner 的 meta 桶 Scope）；root 为文件所在租户根；
 	// rel 为根内相对路径（含 user/ 前缀）。
 	WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error
+	// VerifyDownload 返回下载流的**逐分块校验包装**（信任保证演进：下载路径读回比对
+	// meta，异常 fail-closed——跨信任边界静默损坏在下发客户端前被拦截）。无 meta /
+	// 跳过校验（skip_verify）→ 返回 nil（直通）。实现方读 meta sidecar（root 相对
+	// meta.MetaPath(rel)）后 meta.VerifyReadSeeker 包装。
+	VerifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error)
 }
 
 // WithFileMeta 注入可信卷 meta 能力。默认：不装配（零回归）。

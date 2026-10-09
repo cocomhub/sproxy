@@ -77,6 +77,15 @@ func (rt runtime) writeMetaSidecar(ctx context.Context, owner string, root *stor
 	return rt.fileMeta.WriteMeta(ctx, owner, root, rel)
 }
 
+// verifyDownload 委托装配层下载流逐分块校验（信任保证演进；未装配/无 meta/skip_verify
+// → 返回 nil 直通——零回归）。
+func (rt runtime) verifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error) {
+	if rt.fileMeta == nil {
+		return nil, nil
+	}
+	return rt.fileMeta.VerifyDownload(ctx, root, rel, r)
+}
+
 // sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（崩溃残留）。best-effort：删除失败
 // 仅忽略（下次写同 rel 再试）；目录不可读无孤儿可清。删除联动调用（m4：文件删除后
 // 孤儿常驻，删除路径也自愈）。

@@ -317,6 +317,19 @@ func (s *Service) OpenPath(ctx context.Context, dp DownloadPath) (OpenedFile, er
 		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
 	}
 
+	// 信任保证演进：下载流逐分块校验（读回比对 meta，异常 fail-closed）。装配层未注入
+	// meta 能力 / skip_verify / meta 缺失 → 返回 nil 直通（零回归）。仅可 Seek 流可校验
+	// （ServeContent 需求一致——不可 Seek 不校验，后续断言 500）。
+	if srf, ok := file.(SeekReadCloser); ok {
+		if vf, verr := s.rt.verifyDownload(ctx, dp.Tenant.Root(), dp.Rel, srf); verr != nil {
+			_ = file.Close()
+			s.rt.logger().Error("下载校验装配失败", "file_name", dp.Filename, "error", verr.Error())
+			return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
+		} else if vf != nil {
+			file = vf
+		}
+	}
+
 	out := OpenedFile{File: file, Info: info}
 	s.attachChecksum(dp, file, &out)
 	return out, nil

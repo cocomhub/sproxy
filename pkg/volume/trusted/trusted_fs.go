@@ -83,6 +83,7 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 
 // maxMetaSidecarBytes 是 meta sidecar 读取上限（64MiB——合理 FileMeta 远小于此，
 // 防被注入超大 JSON 的 OOM；超限视为 meta 缺失回落直算）。
+// 定义在 meta 包（导出 MaxMetaSidecarBytes）供装配层下载校验复用同一防护口径。
 const maxMetaSidecarBytes = 64 << 20
 
 // minMetaChunkSize 是可信卷分块大小下界（1MiB，A-MAJOR-5：配置极小 chunk_size 时

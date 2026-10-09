@@ -302,6 +302,11 @@ func (testMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage
 	return werr
 }
 
+// VerifyDownload 测试替身：不包装（返回 nil = 直通，域测试不测下载校验）。
+func (testMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error) {
+	return nil, nil
+}
+
 // findAudit 返回首条匹配 action/object 的审计行（未命中 ok=false）。
 func (e *dirsEnv) findAudit(action, object string) (auditRow, bool) {
 	for _, row := range e.audits {
