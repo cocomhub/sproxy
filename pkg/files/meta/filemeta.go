@@ -47,7 +47,11 @@ type FileMeta struct {
 	MediaType   string         `json:"media_type,omitempty"`
 	Extra       map[string]any `json:"extra,omitempty"` // 自定义扩展信息（创建人/email/校验信息等任意数据）
 	BaseVersion int64          `json:"base_version,omitempty"`
-	Signature   string         `json:"signature,omitempty"` // meta HMAC
+	// Signature 是预留字段（当前不写/不校验，A-MAJOR 如实降级）：完整 meta HMAC 需要
+	// 服务级签名密钥 + 全部写路径签名 + 读路径恒时校验。当前信任根由「meta 桶用户
+	// 不可达」+「写路径独占约束」提供（转存/上传侧构造，无用户侧旁路）。启用前不得
+	// 依赖该字段做防篡改（读路径不校验）。
+	Signature string `json:"signature,omitempty"`
 }
 
 // Validate 校验 meta 字段完备性（fail-closed：残缺即不可信）。
