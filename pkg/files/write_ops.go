@@ -1493,6 +1493,10 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	if ds := s.rt.dedupStore(f.owner); s.rt.dedupEnabled() && ds != nil {
 		refCount = ds.RemoveRef(rel, homeVol, cs)
 	}
+	// C-MAJOR-2 修复：dedup 硬链引用（refCount>0）时主文件被**硬 unlink**（无论 SoftDelete
+	// 都不进 trash、不可恢复）——meta 无保留意义，须随删（下方 removeFileMeta 的
+	// `!input.SoftDelete` 门控只对"软删可恢复"场景成立）。unlinked 标记硬删已完成。
+	unlinked := false
 	// B-M5 修复：摘除目录项（unlink）失败 → 主文件仍在卷上，**不得删 meta**——
 	// 否则主文件失去校验凭证（读路径直算兜底，但可信卷承诺"每文件必有隐藏 meta"
 	// 被打破）。unlink 失败记错误后返回失败（主文件保留，不继续收尾）。
@@ -1503,6 +1507,7 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 			f.logger.ErrorContext(f.ctx, "摘除去重引用失败", "file_name", f.remotePath, "error", err.Error())
 			return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile}
 		}
+		unlinked = true
 	} else if refCount == 0 {
 		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
 		// C-MAJOR-1 修复：软删（handled=true）也走统一后台收尾（checksum 台账/索引/
@@ -1528,7 +1533,9 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	// 删除须对称 ReleaseUsage——否则 owner meta 桶 Scope 随删除永久虚高/假 507）。
 	// C5 修复：不闸 fileMetaEnabled——disable 只停新建不停清理（enable 期写入的存量
 	// sidecar 在 disable 后删除主文件仍须清理；内部按存在性判断，无 meta no-op）。
-	if !input.SoftDelete {
+	// C-MAJOR-2 修复：`!input.SoftDelete || unlinked`——软删可恢复场景保留 meta 供恢复；
+	// dedup 硬链已硬 unlink（不可恢复）的 rel 也删 meta（否则孤儿 + meta 桶配额永不释放）。
+	if s.metaShouldClean(input, unlinked) {
 		s.removeFileMeta(f, rel)
 	}
 	// C-MAJOR-1 修复：audit/logger 对软删跳过（removeOrSoftDelete 内已记「软删到回收站」）——
@@ -1543,6 +1550,13 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 		return DeleteFileResult{RemotePath: f.remotePath, Message: "文件已移入回收站"}, nil
 	}
 	return DeleteFileResult{RemotePath: f.remotePath, Message: fmt.Sprintf("文件删除成功: %s", f.remotePath)}, nil
+}
+
+// metaShouldClean 判定删除收尾是否清理 meta sidecar（C-MAJOR-2/gocognit 抽离）：
+// 软删可恢复场景保留 meta 供恢复（!SoftDelete 才删）；dedup 硬链已硬 unlink 的 rel
+// 无论 SoftDelete 都删（不可恢复，孤儿 + meta 桶配额永不释放）。
+func (s *Service) metaShouldClean(input DeleteFileInput, unlinked bool) bool {
+	return !input.SoftDelete || unlinked
 }
 
 // removeOrSoftDelete 引用归零后的真正删除：软删（quarantine → trash 桶，保留原 rel 供
