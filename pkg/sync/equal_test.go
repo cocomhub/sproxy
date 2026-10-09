@@ -167,3 +167,56 @@ func TestEqual_MissingFailClosed(t *testing.T) {
 		t.Fatal("源缺失应 fail-closed 报错")
 	}
 }
+
+func TestEqual_CrossAlgoSingleField_NoStringCompare(t *testing.T) {
+	t.Parallel()
+	src := &crossAlgoFS{inner: newFS(t), algo: "sha256", checksum: "src-sha256"}
+	dst := &crossAlgoFS{inner: newFS(t), algo: "md5", checksum: "dst-md5"}
+	ctx := context.Background()
+	content := []byte("same-content-for-cross-algo")
+	if err := src.WriteFile(ctx, "a.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := dst.WriteFile(ctx, "a.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+	ok, err := Equal(ctx, src, "a.bin", dst, "a.bin")
+	if err != nil {
+		t.Fatalf("Equal: %v", err)
+	}
+	if !ok {
+		t.Fatal("内容相同但校验和算法不同 → 应回落流式判定一致（不得跨算法字符串直比）")
+	}
+}
+
+// crossAlgoFS 包装 LocalFS：Stat 只填单字段 Checksum+ChecksumType（不填 Checksums map）
+// 且源填 sha256、目标填 md5——模拟"无交集 + 单字段不同算法"（A-MAJOR 修复目标）。
+type crossAlgoFS struct {
+	inner    *LocalFS
+	algo     string
+	checksum string
+}
+
+func (c *crossAlgoFS) ListDir(ctx context.Context, path string) ([]Entry, error) {
+	return c.inner.ListDir(ctx, path)
+}
+func (c *crossAlgoFS) Stat(ctx context.Context, path string) (*Entry, error) {
+	e, err := c.inner.Stat(ctx, path)
+	if e != nil && c.checksum != "" {
+		e.Checksum = c.checksum
+		e.ChecksumType = c.algo
+		e.Checksums = nil // 只单字段（无交集）
+	}
+	return e, err
+}
+func (c *crossAlgoFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
+	return c.inner.OpenRead(ctx, path)
+}
+func (c *crossAlgoFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+	return c.inner.WriteFile(ctx, p, r, size, mtime)
+}
+func (c *crossAlgoFS) Rename(ctx context.Context, f, t string) error {
+	return c.inner.Rename(ctx, f, t)
+}
+func (c *crossAlgoFS) Delete(ctx context.Context, p string) error  { return c.inner.Delete(ctx, p) }
+func (c *crossAlgoFS) MakeDir(ctx context.Context, p string) error { return c.inner.MakeDir(ctx, p) }

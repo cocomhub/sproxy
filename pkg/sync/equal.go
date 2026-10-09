@@ -54,7 +54,12 @@ func Equal(ctx context.Context, src FS, srcPath string, dst FS, dstPath string) 
 			return sw == dw, nil
 		}
 		// 传统单字段：Checksum + ChecksumType 匹配该算法时兜底。
-		if se.Checksum != "" && se.ChecksumType == algo && de.Checksum != "" && de.ChecksumType == algo {
+		// A-MAJOR 修复：**algo 非空才走单字段兜底**——commonChecksumAlgo 在两侧
+		// Checksums 无交集时返回 algo=""（仅 has 标志 true），此时若再按
+		// `ChecksumType == algo == ""` 比较，会把**不同算法**的 Checksum 字符串直比
+		// （如 sha256 vs md5）→ 恒 false 判定不等（误判损坏重下）。algo=="" 直接回落
+		// streamEqual（算法未知，不得跨算法字符串直比）。
+		if algo != "" && se.Checksum != "" && se.ChecksumType == algo && de.Checksum != "" && de.ChecksumType == algo {
 			return se.Checksum == de.Checksum, nil
 		}
 	}
