@@ -256,6 +256,12 @@ func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input Write
 	if serverChecksum != input.ExpectedChecksum {
 		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomicallyRoot 清理）
 		_ = f.root.Remove(rel)
+		// MINOR-4 修复：覆盖写校验失败删主文件时同步清 meta（防旧 sidecar 描述旧内容、
+		// 新 rel 已删 → 下次同 rel 成功写前 meta 残留占配额）——用 fileOp 上下文（有
+		// root/owner/logger），走 removeFileMeta 配额对称清理。
+		if prev > 0 {
+			s.removeFileMeta(f, rel)
+		}
 		route.Release()
 		f.logger.WarnContext(f.ctx, errMsgChecksumMismatch, "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", f.remotePath)
 		return WriteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
