@@ -141,6 +141,12 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		return fmt.Errorf("trusted: meta 更新落盘失败: %w", werr)
 	}
+	// B-MAJOR 修复：写后交叉比对（复用 verifyWriteMeta）——写前校验与落盘之间仍存在
+	// 并发覆盖窗口（校验通过 → 合并 Extra → marshal → WriteFile 期间另一写者覆盖主文件
+	// + 新 meta），不加这一步会固化"描述旧内容的 meta+extra"盖掉新 meta（读路径恒失配，
+	// 与 missing 直算兜底不同）。写后重读主文件比对 TotalSHA256，不一致 → 删 meta 退化
+	// missing（下次覆盖写自愈）。
+	t.verifyWriteMeta(ctx, rel, fm)
 	return nil
 }
 
@@ -408,6 +414,12 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	if merr != nil {
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
 	}
+	// E-MAJOR 修复：写 meta 前确保 sidecar 父目录存在（与 Move/Copy/Rename 的
+	// ensureMetaDir 一致）——transfer 只 ensureTransferDir(user 目录)，远程卷
+	// （库路径 baidupcs 等不自动建父目录）meta/<rel>.meta 父目录未建 → WriteFile 失败
+	// → 下方删旧 sidecar → 每次上传 meta 恒缺失，verifyByFileMeta 恒回落流式（可信卷
+	// 分块校验在远程卷上静默失效）。
+	t.ensureMetaDir(ctx, meta.MetaPath(rel))
 	// meta 落盘（隐藏同目录 sidecar；占配额——经 inner.WriteFile 计入底层账本）。
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		// meta 落盘失败：主文件已成功——不失败主写（meta 可下次读时补），记日志语义

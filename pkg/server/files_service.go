@@ -322,9 +322,14 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *stor
 	if err := p.atomicWriteMeta(root, mrel, data); err != nil {
 		// C1 修复：覆盖写 meta 落盘失败 → 删旧 sidecar（best-effort）——残留描述旧
 		// 内容的陈旧 meta 会使读路径按旧分块校验新内容恒失配（硬失败固化）；删后
-		// 退化为 missing（读路径直算兜底）。配额侧：旧 meta 未 commit（prev 仍占），
-		// 主文件已换新内容、旧 sidecar 删除 → 下次 WriteMeta 会按新内容重算并差分。
+		// 退化为 missing（读路径直算兜底）。
+		// E-MAJOR 修复：**删旧 sidecar 时对称释放其已提交配额**（prev）——删除即释放
+		// 磁盘字节，prev 仍占 meta 桶 Scope；否则磁盘释放但配额虚高（假 507），下次
+		// 成功 WriteMeta prev=0 只 Commit 新字节，泄漏的 prev 永不复位（仅 reconcile 自愈）。
 		_ = root.Remove(mrel)
+		if scope != nil && prev > 0 {
+			scope.ReleaseUsage(prev)
+		}
 		return err
 	}
 	// 配额落地：覆盖写先释放旧 committed（rename 替换旧 inode，旧字节不再占盘），
