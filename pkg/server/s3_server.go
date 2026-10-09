@@ -333,8 +333,11 @@ func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key str
 		h.s3WriteMetaAfter(r, owner, root, rel)
 	case http.MethodDelete:
 		// M1 修复：删除联动清理 meta（与 files.Service delete 一致；disable 后存量也清理）。
-		h.s3DeleteObject(w, root, rel)
-		h.s3DeleteMetaAfter(r, owner, root, rel)
+		// C-MAJOR-3 修复：主文件删除**成功**才清理 meta——s3DeleteObject 返回是否成功，
+		// 失败（瞬时 IO/独占）保留 meta 与配额（对称性：主文件仍在则 meta 不删）。
+		if h.s3DeleteObject(w, root, rel) {
+			h.s3DeleteMetaAfter(r, owner, root, rel)
+		}
 	default:
 		http.Error(w, "s3: 方法不支持", http.StatusMethodNotAllowed)
 	}
@@ -418,13 +421,15 @@ func (h *Handlers) s3PutObject(w http.ResponseWriter, root *storage.Root, rel st
 	w.WriteHeader(http.StatusCreated)
 }
 
-// s3DeleteObject 删除对象（不存在 404）。
-func (h *Handlers) s3DeleteObject(w http.ResponseWriter, root *storage.Root, rel string) {
+// s3DeleteObject 删除对象（不存在 404）。返回 bool 表示主文件是否删除成功——
+// C-MAJOR-3 修复：调用方据此决定是否清理 meta（删除失败须保留 meta 与配额对称性）。
+func (h *Handlers) s3DeleteObject(w http.ResponseWriter, root *storage.Root, rel string) bool {
 	if err := root.Remove(rel); err != nil {
 		http.Error(w, "s3: 删除失败", http.StatusNotFound)
-		return
+		return false
 	}
 	w.WriteHeader(http.StatusNoContent)
+	return true
 }
 
 func bytesReader(b []byte) io.Reader {
