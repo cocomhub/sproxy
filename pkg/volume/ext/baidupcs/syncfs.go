@@ -39,20 +39,20 @@ type StorageFS struct {
 	temp string // 本地中间态目录（staging/下载缓存），用户硬约束：只依赖本地 FS
 	// quota 是可选配额记账钩子（staging 预留/释放）；nil = 不记账（独立 module 保持薄，
 	// 装配层注入实现，server 侧包 pkg/quota.Scope）。
-	quota QuotaTracker
+	quota syncpkg.StagingQuotaTracker
 }
 
-// QuotaTracker 是 staging 配额记账钩子接口（装配层注入；不依赖 pkg/quota 具体类型）。
-// 语义：本地 staging 写入计入 owner 配额（防磁盘占满），上传网盘成功后释放本地占用。
-type QuotaTracker interface {
-	// ReserveUsage 预留 size 字节（本地 staging 写入前调用）。
-	ReserveUsage(size int64) error
-	// ReleaseUsage 释放 size 字节（上传成功或失败后调用）。
-	ReleaseUsage(size int64)
+// StagingQuotaCapable 能力接口（pkg/sync.StagingQuotaCapable）——baidupcs_sync 装配层
+// 经**通用接口**探测注入 staging 配额（不依赖本包具体类型；Wrap 装饰后仍可注入）。
+var _ syncpkg.StagingQuotaCapable = (*StorageFS)(nil)
+
+// WithStagingQuota 装配 staging 配额钩子（pkg/sync.StagingQuotaCapable 实现）。
+func (f *StorageFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
+	f.quota = q
 }
 
-// WithQuota 为 StorageFS 装配配额记账钩子（链式配置）。
-func (f *StorageFS) WithQuota(q QuotaTracker) *StorageFS {
+// WithQuota 为 StorageFS 装配配额记账钩子（旧签名兼容；委托 WithStagingQuota）。
+func (f *StorageFS) WithQuota(q syncpkg.StagingQuotaTracker) *StorageFS {
 	f.quota = q
 	return f
 }
@@ -149,10 +149,13 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 	if clean == "" || clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
 	}
-	// 0. quota 预留（本地 staging 写入前）。
+	// 0. quota 预留（本地 staging 写入前；不足排队等待，受 ctx 约束/超时中断）。
+	// **不包 ErrTransient**——排队超时 = 配额永久不足，重试无意义；返回原错误由 sync
+	// 引擎按单文件 ActionError 处理（对齐本地 quotaLocalFS TryReserve 失败语义，
+	// 不中止整体同步也不无限重试）。
 	if f.quota != nil {
-		if err := f.quota.ReserveUsage(size); err != nil {
-			return fmt.Errorf("%w: quota reserve %d: %v", ErrTransient, size, err)
+		if err := f.quota.ReserveUsage(ctx, size); err != nil {
+			return fmt.Errorf("%w: quota reserve %d: %v", ErrQuotaExceeded, size, err)
 		}
 		defer f.quota.ReleaseUsage(size)
 	}

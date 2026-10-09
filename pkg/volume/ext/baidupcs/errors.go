@@ -22,6 +22,9 @@ var (
 	ErrInvalidParam = errors.New("baidupcs: invalid param")
 	// ErrTransient 表示可重试的瞬时错误（网络/超时/接口抖动）。
 	ErrTransient = errors.New("baidupcs: transient error")
+	// ErrQuotaExceeded 表示本地 staging 配额不足/排队超时（配额永久不足——单文件
+	// ActionError 而非重试；对齐本地 quotaLocalFS TryReserve 失败语义）。
+	ErrQuotaExceeded = errors.New("baidupcs: staging quota exceeded")
 	// ErrUnsupported 表示该能力无直接支持（如无会话/二进制模式执行服务端 Move/Copy）。
 	// 用户裁定：无直接能力则明确报错不支持（fail-closed），不静默降级。
 	ErrUnsupported = errors.New("baidupcs: unsupported operation")

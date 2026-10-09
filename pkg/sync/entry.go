@@ -112,6 +112,26 @@ type Linker interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命�
 	Link(ctx context.Context, from, to string) error
 }
 
+// StagingQuotaTracker 是本地中间态（staging/上传暂存）写入的配额记账钩子接口。
+// 语义：WriteFile 先落本地 staging 再上传——本地磁盘须防占满，写入计入配额
+// （预留 → 上传完成释放）。实现方（装配层）注入，不依赖具体配额池类型。
+// 与 ReserveSpace（目标卷容量预检）区分：StagingQuotaTracker 管**本地暂存**占用。
+type StagingQuotaTracker interface {
+	// ReserveUsage 预留 size 字节（本地 staging 写入前调用）。本地磁盘不足 → 实现方
+	// **排队等待**（受 ctx 约束：释放信号/ctx.Done 中断）；返回错误 = 拒绝本次写入。
+	ReserveUsage(ctx context.Context, size int64) error
+	// ReleaseUsage 释放 size 字节（上传成功或失败后调用；唤醒排队等待者）。
+	ReleaseUsage(size int64)
+}
+
+// StagingQuotaCapable 是 FS 的**可选** staging 配额能力（装配层探测并注入：
+// 不依赖具体卷类型——baidupcs_sync 从 *StorageFS 类型断言解耦为通用接口，Wrap 装饰
+// 后的 fs 也实现委托 inner，避免包装后 quota 丢失）。
+type StagingQuotaCapable interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	// WithStagingQuota 装配 staging 配额钩子（链式返回自身；nil = 不记账）。
+	WithStagingQuota(q StagingQuotaTracker)
+}
+
 // maxWalkDepth 限制目录递归深度（符号链接环的 fail-closed 兜底）。
 // 合法超深目录（>128 层）会因此被误判为疑似环而报错；对绝大多数真实目录树足够，
 // 且环检测比放任无限递归更安全（审查 M11：保持 fail-closed）。

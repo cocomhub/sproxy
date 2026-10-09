@@ -386,24 +386,45 @@ func TestOwnerQuotaTracker(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(100)
 	scope := pool.Scope("", 0)
-	q := &ownerQuotaTracker{scope: scope}
-	if err := q.ReserveUsage(40); err != nil {
+	q := newOwnerQuotaTracker(scope)
+	ctx := context.Background()
+	if err := q.ReserveUsage(ctx, 40); err != nil {
 		t.Fatalf("ReserveUsage(40): %v", err)
 	}
 	if got := scope.Usage(); got != 40 {
 		t.Fatalf("Usage after reserve = %d, want 40", got)
 	}
-	if err := q.ReserveUsage(50); err != nil {
+	if err := q.ReserveUsage(ctx, 50); err != nil {
 		t.Fatalf("ReserveUsage(50): %v", err)
 	}
 	if got := scope.Usage(); got != 90 {
 		t.Fatalf("Usage = %d, want 90", got)
 	}
-	// 超限 → 错误。
-	if err := q.ReserveUsage(50); err == nil {
-		t.Fatal("超限应报错")
+	// 排队等待：超限（90+50>100）→ 挂起等待释放（不立即报错——用户裁定本地磁盘不足排队）。
+	waitRes := make(chan error, 1)
+	go func() { waitRes <- q.ReserveUsage(ctx, 50) }()
+	// 等排队者进入等待后释放 40 → 排队者获 50 完成（90-40+50=100 边界）。
+	select {
+	case err := <-waitRes:
+		t.Fatalf("排队中不应提前返回: %v", err)
+	default:
 	}
 	q.ReleaseUsage(40)
+	if err := <-waitRes; err != nil {
+		t.Fatalf("释放后排队者应获配额: %v", err)
+	}
+	if got := scope.Usage(); got != 100 {
+		t.Fatalf("Usage after queued reserve = %d, want 100", got)
+	}
+	// ctx 取消中断排队（无释放信号）。
+	cctx, cancel := context.WithCancel(ctx)
+	waitCancel := make(chan error, 1)
+	go func() { waitCancel <- q.ReserveUsage(cctx, 50) }()
+	cancel()
+	if err := <-waitCancel; err == nil {
+		t.Fatal("ctx 取消应中断排队")
+	}
+	q.ReleaseUsage(50)
 	q.ReleaseUsage(50)
 	if got := scope.Usage(); got != 0 {
 		t.Fatalf("Usage after release = %d, want 0", got)

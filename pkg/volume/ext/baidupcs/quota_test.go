@@ -83,7 +83,7 @@ type fakeQuotaTracker struct {
 	failRes  atomic.Bool // true = ReserveUsage 返回错误
 }
 
-func (q *fakeQuotaTracker) ReserveUsage(size int64) error {
+func (q *fakeQuotaTracker) ReserveUsage(_ context.Context, size int64) error {
 	if q.failRes.Load() {
 		return errQuotaTestFail
 	}

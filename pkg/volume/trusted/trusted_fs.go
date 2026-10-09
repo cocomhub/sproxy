@@ -237,6 +237,14 @@ func (t *TrustedVolumeFS) IsLocalVolume() bool {
 	return false
 }
 
+// WithStagingQuota 委托 inner（StagingQuotaCapable 能力——baidupcs_sync 装配层经通用
+// 接口注入 staging 配额，Wrap 装饰后仍可达底层；inner 未实现 → no-op）。
+func (t *TrustedVolumeFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
+	if qc, ok := t.inner.(syncpkg.StagingQuotaCapable); ok {
+		qc.WithStagingQuota(q)
+	}
+}
+
 // Move 委托 inner（同卷移动；inner 未实现 → ErrUnsupported，调用方回落复制）。
 // 成功后联动移动 sidecar（C1 修复：与 Rename 一致，防目标无 meta、源 meta 成孤儿）。
 func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
