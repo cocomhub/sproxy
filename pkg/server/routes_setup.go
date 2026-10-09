@@ -489,7 +489,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// scheme 从卷 Type 反查（secretdata/secrets/baidupcs/s3 等声明协议）。
 			vol, ok := vs.ByName(volumeName)
 			if !ok {
-				return be.FS(), "", false
+				// 卷元信息缺失（极罕见装配异常）：仍加 Guard（meta 桶隔离恒生效）——
+				// 转存目标也不能触达凭据桶。
+				return trusted.Guard(be.FS()), "", false
 			}
 			// 共享判定（用户裁定）：ModeAllow + 多 owner 白名单 = 共享；ModeDeny/零值
 			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。单一

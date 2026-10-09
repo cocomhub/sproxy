@@ -32,6 +32,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // ---- secrets backend ----
@@ -363,7 +364,7 @@ func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultR
 	if be := set.External(regName); be != nil {
 		// 已有同名卷（用户显式配置）——取出其 FS 视图返回。
 		if fs := be.FS(); fs != nil {
-			return secrets.NewManager(fs, regName, true), nil
+			return secrets.NewManager(trusted.Guard(fs), regName, true), nil
 		}
 	}
 	// 设计 §6.1/§9：默认 secrets 卷落 <StorageRoot>/secrets 恰一次——secretsLocalFS

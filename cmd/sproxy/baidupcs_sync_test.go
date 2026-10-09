@@ -622,3 +622,14 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 		t.Fatalf("WriteFile(carol 无配额): %v", werr)
 	}
 }
+
+// Move 服务端移动（StorageAPI 要求——fake 简化：内容转移 + 删源）。
+func (f *fakeBaidupcsStorage) Move(ctx context.Context, srcKey, dstKey string) (*baidupcs.ObjectMeta, error) {
+	data, ok := f.files[srcKey]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	delete(f.files, srcKey)
+	f.files[dstKey] = data
+	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
+}

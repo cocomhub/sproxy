@@ -200,3 +200,14 @@ func (g *MetaBucketGuard) OpenRangeRead(ctx context.Context, p string, offset, s
 	}
 	return nil, fmt.Errorf("trusted: 底层未实现 RangeReader")
 }
+
+// DirectURL 透传 DirectURLProvider（集群出口 302 直链；meta 桶路径拒绝）。
+func (g *MetaBucketGuard) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
+	if err := g.guardPath(relPath); err != nil {
+		return "", false, err
+	}
+	if d, ok := g.inner.(syncpkg.DirectURLProvider); ok {
+		return d.DirectURL(ctx, relPath)
+	}
+	return "", false, fmt.Errorf("trusted: 底层未实现 DirectURL")
+}

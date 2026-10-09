@@ -14,6 +14,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // externalDownloadSource 是外部卷的服务端读取源（files.DownloadSource 实现，
@@ -95,7 +96,7 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		if be == nil {
 			continue
 		}
-		fsys := be.FS()
+		fsys := trusted.Guard(be.FS())
 		if fsys == nil {
 			// 后端已登记但 FS 视图未就绪（评审 Minor：nil 接口解引用 panic 防御）。
 			continue

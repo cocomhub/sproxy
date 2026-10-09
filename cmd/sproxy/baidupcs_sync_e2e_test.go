@@ -435,3 +435,16 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 		t.Fatalf("ownerB 网盘 big.txt = %q (ok=%v), want %q", string(gotB), okB, bigContent)
 	}
 }
+
+// Move 服务端移动（StorageAPI 要求——fake 简化：内容转移 + 删源）。
+func (f *fakeBaidupcsE2EStorage) Move(ctx context.Context, srcKey, dstKey string) (*baidupcs.ObjectMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[srcKey]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	delete(f.files, srcKey)
+	f.files[dstKey] = data
+	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
+}

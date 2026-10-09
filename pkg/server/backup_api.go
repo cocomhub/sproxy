@@ -24,6 +24,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // BackupRequest 是 POST /api/backup 的请求体。
@@ -216,7 +217,7 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 				return nil, fmt.Errorf("备份目标卷 %q 远端不可达: %w", target, perr)
 			}
 		}
-		fs := be.FS()
+		fs := trusted.Guard(be.FS())
 		if fs == nil {
 			return nil, fmt.Errorf("备份目标卷 %q 无文件系统视图（装配错误）", target)
 		}

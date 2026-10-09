@@ -14,6 +14,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 type backendsListResponse struct {
@@ -85,7 +86,7 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	defer be.Close()
-	fs := be.FS()
+	fs := trusted.Guard(be.FS())
 	if fs == nil {
 		http.Error(w, "后端无文件视图", http.StatusInternalServerError)
 		return
