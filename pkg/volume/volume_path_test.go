@@ -259,22 +259,27 @@ func TestLocation_StringParse_Roundtrip(t *testing.T) {
 		{sharedVolume(), "alice", "user", "dir/movie.bin", "volume://shared/alice/user/dir/movie.bin"},
 		{sharedVolume(), "alice", "meta", "x.bin.meta", "volume://shared/alice/meta/x.bin.meta"},
 		{sharedVolume(), "bob", "user", "", "volume://shared/bob/user"},
-		// R1-MAJOR-2：空 owner 归一 anonymous（与 FSPath 同），往返幂等。
-		{sharedVolume(), "anonymous", "user", "f.txt", "volume://shared/anonymous/user/f.txt"},
+		// E-MAJOR-6：空 owner 归一 anonymous（与 FSPath 同），往返幂等——空是唯一合法
+		// 匿名入口（字面 "anonymous" 被 ResolveLocation 拒绝防键空间重合）。
+		{sharedVolume(), "", "user", "f.txt", "volume://shared/anonymous/user/f.txt"},
 	}
 	for _, tc := range cases {
 		loc := tc.v.MustLocation(tc.owner, tc.bucket, tc.path)
 		if got := loc.String(); got != tc.want {
 			t.Errorf("String() = %q, want %q", got, tc.want)
 		}
-		// Parse 往返：注入卷上下文后字段一致（owner 恒含）。
+		// Parse 往返：注入卷上下文后字段一致（owner 恒含——空 owner 归一 anonymous）。
 		back, perr := tc.v.ParseLocation(tc.want)
 		if perr != nil {
 			t.Fatalf("ParseLocation(%q): %v", tc.want, perr)
 		}
-		if back.Owner() != tc.owner || back.Bucket() != tc.bucket || back.Path() != tc.path {
+		wantOwner := tc.owner
+		if wantOwner == "" {
+			wantOwner = "anonymous"
+		}
+		if back.Owner() != wantOwner || back.Bucket() != tc.bucket || back.Path() != tc.path {
 			t.Errorf("roundtrip 字段不符: got (%q,%q,%q) want (%q,%q,%q)",
-				back.Owner(), back.Bucket(), back.Path(), tc.owner, tc.bucket, tc.path)
+				back.Owner(), back.Bucket(), back.Path(), wantOwner, tc.bucket, tc.path)
 		}
 	}
 }
@@ -297,5 +302,23 @@ func TestParseLocation_FailClosed(t *testing.T) {
 	// 仅桶（path 空）合法：`volume://<卷>/<owner>/<bucket>`（owner/桶必填，path 可空）。
 	if _, err := sharedVolume().ParseLocation("volume://shared/alice/user"); err != nil {
 		t.Errorf("仅桶定位应通过: %v", err)
+	}
+}
+
+// TestResolveLocation_AnonymousOwnerRejected E-MAJOR-6 回归：字面 "anonymous" owner
+// 拒绝（与空 owner 归一键空间重合防交叉互覆）；空 owner 放行（归一 anonymous）。
+func TestResolveLocation_AnonymousOwnerRejected(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []Owner{"anonymous"} { // 字面 anonymous（NormalizeOwner 不归一大小写）
+		if _, err := sharedVolume().ResolveLocation(bad, "user", "f.txt"); err == nil {
+			t.Errorf("字面 %q owner 应被拒绝（与匿名键空间重合）", bad)
+		}
+	}
+	loc, err := sharedVolume().ResolveLocation("", "user", "f.txt")
+	if err != nil {
+		t.Fatalf("空 owner 应放行（归一 anonymous）: %v", err)
+	}
+	if loc.FSPath() != "anonymous/user/f.txt" {
+		t.Fatalf("空 owner 键=%q want anonymous/user/f.txt", loc.FSPath())
 	}
 }

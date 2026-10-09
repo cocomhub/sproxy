@@ -159,7 +159,12 @@ func (v Volume) ResolveLocation(owner Owner, bucket Bucket, rel Path) (Location,
 	// （owner=user 撞车 → sidecar 桶段判错），且 owner 含 `/` 会跨 owner 键交错。
 	// 转存/上传经卷键空间唯一入口 ResolveLocation——此处是纵深防御（注册口未拦）。
 	// **空 owner 放行**：空 = 匿名（FSPath 归一 anonymous），既有转存/上传语义合法。
-	if owner != "" && (!storage.ValidSegmentName(owner) || storage.IsReservedBucketName(owner)) {
+	// E-MAJOR-6 修复：owner 字面 "anonymous"（AnonymousOwner）**拒绝**——字面 anonymous
+	// 账号与空 owner 归一（FSPath → anonymous/user/...）键空间完全重合，匿名数据与账号
+	// 数据交叉/互覆（且 ACL 语义混淆）。空 owner（将归一为 anonymous）是唯一合法匿名
+	// 入口。
+	if owner != "" && (owner == storage.AnonymousOwner ||
+		!storage.ValidSegmentName(owner) || storage.IsReservedBucketName(owner)) {
 		return Location{}, ErrInvalidUserPath
 	}
 	// 2. bucket 校验（单段合法名——防桶名注入/多段拼写）。
