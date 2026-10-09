@@ -72,13 +72,22 @@ func flattenRel(rel string) string {
 
 // unflattenRel 把 trash 条目路径还原为原 rel（与 flattenRel 互逆；文件名段非法编码
 // 返回 ""）。目录段原样拼接、仅最后一段 base64 解码。
+// E-MAJOR 修复：base64 解码失败（**存量旧编码条目**——升级前用 `_` 扁平时代
+// `user_a_b.txt` 形态）回退旧 `_`→`/` 解码——否则升级后旧 trash 条目永久无法恢复 +
+// 配额永不释放（EmptyTrash 删磁盘字节后原 rel 配额虚高假 507）。
 func unflattenRel(flat string) string {
 	dir, file := path.Split(flat)
 	b, err := base64.RawURLEncoding.DecodeString(file)
-	if err != nil {
-		return ""
+	if err == nil {
+		return strings.TrimSuffix(dir, "/") + "/" + string(b)
 	}
-	return strings.TrimSuffix(dir, "/") + "/" + string(b)
+	// 回退旧编码：`_` 分隔的扁平 rel（`user_a_b.txt` → `user/a/b.txt`；仅文件名段解码）。
+	legacy := strings.ReplaceAll(strings.TrimSuffix(dir, "/")+"/"+file, "_", "/")
+	legacy = strings.TrimPrefix(legacy, "/")
+	if !storage.ValidSegmentName(path.Base(legacy)) {
+		return "" // 回退名也非法（非 trash 条目形态）
+	}
+	return legacy
 }
 
 // M2 修复：meta sidecar 随主文件一起移到 trash 桶（生命周期一致）——软删保留 meta

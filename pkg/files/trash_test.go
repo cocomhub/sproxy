@@ -12,6 +12,7 @@ package files
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"path"
 	"path/filepath"
@@ -290,5 +291,28 @@ func TestTrash_SoftDelete_CleansLedgerAndIndex(t *testing.T) {
 	// checksum 台账不含该 rel（软删即不在 user 桶）。
 	if got, _ := env.checksum["alice"].Get("user/a.txt"); got != "" {
 		t.Fatal("软删后 checksum 台账应移除 user/a.txt（统一收尾）")
+	}
+}
+
+// TestUnflattenRel_LegacyFallback E-MAJOR 回归：存量旧编码 trash 条目（升级前 `_`
+// 扁平时代 `user_a_b.txt`）经新 unflattenRel 的 base64 解码失败 → 回退旧 `_`→`/`
+// 解码（否则升级后旧条目永久无法恢复 + 配额不释放）。
+func TestUnflattenRel_LegacyFallback(t *testing.T) {
+	t.Parallel()
+	// 新编码（base64）正常解码。
+	if got := unflattenRel("user/" + base64.RawURLEncoding.EncodeToString([]byte("a b.txt"))); got != "user/a b.txt" {
+		t.Fatalf("新编码 unflatten = %q, want user/a b.txt", got)
+	}
+	// 旧编码回退：`user_a_b.txt`（升级前 `_` 扁平）→ `user/a/b.txt`。
+	if got := unflattenRel("user_a_b.txt"); got != "user/a/b.txt" {
+		t.Fatalf("旧编码回退 = %q, want user/a/b.txt", got)
+	}
+	// 带目录的旧编码：`sub_user_a.txt` → `sub/user/a.txt`。
+	if got := unflattenRel("sub_user_a.txt"); got != "sub/user/a.txt" {
+		t.Fatalf("带目录旧编码回退 = %q, want sub/user/a.txt", got)
+	}
+	// 非法（非 trash 形态：回退名含非法段）→ ""。
+	if got := unflattenRel("CON.txt"); got != "" {
+		t.Fatalf("非法回退名应返回空, got %q", got)
 	}
 }
