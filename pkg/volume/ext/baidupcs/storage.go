@@ -145,7 +145,7 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 // putRetryLoop 有界重试主循环（cocom 对齐）：每轮先 Stat（秒传命中直接返回）→ 未命中
 // 上传 → Stat 复核 ETag 与本地 md5（md5 刷新），不匹配重传；超限 ErrTransient（内容
 // 即使正确也强制验证，绝不静默放行未验证内容）。
-// M4：轮间指数退避（300ms/700ms/1.5s）——百度上传后 Stat 有最终一致性窗口，立即重传
+// M4：轮间指数退避（300ms/1.2s）——百度上传后 Stat 有最终一致性窗口，立即重传
 // 大概率仍未见/仍片组合 md5，白白整文件重传；退避让秒传索引/meta 刷新落定再复核。
 func (s *Storage) putRetryLoop(ctx context.Context, key, remote string, st *stagedUpload) (*ObjectMeta, error) {
 	lastRemoteETag := ""
