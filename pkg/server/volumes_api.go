@@ -392,6 +392,13 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	if !rOk {
 		return status, resp
 	}
+	// M3 修复：迁移前**探测 meta 配额**（owner 全局 → 目标卷池，metaEstimate 探测即释放）——
+	// 原设计 move 后 moveMetaAfterVolumeMove 重建目标 meta 仅 Warn，目标 meta 桶配额不足时
+	// move 静默成功 → 源 meta 已删、目标无 meta（不可信，读路径永久直算）。探测在写前
+	// fail-closed：meta 配额不足 507 拒绝，不让 move 进入"目标无 meta"状态。
+	if pStatus, pResp, pOk := h.moveProbeMetaQuota(owner, rel, toVol, size); !pOk {
+		return pStatus, pResp
+	}
 
 	// 流式复制到 to 卷（临时 + fsync + 原子 rename）；失败回滚双预留，源不动。
 	written, status, resp, cOk := h.moveCopyToTarget(mc, size, scopeRes, poolRes)
@@ -401,6 +408,49 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 
 	// 删源三分支 + 双 commit/release 结算（语义见 moveDeleteSource）。
 	return h.moveDeleteSource(mc, written, scope, scopeRes, poolRes)
+}
+
+// moveProbeMetaQuota 探测目标卷 meta 桶配额是否足够容纳 FileMeta sidecar（M3）：
+// 用 metaEstimate（上限估算）经 owner 全局 scope 与目标卷池 TryReserve 探测、立即释放
+// （探测即释放不落地，与 transferQuotaGate 同语义）——不足 → 507 fail-closed（迁移拒绝，
+// 防止"目标无 meta"的静默成功）。估算偏保守（每 1MiB 一块 × 150B JSON + 固定头），
+// 不足时提前拒绝；精确记账仍由 moveMetaAfterVolumeMove 的 WriteMeta 内部完成。
+func (h *Handlers) moveProbeMetaQuota(owner, rel, toVol string, size int64) (int, UploadResponse, bool) {
+	est := metaEstimateForSize(size)
+	if est <= 0 {
+		return 0, UploadResponse{}, true
+	}
+	if scope := h.quotaScopeFor(owner, meta.MetaPath(rel)); scope != nil {
+		r, rerr := scope.TryReserve(est)
+		if rerr != nil {
+			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
+		}
+		r.Release()
+	}
+	if pool := h.volSet.Pool(toVol); pool != nil {
+		r, rerr := pool.TryReserve(est)
+		if rerr != nil {
+			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
+		}
+		r.Release()
+	}
+	return 0, UploadResponse{}, true
+}
+
+// metaEstimateForSize 估算 FileMeta sidecar 上限字节（M3 探测用；按 1MiB 分块 ×
+// ~150B/块 JSON + 固定头，保守上限——实际 meta 通常更小，探测提前拒绝最坏情况）。
+func metaEstimateForSize(size int64) int64 {
+	if size <= 0 {
+		return 0
+	}
+	const chunk = int64(1 << 20) // 1MiB 最小分块（minMetaChunkSize）
+	blocks := size / chunk
+	if size%chunk != 0 {
+		blocks++
+	}
+	const perBlock = int64(150) // 每块 ChunkMeta JSON 上限
+	const header = int64(512)   // 固定头（总哈希/Size/ChunkSize/Name）
+	return blocks*perBlock + header
 }
 
 // moveOKResp 构造跨卷移动成功响应体。
