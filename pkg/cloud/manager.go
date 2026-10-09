@@ -271,6 +271,9 @@ type CloudDownloadManager struct {
 	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveLocation 键空间计算）。
 	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
 	volumeFor func(volume string) (volume.Volume, bool)
+	// stagingQuotaFor 返回 owner 的本地 staging 配额钩子（装配层注入；nil = 无独立
+	// staging 配额，转存不包 gate——零回归）。
+	stagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
 	// integrityLookup 按文件名分发完整性校验器（装配层注入 integrity.Lookup 代理；
 	// nil = 无校验器，语义校验跳过视为通过——Review Focus 1）。
 	integrityLookup func(name string) integrity.Checker
@@ -359,6 +362,11 @@ type CloudManagerOptions struct {
 	// 可被 ResolveURL 解析的转存 URL；shared=true 表示共享卷（内容不共享，转存落盘须加
 	// owner 前缀隔离）。由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用）。
 	TransferFSFor func(volume string) (syncpkg.FS, string, bool)
+	// StagingQuotaFor 返回 owner 的本地 staging 配额钩子（用户裁定 2026-10-10：外部卷
+	// 转存写本地暂存统一过独立 staging 配额——防本地磁盘打满；转存目标 FS 未实现
+	// StagingQuotaExempt/StagingQuotaCapable 时包 StagingQuotaGateFS 强制预留）。
+	// nil = 无独立 staging 配额（零回归，不包 gate）。装配层注入（pkg/server 实现）。
+	StagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
 	// VolumeFor 解析转存目标卷的 volume.Volume（用于 ResolveLocation 键空间计算——
 	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
 	// nil = 转存不可用（与 TransferFSFor 同门）。
@@ -426,6 +434,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		dl:               newDefaultDownloader(cfg),
 		transferFSFor:    opts.TransferFSFor,
 		volumeFor:        opts.VolumeFor,
+		stagingQuotaFor:  opts.StagingQuotaFor,
 		integrityLookup:  opts.IntegrityLookup,
 		removeFile:       opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
 		cancelFuncs:      make(map[string]context.CancelFunc),

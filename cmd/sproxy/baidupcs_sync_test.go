@@ -386,7 +386,7 @@ func TestOwnerQuotaTracker(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(100)
 	scope := pool.Scope("", 0)
-	q := newOwnerQuotaTracker(scope)
+	q := quota.NewStagingTracker(scope)
 	ctx := context.Background()
 	if err := q.ReserveUsage(ctx, 40); err != nil {
 		t.Fatalf("ReserveUsage(40): %v", err)

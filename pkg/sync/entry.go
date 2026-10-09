@@ -127,9 +127,22 @@ type StagingQuotaTracker interface {
 // StagingQuotaCapable 是 FS 的**可选** staging 配额能力（装配层探测并注入：
 // 不依赖具体卷类型——baidupcs_sync 从 *StorageFS 类型断言解耦为通用接口，Wrap 装饰
 // 后的 fs 也实现委托 inner，避免包装后 quota 丢失）。
+// **自管语义（用户裁定）**：实现本接口的卷 = 获取配额句柄后**内部自行接管**本地
+// staging 配额管理（如 baidupcs StorageFS 在 WriteFile 内预留/释放）——装配层注入
+// 钩子后不再包 gate 装饰器。
 type StagingQuotaCapable interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
 	// WithStagingQuota 装配 staging 配额钩子（链式返回自身；nil = 不记账）。
 	WithStagingQuota(q StagingQuotaTracker)
+}
+
+// StagingQuotaExempt 是**显式豁免** staging 配额的标记接口（用户裁定：不需要 staging
+// 或实际只占用部分空间的卷须**显式实现**本接口才豁免——不实现 = 默认强制 gate）。
+// 流式直传卷（如 s3：PutObject 单请求直传、无本地中间态）实现；装配层探测到本接口
+// → 跳过 gate 包装（不预留本地磁盘，零误伤）。**显式声明而非实现遗漏**：新卷未实现
+// 本接口也未实现 StagingQuotaCapable → 默认被 gate 强制预留（fail-safe，宁多勿漏）。
+type StagingQuotaExempt interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	// ExemptStagingQuota 报告本卷无需本地 staging 配额（流式直传不落盘）。
+	ExemptStagingQuota() bool
 }
 
 // maxWalkDepth 限制目录递归深度（符号链接环的 fail-closed 兜底）。

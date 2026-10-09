@@ -453,7 +453,12 @@ func notFoundText(err error) bool {
 }
 
 // _ 编译期断言：S3FS 实现 sync.FS。
-
 var _ sync.FS = (*S3FS)(nil)
+
+// ExemptStagingQuota 报告 s3 无需本地 staging 配额（显式豁免——用户裁定 2026-10-10：
+// 不需要 staging 或只占部分空间的卷须显式实现接口；s3 为流式直传：PutObject 单请求
+// 直发、multipart 由 minio 内存/HTTP 直传，**无本地中间态落盘**——装配层探测到本接口
+// 跳过 StagingQuotaGateFS 包装，不预留本地磁盘）。
+func (f *S3FS) ExemptStagingQuota() bool { return true }
 
 var _ = time.Now // 保留 time import（MTime 用 UnixNano 已用；防未来裁剪）

@@ -37,6 +37,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -193,6 +194,10 @@ type Handlers struct {
 	dedupStores    map[string]*files.DedupStore       // 按 owner 缓存 per-tenant 去重台账（懒创建）
 	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
 	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
+	// stagingScopes 按 owner 缓存**独立 staging 配额 Scope**（用户裁定 2026-10-10：
+	// 本地暂存独立记账，不与网盘 owner_quotas 混用——外部卷 WriteFile 先预留本地字节）。
+	// 上限 = trusted_volume.staging_quota_bytes；0 = 不限制但记账。tenantMu 保护。
+	stagingScopes map[string]*quota.Scope
 	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
 	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
 	archiveUsage map[string]map[string]int64
@@ -764,6 +769,44 @@ func (h *Handlers) quotaScopeFor(owner, rel string) *quota.Scope {
 		return rootSc // 功能桶根内的文件（user/a.txt）
 	}
 	return rootSc.Resolve(segs[1:])
+}
+
+// stagingQuotaScope 返回 owner 的**独立 staging 配额 Scope**（用户裁定 2026-10-10）：
+// 本地上传暂存独立记账，**不与网盘 owner_quotas 混用**——外部卷 WriteFile 先预留本地
+// 字节、写后释放，防本地磁盘被 staging 占满。上限 = trusted_volume.staging_quota_bytes
+// （0/缺省 = 不限制但记账，预留/释放对称不误伤）。globalPool 未装配 → nil（无配额能力
+// 零回归）。懒建缓存（tenantMu 保护），装配期硬配置不重建。
+func (h *Handlers) stagingQuotaScope(owner string) *quota.Scope {
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.globalPool == nil {
+		return nil
+	}
+	if h.stagingScopes == nil {
+		h.stagingScopes = make(map[string]*quota.Scope)
+	}
+	if sc, ok := h.stagingScopes[owner]; ok {
+		return sc
+	}
+	var limit int64
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		limit = int64(cfg.TrustedVolume.StagingQuotaBytes)
+	}
+	sc := h.globalPool.Scope("/staging/"+owner, limit)
+	h.stagingScopes[owner] = sc
+	return sc
+}
+
+// stagingQuotaTrackerFor 返回 owner 的 staging 配额钩子（独立 Scope 适配——
+// ReserveUsage = TryReserve + Commit；不足排队等待（quota.StagingTracker：sync.Cond +
+// ctx/超时）；ReleaseUsage = ReleaseUsage + 广播。无 globalPool → nil（零回归）。
+func (h *Handlers) stagingQuotaTrackerFor(owner string) syncpkg.StagingQuotaTracker {
+	sc := h.stagingQuotaScope(owner)
+	if sc == nil {
+		return nil
+	}
+	return quota.NewStagingTracker(sc)
 }
 
 // bwBucketFor 返回 owner 的带宽令牌桶（懒建缓存；限速关闭/无速率时 nil = 不限速）。

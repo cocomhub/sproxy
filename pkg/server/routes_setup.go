@@ -479,6 +479,12 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 			return h.quotaBucketFor(owner, "cloud")
 		}},
+		// 本地 staging 配额钩子（用户裁定 2026-10-10）：外部卷转存写本地暂存统一过
+		// 独立 staging Scope（防本地磁盘打满）——cloud 层在 transferDone 按 owner 注入
+		// targetFS（Exempt 跳过 / Capable 自管 / 默认 gate 强制）。
+		StagingQuotaFor: func(owner string) syncpkg.StagingQuotaTracker {
+			return h.stagingQuotaTrackerFor(owner)
+		},
 		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
 		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
 		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool) {

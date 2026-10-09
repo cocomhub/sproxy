@@ -221,7 +221,9 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 		if fs == nil {
 			return nil, fmt.Errorf("备份目标卷 %q 无文件系统视图（装配错误）", target)
 		}
-		return fs, nil
+		// 本地 staging 配额强制接线（用户裁定 2026-10-10：外部卷统一过独立 staging
+		// 配额——备份写本地暂存防打满；s3 流式显式 Exempt，baidupcs 自管 StagingQuotaCapable）。
+		return h.stagingQuotaFS(owner, fs), nil
 	}
 	tnt := h.volumeTenant(target, owner)
 	if tnt == nil || tnt.Root() == nil {

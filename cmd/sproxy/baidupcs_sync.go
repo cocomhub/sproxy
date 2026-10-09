@@ -26,7 +26,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -40,84 +39,6 @@ import (
 // baidupcsStorageFactory 构造网盘 Storage（可注入，测试用内存 fake）。
 // nil（生产）时用 baidupcs.DefaultFactory().New。
 type baidupcsStorageFactory func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error)
-
-// ownerQuotaTracker 是 StagingQuotaTracker 的 per-owner quota.Scope 适配器（P5，Ruling-5
-// 修正 + 排队等待）：本地磁盘不足时**排队等待**（quota.Scope 无 wait API——用 sync.Cond
-// 在 ReleaseUsage 广播唤醒，ctx.Done 中断），而不是立即拒绝（staging 写满应等待释放而非
-// 任务失败；防本地磁盘被 staging/cache 占满仍由配额上限兜底）。
-// **有界等待（bounded wait）**：排队不无限挂起——ctx 取消 / 等待超时（stagingWaitTimeout）
-// 均中断返回错误（永久不足如「单文件超 owner 配额」快速失败为单文件 ActionError，任务
-// 不卡 syncing 永不完成）。
-//
-//	ReserveUsage(ctx, size) → scope.TryReserve(size) + res.Commit(size) // 入账 committed
-//	                         不足 → 等待（cond；Release 广播 / ctx.Done / 超时中断）
-//	ReleaseUsage(size)     → scope.ReleaseUsage(size) + cond.Broadcast() // 唤醒等待者
-//
-// 对齐 syncfs.go WriteFile 的「预留→上传完成释放」；无单 Reservation 状态 → 并发 WriteFile
-// （多任务共享同一 StorageFS）安全（Scope 内部 mutex 串行化账本操作 + cond 持锁等待）。
-// scope 由装配层按任务 owner 解析（owner_quotas 的 user 桶）——每任务构造（工厂调用时
-// WithQuota 注入），owner 绑定在 quota.Scope 上。
-type ownerQuotaTracker struct {
-	scope *quota.Scope
-	cond  *sync.Cond // 排队等待：Release 广播唤醒
-}
-
-// stagingWaitTimeout 是 staging 配额排队等待超时（本地磁盘不足等待释放的最长时限）。
-// **瞬时磁盘紧张**（并发任务占满、释放后继续）在此时限内重试成功；**永久不足**
-// （单文件超 owner 配额、无并发释放）超过此时限快速失败为单文件 ActionError——排队
-// 不无限挂起，任务不卡 syncing。5s 足够瞬时释放窗口，且远小于任务/测试等待窗口。
-const stagingWaitTimeout = 5 * time.Second
-
-func newOwnerQuotaTracker(scope *quota.Scope) *ownerQuotaTracker {
-	return &ownerQuotaTracker{scope: scope, cond: sync.NewCond(&sync.Mutex{})}
-}
-
-func (q *ownerQuotaTracker) ReserveUsage(ctx context.Context, size int64) error {
-	if size <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(stagingWaitTimeout)
-	defer timer.Stop()
-	for {
-		res, err := q.scope.TryReserve(size)
-		if err == nil {
-			res.Commit(size)
-			return nil
-		}
-		// 磁盘不足：排队等待释放（ctx 取消 / 超时中断；cond 无 ctx 原语——用 goroutine
-		// 感知 ctx/timer 并 Broadcast 打断 cond.Wait）。
-		q.cond.L.Lock()
-		waiter := make(chan struct{})
-		interrupt := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				q.cond.Broadcast() // 打断所有等待者重新评估（含本 ctx 取消者）
-			case <-timer.C:
-				q.cond.Broadcast() // 等待超时：打断重新评估（本循环感知后返回错误）
-			case <-interrupt:
-			}
-		}()
-		q.cond.Wait()
-		close(interrupt)
-		close(waiter)
-		q.cond.L.Unlock()
-		if ctx.Err() != nil {
-			return fmt.Errorf("quota: 等待本地 staging 空间中断: %w", ctx.Err())
-		}
-		if !timer.Stop() {
-			return fmt.Errorf("quota: 等待本地 staging 空间超时（%s）", stagingWaitTimeout)
-		}
-	}
-}
-
-func (q *ownerQuotaTracker) ReleaseUsage(size int64) {
-	if size <= 0 {
-		return
-	}
-	q.scope.ReleaseUsage(size)
-	q.cond.Broadcast() // 唤醒排队等待者
-}
 
 // setupBaidupcsFSFactory 装配 baidupcs 载体工厂（V3 接入 T3：工厂查 registry external；
 // P5：staging quota 按任务 owner 分桶）。
@@ -153,7 +74,7 @@ func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slo
 		// 限制，per-owner 多任务并发隔离留后续装饰器方案）。
 		if qc, ok := fs.(syncpkg.StagingQuotaCapable); ok && scopeFor != nil {
 			if ownerScope := scopeFor(owner); ownerScope != nil {
-				qc.WithStagingQuota(newOwnerQuotaTracker(ownerScope))
+				qc.WithStagingQuota(quota.NewStagingTracker(ownerScope))
 			}
 		}
 		return fs, func() { /* 无清理 */ }, nil

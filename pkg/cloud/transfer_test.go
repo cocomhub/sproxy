@@ -24,6 +24,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -1377,3 +1378,81 @@ func TestIsFsNotFound_NoSubstringMatch(t *testing.T) {
 		t.Fatal("nil 不应判定不存在")
 	}
 }
+
+// TestStagingQuotaWrap 用户裁定 2026-10-10 机制化回归：转存目标 FS 的本地 staging 配额
+// 强制接线——无接口的裸卷默认被 gate 强制预留（新卷遗漏也 fail-safe）；Exempt 跳过；
+// Capable 注入自管。
+func TestStagingQuotaWrap(t *testing.T) {
+	t.Parallel()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return newMemFS(), "s3", false
+	})
+	mgr.stagingQuotaFor = func(owner string) syncpkg.StagingQuotaTracker {
+		return quota.NewStagingTracker(quota.NewPool(1<<30).Scope("", 0))
+	}
+	// 无接口裸卷（memFS）：默认包 gate。
+	gw := mgr.stagingQuotaWrap("alice", newMemFS())
+	if _, ok := gw.(*syncpkg.StagingQuotaGateFS); !ok {
+		t.Fatal("无接口卷应默认被 gate 强制预留（fail-safe）")
+	}
+	// Exempt 卷：跳过。
+	ex := &exemptFS{inner: newMemFS()}
+	if got := mgr.stagingQuotaWrap("alice", ex); got != ex {
+		t.Fatal("Exempt 卷应跳过 gate（原 fs 返回）")
+	}
+	// Capable 卷：注入自管（返回原 fs）。
+	cap := &capableFS{inner: newMemFS()}
+	if got := mgr.stagingQuotaWrap("alice", cap); got != cap {
+		t.Fatal("Capable 卷应注入自管（原 fs 返回）")
+	}
+	if cap.tracker == nil {
+		t.Fatal("Capable 卷应收到 staging 配额钩子（自管）")
+	}
+}
+
+// exemptFS 是 StagingQuotaExempt 测试实现（流式直传语义）。
+type exemptFS struct{ inner syncpkg.FS }
+
+func (e *exemptFS) ExemptStagingQuota() bool { return true }
+func (e *exemptFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return e.inner.ListDir(ctx, p)
+}
+func (e *exemptFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return e.inner.Stat(ctx, p)
+}
+func (e *exemptFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return e.inner.OpenRead(ctx, p)
+}
+func (e *exemptFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return e.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (e *exemptFS) Rename(ctx context.Context, f, t string) error { return e.inner.Rename(ctx, f, t) }
+func (e *exemptFS) Delete(ctx context.Context, p string) error    { return e.inner.Delete(ctx, p) }
+func (e *exemptFS) MakeDir(ctx context.Context, p string) error   { return e.inner.MakeDir(ctx, p) }
+
+var _ syncpkg.StagingQuotaExempt = (*exemptFS)(nil)
+
+// capableFS 是 StagingQuotaCapable 测试实现（自管本地配额）。
+type capableFS struct {
+	inner   syncpkg.FS
+	tracker syncpkg.StagingQuotaTracker
+}
+
+func (c *capableFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) { c.tracker = q }
+func (c *capableFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return c.inner.ListDir(ctx, p)
+}
+func (c *capableFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return c.inner.Stat(ctx, p)
+}
+func (c *capableFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return c.inner.OpenRead(ctx, p)
+}
+func (c *capableFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return c.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (c *capableFS) Rename(ctx context.Context, f, t string) error { return c.inner.Rename(ctx, f, t) }
+func (c *capableFS) Delete(ctx context.Context, p string) error    { return c.inner.Delete(ctx, p) }
+func (c *capableFS) MakeDir(ctx context.Context, p string) error   { return c.inner.MakeDir(ctx, p) }
+
+var _ syncpkg.StagingQuotaCapable = (*capableFS)(nil)

@@ -1093,6 +1093,10 @@ type TrustedVolumeConfig struct {
 	// ChunkSize 分块校验大小（缺省 0 = 按文件大小自适应 ChunkSizeForSize；显式设置固定
 	// 分块粒度，sizex.ByteSize 字节配置——C-MAJOR-4：Options.ChunkSize 接线到配置）。
 	ChunkSize ByteSize `yaml:"chunk_size" mapstructure:"chunk_size"`
+	// StagingQuotaBytes 是**本地 staging 配额上限**（用户裁定 2026-10-10：独立 staging
+	// Scope——所有外部卷 WriteFile 先预留本地暂存字节、写后释放；0/缺省 = 不限制但
+	// 记账。防本地磁盘被上传暂存打满：per-owner 独立 Scope，不与网盘 owner_quotas 混用）。
+	StagingQuotaBytes ByteSize `yaml:"staging_quota_bytes" mapstructure:"staging_quota_bytes"`
 }
 
 // PikpakConfig 是 PikPak 网盘中转后端配置。
