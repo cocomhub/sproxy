@@ -161,7 +161,6 @@ func (c *Calculator) Finish() *FileMeta {
 type metaReader struct {
 	inner io.Reader
 	calc  *Calculator
-	used  bool
 }
 
 // WrapReader 包装 io.Reader：读数据经过 wrap 时顺便累计 FileMeta 哈希。
@@ -179,7 +178,6 @@ func (mr *metaReader) Read(p []byte) (int, error) {
 		if _, werr := mr.calc.Write(p[:n]); werr != nil {
 			return n, werr
 		}
-		mr.used = true
 	}
 	return n, err
 }

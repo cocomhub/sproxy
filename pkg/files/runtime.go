@@ -77,18 +77,22 @@ func (rt runtime) writeMetaSidecar(ctx context.Context, owner string, root *stor
 	return rt.fileMeta.WriteMeta(ctx, owner, root, rel)
 }
 
-// sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（`.tmp.<nano>` 前缀，崩溃残留）。
-// best-effort：删除失败仅忽略（下次写同 rel 再试）；目录不可读无孤儿可清。删除联动
-// 调用（m4：文件删除后孤儿常驻，删除路径也自愈）。
+// sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（崩溃残留）。best-effort：删除失败
+// 仅忽略（下次写同 rel 再试）；目录不可读无孤儿可清。删除联动调用（m4：文件删除后
+// 孤儿常驻，删除路径也自愈）。
+// MINOR-8 修复：兼容两种 tmp 命名——filesMetaPolicy.atomicWriteMeta 的 `.tmp.<nano>`
+// （点）与 LocalFS.writeFileAtomic 的 `.tmp-*`（连字符，装饰器 meta 写经 inner 用此）；
+// 原只匹配点前缀，LocalFS 崩溃残留 `.tmp-*` 孤儿永不清理。
 func (rt runtime) sweepMetaTmp(root *storage.Root, mrel string) {
 	dir := path.Dir(mrel)
-	base := path.Base(mrel) + ".tmp."
+	baseDot := path.Base(mrel) + ".tmp."
+	baseDash := path.Base(mrel) + ".tmp-"
 	es, err := root.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range es {
-		if strings.HasPrefix(e.Name(), base) {
+		if strings.HasPrefix(e.Name(), baseDot) || strings.HasPrefix(e.Name(), baseDash) {
 			_ = root.Remove(path.Join(dir, e.Name()))
 		}
 	}
