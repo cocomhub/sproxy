@@ -501,7 +501,7 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// 可信卷：外部卷 FS 恒经 trusted.Wrap 包一层（用户裁定：meta 恒生成——skip_verify
 			// 只关读侧校验不关 meta；转存写后自动生成隐藏 .meta，目标成为可信卷）。
 			fsys := be.FS()
-			fsys = trusted.Wrap(fsys, h.trustedWrapOpts())
+			fsys = trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts()))
 			return fsys, registry.SchemeOf(vol.Type), shared
 		},
 		// VolumeFor：转存键空间经 volume.ResolveLocation 计算（权限门/路径安全/共享前缀

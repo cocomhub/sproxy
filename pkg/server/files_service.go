@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // filesStorageManager 把 *capacity.StorageManager 适配为 files.StorageManager。
@@ -255,7 +256,7 @@ func (h *Handlers) externalFSFor(volName string) (syncpkg.FS, bool) {
 		return nil, false
 	}
 	fsys := be.FS()
-	return fsys, fsys != nil
+	return trusted.Guard(fsys), fsys != nil
 }
 
 // toFilesHTTPError 把带 HTTP 状态码的 pkg/server 错误（下载路径解析错误 / 卷路由错误）

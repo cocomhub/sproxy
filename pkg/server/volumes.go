@@ -591,7 +591,7 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if !ok {
 		return nil
 	}
-	fsys = trusted.Wrap(fsys, h.trustedWrapOpts())
+	fsys = trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts()))
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
 }
 
