@@ -367,7 +367,13 @@ func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
 	}
 	// 无 Provider meta：流式整文件 sha256 对 result.Checksum（需参考 checksum）。
 	if env.result.Checksum == "" {
-		return nil // 无参考值（下载器未提供）→ 信任写盘成功
+		// M1 修复：无参考值（下载器未提供）→ 转存校验**退化为自参照**（目标卷内容 ==
+		// 写侧 meta，源损坏由 #743 下载层完整性管道兜底）——记录 extra 标记供下游消费
+		// 方知"未交叉权威"（与 damaged 旁路同机制，不阻断转存）。
+		if ue, ok := env.targetFS.(metaExtraUpdater); ok {
+			_ = ue.UpdateMetaExtra(env.ctx, env.rel, map[string]any{"transfer_verified": "no_reference_checksum"})
+		}
+		return nil // 无参考值 → 信任写盘成功（源完整性由下载层验证）
 	}
 	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
 	if rerr != nil {
