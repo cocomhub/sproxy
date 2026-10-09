@@ -633,21 +633,17 @@ func isLocalVolumeFS(fs syncpkg.FS) bool {
 		return lv.IsLocalVolume()
 	}
 	return false
-} // isFsNotFound 判断文件系统错误是否为「路径不存在」：errors.Is 匹配 os.ErrNotExist /
-// fs.ErrNotExist，另兜底常见 NotFound 文案（s3/baidupcs 等远程卷用自定义错误）。
-// 存在性判断模糊（非 nil 且非「不存在」）→ 返回 false：调用方把存在性检查失败当
-// 目标卷异常重试（fail-closed，防把未确认状态当不存在继续写而覆盖）。
+} // isFsNotFound 判断文件系统错误是否为「路径不存在」：仅接受标准库哨兵
+// （errors.Is os.ErrNotExist / fs.ErrNotExist）——卷 Stat 契约是「不存在返回 (nil,nil)」
+// （全仓统一，各卷已把 not-found 转 nil,nil），故非 nil 错误即真故障；**不靠文案子串
+// 匹配**（E-CRITICAL 修复：`no such host`/`not found` 等瞬态网络错误文案会被误判为
+// not-found → 降级路径把未确认状态当不存在继续写，静默覆盖既有文件）。存在性判断
+// 模糊（非 nil 且非哨兵）→ 返回 false：调用方 fail-closed 归目标卷异常重试。
 func isFsNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist) {
-		return true
-	}
-	msg := err.Error()
-	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "not found") || strings.Contains(lower, "notfound") ||
-		strings.Contains(lower, "no such") || strings.Contains(lower, "不存在")
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist)
 }
 
 // writeTargetUnique 以「目标唯一」语义写转存产物：卷实现 pkg/sync.WriteIfAbsent 时用其

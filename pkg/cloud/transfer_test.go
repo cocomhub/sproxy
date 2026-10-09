@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1349,5 +1350,30 @@ func TestVerifyByFileMeta_TrailingGarbage(t *testing.T) {
 		t.Fatal("D-MAJOR-1: 目标卷尾部追加垃圾（合法前缀+垃圾）应判卷静默损坏，原实现误判可信")
 	} else if !errors.Is(err, ErrTransferTarget) {
 		t.Fatalf("尾追加应归 ErrTransferTarget, got %v", err)
+	}
+}
+
+// TestIsFsNotFound_NoSubstringMatch E-CRITICAL 回归：瞬态网络错误文案含
+// "no such"/"not found" 不得被误判为 not-found（否则降级路径覆盖既有文件）。
+// 仅标准库哨兵（os.ErrNotExist/fs.ErrNotExist）判不存在。
+func TestIsFsNotFound_NoSubstringMatch(t *testing.T) {
+	t.Parallel()
+	// 标准库哨兵 → true。
+	if !isFsNotFound(os.ErrNotExist) || !isFsNotFound(fs.ErrNotExist) {
+		t.Fatal("os/fs.ErrNotExist 应判定不存在")
+	}
+	// 包装的 os.ErrNotExist（%w）→ true（errors.Is 沿链）。
+	if !isFsNotFound(fmt.Errorf("stat %s: %w", "x", os.ErrNotExist)) {
+		t.Fatal("包装 os.ErrNotExist 应判定不存在")
+	}
+	// 瞬态网络错误（文案含 no such/not found）→ false（fail-closed，归目标卷异常重试）。
+	for _, msg := range []string{"no such host", "dial tcp: lookup x not found", "404 Not Found 网络错误"} {
+		if isFsNotFound(fmt.Errorf("%s", msg)) {
+			t.Fatalf("瞬态网络错误 %q 不得误判为 not-found（防静默覆盖既有文件）", msg)
+		}
+	}
+	// nil → false。
+	if isFsNotFound(nil) {
+		t.Fatal("nil 不应判定不存在")
 	}
 }
