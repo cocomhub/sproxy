@@ -1505,7 +1505,11 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 		}
 	} else if refCount == 0 {
 		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
-		if res, handled, rmErr := s.removeOrSoftDelete(f, homeVol, rel, quarRel, info, input); handled {
+		// C-MAJOR-1 修复：软删（handled=true）也走统一后台收尾（checksum 台账/索引/
+		// 计量/事件）——原实现直接 return 跳过后台收尾，软删后 search 仍命中、台账仍
+		// 含该 rel（残留到再次写入）。这里改为软删成功后**不 return**，落入下方统一收尾
+		// （软删保留 meta 供恢复由 `if !input.SoftDelete` 门控——recovered 后仍可恢复）。
+		if res, handled, rmErr := s.removeOrSoftDelete(f, homeVol, rel, quarRel, info, input); handled && rmErr != nil {
 			return res, rmErr
 		}
 	}
@@ -1527,10 +1531,17 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	if !input.SoftDelete {
 		s.removeFileMeta(f, rel)
 	}
-	s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
-	f.logger.InfoContext(f.ctx, "文件已删除", "file_name", f.remotePath)
+	// C-MAJOR-1 修复：audit/logger 对软删跳过（removeOrSoftDelete 内已记「软删到回收站」）——
+	// 仅硬删在统一收尾记录，防重复审计行。
+	if !input.SoftDelete {
+		s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
+		f.logger.InfoContext(f.ctx, "文件已删除", "file_name", f.remotePath)
+	}
 	// 文件变更事件：delete 成功（幂等删除不推送——无实际变更）。
 	s.rt.publishFileEvent(EventDelete, f.owner, rel, 0)
+	if input.SoftDelete {
+		return DeleteFileResult{RemotePath: f.remotePath, Message: "文件已移入回收站"}, nil
+	}
 	return DeleteFileResult{RemotePath: f.remotePath, Message: fmt.Sprintf("文件删除成功: %s", f.remotePath)}, nil
 }
 

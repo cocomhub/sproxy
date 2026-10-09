@@ -263,3 +263,32 @@ func TestTrash_SoftDeleteRestore_Underscore(t *testing.T) {
 		t.Fatal("不得落到错位目录 a/b/c.txt")
 	}
 }
+
+// TestTrash_SoftDelete_CleansLedgerAndIndex C-MAJOR-1 回归：软删后 checksum 台账与
+// 搜索索引须同步移除（统一后台收尾）——原实现软删 handled=true 直接 return 跳过
+// csStore.Delete + index.remove，软删后 search 仍命中、台账仍含该 rel（残留到再写）。
+func TestTrash_SoftDelete_CleansLedgerAndIndex(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	env.enableWriteDefaults()
+	tnt := env.tenantFor("alice")
+	userAbs, _ := tnt.Root().Abs("user")
+	_ = os.MkdirAll(userAbs, 0o755)
+	_ = os.WriteFile(filepath.Join(userAbs, "a.txt"), []byte("ledger-clean"), 0o644)
+	cs := testutil.SHA256Hex([]byte("ledger-clean"))
+	if _, err := env.svc.WriteFile(context.Background(), WriteFileInput{
+		Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: cs, ClientSize: 11,
+	}, strings.NewReader("ledger-clean")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// 软删。
+	if _, err := env.svc.DeleteFile(context.Background(), DeleteFileInput{
+		Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: cs, SoftDelete: true,
+	}); err != nil {
+		t.Fatalf("DeleteFile soft: %v", err)
+	}
+	// checksum 台账不含该 rel（软删即不在 user 桶）。
+	if got, _ := env.checksum["alice"].Get("user/a.txt"); got != "" {
+		t.Fatal("软删后 checksum 台账应移除 user/a.txt（统一收尾）")
+	}
+}
