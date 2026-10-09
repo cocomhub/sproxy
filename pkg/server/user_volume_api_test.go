@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -220,5 +221,32 @@ func TestUserVolumeAPI_Delete_OwnerMismatch(t *testing.T) {
 	muxBob.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("bob DELETE alice-disk = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUserVolumeAPI_List_RedactsCredentials D-CRITICAL 回归：GET /api/volumes/user
+// 不得回显凭据（bduss/stoken/secret_key 等）——store.Get 已解密 Extra，列表响应须剔除
+// 凭据键（防 BDUSS 明文泄露到浏览器）。
+func TestUserVolumeAPI_List_RedactsCredentials(t *testing.T) {
+	t.Parallel()
+	h, _ := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+
+	postUserVolume(t, mux, map[string]any{
+		"name": "cred-disk", "type": userVolumeTestType,
+		"extra": map[string]any{"bduss": "secret-bduss", "baidu_root": "/x", "capacity": "1"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/volumes/user", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "secret-bduss") {
+		t.Fatalf("列表响应不得回显 BDUSS 明文: %s", body)
+	}
+	if !strings.Contains(body, "/x") {
+		t.Fatalf("非敏感配置（baidu_root）应保留: %s", body)
 	}
 }

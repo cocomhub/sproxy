@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -99,8 +100,47 @@ func (h *Handlers) listUserVolumesHandler(w http.ResponseWriter, r *http.Request
 				}
 			}
 		}
+		// 敏感信息防护（D-CRITICAL 修复）：store.Get 已把 ExtraEnc 解密回填 Extra——
+		// 直接序列化会把凭据（bduss/stoken/access_key/secret_key 等）明文回传给浏览器。
+		// 列表响应只暴露非敏感配置（root/capacity/binary_path），凭据键剔除。
+		vols[i].Extra = redactVolumeExtra(vols[i].Extra)
 	}
 	sendJSONResponse(w, userVolumesListResponse{Volumes: vols}, http.StatusOK)
+}
+
+// sensitiveVolumeExtraKeys 是卷 Extra 中的凭据/敏感键（回显时剔除）。
+var sensitiveVolumeExtraKeys = []string{
+	"bduss", "stoken", "ptoken", "cookies", "access_key_secret", "secret_key",
+	"access_key", "client_secret", "password", "token",
+}
+
+// redactVolumeExtra 剔除卷 Extra 中的凭据键（保留配置键如 root/local_root/binary_path/capacity）。
+// 防御纵深：即使 store 未加密（masterKey 为 nil 旧装配）也不把凭据回传。
+func redactVolumeExtra(extra map[string]any) map[string]any {
+	if len(extra) == 0 {
+		return extra
+	}
+	out := make(map[string]any, len(extra))
+	for k, v := range extra {
+		if isSensitiveVolumeKey(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// isSensitiveVolumeKey 判定卷 Extra 键是否为凭据（含 key/secret/password/token 形态）。
+func isSensitiveVolumeKey(k string) bool {
+	lk := strings.ToLower(k)
+	for _, sk := range sensitiveVolumeExtraKeys {
+		if lk == sk {
+			return true
+		}
+	}
+	return strings.Contains(lk, "secret") || strings.Contains(lk, "password") ||
+		strings.Contains(lk, "bduss") || strings.Contains(lk, "stoken") ||
+		strings.Contains(lk, "access_key")
 }
 
 // deleteUserVolumeHandler 处理 DELETE /api/volumes/user?name=<n>。
