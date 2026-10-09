@@ -420,7 +420,11 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	// → 下方删旧 sidecar → 每次上传 meta 恒缺失，verifyByFileMeta 恒回落流式（可信卷
 	// 分块校验在远程卷上静默失效）。
 	t.ensureMetaDir(ctx, meta.MetaPath(rel))
-	// meta 落盘（隐藏同目录 sidecar；占配额——经 inner.WriteFile 计入底层账本）。
+	// meta 落盘（隐藏同目录 sidecar）。配额口径（B-MAJOR 如实声明）：
+	//   - 本地卷：经 filesMetaPolicy 走 owner meta 桶子 Scope（TryReserve→Commit，占 owner 配额）；
+	//   - 外部卷（本装饰器路径）：meta 经 inner.WriteFile 计入**卷自身真实占用**——远程网盘
+	//     容量/配额由卷后端自管（超限 WriteFile 失败），不进入 owner 全局 Scope 预留
+	//     （外部卷上传 reserveVolume 只按主文件 size 预留；meta 字节由卷容量约束，合理）。
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		// meta 落盘失败：主文件已成功——不失败主写（meta 可下次读时补），记日志语义
 		// 由调用方/审计处理；此处返回主写成功（meta 缺失时 Stat 直算兜底）。
