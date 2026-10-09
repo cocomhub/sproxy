@@ -419,7 +419,40 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 		t.logMetaWarn("WriteFile", rel, werr)
 		return nil
 	}
+	// M5 修复（E-MAJOR-3）：meta 落盘成功后读回主文件交叉比对 TotalSHA256——主文件与
+	// meta 是两次独立原子写，云转存路径不经上层 fileLocks；并发写同 rel 时主文件与 meta
+	// 可能来自不同 writer（meta=A、主文件=B → 读路径按 A 分块校验 B 恒失配，永久固化）。
+	// 读回重算若与刚落盘的 fm 不一致（被并发覆盖）→ 删 meta（best-effort，退化 missing
+	// 直算兜底）而非固化错误 sidecar。
+	t.verifyWriteMeta(ctx, rel, fm)
 	return nil
+}
+
+// verifyWriteMeta 写后读回主文件交叉比对（M5/E-MAJOR-3）：重算 TotalSHA256 与刚落盘的
+// fm 比对——不一致（并发覆盖错位）→ 删 meta 退化 missing；一致或读回失败（并发删除等）
+// → 保留（读回失败不误删，主文件不可读时 meta 无害）。
+func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *meta.FileMeta) {
+	rc, oerr := t.inner.OpenRead(ctx, rel)
+	if oerr != nil {
+		return // 主文件不可读（并发删除等）→ 保留 meta（读路径直算兜底）
+	}
+	calc, cerr := meta.NewCalculator(fm.Size, fm.ChunkSize)
+	if cerr != nil {
+		rc.Close()
+		return
+	}
+	_, rerr := calc.ReadFrom(rc)
+	rc.Close()
+	if rerr != nil {
+		return
+	}
+	got := calc.Finish()
+	if got.TotalSHA256 != fm.TotalSHA256 {
+		// 主文件被并发覆盖（本次 meta 描述旧写流内容）→ 删 meta 退化 missing（直算兜底，
+		// 下次覆盖写自愈），不固化错误 sidecar。
+		_ = t.inner.Delete(ctx, meta.MetaPath(rel))
+		t.logMetaWarn("WriteFile-verify", rel, fmt.Errorf("meta 与主文件交叉比对不一致（并发覆盖错位），已删 sidecar"))
+	}
 }
 
 // Delete 删除文件 + 联动删除 .meta。
