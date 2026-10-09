@@ -407,6 +407,13 @@ func verifyByFileMeta(env *transferEnv) error {
 		// meta 读失败（sidecar 缺失/未启用）→ 回落流式（不误报损坏）。
 		return errNoProviderMeta
 	}
+	// M7a 修复：先 Validate FileMeta——装饰器内部已 Validate，但 Provider 接口不保证
+	// （非装饰卷/畸形 Provider 返回 c.Size<0 或 Offset 空洞 → CopyN 走错误路径）。
+	// 校验失败视为目标卷 meta 非法（ErrTransferTarget，非回落流式——畸形 meta 是卷
+	// 状态异常，可观测）。
+	if verr := meta.Validate(fm); verr != nil {
+		return fmt.Errorf("%w: 目标卷 meta 非法: %v", ErrTransferTarget, verr)
+	}
 	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
 	if rerr != nil {
 		return fmt.Errorf("%w: 读回分块校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
