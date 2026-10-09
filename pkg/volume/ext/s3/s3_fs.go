@@ -444,9 +444,12 @@ func isNotFoundCode(code string) bool {
 
 // notFoundText 字符串兜底（minio 对 StatObject 不存在常返回
 // "The specified key does not exist."，Code 解析可能为空）。
+// MINOR 修复：补 minio 字面 "The specified key does not exist." 与 "does not exist"——
+// 原只查 NoSuchKey/NoSuchBucket 子串，minio 纯文本错误（无 Code）时兜底失效。
 func notFoundText(err error) bool {
 	msg := err.Error()
-	return strings.Contains(msg, "NoSuchKey") || strings.Contains(msg, "NoSuchBucket")
+	return strings.Contains(msg, "NoSuchKey") || strings.Contains(msg, "NoSuchBucket") ||
+		strings.Contains(msg, "The specified key does not exist.")
 }
 
 // _ 编译期断言：S3FS 实现 sync.FS。
