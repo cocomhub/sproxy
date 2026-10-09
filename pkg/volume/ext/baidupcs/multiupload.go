@@ -49,11 +49,11 @@ func newBaiduMultiUpload(pcs *Client, targetPath string) *baiduMultiUpload {
 // 接口挂起（响应 body 无限等待）且分片间零连接复用（C-M2）。jar 参数保留兼容（实际
 // 复用 pcs client 已带 cookie jar）。
 func (u *baiduMultiUpload) uploadClient(jar http.CookieJar) *requester.HTTPClient {
-	c := u.pcs.PCS().GetClient()
-	if jar != nil {
-		c.SetCookiejar(jar) // 兼容调用方传入的 cookie jar（pcs 默认已带；显式设置不冲突）
-	}
-	return c
+	// D-MAJOR 修复：移除冗余 SetCookiejar——jar 即 client 自身 cookie jar（fork 库
+	// preparePCSHeader 传入的自赋值），并发分片下 SetCookiejar 无锁写 Jar 字段构成
+	// W/R 数据竞争（-race 必报）。pcs 默认已带 cookie jar，直接复用即可。
+	_ = jar // 兼容参数保留（无实际用途，显式忽略防 future jar 变化）
+	return u.pcs.PCS().GetClient()
 }
 
 // Precreate 上传前准备：与上游 PCSUpload.Precreate 同构。
