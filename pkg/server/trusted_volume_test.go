@@ -42,7 +42,7 @@ func newTrustedHandlers(t *testing.T, disable bool) (*Handlers, *syncpkg.LocalFS
 		t.Fatalf("AddExternalVolume: %v", err)
 	}
 	cfg := Default()
-	cfg.TrustedVolume.Disable = disable
+	cfg.TrustedVolume.SkipVerify = disable
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	return &Handlers{cfgPtr: &cfgPtr, volSet: vs}, inner
@@ -84,7 +84,8 @@ func TestExternalSinkFor_TrustedWrap(t *testing.T) {
 	}
 }
 
-// TestExternalSinkFor_Disabled  trusted_volume.disable=true → 不 Wrap：无 .meta（零回归）。
+// TestExternalSinkFor_Disabled  trusted_volume.skip_verify=true → 外部卷仍恒 Wrap：
+// meta 恒生成（用户裁定：只关校验不关 meta）——sidecar 照落，仅读侧校验放宽。
 func TestExternalSinkFor_Disabled(t *testing.T) {
 	t.Parallel()
 	h, inner := newTrustedHandlers(t, true)
@@ -97,52 +98,54 @@ func TestExternalSinkFor_Disabled(t *testing.T) {
 	if err := sink.WriteFile(ctx, "user/plain.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("sink.WriteFile: %v", err)
 	}
-	if e, err := inner.Stat(ctx, "alice/user/plain.bin.meta"); err != nil || e != nil {
-		t.Fatalf("disable 下不应生成 .meta: %v %v", e, err)
+	// skip_verify=true 不关 meta 生成——外部卷恒 Wrap，sidecar 照落（写侧完整性证据必在）。
+	if e, err := inner.Stat(ctx, "alice/meta/plain.bin.meta"); err != nil || e == nil {
+		t.Fatalf("skip_verify 下 meta 仍应生成（只关校验不关 meta）: %v %v", e, err)
 	}
 }
 
-// TestTrustedDisabled 开关读取：缺省 false（功能默认启用），显式 true 关闭。
+// TestTrustedDisabled 开关读取：缺省 false（校验开启=默认可信行为），显式 true 跳过校验。
 func TestTrustedDisabled(t *testing.T) {
 	t.Parallel()
-	// 缺省 Default()：TrustedVolume.Disable 零值 false。
+	// 缺省 Default()：TrustedVolume.SkipVerify 零值 false。
 	h := &Handlers{}
 	cfg := Default()
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	h.cfgPtr = &cfgPtr
-	if h.trustedDisabled() {
-		t.Fatal("缺省 trusted_volume.disable 应为 false（功能默认启用）")
+	if h.verifySkipped() {
+		t.Fatal("缺省 trusted_volume.skip_verify 应为 false（校验开启=默认可信行为）")
 	}
 	cfg2 := Default()
-	cfg2.TrustedVolume.Disable = true
+	cfg2.TrustedVolume.SkipVerify = true
 	cfgPtr.Store(cfg2)
-	if !h.trustedDisabled() {
-		t.Fatal("显式 disable=true 应报告关闭")
+	if !h.verifySkipped() {
+		t.Fatal("显式 skip_verify=true 应报告跳过校验")
 	}
 }
 
-// TestDelete_AfterDisable_CleansLegacyMeta C5 回归：enable 期上传生成 sidecar →
-// 切 trusted_volume.disable=true → 删除主文件 → 存量 sidecar 仍被清理（disable 只停
-// 新建不停清理，防孤儿 sidecar + owner meta 桶配额永久泄漏）。
-func TestDelete_AfterDisable_CleansLegacyMeta(t *testing.T) {
+// TestDelete_AfterSkipVerify_CleansLegacyMeta 回归：enable 期上传生成 sidecar →
+// 切 trusted_volume.skip_verify=true（只关校验不关 meta，删除联动仍清理）→ 删除
+// 主文件 → 存量 sidecar 仍被清理（清理恒生效，防孤儿 sidecar + owner meta 桶配额
+// 永久泄漏）。
+func TestDelete_AfterSkipVerify_CleansLegacyMeta(t *testing.T) {
 	t.Parallel()
-	url, cfgPtr := newTestServerWithAllRoutes(t, nil) // 缺省 disable=false
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil) // 缺省 skip_verify=false
 	base := cfgPtr.Load().StorageRoot
 
-	// enable 期上传 → sidecar 生成。
+	// 上传 → sidecar 生成。
 	if code, resp := postUpload(url, "legacy.bin", []byte("legacy-content")); code != http.StatusOK {
-		t.Fatalf("enable 上传应 200, got %d: %s", code, resp)
+		t.Fatalf("上传应 200, got %d: %s", code, resp)
 	}
 	metaPath := filepath.Join(base, "anonymous", "meta", "legacy.bin.meta")
 	if _, err := os.Stat(metaPath); err != nil {
-		t.Fatalf("enable 上传应生成 sidecar: %v", err)
+		t.Fatalf("上传应生成 sidecar: %v", err)
 	}
-	// 切 disable。
+	// 切 skip_verify。
 	cfg := cfgPtr.Load()
-	cfg.TrustedVolume.Disable = true
+	cfg.TrustedVolume.SkipVerify = true
 	cfgPtr.Store(cfg)
-	// 删除主文件 → sidecar 应被清理（C5：不闸 fileMetaEnabled）。
+	// 删除主文件 → sidecar 应被清理（清理恒生效，与 skip_verify 无关）。
 	if code := postDelete(url, "legacy.bin", []byte("legacy-content")); code != http.StatusOK {
 		t.Fatalf("删除应 200, got %d", code)
 	}

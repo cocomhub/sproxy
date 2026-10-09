@@ -151,6 +151,10 @@ type CloudDownloadConfig struct {
 	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验
 	// 标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
 	MaxCheckMemBytes sizex.ByteSize
+	// SkipVerify 跳过转存写后读侧校验（trusted_volume.skip_verify 接线；缺省 false =
+	// 校验开启——默认可信行为）。**只关读侧校验，不关 meta 生成/桶隔离**（meta 恒生成、
+	// 凭据保护恒生效；skip_verify 仅放宽读侧下载校验，极端性能场景）。
+	SkipVerify bool
 	// ExitDial 是下载器出站拨号函数注入（装配层构造）：nil = 默认直连。
 	// 非 nil 时覆写下载器 http.Transport.DialContext（本地直连优先 → 失败回退经 mesh 出口）。
 	// 领域包不依赖 mesh（R1 分层）——函数字段注入解耦，对齐 downloader 的 httpClient 注入模式。

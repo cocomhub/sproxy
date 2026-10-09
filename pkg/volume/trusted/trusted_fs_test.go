@@ -184,18 +184,19 @@ func TestRename_MovesMeta(t *testing.T) {
 	}
 }
 
-// TestDisableMetaFile 关闭 meta 落盘（纯校验读取可用）。
-func TestDisableMetaFile(t *testing.T) {
+// TestMetaAlwaysGenerated 用户裁定：meta 恒生成（只能关校验、不能关 meta——sidecar
+// 是完整性证据，写入路径必落；装饰器 Options 无 SkipMeta 开关）。
+func TestMetaAlwaysGenerated(t *testing.T) {
 	t.Parallel()
 	inner := newInner(t)
-	tv := Wrap(inner, Options{DisableMetaFile: true})
+	tv := Wrap(inner, Options{})
 	ctx := context.Background()
-	data := []byte("no meta")
+	data := []byte("meta always")
 	if err := tv.WriteFile(ctx, "n.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if e, err := inner.Stat(ctx, "n.bin.meta"); err != nil || e != nil {
-		t.Fatalf("DisableMetaFile 下不应落 meta: %v %v", e, err)
+	if e, err := inner.Stat(ctx, "n.bin.meta"); err != nil || e == nil {
+		t.Fatalf("meta 应恒生成（默认落盘）: %v %v", e, err)
 	}
 }
 

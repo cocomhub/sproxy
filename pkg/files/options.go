@@ -426,10 +426,10 @@ func WithContentIndex(enabled bool) Option {
 // FileMetaPolicy 是**可信卷 meta 能力**（用户裁定 2026-10-07：本地卷上传到达即建
 // meta——新文件到达系统立刻计算 sha256/md5（含分块）并创建配套 .meta 文件，隐藏
 // 占配额）。默认：未装配（零回归，不落 .meta）。装配层（pkg/server）注入实现
-// （经 trusted_volume.disable 开关控制；secretdata 等自带 Provider 的卷不在本地
-// 写路径）。
+// （meta 恒生成——skip_verify 只关读侧校验不关 meta；secretdata 等自带 Provider 的卷
+// 不在本地写路径）。
 type FileMetaPolicy interface {
-	// Enabled 返回是否写入 FileMeta sidecar（trusted_volume.disable 缺省 false）。
+	// Enabled 恒 true（meta 恒生成；装配层注入即生效）。
 	Enabled() bool
 	// WriteMeta 在文件落盘成功后生成并写入配套 .meta（隐藏、占配额）。实现方负责
 	// 计算 FileMeta（从已落盘文件计算总/分块 sha256+md5）与失败兜底（读路径直算）。

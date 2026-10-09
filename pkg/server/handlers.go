@@ -45,10 +45,15 @@ import (
 
 // Handlers 持有所有 HTTP handler 的依赖。
 type Handlers struct {
-	cfgPtr        *atomic.Pointer[Config]
-	version       string
-	buildAt       string
-	tunnelHandler http.Handler
+	cfgPtr *atomic.Pointer[Config]
+	// skipFileMetaAssembly 是测试隔离开关（AGENTS.md 7b：测试注入走结构体内部私有
+	// 变量）：存量语义测试用 newAssemblyTestHandlers 置 true 跳过 filesMetaPolicy 装配
+	// （meta 不生成，配额/统计/账本断言不被 sidecar 字节干扰）。生产恒 false——
+	// meta 恒生成（用户裁定：只关校验不关 meta）。
+	skipFileMetaAssembly bool
+	version              string
+	buildAt              string
+	tunnelHandler        http.Handler
 	// removeMovedSource 是 move 删源实现（nil = 默认 storage.Root.Remove）。**测试注入
 	// opt（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam）**：RegisterRoutes
 	// 构造时经 opts.RemoveMovedSource 注入实例字段，运行期不可变（无包级 seam 并发替换）。
@@ -414,7 +419,13 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithEventSink(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 			files.WithBandwidthLimiter(rt),
-			files.WithFileMeta(filesMetaPolicy{h: h}),
+		}
+		// meta 恒生成（用户裁定：只关校验不关 meta）——fileMetaPolicy 恒装配。
+		// skipFileMetaAssembly 是测试隔离开关（AGENTS.md 7b：测试注入走结构体内部私有
+		// 变量；存量语义测试用 newAssemblyTestHandlers 置 true 跳过 meta 装配，避免
+		// 配额/统计/账本断言被 sidecar 字节干扰；生产恒 false 装配 meta 策略）。
+		if !h.skipFileMetaAssembly {
+			opts = append(opts, files.WithFileMeta(filesMetaPolicy{h: h}))
 		}
 		if h.metrics != nil {
 			opts = append(opts, files.WithMetrics(h.metrics))

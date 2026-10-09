@@ -1073,23 +1073,23 @@ type Config struct {
 	CloudArchiveMaxBytes int64 `yaml:"cloud_archive_max_bytes" mapstructure:"cloud_archive_max_bytes"`
 
 	// TrustedVolume 是可信卷配置（trusted_volume 段，2026-10-07 新增）：
-	//   - Disable 缺省 false = 外部卷上传/转存默认包 TrustedVolumeFS 装饰器（写后生成
-	//     隐藏 .meta 文件、按 FileMeta 总哈希+分块哈希逐分片校验），解决跨信任边界
-	//     的静默损坏；true = 显式关闭（零回归，外部卷不落 meta）。
-	//   - DisableDoubleDownloadVerify 缺省 false = 源无权威 checksum 且跨第三方信任
-	//     边界时启用双下比对构造一致 meta；true = 跳过（大文件/流量贵场景读回懒校验
-	//     兜底）。
+	//   - SkipVerify 缺省 false = 外部卷上传/转存默认包 TrustedVolumeFS 装饰器（写后
+	//     生成隐藏 .meta 文件、按 FileMeta 总哈希+分块哈希逐分片校验）——**默认即可信
+	//     行为（安全可靠）**；true = 跳过下载数据校验（显式放宽，仅极端性能场景）。
+	//     meta 生成恒在（只关校验，不关 meta——桶隔离/凭据保护不随本字段变化）。
 	TrustedVolume TrustedVolumeConfig `yaml:"trusted_volume" mapstructure:"trusted_volume"`
 
 	// Pikpak 是 PikPak 网盘中转后端配置（分享转存 + 官方 CLI 完整下载）。
 	Pikpak PikpakConfig `yaml:"pikpak" mapstructure:"pikpak"`
 }
 
-// TrustedVolumeConfig 是可信卷配置（默认全关零回归；Disable 语义为「显式禁用」简化
-// 默认配置管理——用户裁定 DisableXxx 默认 false = 功能默认打开）。
+// TrustedVolumeConfig 是可信卷配置（SkipVerify 语义为「显式跳过下载校验」——默认
+// false = 校验开启，可信行为默认安全可靠；true = 显式放宽）。
 type TrustedVolumeConfig struct {
-	// Disable 缺省 false = 可信卷默认启用（外部卷写后落 meta + 校验）；true = 显式关闭。
-	Disable bool `yaml:"disable" mapstructure:"disable"`
+	// SkipVerify 缺省 false = 下载数据校验开启（默认可信行为：读侧按 FileMeta 逐分块
+	// 校验，静默损坏 fail-closed）；true = 跳过下载数据校验（显式放宽——仅极端性能/无
+	// 校验需求场景）。**meta 生成恒在**：本字段只关校验不关 meta 生成/桶隔离。
+	SkipVerify bool `yaml:"skip_verify" mapstructure:"skip_verify"`
 	// ChunkSize 分块校验大小（缺省 0 = 按文件大小自适应 ChunkSizeForSize；显式设置固定
 	// 分块粒度，sizex.ByteSize 字节配置——C-MAJOR-4：Options.ChunkSize 接线到配置）。
 	ChunkSize ByteSize `yaml:"chunk_size" mapstructure:"chunk_size"`

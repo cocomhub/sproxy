@@ -355,7 +355,12 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 // secretdata）时，读回其 FileMeta 做**分块级校验**（Calculator 流式重算 TotalSHA256 +
 // 逐分块 SHA256，与写侧落盘 meta 比对——跨信任边界静默损坏逐分块定位）；无 Provider
 // 回落整文件流式 sha256 对 result.Checksum。抽离 transferOnce 以控制 gocognit。
+// skip_verify 时跳过整个读侧校验（用户裁定：只关校验不关 meta——meta 恒生成，本处仅
+// 放宽读侧比对，极端性能场景）。
 func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
+	if m.config.SkipVerify {
+		return nil // 显式跳过读侧校验（meta 恒生成，仅校验放宽）
+	}
 	// E-m1 修复：Checksum=="" 门禁只对**流式回落**有意义（比对基准是 result.Checksum）；
 	// verifyByFileMeta 比对的完全是卷内 meta（与源 checksum 无关），无 checksum 下载器
 	// 转存到可信卷时也应执行写完整性校验。门禁下移到流式分支。

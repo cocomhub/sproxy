@@ -498,12 +498,10 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// 远程性判定不在装配层：目标 FS 自述（syncpkg.LocalVolume 能力接口，transfer.go
 			// 查询）——外部卷零配置（未实现默认远程），内部/封装卷实现 IsLocalVolume()
 			// 自述（用户裁定 2026-10-05：不靠类型名硬编码，层层委派）。
-			// 可信卷（trusted_volume.disable 缺省 false）：外部卷 FS 经 trusted.Wrap 包一层，
-			// 转存写后自动生成隐藏 .meta（FileMeta 总/分块 sha256+md5）——目标成为可信卷。
+			// 可信卷：外部卷 FS 恒经 trusted.Wrap 包一层（用户裁定：meta 恒生成——skip_verify
+			// 只关读侧校验不关 meta；转存写后自动生成隐藏 .meta，目标成为可信卷）。
 			fsys := be.FS()
-			if !h.trustedDisabled() {
-				fsys = trusted.Wrap(fsys, h.trustedWrapOpts())
-			}
+			fsys = trusted.Wrap(fsys, h.trustedWrapOpts())
 			return fsys, registry.SchemeOf(vol.Type), shared
 		},
 		// VolumeFor：转存键空间经 volume.ResolveLocation 计算（权限门/路径安全/共享前缀

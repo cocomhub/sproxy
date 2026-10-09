@@ -347,16 +347,13 @@ func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key str
 // files.Service，故此处补「到达即建」——与上传 writeFileSettle 同源）。失败 Warn 兜底
 // （读路径直算），不阻断对象写入成功。
 func (h *Handlers) s3WriteMetaAfter(r *http.Request, owner string, root *storage.Root, rel string) {
-	if h.trustedDisabled() {
-		return // disable 只停新建（存量清理仍走删除联动）
-	}
 	if mErr := (filesMetaPolicy{h: h}).WriteMeta(r.Context(), owner, root, rel); mErr != nil {
 		h.logger.Warn("s3 写后 meta 落盘失败（读路径直算兜底）", "key", rel, "error", mErr)
 	}
 }
 
 // s3DeleteMetaAfter 在 s3 DELETE 成功后清理配套 meta（防孤儿 + 释放 meta 桶配额）。
-// 不闸 trustedDisabled——disable 只停新建不停清理（C5 语义与 files.Service 一致）。
+// 清理恒生效（只关校验不关 meta——存量 sidecar 删除联动仍清，与 files.Service 一致）。
 // m4 修复：一并清理同目录旧 meta tmp 孤儿（sweepMetaTmp——文件删除后孤儿常驻，
 // 下次写同 rel 才 sweep；删除路径也自愈）。
 func (h *Handlers) s3DeleteMetaAfter(r *http.Request, owner string, root *storage.Root, rel string) {

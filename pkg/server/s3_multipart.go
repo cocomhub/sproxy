@@ -396,10 +396,8 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	_ = plan.root.Remove(chunkPrefix + multipartPartPrefix + plan.uploadID + ".meta")
 	// M1 修复：multipart complete 是本地旁路写（root 直写不经 files.Service）——补
 	// 「到达即建」meta（与单次 s3 PUT/上传一致）；失败 Warn 兜底不阻断成功响应。
-	if !h.trustedDisabled() {
-		if mErr := (filesMetaPolicy{h: h}).WriteMeta(r.Context(), plan.owner, plan.root, plan.rel); mErr != nil {
-			h.logger.Warn("s3 multipart 写后 meta 落盘失败（读路径直算兜底）", "key", key, "error", mErr)
-		}
+	if mErr := (filesMetaPolicy{h: h}).WriteMeta(r.Context(), plan.owner, plan.root, plan.rel); mErr != nil {
+		h.logger.Warn("s3 multipart 写后 meta 落盘失败（读路径直算兜底）", "key", key, "error", mErr)
 	}
 	// 响应：Key（XML 转义防注入）+ 复合 ETag（S3 分块标准形态，可选增强；哈希已在循环内）。
 	w.Header().Set(headerContentType, "application/xml")

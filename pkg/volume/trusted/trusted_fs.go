@@ -27,8 +27,6 @@ import (
 type Options struct {
 	// ChunkSize 分块校验大小（<=0 = 按文件大小自适应 ChunkSizeForSize）。
 	ChunkSize int64
-	// DisableMetaFile 禁写 .meta sidecar（纯校验读取仍可用；默认 false = 落 meta）。
-	DisableMetaFile bool
 	// Extra 是写入 meta 的自定义扩展信息（创建人/email 等任意数据）。
 	Extra map[string]any
 	// Logger 是 meta 落盘/校验失败的可观测日志器（C-MAJOR-7；nil = 静默——默认装配
@@ -177,10 +175,8 @@ func (t *TrustedVolumeFS) WriteIfAbsent(ctx context.Context, path string, r io.R
 // writeMetaAfter 在写成功路径补建 meta sidecar（WriteIfAbsent 首写专用；WriteFile
 // 已内嵌流式计算）。从已落盘文件读回计算（与 filesMetaPolicy.computeMeta 同语义）。
 // 失败静默（与 WriteFile meta 落盘失败吞错同语义——meta 缺失读路径直算兜底）。
+// meta 恒生成（用户裁定：只关校验不关 meta——sidecar 是完整性证据，写入路径必落）。
 func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size int64) {
-	if t.opts.DisableMetaFile {
-		return
-	}
 	// C2 修复：与 WriteFile 共用 chunkSizeFor（含 minMetaChunkSize 钳制）——原实现只用
 	// <=0 默认，配置 ChunkSize=1B + 大文件 → 10 亿 ChunkMeta OOM/爆配额。
 	chunkSize := t.chunkSizeFor(size)
@@ -372,10 +368,8 @@ func (t *TrustedVolumeFS) chunkSizeFor(size int64) int64 {
 // minMetaChunkSize（1MiB）保 chunk 数上限；同时按 size 自适应的上限天然（ChunkSizeForSize
 // 最大 32MiB）不设额外上限。
 func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
-	if t.opts.DisableMetaFile {
-		return t.inner.WriteFile(ctx, rel, r, size, mtime)
-	}
-	// 计算 meta：读一遍流（同时喂给 inner 写）。
+	// 计算 meta：读一遍流（同时喂给 inner 写）。meta 恒生成（用户裁定：只关校验不关
+	// meta——桶隔离/凭据保护不随校验开关变化）。
 	chunkSize := t.chunkSizeFor(size)
 	calc, err := meta.NewCalculator(size, chunkSize)
 	if err != nil {

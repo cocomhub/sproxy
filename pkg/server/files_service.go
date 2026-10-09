@@ -271,7 +271,8 @@ func toFilesHTTPError(err error) error {
 }
 
 // filesMetaPolicy 实现 files.FileMetaPolicy（可信卷 meta 能力装配）：本地卷上传
-// 到达即建配套 .meta（隐藏、占配额）。由 trusted_volume.disable 开关控制
+// 到达即建配套 .meta（隐藏、占配额）。meta 恒生成（用户裁定：只关校验不关 meta——
+// skip_verify 只放宽读侧校验）。
 // （缺省 false = 启用）。WriteMeta 从已落盘文件计算 FileMeta（总/分块 sha256+md5）
 // 并原子写 `.meta` sidecar 到 **meta 功能桶**（`meta/<rel>.meta`，移出 user/ 桶——
 // 用户裁定 2026-10-07：杜绝与用户真实 `.meta` 文件名冲突），配额记入 owner 的
@@ -280,8 +281,9 @@ type filesMetaPolicy struct{ h *Handlers }
 
 var _ files.FileMetaPolicy = filesMetaPolicy{}
 
-// Enabled 报告可信卷 meta 是否启用（trusted_volume.disable 缺省 false）。
-func (p filesMetaPolicy) Enabled() bool { return !p.h.trustedDisabled() }
+// Enabled 恒 true（用户裁定：meta 恒生成——只关校验不关 meta；sidecar 是完整性证据，
+// 写入路径必落。skip_verify 只关读侧校验，不关本写侧 meta 生成）。
+func (p filesMetaPolicy) Enabled() bool { return true }
 
 // WriteMeta 计算并写入配套 .meta（本地卷上传到达即建；失败返回错误由调用方 Warn 兜底，
 // 读路径 Stat 直算不依赖 meta 存在）。

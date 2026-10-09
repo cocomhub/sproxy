@@ -573,7 +573,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 // externalSinkFor 返回外部卷的写入源（External FS 包装为 files.UploadSink）；
 // 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。持卷描述（ResolveLocation
 // 按共享性自动适配 owner 前缀——评审 M3 + 用户裁定统一入口）。
-// 可信卷（trusted_volume.disable 缺省 false）：外部卷 FS 经 trusted.Wrap 包一层——
+// 可信卷：外部卷 FS 恒经 trusted.Wrap 包一层（meta 恒生成，skip_verify 只关读侧校验）。
 // 写路径自动生成隐藏 .meta（FileMeta 总/分块 sha256+md5），上传/转存目标成为可信卷。
 func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if h.volSet == nil {
@@ -591,9 +591,7 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if !ok {
 		return nil
 	}
-	if !h.trustedDisabled() {
-		fsys = trusted.Wrap(fsys, h.trustedWrapOpts())
-	}
+	fsys = trusted.Wrap(fsys, h.trustedWrapOpts())
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
 }
 
@@ -607,13 +605,15 @@ func (h *Handlers) trustedWrapOpts() trusted.Options {
 	}
 }
 
-// trustedDisabled 报告可信卷是否显式禁用（trusted_volume.disable；缺省 false = 启用）。
-func (h *Handlers) trustedDisabled() bool {
+// verifySkipped 报告是否跳过下载数据校验（trusted_volume.skip_verify；缺省 false =
+// 校验开启——默认可信行为）。**只关校验，不关 meta 生成/桶隔离**（meta 恒生成、凭据
+// 保护恒生效；skip_verify 仅放宽读侧下载校验，极端性能场景）。
+func (h *Handlers) verifySkipped() bool {
 	if h.cfgPtr == nil {
 		return false
 	}
 	if cfg := h.cfgPtr.Load(); cfg != nil {
-		return cfg.TrustedVolume.Disable
+		return cfg.TrustedVolume.SkipVerify
 	}
 	return false
 }
