@@ -256,3 +256,37 @@ func writeTemp(t *testing.T, data []byte) string {
 	}
 	return p
 }
+
+// TestValidate_ChunkCountCap 分块数超上限拒绝（防 O(n) 内存 DoS）。
+func TestValidate_ChunkCountCap(t *testing.T) {
+	t.Parallel()
+	m := &FileMeta{Version: metaVersion, Size: 1 << 20, TotalSHA256: strings.Repeat("a", 64), ChunkSize: 1 << 20}
+	m.Chunks = make([]ChunkMeta, maxMetaChunks+1)
+	if err := Validate(m); err == nil {
+		t.Fatal("分块数超上限应拒绝")
+	}
+}
+
+// TestValidate_ChunkOverflow 分块覆盖和溢出 Size 拒绝。
+func TestValidate_ChunkOverflow(t *testing.T) {
+	t.Parallel()
+	m := &FileMeta{Version: metaVersion, Size: 4, TotalSHA256: strings.Repeat("a", 64), ChunkSize: 4,
+		Chunks: []ChunkMeta{{Index: 0, Offset: 0, Size: 8, SHA256: "x"}}}
+	if err := Validate(m); err == nil {
+		t.Fatal("分块覆盖和大于 Size 应拒绝")
+	}
+}
+
+// TestResolveChunkSize_UpperClamp 配置过大 chunk_size 钳到 32MiB 上界（防逐块校验静默退化）。
+func TestResolveChunkSize_UpperClamp(t *testing.T) {
+	t.Parallel()
+	if got := ResolveChunkSize(8<<30, 1<<30); got != MaxMetaChunkSize {
+		t.Fatalf("ResolveChunkSize(8GiB) = %d, want %d", got, MaxMetaChunkSize)
+	}
+	if got := ResolveChunkSize(0, 1<<30); got != ChunkSizeForSize(1<<30) {
+		t.Fatalf("0 应自适应: got %d", got)
+	}
+	if got := ResolveChunkSize(1<<20, 1<<30); got != 1<<20 {
+		t.Fatalf("合法值应保留: got %d", got)
+	}
+}

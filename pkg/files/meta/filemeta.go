@@ -23,6 +23,10 @@ import (
 // metaVersion 是 FileMeta 结构版本。
 const metaVersion = 1
 
+// maxMetaChunks 是 FileMeta 分块数上限（防恶意/损坏 meta 的 O(n) 内存 DoS；
+// 32MiB 块下 1e6 块 = 32TiB，远超实际）。
+const maxMetaChunks = 1 << 20
+
 // ChunkMeta 是单个分块的校验元信息（偏移 + 大小 + sha256 + md5 双算法）。
 type ChunkMeta struct {
 	Index  int    `json:"index"`
@@ -106,6 +110,10 @@ func validateHeader(m *FileMeta) error {
 	if m.ChunkSize <= 0 {
 		return fmt.Errorf("meta: 分块大小非法 %d", m.ChunkSize)
 	}
+	// 分块数上限（防恶意/损坏 meta 的 O(n) 内存与 DoS；正常文件 32MiB 块下 1e6 块 = 32TiB）。
+	if len(m.Chunks) > maxMetaChunks {
+		return fmt.Errorf("meta: 分块数 %d 超上限 %d", len(m.Chunks), maxMetaChunks)
+	}
 	return nil
 }
 
@@ -125,6 +133,10 @@ func validateChunkCoverage(m *FileMeta) error {
 		}
 		if c.SHA256 == "" {
 			return fmt.Errorf("meta: 分块 %d 缺失 SHA-256", i)
+		}
+		// 累加溢出防御：分块覆盖和不得超过 Size（否则 cur 回绕可能使后续 offset 判定失真）。
+		if c.Size > m.Size-cur {
+			return fmt.Errorf("meta: 分块 %d 覆盖和超出 Size %d", i, m.Size)
 		}
 		cur += c.Size
 	}
@@ -181,6 +193,11 @@ func ChunkSizeForSize(size int64) int64 {
 // 写侧（本地卷 filesMetaPolicy / 外部卷 trusted 装饰器）共用该下界。
 const MinMetaChunkSize = 1 << 20
 
+// MaxMetaChunkSize 是可信卷分块大小上界（32MiB）：配置过大 chunk_size（如 8GiB）时
+// 钳到上界——否则逐分块校验退化为整文件级、且 Range/分块请求全不校验（静默安全降级，
+// 与文档「自适应 1MiB~32MiB」口径一致；P3 对抗评审）。
+const MaxMetaChunkSize = 32 << 20
+
 // ResolveChunkSize 按配置值 + 文件大小解析分块大小：配置 <=0 → 按大小自适应
 // （ChunkSizeForSize）；配置 < MinMetaChunkSize → 钳到下界；否则用配置值。
 // 本地卷与外部卷装饰器共用同一口径（防两处实现漂移）。
@@ -190,6 +207,9 @@ func ResolveChunkSize(configured, size int64) int64 {
 	}
 	if configured < MinMetaChunkSize {
 		return MinMetaChunkSize
+	}
+	if configured > MaxMetaChunkSize {
+		return MaxMetaChunkSize
 	}
 	return configured
 }

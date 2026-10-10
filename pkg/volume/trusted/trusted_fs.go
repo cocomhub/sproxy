@@ -547,9 +547,12 @@ func (t *TrustedVolumeFS) isLocal() bool {
 // Delete 删除文件 + 联动删除 .meta。
 func (t *TrustedVolumeFS) Delete(ctx context.Context, rel string) error {
 	err := t.inner.Delete(ctx, rel)
-	// 联动 meta（best-effort：主文件删除为主，meta 残留由 GC/Stat 兜底忽略）。
+	if err != nil {
+		return err // 主文件删除失败（仍在）：不得删 sidecar（否则文件在但永久失证据）
+	}
+	// 仅主文件确实删除后才联动 meta（best-effort：meta 残留由 GC/Stat 兜底忽略）。
 	_ = t.inner.Delete(ctx, meta.MetaPath(rel))
-	return err
+	return nil
 }
 
 // Rename 重命名/移动 + 联动 .meta。目标父目录自动创建（与 WriteFile 行为一致——
