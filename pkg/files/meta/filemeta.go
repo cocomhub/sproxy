@@ -209,6 +209,7 @@ type Provider interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命
 const metaSuffix = ".meta"
 
 // IsMetaName 判定文件名/路径是否为 FileMeta sidecar（`.meta` 后缀）。
+// **预留**：当前无生产调用（隐藏过滤走 IsMetaPath 结构解析）；保留供显式识别 sidecar 名。
 // 注：sidecar 已独立 meta 桶，user 桶内用户真实 `.meta` 文件合法可见——本判定仅供
 // 显式识别 sidecar 名（如删除/移动联动），**不用于列表/搜索隐藏过滤**（隐藏过滤走
 // IsMetaPath 结构解析，防误判用户目录）。
@@ -251,6 +252,8 @@ func sanitizeName(name string) string {
 }
 
 // FromFile 计算本地文件的完整 FileMeta（双算法整文件 + 分块）。
+// **预留**：当前无生产调用（写侧从流计算、本地卷经 filesMetaPolicy.computeMeta）；
+// 保留供离线/工具场景。
 // chunkSize <= 0 时按 ChunkSizeForSize 自适应。mtime/ctime 取自文件 stat。
 func FromFile(path string, chunkSize int64, extra map[string]any) (*FileMeta, error) {
 	f, err := os.Open(path)

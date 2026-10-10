@@ -157,6 +157,7 @@ func (c *Calculator) Finish() *FileMeta {
 }
 
 // WrapReader 封装 reader 为"读写时顺便计算"的流：读取数据经流的同时累计 meta 哈希。
+// **预留**：当前无生产调用（写侧以 io.TeeReader 内联计算）；保留供流式读时累计复用。
 // 返回的 reader 关闭时可通过 Calc() 取计算器（Finish 由调用方决定时机）。
 type metaReader struct {
 	inner io.Reader

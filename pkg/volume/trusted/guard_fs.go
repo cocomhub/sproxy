@@ -49,6 +49,7 @@ func Guard(inner syncpkg.FS) *MetaBucketGuard {
 }
 
 // Inner 返回被守卫的底层 FS（受控装配/能力透传取用）。
+// **预留逃生口**：当前无调用（能力已由守卫透传）；保留供受控装配直接触达 inner。
 func (g *MetaBucketGuard) Inner() syncpkg.FS { return g.inner }
 
 // guardPath 判定路径是否触达 meta 桶（fail-closed 拒绝）。owner 前缀共享卷经

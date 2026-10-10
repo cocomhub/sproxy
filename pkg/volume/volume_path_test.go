@@ -221,6 +221,27 @@ func TestBucketOf_NoBucket(t *testing.T) {
 	}
 }
 
+// TestBucketOf_CaseInsensitiveCanonical 桶名大小写不敏感：`META/` 等变体仍识别为
+// meta 桶并归一小写返回（macOS/Windows 大小写不敏感文件系统上 `META/` 与 `meta/` 同目录）。
+func TestBucketOf_CaseInsensitiveCanonical(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		key, bucket, rest string
+	}{
+		{"META/x.meta", "meta", "x.meta"},
+		{"Meta/x", "meta", "x"},
+		{"alice/META/x", "meta", "x"},
+		{"alice/User/x", "user", "x"},
+		{"TRASH/a", "trash", "a"},
+	}
+	for _, tc := range cases {
+		b, rest, ok := BucketOf(tc.key)
+		if !ok || b != tc.bucket || rest != tc.rest {
+			t.Errorf("BucketOf(%q) = (%q,%q,%v), want (%q,%q,true)", tc.key, b, rest, ok, tc.bucket, tc.rest)
+		}
+	}
+}
+
 // TestRebucketTo_UserToMeta 换桶：user → meta，独享/共享前缀/用户目录同名段均正确。
 func TestRebucketTo_UserToMeta(t *testing.T) {
 	t.Parallel()

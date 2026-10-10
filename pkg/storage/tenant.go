@@ -6,7 +6,6 @@ package storage
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 )
 
@@ -106,15 +105,22 @@ func (t *Tenant) FeatureRel(bucket, sub string) (string, bool) {
 	return bucket + "/" + normalized, true
 }
 
-// isValidBucket 判断 bucket 是否在功能桶白名单内。
+// isValidBucket 判断 bucket 是否在功能桶白名单内（大小写不敏感，与 IsReservedBucketName 同口径）。
 func isValidBucket(bucket string) bool {
-	return slices.Contains(featureBuckets, bucket)
+	return IsReservedBucketName(bucket)
 }
 
 // IsReservedBucketName 报告 name 是否为内部保留功能桶名（user/meta/cloud/archive/
 // chunk/version/trash）。**用户裁定 2026-10-07：owner 注册须拒绝保留桶名**——
 // 否则租户根顶层 `<owner>/user/...` 与桶路径 `user/...` 歧义（桶解析靠首段/次段
 // 结构消歧，owner=user 会撞车）。导出供装配层/注册校验复用。
+// **2026-10-10：大小写不敏感**（macOS/Windows 大小写不敏感文件系统上 `META/` 与
+// `meta/` 同目录）——统一按小写比较；桶名 canonical 小写（volume.BucketOf 归一小写返回）。
 func IsReservedBucketName(name string) bool {
-	return slices.Contains(featureBuckets, name)
+	for _, b := range featureBuckets {
+		if strings.EqualFold(b, name) {
+			return true
+		}
+	}
+	return false
 }

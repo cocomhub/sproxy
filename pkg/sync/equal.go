@@ -21,6 +21,9 @@ const compareChunkSize = 1 << 20 // 1MiB
 
 // Equal 判定 src.FS 中 srcPath 与 dst.FS 中 dstPath 内容一致。
 //
+// **预留（2026-10-10 评审）**：当前无生产调用——读侧逐分块校验走 meta.VerifyReadSeeker、
+// 转存校验走 transfer.verifyByFileMeta；保留供跨 FS 比对后续复用（删除需同步删 equal_test.go）。
+//
 // 判定顺序（用户裁定"优先用可用校验和"）：
 //  1. 两侧 Stat 均提供同一算法的校验和（Checksums 交集，优先 sha256→md5→etag）→
 //     比对校验和值（零流量，最快）；

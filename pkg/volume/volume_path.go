@@ -324,12 +324,13 @@ func BucketOf(key string) (bucket, rest string, ok bool) {
 		return "", "", false
 	}
 	if storage.IsReservedBucketName(segs[0]) {
-		return segs[0], joinSegsVolume(segs[1:]), true
+		return strings.ToLower(segs[0]), joinSegsVolume(segs[1:]), true
 	}
 	if len(segs) >= 2 && storage.IsReservedBucketName(segs[1]) {
 		// 共享卷 `<owner>/<bucket>/...`：owner 首段非桶名（NewTenant 已拒保留桶名 owner），
-		// 桶段=次段。桶名后段即 rest。
-		return segs[1], joinSegsVolume(segs[2:]), true
+		// 桶段=次段。桶名后段即 rest。**桶段归一小写**（canonical——大小写不敏感文件
+		// 系统上 `META/` 与 `meta/` 同目录；guard/IsMetaPath 的 `== "meta"` 比较依赖此）。
+		return strings.ToLower(segs[1]), joinSegsVolume(segs[2:]), true
 	}
 	return "", "", false
 }
@@ -338,6 +339,7 @@ func BucketOf(key string) (bucket, rest string, ok bool) {
 // 同结构识别：首段命中桶 → 替换首段；否则共享卷 owner 前缀 → 替换次段。返回 ok=false
 // = 无桶段（键未含功能桶，原样返回）。
 func RebucketTo(key, toBucket string) (string, bool) {
+	toBucket = strings.ToLower(toBucket) // canonical 小写（与 BucketOf 归一一致）
 	segs := splitSegsVolume(key)
 	if len(segs) == 0 {
 		return key, false

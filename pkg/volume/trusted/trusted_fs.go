@@ -53,6 +53,7 @@ func Wrap(fs syncpkg.FS, opts Options) syncpkg.FS {
 }
 
 // Inner 返回底层 FS（装配层需要原始能力如 Move/Copy/Link 时取用）。
+// **预留逃生口**：当前无调用（能力已由装饰器透传）；保留供受控装配直接触达 inner。
 func (t *TrustedVolumeFS) Inner() syncpkg.FS { return t.inner }
 
 // FileMeta 实现 meta.Provider（读侧消费 FileMeta 的读端入口——C4 落地）：装饰器写侧
