@@ -300,7 +300,12 @@ func TestDownloadIntegrity_ResumeResetsState(t *testing.T) {
 	}
 	// D-CRITICAL 回归：failed 任务 resume 不置 resumeSelfOverwrite（且旧标记被清除——
 	// 若任务先前 damaged→resume 置过 true，之后 failed 再 resume 不得残留盲覆标记）。
-	if got.resumeSelfOverwrite {
+	// 注：master 将上方重置断言改为 testutil.WaitFor 闭包轮询（got 不再在函数作用域内），
+	// 故此处独立加锁读取（rebase 语义冲突修复）。
+	mgr.mu.RLock()
+	resumeSelfOverwrite := mgr.tasks[task.ID].resumeSelfOverwrite
+	mgr.mu.RUnlock()
+	if resumeSelfOverwrite {
 		t.Fatal("D-CRITICAL: 非 damaged resume 应清 resumeSelfOverwrite（防盲覆他人同 rel）")
 	}
 }
