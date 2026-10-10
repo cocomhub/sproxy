@@ -133,7 +133,7 @@ func newRangeHTTPClient() *http.Client {
 // 对齐 cocom 循环结构：**每轮先 Stat**——远端已存在且 ETag 与本地 md5 一致（内容未
 // 变/秒传命中）直接返回（零额外上传）；否则上传 → 再 Stat 复核。
 func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta, error) {
-	st, err := s.stageUpload(r, key)
+	st, err := s.stageUpload(ctx, r, key)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +336,31 @@ type stagedUpload struct {
 // 4MiB 对齐——秒传 block 列表须与上传块一致才能命中索引）。
 const uploadBlockSize = 4 * 1024 * 1024
 
-func (s *Storage) stageUpload(r io.Reader, key string) (*stagedUpload, error) {
+// copyCtx 在拷贝过程中检查 ctx（取消/超时即返回，避免已取消仍整文件复制）。
+func copyCtx(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+	buf := make([]byte, 64<<10)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return total, werr
+			}
+			total += int64(n)
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return total, nil
+			}
+			return total, rerr
+		}
+	}
+}
+
+func (s *Storage) stageUpload(ctx context.Context, r io.Reader, key string) (*stagedUpload, error) {
 	// 临时文件放独立随机子目录、用**目标 basename 精确命名**（e2e 实测修复）：CLI
 	// 二进制 upload 的保存名 = 本地文件 basename（`<dir>/<basename>` 目录语义）——若 tmp
 	// basename 带随机后缀（原 CreateTemp `basename-*`），CLI 保存到 `<dir>/cli.bin-<rand>`
@@ -355,9 +379,10 @@ func (s *Storage) stageUpload(r io.Reader, key string) (*stagedUpload, error) {
 	cleanup := func() { tmp.Close(); os.RemoveAll(sub) }
 	md5h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传/ETag），非安全用途
 	crc := crc32.NewIEEE()
-	// 单遍拷贝：tmp 落盘 + 整文件 md5 + crc32 同步累计。
+	// 单遍拷贝：tmp 落盘 + 整文件 md5 + crc32 同步累计；**过程中检查 ctx**（取消即
+	// 返回，避免已取消仍整文件复制第二份副本，P3 对抗评审）。
 	tee := io.MultiWriter(tmp, md5h, crc)
-	size, copyErr := io.Copy(tee, r)
+	size, copyErr := copyCtx(ctx, tee, r)
 	if copyErr != nil {
 		cleanup()
 		return nil, copyErr

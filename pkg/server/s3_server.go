@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -388,15 +389,21 @@ func (h *Handlers) s3HeadObject(w http.ResponseWriter, root *storage.Root, rel s
 }
 
 // s3GetObject 返回对象内容（application/octet-stream；不存在 404）。
+// P2 对抗评审：S3 网关 GET 与 /download 同口径接本地卷读校验（meta.VerifyReadSeeker
+// 逐分块比对，损坏 fail-closed）——此前直读 storage.Root 绕过校验。
 func (h *Handlers) s3GetObject(w http.ResponseWriter, root *storage.Root, rel string) {
 	f, err := root.Open(rel)
 	if err != nil {
 		http.Error(w, "s3: 文件不存在", http.StatusNotFound)
 		return
 	}
-	defer f.Close()
+	rc := files.SeekReadCloser(f)
+	if v, _ := (filesMetaPolicy{h: h}).VerifyDownload(context.Background(), root, rel, f); v != nil {
+		rc = v // 逐分块校验包装（Close 透传底层）
+	}
+	defer rc.Close()
 	w.Header().Set(headerContentType, "application/octet-stream")
-	_, _ = io.Copy(w, f)
+	_, _ = io.Copy(w, rc)
 }
 
 // s3PutObject 写对象：MkdirAll 父目录后 OpenFile 直写（root 无 WriteFile——用 OpenFile）。
