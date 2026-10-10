@@ -198,8 +198,14 @@ func (h *Handlers) backupTargetFS(ctx context.Context, owner, target string) (sy
 		return nil, err
 	}
 	// 配额记账：备份占用目标卷配额（owner user 桶 + 目标卷容量池）。
+	// **外部卷不再叠加卷池**：卷池由 FS 层 capacity.CapacityFS 权威记账（backupQuotaFS
+	// 与共享 Pool 双预留会使 committed += 2×size，Delete 只释放 1× → 池单调膨胀至该卷
+	// 全部写被误拒；P2 对抗评审）。本地卷目标无 CapacityFS，保留 pool 记账。
 	scope := h.quotaScopeFor(owner, "user")
 	pool := h.volSet.Pool(target)
+	if h.volSet.External(target) != nil {
+		pool = nil
+	}
 	if scope == nil && pool == nil {
 		return fs, nil
 	}

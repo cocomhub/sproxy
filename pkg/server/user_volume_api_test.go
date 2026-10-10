@@ -262,3 +262,33 @@ func TestUserVolumeAPI_List_RedactsCredentials(t *testing.T) {
 		t.Fatalf("非敏感配置（baidu_root）应保留: %s", body)
 	}
 }
+
+// TestUserVolumeAPI_DeleteRecreateKeepsUsage P2 回归：删除用户卷不清理容量计数文件，
+// 同名重建必须 Load 到旧占用（否则 delete+recreate 归零 → 反复绕过「Σ占用 ≤ 卷限额」）。
+func TestUserVolumeAPI_DeleteRecreateKeepsUsage(t *testing.T) {
+	t.Parallel()
+	h, _ := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+	body := map[string]any{"name": "ud", "type": userVolumeTestType, "capacity": 1000, "extra": map[string]any{"bduss": "t"}}
+	if rec := postUserVolume(t, mux, body); rec.Code != http.StatusOK {
+		t.Fatalf("create = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if err := h.volSet.External("ud").FS().WriteFile(context.Background(), "f.bin", bytes.NewReader(make([]byte, 42)), 42, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// delete
+	dreq := httptest.NewRequest(http.MethodDelete, "/api/volumes/user?name=ud", nil)
+	drec := httptest.NewRecorder()
+	mux.ServeHTTP(drec, dreq)
+	if drec.Code != http.StatusOK {
+		t.Fatalf("delete = %d (%s)", drec.Code, drec.Body.String())
+	}
+	// recreate（同名）
+	if rec := postUserVolume(t, mux, body); rec.Code != http.StatusOK {
+		t.Fatalf("recreate = %d (%s)", rec.Code, rec.Body.String())
+	}
+	up, ok := h.volSet.External("ud").(registry.UsageProvider)
+	if !ok || up.Usage() != 42 {
+		t.Fatalf("delete+recreate 后 Usage 应保留 42（不得归零绕过限额）, ok=%v usage=%d", ok, up.Usage())
+	}
+}

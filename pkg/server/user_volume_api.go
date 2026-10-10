@@ -71,7 +71,12 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// 路径 <root>/<owner>/meta/volume/<name>.capacity（**非 .json**：避开 UserVolumeStore
 	// 的 *.json 扫描，防计数文件被误当卷元数据）；重启后 Load 续用。
 	counterPath := filepath.Join(h.userVolumes.Root(), owner, "meta", "volume", req.Name+".capacity")
-	be = capacity.WrapBackend(be, capacity.NewCounter(req.Capacity, counterPath))
+	counter, lerr := capacity.Load(counterPath, req.Capacity)
+	if lerr != nil {
+		sendJSONResponse(w, map[string]string{"error": "容量快照读取失败: " + lerr.Error()}, http.StatusInternalServerError)
+		return
+	}
+	be = capacity.WrapBackend(be, counter)
 	// store 落盘（重名拒绝）。
 	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra}
 	if err := h.userVolumes.Create(owner, uv); err != nil {
@@ -182,17 +187,20 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "卷被活跃同步任务引用，请先取消任务"}, http.StatusConflict)
 		return
 	}
-	// Set 移除（Close 后端）+ store 删文件。
-	if err := h.volSet.RemoveExternalVolume(name); err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
-		return
-	}
+	// 先删 store 元数据（失败则 Set 不变，无需回滚），再摘除运行时卷，最后清计数文件。
 	if err := h.userVolumes.Delete(owner, name); err != nil {
-		// Set 已移除但 store 删除失败：回滚 Add（尽力恢复一致性）。
-		_ = h.volSet.AddExternalVolume(volume.Volume{Name: name, Type: v.Type, Extra: v.Extra}, nil)
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
+	if err := h.volSet.RemoveExternalVolume(name); err != nil {
+		// store 已删但 Set 摘除失败：回滚重建 store 元数据（Set 未变，保持一致）。
+		_ = h.userVolumes.Create(owner, *v)
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	// **不删容量计数文件**：卷删除仅移除元数据/句柄，远端已写入的字节仍在（本系统不删
+	// 远端内容）；保留 used 使同名重建时 Load 到旧占用（否则 delete+recreate 把上限变成
+	// 「每轮限额 × 轮数」，绕过「Σ占用 ≤ 卷限额」）。计数文件为安全保留，非泄漏。
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 
