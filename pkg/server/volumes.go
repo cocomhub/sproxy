@@ -263,6 +263,8 @@ func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc 
 	if cerr != nil {
 		log.Warn("外部卷容量快照恢复失败，本次进程从零累计", "volume", vc.Name, "error", cerr)
 		counter = capacity.NewPoolCounter(pool)
+	} else if counter.CorruptSnapshot() {
+		log.Warn("外部卷容量快照损坏，本次进程从零累计", "volume", vc.Name)
 	}
 	acc.external[vc.Name] = capacity.WrapBackend(be, counter)
 	acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, ""))

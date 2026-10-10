@@ -290,3 +290,28 @@ func TestResolveChunkSize_UpperClamp(t *testing.T) {
 		t.Fatalf("合法值应保留: got %d", got)
 	}
 }
+
+// TestMaxMetaChunks_CoherentWithSidecarLimit P3 回归：maxMetaChunks 必须与
+// MaxMetaSidecarBytes 自洽——否则合法 meta（块数 ≤ 上限）仍可能超过读取上限，
+// 读路径静默降级为不校验。
+func TestMaxMetaChunks_CoherentWithSidecarLimit(t *testing.T) {
+	t.Parallel()
+	if int64(maxMetaChunks)*maxMetaChunkJSONBytes > MaxMetaSidecarBytes() {
+		t.Fatalf("maxMetaChunks(%d) × 单块上界(%d) 超过读取上限(%d)——合法 sidecar 会被降级",
+			maxMetaChunks, maxMetaChunkJSONBytes, MaxMetaSidecarBytes())
+	}
+	// 恰好 maxMetaChunks 块的 meta 序列化后必须 ≤ 读取上限。
+	m := &FileMeta{Version: metaVersion, Size: int64(maxMetaChunks) * 1 << 20, ChunkSize: 1 << 20}
+	m.Chunks = make([]ChunkMeta, maxMetaChunks)
+	for i := range m.Chunks {
+		m.Chunks[i] = ChunkMeta{Index: i, Offset: int64(i) * 1 << 20, Size: 1 << 20,
+			SHA256: strings.Repeat("a", 64), MD5: strings.Repeat("b", 32)}
+	}
+	raw, err := Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) > MaxMetaSidecarBytes() {
+		t.Fatalf("合法 meta 大小 %d 超过读取上限 %d", len(raw), MaxMetaSidecarBytes())
+	}
+}

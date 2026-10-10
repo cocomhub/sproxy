@@ -467,3 +467,131 @@ func TestTrustedVolumeFS_WriteIfAbsent_NoReadBack(t *testing.T) {
 		t.Fatalf("TotalSHA256=%s want %s", fm.TotalSHA256, refSHA(data))
 	}
 }
+
+// TestTrustedVolumeFS_RenameStaleTargetMetaInvalidated R1-FS-2 回归：源无 sidecar 时
+// rename 覆盖既有目标，目标旧 sidecar 必须失效（否则读路径按旧 meta 校验新内容恒失配）。
+func TestTrustedVolumeFS_RenameStaleTargetMetaInvalidated(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv := Wrap(inner, Options{}).(*TrustedVolumeFS)
+	ctx := context.Background()
+	if err := tv.WriteFile(ctx, "user/t.bin", strings.NewReader("old-target"), 10, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); err != nil {
+		t.Fatalf("前置：目标应有 sidecar: %v", err)
+	}
+	// 源**无 sidecar**（直接经 inner 写，模拟旁路写/存量数据）。
+	if err := inner.WriteFile(ctx, "user/s.bin", strings.NewReader("new"), 3, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := tv.Rename(ctx, "user/s.bin", "user/t.bin"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if _, err := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); err == nil {
+		t.Fatal("源无 sidecar 时目标陈旧 sidecar 必须被失效（否则文件固化不可读）")
+	}
+}
+
+// TestTrustedVolumeFS_CopyStaleTargetMetaInvalidated 同 R1-FS-2（Copy 路径）。
+func TestTrustedVolumeFS_CopyStaleTargetMetaInvalidated(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv := Wrap(inner, Options{}).(*TrustedVolumeFS)
+	ctx := context.Background()
+	if err := tv.WriteFile(ctx, "user/t.bin", strings.NewReader("old-target"), 10, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := inner.WriteFile(ctx, "user/s.bin", strings.NewReader("new"), 3, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := tv.Copy(ctx, "user/s.bin", "user/t.bin"); err != nil {
+		if errors.Is(err, syncpkg.ErrUnsupported) {
+			t.Skip("inner 未实现 Copy")
+		}
+		t.Fatalf("Copy: %v", err)
+	}
+	if _, err := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); err == nil {
+		t.Fatal("Copy 源无 sidecar 时目标陈旧 sidecar 必须被失效")
+	}
+}
+
+// failMetaFS 主文件写成功、meta 路径写失败（注入 meta 落盘故障）。
+type failMetaFS struct{ *syncpkg.LocalFS }
+
+func (f *failMetaFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
+	if rel == "meta" || strings.HasPrefix(rel, "meta/") || strings.Contains(rel, "/meta/") {
+		return errors.New("injected: meta write failure")
+	}
+	return f.LocalFS.WriteFile(ctx, rel, r, size, mtime)
+}
+
+// TestTrustedVolumeFS_MetaWriteFailureKeepsMainFile F3：meta 落盘失败不得失败主写，
+// 且必须失效旧 sidecar（退化 missing 直算，而非陈旧 meta 固化）。
+func TestTrustedVolumeFS_MetaWriteFailureKeepsMainFile(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv := Wrap(inner, Options{}).(*TrustedVolumeFS)
+	ctx := context.Background()
+	if err := tv.WriteFile(ctx, "user/a.bin", strings.NewReader("v1-content"), 10, 0); err != nil {
+		t.Fatal(err)
+	}
+	stale := strings.Repeat("s", 64)
+	if err := inner.WriteFile(ctx, meta.MetaPath("user/a.bin"), strings.NewReader(stale), int64(len(stale)), 0); err != nil {
+		t.Fatal(err)
+	}
+	fail := &failMetaFS{LocalFS: inner}
+	tvF := Wrap(fail, Options{}).(*TrustedVolumeFS)
+	if err := tvF.WriteFile(ctx, "user/a.bin", strings.NewReader("v2-content"), 10, 0); err != nil {
+		t.Fatalf("meta 失败不得失败主写: %v", err)
+	}
+	// 主文件已是新内容。
+	rc, err := inner.OpenRead(ctx, "user/a.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "v2-content" {
+		t.Fatalf("主文件 = %q", got)
+	}
+	if _, err := inner.OpenRead(ctx, meta.MetaPath("user/a.bin")); err == nil {
+		t.Fatal("meta 落盘失败时旧陈旧 sidecar 必须被失效")
+	}
+}
+
+// notLocalFS 自述非本地（IsLocalVolume=false）——覆盖 TrustedVolumeFS.isLocal() 的
+// 「远端卷」分支（正例若用 LocalFS 会恒判本地，遮蔽该分支；F4 测试盲区）。
+type notLocalFS struct{ *syncpkg.LocalFS }
+
+func (n *notLocalFS) IsLocalVolume() bool { return false }
+
+// TestTrustedVolumeFS_IsLocalBranch_RemoteSkipsReadback F4：非本地卷不执行整文件读回
+// 交叉校验（verifyWriteMeta 早退），且写后 sidecar 仍正确生成。
+func TestTrustedVolumeFS_IsLocalBranch_RemoteSkipsReadback(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	nl := &notLocalFS{LocalFS: inner}
+	tv := Wrap(nl, Options{}).(*TrustedVolumeFS)
+	if tv.isLocal() {
+		t.Fatal("notLocalFS 应判为非本地（远端分支）")
+	}
+	ctx := context.Background()
+	data := []byte("remote-content")
+	if err := tv.WriteFile(ctx, "user/r.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		t.Fatal(err)
+	}
+	rc, err := inner.OpenRead(ctx, meta.MetaPath("user/r.bin"))
+	if err != nil {
+		t.Fatalf("远端卷写后仍应生成 sidecar: %v", err)
+	}
+	raw, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("sidecar 反序列化: %v", uerr)
+	}
+	if fm.TotalSHA256 != refSHA(data) {
+		t.Fatalf("TotalSHA256=%s want %s", fm.TotalSHA256, refSHA(data))
+	}
+}

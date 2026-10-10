@@ -76,6 +76,9 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "容量快照读取失败: " + lerr.Error()}, http.StatusInternalServerError)
 		return
 	}
+	if counter.CorruptSnapshot() {
+		h.logger.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", req.Name, "owner", owner, "path", counterPath)
+	}
 	be = capacity.WrapBackend(be, counter)
 	// store 落盘（重名拒绝）。
 	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra}

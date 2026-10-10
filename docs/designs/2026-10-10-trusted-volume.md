@@ -135,6 +135,11 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 - **容量释放依赖 Stat**（第 3 轮对抗评审 P3）：`Delete/Rename/Move/Copy` 释放量取自
   `inner.Stat` 实测；Stat 瞬时失败时释放 0（计数偏高、仅对账/重启自愈）。
 - **`FileMeta.Signature`**：同上行（预留字段）。
+- **无桶段键的 `MetaPath` 兜底**（第 4 轮对抗评审，SUSPECTED）：`MetaPath(rel)` 对不含
+  功能桶段的键（如 `docs/x`）回落 `docs/x.meta`——sidecar 会落在用户可见目录且
+  `IsMetaPath` 判为非 meta。当前**所有 in-tree 调用方均经 bucket 限定的键**
+  （`Location.FSPath` / `prefixFS`），不可达；未加 Guard 拒绝（会误伤合法部分路径枚举，
+  如外部卷根 `<owner>` 单段）。彻底解决需在 MetaPath 返回 (path, ok) 并逐调用方适配。
 - **容量记账并发**（第 4 轮对抗评审 P2）：`CapacityFS` 无自身锁，`stat→reserve→settle`
   跨锁 read-modify-write；同 rel 并发 写/删 可致 used 少计或虚高。计数器内部操作原子安全
   （无内存损坏），逻辑漂移有界、重启/对账自愈；彻底解决需按 rel 串行化（会串行化远端写 I/O，

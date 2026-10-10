@@ -63,7 +63,11 @@ type VolumeCapacityCounter struct {
 	used     int64
 	capacity int64  // 0 = 不限制
 	path     string // 持久化路径（空 = 不持久化）
+	corrupt  bool   // 快照损坏/版本不识 → 已重置 used=0（须告警，防静默放宽限额）
 }
+
+// CorruptSnapshot 报告 Load 是否因快照损坏/版本不识而重置 used（供调用方告警）。
+func (c *VolumeCapacityCounter) CorruptSnapshot() bool { return c.corrupt }
 
 // NewCounter 创建计数器（capacity 字节限额；0 = 不限；path 空 = 不持久化）。
 func NewCounter(capacity int64, path string) *VolumeCapacityCounter {
@@ -159,6 +163,25 @@ func writeCounterFile(path string, f counterFile) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("capacity: 原子重命名失败: %w", err)
 	}
+	// fsync 父目录：rename 元数据落盘（否则崩溃后可能回退到旧快照/丢新快照——used 偏低
+	// 使重启后可超额写入；P2 对抗评审）。
+	if derr := syncDir(filepath.Dir(path)); derr != nil {
+		return fmt.Errorf("capacity: 目录 fsync 失败: %w", derr)
+	}
+	return nil
+}
+
+// syncDir fsync 目录项（best-effort；Windows 上打开目录可能失败 → 忽略）。
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // 目录路径由调用方给定（卷内元数据目录）
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	if serr := d.Sync(); serr != nil {
+		// 部分平台不支持目录 fsync（EINVAL/Windows）：非致命，忽略。
+		return nil //nolint:nilerr // 目录 fsync 不支持的平台视为成功
+	}
 	return nil
 }
 
@@ -175,7 +198,13 @@ func Load(path string, capacity int64) (*VolumeCapacityCounter, error) {
 	}
 	var f counterFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		// 损坏快照：重置（不 fail-closed——容量是防超限非数据完整，重置后重新累计安全）。
+		// 损坏快照：重置（不 fail-closed——容量是防超限非数据完整，重置后重新累计安全），
+		// 但**标记**以便调用方告警（静默归零会让重启后可超额写入；P2 对抗评审）。
+		c.corrupt = true
+		return c, nil
+	}
+	if f.Version != 1 {
+		c.corrupt = true // 版本不认识 → 视为损坏（重置并标记）
 		return c, nil
 	}
 	c.mu.Lock()
@@ -205,10 +234,14 @@ func VolumeCounterPath(storageRoot, name string) string {
 // 不漏计）、变更后原子写回——修对抗评审 P1：此前纯内存，重启 Usage 归零 → 可
 // 反复写满限额（“Σ用户 ≤ 卷限额”静默失效）。
 type PoolCounter struct {
-	pool *quota.Pool
-	path string
-	mu   sync.Mutex
+	pool    *quota.Pool
+	path    string
+	mu      sync.Mutex
+	corrupt bool // 快照损坏/版本不识 → 未恢复占用（须告警，防静默放宽限额）
 }
+
+// CorruptSnapshot 报告持久化快照是否损坏/版本不识（未恢复占用；供调用方告警）。
+func (p *PoolCounter) CorruptSnapshot() bool { return p.corrupt }
 
 // NewPoolCounter 包装卷容量池为卷级计数器（无持久化）。
 func NewPoolCounter(p *quota.Pool) *PoolCounter { return &PoolCounter{pool: p} }
@@ -225,7 +258,15 @@ func NewPoolCounterPersistent(p *quota.Pool, path string) (*PoolCounter, error) 
 		return nil, fmt.Errorf("capacity: 读取 %s 失败: %w", path, err)
 	}
 	var f counterFile
-	if json.Unmarshal(data, &f) != nil || f.Used <= 0 {
+	if err := json.Unmarshal(data, &f); err != nil {
+		c.corrupt = true // 损坏：未恢复占用（携带标记供调用方告警）
+		return c, nil
+	}
+	if f.Version != 1 {
+		c.corrupt = true
+		return c, nil
+	}
+	if f.Used <= 0 {
 		return c, nil
 	}
 	seed := f.Used
@@ -646,9 +687,25 @@ func (b *Backend) SecretsManagerAny() any {
 	return nil
 }
 
-// 编译期断言：CapacityFS 实现 sync.FS；Backend 的 FS 满足 sync.FS。
+// 编译期断言：CapacityFS 实现 sync.FS 与**全部可选能力接口**（能力透传契约，防未来
+// 新增能力接口后遗漏——装饰器不转发会让上层断言恒 false → 静默降级）。
+// BlockAccessor 有意不实现（documented）：直接转发会让 sync 引擎对无该能力的底层
+// 也走块级路径（ErrUnsupported 无法表达「未实现」），需 Capability 探测语义，见
+// docs/designs/2026-10-10-trusted-volume.md §8。
 var (
 	_ syncpkg.FS = (*CapacityFS)(nil)
 	_ Counter    = (*VolumeCapacityCounter)(nil)
 	_ Counter    = (*PoolCounter)(nil)
+
+	_ meta.Provider               = (*CapacityFS)(nil)
+	_ syncpkg.WriteIfAbsent       = (*CapacityFS)(nil)
+	_ syncpkg.ReserveSpace        = (*CapacityFS)(nil)
+	_ syncpkg.LocalVolume         = (*CapacityFS)(nil)
+	_ syncpkg.Mover               = (*CapacityFS)(nil)
+	_ syncpkg.Copier              = (*CapacityFS)(nil)
+	_ syncpkg.Linker              = (*CapacityFS)(nil)
+	_ syncpkg.RangeReader         = (*CapacityFS)(nil)
+	_ syncpkg.DirectURLProvider   = (*CapacityFS)(nil)
+	_ syncpkg.StagingQuotaCapable = (*CapacityFS)(nil)
+	_ syncpkg.StagingQuotaExempt  = (*CapacityFS)(nil)
 )

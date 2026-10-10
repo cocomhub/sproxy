@@ -11,6 +11,7 @@ package capacity
 import (
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -333,5 +334,74 @@ func TestCapacityFS_WriteIfAbsent_MeasuredAndRollback(t *testing.T) {
 	}
 	if got := pool.Usage(); got != 30 {
 		t.Fatalf("回滚后 Usage=%d want 30", got)
+	}
+}
+
+// TestLoad_CorruptSnapshotFlagged P2：损坏/版本不识的快照须被**标记**（此前静默重置
+// used=0，重启后可超额写入且无任何信号）。
+func TestLoad_CorruptSnapshotFlagged(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.capacity")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.CorruptSnapshot() {
+		t.Fatal("损坏快照应被标记")
+	}
+	if c.Used() != 0 {
+		t.Fatalf("损坏快照 used=%d want 0", c.Used())
+	}
+	// 正常快照：不标记、used 恢复。
+	ok := NewCounter(100, path)
+	if aerr := ok.TryAdd(10); aerr != nil {
+		t.Fatal(aerr)
+	}
+	if serr := ok.Save(); serr != nil {
+		t.Fatal(serr)
+	}
+	c2, err := Load(path, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.CorruptSnapshot() {
+		t.Fatal("正常快照不应标记")
+	}
+	if c2.Used() != 10 {
+		t.Fatalf("正常快照 used=%d want 10", c2.Used())
+	}
+	// 版本不识：标记。
+	if werr := os.WriteFile(path, []byte(`{"version":99,"used":5}`), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	c3, err := Load(path, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c3.CorruptSnapshot() {
+		t.Fatal("版本不识应标记")
+	}
+}
+
+// TestNewPoolCounterPersistent_CorruptFlagged P2：配置卷池计数器损坏快照同样标记。
+func TestNewPoolCounterPersistent_CorruptFlagged(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "v.capacity")
+	if err := os.WriteFile(path, []byte("boom"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pc, err := NewPoolCounterPersistent(quota.NewPool(1000), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pc.CorruptSnapshot() {
+		t.Fatal("池计数器损坏快照应标记")
+	}
+	if pc.pool.Usage() != 0 {
+		t.Fatalf("损坏快照 Usage=%d want 0", pc.pool.Usage())
 	}
 }

@@ -23,9 +23,20 @@ import (
 // metaVersion 是 FileMeta 结构版本。
 const metaVersion = 1
 
-// maxMetaChunks 是 FileMeta 分块数上限（防恶意/损坏 meta 的 O(n) 内存 DoS；
-// 32MiB 块下 1e6 块 = 32TiB，远超实际）。
-const maxMetaChunks = 1 << 20
+// maxMetaSidecarBytes 是 meta sidecar 读取上限（64MiB——合理 FileMeta 远小于此，
+// 防被注入超大 JSON 的 OOM DoS；超限视为 meta 缺失回落直算）。供 trusted 装饰器与
+// 装配层下载校验（filesMetaPolicy.VerifyDownload）复用同一防护口径。
+const maxMetaSidecarBytes = 64 << 20
+
+// maxMetaChunkJSONBytes 是单条 ChunkMeta 序列化后的保守字节上界（含 index/offset/size
+// 数字 + sha256(64hex) + md5(32hex) + JSON 字段名/分隔符）。
+// 用于使 maxMetaChunks 与 maxMetaSidecarBytes **自洽**——否则合法 meta（块数 ≤ 上限）
+// 仍可能超过读取上限 → 读路径静默降级为不校验（P3 对抗评审）。
+const maxMetaChunkJSONBytes = 192
+
+// maxMetaChunks 是 FileMeta 分块数上限（防恶意/损坏 meta 的 O(n) 内存 DoS），
+// 与 maxMetaSidecarBytes 自洽：合法 meta 必落在读取上限内。
+const maxMetaChunks = maxMetaSidecarBytes / maxMetaChunkJSONBytes
 
 // ChunkMeta 是单个分块的校验元信息（偏移 + 大小 + sha256 + md5 双算法）。
 type ChunkMeta struct {
@@ -304,4 +315,4 @@ func FromFile(path string, chunkSize int64, extra map[string]any) (*FileMeta, er
 // MaxMetaSidecarBytes 是 meta sidecar 读取上限（64MiB——合理 FileMeta 远小于此，
 // 防被注入超大 JSON 的 OOM DoS；超限视为 meta 缺失回落直算）。
 // 供 trusted 装饰器与装配层下载校验（filesMetaPolicy.VerifyDownload）复用同一防护口径。
-func MaxMetaSidecarBytes() int64 { return 64 << 20 }
+func MaxMetaSidecarBytes() int64 { return maxMetaSidecarBytes }

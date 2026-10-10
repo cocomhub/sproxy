@@ -61,6 +61,8 @@ func restoreUserVolumes(set *registry.Set, store *server.UserVolumeStore, log *s
 		if cErr != nil {
 			log.Warn("用户卷容量恢复失败（按新计数器）", "volume", uv.Name, "owner", uv.Owner, "error", cErr)
 			cnt = capacity.NewCounter(uv.Capacity, counterPath)
+		} else if cnt.CorruptSnapshot() {
+			log.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", uv.Name, "owner", uv.Owner, "path", counterPath)
 		}
 		be = capacity.WrapBackend(be, cnt)
 		if aErr := set.AddExternalVolume(v, be); aErr != nil {

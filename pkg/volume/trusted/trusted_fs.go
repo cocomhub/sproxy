@@ -336,6 +336,8 @@ func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
 			// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——源 meta 不存在（未启用/
 			// 旁路写）是正常 skip，其余失败可观测（读路径直算兜底，不阻断主 Move）。
 			t.logMetaWarn("Move", to, rerr)
+			// R1-FS-2：源无 meta 时目标旧 sidecar 描述被覆盖的旧内容 → 失效（防固化不可读）。
+			t.invalidateMeta(ctx, to)
 		}
 		return nil
 	}
@@ -376,7 +378,9 @@ func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 	dst := meta.MetaPath(to)
 	rc, err := t.inner.OpenRead(ctx, src)
 	if err != nil {
-		return // 源 meta 不存在（读路径直算兜底）
+		// 源 meta 不存在（读路径直算兜底）；但目标旧 sidecar（若有）现已描述旧内容 → 失效。
+		t.invalidateMeta(ctx, to)
+		return
 	}
 	defer rc.Close()
 	// 取源 meta 实际大小作为声明长度（避免传 -1 使容量层无法预留/按实测结算；
@@ -391,6 +395,16 @@ func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 	if werr := t.inner.WriteFile(ctx, dst, rc, srcSize, 0); werr != nil {
 		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——可观测，读路径直算兜底。
 		t.logMetaWarn("Copy", to, werr)
+		// 目标旧 sidecar 描述旧内容 → 失效（防陈旧 meta 固化）。
+		t.invalidateMeta(ctx, to)
+	}
+}
+
+// invalidateMeta 删除目标 sidecar（覆盖写/移动/复制后源无可用 meta 时，防陈旧 meta
+// 描述旧内容使读路径恒失配、文件固化不可读——R1-FS-2）。删除不存在是正常（无旧 sidecar）。
+func (t *TrustedVolumeFS) invalidateMeta(ctx context.Context, rel string) {
+	if err := t.inner.Delete(ctx, meta.MetaPath(rel)); err != nil {
+		t.logMetaWarn("invalidateMeta", rel, err)
 	}
 }
 
@@ -600,6 +614,9 @@ func (t *TrustedVolumeFS) Rename(ctx context.Context, from, to string) error {
 		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——源 meta 不存在是正常 skip，
 		// 其余失败可观测（读路径直算兜底，不阻断主 Rename）。
 		t.logMetaWarn("Rename", to, rerr)
+		// R1-FS-2：源无 meta / 联动失败时，目标已有旧 sidecar 描述的是被覆盖的旧内容 →
+		// 必须失效，否则读路径按旧 meta 校验新内容恒失配（硬失败固化，与 missing 直算不同）。
+		t.invalidateMeta(ctx, to)
 	}
 	return nil
 }
@@ -625,3 +642,23 @@ func (r *byteReader) Read(p []byte) (int, error) {
 	r.off += n
 	return n, nil
 }
+
+// 编译期断言：TrustedVolumeFS 实现 sync.FS 与**全部可选能力接口**（能力透传契约，
+// 防未来新增能力接口后遗漏——装饰器不转发会让上层断言恒 false → 静默降级）。
+// BlockAccessor 有意不实现（与 CapacityFS/Guard 同理由，见设计 §8）。
+var (
+	_ syncpkg.FS = (*TrustedVolumeFS)(nil)
+
+	_ meta.Provider               = (*TrustedVolumeFS)(nil)
+	_ MetaExtraUpdater            = (*TrustedVolumeFS)(nil)
+	_ syncpkg.WriteIfAbsent       = (*TrustedVolumeFS)(nil)
+	_ syncpkg.ReserveSpace        = (*TrustedVolumeFS)(nil)
+	_ syncpkg.LocalVolume         = (*TrustedVolumeFS)(nil)
+	_ syncpkg.Mover               = (*TrustedVolumeFS)(nil)
+	_ syncpkg.Copier              = (*TrustedVolumeFS)(nil)
+	_ syncpkg.Linker              = (*TrustedVolumeFS)(nil)
+	_ syncpkg.RangeReader         = (*TrustedVolumeFS)(nil)
+	_ syncpkg.DirectURLProvider   = (*TrustedVolumeFS)(nil)
+	_ syncpkg.StagingQuotaCapable = (*TrustedVolumeFS)(nil)
+	_ syncpkg.StagingQuotaExempt  = (*TrustedVolumeFS)(nil)
+)
