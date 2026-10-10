@@ -99,7 +99,7 @@ func TestWriteFile_MultipartRouting(t *testing.T) {
 		{"大文件走 multipart", 128 << 20, 64 << 20, uint64(16 << 20)},
 		{"等于阈值走 multipart", 64 << 20, 64 << 20, uint64(16 << 20)},
 		{"小文件单 PutObject", 1024, 64 << 20, 0},
-		{"零阈值禁用分片", 128 << 20, 0, 0},
+		{"负阈值禁用分片", 128 << 20, -1, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

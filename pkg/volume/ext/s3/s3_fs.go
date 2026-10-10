@@ -307,6 +307,14 @@ func (f *S3FS) Stat(ctx context.Context, relPath string) (*sync.Entry, error) {
 	}
 
 	if isNotFound(dirErr) {
+		// 隐式前缀目录：目录仅由 WriteFile("dir/a") 产生（无占位对象）时，ListDir 会
+		// 经 CommonPrefixes 列出该目录，但 Stat 的对象探测均 NotFound——两者自相矛盾
+		// （EXT-7）。用一次 ListObjects(Prefix) 判定隐式目录。
+		for obj := range f.client.ListObjects(ctx, f.bucket, minio.ListObjectsOptions{Prefix: f.keyFor(clean) + "/", MaxKeys: 1, Recursive: false}) {
+			if obj.Err == nil {
+				return &sync.Entry{Name: path.Base(clean), Path: clean, IsDir: true}, nil
+			}
+		}
 		return nil, nil // 不存在
 	}
 

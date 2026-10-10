@@ -295,4 +295,6 @@ var (
 	_ syncpkg.Copier              = (*MetaBucketGuard)(nil)
 	_ syncpkg.Linker              = (*MetaBucketGuard)(nil)
 	_ syncpkg.RangeReader         = (*MetaBucketGuard)(nil)
+	_ syncpkg.DirectURLProvider   = (*MetaBucketGuard)(nil)
+	_ syncpkg.LocalVolume         = (*MetaBucketGuard)(nil)
 )

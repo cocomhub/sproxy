@@ -268,3 +268,18 @@ func TestParseBinaryMeta_MD5Unreliable(t *testing.T) {
 		t.Fatal("`md5 (可能不正确)` 应标记 MD5Unreliable")
 	}
 }
+
+// TestSanitizeRemotePath_RejectsGlob EXT-3：CLI glob 元字符 `*`/`?` 被 BaiduPCS-Go 展开，
+// 可能把别的对象当目标 → fail-closed 拒绝（`[` 由 CLI escaper 转义，不拒）。
+func TestSanitizeRemotePath_RejectsGlob(t *testing.T) {
+	t.Parallel()
+	for _, p := range []string{"/dir/a*b.txt", "/dir/a?b.txt", "a*b"} {
+		if _, err := sanitizeRemotePath(p); err == nil {
+			t.Fatalf("路径 %q 含 glob 元字符应拒绝", p)
+		}
+	}
+	// `[` 合法（escaper 处理）：不拒。
+	if _, err := sanitizeRemotePath("/dir/01 [金田一少年事件簿]/x"); err != nil {
+		t.Fatalf("含 `[` 的合法路径不应拒绝: %v", err)
+	}
+}
