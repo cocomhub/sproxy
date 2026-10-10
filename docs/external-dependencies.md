@@ -110,6 +110,7 @@
 ## 维护指引
 
 - **新增外部依赖**：先在本文档对应分类补条目 + 测试锁定（TDD 红灯 → 实现 → 绿）
+- **e2e 门控测试不被 CI 编译**（如 `pkg/volume/ext/baidupcs/real_network_compare_e2e_test.go` 带 `//go:build e2e`，CI 的 e2e tag 只作用于 `./test/...`）：外部依赖接口变更后，需手工 `cd pkg/volume/ext/baidupcs && GOWORK=off go vet -tags=e2e ./...` 确认仍可编译，避免测试腐化。
 - **测试红时**：先对照本文档判断「依赖变化（外部改了）」vs「实现回归（我们改了）」
 - **依赖变化处置**：外部行为变化 → 更新本文档 + 适配实现；实现回归 → 修实现，文档不动
 - **静默变更拦截**：外部行为一旦无锁即会静默漂移（例：416 边界 / expire 签名 / keepshare 301

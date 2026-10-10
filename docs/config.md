@@ -241,6 +241,16 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 | `cloud_download_exit_node` | string | (空) | 云端下载经 mesh 出口节点 ID（空=服务端本地直连）。非空时下载器 Transport.DialContext 指向「本地直连优先→失败回退经出口（hub 中继 RelayStream）」拨号；需 mesh.hub_url + mesh.access_key/secret（fail-closed） |
 | `cloud_archive_max_bytes` | int | `0` | 单次云归档允许的原始文件大小总和（0 = 不限制，仍受 `max_storage_bytes` 兜底） |
 
+### 可信卷（`trusted_volume`）
+
+外部卷上传/转存默认包**可信卷装饰器**：写侧为文件生成隐藏 `FileMeta` sidecar（整文件 sha256/md5 + 逐分块 sha256/md5，落独立 meta 功能桶 `<owner>/meta/<rel>.meta`），读侧（下载、云转存读回）按 `FileMeta` 逐分块校验，跨信任边界（外部网盘）静默损坏 fail-closed。**默认开启**；本地卷恒建 meta（`skip_verify` 只关读侧校验，不关 meta 生成；meta 桶对业务层结构性不可达）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `trusted_volume.skip_verify` | bool | `false` | `true` = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；meta 生成与 meta 桶隔离不受影响 |
+| `trusted_volume.chunk_size` | ByteSize | `0` | 分块大小；`0` = 按文件大小自适应（1MiB~32MiB）；小于下界 1MiB 时钳到 1MiB（防百万分块 meta DoS） |
+| `trusted_volume.staging_quota_bytes` | ByteSize | `0` | 本地 staging（上传暂存）每-owner 配额上限；`0` = 不限制但记账。所有外部卷写前预留/写后释放，防本地磁盘被上传暂存打满；s3 流式直传显式豁免、baidupcs 自管 |
+
 ### 文件同步（sync.*）
 
 服务端文件同步任务（`/api/sync/tasks`，见 [api.md](./api.md)「文件同步」）配置：

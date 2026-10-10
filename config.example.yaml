@@ -317,6 +317,19 @@ tls:
 # 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
 # cloud_archive_max_bytes: 10737418240   # 10 GiB 示例
 
+# 可信卷（Trusted Volume）：外部卷上传/转存默认包可信卷装饰器——写侧生成隐藏 FileMeta
+# sidecar（整文件 sha256/md5 + 逐分块 sha256/md5，落独立 meta 桶 <owner>/meta/<rel>.meta），
+# 读侧（下载 / 云转存读回）按 FileMeta 逐分块校验，跨信任边界静默损坏 fail-closed。
+# 默认即开启（安全可靠）；本地卷恒建 meta（只关校验不关 meta）。
+# trusted_volume:
+#   skip_verify: false        # true = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；
+#                             #   meta 生成与 meta 桶隔离不受影响（meta 恒生成）。
+#   chunk_size: 0             # 分块大小（ByteSize；0 = 按文件大小自适应 1MiB~32MiB；
+#                             #   配置值小于下界 1MiB 时钳到 1MiB，防百万分块 DoS）
+#   staging_quota_bytes: 0    # 本地 staging（上传暂存）每-owner 配额上限（ByteSize；0 = 不限制但记账）。
+#                             #   所有外部卷写前预留、写后释放，防本地磁盘被上传暂存打满；
+#                             #   s3 流式直传显式豁免、baidupcs 自管。
+
 # PikPak 网盘中转后端（分享 URL → 转存个人网盘 → 官方 CLI 完整下载）：
 # 绕过 PikPak 分享链接 40-50% 下载限制（官方对分享链接的反下载设计）。
 # 前置：安装官方 CLI 并登录（`sproxy pikpak install` + `sproxy pikpak login`）。
