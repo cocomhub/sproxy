@@ -253,3 +253,12 @@ func UnregisterBackendForTest(typ string) {
 		}
 	}
 }
+
+// IsBackendRegistered 报告类型是否已注册后端工厂（供 API 区分「未注册」与「构造失败」——
+// 此前一律映射 404「后端类型未注册」，缺配置的真实类型也误报未注册）。
+func IsBackendRegistered(typ string) bool {
+	backendMu.RLock()
+	defer backendMu.RUnlock()
+	_, ok := backendFactories[typ]
+	return ok
+}

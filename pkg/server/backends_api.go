@@ -8,6 +8,7 @@ package server
 // 未来任何新 backend（S3/…）只 RegisterBackend 注册即自动出现在前端，无需改前端代码。
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -55,9 +56,9 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 		}
 		expires = n
 	}
-	be, err := registry.NewBackend(r.Context(), volume.Volume{Type: typ})
+	be, err := h.presignBackendFor(r.Context(), typ)
 	if err != nil {
-		http.Error(w, "后端类型未注册: "+typ, http.StatusNotFound)
+		h.presignBackendError(w, typ, err)
 		return
 	}
 	defer be.Close()
@@ -78,6 +79,36 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 	sendJSONResponse(w, map[string]string{"url": u}, http.StatusOK)
 }
 
+// presignBackendFor 解析预签名目标后端：**优先取已配置的该类型卷**（携带凭证 Extra）
+// ——直接用 `volume.Volume{Type: typ}` 构造对 s3/baidupcs 等一切需配置的后端必失败
+// （真实类型被错报 404「未注册」，生产上直传端点实际不可用）。无配置卷时回落按 type
+// 构造（纯内存/测试后端可用）。
+func (h *Handlers) presignBackendFor(ctx context.Context, typ string) (registry.ExternalBackend, error) {
+	if !registry.IsBackendRegistered(typ) {
+		return nil, errPresignTypeUnregistered
+	}
+	if h.volSet != nil {
+		for _, v := range h.volSet.All() {
+			if v.Type == typ {
+				return registry.NewBackend(ctx, v)
+			}
+		}
+	}
+	return registry.NewBackend(ctx, volume.Volume{Type: typ})
+}
+
+// errPresignTypeUnregistered 是后端类型未注册的哨兵（调用方据此映射 404）。
+var errPresignTypeUnregistered = errors.New("后端类型未注册")
+
+// presignBackendError 分档映射：未注册 → 404；已注册但构造失败（缺配置/远端不可达）→ 500。
+func (h *Handlers) presignBackendError(w http.ResponseWriter, typ string, err error) {
+	if errors.Is(err, errPresignTypeUnregistered) {
+		http.Error(w, "后端类型未注册: "+typ, http.StatusNotFound)
+		return
+	}
+	http.Error(w, "后端构造失败（检查卷配置）: "+err.Error(), http.StatusInternalServerError)
+}
+
 // backendPresignCompleteHandler 处理 POST /api/backends/{type}/presign/complete?path=：
 // 客户端直传完成后登记——服务端确认对象已存在（sync.FS.Stat）。
 // 未注册 type → 404；对象不存在 → 404（fail-closed）。
@@ -88,9 +119,9 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		http.Error(w, perr.Error(), http.StatusBadRequest)
 		return
 	}
-	be, err := registry.NewBackend(r.Context(), volume.Volume{Type: typ})
+	be, err := h.presignBackendFor(r.Context(), typ)
 	if err != nil {
-		http.Error(w, "后端类型未注册: "+typ, http.StatusNotFound)
+		h.presignBackendError(w, typ, err)
 		return
 	}
 	defer be.Close()

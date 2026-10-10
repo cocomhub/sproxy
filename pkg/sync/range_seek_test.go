@@ -223,3 +223,49 @@ func TestRangeSeeker_CloseIdempotent(t *testing.T) {
 	}
 	_ = filepath.Join
 }
+
+// openOnlyFS 只有 OpenRead（无 RangeReader）——验证「退整流 seeker」路径。
+type openOnlyFS struct{ data []byte }
+
+func (o *openOnlyFS) ListDir(context.Context, string) ([]Entry, error) { return nil, nil }
+func (o *openOnlyFS) Stat(context.Context, string) (*Entry, error)     { return nil, nil }
+func (o *openOnlyFS) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+	return nil
+}
+func (o *openOnlyFS) Rename(context.Context, string, string) error { return nil }
+func (o *openOnlyFS) Delete(context.Context, string) error         { return nil }
+func (o *openOnlyFS) MakeDir(context.Context, string) error        { return nil }
+func (o *openOnlyFS) OpenRead(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(o.data)), nil
+}
+
+// TestStreamSeeker_FullAndRange 无 RangeReader 的卷也能整读/按 Range 读（修正下载恒 500）。
+func TestStreamSeeker_FullAndRange(t *testing.T) {
+	t.Parallel()
+	fs := &openOnlyFS{data: []byte("0123456789abcdef")}
+	s := NewStreamSeeker(context.Background(), fs, "x", int64(len(fs.data)))
+	if n, err := s.Seek(0, io.SeekEnd); err != nil || n != 16 {
+		t.Fatalf("SeekEnd = %d,%v want 16", n, err)
+	}
+	if _, err := s.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	all, err := io.ReadAll(s)
+	if err != nil || string(all) != "0123456789abcdef" {
+		t.Fatalf("整流读 = %q,%v", all, err)
+	}
+	// Range 读 [4,8)：先 Seek(0,End)（ServeContent 用法）→ Seek(4,Start) → 读 4 字节。
+	if _, err := s.Seek(0, io.SeekEnd); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.Seek(4, io.SeekStart); err != nil || n != 4 {
+		t.Fatalf("Seek(4) = %d,%v", n, err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(s, buf); err != nil || string(buf) != "4567" {
+		t.Fatalf("Range 读 = %q,%v", buf, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -63,20 +63,24 @@ func (s *externalDownloadSource) Stat(ctx context.Context) (fs.FileInfo, error) 
 // 信任保证演进：fsys 为可信卷（装配层注入 fileMeta 读取器）→ 包装 VerifyReadSeeker
 // 逐分块校验（下载比对 meta，静默损坏 fail-closed 不发损坏内容）。
 func (s *externalDownloadSource) Open(ctx context.Context) (files.SeekReadCloser, error) {
-	rs, err := syncpkg.NewRangeSeeker(ctx, s.fs, s.rel, s.size)
-	if err != nil {
-		return nil, err
+	// 无 RangeReader 的外部卷（如 S3 网关后端）：退**整流 seeker**（P1：此前直接报错 →
+	// /download 恒 500，本函数注释承诺的「调用方退整流 200」并不存在）。
+	var seeker files.SeekReadCloser
+	if rs, err := syncpkg.NewRangeSeeker(ctx, s.fs, s.rel, s.size); err == nil {
+		seeker = rs
+	} else {
+		seeker = syncpkg.NewStreamSeeker(ctx, s.fs, s.rel, s.size)
 	}
 	if s.fileMeta != nil {
 		if fm, ferr := s.fileMeta(ctx, s.rel); ferr == nil && fm != nil {
 			// meta 缺失/读取失败 → 直通（不误报）；meta 可用 → 逐分块校验。
-			v := meta.VerifyReadSeeker(rs, fm)
+			v := meta.VerifyReadSeeker(seeker, fm)
 			if vc, ok := v.(files.SeekReadCloser); ok {
 				return vc, nil
 			}
 		}
 	}
-	return rs, nil
+	return seeker, nil
 }
 
 // newExternalSource 构造服务端读取源（从 sync.Entry 元信息填充）。skipVerify=true
