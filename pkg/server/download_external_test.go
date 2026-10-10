@@ -376,7 +376,7 @@ func TestExternalDownloadSource_VerifyMeta(t *testing.T) {
 	pfs.fm = calc.Finish()
 
 	// 装配注入 FileMeta 读取器（模拟 newExternalSource 的 fileMetaReaderFor）。
-	src := newExternalSource(pfs, "alice/user/f.bin", &syncpkg.Entry{Size: int64(len(content)), MTime: 0})
+	src := newExternalSource(pfs, "alice/user/f.bin", &syncpkg.Entry{Size: int64(len(content)), MTime: 0}, false)
 	if src.fileMeta == nil {
 		t.Fatal("meta.Provider fsys 应注入 FileMeta 读取器")
 	}

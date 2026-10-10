@@ -12,10 +12,12 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -218,5 +220,55 @@ func TestCapacityFS_RenameFreesTarget(t *testing.T) {
 	}
 	if got := c.Used(); got != 20 {
 		t.Fatalf("Rename 后 Used = %d, want 20（目标旧 15 释放）", got)
+	}
+}
+
+// measuringFS 记录 WriteFile 实际读到的字节数（用于 size<=0 未知长度的实测记账断言）。
+type measuringFS struct {
+	mu    sync.Mutex
+	sizes map[string]int64
+}
+
+func (m *measuringFS) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
+func (m *measuringFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sizes[p]; ok {
+		return &syncpkg.Entry{Name: p, Path: p, Size: s}, nil
+	}
+	return nil, nil
+}
+func (m *measuringFS) OpenRead(context.Context, string) (io.ReadCloser, error) { return nil, nil }
+func (m *measuringFS) WriteFile(_ context.Context, p string, r io.Reader, size, _ int64) error {
+	n := size
+	if r != nil {
+		w, _ := io.Copy(io.Discard, r)
+		n = w
+	}
+	m.mu.Lock()
+	m.sizes[p] = n
+	m.mu.Unlock()
+	return nil
+}
+func (m *measuringFS) Rename(context.Context, string, string) error { return nil }
+func (m *measuringFS) Delete(context.Context, string) error         { return nil }
+func (m *measuringFS) MakeDir(context.Context, string) error        { return nil }
+
+// TestCapacityFS_UnknownSizeUsesMeasured 对抗评审：size<=0（未知长度，如 ContentLength=-1）
+// 此前会反向记账（delta<0 → Release 抹掉他人占用）；现按实测字节入账。
+func TestCapacityFS_UnknownSizeUsesMeasured(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(100)
+	fs := Wrap(&measuringFS{sizes: map[string]int64{}}, NewPoolCounter(pool))
+	content := strings.Repeat("x", 30)
+	if err := fs.WriteFile(context.Background(), "a.bin", strings.NewReader(content), -1, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if got := pool.Usage(); got != 30 {
+		t.Fatalf("未知长度应按实测入账 30, got %d", got)
+	}
+	// 已知长度超限仍 fail-closed。
+	if err := fs.WriteFile(context.Background(), "b.bin", nil, 80, 0); err == nil {
+		t.Fatal("30+80 超限应拒绝")
 	}
 }

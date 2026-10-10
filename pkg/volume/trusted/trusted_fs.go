@@ -362,10 +362,16 @@ func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 		return // 源 meta 不存在（读路径直算兜底）
 	}
 	defer rc.Close()
+	// 取源 meta 实际大小作为声明长度（避免传 -1 使容量层无法预留/按实测结算；
+	// FS-CORE-6）。取不到则仍传 -1（容量层现按实测结算，不再反向记账）。
+	srcSize := int64(-1)
+	if se, serr := t.inner.Stat(ctx, src); serr == nil && se != nil && !se.IsDir {
+		srcSize = se.Size
+	}
 	// B-MINOR：目标父目录先建（与 Rename 的 MakeDir 一致——Copy 到新子目录时
 	// meta/<新dir> 可能不存在，直接 WriteFile 会失败被吞成无 meta 孤儿）。
 	t.ensureMetaDir(ctx, dst)
-	if werr := t.inner.WriteFile(ctx, dst, rc, -1, 0); werr != nil {
+	if werr := t.inner.WriteFile(ctx, dst, rc, srcSize, 0); werr != nil {
 		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——可观测，读路径直算兜底。
 		t.logMetaWarn("Copy", to, werr)
 	}

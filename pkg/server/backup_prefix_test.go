@@ -7,6 +7,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // TestPrefixFS_KeySpaceMapping FS-CORE-3：备份目标键空间前缀映射——写入加 `<prefix>`，
@@ -29,5 +31,20 @@ func TestPrefixFS_KeySpaceMapping(t *testing.T) {
 	// Inner 透传（供 Innermost 下探）。
 	if p.Inner() == nil {
 		t.Fatal("Inner 应返回被包装 FS")
+	}
+}
+
+// TestNewExternalSource_SkipVerifyDisablesFileMeta skip_verify 对外部卷下载同口径生效
+// （此前仅本地卷/转存消费该开关）。
+func TestNewExternalSource_SkipVerifyDisablesFileMeta(t *testing.T) {
+	t.Parallel()
+	e := &syncpkg.Entry{Size: 1}
+	s := newExternalSource(&extFS{files: map[string]string{}}, "k", e, true)
+	if s.fileMeta != nil {
+		t.Fatal("skip_verify=true 应禁用 FileMeta 注入")
+	}
+	s2 := newExternalSource(&extFS{files: map[string]string{}}, "k", e, false)
+	if s2 == nil {
+		t.Fatal("非 skip 应返回 source")
 	}
 }

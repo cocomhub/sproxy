@@ -330,23 +330,49 @@ func (f *CapacityFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, err
 
 func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
 	prev := f.innerSize(ctx, relPath)
-	delta := size - prev
-	if delta > 0 {
-		if err := f.counter.TryAdd(delta); err != nil {
-			return err
+	// 声明长度已知（>0）时先预留（超限 fail-closed 拒绝写入）；未知/非法（<=0，如
+	// 分块传输 ContentLength=-1 / copyMeta）不预留，写后按**实测字节**结算。
+	reserved := int64(0)
+	if size > 0 {
+		if d := size - prev; d > 0 {
+			if err := f.counter.TryAdd(d); err != nil {
+				return err
+			}
+			reserved = d
 		}
 	}
-	if err := f.inner.WriteFile(ctx, relPath, r, size, mtime); err != nil {
-		if delta > 0 {
-			f.counter.Release(delta) // 写失败回滚净增
+	cr := &countingReader{r: r}
+	if err := f.inner.WriteFile(ctx, relPath, cr, size, mtime); err != nil {
+		if reserved > 0 {
+			f.counter.Release(reserved) // 写失败回滚预留
 		}
 		return err
 	}
-	if delta < 0 {
-		f.counter.Release(-delta) // 覆盖写变小：释放差额
+	// 结算：以实际写入（实测）为准，扣掉已预留。effective <= 0 时才回落声明值
+	// （inner 忽略 reader 但仍写 size 字节的极端实现）。
+	effective := cr.n
+	if effective <= 0 && size > 0 {
+		effective = size
+	}
+	if adj := (effective - prev) - reserved; adj > 0 {
+		_ = f.counter.TryAdd(adj) // 声明失真（少报）→ 补记（best-effort）
+	} else if adj < 0 {
+		f.counter.Release(-adj) // 覆盖写变小 / 多预留
 	}
 	f.persist()
 	return nil
+}
+
+// countingReader 记录底层实际被读取的字节（记账以实测为准，防声明长度撒谎）。
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // WriteIfAbsent 原子唯一写 + 卷级记账（目标不存在先预留 size）。

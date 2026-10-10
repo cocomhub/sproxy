@@ -243,7 +243,7 @@ func (h *Handlers) externalRemotePath(ctx context.Context, owner, volName, rel0,
 	}
 	return files.DownloadPath{
 		Filename: remotePath, VolumeName: volName,
-		Rel: ownerKey, Source: newExternalSource(fsys, ownerKey, e),
+		Rel: ownerKey, Source: newExternalSource(fsys, ownerKey, e, h.verifySkipped()),
 	}, nil
 }
 

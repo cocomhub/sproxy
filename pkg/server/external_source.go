@@ -79,17 +79,23 @@ func (s *externalDownloadSource) Open(ctx context.Context) (files.SeekReadCloser
 	return rs, nil
 }
 
-// newExternalSource 构造服务端读取源（从 sync.Entry 元信息填充）。
-func newExternalSource(fsys syncpkg.FS, rel string, e *syncpkg.Entry) *externalDownloadSource {
-	return &externalDownloadSource{
-		fs:      fsys,
-		rel:     rel,
-		size:    e.Size,
-		modTime: time.Unix(0, e.MTime),
+// newExternalSource 构造服务端读取源（从 sync.Entry 元信息填充）。skipVerify=true
+// （trusted_volume.skip_verify）时**不注入** meta 读取器 —— 外部卷下载与本地卷下载、
+// 云转存读回同口径地尊重该开关（P3 对抗评审：此前外部卷下载无效）。
+func newExternalSource(fsys syncpkg.FS, rel string, e *syncpkg.Entry, skipVerify bool) *externalDownloadSource {
+	var fm func(ctx context.Context, rel string) (*meta.FileMeta, error)
+	if !skipVerify {
 		// 装配层注入 FileMeta 读取器（fsys 为可信卷——secretdata Provider / trusted
 		// Wrap 装饰器——时经 meta.Provider 探测）；无 meta 能力 → nil（直通，读路径
 		// 直算兜底）。
-		fileMeta: fileMetaReaderFor(fsys),
+		fm = fileMetaReaderFor(fsys)
+	}
+	return &externalDownloadSource{
+		fs:       fsys,
+		rel:      rel,
+		size:     e.Size,
+		modTime:  time.Unix(0, e.MTime),
+		fileMeta: fm,
 	}
 }
 
@@ -129,11 +135,12 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		if be == nil {
 			continue
 		}
-		fsys := trusted.Guard(trusted.Wrap(be.FS(), h.trustedWrapOpts()))
-		if fsys == nil {
-			// 后端已登记但 FS 视图未就绪（评审 Minor：nil 接口解引用 panic 防御）。
+		raw := be.FS()
+		if raw == nil {
+			// 后端已登记但 FS 视图未就绪（nf 安全：Guard 恒非 nil，必须在 Wrap 前判裸 FS）。
 			continue
 		}
+		fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
 		loc, kerr := v.ResolveUserLocation(owner, stripped)
 		if kerr != nil {
 			// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
@@ -153,7 +160,7 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 			continue // 该卷无此文件/目录 → 下一候选
 		}
 		// 命中卷：分 A/B/C 态（volumePrivate 见 volumes.go：secretdata 恒 true）。
-		src := newExternalSource(fsys, ownerKey, e)
+		src := newExternalSource(fsys, ownerKey, e, h.verifySkipped())
 		if resolved := h.externalStateFor(v, forceForward, fsys, r, ownerKey, filename, src); resolved != nil {
 			return resolved
 		}
