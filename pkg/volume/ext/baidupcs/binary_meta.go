@@ -37,6 +37,10 @@ const binaryModTimeLayout = "2006-01-02 15:04:05"
 // binaryMetaHeader 匹配多路径 meta 输出的块头：`[0] - [/path/to/x] ------`。
 var binaryMetaHeader = regexp.MustCompile(`^\s*\[\d+\]\s*-\s*\[(.*)\]\s*-+`)
 
+// binaryListLineRE 匹配 `ls` 数据行：`<idx> <size> <date> <time> <name...>`。
+// **按列位置提取名字**（而非 strings.Fields + Join）——保留文件名内的连续/首部空格。
+var binaryListLineRE = regexp.MustCompile(`^\s*(\d+)\s+(\S+)\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s(.*)$`)
+
 // runBinaryOutput 执行 BaiduPCS-Go 子命令并返回 stdout（解析用）。
 // 与 runBinary 的区别：只取 stdout（stdout 混入 stderr 会破坏解析），失败带 stderr 摘要。
 func (a *binaryAdapter) runBinaryOutput(ctx context.Context, args ...string) ([]byte, error) {
@@ -274,29 +278,28 @@ func parseBinaryList(out []byte) ([]ObjectMeta, error) {
 }
 
 // parseBinaryListLine 解析 `ls` 输出一行：返回 (条目, 是否为数据行, 是否为目录头)。
+// 用正则按列位置提取文件名（保留内部空格；仅裁尾部列对齐填充），不用 strings.Fields
+// 重组（否则 `a  b.txt` 被归一为 `a b.txt`，后续寻址错对象；EXT-4）。
 func parseBinaryListLine(line string) (ObjectMeta, bool, bool) {
 	trimmed := strings.TrimSpace(line)
 	if strings.Contains(trimmed, "当前目录") || strings.HasPrefix(trimmed, "#") {
 		return ObjectMeta{}, false, true
 	}
-	fields := strings.Fields(trimmed)
-	if len(fields) < 5 {
+	m := binaryListLineRE.FindStringSubmatch(line)
+	if m == nil {
 		return ObjectMeta{}, false, false
 	}
-	if _, err := strconv.Atoi(fields[0]); err != nil {
-		return ObjectMeta{}, false, false // 表头 / 总行 / 分隔线
-	}
-	name := strings.Join(fields[4:], " ")
+	name := strings.TrimSpace(m[5])
 	if name == "" {
 		return ObjectMeta{}, false, false
 	}
 	isDir := strings.HasSuffix(name, "/")
 	name = strings.TrimSuffix(name, "/")
 	entry := ObjectMeta{Key: name, IsDir: isDir}
-	if fields[1] != "-" {
-		entry.Size = parseHumanSize(fields[1])
+	if m[2] != "-" {
+		entry.Size = parseHumanSize(m[2])
 	}
-	if ts, err := time.ParseInLocation(binaryModTimeLayout, fields[2]+" "+fields[3], time.Local); err == nil {
+	if ts, err := time.ParseInLocation(binaryModTimeLayout, m[3]+" "+m[4], time.Local); err == nil {
 		entry.ModTime = ts
 	}
 	return entry, true, false

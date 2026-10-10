@@ -283,3 +283,23 @@ func TestSanitizeRemotePath_RejectsGlob(t *testing.T) {
 		t.Fatalf("含 `[` 的合法路径不应拒绝: %v", err)
 	}
 }
+
+// TestParseBinaryList_InternalSpacesPreserved EXT-4：文件名内部连续空格必须保留
+// （strings.Fields+Join 会归一为单空格 → 后续寻址错对象）。
+func TestParseBinaryList_InternalSpacesPreserved(t *testing.T) {
+	t.Parallel()
+	const out = `
+当前目录: /
+----
+  #     文件大小         修改日期                                     文件(目录)
+   7        1.00MB  2026-04-23 16:49:04  a  b.txt
+----
+`
+	es, err := parseBinaryList([]byte(out))
+	if err != nil || len(es) != 1 {
+		t.Fatalf("parseBinaryList: n=%d err=%v", len(es), err)
+	}
+	if es[0].Key != "a  b.txt" {
+		t.Fatalf("内部空格应保留, got %q", es[0].Key)
+	}
+}

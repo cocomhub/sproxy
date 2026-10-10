@@ -341,15 +341,19 @@ func (h *Handlers) commitCopyResult(cvc *copyVolumeCtx, scope *quota.Scope, toPo
 		}
 	}
 
-	// checksum 台账：目标卷副本也登记（与上传一致，供后续幂等/删除校验复用）。
-	if cs := h.checksumStoreFor(cvc.owner); cs != nil {
-		cs.Set(cvc.rel, serverChecksumOf(written))
-	}
-
 	// 计算实际写入 checksum（流式复制未计哈希——补算，幂等/校验用）。
 	srcCS, cerr := FileChecksumRoot(cvc.fromRoot, cvc.rel)
 	if cerr != nil {
 		srcCS = ""
+	}
+	// checksum 台账：目标卷副本也登记（与上传一致，供后续幂等/删除校验复用）。
+	// 必须在实测 srcCS 算出**之后**写入——此前用 serverChecksumOf（恒空串）占位，
+	// 使 attachChecksum/writeChunkSuccess 命中空 checksum 提前返回、X-File-Checksum 为空
+	// （客户端整文件校验降级；P2 对抗评审）。
+	if srcCS != "" {
+		if cs := h.checksumStoreFor(cvc.owner); cs != nil {
+			cs.Set(cvc.rel, srcCS)
+		}
 	}
 	h.RecordAudit(cvc.ctx, AuditEvent{
 		Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
@@ -372,13 +376,6 @@ func (h *Handlers) writeCopyMeta(cvc *copyVolumeCtx) {
 		h.logger.Warn("跨卷复制目标 meta 落盘失败（读路径直算兜底）",
 			"file_name", cvc.remotePath, "to", cvc.toVol, "error", mErr)
 	}
-}
-
-// serverChecksumOf 占位：流式复制不产出哈希，checksum 台账以源文件实测为准
-// （见 copyFileBetweenVolumes 补算分支）。此处保持函数存在以防未来流式复制返回哈希。
-func serverChecksumOf(written int64) string {
-	_ = written
-	return ""
 }
 
 // mirrorVolumeStats 是单次 mirrorVolume 的统计结果。

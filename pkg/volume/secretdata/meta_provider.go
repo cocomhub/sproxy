@@ -56,6 +56,8 @@ func shardsealMetaToFileMeta(m *shardseal.Meta) *meta.FileMeta {
 		TotalSHA256: m.Original.SHA256,
 		Name:        m.Original.Name,
 		MTime:       m.Original.MTime,
+		CTime:       m.Original.CTime,
+		MediaType:   m.Original.MediaType,
 		BaseVersion: m.BaseVersion,
 		Signature:   m.Signature,
 	}
