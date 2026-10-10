@@ -51,7 +51,7 @@ func (b *completeTestBackend) Close() error { return nil }
 func TestBackendsPresignComplete(t *testing.T) {
 	t.Parallel()
 	registry.RegisterBackend(completeTestType, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-		return &completeTestBackend{entries: map[string]bool{"dir/a.txt": true}}, nil
+		return &completeTestBackend{entries: map[string]bool{"anonymous/user/dir/a.txt": true}}, nil
 	})
 	defer registry.UnregisterBackendForTest(completeTestType)
 

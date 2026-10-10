@@ -335,7 +335,7 @@ func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key str
 	case http.MethodGet:
 		h.s3GetObject(w, root, rel)
 	case http.MethodPut:
-		h.s3PutWithQuota(w, r, owner, root, rel, body)
+		h.s3PutWithQuota(w, r, owner, tnt, root, rel, body)
 	case http.MethodDelete:
 		// M1 修复：删除联动清理 meta（与 files.Service delete 一致；disable 后存量也清理）。
 		// C-MAJOR-3 修复：主文件删除**成功**才清理 meta——s3DeleteObject 返回是否成功，
@@ -370,40 +370,91 @@ func (h *Handlers) s3ReadBody(w http.ResponseWriter, r *http.Request) ([]byte, b
 	return body, true
 }
 
-// s3PutWithQuota 处理 S3 单对象 PUT：owner 配额双预留（写前 TryReserve、成功 Commit/
-// 覆盖差分、失败 Release）+ 写成功后补建 meta（P1/P2 修复）。
-func (h *Handlers) s3PutWithQuota(w http.ResponseWriter, r *http.Request, owner string, root *storage.Root, rel string, body []byte) {
-	size := int64(len(body))
-	var scope *quota.Scope
-	var res *quota.Reservation
-	prev := int64(0)
-	if sc := h.quotaScopeFor(owner, rel); sc != nil {
-		scope = sc
-		if e, serr := root.Stat(rel); serr == nil && e != nil && !e.IsDir() {
-			prev = e.Size()
-		}
-		r0, rerr := sc.TryReserve(size)
-		if rerr != nil {
-			http.Error(w, msgStorageQuotaExceeded, http.StatusInsufficientStorage)
-			return
-		}
-		res = r0
-	}
-	if !h.s3PutObject(w, root, rel, body) {
-		if res != nil {
-			res.Release()
-		}
+// s3PutWithQuota 处理 S3 单对象 PUT：**owner 配额 + 卷容量池双账本**预留（写前
+// TryReserve、成功 Commit/覆盖差分、失败 Release）+ 写成功后补建 meta。
+// 卷容量池此前漏预留（第 5 轮对抗评审）：经 S3 网关单 PUT 写本地卷可叠加突破
+// `vol_capacity` 上限；multipart complete（s3_multipart.go）与版本恢复（version.go）
+// 均已双账本，此处对齐。
+func (h *Handlers) s3PutWithQuota(w http.ResponseWriter, r *http.Request, owner string, tnt *storage.Tenant, root *storage.Root, rel string, body []byte) {
+	resv, ok := h.s3PutReserve(w, owner, tnt, root, rel, int64(len(body)))
+	if !ok {
 		return
 	}
-	if scope != nil {
-		if prev > 0 {
-			scope.Adjust(prev, size)
-			res.Release()
+	if !h.s3PutObject(w, root, rel, body) {
+		resv.release()
+		return
+	}
+	resv.settle(int64(len(body)))
+	h.s3WriteMetaAfter(r, owner, root, rel)
+}
+
+// s3PutReservation 承载 S3 单对象 PUT 的 owner Scope + 卷容量池双预留。
+type s3PutReservation struct {
+	scope    *quota.Scope
+	pool     *quota.Pool
+	scopeRes *quota.Reservation
+	poolRes  *quota.Reservation
+	prev     int64 // 目标 rel 旧大小（覆盖写差分）
+}
+
+// s3PutReserve 双账本预留（owner Scope + 卷容量池）。不足 → 507 并返回 ok=false。
+// 卷容量池此前漏预留（第 5 轮对抗评审）：经 S3 网关单 PUT 写本地卷可叠加突破
+// `vol_capacity` 上限；multipart complete（s3_multipart.go）与版本恢复（version.go）
+// 均已双账本，此处对齐。
+func (h *Handlers) s3PutReserve(w http.ResponseWriter, owner string, tnt *storage.Tenant, root *storage.Root, rel string, size int64) (*s3PutReservation, bool) {
+	resv := &s3PutReservation{}
+	// prev 预读（覆盖写差分；预留在 prev 统计之前，对齐 routeUpload/s3CompleteReserve 同序）。
+	if e, serr := root.Stat(rel); serr == nil && e != nil && !e.IsDir() {
+		resv.prev = e.Size()
+	}
+	if resv.scope = h.quotaScopeFor(owner, rel); resv.scope != nil {
+		r0, rerr := resv.scope.TryReserve(size)
+		if rerr != nil {
+			http.Error(w, msgStorageQuotaExceeded, http.StatusInsufficientStorage)
+			return nil, false
+		}
+		resv.scopeRes = r0
+	}
+	if resv.pool = h.volumePoolForTenant(tnt); resv.pool != nil {
+		r0, rerr := resv.pool.TryReserve(size)
+		if rerr != nil {
+			resv.release()
+			http.Error(w, "s3: 卷容量不足", http.StatusInsufficientStorage)
+			return nil, false
+		}
+		resv.poolRes = r0
+	}
+	return resv, true
+}
+
+// release 归还所有未提交的预留（写失败或后续预留失败）。
+func (r *s3PutReservation) release() {
+	if r.scopeRes != nil {
+		r.scopeRes.Release()
+	}
+	if r.poolRes != nil {
+		r.poolRes.Release()
+	}
+}
+
+// settle 写成功后入账：覆盖写按差分 Adjust，新对象直接 Commit。
+func (r *s3PutReservation) settle(size int64) {
+	if r.scope != nil {
+		if r.prev > 0 {
+			r.scope.Adjust(r.prev, size)
+			r.scopeRes.Release()
 		} else {
-			res.Commit(size)
+			r.scopeRes.Commit(size)
 		}
 	}
-	h.s3WriteMetaAfter(r, owner, root, rel)
+	if r.pool != nil {
+		if r.prev > 0 {
+			r.pool.Adjust(r.prev, size)
+			r.poolRes.Release()
+		} else {
+			r.poolRes.Commit(size)
+		}
+	}
 }
 
 // s3WriteMetaAfter 在 s3 PUT 成功后补建 meta sidecar（本地旁路写：root 直写不经

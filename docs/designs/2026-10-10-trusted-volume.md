@@ -151,6 +151,24 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 - **presign 直传绕过 meta + 容量**（第 4 轮对抗评审 P1）：预签名 PUT 是客户端直写对象键，
   不经 `be.FS()`——不写 sidecar、不计卷级容量。彻底解决需 per-volume presign 或将直传对象在
   complete 阶段经 `Guard(Wrap(fs))` 回读算 meta 并记账（成本与产品决策待定）。
+- **第 5 轮对抗评审修复批次一（2026-10-11）**：
+  * 外部卷「无 RangeReader → 整流回落」此前是**死代码**（装饰器无条件实现 `OpenRangeRead`，
+    `AssertRangeReader` 恒真）→ `NewRangeSeeker` 判据改为下探 `syncpkg.Innermost`；
+  * **加密卷坐标统一**：新增 `storage.Root.LogicalSize`（明文长度），`/api/files` 列表、
+    `/api/files/stat` 的 `X-File-Size`、`/download/chunk` 的 `Content-Range`/截断判据一律
+    报明文；`encReadCloser.Seek` 支持任意正偏移 `SeekStart`（`/download` 的非零 Range 不再 416）；
+    `/download/chunk` 先定分块边界再开句柄（越界回 416 而非 500）；缺文件回 404；
+  * `/download` 校验失败改为 `panic(http.ErrAbortHandler)` 主动断连 + `success=false` 指标 + Warn
+    （对齐 S3 网关 GET），不再静默截断却记成功；
+  * 读校验降级可观测：sidecar 缺失记 Debug（升级后对所有存量文件成立，避免刷屏）、
+    读失败/畸形记 Warn（本地与外部卷两条路径）；
+  * **`pkg/syncexec` 补 sidecar 联动**：pull/both 本地目标改为「租户根 user 桶视图 × trusted.Wrap」
+    （`userBucketFS` + `newLocalPullFS`）→ 覆盖写重建 sidecar、不再留陈旧 sidecar 致文件永久
+    不可下载；`cmd/sproxy` 的 baidupcs 同步载体工厂补 `Guard(Wrap(...))`（push 到外部卷也生成 sidecar）；
+  * **S3 网关单对象 PUT 补卷容量池预留**（此前只预留 owner Scope，可叠加突破 `vol_capacity`）；
+  * **presign/complet 端点 owner 收敛（预存安全缺口）**：`presignOwnerKey` 把请求路径重绑到
+    调用者 `<owner>/user/<rel>`，越权（他人 owner / 非 user 桶）→ 403；此前服务端凭据可对
+    任意键签发 PUT/GET（且直传对象落在裸 key、文件 API 根本看不到）。
 - **回收站仅默认卷可见**（第 4 轮对抗评审 P1）：软删写 home 卷 trash，列表/恢复/清空只看默认
   卷 → 多卷下软删文件不可见不可恢复、EmptyTrash 不释放配额。彻底解决需按 owner 卷视图逐卷
   定位。

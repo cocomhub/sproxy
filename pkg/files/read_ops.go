@@ -177,7 +177,7 @@ func (s *Service) listFallbackSingle(owner, subdir, rel string, csMap map[string
 		s.rt.logger().Warn("读取卷目录失败", "dir", rel, "error", err)
 		return nil
 	}
-	return s.buildFileListEntries(entries, csMap, subdir)
+	return s.buildFileListEntries(entries, csMap, subdir, tnt.Root())
 }
 
 // listVolumeDirEntries 聚合多卷回退中单个卷的目录条目：目录条目去重、文件条目带卷名。
@@ -195,7 +195,7 @@ func (s *Service) listVolumeDirEntries(v volume.Volume, owner, subdir, rel strin
 		s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
 		return out
 	}
-	for _, e := range s.buildFileListEntries(entries, csMap, subdir) {
+	for _, e := range s.buildFileListEntries(entries, csMap, subdir, tnt.Root()) {
 		if e.IsDir {
 			if seenDirs[e.Name] {
 				continue
@@ -263,7 +263,7 @@ func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, erro
 		s.rt.logger().Error(errMsgStatFailed, "file_name", dp.Filename, "error", err.Error())
 		return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
 	}
-	st := FileStat{IsDir: info.IsDir(), Size: info.Size(), MTime: info.ModTime().UnixNano()}
+	st := FileStat{IsDir: info.IsDir(), Size: logicalSizeFor(dp.Tenant.Root(), dp.Rel, info), MTime: info.ModTime().UnixNano()}
 	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			st.Checksum = cs

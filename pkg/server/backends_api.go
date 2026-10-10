@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -37,9 +38,9 @@ func (h *Handlers) backendsHandler(w http.ResponseWriter, r *http.Request) {
 // 未注册 type → 404；后端不支持 Presign → 405；缺 path / method 非法 → 400。
 func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request) {
 	typ := r.PathValue("type")
-	path, perr := guardPresignPath(r.URL.Query().Get("path"))
+	path, perr := h.presignPathFor(r)
 	if perr != nil {
-		http.Error(w, perr.Error(), http.StatusBadRequest)
+		http.Error(w, perr.Error(), http.StatusForbidden)
 		return
 	}
 	method := strings.ToUpper(r.URL.Query().Get("method"))
@@ -114,9 +115,9 @@ func (h *Handlers) presignBackendError(w http.ResponseWriter, typ string, err er
 // 未注册 type → 404；对象不存在 → 404（fail-closed）。
 func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	typ := r.PathValue("type")
-	path, perr := guardPresignPath(r.URL.Query().Get("path"))
+	path, perr := h.presignPathFor(r)
 	if perr != nil {
-		http.Error(w, perr.Error(), http.StatusBadRequest)
+		http.Error(w, perr.Error(), http.StatusForbidden)
 		return
 	}
 	be, err := h.presignBackendFor(r.Context(), typ)
@@ -152,4 +153,56 @@ func guardPresignPath(raw string) (string, error) {
 		return "", fmt.Errorf("路径命中内部功能桶，禁止直传")
 	}
 	return clean, nil
+}
+
+// errPresignCrossOwner / errPresignNonUserBucket 是预签名越权哨兵（达 403）。
+var (
+	errPresignCrossOwner    = errors.New("越权：预签名路径不属于当前主体")
+	errPresignNonUserBucket = errors.New("预签名仅允许 user 桶")
+)
+
+// presignPathFor 解析请求的卷内路径并**收敛到调用者的 owner 键空间**。
+//
+// 安全背景（第 5 轮对抗评审 P0，**预存缺陷**）：原实现把客户端给的裸路径直接交给
+// 后端 `PresignedURL`——后端键空间恒为 `<归一 owner>/<bucket>/<path>`
+// （`volume.Location.FSPath`），故任意已认证用户可对 `<他人 owner>/user/...` 取
+// 服务端凭据签名的 PUT/GET URL（跨租户读写）。此处服务端统一重绑：
+//   - 裸相对路径（`a.txt`）→ `<owner>/user/a.txt`；
+//   - `user/a.txt` → `<owner>/user/a.txt`；
+//   - `<owner>/user/a.txt` → 原样（owner 必须为调用者）；
+//   - `<他人 owner>/...` → 403；非 user 桶（cloud/version/…）→ 403。
+//
+// 这样对象落点与文件 API（`externalUploadSink.ownerKey` → `FSPath`）一致——此前
+// 直传对象落在裸 key、文件 API 根本看不到。
+func (h *Handlers) presignPathFor(r *http.Request) (string, error) {
+	clean, err := guardPresignPath(r.URL.Query().Get("path"))
+	if err != nil {
+		return "", err
+	}
+	return presignOwnerKey(normalizeOwner(ownerFromRequest(r)), clean)
+}
+
+// presignOwnerKey 把已清洗的卷内路径收敛为 `<owner>/user/<rel>`（纯函数，便于测试）。
+func presignOwnerKey(owner, clean string) (string, error) {
+	owner = normalizeOwner(owner)
+	seg := strings.Split(clean, "/")
+	// 共享卷形态 `<owner>/<bucket>/<rel...>`：次段为保留桶名。
+	if len(seg) >= 2 && storage.IsReservedBucketName(seg[1]) {
+		if seg[0] != owner {
+			return "", errPresignCrossOwner
+		}
+		seg = seg[1:]
+	}
+	if !storage.IsReservedBucketName(seg[0]) {
+		// 裸相对路径（无桶段）→ 视为调用者 user 桶内路径。
+		return owner + "/user/" + clean, nil
+	}
+	if strings.ToLower(seg[0]) != "user" {
+		return "", errPresignNonUserBucket
+	}
+	rel := strings.Join(seg[1:], "/")
+	if rel == "" {
+		return "", errors.New("预签名路径不能为 user 桶根")
+	}
+	return owner + "/user/" + rel, nil
 }

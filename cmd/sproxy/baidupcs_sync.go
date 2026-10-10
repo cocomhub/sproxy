@@ -34,6 +34,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 	baidupcs "github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // baidupcsStorageFactory 构造网盘 Storage（可注入，测试用内存 fake）。
@@ -53,7 +54,7 @@ type baidupcsStorageFactory func(cfg baidupcs.StorageConfig) (baidupcs.StorageAP
 //   - 工厂总是注入：Set.External 查不到卷时在**调用点**报错（fail-closed，绝不回落
 //     direct——回落会让「已声明本机卷」的配置静默走远程 HTTP，破坏卷寻址语义）。
 //   - set 为 nil（未装配卷集合）→ 不注入（防御；正常装配下恒非 nil）。
-func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slog.Logger, trackerFor func(owner string) syncpkg.StagingQuotaTracker) {
+func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slog.Logger, trackerFor func(owner string) syncpkg.StagingQuotaTracker, wrapOpts ...trusted.Options) {
 	if exec == nil || set == nil {
 		return
 	}
@@ -66,6 +67,13 @@ func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slo
 			return nil, nil, fmt.Errorf("remote %q: baidupcs 卷 %q 未装配（volumes[] 需含 type=baidupcs 且 name 匹配）", remote.Name, remote.Volume)
 		}
 		fs := be.FS()
+		// P2 修复（第 5 轮对抗评审）：push 到外部卷同样叠 `Guard(Wrap(...))`——此前该入口
+		// 是全仓唯一未包可信卷的写面，推送落盘的文件**不生成 sidecar** → 该卷 `/download`
+		// 取不到 FileMeta 而静默零校验。与 HTTP 上传（externalSinkFor）/转存（TransferFSFor）/
+		// 备份（backupTargetFSBase）同一装配形状；wrapOpts 由装配层注入（缺省零值 = 自适应分块）。
+		if len(wrapOpts) > 0 {
+			fs = trusted.Guard(trusted.Wrap(fs, wrapOpts[0]))
+		}
 		// 2026-10-10：staging 配额改**per-request/per-owner 包装实例**——不再向卷共享
 		// 单例注入（旧 WithQuota 覆盖会跨 owner 串账）。
 		// P1 修复：改用**与 HTTP 上传/转存/备份同一个 per-owner staging tracker**

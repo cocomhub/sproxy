@@ -306,7 +306,11 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 	mrel := meta.MetaPath(rel)
 	rc, err := root.Open(mrel)
 	if err != nil {
-		return nil, nil // sidecar 缺失（旁路写/未启用/存量数据）：直通——**本路径不提供任何服务端校验**，非「直算兜底」
+		// sidecar 缺失（旁路写/未启用/存量数据）→ 直通——**本路径不提供任何服务端校验**，
+		// 非「直算兜底」。可观测性（第 5 轮对抗评审 P1）：升级后存量文件全部无 sidecar，
+		// 运维必须能区分「无校验能力」与「校验通过」；用 Debug 避免大目录刷屏（读失败才是 Warn）。
+		p.warnDegradeDebug("sidecar 缺失", rel, err)
+		return nil, nil
 	}
 	defer rc.Close()
 	raw, rerr := io.ReadAll(io.LimitReader(rc, meta.MaxMetaSidecarBytes()+1))
@@ -345,6 +349,15 @@ func (p filesMetaPolicy) warnDegrade(reason, rel string, err error) {
 		return
 	}
 	p.h.logger.Warn("可信卷读校验降级为直通", "reason", reason, "path", rel, "error", err)
+}
+
+// warnDegradeDebug 同 warnDegrade，但用 Debug 级别（仅用于「sidecar 缺失」这类升级
+// 后对所有存量文件都成立、按 Warn 会刷屏的预期状态）。
+func (p filesMetaPolicy) warnDegradeDebug(reason, rel string, err error) {
+	if p.h == nil || p.h.logger == nil {
+		return
+	}
+	p.h.logger.Debug("可信卷读校验降级为直通", "reason", reason, "path", rel, "error", err)
 }
 
 // WriteMeta 计算并写入配套 .meta（本地卷上传到达即建；失败返回错误由调用方 Warn 兜底，

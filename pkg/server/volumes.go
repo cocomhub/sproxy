@@ -636,6 +636,10 @@ func (h *Handlers) stagingQuotaFS(owner string, fs syncpkg.FS) syncpkg.FS {
 
 // trustedWrapOpts 装配可信卷装饰器配置（C-MAJOR-4：ChunkSize 从 trusted_volume
 // 配置接线——缺省 0 自适应 ChunkSizeForSize；Logger 随装配层注入可观测 meta 失败）。
+// TrustedWrapOptions 导出可信卷 Wrap 选项（装配层在 pkg/server 之外装配外部卷写面时
+// 复用同一分块/日志口径——如 cmd/sproxy 的 baidupcs 同步载体工厂）。
+func (h *Handlers) TrustedWrapOptions() trusted.Options { return h.trustedWrapOpts() }
+
 func (h *Handlers) trustedWrapOpts() trusted.Options {
 	opts := trusted.Options{Logger: h.logger}
 	if h.cfgPtr == nil {

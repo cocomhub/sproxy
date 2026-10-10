@@ -59,6 +59,15 @@ func NewRangeSeeker(ctx context.Context, fs FS, rel string, size int64) (*RangeS
 	if rr == nil {
 		return nil, fmt.Errorf("sync: FS 未实现 RangeReader，无法随机访问（服务端整流路径）")
 	}
+	// P1（第 5 轮对抗评审）：透明装饰器（MetaBucketGuard/TrustedVolumeFS/CapacityFS/
+	// StagingQuotaGateFS 等）**无条件**实现 OpenRangeRead（inner 无能力时运行期才返
+	// ErrUnsupported），故仅凭类型断言恒真——会让调用方（external_source.go）的
+	// 「整流 seeker 回落」变成死代码：RangeSeeker 构造成功、首次 Read 才报错，而
+	// ServeContent 已发出 200/Content-Length → 客户端静默截断。
+	// 判据必须下探最内层原始卷（与 Innermost 的既定能力探测纪律一致）。
+	if AssertRangeReader(Innermost(fs)) == nil {
+		return nil, fmt.Errorf("sync: 底层卷未实现 RangeReader（仅装饰层回显），无法随机访问（服务端整流路径）")
+	}
 	if size < 0 {
 		return nil, fmt.Errorf("sync: 非法文件大小 %d", size)
 	}

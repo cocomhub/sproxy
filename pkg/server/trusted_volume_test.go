@@ -225,7 +225,9 @@ func TestDownload_VerifyMeta_TamperFailClosed(t *testing.T) {
 	}
 	r2, err := hc.Get(url + "/download?filename=verify.bin")
 	if err != nil {
-		t.Fatalf("download2: %v", err)
+		// 第 5 轮对抗评审 P1：校验失败改为 **panic(http.ErrAbortHandler)** 主动中断连接
+		// （对齐 S3 GET），客户端在 Do/Read 阶段见 EOF——fail-closed 达成。
+		return
 	}
 	defer r2.Body.Close()
 	if r2.StatusCode == http.StatusOK {

@@ -6,7 +6,9 @@ package server
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -77,6 +79,14 @@ func (s *externalDownloadSource) Open(ctx context.Context) (files.SeekReadCloser
 			v := meta.VerifyReadSeeker(seeker, fm)
 			if vc, ok := v.(files.SeekReadCloser); ok {
 				return vc, nil
+			}
+		} else if ferr != nil {
+			// 可观测性（第 5 轮对抗评审 P1）：sidecar 缺失是升级后的预期状态（Debug），
+			// 而**读失败/畸形**必须 Warn——否则运维无法区分「无校验能力」与「已校验」。
+			if os.IsNotExist(ferr) {
+				slog.Default().Debug("外部卷下载不经服务端校验（sidecar 缺失）", "path", s.rel)
+			} else {
+				slog.Default().Warn("外部卷 sidecar 读取失败，降级为不经服务端校验", "path", s.rel, "error", ferr.Error())
 			}
 		}
 	}
