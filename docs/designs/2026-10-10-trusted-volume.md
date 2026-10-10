@@ -116,6 +116,25 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   桶并拒绝（`guard_fs_test.go` 已断言）。**残余**：Windows 反斜杠分隔符需 `guardPath`
   先归一（当前 in-tree 调用方均先经 `storage.NormalizeRemote`，纵深防御缺口，已记档）。
 - 崩溃恢复（统一恢复协调器 / staging 本地 meta 校验续传）为后续专题，见 `docs/archive/architecture-task-recovery.md`。
+- **远端卷写后交叉校验**（并发覆盖错位检测）仅本地卷执行（第 3 轮对抗评审 P2）：远端回读 =
+  一次全量下载，成本不可接受；远端并发写同键的错配 sidecar 会固化为读失败（fail-closed）——
+  经第 3 轮修复，backup 目标键空间已按 owner 归一（`prefixFS`），但 cloud 转存/上传到同一
+  `<owner>/user/<rel>` 仍无按 rel 写锁；彻底解决需统一恢复协调器或按 rel 写锁，记档。
+- **`syncpkg.BlockAccessor` 未转发**（第 3 轮对抗评审 P2）：四个装饰器不实现该可选接口，
+  块级增量对装饰后的卷静默回退整文件复制。**不直接转发的原因**：装饰器无条件实现会让
+  sync 引擎对不具备该能力的底层也走块级路径（`ErrUnsupported` 无法表达「未实现」），需引
+  入 `Capability` 探测语义（后续专题）；当前无生产后端实现 BlockAccessor，无生产触发。
+- **`/download/chunk` 部分 Range 不足一块时无逐块校验**（第 3 轮对抗评审 P2）：
+  `VerifyReadSeeker` 只校验从块首完整读满的块；请求区间不覆盖任何完整 meta 块时本次响应
+  不校验（剩客户端整文件 checksum）。彻底解决需把分块下载 offset/length 对齐 meta 块边界，
+  记档。
+- **baidupcs 本地 staging 峰值 ≈ 2×size**（第 3 轮对抗评审 P2）：`SyncFS.WriteFile` 落
+  `staging-*` 后 `Storage.Put→stageUpload` 又复制一份 `stage-*`；gate 只按 1×size 预留。
+  消除第二份复制需 `Storage.Put` 直接接受 staging 路径（改动 baidu 上传算法），记档。
+  读路径（`Storage.Get` 整文件落本地）亦不受 staging gate 约束（同上）。
+- **容量释放依赖 Stat**（第 3 轮对抗评审 P3）：`Delete/Rename/Move/Copy` 释放量取自
+  `inner.Stat` 实测；Stat 瞬时失败时释放 0（计数偏高、仅对账/重启自愈）。
+- **`FileMeta.Signature`**：同上行（预留字段）。
 
 ## 9. 验证
 
