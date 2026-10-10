@@ -199,6 +199,11 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// P2-3 修复：本地（非加密）分块下载也接 meta 逐分块校验（与 /download 一致）。
+	file, fcloser, ok = s.maybeWrapChunkVerify(w, r, root, dp, file, fcloser, encrypted)
+	if !ok {
+		return
+	}
 	defer func() {
 		if fcloser != nil {
 			_ = fcloser.Close()
@@ -226,6 +231,29 @@ func (s *Service) openChunkSource(w http.ResponseWriter, root *storage.Root, dp 
 		return s.openEncryptedChunkSource(w, root, dp, offset)
 	}
 	return s.openPlainChunkSource(w, root, dp)
+}
+
+// maybeWrapChunkVerify 给本地非加密分块源接 meta 逐分块校验（P2-3）。返回
+// (file, closer, ok)：ok=false = 已写错误响应（调用方直接 return）；加密卷/未装配/无
+// meta → 原值直通零回归。构造时 extent 探测 + 读入时凡完整覆盖的 meta 分块逐块比对。
+func (s *Service) maybeWrapChunkVerify(w http.ResponseWriter, r *http.Request, root *storage.Root, dp DownloadPath, file io.ReadSeeker, fcloser io.Closer, encrypted bool) (io.ReadSeeker, io.Closer, bool) {
+	if encrypted {
+		// 加密流由卷内 GCM 自校验，且解密流不支持任意 Seek（仅 0 重开）。
+		return file, fcloser, true
+	}
+	vf, verr := s.rt.verifyDownload(r.Context(), root, dp.Rel, seekReadCloser{ReadSeeker: file, Closer: fcloser})
+	if verr != nil {
+		s.rt.logger().Error("分块下载校验装配失败", "file_name", dp.Filename, "error", verr.Error())
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
+		if fcloser != nil {
+			_ = fcloser.Close()
+		}
+		return nil, nil, false
+	}
+	if vf != nil {
+		return vf, vf, true // 包装器 Close 委托底层，避免重复关原句柄
+	}
+	return file, fcloser, true
 }
 
 // openEncryptedChunkSource 打开加密卷解密流并丢弃 offset 字节（解密流无任意 Seek）。
@@ -313,6 +341,13 @@ func (s *Service) readChunkData(w http.ResponseWriter, dp DownloadPath, file io.
 		return nil, "", false
 	}
 	return data, serverChecksum, true
+}
+
+// seekReadCloser 把分离的 io.ReadSeeker + io.Closer 组合为 files.SeekReadCloser
+// （分块下载接 meta 校验包装用；Open 返回的普通卷文件即此形态）。
+type seekReadCloser struct {
+	io.ReadSeeker
+	io.Closer
 }
 
 // chunkResp 承载一次分块下载响应的写上下文（S107：收敛 writeChunkSuccess 的 w/r/dp 参数）。

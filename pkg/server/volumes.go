@@ -593,6 +593,10 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 		return nil
 	}
 	fsys = trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts()))
+	// P1-6 修复：直传外部卷也接本地 staging 配额（与 backup/transfer 统一）——
+	// baidupcs StorageFS.WriteFile 先落本地 staging，此前该入口无记账。gate 置于
+	// Guard(Wrap) 之外：meta 写经 Wrap.inner（raw）绕过 gate（小字节），主文件写在 gate 预留。
+	fsys = h.stagingQuotaFS(owner, fsys)
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
 }
 
@@ -623,11 +627,14 @@ func (h *Handlers) stagingQuotaFS(owner string, fs syncpkg.FS) syncpkg.FS {
 // trustedWrapOpts 装配可信卷装饰器配置（C-MAJOR-4：ChunkSize 从 trusted_volume
 // 配置接线——缺省 0 自适应 ChunkSizeForSize；Logger 随装配层注入可观测 meta 失败）。
 func (h *Handlers) trustedWrapOpts() trusted.Options {
-	cfg := h.cfgPtr.Load()
-	return trusted.Options{
-		ChunkSize: int64(cfg.TrustedVolume.ChunkSize),
-		Logger:    h.logger,
+	opts := trusted.Options{Logger: h.logger}
+	if h.cfgPtr == nil {
+		return opts // 直接构造的 Handlers（单测/嵌入）无配置指针：缺省零值，nil 安全
 	}
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		opts.ChunkSize = int64(cfg.TrustedVolume.ChunkSize)
+	}
+	return opts
 }
 
 // verifySkipped 报告是否跳过下载数据校验（trusted_volume.skip_verify；缺省 false =

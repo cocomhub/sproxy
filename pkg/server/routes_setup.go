@@ -464,6 +464,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		RetryDelay:          cfg.CloudRetryDelay,
 		Downloader:          cfg.CloudDownloader,
 		MaxCheckMemBytes:    cfg.CloudCheckMemBytes,
+		// P2-7 修复：trusted_volume.skip_verify 接线到转存读侧校验（此前 cloudCfg 缺该
+		// 字段，transfer.go 的 m.config.SkipVerify 恒 false——配置项与文档不符）。
+		SkipVerify: cfg.TrustedVolume.SkipVerify,
 	}
 	// 云端下载经 mesh 出口：由装配层（cmd/sproxy）构造 CloudExitDial 注入
 	// （pkg/server 不 import pkg/client——client 测试 import server 构成包级环，

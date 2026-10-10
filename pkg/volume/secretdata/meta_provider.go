@@ -67,9 +67,8 @@ func shardsealMetaToFileMeta(m *shardseal.Meta) *meta.FileMeta {
 	}
 	// 分块大小：secretdata 不定长分块——取首块 OrigSize 作 ChunkSize 表达；
 	// 实际逐块校验以各块 SHA256 为准（ChunkSize 仅元信息，非校验粒度）。
-	// m2 修复：零字节文件无分块（Chunks 空）→ ChunkSize 取默认 1MiB
-	// （ChunkSizeForSize(0)）——空文件是合法产物（touch/.gitkeep），
-	// ChunkSize=0 会被 meta.Validate 拒（"分块大小非法"），须给默认表达。
+	// 零分块分支为防御性表达（shardseal 写/载入均拒绝空分块 meta——空文件在本卷
+	// 写不进去；此分支仅在外部注入畸形 meta 时产出合法默认值）。
 	if len(m.Chunks) > 0 {
 		fm.ChunkSize = m.Chunks[0].OrigSize
 	} else {

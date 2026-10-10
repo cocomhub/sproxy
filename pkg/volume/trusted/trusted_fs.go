@@ -66,13 +66,13 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", meta.MetaPath(rel), err)
 	}
 	defer rc.Close()
-	raw, rerr := io.ReadAll(io.LimitReader(rc, maxMetaSidecarBytes+1))
+	raw, rerr := io.ReadAll(io.LimitReader(rc, meta.MaxMetaSidecarBytes()+1))
 	if rerr != nil {
 		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", meta.MetaPath(rel), rerr)
 	}
-	if int64(len(raw)) > maxMetaSidecarBytes {
+	if int64(len(raw)) > meta.MaxMetaSidecarBytes() {
 		return nil, fmt.Errorf("trusted: meta sidecar %s 超限（>%d B，疑似注入），回落直算",
-			meta.MetaPath(rel), maxMetaSidecarBytes)
+			meta.MetaPath(rel), meta.MaxMetaSidecarBytes())
 	}
 	fm, uerr := meta.Unmarshal(raw)
 	if uerr != nil {
@@ -81,15 +81,8 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 	return fm, nil
 }
 
-// maxMetaSidecarBytes 是 meta sidecar 读取上限（64MiB——合理 FileMeta 远小于此，
-// 防被注入超大 JSON 的 OOM；超限视为 meta 缺失回落直算）。
-// 定义在 meta 包（导出 MaxMetaSidecarBytes）供装配层下载校验复用同一防护口径。
-const maxMetaSidecarBytes = 64 << 20
-
-// minMetaChunkSize 是可信卷分块大小下界（1MiB，A-MAJOR-5：配置极小 chunk_size 时
-// 大文件按 1B 分块会产生数百万 ChunkMeta → meta JSON GB 级 DoS）。ChunkSizeForSize
-// 自适应上限天然（最大 32MiB），无需额外上限钳制。
-const minMetaChunkSize = 1 << 20
+// maxMetaSidecarBytes 已去重：统一用 meta.MaxMetaSidecarBytes()（P3 修复——
+// 防两处 64MiB 字面量漂移）。
 
 // UpdateMetaExtra 更新已落盘 meta sidecar 的 Extra（旁路记录能力——如源完整性
 // damaged 标记 source_integrity=damaged；失败返回错误由调用方 Warn 兜底，不阻断）。
@@ -108,24 +101,29 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	// 不一致却**不回滚**，正确新 meta 已丢失（readbackVerify 此后恒失配）。校验前置：
 	// 主文件当前内容必须仍与旧 meta 一致（fm.TotalSHA256），一致才允许写入（合并
 	// Extra 的 meta 仍描述当前内容，天然无污染）。
-	rc, oerr := t.inner.OpenRead(ctx, rel)
-	if oerr != nil {
-		return nil // 主文件不可读（并发删除等）→ 不误报，调用方跳过
-	}
-	calc, cerr := meta.NewCalculator(fm.Size, fm.ChunkSize)
-	if cerr != nil {
+	// P1-10：整文件读回交叉校验仅本地卷执行——远端卷（网盘等）回读 = 一次全量下载，
+	// 对 6GiB 级文件不可接受；远端并发覆盖窗口由写路径独占 + 读路径校验兜底。
+	if t.isLocal() {
+		rc, oerr := t.inner.OpenRead(ctx, rel)
+		if oerr != nil {
+			return nil // 主文件不可读（并发删除等）→ 不误报，调用方跳过
+		}
+		calc, cerr := meta.NewCalculator(fm.Size, fm.ChunkSize)
+		if cerr != nil {
+			rc.Close()
+			return nil
+		}
+		_, rerr := calc.ReadFrom(rc)
 		rc.Close()
-		return nil
-	}
-	_, rerr := calc.ReadFrom(rc)
-	rc.Close()
-	if rerr != nil {
-		return nil
-	}
-	got := calc.Finish()
-	if got.TotalSHA256 != fm.TotalSHA256 {
-		// 主文件已被并发覆盖（旧 meta 描述旧内容）→ 跳过，不覆盖新 meta（无污染）。
-		return nil
+		if rerr != nil {
+			return nil
+		}
+		got := calc.Finish()
+		if got.TotalSHA256 != fm.TotalSHA256 {
+			// 主文件已被并发覆盖（旧 meta 描述旧内容）→ 返回错误（与函数注释「失败返回
+			// 错误由调用方 Warn 兜底」一致，可观测），不覆盖新 meta（无污染）。
+			return fmt.Errorf("trusted: 主文件已被并发覆盖（旧 meta 失效），跳过 Extra 更新")
+		}
 	}
 	if fm.Extra == nil {
 		fm.Extra = make(map[string]any, len(extra))
@@ -196,7 +194,11 @@ func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size i
 		return
 	}
 	fm := calc.Finish()
-	if !meta.FixSizeFromChunks(fm) || meta.Validate(fm) != nil {
+	// size 声明失真的实写自愈（有分块才可能失真）；零字节文件无分块直接 Validate。
+	if len(fm.Chunks) > 0 {
+		meta.FixSizeFromChunks(fm)
+	}
+	if meta.Validate(fm) != nil {
 		return
 	}
 	fm.Name = path.Base(filepath.ToSlash(rel))
@@ -243,6 +245,35 @@ func (t *TrustedVolumeFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
 	if qc, ok := t.inner.(syncpkg.StagingQuotaCapable); ok {
 		qc.WithStagingQuota(q)
 	}
+}
+
+// ExemptStagingQuota 委托 inner（StagingQuotaExempt 能力——s3 流式直传不落本地盘，
+// 显式豁免；P0-1 修复：Wrap 装饰后仍透传，否则装配层 stagingQuotaFS 断言落在 Wrap 上
+// 恒 false → s3 被 gate 强制预留，大文件 5s 超时误拒）。
+func (t *TrustedVolumeFS) ExemptStagingQuota() bool {
+	if ex, ok := t.inner.(syncpkg.StagingQuotaExempt); ok {
+		return ex.ExemptStagingQuota()
+	}
+	return false
+}
+
+// OpenRangeRead 委托 inner（RangeReader：secretdata 视频关键帧定点读 / baidupcs dlink
+// Range GET）。A7 修复：Wrap 装饰后不遮蔽 Range 能力，否则装配层 `Guard(Wrap(fs))`
+// 的 Range 读退化为整流。inner 未实现 → ErrUnsupported（与其它能力同口径）。
+func (t *TrustedVolumeFS) OpenRangeRead(ctx context.Context, p string, offset, size int64) (io.ReadCloser, error) {
+	if rr, ok := t.inner.(syncpkg.RangeReader); ok {
+		return rr.OpenRangeRead(ctx, p, offset, size)
+	}
+	return nil, fmt.Errorf("trusted: 底层卷未实现 OpenRangeRead: %w", syncpkg.ErrUnsupported)
+}
+
+// DirectURL 委托 inner（DirectURLProvider：集群出口 302 直链）。A7 修复：Wrap 装饰后
+// 不遮蔽直链能力，否则 direct_link 外部卷 302 失效。inner 未实现 → ErrUnsupported。
+func (t *TrustedVolumeFS) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
+	if d, ok := t.inner.(syncpkg.DirectURLProvider); ok {
+		return d.DirectURL(ctx, relPath)
+	}
+	return "", false, fmt.Errorf("trusted: 底层卷未实现 DirectURL: %w", syncpkg.ErrUnsupported)
 }
 
 // Move 委托 inner（同卷移动；inner 未实现 → ErrUnsupported，调用方回落复制）。
@@ -344,8 +375,8 @@ func (t *TrustedVolumeFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, e
 	return t.inner.Stat(ctx, p)
 }
 
-// OpenRead 打开读取（读时按 meta 逐分块校验由调用方经 Equal 完成；装饰器本身
-// 透传——校验逻辑在通用 Equal 工具，不落每个卷）。
+// OpenRead 打开读取（装饰器本身透传——逐分块校验在消费侧由
+// meta.VerifyReadSeeker 完成，不落每个卷）。
 func (t *TrustedVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return t.inner.OpenRead(ctx, p)
 }
@@ -355,17 +386,10 @@ func (t *TrustedVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser
 // sidecar 统一独立 meta 桶后：用户写 `x.meta` 落 user 桶、sidecar 落 meta 桶不冲突，
 // **无需保留 `.meta` 后缀禁用**（用户真实 `.meta` 文件合法，与本地卷一致）。
 // chunkSizeFor 计算可信卷分块大小（WriteFile 与 writeMetaAfter 共用——C2 修复防
-// 双实现漂移）：配置 >0 且 >= minMetaChunkSize 用配置值，否则按 size 自适应
-// （ChunkSizeForSize）；配置 < minMetaChunkSize 钳到下界（A-MAJOR-5 防百万分块 DoS）。
+// 双实现漂移）：委托 meta.ResolveChunkSize（配置 <=0 自适应 / 配置 < 下界钳到下界 /
+// 否则用配置值），与本地卷 filesMetaPolicy 同口径。
 func (t *TrustedVolumeFS) chunkSizeFor(size int64) int64 {
-	cs := t.opts.ChunkSize
-	if cs <= 0 {
-		return meta.ChunkSizeForSize(size)
-	}
-	if cs < minMetaChunkSize {
-		return minMetaChunkSize
-	}
-	return cs
+	return meta.ResolveChunkSize(t.opts.ChunkSize, size)
 }
 
 // WriteFile 写入 + 计算并落 .meta（若启用）。meta 大小计入底层配额（WriteFile 经
@@ -415,6 +439,10 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	fm.Extra = t.opts.Extra
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
+		// C1 修复：Marshal 失败同样删旧 sidecar（主文件已写成功）——残留描述旧内容的
+		// 陈旧 meta 会使读路径按旧分块校验新内容恒失配（硬失败固化）；删后退化为
+		// missing（直算兜底，下次覆盖写自愈）。
+		_ = t.inner.Delete(ctx, meta.MetaPath(rel))
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
 	}
 	// E-MAJOR 修复：写 meta 前确保 sidecar 父目录存在（与 Move/Copy/Rename 的
@@ -451,6 +479,11 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 // fm 比对——不一致（并发覆盖错位）→ 删 meta 退化 missing；一致或读回失败（并发删除等）
 // → 保留（读回失败不误删，主文件不可读时 meta 无害）。
 func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *meta.FileMeta) {
+	// P1-10：整文件读回型交叉校验仅限本地卷——远端卷每次写都回读 = 一次全量下载
+	// （6GiB 级不可行），且写路径已独占 + 读路径逐分块校验兑底。
+	if !t.isLocal() {
+		return
+	}
 	rc, oerr := t.inner.OpenRead(ctx, rel)
 	if oerr != nil {
 		return // 主文件不可读（并发删除等）→ 保留 meta（读路径直算兜底）
@@ -472,6 +505,14 @@ func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *m
 		_ = t.inner.Delete(ctx, meta.MetaPath(rel))
 		t.logMetaWarn("WriteFile-verify", rel, fmt.Errorf("meta 与主文件交叉比对不一致（并发覆盖错位），已删 sidecar"))
 	}
+}
+
+// isLocal 报告底层卷自述为本地/内部卷（未实现 LocalVolume 的按外部卷处理——与全仓
+// 「未实现默认外部」一致）。用于把整文件读回型交叉校验（verifyWriteMeta /
+// UpdateMetaExtra 前置校验）限制在本地卷，避免远端卷每次写付一次全量下载（P1-10）。
+func (t *TrustedVolumeFS) isLocal() bool {
+	lv, ok := t.inner.(syncpkg.LocalVolume)
+	return ok && lv.IsLocalVolume()
 }
 
 // Delete 删除文件 + 联动删除 .meta。

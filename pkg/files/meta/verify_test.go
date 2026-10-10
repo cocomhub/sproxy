@@ -109,3 +109,55 @@ func TestVerifyReadSeeker_TotalHashFullRead(t *testing.T) {
 		t.Fatalf("全量读校验应通过: %v", err)
 	}
 }
+
+// TestVerifyReadSeeker_ShortContent 底层内容短于 fm.Size（截断/尾块静默丢失）→ fail-closed。
+// 钉住 P1-1：ServeContent 的 CopyN 按实际（截断）长度精确读满，不会产生底层 EOF 的那次
+// Read；仅靠 EOF 判据会静默放行，必须靠构造时的长度探测拦截。
+func TestVerifyReadSeeker_ShortContent(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("A"), 3000)
+	fm := refFileMeta(t, content, 1024)
+	v := VerifyReadSeeker(bytes.NewReader(content[:1500]), fm)
+	if _, err := readAll(v); err == nil {
+		t.Fatal("截断内容必须 fail-closed 报错（不得静默交付）")
+	}
+	// ServeContent 语义：按实际（截断）长度精确读满，不产生底层 EOF 的那次 Read——
+	// 仅靠 EOF 判据会漏；必须靠构造时的长度探测使首次 Read 即报错。
+	v2 := VerifyReadSeeker(bytes.NewReader(content[:1500]), fm)
+	if _, err := readAll(io.LimitReader(v2, 1500)); err == nil {
+		t.Fatal("按实际长度精确读满时也必须 fail-closed（extent 探测）")
+	}
+}
+
+// TestVerifyReadSeeker_ExtraTailExtent 内容长于 fm.Size（附加垃圾）→ 构造时长度探测即拒。
+func TestVerifyReadSeeker_ExtraTailExtent(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("B"), 3000)
+	fm := refFileMeta(t, content, 1024)
+	extra := append(append([]byte(nil), content...), []byte("garbage-tail")...)
+	v := VerifyReadSeeker(bytes.NewReader(extra), fm)
+	// 即使消费者只按 fm.Size 精确读取（不触发底层 EOF），也必须拒绝。
+	if _, err := readAll(io.LimitReader(v, fm.Size)); err == nil {
+		t.Fatal("越界内容必须 fail-closed 报错（不得靠下一次 Read 才报）")
+	}
+}
+
+// TestVerifyReadSeeker_MidSeekToEOF_NoFalsePositive 中段 Seek 后读到 EOF 不得误报
+// 「整文件哈希不一致」——钉住 P2-1（fromStart 语义）。
+func TestVerifyReadSeeker_MidSeekToEOF_NoFalsePositive(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("C"), 3000)
+	fm := refFileMeta(t, content, 1024)
+	v := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, err := v.Seek(1500, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	// io.Copy 会读到 bytes.Reader 的真实 EOF（与 RangePartial 的 LimitReader 不同）。
+	got, err := readAll(v)
+	if err != nil {
+		t.Fatalf("中段读到 EOF 不应误报损坏: %v", err)
+	}
+	if got != string(content[1500:]) {
+		t.Fatalf("中段读回内容不符")
+	}
+}

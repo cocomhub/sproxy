@@ -258,6 +258,8 @@ func (h *Handlers) checkCopyTarget(cvc *copyVolumeCtx, targetOverwrite bool) (in
 				Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
 				Result: AuditResultSuccess, Detail: "目标已存在且 checksum 一致（幂等）",
 			})
+			// P1-8 修复：幂等命中时也确保目标有 meta（存量副本可能缺 sidecar）。
+			h.writeCopyMeta(cvc)
 			return http.StatusOK, mirrorCopyResponse{Success: true, Message: "目标已存在且内容一致，无需复制", Checksum: srcCS, Idempotent: true}, true
 		}
 		if !targetOverwrite {
@@ -354,7 +356,22 @@ func (h *Handlers) commitCopyResult(cvc *copyVolumeCtx, scope *quota.Scope, toPo
 		Result: AuditResultSuccess, Detail: "from=" + cvc.fromVol + " to=" + cvc.toVol,
 	})
 	h.logger.Info("跨卷复制成功", "file_name", cvc.remotePath, "from", cvc.fromVol, "to", cvc.toVol)
+	// P1-8 修复：跨卷副本在目标卷重建 meta sidecar（与 move 的 moveMetaAfterVolumeMove
+	// 对称）——否则镜像/复制产物无完整性证据、下载零校验。失败 Warn 兜底（读路径直算）。
+	h.writeCopyMeta(cvc)
 	return http.StatusOK, mirrorCopyResponse{Success: true, Message: fmt.Sprintf("文件已复制: %s (%s → %s)", cvc.remotePath, cvc.fromVol, cvc.toVol), Checksum: srcCS, Size: written}
+}
+
+// writeCopyMeta 在跨卷复制目标卷重建 meta sidecar（best-effort：失败仅 Warn——读路径
+// 直算兜底不阻断复制）。目标为本地卷；tenant/rel 由 copyVolumeCtx 提供。
+func (h *Handlers) writeCopyMeta(cvc *copyVolumeCtx) {
+	if cvc.toTnt == nil || cvc.toTnt.Root() == nil {
+		return
+	}
+	if mErr := (filesMetaPolicy{h: h}).WriteMeta(cvc.ctx, cvc.owner, cvc.toTnt.Root(), cvc.rel); mErr != nil {
+		h.logger.Warn("跨卷复制目标 meta 落盘失败（读路径直算兜底）",
+			"file_name", cvc.remotePath, "to", cvc.toVol, "error", mErr)
+	}
 }
 
 // serverChecksumOf 占位：流式复制不产出哈希，checksum 台账以源文件实测为准

@@ -157,7 +157,7 @@ func Unmarshal(data []byte) (*FileMeta, error) {
 //	16MiB ~ 256MiB   → 4MiB
 //	256MiB ~ 1GiB    → 8MiB
 //	1GiB ~ 4GiB      → 16MiB
-//	>4GiB            → 32MiB（6G ≈ 192 块，逐分片校验/流量成本可控）
+//	≥4GiB            → 32MiB（6G ≈ 192 块，逐分片校验/流量成本可控）
 func ChunkSizeForSize(size int64) int64 {
 	const miB = 1 << 20
 	switch {
@@ -174,6 +174,24 @@ func ChunkSizeForSize(size int64) int64 {
 	default:
 		return 32 * miB
 	}
+}
+
+// MinMetaChunkSize 是可信卷分块大小下界（1MiB）：配置极小 chunk_size（如 1B）时
+// 大文件按 1B 分块会产生数百万 ChunkMeta（meta JSON GB 级 → 落盘爆配额/读侧 OOM）。
+// 写侧（本地卷 filesMetaPolicy / 外部卷 trusted 装饰器）共用该下界。
+const MinMetaChunkSize = 1 << 20
+
+// ResolveChunkSize 按配置值 + 文件大小解析分块大小：配置 <=0 → 按大小自适应
+// （ChunkSizeForSize）；配置 < MinMetaChunkSize → 钳到下界；否则用配置值。
+// 本地卷与外部卷装饰器共用同一口径（防两处实现漂移）。
+func ResolveChunkSize(configured, size int64) int64 {
+	if configured <= 0 {
+		return ChunkSizeForSize(size)
+	}
+	if configured < MinMetaChunkSize {
+		return MinMetaChunkSize
+	}
+	return configured
 }
 
 // Provider 是 FS 的**自带 meta 提供能力**（用户裁定 2026-10-07：卷自身提供正确 meta

@@ -293,7 +293,8 @@ func newLibraryAdapter(pcs *Client, logger *slog.Logger) *libraryAdapter {
 }
 
 // Upload 用 fork 库的分片上传器（NewMultiUploader）上传本地文件到网盘。
-// 走 Precreate→分片 TmpFile→CreateSuperFile；断点状态持久化到 Layout.Resume。
+// 走 Precreate→分片 TmpFile→CreateSuperFile。**断点持久化当前未接线**
+// （globalLayout 恒 nil，见 resume_upload.go 顶部说明）——中断后不续传，重传。
 // 这是 P2 真实现——脱离二进制也完整可用（二进制优先策略下是可靠兜底）。
 func (a *libraryAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
 	if a.pcs == nil {

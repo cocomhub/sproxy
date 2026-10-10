@@ -32,20 +32,31 @@ const stagingWaitTimeout = 5 * time.Second
 type StagingTracker struct {
 	scope *Scope
 	cond  *sync.Cond // 排队等待：Release 广播唤醒
+	// waitTimeout 是排队等待超时（<=0 = stagingWaitTimeout）；测试可注入缩短。
+	waitTimeout time.Duration
 }
 
 // NewStagingTracker 构造 staging 配额记账器（scope 为独立 staging Scope）。
 func NewStagingTracker(scope *Scope) *StagingTracker {
-	return &StagingTracker{scope: scope, cond: sync.NewCond(&sync.Mutex{})}
+	return &StagingTracker{scope: scope, cond: sync.NewCond(&sync.Mutex{}), waitTimeout: stagingWaitTimeout}
 }
 
 // ReserveUsage 预留 size 字节（本地 staging 写入前）。不足 → 排队等待（ctx 取消 /
 // 等待超时中断）；返回错误 = 拒绝本次写入（永久不足快速失败）。
+//
+// 超时判据基于**绝对 deadline**（非 timer.Stop 结果）——避免「空间刚好释放但 timeout
+// 定时器已触发」的边界误判：每次唤醒先重试 TryReserve，仅当已过 deadline 且抢占
+// 仍失败才报超时。
 func (q *StagingTracker) ReserveUsage(ctx context.Context, size int64) error {
 	if size <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(stagingWaitTimeout)
+	timeout := q.waitTimeout
+	if timeout <= 0 {
+		timeout = stagingWaitTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
 		res, err := q.scope.TryReserve(size)
@@ -53,8 +64,19 @@ func (q *StagingTracker) ReserveUsage(ctx context.Context, size int64) error {
 			res.Commit(size)
 			return nil
 		}
-		// 磁盘不足：排队等待释放（ctx 取消 / 超时中断；cond 无 ctx 原语——用 goroutine
-		// 感知 ctx/timer 并 Broadcast 打断 cond.Wait）。
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("quota: 等待本地 staging 空间中断: %w", cerr)
+		}
+		if time.Until(deadline) <= 0 {
+			// deadline 后最后一次尝试：释放可能与超时同时发生，避免误报。
+			if res, rerr := q.scope.TryReserve(size); rerr == nil {
+				res.Commit(size)
+				return nil
+			}
+			return fmt.Errorf("quota: 等待本地 staging 空间超时（%s）", timeout)
+		}
+		// 磁盘不足：排队等待释放（ctx 取消 / 超时中断；cond 无 ctx 原语——用一次性的
+		// goroutine 感知 ctx/timer 并 Broadcast 打断 Wait，Wait 返回即停止）。
 		q.cond.L.Lock()
 		interrupt := make(chan struct{})
 		go func() {
@@ -62,19 +84,13 @@ func (q *StagingTracker) ReserveUsage(ctx context.Context, size int64) error {
 			case <-ctx.Done():
 				q.cond.Broadcast() // 打断所有等待者重新评估（含本 ctx 取消者）
 			case <-timer.C:
-				q.cond.Broadcast() // 等待超时：打断重新评估（本循环感知后返回错误）
+				q.cond.Broadcast() // 等待超时：打断重新评估（本循环按 deadline 判定返回）
 			case <-interrupt:
 			}
 		}()
 		q.cond.Wait()
 		close(interrupt)
 		q.cond.L.Unlock()
-		if ctx.Err() != nil {
-			return fmt.Errorf("quota: 等待本地 staging 空间中断: %w", ctx.Err())
-		}
-		if !timer.Stop() {
-			return fmt.Errorf("quota: 等待本地 staging 空间超时（%s）", stagingWaitTimeout)
-		}
 	}
 }
 

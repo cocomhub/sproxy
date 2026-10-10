@@ -217,10 +217,13 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 				return nil, fmt.Errorf("备份目标卷 %q 远端不可达: %w", target, perr)
 			}
 		}
-		fs := trusted.Guard(be.FS())
-		if fs == nil {
+		raw := be.FS()
+		if raw == nil {
 			return nil, fmt.Errorf("备份目标卷 %q 无文件系统视图（装配错误）", target)
 		}
+		// P1-9 修复：备份写外部卷也须 Wrap（meta 恒生成，与上传/转存一致）；
+		// P1-4 修复：Guard 现透传 StagingQuotaExempt/Capable，s3 豁免/baidupcs 自管可命中。
+		fs := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
 		// 本地 staging 配额强制接线（用户裁定 2026-10-10：外部卷统一过独立 staging
 		// 配额——备份写本地暂存防打满；s3 流式显式 Exempt，baidupcs 自管 StagingQuotaCapable）。
 		return h.stagingQuotaFS(owner, fs), nil

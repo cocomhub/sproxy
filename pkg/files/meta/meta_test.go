@@ -222,11 +222,12 @@ func TestMarshalUnmarshal(t *testing.T) {
 
 // TestFromFile 本地文件直接计算（含 CTime/Name sanitize）。
 func TestFromFile(t *testing.T) {
-	t.Parallel()
+	// 非并行：本用例改写包级时钟 nowRFC3339（并行会与其它用例数据竞争）。
 	data := bytes.Repeat([]byte("from-file 内容"), 100)
 	c := 0
+	orig := nowRFC3339
 	nowRFC3339 = func() string { c++; return fmt.Sprintf("2026-10-07T%02d:00:00Z", c) }
-	t.Cleanup(func() { nowRFC3339 = func() string { return "" } })
+	t.Cleanup(func() { nowRFC3339 = orig })
 	m, err := FromFile(writeTemp(t, data), 0, map[string]any{"creator": "bob"})
 	if err != nil {
 		t.Fatalf("FromFile: %v", err)

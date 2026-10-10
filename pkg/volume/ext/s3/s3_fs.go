@@ -331,9 +331,8 @@ func (f *S3FS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, err
 // 内建自动分片 + 失败自动 Abort 防孤儿；PartSize 透传可配分片大小）+ 显式失败重试
 // （UploadRetries 次退避）；小文件（< 阈值）单 PutObject 零回归。
 func (f *S3FS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
-	if size < 0 {
-		size = 0
-	}
+	// size<0（未知长度）：透传给 minio（其内部走 putObjectMultipartStreamNoLength 流式读
+	// 到 EOF）。**不得钳为 0**——那会声明 0 字节却带非空 body（数据丢失/语义冲突）。
 
 	mo := multipartOptsFromConfig(f.cfg)
 	key := f.keyFor(relPath)

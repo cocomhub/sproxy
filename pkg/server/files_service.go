@@ -257,7 +257,9 @@ func (h *Handlers) externalFSFor(volName string) (syncpkg.FS, bool) {
 		return nil, false
 	}
 	fsys := be.FS()
-	return trusted.Guard(fsys), fsys != nil
+	// P0-2 修复：下载路径也必须 Wrap（写侧才能落 sidecar、读侧才能经 meta.Provider
+	// 逐分块校验）；此前只 Guard 导致 fileMetaReaderFor 恒 nil、外部卷下载零校验。
+	return trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts())), fsys != nil
 }
 
 // toFilesHTTPError 把带 HTTP 状态码的 pkg/server 错误（下载路径解析错误 / 卷路由错误）
@@ -458,7 +460,15 @@ func (p filesMetaPolicy) computeMeta(ctx context.Context, root *storage.Root, re
 	if serr != nil {
 		return nil, fmt.Errorf("可信卷 meta stat %s: %w", rel, serr)
 	}
-	c, cerr := meta.NewCalculator(fi.Size(), 0)
+	// G3 修复：本地卷 sidecar 分块大小也接线 trusted_volume.chunk_size（此前硬编码 0
+	// 自适应，同一文件在本地/外部卷得到不同 ChunkSize）。
+	chunkSize := int64(0)
+	if p.h.cfgPtr != nil {
+		if cfg := p.h.cfgPtr.Load(); cfg != nil {
+			chunkSize = int64(cfg.TrustedVolume.ChunkSize)
+		}
+	}
+	c, cerr := meta.NewCalculator(fi.Size(), meta.ResolveChunkSize(chunkSize, fi.Size()))
 	if cerr != nil {
 		return nil, cerr
 	}

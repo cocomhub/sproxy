@@ -8,10 +8,12 @@ package server
 // 未来任何新 backend（S3/…）只 RegisterBackend 注册即自动出现在前端，无需改前端代码。
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
@@ -32,9 +34,9 @@ func (h *Handlers) backendsHandler(w http.ResponseWriter, r *http.Request) {
 // 未注册 type → 404；后端不支持 Presign → 405；缺 path / method 非法 → 400。
 func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request) {
 	typ := r.PathValue("type")
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		http.Error(w, "path 必填（卷内相对路径）", http.StatusBadRequest)
+	path, perr := guardPresignPath(r.URL.Query().Get("path"))
+	if perr != nil {
+		http.Error(w, perr.Error(), http.StatusBadRequest)
 		return
 	}
 	method := strings.ToUpper(r.URL.Query().Get("method"))
@@ -75,9 +77,9 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 // 未注册 type → 404；对象不存在 → 404（fail-closed）。
 func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	typ := r.PathValue("type")
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		http.Error(w, "path 必填（卷内相对路径）", http.StatusBadRequest)
+	path, perr := guardPresignPath(r.URL.Query().Get("path"))
+	if perr != nil {
+		http.Error(w, perr.Error(), http.StatusBadRequest)
 		return
 	}
 	be, err := registry.NewBackend(r.Context(), volume.Volume{Type: typ})
@@ -96,4 +98,18 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	sendJSONResponse(w, map[string]string{"ok": "registered"}, http.StatusOK)
+}
+
+// guardPresignPath 校验并归一预签名/登记路径：拒绝路径穿越/绝对路径/空值，且拒绝
+// meta 等内部功能桶（P2-2/F3：预签名直接签发对象键、不经 MetaBucketGuard 的
+// keyspace，必须在此拦死——否则客户端可 PUT/GET 到 `<owner>/meta/...` 侧车/凭据）。
+func guardPresignPath(raw string) (string, error) {
+	clean, err := pathguard.ValidateFilePath(raw)
+	if err != nil {
+		return "", err
+	}
+	if bucket, _, ok := volume.BucketOf(clean); ok && bucket == "meta" {
+		return "", fmt.Errorf("路径命中内部功能桶，禁止直传")
+	}
+	return clean, nil
 }

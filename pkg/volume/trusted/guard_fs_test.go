@@ -9,8 +9,12 @@ package trusted
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files/meta"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // TestGuard_MetaBucketDenied meta 桶路径（含 owner 前缀共享卷）→ 拒绝。
@@ -89,5 +93,67 @@ func TestGuard_InnerCapabilities(t *testing.T) {
 	}
 	if err := g.Link(ctx, "user/a", "meta/b"); err == nil {
 		t.Fatal("Link 目标 meta 桶应拒绝")
+	}
+}
+
+// exemptProviderFS 是 FS + meta.Provider + StagingQuotaExempt（断言 Guard 能力透传）。
+type exemptProviderFS struct{ *providerFS }
+
+func (e *exemptProviderFS) ExemptStagingQuota() bool { return true }
+
+// TestGuard_PathNormalizationDenied P2-2：含 .. / 绝对路径 / 空段 → fail-closed
+// （守卫自身归一，不得依赖调用方——否则 user/../meta/x 经 BucketOf 被误判为 user 桶放行）。
+func TestGuard_PathNormalizationDenied(t *testing.T) {
+	t.Parallel()
+	g := Guard(newInner(t))
+	ctx := context.Background()
+	for _, p := range []string{"user/../meta/creds.json", "alice/user/../meta/sidecar.meta", "/meta/x", "user//x"} {
+		if _, err := g.Stat(ctx, p); err == nil {
+			t.Fatalf("路径 %q 应拒绝（归一/逃逸）", p)
+		}
+		if err := g.WriteFile(ctx, p, strings.NewReader("x"), 1, 0); err == nil {
+			t.Fatalf("写路径 %q 应拒绝", p)
+		}
+	}
+}
+
+// TestGuard_CapabilityForwarding P0-1：Guard 透传 meta.Provider / ExemptStagingQuota；
+// 生产装配形状 Guard(Wrap(fs)) 仍是 meta.Provider（转存/下载校验可达）。
+func TestGuard_CapabilityForwarding(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	g := Guard(&providerFS{inner: inner})
+	pv, ok := any(g).(meta.Provider)
+	if !ok {
+		t.Fatal("Guard(providerFS) 应实现 meta.Provider")
+	}
+	if _, err := pv.FileMeta(context.Background(), "user/f.bin"); err != nil {
+		t.Fatalf("FileMeta 应转发: %v", err)
+	}
+	if !Guard(&exemptProviderFS{providerFS: &providerFS{inner: inner}}).ExemptStagingQuota() {
+		t.Fatal("Guard 应转发 ExemptStagingQuota")
+	}
+	if _, ok := any(Guard(Wrap(newInner(t), Options{}))).(meta.Provider); !ok {
+		t.Fatal("Guard(Wrap(fs)) 应实现 meta.Provider（生产装配形状）")
+	}
+}
+
+// TestWrap_CapabilityForwarding A7：Wrap 透传 RangeReader/DirectURL（inner 未实现 → ErrUnsupported）。
+func TestWrap_CapabilityForwarding(t *testing.T) {
+	t.Parallel()
+	w := Wrap(&noCapsFS{}, Options{})
+	rr, ok := any(w).(syncpkg.RangeReader)
+	if !ok {
+		t.Fatal("Wrap 应实现 RangeReader")
+	}
+	if _, err := rr.OpenRangeRead(context.Background(), "user/x", 0, 1); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("noCapsFS 无 RangeReader → ErrUnsupported, got %v", err)
+	}
+	du, ok := any(w).(syncpkg.DirectURLProvider)
+	if !ok {
+		t.Fatal("Wrap 应实现 DirectURLProvider")
+	}
+	if _, _, err := du.DirectURL(context.Background(), "user/x"); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("noCapsFS 无 DirectURL → ErrUnsupported, got %v", err)
 	}
 }

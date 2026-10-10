@@ -407,8 +407,8 @@ func TestUpdateMetaExtra_C5(t *testing.T) {
 	if err := inner.WriteFile(ctx, "user/f.bin", bytes.NewReader(append([]byte("tampered-"), data...)), int64(len(data))+8, 0); err != nil {
 		t.Fatalf("篡改写入: %v", err)
 	}
-	if err := tv.UpdateMetaExtra(ctx, "user/f.bin", map[string]any{"k": "v"}); err != nil {
-		t.Fatalf("篡改时更新应跳过（nil）而非报错, got %v", err)
+	if err := tv.UpdateMetaExtra(ctx, "user/f.bin", map[string]any{"k": "v"}); err == nil {
+		t.Fatal("篡改时更新应报错（可观测，不静默），而非 nil")
 	}
 	fm2, _ := tv.FileMeta(ctx, "user/f.bin")
 	if _, has := fm2.Extra["k"]; has {

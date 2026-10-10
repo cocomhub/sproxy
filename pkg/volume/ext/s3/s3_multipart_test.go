@@ -140,3 +140,58 @@ func (r *recordingPutter) PutObject(ctx context.Context, bucket, object string, 
 	r.calls = append(r.calls, opts)
 	return minio.UploadInfo{}, nil
 }
+
+// consumeFailPutter 每次调用先读尽 reader（记录字节数）再按脚本返回错误——模拟真实
+// 网络在传输中段中断（区别于不消费 reader 的假失败）。
+type consumeFailPutter struct {
+	failFirst int
+	attempt   int
+	readBytes []int
+}
+
+func (p *consumeFailPutter) PutObject(_ context.Context, _, _ string, reader io.Reader, _ int64, _ minio.PutObjectOptions) (minio.UploadInfo, error) {
+	n, _ := io.Copy(io.Discard, reader)
+	p.attempt++
+	p.readBytes = append(p.readBytes, int(n))
+	if p.attempt <= p.failFirst {
+		return minio.UploadInfo{}, context.DeadlineExceeded
+	}
+	return minio.UploadInfo{}, nil
+}
+
+// nonSeekReader 包装 reader 去掉 Seeker 能力（模拟 trusted.Wrap 的 io.TeeReader）。
+type nonSeekReader struct{ r io.Reader }
+
+func (n nonSeekReader) Read(p []byte) (int, error) { return n.r.Read(p) }
+
+// TestPutObjectWithRetry_ResetsSeekableReader 钉住 P0-3：重试前必须 Seek(0)，
+// 否则第二次尝试读到 0 字节 → minio 静默写空对象。
+func TestPutObjectWithRetry_ResetsSeekableReader(t *testing.T) {
+	t.Parallel()
+	p := &consumeFailPutter{failFirst: 1}
+	data := bytes.NewReader(bytes.Repeat([]byte("x"), 1000))
+	if err := putObjectWithRetry(t.Context(), p, uploadParams{bucket: "b", key: "k", retries: 3}, data, 1000); err != nil {
+		t.Fatalf("可 seek 源重试应成功: %v", err)
+	}
+	if p.attempt != 2 {
+		t.Fatalf("应尝试 2 次, got %d", p.attempt)
+	}
+	if len(p.readBytes) != 2 || p.readBytes[0] != 1000 || p.readBytes[1] != 1000 {
+		t.Fatalf("每次尝试都应读到完整 1000 字节（重试前 Seek(0)），got %v", p.readBytes)
+	}
+}
+
+// TestPutObjectWithRetry_NonSeekableFailClosed 钉住 P0-3 另一半：不可 seek 源不得
+// 复用已消费流重试（会静默写坏对象）；必须 fail-closed 返回错误且不重试成功。
+func TestPutObjectWithRetry_NonSeekableFailClosed(t *testing.T) {
+	t.Parallel()
+	p := &consumeFailPutter{failFirst: 1}
+	data := nonSeekReader{r: bytes.NewReader(bytes.Repeat([]byte("x"), 1000))}
+	err := putObjectWithRetry(t.Context(), p, uploadParams{bucket: "b", key: "k", retries: 3}, data, 1000)
+	if err == nil {
+		t.Fatal("不可 seek 源重试必须 fail-closed 返回错误（不得静默成功）")
+	}
+	if p.attempt != 1 {
+		t.Fatalf("不可 seek 源不应重试, got %d 次", p.attempt)
+	}
+}

@@ -14,7 +14,10 @@ package sync
 
 import (
 	"context"
+	"fmt"
 	"io"
+
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 )
 
 // StagingQuotaGateFS 包装任意 FS 的本地 staging 配额门卫：WriteFile 前经
@@ -60,3 +63,128 @@ func (g *StagingQuotaGateFS) Delete(ctx context.Context, path string) error {
 func (g *StagingQuotaGateFS) MakeDir(ctx context.Context, path string) error {
 	return g.inner.MakeDir(ctx, path)
 }
+
+// ---- 能力透传（P1-5 修复）：gate 是最外层装饰器时必须透明转发可选能力，
+// 否则转存的 WriteIfAbsent/ReserveSpace/meta.Provider/damaged 标记/staging 豁免/自管
+// 会在此层被吞（断言落在 gate 上恒 false），与「门卫只拦截写路径」的定位矛盾。
+// 写类能力（WriteIfAbsent）与 WriteFile 同语义：预留 → 写 → 释放。----
+
+// WriteIfAbsent 委托 inner（预留在前、释放在后；inner 未实现 → ErrUnsupported 供调用方回落）。
+func (g *StagingQuotaGateFS) WriteIfAbsent(ctx context.Context, path string, r io.Reader, size, mtime int64) (bool, error) {
+	pia, ok := g.inner.(WriteIfAbsent)
+	if !ok {
+		return false, fmt.Errorf("sync: 底层未实现 WriteIfAbsent: %w", ErrUnsupported)
+	}
+	if g.quota != nil {
+		if err := g.quota.ReserveUsage(ctx, size); err != nil {
+			return false, err
+		}
+		defer g.quota.ReleaseUsage(size)
+	}
+	return pia.WriteIfAbsent(ctx, path, r, size, mtime)
+}
+
+// ReserveSpace 委托 inner（容量预检，不涉及本地 staging 记账）。
+func (g *StagingQuotaGateFS) ReserveSpace(ctx context.Context, path string, size int64) error {
+	if rs, ok := g.inner.(ReserveSpace); ok {
+		return rs.ReserveSpace(ctx, path, size)
+	}
+	return fmt.Errorf("sync: 底层未实现 ReserveSpace: %w", ErrUnsupported)
+}
+
+// IsLocalVolume 委托 inner（本地性自述不涉及路径）。
+func (g *StagingQuotaGateFS) IsLocalVolume() bool {
+	if lv, ok := g.inner.(LocalVolume); ok {
+		return lv.IsLocalVolume()
+	}
+	return false
+}
+
+// Move 委托 inner（inner 未实现 → ErrUnsupported）。
+func (g *StagingQuotaGateFS) Move(ctx context.Context, from, to string) error {
+	if mv, ok := g.inner.(Mover); ok {
+		return mv.Move(ctx, from, to)
+	}
+	return fmt.Errorf("sync: 底层未实现 Move: %w", ErrUnsupported)
+}
+
+// Copy 委托 inner（inner 未实现 → ErrUnsupported）。
+func (g *StagingQuotaGateFS) Copy(ctx context.Context, from, to string) error {
+	if cp, ok := g.inner.(Copier); ok {
+		return cp.Copy(ctx, from, to)
+	}
+	return fmt.Errorf("sync: 底层未实现 Copy: %w", ErrUnsupported)
+}
+
+// Link 委托 inner（inner 未实现 → ErrUnsupported）。
+func (g *StagingQuotaGateFS) Link(ctx context.Context, from, to string) error {
+	if lk, ok := g.inner.(Linker); ok {
+		return lk.Link(ctx, from, to)
+	}
+	return fmt.Errorf("sync: 底层未实现 Link: %w", ErrUnsupported)
+}
+
+// OpenRangeRead 委托 inner（inner 未实现 → ErrUnsupported）。
+func (g *StagingQuotaGateFS) OpenRangeRead(ctx context.Context, path string, offset, size int64) (io.ReadCloser, error) {
+	if rr, ok := g.inner.(RangeReader); ok {
+		return rr.OpenRangeRead(ctx, path, offset, size)
+	}
+	return nil, fmt.Errorf("sync: 底层未实现 OpenRangeRead: %w", ErrUnsupported)
+}
+
+// DirectURL 委托 inner（inner 未实现 → ErrUnsupported）。
+func (g *StagingQuotaGateFS) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
+	if d, ok := g.inner.(DirectURLProvider); ok {
+		return d.DirectURL(ctx, relPath)
+	}
+	return "", false, fmt.Errorf("sync: 底层未实现 DirectURL: %w", ErrUnsupported)
+}
+
+// FileMeta 委托 inner（meta.Provider：转存读端分块校验 / 下载校验消费）。
+func (g *StagingQuotaGateFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	if pv, ok := g.inner.(meta.Provider); ok {
+		return pv.FileMeta(ctx, rel)
+	}
+	return nil, fmt.Errorf("sync: 底层未实现 FileMeta: %w", ErrUnsupported)
+}
+
+// UpdateMetaExtra 委托 inner（damaged 源完整性 / transfer_verified 旁路标记）。
+func (g *StagingQuotaGateFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
+	ue, ok := g.inner.(interface {
+		UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error
+	})
+	if !ok {
+		return fmt.Errorf("sync: 底层未实现 UpdateMetaExtra: %w", ErrUnsupported)
+	}
+	return ue.UpdateMetaExtra(ctx, rel, extra)
+}
+
+// WithStagingQuota 委托 inner（StagingQuotaCapable 自管：注入配额句柄）。
+func (g *StagingQuotaGateFS) WithStagingQuota(q StagingQuotaTracker) {
+	if qc, ok := g.inner.(StagingQuotaCapable); ok {
+		qc.WithStagingQuota(q)
+	}
+}
+
+// ExemptStagingQuota 委托 inner（StagingQuotaExempt 显式豁免）。
+func (g *StagingQuotaGateFS) ExemptStagingQuota() bool {
+	if ex, ok := g.inner.(StagingQuotaExempt); ok {
+		return ex.ExemptStagingQuota()
+	}
+	return false
+}
+
+// 编译期断言：gate 实现全部能力接口（能力透传契约，防未来新增能力接口后遗漏）。
+var (
+	_ WriteIfAbsent       = (*StagingQuotaGateFS)(nil)
+	_ ReserveSpace        = (*StagingQuotaGateFS)(nil)
+	_ LocalVolume         = (*StagingQuotaGateFS)(nil)
+	_ Mover               = (*StagingQuotaGateFS)(nil)
+	_ Copier              = (*StagingQuotaGateFS)(nil)
+	_ Linker              = (*StagingQuotaGateFS)(nil)
+	_ RangeReader         = (*StagingQuotaGateFS)(nil)
+	_ DirectURLProvider   = (*StagingQuotaGateFS)(nil)
+	_ meta.Provider       = (*StagingQuotaGateFS)(nil)
+	_ StagingQuotaCapable = (*StagingQuotaGateFS)(nil)
+	_ StagingQuotaExempt  = (*StagingQuotaGateFS)(nil)
+)

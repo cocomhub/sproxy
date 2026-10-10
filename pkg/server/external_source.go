@@ -129,7 +129,7 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		if be == nil {
 			continue
 		}
-		fsys := trusted.Guard(be.FS())
+		fsys := trusted.Guard(trusted.Wrap(be.FS(), h.trustedWrapOpts()))
 		if fsys == nil {
 			// 后端已登记但 FS 视图未就绪（评审 Minor：nil 接口解引用 panic 防御）。
 			continue
