@@ -235,6 +235,10 @@ func applyBinaryMetaLine(m *ObjectMeta, line string) bool {
 		if last := val[len(val)-1]; len(last) == 32 {
 			m.ETag = last
 		}
+		// `md5 (可能不正确) <hex>` / `md5 (截图请打码) <hex>`：带括号注记 → 非权威整文件 md5。
+		if len(val) >= 2 {
+			m.MD5Unreliable = true
+		}
 		return true
 	case label == "修改日期":
 		if len(val) >= 2 {

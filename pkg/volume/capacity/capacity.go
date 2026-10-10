@@ -123,15 +123,21 @@ func (c *VolumeCapacityCounter) Save() error {
 		return nil
 	}
 	c.mu.Lock()
-	data, err := json.Marshal(counterFile{Version: 1, Used: c.used, Capacity: c.capacity})
+	f := counterFile{Version: 1, Used: c.used, Capacity: c.capacity}
 	c.mu.Unlock()
+	return writeCounterFile(c.path, f)
+}
+
+// writeCounterFile 原子写计数快照（tmp + fsync + rename）；目录自动创建。
+func writeCounterFile(path string, f counterFile) error {
+	data, err := json.Marshal(f)
 	if err != nil {
 		return fmt.Errorf("capacity: 序列化失败: %w", err)
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(c.path), 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(filepath.Dir(path), 0o755); mkErr != nil {
 		return fmt.Errorf("capacity: 创建目录失败: %w", mkErr)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(c.path), "capacity-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), "capacity-*.tmp")
 	if err != nil {
 		return fmt.Errorf("capacity: 创建临时文件失败: %w", err)
 	}
@@ -148,7 +154,7 @@ func (c *VolumeCapacityCounter) Save() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("capacity: 关闭临时文件失败: %w", err)
 	}
-	if err := os.Rename(tmpName, c.path); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("capacity: 原子重命名失败: %w", err)
 	}
 	return nil
@@ -176,32 +182,86 @@ func Load(path string, capacity int64) (*VolumeCapacityCounter, error) {
 	return c, nil
 }
 
+// VolumeCounterPath 返回配置外部卷容量计数器的持久化路径。
+// 目录 <root>/meta/vol-capacity/、文件名 <name>.capacity（**非 .json**——避开
+// UserVolumeStore 的 *.json 扫描；与用户卷 <name>.capacity 同口径）。
+func VolumeCounterPath(storageRoot, name string) string {
+	return filepath.Join(storageRoot, "meta", "vol-capacity", name+".capacity")
+}
+
 // PoolCounter 是 quota.Pool 的 Counter 适配（配置卷：与 vol_capacity 池同源，
 // 使路由排序/指标/对账读取到的 Usage 即卷级真实占用）。
-type PoolCounter struct{ pool *quota.Pool }
+//
+// path 非空时具备**持久化**：装配时把快照 used 预置进池（重启后仍从已占用起算，
+// 不漏计）、变更后原子写回——修对抗评审 P1：此前纯内存，重启 Usage 归零 → 可
+// 反复写满限额（“Σ用户 ≤ 卷限额”静默失效）。
+type PoolCounter struct {
+	pool *quota.Pool
+	path string
+	mu   sync.Mutex
+}
 
-// NewPoolCounter 包装卷容量池为卷级计数器。
+// NewPoolCounter 包装卷容量池为卷级计数器（无持久化）。
 func NewPoolCounter(p *quota.Pool) *PoolCounter { return &PoolCounter{pool: p} }
 
-// TryAdd 预留并立即提交 size（超限返回包装 ErrVolumeFull 的错误）。
+// NewPoolCounterPersistent 包装卷容量池并恢复持久化占用：快照 used > 0 时预置进池
+// （TryReserve + Commit）；超出当前限额（配置改小）时封顶为限额。文件不存在 → used=0。
+func NewPoolCounterPersistent(p *quota.Pool, path string) (*PoolCounter, error) {
+	c := &PoolCounter{pool: p, path: path}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return c, nil
+		}
+		return nil, fmt.Errorf("capacity: 读取 %s 失败: %w", path, err)
+	}
+	var f counterFile
+	if json.Unmarshal(data, &f) != nil || f.Used <= 0 {
+		return c, nil
+	}
+	seed := f.Used
+	if max := p.MaxBytes(); max > 0 && seed > max {
+		seed = max
+	}
+	if res, err := p.TryReserve(seed); err == nil {
+		res.Commit(seed)
+	}
+	return c, nil
+}
+
+// TryAdd 预留并立即提交 size（超限返回包装 ErrVolumeFull 的错误）；变更后持久化。
 func (p *PoolCounter) TryAdd(size int64) error {
 	if size <= 0 {
 		return nil
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	res, err := p.pool.TryReserve(size)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrVolumeFull, err)
 	}
 	res.Commit(size)
+	p.persistLocked()
 	return nil
 }
 
-// Release 释放 size（从池 committed 扣减）。
+// Release 释放 size（从池 committed 扣减）；变更后持久化。
 func (p *PoolCounter) Release(size int64) {
 	if size <= 0 {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.pool.ReleaseCommitted(size)
+	p.persistLocked()
+}
+
+// persistLocked 在持锁下取快照并原子写回（best-effort；无 path → no-op）。
+func (p *PoolCounter) persistLocked() {
+	if p.path == "" {
+		return
+	}
+	_ = writeCounterFile(p.path, counterFile{Version: 1, Used: p.pool.Usage(), Capacity: p.pool.MaxBytes()})
 }
 
 // Used 返回池当前占用。
@@ -508,6 +568,18 @@ func (b *Backend) PresignedURL(ctx context.Context, relPath, method string, expi
 		return p.PresignedURL(ctx, relPath, method, expires)
 	}
 	return "", fmt.Errorf("capacity: backend 未实现 PresignedURL: %w", syncpkg.ErrUnsupported)
+}
+
+// SecretsManagerAny 委托 inner（secrets 卷的 Manager 反取）。
+// 用 any 而非具体类型，避免本包依赖具体 secrets 实现；装配层 secrets.ManagerOfExternal
+// 反取（未实现 → nil）。修对抗评审 P1：
+// 此前 WrapBackend 只提升 {FS,Close}，动态值的 SecretsManager 不在提升集 →
+// ManagerOfExternal 断言恒失败 → 配置的 `type: secrets` 卷不可达、密钥被写到默认卷。
+func (b *Backend) SecretsManagerAny() any {
+	if sp, ok := b.ExternalBackend.(interface{ SecretsManagerAny() any }); ok {
+		return sp.SecretsManagerAny()
+	}
+	return nil
 }
 
 // 编译期断言：CapacityFS 实现 sync.FS；Backend 的 FS 满足 sync.FS。

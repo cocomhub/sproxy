@@ -67,9 +67,14 @@ type multipartOptions struct {
 }
 
 // multipartOptsFromConfig 从 ClientConfig 构造归一后的分片参数。
+// threshold == 0（未配置/非法）→ 默认 64MiB（文档承诺）；< 0 = 显式禁用分片。
 func multipartOptsFromConfig(cfg ClientConfig) multipartOptions {
+	threshold := cfg.MultipartThreshold
+	if threshold == 0 {
+		threshold = defaultMultipartThreshold
+	}
 	return multipartOptions{
-		threshold: cfg.MultipartThreshold,
+		threshold: threshold,
 		partSize:  normalizePartSize(cfg.MultipartPartSize),
 		retries:   normalizeRetries(cfg.UploadRetries),
 	}

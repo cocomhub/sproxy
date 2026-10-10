@@ -673,3 +673,55 @@ func (r *recordBinaryAdapter) Download(ctx context.Context, remotePath, localPat
 func (r *recordBinaryAdapter) Move(ctx context.Context, from, to string) error     { return nil }
 func (r *recordBinaryAdapter) Copy(ctx context.Context, from, to string) error     { return nil }
 func (r *recordBinaryAdapter) Delete(ctx context.Context, remotePath string) error { return nil }
+
+// unreliableMD5Adapter 模拟 binary-only 模式的 `meta`：远端 ETag 非权威整文件 md5
+// （服务端标注「可能不正确」）——不得据此做相等断言。
+type unreliableMD5Adapter struct{ inner *fakeStorageAdapter }
+
+func (a *unreliableMD5Adapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (a *unreliableMD5Adapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return a.inner.Download(ctx, remotePath, localPath)
+}
+func (a *unreliableMD5Adapter) Move(ctx context.Context, from, to string) error {
+	return a.inner.Move(ctx, from, to)
+}
+func (a *unreliableMD5Adapter) Copy(ctx context.Context, from, to string) error {
+	return a.inner.Copy(ctx, from, to)
+}
+func (a *unreliableMD5Adapter) Delete(ctx context.Context, remotePath string) error {
+	return a.inner.Delete(ctx, remotePath)
+}
+func (a *unreliableMD5Adapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.inner.List(ctx, remotePath)
+}
+func (a *unreliableMD5Adapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	m, err := a.inner.Meta(ctx, remotePath)
+	if err != nil || m == nil {
+		return m, err
+	}
+	m.ETag = "00000000000000000000000000000000" // 非整文件 md5（片组合/不确定）
+	m.MD5Unreliable = true
+	return m, nil
+}
+
+// TestStorage_Put_BinaryOnlyUnreliableMD5Accepted EXT-2 回归：binary-only 模式上传后远端
+// md5 可能不正确 → 不得判失败重传（否则 3 轮全量重传后 ErrTransient），应接受。
+func TestStorage_Put_BinaryOnlyUnreliableMD5Accepted(t *testing.T) {
+	t.Parallel()
+	s := newTestStorage(t, &unreliableMD5Adapter{inner: newFakeStorageAdapter()})
+	content := strings.Repeat("binary-only-unreliable-md5-", 64)
+	if _, err := s.Put(context.Background(), "x.bin", strings.NewReader(content)); err != nil {
+		t.Fatalf("Put 应接受（md5 非权威不判失败）: %v", err)
+	}
+	rc, _, err := s.Get(context.Background(), "x.bin")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if string(got) != content {
+		t.Fatalf("内容不一致")
+	}
+}

@@ -195,3 +195,18 @@ func TestPutObjectWithRetry_NonSeekableFailClosed(t *testing.T) {
 		t.Fatalf("不可 seek 源不应重试, got %d 次", p.attempt)
 	}
 }
+
+// TestMultipartOptsFromConfig_DefaultThreshold 文档承诺 multipart_threshold 默认 64MiB：
+// 0（未配置/非法）→ 默认；<0 = 显式禁用分片。
+func TestMultipartOptsFromConfig_DefaultThreshold(t *testing.T) {
+	t.Parallel()
+	if got := multipartOptsFromConfig(ClientConfig{}).threshold; got != defaultMultipartThreshold {
+		t.Fatalf("缺省 threshold = %d, want %d", got, defaultMultipartThreshold)
+	}
+	if got := multipartOptsFromConfig(ClientConfig{MultipartThreshold: -1}).threshold; got != -1 {
+		t.Fatalf("负值应保留（显式禁用），got %d", got)
+	}
+	if got := multipartOptsFromConfig(ClientConfig{MultipartThreshold: 1 << 20}).threshold; got != 1<<20 {
+		t.Fatalf("显式值应保留，got %d", got)
+	}
+}

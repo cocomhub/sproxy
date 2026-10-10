@@ -256,3 +256,15 @@ func TestParseBinaryMeta_SingleBlockDifferentPathRejected(t *testing.T) {
 		t.Fatal("块键不匹配时不应采用（防取到别的对象元信息）")
 	}
 }
+
+// TestParseBinaryMeta_MD5Unreliable 带括号注记的 md5 行标记为非权威（EXT-2）。
+func TestParseBinaryMeta_MD5Unreliable(t *testing.T) {
+	t.Parallel()
+	m, err := parseBinaryMeta([]byte(metaOutputFile), "/downList.tgz")
+	if err != nil {
+		t.Fatalf("parseBinaryMeta: %v", err)
+	}
+	if !m.MD5Unreliable {
+		t.Fatal("`md5 (可能不正确)` 应标记 MD5Unreliable")
+	}
+}

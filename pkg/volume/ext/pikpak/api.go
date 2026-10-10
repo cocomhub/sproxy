@@ -134,8 +134,12 @@ func (m *FileMeta) UnmarshalJSON(data []byte) error {
 
 // fileListResp 是 /drive/v1/files 的响应。
 type fileListResp struct {
-	Files []FileMeta `json:"files"`
+	Files         []FileMeta `json:"files"`
+	NextPageToken string     `json:"next_page_token"`
 }
+
+// pikpakMaxListPages 是 List 分页安全上限（防服务端 page_token 回环导致死循环）。
+const pikpakMaxListPages = 1000
 
 // doJSON 执行带鉴权的 API 请求并解析 JSON。
 // 鉴权：优先显式 AccessToken（cfg.AccessToken）；未配置时经 CLI `auth token`
@@ -215,16 +219,29 @@ func (a *API) ensureToken(ctx context.Context) (string, error) {
 	return a.token, nil
 }
 
-// List 列出目录（parentID 空 = 根）下文件。
+// List 列出目录（parentID 空 = 根）下文件。**带 page_token 循环取全量**（EXT-6：
+// 此前只取第一页 500 条，>500 条目目录的后续文件对 Stat/Get/List 变成「不存在」）。
 func (a *API) List(ctx context.Context, parentID string) ([]FileMeta, error) {
-	q := url.Values{}
-	q.Set("parent_id", parentID)
-	q.Set("page_size", "500")
-	var resp fileListResp
-	if err := a.doJSON(ctx, http.MethodGet, "/drive/v1/files", q, nil, &resp); err != nil {
-		return nil, err
+	var out []FileMeta
+	pageToken := ""
+	for page := 0; page < pikpakMaxListPages; page++ {
+		q := url.Values{}
+		q.Set("parent_id", parentID)
+		q.Set("page_size", "500")
+		if pageToken != "" {
+			q.Set("page_token", pageToken)
+		}
+		var resp fileListResp
+		if err := a.doJSON(ctx, http.MethodGet, "/drive/v1/files", q, nil, &resp); err != nil {
+			return nil, err
+		}
+		out = append(out, resp.Files...)
+		if resp.NextPageToken == "" {
+			return out, nil
+		}
+		pageToken = resp.NextPageToken
 	}
-	return resp.Files, nil
+	return out, nil
 }
 
 // ListRecursive 递归列出（用于找分享转存后的文件）。

@@ -55,6 +55,10 @@ type ObjectMeta struct {
 	ETag    string
 	ModTime time.Time
 	IsDir   bool
+	// MD5Unreliable 标记 ETag 并非权威整文件 md5（如 `meta` 输出 `md5 (可能不正确)`——
+	// 服务端对分片上传的 md5 可能为片组合/标注不可信）。上传后 ETag 复核须据此跳过
+	// 相等断言（否则 binary-only 模式 ≥4MiB 上传必然 3 轮全量重传后失败，EXT-2）。
+	MD5Unreliable bool
 }
 
 // Storage 是百度网盘存储后端。
@@ -297,6 +301,12 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key, localMD5 string,
 			return nil, false, nil
 		}
 		return nil, false, mapPCSError(statErr)
+	}
+	if meta.MD5Unreliable {
+		// 服务端标注 md5 可能不正确（分片组合）：不得做相等断言（否则必然判失败 +
+		// 白传 3 遍），按 size/存在性接受并告警（对齐 R5-I1「无校验能力≠损坏」）。
+		s.log.Warn("远端 md5 非权威（服务端标注可能不正确），跳过复核", "key", key, "remote_etag", meta.ETag, "attempt", attempt)
+		return meta, true, nil
 	}
 	if meta.ETag == localMD5 {
 		return meta, true, nil
