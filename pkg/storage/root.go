@@ -4,6 +4,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -102,7 +103,18 @@ func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
 		f.Close()
 		return nil, ferr
 	}
-	return &encReadCloser{r: dr, c: f, size: fi.Size(), open: func() (io.Reader, error) {
+	// 明文总长（P0）：fi.Size() 是**密文**长度，ServeContent 会用 SeekEnd 取它当
+	// Content-Length → 响应头长度 > 实际下发明文长度 → 客户端 unexpected EOF。
+	// 不解密，仅走每块长度头累计明文长度（加密格式：[magic][4B chunk] 重复
+	// [4B l][nonce|ct|tag]，l = overhead + 明文长）。探测失败回落密文长度（保持旧行为）。
+	size := fi.Size()
+	if pf, perr := rt.r.Open(rel); perr == nil {
+		if ps, pserr := encPlaintextSize(pf); pserr == nil {
+			size = ps
+		}
+		_ = pf.Close()
+	}
+	return &encReadCloser{r: dr, c: f, size: size, open: func() (io.Reader, error) {
 		nf, oerr := rt.r.Open(rel)
 		if oerr != nil {
 			return nil, oerr
@@ -112,7 +124,7 @@ func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
 			nf.Close()
 			return nil, nderr
 		}
-		return &encReadCloser{r: ndr, c: nf, size: fi.Size()}, nil
+		return &encReadCloser{r: ndr, c: nf, size: size}, nil
 	}}, nil
 }
 
@@ -264,12 +276,43 @@ func (rt *Root) Close() error {
 // encReadCloser 解密流 + 底层文件关闭。
 // 实现 io.ReadSeeker 的最小集：Seek 仅支持 0 起（重开解密流）——加密流不可任意 seek
 // （块随机存取需重读密文块），Range 语义降级为整读重开（ServeContent 兼容）。
+// size 为**明文**总长（由 encPlaintextSize 探测）——供 ServeContent 设正确的
+// Content-Length（若误用密文长度会导致客户端 unexpected EOF）。
 type encReadCloser struct {
 	r    io.Reader
 	c    io.Closer
 	open func() (io.Reader, error) // 重开回调（Seek 0 时重建解密流）
-	size int64                     // 文件总大小（密文 size，opaque；Seek End 返回）
+	size int64                     // 文件总大小（明文长度）
 	pos  int64                     // 已读位置（Seek End 语义返回）
+}
+
+// encRootOverhead 是加密块头外的固定开销：nonce(12B) + GCM tag(16B)。
+const encRootOverhead = 12 + 16
+
+// encPlaintextSize 探测加密文件的明文总长（**不解密**，仅顺序走每块长度头后跳过密文）。
+// 加密格式：[magic(15B)][4B chunk] 重复 [4B l][nonce|ct|tag]，l = encRootOverhead + 明文长。
+func encPlaintextSize(f *os.File) (int64, error) {
+	if _, err := f.Seek(int64(len(encRootMagic))+4, io.SeekStart); err != nil {
+		return 0, err
+	}
+	var total int64
+	var lenBuf [4]byte
+	for {
+		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return 0, err
+		}
+		l := int64(binary.BigEndian.Uint32(lenBuf[:]))
+		if l < encRootOverhead {
+			return 0, fmt.Errorf("storage: 非法密文块长 %d", l)
+		}
+		total += l - encRootOverhead
+		if _, err := f.Seek(l, io.SeekCurrent); err != nil {
+			return 0, err
+		}
+	}
 }
 
 func (e *encReadCloser) Read(p []byte) (int, error) {

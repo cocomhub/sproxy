@@ -55,9 +55,17 @@ func TestVolumesEncrypt_RoundTrip(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("download = %d", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		// 回归守卫（P0）：加密卷下载若被误接明文流校验，Content-Length=密文长而 body=明文，
+		// 读取在这里以 unexpected EOF 报错。
+		t.Fatalf("读取下载响应失败（加密卷不应接密文 meta 校验）: %v (body=%q, ContentLength=%d)", rerr, body, resp.ContentLength)
+	}
 	if string(body) != "top secret" {
 		t.Fatalf("下载明文 = %q", body)
+	}
+	if resp.ContentLength >= 0 && resp.ContentLength != int64(len(body)) {
+		t.Fatalf("ContentLength=%d 与明文 body 长度 %d 不符", resp.ContentLength, len(body))
 	}
 	// 密文落盘（user 桶内文件非明文）。
 	var raw []byte

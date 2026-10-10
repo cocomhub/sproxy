@@ -79,8 +79,16 @@ func (rt runtime) writeMetaSidecar(ctx context.Context, owner string, root *stor
 
 // verifyDownload 委托装配层下载流逐分块校验（信任保证演进；未装配/无 meta/skip_verify
 // → 返回 nil 直通——零回归）。
+//
+// 加密卷：sidecar 由 `computeMeta` 走 `root.Open`（**密文**）计算，而本路径的读取流是
+// `root.OpenDecrypted`（**明文**）——两者必然失配，长度探测也因 `SeekEnd` 返回密文长度
+// 而不报警。加密卷的完整性由卷内 GCM 认证保证，故与 `chunked_download.go` 同口径直接
+// 跳过（否则加密卷 `/download` 恒被截断/客户端 unexpected EOF）。
 func (rt runtime) verifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error) {
 	if rt.fileMeta == nil {
+		return nil, nil
+	}
+	if root != nil && root.IsEncrypted() {
 		return nil, nil
 	}
 	return rt.fileMeta.VerifyDownload(ctx, root, rel, r)

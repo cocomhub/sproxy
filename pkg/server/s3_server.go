@@ -398,12 +398,23 @@ func (h *Handlers) s3GetObject(w http.ResponseWriter, root *storage.Root, rel st
 		return
 	}
 	rc := files.SeekReadCloser(f)
-	if v, _ := (filesMetaPolicy{h: h}).VerifyDownload(context.Background(), root, rel, f); v != nil {
-		rc = v // 逐分块校验包装（Close 透传底层）
+	vf, verr := (filesMetaPolicy{h: h}).VerifyDownload(context.Background(), root, rel, f)
+	if verr != nil {
+		// 鉴柄已开但校验器装配失败（如畸形 sidecar）：不得下发半截内容。
+		_ = f.Close()
+		http.Error(w, "s3: 校验装配失败", http.StatusInternalServerError)
+		return
+	}
+	if vf != nil {
+		rc = vf // 逐分块校验包装（Close 透传底层）
 	}
 	defer rc.Close()
 	w.Header().Set(headerContentType, "application/octet-stream")
-	_, _ = io.Copy(w, rc)
+	if _, cerr := io.Copy(w, rc); cerr != nil {
+		// 校验失败/底层读错时 io.Copy 会先写出部分字节再回错；响应头已发出，无法改状态码。
+		// 必须中断连接（否则 chunked 会以**合法**终止块结束 → 客户端 200 + 静默截断对象）。
+		panic(http.ErrAbortHandler)
+	}
 }
 
 // s3PutObject 写对象：MkdirAll 父目录后 OpenFile 直写（root 无 WriteFile——用 OpenFile）。

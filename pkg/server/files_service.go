@@ -297,10 +297,16 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 	if p.h.verifySkipped() {
 		return nil, nil // 显式跳过下载校验（极端性能场景；meta 仍恒生成）
 	}
+	if root != nil && root.IsEncrypted() {
+		// 加密卷：sidecar 由 computeMeta 走 root.Open（密文）算，而本路径的流是明文
+		// （OpenDecrypted），二者必然失配。加密卷完整性由卷内 GCM 认证保证——与
+		// chunked_download.go 同口径跳过。
+		return nil, nil
+	}
 	mrel := meta.MetaPath(rel)
 	rc, err := root.Open(mrel)
 	if err != nil {
-		return nil, nil // meta 缺失（旁路写/未启用）：直通（读路径直算兜底，不阻断下载）
+		return nil, nil // sidecar 缺失（旁路写/未启用/存量数据）：直通——**本路径不提供任何服务端校验**，非「直算兜底」
 	}
 	defer rc.Close()
 	raw, rerr := io.ReadAll(io.LimitReader(rc, meta.MaxMetaSidecarBytes()+1))
