@@ -53,6 +53,13 @@ func NewVolumeBackend(ctx context.Context, cfg VolumeBackendConfig) (*VolumeBack
 	if local == "" {
 		local = filepath.Join(os.TempDir(), "baidupcs", cfg.Name)
 	}
+	// 重启恢复（用户裁定）：启动清理崩溃残留的 staging 孤儿——配额 Scope 新进程归零，
+	// 残留只占磁盘不占配额，清理使磁盘/配额基线一致（best-effort 不阻断）。
+	l, lerr := NewLayout(local)
+	if lerr != nil {
+		return nil, lerr
+	}
+	l.RecoverOrphans()
 	fs, err := NewStorageFS(cfg.Storage, local)
 	if err != nil {
 		return nil, err

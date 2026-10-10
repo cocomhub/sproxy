@@ -74,3 +74,35 @@ func TestLayout_SanitizeKey_NoEscape(t *testing.T) {
 		t.Fatalf("归一 key 越出 base: %q (rel=%q)", joined, rel)
 	}
 }
+
+// TestLayout_RecoverOrphans 重启恢复（用户裁定）：NewVolumeBackend 启动清理崩溃残留的
+// staging 孤儿——配额 Scope 新进程归零，残留只占磁盘不占配额，清理使基线一致。
+func TestLayout_RecoverOrphans(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	l, err := NewLayout(base)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	// 模拟崩溃残留：staging 下遗留孤儿（stage-abc123 子目录 + 游离文件）。
+	orphanDir := filepath.Join(l.Staging, "stage-abc123")
+	_ = os.MkdirAll(filepath.Join(orphanDir, "nested"), 0o755)
+	_ = os.WriteFile(filepath.Join(orphanDir, "nested", "f.bin"), []byte("orphan"), 0o644)
+	_ = os.WriteFile(filepath.Join(l.Staging, "stale.tmp"), []byte("stale"), 0o644)
+	// 非孤儿（resume 断点保留——有续传价值）。
+	_ = os.WriteFile(filepath.Join(l.Resume, "keep.json"), []byte(`{"part":1}`), 0o644)
+
+	l.RecoverOrphans()
+
+	// staging 孤儿全清。
+	if _, serr := os.Stat(orphanDir); !os.IsNotExist(serr) {
+		t.Fatalf("staging 孤儿子目录应清理: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(l.Staging, "stale.tmp")); !os.IsNotExist(serr) {
+		t.Fatalf("staging 游离残留应清理: %v", serr)
+	}
+	// resume 断点保留。
+	if _, serr := os.Stat(filepath.Join(l.Resume, "keep.json")); serr != nil {
+		t.Fatalf("resume 断点应保留（有续传价值）: %v", serr)
+	}
+}
