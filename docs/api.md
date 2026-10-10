@@ -878,6 +878,26 @@ sproxy_gc_cycles 42
   - `s3`：`endpoint`/`bucket`/`access_key`/`secret_key`（必填），`region`/`use_ssl`/`local_root`（可选）；大文件分片上传（roadmap 3.3 P1）：`multipart_threshold`（分片阈值，默认 64MiB）、`multipart_part_size`（分片大小，默认 16MiB，minio 5MiB 下限钳制）、`upload_retries`（失败重试次数，默认 3）
   - `sftp`：`url`（`sftp://user@host[:port][/root-path]`，必填）+ `private_key` 或 `password`（二选一），`root`（远端根，可选）
 
+### 预签名直传（`POST /api/backends/{type}/presign`）
+
+服务端持凭据为客户端签发对象存储直传 URL（当前 `s3`），客户端 PUT 后经登记端点确认。
+
+query 参数：`path`（卷内相对路径，必填）、`method`（`PUT`/`GET`，必填）、`expires`（正整数秒，可选）。
+
+- **路径 owner 收敛（硬性）**：`path` 由服务端重绑到**调用者**的键空间——
+  裸相对路径（`dir/a.txt`）与 `user/dir/a.txt` 均归一为 `<owner>/user/dir/a.txt`；
+  已带 `<owner>/…` 前缀时 owner 必须等于调用者。**越权（他人 owner 前缀 / 非 `user` 桶 /
+  `meta` 功能桶）→ 403**。这样对象落点与文件 API 一致（此前落裸 key、文件 API 不可见）。
+- 响应 `{"url": "…"}`；未注册类型 → 404；后端不支持预签名 → 405；`method`/`expires` 非法 → 400。
+
+### 预签名登记（`POST /api/backends/{type}/presign/complete`）
+
+客户端直传完成后登记：服务端按上述同一 owner 收敛路径 `Stat` 确认对象存在。
+
+- 对象不存在 → 404（fail-closed，**不**空确认）；未注册类型 → 404；越权路径 → 403。
+- 注意：预签名直传**不经**服务端 `Wrap`/`CapacityFS`，当前不生成完整性 sidecar、不计卷级容量
+  （设计边界，见 `docs/designs/2026-10-10-trusted-volume.md` §8）。
+
 ## 审计（audit /api/audit）
 
 审计日志查看与导出（敏感运维面，主 mux 需 SproxySig/APIKey 认证；隧道内层裸注册，隧道加密即认证）。

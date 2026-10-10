@@ -542,3 +542,12 @@ tls:
 #   enabled: false
 #   listen: "127.0.0.1:19001"
 #   handshake_timeout: "10s"
+# 卷根 at-rest 加密（仅本地卷；用户访问恒见明文，落盘字节为密文）：
+#   - name: "secure"
+#     type: "local"
+#     root: "./storage-secure"
+#     extra:
+#       encrypt: true
+#       encrypt_key_file: "./secure.key"   # raw 32B 或 base64 32B（openssl rand -base64 32）
+#       cipher: "64KiB"                    # 可选：加密分块大小（非法值 fail-closed）
+#   —— 备份/迁移需导出存储原样密文时用 `?ciphertext=1`（详见 docs/api.md）。

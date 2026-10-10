@@ -151,6 +151,10 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `tier_policy.interval` | duration | `0`（关闭） | 冷热分层自动降级扫描间隔：`> 0` 时启用周期任务（ticker + 停止通道，与 `mirror_interval` 同构），把 hot 卷满足条件的文件迁移到 cold 卷；`0`/缺省 = 关闭（零回归） |
 | `tier_policy.max_age_hot` | duration | `0`（不限龄） | hot 卷文件最大存活时间：mtime 超过此值且 size ≥ `min_size_hot` 才降级。`0` = 不限龄（仅按大小降级） |
 | `tier_policy.min_size_hot` | size | `0`（不限大小） | hot 卷文件最小大小阈值：size 超过此值且 age ≥ `max_age_hot` 才降级。`0` = 不限大小（仅按龄降级）。**至少一个阈值非零**降级才可能发生 |
+| `volumes[].extra.encrypt` | bool | `false` | **卷根 at-rest 加密**（仅本地卷）：`true` = 落盘字节经 AES-256-GCM 分块加密，用户访问恒见**明文**（`/download`、DAV/S3 GET、分享、预览统一透明解密）。`encrypt=true` 但缺 `encrypt_key_file` → 启动 fail-closed。`?ciphertext=1` 可按需导出**存储原样密文**（备份/迁移/带外校验） |
+| `volumes[].extra.encrypt_key_file` | string | (空) | at-rest 加密密钥文件路径（raw 32B 或 base64 32B）。`encrypt=true` 时必填（缺失启动失败）；与 `credential_store.master_key_file` 同语义，`openssl rand -base64 32` 生成 |
+| `volumes[].extra.cipher` | size | `64KiB` | at-rest 加密的分块大小（仅 `encrypt=true` 时生效；非法值 fail-closed）。预留给未来多算法选型——当前仅 `aes-256-gcm` 一种 |
+| `volumes[].extra.*` | object | (空) | 后端类型特有配置（外部后端构造器读取，如 baidupcs 的 `bduss`/`baidu_root`、s3 的 `endpoint`/`bucket`/`access_key`/`secret_key`）。**含凭据的键在 `GET /api/volumes` / `GET /api/volumes/user` 回显时被打码** |
 
 配置示例见 `config.example.yaml`。
 
