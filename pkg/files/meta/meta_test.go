@@ -315,3 +315,32 @@ func TestMaxMetaChunks_CoherentWithSidecarLimit(t *testing.T) {
 		t.Fatalf("合法 meta 大小 %d 超过读取上限 %d", len(raw), MaxMetaSidecarBytes())
 	}
 }
+
+// TestResolveChunkSize_ClampsChunkCount P2 回归（第 5 轮对抗评审）：写侧档位必须保证
+// 分块数 ≤ maxMetaChunks，否则合法文件写出「读侧 Validate 拒绝」的 sidecar → 永久
+// 静默零校验（本地）/上传误判失败（外部卷）。
+func TestResolveChunkSize_ClampsChunkCount(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		configured int64
+		size       int64
+	}{
+		{"1MiB 档 + 400GiB", MinMetaChunkSize, 400 << 30},
+		{"1MiB 档 + 1TiB", MinMetaChunkSize, 1 << 40},
+		{"自适应默认 + 1TiB", 0, 1 << 40},
+		{"32MiB 档 + 5TiB", MaxMetaChunkSize, 5 << 40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cs := ResolveChunkSize(tc.configured, tc.size)
+			chunks := (tc.size + cs - 1) / cs
+			if chunks > int64(MaxMetaChunks()) {
+				t.Fatalf("分块数 %d 超上限 %d（chunkSize=%d）", chunks, MaxMetaChunks(), cs)
+			}
+			if cs > MaxMetaChunkSize {
+				t.Fatalf("chunkSize %d 超上界 %d", cs, MaxMetaChunkSize)
+			}
+		})
+	}
+}

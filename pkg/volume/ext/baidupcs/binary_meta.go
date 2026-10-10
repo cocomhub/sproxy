@@ -58,7 +58,10 @@ func (a *binaryAdapter) runBinaryOutput(ctx context.Context, args ...string) ([]
 	if err != nil {
 		a.logger().Info("baidupcs 二进制元信息失败，回退库",
 			"bin", bin, "args", args, "err", err, "stderr", truncate(stderr.String(), 200))
-		return nil, fmt.Errorf("BaiduPCS-Go %v: %w", args, err)
+		// stderr 文本并入错误串：CLI 对「路径不存在」是**非零退出 + stderr/stdout 文本**，
+		// 调用方需据此归类 ErrNotFound（P2：原实现丢弃文本 → isBinaryNotFound(out) 恒 false
+		// 且 out 恒 nil 的死代码，二元模式新文件上传会因非 ErrNotFound 而失败）。
+		return nil, fmt.Errorf("BaiduPCS-Go %v: %w: %s", args, err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }
@@ -80,8 +83,9 @@ func (a *binaryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMet
 	}
 	out, err := a.runBinaryOutput(ctx, "meta", remotePath)
 	if err != nil {
-		// CLI 非零退出：可能是路径不存在（走 not-found 归类再回落）。
-		if isBinaryNotFound(out) {
+		// CLI 非零退出：可能是路径不存在（走 not-found 归类再回落）。文本在错误串里
+		// （stderr 已并入，见 runBinaryOutput）——out 在失败路径恒 nil。
+		if isBinaryNotFound([]byte(err.Error())) {
 			if fb := a.fallbackMeta(); fb != nil {
 				return fb.Meta(ctx, remotePath)
 			}

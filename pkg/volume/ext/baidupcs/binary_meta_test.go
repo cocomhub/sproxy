@@ -5,6 +5,10 @@ package baidupcs
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -326,4 +330,37 @@ func TestIsBinaryNotFound(t *testing.T) {
 			t.Errorf("isBinaryNotFound(%.30q) = %v, want %v", tc.out, got, tc.want)
 		}
 	}
+}
+
+// TestBinaryAdapter_Meta_CLINotFoundIsErrNotFound P2 回归（第 5 轮对抗评审）：
+// `runBinaryOutput` 失败时 out 恒 nil，原实现 `isBinaryNotFound(out)` 是死代码 →
+// CLI 以非零退出报告「路径不存在」时不会归类 ErrNotFound → binary-only 模式下任意
+// 新文件上传在 putCheckExisting 写前失败。修复：stderr 文本并入错误串，判定改看它。
+func TestBinaryAdapter_Meta_CLINotFoundIsErrNotFound(t *testing.T) {
+	t.Parallel()
+	bin := writeNotFoundScript(t)
+	a := newBinaryAdapter(AdapterConfig{BinaryPath: bin})
+	_, err := a.Meta(context.Background(), "/no/such/file")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("CLI 报告不存在应归类 ErrNotFound，得到 %v", err)
+	}
+}
+
+// writeNotFoundScript 写一个「向 stderr 打 not-found 文本并非零退出」的可执行脚本（跨平台；
+// 用 ASCII 短语避免 Windows 控制台代码页把 UTF-8 中文弄乱）。
+func writeNotFoundScript(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		p := filepath.Join(dir, "cli.bat")
+		if err := os.WriteFile(p, []byte("@echo off\r\necho No such file or directory 1>&2\r\nexit /b 1\r\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := filepath.Join(dir, "cli.sh")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho 'No such file or directory' 1>&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

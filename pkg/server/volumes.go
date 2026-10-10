@@ -571,23 +571,52 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 		}
 		route.scopeRes = res
 	}
-	if pool := h.volSet.Pool(volName); pool != nil {
-		res, err := pool.TryReserve(size)
-		if err != nil {
-			if route.scopeRes != nil {
-				route.scopeRes.Release()
-			}
-			return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
-		}
-		if external != nil {
-			// 外部卷：卷级容量由 FS 层 CapacityFS 权威记账（本次仅探测用于路由/快速失败，
-			// 立即释放防双计）。
-			res.Release()
-		} else {
-			route.pool, route.poolRes = pool, res
-		}
+	if err := h.reserveVolumePool(route, volName, external, rel, size); err != nil {
+		return nil, err
 	}
 	return route, nil
+}
+
+// reserveVolumePool 卷级容量池预留（单一出口，卸下 reserveVolume 的认知复杂度）。
+// 外部卷只探测**净增**并在成功后立即释放（容量记账权威在 FS 层 CapacityFS）。
+func (h *Handlers) reserveVolumePool(route *volumeRoute, volName string, external files.UploadSink, rel string, size int64) error {
+	pool := h.volSet.Pool(volName)
+	if pool == nil {
+		return nil
+	}
+	need := size
+	if external != nil {
+		need = externalReserveNeed(context.Background(), external, rel, size)
+	}
+	if need <= 0 {
+		return nil // 净增为 0（覆盖写更小/等大）：无需卷池探测
+	}
+	res, err := pool.TryReserve(need)
+	if err != nil {
+		if route.scopeRes != nil {
+			route.scopeRes.Release()
+		}
+		return newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
+	}
+	if external != nil {
+		// 外部卷：卷级容量由 FS 层 CapacityFS 权威记账（本次仅探测用于路由/快速失败，
+		// 立即释放防双计）。
+		res.Release()
+		return nil
+	}
+	route.pool, route.poolRes = pool, res
+	return nil
+}
+
+// externalReserveNeed 返回外部卷写入的**净增**字节：容量已按全量记账，覆盖写只需预留
+// 增量——否则 `used==capacity` 后该卷一切写入（含把大文件覆盖成小文件）恒 507，只能靠
+// 运维删计数文件/重启恢复（第 5 轮对抗评审 P1）。Stat 失败（不存在/后端报错）→ 按全量。
+func externalReserveNeed(ctx context.Context, sink files.UploadSink, rel string, size int64) int64 {
+	prev, ok, err := sink.Stat(ctx, rel)
+	if err != nil || !ok {
+		return size
+	}
+	return max(size-prev, 0)
 }
 
 // externalSinkFor 返回外部卷的写入源（External FS 包装为 files.UploadSink）；

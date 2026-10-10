@@ -213,16 +213,26 @@ const MaxMetaChunkSize = 32 << 20
 // （ChunkSizeForSize）；配置 < MinMetaChunkSize → 钳到下界；否则用配置值。
 // 本地卷与外部卷装饰器共用同一口径（防两处实现漂移）。
 func ResolveChunkSize(configured, size int64) int64 {
-	if configured <= 0 {
-		return ChunkSizeForSize(size)
+	cs := configured
+	switch {
+	case configured <= 0:
+		cs = ChunkSizeForSize(size)
+	case configured < MinMetaChunkSize:
+		cs = MinMetaChunkSize
+	case configured > MaxMetaChunkSize:
+		cs = MaxMetaChunkSize
 	}
-	if configured < MinMetaChunkSize {
-		return MinMetaChunkSize
+	// P2（第 5 轮对抗评审）：分块数上界**自洽**——`maxMetaChunks` 只在读侧 Validate
+	// 生效，而写侧按配置档位分块：配置 `chunk_size=1MiB` 时 >341GiB 文件会写出「显著但
+	// 被读侧拒绝」的 sidecar → 该文件**永久静默零校验**（本地卷）或把已成功写盘的上传
+	// 判为失败（外部卷）。此处上抬档位至满足分块数上限，保证合法写出的 meta 必可读。
+	if size > 0 && cs > 0 {
+		need := (size + int64(maxMetaChunks) - 1) / int64(maxMetaChunks)
+		if need > cs {
+			cs = min(need, MaxMetaChunkSize)
+		}
 	}
-	if configured > MaxMetaChunkSize {
-		return MaxMetaChunkSize
-	}
-	return configured
+	return cs
 }
 
 // Provider 是 FS 的**自带 meta 提供能力**（用户裁定 2026-10-07：卷自身提供正确 meta
@@ -316,3 +326,6 @@ func FromFile(path string, chunkSize int64, extra map[string]any) (*FileMeta, er
 // 防被注入超大 JSON 的 OOM DoS；超限视为 meta 缺失回落直算）。
 // 供 trusted 装饰器与装配层下载校验（filesMetaPolicy.VerifyDownload）复用同一防护口径。
 func MaxMetaSidecarBytes() int64 { return maxMetaSidecarBytes }
+
+// MaxMetaChunks 是 FileMeta 分块数上限（供写侧 ResolveChunkSize 保证「写出即可读」）。
+func MaxMetaChunks() int { return maxMetaChunks }
