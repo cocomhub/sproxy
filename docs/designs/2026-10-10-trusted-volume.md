@@ -102,6 +102,10 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   内层未实现返回 `syncpkg.ErrUnsupported` 哨兵（消费方按「不支持」处理）。
 - 装饰器链：`Guard(Wrap(CapacityFS(raw)))`；`trusted.Wrap` 下探透明装饰器（CapacityFS.Inner）
   判断卷自身是否自带 meta，避免把转发层误判为 Provider。
+- **备份目标键空间归一**（FS-CORE-3）：备份源相对路径经 `prefixFS` 映射到目标卷桶键空间
+  （外部卷 `<owner>/user/...`、本地卷 `user/...`）再进 `Guard(Wrap(...))`——否则 Guard 会把
+  源里名为 `meta` 的目录误判为 meta 桶拒绝、sidecar 落到用户可见目录（不隐藏/不隔离）、
+  且无 owner 前缀致跨 owner 同名相对路径互相覆盖；本地卷目标现在也包 Guard(Wrap) 建 sidecar。
 
 ## 8. 已知边界与后续
 

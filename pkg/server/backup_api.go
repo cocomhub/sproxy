@@ -23,6 +23,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/backup"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
@@ -230,7 +231,10 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 		}
 		// P1-9 修复：备份写外部卷也须 Wrap（meta 恒生成，与上传/转存一致）；
 		// P1-4 修复：Guard 现透传 StagingQuotaExempt/Capable，s3 豁免/baidupcs 自管可命中。
-		fs := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
+		// FS-CORE-3 修复：经 prefixFS 把源相对路径映射到外部卷桶键空间 `<owner>/user/...`
+		// （否则 Guard 误判 meta 目录、sidecar 落用户可见目录、跨 owner 同名互覆）。
+		fs := syncpkg.FS(trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())))
+		fs = &prefixFS{FS: fs, prefix: storage.NormalizeOwner(owner) + "/user/"}
 		// 本地 staging 配额强制接线（用户裁定 2026-10-10：外部卷统一过独立 staging
 		// 配额——备份写本地暂存防打满；s3 流式显式 Exempt，baidupcs 自管 StagingQuotaCapable）。
 		return h.stagingQuotaFS(owner, fs), nil
@@ -239,11 +243,15 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 	if tnt == nil || tnt.Root() == nil {
 		return nil, fmt.Errorf("备份目标卷 %q 不可用", target)
 	}
-	userAbs, ok := tnt.Root().Abs(tnt.UserRoot())
+	// 本地卷目标：root 在 tenant 根（`<storage_root>/<owner>`），键空间 = `user/<rel>`。
+	// 经 Guard(Wrap)（TV-BACKUP-LOCAL-BYPASS 修复：本地目标同样建 sidecar，与上传/转存
+	// 一致）；prefixFS 把源相对路径 rel 映射到 `user/rel`，Wrap 写 sidecar 到 `meta/rel.meta`。
+	rootAbs, ok := tnt.Root().Abs("")
 	if !ok {
 		return nil, fmt.Errorf("备份目标卷 %q 根不可用", target)
 	}
-	return syncpkg.NewLocalFS(filepath.ToSlash(userAbs), h.logger), nil
+	fs := trusted.Guard(trusted.Wrap(syncpkg.NewLocalFS(filepath.ToSlash(rootAbs), h.logger), h.trustedWrapOpts()))
+	return &prefixFS{FS: fs, prefix: "user/"}, nil
 }
 
 // backupQuotaFS 是备份目标写面的配额记账装饰器：WriteFile 前对文件 size 在
