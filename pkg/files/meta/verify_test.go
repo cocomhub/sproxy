@@ -8,6 +8,8 @@ package meta
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"strings"
 	"testing"
@@ -159,5 +161,23 @@ func TestVerifyReadSeeker_MidSeekToEOF_NoFalsePositive(t *testing.T) {
 	}
 	if got != string(content[1500:]) {
 		t.Fatalf("中段读回内容不符")
+	}
+}
+
+// TestVerifyReadSeeker_InvalidMetaFailsClosed 入口 Validate fail-closed：畸形 meta
+// （哈希格式错等）应首次 Read 即报错，不进入流式校验（可能 slice 越界/校验弱化）。
+func TestVerifyReadSeeker_InvalidMetaFailsClosed(t *testing.T) {
+	t.Parallel()
+	h := sha256.Sum256([]byte("abcd"))
+	sum := hex.EncodeToString(h[:])
+	// ChunkSize=0 属 Validate 拒绝项，但分块/总哈希与实际内容一致（不 Validate 时流式
+	// 校验会通过）——测试专门钉住入口 Validate 门。
+	bad := &FileMeta{
+		Version: 1, Size: 4, TotalSHA256: sum, ChunkSize: 0,
+		Chunks: []ChunkMeta{{Index: 0, Offset: 0, Size: 4, SHA256: sum}},
+	}
+	v := VerifyReadSeeker(strings.NewReader("abcd"), bad)
+	if _, err := v.Read(make([]byte, 4)); err == nil {
+		t.Fatal("畸形 meta 应首次 Read 即 fail-closed")
 	}
 }

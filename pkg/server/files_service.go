@@ -305,12 +305,24 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 	defer rc.Close()
 	raw, rerr := io.ReadAll(io.LimitReader(rc, meta.MaxMetaSidecarBytes()+1))
 	if rerr != nil {
+		p.warnDegrade("读取失败", rel, rerr)
 		return nil, nil // meta 读失败：直通（不阻断下载）
+	}
+	if int64(len(raw)) > meta.MaxMetaSidecarBytes() {
+		// 显式超限拒绝（与 trusted_fs.FileMeta 同口径）：截读会得到非法 JSON →
+		// 静默直通；此处拒绝并告警，防被注入超大 JSON 的 OOM DoS（P2 对抗评审）。
+		p.warnDegrade("大小超限", rel, nil)
+		return nil, nil
 	}
 	fm, uerr := meta.Unmarshal(raw)
 	if uerr != nil {
+		// 可观测性（仓库既定：安全开关生效状态必须可观测、禁静默降级）：解析失败/超限
+		// 与「本无 sidecar」可区分，供运维告警。
+		p.warnDegrade("解析失败", rel, uerr)
 		return nil, nil // meta 解析失败：直通（不阻断）
 	}
+	// 外部卷下的 sidecar 与数据同存不受信后端：畸形 meta 一律由 VerifyReadSeeker 内部
+	// 入口 Validate fail-closed（见 pkg/files/meta/verify.go），不在此处降级为直通。
 	// 包装为逐分块校验流（ServeContent 消费，Seek 语义保持）。具体类型实现 Close——
 	// 断言回 SeekReadCloser（底层 r 可 Close，包装透传）。
 	v := meta.VerifyReadSeeker(r, fm)
@@ -319,6 +331,14 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 		return nil, nil // 防御：不可 Close 断言失败直通（正常不可达）
 	}
 	return sr, nil
+}
+
+// warnDegrade 记录「读侧校验被跳过」的可观测信号（与显式 skip_verify 可区分）。
+func (p filesMetaPolicy) warnDegrade(reason, rel string, err error) {
+	if p.h == nil || p.h.logger == nil {
+		return
+	}
+	p.h.logger.Warn("可信卷读校验降级为直通", "reason", reason, "path", rel, "error", err)
 }
 
 // WriteMeta 计算并写入配套 .meta（本地卷上传到达即建；失败返回错误由调用方 Warn 兜底，

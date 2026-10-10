@@ -123,10 +123,11 @@ func (c *VolumeCapacityCounter) Save() error {
 	if c.path == "" {
 		return nil
 	}
+	// 全程持锁（含序列化与落盘）：否则并发 Save 各自在锁内取快照、锁外写文件，
+	// 更旧的快照可能后落盘 → 磁盘 used 永久偏低（重启后超限保护被削弱；P2 对抗评审）。
 	c.mu.Lock()
-	f := counterFile{Version: 1, Used: c.used, Capacity: c.capacity}
-	c.mu.Unlock()
-	return writeCounterFile(c.path, f)
+	defer c.mu.Unlock()
+	return writeCounterFile(c.path, counterFile{Version: 1, Used: c.used, Capacity: c.capacity})
 }
 
 // writeCounterFile 原子写计数快照（tmp + fsync + rename）；目录自动创建。

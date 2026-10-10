@@ -35,6 +35,17 @@ import (
 // （极端定制 reader）→ 退化为流式判据（EOF 时判短读/总哈希）。
 func VerifyReadSeeker(r io.ReadSeeker, fm *FileMeta) io.ReadSeeker {
 	v := &verifyReadSeeker{inner: r, fm: fm, curChunk: -1}
+	// 入口 fail-closed：畸形 meta（分块重叠/空洞/负 size/哈希格式错…）不得进入流式
+	// 校验（可能致 slice 越界 panic 或校验被静默弱化）；与 cloud/transfer.go 的 M7a
+	// 同口径（P3 对抗评审）。
+	if fm == nil {
+		v.fatal = fmt.Errorf("meta: 校验失败：FileMeta 为空")
+		return v
+	}
+	if err := Validate(fm); err != nil {
+		v.fatal = fmt.Errorf("meta: 校验失败：FileMeta 非法: %w", err)
+		return v
+	}
 	if end, err := r.Seek(0, io.SeekEnd); err == nil {
 		if end != fm.Size {
 			v.fatal = fmt.Errorf("meta: 校验失败：底层内容长度 %d 与 FileMeta.Size %d 不一致（截断/追加）", end, fm.Size)
