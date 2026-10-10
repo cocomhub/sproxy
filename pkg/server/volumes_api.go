@@ -36,6 +36,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -121,6 +122,9 @@ func (h *Handlers) externalVolumeState(name string, be registry.ExternalBackend)
 	defer cancel()
 	state := volumeStateHealthy
 	if err := probe.Ping(ctx); err != nil {
+		if errors.Is(err, syncpkg.ErrUnsupported) {
+			return volumeStateUnknown // 记账包装层转发，内层未实现探针 → 不误报 degraded
+		}
 		state = volumeStateDegraded
 		// 告警引擎挂点（roadmap P1 阈值告警）：卷 degraded 即时告警（nil = 未启用）。
 		if h.alertEngine != nil {

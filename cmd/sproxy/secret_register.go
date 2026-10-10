@@ -29,6 +29,7 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
@@ -463,6 +464,11 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 		be, berr := registry.NewBackend(ctx, v)
 		if berr != nil {
 			return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败（boot fail）: %w", v.Name, berr)
+		}
+		// 卷级容量记账（FS 层）：与非延迟外部卷同—包 CapacityFS（PoolCounter 复用该卷
+		// vol_capacity 池）。
+		if pool := set.Pool(v.Name); pool != nil {
+			be = capacity.WrapBackend(be, capacity.NewPoolCounter(pool))
 		}
 		if aerr := set.AttachExternal(v.Name, be); aerr != nil {
 			return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)

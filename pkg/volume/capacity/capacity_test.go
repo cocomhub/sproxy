@@ -12,6 +12,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -73,35 +74,55 @@ func TestCounter_Persist_Roundtrip(t *testing.T) {
 
 // ---- CapacityFS 装饰器：WriteFile 累计 / Delete 释放 / 超限拒绝 ----
 
-// recordingFS 是记录 WriteFile/Delete 调用的 fake sync.FS（Stat 返回 a.txt 大小 30）。
+// recordingFS 是记录 WriteFile/Delete 调用的 fake sync.FS（内存 size 表，支持覆盖写）。
 type recordingFS struct {
+	mu     sync.Mutex
+	sizes  map[string]int64
 	writes atomic.Int64
 	dels   atomic.Int64
 }
 
+func newRecordingFS() *recordingFS { return &recordingFS{sizes: map[string]int64{}} }
+
 func (r *recordingFS) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
 func (r *recordingFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error) {
-	if p == "a.txt" {
-		return &syncpkg.Entry{Name: "a.txt", Path: "a.txt", Size: 30}, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.sizes[p]; ok {
+		return &syncpkg.Entry{Name: p, Path: p, Size: s}, nil
 	}
 	return nil, nil
 }
 func (r *recordingFS) OpenRead(context.Context, string) (io.ReadCloser, error) { return nil, nil }
-func (r *recordingFS) WriteFile(_ context.Context, _ string, _ io.Reader, _ int64, _ int64) error {
+func (r *recordingFS) WriteFile(_ context.Context, p string, _ io.Reader, size, _ int64) error {
 	r.writes.Add(1)
+	r.mu.Lock()
+	r.sizes[p] = size
+	r.mu.Unlock()
 	return nil
 }
-func (r *recordingFS) Rename(context.Context, string, string) error { return nil }
-func (r *recordingFS) Delete(_ context.Context, _ string) error {
+func (r *recordingFS) Rename(_ context.Context, from, to string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.sizes[from]; ok {
+		r.sizes[to] = s
+		delete(r.sizes, from)
+	}
+	return nil
+}
+func (r *recordingFS) Delete(_ context.Context, p string) error {
 	r.dels.Add(1)
+	r.mu.Lock()
+	delete(r.sizes, p)
+	r.mu.Unlock()
 	return nil
 }
 func (r *recordingFS) MakeDir(context.Context, string) error { return nil }
 
-// TestCapacityFS_WriteAddsAndDeleteReleases 钉住装饰器：WriteFile 累计 size，Delete 释放。
+// TestCapacityFS_WriteAddsAndDeleteReleases 钉住装饰器：新建 WriteFile 累计 size，Delete 释放。
 func TestCapacityFS_WriteAddsAndDeleteReleases(t *testing.T) {
 	t.Parallel()
-	inner := &recordingFS{}
+	inner := newRecordingFS()
 	c := NewCounter(100, "")
 	fs := Wrap(inner, c)
 
@@ -126,7 +147,7 @@ func TestCapacityFS_WriteAddsAndDeleteReleases(t *testing.T) {
 // capacity 满时 WriteFile 返回错误（不触达 inner）。
 func TestCapacityFS_WriteExceedsCapacity_Rejected(t *testing.T) {
 	t.Parallel()
-	inner := &recordingFS{}
+	inner := newRecordingFS()
 	c := NewCounter(50, "")
 	fs := Wrap(inner, c)
 
@@ -141,5 +162,61 @@ func TestCapacityFS_WriteExceedsCapacity_Rejected(t *testing.T) {
 	}
 	if inner.writes.Load() != 1 {
 		t.Fatalf("inner writes = %d, want 1（超限不触达）", inner.writes.Load())
+	}
+}
+
+// TestCapacityFS_OverwriteAdjustsDelta 钉住覆盖写差分（2026-10-10）：覆盖小文件释放差额，
+// 变大时只按净增收取；超净增部分被拒绝。
+func TestCapacityFS_OverwriteAdjustsDelta(t *testing.T) {
+	t.Parallel()
+	inner := newRecordingFS()
+	c := NewCounter(50, "")
+	fs := Wrap(inner, c)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "x.bin", nil, 30, 0); err != nil {
+		t.Fatalf("WriteFile(30): %v", err)
+	}
+	if err := fs.WriteFile(ctx, "x.bin", nil, 10, 0); err != nil {
+		t.Fatalf("覆盖写小文件: %v", err)
+	}
+	if got := c.Used(); got != 10 {
+		t.Fatalf("覆盖写变小后 Used = %d, want 10", got)
+	}
+	// 净增 50（10 → 60）超限（10+50>50）→ 拒绝，且不触达 inner。
+	writesBefore := inner.writes.Load()
+	if err := fs.WriteFile(ctx, "x.bin", nil, 60, 0); err == nil {
+		t.Fatal("覆盖写净增超限应拒绝")
+	}
+	if got := c.Used(); got != 10 {
+		t.Fatalf("拒绝后 Used = %d, want 10（不变）", got)
+	}
+	if inner.writes.Load() != writesBefore {
+		t.Fatal("超限不应触达 inner WriteFile")
+	}
+}
+
+// TestCapacityFS_RenameFreesTarget 钉住改名/移动释放目标旧字节（源已在账上）。
+func TestCapacityFS_RenameFreesTarget(t *testing.T) {
+	t.Parallel()
+	inner := newRecordingFS()
+	c := NewCounter(50, "")
+	fs := Wrap(inner, c)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "src.bin", nil, 20, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(ctx, "dst.bin", nil, 15, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Used(); got != 35 {
+		t.Fatalf("Used = %d, want 35", got)
+	}
+	if err := fs.Rename(ctx, "src.bin", "dst.bin"); err != nil { // 覆盖 dst（旧 15 释放）
+		t.Fatal(err)
+	}
+	if got := c.Used(); got != 20 {
+		t.Fatalf("Rename 后 Used = %d, want 20（目标旧 15 释放）", got)
 	}
 }

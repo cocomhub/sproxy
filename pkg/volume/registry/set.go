@@ -15,6 +15,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -201,6 +203,9 @@ func (vs *Set) ResolveURL(ctx context.Context, url string) (io.ReadCloser, error
 	}
 	rc, err := ur.OpenURL(ctx, url)
 	if err != nil {
+		if errors.Is(err, syncpkg.ErrUnsupported) {
+			return nil, fmt.Errorf("registry: ResolveURL %q 的卷 %q 未实现 URLResolver（地址 %q 不可寻址）", url, vol, scheme)
+		}
 		return nil, fmt.Errorf("registry: ResolveURL %q 失败: %w", url, err)
 	}
 	return rc, nil

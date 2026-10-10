@@ -14,6 +14,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -213,7 +214,7 @@ func (h *Handlers) backupTargetFS(ctx context.Context, owner, target string) (sy
 func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string) (syncpkg.FS, error) {
 	if be := h.volSet.External(target); be != nil {
 		if probe, ok := be.(registry.HealthProbe); ok {
-			if perr := probe.Ping(ctx); perr != nil {
+			if perr := probe.Ping(ctx); perr != nil && !errors.Is(perr, syncpkg.ErrUnsupported) {
 				return nil, fmt.Errorf("备份目标卷 %q 远端不可达: %w", target, perr)
 			}
 		}

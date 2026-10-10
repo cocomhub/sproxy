@@ -8,12 +8,14 @@ package server
 // 未来任何新 backend（S3/…）只 RegisterBackend 注册即自动出现在前端，无需改前端代码。
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
@@ -66,6 +68,10 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 	}
 	u, err := p.PresignedURL(r.Context(), path, method, expires)
 	if err != nil {
+		if errors.Is(err, syncpkg.ErrUnsupported) {
+			http.Error(w, "后端不支持预签名直传: "+typ, http.StatusMethodNotAllowed)
+			return
+		}
 		http.Error(w, "预签名失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

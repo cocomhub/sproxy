@@ -700,8 +700,14 @@ chunk_size: 8388608    # 8 MiB
 或 volumes[].vol_capacity；0 = 不限）——与本地卷（owner_quotas 物理资源）不同，外部卷不占
 本机磁盘，限额是「本系统授权占用外部卷的额度」。
 
-- **卷级计数记账**：外部卷写入累计（超限拒绝）、删除释放——`pkg/volume/capacity`（CapacityFS
-  装饰器包装 backend FS，counter 持久化 `<root>/<owner>/meta/volume/<name>.capacity.json`）。
+- **卷级计数记账（FS 层强制，2026-10-10）**：外部卷（配置卷 + 用户卷）在 **backend FS 层**统一包
+  `capacity.CapacityFS`——写入累计（超限 fail-closed 拒绝）、删除/覆盖/改名/服务端 Copy 释放。
+  因此**凡经 `be.FS()` 的写路径**（HTTP 上传、云转存、同步 push、备份、服务端 Copy·Move）
+  都被同一卷级计数器拦截，保证「**所有用户在该卷的占用之和 ≤ 卷限额**」（跨 owner 共享）。
+  - 配置卷：用 `PoolCounter` 复用该卷 `vol_capacity` 池（与路由排序/指标/对账同源）；
+  - 用户卷：用持久化 `VolumeCapacityCounter`（`<root>/<owner>/meta/volume/<name>.capacity`，
+    **非 .json**——避开 UserVolumeStore 的 `*.json` 扫描；重启 Load 续用）；
+  - 用户卷限额**从创建期即生效**（不再等重启 restore）。
 - **用量查询**：`GET /api/volumes/user`（用户卷）与 `GET /api/volumes`（系统盘）返回每卷
   `usage`（本系统已用）；backend 支持时另有卷总量（baidupcs 配额 / S3 bucket 用量，
   WebDAV 无标准 API 仅限额维度）。

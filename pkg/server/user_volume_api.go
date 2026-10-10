@@ -18,9 +18,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -64,6 +66,12 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "type 未注册或 extra 非法: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// 卷级容量记账（FS 层）：从**创建期**即包 CapacityFS（此前只有重启 restore 才包，
+	// 新建卷在本次进程内 Capacity 不生效——顺手修）。计数器持久化到与 restore 相同的
+	// 路径 <root>/<owner>/meta/volume/<name>.capacity（**非 .json**：避开 UserVolumeStore
+	// 的 *.json 扫描，防计数文件被误当卷元数据）；重启后 Load 续用。
+	counterPath := filepath.Join(h.userVolumes.Root(), owner, "meta", "volume", req.Name+".capacity")
+	be = capacity.WrapBackend(be, capacity.NewCounter(req.Capacity, counterPath))
 	// store 落盘（重名拒绝）。
 	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra}
 	if err := h.userVolumes.Create(owner, uv); err != nil {

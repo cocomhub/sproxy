@@ -1,34 +1,61 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package capacity 提供外部卷**卷级计数记账**（C2 外部卷容量纳管）。
+// Package capacity 提供外部卷**卷级容量记账与强制**（C2 外部卷容量纳管）。
 //
-// 用户定案（2026-09-18）：外部卷本系统可用限额（UserVolume.Capacity）用**卷级计数**强制——
-// 写入累计（超限拒绝）、删除释放；与本地卷（owner_quotas 物理资源）不同，外部卷不占本机
-// 磁盘，限额是「本系统授权占用外部卷的额度」。
+// 用户定案（2026-09-18 / 2026-10-10）：外部卷（配置卷 volumes[] 与用户卷
+// /api/volumes/user，含 baidupcs/webdav/s3/secretdata）的本系统可用限额用**卷级计数**
+// 强制——写入累计（超限 fail-closed 拒绝）、删除/覆盖/改名释放；与本地卷（owner_quotas
+// 物理资源）不同，外部卷不占本机磁盘，限额是「本系统授权占用外部卷的额度」。
+//
+// **记账位于 FS 层**（`CapacityFS` 包在 backend FS 之外）：凡经 `be.FS()` 的写路径
+// （HTTP 上传、云转存、同步 push、备份、服务端 Copy/Move）都被同一卷级计数器拦截，
+// 从而保证「所有用户在该卷的占用之和 ≤ 卷限额」。装配层配置卷用 `PoolCounter`
+// （复用卷容量 `quota.Pool`，与路由/指标同源）；用户卷用持久化 `VolumeCapacityCounter`
+// （`<root>/<owner>/meta/volume/<name>.capacity.json`，重启恢复）。
 //
 // 组件：
-//   - VolumeCapacityCounter：卷级计数器（used 字节 + 限额），原子写持久化（重启不丢）。
-//   - CapacityFS：sync.FS 装饰器——WriteFile 前 TryAdd（超限拒绝）、成功后累计；
-//     Delete 后 Release（释放）。包装外部卷 FS（baidupcs/webdav/s3），不侵入各自实现。
+//   - Counter：卷级计数抽象（TryAdd/Release/Used/Capacity）。
+//   - VolumeCapacityCounter：持久化文件态计数器（用户卷）。
+//   - PoolCounter：quota.Pool 适配（配置卷，与 vol_capacity 池同源）。
+//   - CapacityFS：sync.FS 装饰器（覆盖写差分 + 透传全部可选能力 + 变更后持久化）。
+//   - Backend：把 ExternalBackend 的 FS 包为 CapacityFS 的 backend 包装。
 package capacity
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
-// VolumeCapacityCounter 是外部卷的卷级容量计数器（C2）。
+// ErrVolumeFull 是卷容量超限哨兵（fail-closed：调用方 errors.Is 识别并映射 507）。
+var ErrVolumeFull = errors.New("volume capacity exceeded")
+
+// Counter 是卷级容量记账抽象。
 //
-// used = 本系统当前占用该卷的字节（写入累计 - 删除释放）；capacity = 本系统可用限额
-// （UserVolume.Capacity；0 = 不限）。TryAdd 超限拒绝（fail-closed，不部分写入）。
+// TryAdd 在写入前累计 size，超限返回（包装 ErrVolumeFull）且不改变 used；
+// Release 在删除/覆盖/改名后释放；Used/Capacity 供查询。
+type Counter interface {
+	TryAdd(size int64) error
+	Release(size int64)
+	Used() int64
+	Capacity() int64
+}
+
+// VolumeCapacityCounter 是外部卷的卷级容量计数器（C2，持久化文件态）。
+//
+// used = 本系统当前占用该卷的字节（写入累计 - 删除/覆盖释放）；capacity = 本系统可用
+// 限额（UserVolume.Capacity；0 = 不限）。TryAdd 超限拒绝（fail-closed，不部分写入）。
 // 持久化：Save 原子写（tmp+rename）；Load 恢复（重启不丢）。
 type VolumeCapacityCounter struct {
 	mu       sync.Mutex
@@ -43,7 +70,7 @@ func NewCounter(capacity int64, path string) *VolumeCapacityCounter {
 }
 
 // TryAdd 尝试累计 size 字节（写入前调用）。超限（capacity>0 且 used+size>capacity）
-// 返回错误（fail-closed：调用方不得写入）。失败不改变 used。
+// 返回（包装 ErrVolumeFull）错误（fail-closed：调用方不得写入）。失败不改变 used。
 func (c *VolumeCapacityCounter) TryAdd(size int64) error {
 	if size <= 0 {
 		return nil
@@ -51,13 +78,13 @@ func (c *VolumeCapacityCounter) TryAdd(size int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.capacity > 0 && c.used+size > c.capacity {
-		return fmt.Errorf("volume capacity exceeded (used %d + %d > limit %d)", c.used, size, c.capacity)
+		return fmt.Errorf("%w (used %d + %d > limit %d)", ErrVolumeFull, c.used, size, c.capacity)
 	}
 	c.used += size
 	return nil
 }
 
-// Release 释放 size 字节（删除后调用）。非负归零：释放超过 used → 置 0（幂等防御）。
+// Release 释放 size 字节（删除/覆盖后调用）。非负归零：释放超过 used → 置 0（幂等防御）。
 func (c *VolumeCapacityCounter) Release(size int64) {
 	if size <= 0 {
 		return
@@ -88,6 +115,9 @@ type counterFile struct {
 }
 
 // Save 原子写持久化（tmp + rename）。path 为空 → no-op（内存态）。
+//
+// state-write-exempt: 快照路径由调用方给定（用户卷为 <root>/<owner>/meta/volume/...），
+// 属**卷数据/计数**而非 pkg/state 状态存储（与 pkg/server/user_volume_store.go 同类）。
 func (c *VolumeCapacityCounter) Save() error {
 	if c.path == "" {
 		return nil
@@ -146,23 +176,83 @@ func Load(path string, capacity int64) (*VolumeCapacityCounter, error) {
 	return c, nil
 }
 
-// CapacityFS 是外部卷 sync.FS 装饰器（C2 记账强制）。
-//
-// WriteFile：TryAdd(size) 超限拒绝 → inner.WriteFile（失败回滚 TryAdd 的累计）。
-// Delete：inner.Delete 成功 → Release（释放占用）。
-// 其它方法透传 inner。Rename = 大小不变（不重计）。
-type CapacityFS struct {
-	inner   syncpkg.FS
-	counter *VolumeCapacityCounter
+// PoolCounter 是 quota.Pool 的 Counter 适配（配置卷：与 vol_capacity 池同源，
+// 使路由排序/指标/对账读取到的 Usage 即卷级真实占用）。
+type PoolCounter struct{ pool *quota.Pool }
+
+// NewPoolCounter 包装卷容量池为卷级计数器。
+func NewPoolCounter(p *quota.Pool) *PoolCounter { return &PoolCounter{pool: p} }
+
+// TryAdd 预留并立即提交 size（超限返回包装 ErrVolumeFull 的错误）。
+func (p *PoolCounter) TryAdd(size int64) error {
+	if size <= 0 {
+		return nil
+	}
+	res, err := p.pool.TryReserve(size)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrVolumeFull, err)
+	}
+	res.Commit(size)
+	return nil
 }
 
-// Wrap 包装 fs 为带卷级计数的 FS。
-func Wrap(fs syncpkg.FS, c *VolumeCapacityCounter) *CapacityFS {
+// Release 释放 size（从池 committed 扣减）。
+func (p *PoolCounter) Release(size int64) {
+	if size <= 0 {
+		return
+	}
+	p.pool.ReleaseCommitted(size)
+}
+
+// Used 返回池当前占用。
+func (p *PoolCounter) Used() int64 { return p.pool.Usage() }
+
+// Capacity 返回池上限（0 = 不限）。
+func (p *PoolCounter) Capacity() int64 { return p.pool.MaxBytes() }
+
+// CapacityFS 是外部卷 sync.FS 装饰器（卷级记账强制 + 能力透传）。
+//
+// 记账规则（覆盖所有 FS 变更面，防重复计数）：
+//   - WriteFile：stat 旧文件大小 prev，净增 delta=size-prev；delta>0 先 TryAdd（超限拒绝），
+//     写成功后若 delta<0 释放；写失败回滚 delta。
+//   - WriteIfAbsent：目标不存在先 TryAdd(size)，返回 (false,nil)/err 时回滚。
+//   - Delete：stat 旧大小，删除成功后释放。
+//   - Rename/Move：目标旧大小在成功后释放（源已在账上）。
+//   - Copy：先 TryAdd(源大小)，成功后释放目标旧大小；失败回滚。
+//   - Link：硬链接共享 inode，不新增字节，不计。
+//
+// 变更后 best-effort 持久化（counter 实现 Save 时）。
+type CapacityFS struct {
+	inner   syncpkg.FS
+	counter Counter
+}
+
+// Wrap 包装 fs 为带卷级计数的 FS（counter 为任意 Counter 实现）。
+func Wrap(fs syncpkg.FS, c Counter) *CapacityFS {
 	return &CapacityFS{inner: fs, counter: c}
 }
 
 // Counter 返回底层计数器（查询/持久化）。
-func (f *CapacityFS) Counter() *VolumeCapacityCounter { return f.counter }
+func (f *CapacityFS) Counter() Counter { return f.counter }
+
+// Inner 返回被包装的底层 FS（透明装饰器下探标记——trusted.Wrap 据此区分「转发层」
+// 与「卷自带 meta」，避免把 CapacityFS 的 FileMeta 转发误判为自带 Provider）。
+func (f *CapacityFS) Inner() syncpkg.FS { return f.inner }
+
+// persist 变更后 best-effort 持久化（仅带 Save 的计数器，如文件态）。
+func (f *CapacityFS) persist() {
+	if p, ok := f.counter.(interface{ Save() error }); ok {
+		_ = p.Save()
+	}
+}
+
+// innerSize 返回 rel 当前大小（不存在/目录 → 0）。
+func (f *CapacityFS) innerSize(ctx context.Context, rel string) int64 {
+	if e, err := f.inner.Stat(ctx, rel); err == nil && e != nil && !e.IsDir {
+		return e.Size
+	}
+	return 0
+}
 
 func (f *CapacityFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
 	return f.inner.ListDir(ctx, p)
@@ -177,18 +267,57 @@ func (f *CapacityFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, err
 }
 
 func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
-	if err := f.counter.TryAdd(size); err != nil {
-		return err
+	prev := f.innerSize(ctx, relPath)
+	delta := size - prev
+	if delta > 0 {
+		if err := f.counter.TryAdd(delta); err != nil {
+			return err
+		}
 	}
 	if err := f.inner.WriteFile(ctx, relPath, r, size, mtime); err != nil {
-		f.counter.Release(size) // 写失败回滚累计
+		if delta > 0 {
+			f.counter.Release(delta) // 写失败回滚净增
+		}
 		return err
 	}
+	if delta < 0 {
+		f.counter.Release(-delta) // 覆盖写变小：释放差额
+	}
+	f.persist()
 	return nil
 }
 
+// WriteIfAbsent 原子唯一写 + 卷级记账（目标不存在先预留 size）。
+func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Reader, size, mtime int64) (bool, error) {
+	pia, ok := f.inner.(syncpkg.WriteIfAbsent)
+	if !ok {
+		return false, fmt.Errorf("capacity: 底层未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
+	}
+	exists := f.innerSize(ctx, relPath) > 0
+	if !exists {
+		if err := f.counter.TryAdd(size); err != nil {
+			return false, err
+		}
+	}
+	written, err := pia.WriteIfAbsent(ctx, relPath, r, size, mtime)
+	if err != nil || !written {
+		if !exists {
+			f.counter.Release(size) // 未落盘：回滚预留
+		}
+		return written, err
+	}
+	f.persist()
+	return true, nil
+}
+
 func (f *CapacityFS) Rename(ctx context.Context, from, to string) error {
-	return f.inner.Rename(ctx, from, to)
+	targetOld := f.innerSize(ctx, to) // 覆盖目标旧字节（成功后释放）
+	if err := f.inner.Rename(ctx, from, to); err != nil {
+		return err
+	}
+	f.counter.Release(targetOld)
+	f.persist()
+	return nil
 }
 
 func (f *CapacityFS) MakeDir(ctx context.Context, relPath string) error {
@@ -196,17 +325,194 @@ func (f *CapacityFS) MakeDir(ctx context.Context, relPath string) error {
 }
 
 func (f *CapacityFS) Delete(ctx context.Context, relPath string) error {
-	// 释放大小：Delete 前 Stat 查（Entry.Size）——不存在（nil Entry）按 0 释放。
-	var size int64
-	if e, err := f.inner.Stat(ctx, relPath); err == nil && e != nil {
-		size = e.Size
-	}
+	size := f.innerSize(ctx, relPath)
 	if err := f.inner.Delete(ctx, relPath); err != nil {
 		return err
 	}
 	f.counter.Release(size)
+	f.persist()
 	return nil
 }
 
-// _ 编译期断言：CapacityFS 实现 sync.FS。
-var _ syncpkg.FS = (*CapacityFS)(nil)
+// ---- 可选能力透传（装饰器透明转发，否则包装后能力静默降级）----
+
+// Move 委托 inner（Mover）；成功后释放目标旧字节。
+func (f *CapacityFS) Move(ctx context.Context, from, to string) error {
+	mv, ok := f.inner.(syncpkg.Mover)
+	if !ok {
+		return fmt.Errorf("capacity: 底层未实现 Move: %w", syncpkg.ErrUnsupported)
+	}
+	targetOld := f.innerSize(ctx, to)
+	if err := mv.Move(ctx, from, to); err != nil {
+		return err
+	}
+	f.counter.Release(targetOld)
+	f.persist()
+	return nil
+}
+
+// Copy 委托 inner（Copier）；先预留源大小，成功后释放目标旧字节。
+func (f *CapacityFS) Copy(ctx context.Context, from, to string) error {
+	cp, ok := f.inner.(syncpkg.Copier)
+	if !ok {
+		return fmt.Errorf("capacity: 底层未实现 Copy: %w", syncpkg.ErrUnsupported)
+	}
+	targetOld := f.innerSize(ctx, to)
+	added := f.innerSize(ctx, from)
+	if added > 0 {
+		if err := f.counter.TryAdd(added); err != nil {
+			return err
+		}
+	}
+	if err := cp.Copy(ctx, from, to); err != nil {
+		if added > 0 {
+			f.counter.Release(added)
+		}
+		return err
+	}
+	f.counter.Release(targetOld)
+	f.persist()
+	return nil
+}
+
+// Link 委托 inner（Linker）；硬链接共享 inode，不新增字节（不计）。
+func (f *CapacityFS) Link(ctx context.Context, from, to string) error {
+	lk, ok := f.inner.(syncpkg.Linker)
+	if !ok {
+		return fmt.Errorf("capacity: 底层未实现 Link: %w", syncpkg.ErrUnsupported)
+	}
+	return lk.Link(ctx, from, to)
+}
+
+// ReserveSpace 委托 inner（卷自管理容量预检；inner 未实现 → ErrUnsupported）。
+func (f *CapacityFS) ReserveSpace(ctx context.Context, p string, size int64) error {
+	if rs, ok := f.inner.(syncpkg.ReserveSpace); ok {
+		return rs.ReserveSpace(ctx, p, size)
+	}
+	return fmt.Errorf("capacity: 底层未实现 ReserveSpace: %w", syncpkg.ErrUnsupported)
+}
+
+// IsLocalVolume 委托 inner（未实现默认外部）。
+func (f *CapacityFS) IsLocalVolume() bool {
+	if lv, ok := f.inner.(syncpkg.LocalVolume); ok {
+		return lv.IsLocalVolume()
+	}
+	return false
+}
+
+// OpenRangeRead 委托 inner（RangeReader）。
+func (f *CapacityFS) OpenRangeRead(ctx context.Context, p string, offset, size int64) (io.ReadCloser, error) {
+	if rr, ok := f.inner.(syncpkg.RangeReader); ok {
+		return rr.OpenRangeRead(ctx, p, offset, size)
+	}
+	return nil, fmt.Errorf("capacity: 底层未实现 OpenRangeRead: %w", syncpkg.ErrUnsupported)
+}
+
+// DirectURL 委托 inner（DirectURLProvider）。
+func (f *CapacityFS) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
+	if d, ok := f.inner.(syncpkg.DirectURLProvider); ok {
+		return d.DirectURL(ctx, relPath)
+	}
+	return "", false, fmt.Errorf("capacity: 底层未实现 DirectURL: %w", syncpkg.ErrUnsupported)
+}
+
+// FileMeta 委托 inner（meta.Provider：卷自带/装饰器 meta）。
+func (f *CapacityFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	if pv, ok := f.inner.(meta.Provider); ok {
+		return pv.FileMeta(ctx, rel)
+	}
+	return nil, fmt.Errorf("capacity: 底层未实现 FileMeta: %w", syncpkg.ErrUnsupported)
+}
+
+// UpdateMetaExtra 委托 inner（damaged/transfer_verified 旁路标记）。
+func (f *CapacityFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
+	ue, ok := f.inner.(interface {
+		UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error
+	})
+	if !ok {
+		return fmt.Errorf("capacity: 底层未实现 UpdateMetaExtra: %w", syncpkg.ErrUnsupported)
+	}
+	return ue.UpdateMetaExtra(ctx, rel, extra)
+}
+
+// WithStagingQuota 委托 inner（StagingQuotaCapable 自管；per-instance 语义）。
+func (f *CapacityFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
+	if qc, ok := f.inner.(syncpkg.StagingQuotaCapable); ok {
+		qc.WithStagingQuota(q)
+	}
+}
+
+// ExemptStagingQuota 委托 inner（StagingQuotaExempt 显式豁免）。
+func (f *CapacityFS) ExemptStagingQuota() bool {
+	if ex, ok := f.inner.(syncpkg.StagingQuotaExempt); ok {
+		return ex.ExemptStagingQuota()
+	}
+	return false
+}
+
+// Backend 把外部卷 backend 的 FS 包为 CapacityFS（卷级记账），并暴露 Usage/Capacity 供
+// 查询（registry.UsageProvider）。**内嵌 registry.ExternalBackend**：backend 级可选能力
+// （HealthProbe/VolumeStatsProvider/Presigner/URLResolver）透明转发，不因记账包装而隐藏。
+type Backend struct {
+	registry.ExternalBackend
+	fs *CapacityFS
+}
+
+// WrapBackend 包装外部卷 backend（FS 经 CapacityFS 记账）。
+func WrapBackend(be registry.ExternalBackend, c Counter) *Backend {
+	return &Backend{ExternalBackend: be, fs: Wrap(be.FS(), c)}
+}
+
+// FS 返回带卷级记账的 FS。
+func (b *Backend) FS() syncpkg.FS { return b.fs }
+
+// Usage 返回本系统已占用该卷的字节（registry.UsageProvider，权威源 = 本层计数器）。
+func (b *Backend) Usage() int64 { return b.fs.Counter().Used() }
+
+// Capacity 返回本系统可用限额（0 = 不限）。
+func (b *Backend) Capacity() int64 { return b.fs.Counter().Capacity() }
+
+// Counter 返回底层计数器。
+func (b *Backend) Counter() Counter { return b.fs.Counter() }
+
+// ---- backend 级可选能力透传（inner 未实现 → syncpkg.ErrUnsupported 哨兵，
+// 消费方 errors.Is 识别后按「不支持」处理，避免包装后能力静默降级）----
+
+// Ping 委托 inner（HealthProbe）。
+func (b *Backend) Ping(ctx context.Context) error {
+	if hp, ok := b.ExternalBackend.(registry.HealthProbe); ok {
+		return hp.Ping(ctx)
+	}
+	return fmt.Errorf("capacity: backend 未实现 Ping: %w", syncpkg.ErrUnsupported)
+}
+
+// Stats 委托 inner（VolumeStatsProvider）。
+func (b *Backend) Stats(ctx context.Context) (*registry.VolumeStats, error) {
+	if sp, ok := b.ExternalBackend.(registry.VolumeStatsProvider); ok {
+		return sp.Stats(ctx)
+	}
+	return nil, fmt.Errorf("capacity: backend 未实现 Stats: %w", syncpkg.ErrUnsupported)
+}
+
+// OpenURL 委托 inner（URLResolver）。
+func (b *Backend) OpenURL(ctx context.Context, url string) (io.ReadCloser, error) {
+	if ur, ok := b.ExternalBackend.(registry.URLResolver); ok {
+		return ur.OpenURL(ctx, url)
+	}
+	return nil, fmt.Errorf("capacity: backend 未实现 OpenURL: %w", syncpkg.ErrUnsupported)
+}
+
+// PresignedURL 委托 inner（Presigner）。
+func (b *Backend) PresignedURL(ctx context.Context, relPath, method string, expires int64) (string, error) {
+	if p, ok := b.ExternalBackend.(registry.Presigner); ok {
+		return p.PresignedURL(ctx, relPath, method, expires)
+	}
+	return "", fmt.Errorf("capacity: backend 未实现 PresignedURL: %w", syncpkg.ErrUnsupported)
+}
+
+// 编译期断言：CapacityFS 实现 sync.FS；Backend 的 FS 满足 sync.FS。
+var (
+	_ syncpkg.FS = (*CapacityFS)(nil)
+	_ Counter    = (*VolumeCapacityCounter)(nil)
+	_ Counter    = (*PoolCounter)(nil)
+)

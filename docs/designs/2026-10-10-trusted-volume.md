@@ -87,6 +87,22 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 - 与**卷自身容量配额**（`syncpkg.ReserveSpace` / 卷容量 Pool）严格区分：后者管远端
   网盘容量，前者只记本地暂存字节。
 
+## 7.1 卷级容量强制（外部卷 + 用户卷）
+
+外部卷（配置卷 `volumes[]` + 用户卷 `/api/volumes/user`）的本系统可用限额在 **backend FS 层**
+统一强制（`capacity.CapacityFS`）：写入累计、删除/覆盖/改名/服务端 Copy 释放，超限 fail-closed。
+因此**凡经 `be.FS()` 的写路径**（HTTP 上传、云转存、同步 push、备份、服务端 Copy·Move）
+都被同一卷级计数器拦截，保证「**所有用户在该卷的占用之和 ≤ 卷限额**」（跨 owner 共享）。
+
+- 配置卷：`capacity.PoolCounter` 复用该卷 `vol_capacity` 池（与路由排序/指标/对账同源；
+  `reserveVolume` 对外部卷改为**探测**，权威记账在 FS 层，防双计）。
+- 用户卷：持久化 `VolumeCapacityCounter`（`<root>/<owner>/meta/volume/<name>.capacity`，
+  非 `.json` 避开 store 扫描）；创建期与重启 restore 都包 CapacityFS。
+- backend 级可选能力（HealthProbe/VolumeStatsProvider/Presigner/URLResolver）透明转发，
+  内层未实现返回 `syncpkg.ErrUnsupported` 哨兵（消费方按「不支持」处理）。
+- 装饰器链：`Guard(Wrap(CapacityFS(raw)))`；`trusted.Wrap` 下探透明装饰器（CapacityFS.Inner）
+  判断卷自身是否自带 meta，避免把转发层误判为 Provider。
+
 ## 8. 已知边界与后续
 
 - `FileMeta.Signature` 为预留字段（当前不写/不校验）——信任根由「meta 桶用户不可达 + 写路径独占」提供；启用完整 HMAC 需服务级签名密钥 + 全部写路径签名 + 读路径恒时校验。

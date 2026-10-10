@@ -40,14 +40,42 @@ type TrustedVolumeFS struct {
 	opts  Options
 }
 
+// transparentUnwrapper 是**透明装饰器**（如 capacity.CapacityFS）暴露内层 FS 的接口。
+// trusted.Wrap 通过它下探，判断「**卷自身**是否自带 meta」——否则转发层（实现了
+// FileMeta 但只是委托 inner）会被误判为自带 Provider，跳过 TrustedVolumeFS（写出
+// 的 sidecar 就没人建了）。
+type transparentUnwrapper interface {
+	Inner() syncpkg.FS
+}
+
+// innermost 逐层剥去透明装饰器，返回最内层 FS。
+func innermost(fs syncpkg.FS) syncpkg.FS {
+	for {
+		u, ok := fs.(transparentUnwrapper)
+		if !ok {
+			return fs
+		}
+		nxt := u.Inner()
+		if nxt == nil || nxt == fs {
+			return fs
+		}
+		fs = nxt
+	}
+}
+
 // Wrap 包装 fs 为可信卷。
 //
-// **用户裁定 2026-10-07：卷自身提供正确 meta 接口的无需封装，交给卷处理**——
-// fs 实现 meta.Provider（如 secretdata 已有 shardseal.Meta）时返回**原 fs**（零封装），
-// 卷自己负责提供与校验 FileMeta；未实现才包装饰器兜底。装配层因此无需感知卷类型。
+// **用户裁定 2026-10-07：卷自身提供正确 meta 接口的无需封装，交给卷处理**——判断依据是
+// **最内层原始卷**是否实现 meta.Provider（下探透明装饰器，避免把 capacity.CapacityFS
+// 之类的转发层误当自带 Provider）：是则保持装饰链（外层转发 Provider）；否则包装饰器。
 func Wrap(fs syncpkg.FS, opts Options) syncpkg.FS {
-	if _, ok := fs.(meta.Provider); ok {
-		return fs // 卷自带 meta（secretdata 等）：不封装，交给卷处理
+	if _, isProvider := fs.(meta.Provider); isProvider {
+		if _, transparent := fs.(transparentUnwrapper); !transparent {
+			return fs // 原始卷自带 meta（如 secretdata）：不封装，交给卷处理
+		}
+	}
+	if _, innerProvider := innermost(fs).(meta.Provider); innerProvider {
+		return fs // 透明装饰器链最内层自带 meta：保持装饰链，不叠加 TrustedVolumeFS
 	}
 	return &TrustedVolumeFS{inner: fs, opts: opts}
 }

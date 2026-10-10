@@ -31,6 +31,7 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
@@ -252,8 +253,12 @@ func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc 
 	if err != nil {
 		return fmt.Errorf("装配外部卷 %q 失败: %w", vc.Name, err)
 	}
-	acc.external[vc.Name] = be
-	acc.pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+	pool := quota.NewPool(int64(vc.VolCapacity))
+	acc.pools[vc.Name] = pool
+	// 卷级容量记账在 FS 层（capacity.CapacityFS）：凡经 be.FS() 的写路径（上传/转存/
+	// 同步 push/备份/服务端 Copy·Move）都被同一卷级计数器拦截，保障所有用户占用之和
+	// 不超卷总额度。PoolCounter 复用本卷容量池（路由/指标/对账同源）。
+	acc.external[vc.Name] = capacity.WrapBackend(be, capacity.NewPoolCounter(pool))
 	acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, ""))
 	log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
 	return nil
@@ -566,7 +571,13 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 			}
 			return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}
-		route.pool, route.poolRes = pool, res
+		if external != nil {
+			// 外部卷：卷级容量由 FS 层 CapacityFS 权威记账（本次仅探测用于路由/快速失败，
+			// 立即释放防双计）。
+			res.Release()
+		} else {
+			route.pool, route.poolRes = pool, res
+		}
 	}
 	return route, nil
 }
