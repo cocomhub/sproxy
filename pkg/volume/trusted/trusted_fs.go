@@ -158,9 +158,7 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	if fm.Extra == nil {
 		fm.Extra = make(map[string]any, len(extra))
 	}
-	for k, v := range extra {
-		fm.Extra[k] = v
-	}
+	maps.Copy(fm.Extra, extra)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)

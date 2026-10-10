@@ -208,10 +208,7 @@ func Load(path string, capacity int64) (*VolumeCapacityCounter, error) {
 		return c, nil
 	}
 	c.mu.Lock()
-	c.used = f.Used
-	if c.used < 0 {
-		c.used = 0
-	}
+	c.used = max(f.Used, 0)
 	// 快照 used 超过当前限额（配置改小）→ 钳到限额（写全拒，与 PoolCounter 同口径）。
 	if c.capacity > 0 && c.used > c.capacity {
 		c.used = c.capacity

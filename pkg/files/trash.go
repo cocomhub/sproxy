@@ -271,8 +271,8 @@ func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entry
 		return
 	}
 	// meta 条目（软删随迁命名 <flat>.meta.__deleted__）→ 释放 meta/<origRel>.meta。
-	if strings.HasSuffix(before, trashMetaMarker) {
-		flat := strings.TrimSuffix(before, trashMetaMarker)
+	if before0, ok0 := strings.CutSuffix(before, trashMetaMarker); ok0 {
+		flat := before0
 		origRel := unflattenRel(flat)
 		mrel := meta.MetaPath(origRel)
 		if scope := s.rt.quotaScope(owner, mrel); scope != nil {

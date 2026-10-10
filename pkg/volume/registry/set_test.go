@@ -517,7 +517,7 @@ func TestNewSet_DefaultExternalDeclarationOrder(t *testing.T) {
 	if first == nil || first != ext["a"] {
 		t.Fatalf("NewSet 应把 firstExternal 初始化为声明序首个外部卷 a, got %v", first)
 	}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		if vs.DefaultExternal() != first {
 			t.Fatal("DefaultExternal 必须恒返回同一卷（确定性）")
 		}

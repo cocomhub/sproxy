@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -149,10 +150,8 @@ func redactVolumeExtra(extra map[string]any) map[string]any {
 // isSensitiveVolumeKey 判定卷 Extra 键是否为凭据（含 key/secret/password/token 形态）。
 func isSensitiveVolumeKey(k string) bool {
 	lk := strings.ToLower(k)
-	for _, sk := range sensitiveVolumeExtraKeys {
-		if lk == sk {
-			return true
-		}
+	if slices.Contains(sensitiveVolumeExtraKeys, lk) {
+		return true
 	}
 	return strings.Contains(lk, "secret") || strings.Contains(lk, "password") ||
 		strings.Contains(lk, "bduss") || strings.Contains(lk, "stoken") ||

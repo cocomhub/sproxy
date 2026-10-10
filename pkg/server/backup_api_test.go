@@ -320,7 +320,7 @@ func TestBackupQuotaFS_OverwriteReleasesPrev(t *testing.T) {
 	inner := &backupSizedMemFS{backupMemFS{files: map[string]string{}}}
 	q := &backupQuotaFS{inner: inner, scope: scope, pool: volPool}
 	ctx := context.Background()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := q.WriteFile(ctx, "a.txt", strings.NewReader(strings.Repeat("x", 10)), 10, 0); err != nil {
 			t.Fatalf("第 %d 次覆盖写: %v", i+1, err)
 		}

@@ -220,9 +220,7 @@ func TestMultiUpload_HostLockSerializes(t *testing.T) {
 	active := 0
 	lock := &sync.Mutex{}
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// 模拟 uploadViaMultiUploader 的锁持有（Execute 全程）：Lock 在入口、
 			// defer Unlock——失败/取消路径也解锁（C3 核心）。
 			mu.Lock()
@@ -239,7 +237,7 @@ func TestMultiUpload_HostLockSerializes(t *testing.T) {
 			lock.Lock()
 			active--
 			lock.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 }

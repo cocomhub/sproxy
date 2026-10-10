@@ -359,8 +359,7 @@ func (h *Handlers) s3ReadBody(w http.ResponseWriter, r *http.Request) ([]byte, b
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			http.Error(w, "s3: 对象超过单请求上限", http.StatusRequestEntityTooLarge)
 			return nil, false
 		}

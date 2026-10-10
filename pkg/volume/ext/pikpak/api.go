@@ -227,7 +227,7 @@ func (a *API) ensureToken(ctx context.Context) (string, error) {
 func (a *API) List(ctx context.Context, parentID string) ([]FileMeta, error) {
 	var out []FileMeta
 	pageToken := ""
-	for page := 0; page < pikpakMaxListPages; page++ {
+	for range pikpakMaxListPages {
 		q := url.Values{}
 		q.Set("parent_id", parentID)
 		q.Set("page_size", "500")
@@ -355,7 +355,7 @@ func (a *API) walkShareFolderDepth(ctx context.Context, shareID, pid string, out
 		return fmt.Errorf("pikpak: 分享目录递归超过上限 %d（疑似自环）", pikpakMaxWalkDepth)
 	}
 	pageToken := ""
-	for pages := 0; pages < pikpakMaxListPages; pages++ {
+	for range pikpakMaxListPages {
 		files, next, err := a.ShareDetail(ctx, shareID, pid, pageToken)
 		if err != nil {
 			return err

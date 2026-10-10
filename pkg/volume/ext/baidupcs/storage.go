@@ -428,10 +428,7 @@ func blockMD5ListOf(path string, size int64) ([]string, error) {
 	var out []string
 	remaining := size
 	for remaining > 0 {
-		block := int64(uploadBlockSize)
-		if remaining < block {
-			block = remaining
-		}
+		block := min(remaining, int64(uploadBlockSize))
 		sum, read, rerr := hashBlockMD5(f, buf, block)
 		if rerr != nil {
 			return nil, rerr
@@ -450,10 +447,7 @@ func hashBlockMD5(f *os.File, buf []byte, block int64) (string, int64, error) {
 	h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传），非安全用途
 	read := int64(0)
 	for read < block {
-		want := block - read
-		if int64(len(buf)) < want {
-			want = int64(len(buf))
-		}
+		want := min(int64(len(buf)), block-read)
 		n, rerr := f.Read(buf[:want])
 		if n > 0 {
 			_, _ = h.Write(buf[:n])

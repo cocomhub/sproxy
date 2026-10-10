@@ -311,7 +311,7 @@ func (m *wiaMeasuringFS) Delete(_ context.Context, p string) error {
 func TestCapacityFS_WriteIfAbsent_MeasuredAndRollback(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(100)
-	inner := &wiaMeasuringFS{measuringFS: measuringFS{sizes: map[string]int64{}}}
+	inner := &wiaMeasuringFS{sizes: map[string]int64{}}
 	fs := Wrap(inner, NewPoolCounter(pool))
 	content := strings.Repeat("x", 30)
 	ok, err := fs.WriteIfAbsent(context.Background(), "a.bin", strings.NewReader(content), -1, 0)
