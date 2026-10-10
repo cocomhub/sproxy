@@ -165,10 +165,17 @@ func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) erro
 }
 
 // restoreTrashMetaSuffix 定位 trash 桶中对应 flat 的 meta 条目并返回其删除后缀段。
-// **优先精确匹配同代 nano**（主文件与 meta 软删时共享同一 nano）——多代软删（同 rel 多次
-// 删除/重传）时旧实现取「前缀第一个」（最旧）会致主文件/meta 错代不可读（P1）；精确匹配
-// 失败时回落首个前缀命中（兼容修复前旧条目，读路径仍可退化兜底）。找不到返回空。
+// **只接受同代 nano 精确匹配**（主文件与 meta 软删时共享同一 nano）。
+//
+// 不要回落「首个前缀命中」：条目名不区分「sidecar」与「名字以 .meta 结尾的用户文件」——
+// `user/x` 的 sidecar 软删为 `x.meta.__deleted__<n1>`，而用户文件 `user/x.meta` 软删为
+// `x.meta.__deleted__<n3>`，**两者共享同一前缀**；回落会把另一个文件的回收站条目搬进 meta
+// 桶（该文件永久不可恢复，数据丢失），或搬入上一代 sidecar（恢复后文件哈希失配 → 下载
+// 恒 fail-closed）。精确未命中就不搬 meta（等价于「无 meta」，读路径直通，安全）。
 func restoreTrashMetaSuffix(root *storage.Root, flat, nano string) string {
+	if nano == "" {
+		return ""
+	}
 	// flat 可能是 user/<...>/<base>（分层）——meta 条目与主文件同目录，basename 前加 .meta。
 	base := path.Base(flat)
 	dir := path.Dir(flat)
@@ -185,19 +192,13 @@ func restoreTrashMetaSuffix(root *storage.Root, flat, nano string) string {
 	if err != nil {
 		return ""
 	}
-	prefix := base + trashMetaMarker + trashDeletedSuffix
-	want := prefix + nano
-	fallback := ""
+	want := base + trashMetaMarker + trashDeletedSuffix + nano
 	for _, e := range entries {
-		name := e.Name()
-		if name == want {
+		if e.Name() == want {
 			return nano
 		}
-		if fallback == "" && strings.HasPrefix(name, prefix) {
-			fallback = strings.TrimPrefix(name, prefix)
-		}
 	}
-	return fallback
+	return ""
 }
 
 // EmptyTrash 清空回收站（删除全部 trash 桶文件）。

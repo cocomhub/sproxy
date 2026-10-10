@@ -401,3 +401,42 @@ func TestTrash_RestoreSecondGenerationMetaPaired(t *testing.T) {
 		t.Fatalf("恢复应与同代 meta 配对，got %q, want M2（旧实现取最旧一代 M1）", sidecar)
 	}
 }
+
+// TestRestoreTrashMetaSuffix_NoCrossFileFallback 第 4 轮对抗评审 P1 回归：
+// 条目名不区分「sidecar」与「名字以 .meta 结尾的用户文件」——`user/x` 的 sidecar 软删为
+// `x.meta.__deleted__<n1>`，用户文件 `user/x.meta` 软删为 `x.meta.__deleted__<n3>`，共享
+// 同一前缀。不同代时**不得回落**（否则会把另一个文件的回收站条目搬进 meta 桶 → 数据丢失）。
+func TestRestoreTrashMetaSuffix_NoCrossFileFallback(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("tenant 不可用")
+	}
+	root := tnt.Root()
+	flat := flattenRel("user/x")
+	dirAbs, ok := root.Abs(path.Join("trash", path.Dir(flat)))
+	if !ok {
+		t.Fatal("Abs")
+	}
+	if err := os.MkdirAll(dirAbs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := path.Base(flat)
+	// 另一个用户文件 user/x.meta 的回收站条目（与 user/x 的 sidecar 同前缀、不同代）。
+	other := base + trashMetaMarker + trashDeletedSuffix + "999"
+	if err := os.WriteFile(filepath.Join(dirAbs, other), []byte("other-file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := restoreTrashMetaSuffix(root, flat, "123"); got != "" {
+		t.Fatalf("不同代不得回落到其它条目前缀命中，got %q", got)
+	}
+	// 同代精确命中仍工作。
+	mine := base + trashMetaMarker + trashDeletedSuffix + "123"
+	if err := os.WriteFile(filepath.Join(dirAbs, mine), []byte("my-meta"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := restoreTrashMetaSuffix(root, flat, "123"); got != "123" {
+		t.Fatalf("同代精确匹配应命中，got %q", got)
+	}
+}

@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 
@@ -32,7 +33,31 @@ type prefixFS struct {
 // Inner 透明暴露被包装 FS（使 trusted.Innermost / ApplyStagingQuota 能下探到原始卷能力）。
 func (p *prefixFS) Inner() syncpkg.FS { return p.FS }
 
-func (p *prefixFS) key(k string) string { return p.prefix + strings.TrimPrefix(k, "/") }
+// WithStagingQuota 转发到内层（P1：ApplyStagingQuota 对「最内层自管但外层不转发」会静默
+// 不注入且不包 gate → staging 配额失效；装饰器必须透明转发）。
+func (p *prefixFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
+	if sc, ok := p.FS.(syncpkg.StagingQuotaCapable); ok {
+		sc.WithStagingQuota(q)
+	}
+}
+
+// IsLocalVolume 转发内层本地性自述（不涉及路径）。
+func (p *prefixFS) IsLocalVolume() bool {
+	if lv, ok := p.FS.(syncpkg.LocalVolume); ok {
+		return lv.IsLocalVolume()
+	}
+	return false
+}
+
+// key 把调用方键映射到桶键空间。空键（根）必须映射为前缀**去尾斜杠**：否则
+// `prefix+""` = `alice/user/` → Guard 拆到空段而被拒（F5）。
+func (p *prefixFS) key(k string) string {
+	t := strings.Trim(k, "/")
+	if t == "" {
+		return strings.TrimSuffix(p.prefix, "/")
+	}
+	return p.prefix + t
+}
 func (p *prefixFS) strip(k string) string {
 	return strings.TrimPrefix(k, p.prefix)
 }
@@ -69,7 +94,8 @@ func (p *prefixFS) WriteIfAbsent(ctx context.Context, path string, r io.Reader, 
 	if w, ok := p.FS.(syncpkg.WriteIfAbsent); ok {
 		return w.WriteIfAbsent(ctx, p.key(path), r, size, mtime)
 	}
-	return false, nil
+	// 不得返回 (false,nil)：「未实现」会被调用方读成「目标已存在」（转存幂等分支）→ 静默丢写。
+	return false, fmt.Errorf("prefixFS: 底层未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
 }
 
 func (p *prefixFS) Rename(ctx context.Context, from, to string) error {

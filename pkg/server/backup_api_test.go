@@ -287,3 +287,67 @@ func (m *backupMemFS) MakeDir(_ context.Context, _ string) error   { return nil 
 
 // _ 编译期断言：backupMemFS 实现 sync.FS。
 var _ syncpkg.FS = (*backupMemFS)(nil)
+
+// backupSizedMemFS 带 Stat 的内存 FS（覆盖写差分测试用）。
+type backupSizedMemFS struct{ backupMemFS }
+
+func (m *backupSizedMemFS) Stat(_ context.Context, rel string) (*syncpkg.Entry, error) {
+	s, ok := m.files[rel]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return &syncpkg.Entry{Path: rel, Name: rel, Size: int64(len(s))}, nil
+}
+func (m *backupSizedMemFS) Delete(_ context.Context, rel string) error {
+	delete(m.files, rel)
+	return nil
+}
+func (m *backupSizedMemFS) Rename(_ context.Context, from, to string) error {
+	if s, ok := m.files[from]; ok {
+		m.files[to] = s
+		delete(m.files, from)
+	}
+	return nil
+}
+
+// TestBackupQuotaFS_OverwriteReleasesPrev 第 4 轮对抗评审 P1 回归：备份目标覆盖写必须
+// 按 prev 差分（否则每轮备份同 rel 单调累加 → 假 507）。
+func TestBackupQuotaFS_OverwriteReleasesPrev(t *testing.T) {
+	t.Parallel()
+	ownerPool := quota.NewPool(1000)
+	scope := ownerPool.Scope("/tenant/test", 1000)
+	volPool := quota.NewPool(1000)
+	inner := &backupSizedMemFS{backupMemFS{files: map[string]string{}}}
+	q := &backupQuotaFS{inner: inner, scope: scope, pool: volPool}
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := q.WriteFile(ctx, "a.txt", strings.NewReader(strings.Repeat("x", 10)), 10, 0); err != nil {
+			t.Fatalf("第 %d 次覆盖写: %v", i+1, err)
+		}
+	}
+	if got := scope.Usage(); got != 10 {
+		t.Fatalf("覆盖写后 Scope.Usage=%d want 10（旧字节必须释放）", got)
+	}
+	if got := volPool.Usage(); got != 10 {
+		t.Fatalf("覆盖写后 volPool.Usage=%d want 10", got)
+	}
+	// 改名到新名（覆盖既有 30B 目标）→ 目标旧字节释放。
+	if err := q.WriteFile(ctx, "b.txt", strings.NewReader(strings.Repeat("y", 30)), 30, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Rename(ctx, "a.txt", "b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	// 改名把源 10B 搬到 b（覆盖 b 原 30B）：源字节已在写时计入，故只释放目标旧字节 →
+	// 账面 = 10（恰为 b.txt 实际内容），既不双计也不漏计。
+	if got := scope.Usage(); got != 10 {
+		t.Fatalf("改名覆盖后 Usage=%d want 10", got)
+	}
+	// 删除释放。
+	if err := q.Delete(ctx, "b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if got := scope.Usage(); got != 0 {
+		t.Fatalf("删除后 Usage=%d want 0", got)
+	}
+}

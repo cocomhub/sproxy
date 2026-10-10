@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -46,5 +47,21 @@ func TestNewExternalSource_SkipVerifyDisablesFileMeta(t *testing.T) {
 	s2 := newExternalSource(&extFS{files: map[string]string{}}, "k", e, false)
 	if s2 == nil {
 		t.Fatal("非 skip 应返回 source")
+	}
+}
+
+// TestPrefixFS_EmptyKeyAndUnsupported 第 4 轮对抗评审：根键不得产出尾斜杠（Guard 会判
+// 空段拒绝）；WriteIfAbsent 未实现须返回 ErrUnsupported（否则被读成「已存在」）。
+func TestPrefixFS_EmptyKeyAndUnsupported(t *testing.T) {
+	t.Parallel()
+	p := &prefixFS{FS: &extFS{files: map[string]string{}}, prefix: "alice/user/"}
+	if got := p.key(""); got != "alice/user" {
+		t.Fatalf(`key("") = %q, want "alice/user"（无尾斜杠）`, got)
+	}
+	if got := p.key("/a/b"); got != "alice/user/a/b" {
+		t.Fatalf(`key("/a/b") = %q`, got)
+	}
+	if _, err := p.WriteIfAbsent(context.Background(), "", strings.NewReader("x"), 1, 0); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("未实现 WriteIfAbsent 应 ErrUnsupported, got %v", err)
 	}
 }

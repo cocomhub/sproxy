@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -293,10 +295,15 @@ func (h *Handlers) s3HandleEmptyKey(w http.ResponseWriter, r *http.Request) {
 
 // s3ServeObject 校验 SproxySig 后按方法分发对象级操作（HEAD/GET/PUT/DELETE）。
 func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key string) {
-	// 验签（读 body 供 PUT 哈希）。
+	// 验签（读 body 供 PUT 哈希）。P2：先限长再读——原先无界 io.ReadAll 在**验签前**
+	// 读整个 body，未认证请求即可 OOM DoS（同仓 remote_write 有 MaxBytesReader）。
 	var body []byte
 	if r.Method == http.MethodPut {
-		body, _ = io.ReadAll(r.Body)
+		b, ok := h.s3ReadBody(w, r)
+		if !ok {
+			return
+		}
+		body = b
 	}
 	ak, err := h.sigV4Verify(r, body)
 	if err != nil {
@@ -328,10 +335,7 @@ func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key str
 	case http.MethodGet:
 		h.s3GetObject(w, root, rel)
 	case http.MethodPut:
-		// M1 修复：s3PutObject 写后补建 meta sidecar（旁路写「到达即建」不变量——
-		// 与 files.Service 上传一致；失败 Warn 兜底不阻断主写）。
-		h.s3PutObject(w, root, rel, body)
-		h.s3WriteMetaAfter(r, owner, root, rel)
+		h.s3PutWithQuota(w, r, owner, root, rel, body)
 	case http.MethodDelete:
 		// M1 修复：删除联动清理 meta（与 files.Service delete 一致；disable 后存量也清理）。
 		// C-MAJOR-3 修复：主文件删除**成功**才清理 meta——s3DeleteObject 返回是否成功，
@@ -342,6 +346,64 @@ func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key str
 	default:
 		http.Error(w, "s3: 方法不支持", http.StatusMethodNotAllowed)
 	}
+}
+
+// s3ReadBody 读取并限长 PUT body（P2：未认证请求不得无界占内存）。
+// 返回 ok=false 表示已写错误响应（超限）。
+func (h *Handlers) s3ReadBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	limit := int64(64 << 20)
+	if h.cfgPtr != nil {
+		if cfg := h.cfgPtr.Load(); cfg != nil && cfg.MaxUploadBytes > 0 {
+			limit = int64(cfg.MaxUploadBytes)
+		}
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "s3: 对象超过单请求上限", http.StatusRequestEntityTooLarge)
+			return nil, false
+		}
+		// 读失败：返回 nil 继续验签（会因签名不匹配拒绝）；不信任截断内容。
+		return nil, true
+	}
+	return body, true
+}
+
+// s3PutWithQuota 处理 S3 单对象 PUT：owner 配额双预留（写前 TryReserve、成功 Commit/
+// 覆盖差分、失败 Release）+ 写成功后补建 meta（P1/P2 修复）。
+func (h *Handlers) s3PutWithQuota(w http.ResponseWriter, r *http.Request, owner string, root *storage.Root, rel string, body []byte) {
+	size := int64(len(body))
+	var scope *quota.Scope
+	var res *quota.Reservation
+	prev := int64(0)
+	if sc := h.quotaScopeFor(owner, rel); sc != nil {
+		scope = sc
+		if e, serr := root.Stat(rel); serr == nil && e != nil && !e.IsDir() {
+			prev = e.Size()
+		}
+		r0, rerr := sc.TryReserve(size)
+		if rerr != nil {
+			http.Error(w, msgStorageQuotaExceeded, http.StatusInsufficientStorage)
+			return
+		}
+		res = r0
+	}
+	if !h.s3PutObject(w, root, rel, body) {
+		if res != nil {
+			res.Release()
+		}
+		return
+	}
+	if scope != nil {
+		if prev > 0 {
+			scope.Adjust(prev, size)
+			res.Release()
+		} else {
+			res.Commit(size)
+		}
+	}
+	h.s3WriteMetaAfter(r, owner, root, rel)
 }
 
 // s3WriteMetaAfter 在 s3 PUT 成功后补建 meta sidecar（本地旁路写：root 直写不经
@@ -418,22 +480,26 @@ func (h *Handlers) s3GetObject(w http.ResponseWriter, root *storage.Root, rel st
 }
 
 // s3PutObject 写对象：MkdirAll 父目录后 OpenFile 直写（root 无 WriteFile——用 OpenFile）。
-func (h *Handlers) s3PutObject(w http.ResponseWriter, root *storage.Root, rel string, body []byte) {
+// 返回是否写成功（P2：失败时清理半截对象与旧 sidecar，且调用方不得补建 meta——否则
+// O_TRUNC 后的截断对象会获得自洽 sidecar，S3 GET 校验通过返回 200，损坏固化）。
+func (h *Handlers) s3PutObject(w http.ResponseWriter, root *storage.Root, rel string, body []byte) bool {
 	if dir := path.Dir(rel); dir != "." {
 		_ = root.MkdirAll(dir, 0o755)
 	}
 	f, ferr := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if ferr != nil {
 		http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
-		return
+		return false
 	}
 	_, werr := io.Copy(f, bytesReader(body))
 	_ = f.Close()
 	if werr != nil {
+		removePartialS3(root, rel) // 失败：不得留半截对象（+ 旧 sidecar）被后续校验当作有效
 		http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
-		return
+		return false
 	}
 	w.WriteHeader(http.StatusCreated)
+	return true
 }
 
 // s3DeleteObject 删除对象（不存在 404）。返回 bool 表示主文件是否删除成功——

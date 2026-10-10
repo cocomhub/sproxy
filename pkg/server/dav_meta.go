@@ -44,6 +44,16 @@ func (d *davMetaFS) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// Inner 透明暴露（使 Innermost/ApplyStagingQuota 能下探到最内层原始卷能力）。
+func (d *davMetaFS) Inner() syncpkg.FS { return d.FS }
+
+// WithStagingQuota 转发到内层（P1：外层不转发会让 ApplyStagingQuota 静默不包 gate）。
+func (d *davMetaFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
+	if sc, ok := d.FS.(syncpkg.StagingQuotaCapable); ok {
+		sc.WithStagingQuota(q)
+	}
+}
+
 // writeMeta 为已落盘文件重建 sidecar（best-effort；失败仅告警——读路径退化为直算/流式）。
 func (d *davMetaFS) writeMeta(ctx context.Context, p string) {
 	rel := d.bucketRel(p)
@@ -58,13 +68,28 @@ func (d *davMetaFS) writeMeta(ctx context.Context, p string) {
 	}
 }
 
-// removeMeta 删除对应 sidecar（主文件已删/改名，陈旧 sidecar 会致读校验固化失败）。
+// removeMeta 删除对应 sidecar 并**释放 meta 桶配额**（P2：原实现只 root.Remove 不释放，
+// 而 WriteMeta 已 Commit → 每次 DAV DELETE/MOVE 永久泄漏 sidecar 字节，磁盘空闲也回 507；
+// 与 s3DeleteMetaAfter / write_ops 删除路径对称）。
 func (d *davMetaFS) removeMeta(p string) {
 	rel := d.bucketRel(p)
 	if rel == "" {
 		return
 	}
-	_ = d.root.Remove(meta.MetaPath(rel))
+	mrel := meta.MetaPath(rel)
+	metaSize := int64(0)
+	if d.root != nil {
+		if e, serr := d.root.Stat(mrel); serr == nil && e != nil {
+			metaSize = e.Size()
+		}
+		(filesMetaPolicy{h: d.h}).sweepMetaTmp(d.root, mrel)
+		_ = d.root.Remove(mrel)
+	}
+	if metaSize > 0 && d.h != nil {
+		if scope := d.h.quotaScopeFor(d.owner, mrel); scope != nil {
+			scope.ReleaseUsage(metaSize)
+		}
+	}
 }
 
 func (d *davMetaFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
@@ -87,6 +112,9 @@ func (d *davMetaFS) Rename(ctx context.Context, from, to string) error {
 	if err := d.FS.Rename(ctx, from, to); err != nil {
 		return err
 	}
+	// 先清目标旧 sidecar（释放其配额 + 防陈旧），再写新 meta——否则目标键已有 sidecar 时
+	// writeMeta 失败会残留描述旧内容的 sidecar（读校验固化失败，P2）。
+	d.removeMeta(to)
 	d.removeMeta(from)
 	d.writeMeta(ctx, to)
 	return nil

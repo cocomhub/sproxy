@@ -415,3 +415,55 @@ func TestUpdateMetaExtra_C5(t *testing.T) {
 		t.Fatal("篡改时 Extra 更新应被跳过（不污染 meta）")
 	}
 }
+
+// countingReadFS 记录 OpenRead 次数（断言 WriteIfAbsent 不再整文件回读算 meta）。
+type countingReadFS struct {
+	syncpkg.FS
+	reads int
+}
+
+func (c *countingReadFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
+	c.reads++
+	return c.FS.OpenRead(ctx, path)
+}
+
+func (c *countingReadFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Reader, size, mtime int64) (bool, error) {
+	w, ok := c.FS.(syncpkg.WriteIfAbsent)
+	if !ok {
+		return false, syncpkg.ErrUnsupported
+	}
+	return w.WriteIfAbsent(ctx, relPath, r, size, mtime)
+}
+
+// TestTrustedVolumeFS_WriteIfAbsent_NoReadBack 第 4 轮对抗评审 P1：WriteIfAbsent 必须
+// 在写入流上流式算 meta（TeeReader），**不得**在写成功后整文件 OpenRead 回读——远端卷
+// 回读=一次全量下载（6GiB → +6GiB，违背设计 §8）。
+func TestTrustedVolumeFS_WriteIfAbsent_NoReadBack(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	cr := &countingReadFS{FS: inner}
+	tv := Wrap(cr, Options{}).(*TrustedVolumeFS)
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("stream-meta-"), 100)
+	written, err := tv.WriteIfAbsent(ctx, "a.bin", bytes.NewReader(data), int64(len(data)), 0)
+	if err != nil || !written {
+		t.Fatalf("WriteIfAbsent: written=%v err=%v", written, err)
+	}
+	if cr.reads != 0 {
+		t.Fatalf("WriteIfAbsent 不得回读主文件算 meta，OpenRead 次数=%d", cr.reads)
+	}
+	// meta 必须存在且可反序列化、TotalSHA256 与独立重算一致（真副作用断言）。
+	rc, rerr := inner.OpenRead(ctx, meta.MetaPath("a.bin"))
+	if rerr != nil {
+		t.Fatalf("WriteIfAbsent 应流式落 meta: %v", rerr)
+	}
+	raw, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("meta 反序列化: %v", uerr)
+	}
+	if fm.TotalSHA256 != refSHA(data) {
+		t.Fatalf("TotalSHA256=%s want %s", fm.TotalSHA256, refSHA(data))
+	}
+}

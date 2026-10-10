@@ -190,13 +190,23 @@ func (t *TrustedVolumeFS) WriteIfAbsent(ctx context.Context, path string, r io.R
 	if !ok {
 		return false, fmt.Errorf("trusted: 底层卷未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
 	}
-	written, err := pia.WriteIfAbsent(ctx, path, r, size, mtime)
+	// 流式计算 meta（P1 性能）：对入参 r 包 TeeReader，与 WriteFile 同法——避免写成功后
+	// `writeMetaAfter` 整文件回读（远端卷 = 一次全量下载，6GiB → +6GiB，与设计 §8
+	// 「远端不回读」直接冲突）。Calculator 无法构造时回落旧回读路径（保可用性）。
+	calc, cerr := meta.NewCalculator(size, t.chunkSizeFor(size))
+	if cerr != nil {
+		written, err := pia.WriteIfAbsent(ctx, path, r, size, mtime)
+		if err != nil || !written {
+			return written, err
+		}
+		t.writeMetaAfter(ctx, path, size)
+		return written, nil
+	}
+	written, err := pia.WriteIfAbsent(ctx, path, io.TeeReader(r, calc), size, mtime)
 	if err != nil || !written {
 		return written, err
 	}
-	// 写成功（新文件）→ 补写 meta（从已落盘文件读回计算；失败仅影响校验精度——
-	// 读路径直算兜底，不阻断主写）。
-	t.writeMetaAfter(ctx, path, size)
+	t.persistCalcMeta(ctx, path, calc)
 	return written, nil
 }
 
@@ -212,16 +222,20 @@ func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size i
 	if err != nil {
 		return // 读回失败：meta 不落（直算兜底）
 	}
+	defer rc.Close()
 	calc, cerr := meta.NewCalculator(size, chunkSize)
 	if cerr != nil {
-		rc.Close()
 		return
 	}
-	_, rerr := calc.ReadFrom(rc)
-	rc.Close()
-	if rerr != nil {
+	if _, rerr := calc.ReadFrom(rc); rerr != nil {
 		return
 	}
+	t.persistCalcMeta(ctx, rel, calc)
+}
+
+// persistCalcMeta 由已完成的 Calculator 落 meta sidecar（WriteFile/WriteIfAbsent 共用）。
+// 失败仅影响校验精度（读路径直算兜底），不阻断主写。
+func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc *meta.Calculator) {
 	fm := calc.Finish()
 	// size 声明失真的实写自愈（有分块才可能失真）；零字节文件无分块直接 Validate。
 	if len(fm.Chunks) > 0 {
@@ -237,7 +251,7 @@ func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size i
 		return
 	}
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
-		t.logMetaWarn("writeMetaAfter", rel, werr)
+		t.logMetaWarn("persistCalcMeta", rel, werr)
 	}
 }
 
