@@ -135,6 +135,20 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 - **容量释放依赖 Stat**（第 3 轮对抗评审 P3）：`Delete/Rename/Move/Copy` 释放量取自
   `inner.Stat` 实测；Stat 瞬时失败时释放 0（计数偏高、仅对账/重启自愈）。
 - **`FileMeta.Signature`**：同上行（预留字段）。
+- **容量记账并发**（第 4 轮对抗评审 P2）：`CapacityFS` 无自身锁，`stat→reserve→settle`
+  跨锁 read-modify-write；同 rel 并发 写/删 可致 used 少计或虚高。计数器内部操作原子安全
+  （无内存损坏），逻辑漂移有界、重启/对账自愈；彻底解决需按 rel 串行化（会串行化远端写 I/O，
+  权衡后留专题）。
+- **加密卷容量记账低估**（第 4 轮对抗评审 P1）：`CapacityFS` 包在 `SecretdataFS` 外层，
+  只按逻辑 size 计；容器内 chunk/meta 写入与默认 1–2MiB meta pad 不进计数器（1KiB 文件
+  实占 2–4MiB）→ 理论上限可被绕过约 10³。彻底解决需按底层实测字节记账（暴露真实 usage 或
+  底层树求和）。
+- **presign 直传绕过 meta + 容量**（第 4 轮对抗评审 P1）：预签名 PUT 是客户端直写对象键，
+  不经 `be.FS()`——不写 sidecar、不计卷级容量。彻底解决需 per-volume presign 或将直传对象在
+  complete 阶段经 `Guard(Wrap(fs))` 回读算 meta 并记账（成本与产品决策待定）。
+- **回收站仅默认卷可见**（第 4 轮对抗评审 P1）：软删写 home 卷 trash，列表/恢复/清空只看默认
+  卷 → 多卷下软删文件不可见不可恢复、EmptyTrash 不释放配额。彻底解决需按 owner 卷视图逐卷
+  定位。
 
 ## 9. 验证
 

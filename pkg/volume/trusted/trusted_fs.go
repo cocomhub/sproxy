@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"path"
 	"path/filepath"
 
@@ -245,7 +246,9 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 		return
 	}
 	fm.Name = path.Base(filepath.ToSlash(rel))
-	fm.Extra = t.opts.Extra
+	// 深拷贝：所有文件的 meta 不得共享同一 map 实例（对比 secretdata 已深拷贝）——
+	// 未来任何就地改 Extra 的调用方会污染全部文件的 meta。
+	fm.Extra = maps.Clone(t.opts.Extra)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		return
@@ -485,7 +488,9 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 		}
 	}
 	fm.Name = path.Base(filepath.ToSlash(rel))
-	fm.Extra = t.opts.Extra
+	// 深拷贝：所有文件的 meta 不得共享同一 map 实例（对比 secretdata 已深拷贝）——
+	// 未来任何就地改 Extra 的调用方会污染全部文件的 meta。
+	fm.Extra = maps.Clone(t.opts.Extra)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		// C1 修复：Marshal 失败同样删旧 sidecar（主文件已写成功）——残留描述旧内容的
