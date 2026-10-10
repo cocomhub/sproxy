@@ -316,3 +316,88 @@ func TestUnflattenRel_LegacyFallback(t *testing.T) {
 		t.Fatalf("非法回退名应返回空, got %q", got)
 	}
 }
+
+// TestTrash_RestoreSecondGenerationMetaPaired P1 回归：同 rel 多代软删后，恢复第 2 代
+// 必须配对**同代** sidecar（旧实现取前缀第一个=最旧一代 → 主文件 C2 与 meta M1 错代，
+// 读校验恒失配不可读）。
+func TestTrash_RestoreSecondGenerationMetaPaired(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	env.fileMeta = true
+	env.enableWriteDefaults()
+	tnt := env.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("tenant 不可用")
+	}
+	root := tnt.Root()
+	userAbs, _ := root.Abs("user")
+	_ = os.MkdirAll(userAbs, 0o755)
+	c1 := "hello-first-generation"
+	c2 := "second-generation-content"
+	write := func(s string) {
+		if _, err := env.svc.WriteFile(context.Background(), WriteFileInput{
+			Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: testutil.SHA256Hex([]byte(s)), ClientSize: int64(len(s)),
+		}, strings.NewReader(s)); err != nil {
+			t.Fatalf("WriteFile(%s): %v", s, err)
+		}
+	}
+	softDel := func(s string) {
+		if _, err := env.svc.DeleteFile(context.Background(), DeleteFileInput{
+			Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: testutil.SHA256Hex([]byte(s)), SoftDelete: true,
+		}); err != nil {
+			t.Fatalf("DeleteFile soft: %v", err)
+		}
+	}
+	write(c1)
+	softDel(c1)
+	write(c2)
+	softDel(c2)
+
+	// 同目录两个主文件条目（gen1、gen2）：取 nano 最大的（第 2 代）。
+	trashAbs, _ := root.Abs("trash")
+	flat := flattenRel("user/a.txt")
+	dirAbs := filepath.Join(trashAbs, filepath.FromSlash(path.Dir(flat)))
+	entries, _ := os.ReadDir(dirAbs)
+	best := ""
+	for _, e := range entries {
+		n := e.Name()
+		if !strings.HasPrefix(n, path.Base(flat)+trashDeletedSuffix) || strings.Contains(n, trashMetaMarker) {
+			continue
+		}
+		if n > best {
+			best = n // 19 位十进制 nano：字典序 = 时间序
+		}
+	}
+	if best == "" {
+		t.Fatal("trash 缺主文件条目")
+	}
+	// 让两代 sidecar 内容可区分（test meta 政策内容为常量）：按 nano 与 best 同代写 M2，
+	// 其余写 M1 —— 恢复后必须是 M2（同代配对），不得是 M1（最旧一代）。
+	bestNano := strings.TrimPrefix(best, path.Base(flat)+trashDeletedSuffix)
+	for _, e := range entries {
+		n := e.Name()
+		if !strings.Contains(n, trashMetaMarker) {
+			continue
+		}
+		marker := []byte("M1")
+		if strings.HasSuffix(n, bestNano) {
+			marker = []byte("M2")
+		}
+		if werr := os.WriteFile(filepath.Join(dirAbs, n), marker, 0o644); werr != nil {
+			t.Fatalf("写测试 meta 标记: %v", werr)
+		}
+	}
+	if err := env.svc.RestoreTrash(context.Background(), "alice", trashPrefix+path.Dir(flat)+"/"+best); err != nil {
+		t.Fatalf("RestoreTrash: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(userAbs, "a.txt")); err != nil || string(b) != c2 {
+		t.Fatalf("恢复内容 = %q err=%v, want %q", b, err, c2)
+	}
+	sidecar, err := os.ReadFile(filepath.Clean(filepath.Join(userAbs, "..", "meta", "a.txt.meta")))
+	if err != nil {
+		t.Fatalf("恢复后应回 meta sidecar: %v", err)
+	}
+	if string(sidecar) != "M2" {
+		t.Fatalf("恢复应与同代 meta 配对，got %q, want M2（旧实现取最旧一代 M1）", sidecar)
+	}
+}

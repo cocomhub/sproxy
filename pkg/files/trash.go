@@ -97,7 +97,8 @@ func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, qua
 	// trash 桶相对路径：trash/<分层扁平>.__deleted__<nano>（C-MAJOR-2：逐段 base64 保留
 	// 目录层级，单文件名不超 NAME_MAX——整条 rel 编码深路径会 ENAMETOOLONG）。
 	flatRel := flattenRel(rel)
-	trashRel := trashPrefix + flatRel + trashDeletedSuffix + strconv.FormatInt(time.Now().UnixNano(), 10)
+	nano := strconv.FormatInt(time.Now().UnixNano(), 10)
+	trashRel := trashPrefix + flatRel + trashDeletedSuffix + nano
 	// trash 条目父目录逐级创建（分层树：trash/<dir1>/<dir2>/...——rename 目标父目录必须已建）。
 	if dir := filepath.ToSlash(filepath.Dir(trashRel)); dir != "." {
 		if err := root.MkdirAll(dir, 0o755); err != nil {
@@ -109,7 +110,9 @@ func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, qua
 	}
 	// meta sidecar 随迁（best-effort：源 meta 不存在则跳过——读路径直算兜底；恢复时
 	// 随主文件一起回 meta 桶）。meta 条目与主文件同 flat 目录（+.meta 标记）。
-	_ = atomicRenameRoot(root, meta.MetaPath(rel), trashPrefix+flatRel+trashMetaMarker+trashDeletedSuffix+strconv.FormatInt(time.Now().UnixNano(), 10))
+	// **同代 nano**：主文件与 meta 共享同一 nano，恢复时按同代精确配对（P1：此前各
+	// 自 time.Now() → 多代软删后恢复取到最旧一代 meta → 主文件/meta 错代不可读）。
+	_ = atomicRenameRoot(root, meta.MetaPath(rel), trashPrefix+flatRel+trashMetaMarker+trashDeletedSuffix+nano)
 	_ = info // 保留（未来恢复时用大小）
 	return trashRel, nil
 }
@@ -127,7 +130,7 @@ func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) erro
 		return &HTTPError{Status: 400, Message: "无效的回收站路径"}
 	}
 	inner := strings.TrimPrefix(trashRel, trashPrefix)
-	before, _, ok := strings.Cut(inner, trashDeletedSuffix)
+	before, nano, ok := strings.Cut(inner, trashDeletedSuffix)
 	if !ok {
 		return &HTTPError{Status: 400, Message: "无效的回收站条目"}
 	}
@@ -154,17 +157,18 @@ func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) erro
 		return fmt.Errorf("恢复失败: %w", err)
 	}
 	// M2 修复：meta sidecar 随主文件一起恢复（软删时已随迁 trash 桶；这里回 meta 桶）。
-	if mt := restoreTrashMetaSuffix(root, flat); mt != "" {
+	// 按**同代 nano** 精确配对（P1：多代软删后不得取到最旧一代 meta）。
+	if mt := restoreTrashMetaSuffix(root, flat, nano); mt != "" {
 		_ = atomicRenameRoot(root, trashPrefix+flat+trashMetaMarker+trashDeletedSuffix+mt, meta.MetaPath(origRel))
 	}
 	return nil
 }
 
-// restoreTrashMetaSuffix 定位 trash 桶中对应 flat 的 meta 条目（软删随迁命名
-// trash/<flat>.meta.__deleted__<nano>，flat 含分层路径段）并返回其删除后缀段。
-// 找不到返回空（读路径直算兜底）。实现：在 trash/<flat 父目录> 下找
-// `<basename>.meta.__deleted__`。
-func restoreTrashMetaSuffix(root *storage.Root, flat string) string {
+// restoreTrashMetaSuffix 定位 trash 桶中对应 flat 的 meta 条目并返回其删除后缀段。
+// **优先精确匹配同代 nano**（主文件与 meta 软删时共享同一 nano）——多代软删（同 rel 多次
+// 删除/重传）时旧实现取「前缀第一个」（最旧）会致主文件/meta 错代不可读（P1）；精确匹配
+// 失败时回落首个前缀命中（兼容修复前旧条目，读路径仍可退化兜底）。找不到返回空。
+func restoreTrashMetaSuffix(root *storage.Root, flat, nano string) string {
 	// flat 可能是 user/<...>/<base>（分层）——meta 条目与主文件同目录，basename 前加 .meta。
 	base := path.Base(flat)
 	dir := path.Dir(flat)
@@ -182,13 +186,18 @@ func restoreTrashMetaSuffix(root *storage.Root, flat string) string {
 		return ""
 	}
 	prefix := base + trashMetaMarker + trashDeletedSuffix
+	want := prefix + nano
+	fallback := ""
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, prefix) {
-			return strings.TrimPrefix(name, base+trashMetaMarker+trashDeletedSuffix)
+		if name == want {
+			return nano
+		}
+		if fallback == "" && strings.HasPrefix(name, prefix) {
+			fallback = strings.TrimPrefix(name, prefix)
 		}
 	}
-	return ""
+	return fallback
 }
 
 // EmptyTrash 清空回收站（删除全部 trash 桶文件）。

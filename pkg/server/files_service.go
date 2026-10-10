@@ -328,6 +328,19 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 //     再 Commit 新字节（net = new - prev，杜绝 owner meta 桶 Scope 随覆盖次数通胀）；
 //   - 删除联动处（deleteQuarantinedFile）按 sidecar 实际大小 ReleaseUsage（见 write_ops.go）。
 func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error {
+	mrel := meta.MetaPath(rel)
+	if err := p.writeMetaCore(ctx, owner, root, rel, mrel); err != nil {
+		// 统一补偿（对抗评审 P2）：任何失败分支都失效旧 sidecar——主文件已换新内容而
+		// sidecar 仍描述旧内容会使读路径按旧分块校验恒失配（硬失败固化不可读，幂等重传
+		// 不自愈）；删后退化为 missing → 读路径直算兜底（安全）。
+		_ = root.Remove(mrel)
+		return err
+	}
+	return nil
+}
+
+// writeMetaCore 是 WriteMeta 主体（计算 FileMeta → 配额预留 → 原子落盘）。
+func (p filesMetaPolicy) writeMetaCore(ctx context.Context, owner string, root *storage.Root, rel, mrel string) error {
 	// 计算 FileMeta：从已落盘文件（root 相对 rel）读取计算总 sha256+md5 + 分块。
 	fm, err := p.computeMeta(ctx, root, rel)
 	if err != nil {
@@ -338,7 +351,6 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *stor
 		return err
 	}
 	// sidecar 落 meta 功能桶（`meta/<rel>.meta`）：与用户文件命名空间隔离。
-	mrel := meta.MetaPath(rel)
 	if dirErr := p.prepareMetaDir(root, mrel); dirErr != nil {
 		return dirErr
 	}
