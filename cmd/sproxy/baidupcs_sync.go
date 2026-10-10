@@ -12,7 +12,7 @@ package main
 // 卷构造器，卷名→StorageFS 的映射关系在装配层维护。
 //
 // quota 融合（P5 per-owner，2026-10-10 改 per-request 包装）：staging 配额按**任务 owner**
-// 分桶——工厂签名带 owner，装配层经 scopeFor(owner) 解析该 owner 的 quota.Scope，返回
+// 分桶——工厂签名带 owner，装配层经 trackerFor(owner) 解析该 owner 的 staging tracker，返回
 // **包了 `syncpkg.StagingQuotaGateFS` 的实例**（写前预留/写后释放）。**不再注入卷共享
 // 单例**（同卷多 owner 并发会互相覆盖，见下）；与卷自身容量配额（ReserveSpace/卷 Pool）
 // 严格区分：后者管远端网盘容量，前者只记本地暂存。scopeFor 为 nil 或返回 nil Scope 时
@@ -28,7 +28,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
@@ -54,7 +53,7 @@ type baidupcsStorageFactory func(cfg baidupcs.StorageConfig) (baidupcs.StorageAP
 //   - 工厂总是注入：Set.External 查不到卷时在**调用点**报错（fail-closed，绝不回落
 //     direct——回落会让「已声明本机卷」的配置静默走远程 HTTP，破坏卷寻址语义）。
 //   - set 为 nil（未装配卷集合）→ 不注入（防御；正常装配下恒非 nil）。
-func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slog.Logger, scopeFor func(owner string) *quota.Scope) {
+func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slog.Logger, trackerFor func(owner string) syncpkg.StagingQuotaTracker) {
 	if exec == nil || set == nil {
 		return
 	}
@@ -68,12 +67,14 @@ func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slo
 		}
 		fs := be.FS()
 		// 2026-10-10：staging 配额改**per-request/per-owner 包装实例**——不再向卷共享
-		// 单例注入（旧 WithQuota 覆盖会跨 owner 串账）。ownerScope 非 nil 时包
-		// StagingQuotaGateFS：写前预留本地 staging、写后释放；无配额装配则不包（零回归）。
-		// 与卷自身容量配额（ReserveSpace/卷 Pool）无关——后者管远端容量，前者只记本地暂存。
-		if scopeFor != nil {
-			if ownerScope := scopeFor(owner); ownerScope != nil {
-				fs = syncpkg.WrapStagingQuota(fs, quota.NewStagingTracker(ownerScope))
+		// 单例注入（旧 WithQuota 覆盖会跨 owner 串账）。
+		// P1 修复：改用**与 HTTP 上传/转存/备份同一个 per-owner staging tracker**
+		// （独立 `/staging/<owner>` Scope + 同一 cond 实例）——此前绑 owner user 桶
+		// （owner_quotas）Scope，导致 staging_quota_bytes 在该入口失效、且本地配额将满时
+		// 误拒「根本不落本地盘」的推送，同一资源两本账、跨任务广播全失效。
+		if trackerFor != nil {
+			if t := trackerFor(owner); t != nil {
+				fs = syncpkg.WrapStagingQuota(fs, t)
 			}
 		}
 		return fs, func() { /* 无清理 */ }, nil

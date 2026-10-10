@@ -44,11 +44,14 @@ type clusterFS struct {
 func (f *clusterFS) holderRel(ownerKey string) (string, error) {
 	rel := ownerKey
 	// 剥 <owner>/ 前缀（出口 owner key 形态：<owner>/user/<rel>）——首个 /user/ 是桶边界。
+	// **已剥过就不能再剥 user/**：否则 `<owner>/user/user/x.bin`（用户目录名恰为 user）
+	// 会被误剥成 `x.bin` → 404，或命中持有侧根同名文件 → **返回另一个文件的内容**（P2）。
 	if i := strings.Index(rel, "/user/"); i >= 0 {
 		rel = rel[i+len("/user/"):]
+	} else {
+		// 未带 owner 前缀的形态（已是桶相对 `user/...`）才剥 user 桶。
+		rel = strings.TrimPrefix(rel, "user/")
 	}
-	// 剥 user 桶（若仍带）。
-	rel = strings.TrimPrefix(rel, "user/")
 	if rel == "" {
 		return "", fmt.Errorf("cluster: 路径 %q 剥前缀后为空（非法 owner key）", ownerKey)
 	}

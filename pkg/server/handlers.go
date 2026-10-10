@@ -811,6 +811,12 @@ func (h *Handlers) stagingQuotaScope(owner string) *quota.Scope {
 // stagingQuotaTrackerFor 返回 owner 的 staging 配额钩子（独立 Scope 适配——
 // ReserveUsage = TryReserve + Commit；不足排队等待（quota.StagingTracker：sync.Cond +
 // ctx/超时）；ReleaseUsage = ReleaseUsage + 广播。无 globalPool → nil（零回归）。
+// StagingQuotaTrackerFor 导出版（供装配层把同一 per-owner staging tracker 注入
+// 非 HTTP 写入口，如 baidupcs sync push——P1：此前误用 owner user 桶 Scope）。
+func (h *Handlers) StagingQuotaTrackerFor(owner string) syncpkg.StagingQuotaTracker {
+	return h.stagingQuotaTrackerFor(owner)
+}
+
 func (h *Handlers) stagingQuotaTrackerFor(owner string) syncpkg.StagingQuotaTracker {
 	sc := h.stagingQuotaScope(owner)
 	if sc == nil {

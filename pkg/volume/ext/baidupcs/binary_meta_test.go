@@ -303,3 +303,27 @@ func TestParseBinaryList_InternalSpacesPreserved(t *testing.T) {
 		t.Fatalf("内部空格应保留, got %q", es[0].Key)
 	}
 }
+
+// TestIsBinaryNotFound 第 4 轮对抗评审 P1：CLI 输出须归类「不存在」，否则 binary-only
+// 模式下任意新文件上传在写前失败（putCheckExisting 需 errors.Is(ErrNotFound)）。
+func TestIsBinaryNotFound(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		out  string
+		want bool
+	}{
+		{metaOutputCLIError, true},
+		{"文件不存在", true},
+		{"目录不存在", true},
+		{"not found", true},
+		{"No such file or directory", true},
+		{listOutputCLIError, false}, // 帐号未登录
+		{metaOutputFile, false},     // 正常输出
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isBinaryNotFound([]byte(tc.out)); got != tc.want {
+			t.Errorf("isBinaryNotFound(%.30q) = %v, want %v", tc.out, got, tc.want)
+		}
+	}
+}

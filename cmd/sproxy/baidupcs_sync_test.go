@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -594,7 +595,12 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 			return nil // 无配额 owner → 不装配
 		}
 	}
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), scopeFor)
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), func(owner string) syncpkg.StagingQuotaTracker {
+		if sc := scopeFor(owner); sc != nil {
+			return quota.NewStagingTracker(sc)
+		}
+		return nil
+	})
 	if exec.BaidupcsFS == nil {
 		t.Fatal("装配 baidupcs 卷应注入工厂")
 	}

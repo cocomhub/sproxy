@@ -361,12 +361,28 @@ func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader,
 	if effective <= 0 && size > 0 {
 		effective = size
 	}
-	if adj := (effective - prev) - reserved; adj > 0 {
-		_ = f.counter.TryAdd(adj) // 声明失真（少报）→ 补记（best-effort）
-	} else if adj < 0 {
-		f.counter.Release(-adj) // 覆盖写变小 / 多预留
+	if serr := f.settle(ctx, relPath, prev, reserved, effective, size); serr != nil {
+		return serr
 	}
 	f.persist()
+	return nil
+}
+
+// settle 写后结算：按实测补记/退还。未知长度路径（size<=0）无法写前 fail-closed——
+// 若补记失败（超出卷限额），删除刚写对象并返回错误，恢复「Σ占用 ≤ 卷限额」不变量。
+// 声明长度路径写前已预留，补记失败仅可能是并发漂移，记不了即保留（不误删已成功写入）。
+func (f *CapacityFS) settle(ctx context.Context, relPath string, prev, reserved, effective, size int64) error {
+	switch adj := (effective - prev) - reserved; {
+	case adj > 0:
+		if err := f.counter.TryAdd(adj); err != nil {
+			if size <= 0 {
+				_ = f.inner.Delete(ctx, relPath)
+				return err
+			}
+		}
+	case adj < 0:
+		f.counter.Release(-adj) // 覆盖写变小 / 多预留
+	}
 	return nil
 }
 
@@ -382,24 +398,37 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// WriteIfAbsent 原子唯一写 + 卷级记账（目标不存在先预留 size）。
+// WriteIfAbsent 原子唯一写 + 卷级记账（与 WriteFile 同口径：声明长度已知则写前预留，
+// 未知/非法长度（<=0，如 copyMeta / 流式）不预留、写后按**实测**结算）。
 func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Reader, size, mtime int64) (bool, error) {
 	pia, ok := f.inner.(syncpkg.WriteIfAbsent)
 	if !ok {
 		return false, fmt.Errorf("capacity: 底层未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
 	}
-	exists := f.innerSize(ctx, relPath) > 0
-	if !exists {
-		if err := f.counter.TryAdd(size); err != nil {
-			return false, err
+	prev := f.innerSize(ctx, relPath)
+	reserved := int64(0)
+	if size > 0 {
+		if d := size - prev; d > 0 {
+			if err := f.counter.TryAdd(d); err != nil {
+				return false, err
+			}
+			reserved = d
 		}
 	}
-	written, err := pia.WriteIfAbsent(ctx, relPath, r, size, mtime)
+	cr := &countingReader{r: r}
+	written, err := pia.WriteIfAbsent(ctx, relPath, cr, size, mtime)
 	if err != nil || !written {
-		if !exists {
-			f.counter.Release(size) // 未落盘：回滚预留
+		if reserved > 0 {
+			f.counter.Release(reserved) // 未落盘：回滚预留
 		}
 		return written, err
+	}
+	effective := cr.n
+	if effective <= 0 && size > 0 {
+		effective = size
+	}
+	if serr := f.settle(ctx, relPath, prev, reserved, effective, size); serr != nil {
+		return false, serr
 	}
 	f.persist()
 	return true, nil

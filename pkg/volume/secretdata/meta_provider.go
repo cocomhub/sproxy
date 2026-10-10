@@ -128,8 +128,13 @@ func (s *SecretdataFS) UpdateMetaExtra(ctx context.Context, rel string, extra ma
 		_ = s.inner.Delete(ctx, metaPath)
 		return fmt.Errorf("secretdata: 更新 meta 并发冲突（条目已被改写）: %s", rel)
 	}
-	cur.metaName = name
-	cur.meta = nm
+	// copy-on-write（P2 并发）：**不得**就地改已发布条目的 meta/metaName——读路径（OpenRangeRead/
+	// openRead）先取 *metaEntry 指针、RUnlock 后才解引用，就地改会与之构成 data race（Go UB，
+	// -race 必报）。换成新条目，旧指针对在途读者保持不可变。
+	next := *cur
+	next.metaName = name
+	next.meta = nm
+	s.index[key] = &next
 	s.mu.Unlock()
 	// 锁外删旧 blob（best-effort：残留由 GC 上收）。
 	_ = s.inner.Delete(context.Background(), path.Join(dirSeg, oldName))

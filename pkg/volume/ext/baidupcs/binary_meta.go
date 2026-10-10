@@ -79,17 +79,44 @@ func (a *binaryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMet
 		return nil, err
 	}
 	out, err := a.runBinaryOutput(ctx, "meta", remotePath)
-	if err == nil {
-		if m, perr := parseBinaryMeta(out, remotePath); perr == nil {
-			return m, nil
-		} else {
-			err = perr
+	if err != nil {
+		// CLI 非零退出：可能是路径不存在（走 not-found 归类再回落）。
+		if isBinaryNotFound(out) {
+			if fb := a.fallbackMeta(); fb != nil {
+				return fb.Meta(ctx, remotePath)
+			}
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
+		}
+	} else if m, perr := parseBinaryMeta(out, remotePath); perr == nil {
+		return m, nil
+	} else {
+		err = perr
+		// 退出码 0 但输出无字段：多为「文件不存在/路径非法」等 API 级错误（夹具已证
+		// 文本在 stdout）。不予归类会让 binary-only 模式下任意新文件上传在写前失败
+		// （putCheckExisting 需 errors.Is(ErrNotFound)），且 Stat 违反 (nil,nil) 契约返 500。
+		if isBinaryNotFound(out) {
+			if fb := a.fallbackMeta(); fb != nil {
+				return fb.Meta(ctx, remotePath)
+			}
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
 		}
 	}
 	if fb := a.fallbackMeta(); fb != nil {
 		return fb.Meta(ctx, remotePath)
 	}
 	return nil, err
+}
+
+// isBinaryNotFound 判定 CLI 输出是否表示「路径不存在」（大小写不敏感的子串匹配）——
+// 保留 stdout 片段于错误文案中便于排障。
+func isBinaryNotFound(out []byte) bool {
+	low := strings.ToLower(string(out))
+	for _, kw := range []string{"文件不存在", "目录不存在", "路径不存在", "not found", "does not exist", "no such file"} {
+		if strings.Contains(low, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // List 实现 metadataProvider：`ls` 枚举 + 对文件条目批量 `meta` 取精确 size。
@@ -103,12 +130,18 @@ func (a *binaryAdapter) List(ctx context.Context, remotePath string) ([]ObjectMe
 		if fb := a.fallbackMeta(); fb != nil {
 			return fb.List(ctx, remotePath)
 		}
+		if isBinaryNotFound(out) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
+		}
 		return nil, err
 	}
 	entries, perr := parseBinaryList(out)
 	if perr != nil {
 		if fb := a.fallbackMeta(); fb != nil {
 			return fb.List(ctx, remotePath)
+		}
+		if isBinaryNotFound(out) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
 		}
 		return nil, perr
 	}

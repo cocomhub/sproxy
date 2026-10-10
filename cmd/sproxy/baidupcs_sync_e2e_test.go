@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -379,7 +380,12 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 	}
 
 	exec := syncexec.NewExecutor(resolver, discardLoggerMain())
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), scopeFor)
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), func(owner string) syncpkg.StagingQuotaTracker {
+		if sc := scopeFor(owner); sc != nil {
+			return quota.NewStagingTracker(sc)
+		}
+		return nil
+	})
 	if exec.BaidupcsFS == nil {
 		t.Fatal("setupBaidupcsFSFactory 应注入 BaidupcsFS 工厂")
 	}

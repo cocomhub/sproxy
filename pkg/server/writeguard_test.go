@@ -178,6 +178,9 @@ func TestWriteGuard_IsWriteFaceRoute(t *testing.T) {
 		{"/api/volumes/import", http.MethodPost},
 		{"/api/notify/test", http.MethodPost},
 		{"/api/ai/privacy/purge", http.MethodPost},
+		{"/s3/k.txt", http.MethodPut},
+		{"/s3/k.txt", http.MethodDelete},
+		{"/s3/k.txt?uploads", http.MethodPost},
 	}
 	read := []struct{ path, method string }{
 		{"/download", http.MethodGet},
@@ -190,6 +193,8 @@ func TestWriteGuard_IsWriteFaceRoute(t *testing.T) {
 		{"/api/stats", http.MethodGet},
 		{"/api/cloud/tasks", http.MethodGet},
 		{"/api/credentials", http.MethodGet},
+		{"/s3/k.txt", http.MethodGet},
+		{"/s3/k.txt", http.MethodHead},
 	}
 	for _, tc := range write {
 		if !isWriteFaceRoute(tc.path, tc.method) {

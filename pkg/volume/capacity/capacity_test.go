@@ -272,3 +272,66 @@ func TestCapacityFS_UnknownSizeUsesMeasured(t *testing.T) {
 		t.Fatal("30+80 超限应拒绝")
 	}
 }
+
+// wiaMeasuringFS 支持 WriteIfAbsent 的 measuringFS（未知长度实测 + 写后回滚用）。
+type wiaMeasuringFS struct {
+	measuringFS
+	deleted []string
+}
+
+func (m *wiaMeasuringFS) WriteIfAbsent(_ context.Context, p string, r io.Reader, size, _ int64) (bool, error) {
+	m.mu.Lock()
+	_, exists := m.sizes[p]
+	m.mu.Unlock()
+	if exists {
+		return false, nil
+	}
+	n := size
+	if r != nil {
+		w, _ := io.Copy(io.Discard, r)
+		n = w
+	}
+	m.mu.Lock()
+	m.sizes[p] = n
+	m.mu.Unlock()
+	return true, nil
+}
+func (m *wiaMeasuringFS) Delete(_ context.Context, p string) error {
+	m.mu.Lock()
+	delete(m.sizes, p)
+	m.deleted = append(m.deleted, p)
+	m.mu.Unlock()
+	return nil
+}
+
+// TestCapacityFS_WriteIfAbsent_MeasuredAndRollback 第 4 轮对抗评审 P1：
+// ① WriteIfAbsent 未知长度须按实测记账（原按声明 size，size<=0 完全漏记）；
+// ② 未知长度写后超限须回滚（删除刚写对象）并返回错误，恢复不变量。
+func TestCapacityFS_WriteIfAbsent_MeasuredAndRollback(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(100)
+	inner := &wiaMeasuringFS{measuringFS: measuringFS{sizes: map[string]int64{}}}
+	fs := Wrap(inner, NewPoolCounter(pool))
+	content := strings.Repeat("x", 30)
+	ok, err := fs.WriteIfAbsent(context.Background(), "a.bin", strings.NewReader(content), -1, 0)
+	if err != nil || !ok {
+		t.Fatalf("WriteIfAbsent: ok=%v err=%v", ok, err)
+	}
+	if got := pool.Usage(); got != 30 {
+		t.Fatalf("未知长度应按实测入账 30, got %d", got)
+	}
+	// 再来一个 80B 未知长度：写后 30+80>100 → 回滚（删除 b.bin）且报错。
+	_, err = fs.WriteIfAbsent(context.Background(), "b.bin", strings.NewReader(strings.Repeat("y", 80)), -1, 0)
+	if err == nil {
+		t.Fatal("未知长度写后超限应返回错误（fail-closed）")
+	}
+	inner.mu.Lock()
+	_, existed := inner.sizes["b.bin"]
+	inner.mu.Unlock()
+	if existed {
+		t.Fatal("超限回滚应删除刚写对象 b.bin")
+	}
+	if got := pool.Usage(); got != 30 {
+		t.Fatalf("回滚后 Usage=%d want 30", got)
+	}
+}

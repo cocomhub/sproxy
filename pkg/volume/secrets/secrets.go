@@ -217,10 +217,18 @@ func (m *Manager) SelectDefault(ctx context.Context, defaultSecret string) (stri
 	if err != nil {
 		return "", err
 	}
-	if len(names) == 0 {
+	// 过滤非法条目（`..` 等）后再取首个——List 是目录枚举，可能含外部写入的异常名；
+	// 直接 names[0] 会把异常名当默认 secret 返回，直到 Read 才报错（入口校验口径不一致）。
+	valid := names[:0]
+	for _, n := range names {
+		if validSecretName(n) {
+			valid = append(valid, n)
+		}
+	}
+	if len(valid) == 0 {
 		return "", fmt.Errorf("secrets: 卷 %q 无 secret 可用（先 Create）", m.name)
 	}
-	return names[0], nil
+	return valid[0], nil
 }
 
 // ---- ExternalBackend 适配 ----

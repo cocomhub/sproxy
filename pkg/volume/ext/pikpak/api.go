@@ -141,6 +141,9 @@ type fileListResp struct {
 // pikpakMaxListPages 是 List 分页安全上限（防服务端 page_token 回环导致死循环）。
 const pikpakMaxListPages = 1000
 
+// pikpakMaxWalkDepth 是分享目录递归深度上限（防服务端目录自环导致栈溢出/死循环）。
+const pikpakMaxWalkDepth = 64
+
 // doJSON 执行带鉴权的 API 请求并解析 JSON。
 // 鉴权：优先显式 AccessToken（cfg.AccessToken）；未配置时经 CLI `auth token`
 // 惰性导出并缓存（CLI 登录态 → REST 的官方通道）。两者皆无 → ErrNotLoggedIn。
@@ -342,25 +345,44 @@ func (a *API) ListShareRecursive(ctx context.Context, shareID string) ([]FileMet
 
 // walkShareFolder 递归展开分享目录树：分页拉取 + 子目录递归，结果追加到 out。
 func (a *API) walkShareFolder(ctx context.Context, shareID, pid string, out *[]FileMeta) error {
+	return a.walkShareFolderDepth(ctx, shareID, pid, out, 0)
+}
+
+// walkShareFolderDepth 带**深度上限**的递归（P2：原无限递归在服务端目录自环时会栈溢出/
+// 死循环占死任务；List 已有 pikpakMaxListPages 但 walk 无）。
+func (a *API) walkShareFolderDepth(ctx context.Context, shareID, pid string, out *[]FileMeta, depth int) error {
+	if depth > pikpakMaxWalkDepth {
+		return fmt.Errorf("pikpak: 分享目录递归超过上限 %d（疑似自环）", pikpakMaxWalkDepth)
+	}
 	pageToken := ""
-	for {
+	for pages := 0; pages < pikpakMaxListPages; pages++ {
 		files, next, err := a.ShareDetail(ctx, shareID, pid, pageToken)
 		if err != nil {
 			return err
 		}
-		for i := range files {
-			*out = append(*out, files[i])
-			if files[i].Kind == "drive#folder" {
-				if err := a.walkShareFolder(ctx, shareID, files[i].ID, out); err != nil {
-					return err
-				}
-			}
+		if aerr := a.appendShareFiles(ctx, shareID, files, out, depth); aerr != nil {
+			return aerr
 		}
 		if next == "" {
 			return nil
 		}
 		pageToken = next
 	}
+	return fmt.Errorf("pikpak: 分享目录分页超过上限 %d（疑似 page_token 回环）", pikpakMaxListPages)
+}
+
+// appendShareFiles 追加一页条目并对子目录递归（抽出以降低 walkShareFolderDepth 复杂度）。
+func (a *API) appendShareFiles(ctx context.Context, shareID string, files []FileMeta, out *[]FileMeta, depth int) error {
+	for i := range files {
+		*out = append(*out, files[i])
+		if files[i].Kind != "drive#folder" {
+			continue
+		}
+		if err := a.walkShareFolderDepth(ctx, shareID, files[i].ID, out, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // FindInDrive 在网盘（递归）里找匹配名字/大小的文件，返回 FileMeta。
