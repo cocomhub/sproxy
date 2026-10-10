@@ -96,9 +96,17 @@ BuildAt: 2026-06-01T12:00:00Z
 
 | 项 | 内容 |
 |---|---|
-| 查询参数 | `filename` |
+| 查询参数 | `filename`；可选 `ciphertext=1` |
 | 响应头 | `X-File-Checksum`、`X-File-MTime`、`Accept-Ranges: bytes`、`Content-Disposition` |
 | Range 支持 | 是（返回 206 + `Content-Range`） |
+
+**`ciphertext=1`**：at-rest 加密卷（`volumes[].extra.encrypt`）默认返回**明文**（加密只在
+存储层，用户访问恒见明文）；带此参数时返回**存储原样密文**（不解密），`Range`/`Content-Length`
+按密文坐标——供备份/迁移/带外校验。非加密卷该参数无副作用（原始字节 == 明文）。
+密文响应不附 `X-File-Checksum`（台账描述明文，不适用于密文）。
+
+> 适用范围：`ciphertext=1` 仅对**卷根 at-rest 加密**（`storage.Root` 加密态）生效。
+> secretdata 保密卷 / 302 直链（B 态外部卷）分支不支持该参数（仍返回解密/直链内容）。
 
 | 状态码 | 含义 |
 |---|---|
@@ -354,6 +362,9 @@ JSON body 批量形态（body 存在且 `files` 非空时优先）：
 ### GET /download/chunk?filename=&offset=&length=
 
 自定义分块下载端点。响应头包含 `Content-Range`、`X-Chunk-Checksum`。
+
+支持与 `GET /download` 同名的 `ciphertext=1`：at-rest 加密卷按**密文坐标**
+（`offset`/`length`/`size` 均为密文字节）返回存储原样字节；缺省返回明文。
 
 > 推荐：标准 `GET /download` + `Range: bytes=` 与本端点等价，且更易穿越 CDN。
 > 本端点保留以维持向后兼容、支持 SHA-256 单块校验场景。

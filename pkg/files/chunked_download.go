@@ -194,7 +194,9 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
 	root := dp.Tenant.Root()
-	encrypted := root.IsEncrypted()
+	// 显式请求密文（?ciphertext=1）时按原始字节走「非加密」分块路径（offset/length/size
+	// 均为密文坐标，与存量 meta sidecar 口径一致）；否则加密卷走解密流。
+	encrypted := root.IsEncrypted() && !dp.Ciphertext
 	file, fcloser, ok := s.openChunkSource(w, root, dp, encrypted, offset)
 	if !ok {
 		return

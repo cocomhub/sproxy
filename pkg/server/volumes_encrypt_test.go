@@ -81,6 +81,27 @@ func TestVolumesEncrypt_RoundTrip(t *testing.T) {
 	if bytes.Contains(raw, []byte("top secret")) {
 		t.Fatalf("密文不应含明文")
 	}
+	// 显式请求密文（?ciphertext=1）：返回存储原样字节（== 磁盘上的密文），ContentLength 正确。
+	req2, _ := http.NewRequest(http.MethodGet, baseURL+"/download?filename=sec.txt&ciphertext=1", nil)
+	signRequest(req2, testAccessKey, testAccessSecret)
+	resp2, err2 := http.DefaultClient.Do(req2)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("ciphertext download = %d", resp2.StatusCode)
+	}
+	enc, eerr := io.ReadAll(resp2.Body)
+	if eerr != nil {
+		t.Fatalf("读取密文响应失败: %v", eerr)
+	}
+	if !bytes.Equal(enc, raw) {
+		t.Fatalf("ciphertext=1 应返回磁盘原样密文（len got=%d want=%d）", len(enc), len(raw))
+	}
+	if resp2.ContentLength >= 0 && resp2.ContentLength != int64(len(enc)) {
+		t.Fatalf("密文 ContentLength=%d body=%d", resp2.ContentLength, len(enc))
+	}
 }
 
 // TestVolumesEncrypt_MissingKey 无 key → fail-closed。
@@ -146,5 +167,59 @@ func TestVolumesEncrypt_ChunkedDownload(t *testing.T) {
 	}
 	if !bytes.Equal(assembled, payload) {
 		t.Fatalf("重组明文不匹配: got %d bytes want %d", len(assembled), len(payload))
+	}
+}
+
+// TestVolumesEncrypt_ChunkedCiphertext 显式请求密文分块（?ciphertext=1）：offset/length
+// 按密文坐标，返回存储原样字节。
+func TestVolumesEncrypt_ChunkedCiphertext(t *testing.T) {
+	t.Parallel()
+	keyFile := filepath.Join(t.TempDir(), "vol.key")
+	if err := os.WriteFile(keyFile, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	volRoot := filepath.Join(t.TempDir(), "vol")
+	_ = os.MkdirAll(volRoot, 0o755)
+	baseURL, _, cleanup := newTestServerCreds(t, func(cfg *Config) {
+		cfg.Volumes = []VolumeConfig{{
+			Name: "enc", Type: "local", Root: volRoot,
+			Extra: map[string]any{"encrypt": true, "encrypt_key_file": keyFile},
+		}}
+		cfg.Volumes[0].Name = "enc"
+	})
+	defer cleanup()
+
+	payload := bytes.Repeat([]byte("enc-chunk-ct!"), 1024)
+	if st := uploadFileSigned(t, baseURL, "ct.bin", payload); st != 200 {
+		t.Fatalf("upload = %d", st)
+	}
+	var raw []byte
+	_ = filepath.WalkDir(volRoot, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Base(p) == "ct.bin" {
+			raw, _ = os.ReadFile(p)
+		}
+		return nil
+	})
+	if len(raw) == 0 {
+		t.Fatal("未找到加密文件")
+	}
+	// 密文分块：offset=0..N，返回 raw 前缀。
+	req, _ := http.NewRequest(http.MethodGet,
+		fmt.Sprintf("%s/download/chunk?filename=ct.bin&offset=0&length=%d&ciphertext=1", baseURL, 1024), nil)
+	signRequest(req, testAccessKey, testAccessSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ciphertext chunk = %d", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, raw[:1024]) {
+		t.Fatalf("ciphertext chunk 应与磁盘密文前缀一致: got %d bytes, want %d", len(got), 1024)
+	}
+	if bytes.Contains(got, []byte("enc-chunk-ct!")) {
+		t.Fatal("密文分块不应含明文")
 	}
 }

@@ -304,6 +304,11 @@ func (s *Service) OpenPath(ctx context.Context, dp DownloadPath) (OpenedFile, er
 	if info.IsDir() {
 		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}
 	}
+	// 显式请求密文（?ciphertext=1）：at-rest 加密卷返回**存储原样**字节（不解密）——
+	// 加密只在存储层，用户常规访问恒为明文；此开关供备份/迁移/带外校验。
+	if dp.Ciphertext && dp.Tenant.Root().IsEncrypted() {
+		return s.openCiphertext(dp, info)
+	}
 	file, err := dp.Tenant.Root().OpenDecrypted(dp.Rel)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -333,6 +338,21 @@ func (s *Service) OpenPath(ctx context.Context, dp DownloadPath) (OpenedFile, er
 	out := OpenedFile{File: file, Info: info}
 	s.attachChecksum(dp, file, &out)
 	return out, nil
+}
+
+// openCiphertext 打开 at-rest 加密卷的**存储原样**字节（?ciphertext=1，不解密）——
+// info 为上方 raw Stat（真实密文大小，raw *os.File 原生可 Seek，Range/Content-Length 正确）；
+// 不接明文的 meta 校验与 checksum 台账（那份描述明文，不适用于密文响应）。
+func (s *Service) openCiphertext(dp DownloadPath, info os.FileInfo) (OpenedFile, error) {
+	raw, oerr := dp.Tenant.Root().Open(dp.Rel)
+	if oerr != nil {
+		if os.IsNotExist(oerr) {
+			return OpenedFile{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		}
+		s.rt.logger().Error("打开密文文件失败", "file_name", dp.Filename, "error", oerr.Error())
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
+	}
+	return OpenedFile{File: raw, Info: info}, nil
 }
 
 // attachChecksum 为 OpenedFile 填充 SHA-256 checksum（台账命中或实时计算，零额外 I/O）。
