@@ -12,7 +12,8 @@
 // （HTTP 上传、云转存、同步 push、备份、服务端 Copy/Move）都被同一卷级计数器拦截，
 // 从而保证「所有用户在该卷的占用之和 ≤ 卷限额」。装配层配置卷用 `PoolCounter`
 // （复用卷容量 `quota.Pool`，与路由/指标同源）；用户卷用持久化 `VolumeCapacityCounter`
-// （`<root>/<owner>/meta/volume/<name>.capacity.json`，重启恢复）。
+// （`<root>/<owner>/meta/volume/<name>.capacity`——**非 .json**，避开 UserVolumeStore
+// 的 *.json 扫描；重启恢复）。
 //
 // 组件：
 //   - Counter：卷级计数抽象（TryAdd/Release/Used/Capacity）。

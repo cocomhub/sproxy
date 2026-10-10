@@ -80,13 +80,24 @@ func NewSet(
 	if external == nil {
 		external = map[string]ExternalBackend{}
 	}
+	// 默认外部卷按**声明序**确定（首个有 external 句柄的卷）——NewSet 生产构造路径
+	// 不能留空 firstExternal，否则 DefaultExternal 回落到 map 随机迭代序，同一进程内
+	// 多次调用结果不一致（违装配序确定性契约；P2 对抗评审）。
+	firstExternal := ""
+	for _, v := range volumes {
+		if _, ok := external[v.Name]; ok {
+			firstExternal = v.Name
+			break
+		}
+	}
 	return &Set{
-		volumes:     volumes,
-		roots:       roots,
-		external:    external,
-		pools:       pools,
-		defaultName: defaultName,
-		caches:      map[string]*storage.TenantCache{},
+		volumes:       volumes,
+		roots:         roots,
+		external:      external,
+		pools:         pools,
+		defaultName:   defaultName,
+		firstExternal: firstExternal,
+		caches:        map[string]*storage.TenantCache{},
 	}
 }
 
@@ -141,8 +152,9 @@ func (vs *Set) DefaultExternal() ExternalBackend {
 			return be
 		}
 	}
-	for _, be := range vs.external {
-		if be != nil {
+	// 声明序重算（确定性；AddExternalVolume 会 append 到 volumes，故覆盖全部已登记卷）。
+	for _, v := range vs.volumes {
+		if be := vs.external[v.Name]; be != nil {
 			return be
 		}
 	}

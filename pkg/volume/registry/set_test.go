@@ -502,3 +502,24 @@ func TestResolveURL_S3ProtocolRegistered(t *testing.T) {
 	}
 	rc.Close()
 }
+
+// TestNewSet_DefaultExternalDeclarationOrder P2 回归：生产构造路径（NewSet 传入已填充的
+// external map）必须把 firstExternal 初始化为**声明序首个**外部卷，不得留空使
+// DefaultExternal 回落到 map 随机迭代序（同一进程内多次调用结果不一致）。
+func TestNewSet_DefaultExternalDeclarationOrder(t *testing.T) {
+	t.Parallel()
+	ext := map[string]ExternalBackend{
+		"b": &fakeURLBackend{},
+		"a": &fakeURLBackend{},
+	}
+	vs := NewSet([]volume.Volume{{Name: "a"}, {Name: "b"}}, nil, ext, nil, "a")
+	first := vs.DefaultExternal()
+	if first == nil || first != ext["a"] {
+		t.Fatalf("NewSet 应把 firstExternal 初始化为声明序首个外部卷 a, got %v", first)
+	}
+	for i := 0; i < 20; i++ {
+		if vs.DefaultExternal() != first {
+			t.Fatal("DefaultExternal 必须恒返回同一卷（确定性）")
+		}
+	}
+}

@@ -63,6 +63,12 @@ func (g *MetaBucketGuard) guardPath(p string) error {
 	if p == "" {
 		return nil // 桶根/空路径不触达 meta
 	}
+	// 拒绝反斜杠/NUL（Windows 分隔符绕过：guardPath 只按 "/" 切段，而 inner
+	// LocalFS 在 Windows 上会把 "\\" 归一为 "/" 再 path.Clean——`user\..\meta\x`
+	// 会绕过桶判定落到 meta 桶。fail-closed 拒绝，不依赖调用方归一；P2 对抗评审）。
+	if strings.ContainsAny(p, "\\\x00") {
+		return fmt.Errorf("trusted: 路径含非法字符（反斜杠/NUL）: %q", p)
+	}
 	if strings.HasPrefix(p, "/") {
 		return fmt.Errorf("trusted: 路径不得为绝对路径: %q", p)
 	}

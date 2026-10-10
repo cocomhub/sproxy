@@ -94,12 +94,15 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	defer be.Close()
-	fs := trusted.Guard(be.FS())
-	if fs == nil {
+	raw := be.FS()
+	if raw == nil {
 		http.Error(w, "后端无文件视图", http.StatusInternalServerError)
 		return
 	}
-	if _, err := fs.Stat(r.Context(), path); err != nil {
+	fs := trusted.Guard(raw)
+	// 全仓 Stat 契约为「不存在返回 (nil, nil)」——必须判 e == nil（旧实现只看 err==nil，
+	// 对象不存在也回 200 registered = 假确认；P2 对抗评审）。
+	if e, err := fs.Stat(r.Context(), path); err != nil || e == nil {
 		http.Error(w, "对象不存在（直传未完成或路径错误）", http.StatusNotFound)
 		return
 	}

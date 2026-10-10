@@ -198,6 +198,11 @@ type Handlers struct {
 	// 本地暂存独立记账，不与网盘 owner_quotas 混用——外部卷 WriteFile 先预留本地字节）。
 	// 上限 = trusted_volume.staging_quota_bytes；0 = 不限制但记账。tenantMu 保护。
 	stagingScopes map[string]*quota.Scope
+	// stagingTrackers 按 owner 缓存 staging 等待队列（quota.StagingTracker，含 sync.Cond）。
+	// **必须复用同一实例**：每请求新建 tracker 会产生各自独立的 cond，其它请求的
+	// ReleaseUsage 广播无法唤醒等待者（只能干等满 deadline，甚至误报「空间不足」；
+	// P2 对抗评审）。tenantMu 保护。
+	stagingTrackers map[string]*quota.StagingTracker
 	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
 	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
 	archiveUsage map[string]map[string]int64
@@ -811,7 +816,18 @@ func (h *Handlers) stagingQuotaTrackerFor(owner string) syncpkg.StagingQuotaTrac
 	if sc == nil {
 		return nil
 	}
-	return quota.NewStagingTracker(sc)
+	// 按 owner 复用同一 tracker（含 cond）——跨请求 ReleaseUsage 广播才能唤醒等待者。
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.stagingTrackers == nil {
+		h.stagingTrackers = make(map[string]*quota.StagingTracker)
+	}
+	if t, ok := h.stagingTrackers[owner]; ok {
+		return t
+	}
+	t := quota.NewStagingTracker(sc)
+	h.stagingTrackers[owner] = t
+	return t
 }
 
 // bwBucketFor 返回 owner 的带宽令牌桶（懒建缓存；限速关闭/无速率时 nil = 不限速）。

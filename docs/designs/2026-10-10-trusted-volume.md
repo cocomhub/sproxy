@@ -107,7 +107,10 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 
 - `FileMeta.Signature` 为预留字段（当前不写/不校验）——信任根由「meta 桶用户不可达 + 写路径独占」提供；启用完整 HMAC 需服务级签名密钥 + 全部写路径签名 + 读路径恒时校验。
 - 整文件读回型交叉校验（并发覆盖错位检测）**仅本地卷执行**——远端卷回读 = 一次全量下载，成本不可接受；远端并发覆盖窗口由写路径独占 + 读路径校验兜底。
-- `BucketOf` 桶名判定大小写敏感：大小写不敏感文件系统上 `META/...` 不被识别为 meta 桶（纵深防御缺口，当前无用户可控路径构造该键）。
+- `BucketOf` 桶名判定**已大小写不敏感（2026-10-10 修复）**：`IsReservedBucketName` 用
+  `EqualFold`、`BucketOf/RebucketTo` 统一归一小写，`META/`、`Meta/` 等变体均被识别为 meta
+  桶并拒绝（`guard_fs_test.go` 已断言）。**残余**：Windows 反斜杠分隔符需 `guardPath`
+  先归一（当前 in-tree 调用方均先经 `storage.NormalizeRemote`，纵深防御缺口，已记档）。
 - 崩溃恢复（统一恢复协调器 / staging 本地 meta 校验续传）为后续专题，见 `docs/archive/architecture-task-recovery.md`。
 
 ## 9. 验证

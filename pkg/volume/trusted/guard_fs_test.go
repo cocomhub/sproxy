@@ -107,7 +107,7 @@ func TestGuard_PathNormalizationDenied(t *testing.T) {
 	t.Parallel()
 	g := Guard(newInner(t))
 	ctx := context.Background()
-	for _, p := range []string{"user/../meta/creds.json", "alice/user/../meta/sidecar.meta", "/meta/x", "user//x", "META/creds.json", "alice/META/sidecar.meta", "Meta/x"} {
+	for _, p := range []string{"user/../meta/creds.json", "alice/user/../meta/sidecar.meta", "/meta/x", "user//x", "META/creds.json", "alice/META/sidecar.meta", "Meta/x", `user\..\meta\creds.json`, `alice\user\meta\x`} {
 		if _, err := g.Stat(ctx, p); err == nil {
 			t.Fatalf("路径 %q 应拒绝（归一/逃逸）", p)
 		}
