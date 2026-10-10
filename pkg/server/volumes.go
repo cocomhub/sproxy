@@ -614,27 +614,16 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 // stagingQuotaFS 是外部卷 FS 的**本地 staging 配额统一接线**（用户裁定 2026-10-10：
 // 全部外部卷强制本地配额——独立 staging Scope，写前预留/写后释放防本地磁盘打满；
 // 不需要 staging 或只占部分空间的卷**显式实现 StagingQuotaExempt** 才豁免；以
-// **per-instance** 状态自行接管的卷实现 StagingQuotaCapable（不得是共享单例；
-// baidupcs 已改为走下方 per-request gate 包装）。机制化保证：新卷未实现任何接口 →
-// 默认被 StagingQuotaGateFS 强制预留（fail-safe 宁多勿漏，不依赖实现者自觉）。
+// **per-instance** 状态自行接管的卷实现 StagingQuotaCapable（不得是共享单例）。
+// 机制化保证：新卷未实现任何接口 → 默认被 StagingQuotaGateFS 强制预留（fail-safe
+// 宁多勿漏，不依赖实现者自觉）。
+//
+// **判据下沉到最内层原始卷**（syncpkg.ApplyStagingQuota）——fs 恒为 trusted 装饰链
+// （Guard/Wrap/CapacityFS 都会无条件下回显可选能力接口），直接对 fs 做类型断言会恒真
+// 而误判「自管」，使默认 gate 分支永不执行（P0-1）。
 // 无 globalPool（未装配配额）→ 直通（零回归）。
 func (h *Handlers) stagingQuotaFS(owner string, fs syncpkg.FS) syncpkg.FS {
-	// 显式豁免（流式直传不落本地盘，如 s3）：跳过 gate。
-	if ex, ok := fs.(syncpkg.StagingQuotaExempt); ok && ex.ExemptStagingQuota() {
-		return fs
-	}
-	q := h.stagingQuotaTrackerFor(owner)
-	if q == nil {
-		return fs // 无独立 staging 配额能力：直通（零回归）
-	}
-	// 自管（卷以 per-instance 状态接管；实现方不得是共享单例——baidupcs 已改走 gate）：
-	// 注入后不包 gate。
-	if sc, ok := fs.(syncpkg.StagingQuotaCapable); ok {
-		sc.WithStagingQuota(q)
-		return fs
-	}
-	// 默认强制 gate：写前预留、写后释放。
-	return syncpkg.WrapStagingQuota(fs, q)
+	return syncpkg.ApplyStagingQuota(fs, h.stagingQuotaTrackerFor(owner))
 }
 
 // trustedWrapOpts 装配可信卷装饰器配置（C-MAJOR-4：ChunkSize 从 trusted_volume

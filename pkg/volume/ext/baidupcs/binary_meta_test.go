@@ -203,3 +203,56 @@ func TestBinaryAdapter_List_Fallback(t *testing.T) {
 		t.Fatalf("回退列表不符: %+v", got)
 	}
 }
+
+// ---- P0-2 回归：BaiduPCS-Go 失败时退出码恒 0、错误进 stdout，且 meta 块头先打印 ----
+
+const metaOutputCLIError = `[0] - [/不存在] --------------
+
+文件不存在
+remote path is not absolute
+`
+
+const listOutputCLIError = `帐号未登录
+`
+
+const listOutputEmptyDir = `
+当前目录: /empty
+----
+  #     文件大小         修改日期                                     文件(目录)
+----
+`
+
+// TestParseBinaryMeta_CLIErrorNoFabrication CLI 失败不得伪造「存在」的元信息。
+func TestParseBinaryMeta_CLIErrorNoFabrication(t *testing.T) {
+	t.Parallel()
+	m, err := parseBinaryMeta([]byte(metaOutputCLIError), "/不存在")
+	if err == nil {
+		t.Fatalf("CLI 失败应返回 error（不得伪造 ObjectMeta：%+v）", m)
+	}
+}
+
+// TestParseBinaryList_CLIErrorReturnsError 无目录头也无条目 → 视为 CLI 失败（非空目录）。
+func TestParseBinaryList_CLIErrorReturnsError(t *testing.T) {
+	t.Parallel()
+	if _, err := parseBinaryList([]byte(listOutputCLIError)); err == nil {
+		t.Fatal("CLI 失败输出应返回 error（不得当空目录）")
+	}
+}
+
+// TestParseBinaryList_EmptyDirOK 真空目录（含目录头）仍应成功返回 0 条目。
+func TestParseBinaryList_EmptyDirOK(t *testing.T) {
+	t.Parallel()
+	es, err := parseBinaryList([]byte(listOutputEmptyDir))
+	if err != nil || len(es) != 0 {
+		t.Fatalf("空目录应 0 条目且无错: n=%d err=%v", len(es), err)
+	}
+}
+
+// TestParseBinaryMeta_SingleBlockDifferentPathRejected 唯一块键与请求不同（CLI glob 展开成
+// 别的对象）时不得改写采用。
+func TestParseBinaryMeta_SingleBlockDifferentPathRejected(t *testing.T) {
+	t.Parallel()
+	if _, err := parseBinaryMeta([]byte(metaOutputFile), "/other.tgz"); err == nil {
+		t.Fatal("块键不匹配时不应采用（防取到别的对象元信息）")
+	}
+}

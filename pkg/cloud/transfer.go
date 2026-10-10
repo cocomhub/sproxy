@@ -824,23 +824,12 @@ func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
 
 // stagingQuotaWrap 按 owner 给转存目标 FS 强制接本地 staging 配额（用户裁定
 // 2026-10-10）：外部卷转存写本地暂存统一过独立 staging 配额（防本地磁盘打满）。
-// 目标 FS 显式 Exempt（流式直传如 s3）→ 跳过；per-instance 自管（StagingQuotaCapable，
-// 不得是共享单例）→ 注入后不包；baidupcs 已改为走下方 gate（per-request 包装）→ 包门卫。
+// 判据下沉到最内层原始卷（syncpkg.ApplyStagingQuota）——fs 恒为 trusted 装饰链，
+// 直接类型断言会恒真而误判自管（P0-1）。
 // 无 stagingQuotaFor（未装配独立配额）→ 直通（零回归）。
 func (m *CloudDownloadManager) stagingQuotaWrap(owner string, fs syncpkg.FS) syncpkg.FS {
 	if m.stagingQuotaFor == nil {
 		return fs
 	}
-	if ex, ok := fs.(syncpkg.StagingQuotaExempt); ok && ex.ExemptStagingQuota() {
-		return fs // 显式豁免：流式直传不落本地盘，不包 gate
-	}
-	q := m.stagingQuotaFor(owner)
-	if q == nil {
-		return fs // 该 owner 无独立 staging 配额：直通
-	}
-	if sc, ok := fs.(syncpkg.StagingQuotaCapable); ok {
-		sc.WithStagingQuota(q) // 自管：注入后内部接管
-		return fs
-	}
-	return syncpkg.WrapStagingQuota(fs, q) // 默认强制 gate
+	return syncpkg.ApplyStagingQuota(fs, m.stagingQuotaFor(owner))
 }

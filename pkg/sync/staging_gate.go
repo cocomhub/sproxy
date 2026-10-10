@@ -20,6 +20,59 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 )
 
+// innerFS 是**透明装饰器**（暴露被包装内层 FS 的包装层，如 trusted 的 Guard/Wrap、
+// capacity.CapacityFS、本包的 StagingQuotaGateFS）的统一标记。Innermost 据此逐层下探，
+// 使「卷自身能力」（豁免/自管）的判定不被转发层污染。
+type innerFS interface{ Inner() FS }
+
+// Innermost 逐层剥去透明装饰器，返回**最内层原始 FS**（无限/自环防御）。
+// 能力探测必须用它：装饰器会无条件回显可选能力接口（透传契约），直接对装饰层做类型
+// 断言会恒真，从而击穿「默认强制 gate」等分支（P0：staging 配额门卫恒被跳过）。
+func Innermost(fs FS) FS {
+	for {
+		u, ok := fs.(innerFS)
+		if !ok {
+			return fs
+		}
+		nxt := u.Inner()
+		if nxt == nil || nxt == fs {
+			return fs
+		}
+		fs = nxt
+	}
+}
+
+// StagingQuotaExempted 报告**最内层原始卷**是否显式豁免本地 staging 记账。
+func StagingQuotaExempted(fs FS) bool {
+	if ex, ok := Innermost(fs).(StagingQuotaExempt); ok {
+		return ex.ExemptStagingQuota()
+	}
+	return false
+}
+
+// ApplyStagingQuota 按用户裁定（2026-10-10）对任意 FS 施加本地 staging 配额：
+//   - 最内层原始卷显式豁免（StagingQuotaExempt）→ 原样返回；
+//   - 最内层原始卷自管（StagingQuotaCapable）→ 经外层透明转发注入句柄后原样返回；
+//   - 否则包 StagingQuotaGateFS 强制预留/释放（fail-safe：新卷未实现也不漏）。
+//
+// q == nil（未装配独立 staging 配额）→ 原样返回（零回归）。
+// **判据一律基于 Innermost(fs)**：直接对 `fs` 做断言会被装饰器透传接口恒真击穿。
+func ApplyStagingQuota(fs FS, q StagingQuotaTracker) FS {
+	if StagingQuotaExempted(fs) {
+		return fs
+	}
+	if q == nil {
+		return fs
+	}
+	if _, ok := Innermost(fs).(StagingQuotaCapable); ok {
+		if sc, ok := fs.(StagingQuotaCapable); ok {
+			sc.WithStagingQuota(q) // 外层透传至最内层自管卷
+		}
+		return fs
+	}
+	return WrapStagingQuota(fs, q)
+}
+
 // StagingQuotaGateFS 包装任意 FS 的本地 staging 配额门卫：WriteFile 前经
 // StagingQuotaTracker.ReserveUsage(size) 预留、写后 ReleaseUsage——本地磁盘防打满。
 // 所有 FS 方法透明委派 inner（gate 只拦截写路径）。
@@ -35,6 +88,10 @@ func WrapStagingQuota(fs FS, q StagingQuotaTracker) *StagingQuotaGateFS {
 }
 
 var _ FS = (*StagingQuotaGateFS)(nil)
+
+// Inner 返回底层 FS（透明装饰器标记：使 Innermost/Wrap 能下探，避免把本转发层误判为
+// 「卷自带 meta/能力」——P0 同源缺陷的纵深防御）。
+func (g *StagingQuotaGateFS) Inner() FS { return g.inner }
 
 func (g *StagingQuotaGateFS) ListDir(ctx context.Context, path string) ([]Entry, error) {
 	return g.inner.ListDir(ctx, path)

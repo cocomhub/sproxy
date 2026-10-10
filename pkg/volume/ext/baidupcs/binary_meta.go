@@ -166,26 +166,35 @@ func parseBinaryMeta(out []byte, want string) (*ObjectMeta, error) {
 	if m, ok := blocks[want]; ok {
 		return m, nil
 	}
+	// CLI 可能对路径做归一（去尾斜杠等）：仅当唯一块的键**归一后等于 want** 才采用，
+	// 避免路径含通配符时把「被展开成另一对象」的元信息当成目标（EXT-3）。
 	if len(blocks) == 1 {
-		for _, m := range blocks {
-			m.Key = want
-			return m, nil
+		for k, m := range blocks {
+			if path.Clean(k) == path.Clean(want) {
+				m.Key = want
+				return m, nil
+			}
 		}
 	}
 	return nil, fmt.Errorf("baidupcs: 无法解析 meta 输出（路径 %q）", want)
 }
 
 // parseBinaryMetaBlocks 解析多路径 `meta` 输出为 path → ObjectMeta。
+// **只有含至少一个真实字段的块才入结果**：BaituPCS-Go 在 API 失败时先打印块头再
+// `fmt.Println(err); return`（错误进 stdout、退出码恒 0），仅凭块头建出的「全零
+// ObjectMeta」会让 Stat 对不存在对象返回存在（P0-2）。
 func parseBinaryMetaBlocks(out []byte) map[string]*ObjectMeta {
 	res := map[string]*ObjectMeta{}
 	var cur *ObjectMeta
 	var curPath string
+	curHasData := false
 	flush := func() {
-		if cur != nil {
+		if cur != nil && curHasData {
 			cur.Key = curPath
 			res[curPath] = cur
-			cur = nil
 		}
+		cur = nil
+		curHasData = false
 	}
 	for line := range strings.SplitSeq(string(out), "\n") {
 		if mm := binaryMetaHeader.FindStringSubmatch(line); mm != nil {
@@ -197,68 +206,96 @@ func parseBinaryMetaBlocks(out []byte) map[string]*ObjectMeta {
 		if cur == nil {
 			continue
 		}
-		applyBinaryMetaLine(cur, line)
+		if applyBinaryMetaLine(cur, line) {
+			curHasData = true
+		}
 	}
 	flush()
 	return res
 }
 
-// applyBinaryMetaLine 把一行 `key  value...` 应用到 ObjectMeta。
-func applyBinaryMetaLine(m *ObjectMeta, line string) {
+// applyBinaryMetaLine 把一行 `key  value...` 应用到 ObjectMeta；返回是否识别到已知字段。
+func applyBinaryMetaLine(m *ObjectMeta, line string) bool {
 	fields := strings.Fields(strings.TrimSpace(line))
 	if len(fields) < 2 {
-		return
+		return false
 	}
 	label, val := fields[0], fields[1:]
 	switch {
 	case strings.HasPrefix(label, "类型"):
 		m.IsDir = strings.Contains(strings.Join(val, ""), "目录")
+		return true
 	case label == "文件大小":
 		raw := strings.TrimSuffix(strings.ReplaceAll(val[0], ",", ""), ",")
 		if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			m.Size = n
 		}
+		return true
 	case strings.HasPrefix(label, "md5"):
 		if last := val[len(val)-1]; len(last) == 32 {
 			m.ETag = last
 		}
+		return true
 	case label == "修改日期":
 		if len(val) >= 2 {
 			if ts, err := time.ParseInLocation(binaryModTimeLayout, val[0]+" "+val[1], time.Local); err == nil {
 				m.ModTime = ts
 			}
 		}
+		return true
 	}
+	return false
 }
 
 // parseBinaryList 解析 `ls <dir>` 输出为条目（Key=名称、IsDir、近似 Size/mtime）。
 // 表头/分隔线/“总:”汇总行跳过；数据行形如 `<idx> <size> <date> <time> <name...>`。
+// **没有目录头也没有条目 → 视为 CLI 失败（返回 error）**：BaituPCS-Go 失败时错误进
+// stdout、退出码恒 0（P0-2），若静默返回空列表会把「未登录/权限/多通配符」当成空目录。
 func parseBinaryList(out []byte) ([]ObjectMeta, error) {
 	var res []ObjectMeta
+	headerSeen := false
 	for line := range strings.SplitSeq(string(out), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 5 {
-			continue
+		e, ok, hdr := parseBinaryListLine(line)
+		if hdr {
+			headerSeen = true
 		}
-		if _, err := strconv.Atoi(fields[0]); err != nil {
-			continue // 表头 / 总行 / 分隔线
+		if ok {
+			res = append(res, e)
 		}
-		name := strings.Join(fields[4:], " ")
-		if name == "" {
-			continue
-		}
-		isDir := strings.HasSuffix(name, "/")
-		name = strings.TrimSuffix(name, "/")
-		entry := ObjectMeta{Key: name, IsDir: isDir}
-		if fields[1] != "-" {
-			entry.Size = parseHumanSize(fields[1])
-		}
-		if ts, err := time.ParseInLocation(binaryModTimeLayout, fields[2]+" "+fields[3], time.Local); err == nil {
-			entry.ModTime = ts
-		}
-		res = append(res, entry)
+	}
+	if len(res) == 0 && !headerSeen {
+		return nil, fmt.Errorf("baidupcs: ls 输出无目录头也无条目（疑似 CLI 失败）")
 	}
 	return res, nil
+}
+
+// parseBinaryListLine 解析 `ls` 输出一行：返回 (条目, 是否为数据行, 是否为目录头)。
+func parseBinaryListLine(line string) (ObjectMeta, bool, bool) {
+	trimmed := strings.TrimSpace(line)
+	if strings.Contains(trimmed, "当前目录") || strings.HasPrefix(trimmed, "#") {
+		return ObjectMeta{}, false, true
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) < 5 {
+		return ObjectMeta{}, false, false
+	}
+	if _, err := strconv.Atoi(fields[0]); err != nil {
+		return ObjectMeta{}, false, false // 表头 / 总行 / 分隔线
+	}
+	name := strings.Join(fields[4:], " ")
+	if name == "" {
+		return ObjectMeta{}, false, false
+	}
+	isDir := strings.HasSuffix(name, "/")
+	name = strings.TrimSuffix(name, "/")
+	entry := ObjectMeta{Key: name, IsDir: isDir}
+	if fields[1] != "-" {
+		entry.Size = parseHumanSize(fields[1])
+	}
+	if ts, err := time.ParseInLocation(binaryModTimeLayout, fields[2]+" "+fields[3], time.Local); err == nil {
+		entry.ModTime = ts
+	}
+	return entry, true, false
 }
 
 // parseHumanSize 解析 `ls` 的近似大小（如 `353.75MB`/`4.49MB`/`123B`）——**仅近似**，

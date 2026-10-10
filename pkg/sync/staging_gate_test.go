@@ -133,3 +133,101 @@ func TestStagingQuotaGate_CapabilityForwarding(t *testing.T) {
 		t.Fatal("gate 应把 WithStagingQuota 转发给 inner")
 	}
 }
+
+// decoratorFS 模拟 trusted.Guard/Wrap 等**透明装饰器**：实现 Inner()，且无条件回显
+// 可选能力（透传契约）——直接对装饰层断言会恒真。ApplyStagingQuota 必须下探最内层。
+type decoratorFS struct {
+	baseFS
+	inner FS
+}
+
+func (d *decoratorFS) Inner() FS { return d.inner }
+func (d *decoratorFS) WithStagingQuota(q StagingQuotaTracker) {
+	if c, ok := d.inner.(StagingQuotaCapable); ok {
+		c.WithStagingQuota(q)
+	}
+}
+func (d *decoratorFS) ExemptStagingQuota() bool {
+	if e, ok := d.inner.(StagingQuotaExempt); ok {
+		return e.ExemptStagingQuota()
+	}
+	return false
+}
+
+// TestInnermost 逐层剥去透明装饰器，返回最内层原始 FS（含自环防御）。
+func TestInnermost(t *testing.T) {
+	t.Parallel()
+	raw := &baseFS{}
+	mid := &decoratorFS{inner: raw}
+	outer := &decoratorFS{inner: mid}
+	if got := Innermost(outer); got != raw {
+		t.Fatalf("Innermost 应剥到 raw, got %T", got)
+	}
+	if got := Innermost(raw); got != raw {
+		t.Fatal("无可剥层应原样返回")
+	}
+	self := &decoratorFS{}
+	self.inner = self // 自环
+	if got := Innermost(self); got != self {
+		t.Fatal("自环应返回自身，不死循环")
+	}
+}
+
+// TestApplyStagingQuota_ProductionShapeWrapsGate 是本轮 P0 回归：生产链 fs 恒为
+// 装饰链（装饰层回显 StagingQuotaCapable），旧判据 `fs.(StagingQuotaCapable)` 恒真 →
+// 从不包 gate。修复后必须下探最内层（raw 无能力）→ 返回 StagingQuotaGateFS 且写触发记账。
+func TestApplyStagingQuota_ProductionShapeWrapsGate(t *testing.T) {
+	t.Parallel()
+	raw := &baseFS{}
+	fs := &decoratorFS{inner: &decoratorFS{inner: raw}} // Guard(Wrap(raw))
+	rq := &recQuota{}
+	out := ApplyStagingQuota(fs, rq)
+	g, ok := out.(*StagingQuotaGateFS)
+	if !ok {
+		t.Fatalf("最内层不自管/不豁免时必须包 gate（P0 回归）, got %T", out)
+	}
+	if err := g.WriteFile(context.Background(), "user/f.bin", strings.NewReader("x"), 5, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if len(rq.reserved) != 1 || len(rq.released) != 1 {
+		t.Fatalf("gate 应预留/释放, reserved=%v released=%v", rq.reserved, rq.released)
+	}
+}
+
+// TestApplyStagingQuota_SelfManaged 最内层自管 → 不包 gate，且句柄经外层透传到最内层。
+func TestApplyStagingQuota_SelfManaged(t *testing.T) {
+	t.Parallel()
+	raw := &capableFS{}
+	fs := &decoratorFS{inner: &decoratorFS{inner: raw}}
+	rq := &recQuota{}
+	out := ApplyStagingQuota(fs, rq)
+	if _, ok := out.(*StagingQuotaGateFS); ok {
+		t.Fatal("最内层自管时不应再包 gate")
+	}
+	if raw.got != rq {
+		t.Fatal("自管句柄应经外层透传注入到最内层")
+	}
+}
+
+// TestApplyStagingQuota_Exempt 最内层显式豁免（s3）→ 原样返回（不包 gate）。
+func TestApplyStagingQuota_Exempt(t *testing.T) {
+	t.Parallel()
+	raw := &exemptFS{}
+	fs := &decoratorFS{inner: &decoratorFS{inner: raw}}
+	out := ApplyStagingQuota(fs, &recQuota{})
+	if _, ok := out.(*StagingQuotaGateFS); ok {
+		t.Fatal("最内层豁免时不应包 gate")
+	}
+	if out != fs {
+		t.Fatal("豁免应原样返回装饰链")
+	}
+}
+
+// TestApplyStagingQuota_NilQuota 无配额 → 原样返回（零回归）。
+func TestApplyStagingQuota_NilQuota(t *testing.T) {
+	t.Parallel()
+	fs := &decoratorFS{inner: &baseFS{}}
+	if out := ApplyStagingQuota(fs, nil); out != fs {
+		t.Fatal("nil quota 应原样返回")
+	}
+}
