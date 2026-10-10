@@ -107,6 +107,21 @@
 | 库兜底（libraryAdapter + refreshByRapidUpload）：秒传刷新用**真实分块 md5 列表**（blockMD5s）→ 命中刚上传块索引 → md5 权威 | 库路径收敛机制（C-C1 修复：原 `RapidUploadNoCheckDir` 只发整文件 md5，>4MB 恒 miss） | 同上（对比结果输出） |
 | 生产默认装配（binaryAdapter 二进制优先 + 库 Fallback）：refreshByRapidUpload **透传 Fallback** 秒传能力 | 默认路径大文件收敛（C-C1 深化，与 metadata() 透传同构） | `TestRefreshByRapidUpload_FallbackBinary`（单测锁定） |
 
+### 7.5 BaiduPCS-Go 元信息子命令（`meta` / `ls`，binary-only 免下载）
+
+> **背景（2026-10-10）**：binary-only 模式（无 BDUSS/库会话）下 `Stat` 此前回退「下载整文件
+> 到本地再 stat+md5」——`Put` 前后各一次全量下载，最坏 ~4× 文件流量。现改为解析 CLI 元信息。
+> **入口（WSL 实测）**：`BaiduPCS-Go meta <path...>`（精确字节 + md5 + mtime + 类型，
+> 支持多路径一次调用）、`BaiduPCS-Go ls <dir>`（单层枚举；size 列为人类可读近似值，
+> 文件条目再批量 `meta` 取精确 size）。解析器：`pkg/volume/ext/baidupcs/binary_meta.go`。
+
+| 行为 | 说明 | 锁定测试 |
+|---|---|---|
+| `meta` 输出字段（类型/文件大小/md5/mtime） | 解析精确字节数（忽略人类可读近似列）与 md5（标签含“可能不正确/截图请打码”变体） | `TestParseBinaryMeta_File` / `_Dir` / `TestParseBinaryMetaBlocks_Two` |
+| `ls` 输出表格 | 枚举名称 + 目录标记 + mtime；size 近似值由批量 `meta` 覆盖 | `TestParseBinaryList` / `TestParseHumanSize` |
+| 二进制失败回退库 adpater / 无兜底 fail-closed（不落回全量下载） | 与既有 binary→library 回退同构 | `TestBinaryAdapter_Meta_Fallback` / `_NoFallback` / `_List_Fallback` |
+| 子 module e2e 测试不被 CI 编译（`//go:build e2e`）→ `make vet-e2e-submodules` 编译门 | 防外部依赖/接口变更后静默腐化 | CI `Test Sub-Modules` job 内 `make vet-e2e-submodules` |
+
 ## 维护指引
 
 - **新增外部依赖**：先在本文档对应分类补条目 + 测试锁定（TDD 红灯 → 实现 → 绿）

@@ -249,7 +249,7 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 |---|---|---|---|
 | `trusted_volume.skip_verify` | bool | `false` | `true` = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；meta 生成与 meta 桶隔离不受影响 |
 | `trusted_volume.chunk_size` | ByteSize | `0` | 分块大小；`0` = 按文件大小自适应（1MiB~32MiB）；小于下界 1MiB 时钳到 1MiB（防百万分块 meta DoS） |
-| `trusted_volume.staging_quota_bytes` | ByteSize | `0` | 本地 staging（上传暂存）每-owner 配额上限；`0` = 不限制但记账。所有外部卷写前预留/写后释放，防本地磁盘被上传暂存打满；s3 流式直传显式豁免、baidupcs 自管 |
+| `trusted_volume.staging_quota_bytes` | ByteSize | `0` | 本地 staging（上传暂存）每-owner 配额上限；`0` = 不限制但记账。**独立记账**（与网盘 `owner_quotas` 分离）但挂在全局池之下——受 `max_storage_bytes` 约束（staging 实占本地盘，防打满）。所有外部卷写前预留/写后释放；s3 流式直传显式豁免、baidupcs 由 per-request 门卫包装记账 |
 
 ### 文件同步（sync.*）
 

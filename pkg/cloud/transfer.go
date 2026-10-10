@@ -824,8 +824,8 @@ func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
 
 // stagingQuotaWrap 按 owner 给转存目标 FS 强制接本地 staging 配额（用户裁定
 // 2026-10-10）：外部卷转存写本地暂存统一过独立 staging 配额（防本地磁盘打满）。
-// 目标 FS 显式 Exempt（流式直传如 s3）→ 跳过；自管（StagingQuotaCapable 如 baidupcs）
-// → 注入后不包；否则 → StagingQuotaGateFS 强制预留（新卷遗漏也 fail-safe）。
+// 目标 FS 显式 Exempt（流式直传如 s3）→ 跳过；per-instance 自管（StagingQuotaCapable，
+// 不得是共享单例）→ 注入后不包；baidupcs 已改为走下方 gate（per-request 包装）→ 包门卫。
 // 无 stagingQuotaFor（未装配独立配额）→ 直通（零回归）。
 func (m *CloudDownloadManager) stagingQuotaWrap(owner string, fs syncpkg.FS) syncpkg.FS {
 	if m.stagingQuotaFor == nil {

@@ -570,7 +570,7 @@ func TestNewBaidupcsBackend_ExtraLocalRootWins(t *testing.T) {
 
 // TestSetupBaidupcsFactory_OwnerScope 验证工厂闭包按任务 owner 装配 per-owner quota：
 // scopeFor(ownerA) 与 scopeFor(ownerB) 各自独立 Scope（配额分桶不串），ownerScope nil
-// （该 owner 无配额）→ 不装配（StorageFS.quota 保持 nil，WriteFile 不受限）。
+// （该 owner 无配额）→ 不包装门卫（WriteFile 不受限）。
 func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
@@ -599,7 +599,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 		t.Fatal("装配 baidupcs 卷应注入工厂")
 	}
 
-	// ownerA 任务 → 工厂 → StorageFS WithQuota(scopeA)。
+	// ownerA 任务 → 工厂 → 返回包了 per-owner staging 门卫的 FS（scopeA）。
 	fsA, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
 	}, "alice")
@@ -617,7 +617,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 		t.Fatalf("scopeB Usage = %d, want 0（bob 配额未受 alice 影响）", got)
 	}
 
-	// ownerB 任务 → 工厂 → StorageFS WithQuota(scopeB)。
+	// ownerB 任务 → 工厂 → 返回包了 per-owner staging 门卫的 FS（scopeB）。
 	fsB, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
 	}, "bob")
@@ -632,7 +632,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 		t.Fatalf("scopeB Usage = %d, want 0（bob 写入成功且释放）", got)
 	}
 
-	// 无配额 owner（无 scopeFor 命中）→ StorageFS.quota nil，WriteFile 不受限。
+	// 无配额 owner（无 scopeFor 命中）→ 不包门卫，WriteFile 不受限。
 	fsC, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
 	}, "carol")

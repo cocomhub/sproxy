@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // TestQuota_ReserveRelease 预留 → 释放 → 用量归零。
@@ -105,9 +107,10 @@ func TestQuota_StagingReserveRelease(t *testing.T) {
 	t.Parallel()
 	fs := newTestStorageFS(t)
 	qt := &fakeQuotaTracker{}
-	fs.WithQuota(qt)
+	// 2026-10-10：staging 配额由 caller 侧 per-request 包装实例记账（卷共享单例不再注入）。
+	g := syncpkg.WrapStagingQuota(fs, qt)
 
-	if err := fs.WriteFile(context.Background(), "f.txt", strings.NewReader("data"), 4, 0); err != nil {
+	if err := g.WriteFile(context.Background(), "f.txt", strings.NewReader("data"), 4, 0); err != nil {
 		t.Fatal(err)
 	}
 	if qt.reserved.Load() != 4 {
@@ -123,9 +126,9 @@ func TestQuota_ReserveFail_Aborts(t *testing.T) {
 	fs := newTestStorageFS(t)
 	qt := &fakeQuotaTracker{}
 	qt.failRes.Store(true)
-	fs.WithQuota(qt)
+	g := syncpkg.WrapStagingQuota(fs, qt)
 
-	err := fs.WriteFile(context.Background(), "f.txt", strings.NewReader("data"), 4, 0)
+	err := g.WriteFile(context.Background(), "f.txt", strings.NewReader("data"), 4, 0)
 	if err == nil {
 		t.Fatal("ReserveUsage 失败时 WriteFile 应报错")
 	}
@@ -133,16 +136,20 @@ func TestQuota_ReserveFail_Aborts(t *testing.T) {
 	if qt.reserved.Load() != 0 || qt.released.Load() != 0 {
 		t.Fatalf("reserve fail 后不应有记账: reserved=%d released=%d", qt.reserved.Load(), qt.released.Load())
 	}
+	// 预留失败 = 未落本地 staging（网盘不应出现该文件）。
+	if e, serr := fs.Stat(context.Background(), "f.txt"); serr != nil || e != nil {
+		t.Fatalf("预留失败不应上传, got e=%+v err=%v", e, serr)
+	}
 }
 
-// 变异验证：去掉 WriteFile 的 quota 释放 → 本测试应红。
+// 变异验证：去掉 gate 的 quota 释放 → 本测试应红。
 func TestSyncFS_WriteFile_Quota_Tracked(t *testing.T) {
 	t.Parallel()
 	fs := newTestStorageFS(t)
 	qt := &fakeQuotaTracker{}
-	fs.WithQuota(qt)
+	g := syncpkg.WrapStagingQuota(fs, qt)
 
-	if err := fs.WriteFile(context.Background(), "a/b.txt", strings.NewReader("hello"), 5, 0); err != nil {
+	if err := g.WriteFile(context.Background(), "a/b.txt", strings.NewReader("hello"), 5, 0); err != nil {
 		t.Fatal(err)
 	}
 	if qt.released.Load() != 5 {

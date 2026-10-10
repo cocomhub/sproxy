@@ -1,0 +1,205 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package baidupcs
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// 以下夹具为 WSL 实测（BaiduPCS-Go v4.0.1，2026-10-10）的真实输出。
+const metaOutputFile = `[0] - [/downList.tgz] --------------
+
+  类型              文件                              
+  文件路径          /downList.tgz                     
+  文件名称          downList.tgz                      
+  文件大小          4712617, 4.494302MB               
+  md5 (可能不正确)  b69d50218b268594bae4161264c45252  
+  app_id            250528                            
+  fs_id             775970150298282                   
+  创建日期          2026-08-21 15:06:04               
+  修改日期          2026-08-21 15:06:04               
+`
+
+const metaOutputDir = `[0] - [/我的资源] --------------
+
+  类型            目录                 
+  目录路径        /我的资源            
+  目录名称        我的资源             
+  app_id          250528               
+  fs_id           799581621227860      
+  创建日期        2017-10-05 16:06:27  
+  修改日期        2026-01-04 10:51:37  
+  是否含有子目录  true                 
+`
+
+const metaOutputTwo = `[0] - [/downList.tgz] --------------
+
+  类型              文件                              
+  文件大小          4712617, 4.494302MB               
+  md5 (可能不正确)  b69d50218b268594bae4161264c45252  
+  修改日期          2026-08-21 15:06:04               
+
+[1] - [/test.cocoma] --------------
+
+  类型              文件                              
+  文件大小          4362320, 4.160233MB               
+  md5 (截图请打码)  66eb57fb6e8a6f4f5cd2c094990a23ba  
+  修改日期          2026-04-16 10:19:34               
+`
+
+const listOutput = `
+当前目录: /
+----
+  #     文件大小         修改日期                                     文件(目录)                                
+   0             -  2026-04-20 21:01:08  01 [金田一少年事件簿]/  
+  14      353.75MB  2026-04-23 16:49:04  465014.cocoma                                                          
+  15        4.49MB  2026-08-21 15:06:04  downList.tgz                                                           
+      总: 362.40MB                       文件总数: 2, 目录总数: 1                                              
+----
+`
+
+func TestParseBinaryMeta_File(t *testing.T) {
+	t.Parallel()
+	m, err := parseBinaryMeta([]byte(metaOutputFile), "/downList.tgz")
+	if err != nil {
+		t.Fatalf("parseBinaryMeta: %v", err)
+	}
+	if m.Size != 4712617 {
+		t.Fatalf("Size = %d, want 4712617", m.Size)
+	}
+	if m.ETag != "b69d50218b268594bae4161264c45252" {
+		t.Fatalf("ETag = %q", m.ETag)
+	}
+	if m.IsDir {
+		t.Fatal("文件不应 IsDir")
+	}
+	want := time.Date(2026, 8, 21, 15, 6, 4, 0, time.Local)
+	if !m.ModTime.Equal(want) {
+		t.Fatalf("ModTime = %v, want %v", m.ModTime, want)
+	}
+}
+
+func TestParseBinaryMeta_Dir(t *testing.T) {
+	t.Parallel()
+	m, err := parseBinaryMeta([]byte(metaOutputDir), "/我的资源")
+	if err != nil {
+		t.Fatalf("parseBinaryMeta: %v", err)
+	}
+	if !m.IsDir {
+		t.Fatal("目录应 IsDir=true")
+	}
+}
+
+func TestParseBinaryMetaBlocks_Two(t *testing.T) {
+	t.Parallel()
+	blocks := parseBinaryMetaBlocks([]byte(metaOutputTwo))
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want 2", len(blocks))
+	}
+	if m := blocks["/downList.tgz"]; m == nil || m.Size != 4712617 {
+		t.Fatalf("downList.tgz 块不符: %+v", m)
+	}
+	// md5 标签带截图提示时也应取到 hex。
+	if m := blocks["/test.cocoma"]; m == nil || m.ETag != "66eb57fb6e8a6f4f5cd2c094990a23ba" {
+		t.Fatalf("test.cocoma 块不符: %+v", m)
+	}
+}
+
+func TestParseBinaryList(t *testing.T) {
+	t.Parallel()
+	entries, err := parseBinaryList([]byte(listOutput))
+	if err != nil {
+		t.Fatalf("parseBinaryList: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3 (%+v)", len(entries), entries)
+	}
+	if !entries[0].IsDir || entries[0].Key != "01 [金田一少年事件簿]" {
+		t.Fatalf("目录条目不符: %+v", entries[0])
+	}
+	if entries[1].IsDir || entries[1].Key != "465014.cocoma" {
+		t.Fatalf("文件条目不符: %+v", entries[1])
+	}
+	mib := 1 << 20
+	if entries[1].Size != int64(353.75*float64(mib)) { // 近似值（精确值由 meta 覆盖）
+		t.Fatalf("近似 Size = %d", entries[1].Size)
+	}
+}
+
+func TestParseHumanSize(t *testing.T) {
+	t.Parallel()
+	mib := 1 << 20 // 变量（非编译期常量），避免 float 常量转 int64 报错
+	cases := map[string]int64{
+		"-":        0,
+		"123B":     123,
+		"1KB":      1 << 10,
+		"4.49MB":   int64(4.49 * float64(mib)),
+		"353.75MB": int64(353.75 * float64(mib)),
+		"2GB":      2 << 30,
+	}
+	for in, want := range cases {
+		if got := parseHumanSize(in); got != want {
+			t.Errorf("parseHumanSize(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// fakeMetaFallback 实现 libraryFallback + metadataProvider（binary 失败回退断言用）。
+type fakeMetaFallback struct {
+	meta    *ObjectMeta
+	list    []ObjectMeta
+	metaErr error
+}
+
+func (f *fakeMetaFallback) Upload(context.Context, string, string, bool) error { return nil }
+func (f *fakeMetaFallback) Download(context.Context, string, string) error     { return nil }
+func (f *fakeMetaFallback) Move(context.Context, string, string) error         { return nil }
+func (f *fakeMetaFallback) Copy(context.Context, string, string) error         { return nil }
+func (f *fakeMetaFallback) Delete(context.Context, string) error               { return nil }
+func (f *fakeMetaFallback) Meta(context.Context, string) (*ObjectMeta, error) {
+	return f.meta, f.metaErr
+}
+func (f *fakeMetaFallback) List(context.Context, string) ([]ObjectMeta, error) { return f.list, nil }
+
+// TestBinaryAdapter_Meta_Fallback binary 执行失败 → 回退库 metadata（不落回全量下载）。
+func TestBinaryAdapter_Meta_Fallback(t *testing.T) {
+	t.Parallel()
+	fb := &fakeMetaFallback{meta: &ObjectMeta{Key: "/x", Size: 42, ETag: "e"}}
+	a := newBinaryAdapter(AdapterConfig{BinaryPath: "definitely-not-a-real-binary-xyz", Fallback: fb})
+	m, err := a.Meta(context.Background(), "/x")
+	if err != nil {
+		t.Fatalf("应回退库 Meta: %v", err)
+	}
+	if m == nil || m.Size != 42 {
+		t.Fatalf("回退值不符: %+v", m)
+	}
+}
+
+// TestBinaryAdapter_Meta_NoFallback binary 失败且无兜底 → 返回错误（fail-closed）。
+func TestBinaryAdapter_Meta_NoFallback(t *testing.T) {
+	t.Parallel()
+	a := newBinaryAdapter(AdapterConfig{BinaryPath: "definitely-not-a-real-binary-xyz"})
+	if _, err := a.Meta(context.Background(), "/x"); err == nil {
+		t.Fatal("无兜底应返回错误（不得静默落回全量下载）")
+	}
+	if _, err := a.List(context.Background(), "/x"); err == nil {
+		t.Fatal("List 无兜底应返回错误")
+	}
+}
+
+// TestBinaryAdapter_List_Fallback binary 失败 → 回退库 List。
+func TestBinaryAdapter_List_Fallback(t *testing.T) {
+	t.Parallel()
+	fb := &fakeMetaFallback{list: []ObjectMeta{{Key: "/a", Size: 1}}}
+	a := newBinaryAdapter(AdapterConfig{BinaryPath: "definitely-not-a-real-binary-xyz", Fallback: fb})
+	got, err := a.List(context.Background(), "/d")
+	if err != nil {
+		t.Fatalf("应回退库 List: %v", err)
+	}
+	if len(got) != 1 || got[0].Size != 1 {
+		t.Fatalf("回退列表不符: %+v", got)
+	}
+}

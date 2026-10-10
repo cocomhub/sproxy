@@ -34,27 +34,15 @@ import (
 )
 
 // StorageFS 把 Storage 适配为 pkg/sync.FS。
+//
+// **本地 staging 配额（2026-10-10 用户裁定）**：不在本结构体持有配额句柄（卷是 backend
+// 共享单例，per-owner 注入会互相覆盖）。装配层改为**按请求/按 owner 包一层
+// `syncpkg.StagingQuotaGateFS`**（per-instance 预留/释放，无共享可变状态）——与卷自身
+// 容量配额（`syncpkg.ReserveSpace`/卷 Pool）严格区分：后者管远端网盘容量，前者只记本地
+// 暂存字节。
 type StorageFS struct {
 	s    StorageAPI
 	temp string // 本地中间态目录（staging/下载缓存），用户硬约束：只依赖本地 FS
-	// quota 是可选配额记账钩子（staging 预留/释放）；nil = 不记账（独立 module 保持薄，
-	// 装配层注入实现，server 侧包 pkg/quota.Scope）。
-	quota syncpkg.StagingQuotaTracker
-}
-
-// StagingQuotaCapable 能力接口（pkg/sync.StagingQuotaCapable）——baidupcs_sync 装配层
-// 经**通用接口**探测注入 staging 配额（不依赖本包具体类型；Wrap 装饰后仍可注入）。
-var _ syncpkg.StagingQuotaCapable = (*StorageFS)(nil)
-
-// WithStagingQuota 装配 staging 配额钩子（pkg/sync.StagingQuotaCapable 实现）。
-func (f *StorageFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
-	f.quota = q
-}
-
-// WithQuota 为 StorageFS 装配配额记账钩子（旧签名兼容；委托 WithStagingQuota）。
-func (f *StorageFS) WithQuota(q syncpkg.StagingQuotaTracker) *StorageFS {
-	f.quota = q
-	return f
 }
 
 // StorageAPI 是 StorageFS 消费的最小接口（P3 只依赖公开方法，与 P2 内部解耦）。
@@ -149,16 +137,8 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 	if clean == "" || clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
 	}
-	// 0. quota 预留（本地 staging 写入前；不足排队等待，受 ctx 约束/超时中断）。
-	// **不包 ErrTransient**——排队超时 = 配额永久不足，重试无意义；返回原错误由 sync
-	// 引擎按单文件 ActionError 处理（对齐本地 quotaLocalFS TryReserve 失败语义，
-	// 不中止整体同步也不无限重试）。
-	if f.quota != nil {
-		if err := f.quota.ReserveUsage(ctx, size); err != nil {
-			return fmt.Errorf("%w: quota reserve %d: %v", ErrQuotaExceeded, size, err)
-		}
-		defer f.quota.ReleaseUsage(size)
-	}
+	// 本地 staging 配额由外层 per-request `syncpkg.StagingQuotaGateFS` 预留/释放
+	// （不再由本共享单例记账——避免 per-owner 覆盖）。此处只落 staging + 上传。
 	// 1. 落本地 staging（受 ctx 约束的流式拷贝）。
 	tmp, err := os.CreateTemp(f.temp, "staging-*")
 	if err != nil {

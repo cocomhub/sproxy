@@ -772,10 +772,15 @@ func (h *Handlers) quotaScopeFor(owner, rel string) *quota.Scope {
 }
 
 // stagingQuotaScope 返回 owner 的**独立 staging 配额 Scope**（用户裁定 2026-10-10）：
-// 本地上传暂存独立记账，**不与网盘 owner_quotas 混用**——外部卷 WriteFile 先预留本地
+// 本地上传暂存**独立记账**（不与网盘 owner_quotas 混用）——外部卷 WriteFile 先预留本地
 // 字节、写后释放，防本地磁盘被 staging 占满。上限 = trusted_volume.staging_quota_bytes
-// （0/缺省 = 不限制但记账，预留/释放对称不误伤）。globalPool 未装配 → nil（无配额能力
-// 零回归）。懒建缓存（tenantMu 保护），装配期硬配置不重建。
+// （0/缺省 = 不限制但记账，预留/释放对称不误伤）。
+//
+// **注意（设计意图）**：本 Scope **挂在 h.globalPool 之下**——即 staging 占用计入
+// max_storage_bytes 全局上限（quota.reserveUp/commitUp 沿父链累加）。这是**有意为之**：
+// staging 实占本地磁盘，「独立」指记账维度与网盘配额分离，而非脱离本地全局限制——
+// 核心目的就是防本地盘被打满。若改为独立根池，两池各自不超但合计可超物理盘，反而不安全。
+// globalPool 未装配 → nil（无配额能力零回归）。懒建缓存（tenantMu 保护），装配期硬配置不重建。
 func (h *Handlers) stagingQuotaScope(owner string) *quota.Scope {
 	owner = normalizeOwner(owner)
 	h.tenantMu.Lock()

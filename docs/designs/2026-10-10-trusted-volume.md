@@ -73,7 +73,19 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 
 ## 7. 本地 staging 配额
 
-外部卷写本地暂存（如 baidupcs `staging-*`）会占本地磁盘。独立 staging Scope（`trusted_volume.staging_quota_bytes`，0 = 不限制但记账）+ `quota.StagingTracker`：写前 `ReserveUsage`（不足排队等待，ctx/超时中断）、写后释放。装配层对所有外部卷 `stagingQuotaFS`：显式 `StagingQuotaExempt`（s3 流式直传）跳过；`StagingQuotaCapable`（baidupcs）注入自管；否则 `StagingQuotaGateFS` 强制预留（fail-safe，新卷未实现也不漏）。
+外部卷写本地暂存（如 baidupcs `staging-*`）会占本地磁盘。独立 staging Scope
+（`trusted_volume.staging_quota_bytes`，0 = 不限制但记账；**独立记账**指与网盘
+`owner_quotas` 分离，但**有意挂在全局池之下**——staging 实占本地盘，受
+`max_storage_bytes` 约束，核心目的就是防本地盘打满）+ `quota.StagingTracker`：写前
+`ReserveUsage`（不足排队等待，ctx/超时中断）、写后释放。装配层对所有外部卷经
+`stagingQuotaFS` 处理：显式 `StagingQuotaExempt`（s3 流式直传）跳过；
+`StagingQuotaCapable`（卷以 **per-instance** 状态自管，不得是共享单例）注入；
+否则 `StagingQuotaGateFS` **per-request 包装**强制预留（fail-safe，新卷未实现也不漏）。
+
+- baidupcs 的本地 staging 配额**由 caller 侧 per-request 门卫实例记账**，不再注入卷
+  共享单例（`StorageFS` 是 backend 单例，per-owner 注入会跨 owner 串账）。
+- 与**卷自身容量配额**（`syncpkg.ReserveSpace` / 卷容量 Pool）严格区分：后者管远端
+  网盘容量，前者只记本地暂存字节。
 
 ## 8. 已知边界与后续
 
