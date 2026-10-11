@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/mxschmitt/playwright-go"
 )
 
@@ -131,7 +133,24 @@ func TestSyncCarrierBadge_RendersFromServerData(t *testing.T) {
 	// 徽标文案 `direct` **只能**由 syncCarrierText 渲染（页面上没有别处产出这个字样）
 	// ⇒ 出现即证明「服务端 kind 字段 → 列表 JSON → 归一化 → 行内徽标」整条链路通。
 	// 这也正是修复前必然失败的断言：投影漏字段时徽标是空串，不会出现在 DOM 里。
-	waitTextVisible(t, page, "#transfer-body", "direct", 15000)
+	//
+	// **必须展开已完成折叠分组**：任务若在页面加载前就已完成，其行渲染在 `<details>` 折叠组内
+	// （summary 文案「点击展开」），徽标文本对 `#transfer-body` 的 InnerText 不可见 ⇒ 用例会以
+	// 「数据链路坏」的表象假红（实测：sync 本地侧改经 Root+前缀视图后任务完成更快，稳定命中）。
+	waitTextVisibleAfterExpand(t, page, "#transfer-body", "direct", 15000)
+}
+
+// waitTextVisibleAfterExpand 与 waitTextVisible 同语义，但每轮先展开 `#transfer-body` 内全部
+// `<details>` 折叠分组（已完成行藏在其中）；轮询 + 展开必须交替，因为分组是页面加载后才渲染的。
+func waitTextVisibleAfterExpand(t *testing.T, page playwright.Page, sel, want string, timeoutMs float64) {
+	t.Helper()
+	var last string
+	testutil.WaitFor(t, max(time.Duration(timeoutMs)*time.Millisecond, 30*time.Second), func() bool {
+		_, _ = page.Locator(sel + " details").EvaluateAll("els => els.forEach(e => { e.open = true; })")
+		txt, err := page.Locator(sel).InnerText()
+		last = txt
+		return err == nil && strings.Contains(txt, want)
+	}, func() string { return "徽标文本应出现（已展开折叠分组），最后观测: " + last })
 }
 
 // TestSyncCarrierBadge_MeshRemoteShowsDeclaredTransport 用 **mesh** 载体再钉一层：徽标为
@@ -176,5 +195,5 @@ func TestSyncCarrierBadge_MeshRemoteShowsDeclaredTransport(t *testing.T) {
 	if err := waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("传输页未显示: %v", err)
 	}
-	waitTextVisible(t, page, "#transfer-body", "mesh/relay", 15000)
+	waitTextVisibleAfterExpand(t, page, "#transfer-body", "mesh/relay", 15000)
 }
