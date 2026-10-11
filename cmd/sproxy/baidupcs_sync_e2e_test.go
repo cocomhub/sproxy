@@ -281,14 +281,15 @@ func TestBaidupcsE2E_Push(t *testing.T) {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if got := string(st.files["a.txt"]); got != "hello push" {
+	// C1 修复后键空间带用户桶前缀（<owner>/user/<rel>，与 HTTP 上传/下载/转存同形）。
+	if got := string(st.files["anonymous/user/a.txt"]); got != "hello push" {
 		t.Fatalf("网盘 a.txt = %q, want %q", got, "hello push")
 	}
-	if got := string(st.files["sub/b.txt"]); got != "world push" {
+	if got := string(st.files["anonymous/user/sub/b.txt"]); got != "world push" {
 		t.Fatalf("网盘 sub/b.txt = %q, want %q", got, "world push")
 	}
-	if _, ok := st.dirs["sub"]; !ok {
-		t.Fatal("网盘应有 sub 目录标记")
+	if _, ok := st.dirs["anonymous/user/sub"]; !ok {
+		t.Fatal("网盘应有 anonymous/user/sub 目录标记")
 	}
 }
 
@@ -297,11 +298,12 @@ func TestBaidupcsE2E_Pull(t *testing.T) {
 	t.Parallel()
 	mgr, st, userRoot := newBaidupcsE2EManager(t)
 
-	// 预置网盘文件（fake Put 隐式建目录）。
-	if _, err := st.Put(context.Background(), "r.txt", strings.NewReader("remote content")); err != nil {
+	// 预置网盘文件（fake Put 隐式建目录）。C1 修复后键空间 = `<owner>/user/<rel>`
+	// （owner="" → anonymous；与 HTTP 上传/下载/转存同形）。
+	if _, err := st.Put(context.Background(), "anonymous/user/r.txt", strings.NewReader("remote content")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Put(context.Background(), "sub/x.txt", strings.NewReader("nested")); err != nil {
+	if _, err := st.Put(context.Background(), "anonymous/user/sub/x.txt", strings.NewReader("nested")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -416,7 +418,7 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 		t.Fatalf("ownerA Results 应含 quota 错误, got %+v", doneA.Results)
 	}
 	st.mu.Lock()
-	_, gotA := st.files["big.txt"]
+	_, gotA := st.files["ownerA/user/big.txt"]
 	st.mu.Unlock()
 	if gotA {
 		t.Fatal("ownerA 网盘不应出现 big.txt（quota 拒绝）")
@@ -435,7 +437,7 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 		t.Fatalf("ownerB FilesDone = %d, want 1", doneB.FilesDone)
 	}
 	st.mu.Lock()
-	gotB, okB := st.files["big.txt"]
+	gotB, okB := st.files["ownerB/user/big.txt"]
 	st.mu.Unlock()
 	if !okB || string(gotB) != bigContent {
 		t.Fatalf("ownerB 网盘 big.txt = %q (ok=%v), want %q", string(gotB), okB, bigContent)

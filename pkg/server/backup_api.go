@@ -278,11 +278,11 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 		// FS-CORE-3 修复：经 prefixFS 把源相对路径映射到外部卷桶键空间 `<owner>/user/...`
 		// （否则 Guard 误判 meta 目录、sidecar 落用户可见目录、跨 owner 同名互覆）。
 		fs := syncpkg.FS(trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())))
-		fs = &prefixFS{FS: fs, prefix: storage.NormalizeOwner(owner) + "/user/"}
+		fs = syncpkg.NewPrefixFS(fs, storage.NormalizeOwner(owner)+"/user/")
 		// manifest 写面：同后端键空间的功能桶 `<owner>/backup/`（不 Wrap：manifest 不需 sidecar），
 		// 仍经 Guard（防意外触碰 meta 桶；标签桶非 meta，正常放行）。
 		mfs := syncpkg.FS(trusted.Guard(raw))
-		mfs = &prefixFS{FS: mfs, prefix: storage.NormalizeOwner(owner) + "/" + backupManifestBucket + "/"}
+		mfs = syncpkg.NewPrefixFS(mfs, storage.NormalizeOwner(owner)+"/"+backupManifestBucket+"/")
 		// 本地 staging 配额强制接线（用户裁定 2026-10-10：外部卷统一过独立 staging
 		// 配额——备份写本地暂存防打满；s3 流式显式 Exempt，baidupcs 自管 StagingQuotaCapable）。
 		return h.stagingQuotaFS(owner, fs), mfs, nil
@@ -301,7 +301,7 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 	fs := trusted.Guard(trusted.Wrap(syncpkg.NewLocalFS(filepath.ToSlash(rootAbs), h.logger), h.trustedWrapOpts()))
 	// manifest 写面：租户根的 `backup/` 功能桶（与 user/meta 并列，用户 API 不可寻址）。
 	mroot := filepath.ToSlash(filepath.Join(filepath.FromSlash(rootAbs), backupManifestBucket))
-	return &prefixFS{FS: fs, prefix: "user/"}, syncpkg.NewLocalFS(mroot, h.logger), nil
+	return syncpkg.NewPrefixFS(fs, "user/"), syncpkg.NewLocalFS(mroot, h.logger), nil
 }
 
 // backupQuotaFS 是备份目标写面的配额记账装饰器：WriteFile 前对文件 size 在

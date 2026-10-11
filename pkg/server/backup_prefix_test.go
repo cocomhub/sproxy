@@ -17,7 +17,7 @@ import (
 func TestPrefixFS_KeySpaceMapping(t *testing.T) {
 	t.Parallel()
 	inner := &extFS{files: map[string]string{}}
-	p := &prefixFS{FS: inner, prefix: "alice/user/"}
+	p := syncpkg.NewPrefixFS(inner, "alice/user/")
 	ctx := context.Background()
 	if err := p.WriteFile(ctx, "docs/a.txt", strings.NewReader("hi"), 2, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -54,11 +54,11 @@ func TestNewExternalSource_SkipVerifyDisablesFileMeta(t *testing.T) {
 // 空段拒绝）；WriteIfAbsent 未实现须返回 ErrUnsupported（否则被读成「已存在」）。
 func TestPrefixFS_EmptyKeyAndUnsupported(t *testing.T) {
 	t.Parallel()
-	p := &prefixFS{FS: &extFS{files: map[string]string{}}, prefix: "alice/user/"}
-	if got := p.key(""); got != "alice/user" {
+	p := syncpkg.NewPrefixFS(&extFS{files: map[string]string{}}, "alice/user/")
+	if got := p.Key(""); got != "alice/user" {
 		t.Fatalf(`key("") = %q, want "alice/user"（无尾斜杠）`, got)
 	}
-	if got := p.key("/a/b"); got != "alice/user/a/b" {
+	if got := p.Key("/a/b"); got != "alice/user/a/b" {
 		t.Fatalf(`key("/a/b") = %q`, got)
 	}
 	if _, err := p.WriteIfAbsent(context.Background(), "", strings.NewReader("x"), 1, 0); !errors.Is(err, syncpkg.ErrUnsupported) {

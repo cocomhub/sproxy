@@ -134,7 +134,7 @@ func TestWrite_ExtraCarried(t *testing.T) {
 	if err := tv.WriteFile(ctx, "e.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	rc, _ := inner.OpenRead(ctx, "e.bin.meta")
+	rc, _ := inner.OpenRead(ctx, meta.MetaPath("e.bin"))
 	raw, _ := io.ReadAll(rc)
 	rc.Close()
 	fm, err := meta.Unmarshal(raw)
@@ -159,7 +159,7 @@ func TestDelete_RemovesMeta(t *testing.T) {
 	if err := tv.Delete(ctx, "d.bin"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if e, err := inner.Stat(ctx, "d.bin.meta"); err != nil || e != nil {
+	if e, err := inner.Stat(ctx, meta.MetaPath("d.bin")); err != nil || e != nil {
 		t.Fatalf("删除主文件应联动删 meta: %v %v", e, err)
 	}
 }
@@ -177,10 +177,10 @@ func TestRename_MovesMeta(t *testing.T) {
 	if err := tv.Rename(ctx, "r.bin", "sub/r2.bin"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	if e, err := inner.Stat(ctx, "r.bin.meta"); err == nil && e != nil {
+	if e, err := inner.Stat(ctx, meta.MetaPath("r.bin")); err == nil && e != nil {
 		t.Fatal("旧 meta 应已移走")
 	}
-	if e, err := inner.Stat(ctx, "sub/r2.bin.meta"); err != nil || e == nil {
+	if e, err := inner.Stat(ctx, meta.MetaPath("sub/r2.bin")); err != nil || e == nil {
 		t.Fatalf("新位置 meta 应存在: %v %v", e, err)
 	}
 }
@@ -196,7 +196,7 @@ func TestMetaAlwaysGenerated(t *testing.T) {
 	if err := tv.WriteFile(ctx, "n.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if e, err := inner.Stat(ctx, "n.bin.meta"); err != nil || e == nil {
+	if e, err := inner.Stat(ctx, meta.MetaPath("n.bin")); err != nil || e == nil {
 		t.Fatalf("meta 应恒生成（默认落盘）: %v %v", e, err)
 	}
 }

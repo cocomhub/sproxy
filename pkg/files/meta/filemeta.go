@@ -282,7 +282,16 @@ func MetaPath(rel string) string {
 	if rebucketed, ok := volume.RebucketTo(rel, "meta"); ok {
 		return rebucketed + metaSuffix
 	}
-	return rel + metaSuffix // 无 user 桶段：同目录兜底（外部卷罕见场景）
+	// 无桶段（调用方传用户相对路径而非 `<owner>/<bucket>/...` 键）：**fail-closed 落
+	// meta 桶**（`meta/<rel>.meta`），绝不落用户可见目录。原实现回落 `rel + ".meta"`
+	// （与用户真实 `x.meta` 同路径互盖、`IsMetaPath` 不过滤 → 同步引擎把 sidecar 当用户
+	// 文件、下载侧按 `<owner>/meta/...` 又找不到 → 零校验）。
+	// 语义：
+	//   - 本地卷（FS 根 = 租户根）：`meta/<rel>.meta` 正是正确落点；
+	//   - 共享/外部卷（键空间 `<owner>/...`）：桶段判为 meta → 业务层守卫拒绝写入
+	//     （fail-closed，不产生错误键空间数据）；正确做法是装配点加前缀视图
+	//     （`syncpkg.PrefixFS`，见 cmd/sproxy/baidupcs_sync.go）。
+	return "meta/" + rel + metaSuffix
 }
 
 // MetaDirPath 返回路径 rel（目录）对应的 **sidecar 子树目录**（= MetaPath(rel) 去掉结尾
