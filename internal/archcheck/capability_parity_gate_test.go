@@ -149,6 +149,8 @@ func TestDecoratorsDeclareAllCapabilities(t *testing.T) {
 		{typeName: "PrefixFS", pkgDir: "pkg/sync", exempt: blockExempt},
 		// WebDAV 挂载面 sidecar 联动装饰器（M8：此前不透传可选能力、未登记）。
 		{typeName: "davMetaFS", pkgDir: "pkg/server", exempt: blockExempt},
+		// 封装卷视图防护薄层（组合 sync.PrefixFS；R21 覆盖——防新装饰器漏转发不受保护）。
+		{typeName: "FS", pkgDir: "pkg/volume/enclosure", exempt: blockExempt},
 	}
 
 	var problems []string
