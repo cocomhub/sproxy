@@ -70,6 +70,12 @@ type verifyReadSeeker struct {
 	extra     bool      // 已读超过 fm.Size（多余数据）
 	fromStart bool      // 本次累计是否从 offset 0 起（仅此才比对整文件哈希/判短读）
 	fatal     error     // 构造时探测到的致命不一致（长度 != fm.Size）
+	// aheadTried/aheadVerified 服务「先验后发」（C3）：从块中间起始时把**整块**读回比对，
+	// 每位置只试一次；aheadVerified=true 表示该块已整体验过（consume 读满时不再重复比对）。
+	aheadTried    bool
+	aheadVerified bool
+	// aheadFailed 标记先验不可行（底层不可 Seek/短读）→ 该块维持跳过（降级，不误报）。
+	aheadFailed bool
 }
 
 // Read 读数据并逐分块校验。返回错误 = 分块不一致 / 长度不一致 / 多余数据 / EOF 总校验失败。
@@ -79,6 +85,10 @@ func (v *verifyReadSeeker) Read(p []byte) (int, error) {
 	}
 	if v.extra {
 		return 0, fmt.Errorf("meta: 校验失败：内容超过 FileMeta.Size %d（多余数据）", v.fm.Size)
+	}
+	v.verifyChunkAhead()
+	if v.fatal != nil {
+		return 0, v.fatal // 先验后发发现损坏：本批字节一个都不下发
 	}
 	n, err := v.inner.Read(p)
 	if n > 0 {
@@ -114,6 +124,9 @@ func (v *verifyReadSeeker) reset(pos int64) {
 	v.fromStart = pos == 0
 	v.verified = false
 	v.extra = false
+	v.aheadTried = false
+	v.aheadVerified = false
+	v.aheadFailed = false
 }
 
 // chunkPos 由绝对位置推算 (分块索引, 块内已读, 是否从中间开始)。
@@ -125,6 +138,103 @@ func (v *verifyReadSeeker) chunkPos(pos int64) (int, int64, bool) {
 	}
 	// pos >= Size（越界/EOF 后）：多余数据判定由 consume/extra 处理。
 	return len(v.fm.Chunks), 0, true
+}
+
+// verifyChunkAhead 对「从块中间起始」的当前块做**先验后发**（C3 修复，P0）：seek 回块首
+// 读满整块、重算 sha256 与 meta 比对——不一致立即 fail-closed（本批字节都不下发），
+// 一致则复位底层到原位置继续正常读。
+//
+// 背景：此前 `chunkPos` 对中段起始把 `skipCur` 置真，读满也不校验，且 `verifyEOF` 对
+// `!fromStart` 直接 return nil ⇒ 起点非 0、又不覆盖整块的 Range（单块/粗分块文件尤甚）
+// **零校验**下发——「异常 fail-closed」承诺在 Range 路径瓦解。
+//
+// 成本：仅在首块（中段起始）多一次整块读（≤32MiB）；后续块从块首起，走常规流式校验。
+// 失败（不可 Seek/短读）→ 维持跳过（降级，不误报也不阻断）；每位置只试一次。
+func (v *verifyReadSeeker) verifyChunkAhead() {
+	if !v.skipCur || v.aheadTried || v.aheadFailed || v.verified || v.fatal != nil {
+		return
+	}
+	if v.curChunk < 0 || v.curChunk >= len(v.fm.Chunks) || v.curRead <= 0 {
+		return
+	}
+	v.aheadTried = true
+	chunk := v.fm.Chunks[v.curChunk]
+	pos := chunk.Offset + v.curRead
+	if _, err := v.inner.Seek(chunk.Offset, io.SeekStart); err != nil {
+		v.aheadFailed = true
+		return
+	}
+	h := sha256.New()
+	remaining := chunk.Size
+	buf := make([]byte, 64<<10)
+	for remaining > 0 {
+		want := min(int64(len(buf)), remaining)
+		n, rerr := v.inner.Read(buf[:want])
+		if n > 0 {
+			_, _ = h.Write(buf[:n])
+			remaining -= int64(n)
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	if remaining > 0 {
+		v.aheadFailed = true // 短读/出错：不可验 → 维持跳过
+		_, _ = v.inner.Seek(pos, io.SeekStart)
+		return
+	}
+	if _, err := v.inner.Seek(pos, io.SeekStart); err != nil {
+		v.aheadFailed = true
+		return
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != chunk.SHA256 {
+		v.fatal = fmt.Errorf("meta: 校验失败：分块 %d 内容不一致（卷静默损坏？）", v.curChunk)
+		return
+	}
+	// 该块已整体验过：区间内字节不再重复累计比对（见 consume 的 aheadVerified 分支）。
+	v.aheadVerified = true
+	v.skipCur = false
+}
+
+// sealPartialChunk 在 EOF 为**尾部半块**补验（C3）：消费者读到的最后一块可能不满整块
+// （Range 在块中间结束）——此时块首字节已累计、缺尾部；seek 到块内已读位置读回到块尾，
+// 补入 curSHA 后比对整块哈希（只影响校验，不动消费者可见字节/totalSHA）。
+// 不可 Seek/短读 → 维持跳过（降级）。返回错误 = 该块内容不一致（fail-closed）。
+func (v *verifyReadSeeker) sealPartialChunk() error {
+	if v.aheadVerified || v.skipCur || v.fatal != nil {
+		return nil
+	}
+	if v.curChunk < 0 || v.curChunk >= len(v.fm.Chunks) || v.curRead <= 0 {
+		return nil
+	}
+	chunk := v.fm.Chunks[v.curChunk]
+	if v.curRead >= chunk.Size {
+		return nil // 已满块（consume 已比对）
+	}
+	pos := chunk.Offset + v.curRead
+	if _, err := v.inner.Seek(pos, io.SeekStart); err != nil {
+		return nil // 不可 Seek：降级（不误报）
+	}
+	remaining := chunk.Size - v.curRead
+	buf := make([]byte, 64<<10)
+	for remaining > 0 {
+		want := min(int64(len(buf)), remaining)
+		n, rerr := v.inner.Read(buf[:want])
+		if n > 0 {
+			_, _ = v.curSHA.Write(buf[:n])
+			remaining -= int64(n)
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	if remaining > 0 {
+		return nil // 短读：降级（不误报）
+	}
+	if got := hex.EncodeToString(v.curSHA.Sum(nil)); got != chunk.SHA256 {
+		return fmt.Errorf("meta: 校验失败：分块 %d 内容不一致（卷静默损坏？）", v.curChunk)
+	}
+	return nil
 }
 
 // consume 把读入数据按分块边界喂入哈希；块从块首开始完整读满 → 校验。
@@ -147,8 +257,12 @@ func (v *verifyReadSeeker) consume(data []byte) error {
 		v.totalRead += int64(len(part))
 		data = data[len(part):]
 		if v.curRead == v.fm.Chunks[v.curChunk].Size {
-			// 块读满：从块首开始才校验（Range 中间块跳过不误报）。
-			if !v.skipCur {
+			// 块读满：从块首开始才校验（Range 中间块跳过不误报）；**先验后发**过的块
+			// （C3：中段起始块已整体比对过）不再重复比对——否则只累计了区间内字节的
+			// curSHA 与整块哈希必然不等，会误报。
+			if v.aheadVerified {
+				v.aheadVerified = false
+			} else if !v.skipCur {
 				wantSHA := v.fm.Chunks[v.curChunk].SHA256
 				if got := hex.EncodeToString(v.curSHA.Sum(nil)); got != wantSHA {
 					return fmt.Errorf("meta: 校验失败：分块 %d 内容不一致（卷静默损坏？）", v.curChunk)
@@ -177,6 +291,9 @@ func (v *verifyReadSeeker) verifyEOF() error {
 	v.verified = true
 	if v.extra {
 		return fmt.Errorf("meta: 校验失败：内容超过 FileMeta.Size %d", v.fm.Size)
+	}
+	if serr := v.sealPartialChunk(); serr != nil {
+		return serr
 	}
 	if !v.fromStart {
 		return nil // 中段起始读：整文件哈希/短读判据不适用（Range 语义）

@@ -129,12 +129,17 @@ func newExternalTestEnv(t *testing.T, v volume.Volume, fs *extFS) *Handlers {
 		checksumStores: make(map[string]*checksum.ChecksumStore)}
 }
 
-// TestResolveExternalDownload_BState302：明文外部卷 direct_link:true → 302 直链。
-func TestResolveExternalDownload_BState302(t *testing.T) {
+// TestResolveExternalDownload_BState302RequiresSkipVerify：明文外部卷 direct_link:true
+// **且显式关闭服务端校验**（skip_verify=true，即可观测地放弃完整性承诺）→ 302 直链。
+// 变异：把 externalStateFor 的服务端校验门去掉 → 下面的 Suppressed 用例红。
+func TestResolveExternalDownload_BState302RequiresSkipVerify(t *testing.T) {
 	t.Parallel()
 	v := volume.Volume{Name: "baidu", Type: "baidupcs", DirectLink: true}
 	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://d.pcs.baidu.com/f.bin?sign=x"}
 	h := newExternalTestEnv(t, v, fs)
+	cfg := h.cfgPtr.Load()
+	cfg.TrustedVolume.SkipVerify = true // 显式放弃服务端校验 → 直链可用
+	h.cfgPtr.Store(cfg)
 
 	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
 	if dp == nil {
@@ -145,6 +150,31 @@ func TestResolveExternalDownload_BState302(t *testing.T) {
 	}
 	if dp.source == nil {
 		t.Fatal("B 态应同时携带 source（Stat 回元信息）")
+	}
+}
+
+// TestResolveExternalDownload_DirectLinkSuppressedWhenVerifyOn 回归（C4，P0）：服务端
+// 完整性校验开启（默认）时，direct_link:true 的卷**必须强制服务端转发**（A 态）——
+// 否则 302 让客户端直接从后端取字节、绕过逐分块校验，「同一卷 A 态有校验 / B 态无校验」
+// 自相矛盾。变异：去掉 externalStateFor 的 `!h.verifySkipped()` 门 → 返回 302 → 红。
+func TestResolveExternalDownload_DirectLinkSuppressedWhenVerifyOn(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "baidu", Type: "baidupcs", DirectLink: true}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://d.pcs.baidu.com/f.bin?sign=x"}
+	h := newExternalTestEnv(t, v, fs)
+	cfg := h.cfgPtr.Load()
+	cfg.TrustedVolume.SkipVerify = false // 校验开启（默认）
+	h.cfgPtr.Store(cfg)
+
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
+	if dp == nil {
+		t.Fatal("外部卷命中应返回 downloadPath")
+	}
+	if dp.redirectURL != "" {
+		t.Fatalf("校验开启时不得下发 302 直链（绕过校验）, got %q", dp.redirectURL)
+	}
+	if dp.source == nil {
+		t.Fatal("强制 A 态应携带服务端转发 source")
 	}
 }
 
