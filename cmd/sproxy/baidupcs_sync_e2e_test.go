@@ -81,8 +81,9 @@ func (f *fakeBaidupcsE2EStorage) PutFromStagedPath(_ context.Context, key, stage
 		return nil, err
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.files[key] = data
+	f.mu.Unlock()
+	// markDirs 自持 f.mu：必须在释放之后调用（否则自死锁 → 同步任务永久卡 syncing）。
 	f.markDirs(key) // 与 Put 同语义：父路径目录标记（SyncFS.ListDir 依赖）
 	return &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
 }
