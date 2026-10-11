@@ -492,9 +492,14 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 将任务已下载文件打包为 tar.gz（`cloud_archive_max_bytes` 限制原始大小总和）。
 
+请求体可选字段 `target_volume`：非空 = **统一转存**——打包后经可信卷写视图转存到该外部卷，
+不落租户 archive 桶；目标键为 `<owner>/user/archive/<archive_name>`（经 `volume.ResolveUserLocation`
+唯一入口，与读路径同键空间，可被 `/download` 与文件列表命中），响应 `file` 为可 `ResolveURL`
+取用的 URL。空/缺省 = 沿既有行为落租户 archive 桶。
+
 ### POST /api/cloud/archive
 
-批量归档（请求体含任务 ID 列表）。
+批量归档（请求体含任务 ID 列表）。支持与单任务相同的 `target_volume` 统一转存语义。
 
 ### DELETE /api/cloud/tasks/{id}
 
@@ -514,7 +519,9 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 ### POST /api/cloud/groups/{id}/cancel / /resume / /archive
 
-取消 / 恢复 / 归档整个组。
+取消 / 恢复 / 归档整个组。`/archive` 请求体同样支持 `target_volume`（统一转存到外部卷，
+可信卷写视图 + owner 前缀键 + 本地 staging 配额 + `per-(owner,rel)` 写锁；语义与单任务/批量
+归档一致）。
 
 ### DELETE /api/cloud/groups/{id}
 

@@ -226,3 +226,22 @@ func TestExecute_Pack_WriteIfAbsentUnsupportedFallsBack(t *testing.T) {
 		t.Fatalf("二次打包转存应 ErrExists，got %v", err)
 	}
 }
+
+// TestExecute_TargetURLPercentEncodes 目标 URL 逐段 percent-encode（`#`/`%`/空格等文件名
+// 可 ResolveURL 往返；与 cloud 转存 transferURL 同规约）。
+func TestExecute_TargetURLPercentEncodes(t *testing.T) {
+	t.Parallel()
+	v := &memVol{memFS: newMemFS(), scheme: "vault", name: "vol1"}
+	content := []byte("x")
+	got, err := Execute(context.Background(), TransferRequest{
+		Entries:     []SourceEntry{{Rel: "src/x", Size: int64(len(content)), Reader: strings.NewReader(string(content))}},
+		Destination: v,
+		Rel:         "dst/a b#c%d.txt",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if want := "vault://vol1/dst/a%20b%23c%25d.txt"; got != want {
+		t.Fatalf("url=%q want %q", got, want)
+	}
+}

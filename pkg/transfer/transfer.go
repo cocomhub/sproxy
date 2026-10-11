@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -167,9 +168,20 @@ func packedWrite(ctx context.Context, req TransferRequest, rel string, pr io.Rea
 	return writeUnique(ctx, req.Destination, rel, pr, 0, 0, req.Overwrite)
 }
 
-// targetURL 生成目标 URL（<scheme>://<volume>/<rel>）。
+// targetURL 生成目标 URL（<scheme>://<volume>/<rel>；路径段 percent-encode，
+// 与 cloud 转存 transferURL 同规约——`#`/`%`/空格等文件名才能 ResolveURL 往返）。
 func targetURL(d VolumeFS, rel string) string {
-	return d.Scheme() + "://" + d.Volume() + "/" + strings.TrimPrefix(rel, "/")
+	return d.Scheme() + "://" + d.Volume() + "/" + escapeRel(rel)
+}
+
+// escapeRel 逐段 percent-encode 卷内相对路径（保留 `/` 分隔）。
+func escapeRel(rel string) string {
+	segs := strings.Split(strings.TrimPrefix(rel, "/"), "/")
+	esc := make([]string, 0, len(segs))
+	for _, s := range segs {
+		esc = append(esc, url.PathEscape(s))
+	}
+	return strings.Join(esc, "/")
 }
 
 // AutoRel 自动派生目标相对路径（用源 basename；目录前缀由调用方 policy 决定）。

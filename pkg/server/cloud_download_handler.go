@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -673,19 +674,7 @@ func (h *Handlers) cloudArchiveResolveName(w http.ResponseWriter, req *CloudArch
 	if archiveName == "" {
 		archiveName = fmt.Sprintf("%s-%d.tar.gz", groupID, time.Now().Unix())
 	}
-	archiveName = filepath.Base(archiveName)
-	if archiveName == "" || archiveName == "." || archiveName == ".." {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
-		return "", false
-	}
-	if !strings.HasSuffix(archiveName, tarGZExt) {
-		archiveName += tarGZExt
-	}
-	if len(archiveName) > 255 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
-		return "", false
-	}
-	return archiveName, true
+	return h.normalizeArchiveName(w, archiveName)
 }
 
 // cloudArchiveCollectFiles 按子任务目录收集已完成文件（子任务文件按任务 owner 落租户
@@ -871,7 +860,19 @@ func (h *Handlers) cloudArchiveReconcileReservation(w http.ResponseWriter, root 
 }
 
 // cloudArchiveGroupToVolume 统一转存：组归档打包后转存到外部卷（target_volume）。
-// 复用 pkg/transfer：TarPreprocessor（tar.gz）+ 目标卷（可信卷写视图的 VolumeFS）。
+// 收集组文件 Reader 后交共享核心 cloudArchiveToVolume（可信卷写视图 + owner 前缀 +
+// staging/写锁）。
+func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Request, groupID, owner string, groupFiles []fileWithRelPath, req *CloudArchiveRequest, archiveName string) {
+	entries, err := archiveEntries(groupFiles)
+	if err != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, archiveName, entries, archiveTotalSize(groupFiles), h.logger.With("archive", "group", "group_id", groupID))
+}
+
+// cloudArchiveToVolume 是统一转存的**共享执行核心**（单任务 / 批量 / 组归档共用）：
+// 把打包流（tar.gz）转存到外部卷。
 //
 // 接线纪律（复用 master 可信卷能力，与 cloud 下载转存同款）：
 //   - 目标 FS = externalVolumeTransferFS（trusted.Guard(Wrap(...))）——meta 恒生成 +
@@ -879,9 +880,19 @@ func (h *Handlers) cloudArchiveReconcileReservation(w http.ResponseWriter, root 
 //   - 目标键经 volume.ResolveLocation 唯一入口计算（恒 owner 前缀 + 路径安全）——与读
 //     路径 ResolveUserLocation 同键空间，产物可被 /download 与列表命中；
 //   - 本地 staging 配额 + per-(owner,rel) 写锁（与 HTTP 上传/DAV/S3 同键空间）。
-func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Request, groupID, owner string, groupFiles []fileWithRelPath, req *CloudArchiveRequest, archiveName string) {
+//
+// entries 已由调用方打开 source Reader（本函数负责关闭）；totalSize 为源总量
+// （cloud_archive_max_bytes + 配额预检）。外部卷转存不消耗租户 archive 桶 → 预检预留
+// 即时归还（防 Scope Reserved 虚高）。
+func (h *Handlers) cloudArchiveToVolume(
+	w http.ResponseWriter, r *http.Request,
+	owner, targetVolume, archiveName string,
+	entries []transfer.SourceEntry, totalSize int64,
+	logger *slog.Logger,
+) {
+	defer closeEntries(entries)
 	// 目标卷解析（可信卷写视图；未装/元数据不可解析/类型未声明协议 → fail-closed）。
-	fs, scheme, vol, ok := h.externalVolumeTransferFS(req.TargetVolume)
+	fs, scheme, vol, ok := h.externalVolumeTransferFS(targetVolume)
 	if !ok || scheme == "" {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "target volume not assembled"}, http.StatusNotFound)
 		return
@@ -896,16 +907,11 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 	rel := loc.FSPath()
 	// 本地 staging 配额统一接线（与 cloud 下载转存一致；无独立配额 → 直通零回归）。
 	fs = h.stagingQuotaFS(owner, fs)
-	// V2：配额预检（复用 cloudArchiveReserveQuota：总量限制 + 用户 archive 桶 Scope 预留）
-	// + 目标卷自身容量（sync.ReserveSpace 能力，外部网盘配额 API）。
-	// 任一不通过 → 不转存（fail-closed，防超额写）。
-	totalSize := archiveTotalSize(groupFiles)
+	// 总量限制 + 配额预检（外部卷不消耗 archive 桶 → 预检后归还预留）。
 	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, totalSize)
 	if !ok {
 		return
 	}
-	// 外部卷转存不消耗租户 archive 桶空间（产物落目标卷；容量权威在目标卷
-	// ReserveSpace / 卷池）——预检后**归还预留**（防 archive 桶 Scope Reserved 虚高）。
 	defer releaseArchiveReservation(res, h.storageMgr, pre)
 	// ReserveSpace 经装饰器链恒「实现」（底层未实现 → ErrUnsupported）——不得误报容量不足。
 	if rs, isRS := fs.(syncpkg.ReserveSpace); isRS {
@@ -922,16 +928,7 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 	} else {
 		defer release()
 	}
-	// 打包（tar.gz）→ 转存：groupFiles 转 SourceEntry（Reader 打开源文件）。
-	entries, err := archiveEntries(groupFiles)
-	if err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
-		return
-	}
-	// 关闭所有源 Reader（transfer.Execute 消费后；防句柄泄漏——Windows 下未关的
-	// os.File 会占 TempDir 阻止清理）。
-	defer closeEntries(entries)
-	dest := &transferVolumeFS{FS: fs, scheme: scheme, name: req.TargetVolume}
+	dest := &transferVolumeFS{FS: fs, scheme: scheme, name: targetVolume}
 	url, terr := transfer.Execute(r.Context(), transfer.TransferRequest{
 		Entries:     entries,
 		Preprocess:  &transfer.TarPreprocessor{Compression: compressx.Gzip},
@@ -940,7 +937,7 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 		Owner:       owner,
 	})
 	if terr != nil {
-		h.logger.Error("unified transfer to volume failed", "group_id", groupID, "volume", req.TargetVolume, "error", terr)
+		logger.Error("unified transfer to volume failed", "volume", targetVolume, "error", terr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "transfer failed: " + terr.Error()}, http.StatusInternalServerError)
 		return
 	}
@@ -958,11 +955,13 @@ func (t *transferVolumeFS) Scheme() string { return t.scheme }
 func (t *transferVolumeFS) Volume() string { return t.name }
 
 // archiveEntries 把 groupFiles 转为 SourceEntry（打开源文件作 Reader；size/mtime 填真值）。
+// 打开中途失败时关闭已打开的 Reader（防句柄泄漏）。
 func archiveEntries(files []fileWithRelPath) ([]transfer.SourceEntry, error) {
 	out := make([]transfer.SourceEntry, 0, len(files))
 	for _, f := range files {
 		rc, err := f.root.Open(f.rel)
 		if err != nil {
+			closeEntries(out)
 			return nil, err
 		}
 		st, serr := f.root.Stat(f.rel)

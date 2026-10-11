@@ -5,12 +5,16 @@ package server
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -662,21 +666,67 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	}
 }
 
-// TestCloudArchive_SingleTask_TargetVolumeRejected 锁定单任务归档对 target_volume 的
-// fail-closed（统一转存当前仅组归档接线）——防「显式指定 target_volume 却被静默按桶归档」
-// 的行为分歧（与组归档 target_volume 语义不一致即静默做错）。
-func TestCloudArchive_SingleTask_TargetVolumeRejected(t *testing.T) {
-	t.Parallel()
-	ts, mgr, _ := setupCloudArchiveTest(t)
-	defer ts.Close()
-	id := createCompletedTask(t, mgr, "test.zip")
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON,
-		strings.NewReader(`{"archive_name":"x.tar.gz","target_volume":"vault"}`))
+// setupCloudArchiveVolumeHandlers 构造带 fake 外部卷 + completed 任务的 handler，
+// 供单任务/批量归档 target_volume 的统一转存测试直接调用 handler（不经 HTTP mux）。
+func setupCloudArchiveVolumeHandlers(t *testing.T) (*Handlers, *serverMemFS, *cloud.CloudDownloadManager) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "archive-volume-*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("单任务 target_volume 应 400 fail-closed，got %d", resp.StatusCode)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := newAssemblyTestHandlers(t, dir)
+	fs := &serverMemFS{files: map[string][]byte{}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	sm := capacity.NewStorageManager(dir, 1<<30, nil, testLogger())
+	h.storageMgr = sm
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{
+		UploadsDir: dir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor,
+		ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs,
+		Logger: testLogger(), Config: defaultCloudDownloadConfig(),
+	})
+	h.cloudMgr = mgr
+	return h, fs, mgr
+}
+
+// TestCloudArchive_SingleTask_ToVolume 单任务归档 target_volume：打包转存外部卷
+// （owner 前缀键 + tar.gz 内容），不再静默按桶归档。
+func TestCloudArchive_SingleTask_ToVolume(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/archive/s.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+	if _, err := gzip.NewReader(bytes.NewReader(fs.files[key])); err != nil {
+		t.Fatalf("目标应为 tar.gz（gzip 头）: %v", err)
+	}
+}
+
+// TestCloudArchive_Batch_ToVolume 批量归档 target_volume：多文件打包转存外部卷。
+func TestCloudArchive_Batch_ToVolume(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id1 := createCompletedTask(t, mgr, "a.bin")
+	id2 := createCompletedTask(t, mgr, "b.bin")
+	body := fmt.Sprintf(`{"task_ids":[%q,%q],"archive_name":"batch.tar.gz","target_volume":"vault"}`, id1, id2)
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/archive", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.cloudArchiveBatch(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/archive/batch.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
 	}
 }
