@@ -14,7 +14,6 @@ package server
 import (
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	webdavcore "github.com/cocomhub/sproxy/pkg/gateway/webdav/webdavcore"
@@ -57,10 +56,16 @@ func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "创建 user 桶失败", http.StatusInternalServerError)
 		return
 	}
-	// LocalFS 需要绝对路径；user 桶即 WebDAV 根（路径相对 user 桶）。
-	// 经 davMetaFS 包一层：写/删/改名联动 sidecar（P1：裸 LocalFS 覆盖写会留陈旧 meta，
-	// 使该文件经 /download 校验固化失败且不可自愈）。
-	fs := &davMetaFS{FS: sync.NewLocalFS(filepath.ToSlash(userAbs), h.logger), h: h, owner: owner, root: tnt.Root()}
+	// **经 Root 适配器**（评审 P0 结构性修复）：DAV 此前用 sync.NewLocalFS(<绝对路径>) 纯 os I/O
+	// ⇒ ① 绕过 at-rest 加解密（读密文/写明文）；② 绕过封装封印（被封源目录仍可 DAV 直连）。
+	// PrefixFS 把 DAV 相对路径映射到 user 桶（同时负责可选能力转发，R21）。
+	// davMetaFS 再包一层：写/删/改名联动 sidecar（防裸覆盖写留陈旧 meta 固化失败）。
+	fs := &davMetaFS{
+		FS:    sync.NewPrefixFS(NewRootFS(tnt.Root()), tnt.UserRoot()+"/"),
+		h:     h,
+		owner: owner,
+		root:  tnt.Root(),
+	}
 	dav := webdavcore.NewHandler(fs)
 	if dav == nil {
 		http.Error(w, "webdav 不可用", http.StatusInternalServerError)
