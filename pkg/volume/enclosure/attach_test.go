@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -143,5 +144,47 @@ func TestAttachAll_Idempotent(t *testing.T) {
 	}
 	if set.External("vault") != first {
 		t.Fatal("重复补装不应重建后端")
+	}
+}
+
+// TestAttachAll_WrapsCapacityAccounting 封装卷后端必须接卷级容量记账：写入按声明大小入账、
+// 超 `max_bytes` 即拒（否则封装卷的容量上限形同虚设）。
+// 变异：去掉 AttachAll 的 WrapBackend → 超限写入不再被拒 → 红。
+func TestAttachAll_WrapsCapacityAccounting(t *testing.T) {
+	t.Parallel()
+	newCaptureWrapper(t, "capture_pool")
+	dir := t.TempDir()
+	rt, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close() })
+	if merr := os.MkdirAll(filepath.Join(dir, "base"), 0o755); merr != nil {
+		t.Fatal(merr)
+	}
+	vols := []volume.Volume{
+		{Name: "main", Type: volume.TypeLocal, RootDir: dir},
+		{Name: "vault", Type: TypeEnclosure, Extra: map[string]any{"source": "main:base", "wrapper": "capture_pool"}},
+	}
+	pools := map[string]*quota.Pool{"vault": quota.NewPool(4)}
+	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, pools, "main")
+	if aerr := AttachAll(context.Background(), set, nil); aerr != nil {
+		t.Fatalf("AttachAll: %v", aerr)
+	}
+	be := set.External("vault")
+	if be == nil {
+		t.Fatal("封装卷后端应已挂回")
+	}
+	// 超限写入（10B > max_bytes=4B）必须被拒。
+	werr := be.FS().WriteFile(context.Background(), "x.bin", bytes.NewReader(make([]byte, 10)), 10, 0)
+	if werr == nil {
+		t.Fatal("超过封装卷 max_bytes 的写入必须被拒")
+	}
+	// 未超限写入成功并入账。
+	if werr := be.FS().WriteFile(context.Background(), "y.bin", bytes.NewReader(make([]byte, 3)), 3, 0); werr != nil {
+		t.Fatalf("未超限写入应成功: %v", werr)
+	}
+	if got := pools["vault"].Usage(); got != 3 {
+		t.Fatalf("封装卷池应入账 3, got %d", got)
 	}
 }

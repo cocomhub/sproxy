@@ -12,6 +12,7 @@ import (
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -65,28 +66,42 @@ func AttachAll(ctx context.Context, set *registry.Set, logger *slog.Logger) erro
 		log = logger
 	}
 	for _, d := range decls {
-		if set.External(d.Vol) != nil {
-			continue // 已装配（测试自注册类型等）
-		}
-		v, ok := set.ByName(d.Vol)
-		if !ok {
-			return fmt.Errorf("enclosure: 卷 %q 未登记", d.Vol)
-		}
-		src, serr := sourceFS(set, d)
-		if serr != nil {
-			return serr
-		}
-		be, berr := d.Build(ctx, v, src)
-		if berr != nil {
-			return fmt.Errorf("enclosure: 封装卷 %q 补装失败: %w", d.Vol, berr)
-		}
-		if aerr := set.AttachExternal(d.Vol, be); aerr != nil {
-			return fmt.Errorf("enclosure: 封装卷 %q 挂回失败: %w", d.Vol, aerr)
+		if err := attachOne(ctx, set, d); err != nil {
+			return err
 		}
 		baseVol, basePath := EffectiveTarget(d, decls)
 		log.Info("封装卷后端补装完成（经服务器处理读写；源目录已封印）",
 			"enclosure", d.Vol, "wrapper", d.Wrapper, "source", d.Source, "path", d.Path,
 			"effective_source", baseVol, "effective_path", basePath)
+	}
+	return nil
+}
+
+// attachOne 补装单个封装卷（已装配则跳过）。
+func attachOne(ctx context.Context, set *registry.Set, d Decl) error {
+	if set.External(d.Vol) != nil {
+		return nil // 已装配（测试自注册类型等）
+	}
+	v, ok := set.ByName(d.Vol)
+	if !ok {
+		return fmt.Errorf("enclosure: 卷 %q 未登记", d.Vol)
+	}
+	src, serr := sourceFS(set, d)
+	if serr != nil {
+		return serr
+	}
+	be, berr := d.Build(ctx, v, src)
+	if berr != nil {
+		return fmt.Errorf("enclosure: 封装卷 %q 补装失败: %w", d.Vol, berr)
+	}
+	// 容量记账：封装卷池在装配期已挂到有效源卷池之下（继承语义），此处把后端包上
+	// CapacityFS ⇒ `max_bytes` 与用量统计真实生效（写入按声明大小预留/结算；卷层实现
+	// TrueUsageReporter 时真值优先，见 pkg/volume/capacity/trueusage.go）。
+	if pool := set.Pool(d.Vol); pool != nil {
+		be = capacity.WrapBackend(be, capacity.NewPoolCounter(pool))
+	}
+	if aerr := set.AttachExternal(d.Vol, be); aerr != nil {
+		return fmt.Errorf("enclosure: 封装卷 %q 挂回失败: %w", d.Vol, aerr)
 	}
 	return nil
 }
