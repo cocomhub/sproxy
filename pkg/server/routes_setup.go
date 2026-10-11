@@ -493,7 +493,10 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		// sidecar 错位」的固化状态（远端卷写后不回读交叉校验 → 读侧逐分块校验恒失配、
 		// 永久 fail-closed）。抢不到 → 可重试目标卷异常，编排层退避重试错开窗口。
 		TargetWriteLock: func(owner, rel string) (func(), bool) {
-			return h.acquireFileLock(owner, rel)
+			// M2（第 7 轮 MAJOR）：转存传的是卷 FS 键（共享卷含 `<owner>/` 前缀），
+			// 经 transferWriteLock 归一为域侧锁键后再取锁——否则与 HTTP 上传/删除/move
+			// 的锁互不可见，同 rel 并发写会产出「主文件与 sidecar 错位」固化状态。
+			return h.transferWriteLock(owner, rel)
 		},
 		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
 		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
@@ -505,9 +508,10 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// scheme 从卷 Type 反查（secretdata/secrets/baidupcs/s3 等声明协议）。
 			vol, ok := vs.ByName(volumeName)
 			if !ok {
-				// 卷元信息缺失（极罕见装配异常）：仍加 Guard（meta 桶隔离恒生效）——
-				// 转存目标也不能触达凭据桶。
-				return trusted.Guard(be.FS()), "", false
+				// 卷元信息缺失（极罕见装配异常）：仍加 Guard(Wrap(...))（meta 桶隔离恒生效
+				// + 写面恒生成 sidecar，与其余装配形状一致——m4 修复：此前只 Guard 不 Wrap，
+				// 该分支转存产物无完整性证据）。
+				return trusted.Guard(trusted.Wrap(be.FS(), h.trustedWrapOpts())), "", false
 			}
 			// 共享判定（用户裁定）：ModeAllow + 多 owner 白名单 = 共享；ModeDeny/零值
 			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。单一

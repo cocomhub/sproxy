@@ -3,6 +3,12 @@
 
 package server
 
+import (
+	"strings"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
+)
+
 // uploading_lock.go 收敛 uploadingFiles 文件级互斥锁的键格式与获取语义（T6c move 锁架构延伸）：
 // 单次上传 / 跨卷 move / 分块 init 已共用 <owner>\x00<rel> 键；本文件把 delete、版本 restore、
 // 分块 complete 也纳入同一把锁，使「move 复制→删源」窗口内的并发 delete/restore/complete 各自
@@ -38,6 +44,24 @@ func isUploadingLockMarker(value string) bool {
 	default:
 		return false
 	}
+}
+
+// lockRelFor 把**卷 FS 键**归一为**文件域锁键**（M2 修复，第 7 轮 MAJOR）：转存传的是
+// `volume.Location.FSPath()`（共享卷含 owner 前缀 `<owner>/user/<rel>`），而 HTTP 上传/
+// 删除/move 用域侧 rel（`user/<rel>`）——不归一会让两写面在共享外部卷上**互不可见**，
+// 同 rel 并发写产出「主文件与 sidecar 错位」的固化状态。此处剥掉 `<owner>/` 前缀
+// （无前缀/私有卷原样返回），使两写面共用同一键。
+func (h *Handlers) lockRelFor(owner, fsKey string) string {
+	trimmed := strings.TrimPrefix(fsKey, "/")
+	return strings.TrimPrefix(trimmed, storage.NormalizeOwner(owner)+"/")
+}
+
+// transferWriteLock 是**转存写面**的取锁入口（装配层注入 `cloud.Options.TargetWriteLock`）：
+// 转存传的是卷 FS 键（`volume.Location.FSPath()`，共享卷含 `<owner>/` 前缀），先经
+// `lockRelFor` 归一为域侧锁键，再取与 HTTP 上传/删除/move **同一键空间**的排他锁
+// （M2：不归一 → 两写面在共享外部卷上互不可见 → 同 rel 并发写产出主文件/sidecar 错位固化）。
+func (h *Handlers) transferWriteLock(owner, rel string) (func(), bool) {
+	return h.acquireFileLock(owner, h.lockRelFor(owner, rel))
 }
 
 // acquireFileLock 为 owner 的 rel 获取文件级排他锁（key = <owner>\x00<rel>，与单次上传 /

@@ -199,6 +199,10 @@ type Handlers struct {
 	// 本地暂存独立记账，不与网盘 owner_quotas 混用——外部卷 WriteFile 先预留本地字节）。
 	// 上限 = trusted_volume.staging_quota_bytes；0 = 不限制但记账。tenantMu 保护。
 	stagingScopes map[string]*quota.Scope
+	// stagingPool 是 staging 的**独立根池**（M5，第 7 轮 MAJOR）：不挂 globalPool 之下，
+	// 只受 trusted_volume.staging_quota_bytes 约束（0 = 该维度不限）——否则慢速外部卷上传
+	// 长期占暂存会沿父链抬高 max_storage_bytes 的全局 usage，误拒无关 owner 的正常写。
+	stagingPool *quota.Pool
 	// stagingTrackers 按 owner 缓存 staging 等待队列（quota.StagingTracker，含 sync.Cond）。
 	// **必须复用同一实例**：每请求新建 tracker 会产生各自独立的 cond，其它请求的
 	// ReleaseUsage 广播无法唤醒等待者（只能干等满 deadline，甚至误报「空间不足」；
@@ -782,11 +786,12 @@ func (h *Handlers) quotaScopeFor(owner, rel string) *quota.Scope {
 // 字节、写后释放，防本地磁盘被 staging 占满。上限 = trusted_volume.staging_quota_bytes
 // （0/缺省 = 不限制但记账，预留/释放对称不误伤）。
 //
-// **注意（设计意图）**：本 Scope **挂在 h.globalPool 之下**——即 staging 占用计入
-// max_storage_bytes 全局上限（quota.reserveUp/commitUp 沿父链累加）。这是**有意为之**：
-// staging 实占本地磁盘，「独立」指记账维度与网盘配额分离，而非脱离本地全局限制——
-// 核心目的就是防本地盘被打满。若改为独立根池，两池各自不超但合计可超物理盘，反而不安全。
-// globalPool 未装配 → nil（无配额能力零回归）。懒建缓存（tenantMu 保护），装配期硬配置不重建。
+// **M5 修复（2026-10-11，第 7 轮对抗评审）**：本 Scope 现挂**独立根池** `h.stagingPool`
+// （容量 = `staging_quota_bytes`），不再挂 `globalPool` 之下。原因：挂父链会让慢速外部卷
+// 上传（长期占本地暂存）抬高 `max_storage_bytes` 的全局 usage，从而**误拒无关 owner 的
+// 正常写**（跨租户干扰）；「staging 占物理盘」的保护改由运维显式配置 `staging_quota_bytes`
+// 承担（建议按本地盘余量设置）。globalPool 未装配时仍返回 nil（无配额能力零回归）。
+// 懒建缓存（tenantMu 保护），装配期硬配置不重建。
 func (h *Handlers) stagingQuotaScope(owner string) *quota.Scope {
 	owner = normalizeOwner(owner)
 	h.tenantMu.Lock()
@@ -800,11 +805,20 @@ func (h *Handlers) stagingQuotaScope(owner string) *quota.Scope {
 	if sc, ok := h.stagingScopes[owner]; ok {
 		return sc
 	}
+	if h.stagingPool == nil {
+		// 独立根池：容量 = staging_quota_bytes（0 = 不设上限，仅记账；根池无父链，
+		// 不牵连 max_storage_bytes 的全局账本——M5 修复）。
+		var poolMax int64
+		if cfg := h.cfgPtr.Load(); cfg != nil {
+			poolMax = int64(cfg.TrustedVolume.StagingQuotaBytes)
+		}
+		h.stagingPool = quota.NewPool(poolMax)
+	}
 	var limit int64
 	if cfg := h.cfgPtr.Load(); cfg != nil {
 		limit = int64(cfg.TrustedVolume.StagingQuotaBytes)
 	}
-	sc := h.globalPool.Scope("/staging/"+owner, limit)
+	sc := h.stagingPool.Scope("/staging/"+owner, limit)
 	h.stagingScopes[owner] = sc
 	return sc
 }

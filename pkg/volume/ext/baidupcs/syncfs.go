@@ -134,8 +134,15 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 		return err
 	}
 	clean := strings.TrimPrefix(relPath, "/")
-	if clean == "" || clean == ".." || strings.HasPrefix(clean, "../") {
+	// m8 修复（第 7 轮 MINOR）：此前只拒**前缀** `../`，中段（`docs/../../etc`）或
+	// 单段 `..` 漏判 → 原样透传给远端 API（可能跨目录）。改为**逐段**拒绝 `..`/空段。
+	if clean == "" {
 		return fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
+	}
+	for seg := range strings.SplitSeq(clean, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
+		}
 	}
 	// 本地 staging 配额由外层 per-request `syncpkg.StagingQuotaGateFS` 预留/释放
 	// （不再由本共享单例记账——避免 per-owner 覆盖）。此处只落 staging + 上传。

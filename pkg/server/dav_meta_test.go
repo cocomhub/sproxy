@@ -11,8 +11,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -75,3 +77,72 @@ func TestDavMetaFS_RenameDirMigratesMetaSubtree(t *testing.T) {
 		}
 	}
 }
+
+// TestDavMetaFS_CapabilityForwardingAndMetaLink 回归（M8，第 7 轮 MAJOR）：davMetaFS 必须
+// 透传可选能力（Provider/Mover/Copier/Linker/RangeReader/DirectURL/WriteIfAbsent/
+// LocalVolume/StagingQuota*），且**写面能力带 meta 重链**——此前 Move/Copy/Link 被嵌入
+// FS 直通（目标无 sidecar、源成孤儿），Provider 等断言恒 false 静默降级。
+// 变异：去掉 Move 里的 relinkAfterMove → 目标无 sidecar → 红。
+func TestDavMetaFS_CapabilityForwardingAndMetaLink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	userRoot := filepath.Join(dir, "user")
+	base := syncpkg.NewLocalFS(filepath.ToSlash(userRoot), testLogger())
+	provider := &capProviderFS{LocalFS: base, fm: &meta.FileMeta{
+		Version: 1, Size: 1, TotalSHA256: strings.Repeat("a", 64), ChunkSize: 1,
+	}}
+	d := &davMetaFS{FS: provider, h: &Handlers{logger: testLogger()}, owner: "", root: root}
+	ctx := context.Background()
+
+	// 能力断言（编译期已断言；运行期再核一层，防「实现了但语义落空」）。
+	if _, ok := any(d).(syncpkg.WriteIfAbsent); !ok {
+		t.Fatal("davMetaFS 应实现 WriteIfAbsent")
+	}
+	if _, ok := any(d).(syncpkg.RangeReader); !ok {
+		t.Fatal("davMetaFS 应实现 RangeReader")
+	}
+	if _, ok := any(d).(syncpkg.DirectURLProvider); !ok {
+		t.Fatal("davMetaFS 应实现 DirectURLProvider")
+	}
+	if pv, ok := any(d).(meta.Provider); !ok {
+		t.Fatal("davMetaFS 应实现 meta.Provider")
+	} else if fm, ferr := pv.FileMeta(ctx, "x.bin"); ferr != nil || fm == nil {
+		t.Fatalf("FileMeta 应透传内层: fm=%v err=%v", fm, ferr)
+	}
+	if !d.IsLocalVolume() {
+		t.Fatal("IsLocalVolume 应透传内层（capProviderFS 自述本地）")
+	}
+
+	// 写面 + Move 重链：先写（生成 sidecar），再 Move → 目标必须有 sidecar、源不得残留。
+	if werr := d.WriteFile(ctx, "a.bin", strings.NewReader("hello"), 5, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	if _, oerr := root.Stat(meta.MetaPath("user/a.bin")); oerr != nil {
+		t.Fatalf("写后应有 sidecar: %v", oerr)
+	}
+	if merr := d.Move(ctx, "a.bin", "b.bin"); merr != nil {
+		t.Fatalf("Move: %v", merr)
+	}
+	if _, oerr := root.Stat(meta.MetaPath("user/b.bin")); oerr != nil {
+		t.Fatalf("Move 后目标应有 sidecar（M8：写面能力须带 meta 重链）: %v", oerr)
+	}
+	if _, oerr := root.Stat(meta.MetaPath("user/a.bin")); oerr == nil {
+		t.Fatal("Move 后源 sidecar 应随迁不残留")
+	}
+}
+
+// capProviderFS 是「实现 meta.Provider + LocalVolume + Mover/Copier/Linker」的替身
+// （LocalFS 已实现 Mover/Copier/Linker），用于验证 davMetaFS 的透传与重链。
+type capProviderFS struct {
+	*syncpkg.LocalFS // 具体类型嵌入：连带提升 Mover/Copier/Linker/RangeReader 等可选能力
+	fm               *meta.FileMeta
+}
+
+func (c *capProviderFS) FileMeta(context.Context, string) (*meta.FileMeta, error) { return c.fm, nil }
+
+func (c *capProviderFS) IsLocalVolume() bool { return true }
