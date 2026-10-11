@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,11 @@ type StagingTracker struct {
 	cond  *sync.Cond // 排队等待：Release 广播唤醒
 	// waitTimeout 是排队等待超时（<=0 = stagingWaitTimeout）；测试可注入缩短。
 	waitTimeout time.Duration
+	// waitRounds 是**进入 cond.Wait 的次数**（测试可观测：替代固定 Sleep 做时序同步）。
+	waitRounds atomic.Int64
+	// watchers 是**观察者 goroutine 计数**（每次 ReserveUsage 至多 1 个；m7：此前每轮等待
+	// 都 spawn 一个 → 高竞争下 goroutine churn + 野 Broadcast）。测试断言其有界。
+	watchers atomic.Int64
 }
 
 // NewStagingTracker 构造 staging 配额记账器（scope 为独立 staging Scope）。
@@ -58,6 +64,11 @@ func (q *StagingTracker) ReserveUsage(ctx context.Context, size int64) error {
 	deadline := time.Now().Add(timeout)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	// 观察者**懒起且至多 1 个**（见 waitWatcher）：快路径零 goroutine；仅在真正进入等待时
+	// 创建，供 ctx 取消/超时 `Broadcast` 打断 `cond.Wait`（m7：此前**每轮等待**各 spawn 一个
+	// → 高竞争下 goroutine churn + 野 Broadcast）。
+	w := &waitWatcher{}
+	defer w.stop()
 	for {
 		res, err := q.scope.TryReserve(size)
 		if err == nil {
@@ -75,22 +86,45 @@ func (q *StagingTracker) ReserveUsage(ctx context.Context, size int64) error {
 			}
 			return fmt.Errorf("quota: 等待本地 staging 空间超时（%s）", timeout)
 		}
-		// 磁盘不足：排队等待释放（ctx 取消 / 超时中断；cond 无 ctx 原语——用一次性的
-		// goroutine 感知 ctx/timer 并 Broadcast 打断 Wait，Wait 返回即停止）。
+		// 磁盘不足：排队等待释放（ctx 取消 / 超时由单观察者打断，首次进入时懒起）。
+		w.arm(q, ctx, timer)
 		q.cond.L.Lock()
-		interrupt := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				q.cond.Broadcast() // 打断所有等待者重新评估（含本 ctx 取消者）
-			case <-timer.C:
-				q.cond.Broadcast() // 等待超时：打断重新评估（本循环按 deadline 判定返回）
-			case <-interrupt:
-			}
-		}()
+		q.waitRounds.Add(1) // 进入等待（测试据此同步，无需固定 Sleep）
 		q.cond.Wait()
-		close(interrupt)
 		q.cond.L.Unlock()
+	}
+}
+
+// waitWatcher 承载一次 ReserveUsage 的等待观察者（懒起一次；stop 幂等）。
+// 抽取原因：让 ReserveUsage 保持可读（gocognit 阈值）且观察者语义单点。
+type waitWatcher struct {
+	interrupt chan struct{}
+	armed     bool
+}
+
+// arm 首次进入等待时启动观察者：ctx 取消 / 超时 → Broadcast 打断所有等待者重新评估。
+func (w *waitWatcher) arm(q *StagingTracker, ctx context.Context, timer *time.Timer) {
+	if w.armed {
+		return
+	}
+	w.armed = true
+	w.interrupt = make(chan struct{})
+	q.watchers.Add(1)
+	go func() {
+		select {
+		case <-ctx.Done():
+			q.cond.Broadcast() // 含本 ctx 取消者在内，全部重新评估
+		case <-timer.C:
+			q.cond.Broadcast() // 等待超时：重新评估（本循环按 deadline 判定返回）
+		case <-w.interrupt:
+		}
+	}()
+}
+
+// stop 停止观察者（未 arm 时 no-op；重复调用安全由调用方一次性 defer 保证）。
+func (w *waitWatcher) stop() {
+	if w.interrupt != nil {
+		close(w.interrupt)
 	}
 }
 

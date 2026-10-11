@@ -680,6 +680,19 @@ func (h *Handlers) trustedWrapOpts() trusted.Options {
 	return opts
 }
 
+// warnIfVerifySkipped 在**装配期**对「显式关闭服务端完整性校验」告警一次（M9d，第 7 轮
+// MINOR）：`trusted_volume.skip_verify=true` 是可信卷承诺的降级开关（读侧不校验、
+// 302 直链前置、外部卷写后不回读），必须启动即可见——此前只有配置注释，运行期无任何提示，
+// 运维可能在不知情下长期运行在「无校验」状态。
+func warnIfVerifySkipped(cfg *Config, log *slog.Logger) {
+	if cfg == nil || log == nil || !cfg.TrustedVolume.SkipVerify {
+		return
+	}
+	log.Warn("trusted_volume.skip_verify=true：服务端完整性校验已**关闭**（可信卷承诺降级）",
+		"impact", "下载/转存读侧不校验、外部卷允许 302 直链、外部卷写后不回读交叉校验",
+		"hint", "如需恢复默认（校验开启）请置 trusted_volume.skip_verify=false")
+}
+
 // verifySkipped 报告是否跳过下载数据校验（trusted_volume.skip_verify；缺省 false =
 // 校验开启——默认可信行为）。**只关校验，不关 meta 生成/桶隔离**（meta 恒生成、凭据
 // 保护恒生效；skip_verify 仅放宽读侧下载校验，极端性能场景）。

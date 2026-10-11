@@ -13,10 +13,12 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -283,5 +285,34 @@ func TestDownload_VerifyMeta_TamperFailClosed(t *testing.T) {
 	}
 	if r2.StatusCode != http.StatusInternalServerError && r2.StatusCode != http.StatusBadRequest {
 		t.Fatalf("篡改下载应失败（500/400/中断）, got %d", r2.StatusCode)
+	}
+}
+
+// TestWarnIfVerifySkipped 回归（M9d，第 7 轮 MINOR）：`trusted_volume.skip_verify=true` 必须在
+// **装配期**显式告警（可信卷承诺降级：读侧不校验 / 302 直链前置 / 外卷写后不回读）——
+// 此前只有配置注释，运行期无任何提示。
+// 变异：去掉 warnIfVerifySkipped 的告警 → 断言红。
+func TestWarnIfVerifySkipped(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	warnIfVerifySkipped(&Config{TrustedVolume: TrustedVolumeConfig{SkipVerify: true}}, log)
+	if out := buf.String(); !strings.Contains(out, "skip_verify") || !strings.Contains(out, "降级") {
+		t.Fatalf("skip_verify=true 应告警（含降级语义）: %q", out)
+	}
+	buf.Reset()
+	warnIfVerifySkipped(&Config{}, log) // 缺省 false = 校验开启 → 不告警
+	if buf.Len() != 0 {
+		t.Fatalf("校验开启时不应告警: %q", buf.String())
+	}
+	warnIfVerifySkipped(nil, log) // nil 安全
+	// 接线断言（门禁式）：RegisterRoutes 装配期必须调用本告警（防「helper 有测试但没人调」）。
+	src, rerr := os.ReadFile("routes.go")
+	if rerr != nil {
+		t.Fatalf("读 routes.go: %v", rerr)
+	}
+	if !strings.Contains(string(src), "warnIfVerifySkipped(cfg, log)") {
+		t.Fatal("RegisterRoutes 必须在装配期调用 warnIfVerifySkipped（M9d 接线）")
 	}
 }

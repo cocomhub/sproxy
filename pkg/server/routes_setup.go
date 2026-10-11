@@ -500,10 +500,10 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		},
 		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
 		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
-		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool) {
+		TransferFSFor: func(volumeName string) (syncpkg.FS, string) {
 			be := vs.External(volumeName)
 			if be == nil {
-				return nil, "", false
+				return nil, ""
 			}
 			// scheme 从卷 Type 反查（secretdata/secrets/baidupcs/s3 等声明协议）。
 			vol, ok := vs.ByName(volumeName)
@@ -511,12 +511,10 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 				// 卷元信息缺失（极罕见装配异常）：仍加 Guard(Wrap(...))（meta 桶隔离恒生效
 				// + 写面恒生成 sidecar，与其余装配形状一致——m4 修复：此前只 Guard 不 Wrap，
 				// 该分支转存产物无完整性证据）。
-				return trusted.Guard(trusted.Wrap(be.FS(), h.trustedWrapOpts())), "", false
+				return trusted.Guard(trusted.Wrap(be.FS(), h.trustedWrapOpts())), ""
 			}
-			// 共享判定（用户裁定）：ModeAllow + 多 owner 白名单 = 共享；ModeDeny/零值
-			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。单一
-			// 事实源：volume.Shared()（2026-10-05，#735 收敛：写/读/转存三侧共用）。
-			shared := vol.Shared()
+			// 共享卷的 owner 前缀隔离由 `volume.ResolveLocation` 唯一入口承担（转存键空间
+			// 见 VolumeFor）；历史 `shared` 第三返回值已删除（m5：转存路径从未消费，死值）。
 			// 远程性判定不在装配层：目标 FS 自述（syncpkg.LocalVolume 能力接口，transfer.go
 			// 查询）——外部卷零配置（未实现默认远程），内部/封装卷实现 IsLocalVolume()
 			// 自述（用户裁定 2026-10-05：不靠类型名硬编码，层层委派）。
@@ -524,7 +522,7 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// 只关读侧校验不关 meta；转存写后自动生成隐藏 .meta，目标成为可信卷）。
 			fsys := be.FS()
 			fsys = trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts()))
-			return fsys, registry.SchemeOf(vol.Type), shared
+			return fsys, registry.SchemeOf(vol.Type)
 		},
 		// VolumeFor：转存键空间经 volume.ResolveLocation 计算（权限门/路径安全/共享前缀
 		// 由 volume 唯一入口承担，用户裁定 2026-10-05）——装配层提供 vs.ByName 解析。
