@@ -33,6 +33,11 @@ type APIConfig struct {
 	CredentialPath string
 	// HTTPClient 可选注入（测试用）。
 	HTTPClient *http.Client
+	// UserHost 是 OAuth token 端点域名（默认 https://user.mypikpak.com）——access_token
+	// 过期时用 refresh_token 续期；测试可注入本地 httptest。
+	UserHost string
+	// RefreshSkew 是 access_token 临期续期提前量；<=0 → 默认 5min。
+	RefreshSkew time.Duration
 	// MaxRetries 是幂等请求（GET/HEAD）的瞬断重试次数；<=0 → 默认（3）。
 	// 背景：取 FETCH 直链的控制面请求单次 TLS 握手超时会让整个多 GB 任务失败。
 	MaxRetries int
@@ -55,7 +60,15 @@ type API struct {
 	token string
 	// credPath 是 CLI 会话凭据文件路径（.credentials.json）。
 	credPath string
-	log      *slog.Logger
+	// userHost 是 OAuth token 端点域名（续期用）。
+	userHost string
+	// refreshSkew 是临期续期提前量。
+	refreshSkew time.Duration
+	// expiry 是当前 token 的过期时间（零值 = 未知，不主动续期）。
+	expiry time.Time
+	// lastRefresh 是上次续期时间（节流：避免并发 401 触发续期风暴）。
+	lastRefresh time.Time
+	log         *slog.Logger
 	// retry 是幂等请求（GET/HEAD）的退避重试策略。
 	retry retryPolicy
 
@@ -84,7 +97,16 @@ func NewAPI(cfg APIConfig, cli *Cli) *API {
 			credPath = filepath.Join(home, ".pikpak", ".credentials.json")
 		}
 	}
-	return &API{host: strings.TrimRight(host, "/"), client: client, cli: cli, cfgToken: cfg.AccessToken, token: cfg.AccessToken, credPath: credPath, log: log,
+	userHost := strings.TrimRight(cfg.UserHost, "/")
+	if userHost == "" {
+		userHost = defaultUserHost
+	}
+	skew := cfg.RefreshSkew
+	if skew <= 0 {
+		skew = defaultRefreshSkew
+	}
+	return &API{host: strings.TrimRight(host, "/"), client: client, cli: cli, cfgToken: cfg.AccessToken, token: cfg.AccessToken,
+		credPath: credPath, userHost: userHost, refreshSkew: skew, log: log,
 		retry: retryPolicy{MaxRetries: cfg.MaxRetries, Backoff: cfg.RetryBackoff}}
 }
 
@@ -201,6 +223,13 @@ func (a *API) doJSONOnce(ctx context.Context, method, path, u string, body any, 
 		return retryableRequestErr(err), err
 	}
 	defer resp.Body.Close()
+	// 401：token 已失效（本地 token_expiry 未到也可能发生，如服务端提前失效/改密）→
+	// 续期一次（HTTP → CLI）并交由外层退避重试；不把 401 当普通 4xx 直接放弃。
+	if resp.StatusCode == http.StatusUnauthorized {
+		b, _ := ioReadAll(resp.Body)
+		a.invalidateToken(ctx)
+		return true, fmt.Errorf("pikpak api %s %s: HTTP %d: %s", method, path, resp.StatusCode, truncate(string(b), 200))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := ioReadAll(resp.Body)
 		return retryableStatus(resp.StatusCode),
@@ -214,36 +243,86 @@ func (a *API) doJSONOnce(ctx context.Context, method, path, u string, body any, 
 	return false, nil
 }
 
-// ensureToken 返回当前 access token：显式配置优先；否则从 CLI 会话凭据文件
-// （.credentials.json）读 access_token 并缓存。CLI v0.5.2 的 `auth token` 是【保存】
-// 命令不再导出——凭据文件是唯一可靠来源（CLI 每次操作前自动 refresh 会话，故文件内
-// access_token 恒为最新）。凭据文件缺失/无 access_token → ErrNotLoggedIn（fail-closed）。
+// ensureToken 返回**当前有效**的 access token：显式配置优先；否则读 CLI 会话凭据文件
+// （.credentials.json），token 过期/临期时用 refresh_token 自动续期（HTTP 优先 → 官方 CLI
+// 回落）并落盘。凭据文件缺失/无 access_token → ErrNotLoggedIn（fail-closed）。
 // 并发安全：全部读写都在 tokenMu 保护下（含快速路径——锁外读 token 与锁内写之间
 // 无 happens-before，多 goroutine 并发首个云下载会真实竞争）。
 func (a *API) ensureToken(ctx context.Context) (string, error) {
 	a.tokenMu.Lock()
 	defer a.tokenMu.Unlock()
-	if a.token != "" {
+	// 显式 token（cfg.AccessToken）：无凭据文件可续期，按原样使用。
+	if a.cfgToken != "" {
+		a.token = a.cfgToken
+		return a.token, nil
+	}
+	if a.token != "" && !a.needsRefreshLocked() {
 		return a.token, nil
 	}
 	if a.credPath == "" {
 		return "", fmt.Errorf("%w: 凭据文件路径不可用", ErrNotLoggedIn)
 	}
-	data, err := os.ReadFile(a.credPath)
+	cred, err := readCredentials(a.credPath)
 	if err != nil {
-		return "", fmt.Errorf("%w: 读凭据文件: %v", ErrNotLoggedIn, err)
+		if a.token != "" {
+			return a.token, nil // 已有可用 token：凭据文件暂不可读不阻断
+		}
+		return "", fmt.Errorf("%w: 读凭据文件 %s: %v", ErrNotLoggedIn, a.credPath, err)
 	}
-	var cred struct {
-		AccessToken string `json:"access_token"`
-	}
-	if jerr := json.Unmarshal(data, &cred); jerr != nil {
-		return "", fmt.Errorf("%w: 凭据文件解析失败: %v", ErrNotLoggedIn, jerr)
-	}
-	if cred.AccessToken == "" {
+	if cred.accessToken() == "" {
 		return "", fmt.Errorf("%w: 凭据文件缺 access_token", ErrNotLoggedIn)
 	}
-	a.token = cred.AccessToken
+	// 文件比内存新（其它进程/CLI 已续期）→ 直接采用文件里的 token。
+	if cred.accessToken() != a.token {
+		a.token, a.expiry = cred.accessToken(), cred.expiry()
+	}
+	if !a.needsRefreshLocked() {
+		return a.token, nil
+	}
+	if rerr := a.refreshLocked(ctx, cred); rerr != nil {
+		if a.expiredLocked() {
+			return "", rerr // 确已过期且续期失败：如实报错（带续期/登录提示）
+		}
+		a.log.Warn("pikpak token refresh failed, continue with current token", "err", rerr)
+	}
 	return a.token, nil
+}
+
+// needsRefreshLocked 判断是否需续期：无 token 或（已知过期时间且临期）。
+// 过期时间未知（老凭据/显式 token）→ 不主动续期（保持既有行为，失败由 401 路径兜底）。
+func (a *API) needsRefreshLocked() bool {
+	if a.token == "" {
+		return true
+	}
+	if a.expiry.IsZero() {
+		return false
+	}
+	return time.Now().Add(a.refreshSkew).After(a.expiry)
+}
+
+// expiredLocked 判断当前 token 是否已过期（过期时间未知 → false）。
+func (a *API) expiredLocked() bool {
+	return !a.expiry.IsZero() && time.Now().After(a.expiry)
+}
+
+// invalidateToken 处理「服务端判 401（token 已失效）」：清缓存 + 尽力续期一次，
+// 让外层重试用续期后的 token。续期失败只记日志（不把 401 掩盖成续期错误）。
+func (a *API) invalidateToken(ctx context.Context) {
+	a.tokenMu.Lock()
+	defer a.tokenMu.Unlock()
+	a.token = a.cfgToken
+	a.expiry = time.Time{}
+	if a.cfgToken != "" || a.credPath == "" {
+		return
+	}
+	cred, err := readCredentials(a.credPath)
+	if err != nil {
+		a.log.Warn("pikpak 401: 读凭据文件失败", "err", err)
+		return
+	}
+	if rerr := a.refreshLocked(ctx, cred); rerr != nil {
+		a.log.Warn("pikpak 401: token 续期失败", "err", rerr)
+	}
 }
 
 // List 列出目录（parentID 空 = 根）下文件。**带 page_token 循环取全量**（EXT-6：
