@@ -34,7 +34,21 @@ storage_root: "./storage"
 #                               #   零值 false = 私密（外部卷经服务端转发，不暴露原始存储 URL）；
 #                               #   显式 true = 下载时 302 跳到后端直链（流量不经服务端，需后端支持直链）。
 #                               #   仅明文外部卷（baidupcs 等）消费；secretdata 密文卷恒服务端解密（忽略本字段）。
-#   # 集群出口示例（type=egress，2026-10-05 用户裁定凭证下发）：一出口卷 = 一持有节点卷
+#   # 封装卷示例（type=enclosure，2026-10-11 通用封装机制）：声明占用某个已装配卷的根/子目录，
+  # 由注册的封装处理器（wrapper）提供变换后的访问（如 secretdata 加密）。
+  # 装配后**源目录在源卷侧被封印**：直连写操作恒拒（409）、默认读按不存在（404）且列举过滤；
+  # 封装卷自身经服务器处理读写（不受封印影响）。支持嵌套（封装另一个封装卷，路径逐层拼接）与
+  # 深度上限 8；跨外部卷源当前装配期显式拒绝（禁静默降级）。
+  #   - name: "vault"
+  #     type: "enclosure"
+  #     extra:
+  #       source: "main:private/vault"   # <源卷名>:<子路径>（子路径可空 = 整卷封装）
+  #       wrapper: "secretdata"          # 封装处理器注册名
+  #       secret_url: "secrets://keys/vault"   # wrapper 自身配置（此处为密钥来源）
+  #       source_read_mode: "hidden"     # hidden(默认，读 404+列举过滤) | readable(只读透视，便于迁移)
+  #       allow_direct_url: false        # 默认禁止 302 直链（禁客户端直连源存储）
+  #       max_bytes: 0                   # 0 = 仅受源卷池约束（继承）；>0 = 封装卷自身上限
+  # 集群出口示例（type=egress，2026-10-05 用户裁定凭证下发）：一出口卷 = 一持有节点卷
 #   # （多凭证/多持有节点 = 配多条 egress 卷）。持有节点签发自包含短效凭证（HMAC+时效+
 #   # 白名单+范围），出口节点经 mesh 从持有节点拉数据转发（播放器 302/转发目标 = 出口节点）。
 #   # 需配合：持有节点 remote_read.enabled + mesh.node.enabled（宣告 volread）+ 本节点

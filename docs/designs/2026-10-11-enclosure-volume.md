@@ -155,12 +155,18 @@ func (rt *Root) SetSeals([]SealRule) error               // 写恒拒；读 hidd
 
 | 期 | 内容 | 验收 |
 |---|---|---|
-| S1 ✅ | `storage` 封印内核（15 入口 + 7 组测试） | 已提交 `6b9f03983` |
-| S2 | `enclosure.FS` 薄层 + `PrefixFS` 补 `MetaExtraUpdater` + R21 纳入 + `quota` 父链 | 单测 + 变异 + R21 绿 |
-| S3 | `enclosure.Parse` 声明/拓扑 + `type: enclosure` 装配 + 源封印注入 + DAV 视图注入 | 端到端拒绝 + 正常读写 |
-| S4 | wrapper 注册表（`secretdata` 迁为 wrapper）+ 跨外部卷 per-tenant 视图 | 加密卷六面接通 |
-| S5 | 物理占用记账（`TrueUsageReporter`/`CorrectTo`/`NewPoolWithParent` 已落地；`secretdata` 与封装卷接入 + `reconcile` 优先真值 + 交叉校验 + S3 part/`Release` 钳 0 待接） | 配额不可被逻辑放大绕过 |
-| S6 | 评审 P0/P1/P2/Minor 全量修复 + 文档/门禁 | 四 lint 面 + archcheck + 全量测试绿 |
+| S1 ✅ | `storage` 封印内核（15 入口 + 7 组测试） | 已落地（`6b9f03983`） |
+| S2 ✅ | `enclosure.FS` 薄层 + `PrefixFS` 补 `MetaExtraUpdater` + R21 纳入 + `quota` 父链 | 已落地（`5439f2bbc`/`947ea367c` 等）；R23 自动发现门禁另补 |
+| S3 ✅ | `enclosure.Parse` 声明/拓扑 + `type: enclosure` 装配 + 源封印注入 + 租户子根传播 | 已落地（`f07b23d93`/`eb8c9a135`）；DAV 经 `NewRootFS` 同受封印约束 |
+| S4 ◐ | wrapper 注册表已就绪；`secretdata` 迁为 wrapper **待接入**；跨外部卷 per-tenant 视图待做（当前装配期显式拒绝） | 加密卷六面已由「用户可见入口」覆盖（见下）；wrapper 迁移为收尾项 |
+| S5 ◐ | 真值机制（`TrueUsageReporter`/`CorrectTo`/`NewPoolWithParent`）已落地；封装卷已接 `CapacityFS` 与父链；`secretdata`/封装卷的**物理字节报告**与 `reconcile` 优先真值待接 | 配额不可被逻辑放大绕过（当前对本地面板已生效，加密卷物理口径待接） |
+| S6 ◐ | 评审 P0/P1 全部修复 + 大批 P2（含 R23、ACL、锁 TTL、`?ciphertext=1`、m9 修正）；余项：物理报告接入、`sweepMetaTmp` 惰性化、本地写单遍 meta | 四 lint 面 + archcheck + 全量测试绿 → PR |
+
+**已实现的实际防线（与本设计对应）**：① 封印（源卷根 + 租户子根，写恒拒/读 404 或只读透视）；
+② 封装视图（`PrefixFS` 前缀映射 + `enclosure.FS` 默认抑制 302 直链 + `MetaExtraUpdater` 透传）；
+③ 声明/拓扑/装配（推迟装配 + `EffectiveTarget` 嵌套路径拼接 + 配额父链继承）；
+④ **面级用户可见加解密唯一入口**（`pkg/server/user_visible_io.go` + `NewRootFS`）：S3/DAV/分享/
+分块上传/整文件上传/下载全走透明加解密，块写加密卷显式拒绝。
 
 ## 10. 真值修正机制（让「知道真实占用的卷层」修正账本）
 
