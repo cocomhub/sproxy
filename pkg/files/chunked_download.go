@@ -380,10 +380,15 @@ type chunkResp struct {
 // writeChunkSuccess 写分块下载成功响应：响应头 + 完整文件 checksum + 数据 + 计量。
 func (s *Service) writeChunkSuccess(c *chunkResp, offset, length, fileSize int64, serverChecksum string, data []byte) {
 	setChunkResponseHeaders(c.w, c.dp.Filename, offset, length, fileSize)
-	// 如果 ChecksumStore 有记录，返回完整文件 checksum（per-tenant + 根内相对 key）
-	if csStore, csKey := s.checksumStoreForRead(c.dp); csStore != nil {
-		if cs, ok := csStore.Get(csKey); ok {
-			c.w.Header().Set(headerFileChecksum, cs)
+	// 完整文件 checksum（per-tenant + 根内相对 key）。
+	// **密文导出模式（?ciphertext=1）必须跳过**：台账里存的是**明文** sha256（上传时对明文流计算），
+	// 而本响应的实体是**密文**字节 —— 回明文哈希 = 坐标混用（客户端按该头校验必然失配、误判损坏），
+	// 且与整文件密文导出面（openCiphertext 刻意不返回 checksum）语义相反。
+	if !c.dp.Ciphertext {
+		if csStore, csKey := s.checksumStoreForRead(c.dp); csStore != nil {
+			if cs, ok := csStore.Get(csKey); ok {
+				c.w.Header().Set(headerFileChecksum, cs)
+			}
 		}
 	}
 	c.w.Header().Set("X-Chunk-Checksum", serverChecksum)
