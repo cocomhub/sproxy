@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"strings"
 
@@ -108,9 +109,10 @@ func executeIndividual(ctx context.Context, req TransferRequest, rel string) (st
 // writeUnique 以「目标唯一」语义写目标 rel：
 //   - Overwrite=false：优先 WriteIfAbsent（原子、无 TOCTOU、并发安全防覆盖）；装饰器链
 //     （trusted.Guard/Wrap、capacity、staging）**无条件实现**该可选能力接口，但底层可能
-//     未实现（返回 syncpkg.ErrUnsupported）——此时**回落** Stat 存在性检查 + WriteFile，
-//     不把「未实现」当写失败（P0-1 同型陷阱：对装饰器链做能力类型断言恒真）。
-//   - 目标已存在 → ErrExists（fail-closed，拒绝静默覆盖）。
+//     未实现（返回 syncpkg.ErrUnsupported）——此时**回落** Stat 存在性检查 + WriteFile。
+//     目标 FS **完全无**该能力时也走同一 Stat 检查（断言失败不等于「可覆盖」）。
+//   - 目标已存在 → ErrExists（fail-closed，拒绝静默覆盖）；存在性检查出错（非不存在）
+//     也 fail-closed（不得把未确认状态当不存在继续写）。
 //   - Overwrite=true：直接 WriteFile（允许覆盖）。
 func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, size, mtime int64, overwrite bool) error {
 	if !overwrite {
@@ -125,9 +127,14 @@ func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, 
 				return err
 			}
 			// ErrUnsupported = 能力探针（未消费 reader）→ 降级存在性检查。
-			if e, serr := dest.Stat(ctx, rel); serr == nil && e != nil {
-				return ErrExists
-			}
+		}
+		// 无原子能力 / 底层未实现 → 存在性检查（**不论能力分支是否命中**都执行）。
+		e, serr := dest.Stat(ctx, rel)
+		if serr != nil && !errors.Is(serr, fs.ErrNotExist) {
+			return fmt.Errorf("transfer: 目标 %q 存在性检查失败: %w", rel, serr)
+		}
+		if e != nil {
+			return ErrExists
 		}
 	}
 	return dest.WriteFile(ctx, rel, r, size, mtime)
@@ -147,6 +154,10 @@ func executePacked(ctx context.Context, req TransferRequest, rel string) (string
 	// V1：覆盖保护与 individual 一致——WriteIfAbsent 优先（拒绝静默覆盖），
 	// 否则降级 WriteFile。
 	if err := packedWrite(ctx, req, rel, pr); err != nil {
+		// join pack goroutine（防调用方 close 源 Reader 与 goroutine 仍在 io.Copy 读并发）：
+		// 让管道写端报错退出后等待 goroutine 收尾再返回。
+		_ = pr.CloseWithError(err)
+		<-packErrCh
 		return "", err
 	}
 	// 等 pack goroutine 收尾（WriteIfAbsent/WriteFile 已消费 pr 至 EOF）。

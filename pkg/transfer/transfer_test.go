@@ -245,3 +245,41 @@ func TestExecute_TargetURLPercentEncodes(t *testing.T) {
 		t.Fatalf("url=%q want %q", got, want)
 	}
 }
+
+// noCallFS 只暴露 sync.FS 的 7 个方法（以接口嵌入隐藏底层实现的可选能力）——复现
+// transferVolumeFS 一类「装饰器/包装器吞掉可选能力」的形态。
+type noCallFS struct{ syncpkg.FS }
+
+// noCallVol 是 transfer.VolumeFS（Scheme/Volume）+ 被隐藏 WriteIfAbsent 的 FS。
+type noCallVol struct {
+	noCallFS
+	scheme string
+	name   string
+}
+
+func (v *noCallVol) Scheme() string { return v.scheme }
+func (v *noCallVol) Volume() string { return v.name }
+
+// TestExecute_NoWriteIfAbsentStillRejectsOverwrite 目标 FS **完全没有** WriteIfAbsent 能力
+// 时，写前 Stat 存在性检查仍须生效（不得因断言失败就静默覆盖）。
+func TestExecute_NoWriteIfAbsentStillRejectsOverwrite(t *testing.T) {
+	t.Parallel()
+	base := newMemFS()
+	v := &noCallVol{noCallFS: noCallFS{FS: base}, scheme: "vault", name: "vol1"}
+	content := []byte("payload")
+	if _, err := Execute(context.Background(), TransferRequest{
+		Entries:     []SourceEntry{{Rel: "src/x.bin", Size: int64(len(content)), Reader: strings.NewReader(string(content))}},
+		Destination: v, Rel: "dst/x.bin",
+	}); err != nil {
+		t.Fatalf("首次写: %v", err)
+	}
+	if _, err := Execute(context.Background(), TransferRequest{
+		Entries:     []SourceEntry{{Rel: "src/y.bin", Size: 1, Reader: strings.NewReader("z")}},
+		Destination: v, Rel: "dst/x.bin",
+	}); !errors.Is(err, ErrExists) {
+		t.Fatalf("无 WriteIfAbsent 能力时二次写应 ErrExists，got %v", err)
+	}
+	if got := string(base.files["dst/x.bin"]); got != string(content) {
+		t.Fatalf("二次写不得覆盖，got %q", got)
+	}
+}

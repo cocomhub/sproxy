@@ -494,8 +494,9 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 请求体可选字段 `target_volume`：非空 = **统一转存**——打包后经可信卷写视图转存到该外部卷，
 不落租户 archive 桶；目标键为 `<owner>/user/archive/<archive_name>`（经 `volume.ResolveUserLocation`
-唯一入口，与读路径同键空间，可被 `/download` 与文件列表命中），响应 `file` 为可 `ResolveURL`
-取用的 URL。空/缺省 = 沿既有行为落租户 archive 桶。
+唯一入口，与读路径同键空间，可经 `/download` 命中；外部卷不走本地文件索引，故不出现在
+`/api/files` 列表），响应 `file` 为可 `ResolveURL` 取用的 URL（非归档名）。空/缺省 = 沿既有
+行为落租户 archive 桶。同名目标已存在 → 409（拒绝静默覆盖）。
 
 ### POST /api/cloud/archive
 
@@ -521,7 +522,7 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 取消 / 恢复 / 归档整个组。`/archive` 请求体同样支持 `target_volume`（统一转存到外部卷，
 可信卷写视图 + owner 前缀键 + 本地 staging 配额 + `per-(owner,rel)` 写锁；语义与单任务/批量
-归档一致）。
+归档一致）。转存成功后组记录 `archive_file` 为转存 URL，组删除时联动清理该外部产物。
 
 ### DELETE /api/cloud/groups/{id}
 

@@ -730,3 +730,63 @@ func TestCloudArchive_Batch_ToVolume(t *testing.T) {
 		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
 	}
 }
+
+// TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite 同名归档二次转存 → 409：锁定
+// transferVolumeFS 显式转发 WriteIfAbsent + transfer 存在性检查（防静默覆盖）。
+func TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	post := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+			strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
+		req.SetPathValue("id", id)
+		rec := httptest.NewRecorder()
+		h.cloudArchiveTask(rec, req)
+		return rec.Code
+	}
+	if code := post(); code != http.StatusOK {
+		t.Fatalf("首次转存应 200，got %d", code)
+	}
+	if code := post(); code != http.StatusConflict {
+		t.Fatalf("同名二次转存应 409（拒绝静默覆盖），got %d", code)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_LockKey 转存写锁与文件域同键空间（user/<rel>）：
+// 预占 user/archive/lock.tar.gz 锁后转存应 409（证明锁键未用带 owner 前缀的 FSPath）。
+func TestCloudArchive_SingleTask_ToVolume_LockKey(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	release, ok := h.acquireFileLock("", "user/archive/lock.tar.gz")
+	if !ok {
+		t.Fatal("预占锁失败")
+	}
+	defer release()
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"lock.tar.gz","target_volume":"vault"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("锁被占时应 409，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_SecretsRejected secrets 密钥卷非通用转存目标 →
+// 400 fail-closed（与 cloud 下载转存 checkTransferVolumePreflight 同语义）。
+func TestCloudArchive_SingleTask_ToVolume_SecretsRejected(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	h.volSet = newFakeVolSetForTypedTransfer("secrets", "secrets", &serverMemFS{files: map[string][]byte{}})
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"secrets"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("secrets 卷应 400，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}

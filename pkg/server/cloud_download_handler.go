@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -518,10 +519,10 @@ func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
 		return
 	}
-	// 组归档文件（存的是归档名，如 "g1.tar.gz"）联动删除并释放 Scope。失败仅记日志
+	// 组归档文件联动删除（桶归档名或外部卷转存 URL）。失败仅记日志
 	// （组删除已完成，归档残留由周期扫描校准兜底；不把归档清理失败当作组删除失败）。
 	if archiveFile != "" {
-		if aErr := h.deleteCloudArchive(owner, archiveFile); aErr != nil {
+		if aErr := h.deleteGroupArchive(owner, archiveFile); aErr != nil {
 			h.logger.Warn("删除组归档失败（残留由周期扫描校准）", "group_id", id, "archive", archiveFile, "error", aErr)
 		}
 	}
@@ -552,8 +553,32 @@ func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, map[string]string{"status": "resumed"}, http.StatusOK)
 }
 
-// cloudArchiveGroup 处理 POST /api/cloud/groups/{id}/archive。
-// 收集组内所有已完成子任务的文件打包为单个 tar.gz（未完成任务跳过并记录）。
+// deleteGroupArchive 删除组归档产物：外部卷转存 URL（含 "://"）→ 按卷可信 FS 删除
+// （主文件 + sidecar）；否则按租户 archive 桶归档名删除（既有行为零回归）。
+func (h *Handlers) deleteGroupArchive(owner, archiveFile string) error {
+	if !strings.Contains(archiveFile, "://") {
+		return h.deleteCloudArchive(owner, archiveFile)
+	}
+	u, err := url.Parse(archiveFile)
+	if err != nil {
+		return fmt.Errorf("解析归档 URL %q: %w", archiveFile, err)
+	}
+	volName := u.Host
+	fsKey := strings.TrimPrefix(u.Path, "/")
+	if volName == "" || fsKey == "" {
+		return fmt.Errorf("归档 URL %q 缺少卷/路径", archiveFile)
+	}
+	fs, _, _, ok := h.externalVolumeTransferFS(volName)
+	if !ok {
+		return fmt.Errorf("归档目标卷 %q 未装配", volName)
+	}
+	if err := fs.Delete(context.Background(), fsKey); err != nil {
+		return fmt.Errorf("删除外部卷归档 %q: %w", fsKey, err)
+	}
+	return nil
+}
+
+// cloudArchiveGroup 处理 POST /api/cloud/groups/{id}/archive。// 收集组内所有已完成子任务的文件打包为单个 tar.gz（未完成任务跳过并记录）。
 func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := r.PathValue("id")
 	owner := ActorFrom(r.Context())
@@ -766,14 +791,24 @@ func (h *Handlers) cloudArchivePrepTarget(w http.ResponseWriter, owner string, r
 	return root, rel, true
 }
 
+// cloudArchiveMaxBytesOK 校验云归档总量上限（cloud_archive_max_bytes；0=不限）。失败已回响应。
+// 单任务/批量/组归档与统一转存（不占 archive 桶）共用同一上限校验。
+func (h *Handlers) cloudArchiveMaxBytesOK(w http.ResponseWriter, totalSize int64) bool {
+	maxBytes := h.cloudArchiveMaxBytes()
+	if maxBytes > 0 && totalSize > maxBytes {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: fmt.Sprintf("archive exceeds cloud_archive_max_bytes: %d > %d", totalSize, maxBytes),
+		}, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
 // cloudArchiveReserveQuota 打包前做总量限制（cloud_archive_max_bytes）+ 配额预留
 // （scope 优先单步；storageMgr 仅作回退）。返回 false 表示已回错误响应包。
 func (h *Handlers) cloudArchiveReserveQuota(w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Reservation, int64, bool) {
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
-	if maxBytes := h.cloudArchiveMaxBytes(); maxBytes > 0 && totalSourceSize > maxBytes {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("archive exceeds cloud_archive_max_bytes: %d > %d", totalSourceSize, maxBytes),
-		}, http.StatusBadRequest)
+	if !h.cloudArchiveMaxBytesOK(w, totalSourceSize) {
 		return nil, 0, false
 	}
 	pre := totalSourceSize + cloudArchiveReservePlaceholder
@@ -868,7 +903,13 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, archiveName, entries, archiveTotalSize(groupFiles), h.logger.With("archive", "group", "group_id", groupID))
+	// 成功时登记组归档引用（供 cloudDeleteGroup 联动清理外部产物；转存 URL 含卷信息）。
+	onSuccess := func(url string) {
+		if h.cloudMgr != nil {
+			h.cloudMgr.SetGroupArchiveFile(groupID, url)
+		}
+	}
+	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, archiveName, entries, archiveTotalSize(groupFiles), h.logger.With("archive", "group", "group_id", groupID), onSuccess)
 }
 
 // cloudArchiveToVolume 是统一转存的**共享执行核心**（单任务 / 批量 / 组归档共用）：
@@ -878,23 +919,32 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 //   - 目标 FS = externalVolumeTransferFS（trusted.Guard(Wrap(...))）——meta 恒生成 +
 //     meta 桶隔离（裸 FS 会让转存产物不是可信卷、且可触达 meta 凭据桶）；
 //   - 目标键经 volume.ResolveLocation 唯一入口计算（恒 owner 前缀 + 路径安全）——与读
-//     路径 ResolveUserLocation 同键空间，产物可被 /download 与列表命中；
+//     路径 ResolveUserLocation 同键空间，产物可经 /download 命中（外部卷不进本地文件
+//     索引，故不出现在 /api/files 列表）；
 //   - 本地 staging 配额 + per-(owner,rel) 写锁（与 HTTP 上传/DAV/S3 同键空间）。
 //
-// entries 已由调用方打开 source Reader（本函数负责关闭）；totalSize 为源总量
-// （cloud_archive_max_bytes + 配额预检）。外部卷转存不消耗租户 archive 桶 → 预检预留
-// 即时归还（防 Scope Reserved 虚高）。
+// entries 已由调用方打开 source Reader（本函数负责关闭）；totalSize 用于
+// cloud_archive_max_bytes 上限校验。外部卷不消耗租户 archive 桶（产物落目标卷，容量
+// 由目标卷 ReserveSpace / staging 配额管），故不做 archive 桶 Scope 预留。
 func (h *Handlers) cloudArchiveToVolume(
 	w http.ResponseWriter, r *http.Request,
 	owner, targetVolume, archiveName string,
 	entries []transfer.SourceEntry, totalSize int64,
 	logger *slog.Logger,
+	onSuccess func(url string),
 ) {
 	defer closeEntries(entries)
 	// 目标卷解析（可信卷写视图；未装/元数据不可解析/类型未声明协议 → fail-closed）。
 	fs, scheme, vol, ok := h.externalVolumeTransferFS(targetVolume)
 	if !ok || scheme == "" {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "target volume not assembled"}, http.StatusNotFound)
+		return
+	}
+	// NM6（与 cloud 下载转存 checkTransferVolumePreflight 一致）：secrets 是密钥管理卷
+	// （secret 名禁路径分隔符），非通用转存目标——转存 rel 恒含 /，secrets:// 无法解析
+	// 且写路径绕过 Secrets Manager 校验。
+	if scheme == "secrets" {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标卷是 secrets 密钥卷（非转存目标，请用 secretdata/普通卷）"}, http.StatusBadRequest)
 		return
 	}
 	// 目标键：volume 唯一入口（权限门 + 路径安全 + 恒 owner 前缀），与读路径
@@ -905,29 +955,32 @@ func (h *Handlers) cloudArchiveToVolume(
 		return
 	}
 	rel := loc.FSPath()
+	// 锁键用**文件域同键空间**（tnt.UserRel = "user/<path>"，无 owner 前缀）——用 FSPath
+	// 做锁键会与 HTTP/DAV/S3 的实际锁键永不相等，跨写面互斥失效（可信卷主文件+sidecar
+	// 并发写会产出错位固化态）。
+	lockKey := loc.Bucket() + "/" + loc.Path()
 	// 本地 staging 配额统一接线（与 cloud 下载转存一致；无独立配额 → 直通零回归）。
 	fs = h.stagingQuotaFS(owner, fs)
-	// 总量限制 + 配额预检（外部卷不消耗 archive 桶 → 预检后归还预留）。
-	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, totalSize)
-	if !ok {
+	// 打包流长度未知 → 装配层显式预留本地 staging 上界（见 reservePackedStaging）。
+	releaseStage, stageErr := h.reservePackedStaging(r.Context(), owner, fs, totalSize)
+	if stageErr != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "本地暂存配额不足: " + stageErr.Error()}, http.StatusInsufficientStorage)
 		return
 	}
-	defer releaseArchiveReservation(res, h.storageMgr, pre)
+	defer releaseStage()
+	// 总量上限校验（不占租户 archive 桶 → 不做桶 Scope 预留，避免桶近满时误拒）。
+	if !h.cloudArchiveMaxBytesOK(w, totalSize) {
+		return
+	}
 	// ReserveSpace 经装饰器链恒「实现」（底层未实现 → ErrUnsupported）——不得误报容量不足。
-	if rs, isRS := fs.(syncpkg.ReserveSpace); isRS {
-		if err := rs.ReserveSpace(r.Context(), rel, totalSize); err != nil && !errors.Is(err, syncpkg.ErrUnsupported) {
-			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标卷容量不足: " + err.Error()}, http.StatusInsufficientStorage)
-			return
-		}
-	}
-	// 跨写面互斥：per-(owner,rel) 写锁（与 HTTP 上传/删除/改名/DAV/S3 同键空间）——
+	// 容量预检 + per-(owner,rel) 写锁（与 HTTP 上传/删除/改名/DAV/S3 同键空间）——
 	// 转存写可信卷（主文件 + sidecar meta）与其它写面并发同 rel 会产出错位固化态。
-	if release, locked := h.acquireFileLock(owner, rel); !locked {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标正被其他写者占用，请稍后重试"}, http.StatusConflict)
+	release, status, msg := h.archiveVolumeWriteGate(r.Context(), fs, owner, rel, lockKey, totalSize)
+	if status != 0 {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msg}, status)
 		return
-	} else {
-		defer release()
 	}
+	defer release()
 	dest := &transferVolumeFS{FS: fs, scheme: scheme, name: targetVolume}
 	url, terr := transfer.Execute(r.Context(), transfer.TransferRequest{
 		Entries:     entries,
@@ -937,11 +990,36 @@ func (h *Handlers) cloudArchiveToVolume(
 		Owner:       owner,
 	})
 	if terr != nil {
+		// 目标已存在（拒绝静默覆盖）是客户端可解冲突 → 409（非 500）。
+		if errors.Is(terr, transfer.ErrExists) {
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: terr.Error()}, http.StatusConflict)
+			return
+		}
 		logger.Error("unified transfer to volume failed", "volume", targetVolume, "error", terr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "transfer failed: " + terr.Error()}, http.StatusInternalServerError)
 		return
 	}
-	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url, Size: 0}, http.StatusOK)
+	if onSuccess != nil {
+		onSuccess(url)
+	}
+	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url}, http.StatusOK)
+}
+
+// archiveVolumeWriteGate 是统一转存的写前门：目标卷容量预检（ReserveSpace 可选能力，
+// 装饰器链未实现 → ErrUnsupported 跳过）+ per-(owner,rel) 写锁。返回 (release, status,
+// msg)：status==0 表示通过（release 必非 nil）；否则按 status/msg 回包。抽离以控制
+// cloudArchiveToVolume 的认知复杂度（gocognit 门禁）。
+func (h *Handlers) archiveVolumeWriteGate(ctx context.Context, fs syncpkg.FS, owner, rel, lockKey string, size int64) (func(), int, string) {
+	if rs, ok := fs.(syncpkg.ReserveSpace); ok {
+		if err := rs.ReserveSpace(ctx, rel, size); err != nil && !errors.Is(err, syncpkg.ErrUnsupported) {
+			return func() {}, http.StatusInsufficientStorage, "目标卷容量不足: " + err.Error()
+		}
+	}
+	release, locked := h.acquireFileLock(owner, lockKey)
+	if !locked {
+		return func() {}, http.StatusConflict, "目标正被其他写者占用，请稍后重试"
+	}
+	return release, 0, ""
 }
 
 // transferVolumeFS 包装 sync.FS + scheme/name（实现 transfer.VolumeFS）。
@@ -953,6 +1031,20 @@ type transferVolumeFS struct {
 
 func (t *transferVolumeFS) Scheme() string { return t.scheme }
 func (t *transferVolumeFS) Volume() string { return t.name }
+
+// Inner 透明暴露被包装 FS（透明装饰器约定；便于 Innermost 能力探测）。
+func (t *transferVolumeFS) Inner() syncpkg.FS { return t.FS }
+
+// WriteIfAbsent 显式转发底层原子写能力——**必须显式实现**：嵌入接口只提升 FS 的 7 个
+// 方法，不会转发动态值上的可选能力接口（否则 dest.(WriteIfAbsent) 恒 false，覆盖保护
+// 静默失效）。底层未实现 → ErrUnsupported 供 transfer 回落 Stat 检查。
+func (t *transferVolumeFS) WriteIfAbsent(ctx context.Context, p string, r io.Reader, size, mtime int64) (bool, error) {
+	pia, ok := t.FS.(syncpkg.WriteIfAbsent)
+	if !ok {
+		return false, fmt.Errorf("transferVolumeFS: 底层卷未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
+	}
+	return pia.WriteIfAbsent(ctx, p, r, size, mtime)
+}
 
 // archiveEntries 把 groupFiles 转为 SourceEntry（打开源文件作 Reader；size/mtime 填真值）。
 // 打开中途失败时关闭已打开的 Reader（防句柄泄漏）。

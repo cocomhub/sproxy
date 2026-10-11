@@ -700,6 +700,34 @@ func (h *Handlers) stagingQuotaFS(owner string, fs syncpkg.FS) syncpkg.FS {
 	return syncpkg.ApplyStagingQuota(fs, h.stagingQuotaTrackerFor(owner))
 }
 
+// reservePackedStaging 为「长度未知的流式写」（打包转存 tar.gz）在装配层做一次**上界**
+// 本地 staging 预留并返回释放函数。
+//
+// 为何不把估值传给 WriteFile：打包流边压边写，写前不知精确字节数；把估值当 size 传给
+// s3/minio 等「按已知长度上传」的后端会导致短读错误（输出通常小于源总量，可能更小或
+// 略大）。故此处在整个转存期间预留 totalSize 上界（与 gate 内 size=0 预留不重复计），
+// 写完成后释放。
+//
+// 卷 StagingQuotaExempted（无需 staging）或最内层实现 StagingQuotaCapable（自管，已由
+// ApplyStagingQuota 注入配额）时跳过；无独立配额（tracker nil）直通。size<=0 直通。
+func (h *Handlers) reservePackedStaging(ctx context.Context, owner string, fs syncpkg.FS, size int64) (func(), error) {
+	noop := func() {}
+	if size <= 0 || syncpkg.StagingQuotaExempted(fs) {
+		return noop, nil
+	}
+	if _, ok := syncpkg.Innermost(fs).(syncpkg.StagingQuotaCapable); ok {
+		return noop, nil
+	}
+	tracker := h.stagingQuotaTrackerFor(owner)
+	if tracker == nil {
+		return noop, nil
+	}
+	if err := tracker.ReserveUsage(ctx, size); err != nil {
+		return noop, err
+	}
+	return func() { tracker.ReleaseUsage(size) }, nil
+}
+
 // trustedWrapOpts 装配可信卷装饰器配置（C-MAJOR-4：ChunkSize 从 trusted_volume
 // 配置接线——缺省 0 自适应 ChunkSizeForSize；Logger 随装配层注入可观测 meta 失败）。
 // TrustedWrapOptions 导出可信卷 Wrap 选项（装配层在 pkg/server 之外装配外部卷写面时

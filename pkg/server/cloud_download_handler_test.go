@@ -1287,7 +1287,7 @@ func TestCloudArchiveGroupToVolume_TrustedVolumeWiring(t *testing.T) {
 	if resp.File != wantURL {
 		t.Fatalf("File=%q want %q", resp.File, wantURL)
 	}
-	// 4) 外部卷转存不消耗 archive 桶——预检预留必须归还（防 Reserved 虚高）。
+	// 4) 外部卷转存不占租户 archive 桶——不经该桶记账（无预留/占用）。
 	sc := h.quotaBucketFor("alice", "archive")
 	if sc == nil {
 		t.Fatal("测试前提：archive 桶 Scope 应可装配（globalPool 已配）")
@@ -1332,13 +1332,23 @@ func (m *serverMemFS) Rename(ctx context.Context, f, t string) error { return ni
 func (m *serverMemFS) Delete(ctx context.Context, p string) error    { delete(m.files, p); return nil }
 func (m *serverMemFS) MakeDir(ctx context.Context, p string) error   { return nil }
 
-// newFakeVolSetForTransfer 构造带 fake 外部卷的 registry.Set（统一转存目标）。
-// 注册 fake 卷类型 "vault" 的协议映射（SchemeOf 需要类型→协议；生产由各后端
-// RegisterBackend 声明），使转存 URL 有非空 scheme。
+// newFakeVolSetForTransfer 构造带 fake 外部卷（类型 "vault"）的 registry.Set（统一转存目标）。
 func newFakeVolSetForTransfer(name string, fs syncpkg.FS) *registry.Set {
-	registerFakeTransferScheme()
+	return newFakeVolSetForTypedTransfer(name, "vault", fs)
+}
+
+// newFakeVolSetForTypedTransfer 构造带指定类型 fake 外部卷的 registry.Set，并按类型注册
+// 协议映射（SchemeOf 需要类型→协议；生产由各后端 RegisterBackend 声明），使转存 URL 有
+// 非空 scheme。
+func newFakeVolSetForTypedTransfer(name, typ string, fs syncpkg.FS) *registry.Set {
+	switch typ {
+	case "vault":
+		registerFakeTransferScheme()
+	case "secrets":
+		registerFakeSecretsScheme()
+	}
 	vs := registry.NewSet(nil, nil, nil, nil, name)
-	if err := vs.AddExternalVolume(volume.Volume{Name: name, Type: "vault"}, fakeTransferBackend{fs: fs}); err != nil {
+	if err := vs.AddExternalVolume(volume.Volume{Name: name, Type: typ}, fakeTransferBackend{fs: fs}); err != nil {
 		panic("fake volSet AddExternalVolume: " + err.Error())
 	}
 	return vs
@@ -1353,6 +1363,17 @@ func registerFakeTransferScheme() {
 		registry.RegisterBackend("vault", func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
 			return nil, errors.New("fake vault backend 不用于构造")
 		}, "vault")
+	})
+}
+
+// fakeSecretsSchemeOnce 注册 "secrets" 协议（统一转存须拒绝 secrets 密钥卷的测试用）。
+var fakeSecretsSchemeOnce sync.Once
+
+func registerFakeSecretsScheme() {
+	fakeSecretsSchemeOnce.Do(func() {
+		registry.RegisterBackend("secrets", func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
+			return nil, errors.New("fake secrets backend 不用于构造")
+		}, "secrets")
 	})
 }
 
@@ -1374,4 +1395,55 @@ func writeRootFile(t *testing.T, root *storage.Root, rel, content string) {
 		t.Fatalf("write %s: %v", rel, err)
 	}
 	f.Close()
+}
+
+// TestDeleteGroupArchive_ExternalURL 组删除联动清理外部卷转存产物：URL 形态按卷可信 FS
+// 删除（主文件 + sidecar 一并删净），非 URL 走既有 archive 桶删除。
+func TestDeleteGroupArchive_ExternalURL(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp("", "del-group-archive-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := newAssemblyTestHandlers(t, dir)
+	fs := &serverMemFS{files: map[string][]byte{
+		"alice/user/archive/x.tar.gz":      []byte("data"),
+		"alice/meta/archive/x.tar.gz.meta": []byte("meta"),
+		"alice/user/archive/keep.tar.gz":   []byte("keep"),
+	}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	if err := h.deleteGroupArchive("alice", "vault://vault/alice/user/archive/x.tar.gz"); err != nil {
+		t.Fatalf("删除外部卷归档: %v", err)
+	}
+	if got := slices.Sorted(maps.Keys(fs.files)); len(got) != 1 || got[0] != "alice/user/archive/keep.tar.gz" {
+		t.Fatalf("应仅删目标主文件+sidecar，剩余 %v", got)
+	}
+}
+
+// TestReservePackedStaging_Balance 打包转存长度未知 → 装配层 staging 上界预留/释放平衡。
+func TestReservePackedStaging_Balance(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp("", "packed-staging-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := newAssemblyTestHandlers(t, dir)
+	fs := syncpkg.FS(&serverMemFS{files: map[string][]byte{}})
+	release, err := h.reservePackedStaging(context.Background(), "", fs, 1024)
+	if err != nil {
+		t.Fatalf("预留: %v", err)
+	}
+	sc := h.stagingQuotaScope("")
+	if sc == nil {
+		t.Fatal("测试前提：staging Scope 可装配")
+	}
+	if got := sc.Usage(); got != 1024 {
+		t.Fatalf("预留应为 1024，got %d", got)
+	}
+	release()
+	if got := sc.Usage(); got != 0 {
+		t.Fatalf("释放后应 0，got %d", got)
+	}
 }

@@ -380,7 +380,7 @@ func (h *Handlers) cloudArchiveTaskToVolume(w http.ResponseWriter, r *http.Reque
 	entries := []transfer.SourceEntry{{
 		Rel: task.Filename, Size: info.Size(), ModTime: info.ModTime().Unix(), Reader: f,
 	}}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, name, entries, info.Size(), h.logger.With("archive", "cloud_task", "task_id", taskID))
+	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, name, entries, info.Size(), h.logger.With("archive", "cloud_task", "task_id", taskID), nil)
 }
 
 // cloudArchiveBatchToVolume 批量归档统一转存：多文件（tar.gz 打包）→ 外部卷。
@@ -399,7 +399,7 @@ func (h *Handlers) cloudArchiveBatchToVolume(w http.ResponseWriter, r *http.Requ
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, name, entries, totalSize, h.logger.With("archive", "cloud_batch"))
+	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, name, entries, totalSize, h.logger.With("archive", "cloud_batch"), nil)
 }
 
 // cloudArchiveSettleQuota 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)
