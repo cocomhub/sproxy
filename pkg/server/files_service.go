@@ -306,30 +306,38 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 	mrel := meta.MetaPath(rel)
 	rc, err := root.Open(mrel)
 	if err != nil {
-		// sidecar 缺失（旁路写/未启用/存量数据）→ 直通——**本路径不提供任何服务端校验**，
+		if !errors.Is(err, os.ErrNotExist) {
+			// C2（P0）：sidecar **存在但读失败** → fail-closed，绝不直通。否则「后端同时
+			// 坏 sidecar + 数据」时损坏内容静默下发（「异常 fail-closed」承诺仅对 meta
+			// 完好时成立 = 信任承诺瓦解）。运营上如需彻底关闭校验，用既有的
+			// `trusted_volume.skip_verify` 开关（显式、可观测）。
+			return nil, fmt.Errorf("meta: sidecar 读取失败（存在但不可读，拒绝下发未校验内容）: %w", err)
+		}
+		// 真·sidecar 缺失（旁路写/未启用/存量数据）→ 直通：**本路径不提供任何服务端校验**，
 		// 非「直算兜底」。可观测性（第 5 轮对抗评审 P1）：升级后存量文件全部无 sidecar，
-		// 运维必须能区分「无校验能力」与「校验通过」；用 Debug 避免大目录刷屏（读失败才是 Warn）。
+		// 运维必须能区分「无校验能力」与「校验通过」；用 Debug 避免大目录刷屏。
 		p.warnDegradeDebug("sidecar 缺失", rel, err)
 		return nil, nil
 	}
 	defer rc.Close()
 	raw, rerr := io.ReadAll(io.LimitReader(rc, meta.MaxMetaSidecarBytes()+1))
 	if rerr != nil {
+		// C2（P0）：**有 sidecar 但读不完整** → 拒绝（不得静默直通）。
 		p.warnDegrade("读取失败", rel, rerr)
-		return nil, nil // meta 读失败：直通（不阻断下载）
+		return nil, fmt.Errorf("meta: sidecar 读取失败（拒绝下发未校验内容）: %w", rerr)
 	}
 	if int64(len(raw)) > meta.MaxMetaSidecarBytes() {
 		// 显式超限拒绝（与 trusted_fs.FileMeta 同口径）：截读会得到非法 JSON →
 		// 静默直通；此处拒绝并告警，防被注入超大 JSON 的 OOM DoS（P2 对抗评审）。
 		p.warnDegrade("大小超限", rel, nil)
-		return nil, nil
+		return nil, fmt.Errorf("meta: sidecar 超过上限 %d 字节（拒绝下发未校验内容）", meta.MaxMetaSidecarBytes())
 	}
 	fm, uerr := meta.Unmarshal(raw)
 	if uerr != nil {
-		// 可观测性（仓库既定：安全开关生效状态必须可观测、禁静默降级）：解析失败/超限
-		// 与「本无 sidecar」可区分，供运维告警。
+		// C2（P0）：**sidecar 损坏（解析/校验失败）** → 拒绝。损坏的 sidecar 意味着无法
+		// 提供任何完整性证据——直通等于静默放弃承诺；报文可观测（Warn + 错误返回）。
 		p.warnDegrade("解析失败", rel, uerr)
-		return nil, nil // meta 解析失败：直通（不阻断）
+		return nil, fmt.Errorf("meta: sidecar 损坏（拒绝下发未校验内容）: %w", uerr)
 	}
 	// 外部卷下的 sidecar 与数据同存不受信后端：畸形 meta 一律由 VerifyReadSeeker 内部
 	// 入口 Validate fail-closed（见 pkg/files/meta/verify.go），不在此处降级为直通。

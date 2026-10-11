@@ -101,6 +101,50 @@ func TestVerifyReadSeeker_RangePartial(t *testing.T) {
 	}
 }
 
+// TestVerifyReadSeeker_MidChunkRangeVerified 回归（C3，P0）：Range 起点在块中间、且区间
+// **不覆盖整块**时，必须先验后发/尾部补验——此前该区间字节零校验下发（`skipCur` +
+// `!fromStart` 双短路）。变异：去掉 verifyChunkAhead/sealPartialChunk → 损坏不被检出 → 红。
+func TestVerifyReadSeeker_MidChunkRangeVerified(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("mid-range-"), 400) // 4000B，1MiB 单块
+	fm := refFileMeta(t, content, 1<<20)
+
+	// ① 中段起、区间完全落在单块内（消费者只读 100B 就停，不触发 EOF）→ 先验后发必须拦截。
+	bad := append([]byte(nil), content...)
+	bad[50] = 'X' // 块内损坏，落在交付区间之外也属同一块
+	v := VerifyReadSeeker(bytes.NewReader(bad), fm)
+	if _, err := v.Seek(10, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := readAll(io.LimitReader(v, 100)); err == nil {
+		t.Fatal("块内损坏在「中段起」的 Range 下必须被检出（修复前零校验）")
+	}
+
+	// ② 中段起 + 区间延伸到 EOF（尾部半块）→ 补验拦截。
+	bad2 := append([]byte(nil), content...)
+	bad2[3500] = 'Y' // 尾部区域内损坏
+	v2 := VerifyReadSeeker(bytes.NewReader(bad2), fm)
+	if _, err := v2.Seek(3400, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := readAll(v2); err == nil {
+		t.Fatal("尾部半块损坏必须被检出（EOF 补验）")
+	}
+
+	// ③ 完好内容：同样路径不得误报（不破坏正常 Range 下载）。
+	v3 := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, err := v3.Seek(10, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	got, err := readAll(io.LimitReader(v3, 100))
+	if err != nil {
+		t.Fatalf("完好内容中段 Range 不应误报: %v", err)
+	}
+	if got != string(content[10:110]) {
+		t.Fatalf("中段 Range 内容不符")
+	}
+}
+
 // TestVerifyReadSeeker_TotalHashFullRead EOF 全量读 → 整文件 TotalSHA256 比对。
 func TestVerifyReadSeeker_TotalHashFullRead(t *testing.T) {
 	t.Parallel()

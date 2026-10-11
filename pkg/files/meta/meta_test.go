@@ -226,6 +226,32 @@ func TestMarshal_RejectsTooManyChunks(t *testing.T) {
 	}
 }
 
+// TestMetaPath_NoBucketSegmentStaysHidden 回归（C1 后半，P0）：无桶段路径（调用方忘加
+// `<owner>/` 前缀/sync 载体缺前缀视图时的键）必须**落 meta 桶**（隐藏 + 守卫 fail-closed），
+// 绝不回落用户可见目录——旧实现回落 `rel + ".meta"` 会与用户真实 `x.meta` 同路径互盖，
+// 且 `IsMetaPath` 不识别（同步引擎把它当用户文件：push 误删、pull 下载成垃圾）。
+// 变异：回落改回 `rel + metaSuffix` → 断言红。
+func TestMetaPath_NoBucketSegmentStaysHidden(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{"x", "dir/x.bin"} {
+		got := MetaPath(rel)
+		if got != "meta/"+rel+".meta" {
+			t.Fatalf("MetaPath(%q) = %q, want meta/%s.meta（无桶段须落 meta 桶）", rel, got, rel)
+		}
+		if !IsMetaPath(got) {
+			t.Fatalf("MetaPath(%q)=%q 必须被 IsMetaPath 识别（隐藏过滤）", rel, got)
+		}
+	}
+	// 有桶段的常规路径不受影响（rebucket 语义保持）。
+	if got := MetaPath("alice/user/x.bin"); got != "alice/meta/x.bin.meta" {
+		t.Fatalf("MetaPath(有桶段) = %q, want alice/meta/x.bin.meta", got)
+	}
+	// MetaDirPath 与 MetaPath 自洽（目录级迁移用）。
+	if got := MetaDirPath("dir"); got != "meta/dir" {
+		t.Fatalf("MetaDirPath(\"dir\") = %q, want meta/dir", got)
+	}
+}
+
 // TestMarshalUnmarshal Roundtrip：JSON 序列化 + 反序列化校验（Extra map[string]any 保真）。
 func TestMarshalUnmarshal(t *testing.T) {
 	t.Parallel()

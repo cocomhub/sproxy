@@ -209,7 +209,18 @@ func egressVisibleView(view []volume.Volume, owner string) []volume.Volume {
 // externalStateFor 分 A/B/C 态（gocognit 收敛）：私密/egress_forward → A 态服务端转发；
 // 明文未私密 → B 态 302 直链（失败回落 A）；返回 nil = 未命中（调用方继续下一候选）。
 func (h *Handlers) externalStateFor(v volume.Volume, forceForward bool, fsys syncpkg.FS, r *http.Request, ownerKey, filename string, src files.DownloadSource) *downloadPath {
-	if volumePrivate(v) || forceForward {
+	// C4 修复（P0，完整性承诺）：302 直链让客户端直接从后端取字节、绕过本服务端的
+	// `VerifyReadSeeker` ⇒ 仅当**本服务端不承诺完整性**时才允许：
+	//   ① 显式 `trusted_volume.skip_verify`（可观测地放弃校验）；
+	//   ② **出口卷**（`clustercred.TypeEgress`）：其 302 指向出口节点自身，二次进入由
+	//      `egress_forward=1` 强制 A 态 → 校验仍在服务端（出口侧）完成，未绕过承诺。
+	// 其余情形（默认校验开启的普通外部卷）强制 A 态服务端转发；被抑制的直链显式告警一次
+	// （禁静默降级：安全开关生效状态必须可观测）。
+	directAllowed := h.verifySkipped() || v.Type == clustercred.TypeEgress
+	if volumePrivate(v) || forceForward || !directAllowed {
+		if !volumePrivate(v) && !forceForward && !directAllowed {
+			h.warnDirectLinkSuppressed(v.Name)
+		}
 		// A/C 态：服务端转发（解密/整流）。filename 用用户原始名（无 user/ 前缀）。
 		return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, source: src}
 	}
@@ -220,6 +231,16 @@ func (h *Handlers) externalStateFor(v volume.Volume, forceForward bool, fsys syn
 	}
 	// 直链不可得（adapter 不支持 / 定位失败）：回落服务端转发，绝不半截 302。
 	return &downloadPath{filename: filename, volName: v.Name, rel: ownerKey, source: src}
+}
+
+// warnDirectLinkSuppressed 对「配置了 direct_link 但因完整性承诺被强制服务端转发」的卷
+// 告警一次（每卷一次，避免按请求刷屏）：运维必须能看到「直链未生效」而非静默降级。
+func (h *Handlers) warnDirectLinkSuppressed(volName string) {
+	if _, loaded := h.directLinkWarned.LoadOrStore(volName, struct{}{}); loaded {
+		return
+	}
+	h.logger.Warn("外部卷 direct_link 被抑制：服务端完整性校验开启，改为服务端转发", "volume", volName,
+		"hint", "如需 302 直链（放弃服务端校验）请显式设置 trusted_volume.skip_verify=true")
 }
 
 // externalCandidates 返回 owner 可见的外部卷候选（External 非 nil；显式卷只取指定卷）。

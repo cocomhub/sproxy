@@ -134,7 +134,7 @@ func TestWrite_ExtraCarried(t *testing.T) {
 	if err := tv.WriteFile(ctx, "e.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	rc, _ := inner.OpenRead(ctx, "e.bin.meta")
+	rc, _ := inner.OpenRead(ctx, meta.MetaPath("e.bin"))
 	raw, _ := io.ReadAll(rc)
 	rc.Close()
 	fm, err := meta.Unmarshal(raw)
@@ -159,7 +159,7 @@ func TestDelete_RemovesMeta(t *testing.T) {
 	if err := tv.Delete(ctx, "d.bin"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if e, err := inner.Stat(ctx, "d.bin.meta"); err != nil || e != nil {
+	if e, err := inner.Stat(ctx, meta.MetaPath("d.bin")); err != nil || e != nil {
 		t.Fatalf("删除主文件应联动删 meta: %v %v", e, err)
 	}
 }
@@ -177,10 +177,10 @@ func TestRename_MovesMeta(t *testing.T) {
 	if err := tv.Rename(ctx, "r.bin", "sub/r2.bin"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	if e, err := inner.Stat(ctx, "r.bin.meta"); err == nil && e != nil {
+	if e, err := inner.Stat(ctx, meta.MetaPath("r.bin")); err == nil && e != nil {
 		t.Fatal("旧 meta 应已移走")
 	}
-	if e, err := inner.Stat(ctx, "sub/r2.bin.meta"); err != nil || e == nil {
+	if e, err := inner.Stat(ctx, meta.MetaPath("sub/r2.bin")); err != nil || e == nil {
 		t.Fatalf("新位置 meta 应存在: %v %v", e, err)
 	}
 }
@@ -196,7 +196,7 @@ func TestMetaAlwaysGenerated(t *testing.T) {
 	if err := tv.WriteFile(ctx, "n.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if e, err := inner.Stat(ctx, "n.bin.meta"); err != nil || e == nil {
+	if e, err := inner.Stat(ctx, meta.MetaPath("n.bin")); err != nil || e == nil {
 		t.Fatalf("meta 应恒生成（默认落盘）: %v %v", e, err)
 	}
 }
@@ -610,8 +610,12 @@ func TestTrustedVolumeFS_RenameStaleTargetMetaInvalidated(t *testing.T) {
 	if err := tv.WriteFile(ctx, "user/t.bin", strings.NewReader("old-target"), 10, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); err != nil {
-		t.Fatalf("前置：目标应有 sidecar: %v", err)
+	// 前置：目标应有 sidecar（**必须关闭句柄**：Windows 上未关句柄会让后续
+	// Rename/Delete 因 sharing violation 失败 → 陈旧 sidecar 残留 → 断言假红）。
+	if rc, rerr := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); rerr != nil {
+		t.Fatalf("前置：目标应有 sidecar: %v", rerr)
+	} else {
+		_ = rc.Close()
 	}
 	// 源**无 sidecar**（直接经 inner 写，模拟旁路写/存量数据）。
 	if err := inner.WriteFile(ctx, "user/s.bin", strings.NewReader("new"), 3, 0); err != nil {
@@ -620,7 +624,8 @@ func TestTrustedVolumeFS_RenameStaleTargetMetaInvalidated(t *testing.T) {
 	if err := tv.Rename(ctx, "user/s.bin", "user/t.bin"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	if _, err := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); err == nil {
+	if rc, rerr := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); rerr == nil {
+		_ = rc.Close()
 		t.Fatal("源无 sidecar 时目标陈旧 sidecar 必须被失效（否则文件固化不可读）")
 	}
 }
@@ -643,7 +648,8 @@ func TestTrustedVolumeFS_CopyStaleTargetMetaInvalidated(t *testing.T) {
 		}
 		t.Fatalf("Copy: %v", err)
 	}
-	if _, err := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); err == nil {
+	if rc, rerr := inner.OpenRead(ctx, meta.MetaPath("user/t.bin")); rerr == nil {
+		_ = rc.Close() // Windows：未关句柄会让断言分支后的 TempDir 清理失败（sharing violation）
 		t.Fatal("Copy 源无 sidecar 时目标陈旧 sidecar 必须被失效")
 	}
 }

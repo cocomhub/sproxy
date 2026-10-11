@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -407,11 +408,34 @@ func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 
 // invalidateMeta 删除目标 sidecar（覆盖写/移动/复制后源无可用 meta 时，防陈旧 meta
 // 描述旧内容使读路径恒失配、文件固化不可读——R1-FS-2）。删除不存在是正常（无旧 sidecar）。
+//
+// **Windows 共享占用**：并发读者正持 sidecar 句柄时，删除会短暂失败（sharing violation，
+// 见 `TestTrustedVolumeFS_RenameStaleTargetMetaInvalidated` 的 Windows 复现）——此处做
+// **有界退避重试**（3×20ms，ctx 可取消），仍失败才 Warn。语义上失败退化为「陈旧 sidecar
+// 残留」（下次覆盖写自愈），但重试显著降低该窗口（否则文件在 Windows 上会恒失配不可读）。
 func (t *TrustedVolumeFS) invalidateMeta(ctx context.Context, rel string) {
-	if err := t.inner.Delete(ctx, meta.MetaPath(rel)); err != nil {
-		t.logMetaWarn("invalidateMeta", rel, err)
+	mrel := meta.MetaPath(rel)
+	var lastErr error
+	for range invalidateMetaAttempts {
+		if lastErr = t.inner.Delete(ctx, mrel); lastErr == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.logMetaWarn("invalidateMeta", rel, lastErr)
+			return
+		case <-time.After(invalidateMetaRetryDelay):
+		}
 	}
+	t.logMetaWarn("invalidateMeta", rel, lastErr)
 }
+
+// invalidateMetaAttempts/invalidateMetaRetryDelay 是 sidecar 失效的有界重试参数
+// （Windows sharing violation 通常是瞬时占用：读者读完即释放）。
+const (
+	invalidateMetaAttempts   = 3
+	invalidateMetaRetryDelay = 20 * time.Millisecond
+)
 
 // ensureMetaDir 确保 sidecar 目标父目录存在（best-effort：失败跳过——WriteFile 失败
 // 由调用方读路径直算兜底）。

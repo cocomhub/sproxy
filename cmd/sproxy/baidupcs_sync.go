@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
@@ -74,6 +75,16 @@ func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slo
 		if len(wrapOpts) > 0 {
 			fs = trusted.Guard(trusted.Wrap(fs, wrapOpts[0]))
 		}
+		// C1 修复（P0，数据面）：同步引擎传的是**用户相对路径**（`syncmgr.validateSyncPath`
+		// 明示「恒落 user/ 桶内」，`pkg/sync/engine.go` 只做 joinSlash），而外部卷键空间恒
+		// `<owner>/<bucket>/...`（`volume.Location.FSPath`）。此前本入口缺前缀视图 →
+		// ① 用户文件落卷根而非 `<owner>/user/`（与 HTTP 上传/下载/转存键空间不一致）；
+		// ② sidecar 走 `meta.MetaPath` 无桶段回落，落**用户可见**键空间 → 与用户真实
+		// `x.meta` 同路径互盖、`IsMetaPath` 不过滤（同步引擎把 sidecar 当用户文件：push
+		// 判远端多余而删、pull 下载成垃圾）；
+		// ③ 下载侧按 `<owner>/meta/x.meta` 定位不到 → 零校验。
+		// 与上传/转存/备份同一装配形状：Guard(Wrap(PrefixFS(<owner>/user/)))。
+		fs = syncpkg.NewPrefixFS(fs, storage.NormalizeOwner(owner)+"/user/")
 		// 2026-10-10：staging 配额改**per-request/per-owner 包装实例**——不再向卷共享
 		// 单例注入（旧 WithQuota 覆盖会跨 owner 串账）。
 		// P1 修复：改用**与 HTTP 上传/转存/备份同一个 per-owner staging tracker**

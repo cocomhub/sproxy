@@ -144,6 +144,9 @@ func TestDecoratorsDeclareAllCapabilities(t *testing.T) {
 		{typeName: "MetaBucketGuard", pkgDir: "pkg/volume/trusted", exempt: blockExempt},
 		{typeName: "CapacityFS", pkgDir: "pkg/volume/capacity", exempt: blockExempt},
 		{typeName: "StagingQuotaGateFS", pkgDir: "pkg/sync", exempt: blockExempt},
+		// 桶前缀视图（C1 修复后由 pkg/sync 单一实现，备份目标 + 同步载体共用）；
+		// 与其余装饰器同口径全能力转发（BlockAccessor 同样豁免）。
+		{typeName: "PrefixFS", pkgDir: "pkg/sync", exempt: blockExempt},
 	}
 
 	var problems []string

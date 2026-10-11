@@ -188,6 +188,45 @@ func postDelete(url, filename string, body []byte) int {
 	return resp.StatusCode
 }
 
+// TestDownload_VerifyMeta_BrokenSidecarFailClosed 回归（C2，P0）：sidecar **存在但损坏**
+// 时必须 fail-closed（拒绝下发），不得像「无 sidecar」那样直通——否则后端同时坏 sidecar+数据
+// 时损坏内容静默下发，「异常 fail-closed」承诺形同虚设。
+// 变异：把 Unmarshal 失败分支改回 return nil,nil → 下载回完整原始内容 → 红。
+func TestDownload_VerifyMeta_BrokenSidecarFailClosed(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr, _ := newTestServer(t, nil) // 校验开启（skip_verify 缺省 false）
+	cfg := cfgPtr.Load()
+	cfg.TrustedVolume.SkipVerify = false
+	cfgPtr.Store(cfg)
+
+	body := bytes.Repeat([]byte("broken-sidecar-"), 100)
+	if code, resp := postUpload(url, "brk.bin", body); code != http.StatusOK {
+		t.Fatalf("上传应 200, got %d: %s", code, resp)
+	}
+	// 破坏 sidecar：写成非法 JSON（主文件未动）→ 无法提供完整性证据。
+	disk := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "meta", "brk.bin.meta")
+	if wErr := os.WriteFile(disk, []byte("{ not-json"), 0o644); wErr != nil {
+		t.Fatalf("破坏 sidecar: %v", wErr)
+	}
+	hc := testHTTPClientAt()
+	defer hc.CloseIdleConnections()
+	resp, err := hc.Get(url + "/download?filename=brk.bin")
+	if err != nil {
+		return // 连接被主动中断 = fail-closed 达成（panic(http.ErrAbortHandler) 路径）
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		got, _ := io.ReadAll(resp.Body)
+		if bytes.Equal(got, body) {
+			t.Fatal("sidecar 损坏时下载不得直通返回完整内容（C2 fail-open）")
+		}
+		return // 200 但截断 = 校验中断，也算 fail-closed
+	}
+	if resp.StatusCode != http.StatusInternalServerError && resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("sidecar 损坏下载应失败（500/400/中断）, got %d", resp.StatusCode)
+	}
+}
+
 // TestDownload_VerifyMeta_TamperFailClosed 信任保证演进回归：本地卷上传生成 meta →
 // 下载经 VerifyDownload 逐分块校验（正常内容 200）；篡改磁盘主文件（meta 未变）→
 // 下载 fail-closed 500（不发损坏内容——跨信任边界静默损坏被拦截）。

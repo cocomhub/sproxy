@@ -128,13 +128,14 @@ type Handlers struct {
 	writeGuard *leader.WriteGuard
 	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
 	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
-	alertEngine    *AlertEngine
-	cloudMgr       *cloud.CloudDownloadManager
-	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
-	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
-	storageMgr     *capacity.StorageManager
-	uploadingFiles sync.Map      // map[string]string — filename → uploadID，追踪正在上传的文件名
-	uploadingStop  chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出（兼容旧装配路径）
+	alertEngine      *AlertEngine
+	cloudMgr         *cloud.CloudDownloadManager
+	syncMgr          *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
+	conflictIndex    *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
+	storageMgr       *capacity.StorageManager
+	uploadingFiles   sync.Map      // map[string]string — filename → uploadID，追踪正在上传的文件名
+	directLinkWarned sync.Map      // map[string]struct{} — 已告警「direct_link 被完整性承诺抑制」的卷名
+	uploadingStop    chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出（兼容旧装配路径）
 	// scheduler 是统一任务调度器（roadmap 11.10-H2）：uploading 清理 / version-gc /
 	// trash-gc / share-cleanup 四个周期任务统一注册（RegisterRoutes 装配；
 	// nil = 未装配的旧构造路径，Close 跳过）。
