@@ -88,7 +88,7 @@ func TestScanZeroTail_Threshold(t *testing.T) {
 	for i := chunk - 8<<10; i < chunk; i++ {
 		data[i] = 0
 	}
-	for i := 0; i < chunk-8<<10; i++ {
+	for i := range chunk - 8<<10 {
 		data[i] = 0xAB
 	}
 	path := filepath.Join(t.TempDir(), "f.bin")

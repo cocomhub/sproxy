@@ -785,8 +785,7 @@ func isPermanentChunkErr(err error) bool {
 // 登录失效/空间不足。传输层瞬断（TLS 握手超时/连接重置）与 API 临时 5xx 不算——
 // 否则一次网络抖动会冤枉健康账号，冷却期白扣一个可用账号。
 func isAccountFaultErr(err error) bool {
-	var ne net.Error
-	if errors.As(err, &ne) { // 传输层瞬断（*net.OpError / *url.Error 均实现 net.Error）
+	if _, ok := errors.AsType[net.Error](err); ok { // 传输层瞬断（*net.OpError / *url.Error 均实现 net.Error）
 		return false
 	}
 	return errors.Is(err, ErrNotLoggedIn) || errors.Is(err, ErrStorageFull)

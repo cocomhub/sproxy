@@ -21,6 +21,7 @@ package pikpak
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 )
 
@@ -159,8 +160,8 @@ func scanOneChunkTail(f *os.File, span ChunkSpan, o ZeroScanOptions) (*ZeroTailS
 // trailingZeros 返回尾部连续 0x00 的长度（逐字节回退，遇到非零即停）。
 func trailingZeros(b []byte) int64 {
 	var n int64
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] != 0 {
+	for _, v := range slices.Backward(b) {
+		if v != 0 {
 			break
 		}
 		n++
