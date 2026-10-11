@@ -158,6 +158,77 @@ func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	}
 }
 
+// TestTransferDone_AcquiresTargetWriteLock 回归（本轮 D 面）：转存写目标 rel 必须持
+// per-(owner,rel) 写锁（与 HTTP 上传/删除/改名/DAV/S3 共用同一键空间）——否则跨写面同 rel
+// 并发写会产出「主文件与 sidecar 错位」的固化状态（远端卷写后不回读交叉校验 → 永久
+// fail-closed）。变异：去掉 writeTransferOnce 的加锁 → 写入时 held=false → 红。
+func TestTransferDone_AcquiresTargetWriteLock(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	var held atomic.Bool
+	var gotOwner, gotRel string
+	fs.writeFn = func(p string) error {
+		if !held.Load() {
+			return fmt.Errorf("写 %s 时未持 rel 写锁", p)
+		}
+		return nil
+	}
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		if vol == "secretdata-main" {
+			return fs, "secretdata", false
+		}
+		return nil, "", false
+	})
+	mgr.targetWriteLock = func(owner, rel string) (func(), bool) {
+		gotOwner, gotRel = owner, rel
+		held.Store(true)
+		return func() { held.Store(false) }, true
+	}
+	task := &CloudTask{ID: "task-lock", Filename: "movie.mp4", Transfer: &TransferSpec{Volume: "secretdata-main"}}
+	dest := filepath.Join(t.TempDir(), "movie.mp4")
+	if err := os.WriteFile(dest, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Size: 5}, nil); err != nil {
+		t.Fatalf("transferDone: %v", err)
+	}
+	if gotOwner != "" || gotRel == "" {
+		t.Fatalf("应以 (owner,rel) 获取写锁: owner=%q rel=%q", gotOwner, gotRel)
+	}
+	if held.Load() {
+		t.Fatal("写完成后必须释放 rel 写锁")
+	}
+}
+
+// TestTransferDone_TargetWriteLockBusy_RetryableError 断言：抢不到 rel 写锁时按**可重试的
+// 目标卷异常**返回（不并发写、不静默覆盖），错误文案显式化占用原因。
+func TestTransferDone_TargetWriteLockBusy_RetryableError(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		if vol == "secretdata-main" {
+			return fs, "secretdata", false
+		}
+		return nil, "", false
+	})
+	mgr.targetWriteLock = func(owner, rel string) (func(), bool) { return nil, false }
+	task := &CloudTask{ID: "task-busy", Filename: "movie.mp4", Transfer: &TransferSpec{Volume: "secretdata-main"}}
+	dest := filepath.Join(t.TempDir(), "movie.mp4")
+	if err := os.WriteFile(dest, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Size: 5}, nil)
+	if err == nil {
+		t.Fatal("抢不到写锁应失败（不得无锁并发写）")
+	}
+	if !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("应按可重试目标卷异常归类: %v", err)
+	}
+	if len(fs.files) != 0 {
+		t.Fatalf("不得写入任何文件: %v", keys(fs.files))
+	}
+}
+
 // TestTransferDone_TargetVolumeError_RetriesExhausted 目标卷异常：3 次指数重试后失败 + 指标。
 func TestTransferDone_TargetVolumeError_RetriesExhausted(t *testing.T) {
 	t.Parallel()

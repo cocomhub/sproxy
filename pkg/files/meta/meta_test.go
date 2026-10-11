@@ -124,9 +124,11 @@ func TestChunkSizeForSize(t *testing.T) {
 		size int64
 		want int64
 	}{
-		{0, miB}, {15 * miB, miB}, {16 * miB, 4 * miB}, {255 * miB, 4 * miB},
+		{0, 32 * miB}, {15 * miB, miB}, {16 * miB, 4 * miB}, {255 * miB, 4 * miB},
 		{256 * miB, 8 * miB}, {1*giB - 1, 8 * miB}, {1 * giB, 16 * miB},
 		{4 * giB, 32 * miB}, {6 * giB, 32 * miB},
+		// 未知大小（<=0）：最粗档（unknown 流无法事后重分块，见 ChunkSizeForSize 注释）。
+		{-1, 32 * miB},
 	}
 	for _, tc := range cases {
 		if got := ChunkSizeForSize(tc.size); got != tc.want {
@@ -136,6 +138,11 @@ func TestChunkSizeForSize(t *testing.T) {
 	// 6GiB 分块数合理（192 块），逐分片校验流量可控。
 	if n := (6 * giB) / ChunkSizeForSize(6*giB); n != 192 {
 		t.Errorf("6GiB 分块数 = %d, want 192", n)
+	}
+	// 未知大小档位下界：单块容量 × 分块数上限必须 ≥ 4TiB——否则合法流式写会产出
+	// 超 sidecar 上限的 meta（读侧必拒）。与 ResolveChunkSize 的上界自洽同类要求。
+	if cap := int64(MaxMetaChunks()) * ChunkSizeForSize(0); cap < 4<<40 {
+		t.Errorf("未知大小档位可表达上限 = %d B，want ≥ 4TiB", cap)
 	}
 }
 
@@ -192,6 +199,30 @@ func TestFixSizeFromChunks(t *testing.T) {
 	fm3 := &FileMeta{Size: 0}
 	if ok := FixSizeFromChunks(fm3); ok {
 		t.Fatal("无分块应 ok=false（零字节不修正）")
+	}
+}
+
+// TestMarshal_RejectsTooManyChunks 回归（P2，未知 size 超大流）：分块数超读侧上限的
+// meta 必须**拒绝序列化**（否则落盘后读侧 Validate 必拒 → 该文件永久读校验失败）。
+// 变异：Marshal 不校验分块数 → 超大 meta 也能落盘 → 红。
+func TestMarshal_RejectsTooManyChunks(t *testing.T) {
+	t.Parallel()
+	mk := func(n int) *FileMeta {
+		m := &FileMeta{
+			Version: metaVersion, Size: int64(n),
+			TotalSHA256: strings.Repeat("c", 64), TotalMD5: strings.Repeat("d", 32),
+			ChunkSize: 1, Chunks: make([]ChunkMeta, n),
+		}
+		for i := range m.Chunks {
+			m.Chunks[i] = ChunkMeta{Index: i, Offset: int64(i), Size: 1, SHA256: strings.Repeat("e", 64)}
+		}
+		return m
+	}
+	if _, err := Marshal(mk(MaxMetaChunks())); err != nil {
+		t.Fatalf("恰好等于上限应可序列化: %v", err)
+	}
+	if _, err := Marshal(mk(MaxMetaChunks() + 1)); err == nil {
+		t.Fatal("超上限应拒绝序列化（变异：不校验 → 红）")
 	}
 }
 

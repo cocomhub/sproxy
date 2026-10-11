@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"path"
 	"strings"
 	"testing"
 
@@ -304,6 +305,137 @@ func TestMoveCopyLink_MetaLinkage(t *testing.T) {
 	}
 	if e, err := inner.Stat(ctx, "meta/g.bin.meta"); err != nil || e == nil {
 		t.Fatalf("Link 后源 sidecar 应保留: %v %v", e, err)
+	}
+}
+
+// TestTrustedVolumeFS_RenameDirMigratesMetaSubtree 回归（本轮 B 面）：目录级 Rename 必须把
+// 子文件 sidecar 子树整棵迁移（meta/<from>/** → meta/<to>/**）——否则新位置逐分块校验
+// 静默失效（退化为直算）且旧子树成孤儿白占 meta 桶配额。
+// 变异：去掉 Rename 里的 relocateMetaSubtree 调用 → 子 sidecar 仍在 meta/dir/** → 红。
+func TestTrustedVolumeFS_RenameDirMigratesMetaSubtree(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv, ok := Wrap(inner, Options{}).(*TrustedVolumeFS)
+	if !ok {
+		t.Fatalf("Wrap(LocalFS) 应返回装饰器, got %T", tv)
+	}
+	ctx := context.Background()
+	for _, dir := range []string{"user/dir", "user/dir/sub"} {
+		if err := tv.MakeDir(ctx, dir); err != nil {
+			t.Fatalf("MakeDir(%s): %v", dir, err)
+		}
+	}
+	for _, rel := range []string{"user/dir/a.bin", "user/dir/sub/b.bin"} {
+		body := []byte("body-" + rel)
+		if err := tv.WriteFile(ctx, rel, bytes.NewReader(body), int64(len(body)), 0); err != nil {
+			t.Fatalf("WriteFile(%s): %v", rel, err)
+		}
+	}
+
+	if err := tv.Rename(ctx, "user/dir", "user/dir2"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	// 子 sidecar（含嵌套层）必须在新子树。
+	for _, rel := range []string{"user/dir2/a.bin", "user/dir2/sub/b.bin"} {
+		if e, err := inner.Stat(ctx, meta.MetaPath(rel)); err != nil || e == nil {
+			t.Fatalf("%s 的 sidecar 应迁移到新位置（变异：不迁移 → 红）: e=%v err=%v", rel, e, err)
+		}
+	}
+	// 旧子树不得残留 sidecar 文件（孤儿白占 meta 桶配额）。
+	for _, rel := range []string{"user/dir/a.bin", "user/dir/sub/b.bin"} {
+		if st, err := inner.Stat(ctx, meta.MetaPath(rel)); err != nil || st != nil {
+			t.Fatalf("旧位置 %s 的 sidecar 应已随迁不残留: st=%v err=%v", rel, st, err)
+		}
+	}
+	// 可信承诺仍成立：新位置可读到与内容一致的 sidecar。
+	fm, err := tv.FileMeta(ctx, "user/dir2/a.bin")
+	if err != nil || fm == nil || fm.TotalSHA256 == "" {
+		t.Fatalf("新位置应能读到 sidecar（逐分块校验证据）: fm=%v err=%v", fm, err)
+	}
+}
+
+// metaDirGateFS 是「meta 目录未建则写失败」的替身（**不实现 meta.Provider**，否则 Wrap
+// 会短路返回原 FS 而不装饰）——用于验证 UpdateMetaExtra 落 sidecar 前先建父目录。
+type metaDirGateFS struct {
+	inner syncpkg.FS
+	made  map[string]bool
+}
+
+func (d *metaDirGateFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return d.inner.ListDir(ctx, p)
+}
+func (d *metaDirGateFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return d.inner.Stat(ctx, p)
+}
+func (d *metaDirGateFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return d.inner.OpenRead(ctx, p)
+}
+func (d *metaDirGateFS) Rename(ctx context.Context, from, to string) error {
+	return d.inner.Rename(ctx, from, to)
+}
+func (d *metaDirGateFS) Delete(ctx context.Context, p string) error { return d.inner.Delete(ctx, p) }
+func (d *metaDirGateFS) MakeDir(_ context.Context, p string) error {
+	d.made[p] = true
+	return nil
+}
+func (d *metaDirGateFS) WriteFile(_ context.Context, p string, _ io.Reader, _ int64, _ int64) error {
+	if !d.made[path.Dir(p)] {
+		return errors.New("meta 目录未建: " + path.Dir(p))
+	}
+	return nil
+}
+
+// TestUpdateMetaExtra_EnsuresMetaDir 回归（MINOR 批）：UpdateMetaExtra 落 sidecar 前必须
+// 先建目标父目录（与 persistCalcMeta/writeMetaAfter/Rename/Move 一致）——否则 `meta/` 目录
+// 不存在的场景下写 sidecar 必失败被吞（Extra 更新静默丢失）。
+// 变异：去掉 UpdateMetaExtra 里的 ensureMetaDir → WriteFile 报「meta 目录未建」→ 红。
+func TestUpdateMetaExtra_EnsuresMetaDir(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	ctx := context.Background()
+	// 预置合法 sidecar（FileMeta 前置校验需读到它）。
+	sidecar := `{"version":1,"size":0,"total_sha256":"` + strings.Repeat("a", 64) + `","chunk_size":1,"chunks":null}`
+	if err := inner.WriteFile(ctx, "meta/x.bin.meta", strings.NewReader(sidecar), int64(len(sidecar)), 0); err != nil {
+		t.Fatalf("预置 sidecar: %v", err)
+	}
+	gate := &metaDirGateFS{inner: inner, made: map[string]bool{}}
+	tv := Wrap(gate, Options{}).(*TrustedVolumeFS)
+	if err := tv.UpdateMetaExtra(ctx, "user/x.bin", map[string]any{"k": "v"}); err != nil {
+		t.Fatalf("UpdateMetaExtra 应先建 meta 目录再落盘: %v", err)
+	}
+	if !gate.made["meta"] {
+		t.Fatalf("应显式建 meta 目录，实际 made=%v", gate.made)
+	}
+}
+
+// TestCloneExtra_DeepCopiesNested 回归（MINOR 批）：Extra 必须**深**拷贝——maps.Clone 只
+// 浅拷贝，嵌套 map/slice 与源共享底层数组，任一侧就地修改会互相污染（已落盘 meta 的并发
+// 读者会看到撕裂数据）。变异：cloneExtra 改回 maps.Clone → 嵌套修改互相穿透 → 红。
+func TestCloneExtra_DeepCopiesNested(t *testing.T) {
+	t.Parallel()
+	src := map[string]any{
+		"creator": "alice",
+		"nested":  map[string]any{"tags": []any{"a", "b"}},
+		"list":    []string{"x"},
+	}
+	cp := cloneExtra(src)
+	// 写在副本上：源不得受影响。
+	cp["nested"].(map[string]any)["tags"].([]any)[0] = "changed"
+	cp["list"].([]string)[0] = "changed"
+	if got := src["nested"].(map[string]any)["tags"].([]any)[0]; got != "a" {
+		t.Fatalf("副本嵌套修改穿透到源（浅拷贝）: tags[0]=%v", got)
+	}
+	if got := src["list"].([]string)[0]; got != "x" {
+		t.Fatalf("副本切片修改穿透到源（浅拷贝）: list[0]=%v", got)
+	}
+	// 反向：源后续修改不得影响副本。
+	src["nested"].(map[string]any)["tags"].([]any)[0] = "src-changed"
+	if got := cp["nested"].(map[string]any)["tags"].([]any)[0]; got == "src-changed" {
+		t.Fatalf("源修改穿透到副本（浅拷贝）: tags[0]=%v", got)
+	}
+	// nil 保真（nil in → nil out，与 maps.Clone 语义一致）。
+	if cloneExtra(nil) != nil {
+		t.Fatal("nil Extra 应保持 nil")
 	}
 }
 

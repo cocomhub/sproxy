@@ -488,6 +488,13 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		StagingQuotaFor: func(owner string) syncpkg.StagingQuotaTracker {
 			return h.stagingQuotaTrackerFor(owner)
 		},
+		// 转存写目标 rel 复用**文件级写锁池**（与 HTTP 上传/删除/改名/DAV/S3 同一键空间）：
+		// 转存不经 pkg/files 写路径，无此锁时与其它写面同 rel 并发写会产出「主文件与
+		// sidecar 错位」的固化状态（远端卷写后不回读交叉校验 → 读侧逐分块校验恒失配、
+		// 永久 fail-closed）。抢不到 → 可重试目标卷异常，编排层退避重试错开窗口。
+		TargetWriteLock: func(owner, rel string) (func(), bool) {
+			return h.acquireFileLock(owner, rel)
+		},
 		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
 		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
 		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool) {

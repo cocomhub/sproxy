@@ -158,7 +158,16 @@ func validateChunkCoverage(m *FileMeta) error {
 }
 
 // Marshal 序列化为 JSON（紧凑，供落盘/传输）。
+// fail-closed：分块数超读侧上限（maxMetaChunks）时**拒绍序列化**——落盘后读侧 Validate
+// 必拒（该文件永久读校验失败）；在写侧提前失败可让调用方走「不落 sidecar → 读侧直算
+// 兜底/降级 + 日志」，优于落一个必被拒的 sidecar。
 func Marshal(m *FileMeta) ([]byte, error) {
+	if m == nil {
+		return nil, fmt.Errorf("meta: FileMeta 为 nil")
+	}
+	if len(m.Chunks) > maxMetaChunks {
+		return nil, fmt.Errorf("meta: 分块数 %d 超上限 %d（拒绝序列化）", len(m.Chunks), maxMetaChunks)
+	}
 	return json.Marshal(m)
 }
 
@@ -185,7 +194,11 @@ func ChunkSizeForSize(size int64) int64 {
 	const miB = 1 << 20
 	switch {
 	case size <= 0:
-		return miB
+		// 未知大小（流式写，无 Content-Length）：**取最粗档 32MiB**。未知大小的流无法
+		// 事后重分块（分块哈希已逐个累计），若取 1MiB，超过 maxMetaChunks×1MiB（约
+		// 341GiB）的流会产出超 sidecar 上限的 meta → 读侧 Validate 必拒（永久降级）。
+		// 32MiB 把该上限推到 ~11TiB，实际不可达；同时 Marshal 仍 fail-closed 兑底。
+		return 32 * miB
 	case size < 16*miB:
 		return 1 * miB
 	case size < 256*miB:
@@ -270,6 +283,15 @@ func MetaPath(rel string) string {
 		return rebucketed + metaSuffix
 	}
 	return rel + metaSuffix // 无 user 桶段：同目录兜底（外部卷罕见场景）
+}
+
+// MetaDirPath 返回路径 rel（目录）对应的 **sidecar 子树目录**（= MetaPath(rel) 去掉结尾
+// “.meta”）：子条目的 sidecar 就落在这里，目录级 Rename/Move/Copy 需整棵子树迁移/复制。
+//
+//	MetaDirPath("dir")            = "meta/dir"
+//	MetaDirPath("alice/user/dir") = "alice/meta/dir"
+func MetaDirPath(rel string) string {
+	return strings.TrimSuffix(MetaPath(rel), metaSuffix)
 }
 
 // IsMetaPath 判定路径是否落在 meta 桶（sidecar 或 meta 桶目录，隐藏过滤用）。

@@ -117,5 +117,60 @@ func (d *davMetaFS) Rename(ctx context.Context, from, to string) error {
 	d.removeMeta(to)
 	d.removeMeta(from)
 	d.writeMeta(ctx, to)
+	// 目录级 MOVE：子文件 sidecar 在 `meta/<from>/**` 子树，必须整棵迁移——否则新位置
+	// 逐分块校验静默失效（退化为直算）且旧子树成孤儿白占 meta 桶配额（本轮 B 面）。
+	d.migrateMetaSubtree(from, to)
 	return nil
+}
+
+// migrateMetaSubtree 目录级 MOVE 时整棵迁移 sidecar 子树：`meta/<from>/**` → `meta/<to>/**`。
+// best-effort（单条失败 Warn 并继续——失败只退化为缺/孤 sidecar，读侧 missing 直算兜底）；
+// 返回迁移条数（0 = 源无子树，正常）。字节总量不变，无需配额调整。
+func (d *davMetaFS) migrateMetaSubtree(from, to string) int {
+	if d.root == nil {
+		return 0
+	}
+	srcRel, dstRel := d.bucketRel(from), d.bucketRel(to)
+	if srcRel == "" || dstRel == "" {
+		return 0
+	}
+	srcRoot := meta.MetaDirPath(srcRel)
+	dstRoot := meta.MetaDirPath(dstRel)
+	if srcRoot == dstRoot {
+		return 0
+	}
+	done := 0
+	var walk func(dir string)
+	walk = func(dir string) {
+		entries, err := d.root.ReadDir(dir)
+		if err != nil {
+			return // 源子树不存在（该目录下无 sidecar）→ 正常跳过
+		}
+		for _, e := range entries {
+			child := dir + "/" + e.Name()
+			if e.IsDir() {
+				walk(child)
+				continue
+			}
+			if d.migrateMetaEntry(child, srcRoot, dstRoot) {
+				done++
+			}
+		}
+	}
+	walk(srcRoot)
+	return done
+}
+
+// migrateMetaEntry 迁移单条 sidecar（目标父目录先建；失败 Warn 并返回 false）。
+func (d *davMetaFS) migrateMetaEntry(child, srcRoot, dstRoot string) bool {
+	dst := dstRoot + strings.TrimPrefix(child, srcRoot)
+	if merr := d.root.MkdirAll(path.Dir(dst), 0o755); merr != nil {
+		d.logger().Warn("dav: sidecar 目标目录建立失败（新位置退化为直算）", "dir", path.Dir(dst), "error", merr)
+		return false
+	}
+	if rerr := d.root.Rename(child, dst); rerr != nil {
+		d.logger().Warn("dav: sidecar 子树迁移失败（新位置退化为直算）", "from", child, "to", dst, "error", rerr)
+		return false
+	}
+	return true
 }

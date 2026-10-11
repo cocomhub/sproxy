@@ -65,6 +65,10 @@ type transferEnv struct {
 	// W1/W3：首写（=0 时进入 transferOnce）用 WriteIfAbsent 拒绝静默覆盖；
 	// 重试（卷损坏/文件异常重下后的再次写）须覆盖同 rel（任务内自愈），不受拒绝。
 	writeCount int
+	// targetWriteLock 是 per-(owner,rel) 写锁获取钩子（装配层注入；nil = 不加锁）。
+	// 与 HTTP 上传/DAV/S3 共用同一键空间——防跨写面同 rel 并发写产出「主文件与 sidecar
+	// 错位」的固化状态（远端卷写后不回读交叉校验 → 永久 fail-closed）。
+	targetWriteLock func(owner, rel string) (release func(), ok bool)
 	// resumeSelfOverwrite 是 damaged 任务 Resume 重下自愈标记（E-M2）：目标卷旧损坏
 	// 副本允许被本任务覆盖（W1/W3 只对他人生效）。来自 task.resumeSelfOverwrite。
 	resumeSelfOverwrite bool
@@ -124,6 +128,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	env := &transferEnv{
 		ctx: ctx, targetFS: targetFS, scheme: scheme, loc: loc, rel: rel, remote: remote,
 		destPath: destPath, task: task, result: result, retryDownload: retryDownload,
+		targetWriteLock:     m.targetWriteLock,
 		resumeSelfOverwrite: task.resumeSelfOverwrite,
 	}
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
@@ -692,6 +697,18 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 // 文件异常重下后）覆盖同 rel（任务内自愈）。错误统一包 ErrTransferTarget。
 // 返回 (done, err)：done=true 表示本次已成功完成转存（含幂等命中，无需调用方再读回校验）。
 func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) (bool, error) {
+	// 跨写面互斥：转存与 HTTP 上传/删除/改名/DAV/S3 共用 per-(owner,rel) 写锁。抢不到
+	// 说明同 rel 正被另一写者持有（其主文件/sidecar 正在落盘）——不能并发写（会产出
+	// 「主文件与 sidecar 错位」的固化状态），按**可重试**的目标卷异常返回，由编排层
+	// 退避重试（1s/2s/4s）错开窗口。
+	if env.targetWriteLock != nil {
+		release, ok := env.targetWriteLock(env.task.Owner, env.rel)
+		if !ok {
+			return false, fmt.Errorf("%w: 目标 %q 正被其他写者占用（并发写互斥），稍后重试",
+				ErrTransferTarget, env.rel)
+		}
+		defer release()
+	}
 	// E-M2（damaged 自愈）：resumeSelfOverwrite（damaged 任务重下）允许首写覆盖本任务
 	// 先前写过的目标卷副本——旧损坏副本需被新下载内容替换，不走唯一性拒绝。
 	if env.resumeSelfOverwrite || env.writeCount > 0 {

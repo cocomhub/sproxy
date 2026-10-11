@@ -69,6 +69,14 @@ func (g *MetaBucketGuard) guardPath(p string) error {
 	if strings.ContainsAny(p, "\\\x00") {
 		return fmt.Errorf("trusted: 路径含非法字符（反斜杠/NUL）: %q", p)
 	}
+	// 盘符前缀（Windows `C:/x`、`c:foo`）：本守卫只按 "/" 切段，盘符形式结构上不是
+	// 「绝对路径」，故需显式拒。**当前实际逃逸已被下层拦下**（fsutil.SanitizeRelPath 的
+	// windows 分支拒 `p[1]==':'`；LocalFS confine/within 二次兜底）——此处按**守卫自身
+	// fail-closed 口径**统一拒绝，不依赖调用方/内层归一。仅影响「首段为单字母+冒号」的
+	// 路径（Windows 本就禁 ':'；Linux 上极罕见且无合法用例）。
+	if len(p) >= 2 && p[1] == ':' && isASCIILetter(p[0]) {
+		return fmt.Errorf("trusted: 路径不得含盘符前缀: %q", p)
+	}
 	if strings.HasPrefix(p, "/") {
 		return fmt.Errorf("trusted: 路径不得为绝对路径: %q", p)
 	}
@@ -84,6 +92,11 @@ func (g *MetaBucketGuard) guardPath(p string) error {
 }
 
 var _ syncpkg.FS = (*MetaBucketGuard)(nil)
+
+// isASCIILetter 报告 b 是否为 ASCII 字母（盘符前缀判定用）。
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
 
 // ListDir 委托 inner（meta 桶隔离：目录枚举路径同样守卫）。
 func (g *MetaBucketGuard) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {

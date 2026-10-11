@@ -19,6 +19,7 @@ import (
 	"maps"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -163,6 +164,9 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	if merr != nil {
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
 	}
+	// 与其它 sidecar 落盘点一致：目标父目录先建（meta.Provider 短路场景——meta 由卷自身
+	// 提供、可能从未落过 sidecar → `meta/` 目录不存在，直接 WriteFile 必失败被吞）。
+	t.ensureMetaDir(ctx, meta.MetaPath(rel))
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		return fmt.Errorf("trusted: meta 更新落盘失败: %w", werr)
 	}
@@ -245,8 +249,9 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 	}
 	fm.Name = path.Base(filepath.ToSlash(rel))
 	// 深拷贝：所有文件的 meta 不得共享同一 map 实例（对比 secretdata 已深拷贝）——
-	// 未来任何就地改 Extra 的调用方会污染全部文件的 meta。
-	fm.Extra = maps.Clone(t.opts.Extra)
+	// 未来任何就地改 Extra 的调用方会污染全部文件的 meta。**必须深**：maps.Clone 只浅
+	// 拷贝，嵌套 map/slice 仍与配置/调用方共享底层数组（就地修改会跨文件互相污染）。
+	fm.Extra = cloneExtra(t.opts.Extra)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		return
@@ -337,6 +342,8 @@ func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
 			// R1-FS-2：源无 meta 时目标旧 sidecar 描述被覆盖的旧内容 → 失效（防固化不可读）。
 			t.invalidateMeta(ctx, to)
 		}
+		// 目录级 Move：同 Rename，子 sidecar 子树整棵迁移（防孤儿 + 新位置校验失效）。
+		t.migrateMetaSubtree(ctx, from, to)
 		return nil
 	}
 	return fmt.Errorf("trusted: 底层卷未实现 Move: %w", syncpkg.ErrUnsupported)
@@ -412,6 +419,79 @@ func (t *TrustedVolumeFS) ensureMetaDir(ctx context.Context, mrel string) {
 	if dir := path.Dir(mrel); dir != "." && dir != "" {
 		_ = t.inner.MakeDir(ctx, dir)
 	}
+}
+
+// cloneExtra 深拷贝 Extra：maps.Clone 是浅拷贝（嵌套 map/slice 仍与源共享底层数组，
+// 任一侧就地修改会污染另一侧——已落盘 meta 的并发读取者会看到撕裂数据）。
+// 覆盖 JSON 可表达类型：map[string]any / []any / []string；其余（标量、time.Time 等）直接共享。
+func cloneExtra(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = cloneExtraValue(v)
+	}
+	return out
+}
+
+// cloneExtraValue 递归拷贝 Extra 值（见 cloneExtra）。
+func cloneExtraValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return cloneExtra(t)
+	case []any:
+		cp := make([]any, len(t))
+		for i := range t {
+			cp[i] = cloneExtraValue(t[i])
+		}
+		return cp
+	case []string:
+		return append([]string(nil), t...)
+	default:
+		return v
+	}
+}
+
+// migrateMetaSubtree 迁移**目录级** Rename/Move 的 sidecar 子树：
+//
+//	<meta>/<from>/**  →  <meta>/<to>/**
+//
+// 背景：单文件联动只搬 `MetaPath(from)` 一条；目录级 Rename/Move 时子文件 sidecar 留在
+// 旧子树 → 新位置逐分块校验静默失效（退化为直算），且旧子树成孤儿白占 meta 桶配额。
+// 逐条 Rename（目标父目录先建）；单条失败记 Warn 并继续（失败只退化为缺/孤 sidecar，读侧
+// missing 直算兜底，不会误判损坏）。返回成功条数（0 = 源无子树，正常）。
+// **仅 Rename/Move**：`Copy` 是对象级（LocalFS/baidupcs 等均不支持目录 Copy），无目录语义。
+func (t *TrustedVolumeFS) migrateMetaSubtree(ctx context.Context, from, to string) int {
+	srcRoot := meta.MetaDirPath(from)
+	dstRoot := meta.MetaDirPath(to)
+	if srcRoot == dstRoot {
+		return 0
+	}
+	done := 0
+	var walk func(dir string)
+	walk = func(dir string) {
+		es, err := t.inner.ListDir(ctx, dir)
+		if err != nil {
+			return // 源子树不存在（该目录下无 sidecar）→ 正常跳过
+		}
+		for i := range es {
+			e := &es[i]
+			if e.IsDir {
+				walk(e.Path)
+				continue
+			}
+			dst := dstRoot + strings.TrimPrefix(e.Path, srcRoot)
+			t.ensureMetaDir(ctx, dst)
+			if rerr := t.inner.Rename(ctx, e.Path, dst); rerr != nil {
+				t.logMetaWarn("metaSubtreeMove", dst, rerr)
+				continue
+			}
+			done++
+		}
+	}
+	walk(srcRoot)
+	return done
 }
 
 // ListDir 列目录：过滤 meta 桶（sidecar 独立桶用户不可见）；user 桶内真实 `.meta`
@@ -502,7 +582,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	fm.Name = path.Base(filepath.ToSlash(rel))
 	// 深拷贝：所有文件的 meta 不得共享同一 map 实例（对比 secretdata 已深拷贝）——
 	// 未来任何就地改 Extra 的调用方会污染全部文件的 meta。
-	fm.Extra = maps.Clone(t.opts.Extra)
+	fm.Extra = cloneExtra(t.opts.Extra)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		// C1 修复：Marshal 失败同样删旧 sidecar（主文件已写成功）——残留描述旧内容的
@@ -616,6 +696,9 @@ func (t *TrustedVolumeFS) Rename(ctx context.Context, from, to string) error {
 		// 必须失效，否则读路径按旧 meta 校验新内容恒失配（硬失败固化，与 missing 直算不同）。
 		t.invalidateMeta(ctx, to)
 	}
+	// 目录级 Rename：子文件 sidecar 在 `meta/<from>/**` 子树，必须整棵迁移——否则新位置
+	// 逐分块校验静默失效（退化为直算）且旧子树成孤儿白占 meta 桶配额（第 5 轮残余）。
+	t.migrateMetaSubtree(ctx, from, to)
 	return nil
 }
 

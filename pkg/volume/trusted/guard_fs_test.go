@@ -117,6 +117,25 @@ func TestGuard_PathNormalizationDenied(t *testing.T) {
 	}
 }
 
+// TestGuard_DrivePrefixDenied 盘符前缀（Windows `C:/x`、`c:foo`）→ **守卫自身** fail-closed
+// 拒绝（不依赖调用方/内层归一）。直接调 guardPath：不经 inner FS，避开「内层本身也拒 ':'」
+// 的平台差异（Windows 上 LocalFS 亦拒，无法区分是谁拒的）。
+func TestGuard_DrivePrefixDenied(t *testing.T) {
+	t.Parallel()
+	g := Guard(newInner(t))
+	for _, p := range []string{"C:/meta/x", "c:foo", "Z:/x", "D:/a/b"} {
+		if err := g.guardPath(p); err == nil {
+			t.Fatalf("盘符路径 %q 应被守卫拒绝", p)
+		}
+	}
+	// 限定误伤面：非「首段单字母+冒号」的冒号路径不受影响。
+	for _, p := range []string{"user/a:b.txt", "alice/user/a:b.txt"} {
+		if err := g.guardPath(p); err != nil {
+			t.Fatalf("路径 %q 不应被盘符判据误拒: %v", p, err)
+		}
+	}
+}
+
 // TestGuard_CapabilityForwarding P0-1：Guard 透传 meta.Provider / ExemptStagingQuota；
 // 生产装配形状 Guard(Wrap(fs)) 仍是 meta.Provider（转存/下载校验可达）。
 func TestGuard_CapabilityForwarding(t *testing.T) {

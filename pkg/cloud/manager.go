@@ -274,6 +274,8 @@ type CloudDownloadManager struct {
 	// stagingQuotaFor 返回 owner 的本地 staging 配额钩子（装配层注入；nil = 无独立
 	// staging 配额，转存不包 gate——零回归）。
 	stagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
+	// targetWriteLock 是 per-(owner,rel) 写锁获取钩子（装配层注入；nil = 不加锁）。
+	targetWriteLock func(owner, rel string) (release func(), ok bool)
 	// integrityLookup 按文件名分发完整性校验器（装配层注入 integrity.Lookup 代理；
 	// nil = 无校验器，语义校验跳过视为通过——Review Focus 1）。
 	integrityLookup func(name string) integrity.Checker
@@ -367,6 +369,12 @@ type CloudManagerOptions struct {
 	// StagingQuotaExempt/StagingQuotaCapable 时包 StagingQuotaGateFS 强制预留）。
 	// nil = 无独立 staging 配额（零回归，不包 gate）。装配层注入（pkg/server 实现）。
 	StagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
+	// TargetWriteLock 返回 owner+rel 的**文件级写锁**（与 HTTP 上传/删除/改名/DAV/S3
+	// 共用同一键空间；装配层注入 filesRuntime.Acquire 语义）。转存不经 pkg/files 写路径，
+	// 若无此锁，与其它写面同 rel 并发写会产出「主文件与 sidecar 错位」的固化状态
+	// （远端卷写后回读交叉校验被跳过 → 读侧逐分块校验恒失配、永久 fail-closed）。
+	// nil = 不加锁（零回归：单写面装配不受影响）。
+	TargetWriteLock func(owner, rel string) (release func(), ok bool)
 	// VolumeFor 解析转存目标卷的 volume.Volume（用于 ResolveLocation 键空间计算——
 	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
 	// nil = 转存不可用（与 TransferFSFor 同门）。
@@ -435,6 +443,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		transferFSFor:    opts.TransferFSFor,
 		volumeFor:        opts.VolumeFor,
 		stagingQuotaFor:  opts.StagingQuotaFor,
+		targetWriteLock:  opts.TargetWriteLock,
 		integrityLookup:  opts.IntegrityLookup,
 		removeFile:       opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
 		cancelFuncs:      make(map[string]context.CancelFunc),
