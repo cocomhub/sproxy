@@ -955,10 +955,6 @@ func (h *Handlers) cloudArchiveToVolume(
 		return
 	}
 	rel := loc.FSPath()
-	// 锁键用**文件域同键空间**（tnt.UserRel = "user/<path>"，无 owner 前缀）——用 FSPath
-	// 做锁键会与 HTTP/DAV/S3 的实际锁键永不相等，跨写面互斥失效（可信卷主文件+sidecar
-	// 并发写会产出错位固化态）。
-	lockKey := loc.Bucket() + "/" + loc.Path()
 	// 本地 staging 配额统一接线（与 cloud 下载转存一致；无独立配额 → 直通零回归）。
 	fs = h.stagingQuotaFS(owner, fs)
 	// 打包流长度未知 → 装配层显式预留本地 staging 上界（见 reservePackedStaging）。
@@ -975,7 +971,7 @@ func (h *Handlers) cloudArchiveToVolume(
 	// ReserveSpace 经装饰器链恒「实现」（底层未实现 → ErrUnsupported）——不得误报容量不足。
 	// 容量预检 + per-(owner,rel) 写锁（与 HTTP 上传/删除/改名/DAV/S3 同键空间）——
 	// 转存写可信卷（主文件 + sidecar meta）与其它写面并发同 rel 会产出错位固化态。
-	release, status, msg := h.archiveVolumeWriteGate(r.Context(), fs, owner, rel, lockKey, totalSize)
+	release, status, msg := h.archiveVolumeWriteGate(r.Context(), fs, owner, rel, totalSize)
 	if status != 0 {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msg}, status)
 		return
@@ -1006,16 +1002,18 @@ func (h *Handlers) cloudArchiveToVolume(
 }
 
 // archiveVolumeWriteGate 是统一转存的写前门：目标卷容量预检（ReserveSpace 可选能力，
-// 装饰器链未实现 → ErrUnsupported 跳过）+ per-(owner,rel) 写锁。返回 (release, status,
-// msg)：status==0 表示通过（release 必非 nil）；否则按 status/msg 回包。抽离以控制
-// cloudArchiveToVolume 的认知复杂度（gocognit 门禁）。
-func (h *Handlers) archiveVolumeWriteGate(ctx context.Context, fs syncpkg.FS, owner, rel, lockKey string, size int64) (func(), int, string) {
+// 装饰器链未实现 → ErrUnsupported 跳过）+ 转存取锁。取锁经 h.transferWriteLock（唯一
+// 归一入口：卷 FS 键 → 域侧锁键）——与 HTTP 上传/删除/改名/DAV/S3、cloud 下载转存**同一
+// 键空间**（否则共享外部卷上互不可见，同 rel 并发写产出主文件/sidecar 错位固化）。
+// 返回 (release, status, msg)：status==0 表示通过（release 必非 nil）；否则按 status/msg 回包。
+// 抽离以控制 cloudArchiveToVolume 的认知复杂度（gocognit 门禁）。
+func (h *Handlers) archiveVolumeWriteGate(ctx context.Context, fs syncpkg.FS, owner, rel string, size int64) (func(), int, string) {
 	if rs, ok := fs.(syncpkg.ReserveSpace); ok {
 		if err := rs.ReserveSpace(ctx, rel, size); err != nil && !errors.Is(err, syncpkg.ErrUnsupported) {
 			return func() {}, http.StatusInsufficientStorage, "目标卷容量不足: " + err.Error()
 		}
 	}
-	release, locked := h.acquireFileLock(owner, lockKey)
+	release, locked := h.transferWriteLock(owner, rel)
 	if !locked {
 		return func() {}, http.StatusConflict, "目标正被其他写者占用，请稍后重试"
 	}
