@@ -86,6 +86,12 @@ func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// **加密卷源 fail-closed 拒绝**（评审 P0）：源侧经裸 LocalFS 读会拿到**密文**，备份产物不可用；
+	// 在接「经 Root 的备份源」前显式拒绝（禁静默降级）。
+	if tnt := h.tenantFor(owner); tnt != nil && tnt.Root() != nil && tnt.Root().IsEncrypted() {
+		http.Error(w, "加密卷暂不支持作为备份源（待接入经 Root 的备份源）", http.StatusConflict)
+		return
+	}
 	srcFS := syncpkg.NewLocalFS(filepath.ToSlash(srcAbs), h.logger)
 
 	// 自备份守卫：源与目标为同一实体时拒绝（与 manifest 落点无关的独立防线）。

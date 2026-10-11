@@ -74,11 +74,13 @@ func (h *Handlers) s3ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set(headerContentType, "application/xml")
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>default</Name><IsTruncated>false</IsTruncated><Contents>%s</Contents></ListBucketResult>`, h.s3ContentsXML(entries, prefix))
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>default</Name><IsTruncated>false</IsTruncated><Contents>%s</Contents></ListBucketResult>`, h.s3ContentsXML(root, entries, prefix))
 }
 
 // s3ContentsXML 生成 <Contents> 对象条目（key/size/last-modified）。
-func (h *Handlers) s3ContentsXML(entries []os.DirEntry, prefix string) string {
+// s3ContentsXML 生成 <Contents> 条目；size 用**用户可见**长度（加密卷 = 明文长度，与
+// HEAD/GET 同口径——评审 P2：此前用密文长度会让 rclone/aws 判 size 不一致而反复重传）。
+func (h *Handlers) s3ContentsXML(root *storage.Root, entries []os.DirEntry, prefix string) string {
 	var b strings.Builder
 	for _, e := range entries {
 		if e.IsDir() {
@@ -94,8 +96,12 @@ func (h *Handlers) s3ContentsXML(entries []os.DirEntry, prefix string) string {
 		}
 		// XML 转义（审查 P2 修复）：文件名可能含 <>&"' —— 直接拼接会注入 XML
 		// （S3 客户端 rclone/aws 解析 ListBucketResult 时被注入伪造条目）。
+		size := info.Size()
+		if ls, lerr := userVisibleSize(root, path.Join("user", name)); lerr == nil {
+			size = ls
+		}
 		fmt.Fprintf(&b, `<Contents><Key>%s</Key><Size>%d</Size><LastModified>%s</LastModified></Contents>`,
-			xmlEscapeText(name), info.Size(), info.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
+			xmlEscapeText(name), size, info.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
 	}
 	return b.String()
 }

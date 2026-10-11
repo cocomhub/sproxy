@@ -249,6 +249,13 @@ func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input Write
 	serverChecksum, written, wErr := writeFileAtomicallyRoot(f.ctx, f.root, rel, limitedSrc)
 	if wErr != nil {
 		route.Release()
+		// 封印拒绝（评审 P2）：目标路径落在封装卷占用的源区间时，卷层返回 ErrSealed——按 409
+		// 语义回包（显式「路径由封装卷管理」，不暴露封装卷名），并记 Warn 以便与真失败区分。
+		if errors.Is(wErr, storage.ErrSealed) {
+			f.logger.WarnContext(f.ctx, "写入被封印拒绝（路径由封装卷管理，禁止直连写入）",
+				"file_name", f.remotePath)
+			return WriteFileResult{}, &HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接写入"}
+		}
 		f.logger.ErrorContext(f.ctx, "保存文件失败", "error", wErr.Error(), "file_name", f.remotePath)
 		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 	}

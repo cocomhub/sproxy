@@ -811,7 +811,10 @@ func (h *Handlers) checkMoveTargetUnique(owner, rel, fromVol, toVol string) (str
 // 原子 rename（atomicRenameRoot，Windows 并发退避）。返回复制字节数（供配额 Commit/release）。
 // 失败路径幂等清理临时文件；成功路径临时文件已 rename 不存在，defer Remove 为空操作。
 func crossVolumeCopy(ctx context.Context, srcRoot, dstRoot *storage.Root, srcRel, dstRel string) (int64, error) {
-	src, err := srcRoot.Open(srcRel)
+	// **加密感知**（评审 P0）：跨卷复制（move / 版本恢复 / 镜像 / 冷热迁移共用）必须按两侧卷的
+	// at-rest 状态分叉——裸 Open/OpenFile 会在「加密→明文」时把密文原样搬到明文卷（不可逆损坏）、
+	// 在「明文→加密」时把明文落到加密卷（at-rest 失效，随后 OpenDecrypted 魔数失配 ⇒ 不可读）。
+	src, err := openUserVisibleRead(srcRoot, srcRel)
 	if err != nil {
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
@@ -822,22 +825,28 @@ func crossVolumeCopy(ctx context.Context, srcRoot, dstRoot *storage.Root, srcRel
 		return 0, fmt.Errorf("创建目标目录失败: %w", err)
 	}
 	tmpRel := filepath.Join(dir, filepath.Base(dstRel)+fmt.Sprintf(".tmp.%d", time.Now().UnixNano()))
-	dst, err := dstRoot.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	tmpDst, err := writeUserVisible(dstRoot, tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("创建目标临时文件失败: %w", err)
 	}
+	dst, ok := tmpDst.(*os.File) // 非加密卷为 *os.File（需 Sync）；加密写入器无 Sync（Close 已冲刷）
+	if !ok {
+		dst = nil
+	}
 	defer func() { _ = dstRoot.Remove(tmpRel) }()
 
-	written, err := copyWithContext(dst, src, ctx)
+	written, err := copyWithContext(tmpDst, src, ctx)
 	if err != nil {
-		_ = dst.Close()
+		_ = tmpDst.Close()
 		return 0, fmt.Errorf("复制文件失败: %w", err)
 	}
-	if err = dst.Sync(); err != nil {
-		_ = dst.Close()
-		return 0, fmt.Errorf("同步目标文件失败: %w", err)
+	if dst != nil {
+		if err = dst.Sync(); err != nil {
+			_ = tmpDst.Close()
+			return 0, fmt.Errorf("同步目标文件失败: %w", err)
+		}
 	}
-	if err = dst.Close(); err != nil {
+	if err = tmpDst.Close(); err != nil {
 		return 0, fmt.Errorf("关闭目标文件失败: %w", err)
 	}
 	if err = atomicRenameRoot(dstRoot, tmpRel, dstRel); err != nil {
