@@ -67,6 +67,12 @@ func (s *Service) OpenBlockWrite(ctx context.Context, owner, rel, volume string,
 			return "", fmt.Errorf("块写父目录: %w", merr)
 		}
 	}
+	// at-rest 加密卷：块写是**随机定位写**（OpenFile+WriteAt），与 GCM 流式加密不兼容——
+	// 写明文会绕过 at-rest 加密（评审 P0 的块写面），故**显式拒绝**（禁静默降级）；
+	// 加密卷请走分块上传（finalize 时单遍加密）或整文件上传。
+	if root.IsEncrypted() {
+		return "", fmt.Errorf("块写不支持 at-rest 加密卷（GCM 不支持随机定位写）：请使用分块上传或整文件上传")
+	}
 	tf, err := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("块写会话打开临时文件: %w", err)

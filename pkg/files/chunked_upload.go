@@ -1266,8 +1266,16 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 场景 old=0。
 	overwrote, prev := s.backupCompleteVersion(tnt, rel, owner, session.Filename)
 	finalChecksum := session.FileChecksum
-	if err := atomicRenameRoot(tnt.Root(), session.TempPath, rel); err != nil {
-		s.rt.logger().Error("重命名最终文件失败", "upload_id", uploadID, "file_name", session.Filename, "error", err)
+	// at-rest 加密卷：在途明文（可续传）在 finalize 单遍加密落位——raw rename 会把明文
+	// 直接落盘（at-rest 加密被绕过、/download 解密失败 = 文件不可读，评审 P0 的分块上传面）。
+	var ferr error
+	if tnt.Root().IsEncrypted() {
+		ferr = encryptFinalizeRoot(tnt.Root(), session.TempPath, rel)
+	} else {
+		ferr = atomicRenameRoot(tnt.Root(), session.TempPath, rel)
+	}
+	if ferr != nil {
+		s.rt.logger().Error("最终文件落位失败", "upload_id", uploadID, "file_name", session.Filename, "error", ferr)
 		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -1487,4 +1495,30 @@ func (s *Service) sendUploadRouteError(w http.ResponseWriter, r *http.Request, r
 	}
 	s.rt.logger().ErrorContext(r.Context(), "上传卷路由失败", "file_name", remotePath, "error", err.Error())
 	s.sendJSON(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
+}
+
+// encryptFinalizeRoot 把**在途明文**临时文件（可续传的分片暂存）以 at-rest 加密语义写入
+// rel，并删除临时文件。用于加密卷的分块上传 finalize：GCM 是流式格式，分片随机定位写
+// 不可行，故分片阶段保持明文暂存、落位时单遍加密（峰值 ≈ 明文+密文，与整文件原子写同量级）。
+// 写失败时不留半截目标（删除 rel），临时文件保留（调用方可重试）。
+func encryptFinalizeRoot(root *storage.Root, tmpRel, rel string) error {
+	src, err := root.Open(tmpRel)
+	if err != nil {
+		return fmt.Errorf("打开在途文件: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+	w, werr := root.OpenFileEncrypted(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if werr != nil {
+		return fmt.Errorf("创建加密封装目标: %w", werr)
+	}
+	if _, cerr := io.Copy(w, src); cerr != nil {
+		_ = w.Close()
+		_ = root.Remove(rel)
+		return fmt.Errorf("加密落位: %w", cerr)
+	}
+	if cerr := w.Close(); cerr != nil {
+		_ = root.Remove(rel)
+		return fmt.Errorf("加密落位收尾: %w", cerr)
+	}
+	return root.Remove(tmpRel)
 }

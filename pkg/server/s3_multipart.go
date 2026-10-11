@@ -312,8 +312,11 @@ func removePartialS3(root *storage.Root, rel string) {
 // s3CompleteWriteParts 打开目标文件并逐 part 单遍拷贝+哈希+ETag 校验；
 // 任一失败已回包并清理（关目标+释放双预留+删半截目标），返回 ok=false 与累积的 md5 字节。
 func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan, resv *s3CompleteReservation) ([]byte, bool) {
-	// 9. OpenFile 目标 + 逐 part 单遍拷贝+哈希。
-	f, err := plan.root.OpenFile(plan.rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// 9. 打开目标 + 逐 part 单遍拷贝+哈希。
+	// 目标写走**用户可见**入口：加密卷 transparent 加密落盘（raw OpenFile 会写明文 =
+	// at-rest 加密被绕过，评审 P0 的 multipart 面）。in-flight part 仍是明文暂存（分片
+	// 可续传，且 GCM 流不可拼接）——finalize 单遍加密。
+	f, err := writeUserVisible(plan.root, plan.rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		resv.release()
 		http.Error(w, "s3: 目标创建失败", http.StatusInternalServerError)
