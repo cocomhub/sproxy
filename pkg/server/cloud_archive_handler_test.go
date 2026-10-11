@@ -661,3 +661,22 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 		t.Fatalf("kind=cloud_archive 下载应 200, got %d", code)
 	}
 }
+
+// TestCloudArchive_SingleTask_TargetVolumeRejected 锁定单任务归档对 target_volume 的
+// fail-closed（统一转存当前仅组归档接线）——防「显式指定 target_volume 却被静默按桶归档」
+// 的行为分歧（与组归档 target_volume 语义不一致即静默做错）。
+func TestCloudArchive_SingleTask_TargetVolumeRejected(t *testing.T) {
+	t.Parallel()
+	ts, mgr, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+	id := createCompletedTask(t, mgr, "test.zip")
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON,
+		strings.NewReader(`{"archive_name":"x.tar.gz","target_volume":"vault"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("单任务 target_volume 应 400 fail-closed，got %d", resp.StatusCode)
+	}
+}

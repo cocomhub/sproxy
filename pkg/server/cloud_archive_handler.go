@@ -79,6 +79,14 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 统一转存目前仅组归档接线（cloudArchiveGroup → cloudArchiveGroupToVolume）；
+	// 单任务归档显式拒绝 target_volume——否则会被静默按「落 archive 桶」处理，
+	// 与调用方指定的目标卷不一致（fail-closed，防静默行为分歧）。
+	if req.TargetVolume != "" {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "target_volume 暂仅支持组归档（/api/cloud/groups/{id}/archive）"}, http.StatusBadRequest)
+		return
+	}
+
 	// 确定归档文件名（路径穿越防护 + 合法性检查）
 	archiveName := req.ArchiveName
 	if archiveName == "" {

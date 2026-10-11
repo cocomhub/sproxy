@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -69,6 +71,7 @@ func (v *memVol) Scheme() string { return v.scheme }
 func (v *memVol) Volume() string { return v.name }
 
 func TestExecute_Individual_RoundTrip(t *testing.T) {
+	t.Parallel()
 	v := &memVol{memFS: newMemFS(), scheme: "vault", name: "vol1"}
 	content := []byte("individual payload")
 	url, err := Execute(context.Background(), TransferRequest{
@@ -95,6 +98,7 @@ func TestExecute_Individual_RoundTrip(t *testing.T) {
 }
 
 func TestExecute_Pack_TarGz(t *testing.T) {
+	t.Parallel()
 	v := &memVol{memFS: newMemFS(), scheme: "vault", name: "vol1"}
 	p := &TarPreprocessor{Compression: compressx.Gzip}
 	url, err := Execute(context.Background(), TransferRequest{
@@ -137,6 +141,7 @@ func TestExecute_Pack_TarGz(t *testing.T) {
 }
 
 func TestExecute_Pack_Encrypt(t *testing.T) {
+	t.Parallel()
 	v := &memVol{memFS: newMemFS(), scheme: "vault", name: "vol1"}
 	key := make([]byte, 32)
 	p := &TarPreprocessor{Compression: compressx.Gzip, EncryptKey: key}
@@ -151,5 +156,73 @@ func TestExecute_Pack_Encrypt(t *testing.T) {
 	// 密文：直接 gzip 解应失败（已加密）
 	if _, err := gzip.NewReader(bytes.NewReader(v.files["enc.tar.gz.aes"])); err == nil {
 		t.Fatal("加密产物不应直接 gzip 可解")
+	}
+}
+
+// unsupportedWriteIfAbsentVol 是「装饰器语义」目标卷：**无条件实现** WriteIfAbsent 但底层
+// 未实现（返回 syncpkg.ErrUnsupported）——与 trusted.Guard/Wrap、capacity、staging 装饰
+// 器链同型（对可选能力接口的类型断言恒真）。
+type unsupportedWriteIfAbsentVol struct {
+	*memVol
+}
+
+func (u *unsupportedWriteIfAbsentVol) WriteIfAbsent(_ context.Context, _ string, _ io.Reader, _, _ int64) (bool, error) {
+	return false, fmt.Errorf("decorator: %w", syncpkg.ErrUnsupported)
+}
+
+// TestExecute_WriteIfAbsentUnsupportedFallsBack individual 纯转存：经装饰器链时
+// WriteIfAbsent 能力接口恒存在但返回 ErrUnsupported → 须回落 WriteFile（不得把「未实现」
+// 当写失败），且覆盖保护仍生效（二次写 ErrExists）。
+func TestExecute_WriteIfAbsentUnsupportedFallsBack(t *testing.T) {
+	t.Parallel()
+	base := newMemFS()
+	v := &unsupportedWriteIfAbsentVol{memVol: &memVol{memFS: base, scheme: "vault", name: "vol1"}}
+	content := []byte("fallback payload")
+	url, err := Execute(context.Background(), TransferRequest{
+		Entries:     []SourceEntry{{Rel: "src/x.bin", Size: int64(len(content)), Reader: strings.NewReader(string(content))}},
+		Destination: v,
+		Rel:         "dst/x.bin",
+	})
+	if err != nil {
+		t.Fatalf("应回落 WriteFile 而非报 ErrUnsupported: %v", err)
+	}
+	if url != "vault://vol1/dst/x.bin" {
+		t.Fatalf("url=%q", url)
+	}
+	if got := string(base.files["dst/x.bin"]); got != string(content) {
+		t.Fatalf("内容 %q want %q", got, content)
+	}
+	if _, err := Execute(context.Background(), TransferRequest{
+		Entries:     []SourceEntry{{Rel: "src/y.bin", Size: 1, Reader: strings.NewReader("z")}},
+		Destination: v, Rel: "dst/x.bin",
+	}); !errors.Is(err, ErrExists) {
+		t.Fatalf("二次写应 ErrExists（覆盖保护仍生效），got %v", err)
+	}
+}
+
+// TestExecute_Pack_WriteIfAbsentUnsupportedFallsBack 打包预处理路径同样回落（V1 覆盖
+// 保护不因装饰器链丢失）。
+func TestExecute_Pack_WriteIfAbsentUnsupportedFallsBack(t *testing.T) {
+	t.Parallel()
+	base := newMemFS()
+	v := &unsupportedWriteIfAbsentVol{memVol: &memVol{memFS: base, scheme: "vault", name: "vol1"}}
+	if _, err := Execute(context.Background(), TransferRequest{
+		Entries:     []SourceEntry{{Rel: "s.txt", Size: 3, Reader: strings.NewReader("abc")}},
+		Preprocess:  &TarPreprocessor{Compression: compressx.Gzip},
+		Destination: v,
+		Rel:         "pack.tar.gz",
+	}); err != nil {
+		t.Fatalf("打包路径应回落 WriteFile: %v", err)
+	}
+	if len(base.files["pack.tar.gz"]) == 0 {
+		t.Fatal("打包产物未落盘")
+	}
+	if _, err := Execute(context.Background(), TransferRequest{
+		Entries:     []SourceEntry{{Rel: "s.txt", Size: 3, Reader: strings.NewReader("abc")}},
+		Preprocess:  &TarPreprocessor{Compression: compressx.Gzip},
+		Destination: v,
+		Rel:         "pack.tar.gz",
+	}); !errors.Is(err, ErrExists) {
+		t.Fatalf("二次打包转存应 ErrExists，got %v", err)
 	}
 }

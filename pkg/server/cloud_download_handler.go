@@ -24,7 +24,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/transfer"
-	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
@@ -872,26 +871,56 @@ func (h *Handlers) cloudArchiveReconcileReservation(w http.ResponseWriter, root 
 }
 
 // cloudArchiveGroupToVolume 统一转存：组归档打包后转存到外部卷（target_volume）。
-// 复用 pkg/transfer：TarPreprocessor（tar.gz）+ 目标卷（transferFS 解析的 VolumeFS）。
+// 复用 pkg/transfer：TarPreprocessor（tar.gz）+ 目标卷（可信卷写视图的 VolumeFS）。
+//
+// 接线纪律（复用 master 可信卷能力，与 cloud 下载转存同款）：
+//   - 目标 FS = externalVolumeTransferFS（trusted.Guard(Wrap(...))）——meta 恒生成 +
+//     meta 桶隔离（裸 FS 会让转存产物不是可信卷、且可触达 meta 凭据桶）；
+//   - 目标键经 volume.ResolveLocation 唯一入口计算（恒 owner 前缀 + 路径安全）——与读
+//     路径 ResolveUserLocation 同键空间，产物可被 /download 与列表命中；
+//   - 本地 staging 配额 + per-(owner,rel) 写锁（与 HTTP 上传/DAV/S3 同键空间）。
 func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Request, groupID, owner string, groupFiles []fileWithRelPath, req *CloudArchiveRequest, archiveName string) {
-	// 目标卷解析（transferFS 装配；未装 → 404）。
-	fs, scheme, ok := h.transferTargetFS(req.TargetVolume)
-	if !ok {
+	// 目标卷解析（可信卷写视图；未装/元数据不可解析/类型未声明协议 → fail-closed）。
+	fs, scheme, vol, ok := h.externalVolumeTransferFS(req.TargetVolume)
+	if !ok || scheme == "" {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "target volume not assembled"}, http.StatusNotFound)
 		return
 	}
+	// 目标键：volume 唯一入口（权限门 + 路径安全 + 恒 owner 前缀），与读路径
+	// resolveExternalDownload 的 ResolveUserLocation 同键空间。
+	loc, lerr := vol.ResolveUserLocation(owner, relOf(archiveName))
+	if lerr != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid target path: " + lerr.Error()}, http.StatusBadRequest)
+		return
+	}
+	rel := loc.FSPath()
+	// 本地 staging 配额统一接线（与 cloud 下载转存一致；无独立配额 → 直通零回归）。
+	fs = h.stagingQuotaFS(owner, fs)
 	// V2：配额预检（复用 cloudArchiveReserveQuota：总量限制 + 用户 archive 桶 Scope 预留）
 	// + 目标卷自身容量（sync.ReserveSpace 能力，外部网盘配额 API）。
 	// 任一不通过 → 不转存（fail-closed，防超额写）。
 	totalSize := archiveTotalSize(groupFiles)
-	if _, _, ok := h.cloudArchiveReserveQuota(w, owner, totalSize); !ok {
+	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, totalSize)
+	if !ok {
 		return
 	}
+	// 外部卷转存不消耗租户 archive 桶空间（产物落目标卷；容量权威在目标卷
+	// ReserveSpace / 卷池）——预检后**归还预留**（防 archive 桶 Scope Reserved 虚高）。
+	defer releaseArchiveReservation(res, h.storageMgr, pre)
+	// ReserveSpace 经装饰器链恒「实现」（底层未实现 → ErrUnsupported）——不得误报容量不足。
 	if rs, isRS := fs.(syncpkg.ReserveSpace); isRS {
-		if err := rs.ReserveSpace(r.Context(), relOf(req.TargetVolume, archiveName), totalSize); err != nil {
+		if err := rs.ReserveSpace(r.Context(), rel, totalSize); err != nil && !errors.Is(err, syncpkg.ErrUnsupported) {
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标卷容量不足: " + err.Error()}, http.StatusInsufficientStorage)
 			return
 		}
+	}
+	// 跨写面互斥：per-(owner,rel) 写锁（与 HTTP 上传/删除/改名/DAV/S3 同键空间）——
+	// 转存写可信卷（主文件 + sidecar meta）与其它写面并发同 rel 会产出错位固化态。
+	if release, locked := h.acquireFileLock(owner, rel); !locked {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标正被其他写者占用，请稍后重试"}, http.StatusConflict)
+		return
+	} else {
+		defer release()
 	}
 	// 打包（tar.gz）→ 转存：groupFiles 转 SourceEntry（Reader 打开源文件）。
 	entries, err := archiveEntries(groupFiles)
@@ -902,7 +931,6 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 	// 关闭所有源 Reader（transfer.Execute 消费后；防句柄泄漏——Windows 下未关的
 	// os.File 会占 TempDir 阻止清理）。
 	defer closeEntries(entries)
-	rel := relOf(req.TargetVolume, archiveName)
 	dest := &transferVolumeFS{FS: fs, scheme: scheme, name: req.TargetVolume}
 	url, terr := transfer.Execute(r.Context(), transfer.TransferRequest{
 		Entries:     entries,
@@ -948,23 +976,6 @@ func archiveEntries(files []fileWithRelPath) ([]transfer.SourceEntry, error) {
 	return out, nil
 }
 
-// transferTargetFS 解析目标卷的 FS + scheme（统一转存：归档打包转存外部卷用）。
-// 复用 registry.Set.External + SchemeOf；未装配/无 FS → ok=false。
-func (h *Handlers) transferTargetFS(volume string) (syncpkg.FS, string, bool) {
-	if h.volSet == nil {
-		return nil, "", false
-	}
-	be := h.volSet.External(volume)
-	if be == nil || be.FS() == nil {
-		return nil, "", false
-	}
-	vol, ok := h.volSet.ByName(volume)
-	if !ok {
-		return be.FS(), "", true
-	}
-	return be.FS(), registry.SchemeOf(vol.Type), true
-}
-
 // closeEntries 关闭所有 SourceEntry 的 Reader（io.Closer）。
 func closeEntries(entries []transfer.SourceEntry) {
 	for _, e := range entries {
@@ -987,8 +998,9 @@ func archiveTotalSize(files []fileWithRelPath) int64 {
 	return total
 }
 
-// relOf 派生转存目标路径（archive/<name>.tar.gz）。
-func relOf(volume, archiveName string) string {
+// relOf 派生转存目标路径（archive/<name>.tar.gz，卷内 user 桶相对路径；
+// owner 前缀/路径安全由 volume.ResolveLocation 唯一入口拼接）。
+func relOf(archiveName string) string {
 	rel := "archive/" + archiveName
 	if !strings.HasSuffix(rel, ".tar.gz") {
 		rel += ".tar.gz"

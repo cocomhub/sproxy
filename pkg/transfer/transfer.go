@@ -15,6 +15,7 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -96,23 +97,39 @@ func executeIndividual(ctx context.Context, req TransferRequest, rel string) (st
 		return "", ErrIndividualMulti
 	}
 	e := req.Entries[0]
-	// 写目标：优先 WriteIfAbsent（防覆盖），降级 WriteFile。
-	if !req.Overwrite {
-		if pia, ok := req.Destination.(syncpkg.WriteIfAbsent); ok {
-			written, err := pia.WriteIfAbsent(ctx, rel, e.Reader, e.Size, e.ModTime)
-			if err != nil {
-				return "", err
-			}
-			if !written {
-				return "", ErrExists
-			}
-			return targetURL(req.Destination, rel), nil
-		}
-	}
-	if err := req.Destination.WriteFile(ctx, rel, e.Reader, e.Size, e.ModTime); err != nil {
+	// 写目标：优先 WriteIfAbsent（防覆盖），降级 WriteFile（见 writeUnique）。
+	if err := writeUnique(ctx, req.Destination, rel, e.Reader, e.Size, e.ModTime, req.Overwrite); err != nil {
 		return "", err
 	}
 	return targetURL(req.Destination, rel), nil
+}
+
+// writeUnique 以「目标唯一」语义写目标 rel：
+//   - Overwrite=false：优先 WriteIfAbsent（原子、无 TOCTOU、并发安全防覆盖）；装饰器链
+//     （trusted.Guard/Wrap、capacity、staging）**无条件实现**该可选能力接口，但底层可能
+//     未实现（返回 syncpkg.ErrUnsupported）——此时**回落** Stat 存在性检查 + WriteFile，
+//     不把「未实现」当写失败（P0-1 同型陷阱：对装饰器链做能力类型断言恒真）。
+//   - 目标已存在 → ErrExists（fail-closed，拒绝静默覆盖）。
+//   - Overwrite=true：直接 WriteFile（允许覆盖）。
+func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, size, mtime int64, overwrite bool) error {
+	if !overwrite {
+		if pia, ok := dest.(syncpkg.WriteIfAbsent); ok {
+			written, err := pia.WriteIfAbsent(ctx, rel, r, size, mtime)
+			switch {
+			case err == nil && written:
+				return nil
+			case err == nil:
+				return ErrExists
+			case !errors.Is(err, syncpkg.ErrUnsupported):
+				return err
+			}
+			// ErrUnsupported = 能力探针（未消费 reader）→ 降级存在性检查。
+			if e, serr := dest.Stat(ctx, rel); serr == nil && e != nil {
+				return ErrExists
+			}
+		}
+	}
+	return dest.WriteFile(ctx, rel, r, size, mtime)
 }
 
 // executePacked 预处理后转存：聚合流写目标卷。
@@ -144,21 +161,10 @@ func executePacked(ctx context.Context, req TransferRequest, rel string) (string
 	return targetURL(req.Destination, rel), nil
 }
 
-// packedWrite 打包流的覆盖保护写：WriteIfAbsent 优先（拒绝覆盖），降级 WriteFile。
+// packedWrite 打包流的覆盖保护写：复用 writeUnique（WriteIfAbsent 优先，拒绝覆盖；
+// 装饰器 ErrUnsupported 回落 WriteFile）。
 func packedWrite(ctx context.Context, req TransferRequest, rel string, pr io.Reader) error {
-	if !req.Overwrite {
-		if pia, ok := req.Destination.(syncpkg.WriteIfAbsent); ok {
-			written, err := pia.WriteIfAbsent(ctx, rel, pr, 0, 0)
-			if err != nil {
-				return err
-			}
-			if !written {
-				return ErrExists
-			}
-			return nil
-		}
-	}
-	return req.Destination.WriteFile(ctx, rel, pr, 0, 0)
+	return writeUnique(ctx, req.Destination, rel, pr, 0, 0, req.Overwrite)
 }
 
 // targetURL 生成目标 URL（<scheme>://<volume>/<rel>）。
