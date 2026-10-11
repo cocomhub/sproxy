@@ -402,6 +402,20 @@ func (s *Service) finishDownload(r *http.Request, dp DownloadPath, start time.Ti
 	s.rt.metricsRecorder().RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
 }
 
+// serveVerifiedFallback 以 /download 主链**同口径**下发原文件（评审 P1：transform 回退分支
+// 此前直接 http.ServeContent(seeker) —— 未包 firstErrReadSeeker、不调 finishDownload，
+// 而 ServeContent 吞掉 io.Copy 错误 ⇒ 损坏内容被静默截断 200（无 Warn、无失败指标、不中断
+// 连接）。回退路径必须与主链一致：首错记录 → 失败可观测 → 主动中断连接。
+func (s *Service) serveVerifiedFallback(w http.ResponseWriter, r *http.Request, dp DownloadPath, seeker io.ReadSeeker, name string, modTime time.Time) {
+	owner := normalizeOwner(s.rt.actorOf(r))
+	cw := &countingWriter{ResponseWriter: w}
+	limited := limitResponseWriter(s.rt.bandwidthLimiter(), owner, cw)
+	start := time.Now()
+	tracked := &firstErrReadSeeker{inner: seeker}
+	http.ServeContent(limited, r, name, modTime, tracked)
+	s.finishDownload(r, dp, start, cw, tracked)
+}
+
 // firstErrReadSeeker 记录底层读的**首个非 EOF 错误**并原样返回（Read/Seek 直透）。
 // 供 /download 在 ServeContent 返回后判定「是否因校验/读错而截断」，从而中断连接并
 // 把指标记为失败（ServeContent 本身不暴露该错误）。
