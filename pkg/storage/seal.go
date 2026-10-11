@@ -173,7 +173,12 @@ func normalizeSealPath(p string) (string, error) {
 		return "", fmt.Errorf("storage: 封印路径不能为空")
 	}
 	// 绝对路径/盘符一律拒绝（封印必须是卷根相对子路径；避免绕过 Abs 逃逸检查）。
-	if strings.HasPrefix(p, "/") || filepath.VolumeName(p) != "" {
+	//
+	// **词法判定而非 filepath.VolumeName**：后者平台相关（Linux 上 `filepath.VolumeName("C:/win")`
+	// 返回空 ⇒ Windows 盘符写法在 Linux 装配时**不被拒绝**）——同一份配置在 Windows 拒、Linux 放行，
+	// 既不可移植也不安全（CI 已在 ubuntu 上暴露，评审「tests」角度同类问题）。故显式拒绝
+	// 「盘符前缀」与任何含 `:` 的段（NTFS 保留字符，fail-closed）。
+	if strings.HasPrefix(p, "/") || filepath.VolumeName(p) != "" || hasDriveOrColon(p) {
 		return "", fmt.Errorf("storage: 封印路径必须为卷根相对路径 %q", p)
 	}
 	p = strings.Trim(p, "/")
@@ -229,4 +234,13 @@ func sealCompareKey(p string) string {
 // isWriteOpenFlag 判断 open 标志是否为写意图（任一写/创建/截断位）。
 func isWriteOpenFlag(flag int) bool {
 	return flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0
+}
+
+// hasDriveOrColon 报告路径是否含盘符前缀（`X:`）或任何 `:`（跨平台词法判定，不依赖
+// filepath.VolumeName 的平台语义；NTFS 不允许 `:` 出现在文件名中，且 `C:foo` 属驱动器相对路径）。
+func hasDriveOrColon(p string) bool {
+	if len(p) >= 2 && p[1] == ':' {
+		return true
+	}
+	return strings.ContainsRune(p, ':')
 }
