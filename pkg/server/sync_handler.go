@@ -16,6 +16,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -105,6 +106,18 @@ func (h *Handlers) SyncScopeFor() func(owner, rel string) *quota.Scope {
 // 排除面边界（F4 review 成文）：sync pull 目标解析到**默认卷** user 根属默认卷 ACL 排除面的
 // 设计内例外（服务端自有 meta/sync 桶 + 同步目标按 owner 逻辑树解析，非 T6b 门禁入口）。
 // 见 volumes.go defaultVolumeAllows 边界注释。不改行为，仅记录避免未来误判为漏洞。
+// SyncTenantRootFS 是「Root 感知本地 FS 提供者」（供 syncexec 本地侧使用）：返回根在该
+// 租户**租户根**的 FS——经 `storage.Root` 入口 ⇒ 本地侧自动获得 at-rest 透明加解密与封印
+// 语义（评审 P0：sync pull/push 此前用裸 LocalFS，加密卷上落明文/传密文）。
+// 返回 ok=false 时调用方回落路径式 LocalFS（fail-open 仅限未装配场景；生产恒注入）。
+func (h *Handlers) SyncTenantRootFS(owner string) (syncpkg.FS, bool) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, false
+	}
+	return NewRootFS(tnt.Root()), true
+}
+
 func (h *Handlers) syncTenantRoot(owner string) (userRootAbs, persistDirAbs string, ok bool) {
 	tnt := h.tenantFor(owner)
 	if tnt == nil {

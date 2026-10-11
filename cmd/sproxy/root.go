@@ -1341,6 +1341,9 @@ func (rt *runServerRuntime) setupSync(h *server.Handlers) error {
 	}
 	remotes := buildSyncRemotes(cfg)
 	exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
+	// 本地侧 Root 感知（评审 P0）：sync push/pull 的本地 FS 经 storage.Root ⇒ at-rest
+	// 透明加解密 + 封印语义（此前裸 LocalFS 会在加密卷上落明文/传密文）。
+	exec.TenantRootFS = h.SyncTenantRootFS
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
 	exec.SetScopeResolver(h.SyncScopeFor())
 	rt.setupSyncConflictIndex(exec, h, logger)
