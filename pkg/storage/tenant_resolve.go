@@ -126,6 +126,16 @@ func openTenant(parent *Root, owner string, cfg tenantConfig) (*Tenant, error) {
 			return nil, fmt.Errorf("storage: OpenTenant: 租户子根加密态注入失败: %w", serr)
 		}
 	}
+	// 封印传播：源卷的封印规则对**每个租户子根同样适用**——声明的源子路径在卷根命名空间与
+	// 各租户树内同名位置一律禁止直连（租户根是该卷的一个子根，直连租户根 = 直连源存储）。
+	// 只读透视/写恒拒语义不变（封装卷持特权视图，不受影响）。
+	if seals := parent.Seals(); len(seals) > 0 {
+		if serr := tenantRoot.SetSeals(seals); serr != nil {
+			cfg.warn("租户子根封印注入失败（fail-closed）", "owner", owner, "error", serr)
+			_ = tenantRoot.Close()
+			return nil, fmt.Errorf("storage: OpenTenant: 租户子根封印注入失败: %w", serr)
+		}
+	}
 	t, err := NewTenant(owner, tenantRoot)
 	if err != nil {
 		cfg.warn("创建租户失败（fail-closed）", "owner", owner, "error", err)
