@@ -497,22 +497,38 @@ func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data [
 
 // sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（崩溃残留）。best-effort：删除失败仅
 // 日志语义（下次写再试）。
-// m9：兼容两种 tmp 命名——本文件的 `.tmp.<nano>`（点）与 LocalFS.writeFileAtomic 的
-// `.tmp-*`（连字符，装饰器写经 inner 落盘用此）；原只匹配点前缀，`LocalFS` 崩溃残留
-// 的 `.tmp-*` 孤儿永不清理（与 runtime.sweepMetaTmp 的 MINOR-8 修复对齐）。
+//
+// 兼容三种真实命名（全部由代码生成，逐一核对）：
+//   - `.tmp.<nano>`：本文件 atomicWriteMeta 的 tmp 名（`<base>.tmp.<unixNano>`）；
+//   - `.<base>.tmp-*`：**LocalFS.writeFileAtomic** 用 `os.CreateTemp(dir, "."+base+".tmp-*")`
+//     生成的真实名（**带前导点**）——此前只匹配无前导点变体，导致这类孤儿实际**从未**被清理
+//     （我的 m9 首版修复即此错：判据与生成端不一致 + fixture 用了假名 ⇒ 假绿）。
+//
+// **刻意不匹配** `<base>.tmp-*`（无前导点）：全仓无该命名的生成端，而它会误删合法 sidecar
+// （如用户文件 `x.meta.tmp-abc` 的 sidecar `x.meta.tmp-abc.meta`）——宁漏不误删。
 func (p filesMetaPolicy) sweepMetaTmp(root *storage.Root, mrel string) {
 	dir := path.Dir(mrel)
-	base := path.Base(mrel) + ".tmp."
-	baseDash := path.Base(mrel) + ".tmp-"
+	bn := path.Base(mrel)
+	prefixes := []string{bn + ".tmp.", "." + bn + ".tmp-"}
 	es, err := root.ReadDir(dir)
 	if err != nil {
 		return // 目录不存在/不可读：无孤儿可清
 	}
 	for _, e := range es {
-		if strings.HasPrefix(e.Name(), base) || strings.HasPrefix(e.Name(), baseDash) {
+		if hasAnyPrefix(e.Name(), prefixes) {
 			_ = root.Remove(path.Join(dir, e.Name()))
 		}
 	}
+}
+
+// hasAnyPrefix 报告 name 是否以任一前缀开头（sweep 判据的单一实现，防两处拷贝漂移）。
+func hasAnyPrefix(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // computeMeta 从 root 相对 rel 的文件计算完整 FileMeta（流式读一遍，双算法 + 分块）。

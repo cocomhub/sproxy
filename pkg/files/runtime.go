@@ -97,22 +97,35 @@ func (rt runtime) verifyDownload(ctx context.Context, root *storage.Root, rel st
 // sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（崩溃残留）。best-effort：删除失败
 // 仅忽略（下次写同 rel 再试）；目录不可读无孤儿可清。删除联动调用（m4：文件删除后
 // 孤儿常驻，删除路径也自愈）。
-// MINOR-8 修复：兼容两种 tmp 命名——filesMetaPolicy.atomicWriteMeta 的 `.tmp.<nano>`
-// （点）与 LocalFS.writeFileAtomic 的 `.tmp-*`（连字符，装饰器 meta 写经 inner 用此）；
-// 原只匹配点前缀，LocalFS 崩溃残留 `.tmp-*` 孤儿永不清理。
+// 兼容三种真实命名（与 filesMetaPolicy.sweepMetaTmp 同口径）：
+//   - `.tmp.<nano>`（atomicWriteMeta）；
+//   - `.<base>.tmp-*`：LocalFS.writeFileAtomic 的真实名（**带前导点**）——此前判据缺该变体，
+//     这类孤儿实际从未被清理（与 filesMetaPolicy 同型缺陷）。
+//
+// **刻意不匹配** `<base>.tmp-*`（无前导点）：无生成端且会误删合法 sidecar。——宁漏不误删。
 func (rt runtime) sweepMetaTmp(root *storage.Root, mrel string) {
 	dir := path.Dir(mrel)
-	baseDot := path.Base(mrel) + ".tmp."
-	baseDash := path.Base(mrel) + ".tmp-"
+	bn := path.Base(mrel)
+	prefixes := []string{bn + ".tmp.", "." + bn + ".tmp-"}
 	es, err := root.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range es {
-		if strings.HasPrefix(e.Name(), baseDot) || strings.HasPrefix(e.Name(), baseDash) {
+		if hasAnyPrefix(e.Name(), prefixes) {
 			_ = root.Remove(path.Join(dir, e.Name()))
 		}
 	}
+}
+
+// hasAnyPrefix 报告 name 是否以任一前缀开头（与 filesMetaPolicy 同实现）。
+func hasAnyPrefix(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // New 构造文件服务实例：**唯一必需项**是租户解析，其余能力由 Option 注入，未注入的
