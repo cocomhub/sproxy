@@ -214,7 +214,7 @@ func (s *Storage) putAttempt(ctx context.Context, key, remote string, st *staged
 	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
 		return nil, "", mapPCSError(upErr)
 	}
-	meta, done, werr := s.putCheckAfterUpload(ctx, key, st.md5, attempt)
+	meta, done, werr := s.putCheckAfterUpload(ctx, key, st, attempt)
 	if werr != nil {
 		return nil, "", werr
 	}
@@ -257,7 +257,7 @@ func (s *Storage) refreshByRapidUpload(ctx context.Context, key, remote string, 
 	if !hit {
 		return nil, "", nil // 未命中（内容不在网盘）→ 下一轮上传
 	}
-	m2, d2, e2 := s.putCheckAfterUpload(ctx, key, st.md5, attempt)
+	m2, d2, e2 := s.putCheckAfterUpload(ctx, key, st, attempt)
 	if e2 != nil {
 		return nil, "", e2
 	}
@@ -293,7 +293,8 @@ func (s *Storage) putCheckExisting(ctx context.Context, key, localMD5 string, at
 // putCheckAfterUpload 上传后的 ETag 复核（md5 刷新）：远端 ETag 与本地 md5 一致 →
 // (meta, done=true) 完成；Stat 未见（瞬时最终一致性）→ (nil, false) 重试；Stat 错误
 // fail-closed。返回 done=false 且 meta 非 nil = 复核不匹配（调用方重传）。
-func (s *Storage) putCheckAfterUpload(ctx context.Context, key, localMD5 string, attempt int) (*ObjectMeta, bool, error) {
+func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stagedUpload, attempt int) (*ObjectMeta, bool, error) {
+	localMD5 := st.md5
 	meta, statErr := s.Stat(ctx, key)
 	if statErr != nil {
 		if errors.Is(statErr, ErrNotFound) {
@@ -303,9 +304,22 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key, localMD5 string,
 		return nil, false, mapPCSError(statErr)
 	}
 	if meta.MD5Unreliable {
-		// 服务端标注 md5 可能不正确（分片组合）：不得做相等断言（否则必然判失败 +
-		// 白传 3 遍），按 size/存在性接受并告警（对齐 R5-I1「无校验能力≠损坏」）。
-		s.log.Warn("远端 md5 非权威（服务端标注可能不正确），跳过复核", "key", key, "remote_etag", meta.ETag, "attempt", attempt)
+		// M6 修复（第 7 轮 MINOR）：先尝试 **rapidupload 刷新**——秒传命中会把远端 md5 刷新为
+		// 权威整文件 md5，刷新后即可正常做相等断言；仍非权威才按「无校验能力≠损坏」（R5-I1）
+		// 以 size/存在性接受。此前直接接受，「必须 md5 一致」在分片上传（>4MiB）路径被架空。
+		if renewed, rok := s.renewAuthoritativeMD5(ctx, key, st, attempt); rok {
+			meta = renewed
+		}
+		if !meta.MD5Unreliable {
+			if meta.ETag == localMD5 {
+				return meta, true, nil
+			}
+			s.log.Warn("上传后 ETag 与本地 md5 不一致（rapidupload 刷新后仍不同，重传刷新 meta）",
+				"key", key, "local_md5", localMD5, "remote_etag", meta.ETag, "attempt", attempt)
+			return meta, false, nil
+		}
+		s.log.Warn("远端 md5 非权威（rapidupload 刷新后仍非权威），跳过复核",
+			"key", key, "remote_etag", meta.ETag, "attempt", attempt)
 		return meta, true, nil
 	}
 	if meta.ETag == localMD5 {
@@ -314,6 +328,26 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key, localMD5 string,
 	s.log.Warn("上传后 ETag 与本地 md5 不一致（重传刷新 meta）",
 		"key", key, "local_md5", localMD5, "remote_etag", meta.ETag, "attempt", attempt)
 	return meta, false, nil
+}
+
+// renewAuthoritativeMD5 在远端 md5 非权威时经 rapidupload 刷新远端元数据（秒传命中会把
+// md5 写为权威整文件 md5，M4 实测）；返回刷新后的 meta（ok=true）或 (nil,false)
+// （无秒传能力/刷新失败/Stat 不可见——调用方按原语义接受并告警）。
+func (s *Storage) renewAuthoritativeMD5(ctx context.Context, key string, st *stagedUpload, attempt int) (*ObjectMeta, bool) {
+	ru, ok := s.adapter.(rapidUploader)
+	if !ok || st == nil || len(st.blockMD5s) == 0 {
+		return nil, false // 无秒传能力（binary-only 无库兜底）：无法刷新
+	}
+	if _, err := ru.RapidUpload(ctx, key, st); err != nil {
+		s.log.Warn("远端 md5 非权威：rapidupload 刷新失败（按 size/存在性接受）",
+			"key", key, "attempt", attempt, "error", err)
+		return nil, false
+	}
+	m, serr := s.Stat(ctx, key)
+	if serr != nil || m == nil {
+		return nil, false
+	}
+	return m, true
 }
 
 // stageUpload 把上传流落本地临时文件并计算 md5/sliceMD5/crc32/分块 md5 列表（上传前

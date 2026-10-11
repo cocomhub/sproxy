@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
@@ -193,6 +194,11 @@ func TestPutObjectWithRetry_NonSeekableFailClosed(t *testing.T) {
 	}
 	if p.attempt != 1 {
 		t.Fatalf("不可 seek 源不应重试, got %d 次", p.attempt)
+	}
+	// m6 回归：错误必须**显式归因**「UploadRetries 未生效」（运维可区分「重试已尽力」与
+	// 「根本没重试」）。变异：去掉错误包装 → 断言红。
+	if !strings.Contains(err.Error(), "未生效") {
+		t.Fatalf("错误应显式说明 UploadRetries 未生效: %v", err)
 	}
 }
 

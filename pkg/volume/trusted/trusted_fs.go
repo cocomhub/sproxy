@@ -13,6 +13,8 @@ package trusted
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -650,8 +652,9 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 // → 保留（读回失败不误删，主文件不可读时 meta 无害）。
 func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *meta.FileMeta) {
 	// P1-10：整文件读回型交叉校验仅限本地卷——远端卷每次写都回读 = 一次全量下载
-	// （6GiB 级不可行），且写路径已独占 + 读路径逐分块校验兑底。
+	// （6GiB 级不可行）。M9c：远端改走**轻量**交叉校验（size + 末块），不再完全不校验。
 	if !t.isLocal() {
+		t.verifyWriteMetaRemote(ctx, rel, fm)
 		return
 	}
 	rc, oerr := t.inner.OpenRead(ctx, rel)
@@ -674,6 +677,51 @@ func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *m
 		// 下次覆盖写自愈），不固化错误 sidecar。
 		_ = t.inner.Delete(ctx, meta.MetaPath(rel))
 		t.logMetaWarn("WriteFile-verify", rel, fmt.Errorf("meta 与主文件交叉比对不一致（并发覆盖错位），已删 sidecar"))
+	}
+}
+
+// verifyWriteMetaRemote 远端卷的**轻量**写后交叉校验（M9c，第 7 轮 MAJOR）：整文件回读
+// （6GiB = 一次全量下载）不可接受，但**完全跳过**会让「远端静默截断/并发覆盖错位」无任何
+// 检测（同一份写路径在本地卷有校验、远端卷没有 = 承诺不一致）。折中两条**有界**判据：
+//  1. `Stat` 实测 size 必须等于 `meta.Size`（截断/追加/写错对象立即发现，零额外流量）；
+//  2. 底层实现 `RangeReader` 时读**末块**（≤ maxMetaChunkSize）重算 sha256 与 meta 末块
+//     比对——尾部是静默损坏高发区，代价单块（最大 32MiB）而非整文件。
+//
+// 任一不一致 → 删 sidecar 退化 missing（读侧直算兜底/逐分块校验），绝不留错证据。
+// 能力不足（无 RangeReader / Stat 不可用 / 读失败）→ 保留 sidecar（读路径校验兜底）。
+func (t *TrustedVolumeFS) verifyWriteMetaRemote(ctx context.Context, rel string, fm *meta.FileMeta) {
+	se, serr := t.inner.Stat(ctx, rel)
+	if serr != nil || se == nil {
+		return
+	}
+	if se.Size != fm.Size {
+		t.logMetaWarn("WriteFile-verify-remote", rel,
+			fmt.Errorf("远端 size %d 与 meta.Size %d 不一致（截断/覆盖错位），已删 sidecar", se.Size, fm.Size))
+		t.invalidateMeta(ctx, rel)
+		return
+	}
+	if len(fm.Chunks) == 0 {
+		return
+	}
+	rr, ok := t.inner.(syncpkg.RangeReader)
+	if !ok {
+		return // 无定点读能力：仅 size 判据（读路径逐分块校验兜底）
+	}
+	last := fm.Chunks[len(fm.Chunks)-1]
+	rc, oerr := rr.OpenRangeRead(ctx, rel, last.Offset, last.Size)
+	if oerr != nil {
+		return
+	}
+	h := sha256.New()
+	_, rerr := io.Copy(h, io.LimitReader(rc, last.Size))
+	_ = rc.Close()
+	if rerr != nil {
+		return
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != last.SHA256 {
+		t.logMetaWarn("WriteFile-verify-remote", rel,
+			fmt.Errorf("远端末块 sha256 不一致（分块 %d），已删 sidecar", last.Index))
+		t.invalidateMeta(ctx, rel)
 	}
 }
 
