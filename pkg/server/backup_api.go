@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/backup"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
@@ -248,11 +250,18 @@ func (h *Handlers) backupTargetFS(ctx context.Context, owner, target string) (ba
 	// 全部写被误拒；P2 对抗评审）。本地卷目标无 CapacityFS，保留 pool 记账。
 	scope := h.quotaScopeFor(owner, "user")
 	pool := h.volSet.Pool(target)
+	var sm *capacity.StorageManager
 	if h.volSet.External(target) != nil {
 		pool = nil
+	} else {
+		// M9b（强一致）：本地卷目标的**持久容量账本**（capacity.StorageManager——/stats 与
+		// ScanAndRecalculate 的权威账本）必须随写同步记账。原先只有 Scope/卷池两条内存账，
+		// 无 vol_capacity 的本地卷靠周期扫描对账 ⇒ 扫描前统计低估（与云端归档/云下载的
+		// storageMgr 结算语义对齐）。
+		sm = h.storageMgr
 	}
-	if scope != nil || pool != nil {
-		fs = &backupQuotaFS{inner: fs, scope: scope, pool: pool}
+	if scope != nil || pool != nil || sm != nil {
+		fs = &backupQuotaFS{inner: fs, scope: scope, pool: pool, sm: sm, cat: capacity.CategoryChunked, log: h.logger}
 	}
 	return backupTarget{data: fs, manifest: mfs}, nil
 }
@@ -304,19 +313,26 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 	return syncpkg.NewPrefixFS(fs, "user/"), syncpkg.NewLocalFS(mroot, h.logger), nil
 }
 
-// backupQuotaFS 是备份目标写面的配额记账装饰器：WriteFile 前对文件 size 在
-// owner user 桶 Scope 与目标卷容量池上双预留（与 syncexec.quotaLocalFS 同构），
-// 超限拒绝（该文件计入 Report.Failed，不中止整体）；写成功 Commit、失败 Release。
-// 其余方法透传 inner。
+// backupQuotaFS 是备份目标写面的配额记账装饰器：WriteFile 前对文件 size 在三本账上预留
+// ——owner user 桶 Scope、目标卷容量池（与 syncexec.quotaLocalFS 同构）、以及本地卷目标的
+// **持久容量账本** capacity.StorageManager（M9b，强一致），超限拒绝（该文件计入
+// Report.Failed，不中止整体）；写成功 Commit、失败 Release。其余方法透传 inner。
 type backupQuotaFS struct {
 	inner syncpkg.FS
 	scope *quota.Scope
 	pool  *quota.Pool
+	sm    *capacity.StorageManager // 持久容量账本（仅本地卷目标；nil = 未装配或外部卷）
+	cat   capacity.StorageCategory // 记账类别（与用户文件写面一致）
+	log   *slog.Logger
 }
 
-// backupReservation 是 scope+pool 双预留的聚合（任一为空则跳过）。
+// backupReservation 是 scope+pool+持久账本三预留的聚合（任一为空则跳过）。
 type backupReservation struct {
 	scope, pool *quota.Reservation
+	sm          *capacity.StorageManager
+	cat         capacity.StorageCategory
+	log         *slog.Logger
+	smPre       int64 // 持久账本上已预留字节；0 = 未预留
 }
 
 func (r *backupReservation) Commit(actual int64) {
@@ -326,6 +342,7 @@ func (r *backupReservation) Commit(actual int64) {
 	if r.pool != nil {
 		r.pool.Commit(actual)
 	}
+	r.settleSM(actual)
 }
 
 func (r *backupReservation) Release() {
@@ -335,29 +352,98 @@ func (r *backupReservation) Release() {
 	if r.pool != nil {
 		r.pool.Release()
 	}
+	r.releaseSM()
+}
+
+// settleSM 把持久账本上的预留调到实际落盘大小（Commit(actual) 的持久账本版）：
+// 账本无 Adjust，走「Release(pre) + TryReserve(actual)」（与云端归档/云下载回退路径同款）。
+// actual>pre 且 TryReserve 失败属罕见（声明失真）：文件已在盘上，账本待下次扫描校准，
+// 此处只告警不改变写入结果（禁静默）。
+func (r *backupReservation) settleSM(actual int64) {
+	if r.sm == nil || r.smPre <= 0 {
+		return
+	}
+	pre := r.smPre
+	r.smPre = 0
+	r.sm.Release(pre, r.cat)
+	if actual <= 0 {
+		return
+	}
+	if err := r.sm.TryReserve(actual, r.cat); err != nil && r.log != nil {
+		r.log.Warn("备份目标容量账本对账未达（已落盘，待下次扫描校准）", "error", err, "actual", actual)
+	}
+}
+
+// releaseSM 回退持久账本预留（写失败/取消）。
+func (r *backupReservation) releaseSM() {
+	if r.sm == nil || r.smPre <= 0 {
+		return
+	}
+	r.sm.Release(r.smPre, r.cat)
+	r.smPre = 0
+}
+
+// smAdopt 覆盖写：把账本上的旧字节 prev 换成本次写入（预留在前，写成功后调用）；与
+// Scope/Pool 的 Adjust(prev,size) 同效果——预留的 size 转为已确认占用。
+func (r *backupReservation) smAdopt(prev int64) {
+	if r.sm == nil {
+		return
+	}
+	if prev > 0 {
+		r.sm.Release(prev, r.cat)
+	}
+	r.smPre = 0
+}
+
+// reserveMemory 预留 Scope 与卷池（二者可空，任一失败自动回退已成功的一侧）。
+func (r *backupReservation) reserveMemory(size int64, scope *quota.Scope, pool *quota.Pool) error {
+	if scope != nil {
+		s, err := scope.TryReserve(size)
+		if err != nil {
+			return err
+		}
+		r.scope = s
+	}
+	if pool != nil {
+		p, err := pool.TryReserve(size)
+		if err != nil {
+			r.releaseScope()
+			return err
+		}
+		r.pool = p
+	}
+	return nil
+}
+
+func (r *backupReservation) releaseScope() {
+	if r.scope != nil {
+		r.scope.Release()
+		r.scope = nil
+	}
+}
+
+func (r *backupReservation) releasePool() {
+	if r.pool != nil {
+		r.pool.Release()
+		r.pool = nil
+	}
 }
 
 func (q *backupQuotaFS) reserve(size int64) (*backupReservation, error) {
-	if q.scope == nil && q.pool == nil {
+	if q.scope == nil && q.pool == nil && q.sm == nil {
 		return nil, nil
 	}
-	var res backupReservation
-	if q.scope != nil {
-		s, err := q.scope.TryReserve(size)
-		if err != nil {
-			return nil, err
-		}
-		res.scope = s
+	res := backupReservation{sm: q.sm, cat: q.cat, log: q.log}
+	if err := res.reserveMemory(size, q.scope, q.pool); err != nil {
+		return nil, err
 	}
-	if q.pool != nil {
-		p, err := q.pool.TryReserve(size)
-		if err != nil {
-			if res.scope != nil {
-				res.scope.Release()
-			}
+	if q.sm != nil {
+		if err := q.sm.TryReserve(size, q.cat); err != nil {
+			res.releaseScope()
+			res.releasePool()
 			return nil, err
 		}
-		res.pool = p
+		res.smPre = size
 	}
 	return &res, nil
 }
@@ -389,6 +475,7 @@ func (q *backupQuotaFS) WriteFile(ctx context.Context, relPath string, r io.Read
 			q.pool.Adjust(prev, size)
 			res.pool.Release()
 		}
+		res.smAdopt(prev)
 	} else {
 		res.Commit(size)
 	}
@@ -414,6 +501,9 @@ func (q *backupQuotaFS) releaseBytes(n int64) {
 	}
 	if q.pool != nil {
 		q.pool.Adjust(n, 0)
+	}
+	if q.sm != nil {
+		q.sm.Release(n, q.cat)
 	}
 }
 
