@@ -136,22 +136,7 @@ func TestDecoratorsDeclareAllCapabilities(t *testing.T) {
 		t.Fatalf("能力枚举缺少哨兵 %q（解析失效，门禁会静默通过）", capabilitySentinel)
 	}
 
-	blockExempt := map[string]string{
-		"BlockAccessor": "有意不转发：引擎回退语义需 Capability 探测（设计 §8）",
-	}
-	decorators := []decoratorSpec{
-		{typeName: "TrustedVolumeFS", pkgDir: "pkg/volume/trusted", exempt: blockExempt},
-		{typeName: "MetaBucketGuard", pkgDir: "pkg/volume/trusted", exempt: blockExempt},
-		{typeName: "CapacityFS", pkgDir: "pkg/volume/capacity", exempt: blockExempt},
-		{typeName: "StagingQuotaGateFS", pkgDir: "pkg/sync", exempt: blockExempt},
-		// 桶前缀视图（C1 修复后由 pkg/sync 单一实现，备份目标 + 同步载体共用）；
-		// 与其余装饰器同口径全能力转发（BlockAccessor 同样豁免）。
-		{typeName: "PrefixFS", pkgDir: "pkg/sync", exempt: blockExempt},
-		// WebDAV 挂载面 sidecar 联动装饰器（M8：此前不透传可选能力、未登记）。
-		{typeName: "davMetaFS", pkgDir: "pkg/server", exempt: blockExempt},
-		// 封装卷视图防护薄层（组合 sync.PrefixFS；R21 覆盖——防新装饰器漏转发不受保护）。
-		{typeName: "FS", pkgDir: "pkg/volume/enclosure", exempt: blockExempt},
-	}
+	decorators := decoratorsForGate()
 
 	var problems []string
 	for _, d := range decorators {
@@ -179,4 +164,123 @@ func TestDecoratorsDeclareAllCapabilities(t *testing.T) {
 
 func contains(xs []string, want string) bool {
 	return slices.Contains(xs, want)
+}
+
+// wrapperInnerRe 匹配「包装型 FS」的透明下探标记方法 `Inner() FS`（可为 `sync.FS`/
+// `syncpkg.FS` 限定形式）。
+var wrapperInnerRe = regexp.MustCompile(`(?m)^func \(\w+ \*?(\w+)\) Inner\(\) (\w+\.)?FS\b`)
+
+// wrapperFSExempt 是「实现 Inner() 但不进入 R21 全能力断言」的显式豁免表（键 `<pkgDir>:<Type>`）。
+// 每条必须写明理由——默认拒绝（防漏网：新装饰器必须要么登记、要么解释为什么不登记）。
+var wrapperFSExempt = map[string]string{
+	// 仅用基础 7 方法、不参与可选能力探测的包装层（记档为 latent：若将来上层对其断言可选
+	// 能力，必须补转发并转为 R21 登记项）。
+	"pkg/server:backupQuotaFS":      "备份目标写面只用基础方法（预留/写/删/改名）；可选能力未接（latent，记档）",
+	"cmd/sproxy:carrierReportingFS": "仅统计载体用量，嵌入 FS 接口（可选能力本就不在方法集）",
+	"pkg/gateway/webdav:subPathFS":  "WebDAV remote 子路径视图，仅基础方法（远端协议无语义）",
+	"pkg/volume/federated:FS":       "联邦卷视图（远端协议），可选能力按能力探测语义不转发",
+	"pkg/volume/ext/cluster:FS":     "集群卷视图（远端协议），同上",
+	// 处理层（对字节做变换：加密）：可选能力坐标与明/密文语义不同，**不得**透明转发
+	// （如 RangeReader 的 offset 在密文空间 vs 明文空间），故不做装饰器登记（设计 §2 正交：
+	// 处理只改字节、视图只搬键）。
+	"pkg/sync:EncryptedFS":               "处理层（字节加密）：可选能力坐标语义不同，不透明转发",
+	"pkg/volume/secretdata:SecretdataFS": "处理层（分块加密+meta pad）：同上",
+}
+
+// wrapperStructRe 匹配结构体定义（含简单/嵌套大括号体的首层），wrapperEmbedsFSRe/
+// wrapperInnerFieldRe 判定其是否「包装型 FS」——嵌入 FS 接口或持有 `inner ...FS` 字段
+// （后者覆盖**无 Inner() 方法**的包装层，如 pkg/syncexec 的 quotaLocalFS：评审点名的漏网点）。
+var (
+	wrapperStructRe     = regexp.MustCompile(`(?ms)^type (\w+) struct \{(.*?)^\}`)
+	wrapperInnerFieldRe = regexp.MustCompile(`(?m)^\s*inner\s+\S*FS\s*$`)
+	wrapperEmbedFSRe    = regexp.MustCompile(`(?m)^\s*(?:\w+\.)?FS\s*$`)
+)
+
+// TestWrapperFSDiscoveredWithoutRegistration R23（评审 P2）：R21 只校验**硬编码装饰器清单**，
+// 新增包装型 FS（实现 Inner()）不会被任何门禁拦住 ⇒ 本特性历史 P0 类（装饰器漏转发可选能力）
+// 无机制兜底。本门禁**自动发现**仓库内全部包装型 FS，要求每个都登记进 R21 装饰器清单或出现在
+// wrapperFSExempt（含书面理由），否则失败。
+func TestWrapperFSDiscoveredWithoutRegistration(t *testing.T) {
+	t.Parallel()
+	root := moduleRoot(t)
+	registered := map[string]bool{}
+	for _, d := range decoratorsForGate() {
+		registered[d.pkgDir+":"+d.typeName] = true
+	}
+
+	skipDir := map[string]bool{
+		".git": true, ".worktrees": true, "node_modules": true, "testdata": true,
+		"web": true, "docs": true, ".pi-review": true, "tool": true, "tools": true,
+	}
+	var problems []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() {
+			if skipDir[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		names := map[string]bool{}
+		for _, m := range wrapperInnerRe.FindAllStringSubmatch(string(data), -1) {
+			names[m[1]] = true
+		}
+		for _, m := range wrapperStructRe.FindAllStringSubmatch(string(data), -1) {
+			body := m[2]
+			if wrapperEmbedFSRe.MatchString(body) || wrapperInnerFieldRe.MatchString(body) {
+				names[m[1]] = true
+			}
+		}
+		for typeName := range names {
+			rel, rerr2 := filepath.Rel(root, filepath.Dir(p))
+			if rerr2 != nil {
+				return rerr2
+			}
+			pkgDir := filepath.ToSlash(rel)
+			key := pkgDir + ":" + typeName
+			if registered[key] {
+				continue
+			}
+			if _, ok := wrapperFSExempt[key]; ok {
+				continue
+			}
+			problems = append(problems, key+" 既未登记进 R21 装饰器清单，也无 wrapperFSExempt 豁免理由")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("扫描仓库失败: %v", err)
+	}
+	if len(problems) > 0 {
+		t.Fatalf("发现未登记的包装型 FS（R23：新增装饰器必须登记或显式豁免）:\n  %s", strings.Join(problems, "\n  "))
+	}
+}
+
+// decoratorsForGate 返回 R21 登记的装饰器清单（TestDecoratorsDeclareAllCapabilities 与
+// R23 自动发现门禁共用单一事实源）。
+func decoratorsForGate() []decoratorSpec {
+	blockExempt := map[string]string{
+		"BlockAccessor": "有意不转发：引擎回退语义需 Capability 探测（设计 §8）",
+	}
+	return []decoratorSpec{
+		{typeName: "TrustedVolumeFS", pkgDir: "pkg/volume/trusted", exempt: blockExempt},
+		{typeName: "MetaBucketGuard", pkgDir: "pkg/volume/trusted", exempt: blockExempt},
+		{typeName: "CapacityFS", pkgDir: "pkg/volume/capacity", exempt: blockExempt},
+		{typeName: "StagingQuotaGateFS", pkgDir: "pkg/sync", exempt: blockExempt},
+		{typeName: "PrefixFS", pkgDir: "pkg/sync", exempt: blockExempt},
+		{typeName: "davMetaFS", pkgDir: "pkg/server", exempt: blockExempt},
+		{typeName: "FS", pkgDir: "pkg/volume/enclosure", exempt: blockExempt},
+		// 同步 pull 本地目标的配额装饰器（评审 P2：此前只实现基础 7 方法，把内层能力全剥掉
+		// ⇒ meta.Provider/WriteIfAbsent/Mover/RangeReader 等断言恒 false 静默降级）。
+		{typeName: "quotaLocalFS", pkgDir: "pkg/syncexec", exempt: blockExempt},
+	}
 }
