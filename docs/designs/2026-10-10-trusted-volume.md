@@ -262,7 +262,7 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   （`a/C:/x` 不再漏判，精确到「整段恰为 `<字母>:`」以免误伤合法含冒号文件名）；baidupcs
   `StorageFS.WriteFile` 路径校验改**逐段**拒空/`.`/`..`（此前只拒前缀 `../`，中段穿越透传远端）。
 
-**仍未修（下一批，已记档）**：M3（baidupcs staging 峰值 2×：`SyncFS` 落 `staging-*` 后
+**仍未修（下一批，已记档）**（**历史记录**：最新状态见 §8.8 收口表）：M3（baidupcs staging 峰值 2×：`SyncFS` 落 `staging-*` 后
 `Storage.Put` 再拷一份）、M6（远端 md5 非权威时跳过相等断言——现为「Warn + 接受」，评审主张
 先 rapidupload 刷新重验）、M9（S3 multipart 崩溃遗留孤儿 parts 无清理；本地备份未走卷容量池
 账本；外部卷写后交叉校验被 `isLocal` 门跳过；`skip_verify` 缺启动期显式告警）、m1（
@@ -289,7 +289,7 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   **评审另一项 `DisableDoubleDownloadVerify` 在本仓无对应规格**（全仓仅出现在本条记档里），
   属评审输入串味，无需实现。
 
-**仍未修（下一批）**：M3（baidupcs staging 峰值 2×）、M6（远端 md5 非权威时先 rapidupload
+**仍未修（下一批）**（**历史记录**：最新状态见 §8.8 收口表）：M3（baidupcs staging 峰值 2×）、M6（远端 md5 非权威时先 rapidupload
 刷新重验）、M9a（S3 multipart 崩溃遗留孤儿 parts 清理）、M9b（本地备份未走卷容量池账本）、
 M9c（外部卷写后轻量交叉校验，现被 `isLocal` 门跳过）、m6（S3 multipart `UploadRetries` 在
 TeeReader 非 Seeker 下恒失效）、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/
@@ -316,8 +316,8 @@ TeeReader 非 Seeker 下恒失效）、m9（meta tmp 孤儿仅下次写清扫；
   `S3FS.WriteFile` 注释的前置条件）——可信卷写面读流是 `io.TeeReader`，该配置在其上本就不
   生效，此前只能看到裸 PutObject 错误，运维无法区分「重试已尽力」与「根本没重试」。
 
-**仍未修（下一批）**：M9b（本地备份写面未更新**卷级持久容量计数器**（用户已裁定：按**强一致**处理，下一提交）——需先定「本地卷
-durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging 峰值 2×）**已由 §8.6 的 staging 路径复用机制解决**、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/
+**仍未修（下一批）**（**历史记录**：最新状态见 §8.8 收口表）：M9b（本地备份写面未更新**卷级持久容量计数器**（用户已裁定：按**强一致**处理，下一提交）——需先定「本地卷
+durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging 峰值 2×）**已由 §8.6 的 staging 路径复用机制解决**（见 §8.8）、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/
 `UpdateMetaExtra` 本地两遍整文件读回，需「stat/末块轻量判据替代整文件回读」的等价性论证）。
 
 ### 8.6 本地 staging 路径复用机制（2026-10-11）
@@ -388,3 +388,23 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 - 单元：`pkg/files/meta`（计算/校验/短读/长读/中段 Seek）、`pkg/volume/trusted`（Wrap/Guard/能力透传/生命周期）、`pkg/cloud`（转存分块校验/标记）、`pkg/sync`（Equal/staging gate）、`pkg/quota`（staging tracker）。
 - 集成：`pkg/server`（外部卷下载校验、S3 gateway meta、卷间 move/copy）、`pkg/volume/ext/{baidupcs,s3}`（元数据/重试/并发）。
 - 装配形状回归：断言 `Guard(Wrap(fs))` 仍满足 `meta.Provider` / `metaExtraUpdater` / `StagingQuota*`（防能力透传回归）。
+
+## 8.8 遗留项收口状态（2026-10-11，随封装卷分支更新）
+
+> §8.x 各轮的「仍未修」列表是**当时**快照（保留作审计轨迹），本节是唯一权威状态。
+
+| 遗留项 | 状态 | 落点 |
+|---|---|---|
+| M2 转存写锁键归一 | ✅ 已修（§8.3） | `lockRelFor` + `transferWriteLock`；**文档措辞已修正**：锁覆盖 HTTP 家族（上传/删除/改名/分块 complete/跨卷 move），DAV/S3/备份/同步 push 不经该锁（真实风险有限，非「同一键空间全覆盖」） |
+| M3 baidupcs staging 峰值 2× | ✅ 已修 | `SyncFS.WriteFile` 无条件走 `PutFromStagedPath`（硬链接复用，峰值 1×）；ctx/能力复用路径为**额外优化**（当前无仓内调用方，记档 P3） |
+| M6 远端 md5 非权威 | ✅ 已修（§8.5） | 先 rapidupload 刷新重验，仍非权威才接受并告警 |
+| M9a S3 multipart 孤儿 parts | ✅ 已修（§8.5） | `sweepStaleMultipart` + `s3MultipartOrphanTTL=24h` |
+| M9b 本地备份持久容量账本 | ✅ 已修（强一致） | `backupQuotaFS` 三本账同进同退（Scope + 卷池 + `StorageManager`） |
+| M9c 远端写后交叉校验 | ✅ 已修，且**已统一为有界轻量判据** | `verifyWriteMeta`：本地/远端同口径（Stat size + 末块 sha256；放弃「同 size 中段覆盖」检出，读路径逐分块兜底） |
+| M9d skip_verify 启动告警 | ✅ 已修（§8.5） | `warnIfVerifySkipped` |
+| m9 meta tmp 孤儿 / 整文件回读 | ✅ 已修，**并修正首版假修** | 清扫判定对齐真实生成端（`.<base>.tmp-*` 带前导点）；本地写后校验改有界轻量判据 |
+| Windows 反斜杠分隔符 | ✅ 已修 | `guardPath` 拒绝 `\`/NUL 且 fail-closed（`guard_fs_test.go` 已断言）——§8 旧文「残余」描述作废 |
+| 加密卷容量按逻辑长度记账（可绕过 ~10³） | ⚠️ 机制就绪、待接入 | `capacity.TrueUsageReporter` + `CorrectTo/CorrectFrom` 已落地；`secretdata`/封装卷待实现物理字节报告（内容分块+meta pad+parity） |
+| 面级加密入口未接线（S3/DAV/分享/分块上传/块写） | ✅ 已修 | 用户可见读写唯一入口（`pkg/server/user_visible_io.go`）；DAV 收敛到 `NewRootFS`（同时修掉封印绕过）；分块上传 finalize 单遍加密；块写加密卷显式拒绝 |
+| 封装卷「源目录禁止直连」 | ✅ 已修（机制级） | `storage.Root.SetSeals`（写恒拒/读 404 或只读透视）+ 装配接线 + 租户子根传播 + `enclosure.FS` 直链抑制 |
+| 新装饰器漏转发可选能力（R21 只查硬编码清单） | ✅ 已修 | R23 自动发现门禁（`Inner()` 与「嵌入 FS/持有 inner FS 字段」两类）+ `quotaLocalFS` 能力补齐 + 处理层显式豁免 |

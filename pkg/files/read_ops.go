@@ -264,6 +264,13 @@ func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, erro
 		return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
 	}
 	st := FileStat{IsDir: info.IsDir(), Size: logicalSizeFor(dp.Tenant.Root(), dp.Rel, info), MTime: info.ModTime().UnixNano()}
+	// **密文导出模式（?ciphertext=1）**：实体是存储原样密文 ⇒ size 必须用**密文**长度（info.Size()，
+	// 而非 logicalSizeFor 的明文长度），且不回明文 checksum；否则客户端「先 stat 再分块」会按
+	// 明文坐标规划区间，与 /download/chunk?ciphertext=1 的密文 Content-Range 判据矛盾。
+	if dp.Ciphertext && dp.Tenant != nil && dp.Tenant.Root() != nil && dp.Tenant.Root().IsEncrypted() {
+		st.Size = info.Size()
+		return st, nil
+	}
 	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			st.Checksum = cs

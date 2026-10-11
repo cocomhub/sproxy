@@ -44,9 +44,10 @@ func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp Down
 	}
 	out, _, ct, err := applyTransform(r.Context(), ext, of.File, of.Info.Size(), name, width, watermark)
 	if err != nil {
-		// 无匹配/失败：回退原文件（ServeContent 路径）。
+		// 无匹配/失败：回退原文件——**走主链同口径收尾**（首错中断 + 失败指标 + Warn），
+		// 不得裸 ServeContent（会静默截断损坏内容为 200，评审 P1）。
 		s.rt.logger().Debug("transform 回退原文件", "file", dp.Filename, "ext", ext, "error", err)
-		http.ServeContent(w, r, of.Info.Name(), of.Info.ModTime(), seeker)
+		s.serveVerifiedFallback(w, r, dp, seeker, of.Info.Name(), of.Info.ModTime())
 		return
 	}
 	data, err := io.ReadAll(out)

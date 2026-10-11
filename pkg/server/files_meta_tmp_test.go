@@ -6,6 +6,7 @@ package server
 import (
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 
@@ -36,11 +37,13 @@ func TestFilesMetaPolicy_SweepMetaTmp(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	orphans := []string{mrel + ".tmp.123", mrel + ".tmp-abc"}
+	// 真实命名（由生成端决定）：`.tmp.<nano>`（无前导点）与 LocalFS 的 `.<base>.tmp-*`（**带前导点**）。
+	// 首版 fixture 用了 `x.meta.tmp-abc`（无前导点）⇒ 与生成端不符 ⇒ 假绿（我的 m9 回归）。
+	orphans := []string{mrel + ".tmp.123", path.Dir(mrel) + "/." + path.Base(mrel) + ".tmp-abc"}
 	for _, o := range orphans {
 		plant(o, "orphan")
 	}
-	keep := []string{mrel, "sub/other.meta", "sub/x.meta.keep"}
+	keep := []string{mrel, "sub/other.meta", "sub/x.meta.keep", "sub/x.meta.tmp-abc.meta"}
 	for _, k := range keep {
 		plant(k, "keep")
 	}

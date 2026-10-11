@@ -27,6 +27,9 @@ type Root struct {
 	r    *os.Root
 	base string // 绝对路径（供 Abs/Chtimes 等派生）
 	// enc 是 at-rest 加密态（roadmap P2 残余）：非 nil 时 Open/OpenFile 返回
+	// seals 是卷级封印规则（封装卷占用的源卷子路径；装配期经 SetSeals 注入，之后不可变）。
+	// nil = 无封印（行为零回归）。封印语义见 seal.go。
+	seals []SealRule
 	// 解密 reader / 加密 writer（透明）。OpenRoot 后经 SetEncryption 注入。
 	enc *rootEnc
 }
@@ -76,16 +79,25 @@ func (rt *Root) ensureLayoutVersion() error {
 
 // Open 相对 root 打开文件（原始 *os.File 签名，供 Seek/Stat/Sync 等具体方法）。
 func (rt *Root) Open(rel string) (*os.File, error) {
+	if err := rt.sealCheck(rel, false); err != nil {
+		return nil, err
+	}
 	return rt.r.Open(rel)
 }
 
 // OpenFile 相对 root 打开/创建文件（原始 *os.File 签名）。
 func (rt *Root) OpenFile(rel string, flag int, perm os.FileMode) (*os.File, error) {
+	if err := rt.sealCheck(rel, isWriteOpenFlag(flag)); err != nil {
+		return nil, err
+	}
 	return rt.r.OpenFile(rel, flag, perm)
 }
 
 // OpenDecrypted 打开并解密读取（at-rest 加密卷透明读；非加密态 = Open 等价）。
 func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
+	if err := rt.sealCheck(rel, false); err != nil {
+		return nil, err
+	}
 	f, err := rt.r.Open(rel)
 	if err != nil {
 		return nil, err
@@ -130,6 +142,9 @@ func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
 
 // OpenFileEncrypted 打开并加密写（at-rest 加密卷透明写；非加密态 = OpenFile 等价）。
 func (rt *Root) OpenFileEncrypted(rel string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+	if err := rt.sealCheck(rel, isWriteOpenFlag(flag)); err != nil {
+		return nil, err
+	}
 	f, err := rt.r.OpenFile(rel, flag, perm)
 	if err != nil {
 		return nil, err
@@ -181,6 +196,9 @@ func (rt *Root) SetCipher(chunk int) error {
 
 // Stat 返回相对路径的文件信息。
 func (rt *Root) Stat(rel string) (os.FileInfo, error) {
+	if err := rt.sealCheck(rel, false); err != nil {
+		return nil, err
+	}
 	return rt.r.Stat(rel)
 }
 
@@ -195,6 +213,9 @@ func (rt *Root) Stat(rel string) (os.FileInfo, error) {
 //
 // 代价：加密卷需顺序走每块长度头（不解密、不做 GCM），O(块数) 次短读。
 func (rt *Root) LogicalSize(rel string) (int64, error) {
+	if err := rt.sealCheck(rel, false); err != nil {
+		return 0, err
+	}
 	fi, err := rt.r.Stat(rel)
 	if err != nil {
 		return 0, err
@@ -213,12 +234,18 @@ func (rt *Root) LogicalSize(rel string) (int64, error) {
 // Lstat 返回相对路径的文件信息（不跟随符号链接）。供 rmdir 等检查符号链接，
 // os.Root 保证结果不逃逸 root。
 func (rt *Root) Lstat(rel string) (os.FileInfo, error) {
+	if err := rt.sealCheck(rel, false); err != nil {
+		return nil, err
+	}
 	return rt.r.Lstat(rel)
 }
 
 // ReadDir 相对 root 读取目录条目（按名排序）。os.Root 对每路径分量强制 O_NOFOLLOW，
 // 中间目录符号链接指向 root 外时返回错误（不逃逸）。
 func (rt *Root) ReadDir(rel string) ([]os.DirEntry, error) {
+	if err := rt.sealCheck(rel, false); err != nil {
+		return nil, err
+	}
 	f, err := rt.r.Open(rel)
 	if err != nil {
 		return nil, err
@@ -228,6 +255,7 @@ func (rt *Root) ReadDir(rel string) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	entries = rt.sealFilterEntries(rel, entries)
 	slices.SortFunc(entries, func(a, b os.DirEntry) int {
 		return strings.Compare(a.Name(), b.Name())
 	})
@@ -236,16 +264,25 @@ func (rt *Root) ReadDir(rel string) ([]os.DirEntry, error) {
 
 // MkdirAll 相对 root 递归创建目录；已存在时幂等。
 func (rt *Root) MkdirAll(rel string, perm os.FileMode) error {
+	if err := rt.sealCheck(rel, true); err != nil {
+		return err
+	}
 	return rt.r.MkdirAll(rel, perm)
 }
 
 // Remove 相对 root 删除单个文件/空目录。
 func (rt *Root) Remove(rel string) error {
+	if err := rt.sealCheck(rel, true); err != nil {
+		return err
+	}
 	return rt.r.Remove(rel)
 }
 
 // RemoveAll 相对 root 递归删除。
 func (rt *Root) RemoveAll(rel string) error {
+	if err := rt.sealCheck(rel, true); err != nil {
+		return err
+	}
 	return rt.r.RemoveAll(rel)
 }
 
@@ -253,16 +290,33 @@ func (rt *Root) RemoveAll(rel string) error {
 // 委托 os.Root.Link：两路径均相对 root，符号链接目标不逃逸由标准库保证。
 // 硬链接仅同卷内可用（跨物理卷/文件系统会返回 EXDEV）。
 func (rt *Root) Link(oldRel, newRel string) error {
+	// 封印保护双向：既禁止链接**进入**封印区，也禁止把封印区内容链接出去。
+	if err := rt.sealCheck(newRel, true); err != nil {
+		return err
+	}
+	if err := rt.sealCheck(oldRel, true); err != nil {
+		return err
+	}
 	return rt.r.Link(oldRel, newRel)
 }
 
 // Rename 相对 root 重命名/移动。
 func (rt *Root) Rename(oldRel, newRel string) error {
+	// 封印保护双向：禁止移入/移出封印区（含跨写面 move/copy 的落位）。
+	if err := rt.sealCheck(newRel, true); err != nil {
+		return err
+	}
+	if err := rt.sealCheck(oldRel, true); err != nil {
+		return err
+	}
 	return rt.r.Rename(oldRel, newRel)
 }
 
 // Chtimes 相对 root 修改访问/修改时间。委托 os.Root.Chtimes，随标准库保证 root 内约束。
 func (rt *Root) Chtimes(rel string, atime, mtime time.Time) error {
+	if err := rt.sealCheck(rel, true); err != nil {
+		return err
+	}
 	return rt.r.Chtimes(rel, atime, mtime)
 }
 

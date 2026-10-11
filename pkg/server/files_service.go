@@ -473,6 +473,11 @@ func (p filesMetaPolicy) reserveMetaQuota(owner, mrel string, size int64) (*quot
 // meta 桶占磁盘；下次 WriteMeta 自愈清理，防孤儿累积）。
 func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data []byte) error {
 	p.sweepMetaTmp(root, mrel)
+	// **写前先删旧 sidecar**（评审 P2：崩溃窗口）。主文件与 sidecar 是两次独立原子写：覆盖写
+	// 在两次写之间崩溃会留下「旧 sidecar + 新主文件」——读路径按旧分块恒失配 ⇒ 该文件**永久
+	// fail-closed 500**（不自愈）。先删使该窗口退化为「无 sidecar」（读路径直算兜底/按 missing
+	// 语义降级），宁可缺证据也不留**错证据**。删除失败不阻断（best-effort：后续 rename 会覆盖）。
+	_ = root.Remove(mrel)
 	tmpRel := mrel + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
 	f, ferr := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if ferr != nil {
@@ -497,22 +502,38 @@ func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data [
 
 // sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（崩溃残留）。best-effort：删除失败仅
 // 日志语义（下次写再试）。
-// m9：兼容两种 tmp 命名——本文件的 `.tmp.<nano>`（点）与 LocalFS.writeFileAtomic 的
-// `.tmp-*`（连字符，装饰器写经 inner 落盘用此）；原只匹配点前缀，`LocalFS` 崩溃残留
-// 的 `.tmp-*` 孤儿永不清理（与 runtime.sweepMetaTmp 的 MINOR-8 修复对齐）。
+//
+// 兼容三种真实命名（全部由代码生成，逐一核对）：
+//   - `.tmp.<nano>`：本文件 atomicWriteMeta 的 tmp 名（`<base>.tmp.<unixNano>`）；
+//   - `.<base>.tmp-*`：**LocalFS.writeFileAtomic** 经 `os.CreateTemp` 以 pattern
+//     `"."+base+".tmp-*"` 生成的真实名（**带前导点**）——此前只匹配无前导点变体，导致这类孤儿实际**从未**被清理
+//     （我的 m9 首版修复即此错：判据与生成端不一致 + fixture 用了假名 ⇒ 假绿）。
+//
+// **刻意不匹配** `<base>.tmp-*`（无前导点）：全仓无该命名的生成端，而它会误删合法 sidecar
+// （如用户文件 `x.meta.tmp-abc` 的 sidecar `x.meta.tmp-abc.meta`）——宁漏不误删。
 func (p filesMetaPolicy) sweepMetaTmp(root *storage.Root, mrel string) {
 	dir := path.Dir(mrel)
-	base := path.Base(mrel) + ".tmp."
-	baseDash := path.Base(mrel) + ".tmp-"
+	bn := path.Base(mrel)
+	prefixes := []string{bn + ".tmp.", "." + bn + ".tmp-"}
 	es, err := root.ReadDir(dir)
 	if err != nil {
 		return // 目录不存在/不可读：无孤儿可清
 	}
 	for _, e := range es {
-		if strings.HasPrefix(e.Name(), base) || strings.HasPrefix(e.Name(), baseDash) {
+		if hasAnyPrefix(e.Name(), prefixes) {
 			_ = root.Remove(path.Join(dir, e.Name()))
 		}
 	}
+}
+
+// hasAnyPrefix 报告 name 是否以任一前缀开头（sweep 判据的单一实现，防两处拷贝漂移）。
+func hasAnyPrefix(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // computeMeta 从 root 相对 rel 的文件计算完整 FileMeta（流式读一遍，双算法 + 分块）。

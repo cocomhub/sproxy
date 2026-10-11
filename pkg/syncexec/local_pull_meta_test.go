@@ -26,7 +26,7 @@ func TestNewLocalPullFS_WritesSidecarUnderMetaBucket(t *testing.T) {
 	t.Parallel()
 	tenantRoot := t.TempDir()
 	e := NewExecutor(nil, nil)
-	fs := e.newLocalPullFS(tenantRoot)
+	fs := e.newLocalPullFS(tenantRoot, "alice")
 	ctx := context.Background()
 
 	content := []byte("pulled-content-0123456789")
@@ -66,7 +66,7 @@ func TestNewLocalPullFS_OverwriteRefreshesSidecar(t *testing.T) {
 	t.Parallel()
 	tenantRoot := t.TempDir()
 	e := NewExecutor(nil, nil)
-	fs := e.newLocalPullFS(tenantRoot)
+	fs := e.newLocalPullFS(tenantRoot, "alice")
 	ctx := context.Background()
 
 	old := []byte("old-content")

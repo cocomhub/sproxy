@@ -114,11 +114,21 @@ func (s *StorageManager) casReserve(size int64) bool {
 }
 
 // Release 释放已占用的空间。
+//
+// **钳 0**（评审 P2）：与 quota.Pool 的「恒不为负」不变量对齐——扫描窗口内若先被扫描
+// 覆写（ScanAndRecalculate 无条件 Store）再 Release 在途预留，`totalUsage` 会被推负，
+// 导致上限校验短暂失效（负值使 max-bytes 比较恒通过）。原子 CAS 钳到 0。
 func (s *StorageManager) Release(size int64, cat StorageCategory) {
 	if size <= 0 {
 		return
 	}
-	s.totalUsage.Add(-size)
+	for {
+		cur := s.totalUsage.Load()
+		next := max(cur-size, 0)
+		if s.totalUsage.CompareAndSwap(cur, next) {
+			break
+		}
+	}
 	s.addCategory(cat, -size)
 }
 
@@ -388,15 +398,35 @@ func bucketDirKey(rel string) string {
 }
 
 func (s *StorageManager) addCategory(cat StorageCategory, delta int64) {
+	// 与 totalUsage 同口径钳 0（防扫描覆写后在途 Release 把分类计数推负 → /stats 出现
+	// 负值且分类合计与总量不一致）。
 	switch cat {
 	case CategoryUserFiles:
-		s.userFilesSize.Add(delta)
+		clampAdd(&s.userFilesSize, delta)
 	case CategoryChunked:
-		s.chunkedSize.Add(delta)
+		clampAdd(&s.chunkedSize, delta)
 	case CategoryVersions:
-		s.versionsSize.Add(delta)
+		clampAdd(&s.versionsSize, delta)
 	case CategoryCloud:
-		s.cloudSize.Add(delta)
+		clampAdd(&s.cloudSize, delta)
+	}
+}
+
+// clampAdd 原子加 delta 并把结果钳到 >= 0（CAS 循环；delta>0 直接 Add 免循环）。
+func clampAdd(v *atomic.Int64, delta int64) {
+	if delta == 0 {
+		return
+	}
+	if delta > 0 {
+		v.Add(delta)
+		return
+	}
+	for {
+		cur := v.Load()
+		next := max(cur+delta, 0)
+		if v.CompareAndSwap(cur, next) {
+			return
+		}
 	}
 }
 

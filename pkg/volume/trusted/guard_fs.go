@@ -314,10 +314,12 @@ func (g *MetaBucketGuard) ExemptStagingQuota() bool {
 
 // 编译期断言：Guard 实现全部能力接口（能力透传契约，防未来新增能力接口后遗漏）。
 var (
-	_ syncpkg.FS                  = (*MetaBucketGuard)(nil)
-	_ syncpkg.StagedPathReuse     = (*MetaBucketGuard)(nil)
-	_ meta.Provider               = (*MetaBucketGuard)(nil)
-	_ MetaExtraUpdater            = (*MetaBucketGuard)(nil)
+	_ syncpkg.FS              = (*MetaBucketGuard)(nil)
+	_ syncpkg.StagedPathReuse = (*MetaBucketGuard)(nil)
+	_ meta.Provider           = (*MetaBucketGuard)(nil)
+	_ MetaExtraUpdater        = (*MetaBucketGuard)(nil)
+	// 同一能力的规范化声明（pkg/sync 为能力枚举单一事实源，R21 门禁据此检查）。
+	_ syncpkg.MetaExtraUpdater    = (*TrustedVolumeFS)(nil)
 	_ syncpkg.StagingQuotaCapable = (*MetaBucketGuard)(nil)
 	_ syncpkg.StagingQuotaExempt  = (*MetaBucketGuard)(nil)
 	_ syncpkg.WriteIfAbsent       = (*MetaBucketGuard)(nil)

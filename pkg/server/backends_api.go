@@ -57,7 +57,7 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 		}
 		expires = n
 	}
-	be, err := h.presignBackendFor(r.Context(), typ)
+	be, err := h.presignBackendFor(r.Context(), typ, normalizeOwner(ownerFromRequest(r)))
 	if err != nil {
 		h.presignBackendError(w, typ, err)
 		return
@@ -84,15 +84,24 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 // ——直接用 `volume.Volume{Type: typ}` 构造对 s3/baidupcs 等一切需配置的后端必失败
 // （真实类型被错报 404「未注册」，生产上直传端点实际不可用）。无配置卷时回落按 type
 // 构造（纯内存/测试后端可用）。
-func (h *Handlers) presignBackendFor(ctx context.Context, typ string) (registry.ExternalBackend, error) {
+func (h *Handlers) presignBackendFor(ctx context.Context, typ, owner string) (registry.ExternalBackend, error) {
 	if !registry.IsBackendRegistered(typ) {
 		return nil, errPresignTypeUnregistered
 	}
 	if h.volSet != nil {
+		matched := 0
 		for _, v := range h.volSet.All() {
-			if v.Type == typ {
-				return registry.NewBackend(ctx, v)
+			if v.Type != typ {
+				continue
 			}
+			matched++
+			if !v.Authorize(owner) {
+				continue // 该卷不授权该 owner：不得借其凭证直传（评审 P2：presign 缺卷 ACL 校验）
+			}
+			return registry.NewBackend(ctx, v)
+		}
+		if matched > 0 {
+			return nil, errPresignForbidden
 		}
 	}
 	return registry.NewBackend(ctx, volume.Volume{Type: typ})
@@ -101,13 +110,19 @@ func (h *Handlers) presignBackendFor(ctx context.Context, typ string) (registry.
 // errPresignTypeUnregistered 是后端类型未注册的哨兵（调用方据此映射 404）。
 var errPresignTypeUnregistered = errors.New("后端类型未注册")
 
-// presignBackendError 分档映射：未注册 → 404；已注册但构造失败（缺配置/远端不可达）→ 500。
+// errPresignForbidden 表示该类型存在已配置卷、但调用方对该卷无 ACL 授权（→ 403）。
+var errPresignForbidden = errors.New("后端类型对当前用户不可用（卷 ACL 拒绝）")
+
+// presignBackendError 分档映射：未注册 → 404；ACL 拒绝 → 403；其余构造失败 → 500。
 func (h *Handlers) presignBackendError(w http.ResponseWriter, typ string, err error) {
-	if errors.Is(err, errPresignTypeUnregistered) {
+	switch {
+	case errors.Is(err, errPresignTypeUnregistered):
 		http.Error(w, "后端类型未注册: "+typ, http.StatusNotFound)
-		return
+	case errors.Is(err, errPresignForbidden):
+		http.Error(w, "后端类型对当前用户不可用（卷 ACL 拒绝）", http.StatusForbidden)
+	default:
+		http.Error(w, "后端构造失败（检查卷配置）: "+err.Error(), http.StatusInternalServerError)
 	}
-	http.Error(w, "后端构造失败（检查卷配置）: "+err.Error(), http.StatusInternalServerError)
 }
 
 // backendPresignCompleteHandler 处理 POST /api/backends/{type}/presign/complete?path=：
@@ -120,7 +135,7 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		http.Error(w, perr.Error(), http.StatusForbidden)
 		return
 	}
-	be, err := h.presignBackendFor(r.Context(), typ)
+	be, err := h.presignBackendFor(r.Context(), typ, normalizeOwner(ownerFromRequest(r)))
 	if err != nil {
 		h.presignBackendError(w, typ, err)
 		return

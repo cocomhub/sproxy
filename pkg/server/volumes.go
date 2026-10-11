@@ -108,6 +108,12 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 			return nil, aerr
 		}
 	}
+	// 封装卷：解析声明并向源卷注入封印（源目录禁止直连；无声明时零回归）。
+	// 必须在 NewSet 之前——封印相对源卷根命名空间，set 未建时源根已就绪。
+	if serr := applyEnclosureSeals(log, acc); serr != nil {
+		closeOpenedVolumes(acc.roots, acc.external)
+		return nil, serr
+	}
 	return registry.NewSet(acc.volumes, acc.roots, acc.external, acc.pools, acc.defaultName), nil
 }
 
