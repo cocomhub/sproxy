@@ -48,35 +48,51 @@ func transformCachePath(t *storage.Tenant, key string) string {
 	return abs
 }
 
+// transformCacheRel 返回租户根相对的缓存键路径（`meta/transform/<key>`）。
+func transformCacheRel(key string) string {
+	return filepath.ToSlash(filepath.Join("meta", "transform", key))
+}
+
 // loadTransformCache 尝试读缓存文件；不存在/不可读 → (nil, false)。
+//
+// **加密感知**（评审 P2）：派生缓存（缩略图/gzip 等**明文派生**）落在卷上时必须与卷的 at-rest
+// 状态一致——裸 `os.Open` 会在加密卷上把明文读回（自洽所以不报错，但泄漏点隐蔽）。经
+// `storage.Root` 的 `OpenDecrypted` 读取（非加密卷等价 raw）。
 func loadTransformCache(t *storage.Tenant, key string) (io.ReadCloser, bool) {
-	p := transformCachePath(t, key)
-	if p == "" {
-		return nil, false
-	}
-	f, err := os.Open(p)
+	rc, err := t.Root().OpenDecrypted(transformCacheRel(key))
 	if err != nil {
 		return nil, false
 	}
-	return f, true
+	return rc, true
 }
 
 // storeTransformCache 原子写缓存（tmp + rename；目录不存在时 MkdirAll）。
 // 失败静默（缓存是加速层，失败不影响派生内容生成）。
+// storeTransformCache 原子写缓存（tmp + rename；目录不存在时 MkdirAll）。
+// 失败静默（缓存是加速层，失败不影响派生内容生成）。**加密感知**：经 Root 的
+// `OpenFileEncrypted` 落盘（加密卷上密文，避免明文派生数据以明文形态留在加密卷上，评审 P2）。
 func storeTransformCache(t *storage.Tenant, key string, data []byte) {
-	p := transformCachePath(t, key)
-	if p == "" {
+	root := t.Root()
+	rel := transformCacheRel(key)
+	dirRel := filepath.ToSlash(filepath.Dir(rel))
+	if err := root.MkdirAll(dirRel, 0o755); err != nil {
 		return
 	}
-	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	tmpRel := rel + ".tmp"
+	w, err := root.OpenFileEncrypted(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
 		return
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if _, werr := w.Write(data); werr != nil {
+		_ = w.Close()
+		_ = root.Remove(tmpRel)
 		return
 	}
-	_ = os.Rename(tmp, p)
+	if cerr := w.Close(); cerr != nil {
+		_ = root.Remove(tmpRel)
+		return
+	}
+	_ = root.Rename(tmpRel, rel)
 }
 
 // TransformCacheGCOptions 是派生缓存 GC 参数（零值 = 默认语义）。
