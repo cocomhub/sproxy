@@ -95,6 +95,9 @@ func (h *Handlers) cleanupUploadingFilesPass() {
 			return true
 		}
 		if isUploadingLockMarker(uploadID) {
+			// 锁标记：优先按 TTL 回收超龄条目（持锁者异常退出 → 该 rel 永久 409，评审 P2）；
+			// 未超龄照旧跳过（长事务持锁期间不得误删，否则锁形同虚设）。
+			h.reclaimStaleLock(filename)
 			return true
 		}
 		// 分块上传条目 value 为 upload_id（裸 id）。uploadingFiles key 为

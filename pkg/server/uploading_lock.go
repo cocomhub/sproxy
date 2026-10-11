@@ -5,6 +5,7 @@ package server
 
 import (
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -81,5 +82,33 @@ func (h *Handlers) tryMarkUploadingFile(owner, rel, value string) (release func(
 	if _, loaded := h.uploadingFiles.LoadOrStore(key, value); loaded {
 		return nil, false
 	}
-	return func() { h.uploadingFiles.Delete(key) }, true
+	if isUploadingLockMarker(value) {
+		h.uploadingLockAt.Store(key, time.Now())
+	}
+	return func() {
+		h.uploadingFiles.Delete(key)
+		h.uploadingLockAt.Delete(key)
+	}, true
+}
+
+// uploadingLockTTL 是锁标记的最长合理持有时长（超过视为持锁者异常退出）。取值远大于任何
+// 合法事务（跨卷 move / 大文件复制 / 校验均分钟级），避免误回收在途长事务。
+const uploadingLockTTL = 30 * time.Minute
+
+// reclaimStaleLock 回收超龄锁标记（持锁者异常退出：panic 逃出 defer、或远端写无超时永久阻塞
+// 而未执行 release）——否则该 rel 后续所有写请求持续 409 至进程重启（评审 P2）。返回是否回收。
+// 未记录获取时间的条目（历史/领域侧写入）不回收（零回归）。
+func (h *Handlers) reclaimStaleLock(key string) bool {
+	at, ok := h.uploadingLockAt.Load(key)
+	if !ok {
+		return false
+	}
+	t, ok := at.(time.Time)
+	if !ok || time.Since(t) < uploadingLockTTL {
+		return false
+	}
+	h.uploadingLockAt.Delete(key)
+	h.uploadingFiles.Delete(key)
+	h.logger.Warn("回收超龄文件锁标记（持锁者疑似异常退出）", "lock_key", key, "held_for", time.Since(t).String())
+	return true
 }

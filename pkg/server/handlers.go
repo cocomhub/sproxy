@@ -128,12 +128,17 @@ type Handlers struct {
 	writeGuard *leader.WriteGuard
 	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
 	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
-	alertEngine      *AlertEngine
-	cloudMgr         *cloud.CloudDownloadManager
-	syncMgr          *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
-	conflictIndex    *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
-	storageMgr       *capacity.StorageManager
-	uploadingFiles   sync.Map      // map[string]string — filename → uploadID，追踪正在上传的文件名
+	alertEngine    *AlertEngine
+	cloudMgr       *cloud.CloudDownloadManager
+	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
+	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
+	storageMgr     *capacity.StorageManager
+	uploadingFiles sync.Map // map[string]string — filename → uploadID，追踪正在上传的文件名
+	// uploadingLockAt 记录**文件级锁标记**的获取时间（key 与 uploadingFiles 同键空间）。
+	// 用于 TTL 回收：持锁者异常退出（panic 逃出 defer / 无超时的远端写永久阻塞）时锁条目
+	// 永不被释放 ⇒ 该 rel 后续所有写请求持续 409 至重启（评审 P2）。仅锁标记写入本表；
+	// 分块会话条目（value=upload_id）不写（它们由 session 存在性判定过期）。
+	uploadingLockAt  sync.Map      // map[string]time.Time
 	directLinkWarned sync.Map      // map[string]struct{} — 已告警「direct_link 被完整性承诺抑制」的卷名
 	uploadingStop    chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出（兼容旧装配路径）
 	// scheduler 是统一任务调度器（roadmap 11.10-H2）：uploading 清理 / version-gc /
