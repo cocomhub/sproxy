@@ -76,7 +76,19 @@ type verifyReadSeeker struct {
 	aheadVerified bool
 	// aheadFailed 标记先验不可行（底层不可 Seek/短读）→ 该块维持跳过（降级，不误报）。
 	aheadFailed bool
+	// expectEnd 是调用方声明的「本次下发的最后字节位置」（独占；0 = 未告知）。用于在
+	// **Range 结束于块中间**时于 Close 补验尾部半块——C3 的 sealPartialChunk 只由 EOF 触发，
+	// 块边界对齐且不读到 EOF 的 Range 会整段零校验（第 10 轮评审 P1）。
+	expectEnd int64
 }
+
+// RangeVerifier 是「Range 端点提示」可选能力：调用方在知道本次下发的最后字节位置时告知，
+// 使 Close() 能补验「Range 在块中间结束」的尾部半块。未告知 = Close 不做额外校验（行为不变，
+// 避免客户端中途断开被误判为校验失败）。
+type RangeVerifier interface{ SetExpectedEnd(end int64) }
+
+// SetExpectedEnd 声明本次下发的**独占**结束偏移（end<=0 表示清除提示）。
+func (v *verifyReadSeeker) SetExpectedEnd(end int64) { v.expectEnd = end }
 
 // Read 读数据并逐分块校验。返回错误 = 分块不一致 / 长度不一致 / 多余数据 / EOF 总校验失败。
 func (v *verifyReadSeeker) Read(p []byte) (int, error) {
@@ -311,9 +323,19 @@ func (v *verifyReadSeeker) verifyEOF() error {
 
 // Close 委托底层（标准库风格自动补 Close：底层支持 io.Closer 则关闭，不支持则 no-op
 // ——SeekRead 无 Close 的流经包装后恒可 Close，ServeContent/调用方统一关闭语义）。
+// Close 关闭底层流；若调用方声明过 Range 端点且**恰好读满该端点**（≤ fm.Size），则在此补验
+// 尾部半块（sealPartialChunk 语义）——覆盖「块边界对齐、Range 在块中间结束」这一零校验分支。
+// 未读满端点（客户端中途断开/上层提前停止）→ 不校验（避免把「提前停止」误判为损坏）。
+// 校验错误优先于底层关闭错误返回（调用方据此中断连接）。
 func (v *verifyReadSeeker) Close() error {
-	if c, ok := v.inner.(io.Closer); ok {
-		return c.Close()
+	var verr error
+	if v.expectEnd > 0 && v.expectEnd <= v.fm.Size && v.totalRead == v.expectEnd && !v.verified && v.fatal == nil {
+		verr = v.verifyEOF()
 	}
-	return nil
+	if c, ok := v.inner.(io.Closer); ok {
+		if cerr := c.Close(); cerr != nil && verr == nil {
+			return cerr
+		}
+	}
+	return verr
 }

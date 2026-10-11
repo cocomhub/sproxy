@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -341,7 +343,6 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
 		return
 	}
-	defer func() { _ = of.File.Close() }()
 
 	w.Header().Set("Content-Disposition", formatContentDisposition(dp.Filename))
 	w.Header().Set(headerContentType, contentTypeOctetStream)
@@ -375,14 +376,71 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 	// `http.ServeContent` **吞掉** io.Copy 错误且响应头（含 Content-Length）已发出 →
 	// 客户端只收到短包，监控还硬编码 success=true、无任何日志。此处记录首个非 EOF
 	// 读取错误，随后**主动中断连接**（对齐 s3_server.go 的 ErrAbortHandler）。
+	// Range 端点提示（第 10 轮评审 P1）：块边界对齐且不读到 EOF 的 Range 此前整段零校验，
+	// 现由 Close 收尾补验尾部半块（多区间/非法 Range → 不设提示，维持既有行为不误报）。
+	closeErrIsVerify := armRangeVerify(of.File, r.Header.Get("Range"), of.Info.Size())
 	tracked := &firstErrReadSeeker{inner: seeker}
 	http.ServeContent(limited, r, of.Info.Name(), of.Info.ModTime(), tracked)
-	s.finishDownload(r, dp, start, cw, tracked)
+	cerr := of.File.Close()
+	if !closeErrIsVerify {
+		cerr = nil // 非校验流的 Close 错误与完整性无关，不得触发中断（避免误杀正常下载）
+	}
+	s.finishDownload(r, dp, start, cw, tracked, cerr)
+}
+
+// armRangeVerify 为**校验流**装配 Range 端点提示并报告其 Close 是否承载校验语义：
+// 仅 meta.RangeVerifier（读时逐分块校验流）才把 Close 错误视为「收尾补验失败」；其它形态
+// （含加密解密流）的 Close 错误与完整性无关（第 10 轮评审 P1）。
+func armRangeVerify(f io.Reader, rangeHeader string, size int64) bool {
+	rv, ok := f.(meta.RangeVerifier)
+	if !ok {
+		return false
+	}
+	if end, ok2 := singleRangeEnd(rangeHeader, size); ok2 {
+		rv.SetExpectedEnd(end)
+	}
+	return true
+}
+
+// singleRangeEnd 解析**单区间** Range 头（`bytes=start-end` / `bytes=start-`），返回独占结束
+// 偏移；多区间/非法/通配 → ok=false（不设端点提示 ⇒ Close 不补验，避免误报）。
+func singleRangeEnd(header string, size int64) (int64, bool) {
+	raw, ok := strings.CutPrefix(strings.TrimSpace(header), "bytes=")
+	if !ok || strings.Contains(raw, ",") || size <= 0 {
+		return 0, false
+	}
+	startS, endS, ok := strings.Cut(raw, "-")
+	if !ok {
+		return 0, false
+	}
+	if startS == "" { // suffix range（bytes=-N）：结束即文件尾，EOF 路径已覆盖
+		return 0, false
+	}
+	start, serr := strconv.ParseInt(strings.TrimSpace(startS), 10, 64)
+	if serr != nil || start < 0 || start >= size {
+		return 0, false
+	}
+	if strings.TrimSpace(endS) == "" {
+		return size, true
+	}
+	end, eerr := strconv.ParseInt(strings.TrimSpace(endS), 10, 64)
+	if eerr != nil || end < start {
+		return 0, false
+	}
+	if end >= size-1 {
+		return size, true
+	}
+	return end + 1, true
 }
 
 // finishDownload 收尾 /download：校验/读取失败 → 中断连接 + 记录失败（第 5 轮对抗评审
 // P1：ServeContent 吞掉错误，响应头已发只会静默截断且指标恒 true）；成功 → 记录计量。
-func (s *Service) finishDownload(r *http.Request, dp DownloadPath, start time.Time, cw *countingWriter, tracked *firstErrReadSeeker) {
+func (s *Service) finishDownload(r *http.Request, dp DownloadPath, start time.Time, cw *countingWriter, tracked *firstErrReadSeeker, closeErr error) {
+	// closeErr：Range 在块中间结束时的**收尾补验**失败（RangeVerifier，第 10 轮评审 P1）。
+	// 与读错误同口径处理：已知下发内容源自损坏分块 → 中断连接（客户端看到截断而非「完整成功」）。
+	if tracked.err == nil && closeErr != nil {
+		tracked.err = closeErr
+	}
 	if tracked.err != nil {
 		s.rt.logger().Warn("下载流校验失败：中断连接（不发损坏内容）",
 			"file_name", dp.Filename, "volume", dp.VolumeName, "written", cw.count.Load(), "error", tracked.err.Error())
@@ -413,7 +471,7 @@ func (s *Service) serveVerifiedFallback(w http.ResponseWriter, r *http.Request, 
 	start := time.Now()
 	tracked := &firstErrReadSeeker{inner: seeker}
 	http.ServeContent(limited, r, name, modTime, tracked)
-	s.finishDownload(r, dp, start, cw, tracked)
+	s.finishDownload(r, dp, start, cw, tracked, nil)
 }
 
 // firstErrReadSeeker 记录底层读的**首个非 EOF 错误**并原样返回（Read/Seek 直透）。

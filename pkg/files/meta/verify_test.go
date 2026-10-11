@@ -225,3 +225,59 @@ func TestVerifyReadSeeker_InvalidMetaFailsClosed(t *testing.T) {
 		t.Fatal("畸形 meta 应首次 Read 即 fail-closed")
 	}
 }
+
+// TestVerifyReadSeeker_AlignedRangeEndsMidChunk_CloseVerifies 第 10 轮评审 P1：
+// Range 起点**恰好落在块边界**且结束于块中间时不产生 EOF ⇒ 此前既不先验（verifyChunkAhead
+// 需 curRead>0）也不补验（sealPartialChunk 仅由 verifyEOF 触发）→ 整段零校验且记成功。
+// 现由 Close 在「调用方声明的端点被读满」时补验尾部半块。
+// 变异：去掉 Close 的 verifyEOF 调用 → 篡改用例不再报错 → 红。
+func TestVerifyReadSeeker_AlignedRangeEndsMidChunk_CloseVerifies(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("abcdefgh"), 256) // 2048B → 4 块 × 512B
+	fm := refFileMeta(t, content, 512)
+
+	// Range = [512, 1200)：起点在块 1 边界（对齐），结束于块 2 中间（不触 EOF）。
+	const start, end = int64(512), int64(1200)
+	buf := make([]byte, end-start)
+
+	// ① 内容正确：读满端点后 Close 不得报错（补验通过）。
+	good := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, serr := good.Seek(start, io.SeekStart); serr != nil {
+		t.Fatalf("seek: %v", serr)
+	}
+	if _, rerr := io.ReadFull(good, buf); rerr != nil {
+		t.Fatalf("读区间: %v", rerr)
+	}
+	good.(RangeVerifier).SetExpectedEnd(end)
+	if cerr := good.(io.Closer).Close(); cerr != nil {
+		t.Fatalf("正确内容的 Range 收尾不应报错: %v", cerr)
+	}
+
+	// ② 篡改块 2（区间覆盖到的那块）：读满端点后 Close 必须报错（fail-closed）。
+	tampered := append([]byte(nil), content...)
+	tampered[1024] ^= 0xFF
+	bad := VerifyReadSeeker(bytes.NewReader(tampered), fm)
+	if _, serr := bad.Seek(start, io.SeekStart); serr != nil {
+		t.Fatalf("seek: %v", serr)
+	}
+	if _, rerr := io.ReadFull(bad, buf); rerr != nil {
+		t.Fatalf("读区间: %v", rerr)
+	}
+	bad.(RangeVerifier).SetExpectedEnd(end)
+	if cerr := bad.(io.Closer).Close(); cerr == nil {
+		t.Fatal("块边界对齐、Range 在块中间结束的篡改必须被识别（评审 P1）")
+	}
+
+	// ③ 客户端提前停止（未读满端点）：Close 不得误报（避免把中断当损坏）。
+	aborted := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, serr := aborted.Seek(start, io.SeekStart); serr != nil {
+		t.Fatalf("seek: %v", serr)
+	}
+	if _, rerr := io.ReadFull(aborted, buf[:100]); rerr != nil {
+		t.Fatalf("部分读: %v", rerr)
+	}
+	aborted.(RangeVerifier).SetExpectedEnd(end)
+	if cerr := aborted.(io.Closer).Close(); cerr != nil {
+		t.Fatalf("提前停止不应误报: %v", cerr)
+	}
+}
