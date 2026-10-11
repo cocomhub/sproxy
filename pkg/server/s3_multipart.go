@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
@@ -65,6 +66,10 @@ func (h *Handlers) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, k
 		http.Error(w, "s3: 会话创建失败", http.StatusInternalServerError)
 		return
 	}
+	// M9a（第 7 轮 MAJOR）：清扫**过期孤儿会话**（客户端崩溃/断连未发 abort → parts + meta
+	// 永久残留占 chunk 桶与配额）。懒触发（每次 init 顺带一次，零后台 goroutine）：
+	// meta 超过 s3MultipartOrphanTTL 未更新的会话，其 parts 与 meta 一并删除（best-effort）。
+	h.sweepStaleMultipart(tnt.Root())
 	uploadID := hex.EncodeToString(b)
 	mpMetaRel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
 	if err := rootWriteFile(tnt.Root(), mpMetaRel, []byte(key)); err != nil {
@@ -412,6 +417,64 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	comp := md5.Sum(partMd5s) //nolint:gosec // G401: S3 复合 ETag 协议要求 MD5（非安全用途）
 	compositeETag := hex.EncodeToString(comp[:]) + "-" + strconv.Itoa(len(plan.parts))
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Key>%s</Key><ETag>%s</ETag></CompleteMultipartUploadResult>`, xmlEscapeText(key), compositeETag)
+}
+
+// s3MultipartOrphanTTL 是孤儿分块会话的存活上限（秒）：超过则视为客户端已放弃——
+// Initiate→Complete 的正常窗口是分钟级（大文件 ≤ 小时级），24h 足够宽裕且防无限残留。
+const s3MultipartOrphanTTL = 24 * time.Hour
+
+// sweepStaleMultipart 清扫过期孤儿分块会话（M9a）：遍历 chunk 桶内 `s3mp-<id>.meta`，
+// meta mtime 早于 TTL 的会话，删除其全部 `s3mp-<id>-<part>` 与 meta 本身（best-effort；
+// 删除失败只记 Warn，不阻断新会话创建）。返回清扫的会话数（供测试/可观测）。
+func (h *Handlers) sweepStaleMultipart(root *storage.Root) int {
+	entries, err := root.ReadDir("chunk")
+	if err != nil {
+		return 0
+	}
+	swept := 0
+	for _, e := range entries {
+		uploadID, stale := staleMultipartSession(e, time.Now())
+		if !stale {
+			continue
+		}
+		h.removeMultipartSession(root, entries, uploadID)
+		swept++
+	}
+	if swept > 0 {
+		h.logger.Info("s3: 清扫过期孤儿分块会话", "sessions", swept)
+	}
+	return swept
+}
+
+// staleMultipartSession 判定条目是否为**过期的**分块会话 meta（`s3mp-<id>.meta` 且 mtime
+// 早于 TTL）；返回上传 ID 与是否过期。
+func staleMultipartSession(e os.DirEntry, now time.Time) (string, bool) {
+	name := e.Name()
+	if !strings.HasPrefix(name, multipartPartPrefix) || !strings.HasSuffix(name, ".meta") {
+		return "", false
+	}
+	info, err := e.Info()
+	if err != nil || now.Sub(info.ModTime()) < s3MultipartOrphanTTL {
+		return "", false
+	}
+	uploadID := strings.TrimSuffix(strings.TrimPrefix(name, multipartPartPrefix), ".meta")
+	return uploadID, uploadID != ""
+}
+
+// removeMultipartSession 删除某会话的全部 parts 与 meta（best-effort，失败只记 Warn）。
+func (h *Handlers) removeMultipartSession(root *storage.Root, entries []os.DirEntry, uploadID string) {
+	for _, pe := range entries {
+		if !strings.HasPrefix(pe.Name(), multipartPartPrefix+uploadID+partSuffix) {
+			continue
+		}
+		if rerr := root.Remove(chunkPrefix + pe.Name()); rerr != nil {
+			h.logger.Warn("s3: 清理孤儿 part 失败", "part", pe.Name(), "error", rerr)
+		}
+	}
+	metaRel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
+	if rerr := root.Remove(metaRel); rerr != nil {
+		h.logger.Warn("s3: 清理孤儿分块会话 meta 失败", "meta", metaRel, "error", rerr)
+	}
 }
 
 // s3AbortMultipart 中止分块上传（DELETE ?uploadId → 清 parts + meta）。

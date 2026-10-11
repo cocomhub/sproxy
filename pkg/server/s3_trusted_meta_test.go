@@ -15,9 +15,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/netutil"
@@ -76,5 +79,71 @@ func TestS3Put_CreatesTrustedSidecar(t *testing.T) {
 	want := fmt.Sprintf("%x", sha256sum(body))
 	if fm.TotalSHA256 != want {
 		t.Fatalf("sidecar TotalSHA256=%s want %s", fm.TotalSHA256, want)
+	}
+}
+
+// TestS3Multipart_SweepStaleOrphans 回归（M9a，第 7 轮 MAJOR）：客户端崩溃/断连未发 abort 的
+// 分块会话（parts + meta）必须被清扫（否则永久残留占 chunk 桶与配额）。懒触发（init 顺带），
+// TTL 24h。变异：去掉 sweepStaleMultipart 调用/实现 → 过期会话不被删 → 红。
+func TestS3Multipart_SweepStaleOrphans(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{logger: testLogger()}
+	dir := t.TempDir()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	writePart := func(uploadID string, partNum int) {
+		rel := "chunk/" + multipartPartPrefix + uploadID + partSuffix + strconv.Itoa(partNum)
+		if werr := rootWriteFile(root, rel, []byte("part-body")); werr != nil {
+			t.Fatalf("write part: %v", werr)
+		}
+	}
+	writeMeta := func(uploadID string) {
+		if werr := rootWriteFile(root, "chunk/"+multipartPartPrefix+uploadID+".meta", []byte("k")); werr != nil {
+			t.Fatalf("write meta: %v", werr)
+		}
+	}
+	age := func(uploadID string, d time.Duration) {
+		for _, rel := range []string{
+			"chunk/" + multipartPartPrefix + uploadID + ".meta",
+			"chunk/" + multipartPartPrefix + uploadID + partSuffix + "1",
+		} {
+			full := filepath.Join(dir, filepath.FromSlash(rel))
+			old := time.Now().Add(-d)
+			if cerr := os.Chtimes(full, old, old); cerr != nil {
+				t.Fatalf("Chtimes(%s): %v", rel, cerr)
+			}
+		}
+	}
+
+	// 过期会话（25h）+ 活跃会话（1h）。
+	writeMeta("stale-session")
+	writePart("stale-session", 1)
+	age("stale-session", 25*time.Hour)
+	writeMeta("live-session")
+	writePart("live-session", 1)
+	age("live-session", time.Hour)
+
+	if n := h.sweepStaleMultipart(root); n != 1 {
+		t.Fatalf("应清扫 1 个过期会话，实际 %d", n)
+	}
+	for _, rel := range []string{
+		"chunk/" + multipartPartPrefix + "stale-session.meta",
+		"chunk/" + multipartPartPrefix + "stale-session" + partSuffix + "1",
+	} {
+		if _, serr := root.Stat(rel); serr == nil {
+			t.Fatalf("过期会话残留: %s", rel)
+		}
+	}
+	for _, rel := range []string{
+		"chunk/" + multipartPartPrefix + "live-session.meta",
+		"chunk/" + multipartPartPrefix + "live-session" + partSuffix + "1",
+	} {
+		if _, serr := root.Stat(rel); serr != nil {
+			t.Fatalf("活跃会话不得被误清: %s (%v)", rel, serr)
+		}
 	}
 }

@@ -733,3 +733,78 @@ func TestTrustedVolumeFS_IsLocalBranch_RemoteSkipsReadback(t *testing.T) {
 		t.Fatalf("TotalSHA256=%s want %s", fm.TotalSHA256, refSHA(data))
 	}
 }
+
+// remoteVerifyFS 模拟**远端卷**（不实现 LocalVolume → isLocal()==false），可注入 Stat size
+// 偏差与末块内容篡改，用于验证 verifyWriteMeta 的远端轻量分支（M9c）。
+type remoteVerifyFS struct {
+	*syncpkg.LocalFS
+	sizeDelta   int64
+	corruptLast bool
+}
+
+// IsLocalVolume 覆盖提升自 *LocalFS 的实现：本替身模拟**远端**卷（isLocal()==false）。
+func (r *remoteVerifyFS) IsLocalVolume() bool { return false }
+
+func (r *remoteVerifyFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	e, err := r.LocalFS.Stat(ctx, p)
+	if err == nil && e != nil && !e.IsDir && r.sizeDelta != 0 {
+		e.Size += r.sizeDelta
+	}
+	return e, err
+}
+
+func (r *remoteVerifyFS) OpenRangeRead(ctx context.Context, p string, offset, size int64) (io.ReadCloser, error) {
+	rc, err := r.LocalFS.OpenRangeRead(ctx, p, offset, size)
+	if err != nil || !r.corruptLast {
+		return rc, err
+	}
+	b, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr != nil {
+		return nil, rerr
+	}
+	if len(b) > 0 {
+		b[0] ^= 0xFF // 末块内容篡改（长度不变）
+	}
+	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+// TestTrustedVolumeFS_VerifyWriteMetaRemote 回归（M9c，第 7 轮 MAJOR）：远端卷写后必须做
+// **轻量**交叉校验（size + 末块），不得完全跳过——否则远端静默截断/并发覆盖错位无任何检测
+// （同一写路径本地卷有校验、远端卷没有 = 承诺不一致）。
+// 变异：verifyWriteMeta 的远端分支改回直接 return → 两个不一致用例的 sidecar 不被失效 → 红。
+func TestTrustedVolumeFS_VerifyWriteMetaRemote(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	body := bytes.Repeat([]byte("remote-verify-"), 300) // 3900B（单块）
+
+	// ① size 不一致（远端静默截断/写错对象）→ sidecar 必须被失效。
+	inner1 := newInner(t)
+	tv1 := Wrap(&remoteVerifyFS{LocalFS: inner1, sizeDelta: -7}, Options{}).(*TrustedVolumeFS)
+	if err := tv1.WriteFile(ctx, "user/a.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if e, err := inner1.Stat(ctx, meta.MetaPath("user/a.bin")); err == nil && e != nil {
+		t.Fatal("远端 size 与 meta.Size 不一致时应失效 sidecar（M9c）")
+	}
+
+	// ② 末块内容不一致（尾部静默损坏）→ sidecar 必须被失效。
+	inner2 := newInner(t)
+	tv2 := Wrap(&remoteVerifyFS{LocalFS: inner2, corruptLast: true}, Options{}).(*TrustedVolumeFS)
+	if err := tv2.WriteFile(ctx, "user/b.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if e, err := inner2.Stat(ctx, meta.MetaPath("user/b.bin")); err == nil && e != nil {
+		t.Fatal("远端末块 sha256 不一致时应失效 sidecar（M9c）")
+	}
+
+	// ③ 一致（正常远端）→ sidecar 必须保留（不误伤）。
+	inner3 := newInner(t)
+	tv3 := Wrap(&remoteVerifyFS{LocalFS: inner3}, Options{}).(*TrustedVolumeFS)
+	if err := tv3.WriteFile(ctx, "user/c.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if e, err := inner3.Stat(ctx, meta.MetaPath("user/c.bin")); err != nil || e == nil {
+		t.Fatalf("一致时 sidecar 应保留（M9c 不误伤正常写）: e=%v err=%v", e, err)
+	}
+}

@@ -725,3 +725,72 @@ func TestStorage_Put_BinaryOnlyUnreliableMD5Accepted(t *testing.T) {
 		t.Fatalf("内容不一致")
 	}
 }
+
+// unreliableMD5RapidAdapter 是「远端 md5 非权威 + **有秒传能力**」的替身：RapidUpload 后
+// 远端 md5 变权威（整文件 md5），用于验证 M6 的「先刷新重验」路径。
+type unreliableMD5RapidAdapter struct {
+	inner    *unreliableMD5Adapter
+	rapidHit bool
+}
+
+func (a *unreliableMD5RapidAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (a *unreliableMD5RapidAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return a.inner.Download(ctx, remotePath, localPath)
+}
+func (a *unreliableMD5RapidAdapter) Move(ctx context.Context, from, to string) error {
+	return a.inner.Move(ctx, from, to)
+}
+func (a *unreliableMD5RapidAdapter) Copy(ctx context.Context, from, to string) error {
+	return a.inner.Copy(ctx, from, to)
+}
+func (a *unreliableMD5RapidAdapter) Delete(ctx context.Context, remotePath string) error {
+	return a.inner.Delete(ctx, remotePath)
+}
+func (a *unreliableMD5RapidAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.inner.List(ctx, remotePath)
+}
+func (a *unreliableMD5RapidAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	// 直取底层 fake（跳过 unreliableMD5Adapter 的无条件 MD5Unreliable 覆盖）。
+	m, err := a.inner.inner.Meta(ctx, remotePath)
+	if err != nil || m == nil || a.rapidHit {
+		return m, err // 刷新后：权威整文件 md5
+	}
+	m.MD5Unreliable = true // 刷新前：分片组合语义
+	return m, nil
+}
+func (a *unreliableMD5RapidAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
+	a.rapidHit = true
+	return true, nil
+}
+
+var _ Adapter = (*unreliableMD5RapidAdapter)(nil)
+var _ rapidUploader = (*unreliableMD5RapidAdapter)(nil)
+
+// TestStorage_Put_UnreliableMD5RefreshedByRapidUpload 回归（M6，第 7 轮 MINOR）：远端 md5
+// 非权威时**必须先经 rapidupload 刷新**再判定，而不是直接接受——否则「必须 md5 一致」在
+// 分片上传（>4MiB）路径被架空（任何 md5 不匹配都会被同一句「可能不正确」放过）。
+// 变异：去掉 renewAuthoritativeMD5 调用 → rapidHit=false → 红。
+func TestStorage_Put_UnreliableMD5RefreshedByRapidUpload(t *testing.T) {
+	t.Parallel()
+	ad := &unreliableMD5RapidAdapter{inner: &unreliableMD5Adapter{inner: newFakeStorageAdapter()}}
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("unreliable-md5-rapid-refresh-", 80)
+	if _, err := s.Put(context.Background(), "r.bin", strings.NewReader(content)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !ad.rapidHit {
+		t.Fatal("远端 md5 非权威时应先触发 rapidupload 刷新（M6）")
+	}
+	m, err := s.Stat(context.Background(), "r.bin")
+	if err != nil || m == nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if m.MD5Unreliable {
+		t.Fatal("刷新后远端 md5 应权威（否则相等断言仍被跳过）")
+	}
+	if m.ETag != md5Hex(content) {
+		t.Fatalf("刷新后应做相等断言并与本地 md5 一致: got %s want %s", m.ETag, md5Hex(content))
+	}
+}

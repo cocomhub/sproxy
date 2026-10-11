@@ -87,6 +87,10 @@ type ClientConfig struct {
 	MultipartPartSize int64
 
 	// UploadRetries 是 PutObject 失败重试次数（默认 3；退避重试）。
+	// **前置条件**：重试要求写面读流可 `Seek(0)`——直接传入 `*os.File`/`bytes.Reader`
+	// 的调用方可用；**可信卷（trusted.Wrap）写面**的读流是 `io.TeeReader`（边读边算
+	// 哈希，不可重置）→ 该配置在其上不生效（fail-closed，错误信息显式归因；见
+	// s3_multipart.go 的 putObjectWithRetry）。
 	UploadRetries int
 }
 
@@ -337,7 +341,8 @@ func (f *S3FS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, err
 //
 // 分片上传（roadmap 3.3 P1）：size >= MultipartThreshold 时走 multipart（minio PutObject
 // 内建自动分片 + 失败自动 Abort 防孤儿；PartSize 透传可配分片大小）+ 显式失败重试
-// （UploadRetries 次退避）；小文件（< 阈值）单 PutObject 零回归。
+// （UploadRetries 次退避，**需可 Seek 源**——可信卷写面为 TeeReader 时不重试并显式归因）；
+// 小文件（< 阈值）单 PutObject 零回归。
 func (f *S3FS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
 	// size<0（未知长度）：透传给 minio（其内部走 putObjectMultipartStreamNoLength 流式读
 	// 到 EOF）。**不得钳为 0**——那会声明 0 字节却带非空 body（数据丢失/语义冲突）。

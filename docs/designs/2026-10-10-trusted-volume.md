@@ -295,6 +295,32 @@ M9c（外部卷写后轻量交叉校验，现被 `isLocal` 门跳过）、m6（S
 TeeReader 非 Seeker 下恒失效）、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/
 `UpdateMetaExtra` 本地两遍整文件读回）。
 
+### 8.5 第 10 批（M9c/M6/M9a/m6）修复（2026-10-11）
+
+- **M9c 远端卷写后轻量交叉校验**：`verifyWriteMeta` 的远端分支不再直接 return，改走
+  `verifyWriteMetaRemote`——① `Stat` 实测 size 必须等于 `meta.Size`（零额外流量）；
+  ② 底层实现 `RangeReader` 时读**末块**（≤32MiB）重算 sha256 与 meta 末块比对。任一不一致
+  → 删 sidecar（读侧直算/逐分块兜底），绝不留错证据；能力不足则保留（读路径校验兜底）。
+  消灭了「同一写路径本地卷有校验、远端卷完全没有」的承诺不一致。
+- **M6 远端 md5 非权威先刷新重验**：`putCheckAfterUpload` 在 `MD5Unreliable` 时先经
+  `renewAuthoritativeMD5`（rapidupload 秒传，命中会把远端 md5 刷新为权威整文件 md5）→
+  刷新后正常做相等断言（不等则重传刷新 meta）；仍非权威才按「无校验能力≠损坏」接受并告警。
+  此前直接接受，把「必须 md5 一致」在分片上传（>4MiB）路径架空。
+- **M9a S3 multipart 孤儿会话清扫**：新增 `sweepStaleMultipart`（懒触发：每次
+  InitiateMultipartUpload 顺带一次，零后台 goroutine），清理 meta mtime 超过
+  `s3MultipartOrphanTTL`（24h）的会话及其全部 parts——客户端崩溃/断连未发 abort 的残留
+  不再永久占 chunk 桶与配额。抽取 `staleMultipartSession`/`removeMultipartSession` 保持
+  可读（gocognit）。
+- **m6 S3 重试失败显式归因**：`putObjectWithRetry` 对「源非 io.Seeker / Seek(0) 失败」的
+  fail-closed 早退路径把「UploadRetries 未生效」写进错误（并更新 `UploadRetries` 与
+  `S3FS.WriteFile` 注释的前置条件）——可信卷写面读流是 `io.TeeReader`，该配置在其上本就不
+  生效，此前只能看到裸 PutObject 错误，运维无法区分「重试已尽力」与「根本没重试」。
+
+**仍未修（下一批）**：M9b（本地备份写面未更新**卷级持久容量计数器**——需先定「本地卷
+durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging 峰值 2×——需 `Storage.Put`
+直接接受 staging 路径，改上传算法）、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/
+`UpdateMetaExtra` 本地两遍整文件读回，需「stat/末块轻量判据替代整文件回读」的等价性论证）。
+
 ## 9. 验证
 
 - 单元：`pkg/files/meta`（计算/校验/短读/长读/中段 Seek）、`pkg/volume/trusted`（Wrap/Guard/能力透传/生命周期）、`pkg/cloud`（转存分块校验/标记）、`pkg/sync`（Equal/staging gate）、`pkg/quota`（staging tracker）。

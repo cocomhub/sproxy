@@ -13,6 +13,7 @@ package s3
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -110,10 +111,14 @@ func putObjectWithRetry(ctx context.Context, client putter, params uploadParams,
 		if attempt > 0 {
 			seeker, ok := r.(io.Seeker)
 			if !ok {
-				return err // 不可重置源：不重试（fail-closed，防复用已消费流写坏对象）
+				// 不可重置源：不重试（fail-closed，防复用已消费流写坏对象）。**m6（第 7 轮
+				// MINOR）显式归因**：可信卷写面的读流是 `io.TeeReader`（非 Seeker）→ 生产
+				// 路径下 UploadRetries 实际不生效；此处把「重试未发生」写进错误，避免运维
+				// 只看到原始 PutObject 错误而误以为重试已尽力。
+				return fmt.Errorf("%w（源不可重置：非 io.Seeker，UploadRetries=%d 未生效——可信卷写面读流为 TeeReader）", err, params.retries)
 			}
 			if _, serr := seeker.Seek(0, io.SeekStart); serr != nil {
-				return err // Seek 失败：同样 fail-closed
+				return fmt.Errorf("%w（源 Seek(0) 失败，UploadRetries=%d 未生效）", err, params.retries)
 			}
 			select {
 			case <-ctx.Done():
