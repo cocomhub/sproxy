@@ -286,13 +286,36 @@ func (d *davMetaFS) OpenRangeRead(ctx context.Context, p string, offset, size in
 }
 
 // DirectURL 透传直链（内层未实现 → ErrUnsupported，调用方回落服务端转发）。
+//
+// 封印优先：目标路径落在封装卷占用的源区间时**必须抑制直链**——302 直链意味着客户端
+// 直连源存储，与「封装后源目录禁止直连」冲突（会读到密文/原始存储形态）。此处按封印规则
+// 显式拒绝（返回 ok=false，不报错：抑制是正常策略非故障）。
 func (d *davMetaFS) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
+	if d.root != nil {
+		if rule := d.root.SealAt(d.bucketRel(relPath)); rule != nil {
+			return "", false, nil
+		}
+	}
 	dp, ok := d.FS.(syncpkg.DirectURLProvider)
 	if !ok {
 		return "", false, fmt.Errorf("dav: 底层未实现 DirectURL: %w", syncpkg.ErrUnsupported)
 	}
 	return dp.DirectURL(ctx, relPath)
 }
+
+// UpdateMetaExtra 转发旁路 Extra 更新能力（R21 透明装饰器契约）。
+func (d *davMetaFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
+	u, ok := d.FS.(syncpkg.MetaExtraUpdater)
+	if !ok {
+		return fmt.Errorf("dav: 底层未实现 UpdateMetaExtra: %w", syncpkg.ErrUnsupported)
+	}
+	return u.UpdateMetaExtra(ctx, rel, extra)
+}
+
+// 编译期能力断言（R21；须位于 var 块内——门禁按行首 `_ <Cap> = (*Type)(nil)` 匹配）。
+var (
+	_ syncpkg.MetaExtraUpdater = (*davMetaFS)(nil)
+)
 
 // FileMeta 透传 sidecar 读取（内层未实现 → ErrUnsupported；本装饰器只做**写面重链**，
 // 读面证据由底层可信卷提供）。
