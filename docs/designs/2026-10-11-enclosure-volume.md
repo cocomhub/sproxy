@@ -159,10 +159,61 @@ func (rt *Root) SetSeals([]SealRule) error               // 写恒拒；读 hidd
 | S2 | `enclosure.FS` 薄层 + `PrefixFS` 补 `MetaExtraUpdater` + R21 纳入 + `quota` 父链 | 单测 + 变异 + R21 绿 |
 | S3 | `enclosure.Parse` 声明/拓扑 + `type: enclosure` 装配 + 源封印注入 + DAV 视图注入 | 端到端拒绝 + 正常读写 |
 | S4 | wrapper 注册表（`secretdata` 迁为 wrapper）+ 跨外部卷 per-tenant 视图 | 加密卷六面接通 |
-| S5 | 物理占用记账（`PhysSizer`/`Adjust`/S3 part/`Release` 钳 0） | 配额不可被逻辑放大绕过 |
+| S5 | 物理占用记账（`TrueUsageReporter`/`CorrectTo`/`NewPoolWithParent` 已落地；`secretdata` 与封装卷接入 + `reconcile` 优先真值 + 交叉校验 + S3 part/`Release` 钳 0 待接） | 配额不可被逻辑放大绕过 |
 | S6 | 评审 P0/P1/P2/Minor 全量修复 + 文档/门禁 | 四 lint 面 + archcheck + 全量测试绿 |
 
-## 10. 已知边界（记档，不阻塞）
+## 10. 真值修正机制（让「知道真实占用的卷层」修正账本）
+
+逻辑记账对会改变物理落盘量的卷层必然失真（实证：at-rest 加密卷 `1GiB` 限额实际可落 ~1.5TiB——
+每文件的 meta pad 1–2MiB 不入账，且外部/封装卷 `RootDir` 为空被对账扫描跳过 ⇒ **无自愈**）。
+
+机制为「报告 + 对账 + 交叉校验」三件套：
+
+```go
+// pkg/volume/capacity —— 由掌握物理布局的那一层实现（后端/封装处理器）
+type TrueUsageReporter interface {
+    TrueUsage() (bytes int64, ok bool)          // 全卷真实占用（物理字节）
+    TrueSize(rel string) (bytes int64, ok bool) // 单路径真实占用（含 sidecar/pad 开销）
+}
+func TrueUsageOf(fs syncpkg.FS) (TrueUsageReporter, bool) // 经 Innermost 穿过装饰器链
+func (p *PoolCounter) CorrectTo(bytes int64)              // 真值修正 committed（可增可减/防负/不动 reserved/持久化）
+func (p *PoolCounter) CorrectFrom(r TrueUsageReporter) (int64, bool)
+func quota.NewPoolWithParent(parent *Pool, maxBytes int64) *Pool // 封装卷配额继承源卷（不双计）
+```
+
+**可靠性保证（为什么真值可信）**
+1. 报告方必须是**掌握物理布局**的那一层，禁止装饰器估算；`ok=false` 表示「不掌握」→ 调用方
+   回落既有记账，**绝不静默降级为 0**（否则凭空释放配额 = 上限失效）；
+2. 修正只动 `committed`（沿父链聚合、防下溢归零），**不触碰在途 `reserved`**（并发安全）；
+3. 真值优先于上限：修正可以暴露「已超限」，但**不得截断**（否则失真被掩盖）；
+4. 双源交叉校验：磁盘扫描（本地卷）/ backend `VolumeStatsProvider`（外部卷，baidupcs 配额、
+   S3 bucket 用量）与 `TrueUsageReporter` 并存时，若差异超阈值 → 告警（防「扫描口径遗漏封装
+   开销」再次失真），并以真值为准；
+5. 修正后**下一次预留即按真值判定**（超限拒绝新写），账本失真不再能兑换成超额写入。
+
+**对评审 P1 的直接效果**：加密卷/封装卷把 `TrueUsageReporter` 实现为「内容分块 + meta pad +
+parity 的物理字节合计」后，`CapacityFS` 写后结算与周期对账都按真值收敛 ⇒ 「卷级容量强制」
+恢复为不可绕过的硬上限（不再依赖「用户只传大文件」的假设）。
+
+**两条腿互补**：有报告者 → 实时准确；无报告者 → 扫描/后端统计兜底；两者皆有 → 交叉校验。
+
+## 11. 命名定案：封装卷（Enclosure Volume）
+
+**推荐「封装卷 / Enclosure Volume」**（代码：包 `pkg/volume/enclosure`、类型 `EnclosureFS`、
+声明 `enclosure.Decl`）。
+
+| 候选 | 评价 |
+|---|---|
+| **封装卷（enclosure）** ✅ | `enclosure` 一词同时覆盖本机制的两大职责：**包装**（提供变换后的访问）与**围栏**（圈占源目录、禁止直接进入）。与实现术语分层清晰：`wrapper` = 处理层（secretdata…），`enclosure` = 卷类型（声明/视图/封印/配额）。中文「封装」也直观表达「封装起来、不能直连」。 |
+| 抽象卷（abstract volume） ❌ | 语义过载且**不表达关键约束**：「抽象」描述的是实现手法（任何卷都是抽象），无法推出「源目录被占有、必须经我访问」；Go 语境里 `Abstract*` 属反面模式命名；也无法区分处理层与卷类型。 |
+| 备选：托管卷（custodian） △ | 强调「由我代理访问」，但弱化了「源目录被围栏」的防护语义；若未来出现「代理但不围栏」的卷型，会与封装卷混淆。 |
+
+术语约定（写入代码注释与文档）：
+- **封装卷（enclosure volume）**：卷类型，承担声明/源视图/封印/配额继承；
+- **封装处理器（wrapper）**：可注册的处理层（加解密/镜像/压缩/脱敏…），只改字节；
+- **封印（seal）**：源卷侧对封装区间的直连拒绝（写恒拒、读可配 404/只读透视）。
+
+## 12. 已知边界（记档，不阻塞）
 
 - 外部卷源的 per-tenant 视图构造在 S4；在此之前外部源装配期**显式拒绝**（禁静默降级）。
 - 封印只覆盖经 `storage.Root` 与注入检查的视图；任何**新增直连 os I/O 的面**都必须同时接入
