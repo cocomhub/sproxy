@@ -271,6 +271,30 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 非 Seeker 下恒失效）、m7（staging `ReserveUsage` 每轮 spawn select goroutine；baidupcs 单测 5s
 等待）、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/`UpdateMetaExtra` 本地两遍整文件读回）。
 
+### 8.4 第 9 批（M9d/m1/m7/m5 与 M9-MINOR 归并）修复（2026-10-11）
+
+- **M9d `skip_verify` 装配期告警**：新增 `warnIfVerifySkipped(cfg, log)` 并在 `RegisterRoutes`
+  装配时调用——`trusted_volume.skip_verify=true` 是可信卷承诺的降级开关（读侧不校验 / 302 直链
+  前置 / 外卷写后不回读），必须启动即可见（此前只有配置注释）。测试含**接线断言**（防
+  「helper 有测试但没人调」）。
+- **m1 `Inner()` 逃生口门禁（R22）**：新增 `internal/archcheck/inner_escape_gate_test.go`——
+  全仓非测试源码里 `.Inner()` **调用**只允许出现在 `pkg/sync/staging_gate.go`（Innermost
+  下探）与 `pkg/volume/trusted/trusted_fs.go` 两处，新增调用须登记并写明理由；正则区分
+  「方法定义」与「单行函数体内调用」。
+- **m7 staging 等待观察者收敛**：`StagingTracker.ReserveUsage` 改**懒起 + 至多 1 个**观察者
+  goroutine（快路径零 goroutine；多轮等待仍只 1 个），并加 `watchers` 计数供测试断言——
+  此前**每轮等待**各 spawn 一个（高竞争 churn + 野 Broadcast）。
+- **m5 去掉 `TransferFSFor` 死值**：第三返回值「是否共享」在转存路径从未被消费（共享卷 owner
+  前缀合并由 `volume.ResolveLocation` 唯一入口承担），删除以免误导调用方需感知共享性。
+  **评审另一项 `DisableDoubleDownloadVerify` 在本仓无对应规格**（全仓仅出现在本条记档里），
+  属评审输入串味，无需实现。
+
+**仍未修（下一批）**：M3（baidupcs staging 峰值 2×）、M6（远端 md5 非权威时先 rapidupload
+刷新重验）、M9a（S3 multipart 崩溃遗留孤儿 parts 清理）、M9b（本地备份未走卷容量池账本）、
+M9c（外部卷写后轻量交叉校验，现被 `isLocal` 门跳过）、m6（S3 multipart `UploadRetries` 在
+TeeReader 非 Seeker 下恒失效）、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/
+`UpdateMetaExtra` 本地两遍整文件读回）。
+
 ## 9. 验证
 
 - 单元：`pkg/files/meta`（计算/校验/短读/长读/中段 Seek）、`pkg/volume/trusted`（Wrap/Guard/能力透传/生命周期）、`pkg/cloud`（转存分块校验/标记）、`pkg/sync`（Equal/staging gate）、`pkg/quota`（staging tracker）。

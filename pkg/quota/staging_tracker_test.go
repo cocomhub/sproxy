@@ -8,6 +8,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestStagingTracker_ReserveRelease 基本记账：预留 + 释放后可再次预留。
@@ -85,5 +87,40 @@ func TestStagingTracker_CtxCancel(t *testing.T) {
 	}()
 	if err := q.ReserveUsage(cctx, 100); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ctx 取消应返回 context.Canceled（包装），got %v", err)
+	}
+}
+
+// TestStagingTracker_SingleWatcherPerCall 回归（m7，第 7 轮 MINOR）：一次 ReserveUsage 在
+// **多轮**排队等待中只允许 1 个观察者 goroutine（此前每轮等待都 spawn 一个 → 高竞争下
+// goroutine churn + 野 Broadcast）。变异：把观察者放回循环内 → watchers > 1 → 红。
+func TestStagingTracker_SingleWatcherPerCall(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(100)
+	scope := pool.Scope("", 0)
+	q := NewStagingTracker(scope)
+	q.waitTimeout = 3 * time.Second
+	ctx := context.Background()
+	if err := q.ReserveUsage(ctx, 90); err != nil { // 占 90/100
+		t.Fatalf("预占: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- q.ReserveUsage(ctx, 50) }() // 90+50>100 → 进入等待
+	// 触发**两轮**唤醒：每轮释放量都仍不足以满足 50（用 waitRounds 条件同步，避免固定 Sleep）。
+	testutil.WaitFor(t, 5*time.Second, func() bool { return q.waitRounds.Load() >= 1 },
+		"等待者应进入第一轮排队")
+	q.ReleaseUsage(10) // used=80 → 仍不足（130>100）→ 第二轮等待
+	testutil.WaitFor(t, 5*time.Second, func() bool { return q.waitRounds.Load() >= 2 },
+		"释放不足时应进入第二轮排队")
+	q.ReleaseUsage(30) // used=50 → 100 恰好满足
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("满足后应成功: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("等待者未在释放后唤醒")
+	}
+	if got := q.watchers.Load(); got != 1 {
+		t.Fatalf("单次 ReserveUsage 只应 spawn 1 个观察者（m7），实际 %d", got)
 	}
 }

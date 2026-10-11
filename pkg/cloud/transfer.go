@@ -95,7 +95,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if task.Transfer == nil {
 		return nil, result, nil // 无转存要求（仅下载）
 	}
-	targetFS, scheme, _ := m.transferFS(task.Transfer.Volume)
+	targetFS, scheme := m.transferFS(task.Transfer.Volume)
 	if targetFS == nil {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
 	}
@@ -635,9 +635,9 @@ func sanitizeTransferName(name string) string {
 
 // transferFS 解析转存目标卷的 (FS 视图, 协议 scheme)。
 // 由装配层注入 resolver（pkg/server 不 import registry；经 CloudManagerOptions）。
-func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string, bool) {
+func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string) {
 	if m.transferFSFor == nil {
-		return nil, "", false
+		return nil, ""
 	}
 	return m.transferFSFor(volume)
 }

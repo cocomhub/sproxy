@@ -267,7 +267,7 @@ type CloudDownloadManager struct {
 	dl          downloader.Downloader
 	// transferFSFor 解析转存目标卷 (FS, scheme, shared)（编排层注入；nil = 转存不可用）。
 	// 远程性不在此返回（由 FS 自述 syncpkg.LocalVolume，transfer.go 查询）。
-	transferFSFor func(volume string) (syncpkg.FS, string, bool)
+	transferFSFor func(volume string) (syncpkg.FS, string)
 	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveLocation 键空间计算）。
 	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
 	volumeFor func(volume string) (volume.Volume, bool)
@@ -360,10 +360,11 @@ type CloudManagerOptions struct {
 	Logger           *slog.Logger
 	Config           *CloudDownloadConfig
 	QuotaFor         []QuotaResolver
-	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme, 是否共享)。scheme 用于生成
-	// 可被 ResolveURL 解析的转存 URL；shared=true 表示共享卷（内容不共享，转存落盘须加
-	// owner 前缀隔离）。由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用）。
-	TransferFSFor func(volume string) (syncpkg.FS, string, bool)
+	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme)。scheme 用于生成可被
+	// ResolveURL 解析的转存 URL。**注意**：历史第三个返回值「是否共享」已删除（m5，第 7 轮
+	// MINOR）——共享卷的 owner 前缀隔离现由 `volume.ResolveLocation` 唯一入口承担，
+	// 该值在转存路径上从未被消费（死值）。
+	TransferFSFor func(volume string) (syncpkg.FS, string)
 	// StagingQuotaFor 返回 owner 的本地 staging 配额钩子（用户裁定 2026-10-10：外部卷
 	// 转存写本地暂存统一过独立 staging 配额——防本地磁盘打满；转存目标 FS 未实现
 	// StagingQuotaExempt/StagingQuotaCapable 时包 StagingQuotaGateFS 强制预留）。

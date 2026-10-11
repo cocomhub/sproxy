@@ -98,7 +98,12 @@ func newTransferTestMgr(t *testing.T, fsFor func(volume string) (syncpkg.FS, str
 	mgr, _ := newCloudTestManager(t, t.TempDir(), nil, &CloudDownloadConfig{
 		MaxConcurrent: 3, TaskTTL: time.Hour,
 	})
-	mgr.transferFSFor = fsFor
+	// 生产选项已无第三返回值（m5）：测试 helper 保留 (FS, scheme, shared) 形态（volumeFor
+	// 据此推导 ACL 语义），此处适配为 2 值。
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
+		fs, scheme, _ := fsFor(vol)
+		return fs, scheme
+	}
 	// VolumeFor：转存键空间经 volume.ResolveOwnerPath 计算——测试注入与 fsFor 同语义的
 	// 卷元信息（共享/独享、owner 白名单）。fsFor 返回第 3 值 shared。
 	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
@@ -376,11 +381,11 @@ func TestCreateTask_VoidSemantics(t *testing.T) {
 	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
 	// 转存卷 resolver：v → 可解析 FS（前置校验需卷装配 + 协议声明）
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
 		if vol == "v" {
-			return newMemFS(), "secretdata", false
+			return newMemFS(), "secretdata"
 		}
-		return nil, "", false
+		return nil, ""
 	}
 	t.Cleanup(mgr.Close)
 	_, err := mgr.CreateTask("url", "https://example.com/v.mp4", "v.mp4", 100, "", TaskParams{})
@@ -409,11 +414,11 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
 	// 转存卷 resolver：v → 可解析 FS（前置校验需卷装配 + 协议声明）
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
 		if vol == "v" {
-			return newMemFS(), "secretdata", false
+			return newMemFS(), "secretdata"
 		}
-		return nil, "", false
+		return nil, ""
 	}
 	t.Cleanup(mgr.Close)
 	task, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", TaskParams{Save: true})
@@ -462,11 +467,11 @@ func TestCreateTask_TransferVolumePrecheck(t *testing.T) {
 	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
 	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr.Close)
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
 		if vol == "ready" {
-			return newMemFS(), "secretdata", false
+			return newMemFS(), "secretdata"
 		}
-		return nil, "", false // 未装配
+		return nil, "" // 未装配
 	}
 	// 卷未装配 → 创建即拒
 	if _, err := mgr.CreateTask("url", "https://example.com/x.mp4", "x.mp4", 100, "", TaskParams{Transfer: &TransferSpec{Volume: "missing"}}); err == nil {
@@ -967,11 +972,11 @@ func TestTransferFullChain_ResolveURLRoundTrip(t *testing.T) {
 	cfg := &CloudDownloadConfig{SyncThreshold: 20 * 1024 * 1024, MaxConcurrent: 3, TaskTTL: 24 * time.Hour, FailedTaskTTL: 1 * time.Hour, AllowPrivate: true, TransferConcurrency: 2}
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	vaultFS := newMemFS() // 单一实例：转存写入与取用读同一 FS
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
 		if vol == "vault" {
-			return vaultFS, "secretdata", false
+			return vaultFS, "secretdata"
 		}
-		return nil, "", false
+		return nil, ""
 	}
 	// VolumeFor：独享卷（owner 空授权）。
 	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
@@ -1101,8 +1106,8 @@ func TestTransferDone_InternalVolumeQuotaGate(t *testing.T) {
 	}
 	// 装配 transferFSFor：内部卷（LocalVolume true → 走用户配额）。
 	local := &localVolumeFS{inner: newMemFS()}
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) {
-		return local, "secretdata", false
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
+		return local, "secretdata"
 	}
 	t.Cleanup(mgr.Close)
 

@@ -144,6 +144,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// F1 门禁：Volumes[0].Root 占位（defaultStorageRoot）时不按它建根，防存储根静默漂移
 	// 到 ./storage（单卷零回归红线）。失败（目录无法打开 / 布局版本不匹配）是致命装配
 	// 错误：记 Error 并 panic 拒绝启动，绝不静默继续（否则文件服务会在错误的存储根上运行）。
+	warnIfVerifySkipped(cfg, log)
 	vs, err := assembleVolumes(cfg, log)
 	if err != nil {
 		log.Error("卷集合装配失败", "error", err)
