@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -651,20 +652,22 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 直接流式传输文件，不暴露文件路径（root 相对打开，符号链接不逃逸）。
-	f, err := root.Open(link.Rel)
+	// 加密卷走**用户可见**入口（透明解密）并报**明文**长度——raw Open 会把密文原样下发
+	// （评审 P0：分享面静默损坏），密文长度当 Content-Length 还会导致客户端 unexpected EOF。
+	f, err := openUserVisibleRead(root, link.Rel)
 	if err != nil {
 		http.Error(w, "文件读取失败", http.StatusInternalServerError)
 		return
 	}
 	defer f.Close()
 
-	stat, err := f.Stat()
+	size, err := userVisibleSize(root, link.Rel)
 	if err != nil {
 		http.Error(w, "文件状态读取失败", http.StatusInternalServerError)
 		return
 	}
 
-	h.streamShareFile(w, r, token, link, f, stat.Size())
+	h.streamShareFile(w, r, token, link, f, size)
 }
 
 // resolveShareAccess 校验分享链接有效性并消费（Peek → 租户/卷定位 → 文件存在 → Consume）。
@@ -715,7 +718,7 @@ func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, to
 }
 
 // streamShareFile 设置分享响应头并以流式方式传输文件内容（不暴露文件路径）。
-func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token string, link *ShareLink, f *os.File, size int64) {
+func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token string, link *ShareLink, f io.Reader, size int64) {
 	w.Header().Set(headerContentType, contentTypeOctetStream)
 	// 分享只读语义可见（roadmap P2）：仅下载的分享响应带 X-Share-ReadOnly 头。
 	if link.ReadOnly {

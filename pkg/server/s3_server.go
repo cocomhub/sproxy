@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -487,16 +488,16 @@ func (h *Handlers) s3DeleteMetaAfter(r *http.Request, owner string, root *storag
 }
 
 // s3HeadObject 返回对象的元信息头（Content-Length；不存在 404）。
+//
+// 加密卷：长度必须是**明文**长度（LogicalSize）——用密文长度当 Content-Length 会让客户端
+// 读满后 unexpected EOF（用户可见契约：GET 下发的是明文）。
 func (h *Handlers) s3HeadObject(w http.ResponseWriter, root *storage.Root, rel string) {
-	f, herr := root.Open(rel)
-	if herr != nil {
+	size, serr := userVisibleSize(root, rel)
+	if serr != nil {
 		http.Error(w, "s3: 文件不存在", http.StatusNotFound)
 		return
 	}
-	defer f.Close()
-	if st, serr := f.Stat(); serr == nil {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", st.Size()))
-	}
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -504,6 +505,22 @@ func (h *Handlers) s3HeadObject(w http.ResponseWriter, root *storage.Root, rel s
 // P2 对抗评审：S3 网关 GET 与 /download 同口径接本地卷读校验（meta.VerifyReadSeeker
 // 逐分块比对，损坏 fail-closed）——此前直读 storage.Root 绕过校验。
 func (h *Handlers) s3GetObject(w http.ResponseWriter, root *storage.Root, rel string) {
+	// 加密卷：走**用户可见**入口（透明解密）——raw Open 会下发密文（评审 P0：静默损坏）。
+	// 加密卷完整性由卷内 GCM 认证保证，sidecar 逐分块校验不适用（filesMetaPolicy 亦已跳过）。
+	if root.IsEncrypted() {
+		rc, oerr := openUserVisibleRead(root, rel)
+		if oerr != nil {
+			http.Error(w, "s3: 文件不存在", http.StatusNotFound)
+			return
+		}
+		defer func() { _ = rc.Close() }()
+		w.Header().Set(headerContentType, "application/octet-stream")
+		if _, cerr := io.Copy(w, rc); cerr != nil {
+			// 同 /download：io.Copy 回错时响应头已发出，必须中断连接（否则静默截断 200）。
+			panic(http.ErrAbortHandler)
+		}
+		return
+	}
 	f, err := root.Open(rel)
 	if err != nil {
 		http.Error(w, "s3: 文件不存在", http.StatusNotFound)
@@ -536,7 +553,7 @@ func (h *Handlers) s3PutObject(w http.ResponseWriter, root *storage.Root, rel st
 	if dir := path.Dir(rel); dir != "." {
 		_ = root.MkdirAll(dir, 0o755)
 	}
-	f, ferr := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, ferr := writeUserVisible(root, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if ferr != nil {
 		http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
 		return false
