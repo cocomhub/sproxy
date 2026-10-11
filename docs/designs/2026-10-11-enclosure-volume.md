@@ -93,6 +93,20 @@ volumes:
 - 装配期 fail-closed：`source` 未注册/自封装/成环/深度 > 8/同一 `<卷>:<子路径>` 被两个封装卷声明/
   源卷同时 `extra.encrypt`（双重变换）/`wrapper` 未注册 → 报错拒绝启动。
 
+### 4.1 命名空间契约（评审 P1 明确，务必遵守）
+
+- **`extra.source` 的子路径是「卷根相对」**（与 `Location.FSPath()` 的最终键同命名空间）。
+- **客户端可达路径恒为 `<卷根>/<owner>/<bucket>/<rel>`**（所有面——HTTP/DAV/S3/分享——都经
+  租户根寻址，如 `/download` 的 `user/<rel>`）。因此：
+  - 要保护**客户端可达**的封装区间，声明必须写 **`<owner>/<bucket>/<子路径>`**，例如
+    `source: "main:alice/user/vault"`；
+  - 声明 `main:private/vault` 表示封装**卷根专有区间**（客户端不可寻址——任何面都到不了），
+    封印该区间是防御纵深。
+- **封印在卷根按声明原样注入**，并在每个租户子根按**等价翻译**注入：规则首段等于该租户 owner
+  时剥去 `owner/`（`alice/user/vault` → 租户根内 `user/vault`）；不以 owner 开头的规则原样注入
+  （多封无害）。见 `pkg/storage/tenant_resolve.go:translateSealsForTenant`。
+- 首段**不得**是保留功能桶名（`user`/`meta`/…）——否则会封印全体租户的同名桶（装配期拒绝）。
+
 ## 5. 可复用能力层 API（对外只需这四个）
 
 ```go

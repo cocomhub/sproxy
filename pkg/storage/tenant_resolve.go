@@ -126,11 +126,13 @@ func openTenant(parent *Root, owner string, cfg tenantConfig) (*Tenant, error) {
 			return nil, fmt.Errorf("storage: OpenTenant: 租户子根加密态注入失败: %w", serr)
 		}
 	}
-	// 封印传播：源卷的封印规则对**每个租户子根同样适用**——声明的源子路径在卷根命名空间与
-	// 各租户树内同名位置一律禁止直连（租户根是该卷的一个子根，直连租户根 = 直连源存储）。
+	// 封印传播：**卷根命名空间 → 租户子根命名空间的等价翻译**（评审 P1：口径不一致）。
+	// 客户端一律经租户根寻址（`<volumeRoot>/<owner>/user/<rel>`），故卷根规则
+	// `<owner>/user/<x>` 在本租户根内的等价位置是 `user/<x>`（剥去 owner 段）；未以某 owner
+	// 开头的规则属卷根专有区间（客户端不可寻址），原样注入作防御纵深（多封无害）。
 	// 只读透视/写恒拒语义不变（封装卷持特权视图，不受影响）。
 	if seals := parent.Seals(); len(seals) > 0 {
-		if serr := tenantRoot.SetSeals(seals); serr != nil {
+		if serr := tenantRoot.SetSeals(translateSealsForTenant(seals, owner)); serr != nil {
 			cfg.warn("租户子根封印注入失败（fail-closed）", "owner", owner, "error", serr)
 			_ = tenantRoot.Close()
 			return nil, fmt.Errorf("storage: OpenTenant: 租户子根封印注入失败: %w", serr)
@@ -262,4 +264,24 @@ func (c *TenantCache) Close() error {
 		delete(c.cache, owner)
 	}
 	return nil
+}
+
+// translateSealsForTenant 把**卷根命名空间**的封印规则翻译到某租户子根命名空间：
+// 首段与本租户 owner 相同（大小写不敏感）→ 剥去该段；其余原样保留。
+//
+// 例（owner=alice）：`alice/user/vault` → `user/vault`（客户端可达位置被正确封印）；
+// `private/vault` → 原样（卷根专有区间，非客户端可达，多封无害）。
+func translateSealsForTenant(rules []SealRule, owner string) []SealRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]SealRule, 0, len(rules))
+	for _, r := range rules {
+		rr := r
+		if first, rest, ok := strings.Cut(r.Path, "/"); ok && strings.EqualFold(first, owner) {
+			rr.Path = rest
+		}
+		out = append(out, rr)
+	}
+	return out
 }
