@@ -52,6 +52,18 @@ func Guard(inner syncpkg.FS) *MetaBucketGuard {
 // **预留逃生口**：当前无调用（能力已由守卫透传）；保留供受控装配直接触达 inner。
 func (g *MetaBucketGuard) Inner() syncpkg.FS { return g.inner }
 
+// WriteFromStagedPath 转发 staging 路径复用能力（先守卫 relPath 再委托 inner）。
+func (g *MetaBucketGuard) WriteFromStagedPath(ctx context.Context, relPath, stagedPath string, size, mtime int64) error {
+	if err := g.guardPath(relPath); err != nil {
+		return err
+	}
+	sp, ok := g.inner.(syncpkg.StagedPathReuse)
+	if !ok {
+		return fmt.Errorf("trusted: 底层未实现 WriteFromStagedPath: %w", syncpkg.ErrUnsupported)
+	}
+	return sp.WriteFromStagedPath(ctx, relPath, stagedPath, size, mtime)
+}
+
 // guardPath 判定路径是否触达 meta 桶（fail-closed 拒绝）。owner 前缀共享卷经
 // volume.BucketOf 结构识别（首段/次段），用户真实目录 `user/dir/meta/x` 的桶段是
 // user（meta 是用户子目录，放行——用户目录可叫保留名，用户裁定）。
@@ -96,8 +108,6 @@ func (g *MetaBucketGuard) guardPath(p string) error {
 	}
 	return nil
 }
-
-var _ syncpkg.FS = (*MetaBucketGuard)(nil)
 
 // isASCIILetter 报告 b 是否为 ASCII 字母（盘符前缀判定用）。
 func isASCIILetter(b byte) bool {
@@ -304,6 +314,8 @@ func (g *MetaBucketGuard) ExemptStagingQuota() bool {
 
 // 编译期断言：Guard 实现全部能力接口（能力透传契约，防未来新增能力接口后遗漏）。
 var (
+	_ syncpkg.FS                  = (*MetaBucketGuard)(nil)
+	_ syncpkg.StagedPathReuse     = (*MetaBucketGuard)(nil)
 	_ meta.Provider               = (*MetaBucketGuard)(nil)
 	_ MetaExtraUpdater            = (*MetaBucketGuard)(nil)
 	_ syncpkg.StagingQuotaCapable = (*MetaBucketGuard)(nil)

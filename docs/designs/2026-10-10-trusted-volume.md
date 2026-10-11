@@ -316,10 +316,44 @@ TeeReader 非 Seeker 下恒失效）、m9（meta tmp 孤儿仅下次写清扫；
   `S3FS.WriteFile` 注释的前置条件）——可信卷写面读流是 `io.TeeReader`，该配置在其上本就不
   生效，此前只能看到裸 PutObject 错误，运维无法区分「重试已尽力」与「根本没重试」。
 
-**仍未修（下一批）**：M9b（本地备份写面未更新**卷级持久容量计数器**——需先定「本地卷
-durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging 峰值 2×——需 `Storage.Put`
-直接接受 staging 路径，改上传算法）、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/
+**仍未修（下一批）**：M9b（本地备份写面未更新**卷级持久容量计数器**（用户已裁定：按**强一致**处理，下一提交）——需先定「本地卷
+durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging 峰值 2×）**已由 §8.6 的 staging 路径复用机制解决**、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/
 `UpdateMetaExtra` 本地两遍整文件读回，需「stat/末块轻量判据替代整文件回读」的等价性论证）。
+
+### 8.6 本地 staging 路径复用机制（2026-10-11）
+
+**问题**：需要本地暂存的卷（baidupcs）此前落两份——调用方 `staging-*` 一份，卷内部
+`stage-*/<basename>` 又拷一份 → 本地峰值 **2×size**，而 `staging_quota_bytes` 的 gate 只按
+**1×** 预留（保护减半），且与「本地突发占用」的真实峰值不符。
+
+**机制**（`pkg/sync/stagedpath.go`，两条等价协作路径）：
+
+1. **能力接口**（可静态探测）：`StagedPathReuse.WriteFromStagedPath(ctx, relPath, stagedPath,
+   size, mtime)` —— 卷声明「可直接消费调用方已落盘的本地文件」。契约：**只读** stagedPath
+   （不移动/不删除；生命周期归调用方，实现方可能在返回前并发读它）。
+2. **ctx 传递**：调用方经 `WithStagedLocalPath(ctx, path)` 发布已暂存路径，卷侧写面
+   （`StorageFS.WriteFile`）自取复用——适合调用方是通用上传器、不愿引入额外接口分支的场景。
+
+**落地**：
+
+- `baidupcs.Storage.PutFromStagedPath(ctx, key, stagedPath, size)`：从**已存在**的本地文件
+  单遍读算 md5/crc32 + 读回算 sliceMD5/分块 md5 列表（不新建副本），随后走既有
+  「Stat 复核 + ETag 一致才成功」的有界重试主循环（复用语义不变）；
+- `StorageFS.WriteFile`：ctx 有已暂存路径 → **零额外落盘**直接复用；否则本函数落一份
+  `staging-*` 后同样以复用入口上传（不再由 Storage 内部拷第二份）；
+- `prepareStagedForAdapter`：交给 adapter 的本地文件 basename 必须等于目标 basename
+  （CLI 适配器按本地 basename 决定保存名，随机 basename 会 Stat 恒 NotFound）——不一致时用
+  **硬链接**（零字节拷贝，峰值仍 1×）到临时子目录；跨卷/不支持硬链接才回落拷贝（此时才 2×，
+  且仅限 CLI 场景，记 Warn）；
+- 透明装饰器（`TrustedVolumeFS`/`MetaBucketGuard`/`CapacityFS`/`StagingQuotaGateFS`/
+  `PrefixFS`/`davMetaFS`）**逐层转发**该能力并带 R21 编译期断言（新增 `StagedPathReuse`
+  自动进入门禁检查集）；`StagingQuotaGateFS` 的复用路径**不重复预留**（数据已由调用方暂存
+  且已被 gate 按 1× 预留）。
+
+**验证**：`TestStorageFS_WriteFile_ReusesCtxStagedPath`（复用分支零额外落盘 + 只读契约）、
+`TestStorage_PutFromStagedPath_NoPhysicalSecondCopy`（交给 adapter 的路径必须是暂存文件的
+**硬链接**，在 adapter 内用 `os.SameFile` 判定——拷贝版会被 cleanup 删掉，事后扫描看不见）、
+`TestStorageFS_WriteFile_SingleLocalStaging`；变异两处命中（去 ctx 复用分支 / 链接改拷贝）。
 
 ## 9. 验证
 

@@ -794,3 +794,80 @@ func TestStorage_Put_UnreliableMD5RefreshedByRapidUpload(t *testing.T) {
 		t.Fatalf("刷新后应做相等断言并与本地 md5 一致: got %s want %s", m.ETag, md5Hex(content))
 	}
 }
+
+// TestStorage_PutFromStagedPath_NoPhysicalSecondCopy staging 复用入口**只读**调用方文件、
+// 不产生第二份**物理**拷贝（同 inode 的硬链接不算拷贝）：以 os.SameFile 逐文件判定，避免
+// 「按 Size 求和」把硬链接误计为 2×。变异：把 prepareStagedForAdapter 的链接分支改成拷贝
+// → SameFile 为假 → 红。
+func TestStorage_PutFromStagedPath_NoPhysicalSecondCopy(t *testing.T) {
+	t.Parallel()
+	sink := &recordingUploadPathAdapter{inner: newFakeStorageAdapter()}
+	s := newTestStorage(t, sink)
+	content := strings.Repeat("staged-reuse-body-", 64)
+	staged := filepath.Join(s.temp, "already-staged.bin")
+	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sink.linkSource = staged
+	if _, err := s.PutFromStagedPath(context.Background(), "reuse.bin", staged, int64(len(content))); err != nil {
+		t.Fatalf("PutFromStagedPath: %v", err)
+	}
+	stagedInfo, serr := os.Stat(staged)
+	if serr != nil {
+		t.Fatalf("调用方暂存文件不得被删除/移动（只读契约）: %v", serr)
+	}
+	// 上传播径必须是暂存文件的**硬链接**（同 inode）：在 adapter 内（链接仍在时）判定——
+	// 拷贝版会在 PutFromStagedPath 返回前被 cleanup 删掉，事后扫描看不见。
+	if !sink.sameFile {
+		t.Fatalf("交给 adapter 的本地路径必须是暂存文件的硬链接（不得为拷贝）: %s", sink.uploadedPath)
+	}
+	_ = filepath.WalkDir(s.temp, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || p == staged {
+			return nil
+		}
+		fi, ferr := d.Info()
+		if ferr != nil {
+			return nil
+		}
+		if !os.SameFile(stagedInfo, fi) {
+			t.Fatalf("不得出现第二份物理拷贝（staging 复用应链接而非复制）: %s", p)
+		}
+		return nil
+	})
+}
+
+// recordingUploadPathAdapter 记录 adapter.Upload 收到的本地路径（断言「硬链接而非拷贝」）。
+type recordingUploadPathAdapter struct {
+	inner        *fakeStorageAdapter
+	uploadedPath string
+	linkSource   string
+	sameFile     bool
+}
+
+func (a *recordingUploadPathAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	a.uploadedPath = localPath
+	if a.linkSource != "" {
+		si, e1 := os.Stat(a.linkSource)
+		fi, e2 := os.Stat(localPath)
+		a.sameFile = e1 == nil && e2 == nil && os.SameFile(si, fi)
+	}
+	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (a *recordingUploadPathAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return a.inner.Download(ctx, remotePath, localPath)
+}
+func (a *recordingUploadPathAdapter) Move(ctx context.Context, from, to string) error {
+	return a.inner.Move(ctx, from, to)
+}
+func (a *recordingUploadPathAdapter) Copy(ctx context.Context, from, to string) error {
+	return a.inner.Copy(ctx, from, to)
+}
+func (a *recordingUploadPathAdapter) Delete(ctx context.Context, remotePath string) error {
+	return a.inner.Delete(ctx, remotePath)
+}
+func (a *recordingUploadPathAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.inner.List(ctx, remotePath)
+}
+func (a *recordingUploadPathAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	return a.inner.Meta(ctx, remotePath)
+}

@@ -57,6 +57,9 @@ type StorageAPI interface {
 	// Move 服务端移动（sync.Mover 能力；零流量）。服务端不可用返回 ErrUnsupported，
 	// 调用方（StorageFS.Rename）回退 Copy+Delete。
 	Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error)
+	// PutFromStagedPath 复用**调用方已暂存**的本地文件路径上传（本地 staging 路径复用：
+	// 不再拷第二份；只读 stagedPath，生命周期由调用方负责）。
+	PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64) (*ObjectMeta, error)
 }
 
 // NewStorageFS 构造 StorageFS 适配层。temp 为本地中间态目录（默认 os.TempDir()）。
@@ -74,6 +77,21 @@ func NewStorageFS(s StorageAPI, temp string) (*StorageFS, error) {
 }
 
 var _ syncpkg.FS = (*StorageFS)(nil)
+var _ syncpkg.StagedPathReuse = (*StorageFS)(nil)
+
+// WriteFromStagedPath 实现 syncpkg.StagedPathReuse：把调用方已暂存的本地文件直接上传
+// （**零额外落盘**；契约：只读 stagedPath，生命周期由调用方负责）。
+func (f *StorageFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath string, size, mtime int64) error {
+	clean, err := f.validatePath(relPath)
+	if err != nil {
+		return err
+	}
+	if _, perr := f.s.PutFromStagedPath(ctx, clean, stagedPath, size); perr != nil {
+		return mapPCSError(perr)
+	}
+	_ = mtime // 百度 API 无直接 Chtimes（与 WriteFile 同口径）
+	return nil
+}
 
 // ListDir 列出目录单层条目（目录+文件混合，不递归）。
 // 底层 Storage.List 是库真目录列举（FilesDirectoriesList 单层语义）；
@@ -129,23 +147,41 @@ func (f *StorageFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser
 // WriteFile 把流写入网盘：先落本地 staging 临时文件，再经 Storage.Put 上传。
 // 中间态只依赖本地 FS（用户硬规则）；mtime 保留到远端元数据。
 // quota：装配了 QuotaTracker 时，staging 写入预留 size，Put 成功释放，失败归还。
+// validatePath 归一并校验卷内相对路径（逐段拒绝空/`.`/`..`；前导斜杠剥离）。
+// 抽为方法：WriteFile 与 WriteFromStagedPath（staging 复用入口）共用同一口径。
+func (f *StorageFS) validatePath(relPath string) (string, error) {
+	clean := strings.TrimPrefix(relPath, "/")
+	if clean == "" {
+		return "", fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
+	}
+	for seg := range strings.SplitSeq(clean, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
+		}
+	}
+	return clean, nil
+}
+
 func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	clean := strings.TrimPrefix(relPath, "/")
-	// m8 修复（第 7 轮 MINOR）：此前只拒**前缀** `../`，中段（`docs/../../etc`）或
-	// 单段 `..` 漏判 → 原样透传给远端 API（可能跨目录）。改为**逐段**拒绝 `..`/空段。
-	if clean == "" {
-		return fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
-	}
-	for seg := range strings.SplitSeq(clean, "/") {
-		if seg == "" || seg == "." || seg == ".." {
-			return fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
-		}
+	clean, err := f.validatePath(relPath)
+	if err != nil {
+		return err
 	}
 	// 本地 staging 配额由外层 per-request `syncpkg.StagingQuotaGateFS` 预留/释放
-	// （不再由本共享单例记账——避免 per-owner 覆盖）。此处只落 staging + 上传。
+	// （不再由本共享单例记账——避免 per-owner 覆盖）。
+	// **staging 路径复用（用户裁定）**：调用方已把本地暂存文件路径放入 ctx
+	// （`syncpkg.WithStagedLocalPath`）→ 直接交给 Storage 复用（**零额外落盘**，本地峰值
+	// 1×size，与配额 1× 预留口径一致）；否则本函数落一份 staging 后同样以「路径复用」入口
+	// 上传（不再由 Storage 内部拷第二份）。
+	if staged, ok := syncpkg.StagedLocalPathFrom(ctx); ok {
+		if _, perr := f.s.PutFromStagedPath(ctx, clean, staged, size); perr != nil {
+			return mapPCSError(perr)
+		}
+		return nil
+	}
 	// 1. 落本地 staging（受 ctx 约束的流式拷贝）。
 	tmp, err := os.CreateTemp(f.temp, "staging-*")
 	if err != nil {
@@ -160,13 +196,9 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 	if closeErr := tmp.Close(); closeErr != nil {
 		return closeErr
 	}
-	// 2. 上传网盘（Put 内部有界重试）。staging 文件句柄由本函数关闭（Put 不接管 r 的 Close）。
-	staging, openErr := os.Open(tmpPath)
-	if openErr != nil {
-		return openErr
-	}
-	meta, err := f.s.Put(ctx, clean, staging)
-	_ = staging.Close()
+	// 2. 上传网盘（Storage 内部有界重试 + ETag 复核）。**以 staging 路径复用入口上传**：
+	// Storage 不再拷第二份（此前 staging-* + stage-*/basename 两份并存 = 峰值 2×size）。
+	meta, err := f.s.PutFromStagedPath(ctx, clean, tmpPath, size)
 	if err != nil {
 		return mapPCSError(err)
 	}

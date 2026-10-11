@@ -130,6 +130,15 @@ func (p *PrefixFS) MakeDir(ctx context.Context, path string) error {
 	return p.FS.MakeDir(ctx, p.Key(path))
 }
 
+// WriteFromStagedPath 转发 staging 路径复用（relPath 走本层键映射；stagedPath 原样透传）。
+func (p *PrefixFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath string, size, mtime int64) error {
+	sp, ok := p.FS.(StagedPathReuse)
+	if !ok {
+		return fmt.Errorf("PrefixFS: 底层未实现 WriteFromStagedPath: %w", ErrUnsupported)
+	}
+	return sp.WriteFromStagedPath(ctx, p.Key(relPath), stagedPath, size, mtime)
+}
+
 // Move 转发同卷移动（两端加前缀）；底层未实现 → ErrUnsupported。
 func (p *PrefixFS) Move(ctx context.Context, from, to string) error {
 	m, ok := p.FS.(Mover)
@@ -256,5 +265,6 @@ var (
 	_ StagingQuotaCapable = (*PrefixFS)(nil)
 	_ StagingQuotaExempt  = (*PrefixFS)(nil)
 	_ meta.Provider       = (*PrefixFS)(nil)
+	_ StagedPathReuse     = (*PrefixFS)(nil)
 	// BlockAccessor 有意豁免（见文件头注释）。
 )

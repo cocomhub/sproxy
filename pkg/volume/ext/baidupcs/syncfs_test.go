@@ -6,6 +6,9 @@ package baidupcs
 import (
 	"context"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -202,5 +205,73 @@ func TestStorageFS_WriteFile_RejectsTraversalSegments(t *testing.T) {
 	// 合法路径不受影响。
 	if err := fs.WriteFile(ctx, "docs/a.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("合法路径不应被拒: %v", err)
+	}
+}
+
+// countFiles 统计目录下文件数与总字节（断言「本地峰值」用）。
+func countFiles(t *testing.T, dir string) (int, int64) {
+	t.Helper()
+	var n int
+	var size int64
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		n++
+		if fi, ferr := d.Info(); ferr == nil {
+			size += fi.Size()
+		}
+		return nil
+	})
+	return n, size
+}
+
+// TestStorageFS_WriteFile_ReusesCtxStagedPath staging 路径复用（ctx 传递）：调用方已暂存
+// （WithStagedLocalPath）时卷侧**零额外落盘**（不复拷第二份），且**只读**该文件（调用方
+// 生命周期不受影响）。变异：忽略 ctx 复用分支 → 多出 staging-* 文件 → 红。
+func TestStorageFS_WriteFile_ReusesCtxStagedPath(t *testing.T) {
+	t.Parallel()
+	st := newFakeStorage()
+	fs := &StorageFS{s: st, temp: t.TempDir()}
+	stagedDir := t.TempDir()
+	staged := filepath.Join(stagedDir, "already-staged.bin")
+	content := []byte("reuse-me")
+	if err := os.WriteFile(staged, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := syncpkg.WithStagedLocalPath(context.Background(), staged)
+	// 传入的 reader 在复用分支必须**不被消费**（staging 已完成）。
+	if err := fs.WriteFile(ctx, "docs/a.bin", strings.NewReader("SHOULD-NOT-BE-USED"), int64(len(content)), 0); err != nil {
+		t.Fatalf("WriteFile(复用): %v", err)
+	}
+	if got := st.files["docs/a.bin"].data; string(got) != string(content) {
+		t.Fatalf("复用上传内容应为暂存文件内容, got %q", got)
+	}
+	if n, _ := countFiles(t, fs.temp); n != 0 {
+		t.Fatalf("复用分支不得在卷 staging 目录落任何文件（零额外落盘）, got %d", n)
+	}
+	if b, rerr := os.ReadFile(staged); rerr != nil || string(b) != string(content) {
+		t.Fatalf("暂存文件必须只读（调用方生命周期不受影响）: %q err=%v", b, rerr)
+	}
+}
+
+// TestStorageFS_WriteFile_SingleLocalStaging 非复用路径只落**一份**本地 staging
+// （staging-*），不再由 Storage 内部另拷 stage-*/<basename>（此前峰值 2×size，而 staging
+// 配额只按 1× 预留）。变异：改回 f.s.Put(...)（fake 不落盘，但真 Storage 会拷第二份）
+// —— 本用例以 fake 记账「调用方 staging 数量」，配合 storage_test 的字节断言双向覆盖。
+func TestStorageFS_WriteFile_SingleLocalStaging(t *testing.T) {
+	t.Parallel()
+	st := newFakeStorage()
+	fs := &StorageFS{s: st, temp: t.TempDir()}
+	content := strings.Repeat("single-stage-", 64)
+	if err := fs.WriteFile(context.Background(), "docs/b.bin", strings.NewReader(content), int64(len(content)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if got := string(st.files["docs/b.bin"].data); got != content {
+		t.Fatal("内容不一致")
+	}
+	// staging 目录在成功返回后应已清空（defer remove），且过程中只有一份。
+	if n, _ := countFiles(t, fs.temp); n != 0 {
+		t.Fatalf("成功返回后 staging 应清理干净, got %d", n)
 	}
 }

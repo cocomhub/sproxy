@@ -139,11 +139,115 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 	}
 	defer os.RemoveAll(filepath.Dir(st.tmpPath)) // 清理独立临时子目录（含 tmp 文件）
 
+	return s.putStaged(ctx, key, st)
+}
+
+// PutFromStagedPath 把**调用方已暂存**的本地文件上传为 key（本地 staging 路径复用：
+// 不再拷第二份——本地峰值 1×size，与 staging 配额 1× 预留口径一致）。
+// 契约：**只读** stagedPath（不移动/不删除；生命周期由调用方负责）。
+// size<=0 = 未知，按 Stat 实测。
+func (s *Storage) PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64) (*ObjectMeta, error) {
+	prepared, cleanup, perr := s.prepareStagedForAdapter(stagedPath, key)
+	if perr != nil {
+		return nil, perr
+	}
+	defer cleanup()
+	st, err := s.stageUploadFromPath(ctx, prepared, key, size)
+	if err != nil {
+		return nil, err
+	}
+	st.tmpPath = prepared
+	return s.putStaged(ctx, key, st)
+}
+
+// prepareStagedForAdapter 保证交给 adapter 的本地文件 basename == 目标 basename：
+// CLI 适配器（BaiduPCS-Go upload <local> <remoteDir>）按**本地 basename** 决定保存名，
+// 复用调用方暂存路径（basename 随机，如 `staging-123456`）会保存成错误文件名 → Stat 恒
+// NotFound → 复核失败。basename 已一致 → 原路径直用；否则**硬链接**（零字节拷贝，峰值
+// 仍 1×）到临时子目录的正确命名；链接不可用（跨卷/不支持）→ 回落拷贝（此时才 2×，且仅
+// 限 CLI 场景）。返回的 cleanup 只清理 link 子目录，**绝不删调用方文件**。
+func (s *Storage) prepareStagedForAdapter(stagedPath, key string) (string, func(), error) {
+	wantBase := filepath.Base(key)
+	if filepath.Base(stagedPath) == wantBase {
+		return stagedPath, func() {}, nil
+	}
+	sub, mkErr := os.MkdirTemp(s.temp, "link-*")
+	if mkErr != nil {
+		return "", nil, mkErr
+	}
+	cleanup := func() { os.RemoveAll(sub) }
+	linked := filepath.Join(sub, wantBase)
+	if linkErr := os.Link(stagedPath, linked); linkErr == nil {
+		return linked, cleanup, nil
+	}
+	// 跨卷/文件系统不支持硬链接：回落拷贝（保持可用性；本地峰值此时为 2×）。
+	src, oerr := os.Open(stagedPath)
+	if oerr != nil {
+		cleanup()
+		return "", nil, oerr
+	}
+	defer src.Close()
+	dst, cerr := os.OpenFile(linked, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if cerr != nil {
+		cleanup()
+		return "", nil, cerr
+	}
+	if _, copyErr := io.Copy(dst, src); copyErr != nil {
+		_ = dst.Close()
+		cleanup()
+		return "", nil, copyErr
+	}
+	if closeErr := dst.Close(); closeErr != nil {
+		cleanup()
+		return "", nil, closeErr
+	}
+	s.log.Warn("staging 复用：跨卷无法硬链接，回落拷贝（本地峰值 2×）",
+		"staged", stagedPath, "target", wantBase)
+	return linked, cleanup, nil
+}
+
+// putStaged 远端路径解析 + 有界重试主循环（Put 与 PutFromStagedPath 共用）。
+func (s *Storage) putStaged(ctx context.Context, key string, st *stagedUpload) (*ObjectMeta, error) {
 	remote, err := s.remotePath(key)
 	if err != nil {
 		return nil, err
 	}
 	return s.putRetryLoop(ctx, key, remote, st)
+}
+
+// stageUploadFromPath 从**已存在的本地文件**构造 stagedUpload（单遍读该文件算
+// md5/crc32，再读回算 sliceMD5/分块 md5 列表）——不新建副本。
+func (s *Storage) stageUploadFromPath(ctx context.Context, path, key string, size int64) (*stagedUpload, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, mapPCSError(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	md5h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传/ETag），非安全用途
+	crc := crc32.NewIEEE()
+	actual, copyErr := copyCtx(ctx, io.MultiWriter(md5h, crc), f)
+	if copyErr != nil {
+		return nil, copyErr
+	}
+	if size > 0 && actual != size {
+		// 声明大小仅作提示：可信卷写路径已有「声明失真自愈」语义（按实写重算），此处按实测
+		// actual 继续（不因此拒绝——否则调用方声明偏小/偏大都会让上传失败）。
+		s.log.Warn("staging 复用：声明大小与实测不一致，按实测继续",
+			"declared", size, "actual", actual, "path", path)
+	}
+	st := &stagedUpload{
+		tmpPath: path,
+		md5:     hex.EncodeToString(md5h.Sum(nil)),
+		crc32:   strconv.FormatUint(uint64(crc.Sum32()), 10),
+		size:    actual,
+	}
+	if err := s.fillStagedLists(st); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 // putRetryLoop 有界重试主循环（cocom 对齐）：每轮先 Stat（秒传命中直接返回）→ 未命中
@@ -445,6 +549,21 @@ func (s *Storage) stageUpload(ctx context.Context, r io.Reader, key string) (*st
 		size:      size,
 		blockMD5s: blockMD5s,
 	}, nil
+}
+
+// fillStagedLists 计算 sliceMD5（前 256KB）与分块 md5 列表（按 uploadBlockSize 读回 tmp）。
+func (s *Storage) fillStagedLists(st *stagedUpload) error {
+	sliceMD5, slErr := sliceMD5Of(st.tmpPath)
+	if slErr != nil {
+		return slErr
+	}
+	blockMD5s, blErr := blockMD5ListOf(st.tmpPath, st.size)
+	if blErr != nil {
+		return blErr
+	}
+	st.sliceMD5 = sliceMD5
+	st.blockMD5s = blockMD5s
+	return nil
 }
 
 // blockMD5ListOf 按 uploadBlockSize（4MiB，与上传分块一致）读回文件逐块计算 md5 列表。

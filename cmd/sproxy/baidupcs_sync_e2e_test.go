@@ -73,6 +73,21 @@ func (f *fakeBaidupcsE2EStorage) markDirs(key string) {
 	f.dirs["/"] = struct{}{}
 }
 
+// PutFromStagedPath 实现 baidupcs.StorageAPI（staging 路径复用）：读暂存文件入内存，
+// 不删/不改调用方文件。
+func (f *fakeBaidupcsE2EStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64) (*baidupcs.ObjectMeta, error) {
+	data, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	f.files[key] = data
+	f.mu.Unlock()
+	// markDirs 自持 f.mu：必须在释放之后调用（否则自死锁 → 同步任务永久卡 syncing）。
+	f.markDirs(key) // 与 Put 同语义：父路径目录标记（SyncFS.ListDir 依赖）
+	return &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
+}
+
 func (f *fakeBaidupcsE2EStorage) Put(ctx context.Context, key string, r io.Reader) (*baidupcs.ObjectMeta, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {

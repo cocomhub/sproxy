@@ -87,8 +87,6 @@ func WrapStagingQuota(fs FS, q StagingQuotaTracker) *StagingQuotaGateFS {
 	return &StagingQuotaGateFS{inner: fs, quota: q}
 }
 
-var _ FS = (*StagingQuotaGateFS)(nil)
-
 // Inner 返回底层 FS（透明装饰器标记：使 Innermost/Wrap 能下探，避免把本转发层误判为
 // 「卷自带 meta/能力」——P0 同源缺陷的纵深防御）。
 func (g *StagingQuotaGateFS) Inner() FS { return g.inner }
@@ -155,6 +153,16 @@ func (g *StagingQuotaGateFS) IsLocalVolume() bool {
 		return lv.IsLocalVolume()
 	}
 	return false
+}
+
+// WriteFromStagedPath 委托 inner（staging 复用路径不额外预留：数据由调用方暂存且已被 gate
+// 按 1× 预留，再预留会双计。未实现 → ErrUnsupported）。
+func (g *StagingQuotaGateFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath string, size, mtime int64) error {
+	sp, ok := g.inner.(StagedPathReuse)
+	if !ok {
+		return fmt.Errorf("sync: 底层未实现 WriteFromStagedPath: %w", ErrUnsupported)
+	}
+	return sp.WriteFromStagedPath(ctx, relPath, stagedPath, size, mtime)
 }
 
 // Move 委托 inner（inner 未实现 → ErrUnsupported）。
@@ -233,6 +241,8 @@ func (g *StagingQuotaGateFS) ExemptStagingQuota() bool {
 
 // 编译期断言：gate 实现全部能力接口（能力透传契约，防未来新增能力接口后遗漏）。
 var (
+	_ FS                  = (*StagingQuotaGateFS)(nil)
+	_ StagedPathReuse     = (*StagingQuotaGateFS)(nil)
 	_ WriteIfAbsent       = (*StagingQuotaGateFS)(nil)
 	_ ReserveSpace        = (*StagingQuotaGateFS)(nil)
 	_ LocalVolume         = (*StagingQuotaGateFS)(nil)
