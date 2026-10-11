@@ -8,9 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -33,8 +35,46 @@ const (
 // 防 PikPak 收紧限制/边界波动导致 416）。
 const hybridShareRatioMax = 0.5
 
-// defaultHybridChunkSize 是分片大小（默认 64MB，平衡并发与恢复粒度）。
-const defaultHybridChunkSize = 32 << 20 // 32MiB（分片更细，中断恢复粒度更小；与 pikget 对齐）
+// defaultHybridChunkSize 是分片大小（默认 32MiB：分片更细 → 中断恢复粒度更小，与 pikget 对齐）。
+const defaultHybridChunkSize = 32 << 20 // 32MiB
+
+// hybridWorkingSuffix 是下载期临时文件后缀（全部分片完成且权威校验通过后才 rename 到 destPath）。
+const hybridWorkingSuffix = ".hybrid.downloading"
+
+// hybridManifestSuffix 是进度文件（manifest）后缀。
+const hybridManifestSuffix = ".hybrid"
+
+// hybridStaleSuffix 是失效 manifest 的归档后缀（源身份不一致/工作文件缺失时归到此，保留证据）。
+const hybridStaleSuffix = ".hybrid.stale"
+
+// hybridChunkAttempts 是单分片总尝试次数（取链与下载共用；**取链失败同样退避重试**——
+// 2026-10-11 实测：单次 FETCH 取链 TLS 握手超时曾让 1.3GB 任务整单失败）。
+const hybridChunkAttempts = 3
+
+// defaultChunkRetryBackoff 是分片重试退避基数（指数 + 抖动）。
+const defaultChunkRetryBackoff = 500 * time.Millisecond
+
+// WorkingPath 返回下载期临时文件路径（分片 WriteAt 目标；全部分片完成且权威校验通过后才 rename 到 destPath）。
+func WorkingPath(destPath string) string { return destPath + hybridWorkingSuffix }
+
+// StaleManifestPath 返回失效 manifest 的归档路径（保留进度证据，rebuild 修复命令可参考）。
+func StaleManifestPath(destPath string) string { return destPath + hybridStaleSuffix }
+
+// ChunkError 是分片级失败（带 offset/length）——CLI 据此提示「缺哪一片/可续传」，
+// 不再只给一句网络错误。
+type ChunkError struct {
+	Offset int64 // 分片起始偏移
+	Length int64 // 分片长度
+	Err    error // 底层错误（errors.Is/As 可追溯 ctx/网络哨兵）
+}
+
+// Error 实现 error（含偏移与底层原因）。
+func (e *ChunkError) Error() string {
+	return fmt.Sprintf("hybrid chunk @%d+%d: %v", e.Offset, e.Length, e.Err)
+}
+
+// Unwrap 暴露底层错误（ctx 取消/网络错误/业务哨兵可被 errors.Is/As 识别）。
+func (e *ChunkError) Unwrap() error { return e.Err }
 
 // HybridMetrics 是混合下载指标（并入 CloudMetrics）。
 type HybridMetrics struct {
@@ -77,6 +117,8 @@ type HybridConfig struct {
 	AutoDelete  bool    // 完成后永久删转存（释放 6GB 空间）
 	Logger      *slog.Logger
 	Metrics     *HybridMetrics
+	// ChunkRetryBackoff 是分片取链/下载失败的重试退避基数（指数 + 抖动）；<=0 → 默认 500ms。
+	ChunkRetryBackoff time.Duration
 	// ChunkProgress 是 per-chunk 进度回调（nil = 不回调）。pikget 用它逐行显示每个分片
 	// （编号/来源链/状态/进度/速率）。下载开始前会为每个 chunk 发一次 pending 事件。
 	ChunkProgress ChunkProgressFunc
@@ -111,6 +153,7 @@ type HybridDownloader struct {
 	acctSemMu     sync.Mutex                 // 保护 acctSems
 	gcidStats     *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
 	fallback      downloader.Downloader      // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
+	chunkBackoff  time.Duration              // 分片重试退避基数（0 = 默认；见 chunkRetryDelay）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
@@ -130,6 +173,7 @@ type downloadCtx struct {
 	// 单次下载不变上下文（Sonar S107 收敛，2026-10-05）：shareID/target/destPath/prog/
 	// onProgress 本是下载期常量，从函数签名收进 dc——函数签名降回 ≤7 参数。
 	shareID    string
+	sourceURL  string // 原始分享 URL（供 manifest 记录，CLI 恢复用）
 	shareToken string // /s/<id>/<token> 的子路径 token（round-11：RefreshLink 重取需带 token，
 	// 否则 token 分享中途重试 shareDetail 缺 token → 降级）
 	target *ShareFile
@@ -195,6 +239,7 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 		log: log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
 		chunkProgress: cfg.ChunkProgress,
 		gcidStats:     cfg.GCIDStats,
+		chunkBackoff:  cfg.ChunkRetryBackoff,
 		acctSems:      make(map[string]chan struct{}),
 	}, nil
 }
@@ -264,7 +309,7 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	// ②-⑥ 分片规划/预分配/并行下载/校验/删除
 	dc := &downloadCtx{
 		currentTotal: total, lease: NewRestoreLease(d.api, d.pool, d.autoDelete, d.log),
-		shareID: shareID, target: target, destPath: destPath, onProgress: onProgress,
+		shareID: shareID, sourceURL: source, target: target, destPath: destPath, onProgress: onProgress,
 		chunkProgress: d.chunkProgress,
 		accounted:     make(map[string]string),
 	}
@@ -348,7 +393,7 @@ func (d *HybridDownloader) verifyHybridGCID(ctx context.Context, dc *downloadCtx
 	}
 	if !matched {
 		dc.lease.Release(ctx) // G4：校验失败也清理转存副本（AutoDelete 语义）
-		return false, fmt.Errorf("hybrid integrity check failed: file gcid != target %s", dc.target.Hash)
+		return false, fmt.Errorf("hybrid integrity check failed: %w (file gcid != target %s)", ErrIntegrityMismatch, dc.target.Hash)
 	}
 	d.log.Info("hybrid integrity verified (gcid match)")
 	return true, nil
@@ -359,15 +404,12 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	// 写盘目标：临时文件 destPath + ".hybrid.downloading"（分片 WriteAt 全落这里，
 	// 完成并校验通过后才 rename 到最终 destPath）。manifest 随临时文件（destPath+".hybrid"
 	// 不变——源身份/恢复逻辑零改动）。
-	dc.working = dc.destPath + ".hybrid.downloading"
+	dc.working = WorkingPath(dc.destPath)
 	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
 	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
 	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
 	shareEnd := d.computeShareEnd(ctx, dc.target, dc.currentTotal)
 	d.log.Info("hybrid plan", "total", dc.currentTotal, "share_end", shareEnd, "chunk", d.chunkSize)
-	if err := preallocate(dc.working, dc.currentTotal); err != nil {
-		return nil, fmt.Errorf("hybrid preallocate: %w", err)
-	}
 	chunks := planChunks(0, dc.currentTotal, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
 	dc.chunkOffsets = make([]int64, 0, len(chunks))
@@ -375,16 +417,21 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	for _, c := range chunks {
 		dc.chunkOffsets = append(dc.chunkOffsets, c.offset)
 	}
-	// 崩溃恢复：读 manifest（源身份一致校验），缺失则创建空 manifest（两文件配套），
-	// 续传进度基准预置 prog。抽 helper 控制认知复杂度。
+	// 崩溃恢复：读 manifest（源身份 + 工作文件一致性 + 零尾扫描），缺失则创建空 manifest
+	// （两文件配套），续传进度基准预置 prog。抽 helper 控制认知复杂度。
+	// **必须在 preallocate 之前**：预分配会让「工作文件存在且大小=total」恒真——先分配再校验，
+	// 「成品已改名 + manifest 残留」这类异常状态会通过校验 → 跳过全部缺失分片 →
+	// 产出大小正确但内容残缺的文件（静默损坏）。
 	manifest := d.prepareManifest(dc, shareEnd)
+	if err := preallocate(dc.working, dc.currentTotal); err != nil {
+		return nil, fmt.Errorf("hybrid preallocate: %w", err)
+	}
 	if err := d.runChunks(ctx, dc, chunks, shareEnd, manifest); err != nil {
 		// G4：失败路径也清理已转存副本（AutoDelete 语义——失败任务不留 6GB 空间占用）。
 		dc.lease.Release(ctx)
 		return nil, err
 	}
 	d.log.Info("hybrid chunks done")
-	removeManifest(dc.destPath)
 	checksum, err := sha256File(dc.working)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid hash: %w", err)
@@ -400,6 +447,8 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	if err := os.Rename(dc.working, dc.destPath); err != nil {
 		return nil, fmt.Errorf("hybrid finalize rename: %w", err)
 	}
+	// 定稿后才清 manifest（此前在 verify 之前删 → 校验失败即丢续传信息，重跑只能全量重下）。
+	removeManifest(dc.destPath)
 	// sink 记账：sinkFactory 非空时把已落盘文件重放进 sink（配额语义）。
 	if sinkFactory != nil {
 		if serr := d.hybridSinkReplay(ctx, dc, sinkFactory); serr != nil {
@@ -434,21 +483,28 @@ func (d *HybridDownloader) runChunks(ctx context.Context, dc *downloadCtx, chunk
 		mu       sync.Mutex
 		firstErr error
 	)
+	// fail-fast：首个分片失败即取消其余分片——不再白耗带宽/账号配额，也避免「部分分片继续写盘
+	// 但任务已注定失败」；已下分片仍在 manifest（可续传）。
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	chunks = filterChunks(chunks, manifest) // 崩溃恢复：跳过已完成
-	// 每个未完成 chunk 先发 pending 事件（per-chunk 回调，pikget 注册所有分片行）。
-	// 索引用 dc.chunkIndex(offset)（全量编号），与 downloadOneChunk 一致。
-	if dc.chunkProgress != nil {
-		for _, c := range chunks {
-			dc.chunkProgress(ChunkInfo{
-				Index: dc.chunkIndex(c.offset), Offset: c.offset, Length: c.length,
-				Source: d.chunkSource(dc, c), Phase: "pending", Done: 0, Total: c.length,
-			})
-		}
-	}
+	d.emitPendingChunks(dc, chunks)         // per-chunk pending 事件（进度条先行注册行）
 	// **每 source 单 worker 并发**（用户明示）：同一 source（share 匿名直链/单账号直链）
 	// 内部限速（CDN/账号级），并发无叠加收益；**不同 source 之间真正并行**。
 	// 实现：share 源 sem(1) + acct 源 sem(1)（单账号/未细分账号）；多账号时
 	// downloadAccountChunkMulti 内再按账号 Select 后 per-account 串行（不同账号并发）。
+	// 首个错误记录 + fail-fast 取消（闭包抽离，降认知复杂度）。
+	recordErr := func(c chunk, cerr error) {
+		mu.Lock()
+		first := firstErr == nil
+		if first {
+			firstErr = &ChunkError{Offset: c.offset, Length: c.length, Err: cerr}
+		}
+		mu.Unlock()
+		if first {
+			cancel() // 首个失败即取消其余分片（不再白耗带宽/配额）
+		}
+	}
 	shareSem := make(chan struct{}, 1)
 	acctSem := make(chan struct{}, 1)
 	// **先 spawn 全部 goroutine**，各自在 goroutine 内 acquire 对应池——循环内同步
@@ -462,21 +518,46 @@ func (d *HybridDownloader) runChunks(ctx context.Context, dc *downloadCtx, chunk
 		}
 		go func(c chunk, sem chan struct{}) {
 			defer wg.Done()
-			sem <- struct{}{} // goroutine 内 acquire（不阻塞 spawn 循环）
-			defer func() { <-sem }()
-			cerr := d.downloadOneChunk(ctx, dc, c, shareEnd)
-			if cerr != nil {
-				d.metricsInc(func(m *HybridMetrics) { m.AccountSegmentFailed.Add(1) })
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = cerr
-				}
-				mu.Unlock()
-			}
+			d.runChunkWithSem(cctx, dc, c, shareEnd, sem, recordErr)
 		}(c, sem)
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// emitPendingChunks 为待下载分片发 pending 事件（per-chunk 回调；pikget 据此注册所有分片行）。
+func (d *HybridDownloader) emitPendingChunks(dc *downloadCtx, chunks []chunk) {
+	if dc.chunkProgress == nil {
+		return
+	}
+	for _, c := range chunks {
+		dc.chunkProgress(ChunkInfo{
+			Index: dc.chunkIndex(c.offset), Offset: c.offset, Length: c.length,
+			Source: d.chunkSource(dc, c), Phase: "pending", Done: 0, Total: c.length,
+		})
+	}
+}
+
+// runChunkWithSem 在并发槽内下载单个分片：取槽（响应 fail-fast 取消）→ 下载 → 错误上报。
+func (d *HybridDownloader) runChunkWithSem(cctx context.Context, dc *downloadCtx, c chunk, shareEnd int64, sem chan struct{}, onErr func(chunk, error)) {
+	if !acquireOrDone(cctx, sem) {
+		return // fail-fast 已取消：未开始的分片直接跳过（不发事件）
+	}
+	defer func() { <-sem }()
+	if cerr := d.downloadOneChunk(cctx, dc, c, shareEnd); cerr != nil {
+		d.metricsInc(func(m *HybridMetrics) { m.AccountSegmentFailed.Add(1) })
+		onErr(c, cerr)
+	}
+}
+
+// acquireOrDone 获取并发槽；ctx 结束时返回 false（fail-fast 后未开始的分片直接跳过）。
+func acquireOrDone(ctx context.Context, sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // downloadOneChunk 单个 chunk：分享区（含降级）或账号区。
@@ -495,13 +576,17 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx
 			cerr = d.downloadAccountChunk(ctx, dc, c)
 		}
 	}
-	if cerr == nil {
+	switch {
+	case cerr == nil:
 		// 完成：写 manifest（崩溃恢复跳过；记录源身份）。
 		d.markChunkDone(dc, c, manifestSource{
-			ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size,
+			ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size, URL: dc.sourceURL,
 		})
 		d.chunkPhase(dc, idx, c, "done", c.length, nil)
-	} else {
+	case ctx.Err() != nil:
+		// fail-fast 取消的兄弟分片：区别于真失败（进度条显示 cancelled，不误报 failed）。
+		d.chunkPhase(dc, idx, c, "cancelled", 0, cerr)
+	default:
 		d.chunkPhase(dc, idx, c, "failed", 0, cerr)
 	}
 	return cerr
@@ -620,22 +705,34 @@ func (d *HybridDownloader) downloadAccountChunk(ctx context.Context, dc *downloa
 	if d.pool != nil && len(d.pool.Accounts()) > 0 {
 		return d.downloadAccountChunkMulti(ctx, dc, c)
 	}
-	// 🟡 账号区 chunk 韧性：失败重试 1 次（FETCH 链接每次新取，瞬时网络抖动可恢复）——
-	// 与分享区重试对称，避免单次抖动整段放弃（manager 外层整任务重试兜底不够 chunk 级）。
-	for attempt := 1; ; attempt++ {
+	// 🟡 账号区 chunk 韧性：**取链与下载都退避重试**（hybridChunkAttempts 次）——每次重试
+	// 都重新取 FETCH 直链（新链接可绕过 TTL/限流/瞬断）。此前取链失败直接 return：
+	// 单次 TLS 握手超时就终止整个任务（2026-10-11 实测 1.3GB/43 片任务因一片取链超时失败）。
+	// 仅**永久错误**（未登录/空间不足/无账号/分享失效/不支持）不重试。
+	var lastErr error
+	for attempt := 1; attempt <= hybridChunkAttempts; attempt++ {
+		if attempt > 1 && !sleepCtx(ctx, d.chunkRetryDelay(attempt-1)) {
+			return lastErr
+		}
 		link, err := d.restoreAndLink(ctx, dc)
 		if err != nil {
-			return err
+			lastErr = err
+			if isPermanentChunkErr(err) {
+				return err
+			}
+			d.log.Warn("hybrid acct link attempt failed", "share", dc.shareID, "offset", c.offset, "attempt", attempt, "err", err)
+			continue
 		}
-		err = d.downloadChunkRange(ctx, dc, c, link)
-		if err == nil {
+		lastErr = d.downloadChunkRange(ctx, dc, c, link)
+		if lastErr == nil {
 			return nil
 		}
-		d.log.Warn("hybrid acct chunk attempt failed", "share", dc.shareID, "offset", c.offset, "attempt", attempt, "err", err)
-		if attempt == 2 {
-			return err
+		if isPermanentChunkErr(lastErr) {
+			return lastErr
 		}
+		d.log.Warn("hybrid acct chunk attempt failed", "share", dc.shareID, "offset", c.offset, "attempt", attempt, "err", lastErr)
 	}
+	return lastErr
 }
 
 // downloadAccountChunkMulti 多账号分片：Select 选账号 → Use 内转存（去重）+ FETCH 下载。
@@ -660,10 +757,38 @@ func (d *HybridDownloader) downloadAccountChunkMulti(ctx context.Context, dc *do
 		if err == nil {
 			return nil
 		}
-		if attempt == 2 {
+		if attempt == hybridChunkAttempts || isPermanentChunkErr(err) {
 			return err
 		}
 	}
+}
+
+// chunkRetryDelay 返回第 retry 次分片重试前的退避（retry 从 1 起；指数 + 抖动，封顶）。
+func (d *HybridDownloader) chunkRetryDelay(retry int) time.Duration {
+	base := d.chunkBackoff
+	if base <= 0 {
+		base = defaultChunkRetryBackoff
+	}
+	return retryPolicy{Backoff: base}.delay(retry)
+}
+
+// isPermanentChunkErr 判断分片错误是否不可重试（重试也不会变好）：登录失效/空间不足/
+// 无可用账号/分享失效/不支持。网络瞬断、HTTP 4xx/5xx、取链失败一律可重试
+// （重试会重新取链：链接 TTL 过期/限流/握手超时都可恢复）。
+func isPermanentChunkErr(err error) bool {
+	return errors.Is(err, ErrNotLoggedIn) || errors.Is(err, ErrStorageFull) ||
+		errors.Is(err, ErrNoAccountAvailable) || errors.Is(err, ErrShareNotFound) ||
+		errors.Is(err, ErrUnsupported)
+}
+
+// isAccountFaultErr 判断取链失败是否属**账号级过错**（需冷却该账号）：
+// 登录失效/空间不足。传输层瞬断（TLS 握手超时/连接重置）与 API 临时 5xx 不算——
+// 否则一次网络抖动会冤枉健康账号，冷却期白扣一个可用账号。
+func isAccountFaultErr(err error) bool {
+	if _, ok := errors.AsType[net.Error](err); ok { // 传输层瞬断（*net.OpError / *url.Error 均实现 net.Error）
+		return false
+	}
+	return errors.Is(err, ErrNotLoggedIn) || errors.Is(err, ErrStorageFull)
 }
 
 // tryMultiAccountChunk 单次尝试：取账号直链 + 下载 chunk + 记账。失败按过错分类：
@@ -672,7 +797,8 @@ func (d *HybridDownloader) downloadAccountChunkMulti(ctx context.Context, dc *do
 func (d *HybridDownloader) tryMultiAccountChunk(ctx context.Context, dc *downloadCtx, c chunk, acct *Account) error {
 	link, linkErr := d.multiAccountLink(ctx, dc, acct)
 	if linkErr != nil {
-		if ctx.Err() == nil {
+		// 仅账号级过错才 MarkFailed 冷却（传输层瞬断不算——见 isAccountFaultErr）。
+		if ctx.Err() == nil && isAccountFaultErr(linkErr) {
 			_ = d.pool.MarkFailed(ctx, acct.Name)
 		}
 		d.log.Warn("hybrid multi-account use/link failed", "acct", acct.Name, "err", linkErr)
@@ -1182,14 +1308,17 @@ type manifestSource struct {
 	FileID  string `json:"file_id"`
 	Hash    string `json:"hash"`
 	Size    int64  `json:"size"`
+	// URL 是原始分享 URL（含 token 时原样保留）——**仅供 CLI 恢复用**（rebuild 免重输 URL）。
+	// 不参与 SourceMatches 判定（同一分享可有多种 URL 形态，且旧 manifest 无此字段）。
+	URL string `json:"url,omitempty"`
 }
 
-// manifestPath 返回 manifest 文件路径（destPath + ".hybrid"）。
-func manifestPath(destPath string) string { return destPath + ".hybrid" }
+// ManifestPath 返回进度文件（manifest）路径——与 CLI/rebuild 共用同一命名，不重复硬编码。
+func ManifestPath(destPath string) string { return destPath + hybridManifestSuffix }
 
 // loadManifest 读取 manifest（不存在返回 nil）。
 func loadManifest(destPath string) *hybridManifest {
-	data, err := os.ReadFile(manifestPath(destPath))
+	data, err := os.ReadFile(ManifestPath(destPath))
 	if err != nil {
 		return nil
 	}
@@ -1232,11 +1361,9 @@ func (d *HybridDownloader) initManifest(dc *downloadCtx, shareEnd int64) *hybrid
 	m := &hybridManifest{
 		Total: dc.currentTotal, ShareEnd: shareEnd,
 		Chunks: map[int64]int64{},
-		Source: manifestSource{ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size},
+		Source: manifestSource{ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size, URL: dc.sourceURL},
 	}
-	if data, err := json.Marshal(m); err == nil {
-		_ = os.WriteFile(manifestPath(dc.destPath), data, 0o644)
-	}
+	writeManifest(dc.destPath, m)
 	return m
 }
 
@@ -1254,16 +1381,12 @@ func (d *HybridDownloader) markChunkDone(dc *downloadCtx, c chunk, src manifestS
 	}
 	m.Chunks[c.offset] = c.length
 	m.Source = src
-	data, err := json.Marshal(m)
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(manifestPath(dc.destPath), data, 0o644)
+	writeManifest(dc.destPath, m)
 }
 
 // removeManifest 完成时删除 manifest。
 func removeManifest(destPath string) {
-	_ = os.Remove(manifestPath(destPath))
+	_ = os.Remove(ManifestPath(destPath))
 }
 
 // reResolveLink 重新 resolve 拿新直链，并核对新目标与首次 target 一致（C3）。
@@ -1299,15 +1422,87 @@ func (d *HybridDownloader) computeShareEnd(ctx context.Context, target *ShareFil
 	return shareEnd
 }
 
-// loadValidManifest 读 manifest 并校验源身份一致（C4）；不一致返回 nil（全量重下）。
+// loadValidManifest 读 manifest 并校验可用性（C4 源身份 + 工作文件一致性）：
+//   - 源身份不一致（不同分享/文件）→ 归档旧 manifest，返回 nil（全量重下）；
+//   - 工作文件缺失或大小 != total（用户实测状态：数据文件被改名成最终名后 manifest 残留）→
+//     归档 manifest，返回 nil——绝不能凭 manifest 假装续传：跳过缺失分片会产出
+//     「大小正确但内容残缺」的文件（静默损坏），且最终校验失败后反复重试。
+//
+// 归档（而非删除）到 .hybrid.stale：保留源身份/分片清单证据，rebuild 命令可据此定点修复。
 func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *ShareFile) *hybridManifest {
 	m := loadManifest(destPath)
-	if m != nil && !m.SourceMatches(shareID, target) {
-		d.log.Warn("hybrid manifest source mismatch, full re-download", "manifest_source", m.Source.ShareID)
-		removeManifest(destPath) // 🟠4：清旧源 manifest，防 markChunkDone 合并污染
+	if m == nil {
 		return nil
 	}
+	if !m.SourceMatches(shareID, target) {
+		d.archiveManifest(destPath, "manifest source mismatch, full re-download", "manifest_source", m.Source.ShareID)
+		return nil
+	}
+	if !workingFileMatches(destPath, m.Total) {
+		d.archiveManifest(destPath, "working file missing or size mismatch, full re-download",
+			"total", m.Total, "working", WorkingPath(destPath))
+		return nil
+	}
+	// 记录一致还不够：磁盘上可能有「被跳过但未写入」的零洞（预分配让大小恒等于目标，
+	// 崩溃/断电时 manifest 可能先于数据落盘）——零尾扫描剔除，交由本次下载补齐（自愈）。
+	d.dropZeroTailChunks(destPath, m)
 	return m
+}
+
+// dropZeroTailChunks 剔除「manifest 记录完成但磁盘上尾部连续为零」的分片（未写完）。
+// 直接信任 manifest 会跳过这些块 → 大小正确但内容残缺（静默损坏）＋校验反复失败。
+// 剔除后 markChunkDone 会重新记录，本次下载补下这些块。
+func (d *HybridDownloader) dropZeroTailChunks(destPath string, m *hybridManifest) {
+	if m == nil || len(m.Chunks) == 0 {
+		return
+	}
+	// 用 manifest 自己记录的块长度（不是下载器当前 chunkSize——旧 manifest 可能是别的大小）。
+	spans := make([]ChunkSpan, 0, len(m.Chunks))
+	for off, ln := range m.Chunks {
+		if ln <= 0 || off < 0 || off >= m.Total {
+			continue
+		}
+		spans = append(spans, ChunkSpan{Offset: off, Length: min(ln, m.Total-off)})
+	}
+	suspect, err := ScanZeroTail(WorkingPath(destPath), spans, ZeroScanOptions{})
+	if err != nil {
+		d.log.Warn("hybrid manifest zero-tail scan failed, trust manifest", "err", err)
+		return
+	}
+	if len(suspect) == 0 {
+		return
+	}
+	for _, s := range suspect {
+		delete(m.Chunks, s.Offset)
+	}
+	d.log.Warn("hybrid manifest chunks dropped (zero tail, will re-download)", "count", len(suspect))
+	writeManifest(destPath, m)
+}
+
+// writeManifest 落盘 manifest（错误忽略：进度文件问题只影响续传效率，不影响正确性）。
+func writeManifest(destPath string, m *hybridManifest) {
+	if m == nil {
+		return
+	}
+	if data, err := json.Marshal(m); err == nil {
+		_ = os.WriteFile(ManifestPath(destPath), data, 0o644)
+	}
+}
+
+// workingFileMatches 判断工作文件（临时文件）存在且大小与 manifest.Total 一致。
+func workingFileMatches(destPath string, total int64) bool {
+	if total <= 0 {
+		return false
+	}
+	fi, err := os.Stat(WorkingPath(destPath))
+	return err == nil && !fi.IsDir() && fi.Size() == total
+}
+
+// archiveManifest 把当前 manifest 归档为 .hybrid.stale（覆盖上一个归档）并告警——
+// 保留进度证据供诊断/rebuild，不静默丢弃。
+func (d *HybridDownloader) archiveManifest(destPath, reason string, args ...any) {
+	d.log.Warn("hybrid "+reason, args...)
+	_ = os.Rename(ManifestPath(destPath), StaleManifestPath(destPath))
 }
 
 // driveFileID 返回 FileMeta 的 ID（nil 安全，日志用）。

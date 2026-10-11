@@ -30,6 +30,9 @@ var (
 	ErrAccountNotFound = errors.New("pikpak: account not found")
 	// ErrStorageFull 表示账号网盘空间不足（转存失败）——立即报错，不重试拖沓。
 	ErrStorageFull = errors.New("pikpak: account storage full")
+	// ErrIntegrityMismatch 表示文件与源权威哈希（GCID）不一致——下载产物错误。
+	// rebuild 据此区分「内容不对（需全量重建）」与「取链/网络失败（可重试）」。
+	ErrIntegrityMismatch = errors.New("pikpak: integrity mismatch (gcid)")
 )
 
 // truncate 截断字符串（日志/错误信息），按 rune 截断避免劈开 UTF-8 多字节字符
