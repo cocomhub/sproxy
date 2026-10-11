@@ -330,6 +330,13 @@ lint-web-e2e: prepare
 lint-e2e: prepare
 	golangci-lint run --build-tags=e2e ./test/...
 
+# 子 module 的 e2e-tagged 测试文件编译门禁（CI 的 e2e lint/test 只覆盖 ./test/...，
+# 子 module 里带 //go:build e2e 的文件在默认 build tags 下既不编译也不 lint——外部依赖/
+# 接口变更后可能静默腐化）。当前唯一此类文件：pkg/volume/ext/baidupcs 的真实网盘对比 e2e。
+.PHONY: vet-e2e-submodules
+vet-e2e-submodules: prepare
+	cd pkg/volume/ext/baidupcs && GOWORK=off $(GO) vet -tags=e2e ./...
+
 .PHONY: bench
 bench: prepare
 	@mkdir -p $(BUILD_DIR)/bench
@@ -571,7 +578,7 @@ deadcode: prepare ## 列出从 main 不可达的函数（信息性输出，不�
 # 注意：此处用 deadcode-check（失败门禁，带 .deadcodeignore 豁免）而非信息性 deadcode——
 # 两者行为不同（2026-10-02 核查：此前用 deadcode 导致本地/ pre-push 的 check-ci 对死代码
 # 静默放行，CI Lint job 的 deadcode-check 才能拦；保持一致见 .golangci.yml / ci.yml）。
-check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck deadcode-check build-ci test-cover cover-check test-all build-all
+check-ci: vet lint lint-all lint-web-e2e lint-e2e vet-e2e-submodules check-loopback notest archcheck deadcode-check build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:
@@ -608,6 +615,7 @@ help:
 	@echo "  lint            Run golangci-lint"
 	@echo "  lint-all        Run golangci-lint for every sub-module (cmd + ext + hub + mesh)"
 	@echo "  lint-e2e        Run golangci-lint for e2e-tagged test suites"
+	@echo "  vet-e2e-submodules  Compile-check sub-module e2e-tagged tests (go vet -tags=e2e)"
 	@echo "  lint-web-e2e    Run golangci-lint for the nested web/e2e module"
 	@echo "  bench-local     Run benchmarks with metadata (local use)"
 	@echo "  bench           Run benchmarks (CI, output to build/bench/output.txt)"

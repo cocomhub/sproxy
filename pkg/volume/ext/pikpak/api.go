@@ -134,8 +134,15 @@ func (m *FileMeta) UnmarshalJSON(data []byte) error {
 
 // fileListResp 是 /drive/v1/files 的响应。
 type fileListResp struct {
-	Files []FileMeta `json:"files"`
+	Files         []FileMeta `json:"files"`
+	NextPageToken string     `json:"next_page_token"`
 }
+
+// pikpakMaxListPages 是 List 分页安全上限（防服务端 page_token 回环导致死循环）。
+const pikpakMaxListPages = 1000
+
+// pikpakMaxWalkDepth 是分享目录递归深度上限（防服务端目录自环导致栈溢出/死循环）。
+const pikpakMaxWalkDepth = 64
 
 // doJSON 执行带鉴权的 API 请求并解析 JSON。
 // 鉴权：优先显式 AccessToken（cfg.AccessToken）；未配置时经 CLI `auth token`
@@ -215,16 +222,29 @@ func (a *API) ensureToken(ctx context.Context) (string, error) {
 	return a.token, nil
 }
 
-// List 列出目录（parentID 空 = 根）下文件。
+// List 列出目录（parentID 空 = 根）下文件。**带 page_token 循环取全量**（EXT-6：
+// 此前只取第一页 500 条，>500 条目目录的后续文件对 Stat/Get/List 变成「不存在」）。
 func (a *API) List(ctx context.Context, parentID string) ([]FileMeta, error) {
-	q := url.Values{}
-	q.Set("parent_id", parentID)
-	q.Set("page_size", "500")
-	var resp fileListResp
-	if err := a.doJSON(ctx, http.MethodGet, "/drive/v1/files", q, nil, &resp); err != nil {
-		return nil, err
+	var out []FileMeta
+	pageToken := ""
+	for range pikpakMaxListPages {
+		q := url.Values{}
+		q.Set("parent_id", parentID)
+		q.Set("page_size", "500")
+		if pageToken != "" {
+			q.Set("page_token", pageToken)
+		}
+		var resp fileListResp
+		if err := a.doJSON(ctx, http.MethodGet, "/drive/v1/files", q, nil, &resp); err != nil {
+			return nil, err
+		}
+		out = append(out, resp.Files...)
+		if resp.NextPageToken == "" {
+			return out, nil
+		}
+		pageToken = resp.NextPageToken
 	}
-	return resp.Files, nil
+	return out, nil
 }
 
 // ListRecursive 递归列出（用于找分享转存后的文件）。
@@ -325,25 +345,44 @@ func (a *API) ListShareRecursive(ctx context.Context, shareID string) ([]FileMet
 
 // walkShareFolder 递归展开分享目录树：分页拉取 + 子目录递归，结果追加到 out。
 func (a *API) walkShareFolder(ctx context.Context, shareID, pid string, out *[]FileMeta) error {
+	return a.walkShareFolderDepth(ctx, shareID, pid, out, 0)
+}
+
+// walkShareFolderDepth 带**深度上限**的递归（P2：原无限递归在服务端目录自环时会栈溢出/
+// 死循环占死任务；List 已有 pikpakMaxListPages 但 walk 无）。
+func (a *API) walkShareFolderDepth(ctx context.Context, shareID, pid string, out *[]FileMeta, depth int) error {
+	if depth > pikpakMaxWalkDepth {
+		return fmt.Errorf("pikpak: 分享目录递归超过上限 %d（疑似自环）", pikpakMaxWalkDepth)
+	}
 	pageToken := ""
-	for {
+	for range pikpakMaxListPages {
 		files, next, err := a.ShareDetail(ctx, shareID, pid, pageToken)
 		if err != nil {
 			return err
 		}
-		for i := range files {
-			*out = append(*out, files[i])
-			if files[i].Kind == "drive#folder" {
-				if err := a.walkShareFolder(ctx, shareID, files[i].ID, out); err != nil {
-					return err
-				}
-			}
+		if aerr := a.appendShareFiles(ctx, shareID, files, out, depth); aerr != nil {
+			return aerr
 		}
 		if next == "" {
 			return nil
 		}
 		pageToken = next
 	}
+	return fmt.Errorf("pikpak: 分享目录分页超过上限 %d（疑似 page_token 回环）", pikpakMaxListPages)
+}
+
+// appendShareFiles 追加一页条目并对子目录递归（抽出以降低 walkShareFolderDepth 复杂度）。
+func (a *API) appendShareFiles(ctx context.Context, shareID string, files []FileMeta, out *[]FileMeta, depth int) error {
+	for i := range files {
+		*out = append(*out, files[i])
+		if files[i].Kind != "drive#folder" {
+			continue
+		}
+		if err := a.walkShareFolderDepth(ctx, shareID, files[i].ID, out, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // FindInDrive 在网盘（递归）里找匹配名字/大小的文件，返回 FileMeta。

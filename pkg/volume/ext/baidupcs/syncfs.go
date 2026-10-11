@@ -23,6 +23,7 @@ package baidupcs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,27 +34,15 @@ import (
 )
 
 // StorageFS 把 Storage 适配为 pkg/sync.FS。
+//
+// **本地 staging 配额（2026-10-10 用户裁定）**：不在本结构体持有配额句柄（卷是 backend
+// 共享单例，per-owner 注入会互相覆盖）。装配层改为**按请求/按 owner 包一层
+// `syncpkg.StagingQuotaGateFS`**（per-instance 预留/释放，无共享可变状态）——与卷自身
+// 容量配额（`syncpkg.ReserveSpace`/卷 Pool）严格区分：后者管远端网盘容量，前者只记本地
+// 暂存字节。
 type StorageFS struct {
 	s    StorageAPI
 	temp string // 本地中间态目录（staging/下载缓存），用户硬约束：只依赖本地 FS
-	// quota 是可选配额记账钩子（staging 预留/释放）；nil = 不记账（独立 module 保持薄，
-	// 装配层注入实现，server 侧包 pkg/quota.Scope）。
-	quota QuotaTracker
-}
-
-// QuotaTracker 是 staging 配额记账钩子接口（装配层注入；不依赖 pkg/quota 具体类型）。
-// 语义：本地 staging 写入计入 owner 配额（防磁盘占满），上传网盘成功后释放本地占用。
-type QuotaTracker interface {
-	// ReserveUsage 预留 size 字节（本地 staging 写入前调用）。
-	ReserveUsage(size int64) error
-	// ReleaseUsage 释放 size 字节（上传成功或失败后调用）。
-	ReleaseUsage(size int64)
-}
-
-// WithQuota 为 StorageFS 装配配额记账钩子（链式配置）。
-func (f *StorageFS) WithQuota(q QuotaTracker) *StorageFS {
-	f.quota = q
-	return f
 }
 
 // StorageAPI 是 StorageFS 消费的最小接口（P3 只依赖公开方法，与 P2 内部解耦）。
@@ -65,6 +54,9 @@ type StorageAPI interface {
 	List(ctx context.Context, prefix string) ([]ObjectMeta, error)
 	Delete(ctx context.Context, key string) error
 	Copy(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error)
+	// Move 服务端移动（sync.Mover 能力；零流量）。服务端不可用返回 ErrUnsupported，
+	// 调用方（StorageFS.Rename）回退 Copy+Delete。
+	Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error)
 }
 
 // NewStorageFS 构造 StorageFS 适配层。temp 为本地中间态目录（默认 os.TempDir()）。
@@ -145,13 +137,8 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 	if clean == "" || clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("%w: invalid path %q", ErrInvalidParam, relPath)
 	}
-	// 0. quota 预留（本地 staging 写入前）。
-	if f.quota != nil {
-		if err := f.quota.ReserveUsage(size); err != nil {
-			return fmt.Errorf("%w: quota reserve %d: %v", ErrTransient, size, err)
-		}
-		defer f.quota.ReleaseUsage(size)
-	}
+	// 本地 staging 配额由外层 per-request `syncpkg.StagingQuotaGateFS` 预留/释放
+	// （不再由本共享单例记账——避免 per-owner 覆盖）。此处只落 staging + 上传。
 	// 1. 落本地 staging（受 ctx 约束的流式拷贝）。
 	tmp, err := os.CreateTemp(f.temp, "staging-*")
 	if err != nil {
@@ -182,15 +169,38 @@ func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, 
 	return nil
 }
 
-// Rename 重命名/移动（网盘无原子 MOVE → Copy + Delete 两步）。
+// Rename 重命名/移动：服务端 Move（源移除、零流量）；服务端不可用回退 Copy+Delete。
 func (f *StorageFS) Rename(ctx context.Context, from, to string) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if _, err := f.s.Move(ctx, from, to); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrUnsupported) {
+		return mapPCSError(err)
 	}
 	if _, err := f.s.Copy(ctx, from, to); err != nil {
 		return mapPCSError(err)
 	}
 	return f.Delete(ctx, from)
+}
+
+// Move 同卷服务端移动（sync.Mover 能力）：源移除、零流量（百度 filemanager move）。
+func (f *StorageFS) Move(ctx context.Context, from, to string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := f.s.Move(ctx, from, to)
+	return mapPCSError(err)
+}
+
+// Copy 同卷服务端复制（sync.Copier 能力）：源保留、零流量（百度 filemanager copy）。
+func (f *StorageFS) Copy(ctx context.Context, from, to string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := f.s.Copy(ctx, from, to)
+	return mapPCSError(err)
 }
 
 // Delete 删除文件（幂等：不存在不报错）。
@@ -229,25 +239,32 @@ func entryFromMeta(m ObjectMeta) syncpkg.Entry {
 	if !m.ModTime.IsZero() {
 		e.MTime = m.ModTime.UnixNano()
 	}
+	// 校验和信息（用户裁定：每个 entry 提供已知的所有校验和数据，便于比较）：
+	// **百度 ETag 不能无条件标注为整文件 md5**（M3 实测：分片上传后百度 Stat.MD5 是
+	// 片 md5 组合/服务端标记"可能不正确"，非整文件 md5；仅小文件单传（<4MB）ETag 恰为
+	// 整文件 md5，但 Stat 无法区分来源）。标 "etag"（与 s3 一致，诚实表达服务端对象
+	// 标识）——Equal 的 commonChecksumAlgo 只看 sha256/md5，baidupcs 无交集 → 强制
+	// 流式分段自算（跨信任边界不信任远端自报 hash，C2 方向）。Put 路径自身已 readback
+	// 验证内容（C5），不受影响。
 	if m.ETag != "" {
 		e.Checksum = m.ETag
+		e.ChecksumType = "etag"
+		e.Checksums = map[string]string{"etag": m.ETag}
 	}
 	return e
 }
 
 // isNotFound 判断错误是否为「不存在」语义（哨兵或文本）。
+// M6 修复：用 stdlib errors.Is（%w 包装的 ErrNotFound 也能沿 Unwrap 链识别）替代
+// 本地恒等比较——errorsIs = err == target 对 fmt.Errorf("%w:...") 包装的错误恒判
+// false（文案兜底掩盖了大部分场景，但属错误处理坏味道 + 未来隐患）。
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errorsIs(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) {
 		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "不存在")
-}
-
-// errorsIs 避免与标准库 errors 冲突的本地包装。
-func errorsIs(err, target error) bool {
-	return err == target
 }

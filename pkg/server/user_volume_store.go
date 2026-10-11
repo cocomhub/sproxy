@@ -88,7 +88,7 @@ func (s *UserVolumeStore) dirFor(owner string) string {
 	return filepath.Join(s.root, owner, "meta", "volume")
 }
 
-// Root 返回用户卷 store 的存储根（counter 持久化用：<root>/<owner>/meta/volume/<name>.capacity.json）。
+// Root 返回用户卷 store 的存储根（counter 持久化用：<root>/<owner>/meta/volume/<name>.capacity（非 .json，避开 store 扫描））。
 func (s *UserVolumeStore) Root() string { return s.root }
 
 // pathFor 返回 owner 的卷文件路径。

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -331,19 +332,19 @@ func readE2EFile(t *testing.T, root, rel string) string {
 	return string(data)
 }
 
-// ---- P5：quota per-owner 端到端（串行任务，同卷；工厂每次调用 WithQuota 覆盖为当前 owner scope） ----
+// ---- P5：quota per-owner 端到端（同卷；工厂每次调用返回 per-owner staging 门卫包装实例） ----
 
 // TestBaidupcsE2E_QuotaPerOwner 验证 staging quota 按任务 owner 分桶（owner_quotas 生效）：
 //   - ownerA（5 字节小配额）push 10 字节文件 → WriteFile ReserveUsage(10) 超限 → 单文件
 //     ActionError（quota 拒绝，任务 completed 但 FilesDone=0，网盘无该文件）；
 //   - ownerB（100 字节大配额）push 同文件 → 成功（FilesDone=1，网盘出现）。
 //
-// 串行任务（ownerA 完成后 ownerB）：工厂每次创建任务时 WithQuota(scopeFor(owner)) 覆盖
-// 为当前 owner scope——同卷单例 StorageFS 下串行正确（P2 疑虑：并发多 owner 留后续装饰器）。
+// 工厂每次创建任务时按 owner 返回独立的 per-request 门卫包装（scopeFor(owner)），
+// 同卷多 owner 并发不再互相覆盖（2026-10-10 去卷单例注入）。
 func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 	// 本测试串行两个任务（ownerA → ownerB），同卷共享 StorageFS——不 t.Parallel（R18 豁免：
 	// 依赖全局 quota Pool 状态 + 任务串行顺序，见下方 // sproxy:serial 注释）。
-	// sproxy:serial: 同卷 StorageFS 单例 WithQuota 覆盖——并发任务会互相覆盖 quota 干扰断言
+	// sproxy:serial: 本用例仍串行两个任务（共享 fake Storage + 全局 quota Pool 状态）。
 	_, resolver := e2eTenantRoot(t)
 	userRootA, _, _ := resolver("ownerA")
 	userRootB, _, _ := resolver("ownerB")
@@ -379,7 +380,12 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 	}
 
 	exec := syncexec.NewExecutor(resolver, discardLoggerMain())
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), scopeFor)
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), func(owner string) syncpkg.StagingQuotaTracker {
+		if sc := scopeFor(owner); sc != nil {
+			return quota.NewStagingTracker(sc)
+		}
+		return nil
+	})
 	if exec.BaidupcsFS == nil {
 		t.Fatal("setupBaidupcsFSFactory 应注入 BaidupcsFS 工厂")
 	}
@@ -434,4 +440,17 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 	if !okB || string(gotB) != bigContent {
 		t.Fatalf("ownerB 网盘 big.txt = %q (ok=%v), want %q", string(gotB), okB, bigContent)
 	}
+}
+
+// Move 服务端移动（StorageAPI 要求——fake 简化：内容转移 + 删源）。
+func (f *fakeBaidupcsE2EStorage) Move(ctx context.Context, srcKey, dstKey string) (*baidupcs.ObjectMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[srcKey]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	delete(f.files, srcKey)
+	f.files[dstKey] = data
+	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
 }

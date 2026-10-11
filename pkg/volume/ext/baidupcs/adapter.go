@@ -5,25 +5,54 @@ package baidupcs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 )
 
 // Adapter 是百度网盘底层执行器接口（二进制优先 + 库兜底双路径的抽象）。
+// Move/Copy 是服务端 filemanager 能力（库路径 pcs.Move/pcs.Copy；二进制 CLI
+// `mv`/`cp` 可用时二进制优先、失败回退库）。无直接能力 → 明确 ErrUnsupported。
 type Adapter interface {
 	Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error
 	Download(ctx context.Context, remotePath, localPath string) error
+	// Move 服务端移动（源移除）；不支持返回 ErrUnsupported。
+	Move(ctx context.Context, from, to string) error
+	// Copy 服务端复制（源保留）；不支持返回 ErrUnsupported。
+	Copy(ctx context.Context, from, to string) error
 }
 
 // libraryFallback 是库兜底的最小接口（真实库 adapter 与测试 fake 都实现）。
 type libraryFallback interface {
 	Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error
 	Download(ctx context.Context, remotePath, localPath string) error
+	Move(ctx context.Context, from, to string) error
+	Copy(ctx context.Context, from, to string) error
+	Delete(ctx context.Context, remotePath string) error
+}
+
+// deleter 是可选删除能力（Adapter 主接口不含 Delete——二进制模式可能无会话；
+// 实现者：libraryAdapter pcs.Remove / binaryAdapter `rm` CLI）。
+type deleter interface {
+	Delete(ctx context.Context, remotePath string) error
+}
+
+// rapidUploader 是可选秒传能力（M4：分片上传后远端 md5 是片组合/服务端"可能不正确"，
+// 仅 rapidupload 命中或小文件单传得到权威整文件 md5——Put 复核不匹配时经它秒传刷新）。
+// 实现者：libraryAdapter（pcs.RapidUploadNoCheckDir）；binaryAdapter 无会话不实现。
+// 返回 (hit, err)：hit=true = 秒传命中（内容已在网盘，目标 md5 刷新为权威整文件 md5）；
+// hit=false = 未命中（md5 not found，errno 31079）——调用方下一轮重传；err = 其它错误。
+type rapidUploader interface {
+	RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error)
 }
 
 // directLinkProvider 是可选直链能力接口：底层 adapter 若实现（库 adapter 持有
@@ -93,12 +122,23 @@ func (a *binaryAdapter) runBinary(ctx context.Context, args ...string) (bool, er
 }
 
 // Upload 二进制优先上传，失败（缺失/超时/非零退出）回退库。
+//
+// **CLI target 目录语义适配（e2e 实测 2026-10-08）**：`BaiduPCS-Go upload <local> <dir>`
+// 的第二个参数是**目标目录**（内容落到 `<dir>/<basename(local)>`），而调用方（Storage.Put）
+// 传入的是**文件路径** targetPath。直接传 targetPath 会让内容保存到
+// `<targetPath>/<basename(local)>`（父路径错位 + 残留目录 → 后续 Stat 见目录报
+// "不可覆盖目录"）。修复：传 `path.Dir(targetPath)` 作 CLI 目标目录——CLI 用本地文件
+// basename 保存，与库路径语义对齐（同目录同 basename）。
 func (a *binaryAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
 	policy := "skip"
 	if overwrite {
 		policy = "overwrite"
 	}
-	ok, err := a.runBinary(ctx, "upload", "--policy", policy, localPath, targetPath)
+	dir := path.Dir(targetPath)
+	if dir == "" || dir == "." {
+		dir = "/"
+	}
+	ok, err := a.runBinary(ctx, "upload", "--policy", policy, localPath, dir)
 	if ok {
 		return nil
 	}
@@ -117,22 +157,110 @@ func (a *binaryAdapter) Upload(ctx context.Context, localPath, targetPath string
 }
 
 // Download 二进制优先下载，失败（缺失/超时/非零退出）回退库。
+//
+// C4 修复（--saveto 目录语义适配）：fork 库 `download --saveto <dir>` 的 saveto 是
+// **目录**（内容落到 `<dir>/<basename>`）——而调用方（Storage.Get/Stat 回退）传入的是
+// 预创建的**文件路径** localPath。直接传 localPath 会让二进制写 `<localPath>/<basename>`
+// 时父路径是 0 字节文件 → ENOTDIR 恒失败。修复：内部 MkdirTemp 临时目录传 saveto，
+// 下载成功后把目录内产物（basename 对应 remotePath 末段）rename 到 localPath（覆盖
+// 调用方预创建的空文件），再清理目录——对外保持"下载到文件"契约，与库 fallback 一致。
 func (a *binaryAdapter) Download(ctx context.Context, remotePath, localPath string) error {
-	ok, err := a.runBinary(ctx, "download", "--saveto", localPath, remotePath)
-	if ok {
+	if err := a.downloadViaBinary(ctx, remotePath, localPath); err == nil {
 		return nil
+	} else if !errors.Is(err, errBinaryDownloadFailed) {
+		return err
 	}
 	if a.cfg.Fallback != nil {
 		fbErr := a.cfg.Fallback.Download(ctx, remotePath, localPath)
 		if fbErr != nil {
-			return fmt.Errorf("baidupcs download: 二进制失败(%v) 且库兜底也失败: %w", err, fbErr)
+			return fmt.Errorf("baidupcs download: 二进制失败且库兜底也失败: %w", fbErr)
 		}
 		return nil
 	}
-	if err != nil {
-		return err
+	return fmt.Errorf("%w: baidupcs download 失败且无库兜底", errBinaryDownloadFailed)
+}
+
+// errBinaryDownloadFailed 是二进制下载失败的哨兵（回退库判定用）。
+var errBinaryDownloadFailed = errors.New("baidupcs: binary download failed")
+
+// downloadViaBinary 二进制路径：临时目录 saveto → 定位产物 → rename 到 localPath。
+func (a *binaryAdapter) downloadViaBinary(ctx context.Context, remotePath, localPath string) error {
+	dir, mkErr := os.MkdirTemp("", "baidupcs-dl-*")
+	if mkErr != nil {
+		return fmt.Errorf("baidupcs: 创建下载临时目录: %w", mkErr)
 	}
-	return fmt.Errorf("baidupcs download 失败且无库兜底")
+	defer os.RemoveAll(dir)
+	ok, _ := a.runBinary(ctx, "download", "--saveto", dir, remotePath)
+	if !ok {
+		return errBinaryDownloadFailed // 回退库
+	}
+	// 定位目录内产物（basename = remotePath 末段；saveto 目录语义下内容落 `<dir>/<basename>`）。
+	base := path.Base(strings.TrimSuffix(remotePath, "/"))
+	prod := filepath.Join(dir, base)
+	if fi, ferr := os.Stat(prod); ferr != nil || fi.IsDir() {
+		// 产物名与 remotePath 不一致（罕见）：取目录内唯一普通文件。
+		es, derr := os.ReadDir(dir)
+		if derr != nil || len(es) == 0 || es[0].IsDir() {
+			return fmt.Errorf("%w: 下载成功但未在临时目录定位产物（dir=%s base=%s）", errBinaryDownloadFailed, dir, base)
+		}
+		prod = filepath.Join(dir, es[0].Name())
+	}
+	if rerr := os.Rename(prod, localPath); rerr != nil {
+		// rename 覆盖失败（Windows 预创建文件存在时可能拒绝）→ 回退复制。
+		data, rerr2 := os.ReadFile(prod)
+		if rerr2 != nil {
+			return fmt.Errorf("baidupcs: 移动下载产物失败（read %s）: %w", prod, rerr2)
+		}
+		if werr := os.WriteFile(localPath, data, 0o600); werr != nil {
+			return fmt.Errorf("baidupcs: 移动下载产物失败（write %s）: %w", localPath, werr)
+		}
+	}
+	return nil
+}
+
+// Move 服务端移动（源移除）：二进制 `mv` 优先、失败回退库；无兜底明确 ErrUnsupported。
+func (a *binaryAdapter) Move(ctx context.Context, from, to string) error {
+	ok, err := a.runBinary(ctx, "mv", from, to)
+	if ok {
+		return nil
+	}
+	if a.cfg.Fallback != nil {
+		if fbErr := a.cfg.Fallback.Move(ctx, from, to); fbErr != nil {
+			return fmt.Errorf("baidupcs move: 二进制失败(%v) 且库兜底也失败: %w", err, fbErr)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: baidupcs 无会话执行 Move（需库兜底）", ErrUnsupported)
+}
+
+// Copy 服务端复制（源保留）：二进制 `cp` 优先、失败回退库；无兜底明确 ErrUnsupported。
+func (a *binaryAdapter) Copy(ctx context.Context, from, to string) error {
+	ok, err := a.runBinary(ctx, "cp", from, to)
+	if ok {
+		return nil
+	}
+	if a.cfg.Fallback != nil {
+		if fbErr := a.cfg.Fallback.Copy(ctx, from, to); fbErr != nil {
+			return fmt.Errorf("baidupcs copy: 二进制失败(%v) 且库兜底也失败: %w", err, fbErr)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: baidupcs 无会话执行 Copy（需库兜底）", ErrUnsupported)
+}
+
+// Delete 服务端删除（二进制 `rm` 优先、失败回退库）；无兜底明确 ErrUnsupported。
+func (a *binaryAdapter) Delete(ctx context.Context, remotePath string) error {
+	ok, err := a.runBinary(ctx, "rm", remotePath)
+	if ok {
+		return nil
+	}
+	if dl, ok := a.cfg.Fallback.(deleter); ok {
+		if fbErr := dl.Delete(ctx, remotePath); fbErr != nil {
+			return fmt.Errorf("baidupcs delete: 二进制失败(%v) 且库兜底也失败: %w", err, fbErr)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: baidupcs 无会话执行 Delete（需库兜底）", ErrUnsupported)
 }
 
 // discard 是 io.Writer 的静默实现（slog 无日志时用）。
@@ -153,6 +281,10 @@ type libraryAdapter struct {
 	pcs    *Client
 	log    *slog.Logger
 	layout *Layout // 断点/暂存布局；nil = 断点不持久化
+	// uploadMu 是共享上传锁（C-C2：并发上传交错 host 生命周期——Precreate 对共享
+	// pcsAddr 做 Set/恢复、TmpFile 经 generatePCSURL 读 pcsAddr；串行化上传会话，
+	// 单会话内分片并发不受锁）。
+	uploadMu sync.Mutex
 }
 
 // newLibraryAdapter 创建库兜底 adapter。
@@ -161,7 +293,8 @@ func newLibraryAdapter(pcs *Client, logger *slog.Logger) *libraryAdapter {
 }
 
 // Upload 用 fork 库的分片上传器（NewMultiUploader）上传本地文件到网盘。
-// 走 Precreate→分片 TmpFile→CreateSuperFile；断点状态持久化到 Layout.Resume。
+// 走 Precreate→分片 TmpFile→CreateSuperFile。**断点持久化当前未接线**
+// （globalLayout 恒 nil，见 resume_upload.go 顶部说明）——中断后不续传，重传。
 // 这是 P2 真实现——脱离二进制也完整可用（二进制优先策略下是可靠兜底）。
 func (a *libraryAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
 	if a.pcs == nil {
@@ -172,7 +305,7 @@ func (a *libraryAdapter) Upload(ctx context.Context, localPath, targetPath strin
 	if a.layout != nil {
 		resumeKey = a.layout.SanitizeKey(targetPath) + ":" + sanitizeRemotePathSize(localPath)
 	}
-	return uploadViaMultiUploader(ctx, a.pcs, localPath, targetPath, overwrite, resumeKey)
+	return uploadViaMultiUploader(ctx, a.pcs, &a.uploadMu, localPath, targetPath, overwrite, resumeKey)
 }
 
 // Download 用 fork 库的 Downloader（Range 并行 + 断点恢复）下载网盘文件到本地。
@@ -200,6 +333,78 @@ func (a *libraryAdapter) Download(ctx context.Context, remotePath, localPath str
 	}
 	a.log.Info("baidupcs 库兜底 Download（Downloader + 断点）", "remote", remotePath, "local", localPath)
 	return downloadViaDownloader(ctx, a.pcs, remotePath, localPath, layout)
+}
+
+// RapidUpload 库路径秒传（rapidUploader 能力）：用本地整文件 md5/前 256KB sliceMD5/crc32
+// 请求秒传——内容已在网盘（含刚分片上传的）→ 命中，目标 md5 刷新为权威整文件 md5。
+// 未命中（errno 31079 md5 not found）→ (false, nil) 由调用方下一轮重传。
+//
+// **C-C1 修复 + D-M1 风险明示**：改用 fork 完整 `RapidUpload`（带 blockListMD5）——
+// 原 `RapidUploadNoCheckDir` 只把 `block_list=[整文件md5]` 发到 xpan/file/create，
+// 匹配仅按**整文件 md5 + size**（>4MB 分片文件秒传索引按块 md5 列表匹配 → 恒 miss：
+// 3 轮整文件重传后 ErrTransient，内容实际正确却判失败）。block_list 传真实分块 md5
+// （与上传块一致，stageUpload.blockMD5s）即命中刚上传的块索引；整文件 md5 + size 组合
+// 碰撞概率极低但非零（残余理论风险可接受），主要用途是「本账号刚上传内容刷新」场景。
+func (a *libraryAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, mapPCSError(err)
+	}
+	if a.pcs == nil {
+		return false, fmt.Errorf("baidupcs: library adapter without client")
+	}
+	a.log.Info("baidupcs 库秒传刷新（rapidupload）", "remote", remotePath, "size", st.size, "blocks", len(st.blockMD5s))
+	pcsErr, _ := a.pcs.PCS().RapidUpload(
+		remotePath, "overwrite", "", st.md5, st.sliceMD5, "", st.crc32,
+		0, st.size, st.size, 0, st.blockMD5s)
+	if pcsErr == nil {
+		return true, nil // 秒传命中：目标关联到已存在内容，md5 权威
+	}
+	if pcsErr.GetRemoteErrCode() == rapidUploadMissErrno {
+		// md5 not found → 内容不在网盘，未命中（下一轮上传）。
+		return false, nil
+	}
+	return false, mapPCSError(pcsErr)
+}
+
+// rapidUploadMissErrno 是百度秒传未命中的错误码（md5 not found，应改用上传 API）。
+const rapidUploadMissErrno = 31079
+
+var _ rapidUploader = (*libraryAdapter)(nil)
+
+// Move 库路径服务端移动（源移除，pcs.Move 服务端 filemanager）。
+func (a *libraryAdapter) Move(ctx context.Context, from, to string) error {
+	if a.pcs == nil {
+		return fmt.Errorf("baidupcs: library adapter without client")
+	}
+	if err := ctx.Err(); err != nil {
+		return mapPCSError(err)
+	}
+	a.log.Info("baidupcs 库服务端 Move", "from", from, "to", to)
+	return mapPCSError(a.pcs.PCS().Move(&bdlib.CpMvJSON{From: from, To: to}))
+}
+
+// Copy 库路径服务端复制（源保留，pcs.Copy 服务端 filemanager）。
+func (a *libraryAdapter) Copy(ctx context.Context, from, to string) error {
+	if a.pcs == nil {
+		return fmt.Errorf("baidupcs: library adapter without client")
+	}
+	if err := ctx.Err(); err != nil {
+		return mapPCSError(err)
+	}
+	a.log.Info("baidupcs 库服务端 Copy", "from", from, "to", to)
+	return mapPCSError(a.pcs.PCS().Copy(&bdlib.CpMvJSON{From: from, To: to}))
+}
+
+// Delete 库路径服务端删除（pcs.Remove）。
+func (a *libraryAdapter) Delete(ctx context.Context, remotePath string) error {
+	if a.pcs == nil {
+		return fmt.Errorf("baidupcs: library adapter without client")
+	}
+	if err := ctx.Err(); err != nil {
+		return mapPCSError(err)
+	}
+	a.log.Info("baidupcs 库服务端 Delete", "path", remotePath)
+	return mapPCSError(a.pcs.PCS().Remove(remotePath))
 }
 
 // DirectLink 实现 directLinkProvider：用 LocateDownload 获取 remotePath 的下载直链。

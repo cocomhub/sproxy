@@ -23,12 +23,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -254,6 +256,12 @@ func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input Write
 	if serverChecksum != input.ExpectedChecksum {
 		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomicallyRoot 清理）
 		_ = f.root.Remove(rel)
+		// MINOR-4 修复：覆盖写校验失败删主文件时同步清 meta（防旧 sidecar 描述旧内容、
+		// 新 rel 已删 → 下次同 rel 成功写前 meta 残留占配额）——用 fileOp 上下文（有
+		// root/owner/logger），走 removeFileMeta 配额对称清理。
+		if prev > 0 {
+			s.removeFileMeta(f, rel)
+		}
 		route.Release()
 		f.logger.WarnContext(f.ctx, errMsgChecksumMismatch, "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", f.remotePath)
 		return WriteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
@@ -269,6 +277,14 @@ func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input Write
 		// 新文件与覆盖写都登记新 checksum 引用（覆盖写已在上方 prev>0 分支摘除旧引用；
 		// 本处登记新内容引用，使后续去重可命中）。幂等/409 提前返回不经过此处。
 		ds.Add(rel, route.VolumeName, serverChecksum)
+	}
+	// 可信卷（本地卷到达即建 meta）：写入成功后生成配套 FileMeta（从已落盘文件
+	// 计算总 sha256+md5 + 分块）并落隐藏 `.meta`（占配额——经装配层实现写入计入账本）。
+	// 失败不阻断主写成功（meta 缺失时读路径直算/Stat 兜底；用户裁定新文件保障立刻创建）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
+			f.logger.Warn("可信卷 meta 落盘失败（读路径直算兜底）", "file_name", rel, "error", mErr)
+		}
 	}
 
 	return WriteFileResult{Checksum: serverChecksum, Size: written, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, nil
@@ -358,12 +374,25 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 		route.Commit(0, size)
 		ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 		s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
+		// 可信卷：去重回退复制路径也建 meta（C-MAJOR-3 修复——去重 rel 与普通上传一致有 sidecar）。
+		if s.rt.fileMetaEnabled() {
+			if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
+				f.logger.Warn("可信卷 meta 落盘失败（去重回退复制）", "file_name", rel, "error", mErr)
+			}
+		}
 		return WriteFileResult{Checksum: input.ExpectedChecksum, Size: size, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, true, nil
 	}
 	// 硬链接成功：零拷贝不占新配额 → 回滚预留。
 	route.Release()
 	ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 	s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
+	// 可信卷：去重硬链接路径同样建 meta（M2 修复——回退复制分支有、硬链接分支此前
+	// 漏建，违反「新文件到达立刻建 meta」不变量；与 srcRel 内容一致，读路径直算兜底）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
+			f.logger.Warn("可信卷 meta 落盘失败（去重硬链接）", "file_name", rel, "error", mErr)
+		}
+	}
 	// 引用文件大小 = 已存首份大小（从硬链接目标 stat）。
 	var linkedSize int64
 	if fi, statErr := f.root.Stat(rel); statErr == nil {
@@ -727,6 +756,13 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 			scope.ReleaseUsage(f.size)
 		}
 	}
+	// C2 修复：rmdir 删除 user 子树后联动删除各文件 meta sidecar（meta 功能桶）并
+	// 释放其 meta 桶配额——否则 meta/<rel>.meta 成孤儿、meta 桶 Scope 永久虚高。
+	// 软删（trash）场景保留 meta 供恢复（DeleteFile SoftDelete 分支不删 meta）。
+	// C5 修复：删除联动不闸 fileMetaEnabled——disable 只停新建不停清理（enable 期写入的
+	// 存量 sidecar 在 disable 后删除主文件仍须清理，否则孤儿+配额永久泄漏）。内部按
+	// sidecar 是否存在判断，无 meta 时 no-op（一次多余 stat，可接受）。
+	s.cleanupRemovedDirMeta(owner, allFiles)
 	if cs := s.rt.checksumStore(owner); cs != nil {
 		cs.DeletePrefix(rel + "/")
 		// 清理目录自身的 checksum 记录（如果存在）
@@ -735,6 +771,52 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 	// 搜索索引同步删除子树（roadmap P0）：rmdir 后子树不可见。
 	if s.index != nil {
 		s.index.removePrefix(owner, strings.TrimPrefix(rel, "user/"))
+	}
+}
+
+// cleanupRemovedDirMeta 删除目录内各文件 meta sidecar 并释放其 meta 桶配额
+// （rmdir 联动；与写侧 WriteMeta 的 Commit 对称——防 meta 桶 Scope 虚高/孤儿）。
+func (s *Service) cleanupRemovedDirMeta(owner string, allFiles []rmdirFileStat) {
+	for _, f := range allFiles {
+		if f.root == nil {
+			continue
+		}
+		mrel := meta.MetaPath(f.rel)
+		metaSize := int64(0)
+		if e, serr := f.root.Stat(mrel); serr == nil && e != nil {
+			metaSize = e.Size()
+		}
+		_ = f.root.Remove(mrel)
+		if metaSize > 0 {
+			if scope := s.rt.quotaScope(owner, mrel); scope != nil {
+				scope.ReleaseUsage(metaSize)
+			}
+		}
+	}
+}
+
+// removeFileMeta 删除单文件配套 .meta sidecar 并释放其 meta 桶配额（删除联动；
+// 与写侧 WriteMeta Commit 对称）。主文件已确认删除/软删成功才调用（软删保留）。
+// m4 修复：删除时一并清理同目录旧 meta tmp 孤儿（崩溃残留 `.tmp.<nano>`——原只在
+// 下次同 rel 写时 sweep，文件删除后孤儿常驻 + 配额/磁盘漂移）。
+func (s *Service) removeFileMeta(f *fileOp, rel string) {
+	mrel := meta.MetaPath(rel)
+	s.rt.sweepMetaTmp(f.root, mrel)
+	metaSize := int64(0)
+	if e, serr := f.root.Stat(mrel); serr == nil && e != nil {
+		metaSize = e.Size()
+	}
+	if rerr := f.root.Remove(mrel); rerr != nil && !os.IsNotExist(rerr) {
+		// C-MAJOR-5 修复：删除失败（IO 瞬时/独占）→ **不释放配额**（磁盘 meta 仍在，
+		// 配额保留与磁盘一致；下次删除/重写时再对账）。记 Error 供运维可见。
+		f.logger.ErrorContext(f.ctx, "删除 meta sidecar 失败（配额保留）",
+			"file_name", f.remotePath, "meta", mrel, "error", rerr.Error())
+		return
+	}
+	if metaSize > 0 {
+		if scope := s.rt.quotaScope(f.owner, mrel); scope != nil {
+			scope.ReleaseUsage(metaSize)
+		}
 	}
 }
 
@@ -1145,6 +1227,22 @@ func (s *Service) renameChecksumIndex(a renameHomeArgs) {
 	if s.index != nil {
 		s.index.rename(a.owner, strings.TrimPrefix(a.fromRel, "user/"), strings.TrimPrefix(a.toRel, "user/"))
 	}
+	// 可信卷：重命名主文件联动移动配套 .meta（服务端内部文件随主文件一起动）。
+	// M4 修复：搬 meta 前先确保 meta 目标父目录存在（rename 到新目录时 meta/<新dir>
+	// 不存在 → 裸 Rename 失败被吞 → 孤儿 + 目标无 sidecar）；失败记 Warn（非阻断）。
+	if s.rt.fileMetaEnabled() && a.root != nil {
+		fromMeta := meta.MetaPath(a.fromRel)
+		toMeta := meta.MetaPath(a.toRel)
+		if dir := path.Dir(toMeta); dir != "." && dir != "" {
+			if mkErr := a.root.MkdirAll(dir, 0o755); mkErr != nil {
+				a.logger.Warn("重命名创建 meta 目标父目录失败", "meta", toMeta, "error", mkErr)
+				return
+			}
+		}
+		if rerr := a.root.Rename(fromMeta, toMeta); rerr != nil {
+			a.logger.Warn("重命名联动 meta 失败", "from", fromMeta, "to", toMeta, "error", rerr)
+		}
+	}
 }
 
 // ---- 删除族域操作（delete）----
@@ -1394,20 +1492,36 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 // 引用计数（仍有其它引用时只 unlink，配额不减）；引用归零 → 软删到回收站 / 硬删 +
 // 配额与卷池释放；再统一收尾（checksum 台账 / 索引 / 计量 / 审计 / 事件）。
 func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string, info os.FileInfo, cs string, input DeleteFileInput) (DeleteFileResult, error) {
+	// 可信卷：**删除成功后**联动删除配套 .meta（C-MINOR-3 修复：主文件删除失败/软删
+	// 时 meta 保留——先在成功路径统一删；此处只删当次 rel 的 sidecar，防止软删可恢复
+	// 场景丢失校验凭证）。
 	refCount := 0
 	if ds := s.rt.dedupStore(f.owner); s.rt.dedupEnabled() && ds != nil {
 		refCount = ds.RemoveRef(rel, homeVol, cs)
 	}
-	if refCount == 0 {
-		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
-		if res, handled, rmErr := s.removeOrSoftDelete(f, homeVol, rel, quarRel, info, input); handled {
-			return res, rmErr
-		}
-	} else {
+	// C-MAJOR-2 修复：dedup 硬链引用（refCount>0）时主文件被**硬 unlink**（无论 SoftDelete
+	// 都不进 trash、不可恢复）——meta 无保留意义，须随删（下方 removeFileMeta 的
+	// `!input.SoftDelete` 门控只对"软删可恢复"场景成立）。unlinked 标记硬删已完成。
+	unlinked := false
+	// B-M5 修复：摘除目录项（unlink）失败 → 主文件仍在卷上，**不得删 meta**——
+	// 否则主文件失去校验凭证（读路径直算兜底，但可信卷承诺"每文件必有隐藏 meta"
+	// 被打破）。unlink 失败记错误后返回失败（主文件保留，不继续收尾）。
+	if refCount > 0 {
 		// 仍有其它引用：unlink 本 rel 目录项（inode 链接数-1，其余引用仍指向同一 inode），
 		// 配额不减。硬链接下 Remove(quarRel) 即 unlink——另一引用（b.txt）的 inode 保留。
 		if err := f.root.Remove(quarRel); err != nil {
 			f.logger.ErrorContext(f.ctx, "摘除去重引用失败", "file_name", f.remotePath, "error", err.Error())
+			return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile}
+		}
+		unlinked = true
+	} else if refCount == 0 {
+		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
+		// C-MAJOR-1 修复：软删（handled=true）也走统一后台收尾（checksum 台账/索引/
+		// 计量/事件）——原实现直接 return 跳过后台收尾，软删后 search 仍命中、台账仍
+		// 含该 rel（残留到再次写入）。这里改为软删成功后**不 return**，落入下方统一收尾
+		// （软删保留 meta 供恢复由 `if !input.SoftDelete` 门控——recovered 后仍可恢复）。
+		if res, handled, rmErr := s.removeOrSoftDelete(f, homeVol, rel, quarRel, info, input); handled && rmErr != nil {
+			return res, rmErr
 		}
 	}
 	if csStore := s.rt.checksumStore(f.owner); csStore != nil {
@@ -1419,11 +1533,36 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDelete()
 	}
-	s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
-	f.logger.InfoContext(f.ctx, "文件已删除", "file_name", f.remotePath)
+	// 可信卷：**删除成功收尾**联动删除配套 .meta（服务端内部文件随主文件一起删，
+	// 防残留；此时主文件已确认删除/软删成功——软删场景保留 meta 供恢复，见下）。
+	// C1 修复：删除 meta 时按实际大小释放其 meta 桶配额（写侧 WriteMeta 已 Commit，
+	// 删除须对称 ReleaseUsage——否则 owner meta 桶 Scope 随删除永久虚高/假 507）。
+	// C5 修复：不闸 fileMetaEnabled——disable 只停新建不停清理（enable 期写入的存量
+	// sidecar 在 disable 后删除主文件仍须清理；内部按存在性判断，无 meta no-op）。
+	// C-MAJOR-2 修复：`!input.SoftDelete || unlinked`——软删可恢复场景保留 meta 供恢复；
+	// dedup 硬链已硬 unlink（不可恢复）的 rel 也删 meta（否则孤儿 + meta 桶配额永不释放）。
+	if s.metaShouldClean(input, unlinked) {
+		s.removeFileMeta(f, rel)
+	}
+	// C-MAJOR-1 修复：audit/logger 对软删跳过（removeOrSoftDelete 内已记「软删到回收站」）——
+	// 仅硬删在统一收尾记录，防重复审计行。
+	if !input.SoftDelete {
+		s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
+		f.logger.InfoContext(f.ctx, "文件已删除", "file_name", f.remotePath)
+	}
 	// 文件变更事件：delete 成功（幂等删除不推送——无实际变更）。
 	s.rt.publishFileEvent(EventDelete, f.owner, rel, 0)
+	if input.SoftDelete {
+		return DeleteFileResult{RemotePath: f.remotePath, Message: "文件已移入回收站"}, nil
+	}
 	return DeleteFileResult{RemotePath: f.remotePath, Message: fmt.Sprintf("文件删除成功: %s", f.remotePath)}, nil
+}
+
+// metaShouldClean 判定删除收尾是否清理 meta sidecar（C-MAJOR-2/gocognit 抽离）：
+// 软删可恢复场景保留 meta 供恢复（!SoftDelete 才删）；dedup 硬链已硬 unlink 的 rel
+// 无论 SoftDelete 都删（不可恢复，孤儿 + meta 桶配额永不释放）。
+func (s *Service) metaShouldClean(input DeleteFileInput, unlinked bool) bool {
+	return !input.SoftDelete || unlinked
 }
 
 // removeOrSoftDelete 引用归零后的真正删除：软删（quarantine → trash 桶，保留原 rel 供

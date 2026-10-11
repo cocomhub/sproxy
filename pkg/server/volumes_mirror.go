@@ -258,6 +258,8 @@ func (h *Handlers) checkCopyTarget(cvc *copyVolumeCtx, targetOverwrite bool) (in
 				Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
 				Result: AuditResultSuccess, Detail: "目标已存在且 checksum 一致（幂等）",
 			})
+			// P1-8 修复：幂等命中时也确保目标有 meta（存量副本可能缺 sidecar）。
+			h.writeCopyMeta(cvc)
 			return http.StatusOK, mirrorCopyResponse{Success: true, Message: "目标已存在且内容一致，无需复制", Checksum: srcCS, Idempotent: true}, true
 		}
 		if !targetOverwrite {
@@ -339,29 +341,41 @@ func (h *Handlers) commitCopyResult(cvc *copyVolumeCtx, scope *quota.Scope, toPo
 		}
 	}
 
-	// checksum 台账：目标卷副本也登记（与上传一致，供后续幂等/删除校验复用）。
-	if cs := h.checksumStoreFor(cvc.owner); cs != nil {
-		cs.Set(cvc.rel, serverChecksumOf(written))
-	}
-
 	// 计算实际写入 checksum（流式复制未计哈希——补算，幂等/校验用）。
 	srcCS, cerr := FileChecksumRoot(cvc.fromRoot, cvc.rel)
 	if cerr != nil {
 		srcCS = ""
+	}
+	// checksum 台账：目标卷副本也登记（与上传一致，供后续幂等/删除校验复用）。
+	// 必须在实测 srcCS 算出**之后**写入——此前用 serverChecksumOf（恒空串）占位，
+	// 使 attachChecksum/writeChunkSuccess 命中空 checksum 提前返回、X-File-Checksum 为空
+	// （客户端整文件校验降级；P2 对抗评审）。
+	if srcCS != "" {
+		if cs := h.checksumStoreFor(cvc.owner); cs != nil {
+			cs.Set(cvc.rel, srcCS)
+		}
 	}
 	h.RecordAudit(cvc.ctx, AuditEvent{
 		Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
 		Result: AuditResultSuccess, Detail: "from=" + cvc.fromVol + " to=" + cvc.toVol,
 	})
 	h.logger.Info("跨卷复制成功", "file_name", cvc.remotePath, "from", cvc.fromVol, "to", cvc.toVol)
+	// P1-8 修复：跨卷副本在目标卷重建 meta sidecar（与 move 的 moveMetaAfterVolumeMove
+	// 对称）——否则镜像/复制产物无完整性证据、下载零校验。失败 Warn 兜底（读路径直算）。
+	h.writeCopyMeta(cvc)
 	return http.StatusOK, mirrorCopyResponse{Success: true, Message: fmt.Sprintf("文件已复制: %s (%s → %s)", cvc.remotePath, cvc.fromVol, cvc.toVol), Checksum: srcCS, Size: written}
 }
 
-// serverChecksumOf 占位：流式复制不产出哈希，checksum 台账以源文件实测为准
-// （见 copyFileBetweenVolumes 补算分支）。此处保持函数存在以防未来流式复制返回哈希。
-func serverChecksumOf(written int64) string {
-	_ = written
-	return ""
+// writeCopyMeta 在跨卷复制目标卷重建 meta sidecar（best-effort：失败仅 Warn——读路径
+// 直算兜底不阻断复制）。目标为本地卷；tenant/rel 由 copyVolumeCtx 提供。
+func (h *Handlers) writeCopyMeta(cvc *copyVolumeCtx) {
+	if cvc.toTnt == nil || cvc.toTnt.Root() == nil {
+		return
+	}
+	if mErr := (filesMetaPolicy{h: h}).WriteMeta(cvc.ctx, cvc.owner, cvc.toTnt.Root(), cvc.rel); mErr != nil {
+		h.logger.Warn("跨卷复制目标 meta 落盘失败（读路径直算兜底）",
+			"file_name", cvc.remotePath, "to", cvc.toVol, "error", mErr)
+	}
 }
 
 // mirrorVolumeStats 是单次 mirrorVolume 的统计结果。

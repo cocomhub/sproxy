@@ -12,7 +12,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -119,3 +122,49 @@ func webDAVRequest(t *testing.T, cl *http.Client, baseURL, method, path, body st
 
 var _ = bytes.NewReader
 var _ = context.Background
+
+// TestWebDAVServer_OverwriteKeepsDownloadVerifiable P1 回归：经 /api/upload 写入（已有
+// sidecar）后，用 /dav/ PUT 覆盖同 rel —— sidecar 必须同步更新为**新内容**哈希，否则
+// 读路径按旧 meta 校验新内容恒失配（fail-closed 固化不可读，幂等重传不自愈）。
+func TestWebDAVServer_OverwriteKeepsDownloadVerifiable(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr, cleanup := newTestServerCreds(t, func(cfg *Config) { cfg.WebDAV.Enabled = true })
+	defer cleanup()
+	c1 := []byte("original-content-aaaa")
+	c2 := []byte("replaced-content-bbbb")
+	if st := uploadFileSigned(t, url, "docs/a.txt", c1); st != 200 {
+		t.Fatalf("upload = %d", st)
+	}
+	// sidecar 初始记录 C1。
+	if findMetaSHA(t, cfgPtr.Load().StorageRoot, sha256hex(c1)) == "" {
+		t.Fatal("上传后 sidecar 应记录 C1 的 sha256")
+	}
+	cl := &http.Client{Transport: netutil.IsolatedTransport()}
+	resp := webDAVRequest(t, cl, url, http.MethodPut, "/dav/docs/a.txt", string(c2))
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		t.Fatalf("WebDAV PUT 覆盖 = %d", resp.StatusCode)
+	}
+	// 覆盖写后 sidecar 必须记录 C2（不得仍是 C1）。
+	if p := findMetaSHA(t, cfgPtr.Load().StorageRoot, sha256hex(c2)); p == "" {
+		t.Fatal("覆盖写后 sidecar 未同步更新为新内容（Dav 旁路陈旧 sidecar）")
+	}
+}
+
+// findMetaSHA 在存储根的 sidecar 中查找包含给定 sha256 的文件路径（找不到返回空）。
+func findMetaSHA(t *testing.T, root, sha string) string {
+	t.Helper()
+	found := ""
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".meta") {
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr == nil && bytes.Contains(b, []byte(sha)) {
+			found = p
+		}
+		return nil
+	})
+	return found
+}

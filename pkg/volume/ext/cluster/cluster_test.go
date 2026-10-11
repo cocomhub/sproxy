@@ -140,6 +140,12 @@ func TestHolderRel_Bridge(t *testing.T) {
 	if err3 != nil || got3 != "docs/user/tutorial.mp4" {
 		t.Fatalf("holderRel(alice/user/docs/user/tutorial.mp4)=%q err=%v want docs/user/tutorial.mp4", got3, err3)
 	}
+	// 第 4 轮对抗评审回归：用户目录名恰为 `user` → `alice/user/user/x.bin` 剥到
+	// `user/x.bin`（此前又无条件 TrimPrefix("user/") → 误剥成 `x.bin`：404 或返回另一文件内容）。
+	got4, err4 := cf.holderRel("alice/user/user/x.bin")
+	if err4 != nil || got4 != "user/x.bin" {
+		t.Fatalf("holderRel(alice/user/user/x.bin)=%q err=%v want user/x.bin", got4, err4)
+	}
 	// 空结果 → 报错。
 	if _, err := cf.holderRel("user/"); err == nil {
 		t.Fatal("剥前缀后空应报错")

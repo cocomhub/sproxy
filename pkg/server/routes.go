@@ -824,6 +824,10 @@ func isWriteFaceRoute(path, method string) bool {
 		return true
 	case path == "/api/ai/privacy/purge":
 		return true
+	// S3 兼容网关写面（P1：原先不在写面集合，集群只读副本仍可经 /s3/ 写入
+	// user/meta 桶——同节点 /upload 会 503 而 S3 PUT 200，副本状态与主分叉）。
+	case strings.HasPrefix(path, "/s3/") && method != http.MethodGet && method != http.MethodHead:
+		return true
 	}
 	return false
 }

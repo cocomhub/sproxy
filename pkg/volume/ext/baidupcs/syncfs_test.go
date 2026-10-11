@@ -166,3 +166,23 @@ func TestStorageFS_Rename(t *testing.T) {
 }
 
 var _ syncpkg.FS = (*StorageFS)(nil)
+
+// TestEntryFromMeta_EtagNotMD5 M3 实测回归：百度分片上传后 Stat 的 ETag 是片 md5 组合/
+// 服务端标记"可能不正确"，**非整文件 md5**（9MB 实测：本地 8f566ecd vs 远端 18df0a1a）。
+// entryFromMeta 必须标 "etag"（与 s3 一致，诚实表达服务端对象标识）——若标 "md5"，
+// Equal 的 commonChecksumAlgo 会取 md5 交集比对 → 相同内容恒判不等（误判损坏重下）。
+func TestEntryFromMeta_EtagNotMD5(t *testing.T) {
+	t.Parallel()
+	// 模拟分片上传后 Stat 返回：ETag 是服务端字段（片组合/可能不正确），非本地整文件 md5。
+	m := ObjectMeta{Key: "user/big.bin", Size: 9437184, ETag: "18df0a1a48fd23ac82bbc042dcc69bc0"}
+	e := entryFromMeta(m)
+	if e.ChecksumType != "etag" {
+		t.Fatalf("百度 ETag 应标 etag（分片上传非整文件 md5）, got %q", e.ChecksumType)
+	}
+	if e.Checksums["md5"] != "" {
+		t.Fatal("不得把百度 ETag 冒充 md5（Checksums[md5] 应缺失）")
+	}
+	if got := e.Checksums["etag"]; got != m.ETag {
+		t.Fatalf("Checksums[etag] = %q, want %q", got, m.ETag)
+	}
+}

@@ -32,9 +32,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -120,6 +122,9 @@ func (h *Handlers) externalVolumeState(name string, be registry.ExternalBackend)
 	defer cancel()
 	state := volumeStateHealthy
 	if err := probe.Ping(ctx); err != nil {
+		if errors.Is(err, syncpkg.ErrUnsupported) {
+			return volumeStateUnknown // 记账包装层转发，内层未实现探针 → 不误报 degraded
+		}
 		state = volumeStateDegraded
 		// 告警引擎挂点（roadmap P1 阈值告警）：卷 degraded 即时告警（nil = 未启用）。
 		if h.alertEngine != nil {
@@ -391,6 +396,13 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	if !rOk {
 		return status, resp
 	}
+	// M3 修复：迁移前**探测 meta 配额**（owner 全局 → 目标卷池，metaEstimate 探测即释放）——
+	// 原设计 move 后 moveMetaAfterVolumeMove 重建目标 meta 仅 Warn，目标 meta 桶配额不足时
+	// move 静默成功 → 源 meta 已删、目标无 meta（不可信，读路径永久直算）。探测在写前
+	// fail-closed：meta 配额不足 507 拒绝，不让 move 进入"目标无 meta"状态。
+	if pStatus, pResp, pOk := h.moveProbeMetaQuota(owner, rel, toVol, size); !pOk {
+		return pStatus, pResp
+	}
 
 	// 流式复制到 to 卷（临时 + fsync + 原子 rename）；失败回滚双预留，源不动。
 	written, status, resp, cOk := h.moveCopyToTarget(mc, size, scopeRes, poolRes)
@@ -400,6 +412,49 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 
 	// 删源三分支 + 双 commit/release 结算（语义见 moveDeleteSource）。
 	return h.moveDeleteSource(mc, written, scope, scopeRes, poolRes)
+}
+
+// moveProbeMetaQuota 探测目标卷 meta 桶配额是否足够容纳 FileMeta sidecar（M3）：
+// 用 metaEstimate（上限估算）经 owner 全局 scope 与目标卷池 TryReserve 探测、立即释放
+// （探测即释放不落地，与 transferQuotaGate 同语义）——不足 → 507 fail-closed（迁移拒绝，
+// 防止"目标无 meta"的静默成功）。估算偏保守（每 1MiB 一块 × 150B JSON + 固定头），
+// 不足时提前拒绝；精确记账仍由 moveMetaAfterVolumeMove 的 WriteMeta 内部完成。
+func (h *Handlers) moveProbeMetaQuota(owner, rel, toVol string, size int64) (int, UploadResponse, bool) {
+	est := metaEstimateForSize(size)
+	if est <= 0 {
+		return 0, UploadResponse{}, true
+	}
+	if scope := h.quotaScopeFor(owner, meta.MetaPath(rel)); scope != nil {
+		r, rerr := scope.TryReserve(est)
+		if rerr != nil {
+			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
+		}
+		r.Release()
+	}
+	if pool := h.volSet.Pool(toVol); pool != nil {
+		r, rerr := pool.TryReserve(est)
+		if rerr != nil {
+			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
+		}
+		r.Release()
+	}
+	return 0, UploadResponse{}, true
+}
+
+// metaEstimateForSize 估算 FileMeta sidecar 上限字节（M3 探测用；按 1MiB 分块 ×
+// ~150B/块 JSON + 固定头，保守上限——实际 meta 通常更小，探测提前拒绝最坏情况）。
+func metaEstimateForSize(size int64) int64 {
+	if size <= 0 {
+		return 0
+	}
+	const chunk = int64(1 << 20) // 1MiB 最小分块（minMetaChunkSize）
+	blocks := size / chunk
+	if size%chunk != 0 {
+		blocks++
+	}
+	const perBlock = int64(150) // 每块 ChunkMeta JSON 上限
+	const header = int64(512)   // 固定头（总哈希/Size/ChunkSize/Name）
+	return blocks*perBlock + header
 }
 
 // moveOKResp 构造跨卷移动成功响应体。
@@ -566,6 +621,10 @@ func (h *Handlers) moveCommitConcurrentDeleted(mc *moveFileCtx, written int64, s
 	if poolRes != nil {
 		poolRes.Commit(written)
 	}
+	// B-M3 修复：并发删除分支目标卷已持数据但无 meta sidecar（正常路径的
+	// moveMetaAfterVolumeMove 不在此分支）——补目标卷 meta 重建；源 meta 已由并发
+	// delete 的 removeFileMeta 清理，源清理 stat 不到自然 no-op。
+	h.moveMetaAfterVolumeMove(mc)
 	h.RecordAudit(mc.r.Context(), AuditEvent{
 		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
 		Result: AuditResultSuccess, Detail: "源已被并发删除，目标卷已持数据（from 侧账本由并发 delete 释放）",
@@ -606,6 +665,11 @@ func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quot
 	if fromPool := h.volSet.Pool(mc.fromVol); fromPool != nil {
 		fromPool.ReleaseCommitted(written)
 	}
+	// M3 修复：跨卷 move 成功后在目标卷**重建 meta sidecar**、删除源卷 meta 并释放
+	// 其配额——否则源卷留孤儿 .meta（磁盘+配额双泄漏）、目标卷文件无 sidecar。
+	// 重建复用 filesMetaPolicy.WriteMeta（与上传到达即建同一入口，覆盖差分 + 配额记账）；
+	// 源侧删除 + ReleaseUsage 与单文件删除联动同构。软删/并发删除路径不在此（moveCommitConcurrentDeleted）。
+	h.moveMetaAfterVolumeMove(mc)
 
 	h.RecordAudit(mc.r.Context(), AuditEvent{
 		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
@@ -613,6 +677,32 @@ func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quot
 	})
 	h.logger.Info("跨卷移动成功", "file_name", mc.remotePath, "from", mc.fromVol, "to", mc.toVol)
 	return moveOKResp(fmt.Sprintf("文件已移动: %s (%s → %s)", mc.remotePath, mc.fromVol, mc.toVol))
+}
+
+// moveMetaAfterVolumeMove 跨卷移动后 meta sidecar 重建/清理：目标卷重建（复用
+// filesMetaPolicy.WriteMeta 覆盖差分 + 配额记账）、源卷删除 meta + 释放 meta 桶配额。
+// B-M4 修复：**目标重建闸 disable（disable 不新建），源清理不闸**——disable 只停新建
+// 不停清理（C5 语义）：enable 期写入的源 meta 在 disable 后移动仍须清理（防孤儿 +
+// 配额泄漏），与单文件删除联动同构。
+func (h *Handlers) moveMetaAfterVolumeMove(mc *moveFileCtx) {
+	// 目标卷重建（WriteMeta 幂等覆盖：同 rel 目标已有 meta 则 Adjust 差分；无则新
+	// 目标卷重建恒执行（meta 恒生成，skip_verify 只关读侧校验）。
+	if mErr := h.filesMetaWriteAfterRestore(mc.toRoot, mc.owner, mc.rel); mErr != nil {
+		h.logger.Warn("跨卷移动后目标卷 meta 重建失败（读路径直算兜底）", "file_name", mc.remotePath, "error", mErr)
+	}
+	// 源卷删除 meta + 释放 meta 桶配额（与单文件删除联动同构；不闸 disable——
+	// 存量 sidecar 在 disable 后移动仍须清理）。
+	srcMeta := meta.MetaPath(mc.rel)
+	metaSize := int64(0)
+	if e, serr := mc.fromRoot.Stat(srcMeta); serr == nil && e != nil {
+		metaSize = e.Size()
+	}
+	_ = mc.fromRoot.Remove(srcMeta)
+	if metaSize > 0 {
+		if scope := h.quotaScopeFor(mc.owner, srcMeta); scope != nil {
+			scope.ReleaseUsage(metaSize)
+		}
+	}
 }
 
 // rebalanceFileEntry 是 rebalance 候选文件（user 桶内，递归收集）。

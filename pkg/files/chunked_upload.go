@@ -1187,6 +1187,13 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 
 	// 上传成功的共同副作用内核（mtime + checksum 台账），与单次上传同源。
 	s.recordUploadSuccess(tnt.Root(), owner, session.Filename, rel, finalChecksum, session.FileModTime, s.rt.logger())
+	// 可信卷：分块上传 complete 后同样到达即建 meta（C-CRITICAL-2 修复——与单次上传
+	// writeFileSettle 一致，分块传完也有 .meta sidecar）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(context.Background(), owner, tnt.Root(), rel); mErr != nil {
+			s.rt.logger().Warn("可信卷 meta 落盘失败（分块上传，读路径直算兜底）", "file_name", session.Filename, "error", mErr)
+		}
+	}
 
 	// 标记完成（延迟清理 session 目录）
 	store := s.rt.uploadStore(owner)

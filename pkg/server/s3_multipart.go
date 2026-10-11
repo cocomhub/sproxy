@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -296,6 +297,13 @@ func (h *Handlers) s3CompleteReserve(w http.ResponseWriter, plan *s3CompletePlan
 	}, true
 }
 
+// removePartialS3 删除半截目标 + 其旧 sidecar：multipart complete 失败清理若只删主文件，
+// 已有对象的旧 sidecar 成孤儿/陈旧（读校验固化失败、meta 桶配额虚高；P2 对抗评审）。
+func removePartialS3(root *storage.Root, rel string) {
+	_ = root.Remove(rel)
+	_ = root.Remove(meta.MetaPath(rel))
+}
+
 // s3CompleteWriteParts 打开目标文件并逐 part 单遍拷贝+哈希+ETag 校验；
 // 任一失败已回包并清理（关目标+释放双预留+删半截目标），返回 ok=false 与累积的 md5 字节。
 func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan, resv *s3CompleteReservation) ([]byte, bool) {
@@ -314,7 +322,7 @@ func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan, resv *s3C
 		if perr != nil {
 			f.Close()
 			resv.release()
-			_ = plan.root.Remove(plan.rel)
+			removePartialS3(plan.root, plan.rel)
 			http.Error(w, fmt.Sprintf("s3: part %d 缺失", p.PartNumber), http.StatusBadRequest)
 			return nil, false
 		}
@@ -324,7 +332,7 @@ func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan, resv *s3C
 		if cerr != nil {
 			f.Close()
 			resv.release()
-			_ = plan.root.Remove(plan.rel)
+			removePartialS3(plan.root, plan.rel)
 			http.Error(w, "s3: part 拼接失败", http.StatusInternalServerError)
 			return nil, false
 		}
@@ -332,7 +340,7 @@ func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan, resv *s3C
 		if normalizeETag(p.ETag) != actual {
 			f.Close()
 			resv.release()
-			_ = plan.root.Remove(plan.rel)
+			removePartialS3(plan.root, plan.rel)
 			http.Error(w, fmt.Sprintf("s3: part %d ETag 不匹配（期望 %s 实际 %s）", p.PartNumber, normalizeETag(p.ETag), actual), http.StatusBadRequest)
 			return nil, false
 		}
@@ -341,7 +349,7 @@ func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan, resv *s3C
 	}
 	if f.Close() != nil {
 		resv.release()
-		_ = plan.root.Remove(plan.rel)
+		removePartialS3(plan.root, plan.rel)
 		http.Error(w, "s3: 目标关闭失败", http.StatusInternalServerError)
 		return nil, false
 	}
@@ -394,6 +402,11 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	s3CompleteSettle(resv, total)
 
 	_ = plan.root.Remove(chunkPrefix + multipartPartPrefix + plan.uploadID + ".meta")
+	// M1 修复：multipart complete 是本地旁路写（root 直写不经 files.Service）——补
+	// 「到达即建」meta（与单次 s3 PUT/上传一致）；失败 Warn 兜底不阻断成功响应。
+	if mErr := (filesMetaPolicy{h: h}).WriteMeta(r.Context(), plan.owner, plan.root, plan.rel); mErr != nil {
+		h.logger.Warn("s3 multipart 写后 meta 落盘失败（读路径直算兜底）", "key", key, "error", mErr)
+	}
 	// 响应：Key（XML 转义防注入）+ 复合 ETag（S3 分块标准形态，可选增强；哈希已在循环内）。
 	w.Header().Set(headerContentType, "application/xml")
 	comp := md5.Sum(partMd5s) //nolint:gosec // G401: S3 复合 ETag 协议要求 MD5（非安全用途）

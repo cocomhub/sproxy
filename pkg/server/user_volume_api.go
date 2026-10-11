@@ -18,8 +18,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -63,6 +67,20 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "type 未注册或 extra 非法: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// 卷级容量记账（FS 层）：从**创建期**即包 CapacityFS（此前只有重启 restore 才包，
+	// 新建卷在本次进程内 Capacity 不生效——顺手修）。计数器持久化到与 restore 相同的
+	// 路径 <root>/<owner>/meta/volume/<name>.capacity（**非 .json**：避开 UserVolumeStore
+	// 的 *.json 扫描，防计数文件被误当卷元数据）；重启后 Load 续用。
+	counterPath := filepath.Join(h.userVolumes.Root(), owner, "meta", "volume", req.Name+".capacity")
+	counter, lerr := capacity.Load(counterPath, req.Capacity)
+	if lerr != nil {
+		sendJSONResponse(w, map[string]string{"error": "容量快照读取失败: " + lerr.Error()}, http.StatusInternalServerError)
+		return
+	}
+	if counter.CorruptSnapshot() {
+		h.logger.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", req.Name, "owner", owner, "path", counterPath)
+	}
+	be = capacity.WrapBackend(be, counter)
 	// store 落盘（重名拒绝）。
 	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra}
 	if err := h.userVolumes.Create(owner, uv); err != nil {
@@ -99,8 +117,45 @@ func (h *Handlers) listUserVolumesHandler(w http.ResponseWriter, r *http.Request
 				}
 			}
 		}
+		// 敏感信息防护（D-CRITICAL 修复）：store.Get 已把 ExtraEnc 解密回填 Extra——
+		// 直接序列化会把凭据（bduss/stoken/access_key/secret_key 等）明文回传给浏览器。
+		// 列表响应只暴露非敏感配置（root/capacity/binary_path），凭据键剔除。
+		vols[i].Extra = redactVolumeExtra(vols[i].Extra)
 	}
 	sendJSONResponse(w, userVolumesListResponse{Volumes: vols}, http.StatusOK)
+}
+
+// sensitiveVolumeExtraKeys 是卷 Extra 中的凭据/敏感键（回显时剔除）。
+var sensitiveVolumeExtraKeys = []string{
+	"bduss", "stoken", "ptoken", "cookies", "access_key_secret", "secret_key",
+	"access_key", "client_secret", "password", "token",
+}
+
+// redactVolumeExtra 剔除卷 Extra 中的凭据键（保留配置键如 root/local_root/binary_path/capacity）。
+// 防御纵深：即使 store 未加密（masterKey 为 nil 旧装配）也不把凭据回传。
+func redactVolumeExtra(extra map[string]any) map[string]any {
+	if len(extra) == 0 {
+		return extra
+	}
+	out := make(map[string]any, len(extra))
+	for k, v := range extra {
+		if isSensitiveVolumeKey(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// isSensitiveVolumeKey 判定卷 Extra 键是否为凭据（含 key/secret/password/token 形态）。
+func isSensitiveVolumeKey(k string) bool {
+	lk := strings.ToLower(k)
+	if slices.Contains(sensitiveVolumeExtraKeys, lk) {
+		return true
+	}
+	return strings.Contains(lk, "secret") || strings.Contains(lk, "password") ||
+		strings.Contains(lk, "bduss") || strings.Contains(lk, "stoken") ||
+		strings.Contains(lk, "access_key")
 }
 
 // deleteUserVolumeHandler 处理 DELETE /api/volumes/user?name=<n>。
@@ -134,17 +189,20 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "卷被活跃同步任务引用，请先取消任务"}, http.StatusConflict)
 		return
 	}
-	// Set 移除（Close 后端）+ store 删文件。
-	if err := h.volSet.RemoveExternalVolume(name); err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
-		return
-	}
+	// 先删 store 元数据（失败则 Set 不变，无需回滚），再摘除运行时卷，最后清计数文件。
 	if err := h.userVolumes.Delete(owner, name); err != nil {
-		// Set 已移除但 store 删除失败：回滚 Add（尽力恢复一致性）。
-		_ = h.volSet.AddExternalVolume(volume.Volume{Name: name, Type: v.Type, Extra: v.Extra}, nil)
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
+	if err := h.volSet.RemoveExternalVolume(name); err != nil {
+		// store 已删但 Set 摘除失败：回滚重建 store 元数据（Set 未变，保持一致）。
+		_ = h.userVolumes.Create(owner, *v)
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	// **不删容量计数文件**：卷删除仅移除元数据/句柄，远端已写入的字节仍在（本系统不删
+	// 远端内容）；保留 used 使同名重建时 Load 到旧占用（否则 delete+recreate 把上限变成
+	// 「每轮限额 × 轮数」，绕过「Σ占用 ≤ 卷限额」）。计数文件为安全保留，非泄漏。
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 

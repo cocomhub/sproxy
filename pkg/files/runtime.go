@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -56,10 +57,63 @@ type runtime struct {
 	bandwidth     BandwidthLimiter
 	eventSink     EventListener
 	contentIndex  bool
+	fileMeta      FileMetaPolicy
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
 func (rt runtime) contentIndexEnabled() bool { return rt.contentIndex }
+
+// fileMetaEnabled 报告可信卷 meta 能力是否装配且启用（缺省 false 零回归）。
+func (rt runtime) fileMetaEnabled() bool {
+	return rt.fileMeta != nil && rt.fileMeta.Enabled()
+}
+
+// writeMetaSidecar 委托装配层实现写配套 .meta（本地卷上传到达即建；未装配 = 无操作）。
+// owner 为文件归属（配额记账按 owner 的 meta 桶 Scope）。
+func (rt runtime) writeMetaSidecar(ctx context.Context, owner string, root *storage.Root, rel string) error {
+	if rt.fileMeta == nil {
+		return nil
+	}
+	return rt.fileMeta.WriteMeta(ctx, owner, root, rel)
+}
+
+// verifyDownload 委托装配层下载流逐分块校验（信任保证演进；未装配/无 meta/skip_verify
+// → 返回 nil 直通——零回归）。
+//
+// 加密卷：sidecar 由 `computeMeta` 走 `root.Open`（**密文**）计算，而本路径的读取流是
+// `root.OpenDecrypted`（**明文**）——两者必然失配，长度探测也因 `SeekEnd` 返回密文长度
+// 而不报警。加密卷的完整性由卷内 GCM 认证保证，故与 `chunked_download.go` 同口径直接
+// 跳过（否则加密卷 `/download` 恒被截断/客户端 unexpected EOF）。
+func (rt runtime) verifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error) {
+	if rt.fileMeta == nil {
+		return nil, nil
+	}
+	if root != nil && root.IsEncrypted() {
+		return nil, nil
+	}
+	return rt.fileMeta.VerifyDownload(ctx, root, rel, r)
+}
+
+// sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（崩溃残留）。best-effort：删除失败
+// 仅忽略（下次写同 rel 再试）；目录不可读无孤儿可清。删除联动调用（m4：文件删除后
+// 孤儿常驻，删除路径也自愈）。
+// MINOR-8 修复：兼容两种 tmp 命名——filesMetaPolicy.atomicWriteMeta 的 `.tmp.<nano>`
+// （点）与 LocalFS.writeFileAtomic 的 `.tmp-*`（连字符，装饰器 meta 写经 inner 用此）；
+// 原只匹配点前缀，LocalFS 崩溃残留 `.tmp-*` 孤儿永不清理。
+func (rt runtime) sweepMetaTmp(root *storage.Root, mrel string) {
+	dir := path.Dir(mrel)
+	baseDot := path.Base(mrel) + ".tmp."
+	baseDash := path.Base(mrel) + ".tmp-"
+	es, err := root.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range es {
+		if strings.HasPrefix(e.Name(), baseDot) || strings.HasPrefix(e.Name(), baseDash) {
+			_ = root.Remove(path.Join(dir, e.Name()))
+		}
+	}
+}
 
 // New 构造文件服务实例：**唯一必需项**是租户解析，其余能力由 Option 注入，未注入的
 // 回落内建「最小可用」默认（单卷、无配额、无台账、无版本、无审计、无计量、内建锁池）。
@@ -101,6 +155,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		bandwidth:    cfg.bandwidth,
 		eventSink:    cfg.eventSink,
 		contentIndex: cfg.contentIndex,
+		fileMeta:     cfg.fileMeta,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default

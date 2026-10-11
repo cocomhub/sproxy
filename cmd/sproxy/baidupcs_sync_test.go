@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -386,24 +387,45 @@ func TestOwnerQuotaTracker(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(100)
 	scope := pool.Scope("", 0)
-	q := &ownerQuotaTracker{scope: scope}
-	if err := q.ReserveUsage(40); err != nil {
+	q := quota.NewStagingTracker(scope)
+	ctx := context.Background()
+	if err := q.ReserveUsage(ctx, 40); err != nil {
 		t.Fatalf("ReserveUsage(40): %v", err)
 	}
 	if got := scope.Usage(); got != 40 {
 		t.Fatalf("Usage after reserve = %d, want 40", got)
 	}
-	if err := q.ReserveUsage(50); err != nil {
+	if err := q.ReserveUsage(ctx, 50); err != nil {
 		t.Fatalf("ReserveUsage(50): %v", err)
 	}
 	if got := scope.Usage(); got != 90 {
 		t.Fatalf("Usage = %d, want 90", got)
 	}
-	// 超限 → 错误。
-	if err := q.ReserveUsage(50); err == nil {
-		t.Fatal("超限应报错")
+	// 排队等待：超限（90+50>100）→ 挂起等待释放（不立即报错——用户裁定本地磁盘不足排队）。
+	waitRes := make(chan error, 1)
+	go func() { waitRes <- q.ReserveUsage(ctx, 50) }()
+	// 等排队者进入等待后释放 40 → 排队者获 50 完成（90-40+50=100 边界）。
+	select {
+	case err := <-waitRes:
+		t.Fatalf("排队中不应提前返回: %v", err)
+	default:
 	}
 	q.ReleaseUsage(40)
+	if err := <-waitRes; err != nil {
+		t.Fatalf("释放后排队者应获配额: %v", err)
+	}
+	if got := scope.Usage(); got != 100 {
+		t.Fatalf("Usage after queued reserve = %d, want 100", got)
+	}
+	// ctx 取消中断排队（无释放信号）。
+	cctx, cancel := context.WithCancel(ctx)
+	waitCancel := make(chan error, 1)
+	go func() { waitCancel <- q.ReserveUsage(cctx, 50) }()
+	cancel()
+	if err := <-waitCancel; err == nil {
+		t.Fatal("ctx 取消应中断排队")
+	}
+	q.ReleaseUsage(50)
 	q.ReleaseUsage(50)
 	if got := scope.Usage(); got != 0 {
 		t.Fatalf("Usage after release = %d, want 0", got)
@@ -549,7 +571,7 @@ func TestNewBaidupcsBackend_ExtraLocalRootWins(t *testing.T) {
 
 // TestSetupBaidupcsFactory_OwnerScope 验证工厂闭包按任务 owner 装配 per-owner quota：
 // scopeFor(ownerA) 与 scopeFor(ownerB) 各自独立 Scope（配额分桶不串），ownerScope nil
-// （该 owner 无配额）→ 不装配（StorageFS.quota 保持 nil，WriteFile 不受限）。
+// （该 owner 无配额）→ 不包装门卫（WriteFile 不受限）。
 func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
@@ -573,12 +595,17 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 			return nil // 无配额 owner → 不装配
 		}
 	}
-	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), scopeFor)
+	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), func(owner string) syncpkg.StagingQuotaTracker {
+		if sc := scopeFor(owner); sc != nil {
+			return quota.NewStagingTracker(sc)
+		}
+		return nil
+	})
 	if exec.BaidupcsFS == nil {
 		t.Fatal("装配 baidupcs 卷应注入工厂")
 	}
 
-	// ownerA 任务 → 工厂 → StorageFS WithQuota(scopeA)。
+	// ownerA 任务 → 工厂 → 返回包了 per-owner staging 门卫的 FS（scopeA）。
 	fsA, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
 	}, "alice")
@@ -596,7 +623,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 		t.Fatalf("scopeB Usage = %d, want 0（bob 配额未受 alice 影响）", got)
 	}
 
-	// ownerB 任务 → 工厂 → StorageFS WithQuota(scopeB)。
+	// ownerB 任务 → 工厂 → 返回包了 per-owner staging 门卫的 FS（scopeB）。
 	fsB, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
 	}, "bob")
@@ -611,7 +638,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 		t.Fatalf("scopeB Usage = %d, want 0（bob 写入成功且释放）", got)
 	}
 
-	// 无配额 owner（无 scopeFor 命中）→ StorageFS.quota nil，WriteFile 不受限。
+	// 无配额 owner（无 scopeFor 命中）→ 不包门卫，WriteFile 不受限。
 	fsC, _, err := exec.BaidupcsFS(context.Background(), syncmgr.RemoteConfig{
 		Name: "r-bd", Kind: syncmgr.RemoteKindBaidupcs, Volume: "mydisk",
 	}, "carol")
@@ -621,4 +648,15 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 	if werr := fsC.WriteFile(context.Background(), "c.txt", bytes.NewReader([]byte("data")), 4, 0); werr != nil {
 		t.Fatalf("WriteFile(carol 无配额): %v", werr)
 	}
+}
+
+// Move 服务端移动（StorageAPI 要求——fake 简化：内容转移 + 删源）。
+func (f *fakeBaidupcsStorage) Move(ctx context.Context, srcKey, dstKey string) (*baidupcs.ObjectMeta, error) {
+	data, ok := f.files[srcKey]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	delete(f.files, srcKey)
+	f.files[dstKey] = data
+	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
 }

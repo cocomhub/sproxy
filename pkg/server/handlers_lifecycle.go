@@ -110,9 +110,11 @@ func (h *Handlers) stopRemainingServices() {
 		h.cloudMgr.Close()
 	}
 	// 审计落盘：优雅停服 flush 并关闭日志文件句柄（Windows 句柄释放，TempDir cleanup 可删）。
+	// **不置 nil**：h.auditStore 自构造后只读，而停服时在途请求仍可能在 RecordAudit；
+	// 此处写字段会与之构成 field 级数据竞态（-race 必捕，曾偶发 TestRemoteWrite_ListenerEndToEnd
+	// 红）。「关闭后不再落盘」的口径由 AuditStore 自身的 closed 标记承担（其 Close 幂等）。
 	if h.auditStore != nil {
 		_ = h.auditStore.Close()
-		h.auditStore = nil
 	}
 	if h.shareStore != nil {
 		h.shareStore.Stop()

@@ -31,6 +31,8 @@ import (
 
 	"context"
 
+	"errors"
+
 	"fmt"
 
 	"io"
@@ -166,10 +168,6 @@ func (f *S3FS) keyFor(rel string) string {
 	if f.prefix == "" {
 		return rel
 	}
-
-	if f.prefix == "" {
-		return rel
-	}
 	return f.prefix + "/" + rel
 }
 
@@ -265,7 +263,7 @@ func (f *S3FS) Stat(ctx context.Context, relPath string) (*sync.Entry, error) {
 	info, err := f.client.StatObject(ctx, f.bucket, f.keyFor(clean), minio.StatObjectOptions{})
 
 	if err == nil {
-		return &sync.Entry{
+		e := &sync.Entry{
 			Name: path.Base(clean),
 
 			Path: clean,
@@ -275,7 +273,17 @@ func (f *S3FS) Stat(ctx context.Context, relPath string) (*sync.Entry, error) {
 			MTime: info.LastModified.UnixNano(),
 
 			IsDir: false,
-		}, nil
+		}
+		// S3 校验和信息（用户裁定：每个 entry 提供已知的所有校验和数据）：
+		// ETag 是服务端对象标识（单 PUT = 内容 MD5；分片 = 片 MD5 组合，非权威整文件
+		// 哈希）——作为 "etag" 算法值提供，供 Equal 按可用算法比对；无 sha256（S3
+		// 不返回整文件内容哈希）。
+		if info.ETag != "" {
+			e.Checksum = info.ETag
+			e.ChecksumType = "etag"
+			e.Checksums = map[string]string{"etag": info.ETag}
+		}
+		return e, nil
 	}
 
 	if !isNotFound(err) {
@@ -299,6 +307,14 @@ func (f *S3FS) Stat(ctx context.Context, relPath string) (*sync.Entry, error) {
 	}
 
 	if isNotFound(dirErr) {
+		// 隐式前缀目录：目录仅由 WriteFile("dir/a") 产生（无占位对象）时，ListDir 会
+		// 经 CommonPrefixes 列出该目录，但 Stat 的对象探测均 NotFound——两者自相矛盾
+		// （EXT-7）。用一次 ListObjects(Prefix) 判定隐式目录。
+		for obj := range f.client.ListObjects(ctx, f.bucket, minio.ListObjectsOptions{Prefix: f.keyFor(clean) + "/", MaxKeys: 1, Recursive: false}) {
+			if obj.Err == nil {
+				return &sync.Entry{Name: path.Base(clean), Path: clean, IsDir: true}, nil
+			}
+		}
 		return nil, nil // 不存在
 	}
 
@@ -323,9 +339,8 @@ func (f *S3FS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, err
 // 内建自动分片 + 失败自动 Abort 防孤儿；PartSize 透传可配分片大小）+ 显式失败重试
 // （UploadRetries 次退避）；小文件（< 阈值）单 PutObject 零回归。
 func (f *S3FS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
-	if size < 0 {
-		size = 0
-	}
+	// size<0（未知长度）：透传给 minio（其内部走 putObjectMultipartStreamNoLength 流式读
+	// 到 EOF）。**不得钳为 0**——那会声明 0 字节却带非空 body（数据丢失/语义冲突）。
 
 	mo := multipartOptsFromConfig(f.cfg)
 	key := f.keyFor(relPath)
@@ -411,31 +426,46 @@ func joinRel(dir, name string) string {
 }
 
 // isNotFound 判定 S3 错误是否为不存在（对象/桶不存在）。
-
+// m8 修复：errors.As 沿包装链找 *minio.ErrorResponse（任一层 %w 包装仍可判定）；
+// 未命中时回退 minio.ToErrorResponse（minio 内部从 resp 解析，处理错误链语义），最后
+// 字符串兜底。原实现用精确类型断言（err.(*minio.ErrorResponse)），任一 %w 包装后
+// 断言失败 → 把「不存在」误判为真失败（Stat 重试循环烧请求）。
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	var respErr minio.ErrorResponse
-
-	if asErr, ok := err.(minio.ErrorResponse); ok {
-		respErr = asErr
-	} else if ok2, ok3 := err.(*minio.ErrorResponse); ok2 != nil && ok3 {
-		respErr = *ok2
+	var target *minio.ErrorResponse
+	if errors.As(err, &target) && target != nil {
+		return isNotFoundCode(target.Code) || notFoundText(err)
 	}
+	// 非 *ErrorResponse 链：minio.ToErrorResponse 提取（包装内部错误时仍能解出 Code）。
+	parsed := minio.ToErrorResponse(err)
+	return isNotFoundCode(parsed.Code) || notFoundText(err)
+}
 
-	if respErr.Code == "NoSuchKey" || respErr.Code == "NoSuchBucket" || respErr.Code == "NotFound" {
-		return true
-	}
+// isNotFoundCode 判定错误码是否为「不存在」族。
+func isNotFoundCode(code string) bool {
+	return code == "NoSuchKey" || code == "NoSuchBucket" || code == "NotFound"
+}
 
-	// minio 对 StatObject 不存在常返回 "The specified key does not exist."（NoSuchKey）。
-
-	return strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "NoSuchBucket")
+// notFoundText 字符串兜底（minio 对 StatObject 不存在常返回
+// "The specified key does not exist."，Code 解析可能为空）。
+// MINOR 修复：补 minio 字面 "The specified key does not exist." 与 "does not exist"——
+// 原只查 NoSuchKey/NoSuchBucket 子串，minio 纯文本错误（无 Code）时兜底失效。
+func notFoundText(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "NoSuchKey") || strings.Contains(msg, "NoSuchBucket") ||
+		strings.Contains(msg, "The specified key does not exist.")
 }
 
 // _ 编译期断言：S3FS 实现 sync.FS。
-
 var _ sync.FS = (*S3FS)(nil)
+
+// ExemptStagingQuota 报告 s3 无需本地 staging 配额（显式豁免——用户裁定 2026-10-10：
+// 不需要 staging 或只占部分空间的卷须显式实现接口；s3 为流式直传：PutObject 单请求
+// 直发、multipart 由 minio 内存/HTTP 直传，**无本地中间态落盘**——装配层探测到本接口
+// 跳过 StagingQuotaGateFS 包装，不预留本地磁盘）。
+func (f *S3FS) ExemptStagingQuota() bool { return true }
 
 var _ = time.Now // 保留 time import（MTime 用 UnixNano 已用；防未来裁剪）

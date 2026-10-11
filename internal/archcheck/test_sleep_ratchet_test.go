@@ -41,18 +41,20 @@ const testSleepTotalBudget = 61
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
 var testSleepBudgets = map[string]int{
-	"cmd/sproxy/mesh_node_test.go":                        1,
-	"cmd/sproxy/root_extra_test.go":                       1,
-	"cmd/sproxy/graceful_restart_unix_test.go":            1, // fd helper 子进程 accept 轮询（10s 有界；子进程启动不可条件化）
-	"pkg/client/mesh_refresh_test.go":                     1,
-	"pkg/cloud/manager_test.go":                           4,
-	"pkg/cloud/quota_writer_test.go":                      3,
-	"pkg/downloader/http_downloader_test.go":              1,
-	"pkg/server/relay_stream_test.go":                     1,
-	"pkg/server/notify_test.go":                           4,
-	"pkg/tunnel/hub/ext/kad/kad_test.go":                  1,
-	"web/e2e/notify_panel_test.go":                        1,
-	"pkg/server/metrics_test.go":                          2,
+	"cmd/sproxy/mesh_node_test.go":             1,
+	"cmd/sproxy/root_extra_test.go":            1,
+	"cmd/sproxy/graceful_restart_unix_test.go": 1, // fd helper 子进程 accept 轮询（10s 有界；子进程启动不可条件化）
+	"pkg/client/mesh_refresh_test.go":          1,
+	"pkg/cloud/manager_test.go":                4,
+	"pkg/cloud/quota_writer_test.go":           3,
+	"pkg/downloader/http_downloader_test.go":   1,
+	"pkg/server/relay_stream_test.go":          1,
+	"pkg/server/notify_test.go":                4,
+	"pkg/tunnel/hub/ext/kad/kad_test.go":       1,
+	"web/e2e/notify_panel_test.go":             1,
+	"pkg/server/metrics_test.go":               2,
+	// staging 配额排队/超时/ctx 取消用例需定时释放或取消（无事件可轮询）；边界时序语义。
+	"pkg/quota/staging_tracker_test.go":                   2,
 	"web/e2e/trash_view_e2e_test.go":                      1,
 	"pkg/tunnel/hub/federation_test.go":                   2,
 	"pkg/tunnel/hub/signaling_client_test.go":             1,

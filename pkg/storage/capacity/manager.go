@@ -269,6 +269,11 @@ func classifyScannedFile(rel string, d fs.DirEntry, totals *storageScanTotals, t
 		// 计入 totalUsage 与租户 meta 配额 Scope，但不入 stats 分类枚举（4 键不变）。
 		totals.meta += size
 		addTenantBucket(tenantBuckets, firstSegment(rel), "meta", size)
+	case "backup":
+		// 备份 manifest 功能桶（2026-10-11 新增）：同 meta 口径——服务端内部账本，
+		// 计入 totalUsage 与租户 backup 配额 Scope，不入 stats 分类枚举。
+		totals.meta += size
+		addTenantBucket(tenantBuckets, firstSegment(rel), "backup", size)
 	default:
 		// 无桶结构的旧布局平铺文件按用户文件计入（新布局路径均落入上方 bucket 分支；
 		// LAYOUT_VERSION 标记文件不计入）。.__ 魔法目录已在目录层 SkipDir 跳过。

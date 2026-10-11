@@ -1072,8 +1072,31 @@ type Config struct {
 	// CloudArchiveMaxBytes 单次云归档允许的最大字节数（原始文件大小总和），0 = 不限制（仍受 max_storage_bytes 与 TryReserve 兜底）。
 	CloudArchiveMaxBytes int64 `yaml:"cloud_archive_max_bytes" mapstructure:"cloud_archive_max_bytes"`
 
+	// TrustedVolume 是可信卷配置（trusted_volume 段，2026-10-07 新增）：
+	//   - SkipVerify 缺省 false = 外部卷上传/转存默认包 TrustedVolumeFS 装饰器（写后
+	//     生成隐藏 .meta 文件、按 FileMeta 总哈希+分块哈希逐分片校验）——**默认即可信
+	//     行为（安全可靠）**；true = 跳过下载数据校验（显式放宽，仅极端性能场景）。
+	//     meta 生成恒在（只关校验，不关 meta——桶隔离/凭据保护不随本字段变化）。
+	TrustedVolume TrustedVolumeConfig `yaml:"trusted_volume" mapstructure:"trusted_volume"`
+
 	// Pikpak 是 PikPak 网盘中转后端配置（分享转存 + 官方 CLI 完整下载）。
 	Pikpak PikpakConfig `yaml:"pikpak" mapstructure:"pikpak"`
+}
+
+// TrustedVolumeConfig 是可信卷配置（SkipVerify 语义为「显式跳过下载校验」——默认
+// false = 校验开启，可信行为默认安全可靠；true = 显式放宽）。
+type TrustedVolumeConfig struct {
+	// SkipVerify 缺省 false = 下载数据校验开启（默认可信行为：读侧按 FileMeta 逐分块
+	// 校验，静默损坏 fail-closed）；true = 跳过下载数据校验（显式放宽——仅极端性能/无
+	// 校验需求场景）。**meta 生成恒在**：本字段只关校验不关 meta 生成/桶隔离。
+	SkipVerify bool `yaml:"skip_verify" mapstructure:"skip_verify"`
+	// ChunkSize 分块校验大小（缺省 0 = 按文件大小自适应 ChunkSizeForSize；显式设置固定
+	// 分块粒度，sizex.ByteSize 字节配置——C-MAJOR-4：Options.ChunkSize 接线到配置）。
+	ChunkSize ByteSize `yaml:"chunk_size" mapstructure:"chunk_size"`
+	// StagingQuotaBytes 是**本地 staging 配额上限**（用户裁定 2026-10-10：独立 staging
+	// Scope——所有外部卷 WriteFile 先预留本地暂存字节、写后释放；0/缺省 = 不限制但
+	// 记账。防本地磁盘被上传暂存打满：per-owner 独立 Scope，不与网盘 owner_quotas 混用）。
+	StagingQuotaBytes ByteSize `yaml:"staging_quota_bytes" mapstructure:"staging_quota_bytes"`
 }
 
 // PikpakConfig 是 PikPak 网盘中转后端配置。

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -28,24 +29,28 @@ import (
 // userVolumeTestType 是用户卷 API 测试用的 fake backend 类型（全局注册一次）。
 const userVolumeTestType = "user-vol-test"
 
-// fakeUserVolBackend 是测试用 ExternalBackend（FS 恒空；Close 计数）。
+// fakeUserVolBackend 是测试用 ExternalBackend（内存 FS；Close 计数）。
 type fakeUserVolBackend struct {
 	closed bool
-	usage  int64
+	fs     *extFS
 }
 
-func (f *fakeUserVolBackend) FS() syncpkg.FS { return nil }
-func (f *fakeUserVolBackend) Close() error   { f.closed = true; return nil }
+func (f *fakeUserVolBackend) FS() syncpkg.FS {
+	if f.fs == nil {
+		f.fs = &extFS{files: map[string]string{}}
+	}
+	return f.fs
+}
+func (f *fakeUserVolBackend) Close() error { f.closed = true; return nil }
 
-// Usage/Capacity 实现 registry.UsageProvider（C3 卷级计数查询——测试固定值）。
-func (f *fakeUserVolBackend) Usage() int64    { return f.usage }
-func (f *fakeUserVolBackend) Capacity() int64 { return 0 }
+// 注：曾在此实现 registry.UsageProvider（固定 42）验证列表填充；现卷级记账权威在
+// capacity.Backend 计数器（FS 层），测试改为经 FS 写入后断言 Usage。
 
 // registerUserVolTestBackend 注册 fake backend（重复注册 panic；sync.Once 保证唯一）。
 func registerUserVolTestBackend() {
 	registerUserVolTestBackendOnce.Do(func() {
 		registry.RegisterBackend(userVolumeTestType, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-			return &fakeUserVolBackend{usage: 42}, nil
+			return &fakeUserVolBackend{}, nil
 		})
 	})
 }
@@ -135,6 +140,10 @@ func TestUserVolumeAPI_Create(t *testing.T) {
 	if h.volSet.External("userdisk1") == nil {
 		t.Fatal("Set.External(userdisk1) = nil, want 已注册")
 	}
+	// 卷级容量计数从创建期即生效（不再等重启 restore）：Capacity = 请求容量。
+	if up, ok := h.volSet.External("userdisk1").(registry.UsageProvider); !ok || up.Capacity() != 1000 {
+		t.Fatalf("创建后 UsageProvider.Capacity = %v/%v, want true/1000（创建期包 CapacityFS）", ok, up)
+	}
 }
 
 // TestUserVolumeAPI_Create_BadType 未注册 type → 400。
@@ -161,6 +170,11 @@ func TestUserVolumeAPI_List_OwnerFilter(t *testing.T) {
 	postUserVolume(t, muxAlice, map[string]any{"name": "alice-disk", "type": userVolumeTestType, "extra": map[string]any{}})
 	postUserVolume(t, muxBob, map[string]any{"name": "bob-disk", "type": userVolumeTestType, "extra": map[string]any{}})
 
+	// C3：卷级计数 usage 填充——经 FS 写入 42 字节后列表反映（创建期即包 CapacityFS）。
+	if err := h.volSet.External("alice-disk").FS().WriteFile(
+		context.Background(), "f.bin", bytes.NewReader(make([]byte, 42)), 42, 0); err != nil {
+		t.Fatalf("写入用户卷: %v", err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/api/volumes/user", nil)
 	rec := httptest.NewRecorder()
 	muxAlice.ServeHTTP(rec, req)
@@ -176,7 +190,6 @@ func TestUserVolumeAPI_List_OwnerFilter(t *testing.T) {
 	if len(resp.Volumes) != 1 || resp.Volumes[0].Name != "alice-disk" {
 		t.Fatalf("alice 列表 = %+v, want 只含 alice-disk", resp.Volumes)
 	}
-	// C3：外部卷 usage 填充（fake backend UsageProvider 返回 42）。
 	if resp.Volumes[0].Usage != 42 {
 		t.Fatalf("alice-disk usage = %d, want 42（卷级计数查询）", resp.Volumes[0].Usage)
 	}
@@ -220,5 +233,62 @@ func TestUserVolumeAPI_Delete_OwnerMismatch(t *testing.T) {
 	muxBob.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("bob DELETE alice-disk = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUserVolumeAPI_List_RedactsCredentials D-CRITICAL 回归：GET /api/volumes/user
+// 不得回显凭据（bduss/stoken/secret_key 等）——store.Get 已解密 Extra，列表响应须剔除
+// 凭据键（防 BDUSS 明文泄露到浏览器）。
+func TestUserVolumeAPI_List_RedactsCredentials(t *testing.T) {
+	t.Parallel()
+	h, _ := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+
+	postUserVolume(t, mux, map[string]any{
+		"name": "cred-disk", "type": userVolumeTestType,
+		"extra": map[string]any{"bduss": "secret-bduss", "baidu_root": "/x", "capacity": "1"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/volumes/user", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "secret-bduss") {
+		t.Fatalf("列表响应不得回显 BDUSS 明文: %s", body)
+	}
+	if !strings.Contains(body, "/x") {
+		t.Fatalf("非敏感配置（baidu_root）应保留: %s", body)
+	}
+}
+
+// TestUserVolumeAPI_DeleteRecreateKeepsUsage P2 回归：删除用户卷不清理容量计数文件，
+// 同名重建必须 Load 到旧占用（否则 delete+recreate 归零 → 反复绕过「Σ占用 ≤ 卷限额」）。
+func TestUserVolumeAPI_DeleteRecreateKeepsUsage(t *testing.T) {
+	t.Parallel()
+	h, _ := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+	body := map[string]any{"name": "ud", "type": userVolumeTestType, "capacity": 1000, "extra": map[string]any{"bduss": "t"}}
+	if rec := postUserVolume(t, mux, body); rec.Code != http.StatusOK {
+		t.Fatalf("create = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if err := h.volSet.External("ud").FS().WriteFile(context.Background(), "f.bin", bytes.NewReader(make([]byte, 42)), 42, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// delete
+	dreq := httptest.NewRequest(http.MethodDelete, "/api/volumes/user?name=ud", nil)
+	drec := httptest.NewRecorder()
+	mux.ServeHTTP(drec, dreq)
+	if drec.Code != http.StatusOK {
+		t.Fatalf("delete = %d (%s)", drec.Code, drec.Body.String())
+	}
+	// recreate（同名）
+	if rec := postUserVolume(t, mux, body); rec.Code != http.StatusOK {
+		t.Fatalf("recreate = %d (%s)", rec.Code, rec.Body.String())
+	}
+	up, ok := h.volSet.External("ud").(registry.UsageProvider)
+	if !ok || up.Usage() != 42 {
+		t.Fatalf("delete+recreate 后 Usage 应保留 42（不得归零绕过限额）, ok=%v usage=%d", ok, up.Usage())
 	}
 }

@@ -217,10 +217,18 @@ func (m *Manager) SelectDefault(ctx context.Context, defaultSecret string) (stri
 	if err != nil {
 		return "", err
 	}
-	if len(names) == 0 {
+	// 过滤非法条目（`..` 等）后再取首个——List 是目录枚举，可能含外部写入的异常名；
+	// 直接 names[0] 会把异常名当默认 secret 返回，直到 Read 才报错（入口校验口径不一致）。
+	valid := names[:0]
+	for _, n := range names {
+		if validSecretName(n) {
+			valid = append(valid, n)
+		}
+	}
+	if len(valid) == 0 {
 		return "", fmt.Errorf("secrets: 卷 %q 无 secret 可用（先 Create）", m.name)
 	}
-	return names[0], nil
+	return valid[0], nil
 }
 
 // ---- ExternalBackend 适配 ----
@@ -316,15 +324,27 @@ func localChmod(fs syncpkg.FS, name string) error {
 }
 
 // ManagerOfExternal 从 ExternalBackend 反取 secrets.Manager（装配层辅助）。
-// 仅当 backend 是 secrets 卷适配器时返回非 nil。
+// 仅当 backend 是 secrets 卷适配器时返回非 nil；支持经透明包装（如 capacity.Backend
+// 用 SecretsManagerAny() 泛型转发）后的反取。
 type managerUnwrapper interface{ SecretsManager() *Manager }
+type managerUnwrapperAny interface{ SecretsManagerAny() any }
 
 func ManagerOfExternal(be registry.ExternalBackend) *Manager {
 	if u, ok := be.(managerUnwrapper); ok {
-		return u.SecretsManager()
+		if m := u.SecretsManager(); m != nil {
+			return m
+		}
+	}
+	if u, ok := be.(managerUnwrapperAny); ok {
+		if m, ok := u.SecretsManagerAny().(*Manager); ok {
+			return m
+		}
 	}
 	return nil
 }
+
+// SecretsManagerAny 暴露内部 Manager（供容量包装等透明层泛型转发）。
+func (b *backend) SecretsManagerAny() any { return b.mgr }
 
 // SecretsManager 暴露内部 Manager（供装配层反取）。
 func (b *backend) SecretsManager() *Manager { return b.mgr }

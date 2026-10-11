@@ -21,7 +21,7 @@ func TestMeta_ReservedFields_RoundtripPaved(t *testing.T) {
 		Compressed:   true,
 		Compression:  "zstd",
 		KeyID:        "sk-2026-10-02-a",
-		Extra:        map[string][]byte{"media_type": []byte("video/mp4"), "acl": []byte("rw")},
+		Extra:        map[string]any{"media_type": "video/mp4", "acl": "rw", "priority": "high"},
 		WriterID:     "pikpak-job-42",
 		SourceURL:    "https://example.com/foo.mp4",
 		AccessCount:  7,

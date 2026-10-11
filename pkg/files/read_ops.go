@@ -177,7 +177,7 @@ func (s *Service) listFallbackSingle(owner, subdir, rel string, csMap map[string
 		s.rt.logger().Warn("读取卷目录失败", "dir", rel, "error", err)
 		return nil
 	}
-	return s.buildFileListEntries(entries, csMap, subdir)
+	return s.buildFileListEntries(entries, csMap, subdir, tnt.Root())
 }
 
 // listVolumeDirEntries 聚合多卷回退中单个卷的目录条目：目录条目去重、文件条目带卷名。
@@ -195,7 +195,7 @@ func (s *Service) listVolumeDirEntries(v volume.Volume, owner, subdir, rel strin
 		s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
 		return out
 	}
-	for _, e := range s.buildFileListEntries(entries, csMap, subdir) {
+	for _, e := range s.buildFileListEntries(entries, csMap, subdir, tnt.Root()) {
 		if e.IsDir {
 			if seenDirs[e.Name] {
 				continue
@@ -263,7 +263,7 @@ func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, erro
 		s.rt.logger().Error(errMsgStatFailed, "file_name", dp.Filename, "error", err.Error())
 		return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
 	}
-	st := FileStat{IsDir: info.IsDir(), Size: info.Size(), MTime: info.ModTime().UnixNano()}
+	st := FileStat{IsDir: info.IsDir(), Size: logicalSizeFor(dp.Tenant.Root(), dp.Rel, info), MTime: info.ModTime().UnixNano()}
 	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			st.Checksum = cs
@@ -304,6 +304,11 @@ func (s *Service) OpenPath(ctx context.Context, dp DownloadPath) (OpenedFile, er
 	if info.IsDir() {
 		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}
 	}
+	// 显式请求密文（?ciphertext=1）：at-rest 加密卷返回**存储原样**字节（不解密）——
+	// 加密只在存储层，用户常规访问恒为明文；此开关供备份/迁移/带外校验。
+	if dp.Ciphertext && dp.Tenant.Root().IsEncrypted() {
+		return s.openCiphertext(dp, info)
+	}
 	file, err := dp.Tenant.Root().OpenDecrypted(dp.Rel)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -317,9 +322,37 @@ func (s *Service) OpenPath(ctx context.Context, dp DownloadPath) (OpenedFile, er
 		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
 	}
 
+	// 信任保证演进：下载流逐分块校验（读回比对 meta，异常 fail-closed）。装配层未注入
+	// meta 能力 / skip_verify / meta 缺失 → 返回 nil 直通（零回归）。仅可 Seek 流可校验
+	// （ServeContent 需求一致——不可 Seek 不校验，后续断言 500）。
+	if srf, ok := file.(SeekReadCloser); ok {
+		if vf, verr := s.rt.verifyDownload(ctx, dp.Tenant.Root(), dp.Rel, srf); verr != nil {
+			_ = file.Close()
+			s.rt.logger().Error("下载校验装配失败", "file_name", dp.Filename, "error", verr.Error())
+			return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
+		} else if vf != nil {
+			file = vf
+		}
+	}
+
 	out := OpenedFile{File: file, Info: info}
 	s.attachChecksum(dp, file, &out)
 	return out, nil
+}
+
+// openCiphertext 打开 at-rest 加密卷的**存储原样**字节（?ciphertext=1，不解密）——
+// info 为上方 raw Stat（真实密文大小，raw *os.File 原生可 Seek，Range/Content-Length 正确）；
+// 不接明文的 meta 校验与 checksum 台账（那份描述明文，不适用于密文响应）。
+func (s *Service) openCiphertext(dp DownloadPath, info os.FileInfo) (OpenedFile, error) {
+	raw, oerr := dp.Tenant.Root().Open(dp.Rel)
+	if oerr != nil {
+		if os.IsNotExist(oerr) {
+			return OpenedFile{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		}
+		s.rt.logger().Error("打开密文文件失败", "file_name", dp.Filename, "error", oerr.Error())
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
+	}
+	return OpenedFile{File: raw, Info: info}, nil
 }
 
 // attachChecksum 为 OpenedFile 填充 SHA-256 checksum（台账命中或实时计算，零额外 I/O）。

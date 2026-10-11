@@ -122,9 +122,9 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 	meta.Original.MTime = mtimeString(wc.mtime)
 	meta.BaseVersion = wc.newVer // Imp-1 修复：去重 miss 落盘 meta 也携带写路径分配版本
 	if meta.Extra == nil {
-		meta.Extra = map[string][]byte{}
+		meta.Extra = map[string]any{}
 	}
-	meta.Extra["dedup"] = []byte(dir)
+	meta.Extra["dedup"] = dir // string（Extra 统一 map[string]any，2026-10-07 用户裁定）
 	name, metaBlob, err := s.encryptMetaBlob(meta)
 	if err != nil {
 		_ = s.inner.Delete(ctx, chunkPath)
@@ -525,8 +525,10 @@ func (s *SecretdataFS) gcProtectLiveMeta(referenced map[string]struct{}, contain
 	referenced[container+"/"+name] = struct{}{}
 	dir := container
 	if len(mm.Extra) > 0 {
-		if dd, ok := mm.Extra["dedup"]; ok && len(dd) > 0 {
-			dir = string(dd)
+		if dd, ok := mm.Extra["dedup"]; ok {
+			if s, sok := dd.(string); sok && s != "" {
+				dir = s
+			}
 		}
 	}
 	for _, ci := range mm.Chunks {

@@ -1324,8 +1324,10 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 	mt := dirMetaMTime(mm.Original.MTime)
 	dataDir := ""
 	if s.opts.Dedup && len(mm.Extra) > 0 {
-		if dd, ok := mm.Extra["dedup"]; ok && len(dd) > 0 && len(mm.Chunks) > 0 {
-			dataDir = string(dd)
+		if dd, ok := mm.Extra["dedup"]; ok {
+			if ds, dok := dd.(string); dok && ds != "" && len(mm.Chunks) > 0 {
+				dataDir = ds
+			}
 		}
 	}
 	s.mu.Lock()

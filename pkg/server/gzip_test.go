@@ -232,3 +232,24 @@ func TestGzipMiddleware_NoAcceptEncoding(t *testing.T) {
 		t.Fatalf("expected 'plain' in body, got: %q", rec.Body.String())
 	}
 }
+
+// TestGzipSkipRequest_FileResponsePaths 文件响应面必须跳过 gzip（P1 对抗评审）：
+// Content-Type 在 handler 内才设置，前置白名单看不到；若不跳过，可信卷读校验在 200 头
+// 之后失败时 gzip 会把「已校验前缀」打成无 Content-Length 的合法 gzip 流 → 静默截断。
+func TestGzipSkipRequest_FileResponsePaths(t *testing.T) {
+	t.Parallel()
+	for _, p := range []string{"/download", "/download/chunk", "/s3/bucket/key", "/dav", "/dav/x"} {
+		r := httptest.NewRequest("GET", p, nil)
+		r.Header.Set("Accept-Encoding", "gzip")
+		if !gzipSkipRequest(httptest.NewRecorder(), r) {
+			t.Fatalf("%s 应跳过 gzip（二进制文件响应）", p)
+		}
+	}
+	for _, p := range []string{"/api/tasks", "/api/files"} {
+		r := httptest.NewRequest("GET", p, nil)
+		r.Header.Set("Accept-Encoding", "gzip")
+		if gzipSkipRequest(httptest.NewRecorder(), r) {
+			t.Fatalf("%s 不应跳过 gzip", p)
+		}
+	}
+}

@@ -65,5 +65,11 @@ func sanitizeRemotePath(p string) (string, error) {
 	if slices.Contains(strings.Split(p, "/"), "..") {
 		return "", fmt.Errorf("baidupcs: invalid path %q: .. not allowed", p)
 	}
+	// 拒绝 CLI glob 元字符 `*`/`?`：BaiduPCS-Go 的 matchPathByShellPattern 会把它们
+	// 展开为 glob，可能把别的对象当成目标（元信息/内容错位；EXT-3）。`[` 由 CLI
+	// escaper 转义（合法文件名常用），不拒。fail-closed（拒绝优于错误寻址）。
+	if strings.ContainsAny(p, "*?") {
+		return "", fmt.Errorf("baidupcs: path %q 含 CLI glob 元字符（*?），拒绝以避免被展开寻址错对象", p)
+	}
 	return clean, nil
 }

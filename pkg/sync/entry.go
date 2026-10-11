@@ -5,11 +5,19 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 )
+
+// ErrUnsupported 是可选能力「未实现」的哨兵错误（B1 修复契约）：能力接口用类型断言
+// 查询（ok=false = 未实现），但**装饰器/封装层为委托底层能力必须实现接口方法**——此时
+// 底层未实现能力无法用断言表达，只能返回本哨兵。使用方（如 pkg/cloud 转存）经
+// errors.Is(err, ErrUnsupported) 识别后回落降级分支，语义与直接使用裸 FS 的
+// 断言失败一致（不把「未实现」当配额拒绝/写失败）。
+var ErrUnsupported = errors.New("sync: 底层未实现该可选能力")
 
 // Entry 表示一个文件系统条目。
 type Entry struct {
@@ -17,9 +25,17 @@ type Entry struct {
 	Path      string // 相对路径（正斜杠，不含根）
 	Size      int64
 	MTime     int64  // UnixNano
-	Checksum  string // SHA-256 hex；空=未知（调用方按需计算）
+	Checksum  string // 首选校验和（默认 SHA-256 hex）；空=未知（调用方按需计算）
 	IsDir     bool
 	IsSymlink bool
+
+	// ChecksumType 是首选校验和的算法标识（"sha256"/"md5"/"etag" 等；Checksum 非空时
+	// 自述算法，空 = 未知/沿用历史默认 sha256）。供 Equal/校验比对按算法取值。
+	ChecksumType string `json:"checksum_type,omitempty"`
+	// Checksums 是**全部已知校验和**（算法名 → 值），Stat/ListDir 尽可能填全
+	// （如 LocalFS: sha256；baidupcs: sha256+md5；s3: etag+sha256）——比对方按可用
+	// 算法取交集（用户裁定：每个 entry 提供已知的所有校验和数据，便于比较）。
+	Checksums map[string]string `json:"checksums,omitempty"`
 }
 
 // FS 抽象文件系统操作，供 LocalFS 与后续远程传输实现。
@@ -73,6 +89,60 @@ type ReserveSpace interface { // NOSONAR: S8196 — 能力接口（非 -er 角�
 //     配额生效）；否则 → 外部卷（容量/配额由卷自身管理，用户通用配额跳过）。
 type LocalVolume interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
 	IsLocalVolume() bool
+}
+
+// Mover 是 FS 的可选**同卷移动**能力（卷自身提供；`pkg/sync` 引擎不关心 Move 语义——
+// 引擎是复制语义，Move 供 cloud save 等明确"源移除"调用方用）。同卷原子移动、源移除；
+// 跨物理卷/文件系统返回 EXDEV 类错误由调用方回退复制。
+type Mover interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Move(ctx context.Context, from, to string) error
+}
+
+// Copier 是 FS 的可选**同卷复制**能力（源保留、目标新写；覆盖语义下用于保留旧目标）。
+// 跨卷返回 EXDEV 类错误由调用方回退常规复制。实现可用底层服务端复制（如 s3 CopyObject、
+// baidupcs 服务端 copy），零流量。
+type Copier interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Copy(ctx context.Context, from, to string) error
+}
+
+// Linker 是 FS 的可选**硬链接**能力（源保留、两个名字共享同一 inode）。跨卷返回 EXDEV
+// 类错误由调用方回退复制。实现可用底层文件系统硬链接（LocalFS os.Link）或卷内 blob
+// 复用（secretdata dedup 池、去重引用）。
+type Linker interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Link(ctx context.Context, from, to string) error
+}
+
+// StagingQuotaTracker 是本地中间态（staging/上传暂存）写入的配额记账钩子接口。
+// 语义：WriteFile 先落本地 staging 再上传——本地磁盘须防占满，写入计入配额
+// （预留 → 上传完成释放）。实现方（装配层）注入，不依赖具体配额池类型。
+// 与 ReserveSpace（目标卷容量预检）区分：StagingQuotaTracker 管**本地暂存**占用。
+type StagingQuotaTracker interface {
+	// ReserveUsage 预留 size 字节（本地 staging 写入前调用）。本地磁盘不足 → 实现方
+	// **排队等待**（受 ctx 约束：释放信号/ctx.Done 中断）；返回错误 = 拒绝本次写入。
+	ReserveUsage(ctx context.Context, size int64) error
+	// ReleaseUsage 释放 size 字节（上传成功或失败后调用；唤醒排队等待者）。
+	ReleaseUsage(size int64)
+}
+
+// StagingQuotaCapable 是 FS 的**可选** staging 配额能力（装配层探测并注入：
+// 不依赖具体卷类型——baidupcs_sync 从 *StorageFS 类型断言解耦为通用接口，Wrap 装饰
+// 后的 fs 也实现委托 inner，避免包装后 quota 丢失）。
+// **自管语义（用户裁定）**：实现本接口的卷 = 获取配额句柄后**内部自行接管**本地
+// staging 配额管理（如 baidupcs StorageFS 在 WriteFile 内预留/释放）——装配层注入
+// 钩子后不再包 gate 装饰器。
+type StagingQuotaCapable interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	// WithStagingQuota 装配 staging 配额钩子（链式返回自身；nil = 不记账）。
+	WithStagingQuota(q StagingQuotaTracker)
+}
+
+// StagingQuotaExempt 是**显式豁免** staging 配额的标记接口（用户裁定：不需要 staging
+// 或实际只占用部分空间的卷须**显式实现**本接口才豁免——不实现 = 默认强制 gate）。
+// 流式直传卷（如 s3：PutObject 单请求直传、无本地中间态）实现；装配层探测到本接口
+// → 跳过 gate 包装（不预留本地磁盘，零误伤）。**显式声明而非实现遗漏**：新卷未实现
+// 本接口也未实现 StagingQuotaCapable → 默认被 gate 强制预留（fail-safe，宁多勿漏）。
+type StagingQuotaExempt interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	// ExemptStagingQuota 报告本卷无需本地 staging 配额（流式直传不落盘）。
+	ExemptStagingQuota() bool
 }
 
 // maxWalkDepth 限制目录递归深度（符号链接环的 fail-closed 兜底）。

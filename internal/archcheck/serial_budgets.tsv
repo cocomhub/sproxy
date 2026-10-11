@@ -58,6 +58,7 @@ internal/archcheck/web_assets_test.go	2
 internal/archcheck/xfer_send_atomicity_test.go	1
 pkg/client/events_test.go	4
 pkg/cloud/manager_test.go	2
+pkg/files/meta/meta_test.go	1
 pkg/files/version_id_test.go	3
 pkg/server/accept_retry_test.go	5
 pkg/server/archive_test.go	1

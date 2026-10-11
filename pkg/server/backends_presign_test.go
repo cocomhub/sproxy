@@ -48,8 +48,49 @@ func TestBackendsPresign(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "https://mock.s3/PUT/dir/a.txt") {
-		t.Fatalf("响应缺签名 URL: %s", body)
+	// P0 修复（第 5 轮对抗评审）：预签名路径由服务端收敛到调用者 owner 键空间
+	// （`<owner>/user/<rel>`），后端键空间恒为 `Location.FSPath` 形态。
+	if !strings.Contains(body, "https://mock.s3/PUT/anonymous/user/dir/a.txt") {
+		t.Fatalf("响应缺 owner 收敛后的签名 URL: %s", body)
+	}
+}
+
+// TestPresignOwnerKey 纯函数：路径 → `<owner>/user/<rel>` 收敛 + 越权拒绝。
+func TestPresignOwnerKey(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		owner   string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"裸相对路径", "alice", "dir/a.txt", "alice/user/dir/a.txt", false},
+		{"user 桶前缀", "alice", "user/dir/a.txt", "alice/user/dir/a.txt", false},
+		{"已带本人 owner", "alice", "alice/user/dir/a.txt", "alice/user/dir/a.txt", false},
+		{"空 owner 归一 anonymous", "", "a.txt", "anonymous/user/a.txt", false},
+		{"他人 owner → 403", "alice", "bob/user/a.txt", "", true},
+		{"他人 owner 非 user 桶也拒", "alice", "bob/cloud/a.txt", "", true},
+		{"非 user 桶 → 403", "alice", "cloud/a.txt", "", true},
+		{"user 桶根 → 拒绝", "alice", "user", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := presignOwnerKey(c.owner, c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("应拒绝 %q，得到 %q", c.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("presignOwnerKey(%q, %q) = %v", c.owner, c.in, err)
+			}
+			if got != c.want {
+				t.Fatalf("got %q want %q", got, c.want)
+			}
+		})
 	}
 }
 

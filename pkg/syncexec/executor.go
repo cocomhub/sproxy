@@ -21,11 +21,13 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/sync/httptransport"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // Executor 基于 pkg/sync.Engine 的同步执行器（实现 syncmgr.Executor）。
@@ -236,7 +238,7 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	if mkErr := os.MkdirAll(localRoot, 0o755); mkErr != nil {
 		return nil, fmt.Errorf("创建本地同步根 %s 失败: %w", localRoot, mkErr)
 	}
-	srcFS, dstFS, remoteClosers, err := e.prepareDirectionFS(ctx, task, remote, localRoot)
+	srcFS, dstFS, remoteClosers, err := e.prepareDirectionFS(ctx, task, remote, localRoot, filepath.Dir(localRoot))
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +248,7 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	// 语义（roadmap P0）：一次提交两边一致；两端各自新增/修改在任务内互相传播；
 	// 删除传播与冲突策略由任务参数控制。
 	if task.Direction == string(syncmgr.DirectionBoth) {
-		return e.runBoth(ctx, task, remote, localRoot)
+		return e.runBoth(ctx, task, remote, localRoot, filepath.Dir(localRoot))
 	}
 
 	job := buildJob(task)
@@ -271,7 +273,7 @@ func closeRemoteFS(remoteClosers []func()) {
 
 // prepareDirectionFS 按方向准备 src/dst FS：push（本地→远程）；pull（远程→本地）。
 // 返回待延迟关闭的远端 close 回调列表。
-func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot string) (syncpkg.FS, syncpkg.FS, []func(), error) {
+func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot, tenantRoot string) (syncpkg.FS, syncpkg.FS, []func(), error) {
 	if task.Direction == string(syncmgr.DirectionPush) {
 		srcFS := syncpkg.NewLocalFS(localRoot, e.logger())
 		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
@@ -285,7 +287,7 @@ func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTas
 		return nil, nil, nil, err
 	}
 	dstFS := &quotaLocalFS{
-		inner: syncpkg.NewLocalFS(localRoot, e.logger()),
+		inner: e.newLocalPullFS(tenantRoot),
 		owner: task.Owner,
 		// 解析器按 (owner, rel) 路由 bucket_limits 子目录配额；e.tenantScope 仅按 owner
 		// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
@@ -294,6 +296,58 @@ func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTas
 	}
 	return remoteFS, dstFS, []func(){closeRemote}, nil
 }
+
+// newLocalPullFS 构造 pull 方向的本地目标 FS：租户根上的「user 桶视图」× trusted.Wrap。
+//
+// 安全/完整性背景（第 5 轮对抗评审 P1）：`pkg/syncexec` 全包零 meta 引用——pull/both
+// 的本地落盘不重建也不失效 sidecar，导致（a）覆盖已上传文件后旧 sidecar 描述旧内容 →
+// `/download` 经 `meta.VerifyReadSeeker` 尺寸/分块失配 → **永久 fail-closed 不可下载**；
+// （b）新落盘文件无 sidecar → 下载**静默零校验**。
+//
+// 为何不直接在 user 根上 Wrap：`TenantRoot` 解析器返回的是 **user 桶绝对路径**，其键为
+// 裸相对路径（无功能桶段）——`meta.MetaPath` 会回落 `docs/x.meta`（用户可见目录，§8
+// 记档的无桶段兜底）。故先上移到租户根（user 桶父目录）并把键映射为 `user/<rel>`，
+// trusted.Wrap 随之把 sidecar 落到 `meta/<rel>.meta`——与本地卷上传路径
+// `filesMetaPolicy.WriteMeta` **同一布局**，下载校验侧无需任何额外接线。
+func (e *Executor) newLocalPullFS(tenantRoot string) syncpkg.FS {
+	inner := syncpkg.NewLocalFS(tenantRoot, e.logger())
+	return &userBucketFS{inner: trusted.Wrap(inner, trusted.Options{Logger: e.logger()})}
+}
+
+// userBucketFS 把 user 桶相对路径映射到租户根相对路径（`p` → `user/p`），透明委托其余。
+type userBucketFS struct{ inner syncpkg.FS }
+
+func (u *userBucketFS) key(p string) string {
+	if p == "" {
+		return "user"
+	}
+	return "user/" + p
+}
+
+func (u *userBucketFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return u.inner.ListDir(ctx, u.key(p))
+}
+func (u *userBucketFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return u.inner.Stat(ctx, u.key(p))
+}
+func (u *userBucketFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return u.inner.OpenRead(ctx, u.key(p))
+}
+func (u *userBucketFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+	return u.inner.WriteFile(ctx, u.key(p), r, size, mtime)
+}
+func (u *userBucketFS) Rename(ctx context.Context, from, to string) error {
+	return u.inner.Rename(ctx, u.key(from), u.key(to))
+}
+func (u *userBucketFS) Delete(ctx context.Context, p string) error {
+	return u.inner.Delete(ctx, u.key(p))
+}
+func (u *userBucketFS) MakeDir(ctx context.Context, p string) error {
+	return u.inner.MakeDir(ctx, u.key(p))
+}
+func (u *userBucketFS) Inner() syncpkg.FS { return u.inner }
+
+var _ syncpkg.FS = (*userBucketFS)(nil)
 
 // buildJob 由任务参数构造 sync 引擎 Job。
 func buildJob(task *syncmgr.SyncTask) *syncpkg.Job {
@@ -519,7 +573,7 @@ var _ syncmgr.Executor = (*Executor)(nil)
 // runBoth 执行双向同步：push（本地→远程）+ pull（远程→本地）两次单向，合并进度/结果。
 // push 方向本地配额不预留（对齐单向 push）；pull 方向本地写侧用 quotaLocalFS 装饰（对齐单向 pull）。
 // 顺序先 push 后 pull：先把我方新增/修改推出去，再拉取对方新增/修改——两边最终一致。
-func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot string) (*syncmgr.RunResult, error) {
+func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot, tenantRoot string) (*syncmgr.RunResult, error) {
 	remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
 	if err != nil {
 		return nil, err
@@ -561,9 +615,9 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		DeletePolicy:   syncpkg.DeletePolicy(task.DeletePolicy),
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
 	}
-	// pull 写侧配额感知（对齐单向 pull）。
+	// pull 写侧配额感知（对齐单向 pull）；本地目标叠 trusted.Wrap 生成/联动 sidecar。
 	pullJobDst := &quotaLocalFS{
-		inner:    syncpkg.NewLocalFS(localRoot, e.logger()),
+		inner:    e.newLocalPullFS(tenantRoot),
 		owner:    task.Owner,
 		scopeFor: e.scopeFor,
 	}
