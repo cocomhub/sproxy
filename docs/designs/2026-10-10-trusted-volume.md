@@ -173,6 +173,51 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   卷 → 多卷下软删文件不可见不可恢复、EmptyTrash 不释放配额。彻底解决需按 owner 卷视图逐卷
   定位。
 
+### 8.1 第 6 轮（B/C/D 面）修复与残余（2026-10-11）
+
+**已修**：
+
+- **备份 manifest 隔离（P1）**：manifest 由 `<目标卷>/user/backup/manifest.json`（**用户 API
+  可读写**）迁到独立 **`backup` 功能桶**（本地卷 `<租户根>/backup/manifest.json`；外部卷
+  `<owner>/backup/manifest.json`，经 `pkg/storage` `featureBuckets` 登记）。此前用户可覆写/
+  伪造 manifest → 增量备份**静默跳过**（漏文件）且覆盖同名用户文件；`backup.Run` 新增
+  `Options.ManifestFS/ManifestRel` 承载该命名空间，manifest 增 `checksum` 自校验（不符 → 全量
+  重扫），handler 新增**同根守卫**（源/目标同一租户根 → 400，防自备份回灌源）。
+- **guardPath 拒盘符前缀**（`C:/x`、`c:foo`）：守卫自身 fail-closed，不再依赖内层
+  `SanitizeRelPath` 兜底（纵深口径统一；实测原本不可逃逸）。
+- **目录级 Rename/Move 迁移 sidecar 子树**：`meta/<from>/**` → `meta/<to>/**`（trusted 装饰器
+  `migrateMetaSubtree` + WebDAV 面 `davMetaFS.migrateMetaSubtree`）——否则新位置逐分块校验静默
+  失效、旧子树成孤儿白占 meta 桶配额。
+- **未知 size 超大流分块档位**：`ChunkSizeForSize(<=0)` 由 1MiB 抬到 32MiB（未知大小的流无法事后
+  重分块；1MiB 时 >~341GiB 即超 sidecar 上限）；`meta.Marshal` 对超 `maxMetaChunks` 的 meta
+  **拒绝序列化**（写侧提前失败 → 不落必被读侧拒绝的 sidecar）。
+- **云转存复用 per-(owner,rel) 写锁**：`Options.TargetWriteLock`（装配层注入
+  `filesRuntime.Acquire`，与 HTTP 上传/删除/改名/DAV/S3 同一键空间）；抢不到 → 可重试目标卷
+  异常（编排层退避重试）。此前转存不经 `pkg/files` 写路径且远端卷写后不回读交叉校验 →
+  跨写面同 rel 并发写可产出「主文件与 sidecar 错位」的固化状态（永久 fail-closed）。
+- **MINOR**：`UpdateMetaExtra` 补 `ensureMetaDir`（provider 短路场景 `meta/` 目录可能不存在）；
+  `Options.Extra` 改为**深拷贝**（`cloneExtra`，嵌套 map/slice 不再与配置共享底层数组）。
+
+**未修（已实测/定性，设计级）**：
+
+- **卷容量池不含 meta 字节**：`filesMetaPolicy.writeMetaCore` 与 S3 PUT 的 sidecar 走
+  `storage.Root` 直写，只入 owner meta 桶 Scope，**不入卷容量池**（`capacity.CapacityFS` 只见经
+  卷 FS 链的写）。修它需先定义 `rel → 卷` 的归属解析（原本由 `pkg/files` 路由持有，meta 策略层
+  不感知），属装配语义改造；缺口有界（sidecar ≤ 64MiB/文件，且受 meta 桶 Scope 约束）。
+- **外部卷 meta/owner 口径**：外部卷 `vol_capacity` 由 `CapacityFS` 权威记账，`owner_quotas`
+  不适用（设计如此）；「meta 不入 owner Scope」是既有口径而非缺陷。
+- **跨写面配额「双计」不成立**（实测）：S3 PUT 走 `root` 直写，owner Scope 单账本；不存在叠加
+  双计。
+- **`staging_quota_bytes` 默认 0**：per-owner staging Scope 无自身上限（但 staging 字节仍计入
+  `globalPool` 的 `max_storage_bytes` 全局上限）；默认值属运维口径，保持 0（不限）并文档化。
+- **读侧不做 MD5 交叉校验**：SHA-256 是完整性原语；`TotalMD5` 是网盘兼容字段（secretdata 等
+  合法留空，语义可能不同源），比对它只增误报面不增安全。
+- **`MetaPath` 无桶段回落**（`rel + ".meta"`，sidecar 与用户文件同目录、不隐藏）：仅当键空间
+  缺 `<bucket>` 段时发生，而所有装配点（`prefixFS` / `bucketRel` / `ResolveLocation`）都保证桶段
+  存在，属不可达边界。
+- **`direct_link: true` 明文外部卷 302 直链绕过服务端校验**：卷配置项（默认 `false` = 私密 + 服务端
+  转发），管理员显式开启即声明放弃服务端校验，属知情选择（已在 `config.example.yaml` 说明）。
+
 ## 9. 验证
 
 - 单元：`pkg/files/meta`（计算/校验/短读/长读/中段 Seek）、`pkg/volume/trusted`（Wrap/Guard/能力透传/生命周期）、`pkg/cloud`（转存分块校验/标记）、`pkg/sync`（Equal/staging gate）、`pkg/quota`（staging tracker）。
