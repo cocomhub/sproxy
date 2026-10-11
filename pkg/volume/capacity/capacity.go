@@ -342,6 +342,15 @@ func Wrap(fs syncpkg.FS, c Counter) *CapacityFS {
 // Counter 返回底层计数器（查询/持久化）。
 func (f *CapacityFS) Counter() Counter { return f.counter }
 
+// WriteFromStagedPath 转发 staging 路径复用能力（未实现 → ErrUnsupported）。
+func (f *CapacityFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath string, size, mtime int64) error {
+	sp, ok := f.inner.(syncpkg.StagedPathReuse)
+	if !ok {
+		return fmt.Errorf("capacity: 底层未实现 WriteFromStagedPath: %w", syncpkg.ErrUnsupported)
+	}
+	return sp.WriteFromStagedPath(ctx, relPath, stagedPath, size, mtime)
+}
+
 // Inner 返回被包装的底层 FS（透明装饰器下探标记——trusted.Wrap 据此区分「转发层」
 // 与「卷自带 meta」，避免把 CapacityFS 的 FileMeta 转发误判为自带 Provider）。
 func (f *CapacityFS) Inner() syncpkg.FS { return f.inner }
@@ -704,5 +713,6 @@ var (
 	_ syncpkg.RangeReader         = (*CapacityFS)(nil)
 	_ syncpkg.DirectURLProvider   = (*CapacityFS)(nil)
 	_ syncpkg.StagingQuotaCapable = (*CapacityFS)(nil)
+	_ syncpkg.StagedPathReuse     = (*CapacityFS)(nil)
 	_ syncpkg.StagingQuotaExempt  = (*CapacityFS)(nil)
 )

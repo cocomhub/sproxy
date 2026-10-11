@@ -725,6 +725,15 @@ func (t *TrustedVolumeFS) verifyWriteMetaRemote(ctx context.Context, rel string,
 	}
 }
 
+// WriteFromStagedPath 转发 staging 路径复用能力（透传契约：能力探测不得因装饰层而恒 false）。
+func (t *TrustedVolumeFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath string, size, mtime int64) error {
+	sp, ok := t.inner.(syncpkg.StagedPathReuse)
+	if !ok {
+		return fmt.Errorf("trusted: 底层卷未实现 WriteFromStagedPath: %w", syncpkg.ErrUnsupported)
+	}
+	return sp.WriteFromStagedPath(ctx, relPath, stagedPath, size, mtime)
+}
+
 // isLocal 报告底层卷自述为本地/内部卷（未实现 LocalVolume 的按外部卷处理——与全仓
 // 「未实现默认外部」一致）。用于把整文件读回型交叉校验（verifyWriteMeta /
 // UpdateMetaExtra 前置校验）限制在本地卷，避免远端卷每次写付一次全量下载（P1-10）。
@@ -814,4 +823,5 @@ var (
 	_ syncpkg.DirectURLProvider   = (*TrustedVolumeFS)(nil)
 	_ syncpkg.StagingQuotaCapable = (*TrustedVolumeFS)(nil)
 	_ syncpkg.StagingQuotaExempt  = (*TrustedVolumeFS)(nil)
+	_ syncpkg.StagedPathReuse     = (*TrustedVolumeFS)(nil)
 )

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -47,6 +48,22 @@ func (f *fakeStorage) Put(ctx context.Context, key string, r io.Reader) (*Object
 	}
 	f.files[key] = fakeFile{data: data, mtime: time.Now()}
 	// 父目录标记（目录语义：key 的父路径隐式建目录）。
+	f.markDirs(key)
+	return &ObjectMeta{Key: key, Size: int64(len(data)), ModTime: time.Now()}, nil
+}
+
+// PutFromStagedPath 复用已暂存文件（fake：读该文件入内存，**不删/不改**调用方文件）。
+func (f *fakeStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64) (*ObjectMeta, error) {
+	data, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return nil, err
+	}
+	if size > 0 && int64(len(data)) != size {
+		return nil, fmt.Errorf("staged 大小不符: %d != %d", len(data), size)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[key] = fakeFile{data: data, mtime: time.Now()}
 	f.markDirs(key)
 	return &ObjectMeta{Key: key, Size: int64(len(data)), ModTime: time.Now()}, nil
 }

@@ -203,6 +203,19 @@ func (d *davMetaFS) WriteIfAbsent(ctx context.Context, p string, r io.Reader, si
 	return true, nil
 }
 
+// WriteFromStagedPath 复用调用方暂存路径写入 + 重建 sidecar（写面能力带 meta 重链）。
+func (d *davMetaFS) WriteFromStagedPath(ctx context.Context, p, stagedPath string, size, mtime int64) error {
+	sp, ok := d.FS.(syncpkg.StagedPathReuse)
+	if !ok {
+		return fmt.Errorf("dav: 底层未实现 WriteFromStagedPath: %w", syncpkg.ErrUnsupported)
+	}
+	if err := sp.WriteFromStagedPath(ctx, p, stagedPath, size, mtime); err != nil {
+		return err
+	}
+	d.writeMeta(ctx, p)
+	return nil
+}
+
 // Move 同卷移动 + meta 重链（内层未实现 → ErrUnsupported）。
 func (d *davMetaFS) Move(ctx context.Context, from, to string) error {
 	m, ok := d.FS.(syncpkg.Mover)
@@ -304,6 +317,7 @@ var (
 	_ syncpkg.DirectURLProvider   = (*davMetaFS)(nil)
 	_ syncpkg.StagingQuotaCapable = (*davMetaFS)(nil)
 	_ syncpkg.StagingQuotaExempt  = (*davMetaFS)(nil)
+	_ syncpkg.StagedPathReuse     = (*davMetaFS)(nil)
 	_ meta.Provider               = (*davMetaFS)(nil)
 	// BlockAccessor 有意豁免（与其余装饰器同口径：需 Capability 探测语义）。
 )

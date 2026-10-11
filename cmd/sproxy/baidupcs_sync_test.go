@@ -13,7 +13,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -35,6 +37,21 @@ type fakeBaidupcsStorage struct {
 
 func newFakeBaidupcsStorage() *fakeBaidupcsStorage {
 	return &fakeBaidupcsStorage{files: map[string][]byte{}}
+}
+
+// PutFromStagedPath 实现 baidupcs.StorageAPI（staging 路径复用）：读暂存文件入内存，
+// 不删/不改调用方文件。
+func (f *fakeBaidupcsStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64) (*baidupcs.ObjectMeta, error) {
+	data, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return nil, err
+	}
+	if size > 0 && int64(len(data)) != size {
+		return nil, fmt.Errorf("staged 大小不符: %d != %d", len(data), size)
+	}
+	// 该 fake 无锁（SimpleStorageAPI 语义：仅测试单线程使用）。
+	f.files[key] = data
+	return &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
 }
 
 func (f *fakeBaidupcsStorage) Put(ctx context.Context, key string, r io.Reader) (*baidupcs.ObjectMeta, error) {
