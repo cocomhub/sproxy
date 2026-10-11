@@ -74,8 +74,14 @@ func (g *MetaBucketGuard) guardPath(p string) error {
 	// windows 分支拒 `p[1]==':'`；LocalFS confine/within 二次兜底）——此处按**守卫自身
 	// fail-closed 口径**统一拒绝，不依赖调用方/内层归一。仅影响「首段为单字母+冒号」的
 	// 路径（Windows 本就禁 ':'；Linux 上极罕见且无合法用例）。
-	if len(p) >= 2 && p[1] == ':' && isASCIILetter(p[0]) {
-		return fmt.Errorf("trusted: 路径不得含盘符前缀: %q", p)
+	// 盘符判据**按段**检查（m8 修复：此前只看首段两字节，`a/C:/x` 这类中段盘符漏判）。
+	// 判据精确到「整段恰为 `<字母>:`」——`C:`/`a/C:` 拒；名称里含冒号的合法文件
+	// （POSIX 允许，如 `a:b.txt`）与盘符相对形式（`c:foo`，Windows 上开文件时由 OS/
+	// 下层 SanitizeRelPath 拒）不误伤。
+	for seg := range strings.SplitSeq(p, "/") {
+		if len(seg) == 2 && seg[1] == ':' && isASCIILetter(seg[0]) {
+			return fmt.Errorf("trusted: 路径不得含盘符段: %q", p)
+		}
 	}
 	if strings.HasPrefix(p, "/") {
 		return fmt.Errorf("trusted: 路径不得为绝对路径: %q", p)

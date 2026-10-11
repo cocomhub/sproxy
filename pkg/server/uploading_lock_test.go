@@ -378,3 +378,32 @@ func postNoBody(t *testing.T, url string) (int, []byte) {
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, body
 }
+
+// TestLockRelFor_NormalizesVolumeFSKey 回归（M2，第 7 轮 MAJOR）：转存取锁传的是**卷 FS 键**
+// （共享外部卷含 `<owner>/` 前缀），必须归一为域侧锁键（`user/<rel>`）才能与 HTTP 上传/
+// 删除/move 的锁**互斥**。变异：直接透传 fsKey（不归一）→ 两写面锁互不可见 → 红。
+func TestLockRelFor_NormalizesVolumeFSKey(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{}
+	cases := []struct{ owner, in, want string }{
+		{"alice", "alice/user/docs/a.txt", "user/docs/a.txt"}, // 共享卷（FSPath 带 owner 前缀）
+		{"alice", "/alice/user/a.txt", "user/a.txt"},          // 前导斜杠
+		{"alice", "user/a.txt", "user/a.txt"},                 // 私有卷（无前缀）：原样
+		{"", "anonymous/user/a.txt", "user/a.txt"},            // 空 owner 归一 anonymous
+		{"alice", "alice/meta/a.txt.meta", "meta/a.txt.meta"}, // meta 桶键同理
+	}
+	for _, c := range cases {
+		if got := h.lockRelFor(c.owner, c.in); got != c.want {
+			t.Errorf("lockRelFor(%q, %q) = %q, want %q", c.owner, c.in, got, c.want)
+		}
+	}
+	// 实际互斥性：以转存 FS 键取锁后，HTTP 上传侧的域侧键必须被拒。
+	release, ok := h.transferWriteLock("alice", "alice/user/a.txt")
+	if !ok {
+		t.Fatal("首次取锁应成功")
+	}
+	if _, ok2 := h.tryMarkUploadingFile("alice", "user/a.txt", uploadingLockUpload); ok2 {
+		t.Fatal("转存锁与上传锁必须同键互斥（M2：键不归一 → 并发写主文件/sidecar 错位）")
+	}
+	release()
+}

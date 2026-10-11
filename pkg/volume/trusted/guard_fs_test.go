@@ -123,13 +123,14 @@ func TestGuard_PathNormalizationDenied(t *testing.T) {
 func TestGuard_DrivePrefixDenied(t *testing.T) {
 	t.Parallel()
 	g := Guard(newInner(t))
-	for _, p := range []string{"C:/meta/x", "c:foo", "Z:/x", "D:/a/b"} {
+	for _, p := range []string{"C:/meta/x", "Z:/x", "D:/a/b", "a/C:/x", "C:"} {
 		if err := g.guardPath(p); err == nil {
 			t.Fatalf("盘符路径 %q 应被守卫拒绝", p)
 		}
 	}
-	// 限定误伤面：非「首段单字母+冒号」的冒号路径不受影响。
-	for _, p := range []string{"user/a:b.txt", "alice/user/a:b.txt"} {
+	// 限定误伤面：名称含冒号的合法文件（POSIX）与盘符相对形式不受守卫影响
+	// （后者由 Windows OS/下层 SanitizeRelPath 拒——避免误伤 `a:b.txt` 这类真实文件名）。
+	for _, p := range []string{"user/a:b.txt", "alice/user/a:b.txt", "c:foo"} {
 		if err := g.guardPath(p); err != nil {
 			t.Fatalf("路径 %q 不应被盘符判据误拒: %v", p, err)
 		}

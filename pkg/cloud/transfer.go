@@ -384,7 +384,12 @@ func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
 		// 写侧 meta，源损坏由 #743 下载层完整性管道兜底）——记录 extra 标记供下游消费
 		// 方知"未交叉权威"（与 damaged 旁路同机制，不阻断转存）。
 		if ue, ok := env.targetFS.(metaExtraUpdater); ok {
-			_ = ue.UpdateMetaExtra(env.ctx, env.rel, map[string]any{"transfer_verified": "no_reference_checksum"})
+			// m2 修复（第 7 轮 MINOR）：此前丢弃错误、无告警——写失败会让「未交叉权威」
+			// 标记静默缺失（下游消费方无从得知），改为 Warn 可观测（不阻断转存）。
+			if uerr := ue.UpdateMetaExtra(env.ctx, env.rel, map[string]any{"transfer_verified": "no_reference_checksum"}); uerr != nil {
+				m.logger.Warn("转存：目标卷 meta extra 标记写入失败（不阻断转存）",
+					"path", env.rel, "volume", env.task.Transfer.Volume, "error", uerr)
+			}
 		}
 		return nil // 无参考值 → 信任写盘成功（源完整性由下载层验证）
 	}

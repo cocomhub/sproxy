@@ -147,6 +147,8 @@ func TestDecoratorsDeclareAllCapabilities(t *testing.T) {
 		// 桶前缀视图（C1 修复后由 pkg/sync 单一实现，备份目标 + 同步载体共用）；
 		// 与其余装饰器同口径全能力转发（BlockAccessor 同样豁免）。
 		{typeName: "PrefixFS", pkgDir: "pkg/sync", exempt: blockExempt},
+		// WebDAV 挂载面 sidecar 联动装饰器（M8：此前不透传可选能力、未登记）。
+		{typeName: "davMetaFS", pkgDir: "pkg/server", exempt: blockExempt},
 	}
 
 	var problems []string

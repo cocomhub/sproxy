@@ -311,43 +311,12 @@ func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTas
 // `filesMetaPolicy.WriteMeta` **同一布局**，下载校验侧无需任何额外接线。
 func (e *Executor) newLocalPullFS(tenantRoot string) syncpkg.FS {
 	inner := syncpkg.NewLocalFS(tenantRoot, e.logger())
-	return &userBucketFS{inner: trusted.Wrap(inner, trusted.Options{Logger: e.logger()})}
+	// M8 修复（第 7 轮 MAJOR）：桶前缀视图改用 `syncpkg.PrefixFS`（**单一实现**：全能力
+	// 转发——WriteIfAbsent/ReserveSpace/LocalVolume/Mover/Copier/Linker/RangeReader/
+	// DirectURL/Provider/StagingQuota*，并已纳入 R21 门禁）。此前本包自建的 userBucketFS
+	// 只转发 7 个基础方法：消费方对 meta.Provider/Mover 等的断言恒 false → 静默降级。
+	return syncpkg.NewPrefixFS(trusted.Wrap(inner, trusted.Options{Logger: e.logger()}), "user/")
 }
-
-// userBucketFS 把 user 桶相对路径映射到租户根相对路径（`p` → `user/p`），透明委托其余。
-type userBucketFS struct{ inner syncpkg.FS }
-
-func (u *userBucketFS) key(p string) string {
-	if p == "" {
-		return "user"
-	}
-	return "user/" + p
-}
-
-func (u *userBucketFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
-	return u.inner.ListDir(ctx, u.key(p))
-}
-func (u *userBucketFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
-	return u.inner.Stat(ctx, u.key(p))
-}
-func (u *userBucketFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
-	return u.inner.OpenRead(ctx, u.key(p))
-}
-func (u *userBucketFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
-	return u.inner.WriteFile(ctx, u.key(p), r, size, mtime)
-}
-func (u *userBucketFS) Rename(ctx context.Context, from, to string) error {
-	return u.inner.Rename(ctx, u.key(from), u.key(to))
-}
-func (u *userBucketFS) Delete(ctx context.Context, p string) error {
-	return u.inner.Delete(ctx, u.key(p))
-}
-func (u *userBucketFS) MakeDir(ctx context.Context, p string) error {
-	return u.inner.MakeDir(ctx, u.key(p))
-}
-func (u *userBucketFS) Inner() syncpkg.FS { return u.inner }
-
-var _ syncpkg.FS = (*userBucketFS)(nil)
 
 // buildJob 由任务参数构造 sync 引擎 Job。
 func buildJob(task *syncmgr.SyncTask) *syncpkg.Job {

@@ -238,6 +238,39 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   （302 二次进入由 `egress_forward=1` 强制转发，校验仍在服务端）」时允许直链；其余强制服务端
   转发并**告警一次**（禁静默降级）。
 
+### 8.3 第 8 批（M1/M2/M5/M7/M8 + 相关 MINOR）修复（2026-10-11）
+
+- **M1 同步冲突解决写回联动 meta**：`writeConflictFile` 写回后调 `relinkConflictMeta`
+  （重建 sidecar；失败则失效旧 sidecar → 读侧直算兜底）。此前解析结果覆盖 marker 内容而
+  sidecar 仍描述 marker → 下载逐分块校验恒失配（fail-closed 固化不可读）。
+- **M2 转存写锁键归一**：新增 `Handlers.transferWriteLock`（`lockRelFor` 剥 `<owner>/` 前缀）
+  并注入 `cloud.Options.TargetWriteLock`。此前转存用卷 FS 键（共享卷含 owner 前缀）、
+  HTTP 上传用域侧 rel → 两写面锁**互不可见**，同 rel 并发写产出主文件/sidecar 错位固化。
+- **M5 staging 独立根池**：`stagingQuotaScope` 改挂 `stagingPool`（容量 = `staging_quota_bytes`，
+  0 = 不限），不再挂 `globalPool` 之下——慢速外部卷上传长期占暂存不再抬高 `max_storage_bytes`
+  的全局 usage、误拒无关 owner 的正常写。**运维影响**：staging 不再计入全局上限，物理盘保护
+  需显式配置 `trusted_volume.staging_quota_bytes`（建议按本地盘余量设置）。
+- **M7 生产组合链贯穿测试**：新增 `pkg/server/trusted_chain_integration_test.go`——
+  `Gate ∘ Guard ∘ Wrap ∘ CapacityFS` 全链 WriteFile → staging 预留对称 → `meta.Provider` 读
+  sidecar → `UpdateMetaExtra` → 逐分块校验通过 + 篡改 fail-closed；并断言 `Innermost` 下探
+  未被装饰层污染（此前的「静默降级」类回归只靠单包测试，编译与单测都拦不住）。
+- **M8 aux 装饰器能力透传**：`davMetaFS` 补齐全部可选能力转发（写面能力**带 meta 重链**：
+  `Move/Copy/Link/WriteIfAbsent`；读/元信息能力透传，未实现返 `ErrUnsupported`）并登记 R21；
+  `pkg/syncexec` 的 `userBucketFS` 删除，改用 `syncpkg.PrefixFS`（单一实现、全能力转发）。
+- **MINOR**：`UpdateMetaExtra` 失败改 Warn（m2）；`trusted_volume_test.go` 陈旧「disable 开关」
+  注释修正（m3）；`TransferFSFor` 卷元缺失分支补 `Wrap`（m4）；`guardPath` 盘符判据改**按段**
+  （`a/C:/x` 不再漏判，精确到「整段恰为 `<字母>:`」以免误伤合法含冒号文件名）；baidupcs
+  `StorageFS.WriteFile` 路径校验改**逐段**拒空/`.`/`..`（此前只拒前缀 `../`，中段穿越透传远端）。
+
+**仍未修（下一批，已记档）**：M3（baidupcs staging 峰值 2×：`SyncFS` 落 `staging-*` 后
+`Storage.Put` 再拷一份）、M6（远端 md5 非权威时跳过相等断言——现为「Warn + 接受」，评审主张
+先 rapidupload 刷新重验）、M9（S3 multipart 崩溃遗留孤儿 parts 无清理；本地备份未走卷容量池
+账本；外部卷写后交叉校验被 `isLocal` 门跳过；`skip_verify` 缺启动期显式告警）、m1（
+`MetaBucketGuard.Inner()` 逃生口需「仅限能力探测」门禁）、m5（`TransferFSFor` 第三返回值语义 /
+`DisableDoubleDownloadVerify` 规格-实现缺口）、m6（S3 multipart `UploadRetries` 在 TeeReader
+非 Seeker 下恒失效）、m7（staging `ReserveUsage` 每轮 spawn select goroutine；baidupcs 单测 5s
+等待）、m9（meta tmp 孤儿仅下次写清扫；`verifyWriteMeta`/`UpdateMetaExtra` 本地两遍整文件读回）。
+
 ## 9. 验证
 
 - 单元：`pkg/files/meta`（计算/校验/短读/长读/中段 Seek）、`pkg/volume/trusted`（Wrap/Guard/能力透传/生命周期）、`pkg/cloud`（转存分块校验/标记）、`pkg/sync`（Equal/staging gate）、`pkg/quota`（staging tracker）。

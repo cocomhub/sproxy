@@ -186,3 +186,21 @@ func TestEntryFromMeta_EtagNotMD5(t *testing.T) {
 		t.Fatalf("Checksums[etag] = %q, want %q", got, m.ETag)
 	}
 }
+
+// TestStorageFS_WriteFile_RejectsTraversalSegments 回归（m8，第 7 轮 MINOR）：路径校验必须
+// **逐段**拒绝空段/`.`/`..`——此前只拒前缀 `../`，中段（`docs/../../etc/passwd`）原样透传给
+// 远端 API（可能跨目录）。变异：恢复为「只查前缀」→ 中段穿越不再报错 → 红。
+func TestStorageFS_WriteFile_RejectsTraversalSegments(t *testing.T) {
+	t.Parallel()
+	fs := newTestStorageFS(t)
+	ctx := context.Background()
+	for _, bad := range []string{"../x", "a/../b", "docs/../../etc/passwd", "a//b", "./a", "/"} {
+		if err := fs.WriteFile(ctx, bad, strings.NewReader("x"), 1, 0); err == nil {
+			t.Errorf("路径 %q 应被拒绝（逐段校验）", bad)
+		}
+	}
+	// 合法路径不受影响。
+	if err := fs.WriteFile(ctx, "docs/a.txt", strings.NewReader("x"), 1, 0); err != nil {
+		t.Fatalf("合法路径不应被拒: %v", err)
+	}
+}

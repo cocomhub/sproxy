@@ -4,8 +4,10 @@
 package server
 
 // trusted_volume_test.go 钉住可信卷装配：外部卷上传源/转存目标默认 Wrap（写后生成
-// .meta），trusted_volume.disable=true 时关闭（零回归）。断言铁律：正例落到真实
-// 副作用（外部卷文件旁存在可反序列化校验的 .meta；关闭后无 .meta）。
+// .meta，落独立 meta 功能桶）。**注意：不存在 `trusted_volume.disable` 开关**——meta
+// 恒生成（用户裁定：「只能关校验、不能关 meta」；本文件旧注释曾声称有 disable 开关，
+// 属陈旧误导，2026-10-11 修正）；唯一的放宽开关是 `trusted_volume.skip_verify`
+// （只关读侧校验）。断言铁律：正例落到真实副作用（sidecar 存在且可反序列化校验）。
 
 import (
 	"bytes"

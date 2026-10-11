@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"path"
@@ -112,15 +113,20 @@ func (d *davMetaFS) Rename(ctx context.Context, from, to string) error {
 	if err := d.FS.Rename(ctx, from, to); err != nil {
 		return err
 	}
-	// 先清目标旧 sidecar（释放其配额 + 防陈旧），再写新 meta——否则目标键已有 sidecar 时
-	// writeMeta 失败会残留描述旧内容的 sidecar（读校验固化失败，P2）。
+	d.relinkAfterMove(ctx, from, to)
+	return nil
+}
+
+// relinkAfterMove 改名/移动/复制后重链 sidecar：先清目标旧 sidecar（释放其配额 + 防陈旧），
+// 再按新路径重建；目录级操作再整棵迁移子 sidecar 子树（M8：Move/Copy/Link 此前**未重链**
+// meta——被嵌入 FS 的方法直通，目标键无证据/源 sidecar 成孤儿）。
+func (d *davMetaFS) relinkAfterMove(ctx context.Context, from, to string) {
 	d.removeMeta(to)
 	d.removeMeta(from)
 	d.writeMeta(ctx, to)
 	// 目录级 MOVE：子文件 sidecar 在 `meta/<from>/**` 子树，必须整棵迁移——否则新位置
-	// 逐分块校验静默失效（退化为直算）且旧子树成孤儿白占 meta 桶配额（本轮 B 面）。
+	// 逐分块校验静默失效（退化为直算）且旧子树成孤儿白占 meta 桶配额。
 	d.migrateMetaSubtree(from, to)
-	return nil
 }
 
 // migrateMetaSubtree 目录级 MOVE 时整棵迁移 sidecar 子树：`meta/<from>/**` → `meta/<to>/**`。
@@ -174,3 +180,130 @@ func (d *davMetaFS) migrateMetaEntry(child, srcRoot, dstRoot string) bool {
 	}
 	return true
 }
+
+// ---- 可选能力转发（M8，第 7 轮 MAJOR）：透明装饰器契约 ----
+//
+// 此前 davMetaFS 只转发 7 个基础方法 + Inner/WithStagingQuota：消费方对
+// `meta.Provider`/`Mover`/`Copier`/`Linker`/`WriteIfAbsent`/`RangeReader`/`DirectURL`
+// 的断言虽为真（类型断言命中本层）却语义落空（方法被嵌入 FS 直通 → meta 不重链；
+// 或根本未实现 → 断言恒 false 静默降级）。逐一显式实现：写面能力**带 meta 重链**，
+// 读/元信息能力透传内层（未实现返回 ErrUnsupported，与其余装饰器同口径）。
+
+// WriteIfAbsent 唯一写（内层未实现 → ErrUnsupported，调用方回落）。
+func (d *davMetaFS) WriteIfAbsent(ctx context.Context, p string, r io.Reader, size, mtime int64) (bool, error) {
+	w, ok := d.FS.(syncpkg.WriteIfAbsent)
+	if !ok {
+		return false, fmt.Errorf("dav: 底层未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
+	}
+	written, err := w.WriteIfAbsent(ctx, p, r, size, mtime)
+	if err != nil || !written {
+		return written, err
+	}
+	d.writeMeta(ctx, p) // 写面同步重链 sidecar（与 http 上传/DAV PUT 一致）
+	return true, nil
+}
+
+// Move 同卷移动 + meta 重链（内层未实现 → ErrUnsupported）。
+func (d *davMetaFS) Move(ctx context.Context, from, to string) error {
+	m, ok := d.FS.(syncpkg.Mover)
+	if !ok {
+		return fmt.Errorf("dav: 底层未实现 Move: %w", syncpkg.ErrUnsupported)
+	}
+	if err := m.Move(ctx, from, to); err != nil {
+		return err
+	}
+	d.relinkAfterMove(ctx, from, to)
+	return nil
+}
+
+// Copy 同卷复制 + 目标 meta 重建（内层未实现 → ErrUnsupported）。
+func (d *davMetaFS) Copy(ctx context.Context, from, to string) error {
+	c, ok := d.FS.(syncpkg.Copier)
+	if !ok {
+		return fmt.Errorf("dav: 底层未实现 Copy: %w", syncpkg.ErrUnsupported)
+	}
+	if err := c.Copy(ctx, from, to); err != nil {
+		return err
+	}
+	d.relinkAfterMove(ctx, from, to)
+	return nil
+}
+
+// Link 硬链接 + 目标 meta 重建（内层未实现 → ErrUnsupported）。
+func (d *davMetaFS) Link(ctx context.Context, from, to string) error {
+	l, ok := d.FS.(syncpkg.Linker)
+	if !ok {
+		return fmt.Errorf("dav: 底层未实现 Link: %w", syncpkg.ErrUnsupported)
+	}
+	if err := l.Link(ctx, from, to); err != nil {
+		return err
+	}
+	d.relinkAfterMove(ctx, from, to)
+	return nil
+}
+
+// ReserveSpace 透传卷容量预检（内层未实现 → ErrUnsupported，调用方跳过卷配额）。
+func (d *davMetaFS) ReserveSpace(ctx context.Context, relPath string, size int64) error {
+	rs, ok := d.FS.(syncpkg.ReserveSpace)
+	if !ok {
+		return fmt.Errorf("dav: 底层未实现 ReserveSpace: %w", syncpkg.ErrUnsupported)
+	}
+	return rs.ReserveSpace(ctx, relPath, size)
+}
+
+// IsLocalVolume 转发本地性自述（未实现 = 外部卷，与全仓「未实现默认外部」一致）。
+func (d *davMetaFS) IsLocalVolume() bool {
+	lv, ok := d.FS.(syncpkg.LocalVolume)
+	return ok && lv.IsLocalVolume()
+}
+
+// ExemptStagingQuota 转发 staging 豁免自述（未实现 = 不豁免，默认强制 gate）。
+func (d *davMetaFS) ExemptStagingQuota() bool {
+	ex, ok := d.FS.(syncpkg.StagingQuotaExempt)
+	return ok && ex.ExemptStagingQuota()
+}
+
+// OpenRangeRead 透传定点读（内层未实现 → ErrUnsupported，调用方整块回退）。
+func (d *davMetaFS) OpenRangeRead(ctx context.Context, p string, offset, size int64) (io.ReadCloser, error) {
+	rr, ok := d.FS.(syncpkg.RangeReader)
+	if !ok {
+		return nil, fmt.Errorf("dav: 底层未实现 OpenRangeRead: %w", syncpkg.ErrUnsupported)
+	}
+	return rr.OpenRangeRead(ctx, p, offset, size)
+}
+
+// DirectURL 透传直链（内层未实现 → ErrUnsupported，调用方回落服务端转发）。
+func (d *davMetaFS) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
+	dp, ok := d.FS.(syncpkg.DirectURLProvider)
+	if !ok {
+		return "", false, fmt.Errorf("dav: 底层未实现 DirectURL: %w", syncpkg.ErrUnsupported)
+	}
+	return dp.DirectURL(ctx, relPath)
+}
+
+// FileMeta 透传 sidecar 读取（内层未实现 → ErrUnsupported；本装饰器只做**写面重链**，
+// 读面证据由底层可信卷提供）。
+func (d *davMetaFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	pv, ok := d.FS.(meta.Provider)
+	if !ok {
+		return nil, fmt.Errorf("dav: 底层未实现 FileMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return pv.FileMeta(ctx, rel)
+}
+
+// ---- 能力平权断言（R21）----
+var (
+	_ syncpkg.FS                  = (*davMetaFS)(nil)
+	_ syncpkg.WriteIfAbsent       = (*davMetaFS)(nil)
+	_ syncpkg.ReserveSpace        = (*davMetaFS)(nil)
+	_ syncpkg.LocalVolume         = (*davMetaFS)(nil)
+	_ syncpkg.Mover               = (*davMetaFS)(nil)
+	_ syncpkg.Copier              = (*davMetaFS)(nil)
+	_ syncpkg.Linker              = (*davMetaFS)(nil)
+	_ syncpkg.RangeReader         = (*davMetaFS)(nil)
+	_ syncpkg.DirectURLProvider   = (*davMetaFS)(nil)
+	_ syncpkg.StagingQuotaCapable = (*davMetaFS)(nil)
+	_ syncpkg.StagingQuotaExempt  = (*davMetaFS)(nil)
+	_ meta.Provider               = (*davMetaFS)(nil)
+	// BlockAccessor 有意豁免（与其余装饰器同口径：需 Capability 探测语义）。
+)
