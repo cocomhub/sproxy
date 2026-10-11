@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -407,5 +408,88 @@ func TestBackupQuotaFS_OverwriteReleasesPrev(t *testing.T) {
 	}
 	if got := scope.Usage(); got != 0 {
 		t.Fatalf("删除后 Usage=%d want 0", got)
+	}
+}
+
+// TestBackupQuotaFS_DurableCapacityLedger 验证本地备份写面同步更新**持久容量账本**
+// （capacity.StorageManager）：写入 / 覆盖写差分 / 删除 / 改名覆盖四路记账对称，
+// 超限拒绝不产生预留泄漏（账本漂移）。
+func TestBackupQuotaFS_DurableCapacityLedger(t *testing.T) {
+	t.Parallel()
+	sm := capacity.NewStorageManager(t.TempDir(), 100, nil, testLogger())
+	inner := &backupSizedMemFS{backupMemFS{files: map[string]string{}}}
+	q := &backupQuotaFS{inner: inner, sm: sm, cat: capacity.CategoryChunked}
+	ctx := context.Background()
+	usage := func() int64 { return sm.UsageByCategory()[capacity.CategoryChunked] }
+
+	if err := q.WriteFile(ctx, "a.txt", strings.NewReader(strings.Repeat("x", 40)), 40, 0); err != nil {
+		t.Fatalf("40B 写入: %v", err)
+	}
+	if got := usage(); got != 40 {
+		t.Fatalf("写入后持久账本=%d want 40（本地备份写面未记账 → 红）", got)
+	}
+	// 覆盖写差分：同 rel 覆盖为 10B → 账本 10（旧字节释放，不累加）。
+	if err := q.WriteFile(ctx, "a.txt", strings.NewReader(strings.Repeat("y", 10)), 10, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := usage(); got != 10 {
+		t.Fatalf("覆盖写后持久账本=%d want 10（旧字节未释放）", got)
+	}
+	// 新文件 50 → 60。
+	if err := q.WriteFile(ctx, "b.txt", strings.NewReader(strings.Repeat("z", 50)), 50, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := usage(); got != 60 {
+		t.Fatalf("新文件后持久账本=%d want 60", got)
+	}
+	// 超限（剩余 40，写 60）→ 拒绝且账本不变（预留已回退，无泄漏）。
+	if err := q.WriteFile(ctx, "c.txt", strings.NewReader(strings.Repeat("w", 60)), 60, 0); err == nil {
+		t.Fatal("超限写应被拒绝")
+	}
+	if got := usage(); got != 60 {
+		t.Fatalf("拒绝后持久账本=%d want 60（预留泄漏）", got)
+	}
+	// 删除释放 → 10。
+	if err := q.Delete(ctx, "b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if got := usage(); got != 10 {
+		t.Fatalf("删除后持久账本=%d want 10", got)
+	}
+	// 覆盖改名（目标旧字节释放；源字节已在写时计入）→ 仍 10。
+	if err := q.WriteFile(ctx, "d.txt", strings.NewReader(strings.Repeat("q", 30)), 30, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Rename(ctx, "a.txt", "d.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if got := usage(); got != 10 {
+		t.Fatalf("改名覆盖后持久账本=%d want 10", got)
+	}
+}
+
+// TestBackupAPI_LocalTargetDurableCapacityLedger 端到端：备份到**本地卷**后持久容量账本
+// 与实际落盘字节一致；随后增量备份（全部 skip）**不产生账本漂移**。
+func TestBackupAPI_LocalTargetDurableCapacityLedger(t *testing.T) {
+	t.Parallel()
+	h, url := newBackupTestServer(t, nil)
+	sm := capacity.NewStorageManager(t.TempDir(), 1<<20, nil, testLogger())
+	h.storageMgr = sm
+	writeUserFile(t, h, "", "a.txt", "hello")
+	writeUserFile(t, h, "", "sub/b.txt", "world!")
+
+	if status, body := doBackup(t, url, map[string]any{"target": "backup-vol"}); status != http.StatusOK {
+		t.Fatalf("备份 status=%d want 200（body=%s）", status, body)
+	}
+	cat := sm.UsageByCategory()[capacity.CategoryChunked]
+	if cat != 11 {
+		t.Fatalf("备份后持久账本=%d want 11（hello=5 + world!=6）", cat)
+	}
+	// 增量备份：全部 skip → 账本不变（覆盖写差分无漂移）。
+	if status, body := doBackup(t, url, map[string]any{"target": "backup-vol"}); status != http.StatusOK {
+		t.Fatalf("增量备份 status=%d want 200（body=%s）", status, body)
+	}
+	if got := sm.UsageByCategory()[capacity.CategoryChunked]; got != 11 {
+		t.Fatalf("增量备份后持久账本=%d want 11（漂移 → 红）", got)
 	}
 }

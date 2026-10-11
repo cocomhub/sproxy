@@ -808,3 +808,75 @@ func TestTrustedVolumeFS_VerifyWriteMetaRemote(t *testing.T) {
 		t.Fatalf("一致时 sidecar 应保留（M9c 不误伤正常写）: e=%v err=%v", e, err)
 	}
 }
+
+// TestTrustedVolumeFS_VerifyWriteMetaLocalLightweight（m9）：本地卷写后交叉校验与远端**统一**
+// 为有界轻量判据（Stat size + 末块 sha256），不再整文件读回（6GiB 级写原每次付一次全量读）。
+//
+//	① 同 size + 末块相同、仅**中段**被并发覆盖 → 轻量判据**不检出**（m9 如实声明的放弃项，
+//	   由读路径逐分块校验兜底）→ sidecar 保留；
+//	② 末块篡改 → sidecar 失效；③ size 不一致 → sidecar 失效。
+//
+// 变异：去掉末块判据（只留 size）→ ② 红；改回整文件读回重算 TotalSHA256 → ① 红。
+func TestTrustedVolumeFS_VerifyWriteMetaLocalLightweight(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	body := bytes.Repeat([]byte("abcd"), 1024) // 4096B → 4 块（ChunkSize 1024）
+	inner := newInner(t)
+	tv := Wrap(inner, Options{}).(*TrustedVolumeFS)
+	calc, cerr := meta.NewCalculator(int64(len(body)), 1024)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	if _, rerr := calc.ReadFrom(bytes.NewReader(body)); rerr != nil {
+		t.Fatal(rerr)
+	}
+	fm := calc.Finish()
+	const rel = "user/m.bin"
+	mrel := meta.MetaPath(rel)
+	writeMain := func(data []byte) {
+		t.Helper()
+		if err := inner.WriteFile(ctx, rel, bytes.NewReader(data), int64(len(data)), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSidecar := func() {
+		t.Helper()
+		_ = inner.Delete(ctx, mrel)
+		if err := inner.WriteFile(ctx, mrel, bytes.NewReader([]byte(`{"version":1}`)), 14, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sidecarExists := func() bool {
+		e, err := inner.Stat(ctx, mrel)
+		return err == nil && e != nil
+	}
+
+	// ① 中段篡改（同 size、末块不变）：轻量判据不检出 → sidecar 保留。
+	writeMain(body)
+	writeSidecar()
+	mid := append([]byte(nil), body...)
+	mid[100] ^= 0xFF
+	writeMain(mid)
+	tv.verifyWriteMeta(ctx, rel, fm)
+	if !sidecarExists() {
+		t.Fatal("中段篡改（末块不变）在轻量判据下不应失效 sidecar（红 = 已改回整文件读回）")
+	}
+
+	// ② 末块篡改 → 失效。
+	writeSidecar()
+	tail := append([]byte(nil), body...)
+	tail[len(tail)-1] ^= 0xFF
+	writeMain(tail)
+	tv.verifyWriteMeta(ctx, rel, fm)
+	if sidecarExists() {
+		t.Fatal("末块 sha256 不一致时应失效 sidecar（末块判据丢失 → 红）")
+	}
+
+	// ③ size 不一致 → 失效。
+	writeSidecar()
+	writeMain(body[:len(body)-7])
+	tv.verifyWriteMeta(ctx, rel, fm)
+	if sidecarExists() {
+		t.Fatal("size 不一致时应失效 sidecar")
+	}
+}
