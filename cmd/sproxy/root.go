@@ -48,6 +48,7 @@ import (
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/federated"
@@ -1133,6 +1134,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 未注册即「未注册后端」启动 panic）。与 sync 开关解耦（Imp-1 装配门控修复：默认配置
 	// sync 关闭时 secret 后端不再不可达）。
 	registerSecretVolumeBackends()
+	// 封装卷类型标记「推迟装配」：其后端构造依赖已装配卷集（源卷特权视图），
+	// 与 secretdata 同型时序；封印注入在 assembleVolumes 内完成，后端在此之后补装。
+	enclosure.MarkDeferred()
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:                 rt.mux,
 		CfgPtr:              &cfgPtr,
@@ -1158,6 +1162,12 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 与本地卷 load failure 同层）；默认 secrets 卷失败已在函数内降级为 WARN。
 	if err := setupSecretBackends(ctx, h.Volumes(), cfg.StorageRoot, logger); err != nil {
 		return fmt.Errorf("secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w", err)
+	}
+	// 封装卷后端补装（推迟装配）：set 已就绪 → 按声明拓扑序构造 wrapper 后端并挂回，
+	// 源视图直接持有源 FS（封印注入在 assembleVolumes 阶段已完成，这里只做特权读写视图）。
+	// 失败即 boot fail（fail-closed）：operator 显式声明的封装卷不得静默消失。
+	if err := enclosure.AttachAll(ctx, h.Volumes(), logger); err != nil {
+		return fmt.Errorf("封装卷装配失败（配置声明的封装卷补装 boot fail）：%w", err)
 	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
