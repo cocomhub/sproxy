@@ -124,10 +124,7 @@ func (s *StorageManager) Release(size int64, cat StorageCategory) {
 	}
 	for {
 		cur := s.totalUsage.Load()
-		next := cur - size
-		if next < 0 {
-			next = 0
-		}
+		next := max(cur-size, 0)
 		if s.totalUsage.CompareAndSwap(cur, next) {
 			break
 		}
@@ -426,10 +423,7 @@ func clampAdd(v *atomic.Int64, delta int64) {
 	}
 	for {
 		cur := v.Load()
-		next := cur + delta
-		if next < 0 {
-			next = 0
-		}
+		next := max(cur+delta, 0)
 		if v.CompareAndSwap(cur, next) {
 			return
 		}

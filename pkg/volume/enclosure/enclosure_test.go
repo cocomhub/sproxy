@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -56,9 +57,7 @@ func (d *directFS) DirectURL(_ context.Context, relPath string) (string, bool, e
 
 func encVol(name, src string, extra map[string]any) volume.Volume {
 	e := map[string]any{"wrapper": "basetest", "source": src}
-	for k, v := range extra {
-		e[k] = v
-	}
+	maps.Copy(e, extra)
 	return volume.Volume{Name: name, Type: TypeEnclosure, Extra: e}
 }
 
@@ -110,9 +109,7 @@ func TestParse_Rejects(t *testing.T) {
 	registerTestWrapper(t, "basetest")
 	base := func(extra map[string]any) volume.Volume {
 		e := map[string]any{}
-		for k, v := range extra {
-			e[k] = v
-		}
+		maps.Copy(e, extra)
 		return volume.Volume{Name: "vault", Type: TypeEnclosure, Extra: e}
 	}
 	cases := []struct {

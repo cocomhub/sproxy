@@ -505,8 +505,8 @@ func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data [
 //
 // 兼容三种真实命名（全部由代码生成，逐一核对）：
 //   - `.tmp.<nano>`：本文件 atomicWriteMeta 的 tmp 名（`<base>.tmp.<unixNano>`）；
-//   - `.<base>.tmp-*`：**LocalFS.writeFileAtomic** 用 `os.CreateTemp(dir, "."+base+".tmp-*")`
-//     生成的真实名（**带前导点**）——此前只匹配无前导点变体，导致这类孤儿实际**从未**被清理
+//   - `.<base>.tmp-*`：**LocalFS.writeFileAtomic** 经 `os.CreateTemp` 以 pattern
+//     `"."+base+".tmp-*"` 生成的真实名（**带前导点**）——此前只匹配无前导点变体，导致这类孤儿实际**从未**被清理
 //     （我的 m9 首版修复即此错：判据与生成端不一致 + fixture 用了假名 ⇒ 假绿）。
 //
 // **刻意不匹配** `<base>.tmp-*`（无前导点）：全仓无该命名的生成端，而它会误删合法 sidecar
