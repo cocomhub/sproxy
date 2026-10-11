@@ -33,6 +33,11 @@ type APIConfig struct {
 	CredentialPath string
 	// HTTPClient 可选注入（测试用）。
 	HTTPClient *http.Client
+	// MaxRetries 是幂等请求（GET/HEAD）的瞬断重试次数；<=0 → 默认（3）。
+	// 背景：取 FETCH 直链的控制面请求单次 TLS 握手超时会让整个多 GB 任务失败。
+	MaxRetries int
+	// RetryBackoff 是重试退避基数（指数增长 + 抖动）；<=0 → 默认（400ms）。
+	RetryBackoff time.Duration
 	// Logger 日志。
 	Logger *slog.Logger
 }
@@ -51,6 +56,8 @@ type API struct {
 	// credPath 是 CLI 会话凭据文件路径（.credentials.json）。
 	credPath string
 	log      *slog.Logger
+	// retry 是幂等请求（GET/HEAD）的退避重试策略。
+	retry retryPolicy
 
 	// tokenMu 保护 token 的惰性初始化（多 goroutine 并发首次请求时只取一次）。
 	tokenMu sync.Mutex
@@ -77,7 +84,8 @@ func NewAPI(cfg APIConfig, cli *Cli) *API {
 			credPath = filepath.Join(home, ".pikpak", ".credentials.json")
 		}
 	}
-	return &API{host: strings.TrimRight(host, "/"), client: client, cli: cli, cfgToken: cfg.AccessToken, token: cfg.AccessToken, credPath: credPath, log: log}
+	return &API{host: strings.TrimRight(host, "/"), client: client, cli: cli, cfgToken: cfg.AccessToken, token: cfg.AccessToken, credPath: credPath, log: log,
+		retry: retryPolicy{MaxRetries: cfg.MaxRetries, Backoff: cfg.RetryBackoff}}
 }
 
 // ResetToken 清除会话导出的 token（恢复为构造时的显式 token，通常为空）——供账号池
@@ -147,14 +155,29 @@ const pikpakMaxWalkDepth = 64
 // doJSON 执行带鉴权的 API 请求并解析 JSON。
 // 鉴权：优先显式 AccessToken（cfg.AccessToken）；未配置时经 CLI `auth token`
 // 惰性导出并缓存（CLI 登录态 → REST 的官方通道）。两者皆无 → ErrNotLoggedIn。
+//
+// **幂等重试**：GET/HEAD 遇传输层瞬断（TLS 握手超时/连接重置/EOF）或 429/5xx
+// 退避重试（默认 3 次）；POST 等非幂等请求单次（避免重放副作用）。
+// 背景（2026-10-11 实测）：DownloadLink 单次握手超时曾让 1.3GB 混合下载整任务失败。
 func (a *API) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
-	token, err := a.ensureToken(ctx)
-	if err != nil {
-		return err
-	}
 	u := a.host + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
+	}
+	if method != http.MethodGet && method != http.MethodHead {
+		_, err := a.doJSONOnce(ctx, method, path, u, body, out)
+		return err
+	}
+	return doWithRetry(ctx, a.retry, a.log, method+" "+path, func() (bool, error) {
+		return a.doJSONOnce(ctx, method, path, u, body, out)
+	})
+}
+
+// doJSONOnce 单次请求（返回是否可重试）。
+func (a *API) doJSONOnce(ctx context.Context, method, path, u string, body any, out any) (bool, error) {
+	token, err := a.ensureToken(ctx)
+	if err != nil {
+		return false, err
 	}
 	var req *http.Request
 	var reqErr error
@@ -165,7 +188,7 @@ func (a *API) doJSON(ctx context.Context, method, path string, query url.Values,
 		req, reqErr = http.NewRequestWithContext(ctx, method, u, nil)
 	}
 	if reqErr != nil {
-		return reqErr
+		return false, reqErr
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 Chrome/117")
@@ -175,19 +198,20 @@ func (a *API) doJSON(ctx context.Context, method, path string, query url.Values,
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return err
+		return retryableRequestErr(err), err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := ioReadAll(resp.Body)
-		return fmt.Errorf("pikpak api %s %s: HTTP %d: %s", method, path, resp.StatusCode, truncate(string(b), 200))
+		return retryableStatus(resp.StatusCode),
+			fmt.Errorf("pikpak api %s %s: HTTP %d: %s", method, path, resp.StatusCode, truncate(string(b), 200))
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return fmt.Errorf("pikpak api decode: %w", err)
+			return false, fmt.Errorf("pikpak api decode: %w", err)
 		}
 	}
-	return nil
+	return false, nil
 }
 
 // ensureToken 返回当前 access token：显式配置优先；否则从 CLI 会话凭据文件

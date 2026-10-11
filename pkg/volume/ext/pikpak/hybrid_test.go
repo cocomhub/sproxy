@@ -972,7 +972,7 @@ func TestHybridManifest_SourceMismatch(t *testing.T) {
 		Chunks:   map[int64]int64{0: int64(len(payload))},
 	}
 	data, _ := json.Marshal(oldManifest)
-	_ = os.WriteFile(manifestPath(dest), data, 0o644)
+	_ = os.WriteFile(ManifestPath(dest), data, 0o644)
 	// 下载：源不匹配 → 忽略 manifest 全量重下 → 内容正确
 	if _, err := mk().Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
 		t.Fatalf("download after source mismatch: %v", err)
@@ -1612,7 +1612,7 @@ func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 	data, _ := json.Marshal(old)
-	_ = os.WriteFile(manifestPath(dest), data, 0o644)
+	_ = os.WriteFile(ManifestPath(dest), data, 0o644)
 
 	var srvURL string
 	mux := http.NewServeMux()
@@ -1668,7 +1668,7 @@ func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
 		t.Fatalf("Download error: %v", err)
 	}
 	// 下载成功 → manifest 已删（removeManifest 在完成路径）
-	if _, err := os.Stat(manifestPath(dest)); err == nil {
+	if _, err := os.Stat(ManifestPath(dest)); err == nil {
 		t.Error("manifest should be removed after completion (and source mismatch)")
 	}
 }
@@ -1945,7 +1945,7 @@ func TestHybridManifest_InitAtStart(t *testing.T) {
 		t.Fatalf("manifest source mismatch: %+v", m.Source)
 	}
 	// initManifest 已落盘 → .hybrid 与 .hybrid.downloading 配对（下载开始即有）
-	if _, err := os.Stat(manifestPath(dest)); err != nil {
+	if _, err := os.Stat(ManifestPath(dest)); err != nil {
 		t.Fatalf("manifest should exist right after init: %v", err)
 	}
 
@@ -1956,7 +1956,7 @@ func TestHybridManifest_InitAtStart(t *testing.T) {
 	if _, err := os.Stat(dest); err != nil {
 		t.Fatalf("final dest should exist: %v", err)
 	}
-	if _, err := os.Stat(manifestPath(dest)); !os.IsNotExist(err) {
+	if _, err := os.Stat(ManifestPath(dest)); !os.IsNotExist(err) {
 		t.Fatalf("manifest should be removed after completion: %v", err)
 	}
 	if _, err := os.Stat(dest + ".hybrid.downloading"); !os.IsNotExist(err) {

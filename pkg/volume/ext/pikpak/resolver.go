@@ -86,6 +86,10 @@ type ShareResolverConfig struct {
 	UserHost string
 	// HTTPClient 可选注入（测试用）。
 	HTTPClient *http.Client
+	// MaxRetries 是幂等 GET（分享详情/文件信息/captcha）的瞬断重试次数；<=0 → 默认（3）。
+	MaxRetries int
+	// RetryBackoff 是重试退避基数（指数 + 抖动）；<=0 → 默认（400ms）。
+	RetryBackoff time.Duration
 	// Logger 日志。
 	Logger *slog.Logger
 }
@@ -108,6 +112,8 @@ type ShareResolver struct {
 	// expires_in（秒），缺省保守 1h。
 	captchaFetchedAt time.Time
 	captchaTTL       time.Duration
+	// retry 是幂等 GET 的退避重试策略（控制面瞬断容忍）。
+	retry retryPolicy
 }
 
 // NewShareResolver 创建匿名分享解析器。
@@ -134,6 +140,7 @@ func NewShareResolver(cfg ShareResolverConfig) *ShareResolver {
 		client:   client,
 		log:      log,
 		deviceID: genDeviceID(),
+		retry:    retryPolicy{MaxRetries: cfg.MaxRetries, Backoff: cfg.RetryBackoff},
 	}
 }
 
@@ -387,35 +394,39 @@ func (r *ShareResolver) doJSONGet(ctx context.Context, u string, q url.Values, c
 	if len(q) > 0 {
 		full += "?" + q.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
-	if err != nil {
-		return err
-	}
-	r.setAnonHeaders(req, captchaTok, dev)
-	return r.doJSON(req, out)
+	return doWithRetry(ctx, r.retry, r.log, "GET "+u, func() (bool, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
+		if err != nil {
+			return false, err
+		}
+		r.setAnonHeaders(req, captchaTok, dev)
+		return r.doJSON(req, out)
+	})
 }
 
-// doJSON 执行请求并解析 JSON（统一错误处理）。
-func (r *ShareResolver) doJSON(req *http.Request, out any) error {
+// doJSON 执行请求并解析 JSON（统一错误处理）。返回是否可重试（传输层瞬断/429/5xx）。
+func (r *ShareResolver) doJSON(req *http.Request, out any) (bool, error) {
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return err
+		return retryableRequestErr(err), err
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		// 读取期中断（半截响应/连接重置）同属瞬断——仅 GET 会被重试（doJSONGet）。
+		return retryableRequestErr(err), err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("pikpak api %s: HTTP %d: %s", req.URL.Path, resp.StatusCode, truncate(string(b), 200))
+		return retryableStatus(resp.StatusCode),
+			fmt.Errorf("pikpak api %s: HTTP %d: %s", req.URL.Path, resp.StatusCode, truncate(string(b), 200))
 	}
 	if err := json.Unmarshal(b, out); err != nil {
-		return fmt.Errorf("pikpak api decode: %w", err)
+		return false, fmt.Errorf("pikpak api decode: %w", err)
 	}
-	return nil
+	return false, nil
 }
 
-// doJSONPost 是 POST 版（captcha init 用）。
+// doJSONPost 是 POST 版（captcha init 用）——非幂等，不重试（忽略 retryable）。
 func (r *ShareResolver) doJSONPost(ctx context.Context, u string, body any, out any) error {
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(b)))
@@ -426,7 +437,8 @@ func (r *ShareResolver) doJSONPost(ctx context.Context, u string, body any, out 
 	req.Header.Set("User-Agent", defaultShareUA)
 	req.Header.Set("X-Client-ID", webClientID)
 	req.Header.Set("X-Device-ID", r.deviceID)
-	return r.doJSON(req, out)
+	_, err = r.doJSON(req, out)
+	return err
 }
 
 // setAnonHeaders 设置匿名 GET 请求头。
