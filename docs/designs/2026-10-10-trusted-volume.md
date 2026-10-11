@@ -355,6 +355,34 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 **硬链接**，在 adapter 内用 `os.SameFile` 判定——拷贝版会被 cleanup 删掉，事后扫描看不见）、
 `TestStorageFS_WriteFile_SingleLocalStaging`；变异两处命中（去 ctx 复用分支 / 链接改拷贝）。
 
+## 8.7 备份目标持久容量账本（强一致）与本地写后校验收敛
+
+**M9b｜本地备份写面并入 durable 容量账本（强一致）**
+- 缺口：本地卷目标的备份写面只记 owner user 桶 `Scope` 与目标卷容量池两本**内存**账，而
+  `/stats` 与 `ScanAndRecalculate` 的权威账本是 `capacity.StorageManager` —— 无
+  `vol_capacity` 的本地卷只靠周期扫描对账 ⇒ 两次扫描之间容量统计**低估**（备份字节不入账）。
+- 修法：`backupQuotaFS` 增 `sm/cat`（本地卷目标在 Scope/卷池之外对声明 size 预留
+  `TryReserve`；写成功按实际大小结算——账本无 `Adjust`，走 `Release(pre)+TryReserve(actual)`；
+  写失败/取消回退；**三本账同进同退**，任一侧拒绝即整体拒绝并回退已成功侧）。覆盖写按
+  `prev` 差分、`Delete`/`Rename` 对称释放；类别与用户文件写面一致（`CategoryChunked`），
+  `/stats` 不新增口径；外部卷目标不参与本地磁盘账本。
+- 验证：`TestBackupQuotaFS_DurableCapacityLedger`、`TestBackupAPI_LocalTargetDurableCapacityLedger`
+  （端到端：备份后账本 = 实际字节，增量备份全 skip 不漂移）；变异 2 处命中。
+
+**m9｜本地写后校验改有界轻量判据 + meta tmp 孤儿清扫扩面**
+- `verifyWriteMeta` 本地分支原为**整文件读回**重算 `TotalSHA256`（每次写付一次全量读，
+  6GiB 级写放大一倍）→ 与远端**统一**为有界判据：`Stat` size 必须等于 `meta.Size`；底层
+  实现 `RangeReader` 时读**末块**重算 sha256 与 meta 末块比对。
+  **如实声明放弃的检出**：同 size 且末块相同、仅中段被并发覆盖的错位（旧实现可捕获）——
+  该场景由读路径逐分块校验兜底（读到被覆盖分块即失败），并发同 rel 写本身无锁语义。
+- meta tmp 孤儿清扫：`filesMetaPolicy.sweepMetaTmp` 兼容两种命名（本文件的 `.tmp.<nano>`
+  与 `LocalFS.writeFileAtomic` 的 `.tmp-*`——原只匹配点前缀，`LocalFS` 崩溃残留的
+  `.tmp-*` 永不清理）；并在下载读路径 **sidecar 解析失败**时联动清扫一次（损坏 sidecar 的
+  常见成因正是「写 meta 崩溃于 rename 前」，孤儿常驻占 meta 桶配额）。
+- 验证：`TestTrustedVolumeFS_VerifyWriteMetaLocalLightweight`（中段篡改不检出 / 末块篡改
+  与 size 不一致均失效 sidecar）、`TestFilesMetaPolicy_SweepMetaTmp`（两种命名清扫 +
+  不误删同目录其他文件）；变异 2 处命中（去末块判据 / 去 `.tmp-` 分支）。
+
 ## 9. 验证
 
 - 单元：`pkg/files/meta`（计算/校验/短读/长读/中段 Seek）、`pkg/volume/trusted`（Wrap/Guard/能力透传/生命周期）、`pkg/cloud`（转存分块校验/标记）、`pkg/sync`（Equal/staging gate）、`pkg/quota`（staging tracker）。

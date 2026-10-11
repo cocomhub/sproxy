@@ -647,56 +647,30 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	return nil
 }
 
-// verifyWriteMeta 写后读回主文件交叉比对（M5/E-MAJOR-3）：重算 TotalSHA256 与刚落盘的
-// fm 比对——不一致（并发覆盖错位）→ 删 meta 退化 missing；一致或读回失败（并发删除等）
-// → 保留（读回失败不误删，主文件不可读时 meta 无害）。
-func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *meta.FileMeta) {
-	// P1-10：整文件读回型交叉校验仅限本地卷——远端卷每次写都回读 = 一次全量下载
-	// （6GiB 级不可行）。M9c：远端改走**轻量**交叉校验（size + 末块），不再完全不校验。
-	if !t.isLocal() {
-		t.verifyWriteMetaRemote(ctx, rel, fm)
-		return
-	}
-	rc, oerr := t.inner.OpenRead(ctx, rel)
-	if oerr != nil {
-		return // 主文件不可读（并发删除等）→ 保留 meta（读路径直算兜底）
-	}
-	calc, cerr := meta.NewCalculator(fm.Size, fm.ChunkSize)
-	if cerr != nil {
-		rc.Close()
-		return
-	}
-	_, rerr := calc.ReadFrom(rc)
-	rc.Close()
-	if rerr != nil {
-		return
-	}
-	got := calc.Finish()
-	if got.TotalSHA256 != fm.TotalSHA256 {
-		// 主文件被并发覆盖（本次 meta 描述旧写流内容）→ 删 meta 退化 missing（直算兜底，
-		// 下次覆盖写自愈），不固化错误 sidecar。
-		_ = t.inner.Delete(ctx, meta.MetaPath(rel))
-		t.logMetaWarn("WriteFile-verify", rel, fmt.Errorf("meta 与主文件交叉比对不一致（并发覆盖错位），已删 sidecar"))
-	}
-}
-
-// verifyWriteMetaRemote 远端卷的**轻量**写后交叉校验（M9c，第 7 轮 MAJOR）：整文件回读
-// （6GiB = 一次全量下载）不可接受，但**完全跳过**会让「远端静默截断/并发覆盖错位」无任何
-// 检测（同一份写路径在本地卷有校验、远端卷没有 = 承诺不一致）。折中两条**有界**判据：
-//  1. `Stat` 实测 size 必须等于 `meta.Size`（截断/追加/写错对象立即发现，零额外流量）；
-//  2. 底层实现 `RangeReader` 时读**末块**（≤ maxMetaChunkSize）重算 sha256 与 meta 末块
-//     比对——尾部是静默损坏高发区，代价单块（最大 32MiB）而非整文件。
+// verifyWriteMeta 写后**有界轻量**交叉校验（M5/E-MAJOR-3 原始意图 + M9c/m9 收敛）：
+// 主文件与 meta 是两次独立原子写，并发写同 rel 时（云转存路径不经上层 fileLocks）主文件
+// 与 meta 可能来自不同 writer（meta=A、主文件=B → 读路径按 A 分块校验 B 恒失配，永久固化）。
 //
-// 任一不一致 → 删 sidecar 退化 missing（读侧直算兜底/逐分块校验），绝不留错证据。
-// 能力不足（无 RangeReader / Stat 不可用 / 读失败）→ 保留 sidecar（读路径校验兜底）。
-func (t *TrustedVolumeFS) verifyWriteMetaRemote(ctx context.Context, rel string, fm *meta.FileMeta) {
+// 判据（本地卷与远端卷**统一**，两条都**有界**）：
+//  1. `Stat` 实测 size 必须等于 `fm.Size`（截断/追加/写错对象立即发现，零额外流量）；
+//  2. 底层实现 `RangeReader` 时读**末块**（≤ 单块上限）重算 sha256 与 meta 末块比对——
+//     尾部是静默损坏高发区，代价单块而非整文件。
+//
+// 任一不一致 → 删 sidecar 退化 missing（读侧直算兜底/逐分块校验），绝不留错证据；能力
+// 不足（无 RangeReader/Stat 不可用/读失败）→ 保留 sidecar（读路径校验兜底）。
+//
+// m9 如实声明：本地卷原实现为**整文件读回**重算 TotalSHA256（每次写付一次全量读，6GiB
+// 级写放大一倍）——改轻量后**放弃的检出**是「同 size 且末块相同、仅中段被并发覆盖」的
+// 错位（旧实现可捕获）：该场景由读路径逐分块校验兜底（读到被覆盖分块即失败），且并发
+// 同 rel 写本身无锁语义——用每次写全量读回换尾部单块为净收益。
+func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *meta.FileMeta) {
 	se, serr := t.inner.Stat(ctx, rel)
 	if serr != nil || se == nil {
-		return
+		return // 主文件不可读（并发删除等）→ 保留 meta（读路径直算兜底）
 	}
 	if se.Size != fm.Size {
-		t.logMetaWarn("WriteFile-verify-remote", rel,
-			fmt.Errorf("远端 size %d 与 meta.Size %d 不一致（截断/覆盖错位），已删 sidecar", se.Size, fm.Size))
+		t.logMetaWarn("WriteFile-verify", rel,
+			fmt.Errorf("实测 size %d 与 meta.Size %d 不一致（截断/覆盖错位），已删 sidecar", se.Size, fm.Size))
 		t.invalidateMeta(ctx, rel)
 		return
 	}
@@ -719,8 +693,8 @@ func (t *TrustedVolumeFS) verifyWriteMetaRemote(ctx context.Context, rel string,
 		return
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != last.SHA256 {
-		t.logMetaWarn("WriteFile-verify-remote", rel,
-			fmt.Errorf("远端末块 sha256 不一致（分块 %d），已删 sidecar", last.Index))
+		t.logMetaWarn("WriteFile-verify", rel,
+			fmt.Errorf("末块 sha256 不一致（分块 %d），已删 sidecar", last.Index))
 		t.invalidateMeta(ctx, rel)
 	}
 }

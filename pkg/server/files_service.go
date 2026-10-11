@@ -336,6 +336,9 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 	if uerr != nil {
 		// C2（P0）：**sidecar 损坏（解析/校验失败）** → 拒绝。损坏的 sidecar 意味着无法
 		// 提供任何完整性证据——直通等于静默放弃承诺；报文可观测（Warn + 错误返回）。
+		// m9：损坏 sidecar 的常见成因是「写 meta 崩溃于 rename 前」——同目录 `.tmp.*`
+		// 孤儿一并清理（best-effort），避免孤儿常驻 meta 桶占配额。
+		p.sweepMetaTmp(root, mrel)
 		p.warnDegrade("解析失败", rel, uerr)
 		return nil, fmt.Errorf("meta: sidecar 损坏（拒绝下发未校验内容）: %w", uerr)
 	}
@@ -492,17 +495,21 @@ func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data [
 	return nil
 }
 
-// sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（`.tmp.<nano>` 前缀，崩溃残留）。
-// best-effort：删除失败仅日志语义（下次写再试）。
+// sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（崩溃残留）。best-effort：删除失败仅
+// 日志语义（下次写再试）。
+// m9：兼容两种 tmp 命名——本文件的 `.tmp.<nano>`（点）与 LocalFS.writeFileAtomic 的
+// `.tmp-*`（连字符，装饰器写经 inner 落盘用此）；原只匹配点前缀，`LocalFS` 崩溃残留
+// 的 `.tmp-*` 孤儿永不清理（与 runtime.sweepMetaTmp 的 MINOR-8 修复对齐）。
 func (p filesMetaPolicy) sweepMetaTmp(root *storage.Root, mrel string) {
 	dir := path.Dir(mrel)
 	base := path.Base(mrel) + ".tmp."
+	baseDash := path.Base(mrel) + ".tmp-"
 	es, err := root.ReadDir(dir)
 	if err != nil {
 		return // 目录不存在/不可读：无孤儿可清
 	}
 	for _, e := range es {
-		if strings.HasPrefix(e.Name(), base) {
+		if strings.HasPrefix(e.Name(), base) || strings.HasPrefix(e.Name(), baseDash) {
 			_ = root.Remove(path.Join(dir, e.Name()))
 		}
 	}
