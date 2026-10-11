@@ -610,7 +610,16 @@ type s3BucketCtxKey struct{}
 // s3TenantFor 按 ctx 中 bucket 卷名解析租户；无 bucket → 默认卷。
 func (h *Handlers) s3TenantFor(owner string, r *http.Request) *storage.Tenant {
 	if vol, _ := r.Context().Value(s3BucketCtxKey{}).(string); vol != "" && h.volSet != nil {
-		if _, ok := h.volSet.ByName(vol); ok {
+		if v, ok := h.volSet.ByName(vol); ok && !v.Authorize(owner) {
+			// 命名桶存在但 ACL 拒绝：**不得回落到默认卷**（否则同一请求会以默认卷语义继续
+			// 读写，语义漂移且仍是越权面）——返回 nil 由调用方按「卷不可用」fail-closed。
+			return nil
+		}
+		if v, ok := h.volSet.ByName(vol); ok && v.Authorize(owner) {
+			// ACL 校验（评审 P2）：此前只按名解析卷——卷配置受限 ACL（allow/deny 名单）时，
+			// 未授权 owner 仍可经 `/s3/<卷名>/<key>` 读写删该卷（限定自身 owner 前缀，不跨
+			// owner）并消耗其共享容量；与同面 s3ListBuckets（AllowedVolumes）、DAV（Authorize）、
+			// 外部卷读（external_source）口径不一致。此处收口后命名桶自然 404（bucket ctx 不注入）。
 			return h.volSet.Tenant(vol, owner, h.logger)
 		}
 	}
