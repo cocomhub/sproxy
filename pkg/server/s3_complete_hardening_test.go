@@ -467,86 +467,6 @@ func s3QuotaScopeForOwner(h *Handlers) *quota.Scope {
 	return h.quotaScopeFor(testAccessKey, "user/q.bin")
 }
 
-// TestS3Complete_Quota_OwnerExceeded_507 新文件 complete 超 owner 配额 → 507，
-// 目标 rel 不存在、parts 保留（可重试）。
-func TestS3Complete_Quota_OwnerExceeded_507(t *testing.T) {
-	t.Parallel()
-	url, h := newS3QuotaServer(t, func(c *Config) {
-		c.OwnerQuotas = map[string]ByteSize{testAccessKey: 4} // 合计 5 > 4
-	})
-	cl := s3TestClient()
-	now := time.Now()
-	host := strings.TrimPrefix(url, "http://")
-
-	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 1, []byte("ab"), now)
-	etag2 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 2, []byte("cde"), now)
-
-	body := s3CompletePartsXML(
-		struct {
-			N    int
-			ETag string
-		}{1, etag1},
-		struct {
-			N    int
-			ETag string
-		}{2, etag2},
-	)
-	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, body, now)
-	if status != http.StatusInsufficientStorage {
-		t.Fatalf("超 owner 配额应 507, got %d body=%s", status, respBody)
-	}
-	tnt := h.tenantFor(testAccessKey)
-	if tnt == nil || tnt.Root() == nil {
-		t.Fatalf("tenant 不可用")
-	}
-	root := tnt.Root()
-	if _, err := root.Stat("user/q.bin"); err == nil {
-		t.Fatalf("507 不应残留目标文件")
-	}
-	// parts 保留（失败可重试 complete）。
-	if _, err := root.Stat(s3PartRel(uploadID, 1)); err != nil {
-		t.Fatalf("507 后 part 应保留: %v", err)
-	}
-	if _, err := root.Stat(s3PartRel(uploadID, 2)); err != nil {
-		t.Fatalf("507 后 part 应保留: %v", err)
-	}
-}
-
-// TestS3Complete_Quota_PoolExceeded_507 新文件 complete 超卷容量池 → 507。
-func TestS3Complete_Quota_PoolExceeded_507(t *testing.T) {
-	t.Parallel()
-	url, h := newS3QuotaServer(t, func(c *Config) {
-		c.Volumes[0].VolCapacity = 4 // 合计 5 > 4
-	})
-	cl := s3TestClient()
-	now := time.Now()
-	host := strings.TrimPrefix(url, "http://")
-
-	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 1, []byte("ab"), now)
-	etag2 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 2, []byte("cde"), now)
-
-	body := s3CompletePartsXML(
-		struct {
-			N    int
-			ETag string
-		}{1, etag1},
-		struct {
-			N    int
-			ETag string
-		}{2, etag2},
-	)
-	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, body, now)
-	if status != http.StatusInsufficientStorage {
-		t.Fatalf("超卷容量应 507, got %d body=%s", status, respBody)
-	}
-	// 卷池 TryReserve 失败须回滚已成功的 Scope 预留（双账本无悬空 reserved）。
-	if got := s3QuotaScopeForOwner(h).Reserved(); got != 0 {
-		t.Fatalf("卷池超限后 scope.Reserved()=%d want 0（回滚）", got)
-	}
-}
-
 // TestS3Complete_Quota_ExactlyAtLimit_200 合计恰好 == 可用 → 200（TryReserve 边界不误拒）。
 func TestS3Complete_Quota_ExactlyAtLimit_200(t *testing.T) {
 	t.Parallel()
@@ -796,11 +716,11 @@ func TestReadMultipartMeta(t *testing.T) {
 	if err := rootWriteFile(root, rel, []byte("obj.txt")); err != nil {
 		t.Fatalf("写 meta: %v", err)
 	}
-	got, rerr := readMultipartMeta(root, uploadID)
-	if rerr != nil || got != "obj.txt" {
-		t.Fatalf("readMultipartMeta = %q, %v want obj.txt", got, rerr)
+	got, key, rerr := readMultipartMeta(root, uploadID)
+	if rerr != nil || key != "obj.txt" || got != "" {
+		t.Fatalf("readMultipartMeta owner=%q key=%q, err=%v；want owner=空 key=obj.txt", got, key, rerr)
 	}
-	if _, rerr := readMultipartMeta(root, "missing"); rerr == nil {
+	if _, _, rerr := readMultipartMeta(root, "missing"); rerr == nil {
 		t.Fatal("缺失 meta 应报错")
 	}
 }

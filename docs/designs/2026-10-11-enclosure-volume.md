@@ -242,13 +242,17 @@ parity 的物理字节合计」后，`CapacityFS` 写后结算与周期对账都
 
 ### 12.1 待办三项的**实现设计**（记档，供后续 PR 直接施工）
 
-1. **S3 multipart 在途 part 记账**（评审 P2；当前仅 complete 时按合计双账本预留 ⇒ 24h 清理窗口内
-   最多 ≈10000×64MiB/会话 未记账）。**无状态方案**（推荐，不引入跨请求预留句柄）：
-   - `s3UploadPart` 成功后把 part 字节**提交**进 chunk 桶 Scope + 卷容量池（`TryReserve`+`Commit`）；
-   - `complete` 成功路径：写完目标并删除 parts 后，按**删除前 stat 合计**（`s3PartTotalSize`）
-     `scope.ReleaseUsage(total)` / `pool.ReleaseCommitted(total)`（净账 = 目标文件，不双计）；
-   - `abort` 与 `sweepStaleMultipart`：同口径（先 stat 合计 → 删 parts → 释放）。
-   - 不变量：任何「parts 保留可重试」的失败路径**不得**释放（否则少计）。
+1. ~~**S3 multipart 在途 part 记账**~~ **已落地**（`pkg/server/s3_part_ledger.go` + `s3_multipart.go`）：
+   - part 上传成功即 **TryReserve + Commit** 进双账本（chunk 桶 Scope + 卷容量池）——超额在
+     **上传期**即 507（此前 enforcement 只在 complete 时按合计预留，在途 part 完全不计账）；
+   - complete **只做「parts → 目标」的账目转移**（逐 part「删成功即释放」+ 目标
+     `Adjust(prev,total)`），**不再在 complete 预留 total**：在途 part 已计入，再预留会把同一
+     批字节双计（峰值 ≈ 2×），使「配额刚好等于文件大小」的合法 multipart 上传恒被 507；
+   - 会话 meta 增记 owner（`owner\nkey`，旧格式单行 key 兼容解析）：abort 与
+     `sweepStaleMultipart` 才能定位 per-owner 的 chunk 桶 Scope 按 stat 合计释放（owner 未知的
+     旧会话只清文件、不释放——宁可少释放也不误扣他人账本）；
+   - 不变量：「parts 保留可重试」的失败路径**不释放**（字节仍在盘上 ⇒ 记账必须保留，否则
+     失败重试可兑换超额写入）；同 partNumber 重传按差分释放（净账 = 新 part 大小）。
 2. **真值报告接入对账**（机制已就绪、零生产接线）。接入点：`quota_reconcile.go` 的
    `adjustVolumePool`/`reconcileVolumesFromDisk` 之前，先取该卷后端 FS 的
    `capacity.TrueUsageOf(fs)`；ok 时 `counter.CorrectFrom(r)`（真值优先）并与磁盘扫描值**交叉校验**
