@@ -288,3 +288,53 @@ func registerTestWrapper(t *testing.T, name string) {
 	}
 	RegisterWrapper(&fakeWrapper{name: name})
 }
+
+// TestParse_RejectsReservedBucketFirstSegment 评审 P1：源子路径首段不得是**保留功能桶**
+// （user/meta/...）——封印会按卷根命名空间注入并原样传播到每个租户子根，声明 `source: "main:user"`
+// （完全合法且与设计示例同形）会把**全体租户**的 user 桶封印（读 404/写拒）= 服务级数据不可用。
+// 变异：去掉保留桶名判据 → 该用例不再报错 → 红。
+func TestParse_RejectsReservedBucketFirstSegment(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	for _, path := range []string{"user", "meta", "Meta/secret", "cloud/x"} {
+		vols := []volume.Volume{
+			{Name: "main"},
+			encVol("vault", "main:"+path, nil),
+		}
+		if _, err := Parse(vols); !errors.Is(err, ErrBadSource) {
+			t.Errorf("保留桶首段 %q 应被拒绝(ErrBadSource), got %v", path, err)
+		}
+	}
+}
+
+// TestParse_RejectsEncryptedSource 设计 §4 承诺「源卷同时 extra.encrypt → 装配期拒绝」，
+// 此前 `ErrSourceEncrypted` 只有声明无实现（评审 P1/P2 双确认死哨兵）。
+// 变异：去掉 encrypt 判据 → 用例不再报错 → 红。
+func TestParse_RejectsEncryptedSource(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	vols := []volume.Volume{
+		{Name: "main", Extra: map[string]any{"encrypt": true}},
+		encVol("vault", "main:private/vault", nil),
+	}
+	if _, err := Parse(vols); !errors.Is(err, ErrSourceEncrypted) {
+		t.Fatalf("源卷已加密时应拒绝封装, got %v", err)
+	}
+}
+
+// TestParse_MaxBytesHumanReadable 文档/示例用人类可读 size（"8GiB"），实现必须同口径。
+func TestParse_MaxBytesHumanReadable(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	vols := []volume.Volume{
+		{Name: "main"},
+		encVol("vault", "main:private/vault", map[string]any{"max_bytes": "8GiB"}),
+	}
+	decls, err := Parse(vols)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if decls[0].MaxBytes != 8<<30 {
+		t.Fatalf("max_bytes=8GiB 应解析为 %d, got %d", int64(8)<<30, decls[0].MaxBytes)
+	}
+}

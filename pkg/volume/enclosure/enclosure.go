@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -124,8 +125,15 @@ func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
 	if srcVol == v.Name {
 		return Decl{}, fmt.Errorf("%w（卷 %q）", ErrSelfEnclosure, v.Name)
 	}
-	if _, ok := byName[srcVol]; !ok {
+	src, ok := byName[srcVol]
+	if !ok {
 		return Decl{}, fmt.Errorf("%w: %q（卷 %q）", ErrSourceNotFound, srcVol, v.Name)
+	}
+	// 源态互斥（设计 §4）：源卷已启用 at-rest 加密时禁止封装——封装源视图是**裸**视图
+	// （绕开 Root 的加解密），双重变换会产生互不可解密的字节（静默双重加密/乱码）。
+	// 此前 `ErrSourceEncrypted` 只有声明无实现（评审 P1/P2 双确认：死哨兵 + 文档承诺落空）。
+	if enc, _ := src.Extra["encrypt"].(bool); enc {
+		return Decl{}, fmt.Errorf("%w（封装卷 %q 的源卷 %q 已加密）", ErrSourceEncrypted, v.Name, srcVol)
 	}
 	wrapper, _ := v.Extra["wrapper"].(string)
 	wrapper = strings.TrimSpace(wrapper)
@@ -180,6 +188,13 @@ func splitSource(raw string) (srcVol, srcPath string, ok bool) {
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", "", false
 	}
+	// 首段不得是**保留功能桶**（user/meta/cloud/archive/chunk/version/trash/backup…）：
+	// 封印会按卷根命名空间注入并**原样传播到每个租户子根**（tenant_resolve），声明
+	// `source: "main:user"`（完全合法且与设计示例同形）会把**全体租户**的 user 桶封印
+	// （读 404/写拒）——一条声明即造成服务级数据不可用（评审 P1）。
+	if first, _, _ := strings.Cut(clean, "/"); first != "" && storage.IsReservedBucketName(first) {
+		return "", "", false
+	}
 	return srcVol, clean, true
 }
 
@@ -215,11 +230,17 @@ func parseMaxBytes(v volume.Volume) (int64, error) {
 	case int:
 		n = int64(t)
 	case string:
-		parsed, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
-		if err != nil {
+		raw := strings.TrimSpace(t)
+		if parsed, perr := strconv.ParseInt(raw, 10, 64); perr == nil {
+			n = parsed
+			break
+		}
+		// 人类可读 size（"8GiB"/"512MiB"，与 sizex.ByteSize 同口径——文档/示例按该口径书写）。
+		var bs sizex.ByteSize
+		if uerr := bs.UnmarshalText([]byte(raw)); uerr != nil {
 			return 0, fmt.Errorf("%w: %q（卷 %q）", ErrBadMaxBytes, t, v.Name)
 		}
-		n = parsed
+		n = int64(bs)
 	default:
 		return 0, fmt.Errorf("%w: %T（卷 %q）", ErrBadMaxBytes, raw, v.Name)
 	}

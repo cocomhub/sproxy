@@ -195,11 +195,35 @@ func sealRel(rel string) (string, bool) {
 }
 
 // sealCovers 报告 sealed 是否覆盖 rel（相等或为 rel 的祖先目录）。
+//
+// **比较用归一键**（sealCompareKey）：大小写不敏感（Windows NTFS / macOS APFS 默认不敏感——
+// 字节前缀比较会被 `user/PRIVATE/vault` 绕过）且逐段去掉**尾部点/空格**（Windows 会在打开时
+// 静默剥离 `vault.`/`vault `，同样的目标却匹配不上封印）。对照 pkg/sync/local_fs.go 的 within()
+// 已用 EqualFold 处置同类风险。
+// 取舍：在大小写敏感 FS（Linux）上会**多封**（`User` 也命中 `user` 封印）——方向保守（fail-closed），
+// 且运维可经日志/只读透视排查；宁可多封不可漏封。
 func sealCovers(sealed, rel string) bool {
-	if sealed == rel {
+	sk, rk := sealCompareKey(sealed), sealCompareKey(rel)
+	if sk == rk {
 		return true
 	}
-	return strings.HasPrefix(rel, sealed+"/")
+	return strings.HasPrefix(rk, sk+"/")
+}
+
+// sealCompareKey 生成封印比较键：`\`→`/`、Clean、逐段去尾点/空格、转小写。
+// 仅用于**比较**，不用于实际文件操作路径（避免改变 os.Root 的相对路径语义）。
+func sealCompareKey(p string) string {
+	norm := strings.ReplaceAll(p, `\`, "/")
+	segs := strings.Split(strings.Trim(norm, "/"), "/")
+	out := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		seg = strings.TrimRight(seg, ". ")
+		if seg == "" {
+			continue
+		}
+		out = append(out, strings.ToLower(seg))
+	}
+	return strings.Join(out, "/")
 }
 
 // isWriteOpenFlag 判断 open 标志是否为写意图（任一写/创建/截断位）。

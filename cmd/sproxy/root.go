@@ -1166,7 +1166,7 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 封装卷后端补装（推迟装配）：set 已就绪 → 按声明拓扑序构造 wrapper 后端并挂回，
 	// 源视图直接持有源 FS（封印注入在 assembleVolumes 阶段已完成，这里只做特权读写视图）。
 	// 失败即 boot fail（fail-closed）：operator 显式声明的封装卷不得静默消失。
-	if err := enclosure.AttachAll(ctx, h.Volumes(), logger); err != nil {
+	if err := enclosure.AttachAll(ctx, h.Volumes(), logger, enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); err != nil {
 		return fmt.Errorf("封装卷装配失败（配置声明的封装卷补装 boot fail）：%w", err)
 	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。

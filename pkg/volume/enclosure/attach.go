@@ -51,9 +51,26 @@ func EffectiveTarget(d Decl, all []Decl) (baseVol, basePath string) {
 	}
 }
 
+// AttachOptions 是补装的装配参数（可选；零值 = 与旧行为一致）。
+type AttachOptions struct {
+	// StorageRoot 是 count/状态文件所在根（用于**持久化**卷容量计数器）。为空则计数器不持久
+	// （重启后封装卷 `max_bytes` 的 committed 会归零——生产必须传）。
+	StorageRoot string
+}
+
 // AttachAll 为所有已登记 `type: enclosure` 卷构造后端并挂回卷集（幂等：已挂者跳过）。
 // 必须在**卷集就绪后**调用（与 secretdata 补装同层，fail-closed：任一卷失败返回错误）。
-func AttachAll(ctx context.Context, set *registry.Set, logger *slog.Logger) error {
+// opts.StorageRoot 非空时启用持久化容量计数器（与外部卷同源）。
+func AttachAll(ctx context.Context, set *registry.Set, logger *slog.Logger, opts ...AttachOptions) error {
+	var opt AttachOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	return attachAllWithOpts(ctx, set, logger, opt)
+}
+
+// attachAllWithOpts 是 AttachAll 的实现（选项显式传入，供内部与测试使用）。
+func attachAllWithOpts(ctx context.Context, set *registry.Set, logger *slog.Logger, opt AttachOptions) error {
 	if set == nil {
 		return fmt.Errorf("enclosure: 卷集未装配")
 	}
@@ -66,7 +83,7 @@ func AttachAll(ctx context.Context, set *registry.Set, logger *slog.Logger) erro
 		log = logger
 	}
 	for _, d := range decls {
-		if err := attachOne(ctx, set, d); err != nil {
+		if err := attachOne(ctx, set, d, opt); err != nil {
 			return err
 		}
 		baseVol, basePath := EffectiveTarget(d, decls)
@@ -78,7 +95,7 @@ func AttachAll(ctx context.Context, set *registry.Set, logger *slog.Logger) erro
 }
 
 // attachOne 补装单个封装卷（已装配则跳过）。
-func attachOne(ctx context.Context, set *registry.Set, d Decl) error {
+func attachOne(ctx context.Context, set *registry.Set, d Decl, opt AttachOptions) error {
 	if set.External(d.Vol) != nil {
 		return nil // 已装配（测试自注册类型等）
 	}
@@ -98,6 +115,16 @@ func attachOne(ctx context.Context, set *registry.Set, d Decl) error {
 	// CapacityFS ⇒ `max_bytes` 与用量统计真实生效（写入按声明大小预留/结算；卷层实现
 	// TrueUsageReporter 时真值优先，见 pkg/volume/capacity/trueusage.go）。
 	if pool := set.Pool(d.Vol); pool != nil {
+		// 计数器**持久化**（与外部卷同源，`capacity.VolumeCounterPath`）：此前用非持久
+		// `NewPoolCounter`，而封装卷 `RootDir==""` 被 `reconcileVolumesFromDisk` 跳过 ⇒
+		// 重启后 committed 归零、`max_bytes` 被突破（评审 P1）。
+		if opt.StorageRoot != "" {
+			if counter, cerr := capacity.NewPoolCounterPersistent(pool, capacity.VolumeCounterPath(opt.StorageRoot, d.Vol)); cerr == nil {
+				be = capacity.WrapBackend(be, counter)
+				_ = set.AttachExternal(d.Vol, be)
+				return nil
+			}
+		}
 		be = capacity.WrapBackend(be, capacity.NewPoolCounter(pool))
 	}
 	if aerr := set.AttachExternal(d.Vol, be); aerr != nil {

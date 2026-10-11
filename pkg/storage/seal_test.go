@@ -260,3 +260,32 @@ func TestRoot_NoSeals_ZeroRegression(t *testing.T) {
 		t.Fatalf("无封印时列举应包含全部条目, got %+v", entries)
 	}
 }
+
+// TestRoot_Seal_CaseInsensitiveAndTrailingDot 评审 P0：封印前缀比较必须是**比较归一键**
+// （大小写不敏感 + 逐段去尾点/空格）——否则在大小写不敏感文件系统（Windows NTFS / macOS APFS
+// 默认）上 `user/PRIVATE/vault`、`user/vault./x`、`user/vault /x` 都能绕过封印直连源存储。
+// 变异：sealCovers 改回字节前缀比较 → 三个变体用例全红。
+func TestRoot_Seal_CaseInsensitiveAndTrailingDot(t *testing.T) {
+	t.Parallel()
+	root := newSealRoot(t, SealRule{Path: "private/vault", Wrapper: "vault"})
+
+	variants := []string{
+		"private/VAULT/x.bin",          // 大小写变体
+		"PRIVATE/vault/x.bin",          // 目录段大小写
+		"private/vault./x.bin",         // Windows 会剥离段尾点 → 实际命中同一目录
+		"private/vault /x.bin",         // 段尾空格同理
+		"private/vault/../vault/x.bin", // 经 `..` 绕一圈仍落在封印目录
+	}
+	for _, rel := range variants {
+		if err := root.Remove(rel); !errors.Is(err, ErrSealed) {
+			t.Errorf("变体 %q 的写必须被拒(ErrSealed), got %v", rel, err)
+		}
+		if _, err := root.Stat(rel); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("变体 %q 的读应按不存在, got %v", rel, err)
+		}
+	}
+	// 未封印路径不受影响（大小写敏感 FS 上的「多封」是保守方向，但不得影响无关路径）。
+	if err := root.MkdirAll("public/ok", 0o755); err != nil {
+		t.Fatalf("无关路径应可用: %v", err)
+	}
+}
