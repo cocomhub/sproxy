@@ -13,7 +13,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,9 +44,6 @@ func (f *fakeBaidupcsStorage) PutFromStagedPath(_ context.Context, key, stagedPa
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
 		return nil, err
-	}
-	if size > 0 && int64(len(data)) != size {
-		return nil, fmt.Errorf("staged 大小不符: %d != %d", len(data), size)
 	}
 	// 该 fake 无锁（SimpleStorageAPI 语义：仅测试单线程使用）。
 	f.files[key] = data

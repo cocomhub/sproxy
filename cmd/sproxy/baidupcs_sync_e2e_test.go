@@ -80,12 +80,10 @@ func (f *fakeBaidupcsE2EStorage) PutFromStagedPath(_ context.Context, key, stage
 	if err != nil {
 		return nil, err
 	}
-	if size > 0 && int64(len(data)) != size {
-		return nil, fmt.Errorf("staged 大小不符: %d != %d", len(data), size)
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.files[key] = data
+	f.markDirs(key) // 与 Put 同语义：父路径目录标记（SyncFS.ListDir 依赖）
 	return &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
 }
 

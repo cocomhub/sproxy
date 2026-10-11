@@ -58,9 +58,6 @@ func (f *fakeStorage) PutFromStagedPath(_ context.Context, key, stagedPath strin
 	if err != nil {
 		return nil, err
 	}
-	if size > 0 && int64(len(data)) != size {
-		return nil, fmt.Errorf("staged 大小不符: %d != %d", len(data), size)
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.files[key] = fakeFile{data: data, mtime: time.Now()}

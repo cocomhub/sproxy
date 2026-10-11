@@ -233,7 +233,10 @@ func (s *Storage) stageUploadFromPath(ctx context.Context, path, key string, siz
 		return nil, copyErr
 	}
 	if size > 0 && actual != size {
-		return nil, fmt.Errorf("%w: staged 文件大小 %d 与声明 %d 不一致（path=%s）", ErrInvalidParam, actual, size, path)
+		// 声明大小仅作提示：可信卷写路径已有「声明失真自愈」语义（按实写重算），此处按实测
+		// actual 继续（不因此拒绝——否则调用方声明偏小/偏大都会让上传失败）。
+		s.log.Warn("staging 复用：声明大小与实测不一致，按实测继续",
+			"declared", size, "actual", actual, "path", path)
 	}
 	st := &stagedUpload{
 		tmpPath: path,
