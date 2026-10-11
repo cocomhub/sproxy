@@ -40,6 +40,12 @@ func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		tnt = h.volSet.Tenant(vol, owner, h.logger)
 	} else {
+		// 默认卷 ACL 与文件 API 面同口径（评审 P2：此前 `/download`、`/api/files` 等经
+		// defaultVolumeAllows 收敛，而 DAV 仍可读写同一 user 桶 ⇒ 收紧默认卷视图后仍能绕过）。
+		if !h.defaultVolumeAllows(owner) {
+			http.Error(w, "卷不可用", http.StatusForbidden)
+			return
+		}
 		tnt = h.tenantFor(owner)
 	}
 	if tnt == nil || tnt.Root() == nil {

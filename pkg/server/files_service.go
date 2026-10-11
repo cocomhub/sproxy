@@ -473,6 +473,11 @@ func (p filesMetaPolicy) reserveMetaQuota(owner, mrel string, size int64) (*quot
 // meta 桶占磁盘；下次 WriteMeta 自愈清理，防孤儿累积）。
 func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data []byte) error {
 	p.sweepMetaTmp(root, mrel)
+	// **写前先删旧 sidecar**（评审 P2：崩溃窗口）。主文件与 sidecar 是两次独立原子写：覆盖写
+	// 在两次写之间崩溃会留下「旧 sidecar + 新主文件」——读路径按旧分块恒失配 ⇒ 该文件**永久
+	// fail-closed 500**（不自愈）。先删使该窗口退化为「无 sidecar」（读路径直算兜底/按 missing
+	// 语义降级），宁可缺证据也不留**错证据**。删除失败不阻断（best-effort：后续 rename 会覆盖）。
+	_ = root.Remove(mrel)
 	tmpRel := mrel + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
 	f, ferr := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if ferr != nil {

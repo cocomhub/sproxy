@@ -51,7 +51,17 @@ func (h *Handlers) s3ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		return
 	}
-	tnt := h.tenantFor(ak)
+	// 命名桶（/s3/<卷名>?list-type=2）须列出**目标桶**：与对象操作同口径注入 bucket ctx
+	// （评审 P2：此前恒用 tenantFor(默认卷)，命名桶返回默认卷顶层，与 rclone/aws 预期不符）。
+	// 列表请求的桶名在**路径首段**（无对象 key，故不能用 s3ResolveBucket）。
+	if h.volSet != nil {
+		if vol := strings.Trim(strings.TrimPrefix(r.URL.Path, "/s3/"), "/"); vol != "" {
+			if v, exist := h.volSet.ByName(vol); exist && v.Authorize(ak) {
+				r = r.WithContext(context.WithValue(r.Context(), s3BucketCtxKey{}, vol))
+			}
+		}
+	}
+	tnt := h.s3TenantFor(ak, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
