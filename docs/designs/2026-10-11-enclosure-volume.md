@@ -240,6 +240,24 @@ parity 的物理字节合计」后，`CapacityFS` 写后结算与周期对账都
 - **封装处理器（wrapper）**：可注册的处理层（加解密/镜像/压缩/脱敏…），只改字节；
 - **封印（seal）**：源卷侧对封装区间的直连拒绝（写恒拒、读可配 404/只读透视）。
 
+### 12.1 待办三项的**实现设计**（记档，供后续 PR 直接施工）
+
+1. **S3 multipart 在途 part 记账**（评审 P2；当前仅 complete 时按合计双账本预留 ⇒ 24h 清理窗口内
+   最多 ≈10000×64MiB/会话 未记账）。**无状态方案**（推荐，不引入跨请求预留句柄）：
+   - `s3UploadPart` 成功后把 part 字节**提交**进 chunk 桶 Scope + 卷容量池（`TryReserve`+`Commit`）；
+   - `complete` 成功路径：写完目标并删除 parts 后，按**删除前 stat 合计**（`s3PartTotalSize`）
+     `scope.ReleaseUsage(total)` / `pool.ReleaseCommitted(total)`（净账 = 目标文件，不双计）；
+   - `abort` 与 `sweepStaleMultipart`：同口径（先 stat 合计 → 删 parts → 释放）。
+   - 不变量：任何「parts 保留可重试」的失败路径**不得**释放（否则少计）。
+2. **真值报告接入对账**（机制已就绪、零生产接线）。接入点：`quota_reconcile.go` 的
+   `adjustVolumePool`/`reconcileVolumesFromDisk` 之前，先取该卷后端 FS 的
+   `capacity.TrueUsageOf(fs)`；ok 时 `counter.CorrectFrom(r)`（真值优先）并与磁盘扫描值**交叉校验**
+   （差异超阈值告警）；`ok=false` 回落扫描。落地前提：封装处理器（secretdata 等）实现
+   `TrueUsageReporter`（内容分块 + meta pad + parity 物理合计）。
+3. **封印比较的 Unicode/8.3 归一**（【未证实】需平台实测）：当前归一只做「逐段去尾点/空格 + 大小写
+   不敏感」；macOS APFS/HFS 的 NFC/NFD 归一与 Windows 8.3 短名理论上有等价路径差异，需在目标平台
+   实测后决定是否补 `unicode/norm` 归一与短名展开（补则同样注意 fail-closed 方向）。
+
 ## 12. 已知边界（记档，不阻塞）
 
 - 外部卷源的 per-tenant 视图构造在 S4；在此之前外部源装配期**显式拒绝**（禁静默降级）。
