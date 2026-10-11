@@ -151,6 +151,19 @@ func (f *fakeUserVolE2EStorage) Copy(_ context.Context, srcKey, dstKey string) (
 	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
 }
 
+func (f *fakeUserVolE2EStorage) Move(_ context.Context, srcKey, dstKey string) (*baidupcs.ObjectMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[srcKey]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	delete(f.files, srcKey)
+	f.files[dstKey] = data
+	f.markDirs(dstKey)
+	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
+}
+
 // userVolE2EBackend 是 e2e ExternalBackend（持有真 StorageFS）。
 type userVolE2EBackend struct {
 	fs syncpkg.FS

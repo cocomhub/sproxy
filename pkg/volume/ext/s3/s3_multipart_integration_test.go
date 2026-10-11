@@ -121,6 +121,9 @@ type failingPutter struct {
 func (c *failingPutter) PutObject(ctx context.Context, bucket, object string, reader io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
 	*c.attempt++
 	if *c.attempt <= c.failTimes {
+		// 消费 reader 再失败——模拟真实网络在传输中段中断（P0-3：重试必须 Seek(0)
+		// 重置，否则复用已耗尽流会把目标写成空/截断）。
+		_, _ = io.Copy(io.Discard, reader)
 		return minio.UploadInfo{}, fmt.Errorf("注入失败: attempt %d", *c.attempt)
 	}
 	return c.inner.PutObject(ctx, bucket, object, reader, size, opts)

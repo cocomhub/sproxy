@@ -4,10 +4,14 @@
 package cloud
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,10 +23,13 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // memFS 是测试用内存 sync.FS（记录写入/目录生成/校验和判定）。
@@ -137,13 +144,13 @@ func TestTransferDone_Success_WritesToTarget(t *testing.T) {
 	if tr == nil || tr.URL == "" {
 		t.Fatal("转存应返回 URL")
 	}
-	// 目标路径自动派生 user/<taskID>/<filename>
-	wantRel := "user/task-1/movie.mp4"
+	// 目标路径自动派生 <owner>/user/<taskID>/<filename>（空 owner → anonymous）
+	wantRel := "anonymous/user/task-1/movie.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("目标卷应收到 %s，实际文件: %v", wantRel, keys(fs.files))
 	}
-	// 目录自动生成（user + user/task-1）
-	if !fs.dirs["user"] || !fs.dirs["user/task-1"] {
+	// 目录自动生成（anonymous/user + anonymous/user/task-1）
+	if !fs.dirs["anonymous/user"] || !fs.dirs["anonymous/user/task-1"] {
 		t.Fatalf("目标目录应自动生成，实际 dirs: %v", fs.dirs)
 	}
 	if !strings.HasPrefix(tr.URL, "secretdata://secretdata-main/") {
@@ -496,10 +503,10 @@ func TestTransferDone_PrivateVolume_NoPrefix(t *testing.T) {
 	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	// 独享卷不加前缀：user/task-p1/c.mp4
-	wantRel := "user/task-p1/c.mp4"
+	// 独享卷也恒加 owner 前缀（2026-10-07 废弃区分）：carol/user/task-p1/c.mp4
+	wantRel := "carol/user/task-p1/c.mp4"
 	if _, ok := fs.files[wantRel]; !ok {
-		t.Fatalf("独享卷不应加 owner 前缀 %s，实际: %v", wantRel, keys(fs.files))
+		t.Fatalf("独享卷应加 owner 前缀 %s，实际: %v", wantRel, keys(fs.files))
 	}
 }
 
@@ -638,7 +645,7 @@ func TestTransferDone_DuplicateRel_RejectsOverwrite(t *testing.T) {
 		t.Fatalf("覆盖拒绝应归目标卷异常（ErrTransferTarget），got %v", err2)
 	}
 	// 卷中内容仍是首次（未被覆盖）
-	if got := string(fs.files["user/task-w3/w3.mp4"]); got != "first" {
+	if got := string(fs.files["anonymous/user/task-w3/w3.mp4"]); got != "first" {
 		t.Fatalf("卷内内容应保持首次 %q，got %q（被静默覆盖）", "first", got)
 	}
 }
@@ -963,7 +970,7 @@ func TestTransferDone_IdempotentSameContent(t *testing.T) {
 		t.Fatalf("幂等重放应返回同 URL，tr2=%v tr1=%v", tr2, tr1)
 	}
 	// 卷内内容未被改写（仍是首次内容）
-	if got := string(fs.files["user/task-imp1/imp1.mp4"]); got != "identical-content" {
+	if got := string(fs.files["anonymous/user/task-imp1/imp1.mp4"]); got != "identical-content" {
 		t.Fatalf("幂等重放不应改写卷内容，got %q", got)
 	}
 }
@@ -1073,3 +1080,379 @@ func (l *localVolumeFS) Rename(ctx context.Context, f, t string) error {
 }
 func (l *localVolumeFS) Delete(ctx context.Context, p string) error  { return l.inner.Delete(ctx, p) }
 func (l *localVolumeFS) MakeDir(ctx context.Context, p string) error { return l.inner.MakeDir(ctx, p) }
+
+// TestTransferToWrappedNoCapFS B1 回归：转存目标是被 trusted.Wrap 装饰的**无能力 FS**
+// （模拟默认装配下 baidupcs/s3 被 Wrap：不实现 WriteIfAbsent/ReserveSpace）——装饰器
+// 桩方法返回 ErrUnsupported → transferQuotaGate 跳过、writeTargetUnique 回落 Stat+WriteFile，
+// 转存成功且落盘。此场景此前恒失败（装饰器硬错误 + 断言恒命中）。
+func TestTransferToWrappedNoCapFS(t *testing.T) {
+	t.Parallel()
+	inner := newMemFS() // 不实现 ReserveSpace；WriteIfAbsent 由装饰器吞掉（inner 未实现？）
+	// memFS 实现 WriteIfAbsent；为测「未实现回落」，
+	// 构造 noCapMemFS（去掉 WriteIfAbsent 能力）——ReserveSpace 同样未实现。
+	nc := &noCapMemFS{inner: inner}
+	wrapped := trusted.Wrap(nc, trusted.Options{})
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return wrapped, "s3", false })
+	task := &CloudTask{ID: "task-wrapped", Filename: "w.mp4", Transfer: &TransferSpec{Volume: "vol-w"}}
+	dest := filepath.Join(t.TempDir(), "w.mp4")
+	_ = os.WriteFile(dest, []byte("wrapped-data"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{Size: int64(len("wrapped-data"))}, nil)
+	if err != nil {
+		t.Fatalf("B1: 转存到被 Wrap 的无能力卷应成功（ErrUnsupported 回落）, got %v", err)
+	}
+	if tr == nil {
+		t.Fatal("转存应返回成功结果")
+	}
+	// 自动派生 rel = <taskID>/<filename>；空 owner 归一 anonymous → 键 anonymous/user/task-wrapped/w.mp4。
+	if got := inner.files["anonymous/user/task-wrapped/w.mp4"]; string(got) != "wrapped-data" {
+		t.Fatalf("转存内容落盘不符: got %q", got)
+	}
+}
+
+// noCapMemFS 是 memFS 的无 WriteIfAbsent 变体（模拟 s3/baidupcs 裸卷能力面）。
+type noCapMemFS struct{ inner *memFS }
+
+func (n *noCapMemFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return n.inner.ListDir(ctx, p)
+}
+func (n *noCapMemFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return n.inner.Stat(ctx, p)
+}
+func (n *noCapMemFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return n.inner.OpenRead(ctx, p)
+}
+func (n *noCapMemFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return n.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (n *noCapMemFS) Rename(ctx context.Context, f, t string) error { return n.inner.Rename(ctx, f, t) }
+func (n *noCapMemFS) Delete(ctx context.Context, p string) error    { return n.inner.Delete(ctx, p) }
+func (n *noCapMemFS) MakeDir(ctx context.Context, p string) error   { return n.inner.MakeDir(ctx, p) }
+
+// TestTransferDone_FileMetaChunkVerify C4 落地：转存目标是被 trusted.Wrap 装饰的卷
+// （写侧已落 meta）→ 转存后 readbackVerify 走 **FileMeta 分块级校验**（Calculator 流式
+// 重算 TotalSHA256 + 逐分块 SHA256 与写侧 meta 比对），而非整文件流式单哈希。回归：
+// 内容正确 → 通过；目标被篡改（分块 SHA 变）→ 报 ErrTransferTarget（卷损坏）。
+func TestTransferDone_FileMetaChunkVerify(t *testing.T) {
+	t.Parallel()
+	inner := newMemFS()
+	wrapped := trusted.Wrap(inner, trusted.Options{})
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return wrapped, "s3", false })
+	task := &CloudTask{ID: "task-meta", Filename: "m.bin", Transfer: &TransferSpec{Volume: "vol-m"}}
+	dest := filepath.Join(t.TempDir(), "m.bin")
+	content := strings.Repeat("filemeta-chunk-verify-", 100) // ~2KB
+	_ = os.WriteFile(dest, []byte(content), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// 目标卷实现 meta.Provider（装饰器 FileMeta）→ 分块校验通过。
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: testutil.SHA256Hex([]byte(content)), Size: int64(len(content)),
+	}, nil)
+	if err != nil {
+		t.Fatalf("C4: 转存+FileMeta 分块校验应通过, got %v", err)
+	}
+	if tr == nil {
+		t.Fatal("转存应返回成功结果")
+	}
+	// 篡改目标内容（meta 桶 sidecar 不动）→ 分块校验应报卷损坏。
+	rel := "anonymous/user/task-meta/m.bin"
+	inner.files[rel] = []byte(content + "-tampered")
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: testutil.SHA256Hex([]byte(content)), Size: int64(len(content)),
+	}, nil); err == nil {
+		t.Fatal("目标被篡改（内容变但 meta 未变）→ FileMeta 分块校验应报 ErrTransferTarget")
+	} else if !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("篡改应归 ErrTransferTarget, got %v", err)
+	}
+}
+
+// TestVerifyByFileMeta_RandomChunks B/E-CRITICAL 回归：secretdata 随机分块（1-200MB
+// 均匀随机，fm.Chunks 各块 Size 不同）——verifyByFileMeta 必须按 meta 实际分块边界
+// 逐块比对通过（原固定 ChunkSize 重切恒误报损坏）。
+func TestVerifyByFileMeta_RandomChunks(t *testing.T) {
+	t.Parallel()
+	// 构造随机分块 meta（三块不同大小）与对应内容：块1="a"*10、块2="b"*20、块3="c"*30。
+	chunks := []meta.ChunkMeta{
+		{Index: 0, Offset: 0, Size: 10, SHA256: refSHA256([]byte(strings.Repeat("a", 10)))},
+		{Index: 1, Offset: 10, Size: 20, SHA256: refSHA256([]byte(strings.Repeat("b", 20)))},
+		{Index: 2, Offset: 30, Size: 30, SHA256: refSHA256([]byte(strings.Repeat("c", 30)))},
+	}
+	var full []byte
+	full = append(full, strings.Repeat("a", 10)...)
+	full = append(full, strings.Repeat("b", 20)...)
+	full = append(full, strings.Repeat("c", 30)...)
+	fm := &meta.FileMeta{Version: 1, Size: 60, TotalSHA256: refSHA256(full), ChunkSize: 10, Chunks: chunks}
+	if err := meta.Validate(fm); err != nil {
+		t.Fatalf("fixture meta 应合法: %v", err)
+	}
+	fs := &staticMetaFS{data: full, fm: fm}
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-random", Filename: "r.bin", Transfer: &TransferSpec{Volume: "vol-r"}}
+	dest := filepath.Join(t.TempDir(), "r.bin")
+	_ = os.WriteFile(dest, full, 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// 正确内容 → 分块校验通过（随机分块边界精确比对）。
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: refSHA256(full), Size: int64(len(full)),
+	}, nil)
+	if err != nil {
+		t.Fatalf("B/E-CRITICAL: 随机分块 meta 校验应通过, got %v", err)
+	}
+	if tr == nil {
+		t.Fatal("转存应返回成功结果")
+	}
+}
+
+// staticMetaFS 是最小 Provider FS：OpenRead 返回固定内容；FileMeta 返回预设 meta。
+type staticMetaFS struct {
+	data []byte
+	fm   *meta.FileMeta
+}
+
+func (s *staticMetaFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return nil, nil
+}
+func (s *staticMetaFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return &syncpkg.Entry{Name: "r.bin", Path: p, Size: int64(len(s.data))}, nil
+}
+func (s *staticMetaFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.data)), nil
+}
+func (s *staticMetaFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	b, _ := io.ReadAll(r)
+	s.data = b
+	return nil
+}
+func (s *staticMetaFS) Rename(ctx context.Context, f, t string) error { return nil }
+func (s *staticMetaFS) Delete(ctx context.Context, p string) error    { return nil }
+func (s *staticMetaFS) MakeDir(ctx context.Context, p string) error   { return nil }
+func (s *staticMetaFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	return s.fm, nil
+}
+
+var _ syncpkg.FS = (*staticMetaFS)(nil)
+
+// refSHA256 独立重算（防与实现同源错误）。
+func refSHA256(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+// TestVerifyByFileMeta_LocalTamperDetected D-C2 回归：本地产物在下载后被篡改（metaProvider
+// 卷写的是篡改内容，meta 也按篡改生成自洽）——verifyByFileMeta 必须与 result.Checksum
+// （下载权威）最终比对，否则损坏内容被静默转存。篡改 → 报 ErrTransferTarget。
+func TestVerifyByFileMeta_LocalTamperDetected(t *testing.T) {
+	t.Parallel()
+	// 目标卷是 metaProvider（secretdata 短路语义）：写侧 meta 按**写入内容**生成。
+	full := []byte(strings.Repeat("dc2-original-", 30)) // ~360B 单分块
+	fm := &meta.FileMeta{
+		Version: 1, Size: int64(len(full)),
+		TotalSHA256: refSHA256(full), ChunkSize: 1024,
+		Chunks: []meta.ChunkMeta{{Index: 0, Offset: 0, Size: int64(len(full)), SHA256: refSHA256(full)}},
+	}
+	fs := &staticMetaFS{data: full, fm: fm}
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-dc2", Filename: "d.bin", Transfer: &TransferSpec{Volume: "vol-d"}}
+	dest := filepath.Join(t.TempDir(), "d.bin")
+	tampered := []byte(strings.Repeat("dc2-tampered-", 30)) // 下载后被篡改的本地产物
+	_ = os.WriteFile(dest, tampered, 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// dest 是篡改内容、result.Checksum 是原始权威值、目标卷 meta 按写入内容（篡改）生成——
+	// verifyByFileMeta 必须用 result.Checksum 捕获（否则静默入库）。
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: refSHA256(full), Size: int64(len(full)),
+	}, nil); err == nil {
+		t.Fatal("D-C2: 本地产物被篡改但 metaProvider 卷自洽 → 必须与 result.Checksum 比对报错")
+	} else if !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("篡改应归 ErrTransferTarget, got %v", err)
+	}
+}
+
+// TestTransferDone_DamagedResumeSelfOverwrite E-M2 回归：damaged 任务 Resume 重下后
+// 允许覆盖目标卷旧损坏副本（resumeSelfOverwrite）——W1/W3 拒绝覆写只对他人生效。
+func TestTransferDone_DamagedResumeSelfOverwrite(t *testing.T) {
+	t.Parallel()
+	inner := newMemFS()
+	wrapped := trusted.Wrap(inner, trusted.Options{})
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return wrapped, "s3", false })
+	task := &CloudTask{
+		ID: "task-damaged-resume", Filename: "d.bin",
+		Transfer: &TransferSpec{Volume: "vol-dr"}, resumeSelfOverwrite: true,
+	}
+	dest := filepath.Join(t.TempDir(), "d.bin")
+	content := []byte(strings.Repeat("damaged-resume-", 50))
+	// 目标卷已有旧损坏副本（不同内容）。
+	rel := "anonymous/user/task-damaged-resume/d.bin"
+	inner.files[rel] = []byte("stale-corrupt-copy")
+	_ = os.WriteFile(dest, content, 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	// resumeSelfOverwrite=true → 首写直接覆盖旧副本（不拒绝）。
+	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: testutil.SHA256Hex(content), Size: int64(len(content)),
+	}, nil)
+	if err != nil {
+		t.Fatalf("E-M2: damaged Resume 应覆盖旧副本（自愈）, got %v", err)
+	}
+	if tr == nil {
+		t.Fatal("转存应成功")
+	}
+	if got := string(inner.files[rel]); got != string(content) {
+		t.Fatalf("覆盖后内容应为新下载产物, got %q", got)
+	}
+}
+
+// TestVerifyByFileMeta_TrailingGarbage D-MAJOR-1 回归：目标卷内容 = 合法前缀+尾部垃圾
+// ——分块哈希/TotalSHA256 只覆盖 meta 窗口（合法前缀），尾部追加的损坏文件原被判
+// 「可信」（循环不 drain 余量、无实读==fm.Size 断言）。修复后应报 ErrTransferTarget。
+func TestVerifyByFileMeta_TrailingGarbage(t *testing.T) {
+	t.Parallel()
+	// 复用随机分块 fixture：meta 覆盖前 60B（3 块），目标内容 = 前 60B + 尾部垃圾。
+	chunks := []meta.ChunkMeta{
+		{Index: 0, Offset: 0, Size: 10, SHA256: refSHA256([]byte(strings.Repeat("a", 10)))},
+		{Index: 1, Offset: 10, Size: 20, SHA256: refSHA256([]byte(strings.Repeat("b", 20)))},
+		{Index: 2, Offset: 30, Size: 30, SHA256: refSHA256([]byte(strings.Repeat("c", 30)))},
+	}
+	var prefix []byte
+	prefix = append(prefix, strings.Repeat("a", 10)...)
+	prefix = append(prefix, strings.Repeat("b", 20)...)
+	prefix = append(prefix, strings.Repeat("c", 30)...)
+	fm := &meta.FileMeta{Version: 1, Size: 60, TotalSHA256: refSHA256(prefix), ChunkSize: 10, Chunks: chunks}
+	if err := meta.Validate(fm); err != nil {
+		t.Fatalf("fixture meta 应合法: %v", err)
+	}
+	// 目标内容 = 合法前缀 + 尾部垃圾（原实现三哈希全过 → 误判可信）。
+	tampered := append(append([]byte{}, prefix...), []byte("TRAILING-GARBAGE")...)
+	fs := &staticMetaFS{data: tampered, fm: fm}
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-trailing", Filename: "t.bin", Transfer: &TransferSpec{Volume: "vol-t"}}
+	dest := filepath.Join(t.TempDir(), "t.bin")
+	_ = os.WriteFile(dest, prefix, 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+	_, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
+		Checksum: refSHA256(prefix), Size: int64(len(prefix)),
+	}, nil)
+	if err == nil {
+		t.Fatal("D-MAJOR-1: 目标卷尾部追加垃圾（合法前缀+垃圾）应判卷静默损坏，原实现误判可信")
+	} else if !errors.Is(err, ErrTransferTarget) {
+		t.Fatalf("尾追加应归 ErrTransferTarget, got %v", err)
+	}
+}
+
+// TestIsFsNotFound_NoSubstringMatch E-CRITICAL 回归：瞬态网络错误文案含
+// "no such"/"not found" 不得被误判为 not-found（否则降级路径覆盖既有文件）。
+// 仅标准库哨兵（os.ErrNotExist/fs.ErrNotExist）判不存在。
+func TestIsFsNotFound_NoSubstringMatch(t *testing.T) {
+	t.Parallel()
+	// 标准库哨兵 → true。
+	if !isFsNotFound(os.ErrNotExist) || !isFsNotFound(fs.ErrNotExist) {
+		t.Fatal("os/fs.ErrNotExist 应判定不存在")
+	}
+	// 包装的 os.ErrNotExist（%w）→ true（errors.Is 沿链）。
+	if !isFsNotFound(fmt.Errorf("stat %s: %w", "x", os.ErrNotExist)) {
+		t.Fatal("包装 os.ErrNotExist 应判定不存在")
+	}
+	// 瞬态网络错误（文案含 no such/not found）→ false（fail-closed，归目标卷异常重试）。
+	for _, msg := range []string{"no such host", "dial tcp: lookup x not found", "404 Not Found 网络错误"} {
+		if isFsNotFound(fmt.Errorf("%s", msg)) {
+			t.Fatalf("瞬态网络错误 %q 不得误判为 not-found（防静默覆盖既有文件）", msg)
+		}
+	}
+	// nil → false。
+	if isFsNotFound(nil) {
+		t.Fatal("nil 不应判定不存在")
+	}
+}
+
+// TestStagingQuotaWrap 用户裁定 2026-10-10 机制化回归：转存目标 FS 的本地 staging 配额
+// 强制接线——无接口的裸卷默认被 gate 强制预留（新卷遗漏也 fail-safe）；Exempt 跳过；
+// Capable 注入自管。
+func TestStagingQuotaWrap(t *testing.T) {
+	t.Parallel()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) {
+		return newMemFS(), "s3", false
+	})
+	mgr.stagingQuotaFor = func(owner string) syncpkg.StagingQuotaTracker {
+		return quota.NewStagingTracker(quota.NewPool(1<<30).Scope("", 0))
+	}
+	// 无接口裸卷（memFS）：默认包 gate。
+	gw := mgr.stagingQuotaWrap("alice", newMemFS())
+	if _, ok := gw.(*syncpkg.StagingQuotaGateFS); !ok {
+		t.Fatal("无接口卷应默认被 gate 强制预留（fail-safe）")
+	}
+	// Exempt 卷：跳过。
+	ex := &exemptFS{inner: newMemFS()}
+	if got := mgr.stagingQuotaWrap("alice", ex); got != ex {
+		t.Fatal("Exempt 卷应跳过 gate（原 fs 返回）")
+	}
+	// Capable 卷：注入自管（返回原 fs）。
+	cap := &capableFS{inner: newMemFS()}
+	if got := mgr.stagingQuotaWrap("alice", cap); got != cap {
+		t.Fatal("Capable 卷应注入自管（原 fs 返回）")
+	}
+	if cap.tracker == nil {
+		t.Fatal("Capable 卷应收到 staging 配额钩子（自管）")
+	}
+}
+
+// exemptFS 是 StagingQuotaExempt 测试实现（流式直传语义）。
+type exemptFS struct{ inner syncpkg.FS }
+
+func (e *exemptFS) ExemptStagingQuota() bool { return true }
+func (e *exemptFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return e.inner.ListDir(ctx, p)
+}
+func (e *exemptFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return e.inner.Stat(ctx, p)
+}
+func (e *exemptFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return e.inner.OpenRead(ctx, p)
+}
+func (e *exemptFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return e.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (e *exemptFS) Rename(ctx context.Context, f, t string) error { return e.inner.Rename(ctx, f, t) }
+func (e *exemptFS) Delete(ctx context.Context, p string) error    { return e.inner.Delete(ctx, p) }
+func (e *exemptFS) MakeDir(ctx context.Context, p string) error   { return e.inner.MakeDir(ctx, p) }
+
+var _ syncpkg.StagingQuotaExempt = (*exemptFS)(nil)
+
+// capableFS 是 StagingQuotaCapable 测试实现（自管本地配额）。
+type capableFS struct {
+	inner   syncpkg.FS
+	tracker syncpkg.StagingQuotaTracker
+}
+
+func (c *capableFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) { c.tracker = q }
+func (c *capableFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return c.inner.ListDir(ctx, p)
+}
+func (c *capableFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return c.inner.Stat(ctx, p)
+}
+func (c *capableFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return c.inner.OpenRead(ctx, p)
+}
+func (c *capableFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return c.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (c *capableFS) Rename(ctx context.Context, f, t string) error { return c.inner.Rename(ctx, f, t) }
+func (c *capableFS) Delete(ctx context.Context, p string) error    { return c.inner.Delete(ctx, p) }
+func (c *capableFS) MakeDir(ctx context.Context, p string) error   { return c.inner.MakeDir(ctx, p) }
+
+var _ syncpkg.StagingQuotaCapable = (*capableFS)(nil)

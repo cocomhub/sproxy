@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // setupAuditServices 装配审计服务：有界内存环形缓冲 + 落盘存储。
@@ -463,6 +464,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		RetryDelay:          cfg.CloudRetryDelay,
 		Downloader:          cfg.CloudDownloader,
 		MaxCheckMemBytes:    cfg.CloudCheckMemBytes,
+		// P2-7 修复：trusted_volume.skip_verify 接线到转存读侧校验（此前 cloudCfg 缺该
+		// 字段，transfer.go 的 m.config.SkipVerify 恒 false——配置项与文档不符）。
+		SkipVerify: cfg.TrustedVolume.SkipVerify,
 	}
 	// 云端下载经 mesh 出口：由装配层（cmd/sproxy）构造 CloudExitDial 注入
 	// （pkg/server 不 import pkg/client——client 测试 import server 构成包级环，
@@ -478,6 +482,12 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 			return h.quotaBucketFor(owner, "cloud")
 		}},
+		// 本地 staging 配额钩子（用户裁定 2026-10-10）：外部卷转存写本地暂存统一过
+		// 独立 staging Scope（防本地磁盘打满）——cloud 层在 transferDone 按 owner 注入
+		// targetFS（Exempt 跳过 / Capable 自管 / 默认 gate 强制）。
+		StagingQuotaFor: func(owner string) syncpkg.StagingQuotaTracker {
+			return h.stagingQuotaTrackerFor(owner)
+		},
 		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
 		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
 		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool) {
@@ -488,7 +498,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// scheme 从卷 Type 反查（secretdata/secrets/baidupcs/s3 等声明协议）。
 			vol, ok := vs.ByName(volumeName)
 			if !ok {
-				return be.FS(), "", false
+				// 卷元信息缺失（极罕见装配异常）：仍加 Guard（meta 桶隔离恒生效）——
+				// 转存目标也不能触达凭据桶。
+				return trusted.Guard(be.FS()), "", false
 			}
 			// 共享判定（用户裁定）：ModeAllow + 多 owner 白名单 = 共享；ModeDeny/零值
 			// （默认开放）任何 owner 可写 → 视为共享（转存加 owner 前缀隔离）。单一
@@ -497,9 +509,13 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// 远程性判定不在装配层：目标 FS 自述（syncpkg.LocalVolume 能力接口，transfer.go
 			// 查询）——外部卷零配置（未实现默认远程），内部/封装卷实现 IsLocalVolume()
 			// 自述（用户裁定 2026-10-05：不靠类型名硬编码，层层委派）。
-			return be.FS(), registry.SchemeOf(vol.Type), shared
+			// 可信卷：外部卷 FS 恒经 trusted.Wrap 包一层（用户裁定：meta 恒生成——skip_verify
+			// 只关读侧校验不关 meta；转存写后自动生成隐藏 .meta，目标成为可信卷）。
+			fsys := be.FS()
+			fsys = trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts()))
+			return fsys, registry.SchemeOf(vol.Type), shared
 		},
-		// VolumeFor：转存键空间经 volume.ResolveOwnerPath 计算（权限门/路径安全/共享前缀
+		// VolumeFor：转存键空间经 volume.ResolveLocation 计算（权限门/路径安全/共享前缀
 		// 由 volume 唯一入口承担，用户裁定 2026-10-05）——装配层提供 vs.ByName 解析。
 		VolumeFor: func(volumeName string) (volume.Volume, bool) {
 			return vs.ByName(volumeName)

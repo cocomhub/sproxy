@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -277,6 +278,53 @@ func TestRecordAudit_DefaultTS(t *testing.T) {
 }
 
 // ---- actor 注入 ----
+
+// TestHandlers_RecordAudit_ConcurrentWithClose 回归（数据竞态）：停服（Close 关闭审计落盘
+// 存储）与在途请求的 RecordAudit **并发**时不得有 field 级竞态，-race 下必捕。
+// 此前 stopRemainingServices 在 Close 里写 `h.auditStore = nil`，而 RecordAudit 读同一字段
+// → CI 的 -race 跑曾偶发 TestRemoteWrite_ListenerEndToEnd 红（隧道写路径的在途 handler 与
+// 该用例 t.Cleanup 的 Close 并发）。「关闭后不再落盘」的语义改由 AuditStore 自身的 closed
+// 标记承担（见 AuditStore.Close/appendLine），故 Close 不再写 h.auditStore 字段。
+func TestHandlers_RecordAudit_ConcurrentWithClose(t *testing.T) {
+	t.Parallel()
+
+	var auditBuf bytes.Buffer
+	h := newRemoteReadHandlers(t, remoteReadTestConfig(t), &auditBuf)
+	if h.auditStore == nil {
+		t.Fatal("前置条件不成立：expected non-nil auditStore（cfg.Audit.BufferSize > 0）")
+	}
+
+	const writers, batches = 4, 64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range writers {
+		wg.Go(func() {
+			<-start
+			for j := range batches {
+				h.RecordAudit(t.Context(), AuditEvent{
+					Action: "probe",
+					Object: fmt.Sprintf("concurrent-close-%d-%d", i, j),
+				})
+			}
+		})
+	}
+	close(start)
+
+	// 与上面的 RecordAudit 并发停服：修复前此处写 h.auditStore = nil → 与读构成竞态。
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wg.Wait()
+
+	// 停服后 Append 不得重新打开落盘句柄（否则 Windows 下会阻止 TempDir 清理，且与
+	// 「已停服」语义矛盾——closed 标记必须在 s.mu 内短路 appendLine 的懒打开）。
+	h.auditStore.mu.RLock()
+	reopened := h.auditStore.file != nil
+	h.auditStore.mu.RUnlock()
+	if reopened {
+		t.Error("停服后审计日志句柄被 Append 重新打开（closed 短路失效）")
+	}
+}
 
 func TestAuthMiddleware_SproxySigActorInjected(t *testing.T) {
 	t.Parallel()

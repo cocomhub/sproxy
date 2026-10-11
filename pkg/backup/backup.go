@@ -220,8 +220,10 @@ func (w *backupWorker) processBackupEntry(e *syncpkg.Entry) bool {
 	}
 	if pe, ok := manifestHit(w.prev, e.Path, e.Size, e.MTime); ok {
 		// manifest 命中（size+mtime 相同）→ 增量跳过；条目保留到新 manifest。
-		w.next[e.Path] = pe
+		// 必须持锁：并发 worker goroutine 也会写 w.next（不持锁 = concurrent map writes
+		// → 运行时 fatal 直接终止进程）。
 		w.mu.Lock()
+		w.next[e.Path] = pe
 		w.rep.Skipped++
 		w.mu.Unlock()
 		return true

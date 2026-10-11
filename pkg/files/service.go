@@ -258,6 +258,10 @@ type DownloadPath struct {
 	// 非 nil 时 OpenPath/StatPath 改经它打开/stat，绕过 dp.Tenant.Root()（本地卷
 	// 恒 nil → 零回归）。
 	Source DownloadSource
+	// Ciphertext 为 true 时请求 at-rest 加密卷的**存储原样字节**（不解密）——加密只在
+	// 存储层，用户常规访问恒为明文；此开关供备份/迁移/带外校验等需要密文的场景。
+	// 非加密卷该标志无副作用（原始字节 == 明文）。
+	Ciphertext bool
 }
 
 // SeekReadCloser 是服务端读取流形态（2026-10-05）：同时满足 io.ReadSeeker（http.

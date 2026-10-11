@@ -164,6 +164,8 @@ func (l *LocalFS) ListDir(ctx context.Context, relPath string) ([]Entry, error) 
 				return nil, err
 			}
 			e.Checksum = cs
+			e.ChecksumType = "sha256"
+			e.Checksums = map[string]string{"sha256": cs}
 		}
 		out = append(out, e)
 	}
@@ -204,6 +206,8 @@ func (l *LocalFS) Stat(ctx context.Context, relPath string) (*Entry, error) {
 			return nil, err
 		}
 		e.Checksum = cs
+		e.ChecksumType = "sha256"
+		e.Checksums = map[string]string{"sha256": cs}
 	}
 	return e, nil
 }
@@ -307,6 +311,8 @@ func (r *rangeReadCloser) Close() error { return r.f.Close() }
 
 // WriteFile 写入文件，自动创建父目录并保留 mtime。大文件拷贝受 ctx 取消约束
 // （审查 I-3：本地 FS 阻塞 IO 也尊重取消语义，为远程实现立规范）。
+// 原子写（可信卷自愈）：同一目录 CreateTemp → CopyWithCtx → fsync → Rename 覆盖——
+// 崩溃/失败只留临时文件或旧完整文件，绝不留下半写目标（转存首写失败后下次覆盖可自愈）。
 func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -334,21 +340,107 @@ func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, si
 			return mkErr
 		}
 	}
-	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// 原子写：同目录临时文件 → 流式拷贝 → fsync → rename 覆盖。
+	// Windows 同卷 rename 原子；临时文件随原文件名前缀防跨目录 EXDEV；fsync 保证
+	// 落盘后才 rename 可见（防断电丢块）。
+	return l.writeFileAtomic(ctx, full, r, mtime)
+}
+
+// writeFileAtomic 同目录 tmp + fsync + rename 的原子写核心（WriteFile 唯一写路径）。
+// 失败清理临时文件，绝不留下半写目标（可信卷自愈语义）。
+func (l *LocalFS) writeFileAtomic(ctx context.Context, full string, r io.Reader, mtime int64) error {
+	tmp, err := os.CreateTemp(filepath.Dir(full), "."+filepath.Base(full)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	if _, err := fsutil.CopyWithCtx(ctx, f, r); err != nil {
-		_ = f.Close()
+	tmpPath := tmp.Name()
+	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
+	if _, err := fsutil.CopyWithCtx(ctx, tmp, r); err != nil {
+		cleanup()
 		return err
 	}
-	if err := f.Close(); err != nil {
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
 		return err
 	}
 	if mtime != 0 {
 		t := time.Unix(0, mtime)
-		if err := os.Chtimes(full, t, t); err != nil {
+		if err := os.Chtimes(tmpPath, t, t); err != nil {
+			os.Remove(tmpPath)
 			return err
+		}
+	}
+	if err := os.Rename(tmpPath, full); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// WriteIfAbsent 原子拒绝已存在写入（W1/W3 转存唯一语义）：
+// 同目录 tmp + fsync + **硬链接安装**（os.Link 到最终路径：目标已存在 → EEXIST → 返回
+// (false, nil)，原子判定无 TOCTOU；tmp 与目标同目录保证同卷可 link）。崩溃只留可清理的
+// `.tmp-*` 残留，**最终路径从不出现半写**（与 writeFileAtomic 自愈语义一致——修复 B1-C3：
+// 原 O_EXCL 直写目标崩溃留截断文件且被"已存在"永久拦截，无法自愈）。
+func (l *LocalFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Reader, size, mtime int64) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	clean, err := fsutil.SanitizeRelPath(relPath)
+	if err != nil {
+		return false, err
+	}
+	if dir := filepath.Dir(clean); dir != "." && dir != "" {
+		if mkErr := l.MakeDir(ctx, dir); mkErr != nil {
+			return false, mkErr
+		}
+	}
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return false, cerr
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(full), "."+filepath.Base(full)+".tmp-*")
+	if err != nil {
+		return false, err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
+	if err := writeIfAbsentToTmp(ctx, tmp, r, mtime); err != nil {
+		cleanup()
+		return false, err
+	}
+	// 硬链接安装：目标已存在 → EEXIST → (false, nil)（原子拒绝，不覆盖）；成功 → 删 tmp。
+	if err := os.Link(tmpPath, full); err != nil {
+		os.Remove(tmpPath)
+		if os.IsExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	os.Remove(tmpPath)
+	return true, nil
+}
+
+// writeIfAbsentToTmp 写 tmp 文件：流式拷贝 + fsync + close + 可选 mtime（WriteIfAbsent
+// 唯一写路径的原子写核心——崩溃只留可清理 tmp，目标从不半写）。
+func writeIfAbsentToTmp(ctx context.Context, tmp *os.File, r io.Reader, mtime int64) error {
+	if _, err := fsutil.CopyWithCtx(ctx, tmp, r); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if mtime != 0 {
+		t := time.Unix(0, mtime)
+		if cerr := os.Chtimes(tmp.Name(), t, t); cerr != nil {
+			return cerr
 		}
 	}
 	return nil
@@ -376,6 +468,79 @@ func (l *LocalFS) Rename(ctx context.Context, from, to string) error {
 		return terr
 	}
 	return os.Rename(fromFull, toFull)
+}
+
+// Move 同卷原子移动（sync.Mover 能力）：等价 os.Rename（源移除、目标覆盖）。
+// 跨物理卷/文件系统返回 EXDEV 类错误由调用方回退复制。
+func (l *LocalFS) Move(ctx context.Context, from, to string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	fromClean, err := fsutil.SanitizeRelPath(from)
+	if err != nil {
+		return err
+	}
+	toClean, err := fsutil.SanitizeRelPath(to)
+	if err != nil {
+		return err
+	}
+	fromFull, ferr := l.confine(fromClean)
+	if ferr != nil {
+		return ferr
+	}
+	toFull, terr := l.confine(toClean)
+	if terr != nil {
+		return terr
+	}
+	return os.Rename(fromFull, toFull)
+}
+
+// Copy 同卷复制（sync.Copier 能力）：源保留、目标新写（读源 → 原子写目标）。
+// 实现复用 WriteFile 的 tmp+rename 原子写；调用方保证目标目录存在（WriteFile 自建）。
+func (l *LocalFS) Copy(ctx context.Context, from, to string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rc, err := l.OpenRead(ctx, from)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	srcE, err := l.Stat(ctx, from)
+	if err != nil || srcE == nil {
+		return fmt.Errorf("copy: stat 源 %s: %v", from, err)
+	}
+	return l.WriteFile(ctx, to, rc, srcE.Size, srcE.MTime)
+}
+
+// Link 同卷硬链接（sync.Linker 能力）：目标指向源同一 inode，两名字共享内容。
+// 跨物理卷返回 EXDEV 类错误由调用方回退复制（Windows NTFS 文件硬链接可用）。
+func (l *LocalFS) Link(ctx context.Context, from, to string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	fromClean, err := fsutil.SanitizeRelPath(from)
+	if err != nil {
+		return err
+	}
+	toClean, err := fsutil.SanitizeRelPath(to)
+	if err != nil {
+		return err
+	}
+	fromFull, ferr := l.confine(fromClean)
+	if ferr != nil {
+		return ferr
+	}
+	toFull, terr := l.confine(toClean)
+	if terr != nil {
+		return terr
+	}
+	if dir := filepath.Dir(toFull); dir != "" {
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return mkErr
+		}
+	}
+	return os.Link(fromFull, toFull)
 }
 
 // Delete 删除文件（须落在 Root 内，防符号链接逃逸）。

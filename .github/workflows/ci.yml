@@ -67,10 +67,17 @@ jobs:
       - name: check-format (gofix/addlicense/gofmt 全部 module 无残留)
         run: make check-format
 
+      # 版本 pin 说明：v2.13.x 内置 x/tools 的 export-data 解码器上限为 version 4，而
+      # runner 经 check-latest 拉到的 Go 1.27.2 把 unified export data 抬到 version 5 →
+      # 全仓 typecheck 硬错（"cannot decode ... export data version 5 is greater than
+      # maximum supported version 4"），报点全落在 stdlib import 上、与业务代码无关。
+      # 该错仅与「lint 二进制内置解码器版本」有关，用 go1.27.2 从源码重建 v2.13.2 仍复现；
+      # v2.14.0 已支持 v5。**升级此 pin 前须以 CI 同款 Go 全量验证**：
+      # `make lint lint-all lint-web-e2e lint-e2e` 均 0 issues（新 linter 版本可能引入新 findings）。
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.2
+          version: v2.14.0
           args: --timeout=5m ./...
 
       # 上面的 `./...` 只覆盖根 module：其余 10 个模块（cmd/sproxy、cmd/sclient、
@@ -228,6 +235,9 @@ jobs:
       # （临时 git 仓库，不触碰本仓库）。挂在**必检**的 test-submodules job 内。
       - name: tag-release script tests
         run: make test-tag-release
+      # 子 module e2e-tagged 测试的编译门禁（默认 build tags 不编译它们，防静默腐化）。
+      - name: vet sub-module e2e tests (compile gate)
+        run: make vet-e2e-submodules
       - name: Upload coverage (sub-modules)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -261,7 +271,7 @@ jobs:
         if: runner.os == 'Linux'
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.2
+          version: v2.14.0
           args: --timeout=5m --build-tags=e2e ./test/...
       - name: go test e2e (real binaries)
         run: make test-e2e
@@ -377,7 +387,7 @@ jobs:
         env:
           GOWORK: "off"
         with:
-          version: v2.13.2
+          version: v2.14.0
           working-directory: web/e2e
           args: --timeout=5m -c ../../.golangci.yml ./...
       - name: Install Playwright browsers

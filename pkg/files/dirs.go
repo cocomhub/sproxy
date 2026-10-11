@@ -19,11 +19,12 @@ const errMsgCreateDirFailed = "创建目录失败"
 // sumRootDirSize 递归统计租户根内 rel 子树下所有普通文件的总字节数（rmdir 配额释放用）。
 // 经 root.ReadDir 相对遍历（os.Root 防符号链接逃逸），跳过符号链接（Lstat 语义不计数），
 // 子目录递归累加。rmdir 删除前调用，删除成功后按该字节数 ReleaseUsage（I2 修复）。
-// rmdirFileStat 是 rmdir 配额释放收集项：每个被删文件的完整相对路径（含功能桶前缀）
-// 与其字节数。按文件 rel 分键释放到对应子 Scope（bucket_limits 子目录配额一致）。
+// rmdirFileStat 是 rmdir 配额释放收集项：每个被删文件的完整相对路径（含功能桶前缀）、
+// 字节数与所在卷租户根（meta sidecar 删除/配额释放需要——C2 修复：rmdir 联动删 meta）。
 type rmdirFileStat struct {
 	rel  string
 	size int64
+	root *storage.Root
 }
 
 // sumRootDirFiles 递归收集租户根内 rel 子树下所有普通文件（符号链接跳过）的 {rel, size}，
@@ -43,7 +44,7 @@ func sumRootDirFiles(root *storage.Root, rel string, out *[]rmdirFileStat) {
 			continue
 		}
 		if info, err := e.Info(); err == nil {
-			*out = append(*out, rmdirFileStat{rel: childRel, size: info.Size()})
+			*out = append(*out, rmdirFileStat{rel: childRel, size: info.Size(), root: root})
 		}
 	}
 }

@@ -20,7 +20,9 @@ func openLocalFile(path string) (*os.File, error) {
 }
 
 // globalLayout 是断点持久化的默认布局（Upload 流程使用）。
-// 由 NewLibraryAdapter 注入；nil 时断点不持久化（仅内存恢复）。
+// **当前未接线（恒 nil）**：仓库内无任何赋值点（后续恢复协调器专题——
+// 见 docs/archive/architecture-task-recovery.md）。nil 时 resumeKey 恒空，
+// 断点不落盘（仅一次性内存态）。
 var globalLayout *Layout
 
 // loadUploadResume 从布局 Resume 目录读取上传断点。

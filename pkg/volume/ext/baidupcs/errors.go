@@ -4,6 +4,7 @@
 package baidupcs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -21,6 +22,12 @@ var (
 	ErrInvalidParam = errors.New("baidupcs: invalid param")
 	// ErrTransient 表示可重试的瞬时错误（网络/超时/接口抖动）。
 	ErrTransient = errors.New("baidupcs: transient error")
+	// ErrQuotaExceeded 表示本地 staging 配额不足/排队超时（配额永久不足——单文件
+	// ActionError 而非重试；对齐本地 quotaLocalFS TryReserve 失败语义）。
+	ErrQuotaExceeded = errors.New("baidupcs: staging quota exceeded")
+	// ErrUnsupported 表示该能力无直接支持（如无会话/二进制模式执行服务端 Move/Copy）。
+	// 用户裁定：无直接能力则明确报错不支持（fail-closed），不静默降级。
+	ErrUnsupported = errors.New("baidupcs: unsupported operation")
 )
 
 // mapPCSError 把 BaiduPCS 库错误归类为哨兵错误。
@@ -29,8 +36,13 @@ func mapPCSError(err error) error {
 	if err == nil {
 		return nil
 	}
+	// D-M2 修复：ctx 取消原样透传（context.Canceled/DeadlineExceeded 非百度语义错误）——
+	// 上层按 ctx 取消识别为任务中止，不归 ErrTransient/目标卷异常。
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	msg := err.Error()
-	lower := toLower(msg)
+	lower := strings.ToLower(msg)
 
 	switch {
 	case containsAny(lower, "not found", "no such file", "does not exist", "文件不存在", "目录不存在"):
@@ -39,8 +51,7 @@ func mapPCSError(err error) error {
 		return fmt.Errorf("%w: %v", ErrAlreadyExists, err)
 	case containsAny(lower, "permission denied", "access denied", "未登录", "cookie", "权限", "登录"):
 		return fmt.Errorf("%w: %v", ErrPermissionDenied, err)
-	case containsAny(lower, "deadline exceeded", "timeout", "timed out", "超时", "请稍后再试"),
-		errors.Is(err, errTimeout), errors.Is(err, errNotExist):
+	case containsAny(lower, "deadline exceeded", "timeout", "timed out", "超时", "请稍后再试"):
 		return fmt.Errorf("%w: %v", ErrTransient, err)
 	}
 	return err
@@ -54,14 +65,3 @@ func containsAny(s string, subs ...string) bool {
 	}
 	return false
 }
-
-// 内部辅助（避免依赖标准库别名冲突）。
-func toLower(s string) string {
-	return strings.ToLower(s)
-}
-
-// errTimeout / errNotExist 是哨兵（供 mapPCSError 分类）。
-var (
-	errTimeout  = fmt.Errorf("timeout")
-	errNotExist = fmt.Errorf("not exist")
-)

@@ -347,3 +347,66 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
   `X-Volume` 头、可选 `volume` 参数（upload 表单 / 其余 query）。FileClient 卷上下文
   （`WithVolume`/`SetVolume`，零值=auto）、`Volumes()`/`MoveVolume()`；sclient `volumes` /
   `--volume` / `mv --to-volume`；WebUI 卷 badge + 仪表 + 上传下拉。
+
+## 可信卷（Trusted Volume：完整性 sidecar + 元信息隔离 + 卷级容量）
+
+「可信卷」把「读回内容 == 写入内容」从**约定**升级为**结构性不变量**：服务端为每个文件维护一份
+用户不可访问的整文件完整性证据（`FileMeta` sidecar），读路径逐分块校验，损坏**fail-closed**。
+设计细节与已记档边界见 [docs/designs/2026-10-10-trusted-volume.md](./designs/2026-10-10-trusted-volume.md)。
+
+### 数据模型与布局
+
+- `FileMeta`（`pkg/files/meta`）：`Size`/`TotalSHA256`/`ChunkSize` + 逐分块 `{index,offset,size,sha256,md5}`，
+  外加 `CTime`/`MTime`/`MediaType`/`Extra`。分块数上限与 sidecar 读取上限（64MiB）**自洽**——
+  `ResolveChunkSize` 会为保证「写出即可读」上抬档位（1MiB…32MiB）。
+- **sidecar 独立桶**：`<owner>/meta/<rel>.meta`（不是用户目录内的 `.meta`）——
+  与用户真实 `*.meta` 文件不再冲突，且业务层经 `MetaBucketGuard` **结构性不可达** meta 桶。
+- **键空间单一来源**：`volume.Location.FSPath()` 恒为 `<归一 owner>/<bucket>/<path>`；
+  备份目标等「相对键空间」经 `prefixFS` 前缀化后才进可信链（防跨 owner 互覆与 Guard 误判）。
+
+### 装饰器链与能力透传
+
+按「最内层原始卷 → 容量 → 可信 → 守卫 → 业务」装配：
+
+```
+业务层 → MetaBucketGuard(TrustedVolumeFS(CapacityFS(原始 FS)))
+                     ↑ staging 门卫按卷另行叠加（StagingQuotaGateFS）
+```
+
+- 每个装饰器**透明转发全部可选能力**（`meta.Provider`/`MetaExtraUpdater`/`RangeReader`/
+  `DirectURLProvider`/`WriteIfAbsent`/`ReserveSpace`/`LocalVolume`/`Mover`/`Copier`/`Linker`/
+  `StagingQuota*`），并由编译期断言 + 门禁 R21（`internal/archcheck/capability_parity_gate_test.go`）
+  机械保证：新增能力接口若漏转发即报红（`BlockAccessor` 为一致豁免，理由见设计 §8）。
+- **能力探测必须下探 `syncpkg.Innermost`**：装饰器无条件回显能力（透传契约）⇒ 直接对装饰层做
+  类型断言恒真。这条纪律已修过三类失效：staging 门卫恒跳过、`RangeReader` 回落成死代码、
+  `Provider` 探测失败。
+
+### 读写路径保证
+
+- **写**：上传（simple/multipart）、S3 网关 PUT/multipart、DAV PUT、块写、跨卷 copy/move、
+  云转存、备份/恢复、回收站、sync push/pull 均在**同一写窗口**生成 sidecar；覆盖写场景
+  必然**失效旧 sidecar**（否则旧 meta 描述旧内容 → 新内容永久校验失败、文件不可读）。
+  写失败/序列化失败同样删旧 sidecar 退化为「无 meta」（可自愈）。
+- **读**：`/download`、`/download/chunk`、S3 兼容网关 GET、DAV GET、外部卷服务端转发统一经
+  `meta.VerifyReadSeeker` 逐分块比对；失败**主动中断连接**（`panic(http.ErrAbortHandler)`）+
+  指标 `success=false`，绝不「200 + 截断内容」。
+- **加密卷（at-rest）**：默认下发**明文**（加密只在存储层，与 DAV/S3/分享/预览语义一致），
+  `?ciphertext=1` 显式导出存储原样密文；尺寸/`Content-Range`/Range 一律按**明文坐标**
+  （`storage.Root.LogicalSize`），密文坐标仅在 `ciphertext=1` 分支。
+- **降级可观测**：sidecar 缺失（升级后存量文件）记 Debug、读失败/畸形记 Warn；`skip_verify`
+  只关读侧校验、不关 meta 生成与桶隔离。
+
+### 卷级容量
+
+- 配置卷/用户卷容量在 **FS 层**（`capacity.CapacityFS`）统一强制：写入累计、删除/覆盖/改名/
+  服务端 Copy 释放、未知长度按实测结算；计数快照持久化（`rename` + fsync 父目录）+
+  损坏/版本不识标记（Warn，避免静默归零后可超额）。
+- 外部卷覆盖写按**净增**探测（`externalReserveNeed`），避免「写满即永久 507」。
+- S3 网关单对象 PUT 与 multipart complete / 版本恢复一致走 **owner Scope + 卷池双账本**。
+
+### 本地 staging 配额
+
+外部卷上传/同步先落本地暂存 → 必须防本地盘打满：`ApplyStagingQuota` 按**最内层原始卷**三分支——
+显式豁免（`StagingQuotaExempt`，如 s3 流式直传）、自管（`StagingQuotaCapable`，如 baidupcs，
+per-request/per-owner 门卫包装）、否则强制 `StagingQuotaGateFS`（fail-safe 宁多勿漏）。
+staging 独立 Scope 但**挂在全局池之下**（受 `max_storage_bytes` 约束）。

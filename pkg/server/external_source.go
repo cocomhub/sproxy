@@ -6,14 +6,18 @@ package server
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // externalDownloadSource 是外部卷的服务端读取源（files.DownloadSource 实现，
@@ -28,6 +32,10 @@ type externalDownloadSource struct {
 	rel     string     // 卷内相对路径
 	size    int64      // 逻辑文件大小（Stat 已知）
 	modTime time.Time  // 元信息 ModTime
+	// fileMeta 是可选的 FileMeta 读取器（装配层注入：fsys 为可信卷——secretdata
+	// Provider 或 trusted.Wrap 装饰器——时非 nil）。Open 后包装 VerifyReadSeeker
+	// 逐分块校验（下载路径比对 meta，异常 fail-closed——与本地卷同级的信任保证）。
+	fileMeta func(ctx context.Context, rel string) (*meta.FileMeta, error)
 }
 
 // externalFileInfo 是 fs.FileInfo 的最小实现（size/modtime；供「不能下载目录」判定）。
@@ -54,18 +62,64 @@ func (s *externalDownloadSource) Stat(ctx context.Context) (fs.FileInfo, error) 
 
 // Open 实现 files.DownloadSource：返回 RangeSeeker（io.ReadSeeker 适配 OpenRangeRead）。
 // 底层无 RangeReader → 报错（调用方退整流 200）。
+// 信任保证演进：fsys 为可信卷（装配层注入 fileMeta 读取器）→ 包装 VerifyReadSeeker
+// 逐分块校验（下载比对 meta，静默损坏 fail-closed 不发损坏内容）。
 func (s *externalDownloadSource) Open(ctx context.Context) (files.SeekReadCloser, error) {
-	return syncpkg.NewRangeSeeker(ctx, s.fs, s.rel, s.size)
+	// 无 RangeReader 的外部卷（如 S3 网关后端）：退**整流 seeker**（P1：此前直接报错 →
+	// /download 恒 500，本函数注释承诺的「调用方退整流 200」并不存在）。
+	var seeker files.SeekReadCloser
+	if rs, err := syncpkg.NewRangeSeeker(ctx, s.fs, s.rel, s.size); err == nil {
+		seeker = rs
+	} else {
+		seeker = syncpkg.NewStreamSeeker(ctx, s.fs, s.rel, s.size)
+	}
+	if s.fileMeta != nil {
+		if fm, ferr := s.fileMeta(ctx, s.rel); ferr == nil && fm != nil {
+			// meta 缺失/读取失败 → 直通（不误报）；meta 可用 → 逐分块校验。
+			v := meta.VerifyReadSeeker(seeker, fm)
+			if vc, ok := v.(files.SeekReadCloser); ok {
+				return vc, nil
+			}
+		} else if ferr != nil {
+			// 可观测性（第 5 轮对抗评审 P1）：sidecar 缺失是升级后的预期状态（Debug），
+			// 而**读失败/畸形**必须 Warn——否则运维无法区分「无校验能力」与「已校验」。
+			if os.IsNotExist(ferr) {
+				slog.Default().Debug("外部卷下载不经服务端校验（sidecar 缺失）", "path", s.rel)
+			} else {
+				slog.Default().Warn("外部卷 sidecar 读取失败，降级为不经服务端校验", "path", s.rel, "error", ferr.Error())
+			}
+		}
+	}
+	return seeker, nil
 }
 
-// newExternalSource 构造服务端读取源（从 sync.Entry 元信息填充）。
-func newExternalSource(fsys syncpkg.FS, rel string, e *syncpkg.Entry) *externalDownloadSource {
-	return &externalDownloadSource{
-		fs:      fsys,
-		rel:     rel,
-		size:    e.Size,
-		modTime: time.Unix(0, e.MTime),
+// newExternalSource 构造服务端读取源（从 sync.Entry 元信息填充）。skipVerify=true
+// （trusted_volume.skip_verify）时**不注入** meta 读取器 —— 外部卷下载与本地卷下载、
+// 云转存读回同口径地尊重该开关（P3 对抗评审：此前外部卷下载无效）。
+func newExternalSource(fsys syncpkg.FS, rel string, e *syncpkg.Entry, skipVerify bool) *externalDownloadSource {
+	var fm func(ctx context.Context, rel string) (*meta.FileMeta, error)
+	if !skipVerify {
+		// 装配层注入 FileMeta 读取器（fsys 为可信卷——secretdata Provider / trusted
+		// Wrap 装饰器——时经 meta.Provider 探测）；无 meta 能力 → nil（直通，读路径
+		// 直算兜底）。
+		fm = fileMetaReaderFor(fsys)
 	}
+	return &externalDownloadSource{
+		fs:       fsys,
+		rel:      rel,
+		size:     e.Size,
+		modTime:  time.Unix(0, e.MTime),
+		fileMeta: fm,
+	}
+}
+
+// fileMetaReaderFor 探测 fsys 的 meta 能力并返回 FileMeta 读取闭包（无能力 → nil）。
+func fileMetaReaderFor(fsys syncpkg.FS) func(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	if pv, ok := fsys.(meta.Provider); ok {
+		return pv.FileMeta
+	}
+	// trusted.Wrap 装饰器也实现 meta.Provider（FileMeta 读 sidecar）——上面断言已覆盖。
+	return nil
 }
 
 // resolveExternalDownload 解析外部卷的下载路径（2026-10-05 通用文件获取）。
@@ -87,7 +141,7 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 	// 二次进入强制 A 态（服务端转发）——否则 DirectURL 无条件命中 → 无限 302 环。
 	// 只收紧（强制转发），无提权面。
 	forceForward := r.URL.Query().Get("egress_forward") == "1"
-	// 域侧 rel 形如 user/<name>；剥桶后经 v.ResolveOwnerPath 统一计算最终键
+	// 域侧 rel 形如 user/<name>；剥桶后经 v.ResolveUserLocation + FSPath 统一计算最终键
 	// （共享卷自动加 <owner>/ 前缀隔离，独享卷无前缀——评审 M3 + 用户裁定统一入口）。
 	stripped := strings.TrimPrefix(rel, "user/")
 	for _, v := range candidates {
@@ -95,12 +149,13 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		if be == nil {
 			continue
 		}
-		fsys := be.FS()
-		if fsys == nil {
-			// 后端已登记但 FS 视图未就绪（评审 Minor：nil 接口解引用 panic 防御）。
+		raw := be.FS()
+		if raw == nil {
+			// 后端已登记但 FS 视图未就绪（nf 安全：Guard 恒非 nil，必须在 Wrap 前判裸 FS）。
 			continue
 		}
-		ownerKey, kerr := v.ResolveUserPath(owner, stripped)
+		fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
+		loc, kerr := v.ResolveUserLocation(owner, stripped)
 		if kerr != nil {
 			// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
 			continue
@@ -112,12 +167,14 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		if !egressOwnerMatch(v, owner) {
 			continue // 非该 owner 请求 egress 卷 → 不命中（404，不泄卷存在性）
 		}
+		// 基于 locator 操作：FS 键仅在调用 FS 方法时经 FSPath 拼接（唯一拼接点）。
+		ownerKey := loc.FSPath()
 		e, err := fsys.Stat(r.Context(), ownerKey)
 		if err != nil || e == nil || e.IsDir {
 			continue // 该卷无此文件/目录 → 下一候选
 		}
 		// 命中卷：分 A/B/C 态（volumePrivate 见 volumes.go：secretdata 恒 true）。
-		src := newExternalSource(fsys, ownerKey, e)
+		src := newExternalSource(fsys, ownerKey, e, h.verifySkipped())
 		if resolved := h.externalStateFor(v, forceForward, fsys, r, ownerKey, filename, src); resolved != nil {
 			return resolved
 		}

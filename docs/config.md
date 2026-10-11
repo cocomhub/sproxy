@@ -151,6 +151,10 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `tier_policy.interval` | duration | `0`（关闭） | 冷热分层自动降级扫描间隔：`> 0` 时启用周期任务（ticker + 停止通道，与 `mirror_interval` 同构），把 hot 卷满足条件的文件迁移到 cold 卷；`0`/缺省 = 关闭（零回归） |
 | `tier_policy.max_age_hot` | duration | `0`（不限龄） | hot 卷文件最大存活时间：mtime 超过此值且 size ≥ `min_size_hot` 才降级。`0` = 不限龄（仅按大小降级） |
 | `tier_policy.min_size_hot` | size | `0`（不限大小） | hot 卷文件最小大小阈值：size 超过此值且 age ≥ `max_age_hot` 才降级。`0` = 不限大小（仅按龄降级）。**至少一个阈值非零**降级才可能发生 |
+| `volumes[].extra.encrypt` | bool | `false` | **卷根 at-rest 加密**（仅本地卷）：`true` = 落盘字节经 AES-256-GCM 分块加密，用户访问恒见**明文**（`/download`、DAV/S3 GET、分享、预览统一透明解密）。`encrypt=true` 但缺 `encrypt_key_file` → 启动 fail-closed。`?ciphertext=1` 可按需导出**存储原样密文**（备份/迁移/带外校验） |
+| `volumes[].extra.encrypt_key_file` | string | (空) | at-rest 加密密钥文件路径（raw 32B 或 base64 32B）。`encrypt=true` 时必填（缺失启动失败）；与 `credential_store.master_key_file` 同语义，`openssl rand -base64 32` 生成 |
+| `volumes[].extra.cipher` | size | `64KiB` | at-rest 加密的分块大小（仅 `encrypt=true` 时生效；非法值 fail-closed）。预留给未来多算法选型——当前仅 `aes-256-gcm` 一种 |
+| `volumes[].extra.*` | object | (空) | 后端类型特有配置（外部后端构造器读取，如 baidupcs 的 `bduss`/`baidu_root`、s3 的 `endpoint`/`bucket`/`access_key`/`secret_key`）。**含凭据的键在 `GET /api/volumes` / `GET /api/volumes/user` 回显时被打码** |
 
 配置示例见 `config.example.yaml`。
 
@@ -240,6 +244,16 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 | `cloud_download_allow_private` | bool | `false` | 允许下载私有 IP 地址（默认关闭，SSRF 防护） |
 | `cloud_download_exit_node` | string | (空) | 云端下载经 mesh 出口节点 ID（空=服务端本地直连）。非空时下载器 Transport.DialContext 指向「本地直连优先→失败回退经出口（hub 中继 RelayStream）」拨号；需 mesh.hub_url + mesh.access_key/secret（fail-closed） |
 | `cloud_archive_max_bytes` | int | `0` | 单次云归档允许的原始文件大小总和（0 = 不限制，仍受 `max_storage_bytes` 兜底） |
+
+### 可信卷（`trusted_volume`）
+
+外部卷上传/转存默认包**可信卷装饰器**：写侧为文件生成隐藏 `FileMeta` sidecar（整文件 sha256/md5 + 逐分块 sha256/md5，落独立 meta 功能桶 `<owner>/meta/<rel>.meta`），读侧（下载、云转存读回）按 `FileMeta` 逐分块校验，跨信任边界（外部网盘）静默损坏 fail-closed。**默认开启**；本地卷恒建 meta（`skip_verify` 只关读侧校验，不关 meta 生成；meta 桶对业务层结构性不可达）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `trusted_volume.skip_verify` | bool | `false` | `true` = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；meta 生成与 meta 桶隔离不受影响 |
+| `trusted_volume.chunk_size` | ByteSize | `0` | 分块大小；`0` = 按文件大小自适应（1MiB~32MiB）；小于下界 1MiB 时钳到 1MiB（防百万分块 meta DoS） |
+| `trusted_volume.staging_quota_bytes` | ByteSize | `0` | 本地 staging（上传暂存）每-owner 配额上限；`0` = 不限制但记账。**独立记账**（与网盘 `owner_quotas` 分离）但挂在全局池之下——受 `max_storage_bytes` 约束（staging 实占本地盘，防打满）。所有外部卷写前预留/写后释放；s3 流式直传显式豁免、baidupcs 由 per-request 门卫包装记账 |
 
 ### 文件同步（sync.*）
 
@@ -690,8 +704,14 @@ chunk_size: 8388608    # 8 MiB
 或 volumes[].vol_capacity；0 = 不限）——与本地卷（owner_quotas 物理资源）不同，外部卷不占
 本机磁盘，限额是「本系统授权占用外部卷的额度」。
 
-- **卷级计数记账**：外部卷写入累计（超限拒绝）、删除释放——`pkg/volume/capacity`（CapacityFS
-  装饰器包装 backend FS，counter 持久化 `<root>/<owner>/meta/volume/<name>.capacity.json`）。
+- **卷级计数记账（FS 层强制，2026-10-10）**：外部卷（配置卷 + 用户卷）在 **backend FS 层**统一包
+  `capacity.CapacityFS`——写入累计（超限 fail-closed 拒绝）、删除/覆盖/改名/服务端 Copy 释放。
+  因此**凡经 `be.FS()` 的写路径**（HTTP 上传、云转存、同步 push、备份、服务端 Copy·Move）
+  都被同一卷级计数器拦截，保证「**所有用户在该卷的占用之和 ≤ 卷限额**」（跨 owner 共享）。
+  - 配置卷：用 `PoolCounter` 复用该卷 `vol_capacity` 池（与路由排序/指标/对账同源）；
+  - 用户卷：用持久化 `VolumeCapacityCounter`（`<root>/<owner>/meta/volume/<name>.capacity`，
+    **非 .json**——避开 UserVolumeStore 的 `*.json` 扫描；重启 Load 续用）；
+  - 用户卷限额**从创建期即生效**（不再等重启 restore）。
 - **用量查询**：`GET /api/volumes/user`（用户卷）与 `GET /api/volumes`（系统盘）返回每卷
   `usage`（本系统已用）；backend 支持时另有卷总量（baidupcs 配额 / S3 bucket 用量，
   WebDAV 无标准 API 仅限额维度）。

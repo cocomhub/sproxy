@@ -29,9 +29,11 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // ---- secrets backend ----
@@ -363,7 +365,7 @@ func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultR
 	if be := set.External(regName); be != nil {
 		// 已有同名卷（用户显式配置）——取出其 FS 视图返回。
 		if fs := be.FS(); fs != nil {
-			return secrets.NewManager(fs, regName, true), nil
+			return secrets.NewManager(trusted.Guard(fs), regName, true), nil
 		}
 	}
 	// 设计 §6.1/§9：默认 secrets 卷落 <StorageRoot>/secrets 恰一次——secretsLocalFS
@@ -459,14 +461,32 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 		if set.External(v.Name) != nil {
 			continue // 已装配（测试自注册类型等）
 		}
-		be, berr := registry.NewBackend(ctx, v)
-		if berr != nil {
-			return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败（boot fail）: %w", v.Name, berr)
+		if err := attachSecretdataVolume(ctx, set, v, localRoot, log); err != nil {
+			return err
 		}
-		if aerr := set.AttachExternal(v.Name, be); aerr != nil {
-			return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)
-		}
-		log.Info("secretdata 卷补装完成（config 声明，推迟装配）", "volume", v.Name)
 	}
+	return nil
+}
+
+// attachSecretdataVolume 补装单个 config 声明的 secretdata 卷（包卷级容量记账后挂回卷集）。
+func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Volume, localRoot string, log *slog.Logger) error {
+	be, berr := registry.NewBackend(ctx, v)
+	if berr != nil {
+		return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败（boot fail）: %w", v.Name, berr)
+	}
+	// 卷级容量记账（FS 层）：与非延迟外部卷同—包 CapacityFS（PoolCounter 复用该卷
+	// vol_capacity 池，并**持久化**——重启后仍从已占用起算）。
+	if pool := set.Pool(v.Name); pool != nil {
+		counter, cerr := capacity.NewPoolCounterPersistent(pool, capacity.VolumeCounterPath(localRoot, v.Name))
+		if cerr != nil {
+			log.Warn("secretdata 卷容量快照恢复失败，本次进程从零累计", "volume", v.Name, "error", cerr)
+			counter = capacity.NewPoolCounter(pool)
+		}
+		be = capacity.WrapBackend(be, counter)
+	}
+	if aerr := set.AttachExternal(v.Name, be); aerr != nil {
+		return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)
+	}
+	log.Info("secretdata 卷补装完成（config 声明，推迟装配）", "volume", v.Name)
 	return nil
 }

@@ -58,7 +58,9 @@ func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// LocalFS 需要绝对路径；user 桶即 WebDAV 根（路径相对 user 桶）。
-	fs := sync.NewLocalFS(filepath.ToSlash(userAbs), h.logger)
+	// 经 davMetaFS 包一层：写/删/改名联动 sidecar（P1：裸 LocalFS 覆盖写会留陈旧 meta，
+	// 使该文件经 /download 校验固化失败且不可自愈）。
+	fs := &davMetaFS{FS: sync.NewLocalFS(filepath.ToSlash(userAbs), h.logger), h: h, owner: owner, root: tnt.Root()}
 	dav := webdavcore.NewHandler(fs)
 	if dav == nil {
 		http.Error(w, "webdav 不可用", http.StatusInternalServerError)

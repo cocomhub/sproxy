@@ -40,6 +40,10 @@ type AuditStore struct {
 	file        *os.File // append-only 句柄（nil = 未打开，懒打开）
 	maxSize     int64    // audit.max_size（字节；<=0 = 不轮转，行为与现状逐字节一致）
 	maxArchives int      // audit.max_archives（保留归档份数；0 = 轮转即删不留档）
+	// closed 是停服标记（Close 置位，持 mu）：置位后 appendLine 不再落盘/懒打开句柄。
+	// 它取代了此前 Handlers.stopRemainingServices 里的 `h.auditStore = nil`——那个写
+	// 与在途请求 RecordAudit 的字段读构成数据竞态（-race 必捕）。
+	closed bool
 }
 
 // NewAuditStore 打开（或创建）审计日志并载入历史。
@@ -122,6 +126,12 @@ func (s *AuditStore) Append(evt AuditEvent) error {
 // 懒打开文件句柄（首次写时建目录 + 打开 append 模式）。
 // 调用方须已持 s.mu（轮转与写入串行，无并发 Rename）。
 func (s *AuditStore) appendLine(evt AuditEvent) error {
+	// 停服后不再落盘：Close 已关句柄，若继续走下面的「懒打开」会重建句柄（Windows 下
+	// 使 TempDir 无法删除），且与「已停服」语义矛盾。关闭状态下静默跳过（审计尽力而为，
+	// 绝不阻断业务）；内存事件仍由 Append 记录，查询路径不受影响。
+	if s.closed {
+		return nil
+	}
 	b, merr := json.Marshal(evt)
 	if merr != nil {
 		return merr
@@ -229,13 +239,16 @@ func (s *AuditStore) Len() int {
 	return len(s.events)
 }
 
-// Close 关闭审计日志文件句柄（优雅停服 flush）。
+// Close 关闭审计日志文件句柄（优雅停服 flush）。幂等（可重复调用）。
+// 置 closed 标记：此后 Append 只进内存、不再落盘（appendLine 短路，不会重新懒打开句柄）。
+// 调用方**不得**在停服时把 Handlers.auditStore 置 nil——该写与在途请求的字段读构成竞态。
 func (s *AuditStore) Close() error {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	if s.file != nil {
 		err := s.file.Close()
 		s.file = nil

@@ -1372,7 +1372,7 @@ func (rt *runServerRuntime) setupSyncConflictIndex(exec *syncexec.Executor, h *s
 func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *server.Handlers, logger *slog.Logger) {
 	cfg := rt.cfg
 	registerBaidupcsBackend()
-	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.SyncQuotaScope())
+	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.StagingQuotaTrackerFor, h.TrustedWrapOptions())
 	webdav.RegisterWebDAVBackend()
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()

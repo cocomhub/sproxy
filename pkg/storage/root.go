@@ -4,6 +4,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -102,7 +103,18 @@ func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
 		f.Close()
 		return nil, ferr
 	}
-	return &encReadCloser{r: dr, c: f, size: fi.Size(), open: func() (io.Reader, error) {
+	// 明文总长（P0）：fi.Size() 是**密文**长度，ServeContent 会用 SeekEnd 取它当
+	// Content-Length → 响应头长度 > 实际下发明文长度 → 客户端 unexpected EOF。
+	// 不解密，仅走每块长度头累计明文长度（加密格式：[magic][4B chunk] 重复
+	// [4B l][nonce|ct|tag]，l = overhead + 明文长）。探测失败回落密文长度（保持旧行为）。
+	size := fi.Size()
+	if pf, perr := rt.r.Open(rel); perr == nil {
+		if ps, pserr := encPlaintextSize(pf); pserr == nil {
+			size = ps
+		}
+		_ = pf.Close()
+	}
+	return &encReadCloser{r: dr, c: f, size: size, open: func() (io.Reader, error) {
 		nf, oerr := rt.r.Open(rel)
 		if oerr != nil {
 			return nil, oerr
@@ -112,7 +124,7 @@ func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
 			nf.Close()
 			return nil, nderr
 		}
-		return &encReadCloser{r: ndr, c: nf, size: fi.Size()}, nil
+		return &encReadCloser{r: ndr, c: nf, size: size}, nil
 	}}, nil
 }
 
@@ -170,6 +182,32 @@ func (rt *Root) SetCipher(chunk int) error {
 // Stat 返回相对路径的文件信息。
 func (rt *Root) Stat(rel string) (os.FileInfo, error) {
 	return rt.r.Stat(rel)
+}
+
+// LogicalSize 返回文件的**逻辑（用户可见）大小**：at-rest 加密卷为**明文**长度，其余卷
+// 等同 Stat().Size()。
+//
+// 为什么需要它（第 5 轮对抗评审 P1）：`Stat().Size()` 在加密卷上是**密文**长度 C
+// （C = P + 每块 28B 头），而 `/download` 下发的是明文 P 字节——任何把 Stat 大小当作
+// 响应长度/总量的读面（`/api/files` 列表、`/api/files/stat` 的 `X-File-Size`、
+// `/download/chunk` 的 `Content-Range`/截断判据）都会声明 > 实际写出字节，令客户端
+// `io.ReadAll` 报 unexpected EOF、WebUI 分块下载按密文 totalChunks 恒判未完成。
+//
+// 代价：加密卷需顺序走每块长度头（不解密、不做 GCM），O(块数) 次短读。
+func (rt *Root) LogicalSize(rel string) (int64, error) {
+	fi, err := rt.r.Stat(rel)
+	if err != nil {
+		return 0, err
+	}
+	if rt.enc == nil || fi.IsDir() {
+		return fi.Size(), nil
+	}
+	f, oerr := rt.r.Open(rel)
+	if oerr != nil {
+		return 0, oerr
+	}
+	defer f.Close()
+	return encPlaintextSize(f)
 }
 
 // Lstat 返回相对路径的文件信息（不跟随符号链接）。供 rmdir 等检查符号链接，
@@ -264,12 +302,43 @@ func (rt *Root) Close() error {
 // encReadCloser 解密流 + 底层文件关闭。
 // 实现 io.ReadSeeker 的最小集：Seek 仅支持 0 起（重开解密流）——加密流不可任意 seek
 // （块随机存取需重读密文块），Range 语义降级为整读重开（ServeContent 兼容）。
+// size 为**明文**总长（由 encPlaintextSize 探测）——供 ServeContent 设正确的
+// Content-Length（若误用密文长度会导致客户端 unexpected EOF）。
 type encReadCloser struct {
 	r    io.Reader
 	c    io.Closer
 	open func() (io.Reader, error) // 重开回调（Seek 0 时重建解密流）
-	size int64                     // 文件总大小（密文 size，opaque；Seek End 返回）
+	size int64                     // 文件总大小（明文长度）
 	pos  int64                     // 已读位置（Seek End 语义返回）
+}
+
+// encRootOverhead 是加密块头外的固定开销：nonce(12B) + GCM tag(16B)。
+const encRootOverhead = 12 + 16
+
+// encPlaintextSize 探测加密文件的明文总长（**不解密**，仅顺序走每块长度头后跳过密文）。
+// 加密格式：[magic(15B)][4B chunk] 重复 [4B l][nonce|ct|tag]，l = encRootOverhead + 明文长。
+func encPlaintextSize(f *os.File) (int64, error) {
+	if _, err := f.Seek(int64(len(encRootMagic))+4, io.SeekStart); err != nil {
+		return 0, err
+	}
+	var total int64
+	var lenBuf [4]byte
+	for {
+		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return 0, err
+		}
+		l := int64(binary.BigEndian.Uint32(lenBuf[:]))
+		if l < encRootOverhead {
+			return 0, fmt.Errorf("storage: 非法密文块长 %d", l)
+		}
+		total += l - encRootOverhead
+		if _, err := f.Seek(l, io.SeekCurrent); err != nil {
+			return 0, err
+		}
+	}
 }
 
 func (e *encReadCloser) Read(p []byte) (int, error) {
@@ -280,23 +349,48 @@ func (e *encReadCloser) Read(p []byte) (int, error) {
 func (e *encReadCloser) Close() error { return e.c.Close() }
 
 func (e *encReadCloser) Seek(offset int64, whence int) (int64, error) {
-	if whence == io.SeekStart && offset == 0 {
-		if e.open == nil {
-			return 0, fmt.Errorf("storage: 解密流不支持重开")
+	if whence == io.SeekCurrent {
+		if offset == 0 {
+			return e.pos, nil
 		}
-		_ = e.c.Close()
-		r, err := e.open()
-		if err != nil {
-			return 0, err
+		return 0, fmt.Errorf("storage: 解密流不支持 SeekCurrent(%d)", offset)
+	}
+	if whence == io.SeekStart {
+		if offset < 0 {
+			return 0, fmt.Errorf("storage: 解密流非法偏移 %d", offset)
 		}
-		e.r = r
-		e.pos = 0
-		return 0, nil
+		// 任意起点（含 0）：重开解密流；正偏移再丢弃对应明文（O(offset)）——http.ServeContent
+		// 对 `Range: bytes=N-`（含后缀 `-N`）会 `Seek(N, SeekStart)`，原实现只放行 offset==0
+		// 使加密卷 Range/断点续传/播放器拖动恒 416（第 5 轮对抗评审 P1）。
+		return e.seekStart(offset)
 	}
 	if whence == io.SeekEnd && offset == 0 {
 		return e.size, nil
 	}
-	return 0, fmt.Errorf("storage: 解密流仅支持 Seek(0, Start) 与 Seek(0, End)")
+	return 0, fmt.Errorf("storage: 解密流仅支持 Seek(0, Start) 与 Seek(0, End)（或正偏移 SeekStart）")
+}
+
+// seekStart 重开解密流并废弃前 offset 字节（正偏移时才实际丢弃）。
+func (e *encReadCloser) seekStart(offset int64) (int64, error) {
+	if e.open == nil {
+		return 0, fmt.Errorf("storage: 解密流不支持重开")
+	}
+	_ = e.c.Close()
+	r, err := e.open()
+	if err != nil {
+		return 0, err
+	}
+	e.r = r
+	e.pos = 0
+	if offset == 0 {
+		return 0, nil
+	}
+	n, derr := io.CopyN(io.Discard, r, offset)
+	e.pos = n
+	if derr != nil {
+		return e.pos, fmt.Errorf("storage: 解密流 seek 越界 %d: %w", offset, derr)
+	}
+	return e.pos, nil
 }
 
 // encWriteCloser 加密流 + 底层文件关闭。

@@ -19,9 +19,14 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
+
+// verifyByFileMeta 直接断言 meta.Provider（复用公共接口——B-MINOR：本地 metaProvider
+// 重复定义与 meta.Provider 签名完全一致，两处断言源漂移风险；收敛到公共接口）。
+// 目标卷实现 Provider（装饰器/secretdata）→ 分块级校验。
 
 // 转存失败分类哨兵（NH-P3：统一用哨兵而非字符串匹配，避免同错双计）。
 var (
@@ -46,7 +51,8 @@ type transferEnv struct {
 	ctx           context.Context // NOSONAR: S8242 — 单次操作作用域共享 ctx（设计保留）
 	targetFS      syncpkg.FS
 	scheme        string
-	rel           string
+	loc           volume.OwnerBucketLocator // 强类型位置（owner/bucket/path 未拼接）
+	rel           string                    // loc 的 FS 键（Volume.FSPath 唯一拼接点）
 	destPath      string
 	task          *CloudTask
 	result        *downloader.Result
@@ -59,6 +65,9 @@ type transferEnv struct {
 	// W1/W3：首写（=0 时进入 transferOnce）用 WriteIfAbsent 拒绝静默覆盖；
 	// 重试（卷损坏/文件异常重下后的再次写）须覆盖同 rel（任务内自愈），不受拒绝。
 	writeCount int
+	// resumeSelfOverwrite 是 damaged 任务 Resume 重下自愈标记（E-M2）：目标卷旧损坏
+	// 副本允许被本任务覆盖（W1/W3 只对他人生效）。来自 task.resumeSelfOverwrite。
+	resumeSelfOverwrite bool
 }
 
 // transferDone 把下载产物 destPath 转存到目标卷（TransferSpec 指定）。
@@ -86,17 +95,20 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	if targetFS == nil {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 未装配", task.Transfer.Volume)
 	}
+	// 本地 staging 配额强制接线（用户裁定 2026-10-10）：外部卷转存写本地暂存统一过
+	// 独立 staging 配额（防本地磁盘打满）。
+	targetFS = m.stagingQuotaWrap(task.Owner, targetFS)
 	if scheme == "" {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 协议未声明（无法生成 ResolveURL 可解析的 URL）", task.Transfer.Volume)
 	}
-	// 目标路径派生：经 volume.ResolveOwnerPath 唯一入口（权限门 + 路径安全 + 键空间
+	// 目标路径派生：经 volume.ResolveLocation 唯一入口（权限门 + 路径安全 + 键空间
 	// 自动适配）——共享卷自动加 owner 前缀、独享卷无前缀；../ 逃逸/绝对路径/非法段
 	// 由 volume 包 fail-closed 拒绝（用户裁定 2026-10-05：转存层不自己拼键/校验）。
 	vol, vok := m.volumeFor(task.Transfer.Volume)
 	if !vok {
 		return nil, result, fmt.Errorf("transfer: 目标卷 %q 元信息不可解析", task.Transfer.Volume)
 	}
-	rel, rerr := transferRelPath(task, vol)
+	loc, rel, rerr := transferRelPath(task, vol)
 	if rerr != nil {
 		return nil, result, rerr
 	}
@@ -108,14 +120,23 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	remote := !isLocalVolumeFS(targetFS)
 
 	// 转存执行上下文（S107 收敛）：目标卷/路径/产物/结果/重下回调全程不变。
+	// loc 是强类型位置（owner/bucket/path 未拼接），rel 是其 FS 键（FSPath 唯一拼接点）。
 	env := &transferEnv{
-		ctx: ctx, targetFS: targetFS, scheme: scheme, rel: rel, remote: remote,
+		ctx: ctx, targetFS: targetFS, scheme: scheme, loc: loc, rel: rel, remote: remote,
 		destPath: destPath, task: task, result: result, retryDownload: retryDownload,
+		resumeSelfOverwrite: task.resumeSelfOverwrite,
 	}
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
 	tr, lerr := m.transferLoop(env)
 	if tr != nil {
 		m.metrics.TransfersSucceeded.Add(1)
+		// E-M1（用户裁定旁路）：IntegrityStatus=damaged 不阻断转存（默认放行），但把
+		// 源完整性标记写入目标卷 meta.Extra（source_integrity=damaged）——消费者读
+		// FileMeta.Extra 可见损坏来源。目标卷实现 meta.Provider 且可更新 Extra（装饰器）
+		// 时记录；无能力（secretdata 短路等）跳过（其 shardseal 自管完整性）。
+		if task.IntegrityStatus == "damaged" {
+			m.recordDamagedSource(env)
+		}
 		return tr, env.result, nil // F1：finalize 用最终（重下后）result，非首次
 	}
 	// M2：任务取消/删除导致的中止不是失败——不记 TransfersFailed/TargetErrors/FileErrors，
@@ -136,24 +157,24 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	return nil, env.result, lerr
 }
 
-// transferRelPath 派生转存目标路径：经 **volume.ResolveOwnerPath 唯一入口**计算
-// （用户裁定 2026-10-05：转存层不自己拼键/校验）。
+// transferRelPath 派生转存目标路径：经 **volume.ResolveLocation 唯一入口**计算
+// （用户裁定 2026-10-07：转存层不自己拼键/校验）。返回 `(Location, FS 键)`——
+// Location 持有 owner/bucket/path 未拼接字段，FS 键经 loc.FSPath() 拼接（拼接唯一发生点）。
 //   - 自动派生：rel = `<taskID>/<sanitized filename>`（桶内相对路径）；
 //   - 显式指定：rel = task.Transfer.Path（用户可控路径+文件名）；
-//   - volume.ResolveOwnerPath 承担：权限门（owner 无权 → 拒）、路径安全（../ 逃逸/
-//     绝对路径/空段/非法段 fail-closed）、键空间自动适配（共享卷加 `<owner>/` 前缀、
-//     独享卷无前缀）——与上传/下载/读路径同一权威，杜绝领域层复制键算法。
-//   - 空 owner 经 storage.NormalizeOwner 归一（与读路径 ResolveOwnerPath 同源）。
-func transferRelPath(task *CloudTask, vol volume.Volume) (string, error) {
+//   - volume.ResolveLocation 承担：权限门（owner 无权 → 拒）、路径安全（../ 逃逸/
+//     绝对路径/空段/非法段 fail-closed）；
+//   - 空 owner 经 storage.NormalizeOwner 归一（FSPath 内完成）。
+func transferRelPath(task *CloudTask, vol volume.Volume) (volume.OwnerBucketLocator, string, error) {
 	rel := task.Transfer.Path
 	if rel == "" {
 		rel = path.Join(task.ID, sanitizeTransferName(task.Filename))
 	}
-	key, err := vol.ResolveOwnerPath(task.Owner, "user", rel)
+	loc, err := vol.ResolveLocation(task.Owner, "user", rel)
 	if err != nil {
-		return "", fmt.Errorf("transfer: 转存路径 %q 非法: %w", rel, err)
+		return nil, "", fmt.Errorf("transfer: 转存路径 %q 非法: %w", rel, err)
 	}
-	return key, nil
+	return loc, loc.FSPath(), nil
 }
 
 // transferLoop 转存主循环：3 次尝试，目标卷异常指数退避重试；文件异常删本地重下载
@@ -226,10 +247,10 @@ func (m *CloudDownloadManager) retryTargetOrFile(env *transferEnv, attempt int, 
 	if !done {
 		return nil, false, false, nil
 	}
-	// 重试耗尽：校验和不一致（卷损坏/瞬态，哨兵 ErrTransferTarget 内）→ 文件异常
-	// 重下载；纯 I/O 失败（同样 ErrTransferTarget）→ 需区分：写/读 I/O 失败 vs 校验和
-	// 不一致。校验和不一致由文案含「校验和不一致」判定（哨兵同一，文案区分）。
-	if strings.Contains(err2.Error(), "校验和不一致") {
+	// 重试耗尽：校验和内容不一致（ErrTransferContentMismatch，本地产物损坏/截断）→
+	// 文件异常重下载；卷静默损坏（裸 ErrTransferTarget 或 FileMeta 分块不一致）→ 重试卷。
+	// E-M3 修复：哨兵错误类别判定（errors.Is），不再靠文案子串「校验和不一致」。
+	if errors.Is(err2, ErrTransferContentMismatch) {
 		next, same, ferr := m.retryTransferFile(env)
 		if ferr != nil {
 			return nil, false, true, ferr
@@ -333,10 +354,34 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 
 // readbackVerify 转存写后读回卷内内容校验（与下载 checksum 一致；不一致 = 文件损坏/传输
 // 异常 → 文件异常重下载）。无参考 checksum（下载器未提供）→ 跳过（信任写盘成功）。
-// 抽离 transferOnce 以控制 gocognit（gocognit=15 门禁）。
+// **C4 落地（用户裁定读端接 FileMeta 为主）**：目标卷实现 meta.Provider（装饰器/
+// secretdata）时，读回其 FileMeta 做**分块级校验**（Calculator 流式重算 TotalSHA256 +
+// 逐分块 SHA256，与写侧落盘 meta 比对——跨信任边界静默损坏逐分块定位）；无 Provider
+// 回落整文件流式 sha256 对 result.Checksum。抽离 transferOnce 以控制 gocognit。
+// skip_verify 时跳过整个读侧校验（用户裁定：只关校验不关 meta——meta 恒生成，本处仅
+// 放宽读侧比对，极端性能场景）。
 func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
+	if m.config.SkipVerify {
+		return nil // 显式跳过读侧校验（meta 恒生成，仅校验放宽）
+	}
+	// E-m1 修复：Checksum=="" 门禁只对**流式回落**有意义（比对基准是 result.Checksum）；
+	// verifyByFileMeta 比对的完全是卷内 meta（与源 checksum 无关），无 checksum 下载器
+	// 转存到可信卷时也应执行写完整性校验。门禁下移到流式分支。
+	if verr := verifyByFileMeta(env); verr == nil {
+		return nil // 目标卷有 meta：分块级校验通过
+	} else if !errors.Is(verr, errNoProviderMeta) {
+		// meta 读/解析/校验失败（真损坏）→ 文件异常；其余回落流式。
+		return verr
+	}
+	// 无 Provider meta：流式整文件 sha256 对 result.Checksum（需参考 checksum）。
 	if env.result.Checksum == "" {
-		return nil
+		// M1 修复：无参考值（下载器未提供）→ 转存校验**退化为自参照**（目标卷内容 ==
+		// 写侧 meta，源损坏由 #743 下载层完整性管道兜底）——记录 extra 标记供下游消费
+		// 方知"未交叉权威"（与 damaged 旁路同机制，不阻断转存）。
+		if ue, ok := env.targetFS.(metaExtraUpdater); ok {
+			_ = ue.UpdateMetaExtra(env.ctx, env.rel, map[string]any{"transfer_verified": "no_reference_checksum"})
+		}
+		return nil // 无参考值 → 信任写盘成功（源完整性由下载层验证）
 	}
 	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
 	if rerr != nil {
@@ -348,9 +393,115 @@ func (m *CloudDownloadManager) readbackVerify(env *transferEnv) error {
 		return fmt.Errorf("transfer: 读回校验 hash 失败: %w", herr)
 	}
 	if got != env.result.Checksum {
-		return fmt.Errorf("%w: 转存后校验和不一致 %s ≠ %s（先按卷损坏重试）", ErrTransferTarget, got, env.result.Checksum)
+		return fmt.Errorf("%w: 转存后校验和不一致 %s ≠ %s（本地产物损坏/截断，重下）",
+			ErrTransferContentMismatch, got, env.result.Checksum)
 	}
 	return nil
+}
+
+// errNoProviderMeta 是目标卷无 meta.Provider（不可分块校验）的回落哨兵。
+var errNoProviderMeta = errors.New("transfer: 目标卷无 Provider meta，回落流式校验")
+
+// ErrTransferContentMismatch 是「转存后内容与下载校验和不一致」哨兵（E-M3 修复）：
+// 本地产物被截断/篡改（非卷静默损坏）→ 应转文件异常重下载。与卷静默损坏
+// （ErrTransferTarget 裸错误，重试卷）区分——不再靠文案子串「校验和不一致」路由。
+var ErrTransferContentMismatch = errors.New("transfer: content checksum mismatch")
+
+// verifyByFileMeta 读端 FileMeta 分块校验（C4/用户裁定）：目标卷实现 meta.Provider →
+// 取 FileMeta，读回内容用 Calculator 流式重算 TotalSHA256 + 逐分块 SHA256 比对——
+// 跨信任边界静默损坏逐分块定位（比整文件单哈希精确）；无 Provider → errNoProviderMeta
+// 由调用方回落流式。校验通过返回 nil。
+func verifyByFileMeta(env *transferEnv) error {
+	pv, ok := env.targetFS.(meta.Provider)
+	if !ok {
+		return errNoProviderMeta
+	}
+	fm, err := pv.FileMeta(env.ctx, env.rel)
+	if err != nil {
+		// meta 读失败（sidecar 缺失/未启用）→ 回落流式（不误报损坏）。
+		return errNoProviderMeta
+	}
+	// M7a 修复：先 Validate FileMeta——装饰器内部已 Validate，但 Provider 接口不保证
+	// （非装饰卷/畸形 Provider 返回 c.Size<0 或 Offset 空洞 → CopyN 走错误路径）。
+	// 校验失败视为目标卷 meta 非法（ErrTransferTarget，非回落流式——畸形 meta 是卷
+	// 状态异常，可观测）。
+	if verr := meta.Validate(fm); verr != nil {
+		return fmt.Errorf("%w: 目标卷 meta 非法: %v", ErrTransferTarget, verr)
+	}
+	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
+	if rerr != nil {
+		return fmt.Errorf("%w: 读回分块校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
+	}
+	defer rc.Close()
+	// B/E-CRITICAL 修复：**按 meta 记录的实际分块边界（Offset/Size）逐块流式重算比对**
+	// ——secretdata 随机分块（1-200MB 均匀随机）用固定 ChunkSize 重切必然错位，恒误报
+	// 损坏。此处逐块按 Size 读回窗口重算该块 SHA256，同时喂整文件 TotalSHA256 累计：
+	// 随机分块与等长分块都精确。
+	totalSHA := sha256.New()
+	for i, c := range fm.Chunks {
+		blockHash := sha256.New()
+		// 每块窗口：MultiWriter 同时喂块哈希与整文件哈希（块连续覆盖 [0,Size)，
+		// 流位置顺序推进即正确）。
+		mw := io.MultiWriter(blockHash, totalSHA)
+		if _, ierr := io.CopyN(mw, rc, c.Size); ierr != nil {
+			return fmt.Errorf("%w: 分块 %d 读回失败（目标卷 %q）: %v", ErrTransferTarget, i, env.task.Transfer.Volume, ierr)
+		}
+		gotSHA := hex.EncodeToString(blockHash.Sum(nil))
+		if gotSHA != c.SHA256 {
+			return fmt.Errorf("%w: 转存后分块 %d 不一致（卷静默损坏？）", ErrTransferTarget, i)
+		}
+	}
+	// D-MAJOR-1 修复：**drain 余量 + 断言实读 == fm.Size**——原循环按 fm.Chunks 覆盖
+	// 窗口读（合法前缀即通过），目标卷内容 = 合法前缀+尾部垃圾时，分块哈希/TotalSHA256/
+	// result.Checksum 三对都只覆盖前缀 → 尾追加的损坏文件被判可信。此处读尽余量：
+	// 若目标比 meta 长（尾部追加）→ 余量非空 → 拒绝（卷静默损坏）。
+	var trailing int64
+	if n, terr := io.Copy(io.Discard, rc); terr != nil {
+		return fmt.Errorf("%w: 读回尾排检查失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, terr)
+	} else {
+		trailing = n
+	}
+	if trailing != 0 {
+		return fmt.Errorf("%w: 转存后内容长于 meta（尾部追加 %d B，卷静默损坏？）", ErrTransferTarget, trailing)
+	}
+	// 整文件 TotalSHA256 与 meta 一致（权威认证：内容整体没被篡改，与分块粒度无关）。
+	totalHex := hex.EncodeToString(totalSHA.Sum(nil))
+	if totalHex != fm.TotalSHA256 {
+		return fmt.Errorf("%w: 转存后内容与 meta 不一致（TotalSHA256 %s ≠ %s，卷静默损坏？）",
+			ErrTransferTarget, totalHex, fm.TotalSHA256)
+	}
+	// D-C2 修复：**与下载权威校验和最终比对**——分块/整文件校验只证明「目标卷内容 ==
+	// 写侧 meta」，但 meta 由**写入流**生成（本地产物被篡改/截断时 meta 也按篡改内容
+	// 生成，自洽却错误入库）。必须与 result.Checksum（下载器权威 sha256）比对，否则
+	// 本地产物损坏被静默转存（metaProvider 卷——secretdata 短路不包装饰器——尤其
+	// 此路径，原流式回落有此比对而 verifyByFileMeta 缺失）。
+	if env.result.Checksum != "" && totalHex != env.result.Checksum {
+		return fmt.Errorf("%w: 转存后内容与下载校验和不一致 %s ≠ %s（本地产物损坏/截断？）",
+			ErrTransferContentMismatch, totalHex, env.result.Checksum)
+	}
+	// 分块校验通过 → 内容与写侧 meta 一致（跨信任边界无静默损坏）。
+	return nil
+}
+
+// recordDamagedSource 把源完整性 damaged 标记写入目标卷 meta.Extra（旁路记录——
+// 不阻断转存；用户裁定 Integrity 默认放行，记录 extra 即可）。目标卷实现可更新
+// Extra 的 Provider 能力（装饰器 UpdateMetaExtra）时写入；失败 Warn 兜底（meta
+// 缺失/无能力跳过——读路径直算兜底，不影响转存成功）。
+func (m *CloudDownloadManager) recordDamagedSource(env *transferEnv) {
+	ue, ok := env.targetFS.(metaExtraUpdater)
+	if !ok {
+		return // 无 Extra 更新能力（secretdata 短路等）→ 跳过（其 shardseal 自管完整性）
+	}
+	if err := ue.UpdateMetaExtra(env.ctx, env.rel, map[string]any{"source_integrity": "damaged"}); err != nil {
+		m.logger.Warn("damaged 源标记写入目标卷 meta 失败（不影响转存）",
+			"task_id", env.task.ID, "volume", env.task.Transfer.Volume, "rel", env.rel, "error", err)
+	}
+}
+
+// metaExtraUpdater 是旁路 Extra 更新能力（装饰器 UpdateMetaExtra 实现；供 damaged 源
+// 标记写入目标卷 meta）。
+type metaExtraUpdater interface {
+	UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error
 }
 
 // ensureTransferDir 逐级创建目标目录（编排层负责，目标目录不存在自动生成）。
@@ -443,18 +594,15 @@ func checksumMatches(destPath, want string) bool {
 	return got == want
 }
 
-// sha256File 计算文件 SHA-256（hex）。
+// sha256File 计算文件 SHA-256（hex）。E-m2：委托 hashReader（同一能力收敛——不再
+// 重复 os.Open+io.Copy 流式哈希，与 hashReader 单一实现）。
 func sha256File(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hashReader(f)
 }
 
 // hashReader 计算 reader 的 SHA-256（hex）。
@@ -493,21 +641,17 @@ func isLocalVolumeFS(fs syncpkg.FS) bool {
 		return lv.IsLocalVolume()
 	}
 	return false
-} // isFsNotFound 判断文件系统错误是否为「路径不存在」：errors.Is 匹配 os.ErrNotExist /
-// fs.ErrNotExist，另兜底常见 NotFound 文案（s3/baidupcs 等远程卷用自定义错误）。
-// 存在性判断模糊（非 nil 且非「不存在」）→ 返回 false：调用方把存在性检查失败当
-// 目标卷异常重试（fail-closed，防把未确认状态当不存在继续写而覆盖）。
+} // isFsNotFound 判断文件系统错误是否为「路径不存在」：仅接受标准库哨兵
+// （errors.Is os.ErrNotExist / fs.ErrNotExist）——卷 Stat 契约是「不存在返回 (nil,nil)」
+// （全仓统一，各卷已把 not-found 转 nil,nil），故非 nil 错误即真故障；**不靠文案子串
+// 匹配**（E-CRITICAL 修复：`no such host`/`not found` 等瞬态网络错误文案会被误判为
+// not-found → 降级路径把未确认状态当不存在继续写，静默覆盖既有文件）。存在性判断
+// 模糊（非 nil 且非哨兵）→ 返回 false：调用方 fail-closed 归目标卷异常重试。
 func isFsNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist) {
-		return true
-	}
-	msg := err.Error()
-	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "not found") || strings.Contains(lower, "notfound") ||
-		strings.Contains(lower, "no such") || strings.Contains(lower, "不存在")
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist)
 }
 
 // writeTargetUnique 以「目标唯一」语义写转存产物：卷实现 pkg/sync.WriteIfAbsent 时用其
@@ -518,9 +662,14 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 	if pia, ok := env.targetFS.(syncpkg.WriteIfAbsent); ok {
 		written, err := pia.WriteIfAbsent(env.ctx, env.rel, r, size, mtime)
 		if err != nil {
-			return false, err
+			// B1 修复：ErrUnsupported（装饰器包装的无能力底层）→ 回落降级分支，与裸 FS
+			// 断言失败语义一致（不把「未实现」当写失败）。
+			if !errors.Is(err, syncpkg.ErrUnsupported) {
+				return false, err
+			}
+		} else {
+			return written, nil
 		}
-		return written, nil
 	}
 	// 降级：写前 Stat 尽力存在性检查 + 写。卷的 Stat 契约：目标存在返回 (*Entry, nil)，
 	// 缺失返回 (nil,nil)（全仓统一）——故以「Entry 非 nil」判定存在，而非 err==nil
@@ -543,37 +692,40 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 // 文件异常重下后）覆盖同 rel（任务内自愈）。错误统一包 ErrTransferTarget。
 // 返回 (done, err)：done=true 表示本次已成功完成转存（含幂等命中，无需调用方再读回校验）。
 func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) (bool, error) {
-	if env.writeCount == 0 {
-		written, werr := writeTargetUnique(env, r, size, mtime)
-		if werr != nil {
-			return false, fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, werr)
-		}
-		if !written {
-			// W1/W3 目标已存在。**幂等判定**（Important-1 崩溃恢复）：进程在写卷成功、
-			// TransferURL 落盘前崩溃 → 重启重放转存 → 目标已存在但内容完整正确。
-			// 此时读回卷内内容与「本地产物」比对：一致 = 上次已交付成功，幂等完成
-			// （返回 done，任务保持 completed 并回写 TransferURL）；不一致 = 真冲突
-			// （他人/旧文件）→ 拒绝覆写。
-			// I2：比对目标与本地产物哈希而非 result.Checksum——空 checksum 下载器
-			// （pikpak 等非主下载器）崩溃重放也能幂等恢复，不会永久 fail。
-			same, cerr := idempotentMatch(env)
-			if cerr != nil {
-				// 幂等读回失败（卷抖动）→ fail-closed 拒绝并带上读回错误（可观测）。
-				return false, fmt.Errorf("%w: 转存目标 %q 已存在且幂等判定失败: %v", ErrTransferTarget, env.rel, cerr)
-			}
-			if same {
-				// 幂等命中：目标卷已持有相同内容（崩溃窗口已交付成功），直接视为成功。
-				// 语义注记（M2）：空 checksum 时「内容即身份」——若目标卷恰有字节级相同的
-				// 他人文件会被判为本任务已交付（TransferURL 指向它、不写盘）。字节一致无数据
-				// 损坏，属无 checksum 下载器的固有同义反复（设计可接受，注释明示）。
-				return true, nil
-			}
-			return false, fmt.Errorf("%w: 转存目标 %q 已存在（拒绝覆写，W1/W3）", ErrTransferTarget, env.rel)
-		}
-	} else {
+	// E-M2（damaged 自愈）：resumeSelfOverwrite（damaged 任务重下）允许首写覆盖本任务
+	// 先前写过的目标卷副本——旧损坏副本需被新下载内容替换，不走唯一性拒绝。
+	if env.resumeSelfOverwrite || env.writeCount > 0 {
 		if err := env.targetFS.WriteFile(env.ctx, env.rel, r, size, mtime); err != nil {
 			return false, fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, err)
 		}
+		env.writeCount++
+		return false, nil
+	}
+	written, werr := writeTargetUnique(env, r, size, mtime)
+	if werr != nil {
+		return false, fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, werr)
+	}
+	if !written {
+		// W1/W3 目标已存在。**幂等判定**（Important-1 崩溃恢复）：进程在写卷成功、
+		// TransferURL 落盘前崩溃 → 重启重放转存 → 目标已存在但内容完整正确。
+		// 此时读回卷内内容与「本地产物」比对：一致 = 上次已交付成功，幂等完成
+		// （返回 done，任务保持 completed 并回写 TransferURL）；不一致 = 真冲突
+		// （他人/旧文件）→ 拒绝覆写。
+		// I2：比对目标与本地产物哈希而非 result.Checksum——空 checksum 下载器
+		// （pikpak 等非主下载器）崩溃重放也能幂等恢复，不会永久 fail。
+		same, cerr := idempotentMatch(env)
+		if cerr != nil {
+			// 幂等读回失败（卷抖动）→ fail-closed 拒绝并带上读回错误（可观测）。
+			return false, fmt.Errorf("%w: 转存目标 %q 已存在且幂等判定失败: %v", ErrTransferTarget, env.rel, cerr)
+		}
+		if same {
+			// 幂等命中：目标卷已持有相同内容（崩溃窗口已交付成功），直接视为成功。
+			// 语义注记（M2）：空 checksum 时「内容即身份」——若目标卷恰有字节级相同的
+			// 他人文件会被判为本任务已交付（TransferURL 指向它、不写盘）。字节一致无数据
+			// 损坏，属无 checksum 下载器的固有同义反复（设计可接受，注释明示）。
+			return true, nil
+		}
+		return false, fmt.Errorf("%w: 转存目标 %q 已存在（拒绝覆写，W1/W3）", ErrTransferTarget, env.rel)
 	}
 	env.writeCount++
 	return false, nil
@@ -648,8 +800,9 @@ func (m *CloudDownloadManager) transferAbortGate(task *CloudTask) error {
 // 的先行请求，不承诺最终不超。卷实现 ReserveSpace 时以卷自身 API 为最终配额权威。
 func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
 	// 1. 卷自身容量：目标卷实现 ReserveSpace → 预检（外部网盘配额 API）。
+	//    B1 修复：ErrUnsupported（装饰器包装的无能力底层）→ 跳过（与裸 FS 断言失败一致）。
 	if rs, ok := env.targetFS.(syncpkg.ReserveSpace); ok {
-		if err := rs.ReserveSpace(env.ctx, env.rel, env.result.Size); err != nil {
+		if err := rs.ReserveSpace(env.ctx, env.rel, env.result.Size); err != nil && !errors.Is(err, syncpkg.ErrUnsupported) {
 			return fmt.Errorf("%w: 目标卷 %q 容量不足（ReserveSpace 拒绝）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
 		}
 	}
@@ -667,4 +820,16 @@ func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
 		}
 	}
 	return nil
+}
+
+// stagingQuotaWrap 按 owner 给转存目标 FS 强制接本地 staging 配额（用户裁定
+// 2026-10-10）：外部卷转存写本地暂存统一过独立 staging 配额（防本地磁盘打满）。
+// 判据下沉到最内层原始卷（syncpkg.ApplyStagingQuota）——fs 恒为 trusted 装饰链，
+// 直接类型断言会恒真而误判自管（P0-1）。
+// 无 stagingQuotaFor（未装配独立配额）→ 直通（零回归）。
+func (m *CloudDownloadManager) stagingQuotaWrap(owner string, fs syncpkg.FS) syncpkg.FS {
+	if m.stagingQuotaFor == nil {
+		return fs
+	}
+	return syncpkg.ApplyStagingQuota(fs, m.stagingQuotaFor(owner))
 }

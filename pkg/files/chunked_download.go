@@ -194,8 +194,21 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
 	root := dp.Tenant.Root()
-	encrypted := root.IsEncrypted()
+	// 显式请求密文（?ciphertext=1）时按原始字节走「非加密」分块路径（offset/length/size
+	// 均为密文坐标，与存量 meta sidecar 口径一致）；否则加密卷走解密流。
+	encrypted := root.IsEncrypted() && !dp.Ciphertext
+	// 先定分块边界（offset/length/fileSize）再打开句柄：加密卷的 fileSize 需为**明文**
+	// 长度，offset 越界才能先回 416（原顺序先打开+丢弃 offset → 越界时 500）。
+	length, fileSize, ok := s.chunkReadParams(w, root, dp, offset, length)
+	if !ok {
+		return
+	}
 	file, fcloser, ok := s.openChunkSource(w, root, dp, encrypted, offset)
+	if !ok {
+		return
+	}
+	// P2-3 修复：本地（非加密）分块下载也接 meta 逐分块校验（与 /download 一致）。
+	file, fcloser, ok = s.maybeWrapChunkVerify(w, r, root, dp, file, fcloser, encrypted)
 	if !ok {
 		return
 	}
@@ -204,11 +217,6 @@ func (s *Service) DownloadChunk(w http.ResponseWriter, r *http.Request) {
 			_ = fcloser.Close()
 		}
 	}()
-
-	length, fileSize, ok := s.chunkReadParams(w, root, dp, offset, length)
-	if !ok {
-		return
-	}
 
 	data, serverChecksum, ok := s.readChunkData(w, dp, file, encrypted, offset, length)
 	if !ok {
@@ -228,6 +236,29 @@ func (s *Service) openChunkSource(w http.ResponseWriter, root *storage.Root, dp 
 	return s.openPlainChunkSource(w, root, dp)
 }
 
+// maybeWrapChunkVerify 给本地非加密分块源接 meta 逐分块校验（P2-3）。返回
+// (file, closer, ok)：ok=false = 已写错误响应（调用方直接 return）；加密卷/未装配/无
+// meta → 原值直通零回归。构造时 extent 探测 + 读入时凡完整覆盖的 meta 分块逐块比对。
+func (s *Service) maybeWrapChunkVerify(w http.ResponseWriter, r *http.Request, root *storage.Root, dp DownloadPath, file io.ReadSeeker, fcloser io.Closer, encrypted bool) (io.ReadSeeker, io.Closer, bool) {
+	if encrypted {
+		// 加密流由卷内 GCM 自校验，且解密流不支持任意 Seek（仅 0 重开）。
+		return file, fcloser, true
+	}
+	vf, verr := s.rt.verifyDownload(r.Context(), root, dp.Rel, seekReadCloser{ReadSeeker: file, Closer: fcloser})
+	if verr != nil {
+		s.rt.logger().Error("分块下载校验装配失败", "file_name", dp.Filename, "error", verr.Error())
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
+		if fcloser != nil {
+			_ = fcloser.Close()
+		}
+		return nil, nil, false
+	}
+	if vf != nil {
+		return vf, vf, true // 包装器 Close 委托底层，避免重复关原句柄
+	}
+	return file, fcloser, true
+}
+
 // openEncryptedChunkSource 打开加密卷解密流并丢弃 offset 字节（解密流无任意 Seek）。
 func (s *Service) openEncryptedChunkSource(w http.ResponseWriter, root *storage.Root, dp DownloadPath, offset int64) (io.ReadSeeker, io.Closer, bool) {
 	rc, oerr := root.OpenDecrypted(dp.Rel)
@@ -239,10 +270,11 @@ func (s *Service) openEncryptedChunkSource(w http.ResponseWriter, root *storage.
 		}
 		return nil, nil, false
 	}
-	// 解密流无任意 Seek：Discard offset 字节（O(offset)）。
+	// 解密流无任意 Seek（现已支持正偏移 SeekStart，此处仍用 CopyN 保持 O(offset) 语义一致）：
+	// Discard offset 字节。偏移超出明文长度（并发截断/越界）→ 416（与 chunkReadParams 同语义）。
 	if _, derr := io.CopyN(io.Discard, rc, offset); derr != nil {
 		_ = rc.Close()
-		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgAccessFile}, http.StatusInternalServerError)
+		s.sendJSON(w, UploadResponse{Success: false, Message: "offset 超出文件大小"}, http.StatusRequestedRangeNotSatisfiable)
 		return nil, nil, false
 	}
 	// encReadCloser 实现 Seek（仅 0 重开），满足 io.ReadSeeker 接口。
@@ -269,13 +301,29 @@ func (s *Service) openPlainChunkSource(w http.ResponseWriter, root *storage.Root
 	return f, f, true
 }
 
-// chunkReadParams 校验并截断分块边界：加密卷解密流无 Stat，取密文大小做越界判断；
+// chunkReadParams 校验并截断分块边界：**加密卷明文路径**取逻辑（明文）大小作越界判断
+// 与 `Content-Range` 总量（`root.Stat` 是密文长度，会让响应声明 > 实际写出字节——
+// 第 5 轮对抗评审 P1）；`?ciphertext=1` 时按密文坐标（与存量 sidecar 一致）。
 // 空文件（size 0 且 offset 0）返回 200 + 0 字节；offset 越界回 416；length 截断到
 // 文件剩余长度与保护上限。失败时已写好响应，返回 ok=false。
 func (s *Service) chunkReadParams(w http.ResponseWriter, root *storage.Root, dp DownloadPath, offset, length int64) (int64, int64, bool) {
 	var fileSize int64
-	if st, serr := root.Stat(dp.Rel); serr == nil {
-		fileSize = st.Size()
+	if dp.Ciphertext {
+		if st, e := root.Stat(dp.Rel); e == nil {
+			fileSize = st.Size()
+		} else if os.IsNotExist(e) {
+			s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+			return 0, 0, false
+		} else {
+			s.rt.logger().Warn("分块下载 stat（密文）失败", "file_name", dp.Filename, "error", e.Error())
+		}
+	} else if ls, e := root.LogicalSize(dp.Rel); e == nil {
+		fileSize = ls
+	} else if os.IsNotExist(e) {
+		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		return 0, 0, false
+	} else {
+		s.rt.logger().Warn("分块下载 stat（逻辑大小）失败", "file_name", dp.Filename, "error", e.Error())
 	}
 	if offset >= fileSize {
 		if fileSize == 0 && offset == 0 {
@@ -313,6 +361,13 @@ func (s *Service) readChunkData(w http.ResponseWriter, dp DownloadPath, file io.
 		return nil, "", false
 	}
 	return data, serverChecksum, true
+}
+
+// seekReadCloser 把分离的 io.ReadSeeker + io.Closer 组合为 files.SeekReadCloser
+// （分块下载接 meta 校验包装用；Open 返回的普通卷文件即此形态）。
+type seekReadCloser struct {
+	io.ReadSeeker
+	io.Closer
 }
 
 // chunkResp 承载一次分块下载响应的写上下文（S107：收敛 writeChunkSuccess 的 w/r/dp 参数）。
