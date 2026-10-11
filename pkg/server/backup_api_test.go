@@ -214,14 +214,72 @@ func TestBackupAPI_Unauthenticated(t *testing.T) {
 	}
 }
 
+// backupBucketFile 读目标卷租户根下 backup 功能桶内的文件（"" = 不存在）。
+func backupBucketFile(t *testing.T, h *Handlers, vol, name string) string {
+	t.Helper()
+	tnt := h.volumeTenant(vol, "")
+	if tnt == nil {
+		t.Fatalf("卷 %q 租户不可用", vol)
+	}
+	rootAbs, ok := tnt.Root().Abs("")
+	if !ok {
+		t.Fatalf("卷 %q 租户根不可用", vol)
+	}
+	data, err := os.ReadFile(filepath.Join(rootAbs, backupManifestBucket, filepath.FromSlash(name)))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// TestBackupAPI_ManifestIsolatedInBackupBucket 回归（P1，备份 manifest 隔离）：manifest
+// 必须落在目标卷租户根的 **backup 功能桶**（用户 API 不可寻址），而不是 user 桶里的
+// `backup/manifest.json`（那是用户可覆写/伪造的路径 → 增量静默跳过 + 覆盖同名用户文件）。
+// 变异：ManifestFS 沿用 dst（或未传 ManifestFS/ManifestRel）→ manifest 落 user 桶 → 红。
+func TestBackupAPI_ManifestIsolatedInBackupBucket(t *testing.T) {
+	t.Parallel()
+	h, url := newBackupTestServer(t, nil)
+	writeUserFile(t, h, "", "a.txt", "hello")
+
+	status, body := doBackup(t, url, map[string]any{"target": "backup-vol"})
+	if status != http.StatusOK {
+		t.Fatalf("备份 status = %d, want 200（body=%s）", status, body)
+	}
+	if got := backupBucketFile(t, h, "backup-vol", backupManifestKey); got == "" {
+		t.Fatalf("manifest 应落在目标卷 backup 功能桶（变异：沿用 dst → 红）")
+	}
+	// user 桶不得出现 manifest（旧落点 = 用户可写路径）。
+	if got := readVolFile(t, h, "backup-vol", "backup/manifest.json"); got != "" {
+		t.Fatalf("user 桶不应出现 manifest（用户可覆写/伪造路径）: %q", got)
+	}
+}
+
+// TestBackupAPI_SelfTargetRejected 断言自备份（目标与源为同一卷）→ 400 显式拒绝
+// （否则 manifest/数据回灌源命名空间、目标产物被再次枚举）。
+func TestBackupAPI_SelfTargetRejected(t *testing.T) {
+	t.Parallel()
+	h, url := newBackupTestServer(t, nil)
+	writeUserFile(t, h, "", "a.txt", "hello")
+
+	// 源缺省 = 默认卷（main），目标显式给同一卷。
+	status, body := doBackup(t, url, map[string]any{"target": "main"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("自备份应 400，got %d（body=%s）", status, body)
+	}
+	status2, body2 := doBackup(t, url, map[string]any{"target": "main", "source": "main"})
+	if status2 != http.StatusBadRequest {
+		t.Fatalf("显式自备份应 400，got %d（body=%s）", status2, body2)
+	}
+}
+
 // TestBackupTargetFS_UnknownVolume 单测 backupTargetFS：未知卷名 → 明确装配错误
 // （fail-closed，不静默回落默认卷）。
 func TestBackupTargetFS_UnknownVolume(t *testing.T) {
 	t.Parallel()
 	h, _ := newBackupTestServer(t, nil)
-	fs, err := h.backupTargetFS(t.Context(), "", "ghost-vol")
-	if err == nil || fs != nil {
-		t.Fatalf("未知卷应装配失败: fs=%v err=%v", fs, err)
+	tgt, err := h.backupTargetFS(t.Context(), "", "ghost-vol")
+	if err == nil || tgt.data != nil || tgt.manifest != nil {
+		t.Fatalf("未知卷应装配失败: tgt=%+v err=%v", tgt, err)
 	}
 	if !strings.Contains(err.Error(), "ghost-vol") {
 		t.Errorf("错误应含卷名: %v", err)

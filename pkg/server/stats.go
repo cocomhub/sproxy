@@ -83,7 +83,7 @@ func quotaStatusOf(scope *quota.Scope) QuotaStatus {
 // isStorageBucket 判断是否为新布局功能桶名（user/cloud/archive/chunk/version/meta）。
 func isStorageBucket(bucket string) bool {
 	switch bucket {
-	case "user", "cloud", "archive", "chunk", "version", "meta":
+	case "user", "cloud", "archive", "chunk", "version", "meta", "backup":
 		return true
 	}
 	return false
@@ -232,6 +232,9 @@ func walkUploadStatsCategoryEntry(h *Handlers, root, path string, d os.DirEntry,
 		acc.versions += size
 	case "meta":
 		// 目录层已 SkipDir，兜底跳过
+	case "backup":
+		// 备份 manifest 功能桶（服务端内部账本）：不计入用户/分类用量。
+		// 目录层已由 isStorageBucket 跳过，此处兜底。
 	default:
 		// 无桶结构的旧布局平铺文件按用户文件计入（.__ 魔法目录已在目录层跳过）。
 		acc.userFiles += size
