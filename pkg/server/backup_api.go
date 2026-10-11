@@ -88,7 +88,14 @@ func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// **加密卷源 fail-closed 拒绝**（评审 P0）：源侧经裸 LocalFS 读会拿到**密文**，备份产物不可用；
 	// 在接「经 Root 的备份源」前显式拒绝（禁静默降级）。
-	if tnt := h.tenantFor(owner); tnt != nil && tnt.Root() != nil && tnt.Root().IsEncrypted() {
+	// **按源卷**判定（评审第 2 轮 P2：原用默认卷租户 ⇒ 显式 `source` 指向加密卷时不命中）。
+	srcVolName := req.Source
+	if srcVolName == "" {
+		if h.volSet != nil {
+			srcVolName = h.volSet.Default().Name
+		}
+	}
+	if st := h.volumeTenant(srcVolName, owner); st != nil && st.Root() != nil && st.Root().IsEncrypted() {
 		http.Error(w, "加密卷暂不支持作为备份源（待接入经 Root 的备份源）", http.StatusConflict)
 		return
 	}
@@ -309,14 +316,15 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 	// 本地卷目标：root 在 tenant 根（`<storage_root>/<owner>`），键空间 = `user/<rel>`。
 	// 经 Guard(Wrap)（TV-BACKUP-LOCAL-BYPASS 修复：本地目标同样建 sidecar，与上传/转存
 	// 一致）；prefixFS 把源相对路径 rel 映射到 `user/rel`，Wrap 写 sidecar 到 `meta/rel.meta`。
-	rootAbs, ok := tnt.Root().Abs("")
-	if !ok {
+	if _, ok := tnt.Root().Abs(""); !ok {
 		return nil, nil, fmt.Errorf("备份目标卷 %q 根不可用", target)
 	}
-	fs := trusted.Guard(trusted.Wrap(syncpkg.NewLocalFS(filepath.ToSlash(rootAbs), h.logger), h.trustedWrapOpts()))
-	// manifest 写面：租户根的 `backup/` 功能桶（与 user/meta 并列，用户 API 不可寻址）。
-	mroot := filepath.ToSlash(filepath.Join(filepath.FromSlash(rootAbs), backupManifestBucket))
-	return syncpkg.NewPrefixFS(fs, "user/"), syncpkg.NewLocalFS(mroot, h.logger), nil
+	// **经 Root 适配器**（评审第 2 轮 P1）：裸 LocalFS 会在加密目标卷上写明文、并绕过封印。
+	fs := trusted.Guard(trusted.Wrap(NewRootFS(tnt.Root()), h.trustedWrapOpts()))
+	// manifest 写面：租户根的 `backup/` 功能桶（与 user/meta 并列，用户 API 不可寻址）；
+	// 同经 Root（manifest 含文件名，加密卷上不应明文落盘）。
+	mfs := syncpkg.NewPrefixFS(NewRootFS(tnt.Root()), backupManifestBucket+"/")
+	return syncpkg.NewPrefixFS(fs, "user/"), mfs, nil
 }
 
 // backupQuotaFS 是备份目标写面的配额记账装饰器：WriteFile 前对文件 size 在三本账上预留

@@ -106,6 +106,9 @@ volumes:
   时剥去 `owner/`（`alice/user/vault` → 租户根内 `user/vault`）；不以 owner 开头的规则原样注入
   （多封无害）。见 `pkg/storage/tenant_resolve.go:translateSealsForTenant`。
 - 首段**不得**是保留功能桶名（`user`/`meta`/…）——否则会封印全体租户的同名桶（装配期拒绝）。
+- **单段声明的边界**：`main:<单段>`（如 `main:alice`）只在**卷根命名空间**生效；若该段恰为某
+  owner 名，租户子根内无法表达该封印（翻译会退化为不可达路径）——要保护该 owner 的客户端可达
+  区间，请显式声明 `<owner>/<bucket>/<子路径>`。
 
 ## 5. 可复用能力层 API（对外只需这四个）
 

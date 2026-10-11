@@ -4,6 +4,9 @@
 package syncexec
 
 import (
+	"context"
+	"io"
+	"strings"
 	"testing"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -38,5 +41,79 @@ func TestExecutor_LocalFS_PrefersRootAwareProvider(t *testing.T) {
 	e2 := &Executor{}
 	if got := e2.localFS(t.TempDir(), "alice"); got == nil {
 		t.Fatal("未注入时应回落路径式 LocalFS")
+	}
+}
+
+// tenantRootFake 是「租户根」替身：ListDir 返回 <bucket>/<name> 形态（模拟 Root 的键空间）。
+type tenantRootFake struct {
+	syncpkg.FS
+	entries []syncpkg.Entry
+	read    []string
+}
+
+// ListDir 按目录**过滤**（与真实 FS 一致：条目必须是该目录的直接子项——PrefixFS 只做前缀
+// 映射与剥离，不做过滤，过滤由底层 FS 提供）。
+func (f *tenantRootFake) ListDir(_ context.Context, dir string) ([]syncpkg.Entry, error) {
+	prefix := strings.Trim(dir, "/")
+	if prefix != "" {
+		prefix += "/"
+	}
+	out := make([]syncpkg.Entry, 0, len(f.entries))
+	for _, e := range f.entries {
+		if strings.HasPrefix(e.Path, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (f *tenantRootFake) Stat(_ context.Context, p string) (*syncpkg.Entry, error) {
+	for i := range f.entries {
+		if f.entries[i].Path == p {
+			e := f.entries[i]
+			return &e, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *tenantRootFake) OpenRead(_ context.Context, p string) (io.ReadCloser, error) {
+	f.read = append(f.read, p)
+	return io.NopCloser(strings.NewReader("x")), nil
+}
+
+// TestExecutor_PushSourceFS_IsUserBucketScoped 评审第 2 轮 P0 回归：push 源必须是 **user 桶**
+// 作用域——注入 Root 感知提供者后（返回**租户根** FS）必须叠加 `user/` 前缀，否则整租户根
+// （含 meta/ 等内部桶）会被当源推送。
+// 变异：pushSourceFS 去掉 PrefixFS 前缀 → 断言红（会看到 meta/ 条目）。
+func TestExecutor_PushSourceFS_IsUserBucketScoped(t *testing.T) {
+	t.Parallel()
+	fake := &tenantRootFake{entries: []syncpkg.Entry{
+		{Name: "a.txt", Path: "user/a.txt", Size: 3},
+		{Name: "x.meta", Path: "meta/a.txt.meta", Size: 9},
+	}}
+	e := &Executor{TenantRootFS: func(string) (syncpkg.FS, bool) { return fake, true }}
+	src := e.pushSourceFS("/tmp/irrelevant", "alice")
+
+	entries, err := src.ListDir(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Path != "a.txt" {
+		t.Fatalf("push 源必须是 user 桶作用域（引擎键空间 = 桶内相对路径 a.txt），got %+v", entries)
+	}
+	for _, en := range entries {
+		if strings.HasPrefix(en.Path, "meta/") || strings.HasPrefix(en.Path, "user/") {
+			t.Fatalf("push 源不得包含租户根内部桶/桶前缀条目: %+v", entries)
+		}
+	}
+	// 读也必须落在 user 桶键空间。
+	rc, rerr := src.OpenRead(context.Background(), "a.txt")
+	if rerr != nil {
+		t.Fatalf("OpenRead: %v", rerr)
+	}
+	_ = rc.Close()
+	if len(fake.read) != 1 || fake.read[0] != "user/a.txt" {
+		t.Fatalf("读应映射到 user/a.txt, got %v", fake.read)
 	}
 }

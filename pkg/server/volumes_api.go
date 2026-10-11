@@ -391,7 +391,13 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	}
 
 	// AD-7 双账本 to 侧先 reserve（owner 全局 → 目标卷池，防中间超限）；任一失败回滚已预留。
+	// **用户可见长度**（评审第 2 轮 P1）：`crossVolumeCopy` 现经解密流复制、返回**明文**字节数，
+	// 而 `Stat().Size()` 在加密卷上是**密文**长度 ⇒ 直接比较会让加密源卷的 move 恒失败。
+	// 以用户可见长度为准（非加密卷等价 Stat；TOCTOU 语义不变）。
 	size := srcInfo.Size()
+	if ls, lerr := userVisibleSize(fromRoot, rel); lerr == nil {
+		size = ls
+	}
 	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(owner, rel, toVol, size)
 	if !rOk {
 		return status, resp

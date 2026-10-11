@@ -281,7 +281,10 @@ func closeRemoteFS(remoteClosers []func()) {
 // 返回待延迟关闭的远端 close 回调列表。
 func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot, tenantRoot string) (syncpkg.FS, syncpkg.FS, []func(), error) {
 	if task.Direction == string(syncmgr.DirectionPush) {
-		srcFS := e.localFS(localRoot, task.Owner)
+		// **键空间**：push 源的引擎键空间是 **user 桶相对**（job.Src 为空 = 桶根），而
+		// `localFS` 返回的是**租户根** FS（Root 感知提供者注入后）⇒ 必须补 `user/` 前缀，
+		// 否则会把整个租户根（含 meta/ 等内部桶）当源推送（评审第 2 轮 P0 回归）。
+		srcFS := e.pushSourceFS(tenantRoot, task.Owner)
 		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
 		if err != nil {
 			return nil, nil, nil, err
@@ -301,6 +304,13 @@ func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTas
 		scopeFor: e.scopeFor,
 	}
 	return remoteFS, dstFS, []func(){closeRemote}, nil
+}
+
+// pushSourceFS 返回 push 方向的**源 FS**：引擎键空间是 **user 桶相对**（`job.Src` 空 = 桶根），
+// 而 `localFS` 返回**租户根** FS ⇒ 必须叠加 `user/` 前缀（否则会把整个租户根——含 meta/ 等内部
+// 桶——当源推送；评审第 2 轮 P0 回归）。抽为单一事实源，供 push 与 runBoth 共用。
+func (e *Executor) pushSourceFS(tenantRoot, owner string) syncpkg.FS {
+	return syncpkg.NewPrefixFS(e.localFS(tenantRoot, owner), "user/")
 }
 
 // localFS 返回本地侧 FS：优先 **Root 感知**提供者（加密/封印语义正确），否则回落路径式 LocalFS。
@@ -582,7 +592,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		VerifyAfter:    task.VerifyAfter,
 	}
 	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
-	pushErr := engine.Sync(ctx, e.localFS(localRoot, task.Owner), remoteFS, pushJob)
+	pushErr := engine.Sync(ctx, e.pushSourceFS(tenantRoot, task.Owner), remoteFS, pushJob)
 	if ctx.Err() != nil {
 		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()
 	}
@@ -613,7 +623,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 	}
 
 	// 校验核对（verify_after=true）：push 段验远程目标、pull 段验本地目标（读侧同步用源 FS）。
-	pushVerify := e.verifyAfterSync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
+	pushVerify := e.verifyAfterSync(ctx, e.pushSourceFS(tenantRoot, task.Owner), remoteFS, pushJob)
 	pullVerify := e.verifyAfterSync(ctx, remoteFS, pullJobDst.inner, pullJob)
 
 	// 合并结果：进度累计（push 的传输 + pull 的传输 + 两段删除）。

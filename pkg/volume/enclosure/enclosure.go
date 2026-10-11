@@ -192,7 +192,10 @@ func splitSource(raw string) (srcVol, srcPath string, ok bool) {
 	// 封印会按卷根命名空间注入并**原样传播到每个租户子根**（tenant_resolve），声明
 	// `source: "main:user"`（完全合法且与设计示例同形）会把**全体租户**的 user 桶封印
 	// （读 404/写拒）——一条声明即造成服务级数据不可用（评审 P1）。
-	if first, _, _ := strings.Cut(clean, "/"); first != "" && storage.IsReservedBucketName(first) {
+	// 首段不得是保留功能桶（见下）；**单段顶层声明保留可用**（卷根专有区间），但其在租户
+	// 命名空间的表达受限——见设计 §4.1「单段声明的边界」。
+	first, _, _ := strings.Cut(clean, "/")
+	if first != "" && storage.IsReservedBucketName(first) {
 		return "", "", false
 	}
 	return srcVol, clean, true

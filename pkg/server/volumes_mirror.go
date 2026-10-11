@@ -158,7 +158,7 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 	}
 
 	// AD-7 双账本 to 侧先 reserve（owner 全局 → 目标卷池，防中间超限）；失败回滚已预留。
-	size := srcInfoCapacity(srcInfo)
+	size := copySourceSize(fromRoot, rel, srcInfo)
 	scope := h.quotaScopeFor(owner, rel)
 	scopeRes, poolRes, status, msg, ok := reserveCopyQuota(scope, toPool, size)
 	if !ok {
@@ -220,6 +220,17 @@ func statCopySource(ctx context.Context, h *Handlers, remotePath, fromVol string
 
 // srcInfoCapacity 返回源文件大小（复制配额与 TOCTOU 校验用）。
 func srcInfoCapacity(srcInfo os.FileInfo) int64 { return srcInfo.Size() }
+
+// copySourceSize 返回复制用**源尺寸**：加密源卷的 Stat 是密文长度，而 `crossVolumeCopy` 经解密
+// 流复制、返回明文字节数 ⇒ 以**用户可见长度**为准（无 root 或读取失败时回落 Stat 尺寸）。
+func copySourceSize(fromRoot *storage.Root, rel string, srcInfo os.FileInfo) int64 {
+	if fromRoot != nil {
+		if ls, lerr := userVisibleSize(fromRoot, rel); lerr == nil {
+			return ls
+		}
+	}
+	return srcInfoCapacity(srcInfo)
+}
 
 // copyVolumeCtx 是跨卷复制（copy API / 镜像 pass）内部步骤共享的上下文：源卷根 + 目标卷租户 +
 // 相对路径 + 请求端点（审计/日志），供 checkCopyTarget / commitCopyResult 复用。
