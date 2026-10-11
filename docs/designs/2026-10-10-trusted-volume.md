@@ -218,6 +218,26 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 - **`direct_link: true` 明文外部卷 302 直链绕过服务端校验**：卷配置项（默认 `false` = 私密 + 服务端
   转发），管理员显式开启即声明放弃服务端校验，属知情选择（已在 `config.example.yaml` 说明）。
 
+### 8.2 第 7 轮（C 面 CRITICAL）修复（2026-10-11）
+
+- **C1 同步载体缺前缀视图（P0 数据面）**：`cmd/sproxy` 的 baidupcs 同步工厂补
+  `syncpkg.NewPrefixFS(fs, "<owner>/user/")`（与 HTTP 上传/转存/备份同一装配形状）。
+  此前引擎的用户相对路径直达外部卷根：① 与 HTTP 面键空间不一致；② `meta.MetaPath` 无桶段
+  回落把 sidecar 写到**用户可见**键（与用户真实 `x.meta` 互盖、`IsMetaPath` 不过滤 →
+  同步引擎把它当用户文件：push 误删、pull 下载成垃圾）；③ 下载侧按 `<owner>/meta/...`
+  找不到 → 零校验。同时把 `MetaPath` 无桶段回落改为 **`meta/<rel>.meta`（fail-closed）**：
+  本地卷（FS 根 = 租户根）正是正确落点，共享/外部卷桶段判为 meta → 业务层守卫拒绝写入
+  （不再污染用户键空间）。`PrefixFS` 提升为 `pkg/sync` 单一实现（全能力转发，纳入 R21 门禁），
+  `pkg/server` 的 prefixFS 改为其别名。
+- **C2 sidecar 损坏静默 fail-open**：`filesMetaPolicy.VerifyDownload` 现在区分「无 sidecar」
+  （放行 + Debug）与「有 sidecar 但读失败/超限/解析失败」（**fail-closed 拒绝**）。
+- **C3 Range 中段零校验**：`verifyReadSeeker` 增「先验后发」（中段起始块 seek 回块首读满整块
+  比对，不一致则本批字节都不下发）与「EOF 补验尾部半块」；此前 `skipCur` + `!fromStart` 双短路
+  使「起点非 0 且不覆盖整块」的 Range（单块/粗分块文件尤甚）零校验。
+- **C4 302 直链绕过校验**：`externalStateFor` 仅在「显式 `skip_verify`」或「出口卷
+  （302 二次进入由 `egress_forward=1` 强制转发，校验仍在服务端）」时允许直链；其余强制服务端
+  转发并**告警一次**（禁静默降级）。
+
 ## 9. 验证
 
 - 单元：`pkg/files/meta`（计算/校验/短读/长读/中段 Seek）、`pkg/volume/trusted`（Wrap/Guard/能力透传/生命周期）、`pkg/cloud`（转存分块校验/标记）、`pkg/sync`（Equal/staging gate）、`pkg/quota`（staging tracker）。

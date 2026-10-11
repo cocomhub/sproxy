@@ -251,7 +251,17 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `trusted_volume.skip_verify` | bool | `false` | `true` = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；meta 生成与 meta 桶隔离不受影响 |
+| `trusted_volume.skip_verify` | bool | `false` | `true` = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；meta 生成与 meta 桶隔离不受影响。**同时是 302 直链的前置**：见下 |
+
+**完整性承诺与两个「放宽」开关的边界（2026-10-11 第 7 轮对抗评审后收敛）**：
+
+- **sidecar 缺失**（旁路写/升级前存量）→ 放行但记 Debug（本路径不提供服务端校验，运维可区分）；
+  **sidecar 存在但损坏**（读失败/超解析上限/JSON 或校验失败）→ 下载**fail-closed 拒绝**
+  （此前静默直通：后端同时坏 sidecar + 数据时损坏内容会被下发）。
+- **`direct_link: true` 的明文外部卷**：仅当 `trusted_volume.skip_verify=true`（显式放弃服务端校验）
+  时才走 302 直链；默认校验开启时**强制服务端转发**并告警一次（302 让客户端直连后端、
+  绕过逐分块校验）。**出口卷（`type=egress`）例外**：其 302 指向出口节点自身，二次进入由
+  `egress_forward=1` 强制服务端转发，校验仍在服务端完成。
 | `trusted_volume.chunk_size` | ByteSize | `0` | 分块大小；`0` = 按文件大小自适应（1MiB~32MiB）；小于下界 1MiB 时钳到 1MiB（防百万分块 meta DoS） |
 | `trusted_volume.staging_quota_bytes` | ByteSize | `0` | 本地 staging（上传暂存）每-owner 配额上限；`0` = 不限制但记账。**独立记账**（与网盘 `owner_quotas` 分离）但挂在全局池之下——受 `max_storage_bytes` 约束（staging 实占本地盘，防打满）。所有外部卷写前预留/写后释放；s3 流式直传显式豁免、baidupcs 由 per-request 门卫包装记账 |
 
