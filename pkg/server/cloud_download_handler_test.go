@@ -15,6 +15,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1295,6 +1296,19 @@ func TestCloudArchiveGroupToVolume_TrustedVolumeWiring(t *testing.T) {
 	if got := sc.Reserved(); got != 0 {
 		t.Fatalf("archive 桶预留泄漏：Reserved=%d want 0", got)
 	}
+	// 5) 返回 URL 经 registry.ResolveURL 往返（backend 解析 scheme/authority/path 后 OpenRead）。
+	rc, uerr := h.volSet.ResolveURL(context.Background(), resp.File)
+	if uerr != nil {
+		t.Fatalf("ResolveURL(%q): %v", resp.File, uerr)
+	}
+	body, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr != nil {
+		t.Fatalf("URL 取回读取: %v", rerr)
+	}
+	if _, gerr := gzip.NewReader(bytes.NewReader(body)); gerr != nil {
+		t.Fatalf("URL 取回内容应可 gzip 解（往返一致）: %v", gerr)
+	}
 	if err := tenantRoot.Close(); err != nil {
 		t.Logf("tenantRoot close: %v", err)
 	}
@@ -1377,11 +1391,21 @@ func registerFakeSecretsScheme() {
 	})
 }
 
-// fakeTransferBackend 实现 registry.ExternalBackend（FS 视图）。
+// fakeTransferBackend 实现 registry.ExternalBackend（FS 视图）+ URLResolver（URL 往返测试）。
 type fakeTransferBackend struct{ fs syncpkg.FS }
 
 func (f fakeTransferBackend) FS() syncpkg.FS { return f.fs }
 func (f fakeTransferBackend) Close() error   { return nil }
+
+// OpenURL 解析 URL（<scheme>://<volume>/<path>）后按解码路径读回——验证转存产物 URL 可
+// 经 registry.ResolveURL 往返。
+func (f fakeTransferBackend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	return f.fs.OpenRead(ctx, strings.TrimPrefix(u.Path, "/"))
+}
 
 // writeRootFile 用 storage.Root 写测试文件。
 func writeRootFile(t *testing.T, root *storage.Root, rel, content string) {

@@ -1002,7 +1002,7 @@ func (h *Handlers) cloudArchiveToVolume(
 	if onSuccess != nil {
 		onSuccess(url)
 	}
-	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url}, http.StatusOK)
+	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url, TaskCount: len(entries)}, http.StatusOK)
 }
 
 // archiveVolumeWriteGate 是统一转存的写前门：目标卷容量预检（ReserveSpace 可选能力，
