@@ -30,10 +30,13 @@ import (
 
 // createUserVolumeRequest 是 POST /api/volumes/user 请求体。
 type createUserVolumeRequest struct {
-	Name     string         `json:"name"`
-	Type     string         `json:"type"`
-	Capacity int64          `json:"capacity"`
-	Extra    map[string]any `json:"extra"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Capacity int64  `json:"capacity"`
+	// Unlimited 显式声明「不限容量」（F6）：`capacity:0` 默认含义是**未声明**（沿用同名卷
+	// 已持久化的上限，防 delete+recreate 把上限变不限）；确需不限必须显式置本字段。
+	Unlimited bool           `json:"unlimited"`
+	Extra     map[string]any `json:"extra"`
 }
 
 // userVolumesListResponse 是 GET /api/volumes/user 响应。
@@ -81,7 +84,9 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// 路径 <root>/<owner>/meta/volume/<name>.capacity（**非 .json**：避开 UserVolumeStore
 	// 的 *.json 扫描，防计数文件被误当卷元数据）；重启后 Load 续用。
 	counterPath := filepath.Join(h.userVolumes.Root(), owner, "meta", "volume", req.Name+".capacity")
-	counter, lerr := capacity.Load(counterPath, req.Capacity)
+	// F6：`capacity:0` 且未显式 unlimited ⇒ **继承同名卷已持久化的上限**（删除用户卷时刻意
+	// 保留 `.capacity`，因为远端字节仍在）——否则 delete+recreate 写 capacity:0 即解除上限。
+	counter, lerr := capacity.LoadForCreate(counterPath, req.Capacity, req.Unlimited)
 	if lerr != nil {
 		sendJSONResponse(w, map[string]string{"error": "容量快照读取失败: " + lerr.Error()}, http.StatusInternalServerError)
 		return
@@ -91,7 +96,8 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	}
 	be = capacity.WrapBackend(be, counter)
 	// store 落盘（重名拒绝）。
-	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra}
+	// 生效上限（可能来自继承）落元数据——否则重启 restore 会用请求里的 0 把继承的上限抹掉。
+	uv := UserVolume{Name: req.Name, Type: req.Type, Capacity: counter.Capacity(), Extra: req.Extra}
 	if err := h.userVolumes.Create(owner, uv); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 		return
@@ -202,6 +208,15 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	if err := h.userVolumes.Delete(owner, name); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
+	}
+	// F9：摘除前把计数快照 flush（`Release` 是节流的）——否则本次进程对该卷的删除量丢失，
+	// 同名重建时 used 偏高（伪 507）。best-effort + 可观测。
+	if be := h.volSet.External(name); be != nil {
+		if fl, ok := be.(interface{ Flush() error }); ok {
+			if ferr := fl.Flush(); ferr != nil {
+				h.logger.Warn("用户卷摘除：容量计数快照落盘失败", "volume", name, "owner", owner, "error", ferr)
+			}
+		}
 	}
 	if err := h.volSet.RemoveExternalVolume(name); err != nil {
 		// store 已删但 Set 摘除失败：回滚重建 store 元数据（Set 未变，保持一致）。

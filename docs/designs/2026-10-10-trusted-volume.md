@@ -470,7 +470,22 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 
 **测试与变异**：`pkg/quota`（F4：`beforeWait` 钩子把「释放恰在 TryReserve 失败与 Wait 之间」确定化并断言 <1s 完成；去 double-check → 4s 超时红）、`pkg/sync`（F3：未知长度写期间配额在账峰值 == 实测字节数；回退透传 → 峰值 0 红）、`pkg/volume/capacity`（F2 三态：已提交→记 40 / 未落盘→回滚 / Stat 不可复核→保留；`nil` reader 不 panic；F5 计数）、`pkg/server`（F5 `/metrics` 计数 >0；F7 非法名 → 400，变异回退 → 409 红）。
 
-**未纳入本次**（需产品/设计口径，另片）：**F6** 用户卷 capacity 完全取自请求体（delete+recreate 写 `capacity:0` 即解除上限——「防放大」保护不完整）；**F9** 每次 `TryAdd/Release` 都 `tmp+fsync+rename+fsync(dir)`（同卷写/删串行化，高并发外部卷吞吐瓶颈）；**F1** 外部卷对象无用户可见删除入口（写满后覆盖写缩小也被全量探测拦下 —— 净增差量探测已在 #755 落地，删除入口属新面）。
+**F6 用户卷上限继承（2026-10-12 落地，用户裁定）**：`capacity:0` 且未显式 `unlimited`
+⇒ **继承同名卷已持久化的上限**；`unlimited:true` ⇒ 显式不限；`capacity>0` ⇒ 显式声明（可改大/改小并把
+used 钳到新上限）。**生效上限创建期即落盘**（计数快照 + 卷元数据，否则「建卷零写入 → 删除 → 重建
+`capacity:0`」时无快照可继承 = 绕过仍成立；元数据不落则重启 restore 用请求里的 0 抹掉继承值）。
+语义唯一落点 `capacity.LoadForCreate`。
+
+**F9 计数落盘策略（2026-10-12 落地，用户裁定）**：**增加（`TryAdd`）恒同步落盘**（崩溃丢增加 =
+used 偏低 = 限额放宽，不可接受）；**减少（`Release`）只标脏**，由 `Flush` / 待写次数阈值
+（`counterFlushEveryOps=64`）/ 下次增加 触发——崩溃最多丢减少 → used 偏高 → **fail-closed（安全方向）**。
+`CapacityFS` 不再每次写/删后落盘；新增 `Counter.Flush`，并在**关机**（`Handlers.flushVolumeCounters`
+→ `volSet.Close` 前）与**摘除用户卷**前 flush（不 flush 会让每次重启 used 偏高、逐次累积成伪 507）。
+
+**未纳入本次**（需产品/设计口径，另片）：**F1** 外部卷对象无用户可见删除/定位入口（写满后覆盖写
+缩小也被全量探测拦下 —— 净增差量探测已在 #755 落地，删除/stat 入口属新面）。
+
+**F1 外部卷回收入口（2026-10-12 落地，用户裁定「补 /delete 硬删 + /stat」）**：见 §8.12。
 
 ## 8.9 崩溃窗口（陈旧 sidecar）处置（2026-10-12 落地）
 

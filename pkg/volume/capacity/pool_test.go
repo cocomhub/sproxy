@@ -158,11 +158,24 @@ func TestPoolCounterPersistent_RestartKeepsUsage(t *testing.T) {
 	if got := c2.Used(); got != 60 {
 		t.Fatalf("拒绝后 Used = %d, want 60", got)
 	}
-	// 释放后持久化。
+	// 释放**节流**（评审 F9）：Release 只标脏不落盘——快照此刻仍是 60（崩溃最多丢「减少」
+	// → used 偏高 = fail-closed 安全方向；避免每次写/删各付 2 次 fsync 并串行化在同卷 mu）。
 	c2.Release(60)
+	if got := c2.Used(); got != 0 {
+		t.Fatalf("内存 Used 应立即为 0, got %d", got)
+	}
+	poolUnflushed := quota.NewPool(100)
+	cUnflushed, _ := NewPoolCounterPersistent(poolUnflushed, path)
+	if got := cUnflushed.Used(); got != 60 {
+		t.Fatalf("未 Flush 时快照应仍为 60（节流语义）, got %d", got)
+	}
+	// Flush（关机/卸载卷路径）后持久化。
+	if ferr := c2.Flush(); ferr != nil {
+		t.Fatalf("Flush: %v", ferr)
+	}
 	pool3 := quota.NewPool(100)
 	c3, _ := NewPoolCounterPersistent(pool3, path)
 	if got := c3.Used(); got != 0 {
-		t.Fatalf("Release 后重启 Used = %d, want 0", got)
+		t.Fatalf("Flush 后重启 Used = %d, want 0", got)
 	}
 }

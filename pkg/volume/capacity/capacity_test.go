@@ -10,6 +10,7 @@ package capacity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -584,5 +585,161 @@ func TestLoad_CorruptSnapshotCounted(t *testing.T) {
 	}
 	if got := CorruptSnapshotCount(); got < before+2 {
 		t.Fatalf("损坏+版本不识应各计一次（before=%d got=%d）", before, got)
+	}
+}
+
+// ---- 评审 F6：用户卷重建时继承持久化上限 ----
+
+// TestLoadForCreate_InheritsPersistedLimit 回归（评审 F6）：用户卷的 limit 此前**完全取自
+// 请求体**，而删除时保留的 `.capacity` 里的 capacity 字段被 `Load` 忽略 → delete+recreate
+// 写 `capacity:0` 即解除上限（「防放大」保护不完整）。新语义（用户裁定）：
+// `capacity:0` 且未显式 unlimited ⇒ **继承持久化上限**；`unlimited:true` ⇒ 真不限；
+// `capacity>0` ⇒ 显式声明（可改大/改小）。
+func TestLoadForCreate_InheritsPersistedLimit(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "u.capacity")
+
+	// 首次创建：显式 1000；写 100 → 快照记录 (used=100, capacity=1000)。
+	c1, err := LoadForCreate(path, 1000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1.Capacity() != 1000 {
+		t.Fatalf("显式上限应生效: %d", c1.Capacity())
+	}
+	if aerr := c1.TryAdd(100); aerr != nil {
+		t.Fatal(aerr)
+	}
+	if serr := c1.Flush(); serr != nil {
+		t.Fatal(serr)
+	}
+
+	// delete+recreate 写 capacity:0（未显式 unlimited）→ **继承 1000**，used 保留。
+	c2, err := LoadForCreate(path, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Capacity() != 1000 {
+		t.Fatalf("capacity:0 应继承持久化上限 1000（否则解除上限 = F6 绕过），got %d", c2.Capacity())
+	}
+	if c2.Used() != 100 {
+		t.Fatalf("used 应保留 100, got %d", c2.Used())
+	}
+	// 继承上限低于持久化 used 时仍要钳到上限（防越限）：先造 used>limit 的快照。
+	c3, err := LoadForCreate(path, 50, false) // 显式改小到 50（< used 100）
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Capacity() != 50 || c3.Used() != 50 {
+		t.Fatalf("显式改小应生效并把 used 钳到上限, got cap=%d used=%d", c3.Capacity(), c3.Used())
+	}
+
+	// 显式 unlimited:true → 真不限（0）。
+	c4, err := LoadForCreate(path, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c4.Capacity() != 0 {
+		t.Fatalf("unlimited:true 应不限（0）, got %d", c4.Capacity())
+	}
+	// 显式改大 → 用之。
+	c5, err := LoadForCreate(path, 5000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c5.Capacity() != 5000 {
+		t.Fatalf("显式改大应生效, got %d", c5.Capacity())
+	}
+}
+
+// TestLoadForCreate_NoSnapshot 无快照（首次创建）→ capacity:0 即不限（无旧上限可继承）。
+func TestLoadForCreate_NoSnapshot(t *testing.T) {
+	t.Parallel()
+	c, err := LoadForCreate(filepath.Join(t.TempDir(), "new.capacity"), 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Capacity() != 0 {
+		t.Fatalf("无快照时 capacity:0 = 不限, got %d", c.Capacity())
+	}
+}
+
+// ---- 评审 F9：减少节流落盘（增加恒同步） ----
+
+// readCounterUsed 读快照里的 used（断言落盘时机用）。
+func readCounterUsed(t *testing.T, path string) int64 {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读快照: %v", err)
+	}
+	var f counterFile
+	if uerr := json.Unmarshal(data, &f); uerr != nil {
+		t.Fatalf("解析快照: %v", uerr)
+	}
+	return f.Used
+}
+
+// TestCounter_IncreaseSyncDecreaseThrottled 回归（评审 F9）：增加（TryAdd）恒同步落盘（崩溃
+// 丢增加 = 限额放宽，不可接受）；减少（Release）只标脏，由 Flush / 下次增加 触发落盘——
+// 崩溃最多丢减少 → used 偏高 → fail-closed（安全方向）。此前每次变更都 tmp+fsync+rename+
+// fsync(dir) 且串行化在同卷 mu 上。
+func TestCounter_IncreaseSyncDecreaseThrottled(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "c.capacity")
+	c := NewCounter(1000, path)
+	if err := c.TryAdd(500); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterUsed(t, path); got != 500 {
+		t.Fatalf("TryAdd 应同步落盘, got %d", got)
+	}
+	c.Release(200)
+	if got := readCounterUsed(t, path); got != 500 {
+		t.Fatalf("Release 应节流（快照仍 500，避免每次落盘）, got %d", got)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterUsed(t, path); got != 300 {
+		t.Fatalf("Flush 后快照应为 300, got %d", got)
+	}
+	// 下次增加连带把待写减少落盘（500-200-100+50 = 250）。
+	c.Release(100)
+	if err := c.TryAdd(50); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterUsed(t, path); got != 250 {
+		t.Fatalf("增加应连带落盘（250）, got %d", got)
+	}
+	// Flush 幂等：无待写变更 → 不报错。
+	if err := c.Flush(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPoolCounter_IncreaseSyncDecreaseThrottled 同上，覆盖配置卷的池计数器。
+func TestPoolCounter_IncreaseSyncDecreaseThrottled(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "p.capacity")
+	pc, err := NewPoolCounterPersistent(quota.NewPool(1000), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aerr := pc.TryAdd(400); aerr != nil {
+		t.Fatal(aerr)
+	}
+	if got := readCounterUsed(t, path); got != 400 {
+		t.Fatalf("PoolCounter.TryAdd 应同步落盘, got %d", got)
+	}
+	pc.Release(150)
+	if got := readCounterUsed(t, path); got != 400 {
+		t.Fatalf("PoolCounter.Release 应节流, got %d", got)
+	}
+	if ferr := pc.Flush(); ferr != nil {
+		t.Fatal(ferr)
+	}
+	if got := readCounterUsed(t, path); got != 250 {
+		t.Fatalf("Flush 后应为 250, got %d", got)
 	}
 }

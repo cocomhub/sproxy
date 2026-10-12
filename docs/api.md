@@ -770,7 +770,7 @@ sproxy_gc_cycles 42
 创建用户卷。请求体（JSON）：
 
 ```json
-{"name": "my-disk-1", "type": "baidupcs", "capacity": 0, "extra": {"bduss": "...", "baidu_root": "/disk1"}}
+{"name": "my-disk-1", "type": "baidupcs", "capacity": 0, "unlimited": false, "extra": {"bduss": "...", "baidu_root": "/disk1"}}
 ```
 
 ```json
@@ -779,7 +779,14 @@ sproxy_gc_cycles 42
 
 - `type` 须服务端已注册 backend（未注册 → 400）；`extra` 为类型特有配置（baidupcs 支持
   `bduss`/`baidu_root`/`binary_path`/`local_root`；webdav 支持 `url`（必填 http(s) 根）、
-  `username`+`password`（Basic）或 `token`（Bearer，优先））；`capacity` 独立卷容量（0 = 不限制，不计 owner 配额）
+  `username`+`password`（Basic）或 `token`（Bearer，优先））
+- `capacity` 独立卷容量（不计 owner 配额）。**语义（F6）**：
+  - `capacity > 0`：显式声明上限（可改大/改小；改小会把已用钳到新上限）；
+  - `capacity == 0` 且 `unlimited != true`：**继承同名卷已持久化的上限**。删除用户卷时刻意保留
+    计数快照（远端已写入的字节仍在，本系统不删远端内容），若不继承，`delete + recreate` 写
+    `capacity:0` 即把上限变「不限」——该绕过已被堵住；
+  - `capacity == 0` 且 `"unlimited": true`：**显式不限**（0）。
+- 生效上限在**创建期即落盘**（计数快照 + 卷元数据），重启 restore 后保持一致
 - 认证：SproxySig / api_keys（owner 从请求派生）；重名 → 错误
 - 响应：`{"success": true}`
 

@@ -35,6 +35,10 @@ func (h *Handlers) Close() error {
 	// 关闭后保存一次（把最终写路径增量固化，重启免全量 WalkDir）。
 	h.saveIndexSnapshots()
 
+	// F9：外部卷容量计数器的「减少」是节流的（增加恒同步落盘）——关闭前 flush，否则本进程
+	// 的删除量不落盘，下次启动 used 偏高 → 伪 507（且逐次累积）。best-effort + 可观测。
+	h.flushVolumeCounters()
+
 	h.stopTenantUploadStores()
 	h.stopRemainingServices()
 
@@ -154,4 +158,26 @@ func (h *Handlers) snapshotCurrent() *hub.Snapshot {
 	// M4：与 FlushSignal / onChange 一致，过滤孤儿收件箱，避免停服快照写入死信。
 	snap.Messages = h.signalBroker.signalSnapshots()
 	return snap
+}
+
+// flushVolumeCounters 把已装配外部卷的容量计数器待落盘变更写入快照（关机路径；best-effort）。
+// 见 capacity.Counter.Flush 的落盘策略（F9）。
+func (h *Handlers) flushVolumeCounters() {
+	if h.volSet == nil {
+		return
+	}
+	for _, v := range h.volSet.All() {
+		be := h.volSet.External(v.Name)
+		if be == nil {
+			continue
+		}
+		fl, ok := be.(interface{ Flush() error })
+		if !ok {
+			continue
+		}
+		if err := fl.Flush(); err != nil {
+			h.logger.Warn("关机：卷容量计数快照落盘失败（重启后 used 可能偏高=安全方向）",
+				"volume", v.Name, "error", err)
+		}
+	}
 }
