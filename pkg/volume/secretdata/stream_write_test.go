@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -72,5 +74,54 @@ func TestWriteFile_NonSeekableReadsAll(t *testing.T) {
 	// 非 seek 回退 io.ReadAll → 读全 21B 加密。
 	if string(got) != string(payload) {
 		t.Fatalf("非 seek 应 io.ReadAll 读全（%d 字节），读回 %d 字节", len(payload), len(got))
+	}
+}
+
+// TestWriteFile_LocalFSSourceStreams 锁定 sync 引擎 / 备份恢复 的写目标路径：
+// 二者均为 `src.OpenRead(...) → dst.WriteFile(rc, ...)`（pkg/sync/engine.go、pkg/backup/backup.go），
+// 本地源 LocalFS.OpenRead 返回 *os.File（可 seek/ReaderAt）→ secretdata 写路径 canStream
+// 命中 → 走流式（EncryptShardsReader）。本测试直接复刻该组合，断言来源 reader 可流式 +
+// 端到端还原一致。
+func TestWriteFile_LocalFSSourceStreams(t *testing.T) {
+	t.Parallel()
+	srcDir := t.TempDir()
+	src := syncpkg.NewLocalFS(srcDir, nil)
+	payload := make([]byte, 3<<20) // 3MiB（跨多块，验证流式多块）
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "src.bin"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 复刻 sync/backup：源 OpenRead → 目标 WriteFile。
+	rc, oerr := src.OpenRead(context.Background(), "src.bin")
+	if oerr != nil {
+		t.Fatalf("OpenRead: %v", oerr)
+	}
+	defer rc.Close()
+	if !canStream(rc) {
+		t.Fatalf("LocalFS.OpenRead 来源 reader 不可流式（%T）——sync/备份流式未生效", rc)
+	}
+
+	dstFS := syncpkg.NewLocalFS(t.TempDir(), nil)
+	sfs, err := NewFS(dstFS, Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if werr := sfs.WriteFile(context.Background(), "restored/src.bin", rc, int64(len(payload)), 0); werr != nil {
+		t.Fatalf("WriteFile(本地源流式): %v", werr)
+	}
+	// 还原一致。
+	back, rerr := sfs.OpenRead(context.Background(), "restored/src.bin")
+	if rerr != nil {
+		t.Fatalf("OpenRead(还原): %v", rerr)
+	}
+	defer back.Close()
+	got, gerr := io.ReadAll(back)
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("还原不一致：got %d bytes want %d", len(got), len(payload))
 	}
 }

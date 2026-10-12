@@ -126,7 +126,7 @@ func EncryptShardsBytes(data []byte, origName, outDir string, secret []byte, pol
 }
 
 // EncryptShardsReader 流式分块加密：src 提供整文件随机读（可 seek），逐块 ReadAt + 流式哈希，
-// 内存峰值 O(单块上限)。磁盘格式/meta/块布局与 EncryptShards/EncryptShardsBytes 完全一致
+// 内存峰值 O(单块上限)。磁盘格式、meta 与块布局与 EncryptShards/EncryptShardsBytes 完全一致
 // （向后兼容，旧读路径可读新写）。
 // src 须实现 io.Seeker / io.ReaderAt（multipart.File、*os.File、SectionReader 等）；
 // 纯流不可 seek 时回退 io.ReadAll（功能不变，仅内存不省）。
@@ -246,7 +246,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 
 // encryptShardsAt 流式分块加密（EncryptShardsReader 的核心）：src 提供整文件随机读。
 // 先一次流式哈希（io.Copy，O(1) 内存）得整文件 SHA256+组签，再逐块 ReadAt 加密写盘，
-// 内存峰值 O(单块上限)。磁盘格式/meta/块布局/命名与 encryptShards 完全一致（向后兼容）。
+// 内存峰值 O(单块上限)。磁盘格式、meta 与块布局/命名与 encryptShards 完全一致（向后兼容）。
 func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
 	blocksPlanner, blockletsPlanner := policy.Planner()
 	if blocksPlanner == nil || blockletsPlanner == nil {
