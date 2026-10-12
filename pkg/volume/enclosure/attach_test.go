@@ -6,8 +6,10 @@ package enclosure
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -186,5 +188,77 @@ func TestAttachAll_WrapsCapacityAccounting(t *testing.T) {
 	}
 	if got := pools["vault"].Usage(); got != 3 {
 		t.Fatalf("封装卷池应入账 3, got %d", got)
+	}
+}
+
+// protSrcFS 是「记写入 + 出直链」的源替身（嵌入 nil FS：只用被覆写的方法）。
+type protSrcFS struct {
+	syncpkg.FS
+	writes []string
+}
+
+func (f *protSrcFS) WriteFile(_ context.Context, p string, _ io.Reader, _, _ int64) error {
+	f.writes = append(f.writes, p)
+	return nil
+}
+
+func (f *protSrcFS) DirectURL(_ context.Context, rel string) (string, bool, error) {
+	return "https://src.example/obj?key=" + rel, true, nil
+}
+
+// TestBuild_WiresProtectionLayerIntoSourceView 设计 §5 装配图要求源视图是
+// `EnclosureFS(PrefixFS(源))`——薄层必须在链上。此前 `Decl.Build` 直接传裸
+// `NewPrefixFS` ⇒ ① `allow_direct_url` 策略与「默认抑制直链」**完全失效**（防护层是死代码，
+// 外部源存储下客户端可拿 302 直连，绕过封印与处理层）；② 身份归因丢失。
+//
+// 变异：把 `NewFS(src, d)` 改回 `NewPrefixFS(src, d.KeySpacePrefix())` → 本用例红。
+func TestBuild_WiresProtectionLayerIntoSourceView(t *testing.T) {
+	t.Parallel()
+	w := newCaptureWrapper(t, "capture_prot")
+	src := &protSrcFS{}
+	d := Decl{Vol: "vault", Source: "main", Path: "alice/user/vault", Wrapper: "capture_prot"}
+	if _, err := d.Build(context.Background(), volume.Volume{Name: "vault", Type: TypeEnclosure}, src); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	view := w.gotView()
+	if view == nil {
+		t.Fatal("wrapper 应收到源视图")
+	}
+	// ① 默认抑制直链（裸 PrefixFS 会无条件透传 → 直连源存储）。
+	dp, dok := view.(syncpkg.DirectURLProvider)
+	if !dok {
+		t.Fatal("源视图须暴露 DirectURLProvider")
+	}
+	if u, ok, err := dp.DirectURL(context.Background(), "x.bin"); ok || err != nil || u != "" {
+		t.Fatalf("默认须抑制直链, got (%q,%v,%v)", u, ok, err)
+	}
+	// ② 身份归因（薄层携带 Decl）。
+	fs, ok := view.(*FS)
+	if !ok {
+		t.Fatalf("源视图须为 *enclosure.FS（薄层在链上），got %T", view)
+	}
+	if fs.Decl().Vol != "vault" || fs.Decl().Source != "main" {
+		t.Fatalf("身份归因缺失: %+v", fs.Decl())
+	}
+	// ③ 前缀映射仍在（薄层不得改变键空间）。
+	if werr := view.WriteFile(context.Background(), "d/x.bin", strings.NewReader("v"), 1, 0); werr != nil {
+		t.Fatalf("视图写入: %v", werr)
+	}
+	if len(src.writes) != 1 || src.writes[0] != "alice/user/vault/d/x.bin" {
+		t.Fatalf("前缀映射被破坏: %v", src.writes)
+	}
+	// ④ 显式 allow_direct_url 时透传，且以**源键**（加前缀）询问源存储。
+	d2 := d
+	d2.AllowDirectURL = true
+	if _, err := d2.Build(context.Background(), volume.Volume{Name: "vault", Type: TypeEnclosure}, src); err != nil {
+		t.Fatalf("Build(allow): %v", err)
+	}
+	dp2, ok := w.gotView().(syncpkg.DirectURLProvider)
+	if !ok {
+		t.Fatalf("源视图须暴露 DirectURLProvider（got %T）", w.gotView())
+	}
+	u, ok, err := dp2.DirectURL(context.Background(), "x.bin")
+	if err != nil || !ok || u != "https://src.example/obj?key=alice/user/vault/x.bin" {
+		t.Fatalf("allow_direct_url 应透传源键直链, got (%q,%v,%v)", u, ok, err)
 	}
 }

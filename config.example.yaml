@@ -42,9 +42,13 @@ storage_root: "./storage"
   #   - name: "vault"
   #     type: "enclosure"
   #     extra:
-  #       source: "main:private/vault"   # <源卷名>:<子路径>（子路径可空 = 整卷封装）
-  #       wrapper: "secretdata"          # 封装处理器注册名
-  #       secret_url: "secrets://keys/vault"   # wrapper 自身配置（此处为密钥来源）
+  #       # <源卷名>:<子路径>（子路径可空 = 整卷封装）。子路径为**卷根相对**：客户端可达路径
+  #       # 恒为 <卷根>/<owner>/<bucket>/<rel>，故要封印「客户端本来能直连的区间」须写
+  #       # "<源卷>:<owner>/user/<子路径>"（如 main:alice/user/vault）；写 "main:private/vault"
+  #       # 表示封装卷根专有区间（客户端不可寻址，封印属防御纵深）。
+  #       source: "main:alice/user/vault" # <源卷名>:<卷根相对子路径>
+  #       wrapper: "secretdata"          # 封装处理器注册名（生产已注册：secretdata）
+  #       secret_url: "secrets://keys/vault"   # wrapper 自身配置（此处为密钥来源；secrets://<卷>/<名>）
   #       source_read_mode: "hidden"     # hidden(默认，读 404+列举过滤) | readable(只读透视，便于迁移)
   #       allow_direct_url: false        # 默认禁止 302 直链（禁客户端直连源存储）
   #       max_bytes: 0                   # 0 = 仅受源卷池约束（继承）；>0 = 封装卷自身上限

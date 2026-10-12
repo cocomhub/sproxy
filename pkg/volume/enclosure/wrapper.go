@@ -65,7 +65,14 @@ func WrapperNames() []string {
 	return out
 }
 
-// Build 按声明构造封装卷后端：源视图 = PrefixFS(源 FS, 声明前缀)，再交给处理层。
+// Build 按声明构造封装卷后端：源视图 = `EnclosureFS(PrefixFS(源 FS, 声明前缀))`，再交给
+// 处理层。
+//
+// **薄层必须在链上**（设计 §5 装配图）：`NewFS` 组合出「前缀映射 + 防护」，缺了它
+// ①`allow_direct_url` 策略与「默认抑制直链」全部失效（裸 PrefixFS 无条件透传 302 ⇒ 客户端
+// 可直连源存储，绕过封印与处理层）；②身份归因（Decl）丢失。此前这里直接传裸 PrefixFS，
+// 使 `enclosure.FS` 成为**从未被调用的死代码**（评审发现）。
+//
 // 装配顺序约束：调用方必须在上游**尚未注入封印**时取得 src（封装卷自身不受封印影响）。
 func (d Decl) Build(ctx context.Context, v volume.Volume, src syncpkg.FS) (registry.ExternalBackend, error) {
 	w, ok := LookupWrapper(d.Wrapper)
@@ -75,6 +82,5 @@ func (d Decl) Build(ctx context.Context, v volume.Volume, src syncpkg.FS) (regis
 	if src == nil {
 		return nil, fmt.Errorf("enclosure: 卷 %q 源视图为空（装配顺序错误）", v.Name)
 	}
-	view := syncpkg.NewPrefixFS(src, d.KeySpacePrefix())
-	return w.Build(ctx, v, view, v.Extra)
+	return w.Build(ctx, v, NewFS(src, d), v.Extra)
 }

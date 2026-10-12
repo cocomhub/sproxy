@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
@@ -356,6 +357,66 @@ func vcExtraBlockPolicy(v volume.Volume) shardseal.BlockPolicy {
 		}
 	}
 	return bp
+}
+
+// ---- 封装处理层（wrapper）注册 ----
+
+// secretdataWrapper 把 secretdata 注册为**封装处理层**（enclosure.Wrapper）：使
+// `type: enclosure` + `extra.wrapper: secretdata` 的配置真正可用（设计 §S4 收尾项，
+// `wrapper` 可插拔的处理层之一）。
+//
+// 与 `type: secretdata` 独立卷的关系：二者共用 `secretdata` 的 FS 实现与 Options 解析，
+// 差别只在**底层来自哪里**——独立卷由 `extra.target`（本地根）解析，封装卷由装配层注入的
+// **源视图**（`EnclosureFS(PrefixFS(源卷特权 FS, 声明子路径))`）提供。
+type secretdataWrapper struct {
+	resolveSecret func(ctx context.Context, v volume.Volume) ([]byte, error)
+}
+
+// Name 返回注册名（`extra.wrapper` 引用它；与文档/示例一致）。
+func (secretdataWrapper) Name() string { return "secretdata" }
+
+// Build 用封装卷的源视图构造 secretdata 后端：视图中「源卷子目录」已等价于本卷根，
+// 处理层只改字节（分块加密 + meta pad + 可选 parity），**不承担**封印与配额职责
+// （封印由源卷 `Root.SetSeals` 注入；配额由装配层 `capacity.WrapBackend` 包装）。
+func (w secretdataWrapper) Build(ctx context.Context, v volume.Volume, src syncpkg.FS, _ map[string]any) (registry.ExternalBackend, error) {
+	secret, err := w.resolveSecret(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+	opts := secretdataOptionsFromVolume(v)
+	opts.Secret = secret
+	// 多副本（extra.targets：多本地根）与 `type: secretdata` 同语义：主底层 = 封装卷源视图，
+	// 副本为独立本地根（写复制、读主失败回退副本）。
+	replicas, err := resolveReplicaTargets(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+	if len(replicas) == 0 {
+		return secretdata.NewBackend(ctx, v, src, opts)
+	}
+	return secretdata.NewBackendMultiplicas(ctx, v, src, replicas, opts)
+}
+
+// enclosureWrapperOnce 守卫注册（进程内一次；wrapper 注册表重复注册会 panic）。
+var enclosureWrapperOnce sync.Once
+
+// registerEnclosureWrappers 注册生产封装处理层。**必须早于** `enclosure.Parse`（即在
+// RegisterRoutes → assembleVolumes 之前调用）：`Parse` 对未注册的 `extra.wrapper` 判
+// `ErrUnknownWrapper` → 封装卷装配失败 → boot fail。此前生产侧没有任何 wrapper 注册
+// （仅测试注册替身）⇒ 文档与 config.example 承诺的 `wrapper: secretdata` **恒不可用**。
+//
+// 密钥解析与 `type: secretdata` 同源（`extra.secret_url` → `secretDataSet` 卷集
+// `ResolveURL`），故同样经**懒解析**：注册发生在卷集就绪前，Build 发生在补装期（卷集已就绪）。
+func registerEnclosureWrappers() {
+	enclosureWrapperOnce.Do(func() {
+		enclosure.RegisterWrapper(secretdataWrapper{resolveSecret: func(ctx context.Context, v volume.Volume) ([]byte, error) {
+			set := secretDataSet.Load()
+			if set == nil {
+				return nil, fmt.Errorf("enclosure: 封装卷 %q 补装时卷集未就绪", v.Name)
+			}
+			return defaultSecretdataSecret(ctx, v, set)
+		}})
+	})
 }
 
 // ---- 公共装配入口 ----
