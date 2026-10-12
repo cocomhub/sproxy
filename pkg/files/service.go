@@ -537,7 +537,9 @@ func checksumReader(src io.Reader) (string, error) {
 // 全程 root 内打开，防符号链接逃逸。对应 pkg/server.FileChecksumRoot（语义等价：
 // 同经 root.Open 打开后哈希整文件）。
 func fileChecksumRoot(root *storage.Root, rel string) (string, error) {
-	f, err := root.Open(rel)
+	// 用户可见语义（两实现同一口径）：加密卷算**明文**摘要
+	// （raw Open 会算密文摘要——校验/冲突检测对明文内容失去意义）。
+	f, err := root.OpenDecrypted(rel)
 	if err != nil {
 		return "", err
 	}

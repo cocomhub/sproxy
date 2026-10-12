@@ -415,22 +415,38 @@ func writeArchiveFile(tw *tar.Writer, root *storage.Root, info os.FileInfo, rel,
 	}
 
 	// 打开文件：os.Root 保证不跟随符号链接（最终组件 + 中间目录均 O_NOFOLLOW）
-	file, err := root.Open(rel)
+	file, err := openUserVisibleRead(root, rel)
 	if err != nil {
 		return fmt.Errorf("打开文件失败: %w", err)
 	}
 	defer file.Close()
 
 	// 交叉验证：lstat 得到的文件信息与打开后的文件信息一致
-	openedInfo, err := file.Stat()
+	stater, ok := file.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		return fmt.Errorf("打开句柄不支持 Stat（无法做 TOCTOU 交叉验证）: %T", file)
+	}
+	openedInfo, err := stater.Stat()
 	if err != nil {
 		return fmt.Errorf("stat 已打开文件失败: %w", err)
 	}
-	if !os.SameFile(info, openedInfo) {
+	// TOCTOU 交叉验证：非加密卷用 os.SameFile（lstat 与 open 同形态句柄，可靠）。
+	// 加密卷（OpenDecrypted 内部两次底层 open）在 Windows 上 Lstat 与 open 的 Sys
+	// FileIndex 表示不同 → SameFile 恒 false；此时降级为「打开后 Size/Mode 一致」的弱判据
+	// （明文 size 与 Lstat 密文 size 本就不等，仅比 Mode），并把不匹配仍按替换拒绝。
+	if os.SameFile(info, openedInfo) {
+		// 同文件：正常
+	} else if !root.IsEncrypted() {
 		return fmt.Errorf("文件在 lstat 和 open 之间被替换（TOCTOU）: %s", tarRel)
 	}
+	// 归档条目大小取**用户可见长度**（明文）：加密卷 Lstat 的 Size 是密文长度，用它做
+	// tar header 会与实际写入的明文流不符（客户端解出条目 size 错、EOF 提前）。
+	headerInfo := info
+	if openedInfo.Size() != info.Size() {
+		headerInfo = openedInfo
+	}
 
-	header, err := tar.FileInfoHeader(info, "")
+	header, err := tar.FileInfoHeader(headerInfo, "")
 	if err != nil {
 		return fmt.Errorf("创建 tar header 失败: %w", err)
 	}

@@ -419,7 +419,7 @@ func (h *Handlers) restoreCopyVersionFile(rc *versionRestoreCopyCtx) (int64, boo
 		}
 		defer src.Close()
 
-		dst, derr := rc.dstRoot.OpenFile(rc.targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		dst, derr := writeUserVisible(rc.dstRoot, rc.targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 		if derr != nil {
 			rc.releaseRes()
 			h.RecordAudit(rc.r.Context(), AuditEvent{
@@ -442,7 +442,7 @@ func (h *Handlers) restoreCopyVersionFile(rc *versionRestoreCopyCtx) (int64, boo
 			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
 			return 0, false
 		}
-		if dst.Sync() != nil {
+		if syncer, ok := dst.(interface{ Sync() error }); ok && syncer.Sync() != nil {
 			rc.releaseRes()
 			h.RecordAudit(rc.r.Context(), AuditEvent{
 				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
