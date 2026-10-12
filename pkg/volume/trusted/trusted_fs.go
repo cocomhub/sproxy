@@ -125,6 +125,9 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 // A-MAJOR-3 修复：读-改-写非原子在并发覆盖窗口会拿旧哈希 meta 覆盖新 meta——更新后
 // 重读校验 TotalSHA256 仍与磁盘文件一致（检测到并发覆盖则返回错误，调用方跳过而非
 // 污染新 meta）。
+// **前置校验口径（评审 ⑤ M9c 残余收口）**：本地卷整文件读回（TotalSHA256）；远端卷用
+// **有界轻量**判据（size + 末块 sha256，`metaContentMatches`）——此前远端**完全跳过**前置
+// 校验，只能靠写后判据发现（那时已污染）。
 func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	fm, err := t.FileMeta(ctx, rel)
 	if err != nil {
@@ -136,7 +139,11 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	// 主文件当前内容必须仍与旧 meta 一致（fm.TotalSHA256），一致才允许写入（合并
 	// Extra 的 meta 仍描述当前内容，天然无污染）。
 	// P1-10：整文件读回交叉校验仅本地卷执行——远端卷（网盘等）回读 = 一次全量下载，
-	// 对 6GiB 级文件不可接受；远端并发覆盖窗口由写路径独占 + 读路径校验兜底。
+	// 对 6GiB 级文件不可接受。
+	// **评审 ⑤（M9c 残余）**：远端卷此前**完全跳过**前置校验，并发覆盖只能靠**写后**判据
+	// 发现——而那时 meta 已被污染写入。改为远端也用**有界轻量**前置判据（size + 末块 sha256，
+	// 与 verifyWriteMeta 同口径）：确认不一致 → 拒绝更新、根本不动 meta（中段覆盖仍由写后
+	// 判据 + 读路径逐分块兜底，如实声明）。
 	if t.isLocal() {
 		rc, oerr := t.inner.OpenRead(ctx, rel)
 		if oerr != nil {
@@ -158,6 +165,8 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 			// 错误由调用方 Warn 兜底」一致，可观测），不覆盖新 meta（无污染）。
 			return fmt.Errorf("trusted: 主文件已被并发覆盖（旧 meta 失效），跳过 Extra 更新")
 		}
+	} else if merr := t.metaContentMatches(ctx, rel, fm); merr != nil {
+		return fmt.Errorf("trusted: 主文件与 meta 不一致（并发覆盖？），已拒绝 Extra 更新: %w", merr)
 	}
 	if fm.Extra == nil {
 		fm.Extra = make(map[string]any, len(extra))
@@ -671,39 +680,51 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 // 错位（旧实现可捕获）：该场景由读路径逐分块校验兜底（读到被覆盖分块即失败），且并发
 // 同 rel 写本身无锁语义——用每次写全量读回换尾部单块为净收益。
 func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *meta.FileMeta) {
+	if merr := t.metaContentMatches(ctx, rel, fm); merr != nil {
+		t.logMetaWarn("WriteFile-verify", rel, fmt.Errorf("%w，已删 sidecar", merr))
+		t.invalidateMeta(ctx, rel)
+	}
+}
+
+// metaContentMatches 用**有界轻量**判据复核「主文件当前内容是否仍与 fm 一致」：
+//   - 返回非 nil = **确认不一致**（截断/追加/写错对象/末块被改写）——调用方据此失效 sidecar
+//     （写后校验）或拒绝写入（前置校验）；
+//   - 返回 nil = 一致，**或无法复核**（Stat/RangeReader 不可用、Stat 失败、读失败、零分块）
+//     ——fail-open（保留 sidecar，不误报），由读路径逐分块校验兜底。
+//
+// 两条判据都**有界**（M9c 收敛，本地/远端同口径）：① `Stat` size；② 末块 sha256（≤ 单块——
+// 尾部是静默损坏高发区，代价单块而非整文件）。如实声明放弃的检出：「同 size 且末块相同、
+// 仅中段被并发覆盖」由读路径逐分块校验兜底（且并发同 rel 写本身无跨路径锁语义）。
+func (t *TrustedVolumeFS) metaContentMatches(ctx context.Context, rel string, fm *meta.FileMeta) error {
 	se, serr := t.inner.Stat(ctx, rel)
 	if serr != nil || se == nil {
-		return // 主文件不可读（并发删除等）→ 保留 meta（读侧不校验）
+		return nil // 主文件不可读（并发删除等）→ 无法复核，不误报
 	}
 	if se.Size != fm.Size {
-		t.logMetaWarn("WriteFile-verify", rel,
-			fmt.Errorf("实测 size %d 与 meta.Size %d 不一致（截断/覆盖错位），已删 sidecar", se.Size, fm.Size))
-		t.invalidateMeta(ctx, rel)
-		return
+		return fmt.Errorf("实测 size %d 与 meta.Size %d 不一致（截断/覆盖错位）", se.Size, fm.Size)
 	}
 	if len(fm.Chunks) == 0 {
-		return
+		return nil
 	}
 	rr, ok := t.inner.(syncpkg.RangeReader)
 	if !ok {
-		return // 无定点读能力：仅 size 判据（读路径逐分块校验兜底）
+		return nil // 无定点读能力：仅 size 判据
 	}
 	last := fm.Chunks[len(fm.Chunks)-1]
 	rc, oerr := rr.OpenRangeRead(ctx, rel, last.Offset, last.Size)
 	if oerr != nil {
-		return
+		return nil
 	}
 	h := sha256.New()
 	_, rerr := io.Copy(h, io.LimitReader(rc, last.Size))
 	_ = rc.Close()
 	if rerr != nil {
-		return
+		return nil
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != last.SHA256 {
-		t.logMetaWarn("WriteFile-verify", rel,
-			fmt.Errorf("末块 sha256 不一致（分块 %d），已删 sidecar", last.Index))
-		t.invalidateMeta(ctx, rel)
+		return fmt.Errorf("末块 sha256 不一致（分块 %d）", last.Index)
 	}
+	return nil
 }
 
 // WriteFromStagedPath 转发 staging 路径复用能力（透传契约：能力探测不得因装饰层而恒 false）。

@@ -975,3 +975,60 @@ func readMetaFile(t *testing.T, inner syncpkg.FS, rel string) ([]byte, error) {
 	defer rc.Close()
 	return io.ReadAll(rc)
 }
+
+// TestUpdateMetaExtra_RemoteBoundedPrecheck 回归（第 7 轮评审 ⑤ M9c 残余）：远端卷的
+// UpdateMetaExtra 此前**完全跳过**前置交叉校验（整文件回读被 isLocal 门挡住），并发覆盖
+// 只能靠**写后**的有界判据发现——而那时 meta 已被污染写入。改为远端也用**有界轻量**前置判据
+// （size + 末块 sha256，与 verifyWriteMeta 同口径）：确认不一致 → 拒绝更新、**根本不动 meta**。
+//
+// 变异：远端分支跳过前置校验 → 不一致时 UpdateMetaExtra 返回 nil（仅写后失效 meta）→ 红。
+func TestUpdateMetaExtra_RemoteBoundedPrecheck(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	body := bytes.Repeat([]byte("remote-extra-"), 300)
+
+	// ① 一致 → 更新成功（远端有界前置判据不得误杀正常路径）。
+	inner1 := newInner(t)
+	tv1 := Wrap(&remoteVerifyFS{LocalFS: inner1}, Options{}).(*TrustedVolumeFS)
+	if err := tv1.WriteFile(ctx, "user/a.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := tv1.UpdateMetaExtra(ctx, "user/a.bin", map[string]any{"source_integrity": "damaged"}); err != nil {
+		t.Fatalf("远端一致时更新应成功: %v", err)
+	}
+
+	// ② size 错位（并发覆盖/截断）→ 拒绝更新，且**未动 meta**（区分于写后失效）。
+	inner2 := newInner(t)
+	tv2 := Wrap(&remoteVerifyFS{LocalFS: inner2}, Options{}).(*TrustedVolumeFS)
+	if err := tv2.WriteFile(ctx, "user/b.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+		t.Fatal(err)
+	}
+	truncated := body[:len(body)-5]
+	if err := inner2.WriteFile(ctx, "user/b.bin", bytes.NewReader(truncated), int64(len(truncated)), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := tv2.UpdateMetaExtra(ctx, "user/b.bin", map[string]any{"k": "v"}); err == nil {
+		t.Fatal("远端 size 错位时更新应报错（有界前置校验）")
+	}
+	if _, serr := inner2.Stat(ctx, meta.MetaPath("user/b.bin")); serr != nil {
+		t.Fatal("前置校验拒绝时不得动 meta（sidecar 应原样保留）")
+	}
+
+	// ③ 同长度、末块被改写（size 判据不可见）→ 末块 sha256 判据必须拒绝。
+	inner3 := newInner(t)
+	tv3 := Wrap(&remoteVerifyFS{LocalFS: inner3}, Options{}).(*TrustedVolumeFS)
+	if err := tv3.WriteFile(ctx, "user/c.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+		t.Fatal(err)
+	}
+	tampered := append([]byte(nil), body...)
+	tampered[len(tampered)-1] ^= 0xFF
+	if err := inner3.WriteFile(ctx, "user/c.bin", bytes.NewReader(tampered), int64(len(tampered)), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := tv3.UpdateMetaExtra(ctx, "user/c.bin", map[string]any{"k": "v"}); err == nil {
+		t.Fatal("远端末块不一致时更新应报错（有界前置校验）")
+	}
+	if _, serr := inner3.Stat(ctx, meta.MetaPath("user/c.bin")); serr != nil {
+		t.Fatal("前置校验拒绝时不得动 meta（sidecar 应原样保留）")
+	}
+}
