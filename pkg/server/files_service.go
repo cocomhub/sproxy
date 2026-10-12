@@ -597,12 +597,18 @@ func hasAnyPrefix(name string, prefixes []string) bool {
 
 // computeMeta 从 root 相对 rel 的文件计算完整 FileMeta（流式读一遍，双算法 + 分块）。
 func (p filesMetaPolicy) computeMeta(ctx context.Context, root *storage.Root, rel string) (*meta.FileMeta, error) {
-	rc, err := root.Open(rel)
+	// 用户可见语义：加密卷算**明文**分块/哈希（与读面同口径；否则 sidecar 存密文哈希
+	// 在加密卷上无意义——读面按明文流无法用它校验，且跨面语义不一致）。
+	rc, err := openUserVisibleRead(root, rel)
 	if err != nil {
 		return nil, fmt.Errorf("可信卷 meta 打开文件 %s: %w", rel, err)
 	}
 	defer rc.Close()
-	fi, serr := rc.Stat()
+	stater, ok := rc.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		return nil, fmt.Errorf("可信卷 meta 打开句柄不支持 Stat: %T", rc)
+	}
+	fi, serr := stater.Stat()
 	if serr != nil {
 		return nil, fmt.Errorf("可信卷 meta stat %s: %w", rel, serr)
 	}

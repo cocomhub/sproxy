@@ -537,13 +537,19 @@ func (h *Handlers) s3GetObject(w http.ResponseWriter, root *storage.Root, rel st
 		}
 		return
 	}
-	f, err := root.Open(rel)
+	f, err := openUserVisibleRead(root, rel)
 	if err != nil {
 		http.Error(w, "s3: 文件不存在", http.StatusNotFound)
 		return
 	}
-	rc := files.SeekReadCloser(f)
-	vf, verr := (filesMetaPolicy{h: h}).VerifyDownload(context.Background(), root, rel, f)
+	srf, ok := f.(files.SeekReadCloser)
+	if !ok {
+		_ = f.Close()
+		http.Error(w, "s3: 流不支持 Range（加密卷只读兼容）", http.StatusInternalServerError)
+		return
+	}
+	rc := srf
+	vf, verr := (filesMetaPolicy{h: h}).VerifyDownload(context.Background(), root, rel, srf)
 	if verr != nil {
 		// 鉴柄已开但校验器装配失败（如畸形 sidecar）：不得下发半截内容。
 		_ = f.Close()

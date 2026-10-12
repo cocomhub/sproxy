@@ -395,6 +395,36 @@ func encPlaintextSize(f *os.File) (int64, error) {
 	}
 }
 
+// Stat 返回明文视图的 FileInfo：Size = 明文长度（与 SeekEnd/LogicalSize 同源），
+// 其余字段（Mode/ModTime/Name…）透传底层文件。供 archive/volume_export 等读面
+// 在加密卷上仍能完成「打开后交叉验证」与 tar header 组装。
+func (e *encReadCloser) Stat() (os.FileInfo, error) {
+	return &plainFileInfo{base: e.cInfo(), size: e.size}, nil
+}
+
+// cInfo 取底层文件的 FileInfo（无则返回 nil——调用方应容忍）。
+func (e *encReadCloser) cInfo() os.FileInfo {
+	if c, ok := e.c.(interface{ Stat() (os.FileInfo, error) }); ok {
+		if fi, err := c.Stat(); err == nil {
+			return fi
+		}
+	}
+	return nil
+}
+
+// plainFileInfo 包装底层 FileInfo：只覆盖 Size 为明文长度。
+type plainFileInfo struct {
+	base os.FileInfo
+	size int64
+}
+
+func (p *plainFileInfo) Name() string       { return p.base.Name() }
+func (p *plainFileInfo) Size() int64        { return p.size }
+func (p *plainFileInfo) Mode() os.FileMode  { return p.base.Mode() }
+func (p *plainFileInfo) ModTime() time.Time { return p.base.ModTime() }
+func (p *plainFileInfo) IsDir() bool        { return p.base.IsDir() }
+func (p *plainFileInfo) Sys() any           { return p.base.Sys() }
+
 func (e *encReadCloser) Read(p []byte) (int, error) {
 	n, err := e.r.Read(p)
 	e.pos += int64(n)
@@ -451,6 +481,13 @@ func (e *encReadCloser) seekStart(offset int64) (int64, error) {
 type encWriteCloser struct {
 	w io.WriteCloser
 	c io.Closer
+}
+
+func (e *encWriteCloser) Sync() error {
+	if c, ok := e.c.(interface{ Sync() error }); ok {
+		return c.Sync()
+	}
+	return nil
 }
 
 func (e *encWriteCloser) Write(p []byte) (int, error) { return e.w.Write(p) }

@@ -432,3 +432,19 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 `ReadDir` 整个 meta 目录——扁平大目录下 n 个文件各写一次 = **O(n²)** 枚举。现改为**进程级节流**
 （`metaTmpSweepThrottle`，默认 1 分钟）：孤儿是惰性残留（不阻断任何读写、仅占少量 meta 桶配额），
 多存活 ≤1 个窗口属可接受降级；解析失败路径与写路径共用同一节流。
+
+**附：server 不再直操作底层 root 的用户内容面（2026-10-12，第 5 轮评审「机制级收敛」）**：
+`pkg/server/user_visible_io.go`（`writeUserVisible`/`openUserVisibleRead`/`userVisibleSize`）是用户内容
+读写的**唯一入口**（加密卷透明加解密 + 封装封印）。此前 S3 GET 非加密分支、归档打包、checksum、
+卷导出、分享创建探测、版本恢复写、云归档输出、`computeMeta` 均直调 `root.Open/OpenFile`——加密卷上
+**读密文/写明文**。已全部收敛：
+- 读面（archive.go/checksum.go/volume_export.go/share.go/s3_server.go/computeMeta）→ `openUserVisibleRead`
+  （加密卷 `OpenDecrypted` 明文）；
+- 写面（version.go 恢复 / cloud_archive_handler.go 归档输出）→ `writeUserVisible`；
+- `encReadCloser` 补 `Stat`（明文长度 FileInfo）、`encWriteCloser` 补 `Sync`——使归档 TOCTOU 交叉
+  验证、tar header 组装、fsync 在加密卷上仍可用；
+- **加密卷 TOCTOU 已知边界**：`os.SameFile` 对 Lstat 与 OpenDecrypted（内部两次底层 open）在 Windows
+  恒 false → 归档交叉验证降级为「Mode 一致」弱判据（非加密卷仍严格 SameFile），记档；
+- 归档 tar header 大小用**用户可见长度**（Lstat 密文 size ≠ 明文流）；
+- 剩余 `root.Open/OpenFile` 直操作仅限：meta sidecar、s3 part/会话、删除/目录类（不读内容）与
+  `user_visible_io.go` 自身——内部面，不属用户内容读写入口。

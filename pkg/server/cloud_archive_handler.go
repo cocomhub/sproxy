@@ -537,8 +537,10 @@ var errArchiveExists = errors.New("archive file already exists")
 
 // openArchiveOutput 以 O_EXCL 语义打开归档输出文件（相对租户 root 的 rel 路径）。
 // 跨平台统一用 errors.Is(err, os.ErrExist) 判已存在（Windows 上 O_EXCL 对已存在文件同样报错）。
-func openArchiveOutput(root *storage.Root, rel string) (*os.File, bool, error) {
-	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+func openArchiveOutput(root *storage.Root, rel string) (io.WriteCloser, bool, error) {
+	// 归档输出是**用户内容**写面：加密卷须透明加密落盘（raw OpenFile 写明文，
+	// 归档产物读回时按密文形态不完整；评审「用户可见入口」收敛面）。
+	f, err := writeUserVisible(root, rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, false, nil

@@ -611,7 +611,7 @@ func validateShareSourceFile(w http.ResponseWriter, root *storage.Root, rel stri
 	}
 	// 校验可读：root 相对打开（符号链接不逃逸），立即关闭。分享链接只存 rel，
 	// 不保留句柄——访问时经 root.Open(rel) 重新解析（TOCTOU 收敛）。
-	if f, openErr := root.Open(rel); openErr != nil {
+	if f, openErr := openUserVisibleRead(root, rel); openErr != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
 		return nil, false
 	} else {

@@ -341,7 +341,7 @@ func TestFileChecksumRoot_ImplParity(t *testing.T) {
 	if domain != assembly {
 		t.Fatalf("FileChecksumRoot 函数体漂移：\n pkg/files =\n%s\n pkg/server=\n%s", domain, assembly)
 	}
-	if len(domain) < 80 || !strings.Contains(domain, "HASH(") || !strings.Contains(domain, "root.Open(") {
+	if len(domain) < 80 || !strings.Contains(domain, "HASH(") || !strings.Contains(domain, "OpenDecrypted(") {
 		t.Fatalf("抽取结果过弱，守卫可能失效（len=%d）：%q", len(domain), domain)
 	}
 }

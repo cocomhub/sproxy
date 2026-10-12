@@ -303,12 +303,16 @@ func (w *volumeUserWalker) addFile(childRel string, e os.DirEntry) {
 // writeVolumeExportEntry 把单个文件以 user/<relName> 条目写入 tar（流式边读边写）。
 // 源在写前被并发删除/修改导致 Open 失败 → 返回错误（调用方按宽松/严格处置）。
 func (h *Handlers) writeVolumeExportEntry(ctx context.Context, tw *tar.Writer, s volumeExportSource) error {
-	f, err := s.root.Open(s.rel)
+	f, err := openUserVisibleRead(s.root, s.rel)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	info, serr := f.Stat()
+	stater, ok := f.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		return fmt.Errorf("导出句柄不支持 Stat: %T", f)
+	}
+	info, serr := stater.Stat()
 	if serr != nil {
 		return serr
 	}
