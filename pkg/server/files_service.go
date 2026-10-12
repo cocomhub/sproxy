@@ -342,6 +342,19 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 		p.warnDegrade("解析失败", rel, uerr)
 		return nil, fmt.Errorf("meta: sidecar 损坏（拒绝下发未校验内容）: %w", uerr)
 	}
+	// **崩溃窗口补偿**（第 5 轮对抗评审 ③）：主文件与 sidecar 是两次独立原子写，崩溃发生在
+	// 「主文件已落新内容、sidecar 未更新」之间时会留下**陈旧 sidecar**（size 与实测内容长度
+	// 不一致）。此处**提前到流下发之前**判定（VerifyReadSeeker 内部虽也判，但那时已在
+	// ServeContent 流中，错误只能中断流），以便：
+	//   1. 保留 C2 口径——**仍拒绝下发未校验内容**（不静默降级为「直通/未校验」，否则「内容
+	//      被截断/追加」会被洗白成可信态，完整性承诺瓦解）；
+	//   2. 与「sidecar 损坏」区分开：报 ErrStaleMeta + 专用 Warn（可告警/可分类），并给出
+	//      可操作修复——重建 sidecar（重写一次该文件，或运维调 filesMetaPolicy.WriteMeta），
+	//      不再表现为「无提示、永久不可读」。
+	if size, serr := seekEndSize(r); serr == nil && size != fm.Size {
+		p.warnStaleMeta(rel, size, fm.Size)
+		return nil, fmt.Errorf("%w: 内容 %d B ≠ sidecar %d B（疑崩溃窗口留陈旧 sidecar；已拒绝下发未校验内容，重建 sidecar 后恢复）", meta.ErrStaleMeta, size, fm.Size)
+	}
 	// 外部卷下的 sidecar 与数据同存不受信后端：畸形 meta 一律由 VerifyReadSeeker 内部
 	// 入口 Validate fail-closed（见 pkg/files/meta/verify.go），不在此处降级为直通。
 	// 包装为逐分块校验流（ServeContent 消费，Seek 语义保持）。具体类型实现 Close——
@@ -352,6 +365,29 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 		return nil, nil // 防御：不可 Close 断言失败直通（正常不可达）
 	}
 	return sr, nil
+}
+
+// seekEndSize 探测流的内容长度（SeekEnd 后复原到起点）；不支持 Seek 时返回错误（调用方跳过判据）。
+func seekEndSize(r io.Seeker) (int64, error) {
+	end, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	if _, serr := r.Seek(0, io.SeekStart); serr != nil {
+		return 0, serr
+	}
+	return end, nil
+}
+
+// warnStaleMeta 记录「陈旧 sidecar」专用告警：与普通降级告警可区分（可作告警规则），
+// 并在文案里给出可操作修复（重建 sidecar），避免运维只看到「下载失败」而无从下手。
+func (p filesMetaPolicy) warnStaleMeta(rel string, contentSize, metaSize int64) {
+	if p.h == nil || p.h.logger == nil {
+		return
+	}
+	p.h.logger.Warn("可信卷 sidecar 陈旧（内容长度与 FileMeta.Size 不一致）：已拒绝下发未校验内容；重建 sidecar 可恢复（重写该文件或调用 WriteMeta）",
+		"path", rel, "content_bytes", contentSize, "meta_bytes", metaSize,
+		"cause", "主文件/sidecar 两次独立原子写之间的崩溃窗口（或内容被截断/追加）")
 }
 
 // warnDegrade 记录「读侧校验被跳过」的可观测信号（与显式 skip_verify 可区分）。
