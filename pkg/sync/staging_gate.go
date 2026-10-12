@@ -101,13 +101,23 @@ func (g *StagingQuotaGateFS) OpenRead(ctx context.Context, path string) (io.Read
 	return g.inner.OpenRead(ctx, path)
 }
 func (g *StagingQuotaGateFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
-	if g.quota != nil {
+	if g.quota == nil {
+		return g.inner.WriteFile(ctx, path, r, size, mtime)
+	}
+	if size > 0 {
 		if err := g.quota.ReserveUsage(ctx, size); err != nil {
 			return err
 		}
 		defer g.quota.ReleaseUsage(size)
+		return g.inner.WriteFile(ctx, path, r, size, mtime)
 	}
-	return g.inner.WriteFile(ctx, path, r, size, mtime)
+	// **未知长度**（ContentLength=-1 / copyMeta 类，评审 F3）：写前无从预留，改为读取中按
+	// **实测**增量预留——配额耗尽时 Read 阻塞（写路径获得背压），写完释放实测总量。此前直接
+	// 透传 size，而 tracker 对 size<=0 是 no-op ⇒ staging 对这类写完全不记账（并发流式写可
+	// 打满本地盘而配额不可见）。
+	rr := newReservingReader(ctx, g.quota, r)
+	defer rr.release()
+	return g.inner.WriteFile(ctx, path, rr, size, mtime)
 }
 func (g *StagingQuotaGateFS) Rename(ctx context.Context, from, to string) error {
 	return g.inner.Rename(ctx, from, to)
@@ -125,18 +135,65 @@ func (g *StagingQuotaGateFS) MakeDir(ctx context.Context, path string) error {
 // 写类能力（WriteIfAbsent）与 WriteFile 同语义：预留 → 写 → 释放。----
 
 // WriteIfAbsent 委托 inner（预留在前、释放在后；inner 未实现 → ErrUnsupported 供调用方回落）。
+// 未知长度（size<=0）与 WriteFile 同口径：读取中按实测增量预留（评审 F3）。
 func (g *StagingQuotaGateFS) WriteIfAbsent(ctx context.Context, path string, r io.Reader, size, mtime int64) (bool, error) {
 	pia, ok := g.inner.(WriteIfAbsent)
 	if !ok {
 		return false, fmt.Errorf("sync: 底层未实现 WriteIfAbsent: %w", ErrUnsupported)
 	}
-	if g.quota != nil {
+	if g.quota == nil {
+		return pia.WriteIfAbsent(ctx, path, r, size, mtime)
+	}
+	if size > 0 {
 		if err := g.quota.ReserveUsage(ctx, size); err != nil {
 			return false, err
 		}
 		defer g.quota.ReleaseUsage(size)
+		return pia.WriteIfAbsent(ctx, path, r, size, mtime)
 	}
-	return pia.WriteIfAbsent(ctx, path, r, size, mtime)
+	rr := newReservingReader(ctx, g.quota, r)
+	defer rr.release()
+	return pia.WriteIfAbsent(ctx, path, rr, size, mtime)
+}
+
+// reservingReader 是**未知长度写**的 staging 记账适配器（评审 F3）：每读取 n 字节即预留 n
+// （实测口径，声明长度无从依赖），使 staging 配额在写期间即生效（Read 阻塞=背压）；写完由
+// 调用方 release 累计预留。仅由写路径单 goroutine 消费，无需同步。
+//
+// ctx/quota 经**闭包**捕获（不把 context.Context 放进结构体——containedctx 门禁 + 生命周期
+// 语义：本适配器的存活期严格短于构造它的调用栈）。
+type reservingReader struct {
+	r            io.Reader
+	reserve      func(int64) error
+	releaseQuota func(int64)
+	reserved     int64
+}
+
+func newReservingReader(ctx context.Context, q StagingQuotaTracker, r io.Reader) *reservingReader {
+	return &reservingReader{
+		r:            r,
+		reserve:      func(n int64) error { return q.ReserveUsage(ctx, n) },
+		releaseQuota: q.ReleaseUsage,
+	}
+}
+
+func (rr *reservingReader) Read(p []byte) (int, error) {
+	n, err := rr.r.Read(p)
+	if n > 0 {
+		if rerr := rr.reserve(int64(n)); rerr != nil {
+			return n, rerr // 预留失败（永久不足/ctx 取消）→ 中断写，调用方清理半截
+		}
+		rr.reserved += int64(n)
+	}
+	return n, err
+}
+
+// release 释放本次写累计预留的实测总量（幂等）。
+func (rr *reservingReader) release() {
+	if rr.reserved > 0 {
+		rr.releaseQuota(rr.reserved)
+		rr.reserved = 0
+	}
 }
 
 // ReserveSpace 委托 inner（容量预检，不涉及本地 staging 记账）。

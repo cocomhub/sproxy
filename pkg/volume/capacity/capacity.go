@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -41,6 +42,16 @@ import (
 
 // ErrVolumeFull 是卷容量超限哨兵（fail-closed：调用方 errors.Is 识别并映射 507）。
 var ErrVolumeFull = errors.New("volume capacity exceeded")
+
+// corruptSnapshots 是**进程级**「容量快照损坏/版本不识 → used 重置」计数（评审 F5）。
+//
+// 为什么需要它：计数文件是占用量的**唯一权威记录**，损坏即等价「限额被放宽一轮」（反复损坏
+// = 反复放大）。此前只有启动日志 Warn（无指标/健康面），违反「限额生效状态必须可观测」。
+// 累计点内聚在 Load/NewPoolCounterPersistent（含 cmd/sproxy 的 restore 路径），无需逐站点接线。
+var corruptSnapshots atomic.Int64
+
+// CorruptSnapshotCount 返回本进程累计的容量快照损坏次数（指标/告警面消费）。
+func CorruptSnapshotCount() int64 { return corruptSnapshots.Load() }
 
 // Counter 是卷级容量记账抽象。
 //
@@ -185,8 +196,11 @@ func syncDir(dir string) error {
 	return nil
 }
 
-// Load 从 path 恢复计数器。文件不存在 → 新计数器（used=0）。capacity 以调用方传入为准
-// （配置权威；持久化的 capacity 仅校验一致，不一致告警但以传入为准）。
+// Load 从 path 恢复计数器。文件不存在 → 新计数器（used=0）。
+//
+// capacity **以调用方传入为准**（配置/请求为权威）：快照里的 capacity 字段仅供追溯「写快照
+// 当时的限额」，**不参与比较、不改写传入值**（F8：原注释称「不一致会告警」，实现从未比较，
+// 属文档/行为漂移——此处如实描述，避免误导后续维护者）。
 func Load(path string, capacity int64) (*VolumeCapacityCounter, error) {
 	c := NewCounter(capacity, path)
 	data, err := os.ReadFile(path)
@@ -201,10 +215,12 @@ func Load(path string, capacity int64) (*VolumeCapacityCounter, error) {
 		// 损坏快照：重置（不 fail-closed——容量是防超限非数据完整，重置后重新累计安全），
 		// 但**标记**以便调用方告警（静默归零会让重启后可超额写入；P2 对抗评审）。
 		c.corrupt = true
+		corruptSnapshots.Add(1)
 		return c, nil
 	}
 	if f.Version != 1 {
 		c.corrupt = true // 版本不认识 → 视为损坏（重置并标记）
+		corruptSnapshots.Add(1)
 		return c, nil
 	}
 	c.mu.Lock()
@@ -257,10 +273,12 @@ func NewPoolCounterPersistent(p *quota.Pool, path string) (*PoolCounter, error) 
 	var f counterFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		c.corrupt = true // 损坏：未恢复占用（携带标记供调用方告警）
+		corruptSnapshots.Add(1)
 		return c, nil
 	}
 	if f.Version != 1 {
 		c.corrupt = true
+		corruptSnapshots.Add(1)
 		return c, nil
 	}
 	if f.Used <= 0 {
@@ -397,9 +415,10 @@ func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader,
 	}
 	cr := &countingReader{r: r}
 	if err := f.inner.WriteFile(ctx, relPath, cr, size, mtime); err != nil {
-		if reserved > 0 {
-			f.counter.Release(reserved) // 写失败回滚预留
-		}
+		// **写错误 ≠ 未落盘**（评审 F2）：远端后端无原子 rename，响应超时/连接中断时对象
+		// 可能已提交——此前一律 Release(reserved) 假定未落盘 ⇒ used 永久偏低（限额可穿透）。
+		// 改为 Stat 复核实测并结算（无法复核则保留预留，宁可偏高）。
+		f.settleAfterWriteError(ctx, relPath, prev, reserved, size)
 		return err
 	}
 	// 结算：以实际写入（实测）为准，扣掉已预留。effective <= 0 时才回落声明值
@@ -413,6 +432,40 @@ func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader,
 	}
 	f.persist()
 	return nil
+}
+
+// settleAfterWriteError 是**写失败后**的记账复核（评审 F2）：远端后端（baidupcs/s3 等）
+// 无原子 rename，「写错误」不代表「未落盘」——响应超时/连接中断时对象可能已提交。故不用
+// 「释放预留」假定未落盘，而是 Stat 复核实测值并结算到实测（本地卷/未提交场景 Stat 仍见旧
+// 对象 → 结算回旧口径，不泄漏占用）。
+//
+// **Stat 无法复核时保留预留不清账**（宁可偏高——限额宁紧勿松，运维可对账；绝不静默少计）。
+func (f *CapacityFS) settleAfterWriteError(ctx context.Context, relPath string, prev, reserved, size int64) {
+	actual, ok := f.innerSizeChecked(ctx, relPath)
+	if !ok {
+		f.persist() // 复核失败：保留预留（bias-high）
+		return
+	}
+	if serr := f.settle(ctx, relPath, prev, reserved, actual, size); serr != nil {
+		// 实测超限（未知长度路径）：与 settle 同处置——删除对象恢复「Σ占用 ≤ 卷限额」，
+		// 并把预留退回旧口径（对象已删，不再占账）。
+		_ = f.inner.Delete(ctx, relPath)
+		f.counter.Release(reserved)
+	}
+	f.persist()
+}
+
+// innerSizeChecked 返回 rel 的实测大小；ok=false = Stat 调用失败（**与「不存在」区分**——
+// 不存在是 (0, true)，用于「复核不可用 → 宁可偏高」的判据）。
+func (f *CapacityFS) innerSizeChecked(ctx context.Context, rel string) (int64, bool) {
+	e, err := f.inner.Stat(ctx, rel)
+	if err != nil {
+		return 0, false
+	}
+	if e == nil || e.IsDir {
+		return 0, true
+	}
+	return e.Size, true
 }
 
 // settle 写后结算：按实测补记/退还。未知长度路径（size<=0）无法写前 fail-closed——
@@ -434,12 +487,16 @@ func (f *CapacityFS) settle(ctx context.Context, relPath string, prev, reserved,
 }
 
 // countingReader 记录底层实际被读取的字节（记账以实测为准，防声明长度撒谎）。
+// r 为 nil（仅声明长度的写，无内容源）时按空流处理——否则对 nil 解引用 panic。
 type countingReader struct {
 	r io.Reader
 	n int64
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
+	if c.r == nil {
+		return 0, io.EOF
+	}
 	n, err := c.r.Read(p)
 	c.n += int64(n)
 	return n, err
@@ -464,11 +521,17 @@ func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Rea
 	}
 	cr := &countingReader{r: r}
 	written, err := pia.WriteIfAbsent(ctx, relPath, cr, size, mtime)
-	if err != nil || !written {
-		if reserved > 0 {
-			f.counter.Release(reserved) // 未落盘：回滚预留
-		}
+	if err != nil {
+		f.settleAfterWriteError(ctx, relPath, prev, reserved, size)
 		return written, err
+	}
+	if !written {
+		// **明确的未落盘答复**（幂等命中已存在对象）→ 回滚预留在本口径下是安全的
+		// （与「写返回错误但可能已提交」区分开——后者走 settleAfterWriteError 复核）。
+		if reserved > 0 {
+			f.counter.Release(reserved)
+		}
+		return written, nil
 	}
 	effective := cr.n
 	if effective <= 0 && size > 0 {

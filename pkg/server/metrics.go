@@ -22,6 +22,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -917,6 +918,12 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	// 卷磁盘水位（roadmap 11.5-⑪）：每卷 usage/capacity gauge（Prometheus 告警模板
 	// sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes 消费；从卷集合注入）。
 	m.renderVolumeWatermarks(&b, h)
+
+	// 容量快照损坏计数（F5）：计数文件是占用量的唯一权威记录，损坏即 used 归零（限额被放宽
+	// 一轮）；除启动 Warn 外必须有可告警面（反复损坏=反复放大）。
+	writeMetric(&b, "sproxy_volume_capacity_corrupt_total", "counter",
+		"Volume capacity snapshots found corrupt or version-unknown (usage reset to 0; limit temporarily unenforced)",
+		capacity.CorruptSnapshotCount())
 
 	// 备份/同步任务计数（roadmap 11.5-⑪）：配合 SproxyBackupSyncFailures 告警。
 	writeMetric(&b, "sproxy_backup_tasks_total", "counter", "Total backup/sync tasks recorded", m.backupTasks.Load())
