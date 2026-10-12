@@ -198,12 +198,11 @@ func (s *SecretdataFS) writeFileOpt(ctx, rel, r io.Reader, size, mtime, expected
 | `pkg/cryptox/shardseal/shardseal.go` | 新增 `EncryptShardsReader(src io.Reader, size int64, …)`：内部 `io.ReaderAt`/`io.Seeker` 判定 → 流式（逐块 ReadAt + 增量哈希 + 组签收尾）；否则回退 `io.ReadAll` + 现有 `encryptShards` |
 | `pkg/cryptox/shardseal/*` | `encryptWriteChunks` 改签名接受 `io.ReaderAt`（替代 `data []byte`）；块级 `ReadAt` + 增量哈希；`buildBlockIndex` 整块摘要用块缓冲；`PlanBlocklets(src)` 传 ReaderAt |
 | `pkg/volume/secretdata/secretdata.go` | `writeFileOpt` seek 判定分叉；新增 `writeFileStream`；`writeCtx` 加 `size`；`commitEntry` usage 用 `wc.size` |
-| `pkg/files/bandwidth.go` | `rateLimitReader` 实现 `Seek`/`ReadAt`（透传底层；ReadAt 不走限速，注释说明随机读语义） |
-| `pkg/files/write_ops.go` | `writeExternalSettle` 用自定义 `teeReadSeeker`（Reader+Seeker+ReadAt，tee 哈希）替代 `io.TeeReader`——保留哈希校验且透传 seek |
+| `pkg/files/write_ops.go` | `writeExternalSettle`：**可 seek 源先独立一遍读满算 checksum 再 `Seek(0)`**（下发原可 seek 源，sink 可多遍随机读）；不可 seek 源退 `io.TeeReader`。**不再用 tee 算 checksum**——tee 只捕获经 Read 的字节，而 secretdata 流式全程 `ReadAt`（两遍）→ 空摘要 → 校验失败（本 PR 修复的回归）。 |
+| `pkg/volume/trusted/trusted_fs.go` | 同类修复：`feedMetaRewindable` 可 seek 源先独立一遍喂 meta 计算器再回绕，inner 得原（可 seek）源（流式）；不可 seek 源退 tee。 |
 
-**video-keyframe 模式（本期边界）**：`parseOnce` 需全文扫描（ReaderAt 读一遍），与 tee 哈希
-（逐块仅一次）冲突 → **keyframe 模式本期保持 `io.ReadAll`**（现状路径，视频文件有 max_file_bytes 兜底）；
-后续由 secretdata 内部返回哈希给上层解决（不在本期）。
+**video-keyframe 模式**：`parseOnce` 本就经 `io.ReaderAt` 扫描关键帧表，与流式逐块加密**天然兼容**——
+流式路径已自动生效（`TestEncryptShardsReader_VideoKeyframeParity` 锁定与内存变体同关键帧切分）。
 
 ## 6. 落地分期与实际状态
 
@@ -211,7 +210,7 @@ func (s *SecretdataFS) writeFileOpt(ctx, rel, r io.Reader, size, mtime, expected
 |---|---|---|
 | **S1** | 设计文档 | ✅ 本文档 |
 | **S2** | `EncryptShardsReader` + `io.ReaderAt`/`io.Seeker` 判定适配 `secretdata` 写路径 | ✅ 已实现（本分支） |
-| **S3** | video-keyframe 模式流式专项（parseOnce 用 ReaderAt） | ⏳ 后续（本期保持 ReadAll） |
+| **S3** | video-keyframe 模式流式 | ✅ 已生效（无守卫；parity 测试锁定） |
 | **S4** | 旁路面可 seek 覆盖 + 回归 | 部分：sync/备份恢复 ✅；S3/DAV 推后（正做写收敛）；trusted/encrypted 记档见下 |
 
 ### 6.1 内存峰值量化（slow tag 实测）
@@ -231,10 +230,11 @@ func (s *SecretdataFS) writeFileOpt(ctx, rel, r io.Reader, size, mtime, expected
 |---|---|---|
 | **sync 引擎**（`pkg/sync/engine.go`） | `src.OpenRead` → LocalFS 返回 `*os.File` | ✅ |
 | **备份恢复**（`pkg/backup/backup.go` `writeOnce`） | 同上 | ✅ |
-| 外部卷普通上传（`pkg/files/write_ops.go`） | multipart.File（经 `teeReadSeeker` 透传 seek） | ✅ |
+| 外部卷普通上传（`pkg/files/write_ops.go`） | multipart.File（独立一遍算 checksum + 回绕，源透传） | ✅ |
 | 云转存（`pkg/cloud/transfer.go`） | `os.Open` 本地产物 | ✅ |
-| **trusted 装饰器**（`pkg/volume/trusted/trusted_fs.go`） | `io.TeeReader`（meta 计算） | ❌ **已知边界**：trusted 包 secretdata 时 tee 剥 seek（与 writeExternalSettle 同构问题）。后续同法修（seek-preserving tee + meta 两遍语义） |
+| **trusted 装饰器**（`pkg/volume/trusted/trusted_fs.go`） | 可 seek 源经 `feedMetaRewindable`（独立一遍喂 meta + 回绕） | ✅ 已修（inner 得可 seek 源 → 流式） |
 | 加密同步包装（`pkg/sync/encrypted.go`） | `io.Pipe` | ❌ 预期（不可 seek，设计如此） |
+| 带宽限速启用（`rateLimitReader` 包装） | 包装后不实现 Seeker/ReaderAt | ❌ 回退整读（正确性不变，仅内存不省；限速关闭=默认时走流式） |
 | S3/DAV 写面 | — | ⏳ 推后（正在做写收敛） |
 
 锁定测试：`pkg/volume/secretdata/stream_write_test.go`（`TestWriteFile_LocalFSSourceStreams` 复刻 sync/备份 `OpenRead → WriteFile` 组合，断言来源可流式 + 还原一致）。

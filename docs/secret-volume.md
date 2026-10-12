@@ -229,8 +229,6 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 ### 8.2 未实现
 
 - **压缩**（`Meta.Compressed` / `Compression`，独立注册表，改压缩算法不升级加密版本）
-- **video-keyframe 模式的流式写**（可 seek 普通文件块已流式；video-keyframe 因 `parseOnce` 需全文
-  扫描关键帧表，本期仍走内存变体，后续接线）
 - **Reed-Solomon 纠删码**（GF(2^8) 手写 ~千行负担大；k-of-k+1 单块起步，奇偶系统多块纠错平滑演进）
 - **CLI 接线加密卷文件面**（`pkg/files` 只走 storage.Root；`ExternalBackend.FS` 仅 /api/volumes + /api/backup
   消费——CLI upload/download 直连加密卷需后续接线，独立立项）
@@ -259,7 +257,6 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   文件 `EncryptShards` 报错 fail-closed。
 - **随机访问粒度**：`OpenRangeRead` 当前下载整块再定位 blocklet，未做逐 blocklet 只取所需段（注释
   已纠偏）；blocklet 索引已内建，逐段随机访问接线留后续。
-- **流式写覆盖边界**：可 seek 源（multipart 上传 / `*os.File` / 转存本地产物 / sync / 备份恢复）走流式；
-  **纯流**（无 seek）与 **video-keyframe 块模式**回退整读；**trusted 完整性装饰器**（`io.TeeReader`
-  算 meta）包 secretdata 时会剥 seek，后续同法修（seek-preserving tee，`pkg/sync/encrypted.go` 的
-  `io.Pipe` 属设计不可 seek）。
+- **流式写覆盖边界**：可 seek 源（multipart 上传 / `*os.File` / 转存本地产物 / sync / 备份恢复 /
+  video-keyframe 块模式 / trusted 装饰器）均走流式；**纯流**（无 seek）与**加密同步 `io.Pipe`**
+  回退整读；**带宽限速启用时**（`rateLimitReader` 包装剥 seek）也回退整读（功能不变，仅内存不省）。
