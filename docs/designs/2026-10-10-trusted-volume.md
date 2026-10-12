@@ -408,6 +408,47 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 | 面级加密入口未接线（S3/DAV/分享/分块上传/块写） | ✅ 已修 | 用户可见读写唯一入口（`pkg/server/user_visible_io.go`）；DAV 收敛到 `NewRootFS`（同时修掉封印绕过）；分块上传 finalize 单遍加密；块写加密卷显式拒绝 |
 | 封装卷「源目录禁止直连」 | ✅ 已修（机制级） | `storage.Root.SetSeals`（写恒拒/读 404 或只读透视）+ 装配接线 + 租户子根传播 + `enclosure.FS` 直链抑制 |
 | 新装饰器漏转发可选能力（R21 只查硬编码清单） | ✅ 已修 | R23 自动发现门禁（`Inner()` 与「嵌入 FS/持有 inner FS 字段」两类）+ `quotaLocalFS` 能力补齐 + 处理层显式豁免 |
+| egress/cluster 卷 sidecar 键空间未归一（下载**零校验**） | ✅ 已修（§8.10） | 出口卷自带 `meta.Provider`（经 remote `meta` 面）+ 持有侧用**自身可信栈**解析 sidecar——不再把 meta 桶语义塞进 remote 路径 |
+
+## 8.10 集群出口卷的真实完整性校验（2026-10-12 落地，第 5 轮评审 P2-10）
+
+**问题**：出口（egress）卷是**代理型卷**——它没有本地文件，sidecar 在**持有侧**的键空间里。
+但出口侧装配链对它也套了 `TrustedVolumeFS`（因它不自带 `meta.Provider`），后者的 `FileMeta` 用
+`inner.OpenRead(meta.MetaPath(rel))` 直取 → 键空间错位（`<owner>/meta/<rel>.meta` 被当作持有侧
+**用户相对路径**；持有侧再经 `UserRel` 映射成 `user/<owner>/meta/...`）→ 恒 404 →
+`externalDownloadSource` 走「sidecar 缺失」降级分支 → **egress 卷下载零校验**（可信卷承诺不成立）。
+
+**根因（架构）**：把「声明 `meta.Provider`」当成了装配的必然结果，而不是**卷必须自己说清**的能力。
+代理型卷无法用自己的键空间拼接去拿另一端的 sidecar，却因装饰器而被认定为「有校验能力」。
+
+**处置（能力归属归位 + 协议面显式）**：
+
+1. **`clusterFS` 自带 `meta.Provider`**（`pkg/volume/ext/cluster/fs.go`）：`FileMeta(ownerKey)` 先经
+   `holderRel` 归一为**持有侧用户相对路径**，再交给注入的 `fetchMeta`。因自带 meta，`trusted.Wrap`
+   保持原样返回（与 secretdata 同构：自带 meta 的卷自己管），不再叠加 `TrustedVolumeFS`；
+   `Guard` 仍透传该能力（`TestEgressMetaCapabilityNotShadowed` 为结构回归锚点）。`fetchMeta` 为 nil
+   时 **fail-closed**（不静默返回 nil 让调用方误当「无 sidecar」）。
+2. **remote 只读面新增 `GET /remote/meta`**（`pkg/remote/client.go` 的 `Meta` + `pkg/server/remote_read.go`
+   的 `handleMeta`/`delegateMeta`）：入参是**用户相对路径**（与 list/stat/download 同语义），
+   sidecar 由**持有侧自身可信栈**解析。因此**凭证范围（PathPrefix）仍作用在用户路径上**，
+   不引入「meta 桶可达」这一越权面（区别于「把 meta 键空间暴露给远端」并把凭证 scope 复杂化）。
+3. **持有侧解析镜像自身校验口径**（`pkg/server/meta_remote.go`）：
+   - 本地卷 → 读 `filesMetaPolicy.VerifyDownload` 同一键 `meta.MetaPath(user/<rel>)`；
+     **加密卷跳过**（sidecar 描述密文、服务流是明文——同 `VerifyDownload` 的口径）；
+   - 外部卷 → 经 `externalRemotePath` 给下载源注入的**同一 `meta.Provider`**（同键 `FSPath`）。
+   故「出口侧校验用的元数据」==「持有侧自己下载时会校验的元数据」——不引入新的语义分叉。
+4. **错误分类保留**：真·无 sidecar → 404 → 客户端 `errors.Is(os.ErrNotExist)` → 出口侧按
+   「无校验能力」**预期降级**（Debug）；读取失败/畸形 → 非 404 → 出口侧 **Warn**（不静默当无校验）。
+   响应体限读 `MaxMetaSidecarBytes()+1`（超限按读取失败，不截断成畸形 JSON）。
+
+**测试**：`pkg/server/cluster_egress_meta_e2e_test.go`（真双端：内容一致 → 通过；**持有侧内容被篡改
+（同 size、不同字节）→ 出口下载 fail-closed**；无 sidecar → 降级可读；能力不被 Wrap 遮蔽）、
+`pkg/server/meta_remote_test.go`（本地/外部两分支 + 读取失败不伪装 404）、
+`pkg/volume/ext/cluster`（holderRel 桥 + ErrNotExist 保留 + 畸形拒绝 + 装配接线）、
+`pkg/remote`（op 往返 + 404 分类）。**变异 3 命中**（FileMeta 用未归一 key／持有侧不重桶／缺失不映射 404）。
+
+**有意未做**：出口侧不去「猜」持有侧是否为加密卷——加密口径由**持有侧**决定并反映在它的回答里
+（返回 404），出口侧只消费结论；否则出口侧需要复制一份持有侧配置，正是本项要消除的耦合。
 
 ## 8.9 崩溃窗口（陈旧 sidecar）处置（2026-10-12 落地）
 

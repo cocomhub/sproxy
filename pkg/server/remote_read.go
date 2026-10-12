@@ -31,8 +31,8 @@ type peerFingerprintProvider interface {
 
 // remoteReadHandler 是跨节点只读面（Y 一期，AD-7/AD-8）。
 //
-// 只读强制：路由表是手写白名单，仅注册三条 GET/HEAD；写方法由 http.ServeMux 的
-// 方法模式天然 405，写 handler 从不出现在这张表上（非黑名单法）。
+// 只读强制：路由表是手写白名单，仅注册四条 GET/HEAD（list/stat/download/meta）；写方法
+// 由 http.ServeMux 的方法模式天然 405，写 handler 从不出现在这张表上（非黑名单法）。
 //
 // 授权：owner 恒由配置（mesh_readers 条目）决定，绝不接受请求方指定；卷名必须命中
 // 本节点已配置的卷，且该卷 mesh_readers 中存在指纹命中的条目。
@@ -60,6 +60,10 @@ func (h *Handlers) newRemoteReadHandler(peer peerFingerprintProvider, creds *clu
 	mux.HandleFunc("GET /remote/list", rh.handleList)
 	mux.HandleFunc("HEAD /remote/stat", rh.handleStat)
 	mux.HandleFunc("GET /remote/download", rh.handleDownload)
+	// meta 面（评审 P2-10 修复）：持有侧 sidecar 的跨节点读取——参数是**用户相对路径**
+	// （与 list/stat/download 同语义），sidecar 由持有侧自身可信栈解析；故凭证范围
+	// （PathPrefix）仍作用在用户路径上，不引入「meta 桶可达」越权面。
+	mux.HandleFunc("GET /remote/meta", rh.handleMeta)
 	mux.HandleFunc("GET /remote/stats", rh.handleStats)
 	return mux
 }
@@ -87,6 +91,11 @@ func (rh *remoteReadHandler) handleStat(w http.ResponseWriter, r *http.Request) 
 
 func (rh *remoteReadHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 	rh.serve(w, r, "download")
+}
+
+// handleMeta 返回持有侧 sidecar 原始 JSON（出口卷的可信校验双分块读取源）。
+func (rh *remoteReadHandler) handleMeta(w http.ResponseWriter, r *http.Request) {
+	rh.serve(w, r, "meta")
 }
 
 // serve 统一走「授权 → 委派 → 审计」三步；拒绝路径在 authorize 内记审计后直接返回。
@@ -243,6 +252,8 @@ func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tg
 		rh.delegateStat(w, r, svc, tgt)
 	case "download":
 		rh.delegateDownload(w, r, svc, tgt)
+	case "meta":
+		rh.delegateMeta(w, r, tgt)
 	default:
 		writeRemoteError(w, http.StatusNotFound, remoteErrorMessage(http.StatusNotFound))
 	}
@@ -312,6 +323,24 @@ func (rh *remoteReadHandler) delegateDownload(w http.ResponseWriter, r *http.Req
 		return
 	}
 	http.ServeContent(w, r, of.Info.Name(), of.Info.ModTime(), seeker)
+}
+
+// delegateMeta 回持有侧 sidecar 原始 JSON（出口卷可信校验的元数据面）。
+//
+// **不泄露敏感数据**：sidecar 只含总/分块 SHA-256+MD5、原文件大小与时间（无内容），
+// 而且调用方已过同一道授权（凭证的卷/path 范围按**用户路径**判定——`tgt.path` 就是
+// 用户相对路径，而非 meta 键）。无 sidecar/不可用 → 404（出口侧据此降级为不校验，
+// 与既有外部卷口径一致）。
+func (rh *remoteReadHandler) delegateMeta(w http.ResponseWriter, r *http.Request, tgt *remoteTarget) {
+	raw, err := rh.h.readMetaForRemote(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	w.Header().Set(headerContentType, contentTypeJSON)
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 // writeRemoteFilesError 把域操作的失败映射为远程面的状态码。
