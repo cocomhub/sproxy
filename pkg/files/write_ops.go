@@ -314,7 +314,7 @@ func (s *Service) linkFile(root *storage.Root, oldRel, newRel string) error {
 // dedupFallbackCopy 在硬链接不可用（FAT/exFAT）时把 srcRel 内容原子复制到 rel。
 // 返回复制后 checksum 与实际写入字节数；失败时清理临时文件并回滚。
 func (s *Service) dedupFallbackCopy(ctx context.Context, root *storage.Root, srcRel, rel string) (string, int64, error) {
-	srcFile, err := root.Open(srcRel)
+	srcFile, err := root.OpenDecrypted(srcRel)
 	if err != nil {
 		return "", 0, fmt.Errorf("打开去重源文件失败: %w", err)
 	}
@@ -1462,14 +1462,20 @@ func (s *Service) locateDeleteTarget(ctx context.Context, owner, rel string, inp
 // verifyDeleteQuarantine 基于 fd 校验 quarantine 内容（打开失败 → 恢复 rel 并 500）。
 // 返回文件元信息与实际 checksum；任一失败已尽力恢复原 rel 并返回 *HTTPError。
 func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root, quarRel, rel, expectedChecksum, remotePath string) (os.FileInfo, string, error) {
-	qf, qErr := root.Open(quarRel)
+	qf, qErr := root.OpenDecrypted(quarRel)
 	if qErr != nil {
 		_ = atomicRenameRoot(root, quarRel, rel) // 尽力恢复：quarantine 已在手，rel 必可回写
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, errMsgOpenFile)
 		s.rt.logger().ErrorContext(ctx, errMsgOpenFile, "file_name", remotePath, "error", qErr.Error())
 		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFile}
 	}
-	info, qErr := qf.Stat()
+	stater, ok := qf.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		qf.Close()
+		_ = atomicRenameRoot(root, quarRel, rel)
+		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
+	}
+	info, qErr := stater.Stat()
 	if qErr != nil {
 		qf.Close()
 		_ = atomicRenameRoot(root, quarRel, rel)
