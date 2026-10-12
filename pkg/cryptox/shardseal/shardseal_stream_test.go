@@ -162,3 +162,56 @@ func TestEncryptShardsReader_FileReaderAt(t *testing.T) {
 		t.Fatalf("文件流式还原不一致")
 	}
 }
+
+// TestEncryptShardsReader_VideoKeyframeParity 锁定：video-keyframe 块模式在**流式路径**
+// （可 seek 源）与内存变体产出一致的关键帧 blocklet 切分——证明 keyframe 的 parseOnce
+// （经 io.ReaderAt 扫描关键帧表）与流式逐块加密兼容，无需回退整读。
+func TestEncryptShardsReader_VideoKeyframeParity(t *testing.T) {
+	t.Parallel()
+	const size = 4000
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	secret := []byte("super-secret-32-bytes")
+	policy := BlockPolicy{
+		Mode: "random", Min: size, Max: size, // 单块 [0,size)
+		BlockletMode: BlockletModeVideoKeyframe,
+		Indexer:      &fixedIndexer{frames: []int64{0, 1000, 2000}},
+		BlockletMin:  256, BlockletMax: 1024,
+	}
+	outA := t.TempDir()
+	resA, err := EncryptShardsBytes(data, "v.mp4", outA, secret, policy, 0, AlgoV1GCMLow)
+	if err != nil {
+		t.Fatalf("EncryptShardsBytes(keyframe): %v", err)
+	}
+	outB := t.TempDir()
+	resB, err := EncryptShardsReader(bytes.NewReader(data), int64(len(data)), "v.mp4", outB, secret, policy, 0, AlgoV1GCMLow)
+	if err != nil {
+		t.Fatalf("EncryptShardsReader(keyframe): %v", err)
+	}
+	blA := resA.Meta.Chunks[0].Blocklets
+	blB := resB.Meta.Chunks[0].Blocklets
+	if len(blA) != 3 || len(blB) != 3 {
+		t.Fatalf("关键帧应切 3 段：内存=%d 流式=%d", len(blA), len(blB))
+	}
+	wantOff := []int64{0, 1000, 2000}
+	wantSize := []int64{1000, 1000, 2000}
+	for i := range blB {
+		if blB[i].Offset != wantOff[i] || blB[i].Size != wantSize[i] {
+			t.Errorf("流式关键帧段 %d = (off=%d,size=%d)，want (off=%d,size=%d)", i, blB[i].Offset, blB[i].Size, wantOff[i], wantSize[i])
+		}
+		if blB[i].Offset != blA[i].Offset || blB[i].Size != blA[i].Size {
+			t.Errorf("流式与内存变体关键帧段 %d 不一致：%+v vs %+v", i, blB[i], blA[i])
+		}
+	}
+	// 还原一致。
+	dst := filepath.Join(t.TempDir(), "r.mp4")
+	if derr := DecryptFile(resB.Meta, outB, dst, secret); derr != nil {
+		t.Fatalf("DecryptFile(流式 keyframe): %v", derr)
+	}
+	got, _ := os.ReadFile(dst)
+	if !bytes.Equal(got, data) {
+		t.Fatalf("流式 keyframe 还原不一致")
+	}
+}

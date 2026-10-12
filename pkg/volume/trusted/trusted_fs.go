@@ -583,7 +583,14 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	// **不得对既有 rel 执行覆盖性 Delete**——否则一次恶意/故障上传永久丢失旧版本+新内容。
 	// 方案：校验失败仅返回错误（底层写入已失败/成功由 inner 语义决定），不额外删 rel；
 	// 真正需要清理的是「本次写」——内层原子写路径失败本就自愈（不留半写）。
-	if err := t.inner.WriteFile(ctx, rel, io.TeeReader(r, calc), size, mtime); err != nil {
+	// 可 seek 源（io.Seeker）→ 独立一遍喂 calc（O(1) 内存），再回绕把原（可 seek）源交给
+	// inner——inner 若为 secretdata 等流式卷可多遍随机读，而 io.TeeReader 会剥 seek 且多遍
+	// 读下 calc 收不到字节（同类问题见 pkg/files writeExternalSettle）。不可 seek 源退 tee。
+	writeSrc, ferr := feedMetaRewindable(r, calc)
+	if ferr != nil {
+		return ferr
+	}
+	if err := t.inner.WriteFile(ctx, rel, writeSrc, size, mtime); err != nil {
 		return err
 	}
 	// 尾块已由 Finish 收尾（Write 路径不足 chunkSize 的尾块 Finish 内 flush）。
@@ -799,3 +806,21 @@ var (
 	_ syncpkg.StagingQuotaExempt  = (*TrustedVolumeFS)(nil)
 	_ syncpkg.StagedPathReuse     = (*TrustedVolumeFS)(nil)
 )
+
+// feedMetaRewindable 构造交给 inner 的写源，同时为 meta 计算器 w 提供全部明文字节：
+//   - 可 seek 源（io.Seeker）：独立一遍读满喂 w（O(1) 内存），Seek(0) 后返回**原**（可 seek）
+//     源——inner 若为 secretdata 等流式卷可逐块 ReadAt 多遍随机读（TeeReader 会剥 seek，
+//     且多遍读下 w 收不到字节）。
+//   - 不可 seek 源：退回 io.TeeReader（单遍，inner 必读全文，功能不变）。
+func feedMetaRewindable(r io.Reader, w io.Writer) (io.Reader, error) {
+	if sec, ok := r.(io.Seeker); ok {
+		if _, err := io.CopyBuffer(w, r, make([]byte, 128<<10)); err != nil {
+			return nil, err
+		}
+		if _, err := sec.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return r, nil
+	}
+	return io.TeeReader(r, w), nil
+}
