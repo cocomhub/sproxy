@@ -108,7 +108,7 @@ func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, qua
 	if err := atomicRenameRoot(root, quarRel, trashRel); err != nil {
 		return "", fmt.Errorf("trash rename: %w", err)
 	}
-	// meta sidecar 随迁（best-effort：源 meta 不存在则跳过——读路径直算兜底；恢复时
+	// meta sidecar 随迁（best-effort：源 meta 不存在则跳过——读侧不校验；恢复时
 	// 随主文件一起回 meta 桶）。meta 条目与主文件同 flat 目录（+.meta 标记）。
 	// **同代 nano**：主文件与 meta 共享同一 nano，恢复时按同代精确配对（P1：此前各
 	// 自 time.Now() → 多代软删后恢复取到最旧一代 meta → 主文件/meta 错代不可读）。

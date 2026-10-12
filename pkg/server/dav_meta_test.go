@@ -5,7 +5,7 @@ package server
 
 // dav_meta_test.go 覆盖 WebDAV 挂载面 sidecar 联动的**目录级**语义（davMetaFS）：
 // MOVE 目录时必须整棵迁移子 sidecar 子树（`meta/<from>/**` → `meta/<to>/**`）——
-// 否则新位置逐分块校验静默失效（退化为直算），且旧子树成孤儿白占 meta 桶配额。
+// 否则新位置逐分块校验静默失效（读侧退化为不校验），且旧子树成孤儿白占 meta 桶配额。
 
 import (
 	"context"

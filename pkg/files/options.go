@@ -441,7 +441,7 @@ type FileMetaPolicy interface {
 	// Enabled 恒 true（meta 恒生成；装配层注入即生效）。
 	Enabled() bool
 	// WriteMeta 在文件落盘成功后生成并写入配套 .meta（隐藏、占配额）。实现方负责
-	// 计算 FileMeta（从已落盘文件计算总/分块 sha256+md5）与失败兜底（读路径直算）。
+	// 计算 FileMeta（从已落盘文件计算总/分块 sha256+md5）与失败兜底（失败＝读侧不校验）。
 	// owner 为文件归属（配额记账按 owner 的 meta 桶 Scope）；root 为文件所在租户根；
 	// rel 为根内相对路径（含 user/ 前缀）。
 	WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error

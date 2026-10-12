@@ -58,7 +58,7 @@ func (d *davMetaFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
 	}
 }
 
-// writeMeta 为已落盘文件重建 sidecar（best-effort；失败仅告警——读路径退化为直算/流式）。
+// writeMeta 为已落盘文件重建 sidecar（best-effort；失败仅告警——读侧退化为不校验/流式）。
 func (d *davMetaFS) writeMeta(ctx context.Context, p string) {
 	rel := d.bucketRel(p)
 	if rel == "" {
@@ -68,7 +68,7 @@ func (d *davMetaFS) writeMeta(ctx context.Context, p string) {
 		return
 	}
 	if err := (filesMetaPolicy{h: d.h}).WriteMeta(ctx, d.owner, d.root, rel); err != nil {
-		d.logger().Warn("dav: 写 meta sidecar 失败（读校验退化为直算/流式）", "path", rel, "error", err)
+		d.logger().Warn("dav: 写 meta sidecar 失败（读侧退化为不校验/流式）", "path", rel, "error", err)
 	}
 }
 
@@ -144,12 +144,12 @@ func (d *davMetaFS) relinkAfterMove(ctx context.Context, from, to string) {
 	d.removeMeta(from)
 	d.writeMeta(ctx, to)
 	// 目录级 MOVE：子文件 sidecar 在 `meta/<from>/**` 子树，必须整棵迁移——否则新位置
-	// 逐分块校验静默失效（退化为直算）且旧子树成孤儿白占 meta 桶配额。
+	// 逐分块校验静默失效（读侧退化为不校验）且旧子树成孤儿白占 meta 桶配额。
 	d.migrateMetaSubtree(from, to)
 }
 
 // migrateMetaSubtree 目录级 MOVE 时整棵迁移 sidecar 子树：`meta/<from>/**` → `meta/<to>/**`。
-// best-effort（单条失败 Warn 并继续——失败只退化为缺/孤 sidecar，读侧 missing 直算兜底）；
+// best-effort（单条失败 Warn 并继续——失败只退化为缺/孤 sidecar，读侧不校验）；
 // 返回迁移条数（0 = 源无子树，正常）。字节总量不变，无需配额调整。
 func (d *davMetaFS) migrateMetaSubtree(from, to string) int {
 	if d.root == nil {
@@ -190,11 +190,11 @@ func (d *davMetaFS) migrateMetaSubtree(from, to string) int {
 func (d *davMetaFS) migrateMetaEntry(child, srcRoot, dstRoot string) bool {
 	dst := dstRoot + strings.TrimPrefix(child, srcRoot)
 	if merr := d.root.MkdirAll(path.Dir(dst), 0o755); merr != nil {
-		d.logger().Warn("dav: sidecar 目标目录建立失败（新位置退化为直算）", "dir", path.Dir(dst), "error", merr)
+		d.logger().Warn("dav: sidecar 目标目录建立失败（新位置读侧不校验）", "dir", path.Dir(dst), "error", merr)
 		return false
 	}
 	if rerr := d.root.Rename(child, dst); rerr != nil {
-		d.logger().Warn("dav: sidecar 子树迁移失败（新位置退化为直算）", "from", child, "to", dst, "error", rerr)
+		d.logger().Warn("dav: sidecar 子树迁移失败（新位置读侧不校验）", "from", child, "to", dst, "error", rerr)
 		return false
 	}
 	return true

@@ -100,8 +100,8 @@ func newExternalSource(fsys syncpkg.FS, rel string, e *syncpkg.Entry, skipVerify
 	var fm func(ctx context.Context, rel string) (*meta.FileMeta, error)
 	if !skipVerify {
 		// 装配层注入 FileMeta 读取器（fsys 为可信卷——secretdata Provider / trusted
-		// Wrap 装饰器——时经 meta.Provider 探测）；无 meta 能力 → nil（直通，读路径
-		// 直算兜底）。
+		// Wrap 装饰器——时经 meta.Provider 探测）；无 meta 能力 → nil（直通）。此时该读路径
+		// **不提供校验**（sidecar 缺失=零校验，读路径不重算 meta）。
 		fm = fileMetaReaderFor(fsys)
 	}
 	return &externalDownloadSource{
