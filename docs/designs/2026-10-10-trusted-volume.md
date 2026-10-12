@@ -407,7 +407,7 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 | M6 远端 md5 非权威 | ✅ 已修（§8.5） | 先 rapidupload 刷新重验，仍非权威才接受并告警 |
 | M9a S3 multipart 孤儿 parts | ✅ 已修（§8.5） | `sweepStaleMultipart` + `s3MultipartOrphanTTL=24h` |
 | M9b 本地备份持久容量账本 | ✅ 已修（强一致） | `backupQuotaFS` 三本账同进同退（Scope + 卷池 + `StorageManager`） |
-| M9c 远端写后交叉校验 | ✅ 已修，且**已统一为有界轻量判据** | `verifyWriteMeta`：本地/远端同口径（Stat size + 末块 sha256；放弃「同 size 中段覆盖」检出，读路径逐分块兜底） |
+| M9c 远端写后交叉校验 | ✅ 已修，且**已统一为有界轻量判据**（含 `UpdateMetaExtra` 前置校验） | `metaContentMatches`：本地/远端同口径（Stat size + 末块 sha256；放弃「同 size 中段覆盖」检出，读路径逐分块兜底）。**第 7 轮残余 ⑤ 已收口**（2026-10-12）：`UpdateMetaExtra` 的**前置**校验此前被 `isLocal` 门整段跳过 → 远端并发覆盖只能靠写后判据发现（那时 meta 已污染）；现远端改用同一 `metaContentMatches` 前置判据，本地仍保留整文件 TotalSHA256 前置校验 |
 | M9d skip_verify 启动告警 | ✅ 已修（§8.5） | `warnIfVerifySkipped` |
 | m9 meta tmp 孤儿 / 整文件回读 | ✅ 已修，**并修正首版假修** | 清扫判定对齐真实生成端（`.<base>.tmp-*` 带前导点）；本地写后校验改有界轻量判据 |
 | Windows 反斜杠分隔符 | ✅ 已修 | `guardPath` 拒绝 `\`/NUL 且 fail-closed（`guard_fs_test.go` 已断言）——§8 旧文「残余」描述作废 |
