@@ -124,3 +124,35 @@ func TestStagingTracker_SingleWatcherPerCall(t *testing.T) {
 		t.Fatalf("单次 ReserveUsage 只应 spawn 1 个观察者（m7），实际 %d", got)
 	}
 }
+
+// TestStagingTracker_ReleaseBeforeWait_NoLostWakeup 回归（评审 F4）：释放恰发生在
+// 「TryReserve 失败 → 进入 cond.Wait」之间时，等待者必须**立即**观察到释放并成功，不得
+// 空等到 waitTimeout。beforeWait 钩子把该竞态窗口确定化。
+//
+// 变异：去掉「持锁后 double-check 重试」（或让 ReleaseUsage 不持 cond.L 广播）→ 释放信号
+// 丢失 → 等待者只能等 timer 广播 → 耗时≈waitTimeout → 红。
+func TestStagingTracker_ReleaseBeforeWait_NoLostWakeup(t *testing.T) {
+	t.Parallel()
+	scope := NewPool(0).Scope("/staging/f4", 100)
+	q := NewStagingTracker(scope)
+	q.waitTimeout = 4 * time.Second
+	ctx := context.Background()
+
+	if err := q.ReserveUsage(ctx, 100); err != nil {
+		t.Fatalf("首次预留应成功: %v", err)
+	}
+	q.beforeWait = func() {
+		q.beforeWait = nil // 只触发一次（窗口点）
+		q.ReleaseUsage(100)
+	}
+	start := time.Now()
+	if err := q.ReserveUsage(ctx, 100); err != nil {
+		t.Fatalf("窗口内释放后应成功: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("释放后应立即成功（窗口内释放不得丢失唤醒）；实际耗时 %s（waitTimeout=%s）", elapsed, q.waitTimeout)
+	}
+	if got := q.waitRounds.Load(); got != 0 {
+		t.Fatalf("double-check 命中时不应进入等待（waitRounds=%d）", got)
+	}
+}

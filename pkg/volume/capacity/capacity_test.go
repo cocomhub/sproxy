@@ -10,6 +10,7 @@ package capacity
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -403,5 +404,185 @@ func TestNewPoolCounterPersistent_CorruptFlagged(t *testing.T) {
 	}
 	if pc.pool.Usage() != 0 {
 		t.Fatalf("损坏快照 Usage=%d want 0", pc.pool.Usage())
+	}
+}
+
+// ---- 评审 F2：写失败后的记账复核（"写错误" ≠ "未落盘"） ----
+
+// commitThenErrFS 模拟**远端后端**：写盘（对象已提交）后返回错误（响应超时/连接中断，
+// 无原子 rename——对象实际已落盘）。Stat 返回真实状态。
+type commitThenErrFS struct {
+	mu    sync.Mutex
+	sizes map[string]int64
+}
+
+func (f *commitThenErrFS) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
+func (f *commitThenErrFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s, ok := f.sizes[p]; ok {
+		return &syncpkg.Entry{Name: p, Path: p, Size: s}, nil
+	}
+	return nil, nil
+}
+func (f *commitThenErrFS) OpenRead(context.Context, string) (io.ReadCloser, error) { return nil, nil }
+func (f *commitThenErrFS) WriteFile(_ context.Context, p string, r io.Reader, size, _ int64) error {
+	n := size
+	if r != nil {
+		w, _ := io.Copy(io.Discard, r)
+		n = w
+	}
+	f.mu.Lock()
+	f.sizes[p] = n
+	f.mu.Unlock()
+	return errors.New("remote: 写响应丢失（对象可能已提交）")
+}
+func (f *commitThenErrFS) Rename(context.Context, string, string) error { return nil }
+func (f *commitThenErrFS) Delete(_ context.Context, p string) error {
+	f.mu.Lock()
+	delete(f.sizes, p)
+	f.mu.Unlock()
+	return nil
+}
+func (f *commitThenErrFS) MakeDir(context.Context, string) error { return nil }
+
+// statErrFS 同 commitThenErrFS，但 Stat 失败（无法复核）。
+type statErrFS struct{ commitThenErrFS }
+
+func (f *statErrFS) Stat(context.Context, string) (*syncpkg.Entry, error) {
+	return nil, errors.New("remote: stat 失败")
+}
+
+// noWriteErrFS 写失败且**未落盘**（本地原子写语义：旧对象原样保留）。
+type noWriteErrFS struct{ sizes map[string]int64 }
+
+func (f *noWriteErrFS) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
+func (f *noWriteErrFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error) {
+	if s, ok := f.sizes[p]; ok {
+		return &syncpkg.Entry{Name: p, Path: p, Size: s}, nil
+	}
+	return nil, nil
+}
+func (f *noWriteErrFS) OpenRead(context.Context, string) (io.ReadCloser, error) { return nil, nil }
+func (f *noWriteErrFS) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+	return errors.New("local: 写失败（对象未变）")
+}
+func (f *noWriteErrFS) Rename(context.Context, string, string) error { return nil }
+func (f *noWriteErrFS) Delete(_ context.Context, p string) error {
+	delete(f.sizes, p)
+	return nil
+}
+func (f *noWriteErrFS) MakeDir(context.Context, string) error { return nil }
+
+// TestCapacityFS_WriteFailureKeepsCommittedAccounting 回归（评审 F2）：写返回错误但对象
+// **已提交**（远端无原子写）时，占用必须记为实测值——此前一律 Release(reserved) 假定未落盘
+// ⇒ used 永久偏低（限额可穿透 ~单文件大小且不重启不自愈）。
+//
+// 变异：把错误路径改回「Release(reserved)」→ Usage=0 → 红。
+func TestCapacityFS_WriteFailureKeepsCommittedAccounting(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(100)
+	fs := Wrap(&commitThenErrFS{sizes: map[string]int64{}}, NewPoolCounter(pool))
+	if err := fs.WriteFile(context.Background(), "a.bin", strings.NewReader(strings.Repeat("x", 40)), 40, 0); err == nil {
+		t.Fatal("应返回写错误")
+	}
+	if got := pool.Usage(); got != 40 {
+		t.Fatalf("写错误但对象已提交 → 占用应记 40（清理回滚=限额穿透），got %d", got)
+	}
+}
+
+// TestCapacityFS_WriteFailureNotPersistedRollsBack：写失败且**确实未落盘**（本地原子写：
+// 旧对象原样保留）→ 预留回滚到旧口径（不泄漏占用）。
+func TestCapacityFS_WriteFailureNotPersistedRollsBack(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(100)
+	inner := &noWriteErrFS{sizes: map[string]int64{"a.bin": 10}}
+	fs := Wrap(inner, NewPoolCounter(pool))
+	pre, perr := pool.TryReserve(10) // 预置 a.bin 的已占用（须 Commit 才计入 Usage）
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	pre.Commit(10)
+	// 覆盖写声明 50（净增预留 40），写失败且未落盘 → 占用应保持 10。
+	if err := fs.WriteFile(context.Background(), "a.bin", nil, 50, 0); err == nil {
+		t.Fatal("应返回写错误")
+	}
+	if got := pool.Usage(); got != 10 {
+		t.Fatalf("未落盘的写失败应回滚预留（占用保持 10），got %d", got)
+	}
+}
+
+// TestCapacityFS_WriteFailureStatUnverifiableBiasesHigh：Stat 无法复核时**不清账**（宁可
+// 偏高——限额宁紧勿松，运维可对账），绝不按「未落盘」静默少计。
+func TestCapacityFS_WriteFailureStatUnverifiableBiasesHigh(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(100)
+	fs := Wrap(&statErrFS{commitThenErrFS{sizes: map[string]int64{}}}, NewPoolCounter(pool))
+	if err := fs.WriteFile(context.Background(), "a.bin", nil, 30, 0); err == nil {
+		t.Fatal("应返回写错误")
+	}
+	if got := pool.Usage(); got != 30 {
+		t.Fatalf("Stat 不可复核时应保留预留（宁可偏高），got %d", got)
+	}
+}
+
+// TestCapacityFS_WriteIfAbsentNotWrittenReleases：WriteIfAbsent 显式返回「未写」（幂等命中
+// 已存在对象）→ 这是**明确的未落盘答复**，回滚预留是正确口径（与写错误区分）。
+func TestCapacityFS_WriteIfAbsentNotWrittenReleases(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(100)
+	inner := &wiaMeasuringFS{sizes: map[string]int64{"a.bin": 5}}
+	fs := Wrap(inner, NewPoolCounter(pool))
+	pre, perr := pool.TryReserve(5) // 预置 a.bin 的已占用
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	pre.Commit(5)
+	ok, err := fs.WriteIfAbsent(context.Background(), "a.bin", strings.NewReader("hello"), 20, 0)
+	if err != nil || ok {
+		t.Fatalf("幂等命中应 (false, nil), got ok=%v err=%v", ok, err)
+	}
+	if got := pool.Usage(); got != 5 {
+		t.Fatalf("未写应回滚预留（占用保持 5），got %d", got)
+	}
+}
+
+// TestCapacityFS_DeclaredSizeNilReader：仅声明长度、无内容源（r=nil）的写不得 panic
+// （countingReader 空流处理）；按声明长度记账。
+func TestCapacityFS_DeclaredSizeNilReader(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(100)
+	fs := Wrap(&measuringFS{sizes: map[string]int64{}}, NewPoolCounter(pool))
+	if err := fs.WriteFile(context.Background(), "a.bin", nil, 30, 0); err != nil {
+		t.Fatalf("WriteFile(nil reader): %v", err)
+	}
+	if got := pool.Usage(); got != 30 {
+		t.Fatalf("按声明长度记账，got %d", got)
+	}
+}
+
+// TestLoad_CorruptSnapshotCounted 回归（评审 F5）：快照损坏必须在**进程级计数**上可见
+// （供 /metrics 消费）——此前只有一行 Warn，运维无从区分「限额生效」与「限额已被放宽一轮」
+// （反复损坏=反复放大，且启动日志早被淹没）。
+func TestLoad_CorruptSnapshotCounted(t *testing.T) {
+	t.Parallel()
+	before := CorruptSnapshotCount()
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.capacity")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(bad, 100); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(dir, "old.capacity")
+	if err := os.WriteFile(old, []byte(`{"version":99,"used":5}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(old, 100); err != nil {
+		t.Fatal(err)
+	}
+	if got := CorruptSnapshotCount(); got < before+2 {
+		t.Fatalf("损坏+版本不识应各计一次（before=%d got=%d）", before, got)
 	}
 }

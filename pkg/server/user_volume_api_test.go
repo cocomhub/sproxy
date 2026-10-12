@@ -160,6 +160,24 @@ func TestUserVolumeAPI_Create_BadType(t *testing.T) {
 	}
 }
 
+// TestUserVolumeAPI_Create_BadName 回归（评审 F7）：非法卷名必须在**拼计数器路径之前**
+// 被拒（400），不得先按 req.Name 去读 meta 目录之外的 `*.capacity`（读到脏数据/500）。
+// 变异：去掉提前的 ValidSegmentName 检查 → 走 store.Create 才拒 → 本用例仍 400 但覆盖了
+// 「路径已拼」的顺序缺陷（配合遍历名可观测到 500）。
+func TestUserVolumeAPI_Create_BadName(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"../evil", "a/b", ".", "..", "a\b"} {
+		h, _ := newUserVolumeAPIHandlers(t, false)
+		mux := userVolWrap(h, "alice")
+		rec := postUserVolume(t, mux, map[string]any{
+			"name": name, "type": userVolumeTestType, "extra": map[string]any{"bduss": "t"},
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("非法卷名 %q → %d, want 400 (body: %s)", name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // TestUserVolumeAPI_List_OwnerFilter 两个 owner 各建 → GET 只列自己。
 func TestUserVolumeAPI_List_OwnerFilter(t *testing.T) {
 	t.Parallel()

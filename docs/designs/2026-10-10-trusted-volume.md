@@ -450,6 +450,21 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 **有意未做**：出口侧不去「猜」持有侧是否为加密卷——加密口径由**持有侧**决定并反映在它的回答里
 （返回 404），出口侧只消费结论；否则出口侧需要复制一份持有侧配置，正是本项要消除的耦合。
 
+## 8.11 容量/staging 记账残余收口（2026-10-12 落地，第 5 轮评审 r1-capacity F2–F5 + F7/F8）
+
+| 项 | 严重度 | 症状 | 处置 |
+|---|---|---|---|
+| **F2** 写失败回滚假定「错误⇒未落盘」 | P2 | 远端后端（baidupcs/s3）无原子 rename，响应超时/连接中断时对象**可能已提交**；此前一律 `Release(reserved)` ⇒ 卷级 `used` 永久偏低（限额可穿透 ~单文件大小，不重启不自愈） | `CapacityFS.settleAfterWriteError`：写失败时 **Stat 复核实测值并结算到实测**（本地卷/未提交 → 结算回旧口径，不泄漏）；**Stat 无法复核 → 保留预留不清账**（宁可偏高，限额宁紧勿松）。`WriteIfAbsent` 的 `(false,nil)`（幂等命中，**明确的未落盘答复**）仍回滚预留。附带修 `countingReader` 对 `r==nil` 的 panic（仅声明长度的写） |
+| **F3** `size<=0` 未知长度写完全不进 staging 记账 | P2 | 无 Content-Length / copyMeta 类：`StagingTracker.ReserveUsage(size<=0)` 是 no-op，gate 亦无写后结算 ⇒ 并发流式写可打满本地盘而配额不可见 | `StagingQuotaGateFS` 未知长度分支改 `reservingReader`：**每读取 n 字节即预留 n**（实测口径；`Read` 阻塞即背压），写完释放累计实测总量（`WriteFile`/`WriteIfAbsent` 同口径） |
+| **F4** `StagingTracker` 丢失唤醒（空间已释放仍空等到 deadline ≤5s） | P2 | `TryReserve` 失败与 `cond.Wait` 之间未持锁，此间的 `ReleaseUsage` 广播被丢失；且每轮等待新起 goroutine 共用单次投递的 `timer.C` | `waitRound`：**持 `cond.L` 先 double-check `TryReserve`** + `ReleaseUsage` **持 `cond.L` 释放并广播** + 观察者**取 `cond.L` 后广播**（等待者持锁直至 `Wait` → 信号不可落在窗口里）。三处叠加后不存在可丢窗口 |
+| **F5** `CorruptSnapshot` 仅 Warn（无可观测面） | P2 | 计数文件是占用量的唯一权威记录，损坏即 `used` 归零（限额被放宽一轮；反复损坏=反复放大），除启动日志无指标/健康项 | `capacity.CorruptSnapshotCount()`（进程级原子计数，累计点内聚在 `Load`/`NewPoolCounterPersistent`，含 `cmd/sproxy` restore 路径）+ `/metrics` 暴露 **`sproxy_volume_capacity_corrupt_total`**；启动 Warn 保留 |
+| **F7** create 在校验名前用 `req.Name` 拼计数器路径 | P3 | 名字含分隔符/`..` 时 `Capacity.Load` 读到 meta 目录之外的 `*.capacity`（读失败直接 500；顺序/错误码不当） | `createUserVolumeHandler` 在拼路径前用**与 store 同一判定**（`storage.ValidSegmentName`）拒绝：非法名 → 400 |
+| **F8** `Load` 的 capacity 一致性注释与实现不符 | P3 | 注释称「持久化 capacity 不一致会告警」，实现从未比较（文档/行为漂移） | 注释改为如实描述：快照 `capacity` 仅供追溯，**不参与比较、不改写传入值**（配置/请求为权威） |
+
+**测试与变异**：`pkg/quota`（F4：`beforeWait` 钩子把「释放恰在 TryReserve 失败与 Wait 之间」确定化并断言 <1s 完成；去 double-check → 4s 超时红）、`pkg/sync`（F3：未知长度写期间配额在账峰值 == 实测字节数；回退透传 → 峰值 0 红）、`pkg/volume/capacity`（F2 三态：已提交→记 40 / 未落盘→回滚 / Stat 不可复核→保留；`nil` reader 不 panic；F5 计数）、`pkg/server`（F5 `/metrics` 计数 >0；F7 非法名 → 400，变异回退 → 409 红）。
+
+**未纳入本次**（需产品/设计口径，另片）：**F6** 用户卷 capacity 完全取自请求体（delete+recreate 写 `capacity:0` 即解除上限——「防放大」保护不完整）；**F9** 每次 `TryAdd/Release` 都 `tmp+fsync+rename+fsync(dir)`（同卷写/删串行化，高并发外部卷吞吐瓶颈）；**F1** 外部卷对象无用户可见删除入口（写满后覆盖写缩小也被全量探测拦下 —— 净增差量探测已在 #755 落地，删除入口属新面）。
+
 ## 8.9 崩溃窗口（陈旧 sidecar）处置（2026-10-12 落地）
 
 **问题**：主文件与 `.meta` sidecar 是**两次独立原子写**，崩溃落在「主文件已落新内容、sidecar

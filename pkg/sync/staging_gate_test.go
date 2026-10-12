@@ -12,16 +12,46 @@ import (
 )
 
 // recQuota 记录 staging 配额预留/释放（断言 gate 记账用）。
+//
+// **镜像真实 tracker 契约**：`size<=0` 是无 no-op（`quota.StagingTracker.ReserveUsage`
+// 对未知长度直接放行）——否则测试替身会比生产「更宽松」，掩盖未知长度漏记（评审 F3）。
 type recQuota struct {
 	reserved []int64
 	released []int64
+	used     int64 // 当前在账（reserve 累加 / release 递减）
+	maxUsed  int64 // 观测到的在账峰值（断言「写期间已预留」）
 }
 
 func (r *recQuota) ReserveUsage(_ context.Context, size int64) error {
+	if size <= 0 {
+		return nil // 与真实 tracker 同语义：未知长度不预留
+	}
 	r.reserved = append(r.reserved, size)
+	r.used += size
+	if r.used > r.maxUsed {
+		r.maxUsed = r.used
+	}
 	return nil
 }
-func (r *recQuota) ReleaseUsage(size int64) { r.released = append(r.released, size) }
+func (r *recQuota) ReleaseUsage(size int64) {
+	if size <= 0 {
+		return
+	}
+	r.released = append(r.released, size)
+	r.used -= size
+}
+
+// drainFS 读尽 reader（模拟 staging 落盘），记录读到的字节数。
+type drainFS struct {
+	baseFS
+	read int
+}
+
+func (s *drainFS) WriteFile(_ context.Context, _ string, r io.Reader, _ int64, _ int64) error {
+	n, err := io.Copy(io.Discard, r)
+	s.read = int(n)
+	return err
+}
 
 // baseFS 是最小 FS（仅 7 基础方法；WriteFile 记数）。
 type baseFS struct{ written int }
@@ -230,4 +260,64 @@ func TestApplyStagingQuota_NilQuota(t *testing.T) {
 	if out := ApplyStagingQuota(fs, nil); out != fs {
 		t.Fatal("nil quota 应原样返回")
 	}
+}
+
+// TestStagingQuotaGate_UnknownLengthStreamsReservation 回归（评审 F3）：size<=0（无
+// Content-Length / copyMeta 类）的写此前**完全不进 staging 记账**（成本：并发流式写可打满
+// 本地盘而配额不可见）。修复后按**累计实测**流式预留（写期间即在账 + 对写路径形成背压），
+// 并在写后释放实测总量。
+//
+// 变异：把未知长度分支改回「直接透传 size」→ 无任何预留 → maxUsed=0 → 红。
+func TestStagingQuotaGate_UnknownLengthStreamsReservation(t *testing.T) {
+	t.Parallel()
+	payload := strings.Repeat("z", 4096)
+	inner := &drainFS{}
+	rq := &recQuota{}
+	g := WrapStagingQuota(inner, rq)
+
+	// size=-1 模拟 ContentLength 未知。
+	if err := g.WriteFile(context.Background(), "user/f.bin", strings.NewReader(payload), -1, 0); err != nil {
+		t.Fatalf("WriteFile(unknown size): %v", err)
+	}
+	if inner.read != len(payload) {
+		t.Fatalf("inner 应读尽 payload, got %d", inner.read)
+	}
+	if rq.maxUsed != int64(len(payload)) {
+		t.Fatalf("未知长度写必须在写期间按实测预留（峰值 %d, want %d）", rq.maxUsed, len(payload))
+	}
+	if rq.used != 0 {
+		t.Fatalf("写后应把实测预留全部释放（残留 %d）", rq.used)
+	}
+	if len(rq.reserved) == 0 || len(rq.released) != 1 || rq.released[0] != int64(len(payload)) {
+		t.Fatalf("应按实测累计预留、一次性释放；reserved=%v released=%v", rq.reserved, rq.released)
+	}
+}
+
+// TestStagingQuotaGate_UnknownLengthWriteIfAbsent 同上，覆盖 WriteIfAbsent 分支。
+func TestStagingQuotaGate_UnknownLengthWriteIfAbsent(t *testing.T) {
+	t.Parallel()
+	payload := strings.Repeat("y", 2048)
+	wa := &waDrainFS{waOK: true}
+	rq := &recQuota{}
+	g := WrapStagingQuota(wa, rq)
+	ok, err := g.WriteIfAbsent(context.Background(), "user/f.bin", strings.NewReader(payload), -1, 0)
+	if err != nil || !ok {
+		t.Fatalf("WriteIfAbsent(unknown size): ok=%v err=%v", ok, err)
+	}
+	if rq.maxUsed != int64(len(payload)) || rq.used != 0 {
+		t.Fatalf("WriteIfAbsent 未知长度应按实测预留并释放（峰值 %d, 残留 %d）", rq.maxUsed, rq.used)
+	}
+}
+
+// waDrainFS 是「WriteIfAbsent 读尽 reader」的测试 FS。
+type waDrainFS struct {
+	baseFS
+	waOK bool
+	read int
+}
+
+func (s *waDrainFS) WriteIfAbsent(_ context.Context, _ string, r io.Reader, _ int64, _ int64) (bool, error) {
+	n, err := io.Copy(io.Discard, r)
+	s.read = int(n)
+	return s.waOK, err
 }
