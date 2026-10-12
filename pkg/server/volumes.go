@@ -475,7 +475,8 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 		return h.routeUploadSingle(owner, rel, forceHomeVol, size, false, view)
 	}
 
-	// 显式指定卷：ACL 校验 + 唯一性查重，单候选双预留（无换卷）。
+	// 显式指定卷：ACL 校验 + 唯一性查重（AD-4）+ 单候选双预留（无换卷）。唯一性属 HTTP
+	// 上传覆盖策略；统一写内核显式卷（S3/DAV/版本恢复）走 RouteTarget（不查重，覆盖写语义）。
 	if explicitVol != "" {
 		return h.routeUploadSingle(owner, rel, explicitVol, size, true, view)
 	}

@@ -256,58 +256,25 @@ func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, 
 // writeFileSettle 原子写入 + 流式哈希 + SHA-256 比对（不符删文件回 400）+ 双账本结算
 // + checksum 台账 + mtime 落地 + 去重新内容登记。返回最终成功结果。
 func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input WriteFileInput, route UploadRoute, src io.Reader) (WriteFileResult, error) {
-	// 原子写入 + 流式哈希（目标卷 f.root）。
-	// 带宽限速（roadmap §6 P1）：src 按 f.owner 桶包一层限速 reader；未装配限速器原样直通。
+	// 统一写内核（writeTargetSettle）：原子写 + checksum 比对 + 双账本 + sidecar + 台账
+	// 全部内聚。HTTP 上传特有的差异只在**限速**（带宽限速器按 owner 包一层）与 **dedup
+	// 台账登记**（本函数额外做）——落盘/结算/副作用与 S3/DAV/版本恢复同一内核。
 	limitedSrc := limitReader(s.rt.bandwidthLimiter(), f.owner, src)
-	serverChecksum, written, wErr := writeFileAtomicallyRoot(f.ctx, f.root, rel, limitedSrc)
-	if wErr != nil {
-		route.Release()
-		// 封印拒绝（评审 P2）：目标路径落在封装卷占用的源区间时，卷层返回 ErrSealed——按 409
-		// 语义回包（显式「路径由封装卷管理」，不暴露封装卷名），并记 Warn 以便与真失败区分。
-		if errors.Is(wErr, storage.ErrSealed) {
-			f.logger.WarnContext(f.ctx, "写入被封印拒绝（路径由封装卷管理，禁止直连写入）",
-				"file_name", f.remotePath)
-			return WriteFileResult{}, &HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接写入"}
-		}
-		f.logger.ErrorContext(f.ctx, "保存文件失败", "error", wErr.Error(), "file_name", f.remotePath)
-		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+	res, werr := s.writeTargetSettle(f.ctx, f.owner, rel, f.remotePath, WriteTargetInput{
+		Owner: f.owner, RemotePath: input.RemotePath, Volume: input.ExplicitVol,
+		Verify: true, ExpectedChecksum: input.ExpectedChecksum,
+		ClientSize: input.ClientSize, Mtime: input.Mtime,
+	}, route, limitedSrc, f.logger)
+	if werr != nil {
+		return WriteFileResult{}, werr
 	}
-
-	if serverChecksum != input.ExpectedChecksum {
-		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomicallyRoot 清理）
-		_ = f.root.Remove(rel)
-		// MINOR-4 修复：覆盖写校验失败删主文件时同步清 meta（防旧 sidecar 描述旧内容、
-		// 新 rel 已删 → 下次同 rel 成功写前 meta 残留占配额）——用 fileOp 上下文（有
-		// root/owner/logger），走 removeFileMeta 配额对称清理。
-		if prev > 0 {
-			s.removeFileMeta(f, rel)
-		}
-		route.Release()
-		f.logger.WarnContext(f.ctx, errMsgChecksumMismatch, "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", f.remotePath)
-		return WriteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
-	}
-
-	// 双账本结算：覆盖写 Adjust(prev, written) + Release（旧文件已占用 prev，差分收敛到
-	// 新大小）；新文件 Commit(written)。f.owner 全局 Scope 与卷容量池同语义。
-	route.Commit(prev, written)
-
-	// 成功后的副作用：checksum 台账写入 + mtime 落地（原 setUploadResponseHeaders 的领域部分）。
-	s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, serverChecksum, input.Mtime, f.logger)
 	if ds := s.rt.dedupStore(f.owner); s.rt.dedupEnabled() && ds != nil {
 		// 新文件与覆盖写都登记新 checksum 引用（覆盖写已在上方 prev>0 分支摘除旧引用；
 		// 本处登记新内容引用，使后续去重可命中）。幂等/409 提前返回不经过此处。
-		ds.Add(rel, route.VolumeName, serverChecksum)
+		ds.Add(rel, route.VolumeName, res.Checksum)
 	}
-	// 可信卷（本地卷到达即建 meta）：写入成功后生成配套 FileMeta（从已落盘文件
-	// 计算总 sha256+md5 + 分块）并落隐藏 `.meta`（占配额——经装配层实现写入计入账本）。
-	// 失败不阻断主写成功（meta 缺失时读路径直算/Stat 兜底；用户裁定新文件保障立刻创建）。
-	if s.rt.fileMetaEnabled() {
-		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
-			f.logger.Warn("可信卷 meta 落盘失败（读路径直算兜底）", "file_name", rel, "error", mErr)
-		}
-	}
-
-	return WriteFileResult{Checksum: serverChecksum, Size: written, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, nil
+	return WriteFileResult{Checksum: res.Checksum, Size: res.Size,
+		Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, nil
 }
 
 // resolveWritePath 校验并映射写路径（pathguard + UserRel），失败以 *HTTPError{400} 表达。
@@ -1629,3 +1596,272 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 	}
 	return DeleteFileResult{}, false, nil
 }
+
+// WriteTargetInput 是统一写内核（WriteTarget）的入参：把「锁 + 目标解析 + 记账 + 原子写 +
+// checksum + sidecar + 台账」内聚为单一入口，供 S3/DAV/版本恢复/归档/HTTP 上传共用。
+//
+// 与 WriteFileInput 的差异（参数化行为）：
+//   - Volume：显式目标卷名（S3 bucket=卷名 / DAV·版本·归档=默认卷；空 = 自动路由按 ACL/placement）；
+//   - Verify：是否比对客户端校验和（HTTP 上传/版本恢复=true；S3/归档聚合=false——服务端自算只记录）；
+//   - Exclusive：O_EXCL 新建（归档输出：同名已存在 → 409 errArchiveExists 语义），且不建 sidecar；
+//   - NoLock：调用方已持锁（multipart complete 会话内；跳过内部 upload 锁）；
+//   - NoQuota：账目已由调用方结算（multipart complete 的「parts→目标」转移、版本恢复的
+//     reserveRestoreQuota 已预留）——WriteTarget 只落盘 + sidecar + 台账，不再 TryReserve/Commit；
+//   - 不做 HTTP 上传专属的幂等/版本/dedup 预处理（那些留在 WriteFile 内部；WriteTarget 是
+//     「写」的单一事实源，预处理是外围策略）。
+type WriteTargetInput struct {
+	// Owner 是操作主体（空 → anonymous，本方法内归一）。
+	Owner string
+	// RemotePath 是用户可见相对路径（含子目录；WriteTarget 内校验）。
+	RemotePath string
+	// Volume 是显式目标卷名（空 = 自动路由）。
+	Volume string
+	// Verify 为 true 时按 ExpectedChecksum 比对（不符即 400 并删除已写内容）。
+	Verify bool
+	// ExpectedChecksum 是客户端声明的 SHA-256（Verify=true 时必填）。
+	ExpectedChecksum string
+	// Exclusive 为 true 时 O_EXCL 新建（同名已存在 → 409；不建 sidecar）。
+	Exclusive bool
+	// NoLock 为 true 时跳过内部 upload 锁（调用方已持锁）。
+	NoLock bool
+	// NoQuota 为 true 时跳过双账本预留/结算（调用方已结算）。
+	NoQuota bool
+	// NoRecord 为 true 时跳过成功副作用（upload 事件/checksum 台账/索引 upsert/mtime）——
+	// 调用方自己发布语义事件（如版本恢复发布 version 事件、S3 由协议层处理）。sidecar 仍内置。
+	NoRecord bool
+	// ClientSize 是客户端声明的大小（用于成功文案与路由预检）。
+	ClientSize int64
+	// Mtime 是写入后要设置的文件修改时间（UnixNano；0 = 不设置）。
+	Mtime int64
+}
+
+// WriteTargetResult 是统一写内核的结果。
+type WriteTargetResult struct {
+	// VolumeName 是落盘卷名（空 = 无卷语义）。
+	VolumeName string
+	// Checksum 是服务端计算的 SHA-256。
+	Checksum string
+	// Size 是实际写入字节。
+	Size int64
+	// ExclusiveCreated 为 true 表示 Exclusive 模式实际创建了新文件（false = 已存在 409 前序）。
+	ExclusiveCreated bool
+	// NoOp 为 true 表示幂等命中（Verify=true 且文件已存在、checksum 一致——不写盘直接成功）。
+	NoOp bool
+	// Message 是成功文案（对齐上传「文件上传成功, size: N」）。
+	Message string
+}
+
+// WriteTarget 是统一写内核：锁（!NoLock）→ 目标解析（Volume 显式 ACL 校验 or 自动路由）→
+// 双账本预留（!NoQuota）→ 原子写（本地 tmp+fsync+rename；Exclusive O_EXCL 直写；外部卷 Sink
+// 直写）→ checksum 比对（Verify）→ sidecar 内置（!Exclusive）→ 台账 + mtime 副作用。
+//
+// 错误一律返回 *HTTPError（Status/Message/Reason 对齐 HTTP 上传语义），供各写面直接映射
+// （S3 保持协议 XML 形态、状态码对齐；DAV 透传；版本/归档复用上传文案）。
+func (s *Service) WriteTarget(ctx context.Context, input WriteTargetInput, src io.Reader) (WriteTargetResult, error) {
+	owner := normalizeOwner(input.Owner)
+	logger := s.rt.logger()
+	remotePath, rel, err := s.resolveWritePath(owner, input.RemotePath)
+	if err != nil {
+		return WriteTargetResult{}, err
+	}
+	if !input.NoLock {
+		release, acquired := s.rt.fileLocks().TryMark(owner, rel, uploadingLockUpload)
+		if !acquired {
+			logger.WarnContext(ctx, "文件正在上传中，拒绝并发写入", "file_name", remotePath)
+			return WriteTargetResult{}, &HTTPError{Status: http.StatusConflict, Message: "文件正在上传中"}
+		}
+		defer release()
+	}
+	// 目标解析 + 双账本预留：显式卷（S3/DAV/版本恢复）走 RouteTarget（ACL+双预留、**不查重**——
+	// 覆盖写语义）；空卷 = 自动路由（HTTP 上传语义，含唯一性由上传层负责）。
+	// NoQuota 时仍走 route（拿 Tenant/Sink 与 VolumeName），但跳过其预留并在写后不结算。
+	var route UploadRoute
+	var routeErr error
+	if input.Volume != "" {
+		route, routeErr = s.rt.routeTarget(owner, rel, input.Volume, input.ClientSize)
+	} else {
+		route, routeErr = s.routeWriteUpload(ctx, logger, owner, rel, WriteFileInput{
+			Owner: owner, RemotePath: remotePath, ExplicitVol: "",
+			ExpectedChecksum: input.ExpectedChecksum, ClientSize: input.ClientSize, Mtime: input.Mtime,
+		}, "", remotePath)
+	}
+	if routeErr != nil {
+		return WriteTargetResult{}, routeErr
+	}
+	if input.NoQuota {
+		route.Release() // 释放探测预留（调用方已结算真实账目）
+	}
+	return s.writeTargetSettle(ctx, owner, rel, remotePath, input, route, src, logger)
+}
+
+// writeTargetSettle 是 WriteTarget 的写盘/校验/结算/副作用主体（对照 writeFileSettle：
+// 去掉 HTTP 上传专属的幂等/版本/dedup 预处理，保留原子写 + checksum + 双账本 + sidecar + 台账）。
+func (s *Service) writeTargetSettle(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, src io.Reader, logger *slog.Logger) (WriteTargetResult, error) {
+	// 外部卷（Sink）写入：无本地 inode 语义，直写 + 校验 + 记账。
+	if route.Sink != nil {
+		return s.writeTargetExternalSettle(ctx, logger, owner, rel, remotePath, input, route, src)
+	}
+	// 本地卷：原子写 + 校验 + 双账本 + sidecar + 台账（统一内核主体）。
+	return s.writeTargetLocalSettle(ctx, owner, rel, remotePath, input, route, src, logger)
+}
+
+// writeTargetLocalSettle 本地卷统一写内核主体：MkdirAll → prev → 原子写（Exclusive O_EXCL）→
+// 校验 → 双账本结算 → sidecar → 台账。
+func (s *Service) writeTargetLocalSettle(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, src io.Reader, logger *slog.Logger) (WriteTargetResult, error) {
+	root := route.Tenant.Root()
+	if mkdirErr := root.MkdirAll(filepath.Dir(rel), 0o755); mkdirErr != nil {
+		route.Release()
+		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", mkdirErr.Error())
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+	}
+	// 覆盖写差分 prev（Exclusive 时 prev 必 0——O_EXCL 创建；NoQuota 时仍预读供 size 语义）。
+	prev := int64(0)
+	if !input.Exclusive {
+		if st, serr := root.Stat(rel); serr == nil && st != nil {
+			prev = st.Size()
+		}
+	}
+
+	var serverChecksum string
+	var written int64
+	var wErr error
+	if input.Exclusive {
+		// O_EXCL 新建（归档输出）：直写目标（无临时+rename——Exclusive 失败不留半截由调用方清理）。
+		serverChecksum, written, wErr = writeTargetExclusive(ctx, root, rel, src)
+	} else {
+		serverChecksum, written, wErr = writeFileAtomicallyRoot(ctx, root, rel, src)
+	}
+	if wErr != nil {
+		route.Release()
+		return WriteTargetResult{}, writeTargetError(logger, ctx, remotePath, input.Exclusive, wErr)
+	}
+	if input.Exclusive {
+		if !input.NoQuota {
+			route.Commit(0, written)
+		}
+		return WriteTargetResult{
+			VolumeName: route.VolumeName, Checksum: serverChecksum, Size: written,
+			ExclusiveCreated: true, Message: fmt.Sprintf("文件写入成功, size: %d", written),
+		}, nil
+	}
+	// 校验 + 结算 + sidecar + 台账（非 Exclusive 常规路径）。
+	if input.Verify && serverChecksum != input.ExpectedChecksum {
+		return WriteTargetResult{}, verifyMismatchError(root, route, logger, ctx, rel, remotePath, serverChecksum, input.ExpectedChecksum)
+	}
+	return s.writeTargetSettleCommon(ctx, owner, rel, remotePath, input, route, root, prev, written, serverChecksum, logger)
+}
+
+// writeTargetSettleCommon 非 Exclusive 路径的结算 + sidecar + 台账（统一内核常规副作用）。
+func (s *Service) writeTargetSettleCommon(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, root *storage.Root, prev, written int64, serverChecksum string, logger *slog.Logger) (WriteTargetResult, error) {
+	// 双账本结算（!NoQuota）：覆盖写 Adjust(prev,written) + Release；新文件 Commit(written)。
+	if !input.NoQuota {
+		route.Commit(prev, written)
+	}
+	// sidecar 内置（!Exclusive）：写成功后生成配套 FileMeta（meta 恒生成；失败只 Warn 兜底）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel); mErr != nil {
+			logger.Warn("可信卷 meta 落盘失败（读路径直算兜底）", "file_name", remotePath, "error", mErr)
+		}
+	}
+	// 台账 + mtime（成功副作用；跳过 Exclusive 的 archive 语义——台账/统计对 user 桶文件）。
+	// NoRecord：调用方自己发布语义事件（版本恢复 version 事件等），不重复 upload 事件/台账。
+	if !input.NoRecord {
+		s.recordUploadSuccess(root, owner, remotePath, rel, serverChecksum, input.Mtime, logger)
+	}
+	return WriteTargetResult{
+		VolumeName: route.VolumeName, Checksum: serverChecksum, Size: written,
+		Message: fmt.Sprintf("文件写入成功, size: %d", written),
+	}, nil
+}
+
+// writeTargetExclusive 以 O_EXCL 语义直写（Exclusive 模式）：同名已存在 → os.ErrExist。
+func writeTargetExclusive(ctx context.Context, root *storage.Root, rel string, src io.Reader) (string, int64, error) {
+	f, err := writeUserVisibleOpenExcl(ctx, root, rel)
+	if err != nil {
+		return "", 0, err
+	}
+	h := sha256.New()
+	written, werr := copyWithContext(io.MultiWriter(f, h), src, ctx)
+	cerr := f.Close()
+	if werr != nil {
+		return "", written, werr
+	}
+	if cerr != nil {
+		return "", written, cerr
+	}
+	return hex.EncodeToString(h.Sum(nil)), written, nil
+}
+
+// writeUserVisibleOpenExcl 以 O_EXCL 语义打开目标（加密卷透明加密；同名已存在 → os.ErrExist）。
+func writeUserVisibleOpenExcl(ctx context.Context, root *storage.Root, rel string) (io.WriteCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if root.IsEncrypted() {
+		return root.OpenFileEncrypted(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	}
+	return root.OpenFile(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+}
+
+// verifyMismatchError 校验和与客户端声明不符：删已写内容 + 释放预留 + 400（对齐上传）。
+func verifyMismatchError(root *storage.Root, route UploadRoute, logger *slog.Logger, ctx context.Context, rel, remotePath, serverChecksum, clientChecksum string) error {
+	_ = root.Remove(rel)
+	route.Release()
+	logger.WarnContext(ctx, errMsgChecksumMismatch, "server", serverChecksum, "client", clientChecksum, "file_name", remotePath)
+	return &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
+}
+
+// writeTargetError 把写失败映射为统一 HTTPError：封印拒绝 → 409（封装卷语义）、Exclusive
+// 已存在 → 409（归档）、其余 → 500（对齐上传 errMsgSaveFailed）。
+func writeTargetError(logger *slog.Logger, ctx context.Context, remotePath string, exclusive bool, wErr error) error {
+	if errors.Is(wErr, storage.ErrSealed) {
+		logger.WarnContext(ctx, "写入被封印拒绝（路径由封装卷管理，禁止直连写入）", "file_name", remotePath)
+		return &HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接写入"}
+	}
+	if exclusive && errors.Is(wErr, os.ErrExist) {
+		return errArchiveExistsHTTPError // 409：同名已存在
+	}
+	logger.ErrorContext(ctx, "保存文件失败", "error", wErr.Error(), "file_name", remotePath)
+	return &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+}
+
+// writeTargetExternalSettle 是 WriteTarget 的外部卷写（对照 writeExternalSettle：保留整流写 +
+// 流式哈希 + Verify 校验 + 双账本结算，去掉去重/版本/台账——统一内核只管写）。
+func (s *Service) writeTargetExternalSettle(ctx context.Context, logger *slog.Logger, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, src io.Reader) (WriteTargetResult, error) {
+	prev := int64(0)
+	if sz, ok, serr := route.Sink.Stat(ctx, rel); serr == nil && ok {
+		prev = sz
+	}
+	if derr := route.Sink.MakeDir(ctx, filepath.Dir(rel)); derr != nil {
+		route.Release()
+		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", remotePath)
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+	}
+	hasher := sha256.New()
+	limitedSrc := limitReader(s.rt.bandwidthLimiter(), owner, io.TeeReader(src, hasher))
+	start := time.Now()
+	if werr := route.Sink.WriteFile(ctx, rel, limitedSrc, input.ClientSize, input.Mtime); werr != nil {
+		route.Release()
+		logger.ErrorContext(ctx, "外部卷保存文件失败", "error", werr.Error(), "file_name", remotePath)
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+	}
+	serverChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if input.Verify && serverChecksum != input.ExpectedChecksum {
+		_ = route.Sink.Remove(ctx, rel)
+		route.Release()
+		logger.WarnContext(ctx, "外部卷文件 SHA-256 校验失败", "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", remotePath)
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
+	}
+	if !input.NoQuota {
+		route.Commit(prev, input.ClientSize)
+	}
+	if mr := s.rt.metricsRecorder(); mr != nil {
+		mr.RecordUpload(input.ClientSize)
+	}
+	logger.DebugContext(ctx, "外部卷写入成功", "file_name", remotePath, "size", input.ClientSize, "elapsed", time.Since(start))
+	return WriteTargetResult{VolumeName: route.VolumeName, Checksum: serverChecksum, Size: input.ClientSize,
+		Message: fmt.Sprintf("文件写入成功, size: %d", input.ClientSize)}, nil
+}
+
+// errArchiveExistsHTTPError 是 O_EXCL 同名已存在 → 409（对齐归档既有语义）。
+var errArchiveExistsHTTPError = &HTTPError{Status: http.StatusConflict, Message: "归档文件已存在", Reason: reasonConflict}

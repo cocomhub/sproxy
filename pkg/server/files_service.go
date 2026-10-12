@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/volume"
+
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
@@ -77,6 +79,14 @@ func (r filesRuntime) Locate(owner, rel string) (files.FileLocation, bool) {
 
 func (r filesRuntime) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (files.UploadRoute, error) {
 	return r.h.routeUploadForFiles(owner, rel, explicitVol, size, forceHomeVol)
+}
+
+func (r filesRuntime) RouteTarget(owner, rel, volName string, size int64) (files.UploadRoute, error) {
+	route, err := r.h.routeUploadForTarget(owner, rel, volName, size)
+	if err != nil {
+		return files.UploadRoute{}, err
+	}
+	return route, nil
 }
 
 func (r filesRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.h.quotaScopeFor(owner, rel) }
@@ -165,6 +175,33 @@ func (h *Handlers) locateOwnerFileForFiles(owner, rel string) (files.FileLocatio
 		return files.FileLocation{}, false
 	}
 	return files.FileLocation{VolumeName: loc.volumeName, Tenant: loc.tenant}, true
+}
+
+// routeUploadForTarget 为统一写内核（WriteTarget 显式卷：S3/DAV/版本恢复）定卷：ACL 校验 +
+// 单候选双预留，**不做唯一性查重**（覆盖写语义——这些写面允许覆盖同 rel）。
+func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) (files.UploadRoute, error) {
+	if h.volSet == nil {
+		return h.routeUploadForFiles(owner, rel, volName, size, "")
+	}
+	owner = normalizeOwner(owner)
+	view := volume.AllowedVolumes(h.volSet.All(), owner)
+	if len(view) == 0 {
+		return files.UploadRoute{}, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return files.UploadRoute{}, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
+	}
+	route, err := h.reserveVolume(owner, rel, v.Name, size)
+	if err != nil {
+		return files.UploadRoute{}, err
+	}
+	release := route.release
+	return files.UploadRoute{
+		VolumeName: route.volumeName, Tenant: route.tenant, Sink: route.sink,
+		Scope: route.scope, ScopeRes: route.scopeRes, Pool: route.pool, PoolRes: route.poolRes,
+		Release: release,
+	}, nil
 }
 
 // routeUploadForFiles 把 routeUpload 的结果适配为子包的值类型，

@@ -15,7 +15,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -201,7 +200,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// （temp + fsync + 原子 rename，MkdirAll 目标父目录），避免把文件写回源卷造成双份。
 	written, ok := h.restoreCopyVersionFile(&versionRestoreCopyCtx{
 		w: w, r: r, remotePath: remotePath, versionIDStr: versionIDStr,
-		verLoc: verLoc, verRel: verRel, dstRoot: dstRoot, dstVol: dstVol,
+		owner: owner, verLoc: verLoc, verRel: verRel, dstRoot: dstRoot, dstVol: dstVol,
 		targetRel: targetRel, releaseRes: releaseRes,
 	})
 	if !ok {
@@ -391,6 +390,7 @@ func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, r
 type versionRestoreCopyCtx struct {
 	w            http.ResponseWriter
 	r            *http.Request
+	owner        string
 	remotePath   string
 	versionIDStr string
 	verLoc       *files.VersionLocation
@@ -407,6 +407,9 @@ type versionRestoreCopyCtx struct {
 func (h *Handlers) restoreCopyVersionFile(rc *versionRestoreCopyCtx) (int64, bool) {
 	var written int64
 	if rc.dstVol == rc.verLoc.VolumeName {
+		// 统一写内核：恢复目标 = 用户可见写（原子 + sidecar 内置 + 台账）。
+		// NoLock：acquireVersionFileLock 已持锁；NoQuota：reserveRestoreQuota 已双预留，
+		// 由 settleRestoreQuota 结算——WriteTarget 只落盘 + sidecar + 台账，不再二次记账。
 		src, oerr := rc.verLoc.Tenant.Root().OpenDecrypted(rc.verRel)
 		if oerr != nil {
 			rc.releaseRes()
@@ -419,38 +422,21 @@ func (h *Handlers) restoreCopyVersionFile(rc *versionRestoreCopyCtx) (int64, boo
 		}
 		defer src.Close()
 
-		dst, derr := writeUserVisible(rc.dstRoot, rc.targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-		if derr != nil {
+		res, werr := h.fileService().WriteTarget(rc.r.Context(), files.WriteTargetInput{
+			Owner: rc.owner, RemotePath: strings.TrimPrefix(rc.targetRel, "user/"),
+			Volume: rc.dstVol, Verify: false, NoLock: true, NoQuota: true, NoRecord: true,
+			ClientSize: int64(-1),
+		}, src)
+		if werr != nil {
 			rc.releaseRes()
 			h.RecordAudit(rc.r.Context(), AuditEvent{
 				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
-				Result: AuditResultError, Detail: "创建目标文件失败: " + rc.versionIDStr,
-			})
-			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
-			return 0, false
-		}
-		defer dst.Close()
-
-		var err error
-		written, err = io.Copy(dst, src)
-		if err != nil {
-			rc.releaseRes()
-			h.RecordAudit(rc.r.Context(), AuditEvent{
-				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
-				Result: AuditResultError, Detail: "恢复文件失败: " + rc.versionIDStr,
+				Result: AuditResultError, Detail: "恢复文件失败: " + werr.Error(),
 			})
 			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
 			return 0, false
 		}
-		if syncer, ok := dst.(interface{ Sync() error }); ok && syncer.Sync() != nil {
-			rc.releaseRes()
-			h.RecordAudit(rc.r.Context(), AuditEvent{
-				Action: "version_restore", ObjectType: "file", Object: rc.remotePath,
-				Result: AuditResultError, Detail: "同步文件失败: " + rc.versionIDStr,
-			})
-			sendJSONResponse(rc.w, UploadResponse{Success: false, Message: "同步文件失败"}, http.StatusInternalServerError)
-			return 0, false
-		}
+		written = res.Size
 	} else {
 		var err error
 		written, err = crossVolumeCopy(rc.r.Context(), rc.verLoc.Tenant.Root(), rc.dstRoot, rc.verRel, rc.targetRel)

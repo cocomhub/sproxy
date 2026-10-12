@@ -338,6 +338,11 @@ func (v testVolumes) Route(owner, rel, explicitVol string, size int64, forceHome
 	return v.route(owner, rel, explicitVol, size, forceHomeVol)
 }
 
+// RouteTarget 显式卷（不查重）：回落 v.route（测试替身 route 钩子不查重）。
+func (v testVolumes) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+	return v.route(owner, rel, volName, size, "")
+}
+
 // testChunked 是 ChunkedUploads 能力的测试实现。
 type testChunked struct {
 	storeFor func(owner string) *UploadStore

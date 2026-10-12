@@ -117,6 +117,11 @@ func (e *chunkedTestEnv) Route(owner, rel, explicitVol string, size int64, force
 	return UploadRoute{VolumeName: "", Tenant: e.tnt, Release: func() { e.routeReleases++ }}, nil
 }
 
+// RouteTarget 显式卷（不查重）：回落 Route。
+func (e *chunkedTestEnv) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+	return e.Route(owner, rel, volName, size, "")
+}
+
 func (e *chunkedTestEnv) ScopeFor(string, string) *quota.Scope { return nil }
 
 func (e *chunkedTestEnv) ChecksumStoreFor(string) *checksum.ChecksumStore { return e.cs }

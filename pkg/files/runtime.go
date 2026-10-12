@@ -230,6 +230,11 @@ func (r *runtime) routeUpload(owner, rel, explicitVol string, size int64, forceH
 	return r.volumes.Route(owner, rel, explicitVol, size, forceHomeVol)
 }
 
+// routeTarget 为统一写内核显式卷定卷（RouteTarget：ACL + 双预留，不查重——覆盖写语义）。
+func (r *runtime) routeTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+	return r.volumes.RouteTarget(owner, rel, volName, size)
+}
+
 func (r *runtime) quotaScope(owner, rel string) *quota.Scope {
 	if r.quota == nil {
 		return nil
