@@ -19,7 +19,8 @@
 //
 // # 现状与写批次
 //
-// 当前对端（B 侧）只提供**只读面**（Y 一期，`/remote/list|stat|download`）。因此 `FS` 的
+// 当前对端（B 侧）只提供**只读面**（Y 一期，`/remote/list|stat|download`，外加
+// `/remote/meta`——跨节点 sidecar 元数据面，见 `Client.Meta`）。因此 `FS` 的
 // 写方法（`WriteFile`/`Rename`/`Delete`/`MakeDir`）自 Y 二期 P3-c 起**已实现**（见 write.go）：
 // 走独立写面服务名 `volwrite`（`WithWriteDialer`），未配置写面时 fail-closed 报
 // `ErrWriteNotConfigured`（原「未实现」哨兵 `ErrUnsupported` 已随之删除——它是死代码）。本段历史：
@@ -43,6 +44,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,6 +52,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -450,6 +453,45 @@ func (c *Client) Open(ctx context.Context, ref Ref, opts ...OpenOption) (io.Read
 	}
 	return resp.Body, nil
 }
+
+// Meta 拉取 ref 对应的持有侧 sidecar 原始 JSON（跨节点**元数据面**，供可信校验使用）。
+//
+// 路径语义与 List/Stat/Open 完全一致：`ref.Path` 是**用户桶内相对路径**（不含 `meta/`
+// 桶段、不含 owner 前缀）——持有侧用自身可信栈把「用户路径」解析为 sidecar（本地卷读
+// meta 桶；外部卷经其 meta.Provider 生成）。因此**凭证范围（PathPrefix）仍作用在用户
+// 路径上**，不引入「meta 桶可达」这一越权面（区别于「把 meta 键空间暴露给远端」）。
+//
+// 无 sidecar（未启用/存量旁路写/加密卷口径不一致）→ 返回包装 `os.ErrNotExist` 的错误，
+// 调用方据此区分「无校验能力」（预期降级）与**读取失败**（应告警）。
+func (c *Client) Meta(ctx context.Context, ref Ref) ([]byte, error) {
+	resp, err := c.do(ctx, ref, http.MethodGet, "/remote/meta", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("remote: meta %q 不存在: %w", ref.Path, os.ErrNotExist)
+	default:
+		return nil, responseError("meta", resp)
+	}
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, maxMetaResponseBytes+1))
+	if rerr != nil {
+		return nil, fmt.Errorf("remote: 读取 meta 响应失败: %w", rerr)
+	}
+	if int64(len(raw)) > maxMetaResponseBytes {
+		return nil, fmt.Errorf("remote: meta 响应超过上限 %d 字节（疑似对端异常）", maxMetaResponseBytes)
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("remote: meta 响应为空: %w", os.ErrNotExist)
+	}
+	return raw, nil
+}
+
+// maxMetaResponseBytes 是远端 meta 响应体上限（与 sidecar 本身上限同值——防对端返回超大
+// 体触发 OOM；超限按「读取失败」拒绝，不静默截断成畸形 JSON）。
+var maxMetaResponseBytes = meta.MaxMetaSidecarBytes()
 
 // responseError 把非 2xx 响应转成带状态码与对端文案的错误。
 func responseError(op string, resp *http.Response) error {

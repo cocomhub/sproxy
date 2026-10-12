@@ -11,14 +11,19 @@ package cluster
 //  5. 写方法 fail-closed（出口只读）。
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/clustercred"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -274,5 +279,115 @@ func TestRegisterBackend(t *testing.T) {
 	defer be.Close()
 	if be.FS() == nil {
 		t.Fatal("FS 不应为 nil")
+	}
+}
+
+// TestClusterFS_FileMeta_HolderSidecarBridge：出口侧 FileMeta 必须把「出口 owner key」
+// 归一到**持有侧用户相对路径**后经 remote meta 面取 sidecar。评审 P2-10：此前
+// clusterFS 不自带 meta，被 trusted.Wrap 包成 TrustedVolumeFS，后者用
+// `inner.OpenRead(meta.MetaPath(rel))` 取 → 键空间错位（`<owner>/meta/...`）→ 持有侧
+// 恒 404 → **egress 卷下载静默零校验**（可信卷承诺不成立）。
+func TestClusterFS_FileMeta_HolderSidecarBridge(t *testing.T) {
+	t.Parallel()
+	body := []byte("0123456789")
+	calc, cerr := meta.NewCalculator(int64(len(body)), int64(len(body)))
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	if _, werr := calc.ReadFrom(bytes.NewReader(body)); werr != nil {
+		t.Fatal(werr)
+	}
+	want := calc.Finish()
+	raw, merr := meta.Marshal(want)
+	if merr != nil {
+		t.Fatal(merr)
+	}
+
+	var gotPath string
+	cf := &clusterFS{
+		cfg:     egressConfig{HolderPath: "sub"},
+		volName: "eg1",
+		fetchMeta: func(_ context.Context, path string) ([]byte, error) {
+			gotPath = path
+			return raw, nil
+		},
+	}
+	fm, err := cf.FileMeta(context.Background(), "alice/user/docs/f.bin")
+	if err != nil {
+		t.Fatalf("FileMeta: %v", err)
+	}
+	// 持有侧收到的必须是「用户桶相对路径 + holder_path 前缀」——**不含** owner 前缀、
+	// **不含** meta 桶段（sidecar 由持有侧自身可信栈解析）。
+	if gotPath != "sub/docs/f.bin" {
+		t.Fatalf("fetchMeta 收到 %q want sub/docs/f.bin", gotPath)
+	}
+	if fm.Size != want.Size || fm.TotalSHA256 != want.TotalSHA256 {
+		t.Fatalf("FileMeta 往返失真: %+v", fm)
+	}
+}
+
+// TestClusterFS_FileMeta_NotFoundWrapsErrNotExist：持有侧无 sidecar（404）→ 出口侧必须
+// 保留 os.ErrNotExist（调用方据此区分「无校验能力」的预期降级与**读取失败**告警）。
+func TestClusterFS_FileMeta_NotFoundWrapsErrNotExist(t *testing.T) {
+	t.Parallel()
+	cf := &clusterFS{
+		cfg: egressConfig{},
+		fetchMeta: func(context.Context, string) ([]byte, error) {
+			return nil, fmt.Errorf("remote: meta 不存在: %w", os.ErrNotExist)
+		},
+	}
+	if _, err := cf.FileMeta(context.Background(), "alice/user/a.bin"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("FileMeta 应保留 os.ErrNotExist, got %v", err)
+	}
+}
+
+// TestClusterFS_FileMeta_NoFetchAssembled：meta 面未装配 → fail-closed（不静默返回 nil
+// 让调用方误以为「无 sidecar」而放行未校验内容）。
+func TestClusterFS_FileMeta_NoFetchAssembled(t *testing.T) {
+	t.Parallel()
+	cf := &clusterFS{cfg: egressConfig{}}
+	if _, err := cf.FileMeta(context.Background(), "alice/user/a.bin"); err == nil {
+		t.Fatal("meta 面未装配应报错（fail-closed）")
+	}
+}
+
+// TestClusterFS_FileMeta_BadPayloadRejected：持有侧返回畸形 JSON → 出口侧报错（
+// fail-closed，不把不可解析的 sidecar 当「校验通过」）。
+func TestClusterFS_FileMeta_BadPayloadRejected(t *testing.T) {
+	t.Parallel()
+	cf := &clusterFS{
+		cfg: egressConfig{},
+		fetchMeta: func(context.Context, string) ([]byte, error) {
+			return []byte("{not-json"), nil
+		},
+	}
+	if _, err := cf.FileMeta(context.Background(), "alice/user/a.bin"); err == nil {
+		t.Fatal("畸形 sidecar 应报错")
+	}
+}
+
+// TestNewBackend_Meta面已接线：NewBackend 必须注入 fetchMeta（否则生产装配下
+// egress 又是「宣称 Provider 却取不到 meta」——本用例是装配缺线的回归护栏）。
+func TestNewBackend_MetaFaceWired(t *testing.T) {
+	t.Parallel()
+	id := newTestIdentity(t)
+	v := egressVolume("eg1", map[string]any{
+		"holder_node": "h", "holder_volume": "v", "holder_fingerprint": "fp",
+		"holder_owner": "alice",
+	})
+	be, err := NewBackend(context.Background(), v, memDialer(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+	cf, ok := be.FS().(*clusterFS)
+	if !ok {
+		t.Fatalf("FS 类型=%T want *clusterFS", be.FS())
+	}
+	if cf.fetchMeta == nil {
+		t.Fatal("NewBackend 必须注入 meta 面（fetchMeta 为 nil = egress 零校验回归）")
+	}
+	if _, isProvider := any(be.FS()).(meta.Provider); !isProvider {
+		t.Fatal("clusterFS 必须实现 meta.Provider（否则 trusted.Wrap 会套 TrustedVolumeFS 导致键空间错位）")
 	}
 }

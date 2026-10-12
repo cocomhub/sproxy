@@ -18,15 +18,31 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // clusterFS 是出口侧集群卷的 FS 适配（只读）：embeds federated.FS（远端只读底座），
 // 叠加 holderRel（出口 owner key → 持有侧命名空间相对路径桥）与 DirectURL（302）。
+//
+// **自带 meta.Provider（评审 P2-10 修复）**：出口侧要对自己的下载流做逐分块校验，
+// 就必须能从**持有侧**取到 sidecar。持有侧的 sidecar 在**持有侧自身的键空间**里
+// （本地卷 `meta/<rel>.meta`，外部卷由其 Provider 决定），出口侧不应（也不能）直接按
+// 键拼接——所以本类型实现 `meta.Provider`，经 remote 的 `meta` 面把**用户相对路径**
+// 交给持有侧，由持有侧用自身可信栈回答。
+//
+// **为何必须自带而不是被 trusted.Wrap 包一层**：`trusted.Wrap` 对**不自带 meta** 的 FS
+// 会套 `TrustedVolumeFS`，后者的 `FileMeta` 用 `inner.OpenRead(meta.MetaPath(rel))` 直取
+// ——键空间错位（`<owner>/meta/...` 被当成持有侧用户相对路径）→ 持有侧恒 404 → 下载
+// **静默零校验**（可信卷承诺不成立）。实现 `meta.Provider` 后 `trusted.Wrap` 保持原样
+// 返回（与 secretdata 同构：自带 meta 的卷自己管），Guard 仍透传该能力。
 type clusterFS struct {
 	fs      syncpkg.FS // federated.FS（挂持有节点卷）
 	cfg     egressConfig
 	volName string // 出口卷名（B 态 302 URL 参数）
+	// fetchMeta 拉取持有侧 sidecar 原始 JSON（remote `meta` 面；入参为**持有侧用户相对
+	// 路径**）。nil = 未装配 → fail-closed（不静默返回 nil 让调用方误当「无 sidecar」）。
+	fetchMeta func(ctx context.Context, path string) ([]byte, error)
 }
 
 // holderRel 映射出口侧 owner key → 持有侧 owner 命名空间相对路径。
@@ -115,6 +131,30 @@ func (f *clusterFS) MakeDir(ctx context.Context, path string) error    { return 
 // errEgressReadOnly 是出口集群卷只读语义的哨兵错误（写方法恒返回）。
 var errEgressReadOnly = fmt.Errorf("cluster: 出口卷只读（数据由持有节点提供，出口仅转发）")
 
+// FileMeta 实现 meta.Provider：把「出口 owner key」归一到**持有侧用户相对路径**后经
+// remote `meta` 面取 sidecar（见 clusterFS 文档「自带 meta.Provider」）。
+//
+// 错误语义：持有侧无 sidecar 时保留 `os.ErrNotExist`（调用方据此区分预期降级与读取失败）；
+// meta 面未装配 / 持有侧返回畸形 JSON → 报错（fail-closed，绝不当作「校验通过」）。
+func (f *clusterFS) FileMeta(ctx context.Context, ownerKey string) (*meta.FileMeta, error) {
+	rel, err := f.holderRel(ownerKey)
+	if err != nil {
+		return nil, err
+	}
+	if f.fetchMeta == nil {
+		return nil, fmt.Errorf("cluster: 持有侧 meta 面未装配: %w", syncpkg.ErrUnsupported)
+	}
+	raw, ferr := f.fetchMeta(ctx, rel)
+	if ferr != nil {
+		return nil, ferr
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		return nil, fmt.Errorf("cluster: 持有侧 meta %s 非法: %w", rel, uerr)
+	}
+	return fm, nil
+}
+
 // DirectURL 实现 syncpkg.DirectURLProvider（B 态 302）：
 //   - holder_public_base_url 非空 → 直跳持有公网端点（B2，需同认证域）；
 //   - egress_base_url 非空 → 302 到出口自身公网端点 + `egress_forward=1`（出口内部再
@@ -151,4 +191,5 @@ var (
 	_ syncpkg.FS                = (*clusterFS)(nil)
 	_ syncpkg.RangeReader       = (*clusterFS)(nil)
 	_ syncpkg.DirectURLProvider = (*clusterFS)(nil)
+	_ meta.Provider             = (*clusterFS)(nil)
 )
