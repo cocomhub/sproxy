@@ -90,7 +90,9 @@ func newExternalEnvWithFS(t *testing.T, volName string, fs syncpkg.FS) *Handlers
 	}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(&Config{})
-	return &Handlers{volSet: vs, logger: testLogger(), cfgPtr: &cfgPtr, tenants: storage.NewTenantCache(root)}
+	tenants := storage.NewTenantCache(root)
+	t.Cleanup(func() { _ = tenants.Close() })
+	return &Handlers{volSet: vs, logger: testLogger(), cfgPtr: &cfgPtr, tenants: tenants}
 }
 
 // assertNotFound404 断言错误是 404 HTTPError。

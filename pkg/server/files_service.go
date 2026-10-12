@@ -285,6 +285,67 @@ func (h *Handlers) externalRemotePath(ctx context.Context, owner, volName, rel0,
 	}, nil
 }
 
+// externalVolumeOps 实现 files.ExternalVolumeOps（评审 F1：外部卷对象的**硬删**入口）。
+type externalVolumeOps struct{ h *Handlers }
+
+// ExternalDelete 经装配层**同一可信链**删除外部卷对象：
+// `Guard(Wrap(CapacityFS(raw)))` 的 Delete 完成「删主文件 + 联动删 sidecar + 释放卷级计数」。
+//
+// 不经回收站、不做 quarantine（远端后端无原子 rename）；`expectedChecksum` 非空时与 sidecar
+// **记录**的整文件 SHA-256 交叉比对（不重算——远端整文件回读不可接受）。
+func (o externalVolumeOps) ExternalDelete(ctx context.Context, owner, volName, remotePath, expectedChecksum string) (bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return false, nil
+	}
+	fsys, ok := h.externalFSFor(volName) // Guard(Wrap(be.FS()))；be.FS() 已含 CapacityFS
+	if !ok {
+		return false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return false, nil // 未授权 → 不命中（404，不泄卷存在性）
+	}
+	loc, kerr := v.ResolveUserLocation(owner, remotePath)
+	if kerr != nil {
+		return false, nil
+	}
+	key := loc.FSPath()
+	e, serr := fsys.Stat(ctx, key)
+	if serr != nil || e == nil || e.IsDir {
+		return false, nil // 不存在/不可 stat → 未命中
+	}
+	if cerr := crossCheckExternalChecksum(ctx, fsys, key, expectedChecksum); cerr != nil {
+		return false, cerr
+	}
+	if derr := fsys.Delete(ctx, key); derr != nil {
+		if errors.Is(derr, storage.ErrSealed) {
+			return false, &files.HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接删除"}
+		}
+		h.logger.ErrorContext(ctx, "外部卷删除失败", "volume", volName, "path", remotePath, "error", derr.Error())
+		return false, &files.HTTPError{Status: http.StatusInternalServerError, Message: "删除失败"}
+	}
+	return true, nil
+}
+
+// crossCheckExternalChecksum 用 sidecar **记录**的整文件 SHA-256 交叉比对客户端声明的
+// checksum（不重算——远端整文件回读不可接受）。`expectedChecksum` 为空或 sidecar 缺失/不可读
+// （无记录值可比）→ 跳过该判据，删除继续；不一致 → `*HTTPError{409}`。
+func crossCheckExternalChecksum(ctx context.Context, fsys syncpkg.FS, key, expectedChecksum string) error {
+	if expectedChecksum == "" {
+		return nil
+	}
+	pv, ok := fsys.(meta.Provider)
+	if !ok {
+		return nil
+	}
+	fm, ferr := pv.FileMeta(ctx, key)
+	if ferr != nil || fm == nil || fm.TotalSHA256 == "" || fm.TotalSHA256 == expectedChecksum {
+		return nil
+	}
+	return &files.HTTPError{Status: http.StatusConflict, Message: "文件已变更（校验和不一致），请刷新后重试"}
+}
+
 // externalFSFor 返回外部卷的 FS 视图（未装配/无 FS → (nil,false)）。
 func (h *Handlers) externalFSFor(volName string) (syncpkg.FS, bool) {
 	if h.volSet == nil {

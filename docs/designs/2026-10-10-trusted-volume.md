@@ -487,6 +487,42 @@ used 偏低 = 限额放宽，不可接受）；**减少（`Release`）只标脏*
 
 **F1 外部卷回收入口（2026-10-12 落地，用户裁定「补 /delete 硬删 + /stat」）**：见 §8.12。
 
+## 8.12 外部卷对象的硬删入口（2026-10-12 落地，评审 F1，P1 功能死路）
+
+**问题**：外部卷没有 `*storage.Root`，`locateForRead`/`volumeFileExists`（须 `vs.Root(vol)`）恒
+未命中 ⇒ 其对象**没有任何用户可见的删除/定位入口**。配置卷 `vol_capacity` 或用户卷 `capacity`
+一旦被占满（`used == capacity`），该卷经文件 API 的**一切写入恒 507**（含「覆盖写缩小」——净增差量
+探测已在 #755 落地仍受 `used` 高位阻挡），只能靠镜像/双向同步的删除传播或**运维手工删计数文件 +
+重启**——功能性死路。
+
+**处置（用户裁定：补 `/delete` **硬删** + `/stat`）**：
+
+- **接缝**（`pkg/files`）：新增 `ExternalVolumeOps.ExternalDelete(ctx, owner, volName, remotePath,
+  expectedChecksum)` + `WithExternalOps` 注入（未装配 → 跳过外部卷分支，零回归）。领域层不感知卷/
+  键空间/装饰器细节。
+- **装配实现**（`pkg/server/files_service.go` 的 `externalVolumeOps`）：经**同一可信链**
+  `Guard(Wrap(be.FS()))`（`be.FS()` 已含 `CapacityFS`）执行 Delete——链上 `TrustedVolumeFS.Delete`
+  完成「删主文件 + 联动删 sidecar」，`CapacityFS.Delete` 完成「**释放卷级计数**」；`storage.ErrSealed`
+  → 409（封装卷禁止直连）。
+- **定位语义**：显式 `?volume=` 指向外部卷 → 该分支终结（命中删、未命中 404 / `AllowMissing` 幂等）；
+  未指定卷 → 遍历 owner 视图内的外部卷，**删到才终结**，都未删到则回落本地流程（默认卷可能仍有该
+  文件，不能武断 404）。「外部卷」判据 = 无本地 Root（与 `volumeFileExists` 同源，非类型名硬编码）。
+- **checksum 口径**：`expectedChecksum` 非空 → 与 sidecar **记录**的整文件 SHA-256 交叉比对（**不
+  重算**——远端整文件回读不可接受），不一致 → 409；sidecar 缺失/不可读 → 跳过（无记录值可比）。
+  **不做 quarantine**（远端后端无原子 rename）、**不进回收站**（硬删）。
+- `/stat` 经读路径（`resolveDownloadPath` 的外部卷分支）**本就可用**，本次补了回归用例钉住。
+
+**同时修掉一个 #765 归口引入的回归**：S3 `DeleteObject` **无 checksum 语义**（客户端不发
+`X-File-Checksum`），而 `DeleteFile` 的 checksum 门禁先回 400 ⇒ **S3 DELETE 既有对象恒 400
+「缺少 X-File-Checksum 请求头」**（既有测试只覆盖「删不存在对象」，故 CI 未捕获）。处置：新增
+`DeleteFileInput.SkipChecksumVerify`（协议面显式跳过；安全由同 rel 文件锁 + 本地卷 quarantine 承担），
+S3 DELETE 置位；`verifyDeleteQuarantine` 对空 `expectedChecksum` 只算不比对（S3 既有对象可删）。
+
+**测试与变异**：`pkg/server/delete_external_test.go`（硬删 + 卷级计数释放 + checksum 不一致 409 且
+对象保留 + sidecar 联动删除 + 显式卷未命中 404/幂等 + HTTP 面 `POST /delete` + 外部卷 `/stat` +
+**S3 PUT→DELETE 无 checksum 成功**）。**变异 4 命中**（去外部卷分支 / S3 不跳过 checksum /
+quarantine 强制比对 / 去 checksum 交叉比对）。
+
 ## 8.9 崩溃窗口（陈旧 sidecar）处置（2026-10-12 落地）
 
 **问题**：主文件与 `.meta` sidecar 是**两次独立原子写**，崩溃落在「主文件已落新内容、sidecar

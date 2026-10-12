@@ -362,10 +362,14 @@ func (h *Handlers) s3DispatchObject(w http.ResponseWriter, r *http.Request, tnt 
 		// **统一删内核**（DeleteFile）：锁 + rename-to-quarantine TOCTOU 加固 + sidecar/配额对称
 		// 清理，全部内聚——不再手工 root.Remove + s3DeleteMetaAfter。显式卷 = bucket 卷名；
 		// AllowMissing=false：不存在 → 404。
+		// **SkipChecksumVerify**：S3 的 DeleteObject **没有 checksum 语义**（客户端不发
+		// X-File-Checksum）——不显式跳过会让既有对象恒 400「缺少 X-File-Checksum 请求头」
+		// （#765 归口时引入的回归）。安全由同 rel 文件锁 + 本地卷 quarantine 承担。
 		volName, _ := r.Context().Value(s3BucketCtxKey{}).(string)
 		remotePath := strings.TrimPrefix(rel, tnt.UserRoot()+"/")
 		_, derr := h.fileService().DeleteFile(r.Context(), files.DeleteFileInput{
 			Owner: owner, RemotePath: remotePath, ExplicitVol: volName, AllowMissing: false,
+			SkipChecksumVerify: true,
 		})
 		if derr != nil {
 			if he, ok := derr.(*files.HTTPError); ok {

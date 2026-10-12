@@ -46,6 +46,26 @@ type ActorResolver interface {
 	Actor(*http.Request) string
 }
 
+// ExternalVolumeOps 是装配层注入的**外部卷对象操作**接缝（评审 F1）。
+//
+// 为什么需要：外部卷没有 `*storage.Root`（`locateForRead`/`volumeFileExists` 恒未命中）⇒ 其
+// 对象**没有任何用户可见的删除入口**；卷写满（`used==capacity`）后该卷一切写入恒 507（含覆盖
+// 写缩小），只能靠同步删除传播或运维手工删计数文件 + 重启 = **功能死路**。
+//
+// 接缝语义（实现方在装配层）：经**同一可信链** `Guard(Wrap(CapacityFS(raw)))` 执行 Delete——
+// 链上 `TrustedVolumeFS.Delete` 天然完成「删主文件 + 联动删 sidecar」，`CapacityFS.Delete`
+// 完成「释放卷级计数」。领域层不感知卷/键空间/装饰器细节。
+type ExternalVolumeOps interface {
+	// ExternalDelete 删除 owner 在 volName 上的 remotePath（用户可见相对路径）。
+	//
+	// expectedChecksum 非空 → 与 sidecar **记录**的整文件 SHA-256 交叉比对（**不重算**：远端
+	// 整文件回读不可接受）；不一致 → `*HTTPError{409}`。sidecar 缺失/不可读 → 跳过该判据
+	// （无记录值可比），删除继续。
+	//
+	// 返回 (false, nil) = 卷未装配 / owner 未授权 / 对象不存在（调用方按 404 处理）。
+	ExternalDelete(ctx context.Context, owner, volName, remotePath, expectedChecksum string) (bool, error)
+}
+
 // VolumeRouter 是**多卷能力**（运行时卷集合 + 卷租户 + 读定位 + 写路由）。
 //
 // 为什么是一个接口而不是多个字段：这四件事共同描述「多卷部署」这一个能力，拆开只会让
@@ -161,6 +181,7 @@ type config struct {
 	bandwidth     BandwidthLimiter
 	contentIndex  bool
 	fileMeta      FileMetaPolicy
+	externalOps   ExternalVolumeOps
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -175,6 +196,11 @@ func WithActor(a ActorResolver) Option {
 }
 
 // WithVolumes 注入多卷能力。默认：由 TenantResolver 派生的单卷实现。
+// WithExternalOps 注入外部卷对象操作接缝（F1；未装配 → 外部卷对象无删除入口，零回归）。
+func WithExternalOps(ops ExternalVolumeOps) Option {
+	return func(c *config) { c.externalOps = ops }
+}
+
 func WithVolumes(v VolumeRouter) Option {
 	return func(c *config) { c.volumes = v }
 }

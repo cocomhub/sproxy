@@ -456,6 +456,8 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 			files.WithChecksumLedger(rt),
 			files.WithDownloadPaths(rt),
 			files.WithFileLocks(rt),
+			// F1：外部卷对象的硬删接缝（外部卷无 *storage.Root，其对象此前无用户可见删除入口）。
+			files.WithExternalOps(externalVolumeOps{h: h}),
 			files.WithChunkedUploads(rt),
 			files.WithVersioning(rt),
 			files.WithDedup(rt),
