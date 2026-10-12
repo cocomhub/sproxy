@@ -408,3 +408,22 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 | 面级加密入口未接线（S3/DAV/分享/分块上传/块写） | ✅ 已修 | 用户可见读写唯一入口（`pkg/server/user_visible_io.go`）；DAV 收敛到 `NewRootFS`（同时修掉封印绕过）；分块上传 finalize 单遍加密；块写加密卷显式拒绝 |
 | 封装卷「源目录禁止直连」 | ✅ 已修（机制级） | `storage.Root.SetSeals`（写恒拒/读 404 或只读透视）+ 装配接线 + 租户子根传播 + `enclosure.FS` 直链抑制 |
 | 新装饰器漏转发可选能力（R21 只查硬编码清单） | ✅ 已修 | R23 自动发现门禁（`Inner()` 与「嵌入 FS/持有 inner FS 字段」两类）+ `quotaLocalFS` 能力补齐 + 处理层显式豁免 |
+
+## 8.9 崩溃窗口（陈旧 sidecar）处置（2026-10-12 落地）
+
+**问题**：主文件与 `.meta` sidecar 是**两次独立原子写**，崩溃落在「主文件已落新内容、sidecar
+未更新」之间时留下**陈旧 sidecar**（`FileMeta.Size` ≠ 实测内容长度）。此前该文件表现为
+**永久 fail-closed 且无提示**（流中首读才报「长度不一致」，运维只看到下载中断）。
+
+**处置（不改变 C2 安全口径）**：
+- **仍在流下发之前**判定（`filesMetaPolicy.VerifyDownload`，`seekEndSize` 探测），并**继续拒绝
+  下发未校验内容**——不静默降级为「直通/未校验」，否则「内容被截断/追加」会被洗白成可信态；
+- 归类哨兵 **`meta.ErrStaleMeta`**（`errors.Is` 可判），把「陈旧」与「sidecar 损坏（解析失败）」
+  分开，供 API/告警分类；
+- 专用 **Warn**（`warnStaleMeta`：`path`/`content_bytes`/`meta_bytes`/`cause`）并给出**可操作修复**：
+  重建 sidecar = 重写该文件（任何写路径都会重算）或调用 `filesMetaPolicy.WriteMeta`；
+- **不做自动重建**：自动重建会把「攻击者截断后的内容」重新认证为可信态（洗白通道），
+  故重建必须由显式写路径/运维动作触发。
+
+**测试**：`pkg/server/files_meta_stale_test.go`（正常校验通过 → 崩溃模拟 → `ErrStaleMeta` + 告警
+→ 重建后恢复可校验读 → 截断同样归类）；变异验证 2 命中（去预检 / 去专用告警）。

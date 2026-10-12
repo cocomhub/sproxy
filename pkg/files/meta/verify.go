@@ -20,10 +20,19 @@ package meta
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
 )
+
+// ErrStaleMeta 标记「sidecar 陈旧」：解析成功但 FileMeta.Size 与实测内容长度不一致。
+//
+// 典型成因是**两次独立原子写之间的崩溃窗口**（主文件已落新内容、sidecar 尚未更新），
+// 也可能是内容被截断/追加。两类在**信任语义上无法区分**（都无法提供可靠的完整性证据），
+// 故调用方口径不变（拒绝下发未校验内容，C2），但可用 `errors.Is(err, ErrStaleMeta)` 把它
+// 与「sidecar 损坏（解析失败/超限）」区分开，给出**可操作**告警与修复指引（重建 sidecar）。
+var ErrStaleMeta = errors.New("meta: sidecar 陈旧（内容长度与 FileMeta.Size 不一致）")
 
 // VerifyReadSeeker 包装底层 ReadSeeker 为"读时逐分块校验"流（异常 fail-closed）。
 // fm 为下载文件的 FileMeta；底层须支持 Seek（Range）。返回保持 Seek 语义，
@@ -48,7 +57,7 @@ func VerifyReadSeeker(r io.ReadSeeker, fm *FileMeta) io.ReadSeeker {
 	}
 	if end, err := r.Seek(0, io.SeekEnd); err == nil {
 		if end != fm.Size {
-			v.fatal = fmt.Errorf("meta: 校验失败：底层内容长度 %d 与 FileMeta.Size %d 不一致（截断/追加）", end, fm.Size)
+			v.fatal = fmt.Errorf("meta: 校验失败：底层内容长度 %d 与 FileMeta.Size %d 不一致（截断/追加）: %w", end, fm.Size, ErrStaleMeta)
 		}
 		_, _ = r.Seek(0, io.SeekStart)
 	}
