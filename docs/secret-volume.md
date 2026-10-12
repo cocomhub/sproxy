@@ -11,7 +11,10 @@ Secret 加密卷把「写入自动分块加密、读取自动解密」沉淀为�
 
 - **加密算法（shardseal）**：纯 Go 随机分块 + AES-256-GCM + scrypt 派生（仅依赖 `golang.org/x/crypto`）。
   每文件随机盐（32B）→ scrypt 派生文件密钥；每段随机 nonce（12B）。
-- **分块加密后上传（非流式）**：边加密边上传，本机峰值 ≈ 原始文件 + 1 个分块（见 §3 `max_file_bytes` 内存防护）。
+- **流式分块加密（可 seek 源）**：可 seek 输入（multipart.File / `*os.File` / SectionReader 等）**逐块
+  ReadAt + 流式哈希**，内存峰值 O(单块上限)（默认 ≤ block_policy.max，2^14 默认档下 ≤200MiB）；
+  纯流不可 seek 回退读全文（功能不变，峰值 1× 文件，见 §3 `max_file_bytes`）。磁盘格式/meta/块布局
+  与旧写路径逐字节同构（向后兼容）。
 - **两类封装卷**：
   - `secrets` 卷（wrapper）：存加密密钥文件（secret 文件本身不加密），底层任意卷的 `secrets/` 目录。
   - `secretdata` 卷（wrapper）：写入自动分块加密、读取自动解密，底层任意卷，对上层透明。
@@ -78,7 +81,7 @@ volumes:
 | `temp_dir` | 系统临时随机目录 | 本地临时空间（0700） |
 | `preserve_mtime` | `false` | 默认 blob mtime 打散；`true` 才透传原始 mtime（§3.5） |
 | `gc_interval` | `0`（禁用） | 后台孤儿/墓碑 GC 周期（§6；可选维护工具，默认关） |
-| `max_file_bytes` | `0`（不限） | 单文件上限（读取全文前的内存防护，§9） |
+| `max_file_bytes` | `0`（不限） | 单文件上限（文件级总闸；流式路径按声明 size 预检，§9） |
 | `targets` | 空 | 多 local root 副本列表（write 复制全部 target、读主失败回退；§3.6） |
 | `erasure` | `false` | XOR parity 基于（**实验性**，§3.7） |
 | `dedup` | — | **预留、装配层不接线**（不解析 `extra.dedup`），内容去重为独立内容寻址子系统的未来能力 |
@@ -226,8 +229,8 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 ### 8.2 未实现
 
 - **压缩**（`Meta.Compressed` / `Compression`，独立注册表，改压缩算法不升级加密版本）
-- **流式加密**（当前写路径走内存明文变体「读全文 → 分块加密」，峰值 1× 文件；`max_file_bytes` 兜底；
-  完整逐块流式留后续，blocklet 双层规划已内建）
+- **video-keyframe 模式的流式写**（可 seek 普通文件块已流式；video-keyframe 因 `parseOnce` 需全文
+  扫描关键帧表，本期仍走内存变体，后续接线）
 - **Reed-Solomon 纠删码**（GF(2^8) 手写 ~千行负担大；k-of-k+1 单块起步，奇偶系统多块纠错平滑演进）
 - **CLI 接线加密卷文件面**（`pkg/files` 只走 storage.Root；`ExternalBackend.FS` 仅 /api/volumes + /api/backup
   消费——CLI upload/download 直连加密卷需后续接线，独立立项）
@@ -256,3 +259,7 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   文件 `EncryptShards` 报错 fail-closed。
 - **随机访问粒度**：`OpenRangeRead` 当前下载整块再定位 blocklet，未做逐 blocklet 只取所需段（注释
   已纠偏）；blocklet 索引已内建，逐段随机访问接线留后续。
+- **流式写覆盖边界**：可 seek 源（multipart 上传 / `*os.File` / 转存本地产物 / sync / 备份恢复）走流式；
+  **纯流**（无 seek）与 **video-keyframe 块模式**回退整读；**trusted 完整性装饰器**（`io.TeeReader`
+  算 meta）包 secretdata 时会剥 seek，后续同法修（seek-preserving tee，`pkg/sync/encrypted.go` 的
+  `io.Pipe` 属设计不可 seek）。

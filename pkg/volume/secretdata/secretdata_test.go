@@ -1729,7 +1729,8 @@ func TestSecretdataBackend_OpenURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &backend{fs: sfs}
-	if werr := sfs.WriteFile(context.Background(), "pikpak/t1/movie.mp4", bytes.NewReader([]byte("encrypted-content-123")), 18, 0); werr != nil {
+	payload := []byte("encrypted-content-123")
+	if werr := sfs.WriteFile(context.Background(), "pikpak/t1/movie.mp4", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
 		t.Fatal(werr)
 	}
 	rc, rerr := b.OpenURL(context.Background(), "secretdata://myvault/pikpak/t1/movie.mp4")
