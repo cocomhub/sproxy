@@ -215,22 +215,27 @@ func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, 
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", a.remotePath)
 		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
 	}
-	// 整流写入 + 流式哈希（一次性流，写盘同时算 SHA-256——外部卷无原子写，写后比对）。
-	// 可 seek 源（multipart.File / *os.File / SectionReader）用 teeReadSeeker 透传 seek
-	// （secretdata 写路径依赖上游 seek 走流式；io.TeeReader 剥 seek 会导致 secretdata
-	// 恒 io.ReadAll——设计 docs/designs/2026-10-12-secretdata-stream-encrypt.md §3.2）。
+	// checksum 计算与底层写入解耦（修复 #763 回归）：外部卷无原子写，需写后比对 SHA-256。
+	// **可 seek 源不能用 tee 算 checksum**——tee 只捕获经由 Read 的字节，而 secretdata
+	// 流式写路径全程用 ReadAt（哈希 pass + 分块 pass），tee 收不到字节 → 空摘要 → 校验失败。
+	// 故可 seek（ReaderAt+Seeker）源先**独立一遍**读满全文算 checksum，再 Seek(0) 把原（可
+	// seek）源交给 sink（sink 可多遍随机读）；不可 seek 源仍用 io.TeeReader 单遍 tee。
 	hasher := sha256.New()
-	var limitedSrc io.Reader
+	var passSrc io.Reader
 	if sec, ok := a.src.(io.Seeker); ok {
-		if ra, ok2 := a.src.(io.ReaderAt); ok2 {
-			limitedSrc = NewTeeReadSeeker(a.src, sec, ra, hasher)
-		} else {
-			limitedSrc = io.TeeReader(a.src, hasher) // 仅 Seeker 无 ReaderAt（罕见）退 io.TeeReader
+		if _, cerr := io.CopyBuffer(hasher, a.src, make([]byte, 128<<10)); cerr != nil {
+			a.route.Release()
+			return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 		}
+		if _, serr := sec.Seek(0, io.SeekStart); serr != nil {
+			a.route.Release()
+			return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+		}
+		passSrc = a.src // 原（可 seek）源：sink 可流式多遍读
 	} else {
-		limitedSrc = io.TeeReader(a.src, hasher)
+		passSrc = io.TeeReader(a.src, hasher)
 	}
-	limitedSrc = limitReader(s.rt.bandwidthLimiter(), a.owner, limitedSrc)
+	limitedSrc := limitReader(s.rt.bandwidthLimiter(), a.owner, passSrc)
 	start := time.Now()
 	if werr := a.route.Sink.WriteFile(ctx, a.rel, limitedSrc, a.input.ClientSize, a.input.Mtime); werr != nil {
 		a.route.Release()
