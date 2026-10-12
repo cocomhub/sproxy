@@ -33,12 +33,27 @@ type rootFSCore struct {
 // NewRootFS 构造「卷根 → sync.FS」适配器（键空间为卷根相对路径）。
 func NewRootFS(root *storage.Root) syncpkg.FS { return &rootFSCore{root: root} }
 
+// rootRel 把 `sync.FS` 的**卷根**相对路径（空串）映射为 `storage.Root` 所需的 `"."`。
+//
+// 为什么必须映射：`sync.FS` 契约里**空串即卷根**（`LocalFS` 的 `SanitizeRelPath("")` 返回 ""、
+// `WalkEntries(ctx, fs, "", …)` 与 `backup.Run` 均以 "" 起步）；而本适配器的底座
+// `os.Root` 要求非空相对路径——`Open("")`/`Stat("")` 会以 `openat : empty path` 失败 ⇒
+// 经本适配器「列/stat 卷根」此前**恒失败**（`sync.WalkEntries` 从 "" 起步的调用方全中）。
+// 只映射空串；`"."` 保持不变（`storage.Root` 对 "." 语义正确，且既有调用方（如
+// `path.Dir` 结果）会传 "."）。
+func rootRel(p string) string {
+	if p == "" {
+		return "."
+	}
+	return p
+}
+
 // ListDir 列举目录（Path 为完整相对路径；文件 Size 用**用户可见**长度）。
 func (c *rootFSCore) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	des, err := c.root.ReadDir(p)
+	des, err := c.root.ReadDir(rootRel(p))
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +84,7 @@ func (c *rootFSCore) Stat(ctx context.Context, p string) (*syncpkg.Entry, error)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	fi, err := c.root.Stat(p)
+	fi, err := c.root.Stat(rootRel(p))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -78,7 +93,7 @@ func (c *rootFSCore) Stat(ctx context.Context, p string) (*syncpkg.Entry, error)
 	}
 	e := &syncpkg.Entry{Name: path.Base(p), Path: p, IsDir: fi.IsDir(), MTime: fi.ModTime().UnixNano()}
 	if !fi.IsDir() {
-		size, serr := c.root.LogicalSize(p)
+		size, serr := c.root.LogicalSize(rootRel(p))
 		if serr != nil {
 			return nil, serr
 		}
@@ -92,7 +107,7 @@ func (c *rootFSCore) OpenRead(ctx context.Context, p string) (io.ReadCloser, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return openUserVisibleRead(c.root, p)
+	return openUserVisibleRead(c.root, rootRel(p))
 }
 
 // WriteFile 以用户可见语义写入（加密卷透明加密落盘；封印路径恒拒）。
@@ -105,7 +120,7 @@ func (c *rootFSCore) WriteFile(ctx context.Context, p string, r io.Reader, size,
 			return err
 		}
 	}
-	w, err := writeUserVisible(c.root, p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	w, err := writeUserVisible(c.root, rootRel(p), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
@@ -118,7 +133,7 @@ func (c *rootFSCore) WriteFile(ctx context.Context, p string, r io.Reader, size,
 	}
 	if mtime > 0 {
 		mt := time.Unix(0, mtime)
-		_ = c.root.Chtimes(p, mt, mt) // best-effort：时间不影响内容正确性
+		_ = c.root.Chtimes(rootRel(p), mt, mt) // best-effort：时间不影响内容正确性
 	}
 	return nil
 }
@@ -133,7 +148,7 @@ func (c *rootFSCore) Rename(ctx context.Context, from, to string) error {
 			return err
 		}
 	}
-	return c.root.Rename(from, to)
+	return c.root.Rename(rootRel(from), rootRel(to))
 }
 
 // Delete 删除文件/空目录（封印路径恒拒）。
@@ -141,7 +156,7 @@ func (c *rootFSCore) Delete(ctx context.Context, p string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return c.root.Remove(p)
+	return c.root.Remove(rootRel(p))
 }
 
 // MakeDir 递归创建目录（封印路径恒拒）。
@@ -152,5 +167,5 @@ func (c *rootFSCore) MakeDir(ctx context.Context, p string) error {
 	if p == "" || p == "." {
 		return nil
 	}
-	return c.root.MkdirAll(p, 0o755)
+	return c.root.MkdirAll(rootRel(p), 0o755)
 }

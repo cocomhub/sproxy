@@ -82,24 +82,15 @@ func (h *Handlers) backupHandler(w http.ResponseWriter, r *http.Request) {
 	owner := normalizeOwner(ownerFromRequest(r))
 
 	// 源=本地卷 user 桶（backup 引擎泛化于 sync.FS，远端源不在本端点范围）。
-	srcAbs, ok := h.backupSourceRoot(w, owner, req)
+	srcTnt, srcAbs, ok := h.backupSourceRoot(w, owner, req)
 	if !ok {
 		return
 	}
-	// **加密卷源 fail-closed 拒绝**（评审 P0）：源侧经裸 LocalFS 读会拿到**密文**，备份产物不可用；
-	// 在接「经 Root 的备份源」前显式拒绝（禁静默降级）。
-	// **按源卷**判定（评审第 2 轮 P2：原用默认卷租户 ⇒ 显式 `source` 指向加密卷时不命中）。
-	srcVolName := req.Source
-	if srcVolName == "" {
-		if h.volSet != nil {
-			srcVolName = h.volSet.Default().Name
-		}
-	}
-	if st := h.volumeTenant(srcVolName, owner); st != nil && st.Root() != nil && st.Root().IsEncrypted() {
-		http.Error(w, "加密卷暂不支持作为备份源（待接入经 Root 的备份源）", http.StatusConflict)
-		return
-	}
-	srcFS := syncpkg.NewLocalFS(filepath.ToSlash(srcAbs), h.logger)
+	// **源经 `storage.Root`**（评审 P0 残余闭环）：键空间与目标一致（`user/<rel>` 前缀映射，
+	// 源条目仍是裸 rel）；经 Root 即自动获得 **at-rest 透明解密**与**封印**语义
+	// ——此前源是裸 `NewLocalFS(srcAbs)`（纯 os I/O）⇒ 加密卷源读到密文（备份产物不可用），
+	// 故当时对加密源显式 409 拒绝；now 该拒绝不再需要（加密卷与封印卷均可作为备份源）。
+	srcFS := syncpkg.NewPrefixFS(NewRootFS(srcTnt.Root()), srcTnt.UserRoot()+"/")
 
 	// 自备份守卫：源与目标为同一实体时拒绝（与 manifest 落点无关的独立防线）。
 	if h.backupSelfTarget(owner, req.Target, srcAbs) {
@@ -160,8 +151,9 @@ func parseBackupRequest(w http.ResponseWriter, r *http.Request) (*BackupRequest,
 }
 
 // backupSourceRoot 解析备份源卷：显式 Source 或默认卷；ACL 收口（AD-6：无权卷不泄不写），
-// 并返回源卷 user 桶的绝对路径。失败已写响应，返回 false。
-func (h *Handlers) backupSourceRoot(w http.ResponseWriter, owner string, req *BackupRequest) (string, bool) {
+// 并返回源卷租户（供经 Root 构造源视图）与 user 桶绝对路径（自备份判据用）。
+// 失败已写响应，返回 false。
+func (h *Handlers) backupSourceRoot(w http.ResponseWriter, owner string, req *BackupRequest) (*storage.Tenant, string, bool) {
 	// 源卷：显式 Source 或默认卷；ACL 收口（AD-6：无权卷不泄不写）。
 	srcVol := req.Source
 	if srcVol == "" && h.volSet != nil {
@@ -169,19 +161,19 @@ func (h *Handlers) backupSourceRoot(w http.ResponseWriter, owner string, req *Ba
 	}
 	if srcVol == "" || !h.volumeAllowedFor(owner, srcVol) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
-		return "", false
+		return nil, "", false
 	}
 	srcTnt := h.volumeTenant(srcVol, owner)
 	if srcTnt == nil || srcTnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "源卷根不可用"}, http.StatusBadRequest)
-		return "", false
+		return nil, "", false
 	}
 	srcAbs, ok := srcTnt.Root().Abs(srcTnt.UserRoot())
 	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "源卷根不可用"}, http.StatusBadRequest)
-		return "", false
+		return nil, "", false
 	}
-	return srcAbs, true
+	return srcTnt, srcAbs, true
 }
 
 // backupSelfTarget 报告备份目标是否与源为**同一实体**（自备份）。

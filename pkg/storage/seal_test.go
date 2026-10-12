@@ -46,7 +46,8 @@ func TestRoot_SetSeals_Validation(t *testing.T) {
 	t.Parallel()
 	root := newSealRoot(t)
 	bad := [][]SealRule{
-		{{Path: "", Wrapper: "w"}},
+		// 注意：**空字符串**是合法的「整卷封印」（见 TestRoot_SetSeals_WholeVolume），
+		// 但**纯空白**是拼写错误（非显式整卷语义）⇒ 仍拒绝（fail-closed）。
 		{{Path: "   ", Wrapper: "w"}},
 		{{Path: "/abs/dir", Wrapper: "w"}},
 		{{Path: "../escape", Wrapper: "w"}},
@@ -287,5 +288,66 @@ func TestRoot_Seal_CaseInsensitiveAndTrailingDot(t *testing.T) {
 	// 未封印路径不受影响（大小写敏感 FS 上的「多封」是保守方向，但不得影响无关路径）。
 	if err := root.MkdirAll("public/ok", 0o755); err != nil {
 		t.Fatalf("无关路径应可用: %v", err)
+	}
+}
+
+// TestRoot_SetSeals_WholeVolume 空路径 = **整卷封印**：设计 2026-10-11-enclosure-volume §4/§5
+// 与 docs/config.md 明确「`extra.source` 子路径可空 = 整卷封装」，`enclosure.KeySpacePrefix()`
+// 也按空前缀实现；但 storage 此前把空路径判非法（"封印路径不能为空"）⇒ 该配置**装配期恒失败**
+// （文档承诺与实现矛盾，两边各自有测试故长期未被发现）。本用例钉住「整卷封印」语义：
+// 卷内**任意**路径写恒拒、读按 hidden 404（readable 可读仍禁写）、根列举被过滤。
+//
+// 变异：`normalizeSealPath` 重新拒绝空路径 → 装配期报错/本用例红；`sealCovers` 不特判空串
+// → 空规则匹配不到任何路径（形同虚设）→ 本用例红。
+func TestRoot_SetSeals_WholeVolume(t *testing.T) {
+	t.Parallel()
+	root := newSealRoot(t, SealRule{Path: "", Wrapper: "vault"})
+	if got := root.Seals(); len(got) != 1 || got[0].Path != "" || got[0].Wrapper != "vault" {
+		t.Fatalf("整卷封印规则应被接受, got %+v", got)
+	}
+	// 写：卷内任意路径（含深层与既有文件）恒拒且可归因。
+	for _, rel := range []string{"private/plain.bin", "private/vault/secret.bin", "brand/new/deep.bin"} {
+		w, werr := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY, 0o644)
+		if werr == nil {
+			_ = w.Close()
+			t.Fatalf("整卷封印下写 %s 必须被拒绝", rel)
+		}
+		if !errors.Is(werr, ErrSealed) {
+			t.Fatalf("写 %s 拒绝应可归因 ErrSealed, got %v", rel, werr)
+		}
+	}
+	// 读：默认 hidden → 按不存在（同时可归因 ErrSealed）。
+	if _, rerr := root.Stat("private/vault/secret.bin"); !errors.Is(rerr, fs.ErrNotExist) || !errors.Is(rerr, ErrSealed) {
+		t.Fatalf("整卷封印读应既不存在又可归因, got %v", rerr)
+	}
+	// 列举：整卷规则覆盖**任意**目录（含其自身）⇒ 父目录列举按 hidden 视为不存在。
+	if _, lerr := root.ReadDir("private"); !errors.Is(lerr, fs.ErrNotExist) || !errors.Is(lerr, ErrSealed) {
+		t.Fatalf("整卷 hidden 封印下目录列举应按不存在, got %v", lerr)
+	}
+	// 规则覆盖面：任意路径（含仅一层、深层、以及 root 自身以外的所有形态）。
+	for _, rel := range []string{"private", "private/vault", "user/a.bin", "meta/x.meta"} {
+		if rule := root.SealAt(rel); rule == nil || rule.Wrapper != "vault" {
+			t.Fatalf("整卷封印应覆盖 %q, got %+v", rel, rule)
+		}
+	}
+}
+
+// TestRoot_SetSeals_WholeVolumeReadable 整卷封印 + readable：只读透视（可读原始形态），
+// 写仍绝对禁止。迁移场景需要（整卷带外核对）。
+func TestRoot_SetSeals_WholeVolumeReadable(t *testing.T) {
+	t.Parallel()
+	root := newSealRoot(t, SealRule{Path: "", Wrapper: "vault", Mode: SealReadable})
+	rc, err := root.OpenDecrypted("private/vault/secret.bin")
+	if err != nil {
+		t.Fatalf("readable 整卷封印应可读: %v", err)
+	}
+	_ = rc.Close()
+	if _, werr := root.OpenFile("private/plain.bin", os.O_CREATE|os.O_WRONLY, 0o644); !errors.Is(werr, ErrSealed) {
+		t.Fatalf("readable 下写仍须拒绝, got %v", werr)
+	}
+	// 列举可见（readable 不隐藏）。
+	ents, lerr := root.ReadDir("private")
+	if lerr != nil || len(ents) == 0 {
+		t.Fatalf("readable 整卷封印应保留列举可见性, got n=%d err=%v", len(ents), lerr)
 	}
 }
