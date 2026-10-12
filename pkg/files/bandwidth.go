@@ -284,3 +284,36 @@ func limitResponseWriter(l BandwidthLimiter, owner string, cw *countingWriter) h
 	}
 	return &rateLimitResponseWriter{countingWriter: cw, bucket: b}
 }
+
+// teeReadSeeker 是 io.TeeReader 的可 seek 变体：同时实现 io.Reader + io.Seeker +
+// io.ReaderAt，透传到底层（multipart.File / *os.File / SectionReader），同时把读到的
+// 字节写入 w（供哈希计算）。secretdata 写路径依赖上游透传 seek 才走流式（设计
+// docs/designs/2026-10-12-secretdata-stream-encrypt.md §3.2）；不可 seek 源用 io.TeeReader
+// 原样。Read 透传底层并 tee；Seek/ReadAt 直接透传底层（不改内部偏移语义）。
+type teeReadSeeker struct {
+	r  io.Reader
+	s  io.Seeker
+	ra io.ReaderAt
+	w  io.Writer
+}
+
+// NewTeeReadSeeker 构造 teeReadSeeker：底层须同时实现 io.Seeker + io.ReaderAt（否则
+// 调用方应退回 io.TeeReader 纯流路径）。w 为 tee 写目标（哈希等）。
+func NewTeeReadSeeker(r io.Reader, s io.Seeker, ra io.ReaderAt, w io.Writer) io.Reader {
+	return &teeReadSeeker{r: r, s: s, ra: ra, w: w}
+}
+
+func (t *teeReadSeeker) Read(p []byte) (n int, err error) {
+	n, err = t.r.Read(p)
+	if n > 0 {
+		if _, werr := t.w.Write(p[:n]); werr != nil {
+			return n, werr
+		}
+	}
+	return n, err
+}
+
+func (t *teeReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	return t.s.Seek(offset, whence)
+}
+func (t *teeReadSeeker) ReadAt(p []byte, off int64) (int, error) { return t.ra.ReadAt(p, off) }

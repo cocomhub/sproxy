@@ -216,8 +216,21 @@ func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, 
 		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
 	}
 	// 整流写入 + 流式哈希（一次性流，写盘同时算 SHA-256——外部卷无原子写，写后比对）。
+	// 可 seek 源（multipart.File / *os.File / SectionReader）用 teeReadSeeker 透传 seek
+	// （secretdata 写路径依赖上游 seek 走流式；io.TeeReader 剥 seek 会导致 secretdata
+	// 恒 io.ReadAll——设计 docs/designs/2026-10-12-secretdata-stream-encrypt.md §3.2）。
 	hasher := sha256.New()
-	limitedSrc := limitReader(s.rt.bandwidthLimiter(), a.owner, io.TeeReader(a.src, hasher))
+	var limitedSrc io.Reader
+	if sec, ok := a.src.(io.Seeker); ok {
+		if ra, ok2 := a.src.(io.ReaderAt); ok2 {
+			limitedSrc = NewTeeReadSeeker(a.src, sec, ra, hasher)
+		} else {
+			limitedSrc = io.TeeReader(a.src, hasher) // 仅 Seeker 无 ReaderAt（罕见）退 io.TeeReader
+		}
+	} else {
+		limitedSrc = io.TeeReader(a.src, hasher)
+	}
+	limitedSrc = limitReader(s.rt.bandwidthLimiter(), a.owner, limitedSrc)
 	start := time.Now()
 	if werr := a.route.Sink.WriteFile(ctx, a.rel, limitedSrc, a.input.ClientSize, a.input.Mtime); werr != nil {
 		a.route.Release()

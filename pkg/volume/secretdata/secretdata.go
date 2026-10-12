@@ -708,10 +708,13 @@ var _ syncpkg.FS = (*SecretdataFS)(nil)
 // （writeFileDedup*/commitDedupEntry）写路径共用的入参组，避免逐参数传递（与 fileOp /
 // backupWorker 的 Go S107 收敛范式一致）。字段语义见 writeFile：sv 为 CAS 起始卷版本、
 // newVer 为写内锁内一次性分配的乐观锁版本（== sv+1）并在写路径全程固定；expected 为
-// 调用方期望卷版本（<0 不校验）。
+// 调用方期望卷版本（<0 不校验）。data 为明文（内存变体）；流式路径 data 为 nil、改用
+// reader 流式加密（size 为文件大小，commit 的 usage/审计用 size）。
 type writeCtx struct {
 	rel       string        // 逻辑相对路径（索引键）
-	data      []byte        // 明文（Imp 内存明文变体）
+	data      []byte        // 明文（Imp 内存明文变体；流式路径 nil）
+	size      int64         // 文件大小（流式路径使用；内存变体 = len(data)）
+	reader    io.Reader     // 流式明文源（内存变体 nil；可 seek 时走 EncryptShardsReader）
 	container string        // 文件 meta 所在容器名
 	created   []dirCreation // 本次新建容器（失败回滚删新留旧）
 	mtime     int64         // 逻辑 mtime（原始值；底层 blob 写入经 blobMTime 打散）
@@ -742,6 +745,11 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 	if s.opts.MaxFileBytes > 0 && size > int64(s.opts.MaxFileBytes) {
 		return fmt.Errorf("%w: 大小 %d，上限 %d", ErrMaxFileBytes, size, int64(s.opts.MaxFileBytes))
 	}
+	// 流式优先：可 seek（io.Seeker/io.ReaderAt）且非 dedup/erasure（这两者需全文内存）→
+	// 流式加密（逐块 ReadAt + 流式哈希，内存峰值 O(单块上限)）；否则读全文走现状内存变体。
+	if canStream(r) && !s.opts.Dedup && !s.opts.Erasure {
+		return s.writeFileStreamEntry(ctx, rel, r, size, mtime, expected, ifAbsent)
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("secretdata: 读明文失败: %w", err)
@@ -751,16 +759,11 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 	// 固定，落盘 meta.BaseVersion 与内存 e.baseVersion/卷版本三者恒等——跨进程 CAS 与
 	// 重启后 loadIndex 恢复的卷版本以此为准；不再由 commitEntry 锁内重算 +1，避免
 	// 「落盘 meta 恒 0」导致的跨重启 CAS 空心化）。
-	s.mu.Lock()
-	sv := s.volVersion
-	if expected >= 0 && expected != sv {
-		s.mu.Unlock()
-		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", sv, expected, ErrVersionConflict)
+	sv, newVer, unlock, cerr := s.beginWrite(expected)
+	if cerr != nil {
+		return cerr
 	}
-	newVer := sv + 1
-	s.writesInFlight++
-	s.mu.Unlock()
-	defer s.endWrite()
+	defer unlock()
 
 	parent := parentDirOf(rel)
 	container, created, err := s.ensureContainer(ctx, parent, mtime)
@@ -775,6 +778,124 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 		return s.writeFileDedup(ctx, wc)
 	}
 	return s.writeFileEncrypted(ctx, wc)
+}
+
+// canStream 判定 r 是否可流式加密（io.Seeker / io.ReaderAt 之一）。
+func canStream(r io.Reader) bool {
+	if _, ok := r.(io.Seeker); ok {
+		return true
+	}
+	_, ok := r.(io.ReaderAt)
+	return ok
+}
+
+// writeFileStreamEntry 流式入口：登记在途 + CAS + 建容器 + 调 writeFileStream。
+func (s *SecretdataFS) writeFileStreamEntry(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64, ifAbsent bool) error {
+	sv, newVer, unlock, cerr := s.beginWrite(expected)
+	if cerr != nil {
+		return cerr
+	}
+	defer unlock()
+	parent := parentDirOf(rel)
+	container, created, err := s.ensureContainer(ctx, parent, mtime)
+	if err != nil {
+		return err
+	}
+	wc := writeCtx{
+		rel: rel, size: size, reader: r, container: container, created: created,
+		mtime: mtime, sv: sv, newVer: newVer, expected: expected, ifAbsent: ifAbsent,
+	}
+	return s.writeFileStream(ctx, wc)
+}
+
+// beginWrite 登记在途写入 + 起始 CAS（expected ≥ 0 须匹配卷当前版本）+ 一次性分配
+// 乐观锁版本 newVer = sv+1（Imp-1 修复：写前锁内定版本；落盘 meta.BaseVersion 与
+// 内存 e.baseVersion/卷版本恒等）。返回 (sv, newVer, unlock, err)。
+func (s *SecretdataFS) beginWrite(expected int64) (int64, int64, func(), error) {
+	s.mu.Lock()
+	sv := s.volVersion
+	if expected >= 0 && expected != sv {
+		s.mu.Unlock()
+		return 0, 0, nil, fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", sv, expected, ErrVersionConflict)
+	}
+	newVer := sv + 1
+	s.writesInFlight++
+	s.mu.Unlock()
+	return sv, newVer, func() { s.endWrite() }, nil
+}
+
+// writeFileStream 流式写路径（可 seek 源）：逐块加密 + 流式哈希，内存峰值 O(单块上限)。
+// 与 writeFileEncrypted 同构：临时分块目录 → EncryptShardsReader → 上传 → commit；
+// 仅加密入口不同（wc.reader 可 seek → 流式；wc.data 为 nil、size 已给定）。
+// video-keyframe 模式由 EncryptShardsReader 内部按 seek 判定（非 keyframe 才流式；
+// keyframe 上层回退 ReadAll——parseOnce 全文扫描与 tee 哈希冲突，见设计 §5）。
+func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) error {
+	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
+	if err != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return fmt.Errorf("secretdata: 创建临时分块目录失败: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	policy, perr := s.blockletPolicyFor(wc.rel)
+	if perr != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return fmt.Errorf("secretdata: blocklet 模式选型失败: %w", perr)
+	}
+	// 流式加密（逐块 ReadAt + 流式哈希，group/SHA256 收尾后给定）。
+	out, cerr := encryptContentReader(wc.reader, wc.size, tmp, s.secret, policy, wc.rel, s.metaPadTarget(), s.algoVer)
+	if cerr != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return fmt.Errorf("secretdata: 流式分块加密失败: %w", cerr)
+	}
+	out.Meta.Original.MTime = mtimeString(wc.mtime)
+	out.Meta.BaseVersion = wc.newVer
+	uploaded := []string{}
+	if s.opts.Erasure && len(out.Meta.Chunks) > 1 {
+		if eerr := s.writeErasureParity(ctx, wc.container, out, nil, wc.mtime, &uploaded); eerr != nil {
+			s.rollbackWrite(ctx, uploaded, wc.created)
+			return eerr
+		}
+	}
+	metaName, metaBlob, merr := s.encryptMetaBlob(out.Meta)
+	if merr != nil {
+		s.rollbackWrite(ctx, uploaded, wc.created)
+		return merr
+	}
+	uploaded = append(uploaded, path.Join(wc.container, metaName))
+	if uerr := s.uploadChunks(ctx, wc.container, tmp, wc.mtime, out.ChunkNames, &uploaded); uerr != nil {
+		s.rollbackWrite(ctx, uploaded, wc.created)
+		return uerr
+	}
+	mt := s.blobMTime(wc.mtime)
+	if werr := s.inner.WriteFile(ctx, path.Join(wc.container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
+		s.rollbackWrite(ctx, uploaded, wc.created)
+		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
+	}
+	return s.commitEntry(ctx, wc, &metaEntry{
+		size: wc.size, mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
+		phys: physBytesOf(out.Meta, int64(len(metaBlob)), false),
+	}, uploaded)
+}
+
+// encryptContentReader 流式加密入口（helpers.go 的同名函数内存变体对应）。
+// 可 seek 源（wc.reader 实现 io.Seeker/io.ReaderAt）→ EncryptShardsReader（流式）；
+// 纯流不可 seek → 回退 io.ReadAll 后 EncryptShardsBytes（内存变体，功能不变）。
+func encryptContentReader(r io.Reader, size int64, outDir string, secret []byte, policy shardseal.BlockPolicy, name string, padTarget int, v shardseal.AlgoVersion) (*shardseal.EncryptionResult, error) {
+	if _, ok := r.(io.ReaderAt); ok || isSeeker(r) {
+		return shardseal.EncryptShardsReader(r, size, sanitizeName(name), outDir, secret, policy, padTarget, v)
+	}
+	data, rerr := io.ReadAll(r)
+	if rerr != nil {
+		return nil, fmt.Errorf("secretdata: 读明文失败: %w", rerr)
+	}
+	return shardseal.EncryptShardsBytes(data, sanitizeName(name), outDir, secret, policy, padTarget, v)
+}
+
+// isSeeker 判定 r 是否实现 io.Seeker。
+func isSeeker(r io.Reader) bool {
+	_, ok := r.(io.Seeker)
+	return ok
 }
 
 // endWrite 结束一段在途写入（defer 调用，成功/失败统一释放计数）。
@@ -869,7 +990,7 @@ func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntr
 	e.baseVersion = wc.newVer
 	addDirKeysLocked(s.dirs, wc.rel)
 	s.volVersion = wc.newVer
-	s.usage += int64(len(wc.data))
+	s.usage += wc.size
 	if prev != nil {
 		s.usage -= prev.size
 		if s.usage < 0 {
