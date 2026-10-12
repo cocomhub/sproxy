@@ -20,5 +20,4 @@ module github.com/cocomhub/sproxy/pkg/volume/ext/pikpak
 
 go 1.27
 
-
 require github.com/cocomhub/sproxy v0.0.0-20261008134855-8b2a42ff4439

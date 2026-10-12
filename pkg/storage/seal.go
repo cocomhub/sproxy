@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	normpkg "golang.org/x/text/unicode/norm"
 )
 
 // seal.go 实现**卷级封印（seal）**：封装卷（enclosure，如 secretdata 加密卷）声明其占用的
@@ -102,6 +104,9 @@ func (rt *Root) SetSeals(rules []SealRule) error {
 		rr := r
 		rr.Path = clean
 		out = append(out, rr)
+		// **8.3 短名别名展开**（平台能力；非 Windows 恒 no-op）：文件系统可为一个长名分配短名，
+		// 二者指向同一文件——只按长名词法比较会漏封短名路径（fail-closed 方向：多封不多放）。
+		out = append(out, sealAliasesOf(rt, rr)...)
 	}
 	// 按路径长度降序：更深的规则优先（嵌套封印时给出更精确的 wrapper 归因）。
 	slices.SortFunc(out, func(a, b SealRule) int { return len(b.Path) - len(a.Path) })
@@ -202,9 +207,13 @@ func sealRel(rel string) (string, bool) {
 // sealCovers 报告 sealed 是否覆盖 rel（相等或为 rel 的祖先目录）。
 //
 // **比较用归一键**（sealCompareKey）：大小写不敏感（Windows NTFS / macOS APFS 默认不敏感——
-// 字节前缀比较会被 `user/PRIVATE/vault` 绕过）且逐段去掉**尾部点/空格**（Windows 会在打开时
-// 静默剥离 `vault.`/`vault `，同样的目标却匹配不上封印）。对照 pkg/sync/local_fs.go 的 within()
-// 已用 EqualFold 处置同类风险。
+// 字节前缀比较会被 `user/PRIVATE/vault` 绕过）、逐段去掉**尾部点/空格**（Windows 会在打开时
+// 静默剥离 `vault.`/`vault `，同样的目标却匹配不上封印；2026-10-12 在 Windows/NTFS 实测确认
+// `secret.txt.`、`secret.txt `、`dir./file` 均打开同一文件）、**Unicode NFC 归一**（macOS
+// APFS/HFS+ 会做 NFC/NFD 归一，同目录会有 `café` 与 `cafe\u0301` 两种写法指向同一项）。
+//
+// 注：Windows 短名（8.3）不是词法归一键能覆盖的等价形态（恶意的短名与长名无字符对应关系），
+// 由 SetSeals 的**别名展开**（sealAliasesOf + resolveShortPath）单独处置。
 // 取舍：在大小写敏感 FS（Linux）上会**多封**（`User` 也命中 `user` 封印）——方向保守（fail-closed），
 // 且运维可经日志/只读透视排查；宁可多封不可漏封。
 func sealCovers(sealed, rel string) bool {
@@ -215,20 +224,54 @@ func sealCovers(sealed, rel string) bool {
 	return strings.HasPrefix(rk, sk+"/")
 }
 
-// sealCompareKey 生成封印比较键：`\`→`/`、Clean、逐段去尾点/空格、转小写。
-// 仅用于**比较**，不用于实际文件操作路径（避免改变 os.Root 的相对路径语义）。
+// sealCompareKey 生成封印比较键：`\`→`/`、去首尾斜杠、逐段去尾点/空格、**Unicode NFC 归一**、
+// 转小写。仅用于**比较**，不用于实际文件操作路径（避免改变 os.Root 的相对路径语义）。
 func sealCompareKey(p string) string {
 	norm := strings.ReplaceAll(p, `\`, "/")
 	segs := strings.Split(strings.Trim(norm, "/"), "/")
 	out := make([]string, 0, len(segs))
 	for _, seg := range segs {
-		seg = strings.TrimRight(seg, ". ")
+		// 先 NFC 归一再去尾点/空格：组合字符（NFD）与预组合字符（NFC）在 macOS 上指向同一
+		// 文件系统对象；归一在去尾点之前做，否则以组合字符结尾的段会被 TrimRight 误割。
+		seg = normpkg.NFC.String(strings.TrimRight(seg, ". "))
 		if seg == "" {
 			continue
 		}
 		out = append(out, strings.ToLower(seg))
 	}
 	return strings.Join(out, "/")
+}
+
+// shortPathResolver 是平台短名解析器（Windows: GetShortPathNameW；其它平台恒不掌握）。
+// 作为包级变量以便测试替换（只能在装配期/测试内替换，替换方负责恢复）。
+var shortPathResolver = resolveShortPath
+
+// sealAliasesOf 返回规则 rr 在本平台可能存在的**等价别名**规则（当前：Windows 8.3 短名）。
+//
+// 为什么归一键挡不住：短名由文件系统按内部算法（含冲突哈希）生成，与长名无字符级对应关系，
+// 无法从长名推导；只能在装配期把**磁盘上实际存在的短名**也登记为封印规则。解析器不掌握/路径
+// 不存在/短名与长名相同（如未启用 8.3 的卷）时返回 nil（零回归）。方向恒为 fail-closed：
+// 多封一个别名不会放行任何东西。
+func sealAliasesOf(rt *Root, rr SealRule) []SealRule {
+	abs, ok := rt.Abs(rr.Path)
+	if !ok {
+		return nil
+	}
+	short, ok := shortPathResolver(abs)
+	if !ok || short == "" || sealCompareKey(short) == sealCompareKey(abs) {
+		return nil
+	}
+	rel, rerr := filepath.Rel(rt.base, short)
+	if rerr != nil {
+		return nil
+	}
+	alias, nerr := normalizeSealPath(filepath.ToSlash(rel))
+	if nerr != nil || alias == rr.Path {
+		return nil
+	}
+	ar := rr
+	ar.Path = alias
+	return []SealRule{ar}
 }
 
 // isWriteOpenFlag 判断 open 标志是否为写意图（任一写/创建/截断位）。
