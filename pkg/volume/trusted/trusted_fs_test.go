@@ -16,6 +16,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
@@ -879,4 +880,98 @@ func TestTrustedVolumeFS_VerifyWriteMetaLocalLightweight(t *testing.T) {
 	if sidecarExists() {
 		t.Fatal("size 不一致时应失效 sidecar")
 	}
+}
+
+// seekSpyFS 模拟「只经 ReadAt 多遍随机读」的 inner（如 secretdata 流式写路径）：
+// 记录传入 WriteFile 的 reader 是否可 seek，并按 ReadAt 读两遍重建内容——若 trusted 仍
+// 用 io.TeeReader（既剥 seek 又让多遍读下 meta 计算器收不到字节），meta 将错误/缺失。
+type seekSpyFS struct {
+	*syncpkg.LocalFS
+	seekable atomic.Bool
+	sawMain  atomic.Bool
+}
+
+func (s *seekSpyFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+	if !strings.HasSuffix(p, ".meta") {
+		_, ok := r.(io.Seeker)
+		s.seekable.Store(ok)
+		s.sawMain.Store(true)
+		if ra, rok := r.(io.ReaderAt); rok && size > 0 {
+			buf := make([]byte, size)
+			_, _ = ra.ReadAt(buf, 0) // 第一遍（模拟哈希 pass）
+			_, _ = ra.ReadAt(buf, 0) // 第二遍（模拟分块 pass）
+			return s.LocalFS.WriteFile(ctx, p, bytes.NewReader(buf), size, mtime)
+		}
+	}
+	return s.LocalFS.WriteFile(ctx, p, r, size, mtime)
+}
+
+// TestWrite_SeekableSourcePreservesSeekAndMeta：可 seek 源 → inner 收到**可 seek** reader
+// （流式生效）+ meta 正确（meta 计算器由独立一遍喂满，不受 inner 多遍 ReadAt 影响）。
+func TestWrite_SeekableSourcePreservesSeekAndMeta(t *testing.T) {
+	t.Parallel()
+	inner := &seekSpyFS{LocalFS: newInner(t)}
+	tv := Wrap(inner, Options{})
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("seekable content 可流式 "), 300)
+	if err := tv.WriteFile(ctx, "user/s.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if !inner.sawMain.Load() {
+		t.Fatal("inner 未收到主文件写入")
+	}
+	if !inner.seekable.Load() {
+		t.Fatal("可 seek 源应把可 seek reader 传给 inner（tee 会剥 seek → 流式失效）")
+	}
+	// meta 完整性（多遍 ReadAt inner 下 tee 会失效，独立一遍喂满则应正确）。
+	raw, rerr := readMetaFile(t, inner, "meta/s.bin.meta")
+	if rerr != nil {
+		t.Fatalf("读 meta: %v", rerr)
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("meta 反序列化: %v", uerr)
+	}
+	if fm.TotalSHA256 != refSHA(data) {
+		t.Fatalf("meta TotalSHA256 错误（meta 计算器未收满字节）: got %s want %s", fm.TotalSHA256, refSHA(data))
+	}
+}
+
+// TestWrite_NonSeekableSourceFallsBackToTee：不可 seek 源 → inner 收到非 seek reader（回退
+// 单遍 tee），meta 仍正确。
+func TestWrite_NonSeekableSourceFallsBackToTee(t *testing.T) {
+	t.Parallel()
+	inner := &seekSpyFS{LocalFS: newInner(t)}
+	tv := Wrap(inner, Options{})
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("nonseek 纯流 "), 300)
+	plain := struct{ io.Reader }{bytes.NewReader(data)}
+	if err := tv.WriteFile(ctx, "user/n.bin", plain, int64(len(data)), 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if inner.seekable.Load() {
+		t.Fatal("不可 seek 源不应被标记可 seek")
+	}
+	raw, rerr := readMetaFile(t, inner, "meta/n.bin.meta")
+	if rerr != nil {
+		t.Fatalf("读 meta: %v", rerr)
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("meta 反序列化: %v", uerr)
+	}
+	if fm.TotalSHA256 != refSHA(data) {
+		t.Fatalf("meta TotalSHA256 错误: got %s", fm.TotalSHA256)
+	}
+}
+
+// readMetaFile 读 inner 上 meta sidecar 内容。
+func readMetaFile(t *testing.T, inner syncpkg.FS, rel string) ([]byte, error) {
+	t.Helper()
+	rc, err := inner.OpenRead(context.Background(), rel)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
 }
