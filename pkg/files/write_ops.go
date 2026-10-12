@@ -201,6 +201,27 @@ type externalWriteArgs struct {
 	remotePath string
 }
 
+// feedChecksumRewindable 构造交给 sink 的写源，同时把**完整明文**喂给 hasher 算 SHA-256：
+//   - 可 seek 源（io.Seeker）：独立一遍读满喂 hasher（O(1) 内存），Seek(0) 后返回**原**
+//     （可 seek）源——sink 若为 secretdata 等流式卷可逐块 ReadAt 多遍随机读。tee 只捕获经
+//     Read 的字节，多遍 ReadAt 下 hasher 收不到内容（#763 回归）。
+//   - 不可 seek 源：退回 io.TeeReader（单遍，sink 必读全文）。
+//
+// 供 writeExternalSettle（HTTP 上传外部卷）与 writeTargetExternalSettle（S3/DAV 等统一
+// 写内核外部卷）共用，避免两处再漂移。
+func feedChecksumRewindable(src io.Reader, hasher io.Writer) (io.Reader, error) {
+	if sec, ok := src.(io.Seeker); ok {
+		if _, err := io.CopyBuffer(hasher, src, make([]byte, 128<<10)); err != nil {
+			return nil, err
+		}
+		if _, err := sec.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return src, nil
+	}
+	return io.TeeReader(src, hasher), nil
+}
+
 // writeExternalSettle 外部卷整流写入（2026-10-05 用户裁定：普通上传进外部卷）：
 // MakeDir + WriteFile + 流式哈希 + SHA-256 比对（不符删回 400）+ 双账本结算。
 // 无原子写/去重/版本/台账——外部卷是远程后端，这些本地 inode 语义天然不适用。
@@ -216,24 +237,12 @@ func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, 
 		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
 	}
 	// checksum 计算与底层写入解耦（修复 #763 回归）：外部卷无原子写，需写后比对 SHA-256。
-	// **可 seek 源不能用 tee 算 checksum**——tee 只捕获经由 Read 的字节，而 secretdata
-	// 流式写路径全程用 ReadAt（哈希 pass + 分块 pass），tee 收不到字节 → 空摘要 → 校验失败。
-	// 故可 seek（ReaderAt+Seeker）源先**独立一遍**读满全文算 checksum，再 Seek(0) 把原（可
-	// seek）源交给 sink（sink 可多遍随机读）；不可 seek 源仍用 io.TeeReader 单遍 tee。
+	// 可 seek 源会被独立一遍读满算 checksum，再原（可 seek）源交给 sink（见 feedChecksumRewindable）。
 	hasher := sha256.New()
-	var passSrc io.Reader
-	if sec, ok := a.src.(io.Seeker); ok {
-		if _, cerr := io.CopyBuffer(hasher, a.src, make([]byte, 128<<10)); cerr != nil {
-			a.route.Release()
-			return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
-		}
-		if _, serr := sec.Seek(0, io.SeekStart); serr != nil {
-			a.route.Release()
-			return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
-		}
-		passSrc = a.src // 原（可 seek）源：sink 可流式多遍读
-	} else {
-		passSrc = io.TeeReader(a.src, hasher)
+	passSrc, ferr := feedChecksumRewindable(a.src, hasher)
+	if ferr != nil {
+		a.route.Release()
+		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 	}
 	limitedSrc := limitReader(s.rt.bandwidthLimiter(), a.owner, passSrc)
 	start := time.Now()
@@ -1843,7 +1852,12 @@ func (s *Service) writeTargetExternalSettle(ctx context.Context, logger *slog.Lo
 		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
 	}
 	hasher := sha256.New()
-	limitedSrc := limitReader(s.rt.bandwidthLimiter(), owner, io.TeeReader(src, hasher))
+	passSrc, ferr := feedChecksumRewindable(src, hasher)
+	if ferr != nil {
+		route.Release()
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+	}
+	limitedSrc := limitReader(s.rt.bandwidthLimiter(), owner, passSrc)
 	start := time.Now()
 	if werr := route.Sink.WriteFile(ctx, rel, limitedSrc, input.ClientSize, input.Mtime); werr != nil {
 		route.Release()

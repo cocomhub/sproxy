@@ -76,3 +76,26 @@ func TestExternalUpload_SecretdataChecksumOK(t *testing.T) {
 		t.Fatalf("返回 checksum=%q 期望 %q", res.Checksum, testutil.SHA256Hex([]byte(content)))
 	}
 }
+
+// TestWriteTarget_SecretdataChecksumOK 统一写内核（#765）外部分支（S3/DAV 路径）写真实
+// secretdata：Verify + 正确 checksum 必须成功——与 writeExternalSettle 共用
+// feedChecksumRewindable（独立一遍算 checksum + 回绕），故多遍 ReadAt 消费下亦正确。
+func TestWriteTarget_SecretdataChecksumOK(t *testing.T) {
+	t.Parallel()
+	h := newSecretdataExternalEnv(t)
+	content := "s3-like object body\n"
+	res, werr := h.fileService().WriteTarget(context.Background(), files.WriteTargetInput{
+		Owner:            "alice",
+		RemotePath:       "user/obj.bin",
+		Volume:           "vault",
+		Verify:           true,
+		ExpectedChecksum: testutil.SHA256Hex([]byte(content)),
+		ClientSize:       int64(len(content)),
+	}, strings.NewReader(content))
+	if werr != nil {
+		t.Fatalf("WriteTarget(外部 secretdata): %v", werr)
+	}
+	if res.Checksum != testutil.SHA256Hex([]byte(content)) {
+		t.Fatalf("checksum=%q 期望 %q", res.Checksum, testutil.SHA256Hex([]byte(content)))
+	}
+}
