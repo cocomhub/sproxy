@@ -151,6 +151,7 @@ pkg/server/version_test.go	3
 pkg/server/volumes_api_test.go	14
 pkg/server/volumes_test.go	12
 pkg/server/xfer_listener_test.go	12
+pkg/storage/seal_alias_test.go	1
 pkg/telemetry/ext/otel/provider_test.go	4
 pkg/telemetry/ext/otel/tracer_test.go	3
 pkg/telemetry/tracing_test.go	15
