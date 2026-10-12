@@ -85,8 +85,9 @@ func (e *sealedError) Unwrap() error {
 	return fs.ErrNotExist
 }
 
-// SetSeals 注入封印规则（装配期一次性；nil/空 = 无封印，行为零回归）。
-// 规则路径会被归一（去前后空白/斜杠、Clean）；非法（空、绝对、含 ..、越出 root）返回错误。
+// SetSeals 注入封印规则（装配期一次性；nil/空切片 = 无封印，行为零回归）。
+// 规则路径会被归一（去前后空白/斜杠、Clean）；**空字符串 = 整卷封印**（覆盖卷内任意路径，
+// 由 enclosure「空子路径 = 整卷封装」产出）；非法（纯空白、绝对、含 ..、越出 root）返回错误。
 func (rt *Root) SetSeals(rules []SealRule) error {
 	if len(rules) == 0 {
 		rt.seals = nil
@@ -173,9 +174,16 @@ func (rt *Root) sealFilterEntries(dir string, entries []os.DirEntry) []os.DirEnt
 
 // normalizeSealPath 归一封印路径：拒绝空/绝对/含 .. /盘符；去尾斜杠。
 func normalizeSealPath(p string) (string, error) {
+	// **空路径 = 整卷封印**（合法显式语义）：设计 2026-10-11-enclosure-volume §4/§5 与
+	// docs/config.md 明确「`extra.source` 子路径可空 = 整卷封装」，`enclosure.KeySpacePrefix()`
+	// 亦按空前缀实现。此前这里一律拒绝 ⇒ 该配置装配期恒失败（boot fail，文档承诺与实现矛盾）。
+	// **纯空白仍是拼写错误**（不是显式整卷语义）⇒ 在 trim 之前判空，只放行字面空串。
+	if p == "" {
+		return "", nil
+	}
 	p = strings.TrimSpace(strings.ReplaceAll(p, `\`, "/"))
 	if p == "" {
-		return "", fmt.Errorf("storage: 封印路径不能为空")
+		return "", fmt.Errorf("storage: 封印路径不能为空白（整卷封印请显式留空）")
 	}
 	// 绝对路径/盘符一律拒绝（封印必须是卷根相对子路径；避免绕过 Abs 逃逸检查）。
 	//
@@ -217,6 +225,11 @@ func sealRel(rel string) (string, bool) {
 // 取舍：在大小写敏感 FS（Linux）上会**多封**（`User` 也命中 `user` 封印）——方向保守（fail-closed），
 // 且运维可经日志/只读透视排查；宁可多封不可漏封。
 func sealCovers(sealed, rel string) bool {
+	// **整卷封印**（空路径）覆盖卷内任意路径：`sealCompareKey("")` 是空串，按下面前缀判据
+	// 会匹配不到任何 rel（规则形同虚设）⇒ 必须显式特判。
+	if strings.TrimSpace(sealed) == "" {
+		return true
+	}
 	sk, rk := sealCompareKey(sealed), sealCompareKey(rel)
 	if sk == rk {
 		return true
@@ -253,6 +266,10 @@ var shortPathResolver = resolveShortPath
 // 不存在/短名与长名相同（如未启用 8.3 的卷）时返回 nil（零回归）。方向恒为 fail-closed：
 // 多封一个别名不会放行任何东西。
 func sealAliasesOf(rt *Root, rr SealRule) []SealRule {
+	// 整卷封印（空路径）：无「短名别名」概念（. → root 自身），无需展开。
+	if strings.TrimSpace(rr.Path) == "" {
+		return nil
+	}
 	abs, ok := rt.Abs(rr.Path)
 	if !ok {
 		return nil

@@ -90,6 +90,47 @@ func TestApplyEnclosureSeals_InjectsAndBlocksDirectAccess(t *testing.T) {
 	}
 }
 
+// TestApplyEnclosureSeals_WholeVolumeSealsEntireSource 「子路径可空 = 整卷封装」是设计 §4/§5、
+// docs/config.md 与 config.example.yaml 明确承诺的配置（`enclosure.KeySpacePrefix()` 亦按空前缀
+// 实现），但 `storage.SetSeals` 把空路径判非法 ⇒ 该配置在装配期**恒失败 = boot fail**（文档承诺
+// 与实现矛盾；enclosure 侧测试只覆盖 Parse/视图，从未走到 SetSeals，故长期未暴露）。
+//
+// 变异：`normalizeSealPath` 重新拒绝空路径 → 本用例装配报错 → 红。
+func TestApplyEnclosureSeals_WholeVolumeSealsEntireSource(t *testing.T) {
+	t.Parallel()
+	registerSealTestWrapper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "user"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "user", "a.bin"), []byte("plain"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	acc := volAccumForTest(t, dir)
+	acc.volumes = []volume.Volume{
+		{Name: "main", Type: volume.TypeLocal},
+		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
+			"source": "main:", "wrapper": "testsealwrapper", // 空子路径 = 整卷封装
+		}},
+	}
+	if err := applyEnclosureSeals(nil, acc); err != nil {
+		t.Fatalf("整卷封装装配应成功（空路径 = 整卷封印）: %v", err)
+	}
+	rt := acc.roots["main"]
+	got := rt.Seals()
+	if len(got) != 1 || got[0].Path != "" {
+		t.Fatalf("整卷封装应注入空前缀封印规则, got %+v", got)
+	}
+	// 卷内任意路径直连：写恒拒、读 hidden 按不存在（同目录「不误伤」不再适用于整卷）。
+	if f, werr := rt.OpenFile("user/new.bin", os.O_CREATE|os.O_WRONLY, 0o644); !errors.Is(werr, storage.ErrSealed) {
+		_ = f
+		t.Fatalf("整卷封装下直连写应被拒（ErrSealed）, got %v", werr)
+	}
+	if _, rerr := rt.Stat("user/a.bin"); !errors.Is(rerr, fs.ErrNotExist) {
+		t.Fatalf("整卷封装下直连读应按不存在, got %v", rerr)
+	}
+}
+
 // TestApplyEnclosureSeals_NoDeclZeroRegression 无封装声明时不注入任何封印。
 func TestApplyEnclosureSeals_NoDeclZeroRegression(t *testing.T) {
 	t.Parallel()

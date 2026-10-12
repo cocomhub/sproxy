@@ -570,3 +570,30 @@ quarantine 强制比对 / 去 checksum 交叉比对）。
 密文导出例外 / 分享探测），其余一律违规。门禁发现并驱动的**新收敛**：`version_store.copyVersionFile`
 （版本保存源读/目标写）、`version.go` 恢复源读、`dedupFallbackCopy`、`verifyDeleteQuarantine`、
 `dupScanFile`、`verifyFileWithChecksumRoot` —— 加密卷上版本/去重/查重/删除校验全部按**明文**语义。
+
+## 8.13 备份源经 Root（加密卷/封印卷可用）+「空路径」语义一致性（2026-10-12）
+
+三处同源缺陷（都是「空路径 = 卷根/整卷」在某一层被当成非法）：
+
+1. **备份源此前是裸 `NewLocalFS(srcAbs)` ⇒ 加密卷源读到密文**，故代码对加密源显式 409 拒绝
+   （"加密卷暂不支持作为备份源（待接入经 Root 的备份源）"）。处置：源改为
+   `NewPrefixFS(NewRootFS(srcTnt.Root()), <user 桶>/)`——经 `storage.Root` 即自动获得
+   **at-rest 透明解密**与**封印**语义（键空间与目标一致：源条目仍是裸 rel，前缀映射到
+   `user/<rel>`）；**加密卷与封印卷均可作为备份源**，且产物是**明文**（可还原）。
+2. **`sync.FS` 契约里空串 = 卷根**（`LocalFS.SanitizeRelPath("")` 返回 ""、
+   `WalkEntries(ctx, fs, "", …)`/`backup.Run` 均以 "" 起步），而 `pkg/server/root_fs.go` 把 ""
+   直接交给底座 `os.Root`，后者 `Open("")`/`Stat("")` 以 `openat : empty path` 失败 ⇒
+   经该适配器「列/stat 卷根」恒失败（任何从 "" 起步的遍历——含新备份源——都不可用）。
+   处置：`rootRel("") → "."`（只映射空串；`.` 保持），子条目 Path 仍为裸相对路径（与
+   `LocalFS` 一致）。
+3. **`storage.SetSeals` 把空路径判非法**（"封印路径不能为空"），而 `enclosure` 与
+   `docs/config.md` 明确「`extra.source` 子路径可空 = 整卷封装」⇒ 该配置装配期恒失败
+   （boot fail；两侧各有测试故长期未暴露）。处置：**空字符串 = 整卷封印**（`sealCovers` 特判
+   覆盖任意路径；纯空白仍拒绝 = 拼写错误）；整卷封印的运维语义见 `docs/config.md`
+   （覆盖服务端内部桶 ⇒ 只应指向专用卷）。
+
+**测试与变异**：`pkg/storage`（整卷封印 hidden/readable + `SealAt` 覆盖面 + 纯空白仍非法）、
+`pkg/server`（`TestRootFS_EmptyRelIsVolumeRoot` 含 `WalkEntries("")` 集成点；
+`TestApplyEnclosureSeals_WholeVolumeSealsEntireSource` 装配接线；
+`TestBackupAPI_EncryptedSourceBacksUpPlaintext` 加密源 → 产物明文）。**变异 5 命中**
+（空路径判非法 / 空规则不覆盖 / rootFS 不映射 / 备份源回退裸 LocalFS / 保留 409）。

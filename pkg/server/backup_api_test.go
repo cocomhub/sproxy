@@ -493,3 +493,57 @@ func TestBackupAPI_LocalTargetDurableCapacityLedger(t *testing.T) {
 		t.Fatalf("增量备份后持久账本=%d want 11（漂移 → 红）", got)
 	}
 }
+
+// TestBackupAPI_EncryptedSourceBacksUpPlaintext 评审 P0 残余闭环：备份源此前是**裸 LocalFS**
+// （`syncpkg.NewLocalFS(srcAbs)` 纯 os I/O）⇒ 加密卷源会读到**密文**，故代码里显式 409 拒绝
+// （"加密卷暂不支持作为备份源（待接入经 Root 的备份源）"）。本用例钉住新语义：源经
+// `NewPrefixFS(NewRootFS(tnt.Root()), "user/")` ⇒ 透明解密 + 封印语义 ⇒ 加密卷源可用，
+// 且产物是**明文**（备份产物可用，而非无法还原的密文）。
+//
+// 变异：源回退裸 LocalFS → 产物为密文（`readVolFile` != 明文）→ 红；保留 409 拒绝 → 红。
+func TestBackupAPI_EncryptedSourceBacksUpPlaintext(t *testing.T) {
+	t.Parallel()
+	keyFile := filepath.Join(t.TempDir(), "src.key")
+	if err := os.WriteFile(keyFile, bytes.Repeat([]byte("k"), 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, url := newBackupTestServer(t, func(c *Config) {
+		c.Volumes[0].Extra = map[string]any{"encrypt": true, "encrypt_key_file": keyFile}
+	})
+	// 经**用户可见入口**写入（加密卷上落密文）。
+	srcTnt := h.volumeTenant("main", "")
+	if srcTnt == nil || srcTnt.Root() == nil {
+		t.Fatal("源卷租户不可用")
+	}
+	if err := srcTnt.Root().MkdirAll("user/sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, werr := writeUserVisible(srcTnt.Root(), "user/sub/secret.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if werr != nil {
+		t.Fatalf("writeUserVisible: %v", werr)
+	}
+	if _, cerr := w.Write([]byte("top secret body")); cerr != nil {
+		t.Fatal(cerr)
+	}
+	if cerr := w.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
+	// 前置条件：源卷磁盘上是密文（否则本用例失去意义）。
+	if raw := readVolFile(t, h, "main", "sub/secret.txt"); raw == "top secret body" {
+		t.Fatal("前置条件不成立：加密源卷磁盘上应为密文")
+	}
+	status, body := doBackup(t, url, map[string]any{"target": "backup-vol"})
+	if status != http.StatusOK {
+		t.Fatalf("加密卷作为备份源应成功, status=%d body=%s", status, body)
+	}
+	var rep backupAPIReport
+	if err := json.Unmarshal(body, &rep); err != nil {
+		t.Fatalf("解析 Report: %v", err)
+	}
+	if rep.Files != 1 || rep.Failed != 0 {
+		t.Fatalf("应备份 1 个文件且无失败: %+v", rep)
+	}
+	if got := readVolFile(t, h, "backup-vol", "sub/secret.txt"); got != "top secret body" {
+		t.Fatalf("备份产物必须是**明文**（源经 Root 透明解密）, got %q", got)
+	}
+}
