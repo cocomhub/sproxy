@@ -427,3 +427,8 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 
 **测试**：`pkg/server/files_meta_stale_test.go`（正常校验通过 → 崩溃模拟 → `ErrStaleMeta` + 告警
 → 重建后恢复可校验读 → 截断同样归类）；变异验证 2 命中（去预检 / 去专用告警）。
+
+**附：meta tmp 孤儿清扫节流（2026-10-12，第 5 轮评审 ⑥）**：`sweepMetaTmp` 原在每次 meta 写时
+`ReadDir` 整个 meta 目录——扁平大目录下 n 个文件各写一次 = **O(n²)** 枚举。现改为**进程级节流**
+（`metaTmpSweepThrottle`，默认 1 分钟）：孤儿是惰性残留（不阻断任何读写、仅占少量 meta 桶配额），
+多存活 ≤1 个窗口属可接受降级；解析失败路径与写路径共用同一节流。

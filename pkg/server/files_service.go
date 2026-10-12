@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -547,11 +548,33 @@ func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data [
 //
 // **刻意不匹配** `<base>.tmp-*`（无前导点）：全仓无该命名的生成端，而它会误删合法 sidecar
 // （如用户文件 `x.meta.tmp-abc` 的 sidecar `x.meta.tmp-abc.meta`）——宁漏不误删。
+// metaTmpSweepThrottle 是 meta 孤儿清扫的**进程级节流窗口**。
+//
+// 为何节流（第 5 轮对抗评审 ⑥）：写路径每次写都调 sweepMetaTmp，而它要 ReadDir 整个 meta
+// 目录——扁平大目录下 n 个文件各写一次 = O(n²) 目录枚举。孤儿是**惰性残留**（不阻断任何读写），
+// 多存活≤窗口时长无副作用（下一次写/解析失败路径会清）。
+var metaTmpSweepThrottle = time.Minute
+
+// metaTmpSweepLast 是上次清扫时刻（unix nano；0 = 从未清扫）。进程级共享，
+// 并发下可能两个 goroutine 同时扫（无害：Remove 幂等）。
+var metaTmpSweepLast atomic.Int64
+
+// metaTmpReadDir 是目录枚举入口（默认直连 root；测试可替换以断言「是否真的枚举了」。）
+var metaTmpReadDir = func(root *storage.Root, dir string) ([]os.DirEntry, error) { return root.ReadDir(dir) }
+
+// sweepMetaTmp 清理同目录内 .meta 写的 `.tmp` 孤儿（best-effort；失败静默——孤儿只占少量
+// meta 桶配额，不阻断读写）。**节流**：同一进程内至多每 metaTmpSweepThrottle 枚举一次目录，
+// 防写路径全量大目录 O(n²)（第 5 轮评审 ⑥）；孤儿多存活一个窗口属可接受降级。
 func (p filesMetaPolicy) sweepMetaTmp(root *storage.Root, mrel string) {
+	now := time.Now()
+	if last := metaTmpSweepLast.Load(); last != 0 && now.Sub(time.Unix(0, last)) < metaTmpSweepThrottle {
+		return
+	}
+	metaTmpSweepLast.Store(now.UnixNano())
 	dir := path.Dir(mrel)
 	bn := path.Base(mrel)
 	prefixes := []string{bn + ".tmp.", "." + bn + ".tmp-"}
-	es, err := root.ReadDir(dir)
+	es, err := metaTmpReadDir(root, dir)
 	if err != nil {
 		return // 目录不存在/不可读：无孤儿可清
 	}
