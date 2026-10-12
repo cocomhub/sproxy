@@ -1134,6 +1134,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 未注册即「未注册后端」启动 panic）。与 sync 开关解耦（Imp-1 装配门控修复：默认配置
 	// sync 关闭时 secret 后端不再不可达）。
 	registerSecretVolumeBackends()
+	// 封装处理层（wrapper）注册：必须在 enclosure.Parse 之前（RegisterRoutes →
+	// assembleVolumes 内解析声明；未注册的 wrapper 判 ErrUnknownWrapper = boot fail）。
+	registerEnclosureWrappers()
 	// 封装卷类型标记「推迟装配」：其后端构造依赖已装配卷集（源卷特权视图），
 	// 与 secretdata 同型时序；封印注入在 assembleVolumes 内完成，后端在此之后补装。
 	enclosure.MarkDeferred()

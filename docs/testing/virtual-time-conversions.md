@@ -181,3 +181,16 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 - 保留串行仅 2 处：ParallelPools（绝对时序）+ keyframe 2 例（共享 provider 注册表）；
 - 基线归位 1781，与 master 同步（rebase），CI merge 树自洽。
 
+
+<!-- 2026-10-12 封装卷 wrapper 生产装配用例（#772） -->
+
+## 2026-10-12：封装卷 wrapper 生产装配用例（`cmd/sproxy/secret_register_test.go`，串行 +1）
+
+`TestEnclosureWrapper_Secretdata_ProductionAssembly` 钉住「`type: enclosure` + `wrapper:
+secretdata` 的生产装配路径可用」（wrapper 注册 / 声明解析 / 补装 / 写读往返 / 真值报告）。
+**不可并行的理由（与既有 `TestRegisterSecretVolumeBackends_Unconditional` 同类）**：
+它必须走**生产注册路径**，因此触及两个进程级单例——① `enclosure` wrapper 注册表（全局，
+`RegisterWrapper` 重复注册 panic，只能进程内注册一次）；② `secretDataSet`（`atomic.Pointer`，
+`setupSecretBackends` 会把**本用例的卷集**存入、收尾再清空）。与同包用例并行时，两者的
+`Store/Load` 会互踩（读到对方的卷集 → 密钥解析到不存在的 secrets 卷），故显式串行。
+注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（总数 1784 → 1785，无新增 slack）。

@@ -4,8 +4,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +19,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
@@ -613,4 +617,142 @@ func TestSetupSecretBackends_DefaultSecretsFail_NotFatal(t *testing.T) {
 	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
 		t.Fatalf("默认 secrets 卷失败应仅降级（WARN，不阻断 boot），got %v", err)
 	}
+}
+
+// TestEnclosureWrapper_Secretdata_ProductionAssembly（S4/S5 收尾）：
+// `type: enclosure` + `wrapper: secretdata` 是**文档与 config.example 承诺的用法**，但此前
+// 生产装配层**没有任何 wrapper 注册**（`RegisterWrapper` 只在测试里被调用）⇒
+// `enclosure.Parse` 恒 `ErrUnknownWrapper`、`AttachAll` 失败 = **封装卷在生产不可用（boot
+// fail）**，且设计 §5 的防护薄层（禁直链/身份）从未接线。
+//
+// 本用例走生产路径，一次钉住四件事：
+//  1. 「生产已注册可用的 wrapper」（删掉注册 → 本用例红）；
+//  2. 声明可解析 + 后端可补装（boot 不再 fail）；
+//  3. 写经封装卷 → 源目录落**密文**（明文字节不出现在源目录任何文件里）+ 读回明文；
+//  4. S5 真值：链上物理字节报告者可用（`secretdata` 在 wrapper 位置 = 最外层实现者），
+//     且真值 > 逻辑大小（meta pad/分块头膨胀）——封装卷配额不再被逻辑大小放大绕过。
+//
+// sproxy:serial: 生产注册路径（全局注册表 Once + secretDataSet 单例 + 共享卷集），不并发。
+func TestEnclosureWrapper_Secretdata_ProductionAssembly(t *testing.T) {
+	ctx := context.Background()
+	// 生产注册顺序：secret 后端类型（含 secretdata）+ 本 PR 新增的封装 wrapper 注册。
+	registerSecretVolumeBackends()
+	registerEnclosureWrappers()
+
+	// 装配卷集：源卷 main（本地）+ 封装卷 vault（main 的 alice/user/vault 子树）。
+	root := t.TempDir()
+	rt, err := storage.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	vols := []volume.Volume{
+		{Name: "main", Type: volume.TypeLocal, RootDir: root},
+		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
+			"source":     "main:alice/user/vault",
+			"wrapper":    "secretdata",
+			"secret_url": "secrets://default/datakey",
+		}},
+	}
+	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"main": quota.NewPool(0), "vault": quota.NewPool(0)}, "main")
+	t.Cleanup(func() { _ = set.Close() })
+
+	// 1) 声明解析：wrapper 必须已被生产注册（此前恒 ErrUnknownWrapper）。
+	if _, perr := enclosure.Parse(vols); perr != nil {
+		t.Fatalf("生产装配下封装声明应可解析（wrapper: secretdata 须已注册）: %v", perr)
+	}
+
+	// 默认 secrets 卷 + 密钥（secretdata 的 secret_url 解析目标）。
+	localRoot := t.TempDir()
+	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
+		t.Fatalf("setupSecretBackends: %v", err)
+	}
+	t.Cleanup(func() { secretDataSet.Store(nil) })
+	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
+	if mgr == nil {
+		t.Fatal("默认 secrets 卷反取失败")
+	}
+	if _, cerr := mgr.Create(ctx, "datakey"); cerr != nil {
+		t.Fatalf("Create key: %v", cerr)
+	}
+
+	// 2) 补装（生产 boot 路径；此前这里会因 wrapper 未注册而 boot fail）。
+	if aerr := enclosure.AttachAll(ctx, set, nil); aerr != nil {
+		t.Fatalf("封装卷补装（生产路径）: %v", aerr)
+	}
+	be := set.External("vault")
+	if be == nil || be.FS() == nil {
+		t.Fatal("封装卷后端未挂回卷集")
+	}
+
+	// 3) 写读往返：用户可见明文。
+	const body = "hello enclosure volume"
+	key := "alice/user/docs/x.bin" // 面级键 = <owner>/<bucket>/<rel>（FSPath 形态）
+	if werr := be.FS().WriteFile(ctx, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+		t.Fatalf("封装卷写入: %v", werr)
+	}
+	rc, oerr := be.FS().OpenRead(ctx, key)
+	if oerr != nil {
+		t.Fatalf("封装卷读取: %v", oerr)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(got) != body {
+		t.Fatalf("明文还原=%q，期望 %q", got, body)
+	}
+	// 源目录里**不得出现明文**（at-rest 加密真实生效；源目录唯一可见形态是密文分块）。
+	if plain := findPlaintext(t, root, body); plain != "" {
+		t.Fatalf("源目录出现明文（at-rest 加密未生效）: %s", plain)
+	}
+	// 且内容确实落在声明的子树下（前缀映射生效，未外溢）：子树内**有真实字节**，
+	// 否则「源目录无明文」只是空目录的假绿。
+	var bytes int64
+	if werr := filepath.WalkDir(filepath.Join(root, "alice", "user", "vault"),
+		func(_ string, e fs.DirEntry, werr error) error {
+			if werr != nil || e.IsDir() {
+				return nil //nolint:nilerr // 遍历容错：仅统计已可读文件字节
+			}
+			if info, ierr := e.Info(); ierr == nil {
+				bytes += info.Size()
+			}
+			return nil
+		}); werr != nil {
+		t.Fatalf("遍历源子树: %v", werr)
+	}
+	if bytes == 0 {
+		t.Fatal("源子树内应有落盘字节（封装卷内容确实写入源卷子树）")
+	}
+
+	// 4) S5 真值报告：链上最外层实现者 = wrapper 位置的 secretdata。
+	rep, ok := capacity.TrueUsageOf(be.FS())
+	if !ok {
+		t.Fatal("封装卷链上应有物理字节报告者（secretdata wrapper）")
+	}
+	truth, tok := rep.TrueUsage()
+	if !tok || truth <= int64(len(body)) {
+		t.Fatalf("真值应 > 逻辑大小（分块头/meta pad 膨胀）: truth=%d ok=%v", truth, tok)
+	}
+	if sz, sok := rep.TrueSize(key); !sok || sz < int64(len(body)) {
+		t.Fatalf("单文件真值应 >= 逻辑大小: %d ok=%v", sz, sok)
+	}
+}
+
+// findPlaintext 在 root 下递归找含 needle 的文件（返回路径；无则空串）。
+func findPlaintext(t *testing.T, root, needle string) string {
+	t.Helper()
+	var found string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || found != "" {
+			return nil //nolint:nilerr // 遍历容错：目录读失败不影响「是否出现明文」判定
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		if bytes.Contains(b, []byte(needle)) {
+			found = p
+		}
+		return nil
+	})
+	return found
 }

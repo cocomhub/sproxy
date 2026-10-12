@@ -45,6 +45,7 @@ cmd/sproxy/mesh_node_test.go	5
 cmd/sproxy/mesh_sync_test.go	8
 cmd/sproxy/root_extra_test.go	4
 cmd/sproxy/root_test.go	12
+cmd/sproxy/secret_register_test.go	1
 cmd/sproxy/version_test.go	3
 cmd/sproxy/xfer_listener_integration_test.go	4
 cmd/sproxy/xfer_listener_test.go	6

@@ -179,8 +179,8 @@ func (rt *Root) SetSeals([]SealRule) error               // 写恒拒；读 hidd
 | S1 ✅ | `storage` 封印内核（15 入口 + 7 组测试） | 已落地（`6b9f03983`） |
 | S2 ✅ | `enclosure.FS` 薄层 + `PrefixFS` 补 `MetaExtraUpdater` + R21 纳入 + `quota` 父链 | 已落地（`5439f2bbc`/`947ea367c` 等）；R23 自动发现门禁另补 |
 | S3 ✅ | `enclosure.Parse` 声明/拓扑 + `type: enclosure` 装配 + 源封印注入 + 租户子根传播 | 已落地（`f07b23d93`/`eb8c9a135`）；DAV 经 `NewRootFS` 同受封印约束 |
-| S4 ◐ | wrapper 注册表已就绪；`secretdata` 迁为 wrapper **待接入**；跨外部卷 per-tenant 视图待做（当前装配期显式拒绝） | 加密卷六面已由「用户可见入口」覆盖（见下）；wrapper 迁移为收尾项 |
-| S5 ◐ | 真值机制（`TrueUsageReporter`/`CorrectTo`/`NewPoolWithParent`）已落地；封装卷已接 `CapacityFS` 与父链；`secretdata`/封装卷的**物理字节报告**与 `reconcile` 优先真值待接 | 配额不可被逻辑放大绕过（当前对本地面板已生效，加密卷物理口径待接） |
+| S4 ✅ | wrapper 注册表就绪 + `secretdata` wrapper **已接入生产**（`cmd/sproxy` 注册，`wrapper: secretdata` 即文档/示例形态）；跨外部卷 per-tenant 视图待做（当前装配期显式拒绝） | `type: enclosure` 在生产**真正可用**（此前生产零注册 ⇒ `Parse` 恒 `ErrUnknownWrapper` ⇒ boot fail；见 §12 记录） |
+| S5 ✅ | 真值机制 + `CapacityFS` 与父链已落地；**封装卷的物理字节报告随 S4 自动生效**：wrapper 位于链的最外层实现者处（`CapacityFS(wrapper(EnclosureFS(PrefixFS(源))))`，`capacity.TrueUsageOf` 取自外向内**第一个**实现者），其索引覆盖的正是本封装卷的子树 ⇒ 配额按物理字节判定 | 封装卷上限不被逻辑大小放大绕过（`wrapper: secretdata` 下真值 > 逻辑，含 meta pad/分块头） |
 | S6 ◐ | 评审 P0/P1 全部修复 + 大批 P2（含 R23、ACL、锁 TTL、`?ciphertext=1`、m9 修正）；余项：物理报告接入、`sweepMetaTmp` 惰性化、本地写单遍 meta | 四 lint 面 + archcheck + 全量测试绿 → PR |
 
 **已实现的实际防线（与本设计对应）**：① 封印（源卷根 + 租户子根，写恒拒/读 404 或只读透视）；
@@ -286,3 +286,33 @@ parity 的物理字节合计」后，`CapacityFS` 写后结算与周期对账都
 - 封印只覆盖经 `storage.Root` 与注入检查的视图；任何**新增直连 os I/O 的面**都必须同时接入
   封印检查（列入 R22/R23 门禁：新增面禁裸 `os.Open*` 于卷根）。
 - 迁移场景的「只读透视」会暴露原始存储形态（密文），这是显式取舍（便于卷迁移/带外校验）。
+
+## 13. 生产可用性收口（2026-10-12，评审发现）
+
+**缺陷（P1，功能不可用）**：`RegisterWrapper` **在生产侧零调用**（仅测试注册替身）⇒
+`enclosure.Parse` 对**任何** `type: enclosure` 配置恒 `ErrUnknownWrapper`，`AttachAll` 失败，
+而 `setupServerCore` 把该失败当 boot fail ⇒ **文档与 `config.example.yaml` 承诺的
+`wrapper: secretdata` 配置根本起不来**（封装卷只能在测试里用替身跑）。同时 `enclosure.FS`
+薄层（默认抑制 302 直链 + 身份归因）**从未被接线**：`Decl.Build` 直接把手搓的
+`NewPrefixFS` 交给 wrapper ⇒ `allow_direct_url` 策略形同虚设（裸 PrefixFS 无条件转发，
+外部源存储下客户端可拿直链绕过封印与处理层），`NewFS`/`SourceView` 是死代码。
+
+**处置**：
+1. `Decl.Build` 改为 `w.Build(ctx, v, NewFS(src, d), v.Extra)`——与 §3 装配图
+   `wrapper(EnclosureFS(PrefixFS(源)))` 一致（薄层在链上，键空间不变：`NewFS` 内部即
+   `NewPrefixFS(src, KeySpacePrefix())`）。
+2. `cmd/sproxy` 新增 `registerEnclosureWrappers()`：把 `secretdata` 注册为 wrapper
+   （与 `type: secretdata` 共用 FS/Options 解析，差别只在底层来自「装配层注入的源视图」），
+   密钥经 `secret_url` → 卷集 `ResolveURL` **懒解析**（注册早于卷集就绪、Build 发生在补装期）。
+   调用点必须在 `enclosure.Parse` 之前（`RegisterRoutes` 之前），与 `MarkDeferred` 同处。
+3. 真值报告**自动**随之生效（见 S5）：wrapper 即链上最外层报告者。
+
+**测试与变异**：`pkg/volume/enclosure`（`TestBuild_WiresProtectionLayerIntoSourceView`：
+默认抑制直链 + 身份 + 前缀不变 + `allow_direct_url` 透传按源键）；`cmd/sproxy`
+（`TestEnclosureWrapper_Secretdata_ProductionAssembly`：生产注册 → 声明可解析 → 补装 →
+写读往返取回明文 + **源目录无明文**（真加密）+ 内容落声明子树 + 真值 > 逻辑）。
+**变异 4 命中**（回退裸 PrefixFS / 生产不注册 wrapper / wrapper 构造失败 / 处理层不加密直通）。
+
+**残余（明示，未在本轮做）**：跨外部卷源（baidupcs/s3/egress）的 per-tenant 源视图仍装配期
+显式拒绝（`ErrExternalSourceTo`）；`type: secretdata` 独立卷与 `wrapper: secretdata` 并存
+（两者共用实现，未做旧写法下线）。
