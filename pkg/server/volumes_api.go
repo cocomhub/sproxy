@@ -404,7 +404,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	}
 	// M3 修复：迁移前**探测 meta 配额**（owner 全局 → 目标卷池，metaEstimate 探测即释放）——
 	// 原设计 move 后 moveMetaAfterVolumeMove 重建目标 meta 仅 Warn，目标 meta 桶配额不足时
-	// move 静默成功 → 源 meta 已删、目标无 meta（不可信，读路径永久直算）。探测在写前
+	// move 静默成功 → 源 meta 已删、目标无 meta（不可信，读侧永久不校验）。探测在写前
 	// fail-closed：meta 配额不足 507 拒绝，不让 move 进入"目标无 meta"状态。
 	if pStatus, pResp, pOk := h.moveProbeMetaQuota(owner, rel, toVol, size); !pOk {
 		return pStatus, pResp
@@ -694,7 +694,7 @@ func (h *Handlers) moveMetaAfterVolumeMove(mc *moveFileCtx) {
 	// 目标卷重建（WriteMeta 幂等覆盖：同 rel 目标已有 meta 则 Adjust 差分；无则新
 	// 目标卷重建恒执行（meta 恒生成，skip_verify 只关读侧校验）。
 	if mErr := h.filesMetaWriteAfterRestore(mc.toRoot, mc.owner, mc.rel); mErr != nil {
-		h.logger.Warn("跨卷移动后目标卷 meta 重建失败（读路径直算兜底）", "file_name", mc.remotePath, "error", mErr)
+		h.logger.Warn("跨卷移动后目标卷 meta 重建失败（读侧将不校验）", "file_name", mc.remotePath, "error", mErr)
 	}
 	// 源卷删除 meta + 释放 meta 桶配额（与单文件删除联动同构；不闸 disable——
 	// 存量 sidecar 在 disable 后移动仍须清理）。

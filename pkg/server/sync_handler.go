@@ -407,14 +407,14 @@ func (h *Handlers) writeConflictFile(rel string, content []byte) error {
 	}
 	// M1 修复（第 7 轮 MAJOR）：写回内容替换了带冲突标记的文件，而 sidecar 仍描述 marker
 	// 内容 → 不联动会让后续下载/转存逐分块校验恒失配（fail-closed 固化不可读、幂等重传
-	// 不自愈）。重建 sidecar（失败则失效旧 sidecar，读侧 missing 直算兜底）。
+	// 不自愈）。重建 sidecar（失败则失效旧 sidecar，读侧不校验）。
 	h.relinkConflictMeta("", clean)
 	return nil
 }
 
 // relinkConflictMeta 冲突解决写回后重建 sidecar（M1）：写回内容替换了带冲突标记的文件，
-// 旧 sidecar 描述的是 marker 内容 → 必须重建；重建失败则**失效**旧 sidecar（读侧 missing
-// 直算兜底），绝不保留陈旧证据（否则该文件永久校验失配、无法下载）。
+// 旧 sidecar 描述的是 marker 内容 → 必须重建；重建失败则**失效**旧 sidecar（读侧不校验），
+// 绝不保留陈旧证据（否则该文件永久校验失配、无法下载）。
 //
 // rel 是**引擎相对路径**（如 `docs/a.txt`）；writeConflictFile 把它落在 user 桶根下，故
 // 租户根相对键 = `user/<rel>`（与下载路径 `user/<rel>` → `meta/<rel>.meta` 同一键空间）。
@@ -426,7 +426,7 @@ func (h *Handlers) relinkConflictMeta(owner, rel string) {
 	root := tnt.Root()
 	bucketRel := "user/" + rel
 	if err := (filesMetaPolicy{h: h}).WriteMeta(context.Background(), owner, root, bucketRel); err != nil {
-		h.logger.Warn("同步冲突写回：重建 sidecar 失败，已失效旧 sidecar（读侧直算兜底）",
+		h.logger.Warn("同步冲突写回：重建 sidecar 失败，已失效旧 sidecar（读侧将不校验）",
 			"path", bucketRel, "error", err)
 		_ = root.Remove(meta.MetaPath(bucketRel))
 	}

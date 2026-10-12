@@ -5,7 +5,7 @@ package server
 
 // s3_trusted_meta_test.go 补写路径 meta 联动测试盲区（第 4 轮对抗评审 F2）：
 // 此前 `s3WriteMetaAfter` / `writeCopyMeta` / `moveMetaAfterVolumeMove` 等在 *_test.go 中
-// **零引用**，联动被删/写坏时读侧静默退化为直算/直通而测试仍全绿。本用例经真实 S3 网关
+// **零引用**，联动被删/写坏时读侧静默退化为不校验/直通而测试仍全绿。本用例经真实 S3 网关
 // PUT，断言磁盘上落有**可解析且哈希自洽**的 sidecar（真副作用断言，非替身）。
 
 import (

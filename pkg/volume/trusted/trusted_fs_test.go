@@ -311,7 +311,7 @@ func TestMoveCopyLink_MetaLinkage(t *testing.T) {
 
 // TestTrustedVolumeFS_RenameDirMigratesMetaSubtree 回归（本轮 B 面）：目录级 Rename 必须把
 // 子文件 sidecar 子树整棵迁移（meta/<from>/** → meta/<to>/**）——否则新位置逐分块校验
-// 静默失效（退化为直算）且旧子树成孤儿白占 meta 桶配额。
+// 静默失效（读侧退化为不校验）且旧子树成孤儿白占 meta 桶配额。
 // 变异：去掉 Rename 里的 relocateMetaSubtree 调用 → 子 sidecar 仍在 meta/dir/** → 红。
 func TestTrustedVolumeFS_RenameDirMigratesMetaSubtree(t *testing.T) {
 	t.Parallel()
@@ -666,7 +666,7 @@ func (f *failMetaFS) WriteFile(ctx context.Context, rel string, r io.Reader, siz
 }
 
 // TestTrustedVolumeFS_MetaWriteFailureKeepsMainFile F3：meta 落盘失败不得失败主写，
-// 且必须失效旧 sidecar（退化 missing 直算，而非陈旧 meta 固化）。
+// 且必须失效旧 sidecar（退化为 missing=读侧不校验，而非陈旧 meta 固化）。
 func TestTrustedVolumeFS_MetaWriteFailureKeepsMainFile(t *testing.T) {
 	t.Parallel()
 	inner := newInner(t)

@@ -221,7 +221,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// meta/<rel>.meta 须同步——否则 meta 描述旧版哈希/内容、主文件与 meta 永久不一致）。
 	// 与上传 writeFileSettle 的到达即建同一入口（WriteMeta 幂等覆盖 + 配额 Adjust）。
 	if mErr := h.filesMetaWriteAfterRestore(dstRoot, owner, targetRel); mErr != nil {
-		h.logger.Warn("版本恢复后 meta 重算失败（读路径直算兜底）", "file_name", remotePath, "error", mErr)
+		h.logger.Warn("版本恢复后 meta 重算失败（读侧将不校验）", "file_name", remotePath, "error", mErr)
 	}
 
 	h.RecordAudit(r.Context(), AuditEvent{

@@ -496,7 +496,7 @@ func verifyByFileMeta(env *transferEnv) error {
 // recordDamagedSource 把源完整性 damaged 标记写入目标卷 meta.Extra（旁路记录——
 // 不阻断转存；用户裁定 Integrity 默认放行，记录 extra 即可）。目标卷实现可更新
 // Extra 的 Provider 能力（装饰器 UpdateMetaExtra）时写入；失败 Warn 兜底（meta
-// 缺失/无能力跳过——读路径直算兜底，不影响转存成功）。
+// 缺失/无能力跳过——读侧不校验（sidecar 缺失=零校验），不影响转存成功）。
 func (m *CloudDownloadManager) recordDamagedSource(env *transferEnv) {
 	ue, ok := env.targetFS.(metaExtraUpdater)
 	if !ok {

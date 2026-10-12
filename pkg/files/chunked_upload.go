@@ -1191,7 +1191,7 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 	// writeFileSettle 一致，分块传完也有 .meta sidecar）。
 	if s.rt.fileMetaEnabled() {
 		if mErr := s.rt.writeMetaSidecar(context.Background(), owner, tnt.Root(), rel); mErr != nil {
-			s.rt.logger().Warn("可信卷 meta 落盘失败（分块上传，读路径直算兜底）", "file_name", session.Filename, "error", mErr)
+			s.rt.logger().Warn("可信卷 meta 落盘失败（分块上传，读侧将不校验）", "file_name", session.Filename, "error", mErr)
 		}
 	}
 

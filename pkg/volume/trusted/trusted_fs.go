@@ -91,9 +91,9 @@ func (t *TrustedVolumeFS) Inner() syncpkg.FS { return t.inner }
 
 // FileMeta 实现 meta.Provider（读侧消费 FileMeta 的读端入口——C4 落地）：装饰器写侧
 // 已算并落盘 meta sidecar，读侧经它取回 FileMeta 供转存校验/可信卷读校验逐分块比对。
-// sidecar 缺失（未启用/旁路写/落盘失败兜底）→ 返回错误，调用方回落 Stat 直算/流式。
+// sidecar 缺失（未启用/旁路写/落盘失败兜底）→ 返回错误，调用方退化为不校验/流式。
 // A-MAJOR-4 修复：sidecar 读上限 maxMetaSidecarBytes（防被注入超大 JSON 的 OOM DoS——
-// meta 是可信卷信任根，超限按"meta 缺失"回落直算而非崩溃）。
+// meta 是可信卷信任根，超限按「meta 缺失」处理（读侧不校验）而非崩溃）。
 func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
 	rc, err := t.inner.OpenRead(ctx, meta.MetaPath(rel))
 	if err != nil {
@@ -105,7 +105,7 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 		return nil, fmt.Errorf("trusted: 读 meta sidecar %s: %w", meta.MetaPath(rel), rerr)
 	}
 	if int64(len(raw)) > meta.MaxMetaSidecarBytes() {
-		return nil, fmt.Errorf("trusted: meta sidecar %s 超限（>%d B，疑似注入），回落直算",
+		return nil, fmt.Errorf("trusted: meta sidecar %s 超限（>%d B，疑似注入），按 meta 缺失处理（读侧不校验）",
 			meta.MetaPath(rel), meta.MaxMetaSidecarBytes())
 	}
 	fm, uerr := meta.Unmarshal(raw)
@@ -176,7 +176,7 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	// B-MAJOR 修复：写后交叉比对（复用 verifyWriteMeta）——写前校验与落盘之间仍存在
 	// 并发覆盖窗口（校验通过 → 合并 Extra → marshal → WriteFile 期间另一写者覆盖主文件
 	// + 新 meta），不加这一步会固化"描述旧内容的 meta+extra"盖掉新 meta（读路径恒失配，
-	// 与 missing 直算兜底不同）。写后重读主文件比对 TotalSHA256，不一致 → 删 meta 退化
+	// 与 missing（读侧不校验）不同）。写后重读主文件比对 TotalSHA256，不一致 → 删 meta 退化
 	// missing（下次覆盖写自愈）。
 	t.verifyWriteMeta(ctx, rel, fm)
 	return nil
@@ -218,7 +218,7 @@ func (t *TrustedVolumeFS) WriteIfAbsent(ctx context.Context, path string, r io.R
 
 // writeMetaAfter 在写成功路径补建 meta sidecar（WriteIfAbsent 首写专用；WriteFile
 // 已内嵌流式计算）。从已落盘文件读回计算（与 filesMetaPolicy.computeMeta 同语义）。
-// 失败静默（与 WriteFile meta 落盘失败吞错同语义——meta 缺失读路径直算兜底）。
+// 失败静默（与 WriteFile meta 落盘失败吞错同语义——meta 缺失则读侧不校验）。
 // meta 恒生成（用户裁定：只关校验不关 meta——sidecar 是完整性证据，写入路径必落）。
 func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size int64) {
 	// C2 修复：与 WriteFile 共用 chunkSizeFor（含 minMetaChunkSize 钳制）——原实现只用
@@ -226,7 +226,7 @@ func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size i
 	chunkSize := t.chunkSizeFor(size)
 	rc, err := t.inner.OpenRead(ctx, rel)
 	if err != nil {
-		return // 读回失败：meta 不落（直算兜底）
+		return // 读回失败：meta 不落（读侧不校验）
 	}
 	defer rc.Close()
 	calc, cerr := meta.NewCalculator(size, chunkSize)
@@ -240,7 +240,7 @@ func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size i
 }
 
 // persistCalcMeta 由已完成的 Calculator 落 meta sidecar（WriteFile/WriteIfAbsent 共用）。
-// 失败仅影响校验精度（读路径直算兜底），不阻断主写。
+// 失败仅影响校验能力（读侧不校验），不阻断主写。
 func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc *meta.Calculator) {
 	fm := calc.Finish()
 	// size 声明失真的实写自愈（有分块才可能失真）；零字节文件无分块直接 Validate。
@@ -266,12 +266,12 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 
 // logMetaWarn 记 meta 落盘/校验失败的可观测日志（C-MAJOR-7：Options.Logger 注入时
 // Warn；nil = 静默现状——默认装配不传 Logger 保持零噪音）。meta 失败不阻断主写
-// （读路径直算兜底），但运维可经 Logger 看到 meta 丢失/校验异常。
+// （读侧不校验），但运维可经 Logger 看到 meta 丢失/校验异常。
 func (t *TrustedVolumeFS) logMetaWarn(stage, rel string, err error) {
 	if t.opts.Logger == nil {
 		return
 	}
-	t.opts.Logger.Warn("trusted: meta 落盘失败（读路径直算兜底）", "stage", stage, "path", rel, "error", err)
+	t.opts.Logger.Warn("trusted: meta 落盘失败（读侧将不校验）", "stage", stage, "path", rel, "error", err)
 }
 
 // ReserveSpace 委托 inner（卷容量预检；inner 未实现 → 返回 ErrUnsupported，调用方
@@ -340,7 +340,7 @@ func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
 		t.ensureMetaDir(ctx, meta.MetaPath(to))
 		if rerr := t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to)); rerr != nil {
 			// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——源 meta 不存在（未启用/
-			// 旁路写）是正常 skip，其余失败可观测（读路径直算兜底，不阻断主 Move）。
+			// 旁路写）是正常 skip，其余失败可观测（读侧不校验，不阻断主 Move）。
 			t.logMetaWarn("Move", to, rerr)
 			// R1-FS-2：源无 meta 时目标旧 sidecar 描述被覆盖的旧内容 → 失效（防固化不可读）。
 			t.invalidateMeta(ctx, to)
@@ -359,7 +359,7 @@ func (t *TrustedVolumeFS) Copy(ctx context.Context, from, to string) error {
 		if err := cp.Copy(ctx, from, to); err != nil {
 			return err
 		}
-		// 复制 meta（best-effort：源 meta 不存在则跳过——目标无 meta 由读路径直算兜底）。
+		// 复制 meta（best-effort：源 meta 不存在则跳过——目标无 meta 则读侧不校验）。
 		t.copyMeta(ctx, from, to)
 		return nil
 	}
@@ -380,13 +380,13 @@ func (t *TrustedVolumeFS) Link(ctx context.Context, from, to string) error {
 	return fmt.Errorf("trusted: 底层卷未实现 Link: %w", syncpkg.ErrUnsupported)
 }
 
-// copyMeta 复制 sidecar（读源 meta 字节流写目标；失败静默——best-effort，读路径直算兜底）。
+// copyMeta 复制 sidecar（读源 meta 字节流写目标；失败静默——best-effort，读侧不校验）。
 func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 	src := meta.MetaPath(from)
 	dst := meta.MetaPath(to)
 	rc, err := t.inner.OpenRead(ctx, src)
 	if err != nil {
-		// 源 meta 不存在（读路径直算兜底）；但目标旧 sidecar（若有）现已描述旧内容 → 失效。
+		// 源 meta 不存在（读侧不校验）；但目标旧 sidecar（若有）现已描述旧内容 → 失效。
 		t.invalidateMeta(ctx, to)
 		return
 	}
@@ -401,7 +401,7 @@ func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 	// meta/<新dir> 可能不存在，直接 WriteFile 会失败被吞成无 meta 孤儿）。
 	t.ensureMetaDir(ctx, dst)
 	if werr := t.inner.WriteFile(ctx, dst, rc, srcSize, 0); werr != nil {
-		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——可观测，读路径直算兜底。
+		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——可观测，读侧不校验。
 		t.logMetaWarn("Copy", to, werr)
 		// 目标旧 sidecar 描述旧内容 → 失效（防陈旧 meta 固化）。
 		t.invalidateMeta(ctx, to)
@@ -440,7 +440,7 @@ const (
 )
 
 // ensureMetaDir 确保 sidecar 目标父目录存在（best-effort：失败跳过——WriteFile 失败
-// 由调用方读路径直算兜底）。
+// 由调用方处理（读侧不校验）。
 func (t *TrustedVolumeFS) ensureMetaDir(ctx context.Context, mrel string) {
 	if dir := path.Dir(mrel); dir != "." && dir != "" {
 		_ = t.inner.MakeDir(ctx, dir)
@@ -484,9 +484,9 @@ func cloneExtraValue(v any) any {
 //	<meta>/<from>/**  →  <meta>/<to>/**
 //
 // 背景：单文件联动只搬 `MetaPath(from)` 一条；目录级 Rename/Move 时子文件 sidecar 留在
-// 旧子树 → 新位置逐分块校验静默失效（退化为直算），且旧子树成孤儿白占 meta 桶配额。
+// 旧子树 → 新位置逐分块校验静默失效（读侧退化为不校验），且旧子树成孤儿白占 meta 桶配额。
 // 逐条 Rename（目标父目录先建）；单条失败记 Warn 并继续（失败只退化为缺/孤 sidecar，读侧
-// missing 直算兜底，不会误判损坏）。返回成功条数（0 = 源无子树，正常）。
+// missing（读侧不校验），不会误判损坏）。返回成功条数（0 = 源无子树，正常）。
 // **仅 Rename/Move**：`Copy` 是对象级（LocalFS/baidupcs 等均不支持目录 Copy），无目录语义。
 func (t *TrustedVolumeFS) migrateMetaSubtree(ctx context.Context, from, to string) int {
 	srcRoot := meta.MetaDirPath(from)
@@ -606,7 +606,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 			// （罕见——非 size 类校验失败），主文件已落盘新内容但无可信 sidecar。
 			// C1 修复：**删旧 sidecar**（best-effort）——残留描述旧内容的陈旧 meta 会使
 			// 读路径 FileMeta 成功解析旧哈希、按旧分块校验新内容恒失配（硬失败，与
-			// missing 直算兜底不同，文件被固化不可读）。删后退化为 missing（直算兜底，
+			// missing（读侧不校验）不同，文件被固化不可读）。删后退化为 missing（读侧不校验，
 			// 下次覆盖写自愈）。
 			_ = t.inner.Delete(ctx, meta.MetaPath(rel))
 			return fmt.Errorf("trusted: 写入后 meta 校验失败（size %d vs 实写，sidecar 未落）: %w", size, err)
@@ -620,7 +620,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	if merr != nil {
 		// C1 修复：Marshal 失败同样删旧 sidecar（主文件已写成功）——残留描述旧内容的
 		// 陈旧 meta 会使读路径按旧分块校验新内容恒失配（硬失败固化）；删后退化为
-		// missing（直算兜底，下次覆盖写自愈）。
+		// missing（读侧不校验，下次覆盖写自愈）。
 		_ = t.inner.Delete(ctx, meta.MetaPath(rel))
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
 	}
@@ -637,7 +637,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	//     （外部卷上传 reserveVolume 只按主文件 size 预留；meta 字节由卷容量约束，合理）。
 	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		// meta 落盘失败：主文件已成功——不失败主写（meta 可下次读时补），记日志语义
-		// 由调用方/审计处理；此处返回主写成功（meta 缺失时 Stat 直算兜底）。
+		// 由调用方/审计处理；此处返回主写成功（meta 缺失时读侧不校验）。
 		// C1 修复：**删旧 sidecar**（best-effort）——覆盖写场景旧 meta 描述旧内容，
 		// 残留会使读路径按旧分块校验新内容恒失配（硬失败固化）；删后退化为 missing。
 		// C-MAJOR-7：经 Options.Logger 可观测（注入时 Warn），默认装配 nil 静默。
@@ -649,7 +649,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	// meta 是两次独立原子写，云转存路径不经上层 fileLocks；并发写同 rel 时主文件与 meta
 	// 可能来自不同 writer（meta=A、主文件=B → 读路径按 A 分块校验 B 恒失配，永久固化）。
 	// 读回重算若与刚落盘的 fm 不一致（被并发覆盖）→ 删 meta（best-effort，退化 missing
-	// 直算兜底）而非固化错误 sidecar。
+	// 读侧不校验）而非固化错误 sidecar。
 	t.verifyWriteMeta(ctx, rel, fm)
 	return nil
 }
@@ -663,7 +663,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 //  2. 底层实现 `RangeReader` 时读**末块**（≤ 单块上限）重算 sha256 与 meta 末块比对——
 //     尾部是静默损坏高发区，代价单块而非整文件。
 //
-// 任一不一致 → 删 sidecar 退化 missing（读侧直算兜底/逐分块校验），绝不留错证据；能力
+// 任一不一致 → 删 sidecar 退化 missing（读侧不校验/逐分块校验），绝不留错证据；能力
 // 不足（无 RangeReader/Stat 不可用/读失败）→ 保留 sidecar（读路径校验兜底）。
 //
 // m9 如实声明：本地卷原实现为**整文件读回**重算 TotalSHA256（每次写付一次全量读，6GiB
@@ -673,7 +673,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 func (t *TrustedVolumeFS) verifyWriteMeta(ctx context.Context, rel string, fm *meta.FileMeta) {
 	se, serr := t.inner.Stat(ctx, rel)
 	if serr != nil || se == nil {
-		return // 主文件不可读（并发删除等）→ 保留 meta（读路径直算兜底）
+		return // 主文件不可读（并发删除等）→ 保留 meta（读侧不校验）
 	}
 	if se.Size != fm.Size {
 		t.logMetaWarn("WriteFile-verify", rel,
@@ -752,14 +752,14 @@ func (t *TrustedVolumeFS) Rename(ctx context.Context, from, to string) error {
 	t.ensureMetaDir(ctx, meta.MetaPath(to))
 	if rerr := t.inner.Rename(ctx, meta.MetaPath(from), meta.MetaPath(to)); rerr != nil {
 		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——源 meta 不存在是正常 skip，
-		// 其余失败可观测（读路径直算兜底，不阻断主 Rename）。
+		// 其余失败可观测（读侧不校验，不阻断主 Rename）。
 		t.logMetaWarn("Rename", to, rerr)
 		// R1-FS-2：源无 meta / 联动失败时，目标已有旧 sidecar 描述的是被覆盖的旧内容 →
-		// 必须失效，否则读路径按旧 meta 校验新内容恒失配（硬失败固化，与 missing 直算不同）。
+		// 必须失效，否则读路径按旧 meta 校验新内容恒失配（硬失败固化，与 missing（读侧不校验）不同）。
 		t.invalidateMeta(ctx, to)
 	}
 	// 目录级 Rename：子文件 sidecar 在 `meta/<from>/**` 子树，必须整棵迁移——否则新位置
-	// 逐分块校验静默失效（退化为直算）且旧子树成孤儿白占 meta 桶配额（第 5 轮残余）。
+	// 逐分块校验静默失效（读侧退化为不校验）且旧子树成孤儿白占 meta 桶配额（第 5 轮残余）。
 	t.migrateMetaSubtree(ctx, from, to)
 	return nil
 }

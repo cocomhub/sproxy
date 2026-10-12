@@ -388,7 +388,7 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 	ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 	s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
 	// 可信卷：去重硬链接路径同样建 meta（M2 修复——回退复制分支有、硬链接分支此前
-	// 漏建，违反「新文件到达立刻建 meta」不变量；与 srcRel 内容一致，读路径直算兜底）。
+	// 漏建，违反「新文件到达立刻建 meta」不变量；与 srcRel 内容一致，读侧不校验）。
 	if s.rt.fileMetaEnabled() {
 		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
 			f.logger.Warn("可信卷 meta 落盘失败（去重硬链接）", "file_name", rel, "error", mErr)
@@ -1511,7 +1511,7 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	// `!input.SoftDelete` 门控只对"软删可恢复"场景成立）。unlinked 标记硬删已完成。
 	unlinked := false
 	// B-M5 修复：摘除目录项（unlink）失败 → 主文件仍在卷上，**不得删 meta**——
-	// 否则主文件失去校验凭证（读路径直算兜底，但可信卷承诺"每文件必有隐藏 meta"
+	// 否则主文件失去校验凭证（读侧不校验；可信卷承诺"每文件必有隐藏 meta"
 	// 被打破）。unlink 失败记错误后返回失败（主文件保留，不继续收尾）。
 	if refCount > 0 {
 		// 仍有其它引用：unlink 本 rel 目录项（inode 链接数-1，其余引用仍指向同一 inode），
@@ -1774,7 +1774,7 @@ func (s *Service) writeTargetSettleCommon(ctx context.Context, owner, rel, remot
 	// sidecar 内置（!Exclusive）：写成功后生成配套 FileMeta（meta 恒生成；失败只 Warn 兜底）。
 	if s.rt.fileMetaEnabled() {
 		if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel); mErr != nil {
-			logger.Warn("可信卷 meta 落盘失败（读路径直算兜底）", "file_name", remotePath, "error", mErr)
+			logger.Warn("可信卷 meta 落盘失败（读侧将不校验）", "file_name", remotePath, "error", mErr)
 		}
 	}
 	// 台账 + mtime（成功副作用；跳过 Exclusive 的 archive 语义——台账/统计对 user 桶文件）。

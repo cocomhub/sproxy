@@ -54,6 +54,13 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   - 逐分块：仅从块首完整读满的块校验；越界（超出 `fm.Size`）**当次 Read 立即报错**；
   - 全量读（从 offset 0 读满）比对整文件 `TotalSHA256`；中段起始读（Range）不比对整文件哈希（避免误报）。
 - `skip_verify=true` 显式跳过上述读侧数据校验（meta 仍恒生成）。
+- **sidecar 缺失/不可读的读侧语义（唯一权威表述）**：读路径**既不算 meta、也不校验**——即
+  **零校验放行**（不是"重算一遍再校验"）。可观测性要求：**sidecar 缺失**（存量/旁路写）按
+  Debug（`warnDegradeDebug`，升级后存量数据量大，避免刷屏）；**存在但读失败/损坏/陈旧**则
+  必须 Warn 或 fail-closed（见 C2 与 §8.9），绝不做静默降级。
+  > 术语纠正（评审 ⑧，2026-10-12）：全仓 ~35 处注释/日志曾写「读路径**直算兜底**」，暗示读侧会
+  > 重算 meta 从而"仍被校验"——与实现不符（易误导维护者以为缺失 sidecar 是安全降级）。已全量
+  > 改为「读侧不校验（sidecar 缺失=零校验）」。
 
 ## 6. 写路径旁路覆盖
 
@@ -241,7 +248,7 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
 ### 8.3 第 8 批（M1/M2/M5/M7/M8 + 相关 MINOR）修复（2026-10-11）
 
 - **M1 同步冲突解决写回联动 meta**：`writeConflictFile` 写回后调 `relinkConflictMeta`
-  （重建 sidecar；失败则失效旧 sidecar → 读侧直算兜底）。此前解析结果覆盖 marker 内容而
+  （重建 sidecar；失败则失效旧 sidecar → 读侧不校验）。此前解析结果覆盖 marker 内容而
   sidecar 仍描述 marker → 下载逐分块校验恒失配（fail-closed 固化不可读）。
 - **M2 转存写锁键归一**：新增 `Handlers.transferWriteLock`（`lockRelFor` 剥 `<owner>/` 前缀）
   并注入 `cloud.Options.TargetWriteLock`。此前转存用卷 FS 键（共享卷含 owner 前缀）、
@@ -300,7 +307,7 @@ TeeReader 非 Seeker 下恒失效）、m9（meta tmp 孤儿仅下次写清扫；
 - **M9c 远端卷写后轻量交叉校验**：`verifyWriteMeta` 的远端分支不再直接 return，改走
   `verifyWriteMetaRemote`——① `Stat` 实测 size 必须等于 `meta.Size`（零额外流量）；
   ② 底层实现 `RangeReader` 时读**末块**（≤32MiB）重算 sha256 与 meta 末块比对。任一不一致
-  → 删 sidecar（读侧直算/逐分块兜底），绝不留错证据；能力不足则保留（读路径校验兜底）。
+  → 删 sidecar（读侧不校验/逐分块校验），绝不留错证据；能力不足则保留（读路径校验不变）。
   消灭了「同一写路径本地卷有校验、远端卷完全没有」的承诺不一致。
 - **M6 远端 md5 非权威先刷新重验**：`putCheckAfterUpload` 在 `MD5Unreliable` 时先经
   `renewAuthoritativeMD5`（rapidupload 秒传，命中会把远端 md5 刷新为权威整文件 md5）→

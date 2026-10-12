@@ -352,7 +352,7 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 			return nil, fmt.Errorf("meta: sidecar 读取失败（存在但不可读，拒绝下发未校验内容）: %w", err)
 		}
 		// 真·sidecar 缺失（旁路写/未启用/存量数据）→ 直通：**本路径不提供任何服务端校验**，
-		// 非「直算兜底」。可观测性（第 5 轮对抗评审 P1）：升级后存量文件全部无 sidecar，
+		// **不重算 meta、不校验**。可观测性（第 5 轮对抗评审 P1）：升级后存量文件全部无 sidecar，
 		// 运维必须能区分「无校验能力」与「校验通过」；用 Debug 避免大目录刷屏。
 		p.warnDegradeDebug("sidecar 缺失", rel, err)
 		return nil, nil
@@ -446,7 +446,7 @@ func (p filesMetaPolicy) warnDegradeDebug(reason, rel string, err error) {
 }
 
 // WriteMeta 计算并写入配套 .meta（本地卷上传到达即建；失败返回错误由调用方 Warn 兜底，
-// 读路径 Stat 直算不依赖 meta 存在）。
+// 读路径下发不依赖 meta（长度取 Stat），但 sidecar 缺失时不做校验）。
 // 配额记账（C1 修复：覆盖写做 Adjust 差分、不重复累计）：
 //   - 写前 stat 旧 sidecar 大小 prev——覆盖写（rename 替换旧 inode）时先释放旧 committed，
 //     再 Commit 新字节（net = new - prev，杜绝 owner meta 桶 Scope 随覆盖次数通胀）；
@@ -456,7 +456,7 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *stor
 	if err := p.writeMetaCore(ctx, owner, root, rel, mrel); err != nil {
 		// 统一补偿（对抗评审 P2）：任何失败分支都失效旧 sidecar——主文件已换新内容而
 		// sidecar 仍描述旧内容会使读路径按旧分块校验恒失配（硬失败固化不可读，幂等重传
-		// 不自愈）；删后退化为 missing → 读路径直算兜底（安全）。
+		// 不自愈）；删后退化为 missing → 读侧不校验（安全）。
 		_ = root.Remove(mrel)
 		return err
 	}
@@ -496,7 +496,7 @@ func (p filesMetaPolicy) writeMetaCore(ctx context.Context, owner string, root *
 	if err := p.atomicWriteMeta(root, mrel, data); err != nil {
 		// C1 修复：覆盖写 meta 落盘失败 → 删旧 sidecar（best-effort）——残留描述旧
 		// 内容的陈旧 meta 会使读路径按旧分块校验新内容恒失配（硬失败固化）；删后
-		// 退化为 missing（读路径直算兜底）。
+		// 退化为 missing（读侧不校验）。
 		// E-MAJOR 修复：**删旧 sidecar 时对称释放其已提交配额**（prev）——删除即释放
 		// 磁盘字节，prev 仍占 meta 桶 Scope；否则磁盘释放但配额虚高（假 507），下次
 		// 成功 WriteMeta prev=0 只 Commit 新字节，泄漏的 prev 永不复位（仅 reconcile 自愈）。
@@ -549,7 +549,7 @@ func (p filesMetaPolicy) atomicWriteMeta(root *storage.Root, mrel string, data [
 	p.sweepMetaTmp(root, mrel)
 	// **写前先删旧 sidecar**（评审 P2：崩溃窗口）。主文件与 sidecar 是两次独立原子写：覆盖写
 	// 在两次写之间崩溃会留下「旧 sidecar + 新主文件」——读路径按旧分块恒失配 ⇒ 该文件**永久
-	// fail-closed 500**（不自愈）。先删使该窗口退化为「无 sidecar」（读路径直算兜底/按 missing
+	// fail-closed 500**（不自愈）。先删使该窗口退化为「无 sidecar」（读侧不校验/按 missing
 	// 语义降级），宁可缺证据也不留**错证据**。删除失败不阻断（best-effort：后续 rename 会覆盖）。
 	_ = root.Remove(mrel)
 	tmpRel := mrel + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
