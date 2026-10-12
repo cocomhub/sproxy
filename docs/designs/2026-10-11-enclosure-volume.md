@@ -253,11 +253,19 @@ parity 的物理字节合计」后，`CapacityFS` 写后结算与周期对账都
      旧会话只清文件、不释放——宁可少释放也不误扣他人账本）；
    - 不变量：「parts 保留可重试」的失败路径**不释放**（字节仍在盘上 ⇒ 记账必须保留，否则
      失败重试可兑换超额写入）；同 partNumber 重传按差分释放（净账 = 新 part 大小）。
-2. **真值报告接入对账**（机制已就绪、零生产接线）。接入点：`quota_reconcile.go` 的
-   `adjustVolumePool`/`reconcileVolumesFromDisk` 之前，先取该卷后端 FS 的
-   `capacity.TrueUsageOf(fs)`；ok 时 `counter.CorrectFrom(r)`（真值优先）并与磁盘扫描值**交叉校验**
-   （差异超阈值告警）；`ok=false` 回落扫描。落地前提：封装处理器（secretdata 等）实现
-   `TrueUsageReporter`（内容分块 + meta pad + parity 物理合计）。
+2. ~~**真值报告接入对账**~~ **已落地**（`pkg/volume/secretdata/trueusage.go` + `pkg/server/quota_reconcile.go`）：
+   - **报告者**：`secretdata` 实现 `TrueUsage/TrueSize`，口径 = **本卷落盘字节**（内容分块
+     `ChunkInfo.EncSize` 之和 + XOR parity `ParityInfo.EncSize` + meta blob 落盘长度含 pad），
+     **不含副本**（副本在其它卷，本卷计会跨卷双计）且**不含目录 meta/孤儿 blob**（由磁盘扫描
+     口径兼顾，差异用容差判定）；去重卷的共享内容按池 blob 只计一次，不摊派给引用条目；
+     写路径（`writeFileEncrypted` / 去重两条分支）与**加载路径**（重启后从 meta + blob 长度
+     重算）都填充物理字节，否则重启会把真值归零；
+   - **接线**：`adjustVolumePool` 取卷后端 FS 的真值（`volumeTrueUsage` → `External(name).FS()`），
+     `ok=true` 即**优先采信**并与磁盘扫描值交叉校验（差异 > `max(1MiB, 扫描值 5%)` 告警），
+     `ok=false` 回落扫描值（**不静默降级为 0**）；
+   - **语义修正**：`capacity.TrueUsageOf` 从「沿 `Inner()` 下探到**最内层**再断言」改为「自外
+     向内返回**第一个**实现者」——掌握物理布局的是**处理器层**（链中间/外层），最内层只是被
+     包装的底层存储；装饰器不实现该接口，遍历天然跳过。
 3. **封印比较的 Unicode/8.3 归一**（【未证实】需平台实测）：当前归一只做「逐段去尾点/空格 + 大小写
    不敏感」；macOS APFS/HFS 的 NFC/NFD 归一与 Windows 8.3 短名理论上有等价路径差异，需在目标平台
    实测后决定是否补 `unicode/norm` 归一与短名展开（补则同样注意 fail-closed 方向）。

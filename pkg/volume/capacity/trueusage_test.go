@@ -38,6 +38,42 @@ type innerWrapFS struct {
 
 func (f *innerWrapFS) Inner() syncpkg.FS { return f.inner }
 
+// reporterWrapFS 是「既包装又实现真值报告」的层（模拟 secretdata：处理器层在链中间）。
+type reporterWrapFS struct {
+	syncpkg.FS
+	inner syncpkg.FS
+	bytes int64
+	ok    bool
+}
+
+func (f *reporterWrapFS) Inner() syncpkg.FS             { return f.inner }
+func (f *reporterWrapFS) TrueUsage() (int64, bool)      { return f.bytes, f.ok }
+func (f *reporterWrapFS) TrueSize(string) (int64, bool) { return f.bytes, f.ok }
+
+// TestTrueUsageOf_PrefersOutermostReporter 链上有多个实现时取**最外层**实现者：掌握物理布局的
+// 是处理器层（内容分块 + pad + parity），最内层只是被包装的底层存储（不知道上层写了几个 blob）。
+func TestTrueUsageOf_PrefersOutermostReporter(t *testing.T) {
+	t.Parallel()
+	innermost := &usageFakeFS{bytes: 7, ok: true}
+	processor := &reporterWrapFS{inner: innermost, bytes: 999, ok: true}
+	decorated := &innerWrapFS{inner: processor}
+
+	r, ok := TrueUsageOf(decorated)
+	if !ok || r == nil {
+		t.Fatalf("应找到链上的真值报告者, ok=%v", ok)
+	}
+	if got, gok := r.TrueUsage(); !gok || got != 999 {
+		t.Fatalf("应取最外层报告者（999）, got %d ok=%v", got, gok)
+	}
+	// ok=false 的报告者仍可被返回（调用方据 ok 回落），不得被当作 0。
+	half := &reporterWrapFS{inner: innermost, ok: false}
+	if r2, ok2 := TrueUsageOf(&innerWrapFS{inner: half}); !ok2 {
+		t.Fatal("实现了接口就应返回（由调用方看 ok）")
+	} else if _, tok := r2.TrueUsage(); tok {
+		t.Fatal("报告者 ok=false 时不得冒称掌握")
+	}
+}
+
 // TestTrueUsageOf_UnwrapsDecorators 真值报告者必须能穿过装饰器链被找到（否则上层永远
 // 只能拿到估算 → 失真不可修正）。
 func TestTrueUsageOf_UnwrapsDecorators(t *testing.T) {
