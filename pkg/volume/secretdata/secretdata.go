@@ -133,6 +133,10 @@ type metaEntry struct {
 	dataDir string
 	// baseVersion 是本条目的乐观锁版本（来自 meta.BaseVersion，写/删 CAS 用）。
 	baseVersion int64
+	// phys 是本条目在**本卷**的物理落盘字节（内容分块 EncSize 之和 + meta blob 含 pad 与
+	// parity 的落盘长度；去重引用条目只计本条目 meta blob，共享内容归 dedupBlob 计数）。
+	// 由写路径/加载路径填充，供 TrueUsage/TrueSize 报告真值（trueusage.go）。
+	phys int64
 }
 
 // dedupBlob 是去重内容池条目：一个整文件内容对应一个共享加密分块 blob 与其引用计数。
@@ -142,6 +146,9 @@ type dedupBlob struct {
 	name string // dedupDir 内的分块 blob 文件名（内容寻址三段哈希）
 	refs int64
 	meta *shardseal.Meta
+	// phys 是该共享内容 blob 的物理落盘字节（内容分块 + parity；meta 归各引用条目）。
+	// 卷真值里每 blob 只计一次（多引用不重复计），见 trueusage.go。
+	phys int64
 }
 
 // dirMeta 是目录 meta 的加密 JSON（q 标记，记录本目录逻辑名与父目录 dir_id；目录移动/改名
@@ -831,6 +838,7 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) erro
 	}
 	return s.commitEntry(ctx, wc, &metaEntry{
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
+		phys: physBytesOf(out.Meta, int64(len(metaBlob)), false),
 	}, uploaded)
 }
 
@@ -1339,14 +1347,14 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 		s.mu.Unlock()
 		return
 	}
-	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, prev)
+	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, int64(len(blob)), prev)
 	s.mu.Unlock()
 }
 
 // registerLoadedEntryLocked 登记已通过校验/冲突解决的加载条目并推进 usage/volVersion。
 // 调用方持 s.mu（且已 resolveSameRelConflict 通过）。prev 是冲突前旧条目（同 rel 已被
 // 新版本覆盖时非 nil；调用方负责对 usage 换账）。
-func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string, mm *shardseal.Meta, dataDir string, mt int64, prev *metaEntry) {
+func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string, mm *shardseal.Meta, dataDir string, mt, metaBlobLen int64, prev *metaEntry) {
 	// 去重引用文件：dataDir 指向池容器；池引用计数随加载恢复（重启后仍可物理删归零）。
 	if dataDir != "" {
 		s.registerPoolEntryLocked(mm)
@@ -1354,6 +1362,7 @@ func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string
 	s.index[rel] = &metaEntry{
 		size: mm.Original.Size, mtime: mt, dirSeg: container, metaName: metaName, meta: mm,
 		dataDir: dataDir, baseVersion: mm.BaseVersion,
+		phys: physBytesOf(mm, metaBlobLen, dataDir != ""),
 	}
 	addDirKeysLocked(s.dirs, rel)
 	s.usage += mm.Original.Size
@@ -1405,7 +1414,7 @@ func (s *SecretdataFS) registerPoolEntryLocked(mm *shardseal.Meta) {
 		b.refs++
 		return
 	}
-	s.dedupPool[key] = &dedupBlob{name: mm.Chunks[0].FileName, refs: 1, meta: mm}
+	s.dedupPool[key] = &dedupBlob{name: mm.Chunks[0].FileName, refs: 1, meta: mm, phys: contentPhysBytes(mm)}
 }
 
 // readBlob 读取底层文件全部字节（容错：失败返回 error）。

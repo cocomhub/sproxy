@@ -8,7 +8,7 @@ package archcheck
 // 但任何持守卫/装饰视图的**业务代码**都能借此一步 unwrap 到原始 backend（绕过 Guard 的
 // meta 桶隔离、Wrap 的 sidecar 联动、CapacityFS 的容量记账）——属特权逃生口。
 //
-// 口径：全仓非测试源码里 `.Inner()` 的**调用**只允许出现在「能力探测实现」这两处；
+// 口径：全仓非测试源码里 `.Inner()` 的**调用**只允许出现在「能力探测实现」这几处；
 // 新增调用必须显式登记并写明理由（默认拒绝）。
 //
 // 注意：本门禁检查**调用**（`.Inner()`），不检查方法定义行（`func (...) Inner() ...`）。
@@ -29,6 +29,9 @@ var innerDefRe = regexp.MustCompile(`func\s*\([^)]*\)\s*Inner\(`)
 var innerCallAllowlist = map[string]string{
 	"pkg/sync/staging_gate.go":         "Innermost 逐层下探（staging 门卫豁免/自管判据必须看原始卷）",
 	"pkg/volume/trusted/trusted_fs.go": "trusted.Innermost 同源实现（Provider 探测不得被装饰层污染）",
+	// 真值探测：掌握物理布局（内容分块 + meta pad + parity）的是**处理器层**，它在装饰器链中间，
+	// 故 TrueUsageOf 必须自外向内逐层下探找第一个实现者（装饰器本身不实现该接口 → 天然跳过）。
+	"pkg/volume/capacity/trueusage.go": "TrueUsageOf 能力探测（真值报告者可能位于链中间，非最内层）",
 }
 
 // TestInnerEscapeGate 门禁：业务代码不得直接 unwrap 装饰器（见文件头）。

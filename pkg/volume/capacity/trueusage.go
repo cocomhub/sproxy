@@ -39,14 +39,30 @@ type TrueUsageReporter interface {
 	TrueSize(rel string) (bytes int64, ok bool)
 }
 
-// TrueUsageOf 从（可能是装饰器链的）FS 中取真值报告者：沿 Inner() 下探到最内层后再断言。
-// 找不到实现返回 (nil, false)——调用方必须按「不掌握」处理（回落估算），不得当作 0。
+// TrueUsageOf 从（可能是装饰器链的）FS 中取真值报告者：**自外向内**逐层 Inner() 下探，
+// 返回**第一个**实现 TrueUsageReporter 的层。
+//
+// 为什么取「最外层实现者」而不是最内层：掌握物理布局的是**处理器层**（如 secretdata 的
+// 内容分块 + meta pad + XOR parity 合计），它在链中间/外层；最内层只是「被包装的底层存储」，
+// 它并不知道上层为同一逻辑文件写了几个 blob、pad 了多少字节。装饰器（CapacityFS/
+// StagingQuotaGateFS/Guard/quotaLocalFS）**不实现**本接口（它们只有估算语义），遍历天然
+// 跳过它们——“不得由装饰器估算冒充真值”由「谁实现了接口」+ R24 门禁保证。
+// 找不到实现返回 (nil, false)——调用方必须按「不掌握」处理（回落估算/扫描），不得当作 0。
 func TrueUsageOf(fs syncpkg.FS) (TrueUsageReporter, bool) {
 	if fs == nil {
 		return nil, false
 	}
-	r, ok := syncpkg.Innermost(fs).(TrueUsageReporter)
-	return r, ok
+	for cur := fs; cur != nil; {
+		if r, ok := cur.(TrueUsageReporter); ok {
+			return r, true
+		}
+		inner, ok := cur.(interface{ Inner() syncpkg.FS })
+		if !ok {
+			return nil, false
+		}
+		cur = inner.Inner()
+	}
+	return nil, false
 }
 
 // CorrectTo 把本池已确认占用**修正为真值** bytes（真值优先；可增可减）。
