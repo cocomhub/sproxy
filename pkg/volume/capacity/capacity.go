@@ -62,6 +62,13 @@ type Counter interface {
 	Release(size int64)
 	Used() int64
 	Capacity() int64
+	// Flush 把待落盘的变更写入快照（幂等；无变更 no-op）。
+	//
+	// **落盘策略（评审 F9）**：**增加**（TryAdd）恒同步落盘——崩溃丢「增加」= used 偏低 =
+	// 限额放宽（不可接受）；**减少**（Release）只标脏，由 Flush / 待写计数达阈值 / 下次增加
+	// 触发——崩溃最多丢「减少」→ 重启后 used 偏高 → fail-closed（安全方向）。如此同卷写/删
+	// 不再每次各付 tmp+fsync+rename+fsync(dir) 并在 mu 上串行化。
+	Flush() error
 }
 
 // VolumeCapacityCounter 是外部卷的卷级容量计数器（C2，持久化文件态）。
@@ -75,7 +82,15 @@ type VolumeCapacityCounter struct {
 	capacity int64  // 0 = 不限制
 	path     string // 持久化路径（空 = 不持久化）
 	corrupt  bool   // 快照损坏/版本不识 → 已重置 used=0（须告警，防静默放宽限额）
+	dirty    bool   // 待落盘的「减少」（F9 节流：见 Counter.Flush）
+	dirtyOps int    // 待落盘的减少次数（达 counterFlushEveryOps 即落盘，给漂移设上界）
+	// persisted 是快照里记录的限额（仅 Load 填充）——供「重建时继承上限」（F6）。
+	persisted int64
 }
+
+// counterFlushEveryOps 是「减少」节流的上界：连续这么多次 Release 未落盘即强制落盘一次
+// （崩溃最多丢这么多轮的减少；used 偏高 = fail-closed，安全方向）。
+const counterFlushEveryOps = 64
 
 // CorruptSnapshot 报告 Load 是否因快照损坏/版本不识而重置 used（供调用方告警）。
 func (c *VolumeCapacityCounter) CorruptSnapshot() bool { return c.corrupt }
@@ -97,10 +112,14 @@ func (c *VolumeCapacityCounter) TryAdd(size int64) error {
 		return fmt.Errorf("%w (used %d + %d > limit %d)", ErrVolumeFull, c.used, size, c.capacity)
 	}
 	c.used += size
+	c.dirty = true
+	// 增加恒同步落盘（F9）：崩溃丢增加 = used 偏低 = 限额放宽（不安全）。
+	_ = c.saveLocked()
 	return nil
 }
 
 // Release 释放 size 字节（删除/覆盖后调用）。非负归零：释放超过 used → 置 0（幂等防御）。
+// **不立即落盘**（F9 节流）：标脏，由 Flush / 阈值 / 下次增加触发——崩溃只丢减少（安全方向）。
 func (c *VolumeCapacityCounter) Release(size int64) {
 	if size <= 0 {
 		return
@@ -111,6 +130,28 @@ func (c *VolumeCapacityCounter) Release(size int64) {
 	if c.used < 0 {
 		c.used = 0
 	}
+	c.dirty = true
+	c.dirtyOps++
+	if c.dirtyOps >= counterFlushEveryOps {
+		_ = c.saveLocked()
+	}
+}
+
+// Flush 把待落盘的变更写入快照（幂等；无待写变更 → no-op）。关机/卸载卷/对账前调用。
+func (c *VolumeCapacityCounter) Flush() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.dirty {
+		return nil
+	}
+	return c.saveLocked()
+}
+
+// PersistedLimit 返回快照里记录的限额（无快照/损坏 → 0）。供「重建时继承上限」判定（F6）。
+func (c *VolumeCapacityCounter) PersistedLimit() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.persisted
 }
 
 // Used 返回当前占用字节。
@@ -142,7 +183,22 @@ func (c *VolumeCapacityCounter) Save() error {
 	// 更旧的快照可能后落盘 → 磁盘 used 永久偏低（重启后超限保护被削弱；P2 对抗评审）。
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return writeCounterFile(c.path, counterFile{Version: 1, Used: c.used, Capacity: c.capacity})
+	return c.saveLocked()
+}
+
+// saveLocked 调用方持 c.mu：原子写快照并清脏标记。
+func (c *VolumeCapacityCounter) saveLocked() error {
+	if c.path == "" {
+		c.dirty = false
+		c.dirtyOps = 0
+		return nil
+	}
+	if err := writeCounterFile(c.path, counterFile{Version: 1, Used: c.used, Capacity: c.capacity}); err != nil {
+		return err
+	}
+	c.dirty = false
+	c.dirtyOps = 0
+	return nil
 }
 
 // writeCounterFile 原子写计数快照（tmp + fsync + rename）；目录自动创建。
@@ -225,12 +281,56 @@ func Load(path string, capacity int64) (*VolumeCapacityCounter, error) {
 	}
 	c.mu.Lock()
 	c.used = max(f.Used, 0)
+	c.persisted = max(f.Capacity, 0) // 快照限额（供 F6 重建继承）
 	// 快照 used 超过当前限额（配置改小）→ 钳到限额（写全拒，与 PoolCounter 同口径）。
 	if c.capacity > 0 && c.used > c.capacity {
 		c.used = c.capacity
 	}
 	c.mu.Unlock()
 	return c, nil
+}
+
+// LoadForCreate 是用户卷创建/重建的计数器加载入口（**F6 语义唯一落点**，用户裁定 2026-10-12）：
+//   - capacity > 0                → 显式声明上限，直接采用（可改大/改小；改小则把 used 钳到上限）；
+//   - capacity == 0 && unlimited  → **显式不限**；
+//   - capacity == 0 && !unlimited → **继承快照里记录的限额**（无快照/损坏 → 不限）。
+//
+// 为什么：删除用户卷时**有意保留** `.capacity`（远端已写入的字节仍在，本系统不删远端内容），
+// 但此前 limit 完全取自请求体 → delete+recreate 写 `capacity:0` 即把上限变「不限」（「防放大」
+// 保护不完整）。继承后该绕过失效；确需不限请显式传 `unlimited: true`。
+func LoadForCreate(path string, capacity int64, unlimited bool) (*VolumeCapacityCounter, error) {
+	// 先按「不限」加载（不钳制 used），再按策略设定生效上限（设定时统一钳制）。
+	c, err := Load(path, 0)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case capacity > 0:
+		c.setCapacity(capacity)
+	case unlimited:
+		// 显式不限：保持 0。
+	default:
+		if p := c.PersistedLimit(); p > 0 {
+			c.setCapacity(p)
+		}
+	}
+	// **生效上限创建期即落盘**：否则「建卷后零写入 → 删除 → 重建 capacity:0」时快照不存在
+	// → 继承不到（0 = 不限，F6 绕过仍成立）。落盘失败即拒绝创建（fail-closed：限额不可持久化
+	// 就不该建出「无上限」的卷）。
+	if err := c.Save(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// setCapacity 设定限额并把 used 钳到限额（与 Load 的钳制口径一致：超限即写全拒）。
+func (c *VolumeCapacityCounter) setCapacity(limit int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.capacity = limit
+	if limit > 0 && c.used > limit {
+		c.used = limit
+	}
 }
 
 // VolumeCounterPath 返回配置外部卷容量计数器的持久化路径。
@@ -247,10 +347,13 @@ func VolumeCounterPath(storageRoot, name string) string {
 // 不漏计）、变更后原子写回——修对抗评审 P1：此前纯内存，重启 Usage 归零 → 可
 // 反复写满限额（“Σ用户 ≤ 卷限额”静默失效）。
 type PoolCounter struct {
-	pool    *quota.Pool
-	path    string
-	mu      sync.Mutex
-	corrupt bool // 快照损坏/版本不识 → 未恢复占用（须告警，防静默放宽限额）
+	// dirty/dirtyOps 是「减少」节流标记（F9；见 Counter.Flush）。
+	dirty    bool
+	dirtyOps int
+	pool     *quota.Pool
+	path     string
+	mu       sync.Mutex
+	corrupt  bool // 快照损坏/版本不识 → 未恢复占用（须告警，防静默放宽限额）
 }
 
 // CorruptSnapshot 报告持久化快照是否损坏/版本不识（未恢复占用；供调用方告警）。
@@ -310,7 +413,7 @@ func (p *PoolCounter) TryAdd(size int64) error {
 	return nil
 }
 
-// Release 释放 size（从池 committed 扣减）；变更后持久化。
+// Release 释放 size（从池 committed 扣减）。**不立即落盘**（F9 节流：见 Counter.Flush）。
 func (p *PoolCounter) Release(size int64) {
 	if size <= 0 {
 		return
@@ -318,15 +421,32 @@ func (p *PoolCounter) Release(size int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pool.ReleaseCommitted(size)
-	p.persistLocked()
+	p.dirty = true
+	p.dirtyOps++
+	if p.dirtyOps >= counterFlushEveryOps {
+		p.persistLocked()
+	}
 }
 
 // persistLocked 在持锁下取快照并原子写回（best-effort；无 path → no-op）。
 func (p *PoolCounter) persistLocked() {
+	p.dirty = false
+	p.dirtyOps = 0
 	if p.path == "" {
 		return
 	}
 	_ = writeCounterFile(p.path, counterFile{Version: 1, Used: p.pool.Usage(), Capacity: p.pool.MaxBytes()})
+}
+
+// Flush 把待落盘的变更写入快照（幂等；无待写变更 → no-op）。
+func (p *PoolCounter) Flush() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.dirty {
+		return nil
+	}
+	p.persistLocked()
+	return nil
 }
 
 // Used 返回池当前占用。
@@ -373,12 +493,10 @@ func (f *CapacityFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPat
 // 与「卷自带 meta」，避免把 CapacityFS 的 FileMeta 转发误判为自带 Provider）。
 func (f *CapacityFS) Inner() syncpkg.FS { return f.inner }
 
-// persist 变更后 best-effort 持久化（仅带 Save 的计数器，如文件态）。
-func (f *CapacityFS) persist() {
-	if p, ok := f.counter.(interface{ Save() error }); ok {
-		_ = p.Save()
-	}
-}
+// Flush 把待落盘的变更写入快照（关机/卸载卷/对账前调用；幂等）。
+// **F9 说明**：`CapacityFS` 自身不再在每次写/删后落盘——落盘策略由计数器决定（增加恒同步、
+// 减少节流），见 `Counter.Flush` 文档。
+func (f *CapacityFS) Flush() error { return f.counter.Flush() }
 
 // innerSize 返回 rel 当前大小（不存在/目录 → 0）。
 func (f *CapacityFS) innerSize(ctx context.Context, rel string) int64 {
@@ -430,7 +548,6 @@ func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader,
 	if serr := f.settle(ctx, relPath, prev, reserved, effective, size); serr != nil {
 		return serr
 	}
-	f.persist()
 	return nil
 }
 
@@ -443,7 +560,6 @@ func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader,
 func (f *CapacityFS) settleAfterWriteError(ctx context.Context, relPath string, prev, reserved, size int64) {
 	actual, ok := f.innerSizeChecked(ctx, relPath)
 	if !ok {
-		f.persist() // 复核失败：保留预留（bias-high）
 		return
 	}
 	if serr := f.settle(ctx, relPath, prev, reserved, actual, size); serr != nil {
@@ -452,7 +568,6 @@ func (f *CapacityFS) settleAfterWriteError(ctx context.Context, relPath string, 
 		_ = f.inner.Delete(ctx, relPath)
 		f.counter.Release(reserved)
 	}
-	f.persist()
 }
 
 // innerSizeChecked 返回 rel 的实测大小；ok=false = Stat 调用失败（**与「不存在」区分**——
@@ -540,7 +655,6 @@ func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Rea
 	if serr := f.settle(ctx, relPath, prev, reserved, effective, size); serr != nil {
 		return false, serr
 	}
-	f.persist()
 	return true, nil
 }
 
@@ -550,7 +664,6 @@ func (f *CapacityFS) Rename(ctx context.Context, from, to string) error {
 		return err
 	}
 	f.counter.Release(targetOld)
-	f.persist()
 	return nil
 }
 
@@ -564,7 +677,6 @@ func (f *CapacityFS) Delete(ctx context.Context, relPath string) error {
 		return err
 	}
 	f.counter.Release(size)
-	f.persist()
 	return nil
 }
 
@@ -581,7 +693,6 @@ func (f *CapacityFS) Move(ctx context.Context, from, to string) error {
 		return err
 	}
 	f.counter.Release(targetOld)
-	f.persist()
 	return nil
 }
 
@@ -605,7 +716,6 @@ func (f *CapacityFS) Copy(ctx context.Context, from, to string) error {
 		return err
 	}
 	f.counter.Release(targetOld)
-	f.persist()
 	return nil
 }
 
@@ -699,6 +809,10 @@ func WrapBackend(be registry.ExternalBackend, c Counter) *Backend {
 
 // FS 返回带卷级记账的 FS。
 func (b *Backend) FS() syncpkg.FS { return b.fs }
+
+// Flush 把卷级计数器的待落盘变更写入快照（关机 / 卸载卷 / 对账前调用；幂等）。
+// F9：`Release` 是节流的——不 flush 会让本次进程的删除量丢失，下次启动 used 偏高 → 伪 507。
+func (b *Backend) Flush() error { return b.fs.Flush() }
 
 // Usage 返回本系统已占用该卷的字节（registry.UsageProvider，权威源 = 本层计数器）。
 func (b *Backend) Usage() int64 { return b.fs.Counter().Used() }

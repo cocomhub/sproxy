@@ -16,13 +16,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -308,5 +311,100 @@ func TestUserVolumeAPI_DeleteRecreateKeepsUsage(t *testing.T) {
 	up, ok := h.volSet.External("ud").(registry.UsageProvider)
 	if !ok || up.Usage() != 42 {
 		t.Fatalf("delete+recreate 后 Usage 应保留 42（不得归零绕过限额）, ok=%v usage=%d", ok, up.Usage())
+	}
+}
+
+// TestUserVolumeAPI_RecreateInheritsCapacity 回归（评审 F6）：用户卷删除时**有意保留**
+// `.capacity`（远端字节仍在），但 limit 此前完全取自请求体 → delete+recreate 写 `capacity:0`
+// 即把上限变「不限」（「防放大」保护不完整）。新语义：`capacity:0` 且未显式 `unlimited`
+// ⇒ **继承持久化上限**；`unlimited:true` ⇒ 真不限。
+func TestUserVolumeAPI_RecreateInheritsCapacity(t *testing.T) {
+	t.Parallel()
+	h, store := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+	create := func(body map[string]any) *httptest.ResponseRecorder {
+		rec := postUserVolume(t, mux, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		return rec
+	}
+	del := func() {
+		req := httptest.NewRequest(http.MethodDelete, "/api/volumes/user?name=ud1", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("DELETE = %d, body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	capOf := func() int64 {
+		up, ok := h.volSet.External("ud1").(registry.UsageProvider)
+		if !ok {
+			t.Fatal("卷应注册为 UsageProvider（创建期包 CapacityFS）")
+		}
+		return up.Capacity()
+	}
+
+	create(map[string]any{"name": "ud1", "type": userVolumeTestType, "capacity": 1000,
+		"extra": map[string]any{"bduss": "t"}})
+	if got := capOf(); got != 1000 {
+		t.Fatalf("显式上限应生效: %d", got)
+	}
+	del()
+	// 重建写 capacity:0（未显式 unlimited）→ 必须继承 1000（否则绕过上限）。
+	create(map[string]any{"name": "ud1", "type": userVolumeTestType, "capacity": 0,
+		"extra": map[string]any{"bduss": "t"}})
+	if got := capOf(); got != 1000 {
+		t.Fatalf("重建 capacity:0 应继承持久化上限 1000（F6）, got %d", got)
+	}
+	// 生效上限也必须落 store 元数据——否则重启 restore 用请求里的 0 把继承的上限抹掉。
+	if v, gerr := store.Get("alice", "ud1"); gerr != nil || v == nil || v.Capacity != 1000 {
+		t.Fatalf("重建后 store 元数据 capacity 应为继承值 1000, got %+v err=%v", v, gerr)
+	}
+	// 显式无限 → 真不限（0）。
+	del()
+	create(map[string]any{"name": "ud1", "type": userVolumeTestType, "capacity": 0, "unlimited": true,
+		"extra": map[string]any{"bduss": "t"}})
+	if got := capOf(); got != 0 {
+		t.Fatalf("unlimited:true 应不限, got %d", got)
+	}
+}
+
+// TestFlushVolumeCounters_FlushesDirtyCounters 回归（F9 接线）：关机路径必须把各外部卷
+// 计数器的待落盘变更写入快照——`Release` 已节流，不 flush 会让本次进程的删除量丢失，
+// 重启后 used 偏高（伪 507）且逐次累积。
+func TestFlushVolumeCounters_FlushesDirtyCounters(t *testing.T) {
+	t.Parallel()
+	path := capacity.VolumeCounterPath(t.TempDir(), "v1")
+	cnt, err := capacity.NewPoolCounterPersistent(quota.NewPool(1000), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aerr := cnt.TryAdd(400); aerr != nil { // 增加恒同步落盘
+		t.Fatal(aerr)
+	}
+	cnt.Release(100) // 减少节流：快照仍 400
+
+	vs := registry.NewSet(nil, nil, nil, nil, "")
+	if aerr := vs.AddExternalVolume(volume.Volume{Name: "v1", Type: "baidupcs"},
+		capacity.WrapBackend(&extBackend{fs: &extFS{files: map[string]string{}}}, cnt)); aerr != nil {
+		t.Fatalf("AddExternalVolume: %v", aerr)
+	}
+	h := &Handlers{volSet: vs, logger: testLogger()}
+	h.flushVolumeCounters()
+
+	// 快照必须已反映「减少」（400-100=300）。
+	raw, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("读快照: %v", rerr)
+	}
+	var f struct {
+		Used int64 `json:"used"`
+	}
+	if uerr := json.Unmarshal(raw, &f); uerr != nil {
+		t.Fatalf("解析快照: %v", uerr)
+	}
+	if f.Used != 300 {
+		t.Fatalf("关机 flush 后快照 used 应为 300, got %d", f.Used)
 	}
 }
