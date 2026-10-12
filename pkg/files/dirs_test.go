@@ -216,6 +216,11 @@ func (r testRuntime) Route(owner, rel, explicitVol string, size int64, forceHome
 	return r.e.routeUpload(owner, rel, explicitVol, size, forceHomeVol)
 }
 
+// RouteTarget 显式卷（不查重）：回落 dirsEnv.routeUpload 的显式卷形态（替身 routeUploadDefault 不查重）。
+func (r testRuntime) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+	return r.e.routeUpload(owner, rel, volName, size, "")
+}
+
 func (r testRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.e.quotaScopeFor(owner, rel) }
 
 func (r testRuntime) ChecksumStoreFor(owner string) *checksum.ChecksumStore {

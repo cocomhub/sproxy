@@ -59,7 +59,11 @@ type VolumeRouter interface {
 	// Locate 在 owner 卷视图内定位 rel 所在卷（读定位，不创建目录）。
 	Locate(owner, rel string) (FileLocation, bool)
 	// Route 为写路径定卷并预留双账本（owner 全局 Scope + 卷容量池）。
+	// 显式卷（explicitVol 非空）语义：ACL 校验 + **唯一性查重**（HTTP 上传覆盖策略）。
 	Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	// RouteTarget 为**统一写内核**显式卷定卷（ACL 校验 + 双预留，**不做唯一性查重**——
+	// 覆盖写语义：S3/DAV/版本恢复允许覆盖同 rel）。
+	RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error)
 }
 
 // QuotaScopeProvider 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
@@ -318,6 +322,11 @@ func (s singleVolume) Route(owner, rel, explicitVol string, size int64, forceHom
 		}
 	}
 	return route, nil
+}
+
+// RouteTarget 单卷形态：唯一根即目标（同 Route，不查重）。
+func (s singleVolume) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+	return s.Route(owner, rel, volName, size, "")
 }
 
 // defaultDownloadPaths 未注入下载路径解析时的默认：仅普通文件（kind 为空）。

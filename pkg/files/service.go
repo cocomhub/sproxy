@@ -376,6 +376,7 @@ const (
 	reasonPathInvalid = "path_invalid"
 	// reasonChecksumMissing 是客户端未提供 X-File-Checksum 的失败。
 	reasonChecksumMissing = "checksum_missing"
+	reasonConflict        = "conflict"
 	// reasonMkdirFailed 是重命名时创建目标父目录失败的失败。
 	reasonMkdirFailed = "mkdir_failed"
 	// reasonRemoveFailed 是删除时 os.Remove 失败的失败。

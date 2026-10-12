@@ -11,6 +11,8 @@ import (
 	"path"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/files"
+
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -24,9 +26,10 @@ import (
 // filesMetaPolicy 的 sidecar（正确落在 <owner>/meta/ 桶，与上传/转存同一位置）。
 type davMetaFS struct {
 	syncpkg.FS
-	h     *Handlers
-	owner string
-	root  *storage.Root
+	h       *Handlers
+	owner   string
+	root    *storage.Root
+	volName string
 }
 
 // bucketRel 把 WebDAV 相对路径（相对 user 桶）归一为桶相对键 `user/<rel>`。
@@ -94,6 +97,22 @@ func (d *davMetaFS) removeMeta(p string) {
 }
 
 func (d *davMetaFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+	// **统一写内核**（WriteTarget）：锁（同键空间，防同 rel 并发写错位）+ 显式卷（DAV
+	// 的 ?volume= 已解析为 d.volName，默认卷空）+ 原子写 + 双账本 + sidecar 内置 + 台账，
+	// 不再自建 davMetaFS 的直写/锁/sidecar 样板。
+	// 显式卷（DAV 的 ?volume= 已解析为 d.volName）；空 = 自动路由（默认卷/单卷形态）。
+	// 统一写内核（WriteTarget）为主路径；测试/未装配（h.tenants nil，fileService 不可用）
+	// 回落内层直写 + sidecar 联动（行为兼容旧 davMetaFS 测试环境）。
+	if svc := d.h.fileServiceIfReady(); svc != nil {
+		_, werr := svc.WriteTarget(ctx, files.WriteTargetInput{
+			Owner: d.owner, RemotePath: strings.TrimPrefix(d.bucketRel(p), "user/"),
+			Volume: d.volName, Verify: false, ClientSize: size, Mtime: mtime,
+		}, r)
+		if werr != nil {
+			return werr
+		}
+		return nil
+	}
 	if err := d.FS.WriteFile(ctx, p, r, size, mtime); err != nil {
 		return err
 	}

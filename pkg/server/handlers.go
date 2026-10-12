@@ -290,6 +290,7 @@ type Handlers struct {
 	// 路径（RegisterRoutes 正式装配、测试手工构造），懒装配让两条路径都无需改动。
 	filesSvc     *files.Service
 	filesOnce    sync.Once
+	filesMu      sync.Mutex
 	eventsBus    *EventBus
 	eventBusOnce sync.Once
 
@@ -421,7 +422,30 @@ func (h *Handlers) LocalHandler() http.Handler {
 //   - 其余能力都是接口方法：每次调用读 h 的实时字段/懒建缓存（如 cfgPtr.Load()、
 //     volSet、quotaScopeFor），故配置与缓存的变化对领域包可见；
 //   - 计量条件注入：h.metrics 为 nil 时不加 WithMetrics（避免 typed-nil 接口）。
+//
+// fileServiceIfReady 返回已装配的 fileService（懒建**已触发**时才可用；测试直构造 h 未装配
+// tenants 时返回 nil——调用方回落内部实现，不 panic）。用 filesOnce 的原子 done 标志避免
+// 读 h.filesSvc 与 fileService 懒建写之间的 race。
+func (h *Handlers) fileServiceIfReady() *files.Service {
+	h.filesMu.Lock()
+	defer h.filesMu.Unlock()
+	if h.filesSvc != nil {
+		return h.filesSvc
+	}
+	if h.tenants == nil {
+		return nil
+	}
+	return h.fileServiceLocked()
+}
+
 func (h *Handlers) fileService() *files.Service {
+	h.filesMu.Lock()
+	defer h.filesMu.Unlock()
+	return h.fileServiceLocked()
+}
+
+// fileServiceLocked 调用方持 h.filesMu；懒装配（filesOnce 幂等）。
+func (h *Handlers) fileServiceLocked() *files.Service {
 	h.filesOnce.Do(func() {
 		rt := filesRuntime{h: h}
 		opts := []files.Option{
@@ -462,7 +486,7 @@ func (h *Handlers) fileService() *files.Service {
 	return h.filesSvc
 }
 
-// anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
+// filesMu 保护 filesSvc 懒装配（fileService 写 vs fileServiceIfReady 读）。
 // 单源在 pkg/storage：租户名是存储布局契约（<root>/<owner>/…），各包必须同值。
 const anonymousOwner = storage.AnonymousOwner
 
