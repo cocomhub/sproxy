@@ -58,6 +58,7 @@ type runtime struct {
 	eventSink     EventListener
 	contentIndex  bool
 	fileMeta      FileMetaPolicy
+	externalOps   ExternalVolumeOps
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
@@ -194,6 +195,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 	if rt.locks == nil {
 		rt.locks = &mapFileLocks{}
 	}
+	rt.externalOps = cfg.externalOps
 	rt.downloadPaths = cfg.downloadPaths
 	if rt.downloadPaths == nil {
 		rt.downloadPaths = defaultDownloadPaths{tenants: rt.tenants, actor: rt.actor}
@@ -217,6 +219,9 @@ func (r *runtime) tenantOf(owner string) *storage.Tenant {
 }
 
 func (r *runtime) volSet() VolumeSet { return r.volumes.Volumes() }
+
+// externalVolOps 返回外部卷对象操作接缝（未装配 → nil，调用方跳过外部卷分支 = 零回归）。
+func (r *runtime) externalVolOps() ExternalVolumeOps { return r.externalOps }
 
 func (r *runtime) volumeTenant(volName, owner string) *storage.Tenant {
 	return r.volumes.Tenant(volName, owner)

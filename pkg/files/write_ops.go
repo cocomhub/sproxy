@@ -1259,6 +1259,10 @@ type DeleteFileInput struct {
 	RemotePath string
 	// ExpectedChecksum 是客户端声明的 SHA-256（**必填**且必须匹配，不符即拒绝删除）。
 	ExpectedChecksum string
+	// SkipChecksumVerify 为 true 时不要求也不比对 ExpectedChecksum（协议面：S3 的 DeleteObject
+	// 无 checksum 语义；此类删除的安全由「同 rel 文件锁 + （本地卷）quarantine 原子改名」承担）。
+	// **单条 HTTP API / 批量族必须留 false**——它们是「先 stat 拿 checksum 再删」的语义。
+	SkipChecksumVerify bool
 	// ExplicitVol 是 `?volume=` 显式卷（空 = 按 owner 卷视图定位）。
 	ExplicitVol string
 	// AllowMissing 为 true 时「文件不存在（含默认卷被 ACL 排除而对 owner 不可见）」按**幂等
@@ -1319,7 +1323,7 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	}
 
 	expectedChecksum := input.ExpectedChecksum
-	if expectedChecksum == "" {
+	if expectedChecksum == "" && !input.SkipChecksumVerify {
 		logger.WarnContext(ctx, "X-File-Checksum 为空", "file_name", remotePath)
 		return DeleteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgMissingChecksum, Reason: reasonChecksumMissing}
 	}
@@ -1338,6 +1342,13 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 			return DeleteFileResult{}, &HTTPError{Status: http.StatusConflict, Message: "文件正在移动/上传中，请稍后重试"}
 		}
 		defer release()
+	}
+
+	// **外部卷硬删（评审 F1）**：外部卷没有 *storage.Root，`locateDeleteTarget`/`volumeFileExists`
+	// 恒未命中 ⇒ 其对象此前无任何用户可见删除入口（卷写满后一切写入恒 507 = 功能死路）。
+	// 命中即在此终结（经装配层可信链：主文件 + 联动 sidecar + 卷级计数释放）。
+	if handled, res, extErr := s.deleteExternalVolume(ctx, owner, remotePath, input); handled {
+		return res, extErr
 	}
 
 	homeVol, root, handled, res, locErr := s.locateDeleteTarget(ctx, owner, rel, input)
@@ -1425,6 +1436,71 @@ func (s *Service) idempotentMissingDelete(ctx context.Context, remotePath string
 // locateDeleteTarget 跨卷定位删除目标（任务 5）：locateForRead 命中 → 用该卷租户根；
 // 未命中时仅当默认卷对 owner 授权才回落默认租户（显式卷未命中 / 默认卷被 ACL 排除 →
 // AllowMissing ? 幂等成功 : 404，fail-closed，AD-6）。返回 handled=true 表示已产出结果。
+// deleteExternalVolume 在**外部卷**上执行硬删（评审 F1）。返回 handled=true 表示请求已被外部卷
+// 分支终结（成功 / 404 / 幂等 / 错误）。
+//
+// 语义：
+//   - 显式卷（`?volume=`）指向外部卷 → 由本分支终结（命中删、未命中 404/幂等）；
+//   - 未指定卷 → 遍历 owner 视图内的外部卷，**删到才终结**；都未删到则回落本地流程
+//     （默认卷可能仍有该文件，不能在此武断 404）。
+//
+// 「外部卷」判据 = 该卷无本地 Root（与 `volumeFileExists` 的判据同源，非类型名硬编码）。
+func (s *Service) deleteExternalVolume(ctx context.Context, owner, remotePath string, input DeleteFileInput) (bool, DeleteFileResult, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return false, DeleteFileResult{}, nil // 未装配接缝：零回归（外部卷无删除入口）
+	}
+	vols := s.externalCandidateVolumes(owner, input.ExplicitVol)
+	if len(vols) == 0 {
+		return false, DeleteFileResult{}, nil // 非外部卷 / 未授权 → 交本地流程
+	}
+	for _, name := range vols {
+		deleted, derr := ops.ExternalDelete(ctx, owner, name, remotePath, input.ExpectedChecksum)
+		if derr != nil {
+			return true, DeleteFileResult{}, derr
+		}
+		if !deleted {
+			continue
+		}
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "外部卷硬删 volume="+name)
+		return true, DeleteFileResult{RemotePath: remotePath,
+			Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
+	}
+	// 候选外部卷都未命中。
+	if input.ExplicitVol == "" {
+		return false, DeleteFileResult{}, nil // 未指定卷：回落本地流程兜底（幂等/404 由它裁决）
+	}
+	if input.AllowMissing {
+		res, err := s.idempotentMissingDelete(ctx, input.RemotePath)
+		return true, res, err
+	}
+	return true, DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
+}
+
+// externalCandidateVolumes 返回 owner 可见的**外部卷**名（无本地 Root ⇒ 外部）。
+// explicitVol 非空时只返回该卷（非外部卷/未授权 → 空 = 交本地流程）。
+func (s *Service) externalCandidateVolumes(owner, explicitVol string) []string {
+	vs := s.rt.volSet()
+	if vs == nil {
+		return nil
+	}
+	if explicitVol != "" {
+		v, ok := vs.ByName(explicitVol)
+		if !ok || !v.Authorize(owner) || vs.Root(explicitVol) != nil {
+			return nil
+		}
+		return []string{explicitVol}
+	}
+	var out []string
+	for _, v := range vs.All() {
+		if !v.Authorize(owner) || vs.Root(v.Name) != nil {
+			continue
+		}
+		out = append(out, v.Name)
+	}
+	return out
+}
+
 func (s *Service) locateDeleteTarget(ctx context.Context, owner, rel string, input DeleteFileInput) (homeVol string, root *storage.Root, handled bool, result DeleteFileResult, err error) {
 	loc, found := s.locateForRead(owner, rel, input.ExplicitVol)
 	if found && loc.Tenant != nil {
@@ -1454,6 +1530,7 @@ func (s *Service) locateDeleteTarget(ctx context.Context, owner, rel string, inp
 }
 
 // verifyDeleteQuarantine 基于 fd 校验 quarantine 内容（打开失败 → 恢复 rel 并 500）。
+// `expectedChecksum` 为空表示「无客户端期望值」（协议面 SkipChecksumVerify）→ 只算不比对。
 // 返回文件元信息与实际 checksum；任一失败已尽力恢复原 rel 并返回 *HTTPError。
 func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root, quarRel, rel, expectedChecksum, remotePath string) (os.FileInfo, string, error) {
 	qf, qErr := root.OpenDecrypted(quarRel)
@@ -1485,7 +1562,9 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 		s.rt.logger().ErrorContext(ctx, "计算文件 checksum 失败", "file_name", remotePath, "error", qErr.Error())
 		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: errMsgFileChecksum}
 	}
-	if !checksum.Equal(cs, expectedChecksum) {
+	// 空 expectedChecksum = 无「客户端期望值」可比（协议面 SkipChecksumVerify：S3 DeleteObject
+	// 无 checksum 语义）→ 跳过比对；仍需打开/stat/算 checksum（审计与去重台账释放要用）。
+	if expectedChecksum != "" && !checksum.Equal(cs, expectedChecksum) {
 		// 恢复原路径：用户数据必须保留（不丢不删），并返回拒绝。
 		_ = atomicRenameRoot(root, quarRel, rel)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
