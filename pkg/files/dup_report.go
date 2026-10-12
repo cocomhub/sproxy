@@ -197,7 +197,7 @@ func dupScanDirEntry(ctx context.Context, root *storage.Root, volume, rel string
 // dupScanFile 对单个文件：打开→SHA-256→计入组（打开/哈希失败记 ScanError 不中断扫描）。
 func dupScanFile(rep *Report, groups map[string]*DupGroup, root *storage.Root, volume, child string, info os.FileInfo) {
 	size := info.Size()
-	f, oerr := root.Open(child)
+	f, oerr := root.OpenDecrypted(child)
 	if oerr != nil {
 		rep.Errors = append(rep.Errors, ScanError{Rel: child, Reason: oerr.Error()})
 		return

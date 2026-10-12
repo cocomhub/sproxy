@@ -553,7 +553,7 @@ func fileChecksumRoot(root *storage.Root, rel string) (string, error) {
 // **先 root.Open**（打开失败即不匹配，即使 expected 为空），打开成功后才做 `expected == ""`
 // 空值短路。顺序刻意对齐——两处实现的行为必须可逐句对照。
 func verifyFileWithChecksumRoot(root *storage.Root, rel, expectedChecksum string) bool {
-	f, err := root.Open(rel)
+	f, err := root.OpenDecrypted(rel)
 	if err != nil {
 		return false
 	}

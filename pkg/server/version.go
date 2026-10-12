@@ -407,7 +407,7 @@ type versionRestoreCopyCtx struct {
 func (h *Handlers) restoreCopyVersionFile(rc *versionRestoreCopyCtx) (int64, bool) {
 	var written int64
 	if rc.dstVol == rc.verLoc.VolumeName {
-		src, oerr := rc.verLoc.Tenant.Root().Open(rc.verRel)
+		src, oerr := rc.verLoc.Tenant.Root().OpenDecrypted(rc.verRel)
 		if oerr != nil {
 			rc.releaseRes()
 			h.RecordAudit(rc.r.Context(), AuditEvent{

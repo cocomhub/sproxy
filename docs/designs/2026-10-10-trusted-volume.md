@@ -448,3 +448,11 @@ durable 容量账本」在备份路径的归属/API）、M3（baidupcs staging �
 - 归档 tar header 大小用**用户可见长度**（Lstat 密文 size ≠ 明文流）；
 - 剩余 `root.Open/OpenFile` 直操作仅限：meta sidecar、s3 part/会话、删除/目录类（不读内容）与
   `user_visible_io.go` 自身——内部面，不属用户内容读写入口。
+
+**附：用户可见入口门禁 R25（2026-10-12）**：`internal/archcheck/user_io_gate_test.go` 把
+「用户内容读写必须经 `openUserVisibleRead`/`writeUserVisible`（加密卷透明加解密 + 封印）」从
+注释纪律升级为**硬门禁**：全仓非测试源码中 `root.Open/OpenFile(rel)` 调用（用户内容面）仅允许
+`user_visible_io.go` 自身与白名单（meta sidecar / s3 part·会话 / 块写·分块在途暂存 / openCiphertext
+密文导出例外 / 分享探测），其余一律违规。门禁发现并驱动的**新收敛**：`version_store.copyVersionFile`
+（版本保存源读/目标写）、`version.go` 恢复源读、`dedupFallbackCopy`、`verifyDeleteQuarantine`、
+`dupScanFile`、`verifyFileWithChecksumRoot` —— 加密卷上版本/去重/查重/删除校验全部按**明文**语义。
