@@ -622,3 +622,25 @@ entryName, size)` 收 `root` 参数却**从未使用**——「本该用 Root �
 `root.OpenDecrypted(...).Stat()`（**解密流**的长度 = 逻辑长度）✓；分块上传覆盖写释放用会话内
 `prev`/`total`（明文口径）✓；sidecar 写面用 `len(data)`（明文 JSON 长度）✓。
 
+## 8.15 卷根直连门禁（R26）与「跨层约定不一致」审计（2026-10-13）
+
+**门禁（机制化）**：新增 `internal/archcheck/volume_root_bypass_gate_test.go`（R26）——非测试
+源码中 `sync.NewLocalFS(...)` 的调用点必须登记并写明「为什么可以不经 Root」。立项理由：历史三个
+P0（DAV 面绕加解密/封印、备份源读密文、同步本地侧落明文）全部出自该类调用，且都靠逐次评审才
+发现（单层测试发现不了：两侧各有测试，跨层才矛盾）；设计 §12 早已承诺该门禁但从未落地。判定用
+AST（`go/parser`）而非正则：注释/字符串里的同名文本不误报，`NewLocalFS (` 带空格写法也不漏报；
+并带**白名单空转自检**（登记文件已无调用即报红——门禁静默失效比报红更危险）。变异验证：未登记
+调用 / 带空格写法 / 去掉登记 / 白名单空转 → 红；纯注释与字符串提及 → 绿。
+
+**同批审计（结论含负结论）**：
+- **配置文档 vs 解析**：`docs/config.md` 的 184 个配置键在 Go 代码中全部有引用，且**无
+  comment-only** ⇒ 该面干净（两轮筛：先「文档有代码无」，再排除只在注释中出现者）。
+- **`NewLocalFS` 站点逐处复核**：`enclosure/attach.go`（特权源视图，设计内）、
+  `secret_register.go`（secrets 卷/secretdata 独立 target）、`pikpak_secretstore.go`（独立密钥
+  目录）、`syncexec/executor.go`（未注入提供者时的回落）。**未修待裁定**：默认 secrets 卷落在
+  `<storage_root>/secrets`（卷根子目录）——在 `extra.encrypt` 的默认卷上既不加密也不受封印；
+  改经 Root 需先定**迁移口径**（既有明文 secrets 文件在加密卷上无法直接 `OpenDecrypted`，禁
+  静默降级）。
+- **裸 `os.*` 文件 I/O 面复核**：`volume_retention.go` 的 `os.ReadDir(<卷根>/<owner>/version)`
+  仅为目录列举（目录名不加密）✓；`share.go`/`search_index.go` 落在服务端内部目录 ✓；
+  `trash.go` 的 size 口径缺陷见 §8.14（已修）。

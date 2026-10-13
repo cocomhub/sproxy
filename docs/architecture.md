@@ -380,6 +380,12 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
 - **能力探测必须下探 `syncpkg.Innermost`**：装饰器无条件回显能力（透传契约）⇒ 直接对装饰层做
   类型断言恒真。这条纪律已修过三类失效：staging 门卫恒跳过、`RangeReader` 回落成死代码、
   `Provider` 探测失败。
+- **卷内容一律经 `storage.Root`（或经 Root 的 FS 适配器 `server.NewRootFS`）**：`sync.NewLocalFS`
+  是「任意目录 → 纯 os I/O」的适配器，用在**卷根**上会绕过 at-rest 加解密、封印、用户可见长度与
+  容量接线——历史三个 P0 全出自这一类（DAV 面、备份源、同步本地侧）。该纪律由门禁 R26
+  （`internal/archcheck/volume_root_bypass_gate_test.go`）机械保证：非测试源码中
+  `NewLocalFS(...)` 的调用点必须登记并写明「为什么可以不经 Root」（与 R25
+  `user_io_gate_test.go` 互补：R25 管「经 Root 但绕过用户可见入口」，R26 管「根本不经 Root」）。
 
 ### 读写路径保证
 
