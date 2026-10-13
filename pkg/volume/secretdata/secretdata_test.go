@@ -1597,16 +1597,18 @@ func TestRename_FileBasenameChange_RewritesMetaOnly(t *testing.T) {
 	}
 }
 
-// backingBlobSnapshot 是底层 blob 快照：内容分块（非 z 标记）名→sha256，与 meta blob 名集合。
+// backingBlobSnapshot 是底层 blob 快照：内容分块（非 meta/dir 标记）名→sha256，文件 meta 名集合，
+// 目录 meta（q 标记）名集合（目录 meta 随目录存在，不属于「内容分块」）。
 type backingBlobSnapshot struct {
 	content map[string]string
 	meta    map[string]struct{}
+	dirs    map[string]struct{}
 }
 
 // snapshotBackingBlobs 遍历底层容器，收集内容分块（名→内容哈希）与 meta blob 名。
 func snapshotBackingBlobs(t *testing.T, fs *SecretdataFS) backingBlobSnapshot {
 	t.Helper()
-	snap := backingBlobSnapshot{content: map[string]string{}, meta: map[string]struct{}{}}
+	snap := backingBlobSnapshot{content: map[string]string{}, meta: map[string]struct{}{}, dirs: map[string]struct{}{}}
 	ctx := context.Background()
 	rootEntries, err := fs.inner.ListDir(ctx, "")
 	if err != nil {
@@ -1622,8 +1624,12 @@ func snapshotBackingBlobs(t *testing.T, fs *SecretdataFS) backingBlobSnapshot {
 		}
 		for _, f := range files {
 			key := e.Name + "/" + f.Name
-			if shardseal.ClassifyName(f.Name) == shardseal.KindFileMeta {
+			switch shardseal.ClassifyName(f.Name) {
+			case shardseal.KindFileMeta:
 				snap.meta[key] = struct{}{}
+				continue
+			case shardseal.KindDirMeta:
+				snap.dirs[key] = struct{}{}
 				continue
 			}
 			rc, oerr := fs.inner.OpenRead(ctx, key)
