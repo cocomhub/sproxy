@@ -204,9 +204,12 @@ func TestPong_DeliveredThroughWriteLoopWhenIdle(t *testing.T) {
 
 	c.feed(t, FramePing, nil)
 
+	// 等待门必须同时包含「帧已出线」**与**「出线结果已落账」：生产侧 `PongsSent.Add(1)`
+	// 发生在 `conn.Send` 成功**之后**（只在真正出线后计数，见 retransmit.go），只等帧数会
+	// 在写者 Add 之前读到 0 ⇒ 假红（低概率窗口，CI 粗时钟/高负载下更易命中）。
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		return c.countOf(FramePong) == 1
-	}, "正常路径下 Pong 必须经 writeLoop 出线")
+		return c.countOf(FramePong) == 1 && m.Metrics().PongsSent.Load() == 1 && m.Metrics().ReadLoopPong.Waits.Load() == 1
+	}, "正常路径下 Pong 必须经 writeLoop 出线且计数落账")
 
 	if got := m.Metrics().ReadLoopPong.Waits.Load(); got != 1 {
 		t.Errorf("ReadLoopPong.Waits=%d want 1", got)
