@@ -11,6 +11,7 @@ package files
 //  5. TTL：过期条目（保留期超时）被清理。
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"os"
@@ -438,5 +439,84 @@ func TestRestoreTrashMetaSuffix_NoCrossFileFallback(t *testing.T) {
 	}
 	if got := restoreTrashMetaSuffix(root, flat, "123"); got != "123" {
 		t.Fatalf("同代精确匹配应命中，got %q", got)
+	}
+}
+
+// TestTrash_EmptyEncryptedVolume_ReleasesLogicalSize 清空回收站必须按**用户可见逻辑长度**释放
+// 配额：at-rest 加密卷上磁盘字节是密文（头部 + 分块 tag 膨胀），而写路径预留/软删保留的是
+// **逻辑长度**。此前 `EmptyTrash`/`CleanupTrash` 传 `os.Stat(条目).Size()`（磁盘字节）⇒ 释放
+// 量失真 → owner 配额漂移：多释放（密文 > 逻辑）使配额虚低（超限写入通过），少释放留下幽灵占用。
+// `releaseTrashEntryQuota` 收 `root` 参数却从未使用——即「本该用 Root 取逻辑长度」的痕迹。
+//
+// 判据：写 big(5000)+small(1000) → 软删 big（配额保留 6000）→ 清空回收站 → user 桶配额必须
+// 等于剩余 small 的逻辑长度 1000（而非 1000+5000-密文(big)）。
+//
+// 变异：回退 `info.Size()` → 本用例红。
+func TestTrash_EmptyEncryptedVolume_ReleasesLogicalSize(t *testing.T) {
+	t.Parallel()
+	e := writeTargetEnv(t)
+	tnt := e.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("tenant 不可用")
+	}
+	if serr := tnt.Root().SetEncryption(bytes.Repeat([]byte{7}, 32)); serr != nil {
+		t.Fatalf("SetEncryption: %v", serr)
+	}
+	ctx := context.Background()
+	big := bytes.Repeat([]byte("A"), 5000)
+	small := bytes.Repeat([]byte("B"), 1000)
+	if _, err := e.svc.WriteTarget(ctx, wtInput("alice", "big.bin"), bytes.NewReader(big)); err != nil {
+		t.Fatalf("write big: %v", err)
+	}
+	if _, err := e.svc.WriteTarget(ctx, wtInput("alice", "small.bin"), bytes.NewReader(small)); err != nil {
+		t.Fatalf("write small: %v", err)
+	}
+	scope := e.quotaScopeFor("alice", "user/big.bin")
+	if scope == nil {
+		t.Fatal("user 桶 Scope 不可用")
+	}
+	const wantAll = int64(5000 + 1000)
+	if got := scope.Usage(); got != wantAll {
+		t.Fatalf("写入后 user 配额应 %d（逻辑长度）, got %d", wantAll, got)
+	}
+	// 前置条件：加密卷磁盘字节 > 逻辑长度（否则本用例不具区分力）。
+	fi, serr := tnt.Root().Stat("user/big.bin")
+	if serr != nil {
+		t.Fatalf("Stat(user/big.bin): %v", serr)
+	}
+	if fi.Size() <= int64(len(big)) {
+		t.Fatalf("前置条件不成立：加密卷磁盘字节应 > 逻辑长度（%d vs %d）", fi.Size(), len(big))
+	}
+	// 软删 big：配额保留（可恢复语义）。
+	if _, err := e.svc.DeleteFile(ctx, DeleteFileInput{
+		Owner: "alice", RemotePath: "big.bin", ExpectedChecksum: testutil.SHA256Hex(big), SoftDelete: true,
+	}); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if got := scope.Usage(); got != wantAll {
+		t.Fatalf("软删应保留配额 %d, got %d", wantAll, got)
+	}
+	if err := e.svc.EmptyTrash(ctx, "alice"); err != nil {
+		t.Fatalf("EmptyTrash: %v", err)
+	}
+	if got := scope.Usage(); got != int64(len(small)) {
+		t.Fatalf("清空回收站后 user 配额应 = 剩余文件逻辑长度 %d, got %d（按磁盘字节释放会失真）",
+			len(small), got)
+	}
+	// TTL 路径（CleanupTrash）走同一释放判据——同样按逻辑长度。
+	if _, err := e.svc.WriteTarget(ctx, wtInput("alice", "big2.bin"), bytes.NewReader(big)); err != nil {
+		t.Fatalf("write big2: %v", err)
+	}
+	if _, err := e.svc.DeleteFile(ctx, DeleteFileInput{
+		Owner: "alice", RemotePath: "big2.bin", ExpectedChecksum: testutil.SHA256Hex(big), SoftDelete: true,
+	}); err != nil {
+		t.Fatalf("soft delete big2: %v", err)
+	}
+	// ttl=0 → 立即清理全部过期条目。
+	if _, err := e.svc.CleanupTrash(ctx, "alice", 0); err != nil {
+		t.Fatalf("CleanupTrash: %v", err)
+	}
+	if got := scope.Usage(); got != int64(len(small)) {
+		t.Fatalf("TTL 清理后 user 配额应 = %d（逻辑长度）, got %d", len(small), got)
 	}
 }

@@ -597,3 +597,28 @@ quarantine 强制比对 / 去 checksum 交叉比对）。
 `TestApplyEnclosureSeals_WholeVolumeSealsEntireSource` 装配接线；
 `TestBackupAPI_EncryptedSourceBacksUpPlaintext` 加密源 → 产物明文）。**变异 5 命中**
 （空路径判非法 / 空规则不覆盖 / rootFS 不映射 / 备份源回退裸 LocalFS / 保留 409）。
+
+
+## 8.14 回收站清理按「用户可见逻辑长度」释放配额（2026-10-12）
+
+**缺陷（评审勘出）**：`package files` 的 `EmptyTrash`/`CleanupTrash` 用 `os.Stat(条目).Size()`
+（**磁盘字节**）释放 owner 配额，而 at-rest 加密卷上磁盘是**密文**（容器头 + 每分块 tag/padding
+膨胀），写路径预留与软删保留的都是**逻辑长度** ⇒ 释放量失真：密文 > 逻辑时**多释放**（owner 配额
+虚低 → 超限写入通过），反之留幽灵占用（假 507）。痕迹：`releaseTrashEntryQuota(owner, root,
+entryName, size)` 收 `root` 参数却**从未使用**——「本该用 Root 取逻辑长度」的残留。
+
+**处置**：`releaseTrashEntryQuota` 去掉 `size` 参数，内部经 `trashEntryReleaseSize(root, entry)`
+用 `Root.LogicalSize`（与写路径同口径）取释放量；取不到 → **返回 0 = 宁少放不多放**（释放不足
+偏向「配额偏高」，由对账自愈；过度释放会让超限写入通过，属不安全方向）。两个调用点
+（`EmptyTrash` 递归清理、`CleanupTrash` TTL 过期）同步收敛，`os.Stat` 取 size 的裸 I/O 一并消失。
+
+**测试与变异**：`pkg/files/trash_test.go` 的
+`TestTrash_EmptyEncryptedVolume_ReleasesLogicalSize`（加密卷写 5000+1000 → 软删 5000 → 清空回收站
+→ 配额必须回到剩余文件逻辑长度 1000；并断言**前置条件**「密文 > 逻辑」，否则用例不具区分力；
+末尾再走一遍 TTL 路径 `CleanupTrash`）。修复前实测 **948（少 52 字节 = 密文膨胀）**。
+**变异 2 命中**（回退磁盘字节 / 恒不释放）。
+
+**同族自查（本次一并核对，无同类缺陷）**：删除路径 `verifyDeleteQuarantine` 经
+`root.OpenDecrypted(...).Stat()`（**解密流**的长度 = 逻辑长度）✓；分块上传覆盖写释放用会话内
+`prev`/`total`（明文口径）✓；sidecar 写面用 `len(data)`（明文 JSON 长度）✓。
+
