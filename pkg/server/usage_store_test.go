@@ -8,7 +8,21 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
+
+// testRootAt 在 dir 上打开 storage.Root（测试统一走**卷句柄**，与生产同路径：
+// 卷决定是否加密，使用方不判加密态）。
+func testRootAt(t *testing.T, dir string) *storage.Root {
+	t.Helper()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("打开 Root 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
 
 // usage_store_test.go 验证计量报告 P1（roadmap 11.10-⑩）usageStore 纯逻辑层：
 //  1. 日轮转：跨日 RecordUsage 生成新日桶（同日累计，跨日分桶）。
@@ -21,7 +35,8 @@ import (
 // newTestUsageStore 创建指向 t.TempDir 的 usageStore（helper）。
 func newTestUsageStore(t *testing.T) *usageStore {
 	t.Helper()
-	return newUsageStore(t.TempDir(), testLogger())
+	dir := t.TempDir()
+	return newUsageStore(testRootAt(t, dir), "", testLogger())
 }
 
 // TestUsageStore_DailyRotation 验证日轮转：同日累计进同一日桶，跨日生成新日桶。
@@ -104,20 +119,20 @@ func TestUsageStore_SnapshotRoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	s1 := newUsageStore(dir, testLogger())
+	s1 := newUsageStore(testRootAt(t, dir), "", testLogger())
 	s1.RecordUsageAt("owner-a", "upload_bytes", 100, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
 	s1.RecordUsageAt("owner-a", "download_bytes", 50, time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC))
 	if err := s1.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	// 月快照文件已落盘（<persistDir>/<owner>/<YYYY-MM>.json）。
+	// 月快照文件已落盘（<rel>/<owner>/<YYYY-MM>.json；rel="" 即 dir 下）。
 	if _, err := os.Stat(filepath.Join(dir, "owner-a", "2026-09.json")); err != nil {
 		t.Fatalf("月快照文件缺失: %v", err)
 	}
 
 	// 重启：新实例载入同一持久化目录。
-	s2 := newUsageStore(dir, testLogger())
+	s2 := newUsageStore(testRootAt(t, dir), "", testLogger())
 	got := s2.Summary("owner-a", "2026-09-01", "2026-09-02")
 	if got.Kinds["upload_bytes"] != 100 {
 		t.Fatalf("重载后 upload_bytes = %d, want 100", got.Kinds["upload_bytes"])

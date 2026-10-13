@@ -532,11 +532,23 @@ func (m *CloudDownloadManager) CloudDirFor(owner string) string {
 	return abs
 }
 
+// cloudStateRootFor 返回 owner 租户状态目录（meta/cloud）所在的 Root；租户不可用 → nil。
+// 状态 JSON 一律经该 Root 读写（卷自己的语义：加密卷由卷加密、封印区间写入恒拒），
+// 见 manager_persist.go 的 cloudStateRel。
+func (m *CloudDownloadManager) cloudStateRootFor(owner string) *storage.Root {
+	tnt := m.tenantFor(owner)
+	if tnt == nil {
+		return nil
+	}
+	return tnt.Root()
+}
+
 // persistDirFor 返回 owner 租户云任务状态目录（<root>/<tenant>/meta/cloud）。
 // 租户不可用时返回 ""。
 // PersistDirFor 返回 owner 租户的云任务**状态**目录（`<租户根>/meta/cloud`），
 // 任务状态落 `<PersistDirFor>/<taskID>.json`、组状态落 `<PersistDirFor>/groups/<groupID>.json`。
-// 导出理由同 CloudDirFor（装配层测试需按布局断言/构造磁盘状态）。
+// 导出理由同 CloudDirFor（装配层测试需按布局断言/构造磁盘状态）。**仅供布局断言/排查**：
+// 状态 I/O 一律经 cloudStateRootFor（加密卷由卷加密、封印区间写入恒拒）。
 func (m *CloudDownloadManager) PersistDirFor(owner string) string {
 	tnt := m.tenantFor(owner)
 	if tnt == nil {
@@ -544,16 +556,6 @@ func (m *CloudDownloadManager) PersistDirFor(owner string) string {
 	}
 	abs, _ := tnt.Root().Abs("meta/cloud")
 	return abs
-}
-
-// groupsDirFor 返回 owner 租户云任务组状态目录（<root>/<tenant>/meta/cloud/groups）。
-// 租户不可用时返回 ""。
-func (m *CloudDownloadManager) groupsDirFor(owner string) string {
-	base := m.PersistDirFor(owner)
-	if base == "" {
-		return ""
-	}
-	return filepath.Join(base, "groups")
 }
 
 // taskDirFor 返回 owner 租户下任务文件目录（<root>/<tenant>/cloud/<taskID>）。

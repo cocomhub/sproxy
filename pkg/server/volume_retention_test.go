@@ -57,7 +57,7 @@ func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, audit *Au
 		shareStore:     NewShareStore(testLogger()),
 	}
 	if shareDir != "" {
-		h.shareStore.EnablePersist(shareDir)
+		h.shareStore.EnablePersist(testRootAt(t, shareDir), "")
 	}
 	h.auditStore = audit
 	t.Cleanup(func() { _ = h.Close() })
@@ -77,10 +77,15 @@ func seedRetentionShare(t *testing.T, h *Handlers, filename string, createdAgo t
 	// 构造等价落盘——测试只依赖「旧文件存在」）。
 	if ps, ok := h.shareStore.(*ShareStore); ok {
 		ps.persistWrite(link)
-	} else if p := h.shareStore.(*stateBackedShareStore).legacyPath(link.Token); p != "" {
-		if data, merr := json.Marshal(link.toPersist()); merr == nil {
-			if os.MkdirAll(filepath.Dir(p), 0o755) == nil {
-				_ = os.WriteFile(p, data, 0o600)
+	} else if ss, ok := h.shareStore.(*stateBackedShareStore); ok && ss.legacyRoot != nil {
+		if rel := ss.legacyRelPath(link.Token); rel != "" {
+			if data, merr := json.Marshal(link.toPersist()); merr == nil {
+				if werr := ss.legacyRoot.MkdirAll(ss.legacyRel, 0o755); werr == nil {
+					if w, werr := writeUserVisible(ss.legacyRoot, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); werr == nil {
+						_, _ = w.Write(data)
+						_ = w.Close()
+					}
+				}
 			}
 		}
 	}
@@ -273,7 +278,7 @@ func TestVolumeRetention_Pass_ExpiredCleanup(t *testing.T) {
 	// 分享：默认卷 anonymous/meta/share 持久化；一条 CreatedAt 超 ShareTTL（兜底删）、
 	// 一条未超（保留）。
 	shareDir := filepath.Join(dirs[0], "anonymous", "meta", "share")
-	h.shareStore.EnablePersist(shareDir)
+	h.shareStore.EnablePersist(testRootAt(t, dirs[0]), "anonymous/meta/share")
 	seedRetentionShare(t, h, "old.txt", 3*time.Hour, 2*time.Hour)      // CreatedAt 3h ago > 1h TTL → 删
 	seedRetentionShare(t, h, "fresh.txt", 30*time.Minute, 2*time.Hour) // CreatedAt 30m ago < 1h TTL → 保留
 

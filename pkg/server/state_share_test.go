@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/state"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // writeLegacyShareFile 在 legacyDir 写旧 <meta>/share/<token>.json（shareLinkPersist 格式）。
@@ -44,10 +45,11 @@ func writeLegacyShareFile(t *testing.T, legacyDir, token string, link *ShareLink
 }
 
 // stateShareStoreFor 构造 StateStore 后端的分享存储（t.TempDir 隔离）。
-func stateShareStoreFor(t *testing.T, legacyDir string) (*stateBackedShareStore, *state.LocalStateStore) {
+// legacyDir 非空时以**卷句柄**（root=legacyDir，rel=""）装配旧 meta 回退读。
+func stateShareStoreFor(t *testing.T, legacyRoot *storage.Root) (*stateBackedShareStore, *state.LocalStateStore) {
 	t.Helper()
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
-	ss := newStateBackedShareStore(st, legacyDir, testLogger())
+	ss := newStateBackedShareStore(st, legacyRoot, "", testLogger())
 	return ss, st
 }
 
@@ -56,7 +58,7 @@ func stateShareStoreFor(t *testing.T, legacyDir string) (*stateBackedShareStore,
 func TestStateBackedShareStore_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	ss, st := stateShareStoreFor(t, "")
+	ss, st := stateShareStoreFor(t, nil)
 
 	link, err := ss.Create(shareSpec{Filename: "a.txt", TenantID: "alice", Rel: "user/a.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
@@ -90,7 +92,7 @@ func TestStateBackedShareStore_RoundTrip(t *testing.T) {
 		t.Fatalf("Consume 后 Downloads=%d want 1", pl2.Downloads)
 	}
 	// 新适配器（模拟重启）从 StateStore 读回。
-	ss2 := newStateBackedShareStore(st, "", testLogger())
+	ss2 := newStateBackedShareStore(st, nil, "", testLogger())
 	if got := ss2.Peek(link.Token); got == nil || got.Downloads != 1 {
 		t.Fatalf("重载后 Peek 应命中 Downloads=1, got %+v", got)
 	}
@@ -100,7 +102,7 @@ func TestStateBackedShareStore_RoundTrip(t *testing.T) {
 // Consume 同一 token → 恰 1 个成功（CAS 防超发）。
 func TestStateBackedShareStore_ConsumeCAS_OneTime(t *testing.T) {
 	t.Parallel()
-	ss, _ := stateShareStoreFor(t, "")
+	ss, _ := stateShareStoreFor(t, nil)
 	link, err := ss.Create(shareSpec{Filename: "ot.txt", TenantID: "alice", Rel: "user/ot.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: true, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +129,7 @@ func TestStateBackedShareStore_ConsumeCAS_OneTime(t *testing.T) {
 // 并发消费 → 恰 3 个成功（CAS 防超发）。
 func TestStateBackedShareStore_ConsumeCAS_Limited(t *testing.T) {
 	t.Parallel()
-	ss, _ := stateShareStoreFor(t, "")
+	ss, _ := stateShareStoreFor(t, nil)
 	link, err := ss.Create(shareSpec{Filename: "lim.txt", TenantID: "alice", Rel: "user/lim.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 3, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +160,7 @@ func TestStateBackedShareStore_LegacyFallback(t *testing.T) {
 		Owner: "ak-1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
 	})
 
-	ss, _ := stateShareStoreFor(t, legacyDir)
+	ss, _ := stateShareStoreFor(t, testRootAt(t, legacyDir))
 	got := ss.Peek(token)
 	if got == nil || got.Filename != "old.txt" || got.TenantID != "alice" {
 		t.Fatalf("回退读旧文件应命中, got %+v", got)
@@ -181,7 +183,7 @@ func TestStateBackedShareStore_SaveMigratesToState(t *testing.T) {
 		OneTime: true,
 	})
 
-	ss, st := stateShareStoreFor(t, legacyDir)
+	ss, st := stateShareStoreFor(t, testRootAt(t, legacyDir))
 	if ss.Peek(token) == nil {
 		t.Fatal("回退载入应命中")
 	}
@@ -211,7 +213,7 @@ func TestStateBackedShareStore_SaveMigratesToState(t *testing.T) {
 // 跨租户撤销被拒。
 func TestStateBackedShareStore_Revoke(t *testing.T) {
 	t.Parallel()
-	ss, _ := stateShareStoreFor(t, "")
+	ss, _ := stateShareStoreFor(t, nil)
 	link, err := ss.Create(shareSpec{Filename: "r.txt", TenantID: "alice", Rel: "user/r.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +256,7 @@ func TestHandlers_StateBackedShareStore(t *testing.T) {
 	})
 	// 装配层注入 StateStore 分享后端（模拟 cmd/sproxy cluster 模式装配：
 	// RegisterRoutes 之后 SetShareStore 替换 shareStore 字段）。
-	h.SetShareStore(newStateBackedShareStore(st, filepath.Join(root, "anonymous", "meta", "share"), testLogger()))
+	h.SetShareStore(newStateBackedShareStore(st, testRootAt(t, root), "anonymous/meta/share", testLogger()))
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -284,7 +286,7 @@ func TestHandlers_StateBackedShareStore(t *testing.T) {
 	// shareStore 应为 StateStore 后端（非本地持久化形态）——经 SetShareStore 注入（见
 	// RegisterRoutes 装配分支：opts.ShareStore 非 nil 时替换 shareStore 字段）。
 	// 注意：注入发生在创建分享**之后**（shareResp 由本地形态创建）——这里直接断言注入生效。
-	h.SetShareStore(newStateBackedShareStore(st, filepath.Join(root, "anonymous", "meta", "share"), testLogger()))
+	h.SetShareStore(newStateBackedShareStore(st, testRootAt(t, root), "anonymous/meta/share", testLogger()))
 	if _, ok := h.shareStore.(*stateBackedShareStore); !ok {
 		t.Fatalf("stateStore 装配后 h.shareStore 应为 *stateBackedShareStore, got %T", h.shareStore)
 	}

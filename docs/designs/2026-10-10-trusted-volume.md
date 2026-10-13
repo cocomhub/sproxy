@@ -712,3 +712,29 @@ pikpak 主密钥回落裸 FS / 目录漏拼 `secrets` 段（该缺陷由 e2e_cli
 **测试与变异**：`pkg/files/tags_test.go`（加密卷：递归扫描磁盘无明文标签 + 载入还原 + 清空幂等；
 封印区间写入 `ErrSealed`）。**变异 3 命中**（写回退裸 os → 标签明文；读回退非解密读 → 载入为空；
 写用非加密 `OpenFile` → 明文落盘）。
+
+## 8.19 云任务状态 / 分享 / 计量台账经 Root（同族收口）（2026-10-13）
+
+**缺陷（与 §8.17/§8.18 同族：绝对路径 + 裸 os I/O 绕过 `storage.Root`）**：
+
+| 台账 | 位置 | 敏感性 |
+|---|---|---|
+| 云任务状态 JSON | `<租户根>/meta/cloud/<taskID>.json`、`groups/<groupID>.json` | URL / 文件名 / 目标路径（用户可见元数据） |
+| 分享链接台账 | `<anonymous 租户根>/meta/share/<token>.json` | **分享 token 凭据** + 目标 rel |
+| 计量台账 | `<默认卷根>/meta/usage/<owner>/<YYYY-MM>.json` | 用户用量画像 |
+
+三者在加密卷上**明文落盘**（加密承诺落空），且都**绕过封印**（整卷封装下仍能写入被封装区间）。
+
+**处置（统一形状：使用方不理解加密态，交给对应卷）**：全部改为「**卷句柄 + 卷内相对目录**」：
+写用 `writeUserVisible`（`pkg/server` 的统一入口，内部按卷加密态分派）/ `root.OpenFileEncrypted`
+（`pkg/cloud` 域包侧），读用 `openUserVisibleRead` / `root.OpenDecrypted`；目录创建 `ensureDir`
+（`rel == "."` = 卷根，no-op）、原子替换 `root.AtomicRename`。
+`PersistDirFor` 降级为**仅供布局断言/排查**（并删除已无使用者的 `groupsDirPath`/`groupsDirFor`）；
+`usagePersistDir()` 收敛为 `usageRel` 常量 + 默认卷句柄；分享的 StateStore 回退读（legacy meta）
+同样经卷句柄（否则加密卷上旧记录解析失败）。新增读取上界（状态 8MiB / 分享 64KiB / 月快照 4MiB）
+防注入超大 JSON 的 OOM。
+
+**测试与变异**：`pkg/cloud/persist_root_test.go`（加密卷：状态密文落盘 + 重启恢复；封印写入
+`ErrSealed`）、`pkg/server/meta_ledger_root_test.go`（分享/计量：加密卷密文落盘 + 重启恢复；
+封印区间 fail-closed）。**变异 6 命中**（状态写/读回退裸 os、分享写回退裸 os、计量写/读回退
+裸 os、写用非加密 `OpenFile`）。
