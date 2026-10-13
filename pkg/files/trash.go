@@ -229,10 +229,9 @@ func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 			return nil // 目录内容由子条目处理，目录自身由 RemoveAll 收尾
 		}
 		entryRel := trashEntryRel(trashAbs, absPath)
-		info, ierr := os.Stat(absPath)
-		if ierr == nil {
-			s.releaseTrashEntryQuota(owner, root, entryRel, info.Size())
-		}
+		// 释放量必须与**预留量**同口径（用户可见逻辑长度，非磁盘密文长度）——见
+		// trashEntryReleaseSize；文件仍存在（下面才 Remove）故 LogicalSize 可取。
+		s.releaseTrashEntryQuota(owner, root, entryRel)
 		_ = root.Remove(entryRel)
 		return nil
 	})
@@ -261,7 +260,8 @@ func trashEntryRel(trashAbs, absPath string) string {
 // B-C1 修复：入参 entryName 是**含 trash/ 前缀的完整条目路径**（与软删命名一致）——
 // 原实现传裸 e.Name() 与 guard HasPrefix("trash/") 不匹配 → 恒早退（配额释放死代码）。
 // 调用方（EmptyTrash/CleanupTrash）传 `trashPrefix + e.Name()`。
-func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entryName string, size int64) {
+func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entryName string) {
+	size := trashEntryReleaseSize(root, entryName)
 	if size <= 0 {
 		return
 	}
@@ -285,6 +285,26 @@ func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entry
 	if scope := s.rt.quotaScope(owner, origRel); scope != nil {
 		scope.ReleaseUsage(size)
 	}
+}
+
+// trashEntryReleaseSize 返回回收站条目应按**用户可见逻辑长度**释放的字节数。
+//
+// 为什么不能用 `os.Stat(条目).Size()`：at-rest 加密卷上磁盘字节是**密文**（容器头部 + 每分块
+// tag/padding 膨胀），而写路径预留、软删保留的配额都是**逻辑长度** ⇒ 按磁盘字节释放会让 owner
+// 配额漂移——密文 > 逻辑时**多释放**（配额虚低 → 超限写入通过），反之留幽灵占用（假 507）。
+// `Root.LogicalSize` 与写路径同口径（明文长度）。
+//
+// 取不到（文件已被并发删除、非加密卷路径异常）→ 返回 0 = **宁少放不多放**：释放不足偏向
+// 「配额偏高」，可由对账自愈；过度释放会让超限写入通过，属不安全方向。
+func trashEntryReleaseSize(root *storage.Root, rel string) int64 {
+	if root == nil {
+		return 0
+	}
+	size, err := root.LogicalSize(rel)
+	if err != nil || size < 0 {
+		return 0
+	}
+	return size
 }
 
 // CleanupTrash 清理过期回收站条目（保留期 ttl；0 = 立即全部清理）。
@@ -331,7 +351,7 @@ func (s *Service) cleanupTrashWalk(owner string, root *storage.Root, trashAbs st
 			return nil // 未过期
 		}
 		entryRel := trashEntryRel(trashAbs, absPath)
-		s.releaseTrashEntryQuota(owner, root, entryRel, info.Size())
+		s.releaseTrashEntryQuota(owner, root, entryRel)
 		if root.Remove(entryRel) == nil {
 			*cleaned++
 		}
