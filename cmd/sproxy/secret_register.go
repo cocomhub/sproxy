@@ -20,12 +20,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -41,8 +44,66 @@ import (
 
 // secretsLocalFS 把由 rootDir 传入的依赖 caller 决定视图的本地 FS 视图建为 LocalFS。
 // 调用方传 rootDir 时即期望集成 secrets 目录（本函数负责拼接 /secrets）。
+//
+// **注意**：仅用于「目标目录不在任何受管卷根之内」的独立目录；落在卷根之内的目录必须走
+// `secretsFSFor`（经 storage.Root：at-rest 加解密 + 封印 + 用户可见长度），否则会在加密卷上
+// 明文落密钥（门禁 R26 登记项，见 `pkg/server/secrets_fs.go` 的文件头）。
 func secretsLocalFS(rootDir string) syncpkg.FS {
 	return syncpkg.NewLocalFS(rootDir+"/secrets", nil)
+}
+
+// secretsFSFor 解析 secrets 目录（绝对路径 absDir）的 FS 视图：
+//   - **落在某个已装配卷根之内** → `server.NewRootSecretsFS(volRoot, <卷根相对目录>, logger)`：
+//     经 Root ⇒ at-rest 透明加解密、封印、用户可见长度全部生效（加密卷上密钥密文落盘），
+//     权限 0600 经 `ChmodSecret` 回调保持（无兼容迁移：见 `pkg/server/secrets_fs.go` 文件头）；
+//   - **独立目录**（不在任何卷根内）→ 裸 `NewLocalFS`（无卷语义可经，零回归；R26 已登记）。
+//
+// 为什么按「路径归属」而不是按配置来源判定：`extra.root`/`storage_root` 都只是路径文本，
+// 是否落在卷根内是**部署事实**——按事实判定才能一处收口两种装配入口（默认 secrets 卷与
+// `type: secrets` 卷）。
+func secretsFSFor(set *registry.Set, absDir string, logger *slog.Logger, local bool) (syncpkg.FS, []secrets.ManagerOption) {
+	clean := filepath.Clean(absDir)
+	if rt, relDir, ok := owningVolumeRoot(set, clean); ok {
+		fs := server.NewRootSecretsFS(rt, relDir, logger)
+		opts := []secrets.ManagerOption{}
+		if local {
+			if c, cok := fs.(interface{ ChmodSecret(name string) error }); cok {
+				opts = append(opts, secrets.WithLocalChmod(c.ChmodSecret))
+			}
+		}
+		return fs, opts
+	}
+	// 独立目录：保持既有裸 LocalFS 语义（无卷语义可经 ⇒ 无加解密/封印可依附，R26 已登记）。
+	return syncpkg.NewLocalFS(clean, logger), nil
+}
+
+// owningVolumeRoot 在已装配卷集中查找**包含** dir 的卷根（返回该根与 dir 的卷根相对路径）。
+// 判据是路径归属（部署事实），而非配置来源——`extra.root`/`storage_root` 都只是路径文本。
+func owningVolumeRoot(set *registry.Set, dir string) (*storage.Root, string, bool) {
+	if set == nil {
+		return nil, "", false
+	}
+	for _, v := range set.All() {
+		rt := set.Root(v.Name)
+		if rt == nil {
+			continue
+		}
+		relDir, rerr := filepath.Rel(filepath.Clean(rt.AbsPath()), dir)
+		if rerr != nil || relDir == ".." || strings.HasPrefix(relDir, ".."+string(filepath.Separator)) || filepath.IsAbs(relDir) {
+			continue // 不在该卷根之内
+		}
+		if relDir == "." {
+			relDir = ""
+		}
+		return rt, filepath.ToSlash(relDir), true
+	}
+	return nil, "", false
+}
+
+// secretsDirFSFor 是 secretsFSFor 的「目录 + /secrets 拼接」变体（默认 secrets 卷形态：
+// 传卷根，内部补 secrets/ 段）。
+func secretsDirFSFor(set *registry.Set, rootDir string, logger *slog.Logger) (syncpkg.FS, []secrets.ManagerOption) {
+	return secretsFSFor(set, filepath.Join(rootDir, "secrets"), logger, true)
 }
 
 // registerSecretsBackendWithFS 注册 secrets backend 类型构造器（可测试）：
@@ -83,7 +144,12 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 		if root == "" {
 			return nil, fmt.Errorf("secrets backend: 卷 %q target=local 但无 root（默认卷根）", v.Name)
 		}
-		return secretsLocalFS(root), nil
+		// `root` 是**父目录**（secrets 目录 = <root>/secrets，与 `secretsLocalFS` 同布局）：
+		// 必须经 secretsDirFSFor 拼接 `secrets` 段——直接传 root 会让视图指向父目录本身，
+		// 密钥文件按名落错位置（e2e 实测：secretdata 卷 secret_url 解析失败 → boot fail）。
+		fs, mopts := secretsDirFSFor(secretDataSet.Load(), root, nil)
+		_ = mopts
+		return fs, nil
 	default:
 		return nil, fmt.Errorf("secrets backend: 卷 %q target=%q 需由装配层解析注入（外部卷 secrets/ 视图）", v.Name, t)
 	}
@@ -433,8 +499,8 @@ func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultR
 	// 内部已把入参拼 /secrets，此处直接传 defaultRoot，避免双 append（secrets/secrets
 	// 层级错误）。
 	root := defaultRoot
-	fs := secretsLocalFS(root)
-	mgr := secrets.NewManager(fs, regName, true)
+	fs, mopts := secretsDirFSFor(set, root, logger)
+	mgr := secrets.NewManager(fs, regName, true, mopts...)
 	// 统一用 secrets backend（实现 URLResolver，secrets:// 可寻址）而非裸 adapter：
 	// 默认卷也是 URL 可寻址目标（secrets://default/ 或 secrets://<name>/）。
 	be, err := secrets.NewBackend(ctx, volume.Volume{Name: regName, Type: "secrets",

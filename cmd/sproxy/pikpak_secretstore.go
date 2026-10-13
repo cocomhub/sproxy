@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/pikpak"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
@@ -31,13 +33,17 @@ const pikpakMasterSecret = "pikpak-master"
 // storageRoot 为卷根；secretRoot 为空 = <storageRoot>/pikpak-secrets（config
 // pikpak.secrets_dir 覆盖）。装配失败 fail-closed——refresh_token 是永久账号接管凭据，
 // 绝不静默退回明文落盘。
-func pikpakEncryptedSecretStore(ctx context.Context, storageRoot, secretRoot string, log *slog.Logger) (pikpak.SecretStore, error) {
+func pikpakEncryptedSecretStore(ctx context.Context, volRoot *storage.Root, storageRoot, secretRoot string, log *slog.Logger) (pikpak.SecretStore, error) {
 	// 1. 主密钥：默认 secrets 卷（<storageRoot>/secrets，0700 目录）。
 	secRoot := filepath.Join(storageRoot, "secrets")
 	if err := os.MkdirAll(secRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("pikpak secret store: mkdir secrets dir: %w", err)
 	}
-	mgr := secrets.NewManager(secretsLocalFS(storageRoot), "default-secrets", true)
+	// 主密钥是**密钥材料**，必须与默认 secrets 卷同口径存储：卷根可用时经 `storage.Root`
+	// （at-rest 加密卷上密文落盘 + 封印 + 历史明文一次性迁移），否则回落裸 LocalFS
+	// （无卷语义可依附的场景，如独立目录/未装配测试）。口径必须与 `ensureDefaultSecretsVolume`
+	// 一致——两个写入者用不同形态写同一目录会让对方读到「密文当密钥」（永久性损坏）。
+	mgr := pikpakMasterKeyManager(volRoot, storageRoot, log)
 	// 主密钥首次创建需**原子**（F3）：双进程并发首装（服务端首启 + CLI 首个 add）各生成
 	// 不同随机密钥会 last-writer-wins 分裂、既有加密凭据不可解。用 O_EXCL 锁文件把
 	// read-or-create 串行化（跨进程互斥；遗留锁超时删除后重试）。
@@ -72,6 +78,20 @@ func pikpakEncryptedSecretStore(ctx context.Context, storageRoot, secretRoot str
 		log.Info("pikpak account credentials 加密卷就绪", "root", secretRoot)
 	}
 	return pikpak.NewFSSecretStore(encFS), nil
+}
+
+// pikpakMasterKeyManager 构造主密钥的 secrets 管理器：卷根可用 → 经 Root 的视图（含 0600
+// 回调）；否则回落裸 LocalFS（与 `secretsFSFor` 的「独立目录」分支同口径）。
+func pikpakMasterKeyManager(volRoot *storage.Root, storageRoot string, log *slog.Logger) *secrets.Manager {
+	if volRoot != nil {
+		fs := server.NewRootSecretsFS(volRoot, "secrets", log)
+		opts := []secrets.ManagerOption{}
+		if c, ok := fs.(interface{ ChmodSecret(name string) error }); ok {
+			opts = append(opts, secrets.WithLocalChmod(c.ChmodSecret))
+		}
+		return secrets.NewManager(fs, "default-secrets", true, opts...)
+	}
+	return secrets.NewManager(secretsLocalFS(storageRoot), "default-secrets", true)
 }
 
 // withExclusiveLock 用 O_CREATE|O_EXCL 锁文件串行化跨进程临界区（Windows 上 O_EXCL
