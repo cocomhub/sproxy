@@ -5,15 +5,27 @@ package files
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
+// maxIndexSnapshotBytes 是快照读取上界（防被注入超大 JSON 的 OOM：快照是加速层，宁可重建）。
+// 与 meta sidecar 同口径（8MiB 级索引；超限即视为损坏 → 全量重建）。
+const maxIndexSnapshotBytes = 8 << 20
+
 // index_persist.go 实现搜索索引持久化（roadmap 2.3 P0 增强）：
-// 内存增量索引 + 落盘快照（<tenant meta>/index/<owner>.json）——重启载入免全量
+// 内存增量索引 + 落盘快照（<tenant>/meta/index/<owner>.json）——重启载入免全量
 // WalkDir；写路径增量后周期保存；失效重建后保存覆盖。快照缺失/损坏 → 回退全量重建。
+//
+// **快照经 storage.Root 读写**（此前是裸 os I/O + 绝对路径）：索引条目含**用户可见文件名**
+// （name/base/rel），裸 I/O 会让它在 at-rest 加密卷上**明文落盘**（加密承诺对文件名落空），
+// 并绕过**封印**（整卷封印下仍能写入被封装区间）。改经 Root 后：加密卷透明加密落盘、封印路径
+// 写入恒拒（`ErrSealed` → 保存失败仅日志，快照是加速层，不影响索引功能）。
+// 读取用 `OpenDecrypted`：历史上的明文快照（本改动前写入）在加密卷上解密失败 → 视为
+// 「无快照」回退全量重建（**无兼容迁移**：用户裁定尚未上线；重建数据可完全再生成）。
 
 // indexSnapshotEntry 是快照的导出 DTO（indexEntry 字段未导出，JSON 需导出字段）。
 // Tags 字段随 roadmap 11.10-④ 新增：旧格式快照缺该字段 → nil（零回归）。
@@ -50,51 +62,63 @@ func fromSnapshotEntries(entries map[string]*indexSnapshotEntry) map[string]*ind
 	return out
 }
 
-// indexSnapshotPath 返回 owner 快照文件路径（meta/index/<owner>.json）。
-func indexSnapshotPath(t *storage.Tenant, owner string) string {
-	abs, ok := t.Root().Abs(filepath.ToSlash(filepath.Join("meta", "index", owner+".json")))
-	if !ok {
-		return ""
-	}
-	return abs
+// indexSnapshotRel 返回 owner 快照的**租户根相对路径**（meta/index/<owner>.json）。
+func indexSnapshotRel(owner string) string {
+	return filepath.ToSlash(filepath.Join("meta", "index", owner+".json"))
 }
 
 // saveIndexSnapshot 原子写 owner 索引快照（tmp + rename）。失败返回错误（调用方
 // 记日志后继续——快照是加速层，写失败不影响索引功能）。
 func saveIndexSnapshot(t *storage.Tenant, owner string, entries map[string]*indexEntry) error {
-	if t == nil {
+	if t == nil || t.Root() == nil {
 		return nil
 	}
-	p := indexSnapshotPath(t, owner)
-	if p == "" {
-		return nil
-	}
-	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	root := t.Root()
+	rel := indexSnapshotRel(owner)
+	if dir := filepath.ToSlash(filepath.Dir(rel)); dir != "." && dir != "" {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
 	}
 	data, err := json.Marshal(indexSnapshotFile{Entries: toSnapshotEntries(entries)})
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
+	// 经 Root 的加密写（非加密卷 = 普通写）+ tmp→rename 原子替换（`AtomicRename` 处理
+	// Windows「目标已存在」语义）。
+	tmpRel := rel + ".tmp"
+	w, werr := root.OpenFileEncrypted(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if werr != nil {
+		return werr
 	}
-	return os.Rename(tmp, p)
+	if _, cerr := w.Write(data); cerr != nil {
+		_ = w.Close()
+		_ = root.Remove(tmpRel)
+		return cerr
+	}
+	if cerr := w.Close(); cerr != nil {
+		_ = root.Remove(tmpRel)
+		return cerr
+	}
+	if rerr := atomicRenameRoot(root, tmpRel, rel); rerr != nil {
+		_ = root.Remove(tmpRel)
+		return rerr
+	}
+	return nil
 }
 
 // loadIndexSnapshot 载入 owner 索引快照。缺失/损坏 → (nil, false)（调用方全量重建）。
 func loadIndexSnapshot(t *storage.Tenant, owner string) (map[string]*indexEntry, bool) {
-	if t == nil {
+	if t == nil || t.Root() == nil {
 		return nil, false
 	}
-	p := indexSnapshotPath(t, owner)
-	if p == "" {
-		return nil, false
-	}
-	data, err := os.ReadFile(p)
+	rc, err := t.Root().OpenDecrypted(indexSnapshotRel(owner))
 	if err != nil {
+		return nil, false // 缺失/不可读/（加密卷上的）历史明文快照 → 全量重建
+	}
+	data, rerr := io.ReadAll(io.LimitReader(rc, maxIndexSnapshotBytes+1))
+	_ = rc.Close()
+	if rerr != nil || int64(len(data)) > maxIndexSnapshotBytes {
 		return nil, false
 	}
 	var f indexSnapshotFile
