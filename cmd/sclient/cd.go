@@ -34,21 +34,45 @@ func NewCmdCd(st *state.State, ios cli.IOStreams) *cobra.Command {
 				return
 			}
 			path := args[0]
+			// 卷 URI（`<卷名>:/<路径>`；`<卷名>:` = 卷根）：切换工作目录**并切到该卷**。
+			// URI 里的路径是**该卷根起算的绝对路径**（不叠加原工作目录）。
+			if vol, inner, ok := splitVolumeURI(path); ok {
+				st.CurrentVolume = vol
+				st.CurrentDir = ""
+				// URI 路径已含前导斜杠（卷根绝对）⇒ 状态内目录不带前导斜杠（既有约定）。
+				inner = strings.TrimPrefix(inner, "/")
+				switch {
+				case inner == "" || inner == ".":
+				case cdApplySpecialPath(st, inner):
+					// `..`/`.` 已按卷内语义处理（卷根下 `..` = 原地）
+				default:
+					cdApplyNormalPath(st, ios, inner)
+				}
+				saveCurrentVolumeValue(st.CurrentVolume)
+				saveCurrentDirValue(st.CurrentDir)
+				return
+			}
+			// 前导 `/` = **本地卷**根（用户口径 2026-10-13）：显式离开当前卷 + 从根起算。
+			if strings.HasPrefix(path, "/") {
+				st.CurrentVolume = ""
+				st.CurrentDir = ""
+				saveCurrentVolumeValue("")
+				// 状态内目录**不带**前导斜杠（与既有约定一致）：去掉后按「从根起算」拼接。
+				path = strings.TrimPrefix(path, "/")
+			}
 			if cdApplySpecialPath(st, path) {
+				saveCurrentVolumeValue(st.CurrentVolume)
 				return
 			}
 			cdApplyNormalPath(st, ios, path)
+			saveCurrentVolumeValue(st.CurrentVolume)
 		},
 	}
 }
 
-// printCurrentDirPath 打印当前目录（空表示根，带前导 /）。
+// printCurrentDirPath 打印当前工作目录（`<卷名>:/<目录>`；本地卷省略卷名 ⇒ `/目录`）。
 func printCurrentDirPath(st *state.State, ios cli.IOStreams) {
-	if st.CurrentDir == "" {
-		ios.WriteOutLine("/")
-	} else {
-		ios.WriteOutLine("/%s", st.CurrentDir)
-	}
+	ios.WriteOutLine("%s", st.Location())
 }
 
 // cdApplySpecialPath 处理 cd 的特殊路径（/、.、..）；返回 true 表示已处理（调用方直接返回）。
@@ -99,13 +123,9 @@ func cdApplyNormalPath(st *state.State, ios cli.IOStreams, path string) {
 func NewCmdPwd(st *state.State, ios cli.IOStreams) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pwd",
-		Short: "打印当前目录",
+		Short: "打印当前目录（含所在卷：`<卷名>:/<目录>`）",
 		Run: func(cmd *cobra.Command, args []string) {
-			if st.CurrentDir == "" {
-				ios.WriteOutLine("/")
-			} else {
-				ios.WriteOutLine("/%s", st.CurrentDir)
-			}
+			ios.WriteOutLine("%s", st.Location())
 		},
 	}
 }
@@ -118,6 +138,10 @@ func NewCmdMkdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 		Long:  "在服务端上传目录下创建指定子目录。路径相对当前目录 (cd)，支持绝对路径 (/开头)。",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷上下文（URI / 当前工作目录所在卷 ⇒ --volume；用户口径 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)
@@ -147,6 +171,10 @@ func NewCmdRmdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 		Long:  "删除服务端上传目录下的指定目录（含所有内容）。路径相对当前目录。\n使用 --force 跳过确认提示。",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷上下文（URI / 当前工作目录所在卷 ⇒ --volume；用户口径 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)
@@ -190,6 +218,7 @@ func NewCmdRmdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 
 const cacheDirName = "sproxy"
 const cacheFile = "current_dir"
+const cacheFileVolume = "current_volume"
 
 // saveCurrentDirValue 将指定目录持久化到 XDG 缓存目录。
 func saveCurrentDirValue(dir string) {
@@ -199,6 +228,29 @@ func saveCurrentDirValue(dir string) {
 	}
 	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
 	_ = os.WriteFile(cachePath, []byte(dir), 0644)
+}
+
+// saveCurrentVolumeValue 持久化当前工作目录所在卷（空串也写：显式回到本地卷要覆盖旧值）。
+func saveCurrentVolumeValue(vol string) {
+	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFileVolume))
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+	_ = os.WriteFile(cachePath, []byte(vol), 0644)
+}
+
+// loadCurrentVolume 从 XDG 缓存目录加载当前工作目录所在卷（无缓存 = 本地卷）。
+func loadCurrentVolume() string {
+	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFileVolume))
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // loadCurrentDir 从 XDG 缓存目录加载当前目录。

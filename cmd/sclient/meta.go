@@ -21,7 +21,7 @@ func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
-			if err := applyVolumeURIs(cmd, args); err != nil {
+			if err := applyVolumeContext(cmd, st, args); err != nil {
 				return err
 			}
 			svc, err := factory.NewClient(cmd)
@@ -60,7 +60,7 @@ func NewCmdMetaVersionList(factory clientfactory.Factory, ios cli.IOStreams, st 
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
-			if err := applyVolumeURIs(cmd, args); err != nil {
+			if err := applyVolumeContext(cmd, st, args); err != nil {
 				return err
 			}
 			svc, err := factory.NewClient(cmd)
@@ -89,7 +89,7 @@ func NewCmdMetaVersionRestore(factory clientfactory.Factory, ios cli.IOStreams, 
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
-			if err := applyVolumeURIs(cmd, args); err != nil {
+			if err := applyVolumeContext(cmd, st, args); err != nil {
 				return err
 			}
 			svc, err := factory.NewClient(cmd)
@@ -120,7 +120,7 @@ func NewCmdMetaVersionDelete(factory clientfactory.Factory, ios cli.IOStreams, s
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
-			if err := applyVolumeURIs(cmd, args); err != nil {
+			if err := applyVolumeContext(cmd, st, args); err != nil {
 				return err
 			}
 			svc, err := factory.NewClient(cmd)

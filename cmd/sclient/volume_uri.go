@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -20,7 +21,11 @@ import (
 // 与 URL 的歧义按语法消除：本形式要求 `:/`（冒号后紧跟**单个**斜杠），故 `https://host/x`
 // （冒号后两个斜杠）与 Windows 盘符 `C:\x`（冒号后无反斜杠/斜杠）都不会被误判为卷 URI。
 
-// splitVolumeURI 解析卷 URI 前缀。返回 (卷名, 卷内相对路径, true)；无前缀/不合法 → ("", arg, false)。
+// splitVolumeURI 解析卷 URI 前缀。返回 (卷名, **卷根起算的绝对路径**, true)；无前缀/不合法 → ("", arg, false)。
+//
+// 返回的路径**保留前导斜杠**：卷 URI 里的路径是「该卷根起算的绝对路径」（用户口径
+// 2026-10-13），交给既有 ResolveRemotePath 时**绕过当前工作目录**；否则 `list vault:/`
+// 会被当成「当前目录相对」而不是卷根（实测踩过）。
 func splitVolumeURI(arg string) (vol, path string, ok bool) {
 	idx := strings.Index(arg, ":")
 	if idx <= 0 {
@@ -32,13 +37,13 @@ func splitVolumeURI(arg string) (vol, path string, ok bool) {
 	}
 	switch {
 	case rest == "", rest == "/":
-		return vol, "", true // `<卷名>:` / `<卷名>:/` = 卷根
+		return vol, "/", true // `<卷名>:` / `<卷名>:/` = 卷根
 	case strings.HasPrefix(rest, "//"):
 		return "", arg, false // URL（scheme://…）不是卷 URI
 	case !strings.HasPrefix(rest, "/"):
 		return "", arg, false // 必须是 `:/`（避免误判 `a:b` / `C:\x`）
 	}
-	return vol, strings.TrimPrefix(rest, "/"), true
+	return vol, rest, true
 }
 
 // validVolumeName 校验卷名（与存储层命名约束一致的保守子集：非空、无空白/分隔符/冒号/通配符）。
@@ -47,6 +52,43 @@ func validVolumeName(name string) bool {
 		return false
 	}
 	return !strings.ContainsAny(name, `/\:*?"<>|`+" \t")
+}
+
+// applyVolumeContext 归一本次调用的卷上下文（顺序即优先级）：
+//  1. 位置参数里的**卷 URI**（`<卷名>:/<路径>`）；
+//  2. 显式 `--volume`（已在 flag 里，`setVolumeFlag` 会做冲突校验）；
+//  3. **当前工作目录所在卷**（`cd <卷名>:/…` 设定，见 state.CurrentVolume）——即「所有操作默认
+//     只对当前工作目录所在卷处理」；
+//  4. 皆空 = auto（服务端按 ACL/默认卷判定，行为不变）。
+//
+// 之所以统一在这里做：命令体只消费 `--volume` flag（clientfactory 读它），本函数是**唯一**把
+// URI/工作目录翻译成 flag 的地方（协议零改动：线上仍是 `?volume=`）。
+func applyVolumeContext(cmd *cobra.Command, st *state.State, args []string) error {
+	if err := applyVolumeURIs(cmd, args); err != nil {
+		return err
+	}
+	return applyStateVolume(cmd, st)
+}
+
+// applyStateVolume 在未显式指定卷时，用当前工作目录所在卷填充 `--volume`（显式 flag 优先）。
+func applyStateVolume(cmd *cobra.Command, st *state.State) error {
+	if st == nil || st.CurrentVolume == "" {
+		return nil
+	}
+	f := cmd.Flags().Lookup("volume")
+	if f == nil || f.Changed {
+		return nil
+	}
+	return cmd.Flags().Set("volume", st.CurrentVolume)
+}
+
+// applyMvVolumeContext 是 mv 的卷上下文归一：两侧路径的卷 URI 优先（目标不同卷 ⇒ `--to-volume`），
+// 随后未指定时回落当前工作目录所在卷（同卷改名语义）。
+func applyMvVolumeContext(cmd *cobra.Command, st *state.State, args []string) error {
+	if err := applyMvVolumeURIs(cmd, args); err != nil {
+		return err
+	}
+	return applyStateVolume(cmd, st)
 }
 
 // applyVolumeURIs 就地剥离 args 中的卷 URI 前缀，并把卷名写入 `--volume`（同一命令内多个位置

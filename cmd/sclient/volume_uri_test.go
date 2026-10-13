@@ -16,6 +16,7 @@ package main
 import (
 	"testing"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -36,9 +37,9 @@ func TestSplitVolumeURI(t *testing.T) {
 		ok      bool
 		comment string
 	}{
-		{"vault:/a/b/c", "vault", "a/b/c", true, "标准形式"},
-		{"vault:/", "vault", "", true, "卷根（带斜杠）"},
-		{"vault:", "vault", "", true, "卷根（不带斜杠）"},
+		{"vault:/a/b/c", "vault", "/a/b/c", true, "标准形式（卷根绝对）"},
+		{"vault:/", "vault", "/", true, "卷根（带斜杠）"},
+		{"vault:", "vault", "/", true, "卷根（不带斜杠）"},
 		{"vault:dir/f.txt", "", "vault:dir/f.txt", false, "缺 `:/`（不得误判）"},
 		{"https://example.com/a", "", "https://example.com/a", false, "URL 不得误判"},
 		{"C:\\Users\\x", "", "C:\\Users\\x", false, "Windows 盘符不得误判"},
@@ -62,8 +63,8 @@ func TestApplyVolumeURIs_SetsFlagAndStripsPrefix(t *testing.T) {
 	if err := applyVolumeURIs(cmd, args); err != nil {
 		t.Fatalf("applyVolumeURIs: %v", err)
 	}
-	if args[0] != "docs/top.txt" {
-		t.Fatalf("前缀未剥离: %q", args[0])
+	if args[0] != "/docs/top.txt" {
+		t.Fatalf("URI 路径应为卷根绝对（保留前导斜杠）: %q", args[0])
 	}
 	if got, _ := cmd.Flags().GetString("volume"); got != "vault" {
 		t.Fatalf("--volume=%q want vault", got)
@@ -97,8 +98,8 @@ func TestApplyMvVolumeURIs_CrossVolumeSetsToVolume(t *testing.T) {
 	if err := applyMvVolumeURIs(cmd, args); err != nil {
 		t.Fatalf("applyMvVolumeURIs: %v", err)
 	}
-	if args[0] != "a.txt" || args[1] != "b.txt" {
-		t.Fatalf("前缀未剥离: %v", args)
+	if args[0] != "/a.txt" || args[1] != "/b.txt" {
+		t.Fatalf("URI 路径应为卷根绝对: %v", args)
 	}
 	if v, _ := cmd.Flags().GetString("volume"); v != "vault" {
 		t.Fatalf("--volume=%q want vault", v)
@@ -114,5 +115,70 @@ func TestApplyMvVolumeURIs_CrossVolumeSetsToVolume(t *testing.T) {
 	}
 	if tv, _ := cmd2.Flags().GetString(flagToVolume); tv != "" {
 		t.Fatalf("同卷不应设置 --to-volume, got %q", tv)
+	}
+}
+
+// ---- 工作目录所在卷回落（用户口径 2026-10-13）----
+
+func TestApplyVolumeContext_StateVolumeFillsFlag(t *testing.T) {
+	t.Parallel()
+	cmd := uriTestCmd()
+	st := &state.State{CurrentVolume: "vault", CurrentDir: "docs"}
+	if err := applyVolumeContext(cmd, st, nil); err != nil {
+		t.Fatalf("applyVolumeContext: %v", err)
+	}
+	if got, _ := cmd.Flags().GetString("volume"); got != "vault" {
+		t.Fatalf("--volume=%q want vault（当前工作目录所在卷）", got)
+	}
+}
+
+func TestApplyVolumeContext_Precedence(t *testing.T) {
+	t.Parallel()
+	st := &state.State{CurrentVolume: "cwd-vol"}
+	// 显式 --volume 优先于工作目录卷。
+	cmd := uriTestCmd()
+	if err := cmd.Flags().Set("volume", "explicit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyVolumeContext(cmd, st, nil); err != nil {
+		t.Fatalf("applyVolumeContext: %v", err)
+	}
+	if got, _ := cmd.Flags().GetString("volume"); got != "explicit" {
+		t.Fatalf("显式 --volume 应优先, got %q", got)
+	}
+	// 位置参数卷 URI 优先于工作目录卷（且位置参数会剥离前缀）。
+	cmd2 := uriTestCmd()
+	args := []string{"uri-vol:/a.txt"}
+	if err := applyVolumeContext(cmd2, st, args); err != nil {
+		t.Fatalf("applyVolumeContext: %v", err)
+	}
+	if got, _ := cmd2.Flags().GetString("volume"); got != "uri-vol" {
+		t.Fatalf("URI 应优先于工作目录卷, got %q", got)
+	}
+	if args[0] != "/a.txt" {
+		t.Fatalf("URI 路径应为卷根绝对（保留前导斜杠）: %q", args[0])
+	}
+}
+
+func TestApplyMvVolumeContext_StateVolumeAppliesToBothSides(t *testing.T) {
+	t.Parallel()
+	cmd := uriTestCmd()
+	st := &state.State{CurrentVolume: "vault", CurrentDir: "docs"}
+	if err := applyMvVolumeContext(cmd, st, []string{"a.txt", "b.txt"}); err != nil {
+		t.Fatalf("applyMvVolumeContext: %v", err)
+	}
+	if got, _ := cmd.Flags().GetString("volume"); got != "vault" {
+		t.Fatalf("--volume=%q want vault", got)
+	}
+	// 目标显式带不同卷 ⇒ 跨卷迁移（--to-volume），源仍取 URI/工作目录卷。
+	cmd2 := uriTestCmd()
+	if err := applyMvVolumeContext(cmd2, st, []string{"a.txt", "other:/b.txt"}); err != nil {
+		t.Fatalf("applyMvVolumeContext: %v", err)
+	}
+	if v, _ := cmd2.Flags().GetString("volume"); v != "vault" {
+		t.Fatalf("源卷应取工作目录卷, got %q", v)
+	}
+	if tv, _ := cmd2.Flags().GetString(flagToVolume); tv != "other" {
+		t.Fatalf("--to-volume=%q want other", tv)
 	}
 }

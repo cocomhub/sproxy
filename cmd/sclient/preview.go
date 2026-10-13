@@ -156,6 +156,10 @@ func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
 		下载到临时目录并使用系统图片查看器打开。`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷上下文（URI / 当前工作目录所在卷 ⇒ --volume；用户口径 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			filename, err := st.ResolveRemotePathOrErr(args[0])
 			if err != nil {
 				return err

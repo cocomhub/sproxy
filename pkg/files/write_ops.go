@@ -629,13 +629,22 @@ type MakeDirResult struct {
 // MakeDir 在 owner 视图内**首个卷**（默认卷优先）创建目录树。
 //
 // 错误语义（*HTTPError）：400 = dirname 为空 / 路径非法 / 租户不可用；500 = 创建失败。
-func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
+func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (MakeDirResult, error) {
 	if dirname == "" {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "dirname 不能为空"}
 	}
 	remotePath, err := pathguard.ValidateFilePath(dirname)
 	if err != nil {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录名: " + err.Error()}
+	}
+	// **显式卷**（`?volume=` / CLI 卷 URI / 工作目录所在卷）：
+	//   - 外部卷（加密/远端）：目录必须建在**该卷**里（经接缝；此前静默落到本地卷）；
+	//   - 本地卷：经 volumeTenant 定位到该卷租户（此前恒落 primary 视图卷——与 upload 的
+	//     `--volume` 语义不一致）。
+	if volName != "" {
+		if res, handled, mkErr := s.makeDirExplicitVolume(ctx, owner, remotePath, remotePath, volName); handled {
+			return res, mkErr
+		}
 	}
 	// 路径映射与卷无关（user/<path> 相对各卷租户根），用默认租户做纯路径校验；
 	// 实际落盘目录选 owner 视图内首个卷（默认卷优先——默认卷开放时即默认租户，零回归；
@@ -650,6 +659,9 @@ func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
 	target := s.primaryViewTenant(owner)
+	if volName != "" {
+		target = s.rt.volumeTenant(volName, owner)
+	}
 	if target == nil || target.Root() == nil {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
@@ -671,6 +683,35 @@ func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
 	// 文件变更事件：mkdir 成功。
 	s.rt.publishFileEvent(EventMkdir, owner, rel, 0)
 	return MakeDirResult{RemotePath: remotePath}, nil
+}
+
+// makeDirExplicitVolume 处理「显式指定卷」的 mkdir：外部卷经接缝创建；本地卷返回
+// handled=false 让调用方走本地流程（本函数只在**外部卷**上终结）。
+//
+// 返回 (res, true, err) = 已由外部卷分支裁决（成功或失败）；(_, false, nil) = 非外部卷/未授权。
+func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, _ string, volName string) (MakeDirResult, bool, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return MakeDirResult{}, false, nil // 未装配接缝：零回归（回落本地流程）
+	}
+	vs := s.rt.volSet()
+	if vs != nil {
+		if v, ok := vs.ByName(volName); !ok || !v.Authorize(owner) {
+			return MakeDirResult{}, true, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		} else if vs.Root(volName) != nil {
+			return MakeDirResult{}, false, nil // 本地卷 → 交本地流程
+		}
+	}
+	created, err := ops.ExternalMkdir(ctx, owner, volName, remotePath)
+	if err != nil {
+		return MakeDirResult{}, true, err
+	}
+	if !created {
+		return MakeDirResult{}, false, nil
+	}
+	s.rt.logger().Info("目录已创建（外部卷）", "dir", remotePath, "volume", volName)
+	s.rt.publishFileEvent(EventMkdir, owner, remotePath, 0)
+	return MakeDirResult{RemotePath: remotePath}, true, nil
 }
 
 // RemoveDirResult 是删目录的领域结果。

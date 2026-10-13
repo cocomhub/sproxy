@@ -250,11 +250,17 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 
 ## 9. 已知限制
 
-- **加密卷文件面已接线，但两条边界要知道**：① 未指定卷的 `list` 只列**本地卷**（搜索索引不含外部卷）——浏览加密卷请显式指定卷：
-  `sclient list vault:/`（**卷 URI 寻址**，等价 `--volume vault`；见 `docs/cli.md`）；② 文件**改名**（basename 变化）= **只重写 meta blob**（2026-10-13 收口）：文件名只存在于加密
-  meta 内（`Original.Name`，meta 名派生自密文内容 ⇒ 改名后换名重写），**分块内容零改动、不重加密**
-  （分块名 = 密文内容哈希，与逻辑名无关）；**先写新 meta 成功再删旧 meta** ⇒ 崩溃窗口最多留两份 meta
-  （不丢数据）。同 basename 换目录仍走「物理搬移分块」（容器变化，内容同样零改动）。文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
+- **加密卷文件面已接线，但有四条边界要知道**：
+  ① 未指定卷的 `list` 只列**本地卷**（搜索索引不含外部卷）——浏览加密卷请显式指定卷
+  （`sclient list vault:/`，或 `sclient cd vault:/` 后直接 `list`；见 `docs/cli.md`「卷感知工作目录」）；
+  ② 文件**改名**（basename 变化）= **只重写 meta blob**（文件名只存在于加密 meta 内；分块名 = 密文
+  内容哈希 ⇒ 内容零改动、不重加密；先写新 meta 成功再删旧 meta ⇒ 崩溃只留双份，不丢数据）；
+  ③ **跨卷移动/复制**（`mv … --to-volume` / `volume copy|move`）**未覆盖外部卷**（服务端管线只处理
+  本地卷；涉及加密卷返回 `400 无效的文件路径`）——workaround：`download` + `upload` + `delete`；
+  ④ 加密卷上**删除目录**（`rmdir`）未接线（`syncpkg.FS` 无目录级递归删）⇒ 显式指定外部卷时
+  fail-closed 报「暂不支持删除目录」（**绝不**静默删本地同名目录）。
+  （mkdir / 列目录 / 上传 / 下载 / 删文件 / 改名 / 明文 checksum 均已可用。）
+  文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
 - **卷声明顺序无关（2026-10-13 实测修正）**：`setupSecretBackends` 在**全卷集装配完成之后**补装
   secretdata（`MarkDeferred`），故 `type: secretdata` 卷可以声明在 secrets 卷之前——e2e
   `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets` 钉住（此前文档声称「必须先装配好」，已不成立）。

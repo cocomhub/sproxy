@@ -1,5 +1,5 @@
 cmd/sclient/batch_test.go	2
-cmd/sclient/cd_test.go	5
+cmd/sclient/cd_test.go	8
 cmd/sclient/cloud_download_group_test.go	17
 cmd/sclient/cloud_download_test.go	31
 cmd/sclient/cmd_rune_test.go	47

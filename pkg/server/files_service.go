@@ -366,6 +366,36 @@ func (o externalVolumeOps) ExternalList(ctx context.Context, owner, volName, sub
 	return out, true, nil
 }
 
+// ExternalMkdir 实现 files.ExternalVolumeOps：经**同一可信链**在外部卷内创建目录
+// （用户可见相对路径 → 卷内键经 ResolveUserLocation 翻译）。幂等：目录已存在由该卷
+// `MakeDir` 语义决定（secretdata 的 ensureContainer 幂等）；封印 → 409。
+func (o externalVolumeOps) ExternalMkdir(ctx context.Context, owner, volName, dir string) (bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return false, nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return false, nil
+	}
+	loc, kerr := v.ResolveUserLocation(owner, dir)
+	if kerr != nil {
+		return true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	if merr := fsys.MakeDir(ctx, loc.FSPath()); merr != nil {
+		if errors.Is(merr, storage.ErrSealed) {
+			return true, &files.HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接创建目录"}
+		}
+		h.logger.ErrorContext(ctx, "外部卷创建目录失败", "volume", volName, "dir", dir, "error", merr.Error())
+		return true, &files.HTTPError{Status: http.StatusInternalServerError, Message: "创建目录失败"}
+	}
+	return true, nil
+}
+
 // ExternalRename 实现 files.ExternalVolumeOps：经**同一可信链**在外部卷内重命名
 // （用户可见相对路径 → 卷内键经 ResolveUserLocation 翻译）。fail-closed：源不存在 → 未命中
 // （调用方回落 404）；目标已存在 → 409（不静默覆盖）；checksum 不一致 → 409；封印 → 409。

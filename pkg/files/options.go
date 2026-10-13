@@ -76,6 +76,15 @@ type ExternalVolumeOps interface {
 	// 此前**静默返回空列表**（加密卷在 CLI 上「看起来是空的」）。
 	ExternalList(ctx context.Context, owner, volName, subdir string) (entries []FileInfo, supported bool, err error)
 
+	// ExternalMkdir 在 volName（外部卷）内创建目录（用户可见相对路径；祖先链由该卷自建）。
+	//
+	// 返回 (true, nil) = 已在该外部卷创建（幂等：目录已存在视为成功）；
+	// (false, nil) = 卷未装配 / 非外部卷 / owner 未授权（调用方回落本地流程）。
+	//
+	// 为什么必须走该卷：此前 `mkdir --volume <加密卷>` 静默落到**本地卷**（用户看到
+	// 「目录已创建」，卷上却找不到）；目录必须建在目标卷自己的键空间里。
+	ExternalMkdir(ctx context.Context, owner, volName, dir string) (bool, error)
+
 	// ExternalRename 在 volName（外部卷）内把 owner 的 fromRemote 重命名为 toRemote
 	// （两者均为用户可见相对路径；**同卷内**语义——跨卷移动由既有 move API 承担）。
 	//

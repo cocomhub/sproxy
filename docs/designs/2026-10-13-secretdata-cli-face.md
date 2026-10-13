@@ -65,3 +65,36 @@
 - ~~文件改名 = O(内容) 重写~~ **已收口（2026-10-13）**：改为「只重写 meta」（O(meta)，内容零
   改动），见 §2 第 4 条。
 - secrets 卷外部 target / secretdata 外部 target（外部卷作 target）仍为预留片（fail-closed）。
+
+## 3.2 卷感知工作目录 + mkdir 接线（2026-10-13 追加，用户口径）
+
+**用户口径**：① 工作目录支持卷 URI（`cd A:/path`）；② 所有操作（list/pwd/相对路径）默认只作用于
+**当前工作目录所在卷**；③ 需操作别处时用 URI；④ 以 `/` 开头 = **本地卷**根，其它卷必须写 `A:/`。
+
+**落地**：
+- `state.State` 增 `CurrentVolume`（**独立缓存文件** `current_volume`，旧缓存缺该文件 = 本地卷，
+  零兼容负担）+ `Location()`（`A:/dir` 或 `/dir`）；`rootPreRunE` 载入。
+- `cd`：`<卷名>:/<路径>` 切卷（路径 = 该卷根绝对）；`/…` 显式回本地卷并从根起算；相对路径/`..` 保持卷。
+  `pwd` 打印 `<卷名>:/<目录>`。
+- 命令侧统一 `applyVolumeContext(cmd, st, args)`：**位置参数卷 URI > `--volume` > 工作目录所在卷 >
+  auto**（冲突报错）；`applyMvVolumeContext` 对 `mv` 两端做同样归一（目标不同卷 ⇒ `--to-volume`）。
+  `upload` 只应用工作目录卷（其位置参数是本地文件）；`copy/move`（`volume` 子命令）同样接入。
+- **URI 路径语义**：`splitVolumeURI` 返回**保留前导 `/`** 的绝对路径 ⇒ 交给既有 `ResolveRemotePath`
+  时绕过 `cd` 前缀（否则 `list vault:/` 会被当成「当前目录相对」，实测踩过）。
+- **顺带修掉的真 bug（实测暴露）**：
+  1. `pkg/client` 的 `Mkdir`/`Rmdir` 手拼 URL **漏带 `volume` 查询参数** ⇒ `--volume`/URI 静默失效
+     （mkdir 落到本地卷，加密卷上「目录已创建」却找不到）；已补 + 单测钉住。
+  2. `files.Service.MakeDir` 无卷参数 ⇒ 显式卷被忽略（恒落 primary 视图卷）；新增 `volName` +
+     `ExternalVolumeOps.ExternalMkdir` 接缝（外部卷目录建在**该卷**）；显式本地卷也按 `volumeTenant` 定位。
+  3. `rmdir` 显式外部卷 ⇒ **fail-closed 501**（此前会静默删本地同名目录——危险方向）。
+  4. `list --json` 空结果此前输出**空串**（JSONFormatter.Println 被忽略）⇒ 非法 JSON；改为输出
+     `{"files":[],"total":0}`。
+
+**测试**：`cmd/sclient`（cd 卷 URI/持久化/`/` 回本地卷/相对保持卷、`pwd`、URI 解析与优先级、
+`ApplyMv*` 跨卷）、`pkg/client`（mkdir/rmdir 携带卷参数）、e2e
+`TestE2E_CLI_VolumeCwd_DefaultsToCurrentVolume`（cd 到加密卷 → 相对 upload/list/mkdir/download 全在
+该卷 → `cd /` 回本地卷 → rmdir 加密卷 fail-closed）。**变异命中**：URI 去掉 URL 排除；URI 去掉冲突报错；
+mkdir 客户端去掉卷参数；同容器改名早退去掉。
+
+**仍开**：跨卷移动/复制对**外部/加密卷**未接线（服务端 `400 无效的文件路径`；需源读 + 目标写 + 源删，
+经统一写内核与外部卷接缝）；加密卷 `rmdir` 未接线（`syncpkg.FS` 缺目录级递归删）。
