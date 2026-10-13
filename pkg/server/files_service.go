@@ -328,6 +328,123 @@ func (o externalVolumeOps) ExternalDelete(ctx context.Context, owner, volName, r
 	return true, nil
 }
 
+// ExternalList 实现 files.ExternalVolumeOps：经**同一可信链**（`Guard(Wrap(be.FS()))`）
+// 列举外部卷目录（用户可见相对路径经 `ResolveUserLocation` 翻译为卷内键——共享卷自动加
+// owner 前缀隔离）。语义：非外部卷/未授权/未装配 → (nil,false,nil)（调用方零回归）；
+// 目录不存在 → 空列表；远端/IO 失败 → 500。
+func (o externalVolumeOps) ExternalList(ctx context.Context, owner, volName, subdir string) ([]files.FileInfo, bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return nil, false, nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return nil, false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return nil, false, nil // 未授权/未知 → 不命中（404，不泄卷存在性）
+	}
+	loc, kerr := v.ResolveUserLocation(owner, subdir)
+	if kerr != nil {
+		return nil, true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	entries, lerr := fsys.ListDir(ctx, loc.FSPath())
+	if lerr != nil {
+		if errors.Is(lerr, os.ErrNotExist) {
+			return nil, true, nil // 目录不存在 = 空列表
+		}
+		h.logger.Warn("外部卷列举失败", "volume", volName, "subdir", subdir, "error", lerr.Error())
+		return nil, true, &files.HTTPError{Status: http.StatusInternalServerError, Message: "列举失败"}
+	}
+	out := make([]files.FileInfo, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, files.FileInfo{
+			Name: e.Name, IsDir: e.IsDir, Size: e.Size, ModTime: e.MTime, Volume: volName, // ModTime = UnixNano
+		})
+	}
+	return out, true, nil
+}
+
+// ExternalRename 实现 files.ExternalVolumeOps：经**同一可信链**在外部卷内重命名
+// （用户可见相对路径 → 卷内键经 ResolveUserLocation 翻译）。fail-closed：源不存在 → 未命中
+// （调用方回落 404）；目标已存在 → 409（不静默覆盖）；checksum 不一致 → 409；封印 → 409。
+func (o externalVolumeOps) ExternalRename(ctx context.Context, owner, volName, fromRemote, toRemote, expectedChecksum string) (bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return false, nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return false, nil
+	}
+	srcLoc, srcErr := v.ResolveUserLocation(owner, fromRemote)
+	dstLoc, dstErr := v.ResolveUserLocation(owner, toRemote)
+	if srcErr != nil || dstErr != nil {
+		return false, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	srcKey, dstKey := srcLoc.FSPath(), dstLoc.FSPath()
+	if e, serr := fsys.Stat(ctx, srcKey); serr != nil || e == nil || e.IsDir {
+		return false, nil // 源不存在/不可 stat → 未命中（404 由调用方裁决）
+	}
+	if e, derr := fsys.Stat(ctx, dstKey); derr == nil && e != nil {
+		return true, &files.HTTPError{Status: http.StatusConflict, Message: "目标路径已存在"}
+	}
+	if cerr := crossCheckExternalChecksum(ctx, fsys, srcKey, expectedChecksum); cerr != nil {
+		return true, cerr
+	}
+	return renameExternalChecked(ctx, h, fsys, volName, fromRemote, toRemote, srcKey, dstKey)
+}
+
+// renameExternalChecked 执行一次改名：原地改名优先；底层**明确不支持**（契约哨兵
+// `syncpkg.ErrUnsupported`，如 secretdata 文件改 basename）→ 该卷设计口径的等价路径
+// 「读源 → 写目标 → 删源」；封印 → 409；其余 → 500（如实失败，不静默半态）。
+func renameExternalChecked(ctx context.Context, h *Handlers, fsys syncpkg.FS, volName, fromRemote, toRemote, srcKey, dstKey string) (bool, error) {
+	rerr := fsys.Rename(ctx, srcKey, dstKey)
+	switch {
+	case rerr == nil:
+		return true, nil
+	case errors.Is(rerr, storage.ErrSealed):
+		return true, &files.HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接重命名"}
+	case errors.Is(rerr, syncpkg.ErrUnsupported):
+		if cerr := copyThenDeleteExternal(ctx, fsys, srcKey, dstKey); cerr != nil {
+			h.logger.ErrorContext(ctx, "外部卷重命名（拷贝+删源）失败", "volume", volName,
+				"from", fromRemote, "to", toRemote, "error", cerr.Error())
+			return true, &files.HTTPError{Status: http.StatusInternalServerError, Message: "重命名失败"}
+		}
+		return true, nil
+	default:
+		h.logger.ErrorContext(ctx, "外部卷重命名失败", "volume", volName,
+			"from", fromRemote, "to", toRemote, "error", rerr.Error())
+		return true, &files.HTTPError{Status: http.StatusInternalServerError, Message: "重命名失败"}
+	}
+}
+
+// copyThenDeleteExternal 以「读源 → 写目标 → 删源」实现底层不支持原地改名的外部卷文件改名
+// （secretdata 的文件 basename 锚定于加密 meta ⇒ `Rename` 返回 `syncpkg.ErrUnsupported`）。
+// 流式拷贝（内存有界，经同一可信链 ⇒ 目标落 sidecar/校验语义与普通写一致）；**写成功后才删源**
+// ⇒ 崩溃窗口只会留下双份（fail-safe，不丢数据）。目标已存在由调用方前置 Stat 拒绝（不覆盖）。
+func copyThenDeleteExternal(ctx context.Context, fsys syncpkg.FS, srcKey, dstKey string) error {
+	e, serr := fsys.Stat(ctx, srcKey)
+	if serr != nil {
+		return serr
+	}
+	rc, oerr := fsys.OpenRead(ctx, srcKey)
+	if oerr != nil {
+		return oerr
+	}
+	werr := fsys.WriteFile(ctx, dstKey, rc, e.Size, e.MTime)
+	_ = rc.Close()
+	if werr != nil {
+		return werr
+	}
+	return fsys.Delete(ctx, srcKey)
+}
+
 // crossCheckExternalChecksum 用 sidecar **记录**的整文件 SHA-256 交叉比对客户端声明的
 // checksum（不重算——远端整文件回读不可接受）。`expectedChecksum` 为空或 sidecar 缺失/不可读
 // （无记录值可比）→ 跳过该判据，删除继续；不一致 → `*HTTPError{409}`。

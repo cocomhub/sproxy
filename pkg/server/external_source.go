@@ -93,6 +93,24 @@ func (s *externalDownloadSource) Open(ctx context.Context) (files.SeekReadCloser
 	return seeker, nil
 }
 
+// Checksum 实现 files.ChecksumSource：经 meta.Provider 取**明文**整文件 SHA-256。
+// secretdata 的 meta 置 `Original.SHA256` = 明文哈希（与客户端收到的解密字节一致）；
+// trusted.Wrap 的 sidecar 记录值同语义。无 meta 能力/读取失败/无记录值 → ok=false
+// （调用方保持旧行为：checksum 空，不伪造）。
+func (s *externalDownloadSource) Checksum(ctx context.Context) (string, bool) {
+	if s.fileMeta == nil {
+		return "", false
+	}
+	fm, err := s.fileMeta(ctx, s.rel)
+	if err != nil || fm == nil || fm.TotalSHA256 == "" {
+		return "", false
+	}
+	return fm.TotalSHA256, true
+}
+
+// _ 编译期断言：外部读取源实现可选 checksum 能力（Stat 据此填 checksum）。
+var _ files.ChecksumSource = (*externalDownloadSource)(nil)
+
 // newExternalSource 构造服务端读取源（从 sync.Entry 元信息填充）。skipVerify=true
 // （trusted_volume.skip_verify）时**不注入** meta 读取器 —— 外部卷下载与本地卷下载、
 // 云转存读回同口径地尊重该开关（P3 对抗评审：此前外部卷下载无效）。

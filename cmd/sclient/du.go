@@ -21,6 +21,10 @@ func NewCmdDu(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 		Short: "查看目录空间占用（递归统计文件数/大小）",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeURIs(cmd, args); err != nil {
+				return err
+			}
 			return duRunE(cmd, factory, ios, st, args)
 		},
 	}
@@ -72,6 +76,10 @@ func NewCmdDF(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 		Short: "查看卷水位与磁盘空间",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeURIs(cmd, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)

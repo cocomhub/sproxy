@@ -25,6 +25,10 @@ func NewCmdDelete(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 			与远端一致后才执行删除，提供额外安全保护。`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeURIs(cmd, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)

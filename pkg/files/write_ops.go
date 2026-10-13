@@ -981,6 +981,12 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 	// （ACL bypass，AD-6）。语义见 resolveRenameHome。
 	homeVol, root, locErr := s.resolveRenameHome(ctx, owner, fromRel, input.ExplicitVol, tnt)
 	if locErr != nil {
+		// **外部卷（加密卷/远端）内重命名**：本地定位不覆盖外部卷（它们没有 *storage.Root）
+		// ⇒ 此前 `mv` 在加密卷上恒 404「源文件不存在」。本地优先、未命中转外部（与删除路径
+		// 同款，避免为每次本地重命名触达远端）。
+		if handled, res, extErr := s.renameExternalVolume(ctx, owner, from, to, input); handled || extErr != nil {
+			return res, extErr
+		}
 		return RenameFileResult{}, locErr
 	}
 
@@ -1015,6 +1021,43 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 		Checksum: input.ExpectedChecksum,
 		Message:  fmt.Sprintf("文件已重命名: %s -> %s", from, to),
 	}, nil
+}
+
+// renameExternalVolume 在**外部卷内**完成重命名（本地定位未命中时调用；同卷语义）。
+// 返回 handled=true 表示已由外部卷分支裁决（成功或失败都算），调用方不再走本地路径；
+// handled=false 表示无外部候选/候选都未命中 → 调用方回落既有 404 语义。
+//
+// 与 deleteExternalVolume 同款：显式 ?volume= 只试该卷；未指定则遍历 owner 可见外部卷，
+// 命中即终结（避免为每次本地重命名触达远端）。
+func (s *Service) renameExternalVolume(ctx context.Context, owner, from, to string, input RenameFileInput) (bool, RenameFileResult, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return false, RenameFileResult{}, nil // 未装配接缝：零回归
+	}
+	vols := s.externalCandidateVolumes(owner, input.ExplicitVol)
+	if len(vols) == 0 {
+		return false, RenameFileResult{}, nil // 非外部卷 / 未授权 → 交本地流程
+	}
+	for _, name := range vols {
+		renamed, rerr := ops.ExternalRename(ctx, owner, name, from, to, input.ExpectedChecksum)
+		if rerr != nil {
+			return true, RenameFileResult{}, rerr
+		}
+		if !renamed {
+			continue
+		}
+		s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to+" 外部卷="+name)
+		s.rt.publishFileEvent(EventRename, owner, to, 0)
+		s.rt.logger().InfoContext(ctx, "外部卷文件已重命名", "volume", name, "from", from, "to", to)
+		return true, RenameFileResult{
+			From: from, To: to, Checksum: input.ExpectedChecksum,
+			Message: fmt.Sprintf("文件已重命名: %s -> %s", from, to),
+		}, nil
+	}
+	if input.ExplicitVol == "" {
+		return false, RenameFileResult{}, nil // 未指定卷且候选都未命中 → 回落本地兜底语义
+	}
+	return true, RenameFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
 }
 
 // validateRenamePaths 校验 from/to 并返回**校验后**的路径（失败以 *HTTPError{400} 表达）。

@@ -64,6 +64,25 @@ type ExternalVolumeOps interface {
 	//
 	// 返回 (false, nil) = 卷未装配 / owner 未授权 / 对象不存在（调用方按 404 处理）。
 	ExternalDelete(ctx context.Context, owner, volName, remotePath, expectedChecksum string) (bool, error)
+
+	// ExternalList 列出 owner 在 volName 的 subdir（用户可见相对路径，"" = 卷根）下的**直接子项**。
+	//
+	// 返回 (entries, true, nil) = 该卷是外部卷且已列举（entries 可为空）；
+	// (nil, false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 不支持列举 —— 调用方按
+	// 「该卷无条目」处理（**与既有行为一致，零回归**：本地卷恒走索引）。
+	// 远端/IO 失败 → (nil, true, err)，由调用方决定响应语义。
+	//
+	// 为什么需要：搜索索引只覆盖本地卷（外部卷没有 *storage.Root）⇒ 显式 `?volume=<外部卷>`
+	// 此前**静默返回空列表**（加密卷在 CLI 上「看起来是空的」）。
+	ExternalList(ctx context.Context, owner, volName, subdir string) (entries []FileInfo, supported bool, err error)
+
+	// ExternalRename 在 volName（外部卷）内把 owner 的 fromRemote 重命名为 toRemote
+	// （两者均为用户可见相对路径；**同卷内**语义——跨卷移动由既有 move API 承担）。
+	//
+	// expectedChecksum 非空 → 与 sidecar/meta **记录**的整文件 SHA-256 交叉比对（**不重算**）；
+	// 不一致 → `*HTTPError{409}`。目标已存在 → `*HTTPError{409}`（不静默覆盖）。
+	// 返回 (false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 源不存在（调用方回落既有语义）。
+	ExternalRename(ctx context.Context, owner, volName, fromRemote, toRemote, expectedChecksum string) (bool, error)
 }
 
 // VolumeRouter 是**多卷能力**（运行时卷集合 + 卷租户 + 读定位 + 写路由）。

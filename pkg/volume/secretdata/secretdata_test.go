@@ -1512,8 +1512,14 @@ func TestRename_FileBasenameChange_Fails(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	writeContent(t, fs, ctx, "a/f1.bin", 100)
-	if err := fs.Rename(ctx, "a/f1.bin", "a/f2.bin"); err == nil {
+	err := fs.Rename(ctx, "a/f1.bin", "a/f2.bin")
+	if err == nil {
 		t.Error("文件改名（basename 变化）应报错（逻辑改名走 delete+write）")
+	}
+	// 契约级哨兵：这不是 IO 失败，而是「底层不支持原地改名」——装配层据此改走
+	// 「读源 → 写目标 → 删源」等价路径（pkg/server ExternalRename 回退）。
+	if !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Errorf("文件改名应返回 syncpkg.ErrUnsupported 哨兵, got %v", err)
 	}
 	// 原文件仍存在（改名失败不落半态）。
 	if _, err := fs.Stat(ctx, "a/f1.bin"); err != nil {

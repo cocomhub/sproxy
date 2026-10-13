@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -89,7 +90,7 @@ type OpenedFile struct {
 //   - `*HTTPError{400}`：owner 不可用 / 派生 user 桶失败 / subdir 非法（同 List 的 subdir 分支）
 //   - `*HTTPError{404}`：`?volume=` 未知或不在 owner 视图（fail-closed，不泄露存在性）
 //   - 其他 error：目录读取失败（仅旧装配路径会走到）
-func (s *Service) List(q ListQuery) (ListResult, error) {
+func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 	owner := normalizeOwner(q.Owner)
 	subdir := strings.TrimPrefix(q.Subdir, "/")
 	empty := ListResult{Files: []FileInfo{}, Offset: q.Offset, Limit: q.Limit}
@@ -121,6 +122,12 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 		volFilter = q.VolName
 	}
 
+	// 外部卷列举（显式 ?volume=）优先：搜索索引只覆盖**本地卷**（外部卷没有 *storage.Root）⇒
+	// 显式指定外部/加密卷时此前**静默返回空列表**（CLI 上「加密卷看起来是空的」）。
+	if res, handled, herr := s.listExternalVolume(ctx, q, owner, subdir, volFilter); handled || herr != nil {
+		return res, herr
+	}
+
 	// 列表走索引：dirRel = rel 去 user/ 前缀（索引 key 空间；"" = 根目录）。
 	dirRel := strings.TrimPrefix(rel, tnt0.UserRoot()+"/")
 	if dirRel == rel {
@@ -140,6 +147,32 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 		Files: paginateEntries(allFiles, q.Offset, q.Limit), Total: len(allFiles),
 		Offset: q.Offset, Limit: q.Limit,
 	}, nil
+}
+
+// listExternalVolume 处理「显式 `?volume=<外部卷>`」的列举（装配层接缝；非外部卷/不支持
+// 列举 → handled=false 落回既有索引语义，零回归）。
+//
+// 为什么不支持时也走索引：本地卷恒走索引（索引是本地卷的权威视图），接缝只负责外部卷。
+func (s *Service) listExternalVolume(ctx context.Context, q ListQuery, owner, subdir, volFilter string) (ListResult, bool, error) {
+	if volFilter == "" {
+		return ListResult{}, false, nil
+	}
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return ListResult{}, false, nil
+	}
+	entries, supported, err := ops.ExternalList(ctx, owner, volFilter, subdir)
+	if err != nil {
+		return ListResult{}, true, err
+	}
+	if !supported {
+		return ListResult{}, false, nil
+	}
+	sortFileEntries(entries, q.SortBy, q.SortOrder)
+	return ListResult{
+		Files: paginateEntries(entries, q.Offset, q.Limit), Total: len(entries),
+		Offset: q.Offset, Limit: q.Limit,
+	}, true, nil
 }
 
 // listFallback 是 List 的实时扫描回退（索引不可用时）：逐卷 ReadDir 聚合，语义与索引化前
@@ -248,12 +281,7 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, error) {
 	// **外部卷读源（2026-10-05）**：dp.Source 非 nil → 经装配层服务端读取源 Stat。
 	if dp.Source != nil {
-		info, serr := dp.Source.Stat(ctx)
-		if serr != nil {
-			s.rt.logger().Error("外部卷 stat 失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", serr.Error())
-			return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
-		}
-		return FileStat{IsDir: info.IsDir(), Size: info.Size(), MTime: info.ModTime().UnixNano()}, nil
+		return statExternalSource(ctx, s.rt.logger(), dp)
 	}
 	info, err := dp.Tenant.Root().Stat(dp.Rel)
 	if err != nil {
@@ -278,6 +306,25 @@ func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, erro
 			if cs, cerr := fileChecksumRoot(dp.Tenant.Root(), dp.Rel); cerr == nil {
 				st.Checksum = cs
 			}
+		}
+	}
+	return st, nil
+}
+
+// statExternalSource 对外部卷读取源取元信息（可选能力 `ChecksumSource` 生效时一并取
+// **明文**整文件 SHA-256——加密卷实体是加密容器，`Stat` 拿不到明文哈希，但可信外部卷经
+// meta.Provider 能就地给出 ⇒ 客户端 `mv` 的源校验和门禁与 `X-File-Checksum` 据此工作；
+// 无该能力 → 保持旧行为（空，不伪造））。
+func statExternalSource(ctx context.Context, logger *slog.Logger, dp DownloadPath) (FileStat, error) {
+	info, serr := dp.Source.Stat(ctx)
+	if serr != nil {
+		logger.Error("外部卷 stat 失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", serr.Error())
+		return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
+	}
+	st := FileStat{IsDir: info.IsDir(), Size: info.Size(), MTime: info.ModTime().UnixNano()}
+	if cs, ok := dp.Source.(ChecksumSource); ok {
+		if sum, ok2 := cs.Checksum(ctx); ok2 {
+			st.Checksum = sum
 		}
 	}
 	return st, nil
