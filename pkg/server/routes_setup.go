@@ -121,6 +121,10 @@ func (h *Handlers) initStorageLayout(vs *registry.Set, cfg *Config, log *slog.Lo
 	}
 }
 
+// shareRel 是分享链接持久化在 anonymous 租户卷内的相对目录
+// （<默认卷根>/anonymous/meta/share）。
+const shareRel = "meta/share"
+
 // initSharePersist 装配分享链接持久化（§10-③）：分享是服务级资源（token 全局唯一、
 // 跨租户可访问），落盘到 anonymous 租户 meta/share（<默认卷根>/anonymous/meta/share/）。
 // 启用后 Create/Consume/Revoke/过期清理同步原子写/删 <token>.json，重启恢复未过期链接。
@@ -129,12 +133,12 @@ func (h *Handlers) initStorageLayout(vs *registry.Set, cfg *Config, log *slog.Lo
 // key share/<token> + Consume 计数 CAS（一次性/限量防超发）；旧 meta 仅回退读。
 func (h *Handlers) initSharePersist(opts RegisterRoutesOpts, cfg *Config, log *slog.Logger) {
 	if tnt := h.tenantFor(anonymousOwner); tnt != nil && tnt.Root() != nil {
-		if shareAbs, ok := tnt.Root().Abs("meta/share"); ok {
-			if opts.StateStore != nil {
-				h.SetShareStore(newStateBackedShareStore(opts.StateStore, shareAbs, log))
-			} else {
-				h.shareStore.EnablePersist(shareAbs)
-			}
+		// 经 anonymous 租户**卷句柄** + "meta/share" 相对目录落盘：卷自己决定是否加密
+		// （使用方不理解加密态），并天然继承封印判定。
+		if opts.StateStore != nil {
+			h.SetShareStore(newStateBackedShareStore(opts.StateStore, tnt.Root(), shareRel, log))
+		} else {
+			h.shareStore.EnablePersist(tnt.Root(), shareRel)
 		}
 	}
 }

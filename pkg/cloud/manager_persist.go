@@ -13,16 +13,64 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // saveTask 持久化单个任务到磁盘，返回写盘错误（供终态调用方显式处理）。
 // 进度类保存（dirty flush）失败可容忍（调用方忽略返回值）；终态（completed/
 // failed/cancelled）保存失败意味着重启后状态回滚，调用方必须记 Error 日志。
+// cloudStateRel 是 owner 租户云任务**状态**的租户根相对目录：任务状态 JSON 落
+// `<cloudStateRel>/<taskID>.json`、组状态落 `<cloudStateRel>/groups/<groupID>.json`。
+//
+// **状态一律经 storage.Root 读写**（卷自己的语义，使用方不理解加密）：at-rest 加密卷上
+// 由卷加密落盘——状态 JSON 含 URL、文件名、目标路径等**用户可见元数据**，此前裸 os I/O +
+// 绝对路径会让它在加密卷上明文落盘（`docs/config.md` 的加密承诺落空）；同时经 Root 即
+// 天然继承封印判定（封装卷占用的区间写入恒拒），不再有绕过封印写元数据的路径。
+// 绝对路径（PersistDirFor/groupsDirFor）**仅供装配层测试按布局断言与运维排查**，不得用于 I/O。
+const cloudStateRel = "meta/cloud"
+
+// maxCloudStateBytes 是状态 JSON 的读取上界（防注入超大 JSON 的 OOM；状态体量是
+// 「条数 × 记录大小」，8MiB 已远超正常形态）。超限 = 视为损坏 → 跳过该条。
+const maxCloudStateBytes = 8 << 20
+
+// writeRootFile 经 Root 写文件（卷决定是否加密；非加密卷 = 普通写）。语义与
+// os.WriteFile(..., 0o644) 对齐（非原子；需要原子性时调用方自行 tmp + AtomicRename）。
+func writeRootFile(root *storage.Root, rel string, data []byte) error {
+	w, err := root.OpenFileEncrypted(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, werr := w.Write(data); werr != nil {
+		_ = w.Close()
+		return werr
+	}
+	return w.Close()
+}
+
+// readRootFile 经 Root 读文件（卷决定是否解密；非加密卷 = 普通读）+ 上界保护。
+func readRootFile(root *storage.Root, rel string) ([]byte, error) {
+	rc, err := root.OpenDecrypted(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	data, err := io.ReadAll(io.LimitReader(rc, maxCloudStateBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxCloudStateBytes {
+		return nil, fmt.Errorf("状态文件超出上界（%d 字节）: %s", maxCloudStateBytes, rel)
+	}
+	return data, nil
+}
+
 func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 	// 检查任务是否已被删除（避免被删除后仍持久化）
 	m.mu.RLock()
@@ -41,17 +89,16 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 		m.logger.Warn("failed to marshal task", "id", t.ID, "error", err)
 		return err
 	}
-	persistDir := m.PersistDirFor(t.Owner)
-	if persistDir == "" {
+	root := m.cloudStateRootFor(t.Owner)
+	if root == nil {
 		m.logger.Warn("租户不可用，跳过任务持久化", "id", t.ID, "owner", t.Owner)
 		return fmt.Errorf("tenant unavailable for task %s", t.ID)
 	}
-	if err := os.MkdirAll(persistDir, 0755); err != nil {
-		m.logger.Warn("创建持久化目录失败", "dir", persistDir, "error", err)
+	if err := root.MkdirAll(cloudStateRel, 0o755); err != nil {
+		m.logger.Warn("创建持久化目录失败", "dir", cloudStateRel, "error", err)
 		return err
 	}
-	taskFile := filepath.Join(persistDir, t.ID+".json")
-	if err := os.WriteFile(taskFile, data, 0644); err != nil {
+	if err := writeRootFile(root, cloudStateRel+"/"+t.ID+".json", data); err != nil {
 		m.logger.Warn("failed to persist task", "id", t.ID, "error", err)
 		return err
 	}
@@ -73,11 +120,11 @@ func (m *CloudDownloadManager) recoverTasks() []string {
 	restarted := 0
 	var orphanPendingGroups []string
 	for _, tenant := range m.listTenants() {
-		persistDir := m.PersistDirFor(tenant)
-		if persistDir == "" {
+		root := m.cloudStateRootFor(tenant)
+		if root == nil {
 			continue
 		}
-		n1, n2, orphans := m.recoverTasksFromDir(persistDir)
+		n1, n2, orphans := m.recoverTasksFromDir(root)
 		recovered += n1
 		restarted += n2
 		orphanPendingGroups = append(orphanPendingGroups, orphans...)
@@ -90,8 +137,8 @@ func (m *CloudDownloadManager) recoverTasks() []string {
 
 // recoverTasksFromDir 解析单个租户持久化目录下的任务 JSON 并挂入 m.tasks，同时重启崩溃前
 // downloading 的任务、把孤儿 pending 转终态。返回恢复数、重启数与需要刷新状态的孤儿组 ID。
-func (m *CloudDownloadManager) recoverTasksFromDir(persistDir string) (int, int, []string) {
-	entries, err := os.ReadDir(persistDir)
+func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int, []string) {
+	entries, err := root.ReadDir(cloudStateRel)
 	if err != nil {
 		return 0, 0, nil
 	}
@@ -101,7 +148,7 @@ func (m *CloudDownloadManager) recoverTasksFromDir(persistDir string) (int, int,
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(persistDir, e.Name()))
+		data, err := readRootFile(root, cloudStateRel+"/"+e.Name())
 		if err != nil {
 			m.logger.Warn("failed to read persisted task, skipping", "file", e.Name(), "error", err)
 			continue
@@ -222,11 +269,11 @@ func (m *CloudDownloadManager) reconcileReservedSize(task *CloudTask) {
 func (m *CloudDownloadManager) recoverGroups() {
 	recovered := 0
 	for _, tenant := range m.listTenants() {
-		groupsDir := m.groupsDirFor(tenant)
-		if groupsDir == "" {
+		root := m.cloudStateRootFor(tenant)
+		if root == nil {
 			continue
 		}
-		recovered += m.recoverGroupsFromDir(groupsDir)
+		recovered += m.recoverGroupsFromDir(root)
 	}
 	// 兼容旧数据：为带 GroupID 但缺少组记录的孤儿任务重建最小组。
 	recovered += m.recoverOrphanGroups()
@@ -236,8 +283,9 @@ func (m *CloudDownloadManager) recoverGroups() {
 }
 
 // recoverGroupsFromDir 解析单个租户组目录下的组 JSON，修剪已不存在的任务引用并挂入 m.groups。
-func (m *CloudDownloadManager) recoverGroupsFromDir(groupsDir string) int {
-	entries, err := os.ReadDir(groupsDir)
+func (m *CloudDownloadManager) recoverGroupsFromDir(root *storage.Root) int {
+	groupsRel := cloudStateRel + "/groups"
+	entries, err := root.ReadDir(groupsRel)
 	if err != nil {
 		return 0
 	}
@@ -246,7 +294,7 @@ func (m *CloudDownloadManager) recoverGroupsFromDir(groupsDir string) int {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(groupsDir, e.Name()))
+		data, err := readRootFile(root, groupsRel+"/"+e.Name())
 		if err != nil {
 			continue
 		}
@@ -256,7 +304,7 @@ func (m *CloudDownloadManager) recoverGroupsFromDir(groupsDir string) int {
 		}
 		group.TaskIDs = m.pruneGroupTaskIDs(group.TaskIDs)
 		if len(group.TaskIDs) == 0 {
-			_ = os.Remove(filepath.Join(groupsDir, e.Name()))
+			_ = root.Remove(groupsRel + "/" + e.Name())
 			continue
 		}
 		m.groupMu.Lock()
@@ -316,11 +364,6 @@ func (m *CloudDownloadManager) pruneGroupTaskIDs(ids []string) []string {
 	return kept
 }
 
-// groupsDirPath 返回 owner 租户的组持久化目录（<root>/<tenant>/meta/cloud/groups）。
-func (m *CloudDownloadManager) groupsDirPath(owner string) string {
-	return m.groupsDirFor(owner)
-}
-
 // saveGroup 持久化任务组到磁盘（按组 owner 落租户 meta/cloud/groups），返回写盘错误。
 // 组状态（completed/partial/archive_file 等）持久化失败意味着重启后组元数据丢失，
 // 调用方（组状态变更点）必须显式处理；清理类保存可忽略返回值。
@@ -339,16 +382,17 @@ func (m *CloudDownloadManager) saveGroup(g *CloudTaskGroup) error {
 		m.logger.Warn("failed to marshal group", "id", g.ID, "error", err)
 		return err
 	}
-	dir := m.groupsDirPath(g.Owner)
-	if dir == "" {
+	root := m.cloudStateRootFor(g.Owner)
+	if root == nil {
 		m.logger.Warn("租户不可用，跳过组持久化", "id", g.ID, "owner", g.Owner)
 		return fmt.Errorf("tenant unavailable for group %s", g.ID)
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		m.logger.Warn("failed to create groups dir", "dir", dir, "error", err)
+	groupsRel := cloudStateRel + "/groups"
+	if err := root.MkdirAll(groupsRel, 0o755); err != nil {
+		m.logger.Warn("failed to create groups dir", "dir", groupsRel, "error", err)
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, g.ID+".json"), data, 0644); err != nil {
+	if err := writeRootFile(root, groupsRel+"/"+g.ID+".json", data); err != nil {
 		m.logger.Warn("failed to persist group", "id", g.ID, "error", err)
 		return err
 	}
@@ -357,11 +401,11 @@ func (m *CloudDownloadManager) saveGroup(g *CloudTaskGroup) error {
 
 // removeGroupFile 删除 owner 租户下组的持久化文件。
 func (m *CloudDownloadManager) removeGroupFile(groupID, owner string) {
-	dir := m.groupsDirPath(owner)
-	if dir == "" {
+	root := m.cloudStateRootFor(owner)
+	if root == nil {
 		return
 	}
-	_ = os.Remove(filepath.Join(dir, groupID+".json"))
+	_ = root.Remove(cloudStateRel + "/groups/" + groupID + ".json")
 }
 
 // cleanupExpiredOnce 执行一次性的过期任务清理，返回清理的任务数量。
@@ -464,8 +508,8 @@ func (m *CloudDownloadManager) cleanupExpiredCloudItem(item expiredCloudTask) {
 		m.logger.Warn("expired orphan pending task cleaned up (never started, no goroutine)",
 			"task_id", item.taskID, "owner", item.owner)
 	}
-	if persistDir := m.PersistDirFor(item.owner); persistDir != "" {
-		_ = os.Remove(filepath.Join(persistDir, item.id+".json"))
+	if root := m.cloudStateRootFor(item.owner); root != nil {
+		_ = root.Remove(cloudStateRel + "/" + item.id + ".json")
 	}
 	m.removeTaskDir(item.owner, item.taskID)
 	if item.reservedSize > 0 {

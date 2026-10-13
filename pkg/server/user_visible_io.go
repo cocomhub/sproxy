@@ -34,6 +34,35 @@ func openUserVisibleRead(root *storage.Root, rel string) (io.ReadCloser, error) 
 	return root.Open(rel)
 }
 
+// relDir 把「卷根」的空 rel 归一为 "."（storage.Root 的 API 以 "." 表示卷根本身，
+// 与 pkg/server/root_fs.go 的 rootRel 同一约定）。
+func relDir(rel string) string {
+	if rel == "" {
+		return "."
+	}
+	return rel
+}
+
+// ensureDir 经 Root 建目录；rel 为 "."（卷根本身）时 no-op——
+// os.Root.MkdirAll(".") 会报「已存在」，而卷根必然存在。
+func ensureDir(root *storage.Root, rel string, perm os.FileMode) error {
+	if rel == "" || rel == "." {
+		return nil
+	}
+	return root.MkdirAll(rel, perm)
+}
+
+// relJoin 拼接卷内相对路径（rel 为空 = 卷根；避免出现前导 "/" 或 "./"）。
+func relJoin(rel, name string) string {
+	if rel == "" || rel == "." {
+		return name
+	}
+	if name == "" {
+		return rel
+	}
+	return rel + "/" + name
+}
+
 // userVisibleSize 返回用户可见（逻辑）长度：加密卷为**明文**长度，其余卷等同 Stat。
 func userVisibleSize(root *storage.Root, rel string) (int64, error) {
 	return root.LogicalSize(rel)
