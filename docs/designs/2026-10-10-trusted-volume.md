@@ -696,3 +696,19 @@ pikpak 主密钥回落裸 FS / 目录漏拼 `secrets` 段（该缺陷由 e2e_cli
 `ErrSealed`）。**变异 3 命中**（写回退裸 os → 文件名明文；读回退非解密读 → 载入失败；
 写用非加密 `OpenFile` → 明文落盘）。文档：`docs/config.md` 的加密覆盖面写精确（内容 + 索引
 快照加密；sidecar/tags 元数据明文，理由同列）。
+
+## 8.18 用户标签（meta/tags）经 Root（加密卷上标签密文落盘 + 封印生效）（2026-10-13）
+
+**缺陷**：`pkg/files/tags.go` 的标签 store（`meta/tags/<sha256(rel)>.json`，**标签的权威事实源**）
+用**裸 os I/O + 绝对路径**（`tagsStoreAbs`）读写 ⇒ ① at-rest 加密卷上标签**明文落盘**（标签是
+**用户数据**，与文件内容同敏感度）；② **封印被绕过**（整卷封装下仍能往被封装区间写标签）。
+（同族：§8.17 搜索索引快照；本类根因统一为「绝对路径 + 裸 os」——见 §8.19 起的门禁。）
+
+**处置**：删除 `tagsStoreAbs`，读写全部**经 `storage.Root`**：写用 `OpenFileEncrypted`（非加密卷
+= 普通写）+ `AtomicRename` 原子替换；读用 `OpenDecrypted` + 读取上界 `maxTagsFileBytes=1MiB`
+（超限视为损坏 → 与「未打标」同语义）；清空标签 = `Root.Remove`（`ErrNotExist` 幂等）；
+子树清理/重命名搬移同经 Root。**副作用（正向）**：封印区间写标签现在 fail-closed（`ErrSealed`）。
+
+**测试与变异**：`pkg/files/tags_test.go`（加密卷：递归扫描磁盘无明文标签 + 载入还原 + 清空幂等；
+封印区间写入 `ErrSealed`）。**变异 3 命中**（写回退裸 os → 标签明文；读回退非解密读 → 载入为空；
+写用非加密 `OpenFile` → 明文落盘）。
