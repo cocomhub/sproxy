@@ -11,6 +11,8 @@ import (
 	"os"
 	"path"
 	"strconv"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"strings"
 	"sync"
 	"time"
@@ -198,6 +200,10 @@ func (f *fakeStorage) GetRange(ctx context.Context, key string, offset, size int
 	if !ok {
 		return nil, ErrNotFound
 	}
+	if size == 0 {
+		// 与真实实现同契约（size==0 = 空区间且不发请求）。
+		return syncpkg.EmptyRangeReader(), nil
+	}
 	if base == "" {
 		return nil, fmt.Errorf("baidupcs: fake storage 无直链（模拟无会话）")
 	}
@@ -210,9 +216,6 @@ func (f *fakeStorage) GetRange(ctx context.Context, key string, offset, size int
 	if derr != nil {
 		return nil, derr
 	}
-	if resp.StatusCode != http.StatusPartialContent {
-		resp.Body.Close()
-		return nil, fmt.Errorf("fake Range GET 返回 %d", resp.StatusCode)
-	}
-	return resp.Body, nil
+	// 与真实实现**共用**同一响应校验（长度契约/钳制判据不再各写一份 ⇒ 杜绝替身漂移）。
+	return validateRangeResponse(resp, key, offset, size, nil)
 }
