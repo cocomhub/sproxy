@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -193,5 +194,36 @@ func TestOpenURL(t *testing.T) {
 	}
 	if _, err := be.(registry.URLResolver).OpenURL(context.Background(), "secrets://sv/nope"); err == nil {
 		t.Error("不存在 secret 应失败")
+	}
+}
+
+// TestManager_ChmodHookInvoked 注入 `WithLocalChmod` 回调时，本地加固必须走**回调**而非
+// `*syncpkg.LocalFS` 类型断言：经 `storage.Root` 适配的 secrets 视图（加密/封印语义必需，
+// 见 pkg/server/secrets_fs.go）不是 LocalFS ⇒ 断言会静默跳过，本地 0600 加固消失。
+// 本用例平台无关（只断言回调被调用），可在 Windows 上守住该接线。
+//
+// 变异：`chmodSecret` 忽略回调（只走类型断言）→ 回调不被调用 → 红。
+func TestManager_ChmodHookInvoked(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "secrets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	var mu sync.Mutex
+	var got []string
+	m := NewManager(syncpkg.NewLocalFS(root, nil), "testvol", true,
+		WithLocalChmod(func(name string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, name)
+			return nil
+		}))
+	if _, err := m.Create(context.Background(), "k1"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != "k1" {
+		t.Fatalf("本地加固回调应被调用一次且带 secret 名, got %v", got)
 	}
 }

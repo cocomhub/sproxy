@@ -45,8 +45,8 @@ import (
 // 路径）→ 理由（必须回答「为什么可以不经 storage.Root」）。
 var localFSCallAllowlist = map[string]string{
 	"pkg/volume/enclosure/attach.go":   "封装卷**特权源视图**（必须在封印注入前取得、且不得受封印影响）；源为 at-rest 加密卷时装配期已 ErrSourceEncrypted 显式拒绝（禁双重变换）",
-	"cmd/sproxy/secret_register.go":    "secrets 卷与 secretdata 本地 target 的 extra.root 是**独立目录**（非卷根语义）；默认 secrets 卷落在 <storage_root>/secrets 属**已记档待裁定**项（改经 Root 需先定迁移口径：既有明文 secrets 在加密卷上无法直接 OpenDecrypted）",
-	"cmd/sproxy/pikpak_secretstore.go": "pikpak 密钥存储目录（独立目录，非卷根；密钥自身存储不经用户卷语义）",
+	"cmd/sproxy/secret_register.go":    "**独立目录**回退分支（目标目录不在任何受管卷根内 ⇒ 无卷语义可依附）；落在卷根内的 secrets 目录已改经 Root（`secretsFSFor` → `server.NewRootSecretsFS`，含 0600 回调）",
+	"cmd/sproxy/pikpak_secretstore.go": "pikpak 凭据的 **shardseal 加密容器**底层（内容已由 secretdata 加密，非明文密钥材料）；其**主密钥**已改经 Root（`pikpakMasterKeyManager` → `server.NewRootSecretsFS`）",
 	"pkg/syncexec/executor.go":         "**回落路径**：仅当装配层未注入 TenantRootFS（测试/未接线）时生效；生产恒注入经 Root 的提供者（cmd/sproxy 装配）",
 }
 

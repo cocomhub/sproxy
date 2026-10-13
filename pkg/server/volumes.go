@@ -188,10 +188,10 @@ func resolveAssembledRootDir(cfg *Config, log *slog.Logger, vc VolumeConfig, i i
 	return rootDir
 }
 
-// openLocalVolumeRoot 打开本地卷根：MkdirAll + storage.OpenRoot（LAYOUT_VERSION 校验/写入）
+// OpenLocalVolumeRoot 打开本地卷根：MkdirAll + storage.OpenRoot（LAYOUT_VERSION 校验/写入）
 // + at-rest 加密卷装配（extra.encrypt=true → key 解析 → SetEncryption；cipher 非法 fail-closed）。
 // 失败时已关闭本根（由调用方 closeOpenedVolumes 回收其它已开根）。
-func openLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.Logger) (*storage.Root, error) {
+func OpenLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.Logger) (*storage.Root, error) {
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建卷 %q 根目录失败（%s）: %w", name, rootDir, err)
 	}
@@ -225,7 +225,7 @@ func openLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.L
 // assembleLocalVolume 装配单个本地卷（根打开 + 容量池 + 卷记录 + 首卷默认名），就地写入累积集合。
 func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, acc *volumeAccum) error {
 	rootDir := resolveAssembledRootDir(cfg, log, vc, i)
-	rt, oerr := openLocalVolumeRoot(vc.Name, rootDir, vc.Extra, log)
+	rt, oerr := OpenLocalVolumeRoot(vc.Name, rootDir, vc.Extra, log)
 	if oerr != nil {
 		return oerr
 	}

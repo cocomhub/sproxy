@@ -644,3 +644,36 @@ AST（`go/parser`）而非正则：注释/字符串里的同名文本不误报�
 - **裸 `os.*` 文件 I/O 面复核**：`volume_retention.go` 的 `os.ReadDir(<卷根>/<owner>/version)`
   仅为目录列举（目录名不加密）✓；`share.go`/`search_index.go` 落在服务端内部目录 ✓；
   `trash.go` 的 size 口径缺陷见 §8.14（已修）。
+
+## 8.16 卷内 secrets/ 目录经 Root（加密卷上密钥材料密文落盘）+ pikpak 主密钥同口径（2026-10-13）
+
+**缺陷（R26 登记项的「待裁定」闭环）**：默认 secrets 卷落 `<storage_root>/secrets` —— 即**默认卷
+根之下**，而装配用的是裸 `sync.NewLocalFS`（纯 os I/O）⇒ 当默认卷启用 `extra.encrypt` 时，
+**卷内容全加密而密钥材料明文落盘**，at-rest 加密对该配置形同虚设（拿到磁盘即拿到密钥）。
+同类：pikpak 账号凭据的**主密钥**（`<storage_root>/secrets/pikpak-master`）由另一路径以裸 FS 写。
+
+**处置**：
+- `pkg/server/secrets_fs.go`：新增 `rootSecretsFS`（叶子适配器，经 `storage.Root`）——
+  `OpenRead` 解密读、`WriteFile`/`ListDir`/`Stat`/`Delete`/`MakeDir`/`Rename` 全经 Root
+  （封印随之生效；`ListDir`/`Stat` 用 `LogicalSize` 报用户可见长度）；`ChmodSecret` 承接本地
+  0600 加固（经 Root 的视图不是 `*LocalFS`，`secrets.Manager` 的类型断言会静默跳过 ⇒ 新增
+  `secrets.WithLocalChmod` 回调）。
+  **无兼容负担**（用户裁定 2026-10-13：尚未上线）：不做「历史明文识别 / 读时迁移」，secrets 一律
+  加密形态；非加密容器按存储层既有报错 fail-closed（不静默降级、不自动改写）。
+- `cmd/sproxy` 装配：`secretsFSFor(set, absDir, …)` **按路径归属**判定——目标目录落在某个已装配
+  卷根内 → 经 Root；独立目录 → 保持裸 `NewLocalFS`（R26 已登记）。目录布局恒为
+  `<root>/secrets/<名>`（父目录 + `secrets` 段，两个入口一致）。默认 secrets 卷与
+  `type: secrets` 卷两处入口共用该判据。
+- pikpak：`pikpakEncryptedSecretStore` 增加卷根参数，主密钥经 `server.NewRootSecretsFS` 写入
+  （**与默认 secrets 卷同口径**——两个写入者形态不一致会让对方把密文当密钥读，属永久性损坏）；
+  服务器路径经 `registerPikpakDownloader(cfg, set)` 传入，CLI 路径按配置用新导出的
+  `server.OpenLocalVolumeRoot` 打开同一卷根。凭据本体仍是 `secretdata` 容器（已由 shardseal 加密）。
+
+**测试与变异**：`pkg/server`（密文落盘 / 读回明文 / 封印拒写 / 0600 加固）、`pkg/volume/secrets`
+（`WithLocalChmod` 回调被调用——平台无关，Windows 上也守得住）、`cmd/sproxy`（加密默认卷下 secret
+密文落盘 + 权限 0600（非 Windows）；pikpak 主密钥密文 + 复用可读；`<root>/secrets/<名>` 布局 +
+封印生效）。**变异 7 命中**（secrets 写不经 Root / 装配回退裸 LocalFS / chmod 回调失效 /
+pikpak 主密钥回落裸 FS / 目录漏拼 `secrets` 段（该缺陷由 e2e_cli_secretdata 实测暴露：secretdata 卷
+`secret_url` 解析失败 → boot fail）等）。**e2e 回归**：`test/` 的 secretdata/secrets 真二进制
+套件（装配 + 跨包互操作 + 多 target 副本 + 播放上传/云转存到 secretdata 卷）本地全绿。
+

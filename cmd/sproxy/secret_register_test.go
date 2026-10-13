@@ -6,10 +6,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -755,4 +757,121 @@ func findPlaintext(t *testing.T, root, needle string) string {
 		return nil
 	})
 	return found
+}
+
+// TestDefaultSecretsVolume_EncryptedRoot_StoresCiphertext 默认 secrets 卷落在**默认卷根**下的
+// `secrets/`：若该卷启用了 at-rest 加密（`extra.encrypt`），密钥文件必须同样**加密落盘**
+// ——此前装配用裸 `NewLocalFS(<storage_root>/secrets)`（纯 os I/O）⇒ 卷内容全加密而**密钥明文**
+// 落盘，at-rest 加密对该配置形同虚设（门禁 R26 登记项里记的「待裁定」项）。
+//
+// 判据：磁盘字节不得等于明文 hex 密钥，且经 Manager 读回应与创建值一致。
+//
+// 变异：装配回退裸 LocalFS → 本用例红。
+func TestDefaultSecretsVolume_EncryptedRoot_StoresCiphertext(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	rt, err := storage.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	if serr := rt.SetEncryption(bytes.Repeat([]byte{5}, 32)); serr != nil {
+		t.Fatalf("SetEncryption: %v", serr)
+	}
+	set := registry.NewSet(
+		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}},
+		map[string]*storage.Root{"default": rt},
+		map[string]registry.ExternalBackend{}, nil, "default")
+	t.Cleanup(func() { _ = set.Close() })
+	registerSecretsBackend()
+
+	mgr, err := ensureDefaultSecretsVolume(ctx, set, root, nil)
+	if err != nil {
+		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
+	}
+	key, err := mgr.Create(ctx, "datakey")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	secretAbs := filepath.Join(root, "secrets", "datakey")
+	raw, rerr := os.ReadFile(secretAbs)
+	if rerr != nil {
+		t.Fatalf("读落盘 secret: %v", rerr)
+	}
+	if runtime.GOOS != "windows" {
+		// 本地 0600 加固必须随「经 Root」的视图保留（回调 `secrets.WithLocalChmod` 承接——
+		// 经 Root 的视图不是 *LocalFS，旧的类型断言会静默跳过）。
+		if fi, serr := os.Stat(secretAbs); serr != nil {
+			t.Fatalf("Stat: %v", serr)
+		} else if fi.Mode().Perm() != 0o600 {
+			t.Fatalf("secret 权限应为 0600（本地加固）, got %o", fi.Mode().Perm())
+		}
+	}
+	if string(raw) == string(key) {
+		t.Fatalf("加密默认卷上的 secret 不得明文落盘（got %q）", raw)
+	}
+	got, err := mgr.Read(ctx, "datakey")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(got) != string(key) {
+		t.Fatalf("读回密钥 = %q，期望 %q", got, key)
+	}
+}
+
+// TestSecretsDirFSFor_SubdirLayoutAndRootSemantics `type: secrets`/默认 secrets 卷的**目录布局**
+// 必须是 `<root>/secrets/<名>`（两个入口同布局），且落在受管卷根内的那部分必须**经 Root**
+// （封印/加解密/迁移随之生效）。此前的实现把**父目录**本身当键空间（漏拼 `/secrets`）⇒ 密钥
+// 文件落错位置、`secret_url` 解析失败 → secretdata 卷装配 boot fail（e2e_cli_secretdata 实测）。
+//
+// 变异：`secretsFSFor` 收父目录（漏 `/secrets` 拼接）→ 落盘位置断言红；回落裸 LocalFS → 封印断言红。
+func TestSecretsDirFSFor_SubdirLayoutAndRootSemantics(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rt, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	set := registry.NewSet(
+		[]volume.Volume{{Name: "main", Type: volume.TypeLocal, RootDir: dir}},
+		map[string]*storage.Root{"main": rt},
+		map[string]registry.ExternalBackend{}, nil, "main")
+	t.Cleanup(func() { _ = set.Close() })
+	fsys, _ := secretsDirFSFor(set, dir, nil)
+	ctx := context.Background()
+	if werr := fsys.WriteFile(ctx, "datakey", strings.NewReader("v"), 1, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "secrets", "datakey")); serr != nil {
+		t.Fatalf("密钥应落 <root>/secrets/<名>（与默认 secrets 卷同布局）: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "datakey")); serr == nil {
+		t.Fatal("密钥不得落在父目录本身（漏拼 /secrets 段）")
+	}
+	// Root 语义：封印必须生效（证明视图经 storage.Root，而非裸 LocalFS）。
+	if serr := rt.SetSeals([]storage.SealRule{{Path: "secrets", Wrapper: "vault"}}); serr != nil {
+		t.Fatalf("SetSeals: %v", serr)
+	}
+	if werr := fsys.WriteFile(ctx, "k2", strings.NewReader("v"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+		t.Fatalf("封印应生效（经 Root 的视图）, got %v", werr)
+	}
+}
+
+// TestDefaultSecretsFS_LocalTargetSubdirLayout `type: secrets` 卷（target=local + root=父目录）
+// 的 FS 视图（`defaultSecretsFS`）必须把**父目录 + /secrets** 作为键空间。
+func TestDefaultSecretsFS_LocalTargetSubdirLayout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	fsys, err := defaultSecretsFS(context.Background(), volume.Volume{
+		Name: "mykeys", Type: "secrets", Extra: map[string]any{"target": "local", "root": root},
+	})
+	if err != nil {
+		t.Fatalf("defaultSecretsFS: %v", err)
+	}
+	if werr := fsys.WriteFile(context.Background(), "datakey", strings.NewReader("v"), 1, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "secrets", "datakey")); serr != nil {
+		t.Fatalf("密钥应落 <root>/secrets/<名>: %v", serr)
+	}
 }
