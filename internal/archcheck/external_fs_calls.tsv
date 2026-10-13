@@ -1,0 +1,27 @@
+# 外部卷后端 FS 直连点登记表（R27）：file<TAB>max_calls<TAB>reason
+#
+# 背景：外部/远端卷（s3/baidupcs/pikpak/cluster/secretdata/…）没有 *storage.Root ⇒ 封印
+# （封装卷占用源子目录后，源侧直连读写必须拒绝）只能靠**装配处**给 `be.FS()` 套封印装饰器
+# （pkg/volume/enclosure/sealfs.go 的 SealBackend）。因此**每一处直接拿 `be.FS()` 的代码
+# 都是封印的潜在绕过点**：新增一处而忘记经装配处包装 = 静默开洞（安全边界静默失效）。
+#
+# 本表登记现状（`max_calls` = 该文件允许的最大 `.FS()` 出现次数；只降不升）。新增文件或
+# 增加次数 ⇒ 门禁红 ⇒ 必须先确认「该调用者是否经装配处封印视图」并在本表登记理由。
+#
+# 注：本门禁按 `\.FS\(\)` 文本计数，可能把非外部后端的同形调用一并计入（偏严不偏松）；
+# 判定口径以「次数只降不升」为准（新增调用点必须显式登记）。
+cmd/sproxy/baidupcs_sync.go	1	baidupcs 同步：取后端 FS 做同步引擎输入（历史直连点，源卷被封装时需评估）
+cmd/sproxy/secret_register.go	1	secretdata 补装：构造阶段取 FS（此后由 registry 持有）
+pkg/server/backends_api.go	1	后端信息 API：只读探测
+pkg/server/backup_api.go	4	备份面：取远端写面（federated/baidupcs）
+pkg/server/external_source.go	1	外部卷下载源解析（经 externalFSFor/同一装饰链）
+pkg/server/files_service.go	5	externalFSFor（可信链入口）+ ExternalCopy 键解析（能力断言）
+pkg/server/quota_reconcile.go	2	真值对账：物理用量探测
+pkg/server/routes_setup.go	2	DAV/S3 装配：临时视图构造
+pkg/server/volumes.go	2	卷路由/装配套接
+pkg/server/volumes_enclosure.go	2	封装装配：**封印注入点本身**
+pkg/server/volumes_mirror.go	1	外部卷只读源构造
+pkg/sync/staging_gate.go	1	staging 门卫下探（非外部卷后端）
+pkg/volume/capacity/capacity.go	2	容量装饰器包装（封印内层，保留配额语义）
+pkg/volume/enclosure/attach.go	1	封装取源特权视图（UnsealedSource）
+pkg/volume/enclosure/sealfs.go	7	封印装饰器自身（Inner/UnsealedFS/SealBackend）

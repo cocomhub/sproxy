@@ -122,26 +122,32 @@ func (rt *Root) Seals() []SealRule {
 
 // SealAt 返回覆盖 rel 的封印规则（无则 nil）。语义为**前缀**匹配：rel == rule.Path 或
 // rel 位于 rule.Path 之下。
-func (rt *Root) SealAt(rel string) *SealRule {
-	if len(rt.seals) == 0 {
+func (rt *Root) SealAt(rel string) *SealRule { return SealAt(rt.seals, rel) }
+
+// SealAt 在规则集内查找命中 rel 的封印规则（无命中 → nil）。**语义与 Root 完全一致**——
+// 导出供「FS 级封印装饰器」（外部卷/远端后端视图，无 *storage.Root）复用，确保本地与外部
+// 两套视图**同一份匹配语义**（避免两处判据漂移：一处改了另一处没改 = 静默开洞）。
+func SealAt(rules []SealRule, rel string) *SealRule {
+	if len(rules) == 0 {
 		return nil
 	}
 	clean, ok := sealRel(rel)
 	if !ok {
 		return nil
 	}
-	for i := range rt.seals {
-		if sealCovers(rt.seals[i].Path, clean) {
-			return &rt.seals[i]
+	for i := range rules {
+		if sealCovers(rules[i].Path, clean) {
+			return &rules[i]
 		}
 	}
 	return nil
 }
 
-// sealCheck 是统一入口：write=true 恒拒绝（ErrSealed）；write=false 时按模式返回
-// SealHidden=密封不存在错误 / SealReadable=nil。
-func (rt *Root) sealCheck(rel string, write bool) error {
-	rule := rt.SealAt(rel)
+// SealError 构造封印错误（与 Root 同口径，供 FS 级装饰器复用）：
+// write=true 恒为封印写错误（可 errors.Is 到 ErrSealed → 409）；write=false 时
+// SealHidden → 读侧「不存在」错误（可 errors.Is 到 fs.ErrNotExist → 404 且可归因 ErrSealed）；
+// SealReadable → nil（放行）。
+func SealError(rule *SealRule, rel string, write bool) error {
 	if rule == nil {
 		return nil
 	}
@@ -152,6 +158,12 @@ func (rt *Root) sealCheck(rel string, write bool) error {
 		return nil
 	}
 	return &sealedError{rel: rel, wrapper: rule.Wrapper}
+}
+
+// sealCheck 是统一入口：write=true 恒拒绝（ErrSealed）；write=false 时按模式返回
+// SealHidden=密封不存在错误 / SealReadable=nil。
+func (rt *Root) sealCheck(rel string, write bool) error {
+	return SealError(SealAt(rt.seals, rel), rel, write)
 }
 
 // sealFilterEntries 在 SealHidden 模式下从目录列举中过滤掉「自身被封印」的条目

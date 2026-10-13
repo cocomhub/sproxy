@@ -24,8 +24,9 @@ import (
 // 结束后、NewSet 之前执行；封装卷后端本身在此之后补装（enclosure.AttachAll，推迟装配），
 // 其源视图直接持有源 FS（不受封印影响）。
 //
-// 跨外部卷源（baidupcs/s3/…）：封印需要注入外部卷后端视图，当前未接入（设计 §10 记档），
-// **装配期显式拒绝**（禁静默降级：否则会留下「以为封了其实没封」的安全缺口）。
+// 跨外部卷源（baidupcs/s3/…）：封印经 `enclosure.SealBackend` 套在**该后端 FS 上**（装配处
+// 就地包装）⇒ 所有 `be.FS()` 调用者自动继承封印；封装卷自身经 `enclosure.UnsealedSource`
+// 取未封印特权视图（只剥封印层，配额/可信装饰器保留）。
 func applyEnclosureSeals(log *slog.Logger, acc *volumeAccum) error {
 	decls, err := enclosure.Parse(acc.volumes)
 	if err != nil {
@@ -51,11 +52,20 @@ func injectSeals(acc *volumeAccum, decls []enclosure.Decl) error {
 	byVol := make(map[string][]storage.SealRule, len(decls))
 	for _, d := range decls {
 		baseVol, basePath := enclosure.EffectiveTarget(d, decls)
-		if rt := acc.roots[baseVol]; rt == nil {
-			return fmt.Errorf("封装卷 %q 的有效源卷 %q 不是本地卷：跨外部卷封装尚未接入（装配期显式拒绝，禁静默降级）",
+		rule := storage.SealRule{Path: basePath, Wrapper: d.Vol, Mode: d.ReadMode}
+		if rt := acc.roots[baseVol]; rt != nil {
+			byVol[baseVol] = append(byVol[baseVol], rule)
+			continue
+		}
+		// **外部/远端源卷**（s3/baidupcs/pikpak/cluster/secretdata/…）：无 storage.Root ⇒ 封印
+		// 只能套在该后端 FS 的**装配处**（此处）——`be.FS()` 的十余处调用者因此全部继承封印，
+		// 这是外部卷封印唯一可靠的收口点（逐面打补丁必漏，见设计 §6「强制点在公共底座」）。
+		be := acc.external[baseVol]
+		if be == nil {
+			return fmt.Errorf("封装卷 %q 的有效源卷 %q 未装配（既无本地根也无外部后端）：无法注入封印，拒绝启动（禁静默降级）",
 				d.Vol, baseVol)
 		}
-		byVol[baseVol] = append(byVol[baseVol], storage.SealRule{Path: basePath, Wrapper: d.Vol, Mode: d.ReadMode})
+		acc.external[baseVol] = enclosure.SealBackend(be, []storage.SealRule{rule})
 	}
 	for name, rules := range byVol {
 		if serr := acc.roots[name].SetSeals(rules); serr != nil {
