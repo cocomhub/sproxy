@@ -166,7 +166,8 @@ func (p *Persister) writeFile(snap *Snapshot) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, p.path); err != nil {
+	// Windows 上覆盖被占用目标会 sharing violation（POSIX 恒成功）⇒ 有界重试（见 rename_retry.go）。
+	if err := renameWithRetry(os.Rename, tmpName, p.path); err != nil {
 		return err
 	}
 	// M7：显式收紧为 0600——per-node secret 等敏感信息落盘不应被同机其他用户读取。
