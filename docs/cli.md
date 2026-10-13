@@ -94,6 +94,41 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`upgrade`](#upgrade) | 自更新（GitHub Releases 校验 + 原子替换） |
 | [`version`](#version) | 打印版本信息 |
 
+## 卷感知工作目录（`cd <卷名>:/<目录>`）
+
+工作目录**含所在卷**：`cd` 支持卷 URI，其后所有相对路径操作默认只作用于**当前工作目录所在卷**
+（用户口径 2026-10-13）。
+
+```bash
+sclient cd vault:/docs      # 切到加密卷 vault 的 /docs（工作目录 = vault:/docs）
+sclient pwd                 # 打印 vault:/docs
+sclient list                # 列 vault:/docs（不必再写 --volume / URI）
+sclient upload ./a.bin      # 目标卷 = vault，路径 = docs/a.bin
+sclient cd /                # 前导 `/` = **本地卷**根（回到默认卷）
+sclient cd other:/x         # 切到另一卷 other 的 /x
+```
+
+规则：
+
+- `<卷名>:/<路径>` = 该卷根起算的**绝对路径**（不受当前工作目录影响）；`<卷名>:` / `<卷名>:/` = 卷根。
+- 前导 `/` 开头的路径 = **本地卷**（默认卷）根起算，并**离开**当前卷。
+- 相对路径沿用当前工作目录（含所在卷）。
+- 优先级：位置参数卷 URI > `--volume` > **工作目录所在卷** > 配置/auto（冲突时报错，不静默取其一）。
+- 其它命令可用卷 URI 一次性寻址（不改工作目录）：`list vault:/`、`meta vault:/a.txt`、
+  `download vault:/a.txt`、`mv vault:/a vault:/b`、`delete vault:/a`。
+
+### 跨卷操作（URI + `--to-volume`）
+
+```bash
+sclient mv vault:/a.txt a.txt --to-volume other      # 跨卷移动（源卷由 URI/工作目录给出）
+sclient volume copy a.txt --from-volume vault --to-volume other   # 跨卷复制（同相对路径）
+sclient volume move a.txt --from-volume vault --to-volume other
+```
+
+**已知限制（2026-10-13 实测）**：服务端跨卷移动/复制管线**只覆盖本地卷**——源或目标为
+**外部/加密卷**（secretdata 等）时返回 `400 无效的文件路径`。workaround：`download` + `upload` +
+`delete`（三段式，加密卷均可用），或等后续片接线。
+
 ## 当前目录概念
 
 sclient 维护一个**持久化的工作目录**（存于 XDG cache），影响所有以相对路径

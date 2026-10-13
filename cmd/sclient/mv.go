@@ -54,7 +54,7 @@ func NewCmdMv(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 卷 URI 寻址：源 `A:/x` ⇒ --volume A；目标 `B:/y`（不同卷）⇒ --to-volume B。
-			if err := applyMvVolumeURIs(cmd, args); err != nil {
+			if err := applyMvVolumeContext(cmd, st, args); err != nil {
 				return err
 			}
 			svc, err := factory.NewClient(cmd)

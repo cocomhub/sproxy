@@ -209,7 +209,12 @@ func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
 	if containsPathTraversal(dirname) {
 		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
 	}
-	urlPath := "/mkdir?dirname=" + url.QueryEscape(dirname)
+	// 卷上下文（多卷）：漏带会导致服务端按 auto 解析 ⇒ `--volume`/卷 URI 静默失效
+	// （表现：mkdir 落在本地卷、加密卷上看不到目录）。
+	mkQuery := url.Values{}
+	mkQuery.Set("dirname", dirname)
+	c.appendVolumeQuery(mkQuery)
+	urlPath := "/mkdir?" + mkQuery.Encode()
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
 		return fmt.Errorf(errFmtRequestFailed, err)
@@ -230,7 +235,10 @@ func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
 	if containsPathTraversal(dirname) {
 		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
 	}
-	urlPath := "/rmdir?dirname=" + url.QueryEscape(dirname)
+	rmQuery := url.Values{}
+	rmQuery.Set("dirname", dirname)
+	c.appendVolumeQuery(rmQuery)
+	urlPath := "/rmdir?" + rmQuery.Encode()
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
 		return fmt.Errorf(errFmtRequestFailed, err)

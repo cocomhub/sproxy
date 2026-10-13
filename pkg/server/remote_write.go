@@ -249,7 +249,7 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 		}, http.StatusOK)
 
 	case "mkdir":
-		res, err := svc.MakeDir(tgt.owner, tgt.path)
+		res, err := svc.MakeDir(r.Context(), tgt.owner, tgt.path, tgt.vol.Name)
 		if err != nil {
 			writeRemoteFilesError(w, err)
 			return

@@ -194,3 +194,11 @@ secretdata` 的生产装配路径可用」（wrapper 注册 / 声明解析 / 补
 `setupSecretBackends` 会把**本用例的卷集**存入、收尾再清空）。与同包用例并行时，两者的
 `Store/Load` 会互踩（读到对方的卷集 → 密钥解析到不存在的 secrets 卷），故显式串行。
 注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（总数 1784 → 1785，无新增 slack）。
+
+## 2026-10-13 卷感知工作目录用例（`cmd/sclient/cd_test.go` 5 → 8）
+
+新增 3 个**串行**用例（`TestCd_VolumeURI_SwitchesVolumeAndDir`、`TestCd_LeadingSlashReturnsToLocalVolume`、
+`TestCd_Pwd`）。**不可并行的理由**：`cd` 的工作目录（含所在卷）落在 **XDG 缓存**里，用例必须用
+`setCacheDirForTest`（内部 `t.Setenv("XDG_CACHE_HOME", tmp)` + `xdg.Reload()`）把缓存隔离到临时目录，
+否则会读写**真实用户缓存**；`t.Setenv` 与 `t.Parallel` 互斥（Go 测试框架限制），故显式串行。
+注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（`cmd/sclient/cd_test.go 5 → 8`）。
