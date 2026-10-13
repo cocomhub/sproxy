@@ -530,10 +530,11 @@ func TestRmdirCmd_HappyPath(t *testing.T) {
 }
 
 func TestRmdirCmd_Force(t *testing.T) {
-	// --force 是客户端 flag，用于跳过非空目录的确认提示（不传递给服务端 API）
-	// 测试场景：目录非空 + --force 应直接删除，不需要交互确认
+	// --force = 「用户已确认」⇒ CLI 直接删（跳过 List 非空探测）并**必须把 force=true 发给服务端**
+	// ——服务端 rmdir 恒要求该确认（此前 CLI 从不发送 ⇒ rmdir 含 --force 也恒 400）。
 	listCalled := false
 	rmdirCalled := false
+	rmdirForceQuery := false
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/files" {
 			listCalled = true
@@ -544,6 +545,7 @@ func TestRmdirCmd_Force(t *testing.T) {
 		}
 		if r.Method == "POST" && r.URL.Path == "/rmdir" {
 			rmdirCalled = true
+			rmdirForceQuery = r.URL.Query().Get("force") == "true"
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"success":true,"message":"deleted"}`))
 			return
@@ -564,11 +566,14 @@ func TestRmdirCmd_Force(t *testing.T) {
 	if !strings.Contains(buf.String(), "目录已删除") {
 		t.Errorf("expected success message, got: %s", buf.String())
 	}
-	if !listCalled {
-		t.Error("expected List to be called for non-empty check")
-	}
 	if !rmdirCalled {
 		t.Error("expected Rmdir to be called")
+	}
+	if !rmdirForceQuery {
+		t.Error("rmdir --force 必须把 force=true 发给服务端（服务端恒要求该确认）")
+	}
+	if listCalled {
+		t.Error("--force 已确认 ⇒ 不应再做非空探测（多一次请求）")
 	}
 }
 

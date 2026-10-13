@@ -168,3 +168,40 @@ mkdir 客户端去掉卷参数；同容器改名早退去掉。
 不再套用短读/整文件哈希判据（`meta/verify.go`）；尾部半块补验**仍逐字节生效**（变异验证：把篡改
 字节放在 Range 端点之后仍被拦住）。回归 `TestVerifyReadSeeker_PartialRangeFromStart{,_DetectsCorruption}`
 + e2e 用 Range 断言（此前为规避该缺陷临时降级为全量下载，现已恢复）。
+
+## 3.5 涉及加密卷的跨卷移动 + 加密卷目录删除（2026-10-13 追加）
+
+**两条能力缺口**（此前）：
+1. 跨卷移动（`POST /api/volumes/move`）只覆盖**本地卷**——装配层的移动核心
+   （`moveFileBetweenVolumes`）依赖写盘 `*storage.Root` 与本地原子 rename ⇒ 任一端是外部/加密卷
+   时直接 `400 无效的文件路径`；
+2. 加密卷 `rmdir` fail-closed 501（`syncpkg.FS` 无目录级递归删）。
+
+**实现**：
+
+| 能力 | 实现 | 关键点 |
+|---|---|---|
+| 跨卷移动（含外部卷） | 装配层判定「涉及非本地卷」→ 交**域侧组合** `files.Service.MoveFile` | 复制复用 `CopyFile`（同卷 blob 直拷 / 统一写内核两条路径）；**写成功才删源**；删源：外部卷 `ExternalDelete` 接缝硬删（带复制时的明文 checksum 交叉比对，防复制后源被改写仍被删），本地卷走既有 `DeleteFile`；删源 404（并发删除）按幂等成功 |
+| 加密卷删目录 | 新增接缝 `ExternalVolumeOps.ExternalRemoveDir` + 卷可选能力 `SecretdataFS.RemoveDir` | 装配层**递归删**（`deleteExternalTree`，先子后父、深度上限 64）；发往卷的删除**先经装饰器链 `Delete`**（封印 `ErrSealed` → 409 不绕过），再取**最内层**卷的 `RemoveDir` 删目录容器（目录不参与文件索引 ⇒ `Delete` 对目录键是 no-op） |
+
+**一并修掉的真问题（均为实测暴露）**：
+1. **CLI `rmdir` 从不发送 `force=true`**（`--force` 只跳过本地提示）⇒ 服务端恒要 `force=true` ⇒
+   CLI `rmdir`（含 `--force`）**恒 400**（外部卷此前被更早的 501 掩盖；本地卷路径同样中招）。
+   修：`FileClient.Rmdir(ctx, dirname, force)` 透传；CLI 在「`--force` 或交互确认或空目录」时置
+   `confirmed=true`，**列目录失败且未 `--force` 时拒绝删除**（不猜）。
+2. **AD-4 唯一性查重把移动的源卷自身判成冲突**：移动目标写入若走「显式卷路由（带查重）」，
+   `checkVolumeUniqueness` 会因**源卷**持有同 rel 而 409「同名文件已存在于卷 X」⇒ 跨卷移动恒失败。
+   修：移动的写入改用**统一写内核 `WriteTarget`（显式卷定卷、不查重）**，由域侧
+   `moveUniqueConflict` 按**源卷豁免**口径复刻 AD-4（目标卷已有 → 409；视图内其它卷已有 → 409），
+   与本地核心 `moveCheckTargetUnique` 同口径。
+3. **secretdata 空目录删不掉**：`Delete` 只对文件索引生效（目录靠「最后一个文件被删」时
+   `pruneEmptyDirsLocked` 顺带回收）⇒ 空目录删除需要显式能力 `RemoveDir`（删容器 + 向上回收空祖先）。
+4. **能力断言必须穿透装饰器**（复发同族）：判 `RemoveDir` 能力同样用 `syncpkg.Innermost`，
+   否则装饰器（Guard/Wrap/CapacityFS）会把「支持」判成「不支持」而静默退化。
+
+**测试**：e2e `TestE2E_CLI_Xfer_ExternalVolumeMoveAndRmdir`（加密卷→本地、本地→加密卷、移入子目录、
+未确认不删、`--force` 递归删 + **物理分块清零**、判据非空自证）；`TestE2E_CLI_VolumeCwd_DefaultsToCurrentVolume`
+更新（原断言「外部卷 rmdir fail-closed」→ 现断言成功且**本地同名目录不受影响**）；域单测
+`TestMoveFile_{ExternalSource_CopiesThenDeletesSource,SourceDeleteFailure_ReportsPartial,SourceGone_IdempotentSuccess}`；
+`TestSecretdata_RemoveDir`（空目录可删/非空拒绝/卷根拒绝）；装配 `TestDeleteExternalTree_{RemovesNestedTree,DepthLimitRejects}`。
+变异 4 命中（删源跳过 → 源残留；去掉源卷豁免 → 复现 409；关闭 `RemoveDir` → 目录残留；`RemoveDir` no-op → 单测红）。

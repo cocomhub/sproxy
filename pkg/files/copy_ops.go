@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
@@ -42,6 +43,12 @@ type CopyFileInput struct {
 	Force   bool   // true = 允许覆盖已存在目标（默认 false → 409，绝不静默覆盖）
 	// Src 是装配层解析好的**外部卷读取源**（源为外部/加密卷时非 nil）；本地卷源为 nil。
 	Src DownloadSource
+	// UniqueExemptVol 是**唯一性查重豁免卷**（仅跨卷移动使用 = 移动的**源卷**）：该卷上存在
+	// 同 rel 属预期（它就是本次要搬走的源），不得据此判「同名文件已存在于卷 X」。
+	// 非空时改用「显式卷定卷（不查重）」写路径，并在域侧自行做 AD-4 查重（目标卷已有同 rel →
+	// 409；视图内**其它**卷已有同 rel → 409）——与本地卷跨卷移动核心 `moveCheckTargetUnique`
+	// 同口径。空值 = 普通复制（保持既有 AD-4 查重，零回归）。
+	UniqueExemptVol string
 }
 
 // CopyFileResult 是复制的领域出参。
@@ -102,6 +109,7 @@ func (s *Service) CopyFile(ctx context.Context, input CopyFileInput) (CopyFileRe
 	return s.copyViaKernel(ctx, owner, copyArgs{
 		from: from, to: to, fromRel: fromRel, toRel: toRel,
 		srcVol: srcVol, dstVol: dstVol, src: input.Src, root: root, force: input.Force,
+		uniqueExemptVol: input.UniqueExemptVol,
 	})
 }
 
@@ -167,6 +175,9 @@ type copyArgs struct {
 	src            DownloadSource
 	root           *storage.Root
 	force          bool
+	// uniqueExemptVol 非空 = 跨卷移动（值为移动**源卷**）：唯一性查重豁免该卷 + 改用
+	// 「显式卷定卷（不查重）」写路径（查重由 moveUniqueConflict 按源卷豁免口径完成）。
+	uniqueExemptVol string
 }
 
 // copyViaKernel 读源 → 统一写内核写目标。
@@ -200,6 +211,14 @@ func (s *Service) copyViaKernel(ctx context.Context, owner string, a copyArgs) (
 				return CopyFileResult{}, derr
 			}
 		}
+	}
+	// 写目标：
+	//   - 普通复制（uniqueExemptVol 空）：`WriteFile` 显式卷路由（**带 AD-4 唯一性查重**，防跨卷双份）；
+	//   - 跨卷移动（uniqueExemptVol = 源卷）：统一写内核 `WriteTarget`（显式卷定卷、不查重）——
+	//     查重已由域侧 moveUniqueConflict 按「源卷豁免」口径完成（否则源卷自己持有同 rel 会被
+	//     装配层的查重误判 409，这正是「跨卷移动涉及外部卷恒失败」的根因之一）。
+	if a.uniqueExemptVol != "" {
+		return s.copyViaTargetForMove(ctx, owner, a, checksum, size)
 	}
 	rc, oerr := s.openCopyStream(ctx, a)
 	if oerr != nil {
@@ -343,4 +362,33 @@ func (s *Service) openCopyStream(ctx context.Context, a copyArgs) (io.ReadCloser
 		return nil, &HTTPError{Status: 500, Message: errMsgOpenFileFailed}
 	}
 	return rc, nil
+}
+
+// copyViaTargetForMove 执行**跨卷移动**的目标写入：域侧 AD-4 查重（源卷豁免）+ 统一写内核
+// `WriteTarget`（显式卷定卷、不查重）。抽独立方法的原因：让 copyViaKernel 保持单一直线路径
+// （普通复制）与可读的复杂度预算。
+func (s *Service) copyViaTargetForMove(ctx context.Context, owner string, a copyArgs, checksum string, size int64) (CopyFileResult, error) {
+	conflictVol, cerr := s.moveUniqueConflict(ctx, owner, a)
+	if cerr != nil {
+		return CopyFileResult{}, cerr
+	}
+	if conflictVol != "" {
+		return CopyFileResult{}, &HTTPError{Status: http.StatusConflict,
+			Message: "同名文件已存在于卷 \"" + conflictVol + "\""}
+	}
+	rc, oerr := s.openCopyStream(ctx, a)
+	if oerr != nil {
+		return CopyFileResult{}, oerr
+	}
+	defer func() { _ = rc.Close() }()
+	tres, terr := s.WriteTarget(ctx, WriteTargetInput{
+		Owner: owner, RemotePath: a.to, Volume: a.dstVol,
+		Verify: true, ExpectedChecksum: checksum, ClientSize: size,
+	}, rc)
+	if terr != nil {
+		return CopyFileResult{}, terr
+	}
+	s.rt.recordFileAudit(ctx, "move", a.from, auditResultSuccess, "to="+a.to+" volume="+tres.VolumeName)
+	return CopyFileResult{From: a.from, To: a.to, VolumeName: tres.VolumeName,
+		Checksum: tres.Checksum, Size: tres.Size}, nil
 }

@@ -231,12 +231,18 @@ func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
 }
 
 // Rmdir 在服务端删除指定目录（含所有内容）。
-func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
+// Rmdir 删除目录（force=true 表示「已确认删除」，服务端据此放行递归删；false → 服务端 400）。
+// 确认责任在调用方（CLI 的 --force 或非空目录的交互确认）——服务端 require force 是**最后一道**
+// 闸门，客户端把「用户已确认」翻成 force=true。
+func (c *FileClient) Rmdir(ctx context.Context, dirname string, force bool) error {
 	if containsPathTraversal(dirname) {
 		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
 	}
 	rmQuery := url.Values{}
 	rmQuery.Set("dirname", dirname)
+	if force {
+		rmQuery.Set("force", "true")
+	}
 	c.appendVolumeQuery(rmQuery)
 	urlPath := "/rmdir?" + rmQuery.Encode()
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)

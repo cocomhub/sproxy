@@ -94,8 +94,18 @@ type ExternalVolumeOps interface {
 	// 「目录已创建」，卷上却找不到）；目录必须建在目标卷自己的键空间里。
 	ExternalMkdir(ctx context.Context, owner, volName, dir string) (bool, error)
 
+	// ExternalRemoveDir 删除 volName（外部卷）上的目录（用户可见相对路径）。force=true 时
+	// **递归删除**整棵子树（先子后父）；force=false → 400（与本地 rmdir 的「必须显式确认」
+	// 语义一致——绝不静默递归删用户内容）。
+	//
+	// 返回 (true, err) = 已裁决（err 为 *HTTPError：400 非法路径/不是目录/未确认、404 目录
+	// 不存在、409 封印、500 IO）；(false, nil) = 卷未装配 / 非外部卷 / owner 未授权
+	// （调用方回落本地流程，零回归）。
+	ExternalRemoveDir(ctx context.Context, owner, volName, dir string, force bool) (bool, error)
+
 	// ExternalRename 在 volName（外部卷）内把 owner 的 fromRemote 重命名为 toRemote
-	// （两者均为用户可见相对路径；**同卷内**语义——跨卷移动由既有 move API 承担）。
+	// （两者均为用户可见相对路径；**同卷内**语义——跨卷移动由 move API 承担，涉及外部/加密卷
+	// 时经域侧组合：复制（统一写内核）+ 删源（接缝/delete））。
 	//
 	// expectedChecksum 非空 → 与 sidecar/meta **记录**的整文件 SHA-256 交叉比对（**不重算**）；
 	// 不一致 → `*HTTPError{409}`。目标已存在 → `*HTTPError{409}`（不静默覆盖）。

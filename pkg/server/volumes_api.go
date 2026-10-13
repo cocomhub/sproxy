@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -194,11 +195,73 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 同卷移动 = no-op 成功（幂等）。放在内部分派之前：外部卷也走该判定（不能落到复制路径的
+	// 「目标已存在」判据）。语义与本地核心一致。
+	if fromVol == toVol {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "volume_move", ObjectType: "file", Object: remotePath,
+			Result: AuditResultSuccess, Detail: "已在目标卷（同卷 no-op）",
+		})
+		status, resp := moveOKResp("文件已在目标卷，无需移动")
+		sendJSONResponse(w, resp, status)
+		return
+	}
+
+	// **外部/加密卷参与**：本地-root 核心（moveFileBetweenVolumes）依赖写盘 root 与本地原子
+	// rename ⇒ 只覆盖本地卷（涉及外部卷的移动此前直接 400 无效的文件路径）。此类组合交域侧：
+	// 复制经统一写内核（配额/sidecar/封印与 cp 完全一致）+ 删源经接缝（外部卷硬删）或既有
+	// delete 路径（本地卷）。
+	if h.moveNeedsDomainPath(fromVol, toVol) {
+		status, resp := h.moveFileViaService(r, owner, remotePath, fromVol, toVol)
+		sendJSONResponse(w, resp, status)
+		return
+	}
+
 	// 单文件移动核心：ACL 校验通过后，由 moveFileBetweenVolumes 完成同 rel 的
 	// 锁 + 源校验 + 唯一性查重 + 双预留 + 复制 + 删源 + commit/release。
 	// 返回 (状态码, 响应体)。move 与 rebalance 共用同一原子语义（rebalance 逐文件调用）。
 	status, resp := h.moveFileBetweenVolumes(r, owner, remotePath, fromVol, toVol)
 	sendJSONResponse(w, resp, status)
+}
+
+// moveNeedsDomainPath 报告跨卷移动是否必须走域侧组合路径（涉及**非本地卷**）：
+// 外部/加密卷没有 `*storage.Root`，本地-root 核心（写盘 root + 本地原子 rename）无法承载。
+// 卷名已过 ACL 白名单校验，未知卷不会到达这里。
+func (h *Handlers) moveNeedsDomainPath(fromVol, toVol string) bool {
+	if h.volSet == nil {
+		return false
+	}
+	return h.volSet.Root(fromVol) == nil || h.volSet.Root(toVol) == nil
+}
+
+// moveFileViaService 经域侧执行跨卷移动（涉及外部/加密卷）。装配层只解析**只读源**：源为
+// 外部卷时给 externalReadSource（解密转发 + meta 校验口径），本地卷源交域侧按卷定位。
+// 返回 (HTTP 状态码, 响应体)，与 moveFileBetweenVolumes 同形。
+func (h *Handlers) moveFileViaService(r *http.Request, owner, remotePath, fromVol, toVol string) (int, UploadResponse) {
+	svc := h.fileServiceLocked()
+	if svc == nil {
+		return moveErrResp(http.StatusBadRequest, "文件服务未装配")
+	}
+	ctx := r.Context()
+	var src files.DownloadSource
+	if h.isExternalVolumeName(fromVol) {
+		src = h.externalReadSource(ctx, owner, fromVol, remotePath)
+	}
+	res, err := svc.MoveFile(ctx, files.MoveFileInput{
+		Owner: owner, From: remotePath, To: remotePath,
+		FromVol: fromVol, ToVol: toVol, Src: src,
+	})
+	if err != nil {
+		if he, ok := errors.AsType[*files.HTTPError](err); ok {
+			return moveErrResp(he.Status, he.Message)
+		}
+		return moveErrResp(http.StatusInternalServerError, err.Error())
+	}
+	h.RecordAudit(ctx, AuditEvent{
+		Action: "volume_move", ObjectType: "file", Object: remotePath, Result: AuditResultSuccess,
+		Detail: fmt.Sprintf("%s → %s（%d 字节）", fromVol, toVol, res.Size),
+	})
+	return moveOKResp(fmt.Sprintf("移动完成: %s → %s", res.From, res.To))
 }
 
 // rebalanceVolumeResponse 是 POST /api/volumes/rebalance 的响应体。

@@ -162,7 +162,7 @@ func batchRunRmdir(cmd *cobra.Command, svc *client.FileClient, st *state.State, 
 	if err != nil {
 		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
 	}
-	if err := svc.Rmdir(cmd.Context(), remote); err != nil {
+	if err := svc.Rmdir(cmd.Context(), remote, true); err != nil {
 		return batchOperationResult{Name: raw, Success: false, Message: err.Error()}
 	}
 	return batchOperationResult{Name: raw, Success: true, Message: "OK"}

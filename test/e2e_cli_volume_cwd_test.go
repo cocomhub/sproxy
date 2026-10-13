@@ -54,11 +54,19 @@ func TestE2E_CLI_VolumeCwd_DefaultsToCurrentVolume(t *testing.T) {
 		t.Fatalf("vault 卷根应含 sub 目录, got:\n%s", out)
 	}
 
-	// 4.1) 加密卷**目录删除**尚未接线 ⇒ 必须 fail-closed 且提示清晰（绝不能静默删本地同名目录）。
-	if _, stderr, rerr := env.sclientRun(t, env.TmpDir, "rmdir", "vault:/sub", "--force"); rerr == nil {
-		t.Fatal("外部/加密卷 rmdir 应 fail-closed（当前未接线）")
-	} else if !strings.Contains(stderr, "暂不支持删除目录") {
-		t.Fatalf("rmdir 失败信息应说明原因, got: %s", stderr)
+	// 4.1) 加密卷**目录删除**已接线：经接缝递归删**该卷自己的键空间**；同名本地目录绝不受影响
+	// （这正是当初 fail-closed 的动机——删错对象）。
+	env.sclient(t, env.TmpDir, "cd", "/")
+	env.sclient(t, env.TmpDir, "mkdir", "localsub") // 本地卷同名/近似名对象
+	env.sclient(t, env.TmpDir, "cd", "vault:/")
+	if out := env.sclient(t, env.TmpDir, "rmdir", "vault:/sub", "--force"); !strings.Contains(out, "目录已删除") {
+		t.Fatalf("加密卷 rmdir 应成功并提示已删除, got:\n%s", out)
+	}
+	if out := env.sclient(t, env.TmpDir, "list", "vault:/"); strings.Contains(out, "sub") {
+		t.Fatalf("删除后 vault 卷根不应再有 sub, got:\n%s", out)
+	}
+	if out := env.sclient(t, env.TmpDir, "list", "main:/"); !strings.Contains(out, "localsub") {
+		t.Fatalf("本地卷对象不得被牵连删除, got:\n%s", out)
 	}
 
 	// 5) 相对路径 download（从工作目录卷根起算）。

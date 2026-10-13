@@ -2013,3 +2013,49 @@ func (fs *SecretdataFS) walkIndex(ctx context.Context, prefix string, fn func(re
 	}
 	return nil
 }
+
+// TestSecretdata_RemoveDir 钉住**显式删空目录**能力：目录不参与文件索引 ⇒ `Delete` 对目录键
+// 是 no-op（历史上空目录只能靠「最后一个文件被删」顺带回收）⇒ 显式删除必须走 RemoveDir：
+// 空目录删掉后 list 不再可见、祖先空目录一并回收；非空目录拒绝（递归删由调用方先清子树）。
+func TestSecretdata_RemoveDir(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fs := newFS(t)
+
+	if err := fs.MakeDir(ctx, "a/b/c"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	// 空目录：Delete（文件语义）是 no-op ⇒ 必须靠 RemoveDir 才真的消失。
+	if err := fs.Delete(ctx, "a/b/c"); err != nil {
+		t.Fatalf("Delete(目录) 应幂等 no-op: %v", err)
+	}
+	if entries, err := fs.ListDir(ctx, "a/b"); err != nil || len(entries) != 1 {
+		t.Fatalf("Delete(目录键) 应当是 no-op（否则 RemoveDir 无意义）: entries=%d err=%v", len(entries), err)
+	}
+	if err := fs.RemoveDir(ctx, "a/b/c"); err != nil {
+		t.Fatalf("RemoveDir: %v", err)
+	}
+	// 语义提示：secretdata 的 Stat 对不存在返回 (nil, nil)（非 error）。
+	if st, serr := fs.Stat(ctx, "a/b/c"); serr != nil {
+		t.Fatalf("Stat 出错: %v", serr)
+	} else if st != nil {
+		t.Fatal("空目录删除后 Stat 应返回 nil（目录不存在）")
+	}
+	if entries, err := fs.ListDir(ctx, "a/b"); err != nil || len(entries) != 0 {
+		t.Fatalf("RemoveDir 后父目录应看不到该子目录: entries=%d err=%v", len(entries), err)
+	}
+	// 非空目录：拒绝（调用方须先清子树）。
+	if err := fs.MakeDir(ctx, "keep"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(ctx, "keep/f.bin", bytes.NewReader([]byte("payload")), 7, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.RemoveDir(ctx, "keep"); err == nil {
+		t.Fatal("非空目录必须拒绝删除")
+	}
+	// 卷根：拒绝。
+	if err := fs.RemoveDir(ctx, ""); err == nil {
+		t.Fatal("不允许删除卷根目录")
+	}
+}

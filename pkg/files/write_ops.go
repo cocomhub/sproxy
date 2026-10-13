@@ -498,7 +498,11 @@ func (s *Service) routeWriteUpload(ctx context.Context, logger *slog.Logger, own
 		return UploadRoute{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 	}
 	if route.Tenant == nil && route.Sink == nil {
-		route.Release()
+		// 空 route = 路由实现未装配/未命中（既无租户也无 sink）⇒ 仍 fail-closed 400。
+		// Release 可能为 nil（空 route 的常态）⇒ 不得直接调用（nil func 调用会 panic）。
+		if route.Release != nil {
+			route.Release()
+		}
 		return UploadRoute{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	return route, nil
@@ -729,7 +733,7 @@ type RemoveDirResult struct {
 //   - 400：dirname 为空 / 路径非法 / 租户不可用 / 目标不是目录 / 目标为符号链接 / 未带 force
 //   - 404：目录不存在（任何卷上都没有）
 //   - 500：访问目录失败 / 删除失败
-func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult, error) {
+func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string, force bool) (RemoveDirResult, error) {
 	if dirname == "" {
 		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "dirname 不能为空"}
 	}
@@ -739,7 +743,15 @@ func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult,
 	}
 	// 归一 owner（空 → anonymous）：目录探测/删除与列表/写路径同键，未认证请求归属 anonymous。
 	owner = normalizeOwner(owner)
-	// 路径映射与卷无关，用默认租户做纯路径校验；卷感知只决定目录落到哪些卷的租户根。
+	// **显式卷**（`?volume=` / CLI 卷 URI / 工作目录所在卷）：
+	//   - 外部/加密卷：目录必须从**该卷自己的键空间**删（经接缝递归删，先子后父）；
+	//   - 本地卷：交下方逐卷定位（显式卷不改变多卷语义）。
+	// 不能省：否则 `rmdir --volume <加密卷> ...` 会落到本地卷同名目录（删错对象）。
+	if volName != "" {
+		if res, handled, rmErr := s.removeDirExplicitVolume(ctx, owner, remotePath, volName, force); handled {
+			return res, rmErr
+		}
+	}
 	tnt0 := s.rt.tenantOf(owner)
 	if tnt0 == nil || tnt0.Root() == nil {
 		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
@@ -786,6 +798,35 @@ func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult,
 	// 文件变更事件：rmdir 成功。
 	s.rt.publishFileEvent(EventRmdir, owner, rel, 0)
 	return RemoveDirResult{RemotePath: remotePath}, nil
+}
+
+// removeDirExplicitVolume 处理「显式指定卷」的 rmdir：外部/加密卷经 ExternalRemoveDir 接缝
+// 递归删除（卷自己的键空间）；本地卷或未装配接缝 → handled=false（交本地逐卷流程，零回归）。
+//
+// 与 makeDirExplicitVolume 同构：未授权卷 → 404（不泄卷存在性）；force 语义与本地 rmdir 一致
+// （必须显式 force=true 才删，绝不静默递归删）。
+func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath, volName string, force bool) (RemoveDirResult, bool, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return RemoveDirResult{}, false, nil // 未装配接缝：零回归
+	}
+	if vs := s.rt.volSet(); vs != nil {
+		if v, ok := vs.ByName(volName); !ok || !v.Authorize(owner) {
+			return RemoveDirResult{}, true, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		} else if vs.Root(volName) != nil {
+			return RemoveDirResult{}, false, nil // 本地卷 → 交本地流程
+		}
+	}
+	removed, err := ops.ExternalRemoveDir(ctx, owner, volName, remotePath, force)
+	if err != nil {
+		return RemoveDirResult{}, true, err
+	}
+	if !removed {
+		return RemoveDirResult{}, false, nil
+	}
+	s.rt.logger().Info("目录已删除（外部卷）", "dir", remotePath, "volume", volName)
+	s.rt.publishFileEvent(EventRmdir, owner, remotePath, 0)
+	return RemoveDirResult{RemotePath: remotePath}, true, nil
 }
 
 // cleanupRemovedDir 目录删除成功后的收尾：按各文件实际子 Scope（按 rel 解析）释放配额

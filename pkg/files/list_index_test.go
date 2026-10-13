@@ -127,7 +127,7 @@ func TestService_ListFiles_IndexTracksRmdir(t *testing.T) {
 	body := []byte("nested")
 	env.upload(t, "alice", "subdir/inner.txt", body, sha256Hex(body), 0)
 
-	if _, err := env.svc.RemoveDir("alice", "subdir", true); err != nil {
+	if _, err := env.svc.RemoveDir(context.Background(), "alice", "subdir", "", true); err != nil {
 		t.Fatalf("RemoveDir: %v", err)
 	}
 

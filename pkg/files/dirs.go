@@ -92,14 +92,11 @@ func (s *Service) Mkdir(w http.ResponseWriter, r *http.Request) {
 // 文件唯一性约束，可跨卷并存）。递归删除用 root.RemoveAll（os.Root 保证符号链接不逃逸）；
 // checksum 从 per-tenant store 清理 rel 前缀与 rel 自身。
 func (s *Service) Rmdir(w http.ResponseWriter, r *http.Request) {
-	// 安全护栏：显式卷为**外部卷**时，删目录尚未接线（`syncpkg.FS` 无目录级递归删）——
-	// 必须 fail-closed 报错，绝不能把命令当成「删本地卷同名目录」（静默删错对象）。
-	if vol := r.URL.Query().Get("volume"); vol != "" && s.isExternalVolume(vol) {
-		s.sendJSON(w, UploadResponse{Success: false,
-			Message: "外部/加密卷暂不支持删除目录（请先删除目录内文件）"}, http.StatusNotImplemented)
-		return
-	}
-	res, err := s.RemoveDir(s.rt.actorOf(r), r.URL.Query().Get("dirname"), r.URL.Query().Get("force") == "true")
+	// 显式卷（`?volume=` / CLI 卷 URI / 工作目录所在卷）由 RemoveDir 分派：外部/加密卷经接缝
+	// **递归删除**（卷自己的键空间，先子后父）；本地卷仍走逐卷定位（多卷语义不变）。
+	// 此前外部卷在此 fail-closed 501（`syncpkg.FS` 无目录级递归删）⇒ 加密卷上无法删目录。
+	res, err := s.RemoveDir(r.Context(), s.rt.actorOf(r), r.URL.Query().Get("dirname"),
+		r.URL.Query().Get("volume"), r.URL.Query().Get("force") == "true")
 	if err != nil {
 		he := asHTTPError(err)
 		s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
@@ -130,17 +127,4 @@ func validateRmdirTarget(root *storage.Root, rel string) error {
 		}
 	}
 	return nil
-}
-
-// isExternalVolume 判定显式卷名是否指向**外部卷**（无本地 *storage.Root）。未装配卷集合
-// 或卷不可见 → false（交既有本地流程，不改变历史语义）。
-func (s *Service) isExternalVolume(volName string) bool {
-	vs := s.rt.volSet()
-	if vs == nil || volName == "" {
-		return false
-	}
-	if _, ok := vs.ByName(volName); !ok {
-		return false
-	}
-	return vs.Root(volName) == nil
 }

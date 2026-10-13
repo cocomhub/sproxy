@@ -522,6 +522,97 @@ func (o externalVolumeOps) ExternalMkdir(ctx context.Context, owner, volName, di
 	return true, nil
 }
 
+// ExternalRemoveDir 实现 files.ExternalVolumeOps：删除外部卷上的目录（`force=true` 时递归）。
+//
+// 语义：非外部卷/未授权/未装配 → (false, nil)（调用方零回归）；否则 (true, err)，err 为
+// `*files.HTTPError`（400 非法路径/不是目录/未确认、404 不存在、409 封印、500 IO）。
+// 递归删先子后父（目录自身最后删）；深度上限防异常后端把键空间挂成环。
+func (o externalVolumeOps) ExternalRemoveDir(ctx context.Context, owner, volName, dir string, force bool) (bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return false, nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return false, nil
+	}
+	loc, kerr := v.ResolveUserLocation(owner, dir)
+	if kerr != nil {
+		return true, &files.HTTPError{Status: http.StatusBadRequest, Message: "无效的目录路径"}
+	}
+	key := loc.FSPath()
+	e, serr := fsys.Stat(ctx, key)
+	if serr != nil || e == nil {
+		return true, &files.HTTPError{Status: http.StatusNotFound, Message: "目录不存在"}
+	}
+	if !e.IsDir {
+		return true, &files.HTTPError{Status: http.StatusBadRequest, Message: "指定路径不是目录"}
+	}
+	// 与本地 rmdir 同语义：必须显式 force=true 才删（绝不静默递归删用户内容）。
+	if !force {
+		return true, &files.HTTPError{Status: http.StatusBadRequest, Message: "请使用 ?force=true 确认删除"}
+	}
+	if derr := h.deleteExternalTree(ctx, fsys, key, 0); derr != nil {
+		return true, derr
+	}
+	return true, nil
+}
+
+// maxExternalTreeDepth 是外部卷目录树递归删除的深度上限（防异常后端 / 键空间环）。
+const maxExternalTreeDepth = 64
+
+// deleteExternalTree 递归删除外部卷目录树（先子目录、后文件、最后目录自身）。
+// 错误映射与 ExternalDelete 同口径（封印 → 409；其它 IO → 500 + 服务端日志）。
+func (h *Handlers) deleteExternalTree(ctx context.Context, fsys syncpkg.FS, key string, depth int) error {
+	if depth > maxExternalTreeDepth {
+		return &files.HTTPError{Status: http.StatusInternalServerError, Message: "目录层级过深，拒绝递归删除"}
+	}
+	entries, err := fsys.ListDir(ctx, key)
+	if err != nil {
+		h.logger.ErrorContext(ctx, "外部卷列目录失败（递归删）", "path", key, "error", err.Error())
+		return &files.HTTPError{Status: http.StatusInternalServerError, Message: "读取目录失败"}
+	}
+	for _, e := range entries {
+		child := path.Join(key, e.Name)
+		if e.IsDir {
+			if derr := h.deleteExternalTree(ctx, fsys, child, depth+1); derr != nil {
+				return derr
+			}
+			continue
+		}
+		if derr := fsys.Delete(ctx, child); derr != nil {
+			return h.mapExternalDeleteErr(ctx, child, derr)
+		}
+	}
+	if derr := fsys.Delete(ctx, key); derr != nil {
+		return h.mapExternalDeleteErr(ctx, key, derr)
+	}
+	// secretdata 等「目录不进文件索引」的卷：Delete 对目录键是 no-op ⇒ 需可选能力显式删容器。
+	// 能力断言必须**穿透装饰器**（Guard/Wrap/CapacityFS），且 Delete 已先行 ⇒ 封印（ErrSealed）
+	// 与容量联动语义不因走最内层而绕过（封印在 Delete 一步已 fail-closed）。
+	if rd, ok := syncpkg.Innermost(fsys).(interface {
+		RemoveDir(ctx context.Context, path string) error
+	}); ok {
+		if derr := rd.RemoveDir(ctx, key); derr != nil {
+			return h.mapExternalDeleteErr(ctx, key, derr)
+		}
+	}
+	return nil
+}
+
+// mapExternalDeleteErr 把外部卷删除错误映射为领域错误（封印 409；其它 500）。
+func (h *Handlers) mapExternalDeleteErr(ctx context.Context, key string, err error) error {
+	if errors.Is(err, storage.ErrSealed) {
+		return &files.HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接删除"}
+	}
+	h.logger.ErrorContext(ctx, "外部卷删除失败", "path", key, "error", err.Error())
+	return &files.HTTPError{Status: http.StatusInternalServerError, Message: "删除失败"}
+}
+
 // ExternalRename 实现 files.ExternalVolumeOps：经**同一可信链**在外部卷内重命名
 // （用户可见相对路径 → 卷内键经 ResolveUserLocation 翻译）。fail-closed：源不存在 → 未命中
 // （调用方回落 404）；目标已存在 → 409（不静默覆盖）；checksum 不一致 → 409；封印 → 409。
