@@ -692,6 +692,32 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	return nil
 }
 
+// RemoveDir 删除**空**目录（非空 → 错误；子树递归删由调用方先清空）。
+//
+// 为什么必须单独提供：卷内**目录不参与文件索引**（`s.index` 只含文件条目）⇒ `Delete` 对目录键
+// 是 no-op（历史上空目录只能靠「最后一个文件被删」时的 `pruneEmptyDirsLocked` 顺带回收）⇒
+// 显式删空目录必须走本方法：删掉该目录自己的容器（目录 meta + 残留文件）并向上回收变空的祖先。
+// 这是 `syncpkg.FS` 之外的**可选能力**（Delete 的删除语义只对文件成立），调用方按类型断言使用。
+func (s *SecretdataFS) RemoveDir(ctx context.Context, rel string) error {
+	key := strings.TrimPrefix(rel, "/")
+	if key == "" {
+		return fmt.Errorf("secretdata: 不允许删除卷根目录")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	container, ok := s.dirSegs[key]
+	if !ok {
+		return nil // 幂等：目录不存在（含纯虚拟中间目录）
+	}
+	if s.dirHasContentLocked(key) {
+		return fmt.Errorf("secretdata: 目录 %q 非空，拒绝删除", key)
+	}
+	s.removeEmptyContainerLocked(ctx, container, key)
+	s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
+	s.volVersion++
+	return nil
+}
+
 // MakeDir 创建逻辑空目录：递归创建随机容器目录 + 目录 meta（q 标记，{name, parent_dir_id}
 // 父引用模型），不再提若干层（旧 inner.MakeDir(rel) 会向底层泄漏目录名，违背目录名保密）。
 func (s *SecretdataFS) MakeDir(ctx context.Context, rel string) error {

@@ -34,7 +34,7 @@ func TestMkdir_Rmdir_CarryVolumeQuery(t *testing.T) {
 	if err := c.Mkdir(ctx, "sub"); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
-	if err := c.Rmdir(ctx, "sub"); err != nil {
+	if err := c.Rmdir(ctx, "sub", true); err != nil {
 		t.Fatalf("Rmdir: %v", err)
 	}
 	want := []string{"/mkdir?vault|sub", "/rmdir?vault|sub"}

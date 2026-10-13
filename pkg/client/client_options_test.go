@@ -484,7 +484,7 @@ func TestRmdir_RoundTrip(t *testing.T) {
 	})
 
 	c := NewFileClient(ts.URL)
-	if err := c.Rmdir(t.Context(), "testdir"); err != nil {
+	if err := c.Rmdir(t.Context(), "testdir", true); err != nil {
 		t.Fatalf("Rmdir: %v", err)
 	}
 }
@@ -497,7 +497,7 @@ func TestRmdir_ServerError(t *testing.T) {
 	})
 
 	c := NewFileClient(ts.URL)
-	if err := c.Rmdir(t.Context(), "nonexistent"); err == nil {
+	if err := c.Rmdir(t.Context(), "nonexistent", true); err == nil {
 		t.Fatal("expected error for non-existent dir")
 	}
 }

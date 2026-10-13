@@ -88,6 +88,8 @@ type dirsEnv struct {
 	// fileMeta 为 true 时注入可信卷 meta 能力（WithFileMeta testMetaPolicy）——软删
 	// 随迁 meta/恢复/清理联动用例需要它；默认 false 零回归（不落 .meta）。
 	fileMeta bool
+	// externalOps 是外部卷对象操作接缝替身（非 nil 时注入 Service；MoveFile/外部卷用例用）。
+	externalOps ExternalVolumeOps
 	// uploading 是替身锁池（TryMark/Acquire 共用，rebuild 时重置——与旧 deps() 每次新建
 	// &sync.Map{} 同语义）。
 	uploading sync.Map
@@ -165,6 +167,9 @@ func (e *dirsEnv) newService() *Service {
 	}
 	if e.fileMeta {
 		opts = append(opts, WithFileMeta(testMetaPolicy{}))
+	}
+	if e.externalOps != nil {
+		opts = append(opts, WithExternalOps(e.externalOps))
 	}
 	if e.metrics != nil {
 		opts = append(opts, WithMetrics(e.metrics))
