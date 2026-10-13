@@ -9,9 +9,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -144,24 +146,6 @@ func TestApplyEnclosureSeals_NoDeclZeroRegression(t *testing.T) {
 	}
 }
 
-// TestApplyEnclosureSeals_ExternalSourceRejected 跨外部卷源当前未接入 ⇒ 装配期显式拒绝
-// （禁静默降级：否则会留下「以为封了其实没封」的安全缺口）。
-func TestApplyEnclosureSeals_ExternalSourceRejected(t *testing.T) {
-	t.Parallel()
-	registerSealTestWrapper()
-	acc := volAccumForTest(t, t.TempDir())
-	acc.volumes = []volume.Volume{
-		{Name: "main", Type: volume.TypeLocal},
-		{Name: "ext", Type: "baidupcs"},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
-			"source": "ext:some/dir", "wrapper": "testsealwrapper",
-		}},
-	}
-	if err := applyEnclosureSeals(nil, acc); err == nil {
-		t.Fatal("跨外部卷源应装配期拒绝")
-	}
-}
-
 // TestApplyEnclosureSeals_InvalidDeclFailsClosed 声明非法（如缺 wrapper）⇒ 装配失败且可归因。
 func TestApplyEnclosureSeals_InvalidDeclFailsClosed(t *testing.T) {
 	t.Parallel()
@@ -172,5 +156,128 @@ func TestApplyEnclosureSeals_InvalidDeclFailsClosed(t *testing.T) {
 	}
 	if err := applyEnclosureSeals(nil, acc); !errors.Is(err, enclosure.ErrMissingWrapper) {
 		t.Fatalf("非法声明应 fail-closed 且可归因, got %v", err)
+	}
+}
+
+// fakeExtBackend 是外部卷后端替身（只提供 FS/Close）。
+type fakeExtBackend struct{ fs syncpkg.FS }
+
+func (b fakeExtBackend) FS() syncpkg.FS { return b.fs }
+func (b fakeExtBackend) Close() error   { return nil }
+
+// TestApplyEnclosureSeals_ExternalSourceSealedViaBackendFS：**外部卷作源**时封印套在后端 FS 上
+// （装配处收口）——所有 `be.FS()` 调用者（HTTP/DAV/S3/分享/云任务/接缝）自动继承；
+// 封装卷自身经 UnsealedSource 取未封印特权视图（只剥封印层）。
+// 变异：去掉 injectSeals 的 SealBackend 包装 → 写入不再被拒 → 红。
+func TestApplyEnclosureSeals_ExternalSourceSealedViaBackendFS(t *testing.T) {
+	t.Parallel()
+	registerSealTestWrapper()
+	raw := syncpkg.NewLocalFS(t.TempDir(), nil)
+	ctx := context.Background()
+	for _, p := range []string{"alice/user/vault", "alice/user/other"} {
+		if err := raw.MakeDir(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	acc := &volumeAccum{
+		roots:    map[string]*storage.Root{},
+		external: map[string]registry.ExternalBackend{"ext": fakeExtBackend{fs: raw}},
+		pools:    map[string]*quota.Pool{"ext": quota.NewPool(0), "vault": quota.NewPool(0)},
+	}
+	acc.volumes = []volume.Volume{
+		{Name: "ext", Type: "s3"},
+		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
+			"source": "ext:alice/user/vault", "wrapper": "testsealwrapper",
+		}},
+	}
+	if err := applyEnclosureSeals(nil, acc); err != nil {
+		t.Fatalf("外部源封装装配应成功（FS 级封印已接入）: %v", err)
+	}
+	be := acc.external["ext"]
+	view := be.FS()
+	// 写：恒拒（可归因 ErrSealed）——覆盖「直连外部卷后端」的十余处调用者。
+	if werr := view.WriteFile(ctx, "alice/user/vault/x.bin", strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+		t.Fatalf("外部卷封印路径写入必须被拒（ErrSealed）, got %v", werr)
+	}
+	// 读：hidden ⇒ 同时可归因 fs.ErrNotExist 与 ErrSealed。
+	if _, rerr := view.OpenRead(ctx, "alice/user/vault/x.bin"); !errors.Is(rerr, fs.ErrNotExist) || !errors.Is(rerr, storage.ErrSealed) {
+		t.Fatalf("外部卷封印路径读应按「不存在」且可归因, got %v", rerr)
+	}
+	// 列举过滤：hidden 下不泄漏封装布局。
+	if err := raw.WriteFile(ctx, "alice/user/vault/real.bin", strings.NewReader("payload"), 7, 0); err != nil {
+		t.Fatal(err)
+	}
+	entries, lerr := view.ListDir(ctx, "alice/user")
+	if lerr != nil {
+		t.Fatalf("父目录列举应可用: %v", lerr)
+	}
+	for _, e := range entries {
+		if e.Name == "vault" {
+			t.Fatalf("hidden 模式必须过滤封印条目, got %+v", entries)
+		}
+	}
+	// 未封印路径不受影响（零回归）。
+	if werr := view.WriteFile(ctx, "alice/user/other/ok.bin", strings.NewReader("ok"), 2, 0); werr != nil {
+		t.Fatalf("同卷未封印路径写应放行, got %v", werr)
+	}
+	// 特权视图：封装卷自身仍能读写被封区间（只剥封印层 ⇒ 源卷配额/可信装饰器保留）。
+	priv := enclosure.UnsealedSource(be)
+	if priv == nil {
+		t.Fatal("未封印特权视图应可用")
+	}
+	if werr := priv.WriteFile(ctx, "alice/user/vault/by-enclosure.bin", strings.NewReader("plain"), 5, 0); werr != nil {
+		t.Fatalf("特权视图必须能写入被封区间, got %v", werr)
+	}
+	if _, serr := raw.Stat(ctx, "alice/user/vault/by-enclosure.bin"); serr != nil {
+		t.Fatalf("特权写入应真的落到源存储: %v", serr)
+	}
+}
+
+// TestApplyEnclosureSeals_ExternalWholeVolume：外部源「空子路径 = 整卷封印」同样生效。
+func TestApplyEnclosureSeals_ExternalWholeVolume(t *testing.T) {
+	t.Parallel()
+	registerSealTestWrapper()
+	raw := syncpkg.NewLocalFS(t.TempDir(), nil)
+	ctx := context.Background()
+	acc := &volumeAccum{
+		roots:    map[string]*storage.Root{},
+		external: map[string]registry.ExternalBackend{"ext": fakeExtBackend{fs: raw}},
+		pools:    map[string]*quota.Pool{"ext": quota.NewPool(0)},
+	}
+	acc.volumes = []volume.Volume{
+		{Name: "ext", Type: "s3"},
+		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
+			"source": "ext:", "wrapper": "testsealwrapper",
+		}},
+	}
+	if err := applyEnclosureSeals(nil, acc); err != nil {
+		t.Fatalf("外部源整卷封装装配应成功: %v", err)
+	}
+	view := acc.external["ext"].FS()
+	for _, p := range []string{"alice/user/a.bin", "meta/x.meta", "deep/nested/p.bin"} {
+		if werr := view.WriteFile(ctx, p, strings.NewReader("x"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+			t.Fatalf("整卷封印下 %s 写入必须被拒, got %v", p, werr)
+		}
+	}
+}
+
+// TestApplyEnclosureSeals_ExternalSourceMissingBackendFailsClosed：外部源后端未装配 →
+// **fail-closed 拒绝启动**（禁静默降级：否则会留下「以为封了其实没封」的安全缺口）。
+func TestApplyEnclosureSeals_ExternalSourceMissingBackendFailsClosed(t *testing.T) {
+	t.Parallel()
+	registerSealTestWrapper()
+	acc := &volumeAccum{
+		roots:    map[string]*storage.Root{},
+		external: map[string]registry.ExternalBackend{},
+		pools:    map[string]*quota.Pool{},
+	}
+	acc.volumes = []volume.Volume{
+		{Name: "ext", Type: "s3"},
+		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
+			"source": "ext:alice/user/vault", "wrapper": "testsealwrapper",
+		}},
+	}
+	if err := applyEnclosureSeals(nil, acc); err == nil {
+		t.Fatal("外部源后端缺失必须装配失败（fail-closed）")
 	}
 }

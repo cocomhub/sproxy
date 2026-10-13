@@ -92,8 +92,15 @@ volumes:
       max_bytes: 8GiB                # 封装卷自身上限；缺省=仅受源卷池约束（继承）
 ```
 
-- 源为外部卷（`baidupcs`/`s3`/…）：子路径按 **owner 运行时**拼接（`<owner>/<bucket>/<sub>`），
-  视图在**租户解析期**构造（`Set.Tenant` 链），非装配期静态构造。
+- 源为外部卷（`baidupcs`/`s3`/…）：**已接入**（2026-10-13）。源卷没有 `*storage.Root` ⇒ 封印
+  经 `pkg/volume/enclosure/sealfs.go` 的 **FS 级封印装饰器**（`SealFS`）施加，并套在**装配处**：
+  `pkg/server/volumes_enclosure.go` 对 `acc.external[baseVol]` 就地 `SealBackend` 包装 ⇒
+  所有 `be.FS()` 调用者（HTTP/DAV/S3/分享/云任务/接缝）**自动继承封印**（逐面打补丁必漏）。
+  封装卷自身经 `enclosure.UnsealedSource(be)` 取**未封印特权视图**——只剥封印层，配额
+  （CapacityFS）/可信（trusted Wrap/Guard）装饰器保留（用 `sync.Innermost` 会把这些一并剥掉，
+  导致源卷侧容量结算与 sidecar 校验失效）。
+  **仍为下一片**：`<owner>` 运行时拼接的 per-tenant 源视图（`Decl.SourceKey(owner)`，设计 §5 承诺）
+  ——现映射为「声明子路径 + 调用方键」的前缀视图；`*` 通配声明同样留给该片（先 fail-closed）。
 - 装配期 fail-closed：`source` 未注册/自封装/成环/深度 > 8/同一 `<卷>:<子路径>` 被两个封装卷声明/
   源卷同时 `extra.encrypt`（双重变换）/`wrapper` 未注册 → 报错拒绝启动。
 
@@ -317,6 +324,24 @@ parity 的物理字节合计」后，`CapacityFS` 写后结算与周期对账都
 写读往返取回明文 + **源目录无明文**（真加密）+ 内容落声明子树 + 真值 > 逻辑）。
 **变异 4 命中**（回退裸 PrefixFS / 生产不注册 wrapper / wrapper 构造失败 / 处理层不加密直通）。
 
-**残余（明示，未在本轮做）**：跨外部卷源（baidupcs/s3/egress）的 per-tenant 源视图仍装配期
-显式拒绝（`ErrExternalSourceTo`）；`type: secretdata` 独立卷与 `wrapper: secretdata` 并存
-（两者共用实现，未做旧写法下线）。
+**残余（明示，未在本轮做）**：跨外部卷源的 **per-tenant 源视图**（`Decl.SourceKey(owner)`：
+`<owner>/<bucket>/<sub>` 运行时拼接、`*` 通配声明）仍为下一片（当前映射 = 声明子路径前缀视图）；
+`type: secretdata` 独立卷与 `wrapper: secretdata` 并存（两者共用实现，未做旧写法下线）。
+
+### 已落地（2026-10-13）：外部卷源的封印
+
+- `pkg/storage`：导出 `SealAt`/`SealError`（与 `Root` 同判据，**单一事实源**，避免两套漂移）；
+- `pkg/volume/enclosure/sealfs.go`：`SealFS`（FS 级封印装饰器：写面全拒、读 hidden/readable、
+  列举过滤、直链抑制、`Inner()`/`UnsealedFS()` 特权解包、R21 能力全量转发）+ `SealBackend`
+  （挂到外部后端句柄上）+ `UnsealedSource`（装配层取特权源视图）；
+- `pkg/server/volumes_enclosure.go`：`injectSeals` 对**外部源卷**就地包装（后端缺失 → fail-closed）；
+- `pkg/volume/enclosure/attach.go`：`sourceFS` 支持外部/远端源（`UnsealedSource` 特权视图），
+  移除历史哨兵 `ErrExternalSourceTo`；
+- 门禁 **R27**（`internal/archcheck/external_fs_gate_test.go` + `external_fs_calls.tsv`）：
+  登记全部 `be.FS()` 直连点（次数只降不升）——外部卷封印的唯一长期保障（新增直连点必须显式
+  评估并在表内登记理由）。
+- 测试：`sealfs_test.go` 6 项（写全拒含改名两端/移动/复制/链接/staging/容量预检/meta 旁路、
+  hidden 读可归因、readable 放行写仍拒、列举过滤、直链抑制、特权解包、整卷规则）；
+  `volumes_enclosure_test.go` 3 项装配级（外部源封印经后端 FS 生效 + 特权视图可写、
+  外部源整卷封印、后端缺失 fail-closed）。变异 3 命中（去写 guard / 去 SealBackend 包装 / 新增
+  未登记直连点）。

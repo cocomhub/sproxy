@@ -139,8 +139,8 @@ func attachOne(ctx context.Context, set *registry.Set, d Decl, opt AttachOptions
 //   - 本地源：`NewLocalFS(卷根绝对路径)`（与 DAV/旧 secretdata 同型；封印在 storage.Root
 //     层，LocalFS 绕开封印正是「特权」的含义）；
 //   - 封装源（嵌套）：内层封装卷的后端 FS（已是带前缀视图，外层再叠自己的前缀）；
-//   - 其它外部源（baidupcs/s3/…）：封印未接入外部视图 → **装配期已在 applyEnclosureSeals
-//     拒绝**（此处防御性再拒，防绕过）。
+//   - 其它外部源（baidupcs/s3/…）：后端 FS 的**未封印**视图（封印层由装配层在
+//     applyEnclosureSeals 中套在该后端的 FS 上；此处只剥封印层 ⇒ 特权）。
 func sourceFS(set *registry.Set, d Decl) (syncpkg.FS, error) {
 	v, ok := set.ByName(d.Source)
 	if !ok {
@@ -160,5 +160,12 @@ func sourceFS(set *registry.Set, d Decl) (syncpkg.FS, error) {
 		}
 		return be.FS(), nil
 	}
-	return nil, fmt.Errorf("%w: %q（卷 %q 的源）", ErrExternalSourceTo, d.Source, d.Vol)
+	// 其它外部/远端源（s3/baidupcs/pikpak/cluster/secretdata/…）：封印（若装配层已为该源卷
+	// 注入，见 applyEnclosureSeals 对 acc.external 的包装）位于 FS 装饰器链上 ⇒ 取**未封印**
+	// 特权视图（只剥封印层，配额/可信装饰器保留）；封装自身读写被判区间不受封印影响。
+	be := set.External(d.Source)
+	if be == nil {
+		return nil, fmt.Errorf("enclosure: 源卷 %q 后端未装配（卷 %q；装配顺序应为源在前）", d.Source, d.Vol)
+	}
+	return UnsealedSource(be), nil
 }

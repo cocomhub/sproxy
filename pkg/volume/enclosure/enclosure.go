@@ -34,19 +34,21 @@ const MaxNestingDepth = 8
 
 // 声明解析错误（装配期 fail-closed；错误必须可归因到具体卷）。
 var (
-	ErrMissingSource    = errors.New("enclosure: 缺少 extra.source（格式 <源卷>:<子路径>）")
-	ErrBadSource        = errors.New("enclosure: extra.source 格式非法")
-	ErrMissingWrapper   = errors.New("enclosure: 缺少 extra.wrapper（封装处理层注册名）")
-	ErrUnknownWrapper   = errors.New("enclosure: extra.wrapper 未注册")
-	ErrSourceNotFound   = errors.New("enclosure: 源卷不存在")
-	ErrSelfEnclosure    = errors.New("enclosure: 不可封装自身")
-	ErrEnclosureCycle   = errors.New("enclosure: 封装链成环")
-	ErrTooDeep          = errors.New("enclosure: 封装嵌套超过深度上限")
-	ErrConflictClaim    = errors.New("enclosure: 同一源路径被多个封装卷声明")
-	ErrSourceEncrypted  = errors.New("enclosure: 源卷已启用 at-rest 加密（禁止双重变换）")
-	ErrExternalSourceTo = errors.New("enclosure: 跨外部卷封装尚未接入（装配期显式拒绝，禁静默降级）")
-	ErrBadReadMode      = errors.New("enclosure: source_read_mode 非法（hidden|readable）")
-	ErrBadMaxBytes      = errors.New("enclosure: max_bytes 非法（须 >= 0）")
+	ErrMissingSource   = errors.New("enclosure: 缺少 extra.source（格式 <源卷>:<子路径>）")
+	ErrBadSource       = errors.New("enclosure: extra.source 格式非法")
+	ErrMissingWrapper  = errors.New("enclosure: 缺少 extra.wrapper（封装处理层注册名）")
+	ErrUnknownWrapper  = errors.New("enclosure: extra.wrapper 未注册")
+	ErrSourceNotFound  = errors.New("enclosure: 源卷不存在")
+	ErrSelfEnclosure   = errors.New("enclosure: 不可封装自身")
+	ErrEnclosureCycle  = errors.New("enclosure: 封装链成环")
+	ErrTooDeep         = errors.New("enclosure: 封装嵌套超过深度上限")
+	ErrConflictClaim   = errors.New("enclosure: 同一源路径被多个封装卷声明")
+	ErrSourceEncrypted = errors.New("enclosure: 源卷已启用 at-rest 加密（禁止双重变换）")
+	// 历史：ErrExternalSourceTo（跨外部卷封装未接入，装配期拒绝）已随「FS 级封印装饰器」
+	// （sealfs.go）落地而移除——外部/远端源卷现在经装配处 SealBackend 注入封印，语义与
+	// 本地源一致（读 hidden/readable、写恒拒）。
+	ErrBadReadMode = errors.New("enclosure: source_read_mode 非法（hidden|readable）")
+	ErrBadMaxBytes = errors.New("enclosure: max_bytes 非法（须 >= 0）")
 )
 
 // Decl 是一条封装声明（装配期解析产物，之后不可变）。
