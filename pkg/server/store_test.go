@@ -5,7 +5,6 @@ package server
 
 import (
 	"fmt"
-	"path/filepath"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -15,7 +14,7 @@ import (
 
 func TestChecksumStore_DeletePrefix(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 
 	cs.Set("dir1/a.txt", "aaa")
 	cs.Set("dir1/b.txt", "bbb")
@@ -38,7 +37,7 @@ func TestChecksumStore_DeletePrefix(t *testing.T) {
 	}
 
 	// 重新加载验证持久化
-	cs2 := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	if _, ok := cs2.Get("dir1/a.txt"); ok {
 		t.Fatal("persisted file still has deleted prefix entry")
 	}
@@ -49,7 +48,7 @@ func TestChecksumStore_DeletePrefix(t *testing.T) {
 
 func TestChecksumStore_Rename_ToExisting(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 
 	cs.Set("from.txt", "fromVal")
 	cs.Set("to.txt", "toVal")
@@ -67,12 +66,12 @@ func TestChecksumStore_Rename_ToExisting(t *testing.T) {
 
 func TestChecksumStore_RecoverFromDisk(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
 
 	// 新建实例从磁盘加载
-	cs2 := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(all))
@@ -84,7 +83,7 @@ func TestChecksumStore_RecoverFromDisk(t *testing.T) {
 
 func TestChecksumStore_GetAll_Consistency(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 
 	for i := range 100 {
 		cs.Set(fmt.Sprintf("f%d", i), fmt.Sprintf("cs%d", i))

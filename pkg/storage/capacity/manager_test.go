@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // testLogger 返回一个丢弃所有日志的 slog.Logger 供测试使用。
@@ -588,10 +589,22 @@ func TestStoragePeriodicScan_StopsOnSignal(t *testing.T) {
 	sm.Stop()
 }
 
+// openTestRoot 在 dir 上打开 storage.Root（测试统一经**卷句柄**：卷决定是否加密，
+// 使用方不判加密态）。
+func openTestRoot(t *testing.T, dir string) *storage.Root {
+	t.Helper()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("打开 Root 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
 func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cs := checksum.NewChecksumStore(filepath.Join(dir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(openTestRoot(t, dir), "checksums.json", nil)
 	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
 
 	filePath := filepath.Join(dir, "test.txt")
@@ -627,7 +640,7 @@ func TestStorageScanOnce_EmptyDir(t *testing.T) {
 func TestStoragePeriodicScan_ScanOnceAfterFileAdd(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cs := checksum.NewChecksumStore(filepath.Join(dir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(openTestRoot(t, dir), "checksums.json", nil)
 	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
 
 	filePath := filepath.Join(dir, "scan-test.txt")

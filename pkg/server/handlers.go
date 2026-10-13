@@ -532,6 +532,10 @@ func (h *Handlers) listTenantIDs() []string {
 // checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
 // storePath = <tenant meta>/checksums.json；获取不到租户（非法 owner / 根不可用）返回 nil。
 // P5 后不再有全局 checksum store——所有读写侧均经本方法取 per-tenant 实例。
+// checksumRel 是校验和台账在**租户卷内**的相对路径（<租户根>/meta/checksums.json）。
+// 台账经租户**卷句柄**读写：卷自己决定是否加密（使用方不理解加密态），并天然继承封印判定。
+const checksumRel = "meta/checksums.json"
+
 // stateStore 非 nil（集群模式装配）时返回 StateStore 适配器（读旧 meta 回退 + 首写迁
 // StateStore 新路径，双读单写零回归，见 state_ledger.go）。
 func (h *Handlers) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
@@ -541,20 +545,20 @@ func (h *Handlers) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	if tnt == nil {
 		return nil
 	}
-	metaAbs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
+	root := tnt.Root()
+	if root == nil {
+		h.logger.Warn("租户卷句柄不可用", "owner", owner)
 		return nil
 	}
 	if h.stateStore != nil {
-		return checksum.NewStateBackedChecksumStore(h.stateStore, "checksum/"+owner+"/all", filepath.Join(metaAbs, "checksums.json"), h.logger)
+		return checksum.NewStateBackedChecksumStore(h.stateStore, "checksum/"+owner+"/all", root, checksumRel, h.logger)
 	}
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
 	if cs, ok := h.checksumStores[owner]; ok {
 		return cs
 	}
-	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), h.logger)
+	cs := checksum.NewChecksumStore(root, checksumRel, h.logger)
 	h.checksumStores[owner] = cs
 	return cs
 }

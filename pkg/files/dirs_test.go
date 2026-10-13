@@ -404,14 +404,8 @@ func (e *dirsEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
 	if tnt == nil {
 		return nil
 	}
-	metaAbs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		return nil
-	}
-	if err := os.MkdirAll(metaAbs, 0o755); err != nil {
-		return nil
-	}
-	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), e.logger)
+	// 台账经租户**卷句柄**读写（与生产同口径：加密卷透明加解密 + 封印判定）。
+	cs := checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", e.logger)
 	e.checksum[owner] = cs
 	return cs
 }
