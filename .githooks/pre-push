@@ -4,8 +4,19 @@ set -e
 # ═══════════════════════════════════════════════════════════════════════════════
 # pre-push：push 前静态门禁（2026-10-05 用户明示改版）
 #
-# 只跑廉价静态检查：① 工作区必须干净；② make check-format（addlicense + gofix +
-# gofmt 后无残留 diff）。
+# 只跑廉价静态检查：① 工作区一致性（未提交/已暂存/未跟踪 + 工作区 == 将推送的提交）；
+# ② make check-format（addlicense + gofix + gofmt 后无残留 diff）。
+#
+# 2026-10-14 加固（用户要求 + 事故复盘）：
+#   - **按 sha 语义判定推送对**：原实现按 `local_ref` 名过滤（只认 refs/heads/*），而
+#     `git push origin HEAD:refs/heads/x` 时钩子收到的 local_ref 是字面 "HEAD" ⇒ 整段
+#     门禁被当作「非分支推送」**静默跳过**。本轮「提交进索引旧版本」事故正是从这里溜过
+#     （本地 lint 绿、CI Lint 红）。
+#   - **一致性检查用 `git status --porcelain`**（未暂存 + 已暂存 + 未跟踪全覆盖；原实现只看
+#     `git diff` + untracked ⇒ 「已 add 未 commit」漏检）。
+#   - **逐文件核对工作区 == 将推送提交**（`git diff <sha> -- <file>`），防 skip-worktree /
+#     assume-unchanged / 部分暂存造成的静默分裂。
+#   - 一致性检查**先于**「无 go 变更跳过」早退：纯文档/配置变更同样会犯这个错。
 #
 # 全量 lint（make lint-all）与测试/构建（make check-ci / test-e2e / build-all）移交
 # CI（.github/workflows/ci.yml 的 Lint / Test / E2E job）在干净环境执行——此前
@@ -19,7 +30,7 @@ set -e
 # 输出落盘：build/hooks/pre-push.log（check-format 失败时直接查看该日志定位）。
 # 旧版全量脚本（fmt-all → lint-all → check-ci）备份于 build/hooks/pre-push.full.bak。
 #
-# 触发：只对分支推送（refs/heads/*）跑；tag 推送 / 分支删除 / 无 stdin 跳过。
+# 触发：任何**内容推送**（按 sha 判定，含 HEAD 形态）都跑；tag 推送 / 删除远端 ref / 无 stdin 跳过。
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # pre-push 的 stdin 为：<local ref> <local sha> <remote ref> <remote sha>，一行一推送。
@@ -31,15 +42,16 @@ while IFS= read -r line; do
   local_ref=$(echo "$line" | awk '{print $1}')
   local_sha=$(echo "$line" | awk '{print $2}')
   remote_sha=$(echo "$line" | awk '{print $4}')
-  case "$local_ref" in
-    refs/heads/*)
-      # 分支删除推送（local sha 全零）不算真正分支推送
-      case "$local_sha" in
-        0000000000000000000000000000000000000000) : ;;
+  # 2026-10-14 修复：按 sha 语义判定（不按 ref 名）——`git push origin HEAD:refs/heads/x`
+  # 时 local_ref 是字面 "HEAD"，旧实现据此把它当「非分支推送」跳过全部门禁。
+  case "$local_sha" in
+    0000000000000000000000000000000000000000) : ;;  # 删除远端 ref，无内容可查
+    *)
+      case "$local_ref" in
+        refs/tags/*) : ;;                              # tag 推送（内容已由分支推送覆盖）
         *) BRANCH_PUSH=1; PUSH_PAIRS="$PUSH_PAIRS $local_sha|$remote_sha" ;;
       esac
       ;;
-    *) : ;;
   esac
 done
 
@@ -68,6 +80,42 @@ say ""
 say "=== pre-push 检查（分支推送）==="
 say "日志位置: $LOG_FILE"
 say ""
+
+# 0. 工作区一致性（**最先跑**，与是否涉及 go 变更无关）。
+say "[0/2] 工作区一致性检查（未提交/已暂存/未跟踪 + 工作区 == 将推送的提交）..."
+dirty=$(git status --porcelain 2>/dev/null || true)
+if [ -n "$dirty" ]; then
+  say "✗ 工作区不干净：push 前必须先把改动纳入提交（或 stash）——否则提交记录的可能是索引里的旧版本"
+  printf '%s
+' "$dirty" | head -20 | while IFS= read -r l; do say "    $l"; done
+  say "  常见根因：gofmt/goimports/go fix/check-format 改完文件后**未重新 git add** ⇒"
+  say "  提交进的是索引旧版本 ⇒ 本地 lint 绿而 CI 红（2026-10-14 实证事故）"
+  say "  处置：git add <file> && git commit（提交失败即原样重来，禁止 amend 已推送提交）"
+  exit 1
+fi
+for pair in $PUSH_PAIRS; do
+  lsha="${pair%%|*}"
+  rsha="${pair##*|}"
+  if [ "$rsha" = "0000000000000000000000000000000000000000" ]; then
+    if git rev-parse --verify origin/master >/dev/null 2>&1; then
+      base=$(git merge-base origin/master "$lsha" 2>/dev/null || echo "")
+      [ -n "$base" ] || base=$(git rev-parse origin/master)
+    else
+      base=""
+    fi
+  else
+    base="$rsha"
+  fi
+  [ -n "$base" ] || continue
+  for f in $(git diff --name-only "$base".."$lsha" -- 2>/dev/null || true); do
+    if ! git diff --quiet "$lsha" -- "$f" 2>/dev/null; then
+      say "✗ 工作区与将推送的提交不一致：$f（工作区版本未进入提交）"
+      say "  处置：git add \"$f\" && git commit（失败即原样重来）"
+      exit 1
+    fi
+  done
+done
+say "工作区干净且与将推送的提交一致"
 
 # 判定本次 push 是否涉及 go 文件变更（对齐 pre-commit：无 go 变更跳过全量）。
 # 每个推送对分别判定；全部无 go 变更才跳过。
@@ -104,16 +152,6 @@ if [ "$HAS_GO" -ne 1 ]; then
   say "（日志: $LOG_FILE）"
   exit 0
 fi
-
-# 0. 工作区必须干净（未提交改动会混入 check-format 的 git diff，造成误报）
-say "[0/2] 工作区干净检查（git diff + untracked 为空）..."
-if [ -n "$(git diff --name-only 2>/dev/null)" ] || [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
-  say "✗ 工作区有未提交改动（push 前需先 commit 或 stash）:"
-  say "$(git diff --name-only | head -20)"
-  say "$(git ls-files --others --exclude-standard | head -20)"
-  exit 1
-fi
-say "工作区干净"
 
 # 1. make check-format（验证 HEAD 格式化干净：go fix + addlicense + gofmt 后无残留）。
 #    与 CI check-format job 对齐：fmt-all 是修改型，check-format 是验证型（git diff 必须空）。
