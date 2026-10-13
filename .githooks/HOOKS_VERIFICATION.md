@@ -174,7 +174,16 @@ git restore --staged pkg/server/accept_retry_test.go && git checkout -- pkg/serv
 
 ---
 
-## pre-push（分支推送门禁；无 go 变更快速放行，含 go 变更跑全量 fmt-all → lint-all → check-ci）
+## pre-push（分支推送门禁）
+
+> **现状（2026-10-05 改版）**：只跑 `[0/2] 工作区一致性检查` + `[1/2] make check-format`
+> （秒级静态层）；全量 lint/test 交 CI。下表 C3–C8 是 2026-10-05 之前「跑全量 fmt-all →
+> lint-all → check-ci」版本的验证记录，保留作历史回归参考。
+>
+> **2026-10-14 加固**（用户要求 + 事故复盘）：① 推送对**按 sha 语义**判定（`git push origin
+> HEAD:refs/heads/x` 时钩子收到 local_ref 字面 `HEAD`，旧实现按 ref 名过滤 ⇒ **整段门禁静默
+> 跳过**）；② 一致性检查用 `git status --porcelain`（未暂存 + **已暂存** + 未跟踪），并逐文件
+> 核对「工作区 == 将推送的提交」；③ 一致性检查**先于**「无 go 变更跳过」早退。
 
 | # | 场景 | stdin 输入 | 期望 |
 |---|---|---|---|
@@ -192,6 +201,9 @@ git restore --staged pkg/server/accept_retry_test.go && git checkout -- pkg/serv
 | C6 | check-ci 内 deadcode 失败 | 真实 make（mock 前三步）+ 注入不可达函数（有调用者但调用链不可达，避免被 unused 先拦） | exit 1，日志含 `FAIL: unreachable symbols found` + 函数列表 |
 | C7 | check-ci 内 notest 失败 | 真实 make + 新建无测试文件的包 | exit 1，日志含 `FAIL: <pkg> has no test files` + 包路径 |
 | C8 | check-ci 内 cover-check 失败 | 临时 `COVER_THRESHOLD ?= 100` 跑 `make cover-check` | exit 1，输出含 `FAIL: coverage X% < threshold 100%`（测完恢复 70） |
+| C9 | **HEAD 形态推送**（旧实现整段跳过） | `HEAD <sha> refs/heads/x 0000…` | **门禁生效**：跑 [0/2] 一致性检查；无 go 变更则放行 |
+| C10 | 工作区不干净（含**已 add 未 commit**） | 任意分支推送 | exit 1，日志含 `✗ 工作区不干净` + 根因/处置；**不得**因「无 go 变更」而跳过 |
+| C11 | 工作区与将推送的提交不一致（skip-worktree/部分暂存） | 任意分支推送 | exit 1，日志含 `✗ 工作区与将推送的提交不一致：<file>` |
 
 > **set -e 陷阱（2026-10-02 实测修复，与 pre-commit 同型）**：`make_out=$(make … 2>&1); make_rc=$?`
 > 赋值式命令替换在 make 失败（rc≠0）时被脚本头 `set -e` **立即静默退出**——`✗` 提示与 make 错误
@@ -205,6 +217,17 @@ git restore --staged pkg/server/accept_retry_test.go && git checkout -- pkg/serv
 printf 'refs/tags/v9.9.9 aaaa refs/tags/v9.9.9 bbbb\n' | ./.githooks/pre-push; echo "exit=$?"
 # C2
 printf '' | ./.githooks/pre-push; echo "exit=$?"
+# C9：HEAD 形态（旧实现会整段跳过——2026-10-14 事故的缝）
+printf 'HEAD %s refs/heads/x 0000000000000000000000000000000000000000
+' "$(git rev-parse HEAD)" | ./.githooks/pre-push; echo "exit=$?"
+# C10：已 add 未 commit（旧实现只看 git diff ⇒ 漏检；期望 exit=1）
+printf '
+<!-- probe -->
+' >> docs/cli.md && git add docs/cli.md
+printf 'HEAD %s refs/heads/x 0000000000000000000000000000000000000000
+' "$(git rev-parse HEAD)" | ./.githooks/pre-push; echo "exit=$?"
+git restore --staged --worktree docs/cli.md
+
 # C4：mock 第 1 步失败（错误输出须完整落盘）
 mkdir -p /tmp/mk && cat > /tmp/mk/make <<'EOF'
 #!/bin/sh
