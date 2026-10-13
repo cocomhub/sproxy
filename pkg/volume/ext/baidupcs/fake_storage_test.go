@@ -12,10 +12,11 @@ import (
 	"path"
 	"strconv"
 
-	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"strings"
 	"sync"
 	"time"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // fakeStorage 是内存版 Storage（实现 Put/Get/Stat/List/Delete/Copy/Move/Exists +
