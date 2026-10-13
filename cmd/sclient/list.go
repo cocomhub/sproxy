@@ -23,6 +23,10 @@ func NewCmdList(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 				默认列出当前目录的顶层文件。
 				使用 --offset 和 --limit 参数进行分页查询。`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeURIs(cmd, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)

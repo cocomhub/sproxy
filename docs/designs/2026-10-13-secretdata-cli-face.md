@@ -1,0 +1,65 @@
+# Secretdata（加密卷）CLI 文件面收口设计（2026-10-13）
+
+> 状态：已实现（master）。关联权威文档：`docs/secret-volume.md` §8.2/§9。
+> 触发：对 secretdata 卷做 CLI 面实测（真 sproxy + 真 sclient），发现**静默错误**与**功能缺口**。
+
+## 1. 实测发现（修复前）
+
+| # | 现象 | 根因 |
+|---|---|---|
+| ① | `sclient --volume vault list` **静默返回空** | `files.Service.List` 走**搜索索引**（只遍历本地卷的 `storage.Root`）；外部/加密卷没有 Root ⇒ 未被列举，且**不报错**（用户以为卷是空的） |
+| ② | `sclient --volume vault mv a b` 恒失败「源文件 checksum 为空，无法重命名」 | `StatPath` 的**外部卷分支**（`dp.Source != nil`）只回 IsDir/Size/MTime，**不填 checksum**（本地分支才取台账/实时算） |
+| ③ | 同上，绕过 checksum 门禁后服务端 404「源文件不存在」 | `RenameFile` 的 `resolveRenameHome` 只覆盖本地卷 ⇒ 外部卷文件无法重命名 |
+| ④ | 即便定位成功，`SecretdataFS.Rename` 对**文件改 basename** fail-closed | 属设计：basename 锚定在加密 meta 内（`Meta.Original.Name`），物理原地改名不成立 |
+
+（`upload`/`download`/`Range 播放`/云转存/`delete` 此前已可用。）
+
+## 2. 处置
+
+1. **列举**：`files.List` 在**显式 `?volume=`** 时优先经新增接缝 `ExternalVolumeOps.ExternalList`
+   列举外部卷（经同一可信链 `Guard(Wrap(be.FS()))` + `ResolveUserLocation` 键翻译）。
+   非外部卷支持返回 `supported=false` → 落回既有索引语义（**零回归**）。
+   未指定卷时不触达外部卷（避免每次列表都打远端 API）——**记为已知限制**并文档化。
+2. **checksum**：新增可选能力 `files.ChecksumSource`（`DownloadSource` 的可选扩展）——
+   `StatPath` 外部卷分支对实现该能力的读取源填 `Checksum`（明文整文件 SHA-256，来自
+   `meta.Provider`：secretdata 的 `Original.SHA256` / trusted sidecar 记录值）；未实现 →
+   保持旧行为（空，不伪造）。
+3. **改名**：新增接缝 `ExternalVolumeOps.ExternalRename`（同卷语义；目标已存在 409、
+   checksum 不一致 409、封印 409）；本地优先、未命中转外部（与删除路径同款，避免为本地
+   重命名触达远端）。
+4. **契约哨兵**：`SecretdataFS.Rename` 对「文件改 basename」现返回
+   `syncpkg.ErrUnsupported`（`errors.Is` 可判）——**这不是 IO 失败**，而是「底层不支持原地
+   改名」；装配层据此走该卷设计口径的等价路径「**读源 → 写目标 → 删源**」（流式、内存有界；
+   **写成功后才删源** ⇒ 崩溃窗口只留双份，不丢数据）。
+
+## 3. 测试与证据
+
+- e2e（真二进制）：`TestE2E_CLI_Secretdata_CliFileOps`（upload → list/list --json → meta 带
+  checksum → download 逐字节 → mv → 旧名不可见/新名一致/磁盘仍加密容器 → delete 即时删净）；
+  `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets`（**卷声明顺序无关**——修正文档旧声称）。
+- 单测：`pkg/files`（`ChecksumSource` 生效 / 未实现时保持空）、`pkg/server`
+  （`copyThenDeleteExternal`：内容搬移 + 删源；**写失败必须保留源**）、`pkg/volume/secretdata`
+  （改名返回契约哨兵）。
+- **变异 6 命中**：StatPath 不取 checksum／拷贝后不删源／先删后写／secretdata 不返回哨兵／
+  去掉外部卷列举分支（e2e 红）／去掉 ErrUnsupported 回退（e2e 红）。
+
+## 3.1 卷 URI 寻址（用户要求 2026-10-13）
+
+位置参数写 `<卷名>:/<路径>`（`<卷名>:` = 卷根）⇒ 等价 `--volume <卷名>` + 纯路径。**纯客户端归一**
+（只改写本地参数与 flag；线上仍是 `?volume=` 查询参数，协议/服务端零改动）：新增
+`cmd/sclient/volume_uri.go`（`splitVolumeURI`/`applyVolumeURIs`/`applyMvVolumeURIs`），接入
+`list`/`download`/`meta`/`delete`/`du`/`mv`（`upload` 的位置参数是本地文件、`search` 是查询串，
+故不接入）。歧义按语法消除：要求 `:/`（冒号后单个斜杠）⇒ `https://…` 与 `C:\…` 不误判；
+位置参数与显式 `--volume` 卷名不一致 → **报错**（不静默取其一）。`mv` 两端带不同卷名 → 自动
+按跨卷迁移（`--to-volume`）。
+
+测试：`cmd/sclient/volume_uri_test.go`（解析表 + flag 归一 + 冲突 + mv 跨卷）；e2e
+`TestE2E_CLI_Secretdata_CliFileOps` 全程以 **URI 形式**驱动加密卷操作。文档：`docs/cli.md`
+「卷 URI 寻址」小节。
+
+## 4. 仍开（记档）
+
+- 未指定 `--volume` 的列表仍只含本地卷（聚合外部卷需要「列表也走远端」的成本口径决策）。
+- 文件改名走「拷贝 + 删源」= O(内容) 重写；更省的实现是**只重加密 meta**（basename 在
+  meta 内，块内容不动）——需在 shardseal/secretdata 侧评估（当前无用户裁决）。
+- secrets 卷外部 target / secretdata 外部 target（外部卷作 target）仍为预留片（fail-closed）。

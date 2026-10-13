@@ -230,8 +230,11 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 
 - **压缩**（`Meta.Compressed` / `Compression`，独立注册表，改压缩算法不升级加密版本）
 - **Reed-Solomon 纠删码**（GF(2^8) 手写 ~千行负担大；k-of-k+1 单块起步，奇偶系统多块纠错平滑演进）
-- **CLI 接线加密卷文件面**（`pkg/files` 只走 storage.Root；`ExternalBackend.FS` 仅 /api/volumes + /api/backup
-  消费——CLI upload/download 直连加密卷需后续接线，独立立项）
+- ~~CLI 接线加密卷文件面~~ **已接线（2026-10-13 收口）**：`pkg/files` 经
+  `WriteTarget` 外部卷分支（#765 统一写内核）与外部卷对象接缝（Stat 明文 checksum / 列举 /
+  改名 / 硬删）覆盖加密卷的文件面；e2e `TestE2E_CLI_Secretdata_CliFileOps` 钉住
+  upload/list/meta/download/mv/delete 全链。**仍限**：`list` 未指定 `--volume` 时只列本地卷
+  （外部/加密卷需显式 `--volume`，见下节已知限制）；文件**改名**非原地改名（见已知限制）
 - **内容寻址去重**（由独立内容寻址子系统承接；Dedup 预留的权威落点）
 
 ### 8.3 KDF 档位扩展
@@ -247,12 +250,16 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 
 ## 9. 已知限制
 
-- **CLI 未接线加密卷文件面**：`pkg/files` 只走 `storage.Root`；加密卷（ExternalBackend.FS）当前仅
-  `/api/volumes` + `/api/backup` 消费，CLI `upload`/`download` 直连加密卷需后续接线（独立立项）。文档
-  首个 secret 密钥需手工放置（无 CLI 交互创建）。
-- **config 一次装配顺序依赖**：secretdata 卷引用的 secrets 卷必须先装配好（既导致 `type=secretdata`
-  的卷无法声明在缺失 secrets 卷之前）；secrets 卷外部 target（嵌套封装）与 secretdata 外部 target
-  （baidupcs/s3/webdav/嵌套）为**预留片**，当前仅 `target=local` 可用。
+- **加密卷文件面已接线，但两条边界要知道**：① 未指定卷的 `list` 只列**本地卷**（搜索索引不含外部卷）——浏览加密卷请显式指定卷：
+  `sclient list vault:/`（**卷 URI 寻址**，等价 `--volume vault`；见 `docs/cli.md`）；② 文件**改名**（basename 变化）不是原地改名：
+  basename 锚定在加密 meta 内，`SecretdataFS.Rename` 对文件 fail-closed（返回契约哨兵
+  `syncpkg.ErrUnsupported`），装配层据此走「读源 → 写目标 → 删源」等价路径（会重写全部分块，写成功
+  后才删源 ⇒ 崩溃窗口只留双份，不丢数据）。文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
+- **卷声明顺序无关（2026-10-13 实测修正）**：`setupSecretBackends` 在**全卷集装配完成之后**补装
+  secretdata（`MarkDeferred`），故 `type: secretdata` 卷可以声明在 secrets 卷之前——e2e
+  `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets` 钉住（此前文档声称「必须先装配好」，已不成立）。
+  **仍预留**：secrets 卷外部 target（嵌套封装）与 secretdata 外部 target（baidupcs/s3/webdav/嵌套），
+  当前仅 `target=local` 可用（配置成外部 target 会 fail-closed 报错，不静默降级）。
 - **空文件不可写**（有意取舍）：分块存储要求至少一个数据分块（承载 meta 引用 + 内容哈希锚定），空
   文件 `EncryptShards` 报错 fail-closed。
 - **随机访问粒度**：`OpenRangeRead` 当前下载整块再定位 blocklet，未做逐 blocklet 只取所需段（注释

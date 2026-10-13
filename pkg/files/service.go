@@ -283,6 +283,17 @@ type DownloadSource interface {
 	Open(ctx context.Context) (SeekReadCloser, error)
 }
 
+// ChecksumSource 是可选的「服务端读取源就地提供**明文**整文件 SHA-256」能力（StatPath 用）。
+//
+// 为什么需要：加密卷（secretdata）的实体在卷内是加密容器，`Stat` 只能给出大小/时间；而
+// 客户端 `mv`/校验需要**明文**整文件哈希。可信外部卷（secretdata 的 `meta.Provider`、
+// trusted.Wrap 的 sidecar）能就地给出该值，故经本可选接口上抛；不实现该接口的读取源
+// 保持旧行为（checksum 空，不误报、不伪造）。
+type ChecksumSource interface {
+	// Checksum 返回明文整文件 SHA-256；不可用（无 meta 能力/读取失败/无记录值）→ ok=false。
+	Checksum(ctx context.Context) (string, bool)
+}
+
 // FileLocation 是 `LocateOwnerFile` 的定位结果：目标文件所在卷名（空 = 默认卷）与该卷租户。
 type FileLocation struct {
 	VolumeName string

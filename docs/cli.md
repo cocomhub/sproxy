@@ -107,6 +107,29 @@ sclient 维护一个**持久化的工作目录**（存于 XDG cache），影响�
 - 包含 `..` 的相对路径在**客户端**就被拒绝（与服务端 ValidateFilePath 对称），
   无需向服务端发送注定失败的请求
 
+## 卷 URI 寻址（`<卷名>:/<路径>`）
+
+文件操作的位置参数可以直接写**卷 URI**，不必再记 `--volume`：
+
+```bash
+sclient list   vault:/                 # 列出加密卷 vault 的根目录
+sclient meta   vault:/docs/top.txt     # 取元信息（含明文 checksum）
+sclient download vault:/docs/top.txt   # 下载
+sclient mv     vault:/a.txt vault:/b.txt
+sclient delete vault:/b.txt
+```
+
+- `<卷名>:` 或 `<卷名>:/` = 卷根；路径部分按普通相对路径解析（仍受 `cd` 影响）。
+- 等价性：`sclient list vault:/x` ≡ `sclient --volume vault list x`。位置参数与显式 `--volume`
+  **卷名不一致时报错**（不静默取其一）；一致则等价。
+- `mv` 的两端可分别带卷名：不同卷 → 自动按**跨卷迁移**（等价 `--to-volume`）执行；同卷 → 同卷改名。
+- `upload` 的位置参数是**本地文件路径**，故不使用卷 URI（目标卷仍用 `--volume` 指定）。
+- 与 URL/盘符的歧义按语法消除：要求冒号后紧跟**单个**斜杠，故 `https://…` 与 `C:\…` 不会被误判。
+
+**为什么要它**：加密卷（`type: secretdata`）等非默认卷的浏览/改名/删除不必再记 flag，
+路径自述归属；同时这也是列出加密卷内容的推荐方式——**未指定卷的 `list` 只列本地卷**
+（搜索索引不含外部卷）。
+
 ## 子命令详情
 
 ### sproxy-mcp（MCP server 二进制）

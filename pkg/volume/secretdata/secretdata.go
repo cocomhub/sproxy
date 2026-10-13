@@ -1844,7 +1844,10 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 		return fmt.Errorf("secretdata: 文件 %q 不存在", from)
 	}
 	if path.Base(from) != path.Base(to) {
-		return fmt.Errorf("secretdata: 文件 %q 改名不可经 Rename（basename 锚定于 meta，逻辑改名走 delete+write）", from)
+		// 契约级哨兵：这**不是** IO 失败，而是「底层不支持原地改名」——调用方（装配层）
+		// 据此改走等价路径「读源 → 写目标 → 删源」（见 pkg/server 的 ExternalRename 回退），
+		// 而不是把它当 500 报给客户端。
+		return fmt.Errorf("secretdata: 文件 %q 改名不可经 Rename（basename 锚定于 meta，逻辑改名走 delete+write）: %w", from, syncpkg.ErrUnsupported)
 	}
 	targetParent := parentDirOf(to)
 	targetContainer := s.dirSegs[targetParent]
