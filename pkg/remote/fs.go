@@ -96,14 +96,23 @@ func (f *remoteFS) OpenRangeRead(ctx context.Context, path string, offset, size 
 	if err != nil {
 		return nil, err
 	}
-	if offset < 0 {
-		return nil, fmt.Errorf("remote: 负区间偏移 %d", offset)
+	if offset < 0 || size < 0 {
+		return nil, fmt.Errorf("remote: 非法区间 offset=%d size=%d", offset, size)
 	}
-	if size <= 0 {
-		return nil, fmt.Errorf("remote: 非法区间长度 %d", size)
+	if size == 0 {
+		// 长度契约（2026-10-14 跨层扫雷）：size==0 = 空区间成功——此前直接报错，与
+		// 本地卷/加密卷（返回空流）语义不一致，同一调用随卷类型可成可败。
+		return syncpkg.EmptyRangeReader(), nil
 	}
-	return f.c.Open(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p},
+	// 精确长度守卫：对端 `http.ServeContent` 会对越过文件尾的 Range **钳制**并回 206
+	// （少字节、无错误）⇒ 上层会当「区间读完」（静默短读）。本地卷/加密卷对越界是
+	// fail-closed 报错，此处以提前 EOF 判据对齐。
+	rc, oerr := f.c.Open(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p},
 		WithRange(offset, offset+size-1))
+	if oerr != nil {
+		return nil, oerr
+	}
+	return syncpkg.ExactRangeReader(rc, size), nil
 }
 
 // 编译期断言：接口形状即最终形态（含 4 个写方法）。
