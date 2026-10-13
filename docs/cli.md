@@ -121,13 +121,27 @@ sclient cd other:/x         # 切到另一卷 other 的 /x
 
 ```bash
 sclient mv vault:/a.txt a.txt --to-volume other      # 跨卷移动（源卷由 URI/工作目录给出）
-sclient volume copy a.txt --from-volume vault --to-volume other   # 跨卷复制（同相对路径）
-sclient volume move a.txt --from-volume vault --to-volume other
+sclient cp main:/a.txt vault:/a.txt                   # 跨卷复制（两端 URI）
+sclient volume move a.txt --from-volume vault --to-volume other   # 旧式跨卷移动（`volume` 子命令）
 ```
 
-**已知限制（2026-10-13 实测）**：服务端跨卷移动/复制管线**只覆盖本地卷**——源或目标为
-**外部/加密卷**（secretdata 等）时返回 `400 无效的文件路径`。workaround：`download` + `upload` +
-`delete`（三段式，加密卷均可用），或等后续片接线。
+### cp（复制，源保留）
+
+```bash
+sclient cp a.txt b.txt                  # 同卷复制（默认与源同卷）
+sclient cp a.txt b.txt --to-volume disk2  # 目标卷（同相对路径）
+sclient cp vault:/a.txt vault:/b.txt      # 卷 URI（同卷）
+sclient cp main:/a.txt vault:/a.txt       # 跨卷（两端 URI）
+sclient cp a.txt b.txt --force            # 允许覆盖已存在目标
+```
+
+- **默认不覆盖**：目标已存在 → 409（绝不静默覆盖用户内容）；`--force` 才覆盖（先删后写，非原子）。
+- **同卷 + 卷支持底层 blob 直拷**（如 secretdata 加密卷）：复制**不重新加解密**——同容器直接共享
+  分块（零 blob 写、O(meta)），跨容器则字节拷贝分块（内容零改动）；删源或删副本都安全（引用计数为
+  「存在即引用」）。跨卷因目标卷独立密钥**必须重新加密**。
+- **配额与写入同口径**：复制经与上传相同的**双账本预留**（owner Scope + 卷容量池），配额不足 →
+  `507` fail-closed（目标不落半态）。注意：外部卷的 `volumes[].capacity` 在**上传与复制**都不做
+  写时拦截（由真值/周期对账收敛），二者口径一致。
 
 ## 当前目录概念
 

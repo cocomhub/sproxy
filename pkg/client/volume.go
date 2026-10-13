@@ -196,6 +196,34 @@ func (c *FileClient) CopyVolume(ctx context.Context, fromVol, toVol, filename st
 	return nil
 }
 
+// CopyFile 复制文件（POST /api/volumes/copy，**源保留**）：fromVol/from → toVol/to。
+//
+// to 为空 = 同 rel（经典跨卷复制语义）；toVol 为空 = 与源同卷（**同卷复制**：卷支持时走
+// 底层 blob 直拷，不重新加解密）。force=true 时允许覆盖已存在目标（默认拒绝，绝不静默覆盖）。
+func (c *FileClient) CopyFile(ctx context.Context, fromVol, from, toVol, to string, force bool) error {
+	if fromVol == "" || from == "" {
+		return fmt.Errorf("源卷与源路径不能为空")
+	}
+	if toVol == "" {
+		toVol = fromVol
+	}
+	q := url.Values{}
+	q.Set("from_volume", fromVol)
+	q.Set("to_volume", toVol)
+	q.Set("filename", from)
+	if to != "" {
+		q.Set("to", to)
+	}
+	if force {
+		q.Set("force", "true")
+	}
+	var result UploadResult
+	if err := c.doJSON(ctx, "POST", "/api/volumes/copy?"+q.Encode(), nil, &result); err != nil {
+		return fmt.Errorf("复制失败: %w", err)
+	}
+	return nil
+}
+
 // RebalanceVolume 触发从 fromVol 到 toVol 的卷再平衡（POST /api/volumes/rebalance）。
 // 服务端逐文件迁移（按大小降序，直至 maxBytes 用尽或无可迁文件），异步语义返回
 // rebalanceVolumeResult（moved/bytes_moved/remaining）。

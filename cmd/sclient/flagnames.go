@@ -10,6 +10,7 @@ const (
 	flagURLFile       = "url-file"
 	flagFromVolume    = "from-volume"
 	flagToVolume      = "to-volume"
+	flagForce         = "force"
 	flagVirtualSubnet = "virtual-subnet"
 	flagAPIBase       = "api-base"
 	flagReleaseBase   = "release-base"
