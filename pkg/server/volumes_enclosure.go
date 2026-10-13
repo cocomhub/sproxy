@@ -51,10 +51,12 @@ func applyEnclosureSeals(log *slog.Logger, acc *volumeAccum) error {
 func injectSeals(acc *volumeAccum, decls []enclosure.Decl) error {
 	byVol := make(map[string][]storage.SealRule, len(decls))
 	for _, d := range decls {
-		baseVol, basePath := enclosure.EffectiveTarget(d, decls)
-		rule := storage.SealRule{Path: basePath, Wrapper: d.Vol, Mode: d.ReadMode}
+		baseVol, rules, ferr := enclosure.EffectiveFootprint(d, decls)
+		if ferr != nil {
+			return fmt.Errorf("封装卷 %q 封印足迹解析失败（fail-closed）: %w", d.Vol, ferr)
+		}
 		if rt := acc.roots[baseVol]; rt != nil {
-			byVol[baseVol] = append(byVol[baseVol], rule)
+			byVol[baseVol] = append(byVol[baseVol], rules...)
 			continue
 		}
 		// **外部/远端源卷**（s3/baidupcs/pikpak/cluster/secretdata/…）：无 storage.Root ⇒ 封印
@@ -65,7 +67,7 @@ func injectSeals(acc *volumeAccum, decls []enclosure.Decl) error {
 			return fmt.Errorf("封装卷 %q 的有效源卷 %q 未装配（既无本地根也无外部后端）：无法注入封印，拒绝启动（禁静默降级）",
 				d.Vol, baseVol)
 		}
-		acc.external[baseVol] = enclosure.SealBackend(be, []storage.SealRule{rule})
+		acc.external[baseVol] = enclosure.SealBackend(be, rules)
 	}
 	for name, rules := range byVol {
 		if serr := acc.roots[name].SetSeals(rules); serr != nil {

@@ -63,11 +63,102 @@ type Decl struct {
 	AllowDirectURL bool
 	// MaxBytes 是封装卷自身上限（0 = 不设自身上限，仅受源卷池约束 = 默认继承）。
 	MaxBytes int64
+	// Owner/Sub 是**owner 限定声明**的解析结果：`Path` 形如 `<owner>/<bucket>/<sub…>` 且第二段为
+	// **保留功能桶名**时判定为 owner 限定——Owner 是权威 owner（调用方键首段必须与其**精确相等**），
+	// Sub 是 `<owner>/<bucket>/` 之后的区域（可为空 = 该 owner 的整桶视图）。
+	//
+	// 映射语义（设计 §4.1「客户端可达的封装区间」）：调用方键 `<owner>/<bucket>/<rel>`
+	// → 源卷键 `<Owner>/<bucket>/<Sub>/<rel>`（**非嵌套**）。非 owner 限定（卷根专有区间，
+	// 如 `private/vault`）⇒ Owner 为空，语义照旧（声明路径前缀视图，客户端本就寻址不到）。
+	Owner, Sub string
 }
+
+// OwnerQualified 报告本声明是否为 owner 限定（客户端可达区间）：视图按 owner/bucket 重映射，
+// owner 只做精确相等校验（无通配、无大小写折叠——安全判据不引入模式匹配）。
+func (d Decl) OwnerQualified() bool { return d.Owner != "" }
 
 // SealRules 把声明转换为源卷的封印规则（供装配层注入源卷 Root/DAV 视图）。
 func (d Decl) SealRules() []storage.SealRule {
 	return []storage.SealRule{{Path: d.Path, Wrapper: d.Vol, Mode: d.ReadMode}}
+}
+
+// Footprint 返回本声明在源卷上的**封印足迹**（单一事实源：`ownerFS` 的桶白名单与之同源）。
+//   - **owner 限定**：**全部保留功能桶**各一条 `<owner>/<bucket>/<sub>` 规则——映射可触达的
+//     键集合 = 被封的键集合（结构性相等；否则出现「可写未封」的洞）；
+//   - **卷根专有**：单条 `<Path>` 规则（历史语义，客户端本就寻址不到）。
+func (d Decl) Footprint() []storage.SealRule {
+	_, rules, err := EffectiveFootprint(d, []Decl{d})
+	if err != nil || len(rules) == 0 {
+		return []storage.SealRule{{Path: d.Path, Wrapper: d.Vol, Mode: d.ReadMode}}
+	}
+	return rules
+}
+
+// EffectiveFootprint 沿封装链回溯出**最终落盘卷**与该链在源卷上的封印足迹。
+//
+// 同形态链：owner 限定 ⇒ owner 必须一致（不同 owner 的嵌套 fail-closed）、sub 依次拼接
+// （内层在前）；卷根专有 ⇒ 路径依次拼接（与 EffectiveTarget 同口径）。**混链 fail-closed**
+// （owner 限定与卷根专有混用的语义需逐段推导，显式报错优于猜测）。
+func EffectiveFootprint(d Decl, all []Decl) (baseVol string, rules []storage.SealRule, err error) {
+	byVol := make(map[string]Decl, len(all))
+	for _, x := range all {
+		byVol[x.Vol] = x
+	}
+	qualified, owner, subParts, legacyParts, baseVol, err := walkFootprintChain(d, byVol)
+	if err != nil {
+		return "", nil, err
+	}
+	if qualified {
+		sub := joinNonEmpty(subParts)
+		for _, b := range storage.ReservedBucketNames() {
+			rules = append(rules, storage.SealRule{
+				Path: joinNonEmpty([]string{owner, b, sub}), Wrapper: d.Vol, Mode: d.ReadMode,
+			})
+		}
+		return baseVol, rules, nil
+	}
+	return baseVol, []storage.SealRule{{Path: joinNonEmpty(legacyParts), Wrapper: d.Vol, Mode: d.ReadMode}}, nil
+}
+
+// walkFootprintChain 沿封装链回溯：返回（是否 owner 限定、owner、sub 段内层在前、卷根专有路径段
+// 内层在前、基底卷）。同形态链合并；**混链或链内 owner 不一致 ⇒ fail-closed**（显式报错优于猜测）。
+func walkFootprintChain(d Decl, byVol map[string]Decl) (qualified bool, owner string, subParts, legacyParts []string, baseVol string, err error) {
+	qualified, owner = d.OwnerQualified(), d.Owner
+	if qualified {
+		subParts = append(subParts, strings.Trim(d.Sub, "/"))
+	} else if p := strings.Trim(d.Path, "/"); p != "" {
+		legacyParts = append(legacyParts, p)
+	}
+	cur := d
+	for {
+		next, ok := byVol[cur.Source]
+		if !ok {
+			return qualified, owner, subParts, legacyParts, cur.Source, nil
+		}
+		if next.OwnerQualified() != qualified {
+			return false, "", nil, nil, "", fmt.Errorf("封装链混用 owner 限定与卷根专有声明（卷 %q 的源 %q）", d.Vol, cur.Source)
+		}
+		if qualified {
+			if next.Owner != owner {
+				return false, "", nil, nil, "", fmt.Errorf("封装链内 owner 不一致（%q vs %q，卷 %q）", owner, next.Owner, d.Vol)
+			}
+			subParts = append([]string{strings.Trim(next.Sub, "/")}, subParts...)
+		} else if p := strings.Trim(next.Path, "/"); p != "" {
+			legacyParts = append([]string{p}, legacyParts...)
+		}
+		cur = next
+	}
+}
+
+// joinNonEmpty 以 "/" 拼接非空段（空段表示「整段省略」：如 sub 为空 = 该 owner 的整桶区域）。
+func joinNonEmpty(segs []string) string {
+	out := make([]string, 0, len(segs))
+	for _, s := range segs {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, "/")
 }
 
 // KeySpacePrefix 返回源视图的键空间前缀（已含尾斜杠；空路径 = 整卷 → 空前缀）。
@@ -156,10 +247,13 @@ func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
 	}
 	allowDirect, _ := v.Extra["allow_direct_url"].(bool)
 
+	owner, sub := splitOwnerQualified(srcPath)
 	return Decl{
 		Vol:            v.Name,
 		Source:         srcVol,
 		Path:           srcPath,
+		Owner:          owner,
+		Sub:            sub,
 		Wrapper:        wrapper,
 		ReadMode:       mode,
 		AllowDirectURL: allowDirect,
@@ -304,4 +398,21 @@ func depthOf(d Decl, all []Decl) int {
 		depth++
 		cur = next
 	}
+}
+
+// splitOwnerQualified 判定并拆分 **owner 限定声明**：`<owner>/<bucket>/<sub…>` 且第二段为保留
+// 功能桶名（user/meta/cloud/archive/chunk/version/trash/backup）时，返回 (owner, sub)；
+// 其余形态（含单段、或无保留桶的第二段）不是 owner 限定 ⇒ 返回 ("", "")，语义照旧。
+//
+// 判据来源：设计 §4.1「首段不得是保留功能桶名」+「客户端可达区间必须写 `<owner>/<bucket>/<子路径>`」
+// ⇒ 「第二段是保留桶」唯一地标识「首段是 owner」。
+func splitOwnerQualified(p string) (owner, sub string) {
+	segs := strings.Split(strings.Trim(p, "/"), "/")
+	if len(segs) < 2 || segs[0] == "" {
+		return "", ""
+	}
+	if !storage.IsReservedBucketName(segs[1]) {
+		return "", ""
+	}
+	return segs[0], strings.Join(segs[2:], "/")
 }

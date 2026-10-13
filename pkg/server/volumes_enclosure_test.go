@@ -216,6 +216,14 @@ func TestApplyEnclosureSeals_ExternalSourceSealedViaBackendFS(t *testing.T) {
 			t.Fatalf("hidden 模式必须过滤封印条目, got %+v", entries)
 		}
 	}
+	// **H1 回归（足迹 = 映射可触达桶集合）**：封装卷的 sidecar/版本等写入落在 **meta/version 等桶**
+	// 的同名子树下 ⇒ 这些桶**同样必须被封印**（否则客户端可直连源卷改写 sidecar/版本，绕过服务端）。
+	for _, b := range storage.ReservedBucketNames() {
+		key := "alice/" + b + "/vault/x.bin"
+		if werr := view.WriteFile(ctx, key, strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+			t.Fatalf("桶 %s 的足迹子路径直连写入必须被拒（否则可绕过封装卷）, got %v", b, werr)
+		}
+	}
 	// 未封印路径不受影响（零回归）。
 	if werr := view.WriteFile(ctx, "alice/user/other/ok.bin", strings.NewReader("ok"), 2, 0); werr != nil {
 		t.Fatalf("同卷未封印路径写应放行, got %v", werr)

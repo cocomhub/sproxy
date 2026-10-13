@@ -25,3 +25,6 @@ pkg/sync/staging_gate.go	1	staging 门卫下探（非外部卷后端）
 pkg/volume/capacity/capacity.go	2	容量装饰器包装（封印内层，保留配额语义）
 pkg/volume/enclosure/attach.go	1	封装取源特权视图（UnsealedSource）
 pkg/volume/enclosure/sealfs.go	7	封印装饰器自身（Inner/UnsealedFS/SealBackend）
+
+pkg/volume/enclosure/fs.go	1	新增直连点：需评估封印影响
+pkg/volume/enclosure/ownerfs.go	4	调用方面 owner 映射视图（be.FS() 取区域视图做底座）+ 真值键翻译

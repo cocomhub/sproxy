@@ -99,10 +99,22 @@ volumes:
   封装卷自身经 `enclosure.UnsealedSource(be)` 取**未封印特权视图**——只剥封印层，配额
   （CapacityFS）/可信（trusted Wrap/Guard）装饰器保留（用 `sync.Innermost` 会把这些一并剥掉，
   导致源卷侧容量结算与 sidecar 校验失效）。
-  **仍为下一片**：`<owner>` 运行时拼接的 per-tenant 源视图（`Decl.SourceKey(owner)`，设计 §5 承诺）
-  ——现映射为「声明子路径 + 调用方键」的前缀视图；`*` 通配声明同样留给该片（先 fail-closed）。
-- 装配期 fail-closed：`source` 未注册/自封装/成环/深度 > 8/同一 `<卷>:<子路径>` 被两个封装卷声明/
-  源卷同时 `extra.encrypt`（双重变换）/`wrapper` 未注册 → 报错拒绝启动。
+  **owner 限定声明的键映射（2026-10-13 落地，A 方案：两个视图）**：声明写 `<owner>/<bucket>/<sub…>`
+  （第二段为**保留功能桶名**即判定为 owner 限定）时——
+  1. **wrapper 面**（`NewFS`）= 区域相对视图（`PrefixFS(特权源, 声明前缀)`）：封装处理器（secretdata 等）
+     在区域内自建**随机容器名 + blob 名**，键语义不变；
+  2. **调用方面**（`backend.FS()`，`WrapOwnerFacing`）= owner 映射视图：
+     `<owner>/<bucket>/<rel>` → `<declOwner>/<bucket>/<sub>/<rel>`（**非嵌套**，§4.1）。
+  **二者不可合并**（CI 实证：同一 FS 无法同时满足两种键空间——`secretdata: 写目录 meta <随机容器>
+  失败: 键首段 owner ... 与声明 owner ... 不符`）。
+  **不变式（均有判据/测试）**：① owner 由**声明给定**，键上只做**精确相等**校验（不折叠/不通配）；
+  ② bucket 白名单 = **全部保留功能桶**，且与 `Decl.Footprint()` 的**封印足迹同源**
+  （足迹 = 8 条 `<owner>/<bucket>/<sub>` 规则 ⇒「能碰到的键」与「封住的键」结构性相等，
+  否则出现「可写未封」的洞）；③ **严格段校验**（拒 `.`/`..`/反斜杠/空段/控制字符，**不**用会归一的
+  `path.Join`）；④ **根/无 owner 键拒绝**（区域按桶定义，卷根无对应物）；⑤ 映射为定值插入
+  （单射无别名）；⑥ 链上 `TrueUsageReporter` 在本层翻译键（`TrueSize(callerKey)` 仍成立）。
+  非 owner 限定声明（卷根专有区间，如 `private/vault`）语义照旧（前缀视图，客户端本就寻址不到）。
+  ⇒ **不需要** `*/user/vault` 通配声明（多 owner = 每 owner 一条声明），安全判据不含模式匹配/大小写折叠。
 
 ### 4.1 命名空间契约（评审 P1 明确，务必遵守）
 
@@ -324,8 +336,9 @@ parity 的物理字节合计」后，`CapacityFS` 写后结算与周期对账都
 写读往返取回明文 + **源目录无明文**（真加密）+ 内容落声明子树 + 真值 > 逻辑）。
 **变异 4 命中**（回退裸 PrefixFS / 生产不注册 wrapper / wrapper 构造失败 / 处理层不加密直通）。
 
-**残余（明示，未在本轮做）**：跨外部卷源的 **per-tenant 源视图**（`Decl.SourceKey(owner)`：
-`<owner>/<bucket>/<sub>` 运行时拼接、`*` 通配声明）仍为下一片（当前映射 = 声明子路径前缀视图）；
+**残余（明示，未在本轮做）**：`Decl.SourceKey(owner)`（设计 §5 宣称的 API）未以该名字落地——
+其语义已由「owner 限定声明的两个视图 + `Decl.Footprint()`」实现（owner 由声明给定，非运行时拼接；
+足迹覆盖全部保留桶）；
 `type: secretdata` 独立卷与 `wrapper: secretdata` 并存（两者共用实现，未做旧写法下线）。
 
 ### 已落地（2026-10-13）：外部卷源的封印

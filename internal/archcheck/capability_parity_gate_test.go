@@ -282,6 +282,8 @@ func decoratorsForGate() []decoratorSpec {
 		// FS 级封印装饰器（外部卷/远端卷视图的封印）：本地卷封印在 storage.Root 层，外部卷
 		// 无 Root ⇒ 在装配处（acc.external）套本装饰器；能力全量转发 + Inner() 特权解包。
 		{typeName: "SealFS", pkgDir: "pkg/volume/enclosure", exempt: blockExempt},
+		// owner 限定声明的键映射视图（owner 由声明给定、键只做精确相等校验）。
+		{typeName: "ownerFS", pkgDir: "pkg/volume/enclosure", exempt: blockExempt},
 		// 同步 pull 本地目标的配额装饰器（评审 P2：此前只实现基础 7 方法，把内层能力全剥掉
 		// ⇒ meta.Provider/WriteIfAbsent/Mover/RangeReader 等断言恒 false 静默降级）。
 		{typeName: "quotaLocalFS", pkgDir: "pkg/syncexec", exempt: blockExempt},

@@ -23,8 +23,12 @@ type FS struct {
 	decl Decl
 }
 
-// NewFS 组装封装视图：源 FS + 声明 → PrefixFS(前缀映射) + 防护层。
+// NewFS 组装封装视图：源 FS + 声明 → 键映射视图 + 防护层。
 // src 必须是**源卷特权视图**（封印注入前取得；封装卷自身不受封印影响）。
+//
+// **本视图是「wrapper 面」**（区域相对键：封装处理器在区域内自建容器/blob 名，见 ownerfs.go 的
+// 两个视图说明）；**调用方面**的 owner 映射视图由 `WrapOwnerFacing` 装在 `backend.FS()` 上
+// （`Decl.Build` 内完成）。二者不可合并（CI 实证：单一映射无法同时满足两种键空间）。
 func NewFS(src syncpkg.FS, d Decl) *FS {
 	return &FS{PrefixFS: syncpkg.NewPrefixFS(src, d.KeySpacePrefix()), decl: d}
 }

@@ -82,5 +82,11 @@ func (d Decl) Build(ctx context.Context, v volume.Volume, src syncpkg.FS) (regis
 	if src == nil {
 		return nil, fmt.Errorf("enclosure: 卷 %q 源视图为空（装配顺序错误）", v.Name)
 	}
-	return w.Build(ctx, v, NewFS(src, d), v.Extra)
+	be, err := w.Build(ctx, v, NewFS(src, d), v.Extra)
+	if err != nil {
+		return nil, err
+	}
+	// 调用方面 = owner 映射视图（owner 限定声明）；wrapper 面 = 区域相对视图（上一行）。
+	// 两个视图分离的原因见 ownerfs.go 顶部说明（单一映射无法同时满足两种键空间）。
+	return WrapOwnerFacing(be, d), nil
 }
