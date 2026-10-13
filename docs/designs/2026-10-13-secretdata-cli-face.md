@@ -129,3 +129,42 @@ mkdir 客户端去掉卷参数；同容器改名早退去掉。
 
 **仍开**：FS 级能力已就绪，但**API/CLI 尚未接线**（`volume copy` 同卷形态需加目标路径参数或新增 `cp`），
 跨卷且涉及外部卷的移动/复制仍需统一写内核 + 外部卷接缝（见 §3.2 的跨卷结论）。
+
+## 3.4 `cp` 命令与复制配额（2026-10-13 追加）
+
+**命令**：`sclient cp <src> <dst> [--force] [--to-volume]`——常规复制语义（源保留），支持**同卷 /
+跨卷 / 卷 URI**（复用 `applyMvVolumeContext`：源 URI → `--volume`、目标不同卷 → `--to-volume`）。
+服务端复用既有 `POST /api/volumes/copy`（扩展可选 `to`（目标路径，缺省 = 同 rel）与 `force`，
+**不新增路由**）；经典本地跨卷同 rel 形态仍走原核心（零回归）。
+
+**两条路径（域侧统一判定，配额口径统一）**：
+
+| 情形 | 处理 | 代价 |
+|---|---|---|
+| **同卷 + 卷支持 blob 直拷**（secretdata 等） | 直调卷 `CopyFile`：底层 blob 直拷 + 新 meta（同容器零 blob 写） | **零重新加解密**，O(meta) |
+| 其余（跨卷 / 本地同卷 / 卷不支持） | 读源 → 统一写内核 `WriteFile`（跨卷目标卷用自己的密钥重新加密） | O(内容) |
+
+**配额（用户重点）**：
+- blob 直拷**不经写内核** ⇒ 若不处理就是**配额旁路**。实现：域侧在调卷能力前经
+  `routeWriteUpload` 做与上传**同一组原语**的 owner Scope + 卷容量池**双预留**（失败 → 403/409/507
+  fail-closed，**未动数据**），成功后 `Commit(0,size)`、失败/回落 `Release()` ⇒ 与写入不可分叉。
+- 同容器共享时**物理字节不增**，但**逻辑占用按文件大小记账**（与上传一致：`usage` + 配额预留）；
+  物理真值由 `TrueUsage`/周期对账收敛（既有设计）。
+- 实测（e2e `TestE2E_CLI_Cp_QuotaReservedOnSameVolume`）：`owner_quotas` 12KiB + 已占 8KiB ⇒ 复制
+  被 **507 存储配额不足**拒绝且**目标不落半态**；同配额下第二个**上传**同样被拒 ⇒ 复制与上传
+  **同口径**。另实测：外部卷的 `volumes[].capacity` 在**上传与复制都不做写时拦截**（靠真值/周期对账；
+  非本次引入，二者一致）。
+- 目标已存在默认 **409**（本地经租户根 Stat、外部卷经 `ExternalStat` 接缝判定）；`--force` 才覆盖
+  （先删后写，删除门禁带目标当前 checksum ⇒ TOCTOU 窗口最小）。
+
+**能力断言的坑（已修）**：装配层 `be.FS()` 通常是**装饰器**（CapacityFS/trusted 等）⇒ 直接类型断言
+`CopyFile` 会**假阴性**（静默回落写内核 = 白重加密）。改为 `syncpkg.Innermost(raw)` 后断言。
+
+**相邻缺陷（本轮同 PR 一并修）**：加密卷上「**从 0 起但不覆盖整文件**的部分 Range」（如
+`Range: bytes=0-1023`）此前会在 Close 收尾时被误判为截断 —— `verifyEOF` 在 `sealPartialChunk`
+补验尾部半块成功后**仍**走「短读 → 截断」判据（`totalRead(1024) < fm.Size(8192)`）⇒ 服务端
+`下载流校验失败：中断连接` ⇒ 客户端 EOF（**播放器从 0 seek 的 Range 全被误杀**；新上传 8KiB 文件
+即复现）。修复：`expectEnd > 0 && expectEnd < fm.Size`（调用方已声明只下发 `[0, expectEnd)`）时
+不再套用短读/整文件哈希判据（`meta/verify.go`）；尾部半块补验**仍逐字节生效**（变异验证：把篡改
+字节放在 Range 端点之后仍被拦住）。回归 `TestVerifyReadSeeker_PartialRangeFromStart{,_DetectsCorruption}`
++ e2e 用 Range 断言（此前为规避该缺陷临时降级为全量下载，现已恢复）。

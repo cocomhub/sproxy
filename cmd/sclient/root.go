@@ -186,6 +186,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdSearch(factory, ios))
 	root.AddCommand(NewCmdStat(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdMv(factory, ios, cliState))
+	root.AddCommand(NewCmdCp(factory, ios, cliState))
 	root.AddCommand(NewCmdArchive(factory, ios))
 	root.AddCommand(NewCmdArchiveDir(factory, ios))
 	root.AddCommand(NewCmdBatch(factory, ios, cliState))

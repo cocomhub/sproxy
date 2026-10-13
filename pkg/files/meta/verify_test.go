@@ -281,3 +281,54 @@ func TestVerifyReadSeeker_AlignedRangeEndsMidChunk_CloseVerifies(t *testing.T) {
 		t.Fatalf("提前停止不应误报: %v", cerr)
 	}
 }
+
+// TestVerifyReadSeeker_PartialRangeFromStart：**部分 Range（从 0 起、端点 < 整文件）**在
+// Close 收尾时不得被判「短读/截断」。回归：此前 `Range: bytes=0-1023`（8KiB 文件）会在
+// finishDownload 的 Close 校验里报「内容长度 1024 短于 FileMeta.Size 8192（截断/静默丢失）」
+// ⇒ 服务端中断连接（客户端 EOF），播放器从 0 seek 的 Range 全被误杀。
+func TestVerifyReadSeeker_PartialRangeFromStart(t *testing.T) {
+	t.Parallel()
+	content := make([]byte, 8192)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	fm := refFileMeta(t, content, 4096) // 两块
+	v := VerifyReadSeeker(bytes.NewReader(content), fm)
+	rv, ok := v.(RangeVerifier)
+	if !ok {
+		t.Fatal("VerifyReadSeeker 必须实现 RangeVerifier（Range 端点提示）")
+	}
+	rv.SetExpectedEnd(1024)
+
+	got := make([]byte, 1024)
+	if _, err := io.ReadFull(v, got); err != nil {
+		t.Fatalf("读 1024 字节失败: %v", err)
+	}
+	if !bytes.Equal(got, content[:1024]) {
+		t.Fatal("前 1024 字节应与源一致")
+	}
+	if err := v.(io.Closer).Close(); err != nil {
+		t.Fatalf("部分 Range 收尾不应报错（尾部半块补验后即成功）: %v", err)
+	}
+}
+
+// TestVerifyReadSeeker_PartialRangeFromStartDetectsCorruption：同一路径上的**真损坏**必须
+// 仍被拦住（尾部半块补验 byte 级生效）——避免「放宽判据」把校验一起放掉。
+func TestVerifyReadSeeker_PartialRangeFromStartDetectsCorruption(t *testing.T) {
+	t.Parallel()
+	content := make([]byte, 8192)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	fm := refFileMeta(t, content, 4096)
+	damaged := append([]byte(nil), content...)
+	damaged[2000] ^= 0xff // 落在第一个分块内、Range 端点（1024）之后
+	v := VerifyReadSeeker(bytes.NewReader(damaged), fm)
+	v.(RangeVerifier).SetExpectedEnd(1024)
+	if _, err := io.ReadFull(v, make([]byte, 1024)); err != nil {
+		t.Fatalf("读 1024 字节失败: %v", err)
+	}
+	if err := v.(io.Closer).Close(); err == nil {
+		t.Fatal("尾部半块补验必须发现损坏（Range 端点之后的分块字节被篡改）")
+	}
+}

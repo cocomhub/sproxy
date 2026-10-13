@@ -42,10 +42,12 @@ import (
 	"sort"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // mirrorCopyResponse 是 POST /api/volumes/copy 的响应体。
@@ -57,12 +59,22 @@ type mirrorCopyResponse struct {
 	Idempotent bool   `json:"idempotent,omitempty"`
 }
 
-// copyVolumeHandler 处理 POST /api/volumes/copy?from_volume&to_volume&filename。
-// 语义见文件头注释（与 move 对齐，仅保留源）。
+// copyVolumeHandler 处理 POST /api/volumes/copy?from_volume&to_volume&filename[&to&force]。
+//
+// 两种形态：
+//   - **经典跨卷同 rel**（无 `to`、无 force、两侧都是本地卷）：走既有本地跨卷核心
+//     `copyFileBetweenVolumes`（双预留 + 流式 + 原子 rename，行为零改动）；
+//   - **通用复制**（CLI `cp`：目标路径可不同 / force / 任一侧为外部卷）：交 `files.Service.CopyFile`
+//     或直调卷的 blob 直拷能力（同卷 + 外部卷 + 卷支持时**不重新加解密**）。
 func (h *Handlers) copyVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	filename := r.URL.Query().Get("filename")
 	fromVol := r.URL.Query().Get("from_volume")
 	toVol := r.URL.Query().Get("to_volume")
+	to := r.URL.Query().Get("to")
+	if to == "" {
+		to = filename
+	}
+	force := r.URL.Query().Get("force") == "true"
 	if filename == "" || fromVol == "" || toVol == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "from_volume、to_volume、filename 均不能为空"}, http.StatusBadRequest)
 		return
@@ -84,6 +96,11 @@ func (h *Handlers) copyVolumeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 通用形态（目标路径不同 / force / 任一侧外部卷）→ 域侧统一复制。
+	if to != filename || force || h.isExternalVolumeName(fromVol) || h.isExternalVolumeName(toVol) {
+		h.copyViaService(w, r, owner, remotePath, to, fromVol, toVol, force)
+		return
+	}
 	status, resp := h.copyFileBetweenVolumes(r.Context(), owner, remotePath, fromVol, toVol, false)
 	sendJSONResponse(w, resp, status)
 }
@@ -532,3 +549,74 @@ var _ = storage.AnonymousOwner
 var _ = volume.AllowedVolumes
 var _ = sort.SliceStable
 var _ = filepath.Join
+
+// isExternalVolumeName 判定卷名是否指向外部卷（无本地 *storage.Root）。
+func (h *Handlers) isExternalVolumeName(name string) bool {
+	if h.volSet == nil || name == "" {
+		return false
+	}
+	if _, ok := h.volSet.ByName(name); !ok {
+		return false
+	}
+	return h.volSet.Root(name) == nil
+}
+
+// copyViaService 走 files.Service.CopyFile（通用复制：目标路径可不同 / force / 含外部卷）。
+func (h *Handlers) copyViaService(w http.ResponseWriter, r *http.Request, owner, from, to, fromVol, toVol string, force bool) {
+	svc := h.fileServiceLocked()
+	if svc == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件服务未装配"}, http.StatusBadRequest)
+		return
+	}
+	// 策略（同卷 blob 直拷 / 写内核）与**配额双账本预留**都在域侧统一判定，装配层只提供
+	// 外部卷只读源与接缝（避免配额口径在装配层分叉）。
+	// 情形：域侧读源 → 统一写内核写目标（跨卷必然重加密；源为外部卷时装配层给只读源）。
+	var src files.DownloadSource
+	if h.isExternalVolumeName(fromVol) {
+		src = h.externalReadSource(r.Context(), owner, fromVol, from)
+	}
+	res, err := svc.CopyFile(r.Context(), files.CopyFileInput{
+		Owner: owner, From: from, To: to, FromVol: fromVol, ToVol: toVol, Force: force, Src: src,
+	})
+	if err != nil {
+		if he, ok := errors.AsType[*files.HTTPError](err); ok {
+			sendJSONResponse(w, mirrorCopyResponse{Success: false, Message: he.Message}, he.Status)
+			return
+		}
+		sendJSONResponse(w, mirrorCopyResponse{Success: false, Message: err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, mirrorCopyResponse{Success: true, Message: fmt.Sprintf("复制完成: %s → %s", res.From, res.To),
+		Checksum: res.Checksum, Size: res.Size}, http.StatusOK)
+}
+
+// externalReadSource 为一个外部卷对象构造服务端只读源（解密转发 + meta 校验口径）。
+// 未授权/未装配/对象不存在 → nil（调用方按 404/回落处理）。
+func (h *Handlers) externalReadSource(ctx context.Context, owner, volName, remotePath string) files.DownloadSource {
+	if h.volSet == nil {
+		return nil
+	}
+	be := h.volSet.External(volName)
+	if be == nil {
+		return nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return nil
+	}
+	raw := be.FS()
+	if raw == nil {
+		return nil
+	}
+	fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
+	loc, kerr := v.ResolveUserLocation(owner, remotePath)
+	if kerr != nil {
+		return nil
+	}
+	key := loc.FSPath()
+	e, serr := fsys.Stat(ctx, key)
+	if serr != nil || e == nil || e.IsDir {
+		return nil
+	}
+	return newExternalSource(fsys, key, e, h.verifySkipped())
+}

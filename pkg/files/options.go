@@ -76,6 +76,15 @@ type ExternalVolumeOps interface {
 	// 此前**静默返回空列表**（加密卷在 CLI 上「看起来是空的」）。
 	ExternalList(ctx context.Context, owner, volName, subdir string) (entries []FileInfo, supported bool, err error)
 
+	// ExternalStat 取外部卷对象的元信息（用户可见相对路径）。返回 size<0 = 不存在/未命中；
+	// checksum = 该卷记录的**明文**整文件 SHA-256（无记录 → 空串）。
+	ExternalStat(ctx context.Context, owner, volName, remotePath string) (size int64, checksum string, err error)
+
+	// ExternalCopy 在 volName（外部卷）内**复制**对象（同卷语义；源保留）。卷实现 blob 直拷
+	// 能力时走「底层 blob 直拷 + 新 meta」（不重新加解密）；不支持时返回 Supported=false，
+	// 调用方回落统一写内核（读源 + 写目标）。
+	ExternalCopy(ctx context.Context, owner, volName, fromRemote, fromRel, toRemote, toRel string, force bool) (ExternalCopyResult, error)
+
 	// ExternalMkdir 在 volName（外部卷）内创建目录（用户可见相对路径；祖先链由该卷自建）。
 	//
 	// 返回 (true, nil) = 已在该外部卷创建（幂等：目录已存在视为成功）；
@@ -92,6 +101,14 @@ type ExternalVolumeOps interface {
 	// 不一致 → `*HTTPError{409}`。目标已存在 → `*HTTPError{409}`（不静默覆盖）。
 	// 返回 (false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 源不存在（调用方回落既有语义）。
 	ExternalRename(ctx context.Context, owner, volName, fromRemote, toRemote, expectedChecksum string) (bool, error)
+}
+
+// ExternalCopyResult 是 ExternalCopy 的返回：Supported=false 表示该卷未实现 blob 直拷能力
+// （调用方回落写内核）；Supported=true 时给出结果元信息。
+type ExternalCopyResult struct {
+	Supported bool
+	Checksum  string
+	Size      int64
 }
 
 // VolumeRouter 是**多卷能力**（运行时卷集合 + 卷租户 + 读定位 + 写路由）。

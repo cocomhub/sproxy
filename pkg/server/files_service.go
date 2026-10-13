@@ -366,6 +366,132 @@ func (o externalVolumeOps) ExternalList(ctx context.Context, owner, volName, sub
 	return out, true, nil
 }
 
+// ExternalStat 实现 files.ExternalVolumeOps：外部卷对象元信息（明文 checksum 经 meta.Provider）。
+func (o externalVolumeOps) ExternalStat(ctx context.Context, owner, volName, remotePath string) (int64, string, error) {
+	h := o.h
+	if h.volSet == nil {
+		return -1, "", nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return -1, "", nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return -1, "", nil
+	}
+	loc, kerr := v.ResolveUserLocation(owner, remotePath)
+	if kerr != nil {
+		return -1, "", &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	e, serr := fsys.Stat(ctx, loc.FSPath())
+	if serr != nil || e == nil || e.IsDir {
+		return -1, "", nil
+	}
+	cs := ""
+	if pv, ok := fsys.(meta.Provider); ok {
+		if fm, ferr := pv.FileMeta(ctx, loc.FSPath()); ferr == nil && fm != nil {
+			cs = fm.TotalSHA256
+		}
+	}
+	return e.Size, cs, nil
+}
+
+// ExternalCopy 实现 files.ExternalVolumeOps：同卷内复制。卷实现 blob 直拷能力（`CopyFile`，
+// 见 pkg/volume/secretdata）⇒ 底层 blob 直拷 + 新 meta（**不重新加解密**）；否则
+// Supported=false（调用方回落统一写内核）。
+func (o externalVolumeOps) ExternalCopy(ctx context.Context, owner, volName, fromRemote, fromRel, toRemote, toRel string, force bool) (files.ExternalCopyResult, error) {
+	h := o.h
+	srcKey, dstKey, fsys, ok := h.externalCopyKeys(owner, volName, fromRemote, toRemote)
+	if !ok {
+		return files.ExternalCopyResult{}, nil // 未装配/非外部卷/未授权/不支持 → 回落写内核
+	}
+	if err := h.prepareExternalCopyDest(ctx, fsys, dstKey, force); err != nil {
+		return files.ExternalCopyResult{Supported: true}, err
+	}
+	res := files.ExternalCopyResult{Supported: true}
+	if pv, ok := fsys.(meta.Provider); ok {
+		if fm, ferr := pv.FileMeta(ctx, srcKey); ferr == nil && fm != nil {
+			res.Checksum, res.Size = fm.TotalSHA256, fm.Size
+		}
+	}
+	if cerr := h.copyWithinVolumeFS(ctx, volName, fromRemote, toRemote, fsys, srcKey, dstKey); cerr != nil {
+		return res, cerr
+	}
+	_ = fromRel
+	_ = toRel
+	return res, nil
+}
+
+// externalCopyKeys 解析同卷复制的源/目标键并做能力断言。ok=false 表示「非本接缝可处理」
+// （未装配 / 非外部卷 / 未授权 / 该卷类型不支持 blob 直拷）⇒ 调用方回落写内核。
+func (h *Handlers) externalCopyKeys(owner, volName, fromRemote, toRemote string) (string, string, syncpkg.FS, bool) {
+	if h.volSet == nil {
+		return "", "", nil, false
+	}
+	be := h.volSet.External(volName)
+	if be == nil {
+		return "", "", nil, false
+	}
+	raw := be.FS()
+	if raw == nil {
+		return "", "", nil, false
+	}
+	// 能力断言必须**穿透装饰器**（装配层会包 CapacityFS/trusted 等）——否则「卷支持 blob 直拷」
+	// 会被判为不支持，静默回落到写内核（重新加密）。
+	if _, ok := syncpkg.Innermost(raw).(interface {
+		CopyFile(ctx context.Context, from, to string) error
+	}); !ok {
+		return "", "", nil, false
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return "", "", nil, false
+	}
+	srcLoc, srcErr := v.ResolveUserLocation(owner, fromRemote)
+	dstLoc, dstErr := v.ResolveUserLocation(owner, toRemote)
+	if srcErr != nil || dstErr != nil {
+		return "", "", nil, true // 已裁决（路径非法）→ 由调用方映射 400
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return "", "", nil, false
+	}
+	return srcLoc.FSPath(), dstLoc.FSPath(), fsys, true
+}
+
+// prepareExternalCopyDest 目标已存在处理：默认 409（不静默覆盖）；force 时先删（幂等）。
+func (h *Handlers) prepareExternalCopyDest(ctx context.Context, fsys syncpkg.FS, dstKey string, force bool) error {
+	if !force {
+		if e, derr := fsys.Stat(ctx, dstKey); derr == nil && e != nil {
+			return &files.HTTPError{Status: http.StatusConflict, Message: "目标路径已存在"}
+		}
+		return nil
+	}
+	if derr := fsys.Delete(ctx, dstKey); derr != nil && !os.IsNotExist(derr) {
+		return &files.HTTPError{Status: http.StatusInternalServerError, Message: "删除已存在目标失败"}
+	}
+	return nil
+}
+
+// copyWithinVolumeFS 调（最内层）卷的 CopyFile，并把底层错误映射为领域错误。
+func (h *Handlers) copyWithinVolumeFS(ctx context.Context, volName, fromRemote, toRemote string, raw syncpkg.FS, srcKey, dstKey string) error {
+	copier, ok := syncpkg.Innermost(raw).(interface {
+		CopyFile(ctx context.Context, from, to string) error
+	})
+	if !ok {
+		return &files.HTTPError{Status: http.StatusNotImplemented, Message: "该卷类型不支持复制"}
+	}
+	if cerr := copier.CopyFile(ctx, srcKey, dstKey); cerr != nil {
+		if errors.Is(cerr, storage.ErrSealed) {
+			return &files.HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接复制"}
+		}
+		h.logger.ErrorContext(ctx, "外部卷复制失败", "volume", volName, "from", fromRemote, "to", toRemote, "error", cerr.Error())
+		return &files.HTTPError{Status: http.StatusInternalServerError, Message: "复制失败"}
+	}
+	return nil
+}
+
 // ExternalMkdir 实现 files.ExternalVolumeOps：经**同一可信链**在外部卷内创建目录
 // （用户可见相对路径 → 卷内键经 ResolveUserLocation 翻译）。幂等：目录已存在由该卷
 // `MakeDir` 语义决定（secretdata 的 ensureContainer 幂等）；封印 → 409。
