@@ -677,3 +677,22 @@ pikpak 主密钥回落裸 FS / 目录漏拼 `secrets` 段（该缺陷由 e2e_cli
 `secret_url` 解析失败 → boot fail）等）。**e2e 回归**：`test/` 的 secretdata/secrets 真二进制
 套件（装配 + 跨包互操作 + 多 target 副本 + 播放上传/云转存到 secretdata 卷）本地全绿。
 
+## 8.17 搜索索引快照经 Root（加密卷上文件名密文落盘 + 封印生效）（2026-10-13）
+
+**缺陷（跨层约定不一致：文档承诺 vs 实现）**：`pkg/files/index_persist.go` 的搜索索引快照
+（`<tenant>/meta/index/<owner>.json`）用**裸 os I/O + 绝对路径**读写 ⇒ ① at-rest 加密卷上
+快照**明文落盘**，而快照条目含**用户可见文件名**（`name`/`base`/`rel`）——`docs/config.md` 的
+「落盘字节经 AES-256-GCM 分块加密」对该配置落空；② **封印被绕过**（整卷封印下仍能写入被封装区间）。
+（时序索引本身无泄漏：索引构建走 `Root.ReadDir` ⇒ 封印条目已被隐藏过滤。）
+
+**处置**：快照统一**经 `storage.Root`**：写用 `OpenFileEncrypted`（非加密卷 = 普通写，加密卷透明
+加密）+ `AtomicRename` 原子替换；读用 `OpenDecrypted`（历史上的明文快照在加密卷上解密失败 →
+视为「无快照」回退**全量重建**——**无兼容迁移**，用户裁定尚未上线，且快照数据可完全再生）；
+失效删除同经 Root（封印路径恒拒，删除失败仅忽略）。读取加 8MiB 上界（防注入超大 JSON 的 OOM，
+超限即视为损坏 → 重建）。**副作用（正向）**：封印区间写入现在 fail-closed（`ErrSealed`），
+不再有「绕过封印往被封装区间写元数据」的路径。
+
+**测试与变异**：`pkg/files`（加密卷：递归扫描磁盘无明文文件名 + 载入还原条目；封印区间写入
+`ErrSealed`）。**变异 3 命中**（写回退裸 os → 文件名明文；读回退非解密读 → 载入失败；
+写用非加密 `OpenFile` → 明文落盘）。文档：`docs/config.md` 的加密覆盖面写精确（内容 + 索引
+快照加密；sidecar/tags 元数据明文，理由同列）。
