@@ -63,7 +63,19 @@ type Decl struct {
 	AllowDirectURL bool
 	// MaxBytes 是封装卷自身上限（0 = 不设自身上限，仅受源卷池约束 = 默认继承）。
 	MaxBytes int64
+	// Owner/Sub 是**owner 限定声明**的解析结果：`Path` 形如 `<owner>/<bucket>/<sub…>` 且第二段为
+	// **保留功能桶名**时判定为 owner 限定——Owner 是权威 owner（调用方键首段必须与其**精确相等**），
+	// Sub 是 `<owner>/<bucket>/` 之后的区域（可为空 = 该 owner 的整桶视图）。
+	//
+	// 映射语义（设计 §4.1「客户端可达的封装区间」）：调用方键 `<owner>/<bucket>/<rel>`
+	// → 源卷键 `<Owner>/<bucket>/<Sub>/<rel>`（**非嵌套**）。非 owner 限定（卷根专有区间，
+	// 如 `private/vault`）⇒ Owner 为空，语义照旧（声明路径前缀视图，客户端本就寻址不到）。
+	Owner, Sub string
 }
+
+// OwnerQualified 报告本声明是否为 owner 限定（客户端可达区间）：视图按 owner/bucket 重映射，
+// owner 只做精确相等校验（无通配、无大小写折叠——安全判据不引入模式匹配）。
+func (d Decl) OwnerQualified() bool { return d.Owner != "" }
 
 // SealRules 把声明转换为源卷的封印规则（供装配层注入源卷 Root/DAV 视图）。
 func (d Decl) SealRules() []storage.SealRule {
@@ -156,10 +168,13 @@ func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
 	}
 	allowDirect, _ := v.Extra["allow_direct_url"].(bool)
 
+	owner, sub := splitOwnerQualified(srcPath)
 	return Decl{
 		Vol:            v.Name,
 		Source:         srcVol,
 		Path:           srcPath,
+		Owner:          owner,
+		Sub:            sub,
 		Wrapper:        wrapper,
 		ReadMode:       mode,
 		AllowDirectURL: allowDirect,
@@ -304,4 +319,21 @@ func depthOf(d Decl, all []Decl) int {
 		depth++
 		cur = next
 	}
+}
+
+// splitOwnerQualified 判定并拆分 **owner 限定声明**：`<owner>/<bucket>/<sub…>` 且第二段为保留
+// 功能桶名（user/meta/cloud/archive/chunk/version/trash/backup）时，返回 (owner, sub)；
+// 其余形态（含单段、或无保留桶的第二段）不是 owner 限定 ⇒ 返回 ("", "")，语义照旧。
+//
+// 判据来源：设计 §4.1「首段不得是保留功能桶名」+「客户端可达区间必须写 `<owner>/<bucket>/<子路径>`」
+// ⇒ 「第二段是保留桶」唯一地标识「首段是 owner」。
+func splitOwnerQualified(p string) (owner, sub string) {
+	segs := strings.Split(strings.Trim(p, "/"), "/")
+	if len(segs) < 2 || segs[0] == "" {
+		return "", ""
+	}
+	if !storage.IsReservedBucketName(segs[1]) {
+		return "", ""
+	}
+	return segs[0], strings.Join(segs[2:], "/")
 }

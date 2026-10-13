@@ -23,10 +23,20 @@ type FS struct {
 	decl Decl
 }
 
-// NewFS 组装封装视图：源 FS + 声明 → PrefixFS(前缀映射) + 防护层。
+// NewFS 组装封装视图：源 FS + 声明 → 键映射视图 + 防护层。
 // src 必须是**源卷特权视图**（封印注入前取得；封装卷自身不受封印影响）。
+//
+// 两种键映射（由声明形态决定，见 Decl.OwnerQualified）：
+//   - **owner 限定**（`<owner>/<bucket>/<sub…>`）：`ownerFS` 按 `<owner>/<bucket>/<rel>` →
+//     `<Owner>/<bucket>/<Sub>/<rel>` 重映射（非嵌套；owner 精确相等校验）；
+//   - **卷根专有区间**（如 `private/vault`）：`PrefixFS` 前缀视图（声明路径 + 调用方键），
+//     语义与历史一致（这类区间客户端本就寻址不到）。
 func NewFS(src syncpkg.FS, d Decl) *FS {
-	return &FS{PrefixFS: syncpkg.NewPrefixFS(src, d.KeySpacePrefix()), decl: d}
+	view, prefix := src, d.KeySpacePrefix()
+	if d.OwnerQualified() {
+		view, prefix = newOwnerFS(src, d), ""
+	}
+	return &FS{PrefixFS: syncpkg.NewPrefixFS(view, prefix), decl: d}
 }
 
 // Decl 返回封装声明（诊断/配额继承/封印规则生成用）。
