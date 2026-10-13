@@ -680,7 +680,7 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	}
 	// 即时物理删（删即释放）：meta + 全部分块 + parity 一次删完（best-effort；去重文件
 	// 释放去重池引用 + 删本容器 meta）。
-	s.removeVersionMeta(e)
+	s.removeVersionMeta(key, e)
 	// 一次性提交内存态：移出索引、扣 usage、推进版本、回收空目录（原子，无半态）。
 	delete(s.index, key)
 	s.volVersion++
@@ -1003,7 +1003,7 @@ func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntr
 		// 索引已指向新条目，旧分块不再被引用。并发 openRead 若在删旧瞬间以旧条目在途
 		// 读取，可能中途读到已被删除的分块而报错（非数据损坏——读失败而非读到错内容）；
 		// 属可接受的并发读-写语义（读要么拿到新内容要么报错，不返回混合/陈旧内容）。
-		s.removeVersionMeta(prev)
+		s.removeVersionMeta(wc.rel, prev)
 	}
 	return nil
 }
@@ -2172,7 +2172,7 @@ func addDirKeysLocked(dirs map[string]struct{}, rel string) {
 //   - 反向（分块先删、meta 后删）的幽灵方向（破坏 §6.2「重启不复现」）：meta 删失败但
 //     分块已删 → 重启把非 Deleted 的 meta 重建为条目（meta 声明 size、分块已缺、OpenRead
 //     失败），且 GC 视非 Deleted meta 为存活而永久保护不清理。**故 meta 恒最先删**。
-func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
+func (s *SecretdataFS) removeVersionMeta(ownerKey string, e *metaEntry) {
 	if e == nil || e.meta == nil {
 		return
 	}
@@ -2183,16 +2183,64 @@ func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
 		return // meta 删失败：分块保留（反幽灵：meta 声明的 size 与分块俱在）
 	}
 	if e.dataDir != "" {
-		// 去重引用文件：meta 已删 → 释放池引用（归零物理删池 blob；失败 → 池 blob 成孤儿）。
+		// 预留去重池记账（opts.Dedup 时生效；池 blob 的物理删由下方存在性判定统一裁决）。
 		s.unrefPoolEntry(e)
+	}
+	// **共享分块（同卷复制）的「存在即引用」裁决**：仍有其他条目引用同一
+	// (数据容器, 分块名集合) ⇒ 不删（源与副本谁先删都安全）；否则物理删分块 + parity。
+	// 不以 dataDir/标记为前提（布局事实由 `dataSeg` 表达；重启后由索引天然恢复）。
+	if s.chunkSetStillReferenced(ownerKey, e) {
 		return
 	}
+	dir := s.dataSeg(e)
 	for _, ci := range e.meta.Chunks {
-		_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, ci.FileName))
+		_ = s.inner.Delete(context.Background(), path.Join(dir, ci.FileName))
 	}
 	if p := e.meta.Parity; p != nil && p.FileName != "" {
-		_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, p.FileName))
+		_ = s.inner.Delete(context.Background(), path.Join(dir, p.FileName))
 	}
+}
+
+// chunkSetStillReferenced 判定「该条目的分块集合是否仍被**其他**条目共享引用」
+// （同卷复制的**存在即引用**引用计数）：按内存索引比对同一数据容器 + 同名分块集合。
+//
+// 为什么不需要持久化引用计数：共享关系就是「两份 meta 引用同一批 blob」这一事实本身，
+// 重启后由索引重建天然恢复；删除时按索引判定最后引用者（O(索引)），因此**源与副本谁先
+// 删都安全**，且无需任何新元数据字段/标记。ownerKey 是正在删除或覆盖的条目键（覆盖时索
+// 引已指向新条目），必须排除以免把自己算作引用者。调用方须持 s.mu。
+func (s *SecretdataFS) chunkSetStillReferenced(ownerKey string, e *metaEntry) bool {
+	if e == nil || e.meta == nil {
+		return false
+	}
+	dir := s.dataSeg(e)
+	for k, other := range s.index {
+		if k == ownerKey || other == nil || other.meta == nil {
+			continue
+		}
+		if s.dataSeg(other) != dir {
+			continue
+		}
+		if sameChunkNames(other.meta, e.meta) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameChunkNames 判定两份 meta 是否引用同一批分块 blob（同容器 + 同名集合；parity 一并比对）。
+func sameChunkNames(a, b *shardseal.Meta) bool {
+	if len(a.Chunks) != len(b.Chunks) {
+		return false
+	}
+	for i := range a.Chunks {
+		if a.Chunks[i].FileName != b.Chunks[i].FileName {
+			return false
+		}
+	}
+	if (a.Parity == nil) != (b.Parity == nil) {
+		return false
+	}
+	return a.Parity == nil || a.Parity.FileName == b.Parity.FileName
 }
 
 // unrefPoolEntry 释放去重池引用：引用计数归零时物理删除池 blob。调用方须持 s.mu。

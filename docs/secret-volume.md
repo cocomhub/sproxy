@@ -260,6 +260,9 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   ④ 加密卷上**删除目录**（`rmdir`）未接线（`syncpkg.FS` 无目录级递归删）⇒ 显式指定外部卷时
   fail-closed 报「暂不支持删除目录」（**绝不**静默删本地同名目录）。
   （mkdir / 列目录 / 上传 / 下载 / 删文件 / 改名 / 明文 checksum 均已可用。）
+- **同卷复制（FS 级已实现，API/CLI 待接线）**：`CopyFile` = 同容器**零 blob 写共享**（引用计数为
+  「存在即引用」，删源或删副本都安全、重启天然恢复）／跨容器**字节拷贝**（内容零改动，不重新加密）；
+  跨卷复制因目标卷独立密钥仍需重新加密。
   文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
 - **卷声明顺序无关（2026-10-13 实测修正）**：`setupSecretBackends` 在**全卷集装配完成之后**补装
   secretdata（`MarkDeferred`），故 `type: secretdata` 卷可以声明在 secrets 卷之前——e2e

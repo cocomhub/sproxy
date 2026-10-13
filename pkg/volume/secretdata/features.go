@@ -177,7 +177,7 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 	if prev != nil {
 		// 同 commitEntry：锁外 best-effort 删旧版本（M-8 并发语义——索引已切新、旧分块
 		// 无引用；并发在途读旧条目可能读到已删分块而报错，属可接受读-写语义，非损坏）。
-		s.removeVersionMeta(prev)
+		s.removeVersionMeta(wc.rel, prev)
 	}
 	return nil
 }
@@ -221,7 +221,7 @@ func (s *SecretdataFS) commitDedupEntry(ctx context.Context, wc writeCtx, e *met
 	if prev != nil {
 		// 同 commitEntry：锁外 best-effort 删旧版本（M-8 并发语义——索引已切新、旧分块
 		// 无引用；并发在途读旧条目可能读到已删分块而报错，属可接受读-写语义，非损坏）。
-		s.removeVersionMeta(prev)
+		s.removeVersionMeta(wc.rel, prev)
 	}
 	return nil
 }
