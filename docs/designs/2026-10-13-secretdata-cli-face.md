@@ -27,10 +27,12 @@
 3. **改名**：新增接缝 `ExternalVolumeOps.ExternalRename`（同卷语义；目标已存在 409、
    checksum 不一致 409、封印 409）；本地优先、未命中转外部（与删除路径同款，避免为本地
    重命名触达远端）。
-4. **契约哨兵**：`SecretdataFS.Rename` 对「文件改 basename」现返回
-   `syncpkg.ErrUnsupported`（`errors.Is` 可判）——**这不是 IO 失败**，而是「底层不支持原地
-   改名」；装配层据此走该卷设计口径的等价路径「**读源 → 写目标 → 删源**」（流式、内存有界；
-   **写成功后才删源** ⇒ 崩溃窗口只留双份，不丢数据）。
+4. **改名 = 只重写 meta（2026-10-13 修正）**：`SecretdataFS.Rename` 对「文件改 basename」改为
+   **原生支持**——文件名只存在于加密 meta 内（`Original.Name`；meta blob 名派生自密文内容 ⇒ 改名
+   换名重写 **meta**），**分块内容零改动、不重加密**（分块名 = 密文内容哈希，与逻辑名无关）；
+   **先写新 meta 成功、再删旧 meta** ⇒ 崩溃窗口最多两份 meta（不丢数据）；耗时 **O(meta)** 而非
+   O(内容)。契约哨兵 `syncpkg.ErrUnsupported` + 装配层「读源 → 写目标 → 删源」兜底**保留**给其它
+   无法原地改名的后端。
 
 ## 3. 测试与证据
 
@@ -60,6 +62,6 @@
 ## 4. 仍开（记档）
 
 - 未指定 `--volume` 的列表仍只含本地卷（聚合外部卷需要「列表也走远端」的成本口径决策）。
-- 文件改名走「拷贝 + 删源」= O(内容) 重写；更省的实现是**只重加密 meta**（basename 在
-  meta 内，块内容不动）——需在 shardseal/secretdata 侧评估（当前无用户裁决）。
+- ~~文件改名 = O(内容) 重写~~ **已收口（2026-10-13）**：改为「只重写 meta」（O(meta)，内容零
+  改动），见 §2 第 4 条。
 - secrets 卷外部 target / secretdata 外部 target（外部卷作 target）仍为预留片（fail-closed）。

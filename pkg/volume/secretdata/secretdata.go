@@ -1843,12 +1843,6 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 	if !ok || e.meta == nil {
 		return fmt.Errorf("secretdata: 文件 %q 不存在", from)
 	}
-	if path.Base(from) != path.Base(to) {
-		// 契约级哨兵：这**不是** IO 失败，而是「底层不支持原地改名」——调用方（装配层）
-		// 据此改走等价路径「读源 → 写目标 → 删源」（见 pkg/server 的 ExternalRename 回退），
-		// 而不是把它当 500 报给客户端。
-		return fmt.Errorf("secretdata: 文件 %q 改名不可经 Rename（basename 锚定于 meta，逻辑改名走 delete+write）: %w", from, syncpkg.ErrUnsupported)
-	}
 	targetParent := parentDirOf(to)
 	targetContainer := s.dirSegs[targetParent]
 	if targetContainer == "" {
@@ -1857,16 +1851,34 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 	if _, exists := s.index[to]; exists {
 		return fmt.Errorf("secretdata: 目标 %q 已是文件", to)
 	}
-	if e.dirSeg == targetContainer {
+	sameBase := path.Base(from) == path.Base(to)
+	if sameBase && e.dirSeg == targetContainer {
 		return nil // 同容器同 basename 同路径（from==to 已早退），防御性无操作
 	}
-	// 物理复制分块 + 文件 meta 到目标容器（blob 内容零改动；去重文件分块在池容器不动），
-	// 删源副本（best-effort），原子迁移索引。
-	if cerr := s.copyFileBlobs(ctx, e, targetContainer); cerr != nil {
-		return cerr
-	}
-	s.deleteFileBlobs(ctx, e)
+
+	// **改名 = 只重写 meta blob**（文件名只存在于加密 meta 内 ⇒ `Original.Name`）：
+	// 分块内容零改动、**不重加密文件内容**（用户口径 2026-10-13）。理由与安全性：
+	//   - 分块 blob 名 = 密文内容哈希，与逻辑名无关 ⇒ 改名不必动分块；
+	//   - meta blob 名（`MetaName`）派生自密文内容 ⇒ 改名后必须换名重写（新 salt 沿用
+	//     `m.Salt`，故**不改内容密钥**、不动分块）；
+	//   - **先写新 meta 成功、再删旧 meta**：崩溃窗口最多留下两份 meta（重启后旧路径仍可读，
+	//     多一个副本而已），绝不出现「两份都没有」的丢数据方向。
 	moved := *e
+	if !sameBase {
+		name, nm, merr := s.writeRenamedMetaLocked(ctx, e, targetContainer, path.Base(to))
+		if merr != nil {
+			return merr
+		}
+		moved.meta = nm
+		moved.metaName = name
+	}
+	if rerr := s.relocateRenamedBlobsLocked(ctx, e, targetContainer, sameBase); rerr != nil {
+		if !sameBase {
+			// 回滚刚写的新 meta（避免重启后新路径出现重影条目）。
+			_ = s.inner.Delete(ctx, path.Join(targetContainer, moved.metaName))
+		}
+		return rerr
+	}
 	moved.dirSeg = targetContainer
 	delete(s.index, from)
 	s.index[to] = &moved
@@ -1874,6 +1886,78 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 	// 源目录若因移出最后一个文件而成空 → 一并回收（Imp-1 空目录语义一致）。
 	s.pruneEmptyDirsLocked(ctx, parentDirOf(from))
 	s.volVersion++
+	return nil
+}
+
+// writeRenamedMetaLocked 按新 basename **只重加密 meta blob**（分块内容零改动），写入
+// 目标容器并返回 (新 meta blob 名, 新 meta)。沿用原 `Salt` ⇒ 内容密钥与分块均不变。
+// 先写成功才返回 ⇒ 崩溃窗口最多多一份 meta（不丢数据）。
+// 调用方持有 s.mu。
+func (s *SecretdataFS) writeRenamedMetaLocked(ctx context.Context, e *metaEntry, targetContainer, newBase string) (string, *shardseal.Meta, error) {
+	nm := cloneMeta(e.meta)
+	nm.Original.Name = newBase
+	name, blob, merr := s.encryptMetaBlob(nm)
+	if merr != nil {
+		return "", nil, merr
+	}
+	if werr := s.uploadBlob(ctx, path.Join(targetContainer, name), blob, e.mtime); werr != nil {
+		return "", nil, werr
+	}
+	return name, nm, nil
+}
+
+// relocateRenamedBlobsLocked 处理改名后的 blob 布局（调用方已按需写好新 meta），并删源：
+//   - 同容器：分块原地不动，只删旧 meta（**O(meta)**，不重加密内容）；
+//   - 跨容器 + 同 basename：meta 原样随迁（名字未变，无需重写）；
+//   - 跨容器 + 改名：只搬内容分块（**绝不复制旧 meta**——否则重启会按旧 basename 重建幽灵条目）。
+//
+// 删源为 best-effort（残留孤儿交 GC）；调用方持有 s.mu。
+func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, e *metaEntry, targetContainer string, sameBase bool) error {
+	if e.dirSeg == targetContainer {
+		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
+		return nil
+	}
+	if sameBase {
+		if cerr := s.copyFileBlobs(ctx, e, targetContainer); cerr != nil {
+			return cerr
+		}
+	} else if cerr := s.copyContentBlobs(ctx, e, targetContainer); cerr != nil {
+		return cerr
+	}
+	s.deleteFileBlobs(ctx, e)
+	return nil
+}
+
+// copyContentBlobs 把条目的**内容分块 + parity** 物理复制到目标容器（不复制 meta——
+// 改名路径的 meta 由 renameFileLocked 单独按新名写入）。内容零改动（纯字节复制，保 blob
+// mtime）；去重文件分块在池容器 ⇒ 无需搬移，直接返回。失败回滚已复制项。
+func (s *SecretdataFS) copyContentBlobs(ctx context.Context, e *metaEntry, targetContainer string) error {
+	var uploaded []string
+	rollback := func() {
+		for _, p := range uploaded {
+			_ = s.inner.Delete(ctx, p)
+		}
+	}
+	if e.dataDir != "" {
+		return nil // 去重文件：分块在池容器不动
+	}
+	for _, ci := range e.meta.Chunks {
+		dst := path.Join(targetContainer, ci.FileName)
+		if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, ci.FileName), dst, e.mtime); cerr != nil {
+			rollback()
+			return cerr
+		}
+		uploaded = append(uploaded, dst)
+	}
+	// Erasure parity：随文件一并搬移（目标保留 XOR 冗余、源 parity 不再孤立）。
+	if p := e.meta.Parity; p != nil {
+		dst := path.Join(targetContainer, p.FileName)
+		if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, p.FileName), dst, e.mtime); cerr != nil {
+			rollback()
+			return cerr
+		}
+		uploaded = append(uploaded, dst)
+	}
 	return nil
 }
 

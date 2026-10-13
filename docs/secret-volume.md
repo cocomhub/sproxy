@@ -251,10 +251,10 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 ## 9. 已知限制
 
 - **加密卷文件面已接线，但两条边界要知道**：① 未指定卷的 `list` 只列**本地卷**（搜索索引不含外部卷）——浏览加密卷请显式指定卷：
-  `sclient list vault:/`（**卷 URI 寻址**，等价 `--volume vault`；见 `docs/cli.md`）；② 文件**改名**（basename 变化）不是原地改名：
-  basename 锚定在加密 meta 内，`SecretdataFS.Rename` 对文件 fail-closed（返回契约哨兵
-  `syncpkg.ErrUnsupported`），装配层据此走「读源 → 写目标 → 删源」等价路径（会重写全部分块，写成功
-  后才删源 ⇒ 崩溃窗口只留双份，不丢数据）。文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
+  `sclient list vault:/`（**卷 URI 寻址**，等价 `--volume vault`；见 `docs/cli.md`）；② 文件**改名**（basename 变化）= **只重写 meta blob**（2026-10-13 收口）：文件名只存在于加密
+  meta 内（`Original.Name`，meta 名派生自密文内容 ⇒ 改名后换名重写），**分块内容零改动、不重加密**
+  （分块名 = 密文内容哈希，与逻辑名无关）；**先写新 meta 成功再删旧 meta** ⇒ 崩溃窗口最多留两份 meta
+  （不丢数据）。同 basename 换目录仍走「物理搬移分块」（容器变化，内容同样零改动）。文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
 - **卷声明顺序无关（2026-10-13 实测修正）**：`setupSecretBackends` 在**全卷集装配完成之后**补装
   secretdata（`MarkDeferred`），故 `type: secretdata` 卷可以声明在 secrets 卷之前——e2e
   `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets` 钉住（此前文档声称「必须先装配好」，已不成立）。
