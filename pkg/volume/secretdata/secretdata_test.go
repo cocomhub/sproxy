@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -927,9 +928,7 @@ func TestFileMove_PhysicalCopy(t *testing.T) {
 	// 不得重加密内容）——成功且内容可读；分块零改动的强断言见
 	// TestRename_FileBasenameChange_RewritesMetaOnly。
 	contentHashesBefore := map[string]string{}
-	for k, v := range snapshotBackingBlobs(t, fs).content {
-		contentHashesBefore[k] = v
-	}
+	maps.Copy(contentHashesBefore, snapshotBackingBlobs(t, fs).content)
 	if err := fs.Rename(ctx, "dst/f1.bin", "dst/renamed.bin"); err != nil {
 		t.Fatalf("文件改名（basename 变）应成功（只重写 meta）: %v", err)
 	}
