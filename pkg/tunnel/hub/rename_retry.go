@@ -28,7 +28,7 @@ const (
 // （Windows sharing violation 无法在 POSIX 上复现，也不宜用全局可变态注入）。
 func renameWithRetry(rename func(string, string) error, tmp, dst string) error {
 	var err error
-	for i := 0; i < renameRetryAttempts; i++ {
+	for i := range renameRetryAttempts {
 		if err = rename(tmp, dst); err == nil {
 			return nil
 		}
