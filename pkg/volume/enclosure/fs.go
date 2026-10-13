@@ -26,17 +26,11 @@ type FS struct {
 // NewFS 组装封装视图：源 FS + 声明 → 键映射视图 + 防护层。
 // src 必须是**源卷特权视图**（封印注入前取得；封装卷自身不受封印影响）。
 //
-// 两种键映射（由声明形态决定，见 Decl.OwnerQualified）：
-//   - **owner 限定**（`<owner>/<bucket>/<sub…>`）：`ownerFS` 按 `<owner>/<bucket>/<rel>` →
-//     `<Owner>/<bucket>/<Sub>/<rel>` 重映射（非嵌套；owner 精确相等校验）；
-//   - **卷根专有区间**（如 `private/vault`）：`PrefixFS` 前缀视图（声明路径 + 调用方键），
-//     语义与历史一致（这类区间客户端本就寻址不到）。
+// **本视图是「wrapper 面」**（区域相对键：封装处理器在区域内自建容器/blob 名，见 ownerfs.go 的
+// 两个视图说明）；**调用方面**的 owner 映射视图由 `WrapOwnerFacing` 装在 `backend.FS()` 上
+// （`Decl.Build` 内完成）。二者不可合并（CI 实证：单一映射无法同时满足两种键空间）。
 func NewFS(src syncpkg.FS, d Decl) *FS {
-	view, prefix := src, d.KeySpacePrefix()
-	if d.OwnerQualified() {
-		view, prefix = newOwnerFS(src, d), ""
-	}
-	return &FS{PrefixFS: syncpkg.NewPrefixFS(view, prefix), decl: d}
+	return &FS{PrefixFS: syncpkg.NewPrefixFS(src, d.KeySpacePrefix()), decl: d}
 }
 
 // Decl 返回封装声明（诊断/配额继承/封印规则生成用）。

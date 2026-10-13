@@ -9,110 +9,145 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
-// ownerfs.go 实现**按 owner 限定的源视图映射**（设计 §4.1 的“客户端可达封装区间”）。
+// ownerfs.go 实现 **owner 限定声明的「调用方面」键映射视图**（设计 §4.1「客户端可达区间」）。
 //
-// 背景：源卷的键空间恒为 `<owner>/<bucket>/<rel>`（`volume.Location.FSPath()` 唯一拼接点）。
-// 声明 `source: "main:alice/user/vault"` 的语义是「占用**alice 的** user 桶下 vault 子树」；
-// 客户端键 `<owner>/<bucket>/<rel>` 必须映射到 `<alice>/<bucket>/<vault>/<rel>`（**非嵌套**，
-// 与设计 §4.1 一致），且 **owner 必须与声明一致**（否则会跨 owner 读写 = 越权）。
+// **两个视图（必须分离，2026-10-13 用户裁定 A + CI 实测）**：
+//   - **wrapper 面**：`NewFS(src, d)` = 区域相对视图（`PrefixFS(特权源, 声明前缀)`）——封装处理器
+//     （secretdata 等）把视图当通用 FS，在区域内自建**随机容器名 + blob 名**（区域相对键）；
+//   - **调用方面**：本文件的 `ownerFS`，装在 `backend.FS()` 上——调用方（HTTP/DAV/S3/分享/云任务/
+//     接缝）恒用 `<owner>/<bucket>/<rel>`。
 //
-// 为什么不是「前缀前插」（PrefixFS）也不是「owner 通配」：
-//   - 前缀前插会把调用方整键（含 owner/bucket）接到声明后 ⇒ 落盘 `<decl>/<owner>/<bucket>/<rel>`
-//     （嵌套重复 owner/bucket，与设计 §4.1 承诺不符，且语义读不出来）；
-//   - owner 通配（`*/user/vault`）把**模式匹配**压进安全判据（大小写折叠/段数语义/归一交互），
-//     难维护且易误封/漏封。
+// 二者**共用一个 FS 对象**是不可能的：CI 实证 `secretdata: 写目录 meta <随机容器> 失败: 键首段
+// owner "lUFXQHBU8KCp9OFI" 与声明 owner "alice" 不符`（单一映射无法同时满足两种键空间）。
 //
-// 本视图把 owner **由声明给定（权威）**，键上的 owner 只做**精确相等校验**（不折叠、不模式
-// 匹配），随后按 `<declOwner>/<bucket>/<sub>/<rel>` 重写——映射规则只有这一处、可逐字节断言。
+// 映射（调用方键 → 源卷键）：
 //
-// 桶维度：**沿用调用方键里的 bucket**（不写死声明里的桶）——user 与 meta（sidecar 镜像）、
-// cloud/archive（转存目标）都自然可用；声明里的桶段只用于识别「这是 owner 限定声明」。
+//	<owner>/<bucket>/<rel>  →  <declOwner>/<bucket>/<sub>/<rel>
+//
+// **不变式（逐条都有判据/测试）**：
+//  1. **owner 由声明给定（权威）**，键上的 owner 只做**精确相等**校验（不折叠、不通配；
+//     不符 ⇒ 不存在语义，不泄漏他人数据存在性）；
+//  2. **bucket 白名单 = 保留功能桶（全部 8 个）**，与 `Decl.Footprint()` 的封印足迹**同源**
+//     ⇒「能碰到的键集合」与「封住的键集合」结构性相等（否则会出现「映射可写、但没被封」的洞）；
+//  3. **严格段校验**：拒绝空段、`.`、`..`、反斜杠、控制字符 ⇒ 绝不使用会归一化的 `path.Join`
+//     （否则 `alice/user/../meta/x` 会被静默折叠、越出区域甚至越出 owner）；
+//  4. **根/无 owner 键拒绝**（区域是**每桶**的，卷根无对应物 ⇒ 明确规定为不存在，不做猜测）；
+//  5. 映射是**定值插入**：单射、无别名（不同调用方键从不落到同一源卷键）；
+//  6. **真值报告键翻译**：链上 `TrueUsageReporter` 在区域键空间工作，本层实现该接口并翻译键，
+//     使 `capacity.TrueUsageOf(be.FS()).TrueSize(callerKey)` 仍成立（装饰器不冒充真值）。
 type ownerFS struct {
 	syncpkg.FS
-	owner string // 声明里的 owner（权威；调用方键首段必须与之精确相等）
-	sub   string // 声明路径中 `<owner>/<bucket>/` 之后的区域（可为空 = 该 owner 的整桶视图）
+	owner string
+	sub   string
+	vol   string
 }
 
-// newOwnerFS 构造 owner 限定视图（d 必须是 owner 限定声明，见 Decl.OwnerQualified）。
-func newOwnerFS(inner syncpkg.FS, d Decl) *ownerFS {
-	return &ownerFS{FS: inner, owner: d.Owner, sub: strings.Trim(d.Sub, "/")}
-}
-
-// Inner 透明暴露被包装 FS（能力探测/特权解包语义与其余装饰器一致）。
-func (o *ownerFS) Inner() syncpkg.FS { return o.FS }
-
-// errOwnerMismatch 是「键首段与声明 owner 不符」的读/写失败错误：对外表现为不存在
-// （不泄漏其它 owner 的数据存在性），且可归因（日志可区分「越权访问」与「真的不存在」）。
-type errOwnerMismatch struct {
-	got  string
-	want string
-}
+// errOwnerMismatch 表示键首段与声明 owner 不符（越权访问被拒；对外表现为「不存在」）。
+type errOwnerMismatch struct{ got, want string }
 
 func (e *errOwnerMismatch) Error() string {
 	return fmt.Sprintf("enclosure: 键首段 owner %q 与声明 owner %q 不符（越权访问被拒）", e.got, e.want)
 }
 
-// Is 让错误同时匹配 fs.ErrNotExist（404 语义）——不泄漏其它 owner 的数据存在性。
-func (e *errOwnerMismatch) Is(target error) bool {
-	return target == fs.ErrNotExist || errors.Is(target, fs.ErrNotExist)
+func (e *errOwnerMismatch) Is(target error) bool { return target == fs.ErrNotExist }
+
+// errBadKey 表示键不满足「调用方面」契约（段非法 / 根键 / 非保留桶）：一律按不存在拒绝。
+type errBadKey struct {
+	vol    string
+	key    string
+	reason string
 }
 
-// key 把调用方键 `<owner>/<bucket>/<rel>` 映射为源卷键 `<declOwner>/<bucket>/<sub>/<rel>`。
-// 键段数不足（<owner>/<bucket>）或 owner 不符 ⇒ 错误（不存在语义）。
-func (o *ownerFS) key(k string) (string, error) {
-	t := strings.Trim(strings.ReplaceAll(k, `\`, "/"), "/")
-	if t == "" || t == "." {
-		// 根：仅当声明是「该 owner 的整桶视图」时才有意义（sub 空且要求调用方给出 owner/bucket）。
-		return "", &errOwnerMismatch{got: "", want: o.owner}
+func (e *errBadKey) Error() string {
+	return fmt.Sprintf("enclosure: 卷 %q 的键 %q 非法（%s）", e.vol, e.key, e.reason)
+}
+
+func (e *errBadKey) Is(target error) bool { return target == fs.ErrNotExist }
+
+// validSegments 把键切成段并做**严格校验**（不变式 3）：空段/`.`/`..`/反斜杠/控制字符一律拒绝。
+// 刻意不使用 `path.Join`（它会静默折叠 `..` ⇒ 越界）。
+func validSegments(key string) ([]string, error) {
+	if strings.Contains(key, `\`) {
+		return nil, errors.New("含反斜杠")
+	}
+	t := strings.Trim(key, "/")
+	if t == "" {
+		return nil, errors.New("空键（卷根无对应区域）")
 	}
 	segs := strings.Split(t, "/")
+	for _, s := range segs {
+		if s == "" {
+			return nil, errors.New("含空路径段")
+		}
+		if s == "." || s == ".." {
+			return nil, errors.New("含 . / .. 路径段")
+		}
+		for i := 0; i < len(s); i++ {
+			if s[i] < 0x20 || s[i] == 0x7f {
+				return nil, errors.New("含控制字符")
+			}
+		}
+	}
+	return segs, nil
+}
+
+// key 把调用方键映射为源卷键（不变式 1/2/3/4）。
+func (o *ownerFS) key(k string) (string, error) {
+	segs, err := validSegments(k)
+	if err != nil {
+		return "", &errBadKey{vol: o.vol, key: k, reason: err.Error()}
+	}
 	if len(segs) < 2 {
-		return "", &errOwnerMismatch{got: segs[0], want: o.owner}
+		// 只有 <owner> 一段：无法确定桶（区域是每桶的）⇒ 明确规定为不存在。
+		return "", &errBadKey{vol: o.vol, key: k, reason: "缺少 <bucket> 段（区域按桶定义）"}
 	}
 	if segs[0] != o.owner {
 		return "", &errOwnerMismatch{got: segs[0], want: o.owner}
 	}
+	if !storage.IsReservedBucketName(segs[1]) {
+		// 白名单与封印足迹同源（不变式 2）：非保留桶不在足迹内 ⇒ 必须拒绝，否则出现「可写未封」。
+		return "", &errBadKey{vol: o.vol, key: k, reason: "非保留功能桶（不在封印足迹内）"}
+	}
 	parts := make([]string, 0, len(segs)+2)
 	parts = append(parts, o.owner, segs[1])
 	if o.sub != "" {
-		parts = append(parts, o.sub)
+		parts = append(parts, strings.Split(o.sub, "/")...)
 	}
 	parts = append(parts, segs[2:]...)
-	return path.Join(parts...), nil
+	return strings.Join(parts, "/"), nil
 }
 
-// strip 把源卷键 `<declOwner>/<bucket>/<sub>/<rel>` 反向剥离回调用方键空间
-// （列举/Stat 条目回填；不在本视图前缀内的路径原样返回）。
+// strip 把源卷键反向剥离回调用方键空间（列举/Stat 回填）；不在足迹内的路径原样返回。
 func (o *ownerFS) strip(k string) string {
-	t := strings.Trim(strings.ReplaceAll(k, `\`, "/"), "/")
-	prefix := o.owner
-	if o.sub != "" {
-		// 形如 <owner>/<bucket>/<sub>：需要保留 bucket 段 ⇒ 按段剥离。
-		segs := strings.Split(t, "/")
-		if len(segs) < 3 || segs[0] != o.owner {
-			return k
-		}
-		subSegs := strings.Split(o.sub, "/")
-		if len(segs) < 2+len(subSegs) || strings.Join(segs[2:2+len(subSegs)], "/") != o.sub {
-			return k
-		}
-		out := append([]string{segs[0], segs[1]}, segs[2+len(subSegs):]...)
-		return strings.Join(out, "/")
-	}
-	if !strings.HasPrefix(t, prefix+"/") {
+	t := strings.Trim(strings.Trim(k, "/"), "/")
+	segs := strings.Split(t, "/")
+	if len(segs) < 2 || segs[0] != o.owner || !storage.IsReservedBucketName(segs[1]) {
 		return k
 	}
-	return t
+	rest := segs[2:]
+	if o.sub != "" {
+		subSegs := strings.Split(o.sub, "/")
+		if len(rest) < len(subSegs) {
+			return k
+		}
+		if strings.Join(rest[:len(subSegs)], "/") != o.sub {
+			return k
+		}
+		rest = rest[len(subSegs):]
+	}
+	out := append([]string{segs[0], segs[1]}, rest...)
+	return strings.Join(out, "/")
 }
 
-// entry 反向映射条目路径（nil 安全）。
 func (o *ownerFS) entry(e *syncpkg.Entry) *syncpkg.Entry {
 	if e == nil {
 		return nil
@@ -121,7 +156,10 @@ func (o *ownerFS) entry(e *syncpkg.Entry) *syncpkg.Entry {
 	return e
 }
 
-// ListDir 列出目录（键重映射 + 条目反向映射）。
+// ---- FS 基础方法（全部经 key 映射，失败即 fail-closed） ----
+
+func (o *ownerFS) Inner() syncpkg.FS { return o.FS }
+
 func (o *ownerFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
 	src, err := o.key(p)
 	if err != nil {
@@ -137,7 +175,6 @@ func (o *ownerFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error
 	return entries, nil
 }
 
-// Stat 元信息（键重映射 + 条目反向映射）。
 func (o *ownerFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
 	src, err := o.key(p)
 	if err != nil {
@@ -150,7 +187,6 @@ func (o *ownerFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
 	return o.entry(e), nil
 }
 
-// OpenRead 读（键重映射）。
 func (o *ownerFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	src, err := o.key(p)
 	if err != nil {
@@ -159,33 +195,6 @@ func (o *ownerFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error)
 	return o.FS.OpenRead(ctx, src)
 }
 
-// OpenRangeRead 定点读（RangeReader；键重映射）。
-func (o *ownerFS) OpenRangeRead(ctx context.Context, p string, offset, size int64) (io.ReadCloser, error) {
-	src, err := o.key(p)
-	if err != nil {
-		return nil, err
-	}
-	rr, ok := o.FS.(syncpkg.RangeReader)
-	if !ok {
-		return nil, fmt.Errorf("ownerFS: 底层未实现 OpenRangeRead: %w", syncpkg.ErrUnsupported)
-	}
-	return rr.OpenRangeRead(ctx, src, offset, size)
-}
-
-// FileMeta 读 sidecar（meta.Provider；键重映射）。
-func (o *ownerFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
-	src, err := o.key(rel)
-	if err != nil {
-		return nil, err
-	}
-	pv, ok := o.FS.(meta.Provider)
-	if !ok {
-		return nil, fmt.Errorf("ownerFS: 底层未实现 FileMeta: %w", syncpkg.ErrUnsupported)
-	}
-	return pv.FileMeta(ctx, src)
-}
-
-// WriteFile 写（键重映射）。
 func (o *ownerFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
 	src, err := o.key(p)
 	if err != nil {
@@ -194,20 +203,6 @@ func (o *ownerFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mt
 	return o.FS.WriteFile(ctx, src, r, size, mtime)
 }
 
-// WriteIfAbsent 原子唯一写（键重映射）。
-func (o *ownerFS) WriteIfAbsent(ctx context.Context, p string, r io.Reader, size, mtime int64) (bool, error) {
-	src, err := o.key(p)
-	if err != nil {
-		return false, err
-	}
-	w, ok := o.FS.(syncpkg.WriteIfAbsent)
-	if !ok {
-		return false, fmt.Errorf("ownerFS: 底层未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
-	}
-	return w.WriteIfAbsent(ctx, src, r, size, mtime)
-}
-
-// MakeDir 建目录（键重映射）。
 func (o *ownerFS) MakeDir(ctx context.Context, p string) error {
 	src, err := o.key(p)
 	if err != nil {
@@ -216,7 +211,6 @@ func (o *ownerFS) MakeDir(ctx context.Context, p string) error {
 	return o.FS.MakeDir(ctx, src)
 }
 
-// Delete 删除（键重映射）。
 func (o *ownerFS) Delete(ctx context.Context, p string) error {
 	src, err := o.key(p)
 	if err != nil {
@@ -225,7 +219,6 @@ func (o *ownerFS) Delete(ctx context.Context, p string) error {
 	return o.FS.Delete(ctx, src)
 }
 
-// Rename 改名（两端键重映射）。
 func (o *ownerFS) Rename(ctx context.Context, from, to string) error {
 	sf, err := o.key(from)
 	if err != nil {
@@ -238,7 +231,44 @@ func (o *ownerFS) Rename(ctx context.Context, from, to string) error {
 	return o.FS.Rename(ctx, sf, st)
 }
 
-// Move 同卷移动（Mover；两端键重映射）。
+// ---- 可选能力（R21：全量转发；键映射后委托；底层未实现 → ErrUnsupported） ----
+
+func (o *ownerFS) OpenRangeRead(ctx context.Context, p string, offset, size int64) (io.ReadCloser, error) {
+	src, err := o.key(p)
+	if err != nil {
+		return nil, err
+	}
+	rr, ok := o.FS.(syncpkg.RangeReader)
+	if !ok {
+		return nil, fmt.Errorf("ownerFS: 底层未实现 OpenRangeRead: %w", syncpkg.ErrUnsupported)
+	}
+	return rr.OpenRangeRead(ctx, src, offset, size)
+}
+
+func (o *ownerFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
+	src, err := o.key(rel)
+	if err != nil {
+		return nil, err
+	}
+	pv, ok := o.FS.(meta.Provider)
+	if !ok {
+		return nil, fmt.Errorf("ownerFS: 底层未实现 FileMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return pv.FileMeta(ctx, src)
+}
+
+func (o *ownerFS) WriteIfAbsent(ctx context.Context, p string, r io.Reader, size, mtime int64) (bool, error) {
+	src, err := o.key(p)
+	if err != nil {
+		return false, err
+	}
+	w, ok := o.FS.(syncpkg.WriteIfAbsent)
+	if !ok {
+		return false, fmt.Errorf("ownerFS: 底层未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
+	}
+	return w.WriteIfAbsent(ctx, src, r, size, mtime)
+}
+
 func (o *ownerFS) Move(ctx context.Context, from, to string) error {
 	sf, err := o.key(from)
 	if err != nil {
@@ -255,7 +285,6 @@ func (o *ownerFS) Move(ctx context.Context, from, to string) error {
 	return m.Move(ctx, sf, st)
 }
 
-// Copy 同卷复制（Copier；两端键重映射）。
 func (o *ownerFS) Copy(ctx context.Context, from, to string) error {
 	sf, err := o.key(from)
 	if err != nil {
@@ -272,7 +301,6 @@ func (o *ownerFS) Copy(ctx context.Context, from, to string) error {
 	return c.Copy(ctx, sf, st)
 }
 
-// Link 硬链接（Linker；两端键重映射）。
 func (o *ownerFS) Link(ctx context.Context, from, to string) error {
 	sf, err := o.key(from)
 	if err != nil {
@@ -289,7 +317,6 @@ func (o *ownerFS) Link(ctx context.Context, from, to string) error {
 	return l.Link(ctx, sf, st)
 }
 
-// WriteFromStagedPath staging 复用（键重映射；stagedPath 是本地临时路径，原样透传）。
 func (o *ownerFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath string, size, mtime int64) error {
 	src, err := o.key(relPath)
 	if err != nil {
@@ -302,7 +329,6 @@ func (o *ownerFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath s
 	return sp.WriteFromStagedPath(ctx, src, stagedPath, size, mtime)
 }
 
-// ReserveSpace 容量预检（键重映射）。
 func (o *ownerFS) ReserveSpace(ctx context.Context, relPath string, size int64) error {
 	src, err := o.key(relPath)
 	if err != nil {
@@ -315,7 +341,6 @@ func (o *ownerFS) ReserveSpace(ctx context.Context, relPath string, size int64) 
 	return rs.ReserveSpace(ctx, src, size)
 }
 
-// UpdateMetaExtra 旁路 sidecar 更新（键重映射）。
 func (o *ownerFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	src, err := o.key(rel)
 	if err != nil {
@@ -328,7 +353,6 @@ func (o *ownerFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[str
 	return u.UpdateMetaExtra(ctx, src, extra)
 }
 
-// DirectURL 直链（键重映射后询问底层）。
 func (o *ownerFS) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
 	src, err := o.key(relPath)
 	if err != nil {
@@ -341,23 +365,67 @@ func (o *ownerFS) DirectURL(ctx context.Context, relPath string) (string, bool, 
 	return d.DirectURL(ctx, src)
 }
 
-// IsLocalVolume 转发本地性自述（不涉及路径）。
+// TrueUsage 真值报告：键翻译后委托（不变式 6）。
+// 只翻译 **TrueSize 的键**（TrueUsage 是卷级合计，无键）。
+func (o *ownerFS) TrueUsage() (int64, bool) {
+	r, ok := capacity.TrueUsageOf(o.FS)
+	if !ok {
+		return 0, false
+	}
+	return r.TrueUsage()
+}
+
+// TrueSize 键翻译后取真值（调用方键 → 区域键 ⇒ 处理器层按自己的键空间回答）。
+func (o *ownerFS) TrueSize(rel string) (int64, bool) {
+	r, ok := capacity.TrueUsageOf(o.FS)
+	if !ok {
+		return 0, false
+	}
+	src, err := o.key(rel)
+	if err != nil {
+		return 0, false
+	}
+	return r.TrueSize(src)
+}
+
 func (o *ownerFS) IsLocalVolume() bool {
 	lv, ok := o.FS.(syncpkg.LocalVolume)
 	return ok && lv.IsLocalVolume()
 }
 
-// WithStagingQuota 转发 staging 配额钩子（不涉及路径）。
 func (o *ownerFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
 	if c, ok := o.FS.(syncpkg.StagingQuotaCapable); ok {
 		c.WithStagingQuota(q)
 	}
 }
 
-// ExemptStagingQuota 转发 staging 豁免自述。
 func (o *ownerFS) ExemptStagingQuota() bool {
 	ex, ok := o.FS.(syncpkg.StagingQuotaExempt)
 	return ok && ex.ExemptStagingQuota()
+}
+
+// ownerFacingBackend 把「调用方面」视图装在 `FS()` 上；区域/特权视图经 `UnsealedSource` 可取回。
+type ownerFacingBackend struct {
+	registry.ExternalBackend
+	fs syncpkg.FS
+}
+
+// FS 返回调用方面视图（owner 映射；装配后只读）。
+func (b *ownerFacingBackend) FS() syncpkg.FS { return b.fs }
+
+// UnsealedSource 返回**区域相对视图**（封装处理器键空间）——装配层需要「同后端原始视图」时用它
+// （与封印解包同名语义：不返回**调用方**映射视图）。
+func (b *ownerFacingBackend) UnsealedSource() syncpkg.FS { return b.ExternalBackend.FS() }
+
+// WrapOwnerFacing 为 owner 限定声明把后端包成「调用方面 owner 映射视图」。
+// 非 owner 限定（卷根专有区间）原样返回（零回归）。
+func WrapOwnerFacing(be registry.ExternalBackend, d Decl) registry.ExternalBackend {
+	if be == nil || !d.OwnerQualified() {
+		return be
+	}
+	return &ownerFacingBackend{ExternalBackend: be, fs: &ownerFS{
+		FS: be.FS(), owner: d.Owner, sub: strings.Trim(d.Sub, "/"), vol: d.Vol,
+	}}
 }
 
 // 编译期能力断言（R21：装饰器必须声明全部可选能力；BlockAccessor 与其余装饰器同口径豁免）。
@@ -376,4 +444,5 @@ var (
 	_ syncpkg.MetaExtraUpdater    = (*ownerFS)(nil)
 	_ syncpkg.StagedPathReuse     = (*ownerFS)(nil)
 	_ meta.Provider               = (*ownerFS)(nil)
+	_ capacity.TrueUsageReporter  = (*ownerFS)(nil)
 )

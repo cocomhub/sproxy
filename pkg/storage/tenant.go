@@ -120,6 +120,14 @@ func isValidBucket(bucket string) bool {
 // 结构消歧，owner=user 会撞车）。导出供装配层/注册校验复用。
 // **2026-10-10：大小写不敏感**（macOS/Windows 大小写不敏感文件系统上 `META/` 与
 // `meta/` 同目录）——统一按小写比较；桶名 canonical 小写（volume.BucketOf 归一小写返回）。
+// ReservedBucketNames 返回保留功能桶名的**副本**（供卷层/装配层派生「可触达键集合」与
+// 「封印足迹」——二者必须同源，否则会出现「映射可写但没被封」的洞）。
+func ReservedBucketNames() []string {
+	out := make([]string, len(featureBuckets))
+	copy(out, featureBuckets)
+	return out
+}
+
 func IsReservedBucketName(name string) bool {
 	for _, b := range featureBuckets {
 		if strings.EqualFold(b, name) {

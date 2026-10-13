@@ -82,6 +82,85 @@ func (d Decl) SealRules() []storage.SealRule {
 	return []storage.SealRule{{Path: d.Path, Wrapper: d.Vol, Mode: d.ReadMode}}
 }
 
+// Footprint 返回本声明在源卷上的**封印足迹**（单一事实源：`ownerFS` 的桶白名单与之同源）。
+//   - **owner 限定**：**全部保留功能桶**各一条 `<owner>/<bucket>/<sub>` 规则——映射可触达的
+//     键集合 = 被封的键集合（结构性相等；否则出现「可写未封」的洞）；
+//   - **卷根专有**：单条 `<Path>` 规则（历史语义，客户端本就寻址不到）。
+func (d Decl) Footprint() []storage.SealRule {
+	_, rules, err := EffectiveFootprint(d, []Decl{d})
+	if err != nil || len(rules) == 0 {
+		return []storage.SealRule{{Path: d.Path, Wrapper: d.Vol, Mode: d.ReadMode}}
+	}
+	return rules
+}
+
+// EffectiveFootprint 沿封装链回溯出**最终落盘卷**与该链在源卷上的封印足迹。
+//
+// 同形态链：owner 限定 ⇒ owner 必须一致（不同 owner 的嵌套 fail-closed）、sub 依次拼接
+// （内层在前）；卷根专有 ⇒ 路径依次拼接（与 EffectiveTarget 同口径）。**混链 fail-closed**
+// （owner 限定与卷根专有混用的语义需逐段推导，显式报错优于猜测）。
+func EffectiveFootprint(d Decl, all []Decl) (baseVol string, rules []storage.SealRule, err error) {
+	byVol := make(map[string]Decl, len(all))
+	for _, x := range all {
+		byVol[x.Vol] = x
+	}
+	qualified, owner, subParts, legacyParts, baseVol, err := walkFootprintChain(d, byVol)
+	if err != nil {
+		return "", nil, err
+	}
+	if qualified {
+		sub := joinNonEmpty(subParts)
+		for _, b := range storage.ReservedBucketNames() {
+			rules = append(rules, storage.SealRule{
+				Path: joinNonEmpty([]string{owner, b, sub}), Wrapper: d.Vol, Mode: d.ReadMode,
+			})
+		}
+		return baseVol, rules, nil
+	}
+	return baseVol, []storage.SealRule{{Path: joinNonEmpty(legacyParts), Wrapper: d.Vol, Mode: d.ReadMode}}, nil
+}
+
+// walkFootprintChain 沿封装链回溯：返回（是否 owner 限定、owner、sub 段内层在前、卷根专有路径段
+// 内层在前、基底卷）。同形态链合并；**混链或链内 owner 不一致 ⇒ fail-closed**（显式报错优于猜测）。
+func walkFootprintChain(d Decl, byVol map[string]Decl) (qualified bool, owner string, subParts, legacyParts []string, baseVol string, err error) {
+	qualified, owner = d.OwnerQualified(), d.Owner
+	if qualified {
+		subParts = append(subParts, strings.Trim(d.Sub, "/"))
+	} else if p := strings.Trim(d.Path, "/"); p != "" {
+		legacyParts = append(legacyParts, p)
+	}
+	cur := d
+	for {
+		next, ok := byVol[cur.Source]
+		if !ok {
+			return qualified, owner, subParts, legacyParts, cur.Source, nil
+		}
+		if next.OwnerQualified() != qualified {
+			return false, "", nil, nil, "", fmt.Errorf("封装链混用 owner 限定与卷根专有声明（卷 %q 的源 %q）", d.Vol, cur.Source)
+		}
+		if qualified {
+			if next.Owner != owner {
+				return false, "", nil, nil, "", fmt.Errorf("封装链内 owner 不一致（%q vs %q，卷 %q）", owner, next.Owner, d.Vol)
+			}
+			subParts = append([]string{strings.Trim(next.Sub, "/")}, subParts...)
+		} else if p := strings.Trim(next.Path, "/"); p != "" {
+			legacyParts = append([]string{p}, legacyParts...)
+		}
+		cur = next
+	}
+}
+
+// joinNonEmpty 以 "/" 拼接非空段（空段表示「整段省略」：如 sub 为空 = 该 owner 的整桶区域）。
+func joinNonEmpty(segs []string) string {
+	out := make([]string, 0, len(segs))
+	for _, s := range segs {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, "/")
+}
+
 // KeySpacePrefix 返回源视图的键空间前缀（已含尾斜杠；空路径 = 整卷 → 空前缀）。
 func (d Decl) KeySpacePrefix() string {
 	p := strings.Trim(d.Path, "/")
