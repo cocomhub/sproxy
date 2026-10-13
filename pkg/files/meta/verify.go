@@ -316,6 +316,14 @@ func (v *verifyReadSeeker) verifyEOF() error {
 	if serr := v.sealPartialChunk(); serr != nil {
 		return serr
 	}
+	if v.expectEnd > 0 && v.expectEnd < v.fm.Size {
+		// **部分 Range（端点 < 整文件）**：调用方明确声明本次只下发 [0, expectEnd)，尾部半块
+		// 已由 sealPartialChunk 补验 ⇒ 短读/整文件哈希判据不适用（Range 语义）。
+		// 缺此判据时 `Range: bytes=0-1023` 这类**从 0 开始但不覆盖整文件**的请求会在 Close
+		// 收尾时被判「内容长度 1024 短于 FileMeta.Size …（截断/静默丢失）」⇒ 中断连接
+		// （客户端 EOF）——播放器从 0 seek 的 Range 全被误杀。
+		return nil
+	}
 	if !v.fromStart {
 		return nil // 中段起始读：整文件哈希/短读判据不适用（Range 语义）
 	}

@@ -160,6 +160,11 @@ mkdir 客户端去掉卷参数；同容器改名早退去掉。
 **能力断言的坑（已修）**：装配层 `be.FS()` 通常是**装饰器**（CapacityFS/trusted 等）⇒ 直接类型断言
 `CopyFile` 会**假阴性**（静默回落写内核 = 白重加密）。改为 `syncpkg.Innermost(raw)` 后断言。
 
-**已发现的相邻缺陷（另立待办）**：加密卷上「Range 请求不覆盖完整分块」时服务端逐块校验误判
-（`下载流校验失败：中断连接` + 客户端 EOF）——与复制无关，**新上传的 8KiB 文件 `bytes=0-1023` 即复现**
-（`written=1024` + `meta: 校验失败`），影响视频播放的 seek 语义，需单独修。
+**相邻缺陷（本轮同 PR 一并修）**：加密卷上「**从 0 起但不覆盖整文件**的部分 Range」（如
+`Range: bytes=0-1023`）此前会在 Close 收尾时被误判为截断 —— `verifyEOF` 在 `sealPartialChunk`
+补验尾部半块成功后**仍**走「短读 → 截断」判据（`totalRead(1024) < fm.Size(8192)`）⇒ 服务端
+`下载流校验失败：中断连接` ⇒ 客户端 EOF（**播放器从 0 seek 的 Range 全被误杀**；新上传 8KiB 文件
+即复现）。修复：`expectEnd > 0 && expectEnd < fm.Size`（调用方已声明只下发 `[0, expectEnd)`）时
+不再套用短读/整文件哈希判据（`meta/verify.go`）；尾部半块补验**仍逐字节生效**（变异验证：把篡改
+字节放在 Range 端点之后仍被拦住）。回归 `TestVerifyReadSeeker_PartialRangeFromStart{,_DetectsCorruption}`
++ e2e 用 Range 断言（此前为规避该缺陷临时降级为全量下载，现已恢复）。

@@ -83,19 +83,21 @@ func TestE2E_CLI_Cp_SameVolumeEncryptedNoReencrypt(t *testing.T) {
 
 	// ② 两份内容一致（经 HTTP 下载，服务端解密转发）。
 	for _, name := range []string{"cp-a.bin", "cp-b.bin"} {
-		status, _, body := rangeRequest(t, env.BaseURL+"/download?filename="+name+"&volume=vault", "")
-		if status != http.StatusOK {
-			t.Fatalf("%s 下载应 200, got %d", name, status)
+		// **部分 Range**（从 0 起、不覆盖整文件）必须 206 且解密内容正确
+		// ——历史上被 Close 收尾的短读判据误杀（连接中断 ⇒ 客户端 EOF）。
+		status, _, body := rangeRequest(t, env.BaseURL+"/download?filename="+name+"&volume=vault", "bytes=0-1023")
+		if status != http.StatusPartialContent {
+			t.Fatalf("%s Range 应 206, got %d", name, status)
 		}
-		if !bytes.Equal(body, content) {
-			t.Fatalf("%s 解密内容与源不一致（len=%d）", name, len(body))
+		if !bytes.Equal(body, content[:1024]) {
+			t.Fatalf("%s Range 解密内容与源不一致（len=%d）", name, len(body))
 		}
 	}
 
 	// ③ 共享引用（存在即引用）：删源，副本仍可读。
 	env.sclient(t, env.TmpDir, "delete", "vault:/cp-a.bin")
-	status, _, body := rangeRequest(t, env.BaseURL+"/download?filename=cp-b.bin&volume=vault", "")
-	if status != http.StatusOK || !bytes.Equal(body, content) {
+	status, _, body := rangeRequest(t, env.BaseURL+"/download?filename=cp-b.bin&volume=vault", "bytes=0-1023")
+	if status != http.StatusPartialContent || !bytes.Equal(body, content[:1024]) {
 		t.Fatalf("删除源后副本应仍可读（共享引用）, status=%d", status)
 	}
 }
