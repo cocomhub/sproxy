@@ -579,8 +579,7 @@ func (h *Handlers) copyViaService(w http.ResponseWriter, r *http.Request, owner,
 		Owner: owner, From: from, To: to, FromVol: fromVol, ToVol: toVol, Force: force, Src: src,
 	})
 	if err != nil {
-		var he *files.HTTPError
-		if errors.As(err, &he) {
+		if he, ok := errors.AsType[*files.HTTPError](err); ok {
 			sendJSONResponse(w, mirrorCopyResponse{Success: false, Message: he.Message}, he.Status)
 			return
 		}
