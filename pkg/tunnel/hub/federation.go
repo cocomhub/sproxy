@@ -562,7 +562,8 @@ func (fc *FederationClient) writeCandidatesFile(path string, snap federationCand
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	// Windows 上覆盖被占用目标会 sharing violation（POSIX 恒成功）⇒ 有界重试（见 rename_retry.go）。
+	if err := renameWithRetry(os.Rename, tmpName, path); err != nil {
 		return err
 	}
 	// 联邦候选虽无敏感信息（仅 id/addr/mesh），仍显式收紧为 0600 与 hub 路由表持久化
