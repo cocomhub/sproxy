@@ -977,7 +977,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 
 	var wg sync.WaitGroup
 	const goroutines = 50
@@ -1000,7 +1000,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 	wg.Wait()
 
 	// 重新打开 store，确认磁盘内容能正确解析
-	cs2 := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	all := cs2.GetAll()
 	// 至少不能 panic、不能丢出错误。具体保留数量取决于调度。
 	t.Logf("after concurrent ops, store has %d entries", len(all))
@@ -1015,7 +1015,7 @@ func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	cs.Set("k", "v")
 	cs.Set("k2", "v2")
 	cs.Delete("k")

@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -489,11 +490,23 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	t.Logf("recovered session: received=%v", s.ReceivedChunks)
 }
 
+// openRootForTest 在 dir 上打开 storage.Root（本文件属**外部**测试包 server_test，
+// 看不到内部包的 testRootAt；口径一致：台账一律经卷句柄读写）。
+func openRootForTest(t *testing.T, dir string) *storage.Root {
+	t.Helper()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("打开 Root 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
 func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(openRootForTest(t, tmpDir), "checksums.json", nil)
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
 
@@ -502,7 +515,7 @@ func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	os.WriteFile(tmpFile, []byte(`{"stale":"data"}`), 0644)
 
 	// 新实例: 应清理 .tmp 并正确加载已持久化的 .json
-	cs2 := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs2 := checksum.NewChecksumStore(openRootForTest(t, tmpDir), "checksums.json", nil)
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d; tmp residue was not cleaned", len(all))

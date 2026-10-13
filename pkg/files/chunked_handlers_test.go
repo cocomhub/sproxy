@@ -86,10 +86,9 @@ func newChunkedTestEnv(t *testing.T) *chunkedTestEnv {
 		t.Fatalf("建 UploadStore 失败: %v", err)
 	}
 	t.Cleanup(us.Stop)
-	metaAbs, _ := tnt.Root().Abs("meta")
 	return &chunkedTestEnv{
 		dir: dir, root: root, tnt: tnt,
-		cs:     checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), nil),
+		cs:     checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", nil),
 		us:     us,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

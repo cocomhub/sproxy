@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -99,11 +98,8 @@ func (e *cloudTestEnv) checksumStoreFor(owner string) checksum.ChecksumStoreIfac
 	if tnt == nil {
 		return nil
 	}
-	abs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		return nil
-	}
-	cs := checksum.NewChecksumStore(filepath.Join(abs, "checksums.json"), testLogger())
+	// 复刻生产：台账经租户**卷句柄** + "meta/checksums.json" 相对路径。
+	cs := checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", testLogger())
 	e.checksumStores[owner] = cs
 	return cs
 }

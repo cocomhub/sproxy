@@ -738,3 +738,28 @@ pikpak 主密钥回落裸 FS / 目录漏拼 `secrets` 段（该缺陷由 e2e_cli
 `ErrSealed`）、`pkg/server/meta_ledger_root_test.go`（分享/计量：加密卷密文落盘 + 重启恢复；
 封印区间 fail-closed）。**变异 6 命中**（状态写/读回退裸 os、分享写回退裸 os、计量写/读回退
 裸 os、写用非加密 `OpenFile`）。
+
+## 8.20 校验和台账（meta/checksums.json）经 Root（同族最后一处）（2026-10-13）
+
+**缺陷（同族：路径式构造 + 裸 os I/O 绕过 `storage.Root`）**：`pkg/checksum` 的
+`ChecksumStore` 以**绝对路径**构造（`<租户根>/meta/checksums.json`）并全程裸 os 读写。
+台账**键是用户可见相对路径**（`user/<名>` → sha256），故在 at-rest 加密卷上：
+① 明文落盘（加密承诺落空）；② 绕过封印（整卷封装下仍能写入被封装区间）。
+`StateBackedChecksumStore`（集群模式）的**旧 meta 回退读**同样是裸 `os.ReadFile`：
+加密卷上读到的是密文 → 解析失败 → 迁移期台账静默丢失。
+
+**处置**：构造入口改为**卷句柄 + 卷内相对路径**（`NewChecksumStore(root, rel, logger)`；
+生产 `rel = "meta/checksums.json"`，常量 `checksumRel` 在 `pkg/server`）：写
+`root.OpenFileEncrypted` + `root.AtomicRename`、读 `root.OpenDecrypted` + 上界
+`maxChecksumStoreBytes=64MiB`（超出视为损坏 → 空台账 + Warn，与「不存在/解析失败」同语义）；
+tmp 残留清理改 `root.Remove`。`NewStateBackedChecksumStore(st, key, legacyRoot, legacyRel, logger)`
+的旧 meta 回退读同样经卷句柄。**顺带**去掉历史上的「重命名失败就直写目标」回退——
+`storage.Root.AtomicRename` 自带短退避重试，失败即真实失败（不再有半写窗口）。
+非加密卷行为/字节/路径**完全不变**（判据在 Root：`if rt.enc == nil { return f }`）。
+调用点适配：`pkg/server`（handlers + 6 处测试）、`pkg/files`（2）、`pkg/cloud`（1）、
+`pkg/storage/capacity`（2）、`pkg/checksum`（5）——测试统一经 `testRootAt`/`openTestRoot`
+拿卷句柄。
+
+**测试与变异**：`pkg/checksum/store_root_test.go`（加密卷：台账密文容器 + 不含台账键、
+重载/删除往返；封印区间 `save()` 返回 `ErrSealed`；适配器旧 meta 回退读在加密卷上可读回）。
+**变异 4 命中**（写回退裸 os、读用非解密 `OpenFile`、写用非加密 `OpenFile`、适配器回退读裸 os）。
