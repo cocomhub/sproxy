@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -923,9 +924,21 @@ func TestFileMove_PhysicalCopy(t *testing.T) {
 	if _, err := fs2.OpenRead(ctx, "src/f1.bin"); err == nil {
 		t.Error("旧路径重启后不可读")
 	}
-	// 改名（basename 变）仍报错。
-	if err := fs.Rename(ctx, "dst/f1.bin", "dst/renamed.bin"); err == nil {
-		t.Error("文件改名（basename 变）应报错")
+	// 改名（basename 变）：**只重写 meta**（2026-10-13 用户口径：文件名只存在于 meta 内，
+	// 不得重加密内容）——成功且内容可读；分块零改动的强断言见
+	// TestRename_FileBasenameChange_RewritesMetaOnly。
+	contentHashesBefore := map[string]string{}
+	maps.Copy(contentHashesBefore, snapshotBackingBlobs(t, fs).content)
+	if err := fs.Rename(ctx, "dst/f1.bin", "dst/renamed.bin"); err != nil {
+		t.Fatalf("文件改名（basename 变）应成功（只重写 meta）: %v", err)
+	}
+	if got := readAll(t, fs, ctx, "dst/renamed.bin"); !bytes.Equal(got, data(300)) {
+		t.Error("改名后内容不一致")
+	}
+	for k, v := range snapshotBackingBlobs(t, fs).content {
+		if contentHashesBefore[k] != v {
+			t.Errorf("改名不得重加密内容：分块 %s 变化", k)
+		}
 	}
 }
 
@@ -1504,34 +1517,144 @@ func TestConcurrentReadWriteDelete_Stress(t *testing.T) {
 	}
 }
 
-// TestRename_FileBasenameChange_Fails（M6 补充）：文件「改名」（from/to basename 不同）
-// 是逻辑改名（basename 锚定于 meta.original.name），不可经 Rename 物理迁移——应明确报错
-// 而非静默搬到新路径。目录改名的 basename 变化路径另有 renameDirLocked 覆盖。
-func TestRename_FileBasenameChange_Fails(t *testing.T) {
+// TestRename_FileBasenameChange_RewritesMetaOnly：文件「改名」（basename 变化）**不是**失败
+// ——文件名只存在于加密 meta 内（`Original.Name`），故改名 = 只重写 meta blob：
+//   - 分块内容**零改动、不重加密**（磁盘上分块 blob 集合与字节完全不变）；
+//   - 旧路径消失（旧 meta 删除）、新路径可读且内容一致；
+//   - 重启（重开同一底层）后新名可解析、旧名不可解析。
+//
+// 变异：改回「拷贝 + 删源」或「delete+write 全量重写」→ 分块 blob 集合变化 ⇒ 断言红。
+func TestRename_FileBasenameChange_RewritesMetaOnly(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	writeContent(t, fs, ctx, "a/f1.bin", 100)
-	err := fs.Rename(ctx, "a/f1.bin", "a/f2.bin")
-	if err == nil {
-		t.Error("文件改名（basename 变化）应报错（逻辑改名走 delete+write）")
+	writeContent(t, fs, ctx, "a/f1.bin", 4096)
+
+	before := snapshotBackingBlobs(t, fs)
+	contentBefore := readAll(t, fs, ctx, "a/f1.bin")
+
+	if err := fs.Rename(ctx, "a/f1.bin", "a/f2.bin"); err != nil {
+		t.Fatalf("改名（basename 变化）应成功（只重写 meta）: %v", err)
 	}
-	// 契约级哨兵：这不是 IO 失败，而是「底层不支持原地改名」——装配层据此改走
-	// 「读源 → 写目标 → 删源」等价路径（pkg/server ExternalRename 回退）。
-	if !errors.Is(err, syncpkg.ErrUnsupported) {
-		t.Errorf("文件改名应返回 syncpkg.ErrUnsupported 哨兵, got %v", err)
+	if e, _ := fs.Stat(ctx, "a/f1.bin"); e != nil {
+		t.Error("改名后旧名不应可解析")
 	}
-	// 原文件仍存在（改名失败不落半态）。
-	if _, err := fs.Stat(ctx, "a/f1.bin"); err != nil {
-		t.Errorf("改名失败后原文件应存在: %v", err)
+	if got := readAll(t, fs, ctx, "a/f2.bin"); !bytes.Equal(got, contentBefore) {
+		t.Fatalf("改名后内容不一致: len=%d want=%d", len(got), len(contentBefore))
 	}
-	// 跨目录移动但 basename 相同 → 合法（物理搬移零改内容）；目标父目录需先存在。
-	if err := fs.MakeDir(ctx, "b"); err != nil {
+
+	after := snapshotBackingBlobs(t, fs)
+	// 分块 blob（内容块）必须**逐个字节不变**：同名同内容，且不新增内容分块。
+	// 只允许 meta 类 blob（z 标记）增减各一个（旧 meta 删、新 meta 增）。
+	changedContent := 0
+	for name, sum := range before.content {
+		got, ok := after.content[name]
+		if !ok {
+			changedContent++
+			t.Errorf("内容分块 %s 不应消失（改名不得重加密内容）", name)
+			continue
+		}
+		if got != sum {
+			changedContent++
+			t.Errorf("内容分块 %s 内容被改写（改名不得动内容）", name)
+		}
+	}
+	for name := range after.content {
+		if _, ok := before.content[name]; !ok {
+			changedContent++
+			t.Errorf("改名不应新增内容分块 %s", name)
+		}
+	}
+	if changedContent > 0 {
+		t.Fatalf("改名必须只重写 meta（内容分块变化 %d 处）", changedContent)
+	}
+	if len(after.meta) != len(before.meta) {
+		t.Errorf("meta blob 数应不变（旧的删、新的增）: before=%d after=%d", len(before.meta), len(after.meta))
+	}
+
+	// 重启（重开同一底层目录）→ 新名可解析、旧名不可。
+	fs2, nerr := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
+		Block: shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128}, TempDir: t.TempDir()})
+	if nerr != nil {
+		t.Fatalf("NewFS(重开): %v", nerr)
+	}
+	if got := readAll(t, fs2, ctx, "a/f2.bin"); !bytes.Equal(got, contentBefore) {
+		t.Fatalf("重启后新名内容不一致: len=%d", len(got))
+	}
+	if e, _ := fs2.Stat(ctx, "a/f1.bin"); e != nil {
+		t.Error("重启后旧名不应可解析（旧 meta 已删）")
+	}
+
+	// 同 basename 跨目录移动仍走「物理搬移分块」路径（内容零改动，但容器变化）。
+	if err := fs2.MakeDir(ctx, "b"); err != nil {
 		t.Fatalf("MakeDir b: %v", err)
 	}
-	if err := fs.Rename(ctx, "a/f1.bin", "b/f1.bin"); err != nil {
+	if err := fs2.Rename(ctx, "a/f2.bin", "b/f2.bin"); err != nil {
 		t.Errorf("同 basename 跨目录移动应成功: %v", err)
 	}
+	if got := readAll(t, fs2, ctx, "b/f2.bin"); !bytes.Equal(got, contentBefore) {
+		t.Fatalf("跨目录移动后内容不一致: len=%d", len(got))
+	}
+}
+
+// backingBlobSnapshot 是底层 blob 快照：内容分块（非 z 标记）名→sha256，与 meta blob 名集合。
+type backingBlobSnapshot struct {
+	content map[string]string
+	meta    map[string]struct{}
+}
+
+// snapshotBackingBlobs 遍历底层容器，收集内容分块（名→内容哈希）与 meta blob 名。
+func snapshotBackingBlobs(t *testing.T, fs *SecretdataFS) backingBlobSnapshot {
+	t.Helper()
+	snap := backingBlobSnapshot{content: map[string]string{}, meta: map[string]struct{}{}}
+	ctx := context.Background()
+	rootEntries, err := fs.inner.ListDir(ctx, "")
+	if err != nil {
+		t.Fatalf("ListDir(root): %v", err)
+	}
+	for _, e := range rootEntries {
+		if !e.IsDir {
+			continue
+		}
+		files, lerr := fs.inner.ListDir(ctx, e.Name)
+		if lerr != nil {
+			t.Fatalf("ListDir(%s): %v", e.Name, lerr)
+		}
+		for _, f := range files {
+			key := e.Name + "/" + f.Name
+			if shardseal.ClassifyName(f.Name) == shardseal.KindFileMeta {
+				snap.meta[key] = struct{}{}
+				continue
+			}
+			rc, oerr := fs.inner.OpenRead(ctx, key)
+			if oerr != nil {
+				t.Fatalf("OpenRead(%s): %v", key, oerr)
+			}
+			data, rerr := io.ReadAll(rc)
+			_ = rc.Close()
+			if rerr != nil {
+				t.Fatalf("ReadAll(%s): %v", key, rerr)
+			}
+			sum := sha256.Sum256(data)
+			snap.content[key] = hex.EncodeToString(sum[:])
+		}
+	}
+	return snap
+}
+
+// readAll 读回逻辑文件全量内容。
+func readAll(t *testing.T, fs *SecretdataFS, ctx context.Context, rel string) []byte {
+	t.Helper()
+	rc, err := fs.OpenRead(ctx, rel)
+	if err != nil {
+		t.Fatalf("OpenRead(%s): %v", rel, err)
+	}
+	defer func() { _ = rc.Close() }()
+	data, rerr := io.ReadAll(rc)
+	if rerr != nil {
+		t.Fatalf("ReadAll(%s): %v", rel, rerr)
+	}
+	return data
 }
 
 // TestMaxParallelLoads_AdaptsToKDFTier（任务 13 档位化补充）：loadGate 并发上界随 KDF 档位
