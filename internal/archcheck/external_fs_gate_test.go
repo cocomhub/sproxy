@@ -38,7 +38,7 @@ func loadExternalFSCalls(t *testing.T) map[string]int {
 		t.Fatalf("读取 %s: %v", externalFSCallsFile, err)
 	}
 	out := map[string]int{}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
