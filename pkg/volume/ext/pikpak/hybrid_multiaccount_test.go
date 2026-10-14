@@ -793,13 +793,25 @@ func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) { // NOSONAR: S37
 	if restoresAfterFirst == 0 {
 		t.Fatalf("首次失败路径应在账号区转存过（restore calls = 0）")
 	}
-	// 第二次：重跑 → 分享区 chunk 被 manifest 跳过（longShareCalls 不再增长），
-	// 账号区 chunk 重新转存下载成功 → 文件完整。
+	// 第二次：重跑 → **已记录完成**的分享区 chunk 被 manifest 跳过，账号区 chunk 重新转存下载成功。
+	//
+	// 判据必须与 **manifest 记录**一致（race-free）：首轮分享区 chunk 若被账号区失败触发的取消
+	// **中断在半途**（数据只写了一部分），它**本来就没被记录**——此时重下是**正确行为**（跳过才是
+	// 静默损坏，`dropZeroTailChunks` 正是为此存在）。故期望值由首轮结束时的 manifest 推出，不写死 1。
+	shareChunkRecorded := false
+	if m := loadManifest(dest); m != nil {
+		shareChunkRecorded = m.Has(0)
+	}
 	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
 		t.Fatalf("resume download: %v", err)
 	}
-	if longShareCalls.Load() != 1 {
-		t.Fatalf("share chunk long-range calls = %d, want 1 (第二次应跳过分享区 chunk)", longShareCalls.Load())
+	wantShare := int64(2)
+	if shareChunkRecorded {
+		wantShare = 1
+	}
+	if got := longShareCalls.Load(); got != wantShare {
+		t.Fatalf("share chunk long-range calls = %d, want %d（已记录完成=%v：已记录必须跳过，未记录必须重下）",
+			got, wantShare, shareChunkRecorded)
 	}
 	// 转存计数断言**增量**（不锁具体次数：重试次数是分片级实现细节，这里锁语义——
 	// 重跑的账号区 chunk 必然重新转存一次副本）。
@@ -994,4 +1006,98 @@ func perAccountReleaseHandler(payload []byte, deleteCalls, wrongAuth *atomic.Int
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
 		}
 	})
+}
+
+// TestHybridDownload_Resume_SkipsRecordedShareChunk **确定性**钉住续传契约：
+// 「manifest 记录为完成的分片 ⇒ 重跑必须跳过（不再拉分享区长 Range）」——不依赖任何时序
+// （对比 CrashResume 用例：那里的分享区分片是否完成取决于首轮取消时序，只能按记录做条件断言）。
+//
+// 预置状态：工作文件已写入分享区分片数据 + manifest 记录该分片完成 ⇒ 重跑只需下载账号区分片。
+// 变异：`loadValidManifest` 恒返回 nil（忽略续传记录）⇒ 分享区分片被重下 ⇒ 本用例红。
+func TestHybridDownload_Resume_SkipsRecordedShareChunk(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i % 59)
+	}
+	chunkLen := int64(len(payload) / 2) // 2 chunks → 分享区 1 + 账号区 1（shareEnd = 0.5 total）
+
+	var longShareCalls atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/shield/captcha/init":
+			writeJSON(w, map[string]any{"captcha_token": "cap-1", "expires_in": 3600})
+		case r.URL.Path == "/drive/v1/share/detail":
+			writeJSON(w, map[string]any{"share_status": "OK", "files": []map[string]any{
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case r.URL.Path == "/drive/v1/share/file_info":
+			writeJSON(w, map[string]any{"file_info": map[string]any{
+				"id": "share-f1", "name": "movie.mp4", "web_content_link": srv.URL + "/share/dl",
+			}})
+		case r.URL.Path == "/share/dl":
+			var s, e int64
+			fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &s, &e)
+			if e-s+1 > 1024 {
+				longShareCalls.Add(1) // 分享区**长 Range**（续传必须避免）
+			}
+			serveRange(w, r, payload)
+		case r.URL.Path == "/drive/v1/share/restore":
+			writeJSON(w, map[string]any{"task_id": "t1", "file_id": "restored-1"})
+		case r.URL.Path == "/drive/v1/files":
+			if r.URL.Query().Get("parent_id") != "" {
+				writeJSON(w, map[string]any{"files": []any{}})
+				return
+			}
+			writeJSON(w, map[string]any{"files": []map[string]any{
+				{"kind": "drive#file", "id": "restored-1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+			}})
+		case strings.HasPrefix(r.URL.Path, "/drive/v1/files/restored"):
+			writeJSON(w, map[string]any{"id": "restored-1", "name": "movie.mp4", "web_content_link": srv.URL + "/dl-restored-1"})
+		case strings.HasPrefix(r.URL.Path, "/dl-restored"):
+			serveRange(w, r, payload) // 账号区正常（本用例不注入失败）
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	pool, _ := newTestPool(t, 1<<30, &now)
+	addAcct(t, pool, "acct-a", `{"access_token":"tok-a"}`, 1<<30)
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
+	api := NewAPI(APIConfig{Host: srv.URL, AccessToken: fakeServerToken, HTTPClient: srv.Client()}, nil)
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, HTTPClient: srv.Client(),
+		ChunkSize: chunkLen, ShareRatio: 0.5, Concurrency: 2,
+		AutoDelete: false, AccountPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+
+	// 预置续传状态：工作文件 = 完整尺寸（预分配形态）+ 分享区分片数据；manifest 记录该分片完成。
+	work := make([]byte, len(payload))
+	copy(work, payload[:chunkLen])
+	if werr := os.WriteFile(WorkingPath(dest), work, 0o644); werr != nil {
+		t.Fatalf("seed working file: %v", werr)
+	}
+	writeManifest(dest, &hybridManifest{
+		Total: int64(len(payload)), ShareEnd: chunkLen, Chunks: map[int64]int64{0: chunkLen},
+		Source: manifestSource{ShareID: "abc123", FileID: "share-f1", Size: int64(len(payload)), URL: "https://mypikpak.com/s/abc123"},
+	})
+
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); derr != nil {
+		t.Fatalf("resume download: %v", derr)
+	}
+	// 决定性断言：已记录完成的分片**不得**再拉长 Range（跳过 = 省带宽/配额）。
+	if got := longShareCalls.Load(); got != 0 {
+		t.Fatalf("已记录完成的分享区分片被重下：long-range calls = %d, want 0", got)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch after resume")
+	}
 }
