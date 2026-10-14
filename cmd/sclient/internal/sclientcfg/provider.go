@@ -45,6 +45,13 @@ func (p *ViperProvider) Unmarshal(obj any) error {
 	return p.v.Unmarshal(obj)
 }
 
+// UnmarshalSub 解码 Viper 中指定 key 下的子配置段到目标结构体
+// （如 UnmarshalSub("sealfile", &cfg) 解码 `sealfile:` 段；走 UnmarshalKey，嵌套键
+// 与 SCLIENT_ 前缀环境变量均生效）。
+func (p *ViperProvider) UnmarshalSub(key string, obj any) error {
+	return p.v.UnmarshalKey(key, obj)
+}
+
 // Refresh 重新读取配置文件。
 func (p *ViperProvider) Refresh() error {
 	return p.v.ReadInConfig()
