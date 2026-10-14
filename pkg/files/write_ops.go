@@ -1709,6 +1709,17 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, rel, remotePa
 	if len(vols) == 0 {
 		return false, DeleteFileResult{}, nil // 非外部卷 / 未授权 → 交本地流程
 	}
+	// **软删不得静默降级**（本项目硬规则：安全/破坏性语义要么明确支持，要么明确拒绝，禁止
+	// 「条件不满足就悄悄换成另一种语义」）。回收站（trash 桶）落在**本地租户根**，外部卷（加密/
+	// 远端）当前没有对应实现 ⇒ 若此处继续走硬删，用户**显式**请求 `?soft=true`（可恢复删除）却
+	// 得到**不可恢复删除** = 静默数据丢失。故 fail-closed：明确拒绝并提示改硬删，**不动数据**。
+	// （外部卷回收站 = 独立排期项，见 docs/designs；届时在本分支实现而不是偷偷降级。）
+	if input.SoftDelete {
+		return true, DeleteFileResult{}, &HTTPError{
+			Status:  http.StatusBadRequest,
+			Message: "外部卷暂不支持回收站删除（soft=true）：请改用硬删（不带 soft=true）",
+		}
+	}
 	for _, name := range vols {
 		// **删除前**取记账字节（卷自报实测足迹优先；删除后对象已不在卷上 ⇒ 无法再测）。
 		charge := int64(0)
