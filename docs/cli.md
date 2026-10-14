@@ -91,6 +91,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`relay`](#relay) | 中继节点：连接到 Hub，转发请求到本地 HTTP 服务 |
 | [`genkey`](#genkey) | 生成 64 hex 随机 AES-256 密钥（自检/手动构造用；隧道密钥由凭据 SK 派生） |
 | [`config`](#config) | 配置管理 |
+| [`sealfile`](#sealfile) | 本地文件加解密（与 secretdata 卷同内核；加密产物可作卷加载播放） |
 | [`upgrade`](#upgrade) | 自更新（GitHub Releases 校验 + 原子替换） |
 | [`version`](#version) | 打印版本信息 |
 
@@ -829,6 +830,49 @@ sclient migrate mirror-config <in> [--print] [--write <path>]
 - `mirror-config <in>`：读 manifest + 目标机卷列表（`GET /api/volumes`）→ 生成 `volumes[].mirror_to`（多卷冗余）/ `sync_remotes`（源机为 direct 同步远端）/ `federation.peers`（源机为联邦对端）片段 YAML，默认打印（`--print`），`--write <path>` 落盘
 - 通用 flags：`--yes`（跳过交互确认，纯脚本模式）、`--ignore-errors`、`--no-verify`（跳过导入后校验，慎用）
 - 迁移期间源端变化：manifest 记录 mtime/checksum，导入后校验发现差异 → 提示重导该文件（幂等重跑即可收敛）
+
+### sealfile
+
+```bash
+sclient sealfile encrypt <file> [--key <密钥>] [--owner <owner>] [--output-dir <目录>]
+sclient sealfile decrypt <输出目录> [卷内文件名] --key <密钥> [-o 还原文件]
+sclient sealfile info <输出目录> [文件名] --key <密钥>
+```
+
+本地文件加解密（**不连服务端**），与 sproxy `secretdata` 卷**同一写内核**（`secretdata.NewFS`）：
+加密产物可直接作为 `type: secretdata` 卷根加载到 sproxy，播放器 Range 直接播放。
+
+- **encrypt**：加密源文件到输出目录。产物为 secretdata 卷布局（逻辑键 `<owner>/user/<名>`，
+  磁盘为随机加密容器）。视频文件缺省按扩展名自动关键帧分块（MP4 走 go-mp4、其它走 ffprobe
+  兜底，与 sproxy 完全同款）；`--video-keyframe` / `--fixed` 显式覆盖（互斥）。输出打印
+  blocklet 模式（关键帧是否生效的可观测性）。
+- **decrypt**：整文件解密还原（含 SHA-256 全量校验，fail-closed）。位置参数 1 = 产物目录，
+  位置参数 2 = 卷内文件名（**短名**，缺省取 `<owner>/user/` 下唯一文件）；`-o/--output` 指定
+  还原路径（缺省 = 产物目录父目录/<短名>）。
+- **info**：查看产物卷信息（文件列表 / 大小 / sha256 / 分块数 / blocklet 模式）。
+- **--key**：64 hex 字面量或 secrets 卷密钥文件路径（文件内容**原样字节**作 secret——与
+  `secret_url` 读取同一语义，不要求 hex）。缺省读配置 `sealfile.key`。
+- **--owner**：逻辑 owner（默认 `anonymous`）。产物布局 `<owner>/user/<名>` 对齐服务器键空间
+  （`Location.FSPath` 恒 owner 前缀）。**注意**：签名请求的 owner 即 **AK 字符串**（非凭据
+  Ring 的 Owner 字段），加密产物要被某请求命中须用对应 AK；未认证请求用 `anonymous`。
+- **加载到 sproxy**：产物目录配置为 `type: secretdata` 卷（`extra.root` 指向产物目录 +
+  `secret_url` 指向同一密钥文件），播放器直接 Range 播放（`/download?filename=<名>&volume=<卷名>`）。
+
+**配置段（sclient.yaml）**：
+
+```yaml
+sealfile:
+  key: "..."            # 密钥：64 hex 字面量或密钥文件路径（原样字节）
+  algorithm: ""         # 加密算法（缺省 shardseal 默认）
+  block_policy:         # 分块策略（同 secretdata extra.block_policy）
+    mode: random
+    min: "1MiB"
+    max: "200MiB"
+  out_dir: "./sealed"   # 输出目录（encrypt 产物 / info 定位）
+  owner: anonymous      # 逻辑 owner（默认 anonymous）
+```
+
+优先级：CLI flag > 配置 > 默认。
 
 ## 常见错误排查
 

@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package main
+package media
 
 import (
 	"bytes"
@@ -15,7 +15,7 @@ import (
 // 提供者（任意 video/* 容器族命中，行为一致全走 ffprobe）。纯只读、不写注册表 → 可并行。
 func TestKeyframeProviderFor_FFprobePreferred(t *testing.T) {
 	t.Parallel()
-	p := keyframeProviderFor(true)
+	p := KeyframeProviderFor(true)
 	if p.Mode != "video-keyframe" || p.Kind != "video" || p.Manager != "ffprobe" {
 		t.Fatalf("ffprobe 选型=%+v，应为 {video-keyframe video ffprobe}", p)
 	}
@@ -34,7 +34,7 @@ func TestKeyframeProviderFor_FFprobePreferred(t *testing.T) {
 // 提供者（仅 MP4 命中，其它容器族回落 fixed）。纯只读、不写注册表 → 可并行。
 func TestKeyframeProviderFor_GoMP4Fallback(t *testing.T) {
 	t.Parallel()
-	p := keyframeProviderFor(false)
+	p := KeyframeProviderFor(false)
 	if p.Mode != "video-keyframe" || p.Kind != "video/mp4" || p.Manager != "go-mp4" {
 		t.Fatalf("go-mp4 选型=%+v，应为 {video-keyframe video/mp4 go-mp4}", p)
 	}
@@ -50,7 +50,7 @@ func TestKeyframeProviderFor_GoMP4Fallback(t *testing.T) {
 // TestRegisterKeyframeBackend_Unregister：装配注册 + 解绑（动态绑定/解绑语义验证）。
 func TestRegisterKeyframeBackend_Unregister(t *testing.T) {
 	// sproxy:serial: 写共享 blocklet 注册表。
-	registerKeyframeProvider(keyframeProviderFor(false))
+	RegisterKeyframeProvider(KeyframeProviderFor(false))
 	t.Cleanup(func() { shardseal.UnregisterBlockletMode("video-keyframe", "video/mp4") })
 
 	// 命中 go-mp4 精确提供者。
@@ -68,10 +68,10 @@ func TestRegisterKeyframeBackend_Unregister(t *testing.T) {
 // MP4 命中 go-mp4（先精确），MKV/TS/AVI 命中 ffprobe（通配）。
 func TestRegisterKeyframeBackend_DualRegistration(t *testing.T) {
 	// sproxy:serial: 写共享 blocklet 注册表。
-	gp := keyframeProviderFor(false)
+	gp := KeyframeProviderFor(false)
 	gp.Fallback = []shardseal.KeyframeIndexer{ffprobe.Indexer{}}
-	registerKeyframeProvider(gp)
-	registerKeyframeProvider(keyframeProviderFor(true))
+	RegisterKeyframeProvider(gp)
+	RegisterKeyframeProvider(KeyframeProviderFor(true))
 	t.Cleanup(func() {
 		shardseal.UnregisterBlockletMode("video-keyframe", "video/mp4")
 		shardseal.UnregisterBlockletMode("video-keyframe", "video")

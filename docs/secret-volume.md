@@ -54,10 +54,30 @@ volumes:
 ```
 
 密钥文件（`secrets://mykeys/datakey`）需**手动放置**：在 secrets 卷底层 `<root>/secrets/` 目录放一个
-64-hex 文本文件（如 `datakey`）。当前 sclient / Web UI 尚未接通加密卷文件面，密钥文件由运维放置
-（参数见 §9 已知限制一）；`sclient trust login` 不会创建卷内密钥文件。
+64-hex 文本文件（如 `datakey`）。sclient 加密卷文件面已接线（上传/下载/改名/删文件/删目录，见 §8），
+密钥文件由运维放置（`sclient trust login` 不会创建卷内密钥文件；本地工具 `sealfile` 只读该文件做
+本地加密，不创建 secrets 卷密钥）。
 
 配置完后重启 sproxy，`volumes[]` 即含 `vault`（加密卷），可经 `secretdata://vault/<path>` 读写（见 §4）。
+
+### 2.1 本地加解密工具（`sclient sealfile`）
+
+`sclient sealfile`（本地命令，不连服务端）用与 secretdata 卷**同一写内核**（`secretdata.NewFS`）
+在本地加密文件，加密产物可直接作为 `type: secretdata` 卷根加载播放（详见 `docs/cli.md`「sealfile」）：
+
+```bash
+# 本地加密（视频自动关键帧分块，与 sproxy 同款）
+sclient sealfile encrypt movie.mp4 --key ./datakey --output-dir ./sealed
+# 产物目录作为 secretdata 卷根装配：extra.root=./sealed + secret_url 指向同一密钥文件
+# 解密还原 / 查看产物信息
+sclient sealfile decrypt ./sealed --key ./datakey -o movie.mp4.restored
+sclient sealfile info ./sealed --key ./datakey
+```
+
+- 产物逻辑布局 `<owner>/user/<名>` 对齐服务器键空间（`Location.FSPath` 恒 owner 前缀）：
+  `--owner` 默认 `anonymous`；**签名请求的 owner 即 AK 字符串**，产物要命中须用对应 AK。
+- 密钥文件内容**原样字节**作 secret（与 `secret_url` 读取同一语义，不要求 hex）。
+- 命令/配置段（`sealfile.key` / `sealfile.out_dir` / `sealfile.owner` 等）见 `docs/cli.md`。
 
 ## 3. 配置参考
 
