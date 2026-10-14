@@ -162,7 +162,16 @@ func (c *VolumeCapacityCounter) Used() int64 {
 }
 
 // Capacity 返回限额（0 = 不限）。
-func (c *VolumeCapacityCounter) Capacity() int64 { return c.capacity }
+//
+// 读侧加锁（2026-10-14 复核，防御性）：写侧 `setCapacity` 持 `c.mu`，而本方法此前无锁读
+// `c.capacity`。**当前** `setCapacity` 只在启动期 Load 路径被调用（计数器尚未发布）⇒ 实际无竞态；
+// 但配置热更新一旦把限额改成可运行时调整，这里就会成为数据竞争。加锁成本可忽略（本包内部无
+// 「持锁时再调 Capacity()」的调用点 ⇒ 无重入风险），故直接对齐写侧口径。
+func (c *VolumeCapacityCounter) Capacity() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.capacity
+}
 
 // counterFile 是持久化快照（版本化）。
 type counterFile struct {
