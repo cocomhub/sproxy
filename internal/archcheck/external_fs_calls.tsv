@@ -28,3 +28,4 @@ pkg/volume/enclosure/sealfs.go	7	封印装饰器自身（Inner/UnsealedFS/SealBa
 
 pkg/volume/enclosure/fs.go	1	新增直连点：需评估封印影响
 pkg/volume/enclosure/ownerfs.go	4	调用方面 owner 映射视图（be.FS() 取区域视图做底座）+ 真值键翻译
+pkg/server/files_phys.go	1	卷自报物理足迹能力查询（配额模型 v3）：经 externalFSFor 取装饰链后 Innermost 取能力实现，仅做**元数据查询**（对象尺寸），不读写内容；调用点仅限用户刚写入/正在删除的对象（已经过封印路径校验）⇒ 无封印写绕过

@@ -59,6 +59,7 @@ type runtime struct {
 	contentIndex  bool
 	fileMeta      FileMetaPolicy
 	externalOps   ExternalVolumeOps
+	phys          VolumePhysFootprinter
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
@@ -170,6 +171,8 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		eventSink:    cfg.eventSink,
 		contentIndex: cfg.contentIndex,
 		fileMeta:     cfg.fileMeta,
+		externalOps:  cfg.externalOps,
+		phys:         cfg.phys,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default

@@ -141,6 +141,23 @@ type VolumeRouter interface {
 	RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error)
 }
 
+// VolumePhysFootprinter 由**掌握物理布局**的卷实现（secretdata 等）：向配额账本报告对象的
+// **真实物理落盘字节**与「逻辑 → 物理上界」换算（配额模型 v3，用户裁定 2026-10-14：只按物理
+// 占用记账）。未装配（nil）= 无该能力 ⇒ 写内核回落 `UploadRoute.PhysSize`（加密卷公式折算）
+// ⇒ 明文/加密本地/可信卷零回归。
+//
+// 为什么必须由卷自报：物理量含**逻辑不可推**的部分——secretdata 的 meta blob pad 到
+// [base, 2·base)（默认 1–2MB/文件、1–2MB/目录，与文件逻辑大小**无关**，是尺寸混淆设计）、
+// XOR parity（可达逻辑 2×）。按逻辑记账在小文件/多目录场景下物理可达逻辑的**千倍**。
+type VolumePhysFootprinter interface {
+	// PhysFootprint 返回 volName 卷上**用户可见路径** remotePath 对应对象的**真实物理字节**
+	// （含 parity/meta pad 等；实测）。owner 用于把用户路径解析为卷内键（`Location.FSPath()`）。
+	PhysFootprint(volName, owner, remotePath string) (int64, bool)
+	// PhysBound 返回 volName 卷上 logical 字节的**物理上界**（预占用用；结算按实测收敛）。
+	// 无该能力/未知卷 ⇒ 0（调用方回落既有折算）。
+	PhysBound(volName string, logical int64) int64
+}
+
 // QuotaScopeProvider 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
 type QuotaScopeProvider interface {
 	ScopeFor(owner, rel string) *quota.Scope
@@ -237,6 +254,7 @@ type config struct {
 	contentIndex  bool
 	fileMeta      FileMetaPolicy
 	externalOps   ExternalVolumeOps
+	phys          VolumePhysFootprinter
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -252,6 +270,11 @@ func WithActor(a ActorResolver) Option {
 
 // WithVolumes 注入多卷能力。默认：由 TenantResolver 派生的单卷实现。
 // WithExternalOps 注入外部卷对象操作接缝（F1；未装配 → 外部卷对象无删除入口，零回归）。
+// WithPhysFootprinter 注入卷物理足迹能力（未注入 = 无该能力；明文/加密本地卷不需要）。
+func WithPhysFootprinter(p VolumePhysFootprinter) Option {
+	return func(c *config) { c.phys = p }
+}
+
 func WithExternalOps(ops ExternalVolumeOps) Option {
 	return func(c *config) { c.externalOps = ops }
 }

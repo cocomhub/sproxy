@@ -361,13 +361,44 @@ func (r *UploadRoute) physicalSize(size int64) int64 {
 // PhysicalSize 导出同一口径：**预留与结算必须同口径**（路由实现方在 TryReserve 前用它折算）。
 func (r *UploadRoute) PhysicalSize(size int64) int64 { return r.physicalSize(size) }
 
+// settleSize 返回本次写入应结算的**物理**字节（写内核唯一入口）。
+//
+// 优先级：① 卷自报**实测足迹**（`VolumePhysFootprinter.PhysFootprint`——secretdata 的 parity +
+// **meta pad** 无法由逻辑长度推出，必须实测）；② 回落 `PhysicalSize`（加密卷公式折算）；③ 恒等。
+//
+// **释放侧必须同口径**（同一 helper / 同一能力），否则：少释放 = 幽灵占用/假 507；
+// 多释放 = 配额虚低/超真实配额。
+func (s *Service) settleSize(route UploadRoute, owner, remotePath string, written int64) int64 {
+	// 不要求 VolumeName 非空：能力由装配层判定（未知卷/无能力 ⇒ ok=false 回落），单卷旧装配下
+	// 卷名为空但能力仍可能装配（能力实现自行裁决）。
+	if s.rt.phys != nil {
+		if n, ok := s.rt.phys.PhysFootprint(route.VolumeName, owner, remotePath); ok && n > 0 {
+			return n
+		}
+	}
+	return route.physicalSize(written)
+}
+
+// physChargeFor 返回 volName 卷上对象的**记账字节**（卷自报实测足迹优先；无能力 ⇒ ok=false）。
+// 释放侧与写入侧必须同源（`settleSize`）——否则少释放 = 幽灵占用/假 507、多释放 = 超真实配额。
+func (s *Service) physChargeFor(volName, owner, remotePath string) (int64, bool) {
+	if s.rt.phys == nil || remotePath == "" {
+		return 0, false
+	}
+	n, ok := s.rt.phys.PhysFootprint(volName, owner, remotePath)
+	if !ok || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // Commit 结算双账本（prev → written 差分）。
 //
-// **口径细节（易错，务必按单位区分）**：`prev` 来自 `root.Stat` ⇒ 加密卷上**已是物理**（密文）长度，
-// **不得再折算**（否则双重折算 ⇒ 过度释放 ⇒ 幽灵占用/假 507）；`written` 是本次写入的**逻辑**字节
-// （调用方按明文长度统计）⇒ 加密卷必须折算为物理。两者差分后 committed 即物理占用。
+// **口径契约（易错）**：两个参数都必须是**物理**字节——`prev` 来自 `root.Stat`（加密卷上已是密文
+// 长度），`written` 必须由调用方经 `Service.settleSize`（卷自报实测足迹优先，否则 `PhysicalSize`
+// 折算）得到。**本方法不再折算**：折算只允许发生在 `settleSize` 一处，否则「谁折算了」不可知 ⇒
+// 双重折算（过度释放/幽灵占用）或漏折算（配额虚低）都是静默错。
 func (r *UploadRoute) Commit(prev, written int64) {
-	written = r.physicalSize(written)
 	if r.ScopeRes != nil {
 		if prev > 0 {
 			r.Scope.Adjust(prev, written)

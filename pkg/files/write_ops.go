@@ -259,7 +259,8 @@ func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, 
 		return WriteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
 	}
 	// 双账本结算：覆盖写 Adjust(prev, written) + Release；新文件 Commit(written)。
-	a.route.Commit(prev, a.input.ClientSize)
+	// 口径：**实测物理足迹**优先（卷自报；secretdata 含 parity/meta pad）⇒ 与释放侧同口径。
+	a.route.Commit(prev, s.settleSize(a.route, a.input.Owner, a.remotePath, a.input.ClientSize))
 	if mr := s.rt.metricsRecorder(); mr != nil {
 		mr.RecordUpload(a.input.ClientSize)
 	}
@@ -372,7 +373,7 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 			f.logger.WarnContext(f.ctx, "去重回退复制校验失败", "file_name", f.remotePath)
 			return WriteFileResult{}, true, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 		}
-		route.Commit(0, size)
+		route.Commit(0, s.settleSize(route, f.owner, f.remotePath, size))
 		ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 		s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
 		// 可信卷：去重回退复制路径也建 meta（C-MAJOR-3 修复——去重 rel 与普通上传一致有 sidecar）。
@@ -1475,7 +1476,7 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	// **外部卷硬删（评审 F1）**：外部卷没有 *storage.Root，`locateDeleteTarget`/`volumeFileExists`
 	// 恒未命中 ⇒ 其对象此前无任何用户可见删除入口（卷写满后一切写入恒 507 = 功能死路）。
 	// 命中即在此终结（经装配层可信链：主文件 + 联动 sidecar + 卷级计数释放）。
-	if handled, res, extErr := s.deleteExternalVolume(ctx, owner, remotePath, input); handled {
+	if handled, res, extErr := s.deleteExternalVolume(ctx, owner, rel, remotePath, input); handled {
 		return res, extErr
 	}
 
@@ -1573,7 +1574,7 @@ func (s *Service) idempotentMissingDelete(ctx context.Context, remotePath string
 //     （默认卷可能仍有该文件，不能在此武断 404）。
 //
 // 「外部卷」判据 = 该卷无本地 Root（与 `volumeFileExists` 的判据同源，非类型名硬编码）。
-func (s *Service) deleteExternalVolume(ctx context.Context, owner, remotePath string, input DeleteFileInput) (bool, DeleteFileResult, error) {
+func (s *Service) deleteExternalVolume(ctx context.Context, owner, rel, remotePath string, input DeleteFileInput) (bool, DeleteFileResult, error) {
 	ops := s.rt.externalVolOps()
 	if ops == nil {
 		return false, DeleteFileResult{}, nil // 未装配接缝：零回归（外部卷无删除入口）
@@ -1583,6 +1584,11 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, remotePath st
 		return false, DeleteFileResult{}, nil // 非外部卷 / 未授权 → 交本地流程
 	}
 	for _, name := range vols {
+		// **删除前**取记账字节（卷自报实测足迹优先；删除后对象已不在卷上 ⇒ 无法再测）。
+		charge := int64(0)
+		if n, ok := s.physChargeFor(name, owner, remotePath); ok {
+			charge = n
+		}
 		deleted, derr := ops.ExternalDelete(ctx, owner, name, remotePath, input.ExpectedChecksum)
 		if derr != nil {
 			return true, DeleteFileResult{}, derr
@@ -1590,6 +1596,9 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, remotePath st
 		if !deleted {
 			continue
 		}
+		// 释放配额（与写入侧同口径：`settleSize` 记的就是这个量）。此前外部卷删除**完全不释放**
+		// ⇒ owner 配额与卷池随每次删除永久虚高（幽灵占用/假 507）。
+		s.releaseExternalDeleteQuota(owner, rel, name, charge)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "外部卷硬删 volume="+name)
 		return true, DeleteFileResult{RemotePath: remotePath,
 			Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
@@ -1603,6 +1612,22 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, remotePath st
 		return true, res, err
 	}
 	return true, DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
+}
+
+// releaseExternalDeleteQuota 释放外部卷删除后的 owner 配额与卷容量池（口径与写入侧同源）。
+// charge 是**删除前**实测/折算出的记账字节（0 = 无记账能力 ⇒ 不释放，保持既有行为）。
+func (s *Service) releaseExternalDeleteQuota(owner, rel, volName string, charge int64) {
+	if charge <= 0 {
+		return
+	}
+	if scope := s.rt.quotaScope(owner, rel); scope != nil {
+		scope.ReleaseUsage(charge)
+	}
+	if vs := s.rt.volSet(); vs != nil {
+		if pool := vs.Pool(volName); pool != nil {
+			pool.ReleaseCommitted(charge)
+		}
+	}
 }
 
 // externalCandidateVolumes 返回 owner 可见的**外部卷**名（无本地 Root ⇒ 外部）。
@@ -1795,6 +1820,12 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 		f.logger.InfoContext(f.ctx, "文件已软删到回收站", "file_name", f.remotePath, "trash", trashRel)
 		return DeleteFileResult{RemotePath: f.remotePath, Message: "文件已移入回收站"}, true, nil
 	}
+	// **删除前**取记账字节：卷自报实测足迹（secretdata 的 parity/meta pad 只能实测）优先，
+	// 否则回落「解密视图逻辑长度 → 所在卷物理」折算。删除后索引已无该对象 ⇒ 必须在此取。
+	charge := physicalCharge(f.root, info.Size())
+	if n, ok := s.physChargeFor(homeVol, f.owner, f.remotePath); ok {
+		charge = n
+	}
 	if err := f.root.Remove(quarRel); err != nil {
 		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
 		// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
@@ -1807,7 +1838,6 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 	// **单位陷阱（实测）**：info 来自 `verifyDeleteQuarantine` 的 `root.OpenDecrypted(...).Stat()`
 	// ⇒ 加密卷上是**解密视图** ⇒ `info.Size()` 是**逻辑**长度（而 `root.Stat()` 才是物理）⇒
 	// 必须按所在卷折算为物理，否则每 64KiB 块少释放 32B ⇒ 幽灵占用/假 507（见 phys_size.go 不变式）。
-	charge := physicalCharge(f.root, info.Size())
 	if scope := s.rt.quotaScope(f.owner, rel); scope != nil {
 		scope.ReleaseUsage(charge)
 	}
@@ -1971,7 +2001,7 @@ func (s *Service) writeTargetPresentSettle(ctx context.Context, owner, rel, remo
 		}
 	}
 	if !input.NoQuota {
-		route.Commit(0, spec.Size)
+		route.Commit(0, s.settleSize(route, owner, remotePath, spec.Size))
 	}
 	checksum := strings.ToLower(spec.SHA256)
 	if route.Sink == nil {
@@ -2069,8 +2099,9 @@ func (s *Service) writeTargetLocalSettle(ctx context.Context, owner, rel, remote
 // writeTargetSettleCommon 非 Exclusive 路径的结算 + sidecar + 台账（统一内核常规副作用）。
 func (s *Service) writeTargetSettleCommon(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, root *storage.Root, prev, written int64, serverChecksum string, logger *slog.Logger) (WriteTargetResult, error) {
 	// 双账本结算（!NoQuota）：覆盖写 Adjust(prev,written) + Release；新文件 Commit(written)。
+	// 口径：**实测物理足迹**优先（见 settleSize）⇒ 与释放侧同口径。
 	if !input.NoQuota {
-		route.Commit(prev, written)
+		route.Commit(prev, s.settleSize(route, owner, remotePath, written))
 	}
 	// sidecar 内置（!Exclusive）：写成功后生成配套 FileMeta（meta 恒生成；失败只 Warn 兜底）。
 	if s.rt.fileMetaEnabled() {
@@ -2173,7 +2204,7 @@ func (s *Service) writeTargetExternalSettle(ctx context.Context, logger *slog.Lo
 		return WriteTargetResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
 	}
 	if !input.NoQuota {
-		route.Commit(prev, input.ClientSize)
+		route.Commit(prev, s.settleSize(route, owner, remotePath, input.ClientSize))
 	}
 	if mr := s.rt.metricsRecorder(); mr != nil {
 		mr.RecordUpload(input.ClientSize)
