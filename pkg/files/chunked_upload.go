@@ -1284,7 +1284,7 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 字节（容量已在 init 校验），此处把预留 Commit 成 user 桶 committed（新文件大小），
 	// 覆盖写再 ReleaseUsage(old) 释放已无磁盘实体的旧文件字节。净效果：committed 恰好等于
 	// 新文件真实大小（显式对账，替代 Adjust 差分）。语义见 settleCompleteQuota。
-	s.settleCompleteQuota(session, owner, rel, prev)
+	s.settleCompleteQuota(session, owner, rel, prev, tnt)
 
 	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 write.go 单次上传的
 	// 覆盖写审计同形（同 action/object_type/result）；无覆盖（新文件）不审计（普通上传成功
@@ -1401,11 +1401,18 @@ func (s *Service) backupCompleteVersion(tnt *storage.Tenant, rel, owner, filenam
 // 卷容量池双账本结算（新文件 Commit(total) / 覆盖写 Adjust(prev,total) 差分收敛 +
 // 释放预留）。Release 原子生效一次——CompleteSession 后 CleanupSessionAfter 删除会话时
 // 的额外 Release/Commit 为空操作。
-func (s *Service) settleCompleteQuota(session *ChunkedUploadSession, owner, rel string, prev int64) {
+func (s *Service) settleCompleteQuota(session *ChunkedUploadSession, owner, rel string, prev int64, tnt *storage.Tenant) {
+	// 口径与写入侧一致（加密卷按物理占用；用目标卷租户根判定——加密是按卷属性）。
+	var root *storage.Root
+	if tnt != nil {
+		root = tnt.Root()
+	}
+	// TotalSize 是客户端声明的**逻辑**总长 ⇒ 折算为物理；prev 来自 Stat（已是物理）⇒ 不折算。
+	total := physicalCharge(root, session.TotalSize)
 	if scope := s.rt.quotaScope(owner, rel); scope != nil {
 		if session.Reservation != nil {
 			// 先提交新文件字节（reserved → committed），再释放旧文件字节。
-			session.Reservation.Commit(session.TotalSize)
+			session.Reservation.Commit(total)
 			session.Reservation = nil
 		}
 		if prev > 0 {
@@ -1419,10 +1426,10 @@ func (s *Service) settleCompleteQuota(session *ChunkedUploadSession, owner, rel 
 	// 防卷池 Usage 虚高/路由误判）。
 	if session.Pool != nil && session.PoolRes != nil {
 		if prev > 0 {
-			session.Pool.Adjust(prev, session.TotalSize)
+			session.Pool.Adjust(prev, total)
 			session.PoolRes.Release()
 		} else {
-			session.PoolRes.Commit(session.TotalSize)
+			session.PoolRes.Commit(total)
 		}
 		session.Pool = nil
 		session.PoolRes = nil

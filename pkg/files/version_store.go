@@ -143,6 +143,8 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	// 拒绝保存版本（调用方语义与单卷 owner 全局 version Scope 满一致：覆盖写 best-effort 跳过
 	// 版本、恢复路径 500 中止）——卷容量对版本字节由预留封顶（T6c 安全②：不再事后 Adjust
 	// fail-open，防借版本反复写把卷堆满）。
+	// srcSize 来自 Stat（加密卷上已是**物理**长度），而版本文件是源文件的同内容拷贝 ⇒ 物理大小相同
+	// ⇒ 预留直接用 srcSize（不再折算）；提交侧 written 是**明文**字节 ⇒ 由 commitVersionQuota 折算。
 	scopeRes, poolRes, release, err := s.reserveVersionQuota(owner, tnt, srcSize)
 	if err != nil {
 		return 0, err
@@ -153,7 +155,7 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	}
 
 	// P5 配额对账：双 Commit(actual)（多预留部分自动归还，预留转 committed）。
-	commitVersionQuota(scopeRes, poolRes, written)
+	commitVersionQuota(root, scopeRes, poolRes, written)
 
 	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
 	s.cleanupOldVersions(userRel, tnt, owner)
@@ -249,7 +251,9 @@ func (s *Service) copyVersionFile(root *storage.Root, fullRel, verRel, userRel, 
 }
 
 // commitVersionQuota 写盘成功后按实际字节双 Commit（多预留部分自动归还，预留转 committed）。
-func commitVersionQuota(scopeRes, poolRes *quota.Reservation, written int64) {
+// 口径与写入/释放侧一致（加密卷按物理占用；root 为版本文件所在卷租户根）。
+func commitVersionQuota(root *storage.Root, scopeRes, poolRes *quota.Reservation, written int64) {
+	written = physicalCharge(root, written)
 	if scopeRes != nil {
 		scopeRes.Commit(written)
 	}
@@ -266,6 +270,8 @@ func (s *Service) ReleaseVersionUsage(tnt *storage.Tenant, owner string, size in
 	if size <= 0 {
 		return
 	}
+	// size 由调用方从版本文件 Stat 取得（加密卷上已是**物理**长度）⇒ 与写入侧物理口径一致，
+	// **不再折算**（折算会双重计数）。
 	if scope := s.rt.quotaScope(owner, "version"); scope != nil {
 		scope.ReleaseUsage(size)
 	}

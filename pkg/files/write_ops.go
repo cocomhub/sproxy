@@ -836,6 +836,8 @@ func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath
 func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat) {
 	for _, f := range allFiles {
 		if scope := s.rt.quotaScope(owner, f.rel); scope != nil {
+			// f.size 来自 ReadDir 的 Info()（加密卷上**已是物理**长度）⇒ 与写入侧物理口径天然一致，
+			// **不再折算**（见 UploadRoute.Commit 的口径说明）。
 			scope.ReleaseUsage(f.size)
 		}
 	}
@@ -872,7 +874,7 @@ func (s *Service) cleanupRemovedDirMeta(owner string, allFiles []rmdirFileStat) 
 		_ = f.root.Remove(mrel)
 		if metaSize > 0 {
 			if scope := s.rt.quotaScope(owner, mrel); scope != nil {
-				scope.ReleaseUsage(metaSize)
+				scope.ReleaseUsage(metaSize) // metaSize 来自 Stat ⇒ 已是物理长度
 			}
 		}
 	}
@@ -898,7 +900,7 @@ func (s *Service) removeFileMeta(f *fileOp, rel string) {
 	}
 	if metaSize > 0 {
 		if scope := s.rt.quotaScope(f.owner, mrel); scope != nil {
-			scope.ReleaseUsage(metaSize)
+			scope.ReleaseUsage(metaSize) // metaSize 来自 Stat ⇒ 已是物理长度
 		}
 	}
 }
@@ -969,7 +971,7 @@ func (s *Service) removeDirOnVolume(tg rmTarget, rel, remotePath string) ([]rmdi
 		if pool := s.rt.volSet().Pool(tg.volName); pool != nil {
 			var volBytes int64
 			for _, f := range dirFiles {
-				volBytes += f.size
+				volBytes += f.size // 来自 ReadDir Info() ⇒ 已是物理长度
 			}
 			if volBytes > 0 {
 				pool.ReleaseCommitted(volBytes)
@@ -1339,6 +1341,7 @@ func (s *Service) renameWithQuotaTransfer(ctx context.Context, a renameHomeArgs)
 		a.logger.ErrorContext(ctx, "重命名失败", "from", a.from, "to", a.to, "error", err.Error())
 		return true, &HTTPError{Status: http.StatusInternalServerError, Message: "重命名失败"}
 	}
+	// size 来自 `a.root.Stat`（加密卷上已是**物理**长度）⇒ 预留/结算/释放天然同口径，不再折算。
 	toRes.Commit(size)
 	fromScope.ReleaseUsage(size)
 	s.renameChecksumIndex(a)
@@ -1801,15 +1804,19 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 	}
 	// P4 配额对账：删除即释放已确认占用（按删除前 stat 的文件大小）；按文件实际 rel
 	// 解析子 Scope（与写入同一键，父链聚合释放到子目录/user/租户各层）。
+	// **单位陷阱（实测）**：info 来自 `verifyDeleteQuarantine` 的 `root.OpenDecrypted(...).Stat()`
+	// ⇒ 加密卷上是**解密视图** ⇒ `info.Size()` 是**逻辑**长度（而 `root.Stat()` 才是物理）⇒
+	// 必须按所在卷折算为物理，否则每 64KiB 块少释放 32B ⇒ 幽灵占用/假 507（见 phys_size.go 不变式）。
+	charge := physicalCharge(f.root, info.Size())
 	if scope := s.rt.quotaScope(f.owner, rel); scope != nil {
-		scope.ReleaseUsage(info.Size())
+		scope.ReleaseUsage(charge)
 	}
 	// 卷容量池双 Release（AD-7）：写入经双账本预留/提交，删除须释放文件所在卷池，否则卷池
 	// Usage 虚高（路由/换卷误判），依赖 reconcile 才自愈。homeVol 空（无卷语义旧装配）跳过。
 	// 用 ReleaseCommitted 原子扣减（PR-C 终审 Minor：替代「读 Usage 两次 + Adjust」非原子序列）。
 	if homeVol != "" && s.rt.volSet() != nil {
 		if pool := s.rt.volSet().Pool(homeVol); pool != nil {
-			pool.ReleaseCommitted(info.Size())
+			pool.ReleaseCommitted(charge)
 		}
 	}
 	return DeleteFileResult{}, false, nil
@@ -2003,11 +2010,14 @@ func presentObjectSize(ctx context.Context, route UploadRoute, rel string) (int6
 	if route.Tenant == nil {
 		return 0, false
 	}
-	st, err := route.Tenant.Root().Stat(rel)
-	if err != nil || st == nil {
+	root := route.Tenant.Root()
+	// 客户端声明的是**逻辑**（明文）长度 ⇒ 必须用 LogicalSize 比较：加密卷上 Stat().Size() 是
+	// **密文**长度，直接比较会让加密卷上的登记恒 409。
+	sz, err := root.LogicalSize(rel)
+	if err != nil {
 		return 0, false
 	}
-	return st.Size(), true
+	return sz, true
 }
 
 // writeTargetLocalSettle 本地卷统一写内核主体：MkdirAll → prev → 原子写（Exclusive O_EXCL）→
