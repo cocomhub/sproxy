@@ -137,7 +137,6 @@ func TestResolveSealfileAlgorithm(t *testing.T) {
 		{name: "默认空", want: ""},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var f sealfileFlags
@@ -249,7 +248,6 @@ func TestResolveSealfileBlockPolicy_ExplicitModes(t *testing.T) {
 		{name: "fixed", key: sealfileFlagFixed, want: shardseal.BlockletModeFixed},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var f sealfileFlags
@@ -283,7 +281,6 @@ func TestResolveSealfileOwner(t *testing.T) {
 		{name: "纯空白", flag: "  ", wantErr: true},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var f sealfileFlags
@@ -317,7 +314,6 @@ func TestSealfileRel(t *testing.T) {
 		{owner: "anonymous", name: "a/b.txt", want: "anonymous/user/a/b.txt"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.owner+"/"+tt.name, func(t *testing.T) {
 			t.Parallel()
 			if got := sealfileRel(tt.owner, tt.name); got != tt.want {
