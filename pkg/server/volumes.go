@@ -565,6 +565,10 @@ func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, che
 // 传给后端——外部卷键空间统一 user/<rel>，与读路径 resolveExternalDownload 一致），
 // 双账本预留照常（owner 全局 Scope + 卷容量池）。
 func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volumeRoute, error) {
+	// 预占用口径（配额模型 v3）：卷自报**物理上界**优先——secretdata 的 meta pad/parity 与逻辑
+	// 大小无关（1KB 文件物理 ≈1–2MB）⇒ 按逻辑预留会在结算（实测）时突破预留。结算按实测收敛，
+	// 多预留部分在 Commit 时自动归还。
+	size = h.physBoundFor(volName, size)
 	tnt := h.volumeTenant(volName, owner)
 	external := h.externalSinkFor(owner, volName)
 	if (tnt == nil || tnt.Root() == nil) && external == nil {
