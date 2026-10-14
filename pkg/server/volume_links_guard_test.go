@@ -331,7 +331,7 @@ func TestDAV_OccupiedWrite_Rejected(t *testing.T) {
 func TestBackup_OccupiedTargetFS_RejectsWrite(t *testing.T) {
 	t.Parallel()
 	h := occupiedMainHandlers(t)
-	fs, err := h.backupTargetFSBase(context.Background(), "alice", "main")
+	fs, _, err := h.backupTargetFSBase(context.Background(), "alice", "main")
 	if err != nil {
 		t.Fatalf("backupTargetFSBase: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestCheckTransferACL_Occupied_Rejected(t *testing.T) {
 func TestOccupiedGuardFS_ReadPassThrough(t *testing.T) {
 	t.Parallel()
 	h := occupiedMainHandlers(t)
-	fs, err := h.backupTargetFSBase(context.Background(), "alice", "main")
+	fs, _, err := h.backupTargetFSBase(context.Background(), "alice", "main")
 	if err != nil {
 		t.Fatalf("backupTargetFSBase: %v", err)
 	}

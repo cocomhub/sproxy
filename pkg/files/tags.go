@@ -9,6 +9,9 @@ package files
 //   - tagsStore：per-owner 持久化（meta 桶 <owner>/meta/tags/<sha256(rel)>.json，
 //     单文件原子写），是标签的**权威事实源**（内存索引只是缓存：索引丢失/失效重建时
 //     从 store 重新合并，见 search_index.go 的 walkUserRoot / buildLocked）；
+//     **经 storage.Root 读写**（at-rest 加密卷 → 标签密文落盘；封印路径 → 恒拒）。
+//     此前是裸 os I/O + 绝对路径：标签属**用户数据**，在加密卷上明文落盘使加密承诺落空，
+//     且绕过封印（整卷封装下仍能往被封装区间写标签）；
 //   - TagFiles：写路径增量——store 原子写（成功才继续）→ index.setTags（COW 替换指针）；
 //   - SearchQuery.Tag：search?tag= 精确匹配（与 q 的 base/contentTokens 匹配 AND 组合）。
 //
@@ -21,6 +24,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -98,26 +102,23 @@ func tagsStoreRel(rel string) string {
 	return filepath.ToSlash(filepath.Join("meta", "tags", hex.EncodeToString(sum[:])+".json"))
 }
 
-// tagsStoreAbs 返回标签文件的绝对路径（租户不可用/派生失败 → 空）。
-func tagsStoreAbs(t *storage.Tenant, rel string) string {
-	if t == nil || t.Root() == nil {
-		return ""
-	}
-	p, ok := t.Root().Abs(tagsStoreRel(rel))
-	if !ok {
-		return ""
-	}
-	return p
-}
+// maxTagsFileBytes 是标签文件读取上界（防注入超大 JSON 的 OOM；标签本身有 ≤20×32 字符
+// 的校验上限，1MiB 已远超正常体量）。超限 = 视为损坏 → 与「未打标」同语义。
+const maxTagsFileBytes = 1 << 20
 
 // loadTagsFromStore 读取某文件的标签（缺失/损坏 → nil，与「未打标」同语义）。
 func loadTagsFromStore(t *storage.Tenant, rel string) []string {
-	p := tagsStoreAbs(t, rel)
-	if p == "" {
+	if t == nil || t.Root() == nil {
 		return nil
 	}
-	data, err := os.ReadFile(p)
+	// 经 Root 的解密读（非加密卷 = 普通读；加密卷 = 透明解密）。
+	rc, err := t.Root().OpenDecrypted(tagsStoreRel(rel))
 	if err != nil {
+		return nil // 缺失/不可读/（加密卷上的）历史明文标签 → 未打标
+	}
+	data, rerr := io.ReadAll(io.LimitReader(rc, maxTagsFileBytes+1))
+	_ = rc.Close()
+	if rerr != nil || len(data) > maxTagsFileBytes {
 		return nil
 	}
 	var f tagStoreFile
@@ -134,41 +135,55 @@ func loadTagsFromStore(t *storage.Tenant, rel string) []string {
 // saveTagsToStore 原子写某文件的标签（tmp + rename；meta/tags 目录自动建）。
 // 空标签 = 删除该标签文件（幂等；避免空文件残留）。
 func saveTagsToStore(t *storage.Tenant, rel string, tags []string) error {
-	p := tagsStoreAbs(t, rel)
-	if p == "" {
+	if t == nil || t.Root() == nil {
 		return errors.New("标签存储路径派生失败")
 	}
+	root := t.Root()
+	storeRel := tagsStoreRel(rel)
 	if len(tags) == 0 {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(storeRel); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
 	}
 	data, err := json.Marshal(tagStoreFile{Tags: tags})
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
+	if dir := filepath.ToSlash(filepath.Dir(storeRel)); dir != "." && dir != "" {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
 	}
-	if err := os.Rename(tmp, p); err != nil {
-		_ = os.Remove(tmp) // Windows 并发 rename 失败：清理 tmp 残留
-		return err
+	tmpRel := storeRel + ".tmp"
+	// 经 Root 的加密写（非加密卷 = 普通写）+ tmp→rename 原子替换（AtomicRename 处理
+	// Windows「目标已存在」语义）。
+	w, werr := root.OpenFileEncrypted(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if werr != nil {
+		return werr
+	}
+	if _, cerr := w.Write(data); cerr != nil {
+		_ = w.Close()
+		_ = root.Remove(tmpRel)
+		return cerr
+	}
+	if cerr := w.Close(); cerr != nil {
+		_ = root.Remove(tmpRel)
+		return cerr
+	}
+	if rerr := atomicRenameRoot(root, tmpRel, storeRel); rerr != nil {
+		_ = root.Remove(tmpRel) // Windows 并发 rename 失败：清理 tmp 残留
+		return rerr
 	}
 	return nil
 }
 
 // deleteTagsFromStore 删除某文件的标签文件（rmdir 子树清理 / rename 搬移旧键用）。
 func deleteTagsFromStore(t *storage.Tenant, rel string) {
-	p := tagsStoreAbs(t, rel)
-	if p == "" {
+	if t == nil || t.Root() == nil {
 		return
 	}
-	_ = os.Remove(p)
+	_ = t.Root().Remove(tagsStoreRel(rel))
 }
 
 // tagsTenant 返回 owner 的标签权威租户（默认卷 = 唯一根；多卷时默认卷持有

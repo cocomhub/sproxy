@@ -32,9 +32,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -143,6 +146,9 @@ func (h *Handlers) externalVolumeState(name string, be registry.ExternalBackend)
 	defer cancel()
 	state := volumeStateHealthy
 	if err := probe.Ping(ctx); err != nil {
+		if errors.Is(err, syncpkg.ErrUnsupported) {
+			return volumeStateUnknown // 记账包装层转发，内层未实现探针 → 不误报 degraded
+		}
 		state = volumeStateDegraded
 		// 告警引擎挂点（roadmap P1 阈值告警）：卷 degraded 即时告警（nil = 未启用）。
 		if h.alertEngine != nil {
@@ -212,11 +218,73 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 同卷移动 = no-op 成功（幂等）。放在内部分派之前：外部卷也走该判定（不能落到复制路径的
+	// 「目标已存在」判据）。语义与本地核心一致。
+	if fromVol == toVol {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "volume_move", ObjectType: "file", Object: remotePath,
+			Result: AuditResultSuccess, Detail: "已在目标卷（同卷 no-op）",
+		})
+		status, resp := moveOKResp("文件已在目标卷，无需移动")
+		sendJSONResponse(w, resp, status)
+		return
+	}
+
+	// **外部/加密卷参与**：本地-root 核心（moveFileBetweenVolumes）依赖写盘 root 与本地原子
+	// rename ⇒ 只覆盖本地卷（涉及外部卷的移动此前直接 400 无效的文件路径）。此类组合交域侧：
+	// 复制经统一写内核（配额/sidecar/封印与 cp 完全一致）+ 删源经接缝（外部卷硬删）或既有
+	// delete 路径（本地卷）。
+	if h.moveNeedsDomainPath(fromVol, toVol) {
+		status, resp := h.moveFileViaService(r, owner, remotePath, fromVol, toVol)
+		sendJSONResponse(w, resp, status)
+		return
+	}
+
 	// 单文件移动核心：ACL 校验通过后，由 moveFileBetweenVolumes 完成同 rel 的
 	// 锁 + 源校验 + 唯一性查重 + 双预留 + 复制 + 删源 + commit/release。
 	// 返回 (状态码, 响应体)。move 与 rebalance 共用同一原子语义（rebalance 逐文件调用）。
 	status, resp := h.moveFileBetweenVolumes(r, owner, remotePath, fromVol, toVol)
 	sendJSONResponse(w, resp, status)
+}
+
+// moveNeedsDomainPath 报告跨卷移动是否必须走域侧组合路径（涉及**非本地卷**）：
+// 外部/加密卷没有 `*storage.Root`，本地-root 核心（写盘 root + 本地原子 rename）无法承载。
+// 卷名已过 ACL 白名单校验，未知卷不会到达这里。
+func (h *Handlers) moveNeedsDomainPath(fromVol, toVol string) bool {
+	if h.volSet == nil {
+		return false
+	}
+	return h.volSet.Root(fromVol) == nil || h.volSet.Root(toVol) == nil
+}
+
+// moveFileViaService 经域侧执行跨卷移动（涉及外部/加密卷）。装配层只解析**只读源**：源为
+// 外部卷时给 externalReadSource（解密转发 + meta 校验口径），本地卷源交域侧按卷定位。
+// 返回 (HTTP 状态码, 响应体)，与 moveFileBetweenVolumes 同形。
+func (h *Handlers) moveFileViaService(r *http.Request, owner, remotePath, fromVol, toVol string) (int, UploadResponse) {
+	svc := h.fileServiceLocked()
+	if svc == nil {
+		return moveErrResp(http.StatusBadRequest, "文件服务未装配")
+	}
+	ctx := r.Context()
+	var src files.DownloadSource
+	if h.isExternalVolumeName(fromVol) {
+		src = h.externalReadSource(ctx, owner, fromVol, remotePath)
+	}
+	res, err := svc.MoveFile(ctx, files.MoveFileInput{
+		Owner: owner, From: remotePath, To: remotePath,
+		FromVol: fromVol, ToVol: toVol, Src: src,
+	})
+	if err != nil {
+		if he, ok := errors.AsType[*files.HTTPError](err); ok {
+			return moveErrResp(he.Status, he.Message)
+		}
+		return moveErrResp(http.StatusInternalServerError, err.Error())
+	}
+	h.RecordAudit(ctx, AuditEvent{
+		Action: "volume_move", ObjectType: "file", Object: remotePath, Result: AuditResultSuccess,
+		Detail: fmt.Sprintf("%s → %s（%d 字节）", fromVol, toVol, res.Size),
+	})
+	return moveOKResp(fmt.Sprintf("移动完成: %s → %s", res.From, res.To))
 }
 
 // rebalanceVolumeResponse 是 POST /api/volumes/rebalance 的响应体。
@@ -431,10 +499,23 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	}
 
 	// AD-7 双账本 to 侧先 reserve（owner 全局 → 目标卷池，防中间超限）；任一失败回滚已预留。
+	// **用户可见长度**（评审第 2 轮 P1）：`crossVolumeCopy` 现经解密流复制、返回**明文**字节数，
+	// 而 `Stat().Size()` 在加密卷上是**密文**长度 ⇒ 直接比较会让加密源卷的 move 恒失败。
+	// 以用户可见长度为准（非加密卷等价 Stat；TOCTOU 语义不变）。
 	size := srcInfo.Size()
+	if ls, lerr := userVisibleSize(fromRoot, rel); lerr == nil {
+		size = ls
+	}
 	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(owner, rel, toVol, size)
 	if !rOk {
 		return status, resp
+	}
+	// M3 修复：迁移前**探测 meta 配额**（owner 全局 → 目标卷池，metaEstimate 探测即释放）——
+	// 原设计 move 后 moveMetaAfterVolumeMove 重建目标 meta 仅 Warn，目标 meta 桶配额不足时
+	// move 静默成功 → 源 meta 已删、目标无 meta（不可信，读侧永久不校验）。探测在写前
+	// fail-closed：meta 配额不足 507 拒绝，不让 move 进入"目标无 meta"状态。
+	if pStatus, pResp, pOk := h.moveProbeMetaQuota(owner, rel, toVol, size); !pOk {
+		return pStatus, pResp
 	}
 
 	// 流式复制到 to 卷（临时 + fsync + 原子 rename）；失败回滚双预留，源不动。
@@ -445,6 +526,49 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 
 	// 删源三分支 + 双 commit/release 结算（语义见 moveDeleteSource）。
 	return h.moveDeleteSource(mc, written, scope, scopeRes, poolRes)
+}
+
+// moveProbeMetaQuota 探测目标卷 meta 桶配额是否足够容纳 FileMeta sidecar（M3）：
+// 用 metaEstimate（上限估算）经 owner 全局 scope 与目标卷池 TryReserve 探测、立即释放
+// （探测即释放不落地，与 transferQuotaGate 同语义）——不足 → 507 fail-closed（迁移拒绝，
+// 防止"目标无 meta"的静默成功）。估算偏保守（每 1MiB 一块 × 150B JSON + 固定头），
+// 不足时提前拒绝；精确记账仍由 moveMetaAfterVolumeMove 的 WriteMeta 内部完成。
+func (h *Handlers) moveProbeMetaQuota(owner, rel, toVol string, size int64) (int, UploadResponse, bool) {
+	est := metaEstimateForSize(size)
+	if est <= 0 {
+		return 0, UploadResponse{}, true
+	}
+	if scope := h.quotaScopeFor(owner, meta.MetaPath(rel)); scope != nil {
+		r, rerr := scope.TryReserve(est)
+		if rerr != nil {
+			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
+		}
+		r.Release()
+	}
+	if pool := h.volSet.Pool(toVol); pool != nil {
+		r, rerr := pool.TryReserve(est)
+		if rerr != nil {
+			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
+		}
+		r.Release()
+	}
+	return 0, UploadResponse{}, true
+}
+
+// metaEstimateForSize 估算 FileMeta sidecar 上限字节（M3 探测用；按 1MiB 分块 ×
+// ~150B/块 JSON + 固定头，保守上限——实际 meta 通常更小，探测提前拒绝最坏情况）。
+func metaEstimateForSize(size int64) int64 {
+	if size <= 0 {
+		return 0
+	}
+	const chunk = int64(1 << 20) // 1MiB 最小分块（minMetaChunkSize）
+	blocks := size / chunk
+	if size%chunk != 0 {
+		blocks++
+	}
+	const perBlock = int64(150) // 每块 ChunkMeta JSON 上限
+	const header = int64(512)   // 固定头（总哈希/Size/ChunkSize/Name）
+	return blocks*perBlock + header
 }
 
 // moveOKResp 构造跨卷移动成功响应体。
@@ -614,6 +738,10 @@ func (h *Handlers) moveCommitConcurrentDeleted(mc *moveFileCtx, written int64, s
 	// 评审 I-②（2026-10-07）：move 成功同步搜索索引（源条目移除 + 目标卷条目写入），
 	// 否则源卷列表 stale 幽灵文件、目标卷缺失/错位。
 	h.fileService().IndexMove(mc.owner, mc.rel, written, mc.toVol, mc.toRoot)
+	// B-M3 修复：并发删除分支目标卷已持数据但无 meta sidecar（正常路径的
+	// moveMetaAfterVolumeMove 不在此分支）——补目标卷 meta 重建；源 meta 已由并发
+	// delete 的 removeFileMeta 清理，源清理 stat 不到自然 no-op。
+	h.moveMetaAfterVolumeMove(mc)
 	h.RecordAudit(mc.r.Context(), AuditEvent{
 		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
 		Result: AuditResultSuccess, Detail: "源已被并发删除，目标卷已持数据（from 侧账本由并发 delete 释放）",
@@ -657,6 +785,11 @@ func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quot
 	// 评审 I-②（2026-10-07）：move 成功同步搜索索引（源条目移除 + 目标卷条目写入），
 	// 否则源卷列表 stale 幽灵文件、目标卷缺失/错位。
 	h.fileService().IndexMove(mc.owner, mc.rel, written, mc.toVol, mc.toRoot)
+	// M3 修复：跨卷 move 成功后在目标卷**重建 meta sidecar**、删除源卷 meta 并释放
+	// 其配额——否则源卷留孤儿 .meta（磁盘+配额双泄漏）、目标卷文件无 sidecar。
+	// 重建复用 filesMetaPolicy.WriteMeta（与上传到达即建同一入口，覆盖差分 + 配额记账）；
+	// 源侧删除 + ReleaseUsage 与单文件删除联动同构。软删/并发删除路径不在此（moveCommitConcurrentDeleted）。
+	h.moveMetaAfterVolumeMove(mc)
 
 	h.RecordAudit(mc.r.Context(), AuditEvent{
 		Action: "volume_move", ObjectType: "file", Object: mc.remotePath,
@@ -664,6 +797,32 @@ func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quot
 	})
 	h.logger.Info("跨卷移动成功", "file_name", mc.remotePath, "from", mc.fromVol, "to", mc.toVol)
 	return moveOKResp(fmt.Sprintf("文件已移动: %s (%s → %s)", mc.remotePath, mc.fromVol, mc.toVol))
+}
+
+// moveMetaAfterVolumeMove 跨卷移动后 meta sidecar 重建/清理：目标卷重建（复用
+// filesMetaPolicy.WriteMeta 覆盖差分 + 配额记账）、源卷删除 meta + 释放 meta 桶配额。
+// B-M4 修复：**目标重建闸 disable（disable 不新建），源清理不闸**——disable 只停新建
+// 不停清理（C5 语义）：enable 期写入的源 meta 在 disable 后移动仍须清理（防孤儿 +
+// 配额泄漏），与单文件删除联动同构。
+func (h *Handlers) moveMetaAfterVolumeMove(mc *moveFileCtx) {
+	// 目标卷重建（WriteMeta 幂等覆盖：同 rel 目标已有 meta 则 Adjust 差分；无则新
+	// 目标卷重建恒执行（meta 恒生成，skip_verify 只关读侧校验）。
+	if mErr := h.filesMetaWriteAfterRestore(mc.toRoot, mc.owner, mc.rel); mErr != nil {
+		h.logger.Warn("跨卷移动后目标卷 meta 重建失败（读侧将不校验）", "file_name", mc.remotePath, "error", mErr)
+	}
+	// 源卷删除 meta + 释放 meta 桶配额（与单文件删除联动同构；不闸 disable——
+	// 存量 sidecar 在 disable 后移动仍须清理）。
+	srcMeta := meta.MetaPath(mc.rel)
+	metaSize := int64(0)
+	if e, serr := mc.fromRoot.Stat(srcMeta); serr == nil && e != nil {
+		metaSize = e.Size()
+	}
+	_ = mc.fromRoot.Remove(srcMeta)
+	if metaSize > 0 {
+		if scope := h.quotaScopeFor(mc.owner, srcMeta); scope != nil {
+			scope.ReleaseUsage(metaSize)
+		}
+	}
 }
 
 // rebalanceFileEntry 是 rebalance 候选文件（user 桶内，递归收集）。
@@ -772,7 +931,10 @@ func (h *Handlers) checkMoveTargetUnique(owner, rel, fromVol, toVol string) (str
 // 原子 rename（atomicRenameRoot，Windows 并发退避）。返回复制字节数（供配额 Commit/release）。
 // 失败路径幂等清理临时文件；成功路径临时文件已 rename 不存在，defer Remove 为空操作。
 func crossVolumeCopy(ctx context.Context, srcRoot, dstRoot *storage.Root, srcRel, dstRel string) (int64, error) {
-	src, err := srcRoot.Open(srcRel)
+	// **加密感知**（评审 P0）：跨卷复制（move / 版本恢复 / 镜像 / 冷热迁移共用）必须按两侧卷的
+	// at-rest 状态分叉——裸 Open/OpenFile 会在「加密→明文」时把密文原样搬到明文卷（不可逆损坏）、
+	// 在「明文→加密」时把明文落到加密卷（at-rest 失效，随后 OpenDecrypted 魔数失配 ⇒ 不可读）。
+	src, err := openUserVisibleRead(srcRoot, srcRel)
 	if err != nil {
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
@@ -783,22 +945,28 @@ func crossVolumeCopy(ctx context.Context, srcRoot, dstRoot *storage.Root, srcRel
 		return 0, fmt.Errorf("创建目标目录失败: %w", err)
 	}
 	tmpRel := filepath.Join(dir, filepath.Base(dstRel)+fmt.Sprintf(".tmp.%d", time.Now().UnixNano()))
-	dst, err := dstRoot.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	tmpDst, err := writeUserVisible(dstRoot, tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("创建目标临时文件失败: %w", err)
 	}
+	dst, ok := tmpDst.(*os.File) // 非加密卷为 *os.File（需 Sync）；加密写入器无 Sync（Close 已冲刷）
+	if !ok {
+		dst = nil
+	}
 	defer func() { _ = dstRoot.Remove(tmpRel) }()
 
-	written, err := copyWithContext(dst, src, ctx)
+	written, err := copyWithContext(tmpDst, src, ctx)
 	if err != nil {
-		_ = dst.Close()
+		_ = tmpDst.Close()
 		return 0, fmt.Errorf("复制文件失败: %w", err)
 	}
-	if err = dst.Sync(); err != nil {
-		_ = dst.Close()
-		return 0, fmt.Errorf("同步目标文件失败: %w", err)
+	if dst != nil {
+		if err = dst.Sync(); err != nil {
+			_ = tmpDst.Close()
+			return 0, fmt.Errorf("同步目标文件失败: %w", err)
+		}
 	}
-	if err = dst.Close(); err != nil {
+	if err = tmpDst.Close(); err != nil {
 		return 0, fmt.Errorf("关闭目标文件失败: %w", err)
 	}
 	if err = atomicRenameRoot(dstRoot, tmpRel, dstRel); err != nil {

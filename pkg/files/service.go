@@ -318,6 +318,10 @@ type DownloadPath struct {
 	// 非 nil 时 OpenPath/StatPath 改经它打开/stat，绕过 dp.Tenant.Root()（本地卷
 	// 恒 nil → 零回归）。
 	Source DownloadSource
+	// Ciphertext 为 true 时请求 at-rest 加密卷的**存储原样字节**（不解密）——加密只在
+	// 存储层，用户常规访问恒为明文；此开关供备份/迁移/带外校验等需要密文的场景。
+	// 非加密卷该标志无副作用（原始字节 == 明文）。
+	Ciphertext bool
 }
 
 // SeekReadCloser 是服务端读取流形态（2026-10-05）：同时满足 io.ReadSeeker（http.
@@ -337,6 +341,17 @@ type DownloadSource interface {
 	Stat(ctx context.Context) (fs.FileInfo, error)
 	// Open 打开服务端读取流（SeekReadCloser——http.ServeContent 消费；调用方 Close）。
 	Open(ctx context.Context) (SeekReadCloser, error)
+}
+
+// ChecksumSource 是可选的「服务端读取源就地提供**明文**整文件 SHA-256」能力（StatPath 用）。
+//
+// 为什么需要：加密卷（secretdata）的实体在卷内是加密容器，`Stat` 只能给出大小/时间；而
+// 客户端 `mv`/校验需要**明文**整文件哈希。可信外部卷（secretdata 的 `meta.Provider`、
+// trusted.Wrap 的 sidecar）能就地给出该值，故经本可选接口上抛；不实现该接口的读取源
+// 保持旧行为（checksum 空，不误报、不伪造）。
+type ChecksumSource interface {
+	// Checksum 返回明文整文件 SHA-256；不可用（无 meta 能力/读取失败/无记录值）→ ok=false。
+	Checksum(ctx context.Context) (string, bool)
 }
 
 // FileLocation 是 `LocateOwnerFile` 的定位结果：目标文件所在卷名（空 = 默认卷）与该卷租户。
@@ -432,6 +447,7 @@ const (
 	reasonPathInvalid = "path_invalid"
 	// reasonChecksumMissing 是客户端未提供 X-File-Checksum 的失败。
 	reasonChecksumMissing = "checksum_missing"
+	reasonConflict        = "conflict"
 	// reasonMkdirFailed 是重命名时创建目标父目录失败的失败。
 	reasonMkdirFailed = "mkdir_failed"
 	// reasonRemoveFailed 是删除时 os.Remove 失败的失败。
@@ -612,7 +628,9 @@ func checksumReader(src io.Reader) (string, error) {
 // 全程 root 内打开，防符号链接逃逸。对应 pkg/server.FileChecksumRoot（语义等价：
 // 同经 root.Open 打开后哈希整文件）。
 func fileChecksumRoot(root *storage.Root, rel string) (string, error) {
-	f, err := root.Open(rel)
+	// 用户可见语义（两实现同一口径）：加密卷算**明文**摘要
+	// （raw Open 会算密文摘要——校验/冲突检测对明文内容失去意义）。
+	f, err := root.OpenDecrypted(rel)
 	if err != nil {
 		return "", err
 	}
@@ -626,7 +644,7 @@ func fileChecksumRoot(root *storage.Root, rel string) (string, error) {
 // **先 root.Open**（打开失败即不匹配，即使 expected 为空），打开成功后才做 `expected == ""`
 // 空值短路。顺序刻意对齐——两处实现的行为必须可逐句对照。
 func verifyFileWithChecksumRoot(root *storage.Root, rel, expectedChecksum string) bool {
-	f, err := root.Open(rel)
+	f, err := root.OpenDecrypted(rel)
 	if err != nil {
 		return false
 	}

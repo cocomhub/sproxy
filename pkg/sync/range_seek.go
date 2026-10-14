@@ -59,6 +59,15 @@ func NewRangeSeeker(ctx context.Context, fs FS, rel string, size int64) (*RangeS
 	if rr == nil {
 		return nil, fmt.Errorf("sync: FS 未实现 RangeReader，无法随机访问（服务端整流路径）")
 	}
+	// P1（第 5 轮对抗评审）：透明装饰器（MetaBucketGuard/TrustedVolumeFS/CapacityFS/
+	// StagingQuotaGateFS 等）**无条件**实现 OpenRangeRead（inner 无能力时运行期才返
+	// ErrUnsupported），故仅凭类型断言恒真——会让调用方（external_source.go）的
+	// 「整流 seeker 回落」变成死代码：RangeSeeker 构造成功、首次 Read 才报错，而
+	// ServeContent 已发出 200/Content-Length → 客户端静默截断。
+	// 判据必须下探最内层原始卷（与 Innermost 的既定能力探测纪律一致）。
+	if AssertRangeReader(Innermost(fs)) == nil {
+		return nil, fmt.Errorf("sync: 底层卷未实现 RangeReader（仅装饰层回显），无法随机访问（服务端整流路径）")
+	}
 	if size < 0 {
 		return nil, fmt.Errorf("sync: 非法文件大小 %d", size)
 	}
@@ -153,4 +162,94 @@ func (s *RangeSeeker) open() error {
 	end := min(s.off+s.window, s.size)
 	s.rcEnd = end
 	return nil
+}
+
+// StreamSeeker 把**只有 OpenRead**（无 RangeReader）的 FS 适配为 io.ReadSeeker + io.Closer，
+// 供 http.ServeContent 服务端转发。无 RangeReader 的外部卷（如 S3 网关后端）此前
+// NewRangeSeeker 直接报错 → /download 恒 500；本类型兑现注释承诺的「退整流 200 路径」。
+//
+// Seek 语义：Seek(0,End) 返回已知 size（不打开）；非当前偏移的定位用「关流 + 下次 Read
+// 重开并丢弃 offset 字节」模拟（Range 请求多付一次顺序读，功能可用）。ctx 为单次
+// ServeContent 取消信号（闭包捕获）。
+type StreamSeeker struct {
+	open func() (io.ReadCloser, error)
+	size int64
+	pos  int64
+	rc   io.ReadCloser
+}
+
+// NewStreamSeeker 构造整流 seeker（fs 仅需 OpenRead）。
+func NewStreamSeeker(ctx context.Context, fs FS, rel string, size int64) *StreamSeeker {
+	if size < 0 {
+		size = 0
+	}
+	return &StreamSeeker{
+		size: size,
+		open: func() (io.ReadCloser, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return fs.OpenRead(ctx, rel)
+		},
+	}
+}
+
+// Read 顺序读取（首次或重开时按 pos 丢弃前缀）。
+func (s *StreamSeeker) Read(p []byte) (int, error) {
+	if s.rc == nil {
+		rc, err := s.open()
+		if err != nil {
+			return 0, err
+		}
+		s.rc = rc
+		if s.pos > 0 {
+			if _, derr := io.CopyN(io.Discard, rc, s.pos); derr != nil {
+				_ = rc.Close()
+				s.rc = nil
+				return 0, derr
+			}
+		}
+	}
+	n, err := s.rc.Read(p)
+	s.pos += int64(n)
+	return n, err
+}
+
+// Seek 支持 Start/Current/End（非当前位仅记录，Read 时重开丢弃）。
+func (s *StreamSeeker) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = s.pos + offset
+	case io.SeekEnd:
+		abs = s.size + offset
+	default:
+		return 0, fmt.Errorf("sync: StreamSeeker 非法 whence %d", whence)
+	}
+	if abs < 0 {
+		return 0, fmt.Errorf("sync: StreamSeeker 负偏移 %d", abs)
+	}
+	if s.rc != nil && abs == s.pos {
+		return abs, nil
+	}
+	_ = s.closeStream()
+	s.pos = abs
+	return abs, nil
+}
+
+// Close 关闭当前流。
+func (s *StreamSeeker) Close() error {
+	err := s.closeStream()
+	return err
+}
+
+func (s *StreamSeeker) closeStream() error {
+	if s.rc == nil {
+		return nil
+	}
+	err := s.rc.Close()
+	s.rc = nil
+	return err
 }

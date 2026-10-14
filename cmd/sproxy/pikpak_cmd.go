@@ -11,8 +11,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"log/slog"
+
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/pikpak"
 	"github.com/spf13/cobra"
 )
@@ -190,6 +193,30 @@ func newCmdPikpakAccount(ios cli.IOStreams, store pikpak.SecretStore, stateDir s
 
 // pikpakAccountStore 返回账号命令用的凭据存储：显式注入（测试 fake）优先，否则从服务
 // 配置构建加密卷 store（C5：主密钥放默认 secrets 卷、凭据经 shardseal 加密落盘）。
+// openDefaultVolumeRoot 按配置打开**默认卷**根（RootDir == storage_root 的卷，缺省取首个；
+// 无卷配置 → (nil, nil) 表示「无卷语义可依附」，调用方回落裸 FS）。CLI 与服务器必须用同一
+// 口径打开（同一 extra ⇒ 同一 at-rest 加密设置），否则同一目录会出现明文/密文两种形态。
+func openDefaultVolumeRoot(cfg *server.Config, log *slog.Logger) (*storage.Root, error) {
+	if cfg == nil || len(cfg.Volumes) == 0 {
+		return nil, nil
+	}
+	vc := cfg.Volumes[0]
+	for _, cand := range cfg.Volumes {
+		if filepath.Clean(cand.Root) == filepath.Clean(cfg.StorageRoot) && cand.Root != "" {
+			vc = cand
+			break
+		}
+	}
+	rootDir := vc.Root
+	if rootDir == "" {
+		rootDir = cfg.StorageRoot
+	}
+	if rootDir == "" {
+		return nil, nil
+	}
+	return server.OpenLocalVolumeRoot(vc.Name, rootDir, vc.Extra, log)
+}
+
 func pikpakAccountStore(ctx context.Context, store pikpak.SecretStore) (pikpak.SecretStore, error) {
 	if store != nil {
 		return store, nil
@@ -198,7 +225,16 @@ func pikpakAccountStore(ctx context.Context, store pikpak.SecretStore) (pikpak.S
 	if err != nil {
 		return nil, fmt.Errorf("pikpak account: 加载服务配置: %w", err)
 	}
-	return pikpakEncryptedSecretStore(ctx, cfg.StorageRoot, cfg.Pikpak.SecretsDir, nil)
+	// 默认卷根（CLI 与服务器写**同一目录**的主密钥，口径必须一致）：从配置解析默认卷
+	// （RootDir == storage_root 的卷，缺省取首个）并以同一 extra 打开（含 at-rest 加密）。
+	volRoot, verr := openDefaultVolumeRoot(cfg, nil)
+	if verr != nil {
+		return nil, verr
+	}
+	if volRoot != nil {
+		defer func() { _ = volRoot.Close() }()
+	}
+	return pikpakEncryptedSecretStore(ctx, volRoot, cfg.StorageRoot, cfg.Pikpak.SecretsDir, nil)
 }
 
 // pikpakReadCreds 读取添加账号的凭据：--file 优先，否则 stdin（禁止 argv 直传，防进程

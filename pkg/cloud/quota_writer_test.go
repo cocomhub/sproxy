@@ -222,6 +222,12 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 		t.Fatalf("写失败后 Scope Reserved()=%d want 0（reserve 无泄漏）", got)
 	}
 
+	// 续传阶段**放宽下载超时**：上文的 300ms 是**第一阶段失败**的触发器（客户端读取超时），
+	// 与续传语义无关；负载下（-race/并行）续传仍受同一 300ms 约束会偶发
+	// `context deadline exceeded` 假红（本仓 flake 记录）。此处显式放宽为充裕值——测试仍然
+	// 断言「续传发送 Range」与「账本收敛到实际大小」，覆盖不变。
+	mgr.config.DownloadTimeout = 30 * time.Second
+
 	// 手动续传（Range）→ 完成，账本收敛到实际大小。
 	if rerr := mgr.ResumeTask(task.ID, false, "alice"); rerr != nil {
 		t.Fatal(rerr)
@@ -269,7 +275,12 @@ func startWriteFailureResumeSource(t *testing.T, full []byte) (*httptest.Server,
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		time.Sleep(2 * time.Second)
+		// 挂住直到客户端放弃（DownloadTimeout 到点即断）：用 ctx.Done 而非固定 Sleep——
+		// 客户端断开即返回，不占用服务端 2s，也不受负载影响（带 5s 兜底防意外长期占用）。
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv, &sawRange

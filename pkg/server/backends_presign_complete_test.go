@@ -33,7 +33,7 @@ func (f *completeTestFS) Stat(_ context.Context, rel string) (*sync.Entry, error
 	if f.entries[rel] {
 		return &sync.Entry{Name: rel}, nil
 	}
-	return nil, os.ErrNotExist
+	return nil, nil // 全仓 Stat 契约：不存在返回 (nil, nil)
 }
 func (*completeTestFS) ListDir(context.Context, string) ([]sync.Entry, error) { return nil, nil }
 func (*completeTestFS) OpenRead(context.Context, string) (io.ReadCloser, error) {
@@ -51,7 +51,7 @@ func (b *completeTestBackend) Close() error { return nil }
 func TestBackendsPresignComplete(t *testing.T) {
 	t.Parallel()
 	registry.RegisterBackend(completeTestType, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-		return &completeTestBackend{entries: map[string]bool{"dir/a.txt": true}}, nil
+		return &completeTestBackend{entries: map[string]bool{"anonymous/user/dir/a.txt": true}}, nil
 	})
 	defer registry.UnregisterBackendForTest(completeTestType)
 

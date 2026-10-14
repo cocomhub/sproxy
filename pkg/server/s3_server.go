@@ -19,17 +19,19 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/volume"
-
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // s3ServiceName 是 SigV4 签名服务名（S3）。
@@ -47,7 +49,17 @@ func (h *Handlers) s3ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		return
 	}
-	tnt := h.tenantFor(ak)
+	// 命名桶（/s3/<卷名>?list-type=2）须列出**目标桶**：与对象操作同口径注入 bucket ctx
+	// （评审 P2：此前恒用 tenantFor(默认卷)，命名桶返回默认卷顶层，与 rclone/aws 预期不符）。
+	// 列表请求的桶名在**路径首段**（无对象 key，故不能用 s3ResolveBucket）。
+	if h.volSet != nil {
+		if vol := strings.Trim(strings.TrimPrefix(r.URL.Path, "/s3/"), "/"); vol != "" {
+			if v, exist := h.volSet.ByName(vol); exist && v.Authorize(ak) {
+				r = r.WithContext(context.WithValue(r.Context(), s3BucketCtxKey{}, vol))
+			}
+		}
+	}
+	tnt := h.s3TenantFor(ak, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
@@ -60,11 +72,13 @@ func (h *Handlers) s3ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set(headerContentType, "application/xml")
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>default</Name><IsTruncated>false</IsTruncated><Contents>%s</Contents></ListBucketResult>`, h.s3ContentsXML(entries, prefix))
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>default</Name><IsTruncated>false</IsTruncated><Contents>%s</Contents></ListBucketResult>`, h.s3ContentsXML(root, entries, prefix))
 }
 
 // s3ContentsXML 生成 <Contents> 对象条目（key/size/last-modified）。
-func (h *Handlers) s3ContentsXML(entries []os.DirEntry, prefix string) string {
+// s3ContentsXML 生成 <Contents> 条目；size 用**用户可见**长度（加密卷 = 明文长度，与
+// HEAD/GET 同口径——评审 P2：此前用密文长度会让 rclone/aws 判 size 不一致而反复重传）。
+func (h *Handlers) s3ContentsXML(root *storage.Root, entries []os.DirEntry, prefix string) string {
 	var b strings.Builder
 	for _, e := range entries {
 		if e.IsDir() {
@@ -80,8 +94,12 @@ func (h *Handlers) s3ContentsXML(entries []os.DirEntry, prefix string) string {
 		}
 		// XML 转义（审查 P2 修复）：文件名可能含 <>&"' —— 直接拼接会注入 XML
 		// （S3 客户端 rclone/aws 解析 ListBucketResult 时被注入伪造条目）。
+		size := info.Size()
+		if ls, lerr := userVisibleSize(root, path.Join("user", name)); lerr == nil {
+			size = ls
+		}
 		fmt.Fprintf(&b, `<Contents><Key>%s</Key><Size>%d</Size><LastModified>%s</LastModified></Contents>`,
-			xmlEscapeText(name), info.Size(), info.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
+			xmlEscapeText(name), size, info.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
 	}
 	return b.String()
 }
@@ -292,10 +310,23 @@ func (h *Handlers) s3HandleEmptyKey(w http.ResponseWriter, r *http.Request) {
 
 // s3ServeObject 校验 SproxySig 后按方法分发对象级操作（HEAD/GET/PUT/DELETE）。
 func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key string) {
-	// 验签（读 body 供 PUT 哈希）。
-	var body []byte
-	if r.Method == http.MethodPut {
-		body, _ = io.ReadAll(r.Body)
+	// 前置：验签 → 卷解析 → 路径校验 → Head 短路；分发在 s3DispatchObject（降复杂度）。
+	tnt, rel, owner, body, ok := h.s3ServeObjectPrepare(w, r, key)
+	if !ok {
+		return
+	}
+	if r.Method == http.MethodHead {
+		h.s3HeadObject(w, tnt.Root(), rel)
+		return
+	}
+	h.s3DispatchObject(w, r, tnt, tnt.Root(), rel, owner, body)
+}
+
+// s3ServeObjectPrepare 验签/卷/路径 解析（失败已回包）。
+func (h *Handlers) s3ServeObjectPrepare(w http.ResponseWriter, r *http.Request, key string) (*storage.Tenant, string, string, []byte, bool) {
+	body, ok := h.s3ReadBody(w, r)
+	if !ok {
+		return nil, "", "", nil, false
 	}
 	ak, err := h.sigV4Verify(r, body)
 	if err != nil {
@@ -304,98 +335,172 @@ func (h *Handlers) s3ServeObject(w http.ResponseWriter, r *http.Request, key str
 		} else {
 			http.Error(w, msgS3AuthFailed, http.StatusForbidden)
 		}
-		return
+		return nil, "", "", nil, false
 	}
-	owner := ak // S3 AK = sproxy AccessKey → owner
+	owner := ak
 	tnt := h.s3TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
-		return
+		return nil, "", "", nil, false
 	}
 	rel, ok := tnt.UserRel(key)
 	if !ok {
 		http.Error(w, "s3: 路径非法", http.StatusBadRequest)
-		return
+		return nil, "", "", nil, false
 	}
-	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：PUT/DELETE 目标命中被封装卷占用的子目录
-	// → 403（s3PutObject/s3DeleteObject 直写卷根，不经 files 域 guard）。读（HEAD/GET）不拦。
-	if h.s3OccupiedWriteGuard(w, r, rel) {
-		return
-	}
-	root := tnt.Root()
-	// HeadObject（HEAD /s3/<key>）。
-	if r.Method == http.MethodHead {
-		h.s3HeadObject(w, root, rel)
-		return
-	}
+	return tnt, rel, owner, body, true
+}
+
+// s3DispatchObject 按方法分发 GET/PUT/DELETE（统一写/读/删内核）。
+func (h *Handlers) s3DispatchObject(w http.ResponseWriter, r *http.Request, tnt *storage.Tenant, root *storage.Root, rel string, owner string, body []byte) {
 	switch r.Method {
 	case http.MethodGet:
 		h.s3GetObject(w, root, rel)
 	case http.MethodPut:
-		h.s3PutObject(w, root, rel, body)
+		h.s3PutWithQuota(w, r, owner, tnt, root, rel, body)
 	case http.MethodDelete:
-		h.s3DeleteObject(w, root, rel)
+		// **统一删内核**（DeleteFile）：锁 + rename-to-quarantine TOCTOU 加固 + sidecar/配额对称
+		// 清理，全部内聚——不再手工 root.Remove + s3DeleteMetaAfter。显式卷 = bucket 卷名；
+		// AllowMissing=false：不存在 → 404。
+		// **SkipChecksumVerify**：S3 的 DeleteObject **没有 checksum 语义**（客户端不发
+		// X-File-Checksum）——不显式跳过会让既有对象恒 400「缺少 X-File-Checksum 请求头」
+		// （#765 归口时引入的回归）。安全由同 rel 文件锁 + 本地卷 quarantine 承担。
+		volName, _ := r.Context().Value(s3BucketCtxKey{}).(string)
+		remotePath := strings.TrimPrefix(rel, tnt.UserRoot()+"/")
+		_, derr := h.fileService().DeleteFile(r.Context(), files.DeleteFileInput{
+			Owner: owner, RemotePath: remotePath, ExplicitVol: volName, AllowMissing: false,
+			SkipChecksumVerify: true,
+		})
+		if derr != nil {
+			if he, ok := derr.(*files.HTTPError); ok {
+				http.Error(w, "s3: "+he.Message, he.Status)
+				return
+			}
+			http.Error(w, "s3: 删除失败", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "s3: 方法不支持", http.StatusMethodNotAllowed)
 	}
 }
 
-// s3HeadObject 返回对象的元信息头（Content-Length；不存在 404）。
+// s3ReadBody 读取并限长 PUT body（P2：未认证请求不得无界占内存）。
+// 返回 ok=false 表示已写错误响应（超限）。
+func (h *Handlers) s3ReadBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	limit := int64(64 << 20)
+	if h.cfgPtr != nil {
+		if cfg := h.cfgPtr.Load(); cfg != nil && cfg.MaxUploadBytes > 0 {
+			limit = int64(cfg.MaxUploadBytes)
+		}
+	}
+	// 无 body（DELETE/HEAD 直调 handler 的测试路径 r.Body 可为 nil；生产路径服务器恒填
+	// http.NoBody，零回归）——直接跳过读（验签用空 body 哈希）。
+	if r.Body == nil {
+		return nil, true
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			http.Error(w, "s3: 对象超过单请求上限", http.StatusRequestEntityTooLarge)
+			return nil, false
+		}
+		// 读失败：返回 nil 继续验签（会因签名不匹配拒绝）；不信任截断内容。
+		return nil, true
+	}
+	return body, true
+}
+
+// s3PutWithQuota 处理 S3 单对象 PUT：**统一写内核**（WriteTarget，显式卷 = bucket 卷名、
+// Verify=false 无客户端校验和；锁 + 双账本 + 原子写 + sidecar 内置 + 台账全部内聚）。
+// 此前的手工样板（s3PutReserve/s3PutReservation/s3PutObject/s3WriteMetaAfter）删除——
+// 语义对齐 files 域上传（409/507/400 文案、失败保留旧文件、meta 恒生成）。
+func (h *Handlers) s3PutWithQuota(w http.ResponseWriter, r *http.Request, owner string, tnt *storage.Tenant, root *storage.Root, rel string, body []byte) {
+	// 目标 rel（user/<key>）→ WriteTarget 的 RemotePath（去 user/ 前缀的桶内路径）。
+	// 显式卷 = bucket 卷名（从 ctx 取，s3ResolveBucket 已注入；bucket 语义 = 固定卷）。
+	volName, _ := r.Context().Value(s3BucketCtxKey{}).(string)
+	remotePath := strings.TrimPrefix(rel, tnt.UserRoot()+"/")
+	res, werr := h.fileService().WriteTarget(r.Context(), files.WriteTargetInput{
+		Owner: owner, RemotePath: remotePath, Volume: volName,
+		Verify: false, ClientSize: int64(len(body)),
+	}, bytes.NewReader(body))
+	if werr != nil {
+		h.s3WriteError(w, werr, "s3: 写入失败")
+		return
+	}
+	_ = res
+	w.WriteHeader(http.StatusCreated)
+}
+
+// s3WriteError 把统一写内核的错误映射为 S3 响应：*files.HTTPError 的 Status/Message 直接采用
+// （对齐上传文案）；未知错误回落 500。
+func (h *Handlers) s3WriteError(w http.ResponseWriter, err error, fallback string) {
+	if he, ok := err.(*files.HTTPError); ok {
+		http.Error(w, he.Message, he.Status)
+		return
+	}
+	http.Error(w, fallback, http.StatusInternalServerError)
+}
+
 func (h *Handlers) s3HeadObject(w http.ResponseWriter, root *storage.Root, rel string) {
-	f, herr := root.Open(rel)
-	if herr != nil {
+	size, serr := userVisibleSize(root, rel)
+	if serr != nil {
 		http.Error(w, "s3: 文件不存在", http.StatusNotFound)
 		return
 	}
-	defer f.Close()
-	if st, serr := f.Stat(); serr == nil {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", st.Size()))
-	}
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 }
 
 // s3GetObject 返回对象内容（application/octet-stream；不存在 404）。
+// P2 对抗评审：S3 网关 GET 与 /download 同口径接本地卷读校验（meta.VerifyReadSeeker
+// 逐分块比对，损坏 fail-closed）——此前直读 storage.Root 绕过校验。
 func (h *Handlers) s3GetObject(w http.ResponseWriter, root *storage.Root, rel string) {
-	f, err := root.Open(rel)
+	// 加密卷：走**用户可见**入口（透明解密）——raw Open 会下发密文（评审 P0：静默损坏）。
+	// 加密卷完整性由卷内 GCM 认证保证，sidecar 逐分块校验不适用（filesMetaPolicy 亦已跳过）。
+	if root.IsEncrypted() {
+		rc, oerr := openUserVisibleRead(root, rel)
+		if oerr != nil {
+			http.Error(w, "s3: 文件不存在", http.StatusNotFound)
+			return
+		}
+		defer func() { _ = rc.Close() }()
+		w.Header().Set(headerContentType, "application/octet-stream")
+		if _, cerr := io.Copy(w, rc); cerr != nil {
+			// 同 /download：io.Copy 回错时响应头已发出，必须中断连接（否则静默截断 200）。
+			panic(http.ErrAbortHandler)
+		}
+		return
+	}
+	f, err := openUserVisibleRead(root, rel)
 	if err != nil {
 		http.Error(w, "s3: 文件不存在", http.StatusNotFound)
 		return
 	}
-	defer f.Close()
+	srf, ok := f.(files.SeekReadCloser)
+	if !ok {
+		_ = f.Close()
+		http.Error(w, "s3: 流不支持 Range（加密卷只读兼容）", http.StatusInternalServerError)
+		return
+	}
+	rc := srf
+	vf, verr := (filesMetaPolicy{h: h}).VerifyDownload(context.Background(), root, rel, srf)
+	if verr != nil {
+		// 鉴柄已开但校验器装配失败（如畸形 sidecar）：不得下发半截内容。
+		_ = f.Close()
+		http.Error(w, "s3: 校验装配失败", http.StatusInternalServerError)
+		return
+	}
+	if vf != nil {
+		rc = vf // 逐分块校验包装（Close 透传底层）
+	}
+	defer rc.Close()
 	w.Header().Set(headerContentType, "application/octet-stream")
-	_, _ = io.Copy(w, f)
-}
-
-// s3PutObject 写对象：MkdirAll 父目录后 OpenFile 直写（root 无 WriteFile——用 OpenFile）。
-func (h *Handlers) s3PutObject(w http.ResponseWriter, root *storage.Root, rel string, body []byte) {
-	if dir := path.Dir(rel); dir != "." {
-		_ = root.MkdirAll(dir, 0o755)
+	if _, cerr := io.Copy(w, rc); cerr != nil {
+		// 校验失败/底层读错时 io.Copy 会先写出部分字节再回错；响应头已发出，无法改状态码。
+		// 必须中断连接（否则 chunked 会以**合法**终止块结束 → 客户端 200 + 静默截断对象）。
+		panic(http.ErrAbortHandler)
 	}
-	f, ferr := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if ferr != nil {
-		http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
-		return
-	}
-	_, werr := io.Copy(f, bytesReader(body))
-	_ = f.Close()
-	if werr != nil {
-		http.Error(w, "s3: 写入失败", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusCreated)
-}
-
-// s3DeleteObject 删除对象（不存在 404）。
-func (h *Handlers) s3DeleteObject(w http.ResponseWriter, root *storage.Root, rel string) {
-	if err := root.Remove(rel); err != nil {
-		http.Error(w, "s3: 删除失败", http.StatusNotFound)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func bytesReader(b []byte) io.Reader {
-	return bytes.NewReader(b)
 }
 
 // splitS3Bucket 解析 key 首段：'vol/rest' → (vol, rest, true)；单段 → (_, key, false)。
@@ -414,7 +519,16 @@ type s3BucketCtxKey struct{}
 // s3TenantFor 按 ctx 中 bucket 卷名解析租户；无 bucket → 默认卷。
 func (h *Handlers) s3TenantFor(owner string, r *http.Request) *storage.Tenant {
 	if vol, _ := r.Context().Value(s3BucketCtxKey{}).(string); vol != "" && h.volSet != nil {
-		if _, ok := h.volSet.ByName(vol); ok {
+		if v, ok := h.volSet.ByName(vol); ok && !v.Authorize(owner) {
+			// 命名桶存在但 ACL 拒绝：**不得回落到默认卷**（否则同一请求会以默认卷语义继续
+			// 读写，语义漂移且仍是越权面）——返回 nil 由调用方按「卷不可用」fail-closed。
+			return nil
+		}
+		if v, ok := h.volSet.ByName(vol); ok && v.Authorize(owner) {
+			// ACL 校验（评审 P2）：此前只按名解析卷——卷配置受限 ACL（allow/deny 名单）时，
+			// 未授权 owner 仍可经 `/s3/<卷名>/<key>` 读写删该卷（限定自身 owner 前缀，不跨
+			// owner）并消耗其共享容量；与同面 s3ListBuckets（AllowedVolumes）、DAV（Authorize）、
+			// 外部卷读（external_source）口径不一致。此处收口后命名桶自然 404（bucket ctx 不注入）。
 			return h.volSet.Tenant(vol, owner, h.logger)
 		}
 	}
@@ -435,20 +549,4 @@ func (h *Handlers) s3BucketVolName(r *http.Request) string {
 	return ""
 }
 
-// s3OccupiedWriteGuard 对 S3 写方法（PUT/DELETE）做占用写保护预检：目标 rel 命中被封装卷
-// 占用的底层子目录 → 写 403 并返回 true（已处理）；读方法/未命中 → false（放行）。
-// 独立方法收敛 gocognit（s3ServeObject 复杂度门禁）。
-func (h *Handlers) s3OccupiedWriteGuard(w http.ResponseWriter, r *http.Request, rel string) bool {
-	if r.Method != http.MethodPut && r.Method != http.MethodDelete {
-		return false
-	}
-	volName := h.s3BucketVolName(r)
-	if volName == "" {
-		return false
-	}
-	if err := h.checkWrapperOccupiedWrite(volName, userVisibleRelOf(rel)); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
-		return true
-	}
-	return false
-}
+// s3DispatchObject 按方法分发 GET/PUT/DELETE（统一写/读/删内核）。

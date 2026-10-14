@@ -22,11 +22,17 @@ package files
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // postJSON 以指定 actor 发起带 JSON body 的 POST 请求（tags 批量形态用）。
@@ -310,4 +316,79 @@ func TestTags_SetTagsConcurrentWithSearch_NoRace(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// TestTagsStore_EncryptedVolumeCiphertextAndReload 标签是**用户数据**：at-rest 加密卷上标签
+// 文件必须**加密落盘**（此前裸 os I/O + 绝对路径 ⇒ 标签明文落盘 = 加密承诺落空），且可读回；
+// 清空标签 = 删除文件（幂等）。
+//
+// 变异：写回退裸 os.WriteFile → 明文断言红；读回退裸 os.ReadFile → 载入断言红。
+func TestTagsStore_EncryptedVolumeCiphertextAndReload(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("tenant 不可用")
+	}
+	if serr := tnt.Root().SetEncryption(bytes.Repeat([]byte{7}, 32)); serr != nil {
+		t.Fatalf("SetEncryption: %v", serr)
+	}
+	const marker = "confidential-tag"
+	if err := saveTagsToStore(tnt, "user/report.pdf", []string{marker}); err != nil {
+		t.Fatalf("saveTagsToStore: %v", err)
+	}
+	rootAbs, ok := tnt.Root().Abs("")
+	if !ok {
+		t.Fatal("Abs(root) 失败")
+	}
+	var hits []string
+	_ = filepath.WalkDir(rootAbs, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // 遍历容错（只关心是否出现明文）
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		if bytes.Contains(b, []byte(marker)) {
+			hits = append(hits, p)
+		}
+		return nil
+	})
+	if len(hits) > 0 {
+		t.Fatalf("加密卷上标签不得明文落盘（命中 %v）", hits)
+	}
+	if got := loadTagsFromStore(tnt, "user/report.pdf"); !slices.Equal(got, []string{marker}) {
+		t.Fatalf("载入标签不符: %v", got)
+	}
+	// 清空 = 删除文件；再读 = 未打标。
+	if err := saveTagsToStore(tnt, "user/report.pdf", nil); err != nil {
+		t.Fatalf("清空标签: %v", err)
+	}
+	if got := loadTagsFromStore(tnt, "user/report.pdf"); got != nil {
+		t.Fatalf("清空后应为未打标, got %v", got)
+	}
+	if err := saveTagsToStore(tnt, "user/report.pdf", nil); err != nil {
+		t.Fatalf("重复清空应幂等: %v", err)
+	}
+}
+
+// TestTagsStore_SealedPathRejected 被封装卷占用的区间上写入标签恒拒（封印经 Root 生效）：
+// 此前裸 os I/O 会绕过封印写进被封装区间。
+//
+// 变异：写路径不经 Root（或不经 sealCheck）→ 写入成功 → 红。
+func TestTagsStore_SealedPathRejected(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("tenant 不可用")
+	}
+	if serr := tnt.Root().SetSeals([]storage.SealRule{{Path: "meta", Wrapper: "vault"}}); serr != nil {
+		t.Fatalf("SetSeals: %v", serr)
+	}
+	err := saveTagsToStore(tnt, "user/a.txt", []string{"vip"})
+	if !errors.Is(err, storage.ErrSealed) {
+		t.Fatalf("封印区间写标签应被拒（ErrSealed）, got %v", err)
+	}
 }

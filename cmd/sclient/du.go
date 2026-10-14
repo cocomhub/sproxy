@@ -21,6 +21,10 @@ func NewCmdDu(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 		Short: "查看目录空间占用（递归统计文件数/大小）",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			return duRunE(cmd, factory, ios, st, args)
 		},
 	}

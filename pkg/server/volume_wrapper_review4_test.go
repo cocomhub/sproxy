@@ -102,27 +102,27 @@ func TestWrapperDelete_ChecksumGate(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("上传封装卷 = %d, want 200 (body: %s)", status, respBody)
 	}
-	if got := h.volSet.Pool("videos").Usage(); got != int64(len(body)) {
-		t.Fatalf("委托子池 Usage=%d want %d", got, len(body))
+	if got := wrapperCounterUsage(t, h, "videos"); got < int64(len(body)) {
+		t.Fatalf("封装卷计数 Usage=%d 应 >= 主文件 %d（master 底座含 meta sidecar）", got, len(body))
 	}
 
-	// 错误 checksum → 400 + 保留文件（委托子池用量不变）。
+	// 错误 checksum → 400 + 保留文件（容量计数不变）。
 	wrong := "deadbeef" + strings.Repeat("0", 56)
 	path := "/delete?filename=" + url.QueryEscape("prot.txt") + "&volume=" + url.QueryEscape("videos")
 	status, delBody := review4Req(t, base, http.MethodPost, path, map[string]string{headerFileChecksum: wrong})
-	if status != http.StatusBadRequest {
-		t.Fatalf("错误 checksum 删除 = %d, want 400（保留文件）(body: %s)", status, delBody)
+	if status != http.StatusConflict {
+		t.Fatalf("错误 checksum 删除 = %d, want 409（master 语义：校验和不一致）（保留文件）(body: %s)", status, delBody)
 	}
-	if got := h.volSet.Pool("videos").Usage(); got != int64(len(body)) {
-		t.Fatalf("错误 checksum 后文件应保留：委托子池 Usage=%d want %d", got, len(body))
+	if got := wrapperCounterUsage(t, h, "videos"); got < int64(len(body)) {
+		t.Fatalf("错误 checksum 后文件应保留：封装卷计数 Usage=%d 应 >= 主文件 %d", got, len(body))
 	}
 	// 正确 checksum 仍可删（400 后文件未被破坏）。
 	status, delBody = deleteFileVol(t, base, "prot.txt", body, "videos")
 	if status != http.StatusOK {
 		t.Fatalf("正确 checksum 删除 = %d, want 200 (body: %s)", status, delBody)
 	}
-	if got := h.volSet.Pool("videos").Usage(); got != 0 {
-		t.Fatalf("删除后委托子池 Usage=%d want 0", got)
+	if got := wrapperCounterUsage(t, h, "videos"); got != 0 {
+		t.Fatalf("删除后封装卷计数 Usage=%d want 0", got)
 	}
 }
 
@@ -221,13 +221,17 @@ func TestWrapperMove_TargetWrapper_ClearMessage(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(mainRoot, "alice", "user", "a.txt"), []byte("aa"), 0o600); err != nil {
 		t.Fatalf("write a.txt: %v", err)
 	}
-	// move a.txt main→wrapB：目标=封装卷 → 400 + 明确文案（非「无效的文件路径」）。
+	// move a.txt main→wrapB：目标=封装卷（master 底座 moveFileViaService 支持外部卷目标——
+	// 复制经统一写内核 + 删源经接缝）→ 200 成功，文件落到 wrapB 的 SubFS 视图。
 	status, body := moveVolume(t, base, "main", "wrapB", "a.txt")
-	if status != http.StatusBadRequest {
-		t.Fatalf("move 目标封装卷 = %d, want 400 (body: %s)", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("move 目标封装卷 = %d, want 200 (body: %s)", status, body)
 	}
-	if !strings.Contains(string(body), "目标卷不支持跨卷移动") {
-		t.Fatalf("目标封装卷文案应明确（非误导性「无效的文件路径」）: %s", body)
+	if _, err := os.Stat(filepath.Join(mainRoot, "wrapdir", "user", "a.txt")); err != nil {
+		t.Fatalf("move 后文件应落到 wrapB 子目录视图: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mainRoot, "alice", "user", "a.txt")); !os.IsNotExist(err) {
+		t.Fatal("move 后源侧 a.txt 应删除")
 	}
 	// 源侧占用优先：main/videos/x 落盘 → move main→wrapB → 403（源侧守卫先于目标类型检查）。
 	if err := os.MkdirAll(filepath.Join(mainRoot, "alice", "user", "videos"), 0o755); err != nil {

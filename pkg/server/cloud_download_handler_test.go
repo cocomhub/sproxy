@@ -1095,17 +1095,16 @@ func TestCloudHandler_CreateGroup_TransferParam(t *testing.T) {
 		Logger:  testLogger(),
 		Config:  defaultCloudDownloadConfig(),
 		// transferFSFor 用 volSet 装配：public-vault 开放卷 → (FS, scheme, shared)
-		TransferFSFor: func(volumeName string) (syncpkg.FS, string, bool) {
+		TransferFSFor: func(volumeName string) (syncpkg.FS, string) {
 			be := vs.External(volumeName)
 			if be == nil {
-				return nil, "", false
+				return nil, ""
 			}
 			vol, ok := vs.ByName(volumeName)
 			if !ok {
-				return be.FS(), "", false
+				return be.FS(), ""
 			}
-			shared := vol.ACL.Mode == volume.ModeDeny || vol.ACL.Mode == "" || len(vol.ACL.Owners) > 1
-			return be.FS(), registry.SchemeOf(vol.Type), shared
+			return be.FS(), registry.SchemeOf(vol.Type)
 		},
 	})
 	h.cloudMgr = mgr

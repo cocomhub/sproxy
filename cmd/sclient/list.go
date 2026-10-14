@@ -23,6 +23,10 @@ func NewCmdList(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 				默认列出当前目录的顶层文件。
 				使用 --offset 和 --limit 参数进行分页查询。`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)
@@ -38,10 +42,17 @@ func NewCmdList(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 			}
 
 			fm := buildFormatterWithWriter(ios.Out, cmd)
-			if len(files) == 0 {
-				fm.Println("no files found")
-			} else {
+			switch {
+			case len(files) > 0:
 				fm.PrintFileList(files)
+			default:
+				// `--json` 下必须输出**合法 JSON**（`{"files":[],"total":0}`）——JSONFormatter
+				// 的 Println 被刻意忽略，若直接 Println("no files found") 会输出空串（机器不可读）。
+				if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+					fm.PrintFileList([]client.FileInfo{})
+				} else {
+					fm.Println("no files found")
+				}
 			}
 			return nil
 		},

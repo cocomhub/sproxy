@@ -1,5 +1,5 @@
 cmd/sclient/batch_test.go	2
-cmd/sclient/cd_test.go	5
+cmd/sclient/cd_test.go	8
 cmd/sclient/cloud_download_group_test.go	17
 cmd/sclient/cloud_download_test.go	31
 cmd/sclient/cmd_rune_test.go	47
@@ -45,6 +45,7 @@ cmd/sproxy/mesh_sync_test.go	8
 cmd/sproxy/nested_target_test.go	1
 cmd/sproxy/root_extra_test.go	4
 cmd/sproxy/root_test.go	12
+cmd/sproxy/secret_register_test.go	1
 cmd/sproxy/user_volume_restore_test.go	1
 cmd/sproxy/version_test.go	3
 cmd/sproxy/xfer_listener_integration_test.go	4
@@ -59,6 +60,8 @@ internal/archcheck/web_assets_test.go	2
 internal/archcheck/xfer_send_atomicity_test.go	1
 pkg/client/events_test.go	4
 pkg/cloud/manager_test.go	2
+pkg/cloud/quota_writer_test.go	1
+pkg/files/meta/meta_test.go	1
 pkg/files/version_id_test.go	3
 pkg/server/accept_retry_test.go	5
 pkg/server/archive_test.go	1
@@ -99,6 +102,7 @@ pkg/server/dirs_owner_test.go	2
 pkg/server/download_owner_test.go	1
 pkg/server/feature_bucket_volume_test.go	4
 pkg/server/federation_forward_test.go	17
+pkg/server/files_meta_tmp_test.go	1
 pkg/server/gzip_flush_test.go	2
 pkg/server/handlers_localmux_test.go	1
 pkg/server/handlers_test.go	6
@@ -151,9 +155,10 @@ pkg/server/version_crossvolume_test.go	1
 pkg/server/version_test.go	3
 pkg/server/volume_wrapper_delete_test.go	2
 pkg/server/volume_wrapper_review4_test.go	8
-pkg/server/volumes_api_test.go	15
+pkg/server/volumes_api_test.go	14
 pkg/server/volumes_test.go	12
 pkg/server/xfer_listener_test.go	12
+pkg/storage/seal_alias_test.go	1
 pkg/telemetry/ext/otel/provider_test.go	4
 pkg/telemetry/ext/otel/tracer_test.go	3
 pkg/telemetry/tracing_test.go	15
@@ -241,6 +246,7 @@ pkg/tunnel/xfer/internal/tcp/tcp_tls_test.go	4
 pkg/tunnel/xfer/registry_test.go	5
 pkg/tunnel/xfer/xfer_test.go	3
 pkg/tunnel/xfer/xfertest/xfertest_test.go	1
+pkg/volume/ext/baidupcs/real_network_compare_e2e_test.go	1
 pkg/volume/ext/pikpak/hybrid_test.go	1
 pkg/volume/registry/set_test.go	8
 pkg/volume/volume_mesh_scope_test.go	2

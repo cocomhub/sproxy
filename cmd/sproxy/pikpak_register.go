@@ -10,8 +10,11 @@ import (
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/pikpak"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // buildAccountPool 从配置装配多账号会话池（**加密卷**凭据存储 + accounts[] 配额）。
@@ -22,8 +25,14 @@ import (
 //     （fail-closed：已配置多账号却无加密卷 → 拒绝静默回落明文单会话，注册侧跳过下载器，
 //     亮错误；F2/安全姿态）；
 //   - 装配失败 + 无账号配置 → ok=false（回落当前 CLI 登录态，Warn，功能未配置）。
-func buildAccountPool(cfg *server.Config, log *slog.Logger) (*pikpak.AccountPool, bool, error) {
-	store, err := pikpakEncryptedSecretStore(context.Background(), cfg.StorageRoot, cfg.Pikpak.SecretsDir, log)
+func buildAccountPool(cfg *server.Config, set *registry.Set, log *slog.Logger) (*pikpak.AccountPool, bool, error) {
+	// 默认卷根（可用时）供主密钥经 `storage.Root` 落盘：at-rest 加密卷上密钥材料必须密文
+	// 存储，且与默认 secrets 卷同口径（两个写入者形态不一致会让对方读到「密文当密钥」）。
+	var volRoot *storage.Root
+	if set != nil {
+		volRoot = set.Root(set.Default().Name)
+	}
+	store, err := pikpakEncryptedSecretStore(context.Background(), volRoot, cfg.StorageRoot, cfg.Pikpak.SecretsDir, log)
 	if err != nil {
 		if len(cfg.Pikpak.AccountConfigs) > 0 {
 			return nil, false, fmt.Errorf("pikpak 已配置多账号但凭据加密卷不可用: %w", err)
@@ -65,7 +74,10 @@ func buildAccountPool(cfg *server.Config, log *slog.Logger) (*pikpak.AccountPool
 //
 // 注意：下载器需已登录 CLI（binary_path 或 PATH 中的 pikpak 登录态）。
 // 未登录时 API 调用返回 ErrNotLoggedIn 明确错误（不静默降级、不假绿）。
-func registerPikpakDownloader(cfg *server.Config) {
+// pikpakGCIDStats 是 GCID 校验命中统计（cloud 装配共享实例，决策用）。
+var pikpakGCIDStats = &integrity.GCIDVerifyStats{}
+
+func registerPikpakDownloader(cfg *server.Config, set *registry.Set) {
 	registerPikpakOnce.Do(func() {
 		cli2, err := pikpak.NewCli(pikpak.CliConfig{
 			BinaryPath:  cfg.Pikpak.BinaryPath,
@@ -79,7 +91,7 @@ func registerPikpakDownloader(cfg *server.Config) {
 			return
 		}
 		api := pikpak.NewAPI(pikpak.APIConfig{}, cli2)
-		pool, ok, fatalErr := buildAccountPool(cfg, slog.Default())
+		pool, ok, fatalErr := buildAccountPool(cfg, set, slog.Default())
 		if fatalErr != nil {
 			// F2/fail-closed：config 已配置多账号但凭据加密卷不可用——拒绝静默回落明文
 			// 单会话，跳过注册（分享下载报「无下载器」亮错误，operator 须修复加密卷）。
@@ -96,6 +108,7 @@ func registerPikpakDownloader(cfg *server.Config) {
 			// 兼作 hybrid 的 Fallback（匿名路径失败时委托），此时也须释放转存副本。
 			AutoDelete:  cfg.Pikpak.AutoDelete || cfg.Pikpak.Hybrid.AutoDelete,
 			AccountPool: pool,
+			GCIDStats:   pikpakGCIDStats,
 		})
 		if err != nil {
 			slog.Warn("pikpak downloader not registered", "err", err)
@@ -132,6 +145,7 @@ func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.Pik
 		AutoDelete:  cfg.Pikpak.Hybrid.AutoDelete,
 		Logger:      slog.Default(),
 		Metrics:     &pikpak.HybridMetrics{},
+		GCIDStats:   pikpakGCIDStats,
 		// 多账号分片（round-12）：非 nil 时账号区 chunk 分摊到多账号并行（转存串行+下载并行）
 		AccountPool: pool,
 		// Fallback：匿名分享路径整体失败时降级到旧 PikpakDownloader 完整账号下载

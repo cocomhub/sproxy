@@ -20,9 +20,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -33,10 +37,13 @@ var errVolumeCycle = errors.New("volume: 底层卷成环引用")
 
 // createUserVolumeRequest 是 POST /api/volumes/user 请求体。
 type createUserVolumeRequest struct {
-	Name     string         `json:"name"`
-	Type     string         `json:"type"`
-	Capacity int64          `json:"capacity"`
-	Extra    map[string]any `json:"extra"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Capacity int64  `json:"capacity"`
+	// Unlimited 显式声明「不限容量」（F6）：`capacity:0` 默认含义是**未声明**（沿用同名卷
+	// 已持久化的上限，防 delete+recreate 把上限变不限）；确需不限必须显式置本字段。
+	Unlimited bool           `json:"unlimited"`
+	Extra     map[string]any `json:"extra"`
 }
 
 // userVolumesListResponse 是 GET /api/volumes/user 响应。
@@ -161,7 +168,9 @@ func detectWrapperCycle(name, start string, allowed []volume.Volume) error {
 //
 // 流程：owner 派生 → 请求体解码 → registry.NewBackend 试构造（type 已注册 + extra 合法，
 // fail-fast）→ store.Create 落盘 → Set.AddExternalVolume 注册（失败回滚 store.Delete）。
-func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Request) {
+//
+//nolint:gocognit // S3776: 用户卷建卷装配流程（master F7/F6 校验 + 过渡层封装卷校验/ACL/配额委托，2026-10）；阶段 2 迁 enclosure 后拆分
+func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Request) { // NOSONAR: S3776 — 同理由
 	owner := normalizeOwner(ownerFromRequest(r))
 	if h.userVolumes == nil {
 		sendJSONResponse(w, map[string]string{"error": "用户卷功能未装配"}, http.StatusBadRequest)
@@ -174,6 +183,14 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	}
 	if req.Name == "" || req.Type == "" {
 		sendJSONResponse(w, map[string]string{"error": "name/type 必填"}, http.StatusBadRequest)
+		return
+	}
+	// F7（评审 P3）：**先校验卷名再拼路径/IO**——下方 counterPath 由 req.Name 拼接，而真正的
+	// 卷名校验此前只在 store.Create 内（更晚）。名字含分隔符/`..` 时会读到 meta 目录之外的
+	// `*.capacity`（且读失败直接 500），顺序与错误码都不当。此处与 store 用**同一判定**
+	// （storage.ValidSegmentName），提前使路径安全不依赖下游副作用。
+	if !storage.ValidSegmentName(req.Name) {
+		sendJSONResponse(w, map[string]string{"error": "卷名非法"}, http.StatusBadRequest)
 		return
 	}
 	// 封装卷校验（防成环，fail-closed）：schema 中 volume-select 必填字段逐一校验
@@ -211,12 +228,30 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "type 未注册或 extra 非法: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// 卷级容量记账（FS 层）：从**创建期**即包 CapacityFS（此前只有重启 restore 才包，
+	// 新建卷在本次进程内 Capacity 不生效——顺手修）。计数器持久化到与 restore 相同的
+	// 路径 <root>/<owner>/meta/volume/<name>.capacity（**非 .json**：避开 UserVolumeStore
+	// 的 *.json 扫描，防计数文件被误当卷元数据）；重启后 Load 续用。
+	counterPath := filepath.Join(h.userVolumes.Root(), owner, "meta", "volume", req.Name+".capacity")
+	// F6：`capacity:0` 且未显式 unlimited ⇒ **继承同名卷已持久化的上限**（删除用户卷时刻意
+	// 保留 `.capacity`，因为远端字节仍在）——否则 delete+recreate 写 capacity:0 即解除上限。
+	counter, lerr := capacity.LoadForCreate(counterPath, req.Capacity, req.Unlimited)
+	if lerr != nil {
+		sendJSONResponse(w, map[string]string{"error": "容量快照读取失败: " + lerr.Error()}, http.StatusInternalServerError)
+		return
+	}
+	if counter.CorruptSnapshot() {
+		h.logger.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", req.Name, "owner", owner, "path", counterPath)
+	}
+	be = capacity.WrapBackend(be, counter)
 	// store 落盘（重名拒绝）。
 	// Owner 一并设置（C4 CRITICAL 复测补直）：owner 以参数为准，使本链产出的 UserVolume
 	// 同时携带正确 Owner 与 ACL。config 写回（下方 AppendVolume(uv)）已改以 ACL.Owners 为
 	// 准（见 config_writer.volumeEntryNode），Owner 字段是冗余保底（store.Create 内部亦按
 	// owner 参数回填，二者一致），供任何以 UserVolume.Owner 为键的消费方读取不改。
-	uv := UserVolume{Name: req.Name, Type: req.Type, Owner: owner, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
+	// 生效上限（可能来自继承）落元数据（master F6）——否则重启 restore 会用请求里的 0 把
+	// 继承的上限抹掉。
+	uv := UserVolume{Name: req.Name, Type: req.Type, Owner: owner, Capacity: counter.Capacity(), Extra: req.Extra, ACL: acl}
 	if err := h.userVolumes.Create(owner, uv); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 		return
@@ -287,15 +322,54 @@ func (h *Handlers) listUserVolumesHandler(w http.ResponseWriter, r *http.Request
 				}
 			}
 		}
+		// 敏感信息防护（D-CRITICAL 修复）：store.Get 已把 ExtraEnc 解密回填 Extra——
+		// 直接序列化会把凭据（bduss/stoken/access_key/secret_key 等）明文回传给浏览器。
+		// 列表响应只暴露非敏感配置（root/capacity/binary_path），凭据键剔除。
+		vols[i].Extra = redactVolumeExtra(vols[i].Extra)
 	}
 	sendJSONResponse(w, userVolumesListResponse{Volumes: vols}, http.StatusOK)
+}
+
+// sensitiveVolumeExtraKeys 是卷 Extra 中的凭据/敏感键（回显时剔除）。
+var sensitiveVolumeExtraKeys = []string{
+	"bduss", "stoken", "ptoken", "cookies", "access_key_secret", "secret_key",
+	"access_key", "client_secret", "password", "token",
+}
+
+// redactVolumeExtra 剔除卷 Extra 中的凭据键（保留配置键如 root/local_root/binary_path/capacity）。
+// 防御纵深：即使 store 未加密（masterKey 为 nil 旧装配）也不把凭据回传。
+func redactVolumeExtra(extra map[string]any) map[string]any {
+	if len(extra) == 0 {
+		return extra
+	}
+	out := make(map[string]any, len(extra))
+	for k, v := range extra {
+		if isSensitiveVolumeKey(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// isSensitiveVolumeKey 判定卷 Extra 键是否为凭据（含 key/secret/password/token 形态）。
+func isSensitiveVolumeKey(k string) bool {
+	lk := strings.ToLower(k)
+	if slices.Contains(sensitiveVolumeExtraKeys, lk) {
+		return true
+	}
+	return strings.Contains(lk, "secret") || strings.Contains(lk, "password") ||
+		strings.Contains(lk, "bduss") || strings.Contains(lk, "stoken") ||
+		strings.Contains(lk, "access_key")
 }
 
 // deleteUserVolumeHandler 处理 DELETE /api/volumes/user?name=<n>。
 //
 // 流程：owner 派生 → store.Get（不存在/跨 owner → 404）→ syncmgr 引用检查（活跃任务
 // 引用 → 409）→ Set.RemoveExternalVolume（Close 后端）→ store.Delete。
-func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Request) {
+//
+//nolint:gocognit // S3776: 用户卷删除装配流程（master F9 flush + 过渡层 config 写回/关联清理，2026-10）；阶段 2 迁 enclosure 后拆分
+func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Request) { // NOSONAR: S3776 — 同理由
 	owner := normalizeOwner(ownerFromRequest(r))
 	if h.userVolumes == nil {
 		sendJSONResponse(w, map[string]string{"error": "用户卷功能未装配"}, http.StatusBadRequest)
@@ -339,17 +413,29 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	// Set 移除（Close 后端）+ store 删文件。
-	if err := h.volSet.RemoveExternalVolume(name); err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
-		return
-	}
+	// 先删 store 元数据（失败则 Set 不变，无需回滚），再摘除运行时卷，最后清计数文件。
 	if err := h.userVolumes.Delete(owner, name); err != nil {
-		// Set 已移除但 store 删除失败：回滚 Add（尽力恢复一致性）。保留 ACL（v 来自 store.Get）。
-		_ = h.volSet.AddExternalVolume(volume.Volume{Name: name, Type: v.Type, Extra: v.Extra, ACL: v.ACL}, nil)
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
+	// F9：摘除前把计数快照 flush（`Release` 是节流的）——否则本次进程对该卷的删除量丢失，
+	// 同名重建时 used 偏高（伪 507）。best-effort + 可观测。
+	if be := h.volSet.External(name); be != nil {
+		if fl, ok := be.(interface{ Flush() error }); ok {
+			if ferr := fl.Flush(); ferr != nil {
+				h.logger.Warn("用户卷摘除：容量计数快照落盘失败", "volume", name, "owner", owner, "error", ferr)
+			}
+		}
+	}
+	if err := h.volSet.RemoveExternalVolume(name); err != nil {
+		// store 已删但 Set 摘除失败：回滚重建 store 元数据（Set 未变，保持一致）。
+		_ = h.userVolumes.Create(owner, *v)
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	// **不删容量计数文件**：卷删除仅移除元数据/句柄，远端已写入的字节仍在（本系统不删
+	// 远端内容）；保留 used 使同名重建时 Load 到旧占用（否则 delete+recreate 把上限变成
+	// 「每轮限额 × 轮数」，绕过「Σ占用 ≤ 卷限额」）。计数文件为安全保留，非泄漏。
 	// 删除成功：若本卷是封装卷（曾占用底层子目录），清除其占用关联与配额委托（生命周期闭环）
 	// + 清理占用子目录残留（C5：配额归还底层池 + 重建同目录不 409；I-③：先整流删除卷内
 	// 数据再删目录——带数据封装卷不留密文残留、子目录可复用）。

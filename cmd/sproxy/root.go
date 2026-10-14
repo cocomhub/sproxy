@@ -48,6 +48,7 @@ import (
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/federated"
@@ -1133,6 +1134,12 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 未注册即「未注册后端」启动 panic）。与 sync 开关解耦（Imp-1 装配门控修复：默认配置
 	// sync 关闭时 secret 后端不再不可达）。
 	registerSecretVolumeBackends()
+	// 封装处理层（wrapper）注册：必须在 enclosure.Parse 之前（RegisterRoutes →
+	// assembleVolumes 内解析声明；未注册的 wrapper 判 ErrUnknownWrapper = boot fail）。
+	registerEnclosureWrappers()
+	// 封装卷类型标记「推迟装配」：其后端构造依赖已装配卷集（源卷特权视图），
+	// 与 secretdata 同型时序；封印注入在 assembleVolumes 内完成，后端在此之后补装。
+	enclosure.MarkDeferred()
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:                 rt.mux,
 		CfgPtr:              &cfgPtr,
@@ -1159,7 +1166,13 @@ func (rt *runServerRuntime) setupServerCore() error {
 	if err := setupSecretBackends(ctx, h.Volumes(), cfg.StorageRoot, logger); err != nil {
 		return fmt.Errorf("secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w", err)
 	}
-	// C4（2026-10-06 用户裁决）：config 声明嵌套封装卷接线 + 完整性检查 + 运行时写回。
+	// 封装卷后端补装（推迟装配，master 底座）：set 已就绪 → 按声明拓扑序构造 wrapper 后端
+	// 并挂回，源视图直接持有源 FS（封印注入在 assembleVolumes 阶段已完成，这里只做特权
+	// 读写视图）。失败即 boot fail（fail-closed）：operator 显式声明的封装卷不得静默消失。
+	if err := enclosure.AttachAll(ctx, h.Volumes(), logger, enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); err != nil {
+		return fmt.Errorf("封装卷装配失败（配置声明的封装卷补装 boot fail）：%w", err)
+	}
+	// C4（2026-10-06 用户裁决，过渡层）：config 声明嵌套封装卷接线 + 完整性检查 + 运行时写回。
 	//  1. WireConfigNestedWrappers：对 config volumes 段声明 `target: <卷>/<子目录>` 的封装卷
 	//     登记互斥占用 + 写保护 + 配额委托（fail-closed，登记失败即启动失败，杜绝声明不生效）；
 	//  2. SetConfigWriter：/api/volumes/user 创建/删除后写回 config volumes 段（重启不丢卷）。
@@ -1171,7 +1184,7 @@ func (rt *runServerRuntime) setupServerCore() error {
 	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
-	registerPikpakDownloader(cfg)
+	registerPikpakDownloader(cfg, h.Volumes())
 	// 视频关键帧分块注册（video-keyframe 提供者，解析器按环境二选一：ffprobe 优先、
 	// go-mp4 兜底；sync.Once 幂等）。注入 fMP4 统计 hook → /metrics 的
 	// sproxy_keyframe_fmp4_total（供「是否切 mp4ff」真实场景决策）。
@@ -1341,6 +1354,9 @@ func (rt *runServerRuntime) setupSync(h *server.Handlers) error {
 	}
 	remotes := buildSyncRemotes(cfg)
 	exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
+	// 本地侧 Root 感知（评审 P0）：sync push/pull 的本地 FS 经 storage.Root ⇒ at-rest
+	// 透明加解密 + 封印语义（此前裸 LocalFS 会在加密卷上落明文/传密文）。
+	exec.TenantRootFS = h.SyncTenantRootFS
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
 	exec.SetScopeResolver(h.SyncScopeFor())
 	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：同步本地写侧（pull/双向）直写默认卷 user
@@ -1385,7 +1401,7 @@ func (rt *runServerRuntime) setupSyncConflictIndex(exec *syncexec.Executor, h *s
 func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *server.Handlers, logger *slog.Logger) {
 	cfg := rt.cfg
 	registerBaidupcsBackend()
-	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.SyncQuotaScope())
+	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.StagingQuotaTrackerFor, h.TrustedWrapOptions())
 	webdav.RegisterWebDAVBackend()
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()

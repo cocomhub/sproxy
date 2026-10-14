@@ -101,6 +101,11 @@ type CloudTask struct {
 	// integrityLastChecksum 是上次校验失败 attempt 的本地 checksum（R1-C2：仅当两次
 	// checksum 一致才累计 integritySames；不同 = 瞬态损坏可恢复 → 重置重试）。
 	integrityLastChecksum string
+	// resumeSelfOverwrite 是 ResumeTask 恢复 completed+damaged 任务时置的运行时标记
+	// （E-M2 修复，不持久化）：damaged 任务重下自愈——目标卷旧损坏副本允许被本任务
+	// 覆盖（W1/W3 拒绝覆写只对他人/外部存在生效，任务自愈语义）。executeDownload
+	// 的转存路径读取后清除。
+	resumeSelfOverwrite bool
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
@@ -151,6 +156,10 @@ type CloudDownloadConfig struct {
 	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验
 	// 标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
 	MaxCheckMemBytes sizex.ByteSize
+	// SkipVerify 跳过转存写后读侧校验（trusted_volume.skip_verify 接线；缺省 false =
+	// 校验开启——默认可信行为）。**只关读侧校验，不关 meta 生成/桶隔离**（meta 恒生成、
+	// 凭据保护恒生效；skip_verify 仅放宽读侧下载校验，极端性能场景）。
+	SkipVerify bool
 	// ExitDial 是下载器出站拨号函数注入（装配层构造）：nil = 默认直连。
 	// 非 nil 时覆写下载器 http.Transport.DialContext（本地直连优先 → 失败回退经 mesh 出口）。
 	// 领域包不依赖 mesh（R1 分层）——函数字段注入解耦，对齐 downloader 的 httpClient 注入模式。
@@ -263,10 +272,15 @@ type CloudDownloadManager struct {
 	dl          downloader.Downloader
 	// transferFSFor 解析转存目标卷 (FS, scheme, shared)（编排层注入；nil = 转存不可用）。
 	// 远程性不在此返回（由 FS 自述 syncpkg.LocalVolume，transfer.go 查询）。
-	transferFSFor func(volume string) (syncpkg.FS, string, bool)
-	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveOwnerPath 键空间计算）。
+	transferFSFor func(volume string) (syncpkg.FS, string)
+	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveLocation 键空间计算）。
 	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
 	volumeFor func(volume string) (volume.Volume, bool)
+	// stagingQuotaFor 返回 owner 的本地 staging 配额钩子（装配层注入；nil = 无独立
+	// staging 配额，转存不包 gate——零回归）。
+	stagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
+	// targetWriteLock 是 per-(owner,rel) 写锁获取钩子（装配层注入；nil = 不加锁）。
+	targetWriteLock func(owner, rel string) (release func(), ok bool)
 	// integrityLookup 按文件名分发完整性校验器（装配层注入 integrity.Lookup 代理；
 	// nil = 无校验器，语义校验跳过视为通过——Review Focus 1）。
 	integrityLookup func(name string) integrity.Checker
@@ -355,11 +369,23 @@ type CloudManagerOptions struct {
 	Logger           *slog.Logger
 	Config           *CloudDownloadConfig
 	QuotaFor         []QuotaResolver
-	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme, 是否共享)。scheme 用于生成
-	// 可被 ResolveURL 解析的转存 URL；shared=true 表示共享卷（内容不共享，转存落盘须加
-	// owner 前缀隔离）。由装配层注入（pkg/server 不直接依赖 registry；nil = 转存不可用）。
-	TransferFSFor func(volume string) (syncpkg.FS, string, bool)
-	// VolumeFor 解析转存目标卷的 volume.Volume（用于 ResolveOwnerPath 键空间计算——
+	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme)。scheme 用于生成可被
+	// ResolveURL 解析的转存 URL。**注意**：历史第三个返回值「是否共享」已删除（m5，第 7 轮
+	// MINOR）——共享卷的 owner 前缀隔离现由 `volume.ResolveLocation` 唯一入口承担，
+	// 该值在转存路径上从未被消费（死值）。
+	TransferFSFor func(volume string) (syncpkg.FS, string)
+	// StagingQuotaFor 返回 owner 的本地 staging 配额钩子（用户裁定 2026-10-10：外部卷
+	// 转存写本地暂存统一过独立 staging 配额——防本地磁盘打满；转存目标 FS 未实现
+	// StagingQuotaExempt/StagingQuotaCapable 时包 StagingQuotaGateFS 强制预留）。
+	// nil = 无独立 staging 配额（零回归，不包 gate）。装配层注入（pkg/server 实现）。
+	StagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
+	// TargetWriteLock 返回 owner+rel 的**文件级写锁**（与 HTTP 上传/删除/改名/DAV/S3
+	// 共用同一键空间；装配层注入 filesRuntime.Acquire 语义）。转存不经 pkg/files 写路径，
+	// 若无此锁，与其它写面同 rel 并发写会产出「主文件与 sidecar 错位」的固化状态
+	// （远端卷写后回读交叉校验被跳过 → 读侧逐分块校验恒失配、永久 fail-closed）。
+	// nil = 不加锁（零回归：单写面装配不受影响）。
+	TargetWriteLock func(owner, rel string) (release func(), ok bool)
+	// VolumeFor 解析转存目标卷的 volume.Volume（用于 ResolveLocation 键空间计算——
 	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
 	// nil = 转存不可用（与 TransferFSFor 同门）。
 	VolumeFor func(volume string) (volume.Volume, bool)
@@ -432,6 +458,8 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		dl:                 newDefaultDownloader(cfg),
 		transferFSFor:      opts.TransferFSFor,
 		volumeFor:          opts.VolumeFor,
+		stagingQuotaFor:    opts.StagingQuotaFor,
+		targetWriteLock:    opts.TargetWriteLock,
 		integrityLookup:    opts.IntegrityLookup,
 		removeFile:         opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
 		occupiedWriteGuard: opts.OccupiedWriteGuard,
@@ -520,11 +548,23 @@ func (m *CloudDownloadManager) CloudDirFor(owner string) string {
 	return abs
 }
 
+// cloudStateRootFor 返回 owner 租户状态目录（meta/cloud）所在的 Root；租户不可用 → nil。
+// 状态 JSON 一律经该 Root 读写（卷自己的语义：加密卷由卷加密、封印区间写入恒拒），
+// 见 manager_persist.go 的 cloudStateRel。
+func (m *CloudDownloadManager) cloudStateRootFor(owner string) *storage.Root {
+	tnt := m.tenantFor(owner)
+	if tnt == nil {
+		return nil
+	}
+	return tnt.Root()
+}
+
 // persistDirFor 返回 owner 租户云任务状态目录（<root>/<tenant>/meta/cloud）。
 // 租户不可用时返回 ""。
 // PersistDirFor 返回 owner 租户的云任务**状态**目录（`<租户根>/meta/cloud`），
 // 任务状态落 `<PersistDirFor>/<taskID>.json`、组状态落 `<PersistDirFor>/groups/<groupID>.json`。
-// 导出理由同 CloudDirFor（装配层测试需按布局断言/构造磁盘状态）。
+// 导出理由同 CloudDirFor（装配层测试需按布局断言/构造磁盘状态）。**仅供布局断言/排查**：
+// 状态 I/O 一律经 cloudStateRootFor（加密卷由卷加密、封印区间写入恒拒）。
 func (m *CloudDownloadManager) PersistDirFor(owner string) string {
 	tnt := m.tenantFor(owner)
 	if tnt == nil {
@@ -532,16 +572,6 @@ func (m *CloudDownloadManager) PersistDirFor(owner string) string {
 	}
 	abs, _ := tnt.Root().Abs("meta/cloud")
 	return abs
-}
-
-// groupsDirFor 返回 owner 租户云任务组状态目录（<root>/<tenant>/meta/cloud/groups）。
-// 租户不可用时返回 ""。
-func (m *CloudDownloadManager) groupsDirFor(owner string) string {
-	base := m.PersistDirFor(owner)
-	if base == "" {
-		return ""
-	}
-	return filepath.Join(base, "groups")
 }
 
 // taskDirFor 返回 owner 租户下任务文件目录（<root>/<tenant>/cloud/<taskID>）。

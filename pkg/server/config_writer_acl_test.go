@@ -79,12 +79,13 @@ func TestConfigWriter_UserVolume_KeyspaceStable(t *testing.T) {
 	}
 	// 写回前（运行时卷）键空间：独享（Allow+单 owner）→ user/x（无 owner 前缀）。
 	preVol := volume.Volume{Name: uv.Name, Type: uv.Type, Capacity: uv.Capacity, Extra: uv.Extra, ACL: uv.ACL}
-	preKey, preErr := preVol.ResolveUserPath("alice", "x")
+	preLoc, preErr := preVol.ResolveUserLocation("alice", "x")
 	if preErr != nil {
-		t.Fatalf("写回前 ResolveUserPath: %v", preErr)
+		t.Fatalf("写回前 ResolveUserLocation: %v", preErr)
 	}
-	if preKey != "user/x" {
-		t.Fatalf("写回前键应为独享 user/x，got %q（Shared=%v）", preKey, preVol.Shared())
+	preKey := preLoc.FSPath()
+	if preKey != "alice/user/x" {
+		t.Fatalf("写回前键应为 alice/user/x（master Location 恒 owner 前缀），got %q", preKey)
 	}
 
 	// 写回 config → 重新解析装配。
@@ -120,10 +121,11 @@ func TestConfigWriter_UserVolume_KeyspaceStable(t *testing.T) {
 	if rebVol.Shared() {
 		t.Fatalf("重启装配后封装卷应 Shared()==false（写回 ACL 应保持独享），ACL=%+v", rebVol.ACL)
 	}
-	rebKey, err := rebVol.ResolveUserPath("alice", "x")
+	rebLoc, err := rebVol.ResolveUserLocation("alice", "x")
 	if err != nil {
-		t.Fatalf("重启装配后 ResolveUserPath: %v", err)
+		t.Fatalf("重启装配后 ResolveUserLocation: %v", err)
 	}
+	rebKey := rebLoc.FSPath()
 	if rebKey != preKey {
 		t.Fatalf("重启键空间翻转：写回前 %q，重启后 %q——旧数据将不可见（应保持 %q）",
 			preKey, rebKey, preKey)
@@ -171,12 +173,13 @@ func TestCreateUserVolume_ConfigWriteback_KeyspaceStable(t *testing.T) {
 	if preVol == nil {
 		t.Fatalf("volSet 未注册 userdisk1 卷")
 	}
-	preKey, err := preVol.ResolveUserPath("alice", "x")
+	preLoc, err := preVol.ResolveUserLocation("alice", "x")
 	if err != nil {
-		t.Fatalf("写回前 ResolveUserPath: %v", err)
+		t.Fatalf("写回前 ResolveUserLocation: %v", err)
 	}
-	if preKey != "user/x" {
-		t.Fatalf("写回前键应为独享 user/x，got %q（Shared=%v）", preKey, preVol.Shared())
+	preKey := preLoc.FSPath()
+	if preKey != "alice/user/x" {
+		t.Fatalf("写回前键应为 alice/user/x（master Location 恒 owner 前缀），got %q", preKey)
 	}
 
 	// 读回写好的 config 文件，重新装配（真路径 parseVolumeACL → 纯域 Volume）。
@@ -202,10 +205,11 @@ func TestCreateUserVolume_ConfigWriteback_KeyspaceStable(t *testing.T) {
 	if rebVol.Shared() {
 		t.Fatalf("重启装配后封装卷应 Shared()==false（真实 create 链写回必须落 owner-only ACL），ACL=%+v", rebVol.ACL)
 	}
-	rebKey, err := rebVol.ResolveUserPath("alice", "x")
+	rebLoc, err := rebVol.ResolveUserLocation("alice", "x")
 	if err != nil {
-		t.Fatalf("重启装配后 ResolveUserPath: %v", err)
+		t.Fatalf("重启装配后 ResolveUserLocation: %v", err)
 	}
+	rebKey := rebLoc.FSPath()
 	if rebKey != preKey {
 		t.Fatalf("重启键空间翻转：写回前 %q，重启后 %q——旧数据将不可见（应保持 %q）",
 			preKey, rebKey, preKey)

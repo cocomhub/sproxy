@@ -20,28 +20,62 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/state"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
-// stateTestLogger 返回丢弃日志的 logger（本包测试专用）。
+// testRootAt 在 dir 上打开 storage.Root（测试统一走**卷句柄**：卷决定是否加密，
+// 使用方不判加密态）；t.Cleanup 关闭。
+func testRootAt(t *testing.T, dir string) *storage.Root {
+	t.Helper()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("打开 Root 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
+// readRootForTest 经卷句柄读文件（加密卷上旧台账是密文）。
 func stateTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// writeLegacyChecksumsFile 在 metaDir 写旧 <meta>/checksums.json（map JSON 格式）。
-func writeLegacyChecksumsFile(t *testing.T, metaDir string, m map[string]string) string {
+// readRootForTest 经卷句柄读文件（加密卷上旧台账是密文，裸 os 读会得到密文/失败）。
+func readRootForTest(t *testing.T, root *storage.Root, rel string) ([]byte, error) {
 	t.Helper()
-	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+	rc, err := root.OpenDecrypted(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(rc)
+}
+
+// writeLegacyChecksumsFile 经**卷句柄**在 relDir 下写旧 <meta>/checksums.json
+// （map JSON 格式），返回其卷内相对路径。经 Root 写 ⇒ 加密卷上旧台账是密文，
+// 故回退读也必须经 Root（本文件的 encrypted 用例钉住这一点）。
+func writeLegacyChecksumsFile(t *testing.T, root *storage.Root, relDir string, m map[string]string) string {
+	t.Helper()
+	if err := root.MkdirAll(relDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(metaDir, "checksums.json")
-	if err := os.WriteFile(p, raw, 0o644); err != nil {
+	rel := relDir + "/checksums.json"
+	w, err := root.OpenFileEncrypted(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return p
+	if _, werr := w.Write(raw); werr != nil {
+		_ = w.Close()
+		t.Fatal(werr)
+	}
+	if cerr := w.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
+	return rel
 }
 
 // TestStateBackedChecksumStore_RoundTrip 验证适配器全流程往返（Set/Get/Rename/DeletePrefix/
@@ -50,7 +84,7 @@ func TestStateBackedChecksumStore_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), stateTestLogger())
-	s := NewStateBackedChecksumStore(st, "checksum/alice/all", filepath.Join(t.TempDir(), "checksums.json"), stateTestLogger())
+	s := NewStateBackedChecksumStore(st, "checksum/alice/all", nil, "", stateTestLogger())
 
 	s.Set("user/dir/f.txt", "sha256hex")
 	s.Set("user/other.txt", "other")
@@ -58,7 +92,7 @@ func TestStateBackedChecksumStore_RoundTrip(t *testing.T) {
 	testStateChecksumRoundTrip_AssertSetAndPersisted(t, ctx, st, s)
 
 	// 重载：新适配器从 StateStore 读回（不回退旧文件）。
-	s2 := NewStateBackedChecksumStore(st, "checksum/alice/all", filepath.Join(t.TempDir(), "missing", "checksums.json"), stateTestLogger())
+	s2 := NewStateBackedChecksumStore(st, "checksum/alice/all", nil, "", stateTestLogger())
 	if got, ok := s2.Get("user/dir/f.txt"); !ok || got != "sha256hex" {
 		t.Fatalf("重载 Get(user/dir/f.txt)=%q,%v", got, ok)
 	}
@@ -66,7 +100,7 @@ func TestStateBackedChecksumStore_RoundTrip(t *testing.T) {
 	testStateChecksumRoundTrip_Delete(t, s2)
 
 	// 再次重载（全流程落盘后状态可恢复）。
-	s3 := NewStateBackedChecksumStore(st, "checksum/alice/all", "", stateTestLogger())
+	s3 := NewStateBackedChecksumStore(st, "checksum/alice/all", nil, "", stateTestLogger())
 	if all := s3.GetAll(); len(all) != 1 || all["user/renamed.txt"] != "sha256hex" {
 		t.Fatalf("二次重载 GetAll=%+v", all)
 	}
@@ -134,11 +168,12 @@ func testStateChecksumRoundTrip_Delete(t *testing.T, s *StateBackedChecksumStore
 func TestStateBackedChecksumStore_LegacyFallback(t *testing.T) {
 	t.Parallel()
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), stateTestLogger())
-	legacyPath := writeLegacyChecksumsFile(t, filepath.Join(t.TempDir(), "anonymous", "meta"), map[string]string{
+	root := testRootAt(t, t.TempDir())
+	legacyRel := writeLegacyChecksumsFile(t, root, "anonymous/meta", map[string]string{
 		"user/a.txt": "legacy-cs",
 	})
 
-	s := NewStateBackedChecksumStore(st, "checksum/alice/all", legacyPath, stateTestLogger())
+	s := NewStateBackedChecksumStore(st, "checksum/alice/all", root, legacyRel, stateTestLogger())
 	if got, ok := s.Get("user/a.txt"); !ok || got != "legacy-cs" {
 		t.Fatalf("回退载入 Get(user/a.txt)=%q,%v want legacy-cs,true", got, ok)
 	}
@@ -152,17 +187,17 @@ func TestStateBackedChecksumStore_LegacyFallback(t *testing.T) {
 func TestStateBackedChecksumStore_SaveMigratesToState(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	metaDir := filepath.Join(t.TempDir(), "anonymous", "meta")
-	legacyPath := writeLegacyChecksumsFile(t, metaDir, map[string]string{
+	root := testRootAt(t, t.TempDir())
+	legacyRel := writeLegacyChecksumsFile(t, root, "anonymous/meta", map[string]string{
 		"user/a.txt": "legacy-cs",
 	})
-	legacyRaw, err := os.ReadFile(legacyPath)
+	legacyRaw, err := readRootForTest(t, root, legacyRel)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), stateTestLogger())
-	s := NewStateBackedChecksumStore(st, "checksum/alice/all", legacyPath, stateTestLogger())
+	s := NewStateBackedChecksumStore(st, "checksum/alice/all", root, legacyRel, stateTestLogger())
 	if _, ok := s.Get("user/a.txt"); !ok {
 		t.Fatal("回退载入应命中")
 	}
@@ -171,7 +206,7 @@ func TestStateBackedChecksumStore_SaveMigratesToState(t *testing.T) {
 	if _, gerr := st.Get(ctx, "checksum/alice/all"); gerr != nil {
 		t.Fatalf("首写应写 StateStore 新路径: %v", gerr)
 	}
-	cur, err := os.ReadFile(legacyPath)
+	cur, err := readRootForTest(t, root, legacyRel)
 	if err != nil {
 		t.Fatal(err)
 	}

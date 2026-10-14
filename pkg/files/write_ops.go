@@ -23,12 +23,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -219,6 +221,27 @@ type externalWriteArgs struct {
 	remotePath string
 }
 
+// feedChecksumRewindable 构造交给 sink 的写源，同时把**完整明文**喂给 hasher 算 SHA-256：
+//   - 可 seek 源（io.Seeker）：独立一遍读满喂 hasher（O(1) 内存），Seek(0) 后返回**原**
+//     （可 seek）源——sink 若为 secretdata 等流式卷可逐块 ReadAt 多遍随机读。tee 只捕获经
+//     Read 的字节，多遍 ReadAt 下 hasher 收不到内容（#763 回归）。
+//   - 不可 seek 源：退回 io.TeeReader（单遍，sink 必读全文）。
+//
+// 供 writeExternalSettle（HTTP 上传外部卷）与 writeTargetExternalSettle（S3/DAV 等统一
+// 写内核外部卷）共用，避免两处再漂移。
+func feedChecksumRewindable(src io.Reader, hasher io.Writer) (io.Reader, error) {
+	if sec, ok := src.(io.Seeker); ok {
+		if _, err := io.CopyBuffer(hasher, src, make([]byte, 128<<10)); err != nil {
+			return nil, err
+		}
+		if _, err := sec.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return src, nil
+	}
+	return io.TeeReader(src, hasher), nil
+}
+
 // writeExternalSettle 外部卷整流写入（2026-10-05 用户裁定：普通上传进外部卷）：
 // MakeDir + WriteFile + 流式哈希 + SHA-256 比对（不符删回 400）+ 双账本结算。
 // 无原子写/去重/版本/台账——外部卷是远程后端，这些本地 inode 语义天然不适用。
@@ -228,14 +251,20 @@ func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, 
 	if sz, ok, serr := a.route.Sink.Stat(ctx, a.rel); serr == nil && ok {
 		prev = sz
 	}
-	if derr := a.route.Sink.MakeDir(ctx, filepath.Dir(a.rel)); derr != nil {
+	if derr := a.route.Sink.MakeDir(ctx, path.Dir(a.rel)); derr != nil {
 		a.route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", a.remotePath)
 		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
 	}
-	// 整流写入 + 流式哈希（一次性流，写盘同时算 SHA-256——外部卷无原子写，写后比对）。
+	// checksum 计算与底层写入解耦（修复 #763 回归）：外部卷无原子写，需写后比对 SHA-256。
+	// 可 seek 源会被独立一遍读满算 checksum，再原（可 seek）源交给 sink（见 feedChecksumRewindable）。
 	hasher := sha256.New()
-	limitedSrc := limitReader(s.rt.bandwidthLimiter(), a.owner, io.TeeReader(a.src, hasher))
+	passSrc, ferr := feedChecksumRewindable(a.src, hasher)
+	if ferr != nil {
+		a.route.Release()
+		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+	}
+	limitedSrc := limitReader(s.rt.bandwidthLimiter(), a.owner, passSrc)
 	start := time.Now()
 	if werr := a.route.Sink.WriteFile(ctx, a.rel, limitedSrc, a.input.ClientSize, a.input.Mtime); werr != nil {
 		a.route.Release()
@@ -261,37 +290,25 @@ func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, 
 // writeFileSettle 原子写入 + 流式哈希 + SHA-256 比对（不符删文件回 400）+ 双账本结算
 // + checksum 台账 + mtime 落地 + 去重新内容登记。返回最终成功结果。
 func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input WriteFileInput, route UploadRoute, src io.Reader) (WriteFileResult, error) {
-	// 原子写入 + 流式哈希（目标卷 f.root）。
-	// 带宽限速（roadmap §6 P1）：src 按 f.owner 桶包一层限速 reader；未装配限速器原样直通。
+	// 统一写内核（writeTargetSettle）：原子写 + checksum 比对 + 双账本 + sidecar + 台账
+	// 全部内聚。HTTP 上传特有的差异只在**限速**（带宽限速器按 owner 包一层）与 **dedup
+	// 台账登记**（本函数额外做）——落盘/结算/副作用与 S3/DAV/版本恢复同一内核。
 	limitedSrc := limitReader(s.rt.bandwidthLimiter(), f.owner, src)
-	serverChecksum, written, wErr := writeFileAtomicallyRoot(f.ctx, f.root, rel, limitedSrc)
-	if wErr != nil {
-		route.Release()
-		f.logger.ErrorContext(f.ctx, "保存文件失败", "error", wErr.Error(), "file_name", f.remotePath)
-		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+	res, werr := s.writeTargetSettle(f.ctx, f.owner, rel, f.remotePath, WriteTargetInput{
+		Owner: f.owner, RemotePath: input.RemotePath, Volume: input.ExplicitVol,
+		Verify: true, ExpectedChecksum: input.ExpectedChecksum,
+		ClientSize: input.ClientSize, Mtime: input.Mtime,
+	}, route, limitedSrc, f.logger)
+	if werr != nil {
+		return WriteFileResult{}, werr
 	}
-
-	if serverChecksum != input.ExpectedChecksum {
-		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomicallyRoot 清理）
-		_ = f.root.Remove(rel)
-		route.Release()
-		f.logger.WarnContext(f.ctx, errMsgChecksumMismatch, "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", f.remotePath)
-		return WriteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
-	}
-
-	// 双账本结算：覆盖写 Adjust(prev, written) + Release（旧文件已占用 prev，差分收敛到
-	// 新大小）；新文件 Commit(written)。f.owner 全局 Scope 与卷容量池同语义。
-	route.Commit(prev, written)
-
-	// 成功后的副作用：checksum 台账写入 + mtime 落地（原 setUploadResponseHeaders 的领域部分）。
-	s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, serverChecksum, input.Mtime, f.logger)
 	if ds := s.rt.dedupStore(f.owner); s.rt.dedupEnabled() && ds != nil {
 		// 新文件与覆盖写都登记新 checksum 引用（覆盖写已在上方 prev>0 分支摘除旧引用；
 		// 本处登记新内容引用，使后续去重可命中）。幂等/409 提前返回不经过此处。
-		ds.Add(rel, route.VolumeName, serverChecksum)
+		ds.Add(rel, route.VolumeName, res.Checksum)
 	}
-
-	return WriteFileResult{Checksum: serverChecksum, Size: written, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, nil
+	return WriteFileResult{Checksum: res.Checksum, Size: res.Size,
+		Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, nil
 }
 
 // resolveWritePath 校验并映射写路径（pathguard + UserRel），失败以 *HTTPError{400} 表达。
@@ -311,7 +328,7 @@ func (s *Service) linkFile(root *storage.Root, oldRel, newRel string) error {
 // dedupFallbackCopy 在硬链接不可用（FAT/exFAT）时把 srcRel 内容原子复制到 rel。
 // 返回复制后 checksum 与实际写入字节数；失败时清理临时文件并回滚。
 func (s *Service) dedupFallbackCopy(ctx context.Context, root *storage.Root, srcRel, rel string) (string, int64, error) {
-	srcFile, err := root.Open(srcRel)
+	srcFile, err := root.OpenDecrypted(srcRel)
 	if err != nil {
 		return "", 0, fmt.Errorf("打开去重源文件失败: %w", err)
 	}
@@ -378,12 +395,25 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 		route.Commit(0, size)
 		ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 		s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
+		// 可信卷：去重回退复制路径也建 meta（C-MAJOR-3 修复——去重 rel 与普通上传一致有 sidecar）。
+		if s.rt.fileMetaEnabled() {
+			if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
+				f.logger.Warn("可信卷 meta 落盘失败（去重回退复制）", "file_name", rel, "error", mErr)
+			}
+		}
 		return WriteFileResult{Checksum: input.ExpectedChecksum, Size: size, Message: fmt.Sprintf("文件上传成功, size: %d", input.ClientSize)}, true, nil
 	}
 	// 硬链接成功：零拷贝不占新配额 → 回滚预留。
 	route.Release()
 	ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
 	s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
+	// 可信卷：去重硬链接路径同样建 meta（M2 修复——回退复制分支有、硬链接分支此前
+	// 漏建，违反「新文件到达立刻建 meta」不变量；与 srcRel 内容一致，读侧不校验）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
+			f.logger.Warn("可信卷 meta 落盘失败（去重硬链接）", "file_name", rel, "error", mErr)
+		}
+	}
 	// 引用文件大小 = 已存首份大小（从硬链接目标 stat）。
 	var linkedSize int64
 	if fi, statErr := f.root.Stat(rel); statErr == nil {
@@ -488,7 +518,11 @@ func (s *Service) routeWriteUpload(ctx context.Context, logger *slog.Logger, own
 		return UploadRoute{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
 	}
 	if route.Tenant == nil && route.Sink == nil {
-		route.Release()
+		// 空 route = 路由实现未装配/未命中（既无租户也无 sink）⇒ 仍 fail-closed 400。
+		// Release 可能为 nil（空 route 的常态）⇒ 不得直接调用（nil func 调用会 panic）。
+		if route.Release != nil {
+			route.Release()
+		}
 		return UploadRoute{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	return route, nil
@@ -647,13 +681,24 @@ type MakeDirResult struct {
 // MakeDir 在 owner 视图内**首个卷**（默认卷优先）创建目录树。
 //
 // 错误语义（*HTTPError）：400 = dirname 为空 / 路径非法 / 租户不可用；500 = 创建失败。
-func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
+//
+//nolint:gocognit // S3776: 写面 MakeDir 装配流程（含过渡层占用写保护分支，2026-10-06）；阶段 2 迁 enclosure 后拆分
+func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (MakeDirResult, error) { // NOSONAR: S3776 — 同理由
 	if dirname == "" {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "dirname 不能为空"}
 	}
 	remotePath, err := pathguard.ValidateFilePath(dirname)
 	if err != nil {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "无效的目录名: " + err.Error()}
+	}
+	// **显式卷**（`?volume=` / CLI 卷 URI / 工作目录所在卷）：
+	//   - 外部卷（加密/远端）：目录必须建在**该卷**里（经接缝；此前静默落到本地卷）；
+	//   - 本地卷：经 volumeTenant 定位到该卷租户（此前恒落 primary 视图卷——与 upload 的
+	//     `--volume` 语义不一致）。
+	if volName != "" {
+		if res, handled, mkErr := s.makeDirExplicitVolume(ctx, owner, remotePath, remotePath, volName); handled {
+			return res, mkErr
+		}
 	}
 	// 路径映射与卷无关（user/<path> 相对各卷租户根），用默认租户做纯路径校验；
 	// 实际落盘目录选 owner 视图内首个卷（默认卷优先——默认卷开放时即默认租户，零回归；
@@ -668,6 +713,9 @@ func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
 	target := s.primaryViewTenant(owner)
+	if volName != "" {
+		target = s.rt.volumeTenant(volName, owner)
+	}
 	if target == nil || target.Root() == nil {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
@@ -695,6 +743,35 @@ func (s *Service) MakeDir(owner, dirname string) (MakeDirResult, error) {
 	return MakeDirResult{RemotePath: remotePath}, nil
 }
 
+// makeDirExplicitVolume 处理「显式指定卷」的 mkdir：外部卷经接缝创建；本地卷返回
+// handled=false 让调用方走本地流程（本函数只在**外部卷**上终结）。
+//
+// 返回 (res, true, err) = 已由外部卷分支裁决（成功或失败）；(_, false, nil) = 非外部卷/未授权。
+func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, _ string, volName string) (MakeDirResult, bool, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return MakeDirResult{}, false, nil // 未装配接缝：零回归（回落本地流程）
+	}
+	vs := s.rt.volSet()
+	if vs != nil {
+		if v, ok := vs.ByName(volName); !ok || !v.Authorize(owner) {
+			return MakeDirResult{}, true, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		} else if vs.Root(volName) != nil {
+			return MakeDirResult{}, false, nil // 本地卷 → 交本地流程
+		}
+	}
+	created, err := ops.ExternalMkdir(ctx, owner, volName, remotePath)
+	if err != nil {
+		return MakeDirResult{}, true, err
+	}
+	if !created {
+		return MakeDirResult{}, false, nil
+	}
+	s.rt.logger().Info("目录已创建（外部卷）", "dir", remotePath, "volume", volName)
+	s.rt.publishFileEvent(EventMkdir, owner, remotePath, 0)
+	return MakeDirResult{RemotePath: remotePath}, true, nil
+}
+
 // RemoveDirResult 是删目录的领域结果。
 type RemoveDirResult struct {
 	// RemotePath 是校验后的用户可见相对路径。
@@ -710,7 +787,9 @@ type RemoveDirResult struct {
 //   - 400：dirname 为空 / 路径非法 / 租户不可用 / 目标不是目录 / 目标为符号链接 / 未带 force
 //   - 404：目录不存在（任何卷上都没有）
 //   - 500：访问目录失败 / 删除失败
-func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult, error) {
+//
+//nolint:gocognit // S3776: 写面 RemoveDir 装配流程（含过渡层占用写保护分支，2026-10-06）；阶段 2 迁 enclosure 后拆分
+func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string, force bool) (RemoveDirResult, error) { // NOSONAR: S3776 — 同理由
 	if dirname == "" {
 		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "dirname 不能为空"}
 	}
@@ -720,7 +799,15 @@ func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult,
 	}
 	// 归一 owner（空 → anonymous）：目录探测/删除与列表/写路径同键，未认证请求归属 anonymous。
 	owner = normalizeOwner(owner)
-	// 路径映射与卷无关，用默认租户做纯路径校验；卷感知只决定目录落到哪些卷的租户根。
+	// **显式卷**（`?volume=` / CLI 卷 URI / 工作目录所在卷）：
+	//   - 外部/加密卷：目录必须从**该卷自己的键空间**删（经接缝递归删，先子后父）；
+	//   - 本地卷：交下方逐卷定位（显式卷不改变多卷语义）。
+	// 不能省：否则 `rmdir --volume <加密卷> ...` 会落到本地卷同名目录（删错对象）。
+	if volName != "" {
+		if res, handled, rmErr := s.removeDirExplicitVolume(ctx, owner, remotePath, volName, force); handled {
+			return res, rmErr
+		}
+	}
 	tnt0 := s.rt.tenantOf(owner)
 	if tnt0 == nil || tnt0.Root() == nil {
 		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
@@ -777,6 +864,35 @@ func (s *Service) RemoveDir(owner, dirname string, force bool) (RemoveDirResult,
 	return RemoveDirResult{RemotePath: remotePath}, nil
 }
 
+// removeDirExplicitVolume 处理「显式指定卷」的 rmdir：外部/加密卷经 ExternalRemoveDir 接缝
+// 递归删除（卷自己的键空间）；本地卷或未装配接缝 → handled=false（交本地逐卷流程，零回归）。
+//
+// 与 makeDirExplicitVolume 同构：未授权卷 → 404（不泄卷存在性）；force 语义与本地 rmdir 一致
+// （必须显式 force=true 才删，绝不静默递归删）。
+func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath, volName string, force bool) (RemoveDirResult, bool, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return RemoveDirResult{}, false, nil // 未装配接缝：零回归
+	}
+	if vs := s.rt.volSet(); vs != nil {
+		if v, ok := vs.ByName(volName); !ok || !v.Authorize(owner) {
+			return RemoveDirResult{}, true, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		} else if vs.Root(volName) != nil {
+			return RemoveDirResult{}, false, nil // 本地卷 → 交本地流程
+		}
+	}
+	removed, err := ops.ExternalRemoveDir(ctx, owner, volName, remotePath, force)
+	if err != nil {
+		return RemoveDirResult{}, true, err
+	}
+	if !removed {
+		return RemoveDirResult{}, false, nil
+	}
+	s.rt.logger().Info("目录已删除（外部卷）", "dir", remotePath, "volume", volName)
+	s.rt.publishFileEvent(EventRmdir, owner, remotePath, 0)
+	return RemoveDirResult{RemotePath: remotePath}, true, nil
+}
+
 // cleanupRemovedDir 目录删除成功后的收尾：按各文件实际子 Scope（按 rel 解析）释放配额
 // 占用（per-file 分键释放 owner 全局 Scope，跨卷合计语义正确）；清理 per-tenant checksum
 // store 中该目录下所有文件的记录（key = rel，无 owner 前缀，"/" 分隔符与 ChecksumStore
@@ -787,6 +903,13 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 			scope.ReleaseUsage(f.size)
 		}
 	}
+	// C2 修复：rmdir 删除 user 子树后联动删除各文件 meta sidecar（meta 功能桶）并
+	// 释放其 meta 桶配额——否则 meta/<rel>.meta 成孤儿、meta 桶 Scope 永久虚高。
+	// 软删（trash）场景保留 meta 供恢复（DeleteFile SoftDelete 分支不删 meta）。
+	// C5 修复：删除联动不闸 fileMetaEnabled——disable 只停新建不停清理（enable 期写入的
+	// 存量 sidecar 在 disable 后删除主文件仍须清理，否则孤儿+配额永久泄漏）。内部按
+	// sidecar 是否存在判断，无 meta 时 no-op（一次多余 stat，可接受）。
+	s.cleanupRemovedDirMeta(owner, allFiles)
 	if cs := s.rt.checksumStore(owner); cs != nil {
 		cs.DeletePrefix(rel + "/")
 		// 清理目录自身的 checksum 记录（如果存在）
@@ -795,6 +918,52 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 	// 搜索索引同步删除子树（roadmap P0）：rmdir 后子树不可见。
 	if s.index != nil {
 		s.index.removePrefix(owner, strings.TrimPrefix(rel, "user/"))
+	}
+}
+
+// cleanupRemovedDirMeta 删除目录内各文件 meta sidecar 并释放其 meta 桶配额
+// （rmdir 联动；与写侧 WriteMeta 的 Commit 对称——防 meta 桶 Scope 虚高/孤儿）。
+func (s *Service) cleanupRemovedDirMeta(owner string, allFiles []rmdirFileStat) {
+	for _, f := range allFiles {
+		if f.root == nil {
+			continue
+		}
+		mrel := meta.MetaPath(f.rel)
+		metaSize := int64(0)
+		if e, serr := f.root.Stat(mrel); serr == nil && e != nil {
+			metaSize = e.Size()
+		}
+		_ = f.root.Remove(mrel)
+		if metaSize > 0 {
+			if scope := s.rt.quotaScope(owner, mrel); scope != nil {
+				scope.ReleaseUsage(metaSize)
+			}
+		}
+	}
+}
+
+// removeFileMeta 删除单文件配套 .meta sidecar 并释放其 meta 桶配额（删除联动；
+// 与写侧 WriteMeta Commit 对称）。主文件已确认删除/软删成功才调用（软删保留）。
+// m4 修复：删除时一并清理同目录旧 meta tmp 孤儿（崩溃残留 `.tmp.<nano>`——原只在
+// 下次同 rel 写时 sweep，文件删除后孤儿常驻 + 配额/磁盘漂移）。
+func (s *Service) removeFileMeta(f *fileOp, rel string) {
+	mrel := meta.MetaPath(rel)
+	s.rt.sweepMetaTmp(f.root, mrel)
+	metaSize := int64(0)
+	if e, serr := f.root.Stat(mrel); serr == nil && e != nil {
+		metaSize = e.Size()
+	}
+	if rerr := f.root.Remove(mrel); rerr != nil && !os.IsNotExist(rerr) {
+		// C-MAJOR-5 修复：删除失败（IO 瞬时/独占）→ **不释放配额**（磁盘 meta 仍在，
+		// 配额保留与磁盘一致；下次删除/重写时再对账）。记 Error 供运维可见。
+		f.logger.ErrorContext(f.ctx, "删除 meta sidecar 失败（配额保留）",
+			"file_name", f.remotePath, "meta", mrel, "error", rerr.Error())
+		return
+	}
+	if metaSize > 0 {
+		if scope := s.rt.quotaScope(f.owner, mrel); scope != nil {
+			scope.ReleaseUsage(metaSize)
+		}
 	}
 }
 
@@ -958,6 +1127,12 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 	// （ACL bypass，AD-6）。语义见 resolveRenameHome。
 	homeVol, root, locErr := s.resolveRenameHome(ctx, owner, fromRel, input.ExplicitVol, tnt)
 	if locErr != nil {
+		// **外部卷（加密卷/远端）内重命名**：本地定位不覆盖外部卷（它们没有 *storage.Root）
+		// ⇒ 此前 `mv` 在加密卷上恒 404「源文件不存在」。本地优先、未命中转外部（与删除路径
+		// 同款，避免为每次本地重命名触达远端）。
+		if handled, res, extErr := s.renameExternalVolume(ctx, owner, from, to, input); handled || extErr != nil {
+			return res, extErr
+		}
 		return RenameFileResult{}, locErr
 	}
 
@@ -1003,6 +1178,43 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 		Checksum: input.ExpectedChecksum,
 		Message:  fmt.Sprintf("文件已重命名: %s -> %s", from, to),
 	}, nil
+}
+
+// renameExternalVolume 在**外部卷内**完成重命名（本地定位未命中时调用；同卷语义）。
+// 返回 handled=true 表示已由外部卷分支裁决（成功或失败都算），调用方不再走本地路径；
+// handled=false 表示无外部候选/候选都未命中 → 调用方回落既有 404 语义。
+//
+// 与 deleteExternalVolume 同款：显式 ?volume= 只试该卷；未指定则遍历 owner 可见外部卷，
+// 命中即终结（避免为每次本地重命名触达远端）。
+func (s *Service) renameExternalVolume(ctx context.Context, owner, from, to string, input RenameFileInput) (bool, RenameFileResult, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return false, RenameFileResult{}, nil // 未装配接缝：零回归
+	}
+	vols := s.externalCandidateVolumes(owner, input.ExplicitVol)
+	if len(vols) == 0 {
+		return false, RenameFileResult{}, nil // 非外部卷 / 未授权 → 交本地流程
+	}
+	for _, name := range vols {
+		renamed, rerr := ops.ExternalRename(ctx, owner, name, from, to, input.ExpectedChecksum)
+		if rerr != nil {
+			return true, RenameFileResult{}, rerr
+		}
+		if !renamed {
+			continue
+		}
+		s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to+" 外部卷="+name)
+		s.rt.publishFileEvent(EventRename, owner, to, 0)
+		s.rt.logger().InfoContext(ctx, "外部卷文件已重命名", "volume", name, "from", from, "to", to)
+		return true, RenameFileResult{
+			From: from, To: to, Checksum: input.ExpectedChecksum,
+			Message: fmt.Sprintf("文件已重命名: %s -> %s", from, to),
+		}, nil
+	}
+	if input.ExplicitVol == "" {
+		return false, RenameFileResult{}, nil // 未指定卷且候选都未命中 → 回落本地兜底语义
+	}
+	return true, RenameFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
 }
 
 // validateRenamePaths 校验 from/to 并返回**校验后**的路径（失败以 *HTTPError{400} 表达）。
@@ -1216,6 +1428,22 @@ func (s *Service) renameChecksumIndex(a renameHomeArgs) {
 	if s.index != nil {
 		s.index.rename(a.owner, strings.TrimPrefix(a.fromRel, "user/"), strings.TrimPrefix(a.toRel, "user/"))
 	}
+	// 可信卷：重命名主文件联动移动配套 .meta（服务端内部文件随主文件一起动）。
+	// M4 修复：搬 meta 前先确保 meta 目标父目录存在（rename 到新目录时 meta/<新dir>
+	// 不存在 → 裸 Rename 失败被吞 → 孤儿 + 目标无 sidecar）；失败记 Warn（非阻断）。
+	if s.rt.fileMetaEnabled() && a.root != nil {
+		fromMeta := meta.MetaPath(a.fromRel)
+		toMeta := meta.MetaPath(a.toRel)
+		if dir := path.Dir(toMeta); dir != "." && dir != "" {
+			if mkErr := a.root.MkdirAll(dir, 0o755); mkErr != nil {
+				a.logger.Warn("重命名创建 meta 目标父目录失败", "meta", toMeta, "error", mkErr)
+				return
+			}
+		}
+		if rerr := a.root.Rename(fromMeta, toMeta); rerr != nil {
+			a.logger.Warn("重命名联动 meta 失败", "from", fromMeta, "to", toMeta, "error", rerr)
+		}
+	}
 }
 
 // ---- 删除族域操作（delete）----
@@ -1231,6 +1459,10 @@ type DeleteFileInput struct {
 	RemotePath string
 	// ExpectedChecksum 是客户端声明的 SHA-256（**必填**且必须匹配，不符即拒绝删除）。
 	ExpectedChecksum string
+	// SkipChecksumVerify 为 true 时不要求也不比对 ExpectedChecksum（协议面：S3 的 DeleteObject
+	// 无 checksum 语义；此类删除的安全由「同 rel 文件锁 + （本地卷）quarantine 原子改名」承担）。
+	// **单条 HTTP API / 批量族必须留 false**——它们是「先 stat 拿 checksum 再删」的语义。
+	SkipChecksumVerify bool
 	// ExplicitVol 是 `?volume=` 显式卷（空 = 按 owner 卷视图定位）。
 	ExplicitVol string
 	// AllowMissing 为 true 时「文件不存在（含默认卷被 ACL 排除而对 owner 不可见）」按**幂等
@@ -1291,7 +1523,7 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	}
 
 	expectedChecksum := input.ExpectedChecksum
-	if expectedChecksum == "" {
+	if expectedChecksum == "" && !input.SkipChecksumVerify {
 		logger.WarnContext(ctx, "X-File-Checksum 为空", "file_name", remotePath)
 		return DeleteFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgMissingChecksum, Reason: reasonChecksumMissing}
 	}
@@ -1312,11 +1544,11 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 		defer release()
 	}
 
-	// C2（2026-10-06）：外部封装卷删除——wrapper（secretdata 等无 *storage.Tenant）内文件
-	// 无法经 storage.Root 定位（locateForRead 要求租户根，封装卷内文件标准 delete 404），
-	// 走外部 FS 整流删除 + 委托子 Scope 配额释放（Pool(volName) = 委托子池，父链归还底层卷池）。
-	if handled, res, derr := s.deleteExternalVolumeTarget(ctx, owner, rel, remotePath, input); handled {
-		return res, derr
+	// **外部卷硬删（评审 F1）**：外部卷没有 *storage.Root，`locateDeleteTarget`/`volumeFileExists`
+	// 恒未命中 ⇒ 其对象此前无任何用户可见删除入口（卷写满后一切写入恒 507 = 功能死路）。
+	// 命中即在此终结（经装配层可信链：主文件 + 联动 sidecar + 卷级计数释放）。
+	if handled, res, extErr := s.deleteExternalVolume(ctx, owner, remotePath, input); handled {
+		return res, extErr
 	}
 
 	homeVol, root, handled, res, locErr := s.locateDeleteTarget(ctx, owner, rel, input)
@@ -1408,6 +1640,71 @@ func (s *Service) idempotentMissingDelete(ctx context.Context, remotePath string
 // locateDeleteTarget 跨卷定位删除目标（任务 5）：locateForRead 命中 → 用该卷租户根；
 // 未命中时仅当默认卷对 owner 授权才回落默认租户（显式卷未命中 / 默认卷被 ACL 排除 →
 // AllowMissing ? 幂等成功 : 404，fail-closed，AD-6）。返回 handled=true 表示已产出结果。
+// deleteExternalVolume 在**外部卷**上执行硬删（评审 F1）。返回 handled=true 表示请求已被外部卷
+// 分支终结（成功 / 404 / 幂等 / 错误）。
+//
+// 语义：
+//   - 显式卷（`?volume=`）指向外部卷 → 由本分支终结（命中删、未命中 404/幂等）；
+//   - 未指定卷 → 遍历 owner 视图内的外部卷，**删到才终结**；都未删到则回落本地流程
+//     （默认卷可能仍有该文件，不能在此武断 404）。
+//
+// 「外部卷」判据 = 该卷无本地 Root（与 `volumeFileExists` 的判据同源，非类型名硬编码）。
+func (s *Service) deleteExternalVolume(ctx context.Context, owner, remotePath string, input DeleteFileInput) (bool, DeleteFileResult, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return false, DeleteFileResult{}, nil // 未装配接缝：零回归（外部卷无删除入口）
+	}
+	vols := s.externalCandidateVolumes(owner, input.ExplicitVol)
+	if len(vols) == 0 {
+		return false, DeleteFileResult{}, nil // 非外部卷 / 未授权 → 交本地流程
+	}
+	for _, name := range vols {
+		deleted, derr := ops.ExternalDelete(ctx, owner, name, remotePath, input.ExpectedChecksum)
+		if derr != nil {
+			return true, DeleteFileResult{}, derr
+		}
+		if !deleted {
+			continue
+		}
+		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "外部卷硬删 volume="+name)
+		return true, DeleteFileResult{RemotePath: remotePath,
+			Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
+	}
+	// 候选外部卷都未命中。
+	if input.ExplicitVol == "" {
+		return false, DeleteFileResult{}, nil // 未指定卷：回落本地流程兜底（幂等/404 由它裁决）
+	}
+	if input.AllowMissing {
+		res, err := s.idempotentMissingDelete(ctx, input.RemotePath)
+		return true, res, err
+	}
+	return true, DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
+}
+
+// externalCandidateVolumes 返回 owner 可见的**外部卷**名（无本地 Root ⇒ 外部）。
+// explicitVol 非空时只返回该卷（非外部卷/未授权 → 空 = 交本地流程）。
+func (s *Service) externalCandidateVolumes(owner, explicitVol string) []string {
+	vs := s.rt.volSet()
+	if vs == nil {
+		return nil
+	}
+	if explicitVol != "" {
+		v, ok := vs.ByName(explicitVol)
+		if !ok || !v.Authorize(owner) || vs.Root(explicitVol) != nil {
+			return nil
+		}
+		return []string{explicitVol}
+	}
+	var out []string
+	for _, v := range vs.All() {
+		if !v.Authorize(owner) || vs.Root(v.Name) != nil {
+			continue
+		}
+		out = append(out, v.Name)
+	}
+	return out
+}
+
 func (s *Service) locateDeleteTarget(ctx context.Context, owner, rel string, input DeleteFileInput) (homeVol string, root *storage.Root, handled bool, result DeleteFileResult, err error) {
 	loc, found := s.locateForRead(owner, rel, input.ExplicitVol)
 	if found && loc.Tenant != nil {
@@ -1436,169 +1733,24 @@ func (s *Service) locateDeleteTarget(ctx context.Context, owner, rel string, inp
 	return "", tnt.Root(), false, DeleteFileResult{}, nil
 }
 
-// deleteExternalVolumeTarget 尝试外部卷删除（C2，2026-10-06）：检测外部卷（显式 ?volume 或
-// 全视图扫描）+ 整流删除。返回 (handled, result, err)——handled=true 表示已产出最终结果
-// （外部卷命中并处理/删除失败）；false = 无外部卷能力/未命中 → 调用方回落既有本地路径。
-func (s *Service) deleteExternalVolumeTarget(ctx context.Context, owner, rel, remotePath string, input DeleteFileInput) (bool, DeleteFileResult, error) {
-	ext, ok := s.rt.volSet().(ExternalVolumeDeleter)
-	if !ok {
-		return false, DeleteFileResult{}, nil
-	}
-	volName, found := s.locateExternalDeleteTarget(ctx, ext, owner, rel, input.ExplicitVol)
-	if !found {
-		return false, DeleteFileResult{}, nil
-	}
-	d := ext.ExternalDeleter(volName)
-	if d == nil {
-		return false, DeleteFileResult{}, nil
-	}
-	res, derr := s.deleteExternalFile(ctx, d, volName, owner, rel, input, remotePath)
-	return true, res, derr
-}
-
-// locateExternalDeleteTarget 定位外部卷上的删除目标（C2，2026-10-06）：
-//   - 显式 explicitVol → 该卷是外部卷、owner 被 ACL 放行且存在 rel → 命中（不在外部卷/
-//     无 ACL/不存在 → 未命中，回落既有本地路径语义）；
-//   - 空 explicitVol → 遍历 owner **ACL 放行**的视图外部卷 stat 探测（I-5，2026-10-07：
-//     外部删除候选按 volume.AllowedVolumes 过滤——既不越权删 ACL 排除卷内文件，也不对
-//     未授权卷 StatSize 做跨卷存在性 oracle）。
-//
-// stat 探测失败（非不存在）视同未命中——调用方回落本地路径（既有 404/500 语义兜底）。
-func (s *Service) locateExternalDeleteTarget(ctx context.Context, ext ExternalVolumeDeleter, owner, rel, explicitVol string) (string, bool) {
-	allowed := allowedVolumeSet(s.rt.volSet().All(), owner)
-	if explicitVol != "" {
-		if !allowed[explicitVol] {
-			return "", false
-		}
-		d := ext.ExternalDeleter(explicitVol)
-		if d == nil {
-			return "", false
-		}
-		if _, exists, _ := d.StatSize(ctx, explicitVol, owner, rel); exists {
-			return explicitVol, true
-		}
-		return "", false
-	}
-	for _, v := range s.rt.volSet().All() {
-		if !allowed[v.Name] {
-			continue
-		}
-		d := ext.ExternalDeleter(v.Name)
-		if d == nil {
-			continue
-		}
-		if _, exists, _ := d.StatSize(ctx, v.Name, owner, rel); exists {
-			return v.Name, true
-		}
-	}
-	return "", false
-}
-
-// allowedVolumeSet 返回 owner 可用的卷名集合（volume.AllowedVolumes；nil volSet → 空）。
-// 外部删除候选的 per-owner ACL 门（I-5）与删除/列表路径的 AD-6 语义一致。
-func allowedVolumeSet(vols []volume.Volume, owner string) map[string]bool {
-	out := make(map[string]bool)
-	for _, v := range volume.AllowedVolumes(vols, owner) {
-		out[v.Name] = true
-	}
-	return out
-}
-
-// deleteExternalFile 外部卷整流删除（C2，2026-10-06）：stat 计量 → 写保护预检（链式嵌套：
-// 本卷被其它封装卷占用其子目录时拒绝）→ 外部 FS 删除 → owner 全局 Scope + 委托子 Scope
-// 配额释放（Pool(volName) 对封装卷返回委托子池，父链聚合归还底层卷池）→ 台账/索引/计量/
-// 审计/事件收尾（与本地删除路径一致）。外部卷无原子 quarantine/去重/软删语义。
-func (s *Service) deleteExternalFile(ctx context.Context, ext ExternalDeleter, volName, owner, rel string, input DeleteFileInput, remotePath string) (DeleteFileResult, error) {
-	size, exists, serr := ext.StatSize(ctx, volName, owner, rel)
-	if serr != nil {
-		s.rt.logger().ErrorContext(ctx, "外部卷删除：stat 失败", "file_name", remotePath, "volume", volName, "error", serr)
-		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile, Reason: reasonRemoveFailed}
-	}
-	if !exists {
-		if input.AllowMissing {
-			return s.idempotentMissingDelete(ctx, remotePath)
-		}
-		return DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
-	}
-	// 写保护（用户语义 #6，C2 兜底）：链式嵌套下本卷子目录被其它封装卷占用 → 拒绝删除。
-	if err := s.rejectOccupiedWrite(volName, userVisibleRel(rel)); err != nil {
-		return DeleteFileResult{}, err
-	}
-	// 评审 CRIT-1（2026-10-07）：外部删除比对实际内容 checksum——ExpectedChecksum 非空且
-	// 与实际不符 → **保留文件 + 400**（对齐本地删除契约，杜绝外部封装卷绕过 checksum 门禁
-	// 静默删）。
-	if oerr := s.verifyExternalDeleteChecksum(ctx, ext, volName, owner, rel, remotePath, size, input); oerr != nil {
-		return DeleteFileResult{}, oerr
-	}
-	if derr := ext.Delete(ctx, volName, owner, rel); derr != nil {
-		s.rt.logger().ErrorContext(ctx, "外部卷删除：删除失败", "file_name", remotePath, "volume", volName, "error", derr)
-		return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile, Reason: reasonRemoveFailed}
-	}
-	// P4 配额对账：删除即释放已确认占用（owner 全局 Scope 按 rel 解析，父链聚合）。
-	if scope := s.rt.quotaScope(owner, rel); scope != nil {
-		scope.ReleaseUsage(size)
-	}
-	// 卷容量池释放（AD-7）：封装卷 Pool(volName) = 底层池委托子 Scope——释放走**委托子池**
-	// 而非底层根池（C2：删除归还 wrapper 配额，不滞留幽灵占用）。
-	if pool := s.rt.volSet().Pool(volName); pool != nil {
-		pool.ReleaseCommitted(size)
-	}
-	// 台账/索引/计量/审计/事件收尾（与本地删除路径一致）。
-	if csStore := s.rt.checksumStore(owner); csStore != nil {
-		csStore.Delete(rel)
-	}
-	if s.index != nil {
-		s.index.remove(owner, strings.TrimPrefix(rel, "user/"))
-	}
-	if s.rt.metricsRecorder() != nil {
-		s.rt.metricsRecorder().RecordDelete()
-	}
-	s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "")
-	s.rt.publishFileEvent(EventDelete, owner, rel, size)
-	return DeleteFileResult{RemotePath: remotePath, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
-}
-
-// verifyExternalDeleteChecksum 外部删除前比对实际内容 checksum（评审 CRIT-1）：
-//   - ExpectedChecksum 为空 → nil（无门禁）；
-//   - 实现侧提供 ExternalFileChecksum → 计算实际明文 SHA-256：计算失败 → 500 保留；
-//     与实际不符 → 400 保留（对齐本地删除契约）；
-//   - 未实现 ExternalFileChecksum 的后端 → **强内容校验缺失**：删除仅凭客户端
-//     ExpectedChecksum 非空 + 文件存在性放行（记录 Warn），调用路径并不对 size 作
-//     弱比对——实现侧补 ExternalFileChecksum 后启用强校验（非 FS 后端降级，无尺寸级弱锚）。
-func (s *Service) verifyExternalDeleteChecksum(ctx context.Context, ext ExternalDeleter, volName, owner, rel, remotePath string, size int64, input DeleteFileInput) error {
-	if input.ExpectedChecksum == "" {
-		return nil
-	}
-	v, ok := ext.(ExternalFileChecksum)
-	if !ok {
-		s.rt.logger().WarnContext(ctx, "外部卷删除：后端未实现内容校验（ExternalFileChecksum），强校验缺失——仅凭客户端 ExpectedChecksum 非空 + 存在性放行（不比对 size）",
-			"file_name", remotePath, "volume", volName, "size", size)
-		return nil
-	}
-	cs, cErr := v.FileChecksum(ctx, volName, owner, rel)
-	if cErr != nil {
-		s.rt.logger().ErrorContext(ctx, "外部卷删除：计算内容 checksum 失败（保留文件）", "file_name", remotePath, "volume", volName, "error", cErr)
-		return &HTTPError{Status: http.StatusInternalServerError, Message: errMsgFileChecksum}
-	}
-	if !checksum.Equal(cs, input.ExpectedChecksum) {
-		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
-		s.rt.logger().WarnContext(ctx, errMsgFileChecksum, "file_name", remotePath, "volume", volName)
-		return &HTTPError{Status: http.StatusBadRequest, Message: errMsgFileChecksum}
-	}
-	return nil
-}
-
 // verifyDeleteQuarantine 基于 fd 校验 quarantine 内容（打开失败 → 恢复 rel 并 500）。
+// `expectedChecksum` 为空表示「无客户端期望值」（协议面 SkipChecksumVerify）→ 只算不比对。
 // 返回文件元信息与实际 checksum；任一失败已尽力恢复原 rel 并返回 *HTTPError。
 func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root, quarRel, rel, expectedChecksum, remotePath string) (os.FileInfo, string, error) {
-	qf, qErr := root.Open(quarRel)
+	qf, qErr := root.OpenDecrypted(quarRel)
 	if qErr != nil {
 		_ = atomicRenameRoot(root, quarRel, rel) // 尽力恢复：quarantine 已在手，rel 必可回写
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, errMsgOpenFile)
 		s.rt.logger().ErrorContext(ctx, errMsgOpenFile, "file_name", remotePath, "error", qErr.Error())
 		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFile}
 	}
-	info, qErr := qf.Stat()
+	stater, ok := qf.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		qf.Close()
+		_ = atomicRenameRoot(root, quarRel, rel)
+		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
+	}
+	info, qErr := stater.Stat()
 	if qErr != nil {
 		qf.Close()
 		_ = atomicRenameRoot(root, quarRel, rel)
@@ -1614,7 +1766,9 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 		s.rt.logger().ErrorContext(ctx, "计算文件 checksum 失败", "file_name", remotePath, "error", qErr.Error())
 		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: errMsgFileChecksum}
 	}
-	if !checksum.Equal(cs, expectedChecksum) {
+	// 空 expectedChecksum = 无「客户端期望值」可比（协议面 SkipChecksumVerify：S3 DeleteObject
+	// 无 checksum 语义）→ 跳过比对；仍需打开/stat/算 checksum（审计与去重台账释放要用）。
+	if expectedChecksum != "" && !checksum.Equal(cs, expectedChecksum) {
 		// 恢复原路径：用户数据必须保留（不丢不删），并返回拒绝。
 		_ = atomicRenameRoot(root, quarRel, rel)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
@@ -1628,20 +1782,36 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 // 引用计数（仍有其它引用时只 unlink，配额不减）；引用归零 → 软删到回收站 / 硬删 +
 // 配额与卷池释放；再统一收尾（checksum 台账 / 索引 / 计量 / 审计 / 事件）。
 func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string, info os.FileInfo, cs string, input DeleteFileInput) (DeleteFileResult, error) {
+	// 可信卷：**删除成功后**联动删除配套 .meta（C-MINOR-3 修复：主文件删除失败/软删
+	// 时 meta 保留——先在成功路径统一删；此处只删当次 rel 的 sidecar，防止软删可恢复
+	// 场景丢失校验凭证）。
 	refCount := 0
 	if ds := s.rt.dedupStore(f.owner); s.rt.dedupEnabled() && ds != nil {
 		refCount = ds.RemoveRef(rel, homeVol, cs)
 	}
-	if refCount == 0 {
-		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
-		if res, handled, rmErr := s.removeOrSoftDelete(f, homeVol, rel, quarRel, info, input); handled {
-			return res, rmErr
-		}
-	} else {
+	// C-MAJOR-2 修复：dedup 硬链引用（refCount>0）时主文件被**硬 unlink**（无论 SoftDelete
+	// 都不进 trash、不可恢复）——meta 无保留意义，须随删（下方 removeFileMeta 的
+	// `!input.SoftDelete` 门控只对"软删可恢复"场景成立）。unlinked 标记硬删已完成。
+	unlinked := false
+	// B-M5 修复：摘除目录项（unlink）失败 → 主文件仍在卷上，**不得删 meta**——
+	// 否则主文件失去校验凭证（读侧不校验；可信卷承诺"每文件必有隐藏 meta"
+	// 被打破）。unlink 失败记错误后返回失败（主文件保留，不继续收尾）。
+	if refCount > 0 {
 		// 仍有其它引用：unlink 本 rel 目录项（inode 链接数-1，其余引用仍指向同一 inode），
 		// 配额不减。硬链接下 Remove(quarRel) 即 unlink——另一引用（b.txt）的 inode 保留。
 		if err := f.root.Remove(quarRel); err != nil {
 			f.logger.ErrorContext(f.ctx, "摘除去重引用失败", "file_name", f.remotePath, "error", err.Error())
+			return DeleteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgDeleteFile}
+		}
+		unlinked = true
+	} else if refCount == 0 {
+		// 引用归零：真正删除 inode + 释放配额（软删则移到回收站）。
+		// C-MAJOR-1 修复：软删（handled=true）也走统一后台收尾（checksum 台账/索引/
+		// 计量/事件）——原实现直接 return 跳过后台收尾，软删后 search 仍命中、台账仍
+		// 含该 rel（残留到再次写入）。这里改为软删成功后**不 return**，落入下方统一收尾
+		// （软删保留 meta 供恢复由 `if !input.SoftDelete` 门控——recovered 后仍可恢复）。
+		if res, handled, rmErr := s.removeOrSoftDelete(f, homeVol, rel, quarRel, info, input); handled && rmErr != nil {
+			return res, rmErr
 		}
 	}
 	if csStore := s.rt.checksumStore(f.owner); csStore != nil {
@@ -1653,11 +1823,36 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDelete()
 	}
-	s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
-	f.logger.InfoContext(f.ctx, "文件已删除", "file_name", f.remotePath)
+	// 可信卷：**删除成功收尾**联动删除配套 .meta（服务端内部文件随主文件一起删，
+	// 防残留；此时主文件已确认删除/软删成功——软删场景保留 meta 供恢复，见下）。
+	// C1 修复：删除 meta 时按实际大小释放其 meta 桶配额（写侧 WriteMeta 已 Commit，
+	// 删除须对称 ReleaseUsage——否则 owner meta 桶 Scope 随删除永久虚高/假 507）。
+	// C5 修复：不闸 fileMetaEnabled——disable 只停新建不停清理（enable 期写入的存量
+	// sidecar 在 disable 后删除主文件仍须清理；内部按存在性判断，无 meta no-op）。
+	// C-MAJOR-2 修复：`!input.SoftDelete || unlinked`——软删可恢复场景保留 meta 供恢复；
+	// dedup 硬链已硬 unlink（不可恢复）的 rel 也删 meta（否则孤儿 + meta 桶配额永不释放）。
+	if s.metaShouldClean(input, unlinked) {
+		s.removeFileMeta(f, rel)
+	}
+	// C-MAJOR-1 修复：audit/logger 对软删跳过（removeOrSoftDelete 内已记「软删到回收站」）——
+	// 仅硬删在统一收尾记录，防重复审计行。
+	if !input.SoftDelete {
+		s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "")
+		f.logger.InfoContext(f.ctx, "文件已删除", "file_name", f.remotePath)
+	}
 	// 文件变更事件：delete 成功（幂等删除不推送——无实际变更）。
 	s.rt.publishFileEvent(EventDelete, f.owner, rel, 0)
+	if input.SoftDelete {
+		return DeleteFileResult{RemotePath: f.remotePath, Message: "文件已移入回收站"}, nil
+	}
 	return DeleteFileResult{RemotePath: f.remotePath, Message: fmt.Sprintf("文件删除成功: %s", f.remotePath)}, nil
+}
+
+// metaShouldClean 判定删除收尾是否清理 meta sidecar（C-MAJOR-2/gocognit 抽离）：
+// 软删可恢复场景保留 meta 供恢复（!SoftDelete 才删）；dedup 硬链已硬 unlink 的 rel
+// 无论 SoftDelete 都删（不可恢复，孤儿 + meta 桶配额永不释放）。
+func (s *Service) metaShouldClean(input DeleteFileInput, unlinked bool) bool {
+	return !input.SoftDelete || unlinked
 }
 
 // removeOrSoftDelete 引用归零后的真正删除：软删（quarantine → trash 桶，保留原 rel 供
@@ -1698,3 +1893,277 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 	}
 	return DeleteFileResult{}, false, nil
 }
+
+// WriteTargetInput 是统一写内核（WriteTarget）的入参：把「锁 + 目标解析 + 记账 + 原子写 +
+// checksum + sidecar + 台账」内聚为单一入口，供 S3/DAV/版本恢复/归档/HTTP 上传共用。
+//
+// 与 WriteFileInput 的差异（参数化行为）：
+//   - Volume：显式目标卷名（S3 bucket=卷名 / DAV·版本·归档=默认卷；空 = 自动路由按 ACL/placement）；
+//   - Verify：是否比对客户端校验和（HTTP 上传/版本恢复=true；S3/归档聚合=false——服务端自算只记录）；
+//   - Exclusive：O_EXCL 新建（归档输出：同名已存在 → 409 errArchiveExists 语义），且不建 sidecar；
+//   - NoLock：调用方已持锁（multipart complete 会话内；跳过内部 upload 锁）；
+//   - NoQuota：账目已由调用方结算（multipart complete 的「parts→目标」转移、版本恢复的
+//     reserveRestoreQuota 已预留）——WriteTarget 只落盘 + sidecar + 台账，不再 TryReserve/Commit；
+//   - 不做 HTTP 上传专属的幂等/版本/dedup 预处理（那些留在 WriteFile 内部；WriteTarget 是
+//     「写」的单一事实源，预处理是外围策略）。
+type WriteTargetInput struct {
+	// Owner 是操作主体（空 → anonymous，本方法内归一）。
+	Owner string
+	// RemotePath 是用户可见相对路径（含子目录；WriteTarget 内校验）。
+	RemotePath string
+	// Volume 是显式目标卷名（空 = 自动路由）。
+	Volume string
+	// Verify 为 true 时按 ExpectedChecksum 比对（不符即 400 并删除已写内容）。
+	Verify bool
+	// ExpectedChecksum 是客户端声明的 SHA-256（Verify=true 时必填）。
+	ExpectedChecksum string
+	// Exclusive 为 true 时 O_EXCL 新建（同名已存在 → 409；不建 sidecar）。
+	Exclusive bool
+	// NoLock 为 true 时跳过内部 upload 锁（调用方已持锁）。
+	NoLock bool
+	// NoQuota 为 true 时跳过双账本预留/结算（调用方已结算）。
+	NoQuota bool
+	// NoRecord 为 true 时跳过成功副作用（upload 事件/checksum 台账/索引 upsert/mtime）——
+	// 调用方自己发布语义事件（如版本恢复发布 version 事件、S3 由协议层处理）。sidecar 仍内置。
+	NoRecord bool
+	// ClientSize 是客户端声明的大小（用于成功文案与路由预检）。
+	ClientSize int64
+	// Mtime 是写入后要设置的文件修改时间（UnixNano；0 = 不设置）。
+	Mtime int64
+}
+
+// WriteTargetResult 是统一写内核的结果。
+type WriteTargetResult struct {
+	// VolumeName 是落盘卷名（空 = 无卷语义）。
+	VolumeName string
+	// Checksum 是服务端计算的 SHA-256。
+	Checksum string
+	// Size 是实际写入字节。
+	Size int64
+	// ExclusiveCreated 为 true 表示 Exclusive 模式实际创建了新文件（false = 已存在 409 前序）。
+	ExclusiveCreated bool
+	// NoOp 为 true 表示幂等命中（Verify=true 且文件已存在、checksum 一致——不写盘直接成功）。
+	NoOp bool
+	// Message 是成功文案（对齐上传「文件上传成功, size: N」）。
+	Message string
+}
+
+// WriteTarget 是统一写内核：锁（!NoLock）→ 目标解析（Volume 显式 ACL 校验 or 自动路由）→
+// 双账本预留（!NoQuota）→ 原子写（本地 tmp+fsync+rename；Exclusive O_EXCL 直写；外部卷 Sink
+// 直写）→ checksum 比对（Verify）→ sidecar 内置（!Exclusive）→ 台账 + mtime 副作用。
+//
+// 错误一律返回 *HTTPError（Status/Message/Reason 对齐 HTTP 上传语义），供各写面直接映射
+// （S3 保持协议 XML 形态、状态码对齐；DAV 透传；版本/归档复用上传文案）。
+func (s *Service) WriteTarget(ctx context.Context, input WriteTargetInput, src io.Reader) (WriteTargetResult, error) {
+	owner := normalizeOwner(input.Owner)
+	logger := s.rt.logger()
+	remotePath, rel, err := s.resolveWritePath(owner, input.RemotePath)
+	if err != nil {
+		return WriteTargetResult{}, err
+	}
+	if !input.NoLock {
+		release, acquired := s.rt.fileLocks().TryMark(owner, rel, uploadingLockUpload)
+		if !acquired {
+			logger.WarnContext(ctx, "文件正在上传中，拒绝并发写入", "file_name", remotePath)
+			return WriteTargetResult{}, &HTTPError{Status: http.StatusConflict, Message: "文件正在上传中"}
+		}
+		defer release()
+	}
+	// 目标解析 + 双账本预留：显式卷（S3/DAV/版本恢复）走 RouteTarget（ACL+双预留、**不查重**——
+	// 覆盖写语义）；空卷 = 自动路由（HTTP 上传语义，含唯一性由上传层负责）。
+	// NoQuota 时仍走 route（拿 Tenant/Sink 与 VolumeName），但跳过其预留并在写后不结算。
+	var route UploadRoute
+	var routeErr error
+	if input.Volume != "" {
+		route, routeErr = s.rt.routeTarget(owner, rel, input.Volume, input.ClientSize)
+	} else {
+		route, routeErr = s.routeWriteUpload(ctx, logger, owner, rel, WriteFileInput{
+			Owner: owner, RemotePath: remotePath, ExplicitVol: "",
+			ExpectedChecksum: input.ExpectedChecksum, ClientSize: input.ClientSize, Mtime: input.Mtime,
+		}, "", remotePath)
+	}
+	if routeErr != nil {
+		return WriteTargetResult{}, routeErr
+	}
+	if input.NoQuota {
+		route.Release() // 释放探测预留（调用方已结算真实账目）
+	}
+	return s.writeTargetSettle(ctx, owner, rel, remotePath, input, route, src, logger)
+}
+
+// writeTargetSettle 是 WriteTarget 的写盘/校验/结算/副作用主体（对照 writeFileSettle：
+// 去掉 HTTP 上传专属的幂等/版本/dedup 预处理，保留原子写 + checksum + 双账本 + sidecar + 台账）。
+func (s *Service) writeTargetSettle(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, src io.Reader, logger *slog.Logger) (WriteTargetResult, error) {
+	// 外部卷（Sink）写入：无本地 inode 语义，直写 + 校验 + 记账。
+	if route.Sink != nil {
+		return s.writeTargetExternalSettle(ctx, logger, owner, rel, remotePath, input, route, src)
+	}
+	// 本地卷：原子写 + 校验 + 双账本 + sidecar + 台账（统一内核主体）。
+	return s.writeTargetLocalSettle(ctx, owner, rel, remotePath, input, route, src, logger)
+}
+
+// writeTargetLocalSettle 本地卷统一写内核主体：MkdirAll → prev → 原子写（Exclusive O_EXCL）→
+// 校验 → 双账本结算 → sidecar → 台账。
+func (s *Service) writeTargetLocalSettle(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, src io.Reader, logger *slog.Logger) (WriteTargetResult, error) {
+	root := route.Tenant.Root()
+	if mkdirErr := root.MkdirAll(filepath.Dir(rel), 0o755); mkdirErr != nil {
+		route.Release()
+		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", mkdirErr.Error())
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+	}
+	// 覆盖写差分 prev（Exclusive 时 prev 必 0——O_EXCL 创建；NoQuota 时仍预读供 size 语义）。
+	prev := int64(0)
+	if !input.Exclusive {
+		if st, serr := root.Stat(rel); serr == nil && st != nil {
+			prev = st.Size()
+		}
+	}
+
+	var serverChecksum string
+	var written int64
+	var wErr error
+	if input.Exclusive {
+		// O_EXCL 新建（归档输出）：直写目标（无临时+rename——Exclusive 失败不留半截由调用方清理）。
+		serverChecksum, written, wErr = writeTargetExclusive(ctx, root, rel, src)
+	} else {
+		serverChecksum, written, wErr = writeFileAtomicallyRoot(ctx, root, rel, src)
+	}
+	if wErr != nil {
+		route.Release()
+		return WriteTargetResult{}, writeTargetError(logger, ctx, remotePath, input.Exclusive, wErr)
+	}
+	if input.Exclusive {
+		if !input.NoQuota {
+			route.Commit(0, written)
+		}
+		return WriteTargetResult{
+			VolumeName: route.VolumeName, Checksum: serverChecksum, Size: written,
+			ExclusiveCreated: true, Message: fmt.Sprintf("文件写入成功, size: %d", written),
+		}, nil
+	}
+	// 校验 + 结算 + sidecar + 台账（非 Exclusive 常规路径）。
+	if input.Verify && serverChecksum != input.ExpectedChecksum {
+		return WriteTargetResult{}, verifyMismatchError(root, route, logger, ctx, rel, remotePath, serverChecksum, input.ExpectedChecksum)
+	}
+	return s.writeTargetSettleCommon(ctx, owner, rel, remotePath, input, route, root, prev, written, serverChecksum, logger)
+}
+
+// writeTargetSettleCommon 非 Exclusive 路径的结算 + sidecar + 台账（统一内核常规副作用）。
+func (s *Service) writeTargetSettleCommon(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, root *storage.Root, prev, written int64, serverChecksum string, logger *slog.Logger) (WriteTargetResult, error) {
+	// 双账本结算（!NoQuota）：覆盖写 Adjust(prev,written) + Release；新文件 Commit(written)。
+	if !input.NoQuota {
+		route.Commit(prev, written)
+	}
+	// sidecar 内置（!Exclusive）：写成功后生成配套 FileMeta（meta 恒生成；失败只 Warn 兜底）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel); mErr != nil {
+			logger.Warn("可信卷 meta 落盘失败（读侧将不校验）", "file_name", remotePath, "error", mErr)
+		}
+	}
+	// 台账 + mtime（成功副作用；跳过 Exclusive 的 archive 语义——台账/统计对 user 桶文件）。
+	// NoRecord：调用方自己发布语义事件（版本恢复 version 事件等），不重复 upload 事件/台账。
+	if !input.NoRecord {
+		s.recordUploadSuccess(root, owner, remotePath, rel, serverChecksum, input.Mtime, logger)
+	}
+	return WriteTargetResult{
+		VolumeName: route.VolumeName, Checksum: serverChecksum, Size: written,
+		Message: fmt.Sprintf("文件写入成功, size: %d", written),
+	}, nil
+}
+
+// writeTargetExclusive 以 O_EXCL 语义直写（Exclusive 模式）：同名已存在 → os.ErrExist。
+func writeTargetExclusive(ctx context.Context, root *storage.Root, rel string, src io.Reader) (string, int64, error) {
+	f, err := writeUserVisibleOpenExcl(ctx, root, rel)
+	if err != nil {
+		return "", 0, err
+	}
+	h := sha256.New()
+	written, werr := copyWithContext(io.MultiWriter(f, h), src, ctx)
+	cerr := f.Close()
+	if werr != nil {
+		return "", written, werr
+	}
+	if cerr != nil {
+		return "", written, cerr
+	}
+	return hex.EncodeToString(h.Sum(nil)), written, nil
+}
+
+// writeUserVisibleOpenExcl 以 O_EXCL 语义打开目标（加密卷透明加密；同名已存在 → os.ErrExist）。
+func writeUserVisibleOpenExcl(ctx context.Context, root *storage.Root, rel string) (io.WriteCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if root.IsEncrypted() {
+		return root.OpenFileEncrypted(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	}
+	return root.OpenFile(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+}
+
+// verifyMismatchError 校验和与客户端声明不符：删已写内容 + 释放预留 + 400（对齐上传）。
+func verifyMismatchError(root *storage.Root, route UploadRoute, logger *slog.Logger, ctx context.Context, rel, remotePath, serverChecksum, clientChecksum string) error {
+	_ = root.Remove(rel)
+	route.Release()
+	logger.WarnContext(ctx, errMsgChecksumMismatch, "server", serverChecksum, "client", clientChecksum, "file_name", remotePath)
+	return &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
+}
+
+// writeTargetError 把写失败映射为统一 HTTPError：封印拒绝 → 409（封装卷语义）、Exclusive
+// 已存在 → 409（归档）、其余 → 500（对齐上传 errMsgSaveFailed）。
+func writeTargetError(logger *slog.Logger, ctx context.Context, remotePath string, exclusive bool, wErr error) error {
+	if errors.Is(wErr, storage.ErrSealed) {
+		logger.WarnContext(ctx, "写入被封印拒绝（路径由封装卷管理，禁止直连写入）", "file_name", remotePath)
+		return &HTTPError{Status: http.StatusConflict, Message: "该路径由封装卷管理，禁止直接写入"}
+	}
+	if exclusive && errors.Is(wErr, os.ErrExist) {
+		return errArchiveExistsHTTPError // 409：同名已存在
+	}
+	logger.ErrorContext(ctx, "保存文件失败", "error", wErr.Error(), "file_name", remotePath)
+	return &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+}
+
+// writeTargetExternalSettle 是 WriteTarget 的外部卷写（对照 writeExternalSettle：保留整流写 +
+// 流式哈希 + Verify 校验 + 双账本结算，去掉去重/版本/台账——统一内核只管写）。
+func (s *Service) writeTargetExternalSettle(ctx context.Context, logger *slog.Logger, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, src io.Reader) (WriteTargetResult, error) {
+	prev := int64(0)
+	if sz, ok, serr := route.Sink.Stat(ctx, rel); serr == nil && ok {
+		prev = sz
+	}
+	if derr := route.Sink.MakeDir(ctx, path.Dir(rel)); derr != nil {
+		route.Release()
+		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", remotePath)
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+	}
+	hasher := sha256.New()
+	passSrc, ferr := feedChecksumRewindable(src, hasher)
+	if ferr != nil {
+		route.Release()
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+	}
+	limitedSrc := limitReader(s.rt.bandwidthLimiter(), owner, passSrc)
+	start := time.Now()
+	if werr := route.Sink.WriteFile(ctx, rel, limitedSrc, input.ClientSize, input.Mtime); werr != nil {
+		route.Release()
+		logger.ErrorContext(ctx, "外部卷保存文件失败", "error", werr.Error(), "file_name", remotePath)
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgSaveFailed}
+	}
+	serverChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if input.Verify && serverChecksum != input.ExpectedChecksum {
+		_ = route.Sink.Remove(ctx, rel)
+		route.Release()
+		logger.WarnContext(ctx, "外部卷文件 SHA-256 校验失败", "server", serverChecksum, "client", input.ExpectedChecksum, "file_name", remotePath)
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgChecksumMismatch}
+	}
+	if !input.NoQuota {
+		route.Commit(prev, input.ClientSize)
+	}
+	if mr := s.rt.metricsRecorder(); mr != nil {
+		mr.RecordUpload(input.ClientSize)
+	}
+	logger.DebugContext(ctx, "外部卷写入成功", "file_name", remotePath, "size", input.ClientSize, "elapsed", time.Since(start))
+	return WriteTargetResult{VolumeName: route.VolumeName, Checksum: serverChecksum, Size: input.ClientSize,
+		Message: fmt.Sprintf("文件写入成功, size: %d", input.ClientSize)}, nil
+}
+
+// errArchiveExistsHTTPError 是 O_EXCL 同名已存在 → 409（对齐归档既有语义）。
+var errArchiveExistsHTTPError = &HTTPError{Status: http.StatusConflict, Message: "归档文件已存在", Reason: reasonConflict}

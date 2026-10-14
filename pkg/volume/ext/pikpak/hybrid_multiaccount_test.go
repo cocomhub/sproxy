@@ -755,8 +755,9 @@ func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) { // NOSONAR: S37
 		case strings.HasPrefix(r.URL.Path, "/drive/v1/files/restored"):
 			writeJSON(w, map[string]any{"id": "restored-1", "name": "movie.mp4", "web_content_link": srv.URL + "/dl-restored-1"})
 		case strings.HasPrefix(r.URL.Path, "/dl-restored"):
-			// 账号区 Range：首次下载恒 500（模拟中途失败，重试也失败）；重跑时恢复成功。
-			if acctDLFails.Add(1) <= 2 {
+			// 账号区 Range：前 5 次恒 500（覆盖首次下载的 3 次分片尝试；模拟持续性瞬断）；
+			// 重跑时恢复成功（第 6 次起）。
+			if acctDLFails.Add(1) <= 5 {
 				http.Error(w, "transient account dl failure", http.StatusInternalServerError)
 				return
 			}
@@ -784,9 +785,13 @@ func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) { // NOSONAR: S37
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 
-	// 第一次：分享区 chunk 完成（manifest 记录），账号区 chunk 失败（2 次重试均失败）→ 报错。
+	// 第一次：分享区 chunk 完成（manifest 记录），账号区 chunk 恒失败（3 次分片尝试全失败）→ 报错。
 	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err == nil {
-		t.Fatalf("first download should fail (account chunk transient failure)")
+		t.Fatalf("first download should fail (account chunk persistent failure)")
+	}
+	restoresAfterFirst := restoreCalls.Load()
+	if restoresAfterFirst == 0 {
+		t.Fatalf("首次失败路径应在账号区转存过（restore calls = 0）")
 	}
 	// 第二次：重跑 → 分享区 chunk 被 manifest 跳过（longShareCalls 不再增长），
 	// 账号区 chunk 重新转存下载成功 → 文件完整。
@@ -796,10 +801,10 @@ func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) { // NOSONAR: S37
 	if longShareCalls.Load() != 1 {
 		t.Fatalf("share chunk long-range calls = %d, want 1 (第二次应跳过分享区 chunk)", longShareCalls.Load())
 	}
-	// 转存计数：首次下载两次尝试各在 a、b 转存一次副本（每次尝试新账号需新副本，失败
-	// 下载 Release 已清理）→ 2；重跑再转存 1 次 → 共 3。账号区 chunk 必然重新转存。
-	if restoreCalls.Load() != 3 {
-		t.Fatalf("restore calls = %d, want 3 (首次 2 次尝试 + 重跑 1 次)", restoreCalls.Load())
+	// 转存计数断言**增量**（不锁具体次数：重试次数是分片级实现细节，这里锁语义——
+	// 重跑的账号区 chunk 必然重新转存一次副本）。
+	if restoreCalls.Load() <= restoresAfterFirst {
+		t.Fatalf("重跑应重新转存账号区副本: restores %d → %d", restoresAfterFirst, restoreCalls.Load())
 	}
 	got, _ := os.ReadFile(dest)
 	if string(got) != string(payload) {

@@ -16,8 +16,15 @@ package files
 //   - 在途临时文件（.inflight-*.part）不参与；q 为空 → 400。
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // TestService_SearchFiles_IndexTracksUpload 钉住「索引增量维护：上传后可见」。
@@ -127,7 +134,7 @@ func TestService_SearchFiles_IndexTracksRmdir(t *testing.T) {
 	body := []byte("nested")
 	env.upload(t, "alice", "subdir/inner.txt", body, sha256Hex(body), 0)
 
-	if _, err := env.svc.RemoveDir("alice", "subdir", true); err != nil {
+	if _, err := env.svc.RemoveDir(context.Background(), "alice", "subdir", "", true); err != nil {
 		t.Fatalf("RemoveDir: %v", err)
 	}
 
@@ -230,5 +237,80 @@ func TestService_SearchFiles_IndexHidesInflightTemp(t *testing.T) {
 	rr := env.serve(env.svc.SearchFiles, "alice", "GET", "/api/files/search?q=inflight")
 	if resp := decodeList(t, rr); resp.Total != 0 {
 		t.Fatalf("在途临时文件不应命中, got %+v", resp.Files)
+	}
+}
+
+// TestIndexSnapshot_EncryptedVolumeCiphertextAndReload 搜索索引快照含**用户可见文件名**
+// （name/base/rel）：at-rest 加密卷上必须**加密落盘**（此前裸 os I/O + 绝对路径 ⇒ 文件名明文
+// 落盘 = 加密承诺对文件名落空），且必须能读回（经 Root 解密）。
+//
+// 变异：写回退裸 os.WriteFile → 明文文件名断言红；读回退裸 os.ReadFile → 载入断言红。
+func TestIndexSnapshot_EncryptedVolumeCiphertextAndReload(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("tenant 不可用")
+	}
+	if serr := tnt.Root().SetEncryption(bytes.Repeat([]byte{6}, 32)); serr != nil {
+		t.Fatalf("SetEncryption: %v", serr)
+	}
+	const secretName = "confidential-report.pdf"
+	entries := map[string]*indexEntry{
+		"user/" + secretName: {name: "user/" + secretName, base: secretName, size: 42, modTime: 1},
+	}
+	if err := saveIndexSnapshot(tnt, "alice", entries); err != nil {
+		t.Fatalf("saveIndexSnapshot: %v", err)
+	}
+	// 磁盘上（递归）不得出现明文文件名。
+	rootAbs, ok := tnt.Root().Abs("")
+	if !ok {
+		t.Fatal("Abs(root) 失败")
+	}
+	var hits []string
+	_ = filepath.WalkDir(rootAbs, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // 遍历容错（只关心是否出现明文）
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		if bytes.Contains(b, []byte(secretName)) {
+			hits = append(hits, p)
+		}
+		return nil
+	})
+	if len(hits) > 0 {
+		t.Fatalf("加密卷上快照不得明文落文件名（命中 %v）", hits)
+	}
+	// 读回：经 Root 解密还原条目。
+	got, ok2 := loadIndexSnapshot(tnt, "alice")
+	if !ok2 {
+		t.Fatal("加密卷上快照应可载入（经 Root 解密）")
+	}
+	e, present := got["user/"+secretName]
+	if !present || e.base != secretName || e.size != 42 {
+		t.Fatalf("载入条目不符: %+v", e)
+	}
+}
+
+// TestIndexSnapshot_SealedPathRejected 快照落在被封装卷占用的区间时**写恒拒**（封印经 Root
+// 生效）：此前裸 os I/O 会绕过封印写进被封装区间。
+//
+// 变异：写路径不经 Root（或不经 sealCheck）→ 写入成功 → 红。
+func TestIndexSnapshot_SealedPathRejected(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	tnt := env.tenantFor("alice")
+	if tnt == nil || tnt.Root() == nil {
+		t.Fatal("tenant 不可用")
+	}
+	if serr := tnt.Root().SetSeals([]storage.SealRule{{Path: "meta", Wrapper: "vault"}}); serr != nil {
+		t.Fatalf("SetSeals: %v", serr)
+	}
+	err := saveIndexSnapshot(tnt, "alice", map[string]*indexEntry{"user/a": {name: "user/a", base: "a"}})
+	if !errors.Is(err, storage.ErrSealed) {
+		t.Fatalf("封印区间写入应被拒（ErrSealed）, got %v", err)
 	}
 }

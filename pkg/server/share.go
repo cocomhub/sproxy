@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -109,11 +110,20 @@ type ShareStore struct {
 	wg       sync.WaitGroup
 	logger   *slog.Logger
 
-	// persistDir 是分享链接持久化目录（<默认卷根>/anonymous/meta/share）。
-	// 为空 = 纯内存（测试/未装配形态，Create/Consume/Revoke 不落盘、重启不恢复）。
-	// EnablePersist 惰性打开；非空时启动扫描恢复未过期链接，变更原子写/删 <token>.json。
-	persistDir string
+	// root/rel 是分享链接持久化的**卷句柄 + 卷内相对目录**（生产 = anonymous 租户卷 +
+	// "meta/share"，即 <默认卷根>/anonymous/meta/share）。root 为 nil = 纯内存（测试/
+	// 未装配形态，Create/Consume/Revoke 不落盘、重启不恢复）。
+	//
+	// 经卷句柄读写：卷自己决定是否加密（使用方不理解加密态），并天然继承封印判定；
+	// 分享 **token** 属敏感凭据，此前裸 os I/O 会让它在加密卷上明文落盘。
+	// EnablePersist 惰性打开；非 nil 时启动扫描恢复未过期链接，变更原子写/删 <token>.json。
+	root *storage.Root
+	rel  string
 }
+
+// maxShareLinkBytes 是分享持久化文件读取上界（防注入超大 JSON 的 OOM；
+// 单条分享是小体量，64KiB 已远超正常形态）。超限 = 视为损坏 → 跳过该条。
+const maxShareLinkBytes = 64 << 10
 
 // NewShareStore 创建 ShareStore 实例（纯内存，未启用持久化）。
 // 周期清理（cleanupLoop）已收敛到统一调度器（RegisterRoutes 装配 share-cleanup 任务，
@@ -126,28 +136,30 @@ func NewShareStore(logger *slog.Logger) *ShareStore {
 	}
 }
 
-// EnablePersist 启用分享链接持久化：
-//   - dir 为空 = 关闭（幂等，等价未启用）；
-//   - dir 非空 = 扫描 dir/*.json 恢复未过期链接（过期条目跳过并删除落盘），
-//     后续 Create/Consume/Revoke/cleanupExpired 变更同步原子写/删 <token>.json。
+// EnablePersist 启用分享链接持久化（root = 卷句柄，rel = 卷内相对目录；rel 空 = 卷根）：
+//   - root 为 nil = 关闭（幂等，等价未启用）；
+//   - 否则扫描 rel/*.json 恢复未过期链接（过期条目跳过并删除落盘），后续
+//     Create/Consume/Revoke/cleanupExpired 变更同步原子写/删 <token>.json。
 //
-// 幂等：重复调用以最新 dir 生效（重建扫描）。线程安全：仅在装配期调用（首次请求前）。
-func (s *ShareStore) EnablePersist(dir string) {
-	if dir == "" {
+// 幂等：重复调用以最新 root/rel 生效（重建扫描）。线程安全：仅在装配期调用（首次请求前）。
+func (s *ShareStore) EnablePersist(root *storage.Root, rel string) {
+	if root == nil {
 		return
 	}
+	rel = relDir(rel)
 	s.mu.Lock()
-	s.persistDir = dir
-	entries, err := os.ReadDir(dir)
+	s.root = root
+	s.rel = rel
+	entries, err := root.ReadDir(rel)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			s.logger.Warn("分享持久化目录读取失败，跳过恢复", "dir", dir, "error", err)
+			s.logger.Warn("分享持久化目录读取失败，跳过恢复", "dir", rel, "error", err)
 		}
 		s.mu.Unlock()
 		return
 	}
 	now := time.Now()
-	s.restoreShareLinks(dir, now, entries)
+	s.restoreShareLinks(now, entries)
 	s.mu.Unlock()
 	if n := len(s.links); n > 0 {
 		s.logger.Info("已恢复分享链接", "count", n)
@@ -155,16 +167,22 @@ func (s *ShareStore) EnablePersist(dir string) {
 }
 
 // restoreShareLinks 恢复扫描到的分享链接：解析 JSON、跳过过期/消费完的残留（删除落盘）。
-// 调用方持有 s.mu 写锁，s.persistDir 已就绪。
-func (s *ShareStore) restoreShareLinks(dir string, now time.Time, entries []os.DirEntry) {
+// 调用方持有 s.mu 写锁，s.root/s.rel 已就绪。
+func (s *ShareStore) restoreShareLinks(now time.Time, entries []os.DirEntry) {
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		full := filepath.Join(dir, e.Name())
-		data, rerr := os.ReadFile(full)
+		rel := relJoin(s.rel, e.Name())
+		rc, rerr := openUserVisibleRead(s.root, rel)
 		if rerr != nil {
 			s.logger.Warn("分享持久化文件读取失败，跳过", "file", e.Name(), "error", rerr)
+			continue
+		}
+		data, rdErr := io.ReadAll(io.LimitReader(rc, maxShareLinkBytes+1))
+		_ = rc.Close()
+		if rdErr != nil || len(data) > maxShareLinkBytes {
+			s.logger.Warn("分享持久化文件读取失败，跳过", "file", e.Name(), "error", rdErr)
 			continue
 		}
 		var pl shareLinkPersist
@@ -175,25 +193,25 @@ func (s *ShareStore) restoreShareLinks(dir string, now time.Time, entries []os.D
 		link := pl.toLink()
 		if now.After(link.ExpiresAt) || (link.MaxDownloads > 0 && link.Downloads >= link.MaxDownloads) {
 			// 过期/消费完的残留：删除落盘（重启后的惰性清理）。
-			_ = os.Remove(full)
+			_ = s.root.Remove(rel)
 			continue
 		}
 		s.links[link.Token] = link
 	}
 }
 
-// persistPath 返回 token 对应的持久化文件路径（未启用持久化时为空串）。
-func (s *ShareStore) persistPath(token string) string {
-	if s.persistDir == "" {
+// persistRel 返回 token 对应的持久化文件卷内相对路径（未启用持久化时为空串）。
+func (s *ShareStore) persistRel(token string) string {
+	if s.root == nil {
 		return ""
 	}
-	return filepath.Join(s.persistDir, token+".json")
+	return relJoin(s.rel, token+".json")
 }
 
 // persistWrite 原子写单条分享到持久化目录（未启用时为 no-op）。
 // 落盘失败仅记 Warn——分享链接是易失资源，失败不阻塞业务路径（与 checksum 重试不同）。
 func (s *ShareStore) persistWrite(link *ShareLink) {
-	if s.persistDir == "" {
+	if s.root == nil {
 		return
 	}
 	data, err := json.Marshal(link.toPersist())
@@ -201,31 +219,41 @@ func (s *ShareStore) persistWrite(link *ShareLink) {
 		s.logger.Warn("分享持久化序列化失败", "token", link.Token, "error", err)
 		return
 	}
-	if err := os.MkdirAll(s.persistDir, 0o755); err != nil {
-		s.logger.Warn("分享持久化目录创建失败", "dir", s.persistDir, "error", err)
+	if err := ensureDir(s.root, s.rel, 0o755); err != nil {
+		s.logger.Warn("分享持久化目录创建失败", "dir", s.rel, "error", err)
 		return
 	}
-	path := s.persistPath(link.Token)
-	tmp := path + ".tmp"
-	defer os.Remove(tmp)
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		s.logger.Warn("分享持久化写入失败", "token", link.Token, "error", err)
+	rel := s.persistRel(link.Token)
+	tmpRel := rel + ".tmp"
+	// 经卷句柄写（卷决定是否加密）+ tmp→rename 原子替换。
+	w, werr := writeUserVisible(s.root, tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if werr != nil {
+		s.logger.Warn("分享持久化写入失败", "token", link.Token, "error", werr)
 		return
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		s.logger.Warn("分享持久化原子重命名失败，回退直接写", "token", link.Token, "error", err)
-		if werr := os.WriteFile(path, data, 0o600); werr != nil {
-			s.logger.Warn("分享持久化回退写入失败", "token", link.Token, "error", werr)
-		}
+	if _, cerr := w.Write(data); cerr != nil {
+		_ = w.Close()
+		_ = s.root.Remove(tmpRel)
+		s.logger.Warn("分享持久化写入失败", "token", link.Token, "error", cerr)
+		return
+	}
+	if cerr := w.Close(); cerr != nil {
+		_ = s.root.Remove(tmpRel)
+		s.logger.Warn("分享持久化写入失败", "token", link.Token, "error", cerr)
+		return
+	}
+	if rerr := s.root.AtomicRename(tmpRel, rel); rerr != nil {
+		_ = s.root.Remove(tmpRel)
+		s.logger.Warn("分享持久化原子重命名失败", "token", link.Token, "error", rerr)
 	}
 }
 
 // persistRemove 删除单条分享的持久化文件（未启用时为 no-op；文件不存在静默）。
 func (s *ShareStore) persistRemove(token string) {
-	if s.persistDir == "" {
+	if s.root == nil {
 		return
 	}
-	if err := os.Remove(s.persistPath(token)); err != nil && !os.IsNotExist(err) {
+	if err := s.root.Remove(s.persistRel(token)); err != nil && !os.IsNotExist(err) {
 		s.logger.Warn("分享持久化删除失败", "token", token, "error", err)
 	}
 }
@@ -610,7 +638,7 @@ func validateShareSourceFile(w http.ResponseWriter, root *storage.Root, rel stri
 	}
 	// 校验可读：root 相对打开（符号链接不逃逸），立即关闭。分享链接只存 rel，
 	// 不保留句柄——访问时经 root.Open(rel) 重新解析（TOCTOU 收敛）。
-	if f, openErr := root.Open(rel); openErr != nil {
+	if f, openErr := openUserVisibleRead(root, rel); openErr != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
 		return nil, false
 	} else {
@@ -651,20 +679,22 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 直接流式传输文件，不暴露文件路径（root 相对打开，符号链接不逃逸）。
-	f, err := root.Open(link.Rel)
+	// 加密卷走**用户可见**入口（透明解密）并报**明文**长度——raw Open 会把密文原样下发
+	// （评审 P0：分享面静默损坏），密文长度当 Content-Length 还会导致客户端 unexpected EOF。
+	f, err := openUserVisibleRead(root, link.Rel)
 	if err != nil {
 		http.Error(w, "文件读取失败", http.StatusInternalServerError)
 		return
 	}
 	defer f.Close()
 
-	stat, err := f.Stat()
+	size, err := userVisibleSize(root, link.Rel)
 	if err != nil {
 		http.Error(w, "文件状态读取失败", http.StatusInternalServerError)
 		return
 	}
 
-	h.streamShareFile(w, r, token, link, f, stat.Size())
+	h.streamShareFile(w, r, token, link, f, size)
 }
 
 // resolveShareAccess 校验分享链接有效性并消费（Peek → 租户/卷定位 → 文件存在 → Consume）。
@@ -715,7 +745,7 @@ func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, to
 }
 
 // streamShareFile 设置分享响应头并以流式方式传输文件内容（不暴露文件路径）。
-func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token string, link *ShareLink, f *os.File, size int64) {
+func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token string, link *ShareLink, f io.Reader, size int64) {
 	w.Header().Set(headerContentType, contentTypeOctetStream)
 	// 分享只读语义可见（roadmap P2）：仅下载的分享响应带 X-Share-ReadOnly 头。
 	if link.ReadOnly {

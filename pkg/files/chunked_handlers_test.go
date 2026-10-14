@@ -86,10 +86,9 @@ func newChunkedTestEnv(t *testing.T) *chunkedTestEnv {
 		t.Fatalf("建 UploadStore 失败: %v", err)
 	}
 	t.Cleanup(us.Stop)
-	metaAbs, _ := tnt.Root().Abs("meta")
 	return &chunkedTestEnv{
 		dir: dir, root: root, tnt: tnt,
-		cs:     checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), nil),
+		cs:     checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", nil),
 		us:     us,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -115,6 +114,11 @@ func (e *chunkedTestEnv) Route(owner, rel, explicitVol string, size int64, force
 		return UploadRoute{}, &HTTPError{Status: http.StatusConflict, Message: "卷不存在"}
 	}
 	return UploadRoute{VolumeName: "", Tenant: e.tnt, Release: func() { e.routeReleases++ }}, nil
+}
+
+// RouteTarget 显式卷（不查重）：回落 Route。
+func (e *chunkedTestEnv) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+	return e.Route(owner, rel, volName, size, "")
 }
 
 func (e *chunkedTestEnv) ScopeFor(string, string) *quota.Scope { return nil }

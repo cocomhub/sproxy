@@ -98,6 +98,9 @@ type downloadPath struct {
 	// source 是外部卷服务端读取源（A/C 态：secretdata 加密卷 / 私密明文外部卷）。
 	// 非 nil 时 OpenPath/StatPath 经它打开/stat（绕过 Tenant.Root）。
 	source files.DownloadSource
+	// ciphertext = 请求 at-rest 加密卷的存储原样字节（?ciphertext=1，不解密）。
+	// 加密只在存储层，用户常规访问恒为明文；此开关供备份/迁移/带外校验。
+	ciphertext bool
 }
 
 // resolveDownloadPath 解析 /download、/download/chunk 与 /api/files/stat 的文件路径。
@@ -116,19 +119,31 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 	name := r.URL.Query().Get("filename")
 	kind := r.URL.Query().Get("kind")
 
+	var (
+		dp  *downloadPath
+		err error
+	)
 	switch kind {
 	case "":
-		return h.resolveDownloadPathDefault(r, name)
+		dp, err = h.resolveDownloadPathDefault(r, name)
 	case downloadKindCloudArchive:
-		return h.resolveCloudArchivePath(r, name)
+		dp, err = h.resolveCloudArchivePath(r, name)
 	case downloadKindCloudTask:
-		return h.resolveCloudTaskPath(r, name)
+		dp, err = h.resolveCloudTaskPath(r, name)
 	default:
 		return nil, &downloadPathError{
 			status:  http.StatusBadRequest,
 			message: "未知下载 kind: " + kind,
 		}
 	}
+	if err != nil {
+		return nil, err
+	}
+	if r.URL.Query().Get("ciphertext") == "1" {
+		// at-rest 加密卷请求存储原样字节（不解密）；非加密卷无副作用。
+		dp.ciphertext = true
+	}
+	return dp, nil
 }
 
 // resolveDownloadPathDefault 解析普通下载路径（kind 为空）：ValidateFilePath 校验 +

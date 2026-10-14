@@ -19,6 +19,28 @@ import (
 // secretdata 加密卷解密转发 / 私密外部卷整流同构）。
 type fakeSource struct {
 	data []byte
+	// checksum 非空 → 本替身实现 CheckableSource（ChecksumSource），模拟外部卷经
+	// meta.Provider 提供**明文**整文件 SHA-256（secretdata 的 Original.SHA256）。
+	checksum string
+}
+
+// Checksum 实现 ChecksumSource（checksum 为空 → ok=false，与「无记录值」同语义）。
+func (f *fakeSource) Checksum(context.Context) (string, bool) {
+	if f.checksum == "" {
+		return "", false
+	}
+	return f.checksum, true
+}
+
+// plainSource 是**不实现** ChecksumSource 的读取源（钉住「无该能力 → checksum 空」零回归）。
+type plainSource struct{ data []byte }
+
+func (p *plainSource) Stat(context.Context) (fs.FileInfo, error) {
+	return fakeFileInfo{name: "plain.bin", size: int64(len(p.data)), modTime: time.Time{}}, nil
+}
+
+func (p *plainSource) Open(context.Context) (SeekReadCloser, error) {
+	return &fakeSeeker{data: p.data}, nil
 }
 
 func (f *fakeSource) Stat(context.Context) (fs.FileInfo, error) {
@@ -168,6 +190,56 @@ func TestService_Download_SourceFull200(t *testing.T) {
 }
 
 // TestService_Stat_SourceExternal：外部卷 Stat 经 Source 返回元信息（不 Redirect）。
+// TestService_Stat_SourceExternalChecksum：外部卷读取源实现 ChecksumSource 时，Stat 必须
+// 带上明文 checksum（客户端 mv 的源校验和门禁与 X-File-Checksum 依赖它）；未实现该能力
+// 的读取源保持旧行为（checksum 空，不伪造）。
+//
+// 变异：去掉 StatPath 里的 ChecksumSource 断言 → 本用例红。
+func TestService_Stat_SourceExternalChecksum(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	env.resolveDownloadPath = func(*http.Request) (DownloadPath, error) {
+		return DownloadPath{
+			Filename:   "f.bin",
+			VolumeName: "secret",
+			Source:     &fakeSource{data: []byte("payload"), checksum: "abc123"},
+		}, nil
+	}
+	env.rebuild()
+	req := readReq("alice", "GET", "/download?filename=f.bin")
+	rr := httptest.NewRecorder()
+	env.svc.Stat(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Stat 应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-File-Checksum"); got != "abc123" {
+		t.Fatalf("外部卷 Stat 应带明文 checksum, got %q", got)
+	}
+}
+
+// TestService_Stat_SourceWithoutChecksum：读取源未实现 ChecksumSource → checksum 空（零回归）。
+func TestService_Stat_SourceWithoutChecksum(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	env.resolveDownloadPath = func(*http.Request) (DownloadPath, error) {
+		return DownloadPath{
+			Filename:   "p.bin",
+			VolumeName: "plain",
+			Source:     &plainSource{data: []byte("payload")},
+		}, nil
+	}
+	env.rebuild()
+	req := readReq("alice", "GET", "/download?filename=p.bin")
+	rr := httptest.NewRecorder()
+	env.svc.Stat(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Stat 应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-File-Checksum"); got != "" {
+		t.Fatalf("未实现 ChecksumSource 的源不得伪造 checksum, got %q", got)
+	}
+}
+
 func TestService_Stat_SourceExternal(t *testing.T) {
 	t.Parallel()
 	env := newDirsEnv(t)

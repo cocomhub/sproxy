@@ -282,12 +282,31 @@ func TestDownloadIntegrity_ResumeResetsState(t *testing.T) {
 	if err := mgr.ResumeTask(task.ID, false, ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	mgr.mu.RLock()
-	got := mgr.tasks[task.ID]
-	mgr.mu.RUnlock()
-	if got.integritySames != 0 || got.integrityLastChecksum != "" || got.IntegrityStatus != "" {
+	// ResumeTask 异步启动 executeDownload（goroutine）—— 轮询等待终态（failed），
+	// 避免与 failTask 并发写字段的 race（-parallel 下 CI 实测触发）。
+	var sames int
+	var last, istatus string
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		mgr.mu.RLock()
+		got := mgr.tasks[task.ID]
+		status := got.Status
+		sames, last, istatus = got.integritySames, got.integrityLastChecksum, got.IntegrityStatus
+		mgr.mu.RUnlock()
+		return status == "failed"
+	}, "resume 后任务应达 failed")
+	if sames != 0 || last != "" || istatus != "" {
 		t.Fatalf("M1: resume 应重置 integrity 状态，got sames=%d last=%q status=%q",
-			got.integritySames, got.integrityLastChecksum, got.IntegrityStatus)
+			sames, last, istatus)
+	}
+	// D-CRITICAL 回归：failed 任务 resume 不置 resumeSelfOverwrite（且旧标记被清除——
+	// 若任务先前 damaged→resume 置过 true，之后 failed 再 resume 不得残留盲覆标记）。
+	// 注：master 将上方重置断言改为 testutil.WaitFor 闭包轮询（got 不再在函数作用域内），
+	// 故此处独立加锁读取（rebase 语义冲突修复）。
+	mgr.mu.RLock()
+	resumeSelfOverwrite := mgr.tasks[task.ID].resumeSelfOverwrite
+	mgr.mu.RUnlock()
+	if resumeSelfOverwrite {
+		t.Fatal("D-CRITICAL: 非 damaged resume 应清 resumeSelfOverwrite（防盲覆他人同 rel）")
 	}
 }
 

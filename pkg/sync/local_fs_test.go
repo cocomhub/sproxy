@@ -473,3 +473,33 @@ func TestLocalFS_SymlinkInsideRootOK(t *testing.T) {
 		t.Fatalf("Root 内符号链接写入应允许: %v", err)
 	}
 }
+
+// TestLocalFS_WriteIfAbsent 原子唯一写：不存在 → (true,nil) 内容落盘；已存在 → (false,nil)
+// 不覆盖（内容保留）；失败清理 tmp 无残留。
+func TestLocalFS_WriteIfAbsent(t *testing.T) {
+	t.Parallel()
+	l := NewLocalFS(t.TempDir(), nil)
+	ctx := context.Background()
+	ok, err := l.WriteIfAbsent(ctx, "a.txt", strings.NewReader("first"), 5, 0)
+	if err != nil || !ok {
+		t.Fatalf("首写应 (true,nil), got ok=%v err=%v", ok, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(l.Root, "a.txt")); string(b) != "first" {
+		t.Fatalf("首写内容不符: %q", b)
+	}
+	// 已存在 → (false,nil)，不覆盖。
+	ok2, err2 := l.WriteIfAbsent(ctx, "a.txt", strings.NewReader("second"), 6, 0)
+	if err2 != nil || ok2 {
+		t.Fatalf("已存在应 (false,nil), got ok=%v err=%v", ok2, err2)
+	}
+	if b, _ := os.ReadFile(filepath.Join(l.Root, "a.txt")); string(b) != "first" {
+		t.Fatalf("已存在时不应覆盖: %q", b)
+	}
+	// 无 tmp 残留。
+	entries, _ := os.ReadDir(l.Root)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp-") || strings.Contains(e.Name(), ".tmp-") {
+			t.Fatalf("写后不应留 tmp: %s", e.Name())
+		}
+	}
+}

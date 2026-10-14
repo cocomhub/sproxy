@@ -17,10 +17,12 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -917,6 +919,12 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	// sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes 消费；从卷集合注入）。
 	m.renderVolumeWatermarks(&b, h)
 
+	// 容量快照损坏计数（F5）：计数文件是占用量的唯一权威记录，损坏即 used 归零（限额被放宽
+	// 一轮）；除启动 Warn 外必须有可告警面（反复损坏=反复放大）。
+	writeMetric(&b, "sproxy_volume_capacity_corrupt_total", "counter",
+		"Volume capacity snapshots found corrupt or version-unknown (usage reset to 0; limit temporarily unenforced)",
+		capacity.CorruptSnapshotCount())
+
 	// 备份/同步任务计数（roadmap 11.5-⑪）：配合 SproxyBackupSyncFailures 告警。
 	writeMetric(&b, "sproxy_backup_tasks_total", "counter", "Total backup/sync tasks recorded", m.backupTasks.Load())
 	writeMetric(&b, "sproxy_backup_tasks_failed_total", "counter", "Total backup/sync tasks that failed", m.backupTasksFailed.Load())
@@ -944,6 +952,7 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_cloud_transfer_file_errors", "counter", "Transfer file content errors", cmMetrics.TransferFileErrors.Load())
 	}
 	writeHybridMetrics(&b)
+	writeGCIDMetrics(&b)
 
 	_, _ = w.Write([]byte(b.String()))
 }
@@ -1195,6 +1204,22 @@ func (h *Handlers) MetricsAuth(next http.Handler) http.Handler {
 
 // writeHybridMetrics 写 PikPak hybrid 指标（从默认注册表 Active() 断言透出）。
 // 独立 helper 控制 MetricsHandler 认知复杂度（gocognit）。
+// writeGCIDMetrics 写 PikPak GCID 校验命中统计（大小引导候选 + 大→小计算 + 首次/二次/未命中率，
+// 供决策官方分块粒度）。从默认注册表 Active() 断言 GCIDStatsProvider 透出。
+func writeGCIDMetrics(b *strings.Builder) {
+	d := downloader.DefaultRegistry.Active()
+	if d == nil {
+		return
+	}
+	if p, ok := d.(interface {
+		GCIDStats() *integrity.GCIDVerifyStats
+	}); ok && p.GCIDStats() != nil {
+		for name, val := range p.GCIDStats().GCIDStatsSnapshot() {
+			writeMetric(b, "sproxy_gcid_"+name, "counter", "PikPak GCID verify "+name, val)
+		}
+	}
+}
+
 func writeHybridMetrics(b *strings.Builder) {
 	d := downloader.DefaultRegistry.Active()
 	if d == nil {

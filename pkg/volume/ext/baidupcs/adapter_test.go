@@ -72,6 +72,10 @@ func (f *fakeLibrary) Download(ctx context.Context, remotePath, localPath string
 	return nil
 }
 
+func (f *fakeLibrary) Move(ctx context.Context, from, to string) error     { return nil }
+func (f *fakeLibrary) Copy(ctx context.Context, from, to string) error     { return nil }
+func (f *fakeLibrary) Delete(ctx context.Context, remotePath string) error { return nil }
+
 // --- 测试 ---
 
 func TestBinaryAdapter_Upload_Success(t *testing.T) {

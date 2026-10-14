@@ -134,6 +134,10 @@ type metaEntry struct {
 	dataDir string
 	// baseVersion 是本条目的乐观锁版本（来自 meta.BaseVersion，写/删 CAS 用）。
 	baseVersion int64
+	// phys 是本条目在**本卷**的物理落盘字节（内容分块 EncSize 之和 + meta blob 含 pad 与
+	// parity 的落盘长度；去重引用条目只计本条目 meta blob，共享内容归 dedupBlob 计数）。
+	// 由写路径/加载路径填充，供 TrueUsage/TrueSize 报告真值（trueusage.go）。
+	phys int64
 }
 
 // dedupBlob 是去重内容池条目：一个整文件内容对应一个共享加密分块 blob 与其引用计数。
@@ -143,6 +147,9 @@ type dedupBlob struct {
 	name string // dedupDir 内的分块 blob 文件名（内容寻址三段哈希）
 	refs int64
 	meta *shardseal.Meta
+	// phys 是该共享内容 blob 的物理落盘字节（内容分块 + parity；meta 归各引用条目）。
+	// 卷真值里每 blob 只计一次（多引用不重复计），见 trueusage.go。
+	phys int64
 }
 
 // dirMeta 是目录 meta 的加密 JSON（q 标记，记录本目录逻辑名与父目录 dir_id；目录移动/改名
@@ -684,7 +691,7 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	}
 	// 即时物理删（删即释放）：meta + 全部分块 + parity 一次删完（best-effort；去重文件
 	// 释放去重池引用 + 删本容器 meta）。
-	s.removeVersionMeta(e)
+	s.removeVersionMeta(key, e)
 	// 一次性提交内存态：移出索引、扣 usage、推进版本、回收空目录（原子，无半态）。
 	delete(s.index, key)
 	s.volVersion++
@@ -693,6 +700,32 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 		s.usage = 0
 	}
 	s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
+	return nil
+}
+
+// RemoveDir 删除**空**目录（非空 → 错误；子树递归删由调用方先清空）。
+//
+// 为什么必须单独提供：卷内**目录不参与文件索引**（`s.index` 只含文件条目）⇒ `Delete` 对目录键
+// 是 no-op（历史上空目录只能靠「最后一个文件被删」时的 `pruneEmptyDirsLocked` 顺带回收）⇒
+// 显式删空目录必须走本方法：删掉该目录自己的容器（目录 meta + 残留文件）并向上回收变空的祖先。
+// 这是 `syncpkg.FS` 之外的**可选能力**（Delete 的删除语义只对文件成立），调用方按类型断言使用。
+func (s *SecretdataFS) RemoveDir(ctx context.Context, rel string) error {
+	key := strings.TrimPrefix(rel, "/")
+	if key == "" {
+		return fmt.Errorf("secretdata: 不允许删除卷根目录")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	container, ok := s.dirSegs[key]
+	if !ok {
+		return nil // 幂等：目录不存在（含纯虚拟中间目录）
+	}
+	if s.dirHasContentLocked(key) {
+		return fmt.Errorf("secretdata: 目录 %q 非空，拒绝删除", key)
+	}
+	s.removeEmptyContainerLocked(ctx, container, key)
+	s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
+	s.volVersion++
 	return nil
 }
 
@@ -712,10 +745,13 @@ var _ syncpkg.FS = (*SecretdataFS)(nil)
 // （writeFileDedup*/commitDedupEntry）写路径共用的入参组，避免逐参数传递（与 fileOp /
 // backupWorker 的 Go S107 收敛范式一致）。字段语义见 writeFile：sv 为 CAS 起始卷版本、
 // newVer 为写内锁内一次性分配的乐观锁版本（== sv+1）并在写路径全程固定；expected 为
-// 调用方期望卷版本（<0 不校验）。
+// 调用方期望卷版本（<0 不校验）。data 为明文（内存变体）；流式路径 data 为 nil、改用
+// reader 流式加密（size 为文件大小，commit 的 usage/审计用 size）。
 type writeCtx struct {
 	rel       string        // 逻辑相对路径（索引键）
-	data      []byte        // 明文（Imp 内存明文变体）
+	data      []byte        // 明文（Imp 内存明文变体；流式路径 nil）
+	size      int64         // 文件大小（流式路径使用；内存变体 = len(data)）
+	reader    io.Reader     // 流式明文源（内存变体 nil；可 seek 时走 EncryptShardsReader）
 	container string        // 文件 meta 所在容器名
 	created   []dirCreation // 本次新建容器（失败回滚删新留旧）
 	mtime     int64         // 逻辑 mtime（原始值；底层 blob 写入经 blobMTime 打散）
@@ -746,6 +782,11 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 	if s.opts.MaxFileBytes > 0 && size > int64(s.opts.MaxFileBytes) {
 		return fmt.Errorf("%w: 大小 %d，上限 %d", ErrMaxFileBytes, size, int64(s.opts.MaxFileBytes))
 	}
+	// 流式优先：可 seek（io.Seeker/io.ReaderAt）且非 dedup/erasure（这两者需全文内存）→
+	// 流式加密（逐块 ReadAt + 流式哈希，内存峰值 O(单块上限)）；否则读全文走现状内存变体。
+	if canStream(r) && !s.opts.Dedup && !s.opts.Erasure {
+		return s.writeFileStreamEntry(ctx, rel, r, size, mtime, expected, ifAbsent)
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("secretdata: 读明文失败: %w", err)
@@ -755,16 +796,11 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 	// 固定，落盘 meta.BaseVersion 与内存 e.baseVersion/卷版本三者恒等——跨进程 CAS 与
 	// 重启后 loadIndex 恢复的卷版本以此为准；不再由 commitEntry 锁内重算 +1，避免
 	// 「落盘 meta 恒 0」导致的跨重启 CAS 空心化）。
-	s.mu.Lock()
-	sv := s.volVersion
-	if expected >= 0 && expected != sv {
-		s.mu.Unlock()
-		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", sv, expected, ErrVersionConflict)
+	sv, newVer, unlock, cerr := s.beginWrite(expected)
+	if cerr != nil {
+		return cerr
 	}
-	newVer := sv + 1
-	s.writesInFlight++
-	s.mu.Unlock()
-	defer s.endWrite()
+	defer unlock()
 
 	parent := parentDirOf(rel)
 	container, created, err := s.ensureContainer(ctx, parent, mtime)
@@ -779,6 +815,139 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 		return s.writeFileDedup(ctx, wc)
 	}
 	return s.writeFileEncrypted(ctx, wc)
+}
+
+// canStream 判定 r 是否可流式加密（io.Seeker / io.ReaderAt 之一）。
+func canStream(r io.Reader) bool {
+	if _, ok := r.(io.Seeker); ok {
+		return true
+	}
+	_, ok := r.(io.ReaderAt)
+	return ok
+}
+
+// writeFileStreamEntry 流式入口：登记在途 + CAS + 建容器 + 调 writeFileStream。
+func (s *SecretdataFS) writeFileStreamEntry(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64, ifAbsent bool) error {
+	sv, newVer, unlock, cerr := s.beginWrite(expected)
+	if cerr != nil {
+		return cerr
+	}
+	defer unlock()
+	parent := parentDirOf(rel)
+	container, created, err := s.ensureContainer(ctx, parent, mtime)
+	if err != nil {
+		return err
+	}
+	wc := writeCtx{
+		rel: rel, size: size, reader: r, container: container, created: created,
+		mtime: mtime, sv: sv, newVer: newVer, expected: expected, ifAbsent: ifAbsent,
+	}
+	return s.writeFileStream(ctx, wc)
+}
+
+// beginWrite 登记在途写入 + 起始 CAS（expected ≥ 0 须匹配卷当前版本）+ 一次性分配
+// 乐观锁版本 newVer = sv+1（Imp-1 修复：写前锁内定版本；落盘 meta.BaseVersion 与
+// 内存 e.baseVersion/卷版本恒等）。返回 (sv, newVer, unlock, err)。
+func (s *SecretdataFS) beginWrite(expected int64) (int64, int64, func(), error) {
+	s.mu.Lock()
+	sv := s.volVersion
+	if expected >= 0 && expected != sv {
+		s.mu.Unlock()
+		return 0, 0, nil, fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", sv, expected, ErrVersionConflict)
+	}
+	newVer := sv + 1
+	s.writesInFlight++
+	s.mu.Unlock()
+	return sv, newVer, func() { s.endWrite() }, nil
+}
+
+// writeFileStream 流式写路径（可 seek 源）：逐块加密 + 流式哈希，内存峰值 O(单块上限)。
+// 与 writeFileEncrypted 同构：临时分块目录 → EncryptShardsReader → 上传 → commit；
+// 仅加密入口不同（wc.reader 可 seek → 流式；wc.data 为 nil、size 已给定）。
+// video-keyframe 模式由 EncryptShardsReader 内部按 seek 判定（非 keyframe 才流式；
+// keyframe 上层回退 ReadAll——parseOnce 全文扫描与 tee 哈希冲突，见设计 §5）。
+func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr error) {
+	// 审计：encrypt 阶段 span（与 writeFileEncrypted 对称；仅 ctx 携带 audit logger 时
+	// 生效，nil-safe no-op）。明文 = wc.size，密文 = 分块物理字节（physBytesOf 同 commitEntry
+	// 口径）。流式路径此前缺此埋点——转存到加密卷（WriteIfAbsent 走流式）审计无 encrypt 行。
+	encSpan := audit.From(ctx).Begin("encrypt")
+	var cipherBytes int64
+	defer func() {
+		if retErr != nil {
+			encSpan.Fail(retErr)
+			return
+		}
+		// applyKV 把 "bytes"→Bytes，"encrypted"/"cipher_bytes"/"algorithm" 进 Meta。
+		encSpan.End("bytes", wc.size, "encrypted", true, "cipher_bytes", cipherBytes,
+			"algorithm", s.auditAlgoName())
+	}()
+	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
+	if err != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return fmt.Errorf("secretdata: 创建临时分块目录失败: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	policy, perr := s.blockletPolicyFor(wc.rel)
+	if perr != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return fmt.Errorf("secretdata: blocklet 模式选型失败: %w", perr)
+	}
+	// 流式加密（逐块 ReadAt + 流式哈希，group/SHA256 收尾后给定）。
+	out, cerr := encryptContentReader(wc.reader, wc.size, tmp, s.secret, policy, wc.rel, s.metaPadTarget(), s.algoVer)
+	if cerr != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return fmt.Errorf("secretdata: 流式分块加密失败: %w", cerr)
+	}
+	out.Meta.Original.MTime = mtimeString(wc.mtime)
+	out.Meta.BaseVersion = wc.newVer
+	uploaded := []string{}
+	if s.opts.Erasure && len(out.Meta.Chunks) > 1 {
+		if eerr := s.writeErasureParity(ctx, wc.container, out, nil, wc.mtime, &uploaded); eerr != nil {
+			s.rollbackWrite(ctx, uploaded, wc.created)
+			return eerr
+		}
+	}
+	metaName, metaBlob, merr := s.encryptMetaBlob(out.Meta)
+	if merr != nil {
+		s.rollbackWrite(ctx, uploaded, wc.created)
+		return merr
+	}
+	uploaded = append(uploaded, path.Join(wc.container, metaName))
+	if uerr := s.uploadChunks(ctx, wc.container, tmp, wc.mtime, out.ChunkNames, &uploaded); uerr != nil {
+		s.rollbackWrite(ctx, uploaded, wc.created)
+		return uerr
+	}
+	mt := s.blobMTime(wc.mtime)
+	if werr := s.inner.WriteFile(ctx, path.Join(wc.container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
+		s.rollbackWrite(ctx, uploaded, wc.created)
+		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
+	}
+	cipherBytes = physBytesOf(out.Meta, int64(len(metaBlob)), false)
+	return s.commitEntry(ctx, wc, &metaEntry{
+		size: wc.size, mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
+		phys: cipherBytes,
+	}, uploaded)
+}
+
+// encryptContentReader 流式加密入口（helpers.go 的同名函数内存变体对应）。
+// 可 seek 源（wc.reader 实现 io.Seeker/io.ReaderAt）→ EncryptShardsReader（流式）；
+// 纯流不可 seek → 回退 io.ReadAll 后 EncryptShardsBytes（内存变体，功能不变）。
+func encryptContentReader(r io.Reader, size int64, outDir string, secret []byte, policy shardseal.BlockPolicy, name string, padTarget int, v shardseal.AlgoVersion) (*shardseal.EncryptionResult, error) {
+	if _, ok := r.(io.ReaderAt); ok || isSeeker(r) {
+		return shardseal.EncryptShardsReader(r, size, sanitizeName(name), outDir, secret, policy, padTarget, v)
+	}
+	data, rerr := io.ReadAll(r)
+	if rerr != nil {
+		return nil, fmt.Errorf("secretdata: 读明文失败: %w", rerr)
+	}
+	return shardseal.EncryptShardsBytes(data, sanitizeName(name), outDir, secret, policy, padTarget, v)
+}
+
+// isSeeker 判定 r 是否实现 io.Seeker。
+func isSeeker(r io.Reader) bool {
+	_, ok := r.(io.Seeker)
+	return ok
 }
 
 // endWrite 结束一段在途写入（defer 调用，成功/失败统一释放计数）。
@@ -857,6 +1026,7 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 	}
 	return s.commitEntry(ctx, wc, &metaEntry{
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
+		phys: physBytesOf(out.Meta, int64(len(metaBlob)), false),
 	}, uploaded)
 }
 
@@ -916,7 +1086,7 @@ func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntr
 	e.baseVersion = wc.newVer
 	addDirKeysLocked(s.dirs, wc.rel)
 	s.volVersion = wc.newVer
-	s.usage += int64(len(wc.data))
+	s.usage += wc.size
 	if prev != nil {
 		s.usage -= prev.size
 		if s.usage < 0 {
@@ -929,7 +1099,7 @@ func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntr
 		// 索引已指向新条目，旧分块不再被引用。并发 openRead 若在删旧瞬间以旧条目在途
 		// 读取，可能中途读到已被删除的分块而报错（非数据损坏——读失败而非读到错内容）；
 		// 属可接受的并发读-写语义（读要么拿到新内容要么报错，不返回混合/陈旧内容）。
-		s.removeVersionMeta(prev)
+		s.removeVersionMeta(wc.rel, prev)
 	}
 	return nil
 }
@@ -1379,8 +1549,10 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 	mt := dirMetaMTime(mm.Original.MTime)
 	dataDir := ""
 	if s.opts.Dedup && len(mm.Extra) > 0 {
-		if dd, ok := mm.Extra["dedup"]; ok && len(dd) > 0 && len(mm.Chunks) > 0 {
-			dataDir = string(dd)
+		if dd, ok := mm.Extra["dedup"]; ok {
+			if ds, dok := dd.(string); dok && ds != "" && len(mm.Chunks) > 0 {
+				dataDir = ds
+			}
 		}
 	}
 	s.mu.Lock()
@@ -1392,14 +1564,14 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 		s.mu.Unlock()
 		return
 	}
-	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, prev)
+	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, int64(len(blob)), prev)
 	s.mu.Unlock()
 }
 
 // registerLoadedEntryLocked 登记已通过校验/冲突解决的加载条目并推进 usage/volVersion。
 // 调用方持 s.mu（且已 resolveSameRelConflict 通过）。prev 是冲突前旧条目（同 rel 已被
 // 新版本覆盖时非 nil；调用方负责对 usage 换账）。
-func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string, mm *shardseal.Meta, dataDir string, mt int64, prev *metaEntry) {
+func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string, mm *shardseal.Meta, dataDir string, mt, metaBlobLen int64, prev *metaEntry) {
 	// 去重引用文件：dataDir 指向池容器；池引用计数随加载恢复（重启后仍可物理删归零）。
 	if dataDir != "" {
 		s.registerPoolEntryLocked(mm)
@@ -1407,6 +1579,7 @@ func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string
 	s.index[rel] = &metaEntry{
 		size: mm.Original.Size, mtime: mt, dirSeg: container, metaName: metaName, meta: mm,
 		dataDir: dataDir, baseVersion: mm.BaseVersion,
+		phys: physBytesOf(mm, metaBlobLen, dataDir != ""),
 	}
 	addDirKeysLocked(s.dirs, rel)
 	s.usage += mm.Original.Size
@@ -1458,7 +1631,7 @@ func (s *SecretdataFS) registerPoolEntryLocked(mm *shardseal.Meta) {
 		b.refs++
 		return
 	}
-	s.dedupPool[key] = &dedupBlob{name: mm.Chunks[0].FileName, refs: 1, meta: mm}
+	s.dedupPool[key] = &dedupBlob{name: mm.Chunks[0].FileName, refs: 1, meta: mm, phys: contentPhysBytes(mm)}
 }
 
 // readBlob 读取底层文件全部字节（容错：失败返回 error）。
@@ -1766,9 +1939,6 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 	if !ok || e.meta == nil {
 		return fmt.Errorf("secretdata: 文件 %q 不存在", from)
 	}
-	if path.Base(from) != path.Base(to) {
-		return fmt.Errorf("secretdata: 文件 %q 改名不可经 Rename（basename 锚定于 meta，逻辑改名走 delete+write）", from)
-	}
 	targetParent := parentDirOf(to)
 	targetContainer := s.dirSegs[targetParent]
 	if targetContainer == "" {
@@ -1777,16 +1947,34 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 	if _, exists := s.index[to]; exists {
 		return fmt.Errorf("secretdata: 目标 %q 已是文件", to)
 	}
-	if e.dirSeg == targetContainer {
+	sameBase := path.Base(from) == path.Base(to)
+	if sameBase && e.dirSeg == targetContainer {
 		return nil // 同容器同 basename 同路径（from==to 已早退），防御性无操作
 	}
-	// 物理复制分块 + 文件 meta 到目标容器（blob 内容零改动；去重文件分块在池容器不动），
-	// 删源副本（best-effort），原子迁移索引。
-	if cerr := s.copyFileBlobs(ctx, e, targetContainer); cerr != nil {
-		return cerr
-	}
-	s.deleteFileBlobs(ctx, e)
+
+	// **改名 = 只重写 meta blob**（文件名只存在于加密 meta 内 ⇒ `Original.Name`）：
+	// 分块内容零改动、**不重加密文件内容**（用户口径 2026-10-13）。理由与安全性：
+	//   - 分块 blob 名 = 密文内容哈希，与逻辑名无关 ⇒ 改名不必动分块；
+	//   - meta blob 名（`MetaName`）派生自密文内容 ⇒ 改名后必须换名重写（新 salt 沿用
+	//     `m.Salt`，故**不改内容密钥**、不动分块）；
+	//   - **先写新 meta 成功、再删旧 meta**：崩溃窗口最多留下两份 meta（重启后旧路径仍可读，
+	//     多一个副本而已），绝不出现「两份都没有」的丢数据方向。
 	moved := *e
+	if !sameBase {
+		name, nm, merr := s.writeRenamedMetaLocked(ctx, e, targetContainer, path.Base(to))
+		if merr != nil {
+			return merr
+		}
+		moved.meta = nm
+		moved.metaName = name
+	}
+	if rerr := s.relocateRenamedBlobsLocked(ctx, e, targetContainer, sameBase); rerr != nil {
+		if !sameBase {
+			// 回滚刚写的新 meta（避免重启后新路径出现重影条目）。
+			_ = s.inner.Delete(ctx, path.Join(targetContainer, moved.metaName))
+		}
+		return rerr
+	}
 	moved.dirSeg = targetContainer
 	delete(s.index, from)
 	s.index[to] = &moved
@@ -1794,6 +1982,78 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 	// 源目录若因移出最后一个文件而成空 → 一并回收（Imp-1 空目录语义一致）。
 	s.pruneEmptyDirsLocked(ctx, parentDirOf(from))
 	s.volVersion++
+	return nil
+}
+
+// writeRenamedMetaLocked 按新 basename **只重加密 meta blob**（分块内容零改动），写入
+// 目标容器并返回 (新 meta blob 名, 新 meta)。沿用原 `Salt` ⇒ 内容密钥与分块均不变。
+// 先写成功才返回 ⇒ 崩溃窗口最多多一份 meta（不丢数据）。
+// 调用方持有 s.mu。
+func (s *SecretdataFS) writeRenamedMetaLocked(ctx context.Context, e *metaEntry, targetContainer, newBase string) (string, *shardseal.Meta, error) {
+	nm := cloneMeta(e.meta)
+	nm.Original.Name = newBase
+	name, blob, merr := s.encryptMetaBlob(nm)
+	if merr != nil {
+		return "", nil, merr
+	}
+	if werr := s.uploadBlob(ctx, path.Join(targetContainer, name), blob, e.mtime); werr != nil {
+		return "", nil, werr
+	}
+	return name, nm, nil
+}
+
+// relocateRenamedBlobsLocked 处理改名后的 blob 布局（调用方已按需写好新 meta），并删源：
+//   - 同容器：分块原地不动，只删旧 meta（**O(meta)**，不重加密内容）；
+//   - 跨容器 + 同 basename：meta 原样随迁（名字未变，无需重写）；
+//   - 跨容器 + 改名：只搬内容分块（**绝不复制旧 meta**——否则重启会按旧 basename 重建幽灵条目）。
+//
+// 删源为 best-effort（残留孤儿交 GC）；调用方持有 s.mu。
+func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, e *metaEntry, targetContainer string, sameBase bool) error {
+	if e.dirSeg == targetContainer {
+		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
+		return nil
+	}
+	if sameBase {
+		if cerr := s.copyFileBlobs(ctx, e, targetContainer); cerr != nil {
+			return cerr
+		}
+	} else if cerr := s.copyContentBlobs(ctx, e, targetContainer); cerr != nil {
+		return cerr
+	}
+	s.deleteFileBlobs(ctx, e)
+	return nil
+}
+
+// copyContentBlobs 把条目的**内容分块 + parity** 物理复制到目标容器（不复制 meta——
+// 改名路径的 meta 由 renameFileLocked 单独按新名写入）。内容零改动（纯字节复制，保 blob
+// mtime）；去重文件分块在池容器 ⇒ 无需搬移，直接返回。失败回滚已复制项。
+func (s *SecretdataFS) copyContentBlobs(ctx context.Context, e *metaEntry, targetContainer string) error {
+	var uploaded []string
+	rollback := func() {
+		for _, p := range uploaded {
+			_ = s.inner.Delete(ctx, p)
+		}
+	}
+	if e.dataDir != "" {
+		return nil // 去重文件：分块在池容器不动
+	}
+	for _, ci := range e.meta.Chunks {
+		dst := path.Join(targetContainer, ci.FileName)
+		if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, ci.FileName), dst, e.mtime); cerr != nil {
+			rollback()
+			return cerr
+		}
+		uploaded = append(uploaded, dst)
+	}
+	// Erasure parity：随文件一并搬移（目标保留 XOR 冗余、源 parity 不再孤立）。
+	if p := e.meta.Parity; p != nil {
+		dst := path.Join(targetContainer, p.FileName)
+		if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, p.FileName), dst, e.mtime); cerr != nil {
+			rollback()
+			return cerr
+		}
+		uploaded = append(uploaded, dst)
+	}
 	return nil
 }
 
@@ -2008,7 +2268,7 @@ func addDirKeysLocked(dirs map[string]struct{}, rel string) {
 //   - 反向（分块先删、meta 后删）的幽灵方向（破坏 §6.2「重启不复现」）：meta 删失败但
 //     分块已删 → 重启把非 Deleted 的 meta 重建为条目（meta 声明 size、分块已缺、OpenRead
 //     失败），且 GC 视非 Deleted meta 为存活而永久保护不清理。**故 meta 恒最先删**。
-func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
+func (s *SecretdataFS) removeVersionMeta(ownerKey string, e *metaEntry) {
 	if e == nil || e.meta == nil {
 		return
 	}
@@ -2019,16 +2279,64 @@ func (s *SecretdataFS) removeVersionMeta(e *metaEntry) {
 		return // meta 删失败：分块保留（反幽灵：meta 声明的 size 与分块俱在）
 	}
 	if e.dataDir != "" {
-		// 去重引用文件：meta 已删 → 释放池引用（归零物理删池 blob；失败 → 池 blob 成孤儿）。
+		// 预留去重池记账（opts.Dedup 时生效；池 blob 的物理删由下方存在性判定统一裁决）。
 		s.unrefPoolEntry(e)
+	}
+	// **共享分块（同卷复制）的「存在即引用」裁决**：仍有其他条目引用同一
+	// (数据容器, 分块名集合) ⇒ 不删（源与副本谁先删都安全）；否则物理删分块 + parity。
+	// 不以 dataDir/标记为前提（布局事实由 `dataSeg` 表达；重启后由索引天然恢复）。
+	if s.chunkSetStillReferenced(ownerKey, e) {
 		return
 	}
+	dir := s.dataSeg(e)
 	for _, ci := range e.meta.Chunks {
-		_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, ci.FileName))
+		_ = s.inner.Delete(context.Background(), path.Join(dir, ci.FileName))
 	}
 	if p := e.meta.Parity; p != nil && p.FileName != "" {
-		_ = s.inner.Delete(context.Background(), path.Join(e.dirSeg, p.FileName))
+		_ = s.inner.Delete(context.Background(), path.Join(dir, p.FileName))
 	}
+}
+
+// chunkSetStillReferenced 判定「该条目的分块集合是否仍被**其他**条目共享引用」
+// （同卷复制的**存在即引用**引用计数）：按内存索引比对同一数据容器 + 同名分块集合。
+//
+// 为什么不需要持久化引用计数：共享关系就是「两份 meta 引用同一批 blob」这一事实本身，
+// 重启后由索引重建天然恢复；删除时按索引判定最后引用者（O(索引)），因此**源与副本谁先
+// 删都安全**，且无需任何新元数据字段/标记。ownerKey 是正在删除或覆盖的条目键（覆盖时索
+// 引已指向新条目），必须排除以免把自己算作引用者。调用方须持 s.mu。
+func (s *SecretdataFS) chunkSetStillReferenced(ownerKey string, e *metaEntry) bool {
+	if e == nil || e.meta == nil {
+		return false
+	}
+	dir := s.dataSeg(e)
+	for k, other := range s.index {
+		if k == ownerKey || other == nil || other.meta == nil {
+			continue
+		}
+		if s.dataSeg(other) != dir {
+			continue
+		}
+		if sameChunkNames(other.meta, e.meta) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameChunkNames 判定两份 meta 是否引用同一批分块 blob（同容器 + 同名集合；parity 一并比对）。
+func sameChunkNames(a, b *shardseal.Meta) bool {
+	if len(a.Chunks) != len(b.Chunks) {
+		return false
+	}
+	for i := range a.Chunks {
+		if a.Chunks[i].FileName != b.Chunks[i].FileName {
+			return false
+		}
+	}
+	if (a.Parity == nil) != (b.Parity == nil) {
+		return false
+	}
+	return a.Parity == nil || a.Parity.FileName == b.Parity.FileName
 }
 
 // unrefPoolEntry 释放去重池引用：引用计数归零时物理删除池 blob。调用方须持 s.mu。

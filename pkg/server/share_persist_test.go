@@ -25,7 +25,7 @@ func TestShare_Persist_RestartRestores(t *testing.T) {
 	dir := t.TempDir()
 
 	ss := NewShareStore(slog.Default())
-	ss.EnablePersist(dir)
+	ss.EnablePersist(testRootAt(t, dir), "")
 	link, err := ss.Create(shareSpec{Filename: "a.txt", TenantID: "alice", Rel: "user/a.txt", Owner: "ak-1", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -39,7 +39,7 @@ func TestShare_Persist_RestartRestores(t *testing.T) {
 
 	// 模拟重启：新建 ShareStore，应恢复该链接。
 	ss2 := NewShareStore(slog.Default())
-	ss2.EnablePersist(dir)
+	ss2.EnablePersist(testRootAt(t, dir), "")
 	got := ss2.Peek(link.Token)
 	if got == nil {
 		t.Fatalf("重启后应恢复分享链接 %s", link.Token)
@@ -56,7 +56,7 @@ func TestShare_Persist_RestartRestores(t *testing.T) {
 		t.Fatalf("Revoke 后落盘应删除 %s: %v", persistFile, err)
 	}
 	ss3 := NewShareStore(slog.Default())
-	ss3.EnablePersist(dir)
+	ss3.EnablePersist(testRootAt(t, dir), "")
 	if ss3.Peek(link.Token) != nil {
 		t.Fatalf("Revoke 后重启不应再恢复 %s", link.Token)
 	}
@@ -68,7 +68,7 @@ func TestShare_Persist_SkipExpiredOnRestore(t *testing.T) {
 	dir := t.TempDir()
 
 	ss := NewShareStore(slog.Default())
-	ss.EnablePersist(dir)
+	ss.EnablePersist(testRootAt(t, dir), "")
 	// TTL 极短：恢复时已过期。
 	link, err := ss.Create(shareSpec{Filename: "b.txt", TenantID: "bob", Rel: "user/b.txt", Owner: "ak-2", TTL: -time.Millisecond, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
@@ -76,7 +76,7 @@ func TestShare_Persist_SkipExpiredOnRestore(t *testing.T) {
 	}
 
 	ss2 := NewShareStore(slog.Default())
-	ss2.EnablePersist(dir)
+	ss2.EnablePersist(testRootAt(t, dir), "")
 	if ss2.Peek(link.Token) != nil {
 		t.Fatalf("过期链接重启后不应恢复: %s", link.Token)
 	}
@@ -88,7 +88,7 @@ func TestShare_Persist_ConsumePersists(t *testing.T) {
 	dir := t.TempDir()
 
 	ss := NewShareStore(slog.Default())
-	ss.EnablePersist(dir)
+	ss.EnablePersist(testRootAt(t, dir), "")
 	// 不限次数（MaxDownloads=0）普通分享：Consume 只递增计数。
 	link, err := ss.Create(shareSpec{Filename: "c.txt", TenantID: "carol", Rel: "user/c.txt", Owner: "ak-3", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
@@ -102,7 +102,7 @@ func TestShare_Persist_ConsumePersists(t *testing.T) {
 
 	// 重启后计数保留：Peek 的 Downloads==1。
 	ss2 := NewShareStore(slog.Default())
-	ss2.EnablePersist(dir)
+	ss2.EnablePersist(testRootAt(t, dir), "")
 	got := ss2.Peek(link.Token)
 	if got == nil {
 		t.Fatalf("重启后应恢复 %s", link.Token)
@@ -132,7 +132,7 @@ func TestShare_Persist_EvictionRemovesFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ss := NewShareStore(slog.Default())
-	ss.EnablePersist(dir)
+	ss.EnablePersist(testRootAt(t, dir), "")
 
 	// 创建 3 条 TTL 极短链接。
 	var tokens []string

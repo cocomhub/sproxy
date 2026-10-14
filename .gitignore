@@ -60,3 +60,11 @@ TASK.md
 
 # golangci-lint 每仓库缓存（pre-commit hook 隔离用，不入库）
 .cache/
+
+# 本地临时/备份/机器专属文件（一律不入库；作用域=全仓任意目录）
+# 覆盖：提交信息与 PR 正文的临时文件（.cm.tmp/.pb.tmp/.mb.tmp）、任意 *.tmp/*.bak、
+# 机器专属配置（*.local）、本地覆盖目录（local/）。
+*.tmp
+*.bak
+*.local
+local/

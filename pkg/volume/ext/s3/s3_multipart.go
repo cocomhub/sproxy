@@ -13,6 +13,7 @@ package s3
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -67,9 +68,14 @@ type multipartOptions struct {
 }
 
 // multipartOptsFromConfig 从 ClientConfig 构造归一后的分片参数。
+// threshold == 0（未配置/非法）→ 默认 64MiB（文档承诺）；< 0 = 显式禁用分片。
 func multipartOptsFromConfig(cfg ClientConfig) multipartOptions {
+	threshold := cfg.MultipartThreshold
+	if threshold == 0 {
+		threshold = defaultMultipartThreshold
+	}
 	return multipartOptions{
-		threshold: cfg.MultipartThreshold,
+		threshold: threshold,
 		partSize:  normalizePartSize(cfg.MultipartPartSize),
 		retries:   normalizeRetries(cfg.UploadRetries),
 	}
@@ -92,12 +98,28 @@ type uploadParams struct {
 
 // putObjectWithRetry 带退避重试执行 PutObject（大文件时透传 PartSize 走 multipart）。
 // minio 内部 multipart 失败自动 Abort（防孤儿）；此处只补应用层重试（网络抖动自愈）。
+//
+// **P0-3 修复：重试前必须重置 reader**——生产写路径经 trusted.Wrap 传入的是
+// `io.TeeReader`（不可 seek）。若重试时复用已消费的流，minio multipart 会把后续
+// `readFull` 的 0 长度当有效分片上传并 complete（SDK 无 totalUploadedSize==size 断言），
+// 使目标对象静默变成 0 字节/截断且返回成功。故：reader 可 seek → Seek(0) 重试；
+// 不可 seek → fail-closed 返回上次错误（由上层重新提供流/重下重传），绝不静默成功。
 func putObjectWithRetry(ctx context.Context, client putter, params uploadParams, r io.Reader, size int64) error {
 	var err error
 	delay := multipartRetryBaseDelay
 	for attempt := 0; attempt <= params.retries; attempt++ {
-		// 每次重试需可重复读取的 reader：调用方保证传 bytes.Reader 等可重置源。
 		if attempt > 0 {
+			seeker, ok := r.(io.Seeker)
+			if !ok {
+				// 不可重置源：不重试（fail-closed，防复用已消费流写坏对象）。**m6（第 7 轮
+				// MINOR）显式归因**：可信卷写面的读流是 `io.TeeReader`（非 Seeker）→ 生产
+				// 路径下 UploadRetries 实际不生效；此处把「重试未发生」写进错误，避免运维
+				// 只看到原始 PutObject 错误而误以为重试已尽力。
+				return fmt.Errorf("%w（源不可重置：非 io.Seeker，UploadRetries=%d 未生效——可信卷写面读流为 TeeReader）", err, params.retries)
+			}
+			if _, serr := seeker.Seek(0, io.SeekStart); serr != nil {
+				return fmt.Errorf("%w（源 Seek(0) 失败，UploadRetries=%d 未生效）", err, params.retries)
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

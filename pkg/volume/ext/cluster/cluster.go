@@ -109,10 +109,16 @@ func NewBackend(ctx context.Context, v volume.Volume, dialer remote.Dialer,
 		c.Close()
 		return nil, fmt.Errorf("cluster backend: 卷 %q 构造失败: %w", v.Name, ferr)
 	}
+	// meta 面（评审 P2-10 修复）：出口侧的可信校验双分块需要持有侧 sidecar，经 remote
+	// `meta` 面按**持有侧用户相对路径**索取（入参已由 holderRel 归一）——持有侧用自身
+	// 可信栈解析，凭证范围仍作用在用户路径上。
+	fetchMeta := func(mctx context.Context, path string) ([]byte, error) {
+		return c.Meta(mctx, remote.Ref{Node: cfg.HolderNode, Volume: cfg.HolderVolume, Path: path})
+	}
 	return &clusterBackend{
 		client:  c,
 		cfg:     cfg,
-		fs:      &clusterFS{fs: fs, cfg: cfg, volName: v.Name},
+		fs:      &clusterFS{fs: fs, cfg: cfg, volName: v.Name, fetchMeta: fetchMeta},
 		closeFn: func() { c.Close() },
 	}, nil
 }

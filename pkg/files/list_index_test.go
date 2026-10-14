@@ -19,6 +19,7 @@ package files
 //     InvalidateIndex 后重建。
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -126,7 +127,7 @@ func TestService_ListFiles_IndexTracksRmdir(t *testing.T) {
 	body := []byte("nested")
 	env.upload(t, "alice", "subdir/inner.txt", body, sha256Hex(body), 0)
 
-	if _, err := env.svc.RemoveDir("alice", "subdir", true); err != nil {
+	if _, err := env.svc.RemoveDir(context.Background(), "alice", "subdir", "", true); err != nil {
 		t.Fatalf("RemoveDir: %v", err)
 	}
 
@@ -146,7 +147,7 @@ func TestService_ListFiles_IndexTracksMkdir(t *testing.T) {
 	if rr := env.serve(env.svc.ListFiles, "alice", "GET", "/api/files"); rr.Code != http.StatusOK {
 		t.Fatalf("预热列表应 200, got %d", rr.Code)
 	}
-	if _, err := env.svc.MakeDir("alice", "newdir"); err != nil {
+	if _, err := env.svc.MakeDir(context.Background(), "alice", "newdir", ""); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 

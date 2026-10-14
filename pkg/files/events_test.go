@@ -4,6 +4,7 @@
 package files
 
 import (
+	"context"
 	"testing"
 )
 
@@ -52,7 +53,7 @@ func TestService_Mkdir_PublishesEvent(t *testing.T) {
 	sink := &fakeEventSink{}
 	env.svc = env.withEventSink(sink)
 
-	if _, err := env.svc.MakeDir("alice", "newdir"); err != nil {
+	if _, err := env.svc.MakeDir(context.Background(), "alice", "newdir", ""); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 	if len(sink.events) != 1 || sink.events[0].action != "mkdir" {

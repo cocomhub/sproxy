@@ -10,6 +10,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	volcapacity "github.com/cocomhub/sproxy/pkg/volume/capacity"
 )
 
 // segNameOfBucketPath 取 bucket_limits 路径键最后一段（段名校验用）。
@@ -161,7 +162,54 @@ func (h *Handlers) adjustVolumePool(name string, tenantBuckets map[string]map[st
 			total += buckets[b]
 		}
 	}
+	// **真值优先**（设计 2026-10-11 §10 与 §12.1 第 2 项）：处理器层（secretdata 等）知道本
+	// 卷物理落盘字节（内容分块 + meta pad + parity），优先采信并与磁盘扫描值交叉校验；
+	// ok=false（未接线/无报告者）回落扫描值，**不静默降级为 0**（本地裸卷的物理真值本来
+	// 就由扫描直接给出）。两者都可得且差异超容差 → 告警（防「扫描口径遗漏封装开销」再次失真）。
+	if rep, ok := h.volumeTrueUsage(name); ok {
+		truth, tok := rep.TrueUsage()
+		if tok {
+			if diff := truth - total; diff != 0 && absInt64(diff) > volumeTruthTolerance(total) {
+				h.logger.Warn("卷真值与磁盘扫描不一致，以真值为准（差异可能来自目录 meta/孤儿 blob/扫描口径）",
+					"volume", name, "truth", truth, "scanned", total, "diff", diff)
+			}
+			total = truth
+		}
+	}
 	pool.Adjust(pool.Usage(), total)
+}
+
+// volumeTruthTolerance 是「真值 vs 磁盘扫描」交叉校验的容差：绝对下限 1MiB 或扫描值的 5%，
+// 取大者。为什么需要容差而不是零偏差：真值口径明确**不含**目录 meta blob、GC 未回收的孤儿
+// blob、并发未命中去重留下的冗余分块（见 secretdata/trueusage.go 的不计项说明），这些都会
+// 使扫描值略高于真值；容差内的差异属已知边界，不告警。
+func volumeTruthTolerance(scanned int64) int64 {
+	if scanned < 0 {
+		scanned = 0
+	}
+	return max(int64(1)<<20, scanned/20)
+}
+
+// absInt64 返回绝对值（防 MinInt64 溢出对判据无意义——差异量级恒远小于该值）。
+func absInt64(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// volumeTrueUsage 取某卷后端 FS 的**真值报告者**（链上最外层实现者，见 capacity.TrueUsageOf）。
+// 处理器卷（secretdata 等）都在 registry.Set 的 external 表里（装配经 capacity.WrapBackend）；
+// 本地裸卷无处理器层 → 无报告者（其物理真值由磁盘扫描直接给出）。
+func (h *Handlers) volumeTrueUsage(name string) (volcapacity.TrueUsageReporter, bool) {
+	if h.volSet == nil {
+		return nil, false
+	}
+	be := h.volSet.External(name)
+	if be == nil || be.FS() == nil {
+		return nil, false
+	}
+	return volcapacity.TrueUsageOf(be.FS())
 }
 
 // reconcileVolumePool 是单卷扫描回调（StorageManager 装配形态，RegisterRoutes 绑定默认卷）：

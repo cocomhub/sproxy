@@ -53,6 +53,10 @@ func NewCmdMv(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 		  sclient mv --volume main a.txt b.txt --to-volume disk2  # main→disk2 迁移并改名`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址：源 `A:/x` ⇒ --volume A；目标 `B:/y`（不同卷）⇒ --to-volume B。
+			if err := applyMvVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)

@@ -78,6 +78,22 @@ func (f *fakeUserVolE2EStorage) markDirs(key string) {
 	}
 }
 
+// PutFromStagedPath 实现 baidupcs.StorageAPI（staging 路径复用）：读暂存文件入内存，
+// 不删/不改调用方文件。
+func (f *fakeUserVolE2EStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64) (*baidupcs.ObjectMeta, error) {
+	data, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return nil, err
+	}
+	if size > 0 && int64(len(data)) != size {
+		return nil, fmt.Errorf("staged 大小不符: %d != %d", len(data), size)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[key] = data
+	return &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
+}
+
 func (f *fakeUserVolE2EStorage) Put(_ context.Context, key string, r io.Reader) (*baidupcs.ObjectMeta, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -147,6 +163,19 @@ func (f *fakeUserVolE2EStorage) Copy(_ context.Context, srcKey, dstKey string) (
 		return nil, baidupcs.ErrNotFound
 	}
 	f.files[dstKey] = append([]byte(nil), data...)
+	f.markDirs(dstKey)
+	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
+}
+
+func (f *fakeUserVolE2EStorage) Move(_ context.Context, srcKey, dstKey string) (*baidupcs.ObjectMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[srcKey]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	delete(f.files, srcKey)
+	f.files[dstKey] = data
 	f.markDirs(dstKey)
 	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
 }

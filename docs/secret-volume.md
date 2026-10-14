@@ -11,7 +11,10 @@ Secret 加密卷把「写入自动分块加密、读取自动解密」沉淀为�
 
 - **加密算法（shardseal）**：纯 Go 随机分块 + AES-256-GCM + scrypt 派生（仅依赖 `golang.org/x/crypto`）。
   每文件随机盐（32B）→ scrypt 派生文件密钥；每段随机 nonce（12B）。
-- **分块加密后上传（非流式）**：边加密边上传，本机峰值 ≈ 原始文件 + 1 个分块（见 §3 `max_file_bytes` 内存防护）。
+- **流式分块加密（可 seek 源）**：可 seek 输入（multipart.File / `*os.File` / SectionReader 等）**逐块
+  ReadAt + 流式哈希**，内存峰值 O(单块上限)（默认 ≤ block_policy.max，2^14 默认档下 ≤200MiB）；
+  纯流不可 seek 回退读全文（功能不变，峰值 1× 文件，见 §3 `max_file_bytes`）。磁盘格式/meta/块布局
+  与旧写路径逐字节同构（向后兼容）。
 - **两类封装卷**：
   - `secrets` 卷（wrapper）：存加密密钥文件（secret 文件本身不加密），底层任意卷的 `secrets/` 目录。
   - `secretdata` 卷（wrapper）：写入自动分块加密、读取自动解密，底层任意卷，对上层透明。
@@ -78,7 +81,7 @@ volumes:
 | `temp_dir` | 系统临时随机目录 | 本地临时空间（0700） |
 | `preserve_mtime` | `false` | 默认 blob mtime 打散；`true` 才透传原始 mtime（§3.5） |
 | `gc_interval` | `0`（禁用） | 后台孤儿/墓碑 GC 周期（§6；可选维护工具，默认关） |
-| `max_file_bytes` | `0`（不限） | 单文件上限（读取全文前的内存防护，§9） |
+| `max_file_bytes` | `0`（不限） | 单文件上限（文件级总闸；流式路径按声明 size 预检，§9） |
 | `targets` | 空 | 多 local root 副本列表（write 复制全部 target、读主失败回退；§3.6） |
 | `erasure` | `false` | XOR parity 基于（**实验性**，§3.7） |
 | `dedup` | — | **预留、装配层不接线**（不解析 `extra.dedup`），内容去重为独立内容寻址子系统的未来能力 |
@@ -242,11 +245,12 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 ### 8.2 未实现
 
 - **压缩**（`Meta.Compressed` / `Compression`，独立注册表，改压缩算法不升级加密版本）
-- **流式加密**（当前写路径走内存明文变体「读全文 → 分块加密」，峰值 1× 文件；`max_file_bytes` 兜底；
-  完整逐块流式留后续，blocklet 双层规划已内建）
 - **Reed-Solomon 纠删码**（GF(2^8) 手写 ~千行负担大；k-of-k+1 单块起步，奇偶系统多块纠错平滑演进）
-- **CLI 接线加密卷文件面**（`pkg/files` 只走 storage.Root；`ExternalBackend.FS` 仅 /api/volumes + /api/backup
-  消费——CLI upload/download 直连加密卷需后续接线，独立立项）
+- ~~CLI 接线加密卷文件面~~ **已接线（2026-10-13 收口）**：`pkg/files` 经
+  `WriteTarget` 外部卷分支（#765 统一写内核）与外部卷对象接缝（Stat 明文 checksum / 列举 /
+  改名 / 硬删）覆盖加密卷的文件面；e2e `TestE2E_CLI_Secretdata_CliFileOps` 钉住
+  upload/list/meta/download/mv/delete 全链。**仍限**：`list` 未指定 `--volume` 时只列本地卷
+  （外部/加密卷需显式 `--volume`，见下节已知限制）；文件**改名**非原地改名（见已知限制）
 - **内容寻址去重**（由独立内容寻址子系统承接；Dedup 预留的权威落点）
 
 ### 8.3 KDF 档位扩展
@@ -262,13 +266,32 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 
 ## 9. 已知限制
 
-- **CLI 未接线加密卷文件面**：`pkg/files` 只走 `storage.Root`；加密卷（ExternalBackend.FS）当前仅
-  `/api/volumes` + `/api/backup` 消费，CLI `upload`/`download` 直连加密卷需后续接线（独立立项）。文档
-  首个 secret 密钥需手工放置（无 CLI 交互创建）。
-- **config 一次装配顺序依赖**：secretdata 卷引用的 secrets 卷必须先装配好（既导致 `type=secretdata`
-  的卷无法声明在缺失 secrets 卷之前）；secrets 卷外部 target（嵌套封装）与 secretdata 外部 target
-  （baidupcs/s3/webdav/嵌套）为**预留片**，当前仅 `target=local` 可用。
+- **加密卷文件面已接线，但有四条边界要知道**：
+  ① 未指定卷的 `list` 只列**本地卷**（搜索索引不含外部卷）——浏览加密卷请显式指定卷
+  （`sclient list vault:/`，或 `sclient cd vault:/` 后直接 `list`；见 `docs/cli.md`「卷感知工作目录」）；
+  ② 文件**改名**（basename 变化）= **只重写 meta blob**（文件名只存在于加密 meta 内；分块名 = 密文
+  内容哈希 ⇒ 内容零改动、不重加密；先写新 meta 成功再删旧 meta ⇒ 崩溃只留双份，不丢数据）；
+  ③ **跨卷移动/复制**（`mv … --to-volume` / `cp` / `volume copy|move`）**已覆盖外部/加密卷**
+  （2026-10-13）：复制段走统一写内核（配额双账本 / sidecar / 封印与上传同口径），移动 = 复制成功
+  **之后**删源（外部卷经接缝硬删）；移动非原子（删源失败会报错并说明「已复制到目标，源删除失败」）。
+  同一 rel 在**其它**卷已存在 → 409（AD-4；移动豁免源卷本身）；
+  ④ 加密卷上**删除目录（`rmdir`）已接线**：经接缝**递归删除**（先子后父；卷侧新增显式「删空目录」
+  能力——目录不参与文件索引，`Delete` 对目录键是 no-op），删除只落在该卷键空间，**绝不**牵连本地
+  同名目录；服务端恒要求 `force=true` 确认。
+  （mkdir / 列目录 / 上传 / 下载 / 删文件 / 改名 / 删目录 / 明文 checksum 均已可用。）
+- **同卷复制（已接线：`cp` / `/api/volumes/copy`）**：`CopyFile` = 同容器**零 blob 写共享**（引用计数为
+  「存在即引用」，删源或删副本都安全、重启天然恢复）／跨容器**字节拷贝**（内容零改动，不重新加密）；
+  跨卷复制因目标卷独立密钥仍需重新加密。
+  文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
+- **卷声明顺序无关（2026-10-13 实测修正）**：`setupSecretBackends` 在**全卷集装配完成之后**补装
+  secretdata（`MarkDeferred`），故 `type: secretdata` 卷可以声明在 secrets 卷之前——e2e
+  `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets` 钉住（此前文档声称「必须先装配好」，已不成立）。
+  **仍预留**：secrets 卷外部 target（嵌套封装）与 secretdata 外部 target（baidupcs/s3/webdav/嵌套），
+  当前仅 `target=local` 可用（配置成外部 target 会 fail-closed 报错，不静默降级）。
 - **空文件不可写**（有意取舍）：分块存储要求至少一个数据分块（承载 meta 引用 + 内容哈希锚定），空
   文件 `EncryptShards` 报错 fail-closed。
 - **随机访问粒度**：`OpenRangeRead` 当前下载整块再定位 blocklet，未做逐 blocklet 只取所需段（注释
   已纠偏）；blocklet 索引已内建，逐段随机访问接线留后续。
+- **流式写覆盖边界**：可 seek 源（multipart 上传 / `*os.File` / 转存本地产物 / sync / 备份恢复 /
+  video-keyframe 块模式 / trusted 装饰器）均走流式；**纯流**（无 seek）与**加密同步 `io.Pipe`**
+  回退整读；**带宽限速启用时**（`rateLimitReader` 包装剥 seek）也回退整读（功能不变，仅内存不省）。

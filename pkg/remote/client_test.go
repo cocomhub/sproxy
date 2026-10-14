@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -443,5 +444,63 @@ func assertFSWritesFailClosed(t *testing.T, fs syncpkg.FS) {
 		if !errors.Is(err, remote.ErrWriteNotConfigured) {
 			t.Fatalf("%s 的错误应包装 remote.ErrWriteNotConfigured: %v", name, err)
 		}
+	}
+}
+
+// writeBSidecar 在 B 侧卷写 sidecar（`<owner>/meta/<rel>.meta`）——与写路径同构：
+// meta.Calculator 算分块 + Marshal 落盘。用于 cross-node meta 面（op=meta）的端到端。
+func writeBSidecar(t *testing.T, cfg *server.Config, rel string, body []byte) {
+	t.Helper()
+	calc, err := meta.NewCalculator(int64(len(body)), int64(len(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, werr := calc.ReadFrom(bytes.NewReader(body)); werr != nil {
+		t.Fatal(werr)
+	}
+	raw, merr := meta.Marshal(calc.Finish())
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	abs := filepath.Join(cfg.StorageRoot, testOwner, filepath.FromSlash(meta.MetaPath("user/"+rel)))
+	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	if werr := os.WriteFile(abs, raw, 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+}
+
+// TestClient_Meta_EndToEnd：跨节点 meta 面（op=meta）——持有侧用自身可信栈把
+// **用户相对路径**解析为 sidecar（调用方无需也不得拼接 meta 桶段，凭证范围语义因此
+// 仍作用在用户路径上）；无 sidecar → 404 → os.ErrNotExist（预期降级可区分）。
+func TestClient_Meta_EndToEnd(t *testing.T) {
+	t.Parallel()
+	aID, err := tunnel.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := startBEnd(t, aID.Fingerprint())
+	body := []byte("remote meta payload")
+	writeBFile(t, b.cfg, "docs/m.bin", body)
+	writeBSidecar(t, b.cfg, "docs/m.bin", body)
+	c := newAClient(t, b, aID)
+
+	raw, merr := c.Meta(context.Background(), mustRef(t, testVol+"/docs/m.bin"))
+	if merr != nil {
+		t.Fatalf("Meta: %v", merr)
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("Meta 返回的 sidecar 应可解析: %v", uerr)
+	}
+	if fm.Size != int64(len(body)) {
+		t.Fatalf("sidecar size=%d want %d", fm.Size, len(body))
+	}
+
+	// 无 sidecar（存量/旁路写）→ 404 → 包装 os.ErrNotExist。
+	writeBFile(t, b.cfg, "docs/none.bin", []byte("no sidecar"))
+	if _, nerr := c.Meta(context.Background(), mustRef(t, testVol+"/docs/none.bin")); !errors.Is(nerr, os.ErrNotExist) {
+		t.Fatalf("无 sidecar 应回 os.ErrNotExist, got %v", nerr)
 	}
 }

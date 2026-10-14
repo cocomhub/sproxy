@@ -20,7 +20,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
-	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
@@ -50,8 +49,10 @@ func (h *Handlers) checkTransferACL(owner string, transfer *cloud.TransferSpec) 
 	}
 	if transfer.Path != "" && h.volSet != nil {
 		if v, ok := h.volSet.ByName(transfer.Volume); ok {
-			if key, kerr := v.ResolveOwnerPath(owner, "user", transfer.Path); kerr == nil {
-				if occErr := h.checkWrapperOccupiedWrite(transfer.Volume, volume.UserVisibleRel(key)); occErr != nil {
+			// Location 强类型：transfer.Path 即用户可见相对路径（user 桶相对），
+			// 解析校验存在性/键空间（ResolveUserLocation 失败 = 路径非法 → 跳过占用检查）。
+			if _, kerr := v.ResolveUserLocation(owner, transfer.Path); kerr == nil {
+				if occErr := h.checkWrapperOccupiedWrite(transfer.Volume, transfer.Path); occErr != nil {
 					return occErr.Error()
 				}
 			}

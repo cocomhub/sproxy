@@ -46,6 +46,81 @@ type ActorResolver interface {
 	Actor(*http.Request) string
 }
 
+// ExternalVolumeOps 是装配层注入的**外部卷对象操作**接缝（评审 F1）。
+//
+// 为什么需要：外部卷没有 `*storage.Root`（`locateForRead`/`volumeFileExists` 恒未命中）⇒ 其
+// 对象**没有任何用户可见的删除入口**；卷写满（`used==capacity`）后该卷一切写入恒 507（含覆盖
+// 写缩小），只能靠同步删除传播或运维手工删计数文件 + 重启 = **功能死路**。
+//
+// 接缝语义（实现方在装配层）：经**同一可信链** `Guard(Wrap(CapacityFS(raw)))` 执行 Delete——
+// 链上 `TrustedVolumeFS.Delete` 天然完成「删主文件 + 联动删 sidecar」，`CapacityFS.Delete`
+// 完成「释放卷级计数」。领域层不感知卷/键空间/装饰器细节。
+type ExternalVolumeOps interface {
+	// ExternalDelete 删除 owner 在 volName 上的 remotePath（用户可见相对路径）。
+	//
+	// expectedChecksum 非空 → 与 sidecar **记录**的整文件 SHA-256 交叉比对（**不重算**：远端
+	// 整文件回读不可接受）；不一致 → `*HTTPError{409}`。sidecar 缺失/不可读 → 跳过该判据
+	// （无记录值可比），删除继续。
+	//
+	// 返回 (false, nil) = 卷未装配 / owner 未授权 / 对象不存在（调用方按 404 处理）。
+	ExternalDelete(ctx context.Context, owner, volName, remotePath, expectedChecksum string) (bool, error)
+
+	// ExternalList 列出 owner 在 volName 的 subdir（用户可见相对路径，"" = 卷根）下的**直接子项**。
+	//
+	// 返回 (entries, true, nil) = 该卷是外部卷且已列举（entries 可为空）；
+	// (nil, false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 不支持列举 —— 调用方按
+	// 「该卷无条目」处理（**与既有行为一致，零回归**：本地卷恒走索引）。
+	// 远端/IO 失败 → (nil, true, err)，由调用方决定响应语义。
+	//
+	// 为什么需要：搜索索引只覆盖本地卷（外部卷没有 *storage.Root）⇒ 显式 `?volume=<外部卷>`
+	// 此前**静默返回空列表**（加密卷在 CLI 上「看起来是空的」）。
+	ExternalList(ctx context.Context, owner, volName, subdir string) (entries []FileInfo, supported bool, err error)
+
+	// ExternalStat 取外部卷对象的元信息（用户可见相对路径）。返回 size<0 = 不存在/未命中；
+	// checksum = 该卷记录的**明文**整文件 SHA-256（无记录 → 空串）。
+	ExternalStat(ctx context.Context, owner, volName, remotePath string) (size int64, checksum string, err error)
+
+	// ExternalCopy 在 volName（外部卷）内**复制**对象（同卷语义；源保留）。卷实现 blob 直拷
+	// 能力时走「底层 blob 直拷 + 新 meta」（不重新加解密）；不支持时返回 Supported=false，
+	// 调用方回落统一写内核（读源 + 写目标）。
+	ExternalCopy(ctx context.Context, owner, volName, fromRemote, fromRel, toRemote, toRel string, force bool) (ExternalCopyResult, error)
+
+	// ExternalMkdir 在 volName（外部卷）内创建目录（用户可见相对路径；祖先链由该卷自建）。
+	//
+	// 返回 (true, nil) = 已在该外部卷创建（幂等：目录已存在视为成功）；
+	// (false, nil) = 卷未装配 / 非外部卷 / owner 未授权（调用方回落本地流程）。
+	//
+	// 为什么必须走该卷：此前 `mkdir --volume <加密卷>` 静默落到**本地卷**（用户看到
+	// 「目录已创建」，卷上却找不到）；目录必须建在目标卷自己的键空间里。
+	ExternalMkdir(ctx context.Context, owner, volName, dir string) (bool, error)
+
+	// ExternalRemoveDir 删除 volName（外部卷）上的目录（用户可见相对路径）。force=true 时
+	// **递归删除**整棵子树（先子后父）；force=false → 400（与本地 rmdir 的「必须显式确认」
+	// 语义一致——绝不静默递归删用户内容）。
+	//
+	// 返回 (true, err) = 已裁决（err 为 *HTTPError：400 非法路径/不是目录/未确认、404 目录
+	// 不存在、409 封印、500 IO）；(false, nil) = 卷未装配 / 非外部卷 / owner 未授权
+	// （调用方回落本地流程，零回归）。
+	ExternalRemoveDir(ctx context.Context, owner, volName, dir string, force bool) (bool, error)
+
+	// ExternalRename 在 volName（外部卷）内把 owner 的 fromRemote 重命名为 toRemote
+	// （两者均为用户可见相对路径；**同卷内**语义——跨卷移动由 move API 承担，涉及外部/加密卷
+	// 时经域侧组合：复制（统一写内核）+ 删源（接缝/delete））。
+	//
+	// expectedChecksum 非空 → 与 sidecar/meta **记录**的整文件 SHA-256 交叉比对（**不重算**）；
+	// 不一致 → `*HTTPError{409}`。目标已存在 → `*HTTPError{409}`（不静默覆盖）。
+	// 返回 (false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 源不存在（调用方回落既有语义）。
+	ExternalRename(ctx context.Context, owner, volName, fromRemote, toRemote, expectedChecksum string) (bool, error)
+}
+
+// ExternalCopyResult 是 ExternalCopy 的返回：Supported=false 表示该卷未实现 blob 直拷能力
+// （调用方回落写内核）；Supported=true 时给出结果元信息。
+type ExternalCopyResult struct {
+	Supported bool
+	Checksum  string
+	Size      int64
+}
+
 // VolumeRouter 是**多卷能力**（运行时卷集合 + 卷租户 + 读定位 + 写路由）。
 //
 // 为什么是一个接口而不是多个字段：这四件事共同描述「多卷部署」这一个能力，拆开只会让
@@ -59,7 +134,11 @@ type VolumeRouter interface {
 	// Locate 在 owner 卷视图内定位 rel 所在卷（读定位，不创建目录）。
 	Locate(owner, rel string) (FileLocation, bool)
 	// Route 为写路径定卷并预留双账本（owner 全局 Scope + 卷容量池）。
+	// 显式卷（explicitVol 非空）语义：ACL 校验 + **唯一性查重**（HTTP 上传覆盖策略）。
 	Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	// RouteTarget 为**统一写内核**显式卷定卷（ACL 校验 + 双预留，**不做唯一性查重**——
+	// 覆盖写语义：S3/DAV/版本恢复允许覆盖同 rel）。
+	RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error)
 }
 
 // QuotaScopeProvider 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
@@ -175,6 +254,8 @@ type config struct {
 	bandwidth     BandwidthLimiter
 	contentIndex  bool
 	occupiedGuard OccupiedWriteGuard
+	fileMeta      FileMetaPolicy
+	externalOps   ExternalVolumeOps
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -189,6 +270,11 @@ func WithActor(a ActorResolver) Option {
 }
 
 // WithVolumes 注入多卷能力。默认：由 TenantResolver 派生的单卷实现。
+// WithExternalOps 注入外部卷对象操作接缝（F1；未装配 → 外部卷对象无删除入口，零回归）。
+func WithExternalOps(ops ExternalVolumeOps) Option {
+	return func(c *config) { c.externalOps = ops }
+}
+
 func WithVolumes(v VolumeRouter) Option {
 	return func(c *config) { c.volumes = v }
 }
@@ -338,6 +424,11 @@ func (s singleVolume) Route(owner, rel, explicitVol string, size int64, forceHom
 	return route, nil
 }
 
+// RouteTarget 单卷形态：唯一根即目标（同 Route，不查重）。
+func (s singleVolume) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+	return s.Route(owner, rel, volName, size, "")
+}
+
 // defaultDownloadPaths 未注入下载路径解析时的默认：仅普通文件（kind 为空）。
 // 云端任务/归档 kind 需要装配层注入（依赖跨族能力）。
 type defaultDownloadPaths struct {
@@ -439,4 +530,29 @@ const (
 // 构建文件索引时对文本文件首 4KiB 抽样抽取词元，搜索命中正文词元也返回文件。
 func WithContentIndex(enabled bool) Option {
 	return func(cfg *config) { cfg.contentIndex = enabled }
+}
+
+// FileMetaPolicy 是**可信卷 meta 能力**（用户裁定 2026-10-07：本地卷上传到达即建
+// meta——新文件到达系统立刻计算 sha256/md5（含分块）并创建配套 .meta 文件，隐藏
+// 占配额）。默认：未装配（零回归，不落 .meta）。装配层（pkg/server）注入实现
+// （meta 恒生成——skip_verify 只关读侧校验不关 meta；secretdata 等自带 Provider 的卷
+// 不在本地写路径）。
+type FileMetaPolicy interface {
+	// Enabled 恒 true（meta 恒生成；装配层注入即生效）。
+	Enabled() bool
+	// WriteMeta 在文件落盘成功后生成并写入配套 .meta（隐藏、占配额）。实现方负责
+	// 计算 FileMeta（从已落盘文件计算总/分块 sha256+md5）与失败兜底（失败＝读侧不校验）。
+	// owner 为文件归属（配额记账按 owner 的 meta 桶 Scope）；root 为文件所在租户根；
+	// rel 为根内相对路径（含 user/ 前缀）。
+	WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error
+	// VerifyDownload 返回下载流的**逐分块校验包装**（信任保证演进：下载路径读回比对
+	// meta，异常 fail-closed——跨信任边界静默损坏在下发客户端前被拦截）。无 meta /
+	// 跳过校验（skip_verify）→ 返回 nil（直通）。实现方读 meta sidecar（root 相对
+	// meta.MetaPath(rel)）后 meta.VerifyReadSeeker 包装。
+	VerifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error)
+}
+
+// WithFileMeta 注入可信卷 meta 能力。默认：不装配（零回归）。
+func WithFileMeta(p FileMetaPolicy) Option {
+	return func(c *config) { c.fileMeta = p }
 }

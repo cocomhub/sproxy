@@ -21,11 +21,13 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/sync/httptransport"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // Executor 基于 pkg/sync.Engine 的同步执行器（实现 syncmgr.Executor）。
@@ -33,6 +35,12 @@ type Executor struct {
 	// TenantRoot 按任务 owner 解析租户 user 根绝对路径（push 的 src / pull 的 dst 根）。
 	// 装配层注入（如 Handlers.syncTenantRoot）；nil 时 Run 报错（fail-closed）。
 	TenantRoot syncmgr.TenantRootResolver
+	// TenantRootFS 是**可选**的「Root 感知本地 FS 提供者」：按 owner 返回根在该租户**租户根**
+	// （user 桶父目录）的 FS。装配层注入 `server.NewRootFS(tnt.Root())` ⇒ 本地侧读写经
+	// `storage.Root` 入口，自动获得 **at-rest 透明加解密**与**封印**语义（评审 P0：此前本地侧
+	// 一律裸 `NewLocalFS(绝对路径)`——加密卷上 pull 落明文、push 上传密文）。
+	// nil = 回落路径式 LocalFS（测试/未接线装配；生产应注入）。
+	TenantRootFS func(owner string) (syncpkg.FS, bool)
 	// TenantScope 按任务 owner 解析租户 user 桶配额 Scope（nil 时不启用逐文件预留，
 	// 由 syncmgr 占位/对账机制兜底——兼容未装配 Scope 的旧装配）。写前逐文件
 	// TryReserve(文件 size) 是"写前 guard"，写成功 Commit(actual) 使 user 桶等额入账。
@@ -262,17 +270,6 @@ func (g *guardedLocalFS) MakeDir(ctx context.Context, p string) error {
 
 var _ syncpkg.FS = (*guardedLocalFS)(nil)
 
-// localWriteFS 构造 pull/双向的本地写侧 FS：占用写保护（WriteGuard）+ 配额感知（quotaLocalFS）
-// 双层装饰 LocalFS。guard 为 nil 时退化仅 quota（零回归）。返回 *quotaLocalFS 使调用方
-// （runBoth verify）可读 .inner 作纯读源。
-func (e *Executor) localWriteFS(localRoot, owner string) *quotaLocalFS {
-	var inner syncpkg.FS = syncpkg.NewLocalFS(localRoot, e.logger())
-	if e.WriteGuard != nil {
-		inner = &guardedLocalFS{inner: inner, guard: e.WriteGuard}
-	}
-	return &quotaLocalFS{inner: inner, owner: owner, scopeFor: e.scopeFor}
-}
-
 // scopeFor 是 Executor 的 resolver：优先按 (owner, rel) 路由（bucket_limits 子目录），
 // 未注册时回落 e.TenantScope（仅按 owner 取 user 桶）。
 func (e *Executor) scopeFor(owner, rel string) *quota.Scope {
@@ -306,7 +303,7 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	if mkErr := os.MkdirAll(localRoot, 0o755); mkErr != nil {
 		return nil, fmt.Errorf("创建本地同步根 %s 失败: %w", localRoot, mkErr)
 	}
-	srcFS, dstFS, remoteClosers, err := e.prepareDirectionFS(ctx, task, remote, localRoot)
+	srcFS, dstFS, remoteClosers, err := e.prepareDirectionFS(ctx, task, remote, localRoot, filepath.Dir(localRoot))
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +313,7 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	// 语义（roadmap P0）：一次提交两边一致；两端各自新增/修改在任务内互相传播；
 	// 删除传播与冲突策略由任务参数控制。
 	if task.Direction == string(syncmgr.DirectionBoth) {
-		return e.runBoth(ctx, task, remote, localRoot)
+		return e.runBoth(ctx, task, remote, localRoot, filepath.Dir(localRoot))
 	}
 
 	job := buildJob(task)
@@ -341,9 +338,12 @@ func closeRemoteFS(remoteClosers []func()) {
 
 // prepareDirectionFS 按方向准备 src/dst FS：push（本地→远程）；pull（远程→本地）。
 // 返回待延迟关闭的远端 close 回调列表。
-func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot string) (syncpkg.FS, syncpkg.FS, []func(), error) {
+func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot, tenantRoot string) (syncpkg.FS, syncpkg.FS, []func(), error) {
 	if task.Direction == string(syncmgr.DirectionPush) {
-		srcFS := syncpkg.NewLocalFS(localRoot, e.logger())
+		// **键空间**：push 源的引擎键空间是 **user 桶相对**（job.Src 为空 = 桶根），而
+		// `localFS` 返回的是**租户根** FS（Root 感知提供者注入后）⇒ 必须补 `user/` 前缀，
+		// 否则会把整个租户根（含 meta/ 等内部桶）当源推送（评审第 2 轮 P0 回归）。
+		srcFS := e.pushSourceFS(tenantRoot, task.Owner)
 		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
 		if err != nil {
 			return nil, nil, nil, err
@@ -354,8 +354,54 @@ func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTas
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	dstFS := e.localWriteFS(localRoot, task.Owner)
+	dstFS := &quotaLocalFS{
+		inner: e.newLocalPullFS(tenantRoot, task.Owner),
+		owner: task.Owner,
+		// 解析器按 (owner, rel) 路由 bucket_limits 子目录配额；e.tenantScope 仅按 owner
+		// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
+		// 该租户无配额，退化为直写）。装配层注入的 ParseScope 见 Handlers.SyncQuotaScope。
+		scopeFor: e.scopeFor,
+	}
 	return remoteFS, dstFS, []func(){closeRemote}, nil
+}
+
+// pushSourceFS 返回 push 方向的**源 FS**：引擎键空间是 **user 桶相对**（`job.Src` 空 = 桶根），
+// 而 `localFS` 返回**租户根** FS ⇒ 必须叠加 `user/` 前缀（否则会把整个租户根——含 meta/ 等内部
+// 桶——当源推送；评审第 2 轮 P0 回归）。抽为单一事实源，供 push 与 runBoth 共用。
+func (e *Executor) pushSourceFS(tenantRoot, owner string) syncpkg.FS {
+	return syncpkg.NewPrefixFS(e.localFS(tenantRoot, owner), "user/")
+}
+
+// localFS 返回本地侧 FS：优先 **Root 感知**提供者（加密/封印语义正确），否则回落路径式 LocalFS。
+// 生产装配注入 TenantRootFS；测试可注入替身或留 nil（零回归）。
+func (e *Executor) localFS(localRoot, owner string) syncpkg.FS {
+	if e.TenantRootFS != nil {
+		if fs, ok := e.TenantRootFS(owner); ok && fs != nil {
+			return fs
+		}
+	}
+	return syncpkg.NewLocalFS(localRoot, e.logger())
+}
+
+// newLocalPullFS 构造 pull 方向的本地目标 FS：租户根上的「user 桶视图」× trusted.Wrap。
+//
+// 安全/完整性背景（第 5 轮对抗评审 P1）：`pkg/syncexec` 全包零 meta 引用——pull/both
+// 的本地落盘不重建也不失效 sidecar，导致（a）覆盖已上传文件后旧 sidecar 描述旧内容 →
+// `/download` 经 `meta.VerifyReadSeeker` 尺寸/分块失配 → **永久 fail-closed 不可下载**；
+// （b）新落盘文件无 sidecar → 下载**静默零校验**。
+//
+// 为何不直接在 user 根上 Wrap：`TenantRoot` 解析器返回的是 **user 桶绝对路径**，其键为
+// 裸相对路径（无功能桶段）——`meta.MetaPath` 会回落 `docs/x.meta`（用户可见目录，§8
+// 记档的无桶段兜底）。故先上移到租户根（user 桶父目录）并把键映射为 `user/<rel>`，
+// trusted.Wrap 随之把 sidecar 落到 `meta/<rel>.meta`——与本地卷上传路径
+// `filesMetaPolicy.WriteMeta` **同一布局**，下载校验侧无需任何额外接线。
+func (e *Executor) newLocalPullFS(tenantRoot string, owner string) syncpkg.FS {
+	inner := e.localFS(tenantRoot, owner)
+	// M8 修复（第 7 轮 MAJOR）：桶前缀视图改用 `syncpkg.PrefixFS`（**单一实现**：全能力
+	// 转发——WriteIfAbsent/ReserveSpace/LocalVolume/Mover/Copier/Linker/RangeReader/
+	// DirectURL/Provider/StagingQuota*，并已纳入 R21 门禁）。此前本包自建的 userBucketFS
+	// 只转发 7 个基础方法：消费方对 meta.Provider/Mover 等的断言恒 false → 静默降级。
+	return syncpkg.NewPrefixFS(trusted.Wrap(inner, trusted.Options{Logger: e.logger()}), "user/")
 }
 
 // buildJob 由任务参数构造 sync 引擎 Job。
@@ -582,7 +628,7 @@ var _ syncmgr.Executor = (*Executor)(nil)
 // runBoth 执行双向同步：push（本地→远程）+ pull（远程→本地）两次单向，合并进度/结果。
 // push 方向本地配额不预留（对齐单向 push）；pull 方向本地写侧用 quotaLocalFS 装饰（对齐单向 pull）。
 // 顺序先 push 后 pull：先把我方新增/修改推出去，再拉取对方新增/修改——两边最终一致。
-func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot string) (*syncmgr.RunResult, error) {
+func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot, tenantRoot string) (*syncmgr.RunResult, error) {
 	remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
 	if err != nil {
 		return nil, err
@@ -605,7 +651,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		VerifyAfter:    task.VerifyAfter,
 	}
 	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
-	pushErr := engine.Sync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
+	pushErr := engine.Sync(ctx, e.pushSourceFS(tenantRoot, task.Owner), remoteFS, pushJob)
 	if ctx.Err() != nil {
 		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()
 	}
@@ -624,15 +670,19 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		DeletePolicy:   syncpkg.DeletePolicy(task.DeletePolicy),
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
 	}
-	// pull 写侧配额感知（对齐单向 pull）。
-	pullJobDst := e.localWriteFS(localRoot, task.Owner)
+	// pull 写侧配额感知（对齐单向 pull）；本地目标叠 trusted.Wrap 生成/联动 sidecar。
+	pullJobDst := &quotaLocalFS{
+		inner:    e.newLocalPullFS(tenantRoot, task.Owner),
+		owner:    task.Owner,
+		scopeFor: e.scopeFor,
+	}
 	pullErr := engine.Sync(ctx, remoteFS, pullJobDst, pullJob)
 	if ctx.Err() != nil {
 		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()
 	}
 
 	// 校验核对（verify_after=true）：push 段验远程目标、pull 段验本地目标（读侧同步用源 FS）。
-	pushVerify := e.verifyAfterSync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
+	pushVerify := e.verifyAfterSync(ctx, e.pushSourceFS(tenantRoot, task.Owner), remoteFS, pushJob)
 	pullVerify := e.verifyAfterSync(ctx, remoteFS, pullJobDst.inner, pullJob)
 
 	// 合并结果：进度累计（push 的传输 + pull 的传输 + 两段删除）。

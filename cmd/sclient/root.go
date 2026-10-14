@@ -186,6 +186,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdSearch(factory, ios))
 	root.AddCommand(NewCmdStat(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdMv(factory, ios, cliState))
+	root.AddCommand(NewCmdCp(factory, ios, cliState))
 	root.AddCommand(NewCmdArchive(factory, ios))
 	root.AddCommand(NewCmdArchiveDir(factory, ios))
 	root.AddCommand(NewCmdBatch(factory, ios, cliState))
@@ -225,6 +226,7 @@ func rootPreRunE(cmd *cobra.Command, cfgProvider **sclientcfg.ViperProvider, cur
 	*cfgProvider = p
 	*currentDir = loadCurrentDir()
 	cliState.CurrentDir = *currentDir
+	cliState.CurrentVolume = loadCurrentVolume()
 
 	// context 解析注入（T3a）：--context/--env/--user flag 优先，环境变量为默认值；
 	// config.yaml 首次缺失且存在旧平铺 → 自动迁移。解析失败（无 config.yaml 且无旧

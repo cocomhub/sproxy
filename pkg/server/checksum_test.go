@@ -4,12 +4,15 @@
 package server
 
 import (
+	"bytes"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 func TestFileChecksum_FileNotFound(t *testing.T) {
@@ -80,7 +83,9 @@ func TestChecksumStore_SaveError(t *testing.T) {
 	roDir, cleanup := makeReadOnlyDir(t)
 	defer cleanup()
 
-	cs := checksum.NewChecksumStore(filepath.Join(roDir, "checksums.json"), nil)
+	// 卷句柄开在**只读目录的父目录**（OpenRoot 需要可写：它要写卷级 LAYOUT_VERSION），
+	// 台账 rel 落在只读子目录内 ⇒ 写入必然失败（保持「save 失败不得 panic」的用例意图）。
+	cs := checksum.NewChecksumStore(testRootAt(t, filepath.Dir(roDir)), filepath.Base(roDir)+"/checksums.json", nil)
 
 	// Set 应该不 panic，save() 会失败但 Set 返回前已释放锁
 	cs.Set("k1", "v1")
@@ -101,4 +106,41 @@ func verifyFileWithChecksum(filePath, expectedChecksum string) bool {
 	}
 	defer f.Close()
 	return verifyChecksum(expectedChecksum, f)
+}
+
+// TestFileChecksumRoot_EncryptedVolumePlaintext 加密卷上 FileChecksumRoot 必须算**明文**摘要
+// （raw Open 会算密文摘要——校验/冲突检测对明文内容失去意义；本修复把两侧统一为 OpenDecrypted）。
+func TestFileChecksumRoot_EncryptedVolumePlaintext(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rt, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close() })
+	if serr := rt.SetEncryption(bytes.Repeat([]byte{0x21}, 32)); serr != nil {
+		t.Fatalf("SetEncryption: %v", serr)
+	}
+	if merr := rt.MkdirAll("user", 0o755); merr != nil {
+		t.Fatalf("MkdirAll: %v", merr)
+	}
+	const rel = "user/plain.bin"
+	payload := []byte("checksum-me-plaintext")
+	w, werr := writeUserVisible(rt, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if werr != nil {
+		t.Fatalf("写: %v", werr)
+	}
+	if _, werr := w.Write(payload); werr != nil {
+		t.Fatalf("写: %v", werr)
+	}
+	_ = w.Close()
+
+	want := hex.EncodeToString(sha256sum(payload))
+	got, gerr := FileChecksumRoot(rt, rel)
+	if gerr != nil {
+		t.Fatalf("FileChecksumRoot: %v", gerr)
+	}
+	if got != want {
+		t.Fatalf("加密卷应算明文摘要: got %s want %s", got, want)
+	}
 }

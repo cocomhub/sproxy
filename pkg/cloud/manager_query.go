@@ -235,10 +235,10 @@ func (m *CloudDownloadManager) deleteTaskFiles(t *CloudTask, taskID string) {
 			}
 		}
 	}
-	// 删除持久化文件（按任务 owner 落租户 meta/cloud）
-	if persistDir := m.PersistDirFor(t.Owner); persistDir != "" {
-		persistFile := filepath.Join(persistDir, t.ID+".json")
-		if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
+	// 删除持久化文件（按任务 owner 落租户 meta/cloud；经 Root ⇒ 封印区间同样被拒）
+	if root := m.cloudStateRootFor(t.Owner); root != nil {
+		persistRel := cloudStateRel + "/" + t.ID + ".json"
+		if err := root.Remove(persistRel); err != nil && !os.IsNotExist(err) {
 			m.logger.Warn("failed to remove persist file", "task_id", taskID, "error", err)
 		}
 	}

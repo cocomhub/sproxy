@@ -170,9 +170,9 @@ func (ix *searchIndex) invalidate(owner string) {
 			_ = ix.persist.delete(owner)
 			return
 		}
-		p := indexSnapshotPath(tnt, owner)
-		if p != "" {
-			_ = os.Remove(p)
+		// 快照删除同经 Root（封印路径恒拒；删除不关心加密态——Remove 原样删字节）。
+		if rt := tnt.Root(); rt != nil {
+			_ = rt.Remove(indexSnapshotRel(owner))
 		}
 	}
 }

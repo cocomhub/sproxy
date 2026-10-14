@@ -8,6 +8,7 @@ package server
 // 分 A（解密转发）/ B（302 直链）/ C（私密转发）三态。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/clustercred"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -127,12 +129,17 @@ func newExternalTestEnv(t *testing.T, v volume.Volume, fs *extFS) *Handlers {
 		checksumStores: make(map[string]*checksum.ChecksumStore)}
 }
 
-// TestResolveExternalDownload_BState302：明文外部卷 direct_link:true → 302 直链。
-func TestResolveExternalDownload_BState302(t *testing.T) {
+// TestResolveExternalDownload_BState302RequiresSkipVerify：明文外部卷 direct_link:true
+// **且显式关闭服务端校验**（skip_verify=true，即可观测地放弃完整性承诺）→ 302 直链。
+// 变异：把 externalStateFor 的服务端校验门去掉 → 下面的 Suppressed 用例红。
+func TestResolveExternalDownload_BState302RequiresSkipVerify(t *testing.T) {
 	t.Parallel()
 	v := volume.Volume{Name: "baidu", Type: "baidupcs", DirectLink: true}
 	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://d.pcs.baidu.com/f.bin?sign=x"}
 	h := newExternalTestEnv(t, v, fs)
+	cfg := h.cfgPtr.Load()
+	cfg.TrustedVolume.SkipVerify = true // 显式放弃服务端校验 → 直链可用
+	h.cfgPtr.Store(cfg)
 
 	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
 	if dp == nil {
@@ -143,6 +150,31 @@ func TestResolveExternalDownload_BState302(t *testing.T) {
 	}
 	if dp.source == nil {
 		t.Fatal("B 态应同时携带 source（Stat 回元信息）")
+	}
+}
+
+// TestResolveExternalDownload_DirectLinkSuppressedWhenVerifyOn 回归（C4，P0）：服务端
+// 完整性校验开启（默认）时，direct_link:true 的卷**必须强制服务端转发**（A 态）——
+// 否则 302 让客户端直接从后端取字节、绕过逐分块校验，「同一卷 A 态有校验 / B 态无校验」
+// 自相矛盾。变异：去掉 externalStateFor 的 `!h.verifySkipped()` 门 → 返回 302 → 红。
+func TestResolveExternalDownload_DirectLinkSuppressedWhenVerifyOn(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "baidu", Type: "baidupcs", DirectLink: true}
+	fs := &extFS{files: map[string]string{"alice/user/f.bin": "hello"}, dlink: "https://d.pcs.baidu.com/f.bin?sign=x"}
+	h := newExternalTestEnv(t, v, fs)
+	cfg := h.cfgPtr.Load()
+	cfg.TrustedVolume.SkipVerify = false // 校验开启（默认）
+	h.cfgPtr.Store(cfg)
+
+	dp := h.resolveExternalDownload(httptest.NewRequest(http.MethodGet, "/download", nil), "alice", "user/f.bin", "f.bin", "")
+	if dp == nil {
+		t.Fatal("外部卷命中应返回 downloadPath")
+	}
+	if dp.redirectURL != "" {
+		t.Fatalf("校验开启时不得下发 302 直链（绕过校验）, got %q", dp.redirectURL)
+	}
+	if dp.source == nil {
+		t.Fatal("强制 A 态应携带服务端转发 source")
 	}
 }
 
@@ -358,3 +390,81 @@ func TestResolveExternalDownload_OwnerIsolation(t *testing.T) {
 		t.Fatal("alice 读自己文件应命中（alice/user/f.bin）")
 	}
 }
+
+// TestExternalDownloadSource_VerifyMeta 信任保证演进：外部卷下载源（A 态服务端转发）
+// 在装配层注入 FileMeta 读取器时，Open 返回**逐分块校验流**——底层内容被篡改（meta
+// 未变）→ 读流报错 fail-closed（不发损坏内容给客户端）；meta 缺失 → 直通零回归。
+func TestExternalDownloadSource_VerifyMeta(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("external-verify-"), 100)
+	tampered := append([]byte(nil), content...)
+	tampered[10] ^= 0xFF
+	// metaProviderFS 同时实现 sync.FS + meta.Provider（FileMeta 由内容实算）。
+	pfs := &metaProviderExtFS{inner: &extFS{files: map[string]string{"alice/user/f.bin": string(content)}}}
+	calc, _ := meta.NewCalculator(int64(len(content)), 1024)
+	_, _ = calc.ReadFrom(bytes.NewReader(content))
+	pfs.fm = calc.Finish()
+
+	// 装配注入 FileMeta 读取器（模拟 newExternalSource 的 fileMetaReaderFor）。
+	src := newExternalSource(pfs, "alice/user/f.bin", &syncpkg.Entry{Size: int64(len(content)), MTime: 0}, false)
+	if src.fileMeta == nil {
+		t.Fatal("meta.Provider fsys 应注入 FileMeta 读取器")
+	}
+
+	// 正常内容：校验通过（读尽不报错）。
+	rc, oerr := src.Open(context.Background())
+	if oerr != nil {
+		t.Fatalf("Open: %v", oerr)
+	}
+	if _, rerr := io.ReadAll(rc); rerr != nil {
+		t.Fatalf("正常内容校验应通过: %v", rerr)
+	}
+	_ = rc.Close()
+
+	// 篡改底层内容（meta 未变）：读流报错 fail-closed。
+	pfs.inner.files["alice/user/f.bin"] = string(tampered)
+	rc2, oerr2 := src.Open(context.Background())
+	if oerr2 != nil {
+		t.Fatalf("Open(篡改): %v", oerr2)
+	}
+	if _, rerr2 := io.ReadAll(rc2); rerr2 == nil {
+		t.Fatal("篡改内容应 fail-closed 报错（不发损坏内容）")
+	}
+	_ = rc2.Close()
+}
+
+// metaProviderExtFS 是 sync.FS + meta.Provider 的测试实现（外部卷可信源）。
+type metaProviderExtFS struct {
+	inner *extFS
+	fm    *meta.FileMeta
+}
+
+func (m *metaProviderExtFS) FileMeta(_ context.Context, rel string) (*meta.FileMeta, error) {
+	return m.fm, nil
+}
+func (m *metaProviderExtFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return m.inner.ListDir(ctx, p)
+}
+func (m *metaProviderExtFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return m.inner.Stat(ctx, p)
+}
+func (m *metaProviderExtFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return m.inner.OpenRead(ctx, p)
+}
+func (m *metaProviderExtFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	return m.inner.WriteFile(ctx, p, r, sz, mt)
+}
+func (m *metaProviderExtFS) Rename(ctx context.Context, f, t string) error {
+	return m.inner.Rename(ctx, f, t)
+}
+func (m *metaProviderExtFS) Delete(ctx context.Context, p string) error {
+	return m.inner.Delete(ctx, p)
+}
+func (m *metaProviderExtFS) MakeDir(ctx context.Context, p string) error {
+	return m.inner.MakeDir(ctx, p)
+}
+func (m *metaProviderExtFS) OpenRangeRead(ctx context.Context, p string, offset, size int64) (io.ReadCloser, error) {
+	return m.inner.OpenRangeRead(ctx, p, offset, size)
+}
+
+var _ meta.Provider = (*metaProviderExtFS)(nil)

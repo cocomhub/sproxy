@@ -470,6 +470,8 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	}
 	done := func(success bool, oldSize int64) { fin(success, oldSize) }
 
+	// 流式整文件 SHA-256（M5 修复：Result.Meta 已移除——可信卷 meta 由写路径
+	// 装饰器/本地卷到达即建自算，下载器无需额外双哈希；此处保持原 sha256 计算）。
 	h := sha256.New()
 	tee := io.TeeReader(resp.Body, h)
 
@@ -627,7 +629,6 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	done := func(success bool, oldSize int64) { fin(success, oldSize) }
 
 	tee := io.TeeReader(resp.Body, h)
-
 	// 追加写入带进度回调；中断可重试，写失败不可重试
 	downloaded, loopErr := copyBodyWithProgress(tee, sink, pw.onProgress, pw.existingSize, totalSize, done, "write to partial file: %w")
 	if loopErr != nil {

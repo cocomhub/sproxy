@@ -6,6 +6,7 @@ package integrity_test
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -172,5 +173,78 @@ func TestRecomputeGCIDAll_TailBlock(t *testing.T) {
 	want := gcidCompute(data, block)
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("尾块文件应命中（got=%v want=%s）——整除限制会跳过尾块导致权威复算失效", got, want)
+	}
+}
+
+// TestVerifyGCID 验证通用 GCID 校验入口（全候选比对命中/未命中/无权威）。
+func TestVerifyGCID(t *testing.T) {
+	t.Parallel()
+	payload := bytes.Repeat([]byte("gcid-verify-"), 30000) // 大小保证 256KB 整除
+	if len(payload)%262144 != 0 {
+		// 调整到整除 256KB
+		payload = bytes.Repeat([]byte("gcid-verify-"), 262144/12)
+	}
+	path := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := integrity.ComputeGCID(payload, 262144)
+	// 命中
+	ok, err := integrity.VerifyGCID(path, integrity.GCIDCandidates, target)
+	if err != nil || !ok {
+		t.Fatalf("VerifyGCID hit: ok=%v err=%v", ok, err)
+	}
+	// 未命中
+	ok, err = integrity.VerifyGCID(path, integrity.GCIDCandidates, "0000000000000000000000000000000000000000")
+	if err != nil || ok {
+		t.Fatalf("VerifyGCID miss: ok=%v err=%v", ok, err)
+	}
+	// 无权威 hash → false 无 err
+	ok, err = integrity.VerifyGCID(path, integrity.GCIDCandidates, "")
+	if err != nil || ok {
+		t.Fatalf("VerifyGCID empty: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestGCIDOrdered_SizeGuided 验证大小引导候选 + 大→小计算 + 命中轮次统计。
+// 构造 300MB 文件（256M~1G 区间推荐 512K/1M），用 1M 分块 GCID 命中 → 应第 2 轮命中。
+func TestGCIDOrdered_SizeGuided(t *testing.T) {
+	t.Parallel()
+	// 300MB 文件（256M~1G 区间）
+	size := int64(300 << 20)
+	payload := make([]byte, size)
+	// 用 1MiB 分块算 GCID 作为"官方 hash"（推荐候选 512K/1M 里 1M 是第二候选）
+	block := int64(1 << 20)
+	h := sha1.New()
+	inner := sha1.New()
+	for off := int64(0); off < size; off += block {
+		end := min(off+block, size)
+		inner.Reset()
+		inner.Write(payload[off:end])
+		h.Write(inner.Sum(nil))
+	}
+	target := hex.EncodeToString(h.Sum(nil))
+	path := filepath.Join(t.TempDir(), "big.bin")
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stats := &integrity.GCIDVerifyStats{}
+	hitRound, hitBlock, hitGCID, err := integrity.RecomputeGCIDOrdered(path, target, stats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 用户规则：推荐候选从大到小 → 推荐 [512K, 1M] 降序 [1M, 512K]，1M 首轮命中。
+	if hitRound != 1 || hitBlock != block {
+		t.Fatalf("hitRound=%d hitBlock=%d, want 1/%d（推荐 1M 首轮命中）", hitRound, hitBlock, block)
+	}
+	if hitGCID != target {
+		t.Fatalf("hitGCID mismatch")
+	}
+	if stats.HitByRound[1].Load() != 1 || stats.HitByRound[2].Load() != 0 {
+		t.Fatalf("stats: round1=%d round2=%d, want round1=1 round2=0", stats.HitByRound[1].Load(), stats.HitByRound[2].Load())
+	}
+	// 首轮命中：无不一致详情
+	if stats.MismatchFirst.Load() != 0 {
+		t.Fatalf("mismatch_first=%d, want 0（首轮命中无不一致）", stats.MismatchFirst.Load())
 	}
 }

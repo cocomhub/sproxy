@@ -13,6 +13,7 @@ package server
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +23,12 @@ import (
 )
 
 // listTrashHandler 列出回收站条目。
+// trashEntry 是回收站列表条目（TrashRel 含分层路径、Name 解码原 rel）。
+type trashEntry struct {
+	TrashRel string `json:"trash_rel"`
+	Name     string `json:"name"`
+}
+
 func (h *Handlers) listTrashHandler(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFromRequest(r)
 	tnt := h.tenantFor(owner)
@@ -35,27 +42,48 @@ func (h *Handlers) listTrashHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]any{"entries": []string{}}, http.StatusOK)
 		return
 	}
-	entries, err := os.ReadDir(trashAbs)
-	if err != nil {
-		sendJSONResponse(w, map[string]any{"entries": []string{}}, http.StatusOK)
-		return
-	}
-	type trashEntry struct {
-		TrashRel string `json:"trash_rel"`
-		Name     string `json:"name"`
-	}
 	var out []trashEntry
-	for _, e := range entries {
-		name := e.Name()
-		if idx := strings.Index(name, files.TrashDeletedSuffix()); idx >= 0 {
-			out = append(out, trashEntry{
-				TrashRel: "trash/" + name,
-				Name:     strings.ReplaceAll(name[:idx], "_", "/"),
-			})
-		}
-	}
+	// C-MAJOR-2（用户裁定）：trash 条目为**目录镜像 + 文件名编码**（trash/user/<目录>/
+	// <文件名>.__deleted__，目录段保留原文、文件名 base64）——递归遍历收集文件条目
+	// （跳过 meta sidecar 条目；目录不列）。
+	_ = filepath.WalkDir(trashAbs, h.listTrashWalk(trashAbs, &out))
 	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{"entries": out})
+}
+
+// listTrashWalk 是 listTrashHandler 的 WalkDir 回调（S107 拆分降 gocognit）：收集
+// 主文件条目（跳过 meta sidecar 与目录），TrashRel 含分层路径、Name 解码原 rel。
+func (h *Handlers) listTrashWalk(trashAbs string, out *[]trashEntry) fs.WalkDirFunc {
+	return func(absPath string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(trashAbs, absPath)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		idx := strings.Index(rel, files.TrashDeletedSuffix())
+		if idx < 0 {
+			return nil
+		}
+		// 跳过 meta sidecar 条目（软删随迁的服务端内部文件；trashMetaMarker
+		// 在删除标记前命中 → 不含主文件条目——主文件条目名无 .meta 段）。
+		if strings.Contains(rel[:idx], files.TrashMetaMarker()) {
+			return nil
+		}
+		*out = append(*out, trashEntry{
+			TrashRel: "trash/" + rel,
+			Name:     files.UnflattenTrashRel(rel[:idx]),
+		})
+		return nil
+	}
 }
 
 // restoreTrashHandler 恢复回收站条目。

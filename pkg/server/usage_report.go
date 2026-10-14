@@ -185,32 +185,25 @@ func renderUsageCSV(reports []usageSummary) string {
 	return b.String()
 }
 
-// usagePersistDir 返回计量落盘目录（<默认卷根>/meta/usage；Root.Abs 只推导不创建，
-// usageStore 懒建时 MkdirAll）。
-func (h *Handlers) usagePersistDir() string {
-	if h.globalRoot == nil {
-		return ""
-	}
-	if abs, ok := h.globalRoot.Abs("meta/usage"); ok {
-		return abs
-	}
-	return ""
-}
+// usageRel 是计量台账在**默认卷**内的相对目录（<默认卷根>/meta/usage）。
+// 台账本身经默认卷句柄读写（卷决定是否加密 + 封印判定），此常量仅表达布局。
+const usageRel = "meta/usage"
 
 // setupUsageReport 装配计量报告（RegisterRoutes 调用）：
 //   - usage.enabled=false（缺省）→ 不装配（usageStore 保持 nil，端点 400 零回归）；
-//   - 启用 → 懒建 usageStore（persistDir = <默认卷根>/meta/usage，载入历史）、
+//   - 启用 → 懒建 usageStore（默认卷句柄 + usageRel 相对目录，载入历史）、
 //     Metrics.usageRecorder 转发、scheduler 周期 Flush（interval>0）；
 //   - 落盘失败仅记 Warn（内存仍可读，降级为不持久）。
 func (h *Handlers) setupUsageReport(cfg *Config, log *slog.Logger) {
 	if !cfg.Usage.Enabled {
 		return
 	}
-	persistDir := h.usagePersistDir()
-	if persistDir == "" {
-		log.Warn("计量报告启用但无法解析落盘目录（默认卷根不可用），降级为纯内存", "usage_persist_dir", persistDir)
+	if h.globalRoot == nil {
+		log.Warn("计量报告启用但默认卷根不可用，降级为纯内存", "usage_rel", usageRel)
 	}
-	store := newUsageStore(persistDir, log.With("component", "usage"))
+	// 台账经**默认卷句柄**落盘：卷自己决定是否加密（使用方不理解是否加密卷），
+	// 并天然继承封印判定。
+	store := newUsageStore(h.globalRoot, usageRel, log.With("component", "usage"))
 	h.usageStore = store
 	if h.metrics != nil {
 		h.metrics.SetUsageRecorder(func(owner, kind string, n int64) {

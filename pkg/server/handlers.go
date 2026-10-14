@@ -37,6 +37,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -45,10 +46,15 @@ import (
 
 // Handlers 持有所有 HTTP handler 的依赖。
 type Handlers struct {
-	cfgPtr        *atomic.Pointer[Config]
-	version       string
-	buildAt       string
-	tunnelHandler http.Handler
+	cfgPtr *atomic.Pointer[Config]
+	// skipFileMetaAssembly 是测试隔离开关（AGENTS.md 7b：测试注入走结构体内部私有
+	// 变量）：存量语义测试用 newAssemblyTestHandlers 置 true 跳过 filesMetaPolicy 装配
+	// （meta 不生成，配额/统计/账本断言不被 sidecar 字节干扰）。生产恒 false——
+	// meta 恒生成（用户裁定：只关校验不关 meta）。
+	skipFileMetaAssembly bool
+	version              string
+	buildAt              string
+	tunnelHandler        http.Handler
 	// removeMovedSource 是 move 删源实现（nil = 默认 storage.Root.Remove）。**测试注入
 	// opt（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam）**：RegisterRoutes
 	// 构造时经 opts.RemoveMovedSource 注入实例字段，运行期不可变（无包级 seam 并发替换）。
@@ -127,8 +133,14 @@ type Handlers struct {
 	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
 	storageMgr     *capacity.StorageManager
-	uploadingFiles sync.Map      // map[string]string — filename → uploadID，追踪正在上传的文件名
-	uploadingStop  chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出（兼容旧装配路径）
+	uploadingFiles sync.Map // map[string]string — filename → uploadID，追踪正在上传的文件名
+	// uploadingLockAt 记录**文件级锁标记**的获取时间（key 与 uploadingFiles 同键空间）。
+	// 用于 TTL 回收：持锁者异常退出（panic 逃出 defer / 无超时的远端写永久阻塞）时锁条目
+	// 永不被释放 ⇒ 该 rel 后续所有写请求持续 409 至重启（评审 P2）。仅锁标记写入本表；
+	// 分块会话条目（value=upload_id）不写（它们由 session 存在性判定过期）。
+	uploadingLockAt  sync.Map      // map[string]time.Time
+	directLinkWarned sync.Map      // map[string]struct{} — 已告警「direct_link 被完整性承诺抑制」的卷名
+	uploadingStop    chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出（兼容旧装配路径）
 	// scheduler 是统一任务调度器（roadmap 11.10-H2）：uploading 清理 / version-gc /
 	// trash-gc / share-cleanup 四个周期任务统一注册（RegisterRoutes 装配；
 	// nil = 未装配的旧构造路径，Close 跳过）。
@@ -188,6 +200,19 @@ type Handlers struct {
 	dedupStores    map[string]*files.DedupStore       // 按 owner 缓存 per-tenant 去重台账（懒创建）
 	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
 	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
+	// stagingScopes 按 owner 缓存**独立 staging 配额 Scope**（用户裁定 2026-10-10：
+	// 本地暂存独立记账，不与网盘 owner_quotas 混用——外部卷 WriteFile 先预留本地字节）。
+	// 上限 = trusted_volume.staging_quota_bytes；0 = 不限制但记账。tenantMu 保护。
+	stagingScopes map[string]*quota.Scope
+	// stagingPool 是 staging 的**独立根池**（M5，第 7 轮 MAJOR）：不挂 globalPool 之下，
+	// 只受 trusted_volume.staging_quota_bytes 约束（0 = 该维度不限）——否则慢速外部卷上传
+	// 长期占暂存会沿父链抬高 max_storage_bytes 的全局 usage，误拒无关 owner 的正常写。
+	stagingPool *quota.Pool
+	// stagingTrackers 按 owner 缓存 staging 等待队列（quota.StagingTracker，含 sync.Cond）。
+	// **必须复用同一实例**：每请求新建 tracker 会产生各自独立的 cond，其它请求的
+	// ReleaseUsage 广播无法唤醒等待者（只能干等满 deadline，甚至误报「空间不足」；
+	// P2 对抗评审）。tenantMu 保护。
+	stagingTrackers map[string]*quota.StagingTracker
 	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
 	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
 	archiveUsage map[string]map[string]int64
@@ -278,6 +303,7 @@ type Handlers struct {
 	// 路径（RegisterRoutes 正式装配、测试手工构造），懒装配让两条路径都无需改动。
 	filesSvc     *files.Service
 	filesOnce    sync.Once
+	filesMu      sync.Mutex
 	eventsBus    *EventBus
 	eventBusOnce sync.Once
 
@@ -409,7 +435,30 @@ func (h *Handlers) LocalHandler() http.Handler {
 //   - 其余能力都是接口方法：每次调用读 h 的实时字段/懒建缓存（如 cfgPtr.Load()、
 //     volSet、quotaScopeFor），故配置与缓存的变化对领域包可见；
 //   - 计量条件注入：h.metrics 为 nil 时不加 WithMetrics（避免 typed-nil 接口）。
+//
+// fileServiceIfReady 返回已装配的 fileService（懒建**已触发**时才可用；测试直构造 h 未装配
+// tenants 时返回 nil——调用方回落内部实现，不 panic）。用 filesOnce 的原子 done 标志避免
+// 读 h.filesSvc 与 fileService 懒建写之间的 race。
+func (h *Handlers) fileServiceIfReady() *files.Service {
+	h.filesMu.Lock()
+	defer h.filesMu.Unlock()
+	if h.filesSvc != nil {
+		return h.filesSvc
+	}
+	if h.tenants == nil {
+		return nil
+	}
+	return h.fileServiceLocked()
+}
+
 func (h *Handlers) fileService() *files.Service {
+	h.filesMu.Lock()
+	defer h.filesMu.Unlock()
+	return h.fileServiceLocked()
+}
+
+// fileServiceLocked 调用方持 h.filesMu；懒装配（filesOnce 幂等）。
+func (h *Handlers) fileServiceLocked() *files.Service {
 	h.filesOnce.Do(func() {
 		rt := filesRuntime{h: h}
 		opts := []files.Option{
@@ -420,6 +469,8 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithChecksumLedger(rt),
 			files.WithDownloadPaths(rt),
 			files.WithFileLocks(rt),
+			// F1：外部卷对象的硬删接缝（外部卷无 *storage.Root，其对象此前无用户可见删除入口）。
+			files.WithExternalOps(externalVolumeOps{h: h}),
 			files.WithChunkedUploads(rt),
 			files.WithVersioning(rt),
 			files.WithDedup(rt),
@@ -428,6 +479,13 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithOccupiedWriteGuard(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 			files.WithBandwidthLimiter(rt),
+		}
+		// meta 恒生成（用户裁定：只关校验不关 meta）——fileMetaPolicy 恒装配。
+		// skipFileMetaAssembly 是测试隔离开关（AGENTS.md 7b：测试注入走结构体内部私有
+		// 变量；存量语义测试用 newAssemblyTestHandlers 置 true 跳过 meta 装配，避免
+		// 配额/统计/账本断言被 sidecar 字节干扰；生产恒 false 装配 meta 策略）。
+		if !h.skipFileMetaAssembly {
+			opts = append(opts, files.WithFileMeta(filesMetaPolicy{h: h}))
 		}
 		if h.metrics != nil {
 			opts = append(opts, files.WithMetrics(h.metrics))
@@ -444,7 +502,7 @@ func (h *Handlers) fileService() *files.Service {
 	return h.filesSvc
 }
 
-// anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
+// filesMu 保护 filesSvc 懒装配（fileService 写 vs fileServiceIfReady 读）。
 // 单源在 pkg/storage：租户名是存储布局契约（<root>/<owner>/…），各包必须同值。
 const anonymousOwner = storage.AnonymousOwner
 
@@ -488,6 +546,10 @@ func (h *Handlers) listTenantIDs() []string {
 // checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
 // storePath = <tenant meta>/checksums.json；获取不到租户（非法 owner / 根不可用）返回 nil。
 // P5 后不再有全局 checksum store——所有读写侧均经本方法取 per-tenant 实例。
+// checksumRel 是校验和台账在**租户卷内**的相对路径（<租户根>/meta/checksums.json）。
+// 台账经租户**卷句柄**读写：卷自己决定是否加密（使用方不理解加密态），并天然继承封印判定。
+const checksumRel = "meta/checksums.json"
+
 // stateStore 非 nil（集群模式装配）时返回 StateStore 适配器（读旧 meta 回退 + 首写迁
 // StateStore 新路径，双读单写零回归，见 state_ledger.go）。
 func (h *Handlers) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
@@ -497,20 +559,20 @@ func (h *Handlers) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	if tnt == nil {
 		return nil
 	}
-	metaAbs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
+	root := tnt.Root()
+	if root == nil {
+		h.logger.Warn("租户卷句柄不可用", "owner", owner)
 		return nil
 	}
 	if h.stateStore != nil {
-		return checksum.NewStateBackedChecksumStore(h.stateStore, "checksum/"+owner+"/all", filepath.Join(metaAbs, "checksums.json"), h.logger)
+		return checksum.NewStateBackedChecksumStore(h.stateStore, "checksum/"+owner+"/all", root, checksumRel, h.logger)
 	}
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
 	if cs, ok := h.checksumStores[owner]; ok {
 		return cs
 	}
-	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), h.logger)
+	cs := checksum.NewChecksumStore(root, checksumRel, h.logger)
 	h.checksumStores[owner] = cs
 	return cs
 }
@@ -766,6 +828,76 @@ func (h *Handlers) quotaScopeFor(owner, rel string) *quota.Scope {
 		return rootSc // 功能桶根内的文件（user/a.txt）
 	}
 	return rootSc.Resolve(segs[1:])
+}
+
+// stagingQuotaScope 返回 owner 的**独立 staging 配额 Scope**（用户裁定 2026-10-10）：
+// 本地上传暂存**独立记账**（不与网盘 owner_quotas 混用）——外部卷 WriteFile 先预留本地
+// 字节、写后释放，防本地磁盘被 staging 占满。上限 = trusted_volume.staging_quota_bytes
+// （0/缺省 = 不限制但记账，预留/释放对称不误伤）。
+//
+// **M5 修复（2026-10-11，第 7 轮对抗评审）**：本 Scope 现挂**独立根池** `h.stagingPool`
+// （容量 = `staging_quota_bytes`），不再挂 `globalPool` 之下。原因：挂父链会让慢速外部卷
+// 上传（长期占本地暂存）抬高 `max_storage_bytes` 的全局 usage，从而**误拒无关 owner 的
+// 正常写**（跨租户干扰）；「staging 占物理盘」的保护改由运维显式配置 `staging_quota_bytes`
+// 承担（建议按本地盘余量设置）。globalPool 未装配时仍返回 nil（无配额能力零回归）。
+// 懒建缓存（tenantMu 保护），装配期硬配置不重建。
+func (h *Handlers) stagingQuotaScope(owner string) *quota.Scope {
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.globalPool == nil {
+		return nil
+	}
+	if h.stagingScopes == nil {
+		h.stagingScopes = make(map[string]*quota.Scope)
+	}
+	if sc, ok := h.stagingScopes[owner]; ok {
+		return sc
+	}
+	if h.stagingPool == nil {
+		// 独立根池：容量 = staging_quota_bytes（0 = 不设上限，仅记账；根池无父链，
+		// 不牵连 max_storage_bytes 的全局账本——M5 修复）。
+		var poolMax int64
+		if cfg := h.cfgPtr.Load(); cfg != nil {
+			poolMax = int64(cfg.TrustedVolume.StagingQuotaBytes)
+		}
+		h.stagingPool = quota.NewPool(poolMax)
+	}
+	var limit int64
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		limit = int64(cfg.TrustedVolume.StagingQuotaBytes)
+	}
+	sc := h.stagingPool.Scope("/staging/"+owner, limit)
+	h.stagingScopes[owner] = sc
+	return sc
+}
+
+// stagingQuotaTrackerFor 返回 owner 的 staging 配额钩子（独立 Scope 适配——
+// ReserveUsage = TryReserve + Commit；不足排队等待（quota.StagingTracker：sync.Cond +
+// ctx/超时）；ReleaseUsage = ReleaseUsage + 广播。无 globalPool → nil（零回归）。
+// StagingQuotaTrackerFor 导出版（供装配层把同一 per-owner staging tracker 注入
+// 非 HTTP 写入口，如 baidupcs sync push——P1：此前误用 owner user 桶 Scope）。
+func (h *Handlers) StagingQuotaTrackerFor(owner string) syncpkg.StagingQuotaTracker {
+	return h.stagingQuotaTrackerFor(owner)
+}
+
+func (h *Handlers) stagingQuotaTrackerFor(owner string) syncpkg.StagingQuotaTracker {
+	sc := h.stagingQuotaScope(owner)
+	if sc == nil {
+		return nil
+	}
+	// 按 owner 复用同一 tracker（含 cond）——跨请求 ReleaseUsage 广播才能唤醒等待者。
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.stagingTrackers == nil {
+		h.stagingTrackers = make(map[string]*quota.StagingTracker)
+	}
+	if t, ok := h.stagingTrackers[owner]; ok {
+		return t
+	}
+	t := quota.NewStagingTracker(sc)
+	h.stagingTrackers[owner] = t
+	return t
 }
 
 // bwBucketFor 返回 owner 的带宽令牌桶（懒建缓存；限速关闭/无速率时 nil = 不限速）。

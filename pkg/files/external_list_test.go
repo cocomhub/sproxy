@@ -37,7 +37,7 @@ func (a dirsExternalSet) ExternalVolume(name string) ExternalVolume {
 
 // enableExternalVolume 在卷集上挂载一个外部卷（卷描述 + 目录浏览能力 fake），重建
 // Service。需要先启用至少一个本地默认卷（供 owner 租户解析与本地路径兼容）。外部卷
-// 不建 storage.Root（无 *storage.Tenant，路由经 ExternalVolumeSource 直连 ListDir）。
+// 不建 storage.Root（无 *storage.Tenant，路由经 ExternalVolumeOps 接缝直连 ListDir）。
 func (e *dirsEnv) enableExternalVolume(t *testing.T, extVol volume.Volume, ext ExternalVolume) {
 	t.Helper()
 	if e.volSet == nil {
@@ -48,8 +48,53 @@ func (e *dirsEnv) enableExternalVolume(t *testing.T, extVol volume.Volume, ext E
 	}
 	e.externalVols[extVol.Name] = ext
 	e.volSet = registry.NewSet(append(e.volSet.All(), extVol), e.volRoots, nil, e.pools, e.volSet.Default().Name)
+	if fe, ok := ext.(*fakeExternalVolume); ok {
+		e.externalOps = &fakeExternalVolumeOps{ext: fe}
+	}
 	e.rebuild()
 }
+
+// fakeExternalVolumeOps 是 ExternalVolumeOps 的测试 fake：ExternalList 委托
+// fakeExternalVolume.ListDir（subdir 为用户可见相对路径，直传），其余方法 no-op 未命中
+// （列表透传语义只经 ExternalList）。装配层 owner 限定由 pkg/server 侧覆盖。
+type fakeExternalVolumeOps struct {
+	ext *fakeExternalVolume
+}
+
+func (o *fakeExternalVolumeOps) ExternalList(ctx context.Context, _, volName, subdir string) ([]FileInfo, bool, error) {
+	entries, err := o.ext.ListDir(ctx, subdir)
+	if err != nil {
+		return nil, true, err
+	}
+	out := make([]FileInfo, 0, len(entries))
+	for _, e := range entries {
+		// 与装配层 externalVolumeOps.ExternalList 同构：填卷名（卷徽标用）；
+		// 展示分类（VolumeCategory）由领域层 listExternalVolume 按卷类型补。
+		out = append(out, FileInfo{Name: e.Name, IsDir: e.IsDir, Size: e.Size, Volume: volName})
+	}
+	return out, true, nil
+}
+
+func (o *fakeExternalVolumeOps) ExternalDelete(context.Context, string, string, string, string) (bool, error) {
+	return false, nil
+}
+func (o *fakeExternalVolumeOps) ExternalStat(context.Context, string, string, string) (int64, string, error) {
+	return -1, "", nil
+}
+func (o *fakeExternalVolumeOps) ExternalCopy(context.Context, string, string, string, string, string, string, bool) (ExternalCopyResult, error) {
+	return ExternalCopyResult{}, nil
+}
+func (o *fakeExternalVolumeOps) ExternalMkdir(context.Context, string, string, string) (bool, error) {
+	return false, nil
+}
+func (o *fakeExternalVolumeOps) ExternalRemoveDir(context.Context, string, string, string, bool) (bool, error) {
+	return false, nil
+}
+func (o *fakeExternalVolumeOps) ExternalRename(context.Context, string, string, string, string, string) (bool, error) {
+	return false, nil
+}
+
+var _ ExternalVolumeOps = (*fakeExternalVolumeOps)(nil)
 
 // fakeExternalVolume 是 ExternalVolume 的测试 fake：固定返回条目，记录 ListDir 收到的
 // rel（断言 owner 限定），listErr 非 nil 时模拟后端失败。
@@ -133,9 +178,10 @@ func TestList_ExternalVolume_PlainMeta(t *testing.T) {
 	if !found {
 		t.Fatalf("响应缺 movie.mp4; files=%+v", resp.Files)
 	}
-	// ListDir 收到 owner 限定的键空间（共享卷带 owner 前缀）。
-	if got, _ := fake.gotRel.Load().(string); got != "ownerA/user" {
-		t.Fatalf("ListDir rel = %q, 期望 ownerA/user（owner 限定）", got)
+	// ListDir 收到 subdir（用户可见相对路径，'' = 卷根）——owner 限定键空间由装配层
+	// （pkg/server externalVolumeOps）经 ResolveUserLocation 计算。
+	if got, _ := fake.gotRel.Load().(string); got != "" {
+		t.Fatalf("ListDir subdir = %q, 期望 ''（卷根，接缝直传）", got)
 	}
 }
 

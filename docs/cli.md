@@ -94,6 +94,61 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`upgrade`](#upgrade) | 自更新（GitHub Releases 校验 + 原子替换） |
 | [`version`](#version) | 打印版本信息 |
 
+## 卷感知工作目录（`cd <卷名>:/<目录>`）
+
+工作目录**含所在卷**：`cd` 支持卷 URI，其后所有相对路径操作默认只作用于**当前工作目录所在卷**
+（用户口径 2026-10-13）。
+
+```bash
+sclient cd vault:/docs      # 切到加密卷 vault 的 /docs（工作目录 = vault:/docs）
+sclient pwd                 # 打印 vault:/docs
+sclient list                # 列 vault:/docs（不必再写 --volume / URI）
+sclient upload ./a.bin      # 目标卷 = vault，路径 = docs/a.bin
+sclient cd /                # 前导 `/` = **本地卷**根（回到默认卷）
+sclient cd other:/x         # 切到另一卷 other 的 /x
+```
+
+规则：
+
+- `<卷名>:/<路径>` = 该卷根起算的**绝对路径**（不受当前工作目录影响）；`<卷名>:` / `<卷名>:/` = 卷根。
+- 前导 `/` 开头的路径 = **本地卷**（默认卷）根起算，并**离开**当前卷。
+- 相对路径沿用当前工作目录（含所在卷）。
+- 优先级：位置参数卷 URI > `--volume` > **工作目录所在卷** > 配置/auto（冲突时报错，不静默取其一）。
+- 其它命令可用卷 URI 一次性寻址（不改工作目录）：`list vault:/`、`meta vault:/a.txt`、
+  `download vault:/a.txt`、`mv vault:/a vault:/b`、`delete vault:/a`。
+
+### 跨卷操作（URI + `--to-volume`）
+
+```bash
+sclient mv vault:/a.txt a.txt --to-volume other      # 跨卷移动（源卷由 URI/工作目录给出）
+sclient cp main:/a.txt vault:/a.txt                   # 跨卷复制（两端 URI）
+sclient volume move a.txt --from-volume vault --to-volume other   # 旧式跨卷移动（`volume` 子命令）
+```
+
+**外部/加密卷已覆盖（2026-10-13）**：任一端为外部/加密卷（secretdata 等）均可工作——复制段经
+**统一写内核**（配额双账本 / sidecar / 封印与 `cp`/上传同口径），移动 = 复制成功**之后**删源
+（外部卷经接缝硬删、本地卷走既有 `delete` 路径）。移动**非原子**：删源失败会返回错误并说明
+「已复制到目标，源删除失败」，此时目标已写入、源仍在（重试或手工清理）。同一文件名（同 rel）在
+**其它**卷已存在 → 409（AD-4 防跨卷双份；移动**豁免源卷**本身——它就是被搬走的那份）。
+
+### cp（复制，源保留）
+
+```bash
+sclient cp a.txt b.txt                  # 同卷复制（默认与源同卷）
+sclient cp a.txt b.txt --to-volume disk2  # 目标卷（同相对路径）
+sclient cp vault:/a.txt vault:/b.txt      # 卷 URI（同卷）
+sclient cp main:/a.txt vault:/a.txt       # 跨卷（两端 URI）
+sclient cp a.txt b.txt --force            # 允许覆盖已存在目标
+```
+
+- **默认不覆盖**：目标已存在 → 409（绝不静默覆盖用户内容）；`--force` 才覆盖（先删后写，非原子）。
+- **同卷 + 卷支持底层 blob 直拷**（如 secretdata 加密卷）：复制**不重新加解密**——同容器直接共享
+  分块（零 blob 写、O(meta)），跨容器则字节拷贝分块（内容零改动）；删源或删副本都安全（引用计数为
+  「存在即引用」）。跨卷因目标卷独立密钥**必须重新加密**。
+- **配额与写入同口径**：复制经与上传相同的**双账本预留**（owner Scope + 卷容量池），配额不足 →
+  `507` fail-closed（目标不落半态）。注意：外部卷的 `volumes[].capacity` 在**上传与复制**都不做
+  写时拦截（由真值/周期对账收敛），二者口径一致。
+
 ## 当前目录概念
 
 sclient 维护一个**持久化的工作目录**（存于 XDG cache），影响所有以相对路径
@@ -106,6 +161,29 @@ sclient 维护一个**持久化的工作目录**（存于 XDG cache），影响�
 - 使用 `/` 开头的**绝对路径**可以绕过当前目录（例如 `sclient upload /shared/file.txt`）
 - 包含 `..` 的相对路径在**客户端**就被拒绝（与服务端 ValidateFilePath 对称），
   无需向服务端发送注定失败的请求
+
+## 卷 URI 寻址（`<卷名>:/<路径>`）
+
+文件操作的位置参数可以直接写**卷 URI**，不必再记 `--volume`：
+
+```bash
+sclient list   vault:/                 # 列出加密卷 vault 的根目录
+sclient meta   vault:/docs/top.txt     # 取元信息（含明文 checksum）
+sclient download vault:/docs/top.txt   # 下载
+sclient mv     vault:/a.txt vault:/b.txt
+sclient delete vault:/b.txt
+```
+
+- `<卷名>:` 或 `<卷名>:/` = 卷根；路径部分按普通相对路径解析（仍受 `cd` 影响）。
+- 等价性：`sclient list vault:/x` ≡ `sclient --volume vault list x`。位置参数与显式 `--volume`
+  **卷名不一致时报错**（不静默取其一）；一致则等价。
+- `mv` 的两端可分别带卷名：不同卷 → 自动按**跨卷迁移**（等价 `--to-volume`）执行；同卷 → 同卷改名。
+- `upload` 的位置参数是**本地文件路径**，故不使用卷 URI（目标卷仍用 `--volume` 指定）。
+- 与 URL/盘符的歧义按语法消除：要求冒号后紧跟**单个**斜杠，故 `https://…` 与 `C:\…` 不会被误判。
+
+**为什么要它**：加密卷（`type: secretdata`）等非默认卷的浏览/改名/删除不必再记 flag，
+路径自述归属；同时这也是列出加密卷内容的推荐方式——**未指定卷的 `list` 只列本地卷**
+（搜索索引不含外部卷）。
 
 ## 子命令详情
 
@@ -205,7 +283,10 @@ sclient rmdir <dirname>
 sclient rmdir --force <dirname>
 ```
 
-非空目录在没有 `--force` 时会有交互式确认提示。
+非空目录在没有 `--force` 时会有交互式确认提示；用户确认（或 `--force`）后 CLI 才把
+`force=true` 发给服务端（**服务端恒要求该确认**——这是最后一道闸门）。显式指定**外部/加密卷**
+时（`rmdir vault:/dir --force`）删除落在**该卷自己的键空间**：经接缝**递归删除**（先子后父），
+绝不牵连本地卷的同名目录。
 
 ### cd / pwd
 

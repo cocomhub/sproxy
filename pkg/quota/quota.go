@@ -34,6 +34,21 @@ func NewPool(maxBytes int64) *Pool {
 	return &Pool{maxBytes: maxBytes}
 }
 
+// NewPoolWithParent 创建**挂到父池之下**的根池（封装卷配额继承源卷）：
+//   - 默认（maxBytes<=0）无自身上限，只受父池约束——即「默认从源卷共享」；
+//   - 配了 maxBytes 则同时受「自身上限」与「父池上限」双重约束（reserveUp 沿父链逐层校验）；
+//   - 占用经 adjustUp 沿父链聚合（同一字节只在父池计一次——子池 committed 是父池的子集，
+//     故子池不再是独立根池：父池不再单独为同一字节记账）。
+//
+// 约束（与 Pool.Adjust / ReleaseCommitted 同）：父链在装配期一次性确定，之后不可变；
+// 调用方不得对同一父池同时用 Scope 与 NewPoolWithParent 表达同一区间（否则双计）。
+func NewPoolWithParent(parent *Pool, maxBytes int64) *Pool {
+	return &Pool{maxBytes: maxBytes, parent: parent}
+}
+
+// Parent 返回父池（根池为 nil）。诊断/装配校验用。
+func (p *Pool) Parent() *Pool { return p.parent }
+
 // TryReserve 在池上预留 estimate（独立根池语义，不挂子层；卷容量池等直接入账）。
 // 失败返回 ErrStorageFull。返回的 Reservation 对池本身 Commit/Release。
 func (p *Pool) TryReserve(estimate int64) (*Reservation, error) {

@@ -93,9 +93,39 @@
 | **manifest**（destPath.hybrid）记录完成 chunk | 崩溃恢复跳过已完成（分享区免配额不浪费） | `TestHybridManifest_Resume` / `TestHybridDownload_ResumeKeepsCompletedChunks` |
 | **sink 配额记账**（DownloadWithWriter 完成后重放） | 对齐内置 HTTP 下载器配额语义 | `TestHybridDownload_SinkAccounting` |
 
+### 7.4 BaiduPCS-Go 上传路径（真实网盘，e2e 门控）
+
+> **入口**：`cd pkg/volume/ext/baidupcs && go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v`
+> **前置**：WSL 已登录 BaiduPCS-Go（`~/.config/BaiduPCS-Go/pcs_config.json`）且二进制可用
+> （PATH 或 `~/go/bin/BaiduPCS-Go`，经 `os.UserHomeDir()` 动态解析不硬编码用户名）；
+> 前置不满足 t.Skip。**凭据运行时读取、不经转录/落库**。
+
+| 行为 | 说明 | 锁定测试 |
+|---|---|---|
+| >4MB 文件分片上传后 `Stat.MD5` 是片组合/服务端"可能不正确"（非整文件 md5） | 分片上传 ETag 语义（C-C1 前提，WSL 实测 2026-10-07：9MB 本地 `8f566ecd` vs 远端 `18df0a1a`） | `TestE2E_CompareUploadPaths`（两条路径最终都须收敛 ETag==本地 md5） |
+| CLI 二进制 `upload`：内部自动完整块列表秒传 → 收敛快 | 二进制路径性能基准 | 同上（对比结果输出：耗时/上传次数/ETag 权威） |
+| 库兜底（libraryAdapter + refreshByRapidUpload）：秒传刷新用**真实分块 md5 列表**（blockMD5s）→ 命中刚上传块索引 → md5 权威 | 库路径收敛机制（C-C1 修复：原 `RapidUploadNoCheckDir` 只发整文件 md5，>4MB 恒 miss） | 同上（对比结果输出） |
+| 生产默认装配（binaryAdapter 二进制优先 + 库 Fallback）：refreshByRapidUpload **透传 Fallback** 秒传能力 | 默认路径大文件收敛（C-C1 深化，与 metadata() 透传同构） | `TestRefreshByRapidUpload_FallbackBinary`（单测锁定） |
+
+### 7.5 BaiduPCS-Go 元信息子命令（`meta` / `ls`，binary-only 免下载）
+
+> **背景（2026-10-10）**：binary-only 模式（无 BDUSS/库会话）下 `Stat` 此前回退「下载整文件
+> 到本地再 stat+md5」——`Put` 前后各一次全量下载，最坏 ~4× 文件流量。现改为解析 CLI 元信息。
+> **入口（WSL 实测）**：`BaiduPCS-Go meta <path...>`（精确字节 + md5 + mtime + 类型，
+> 支持多路径一次调用）、`BaiduPCS-Go ls <dir>`（单层枚举；size 列为人类可读近似值，
+> 文件条目再批量 `meta` 取精确 size）。解析器：`pkg/volume/ext/baidupcs/binary_meta.go`。
+
+| 行为 | 说明 | 锁定测试 |
+|---|---|---|
+| `meta` 输出字段（类型/文件大小/md5/mtime） | 解析精确字节数（忽略人类可读近似列）与 md5（标签含“可能不正确/截图请打码”变体） | `TestParseBinaryMeta_File` / `_Dir` / `TestParseBinaryMetaBlocks_Two` |
+| `ls` 输出表格 | 枚举名称 + 目录标记 + mtime；size 近似值由批量 `meta` 覆盖 | `TestParseBinaryList` / `TestParseHumanSize` |
+| 二进制失败回退库 adpater / 无兜底 fail-closed（不落回全量下载） | 与既有 binary→library 回退同构 | `TestBinaryAdapter_Meta_Fallback` / `_NoFallback` / `_List_Fallback` |
+| 子 module e2e 测试不被 CI 编译（`//go:build e2e`）→ `make vet-e2e-submodules` 编译门 | 防外部依赖/接口变更后静默腐化 | CI `Test Sub-Modules` job 内 `make vet-e2e-submodules` |
+
 ## 维护指引
 
 - **新增外部依赖**：先在本文档对应分类补条目 + 测试锁定（TDD 红灯 → 实现 → 绿）
+- **e2e 门控测试不被 CI 编译**（如 `pkg/volume/ext/baidupcs/real_network_compare_e2e_test.go` 带 `//go:build e2e`，CI 的 e2e tag 只作用于 `./test/...`）：外部依赖接口变更后，需手工 `cd pkg/volume/ext/baidupcs && GOWORK=off go vet -tags=e2e ./...` 确认仍可编译，避免测试腐化。
 - **测试红时**：先对照本文档判断「依赖变化（外部改了）」vs「实现回归（我们改了）」
 - **依赖变化处置**：外部行为变化 → 更新本文档 + 适配实现；实现回归 → 修实现，文档不动
 - **静默变更拦截**：外部行为一旦无锁即会静默漂移（例：416 边界 / expire 签名 / keepshare 301

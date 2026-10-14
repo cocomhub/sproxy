@@ -37,7 +37,9 @@ func FileChecksum(filename string) (string, error) {
 // FileChecksumRoot 计算 storage.Root 内相对路径文件的 SHA-256 十六进制摘要。
 // 全程 root 内打开，防符号链接逃逸（多租户布局迁移后的写端/冲突端校验用）。
 func FileChecksumRoot(root *storage.Root, rel string) (string, error) {
-	f, err := root.Open(rel)
+	// 用户可见语义（两实现同一口径）：加密卷算**明文**摘要
+	// （raw Open 会算密文摘要——校验/冲突检测对明文内容失去意义）。
+	f, err := root.OpenDecrypted(rel)
 	if err != nil {
 		return "", err
 	}

@@ -28,9 +28,12 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // resolveDefaultVolumeRoot 裁决默认卷（Volumes[0]）的物理挂载根（F1 合入门禁）。
@@ -104,6 +107,12 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 			closeOpenedVolumes(acc.roots, acc.external)
 			return nil, aerr
 		}
+	}
+	// 封装卷：解析声明并向源卷注入封印（源目录禁止直连；无声明时零回归）。
+	// 必须在 NewSet 之前——封印相对源卷根命名空间，set 未建时源根已就绪。
+	if serr := applyEnclosureSeals(log, acc); serr != nil {
+		closeOpenedVolumes(acc.roots, acc.external)
+		return nil, serr
 	}
 	return registry.NewSet(acc.volumes, acc.roots, acc.external, acc.pools, acc.defaultName), nil
 }
@@ -179,10 +188,10 @@ func resolveAssembledRootDir(cfg *Config, log *slog.Logger, vc VolumeConfig, i i
 	return rootDir
 }
 
-// openLocalVolumeRoot 打开本地卷根：MkdirAll + storage.OpenRoot（LAYOUT_VERSION 校验/写入）
+// OpenLocalVolumeRoot 打开本地卷根：MkdirAll + storage.OpenRoot（LAYOUT_VERSION 校验/写入）
 // + at-rest 加密卷装配（extra.encrypt=true → key 解析 → SetEncryption；cipher 非法 fail-closed）。
 // 失败时已关闭本根（由调用方 closeOpenedVolumes 回收其它已开根）。
-func openLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.Logger) (*storage.Root, error) {
+func OpenLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.Logger) (*storage.Root, error) {
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建卷 %q 根目录失败（%s）: %w", name, rootDir, err)
 	}
@@ -216,7 +225,7 @@ func openLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.L
 // assembleLocalVolume 装配单个本地卷（根打开 + 容量池 + 卷记录 + 首卷默认名），就地写入累积集合。
 func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, acc *volumeAccum) error {
 	rootDir := resolveAssembledRootDir(cfg, log, vc, i)
-	rt, oerr := openLocalVolumeRoot(vc.Name, rootDir, vc.Extra, log)
+	rt, oerr := OpenLocalVolumeRoot(vc.Name, rootDir, vc.Extra, log)
 	if oerr != nil {
 		return oerr
 	}
@@ -250,8 +259,20 @@ func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc 
 	if err != nil {
 		return fmt.Errorf("装配外部卷 %q 失败: %w", vc.Name, err)
 	}
-	acc.external[vc.Name] = be
-	acc.pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
+	pool := quota.NewPool(int64(vc.VolCapacity))
+	acc.pools[vc.Name] = pool
+	// 卷级容量记账在 FS 层（capacity.CapacityFS）：凡经 be.FS() 的写路径（上传/转存/
+	// 同步 push/备份/服务端 Copy·Move）都被同一卷级计数器拦截，保障所有用户占用之和
+	// 不超卷总额度。PoolCounter 复用本卷容量池（路由/指标/对账同源）并**持久化**
+	// （重启后仍从已占用起算，防“重启归零→反复写满”）。
+	counter, cerr := capacity.NewPoolCounterPersistent(pool, capacity.VolumeCounterPath(cfg.StorageRoot, vc.Name))
+	if cerr != nil {
+		log.Warn("外部卷容量快照恢复失败，本次进程从零累计", "volume", vc.Name, "error", cerr)
+		counter = capacity.NewPoolCounter(pool)
+	} else if counter.CorruptSnapshot() {
+		log.Warn("外部卷容量快照损坏，本次进程从零累计", "volume", vc.Name)
+	}
+	acc.external[vc.Name] = capacity.WrapBackend(be, counter)
 	acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, ""))
 	log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
 	return nil
@@ -454,7 +475,8 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 		return h.routeUploadSingle(owner, rel, forceHomeVol, size, false, view)
 	}
 
-	// 显式指定卷：ACL 校验 + 唯一性查重，单候选双预留（无换卷）。
+	// 显式指定卷：ACL 校验 + 唯一性查重（AD-4）+ 单候选双预留（无换卷）。唯一性属 HTTP
+	// 上传覆盖策略；统一写内核显式卷（S3/DAV/版本恢复）走 RouteTarget（不查重，覆盖写语义）。
 	if explicitVol != "" {
 		return h.routeUploadSingle(owner, rel, explicitVol, size, true, view)
 	}
@@ -585,22 +607,65 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 		}
 		route.scopeRes = res
 	}
-	if pool := h.volSet.Pool(volName); pool != nil {
-		res, err := pool.TryReserve(size)
-		if err != nil {
-			if route.scopeRes != nil {
-				route.scopeRes.Release()
-			}
-			return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
-		}
-		route.pool, route.poolRes = pool, res
+	if err := h.reserveVolumePool(route, volName, external, rel, size); err != nil {
+		return nil, err
 	}
 	return route, nil
 }
 
+// reserveVolumePool 卷级容量池预留（单一出口，卸下 reserveVolume 的认知复杂度）。
+// 外部卷只探测**净增**并在成功后立即释放（容量记账权威在 FS 层 CapacityFS）。
+func (h *Handlers) reserveVolumePool(route *volumeRoute, volName string, external files.UploadSink, rel string, size int64) error {
+	pool := h.volSet.Pool(volName)
+	if pool == nil {
+		return nil
+	}
+	need := size
+	if external != nil {
+		need = externalReserveNeed(context.Background(), external, rel, size)
+	}
+	if need <= 0 {
+		return nil // 净增为 0（覆盖写更小/等大）：无需卷池探测
+	}
+	res, err := pool.TryReserve(need)
+	if err != nil {
+		if route.scopeRes != nil {
+			route.scopeRes.Release()
+		}
+		return newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
+	}
+	if external != nil {
+		// 外部卷：卷级容量由 FS 层 CapacityFS 权威记账（本次仅探测用于路由/快速失败，
+		// 立即释放防双计）。**委托子池例外**：嵌套封装卷（DelegatePool 挂载）容量委托到底层
+		// 卷池的子 Scope，保留 Commit 以维持父链聚合（整体不超底层配额；过渡层语义，
+		// 阶段 2 迁 enclosure 的 EffectiveTarget 后移除本例外）。
+		if h.volSet.IsDelegated(volName) {
+			route.pool, route.poolRes = pool, res
+			return nil
+		}
+		res.Release()
+		return nil
+	}
+	route.pool, route.poolRes = pool, res
+	return nil
+}
+
+// externalReserveNeed 返回外部卷写入的**净增**字节：容量已按全量记账，覆盖写只需预留
+// 增量——否则 `used==capacity` 后该卷一切写入（含把大文件覆盖成小文件）恒 507，只能靠
+// 运维删计数文件/重启恢复（第 5 轮对抗评审 P1）。Stat 失败（不存在/后端报错）→ 按全量。
+func externalReserveNeed(ctx context.Context, sink files.UploadSink, rel string, size int64) int64 {
+	prev, ok, err := sink.Stat(ctx, rel)
+	if err != nil || !ok {
+		return size
+	}
+	return max(size-prev, 0)
+}
+
 // externalSinkFor 返回外部卷的写入源（External FS 包装为 files.UploadSink）；
-// 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。持卷描述（ResolveOwnerPath
+// 非外部卷 / 未装配 → nil（本地卷走 Tenant.Root()）。持卷描述（ResolveLocation
 // 按共享性自动适配 owner 前缀——评审 M3 + 用户裁定统一入口）。
+// 可信卷：外部卷 FS 恒经 trusted.Wrap 包一层（meta 恒生成，skip_verify 只关读侧校验）。
+// 写路径自动生成隐藏 .meta（FileMeta 总/分块 sha256+md5），上传/转存目标成为可信卷。
 func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if h.volSet == nil {
 		return nil
@@ -617,7 +682,70 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if !ok {
 		return nil
 	}
+	fsys = trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts()))
+	// P1-6 修复：直传外部卷也接本地 staging 配额（与 backup/transfer 统一）——
+	// baidupcs StorageFS.WriteFile 先落本地 staging，此前该入口无记账。gate 置于
+	// Guard(Wrap) 之外：meta 写经 Wrap.inner（raw）绕过 gate（小字节），主文件写在 gate 预留。
+	fsys = h.stagingQuotaFS(owner, fsys)
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
+}
+
+// stagingQuotaFS 是外部卷 FS 的**本地 staging 配额统一接线**（用户裁定 2026-10-10：
+// 全部外部卷强制本地配额——独立 staging Scope，写前预留/写后释放防本地磁盘打满；
+// 不需要 staging 或只占部分空间的卷**显式实现 StagingQuotaExempt** 才豁免；以
+// **per-instance** 状态自行接管的卷实现 StagingQuotaCapable（不得是共享单例）。
+// 机制化保证：新卷未实现任何接口 → 默认被 StagingQuotaGateFS 强制预留（fail-safe
+// 宁多勿漏，不依赖实现者自觉）。
+//
+// **判据下沉到最内层原始卷**（syncpkg.ApplyStagingQuota）——fs 恒为 trusted 装饰链
+// （Guard/Wrap/CapacityFS 都会无条件下回显可选能力接口），直接对 fs 做类型断言会恒真
+// 而误判「自管」，使默认 gate 分支永不执行（P0-1）。
+// 无 globalPool（未装配配额）→ 直通（零回归）。
+func (h *Handlers) stagingQuotaFS(owner string, fs syncpkg.FS) syncpkg.FS {
+	return syncpkg.ApplyStagingQuota(fs, h.stagingQuotaTrackerFor(owner))
+}
+
+// trustedWrapOpts 装配可信卷装饰器配置（C-MAJOR-4：ChunkSize 从 trusted_volume
+// 配置接线——缺省 0 自适应 ChunkSizeForSize；Logger 随装配层注入可观测 meta 失败）。
+// TrustedWrapOptions 导出可信卷 Wrap 选项（装配层在 pkg/server 之外装配外部卷写面时
+// 复用同一分块/日志口径——如 cmd/sproxy 的 baidupcs 同步载体工厂）。
+func (h *Handlers) TrustedWrapOptions() trusted.Options { return h.trustedWrapOpts() }
+
+func (h *Handlers) trustedWrapOpts() trusted.Options {
+	opts := trusted.Options{Logger: h.logger}
+	if h.cfgPtr == nil {
+		return opts // 直接构造的 Handlers（单测/嵌入）无配置指针：缺省零值，nil 安全
+	}
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		opts.ChunkSize = int64(cfg.TrustedVolume.ChunkSize)
+	}
+	return opts
+}
+
+// warnIfVerifySkipped 在**装配期**对「显式关闭服务端完整性校验」告警一次（M9d，第 7 轮
+// MINOR）：`trusted_volume.skip_verify=true` 是可信卷承诺的降级开关（读侧不校验、
+// 302 直链前置、外部卷写后不回读），必须启动即可见——此前只有配置注释，运行期无任何提示，
+// 运维可能在不知情下长期运行在「无校验」状态。
+func warnIfVerifySkipped(cfg *Config, log *slog.Logger) {
+	if cfg == nil || log == nil || !cfg.TrustedVolume.SkipVerify {
+		return
+	}
+	log.Warn("trusted_volume.skip_verify=true：服务端完整性校验已**关闭**（可信卷承诺降级）",
+		"impact", "下载/转存读侧不校验、外部卷允许 302 直链、外部卷写后不回读交叉校验",
+		"hint", "如需恢复默认（校验开启）请置 trusted_volume.skip_verify=false")
+}
+
+// verifySkipped 报告是否跳过下载数据校验（trusted_volume.skip_verify；缺省 false =
+// 校验开启——默认可信行为）。**只关校验，不关 meta 生成/桶隔离**（meta 恒生成、凭据
+// 保护恒生效；skip_verify 仅放宽读侧下载校验，极端性能场景）。
+func (h *Handlers) verifySkipped() bool {
+	if h.cfgPtr == nil {
+		return false
+	}
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		return cfg.TrustedVolume.SkipVerify
+	}
+	return false
 }
 
 // volumeTenant 返回指定卷上 owner 的租户（写盘 root）。默认卷委托 h.tenantFor（既有

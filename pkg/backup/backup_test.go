@@ -307,6 +307,69 @@ func TestBackup_FullCopiesAllAndWritesManifest(t *testing.T) {
 	}
 }
 
+// TestBackup_ManifestOnSeparateFS 断言 Options.ManifestFS/ManifestRel 把 manifest 写到
+// **另一个 FS**（装配层用独立功能桶隔离 manifest 的最小单元）：数据写 dst、manifest 写 mfs，
+// 且增量判定跨 Run 生效（同一 manifest FS）。
+// 变异：manifestTarget 忽略 ManifestFS/ManifestRel → manifest 落 dst → 红。
+func TestBackup_ManifestOnSeparateFS(t *testing.T) {
+	t.Parallel()
+	src := newMemFS()
+	src.setFile("a.txt", "hello", 1000)
+	dst := newMemFS()
+	mfs := newMemFS()
+	opts := Options{ManifestFS: mfs, ManifestRel: "manifest.json"}
+
+	rep1, err := Run(context.Background(), src, dst, opts)
+	if err != nil || rep1.Files != 1 {
+		t.Fatalf("首次全量失败: rep=%+v err=%v", rep1, err)
+	}
+	if st, _ := mfs.Stat(context.Background(), "manifest.json"); st == nil {
+		t.Fatal("manifest 应写在 ManifestFS 上（变异：忽略 ManifestFS → 红）")
+	}
+	// dst 上不得出现任何 manifest（含旧默认键）。
+	for _, k := range []string{"manifest.json", "manifest.json.tmp", ManifestRel} {
+		if st, _ := dst.Stat(context.Background(), k); st != nil {
+			t.Fatalf("数据 FS 不应出现 manifest 键 %q", k)
+		}
+	}
+
+	rep2, err := Run(context.Background(), src, dst, opts)
+	if err != nil {
+		t.Fatalf("第二次 Run error: %v", err)
+	}
+	if rep2.Skipped != 1 || rep2.Files != 0 {
+		t.Fatalf("第二次应命中独立 FS 上的 manifest（Skipped=1 Files=0）: %+v", rep2)
+	}
+}
+
+// TestBackup_ManifestChecksumMismatchForcesFullRescan 断言 manifest 校验和不符时
+// **不据其跳过任何文件**（截断/半写/被篡改 → 全量重扫，绝不静默漏备份）。
+// 变异：readManifest 不校验 checksum → 第二次 Skipped=1 → 红。
+func TestBackup_ManifestChecksumMismatchForcesFullRescan(t *testing.T) {
+	t.Parallel()
+	src := newMemFS()
+	src.setFile("a.txt", "hello", 1000)
+	dst := newMemFS()
+
+	if rep, err := Run(context.Background(), src, dst, Options{}); err != nil || rep.Files != 1 {
+		t.Fatalf("首次全量失败: rep=%+v err=%v", rep, err)
+	}
+	// 篡改：保留条目但把 checksum 改成另一值（验证**损坏/篡改**语义：不可信 manifest 不得导致跳过）。
+	tampered := `{"files":{"a.txt":{"size":5,"mtime":1000}},"checksum":"deadbeef"}`
+	if err := dst.WriteFile(context.Background(), ManifestRel,
+		strings.NewReader(tampered), int64(len(tampered)), 0); err != nil {
+		t.Fatalf("写入篡改 manifest 失败: %v", err)
+	}
+
+	rep2, err := Run(context.Background(), src, dst, Options{})
+	if err != nil {
+		t.Fatalf("第二次 Run error: %v", err)
+	}
+	if rep2.Skipped != 0 || rep2.Files != 1 {
+		t.Fatalf("校验和不符应全量重扫（Skipped=0 Files=1）: %+v", rep2)
+	}
+}
+
 func TestBackup_IncrementalSkipsSame(t *testing.T) {
 	t.Parallel()
 	src := newMemFS()

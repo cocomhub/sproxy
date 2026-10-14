@@ -49,7 +49,7 @@ func TestCloudTask_Audit_Collected(t *testing.T) {
 		TaskTTL:       time.Hour,
 	})
 	// 转存目标 = 内存 FS（shared=false + ModeAllow 空 owner，与非空 owner 无关）。
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false }
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) { return fs, "secretdata" }
 	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
 		return volume.Volume{
 			Name: vol, Type: "secretdata",
@@ -70,7 +70,7 @@ func TestCloudTask_Audit_Collected(t *testing.T) {
 
 	// 转存落盘成功是前提（否则无后续审计可断言）。自动派生 rel = <taskID>/<filename>，
 	// 经 ResolveOwnerPath 加 user/ 桶前缀。
-	wantRel := "user/" + task.ID + "/audit.bin"
+	wantRel := "anonymous/user/" + task.ID + "/audit.bin"
 	if _, ok := fs.files[wantRel]; !ok {
 		t.Fatalf("memFS 应收到转存产物 %s，实际 files: %v", wantRel, keys(fs.files))
 	}
@@ -153,7 +153,7 @@ func TestCloudTask_Audit_EncryptRow_SecretVolume(t *testing.T) {
 		TaskTTL:       time.Hour,
 	})
 	// 转存目标 = 真实 secretdata 卷（独享 + ModeAllow 空 owner，与非空 owner 无关）。
-	mgr.transferFSFor = func(vol string) (syncpkg.FS, string, bool) { return secretFS, "secretdata", false }
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) { return secretFS, "secretdata" }
 	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
 		return volume.Volume{
 			Name: vol, Type: "secretdata",
@@ -173,7 +173,7 @@ func TestCloudTask_Audit_EncryptRow_SecretVolume(t *testing.T) {
 	}
 
 	// 真实副作用：转存产物可经 secretdata 卷读回且内容一致（wrapper 分块加密/解密往返）。
-	wantRel := "user/" + task.ID + "/audit.bin"
+	wantRel := "anonymous/user/" + task.ID + "/audit.bin"
 	rc, oerr := secretFS.OpenRead(t.Context(), wantRel)
 	if oerr != nil {
 		t.Fatalf("secretdata 卷应可读回 %s: %v", wantRel, oerr)

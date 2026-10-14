@@ -43,13 +43,32 @@ type Manager struct {
 	fs    syncpkg.FS
 	name  string
 	local bool
+	// chmod 是可选的权限收紧回调（见 WithLocalChmod）：nil = 回落 `*LocalFS` 类型断言路径。
+	chmod func(name string) error
 }
 
 // NewManager 构造 secrets 管理句柄。
 // fs：底层卷的 secrets/ 目录视图（sync.FS）；name：卷名（寻址前缀）；
 // local：底层是否为本地盘（决定 0600 权限语义）。
-func NewManager(fs syncpkg.FS, name string, local bool) *Manager {
-	return &Manager{fs: fs, name: name, local: local}
+func NewManager(fs syncpkg.FS, name string, local bool, opts ...ManagerOption) *Manager {
+	m := &Manager{fs: fs, name: name, local: local}
+	for _, o := range opts {
+		if o != nil {
+			o(m)
+		}
+	}
+	return m
+}
+
+// ManagerOption 配置 Manager 的可选装配项。
+type ManagerOption func(*Manager)
+
+// WithLocalChmod 注入 0600 权限收紧回调（按 secret 名）。为什么需要：权限收紧此前靠对 FS 做
+// `*syncpkg.LocalFS` 类型断言——而经 `storage.Root` 适配的视图（`server.NewRootSecretsFS`，
+// 加密/封印语义必需）不是 LocalFS，断言会**静默跳过**（本地加固消失）。装配层知道卷根，可给出
+// 「按名收紧」的等价实现。未注入时保持既有 `*LocalFS` 断言路径（零回归）。
+func WithLocalChmod(fn func(name string) error) ManagerOption {
+	return func(m *Manager) { m.chmod = fn }
 }
 
 // Name 返回卷名（寻址 `secrets://<name>/` 前缀）。
@@ -94,9 +113,10 @@ func (m *Manager) writeSecret(ctx context.Context, name string, key []byte) erro
 		return fmt.Errorf("secrets: 写入 %q 失败: %w", name, err)
 	}
 	if m.local {
-		// 本地盘权限 0600（ssh 密钥式）：底层为 LocalFS 时直接落盘后收紧权限。
+		// 本地盘权限 0600（ssh 密钥式）：优先用装配层注入的回调（经 Root 的视图无法类型断言）；
+		// 否则底层为 LocalFS 时直接落盘后收紧权限。
 		// 外部盘（baidupcs/s3）无权限要求——无法也无需 chmod。
-		if err := localChmod(m.fs, name); err != nil {
+		if err := m.chmodSecret(name); err != nil {
 			return fmt.Errorf("secrets: 本地 secret %q 权限收紧失败: %w", name, err)
 		}
 	}
@@ -217,10 +237,18 @@ func (m *Manager) SelectDefault(ctx context.Context, defaultSecret string) (stri
 	if err != nil {
 		return "", err
 	}
-	if len(names) == 0 {
+	// 过滤非法条目（`..` 等）后再取首个——List 是目录枚举，可能含外部写入的异常名；
+	// 直接 names[0] 会把异常名当默认 secret 返回，直到 Read 才报错（入口校验口径不一致）。
+	valid := names[:0]
+	for _, n := range names {
+		if validSecretName(n) {
+			valid = append(valid, n)
+		}
+	}
+	if len(valid) == 0 {
 		return "", fmt.Errorf("secrets: 卷 %q 无 secret 可用（先 Create）", m.name)
 	}
-	return names[0], nil
+	return valid[0], nil
 }
 
 // ---- ExternalBackend 适配 ----
@@ -307,6 +335,14 @@ func isLocalTarget(v volume.Volume) bool {
 
 // localChmod 对本地 secret 文件收紧权限为 0600。
 // 底层为 sync.LocalFS 时直接 chmod（见 local_chmod.go）；其它 FS（外部）不支持——忽略。
+// chmodSecret 收紧 secret 权限：注入回调优先，否则回落 `*LocalFS` 断言（既有路径）。
+func (m *Manager) chmodSecret(name string) error {
+	if m.chmod != nil {
+		return m.chmod(name)
+	}
+	return localChmod(m.fs, name)
+}
+
 func localChmod(fs syncpkg.FS, name string) error {
 	lfs, ok := fs.(*syncpkg.LocalFS)
 	if !ok {
@@ -316,15 +352,27 @@ func localChmod(fs syncpkg.FS, name string) error {
 }
 
 // ManagerOfExternal 从 ExternalBackend 反取 secrets.Manager（装配层辅助）。
-// 仅当 backend 是 secrets 卷适配器时返回非 nil。
+// 仅当 backend 是 secrets 卷适配器时返回非 nil；支持经透明包装（如 capacity.Backend
+// 用 SecretsManagerAny() 泛型转发）后的反取。
 type managerUnwrapper interface{ SecretsManager() *Manager }
+type managerUnwrapperAny interface{ SecretsManagerAny() any }
 
 func ManagerOfExternal(be registry.ExternalBackend) *Manager {
 	if u, ok := be.(managerUnwrapper); ok {
-		return u.SecretsManager()
+		if m := u.SecretsManager(); m != nil {
+			return m
+		}
+	}
+	if u, ok := be.(managerUnwrapperAny); ok {
+		if m, ok := u.SecretsManagerAny().(*Manager); ok {
+			return m
+		}
 	}
 	return nil
 }
+
+// SecretsManagerAny 暴露内部 Manager（供容量包装等透明层泛型转发）。
+func (b *backend) SecretsManagerAny() any { return b.mgr }
 
 // SecretsManager 暴露内部 Manager（供装配层反取）。
 func (b *backend) SecretsManager() *Manager { return b.mgr }

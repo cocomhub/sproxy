@@ -200,14 +200,16 @@ func (s *Service) reserveVersionQuota(owner string, tnt *storage.Tenant, srcSize
 // checksumStore 后 fsync。失败时删除半成品版本文件并经 release 释放预留配额。
 // 保持原顺序：复制 → checksum 记录 → fsync（崩溃时版本不丢，checksum 先行）。
 func (s *Service) copyVersionFile(root *storage.Root, fullRel, verRel, userRel, owner string, release func()) (int64, error) {
-	src, err := root.Open(fullRel)
+	// 用户可见语义：加密卷源读**明文**、版本目标写**透明加密**（raw Open/OpenFile 会把
+	// 密文版本存进 version 桶，恢复回原 rel 时又写一次明文 ⇒ 版本内容不可用/错位）。
+	src, err := root.OpenDecrypted(fullRel)
 	if err != nil {
 		release()
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer src.Close()
 
-	dst, err := root.OpenFile(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	dst, err := root.OpenFileEncrypted(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		release()
 		return 0, fmt.Errorf("创建版本文件失败: %w", err)
@@ -237,7 +239,8 @@ func (s *Service) copyVersionFile(root *storage.Root, fullRel, verRel, userRel, 
 	}
 
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
-	if err := dst.Sync(); err != nil {
+	// （encWriteCloser 已补 Sync：透传底层文件 fsync）。
+	if syncer, ok := dst.(interface{ Sync() error }); ok && syncer.Sync() != nil {
 		_ = root.Remove(verRel)
 		release()
 		return 0, fmt.Errorf("同步版本文件失败: %w", err)

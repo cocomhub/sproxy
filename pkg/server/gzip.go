@@ -146,8 +146,30 @@ func gzipSkipRequest(w http.ResponseWriter, r *http.Request) bool {
 	if r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/events/") {
 		return true
 	}
+	// 文件响应强跳过（/download、/download/chunk、S3 网关、WebDAV）：这些响应的
+	// Content-Type 在 handler 内才设置（前置白名单看不到），若不跳过会被 gzip；当可信卷
+	// 读校验在 200 头之后失败时，gzip 会把「已通过校验的前缀」打成**格式完整合法**且
+	// 无 Content-Length 的 gzip 流（无截断信号）→ 客户端静默拿到不完整文件，fail-closed
+	// 承诺被中间件击穿（P1 对抗评审）。跳过后二进制响应原样透传（Content-Length 保留）。
+	if fileResponsePath(r.URL.Path) {
+		return true
+	}
 	// Content-Type 白名单（按内容类型自动 gzip；非文本类不压缩）。
 	if ct := w.Header().Get(headerContentType); ct != "" && !gzipEligible(ct) {
+		return true
+	}
+	return false
+}
+
+// fileResponsePath 报告路径是否为二进制文件响应面（跳过 gzip，保证 Content-Length
+// 可判截断与校验失败可被客户端感知）。
+func fileResponsePath(p string) bool {
+	switch {
+	case p == "/download", strings.HasPrefix(p, "/download/"):
+		return true
+	case strings.HasPrefix(p, "/s3/"):
+		return true
+	case p == "/dav", strings.HasPrefix(p, "/dav/"):
 		return true
 	}
 	return false

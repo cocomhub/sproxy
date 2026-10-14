@@ -125,6 +125,43 @@ func EncryptShardsBytes(data []byte, origName, outDir string, secret []byte, pol
 	return encryptShards(data, srcMeta{name: origName, size: int64(len(data)), mtime: time.Now(), mode: 0o600}, outDir, secret, policy, padTarget, v)
 }
 
+// EncryptShardsReader 流式分块加密：src 提供整文件随机读（可 seek），逐块 ReadAt + 流式哈希，
+// 内存峰值 O(单块上限)。磁盘格式、meta 与块布局与 EncryptShards/EncryptShardsBytes 完全一致
+// （向后兼容，旧读路径可读新写）。
+// src 须实现 io.Seeker / io.ReaderAt（multipart.File、*os.File、SectionReader 等）；
+// 纯流不可 seek 时回退 io.ReadAll（功能不变，仅内存不省）。
+func EncryptShardsReader(src io.Reader, size int64, origName, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
+	ra, ok := src.(io.ReaderAt)
+	if !ok {
+		if s, ok2 := src.(io.Seeker); ok2 {
+			ra = io.NewSectionReader(readSeekerFrom{s, src}, 0, size)
+		} else {
+			data, rerr := io.ReadAll(src)
+			if rerr != nil {
+				return nil, fmt.Errorf("shardseal: 读源失败: %w", rerr)
+			}
+			return encryptShards(data, srcMeta{name: origName, size: size, mtime: time.Now(), mode: 0o600}, outDir, secret, policy, padTarget, v)
+		}
+	}
+	return encryptShardsAt(ra, size, srcMeta{name: origName, size: size, mtime: time.Now(), mode: 0o600}, outDir, secret, policy, padTarget, v)
+}
+
+// readSeekerFrom 把 io.Seeker 同时兼 io.Reader 的实现（如 multipart.File / *os.File
+// 双实现；纯 Seeker 需补 Read）适配为 io.ReaderAt：ReadAt 经 Seek + ReadFull 顺序读。
+type readSeekerFrom struct {
+	s io.Seeker
+	r io.Reader
+}
+
+func (r readSeekerFrom) Read(p []byte) (int, error) { return r.r.Read(p) }
+func (r readSeekerFrom) ReadAt(p []byte, off int64) (int, error) {
+	if _, err := r.s.Seek(off, io.SeekStart); err != nil {
+		return 0, err
+	}
+	n, err := io.ReadFull(r.r, p)
+	return n, err
+}
+
 // srcMeta 是一次加密的源文件逻辑元数据（EncryptShards 文件变体取 os.Stat、内存变体取
 // len/调用方；S107 收敛：origName/size/mtime/mode 四个来源参数归组）。
 type srcMeta struct {
@@ -205,6 +242,158 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 	}
 	res.MetaName = metaName
 	return res, nil
+}
+
+// encryptShardsAt 流式分块加密（EncryptShardsReader 的核心）：src 提供整文件随机读。
+// 先一次流式哈希（io.Copy，O(1) 内存）得整文件 SHA256+组签，再逐块 ReadAt 加密写盘，
+// 内存峰值 O(单块上限)。磁盘格式、meta 与块布局/命名与 encryptShards 完全一致（向后兼容）。
+func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
+	blocksPlanner, blockletsPlanner := policy.Planner()
+	if blocksPlanner == nil || blockletsPlanner == nil {
+		return nil, fmt.Errorf("shardseal: 未知分块策略 %q 或 blocklet 模式 %q", policy.Mode, policy.BlockletMode)
+	}
+	blocks, err := blocksPlanner.Plan(size)
+	if err != nil {
+		return nil, err
+	}
+
+	salt, err := newSalt()
+	if err != nil {
+		return nil, err
+	}
+	key, err := DeriveKey(secret, salt, v)
+	if err != nil {
+		return nil, err
+	}
+
+	// 流式哈希 pass：整文件一遍，O(1) 内存，得 full SHA256 hash（group+Original.SHA256 用它）。
+	fullHasher := sha256.New()
+	if _, cerr := io.CopyBuffer(fullHasher, io.NewSectionReader(src, 0, size), make([]byte, 128<<10)); cerr != nil {
+		return nil, fmt.Errorf("shardseal: 流式哈希读源失败: %w", cerr)
+	}
+	fullSum := fullHasher.Sum(nil)
+	group := GroupSig(secret, fullSum)
+
+	res := &EncryptionResult{Meta: &Meta{
+		Version:     metaVersion,
+		Algorithm:   algorithmName(v),
+		AlgoVersion: v,
+		KDF:         "scrypt",
+		Salt:        toBase64(salt),
+		Original: OriginalInfo{
+			Name: srcMetaV.name,
+			Size: srcMetaV.size,
+			// fullSum 已是整文件 SHA-256（流式哈希），直接 hex 编码——不可再经 Hash256
+			// 二次哈希（sha256(sha256(content)) 会与内容哈希不一致，DecryptFile 完整性校验失败）。
+			SHA256:    hex.EncodeToString(fullSum),
+			MTime:     srcMetaV.mtime.UTC().Format(time.RFC3339Nano),
+			Mode:      srcMetaV.mode,
+			MediaType: mediaType(srcMetaV.name),
+		},
+		Block: policy,
+	}}
+
+	names, chunkInfos, cerr := encryptWriteChunksAt(&chunkPlan{blocks: blocks, blp: blockletsPlanner}, &sectionReader{ra: src, sz: size}, key, salt, group, outDir, v)
+	if cerr != nil {
+		return nil, cerr
+	}
+	res.ChunkNames = names
+	res.Meta.Chunks = chunkInfos
+	if rep, ok := blockletsPlanner.(failureReporter); ok {
+		if fails := rep.Failures(); len(fails) > 0 {
+			slog.Warn("shardseal: 视频关键帧解析失败，blocklet 降级 fixed（fMP4/截断等）",
+				"file", srcMetaV.name, "size", srcMetaV.size, "failures", len(fails))
+		}
+	}
+	metaName, merr := encryptWriteMeta(res, key, salt, group, outDir, padTarget)
+	if merr != nil {
+		return nil, merr
+	}
+	res.MetaName = metaName
+	return res, nil
+}
+
+// sectionReader 是 io.ReaderAt + io.Reader 的适配（encryptWriteChunksAt 需要既能按偏移
+// 随机读（分块 ReadAt）又能作为 io.Reader 交给 PlanBlocklets/加密；*os.File/multipart.File
+// 原生双实现，纯 ReaderAt 经此补 Read 顺序读）。ReadAt 透传底层；Read 从当前偏移顺序读。
+type sectionReader struct {
+	ra  io.ReaderAt
+	off int64
+	sz  int64
+}
+
+func (s *sectionReader) ReadAt(p []byte, off int64) (int, error) { return s.ra.ReadAt(p, off) }
+
+func (s *sectionReader) Read(p []byte) (int, error) {
+	n, err := s.ra.ReadAt(p, s.off)
+	s.off += int64(n)
+	return n, err
+}
+
+// encryptWriteChunksAt 流式逐块加密（encryptShardsAt 的分块循环）：每块从 src ReadAt 读入
+// （内存 O(块上限)），加密写盘；块布局/命名/元数据与 encryptWriteChunks 一致（group 已由
+// 预扫描哈希给定，blob 名与 encryptShards 相同）。src 为 io.ReaderAt（已由 EncryptShardsReader
+// 归一为 ReaderAt）；PlanBlocklets 收到 *sectionReader 同现双能力（Reader+ReaderAt）。
+// video-keyframe parseOnce 需全文扫描，本期由上层走 ReadAll 回退，本路径不动 keyframe。
+func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, group, outDir string, v AlgoVersion) ([]string, []ChunkInfo, error) {
+	var names []string
+	var chunks []ChunkInfo
+	for _, b := range plan.blocks {
+		chunk := make([]byte, b.Size)
+		if _, rerr := src.ReadAt(chunk, b.Offset); rerr != nil && rerr != io.EOF {
+			return nil, nil, fmt.Errorf("shardseal: 读块 [%d,%d) 失败: %w", b.Offset, b.Size, rerr)
+		}
+		blocklets, perr := plan.blp.PlanBlocklets(&sectionReader{ra: src, sz: planSrcSize(plan)}, planSrcSize(plan), b.Offset, b.Size)
+		if perr != nil {
+			return nil, nil, perr
+		}
+		enc, entries, eerr := encryptBlocklets(key, salt, blocklets, chunk, v)
+		if eerr != nil {
+			return nil, nil, eerr
+		}
+		name, nerr := chunkBlobNameAndWrite(enc, group, outDir)
+		if nerr != nil {
+			return nil, nil, nerr
+		}
+		names = append(names, name)
+		ci := ChunkInfo{
+			Index: len(chunks), FileName: name, Offset: b.Offset, OrigSize: int64(len(chunk)),
+			OrigSHA256: Hash256(chunk), EncSize: int64(len(enc)), EncSHA256: Hash256(enc),
+			Blocklets: blockletInfosOf(blocklets, entries, chunk, b.Offset),
+		}
+		if rep, ok := plan.blp.(failureReporter); ok {
+			ci.Failures = rep.Failures()
+		}
+		chunks = append(chunks, ci)
+	}
+	return names, chunks, nil
+}
+
+// blockletInfosOf 从加密结果 entries 与块明文切片构建 blocklet 索引元数据（随机访问定位用）。
+// 与 encryptWriteChunks 的 blocklet 索引逻辑一致（错误段不入索引——覆盖越界）。
+func blockletInfosOf(blocklets []Blocklet, entries []BlobIndexEntry, chunk []byte, blockOffset int64) []BlockletInfo {
+	var blInfos []BlockletInfo
+	for i, bl := range blocklets {
+		e := entries[i]
+		if blockletType(bl) == BlockletTypeError {
+			continue
+		}
+		segment := chunk[bl.Offset-blockOffset : bl.Offset-blockOffset+bl.Size]
+		blInfos = append(blInfos, BlockletInfo{
+			Offset: bl.Offset, Size: bl.Size, EncOffset: int64(e.EncOffset), EncSize: e.EncSize,
+			OrigSHA256: Hash16(segment), Used: !bl.Padding, Type: byte(blockletType(bl)),
+		})
+	}
+	return blInfos
+}
+
+// planSrcSize 返回 chunkPlan 覆盖的源文件长度（blocks 末块 Offset+Size）。
+func planSrcSize(plan *chunkPlan) int64 {
+	if n := len(plan.blocks); n > 0 {
+		b := plan.blocks[n-1]
+		return b.Offset + b.Size
+	}
+	return 0
 }
 
 // encryptWriteMeta 把 meta 明文 JSON 整体加密到 padTarget 落盘并返回 meta 文件名

@@ -155,8 +155,10 @@ type Meta struct {
 	KeyID string `json:"key_id,omitempty"`
 
 	// ---- 扩展元数据（用户：文件名/大小/权限/备注/kv/原始校验和进密文，降外部 meta 依赖）----
-	// Extra 是任意扩展键值（如 media_type、ACL、tag；map[]byte 值，密文内）。
-	Extra map[string][]byte `json:"extra,omitempty"`
+	// Extra 是任意扩展键值（如 media_type、ACL、tag）。2026-10-07 用户裁定：一律用
+	// map[string]any（都是 JSON 序列化，[]byte 无优势且无法存 int/string 等结构化值；
+	// 与通用 FileMeta.Extra 对齐，可互转）。
+	Extra map[string]any `json:"extra,omitempty"`
 
 	// ---- 审计 / 溯源（§13.2 审计项 5：溯源）+ 访问计数（审计项 10）----
 	WriterID    string `json:"writer_id,omitempty"`    // 写入者指纹（PikPak 下载来源等）

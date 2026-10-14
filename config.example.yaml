@@ -28,10 +28,31 @@ storage_root: "./storage"
 #     root: "./storage"         # 物理根目录（首卷 root 缺省/占位形态时用 storage_root 建根，F1 门禁）
 #     extra: {}                 # 类型特有配置（V3）：本地卷恒空；外部后端构造器读取（如 baidupcs 的 bduss/baidu_root）
 #     direct_link: false        # 「允许明文外部卷 302 直链」开关（2026-10-05 通用文件获取）：
+#                               # **仅当 trusted_volume.skip_verify=true 时生效**（2026-10-11：
+#                               # 默认校验开启时强制服务端转发——302 会绕过逐分块校验并告警一次；
+#                               # 出口卷 type=egress 例外，其 302 二次进入仍由服务端校验）。
 #                               #   零值 false = 私密（外部卷经服务端转发，不暴露原始存储 URL）；
 #                               #   显式 true = 下载时 302 跳到后端直链（流量不经服务端，需后端支持直链）。
 #                               #   仅明文外部卷（baidupcs 等）消费；secretdata 密文卷恒服务端解密（忽略本字段）。
-#   # 集群出口示例（type=egress，2026-10-05 用户裁定凭证下发）：一出口卷 = 一持有节点卷
+#   # 封装卷示例（type=enclosure，2026-10-11 通用封装机制）：声明占用某个已装配卷的根/子目录，
+  # 由注册的封装处理器（wrapper）提供变换后的访问（如 secretdata 加密）。
+  # 装配后**源目录在源卷侧被封印**：直连写操作恒拒（409）、默认读按不存在（404）且列举过滤；
+  # 封装卷自身经服务器处理读写（不受封印影响）。支持嵌套（封装另一个封装卷，路径逐层拼接）与
+  # 深度上限 8；跨外部卷源当前装配期显式拒绝（禁静默降级）。
+  #   - name: "vault"
+  #     type: "enclosure"
+  #     extra:
+  #       # <源卷名>:<子路径>（子路径可空 = 整卷封装）。子路径为**卷根相对**：客户端可达路径
+  #       # 恒为 <卷根>/<owner>/<bucket>/<rel>，故要封印「客户端本来能直连的区间」须写
+  #       # "<源卷>:<owner>/user/<子路径>"（如 main:alice/user/vault）；写 "main:private/vault"
+  #       # 表示封装卷根专有区间（客户端不可寻址，封印属防御纵深）。
+  #       source: "main:alice/user/vault" # <源卷名>:<卷根相对子路径>
+  #       wrapper: "secretdata"          # 封装处理器注册名（生产已注册：secretdata）
+  #       secret_url: "secrets://keys/vault"   # wrapper 自身配置（此处为密钥来源；secrets://<卷>/<名>）
+  #       source_read_mode: "hidden"     # hidden(默认，读 404+列举过滤) | readable(只读透视，便于迁移)
+  #       allow_direct_url: false        # 默认禁止 302 直链（禁客户端直连源存储）
+  #       max_bytes: 0                   # 0 = 仅受源卷池约束（继承）；>0 = 封装卷自身上限
+  # 集群出口示例（type=egress，2026-10-05 用户裁定凭证下发）：一出口卷 = 一持有节点卷
 #   # （多凭证/多持有节点 = 配多条 egress 卷）。持有节点签发自包含短效凭证（HMAC+时效+
 #   # 白名单+范围），出口节点经 mesh 从持有节点拉数据转发（播放器 302/转发目标 = 出口节点）。
 #   # 需配合：持有节点 remote_read.enabled + mesh.node.enabled（宣告 volread）+ 本节点
@@ -333,6 +354,19 @@ tls:
 # 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
 # cloud_archive_max_bytes: 10737418240   # 10 GiB 示例
 
+# 可信卷（Trusted Volume）：外部卷上传/转存默认包可信卷装饰器——写侧生成隐藏 FileMeta
+# sidecar（整文件 sha256/md5 + 逐分块 sha256/md5，落独立 meta 桶 <owner>/meta/<rel>.meta），
+# 读侧（下载 / 云转存读回）按 FileMeta 逐分块校验，跨信任边界静默损坏 fail-closed。
+# 默认即开启（安全可靠）；本地卷恒建 meta（只关校验不关 meta）。
+# trusted_volume:
+#   skip_verify: false        # true = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；
+#                             #   meta 生成与 meta 桶隔离不受影响（meta 恒生成）。
+#   chunk_size: 0             # 分块大小（ByteSize；0 = 按文件大小自适应 1MiB~32MiB；
+#                             #   配置值小于下界 1MiB 时钳到 1MiB，防百万分块 DoS）
+#   staging_quota_bytes: 0    # 本地 staging（上传暂存）每-owner 配额上限（ByteSize；0 = 不限制但记账）。
+#                             #   所有外部卷写前预留、写后释放，防本地磁盘被上传暂存打满；
+#                             #   s3 流式直传显式豁免、baidupcs 自管。
+
 # PikPak 网盘中转后端（分享 URL → 转存个人网盘 → 官方 CLI 完整下载）：
 # 绕过 PikPak 分享链接 40-50% 下载限制（官方对分享链接的反下载设计）。
 # 前置：安装官方 CLI 并登录（`sproxy pikpak install` + `sproxy pikpak login`）。
@@ -545,3 +579,12 @@ tls:
 #   enabled: false
 #   listen: "127.0.0.1:19001"
 #   handshake_timeout: "10s"
+# 卷根 at-rest 加密（仅本地卷；用户访问恒见明文，落盘字节为密文）：
+#   - name: "secure"
+#     type: "local"
+#     root: "./storage-secure"
+#     extra:
+#       encrypt: true
+#       encrypt_key_file: "./secure.key"   # raw 32B 或 base64 32B（openssl rand -base64 32）
+#       cipher: "64KiB"                    # 可选：加密分块大小（非法值 fail-closed）
+#   —— 备份/迁移需导出存储原样密文时用 `?ciphertext=1`（详见 docs/api.md）。

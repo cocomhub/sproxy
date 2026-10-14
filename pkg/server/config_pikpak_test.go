@@ -38,8 +38,13 @@ func TestConfig_PikpakHybridDefaults(t *testing.T) {
 	if c.Pikpak.Hybrid.Disable {
 		t.Fatal("expected hybrid.disable default false (= enabled)")
 	}
-	if c.Pikpak.Hybrid.ChunkSize != 0 || c.Pikpak.Hybrid.ShareRatio != 0 || c.Pikpak.Hybrid.Concurrency != 0 {
-		t.Fatal("expected hybrid size/ratio/concurrency zero defaults (downloader falls back)")
+	// ChunkSize 默认 32MiB（2026-10-07 对齐：分片更细中断粒度更小，与 hybrid.go 常量一致）；
+	// ShareRatio/Concurrency 保持零默认（下载器内部回落）。
+	if c.Pikpak.Hybrid.ChunkSize != 32<<20 {
+		t.Fatalf("expected hybrid.chunk_size default 32MiB, got %d", c.Pikpak.Hybrid.ChunkSize)
+	}
+	if c.Pikpak.Hybrid.ShareRatio != 0 || c.Pikpak.Hybrid.Concurrency != 0 {
+		t.Fatal("expected hybrid share_ratio/concurrency zero defaults (downloader falls back)")
 	}
 	// AutoDelete 默认 true（2026-10-05 修正：与 config.go 注释一致，6GB 空间必须释放）。
 	if !c.Pikpak.Hybrid.AutoDelete {

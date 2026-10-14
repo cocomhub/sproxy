@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -25,6 +26,7 @@ import (
 // blockSession 是一次块级写会话（临时文件 + 锁 + 偏移游标）。
 type blockSession struct {
 	root   *storage.Root
+	owner  string   // 归属 owner（meta 配额记账）
 	tmpRel string   // 同目录临时文件（原子 rename 覆盖用）
 	dstRel string   // 目标 rel
 	size   int64    // 最终大小（预分配）
@@ -65,6 +67,12 @@ func (s *Service) OpenBlockWrite(ctx context.Context, owner, rel, volume string,
 			return "", fmt.Errorf("块写父目录: %w", merr)
 		}
 	}
+	// at-rest 加密卷：块写是**随机定位写**（OpenFile+WriteAt），与 GCM 流式加密不兼容——
+	// 写明文会绕过 at-rest 加密（评审 P0 的块写面），故**显式拒绝**（禁静默降级）；
+	// 加密卷请走分块上传（finalize 时单遍加密）或整文件上传。
+	if root.IsEncrypted() {
+		return "", fmt.Errorf("块写不支持 at-rest 加密卷（GCM 不支持随机定位写）：请使用分块上传或整文件上传")
+	}
 	tf, err := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("块写会话打开临时文件: %w", err)
@@ -77,7 +85,7 @@ func (s *Service) OpenBlockWrite(ctx context.Context, owner, rel, volume string,
 			return "", fmt.Errorf("块写预分配: %w", err)
 		}
 	}
-	sess := &blockSession{root: root, tmpRel: tmpRel, dstRel: norm, size: size, mtime: mtime, f: tf}
+	sess := &blockSession{root: root, owner: owner, tmpRel: tmpRel, dstRel: norm, size: size, mtime: mtime, f: tf}
 	buf := make([]byte, 6)
 	_, _ = rand.Read(buf)
 	id := hex.EncodeToString(buf)
@@ -148,6 +156,15 @@ func (s *Service) CloseBlockWrite(ctx context.Context, id string) error {
 	if err := sess.root.AtomicRename(sess.tmpRel, sess.dstRel); err != nil {
 		_ = sess.root.Remove(sess.tmpRel)
 		return fmt.Errorf("块写原子落位: %w", err)
+	}
+	// P1-7 修复：块级覆盖写也须重建 meta sidecar——否则旧 sidecar 描述旧内容，
+	// 读路径按旧分块校验新内容恒失配 → 文件固化不可下载（直到再次成功覆盖写）。
+	// meta 计算失败时删旧 sidecar 退化为 missing（读侧不校验；下次写自愈）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(ctx, sess.owner, sess.root, sess.dstRel); mErr != nil {
+			s.rt.logger().Warn("块写 meta 落盘失败（该文件读侧将不校验）", "file_name", sess.dstRel, "error", mErr)
+			_ = sess.root.Remove(meta.MetaPath(sess.dstRel))
+		}
 	}
 	return nil
 }

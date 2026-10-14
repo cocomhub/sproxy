@@ -25,7 +25,6 @@ const ActionVerifyFailed Action = "verify_failed"
 //
 // 返回校验失败清单（ActionVerifyFailed 结果，path 为目标侧路径）。
 func Verify(ctx context.Context, src, dst FS, job *Job) ([]FileResult, error) {
-	_ = job.VerifyAfter // 变异：忽略开关
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

@@ -3,6 +3,13 @@
 
 package server
 
+import (
+	"strings"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
+)
+
 // uploading_lock.go 收敛 uploadingFiles 文件级互斥锁的键格式与获取语义（T6c move 锁架构延伸）：
 // 单次上传 / 跨卷 move / 分块 init 已共用 <owner>\x00<rel> 键；本文件把 delete、版本 restore、
 // 分块 complete 也纳入同一把锁，使「move 复制→删源」窗口内的并发 delete/restore/complete 各自
@@ -40,6 +47,24 @@ func isUploadingLockMarker(value string) bool {
 	}
 }
 
+// lockRelFor 把**卷 FS 键**归一为**文件域锁键**（M2 修复，第 7 轮 MAJOR）：转存传的是
+// `volume.Location.FSPath()`（共享卷含 owner 前缀 `<owner>/user/<rel>`），而 HTTP 上传/
+// 删除/move 用域侧 rel（`user/<rel>`）——不归一会让两写面在共享外部卷上**互不可见**，
+// 同 rel 并发写产出「主文件与 sidecar 错位」的固化状态。此处剥掉 `<owner>/` 前缀
+// （无前缀/私有卷原样返回），使两写面共用同一键。
+func (h *Handlers) lockRelFor(owner, fsKey string) string {
+	trimmed := strings.TrimPrefix(fsKey, "/")
+	return strings.TrimPrefix(trimmed, storage.NormalizeOwner(owner)+"/")
+}
+
+// transferWriteLock 是**转存写面**的取锁入口（装配层注入 `cloud.Options.TargetWriteLock`）：
+// 转存传的是卷 FS 键（`volume.Location.FSPath()`，共享卷含 `<owner>/` 前缀），先经
+// `lockRelFor` 归一为域侧锁键，再取与 HTTP 上传/删除/move **同一键空间**的排他锁
+// （M2：不归一 → 两写面在共享外部卷上互不可见 → 同 rel 并发写产出主文件/sidecar 错位固化）。
+func (h *Handlers) transferWriteLock(owner, rel string) (func(), bool) {
+	return h.acquireFileLock(owner, h.lockRelFor(owner, rel))
+}
+
 // acquireFileLock 为 owner 的 rel 获取文件级排他锁（key = <owner>\x00<rel>，与单次上传 /
 // 跨卷 move / 分块 init 同一键空间）。成功返回释放函数（调用方 defer 执行）；已被占用返回
 // ok=false（调用方按 409 fail-closed 回包）。
@@ -57,5 +82,33 @@ func (h *Handlers) tryMarkUploadingFile(owner, rel, value string) (release func(
 	if _, loaded := h.uploadingFiles.LoadOrStore(key, value); loaded {
 		return nil, false
 	}
-	return func() { h.uploadingFiles.Delete(key) }, true
+	if isUploadingLockMarker(value) {
+		h.uploadingLockAt.Store(key, time.Now())
+	}
+	return func() {
+		h.uploadingFiles.Delete(key)
+		h.uploadingLockAt.Delete(key)
+	}, true
+}
+
+// uploadingLockTTL 是锁标记的最长合理持有时长（超过视为持锁者异常退出）。取值远大于任何
+// 合法事务（跨卷 move / 大文件复制 / 校验均分钟级），避免误回收在途长事务。
+const uploadingLockTTL = 30 * time.Minute
+
+// reclaimStaleLock 回收超龄锁标记（持锁者异常退出：panic 逃出 defer、或远端写无超时永久阻塞
+// 而未执行 release）——否则该 rel 后续所有写请求持续 409 至进程重启（评审 P2）。返回是否回收。
+// 未记录获取时间的条目（历史/领域侧写入）不回收（零回归）。
+func (h *Handlers) reclaimStaleLock(key string) bool {
+	at, ok := h.uploadingLockAt.Load(key)
+	if !ok {
+		return false
+	}
+	t, ok := at.(time.Time)
+	if !ok || time.Since(t) < uploadingLockTTL {
+		return false
+	}
+	h.uploadingLockAt.Delete(key)
+	h.uploadingFiles.Delete(key)
+	h.logger.Warn("回收超龄文件锁标记（持锁者疑似异常退出）", "lock_key", key, "held_for", time.Since(t).String())
+	return true
 }

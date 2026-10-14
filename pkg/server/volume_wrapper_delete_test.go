@@ -300,3 +300,19 @@ func TestWrapperMove_SourceOccupied403(t *testing.T) {
 		t.Fatalf("move 源侧占用 = %d, want 403 (body: %s)", status, body)
 	}
 }
+
+// wrapperCounterUsage 返回封装卷的 FS 层容量计数（master 底座：外部卷容量由 CapacityFS
+// 计数器权威记账——create 时 capacity.WrapBackend 包装；委托子池（DelegatePool）仅保留
+// 挂载/预检语义，上传/删除计量走计数器）。
+func wrapperCounterUsage(t *testing.T, h *Handlers, volName string) int64 {
+	t.Helper()
+	be := h.volSet.External(volName)
+	if be == nil {
+		t.Fatalf("卷 %q 未注册（External 缺失）", volName)
+	}
+	up, ok := be.(registry.UsageProvider)
+	if !ok {
+		t.Fatalf("卷 %q 未实现 UsageProvider（容量计数缺失）", volName)
+	}
+	return up.Usage()
+}

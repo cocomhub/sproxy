@@ -5,6 +5,8 @@ package baidupcs
 
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // 测试双算法校验
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -49,6 +51,38 @@ func (f *fakeStorageAdapter) Download(ctx context.Context, remotePath, localPath
 		return errNotFound
 	}
 	return os.WriteFile(localPath, []byte(data), 0o644)
+}
+
+// Move 服务端移动（源移除、目标覆盖）。
+func (f *fakeStorageAdapter) Move(ctx context.Context, from, to string) error {
+	data, ok := f.files[from]
+	if !ok {
+		return errNotFound
+	}
+	delete(f.files, from)
+	f.files[to] = data
+	f.markDirs(to)
+	return nil
+}
+
+// Copy 服务端复制（源保留）。
+func (f *fakeStorageAdapter) Copy(ctx context.Context, from, to string) error {
+	data, ok := f.files[from]
+	if !ok {
+		return errNotFound
+	}
+	f.files[to] = data
+	f.markDirs(to)
+	return nil
+}
+
+// Delete 服务端删除（幂等：不存在不报错）。
+func (f *fakeStorageAdapter) Delete(ctx context.Context, remotePath string) error {
+	if _, ok := f.files[remotePath]; !ok {
+		return nil // 幂等：缺失不报错
+	}
+	delete(f.files, remotePath)
+	return nil
 }
 
 // markDirs 为 remotePath 的所有父路径建目录标记。
@@ -126,6 +160,7 @@ func (f *fakeStorageAdapter) listDirsLocked(prefix, remotePath string, seen map[
 }
 
 // Meta 返回单个路径元信息（目录/文件）。实现 metadataProvider。
+// ETag = 内容 md5（对齐百度 ETag 语义；供 Put 的 md5 刷新复核通过）。
 func (f *fakeStorageAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -137,7 +172,13 @@ func (f *fakeStorageAdapter) Meta(ctx context.Context, remotePath string) (*Obje
 	if !ok {
 		return nil, errNotFound
 	}
-	return &ObjectMeta{Key: remotePath, Size: int64(len(data)), ModTime: time.Now()}, nil
+	h := md5.Sum([]byte(data)) //nolint:gosec // 测试双算法校验
+	return &ObjectMeta{
+		Key:     remotePath,
+		Size:    int64(len(data)),
+		ModTime: time.Now(),
+		ETag:    hex.EncodeToString(h[:]),
+	}, nil
 }
 
 var _ metadataProvider = (*fakeStorageAdapter)(nil)
@@ -281,6 +322,13 @@ func (e *statMissingAdapter) Upload(ctx context.Context, localPath, targetPath s
 
 func (e *statMissingAdapter) Download(ctx context.Context, remotePath, localPath string) error {
 	return errNotFound
+}
+
+func (e *statMissingAdapter) Move(ctx context.Context, from, to string) error {
+	return e.inner.Move(ctx, from, to)
+}
+func (e *statMissingAdapter) Copy(ctx context.Context, from, to string) error {
+	return e.inner.Copy(ctx, from, to)
 }
 
 // newTestStorage 构造测试用 Storage（temp 指向 t.TempDir()）。
@@ -434,4 +482,392 @@ func TestStorage_Copy_GetPutCombo(t *testing.T) {
 	if string(got) != "copy-me" {
 		t.Fatalf("复制内容 = %q, want %q", got, "copy-me")
 	}
+}
+
+// TestStorage_Put_MultipartETagRefresh M4 回归（cocom 行为）：分片上传后远端 ETag 是
+// 片组合/服务端"可能不正确"（非整文件 md5）→ Put 复核不匹配 → rapidupload 秒传刷新
+// （内容已在网盘）→ 目标 md5 刷新为权威整文件 md5 → 严格复核一致才成功（无 readback
+// 接受捷径）。
+func TestStorage_Put_MultipartETagRefresh(t *testing.T) {
+	t.Parallel()
+	ad := &multipartETagAdapter{inner: newFakeStorageAdapter(), multipart: true}
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("multipart-md5-refresh-content-", 100)
+	if _, err := s.Put(context.Background(), "big.bin", strings.NewReader(content)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !ad.rapidHit {
+		t.Fatal("分片上传 ETag 不匹配应触发 rapidupload 秒传刷新")
+	}
+	// 最终远端内容与本地一致 + ETag 权威（假 adapter 秒传后 ETag 用整文件 md5）。
+	m, err := s.Stat(context.Background(), "big.bin")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	want := md5Hex(content)
+	if m.ETag != want {
+		t.Fatalf("秒传刷新后 ETag 应权威整文件 md5 %s, got %s", want, m.ETag)
+	}
+}
+
+// multipartETagAdapter 模拟百度分片上传：Upload 后 Stat 返回片组合 ETag（非整文件 md5），
+// RapidUpload 命中后把 ETag 刷新为整文件 md5。
+type multipartETagAdapter struct {
+	inner     *fakeStorageAdapter
+	multipart bool // 分片语义：上传后 ETag 是片组合
+	rapidHit  bool
+}
+
+func (e *multipartETagAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	return e.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (e *multipartETagAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return e.inner.Download(ctx, remotePath, localPath)
+}
+func (e *multipartETagAdapter) Move(ctx context.Context, from, to string) error {
+	return e.inner.Move(ctx, from, to)
+}
+func (e *multipartETagAdapter) Copy(ctx context.Context, from, to string) error {
+	return e.inner.Copy(ctx, from, to)
+}
+func (e *multipartETagAdapter) Delete(ctx context.Context, remotePath string) error {
+	return e.inner.Delete(ctx, remotePath)
+}
+func (e *multipartETagAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return e.inner.List(ctx, remotePath)
+}
+func (e *multipartETagAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	m, err := e.inner.Meta(ctx, remotePath)
+	if err != nil {
+		return nil, err
+	}
+	if e.multipart && !e.rapidHit && m != nil {
+		// 分片语义：真实 md5 算好前 Stat 返回"片组合"（伪造值，≠ 整文件 md5）。
+		return &ObjectMeta{Key: m.Key, Size: m.Size, ETag: "slicemd5-combo-not-whole"}, nil
+	}
+	return m, nil
+}
+func (e *multipartETagAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
+	e.rapidHit = true
+	e.multipart = false // 秒传命中后 Stat 返回真实整文件 md5
+	return true, nil
+}
+
+var _ Adapter = (*multipartETagAdapter)(nil)
+var _ rapidUploader = (*multipartETagAdapter)(nil)
+
+// md5Hex 计算字符串的十六进制 md5。
+func md5Hex(s string) string {
+	h := md5.Sum([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// TestBackoffBeforeRetry M4 退避：轮间等待递增（第二次 ≥300ms），ctx 取消立即中断。
+func TestBackoffBeforeRetry(t *testing.T) {
+	t.Parallel()
+	s := newTestStorage(t, newFakeStorageAdapter())
+	// 第二次轮间退避 300ms（C-MINOR-10：真实 sleep 已 t.Parallel 可接受，只验下限）。
+	start := time.Now()
+	if err := s.backoffBeforeRetry(context.Background(), 2); err != nil {
+		t.Fatalf("backoff(2): %v", err)
+	}
+	if el := time.Since(start); el < 250*time.Millisecond {
+		t.Fatalf("第 2 轮退避应 ≥300ms, got %v", el)
+	}
+	// ctx 取消立即中断。
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.backoffBeforeRetry(cctx, 2); err == nil {
+		t.Fatal("ctx 取消应中断退避")
+	}
+}
+
+// TestBlockMD5ListOf C-C1 回归：分块 md5 列表按 uploadBlockSize（4MiB）切分——
+// >4MiB 文件多块、<4MiB 单块（= 整文件 md5）、空文件空列表。
+func TestBlockMD5ListOf(t *testing.T) {
+	t.Parallel()
+	// <4MiB：单块 = 整文件 md5。
+	small := strings.Repeat("s", 100)
+	sp := filepath.Join(t.TempDir(), "small.bin")
+	_ = os.WriteFile(sp, []byte(small), 0o600)
+	list, err := blockMD5ListOf(sp, int64(len(small)))
+	if err != nil {
+		t.Fatalf("blockMD5ListOf: %v", err)
+	}
+	if len(list) != 1 || list[0] != md5Hex(small) {
+		t.Fatalf("小文件应单块=整文件 md5, got %v", list)
+	}
+	// >4MiB：多块（每块 md5 独立，非整文件 md5）。
+	big := []byte(strings.Repeat("b", 4<<20+100)) // 4MiB+100
+	bp := filepath.Join(t.TempDir(), "big.bin")
+	_ = os.WriteFile(bp, big, 0o600)
+	blist, berr := blockMD5ListOf(bp, int64(len(big)))
+	if berr != nil {
+		t.Fatalf("blockMD5ListOf big: %v", berr)
+	}
+	if len(blist) != 2 {
+		t.Fatalf("4MiB+100 应 2 块, got %d", len(blist))
+	}
+	if blist[0] == md5Hex(string(big)) {
+		t.Fatal("分块 md5 不得等于整文件 md5（否则秒传仍 miss）")
+	}
+	// 空文件 → 空列表。
+	empty := filepath.Join(t.TempDir(), "empty.bin")
+	_ = os.WriteFile(empty, nil, 0o600)
+	elist, eerr := blockMD5ListOf(empty, 0)
+	if eerr != nil || elist != nil {
+		t.Fatalf("空文件应空列表, got %v %v", elist, eerr)
+	}
+}
+
+// TestRefreshByRapidUpload_FallbackBinary C-C1 生产默认路径回归：binaryAdapter（二进制
+// 优先 + 库 Fallback）下 refreshByRapidUpload 必须透传 Fallback 的 rapidUploader——
+// 否则大文件分片上传后 ETag 恒错，默认装配路径无秒传刷新 → 3 轮重传 ErrTransient。
+func TestRefreshByRapidUpload_FallbackBinary(t *testing.T) {
+	t.Parallel()
+	inner := &multipartETagAdapter{inner: newFakeStorageAdapter(), multipart: true}
+	ba := newBinaryAdapter(AdapterConfig{Logger: testLogger(), Fallback: inner})
+	s := newTestStorage(t, ba)
+	content := strings.Repeat("fallback-rapid-", 100)
+	if _, err := s.Put(context.Background(), "big.bin", strings.NewReader(content)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !inner.rapidHit {
+		t.Fatal("binaryAdapter 默认装配（库 Fallback）下 ETag 不匹配应经 Fallback rapidupload 刷新")
+	}
+}
+
+// TestBinaryAdapter_Upload_CLIDirSemantics e2e 实测修复：binaryAdapter.Upload 的 CLI
+// `upload` target 是**目录**语义（内容落 `<dir>/<basename>`）——调用方传入文件路径时
+// 不得直接透传（否则父路径错位 + 残留目录）。这里验证 runBinary 收到的 arg 是目录
+// 而非文件路径。
+func TestBinaryAdapter_Upload_CLIDirSemantics(t *testing.T) {
+	t.Parallel()
+	recorded := &recordBinaryAdapter{}
+	// 用记录 args 的 fake fallback 路径验证：binary 失败（无二进制）→ 回退前 args 应为目录。
+	ba := newBinaryAdapter(AdapterConfig{BinaryPath: "/nonexistent/BaiduPCS-Go", Logger: testLogger(), Fallback: recorded})
+	if err := ba.Upload(context.Background(), "/tmp/local.bin", "/baidu/dir/file.bin", true); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if len(recorded.calls) != 1 {
+		t.Fatalf("应回退库一次, got %d", len(recorded.calls))
+	}
+	// 二进制失败后回退库（库 Upload 拿到的是完整文件路径——库语义）。
+	if recorded.calls[0].target != "/baidu/dir/file.bin" {
+		t.Fatalf("库回退应收完整文件路径, got %q", recorded.calls[0].target)
+	}
+}
+
+// recordBinaryAdapter 记录 Upload 调用的库兜底（验证二进制回退链路）。
+type recordBinaryAdapter struct {
+	calls []struct{ local, target string }
+}
+
+func (r *recordBinaryAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	r.calls = append(r.calls, struct{ local, target string }{localPath, targetPath})
+	return nil
+}
+func (r *recordBinaryAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return nil
+}
+func (r *recordBinaryAdapter) Move(ctx context.Context, from, to string) error     { return nil }
+func (r *recordBinaryAdapter) Copy(ctx context.Context, from, to string) error     { return nil }
+func (r *recordBinaryAdapter) Delete(ctx context.Context, remotePath string) error { return nil }
+
+// unreliableMD5Adapter 模拟 binary-only 模式的 `meta`：远端 ETag 非权威整文件 md5
+// （服务端标注「可能不正确」）——不得据此做相等断言。
+type unreliableMD5Adapter struct{ inner *fakeStorageAdapter }
+
+func (a *unreliableMD5Adapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (a *unreliableMD5Adapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return a.inner.Download(ctx, remotePath, localPath)
+}
+func (a *unreliableMD5Adapter) Move(ctx context.Context, from, to string) error {
+	return a.inner.Move(ctx, from, to)
+}
+func (a *unreliableMD5Adapter) Copy(ctx context.Context, from, to string) error {
+	return a.inner.Copy(ctx, from, to)
+}
+func (a *unreliableMD5Adapter) Delete(ctx context.Context, remotePath string) error {
+	return a.inner.Delete(ctx, remotePath)
+}
+func (a *unreliableMD5Adapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.inner.List(ctx, remotePath)
+}
+func (a *unreliableMD5Adapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	m, err := a.inner.Meta(ctx, remotePath)
+	if err != nil || m == nil {
+		return m, err
+	}
+	m.ETag = "00000000000000000000000000000000" // 非整文件 md5（片组合/不确定）
+	m.MD5Unreliable = true
+	return m, nil
+}
+
+// TestStorage_Put_BinaryOnlyUnreliableMD5Accepted EXT-2 回归：binary-only 模式上传后远端
+// md5 可能不正确 → 不得判失败重传（否则 3 轮全量重传后 ErrTransient），应接受。
+func TestStorage_Put_BinaryOnlyUnreliableMD5Accepted(t *testing.T) {
+	t.Parallel()
+	s := newTestStorage(t, &unreliableMD5Adapter{inner: newFakeStorageAdapter()})
+	content := strings.Repeat("binary-only-unreliable-md5-", 64)
+	if _, err := s.Put(context.Background(), "x.bin", strings.NewReader(content)); err != nil {
+		t.Fatalf("Put 应接受（md5 非权威不判失败）: %v", err)
+	}
+	rc, _, err := s.Get(context.Background(), "x.bin")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if string(got) != content {
+		t.Fatalf("内容不一致")
+	}
+}
+
+// unreliableMD5RapidAdapter 是「远端 md5 非权威 + **有秒传能力**」的替身：RapidUpload 后
+// 远端 md5 变权威（整文件 md5），用于验证 M6 的「先刷新重验」路径。
+type unreliableMD5RapidAdapter struct {
+	inner    *unreliableMD5Adapter
+	rapidHit bool
+}
+
+func (a *unreliableMD5RapidAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (a *unreliableMD5RapidAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return a.inner.Download(ctx, remotePath, localPath)
+}
+func (a *unreliableMD5RapidAdapter) Move(ctx context.Context, from, to string) error {
+	return a.inner.Move(ctx, from, to)
+}
+func (a *unreliableMD5RapidAdapter) Copy(ctx context.Context, from, to string) error {
+	return a.inner.Copy(ctx, from, to)
+}
+func (a *unreliableMD5RapidAdapter) Delete(ctx context.Context, remotePath string) error {
+	return a.inner.Delete(ctx, remotePath)
+}
+func (a *unreliableMD5RapidAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.inner.List(ctx, remotePath)
+}
+func (a *unreliableMD5RapidAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	// 直取底层 fake（跳过 unreliableMD5Adapter 的无条件 MD5Unreliable 覆盖）。
+	m, err := a.inner.inner.Meta(ctx, remotePath)
+	if err != nil || m == nil || a.rapidHit {
+		return m, err // 刷新后：权威整文件 md5
+	}
+	m.MD5Unreliable = true // 刷新前：分片组合语义
+	return m, nil
+}
+func (a *unreliableMD5RapidAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
+	a.rapidHit = true
+	return true, nil
+}
+
+var _ Adapter = (*unreliableMD5RapidAdapter)(nil)
+var _ rapidUploader = (*unreliableMD5RapidAdapter)(nil)
+
+// TestStorage_Put_UnreliableMD5RefreshedByRapidUpload 回归（M6，第 7 轮 MINOR）：远端 md5
+// 非权威时**必须先经 rapidupload 刷新**再判定，而不是直接接受——否则「必须 md5 一致」在
+// 分片上传（>4MiB）路径被架空（任何 md5 不匹配都会被同一句「可能不正确」放过）。
+// 变异：去掉 renewAuthoritativeMD5 调用 → rapidHit=false → 红。
+func TestStorage_Put_UnreliableMD5RefreshedByRapidUpload(t *testing.T) {
+	t.Parallel()
+	ad := &unreliableMD5RapidAdapter{inner: &unreliableMD5Adapter{inner: newFakeStorageAdapter()}}
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("unreliable-md5-rapid-refresh-", 80)
+	if _, err := s.Put(context.Background(), "r.bin", strings.NewReader(content)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !ad.rapidHit {
+		t.Fatal("远端 md5 非权威时应先触发 rapidupload 刷新（M6）")
+	}
+	m, err := s.Stat(context.Background(), "r.bin")
+	if err != nil || m == nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if m.MD5Unreliable {
+		t.Fatal("刷新后远端 md5 应权威（否则相等断言仍被跳过）")
+	}
+	if m.ETag != md5Hex(content) {
+		t.Fatalf("刷新后应做相等断言并与本地 md5 一致: got %s want %s", m.ETag, md5Hex(content))
+	}
+}
+
+// TestStorage_PutFromStagedPath_NoPhysicalSecondCopy staging 复用入口**只读**调用方文件、
+// 不产生第二份**物理**拷贝（同 inode 的硬链接不算拷贝）：以 os.SameFile 逐文件判定，避免
+// 「按 Size 求和」把硬链接误计为 2×。变异：把 prepareStagedForAdapter 的链接分支改成拷贝
+// → SameFile 为假 → 红。
+func TestStorage_PutFromStagedPath_NoPhysicalSecondCopy(t *testing.T) {
+	t.Parallel()
+	sink := &recordingUploadPathAdapter{inner: newFakeStorageAdapter()}
+	s := newTestStorage(t, sink)
+	content := strings.Repeat("staged-reuse-body-", 64)
+	staged := filepath.Join(s.temp, "already-staged.bin")
+	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sink.linkSource = staged
+	if _, err := s.PutFromStagedPath(context.Background(), "reuse.bin", staged, int64(len(content))); err != nil {
+		t.Fatalf("PutFromStagedPath: %v", err)
+	}
+	stagedInfo, serr := os.Stat(staged)
+	if serr != nil {
+		t.Fatalf("调用方暂存文件不得被删除/移动（只读契约）: %v", serr)
+	}
+	// 上传播径必须是暂存文件的**硬链接**（同 inode）：在 adapter 内（链接仍在时）判定——
+	// 拷贝版会在 PutFromStagedPath 返回前被 cleanup 删掉，事后扫描看不见。
+	if !sink.sameFile {
+		t.Fatalf("交给 adapter 的本地路径必须是暂存文件的硬链接（不得为拷贝）: %s", sink.uploadedPath)
+	}
+	_ = filepath.WalkDir(s.temp, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || p == staged {
+			return nil
+		}
+		fi, ferr := d.Info()
+		if ferr != nil {
+			return nil
+		}
+		if !os.SameFile(stagedInfo, fi) {
+			t.Fatalf("不得出现第二份物理拷贝（staging 复用应链接而非复制）: %s", p)
+		}
+		return nil
+	})
+}
+
+// recordingUploadPathAdapter 记录 adapter.Upload 收到的本地路径（断言「硬链接而非拷贝」）。
+type recordingUploadPathAdapter struct {
+	inner        *fakeStorageAdapter
+	uploadedPath string
+	linkSource   string
+	sameFile     bool
+}
+
+func (a *recordingUploadPathAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	a.uploadedPath = localPath
+	if a.linkSource != "" {
+		si, e1 := os.Stat(a.linkSource)
+		fi, e2 := os.Stat(localPath)
+		a.sameFile = e1 == nil && e2 == nil && os.SameFile(si, fi)
+	}
+	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (a *recordingUploadPathAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return a.inner.Download(ctx, remotePath, localPath)
+}
+func (a *recordingUploadPathAdapter) Move(ctx context.Context, from, to string) error {
+	return a.inner.Move(ctx, from, to)
+}
+func (a *recordingUploadPathAdapter) Copy(ctx context.Context, from, to string) error {
+	return a.inner.Copy(ctx, from, to)
+}
+func (a *recordingUploadPathAdapter) Delete(ctx context.Context, remotePath string) error {
+	return a.inner.Delete(ctx, remotePath)
+}
+func (a *recordingUploadPathAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.inner.List(ctx, remotePath)
+}
+func (a *recordingUploadPathAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	return a.inner.Meta(ctx, remotePath)
 }

@@ -44,6 +44,11 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 		使用 / 开头的绝对路径可以绕过当前目录。`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷上下文：**只应用当前工作目录所在卷**（`cd <卷名>:/…` 设定）——位置参数是
+			// **本地文件路径**，故不做卷 URI 解析（用户口径 2026-10-13）。
+			if err := applyStateVolume(cmd, st); err != nil {
+				return err
+			}
 			return runUpload(cmd, args, factory, ios, st)
 		},
 	}

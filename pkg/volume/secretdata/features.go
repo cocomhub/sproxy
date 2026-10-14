@@ -98,6 +98,7 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, wc writeCtx, key, 
 	}
 	if cerr := s.commitDedupEntry(ctx, wc, &metaEntry{
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: ref, dataDir: dir,
+		phys: physBytesOf(ref, int64(len(blob)), true),
 	}, []string{metaPath}); cerr != nil {
 		s.releasePoolRef(key) // 提交失败/版本冲突：释放预留
 		return cerr
@@ -122,9 +123,9 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 	meta.Original.MTime = mtimeString(wc.mtime)
 	meta.BaseVersion = wc.newVer // Imp-1 修复：去重 miss 落盘 meta 也携带写路径分配版本
 	if meta.Extra == nil {
-		meta.Extra = map[string][]byte{}
+		meta.Extra = map[string]any{}
 	}
-	meta.Extra["dedup"] = []byte(dir)
+	meta.Extra["dedup"] = dir // string（Extra 统一 map[string]any，2026-10-07 用户裁定）
 	name, metaBlob, err := s.encryptMetaBlob(meta)
 	if err != nil {
 		_ = s.inner.Delete(ctx, chunkPath)
@@ -155,10 +156,14 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 	// 并发未命中（同 ID 双首写）：已有池条目则保留其 blob 作他人共享，本文件持自有
 	// 分块（不覆盖 —— 覆盖会让他人 blob 丢引用）。entry 引用分块仍在本容器 dataDir。
 	if _, exists := s.dedupPool[key]; !exists {
-		s.dedupPool[key] = &dedupBlob{name: chunkName, refs: 1, meta: meta}
+		s.dedupPool[key] = &dedupBlob{name: chunkName, refs: 1, meta: meta, phys: contentPhysBytes(meta)}
 	}
 	prev := s.index[wc.rel]
-	s.index[wc.rel] = &metaEntry{size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: meta, dataDir: dir, baseVersion: wc.newVer}
+	s.index[wc.rel] = &metaEntry{
+		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: meta,
+		dataDir: dir, baseVersion: wc.newVer,
+		phys: physBytesOf(meta, int64(len(metaBlob)), true),
+	}
 	addDirKeysLocked(s.dirs, wc.rel)
 	s.volVersion = wc.newVer
 	s.usage += int64(len(wc.data))
@@ -172,7 +177,7 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 	if prev != nil {
 		// 同 commitEntry：锁外 best-effort 删旧版本（M-8 并发语义——索引已切新、旧分块
 		// 无引用；并发在途读旧条目可能读到已删分块而报错，属可接受读-写语义，非损坏）。
-		s.removeVersionMeta(prev)
+		s.removeVersionMeta(wc.rel, prev)
 	}
 	return nil
 }
@@ -216,7 +221,7 @@ func (s *SecretdataFS) commitDedupEntry(ctx context.Context, wc writeCtx, e *met
 	if prev != nil {
 		// 同 commitEntry：锁外 best-effort 删旧版本（M-8 并发语义——索引已切新、旧分块
 		// 无引用；并发在途读旧条目可能读到已删分块而报错，属可接受读-写语义，非损坏）。
-		s.removeVersionMeta(prev)
+		s.removeVersionMeta(wc.rel, prev)
 	}
 	return nil
 }
@@ -525,8 +530,10 @@ func (s *SecretdataFS) gcProtectLiveMeta(referenced map[string]struct{}, contain
 	referenced[container+"/"+name] = struct{}{}
 	dir := container
 	if len(mm.Extra) > 0 {
-		if dd, ok := mm.Extra["dedup"]; ok && len(dd) > 0 {
-			dir = string(dd)
+		if dd, ok := mm.Extra["dedup"]; ok {
+			if s, sok := dd.(string); sok && s != "" {
+				dir = s
+			}
 		}
 	}
 	for _, ci := range mm.Chunks {

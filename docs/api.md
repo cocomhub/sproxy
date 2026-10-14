@@ -96,9 +96,17 @@ BuildAt: 2026-06-01T12:00:00Z
 
 | 项 | 内容 |
 |---|---|
-| 查询参数 | `filename` |
+| 查询参数 | `filename`；可选 `ciphertext=1` |
 | 响应头 | `X-File-Checksum`、`X-File-MTime`、`Accept-Ranges: bytes`、`Content-Disposition` |
 | Range 支持 | 是（返回 206 + `Content-Range`） |
+
+**`ciphertext=1`**：at-rest 加密卷（`volumes[].extra.encrypt`）默认返回**明文**（加密只在
+存储层，用户访问恒见明文）；带此参数时返回**存储原样密文**（不解密），`Range`/`Content-Length`
+按密文坐标——供备份/迁移/带外校验。非加密卷该参数无副作用（原始字节 == 明文）。
+密文响应不附 `X-File-Checksum`（台账描述明文，不适用于密文）。
+
+> 适用范围：`ciphertext=1` 仅对**卷根 at-rest 加密**（`storage.Root` 加密态）生效。
+> secretdata 保密卷 / 302 直链（B 态外部卷）分支不支持该参数（仍返回解密/直链内容）。
 
 | 状态码 | 含义 |
 |---|---|
@@ -122,6 +130,18 @@ BuildAt: 2026-06-01T12:00:00Z
 | 200 | 删除成功 |
 | 400 | filename 无效 / 缺少 checksum / checksum 不匹配 |
 | 404 | 文件不存在 |
+| 409 | 外部卷：sidecar 记录的内容校验和与 `X-File-Checksum` 不一致（文件已变更，请刷新后重试） |
+
+- **作用卷（`?volume=`）**：未指定 → 先在 owner 视图内的**外部卷**上按 rel 查找（删到即返回），
+  未命中再走本地卷（跨卷定位）；显式指定外部卷 → 只在该卷上删。
+- **配额释放按「用户可见逻辑长度」**（非磁盘字节）：at-rest 加密卷上磁盘是密文（容器头 +
+  每分块 tag/padding 膨胀），而写入预留/软删保留的都是逻辑长度 ⇒ 清空回收站/过期清理（下文的
+  `EmptyTrash`/`CleanupTrash`）必须用 `Root.LogicalSize` 释放，否则 owner 配额漂移（密文 > 逻辑
+  时多释放 → 配额虚低、超限写入通过）。
+- **外部卷为「硬删」**（评审 F1）：不经回收站（`?soft=true` 对本地卷生效）、不做本地 quarantine
+  （远端后端无原子 rename）。`X-File-Checksum` 与 sidecar **记录**的整文件 SHA-256 交叉比对
+  （不重算——远端整文件回读不可接受）；sidecar 缺失则跳过该判据。删除会同时删 sidecar 并释放卷级容量。
+  此前外部卷对象**无任何用户可见删除入口**（卷写满后一切写入恒 507），本接口是唯一回收路径。
 
 ### POST /rename?from=&to=
 
@@ -354,6 +374,9 @@ JSON body 批量形态（body 存在且 `files` 非空时优先）：
 ### GET /download/chunk?filename=&offset=&length=
 
 自定义分块下载端点。响应头包含 `Content-Range`、`X-Chunk-Checksum`。
+
+支持与 `GET /download` 同名的 `ciphertext=1`：at-rest 加密卷按**密文坐标**
+（`offset`/`length`/`size` 均为密文字节）返回存储原样字节；缺省返回明文。
 
 > 推荐：标准 `GET /download` + `Range: bytes=` 与本端点等价，且更易穿越 CDN。
 > 本端点保留以维持向后兼容、支持 SHA-256 单块校验场景。
@@ -759,7 +782,7 @@ sproxy_gc_cycles 42
 创建用户卷。请求体（JSON）：
 
 ```json
-{"name": "my-disk-1", "type": "baidupcs", "capacity": 0, "extra": {"bduss": "...", "baidu_root": "/disk1"}}
+{"name": "my-disk-1", "type": "baidupcs", "capacity": 0, "unlimited": false, "extra": {"bduss": "...", "baidu_root": "/disk1"}}
 ```
 
 ```json
@@ -768,7 +791,14 @@ sproxy_gc_cycles 42
 
 - `type` 须服务端已注册 backend（未注册 → 400）；`extra` 为类型特有配置（baidupcs 支持
   `bduss`/`baidu_root`/`binary_path`/`local_root`；webdav 支持 `url`（必填 http(s) 根）、
-  `username`+`password`（Basic）或 `token`（Bearer，优先））；`capacity` 独立卷容量（0 = 不限制，不计 owner 配额）
+  `username`+`password`（Basic）或 `token`（Bearer，优先））
+- `capacity` 独立卷容量（不计 owner 配额）。**语义（F6）**：
+  - `capacity > 0`：显式声明上限（可改大/改小；改小会把已用钳到新上限）；
+  - `capacity == 0` 且 `unlimited != true`：**继承同名卷已持久化的上限**。删除用户卷时刻意保留
+    计数快照（远端已写入的字节仍在，本系统不删远端内容），若不继承，`delete + recreate` 写
+    `capacity:0` 即把上限变「不限」——该绕过已被堵住；
+  - `capacity == 0` 且 `"unlimited": true`：**显式不限**（0）。
+- 生效上限在**创建期即落盘**（计数快照 + 卷元数据），重启 restore 后保持一致
 - 认证：SproxySig / api_keys（owner 从请求派生）；重名 → 错误
 - 响应：`{"success": true}`
 
@@ -866,6 +896,26 @@ sproxy_gc_cycles 42
 - 新增外部后端 = 新 backend 包 `RegisterBackend(type, factory)` 注册，前端自动感知
   - `s3`：`endpoint`/`bucket`/`access_key`/`secret_key`（必填），`region`/`use_ssl`/`local_root`（可选）；大文件分片上传（roadmap 3.3 P1）：`multipart_threshold`（分片阈值，默认 64MiB）、`multipart_part_size`（分片大小，默认 16MiB，minio 5MiB 下限钳制）、`upload_retries`（失败重试次数，默认 3）
   - `sftp`：`url`（`sftp://user@host[:port][/root-path]`，必填）+ `private_key` 或 `password`（二选一），`root`（远端根，可选）
+
+### 预签名直传（`POST /api/backends/{type}/presign`）
+
+服务端持凭据为客户端签发对象存储直传 URL（当前 `s3`），客户端 PUT 后经登记端点确认。
+
+query 参数：`path`（卷内相对路径，必填）、`method`（`PUT`/`GET`，必填）、`expires`（正整数秒，可选）。
+
+- **路径 owner 收敛（硬性）**：`path` 由服务端重绑到**调用者**的键空间——
+  裸相对路径（`dir/a.txt`）与 `user/dir/a.txt` 均归一为 `<owner>/user/dir/a.txt`；
+  已带 `<owner>/…` 前缀时 owner 必须等于调用者。**越权（他人 owner 前缀 / 非 `user` 桶 /
+  `meta` 功能桶）→ 403**。这样对象落点与文件 API 一致（此前落裸 key、文件 API 不可见）。
+- 响应 `{"url": "…"}`；未注册类型 → 404；后端不支持预签名 → 405；`method`/`expires` 非法 → 400。
+
+### 预签名登记（`POST /api/backends/{type}/presign/complete`）
+
+客户端直传完成后登记：服务端按上述同一 owner 收敛路径 `Stat` 确认对象存在。
+
+- 对象不存在 → 404（fail-closed，**不**空确认）；未注册类型 → 404；越权路径 → 403。
+- 注意：预签名直传**不经**服务端 `Wrap`/`CapacityFS`，当前不生成完整性 sidecar、不计卷级容量
+  （设计边界，见 `docs/designs/2026-10-10-trusted-volume.md` §8）。
 
 ## 审计（audit /api/audit）
 

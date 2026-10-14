@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -90,6 +91,11 @@ type dirsEnv struct {
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
+	// fileMeta 为 true 时注入可信卷 meta 能力（WithFileMeta testMetaPolicy）——软删
+	// 随迁 meta/恢复/清理联动用例需要它；默认 false 零回归（不落 .meta）。
+	fileMeta bool
+	// externalOps 是外部卷对象操作接缝替身（非 nil 时注入 Service；MoveFile/外部卷用例用）。
+	externalOps ExternalVolumeOps
 	// uploading 是替身锁池（TryMark/Acquire 共用，rebuild 时重置——与旧 deps() 每次新建
 	// &sync.Map{} 同语义）。
 	uploading sync.Map
@@ -166,6 +172,12 @@ func (e *dirsEnv) newService() *Service {
 		WithAudit(rt),
 		WithContentIndex(e.contentIndex),
 	}
+	if e.fileMeta {
+		opts = append(opts, WithFileMeta(testMetaPolicy{}))
+	}
+	if e.externalOps != nil {
+		opts = append(opts, WithExternalOps(e.externalOps))
+	}
 	if e.metrics != nil {
 		opts = append(opts, WithMetrics(e.metrics))
 	}
@@ -214,6 +226,11 @@ func (r testRuntime) Route(owner, rel, explicitVol string, size int64, forceHome
 		return UploadRoute{}, nil
 	}
 	return r.e.routeUpload(owner, rel, explicitVol, size, forceHomeVol)
+}
+
+// RouteTarget 显式卷（不查重）：回落 dirsEnv.routeUpload 的显式卷形态（替身 routeUploadDefault 不查重）。
+func (r testRuntime) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+	return r.e.routeUpload(owner, rel, volName, size, "")
 }
 
 func (r testRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.e.quotaScopeFor(owner, rel) }
@@ -274,6 +291,37 @@ type auditRow struct {
 
 func (r testRuntime) Record(_ context.Context, action, object, result, detail string) {
 	r.e.audits = append(r.e.audits, auditRow{action: action, object: object, result: result, detail: detail})
+}
+
+// testMetaPolicy 是最小 FileMetaPolicy 替身：Enabled 恒 true；WriteMeta 写入 meta 桶
+// 的 `meta/<rel>.meta` 占位文件（内容无关——软删随迁/恢复/清理联动只关心 sidecar
+// 文件的落点与存在性，不校验 JSON 语义）。配额：按 meta 实际字节 ReleaseUsage 对称
+// 释放由被测生命周期代码处理（软删/恢复/清 trash 各自联动）。
+type testMetaPolicy struct{}
+
+var _ FileMetaPolicy = testMetaPolicy{}
+
+func (testMetaPolicy) Enabled() bool { return true }
+
+func (testMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error {
+	mrel := meta.MetaPath(rel)
+	if dir := filepath.ToSlash(filepath.Dir(mrel)); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	f, ferr := root.OpenFile(mrel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if ferr != nil {
+		return ferr
+	}
+	_, werr := f.Write([]byte("test-meta"))
+	_ = f.Close()
+	return werr
+}
+
+// VerifyDownload 测试替身：不包装（返回 nil = 直通，域测试不测下载校验）。
+func (testMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error) {
+	return nil, nil
 }
 
 // findAudit 返回首条匹配 action/object 的审计行（未命中 ok=false）。
@@ -370,14 +418,8 @@ func (e *dirsEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
 	if tnt == nil {
 		return nil
 	}
-	metaAbs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		return nil
-	}
-	if err := os.MkdirAll(metaAbs, 0o755); err != nil {
-		return nil
-	}
-	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), e.logger)
+	// 台账经租户**卷句柄**读写（与生产同口径：加密卷透明加解密 + 封印判定）。
+	cs := checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", e.logger)
 	e.checksum[owner] = cs
 	return cs
 }

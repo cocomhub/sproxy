@@ -19,11 +19,12 @@ const errMsgCreateDirFailed = "创建目录失败"
 // sumRootDirSize 递归统计租户根内 rel 子树下所有普通文件的总字节数（rmdir 配额释放用）。
 // 经 root.ReadDir 相对遍历（os.Root 防符号链接逃逸），跳过符号链接（Lstat 语义不计数），
 // 子目录递归累加。rmdir 删除前调用，删除成功后按该字节数 ReleaseUsage（I2 修复）。
-// rmdirFileStat 是 rmdir 配额释放收集项：每个被删文件的完整相对路径（含功能桶前缀）
-// 与其字节数。按文件 rel 分键释放到对应子 Scope（bucket_limits 子目录配额一致）。
+// rmdirFileStat 是 rmdir 配额释放收集项：每个被删文件的完整相对路径（含功能桶前缀）、
+// 字节数与所在卷租户根（meta sidecar 删除/配额释放需要——C2 修复：rmdir 联动删 meta）。
 type rmdirFileStat struct {
 	rel  string
 	size int64
+	root *storage.Root
 }
 
 // sumRootDirFiles 递归收集租户根内 rel 子树下所有普通文件（符号链接跳过）的 {rel, size}，
@@ -43,7 +44,7 @@ func sumRootDirFiles(root *storage.Root, rel string, out *[]rmdirFileStat) {
 			continue
 		}
 		if info, err := e.Info(); err == nil {
-			*out = append(*out, rmdirFileStat{rel: childRel, size: info.Size()})
+			*out = append(*out, rmdirFileStat{rel: childRel, size: info.Size(), root: root})
 		}
 	}
 }
@@ -75,7 +76,7 @@ func (s *Service) primaryViewTenant(owner string) *storage.Tenant {
 // UserRel 逐段段名校验（拒绝 .__ 内部前缀、功能桶引用、保留设备名等），
 // 无需再单独内部目录守卫。
 func (s *Service) Mkdir(w http.ResponseWriter, r *http.Request) {
-	res, err := s.MakeDir(s.rt.actorOf(r), r.URL.Query().Get("dirname"))
+	res, err := s.MakeDir(r.Context(), s.rt.actorOf(r), r.URL.Query().Get("dirname"), r.URL.Query().Get("volume"))
 	if err != nil {
 		he := asHTTPError(err)
 		s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
@@ -91,7 +92,11 @@ func (s *Service) Mkdir(w http.ResponseWriter, r *http.Request) {
 // 文件唯一性约束，可跨卷并存）。递归删除用 root.RemoveAll（os.Root 保证符号链接不逃逸）；
 // checksum 从 per-tenant store 清理 rel 前缀与 rel 自身。
 func (s *Service) Rmdir(w http.ResponseWriter, r *http.Request) {
-	res, err := s.RemoveDir(s.rt.actorOf(r), r.URL.Query().Get("dirname"), r.URL.Query().Get("force") == "true")
+	// 显式卷（`?volume=` / CLI 卷 URI / 工作目录所在卷）由 RemoveDir 分派：外部/加密卷经接缝
+	// **递归删除**（卷自己的键空间，先子后父）；本地卷仍走逐卷定位（多卷语义不变）。
+	// 此前外部卷在此 fail-closed 501（`syncpkg.FS` 无目录级递归删）⇒ 加密卷上无法删目录。
+	res, err := s.RemoveDir(r.Context(), s.rt.actorOf(r), r.URL.Query().Get("dirname"),
+		r.URL.Query().Get("volume"), r.URL.Query().Get("force") == "true")
 	if err != nil {
 		he := asHTTPError(err)
 		s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)

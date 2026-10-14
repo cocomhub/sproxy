@@ -1,0 +1,207 @@
+# Secretdata（加密卷）CLI 文件面收口设计（2026-10-13）
+
+> 状态：已实现（master）。关联权威文档：`docs/secret-volume.md` §8.2/§9。
+> 触发：对 secretdata 卷做 CLI 面实测（真 sproxy + 真 sclient），发现**静默错误**与**功能缺口**。
+
+## 1. 实测发现（修复前）
+
+| # | 现象 | 根因 |
+|---|---|---|
+| ① | `sclient --volume vault list` **静默返回空** | `files.Service.List` 走**搜索索引**（只遍历本地卷的 `storage.Root`）；外部/加密卷没有 Root ⇒ 未被列举，且**不报错**（用户以为卷是空的） |
+| ② | `sclient --volume vault mv a b` 恒失败「源文件 checksum 为空，无法重命名」 | `StatPath` 的**外部卷分支**（`dp.Source != nil`）只回 IsDir/Size/MTime，**不填 checksum**（本地分支才取台账/实时算） |
+| ③ | 同上，绕过 checksum 门禁后服务端 404「源文件不存在」 | `RenameFile` 的 `resolveRenameHome` 只覆盖本地卷 ⇒ 外部卷文件无法重命名 |
+| ④ | 即便定位成功，`SecretdataFS.Rename` 对**文件改 basename** fail-closed | 属设计：basename 锚定在加密 meta 内（`Meta.Original.Name`），物理原地改名不成立 |
+
+（`upload`/`download`/`Range 播放`/云转存/`delete` 此前已可用。）
+
+## 2. 处置
+
+1. **列举**：`files.List` 在**显式 `?volume=`** 时优先经新增接缝 `ExternalVolumeOps.ExternalList`
+   列举外部卷（经同一可信链 `Guard(Wrap(be.FS()))` + `ResolveUserLocation` 键翻译）。
+   非外部卷支持返回 `supported=false` → 落回既有索引语义（**零回归**）。
+   未指定卷时不触达外部卷（避免每次列表都打远端 API）——**记为已知限制**并文档化。
+2. **checksum**：新增可选能力 `files.ChecksumSource`（`DownloadSource` 的可选扩展）——
+   `StatPath` 外部卷分支对实现该能力的读取源填 `Checksum`（明文整文件 SHA-256，来自
+   `meta.Provider`：secretdata 的 `Original.SHA256` / trusted sidecar 记录值）；未实现 →
+   保持旧行为（空，不伪造）。
+3. **改名**：新增接缝 `ExternalVolumeOps.ExternalRename`（同卷语义；目标已存在 409、
+   checksum 不一致 409、封印 409）；本地优先、未命中转外部（与删除路径同款，避免为本地
+   重命名触达远端）。
+4. **改名 = 只重写 meta（2026-10-13 修正）**：`SecretdataFS.Rename` 对「文件改 basename」改为
+   **原生支持**——文件名只存在于加密 meta 内（`Original.Name`；meta blob 名派生自密文内容 ⇒ 改名
+   换名重写 **meta**），**分块内容零改动、不重加密**（分块名 = 密文内容哈希，与逻辑名无关）；
+   **先写新 meta 成功、再删旧 meta** ⇒ 崩溃窗口最多两份 meta（不丢数据）；耗时 **O(meta)** 而非
+   O(内容)。契约哨兵 `syncpkg.ErrUnsupported` + 装配层「读源 → 写目标 → 删源」兜底**保留**给其它
+   无法原地改名的后端。
+
+## 3. 测试与证据
+
+- e2e（真二进制）：`TestE2E_CLI_Secretdata_CliFileOps`（upload → list/list --json → meta 带
+  checksum → download 逐字节 → mv → 旧名不可见/新名一致/磁盘仍加密容器 → delete 即时删净）；
+  `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets`（**卷声明顺序无关**——修正文档旧声称）。
+- 单测：`pkg/files`（`ChecksumSource` 生效 / 未实现时保持空）、`pkg/server`
+  （`copyThenDeleteExternal`：内容搬移 + 删源；**写失败必须保留源**）、`pkg/volume/secretdata`
+  （改名返回契约哨兵）。
+- **变异 6 命中**：StatPath 不取 checksum／拷贝后不删源／先删后写／secretdata 不返回哨兵／
+  去掉外部卷列举分支（e2e 红）／去掉 ErrUnsupported 回退（e2e 红）。
+
+## 3.1 卷 URI 寻址（用户要求 2026-10-13）
+
+位置参数写 `<卷名>:/<路径>`（`<卷名>:` = 卷根）⇒ 等价 `--volume <卷名>` + 纯路径。**纯客户端归一**
+（只改写本地参数与 flag；线上仍是 `?volume=` 查询参数，协议/服务端零改动）：新增
+`cmd/sclient/volume_uri.go`（`splitVolumeURI`/`applyVolumeURIs`/`applyMvVolumeURIs`），接入
+`list`/`download`/`meta`/`delete`/`du`/`mv`（`upload` 的位置参数是本地文件、`search` 是查询串，
+故不接入）。歧义按语法消除：要求 `:/`（冒号后单个斜杠）⇒ `https://…` 与 `C:\…` 不误判；
+位置参数与显式 `--volume` 卷名不一致 → **报错**（不静默取其一）。`mv` 两端带不同卷名 → 自动
+按跨卷迁移（`--to-volume`）。
+
+测试：`cmd/sclient/volume_uri_test.go`（解析表 + flag 归一 + 冲突 + mv 跨卷）；e2e
+`TestE2E_CLI_Secretdata_CliFileOps` 全程以 **URI 形式**驱动加密卷操作。文档：`docs/cli.md`
+「卷 URI 寻址」小节。
+
+## 4. 仍开（记档）
+
+- 未指定 `--volume` 的列表仍只含本地卷（聚合外部卷需要「列表也走远端」的成本口径决策）。
+- ~~文件改名 = O(内容) 重写~~ **已收口（2026-10-13）**：改为「只重写 meta」（O(meta)，内容零
+  改动），见 §2 第 4 条。
+- secrets 卷外部 target / secretdata 外部 target（外部卷作 target）仍为预留片（fail-closed）。
+
+## 3.2 卷感知工作目录 + mkdir 接线（2026-10-13 追加，用户口径）
+
+**用户口径**：① 工作目录支持卷 URI（`cd A:/path`）；② 所有操作（list/pwd/相对路径）默认只作用于
+**当前工作目录所在卷**；③ 需操作别处时用 URI；④ 以 `/` 开头 = **本地卷**根，其它卷必须写 `A:/`。
+
+**落地**：
+- `state.State` 增 `CurrentVolume`（**独立缓存文件** `current_volume`，旧缓存缺该文件 = 本地卷，
+  零兼容负担）+ `Location()`（`A:/dir` 或 `/dir`）；`rootPreRunE` 载入。
+- `cd`：`<卷名>:/<路径>` 切卷（路径 = 该卷根绝对）；`/…` 显式回本地卷并从根起算；相对路径/`..` 保持卷。
+  `pwd` 打印 `<卷名>:/<目录>`。
+- 命令侧统一 `applyVolumeContext(cmd, st, args)`：**位置参数卷 URI > `--volume` > 工作目录所在卷 >
+  auto**（冲突报错）；`applyMvVolumeContext` 对 `mv` 两端做同样归一（目标不同卷 ⇒ `--to-volume`）。
+  `upload` 只应用工作目录卷（其位置参数是本地文件）；`copy/move`（`volume` 子命令）同样接入。
+- **URI 路径语义**：`splitVolumeURI` 返回**保留前导 `/`** 的绝对路径 ⇒ 交给既有 `ResolveRemotePath`
+  时绕过 `cd` 前缀（否则 `list vault:/` 会被当成「当前目录相对」，实测踩过）。
+- **顺带修掉的真 bug（实测暴露）**：
+  1. `pkg/client` 的 `Mkdir`/`Rmdir` 手拼 URL **漏带 `volume` 查询参数** ⇒ `--volume`/URI 静默失效
+     （mkdir 落到本地卷，加密卷上「目录已创建」却找不到）；已补 + 单测钉住。
+  2. `files.Service.MakeDir` 无卷参数 ⇒ 显式卷被忽略（恒落 primary 视图卷）；新增 `volName` +
+     `ExternalVolumeOps.ExternalMkdir` 接缝（外部卷目录建在**该卷**）；显式本地卷也按 `volumeTenant` 定位。
+  3. `rmdir` 显式外部卷 ⇒ **fail-closed 501**（此前会静默删本地同名目录——危险方向）。
+  4. `list --json` 空结果此前输出**空串**（JSONFormatter.Println 被忽略）⇒ 非法 JSON；改为输出
+     `{"files":[],"total":0}`。
+
+**测试**：`cmd/sclient`（cd 卷 URI/持久化/`/` 回本地卷/相对保持卷、`pwd`、URI 解析与优先级、
+`ApplyMv*` 跨卷）、`pkg/client`（mkdir/rmdir 携带卷参数）、e2e
+`TestE2E_CLI_VolumeCwd_DefaultsToCurrentVolume`（cd 到加密卷 → 相对 upload/list/mkdir/download 全在
+该卷 → `cd /` 回本地卷 → rmdir 加密卷 fail-closed）。**变异命中**：URI 去掉 URL 排除；URI 去掉冲突报错；
+mkdir 客户端去掉卷参数；同容器改名早退去掉。
+
+**仍开**：跨卷移动/复制对**外部/加密卷**未接线（服务端 `400 无效的文件路径`；需源读 + 目标写 + 源删，
+经统一写内核与外部卷接缝）；加密卷 `rmdir` 未接线（`syncpkg.FS` 缺目录级递归删）。
+
+## 3.3 同卷复制：底层 blob 直拷 + 「存在即引用」（用户裁定 2026-10-13）
+
+**用户裁定**：同容器复制走**引用计数**——不重新加解密，最多调整新文件的 meta。
+
+**为什么天然可行**：分块 blob 名 = **密文内容哈希**（与逻辑名无关），文件名只存在于 meta 内；
+故复制 = 写一份新 meta（换 basename，沿用原 `Salt` ⇒ 内容密钥与分块都不变）+ 分块按情形处理：
+
+| 情形 | 处理 | 代价 |
+|---|---|---|
+| **同容器**（目标父目录容器 == 源分块容器） | 分块**原地共享**，只写新 meta | **零 blob 写、零加解密**，O(meta) |
+| **跨容器** | 分块（+parity）**字节拷贝**到目标容器（内容零改动）+ 新 meta | O(内容) 字节拷贝，**零加解密** |
+| 跨卷 | 目标卷有独立密钥 ⇒ 必须重新加密（本方法不涉及） | O(内容) 加解密 |
+
+**引用计数 = 「存在即引用」（无新元数据字段）**：共享事实就是「两份 meta 引用同一批 blob」本身 ——
+不写标记、不复用 `Extra["dedup"]`/`dataDir`（那两个槽位是为**预留去重池**设计的，且加载受
+`opts.Dedup` 门控）。删除路径改为统一裁决：`removeVersionMeta` 删完自身 meta 后，若内存索引中
+**仍有其他条目**引用同一 (数据容器, 分块名集合) ⇒ 不删分块；仅**最后一个引用者**才物理删分块+parity。
+⇒ 源与副本**谁先删都安全**；**重启由索引重建天然恢复**（无需持久化计数）；覆盖写路径同口径
+（`ownerKey` 排除自身）。
+
+**测试**：`pkg/volume/secretdata/copy_test.go`——
+① 同容器复制：**写调用计数恰 1 次且为文件 meta**（零 blob 写）+ 磁盘 blob 集合完全不变 + 删源副本仍可读 +
+删副本清干净；
+② 跨容器复制：副本分块**字节与源逐字节相同**（证明未重新加密）+ 独立性；
+③ **重启**后两份可读且删一份不影响另一份；
+④ 冲突语义（目标已存在/源不存在/父目录不存在）不落半态。
+**变异 2 命中**：同容器改走字节拷贝 → 「只有 1 次写」红（实测 23 次）；去掉存在性判定 → 「删一方另一方仍可读」红。
+
+**仍开**：FS 级能力已就绪，但**API/CLI 尚未接线**（`volume copy` 同卷形态需加目标路径参数或新增 `cp`），
+跨卷且涉及外部卷的移动/复制仍需统一写内核 + 外部卷接缝（见 §3.2 的跨卷结论）。
+
+## 3.4 `cp` 命令与复制配额（2026-10-13 追加）
+
+**命令**：`sclient cp <src> <dst> [--force] [--to-volume]`——常规复制语义（源保留），支持**同卷 /
+跨卷 / 卷 URI**（复用 `applyMvVolumeContext`：源 URI → `--volume`、目标不同卷 → `--to-volume`）。
+服务端复用既有 `POST /api/volumes/copy`（扩展可选 `to`（目标路径，缺省 = 同 rel）与 `force`，
+**不新增路由**）；经典本地跨卷同 rel 形态仍走原核心（零回归）。
+
+**两条路径（域侧统一判定，配额口径统一）**：
+
+| 情形 | 处理 | 代价 |
+|---|---|---|
+| **同卷 + 卷支持 blob 直拷**（secretdata 等） | 直调卷 `CopyFile`：底层 blob 直拷 + 新 meta（同容器零 blob 写） | **零重新加解密**，O(meta) |
+| 其余（跨卷 / 本地同卷 / 卷不支持） | 读源 → 统一写内核 `WriteFile`（跨卷目标卷用自己的密钥重新加密） | O(内容) |
+
+**配额（用户重点）**：
+- blob 直拷**不经写内核** ⇒ 若不处理就是**配额旁路**。实现：域侧在调卷能力前经
+  `routeWriteUpload` 做与上传**同一组原语**的 owner Scope + 卷容量池**双预留**（失败 → 403/409/507
+  fail-closed，**未动数据**），成功后 `Commit(0,size)`、失败/回落 `Release()` ⇒ 与写入不可分叉。
+- 同容器共享时**物理字节不增**，但**逻辑占用按文件大小记账**（与上传一致：`usage` + 配额预留）；
+  物理真值由 `TrueUsage`/周期对账收敛（既有设计）。
+- 实测（e2e `TestE2E_CLI_Cp_QuotaReservedOnSameVolume`）：`owner_quotas` 12KiB + 已占 8KiB ⇒ 复制
+  被 **507 存储配额不足**拒绝且**目标不落半态**；同配额下第二个**上传**同样被拒 ⇒ 复制与上传
+  **同口径**。另实测：外部卷的 `volumes[].capacity` 在**上传与复制都不做写时拦截**（靠真值/周期对账；
+  非本次引入，二者一致）。
+- 目标已存在默认 **409**（本地经租户根 Stat、外部卷经 `ExternalStat` 接缝判定）；`--force` 才覆盖
+  （先删后写，删除门禁带目标当前 checksum ⇒ TOCTOU 窗口最小）。
+
+**能力断言的坑（已修）**：装配层 `be.FS()` 通常是**装饰器**（CapacityFS/trusted 等）⇒ 直接类型断言
+`CopyFile` 会**假阴性**（静默回落写内核 = 白重加密）。改为 `syncpkg.Innermost(raw)` 后断言。
+
+**相邻缺陷（本轮同 PR 一并修）**：加密卷上「**从 0 起但不覆盖整文件**的部分 Range」（如
+`Range: bytes=0-1023`）此前会在 Close 收尾时被误判为截断 —— `verifyEOF` 在 `sealPartialChunk`
+补验尾部半块成功后**仍**走「短读 → 截断」判据（`totalRead(1024) < fm.Size(8192)`）⇒ 服务端
+`下载流校验失败：中断连接` ⇒ 客户端 EOF（**播放器从 0 seek 的 Range 全被误杀**；新上传 8KiB 文件
+即复现）。修复：`expectEnd > 0 && expectEnd < fm.Size`（调用方已声明只下发 `[0, expectEnd)`）时
+不再套用短读/整文件哈希判据（`meta/verify.go`）；尾部半块补验**仍逐字节生效**（变异验证：把篡改
+字节放在 Range 端点之后仍被拦住）。回归 `TestVerifyReadSeeker_PartialRangeFromStart{,_DetectsCorruption}`
++ e2e 用 Range 断言（此前为规避该缺陷临时降级为全量下载，现已恢复）。
+
+## 3.5 涉及加密卷的跨卷移动 + 加密卷目录删除（2026-10-13 追加）
+
+**两条能力缺口**（此前）：
+1. 跨卷移动（`POST /api/volumes/move`）只覆盖**本地卷**——装配层的移动核心
+   （`moveFileBetweenVolumes`）依赖写盘 `*storage.Root` 与本地原子 rename ⇒ 任一端是外部/加密卷
+   时直接 `400 无效的文件路径`；
+2. 加密卷 `rmdir` fail-closed 501（`syncpkg.FS` 无目录级递归删）。
+
+**实现**：
+
+| 能力 | 实现 | 关键点 |
+|---|---|---|
+| 跨卷移动（含外部卷） | 装配层判定「涉及非本地卷」→ 交**域侧组合** `files.Service.MoveFile` | 复制复用 `CopyFile`（同卷 blob 直拷 / 统一写内核两条路径）；**写成功才删源**；删源：外部卷 `ExternalDelete` 接缝硬删（带复制时的明文 checksum 交叉比对，防复制后源被改写仍被删），本地卷走既有 `DeleteFile`；删源 404（并发删除）按幂等成功 |
+| 加密卷删目录 | 新增接缝 `ExternalVolumeOps.ExternalRemoveDir` + 卷可选能力 `SecretdataFS.RemoveDir` | 装配层**递归删**（`deleteExternalTree`，先子后父、深度上限 64）；发往卷的删除**先经装饰器链 `Delete`**（封印 `ErrSealed` → 409 不绕过），再取**最内层**卷的 `RemoveDir` 删目录容器（目录不参与文件索引 ⇒ `Delete` 对目录键是 no-op） |
+
+**一并修掉的真问题（均为实测暴露）**：
+1. **CLI `rmdir` 从不发送 `force=true`**（`--force` 只跳过本地提示）⇒ 服务端恒要 `force=true` ⇒
+   CLI `rmdir`（含 `--force`）**恒 400**（外部卷此前被更早的 501 掩盖；本地卷路径同样中招）。
+   修：`FileClient.Rmdir(ctx, dirname, force)` 透传；CLI 在「`--force` 或交互确认或空目录」时置
+   `confirmed=true`，**列目录失败且未 `--force` 时拒绝删除**（不猜）。
+2. **AD-4 唯一性查重把移动的源卷自身判成冲突**：移动目标写入若走「显式卷路由（带查重）」，
+   `checkVolumeUniqueness` 会因**源卷**持有同 rel 而 409「同名文件已存在于卷 X」⇒ 跨卷移动恒失败。
+   修：移动的写入改用**统一写内核 `WriteTarget`（显式卷定卷、不查重）**，由域侧
+   `moveUniqueConflict` 按**源卷豁免**口径复刻 AD-4（目标卷已有 → 409；视图内其它卷已有 → 409），
+   与本地核心 `moveCheckTargetUnique` 同口径。
+3. **secretdata 空目录删不掉**：`Delete` 只对文件索引生效（目录靠「最后一个文件被删」时
+   `pruneEmptyDirsLocked` 顺带回收）⇒ 空目录删除需要显式能力 `RemoveDir`（删容器 + 向上回收空祖先）。
+4. **能力断言必须穿透装饰器**（复发同族）：判 `RemoveDir` 能力同样用 `syncpkg.Innermost`，
+   否则装饰器（Guard/Wrap/CapacityFS）会把「支持」判成「不支持」而静默退化。
+
+**测试**：e2e `TestE2E_CLI_Xfer_ExternalVolumeMoveAndRmdir`（加密卷→本地、本地→加密卷、移入子目录、
+未确认不删、`--force` 递归删 + **物理分块清零**、判据非空自证）；`TestE2E_CLI_VolumeCwd_DefaultsToCurrentVolume`
+更新（原断言「外部卷 rmdir fail-closed」→ 现断言成功且**本地同名目录不受影响**）；域单测
+`TestMoveFile_{ExternalSource_CopiesThenDeletesSource,SourceDeleteFailure_ReportsPartial,SourceGone_IdempotentSuccess}`；
+`TestSecretdata_RemoveDir`（空目录可删/非空拒绝/卷根拒绝）；装配 `TestDeleteExternalTree_{RemovesNestedTree,DepthLimitRejects}`。
+变异 4 命中（删源跳过 → 源残留；去掉源卷豁免 → 复现 409；关闭 `RemoveDir` → 目录残留；`RemoveDir` no-op → 单测红）。

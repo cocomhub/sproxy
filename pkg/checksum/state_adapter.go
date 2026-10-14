@@ -29,13 +29,15 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/state"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // StateBackedChecksumStore 是 ChecksumStoreIface 的 StateStore 适配（装配层用）。
 type StateBackedChecksumStore struct {
 	st         state.StateStore
-	key        string // StateStore key（checksum/<owner>/all）
-	legacyPath string // 旧 <meta>/checksums.json（回退读）；空 = 不回退
+	key        string        // StateStore key（checksum/<owner>/all）
+	legacyRoot *storage.Root // 旧 <meta>/checksums.json 所在**卷句柄**；nil = 不回退
+	legacyRel  string        // 旧 <meta>/checksums.json 卷内相对路径；空 = 不回退
 	logger     *slog.Logger
 
 	mu        sync.RWMutex
@@ -46,12 +48,15 @@ type StateBackedChecksumStore struct {
 var _ ChecksumStoreIface = (*StateBackedChecksumStore)(nil)
 
 // NewStateBackedChecksumStore 构造 StateStore 后端 checksum 台账。
-// legacyPath 为空 = 不回退读旧 meta（纯 StateStore 形态）。
-func NewStateBackedChecksumStore(st state.StateStore, key, legacyPath string, logger *slog.Logger) *StateBackedChecksumStore {
+// legacyRoot/legacyRel 定位旧 <meta>/checksums.json（回退读）；legacyRoot 为 nil 或
+// legacyRel 为空 = 不回退读旧 meta（纯 StateStore 形态）。回退读经**卷句柄**：
+// 加密卷上旧文件是密文，裸 os 读会解析失败（迁移期台账静默丢失）。
+func NewStateBackedChecksumStore(st state.StateStore, key string, legacyRoot *storage.Root, legacyRel string, logger *slog.Logger) *StateBackedChecksumStore {
 	return &StateBackedChecksumStore{
 		st:         st,
 		key:        key,
-		legacyPath: legacyPath,
+		legacyRoot: legacyRoot,
+		legacyRel:  legacyRel,
 		logger:     slogutil.Default(logger),
 		checksums:  make(map[string]string),
 	}
@@ -91,14 +96,14 @@ func (s *StateBackedChecksumStore) loadFromState(ctx context.Context) (data []by
 			s.logger.Warn("checksum store: StateStore 读取失败，将使用空存储", "key", s.key, "error", err)
 			return nil, true
 		}
-		// 回退读旧 meta（迁移前存量）。
-		if s.legacyPath == "" {
+		// 回退读旧 meta（迁移前存量；经卷句柄 ⇒ 加密卷上密文同样可读）。
+		if s.legacyRoot == nil || s.legacyRel == "" {
 			return nil, true
 		}
-		data, err = os.ReadFile(s.legacyPath)
+		data, err = readRootFileBounded(s.legacyRoot, s.legacyRel, maxChecksumStoreBytes)
 		if err != nil {
-			if !os.IsNotExist(err) {
-				s.logger.Warn("checksum store: 读取旧 meta 文件失败，将使用空存储", "path", s.legacyPath, "error", err)
+			if !errors.Is(err, os.ErrNotExist) {
+				s.logger.Warn("checksum store: 读取旧 meta 文件失败，将使用空存储", "path", s.legacyRel, "error", err)
 			}
 			return nil, true
 		}

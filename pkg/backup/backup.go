@@ -10,18 +10,23 @@ package backup
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// ManifestRel 是目标卷内 manifest 的相对路径（设计文档：<backup>/manifest.json）。
+// ManifestRel 是 manifest 的**默认键**（目标 FS 命名空间内，设计文档：<backup>/manifest.json）。
+// 装配层可经 Options.ManifestRel/ManifestFS 把它移到**独立功能桶**（backup 桶）——
+// 落在 user 桶时该键是用户 API 可读写路径（可被覆写/伪造 → 增量静默跳过）。
 const ManifestRel = "backup/manifest.json"
 
 // Options 控制一次备份。
@@ -30,6 +35,25 @@ type Options struct {
 	Verify     bool     // 传输后对目标 Stat 校验 size（防截断/静默损坏落盘）
 	MaxRetries int      // 单文件写入失败重试次数（指数退避 100ms×2ⁿ；总尝试 = 1+MaxRetries）
 	Exclude    []string // 排除 glob 模式（path.Match 语义，对齐 pkg/sync 的 ParseFilters）
+	// ManifestRel 是 manifest 在 manifest 命名空间内的键（空 = ManifestRel 常量）。
+	ManifestRel string
+	// ManifestFS 是 manifest 的落盘 FS（nil = 与 dst 同一 FS）。装配层传入**独立功能桶**
+	// FS（`<owner>/backup/`）后：manifest 不在用户 API 可寻址的用户桶，用户无法覆写/
+	// 伪造/删除它（可信备份正确性的前提）；备份数据仍写 dst，不受影响。
+	ManifestFS syncpkg.FS
+}
+
+// manifestTarget 归一 manifest 的落盘 FS 与键（零值 Options = 旧行为：与 dst 同 FS）。
+func (o Options) manifestTarget(dst syncpkg.FS) (syncpkg.FS, string) {
+	fs := o.ManifestFS
+	if fs == nil {
+		fs = dst
+	}
+	rel := o.ManifestRel
+	if rel == "" {
+		rel = ManifestRel
+	}
+	return fs, rel
 }
 
 // concurrency 归一化并发数（默认 4）。
@@ -63,43 +87,70 @@ type manifestEntry struct {
 }
 
 // manifestFile 是目标卷 <backup>/manifest.json 的结构。
+// Checksum 是 Files 的规范校验和（键排序后逐条 rel/size/mtime 哈希）——用于识别
+// 截断/半写/被覆写/被伪造的 manifest：不一致按**全量重扫**处理，绝不据此跳过文件。
 type manifestFile struct {
-	Files map[string]manifestEntry `json:"files"`
+	Files    map[string]manifestEntry `json:"files"`
+	Checksum string                   `json:"checksum,omitempty"`
 }
 
-// readManifest 读取目标现有 manifest；不存在 → 空；损坏 → Warn + 全量重扫（不中断备份）。
-func readManifest(ctx context.Context, dst syncpkg.FS) map[string]manifestEntry {
-	rc, err := dst.OpenRead(ctx, ManifestRel)
+// readManifest 读取目标现有 manifest；不存在 → 空；损坏/校验和不符 → Warn + 全量重扫
+// （不中断备份，绝不把不可信 manifest 当增量依据）。
+func readManifest(ctx context.Context, fs syncpkg.FS, key string) map[string]manifestEntry {
+	rc, err := fs.OpenRead(ctx, key)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("备份 manifest 读取失败，按全量重扫", "path", ManifestRel, "error", err)
+			slog.Warn("备份 manifest 读取失败，按全量重扫", "path", key, "error", err)
 		}
 		return map[string]manifestEntry{}
 	}
 	defer rc.Close()
 	var m manifestFile
 	if err := json.NewDecoder(rc).Decode(&m); err != nil {
-		slog.Warn("备份 manifest 损坏，按全量重扫", "path", ManifestRel, "error", err)
+		slog.Warn("备份 manifest 损坏，按全量重扫", "path", key, "error", err)
 		return map[string]manifestEntry{}
 	}
 	if m.Files == nil {
 		m.Files = map[string]manifestEntry{}
 	}
+	// 完整性自校验：缺校验和/不符 ⇒ 不可信（旧版本 manifest 无 checksum 也走全量重扫，
+	// 一次性代价换「绝不据不可信 manifest 漏备份」）。
+	if want := manifestChecksum(m.Files); m.Checksum != want {
+		slog.Warn("备份 manifest 校验和不符（截断/覆写/伪造），按全量重扫",
+			"path", key, "checksum", m.Checksum, "expect", want)
+		return map[string]manifestEntry{}
+	}
 	return m.Files
 }
 
-// writeManifest 原子写 manifest（tmp 写入 + Rename 替换，对齐 DedupStore.save 模式）。
-func writeManifest(ctx context.Context, dst syncpkg.FS, files map[string]manifestEntry) error {
-	m := manifestFile{Files: files}
+// manifestChecksum 计算 Files 的规范校验和：键排序后逐条 `len(rel)␀rel␀size␀mtime` 哈希。
+// 不依赖 map 迭代顺序（同内容恒同和），供读侧校验与写侧生成共用。
+func manifestChecksum(files map[string]manifestEntry) string {
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, k := range keys {
+		e := files[k]
+		fmt.Fprintf(h, "%d:%s\x00%d\x00%d\n", len(k), k, e.Size, e.MTime)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// writeManifest 原子写 manifest（tmp 写入 + Rename 替换，对齐 DedupStore.save 模式）+ 写校验和。
+func writeManifest(ctx context.Context, fs syncpkg.FS, key string, files map[string]manifestEntry) error {
+	m := manifestFile{Files: files, Checksum: manifestChecksum(files)}
 	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("序列化 manifest 失败: %w", err)
 	}
-	tmp := ManifestRel + ".tmp"
-	if err := dst.WriteFile(ctx, tmp, bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	tmp := key + ".tmp"
+	if err := fs.WriteFile(ctx, tmp, bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		return fmt.Errorf("写 manifest 临时文件失败: %w", err)
 	}
-	if err := dst.Rename(ctx, tmp, ManifestRel); err != nil {
+	if err := fs.Rename(ctx, tmp, key); err != nil {
 		return fmt.Errorf("原子替换 manifest 失败: %w", err)
 	}
 	return nil
@@ -118,6 +169,7 @@ func Run(ctx context.Context, src, dst syncpkg.FS, opts Options) (*Report, error
 		return rep, nil
 	}
 	filters := syncpkg.ParseFilters(nil, opts.Exclude)
+	mfs, mkey := opts.manifestTarget(dst)
 	entries, err := syncpkg.WalkEntries(ctx, src, "", true, false, filters)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -127,7 +179,7 @@ func Run(ctx context.Context, src, dst syncpkg.FS, opts Options) (*Report, error
 		return nil, fmt.Errorf("枚举源失败: %w", err)
 	}
 
-	prev := readManifest(ctx, dst)
+	prev := readManifest(ctx, mfs, mkey)
 	next := map[string]manifestEntry{}
 
 	var mu sync.Mutex
@@ -153,8 +205,8 @@ func Run(ctx context.Context, src, dst syncpkg.FS, opts Options) (*Report, error
 	if rep.Truncated {
 		return rep, nil
 	}
-	if merr := writeManifest(ctx, dst, next); merr != nil {
-		recordBackupResult(rep, &mu, 0, 1, FileError{Path: ManifestRel, Err: merr})
+	if merr := writeManifest(ctx, mfs, mkey, next); merr != nil {
+		recordBackupResult(rep, &mu, 0, 1, FileError{Path: mkey, Err: merr})
 	}
 	return rep, nil
 }
@@ -220,8 +272,10 @@ func (w *backupWorker) processBackupEntry(e *syncpkg.Entry) bool {
 	}
 	if pe, ok := manifestHit(w.prev, e.Path, e.Size, e.MTime); ok {
 		// manifest 命中（size+mtime 相同）→ 增量跳过；条目保留到新 manifest。
-		w.next[e.Path] = pe
+		// 必须持锁：并发 worker goroutine 也会写 w.next（不持锁 = concurrent map writes
+		// → 运行时 fatal 直接终止进程）。
 		w.mu.Lock()
+		w.next[e.Path] = pe
 		w.rep.Skipped++
 		w.mu.Unlock()
 		return true

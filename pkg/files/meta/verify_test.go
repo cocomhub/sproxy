@@ -1,0 +1,334 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package meta
+
+// verify_test.go 钉住流式下载校验（VerifyReadSeeker）：全量读逐分块校验通过、
+// 篡改分块 fail-closed、多余数据拒绝、Range 部分读跳过不误报、整文件哈希全量比对。
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"strings"
+	"testing"
+)
+
+// refFileMeta 构造 n 字节、分块 chunkSize 的合法 FileMeta（哈希由实内容算）。
+func refFileMeta(t *testing.T, content []byte, chunkSize int64) *FileMeta {
+	t.Helper()
+	calc, cerr := NewCalculator(int64(len(content)), chunkSize)
+	if cerr != nil {
+		t.Fatalf("NewCalculator: %v", cerr)
+	}
+	if _, rerr := calc.ReadFrom(bytes.NewReader(content)); rerr != nil {
+		t.Fatalf("ReadFrom: %v", rerr)
+	}
+	fm := calc.Finish()
+	fm.Name = "f.bin"
+	return fm
+}
+
+// readAll 把校验流读尽（失败返回错误——fail-closed 语义即 ServeContent 中断）。
+func readAll(r io.Reader) (string, error) {
+	var b strings.Builder
+	_, err := io.Copy(&b, r)
+	return b.String(), err
+}
+
+// TestVerifyReadSeeker_Ok 全量读逐分块校验通过 + 内容一致。
+func TestVerifyReadSeeker_Ok(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("verify-ok-"), 100) // 800B，1MiB 分块单块
+	fm := refFileMeta(t, content, 1024)
+	v := VerifyReadSeeker(bytes.NewReader(content), fm)
+	got, err := readAll(v)
+	if err != nil {
+		t.Fatalf("校验通过路径不应报错: %v", err)
+	}
+	if got != string(content) {
+		t.Fatalf("读回内容不符")
+	}
+}
+
+// TestVerifyReadSeeker_TamperedChunk 篡改数据（分块哈希不一致）→ fail-closed 报错。
+func TestVerifyReadSeeker_TamperedChunk(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("verify-tamper-"), 200) // 1400B，两块 1024+376
+	fm := refFileMeta(t, content, 1024)
+	tampered := append([]byte(nil), content...)
+	tampered[100] ^= 0xFF // 改第一块内一个字节
+	v := VerifyReadSeeker(bytes.NewReader(tampered), fm)
+	if _, err := readAll(v); err == nil {
+		t.Fatal("篡改分块应 fail-closed 报错（不发损坏内容）")
+	}
+}
+
+// TestVerifyReadSeeker_ExtraData 内容超过 fm.Size → 拒绝多余数据。
+func TestVerifyReadSeeker_ExtraData(t *testing.T) {
+	t.Parallel()
+	content := []byte("verify-extra")
+	fm := refFileMeta(t, content, 1024)
+	extra := append([]byte(nil), content...)
+	extra = append(extra, []byte("garbage-tail")...)
+	v := VerifyReadSeeker(bytes.NewReader(extra), fm)
+	if _, err := readAll(v); err == nil {
+		t.Fatal("多余数据应拒绝（防附加垃圾伪装合法内容）")
+	}
+}
+
+// TestVerifyReadSeeker_RangePartial 部分读（Range）块不完整 → 不误报（跳过无法验证的块）。
+// 真实 Range：ServeContent Seek(offset) 后读——用 bytes.Reader（Seek 返回绝对位置，
+// 与 *os.File 同语义）模拟。
+func TestVerifyReadSeeker_RangePartial(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("verify-range-"), 300) // 2100B，三块 1024
+	fm := refFileMeta(t, content, 1024)
+	// 模拟 Range：Seek 到 offset 500 读到 EOF（第一块只读部分——块首缺数据，无法验证跳过）。
+	br := bytes.NewReader(content)
+	v := VerifyReadSeeker(br, fm)
+	if pos, serr := v.Seek(500, io.SeekStart); serr != nil || pos != 500 {
+		t.Fatalf("Seek(500) = %d, %v", pos, serr)
+	}
+	// 读 Range 部分（offset 500 → EOF）。
+	got, err := readAll(io.LimitReader(v, int64(len(content))-500))
+	if err != nil {
+		t.Fatalf("Range 部分读不完整块应跳过（不误报）: %v", err)
+	}
+	if got != string(content[500:]) {
+		t.Fatalf("Range 读回内容不符")
+	}
+}
+
+// TestVerifyReadSeeker_MidChunkRangeVerified 回归（C3，P0）：Range 起点在块中间、且区间
+// **不覆盖整块**时，必须先验后发/尾部补验——此前该区间字节零校验下发（`skipCur` +
+// `!fromStart` 双短路）。变异：去掉 verifyChunkAhead/sealPartialChunk → 损坏不被检出 → 红。
+func TestVerifyReadSeeker_MidChunkRangeVerified(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("mid-range-"), 400) // 4000B，1MiB 单块
+	fm := refFileMeta(t, content, 1<<20)
+
+	// ① 中段起、区间完全落在单块内（消费者只读 100B 就停，不触发 EOF）→ 先验后发必须拦截。
+	bad := append([]byte(nil), content...)
+	bad[50] = 'X' // 块内损坏，落在交付区间之外也属同一块
+	v := VerifyReadSeeker(bytes.NewReader(bad), fm)
+	if _, err := v.Seek(10, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := readAll(io.LimitReader(v, 100)); err == nil {
+		t.Fatal("块内损坏在「中段起」的 Range 下必须被检出（修复前零校验）")
+	}
+
+	// ② 中段起 + 区间延伸到 EOF（尾部半块）→ 补验拦截。
+	bad2 := append([]byte(nil), content...)
+	bad2[3500] = 'Y' // 尾部区域内损坏
+	v2 := VerifyReadSeeker(bytes.NewReader(bad2), fm)
+	if _, err := v2.Seek(3400, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := readAll(v2); err == nil {
+		t.Fatal("尾部半块损坏必须被检出（EOF 补验）")
+	}
+
+	// ③ 完好内容：同样路径不得误报（不破坏正常 Range 下载）。
+	v3 := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, err := v3.Seek(10, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	got, err := readAll(io.LimitReader(v3, 100))
+	if err != nil {
+		t.Fatalf("完好内容中段 Range 不应误报: %v", err)
+	}
+	if got != string(content[10:110]) {
+		t.Fatalf("中段 Range 内容不符")
+	}
+}
+
+// TestVerifyReadSeeker_TotalHashFullRead EOF 全量读 → 整文件 TotalSHA256 比对。
+func TestVerifyReadSeeker_TotalHashFullRead(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("verify-total-"), 200)
+	fm := refFileMeta(t, content, 1024)
+	v := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, err := readAll(v); err != nil {
+		t.Fatalf("全量读校验应通过: %v", err)
+	}
+}
+
+// TestVerifyReadSeeker_ShortContent 底层内容短于 fm.Size（截断/尾块静默丢失）→ fail-closed。
+// 钉住 P1-1：ServeContent 的 CopyN 按实际（截断）长度精确读满，不会产生底层 EOF 的那次
+// Read；仅靠 EOF 判据会静默放行，必须靠构造时的长度探测拦截。
+func TestVerifyReadSeeker_ShortContent(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("A"), 3000)
+	fm := refFileMeta(t, content, 1024)
+	v := VerifyReadSeeker(bytes.NewReader(content[:1500]), fm)
+	if _, err := readAll(v); err == nil {
+		t.Fatal("截断内容必须 fail-closed 报错（不得静默交付）")
+	}
+	// ServeContent 语义：按实际（截断）长度精确读满，不产生底层 EOF 的那次 Read——
+	// 仅靠 EOF 判据会漏；必须靠构造时的长度探测使首次 Read 即报错。
+	v2 := VerifyReadSeeker(bytes.NewReader(content[:1500]), fm)
+	if _, err := readAll(io.LimitReader(v2, 1500)); err == nil {
+		t.Fatal("按实际长度精确读满时也必须 fail-closed（extent 探测）")
+	}
+}
+
+// TestVerifyReadSeeker_ExtraTailExtent 内容长于 fm.Size（附加垃圾）→ 构造时长度探测即拒。
+func TestVerifyReadSeeker_ExtraTailExtent(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("B"), 3000)
+	fm := refFileMeta(t, content, 1024)
+	extra := append(append([]byte(nil), content...), []byte("garbage-tail")...)
+	v := VerifyReadSeeker(bytes.NewReader(extra), fm)
+	// 即使消费者只按 fm.Size 精确读取（不触发底层 EOF），也必须拒绝。
+	if _, err := readAll(io.LimitReader(v, fm.Size)); err == nil {
+		t.Fatal("越界内容必须 fail-closed 报错（不得靠下一次 Read 才报）")
+	}
+}
+
+// TestVerifyReadSeeker_MidSeekToEOF_NoFalsePositive 中段 Seek 后读到 EOF 不得误报
+// 「整文件哈希不一致」——钉住 P2-1（fromStart 语义）。
+func TestVerifyReadSeeker_MidSeekToEOF_NoFalsePositive(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("C"), 3000)
+	fm := refFileMeta(t, content, 1024)
+	v := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, err := v.Seek(1500, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	// io.Copy 会读到 bytes.Reader 的真实 EOF（与 RangePartial 的 LimitReader 不同）。
+	got, err := readAll(v)
+	if err != nil {
+		t.Fatalf("中段读到 EOF 不应误报损坏: %v", err)
+	}
+	if got != string(content[1500:]) {
+		t.Fatalf("中段读回内容不符")
+	}
+}
+
+// TestVerifyReadSeeker_InvalidMetaFailsClosed 入口 Validate fail-closed：畸形 meta
+// （哈希格式错等）应首次 Read 即报错，不进入流式校验（可能 slice 越界/校验弱化）。
+func TestVerifyReadSeeker_InvalidMetaFailsClosed(t *testing.T) {
+	t.Parallel()
+	h := sha256.Sum256([]byte("abcd"))
+	sum := hex.EncodeToString(h[:])
+	// ChunkSize=0 属 Validate 拒绝项，但分块/总哈希与实际内容一致（不 Validate 时流式
+	// 校验会通过）——测试专门钉住入口 Validate 门。
+	bad := &FileMeta{
+		Version: 1, Size: 4, TotalSHA256: sum, ChunkSize: 0,
+		Chunks: []ChunkMeta{{Index: 0, Offset: 0, Size: 4, SHA256: sum}},
+	}
+	v := VerifyReadSeeker(strings.NewReader("abcd"), bad)
+	if _, err := v.Read(make([]byte, 4)); err == nil {
+		t.Fatal("畸形 meta 应首次 Read 即 fail-closed")
+	}
+}
+
+// TestVerifyReadSeeker_AlignedRangeEndsMidChunk_CloseVerifies 第 10 轮评审 P1：
+// Range 起点**恰好落在块边界**且结束于块中间时不产生 EOF ⇒ 此前既不先验（verifyChunkAhead
+// 需 curRead>0）也不补验（sealPartialChunk 仅由 verifyEOF 触发）→ 整段零校验且记成功。
+// 现由 Close 在「调用方声明的端点被读满」时补验尾部半块。
+// 变异：去掉 Close 的 verifyEOF 调用 → 篡改用例不再报错 → 红。
+func TestVerifyReadSeeker_AlignedRangeEndsMidChunk_CloseVerifies(t *testing.T) {
+	t.Parallel()
+	content := bytes.Repeat([]byte("abcdefgh"), 256) // 2048B → 4 块 × 512B
+	fm := refFileMeta(t, content, 512)
+
+	// Range = [512, 1200)：起点在块 1 边界（对齐），结束于块 2 中间（不触 EOF）。
+	const start, end = int64(512), int64(1200)
+	buf := make([]byte, end-start)
+
+	// ① 内容正确：读满端点后 Close 不得报错（补验通过）。
+	good := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, serr := good.Seek(start, io.SeekStart); serr != nil {
+		t.Fatalf("seek: %v", serr)
+	}
+	if _, rerr := io.ReadFull(good, buf); rerr != nil {
+		t.Fatalf("读区间: %v", rerr)
+	}
+	good.(RangeVerifier).SetExpectedEnd(end)
+	if cerr := good.(io.Closer).Close(); cerr != nil {
+		t.Fatalf("正确内容的 Range 收尾不应报错: %v", cerr)
+	}
+
+	// ② 篡改块 2（区间覆盖到的那块）：读满端点后 Close 必须报错（fail-closed）。
+	tampered := append([]byte(nil), content...)
+	tampered[1024] ^= 0xFF
+	bad := VerifyReadSeeker(bytes.NewReader(tampered), fm)
+	if _, serr := bad.Seek(start, io.SeekStart); serr != nil {
+		t.Fatalf("seek: %v", serr)
+	}
+	if _, rerr := io.ReadFull(bad, buf); rerr != nil {
+		t.Fatalf("读区间: %v", rerr)
+	}
+	bad.(RangeVerifier).SetExpectedEnd(end)
+	if cerr := bad.(io.Closer).Close(); cerr == nil {
+		t.Fatal("块边界对齐、Range 在块中间结束的篡改必须被识别（评审 P1）")
+	}
+
+	// ③ 客户端提前停止（未读满端点）：Close 不得误报（避免把中断当损坏）。
+	aborted := VerifyReadSeeker(bytes.NewReader(content), fm)
+	if _, serr := aborted.Seek(start, io.SeekStart); serr != nil {
+		t.Fatalf("seek: %v", serr)
+	}
+	if _, rerr := io.ReadFull(aborted, buf[:100]); rerr != nil {
+		t.Fatalf("部分读: %v", rerr)
+	}
+	aborted.(RangeVerifier).SetExpectedEnd(end)
+	if cerr := aborted.(io.Closer).Close(); cerr != nil {
+		t.Fatalf("提前停止不应误报: %v", cerr)
+	}
+}
+
+// TestVerifyReadSeeker_PartialRangeFromStart：**部分 Range（从 0 起、端点 < 整文件）**在
+// Close 收尾时不得被判「短读/截断」。回归：此前 `Range: bytes=0-1023`（8KiB 文件）会在
+// finishDownload 的 Close 校验里报「内容长度 1024 短于 FileMeta.Size 8192（截断/静默丢失）」
+// ⇒ 服务端中断连接（客户端 EOF），播放器从 0 seek 的 Range 全被误杀。
+func TestVerifyReadSeeker_PartialRangeFromStart(t *testing.T) {
+	t.Parallel()
+	content := make([]byte, 8192)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	fm := refFileMeta(t, content, 4096) // 两块
+	v := VerifyReadSeeker(bytes.NewReader(content), fm)
+	rv, ok := v.(RangeVerifier)
+	if !ok {
+		t.Fatal("VerifyReadSeeker 必须实现 RangeVerifier（Range 端点提示）")
+	}
+	rv.SetExpectedEnd(1024)
+
+	got := make([]byte, 1024)
+	if _, err := io.ReadFull(v, got); err != nil {
+		t.Fatalf("读 1024 字节失败: %v", err)
+	}
+	if !bytes.Equal(got, content[:1024]) {
+		t.Fatal("前 1024 字节应与源一致")
+	}
+	if err := v.(io.Closer).Close(); err != nil {
+		t.Fatalf("部分 Range 收尾不应报错（尾部半块补验后即成功）: %v", err)
+	}
+}
+
+// TestVerifyReadSeeker_PartialRangeFromStartDetectsCorruption：同一路径上的**真损坏**必须
+// 仍被拦住（尾部半块补验 byte 级生效）——避免「放宽判据」把校验一起放掉。
+func TestVerifyReadSeeker_PartialRangeFromStartDetectsCorruption(t *testing.T) {
+	t.Parallel()
+	content := make([]byte, 8192)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	fm := refFileMeta(t, content, 4096)
+	damaged := append([]byte(nil), content...)
+	damaged[2000] ^= 0xff // 落在第一个分块内、Range 端点（1024）之后
+	v := VerifyReadSeeker(bytes.NewReader(damaged), fm)
+	v.(RangeVerifier).SetExpectedEnd(1024)
+	if _, err := io.ReadFull(v, make([]byte, 1024)); err != nil {
+		t.Fatalf("读 1024 字节失败: %v", err)
+	}
+	if err := v.(io.Closer).Close(); err == nil {
+		t.Fatal("尾部半块补验必须发现损坏（Range 端点之后的分块字节被篡改）")
+	}
+}

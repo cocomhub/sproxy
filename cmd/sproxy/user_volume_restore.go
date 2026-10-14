@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/server"
-	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -115,15 +114,17 @@ func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log 
 	// 而 create 裸 AddExternalVolume，重启后计数器从 0 起、已存字节不计入 → 容量额度翻倍。
 	base, subdir, nested := splitNestedUVTarget(uv)
 	if !nested {
-		// C2 卷级计数：包 CapacityFS（counter 持久化 <root>/<owner>/meta/volume/<name>.capacity.json）。
-		// 限额 = UserVolume.Capacity（本系统可用该卷多少；0 = 不限）。
-		counterPath := filepath.Join(store.Root(), uv.Owner, "meta", "volume", uv.Name+".capacity.json")
+		// C2 卷级计数：包 CapacityFS（counter 持久化 <root>/<owner>/meta/volume/<name>.capacity，
+		// **非 .json**——避开 UserVolumeStore 的 *.json 扫描）。限额 = UserVolume.Capacity。
+		counterPath := filepath.Join(store.Root(), uv.Owner, "meta", "volume", uv.Name+".capacity")
 		cnt, cErr := capacity.Load(counterPath, uv.Capacity)
 		if cErr != nil {
 			log.Warn("用户卷容量恢复失败（按新计数器）", "volume", uv.Name, "owner", uv.Owner, "error", cErr)
 			cnt = capacity.NewCounter(uv.Capacity, counterPath)
+		} else if cnt.CorruptSnapshot() {
+			log.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", uv.Name, "owner", uv.Owner, "path", counterPath)
 		}
-		be = wrapBackendWithCapacity(be, cnt)
+		be = capacity.WrapBackend(be, cnt)
 	}
 	if aErr := set.AddExternalVolume(v, be); aErr != nil {
 		log.Warn("用户卷恢复跳过（注册失败）", "volume", uv.Name, "owner", uv.Owner, "error", aErr)
@@ -149,23 +150,3 @@ func splitNestedUVTarget(uv server.UserVolume) (base, subdir string, ok bool) {
 	target, _ := uv.Extra["target"].(string)
 	return volume.SplitNestedTarget(target)
 }
-
-// wrapBackendWithCapacity 把 backend 的 FS 包为 CapacityFS（卷级计数记账）。
-func wrapBackendWithCapacity(be registry.ExternalBackend, cnt *capacity.VolumeCapacityCounter) registry.ExternalBackend {
-	return &capacityBackend{ExternalBackend: be, fs: capacity.Wrap(be.FS(), cnt), counter: cnt}
-}
-
-// capacityBackend 是包装后的 backend：FS 返回 CapacityFS（记账），Usage 暴露已用字节。
-type capacityBackend struct {
-	registry.ExternalBackend
-	fs      *capacity.CapacityFS
-	counter *capacity.VolumeCapacityCounter
-}
-
-func (b *capacityBackend) FS() syncpkg.FS { return b.fs }
-
-// Usage 返回本系统已占用该卷的字节（C3 查询 API 用）。
-func (b *capacityBackend) Usage() int64 { return b.counter.Used() }
-
-// Capacity 返回本系统可用限额。
-func (b *capacityBackend) Capacity() int64 { return b.counter.Capacity() }
