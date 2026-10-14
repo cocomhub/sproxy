@@ -96,15 +96,17 @@ func TestShardsealSecretdataCrossLayer(t *testing.T) {
 	}
 	// 底层产物按 shardseal 分类（跨侧分类协议一致）。
 	// 目录结构：根容器（dir meta） + 逻辑目录容器（dir meta + file meta + chunk）。
-	dirs, _ := os.ReadDir(root)
+	// 容器物理嵌套（子容器落在父容器内）⇒ 必须**递归**遍历底层目录树分类。
 	var countDir, countFile, countChunk int
-	for _, d := range dirs {
-		if !d.IsDir() {
-			continue
-		}
-		files, _ := os.ReadDir(filepath.Join(root, d.Name()))
-		for _, f := range files {
-			switch shardseal.ClassifyName(f.Name()) {
+	var walk func(dir string)
+	walk = func(dir string) {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if e.IsDir() {
+				walk(filepath.Join(dir, e.Name()))
+				continue
+			}
+			switch shardseal.ClassifyName(e.Name()) {
 			case shardseal.KindDirMeta:
 				countDir++
 			case shardseal.KindFileMeta:
@@ -114,6 +116,7 @@ func TestShardsealSecretdataCrossLayer(t *testing.T) {
 			}
 		}
 	}
+	walk(root)
 	if countFile != 1 || countChunk < 1 {
 		t.Errorf("底层分类异常：file=%d chunk=%d（期望 1/≥1）；dirMeta=%d（根+逻辑目录各 1 属正常）", countFile, countChunk, countDir)
 	}

@@ -186,12 +186,16 @@ func TestUnderlyingLayout_DirMetaMarked(t *testing.T) {
 	ctx := context.Background()
 	writeContent(t, fs, ctx, "movies/f1.mp4", 300)
 
-	rootEntries, _ := fs.inner.ListDir(ctx, "")
+	// 容器物理嵌套 ⇒ 按**容器**（含子容器的目录）递归分类，而不是只看卷根一层。
+	containers := map[string][]syncpkg.Entry{}
+	collectContainerEntries(t, fs.inner, "", containers)
 	foundFileContainer := false
-	for _, e := range rootEntries {
-		inner, _ := fs.inner.ListDir(ctx, e.Name)
+	for _, inner := range containers {
 		hasDirMeta, hasFileMeta, hasChunk := false, false, false
 		for _, f := range inner {
+			if f.IsDir {
+				continue // 子容器目录不计入本容器分类
+			}
 			switch {
 			case shardseal.IsDirMetaName(f.Name):
 				hasDirMeta = true
@@ -1606,45 +1610,82 @@ type backingBlobSnapshot struct {
 }
 
 // snapshotBackingBlobs 遍历底层容器，收集内容分块（名→内容哈希）与 meta blob 名。
+// collectContainerEntries 递归收集**每个容器目录**的直接条目（键 = 容器相对路径）。
+func collectContainerEntries(t *testing.T, inner syncpkg.FS, prefix string, out map[string][]syncpkg.Entry) {
+	t.Helper()
+	ctx := context.Background()
+	entries, err := inner.ListDir(ctx, prefix)
+	if err != nil {
+		t.Fatalf("ListDir(%s): %v", prefix, err)
+	}
+	if prefix != "" {
+		out[prefix] = entries
+	}
+	for _, e := range entries {
+		if !e.IsDir {
+			continue
+		}
+		child := e.Name
+		if prefix != "" {
+			child = prefix + "/" + e.Name
+		}
+		collectContainerEntries(t, inner, child, out)
+	}
+}
+
+// walkBackingFiles 递归遍历底层容器树上的**文件**（跳过目录），回调收到「容器相对路径 + 条目」。
+//
+// **必须递归**：容器物理嵌套（子容器落在父容器内，2026-10-14 用户口径）⇒ 只列卷根一层会把子容器
+// 目录当成文件（读目录失败）且漏掉全部嵌套层级。
+func walkBackingFiles(t *testing.T, inner syncpkg.FS, fn func(rel string, e syncpkg.Entry)) {
+	t.Helper()
+	ctx := context.Background()
+	var walk func(prefix string)
+	walk = func(prefix string) {
+		entries, err := inner.ListDir(ctx, prefix)
+		if err != nil {
+			t.Fatalf("ListDir(%s): %v", prefix, err)
+		}
+		for _, e := range entries {
+			rel := e.Name
+			if prefix != "" {
+				rel = prefix + "/" + e.Name
+			}
+			if e.IsDir {
+				walk(rel)
+				continue
+			}
+			fn(rel, e)
+		}
+	}
+	walk("")
+}
+
 func snapshotBackingBlobs(t *testing.T, fs *SecretdataFS) backingBlobSnapshot {
 	t.Helper()
 	snap := backingBlobSnapshot{content: map[string]string{}, meta: map[string]struct{}{}, dirs: map[string]struct{}{}}
 	ctx := context.Background()
-	rootEntries, err := fs.inner.ListDir(ctx, "")
-	if err != nil {
-		t.Fatalf("ListDir(root): %v", err)
-	}
-	for _, e := range rootEntries {
-		if !e.IsDir {
-			continue
+	walkBackingFiles(t, fs.inner, func(key string, f syncpkg.Entry) {
+		switch shardseal.ClassifyName(f.Name) {
+		case shardseal.KindFileMeta:
+			snap.meta[key] = struct{}{}
+			return
+		case shardseal.KindDirMeta:
+			snap.dirs[key] = struct{}{}
+			return
 		}
-		files, lerr := fs.inner.ListDir(ctx, e.Name)
-		if lerr != nil {
-			t.Fatalf("ListDir(%s): %v", e.Name, lerr)
+		rc, oerr := fs.inner.OpenRead(ctx, key)
+		if oerr != nil {
+			t.Fatalf("OpenRead(%s): %v", key, oerr)
 		}
-		for _, f := range files {
-			key := e.Name + "/" + f.Name
-			switch shardseal.ClassifyName(f.Name) {
-			case shardseal.KindFileMeta:
-				snap.meta[key] = struct{}{}
-				continue
-			case shardseal.KindDirMeta:
-				snap.dirs[key] = struct{}{}
-				continue
-			}
-			rc, oerr := fs.inner.OpenRead(ctx, key)
-			if oerr != nil {
-				t.Fatalf("OpenRead(%s): %v", key, oerr)
-			}
-			data, rerr := io.ReadAll(rc)
-			_ = rc.Close()
-			if rerr != nil {
-				t.Fatalf("ReadAll(%s): %v", key, rerr)
-			}
-			sum := sha256.Sum256(data)
-			snap.content[key] = hex.EncodeToString(sum[:])
+		data, rerr := io.ReadAll(rc)
+		_ = rc.Close()
+		if rerr != nil {
+			t.Fatalf("ReadAll(%s): %v", key, rerr)
 		}
-	}
+		sum := sha256.Sum256(data)
+		snap.content[key] = hex.EncodeToString(sum[:])
+	})
 	return snap
 }
 

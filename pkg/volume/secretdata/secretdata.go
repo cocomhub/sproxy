@@ -1123,6 +1123,13 @@ func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container
 			}
 		}
 	}
+	// 容器目录本身也删除（物理嵌套下必须回收：子容器已先删 ⇒ 目录为空可删；残留空容器目录会让
+	// 底层目录树出现「无 meta 的层级」，也会让父容器无法回收）。根容器由调用方保证不被走到
+	// （prune 循环 `for d != ""`），此处 `container` 恒为某逻辑目录的容器。
+	if derr := s.inner.Delete(ctx, container); derr != nil && !errors.Is(derr, os.ErrNotExist) {
+		slog.Warn("secretdata: 删除空容器目录失败（残留空目录，不影响正确性）",
+			"container", container, "dir", dirPath, "error", derr)
+	}
 	delete(s.dirSegs, dirPath)
 	delete(s.dirIDs, dirPath)
 	delete(s.dirParents, dirPath)
@@ -1212,22 +1219,52 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 		}
 		return fmt.Errorf("secretdata: 扫描卷根失败（非首次使用故障，拒绝空视图挂载）: %w", err)
 	}
-	scans := scanAllContainerDirMetas(ctx, s, dirContainers(root))
+	containers, cerr := s.dirContainers(ctx, root)
+	if cerr != nil {
+		return fmt.Errorf("secretdata: 扫描容器树失败（拒绝空视图挂载）: %w", cerr)
+	}
+	scans := scanAllContainerDirMetas(ctx, s, containers)
 	byID := dirMetaTable(scans)
 	res := s.resolveContainerPaths(ctx, byID, scans)
 	loadAllFileMetas(ctx, s, res)
 	return nil
 }
 
-// dirContainers 收集底层根下随机容器目录名（Phase 0）。
-func dirContainers(root []syncpkg.Entry) []string {
-	var containers []string
-	for _, d := range root {
-		if d.IsDir {
-			containers = append(containers, d.Name)
+// maxContainerDepth 是容器树递归深度上限（防御异常/恶意深树导致栈/IO 爆炸；正常逻辑树远小于此）。
+const maxContainerDepth = 64
+
+// dirContainers 递归收集底层**全部容器目录**（Phase 0）。
+//
+// 容器是**物理嵌套**的（子容器落在父容器内，2026-10-14 用户口径：底层目录树与逻辑目录树同形）
+// ⇒ 只列卷根会漏掉全部嵌套层级（表现为「多级目录只剩一层」）。旧卷（扁平布局：容器全部在卷根、
+// 容器内无子目录）同样被本递归覆盖 ⇒ 新旧布局共用同一加载路径，无兼容负担。
+func (s *SecretdataFS) dirContainers(ctx context.Context, root []syncpkg.Entry) ([]string, error) {
+	var out []string
+	var walk func(prefix string, entries []syncpkg.Entry, depth int) error
+	walk = func(prefix string, entries []syncpkg.Entry, depth int) error {
+		if depth > maxContainerDepth {
+			return fmt.Errorf("secretdata: 容器树深度超过上限 %d（目录 %q）", maxContainerDepth, prefix)
 		}
+		for _, e := range entries {
+			if !e.IsDir {
+				continue
+			}
+			p := path.Join(prefix, e.Name)
+			out = append(out, p)
+			sub, lerr := s.inner.ListDir(ctx, p)
+			if lerr != nil {
+				return fmt.Errorf("列容器 %q 失败: %w", p, lerr)
+			}
+			if werr := walk(p, sub, depth+1); werr != nil {
+				return werr
+			}
+		}
+		return nil
 	}
-	return containers
+	if werr := walk("", root, 0); werr != nil {
+		return nil, werr
+	}
+	return out, nil
 }
 
 // maxLoadMemBudget 是 loadIndex 并行派生允许的峰值内存预算（512MiB）。loadGate 并发
@@ -1691,62 +1728,86 @@ func (s *SecretdataFS) ensureContainer(ctx context.Context, dirPath string, mtim
 	return s.ensureContainerLocked(ctx, dirPath, mtime)
 }
 
-// ensureContainerLocked 是 ensureContainer 的持锁实现（递归建祖先链；调用方持 s.mu）。
-func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string, mtime int64) (string, []dirCreation, error) {
-	if c, ok := s.dirSegs[dirPath]; ok {
-		return c, nil, nil
-	}
-	var created []dirCreation
-	var parentID string
-	if dirPath != "" {
-		parent := parentDirOf(dirPath)
-		_, pcreated, perr := s.ensureContainerLocked(ctx, parent, mtime)
-		if perr != nil {
-			return "", nil, perr
-		}
-		created = append(created, pcreated...)
-		parentID = s.dirIDs[parent]
-		if parentID == "" {
-			return "", nil, fmt.Errorf("secretdata: 父目录 %q 无 dir_id，无法建立父子引用", parent)
-		}
-	}
+// createContainerLocked 创建一层容器目录并写入其加密目录 meta，返回
+// (容器相对路径, dir_id, dir-meta blob 名, blob 落盘长度)。调用方持 s.mu。
+//
+// **物理嵌套**（2026-10-14 用户口径）：子容器落在**父容器目录内** ⇒ 底层目录树与逻辑目录树同形
+// （此前所有容器都是卷根下的随机名兄弟目录 ⇒ 存储上看不出父子关系）。卷根容器（parentContainer==""）
+// 仍在卷根（顶层）——逻辑树根无父容器。旧卷（扁平布局）不受影响：加载侧**递归**收集容器
+// （见 dirContainers），扁平卷的容器内无子目录 ⇒ 行为与既有完全一致。
+func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, parentContainer, parentID string, mtime int64) (string, string, string, int64, error) {
 	c, cerr := shardseal.RandDirName()
 	if cerr != nil {
-		return "", nil, cerr
+		return "", "", "", 0, cerr
+	}
+	if parentContainer != "" {
+		c = path.Join(parentContainer, c)
+	}
+	// 显式建容器目录（幂等 MkdirAll）：嵌套层级下不能依赖「写文件隐式建父目录」（部分后端只建
+	// 一级），且**空目录**也必须有容器目录存在。
+	if merr := s.inner.MakeDir(ctx, c); merr != nil {
+		return "", "", "", 0, fmt.Errorf("secretdata: 创建容器目录 %s 失败: %w", c, merr)
 	}
 	dirID, iderr := shardseal.RandID62()
 	if iderr != nil {
-		return "", nil, iderr
+		return "", "", "", 0, iderr
 	}
 	salt, serr := shardseal.RandSalt()
 	if serr != nil {
-		return "", nil, serr
+		return "", "", "", 0, serr
 	}
 	key, kerr := shardseal.DeriveKey(s.secret, salt, s.algoVer)
 	if kerr != nil {
-		return "", nil, kerr
+		return "", "", "", 0, kerr
 	}
 	dm := dirMeta{Version: 1, Algorithm: s.opts.Algorithm, KDF: "scrypt", Type: "dir",
 		Name: logicalDirName(dirPath), ParentDirID: parentID, DirID: dirID, MTime: mtimeString(mtime)}
 	dmJSON, merr := json.Marshal(dm)
 	if merr != nil {
-		return "", nil, merr
+		return "", "", "", 0, merr
 	}
 	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget())
 	if berr != nil {
-		return "", nil, berr
+		return "", "", "", 0, berr
 	}
 	// 新命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62，
 	// 自包含可不解密验证密文完整；中段 = 目录随机 id（base62 9 字符，匿名性一致）。
 	blobA, blobB := shardseal.Hash48Pair(blob, 0, 16)
 	name, nerr := shardseal.DirMetaName(blobA, dirID, blobB)
 	if nerr != nil {
-		return "", nil, nerr
+		return "", "", "", 0, nerr
 	}
 	if werr := s.inner.WriteFile(ctx, path.Join(c, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
-		return "", nil, fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
+		return "", "", "", 0, fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
-	s.dirPhysTotal += int64(len(blob))
+	return c, dirID, name, int64(len(blob)), nil
+}
+
+// ensureContainerLocked 是 ensureContainer 的持锁实现（递归建祖先链；调用方持 s.mu）。
+func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string, mtime int64) (string, []dirCreation, error) {
+	if c, ok := s.dirSegs[dirPath]; ok {
+		return c, nil, nil
+	}
+	var created []dirCreation
+	var parentID, parentContainer string
+	if dirPath != "" {
+		parent := parentDirOf(dirPath)
+		pc, pcreated, perr := s.ensureContainerLocked(ctx, parent, mtime)
+		if perr != nil {
+			return "", nil, perr
+		}
+		created = append(created, pcreated...)
+		parentContainer = pc
+		parentID = s.dirIDs[parent]
+		if parentID == "" {
+			return "", nil, fmt.Errorf("secretdata: 父目录 %q 无 dir_id，无法建立父子引用", parent)
+		}
+	}
+	c, dirID, name, blobLen, cerr := s.createContainerLocked(ctx, dirPath, parentContainer, parentID, mtime)
+	if cerr != nil {
+		return "", nil, cerr
+	}
+	s.dirPhysTotal += blobLen
 	s.dirSegs[dirPath] = c
 	s.dirIDs[dirPath] = dirID
 	if dirPath != "" {
