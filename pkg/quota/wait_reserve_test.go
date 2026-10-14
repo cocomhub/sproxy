@@ -6,6 +6,7 @@ package quota
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -17,6 +18,24 @@ import (
 //     ⇒「真正放得下的文件最终一定成功」。
 //
 // 变异：去掉 usable 判断 ⇒ 运维余量用例红；广播改到非根节点 / 去掉 double-check ⇒ 跨层唤醒或唤醒用例红。
+
+// waitForRoundsOrDone 同 waitForRounds，但若等待者已提前返回则直接报出其错误（诊断用）。
+func waitForRoundsOrDone(t *testing.T, p *Pool, rounds int64, done chan error) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.WaitRounds() >= rounds {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("等待者提前返回（应排队等待）: %v", err)
+		default:
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("等待者未进入等待（waitRounds=%d want >=%d）", p.WaitRounds(), rounds)
+}
 
 // TestOperationalReserve_LimitsQuotaUse：运维余量收紧用量与分配两条路径。
 func TestOperationalReserve_LimitsQuotaUse(t *testing.T) {
@@ -80,12 +99,8 @@ func TestWaitReserve_WakesOnRelease(t *testing.T) {
 		}
 		done <- werr
 	}()
-	// 等等待者真正进入等待（用 waitRounds 语义不可用 ⇒ 用短轮询确认未立即返回），再释放。
-	select {
-	case err := <-done:
-		t.Fatalf("容量不足时不应立即返回: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
+	// **确定性同步**：轮询 waitRounds 直到等待者确实进入等待（不依赖 time.Sleep）。
+	waitForRoundsOrDone(t, p, 1, done)
 	p.ReleaseCommitted(100) // 释放 ⇒ 广播唤醒
 	select {
 	case err := <-done:
@@ -134,7 +149,7 @@ func TestWaitReserve_CtxCancel(t *testing.T) {
 		_, err := p.WaitReserve(ctx, 50, 10*time.Second)
 		done <- err
 	}()
-	time.Sleep(30 * time.Millisecond)
+	waitForRoundsOrDone(t, p, 1, done) // 确定性同步：等待者已进入等待
 	cancel()
 	select {
 	case err := <-done:
@@ -170,11 +185,8 @@ func TestWaitReserve_CrossLevelWake(t *testing.T) {
 		}
 		done <- werr
 	}()
-	select {
-	case err := <-done:
-		t.Fatalf("卷满时不应立即返回: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
+	// 等待者挂在 alice（子节点），但失败点在**卷**（父节点）⇒ 轮询**根节点**的 waitRounds。
+	waitForRoundsOrDone(t, vol, 1, done)
 	other.ReleaseUsage(100) // 父节点释放 ⇒ 必须唤醒挂在子节点的等待者
 	select {
 	case err := <-done:

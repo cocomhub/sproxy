@@ -20,6 +20,14 @@ import (
 // 超时上限（用户裁定）：默认 `DefaultWaitTimeout`（30s）；超时后返回**包装 ErrStorageFull** 的错误
 // （调用方映射 507 + 提示「释放空间或申请提额」）。
 
+// WaitRounds 返回本节点进入等待的轮次（可观测性/测试同步用）。
+func (p *Pool) WaitRounds() int64 {
+	if p == nil {
+		return 0
+	}
+	return p.waitRounds.Load()
+}
+
 // DefaultWaitTimeout 是配额等待的默认上限（用户裁定 30s）。
 const DefaultWaitTimeout = 30 * time.Second
 
@@ -90,10 +98,19 @@ func (p *Pool) waitRound(ctx context.Context, n int64, deadline time.Time) error
 		root.cond.L.Unlock()
 		return fmt.Errorf("%w: %w", ErrWaitTimeout, ErrStorageFull)
 	}
-	// double-check：本节点已有容量 ⇒ 直接让外层重试（不睡）。
-	p.mu.RLock()
-	ok := p.maxBytes <= 0 || p.committed+p.reserved+n <= p.usableLocked()
-	p.mu.RUnlock()
+	// double-check：**沿父链**确认是否已有容量 ⇒ 直接让外层重试（不睡）。
+	// 只看本节点是错的：失败点常在父节点（卷满/用户配额满），父节点释放后本节点仍「有容量」⇒
+	// 会忙等空转（既不等待也不返回）。锁序恒为 子→父（与 reserveUp 一致，无反向嵌套 ⇒ 无死锁）。
+	ok := true
+	for cur := p; cur != nil; cur = cur.parent {
+		cur.mu.RLock()
+		avail := cur.maxBytes <= 0 || cur.committed+cur.reserved+n <= cur.usableLocked()
+		cur.mu.RUnlock()
+		if !avail {
+			ok = false
+			break
+		}
+	}
 	if ok {
 		root.cond.L.Unlock()
 		return nil
@@ -114,6 +131,7 @@ func (p *Pool) waitRound(ctx context.Context, n int64, deadline time.Time) error
 		root.cond.L.Unlock()
 		return fmt.Errorf("%w: %w", ErrWaitTimeout, ErrStorageFull)
 	}
+	root.waitRounds.Add(1) // 进入等待（测试据此确定性同步；见 Pool.waitRounds）
 	root.cond.Wait()
 	root.cond.L.Unlock()
 	// **解锁后**再 stop：回调可能正阻塞在 cond.L 上，若在持锁时 stop 会与回调互等（死锁）。

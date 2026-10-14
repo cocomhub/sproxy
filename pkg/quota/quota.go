@@ -34,10 +34,13 @@ type Pool struct {
 	reserve int64
 	// cond 是等待队列（配额不足时排队重试；释放广播唤醒）。每节点各有一个，但**等待统一挂根节点**
 	// （任何一层的释放都应唤醒等待者）。
-	cond     *sync.Cond
-	parent   *Pool // 非 nil 时向父链聚合
-	children []*Scope
-	path     string // 根池为 ""；子池为对应 Scope 的完整路径
+	cond *sync.Cond
+	// waitRounds 是**进入等待的轮次计数**（仅用于可观测性/测试确定性同步：轮询它即可知道
+	// 「等待者确实进入了等待」，避免固定 time.Sleep；与 staging_tracker 的 waitRounds 同型）。
+	waitRounds atomic.Int64
+	parent     *Pool // 非 nil 时向父链聚合
+	children   []*Scope
+	path       string // 根池为 ""；子池为对应 Scope 的完整路径
 }
 
 // NewPool 创建根配额池。maxBytes<=0 表示不限制。
@@ -304,6 +307,7 @@ func (p *Pool) releaseCommittedUp(n int64) {
 	p.mu.Lock()
 	actual := min(n, p.committed)
 	p.committed -= actual
+	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil && actual > 0 {
 		p.parent.releaseCommittedUp(actual)
