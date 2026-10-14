@@ -438,8 +438,10 @@ staging 独立 Scope 但**挂在全局池之下**（受 `max_storage_bytes` 约�
   `ReserveSpace` 预检（装饰器链未实现 → `ErrUnsupported` 跳过）。
 - 拒绝静默覆盖：`WriteIfAbsent` 优先（同名 → 409）；`secrets` 密钥卷、未声明协议、空 scheme
   fail-closed。转存不占租户 archive 桶（仅 `cloud_archive_max_bytes` 上限校验）。
-- 加密密钥来自 `archive.key_file`（与 `/api/archive` 同约定）；`encrypt`/`cipher`/`compression`
-  仅与 `target_volume` 同用（否则 400，防静默忽略）。CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，
+- 加密密钥来自 `archive.key_file`（与 `/api/archive` 同约定）；`encrypt`/`cipher`/`compression`/
+  `target_path` 仅与 `target_volume` 同用（否则 400，防静默忽略），且 `cipher` 须与 `encrypt`
+  同用（单独指定不加密 → 400）；加密产物命名追加 `.aes`（`<名>.tar.gz.aes`，不再伪装成可直接
+  gunzip 的 `.tar.gz`）。CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，
   cd/mv 同规约）指定，客户端归一为 `target_volume`/`target_path`（协议层不解析 URI）。
 
 **未落地**：图片组「每文件一分块」封装（设计方向 A/B 待 #34 详设）；Web UI 未暴露转存目标。

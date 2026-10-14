@@ -616,8 +616,11 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	// 不落租户 archive 桶。否则落桶（既有行为零回归）。
 	// V4：转存目标卷须经 ACL 校验（volumeAllowedFor 防跨租户写私有卷）——与 cloud
 	// download transfer 的 checkTransferACL 同语义，此处直接复用。
-	// encrypt/cipher/compression 仅与 target_volume 同用（防静默忽略）。
-	if !h.validateArchiveExtras(w, req.TargetVolume, req.Encrypt, req.Cipher, req.Compression) {
+	// target_path/encrypt/cipher/compression 仅与 target_volume 同用（防静默忽略）。
+	if !h.validateArchiveExtras(w, archiveExtras{
+		TargetVolume: req.TargetVolume, TargetPath: req.TargetPath,
+		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
+	}) {
 		return
 	}
 	if req.TargetVolume != "" {
@@ -975,7 +978,13 @@ func (h *Handlers) cloudArchiveToVolume(
 	// 目标键：volume 唯一入口（权限门 + 路径安全 + 恒 owner 前缀），与读路径
 	// resolveExternalDownload 的 ResolveUserLocation 同键空间。targetPath 为客户端由卷 URI
 	// （cd/mv 同规约）归一后的 user 桶相对路径（可含子目录）；空 → 默认 archive/<name>。
-	loc, lerr := vol.ResolveUserLocation(t.Owner, archiveTargetRel(t.TargetPath, t.ArchiveName))
+	// 加密产物按 /api/archive 同口径加 .aes 后缀（`<name>.tar.gz.aes`）——密文不该伪装成
+	// 可直接 gunzip 的 .tar.gz。
+	archiveName := t.ArchiveName
+	if t.Encrypt && !strings.HasSuffix(archiveName, ".aes") {
+		archiveName += ".aes"
+	}
+	loc, lerr := vol.ResolveUserLocation(t.Owner, archiveTargetRel(t.TargetPath, archiveName))
 	if lerr != nil {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid target path: " + lerr.Error()}, http.StatusBadRequest)
 		return
@@ -1029,6 +1038,10 @@ func (h *Handlers) cloudArchiveToVolume(
 // 键空间**（否则共享外部卷上互不可见，同 rel 并发写产出主文件/sidecar 错位固化）。
 // 返回 (release, status, msg)：status==0 表示通过（release 必非 nil）；否则按 status/msg 回包。
 // 抽离以控制 cloudArchiveToVolume 的认知复杂度（gocognit 门禁）。
+//
+// size 语义：打包流的**真实产物长度打包前不可知**，此处以源可见总量作上界近似（预检，
+// 非预留，无需释放）；权威强制在写路径本身——capacity.CapacityFS 按实际写入记账，
+// 外部卷后端按自身配额 API 拒写。
 func (h *Handlers) archiveVolumeWriteGate(ctx context.Context, fs syncpkg.FS, owner, rel string, size int64) (func(), int, string) {
 	if rs, ok := fs.(syncpkg.ReserveSpace); ok {
 		if err := rs.ReserveSpace(ctx, rel, size); err != nil && !errors.Is(err, syncpkg.ErrUnsupported) {
@@ -1110,10 +1123,11 @@ func archiveTargetRel(targetPath, archiveName string) string {
 }
 
 // relOf 派生转存目标默认路径（archive/<name>.tar.gz，卷内 user 桶相对路径；
-// owner 前缀/路径安全由 volume.ResolveLocation 唯一入口拼接）。
+// owner 前缀/路径安全由 volume.ResolveLocation 唯一入口拼接）。已带归档扩展名
+// （`.tar.gz` / 加密产物 `.tar.gz.aes`）时不再重复追加。
 func relOf(archiveName string) string {
 	rel := "archive/" + archiveName
-	if !strings.HasSuffix(rel, ".tar.gz") {
+	if !strings.HasSuffix(rel, ".tar.gz") && !strings.HasSuffix(rel, ".tar.gz.aes") {
 		rel += ".tar.gz"
 	}
 	return rel

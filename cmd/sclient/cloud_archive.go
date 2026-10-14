@@ -116,6 +116,10 @@ func archivePreOpts(cmd *cobra.Command, target *client.TransferSpec) ([]client.C
 	if (encrypt || cipher != "" || compress != "") && target == nil {
 		return nil, fmt.Errorf("--encrypt/--cipher/--compress 仅与 --target（转存外部卷）同用")
 	}
+	// --cipher 未配 --encrypt 时无任何效果（服务端也不加密）——本地 fail-fast，防静默忽略。
+	if cipher != "" && !encrypt {
+		return nil, fmt.Errorf("--cipher 仅与 --encrypt 同用（单独指定不加密，已拒绝以避免误信已加密）")
+	}
 	opts := archiveTargetOpts(target)
 	if encrypt {
 		opts = append(opts, client.WithCloudArchiveEncrypt(cipher))
@@ -128,7 +132,10 @@ func archivePreOpts(cmd *cobra.Command, target *client.TransferSpec) ([]client.C
 
 // resolveArchiveTarget 把 `--target` 的卷 URI 路径归一为转存目标（volume+path）。
 //   - `<卷名>:/<路径>` → 该卷 + 路径（`<卷名>:` / `:<卷名>/` = 卷根，path 空 = 服务端默认 archive/<名>）；
-//   - 纯路径（无卷 URI 前缀）→ 当前工作目录所在卷（cd 语义）；无当前卷 → 报错（请显式给卷 URI）；
+//     卷 URI 里的路径是**卷根起算的绝对路径**（与 splitVolumeURI 口径一致）。
+//   - 纯路径（无卷 URI 前缀）→ 当前工作目录所在卷；路径按 CLI 统一约定
+//     （state.ResolveRemotePath，与 cp/mv/delete/cd 同语义）**拼当前目录**，前导 "/" 则
+//     绕过当前目录、`..` 拒绝；无当前卷 → 报错（请显式给卷 URI）。
 //   - 空 → nil（不转存，落 archive 桶）。
 //
 // 与 cd/mv/cp 共用 splitVolumeURI（`:/` 形式，`https://` / `C:\` 不误判）。
@@ -143,8 +150,13 @@ func resolveArchiveTarget(st *state.State, raw string) (*client.TransferSpec, er
 		}
 		return &client.TransferSpec{Volume: vol, Path: path}, nil
 	}
-	if st != nil && st.CurrentVolume != "" {
-		return &client.TransferSpec{Volume: st.CurrentVolume, Path: raw}, nil
+	if st == nil || st.CurrentVolume == "" {
+		return nil, fmt.Errorf("转存目标须为卷 URI 路径（<卷名>:/<路径>），或先 `cd <卷名>:/` 指定当前卷")
 	}
-	return nil, fmt.Errorf("转存目标须为卷 URI 路径（<卷名>:/<路径>），或先 `cd <卷名>:/` 指定当前卷")
+	// 与 cp/mv/delete 同语义：相对路径拼当前目录，前导 "/" 绕过，`..` 拒绝。
+	rel, err := st.ResolveRemotePath(raw)
+	if err != nil {
+		return nil, fmt.Errorf("无效的转存目标路径: %w", err)
+	}
+	return &client.TransferSpec{Volume: st.CurrentVolume, Path: rel}, nil
 }

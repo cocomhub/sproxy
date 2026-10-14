@@ -498,11 +498,12 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 `<owner>/user/<target_path>`（经 `volume.ResolveUserLocation` 唯一入口，与读路径同键空间，
 可经 `/download` 命中；外部卷不走本地文件索引，故不出现在 `/api/files` 列表），响应 `file` 为
 可 `ResolveURL` 取用的 URL（非归档名）。空/缺省 = 沿既有行为落租户 archive 桶。同名目标已存在
-→ 409（拒绝静默覆盖）。可选 `encrypt`（true = 打包流式加密 `tar.<ext>.aes`，密钥来自
-服务端 `archive.key_file`）、`cipher`（默认 aes-256-gcm）、`compression`（gzip 默认 / zstd /
-brotli；非法值 400）——三者仅与 `target_volume` 同用（未指定 target 时设置 → 400，防静默忽略）。
-CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，cd/mv 同规约）指定，客户端归一为
-`target_volume`/`target_path` 后发送（协议层不解析 URI）。
+→ 409（拒绝静默覆盖）。可选 `encrypt`（true = 打包流式加密，密钥来自服务端 `archive.key_file`，
+产物命名追加 `.aes`，但以 `target_path`/默认名为准）、`cipher`（默认 aes-256-gcm，**须与 `encrypt`
+同用**——单独指定不加密且无效果 → 400，防误信已加密）、`compression`（gzip 默认 / zstd / brotli；
+非法值 400）——均仅与 `target_volume` 同用（未指定 target 时设置 `target_path`/`encrypt`/`cipher`/
+`compression` → 400，防静默忽略）。CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，cd/mv 同规约）
+指定，客户端归一为 `target_volume`/`target_path` 后发送（协议层不解析 URI）。
 
 ### POST /api/cloud/archive
 
@@ -528,7 +529,8 @@ CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，cd/mv 同规约）�
 
 取消 / 恢复 / 归档整个组。`/archive` 请求体同样支持 `target_volume`（统一转存到外部卷，
 可信卷写视图 + owner 前缀键 + 本地 staging 配额 + `per-(owner,rel)` 写锁；语义与单任务/批量
-归档一致）。转存成功后组记录 `archive_file` 为转存 URL，组删除时联动清理该外部产物。
+归档一致）。转存成功后组记录 `archive_file` 为转存 URL，组删除时联动清理该外部产物
+（要求目标卷仍在服务端装配中；卷已移除时删除组会 fail-closed 报错，不静默遗留产物）。
 
 ### DELETE /api/cloud/groups/{id}
 

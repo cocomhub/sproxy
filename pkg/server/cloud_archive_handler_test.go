@@ -842,7 +842,7 @@ func TestCloudArchive_SingleTask_ToVolume_Encrypt(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	raw := fs.files["anonymous/user/archive/s.tar.gz"]
+	raw := fs.files["anonymous/user/archive/s.tar.gz.aes"]
 	if len(raw) == 0 {
 		t.Fatal("加密转存未落盘")
 	}
@@ -894,7 +894,8 @@ func TestCloudArchive_SingleTask_ToVolume_Compression(t *testing.T) {
 	}
 }
 
-// TestCloudArchive_ExtrasRequireTarget encrypt/compression 未配 target_volume → 400（防静默忽略）。
+// TestCloudArchive_ExtrasRequireTarget 预处理/目标路径选项缺前置条件 → 400（防静默忽略）：
+// encrypt/compression 无 target_volume；cipher 无 encrypt；target_path 无 target_volume。
 func TestCloudArchive_ExtrasRequireTarget(t *testing.T) {
 	t.Parallel()
 	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
@@ -902,13 +903,15 @@ func TestCloudArchive_ExtrasRequireTarget(t *testing.T) {
 	for _, body := range []string{
 		`{"archive_name":"s.tar.gz","encrypt":true}`,
 		`{"archive_name":"s.tar.gz","compression":"zstd"}`,
+		`{"archive_name":"s.tar.gz","target_volume":"vault","cipher":"aes-256-gcm"}`,
+		`{"archive_name":"s.tar.gz","target_path":"backups/s.tar.gz"}`,
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
 		req.SetPathValue("id", id)
 		rec := httptest.NewRecorder()
 		h.cloudArchiveTask(rec, req)
 		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("无 target 的预处理选项应 400，body=%s got %d", body, rec.Code)
+			t.Fatalf("选项缺前置条件应 400，body=%s got %d", body, rec.Code)
 		}
 	}
 }

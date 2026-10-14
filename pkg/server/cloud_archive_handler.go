@@ -122,8 +122,11 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 统一转存：target_volume → 打包转存外部卷（统一「归档 = 转存 + 预处理」管道），
-	// 不落租户 archive 桶。encrypt/cipher/compression 仅与 target_volume 同用（防静默忽略）。
-	if !h.validateArchiveExtras(w, req.TargetVolume, req.Encrypt, req.Cipher, req.Compression) {
+	// 不落租户 archive 桶。target_path/encrypt/cipher/compression 仅与 target_volume 同用。
+	if !h.validateArchiveExtras(w, archiveExtras{
+		TargetVolume: req.TargetVolume, TargetPath: req.TargetPath,
+		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
+	}) {
 		return
 	}
 	if req.TargetVolume != "" {
@@ -212,8 +215,11 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 统一转存：target_volume → 打包转存外部卷（统一「归档 = 转存 + 预处理」管道），
-	// 不落租户 archive 桶。encrypt/cipher/compression 仅与 target_volume 同用。
-	if !h.validateArchiveExtras(w, req.TargetVolume, req.Encrypt, req.Cipher, req.Compression) {
+	// 不落租户 archive 桶。target_path/encrypt/cipher/compression 仅与 target_volume 同用。
+	if !h.validateArchiveExtras(w, archiveExtras{
+		TargetVolume: req.TargetVolume, TargetPath: req.TargetPath,
+		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
+	}) {
 		return
 	}
 	if req.TargetVolume != "" {
@@ -744,19 +750,38 @@ func (h *Handlers) deleteCloudArchive(owner, archiveName string) error {
 	return nil
 }
 
-// validateArchiveExtras 校验「仅转存外部卷支持」的预处理选项（encrypt/cipher/compression）：
-// 未指定 target_volume 时不得设置（防静默忽略——archive 桶路径走既有 createTarGz，不加密）。
-func (h *Handlers) validateArchiveExtras(w http.ResponseWriter, targetVolume string, encrypt bool, cipher, compression string) bool {
-	if targetVolume != "" {
+// archiveExtras 是「仅转存外部卷支持」的选项集合（校验入参收拢为结构体，避免长参数列表）。
+type archiveExtras struct {
+	TargetVolume string
+	TargetPath   string
+	Encrypt      bool
+	Cipher       string
+	Compression  string
+}
+
+// validateArchiveExtras 校验「仅转存外部卷支持」的选项：
+//   - 未指定 target_volume 时不得设置 target_path/encrypt/cipher/compression
+//     （archive 桶路径走既有 createTarGz，不加密也不认目标路径）；
+//   - cipher 必须与 encrypt 同用（单独指定无任何加密效果，静默忽略会让用户误信已加密）。
+//
+// 失败时已写响应并返回 false。
+func (h *Handlers) validateArchiveExtras(w http.ResponseWriter, ex archiveExtras) bool {
+	if ex.TargetVolume == "" {
+		if ex.Encrypt || ex.Cipher != "" || ex.Compression != "" || ex.TargetPath != "" {
+			return h.archiveBadRequest(w, "target_path/encrypt/cipher/compression 仅支持与 target_volume（转存外部卷）同用")
+		}
 		return true
 	}
-	if encrypt || cipher != "" || compression != "" {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: "encrypt/cipher/compression 仅支持与 target_volume（转存外部卷）同用",
-		}, http.StatusBadRequest)
-		return false
+	if ex.Cipher != "" && !ex.Encrypt {
+		return h.archiveBadRequest(w, "cipher 仅与 encrypt 同用（单独指定不加密，已拒绝以避免误信已加密）")
 	}
 	return true
+}
+
+// archiveBadRequest 回 400 并返回 false（统一归档端点的参数错误应答）。
+func (h *Handlers) archiveBadRequest(w http.ResponseWriter, msg string) bool {
+	sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msg}, http.StatusBadRequest)
+	return false
 }
 
 // archivePreprocessor 按请求构造打包预处理器（压缩 + 可选加密，经 transfer registry 选型）。

@@ -668,17 +668,18 @@ sclient cloud-download --url-file <file>     # 每行 URL 或 URL<TAB>FILENAME
 
 **归档转存（统一转存）**：`cloud-download archive` 与 `cloud-download-group archive` 支持
 `--target <卷 URI 路径>`（cd/mv 同规约，`<卷名>:/<路径>`）——打包后转存到该外部卷，不落服务端
-archive 桶；不带卷名的纯路径回落当前工作目录所在卷（`cd <卷名>:/…`）。可选 `--encrypt`（流式
-加密，密钥来自服务端 `archive.key_file`）、`--cipher`（默认 aes-256-gcm）、`--compress`
-（gzip 默认 / zstd / brotli）——三者仅与 `--target` 同用（否则报错，不静默忽略）。未指定
-`--target` 时行为不变（落 archive 桶）。CLI 仅把 URI 归一为请求体的 `target_volume`/`target_path`，
-协议零改动：
+archive 桶；不带卷名的纯路径回落**当前工作目录**（`cd <卷名>:/<目录>`，与 cp/mv/delete 同语义：
+相对路径拼当前目录，前导 `/` 绕过当前目录，`..` 拒绝）。可选 `--encrypt`（流式加密，密钥来自
+服务端 `archive.key_file`，产物为 `<名>.tar.gz.aes`）、`--cipher`（默认 aes-256-gcm，**须与
+`--encrypt` 同用**）、`--compress`（gzip 默认 / zstd / brotli）——均仅与 `--target` 同用
+（否则报错，不静默忽略）。未指定 `--target` 时行为不变（落 archive 桶）。CLI 仅把 URI 归一为
+请求体的 `target_volume`/`target_path`，协议零改动：
 
 ```bash
 sclient cloud-download archive <task-id> --target vault:/backups/a.tar.gz   # 指定文件路径
 sclient cloud-download archive <task-id> --target disk2:/                    # 目标是目录（默认文件名）
 sclient cloud-download archive <task-id> --target vault:/b/a.tar.gz --encrypt --compress zstd
-cd vault:/backups && sclient cloud-download archive <task-id> --target a.tar.gz  # 当前卷内路径
+cd vault:/backups && sclient cloud-download archive <task-id> --target a.tar.gz  # 当前目录内（= vault:/backups/a.tar.gz）
 sclient cloud-download-group archive <group-id> --target vault:/backups/     # 组归档转存
 ```
 

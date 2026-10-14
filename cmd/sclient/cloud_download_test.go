@@ -1276,3 +1276,58 @@ func TestCloudDownloadCmd_ArchiveTargetEncrypt(t *testing.T) {
 		t.Fatal("无 --target 的 --encrypt 应本地报错")
 	}
 }
+
+// TestCloudDownloadCmd_ArchiveTargetCurrentDir 纯路径 --target 须拼**当前目录**（与
+// cp/mv/delete 的 state.ResolveRemotePath 同语义），而非只取当前卷根。
+func TestCloudDownloadCmd_ArchiveTargetCurrentDir(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard},
+		&state.State{CurrentVolume: "vault", CurrentDir: "backups"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（当前目录）失败: %v", err)
+	}
+	if body["target_volume"] != "vault" || body["target_path"] != "backups/a.tar.gz" {
+		t.Fatalf("当前目录未拼接: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetAbsolutePath 前导 "/" = 卷根绝对路径（绕过当前目录）。
+func TestCloudDownloadCmd_ArchiveTargetAbsolutePath(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard},
+		&state.State{CurrentVolume: "vault", CurrentDir: "backups"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "/other/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（绝对路径）失败: %v", err)
+	}
+	if body["target_path"] != "other/a.tar.gz" {
+		t.Fatalf("绝对路径应绕过当前目录: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetCipherRequiresEncrypt --cipher 未配 --encrypt → 本地报错
+// （防静默忽略加密选型；报错发生在发起请求之前）。
+func TestCloudDownloadCmd_ArchiveTargetCipherRequiresEncrypt(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "vault:/a.tar.gz", "--cipher", "aes-256-gcm"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("--cipher 未配 --encrypt 应本地报错")
+	}
+	if len(body) != 0 {
+		t.Fatalf("本地应 fail-fast，不得发起请求: %+v", body)
+	}
+}
