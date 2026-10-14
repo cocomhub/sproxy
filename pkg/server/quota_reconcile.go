@@ -258,6 +258,15 @@ func (h *Handlers) reconcileVolumesFromDisk() {
 	vols := h.volSet.All()
 	volumeBuckets := make(map[string]map[string]map[string]int64, len(vols))
 	for _, v := range vols {
+		// 只扫「有本地根」的卷：外部卷（secrets / secretdata / baidupcs / webdav …）无
+		// storage.Root，RootDir 恒为空——其容量由各自后端/容量池语义管理，不参与本地桶扫描。
+		// **必须显式跳过**：空串经 capacity.ScanStorageDir 的 filepath.EvalSymlinks("") 在 Unix
+		// 归一为 "."（见 symlink.go `if dest == "" { dest = "." }`），WalkDir(".") 会扫描
+		// sproxy 进程的**当前工作目录**——实测默认 cwd=/root（5.4G）时启动挂起 >90s，且与卷
+		// 语义无关（Windows 侧 EvalSymlinks("") 报错回落空串不扫，故两端表现不一致）。
+		if v.RootDir == "" {
+			continue
+		}
 		buckets, _, err := capacity.ScanStorageDir(v.RootDir)
 		if err != nil {
 			h.logger.Error("逐卷扫描失败，跳过该卷校准", "volume", v.Name, "error", err)
