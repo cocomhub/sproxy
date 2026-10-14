@@ -20,9 +20,11 @@ import (
 // 副本（NewFSMultiplicas 的 replicas）物理落在**其它卷**，由那个卷自己的账本与对账负责；
 // 在本卷计副本会造成跨卷双计与卷池虚高，故明确不计。
 //
-// 不计入项（文档化，避免与磁盘扫描的差异被误判为漏记）：目录 meta blob（每目录数百字节
-// 量级）、GC 尚未回收的孤儿 blob、并发未命中去重时留下的冗余分块；这些由对账的磁盘扫描
-// 口径覆盖，交叉校验用容差判定（见 quota_reconcile.go volumeTruthTolerance）。
+// 不计入项（文档化，避免与磁盘扫描的差异被误判为漏记）：GC 尚未回收的孤儿 blob、并发未命中
+// 去重时留下的冗余分块；这些由对账的磁盘扫描口径覆盖，交叉校验用容差判定
+// （见 quota_reconcile.go volumeTruthTolerance）。
+// **目录 meta blob 已计入**（`dirPhysTotal`）——每目录 pad 到 1–2MB，若不计入会让周期对账把
+// 已记账的目录字节改回去（2026-10-14 配额模型 v3 修正；旧注释「每目录数百字节」的前提已不成立）。
 //
 // 实现成本 O(索引)——接口契约允许（「O(1) 或 O(索引)」，不得全卷扫描）；只在周期对账调用。
 
@@ -79,6 +81,9 @@ func (s *SecretdataFS) TrueUsage() (int64, bool) {
 	for _, b := range s.dedupPool {
 		total += b.phys
 	}
+	// 目录 meta blob（同样 pad 到 [base, 2·base)，默认 1–2MB/目录）必须计入：否则周期对账
+	// （TrueUsage → 卷池校准）会把目录字节改回去 ⇒ 账本与磁盘漂移（配额模型 v3 只按物理占用）。
+	total += s.dirPhysTotal
 	return total, true
 }
 
