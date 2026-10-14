@@ -815,8 +815,9 @@ func TestNewFS_AlgorithmResolutionFailFast(t *testing.T) {
 	}
 }
 
-// TestDirMove_SubtreeZeroTouch（task10）：移动 a 整棵子树到新位置，仅改根 a 的父引用；
-// 子树内子目录/文件 blob 零改动（目录 meta blob 名不变、文件 dirSeg/metaName 不变）。
+// TestDirMove_SubtreeZeroTouch（task10 + 2026-10-14 用户口径「物理树始终镜像逻辑树」）：移动 a 整棵
+// 子树到新位置时**容器随目录整体搬移**（底层 mv ⇒ 物理位置镜像逻辑树），但**子树内容零改动**——
+// 子树内子目录/文件的 blob **名与字节**不变（容器**路径前缀**变化属预期，正是镜像语义）。
 func TestDirMove_SubtreeZeroTouch(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
@@ -839,21 +840,30 @@ func TestDirMove_SubtreeZeroTouch(t *testing.T) {
 	if err := fs.Rename(ctx, "a", "b/a"); err != nil {
 		t.Fatalf("Rename 目录子树: %v", err)
 	}
-	// 子树文件容器/meta 零改动。
+	// **容器随目录搬移**（物理树镜像逻辑树）：子树容器路径前缀变为新父容器内。
+	newChildSeg := fs.dirSegs["b/a/child"]
+	newDeepSeg := fs.dirSegs["b/a/child/deep"]
+	if newChildSeg == childSeg || newDeepSeg == deepSeg {
+		t.Fatalf("容器应随目录搬移（镜像语义）: child %q→%q deep %q→%q", childSeg, newChildSeg, deepSeg, newDeepSeg)
+	}
+	if !strings.HasPrefix(newChildSeg, fs.dirSegs["b"]+"/") {
+		t.Fatalf("子容器应落在新父目录容器内: %q 不在 %q 下", newChildSeg, fs.dirSegs["b"])
+	}
+	// 子树**内容零改动**：容器路径变了，但 blob 名（metaName）不变。
 	c := fs.index["b/a/child/f1.mp4"]
-	if c == nil || c.dirSeg != childSeg || c.metaName != childMeta {
-		t.Error("子目录文件容器/meta 零改动断言失败")
+	if c == nil || c.dirSeg != newChildSeg || c.metaName != childMeta {
+		t.Errorf("子目录文件：dirSeg=%q(want %q) meta=%q(want %q)", c.dirSeg, newChildSeg, c.metaName, childMeta)
 	}
 	d := fs.index["b/a/child/deep/f2.mp4"]
-	if d == nil || d.dirSeg != deepSeg || d.metaName != deepMeta {
-		t.Error("深层子文件容器/meta 零改动断言失败")
+	if d == nil || d.dirSeg != newDeepSeg || d.metaName != deepMeta {
+		t.Errorf("深层子文件：dirSeg=%q(want %q) meta=%q(want %q)", d.dirSeg, newDeepSeg, d.metaName, deepMeta)
 	}
-	// 子树 dirMeta blob 名不变（仅根 a 被重写）。
-	if dirMetaNameOf(t, ctx, fs.inner, childSeg) != childDmBefore {
-		t.Error("子目录 meta blob 不应被移动改写（零改动）")
+	// 子树 dirMeta blob **名不变**（仅被移动的根 a 重写；子树目录 meta 不重写）——在新位置读。
+	if dirMetaNameOf(t, ctx, fs.inner, newChildSeg) != childDmBefore {
+		t.Error("子目录 meta blob 不应被改写（内容零改动）")
 	}
-	if dirMetaNameOf(t, ctx, fs.inner, deepSeg) != deepDmBefore {
-		t.Error("深层子目录 meta blob 不应被移动改写（零改动）")
+	if dirMetaNameOf(t, ctx, fs.inner, newDeepSeg) != deepDmBefore {
+		t.Error("深层子目录 meta blob 不应被改写（内容零改动）")
 	}
 	// 重启后在新路径按父引用解析。
 	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
