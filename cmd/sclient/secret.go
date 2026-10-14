@@ -163,9 +163,11 @@ func newSecretDirectClient(cmd *cobra.Command, factory clientfactory.Factory, cf
 // ---- secret create ----
 
 // newCmdSecretCreate 创建 secret：无 --passphrase → 服务端生成随机（返回值供备份）；
-// 有 --passphrase → 本地交互读两口令后双口令派生上传（origin=passphrase）。
+// 有 --passphrase → 本地交互读两口令后双口令派生上传（origin=passphrase）；
+// --out 可把派生密钥另存到本地文件（仅 --passphrase 联用）。
 func newCmdSecretCreate(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var passphrase bool
+	var outFile string
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "创建 secret（默认服务端随机生成；--passphrase 本地双口令派生）",
@@ -176,42 +178,81 @@ func newCmdSecretCreate(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc
 				ios.WriteErrLine(msgSecretNameEmpty)
 				return errSecretAborted
 			}
+			if outFile != "" && !passphrase {
+				ios.WriteErrLine("--out 仅与 --passphrase 联用（随机 secret 的值由服务端生成，如需导出请用 secret export）")
+				return errSecretAborted
+			}
 			svc, cerr := newSecretDirectClient(cmd, factory, cfgSvc)
 			if cerr != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, cerr)
 				return fmt.Errorf(errFmtInitClient, cerr)
 			}
 			if !passphrase {
-				// 服务端生成随机；响应返回 secret 值供立即备份。
-				res, rerr := svc.CreateRandomSecret(cmd.Context(), name)
-				if rerr != nil {
-					ios.WriteErrLine("创建 secret 失败: %v", rerr)
-					return fmt.Errorf("创建 secret 失败: %w", rerr)
-				}
-				ios.WriteOutLine("已创建随机 secret %q（请立即备份，仅本次显示）：", res.Name)
-				ios.WriteOutLine("%s", res.Value)
-				return nil
+				return runSecretCreateRandom(ios, cmd, svc, name)
 			}
-			// 本地双口令派生：交互读两口令（不进 bash 历史，不回显）。
-			passA, err := secretReadPassphrase(ios, "口令 A（不显示）: ")
-			if err != nil {
-				return err
-			}
-			passB, err := secretReadPassphrase(ios, "口令 B（不显示，作秘密盐）: ")
-			if err != nil {
-				return err
-			}
-			res, err := svc.CreatePassphraseSecret(cmd.Context(), name, passA, passB)
-			if err != nil {
-				ios.WriteErrLine("创建双口令 secret 失败: %v", err)
-				return fmt.Errorf("创建双口令 secret 失败: %w", err)
-			}
-			ios.WriteOutLine("已创建双口令 secret %q（origin=passphrase；重建=重输两口令+固定 high 档）", res.Name)
-			return nil
+			return runSecretCreatePassphrase(ios, cmd, svc, name, outFile)
 		},
 	}
 	cmd.Flags().BoolVar(&passphrase, "passphrase", false, "本地双口令派生（两口令交互输入，绝不上传）")
+	cmd.Flags().StringVar(&outFile, "out", "", "把派生密钥另存到本地文件（仅 --passphrase；0600，无换行）")
 	return cmd
+}
+
+// runSecretCreateRandom 服务端生成随机 secret（值仅本次返回，供立即备份）。
+func runSecretCreateRandom(ios cli.IOStreams, cmd *cobra.Command, svc *client.FileClient, name string) error {
+	res, rerr := svc.CreateRandomSecret(cmd.Context(), name)
+	if rerr != nil {
+		ios.WriteErrLine("创建 secret 失败: %v", rerr)
+		return fmt.Errorf("创建 secret 失败: %w", rerr)
+	}
+	ios.WriteOutLine("已创建随机 secret %q（请立即备份，仅本次显示）：", res.Name)
+	ios.WriteOutLine("%s", res.Value)
+	return nil
+}
+
+// runSecretCreatePassphrase 本地双口令派生（交互读两口令，不进 bash 历史）→ 上传 →
+// 可选把派生密钥落盘（--out）。落盘在判错前执行：派生成功即有值，避免上传失败时口令白输。
+func runSecretCreatePassphrase(ios cli.IOStreams, cmd *cobra.Command, svc *client.FileClient, name, outFile string) error {
+	passA, err := secretReadPassphrase(ios, "口令 A（不显示）: ")
+	if err != nil {
+		return err
+	}
+	passB, err := secretReadPassphrase(ios, "口令 B（不显示，作秘密盐）: ")
+	if err != nil {
+		return err
+	}
+	res, derived, err := svc.CreatePassphraseSecret(cmd.Context(), name, passA, passB)
+	if outFile != "" && derived != "" {
+		if werr := writeDerivedSecretFile(outFile, derived); werr != nil {
+			ios.WriteErrLine("保存本地密钥文件失败: %v", werr)
+			return fmt.Errorf("保存本地密钥文件失败: %w", werr)
+		}
+		ios.WriteOutLine("已保存派生密钥到本地文件 %s（0600，无换行；可作 sealfile --key 或 secrets 卷 datakey）", outFile)
+	}
+	if err != nil {
+		ios.WriteErrLine("创建双口令 secret 失败: %v", err)
+		return fmt.Errorf("创建双口令 secret 失败: %w", err)
+	}
+	ios.WriteOutLine("已创建双口令 secret %q（origin=passphrase；重建=重输两口令+固定 high 档）", res.Name)
+	return nil
+}
+
+// writeDerivedSecretFile 把派生 secret（64 hex 文本）写到本地文件：权限 0600、**内容无换行**
+// （与 sproxy secrets 卷 datakey / sealfile --key 的读取口径一致——服务器按原样字节读取
+// secret_url 文件，多余换行会造成两端密钥不一致）。目标已存在则拒绝（防误覆盖既有密钥）。
+func writeDerivedSecretFile(path, hexVal string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("目标文件已存在（拒绝覆盖）: %s", path)
+		}
+		return err
+	}
+	defer f.Close()
+	if _, werr := f.WriteString(hexVal); werr != nil {
+		return werr
+	}
+	return nil
 }
 
 // secretReadPassphrase 用 x/term.ReadPassword 无回显读取口令（不从 argv/stdio 落

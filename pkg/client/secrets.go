@@ -68,14 +68,19 @@ func (c *FileClient) CreateRandomSecret(ctx context.Context, name string) (*Secr
 // CreatePassphraseSecret 便捷封装：本地双口令派生后上传派生结果。
 // 口令在调用方处由交互输入取得（x/term.ReadPassword），**不进入本方法之外的任何
 // 存储/传输**；本方法只把派生 hex 上传。
-func (c *FileClient) CreatePassphraseSecret(ctx context.Context, name, passA, passB string) (*SecretCreateResult, error) {
+//
+// 返回 (结果, 派生 hex 文本, error)：**派生成功即返回 derived（即使随后上传失败返回
+// err）**，供调用方按需落盘（如 `sclient secret create --out` 保存本地密钥文件）；
+// 派生本身失败时 derived 为空。
+func (c *FileClient) CreatePassphraseSecret(ctx context.Context, name, passA, passB string) (*SecretCreateResult, string, error) {
 	derived, err := secrets.DerivePassphraseSecret(passA, passB)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return c.CreateSecret(ctx, SecretCreateOptions{
+	res, cerr := c.CreateSecret(ctx, SecretCreateOptions{
 		Name: name, Mode: "passphrase", Value: string(derived), Origin: "passphrase",
 	})
+	return res, string(derived), cerr
 }
 
 // ListSecrets 列出 secret 卷内全部 secret 名（GET /api/secrets）。
