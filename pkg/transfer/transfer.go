@@ -157,7 +157,10 @@ func executePacked(ctx context.Context, req TransferRequest, rel string) (string
 		return "", err
 	}
 	// 等 pack goroutine 收尾（WriteIfAbsent/WriteFile 已消费 pr 至 EOF）。
+	// 收尾失败（如 tar 声明长度与内容不符）时目标已收下字节但内容损坏 ⇒ 删除，不得留
+	// 损坏产物（与 bucket 归档路径「失败清理」同纪律）。
 	if err := <-packErrCh; err != nil {
+		_ = req.Destination.Delete(ctx, rel)
 		return "", err
 	}
 	// V5b：写后校验目标存在且非空（防 0 字节写入失败/卷吞写）。

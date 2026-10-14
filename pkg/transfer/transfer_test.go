@@ -305,3 +305,36 @@ func TestNew_Registry(t *testing.T) {
 		t.Fatalf("未知预处理器应 ErrUnknownPreprocessor，got %v", err)
 	}
 }
+
+// TestTarPreprocessor_Pack_ShortReaderFails 声明大小与实读字节不符 → Pack 必须报错：
+// tar.Writer.Close 的「missed writing N bytes」在 Close 时暴露，defer Close 丢弃该错误
+// 会让损坏产物被当作成功（P1）。
+func TestTarPreprocessor_Pack_ShortReaderFails(t *testing.T) {
+	t.Parallel()
+	p := &TarPreprocessor{Compression: compressx.Gzip}
+	var buf bytes.Buffer
+	err := p.Pack(context.Background(), []SourceEntry{
+		{Rel: "a.txt", Size: 100, Reader: strings.NewReader("0123456789")}, // 声明 100 实读 10
+	}, &buf)
+	if err == nil {
+		t.Fatal("声明长度与内容不符应报错（Close 错误被吞 = 损坏产物静默成功）")
+	}
+}
+
+// TestExecute_Pack_PackFailureRemovesArtifact 打包收尾失败（目标已收下字节但内容损坏）
+// → 必须删除目标产物，不得留损坏归档。
+func TestExecute_Pack_PackFailureRemovesArtifact(t *testing.T) {
+	t.Parallel()
+	v := &memVol{memFS: newMemFS(), scheme: "vault", name: "vol1"}
+	_, err := Execute(context.Background(), TransferRequest{
+		Entries:     []SourceEntry{{Rel: "a.txt", Size: 100, Reader: strings.NewReader("0123456789")}},
+		Preprocess:  &TarPreprocessor{Compression: compressx.Gzip},
+		Destination: v, Scheme: "vault", Volume: "vol1", Rel: "p.tar.gz",
+	})
+	if err == nil {
+		t.Fatal("应失败")
+	}
+	if _, ok := v.files["p.tar.gz"]; ok {
+		t.Fatal("失败后不得残留损坏产物")
+	}
+}

@@ -90,37 +90,53 @@ func (p *TarPreprocessor) Name() string {
 }
 
 // Pack 把 entries 打包为单一 tar 流写到 w。
+//
+// **收尾错误不得吞**（P1）：tar/压缩/加密 writer 的 Close 会落最后一块数据
+// （tar 端标记、gzip/zstd 尾、AES-GCM 末块 tag）——`defer Close()` 丢弃错误会把
+// 损坏产物当成功（archive/tar 的「missed writing N bytes」只在 Close 暴露，声明长度
+// 与实读不符时必然触发）。故按序显式 Close 并收集首个错误（与
+// pkg/server/archive.go 的归档实现同口径）。
 func (p *TarPreprocessor) Pack(ctx context.Context, entries []SourceEntry, w io.Writer) error {
-	dest, cleanup, err := p.packDest(w)
+	dest, closeDest, err := p.packDest(w)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
 	gw, err := compressx.NewWriter(p.Compression, dest, 0)
 	if err != nil {
+		_ = closeDest()
 		return fmt.Errorf("transfer: 压缩初始化: %w", err)
 	}
-	defer gw.Close()
 	tw := tar.NewWriter(gw)
-	defer tw.Close()
+	var werr error
 	for _, e := range entries {
-		if err := writeTarEntry(ctx, tw, e); err != nil {
-			return err
+		if werr = writeTarEntry(ctx, tw, e); werr != nil {
+			break
 		}
 	}
-	return nil
+	// 按序关闭（tar → 压缩 → 加密）；首个错误为准，但三条 Close 都必须执行以释放资源。
+	if cerr := tw.Close(); cerr != nil && werr == nil {
+		werr = fmt.Errorf("transfer: tar 收尾: %w", cerr)
+	}
+	if cerr := gw.Close(); cerr != nil && werr == nil {
+		werr = fmt.Errorf("transfer: 压缩收尾: %w", cerr)
+	}
+	if cerr := closeDest(); cerr != nil && werr == nil {
+		werr = fmt.Errorf("transfer: 加密收尾: %w", cerr)
+	}
+	return werr
 }
 
-// packDest 按 EncryptKey 包装加密 writer（nil key = 直写）。返回 (dest, cleanup)。
-func (p *TarPreprocessor) packDest(w io.Writer) (io.Writer, func(), error) {
+// packDest 按 EncryptKey 包装加密 writer（nil key = 直写）。返回 (dest, closeDest, err)；
+// closeDest 的 **错误必须回传**（加密 writer 在 Close 时落末块与 tag）。
+func (p *TarPreprocessor) packDest(w io.Writer) (io.Writer, func() error, error) {
 	if len(p.EncryptKey) == 0 {
-		return w, func() {}, nil
+		return w, func() error { return nil }, nil
 	}
 	ew, err := newCipherWriter(w, p.Cipher, p.EncryptKey)
 	if err != nil {
 		return nil, nil, err
 	}
-	return ew, func() { ew.Close() }, nil
+	return ew, ew.Close, nil
 }
 
 // writeTarEntry 写单个 tar 条目（含 ctx 取消检查 + Reader 非空校验）。
