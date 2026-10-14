@@ -170,3 +170,68 @@ func TestDirChainFootprint_MultiLevelDiff(t *testing.T) {
 		t.Fatalf("rmdir 后链足迹应下降: %d → %d", after2, after3)
 	}
 }
+
+// TestTrueUsage_IncludesDirMetaBlobs：卷真值必须计入**目录 meta blob**（每目录 pad 到 1–2MB）。
+//
+// 为什么关键：`TrueUsage` 是周期对账校准**卷容量池**的依据 ⇒ 若漏计目录 meta，对账会把刚记账的
+// 目录字节改回去（账本与磁盘漂移，违反「只按物理占用」）。本测同时钉住**同源不变式**：
+//
+//	TrueUsage == Σ 文件足迹（PhysFootprint） + Σ 目录链足迹（DirChainFootprint）
+//
+// 即「真值报告」与「写入侧记账口径」必须一致（否则对账会改错正确账本）。
+func TestTrueUsage_IncludesDirMetaBlobs(t *testing.T) {
+	t.Parallel()
+	const base = 1 << 20
+	rootDir := t.TempDir()
+	opts := Options{Secret: []byte("trueusage-dir-key-0123"), MetaPadBytes: base, TempDir: t.TempDir()}
+	fs, err := NewFS(syncpkg.NewLocalFS(rootDir, nil), opts)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	before, _ := fs.TrueUsage()
+
+	if err := fs.MakeDir(ctx, "videos"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	after, _ := fs.TrueUsage()
+	// 增量 ≥ 一个 dir meta（旧行为为 **0**——目录 meta 完全不计入）；上界放宽到 2 个 dir meta：
+	// 首次 mkdir 会**惰性创建根容器**的 dir meta（+1），故增量为 1–2 个 dir meta。
+	if d := after - before; d < base || d > 4*base+2*blobFormatSlack {
+		t.Fatalf("mkdir 后真值增量=%d，应 ≥ 一个 dir meta blob（≥%d，目录 meta 未计入？）", d, base)
+	}
+
+	// 同源不变式：真值 == 文件足迹 + 目录链足迹。
+	physWrite(t, fs, "videos/a.bin", 4096)
+	filePhys, okF := fs.PhysFootprint("videos/a.bin")
+	dirChain, okD := fs.DirChainFootprint(ctx, "videos")
+	total, _ := fs.TrueUsage()
+	if !okF || !okD {
+		t.Fatalf("足迹能力不可用（file=%v dir=%v）", okF, okD)
+	}
+	if total != filePhys+dirChain {
+		t.Fatalf("真值 %d != 文件足迹 %d + 目录链 %d（对账与写入口径必须同源）", total, filePhys, dirChain)
+	}
+
+	// rmdir 后真值回落（目录 meta 从累计中扣减）。
+	if err := fs.Delete(ctx, "videos/a.bin"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := fs.RemoveDir(ctx, "videos"); err != nil {
+		t.Fatalf("RemoveDir: %v", err)
+	}
+	empty, _ := fs.TrueUsage()
+	if empty >= after {
+		t.Fatalf("rmdir 后真值应回落: %d → %d", after, empty)
+	}
+
+	// 重挂载（新实例读同一卷根）后真值必须重建（加载路径累加目录 meta）。
+	fs2, rerr := NewFS(syncpkg.NewLocalFS(rootDir, nil), opts)
+	if rerr != nil {
+		t.Fatalf("重新 NewFS: %v", rerr)
+	}
+	reloaded, _ := fs2.TrueUsage()
+	if reloaded != empty {
+		t.Fatalf("重挂载后真值 %d != 卸载前 %d（加载路径未重建目录 meta 累计）", reloaded, empty)
+	}
+}

@@ -191,6 +191,12 @@ type SecretdataFS struct {
 	index   map[string]*metaEntry
 	dirs    map[string]struct{} // 已知逻辑目录（子目录发现/进入用）
 	dirSegs map[string]string   // 逻辑目录 → 随机容器目录名
+	// dirPhysTotal 是**全部目录 meta blob 的落盘字节之和**（真值报告用；见 trueusage.go）。
+	// 为什么必须跟踪：目录 meta 也 pad 到 [base, 2·base)（默认 1–2MB/目录）——「每目录数百字节」
+	// 的旧假设已不成立；若不计入，周期对账（TrueUsage → 卷池校准）会把刚记的目录字节**改回去**
+	// （账本与磁盘漂移）。三处维护：目录 meta 写入 +、容器回收 −（列目录时顺带求和，零额外 I/O）、
+	// 挂载扫描 +（Phase 1 已读每个 dir meta blob）。
+	dirPhysTotal int64
 	// dirIDs 是逻辑目录 → 该容器目录 meta 的 dir_id（写新容器 meta 的 parent_dir_id、
 	// 目录移动改写父引用用）。
 	dirIDs map[string]string
@@ -1109,6 +1115,10 @@ func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container
 	if inner, err := s.inner.ListDir(ctx, container); err == nil {
 		for _, f := range inner {
 			if !f.IsDir {
+				// 目录 meta blob 的落盘字节从真值累计中扣减（列目录时顺带求和 ⇒ 零额外 I/O）。
+				if shardseal.ClassifyName(f.Name) == shardseal.KindDirMeta && f.Size > 0 {
+					s.dirPhysTotal = max(s.dirPhysTotal-f.Size, 0)
+				}
 				_ = s.inner.Delete(ctx, path.Join(container, f.Name))
 			}
 		}
@@ -1173,6 +1183,8 @@ type dirScan struct {
 	container string
 	dm        *dirMeta
 	hasFiles  bool
+	// dirPhys 是本容器目录 meta blob 的落盘字节（Phase 1 已读取 ⇒ 顺带求和，供 dirPhysTotal）。
+	dirPhys int64
 }
 
 // dirRes 是容器逻辑路径解析结果（loadIndex Phase 2，供 Phase 3 文件加载）。
@@ -1260,9 +1272,10 @@ func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers [
 			s.loadGate <- struct{}{} // 派生并发上界（scrypt 内存）
 			defer func() { <-s.loadGate }()
 			scans[i] = dirScan{container: c}
-			dm, hasFiles, ok := s.scanContainerDirMeta(ctx, c)
+			dm, blobLen, hasFiles, ok := s.scanContainerDirMeta(ctx, c)
 			if ok {
 				scans[i].dm = dm
+				scans[i].dirPhys = blobLen
 			}
 			scans[i].hasFiles = hasFiles
 		}(i, c)
@@ -1301,6 +1314,7 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 			continue
 		}
 		res[i] = dirRes{container: sc.container, rel: rel, ok: true}
+		s.dirPhysTotal += sc.dirPhys // 挂载时重建目录 meta 真值累计（Phase 1 已读 blob）
 		s.dirSegs[rel] = sc.container
 		s.dirIDs[rel] = sc.dm.DirID
 		if rel != "" {
@@ -1330,25 +1344,25 @@ func loadAllFileMetas(ctx context.Context, s *SecretdataFS, res []dirRes) {
 // scanContainerDirMeta 定位容器目录 meta 并解密（旧格式 fail-closed）。返回
 // (dirMeta, 容器是否含文件 meta, 是否找到可解析目录 meta)。目录 meta 缺失/损坏/旧格式
 // → dm=nil；含文件 meta 时记日志（fail-closed：不压平到根，避免跨容器同名遮蔽，F-1）。
-func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container string) (*dirMeta, bool, bool) {
+func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container string) (*dirMeta, int64, bool, bool) {
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil {
-		return nil, false, false
+		return nil, 0, false, false
 	}
 	hasFiles := hasFileMeta(inner)
-	if dm, found := scanContainerDirMetaBlob(ctx, s, container, inner, hasFiles); found {
-		return dm, hasFiles, true
+	if dm, blobLen, found := scanContainerDirMetaBlob(ctx, s, container, inner, hasFiles); found {
+		return dm, blobLen, hasFiles, true
 	}
 	if hasFiles {
 		slog.Warn("secretdata: 容器缺少可解析目录 meta，跳过恢复其中文件（fail-closed）",
 			"container", container)
 	}
-	return nil, hasFiles, false
+	return nil, 0, hasFiles, false
 }
 
 // scanContainerDirMetaBlob 定位并解密容器内目录 meta（旧格式 fail-closed 判定明确并专用
 // 日志，不落通用缺 meta 日志——M-6 双日志噪点）。返回 (dirMeta, 是否找到可解析目录 meta)。
-func scanContainerDirMetaBlob(ctx context.Context, s *SecretdataFS, container string, inner []syncpkg.Entry, hasFiles bool) (*dirMeta, bool) {
+func scanContainerDirMetaBlob(ctx context.Context, s *SecretdataFS, container string, inner []syncpkg.Entry, hasFiles bool) (*dirMeta, int64, bool) {
 	for _, f := range inner {
 		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindDirMeta {
 			continue
@@ -1364,13 +1378,13 @@ func scanContainerDirMetaBlob(ctx context.Context, s *SecretdataFS, container st
 					slog.Warn("secretdata: 容器目录 meta 为旧格式（path 字段），跳过恢复其中文件（fail-closed）",
 						"container", container)
 				}
-				return nil, false
+				return nil, 0, false
 			}
 			continue // 其它解密失败（损坏）继续尝试容器内其余 dir meta
 		}
-		return dm, true
+		return dm, int64(len(blob)), true
 	}
-	return nil, false
+	return nil, 0, false
 }
 
 // hasFileMeta 报告容器内是否存在文件 meta（z 标记）条目。
@@ -1732,6 +1746,7 @@ func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string
 	if werr := s.inner.WriteFile(ctx, path.Join(c, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
 		return "", nil, fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
+	s.dirPhysTotal += int64(len(blob))
 	s.dirSegs[dirPath] = c
 	s.dirIDs[dirPath] = dirID
 	if dirPath != "" {
