@@ -1847,10 +1847,24 @@ type WriteTargetInput struct {
 	// NoRecord 为 true 时跳过成功副作用（upload 事件/checksum 台账/索引 upsert/mtime）——
 	// 调用方自己发布语义事件（如版本恢复发布 version 事件、S3 由协议层处理）。sidecar 仍内置。
 	NoRecord bool
+	// ContentPresent 非 nil 表示**内容已由外部直传落在目标卷上**（presign 直传登记，2026-10-14 P0）：
+	// 内核不写内容（src 忽略），只做「存在性 + size 校验 → 双账本结算 → 元数据/台账」。
+	// 用途：把「客户端直传对象存储」纳入与上传**同一套**记账原语与元数据，关闭 presign 的
+	// 容量/配额旁路（此前 complete 只做 Stat 存在性确认 ⇒ 对象对账本与 sidecar 完全不可见）。
+	ContentPresent *ContentPresentSpec
 	// ClientSize 是客户端声明的大小（用于成功文案与路由预检）。
 	ClientSize int64
 	// Mtime 是写入后要设置的文件修改时间（UnixNano；0 = 不设置）。
 	Mtime int64
+}
+
+// ContentPresentSpec 描述「内容已在位」的对象（presign 直传完成登记）。
+type ContentPresentSpec struct {
+	// Size 是直传对象的字节数（客户端声明；与实测不符 ⇒ 409 fail-closed——宁可拒绝也不记错账）。
+	Size int64
+	// SHA256 是客户端声明的整文件 SHA-256（64 位小写十六进制）：记入 checksum 台账，
+	// 供列表/下载比对。**服务端不重算**（直传内容不经本进程，重算需完整下载对象——见文档残余）。
+	SHA256 string
 }
 
 // WriteTargetResult 是统一写内核的结果。
@@ -1915,12 +1929,85 @@ func (s *Service) WriteTarget(ctx context.Context, input WriteTargetInput, src i
 // writeTargetSettle 是 WriteTarget 的写盘/校验/结算/副作用主体（对照 writeFileSettle：
 // 去掉 HTTP 上传专属的幂等/版本/dedup 预处理，保留原子写 + checksum + 双账本 + sidecar + 台账）。
 func (s *Service) writeTargetSettle(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, src io.Reader, logger *slog.Logger) (WriteTargetResult, error) {
+	// 内容已在位（presign 直传登记）：不写内容，只登记（存在性/size 校验 + 双账本 + 元数据）。
+	if input.ContentPresent != nil {
+		return s.writeTargetPresentSettle(ctx, owner, rel, remotePath, input, route, logger)
+	}
 	// 外部卷（Sink）写入：无本地 inode 语义，直写 + 校验 + 记账。
 	if route.Sink != nil {
 		return s.writeTargetExternalSettle(ctx, logger, owner, rel, remotePath, input, route, src)
 	}
 	// 本地卷：原子写 + 校验 + 双账本 + sidecar + 台账（统一内核主体）。
 	return s.writeTargetLocalSettle(ctx, owner, rel, remotePath, input, route, src, logger)
+}
+
+// writeTargetPresentSettle 是「内容已在位」的登记主体（presign 直传 complete）：
+// ① 存在性 + size 校验（fail-closed）② 双账本结算 ③ 元数据/台账（本地卷写 sidecar + 索引 +
+// checksum 台账；外部卷与常规外部写一致——由卷根扫描发现，另记 checksum 台账与指标）。
+//
+// **记账口径（明示边界）**：直传内容不经本进程，账本此前完全看不到它 ⇒ 按**新对象**记账
+// （prev=0 ⇒ Commit(size)）。已知边界：若同路径此前已经内核写入并记账，本次会重复计一次
+// （容量池由周期对账收敛；owner 配额侧偏高）——覆盖既有文件请走上传 API（同一套记账原语）。
+func (s *Service) writeTargetPresentSettle(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, logger *slog.Logger) (WriteTargetResult, error) {
+	spec := input.ContentPresent
+	actual, exists := presentObjectSize(ctx, route, rel)
+	if !exists {
+		route.Release()
+		return WriteTargetResult{}, &HTTPError{Status: http.StatusNotFound, Message: "直传对象不存在（直传未完成或路径错误）"}
+	}
+	if actual != spec.Size {
+		route.Release()
+		logger.WarnContext(ctx, "直传对象大小与声明不符，拒绝登记", "actual", actual, "declared", spec.Size, "file_name", remotePath)
+		return WriteTargetResult{}, &HTTPError{
+			Status:  http.StatusConflict,
+			Message: fmt.Sprintf("直传对象大小与声明不符（实际 %d，声明 %d）", actual, spec.Size),
+		}
+	}
+	if !input.NoQuota {
+		route.Commit(0, spec.Size)
+	}
+	checksum := strings.ToLower(spec.SHA256)
+	if route.Sink == nil {
+		root := route.Tenant.Root()
+		if s.rt.fileMetaEnabled() {
+			if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel); mErr != nil {
+				logger.Warn("可信卷 meta 落盘失败（读侧将不校验）", "file_name", remotePath, "error", mErr)
+			}
+		}
+		if !input.NoRecord {
+			s.recordUploadSuccess(root, owner, remotePath, rel, checksum, input.Mtime, logger)
+		}
+	} else {
+		if cs := s.rt.checksumStore(owner); cs != nil && checksum != "" {
+			cs.Set(rel, checksum)
+		}
+		if mr := s.rt.metricsRecorder(); mr != nil {
+			mr.RecordUpload(spec.Size)
+		}
+		logger.DebugContext(ctx, "直传对象登记成功（外部卷）", "file_name", remotePath, "size", spec.Size)
+	}
+	return WriteTargetResult{
+		VolumeName: route.VolumeName, Checksum: checksum, Size: spec.Size,
+		Message: fmt.Sprintf("直传对象登记成功, size: %d", spec.Size),
+	}, nil
+}
+
+// presentObjectSize 取直传对象的物理大小（外部卷经 Sink.Stat，本地卷经租户根 Stat）。
+func presentObjectSize(ctx context.Context, route UploadRoute, rel string) (int64, bool) {
+	if route.Sink != nil {
+		if sz, ok, err := route.Sink.Stat(ctx, rel); err == nil && ok {
+			return sz, true
+		}
+		return 0, false
+	}
+	if route.Tenant == nil {
+		return 0, false
+	}
+	st, err := route.Tenant.Root().Stat(rel)
+	if err != nil || st == nil {
+		return 0, false
+	}
+	return st.Size(), true
 }
 
 // writeTargetLocalSettle 本地卷统一写内核主体：MkdirAll → prev → 原子写（Exclusive O_EXCL）→
