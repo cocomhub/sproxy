@@ -245,7 +245,9 @@ func histStatuses(h []historyEntry) []string {
 // waitNotify 轮询条件（短超时；通知分发是异步 goroutine）。
 func waitNotify(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// 10s（原 3s）：通知中心异步派发在 CI 高负载下可能排队数秒（flake #746 第 2 轮）——
+	// 放宽上限只影响「真失败」的报错延迟，不影响判据强度（仍有界）。
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
