@@ -24,6 +24,10 @@ type Pool struct {
 	maxBytes  int64 // 0 = 不限制
 	committed int64
 	reserved  int64
+	// allocated 是**已分配给子节点的额度**（配额模型 v3 的分配账本）：与 committed/reserved
+	// 严格分离——分配是「策略额度」（允许谁用多少），用量是「实际占用」。把分配记成用量会让
+	// 「已分配但未使用」的空间被误判为已用。不变式：allocated ≤ maxBytes（maxBytes>0 时）。
+	allocated int64
 	parent    *Pool // 非 nil 时向父链聚合
 	children  []*Scope
 	path      string // 根池为 ""；子池为对应 Scope 的完整路径
