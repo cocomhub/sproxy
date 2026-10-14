@@ -22,7 +22,7 @@ import (
 func TestCloudDownloadGroupCmd_Use(t *testing.T) {
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{}, nil, nil)
 	if cmd.Use != "cloud-download-group <name> <url> [url...]" {
 		t.Fatalf("expected Use 'cloud-download-group <name> <url> [url...]', got %q", cmd.Use)
 	}
@@ -31,7 +31,7 @@ func TestCloudDownloadGroupCmd_Use(t *testing.T) {
 func TestCloudDownloadGroupCmd_Subcommands(t *testing.T) {
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{}, nil, nil)
 
 	subcommands := []string{"submit", "wait", "download", "download-archive", "list", "archive", "cancel", "delete", "resume-chain", "resume-download"}
 	for _, name := range subcommands {
@@ -70,7 +70,7 @@ func TestCloudDownloadGroupCmd_Submit(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"submit", "g1", "https://example.com/a.zip", "https://example.com/b.zip"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("submit subcommand failed: %v", err)
@@ -114,7 +114,7 @@ func TestCloudDownloadGroupCmd_SubmitWithUrlFile(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"submit", "g1", "--url-file", urlFile})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("submit subcommand with url-file failed: %v", err)
@@ -146,7 +146,7 @@ func TestCloudDownloadGroupCmd_PreflightConflict(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"submit", "g1", "https://example.com/a/", "https://example.com/b/"})
 	err := cmd.Execute()
 	if err == nil {
@@ -180,7 +180,7 @@ func TestCloudDownloadGroupCmd_List(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"list"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("list subcommand failed: %v", err)
@@ -204,7 +204,7 @@ func TestCloudDownloadGroupCmd_ListEmpty(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"list"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("list subcommand failed: %v", err)
@@ -228,7 +228,7 @@ func TestCloudDownloadGroupCmd_Cancel(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"cancel", "group-1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("cancel subcommand failed: %v", err)
@@ -252,7 +252,7 @@ func TestCloudDownloadGroupCmd_Delete(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"delete", "group-1", "--yes"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("delete subcommand failed: %v", err)
@@ -272,7 +272,7 @@ func TestCloudDownloadGroupCmd_DeleteRequiresYes(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var out, errBuf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &out, ErrOut: &errBuf}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &out, ErrOut: &errBuf}, nil, nil)
 	cmd.SetArgs([]string{"delete", "group-1"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected error when --yes not provided")
@@ -301,7 +301,7 @@ func TestCloudDownloadGroupCmd_Archive(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"archive", "group-1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("archive subcommand failed: %v", err)
@@ -324,7 +324,7 @@ func TestCloudDownloadGroupCmd_Resume(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil, nil)
 
 	resume := findSubCommand(cmd, "resume-download")
 	if resume == nil {
@@ -335,7 +335,7 @@ func TestCloudDownloadGroupCmd_Resume(t *testing.T) {
 	}
 	// 验证命令能实际执行
 	var buf strings.Builder
-	cmdResume := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmdResume := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmdResume.SetArgs([]string{"resume-download", "group-1"})
 	if err := cmdResume.Execute(); err != nil {
 		t.Fatalf("resume-download subcommand failed: %v", err)
@@ -387,7 +387,7 @@ func TestCloudDownloadGroupCmd_DownloadSubcommand(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"download", "group-dl", "task-1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("download subcommand failed: %v", err)
@@ -431,7 +431,7 @@ func TestCloudDownloadGroupCmd_DownloadSubcommandNotCompleted(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"download", "group-dl-pending", "task-pending"})
 	err := cmd.Execute()
 	if err == nil {
@@ -472,7 +472,7 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"download-archive", "archive.tar.gz"})
 	// 切到临时目录为工作目录：下载命令默认输出到当前目录，避免落到真实工作目录。
 	// 必须在 Execute 之前切换（Execute 内部的 DownloadItems 默认写到 cwd）。
@@ -497,7 +497,7 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 func TestCloudDownloadGroupCmd_ResumeChainSubcommand(t *testing.T) {
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil, nil)
 
 	resumeChain := findSubCommand(cmd, "resume-chain")
 	if resumeChain == nil {
@@ -544,7 +544,7 @@ func TestCloudDownloadGroupCmd_Wait(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"wait", "--poll-interval", "50ms", "--timeout", "5s", "group-wait"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("wait subcommand failed: %v", err)
@@ -557,7 +557,7 @@ func TestCloudDownloadGroupCmd_Wait(t *testing.T) {
 func TestCloudDownloadGroupCmd_NoURLs(t *testing.T) {
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil, nil)
 	cmd.SetArgs([]string{"submit", "g1"})
 	err := cmd.Execute()
 	if err == nil {

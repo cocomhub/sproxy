@@ -790,3 +790,30 @@ func TestCloudArchive_SingleTask_ToVolume_SecretsRejected(t *testing.T) {
 		t.Fatalf("secrets 卷应 400，got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestCloudArchive_SingleTask_ToVolume_TargetPath 显式目标路径（客户端由卷 URI 归一）：
+// user 桶内子目录 + 文件名直接生效，不再固定 archive/ 前缀。
+func TestCloudArchive_SingleTask_ToVolume_TargetPath(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	body := `{"archive_name":"s.tar.gz","target_volume":"vault","target_path":"backups/2026/s.tar.gz"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/backups/2026/s.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+	var resp CloudArchiveResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if want := "vault://vault/" + key; resp.File != want {
+		t.Fatalf("File=%q want %q", resp.File, want)
+	}
+}

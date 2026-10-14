@@ -5,21 +5,34 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
 // NewCmdCloudArchive 创建 cloud-download archive 子命令的工厂函数。
-func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+//
+// 转存目标（可选）用**卷 URI 路径** `--target <卷名>:/<路径>`（cd/mv 同规约）——不引入
+// volume flag：URI 里的卷名由客户端归一为请求体的 target_volume/target_path，协议零改动。
+// 未带卷名的纯路径回落当前工作目录所在卷（`cd <卷名>:/…` 设定）。
+func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "archive <task-id> [task-id...]",
 		Short: "打包云端下载已完成的任务文件",
-		Long: `将指定已完成云端下载任务的文件打包为 tar.gz 并存放到服务端 uploads 目录。
+		Long: `将指定已完成云端下载任务的文件打包为 tar.gz。
 
-支持单个或多个任务 ID。使用 --name 指定归档文件名。`,
+支持单个或多个任务 ID。使用 --name 指定归档文件名。
+使用 --target 指定转存目标（卷 URI 路径 <卷名>:/<路径>）时，打包后转存到该外部卷，
+不落服务端 archive 桶：
+
+  sclient cloud-download archive <task-id> --target vault:/backups/a.tar.gz
+  sclient cloud-download archive <task-id> --target disk2:/            # 目录（默认文件名）
+  cd vault:/backups && sclient cloud-download archive <task-id> --target a.tar.gz`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
@@ -27,37 +40,85 @@ func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc
 				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-
-			archiveName, _ := cmd.Flags().GetString("name")
-			if archiveName == "" {
-				// 客户端要求非空名称，未指定时自动生成
-				archiveName = fmt.Sprintf("cloud-archive-%d.tar.gz", time.Now().Unix())
-			}
-
-			if len(args) == 1 {
-				result, err := svc.ArchiveCloudTask(cmd.Context(), args[0], archiveName)
-				if err != nil {
-					return fmt.Errorf("归档失败: %w", err)
-				}
-				ios.WriteOutLine("归档完成: %s (%d bytes)", result.File, result.Size)
-			} else {
-				result, err := svc.ArchiveCloudTasks(cmd.Context(), args, archiveName)
-				if err != nil {
-					return fmt.Errorf("归档失败: %w", err)
-				}
-				// SkippedCount>0 时提示部分跳过（服务端批量归档会跳过无效/未完成任务）
-				if result.SkippedCount > 0 {
-					ios.WriteOutLine("归档完成: %s (%d bytes, %d files, 跳过 %d 个任务)",
-						result.File, result.Size, result.TaskCount, result.SkippedCount)
-				} else {
-					ios.WriteOutLine("归档完成: %s (%d bytes, %d files)", result.File, result.Size, result.TaskCount)
-				}
-			}
-			return nil
+			return runCloudArchive(cmd, args, svc, ios, st)
 		},
 	}
 
 	cmd.Flags().String("name", "", "归档文件名（默认自动生成）")
+	cmd.Flags().String("target", "", "转存目标（卷 URI 路径 <卷名>:/<路径>；缺省落服务端 archive 桶）")
 
 	return cmd
+}
+
+// runCloudArchive 执行归档（单/批）；抽离自 RunE 控制 gocognit。
+func runCloudArchive(cmd *cobra.Command, args []string, svc *client.FileClient, ios cli.IOStreams, st *state.State) error {
+	archiveName, _ := cmd.Flags().GetString("name")
+	if archiveName == "" {
+		// 客户端要求非空名称，未指定时自动生成
+		archiveName = fmt.Sprintf("cloud-archive-%d.tar.gz", time.Now().Unix())
+	}
+	target, terr := resolveArchiveTargetFlag(cmd, st)
+	if terr != nil {
+		ios.WriteErrLine("%v", terr)
+		return terr
+	}
+	opts := archiveTargetOpts(target)
+
+	if len(args) == 1 {
+		result, err := svc.ArchiveCloudTask(cmd.Context(), args[0], archiveName, opts...)
+		if err != nil {
+			return fmt.Errorf("归档失败: %w", err)
+		}
+		ios.WriteOutLine("归档完成: %s (%d bytes)", result.File, result.Size)
+		return nil
+	}
+	result, err := svc.ArchiveCloudTasks(cmd.Context(), args, archiveName, opts...)
+	if err != nil {
+		return fmt.Errorf("归档失败: %w", err)
+	}
+	// SkippedCount>0 时提示部分跳过（服务端批量归档会跳过无效/未完成任务）
+	if result.SkippedCount > 0 {
+		ios.WriteOutLine("归档完成: %s (%d bytes, %d files, 跳过 %d 个任务)",
+			result.File, result.Size, result.TaskCount, result.SkippedCount)
+		return nil
+	}
+	ios.WriteOutLine("归档完成: %s (%d bytes, %d files)", result.File, result.Size, result.TaskCount)
+	return nil
+}
+
+// resolveArchiveTargetFlag 读取 --target 并归一卷 URI 路径。
+func resolveArchiveTargetFlag(cmd *cobra.Command, st *state.State) (*client.TransferSpec, error) {
+	raw, _ := cmd.Flags().GetString("target")
+	return resolveArchiveTarget(st, raw)
+}
+
+// archiveTargetOpts 把转存目标转为 SDK option（nil → 无 option，落 archive 桶）。
+func archiveTargetOpts(t *client.TransferSpec) []client.CloudArchiveOption {
+	if t == nil {
+		return nil
+	}
+	return []client.CloudArchiveOption{client.WithCloudArchiveTarget(t)}
+}
+
+// resolveArchiveTarget 把 `--target` 的卷 URI 路径归一为转存目标（volume+path）。
+//   - `<卷名>:/<路径>` → 该卷 + 路径（`<卷名>:` / `:<卷名>/` = 卷根，path 空 = 服务端默认 archive/<名>）；
+//   - 纯路径（无卷 URI 前缀）→ 当前工作目录所在卷（cd 语义）；无当前卷 → 报错（请显式给卷 URI）；
+//   - 空 → nil（不转存，落 archive 桶）。
+//
+// 与 cd/mv/cp 共用 splitVolumeURI（`:/` 形式，`https://` / `C:\` 不误判）。
+func resolveArchiveTarget(st *state.State, raw string) (*client.TransferSpec, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if vol, path, ok := splitVolumeURI(raw); ok {
+		if path == "/" {
+			path = "" // 卷根：服务端用默认 archive/<归档名>
+		}
+		return &client.TransferSpec{Volume: vol, Path: path}, nil
+	}
+	if st != nil && st.CurrentVolume != "" {
+		return &client.TransferSpec{Volume: st.CurrentVolume, Path: raw}, nil
+	}
+	return nil, fmt.Errorf("转存目标须为卷 URI 路径（<卷名>:/<路径>），或先 `cd <卷名>:/` 指定当前卷")
 }

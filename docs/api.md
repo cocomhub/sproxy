@@ -493,10 +493,13 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 将任务已下载文件打包为 tar.gz（`cloud_archive_max_bytes` 限制原始大小总和）。
 
 请求体可选字段 `target_volume`：非空 = **统一转存**——打包后经可信卷写视图转存到该外部卷，
-不落租户 archive 桶；目标键为 `<owner>/user/archive/<archive_name>`（经 `volume.ResolveUserLocation`
-唯一入口，与读路径同键空间，可经 `/download` 命中；外部卷不走本地文件索引，故不出现在
-`/api/files` 列表），响应 `file` 为可 `ResolveURL` 取用的 URL（非归档名）。空/缺省 = 沿既有
-行为落租户 archive 桶。同名目标已存在 → 409（拒绝静默覆盖）。
+不落租户 archive 桶。可选 `target_path` 指定目标键（目标卷 **user 桶内**相对路径，可含子目录；
+空 = 默认 `archive/<archive_name>`，以 `/` 结尾 = 目录并拼上归档名）。目标键实际为
+`<owner>/user/<target_path>`（经 `volume.ResolveUserLocation` 唯一入口，与读路径同键空间，
+可经 `/download` 命中；外部卷不走本地文件索引，故不出现在 `/api/files` 列表），响应 `file` 为
+可 `ResolveURL` 取用的 URL（非归档名）。空/缺省 = 沿既有行为落租户 archive 桶。同名目标已存在
+→ 409（拒绝静默覆盖）。CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，cd/mv 同规约）指定，
+客户端归一为 `target_volume`/`target_path` 后发送（协议层不解析 URI）。
 
 ### POST /api/cloud/archive
 

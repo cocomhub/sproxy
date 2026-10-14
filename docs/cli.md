@@ -666,6 +666,18 @@ sclient cloud-download --url-file <file>     # 每行 URL 或 URL<TAB>FILENAME
   `cancel` / `resume-chain` / `resume-download` / `group`（任务组）/ `resume`；
 - 任务状态：`pending | downloading | completed | failed | cancelled`；失败自动重试（`cloud_max_retries`）。
 
+**归档转存（统一转存）**：`cloud-download archive` 与 `cloud-download-group archive` 支持
+`--target <卷 URI 路径>`（cd/mv 同规约，`<卷名>:/<路径>`）——打包后转存到该外部卷，不落服务端
+archive 桶；不带卷名的纯路径回落当前工作目录所在卷（`cd <卷名>:/…`）。未指定 `--target` 时行为不变
+（落 archive 桶）。CLI 仅把 URI 归一为请求体的 `target_volume`/`target_path`，协议零改动：
+
+```bash
+sclient cloud-download archive <task-id> --target vault:/backups/a.tar.gz   # 指定文件路径
+sclient cloud-download archive <task-id> --target disk2:/                    # 目标是目录（默认文件名）
+cd vault:/backups && sclient cloud-download archive <task-id> --target a.tar.gz  # 当前卷内路径
+sclient cloud-download-group archive <group-id> --target vault:/backups/     # 组归档转存
+```
+
 ### genkey
 
 ```bash

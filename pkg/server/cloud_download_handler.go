@@ -909,7 +909,7 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 			h.cloudMgr.SetGroupArchiveFile(groupID, url)
 		}
 	}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, archiveName, entries, archiveTotalSize(groupFiles), h.logger.With("archive", "group", "group_id", groupID), onSuccess)
+	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, req.TargetPath, archiveName, entries, archiveTotalSize(groupFiles), h.logger.With("archive", "group", "group_id", groupID), onSuccess)
 }
 
 // cloudArchiveToVolume 是统一转存的**共享执行核心**（单任务 / 批量 / 组归档共用）：
@@ -928,7 +928,7 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 // 由目标卷 ReserveSpace / staging 配额管），故不做 archive 桶 Scope 预留。
 func (h *Handlers) cloudArchiveToVolume(
 	w http.ResponseWriter, r *http.Request,
-	owner, targetVolume, archiveName string,
+	owner, targetVolume, targetPath, archiveName string,
 	entries []transfer.SourceEntry, totalSize int64,
 	logger *slog.Logger,
 	onSuccess func(url string),
@@ -948,8 +948,9 @@ func (h *Handlers) cloudArchiveToVolume(
 		return
 	}
 	// 目标键：volume 唯一入口（权限门 + 路径安全 + 恒 owner 前缀），与读路径
-	// resolveExternalDownload 的 ResolveUserLocation 同键空间。
-	loc, lerr := vol.ResolveUserLocation(owner, relOf(archiveName))
+	// resolveExternalDownload 的 ResolveUserLocation 同键空间。targetPath 为客户端由卷 URI
+	// （cd/mv 同规约）归一后的 user 桶相对路径（可含子目录）；空 → 默认 archive/<name>。
+	loc, lerr := vol.ResolveUserLocation(owner, archiveTargetRel(targetPath, archiveName))
 	if lerr != nil {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid target path: " + lerr.Error()}, http.StatusBadRequest)
 		return
@@ -1065,7 +1066,25 @@ func archiveTotalSize(files []fileWithRelPath) int64 {
 	return total
 }
 
-// relOf 派生转存目标路径（archive/<name>.tar.gz，卷内 user 桶相对路径；
+// archiveTargetRel 派生转存目标在**目标卷 user 桶内**的相对路径：
+//   - targetPath 空 → 默认 archive/<archive_name>；
+//   - targetPath 以 "/" 结尾 → 视为目录，拼上 archiveName；
+//   - 否则直接用 targetPath（去前导 "/"）。
+//
+// 路径安全（../ 逃逸 / 绝对路径 / 非法段）由 volume.ResolveUserLocation 唯一入口校验。
+func archiveTargetRel(targetPath, archiveName string) string {
+	p := strings.TrimPrefix(strings.TrimSpace(targetPath), "/")
+	switch {
+	case p == "":
+		return relOf(archiveName)
+	case strings.HasSuffix(p, "/"):
+		return p + archiveName
+	default:
+		return p
+	}
+}
+
+// relOf 派生转存目标默认路径（archive/<name>.tar.gz，卷内 user 桶相对路径；
 // owner 前缀/路径安全由 volume.ResolveLocation 唯一入口拼接）。
 func relOf(archiveName string) string {
 	rel := "archive/" + archiveName

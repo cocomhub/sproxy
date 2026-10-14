@@ -309,15 +309,47 @@ func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
 
+// CloudArchiveOption 配置云端归档行为（转存目标等）。
+type CloudArchiveOption func(*cloudArchiveOptions)
+
+type cloudArchiveOptions struct {
+	target *TransferSpec
+}
+
+// WithCloudArchiveTarget 设置归档转存目标：打包后转存到外部卷的指定路径（统一转存）。
+// Path 为目标卷 **user 桶内**相对路径（可含子目录；空 = 服务端默认 archive/<归档名>）。
+// 服务端协议只收 volume+path（不解析 URI）；壳层（CLI）负责把卷 URI `<卷名>:/<路径>`
+// 归一为这两个字段（与 cd/mv 同规约）。nil/未设 = 落租户 archive 桶。
+func WithCloudArchiveTarget(t *TransferSpec) CloudArchiveOption {
+	return func(o *cloudArchiveOptions) { o.target = t }
+}
+
+// buildArchiveBody 组装归档请求体（archive_name + 可选 target_volume/target_path）。
+func buildArchiveBody(archiveName string, opts []CloudArchiveOption) map[string]any {
+	var o cloudArchiveOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+	body := map[string]any{"archive_name": archiveName}
+	if o.target != nil {
+		body["target_volume"] = o.target.Volume
+		if o.target.Path != "" {
+			body["target_path"] = o.target.Path
+		}
+	}
+	return body
+}
+
 // ArchiveCloudTask 将单任务文件打包为 tar.gz 并存放到 uploads 目录。
-func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName string) (*CloudArchiveResult, error) {
+// 传 WithCloudArchiveTarget 时改为转存到外部卷（不落 archive 桶）。
+func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName string, opts ...CloudArchiveOption) (*CloudArchiveResult, error) {
 	if taskID == "" {
 		return nil, fmt.Errorf("云端打包: taskID 不能为空")
 	}
 	if archiveName == "" {
 		return nil, fmt.Errorf("云端打包: 归档名称不能为空")
 	}
-	body := map[string]string{"archive_name": archiveName}
+	body := buildArchiveBody(archiveName, opts)
 	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/archive"
 	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
@@ -327,17 +359,16 @@ func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName s
 }
 
 // ArchiveCloudTasks 将多个任务的文件打包为一个 tar.gz。
-func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string) (*CloudArchiveResult, error) {
+// 传 WithCloudArchiveTarget 时改为转存到外部卷（不落 archive 桶）。
+func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string, opts ...CloudArchiveOption) (*CloudArchiveResult, error) {
 	if len(taskIDs) == 0 {
 		return nil, fmt.Errorf("云端打包: taskIDs 不能为空")
 	}
 	if archiveName == "" {
 		return nil, fmt.Errorf("云端打包: 归档名称不能为空")
 	}
-	body := map[string]any{
-		"task_ids":     taskIDs,
-		"archive_name": archiveName,
-	}
+	body := buildArchiveBody(archiveName, opts)
+	body["task_ids"] = taskIDs
 	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/archive", body, &result); err != nil {
 		return nil, fmt.Errorf("云端打包: %w", err)
@@ -487,11 +518,12 @@ func (c *FileClient) CloudDeleteGroup(ctx context.Context, groupID string) error
 }
 
 // CloudArchiveGroup 将组内所有文件打包为 tar.gz。
-func (c *FileClient) CloudArchiveGroup(ctx context.Context, groupID, archiveName string) (*CloudArchiveResult, error) {
+// 传 WithCloudArchiveTarget 时改为转存到外部卷（不落 archive 桶）。
+func (c *FileClient) CloudArchiveGroup(ctx context.Context, groupID, archiveName string, opts ...CloudArchiveOption) (*CloudArchiveResult, error) {
 	if groupID == "" {
 		return nil, fmt.Errorf("打包下载组: groupID 不能为空")
 	}
-	body := map[string]string{"archive_name": archiveName}
+	body := buildArchiveBody(archiveName, opts)
 	apiPath := apiCloudGroupsBase + url.PathEscape(groupID) + "/archive"
 	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {

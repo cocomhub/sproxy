@@ -164,7 +164,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudSubmit(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudWait(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudArchive(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudArchive(factory, ios, st, cfgSvc))
 	cmd.AddCommand(NewCmdCloudDownloadFile(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudDownloadArchive(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudDeleteTask(factory, ios, cfgSvc))

@@ -801,3 +801,32 @@ func TestCloudDownload_ListTasksFullFields(t *testing.T) {
 		t.Fatal("expected task-1 in full list")
 	}
 }
+
+// TestCloudArchive_WithTarget 归档转存目标经请求体 volume+path 传递（协议层不解析 URI；
+// URI 归一在壳层 CLI 完成）。
+func TestCloudArchive_WithTarget(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "file": "vault://vault/anonymous/user/backups/a.tar.gz"})
+	}))
+	defer ts.Close()
+	c := NewFileClient(ts.URL)
+	if _, err := c.ArchiveCloudTask(t.Context(), "t1", "a.tar.gz",
+		WithCloudArchiveTarget(&TransferSpec{Volume: "vault", Path: "backups/a.tar.gz"})); err != nil {
+		t.Fatalf("ArchiveCloudTask: %v", err)
+	}
+	if body["target_volume"] != "vault" || body["target_path"] != "backups/a.tar.gz" {
+		t.Fatalf("请求体 target 错误: %+v", body)
+	}
+	// 未设 target → 请求体不带 target 字段（零回归落 archive 桶）。
+	body = nil
+	if _, err := c.ArchiveCloudTask(t.Context(), "t1", "a.tar.gz"); err != nil {
+		t.Fatalf("ArchiveCloudTask(no target): %v", err)
+	}
+	if _, ok := body["target_volume"]; ok {
+		t.Fatalf("未设 target 不应带 target_volume: %+v", body)
+	}
+}

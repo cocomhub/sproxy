@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
@@ -20,7 +21,7 @@ import (
 
 // NewCmdCloudDownloadGroup 创建云端组下载命令的工厂函数。
 // 默认行为是完整链式操作：创建组 → 等待 → 打包 → 下载 → 清理。
-func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cloud-download-group <name> <url> [url...]",
 		Short: "从云端下载文件到组（链式操作：创建组→等待→打包→下载→清理）",
@@ -61,7 +62,7 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudGroupSubmit(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupWait(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudGroupArchive(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudGroupArchive(factory, ios, st, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupDownload(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupDownloadArchive(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupList(factory, ios, cfgSvc))
@@ -420,13 +421,16 @@ func NewCmdCloudGroupList(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 	return cmd
 }
 
-// NewCmdCloudGroupArchive 创建 archive 子命令。
-func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+// NewCmdCloudGroupArchive 创建 archive 子命令（--target 用卷 URI 路径，cd/mv 同规约）。
+func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "archive <group-id> [archive-name]",
 		Short: "打包下载组文件为 tar.gz",
-		Long:  `将下载组内所有已完成的文件打包为单个 tar.gz 归档文件。`,
-		Args:  cobra.RangeArgs(1, 2),
+		Long: `将下载组内所有已完成的文件打包为单个 tar.gz 归档文件。
+
+使用 --target <卷名>:/<路径> 时转存到该外部卷（不落 archive 桶），如：
+  sclient cloud-download-group archive <group-id> --target vault:/backups/`,
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
@@ -438,7 +442,17 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, c
 			if len(args) > 1 {
 				archiveName = args[1]
 			}
-			result, err := svc.CloudArchiveGroup(cmd.Context(), groupID, archiveName)
+			targetRaw, _ := cmd.Flags().GetString("target")
+			target, terr := resolveArchiveTarget(st, targetRaw)
+			if terr != nil {
+				ios.WriteErrLine("%v", terr)
+				return terr
+			}
+			var opts []client.CloudArchiveOption
+			if target != nil {
+				opts = append(opts, client.WithCloudArchiveTarget(target))
+			}
+			result, err := svc.CloudArchiveGroup(cmd.Context(), groupID, archiveName, opts...)
 			if err != nil {
 				return fmt.Errorf("打包下载组失败: %w", err)
 			}
@@ -451,6 +465,7 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, c
 			return nil
 		},
 	}
+	cmd.Flags().String("target", "", "转存目标（卷 URI 路径 <卷名>:/<路径>；缺省落服务端 archive 桶）")
 	return cmd
 }
 

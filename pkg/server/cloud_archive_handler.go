@@ -32,6 +32,11 @@ type CloudArchiveRequest struct {
 	// TargetVolume 非空 = 归档打包后**转存到外部卷**（统一转存：归档=转存+可选预处理）。
 	// 空 = 落租户 archive 桶（既有行为零回归）。
 	TargetVolume string `json:"target_volume,omitempty"`
+	// TargetPath 是转存目标在**目标卷 user 桶内**的相对路径（含文件名；可含子目录）。
+	// 空 = 默认 `archive/<archive_name>`；以 "/" 结尾 = 目录（拼上 archive_name）。
+	// 由客户端从卷 URI（`<卷名>:/<路径>`，cd/mv 同规约）归一后传入；路径安全由
+	// volume.ResolveUserLocation 唯一入口校验（协议层只收 volume+path，不解析 URI）。
+	TargetPath string `json:"target_path,omitempty"`
 }
 
 // CloudArchiveBatchRequest 是 POST /api/cloud/archive 的请求体。
@@ -41,6 +46,8 @@ type CloudArchiveBatchRequest struct {
 	// TargetVolume 非空 = 批量归档打包后**转存到外部卷**（统一转存）；
 	// 空 = 落租户 archive 桶（既有行为零回归）。
 	TargetVolume string `json:"target_volume,omitempty"`
+	// TargetPath 同 CloudArchiveRequest.TargetPath（目标卷 user 桶内相对路径）。
+	TargetPath string `json:"target_path,omitempty"`
 }
 
 // CloudArchiveResult 是归档操作响应结构体。
@@ -386,7 +393,7 @@ func (h *Handlers) cloudArchiveTaskToVolume(w http.ResponseWriter, r *http.Reque
 	entries := []transfer.SourceEntry{{
 		Rel: task.Filename, Size: size, ModTime: info.ModTime().Unix(), Reader: f,
 	}}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, name, entries, size, h.logger.With("archive", "cloud_task", "task_id", taskID), nil)
+	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, req.TargetPath, name, entries, size, h.logger.With("archive", "cloud_task", "task_id", taskID), nil)
 }
 
 // cloudArchiveBatchToVolume 批量归档统一转存：多文件（tar.gz 打包）→ 外部卷。
@@ -405,7 +412,7 @@ func (h *Handlers) cloudArchiveBatchToVolume(w http.ResponseWriter, r *http.Requ
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, name, entries, totalSize, h.logger.With("archive", "cloud_batch"), nil)
+	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, req.TargetPath, name, entries, totalSize, h.logger.With("archive", "cloud_batch"), nil)
 }
 
 // cloudArchiveSettleQuota 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)

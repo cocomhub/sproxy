@@ -1190,3 +1190,63 @@ func TestCloudDownloadSubmitOpts_Defaults(t *testing.T) {
 		t.Fatalf("未设旗标应仅 download_local 默认 true 一个 option（I-1），实际 %d", len(opts))
 	}
 }
+
+// captureArchiveBody 起一个 mock 服务端，捕获 /archive 请求体并回成功响应。
+func captureArchiveBody(t *testing.T, out *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/archive") || r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(out)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "file": "vault://vault/anonymous/user/backups/a.tar.gz"})
+	}))
+}
+
+// TestCloudDownloadCmd_ArchiveTargetURI 卷 URI 目标（<卷名>:/<路径>）归一为请求体 volume+path，
+// 不经过 volume flag（cd/mv 同规约）。
+func TestCloudDownloadCmd_ArchiveTargetURI(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--name", "a.tar.gz", "--target", "vault:/backups/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target 失败: %v", err)
+	}
+	if body["target_volume"] != "vault" || body["target_path"] != "/backups/a.tar.gz" {
+		t.Fatalf("请求体 target 归一错误: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetCurrentVolume 纯路径 --target 回落当前工作目录所在卷（cd 语义）。
+func TestCloudDownloadCmd_ArchiveTargetCurrentVolume(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{CurrentVolume: "disk2"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "backups/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（当前卷）失败: %v", err)
+	}
+	if body["target_volume"] != "disk2" || body["target_path"] != "backups/a.tar.gz" {
+		t.Fatalf("当前卷回落错误: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetNoVolume 纯路径且无当前卷 → 明确报错（不静默按桶归档）。
+func TestCloudDownloadCmd_ArchiveTargetNoVolume(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient("http://test.local"), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "backups/a.tar.gz"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("无卷 URI 且无当前卷应报错")
+	}
+}
