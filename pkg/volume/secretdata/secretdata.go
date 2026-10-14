@@ -379,9 +379,31 @@ func entryOf(rel, seg string, size int64, isDir bool) syncpkg.Entry {
 // ListDir 列出逻辑 rel 目录下的直接子项（透明子目录可发现/进入）。
 // 索引只存完整逻辑路径文件键；这里对每个路径把下一段作为子项聚合，
 // 跨段前缀呈现为目录条目（审查 F-2：ListDir 永不返回子目录）。
+// collectChildSegments 聚合子条目：**目录集合优先**（`dirs` 是真实目录的事实源），再用 index
+// （文件键首段）补齐——**按名字跨源去重**。
+//
+// 为什么必须跨源去重（用户实测 2026-10-14：secretdata 卷 `list 1/` 输出两个 `2/`）：同一个子目录
+// 会**同时**出现在两处——
+//   - `dirs` 含 `1/2`（目录键，来自 dir meta 加载）⇒ `collectDirSegments` 产出目录 `2`；
+//   - `index` 含 `1/2/f.bin`（文件键）⇒ `collectIndexSegments` 由首段推出**目录** `2`。
+//
+// 两个函数各自内部去重（`seenDirs`）但**互不知道对方** ⇒ 简单 append 必然重复。这里改为
+// 「先目录集合、后 index 补齐 + 共享 seen」：index 推出的目录仅在 `dirs` 缺失时才作为兜底出现
+// （容器/目录 meta 缺失的部分加载场景仍可见），已由 `dirs` 覆盖的名字不再重复。
 func collectChildSegments(paths map[string]*metaEntry, dirs map[string]struct{}, prefix, rel string, entrySize func(*metaEntry) int64) []syncpkg.Entry {
-	out := collectIndexSegments(paths, prefix, rel, entrySize)
-	return append(out, collectDirSegments(dirs, prefix, rel)...)
+	out := collectDirSegments(dirs, prefix, rel)
+	seen := make(map[string]bool, len(out))
+	for _, e := range out {
+		seen[e.Name] = true
+	}
+	for _, e := range collectIndexSegments(paths, prefix, rel, entrySize) {
+		if seen[e.Name] {
+			continue // 已由目录集合贡献（同名不重复；目录是事实源，优先）
+		}
+		seen[e.Name] = true
+		out = append(out, e)
+	}
+	return out
 }
 
 // collectIndexSegments 从 index 文件键聚合：首段为目录则目录条目，否则文件条目。
