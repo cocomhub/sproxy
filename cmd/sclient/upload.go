@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/e2ee"
@@ -44,12 +46,28 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 		使用 / 开头的绝对路径可以绕过当前目录。`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 卷上下文：**只应用当前工作目录所在卷**（`cd <卷名>:/…` 设定）——位置参数是
-			// **本地文件路径**，故不做卷 URI 解析（用户口径 2026-10-13）。
+			// 卷寻址（用户口径 2026-10-14：唯一方式 = 路径内卷 URI，无 --volume）：
+			//   - 位置参数是**本地文件路径** ⇒ 目标卷/目录由**目标 URI** 给出：
+			//     `upload <本地…> <卷名>:/<目录>`（最后一个含 `:/` 的参数视为目标目录）；
+			//   - 未给目标 URI ⇒ 用当前工作目录所在卷（`cd <卷名>:/…` 设定），否则 auto。
+			targetDir := ""
+			if n := len(args); n > 0 {
+				if vol, path, ok := splitVolumeURI(args[n-1]); ok {
+					if err := setSourceVolume(cmd, vol); err != nil {
+						return err
+					}
+					targetDir = path
+					args = args[:n-1]
+					if len(args) == 0 {
+						ios.WriteErrLine("缺少本地文件参数（目标 URI %q 之后无文件）", vol+":"+path)
+						return fmt.Errorf("上传参数不足")
+					}
+				}
+			}
 			if err := applyStateVolume(cmd, st); err != nil {
 				return err
 			}
-			return runUpload(cmd, args, factory, ios, st)
+			return runUpload(cmd, args, factory, ios, st, targetDir)
 		},
 	}
 
@@ -64,7 +82,7 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 }
 
 // runUpload 执行 upload 命令主体。
-func runUpload(cmd *cobra.Command, args []string, factory clientfactory.Factory, ios cli.IOStreams, st *state.State) error {
+func runUpload(cmd *cobra.Command, args []string, factory clientfactory.Factory, ios cli.IOStreams, st *state.State, targetDir string) error {
 	svc, err := factory.NewClient(cmd)
 	if err != nil {
 		ios.WriteErrLine(errFmtInitClientPrint, err)
@@ -84,7 +102,7 @@ func runUpload(cmd *cobra.Command, args []string, factory clientfactory.Factory,
 	stats := NewTransferStats()
 	for _, filePath := range args {
 		fmt.Fprintf(ios.Out, "上传: %s\n", filePath)
-		if err := uploadOneFile(ctx, svc, filePath, ios, st, opts, stats); err != nil {
+		if err := uploadOneFile(ctx, svc, filePath, ios, st, opts, stats, targetDir); err != nil {
 			return err
 		}
 	}
@@ -95,7 +113,7 @@ func runUpload(cmd *cobra.Command, args []string, factory clientfactory.Factory,
 }
 
 // uploadOneFile 计算远端路径并分发到分块/加密分支上传。
-func uploadOneFile(ctx context.Context, svc *client.FileClient, filePath string, ios cli.IOStreams, st *state.State, opts uploadOptions, stats *TransferStats) error {
+func uploadOneFile(ctx context.Context, svc *client.FileClient, filePath string, ios cli.IOStreams, st *state.State, opts uploadOptions, stats *TransferStats, targetDir string) error {
 	useChunked := opts.chunked
 	if !useChunked {
 		if stat, err := os.Stat(filePath); err == nil {
@@ -103,7 +121,7 @@ func uploadOneFile(ctx context.Context, svc *client.FileClient, filePath string,
 		}
 	}
 
-	remotePath, err := st.ResolveRemotePathOrErr(filepath.ToSlash(filepath.Clean(filePath)))
+	remotePath, err := resolveUploadRemotePath(st, filePath, targetDir)
 	if err != nil {
 		return err
 	}
@@ -113,6 +131,26 @@ func uploadOneFile(ctx context.Context, svc *client.FileClient, filePath string,
 		return uploadChunked(ctx, svc, filePath, remotePath, ios, opts, stats)
 	}
 	return uploadPlain(ctx, svc, filePath, remotePath, ios, opts, stats)
+}
+
+// resolveUploadRemotePath 计算上传的**远端目标路径**：
+//   - 给了目标 URI 目录（`upload <本地…> <卷>:/<目录>`）⇒ 远端 = 目标目录 + **本地相对路径**
+//     （保留目录结构；目标目录已由调用方解析为**卷根起算**的绝对路径）；
+//   - 未给 ⇒ 回落既有语义（相对路径拼当前工作目录，`/` 开头绕过 cwd）。
+func resolveUploadRemotePath(st *state.State, filePath, targetDir string) (string, error) {
+	local := filepath.ToSlash(filepath.Clean(filePath))
+	if targetDir == "" {
+		return st.ResolveRemotePathOrErr(local)
+	}
+	base := strings.TrimLeft(local, "/")
+	if strings.HasPrefix(local, "/") {
+		// 绝对本地路径：只保留末段（避免把本地根写进远端）。
+		base = path.Base(local)
+	}
+	// **上传接口要求相对路径**（服务端拒绝绝对路径：`文件名不能是绝对路径`）⇒ 目标 URI 目录与本地
+	// 相对结构拼接后去掉前导 `/`（`vault:/` ⇒ `d.bin`；`vault:/sub` ⇒ `sub/a/d.bin`）。
+	joined := path.Join(strings.TrimPrefix(targetDir, "/"), base)
+	return strings.TrimPrefix(joined, "/"), nil
 }
 
 // uploadChunked 以分块模式上传单个文件并把结果写入传输统计。

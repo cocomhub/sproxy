@@ -98,7 +98,7 @@ func TestE2E_CLI_Playback_UploadToSecretdataVolume(t *testing.T) {
 
 	// 2) 普通上传到 vault 卷（--volume 限定目标卷 → routeUpload 走外部卷 sink；
 	// 相对文件名：sclient 已 cd 到 env.TmpDir，避免绝对路径被当远端路径）。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "movie.bin")
+	env.sclient(t, env.TmpDir, "upload", "movie.bin", "vault:/")
 
 	// 3) 磁盘副作用：vault 卷底层是加密容器（无明文逻辑名 movie.bin、无明文内容）。
 	assertSecretLayoutAnonymity(t, vaultRoot, "user", "movie.bin", "user/movie.bin")
