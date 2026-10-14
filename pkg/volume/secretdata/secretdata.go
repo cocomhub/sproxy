@@ -1908,11 +1908,13 @@ func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) err
 	// 同父改名（仅 basename 变化）无需搬容器。
 	oldContainer := container
 	newContainer := oldContainer
-	if pc := s.dirSegs[toParent]; pc != oldContainer {
-		newContainer = path.Join(pc, path.Base(oldContainer))
-		if rerr := s.inner.Rename(ctx, oldContainer, newContainer); rerr != nil {
-			return fmt.Errorf("secretdata: 搬移容器 %s → %s 失败: %w", oldContainer, newContainer, rerr)
+	// 容器名是**随机名**（与逻辑 basename 无关）⇒ 同父改名时目标容器路径**与源相同**，此时不得
+	// 调 Rename（`rename X X` 会报 file exists）——只在路径真的变化（跨父目录）时才搬。
+	if cand := path.Join(s.dirSegs[toParent], path.Base(oldContainer)); cand != oldContainer {
+		if rerr := s.inner.Rename(ctx, oldContainer, cand); rerr != nil {
+			return fmt.Errorf("secretdata: 搬移容器 %s → %s 失败: %w", oldContainer, cand, rerr)
 		}
+		newContainer = cand
 	}
 	// 在新位置重写本目录 meta 的 Name/ParentDirID（一个文件）；失败则把容器**搬回**（回滚，
 	// 避免物理位置与逻辑引用不一致——加载侧对二者做严格校验）。
