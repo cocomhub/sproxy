@@ -1226,6 +1226,10 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	scans := scanAllContainerDirMetas(ctx, s, containers)
 	byID := dirMetaTable(scans)
 	res := s.resolveContainerPaths(ctx, byID, scans)
+	// **只支持嵌套布局**（用户口径 2026-10-14：不支持旧格式目录、无兼容）⇒ 旧扁平布局 fail-closed。
+	if verr := s.validateNestedContainers(res); verr != nil {
+		return verr
+	}
 	loadAllFileMetas(ctx, s, res)
 	return nil
 }
@@ -1236,8 +1240,8 @@ const maxContainerDepth = 64
 // dirContainers 递归收集底层**全部容器目录**（Phase 0）。
 //
 // 容器是**物理嵌套**的（子容器落在父容器内，2026-10-14 用户口径：底层目录树与逻辑目录树同形）
-// ⇒ 只列卷根会漏掉全部嵌套层级（表现为「多级目录只剩一层」）。旧卷（扁平布局：容器全部在卷根、
-// 容器内无子目录）同样被本递归覆盖 ⇒ 新旧布局共用同一加载路径，无兼容负担。
+// ⇒ 只列卷根会漏掉全部嵌套层级（表现为「多级目录只剩一层」）。收集后由 `validateNestedContainers`
+// 校验布局——**旧扁平布局不支持、无兼容**（fail-closed 拒绝挂载）。
 func (s *SecretdataFS) dirContainers(ctx context.Context, root []syncpkg.Entry) ([]string, error) {
 	var out []string
 	var walk func(prefix string, entries []syncpkg.Entry, depth int) error
@@ -1265,6 +1269,41 @@ func (s *SecretdataFS) dirContainers(ctx context.Context, root []syncpkg.Entry) 
 		return nil, werr
 	}
 	return out, nil
+}
+
+// validateNestedContainers 校验**只支持嵌套布局**（用户口径 2026-10-14：不支持旧格式目录、无兼容）。
+//
+// 判据（稳定且不与既有语义冲突）：**卷根只允许一个容器**——逻辑根目录的容器。旧**扁平**布局把每个
+// 逻辑目录的容器都放在卷根（随机名兄弟目录）⇒ 卷根出现多个容器 ⇒ **fail-closed 拒绝挂载**。
+//
+// 为什么不用更严的「容器物理位置 == 逻辑父目录容器」：**目录移动**按设计是「子树零改动」（只重写被
+// 移动目录的 `parent_dir_id`，容器物理位置不变——对象存储上递归搬子树代价高）⇒ 移动后的目录物理位置
+// **不再**镜像逻辑树。故物理位置只保证「**新建目录必须嵌套**」，不保证「与逻辑树恒等」。
+//
+// 注：去重池目录（`dedupDir`，实验能力）是卷根的**非逻辑目录**（无 dir meta）⇒ 不进 `res`，不参与校验。
+func (s *SecretdataFS) validateNestedContainers(res []dirRes) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rootCount := 0
+	for _, r := range res {
+		if !r.ok {
+			continue
+		}
+		physParent := path.Dir(r.container)
+		if physParent != "." && physParent != "/" {
+			continue // 非卷根容器：嵌套布局允许（目录移动后的位置亦然）
+		}
+		if r.rel != "" {
+			return fmt.Errorf("secretdata: 卷根存在非根容器 %q（逻辑目录 %q；检测到旧扁平布局）——"+
+				"本版本只支持嵌套布局、不提供兼容，请重建该卷", r.container, r.rel)
+		}
+		rootCount++
+	}
+	if rootCount > 1 {
+		return fmt.Errorf("secretdata: 卷根存在 %d 个根容器（应恰好 1 个；检测到旧扁平布局）——"+
+			"本版本只支持嵌套布局、不提供兼容，请重建该卷", rootCount)
+	}
+	return nil
 }
 
 // maxLoadMemBudget 是 loadIndex 并行派生允许的峰值内存预算（512MiB）。loadGate 并发
@@ -1733,8 +1772,8 @@ func (s *SecretdataFS) ensureContainer(ctx context.Context, dirPath string, mtim
 //
 // **物理嵌套**（2026-10-14 用户口径）：子容器落在**父容器目录内** ⇒ 底层目录树与逻辑目录树同形
 // （此前所有容器都是卷根下的随机名兄弟目录 ⇒ 存储上看不出父子关系）。卷根容器（parentContainer==""）
-// 仍在卷根（顶层）——逻辑树根无父容器。旧卷（扁平布局）不受影响：加载侧**递归**收集容器
-// （见 dirContainers），扁平卷的容器内无子目录 ⇒ 行为与既有完全一致。
+// 仍在卷根（顶层）——逻辑树根无父容器。**旧扁平布局不支持、无兼容**：加载侧校验卷根容器唯一
+// （`validateNestedContainers`），违反即 fail-closed 拒绝挂载。
 func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, parentContainer, parentID string, mtime int64) (string, string, string, int64, error) {
 	c, cerr := shardseal.RandDirName()
 	if cerr != nil {
