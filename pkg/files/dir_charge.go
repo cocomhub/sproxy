@@ -89,10 +89,7 @@ func (s *Service) settleDirCharge(c dirCharge) {
 		return
 	}
 	after, _ := s.rt.phys.DirChainFootprint(c.volName, c.owner, c.remotePath)
-	charge := after - c.before
-	if charge < 0 {
-		charge = 0
-	}
+	charge := max(after-c.before, 0)
 	if c.scopeRes != nil {
 		c.scopeRes.Commit(charge)
 	}
