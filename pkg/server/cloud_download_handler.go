@@ -956,14 +956,9 @@ func (h *Handlers) cloudArchiveToVolume(
 	}
 	rel := loc.FSPath()
 	// 本地 staging 配额统一接线（与 cloud 下载转存一致；无独立配额 → 直通零回归）。
+	// 打包流长度未知（size=0）由 gate 的 reservingReader 按实际读取量增量预留（#767 原生
+	// 支持）——不得再在装配层额外预留（会双计）。
 	fs = h.stagingQuotaFS(owner, fs)
-	// 打包流长度未知 → 装配层显式预留本地 staging 上界（见 reservePackedStaging）。
-	releaseStage, stageErr := h.reservePackedStaging(r.Context(), owner, fs, totalSize)
-	if stageErr != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "本地暂存配额不足: " + stageErr.Error()}, http.StatusInsufficientStorage)
-		return
-	}
-	defer releaseStage()
 	// 总量上限校验（不占租户 archive 桶 → 不做桶 Scope 预留，避免桶近满时误拒）。
 	if !h.cloudArchiveMaxBytesOK(w, totalSize) {
 		return
@@ -977,11 +972,12 @@ func (h *Handlers) cloudArchiveToVolume(
 		return
 	}
 	defer release()
-	dest := &transferVolumeFS{FS: fs, scheme: scheme, name: targetVolume}
 	url, terr := transfer.Execute(r.Context(), transfer.TransferRequest{
 		Entries:     entries,
 		Preprocess:  &transfer.TarPreprocessor{Compression: compressx.Gzip},
-		Destination: dest,
+		Destination: fs,
+		Scheme:      scheme,
+		Volume:      targetVolume,
 		Rel:         rel,
 		Owner:       owner,
 	})
@@ -1020,44 +1016,26 @@ func (h *Handlers) archiveVolumeWriteGate(ctx context.Context, fs syncpkg.FS, ow
 	return release, 0, ""
 }
 
-// transferVolumeFS 包装 sync.FS + scheme/name（实现 transfer.VolumeFS）。
-type transferVolumeFS struct {
-	syncpkg.FS
-	scheme string
-	name   string
-}
-
-func (t *transferVolumeFS) Scheme() string { return t.scheme }
-func (t *transferVolumeFS) Volume() string { return t.name }
-
-// Inner 透明暴露被包装 FS（透明装饰器约定；便于 Innermost 能力探测）。
-func (t *transferVolumeFS) Inner() syncpkg.FS { return t.FS }
-
-// WriteIfAbsent 显式转发底层原子写能力——**必须显式实现**：嵌入接口只提升 FS 的 7 个
-// 方法，不会转发动态值上的可选能力接口（否则 dest.(WriteIfAbsent) 恒 false，覆盖保护
-// 静默失效）。底层未实现 → ErrUnsupported 供 transfer 回落 Stat 检查。
-func (t *transferVolumeFS) WriteIfAbsent(ctx context.Context, p string, r io.Reader, size, mtime int64) (bool, error) {
-	pia, ok := t.FS.(syncpkg.WriteIfAbsent)
-	if !ok {
-		return false, fmt.Errorf("transferVolumeFS: 底层卷未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
-	}
-	return pia.WriteIfAbsent(ctx, p, r, size, mtime)
-}
-
 // archiveEntries 把 groupFiles 转为 SourceEntry（打开源文件作 Reader；size/mtime 填真值）。
 // 打开中途失败时关闭已打开的 Reader（防句柄泄漏）。
 func archiveEntries(files []fileWithRelPath) ([]transfer.SourceEntry, error) {
 	out := make([]transfer.SourceEntry, 0, len(files))
 	for _, f := range files {
-		rc, err := f.root.Open(f.rel)
+		// R25：用户可见读入口（加密卷透明解密）——不得直调 root.Open。
+		rc, err := openUserVisibleRead(f.root, f.rel)
 		if err != nil {
 			closeEntries(out)
 			return nil, err
 		}
 		st, serr := f.root.Stat(f.rel)
 		var size, mtime int64
-		if serr == nil && st != nil {
+		// 用户可见（逻辑）长度：加密卷取明文长度，否则等同 Stat。
+		if sv, vErr := userVisibleSize(f.root, f.rel); vErr == nil {
+			size = sv
+		} else if serr == nil && st != nil {
 			size = st.Size()
+		}
+		if serr == nil && st != nil {
 			mtime = st.ModTime().Unix()
 		}
 		out = append(out, transfer.SourceEntry{Rel: f.tarRel, Size: size, ModTime: mtime, Reader: rc})
@@ -1076,12 +1054,12 @@ func closeEntries(entries []transfer.SourceEntry) {
 	}
 }
 
-// archiveTotalSize 汇总 groupFiles 源大小。
+// archiveTotalSize 汇总 groupFiles 源的用户可见（逻辑）大小。
 func archiveTotalSize(files []fileWithRelPath) int64 {
 	var total int64
 	for _, f := range files {
-		if st, err := f.root.Stat(f.rel); err == nil && st != nil {
-			total += st.Size()
+		if sv, err := userVisibleSize(f.root, f.rel); err == nil {
+			total += sv
 		}
 	}
 	return total

@@ -54,23 +54,19 @@ type TransferRequest struct {
 	Entries []SourceEntry
 	// Preprocess 是预处理（nil = individual 纯转存）。
 	Preprocess Preprocessor
-	// Destination 是目标卷（经 VolumeFS 解析）。
-	Destination VolumeFS
+	// Destination 是目标卷 FS（**直接传装饰链**——不套包装器：包装器会吞掉
+	// WriteIfAbsent 等可选能力（接口嵌入不提升动态方法），且触发 R23 包装器门禁）。
+	Destination syncpkg.FS
+	// Scheme / Volume 是目标卷协议与卷名（URL 生成 `<scheme>://<volume>/<rel>`；
+	// 由调用方从卷元信息提供，避免为拿这两个值去包一层 FS）。
+	Scheme string
+	Volume string
 	// Rel 是目标相对路径（含文件名；空 = 自动派生由调用方填）。
 	Rel string
 	// Owner 是请求者（ACL/配额判定）。
 	Owner string
 	// Overwrite 是否允许覆盖已存在目标（false = WriteIfAbsent 拒绝）。
 	Overwrite bool
-}
-
-// VolumeFS 是目标卷写入视图（sync.FS + 能力接口查询）。
-type VolumeFS interface {
-	syncpkg.FS
-	// Scheme 返回目标卷协议（URL 生成：<scheme>://<volume>/<rel>）。
-	Scheme() string
-	// Volume 返回目标卷名（URL authority）。
-	Volume() string
 }
 
 // Execute 执行一次传输：写 source 流（经预处理）到目标卷 rel。
@@ -103,7 +99,7 @@ func executeIndividual(ctx context.Context, req TransferRequest, rel string) (st
 	if err := writeUnique(ctx, req.Destination, rel, e.Reader, e.Size, e.ModTime, req.Overwrite); err != nil {
 		return "", err
 	}
-	return targetURL(req.Destination, rel), nil
+	return targetURL(req.Scheme, req.Volume, rel), nil
 }
 
 // writeUnique 以「目标唯一」语义写目标 rel：
@@ -170,7 +166,7 @@ func executePacked(ctx context.Context, req TransferRequest, rel string) (string
 	} else if st == nil || st.Size <= 0 {
 		return "", fmt.Errorf("transfer: 目标 %q 为空（打包转存未落盘）", rel)
 	}
-	return targetURL(req.Destination, rel), nil
+	return targetURL(req.Scheme, req.Volume, rel), nil
 }
 
 // packedWrite 打包流的覆盖保护写：复用 writeUnique（WriteIfAbsent 优先，拒绝覆盖；
@@ -181,8 +177,8 @@ func packedWrite(ctx context.Context, req TransferRequest, rel string, pr io.Rea
 
 // targetURL 生成目标 URL（<scheme>://<volume>/<rel>；路径段 percent-encode，
 // 与 cloud 转存 transferURL 同规约——`#`/`%`/空格等文件名才能 ResolveURL 往返）。
-func targetURL(d VolumeFS, rel string) string {
-	return d.Scheme() + "://" + d.Volume() + "/" + escapeRel(rel)
+func targetURL(scheme, volume, rel string) string {
+	return scheme + "://" + volume + "/" + escapeRel(rel)
 }
 
 // escapeRel 逐段 percent-encode 卷内相对路径（保留 `/` 分隔）。

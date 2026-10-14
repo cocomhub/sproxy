@@ -76,8 +76,8 @@ func TestExecute_Individual_RoundTrip(t *testing.T) {
 	content := []byte("individual payload")
 	url, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "src/x.bin", Size: int64(len(content)), Reader: strings.NewReader(string(content))}},
-		Destination: v,
-		Rel:         "dst/x.bin",
+		Destination: v, Scheme: "vault", Volume: "vol1",
+		Rel: "dst/x.bin",
 	})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -91,7 +91,7 @@ func TestExecute_Individual_RoundTrip(t *testing.T) {
 	// 重复执行 → ErrExists（WriteIfAbsent 拒绝覆盖）
 	if _, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "src/x.bin", Size: 1, Reader: strings.NewReader("z")}},
-		Destination: v, Rel: "dst/x.bin",
+		Destination: v, Scheme: "vault", Volume: "vol1", Rel: "dst/x.bin",
 	}); err != ErrExists {
 		t.Fatalf("重复转存应 ErrExists，got %v", err)
 	}
@@ -107,8 +107,8 @@ func TestExecute_Pack_TarGz(t *testing.T) {
 			{Rel: "b.txt", Size: 5, Reader: strings.NewReader("bbbbb")},
 		},
 		Preprocess:  p,
-		Destination: v,
-		Rel:         "pack.tar.gz",
+		Destination: v, Scheme: "vault", Volume: "vol1",
+		Rel: "pack.tar.gz",
 	})
 	if err != nil {
 		t.Fatalf("Execute pack: %v", err)
@@ -148,8 +148,8 @@ func TestExecute_Pack_Encrypt(t *testing.T) {
 	if _, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "s.txt", Size: 3, Reader: strings.NewReader("abc")}},
 		Preprocess:  p,
-		Destination: v,
-		Rel:         "enc.tar.gz.aes",
+		Destination: v, Scheme: "vault", Volume: "vol1",
+		Rel: "enc.tar.gz.aes",
 	}); err != nil {
 		t.Fatalf("Execute encrypt: %v", err)
 	}
@@ -180,8 +180,8 @@ func TestExecute_WriteIfAbsentUnsupportedFallsBack(t *testing.T) {
 	content := []byte("fallback payload")
 	url, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "src/x.bin", Size: int64(len(content)), Reader: strings.NewReader(string(content))}},
-		Destination: v,
-		Rel:         "dst/x.bin",
+		Destination: v, Scheme: "vault", Volume: "vol1",
+		Rel: "dst/x.bin",
 	})
 	if err != nil {
 		t.Fatalf("应回落 WriteFile 而非报 ErrUnsupported: %v", err)
@@ -194,7 +194,7 @@ func TestExecute_WriteIfAbsentUnsupportedFallsBack(t *testing.T) {
 	}
 	if _, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "src/y.bin", Size: 1, Reader: strings.NewReader("z")}},
-		Destination: v, Rel: "dst/x.bin",
+		Destination: v, Scheme: "vault", Volume: "vol1", Rel: "dst/x.bin",
 	}); !errors.Is(err, ErrExists) {
 		t.Fatalf("二次写应 ErrExists（覆盖保护仍生效），got %v", err)
 	}
@@ -209,8 +209,8 @@ func TestExecute_Pack_WriteIfAbsentUnsupportedFallsBack(t *testing.T) {
 	if _, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "s.txt", Size: 3, Reader: strings.NewReader("abc")}},
 		Preprocess:  &TarPreprocessor{Compression: compressx.Gzip},
-		Destination: v,
-		Rel:         "pack.tar.gz",
+		Destination: v, Scheme: "vault", Volume: "vol1",
+		Rel: "pack.tar.gz",
 	}); err != nil {
 		t.Fatalf("打包路径应回落 WriteFile: %v", err)
 	}
@@ -220,8 +220,8 @@ func TestExecute_Pack_WriteIfAbsentUnsupportedFallsBack(t *testing.T) {
 	if _, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "s.txt", Size: 3, Reader: strings.NewReader("abc")}},
 		Preprocess:  &TarPreprocessor{Compression: compressx.Gzip},
-		Destination: v,
-		Rel:         "pack.tar.gz",
+		Destination: v, Scheme: "vault", Volume: "vol1",
+		Rel: "pack.tar.gz",
 	}); !errors.Is(err, ErrExists) {
 		t.Fatalf("二次打包转存应 ErrExists，got %v", err)
 	}
@@ -235,8 +235,8 @@ func TestExecute_TargetURLPercentEncodes(t *testing.T) {
 	content := []byte("x")
 	got, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "src/x", Size: int64(len(content)), Reader: strings.NewReader(string(content))}},
-		Destination: v,
-		Rel:         "dst/a b#c%d.txt",
+		Destination: v, Scheme: "vault", Volume: "vol1",
+		Rel: "dst/a b#c%d.txt",
 	})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -269,13 +269,13 @@ func TestExecute_NoWriteIfAbsentStillRejectsOverwrite(t *testing.T) {
 	content := []byte("payload")
 	if _, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "src/x.bin", Size: int64(len(content)), Reader: strings.NewReader(string(content))}},
-		Destination: v, Rel: "dst/x.bin",
+		Destination: v, Scheme: "vault", Volume: "vol1", Rel: "dst/x.bin",
 	}); err != nil {
 		t.Fatalf("首次写: %v", err)
 	}
 	if _, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "src/y.bin", Size: 1, Reader: strings.NewReader("z")}},
-		Destination: v, Rel: "dst/x.bin",
+		Destination: v, Scheme: "vault", Volume: "vol1", Rel: "dst/x.bin",
 	}); !errors.Is(err, ErrExists) {
 		t.Fatalf("无 WriteIfAbsent 能力时二次写应 ErrExists，got %v", err)
 	}

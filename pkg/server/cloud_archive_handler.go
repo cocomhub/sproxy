@@ -371,16 +371,22 @@ func (h *Handlers) cloudArchiveTaskToVolume(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	f, oerr := srcTnt.Root().Open(srcRel)
+	// R25：用户可见读入口（加密卷透明解密）——不得直调 root.Open。
+	f, oerr := openUserVisibleRead(srcTnt.Root(), srcRel)
 	if oerr != nil {
 		h.logger.Error("统一转存打开源文件失败", "task_id", taskID, "error", oerr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + oerr.Error()}, http.StatusInternalServerError)
 		return
 	}
+	// 用户可见（逻辑）长度：加密卷取明文长度，否则等同 Stat。
+	size := info.Size()
+	if sv, vErr := userVisibleSize(srcTnt.Root(), srcRel); vErr == nil {
+		size = sv
+	}
 	entries := []transfer.SourceEntry{{
-		Rel: task.Filename, Size: info.Size(), ModTime: info.ModTime().Unix(), Reader: f,
+		Rel: task.Filename, Size: size, ModTime: info.ModTime().Unix(), Reader: f,
 	}}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, name, entries, info.Size(), h.logger.With("archive", "cloud_task", "task_id", taskID), nil)
+	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, name, entries, size, h.logger.With("archive", "cloud_task", "task_id", taskID), nil)
 }
 
 // cloudArchiveBatchToVolume 批量归档统一转存：多文件（tar.gz 打包）→ 外部卷。

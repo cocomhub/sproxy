@@ -673,16 +673,20 @@ func (h *Handlers) externalVolumeTransferFS(volumeName string) (syncpkg.FS, stri
 		return nil, "", volume.Volume{}, false
 	}
 	be := h.volSet.External(volumeName)
-	if be == nil || be.FS() == nil {
+	if be == nil {
+		return nil, "", volume.Volume{}, false
+	}
+	raw := be.FS()
+	if raw == nil {
 		return nil, "", volume.Volume{}, false
 	}
 	vol, ok := h.volSet.ByName(volumeName)
 	if !ok {
 		// 卷元信息缺失（极罕见装配异常）：仍加 Guard(Wrap(...))（meta 桶隔离恒生效 +
 		// 写面恒生成 sidecar，与其余装配形状一致）——写面也不能触达凭据桶。
-		return trusted.Guard(trusted.Wrap(be.FS(), h.trustedWrapOpts())), "", volume.Volume{}, false
+		return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), "", volume.Volume{}, false
 	}
-	return trusted.Guard(trusted.Wrap(be.FS(), h.trustedWrapOpts())), registry.SchemeOf(vol.Type), vol, true
+	return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), registry.SchemeOf(vol.Type), vol, true
 }
 
 // stagingQuotaFS 是外部卷 FS 的**本地 staging 配额统一接线**（用户裁定 2026-10-10：
@@ -698,34 +702,6 @@ func (h *Handlers) externalVolumeTransferFS(volumeName string) (syncpkg.FS, stri
 // 无 globalPool（未装配配额）→ 直通（零回归）。
 func (h *Handlers) stagingQuotaFS(owner string, fs syncpkg.FS) syncpkg.FS {
 	return syncpkg.ApplyStagingQuota(fs, h.stagingQuotaTrackerFor(owner))
-}
-
-// reservePackedStaging 为「长度未知的流式写」（打包转存 tar.gz）在装配层做一次**上界**
-// 本地 staging 预留并返回释放函数。
-//
-// 为何不把估值传给 WriteFile：打包流边压边写，写前不知精确字节数；把估值当 size 传给
-// s3/minio 等「按已知长度上传」的后端会导致短读错误（输出通常小于源总量，可能更小或
-// 略大）。故此处在整个转存期间预留 totalSize 上界（与 gate 内 size=0 预留不重复计），
-// 写完成后释放。
-//
-// 卷 StagingQuotaExempted（无需 staging）或最内层实现 StagingQuotaCapable（自管，已由
-// ApplyStagingQuota 注入配额）时跳过；无独立配额（tracker nil）直通。size<=0 直通。
-func (h *Handlers) reservePackedStaging(ctx context.Context, owner string, fs syncpkg.FS, size int64) (func(), error) {
-	noop := func() {}
-	if size <= 0 || syncpkg.StagingQuotaExempted(fs) {
-		return noop, nil
-	}
-	if _, ok := syncpkg.Innermost(fs).(syncpkg.StagingQuotaCapable); ok {
-		return noop, nil
-	}
-	tracker := h.stagingQuotaTrackerFor(owner)
-	if tracker == nil {
-		return noop, nil
-	}
-	if err := tracker.ReserveUsage(ctx, size); err != nil {
-		return noop, err
-	}
-	return func() { tracker.ReleaseUsage(size) }, nil
 }
 
 // trustedWrapOpts 装配可信卷装饰器配置（C-MAJOR-4：ChunkSize 从 trusted_volume

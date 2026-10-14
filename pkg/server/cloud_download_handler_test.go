@@ -1444,30 +1444,3 @@ func TestDeleteGroupArchive_ExternalURL(t *testing.T) {
 		t.Fatalf("应仅删目标主文件+sidecar，剩余 %v", got)
 	}
 }
-
-// TestReservePackedStaging_Balance 打包转存长度未知 → 装配层 staging 上界预留/释放平衡。
-func TestReservePackedStaging_Balance(t *testing.T) {
-	t.Parallel()
-	dir, err := os.MkdirTemp("", "packed-staging-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	h := newAssemblyTestHandlers(t, dir)
-	fs := syncpkg.FS(&serverMemFS{files: map[string][]byte{}})
-	release, err := h.reservePackedStaging(context.Background(), "", fs, 1024)
-	if err != nil {
-		t.Fatalf("预留: %v", err)
-	}
-	sc := h.stagingQuotaScope("")
-	if sc == nil {
-		t.Fatal("测试前提：staging Scope 可装配")
-	}
-	if got := sc.Usage(); got != 1024 {
-		t.Fatalf("预留应为 1024，got %d", got)
-	}
-	release()
-	if got := sc.Usage(); got != 0 {
-		t.Fatalf("释放后应 0，got %d", got)
-	}
-}

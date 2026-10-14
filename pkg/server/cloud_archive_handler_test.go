@@ -732,7 +732,7 @@ func TestCloudArchive_Batch_ToVolume(t *testing.T) {
 }
 
 // TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite 同名归档二次转存 → 409：锁定
-// transferVolumeFS 显式转发 WriteIfAbsent + transfer 存在性检查（防静默覆盖）。
+// 目标卷装饰链的 WriteIfAbsent + transfer 存在性检查（防静默覆盖）。
 func TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite(t *testing.T) {
 	t.Parallel()
 	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
