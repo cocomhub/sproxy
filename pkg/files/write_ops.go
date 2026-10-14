@@ -32,6 +32,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -1154,13 +1155,24 @@ func (s *Service) renameExternalVolume(ctx context.Context, owner, from, to stri
 		return false, RenameFileResult{}, nil // 非外部卷 / 未授权 → 交本地流程
 	}
 	for _, name := range vols {
+		// 改名可能**改变物理足迹**：secretdata 改名只重写 meta blob（文件名只在 meta 内），而 meta
+		// pad 随机（[base, 2·base)，默认 1–2MB）⇒ 每次改名物理 ±1MB。故按**前后实测差**调整配额
+		// （源释放 + 目标结算 + 卷池差分），否则账本与磁盘漂移（少记 = 幽灵占用/假 507）。
+		before, hasBefore := s.physChargeFor(name, owner, from)
+		toRes, resErr := s.reserveExternalRenameTarget(ctx, ops, owner, name, from, to)
+		if resErr != nil {
+			return true, RenameFileResult{}, resErr
+		}
 		renamed, rerr := ops.ExternalRename(ctx, owner, name, from, to, input.ExpectedChecksum)
 		if rerr != nil {
+			releaseReservation(toRes)
 			return true, RenameFileResult{}, rerr
 		}
 		if !renamed {
+			releaseReservation(toRes)
 			continue
 		}
+		s.settleExternalRenameQuota(owner, name, from, to, before, hasBefore, toRes)
 		s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to+" 外部卷="+name)
 		s.rt.publishFileEvent(EventRename, owner, to, 0)
 		s.rt.logger().InfoContext(ctx, "外部卷文件已重命名", "volume", name, "from", from, "to", to)
@@ -1173,6 +1185,71 @@ func (s *Service) renameExternalVolume(ctx context.Context, owner, from, to stri
 		return false, RenameFileResult{}, nil // 未指定卷且候选都未命中 → 回落本地兜底语义
 	}
 	return true, RenameFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
+}
+
+// reserveExternalRenameTarget 为外部卷改名**预占目标配额**（按逻辑大小的物理上界；结算按改名后
+// 实测收敛，多预留自动归还）。无能力/无配额/取不到逻辑大小 ⇒ nil（零回归）。
+func (s *Service) reserveExternalRenameTarget(ctx context.Context, ops ExternalVolumeOps, owner, volName, from, to string) (*quota.Reservation, error) {
+	if s.rt.phys == nil || ops == nil {
+		return nil, nil
+	}
+	logical, _, serr := ops.ExternalStat(ctx, owner, volName, from)
+	if serr != nil || logical <= 0 {
+		return nil, nil
+	}
+	toRel, ok := s.renameRel(owner, to)
+	if !ok {
+		return nil, nil
+	}
+	sc := s.rt.quotaScope(owner, toRel)
+	if sc == nil {
+		return nil, nil
+	}
+	res, rerr := sc.TryReserve(s.rt.phys.PhysBound(volName, logical))
+	if rerr != nil {
+		return nil, &HTTPError{Status: http.StatusInsufficientStorage, Message: errMsgStorageQuotaExceeded}
+	}
+	return res, nil
+}
+
+// settleExternalRenameQuota 按改名**前后实测足迹**调整配额：目标按改名后实测结算（预留转正，多退），
+// 源按改名前进账释放，卷池按差分调整（同一对象的物理变化必须双向反映）。
+// 实测不可用（能力缺失/对象已不可见）⇒ 保持既有行为（不动账），避免半程记账。
+func (s *Service) settleExternalRenameQuota(owner, volName, from, to string, before int64, hasBefore bool, toRes *quota.Reservation) {
+	after, hasAfter := s.physChargeFor(volName, owner, to)
+	if !hasBefore || !hasAfter {
+		releaseReservation(toRes)
+		return
+	}
+	if toRes != nil {
+		toRes.Commit(after)
+	}
+	if fromRel, ok := s.renameRel(owner, from); ok {
+		if sc := s.rt.quotaScope(owner, fromRel); sc != nil {
+			sc.ReleaseUsage(before)
+		}
+	}
+	if vs := s.rt.volSet(); vs != nil && volName != "" {
+		if pool := vs.Pool(volName); pool != nil && after != before {
+			pool.Adjust(before, after)
+		}
+	}
+}
+
+// renameRel 把用户可见路径映射为配额键（owner 桶相对 rel）。
+func (s *Service) renameRel(owner, remotePath string) (string, bool) {
+	tnt := s.rt.tenantOf(owner)
+	if tnt == nil {
+		return "", false
+	}
+	return tnt.UserRel(remotePath)
+}
+
+// releaseReservation 归还预留（nil 安全；Commit/Release 二选一，Reservation 原子至多一次）。
+func releaseReservation(res *quota.Reservation) {
+	if res != nil {
+		res.Release()
+	}
 }
 
 // validateRenamePaths 校验 from/to 并返回**校验后**的路径（失败以 *HTTPError{400} 表达）。
