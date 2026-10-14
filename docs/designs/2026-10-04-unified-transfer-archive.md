@@ -1,6 +1,8 @@
 # 统一转存/归档 + 分块打包封装 设计
 
-> 状态：**草稿，待审查**
+> 状态：**已实现（步骤 1/2，2026-10-11）**——事实源：`docs/architecture.md`（统一转存）、
+> `docs/api.md`（`target_volume`/`target_path`/`encrypt`/`cipher`/`compression`）、`docs/cli.md`
+> （`--target`/`--encrypt`/`--cipher`/`--compress`）；步骤 3 图片分块待 #34 详设。
 > 日期：2026-10-04
 > 关联：转存–归档统一（用户裁定 2026-10-04）、#34 组级打包转存、#733 视频关键帧 seek
 
