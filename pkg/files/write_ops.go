@@ -670,9 +670,11 @@ func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (
 	if target == nil || target.Root() == nil {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
 	}
-	if mkErr := target.Root().MkdirAll(rel, 0755); mkErr != nil {
-		s.rt.logger().Error(errMsgCreateDirFailed, "dir", remotePath, "error", mkErr)
-		return MakeDirResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+	// 目录足迹预留/结算（配额模型 v3）：secretdata 的 dir meta blob pad 到 1–2MB/级，且 MkdirAll
+	// 会**递归创建祖先链** ⇒ 预留物理上界，成功后按链差分结算（多预留自动归还）；无能力 ⇒ 零回归。
+	mkVol := s.volumeNameForRoot(target.Root())
+	if mkErr := s.mkdirLocalWithCharge(ctx, owner, rel, remotePath, mkVol, target.Root()); mkErr != nil {
+		return MakeDirResult{}, mkErr
 	}
 	// 索引增量维护：mkdir 后索引补登记目录条目（父目录链由 upsert 顺带补全），
 	// 否则 List 走索引时新目录不出现（#423 修复：TestFiles_Mkdir E2E 红→绿）。
@@ -688,6 +690,22 @@ func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (
 	// 文件变更事件：mkdir 成功。
 	s.rt.publishFileEvent(EventMkdir, owner, rel, 0)
 	return MakeDirResult{RemotePath: remotePath}, nil
+}
+
+// mkdirLocalWithCharge 在本地卷上建目录并按**目录足迹**记账（预留 → MkdirAll → 结算）。
+// 失败路径归还预留（Commit/Release 二选一）。记账口径见 dir_charge.go。
+func (s *Service) mkdirLocalWithCharge(ctx context.Context, owner, rel, remotePath, volName string, root *storage.Root) error {
+	dirCharge, dcErr := s.reserveDirCharge(owner, rel, remotePath, volName)
+	if dcErr != nil {
+		return dcErr
+	}
+	if mkErr := root.MkdirAll(rel, 0755); mkErr != nil {
+		dirCharge.release()
+		s.rt.logger().Error(errMsgCreateDirFailed, "dir", remotePath, "error", mkErr)
+		return &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+	}
+	s.settleDirCharge(dirCharge)
+	return nil
 }
 
 // makeDirExplicitVolume 处理「显式指定卷」的 mkdir：外部卷经接缝创建；本地卷返回
@@ -707,13 +725,21 @@ func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, 
 			return MakeDirResult{}, false, nil // 本地卷 → 交本地流程
 		}
 	}
+	// 目录足迹预留/结算（同本地分支；外部卷尤其需要——secretdata 的 dir meta 1–2MB/级）。
+	dirCharge, dcErr := s.reserveDirCharge(owner, remotePath, remotePath, volName)
+	if dcErr != nil {
+		return MakeDirResult{}, true, dcErr
+	}
 	created, err := ops.ExternalMkdir(ctx, owner, volName, remotePath)
 	if err != nil {
+		dirCharge.release()
 		return MakeDirResult{}, true, err
 	}
 	if !created {
+		dirCharge.release()
 		return MakeDirResult{}, false, nil
 	}
+	s.settleDirCharge(dirCharge)
 	s.rt.logger().Info("目录已创建（外部卷）", "dir", remotePath, "volume", volName)
 	s.rt.publishFileEvent(EventMkdir, owner, remotePath, 0)
 	return MakeDirResult{RemotePath: remotePath}, true, nil
@@ -784,10 +810,14 @@ func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string,
 	// 全局 Scope——跨卷合计语义正确，文件 rel 唯一故不双计），并按所在卷释放卷容量池。
 	var allFiles []rmdirFileStat
 	for _, tg := range targets {
+		// 目录自身足迹：**删除前**取链基准（删除后 dir meta 已不在卷上 ⇒ 无法再测）。
+		dirBefore, dirOK := s.dirChainBefore(owner, remotePath, tg.volName)
 		dirFiles, rmErr := s.removeDirOnVolume(tg, rel, remotePath)
 		if rmErr != nil {
 			return RemoveDirResult{}, rmErr
 		}
+		// 删除成功后按链差分释放（与写入侧同口径：少释放 = 幽灵占用/假 507）。
+		s.releaseDirChainDiff(owner, rel, remotePath, tg.volName, dirBefore, dirOK)
 		allFiles = append(allFiles, dirFiles...)
 	}
 

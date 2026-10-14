@@ -156,6 +156,12 @@ type VolumePhysFootprinter interface {
 	// PhysBound 返回 volName 卷上 logical 字节的**物理上界**（预占用用；结算按实测收敛）。
 	// 无该能力/未知卷 ⇒ 0（调用方回落既有折算）。
 	PhysBound(volName string, logical int64) int64
+	// DirChainFootprint 返回 remotePath **及其全部祖先**已存在目录的物理足迹之和（目录 meta
+	// blob；secretdata 每级 1–2MB）。调用方用「操作前后差分」得到本次新增/移除目录的物理字节
+	// （覆盖祖先链，且不必知道 FS 内部创建/回收了哪几级）。恒 ok=true（本层支持目录足迹）。
+	DirChainFootprint(volName, owner, remotePath string) (int64, bool)
+	// DirPhysBound 返回**单个目录** meta blob 的物理上界（预占用用）。无该能力 ⇒ 0。
+	DirPhysBound(volName string) int64
 }
 
 // QuotaScopeProvider 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
