@@ -206,3 +206,43 @@ volumes:
 		t.Fatalf("64B 文件上传配额增量=%d，应 ≥ meta pad 下限 %d（按逻辑记账会低估 ⇒ 能力未生效）", d, base)
 	}
 }
+
+// TestE2E_CLI_Secretdata_LsNoDuplicateDir：同一目录**不得**在 `ls` 中出现两次。
+//
+// 用户实测（2026-10-14，WSL）：secretdata 卷上存在 `1/2` 且其下有文件时，`sclient list 1/` 输出
+// 两个 `2/`。根因 = 子目录由**两个来源**同时产出：`dirs`（目录键，dir meta 加载）与 `index`
+// （文件键 `1/2/f.bin` 的首段推出目录）⇒ 收集函数各自内部去重、互不知情 ⇒ append 重复。
+// 本用例覆盖两种状态（空目录 / 有文件）并断言**恰好一条**。
+func TestE2E_CLI_Secretdata_LsNoDuplicateDir(t *testing.T) {
+	t.Parallel()
+	env, _ := newSecretdataPlaybackEnv(t)
+	env.sclient(t, env.TmpDir, "mkdir", "vault:/1/2")
+
+	countDir := func() int {
+		out := env.sclient(t, env.TmpDir, "list", "vault:/1")
+		n := 0
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "2/") {
+				n++
+			}
+		}
+		return n
+	}
+	if n := countDir(); n != 1 {
+		t.Fatalf("空目录 ls vault:/1 中 2/ 出现 %d 次（应 1 次）", n)
+	}
+
+	// 目录下写入文件（index 也开始贡献目录条目）⇒ 仍须**恰好一条**。
+	if werr := os.WriteFile(filepath.Join(env.TmpDir, "f.bin"), []byte("dup-check"), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	env.sclient(t, env.TmpDir, "cd", "vault:/1/2")
+	env.sclient(t, env.TmpDir, "upload", "f.bin")
+	if n := countDir(); n != 1 {
+		t.Fatalf("有文件后 ls vault:/1 中 2/ 出现 %d 次（应 1 次；跨源未去重）", n)
+	}
+	// 深层同样不重复（1/2/f.bin 使 index 贡献 2，dirs 亦含 1/2）。
+	if out := env.sclient(t, env.TmpDir, "list", "vault:/1/2"); strings.Count(out, "f.bin") != 1 {
+		t.Fatalf("ls vault:/1/2 中 f.bin 应恰好一条:\n%s", out)
+	}
+}
