@@ -416,3 +416,32 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
 显式豁免（`StagingQuotaExempt`，如 s3 流式直传）、自管（`StagingQuotaCapable`，如 baidupcs，
 per-request/per-owner 门卫包装）、否则强制 `StagingQuotaGateFS`（fail-safe 宁多勿漏）。
 staging 独立 Scope 但**挂在全局池之下**（受 `max_storage_bytes` 约束）。
+
+## 统一转存（归档 = 转存 + 预处理）
+
+**单一管道**：`源(source) → [可选预处理] → 目标卷(destination)`。无预处理 = 纯转存（individual）；
+有预处理 = 打包后转存（旧「归档」概念升级）。预处理经 `pkg/transfer` registry 选型——内置
+`tar`（压缩 gzip/zstd/brotli + 可选加密 aes-256-gcm）。
+
+三个云端归档端点共用同一执行核心 `Handlers.cloudArchiveToVolume`：
+`POST /api/cloud/tasks/{id}/archive`、`POST /api/cloud/archive`、`POST /api/cloud/groups/{id}/archive`；
+请求体 `target_volume` + `target_path` 指定转存目标（空 = 落租户 archive 桶，既有行为零回归）。
+
+**目标卷写视图**——单一出口 `Handlers.externalVolumeTransferFS`（与 cloud 下载转存共用，防解析漂移）：
+- `trusted.Guard(trusted.Wrap(be.FS()))`：meta 恒生成 + meta 桶隔离；外部源卷封印经装配处
+  `enclosure.SealBackend` 注入 ⇒ `be.FS()` 自动继承封印。
+- 目标键经 `volume.ResolveUserLocation`（恒 `<owner>/user/<rel>` 前缀 + 路径安全），与读路径
+  `resolveExternalDownload` 同键空间 ⇒ 产物可经 `/download` 命中（外部卷不进本地文件索引，
+  故不出现在 `/api/files` 列表）；`target_path` 可含子目录，空 = `archive/<归档名>`。
+- 本地 staging 配额（`ApplyStagingQuota`；长度未知的打包流由 gate 的 `reservingReader` 按实测
+  增量预留 + 背压）+ `transferWriteLock`（per-(owner,rel)，与 HTTP/DAV/S3 同键空间）+ 目标卷
+  `ReserveSpace` 预检（装饰器链未实现 → `ErrUnsupported` 跳过）。
+- 拒绝静默覆盖：`WriteIfAbsent` 优先（同名 → 409）；`secrets` 密钥卷、未声明协议、空 scheme
+  fail-closed。转存不占租户 archive 桶（仅 `cloud_archive_max_bytes` 上限校验）。
+- 加密密钥来自 `archive.key_file`（与 `/api/archive` 同约定）；`encrypt`/`cipher`/`compression`/
+  `target_path` 仅与 `target_volume` 同用（否则 400，防静默忽略），且 `cipher` 须与 `encrypt`
+  同用（单独指定不加密 → 400）；加密产物命名追加 `.aes`（`<名>.tar.gz.aes`，不再伪装成可直接
+  gunzip 的 `.tar.gz`）。CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，
+  cd/mv 同规约）指定，客户端归一为 `target_volume`/`target_path`（协议层不解析 URI）。
+
+**未落地**：图片组「每文件一分块」封装（设计方向 A/B 待 #34 详设）；Web UI 未暴露转存目标。

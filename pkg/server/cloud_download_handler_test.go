@@ -4,20 +4,29 @@
 package server
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -1142,5 +1151,296 @@ func TestCloudHandler_CreateGroup_TransferParam(t *testing.T) {
 	}
 	if task.DownloadLocal {
 		t.Fatal("C1: 组子任务 download_local 应 false")
+	}
+}
+
+// TestCloudArchiveGroupToVolume_UnifiedTransfer 统一转存：组归档 + target_volume →
+// 打包后转存到外部卷（transfer.Execute + TarPreprocessor）。验证目标卷收到 tar.gz 且可解包。
+func TestCloudArchiveGroupToVolume_UnifiedTransfer(t *testing.T) {
+	t.Parallel()
+	// 用独立临时目录（非 t.TempDir——newAssemblyTestHandlers 的 globalRoot 持有
+	// 目录句柄不关，Windows 下 TempDir 清理失败）。
+	dir, err := os.MkdirTemp("", "unified-transfer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := newAssemblyTestHandlers(t, dir)
+	// 装配 fake 外部卷（memFS 作目标）。
+	fs := &serverMemFS{files: map[string][]byte{}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	if h.volSet == nil || h.volSet.External("vault") == nil {
+		t.Fatal("fake volSet 未装配 vault 外部卷")
+	}
+	// 组文件：两个小文件源（真实租户桶 root，一次性用完）。
+	tenantDir := filepath.Join(dir, "anonymous")
+	if mkErr := os.MkdirAll(tenantDir, 0755); mkErr != nil {
+		t.Fatalf("mkdir tenant: %v", mkErr)
+	}
+	tenantRoot, err := storage.OpenRoot(tenantDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	if mkErr := tenantRoot.MkdirAll("cloud/g1", 0755); mkErr != nil {
+		t.Fatalf("mkdir: %v", mkErr)
+	}
+	writeRootFile(t, tenantRoot, "cloud/g1/a.txt", "aaaaa")
+	writeRootFile(t, tenantRoot, "cloud/g1/b.txt", "bbbbb")
+	groupFiles := []fileWithRelPath{
+		{root: tenantRoot, rel: "cloud/g1/a.txt", tarRel: "a.txt"},
+		{root: tenantRoot, rel: "cloud/g1/b.txt", tarRel: "b.txt"},
+	}
+	req := &CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/cloud/groups/g1/archive", nil)
+	h.cloudArchiveGroupToVolume(rec, r, "g1", "", groupFiles, req, "g1-archive")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unified transfer status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// 目标卷收到 tar.gz 且含两个文件（键含 owner 前缀——owner 为空归一 anonymous）。
+	gotKey := "anonymous/user/archive/g1-archive.tar.gz"
+	if _, ok := fs.files[gotKey]; !ok {
+		t.Fatalf("目标卷 key=%q 缺失（实际 %v）", gotKey, slices.Sorted(maps.Keys(fs.files)))
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(fs.files[gotKey]))
+	if err != nil {
+		t.Fatalf("gzip 解包: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	names := []string{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		names = append(names, hdr.Name)
+	}
+	if len(names) != 2 || names[0] != "a.txt" || names[1] != "b.txt" {
+		t.Fatalf("tar 文件列表 %v", names)
+	}
+	// 关 root（Windows 句柄：不关 TempDir 清理失败）。
+	if err := tenantRoot.Close(); err != nil {
+		t.Logf("tenantRoot close: %v", err)
+	}
+}
+
+// TestCloudArchiveGroupToVolume_TrustedVolumeWiring 锁定统一转存对 master 可信卷能力的
+// 复用：目标键恒带 owner 前缀（与读路径 ResolveUserLocation 同键空间）、目标卷经
+// trusted.Wrap 生成 sidecar meta（可信卷）、返回 URL 用 FS 键可 ResolveURL 往返。
+//
+// 回归背景：分支原实现用裸 be.FS() + 自拼 "archive/<name>"，转存产物既无 meta（不是
+// 可信卷）、又不在读路径键空间（／download 与列表均不可命中）。
+func TestCloudArchiveGroupToVolume_TrustedVolumeWiring(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp("", "unified-transfer-trusted-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := newAssemblyTestHandlers(t, dir)
+	fs := &serverMemFS{files: map[string][]byte{}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+
+	tenantDir := filepath.Join(dir, "alice")
+	if mkErr := os.MkdirAll(tenantDir, 0o755); mkErr != nil {
+		t.Fatalf("mkdir tenant: %v", mkErr)
+	}
+	tenantRoot, err := storage.OpenRoot(tenantDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	if mkErr := tenantRoot.MkdirAll("cloud/g1", 0o755); mkErr != nil {
+		t.Fatalf("mkdir: %v", mkErr)
+	}
+	writeRootFile(t, tenantRoot, "cloud/g1/a.txt", "aaaaa")
+	writeRootFile(t, tenantRoot, "cloud/g1/b.txt", "bbbbb")
+	groupFiles := []fileWithRelPath{
+		{root: tenantRoot, rel: "cloud/g1/a.txt", tarRel: "a.txt"},
+		{root: tenantRoot, rel: "cloud/g1/b.txt", tarRel: "b.txt"},
+	}
+	req := &CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/cloud/groups/g1/archive", nil)
+	h.cloudArchiveGroupToVolume(rec, r, "g1", "alice", groupFiles, req, "g1-archive")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// 1) 目标键恒带 owner 前缀（volume.ResolveLocation 唯一入口），与读路径同键空间。
+	key := "alice/user/archive/g1-archive.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键应为 %q（owner 前缀），实际键 %v", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+	// 2) 可信卷 sidecar meta 恒生成（裸 FS 无此）。
+	sidecar := meta.MetaPath(key)
+	if _, ok := fs.files[sidecar]; !ok {
+		t.Fatalf("应有可信卷 sidecar %q，实际键 %v", sidecar, slices.Sorted(maps.Keys(fs.files)))
+	}
+	// 3) 返回 URL 用 FS 键（ResolveURL 可往返）。
+	var resp CloudArchiveResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	wantURL := "vault://vault/" + key
+	if resp.File != wantURL {
+		t.Fatalf("File=%q want %q", resp.File, wantURL)
+	}
+	// 4) 外部卷转存不占租户 archive 桶——不经该桶记账（无预留/占用）。
+	sc := h.quotaBucketFor("alice", "archive")
+	if sc == nil {
+		t.Fatal("测试前提：archive 桶 Scope 应可装配（globalPool 已配）")
+	}
+	if got := sc.Reserved(); got != 0 {
+		t.Fatalf("archive 桶预留泄漏：Reserved=%d want 0", got)
+	}
+	// 5) 返回 URL 经 registry.ResolveURL 往返（backend 解析 scheme/authority/path 后 OpenRead）。
+	rc, uerr := h.volSet.ResolveURL(context.Background(), resp.File)
+	if uerr != nil {
+		t.Fatalf("ResolveURL(%q): %v", resp.File, uerr)
+	}
+	body, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr != nil {
+		t.Fatalf("URL 取回读取: %v", rerr)
+	}
+	if _, gerr := gzip.NewReader(bytes.NewReader(body)); gerr != nil {
+		t.Fatalf("URL 取回内容应可 gzip 解（往返一致）: %v", gerr)
+	}
+	if err := tenantRoot.Close(); err != nil {
+		t.Logf("tenantRoot close: %v", err)
+	}
+}
+
+// serverMemFS 测试用内存卷（统一转存目标）。
+type serverMemFS struct {
+	files map[string][]byte
+}
+
+func (m *serverMemFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return nil, nil
+}
+func (m *serverMemFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	if b, ok := m.files[p]; ok {
+		return &syncpkg.Entry{Name: p, Path: p, IsDir: false, Size: int64(len(b))}, nil
+	}
+	return nil, os.ErrNotExist
+}
+func (m *serverMemFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	if b, ok := m.files[p]; ok {
+		return io.NopCloser(bytes.NewReader(b)), nil
+	}
+	return nil, os.ErrNotExist
+}
+func (m *serverMemFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	m.files[p] = b
+	return nil
+}
+func (m *serverMemFS) Rename(ctx context.Context, f, t string) error { return nil }
+func (m *serverMemFS) Delete(ctx context.Context, p string) error    { delete(m.files, p); return nil }
+func (m *serverMemFS) MakeDir(ctx context.Context, p string) error   { return nil }
+
+// newFakeVolSetForTransfer 构造带 fake 外部卷（类型 "vault"）的 registry.Set（统一转存目标）。
+func newFakeVolSetForTransfer(name string, fs syncpkg.FS) *registry.Set {
+	return newFakeVolSetForTypedTransfer(name, "vault", fs)
+}
+
+// newFakeVolSetForTypedTransfer 构造带指定类型 fake 外部卷的 registry.Set，并按类型注册
+// 协议映射（SchemeOf 需要类型→协议；生产由各后端 RegisterBackend 声明），使转存 URL 有
+// 非空 scheme。
+func newFakeVolSetForTypedTransfer(name, typ string, fs syncpkg.FS) *registry.Set {
+	switch typ {
+	case "vault":
+		registerFakeTransferScheme()
+	case "secrets":
+		registerFakeSecretsScheme()
+	}
+	vs := registry.NewSet(nil, nil, nil, nil, name)
+	if err := vs.AddExternalVolume(volume.Volume{Name: name, Type: typ}, fakeTransferBackend{fs: fs}); err != nil {
+		panic("fake volSet AddExternalVolume: " + err.Error())
+	}
+	return vs
+}
+
+// transferFakeSchemeOnce 保证 fake 类型 "vault" 仅注册一次（RegisterBackend 重名 panic）；
+// 不随测试清理——测试二进制生命周期内保持（BackendTypes 断言用 Contains，不受额外类型影响）。
+var transferFakeSchemeOnce sync.Once
+
+func registerFakeTransferScheme() {
+	transferFakeSchemeOnce.Do(func() {
+		registry.RegisterBackend("vault", func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
+			return nil, errors.New("fake vault backend 不用于构造")
+		}, "vault")
+	})
+}
+
+// fakeSecretsSchemeOnce 注册 "secrets" 协议（统一转存须拒绝 secrets 密钥卷的测试用）。
+var fakeSecretsSchemeOnce sync.Once
+
+func registerFakeSecretsScheme() {
+	fakeSecretsSchemeOnce.Do(func() {
+		registry.RegisterBackend("secrets", func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
+			return nil, errors.New("fake secrets backend 不用于构造")
+		}, "secrets")
+	})
+}
+
+// fakeTransferBackend 实现 registry.ExternalBackend（FS 视图）+ URLResolver（URL 往返测试）。
+type fakeTransferBackend struct{ fs syncpkg.FS }
+
+func (f fakeTransferBackend) FS() syncpkg.FS { return f.fs }
+func (f fakeTransferBackend) Close() error   { return nil }
+
+// OpenURL 解析 URL（<scheme>://<volume>/<path>）后按解码路径读回——验证转存产物 URL 可
+// 经 registry.ResolveURL 往返。
+func (f fakeTransferBackend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	return f.fs.OpenRead(ctx, strings.TrimPrefix(u.Path, "/"))
+}
+
+// writeRootFile 用 storage.Root 写测试文件。
+func writeRootFile(t *testing.T, root *storage.Root, rel, content string) {
+	t.Helper()
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open %s: %v", rel, err)
+	}
+	if _, err := io.WriteString(f, content); err != nil {
+		f.Close()
+		t.Fatalf("write %s: %v", rel, err)
+	}
+	f.Close()
+}
+
+// TestDeleteGroupArchive_ExternalURL 组删除联动清理外部卷转存产物：URL 形态按卷可信 FS
+// 删除（主文件 + sidecar 一并删净），非 URL 走既有 archive 桶删除。
+func TestDeleteGroupArchive_ExternalURL(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp("", "del-group-archive-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := newAssemblyTestHandlers(t, dir)
+	fs := &serverMemFS{files: map[string][]byte{
+		"alice/user/archive/x.tar.gz":      []byte("data"),
+		"alice/meta/archive/x.tar.gz.meta": []byte("meta"),
+		"alice/user/archive/keep.tar.gz":   []byte("keep"),
+	}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	if err := h.deleteGroupArchive("alice", "vault://vault/alice/user/archive/x.tar.gz"); err != nil {
+		t.Fatalf("删除外部卷归档: %v", err)
+	}
+	if got := slices.Sorted(maps.Keys(fs.files)); len(got) != 1 || got[0] != "alice/user/archive/keep.tar.gz" {
+		t.Fatalf("应仅删目标主文件+sidecar，剩余 %v", got)
 	}
 }

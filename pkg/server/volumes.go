@@ -659,6 +659,36 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
 }
 
+// externalVolumeTransferFS 是外部卷**转存/写目标** FS 的解析出口（可信卷语义）：
+// 裸后端 FS → trusted.Guard(trusted.Wrap(...))（meta 恒生成 + meta 桶隔离）。
+//
+// **唯一外部卷写视图出口**——cloud 下载转存（装配层 TransferFSFor / CloudManagerOptions）
+// 与统一转存（归档打包后转存外部卷）共用同一 recipe，防「一处可信卷、一处裸卷」的解析
+// 漂移（裸卷产物无 sidecar meta、可触达 meta 凭据桶）。
+//
+// 返回 (fs, scheme, vol, ok)：fs 在裸 FS 未就绪时为 nil；ok=false 表示卷未装配或卷
+// 元数据不可解析（调用方按需 fail-closed；scheme 可能为空 = 类型未声明协议）。
+func (h *Handlers) externalVolumeTransferFS(volumeName string) (syncpkg.FS, string, volume.Volume, bool) {
+	if h.volSet == nil {
+		return nil, "", volume.Volume{}, false
+	}
+	be := h.volSet.External(volumeName)
+	if be == nil {
+		return nil, "", volume.Volume{}, false
+	}
+	raw := be.FS()
+	if raw == nil {
+		return nil, "", volume.Volume{}, false
+	}
+	vol, ok := h.volSet.ByName(volumeName)
+	if !ok {
+		// 卷元信息缺失（极罕见装配异常）：仍加 Guard(Wrap(...))（meta 桶隔离恒生效 +
+		// 写面恒生成 sidecar，与其余装配形状一致）——写面也不能触达凭据桶。
+		return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), "", volume.Volume{}, false
+	}
+	return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), registry.SchemeOf(vol.Type), vol, true
+}
+
 // stagingQuotaFS 是外部卷 FS 的**本地 staging 配额统一接线**（用户裁定 2026-10-10：
 // 全部外部卷强制本地配额——独立 staging Scope，写前预留/写后释放防本地磁盘打满；
 // 不需要 staging 或只占部分空间的卷**显式实现 StagingQuotaExempt** 才豁免；以

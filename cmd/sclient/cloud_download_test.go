@@ -1190,3 +1190,144 @@ func TestCloudDownloadSubmitOpts_Defaults(t *testing.T) {
 		t.Fatalf("未设旗标应仅 download_local 默认 true 一个 option（I-1），实际 %d", len(opts))
 	}
 }
+
+// captureArchiveBody 起一个 mock 服务端，捕获 /archive 请求体并回成功响应。
+func captureArchiveBody(t *testing.T, out *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/archive") || r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(out)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "file": "vault://vault/anonymous/user/backups/a.tar.gz"})
+	}))
+}
+
+// TestCloudDownloadCmd_ArchiveTargetURI 卷 URI 目标（<卷名>:/<路径>）归一为请求体 volume+path，
+// 不经过 volume flag（cd/mv 同规约）。
+func TestCloudDownloadCmd_ArchiveTargetURI(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--name", "a.tar.gz", "--target", "vault:/backups/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target 失败: %v", err)
+	}
+	if body["target_volume"] != "vault" || body["target_path"] != "/backups/a.tar.gz" {
+		t.Fatalf("请求体 target 归一错误: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetCurrentVolume 纯路径 --target 回落当前工作目录所在卷（cd 语义）。
+func TestCloudDownloadCmd_ArchiveTargetCurrentVolume(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{CurrentVolume: "disk2"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "backups/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（当前卷）失败: %v", err)
+	}
+	if body["target_volume"] != "disk2" || body["target_path"] != "backups/a.tar.gz" {
+		t.Fatalf("当前卷回落错误: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetNoVolume 纯路径且无当前卷 → 明确报错（不静默按桶归档）。
+func TestCloudDownloadCmd_ArchiveTargetNoVolume(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient("http://test.local"), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "backups/a.tar.gz"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("无卷 URI 且无当前卷应报错")
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetEncrypt 加密/压缩选型随请求体发送；无 --target 时本地 fail-fast。
+func TestCloudDownloadCmd_ArchiveTargetEncrypt(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--name", "a.tar.gz",
+		"--target", "vault:/backups/a.tar.gz", "--encrypt", "--cipher", "aes-256-gcm", "--compress", "zstd"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --encrypt 失败: %v", err)
+	}
+	if body["encrypt"] != true || body["cipher"] != "aes-256-gcm" || body["compression"] != "zstd" {
+		t.Fatalf("请求体预处理选项错误: %+v", body)
+	}
+
+	// 无 --target 设 --encrypt → 本地报错（不静默忽略）。
+	cmd2 := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd2.SetArgs([]string{"archive", "task-1", "--encrypt"})
+	if err := cmd2.Execute(); err == nil {
+		t.Fatal("无 --target 的 --encrypt 应本地报错")
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetCurrentDir 纯路径 --target 须拼**当前目录**（与
+// cp/mv/delete 的 state.ResolveRemotePath 同语义），而非只取当前卷根。
+func TestCloudDownloadCmd_ArchiveTargetCurrentDir(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard},
+		&state.State{CurrentVolume: "vault", CurrentDir: "backups"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（当前目录）失败: %v", err)
+	}
+	if body["target_volume"] != "vault" || body["target_path"] != "backups/a.tar.gz" {
+		t.Fatalf("当前目录未拼接: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetAbsolutePath 前导 "/" = 卷根绝对路径（绕过当前目录）。
+func TestCloudDownloadCmd_ArchiveTargetAbsolutePath(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard},
+		&state.State{CurrentVolume: "vault", CurrentDir: "backups"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "/other/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（绝对路径）失败: %v", err)
+	}
+	if body["target_path"] != "other/a.tar.gz" {
+		t.Fatalf("绝对路径应绕过当前目录: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetCipherRequiresEncrypt --cipher 未配 --encrypt → 本地报错
+// （防静默忽略加密选型；报错发生在发起请求之前）。
+func TestCloudDownloadCmd_ArchiveTargetCipherRequiresEncrypt(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "vault:/a.tar.gz", "--cipher", "aes-256-gcm"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("--cipher 未配 --encrypt 应本地报错")
+	}
+	if len(body) != 0 {
+		t.Fatalf("本地应 fail-fast，不得发起请求: %+v", body)
+	}
+}

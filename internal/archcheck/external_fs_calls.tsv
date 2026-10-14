@@ -18,7 +18,7 @@ pkg/server/external_source.go	1	外部卷下载源解析（经 externalFSFor/同
 pkg/server/files_service.go	5	externalFSFor（可信链入口）+ ExternalCopy 键解析（能力断言）
 pkg/server/quota_reconcile.go	2	真值对账：物理用量探测
 pkg/server/routes_setup.go	2	DAV/S3 装配：临时视图构造
-pkg/server/volumes.go	2	卷路由/装配套接
+pkg/server/volumes.go	3	卷路由/装配套接 + externalVolumeTransferFS（转存目标解析；be.FS() 为装配处 SealBackend 封印后视图，单点复用）
 pkg/server/volumes_enclosure.go	2	封装装配：**封印注入点本身**
 pkg/server/volumes_mirror.go	1	外部卷只读源构造
 pkg/sync/staging_gate.go	1	staging 门卫下探（非外部卷后端）
