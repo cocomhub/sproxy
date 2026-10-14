@@ -265,7 +265,7 @@ func (v *noCallVol) Volume() string { return v.name }
 func TestExecute_NoWriteIfAbsentStillRejectsOverwrite(t *testing.T) {
 	t.Parallel()
 	base := newMemFS()
-	v := &noCallVol{noCallFS: noCallFS{FS: base}, scheme: "vault", name: "vol1"}
+	v := &noCallVol{FS: base, scheme: "vault", name: "vol1"}
 	content := []byte("payload")
 	if _, err := Execute(context.Background(), TransferRequest{
 		Entries:     []SourceEntry{{Rel: "src/x.bin", Size: int64(len(content)), Reader: strings.NewReader(string(content))}},
