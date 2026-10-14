@@ -20,9 +20,11 @@ func TestE2E_CLI_LinuxCommands_VolumeURI(t *testing.T) {
 	t.Parallel()
 	env, _ := newSecretdataPlaybackEnv(t) // vault = secretdata 卷
 
-	// 注：`du`/`df` 本轮**未纳入本用例**——实测 `du`（无参、`<卷>:/`、外部卷）在空卷/卷根形式下报错
-	// （服务端 du 只按本地默认租户根递归，且 user 桶尚未创建时失败）⇒ 已记档为后续片修复，
-	// 不与本轮的「卷 URI 寻址一致性」混在一起断言。
+	// du（Linux 习惯）：**卷 URI 卷根**（`<卷>:/`）与**子目录**都要可用——此前 `du <卷>:/` 因
+	// `ValidateFilePath` 拒绝绝对路径而恒 400，外部卷又因无本地租户恒 404（已修）。
+	if out := env.sclient(t, env.TmpDir, "du", "vault:/"); !strings.Contains(out, "目录") {
+		t.Fatalf("du vault:/ 应有统计输出, got: %s", out)
+	}
 
 	// 1) 目录：mkdir 卷 URI（多级），ls/tree 逐级可见。
 	env.sclient(t, env.TmpDir, "mkdir", "vault:/a/b")
@@ -67,6 +69,11 @@ func TestE2E_CLI_LinuxCommands_VolumeURI(t *testing.T) {
 	env.sclient(t, env.TmpDir, "rmdir", "vault:/a/b", "--force")
 	if out := env.sclient(t, env.TmpDir, "ls", "vault:/a"); strings.Contains(out, "b") {
 		t.Fatalf("rmdir 后不应见 b, got:\n%s", out)
+	}
+
+	// 2b) 子目录 du（外部卷 + 卷 URI 子路径）。
+	if out := env.sclient(t, env.TmpDir, "du", "vault:/a"); !strings.Contains(out, "目录") {
+		t.Fatalf("du vault:/a 应有统计输出, got: %s", out)
 	}
 
 	// 3) `--volume` flag 已移除：必须报未知 flag（唯一寻址方式 = 路径内卷 URI）。

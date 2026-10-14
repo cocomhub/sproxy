@@ -4,13 +4,18 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // duResponse 是 GET /api/du 的响应体。
@@ -42,6 +47,10 @@ func (h *Handlers) duHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	remotePath := r.URL.Query().Get("path")
+	// **卷 URI 语义**（用户口径 2026-10-14）：以 `/` 开头 = **卷根起算**（`du <卷>:/a/b`）⇒ 去掉前导
+	// 斜杠后按 user 桶相对路径解析；空/`/` = 卷根。此前绝对路径被 `ValidateFilePath` 拒绝 ⇒
+	// `du <卷>:/` 恒 400（实测）。
+	remotePath = strings.TrimPrefix(strings.TrimSpace(remotePath), "/")
 	var rel string
 	if remotePath == "" {
 		rel = tnt0.UserRoot()
@@ -54,6 +63,15 @@ func (h *Handlers) duHandler(w http.ResponseWriter, r *http.Request) {
 		rel, ok = tnt0.UserRel(remotePath)
 		if !ok {
 			sendJSONResponse(w, duResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+			return
+		}
+	}
+
+	// **外部卷**（加密/远端卷：无本地 Root）：走**外部 FS** 递归统计。此前恒 404——`locateForRead`
+	// 需要本地租户，而外部卷没有 ⇒ `du <外部卷>:/…` 不可用（实测）。
+	if explicitVolEarly := r.URL.Query().Get("volume"); explicitVolEarly != "" {
+		if v, ok := h.volSet.ByName(explicitVolEarly); ok && h.volSet.Root(explicitVolEarly) == nil {
+			h.duExternalVolume(w, r, owner, v, remotePath)
 			return
 		}
 	}
@@ -86,6 +104,75 @@ func (h *Handlers) duHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sendJSONResponse(w, duResponse{Success: true, Data: data}, http.StatusOK)
+}
+
+// duExternalVolume 统计**外部卷**（无本地 Root）子树：经同一可信链取外部 FS，用 `externalVolumeKey`
+// 把用户可见路径翻译为卷内键（与 ExternalList/ExternalStat 同一解析），再递归列举统计。
+// 语义与本地 `walkDu` 对齐（跳过 .__ 魔法目录与 checksums.json/LAYOUT_VERSION 元数据）。
+func (h *Handlers) duExternalVolume(w http.ResponseWriter, r *http.Request, owner string, v volume.Volume, remotePath string) {
+	fsys, ok := h.externalFSFor(v.Name)
+	if !ok || !v.Authorize(owner) {
+		sendJSONResponse(w, duResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		return
+	}
+	// 用户可见路径 → 卷内键：`ResolveUserLocation` 是**唯一入口**（含路径安全校验；空路径 = user 桶根）。
+	loc, kerr := v.ResolveUserLocation(owner, remotePath)
+	if kerr != nil {
+		sendJSONResponse(w, duResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	key := loc.FSPath()
+	data, werr := walkDuFS(r.Context(), fsys, key)
+	if werr != nil {
+		h.log().WarnContext(r.Context(), "du: 遍历外部卷失败", "volume", v.Name, "path", remotePath, "error", werr)
+		sendJSONResponse(w, duResponse{Success: false, Message: "遍历目录失败"}, http.StatusInternalServerError)
+		return
+	}
+	data.Path = "/" + strings.TrimPrefix(remotePath, "/")
+	sendJSONResponse(w, duResponse{Success: true, Data: data}, http.StatusOK)
+}
+
+// walkDuFS 递归统计外部 FS 上 key 子树的目录数/文件数/字节（与 walkDu 同语义）。
+func walkDuFS(ctx context.Context, fsys syncpkg.FS, key string) (*duData, error) {
+	d := &duData{}
+	if werr := walkDuFSDir(ctx, fsys, key, d); werr != nil {
+		return nil, werr
+	}
+	return d, nil
+}
+
+// walkDuFSDir 递归一个目录层（目录不存在 = 空，与本地 walkDuDir 一致）。
+func walkDuFSDir(ctx context.Context, fsys syncpkg.FS, key string, d *duData) error {
+	entries, lerr := fsys.ListDir(ctx, key)
+	if lerr != nil {
+		if errors.Is(lerr, os.ErrNotExist) {
+			return nil
+		}
+		return lerr
+	}
+	for _, e := range entries {
+		if werr := walkDuFSEntry(ctx, fsys, key, e, d); werr != nil {
+			return werr
+		}
+	}
+	return nil
+}
+
+// walkDuFSEntry 统计单个条目（目录递归并跳过 `.__` 魔法目录；文件跳过元数据文件）。
+func walkDuFSEntry(ctx context.Context, fsys syncpkg.FS, key string, e syncpkg.Entry, d *duData) error {
+	if e.IsDir {
+		if strings.HasPrefix(e.Name, ".__") {
+			return nil
+		}
+		d.Dirs++
+		return walkDuFSDir(ctx, fsys, path.Join(key, e.Name), d)
+	}
+	if e.Name == "checksums.json" || e.Name == "LAYOUT_VERSION" {
+		return nil
+	}
+	d.Files++
+	d.Size += e.Size
+	return nil
 }
 
 // walkDu 递归统计 root 下 rel 子树（rel 为 root 相对路径，含 user/ 前缀）。

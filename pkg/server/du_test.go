@@ -164,7 +164,9 @@ func TestDUBucketExcluded(t *testing.T) {
 func TestDUInvalidPath(t *testing.T) {
 	t.Parallel()
 	ts := newTestServerWithRoutes(t, nil)
-	for _, p := range []string{"../x", "/abs", "a/b/../../x"} {
+	// 注：`/abs` 不再是「非法」——用户口径 2026-10-14 起以 `/` 开头 = **卷根起算**（`du <卷>:/a`），
+	// 不存在的路径属 404（见 TestDUMissingPath404），故此处只保留真正的**路径穿越/非法段**用例。
+	for _, p := range []string{"../x", "a/b/../../x"} {
 		resp, err := testHTTPClient(t).Get(ts.URL + "/api/du?path=" + p)
 		if err != nil {
 			t.Fatalf("GET /api/du %s: %v", p, err)
@@ -224,5 +226,31 @@ func TestDUBucketSkipMutation(t *testing.T) {
 	}
 	if d.Files != 1 || d.Size != 4 {
 		t.Fatalf("user 桶统计 = files=%d size=%d, want 1/4（功能桶干扰泄漏）", d.Files, d.Size)
+	}
+}
+
+// TestDURootPath 钉住**卷根路径**语义（用户口径 2026-10-14：卷 URI 的 `/` = 卷根起算）：
+// `?path=/` 必须 200 且给出统计（此前绝对路径被 ValidateFilePath 拒绝 ⇒ 恒 400，实测）。
+func TestDURootPath(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	uploadDUTreeFiles(t, root)
+	ts := newTestServerWithRoutes(t, func(cfg *Config) { cfg.StorageRoot = root })
+	defer ts.Close()
+
+	for _, q := range []string{"/api/du?path=/", "/api/du?path=%2F", "/api/du"} {
+		resp, err := testHTTPClient(t).Get(ts.URL + q)
+		if err != nil {
+			t.Fatalf("GET %s: %v", q, err)
+		}
+		body := make([]byte, 4096)
+		n, _ := resp.Body.Read(body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d（want 200），body=%s", q, resp.StatusCode, string(body[:n]))
+		}
+		if !strings.Contains(string(body[:n]), `"success":true`) {
+			t.Fatalf("GET %s 应返回 success=true，body=%s", q, string(body[:n]))
+		}
 	}
 }
