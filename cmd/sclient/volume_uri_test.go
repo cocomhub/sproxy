@@ -16,16 +16,16 @@ package main
 import (
 	"testing"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/volumectx"
+
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/spf13/cobra"
 )
 
-// uriTestCmd 构造带 volume/to-volume flag 的最小命令（与真实命令同 flag 名）。
+// uriTestCmd 构造最小命令（卷经 **上下文** 传递——用户口径 2026-10-14：卷寻址只有路径内 URI，
+// 无 --volume flag）。
 func uriTestCmd() *cobra.Command {
-	c := &cobra.Command{Use: "t", RunE: func(*cobra.Command, []string) error { return nil }}
-	c.Flags().String("volume", "", "")
-	c.Flags().String(flagToVolume, "", "")
-	return c
+	return &cobra.Command{Use: "t", RunE: func(*cobra.Command, []string) error { return nil }}
 }
 
 func TestSplitVolumeURI(t *testing.T) {
@@ -66,28 +66,30 @@ func TestApplyVolumeURIs_SetsFlagAndStripsPrefix(t *testing.T) {
 	if args[0] != "/docs/top.txt" {
 		t.Fatalf("URI 路径应为卷根绝对（保留前导斜杠）: %q", args[0])
 	}
-	if got, _ := cmd.Flags().GetString("volume"); got != "vault" {
+	if got, _ := volumectx.From(cmd.Context()); got != "vault" {
 		t.Fatalf("--volume=%q want vault", got)
 	}
 }
 
-func TestApplyVolumeURIs_ExplicitFlagConflictFails(t *testing.T) {
+func TestApplyVolumeURIs_MultiArgConflictFails(t *testing.T) {
 	t.Parallel()
+	// 单卷命令的多个位置参数指向**不同卷** ⇒ 报错（不静默取其一）。
 	cmd := uriTestCmd()
-	if err := cmd.Flags().Set("volume", "other"); err != nil {
-		t.Fatal(err)
-	}
-	args := []string{"vault:/a"}
+	args := []string{"vault:/a", "other:/b"}
 	if err := applyVolumeURIs(cmd, args); err == nil {
-		t.Fatal("位置参数卷名与显式 --volume 冲突应报错（不静默取其一）")
+		t.Fatal("多个位置参数卷名冲突应报错（不静默取其一）")
 	}
-	// 同名 → 通过。
+	// 同名 → 通过，且前缀被剥离。
 	cmd2 := uriTestCmd()
-	if err := cmd2.Flags().Set("volume", "vault"); err != nil {
-		t.Fatal(err)
-	}
-	if err := applyVolumeURIs(cmd2, []string{"vault:/a"}); err != nil {
+	args2 := []string{"vault:/a", "vault:/b"}
+	if err := applyVolumeURIs(cmd2, args2); err != nil {
 		t.Fatalf("同名卷不应报错: %v", err)
+	}
+	if args2[0] != "/a" || args2[1] != "/b" {
+		t.Fatalf("URI 前缀应被剥离: %v", args2)
+	}
+	if got, _ := volumectx.From(cmd2.Context()); got != "vault" {
+		t.Fatalf("源卷上下文=%q want vault", got)
 	}
 }
 
@@ -101,11 +103,11 @@ func TestApplyMvVolumeURIs_CrossVolumeSetsToVolume(t *testing.T) {
 	if args[0] != "/a.txt" || args[1] != "/b.txt" {
 		t.Fatalf("URI 路径应为卷根绝对: %v", args)
 	}
-	if v, _ := cmd.Flags().GetString("volume"); v != "vault" {
-		t.Fatalf("--volume=%q want vault", v)
+	if v, _ := volumectx.From(cmd.Context()); v != "vault" {
+		t.Fatalf("源卷上下文=%q want vault", v)
 	}
-	if tv, _ := cmd.Flags().GetString(flagToVolume); tv != "backup" {
-		t.Fatalf("--to-volume=%q want backup", tv)
+	if tv, _ := volumectx.Target(cmd.Context()); tv != "backup" {
+		t.Fatalf("目标卷上下文=%q want backup", tv)
 	}
 
 	// 同卷 → 不写 --to-volume（同卷 rename 语义）。
@@ -113,21 +115,21 @@ func TestApplyMvVolumeURIs_CrossVolumeSetsToVolume(t *testing.T) {
 	if err := applyMvVolumeURIs(cmd2, []string{"vault:/a.txt", "vault:/b.txt"}); err != nil {
 		t.Fatal(err)
 	}
-	if tv, _ := cmd2.Flags().GetString(flagToVolume); tv != "" {
-		t.Fatalf("同卷不应设置 --to-volume, got %q", tv)
+	if tv, ok := volumectx.Target(cmd2.Context()); ok {
+		t.Fatalf("同卷不应设置目标卷上下文, got %q", tv)
 	}
 }
 
 // ---- 工作目录所在卷回落（用户口径 2026-10-13）----
 
-func TestApplyVolumeContext_StateVolumeFillsFlag(t *testing.T) {
+func TestApplyVolumeContext_StateVolumeFillsContext(t *testing.T) {
 	t.Parallel()
 	cmd := uriTestCmd()
 	st := &state.State{CurrentVolume: "vault", CurrentDir: "docs"}
 	if err := applyVolumeContext(cmd, st, nil); err != nil {
 		t.Fatalf("applyVolumeContext: %v", err)
 	}
-	if got, _ := cmd.Flags().GetString("volume"); got != "vault" {
+	if got, _ := volumectx.From(cmd.Context()); got != "vault" {
 		t.Fatalf("--volume=%q want vault（当前工作目录所在卷）", got)
 	}
 }
@@ -135,16 +137,13 @@ func TestApplyVolumeContext_StateVolumeFillsFlag(t *testing.T) {
 func TestApplyVolumeContext_Precedence(t *testing.T) {
 	t.Parallel()
 	st := &state.State{CurrentVolume: "cwd-vol"}
-	// 显式 --volume 优先于工作目录卷。
+	// 工作目录卷（cd 设定）在**无 URI** 时生效。
 	cmd := uriTestCmd()
-	if err := cmd.Flags().Set("volume", "explicit"); err != nil {
-		t.Fatal(err)
-	}
 	if err := applyVolumeContext(cmd, st, nil); err != nil {
 		t.Fatalf("applyVolumeContext: %v", err)
 	}
-	if got, _ := cmd.Flags().GetString("volume"); got != "explicit" {
-		t.Fatalf("显式 --volume 应优先, got %q", got)
+	if got, _ := volumectx.From(cmd.Context()); got != "cwd-vol" {
+		t.Fatalf("无 URI 时应取工作目录卷, got %q", got)
 	}
 	// 位置参数卷 URI 优先于工作目录卷（且位置参数会剥离前缀）。
 	cmd2 := uriTestCmd()
@@ -152,7 +151,7 @@ func TestApplyVolumeContext_Precedence(t *testing.T) {
 	if err := applyVolumeContext(cmd2, st, args); err != nil {
 		t.Fatalf("applyVolumeContext: %v", err)
 	}
-	if got, _ := cmd2.Flags().GetString("volume"); got != "uri-vol" {
+	if got, _ := volumectx.From(cmd2.Context()); got != "uri-vol" {
 		t.Fatalf("URI 应优先于工作目录卷, got %q", got)
 	}
 	if args[0] != "/a.txt" {
@@ -167,18 +166,18 @@ func TestApplyMvVolumeContext_StateVolumeAppliesToBothSides(t *testing.T) {
 	if err := applyMvVolumeContext(cmd, st, []string{"a.txt", "b.txt"}); err != nil {
 		t.Fatalf("applyMvVolumeContext: %v", err)
 	}
-	if got, _ := cmd.Flags().GetString("volume"); got != "vault" {
-		t.Fatalf("--volume=%q want vault", got)
+	if got, _ := volumectx.From(cmd.Context()); got != "vault" {
+		t.Fatalf("源卷上下文=%q want vault", got)
 	}
-	// 目标显式带不同卷 ⇒ 跨卷迁移（--to-volume），源仍取 URI/工作目录卷。
+	// 目标显式带不同卷 ⇒ 跨卷迁移（目标卷上下文），源仍取 URI/工作目录卷。
 	cmd2 := uriTestCmd()
 	if err := applyMvVolumeContext(cmd2, st, []string{"a.txt", "other:/b.txt"}); err != nil {
 		t.Fatalf("applyMvVolumeContext: %v", err)
 	}
-	if v, _ := cmd2.Flags().GetString("volume"); v != "vault" {
+	if v, _ := volumectx.From(cmd2.Context()); v != "vault" {
 		t.Fatalf("源卷应取工作目录卷, got %q", v)
 	}
-	if tv, _ := cmd2.Flags().GetString(flagToVolume); tv != "other" {
+	if tv, _ := volumectx.Target(cmd2.Context()); tv != "other" {
 		t.Fatalf("--to-volume=%q want other", tv)
 	}
 }

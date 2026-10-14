@@ -5,11 +5,13 @@ package main
 
 // 集中定义跨命令复用的旗标名字符串（S1192：注册与读取共享同一常量，防拼写漂移）。
 const (
-	flagOutputDir     = "output-dir"
-	flagPollInterval  = "poll-interval"
-	flagURLFile       = "url-file"
-	flagFromVolume    = "from-volume"
+	flagOutputDir    = "output-dir"
+	flagPollInterval = "poll-interval"
+	flagURLFile      = "url-file"
+	// flagToVolume 是**卷管理命令**（volume copy/move/rebalance）的目标卷 flag；
+	// 文件命令（mv/cp 等）已改用**路径内卷 URI**（用户口径 2026-10-14），不再使用本 flag。
 	flagToVolume      = "to-volume"
+	flagFromVolume    = "from-volume"
 	flagForce         = "force"
 	flagVirtualSubnet = "virtual-subnet"
 	flagAPIBase       = "api-base"

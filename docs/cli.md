@@ -21,7 +21,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | `--access-key` | (空) | SproxySig 认证 AccessKey（服务端凭据 Ring 登记对应 AK/SK 时需要） |
 | `--access-key-secret` | (空) | SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线） |
 | `--access-key-id` | (空) | SproxySig SK 条目 ID（skey-id；v2 协议必传，`trust renew` 回填） |
-| `--volume` | (空) | 存储卷上下文；空 = auto。`upload`/`download`/`list`/`stat`/`delete`/`mv` 等文件操作限定到指定卷 |
+| ~~`--volume`~~ | — | **已移除**（2026-10-14）：卷寻址统一为**路径内卷 URI**（`<卷名>:/<路径>`）或 `cd <卷名>:/…` 设定的工作目录卷 |
 | `--download-proxy` | (空) | 下载回退代理地址（如 `http://127.0.0.1:1080`）；直连服务端失败/超时自动经此代理重发，空 = 关闭回退 |
 
 > `mesh` / `relay` / `p2p` / `socks` / `udp` 等命令另有各自的 `--hub`（Hub 的 ws/wss 地址）；
@@ -66,7 +66,8 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`delete`](#delete) | 删除文件 |
 | [`mv`](#mv) | 重命名 / 移动 |
 | [`stat`](#stat) | 查询文件元信息 |
-| [`list`](#list) | 列出文件 |
+| [`ls`](#ls) | 列出文件/目录（`list` 为等价别名） |
+| [`tree`](#tree) | 树形递归显示目录结构 |
 | [`mkdir`](#mkdir) | 创建目录 |
 | [`rmdir`](#rmdir) | 删除目录 |
 | [`search`](#search) | 搜索文件 |
@@ -103,7 +104,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 ```bash
 sclient cd vault:/docs      # 切到加密卷 vault 的 /docs（工作目录 = vault:/docs）
 sclient pwd                 # 打印 vault:/docs
-sclient list                # 列 vault:/docs（不必再写 --volume / URI）
+sclient ls                  # 列 vault:/docs（工作目录卷；无需任何 flag）
 sclient upload ./a.bin      # 目标卷 = vault，路径 = docs/a.bin
 sclient cd /                # 前导 `/` = **本地卷**根（回到默认卷）
 sclient cd other:/x         # 切到另一卷 other 的 /x
@@ -114,14 +115,15 @@ sclient cd other:/x         # 切到另一卷 other 的 /x
 - `<卷名>:/<路径>` = 该卷根起算的**绝对路径**（不受当前工作目录影响）；`<卷名>:` / `<卷名>:/` = 卷根。
 - 前导 `/` 开头的路径 = **本地卷**（默认卷）根起算，并**离开**当前卷。
 - 相对路径沿用当前工作目录（含所在卷）。
-- 优先级：位置参数卷 URI > `--volume` > **工作目录所在卷** > 配置/auto（冲突时报错，不静默取其一）。
-- 其它命令可用卷 URI 一次性寻址（不改工作目录）：`list vault:/`、`meta vault:/a.txt`、
+- 优先级：**位置参数卷 URI** > **工作目录所在卷**（`cd <卷名>:/…`）> 配置 `volume`/auto
+  （同一命令多个位置参数指向不同卷时报错，不静默取其一；`mv`/`cp` 的第二端为跨卷目标）。
+- 其它命令可用卷 URI 一次性寻址（不改工作目录）：`ls vault:/`、`meta vault:/a.txt`、
   `download vault:/a.txt`、`mv vault:/a vault:/b`、`delete vault:/a`。
 
-### 跨卷操作（URI + `--to-volume`）
+### 跨卷操作（两端卷 URI）
 
 ```bash
-sclient mv vault:/a.txt a.txt --to-volume other      # 跨卷移动（源卷由 URI/工作目录给出）
+sclient mv vault:/a.txt other:/a.txt                 # 跨卷移动（两端卷 URI；目标不同卷即跨卷）
 sclient cp main:/a.txt vault:/a.txt                   # 跨卷复制（两端 URI）
 sclient volume move a.txt --from-volume vault --to-volume other   # 旧式跨卷移动（`volume` 子命令）
 ```
@@ -136,7 +138,7 @@ sclient volume move a.txt --from-volume vault --to-volume other   # 旧式跨卷
 
 ```bash
 sclient cp a.txt b.txt                  # 同卷复制（默认与源同卷）
-sclient cp a.txt b.txt --to-volume disk2  # 目标卷（同相对路径）
+sclient cp disk1:/a.txt disk2:/a.txt      # 目标卷（两端卷 URI）
 sclient cp vault:/a.txt vault:/b.txt      # 卷 URI（同卷）
 sclient cp main:/a.txt vault:/a.txt       # 跨卷（两端 URI）
 sclient cp a.txt b.txt --force            # 允许覆盖已存在目标
@@ -165,10 +167,10 @@ sclient 维护一个**持久化的工作目录**（存于 XDG cache），影响�
 
 ## 卷 URI 寻址（`<卷名>:/<路径>`）
 
-文件操作的位置参数可以直接写**卷 URI**，不必再记 `--volume`：
+文件操作的位置参数**一律**用**卷 URI**（唯一寻址方式；`--volume` 已移除）：
 
 ```bash
-sclient list   vault:/                 # 列出加密卷 vault 的根目录
+sclient ls     vault:/                 # 列出加密卷 vault 的根目录
 sclient meta   vault:/docs/top.txt     # 取元信息（含明文 checksum）
 sclient download vault:/docs/top.txt   # 下载
 sclient mv     vault:/a.txt vault:/b.txt
@@ -176,14 +178,15 @@ sclient delete vault:/b.txt
 ```
 
 - `<卷名>:` 或 `<卷名>:/` = 卷根；路径部分按普通相对路径解析（仍受 `cd` 影响）。
-- 等价性：`sclient list vault:/x` ≡ `sclient --volume vault list x`。位置参数与显式 `--volume`
+- 等价性：`sclient ls vault:/x` ≡ `cd vault:/ && sclient ls x`。同一命令多个位置参数
   **卷名不一致时报错**（不静默取其一）；一致则等价。
-- `mv` 的两端可分别带卷名：不同卷 → 自动按**跨卷迁移**（等价 `--to-volume`）执行；同卷 → 同卷改名。
-- `upload` 的位置参数是**本地文件路径**，故不使用卷 URI（目标卷仍用 `--volume` 指定）。
+- `mv`/`cp` 的两端可分别带卷名：不同卷 → **跨卷迁移/复制**；同卷 → 同卷改名/复制。
+- `upload` 的位置参数是**本地文件路径**（不使用卷 URI）⇒ 目标卷经 `cd <卷名>:/<目录>` 设定
+  （工作目录卷）；`download` 的远端参数用卷 URI。
 - 与 URL/盘符的歧义按语法消除：要求冒号后紧跟**单个**斜杠，故 `https://…` 与 `C:\…` 不会被误判。
 
 **为什么要它**：加密卷（`type: secretdata`）等非默认卷的浏览/改名/删除不必再记 flag，
-路径自述归属；同时这也是列出加密卷内容的推荐方式——**未指定卷的 `list` 只列本地卷**
+路径自述归属；同时这也是列出加密卷内容的推荐方式——**未指定卷的 `ls` 只列本地卷**
 （搜索索引不含外部卷）。
 
 ## 子命令详情
@@ -196,13 +199,13 @@ sclient delete vault:/b.txt
 ```bash
 sproxy-mcp --server https://127.0.0.1:18083 \
   --access-key <AK> --access-key-secret <SK> --access-key-id <skey-id> \
-  [--volume docs] [--transport stdio|sse] [--sse-addr :18900]
+  [--transport stdio|sse] [--sse-addr :18900]
 ```
 
 - `--server`（必填）：sproxy 服务端地址
 - `--access-key` / `--access-key-secret` / `--access-key-id`：SproxySig 凭据三要素
   （全部省略时走服务端免认证场景）
-- `--volume`：可选卷上下文（缺省 auto）
+- 卷上下文：由**路径内卷 URI** 或 `cd` 设定的工作目录卷给出（`--volume` 已移除）
 - `--transport`：传输方式，`stdio`（默认，本地 AI CLI）或 `sse`（远程 HTTP）
 - `--sse-addr`：SSE 传输监听地址，默认 `:18900`（`--transport=sse` 时生效）
 
@@ -262,7 +265,7 @@ sclient stat <filename>
 
 输出文件 size、checksum、mod_time。不下载内容。
 
-### list
+### ls（别名 list）
 
 ```bash
 sclient list                # 列当前目录
