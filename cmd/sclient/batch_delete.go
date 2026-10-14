@@ -37,6 +37,9 @@ type batchDeleteItem struct {
 
 // runBatchDelete 执行 batch-delete 命令主体。
 func runBatchDelete(cmd *cobra.Command, args []string, factory clientfactory.Factory, ios cli.IOStreams, st *state.State) error {
+	if err := applyVolumeContext(cmd, st, args); err != nil {
+		return err
+	}
 	svc, err := factory.NewClient(cmd)
 	if err != nil {
 		ios.WriteErrLine(errFmtInitClientPrint, err)

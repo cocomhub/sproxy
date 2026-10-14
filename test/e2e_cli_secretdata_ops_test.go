@@ -41,7 +41,7 @@ func TestE2E_CLI_Secretdata_CliFileOps(t *testing.T) {
 	}
 
 	// 1) 上传 + 磁盘为加密容器（无明文逻辑名）。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "ops.bin")
+	env.sclient(t, env.TmpDir, "upload", "ops.bin", "vault:/")
 	assertSecretLayoutAnonymity(t, vaultRoot, "user", "ops.bin", "user/ops.bin")
 
 	// 2) list 必须能看到（此前静默空列表）。
@@ -123,11 +123,11 @@ func TestE2E_CLI_Secretdata_DeclaredBeforeSecrets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "order.bin"), content, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "order.bin")
-	if out := env.sclient(t, env.TmpDir, "--volume", "vault", "list"); !strings.Contains(out, "order.bin") {
+	env.sclient(t, env.TmpDir, "upload", "order.bin", "vault:/")
+	if out := env.sclient(t, env.TmpDir, "list", "vault:/"); !strings.Contains(out, "order.bin") {
 		t.Fatalf("vault 列表应含 order.bin（声明顺序不应影响装配）, got:\n%s", out)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "download", "order.bin")
+	env.sclient(t, env.TmpDir, "download", "vault:/order.bin")
 	got, err := os.ReadFile(filepath.Join(env.TmpDir, "order.bin"))
 	if err != nil {
 		t.Fatal(err)

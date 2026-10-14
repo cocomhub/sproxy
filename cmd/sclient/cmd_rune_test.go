@@ -530,7 +530,7 @@ func TestListCommand_ServerError(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdList(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd := NewCmdLs(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
 	cmd.SetArgs(nil)
 	err := cmd.Execute()
 	if err == nil {

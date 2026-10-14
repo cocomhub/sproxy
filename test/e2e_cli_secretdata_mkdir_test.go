@@ -29,7 +29,7 @@ func TestE2E_CLI_Secretdata_MkdirTree(t *testing.T) {
 	env, vaultRoot := newSecretdataPlaybackEnv(t)
 
 	// 1) 一次 mkdir 建三层。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "mkdir", "a/b/c")
+	env.sclient(t, env.TmpDir, "mkdir", "vault:/a/b/c")
 	for _, c := range []struct{ parent, child string }{
 		{"vault:/", "a"}, {"vault:/a", "b"}, {"vault:/a/b", "c"},
 	} {
@@ -48,7 +48,7 @@ func TestE2E_CLI_Secretdata_MkdirTree(t *testing.T) {
 	}
 
 	// 3) 父已存在时继续向下创建。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "mkdir", "a/b/c/d")
+	env.sclient(t, env.TmpDir, "mkdir", "vault:/a/b/c/d")
 	if out := env.sclient(t, env.TmpDir, "list", "vault:/a/b/c"); !strings.Contains(out, "d") {
 		t.Fatalf("list vault:/a/b/c 应含 d, got:\n%s", out)
 	}
@@ -63,7 +63,7 @@ func TestE2E_CLI_Secretdata_MkdirTree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(localDir, "nested.bin"), payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", filepath.Join("a", "b", "c", "nested.bin"))
+	env.sclient(t, env.TmpDir, "upload", filepath.Join("a", "b", "c", "nested.bin"), "vault:/")
 	dl := filepath.Join(env.TmpDir, "dl")
 	if err := os.MkdirAll(dl, 0o755); err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ volumes:
 	u0 := usage()
 
 	// 1) 一次建三层 ⇒ 逐级计入（≥3 个 dir meta；上界 16 个含 owner/user 前缀容器与根容器）。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "mkdir", "a/b/c")
+	env.sclient(t, env.TmpDir, "mkdir", "vault:/a/b/c")
 	u1 := usage()
 	if created := u1 - u0; created < 3*base {
 		t.Fatalf("递归 mkdir a/b/c 配额增量=%d，应 ≥ %d（3 级目录 meta 都要计入）", created, 3*base)
@@ -167,13 +167,13 @@ volumes:
 	}
 
 	// 2) 幂等：重复同路径不重复计费。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "mkdir", "a/b/c")
+	env.sclient(t, env.TmpDir, "mkdir", "vault:/a/b/c")
 	if d := usage() - u1; d != 0 {
 		t.Fatalf("幂等 mkdir 不应新增配额，增量=%d", d)
 	}
 
 	// 3) 只新增一级 ⇒ 恰一个 dir meta。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "mkdir", "a/b/c/d")
+	env.sclient(t, env.TmpDir, "mkdir", "vault:/a/b/c/d")
 	u2 := usage()
 	if d := u2 - u1; d < base || d > 2*base {
 		t.Fatalf("新增一级目录配额增量=%d，应为**一个** dir meta ∈ [%d, %d]", d, base, 2*base)
@@ -181,7 +181,7 @@ volumes:
 
 	// 4) 删除该级 ⇒ 释放**至少** d 自身的 dir meta（写/删同口径）。注意本卷「空目录语义」：
 	// 删掉最后一个内容后**空祖先会被连带回收**（连其 dir meta 一并删）⇒ 释放量可大于一个 dir meta。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "rmdir", "a/b/c/d", "--force")
+	env.sclient(t, env.TmpDir, "rmdir", "vault:/a/b/c/d", "--force")
 	u3 := usage()
 	if d := u2 - u3; d < base {
 		t.Fatalf("rmdir 释放=%d，应 ≥ 一个 dir meta（%d）", d, base)
@@ -201,7 +201,7 @@ volumes:
 		t.Fatal(werr)
 	}
 	u4 := usage()
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", filepath.Join("q", "tiny.bin"))
+	env.sclient(t, env.TmpDir, "upload", filepath.Join("q", "tiny.bin"), "vault:/")
 	if d := usage() - u4; d < base {
 		t.Fatalf("64B 文件上传配额增量=%d，应 ≥ meta pad 下限 %d（按逻辑记账会低估 ⇒ 能力未生效）", d, base)
 	}

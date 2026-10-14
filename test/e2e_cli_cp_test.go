@@ -32,7 +32,7 @@ func TestE2E_CLI_Cp_SameVolumeEncryptedNoReencrypt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "cp-a.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "cp-a.bin")
+	env.sclient(t, env.TmpDir, "upload", "cp-a.bin", "vault:/")
 	assertSecretLayoutAnonymity(t, vaultRoot, "user", "cp-a.bin", "user/cp-a.bin")
 
 	// 内容分块快照（排除文件/目录 meta）：用于断言复制**零内容 blob 写**。
@@ -134,8 +134,8 @@ func TestE2E_CLI_Cp_OverwritePolicy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "dst.bin"), []byte("existing-content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "src.bin")
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "dst.bin")
+	env.sclient(t, env.TmpDir, "upload", "src.bin", "vault:/")
+	env.sclient(t, env.TmpDir, "upload", "dst.bin", "vault:/")
 
 	if _, stderr, err := env.sclientRun(t, env.TmpDir, "cp", "vault:/src.bin", "vault:/dst.bin"); err == nil {
 		t.Fatal("目标已存在时默认应拒绝（409）")
@@ -188,7 +188,7 @@ volumes:
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "big.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "big.bin") // 预留上界 ≈24KiB / 配额 32KiB
+	env.sclient(t, env.TmpDir, "upload", "big.bin", "vault:/") // 预留上界 ≈24KiB / 配额 32KiB
 
 	// ① 再复制（又一份 ≈24KiB 上界）⇒ 合计 48KiB > 32KiB ⇒ 必须拒绝，且**目标不落半态**。
 	_, stderr, err := env.sclientRun(t, env.TmpDir, "cp", "vault:/big.bin", "vault:/big-copy.bin")
@@ -204,7 +204,7 @@ volumes:
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "big2.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, uerr := env.sclientRun(t, env.TmpDir, "--volume", "vault", "upload", "big2.bin"); uerr == nil {
+	if _, _, uerr := env.sclientRun(t, env.TmpDir, "upload", "big2.bin", "vault:/"); uerr == nil {
 		t.Fatal("同配额下第二个上传也应被拒（复制与上传应同口径）")
 	}
 }

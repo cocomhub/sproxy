@@ -150,7 +150,6 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().String("access-key", "", "SproxySig 认证 AccessKey（服务端凭据 Ring 登记了对应 AK/SK 时需要）")
 	root.PersistentFlags().String("access-key-secret", "", "SproxySig 认证 AccessKeySecret (本地密钥，仅计算签名，永不上线)")
 	root.PersistentFlags().String("access-key-id", "", "SproxySig SK 条目 ID（skey-id，v2 协议必传；`trust renew` 回填）")
-	root.PersistentFlags().String("volume", "", "存储卷上下文（默认空 = auto；upload/download/list/meta/delete/mv 等文件操作限定到指定卷）")
 	root.PersistentFlags().String("download-proxy", "", "下载回退代理地址（直连服务端失败/超时自动经此代理重发；如 http://127.0.0.1:1080；空=关闭回退）")
 	root.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
 	root.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")
@@ -200,7 +199,8 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdUploadDirect(factory, ios, cliState))
 	root.AddCommand(NewCmdDownload(factory, ios, cliState))
 	root.AddCommand(NewCmdDelete(factory, ios, cliState))
-	root.AddCommand(NewCmdList(factory, ios, cliState))
+	root.AddCommand(NewCmdLs(factory, ios, cliState))
+	root.AddCommand(NewCmdTree(factory, ios, cliState))
 	root.AddCommand(NewCmdVolumes(factory, ios))
 	root.AddCommand(NewCmdVolume(factory, ios, cliState))
 	root.AddCommand(NewCmdBackup(factory, ios))
@@ -244,7 +244,6 @@ func rootPreRunE(cmd *cobra.Command, cfgProvider **sclientcfg.ViperProvider, cur
 	p.BindPFlag("access_key", cmd.Flags().Lookup("access-key"))
 	p.BindPFlag("access_key_secret", cmd.Flags().Lookup("access-key-secret"))
 	p.BindPFlag("access_key_id", cmd.Flags().Lookup("access-key-id"))
-	p.BindPFlag("volume", cmd.Flags().Lookup("volume"))
 	*cfgProvider = p
 	*currentDir = loadCurrentDir()
 	cliState.CurrentDir = *currentDir

@@ -6,6 +6,8 @@ package main
 import (
 	"fmt"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/volumectx"
+
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -24,7 +26,7 @@ func NewCmdCp(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 
 路径支持卷 URI（<卷名>:/<路径>），也受当前工作目录（含所在卷）影响：
   sclient cp a.txt b.txt                     # 同卷复制（目标与源同卷）
-  sclient cp a.txt b.txt --to-volume disk2    # 跨卷复制到 disk2（同相对路径）
+  sclient cp disk1:/a.txt disk2:/a.txt        # 跨卷复制到 disk2（同相对路径）
   sclient cp vault:/a.txt vault:/b.txt        # 卷 URI（同卷）
   sclient cp main:/a.txt vault:/a.txt         # 跨卷（两端 URI）
 
@@ -32,7 +34,7 @@ func NewCmdCp(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 同卷且卷支持「底层 blob 直拷」（如 secretdata 加密卷）时不重新加解密。`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 卷上下文：源 URI → --volume；目标 URI（不同卷）→ --to-volume（用户口径 2026-10-13）。
+			// 卷上下文：源 URI → 源卷；目标 URI（不同卷）→ 目标卷（用户口径 2026-10-14：唯一寻址方式）。
 			if err := applyMvVolumeContext(cmd, st, args); err != nil {
 				return err
 			}
@@ -51,7 +53,7 @@ func NewCmdCp(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 				ios.WriteErrLine("无效的目标路径: %v", err)
 				return fmt.Errorf(errFmtInvalidPath, err)
 			}
-			toVol, _ := cmd.Flags().GetString(flagToVolume)
+			toVol, _ := volumectx.Target(cmd.Context())
 			force, _ := cmd.Flags().GetBool(flagForce)
 			if err := svc.CopyFile(cmd.Context(), svc.Volume(), from, toVol, to, force); err != nil {
 				ios.WriteErrLine("复制失败: %v", err)
@@ -62,6 +64,5 @@ func NewCmdCp(factory clientfactory.Factory, ios cli.IOStreams, st *state.State)
 		},
 	}
 	cmd.Flags().Bool(flagForce, false, "覆盖已存在的目标（默认拒绝，绝不静默覆盖）")
-	cmd.Flags().String(flagToVolume, "", "目标卷（缺省 = 与源同卷）")
 	return cmd
 }
