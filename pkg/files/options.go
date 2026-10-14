@@ -385,10 +385,11 @@ func (s singleVolume) Locate(owner, rel string) (FileLocation, bool) {
 // 装配了配额时在 owner 全局 Scope 上预留（单卷无卷容量池）；未装配时无预留。
 // 租户不可用时 Tenant 为 nil，由 Upload 回 400；配额不足回 507。
 func (s singleVolume) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
-	route := UploadRoute{Tenant: s.tenants.TenantFor(owner)}
+	route := UploadRoute{Tenant: s.tenants.TenantFor(owner), PhysSize: TenantPhysSizer(s.tenants.TenantFor(owner))}
 	if s.quota != nil {
 		if scope := s.quota.ScopeFor(owner, rel); scope != nil {
-			res, err := scope.TryReserve(size)
+			// 预留与结算同口径（加密卷按物理占用预留，见 UploadRoute.PhysSize）。
+			res, err := scope.TryReserve(route.PhysicalSize(size))
 			if err != nil {
 				return UploadRoute{}, &HTTPError{Status: http.StatusInsufficientStorage, Message: "存储配额不足"}
 			}

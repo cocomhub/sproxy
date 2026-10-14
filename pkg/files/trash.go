@@ -276,14 +276,15 @@ func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entry
 		origRel := unflattenRel(flat)
 		mrel := meta.MetaPath(origRel)
 		if scope := s.rt.quotaScope(owner, mrel); scope != nil {
-			scope.ReleaseUsage(size)
+			// 口径与写入侧一致（加密卷按物理占用；见 phys_size.go 的不变式）。
+			scope.ReleaseUsage(physicalCharge(root, size))
 		}
 		return
 	}
 	// 主条目 → 释放 user 桶原 rel。
 	origRel := unflattenRel(before)
 	if scope := s.rt.quotaScope(owner, origRel); scope != nil {
-		scope.ReleaseUsage(size)
+		scope.ReleaseUsage(physicalCharge(root, size))
 	}
 }
 

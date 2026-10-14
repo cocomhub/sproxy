@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -442,17 +443,16 @@ func TestRestoreTrashMetaSuffix_NoCrossFileFallback(t *testing.T) {
 	}
 }
 
-// TestTrash_EmptyEncryptedVolume_ReleasesLogicalSize 清空回收站必须按**用户可见逻辑长度**释放
-// 配额：at-rest 加密卷上磁盘字节是密文（头部 + 分块 tag 膨胀），而写路径预留/软删保留的是
-// **逻辑长度**。此前 `EmptyTrash`/`CleanupTrash` 传 `os.Stat(条目).Size()`（磁盘字节）⇒ 释放
-// 量失真 → owner 配额漂移：多释放（密文 > 逻辑）使配额虚低（超限写入通过），少释放留下幽灵占用。
-// `releaseTrashEntryQuota` 收 `root` 参数却从未使用——即「本该用 Root 取逻辑长度」的痕迹。
+// TestTrash_EmptyEncryptedVolume_ReleasesSameAsWrite 清空回收站必须按**与写入侧同一口径**释放
+// 配额（2026-10-14 容量口径收口后 = **物理占用**）：账本按物理记账，释放若按逻辑长度 ⇒ 少释放
+// 留下幽灵占用（假 507）；释放若按「Stat 的密文长度再折算」⇒ 多释放使配额虚低（超限写入通过）。
 //
-// 判据：写 big(5000)+small(1000) → 软删 big（配额保留 6000）→ 清空回收站 → user 桶配额必须
-// 等于剩余 small 的逻辑长度 1000（而非 1000+5000-密文(big)）。
+// 判据（**精确**而非近似）：写 big(5000)+small(1000) 于加密卷 ⇒ 配额 = physical(5000)+physical(1000)
+// → 软删 big（保留）→ 清空回收站 ⇒ 配额必须**精确**回到 physical(1000)（= 剩余 small 的物理占用）。
+// 只有「写入/保留/释放三处同口径」才能精确回到该值。
 //
-// 变异：回退 `info.Size()` → 本用例红。
-func TestTrash_EmptyEncryptedVolume_ReleasesLogicalSize(t *testing.T) {
+// 变异：释放改用 `LogicalSize`（少释放 32B×块数）或对 Stat 值再折算（多释放）→ 本用例红。
+func TestTrash_EmptyEncryptedVolume_ReleasesSameAsWrite(t *testing.T) {
 	t.Parallel()
 	e := writeTargetEnv(t)
 	tnt := e.tenantFor("alice")
@@ -475,9 +475,9 @@ func TestTrash_EmptyEncryptedVolume_ReleasesLogicalSize(t *testing.T) {
 	if scope == nil {
 		t.Fatal("user 桶 Scope 不可用")
 	}
-	const wantAll = int64(5000 + 1000)
+	wantAll := storage.EncryptedPhysicalSize(5000) + storage.EncryptedPhysicalSize(1000)
 	if got := scope.Usage(); got != wantAll {
-		t.Fatalf("写入后 user 配额应 %d（逻辑长度）, got %d", wantAll, got)
+		t.Fatalf("写入后 user 配额应 %d（物理占用）, got %d", wantAll, got)
 	}
 	// 前置条件：加密卷磁盘字节 > 逻辑长度（否则本用例不具区分力）。
 	fi, serr := tnt.Root().Stat("user/big.bin")
@@ -499,11 +499,12 @@ func TestTrash_EmptyEncryptedVolume_ReleasesLogicalSize(t *testing.T) {
 	if err := e.svc.EmptyTrash(ctx, "alice"); err != nil {
 		t.Fatalf("EmptyTrash: %v", err)
 	}
-	if got := scope.Usage(); got != int64(len(small)) {
-		t.Fatalf("清空回收站后 user 配额应 = 剩余文件逻辑长度 %d, got %d（按磁盘字节释放会失真）",
-			len(small), got)
+	wantSmall := storage.EncryptedPhysicalSize(int64(len(small)))
+	if got := scope.Usage(); got != wantSmall {
+		t.Fatalf("清空回收站后 user 配额应精确 = 剩余文件物理占用 %d, got %d（释放口径与写入不一致）",
+			wantSmall, got)
 	}
-	// TTL 路径（CleanupTrash）走同一释放判据——同样按逻辑长度。
+	// TTL 路径（CleanupTrash）走同一释放判据——同口径。
 	if _, err := e.svc.WriteTarget(ctx, wtInput("alice", "big2.bin"), bytes.NewReader(big)); err != nil {
 		t.Fatalf("write big2: %v", err)
 	}
@@ -516,7 +517,7 @@ func TestTrash_EmptyEncryptedVolume_ReleasesLogicalSize(t *testing.T) {
 	if _, err := e.svc.CleanupTrash(ctx, "alice", 0); err != nil {
 		t.Fatalf("CleanupTrash: %v", err)
 	}
-	if got := scope.Usage(); got != int64(len(small)) {
-		t.Fatalf("TTL 清理后 user 配额应 = %d（逻辑长度）, got %d", len(small), got)
+	if got := scope.Usage(); got != wantSmall {
+		t.Fatalf("TTL 清理后 user 配额应精确 = %d（物理占用）, got %d", wantSmall, got)
 	}
 }
