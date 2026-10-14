@@ -6,6 +6,9 @@
 package sproxy_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,4 +107,102 @@ func containerTreeDepth(t *testing.T, dir string) int {
 		}
 	}
 	return depth
+}
+
+// TestE2E_CLI_Secretdata_MkdirQuotaPerLevel：**递归创建多级目录时，每一级的目录 meta file 都正确
+// 计入配额**（用户 2026-10-14 关注点）。
+//
+// 判据（用 `meta_pad_bytes: 4096` 固定 pad 基准 ⇒ 每级 dir meta 落盘 ∈ [4KiB, 8KiB)）：
+//  1. 一次 `mkdir a/b/c` ⇒ 配额增量 ≥ 3 个 dir meta（每级都要计入；只计一层会是 1 个）；
+//  2. **幂等**：重复同路径 mkdir ⇒ 增量 0（已存在目录不重复计费）；
+//  3. 只新增一级 `a/b/c/d` ⇒ 增量恰为**一个** dir meta ∈ [base, 2·base)；
+//  4. `rmdir --force a/b/c/d` ⇒ 释放同一量（写/删同口径）。
+func TestE2E_CLI_Secretdata_MkdirQuotaPerLevel(t *testing.T) {
+	t.Parallel()
+	keysRoot := filepath.Join(t.TempDir(), "keys")
+	vaultRoot := filepath.Join(t.TempDir(), "vault")
+	seedSecretKey(t, keysRoot)
+	extraConfig := fmt.Sprintf(`owner_quotas:
+  "*": 1GiB
+volumes:
+  - name: main
+  - name: mykeys
+    type: secrets
+    extra:
+      target: local
+      root: %q
+  - name: vault
+    type: secretdata
+    extra:
+      target: local
+      root: %q
+      secret_url: secrets://mykeys/datakey
+      meta_pad_bytes: 4096
+`, keysRoot, vaultRoot)
+	env := startCLIEnv(t, extraConfig)
+	const base = int64(4096)
+
+	usage := func() int64 {
+		out := env.sclient(t, env.TmpDir, "quota", "--json")
+		var wrap struct {
+			Quota *struct {
+				Usage int64 `json:"usage"`
+			} `json:"quota"`
+		}
+		if err := json.Unmarshal([]byte(out), &wrap); err != nil || wrap.Quota == nil {
+			t.Fatalf("解析 quota --json 失败: err=%v out=%q", err, out)
+		}
+		return wrap.Quota.Usage
+	}
+
+	u0 := usage()
+
+	// 1) 一次建三层 ⇒ 逐级计入（≥3 个 dir meta；上界 16 个含 owner/user 前缀容器与根容器）。
+	env.sclient(t, env.TmpDir, "--volume", "vault", "mkdir", "a/b/c")
+	u1 := usage()
+	if created := u1 - u0; created < 3*base {
+		t.Fatalf("递归 mkdir a/b/c 配额增量=%d，应 ≥ %d（3 级目录 meta 都要计入）", created, 3*base)
+	} else if created > 16*base {
+		t.Fatalf("递归 mkdir a/b/c 配额增量=%d 超出上界 %d（含 owner/user 前缀容器）", created, 16*base)
+	}
+
+	// 2) 幂等：重复同路径不重复计费。
+	env.sclient(t, env.TmpDir, "--volume", "vault", "mkdir", "a/b/c")
+	if d := usage() - u1; d != 0 {
+		t.Fatalf("幂等 mkdir 不应新增配额，增量=%d", d)
+	}
+
+	// 3) 只新增一级 ⇒ 恰一个 dir meta。
+	env.sclient(t, env.TmpDir, "--volume", "vault", "mkdir", "a/b/c/d")
+	u2 := usage()
+	if d := u2 - u1; d < base || d > 2*base {
+		t.Fatalf("新增一级目录配额增量=%d，应为**一个** dir meta ∈ [%d, %d]", d, base, 2*base)
+	}
+
+	// 4) 删除该级 ⇒ 释放**至少** d 自身的 dir meta（写/删同口径）。注意本卷「空目录语义」：
+	// 删掉最后一个内容后**空祖先会被连带回收**（连其 dir meta 一并删）⇒ 释放量可大于一个 dir meta。
+	env.sclient(t, env.TmpDir, "--volume", "vault", "rmdir", "a/b/c/d", "--force")
+	u3 := usage()
+	if d := u2 - u3; d < base {
+		t.Fatalf("rmdir 释放=%d，应 ≥ 一个 dir meta（%d）", d, base)
+	}
+	// 5) 不产生幽灵占用：删后用量必须 ≤ mkdir 之后（释放不会反超）。
+	if u3 > u1 {
+		t.Fatalf("rmdir 后用量 %d 反超 mkdir 后 %d（幽灵占用）", u3, u1)
+	}
+
+	// 6) **文件**足迹同口径（同属「能力必须真的解析到」的回归）：64B 小文件在 secretdata 上物理
+	// 含 meta pad ⇒ 配额增量必须 ≥ pad 下限（按逻辑记账会是 64B）。
+	localDir := filepath.Join(env.TmpDir, "q")
+	if merr := os.MkdirAll(localDir, 0o755); merr != nil {
+		t.Fatal(merr)
+	}
+	if werr := os.WriteFile(filepath.Join(localDir, "tiny.bin"), bytes.Repeat([]byte("t"), 64), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	u4 := usage()
+	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", filepath.Join("q", "tiny.bin"))
+	if d := usage() - u4; d < base {
+		t.Fatalf("64B 文件上传配额增量=%d，应 ≥ meta pad 下限 %d（按逻辑记账会低估 ⇒ 能力未生效）", d, base)
+	}
 }

@@ -727,7 +727,15 @@ func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, 
 		}
 	}
 	// 目录足迹预留/结算（同本地分支；外部卷尤其需要——secretdata 的 dir meta 1–2MB/级）。
-	dirCharge, dcErr := s.reserveDirCharge(owner, remotePath, remotePath, volName)
+	// **配额键必须是 owner 作用域 rel**（`user/<rel>`）：`quotaScopeFor` 要求首段是功能桶，
+	// 传用户可见路径会解析到 nil Scope ⇒ **静默不记账**（实测「递归 mkdir 配额增量=0」）。
+	dirRel := remotePath
+	if tnt := s.rt.tenantOf(owner); tnt != nil {
+		if r, ok := tnt.UserRel(remotePath); ok {
+			dirRel = r
+		}
+	}
+	dirCharge, dcErr := s.reserveDirCharge(owner, dirRel, remotePath, volName)
 	if dcErr != nil {
 		return MakeDirResult{}, true, dcErr
 	}
@@ -849,6 +857,16 @@ func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath
 			return RemoveDirResult{}, false, nil // 本地卷 → 交本地流程
 		}
 	}
+	// 目录足迹释放（外部卷尤其需要——secretdata 的 dir meta 1–2MB/级）：**删除前**取链基准，
+	// 删除后按差分释放（与 mkdir/写入侧同口径）。配额键必须是 owner 作用域 rel（首段功能桶），
+	// 否则 `quotaScopeFor` 返回 nil ⇒ 静默不记账。
+	dirRel := remotePath
+	if tnt := s.rt.tenantOf(owner); tnt != nil {
+		if r, ok := tnt.UserRel(remotePath); ok {
+			dirRel = r
+		}
+	}
+	dirBefore, dirOK := s.dirChainBefore(owner, remotePath, volName)
 	removed, err := ops.ExternalRemoveDir(ctx, owner, volName, remotePath, force)
 	if err != nil {
 		return RemoveDirResult{}, true, err
@@ -856,6 +874,7 @@ func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath
 	if !removed {
 		return RemoveDirResult{}, false, nil
 	}
+	s.releaseDirChainDiff(owner, dirRel, remotePath, volName, dirBefore, dirOK)
 	s.rt.logger().Info("目录已删除（外部卷）", "dir", remotePath, "volume", volName)
 	s.rt.publishFileEvent(EventRmdir, owner, remotePath, 0)
 	return RemoveDirResult{RemotePath: remotePath}, true, nil
