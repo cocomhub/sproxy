@@ -134,3 +134,39 @@ func TestDirPhysFootprint_MeasuredAndBounded(t *testing.T) {
 		t.Fatal("不存在的目录应 ok=false")
 	}
 }
+
+// TestDirChainFootprint_MultiLevelDiff：递归 mkdir 的**链差分** = 本次新建目录的物理字节（含祖先）。
+// 单看叶子会漏记祖先链（每级一个 dir meta blob）⇒ 差分是「mkdir/rmdir 精确记账」的基础。
+func TestDirChainFootprint_MultiLevelDiff(t *testing.T) {
+	t.Parallel()
+	const base = 64 << 10
+	fs := physEnv(t, Options{MetaPadBytes: base})
+	ctx := context.Background()
+	before, ok := fs.DirChainFootprint(ctx, "a/b/c")
+	if !ok {
+		t.Fatal("DirChainFootprint 应恒 ok=true（本层支持目录足迹）")
+	}
+	if err := fs.MakeDir(ctx, "a/b/c"); err != nil {
+		t.Fatalf("MakeDir a/b/c: %v", err)
+	}
+	after, _ := fs.DirChainFootprint(ctx, "a/b/c")
+	if created := after - before; created < 3*base {
+		t.Fatalf("新建 a/b/c 应含 3 级 dir meta（每级 ≥%d），got %d", base, created)
+	}
+	// 单级新增：差分应落在一个 dir meta 的 [base, 2·base] 区间内。
+	if err := fs.MakeDir(ctx, "a/b/c/d"); err != nil {
+		t.Fatalf("MakeDir a/b/c/d: %v", err)
+	}
+	after2, _ := fs.DirChainFootprint(ctx, "a/b/c/d")
+	if d := after2 - after; d < base || d > 2*base+blobFormatSlack {
+		t.Fatalf("单级新增差分 = %d，应在一个 dir meta 上界内（[%d, %d]）", d, base, 2*base+blobFormatSlack)
+	}
+	// rmdir 后链足迹必须下降（释放侧同口径）。
+	if err := fs.RemoveDir(ctx, "a/b/c/d"); err != nil {
+		t.Fatalf("RemoveDir: %v", err)
+	}
+	after3, _ := fs.DirChainFootprint(ctx, "a/b/c/d")
+	if after3 >= after2 {
+		t.Fatalf("rmdir 后链足迹应下降: %d → %d", after2, after3)
+	}
+}

@@ -4,6 +4,8 @@
 package server
 
 import (
+	"context"
+
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -69,6 +71,54 @@ func (p filesPhysFootprinter) PhysBound(volName string, logical int64) int64 {
 		return 0
 	}
 	return f.PhysBound(logical)
+}
+
+// DirChainFootprint 实现 files.VolumePhysFootprinter：目录（含祖先链）的物理足迹实测。
+func (p filesPhysFootprinter) DirChainFootprint(volName, owner, remotePath string) (int64, bool) {
+	raw, key, ok := p.resolveDir(volName, owner, remotePath)
+	if !ok {
+		return 0, false
+	}
+	f, ok := raw.(interface {
+		DirChainFootprint(ctx context.Context, rel string) (int64, bool)
+	})
+	if !ok {
+		return 0, false
+	}
+	return f.DirChainFootprint(context.Background(), key)
+}
+
+// DirPhysBound 实现 files.VolumePhysFootprinter：单个目录 meta blob 的物理上界（预占用）。
+func (p filesPhysFootprinter) DirPhysBound(volName string) int64 {
+	raw, ok := p.rawFS(volName)
+	if !ok {
+		return 0
+	}
+	f, ok := raw.(interface{ DirPhysBound() int64 })
+	if !ok {
+		return 0
+	}
+	return f.DirPhysBound()
+}
+
+// resolveDir 把（卷, owner, 用户可见路径）解析为最内层真实 FS + 卷内键。
+func (p filesPhysFootprinter) resolveDir(volName, owner, remotePath string) (syncpkg.FS, string, bool) {
+	if p.h.volSet == nil || remotePath == "" {
+		return nil, "", false
+	}
+	v, ok := p.h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return nil, "", false
+	}
+	loc, kerr := v.ResolveUserLocation(owner, remotePath)
+	if kerr != nil {
+		return nil, "", false
+	}
+	raw, ok := p.rawFS(volName)
+	if !ok {
+		return nil, "", false
+	}
+	return raw, loc.FSPath(), true
 }
 
 // physBoundFor 是装配层统一入口（预占用上界；无能力 ⇒ 原样返回 logical）。

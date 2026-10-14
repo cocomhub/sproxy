@@ -137,3 +137,40 @@ func (s *SecretdataFS) DirPhysFootprint(ctx context.Context, rel string) (int64,
 
 // DirPhysBound 返回目录 meta blob 的落盘长度上界（预占用用）。
 func (s *SecretdataFS) DirPhysBound() int64 { return s.metaPadBound() }
+
+// DirChainFootprint 返回 rel **及其全部祖先**（到卷根）已存在目录的 dir meta blob 落盘长度之和。
+//
+// 为什么需要「链」：`MakeDir` 会**递归创建整条祖先链**（每级一个随机容器 + 一个 dir meta blob，
+// 默认 1–2MB）⇒ 单看叶子会漏记祖先。用「mkdir 前 chain − mkdir 后 chain」做差分即**精确**得到
+// 本次新建目录的物理字节（无需知道 FS 内部创建了哪几级）；rmdir 同理（pre − post）。
+//
+// 不存在的层级贡献 0（`DirPhysFootprint` ok=false）⇒ 差分天然只统计**新增/移除**的层级。
+// 恒返回 ok=true（本层支持目录足迹；调用方按能力装配与否决定是否使用）。
+func (s *SecretdataFS) DirChainFootprint(ctx context.Context, rel string) (int64, bool) {
+	key := path.Clean(strings.TrimPrefix(rel, "/"))
+	if key == "." {
+		key = ""
+	}
+	var total int64
+	// 从卷根逐级累加（根容器也有 dir meta blob）。
+	for _, p := range dirChain(key) {
+		if n, ok := s.DirPhysFootprint(ctx, p); ok && n > 0 {
+			total += n
+		}
+	}
+	return total, true
+}
+
+// dirChain 返回 key 及其祖先（含空串根，从根到叶子顺序）。
+func dirChain(key string) []string {
+	if key == "" {
+		return []string{""}
+	}
+	segs := strings.Split(key, "/")
+	out := make([]string, 0, len(segs)+1)
+	out = append(out, "")
+	for i := range segs {
+		out = append(out, strings.Join(segs[:i+1], "/"))
+	}
+	return out
+}
