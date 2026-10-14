@@ -60,6 +60,7 @@ type runtime struct {
 	occupiedGuard OccupiedWriteGuard
 	fileMeta      FileMetaPolicy
 	externalOps   ExternalVolumeOps
+	phys          VolumePhysFootprinter
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
@@ -172,6 +173,8 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		contentIndex:  cfg.contentIndex,
 		occupiedGuard: cfg.occupiedGuard,
 		fileMeta:      cfg.fileMeta,
+		externalOps:   cfg.externalOps,
+		phys:          cfg.phys,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default

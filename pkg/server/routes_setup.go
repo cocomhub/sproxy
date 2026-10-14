@@ -29,7 +29,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
-	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // setupAuditServices 装配审计服务：有界内存环形缓冲 + 落盘存储。
@@ -502,31 +501,23 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			// 的锁互不可见，同 rel 并发写会产出「主文件与 sidecar 错位」固化状态。
 			return h.transferWriteLock(owner, rel)
 		},
-		// 转存目标卷解析：registry.Set.External(volume) → FS 视图（secretdata 自动加密/
-		// 普通卷纯上传）。volSet 已装配；卷未装 → nil（转存请求 fail-closed 报卷未装配）。
+		// 转存目标卷解析：**唯一外部卷写视图出口** externalVolumeTransferFS（可信卷：
+		// Guard(Wrap) 恒包——meta 恒生成 + meta 桶隔离），cloud 下载转存与统一转存共用，
+		// 防「一处可信卷、一处裸卷」的解析漂移。未装卷 → nil（转存请求 fail-closed）。
+		// 共享卷 owner 前缀隔离由 volume.ResolveLocation 唯一入口承担（见 VolumeFor）；
+		// 远程性由目标 FS 自述（syncpkg.LocalVolume）。
 		TransferFSFor: func(volumeName string) (syncpkg.FS, string) {
-			be := vs.External(volumeName)
-			if be == nil {
+			fsys, scheme, _, ok := h.externalVolumeTransferFS(volumeName)
+			if fsys == nil {
 				return nil, ""
 			}
-			// scheme 从卷 Type 反查（secretdata/secrets/baidupcs/s3 等声明协议）。
-			vol, ok := vs.ByName(volumeName)
 			if !ok {
 				// 卷元信息缺失（极罕见装配异常）：仍加 Guard(Wrap(...))（meta 桶隔离恒生效
-				// + 写面恒生成 sidecar，与其余装配形状一致——m4 修复：此前只 Guard 不 Wrap，
-				// 该分支转存产物无完整性证据）。
-				return trusted.Guard(trusted.Wrap(be.FS(), h.trustedWrapOpts())), ""
+				// + 写面恒生成 sidecar，与其余装配形状一致）——由 externalVolumeTransferFS
+				// 统一承担。
+				return fsys, ""
 			}
-			// 共享卷的 owner 前缀隔离由 `volume.ResolveLocation` 唯一入口承担（转存键空间
-			// 见 VolumeFor）；历史 `shared` 第三返回值已删除（m5：转存路径从未消费，死值）。
-			// 远程性判定不在装配层：目标 FS 自述（syncpkg.LocalVolume 能力接口，transfer.go
-			// 查询）——外部卷零配置（未实现默认远程），内部/封装卷实现 IsLocalVolume()
-			// 自述（用户裁定 2026-10-05：不靠类型名硬编码，层层委派）。
-			// 可信卷：外部卷 FS 恒经 trusted.Wrap 包一层（用户裁定：meta 恒生成——skip_verify
-			// 只关读侧校验不关 meta；转存写后自动生成隐藏 .meta，目标成为可信卷）。
-			fsys := be.FS()
-			fsys = trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts()))
-			return fsys, registry.SchemeOf(vol.Type)
+			return fsys, scheme
 		},
 		// VolumeFor：转存键空间经 volume.ResolveLocation 计算（权限门/路径安全/共享前缀
 		// 由 volume 唯一入口承担，用户裁定 2026-10-05）——装配层提供 vs.ByName 解析。

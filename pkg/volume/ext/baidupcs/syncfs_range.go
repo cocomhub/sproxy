@@ -7,8 +7,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -65,9 +67,23 @@ func (f *StorageFS) OpenRangeRead(ctx context.Context, relPath string, offset, s
 
 // GetRange 实现 rangeGetter：获取 relPath 的直链并发送 Range GET 请求。
 // dlink 自包含签名短时有效；ctx 取消链路终止请求与 body 读取。
+//
+// **长度契约**（2026-10-14 跨层扫雷修复，与 sync.RangeReader 注释同源）：
+//   - `size == 0` ⇒ 空区间（不发请求，返回空流）——原先用「尾开区间」`bytes=offset-`，
+//     会把**整个尾巴**当作请求区间返回（越出请求区间）；
+//   - `size < 0` ⇒ 非法区间（错误）；
+//   - `size > 0` ⇒ 校验 206 的 `Content-Range` 未被服务端**钳制**（钳制 = 静默短读，
+//     原先直接返回 body ⇒ 上层看到「区间读完」而实际少字节），并用 RangeExactReader
+//     兜底（Content-Range 缺失时也能拒掉提前 EOF）。
 func (s *Storage) GetRange(ctx context.Context, key string, offset, size int64) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, mapPCSError(err)
+	}
+	if size < 0 || offset < 0 {
+		return nil, fmt.Errorf("%w: 非法区间 offset=%d size=%d", ErrInvalidParam, offset, size)
+	}
+	if size == 0 {
+		return syncpkg.EmptyRangeReader(), nil
 	}
 	dlink, ok, err := s.DirectURL(ctx, key)
 	if err != nil {
@@ -80,19 +96,65 @@ func (s *Storage) GetRange(ctx context.Context, key string, offset, size int64) 
 	if rerr != nil {
 		return nil, fmt.Errorf("baidupcs: 构造 Range 请求失败: %w", rerr)
 	}
-	// 区间 [offset, offset+size-1]（size==0 时用尾开区间语义：bytes=offset-）。
-	if size > 0 {
-		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+size-1, 10))
-	} else {
-		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
-	}
+	// 区间 [offset, offset+size-1]（size>0 恒为闭区间——size==0 已在上方按空区间返回）。
+	req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+size-1, 10))
 	resp, derr := s.httpc.Do(req)
 	if derr != nil {
 		return nil, fmt.Errorf("baidupcs: Range GET %s 失败: %w", key, derr)
 	}
+	return validateRangeResponse(resp, key, offset, size, s.log)
+}
+
+// validateRangeResponse 校验 Range GET 响应并返回**精确长度**区间流（真实 Storage 与测试
+// 替身 fakeStorage **共用**：2026-10-14 扫雷发现替身复制了一份 Range 语义 ⇒ 真实实现的
+// 长度契约（size==0 尾开区间、无钳制校验）长期无覆盖且与替身行为不一致）。
+func validateRangeResponse(resp *http.Response, key string, offset, size int64, log *slog.Logger) (io.ReadCloser, error) {
 	if resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
 		return nil, fmt.Errorf("baidupcs: Range GET %s 返回 %d（期望 206）", key, resp.StatusCode)
 	}
-	return resp.Body, nil
+	// 服务端钳制判据（fail-closed）：206 的 Content-Range 必须覆盖请求区间。
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		start, end, cok := parseContentRange(cr)
+		if !cok {
+			resp.Body.Close()
+			return nil, fmt.Errorf("baidupcs: Range GET %s 的 Content-Range %q 无法解析", key, cr)
+		}
+		if start != offset || end < offset+size-1 {
+			resp.Body.Close()
+			return nil, fmt.Errorf("baidupcs: Range GET %s 区间被钳制（请求 [%d,%d)，实际 [%d,%d]）——拒绝静默短读",
+				key, offset, offset+size, start, end)
+		}
+	} else if log != nil {
+		// 部分 CDN 不回 Content-Range（协议要求但现实有例外）：不改行为（不引入脆弱失败），
+		// 由 RangeExactReader 的提前 EOF 判据兜底，并留可观测线索。
+		log.Debug("baidupcs: Range GET 无 Content-Range，改由精确长度守卫校验", "key", key)
+	}
+	return syncpkg.ExactRangeReader(resp.Body, size), nil
+}
+
+// parseContentRange 解析 `bytes <start>-<end>/<total>`（total 允许 `*`），返回闭区间端点。
+func parseContentRange(raw string) (start, end int64, ok bool) {
+	s := strings.TrimSpace(raw)
+	rest, found := strings.CutPrefix(strings.ToLower(s), "bytes ")
+	if !found {
+		return 0, 0, false
+	}
+	span, _, found := strings.Cut(strings.TrimSpace(rest), "/")
+	if !found {
+		return 0, 0, false
+	}
+	startS, endS, found := strings.Cut(span, "-")
+	if !found {
+		return 0, 0, false
+	}
+	st, err := strconv.ParseInt(strings.TrimSpace(startS), 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	en, err := strconv.ParseInt(strings.TrimSpace(endS), 10, 64)
+	if err != nil || en < st {
+		return 0, 0, false
+	}
+	return st, en, true
 }

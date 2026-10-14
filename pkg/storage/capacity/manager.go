@@ -204,6 +204,16 @@ func ScanStorageDir(dir string) (map[string]map[string]int64, storageScanTotals,
 	var totals storageScanTotals
 	tenantBuckets := make(map[string]map[string]int64)
 
+	// 空路径防御（纵深，fail-safe）：filepath.EvalSymlinks("") 在 Unix 归一为 "."（symlink.go
+	// 末 `if dest == "" { dest = "." }`），WalkDir(".") 会扫描**进程当前工作目录**而非任何卷根
+	// ——实测 sproxy 默认 cwd=/root（5.4G）时令启动挂起 >90s。无本地根的卷（外部卷）RootDir
+	// 恒空，调用方应已跳过（见 reconcileVolumesFromDisk）；此处短路兜底，杜绝误扫 cwd。
+	// Windows 侧 EvalSymlinks("") 报错回落空串 → WalkDir("") 立即 ENOENT，两端行为不一致，
+	// 故显式短路以统一语义。
+	if dir == "" {
+		return tenantBuckets, totals, nil
+	}
+
 	// 解析符号链接，确保扫描的是真实路径
 	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {

@@ -19,7 +19,7 @@ pkg/server/external_source.go	1	外部卷下载源解析（经 externalFSFor/同
 pkg/server/files_service.go	8	externalFSFor（可信链入口）+ ExternalCopy/ExternalStat/下载源/信息探测——均经装配处 trusted.Guard(Wrap()) 封印视图
 pkg/server/quota_reconcile.go	2	真值对账：物理用量探测
 pkg/server/routes_setup.go	2	DAV/S3 装配：临时视图构造
-pkg/server/volumes.go	2	卷路由/装配套接
+pkg/server/volumes.go	3	卷路由/装配套接 + externalVolumeTransferFS（转存目标解析；be.FS() 为装配处 SealBackend 封印后视图，单点复用）
 pkg/server/volumes_enclosure.go	2	封装装配：**封印注入点本身**
 pkg/server/volumes_mirror.go	1	外部卷只读源构造
 pkg/sync/staging_gate.go	1	staging 门卫下探（非外部卷后端）
@@ -30,3 +30,4 @@ pkg/volume/registry/set.go	2	Set.FSFor：嵌套封装/secretdata 工厂经 set �
 
 pkg/volume/enclosure/fs.go	1	新增直连点：需评估封印影响
 pkg/volume/enclosure/ownerfs.go	4	调用方面 owner 映射视图（be.FS() 取区域视图做底座）+ 真值键翻译
+pkg/server/files_phys.go	1	卷自报物理足迹能力查询（配额模型 v3）：经 externalFSFor 取装饰链后 Innermost 取能力实现，仅做**元数据查询**（对象尺寸），不读写内容；调用点仅限用户刚写入/正在删除的对象（已经过封印路径校验）⇒ 无封印写绕过

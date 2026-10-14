@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	_ "github.com/cocomhub/sproxy/pkg/integrity/ext/video" // 注册视频语义校验器（ffprobe）
 	"github.com/cocomhub/sproxy/pkg/leader"
+	"github.com/cocomhub/sproxy/pkg/media"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/state"
@@ -1188,9 +1189,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 视频关键帧分块注册（video-keyframe 提供者，解析器按环境二选一：ffprobe 优先、
 	// go-mp4 兜底；sync.Once 幂等）。注入 fMP4 统计 hook → /metrics 的
 	// sproxy_keyframe_fmp4_total（供「是否切 mp4ff」真实场景决策）。
-	registerKeyframeBackend()
+	media.RegisterKeyframeBackends()
 	if m := h.Metrics(); m != nil {
-		registerKeyframeMetricHooks(m.RecordKeyframeFragmented)
+		media.SetKeyframeMetricHooks(m.RecordKeyframeFragmented)
 	}
 	if err := rt.setupStateStore(h); err != nil {
 		return err

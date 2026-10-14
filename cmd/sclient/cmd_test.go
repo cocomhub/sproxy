@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 		{"upload", NewCmdUpload(factory, ios, st)},
 		{"download", NewCmdDownload(factory, ios, st)},
 		{"delete", NewCmdDelete(factory, ios, st)},
-		{"list", NewCmdList(factory, ios, st)},
+		{"ls", NewCmdLs(factory, ios, st)},
 		{"search", NewCmdSearch(factory, ios)},
 		{"version", NewCmdVersion(ios)},
 		{"stats", NewCmdStats(factory, ios)},
@@ -159,15 +160,18 @@ func TestDeleteCmd(t *testing.T) {
 	}
 }
 
-// ---- list command ----
+// ---- ls command（旧名 list 保留为别名）----
 
-func TestListCmd(t *testing.T) {
+func TestLsCmd(t *testing.T) {
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdList(factory, cli.IOStreams{Out: io.Discard}, st)
+	cmd := NewCmdLs(factory, cli.IOStreams{Out: io.Discard}, st)
 
-	if cmd.Use != "list" {
-		t.Errorf("listCmd.Use = %q", cmd.Use)
+	if cmd.Use != "ls [path]" {
+		t.Errorf("lsCmd.Use = %q", cmd.Use)
+	}
+	if len(cmd.Aliases) == 0 || cmd.Aliases[0] != "list" {
+		t.Errorf("ls 应保留 list 别名, got %v", cmd.Aliases)
 	}
 	f := cmd.Flags().Lookup("subdir")
 	if f == nil {
@@ -415,7 +419,7 @@ func TestListCommand(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdList(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd := NewCmdLs(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("list command failed: %v", err)
@@ -431,7 +435,7 @@ func TestListCommand_WithSubdirFlag(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdList(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd := NewCmdLs(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
 	cmd.SetArgs([]string{"/sub"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("list command with subdir failed: %v", err)
@@ -488,7 +492,7 @@ func TestListCommand_EmptyResult(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdLs(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("list command failed: %v", err)
@@ -658,5 +662,38 @@ func TestMvCommand_Args(t *testing.T) {
 	}
 	if err := cmd.Args(cmd, []string{"a", "b", "c"}); err == nil {
 		t.Error("mv should reject 3 args")
+	}
+}
+
+// TestWriteDerivedSecretFile 覆盖 secret create --out 的写文件语义：内容精确 64 hex
+// **无换行**（与 sproxy secrets 卷 datakey / sealfile --key 读取口径一致）、权限 0600、
+// 已存在拒绝覆盖（防误覆盖既有密钥）。
+func TestWriteDerivedSecretFile(t *testing.T) {
+	t.Parallel()
+	const hexVal = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	path := filepath.Join(t.TempDir(), "datakey")
+
+	if err := writeDerivedSecretFile(path, hexVal); err != nil {
+		t.Fatalf("writeDerivedSecretFile: %v", err)
+	}
+	got, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("读回: %v", rerr)
+	}
+	if string(got) != hexVal {
+		t.Fatalf("内容=%q 应为精确 64 hex 无换行", got)
+	}
+	// 权限 0600（Windows 的 mode 语义不同，仅非 Windows 断言）。
+	if fi, serr := os.Stat(path); serr == nil && runtime.GOOS != "windows" {
+		if fi.Mode().Perm() != 0o600 {
+			t.Fatalf("权限=%v 应 0600", fi.Mode().Perm())
+		}
+	}
+	// 目标已存在 → 拒绝覆盖，且不改原内容。
+	if err := writeDerivedSecretFile(path, "deadbeef"); err == nil {
+		t.Fatal("目标已存在应拒绝覆盖")
+	}
+	if again, _ := os.ReadFile(path); string(again) != hexVal {
+		t.Fatalf("拒绝覆盖后内容被改: %q", again)
 	}
 }

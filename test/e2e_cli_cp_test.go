@@ -32,7 +32,7 @@ func TestE2E_CLI_Cp_SameVolumeEncryptedNoReencrypt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "cp-a.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "cp-a.bin")
+	env.sclient(t, env.TmpDir, "upload", "cp-a.bin", "vault:/")
 	assertSecretLayoutAnonymity(t, vaultRoot, "user", "cp-a.bin", "user/cp-a.bin")
 
 	// 内容分块快照（排除文件/目录 meta）：用于断言复制**零内容 blob 写**。
@@ -134,8 +134,8 @@ func TestE2E_CLI_Cp_OverwritePolicy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "dst.bin"), []byte("existing-content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "src.bin")
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "dst.bin")
+	env.sclient(t, env.TmpDir, "upload", "src.bin", "vault:/")
+	env.sclient(t, env.TmpDir, "upload", "dst.bin", "vault:/")
 
 	if _, stderr, err := env.sclientRun(t, env.TmpDir, "cp", "vault:/src.bin", "vault:/dst.bin"); err == nil {
 		t.Fatal("目标已存在时默认应拒绝（409）")
@@ -157,8 +157,13 @@ func TestE2E_CLI_Cp_QuotaReservedOnSameVolume(t *testing.T) {
 	keysRoot := filepath.Join(t.TempDir(), "keys")
 	vaultRoot := filepath.Join(t.TempDir(), "vault")
 	seedSecretKey(t, keysRoot)
+	// 配额按**物理占用**（配额模型 v3）：secretdata 卷每个文件的 meta blob 会 pad 到
+	// [meta_pad_bytes, 2·meta_pad_bytes)（尺寸混淆设计）⇒ 物理 = 内容 + pad（+ parity）。
+	// 故配额必须覆盖物理足迹；这里把 pad 基准调小（4096 ⇒ pad ∈ [4KiB, 8KiB)）让判据**确定性**：
+	// 预留用**上界**（内容 8KiB + 保守 slack + meta pad 上界 ≈ 24KiB）⇒ 配额 32KiB 容得下第一个
+	// （24 ≤ 32）而容不下第二个（24+24 = 48 > 32）⇒ 第二个必被拒 ✓。
 	extraConfig := fmt.Sprintf(`owner_quotas:
-  "*": 12KiB
+  "*": 32KiB
 volumes:
   - name: main
   - name: mykeys
@@ -172,6 +177,7 @@ volumes:
       target: local
       root: %q
       secret_url: secrets://mykeys/datakey
+      meta_pad_bytes: 4096
 `, keysRoot, vaultRoot)
 	env := startCLIEnv(t, extraConfig)
 
@@ -182,9 +188,9 @@ volumes:
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "big.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "big.bin") // 占 8KiB / 12KiB
+	env.sclient(t, env.TmpDir, "upload", "big.bin", "vault:/") // 预留上界 ≈24KiB / 配额 32KiB
 
-	// ① 再复制 8KiB ⇒ 16KiB > 12KiB ⇒ 必须拒绝，且**目标不落半态**。
+	// ① 再复制（又一份 ≈24KiB 上界）⇒ 合计 48KiB > 32KiB ⇒ 必须拒绝，且**目标不落半态**。
 	_, stderr, err := env.sclientRun(t, env.TmpDir, "cp", "vault:/big.bin", "vault:/big-copy.bin")
 	if err == nil {
 		t.Fatal("同卷复制应因 owner 配额不足被拒（配额预留 fail-closed），却成功了")
@@ -194,11 +200,11 @@ volumes:
 	}
 	t.Logf("复制被拒: %s", firstNonEmptyLine(stderr))
 
-	// ② 同口径对照：第二个 8KiB **上传**同样必须被拒（证明复制不是比上传更松的口子）。
+	// ② 同口径对照：第二个**上传**同样必须被拒（证明复制不是比上传更松的口子）。
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "big2.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, uerr := env.sclientRun(t, env.TmpDir, "--volume", "vault", "upload", "big2.bin"); uerr == nil {
+	if _, _, uerr := env.sclientRun(t, env.TmpDir, "upload", "big2.bin", "vault:/"); uerr == nil {
 		t.Fatal("同配额下第二个上传也应被拒（复制与上传应同口径）")
 	}
 }

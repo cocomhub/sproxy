@@ -395,6 +395,11 @@ type UploadRoute struct {
 	// Pool/PoolRes 是卷容量池预留（双账本之二，未装配卷集合时为 nil）。
 	Pool    *quota.Pool
 	PoolRes *quota.Reservation
+	// PhysSize 是「逻辑字节 → 物理字节」换算（nil = 恒等）。**加密卷**（at-rest，`extra.encrypt`）
+	// 装配为 `storage.EncryptedPhysicalSize`：容量账本按**物理占用**记账（2026-10-14 容量口径收口）。
+	// 为什么必须按物理：加密块每 64KiB 多 32B（4B 长度前缀 + nonce + GCM tag）+ 22B 文件头，
+	// 此前按逻辑长度记账 ⇒ 账本低估（卷池靠周期对账收敛，**owner 配额侧永不收敛** ⇒ 短时可超限）。
+	PhysSize func(int64) int64
 	// Release 双回滚（预留全额归还），供路由后失败路径调用。
 	Release func()
 }
@@ -405,6 +410,54 @@ type UploadRoute struct {
 // 本方法是该结算规则的**单一事实源**：装配层 routeUpload 的 *volumeRoute 已不再持有
 // commit 方法（唯一调用方随写面迁入本包），故两侧的账单收敛结果结构性不可分叉。
 // Scope 字段即为此处覆盖写差分所需（见其字段注释）。
+// physicalSize 把逻辑字节折算为本次路由的记账口径（nil = 恒等；<=0 原样返回）。
+func (r *UploadRoute) physicalSize(size int64) int64 {
+	if r.PhysSize == nil || size <= 0 {
+		return size
+	}
+	return r.PhysSize(size)
+}
+
+// PhysicalSize 导出同一口径：**预留与结算必须同口径**（路由实现方在 TryReserve 前用它折算）。
+func (r *UploadRoute) PhysicalSize(size int64) int64 { return r.physicalSize(size) }
+
+// settleSize 返回本次写入应结算的**物理**字节（写内核唯一入口）。
+//
+// 优先级：① 卷自报**实测足迹**（`VolumePhysFootprinter.PhysFootprint`——secretdata 的 parity +
+// **meta pad** 无法由逻辑长度推出，必须实测）；② 回落 `PhysicalSize`（加密卷公式折算）；③ 恒等。
+//
+// **释放侧必须同口径**（同一 helper / 同一能力），否则：少释放 = 幽灵占用/假 507；
+// 多释放 = 配额虚低/超真实配额。
+func (s *Service) settleSize(route UploadRoute, owner, remotePath string, written int64) int64 {
+	// 不要求 VolumeName 非空：能力由装配层判定（未知卷/无能力 ⇒ ok=false 回落），单卷旧装配下
+	// 卷名为空但能力仍可能装配（能力实现自行裁决）。
+	if s.rt.phys != nil {
+		if n, ok := s.rt.phys.PhysFootprint(route.VolumeName, owner, remotePath); ok && n > 0 {
+			return n
+		}
+	}
+	return route.physicalSize(written)
+}
+
+// physChargeFor 返回 volName 卷上对象的**记账字节**（卷自报实测足迹优先；无能力 ⇒ ok=false）。
+// 释放侧与写入侧必须同源（`settleSize`）——否则少释放 = 幽灵占用/假 507、多释放 = 超真实配额。
+func (s *Service) physChargeFor(volName, owner, remotePath string) (int64, bool) {
+	if s.rt.phys == nil || remotePath == "" {
+		return 0, false
+	}
+	n, ok := s.rt.phys.PhysFootprint(volName, owner, remotePath)
+	if !ok || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// Commit 结算双账本（prev → written 差分）。
+//
+// **口径契约（易错）**：两个参数都必须是**物理**字节——`prev` 来自 `root.Stat`（加密卷上已是密文
+// 长度），`written` 必须由调用方经 `Service.settleSize`（卷自报实测足迹优先，否则 `PhysicalSize`
+// 折算）得到。**本方法不再折算**：折算只允许发生在 `settleSize` 一处，否则「谁折算了」不可知 ⇒
+// 双重折算（过度释放/幽灵占用）或漏折算（配额虚低）都是静默错。
 func (r *UploadRoute) Commit(prev, written int64) {
 	if r.ScopeRes != nil {
 		if prev > 0 {

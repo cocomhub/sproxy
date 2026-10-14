@@ -258,14 +258,14 @@ func (h *Handlers) reconcileVolumesFromDisk() {
 	vols := h.volSet.All()
 	volumeBuckets := make(map[string]map[string]map[string]int64, len(vols))
 	for _, v := range vols {
-		// M10（2026-10-06）：外部卷/封装卷（RootDir 空，无本地 user 桶）跳过——ScanStorageDir("")
-		// 会扫错根，且封装卷容量经底层池**委托子 Scope** 计（adjustVolumePool 若校准委托子池
-		// 会与底层池 reconcile 双计）。只有本地卷（有 RootDir）参与卷池磁盘校准。
-		// 记录取舍（评审 A4 Minor #1）：wrapper 委托池 committed 恒 0 不随 reconcile 校准——
-		// 删「重启前任一 wrapper 文件」后委托池 release 钳 0 → base 池不降、overcharge 到下次
-		// 重启（方向保守「宁可拒绝」，仅在 base 有容量上限时可见）。委托池物理字节已计入底层池
-		// 校准（封装卷数据落底层卷根内），校准委托子池需按容器拆分子目录字节且与底层池双计，
-		// 复杂度/风险高于收益，按可记录取舍保留跳过。
+		// 只扫「有本地根」的卷：外部卷（secrets / secretdata / baidupcs / webdav …）无
+		// storage.Root，RootDir 恒为空——其容量由各自后端/容量池语义管理，不参与本地桶扫描。
+		// **必须显式跳过**：空串经 capacity.ScanStorageDir 的 filepath.EvalSymlinks("") 在 Unix
+		// 归一为 "."（见 symlink.go `if dest == "" { dest = "." }`），WalkDir(".") 会扫描
+		// sproxy 进程的**当前工作目录**——实测默认 cwd=/root（5.4G）时启动挂起 >90s，且与卷
+		// 语义无关（Windows 侧 EvalSymlinks("") 报错回落空串不扫，故两端表现不一致）。
+		// M10（2026-10-06）：封装卷（externalVolumeKey 委托池）容量经底层池**委托子 Scope**
+		// 计，不参与本卷池磁盘校准，避免与底层池 reconcile 双计。
 		if v.RootDir == "" {
 			continue
 		}

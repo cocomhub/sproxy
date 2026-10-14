@@ -14,16 +14,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// NewCmdList 创建独立的 list 命令工厂函数，使用 factory 创建客户端。
-func NewCmdList(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
+// NewCmdLs 创建独立的 ls 命令工厂函数（Linux 习惯名；旧名 list 保留为别名）。
+func NewCmdLs(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "列出服务器上的文件",
-		Long: `列出 sproxy 服务端上的文件。
-				默认列出当前目录的顶层文件。
+		Use:     "ls [path]",
+		Aliases: []string{"list"},
+		Short:   "列出服务器上的文件/目录（Linux 习惯；支持卷 URI）",
+		Long: `列出 sproxy 服务端上的文件（Linux 习惯名 ls；list 为等价别名）。
+				默认列出当前目录的顶层文件；路径可写卷 URI（如 vault:/a/b）。
 				使用 --offset 和 --limit 参数进行分页查询。`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			// 卷 URI 寻址（`<卷名>:/<路径>`；唯一寻址方式，无 --volume flag）。
 			if err := applyVolumeContext(cmd, st, args); err != nil {
 				return err
 			}

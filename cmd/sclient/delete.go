@@ -15,8 +15,9 @@ import (
 // NewCmdDelete 创建独立的 delete 命令工厂函数，使用 state.State 替代全局 currentDir。
 func NewCmdDelete(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "delete <filename>",
-		Short: "删除文件",
+		Use:     "delete <filename>",
+		Aliases: []string{"rm"},
+		Short:   "删除文件（Linux 习惯别名 rm）",
 		Long: `从 sproxy 服务端删除文件。
 			filename 可以包含路径，如 "dir/file.txt"。
 
@@ -25,7 +26,7 @@ func NewCmdDelete(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 			与远端一致后才执行删除，提供额外安全保护。`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			// 卷 URI 寻址（`<卷名>:/<路径>`；唯一寻址方式，无 --volume flag）。
 			if err := applyVolumeContext(cmd, st, args); err != nil {
 				return err
 			}

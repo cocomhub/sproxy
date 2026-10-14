@@ -70,9 +70,10 @@ func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64,
 	if e.volSet != nil {
 		vol = e.volSet.Default().Name
 	}
-	route := UploadRoute{VolumeName: vol, Tenant: tnt}
-	e.reserveScope(&route, owner, rel, size)
-	e.reservePool(&route, vol, size)
+	// 记账口径与生产同源（加密卷按物理占用；见 UploadRoute.PhysSize / TenantPhysSizer）。
+	route := UploadRoute{VolumeName: vol, Tenant: tnt, PhysSize: TenantPhysSizer(tnt)}
+	e.reserveScope(&route, owner, rel, route.PhysicalSize(size))
+	e.reservePool(&route, vol, route.PhysicalSize(size))
 	route.Release = func() {
 		if route.ScopeRes != nil {
 			route.ScopeRes.Release()

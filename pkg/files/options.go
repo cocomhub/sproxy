@@ -141,6 +141,29 @@ type VolumeRouter interface {
 	RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error)
 }
 
+// VolumePhysFootprinter 由**掌握物理布局**的卷实现（secretdata 等）：向配额账本报告对象的
+// **真实物理落盘字节**与「逻辑 → 物理上界」换算（配额模型 v3，用户裁定 2026-10-14：只按物理
+// 占用记账）。未装配（nil）= 无该能力 ⇒ 写内核回落 `UploadRoute.PhysSize`（加密卷公式折算）
+// ⇒ 明文/加密本地/可信卷零回归。
+//
+// 为什么必须由卷自报：物理量含**逻辑不可推**的部分——secretdata 的 meta blob pad 到
+// [base, 2·base)（默认 1–2MB/文件、1–2MB/目录，与文件逻辑大小**无关**，是尺寸混淆设计）、
+// XOR parity（可达逻辑 2×）。按逻辑记账在小文件/多目录场景下物理可达逻辑的**千倍**。
+type VolumePhysFootprinter interface {
+	// PhysFootprint 返回 volName 卷上**用户可见路径** remotePath 对应对象的**真实物理字节**
+	// （含 parity/meta pad 等；实测）。owner 用于把用户路径解析为卷内键（`Location.FSPath()`）。
+	PhysFootprint(volName, owner, remotePath string) (int64, bool)
+	// PhysBound 返回 volName 卷上 logical 字节的**物理上界**（预占用用；结算按实测收敛）。
+	// 无该能力/未知卷 ⇒ 0（调用方回落既有折算）。
+	PhysBound(volName string, logical int64) int64
+	// DirChainFootprint 返回 remotePath **及其全部祖先**已存在目录的物理足迹之和（目录 meta
+	// blob；secretdata 每级 1–2MB）。调用方用「操作前后差分」得到本次新增/移除目录的物理字节
+	// （覆盖祖先链，且不必知道 FS 内部创建/回收了哪几级）。恒 ok=true（本层支持目录足迹）。
+	DirChainFootprint(volName, owner, remotePath string) (int64, bool)
+	// DirPhysBound 返回**单个目录** meta blob 的物理上界（预占用用）。无该能力 ⇒ 0。
+	DirPhysBound(volName string) int64
+}
+
 // QuotaScopeProvider 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
 type QuotaScopeProvider interface {
 	ScopeFor(owner, rel string) *quota.Scope
@@ -256,6 +279,7 @@ type config struct {
 	occupiedGuard OccupiedWriteGuard
 	fileMeta      FileMetaPolicy
 	externalOps   ExternalVolumeOps
+	phys          VolumePhysFootprinter
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -271,6 +295,11 @@ func WithActor(a ActorResolver) Option {
 
 // WithVolumes 注入多卷能力。默认：由 TenantResolver 派生的单卷实现。
 // WithExternalOps 注入外部卷对象操作接缝（F1；未装配 → 外部卷对象无删除入口，零回归）。
+// WithPhysFootprinter 注入卷物理足迹能力（未注入 = 无该能力；明文/加密本地卷不需要）。
+func WithPhysFootprinter(p VolumePhysFootprinter) Option {
+	return func(c *config) { c.phys = p }
+}
+
 func WithExternalOps(ops ExternalVolumeOps) Option {
 	return func(c *config) { c.externalOps = ops }
 }
@@ -404,10 +433,11 @@ func (s singleVolume) Locate(owner, rel string) (FileLocation, bool) {
 // 装配了配额时在 owner 全局 Scope 上预留（单卷无卷容量池）；未装配时无预留。
 // 租户不可用时 Tenant 为 nil，由 Upload 回 400；配额不足回 507。
 func (s singleVolume) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
-	route := UploadRoute{Tenant: s.tenants.TenantFor(owner)}
+	route := UploadRoute{Tenant: s.tenants.TenantFor(owner), PhysSize: TenantPhysSizer(s.tenants.TenantFor(owner))}
 	if s.quota != nil {
 		if scope := s.quota.ScopeFor(owner, rel); scope != nil {
-			res, err := scope.TryReserve(size)
+			// 预留与结算同口径（加密卷按物理占用预留，见 UploadRoute.PhysSize）。
+			res, err := scope.TryReserve(route.PhysicalSize(size))
 			if err != nil {
 				return UploadRoute{}, &HTTPError{Status: http.StatusInsufficientStorage, Message: "存储配额不足"}
 			}

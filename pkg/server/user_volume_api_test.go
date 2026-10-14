@@ -358,11 +358,14 @@ func TestCreateUserVolume_Wrapper_CycleRejected(t *testing.T) {
 }
 
 // userVolFallbackWrapType 是「wrapper 但未登记任何 schema」的 fake 后端类型（用 wrapper
-// category 名 "secrets"）。pkg/server 测试进程无 cmd/sproxy 的 secrets 生产注册（package
-// main 不可 import），且 pkg/server 无其它测试用它（"secretdata" 被
-// TestCloudHandler_CreateGroup_TransferParam 以 per-test 注册占用，不宜并发冲突；"egress"
-// 同理）。注册一次、不注销（仿 registerUserVolTestBackend 模式）。
-const userVolFallbackWrapType = "secrets"
+// category 名 "egress"）。pkg/server 测试进程无 cmd/sproxy 的生产注册（package main 不可
+// import）。**不能用 "secrets"/"secretdata"**：merge origin/master(#805) 后
+// cloud_download_handler_test.go 的 registerFakeSecretsScheme 注册了 "secrets"，
+// TestCloudHandler_CreateGroup_TransferParam 以 per-test 注册占用了 "secretdata"——同进程
+// 双注册同名 backend 会 panic（registry.RegisterBackend 重名 fail-fast）。"egress" 同为
+// wrapper category（CategoryOf=="wrapper"）且无其它测试占用，测兜底语义等价。
+// 注册一次、不注销（仿 registerUserVolTestBackend 模式）。
+const userVolFallbackWrapType = "egress"
 
 // noSchemaBackend 不实现 SchemaProvider（无 schema），亦响应 NewBackend。
 type noSchemaBackend struct{}

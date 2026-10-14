@@ -346,7 +346,8 @@ func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) 
 	return files.UploadRoute{
 		VolumeName: route.volumeName, Tenant: route.tenant, Sink: route.sink,
 		Scope: route.scope, ScopeRes: route.scopeRes, Pool: route.pool, PoolRes: route.poolRes,
-		Release: release,
+		PhysSize: files.TenantPhysSizer(route.tenant),
+		Release:  release,
 	}, nil
 }
 
@@ -365,6 +366,7 @@ func (h *Handlers) routeUploadForFiles(owner, rel, explicitVol string, size int6
 		ScopeRes:   route.scopeRes,
 		Pool:       route.pool,
 		PoolRes:    route.poolRes,
+		PhysSize:   files.TenantPhysSizer(route.tenant),
 		Release:    route.release,
 	}, nil
 }

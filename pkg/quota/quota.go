@@ -24,14 +24,30 @@ type Pool struct {
 	maxBytes  int64 // 0 = 不限制
 	committed int64
 	reserved  int64
-	parent    *Pool // 非 nil 时向父链聚合
-	children  []*Scope
-	path      string // 根池为 ""；子池为对应 Scope 的完整路径
+	// allocated 是**已分配给子节点的额度**（配额模型 v3 的分配账本）：与 committed/reserved
+	// 严格分离——分配是「策略额度」（允许谁用多少），用量是「实际占用」。把分配记成用量会让
+	// 「已分配但未使用」的空间被误判为已用。不变式：allocated ≤ 可用上限（maxBytes>0 时）。
+	allocated int64
+	// reserve 是**运维余量**（2026-10-14 用户裁定）：为 staging/孤儿 blob/索引等**非配额物理
+	// 字节**保留，配额（用量 + 分配）只能用到 `maxBytes - reserve` ⇒「绝对禁止磁盘打满」由
+	// 预留保证而非事后对账。仅卷根设置；子节点为 0。
+	reserve int64
+	// cond 是等待队列（配额不足时排队重试；释放广播唤醒）。每节点各有一个，但**等待统一挂根节点**
+	// （任何一层的释放都应唤醒等待者）。
+	cond *sync.Cond
+	// waitRounds 是**进入等待的轮次计数**（仅用于可观测性/测试确定性同步：轮询它即可知道
+	// 「等待者确实进入了等待」，避免固定 time.Sleep；与 staging_tracker 的 waitRounds 同型）。
+	waitRounds atomic.Int64
+	parent     *Pool // 非 nil 时向父链聚合
+	children   []*Scope
+	path       string // 根池为 ""；子池为对应 Scope 的完整路径
 }
 
 // NewPool 创建根配额池。maxBytes<=0 表示不限制。
 func NewPool(maxBytes int64) *Pool {
-	return &Pool{maxBytes: maxBytes}
+	p := &Pool{maxBytes: maxBytes}
+	p.cond = sync.NewCond(&sync.Mutex{})
+	return p
 }
 
 // NewPoolWithParent 创建**挂到父池之下**的根池（封装卷配额继承源卷）：
@@ -144,6 +160,7 @@ func (p *Pool) newScope(path string, maxBytes int64) *Scope {
 		parent:   p,
 		path:     joinPath(p.path, path),
 	}
+	child.cond = sync.NewCond(&sync.Mutex{})
 	s := &Scope{pool: child}
 	p.mu.Lock()
 	p.children = append(p.children, s)
@@ -234,11 +251,12 @@ func (p *Pool) collect(m map[string]int64) {
 // reserveUp 沿父链从自身向上预留 n：每层在锁内检查上限并累加，父链失败则回滚自身累加。
 func (p *Pool) reserveUp(n int64) error {
 	p.mu.Lock()
-	if p.maxBytes > 0 && p.committed+p.reserved+n > p.maxBytes {
+	if p.maxBytes > 0 && p.committed+p.reserved+n > p.usableLocked() {
 		p.mu.Unlock()
 		return ErrStorageFull
 	}
 	p.reserved += n
+	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil {
 		if err := p.parent.reserveUp(n); err != nil {
@@ -261,6 +279,7 @@ func (p *Pool) commitUp(amount, actual int64) {
 	p.mu.Lock()
 	p.reserved -= amount
 	p.committed += actual
+	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil {
 		p.parent.commitUp(amount, actual)
@@ -283,6 +302,7 @@ func (p *Pool) releaseUp(n int64) {
 	p.mu.Lock()
 	actual := min(n, p.reserved)
 	p.reserved -= actual
+	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil && actual > 0 {
 		p.parent.releaseUp(actual)
@@ -301,6 +321,7 @@ func (p *Pool) releaseCommittedUp(n int64) {
 	p.mu.Lock()
 	actual := min(n, p.committed)
 	p.committed -= actual
+	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil && actual > 0 {
 		p.parent.releaseCommittedUp(actual)
@@ -322,6 +343,7 @@ func (p *Pool) adjustUp(diff int64) {
 		actual = -p.committed
 	}
 	p.committed += actual
+	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil && actual != 0 {
 		p.parent.adjustUp(actual)
@@ -336,10 +358,69 @@ func (p *Pool) available() int64 {
 	if maxBytes <= 0 {
 		return math.MaxInt64
 	}
-	if used >= maxBytes {
+	usable := p.usable()
+	if used >= usable {
 		return 0
 	}
-	return maxBytes - used
+	return usable - used
+}
+
+// usableLocked / usable 返回**可用上限**（= maxBytes − 运维余量）。语义：配额（用量 + 分配）只能
+// 用到可用上限；余量留给非配额物理字节（staging/孤儿/索引），从而「磁盘绝不打满」。
+func (p *Pool) usableLocked() int64 {
+	if p.maxBytes <= 0 {
+		return 0
+	}
+	u := max(p.maxBytes-p.reserve, 0)
+	return u
+}
+
+// Usable 返回可用上限（卷容量 − 运维余量；maxBytes<=0 ⇒ 0 表示不限制/不适用）。
+func (p *Pool) Usable() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.usableLocked()
+}
+
+func (p *Pool) usable() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.usableLocked()
+}
+
+// SetOperationalReserve 设置**运维余量**（非配额物理字节保留；<0 视为 0）。只应在卷根池设置。
+func (p *Pool) SetOperationalReserve(n int64) {
+	if n < 0 {
+		n = 0
+	}
+	p.mu.Lock()
+	p.reserve = n
+	p.broadcastLocked()
+	p.mu.Unlock()
+}
+
+// OperationalReserve 返回运维余量。
+func (p *Pool) OperationalReserve() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.reserve
+}
+
+// broadcastLocked 唤醒等待者：**统一广播到根节点**（任一层释放都可能让等待者满足）。
+// Cond.Broadcast 不要求持锁；这里在持锁下调用以与状态变更同临界区（避免丢唤醒）。
+func (p *Pool) broadcastLocked() {
+	if c := p.rootCond(); c != nil {
+		c.Broadcast()
+	}
+}
+
+// rootCond 返回根节点的等待队列（parent 构造后不可变 ⇒ 无需加锁读取）。
+func (p *Pool) rootCond() *sync.Cond {
+	cur := p
+	for cur.parent != nil {
+		cur = cur.parent
+	}
+	return cur.cond
 }
 
 // joinPath 拼接父子路径，处理空段与多余分隔符。

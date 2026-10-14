@@ -155,7 +155,12 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   只按逻辑 size 计；容器内 chunk/meta 写入与默认 1–2MiB meta pad 不进计数器（1KiB 文件
   实占 2–4MiB）→ 理论上限可被绕过约 10³。彻底解决需按底层实测字节记账（暴露真实 usage 或
   底层树求和）。
-- **presign 直传绕过 meta + 容量**（第 4 轮对抗评审 P1）：预签名 PUT 是客户端直写对象键，
+- ✅ **已修（2026-10-14，P0 收口）**：`presign/complete` 现**强制登记**——客户端声明 `size`+`sha256`，
+  域侧经统一写内核「内容已在位」模式完成 存在性/size 校验 + **双账本结算** + sidecar/checksum 台账；
+  直传与上传同口径，容量/配额不再旁路。**残余（明示）**：① 服务端不重算 sha256（重算需完整下载对象）
+  ② 账本按新对象记账（prev=0）⇒ 若同路径此前已经内核写入并记账会重复计一次（卷池由周期对账收敛、
+  owner 配额侧偏高；覆盖既有文件请走上传 API）。
+- **presign 直传绕过 meta + 容量**（第 4 轮对抗评审 P1，历史记录）：预签名 PUT 是客户端直写对象键，
   不经 `be.FS()`——不写 sidecar、不计卷级容量。彻底解决需 per-volume presign 或将直传对象在
   complete 阶段经 `Guard(Wrap(fs))` 回读算 meta 并记账（成本与产品决策待定）。
 - **第 5 轮对抗评审修复批次一（2026-10-11）**：

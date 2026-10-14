@@ -18,6 +18,7 @@ import (
 
 	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/volumectx"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -321,11 +322,11 @@ func authAndTunnelOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bo
 	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
 		opts = append(opts, client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret))
 	}
-	// 卷上下文（多卷服务端）：CLI --volume flag 优先，回落配置 volume；两者皆空 = auto（零变化）。
-	volFlag, _ := cmd.Flags().GetString("volume")
-	switch {
-	case volFlag != "":
-		opts = append(opts, client.WithVolume(volFlag))
+	// 卷上下文（多卷服务端）：**路径内 URI / 当前工作目录所在卷**（命令层解析后经 volumectx 上下文
+	// 传入；用户口径 2026-10-14 移除 `--volume` flag）优先，回落配置 volume；皆空 = auto（零变化）。
+	switch vol, ok := volumectx.From(cmd.Context()); {
+	case ok:
+		opts = append(opts, client.WithVolume(vol))
 	case cfg.Volume != "":
 		opts = append(opts, client.WithVolume(cfg.Volume))
 	}

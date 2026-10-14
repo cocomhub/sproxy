@@ -17,7 +17,16 @@ import (
 // [EncOffset, EncOffset+EncSize) 段，避免 seek 某时间点下载 1-200MB 整块。
 type RangeReader interface {
 	// OpenRangeRead 打开路径的定点读 [offset, offset+size)，返回区间字节流。
-	// offset/size 为 0-based 文件字节偏移；区间越出文件 → 错误（fail-closed）。
+	// offset/size 为 0-based 文件字节偏移。
+	//
+	// **长度契约**（2026-10-14 跨层扫雷显式化——此前未写明，三处实现三态分歧：
+	// 本地卷/加密卷对 size==0 返回空流，baidupcs 当「尾开区间」读回整个尾巴（越出请求
+	// 区间），remoteFS 直接报错）：
+	//   - `size == 0` ⇒ **空区间成功**（返回空流，不得读任何字节、不得报错）；
+	//   - `size < 0` / `offset < 0` ⇒ 错误（非法区间）；
+	//   - `offset+size > 文件大小` ⇒ **错误**（fail-closed；绝不允许服务端钳制后静默短读）；
+	//   - `size > 0` ⇒ 返回流必须恰好可读 size 字节，**提前 EOF 即错误**
+	//     （用 ExactRangeReader 兜底：静默短读是最隐蔽的截断型缺陷）。
 	OpenRangeRead(ctx context.Context, path string, offset, size int64) (io.ReadCloser, error)
 }
 

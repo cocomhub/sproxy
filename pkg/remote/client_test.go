@@ -200,8 +200,19 @@ func assertRemoteRange(t *testing.T, c *remote.Client, bodyA, big []byte) {
 	if _, err := rr.OpenRangeRead(context.Background(), "docs/a.bin", -1, 5); err == nil {
 		t.Fatal("负偏移应报错")
 	}
-	if _, err := rr.OpenRangeRead(context.Background(), "docs/a.bin", 0, 0); err == nil {
-		t.Fatal("零长度应报错")
+	// 零长度 = **空区间成功**（长度契约统一，2026-10-14 跨层扫雷）：此前 remoteFS 直接报错，
+	// 而本地卷/加密卷返回空流 ⇒ 同一调用随卷类型可成可败。空区间不触网、不读字节。
+	rc0, rerr0 := rr.OpenRangeRead(context.Background(), "docs/a.bin", 0, 0)
+	if rerr0 != nil {
+		t.Fatalf("零长度应为空区间成功（契约与本地卷/加密卷一致）: %v", rerr0)
+	}
+	got0, gerr0 := io.ReadAll(rc0)
+	_ = rc0.Close()
+	if gerr0 != nil || len(got0) != 0 {
+		t.Fatalf("零长度应为空流, got %q err=%v", got0, gerr0)
+	}
+	if _, err := rr.OpenRangeRead(context.Background(), "docs/a.bin", 0, -1); err == nil {
+		t.Fatal("负长度应报错（非法区间）")
 	}
 }
 

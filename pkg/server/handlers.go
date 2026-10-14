@@ -490,6 +490,9 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 		if h.metrics != nil {
 			opts = append(opts, files.WithMetrics(h.metrics))
 		}
+		// 卷自报物理足迹（配额模型 v3：只按物理占用记账；secretdata 的 parity/meta pad 无法由
+		// 逻辑长度推出 ⇒ 必须由卷实测）。未装配外部卷 ⇒ 无该能力 ⇒ 写内核回落既有折算。
+		opts = append(opts, files.WithPhysFootprinter(filesPhysFootprinter{h: h}))
 		// 唯一必需项（TenantResolver）由 *storage.TenantCache 直接满足——它绑定默认卷根，
 		// 与 pkg/server 的 tenantFor 同一实例（单一租户缓存），无需适配类型。
 		svc, err := files.New(h.tenants, opts...)

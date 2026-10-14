@@ -100,3 +100,30 @@ SPDX-License-Identifier: Apache-2.0
   经段长守卫 panic，解密边界提前拒绝。
 - 哈希 API 收敛为单一导出真身（`Hash16`/`Hash256`/`Hash48Pair`/`GroupSig`，去 error 返回）——按
   3b 原则消除导出薄封装与同名双函数（详见 AGENTS.md 代码规范 §11）。
+
+## 8. 统一转存（归档 = 转存 + 预处理）（2026-10-11）
+
+**判定标准**：归档与转存底层都是「产物流 → 目标 writer」；打包是**预处理行为**（与写到哪无关），
+落盘是**转存行为**（与打不打包无关）⇒ 拆成 `源 → [预处理] → 目标卷` 单一管道，`pkg/transfer` 承载，
+registry 选型（内置 `tar`）。
+
+**接线纪律（复用而非重造）**：目标卷写视图必须走**唯一出口**（`externalVolumeTransferFS` =
+`trusted.Guard(Wrap(be.FS()))`），与 cloud 下载转存共用——两套解析必然漂移（一处可信卷、一处裸卷）。
+目标键经 `volume.ResolveUserLocation` 唯一入口（owner 前缀 + 路径安全），与读路径同键空间。
+
+**能力转发（跨轮复发的 P0 类，本轮第 4 次同型）**：**以接口嵌入实现的包装器不会提升动态可选能力**
+（`type w struct{ sync.FS }` 只暴露 7 个方法）——凡包装器/装饰器必须**显式转发**（或直接传装饰链，
+不套包装器）。历史同型：装饰器无条件实现 `OpenRangeRead` → `RangeReader` 断言恒真；`WriteIfAbsent`
+被 `transferVolumeFS` 吞掉 → 静默覆盖；staging gate 恒被跳过；Provider 探测失败。
+**最优解通常是「不引入包装器」**（参数化 scheme/volume 而非包一层 FS）。
+
+**master 原生能力优先**：未知长度流式写的 staging 记账已由 `StagingQuotaGateFS` 的 `reservingReader`
+原生实现（按实测增量预留 + 背压）——分支自带的「装配层预留上界」会**双计**，须删除。
+**教训**：大跨度 rebase 后先扫 master 是否已原生实现同一能力，再决定自研。
+
+**新门禁即时暴露接线偏差**（本仓已机制化）：R23（包装型 FS 必须登记/豁免）、R25（用户内容读写必须经
+`openUserVisibleRead`/`userVisibleSize`，否则加密卷读密文）、R27（外部卷 `be.FS()` 直连点登记，封印绕过
+风险）。新增写/读面应对照这三类门禁设计，而不是事后补登记。
+
+**未落地（待 #34）**：图片组「每文件一分块」封装（方向 A secretdata 扩展 / B shardseal.PackImages），
+随机访问单图 = 按分块索引解密；本仓已固化 `Preprocessor` 抽象与 registry 作为接入点。

@@ -37,17 +37,21 @@ func NewCmdBatch(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
   sclient batch --workers 1 ops.txt   # 严格串行（等价逐行执行）`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine(errFmtInitClientPrint, err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-
 			workers, _ := cmd.Flags().GetInt("workers")
 
 			ops, err := readBatchOpsFile(args[0])
 			if err != nil {
 				return err
+			}
+			// 卷上下文：**先扫全文件**再建客户端——批次是「一条命令」，卷名必须在建连前定下
+			// （每行可写卷 URI；不同卷 ⇒ 报错，不静默取其一）。
+			if verr := applyBatchVolumeContext(cmd, st, ops); verr != nil {
+				return verr
+			}
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine(errFmtInitClientPrint, err)
+				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if len(ops) == 0 {
 				fmt.Fprintln(ios.Out, "batch 文件为空（无待执行操作）")
@@ -99,6 +103,24 @@ func readBatchOpsFile(path string) ([]string, error) {
 	return ops, nil
 }
 
+// applyBatchVolumeContext 扫描批次全部行的路径参数，把卷 URI 归一为**单一**卷上下文
+// （批次共用一条连接 ⇒ 卷必须一致；不一致即报错，不静默取其一）。缺省回落当前工作目录所在卷。
+func applyBatchVolumeContext(cmd *cobra.Command, st *state.State, ops []string) error {
+	for _, raw := range ops {
+		fields := strings.Fields(raw)
+		for i := 1; i < len(fields); i++ {
+			vol, _, ok := splitVolumeURI(fields[i])
+			if !ok {
+				continue
+			}
+			if err := setSourceVolume(cmd, vol); err != nil {
+				return err
+			}
+		}
+	}
+	return applyStateVolume(cmd, st)
+}
+
 // runBatchLine 执行单行操作（真实 sclient 子命令语义）。
 //
 // 目前支持 delete / mkdir / rmdir / meta（stat）四个轻量文件操作子集；
@@ -107,6 +129,13 @@ func runBatchLine(cmd *cobra.Command, svc *client.FileClient, st *state.State, r
 	fields := strings.Fields(raw)
 	if len(fields) == 0 {
 		return batchOperationResult{Name: raw, Success: false, Message: "空操作行"}
+	}
+	// 路径参数内的卷 URI 前缀已由 applyBatchVolumeContext 校验并写入卷上下文 ⇒ 此处剥离前缀
+	// （与单命令一致：路径自述归属，客户端经 `?volume=` 寻址）。
+	for i := 1; i < len(fields); i++ {
+		if _, path, ok := splitVolumeURI(fields[i]); ok {
+			fields[i] = path
+		}
 	}
 	sub, args := fields[0], fields[1:]
 	switch sub {

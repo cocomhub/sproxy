@@ -8,15 +8,17 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/volumectx"
 	"github.com/spf13/cobra"
 )
 
-// volume_uri.go 实现**卷 URI 寻址**：位置参数写 `<卷名>:/<路径>`（`<卷名>:` 或 `<卷名>:/` = 卷根）
-// 等价于 `--volume <卷名>` + 纯路径。为什么要它：加密卷/非默认卷的文件操作不必再记住 flag，
-// 路径自述归属（用户要求 2026-10-13：「secretdata 卷 A → A:/a/b/c」）。
+// volume_uri.go 实现**卷 URI 寻址**：位置参数写 `<卷名>:/<路径>`（`<卷名>:` 或 `<卷名>:/` = 卷根）。
+// **这是唯一的卷寻址方式**（用户口径 2026-10-14：「所有常见文件命令都要支持卷 uri 操作，移除多余的
+// --volume flag」）：文件与目录一律用同一形式（`ls vault:/a`、`mkdir vault:/a/b`、`rm vault:/a/b.txt`）。
 //
-// 纯客户端归一：只改写本地参数 + `--volume`/`--to-volume` flag，**协议与服务端零改动**
-// （线上仍是 `?volume=` 查询参数）。冲突（位置参数与显式 flag 卷名不一致）→ 报错，不静默取其一。
+// 纯客户端归一：只改写本地参数 + 解析出的卷名（经 `volumectx` 上下文传给客户端工厂），**协议与服务端
+// 零改动**（线上仍是 `?volume=` 查询参数）。同一命令内多个位置参数指向**不同卷**时：单卷命令报错
+// （不静默取其一），mv/cp 把第二个卷作为**目标卷**（跨卷语义）。
 //
 // 与 URL 的歧义按语法消除：本形式要求 `:/`（冒号后紧跟**单个**斜杠），故 `https://host/x`
 // （冒号后两个斜杠）与 Windows 盘符 `C:\x`（冒号后无反斜杠/斜杠）都不会被误判为卷 URI。
@@ -56,13 +58,12 @@ func validVolumeName(name string) bool {
 
 // applyVolumeContext 归一本次调用的卷上下文（顺序即优先级）：
 //  1. 位置参数里的**卷 URI**（`<卷名>:/<路径>`）；
-//  2. 显式 `--volume`（已在 flag 里，`setVolumeFlag` 会做冲突校验）；
-//  3. **当前工作目录所在卷**（`cd <卷名>:/…` 设定，见 state.CurrentVolume）——即「所有操作默认
+//  2. **当前工作目录所在卷**（`cd <卷名>:/…` 设定，见 state.CurrentVolume）——即「所有操作默认
 //     只对当前工作目录所在卷处理」；
-//  4. 皆空 = auto（服务端按 ACL/默认卷判定，行为不变）。
+//  3. 皆空 = auto（服务端按 ACL/默认卷判定，行为不变）。
 //
-// 之所以统一在这里做：命令体只消费 `--volume` flag（clientfactory 读它），本函数是**唯一**把
-// URI/工作目录翻译成 flag 的地方（协议零改动：线上仍是 `?volume=`）。
+// 之所以统一在这里做：命令体只消费上下文里的卷名（clientfactory 读它），本函数是**唯一**把
+// URI/工作目录翻译成卷名的地方（协议零改动：线上仍是 `?volume=`）。
 func applyVolumeContext(cmd *cobra.Command, st *state.State, args []string) error {
 	if err := applyVolumeURIs(cmd, args); err != nil {
 		return err
@@ -70,19 +71,19 @@ func applyVolumeContext(cmd *cobra.Command, st *state.State, args []string) erro
 	return applyStateVolume(cmd, st)
 }
 
-// applyStateVolume 在未显式指定卷时，用当前工作目录所在卷填充 `--volume`（显式 flag 优先）。
+// applyStateVolume 在**URI 未指定卷**时，用当前工作目录所在卷填充卷上下文（URI 优先）。
 func applyStateVolume(cmd *cobra.Command, st *state.State) error {
 	if st == nil || st.CurrentVolume == "" {
 		return nil
 	}
-	f := cmd.Flags().Lookup("volume")
-	if f == nil || f.Changed {
-		return nil
+	if _, ok := volumectx.From(cmd.Context()); ok {
+		return nil // URI 已指定 ⇒ 优先，不被 cwd 覆盖
 	}
-	return cmd.Flags().Set("volume", st.CurrentVolume)
+	cmd.SetContext(volumectx.With(cmd.Context(), st.CurrentVolume))
+	return nil
 }
 
-// applyMvVolumeContext 是 mv 的卷上下文归一：两侧路径的卷 URI 优先（目标不同卷 ⇒ `--to-volume`），
+// applyMvVolumeContext 是 mv/cp 的卷上下文归一：两侧路径的卷 URI 优先（目标不同卷 ⇒ 目标卷上下文），
 // 随后未指定时回落当前工作目录所在卷（同卷改名语义）。
 func applyMvVolumeContext(cmd *cobra.Command, st *state.State, args []string) error {
 	if err := applyMvVolumeURIs(cmd, args); err != nil {
@@ -91,16 +92,16 @@ func applyMvVolumeContext(cmd *cobra.Command, st *state.State, args []string) er
 	return applyStateVolume(cmd, st)
 }
 
-// applyVolumeURIs 就地剥离 args 中的卷 URI 前缀，并把卷名写入 `--volume`（同一命令内多个位置
+// applyVolumeURIs 就地剥离 args 中的卷 URI 前缀，并把卷名写入**卷上下文**（同一命令内多个位置
 // 参数必须指向同一卷，否则报错）。返回冲突/非法时的错误（调用方在 `factory.NewClient` 之前调用，
-// 因为工厂读取 `--volume` flag）。
+// 因为工厂读取上下文）。
 func applyVolumeURIs(cmd *cobra.Command, args []string) error {
 	for i, arg := range args {
 		vol, path, ok := splitVolumeURI(arg)
 		if !ok {
 			continue
 		}
-		if err := setVolumeFlag(cmd, "volume", vol); err != nil {
+		if err := setSourceVolume(cmd, vol); err != nil {
 			return err
 		}
 		args[i] = path
@@ -108,14 +109,14 @@ func applyVolumeURIs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// applyMvVolumeURIs 处理 mv 的两个路径：源路径的卷写 `--volume`；目标路径带**不同**卷名时写
-// `--to-volume`（跨卷迁移语义，与服务端 move API 一致）；相同卷名 → 同卷 rename。
+// applyMvVolumeURIs 处理 mv/cp 的两个路径：源路径的卷写源卷上下文；目标路径带**不同**卷名时写
+// 目标卷上下文（跨卷迁移/复制语义，与服务端 move/copy API 一致）；相同卷名 → 同卷 rename/copy。
 func applyMvVolumeURIs(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return nil
 	}
 	if vol, path, ok := splitVolumeURI(args[0]); ok {
-		if err := setVolumeFlag(cmd, "volume", vol); err != nil {
+		if err := setSourceVolume(cmd, vol); err != nil {
 			return err
 		}
 		args[0] = path
@@ -128,24 +129,23 @@ func applyMvVolumeURIs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	args[1] = toPath
-	fromVol, _ := cmd.Flags().GetString("volume")
+	fromVol, _ := volumectx.From(cmd.Context())
 	if toVol == fromVol {
 		return nil
 	}
-	return setVolumeFlag(cmd, flagToVolume, toVol)
+	cmd.SetContext(volumectx.WithTarget(cmd.Context(), toVol))
+	return nil
 }
 
-// setVolumeFlag 把卷名写入指定 flag；该 flag 已有**不同**显式值 → 报错（不静默取其一）。
-func setVolumeFlag(cmd *cobra.Command, flag, vol string) error {
-	f := cmd.Flags().Lookup(flag)
-	if f == nil {
-		return fmt.Errorf("命令不支持卷寻址（缺少 --%s）", flag)
-	}
-	if f.Changed {
-		if cur, _ := cmd.Flags().GetString(flag); cur != vol {
-			return fmt.Errorf("卷名冲突：位置参数指定 %q，--%s 指定 %q", vol, flag, cur)
+// setSourceVolume 写入源卷上下文；上下文里已有**不同**卷名 → 报错（同一命令多个位置参数必须
+// 指向同一卷，不静默取其一）。
+func setSourceVolume(cmd *cobra.Command, vol string) error {
+	if cur, ok := volumectx.From(cmd.Context()); ok {
+		if cur != vol {
+			return fmt.Errorf("卷名冲突：同一命令的多个位置参数指向不同卷（%q 与 %q）", cur, vol)
 		}
 		return nil
 	}
-	return cmd.Flags().Set(flag, vol)
+	cmd.SetContext(volumectx.With(cmd.Context(), vol))
+	return nil
 }

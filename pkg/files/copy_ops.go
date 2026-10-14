@@ -155,7 +155,7 @@ func (s *Service) copyWithinVolume(ctx context.Context, owner, srcVol, dstVol st
 		route.Release() // 不支持 blob 直拷 → 归还预留，回落写内核（内核会重新预留）
 		return CopyFileResult{}, false, nil
 	}
-	route.Commit(0, size) // 预留转正（与写入同口径）
+	route.Commit(0, s.settleSize(route, owner, to, size)) // 预留转正（与写入同口径）
 	s.rt.recordFileAudit(ctx, "copy", from, auditResultSuccess, "to="+to+" 卷内直拷 volume="+srcVol)
 	s.rt.publishFileEvent(EventUpload, owner, to, size)
 	if cres.Checksum != "" {

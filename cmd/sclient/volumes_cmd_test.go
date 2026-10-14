@@ -67,7 +67,7 @@ func TestVolumesCommand_Empty(t *testing.T) {
 
 // ---- mv --to-volume：跨卷 move + 改名（两步）----
 
-func TestMvCommand_ToVolume_CrossVolumeMovesThenRenames(t *testing.T) {
+func TestMvCommand_CrossVolumeURI_MovesThenRenames(t *testing.T) {
 	var movedQuery, renamedQuery url.Values
 	mock := httptest.NewServer(mvToVolumeMockHandler(t, &movedQuery, &renamedQuery))
 	defer mock.Close()
@@ -77,10 +77,10 @@ func TestMvCommand_ToVolume_CrossVolumeMovesThenRenames(t *testing.T) {
 	st := &state.State{CurrentDir: ""}
 	var out strings.Builder
 	cmd := NewCmdMv(factory, cli.IOStreams{Out: &out, ErrOut: io.Discard}, st)
-	_ = cmd.Flags().Set(flagToVolume, "disk2")
-	cmd.SetArgs([]string{"a.txt", "b.txt"})
+	// 跨卷经**路径内卷 URI**（唯一寻址方式；用户口径 2026-10-14 移除 --to-volume）。
+	cmd.SetArgs([]string{"main:/a.txt", "disk2:/b.txt"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("mv --to-volume failed: %v", err)
+		t.Fatalf("mv（卷 URI 跨卷）failed: %v", err)
 	}
 	if movedQuery.Get("from_volume") != "main" || movedQuery.Get("to_volume") != "disk2" || movedQuery.Get("filename") != "a.txt" {
 		t.Errorf("move query = %v, want from=main/to=disk2/file=a.txt", movedQuery)
@@ -90,7 +90,7 @@ func TestMvCommand_ToVolume_CrossVolumeMovesThenRenames(t *testing.T) {
 	}
 }
 
-// mvToVolumeMockHandler 构造 mv --to-volume 两步（跨卷 move + 改名）的 mock 处理
+// mvToVolumeMockHandler 构造 mv 卷 URI 跨卷两步（跨卷 move + 改名）的 mock 处理
 // 函数：校验各请求的方法/参数（stat HEAD、VolumeOf 无 volume、rename 带目标卷）并
 // 记录 query（movedQuery/renamedQuery 由测试断言）。
 func mvToVolumeMockHandler(t *testing.T, movedQuery, renamedQuery *url.Values) http.HandlerFunc {

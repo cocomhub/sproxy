@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -91,23 +92,36 @@ func (h *Handlers) presignBackendFor(ctx context.Context, typ, owner string) (re
 	if !registry.IsBackendRegistered(typ) {
 		return nil, errPresignTypeUnregistered
 	}
-	if h.volSet != nil {
-		matched := 0
-		for _, v := range h.volSet.All() {
-			if v.Type != typ {
-				continue
-			}
-			matched++
-			if !v.Authorize(owner) {
-				continue // 该卷不授权该 owner：不得借其凭证直传（评审 P2：presign 缺卷 ACL 校验）
-			}
-			return registry.NewBackend(ctx, v)
-		}
-		if matched > 0 {
-			return nil, errPresignForbidden
-		}
+	if v, ok, err := h.presignVolumeFor(typ, owner); err != nil {
+		return nil, err
+	} else if ok {
+		return registry.NewBackend(ctx, v)
 	}
 	return registry.NewBackend(ctx, volume.Volume{Type: typ})
+}
+
+// presignVolumeFor 解析该类型下**已配置且授权给 owner** 的卷（预签名与登记的记账/ACL 依据）。
+// 返回 (卷, true, nil) = 命中；该类型无已配置卷 = (零值, false, nil)；有卷但 ACL 拒绝 =
+// (零值, false, errPresignForbidden)。
+func (h *Handlers) presignVolumeFor(typ, owner string) (volume.Volume, bool, error) {
+	if h.volSet == nil {
+		return volume.Volume{}, false, nil
+	}
+	matched := false
+	for _, v := range h.volSet.All() {
+		if v.Type != typ {
+			continue
+		}
+		matched = true
+		if !v.Authorize(owner) {
+			continue // 该卷不授权该 owner：不得借其凭证直传（评审 P2：presign 缺卷 ACL 校验）
+		}
+		return v, true, nil
+	}
+	if matched {
+		return volume.Volume{}, false, errPresignForbidden
+	}
+	return volume.Volume{}, false, nil
 }
 
 // errPresignTypeUnregistered 是后端类型未注册的哨兵（调用方据此映射 404）。
@@ -138,7 +152,41 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		http.Error(w, perr.Error(), http.StatusForbidden)
 		return
 	}
-	be, err := h.presignBackendFor(r.Context(), typ, normalizeOwner(ownerFromRequest(r)))
+	// 类型未注册 → 404（先于参数校验：契约「未注册类型 → 404」不得被 400 抢先）。
+	if !registry.IsBackendRegistered(typ) {
+		http.Error(w, "后端类型未注册: "+typ, http.StatusNotFound)
+		return
+	}
+	// 2026-10-14 P0（评审 §158 记档）：直传对象必须**登记**——否则 presign 是容量/配额旁路
+	// （对象对 owner 配额与卷容量池完全不可见，且无 sidecar/台账）。客户端须声明 size 与
+	// sha256（服务端无法在直传后廉价读取对象内容）；缺任一/非法 ⇒ 400（不静默跳过登记）。
+	owner := normalizeOwner(ownerFromRequest(r))
+	size, sizeErr := presignSizeParam(r)
+	sha := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sha256")))
+	if sizeErr != nil || !files.IsSHA256Hex(sha) {
+		http.Error(w, "登记需携带 size（非负整数）与 sha256（64 位十六进制）", http.StatusBadRequest)
+		return
+	}
+	vol, matched, verr := h.presignVolumeFor(typ, owner)
+	if verr != nil {
+		h.presignBackendError(w, typ, verr)
+		return
+	}
+	if matched {
+		// path 形态 = `<owner>/user/<rel>`（presignOwnerKey 保证桶为 user）⇒ RemotePath 取
+		// **user 桶相对路径**（与 HTTP 上传/远程写面同一约定：Tenant.UserRel 会补 user/ 前缀）。
+		rel, _ := strings.CutPrefix(strings.TrimPrefix(path, owner+"/"), "user/")
+		if _, rerr := h.fileService().RegisterDirectUpload(r.Context(), files.DirectUploadInput{
+			Owner: owner, RemotePath: rel, Volume: vol.Name, Size: size, SHA256: sha,
+		}); rerr != nil {
+			h.presignRegisterError(w, rerr)
+			return
+		}
+		sendJSONResponse(w, map[string]string{"ok": "registered"}, http.StatusOK)
+		return
+	}
+	// 无已配置卷（裸后端：纯内存/测试）：无卷语义可登记（不存在容量旁路）⇒ 沿用存在性确认。
+	be, err := h.presignBackendFor(r.Context(), typ, owner)
 	if err != nil {
 		h.presignBackendError(w, typ, err)
 		return
@@ -157,6 +205,29 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	sendJSONResponse(w, map[string]string{"ok": "registered"}, http.StatusOK)
+}
+
+// presignSizeParam 解析登记用的 size（非负整数，必填）。
+func presignSizeParam(r *http.Request) (int64, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("size"))
+	if raw == "" {
+		return 0, errors.New("缺少 size")
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return 0, errors.New("size 需为非负整数")
+	}
+	return n, nil
+}
+
+// presignRegisterError 把域侧登记错误映射为 HTTP：*files.HTTPError 自带状态码与文案
+// （400 参数 / 403 ACL / 404 对象不存在 / 409 size 不符 / 507 配额不足），其余 500。
+func (h *Handlers) presignRegisterError(w http.ResponseWriter, err error) {
+	if he, ok := errors.AsType[*files.HTTPError](err); ok {
+		http.Error(w, he.Message, he.Status)
+		return
+	}
+	http.Error(w, "直传登记失败: "+err.Error(), http.StatusInternalServerError)
 }
 
 // guardPresignPath 校验并归一预签名/登记路径：拒绝路径穿越/绝对路径/空值，且拒绝

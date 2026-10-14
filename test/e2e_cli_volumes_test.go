@@ -4,14 +4,14 @@
 //go:build e2e
 
 // e2e_cli_volumes_test.go 覆盖多卷配置下的 sclient 卷能力（真二进制 + 子进程）：
-// volumes / upload --volume / list --volume / mv --to-volume（跨卷迁移）。
+// volumes / upload（卷 URI 目标）/ list（卷 URI）/ mv（双端卷 URI，跨卷迁移）。
 //
 // 卷配置（extraConfig）：
 //   - main（volumes[0]，root 留空）→ 归一为 --storage-root 目录，仍是默认卷，
 //     从而凭据 store 种子路径 <uploadsDir>/anonymous/meta/credentials.json 不变；
 //   - disk2（root 指向独立临时目录）。
 //
-// placement: prefer-default 使新文件落默认卷，确保 --volume 是唯一的落卷决定因素。
+// placement: prefer-default 使新文件落默认卷，确保「卷 URI 目标」是唯一的落卷决定因素。
 package sproxy_test
 
 import (
@@ -41,13 +41,13 @@ func findVolume(vols []client.VolumeInfo, name string) (client.VolumeInfo, bool)
 	return client.VolumeInfo{}, false
 }
 
-// cliFileList 运行 `list --json`（可带 --volume 等前置 flag）并返回文件列表。
+// cliFileList 运行 `list --json <路径参数…>`（路径可写卷 URI）并返回文件列表。
 //
 // 空列表在 JSON 模式下输出为空（cmd/sclient/list.go 走 fm.Println，
 // JSONFormatter 对该调用 no-op）→ 空输出即零文件，不得当作解析失败。
 func cliFileList(t *testing.T, env *cliEnv, prefix ...string) []client.FileInfo {
 	t.Helper()
-	args := append(append([]string{"--json"}, prefix...), "list")
+	args := append([]string{"--json", "list"}, prefix...)
 	out := env.sclient(t, env.TmpDir, args...)
 	if strings.TrimSpace(out) == "" {
 		return nil
@@ -116,12 +116,12 @@ func TestE2E_CLI_Volumes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(env.TmpDir, "volfile.txt"), content, 0644); err != nil {
 		t.Fatalf("写本地文件失败: %v", err)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "disk2", "upload", "volfile.txt")
+	env.sclient(t, env.TmpDir, "upload", "volfile.txt", "disk2:/")
 
 	// 磁盘副作用：落在 disk2 卷根而非默认卷根
 	onDisk2 := findFilesNamed(t, disk2Root, "volfile.txt")
 	if len(onDisk2) != 1 {
-		t.Fatalf("--volume disk2 上传后 disk2 卷根应恰有 1 个 volfile.txt, got %d: %v", len(onDisk2), onDisk2)
+		t.Fatalf("`upload volfile.txt disk2:/` 后 disk2 卷根应恰有 1 个 volfile.txt, got %d: %v", len(onDisk2), onDisk2)
 	}
 	if got, err := os.ReadFile(onDisk2[0]); err != nil {
 		t.Fatalf("读取 disk2 落盘文件失败: %v", err)
@@ -133,7 +133,7 @@ func TestE2E_CLI_Volumes(t *testing.T) {
 	}
 
 	// 3) 分卷 list：disk2 可见且带卷名，main 不可见
-	disk2Files := cliFileList(t, env, "--volume", "disk2")
+	disk2Files := cliFileList(t, env, "disk2:/")
 	if !hasFileNamed(disk2Files, "volfile.txt") {
 		t.Fatalf("disk2 卷列表应含 volfile.txt, got %+v", disk2Files)
 	}
@@ -142,12 +142,12 @@ func TestE2E_CLI_Volumes(t *testing.T) {
 			t.Fatalf("volfile.txt 的卷名应为 disk2, got %q", f.Volume)
 		}
 	}
-	if mainFiles := cliFileList(t, env, "--volume", "main"); hasFileNamed(mainFiles, "volfile.txt") {
+	if mainFiles := cliFileList(t, env, "main:/"); hasFileNamed(mainFiles, "volfile.txt") {
 		t.Fatalf("main 卷列表不应含 volfile.txt, got %+v", mainFiles)
 	}
 
 	// 4) 跨卷迁移：disk2 → main（同相对路径）
-	env.sclient(t, env.TmpDir, "--volume", "disk2", "mv", "volfile.txt", "volfile.txt", "--to-volume", "main")
+	env.sclient(t, env.TmpDir, "mv", "disk2:/volfile.txt", "main:/volfile.txt")
 
 	if got := findFilesNamed(t, disk2Root, "volfile.txt"); len(got) != 0 {
 		t.Fatalf("跨卷迁移后 disk2 卷根不应再有 volfile.txt, got %v", got)
@@ -171,7 +171,7 @@ func TestE2E_CLI_Volumes(t *testing.T) {
 	}
 
 	// 5) 负例：未知卷 → 非零退出（只读操作，无副作用）
-	stdout, stderr, err := env.sclientRun(t, env.TmpDir, "--volume", "nosuchvol", "list")
+	stdout, stderr, err := env.sclientRun(t, env.TmpDir, "list", "nosuchvol:/")
 	if err == nil {
 		t.Fatalf("未知卷应非零退出\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
@@ -181,7 +181,7 @@ func TestE2E_CLI_Volumes(t *testing.T) {
 	if werr := os.WriteFile(filepath.Join(env.TmpDir, "nosuchvol.txt"), []byte("should not land"), 0644); werr != nil {
 		t.Fatalf("写本地文件失败: %v", werr)
 	}
-	stdout, stderr, err = env.sclientRun(t, env.TmpDir, "--volume", "nosuchvol", "upload", "nosuchvol.txt")
+	stdout, stderr, err = env.sclientRun(t, env.TmpDir, "upload", "nosuchvol.txt", "nosuchvol:/")
 	if err == nil {
 		t.Fatalf("向未知卷上传应非零退出\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}

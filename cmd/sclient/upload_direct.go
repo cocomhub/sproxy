@@ -5,11 +5,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
@@ -83,6 +86,12 @@ func directUpload(ctx context.Context, svc *client.FileClient, backend, localPat
 		return fmt.Errorf("stat 文件: %w", err)
 	}
 	fileSize := st.Size()
+	// 内容摘要：complete 登记必需（2026-10-14 P0）——服务端无法在直传后廉价读取对象内容，
+	// 故由客户端声明 size + sha256，服务端据此记账（双账本）并写入 checksum 台账。
+	sha, shaErr := fileSHA256(localPath)
+	if shaErr != nil {
+		return fmt.Errorf("计算内容摘要: %w", shaErr)
+	}
 
 	// 隔离 transport（不共享默认客户端——测试铁律；netutil.IsolatedTransport 无全局状态）。
 	putClient := &http.Client{Transport: netutil.IsolatedTransport()}
@@ -111,13 +120,30 @@ func directUpload(ctx context.Context, svc *client.FileClient, backend, localPat
 		return putErr
 	}
 
-	// 3. complete 登记（服务端确认对象存在）。
+	// 3. complete 登记（服务端校验存在性/size + 双账本记账 + 元数据/checksum 台账）。
 	var completeResp map[string]string
-	if err := svc.DoJSON(ctx, "POST", "/api/backends/"+backend+"/presign/complete?path="+rel, nil, &completeResp); err != nil {
+	completeURL := "/api/backends/" + backend + "/presign/complete?path=" + rel +
+		"&size=" + strconv.FormatInt(fileSize, 10) + "&sha256=" + sha
+	if err := svc.DoJSON(ctx, "POST", completeURL, nil, &completeResp); err != nil {
 		return fmt.Errorf("直传登记: %w", err)
 	}
 	fmt.Fprintf(ios.Out, "直传完成: %s → %s/%s\\n", localPath, backend, rel)
 	return nil
+}
+
+// fileSHA256 计算本地文件 SHA-256（小写十六进制）。直传登记用：服务端据 size+sha256
+// 记账并写入 checksum 台账（服务端不重算——重算需完整下载对象，成本不可接受）。
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // directUploadAttempt 一次直传尝试：签发 PUT 预签名 URL（每次重试重新签发——防 URL

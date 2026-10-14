@@ -142,6 +142,9 @@ BuildAt: 2026-06-01T12:00:00Z
   （远端后端无原子 rename）。`X-File-Checksum` 与 sidecar **记录**的整文件 SHA-256 交叉比对
   （不重算——远端整文件回读不可接受）；sidecar 缺失则跳过该判据。删除会同时删 sidecar 并释放卷级容量。
   此前外部卷对象**无任何用户可见删除入口**（卷写满后一切写入恒 507），本接口是唯一回收路径。
+- **外部卷 `?soft=true` 为 fail-closed（400）**：回收站（trash 桶）落在**本地租户根**，外部卷没有对应
+  实现 ⇒ 若静默走硬删，用户**显式**请求的可恢复删除会变成**不可恢复删除**（静默降级 + 数据丢失）⇒
+  明确拒绝并提示改用硬删（不带 `soft=true`），**不触碰数据**。外部卷回收站为独立排期项。
 
 ### POST /rename?from=&to=
 
@@ -492,9 +495,22 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 将任务已下载文件打包为 tar.gz（`cloud_archive_max_bytes` 限制原始大小总和）。
 
+请求体可选字段 `target_volume`：非空 = **统一转存**——打包后经可信卷写视图转存到该外部卷，
+不落租户 archive 桶。可选 `target_path` 指定目标键（目标卷 **user 桶内**相对路径，可含子目录；
+空 = 默认 `archive/<archive_name>`，以 `/` 结尾 = 目录并拼上归档名）。目标键实际为
+`<owner>/user/<target_path>`（经 `volume.ResolveUserLocation` 唯一入口，与读路径同键空间，
+可经 `/download` 命中；外部卷不走本地文件索引，故不出现在 `/api/files` 列表），响应 `file` 为
+可 `ResolveURL` 取用的 URL（非归档名）。空/缺省 = 沿既有行为落租户 archive 桶。同名目标已存在
+→ 409（拒绝静默覆盖）。可选 `encrypt`（true = 打包流式加密，密钥来自服务端 `archive.key_file`，
+产物命名追加 `.aes`，但以 `target_path`/默认名为准）、`cipher`（默认 aes-256-gcm，**须与 `encrypt`
+同用**——单独指定不加密且无效果 → 400，防误信已加密）、`compression`（gzip 默认 / zstd / brotli；
+非法值 400）——均仅与 `target_volume` 同用（未指定 target 时设置 `target_path`/`encrypt`/`cipher`/
+`compression` → 400，防静默忽略）。CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，cd/mv 同规约）
+指定，客户端归一为 `target_volume`/`target_path` 后发送（协议层不解析 URI）。
+
 ### POST /api/cloud/archive
 
-批量归档（请求体含任务 ID 列表）。
+批量归档（请求体含任务 ID 列表）。支持与单任务相同的 `target_volume` 统一转存语义。
 
 ### DELETE /api/cloud/tasks/{id}
 
@@ -514,7 +530,10 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 ### POST /api/cloud/groups/{id}/cancel / /resume / /archive
 
-取消 / 恢复 / 归档整个组。
+取消 / 恢复 / 归档整个组。`/archive` 请求体同样支持 `target_volume`（统一转存到外部卷，
+可信卷写视图 + owner 前缀键 + 本地 staging 配额 + `per-(owner,rel)` 写锁；语义与单任务/批量
+归档一致）。转存成功后组记录 `archive_file` 为转存 URL，组删除时联动清理该外部产物
+（要求目标卷仍在服务端装配中；卷已移除时删除组会 fail-closed 报错，不静默遗留产物）。
 
 ### DELETE /api/cloud/groups/{id}
 
@@ -911,11 +930,21 @@ query 参数：`path`（卷内相对路径，必填）、`method`（`PUT`/`GET`�
 
 ### 预签名登记（`POST /api/backends/{type}/presign/complete`）
 
-客户端直传完成后登记：服务端按上述同一 owner 收敛路径 `Stat` 确认对象存在。
+客户端直传完成后**登记**：服务端按上述同一 owner 收敛路径校验对象存在且大小与声明一致，并经
+**统一写内核**（内容已在位模式）完成登记。
 
-- 对象不存在 → 404（fail-closed，**不**空确认）；未注册类型 → 404；越权路径 → 403。
-- 注意：预签名直传**不经**服务端 `Wrap`/`CapacityFS`，当前不生成完整性 sidecar、不计卷级容量
-  （设计边界，见 `docs/designs/2026-10-10-trusted-volume.md` §8）。
+query 参数：`path`（必填）、**`size`**（直传对象字节数，非负整数，必填）、**`sha256`**
+（整文件 SHA-256，64 位十六进制，必填）。
+
+- **记账（2026-10-14 P0 收口）**：登记走与上传**同一套**双账本原语（owner Scope + 卷容量池
+  预留→结算）并写 checksum 台账（本地卷另写完整性 sidecar、更新搜索索引、发布 upload 事件）。
+  ⇒ 直传对象与上传对象在容量/配额/元数据上**同口径**，不再有旁路。
+- 错误：缺 `size`/`sha256` 或格式非法 → **400**；对象不存在 → **404**；**大小与声明不符 → 409**
+  （fail-closed，宁可拒绝也不记错账）；配额/容量不足 → 403/507；越权路径 → 403；未注册类型 → 404。
+- **已知边界（明示）**：直传内容不经服务端 ⇒ ① 服务端**不重算** `sha256`（重算需完整下载对象），
+  只记录客户端声明值；② 账本按**新对象**记账（`prev=0`）——若同路径此前已经内核写入并记账，
+  本次会重复计一次（容量池由周期对账收敛，owner 配额侧偏高）。**覆盖既有文件请走上传 API**
+  （同一套记账原语，按差分结算）。设计残余见 `docs/designs/2026-10-10-trusted-volume.md` §8。
 
 ## 审计（audit /api/audit）
 

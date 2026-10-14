@@ -90,6 +90,30 @@ func shardsealMetaToFileMeta(m *shardseal.Meta) *meta.FileMeta {
 // _ 编译期断言：secretdata 仍实现 syncpkg.FS（不因 Provider 改变）。
 var _ syncpkg.FS = (*SecretdataFS)(nil)
 
+// BlockletMode 返回 rel 对应文件写路径固化的 blocklet 模式（"video-keyframe"/"fixed"）。
+// 供本地工具（sclient sealfile info）与装配层断言关键帧分块是否生效；
+// 文件不存在 / 目录 → 明确错误（fail-closed）。
+func (s *SecretdataFS) BlockletMode(ctx context.Context, rel string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := strings.TrimPrefix(rel, "/")
+	e, ok := s.index[key]
+	if !ok {
+		return "", fmt.Errorf("secretdata: BlockletMode 文件不存在: %s", rel)
+	}
+	if e.meta == nil {
+		return "", fmt.Errorf("secretdata: BlockletMode 元信息缺失: %s", rel)
+	}
+	mode := e.meta.Block.BlockletMode
+	if mode == "" {
+		mode = shardseal.BlockletModeFixed
+	}
+	return mode, nil
+}
+
 // UpdateMetaExtra 更新已落盘 meta 的 Extra（旁路记录能力——供 damaged 源完整性标记写入
 // 目标卷 meta；D-MAJOR-2 修复：secretdata 走 Provider 短路不包装饰器，须自带该能力）。
 // 实现：锁内克隆当前 shardseal.Meta → 合并 extra → 重新加密写新 blob（metaName 由

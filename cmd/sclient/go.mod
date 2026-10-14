@@ -6,6 +6,7 @@ require (
 	github.com/adrg/xdg v0.5.3
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
+	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic v0.17.0
@@ -20,6 +21,7 @@ require (
 )
 
 require (
+	github.com/abema/go-mp4 v1.7.3 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
@@ -78,3 +80,5 @@ replace github.com/cocomhub/sproxy/pkg/tunnel/mesh => ../../pkg/tunnel/mesh
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../pkg/tunnel/xfer/ext/ws
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ../../pkg/tunnel/xfer/ext/quic
+
+replace github.com/cocomhub/sproxy/pkg/media/ext/mp4 => ../../pkg/media/ext/mp4

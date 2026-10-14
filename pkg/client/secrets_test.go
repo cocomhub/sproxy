@@ -105,8 +105,8 @@ func TestCreatePassphraseSecret(t *testing.T) {
 	t.Parallel()
 	ts, store := mockSecretsServer(t)
 	c := NewFileClient(ts.URL)
-	// 本地派生（真实高熵双口令→scrypt）；上传派生结果。
-	resp, err := c.CreatePassphraseSecret(context.Background(), "imp1", "口令A", "口令B")
+	// 本地派生（真实高熵双口令→scrypt）；上传派生结果，并返回派生值供调用方落盘。
+	resp, derived, err := c.CreatePassphraseSecret(context.Background(), "imp1", "口令A", "口令B")
 	if err != nil {
 		t.Fatalf("CreatePassphraseSecret: %v", err)
 	}
@@ -120,6 +120,10 @@ func TestCreatePassphraseSecret(t *testing.T) {
 	}
 	if strings.Contains(stored, "口令") {
 		t.Error("原始口令不应出现在上传值中")
+	}
+	// 返回值即上传值（供 --out 落盘，须与线上一致）。
+	if derived != stored {
+		t.Errorf("返回 derived=%q 应等于上传值=%q", derived, stored)
 	}
 }
 

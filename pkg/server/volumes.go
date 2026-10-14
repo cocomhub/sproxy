@@ -594,6 +594,10 @@ func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, che
 // 传给后端——外部卷键空间统一 user/<rel>，与读路径 resolveExternalDownload 一致），
 // 双账本预留照常（owner 全局 Scope + 卷容量池）。
 func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volumeRoute, error) {
+	// 预占用口径（配额模型 v3）：卷自报**物理上界**优先——secretdata 的 meta pad/parity 与逻辑
+	// 大小无关（1KB 文件物理 ≈1–2MB）⇒ 按逻辑预留会在结算（实测）时突破预留。结算按实测收敛，
+	// 多预留部分在 Commit 时自动归还。
+	size = h.physBoundFor(volName, size)
 	tnt := h.volumeTenant(volName, owner)
 	external := h.externalSinkFor(owner, volName)
 	if (tnt == nil || tnt.Root() == nil) && external == nil {
@@ -688,6 +692,36 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	// Guard(Wrap) 之外：meta 写经 Wrap.inner（raw）绕过 gate（小字节），主文件写在 gate 预留。
 	fsys = h.stagingQuotaFS(owner, fsys)
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
+}
+
+// externalVolumeTransferFS 是外部卷**转存/写目标** FS 的解析出口（可信卷语义）：
+// 裸后端 FS → trusted.Guard(trusted.Wrap(...))（meta 恒生成 + meta 桶隔离）。
+//
+// **唯一外部卷写视图出口**——cloud 下载转存（装配层 TransferFSFor / CloudManagerOptions）
+// 与统一转存（归档打包后转存外部卷）共用同一 recipe，防「一处可信卷、一处裸卷」的解析
+// 漂移（裸卷产物无 sidecar meta、可触达 meta 凭据桶）。
+//
+// 返回 (fs, scheme, vol, ok)：fs 在裸 FS 未就绪时为 nil；ok=false 表示卷未装配或卷
+// 元数据不可解析（调用方按需 fail-closed；scheme 可能为空 = 类型未声明协议）。
+func (h *Handlers) externalVolumeTransferFS(volumeName string) (syncpkg.FS, string, volume.Volume, bool) {
+	if h.volSet == nil {
+		return nil, "", volume.Volume{}, false
+	}
+	be := h.volSet.External(volumeName)
+	if be == nil {
+		return nil, "", volume.Volume{}, false
+	}
+	raw := be.FS()
+	if raw == nil {
+		return nil, "", volume.Volume{}, false
+	}
+	vol, ok := h.volSet.ByName(volumeName)
+	if !ok {
+		// 卷元信息缺失（极罕见装配异常）：仍加 Guard(Wrap(...))（meta 桶隔离恒生效 +
+		// 写面恒生成 sidecar，与其余装配形状一致）——写面也不能触达凭据桶。
+		return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), "", volume.Volume{}, false
+	}
+	return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), registry.SchemeOf(vol.Type), vol, true
 }
 
 // stagingQuotaFS 是外部卷 FS 的**本地 staging 配额统一接线**（用户裁定 2026-10-10：

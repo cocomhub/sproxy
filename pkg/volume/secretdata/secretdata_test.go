@@ -186,12 +186,16 @@ func TestUnderlyingLayout_DirMetaMarked(t *testing.T) {
 	ctx := context.Background()
 	writeContent(t, fs, ctx, "movies/f1.mp4", 300)
 
-	rootEntries, _ := fs.inner.ListDir(ctx, "")
+	// 容器物理嵌套 ⇒ 按**容器**（含子容器的目录）递归分类，而不是只看卷根一层。
+	containers := map[string][]syncpkg.Entry{}
+	collectContainerEntries(t, fs.inner, "", containers)
 	foundFileContainer := false
-	for _, e := range rootEntries {
-		inner, _ := fs.inner.ListDir(ctx, e.Name)
+	for _, inner := range containers {
 		hasDirMeta, hasFileMeta, hasChunk := false, false, false
 		for _, f := range inner {
+			if f.IsDir {
+				continue // 子容器目录不计入本容器分类
+			}
 			switch {
 			case shardseal.IsDirMetaName(f.Name):
 				hasDirMeta = true
@@ -811,8 +815,9 @@ func TestNewFS_AlgorithmResolutionFailFast(t *testing.T) {
 	}
 }
 
-// TestDirMove_SubtreeZeroTouch（task10）：移动 a 整棵子树到新位置，仅改根 a 的父引用；
-// 子树内子目录/文件 blob 零改动（目录 meta blob 名不变、文件 dirSeg/metaName 不变）。
+// TestDirMove_SubtreeZeroTouch（task10 + 2026-10-14 用户口径「物理树始终镜像逻辑树」）：移动 a 整棵
+// 子树到新位置时**容器随目录整体搬移**（底层 mv ⇒ 物理位置镜像逻辑树），但**子树内容零改动**——
+// 子树内子目录/文件的 blob **名与字节**不变（容器**路径前缀**变化属预期，正是镜像语义）。
 func TestDirMove_SubtreeZeroTouch(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
@@ -835,21 +840,30 @@ func TestDirMove_SubtreeZeroTouch(t *testing.T) {
 	if err := fs.Rename(ctx, "a", "b/a"); err != nil {
 		t.Fatalf("Rename 目录子树: %v", err)
 	}
-	// 子树文件容器/meta 零改动。
+	// **容器随目录搬移**（物理树镜像逻辑树）：子树容器路径前缀变为新父容器内。
+	newChildSeg := fs.dirSegs["b/a/child"]
+	newDeepSeg := fs.dirSegs["b/a/child/deep"]
+	if newChildSeg == childSeg || newDeepSeg == deepSeg {
+		t.Fatalf("容器应随目录搬移（镜像语义）: child %q→%q deep %q→%q", childSeg, newChildSeg, deepSeg, newDeepSeg)
+	}
+	if !strings.HasPrefix(newChildSeg, fs.dirSegs["b"]+"/") {
+		t.Fatalf("子容器应落在新父目录容器内: %q 不在 %q 下", newChildSeg, fs.dirSegs["b"])
+	}
+	// 子树**内容零改动**：容器路径变了，但 blob 名（metaName）不变。
 	c := fs.index["b/a/child/f1.mp4"]
-	if c == nil || c.dirSeg != childSeg || c.metaName != childMeta {
-		t.Error("子目录文件容器/meta 零改动断言失败")
+	if c == nil || c.dirSeg != newChildSeg || c.metaName != childMeta {
+		t.Errorf("子目录文件：dirSeg=%q(want %q) meta=%q(want %q)", c.dirSeg, newChildSeg, c.metaName, childMeta)
 	}
 	d := fs.index["b/a/child/deep/f2.mp4"]
-	if d == nil || d.dirSeg != deepSeg || d.metaName != deepMeta {
-		t.Error("深层子文件容器/meta 零改动断言失败")
+	if d == nil || d.dirSeg != newDeepSeg || d.metaName != deepMeta {
+		t.Errorf("深层子文件：dirSeg=%q(want %q) meta=%q(want %q)", d.dirSeg, newDeepSeg, d.metaName, deepMeta)
 	}
-	// 子树 dirMeta blob 名不变（仅根 a 被重写）。
-	if dirMetaNameOf(t, ctx, fs.inner, childSeg) != childDmBefore {
-		t.Error("子目录 meta blob 不应被移动改写（零改动）")
+	// 子树 dirMeta blob **名不变**（仅被移动的根 a 重写；子树目录 meta 不重写）——在新位置读。
+	if dirMetaNameOf(t, ctx, fs.inner, newChildSeg) != childDmBefore {
+		t.Error("子目录 meta blob 不应被改写（内容零改动）")
 	}
-	if dirMetaNameOf(t, ctx, fs.inner, deepSeg) != deepDmBefore {
-		t.Error("深层子目录 meta blob 不应被移动改写（零改动）")
+	if dirMetaNameOf(t, ctx, fs.inner, newDeepSeg) != deepDmBefore {
+		t.Error("深层子目录 meta blob 不应被改写（内容零改动）")
 	}
 	// 重启后在新路径按父引用解析。
 	fs2, err := NewFS(fs.inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo,
@@ -1606,45 +1620,82 @@ type backingBlobSnapshot struct {
 }
 
 // snapshotBackingBlobs 遍历底层容器，收集内容分块（名→内容哈希）与 meta blob 名。
+// collectContainerEntries 递归收集**每个容器目录**的直接条目（键 = 容器相对路径）。
+func collectContainerEntries(t *testing.T, inner syncpkg.FS, prefix string, out map[string][]syncpkg.Entry) {
+	t.Helper()
+	ctx := context.Background()
+	entries, err := inner.ListDir(ctx, prefix)
+	if err != nil {
+		t.Fatalf("ListDir(%s): %v", prefix, err)
+	}
+	if prefix != "" {
+		out[prefix] = entries
+	}
+	for _, e := range entries {
+		if !e.IsDir {
+			continue
+		}
+		child := e.Name
+		if prefix != "" {
+			child = prefix + "/" + e.Name
+		}
+		collectContainerEntries(t, inner, child, out)
+	}
+}
+
+// walkBackingFiles 递归遍历底层容器树上的**文件**（跳过目录），回调收到「容器相对路径 + 条目」。
+//
+// **必须递归**：容器物理嵌套（子容器落在父容器内，2026-10-14 用户口径）⇒ 只列卷根一层会把子容器
+// 目录当成文件（读目录失败）且漏掉全部嵌套层级。
+func walkBackingFiles(t *testing.T, inner syncpkg.FS, fn func(rel string, e syncpkg.Entry)) {
+	t.Helper()
+	ctx := context.Background()
+	var walk func(prefix string)
+	walk = func(prefix string) {
+		entries, err := inner.ListDir(ctx, prefix)
+		if err != nil {
+			t.Fatalf("ListDir(%s): %v", prefix, err)
+		}
+		for _, e := range entries {
+			rel := e.Name
+			if prefix != "" {
+				rel = prefix + "/" + e.Name
+			}
+			if e.IsDir {
+				walk(rel)
+				continue
+			}
+			fn(rel, e)
+		}
+	}
+	walk("")
+}
+
 func snapshotBackingBlobs(t *testing.T, fs *SecretdataFS) backingBlobSnapshot {
 	t.Helper()
 	snap := backingBlobSnapshot{content: map[string]string{}, meta: map[string]struct{}{}, dirs: map[string]struct{}{}}
 	ctx := context.Background()
-	rootEntries, err := fs.inner.ListDir(ctx, "")
-	if err != nil {
-		t.Fatalf("ListDir(root): %v", err)
-	}
-	for _, e := range rootEntries {
-		if !e.IsDir {
-			continue
+	walkBackingFiles(t, fs.inner, func(key string, f syncpkg.Entry) {
+		switch shardseal.ClassifyName(f.Name) {
+		case shardseal.KindFileMeta:
+			snap.meta[key] = struct{}{}
+			return
+		case shardseal.KindDirMeta:
+			snap.dirs[key] = struct{}{}
+			return
 		}
-		files, lerr := fs.inner.ListDir(ctx, e.Name)
-		if lerr != nil {
-			t.Fatalf("ListDir(%s): %v", e.Name, lerr)
+		rc, oerr := fs.inner.OpenRead(ctx, key)
+		if oerr != nil {
+			t.Fatalf("OpenRead(%s): %v", key, oerr)
 		}
-		for _, f := range files {
-			key := e.Name + "/" + f.Name
-			switch shardseal.ClassifyName(f.Name) {
-			case shardseal.KindFileMeta:
-				snap.meta[key] = struct{}{}
-				continue
-			case shardseal.KindDirMeta:
-				snap.dirs[key] = struct{}{}
-				continue
-			}
-			rc, oerr := fs.inner.OpenRead(ctx, key)
-			if oerr != nil {
-				t.Fatalf("OpenRead(%s): %v", key, oerr)
-			}
-			data, rerr := io.ReadAll(rc)
-			_ = rc.Close()
-			if rerr != nil {
-				t.Fatalf("ReadAll(%s): %v", key, rerr)
-			}
-			sum := sha256.Sum256(data)
-			snap.content[key] = hex.EncodeToString(sum[:])
+		data, rerr := io.ReadAll(rc)
+		_ = rc.Close()
+		if rerr != nil {
+			t.Fatalf("ReadAll(%s): %v", key, rerr)
 		}
-	}
+		sum := sha256.Sum256(data)
+		snap.content[key] = hex.EncodeToString(sum[:])
+	})
 	return snap
 }
 

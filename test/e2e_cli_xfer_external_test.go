@@ -67,10 +67,10 @@ func TestE2E_CLI_Xfer_ExternalVolumeMoveAndRmdir(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 起点：加密卷（vault）。
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "xfer.bin")
+	env.sclient(t, env.TmpDir, "upload", "xfer.bin", "vault:/")
 
 	// ① 加密卷 → 本地卷（此前 400 无效的文件路径）。
-	env.sclient(t, env.TmpDir, "mv", "vault:/xfer.bin", "xfer.bin", "--to-volume", "main")
+	env.sclient(t, env.TmpDir, "mv", "vault:/xfer.bin", "main:/xfer.bin")
 	if out := env.sclient(t, env.TmpDir, "list", "vault:/"); strings.Contains(out, "xfer.bin") {
 		t.Fatalf("移动后源卷不应再有该文件, got:\n%s", out)
 	}
@@ -80,7 +80,7 @@ func TestE2E_CLI_Xfer_ExternalVolumeMoveAndRmdir(t *testing.T) {
 	downloadAndAssert(t, env, "main:/xfer.bin", content)
 
 	// ② 本地卷 → 加密卷（此前 400）。
-	env.sclient(t, env.TmpDir, "mv", "main:/xfer.bin", "xfer.bin", "--to-volume", "vault")
+	env.sclient(t, env.TmpDir, "mv", "main:/xfer.bin", "vault:/xfer.bin")
 	if out := env.sclient(t, env.TmpDir, "list", "main:/"); strings.Contains(out, "xfer.bin") {
 		t.Fatalf("移动后本地卷不应再有该文件, got:\n%s", out)
 	}

@@ -54,10 +54,30 @@ volumes:
 ```
 
 密钥文件（`secrets://mykeys/datakey`）需**手动放置**：在 secrets 卷底层 `<root>/secrets/` 目录放一个
-64-hex 文本文件（如 `datakey`）。当前 sclient / Web UI 尚未接通加密卷文件面，密钥文件由运维放置
-（参数见 §9 已知限制一）；`sclient trust login` 不会创建卷内密钥文件。
+64-hex 文本文件（如 `datakey`）。sclient 加密卷文件面已接线（上传/下载/改名/删文件/删目录，见 §8），
+密钥文件由运维放置（`sclient trust login` 不会创建卷内密钥文件；本地工具 `sealfile` 只读该文件做
+本地加密，不创建 secrets 卷密钥）。
 
 配置完后重启 sproxy，`volumes[]` 即含 `vault`（加密卷），可经 `secretdata://vault/<path>` 读写（见 §4）。
+
+### 2.1 本地加解密工具（`sclient sealfile`）
+
+`sclient sealfile`（本地命令，不连服务端）用与 secretdata 卷**同一写内核**（`secretdata.NewFS`）
+在本地加密文件，加密产物可直接作为 `type: secretdata` 卷根加载播放（详见 `docs/cli.md`「sealfile」）：
+
+```bash
+# 本地加密（视频自动关键帧分块，与 sproxy 同款）
+sclient sealfile encrypt movie.mp4 --key ./datakey --output-dir ./sealed
+# 产物目录作为 secretdata 卷根装配：extra.root=./sealed + secret_url 指向同一密钥文件
+# 解密还原 / 查看产物信息
+sclient sealfile decrypt ./sealed --key ./datakey -o movie.mp4.restored
+sclient sealfile info ./sealed --key ./datakey
+```
+
+- 产物逻辑布局 `<owner>/user/<名>` 对齐服务器键空间（`Location.FSPath` 恒 owner 前缀）：
+  `--owner` 默认 `anonymous`；**签名请求的 owner 即 AK 字符串**，产物要命中须用对应 AK。
+- 密钥文件内容**原样字节**作 secret（与 `secret_url` 读取同一语义，不要求 hex）。
+- 命令/配置段（`sealfile.key` / `sealfile.out_dir` / `sealfile.owner` 等）见 `docs/cli.md`。
 
 ## 3. 配置参考
 
@@ -162,14 +182,25 @@ secretdata://<卷>/<path>        # secretdata 卷内文件路径
 
 ## 5. 目录与移动语义
 
-secretdata 卷的底层**没有 `data`/`meta` 顶层目录**，而是一个随机命名容器目录：
+secretdata 卷的底层**没有 `data`/`meta` 顶层目录**，而是一个随机命名容器目录；容器**物理嵌套**
+（子容器落在父容器目录内，2026-10-14 用户口径）⇒ **底层目录树与逻辑目录树同形**：
 
 ```
-<secretdata根>/<randDir 5-30>/     # 一个逻辑目录 = 一个随机命名容器目录
+<secretdata根>/<randDir 5-30>/          # 逻辑根目录的容器（顶层唯一）
     目录 meta（q 标记，存 {name, parent_dir_id} 父引用）
     文件 meta（z 标记，存文件根信息）
     加密分块（无标记）
+    <randDir 5-30>/                     # 逻辑子目录的容器（落在**父容器内**）
+        目录 meta / 文件 meta / 加密分块
+        …                               # 逐级嵌套，深度 = 逻辑目录深度
 ```
+
+- **为什么嵌套**：扁平布局（所有容器都是卷根下的兄弟目录）在**存储上看不出父子关系**——备份/迁移/
+  人工排查无法对应逻辑树。嵌套后底层目录树即逻辑树（名字仍全匿名）。
+- **只支持嵌套布局（不提供兼容）**：加载侧**递归**收集容器（`dirContainers`）后校验
+  **容器物理位置 == 逻辑父目录的容器位置**（`validateNestedContainers`）；旧**扁平**布局（所有容器都是
+  卷根下的兄弟目录）⇒ **fail-closed 拒绝挂载**（报错提示重建该卷）。逻辑路径仍沿 `parent_dir_id`
+  父引用重算（与物理位置解耦，但物理位置必须与之一致）。
 
 - **父引用解耦**：目录 meta 不关心父目录物理在哪，逻辑路径沿 parent 链重算（根 → … → name）。
   目录间完全解耦（task10），父引用断裂 fail-closed 跳过该容器。

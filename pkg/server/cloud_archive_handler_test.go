@@ -5,18 +5,25 @@ package server
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
+	"github.com/cocomhub/sproxy/pkg/compressx"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
@@ -659,5 +666,268 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	// kind=cloud_archive 下载 filename=xxx.tar.gz → 200
 	if code := env.doGet(t, "alice", "/download?filename=xxx.tar.gz&kind=cloud_archive"); code != http.StatusOK {
 		t.Fatalf("kind=cloud_archive 下载应 200, got %d", code)
+	}
+}
+
+// setupCloudArchiveVolumeHandlers 构造带 fake 外部卷 + completed 任务的 handler，
+// 供单任务/批量归档 target_volume 的统一转存测试直接调用 handler（不经 HTTP mux）。
+func setupCloudArchiveVolumeHandlers(t *testing.T) (*Handlers, *serverMemFS, *cloud.CloudDownloadManager) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "archive-volume-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := newAssemblyTestHandlers(t, dir)
+	fs := &serverMemFS{files: map[string][]byte{}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	sm := capacity.NewStorageManager(dir, 1<<30, nil, testLogger())
+	h.storageMgr = sm
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{
+		UploadsDir: dir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor,
+		ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs,
+		Logger: testLogger(), Config: defaultCloudDownloadConfig(),
+	})
+	h.cloudMgr = mgr
+	return h, fs, mgr
+}
+
+// TestCloudArchive_SingleTask_ToVolume 单任务归档 target_volume：打包转存外部卷
+// （owner 前缀键 + tar.gz 内容），不再静默按桶归档。
+func TestCloudArchive_SingleTask_ToVolume(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/archive/s.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+	if _, err := gzip.NewReader(bytes.NewReader(fs.files[key])); err != nil {
+		t.Fatalf("目标应为 tar.gz（gzip 头）: %v", err)
+	}
+}
+
+// TestCloudArchive_Batch_ToVolume 批量归档 target_volume：多文件打包转存外部卷。
+func TestCloudArchive_Batch_ToVolume(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id1 := createCompletedTask(t, mgr, "a.bin")
+	id2 := createCompletedTask(t, mgr, "b.bin")
+	body := fmt.Sprintf(`{"task_ids":[%q,%q],"archive_name":"batch.tar.gz","target_volume":"vault"}`, id1, id2)
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/archive", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.cloudArchiveBatch(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/archive/batch.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite 同名归档二次转存 → 409：锁定
+// 目标卷装饰链的 WriteIfAbsent + transfer 存在性检查（防静默覆盖）。
+func TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	post := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+			strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
+		req.SetPathValue("id", id)
+		rec := httptest.NewRecorder()
+		h.cloudArchiveTask(rec, req)
+		return rec.Code
+	}
+	if code := post(); code != http.StatusOK {
+		t.Fatalf("首次转存应 200，got %d", code)
+	}
+	if code := post(); code != http.StatusConflict {
+		t.Fatalf("同名二次转存应 409（拒绝静默覆盖），got %d", code)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_LockKey 转存写锁与文件域同键空间（user/<rel>）：
+// 预占 user/archive/lock.tar.gz 锁后转存应 409（证明锁键未用带 owner 前缀的 FSPath）。
+func TestCloudArchive_SingleTask_ToVolume_LockKey(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	release, ok := h.acquireFileLock("", "user/archive/lock.tar.gz")
+	if !ok {
+		t.Fatal("预占锁失败")
+	}
+	defer release()
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"lock.tar.gz","target_volume":"vault"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("锁被占时应 409，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_SecretsRejected secrets 密钥卷非通用转存目标 →
+// 400 fail-closed（与 cloud 下载转存 checkTransferVolumePreflight 同语义）。
+func TestCloudArchive_SingleTask_ToVolume_SecretsRejected(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	h.volSet = newFakeVolSetForTypedTransfer("secrets", "secrets", &serverMemFS{files: map[string][]byte{}})
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"secrets"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("secrets 卷应 400，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_TargetPath 显式目标路径（客户端由卷 URI 归一）：
+// user 桶内子目录 + 文件名直接生效，不再固定 archive/ 前缀。
+func TestCloudArchive_SingleTask_ToVolume_TargetPath(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	body := `{"archive_name":"s.tar.gz","target_volume":"vault","target_path":"backups/2026/s.tar.gz"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/backups/2026/s.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+	var resp CloudArchiveResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if want := "vault://vault/" + key; resp.File != want {
+		t.Fatalf("File=%q want %q", resp.File, want)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_Encrypt 归档转存 + 流式加密（encrypt=true）：
+// 产物为 tar.gz.aes 密文（不可直接 gzip 解），密钥来自 archive.key_file，解密后 tar 内含源文件。
+func TestCloudArchive_SingleTask_ToVolume_Encrypt(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	key := bytes.Repeat([]byte{0x11}, 32)
+	keyPath := filepath.Join(h.cfgPtr.Load().StorageRoot, "archive.key")
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.cfgPtr.Load().Archive.KeyFile = keyPath
+
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault","encrypt":true}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	raw := fs.files["anonymous/user/archive/s.tar.gz.aes"]
+	if len(raw) == 0 {
+		t.Fatal("加密转存未落盘")
+	}
+	if _, err := gzip.NewReader(bytes.NewReader(raw)); err == nil {
+		t.Fatal("加密产物不应直接 gzip 可解")
+	}
+	cr, err := files.NewCipherReader("aes-256-gcm", key, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("NewCipherReader: %v", err)
+	}
+	gr, err := gzip.NewReader(cr)
+	if err != nil {
+		t.Fatalf("解密后应可 gzip 解: %v", err)
+	}
+	defer gr.Close()
+	names, err := tarNames(gr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "single.bin" {
+		t.Fatalf("tar 文件列表 %v", names)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_Compression 归档转存 + 压缩选型（zstd）。
+func TestCloudArchive_SingleTask_ToVolume_Compression(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault","compression":"zstd"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	raw := fs.files["anonymous/user/archive/s.tar.gz"]
+	if _, err := gzip.NewReader(bytes.NewReader(raw)); err == nil {
+		t.Fatal("zstd 产物不应被 gzip 解")
+	}
+	zr, err := compressx.NewReader(compressx.Zstd, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("NewReader(zstd): %v", err)
+	}
+	defer zr.Close()
+	if _, err := tarNames(zr); err != nil {
+		t.Fatalf("zstd 解包: %v", err)
+	}
+}
+
+// TestCloudArchive_ExtrasRequireTarget 预处理/目标路径选项缺前置条件 → 400（防静默忽略）：
+// encrypt/compression 无 target_volume；cipher 无 encrypt；target_path 无 target_volume。
+func TestCloudArchive_ExtrasRequireTarget(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	for _, body := range []string{
+		`{"archive_name":"s.tar.gz","encrypt":true}`,
+		`{"archive_name":"s.tar.gz","compression":"zstd"}`,
+		`{"archive_name":"s.tar.gz","target_volume":"vault","cipher":"aes-256-gcm"}`,
+		`{"archive_name":"s.tar.gz","target_path":"backups/s.tar.gz"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
+		req.SetPathValue("id", id)
+		rec := httptest.NewRecorder()
+		h.cloudArchiveTask(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("选项缺前置条件应 400，body=%s got %d", body, rec.Code)
+		}
+	}
+}
+
+// tarNames 读取 tar 流的条目名列表。
+func tarNames(r io.Reader) ([]string, error) {
+	tr := tar.NewReader(r)
+	var names []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return names, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, hdr.Name)
 	}
 }
