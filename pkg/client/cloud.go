@@ -313,7 +313,10 @@ func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
 type CloudArchiveOption func(*cloudArchiveOptions)
 
 type cloudArchiveOptions struct {
-	target *TransferSpec
+	target      *TransferSpec
+	encrypt     bool
+	cipher      string
+	compression string
 }
 
 // WithCloudArchiveTarget 设置归档转存目标：打包后转存到外部卷的指定路径（统一转存）。
@@ -324,7 +327,20 @@ func WithCloudArchiveTarget(t *TransferSpec) CloudArchiveOption {
 	return func(o *cloudArchiveOptions) { o.target = t }
 }
 
-// buildArchiveBody 组装归档请求体（archive_name + 可选 target_volume/target_path）。
+// WithCloudArchiveEncrypt 归档转存时流式加密（tar.<ext>.aes）；密钥来自服务端
+// archive.key_file（未配置 → 400 fail-closed）。cipher 空 = aes-256-gcm；仅与
+// WithCloudArchiveTarget 同用（未设 target 时服务端 400，防静默忽略）。
+func WithCloudArchiveEncrypt(cipher string) CloudArchiveOption {
+	return func(o *cloudArchiveOptions) { o.encrypt = true; o.cipher = cipher }
+}
+
+// WithCloudArchiveCompression 归档转存压缩算法选型（gzip 默认 / zstd / brotli；
+// 非法值服务端 400，不静默回退）。仅与 WithCloudArchiveTarget 同用。
+func WithCloudArchiveCompression(algo string) CloudArchiveOption {
+	return func(o *cloudArchiveOptions) { o.compression = algo }
+}
+
+// buildArchiveBody 组装归档请求体（archive_name + 可选 target/encrypt/compression）。
 func buildArchiveBody(archiveName string, opts []CloudArchiveOption) map[string]any {
 	var o cloudArchiveOptions
 	for _, fn := range opts {
@@ -336,6 +352,15 @@ func buildArchiveBody(archiveName string, opts []CloudArchiveOption) map[string]
 		if o.target.Path != "" {
 			body["target_path"] = o.target.Path
 		}
+	}
+	if o.encrypt {
+		body["encrypt"] = true
+		if o.cipher != "" {
+			body["cipher"] = o.cipher
+		}
+	}
+	if o.compression != "" {
+		body["compression"] = o.compression
 	}
 	return body
 }

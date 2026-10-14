@@ -830,3 +830,27 @@ func TestCloudArchive_WithTarget(t *testing.T) {
 		t.Fatalf("未设 target 不应带 target_volume: %+v", body)
 	}
 }
+
+// TestCloudArchive_WithEncryptAndCompression 加密/压缩选型随请求体发送（未设 cipher 不带该字段）。
+func TestCloudArchive_WithEncryptAndCompression(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "file": "vault://vault/a.tar.gz"})
+	}))
+	defer ts.Close()
+	c := NewFileClient(ts.URL)
+	if _, err := c.ArchiveCloudTask(t.Context(), "t1", "a.tar.gz",
+		WithCloudArchiveTarget(&TransferSpec{Volume: "vault", Path: "b/a.tar.gz"}),
+		WithCloudArchiveEncrypt(""), WithCloudArchiveCompression("zstd")); err != nil {
+		t.Fatalf("ArchiveCloudTask: %v", err)
+	}
+	if body["encrypt"] != true || body["compression"] != "zstd" {
+		t.Fatalf("请求体预处理选项错误: %+v", body)
+	}
+	if _, ok := body["cipher"]; ok {
+		t.Fatalf("空 cipher 不应发送: %+v", body)
+	}
+}

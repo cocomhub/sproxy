@@ -46,6 +46,9 @@ func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, st *st
 
 	cmd.Flags().String("name", "", "归档文件名（默认自动生成）")
 	cmd.Flags().String("target", "", "转存目标（卷 URI 路径 <卷名>:/<路径>；缺省落服务端 archive 桶）")
+	cmd.Flags().Bool("encrypt", false, "转存时流式加密（tar.aes；需服务端 archive.key_file；仅与 --target 同用）")
+	cmd.Flags().String("cipher", "", "加密算法（默认 aes-256-gcm；仅与 --encrypt/--target 同用）")
+	cmd.Flags().String("compress", "", "压缩算法（gzip 默认 / zstd / brotli；仅与 --target 同用）")
 
 	return cmd
 }
@@ -62,7 +65,11 @@ func runCloudArchive(cmd *cobra.Command, args []string, svc *client.FileClient, 
 		ios.WriteErrLine("%v", terr)
 		return terr
 	}
-	opts := archiveTargetOpts(target)
+	opts, oerr := archivePreOpts(cmd, target)
+	if oerr != nil {
+		ios.WriteErrLine("%v", oerr)
+		return oerr
+	}
 
 	if len(args) == 1 {
 		result, err := svc.ArchiveCloudTask(cmd.Context(), args[0], archiveName, opts...)
@@ -98,6 +105,25 @@ func archiveTargetOpts(t *client.TransferSpec) []client.CloudArchiveOption {
 		return nil
 	}
 	return []client.CloudArchiveOption{client.WithCloudArchiveTarget(t)}
+}
+
+// archivePreOpts 组装归档预处理 option（--encrypt/--cipher/--compress）；仅与 --target 同用
+// （无 target 时本地 fail-fast，与服务端 400 一致，防静默忽略）。
+func archivePreOpts(cmd *cobra.Command, target *client.TransferSpec) ([]client.CloudArchiveOption, error) {
+	encrypt, _ := cmd.Flags().GetBool("encrypt")
+	cipher, _ := cmd.Flags().GetString("cipher")
+	compress, _ := cmd.Flags().GetString("compress")
+	if (encrypt || cipher != "" || compress != "") && target == nil {
+		return nil, fmt.Errorf("--encrypt/--cipher/--compress 仅与 --target（转存外部卷）同用")
+	}
+	opts := archiveTargetOpts(target)
+	if encrypt {
+		opts = append(opts, client.WithCloudArchiveEncrypt(cipher))
+	}
+	if compress != "" {
+		opts = append(opts, client.WithCloudArchiveCompression(compress))
+	}
+	return opts, nil
 }
 
 // resolveArchiveTarget 把 `--target` 的卷 URI 路径归一为转存目标（volume+path）。

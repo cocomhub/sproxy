@@ -15,4 +15,6 @@ var (
 	ErrIndividualMulti = errors.New("transfer: individual 模式仅支持单条目")
 	// ErrExists 目标已存在且不允许覆盖（WriteIfAbsent 拒绝）。
 	ErrExists = errors.New("transfer: 目标已存在（拒绝覆盖）")
+	// ErrUnknownPreprocessor 预处理器名未注册。
+	ErrUnknownPreprocessor = errors.New("transfer: 预处理器未注册")
 )

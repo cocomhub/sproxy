@@ -20,8 +20,18 @@ var (
 	preprocessors = map[string]PreprocessorFactory{}
 )
 
-// PreprocessorFactory 按配置构造预处理器（nil 配置 = 默认参数）。
-type PreprocessorFactory func(cfg map[string]any) (Preprocessor, error)
+// PreprocessorConfig 是预处理器构造参数（类型化，非 map——避免任意键漂移）。
+type PreprocessorConfig struct {
+	// Compression 压缩算法（调用方应先经 compressx.Parse 归一，默认 gzip）。
+	Compression compressx.Algorithm
+	// Cipher 加密算法名（空 = defaultCipher）；仅 EncryptKey 非空时生效。
+	Cipher string
+	// EncryptKey 非 nil（32 字节）= 加密打包（tar.<ext>.aes）；nil = 纯打包。
+	EncryptKey []byte
+}
+
+// PreprocessorFactory 按类型化配置构造预处理器。
+type PreprocessorFactory func(cfg PreprocessorConfig) (Preprocessor, error)
 
 // Register 注册预处理器类型。重名 panic（装配期 fail-fast，防静默覆盖）。
 func Register(name string, f PreprocessorFactory) {
@@ -43,12 +53,31 @@ func Lookup(name string) PreprocessorFactory {
 	return preprocessors[name]
 }
 
+// New 按名构造预处理器（未注册 → ErrUnknownPreprocessor）。
+func New(name string, cfg PreprocessorConfig) (Preprocessor, error) {
+	f := Lookup(name)
+	if f == nil {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownPreprocessor, name)
+	}
+	return f(cfg)
+}
+
+// init 注册内置打包预处理器（tar：压缩 + 可选加密）——使 registry 成为「预处理选型」
+// 的唯一入口（服务端经 New("tar", cfg) 构造，防直接散建）。
+func init() {
+	Register("tar", func(cfg PreprocessorConfig) (Preprocessor, error) {
+		return &TarPreprocessor{Compression: cfg.Compression, Cipher: cfg.Cipher, EncryptKey: cfg.EncryptKey}, nil
+	})
+}
+
 // TarPreprocessor 是打包预处理（复用 compressx 压缩 + archive/tar）。
 // 把 N 个源文件打包为单一 tar 流（可选压缩算法 gzip/zstd/brotli）。
 type TarPreprocessor struct {
 	// Compression 压缩算法（gzip 默认；zstd/brotli 扩展）。
 	Compression compressx.Algorithm
-	// EncryptKey 非 nil = AES 加密打包（tar.gz.aes）；nil = 纯 tar。
+	// Cipher 加密算法名（空 = aes-256-gcm）；仅 EncryptKey 非空时生效。
+	Cipher string
+	// EncryptKey 非 nil = 加密打包（tar.gz.aes）；nil = 纯 tar。
 	EncryptKey []byte
 }
 
@@ -87,7 +116,7 @@ func (p *TarPreprocessor) packDest(w io.Writer) (io.Writer, func(), error) {
 	if len(p.EncryptKey) == 0 {
 		return w, func() {}, nil
 	}
-	ew, err := newAESWriter(w, p.EncryptKey)
+	ew, err := newCipherWriter(w, p.Cipher, p.EncryptKey)
 	if err != nil {
 		return nil, nil, err
 	}

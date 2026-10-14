@@ -283,3 +283,25 @@ func TestExecute_NoWriteIfAbsentStillRejectsOverwrite(t *testing.T) {
 		t.Fatalf("二次写不得覆盖，got %q", got)
 	}
 }
+
+// TestNew_Registry 预处理选型注册表：内置 "tar" 可构造（含加密变体）；未知名 → ErrUnknownPreprocessor。
+func TestNew_Registry(t *testing.T) {
+	t.Parallel()
+	p, err := New("tar", PreprocessorConfig{Compression: compressx.Gzip})
+	if err != nil {
+		t.Fatalf("New(tar): %v", err)
+	}
+	if p.Name() != "tar" {
+		t.Fatalf("Name=%q want tar", p.Name())
+	}
+	enc, err := New("tar", PreprocessorConfig{Compression: compressx.Gzip, EncryptKey: make([]byte, 32)})
+	if err != nil {
+		t.Fatalf("New(tar,encrypt): %v", err)
+	}
+	if enc.Name() != "tar-encrypt" {
+		t.Fatalf("Name=%q want tar-encrypt", enc.Name())
+	}
+	if _, err := New("nope", PreprocessorConfig{}); !errors.Is(err, ErrUnknownPreprocessor) {
+		t.Fatalf("未知预处理器应 ErrUnknownPreprocessor，got %v", err)
+	}
+}

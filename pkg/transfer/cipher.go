@@ -11,18 +11,24 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 )
 
-// newAESWriter 构造 AES-256-GCM 流式加密 writer（复用 files.NewCipherWriter，
-// 与归档 archiveCipherWriter 同实现，保证加密产物格式一致可解）。
-func newAESWriter(w io.Writer, key []byte) (io.WriteCloser, error) {
+// newCipherWriter 构造流式加密 writer（复用 files.NewCipherWriter，与归档
+// archiveCipherWriter 同实现，保证加密产物格式一致可解）。cipherName 空 = aes-256-gcm。
+func newCipherWriter(w io.Writer, cipherName string, key []byte) (io.WriteCloser, error) {
+	if cipherName == "" {
+		cipherName = defaultCipher
+	}
 	if len(key) != 32 {
 		return nil, fmt.Errorf("transfer: 加密密钥需 32 字节，实际 %d", len(key))
 	}
-	cw, err := files.NewCipherWriter("aes-256-gcm", key, w)
+	cw, err := files.NewCipherWriter(cipherName, key, w)
 	if err != nil {
 		return nil, fmt.Errorf("transfer: 加密 writer: %w", err)
 	}
 	return cw, nil
 }
+
+// defaultCipher 是默认加密算法（与归档 /api/archive 一致）。
+const defaultCipher = "aes-256-gcm"
 
 // unixToTime 转换 Unix 秒为 time.Time（tar header ModTime）。
 func unixToTime(unix int64) time.Time {

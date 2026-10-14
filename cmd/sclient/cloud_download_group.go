@@ -448,9 +448,10 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, s
 				ios.WriteErrLine("%v", terr)
 				return terr
 			}
-			var opts []client.CloudArchiveOption
-			if target != nil {
-				opts = append(opts, client.WithCloudArchiveTarget(target))
+			opts, oerr := archivePreOpts(cmd, target)
+			if oerr != nil {
+				ios.WriteErrLine("%v", oerr)
+				return oerr
 			}
 			result, err := svc.CloudArchiveGroup(cmd.Context(), groupID, archiveName, opts...)
 			if err != nil {
@@ -466,6 +467,9 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, s
 		},
 	}
 	cmd.Flags().String("target", "", "转存目标（卷 URI 路径 <卷名>:/<路径>；缺省落服务端 archive 桶）")
+	cmd.Flags().Bool("encrypt", false, "转存时流式加密（tar.aes；需服务端 archive.key_file；仅与 --target 同用）")
+	cmd.Flags().String("cipher", "", "加密算法（默认 aes-256-gcm；仅与 --encrypt/--target 同用）")
+	cmd.Flags().String("compress", "", "压缩算法（gzip 默认 / zstd / brotli；仅与 --target 同用）")
 	return cmd
 }
 

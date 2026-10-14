@@ -498,8 +498,11 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 `<owner>/user/<target_path>`（经 `volume.ResolveUserLocation` 唯一入口，与读路径同键空间，
 可经 `/download` 命中；外部卷不走本地文件索引，故不出现在 `/api/files` 列表），响应 `file` 为
 可 `ResolveURL` 取用的 URL（非归档名）。空/缺省 = 沿既有行为落租户 archive 桶。同名目标已存在
-→ 409（拒绝静默覆盖）。CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，cd/mv 同规约）指定，
-客户端归一为 `target_volume`/`target_path` 后发送（协议层不解析 URI）。
+→ 409（拒绝静默覆盖）。可选 `encrypt`（true = 打包流式加密 `tar.<ext>.aes`，密钥来自
+服务端 `archive.key_file`）、`cipher`（默认 aes-256-gcm）、`compression`（gzip 默认 / zstd /
+brotli；非法值 400）——三者仅与 `target_volume` 同用（未指定 target 时设置 → 400，防静默忽略）。
+CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，cd/mv 同规约）指定，客户端归一为
+`target_volume`/`target_path` 后发送（协议层不解析 URI）。
 
 ### POST /api/cloud/archive
 

@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
+	"github.com/cocomhub/sproxy/pkg/compressx"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -37,6 +39,13 @@ type CloudArchiveRequest struct {
 	// 由客户端从卷 URI（`<卷名>:/<路径>`，cd/mv 同规约）归一后传入；路径安全由
 	// volume.ResolveUserLocation 唯一入口校验（协议层只收 volume+path，不解析 URI）。
 	TargetPath string `json:"target_path,omitempty"`
+	// Encrypt = true 时打包输出流式加密（tar.<ext>.aes；密钥来自 archive.key_file）。
+	// 仅与 TargetVolume 同用（未指定 target 时设此项 → 400，防静默忽略）。
+	Encrypt bool `json:"encrypt,omitempty"`
+	// Cipher 是加密算法选型（空 = aes-256-gcm）；与 Encrypt 同用。
+	Cipher string `json:"cipher,omitempty"`
+	// Compression 是压缩算法选型（空 = gzip）；gzip/zstd/brotli，非法值 400（不静默回退）。
+	Compression string `json:"compression,omitempty"`
 }
 
 // CloudArchiveBatchRequest 是 POST /api/cloud/archive 的请求体。
@@ -48,6 +57,10 @@ type CloudArchiveBatchRequest struct {
 	TargetVolume string `json:"target_volume,omitempty"`
 	// TargetPath 同 CloudArchiveRequest.TargetPath（目标卷 user 桶内相对路径）。
 	TargetPath string `json:"target_path,omitempty"`
+	// Encrypt / Cipher / Compression 同 CloudArchiveRequest（仅与 TargetVolume 同用）。
+	Encrypt     bool   `json:"encrypt,omitempty"`
+	Cipher      string `json:"cipher,omitempty"`
+	Compression string `json:"compression,omitempty"`
 }
 
 // CloudArchiveResult 是归档操作响应结构体。
@@ -109,7 +122,10 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 统一转存：target_volume → 打包转存外部卷（统一「归档 = 转存 + 预处理」管道），
-	// 不落租户 archive 桶。
+	// 不落租户 archive 桶。encrypt/cipher/compression 仅与 target_volume 同用（防静默忽略）。
+	if !h.validateArchiveExtras(w, req.TargetVolume, req.Encrypt, req.Cipher, req.Compression) {
+		return
+	}
 	if req.TargetVolume != "" {
 		h.cloudArchiveTaskToVolume(w, r, taskID, task, req, srcTnt, srcRel, info, archiveName)
 		return
@@ -196,7 +212,10 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 统一转存：target_volume → 打包转存外部卷（统一「归档 = 转存 + 预处理」管道），
-	// 不落租户 archive 桶。
+	// 不落租户 archive 桶。encrypt/cipher/compression 仅与 target_volume 同用。
+	if !h.validateArchiveExtras(w, req.TargetVolume, req.Encrypt, req.Cipher, req.Compression) {
+		return
+	}
 	if req.TargetVolume != "" {
 		h.cloudArchiveBatchToVolume(w, r, req, files, totalSourceSize, archiveName)
 		return
@@ -393,7 +412,11 @@ func (h *Handlers) cloudArchiveTaskToVolume(w http.ResponseWriter, r *http.Reque
 	entries := []transfer.SourceEntry{{
 		Rel: task.Filename, Size: size, ModTime: info.ModTime().Unix(), Reader: f,
 	}}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, req.TargetPath, name, entries, size, h.logger.With("archive", "cloud_task", "task_id", taskID), nil)
+	h.cloudArchiveToVolume(w, r, archiveVolumeTransfer{
+		Owner: owner, TargetVolume: req.TargetVolume, TargetPath: req.TargetPath, ArchiveName: name,
+		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
+		Entries: entries, TotalSize: size,
+	}, h.logger.With("archive", "cloud_task", "task_id", taskID), nil)
 }
 
 // cloudArchiveBatchToVolume 批量归档统一转存：多文件（tar.gz 打包）→ 外部卷。
@@ -412,7 +435,11 @@ func (h *Handlers) cloudArchiveBatchToVolume(w http.ResponseWriter, r *http.Requ
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	h.cloudArchiveToVolume(w, r, owner, req.TargetVolume, req.TargetPath, name, entries, totalSize, h.logger.With("archive", "cloud_batch"), nil)
+	h.cloudArchiveToVolume(w, r, archiveVolumeTransfer{
+		Owner: owner, TargetVolume: req.TargetVolume, TargetPath: req.TargetPath, ArchiveName: name,
+		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
+		Entries: entries, TotalSize: totalSize,
+	}, h.logger.With("archive", "cloud_batch"), nil)
 }
 
 // cloudArchiveSettleQuota 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)
@@ -715,4 +742,54 @@ func (h *Handlers) deleteCloudArchive(owner, archiveName string) error {
 	h.tenantMu.Unlock()
 	h.logger.Info("云归档已删除并释放配额", "owner", owner, "archive", archiveName, "size", size)
 	return nil
+}
+
+// validateArchiveExtras 校验「仅转存外部卷支持」的预处理选项（encrypt/cipher/compression）：
+// 未指定 target_volume 时不得设置（防静默忽略——archive 桶路径走既有 createTarGz，不加密）。
+func (h *Handlers) validateArchiveExtras(w http.ResponseWriter, targetVolume string, encrypt bool, cipher, compression string) bool {
+	if targetVolume != "" {
+		return true
+	}
+	if encrypt || cipher != "" || compression != "" {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: "encrypt/cipher/compression 仅支持与 target_volume（转存外部卷）同用",
+		}, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// archivePreprocessor 按请求构造打包预处理器（压缩 + 可选加密，经 transfer registry 选型）。
+// 加密密钥来自 archive.key_file（与 /api/archive 同一约定）。失败已回响应。
+func (h *Handlers) archivePreprocessor(w http.ResponseWriter, encrypt bool, cipher, compression string) (transfer.Preprocessor, bool) {
+	algo := compressx.Gzip
+	if compression != "" {
+		parsed, err := compressx.Parse(compression)
+		if err != nil {
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: err.Error()}, http.StatusBadRequest)
+			return nil, false
+		}
+		algo = parsed
+	}
+	cfg := transfer.PreprocessorConfig{Compression: algo, Cipher: cipher}
+	if encrypt {
+		if cipher != "" {
+			if _, ok := files.LookupCipher(cipher); !ok {
+				sendJSONResponse(w, CloudArchiveResult{Success: false, Message: fmt.Sprintf("未知加密算法 %q", cipher)}, http.StatusBadRequest)
+				return nil, false
+			}
+		}
+		key := h.archiveKey()
+		if len(key) != 32 {
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "归档加密密钥不可用（需配置 archive.key_file）"}, http.StatusBadRequest)
+			return nil, false
+		}
+		cfg.EncryptKey = key
+	}
+	pre, err := transfer.New("tar", cfg)
+	if err != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: err.Error()}, http.StatusInternalServerError)
+		return nil, false
+	}
+	return pre, true
 }

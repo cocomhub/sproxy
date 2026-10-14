@@ -9,6 +9,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
+	"github.com/cocomhub/sproxy/pkg/compressx"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
@@ -815,5 +818,113 @@ func TestCloudArchive_SingleTask_ToVolume_TargetPath(t *testing.T) {
 	}
 	if want := "vault://vault/" + key; resp.File != want {
 		t.Fatalf("File=%q want %q", resp.File, want)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_Encrypt 归档转存 + 流式加密（encrypt=true）：
+// 产物为 tar.gz.aes 密文（不可直接 gzip 解），密钥来自 archive.key_file，解密后 tar 内含源文件。
+func TestCloudArchive_SingleTask_ToVolume_Encrypt(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	key := bytes.Repeat([]byte{0x11}, 32)
+	keyPath := filepath.Join(h.cfgPtr.Load().StorageRoot, "archive.key")
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.cfgPtr.Load().Archive.KeyFile = keyPath
+
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault","encrypt":true}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	raw := fs.files["anonymous/user/archive/s.tar.gz"]
+	if len(raw) == 0 {
+		t.Fatal("加密转存未落盘")
+	}
+	if _, err := gzip.NewReader(bytes.NewReader(raw)); err == nil {
+		t.Fatal("加密产物不应直接 gzip 可解")
+	}
+	cr, err := files.NewCipherReader("aes-256-gcm", key, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("NewCipherReader: %v", err)
+	}
+	gr, err := gzip.NewReader(cr)
+	if err != nil {
+		t.Fatalf("解密后应可 gzip 解: %v", err)
+	}
+	defer gr.Close()
+	names, err := tarNames(gr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "single.bin" {
+		t.Fatalf("tar 文件列表 %v", names)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_Compression 归档转存 + 压缩选型（zstd）。
+func TestCloudArchive_SingleTask_ToVolume_Compression(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault","compression":"zstd"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	raw := fs.files["anonymous/user/archive/s.tar.gz"]
+	if _, err := gzip.NewReader(bytes.NewReader(raw)); err == nil {
+		t.Fatal("zstd 产物不应被 gzip 解")
+	}
+	zr, err := compressx.NewReader(compressx.Zstd, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("NewReader(zstd): %v", err)
+	}
+	defer zr.Close()
+	if _, err := tarNames(zr); err != nil {
+		t.Fatalf("zstd 解包: %v", err)
+	}
+}
+
+// TestCloudArchive_ExtrasRequireTarget encrypt/compression 未配 target_volume → 400（防静默忽略）。
+func TestCloudArchive_ExtrasRequireTarget(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	for _, body := range []string{
+		`{"archive_name":"s.tar.gz","encrypt":true}`,
+		`{"archive_name":"s.tar.gz","compression":"zstd"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
+		req.SetPathValue("id", id)
+		rec := httptest.NewRecorder()
+		h.cloudArchiveTask(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("无 target 的预处理选项应 400，body=%s got %d", body, rec.Code)
+		}
+	}
+}
+
+// tarNames 读取 tar 流的条目名列表。
+func tarNames(r io.Reader) ([]string, error) {
+	tr := tar.NewReader(r)
+	var names []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return names, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, hdr.Name)
 	}
 }

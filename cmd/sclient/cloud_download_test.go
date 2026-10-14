@@ -1250,3 +1250,29 @@ func TestCloudDownloadCmd_ArchiveTargetNoVolume(t *testing.T) {
 		t.Fatal("无卷 URI 且无当前卷应报错")
 	}
 }
+
+// TestCloudDownloadCmd_ArchiveTargetEncrypt 加密/压缩选型随请求体发送；无 --target 时本地 fail-fast。
+func TestCloudDownloadCmd_ArchiveTargetEncrypt(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--name", "a.tar.gz",
+		"--target", "vault:/backups/a.tar.gz", "--encrypt", "--cipher", "aes-256-gcm", "--compress", "zstd"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --encrypt 失败: %v", err)
+	}
+	if body["encrypt"] != true || body["cipher"] != "aes-256-gcm" || body["compression"] != "zstd" {
+		t.Fatalf("请求体预处理选项错误: %+v", body)
+	}
+
+	// 无 --target 设 --encrypt → 本地报错（不静默忽略）。
+	cmd2 := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd2.SetArgs([]string{"archive", "task-1", "--encrypt"})
+	if err := cmd2.Execute(); err == nil {
+		t.Fatal("无 --target 的 --encrypt 应本地报错")
+	}
+}
