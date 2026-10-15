@@ -602,21 +602,70 @@ func registerSecretSchemas() {
 	})
 }
 
-// setupSecretBackends 装配 secrets + secretdata 后端。需在 RegisterRoutes（卷集合装配完成后）
-// 调用；localRoot 为默认卷物理根。注册（工厂）部分经 registerSecretVolumeBackends 无条件先行
-// （见 setupServerCore），本函数负责把已装配卷集 Store 进 secretDataSet（供工厂懒读）+
-// **补装 config 声明的 secretdata 卷**（Imp-2 时序修复：assembleVolumes 因 set 未就绪跳过了其
-// backend 构造，此处 set 已就绪、按卷元数据逐个构造并挂回 Set.External）。
+// secret 卷装配（RegisterRoutes 返回后，卷集合已装配；localRoot 为默认卷物理根）：
+// 后端**注册**部分由 registerSecretVolumeBackends 无条件先行（见 setupServerCore），本文件的
+// 三个函数完成**推迟装配**——Store 已装配卷集（供 secretdata 工厂懒读）+
+// 补装 config 声明的 secretdata 卷（Imp-2 时序修复：assembleVolumes 因 set 未就绪跳过了其
+// backend 构造，此后 set 已就绪、按卷元数据逐个构造并挂回 Set.External）。
 //
 // **不再装配「全局默认 secrets 卷」**（用户裁定 2026-10-15）：默认 secrets 是 **per-owner** 的
-// ——每个 owner 租户根下的 `secrets/` 桶，由 `/api/secrets` 按请求 owner 解析并首次使用自动
-// 派生（`pkg/server/secretsManagerFor`）。故此处没有任何默认 secrets 卷需要装配，也不存在
-// 「多个全局 secrets 卷选哪个」的模型。
+// ——每个 owner 租户根下 meta 桶内的 `meta/secrets/` 目录，由 `/api/secrets` 按请求 owner 解析并
+// 首次使用自动派生（`pkg/server/secretsManagerFor`）。故此处没有任何默认 secrets 卷需要装配，也不
+// 存在「多个全局 secrets 卷选哪个」的模型。
 //
 // **fail-closed 语义（方案 A 修复轮 I1）**：仅**配置声明的 secretdata/secrets 卷补装失败**
 // 返回错误（调用方 root.go 视为 boot fail，与本地卷 load failure 同层——operator 显式声明的
 // 加密封装不得静默消失）。
-func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot string, logger *slog.Logger) error {
+//
+// ---- 装配序：拆成四步（2026-10-15 装配序修复） ----
+//
+// 拆点：本函数原先把「Store 卷集」与「补装 config 声明 secretdata 卷」合成一步，且整体早于
+// `enclosure.AttachAll`（封装声明卷补装）。这造成一条**声明顺序限制**：config 里同时声明
+// 「嵌套 secrets 卷」与「`secret_url` 指向它的 secretdata 卷」时，前者只有经 AttachAll 才装配，
+// 于是后者补装时密钥解析必然「源卷后端未装配」→ boot fail。拆成：
+//
+//	① `storeSecretDataSet` —— Store 卷集（供 secretdata 工厂与封装 wrapper 懒解析密钥）；
+//	② `attachSecretdataVolumes(..., secretdataRefsIndependent)` —— 先行补装**不依赖封装声明卷**
+//	   的 config 声明 secretdata 卷（封装卷的**源**可能就是它们，故必须早于 AttachAll）；
+//	③ `enclosure.AttachAll` —— 封装声明卷（嵌套 secrets/secretdata 链由此装配）；
+//	④ `attachSecretdataVolumes(..., secretdataRefsEnclosure)` —— 后置补装 `secret_url` 指向
+//	   **封装声明卷**的 config 声明 secretdata 卷（须待 ③ 之后才能解析密钥）。
+//
+// 为什么不是「单轮 + 失败重试」：判据取**静态声明**（`secretdataRefsEnclosureVolume`），不靠
+// 错误文案识别「依赖未就绪 vs 真失败」——后者会把不可重试的真故障也拖到下一轮。
+// 已知边界（记录在案）：若某 secretdata 卷**既**引用封装卷、**又**是另一个封装卷的源，则本序无解
+// （单轮内无法同时满足两端）——该形态等价于跨层循环依赖，属不支持配置。
+//
+// 注意：**嵌套封装卷**（`extra.target: "<卷>/<子目录>"`，装配侧等价 `extra.source`）不走本文件的
+// 补装路径——其 backend 由 `enclosure.AttachAll` 装配（源特权视图 + wrapper），本文件按类型分派会
+// 给它构造「target 解析失败」的错误后端（方案甲：此类卷 Type 仍是 secretdata，须用声明判据排除）。
+
+// secretdataRefPolicy 决定一轮补装处理哪一类 config 声明的 secretdata 卷（见上方装配序）。
+type secretdataRefPolicy int
+
+const (
+	// secretdataRefsIndependent：`secret_url` **不**指向封装声明卷的卷（或未配 URL / 指向
+	// per-owner 默认桶）——先行补装（AttachAll 之前）。
+	secretdataRefsIndependent secretdataRefPolicy = iota
+	// secretdataRefsEnclosure：`secret_url` **指向**封装声明卷（如嵌套 secrets 卷）的卷——
+	// 后置补装（AttachAll 之后）。
+	secretdataRefsEnclosure
+)
+
+// storeSecretDataSet 把装配后的卷集 Store 进 secretDataSet（供 secretdata 工厂与封装卷的
+// secretdata wrapper 懒解析 `secret_url`）。必须在任何 secretdata 后端构造**与**
+// `enclosure.AttachAll`（其 wrapper 会读该持有者）之前调用。
+func storeSecretDataSet(set *registry.Set) error {
+	if set == nil {
+		return fmt.Errorf("secret backends: volSet 未装配")
+	}
+	secretDataSet.Store(set)
+	return nil
+}
+
+// attachSecretdataVolumes 补装**本轮所属**的 config 声明 secretdata 卷（非封装声明卷；
+// 按 policy 分轮，见上方装配序）。任一卷补装失败 → 返回错误（调用方 boot fail，fail-closed）。
+func attachSecretdataVolumes(ctx context.Context, set *registry.Set, localRoot string, logger *slog.Logger, policy secretdataRefPolicy) error {
 	if set == nil {
 		return fmt.Errorf("secret backends: volSet 未装配")
 	}
@@ -624,15 +673,7 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	if logger != nil {
 		log = logger
 	}
-	// 装配完成后 Store 卷集，供 registerSecretVolumeBackends 注册的 secretdata 工厂
-	// 在后续 NewBackend 时经 ResolveURL(secrets://...) 解析密钥。
-	secretDataSet.Store(set)
-	// 补装 config 声明的 secretdata 卷：assembleVolumes 已把卷元数据登记进 set
-	// （deferred 类型跳过 backend 构造），此处 set 已就绪、secretdata 工厂可解析密钥。
-	// **嵌套封装卷**（`extra.target: "<卷>/<子目录>"`）不走本路径——其 backend 由
-	// `enclosure.AttachAll` 装配（源特权视图 + wrapper），本函数按类型分派会给它构造
-	// 「target 解析失败」的错误后端（方案甲：此类卷 Type 仍是 secretdata，须用声明判据排除）。
-	// 任一卷补装失败 → 返回错误（boot fail，fail-closed）。
+	wantEnclosureRef := policy == secretdataRefsEnclosure
 	for _, v := range set.All() {
 		if v.Type != volume.TypeSecretdata {
 			continue
@@ -641,13 +682,36 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 			continue // 已装配（测试自注册类型等）
 		}
 		if enclosure.IsDeclared(v) {
-			continue // 嵌套封装卷：由 enclosure.AttachAll 补装（同一 boot 阶段，紧随其后）
+			continue // 嵌套封装卷：由 enclosure.AttachAll 补装（同属 boot 阶段，见上方装配序）
+		}
+		if secretdataRefsEnclosureVolume(set, v) != wantEnclosureRef {
+			continue // 属另一轮（先行/后置），本轮不处理
 		}
 		if err := attachSecretdataVolume(ctx, set, v, localRoot, log); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// secretdataRefsEnclosureVolume 报告 secretdata 卷的 `extra.secret_url` 是否指向**封装声明卷**
+// （`enclosure.IsDeclared`：已注册 wrapper 类型 + `extra.source`）——装配层据此把它排到
+// `AttachAll` **之后**补装（判据是静态声明，不靠「试装失败」的错误文案）。
+//
+// 返回 false 的情形：未配 `secret_url`（工厂会 fail-closed 报错）、指向 per-owner 默认桶
+// （`secrets://default-secrets/<名>`，与封装卷无关）、URL 非法/无卷名（同上，报错交给工厂）、
+// 卷名未被登记或不是封装声明卷（含**运行期**新增的普通卷——它们此时已装配）。
+func secretdataRefsEnclosureVolume(set *registry.Set, v volume.Volume) bool {
+	urlStr, _ := v.Extra["secret_url"].(string)
+	if strings.TrimSpace(urlStr) == "" || secrets.IsDefaultVolumeRef(urlStr) {
+		return false
+	}
+	volName, verr := secrets.VolumeFromURL(urlStr)
+	if verr != nil || volName == "" {
+		return false
+	}
+	sv, ok := set.ByName(volName)
+	return ok && enclosure.IsDeclared(sv)
 }
 
 // attachSecretdataVolume 补装单个 config 声明的 secretdata 卷（包卷级容量记账后挂回卷集）。

@@ -24,8 +24,12 @@ Secret 加密卷把「写入自动分块加密、读取自动解密」沉淀为�
 
 ## 2. 快速开始
 
-在 `volumes[]` 下声明 **secrets 卷（先）** + **secretdata 卷（后）**。secretdata 卷通过
-`extra.secret_url` 引用已存在的 secrets 卷读取密钥（依赖顺序：secretdata 引用的 secrets 卷必须先装配）。
+在 `volumes[]` 下声明 **secrets 卷** + **secretdata 卷**。secretdata 卷通过
+`extra.secret_url` 引用 secrets 卷读取密钥。**声明顺序无关**（2026-10-15）：装配按**服务级四步序**
+进行——① Store 已装配卷集 → ② 先行补装「不依赖封装声明卷」的 secretdata 卷 → ③ 封装声明卷补装
+（`enclosure.AttachAll`，嵌套 secrets/secretdata 链由此装配）→ ④ 后置补装「`secret_url` 指向封装声明卷」
+的 secretdata 卷；故 secretdata 卷既可与被引用的 secrets 卷同处 config 且顺序任意，也可引用**嵌套**
+（`extra.target: "<卷>/<子目录>"`）的 secrets 卷。
 
 ```yaml
 volumes:
@@ -216,6 +220,7 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 | ⑤ | enclosure **内部化**（方案甲）：嵌套封装卷的对外 `Type` 保持 wrapper 类型（secretdata/secrets/…），装配由**声明判据**（`enclosure.IsDeclared`）接管而非按类型分派——修正「type=enclosure」造成的 `SchemeOf` 无协议（cloud 转存/归档被拒）、`CategoryOf≠wrapper`（建卷表单/防环失据）、API/CLI 回显泄漏内部机制 | 已完成 |
 | ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只写目标卷 FS、不经路由 commit，删除时仍对 owner 全局 Scope 做未曾提交的释放） | 已完成（写入侧结算：转存写成功后按 `TargetQuotaScopeFor`/`TargetPhysChargeFor` 与删除侧**同账本同口径**差分入账） |
 | ⑥ | enclosure **纯内部化**：`IsDeclared` 判据收敛为「wrapper 类型 + `extra.source`」（去 `type: enclosure` 分支与条件式 wrapper 回落）；`type: enclosure` 在 config 校验与建卷 API 处 fail-closed 拒绝；`ErrMissingSource`/`ErrMissingWrapper` 随判据收紧成为不可达死哨兵 → 移除 | 已完成 |
+| ⑧ | **config 声明顺序限制解除**（2026-10-15）：装配序拆为四步（Store 卷集 → 先行补装 → `enclosure.AttachAll` → 后置补装），使 config 可同时声明「嵌套 secrets 卷」与「`secret_url` 指向它的 secretdata 卷」（旧序下密钥解析遇「源卷后端未装配」必然 boot fail）。判据取**静态声明**（`secretdataRefsEnclosureVolume`），不靠「试装失败」的错误文案重试 | 已完成 |
 | ⑦ | **per-owner 默认 secrets 卷**（用户裁定 2026-10-15）：`default-secrets` 成为**每个 owner 各自的**默认桶（`<storage_root>/<owner>/meta/secrets/`——owner 租户根的 **meta 桶**内，免声明、首次使用自动派生、`/api/secrets` 恒作用于请求者桶 ⇒ per-owner 隔离）；删除「全局默认 secrets 卷 + 多全局卷确定性选取（`extra.default` 标记 / 基础卷优先 / 卷名升序）」整套模型与 `extra.wrapper` 冗余键书写；`secret_url` 双寻址：`secrets://default-secrets/<名>` → per-owner 桶（需请求 owner 上下文），其它卷名 → 显式声明的 secrets 卷（含多层嵌套链，如 secrets over secretdata over baidupcs） | 已完成 |
 
 ## 4. 寻址
@@ -380,11 +385,15 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   「存在即引用」，删源或删副本都安全、重启天然恢复）／跨容器**字节拷贝**（内容零改动，不重新加密）；
   跨卷复制因目标卷独立密钥仍需重新加密。
   文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
-- **卷声明顺序无关（2026-10-13 实测修正）**：`setupSecretBackends` 在**全卷集装配完成之后**补装
-  secretdata（`MarkDeferred`），故 `type: secretdata` 卷可以声明在 secrets 卷之前——e2e
-  `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets` 钉住（此前文档声称「必须先装配好」，已不成立）。
-  **仍预留**：secrets 卷外部 target（嵌套封装）与 secretdata 外部 target（baidupcs/s3/webdav/嵌套），
-  当前仅 `target=local` 可用（配置成外部 target 会 fail-closed 报错，不静默降级）。
+- **卷声明顺序无关（2026-10-13 实测修正；2026-10-15 扩展到嵌套 secrets 卷）**：补装在**全卷集装配
+  完成之后**进行（secretdata 走 `MarkDeferred`，嵌套封装卷走 `enclosure.IsDeclared` 判据），四步序见 §2；
+  故 `type: secretdata` 卷既可与被引用的 secrets 卷任意排序，也可让 `secret_url` 指向**嵌套** secrets
+  卷。锚点：e2e `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets`（平铺顺序无关）+ 单测
+  `TestSetupSecretBackends_ConfigSecretdata_Assembled/config_secretdata_refs_nested_secrets`
+  （config 声明「嵌套 secrets 卷 + 引用它的 secretdata 卷」，旧序必红）。
+  **仍预留**：**对象存储**类外部 target（baidupcs/s3/webdav）与 secretdata 的外部 target——当前
+  secretdata 仅 `target=local` 可用（配外部 target 会 fail-closed 报错，不静默降级）；secrets 卷的
+  嵌套封装 target 已支持（多层链如 secrets over secretdata）。
 - **空文件不可写**（有意取舍）：分块存储要求至少一个数据分块（承载 meta 引用 + 内容哈希锚定），空
   文件 `EncryptShards` 报错 fail-closed。
 - **随机访问粒度**：`OpenRangeRead` 当前下载整块再定位 blocklet，未做逐 blocklet 只取所需段（注释

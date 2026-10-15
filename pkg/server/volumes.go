@@ -288,7 +288,8 @@ func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, 
 //     （secrets 非推迟类型）。
 //
 // 两者都只登记卷元数据（volumes）与容量池（pools）：external 留空，待 RegisterRoutes 卷集合
-// 就绪后由装配层逐个构造并挂回（cmd/sproxy setupSecretBackends / enclosure.AttachAll）。
+// 就绪后由装配层逐个构造并挂回（cmd/sproxy storeSecretDataSet + attachSecretdataVolumes /
+// enclosure.AttachAll）。
 func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc *volumeAccum) error {
 	if registry.IsDeferredType(vc.Type) || isEnclosureDecl(vc.Type, vc.Extra) {
 		acc.pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))

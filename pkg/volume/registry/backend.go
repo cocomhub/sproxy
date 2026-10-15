@@ -115,8 +115,8 @@ var (
 	// deferredBackends 是「推迟装配」的外部卷类型（Imp-2 时序修复）：此类后端构造依赖
 	// 已装配卷集（如 secretdata 经 secret_url 读 secrets 卷密钥），须在卷集合就绪后由
 	// 装配层统一补装。assembleVolumes 遇此类类型跳过 registry.NewBackend（不再因
-	// secretDataSet 未就绪而装配失败），卷集返回后由 cmd/sproxy setupSecretBackends
-	// 逐个 AddExternalVolume 补装（含 config 声明的 secretdata/secrets 卷）。
+	// secretDataSet 未就绪而装配失败），卷集返回后由 cmd/sproxy attachSecretdataVolumes
+	// 逐个补装（含 config 声明的 secretdata/secrets 卷；分「先行/后置」两轮以解除声明顺序限制）。
 	deferredBackends = map[string]bool{}
 	// staticSchemas 是后端类型的**静态**创建表单 schema 表（RegisterBackendSchema 登记；
 	// backendMu 同临界区守卫）。静态表不依赖构造后端实例——生产 wrapper 类型

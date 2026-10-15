@@ -295,13 +295,15 @@ func OwnerFromContext(ctx context.Context) string {
 	return s
 }
 
-// IsDefaultVolumeRef 判定 `secrets://<authority>/<名>` 的 authority 是否指向 **per-owner 默认桶**：
-// 空 / `default` / `DefaultVolumeName`。**唯一实现**：服务级解析（cmd/sproxy）与任何需要区分
-// 「默认桶 vs 显式命名卷」的调用方共用，避免判定口径漂移。
-func IsDefaultVolumeRef(urlStr string) bool {
+// VolumeFromURL 解析 `secrets://<卷名>/<名>` 的 **authority 段（卷名）**，兼容 Opaque 形态
+// `secrets://<名>`（无卷名 → 空串）。**唯一实现**：`IsDefaultVolumeRef` 与装配层「secret_url 是否
+// 指向封装声明卷」的判定共用，避免两处 authority 解析口径漂移。
+//
+// 非法 URL 返回错误——调用方须区分「错误」与「authority 为空」（后者是合法形态）。
+func VolumeFromURL(urlStr string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(urlStr))
 	if err != nil {
-		return false
+		return "", fmt.Errorf("secrets: 解析 %q 失败: %w", urlStr, err)
 	}
 	auth := u.Host
 	if auth == "" {
@@ -311,7 +313,18 @@ func IsDefaultVolumeRef(urlStr string) bool {
 			auth = u.Opaque
 		}
 	}
-	switch strings.TrimSpace(auth) {
+	return strings.TrimSpace(auth), nil
+}
+
+// IsDefaultVolumeRef 判定 `secrets://<authority>/<名>` 的 authority 是否指向 **per-owner 默认桶**：
+// 空 / `default` / `DefaultVolumeName`。**唯一实现**：服务级解析（cmd/sproxy）与任何需要区分
+// 「默认桶 vs 显式命名卷」的调用方共用，避免判定口径漂移。
+func IsDefaultVolumeRef(urlStr string) bool {
+	auth, err := VolumeFromURL(urlStr)
+	if err != nil {
+		return false // 非法 URL：不是默认桶引用（由各解析方按自己的口径报错）
+	}
+	switch auth {
 	case "", "default", DefaultVolumeName:
 		return true
 	}

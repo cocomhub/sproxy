@@ -552,7 +552,7 @@ func TestAssembleVolumes_ExternalDefaultVolume_FailClosed(t *testing.T) {
 // TestAssembleVolumes_DeferredType_SkipsBackend（Imp-2 装配时序守护）：标记为推迟装配的
 // 类型（如 secretdata）在 assembleVolumes 中**跳过 registry.NewBackend 构造**（其构造依赖
 // 已装配卷集，此时 set 未就绪）——但卷元数据与容量池仍登记（set.All 可见、Pool 可用），
-// external 留空待装配层补装（cmd/sproxy setupSecretBackends）。证明 config 声明 secretdata
+// external 留空待装配层补装（cmd/sproxy attachSecretdataVolumes）。证明 config 声明 secretdata
 // 卷不再因「卷集未就绪」而装配失败（config.example vault 示例可用）。
 func TestAssembleVolumes_DeferredType_SkipsBackend(t *testing.T) {
 	t.Parallel()
