@@ -194,7 +194,8 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 - **唯一可写声明形态 = wrapper 类型 + `extra.source`**：`type` 就是处理层名（`secretdata`/
   `secrets`），wrapper 缺省即卷类型本身。`type: enclosure` **不是可写卷类型**——配置校验
   （`Config.Validate`）与建卷 API（`POST /api/volumes/user`）均 fail-closed 拒绝并提示改用
-  wrapper 类型 + source/target；`enclosure.TypeEnclosure` 仅作内部装配标识（日志/诊断）保留。
+  wrapper 类型 + source/target；`enclosure.TypeEnclosure` 的唯一用途是这些**拒绝判据的单一
+  事实源**（配置校验 / 建卷 API / 存量卷恢复三处引用，无日志/诊断/构造用途）。
   wrapper 类型而**无** `extra.source` 的卷不是封装声明（如 `target: local` 的本地整卷形态），
   走按类型分派的常规构造。
 
@@ -242,6 +243,12 @@ secretdata://<卷>/<path>        # secretdata 卷内文件路径
     `extra.source`/`extra.target` 封装在任意已装配卷/子目录之上——含多层嵌套链，如
     `secrets` over `secretdata` over `baidupcs`）仍然支持，供跨 owner 共享密钥库/Federation 等场景；
     它们只是**不被默认寻址**（`/api/secrets` 恒用 per-owner 桶）。
+  - **边界（owner 限定的封装声明可封印密钥桶 ⇒ fail-closed，不静默损坏）**：per-owner 桶位于
+    owner 租户根的 **meta 桶内**，而 owner 限定封装声明的封印足迹覆盖该 owner 的**全部保留功能桶**
+    （`storage.ReservedBucketNames()`：user/cloud/archive/chunk/version/**meta**/trash/backup）。
+    故若显式把封装区声明到 `<owner>/meta/…`（覆盖到 `meta/secrets`），该 owner 的密钥桶会同被封印
+    ⇒ `/api/secrets` 读写与该 owner 的 `secret_url`（per-owner 默认桶）密钥解析**全部 fail-closed**
+    （拒绝而非腐坏；`errors.Is(err, storage.ErrSealed)`）。属稀有显式配置——需要封装的目录请避开 `meta/`。
 - **`secret_url` 的两条寻址路径**（`pkg/volume/secretdata` 消费）：
   - `secrets://default-secrets/<name>`（亦接受 `secrets://default/<name>`）：per-owner 默认桶——
     需要**请求 owner 上下文**（带身份的建卷请求注入），装配期（boot / config 声明）无 owner ⇒

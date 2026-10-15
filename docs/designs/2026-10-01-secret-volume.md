@@ -326,13 +326,21 @@ padding 丢弃。
 
 ### 6.1 secrets 卷（封装卷，存 secret 文件）
 
+> **已废止（2026-10-15 per-owner 重构）**：下面带「已废止」标记的条目属于本次设计时点的旧模型
+> （全局默认 secrets 卷 + 默认卷省略寻址 + `extra.default_secret` 选取）。现行实现是
+> **per-owner 默认桶**——`<storage_root>/<owner>/meta/secrets/`，免声明、首次使用自动派生、
+> `/api/secrets` 恒作用于请求者 owner，**没有全局默认卷**。权威文档见 `docs/secret-volume.md`
+> §3.9 批次表 ⑦ 与 §4 寻址。本文保留为历史设计记录。
+
 - **定位**：封装卷（wrapper），底层指向**任意卷的 `secrets/` 目录**——底层可以是
   local/baidupcs/s3/webdav，**也可以是 secret_data 加密卷**（嵌套封装）。
-- **寻址**：`secrets://<卷名>/<name>`；默认卷可省略：`secrets://default/<name>`。
+- **寻址**：`secrets://<卷名>/<name>`；默认卷可省略：`secrets://default/<name>`。**（已废止：
+  空/`default`/`default-secrets` authority 现解析到 per-owner 默认桶，须有请求 owner 上下文。）**
 - **只存普通文件**（secret 文件本身不加密）。
 - **本地盘权限**：创建 secret 文件时 0600（ssh 密钥式）；外部盘（baidupcs/s3）无权限要求（能拿到 = 有权限）。
 - **嵌套**：secret_data 卷的 `extra.secret_url` 指向**最底层已存在的 secrets 卷**（不循环——secret_data 引用的 secrets 卷必须先装配好）。
-- **服务启动默认**：默认创建一个本地卷作为默认 secrets 卷（`secrets://default/`）。
+- **服务启动默认**：**（已废止）**默认创建一个本地卷作为默认 secrets 卷（`secrets://default/`）——
+  现无任何默认 secrets 卷需要装配（默认 secrets 恒 per-owner）。
 - **管理 API**：
   - 创建 secret：`secrets://<卷>/<name>` 写入随机密钥（32B hex），本地 0600
   - 列出 secrets：`secrets://<卷>/` 列

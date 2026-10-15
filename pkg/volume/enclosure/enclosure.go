@@ -20,8 +20,8 @@
 // （CategoryOf）/ API 回显全部按 wrapper 类型语义，内部机制不外泄。
 //
 // `type: enclosure` **不是可写卷类型**（配置校验与建卷 API 均 fail-closed 拒绝，提示改用
-// wrapper 类型 + source/target）；`TypeEnclosure` 仅作内部装配标识保留（日志/诊断），
-// 亦不经 registry.NewBackend 构造。
+// wrapper 类型 + source/target）；`TypeEnclosure` 的唯一用途是这些**拒绝判据的单一事实源**
+// （无日志/诊断/构造用途），亦不经 registry.NewBackend 构造。
 package enclosure
 
 import (
@@ -37,10 +37,12 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// TypeEnclosure 是**内部装配标识**（日志/诊断用），**不是可写卷类型**：`volumes[].type:
-// enclosure` 被配置校验（pkg/server/config_validate.go）与建卷 API
-// （pkg/server/user_volume_api.go）fail-closed 拒绝。唯一声明形态是「wrapper 类型 +
-// `extra.source`」（见 IsDeclared）——本常量不经 registry.NewBackend 构造。
+// TypeEnclosure 是**拒绝判据的单一事实源**（唯一用途），**不是可写卷类型**：`volumes[].type:
+// enclosure` 在三处显式拒收——配置校验（pkg/server/config_validate.go.validateVolumeIdentity）、
+// 建卷 API（pkg/server/user_volume_api.go）、存量记录的恢复路径
+// （cmd/sproxy/user_volume_restore.go，拒绝 + Warn）；无任何其他引用（无日志/诊断/构造用途）。
+// 唯一声明形态是「wrapper 类型 + `extra.source`」（见 IsDeclared）——本常量不经
+// registry.NewBackend 构造。
 const TypeEnclosure = "enclosure"
 
 // 封装声明的 extra 键（**装配词汇**，与卷类型正交；pkg/server 的翻译层写、本包解析）。

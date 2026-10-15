@@ -137,7 +137,7 @@ func TestConfigDeclaredNested_ConflictFailClosed(t *testing.T) {
 //   - 嵌套 target + 已注册 wrapper 类型 → 翻译（补 source/wrapper，**Type 不变**，原 target 保留）；
 //   - 非嵌套（无分隔符 / `local` / 卷名或子路径空）→ 不翻译；
 //   - 非封装处理层类型 → 不翻译（普通外部卷零回归）；
-//   - `type: enclosure`（内部装配标识，非可写类型 / 非 wrapper 注册名）→ 恒定不翻译。
+//   - `type: enclosure`（拒绝判据 token，非可写卷类型 / 非 wrapper 注册名）→ 恒定不翻译。
 func TestTranslateNestedVolume(t *testing.T) {
 	t.Parallel()
 	registerFixtureWrapper("translate-test-wrap")

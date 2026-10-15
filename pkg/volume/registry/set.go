@@ -139,11 +139,17 @@ func (vs *Set) Root(name string) *storage.Root {
 	return vs.roots[name]
 }
 
-// DefaultExternal 返回默认外部卷句柄（首个 AddExternalVolume 登记的外部卷；无外部卷返回
-// nil）。用途：URL 解析的空/"default" authority 的协议默认寻址目标。装配顺序决定默认
-// （ensureDefaultSecretsVolume 先注册 → 即默认 secrets 卷），firstExternal 显式记录首个
-// 登记卷名，不再依赖 map 随机迭代序（早期问题 P5）；firstExternal 指向的卷被移除后按
-// volumes 声明序重算，保证多次调用恒返回同一（装配序首个存活的）外部卷。
+// DefaultExternal 返回默认外部卷句柄（**配置声明序中首个 AddExternalVolume 登记的外部卷**；
+// 无外部卷返回 nil）。用途：URL 解析的空/"default" authority 的协议默认寻址目标。
+//
+// **不存在「默认卷」的特化角色**（2026-10-15 per-owner 默认桶重构后）：`secrets://` 的空/
+// `default`/`default-secrets` authority 在 `secretdata` 侧由 `secrets.IsDefaultVolumeRef`
+// **前置改道** per-owner 桶（cmd/sproxy.secret_register.defaultSecretdataSecret），不流到此处
+// ⇒ 本函数只服务「未指定卷名」的一般协议寻址，其默认值纯由声明序决定（原
+// `ensureDefaultSecretsVolume` 「先注册即默认 secrets 卷」的模型已随该重构删除）。
+// firstExternal 显式记录首个登记卷名，不再依赖 map 随机迭代序（早期问题 P5）；
+// firstExternal 指向的卷被移除后按 volumes 声明序重算，保证多次调用恒返回同一（装配序首个
+// 存活的）外部卷。
 func (vs *Set) DefaultExternal() ExternalBackend {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()

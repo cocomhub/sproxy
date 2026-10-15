@@ -215,7 +215,7 @@ func resolveReplicaTargets(ctx context.Context, v volume.Volume) ([]syncpkg.FS, 
 	return out, nil
 }
 
-// 注：不再有独立的 registerSecretdataBackend()——setupSecretBackends 内联注册并注入
+// 注：不再有独立的 registerSecretdataBackend()——registerSecretVolumeBackends 内联注册并注入
 // set 派生解析器（defaultSecretdataSecret(ctx, v, set)），避免全局解析器状态。
 // setupSecretdataOnce 守卫注册（root.go + 多测试共享注册表，防重复注册 panic）。
 var setupSecretdataOnce sync.Once
@@ -547,7 +547,7 @@ func registerEnclosureWrappers() {
 // secretdata backend 工厂在 registry.NewBackend 时才调用 resolver 解析 secret_url，
 // 而装配后卷集（registry.Set）要到 RegisterRoutes 卷集合装配完成后才可用——故 resolver
 // 经本持有者读取：注册（registerSecretVolumeBackends，早于 assemble）与装配
-// （setupSecretBackends，装完后 Store）解耦。仅生产 "secretdata" 类型使用；测试用
+// （装配期 storeSecretDataSet，卷集就绪后 Store）解耦。仅生产 "secretdata" 类型使用；测试用
 // registerSecretdataBackendWithFS 注册独立类型自带 set，不受影响。
 var secretDataSet = atomic.Pointer[registry.Set]{}
 
@@ -560,7 +560,8 @@ var secretDataSet = atomic.Pointer[registry.Set]{}
 // 其构造依赖已装配卷集（secret_url → secrets 卷密钥），而 assembleVolumes 在 RegisterRoutes
 // 内部执行、彼时 set 尚未 Store 到 secretDataSet，若直接构造恒「卷集未就绪」失败。
 // 故 assembleVolumes 对 secretdata 卷跳过 backend 构造（仅登记卷元数据 + 容量池），
-// set 就绪后由 setupSecretBackends 遍历已登记卷补装（registry.NewBackend + AttachExternal）
+// set 就绪后由 attachSecretdataVolumes 遍历已登记卷补装（分「先行/后置」两轮，见本文件「装配
+// 序」注释；registry.NewBackend + AttachExternal）
 // ——config 声明的 type:secretdata 卷可真正装配（config.example vault 示例可用）。
 func registerSecretVolumeBackends() {
 	registerSecretsBackend()
@@ -604,7 +605,8 @@ func registerSecretSchemas() {
 
 // secret 卷装配（RegisterRoutes 返回后，卷集合已装配；localRoot 为默认卷物理根）：
 // 后端**注册**部分由 registerSecretVolumeBackends 无条件先行（见 setupServerCore），本文件的
-// 三个函数完成**推迟装配**——Store 已装配卷集（供 secretdata 工厂懒读）+
+// `storeSecretDataSet` + `attachSecretdataVolumes`（分两轮调用）完成**推迟装配**——Store 已装配
+// 卷集（供 secretdata 工厂懒读）+
 // 补装 config 声明的 secretdata 卷（Imp-2 时序修复：assembleVolumes 因 set 未就绪跳过了其
 // backend 构造，此后 set 已就绪、按卷元数据逐个构造并挂回 Set.External）。
 //
@@ -619,7 +621,8 @@ func registerSecretSchemas() {
 //
 // ---- 装配序：拆成四步（2026-10-15 装配序修复） ----
 //
-// 拆点：本函数原先把「Store 卷集」与「补装 config 声明 secretdata 卷」合成一步，且整体早于
+// 拆点：拆分前的单一入口函数把「Store 卷集」与「补装 config 声明 secretdata 卷」合成一步，
+// 且整体早于
 // `enclosure.AttachAll`（封装声明卷补装）。这造成一条**声明顺序限制**：config 里同时声明
 // 「嵌套 secrets 卷」与「`secret_url` 指向它的 secretdata 卷」时，前者只有经 AttachAll 才装配，
 // 于是后者补装时密钥解析必然「源卷后端未装配」→ boot fail。拆成：
