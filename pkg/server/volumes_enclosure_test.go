@@ -147,8 +147,13 @@ func TestApplyEnclosureSeals_NoDeclZeroRegression(t *testing.T) {
 }
 
 // TestApplyEnclosureSeals_InvalidDeclFailsClosed 声明非法（`extra.wrapper` 未注册）⇒ 装配失败且可归因。
+//
+// **自带注册**：判据 `IsDeclared` 要求「卷类型是已注册 wrapper」——若依赖同文件其它用例先注册
+// （sealWrapOnce），并行调度下本用例可能在注册前执行 ⇒ 波动的 nil 错误（实测 `./...` 全量跑
+// 偶发红）。故本用例显式调用幂等注册（与同胞用例同口径）。
 func TestApplyEnclosureSeals_InvalidDeclFailsClosed(t *testing.T) {
 	t.Parallel()
+	registerSealTestWrapper()
 	acc := volAccumForTest(t, t.TempDir())
 	acc.volumes = []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal},
