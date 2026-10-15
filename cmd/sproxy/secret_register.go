@@ -585,6 +585,28 @@ func (w secretdataWrapper) Build(ctx context.Context, v volume.Volume, src syncp
 	return secretdata.NewBackendMultiplicas(ctx, v, src, replicas, opts)
 }
 
+// secretsWrapper 把 secrets 注册为**封装处理层**（enclosure.Wrapper）：使
+// `type: enclosure` + `extra.wrapper: secrets` 的配置真正可用（与 secretdata 同型）。
+//
+// 与 `type: secrets` 独立卷的关系：二者共用 `secrets` 的 FS 实现，差别只在**底层来自哪里**
+// ——独立卷由 `extra.target` 解析，封装卷由装配层注入的**源视图**提供。此前只注册了
+// secretdata ⇒ `wrapper: secrets` 的声明在 `enclosure.Parse` 恒 `ErrUnknownWrapper`（boot fail）。
+//
+// **不做 0600 chmod**：封装源视图是 `PrefixFS`（非 `*syncpkg.LocalFS`），secrets 的 perm 收紧
+// 对封装底层天然不适用（与过渡实现的 SubFS 同口径——`localChmod` 断言失败即 no-op）。
+type secretsWrapper struct{}
+
+// Name 返回注册名（`extra.wrapper` 引用它；与文档/示例一致）。
+func (secretsWrapper) Name() string { return "secrets" }
+
+// Build 用封装卷的源视图构造 secrets 后端：视图中「源卷子目录」已等价于本卷根。
+func (secretsWrapper) Build(ctx context.Context, v volume.Volume, src syncpkg.FS, _ map[string]any) (registry.ExternalBackend, error) {
+	if src == nil {
+		return nil, fmt.Errorf("enclosure: secrets 封装卷 %q 源视图为空（装配顺序错误）", v.Name)
+	}
+	return secrets.NewBackend(ctx, v, src)
+}
+
 // enclosureWrapperOnce 守卫注册（进程内一次；wrapper 注册表重复注册会 panic）。
 var enclosureWrapperOnce sync.Once
 
@@ -604,6 +626,7 @@ func registerEnclosureWrappers() {
 			}
 			return defaultSecretdataSecret(ctx, v, set)
 		}})
+		enclosure.RegisterWrapper(secretsWrapper{})
 	})
 }
 

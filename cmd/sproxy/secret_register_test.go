@@ -979,3 +979,72 @@ func TestDefaultSecretsFS_LocalTargetSubdirLayout(t *testing.T) {
 		t.Fatalf("密钥应落 <root>/secrets/<名>: %v", serr)
 	}
 }
+
+// TestEnclosureWrapper_Secrets_ProductionAssembly：`type: enclosure` + `wrapper: secrets`
+// 此前在生产装配下恒 `ErrUnknownWrapper`（只注册了 secretdata）⇒ secrets 卷无法作为封装卷
+// 装配（阶段 2 迁移的 target→enclosure 翻译会产出该形态，故必须注册）。
+// 变异：去掉 registerEnclosureWrappers 里的 secretsWrapper 注册 → 本用例红。
+//
+// sproxy:serial: 生产注册路径（全局 wrapper 注册表 Once），不并发。
+func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
+	ctx := context.Background()
+	registerSecretVolumeBackends()
+	registerEnclosureWrappers()
+
+	if w, ok := enclosure.LookupWrapper("secrets"); !ok || w.Name() != "secrets" {
+		t.Fatalf("生产装配必须注册 secrets wrapper（否则 secrets 封装卷 boot fail）: ok=%v", ok)
+	}
+
+	root := t.TempDir()
+	rt, err := storage.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	vols := []volume.Volume{
+		{Name: "main", Type: volume.TypeLocal, RootDir: root},
+		{Name: "keys", Type: enclosure.TypeEnclosure, Extra: map[string]any{
+			"source": "main:alice/user/vault", "wrapper": "secrets",
+		}},
+	}
+	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"main": quota.NewPool(0), "keys": quota.NewPool(0)}, "main")
+	t.Cleanup(func() { _ = set.Close() })
+	t.Cleanup(func() { secretDataSet.Store(nil) })
+
+	if _, perr := enclosure.Parse(vols); perr != nil {
+		t.Fatalf("secrets 封装声明应可解析（wrapper 须已注册）: %v", perr)
+	}
+	if aerr := enclosure.AttachAll(ctx, set, nil); aerr != nil {
+		t.Fatalf("secrets 封装卷补装（生产路径）: %v", aerr)
+	}
+	be := set.External("keys")
+	if be == nil || be.FS() == nil {
+		t.Fatal("secrets 封装卷后端未挂回卷集")
+	}
+	// secrets 后端把源视图当文件树用：写入即可读回（内容明文——秘密文件本身靠封印保护）。
+	const body = "s3cr3t-key-material"
+	key := "alice/user/k1"
+	if werr := be.FS().WriteFile(ctx, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+		t.Fatalf("secrets 封装卷写入: %v", werr)
+	}
+	rc, oerr := be.FS().OpenRead(ctx, key)
+	if oerr != nil {
+		t.Fatalf("secrets 封装卷读回: %v", oerr)
+	}
+	defer func() { _ = rc.Close() }()
+	got, rerr := io.ReadAll(rc)
+	if rerr != nil {
+		t.Fatalf("ReadAll: %v", rerr)
+	}
+	if string(got) != body {
+		t.Fatalf("读回内容不符: %q", got)
+	}
+	// 物理落点：确实写在 source 声明的子树之内（前缀映射生效、未外溢）。
+	found := findPlaintext(t, root, body)
+	if found == "" {
+		t.Fatal("secrets 封装卷内容应落盘（源目录找不到写入的字节）")
+	}
+	if !strings.Contains(filepath.ToSlash(found), "/alice/user/vault/") {
+		t.Fatalf("封装内容应落在声明的 source 子树内, got %s", found)
+	}
+}
