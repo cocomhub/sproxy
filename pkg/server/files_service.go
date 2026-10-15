@@ -491,6 +491,11 @@ func (o externalVolumeOps) ExternalDelete(ctx context.Context, owner, volName, r
 func externalVolumeKey(v volume.Volume, owner, remotePath string) (string, bool) {
 	if target, _ := v.Extra["target"].(string); target != "" {
 		if _, _, nested := volume.SplitNestedTarget(target); nested {
+			if remotePath == "" {
+				// 卷根（用户可见根）⇒ 桶目录自身，**不得拖尾斜杠**："user/" 含空段，
+				// 可信链的路径校验直接拒绝 ⇒ 封装卷根列举恒 500（D1）。
+				return "user", true
+			}
 			return "user/" + remotePath, true
 		}
 	}
