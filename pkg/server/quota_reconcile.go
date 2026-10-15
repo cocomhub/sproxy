@@ -266,6 +266,14 @@ func (h *Handlers) reconcileVolumesFromDisk() {
 		// 语义无关（Windows 侧 EvalSymlinks("") 报错回落空串不扫，故两端表现不一致）。
 		// M10（2026-10-06）：封装卷（externalVolumeKey 委托池）容量经底层池**委托子 Scope**
 		// 计，不参与本卷池磁盘校准，避免与底层池 reconcile 双计。
+		//
+		// **取舍记录（评审 A4 Minor #1，勿删——判断依据的载体）**：wrapper 委托池 committed
+		// **不随 reconcile 校准**。后果：删除「重启前任一 wrapper 文件」后，委托池的
+		// ReleaseCommitted 会钳到本层剩余（可能为 0）→ 底座池不降、overcharge 延续到下次重启
+		// （方向保守「宁可拒绝写入」，仅在底层卷设了容量上限时可见）。为何不校准委托子池：
+		// 委托池承载的物理字节**已计入底层池校准**（封装卷数据落在底层卷根内），要单独校准
+		// 就得按容器拆分子目录字节，反而与底层池形成双计；复杂度/风险高于收益，故按可记录
+		// 取舍保留跳过（对账收敛的正确性由写入/删除两侧同口径 + 重启重建兜底）。
 		if v.RootDir == "" {
 			continue
 		}

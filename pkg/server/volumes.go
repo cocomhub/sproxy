@@ -643,6 +643,15 @@ func (h *Handlers) reserveVolumePool(route *volumeRoute, volName string, externa
 		// 立即释放防双计）。**委托子池例外**：嵌套封装卷（DelegatePool 挂载）容量委托到底层
 		// 卷池的子 Scope，保留 Commit 以维持父链聚合（整体不超底层配额；过渡层语义，
 		// 阶段 2 迁 enclosure 的 EffectiveTarget 后移除本例外）。
+		//
+		// **已知取舍（F4，存量非融合引入；现有测试 base 恒为本地卷故未暴露）**：当底层卷是
+		// **config 声明的外部卷**时，其 FS 链本身含 CapacityFS 计数器（`assembleExternalVolume`
+		// 的 `capacity.WrapBackend`，计数器复用同一底层池）⇒ 本函数保留的委托 Commit 与
+		// FS 层计数**对同一字节各计一次**（底座池占用翻倍 ⇒ 约一半容量即 507，方向保守）。
+		// 不在此「无脑释放探测预留」的原因：委托子 Scope 同时承担**封装卷自身 capacity 上限**
+		// 与父链聚合，释放后该上限静默失效（把过度限制换成失去限制）。正确修法需要 quota 层
+		// 表达「只在本层限额、不再向父链聚合」的委托形态（或让装配层在检测到底座已由
+		// CapacityFS 记账时改用该形态），属设计变更——本地底座（LocalFS，无 CapacityFS）无此问题。
 		if h.volSet.IsDelegated(volName) {
 			route.pool, route.poolRes = pool, res
 			return nil

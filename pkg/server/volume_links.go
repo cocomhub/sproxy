@@ -30,7 +30,8 @@ import (
 //   - 关联标注：建封装卷登记「底层卷 → {subdir, wrapper}」；删底层卷有引用 → 409；
 //     删封装卷清关联。防重启丢失由装配层重建（见 rebuildFromUserVolumes）。
 //
-// 写保护（被占用目录只读可查、禁止修改）由 pkg/sync.ReadonlySubFS 承担（本包不必 import）。
+// 写保护（被占用目录只读可查、禁止修改）由本包承担：写面入口 `checkWrapperOccupiedWrite`
+// （按 links 坐标判定 → 403）与直写卷根旁路面的 `occupiedGuardFS` 装饰器（见本文件下部）。
 
 // errVolumeDirOccupied 是互斥占用冲突哨兵错误（建卷校验返回，409）。
 var errVolumeDirOccupied = errors.New("volume: 底层卷子目录已被封装卷占用")

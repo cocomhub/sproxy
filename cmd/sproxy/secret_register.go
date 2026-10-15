@@ -318,8 +318,8 @@ func adoptableNestedDir(ctx context.Context, inner syncpkg.FS, subdir string) (b
 //     装配）→ 复用包装，不报「已存在」；
 //  3. MakeDir 创建空目录 → SubFS 包装（密文/secret 文件落 <卷>/<子目录>/ 下）。
 //
-// 只读保护（占用目录禁改）由互斥占用（pkg/server/volume_links）+ 写保护视图
-// （pkg/sync.ReadonlySubFS）承担。
+// 只读保护（占用目录禁改）由互斥占用（pkg/server/volume_links）+ 写面占用判定
+// （`checkWrapperOccupiedWrite` / `occupiedGuardFS`）承担。
 func resolveNestedTargetFS(ctx context.Context, name, target string) (syncpkg.FS, error) {
 	base, subdir, ok := volume.SplitNestedTarget(target)
 	if !ok {

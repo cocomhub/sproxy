@@ -19,7 +19,8 @@ import (
 // 防穿越：入参 rel 必须是 FS 根相对路径（不允许 `..`/绝对路径/空字节）——subJoin 用
 // internal/fsutil.SanitizeRelPath 校验后拼 subdir 前缀，保证任何操作都逃不出 subdir 边界。
 //
-// SubFS 是**可写**视图（封装卷需要落密文）。只读封装根（写保护）由同包 ReadonlySubFS 提供。
+// SubFS 是**可写**视图（封装卷需要落密文）。被封装卷占用子目录的**只读写保护**不在此层——
+// 由装配层在写面判定（`pkg/server.checkWrapperOccupiedWrite` + `occupiedGuardFS` 装饰器）。
 type SubFS struct {
 	root   FS
 	subdir string

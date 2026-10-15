@@ -301,9 +301,15 @@ func TestWrapperMove_SourceOccupied403(t *testing.T) {
 	}
 }
 
-// wrapperCounterUsage 返回封装卷的 FS 层容量计数（master 底座：外部卷容量由 CapacityFS
-// 计数器权威记账——create 时 capacity.WrapBackend 包装；委托子池（DelegatePool）仅保留
-// 挂载/预检语义，上传/删除计量走计数器）。
+// wrapperCounterUsage 返回封装卷的 FS 层容量计数（外部卷容量由 CapacityFS 计数器权威记账
+// ——create 时 capacity.WrapBackend 包装）。
+//
+// 与**委托子池**的关系（勿混淆，二者都在动，职责不同）：嵌套封装卷的上传/删除在路由侧
+// 保留委托子 Scope 的 Commit/Release（`reserveVolumePool` 的 IsDelegated 分支 + 域侧
+// `releaseExternalDeleteQuota`），用于「父链聚合到底层池 + 封装卷自身 capacity 上限」；
+// 本函数读的计数器只在**底层卷是外部卷**（其 FS 链含 CapacityFS）时才同步增长——
+// 此时同一字节会同时进「委托子 Scope 父链」与「底层 FS 计数器」（已知取舍，见
+// reserveVolumePool 注释的 F4 段）。
 func wrapperCounterUsage(t *testing.T, h *Handlers, volName string) int64 {
 	t.Helper()
 	be := h.volSet.External(volName)

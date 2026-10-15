@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -109,60 +108,6 @@ func TestSubFS_EmptySubdirRejected(t *testing.T) {
 	base := NewLocalFS(t.TempDir(), nil)
 	if _, err := NewSubFS(base, ""); err == nil {
 		t.Fatalf("NewSubFS(空子目录) 应报错")
-	}
-}
-
-// TestReadonlySubFS_WriteFailClosed_ReadPass 只读封装根写保护：
-// WriteFile/Rename/Delete/MakeDir fail-closed（ErrReadOnly）；ListDir/Stat/OpenRead 透传。
-func TestReadonlySubFS_WriteFailClosed_ReadPass(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	base := NewLocalFS(root, nil)
-	// 预写一个文件供读
-	if err := base.WriteFile(context.Background(), "videos/a.txt", strings.NewReader("a"), 1, 0); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	ro, err := NewReadonlySubFS(base, "videos")
-	if err != nil {
-		t.Fatalf("NewReadonlySubFS: %v", err)
-	}
-	ctx := context.Background()
-	// 写方法全部 fail-closed
-	cases := []struct {
-		name string
-		do   func() error
-	}{
-		{"WriteFile", func() error { return ro.WriteFile(ctx, "b.txt", strings.NewReader("x"), 1, 0) }},
-		{"MakeDir", func() error { return ro.MakeDir(ctx, "d") }},
-		{"Delete", func() error { return ro.Delete(ctx, "a.txt") }},
-		{"Rename", func() error { return ro.Rename(ctx, "a.txt", "c.txt") }},
-	}
-	for _, tc := range cases {
-		if lerr := tc.do(); lerr == nil || !strings.Contains(lerr.Error(), "只读") {
-			t.Errorf("%s: err = %v, want ErrReadOnly 包装", tc.name, lerr)
-		}
-	}
-	// 读方法透传（Stat/ListDir/OpenRead）
-	e, err := ro.Stat(ctx, "a.txt")
-	if err != nil || e == nil {
-		t.Fatalf("Stat a.txt = %v/%v, want 存在", e, err)
-	}
-	entries, err := ro.ListDir(ctx, "")
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("ListDir = %+v/%v, want 恰含 a.txt", entries, err)
-	}
-	rc, err := ro.OpenRead(ctx, "a.txt")
-	if err != nil {
-		t.Fatalf("OpenRead: %v", err)
-	}
-	got, _ := readAll(rc)
-	rc.Close()
-	if string(got) != "a" {
-		t.Fatalf("读回 %q, want a", got)
-	}
-	// 防穿越：读 ../ 越界拒绝
-	if e, _ := ro.Stat(ctx, "../x"); e != nil {
-		t.Fatalf("只读视图 Stat ../x 越界应返回 nil/err, got %v", e)
 	}
 }
 
