@@ -1781,3 +1781,20 @@ func TestLogin_EmptyAKTrackerskip(t *testing.T) {
 		t.Fatalf("空 AK 登录不得成功 (body=%s)", body)
 	}
 }
+
+// TestValidateRegistrationOwner 钉住注册 owner 校验（2026-10-15 代码审核第 5 项修正版）：
+// 空串合法（由 AddRegistration 归一为 AK 名）；字面 "anonymous"（匿名保留租户）与非法段名/
+// 保留功能桶名拒绝——否则该账号会与匿名数据共用键空间与 ACL 条目，或在卷层解析必失败。
+func TestValidateRegistrationOwner(t *testing.T) {
+	t.Parallel()
+	for _, ok := range []string{"", "alice", "owner-x", "a1"} {
+		if err := validateRegistrationOwner(ok); err != nil {
+			t.Errorf("owner %q 应合法: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"anonymous", "user", "meta", "cloud", "archive", "chunk", "version", "trash", "a/b", "..", "./x"} {
+		if err := validateRegistrationOwner(bad); err == nil {
+			t.Errorf("owner %q 应被拒绝（保留匿名/非法段/保留桶名）", bad)
+		}
+	}
+}
