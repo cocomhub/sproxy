@@ -4,6 +4,7 @@
 package files
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +16,27 @@ import (
 // errMsgCreateDirFailed 是 mkdir 失败响应文案（随本族从 pkg/server/errors.go 迁入；
 // 该常量在 pkg/server 已无其他使用者）。
 const errMsgCreateDirFailed = "创建目录失败"
+
+// dirCreateHTTPError 把建目录失败映射为**可归因**的 HTTP 错误（2026-10-15 代码审核第 6 项）。
+//
+// 此前一律 500 + 固定文案「创建目录失败」⇒ 真实原因（卷层路径非法 / 无权访问 …）**被吞掉**：
+// 客户端无从判断，CI 也看不到（e2e 夹具日志 io.Discard ⇒ 连服务端日志都没有）——实测定位
+// 该缺陷时只能临时插桩才拿到真因。
+// 现在按底层哨兵归因（路径/权限属客户端可纠正的 4xx；其余保留 500 但**携带原因文本**，
+// 便于运维定位；这些文本是内核/卷层错误串，不含凭据）。
+func dirCreateHTTPError(derr error) *HTTPError {
+	switch {
+	case errors.Is(derr, volume.ErrInvalidUserPath):
+		return &HTTPError{Status: http.StatusBadRequest,
+			Message: errMsgCreateDirFailed + ": " + derr.Error(), Reason: reasonPathInvalid}
+	case errors.Is(derr, volume.ErrVolumeNotAuthorized):
+		return &HTTPError{Status: http.StatusForbidden,
+			Message: errMsgCreateDirFailed + ": " + derr.Error()}
+	default:
+		return &HTTPError{Status: http.StatusInternalServerError,
+			Message: errMsgCreateDirFailed + ": " + derr.Error()}
+	}
+}
 
 // sumRootDirSize 递归统计租户根内 rel 子树下所有普通文件的总字节数（rmdir 配额释放用）。
 // 经 root.ReadDir 相对遍历（os.Root 防符号链接逃逸），跳过符号链接（Lstat 语义不计数），

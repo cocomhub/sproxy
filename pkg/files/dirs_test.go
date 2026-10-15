@@ -16,6 +16,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -910,4 +912,37 @@ func (e *dirsEnv) withEventSink(sink EventListener) *Service {
 	e.eventSink = sink
 	e.rebuild()
 	return e.svc
+}
+
+// TestDirCreateHTTPError_Attributable 钉住「建目录失败可归因」（2026-10-15 代码审核第 6 项）：
+// 此前一律 500 + 固定文案「创建目录失败」⇒ 真实原因被吞掉（客户端与 CI 都无从判断，实测定位时
+// 只能临时插桩）。现在：卷层路径非法 ⇒ 400 + reasonPathInvalid；无权 ⇒ 403；其余 ⇒ 500 但**携带原因**。
+func TestDirCreateHTTPError_Attributable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantReason string
+		wantSub    string
+	}{
+		{"路径非法", volume.ErrInvalidUserPath, http.StatusBadRequest, reasonPathInvalid, "非法用户路径"},
+		{"路径非法（%w 包装）", fmt.Errorf("封装卷写路径: %w", volume.ErrInvalidUserPath), http.StatusBadRequest, reasonPathInvalid, "非法用户路径"},
+		{"无权", volume.ErrVolumeNotAuthorized, http.StatusForbidden, "", "无权访问"},
+		{"其它", errors.New("no space left on device"), http.StatusInternalServerError, "", "no space left"},
+	} {
+		he := dirCreateHTTPError(tc.err)
+		if he.Status != tc.wantStatus {
+			t.Errorf("%s: status=%d want %d", tc.name, he.Status, tc.wantStatus)
+		}
+		if he.Reason != tc.wantReason {
+			t.Errorf("%s: reason=%q want %q", tc.name, he.Reason, tc.wantReason)
+		}
+		if !strings.Contains(he.Message, errMsgCreateDirFailed) {
+			t.Errorf("%s: 应保留原语义文案前缀，got %q", tc.name, he.Message)
+		}
+		if !strings.Contains(he.Message, tc.wantSub) {
+			t.Errorf("%s: 应携带原因 %q，got %q", tc.name, tc.wantSub, he.Message)
+		}
+	}
 }

@@ -148,7 +148,7 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	if mkdirErr := root.MkdirAll(filepath.Dir(rel), 0755); mkdirErr != nil {
 		route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", mkdirErr.Error())
-		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+		return WriteFileResult{}, dirCreateHTTPError(mkdirErr)
 	}
 
 	// 覆盖写场景先统计旧文件大小 prev（双 Adjust 差分用）。
@@ -235,7 +235,7 @@ func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, 
 	if derr := a.route.Sink.MakeDir(ctx, path.Dir(a.rel)); derr != nil {
 		a.route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", a.remotePath)
-		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+		return WriteFileResult{}, dirCreateHTTPError(derr)
 	}
 	// checksum 计算与底层写入解耦（修复 #763 回归）：外部卷无原子写，需写后比对 SHA-256。
 	// 可 seek 源会被独立一遍读满算 checksum，再原（可 seek）源交给 sink（见 feedChecksumRewindable）。
@@ -2267,7 +2267,7 @@ func (s *Service) writeTargetLocalSettle(ctx context.Context, owner, rel, remote
 	if mkdirErr := root.MkdirAll(filepath.Dir(rel), 0o755); mkdirErr != nil {
 		route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", mkdirErr.Error())
-		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+		return WriteTargetResult{}, dirCreateHTTPError(mkdirErr)
 	}
 	// 覆盖写差分 prev（Exclusive 时 prev 必 0——O_EXCL 创建；NoQuota 时仍预读供 size 语义）。
 	prev := int64(0)
@@ -2391,7 +2391,7 @@ func (s *Service) writeTargetExternalSettle(ctx context.Context, logger *slog.Lo
 	if derr := route.Sink.MakeDir(ctx, path.Dir(rel)); derr != nil {
 		route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", remotePath)
-		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+		return WriteTargetResult{}, dirCreateHTTPError(derr)
 	}
 	hasher := sha256.New()
 	passSrc, ferr := feedChecksumRewindable(src, hasher)
