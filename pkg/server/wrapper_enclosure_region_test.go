@@ -14,9 +14,11 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -175,4 +177,62 @@ func TestEnclosureRegion_AttachEnclosureVolumeRejectsPopulatedRegion(t *testing.
 		t.Fatal("拒绝后不得注册运行时卷")
 	}
 	assertUserDataIntact(t, dir)
+}
+
+// TestEnclosureAttach_ConcurrentOverlappingDeclarationsSerialized 钉住运行期封装装配的**串行化**
+// （2026-10-15 代码审核 B 轮发现）：装配是「**读**卷集校验足迹 → **写**卷集登记」的非原子序列，
+// 而「同基底卷上两条无祖先关系的声明不得重叠」这条**互斥占用**不变量正是靠该校验维持。两个并发
+// 请求若同时通过校验 ⇒ 两卷登记进同一足迹区间 ⇒ 互斥被破坏（删其一会擦除另一卷数据）。
+//
+// 判据：N 个并发装配**同一空区间**的声明 ⇒ **恰好 1 个成功**（其余 fail-closed），且最终卷集里
+// 只有一个卷占用该区间。去掉 `enclosureAttachMu` 时本用例稳定出现多个成功（`-race` 亦报竞争）。
+func TestEnclosureAttach_ConcurrentOverlappingDeclarationsSerialized(t *testing.T) {
+	t.Parallel()
+	h, _ := newNestedWrapperAPIHandlers(t)
+	mainDir := h.volSet.Root("main").AbsPath()
+
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var okCount int
+	errs := make([]error, n)
+	names := make([]string, n)
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := fmt.Sprintf("vault-conc-%d", i)
+			tv, nested := TranslateNestedVolume(volume.Volume{
+				Name: name, Type: wrapperFSType,
+				Extra: map[string]any{"target": "main/alice/user/conc"},
+			})
+			var err error
+			if !nested {
+				err = errors.New("应为嵌套封装声明")
+			} else {
+				err = AttachEnclosureVolume(context.Background(), h.volSet, testLogger(), mainDir, tv)
+			}
+			mu.Lock()
+			errs[i], names[i] = err, name
+			if err == nil {
+				okCount++
+			}
+			mu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+
+	if okCount != 1 {
+		t.Fatalf("并发装配同一足迹区间应**恰好 1 个成功**（互斥占用不变量），got %d；errs=%v", okCount, errs)
+	}
+	// 最终卷集里只能有一个卷占用该区间（成功者恰好一个，且失败者未登记）。
+	registered := 0
+	for _, name := range names {
+		if h.volSet.External(name) != nil {
+			registered++
+		}
+	}
+	if registered != 1 {
+		t.Fatalf("卷集里占用该区间的卷应恰好 1 个，got %d", registered)
+	}
 }
