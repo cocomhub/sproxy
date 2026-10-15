@@ -66,6 +66,11 @@ func NewScopeSink(dir, scopeID string) (*FileSink, error) {
 	return &FileSink{file: f, path: path}, nil
 }
 
+// privatePermOK 判定权限位是否**私有**（不含 group/other 任何位）。跨平台纯函数——判据本身
+// 与平台无关（Windows 的 Mode().Perm() 不反映 ACL ⇒ 由 checkPrivatePerm 的平台分支决定是否
+// 调用本函数），因此可在任意平台单测 Linux 语义。
+func privatePermOK(perm os.FileMode) bool { return perm&0o077 == 0 }
+
 // ensurePrivateDir 确保 dir 是**私有**（0700）且**非符号链接**的目录；否则 fail-closed。
 //
 // 覆盖两类实测风险：① 共享路径（如 /tmp）下被他人预置的同名目录 ⇒ 审计文件可被读取/

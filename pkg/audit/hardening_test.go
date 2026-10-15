@@ -100,9 +100,10 @@ func TestNewScopeSink_RejectsSymlinkedFile(t *testing.T) {
 	}
 }
 
-// TestNewScopeSink_RejectsNonPrivateDir：目录含 group/other 位 ⇒ 拒绝（同机他人可读/改）。
-// 仅 Unix 校验：Windows 的 Mode().Perm() 不反映 ACL（按位校验会误禁整个审计能力）。
-func TestNewScopeSink_RejectsNonPrivateDir(t *testing.T) {
+// TestNewScopeSink_TightensNonPrivateDir：既有目录含 group/other 位 ⇒ **自愈收紧为 0700**
+// （安全目标是「审计目录最终私有」，而非让审计在常见环境（用户缓存目录/t.TempDir()）整体不可用）。
+// 仅 Unix 断言权限位：Windows 的 Mode().Perm() 不反映 ACL。
+func TestNewScopeSink_TightensNonPrivateDir(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows 的 Mode().Perm() 不反映 ACL")
@@ -114,8 +115,33 @@ func TestNewScopeSink_RejectsNonPrivateDir(t *testing.T) {
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatalf("Chmod: %v", err)
 	}
-	if _, err := NewScopeSink(dir, "task1"); err == nil {
-		t.Fatal("非私有目录（0777）必须拒绝：同机他人可读/删/改审计")
+	s, err := NewScopeSink(dir, "task1")
+	if err != nil {
+		t.Fatalf("非私有既有目录应被收紧而非拒绝: %v", err)
+	}
+	_ = s.Close()
+	fi, serr := os.Lstat(dir)
+	if serr != nil {
+		t.Fatalf("Lstat: %v", serr)
+	}
+	if !privatePermOK(fi.Mode().Perm()) {
+		t.Fatalf("目录权限应被收紧为私有（无 group/other 位），got %04o", fi.Mode().Perm())
+	}
+}
+
+// TestPrivatePermOK 跨平台钉住私有判据（判据与平台无关；平台分支只决定是否调用它）。
+func TestPrivatePermOK(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		perm os.FileMode
+		want bool
+	}{
+		{0o700, true}, {0o600, true}, {0o500, true},
+		{0o750, false}, {0o705, false}, {0o777, false}, {0o770, false},
+	} {
+		if got := privatePermOK(tc.perm); got != tc.want {
+			t.Errorf("privatePermOK(%04o) = %v, want %v", tc.perm, got, tc.want)
+		}
 	}
 }
 

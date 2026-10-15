@@ -19,11 +19,26 @@ func openAuditFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 }
 
-// checkPrivatePerm 校验目录权限不含 group/other 位（Unix 权限真实可依，必须强制）。
-// 非私有目录（如 0777）意味着同机其他用户可读/删/改审计文件 ⇒ fail-closed。
+// checkPrivatePerm 确保目录私有（不含 group/other 位）。
+//
+// Unix 权限位真实可依 ⇒ 必须强制；但**既有目录可能本就 0755**（如用户缓存目录被其它工具
+// 预建、测试用 t.TempDir()）⇒ 先尝试**自愈**（chmod 0700），仍不可私有才 fail-closed。
+// 只读拒绝会令审计在常见环境下整体不可用，而「审计目录最终必须私有」才是安全目标。
 func checkPrivatePerm(dir string, fi os.FileInfo) error {
-	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("audit: NewScopeSink: 目录 %q 权限 %04o 非私有（要求 0700：否则同机他人可读/改审计）", dir, perm)
+	if privatePermOK(fi.Mode().Perm()) {
+		return nil
+	}
+	if cerr := os.Chmod(dir, 0o700); cerr != nil {
+		return fmt.Errorf("audit: NewScopeSink: 目录 %q 权限 %04o 非私有且无法收紧: %w",
+			dir, fi.Mode().Perm(), cerr)
+	}
+	after, serr := os.Lstat(dir)
+	if serr != nil {
+		return fmt.Errorf("audit: NewScopeSink: stat %q: %w", dir, serr)
+	}
+	if !privatePermOK(after.Mode().Perm()) {
+		return fmt.Errorf("audit: NewScopeSink: 目录 %q 权限 %04o 非私有（要求 0700：否则同机他人可读/改审计）",
+			dir, after.Mode().Perm())
 	}
 	return nil
 }
