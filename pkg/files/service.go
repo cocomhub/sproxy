@@ -196,6 +196,19 @@ type VolumeSet interface {
 	Pool(name string) *quota.Pool
 }
 
+// DelegatedPoolSource 是 VolumeSet 的**可选扩展**：报告某卷的容量池是否为**委托子 Scope**
+// （嵌套封装卷，`registry.Set.DelegatePool` 挂载到底层卷池的占用子目录作用域）。
+//
+// 为什么需要它（F3）：委托子池的占用**由装配层路由保留**（`reserveVolumePool` 的
+// `IsDelegated` 分支提交进子 Scope），故其释放也必须在提交持有方完成；而普通外部卷的池由
+// FS 层 `CapacityFS` 计数器自行释放（删除即扣减），未经路由提交 ⇒ 域层若再扣一次就是**重复
+// 释放**（底座池少计 ⇒ 过度准入）。本接口让域层只在「委托池」这一种情形下归还卷池。
+//
+// 断言失败（未装配/旧适配器）→ 域层不碰卷池（零回归）。
+type DelegatedPoolSource interface {
+	IsDelegated(name string) bool
+}
+
 // ExternalEntry 是外部卷（非本地后端）目录条目的领域视图（逻辑目录浏览的明文信息）：
 // 只含 Name/Size/IsDir，不暴露底层分片名与加密 meta。装配层（pkg/server）在适配
 // sync.FS 的 ListDir 结果时转换为本类型。

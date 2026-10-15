@@ -1800,9 +1800,14 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, rel, remotePa
 		}
 	}
 	for _, name := range vols {
-		// **删除前**取记账字节（卷自报实测足迹优先；删除后对象已不在卷上 ⇒ 无法再测）。
+		// **删除前**取记账字节（对象删除后已不可测量）：① 卷自报实测足迹优先（secretdata 的
+		// parity + meta pad 无法由逻辑长度推出）；② 无足迹能力（多数外部卷：s3/webdav/baidupcs、
+		// 以及键空间不经足迹索引的嵌套封装卷）→ 回落实测逻辑大小——与写入侧 `settleSize` 的
+		// ②③ 档同源（无能力时写入按 written/PhysicalSize 记账），保证「释放量 == 提交量」。
 		charge := int64(0)
 		if n, ok := s.physChargeFor(name, owner, remotePath); ok {
+			charge = n
+		} else if n, _, serr := ops.ExternalStat(ctx, owner, name, remotePath); serr == nil && n > 0 {
 			charge = n
 		}
 		deleted, derr := ops.ExternalDelete(ctx, owner, name, remotePath, input.ExpectedChecksum)
@@ -1830,8 +1835,14 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, rel, remotePa
 	return true, DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
 }
 
-// releaseExternalDeleteQuota 释放外部卷删除后的 owner 配额与卷容量池（口径与写入侧同源）。
-// charge 是**删除前**实测/折算出的记账字节（0 = 无记账能力 ⇒ 不释放，保持既有行为）。
+// releaseExternalDeleteQuota 释放外部卷删除后的 owner 配额与（委托）卷容量池。charge 是
+// **删除前**实测/折算出的记账字节，与写入侧 `settleSize` 同源（0 = 无可测字节 ⇒ 不释放）。
+//
+// **卷池释放的持有方分工（F3：唯一释放点）**：只有**委托子 Scope**（嵌套封装卷，占用由装配层
+// 路由 `reserveVolumePool` 提交进子 Scope）需要域层归还；其余外部卷的池由 FS 层
+// `CapacityFS` 计数器在删除时自行扣减（路由探测预留早已释放、从未提交）⇒ 域层再扣一次就是
+// **重复释放**（把同池其它文件/子 Scope 的占用一并抹掉 ⇒ 少计 ⇒ 过度准入）。故此处按
+// `DelegatedPoolSource` 判定后才动卷池，且这是该池**唯一的**域层释放点（装配层删除接缝不得重复）。
 func (s *Service) releaseExternalDeleteQuota(owner, rel, volName string, charge int64) {
 	if charge <= 0 {
 		return
@@ -1839,10 +1850,16 @@ func (s *Service) releaseExternalDeleteQuota(owner, rel, volName string, charge 
 	if scope := s.rt.quotaScope(owner, rel); scope != nil {
 		scope.ReleaseUsage(charge)
 	}
-	if vs := s.rt.volSet(); vs != nil {
-		if pool := vs.Pool(volName); pool != nil {
-			pool.ReleaseCommitted(charge)
-		}
+	vs := s.rt.volSet()
+	if vs == nil {
+		return
+	}
+	d, ok := vs.(DelegatedPoolSource)
+	if !ok || !d.IsDelegated(volName) {
+		return // 非委托卷：容量账本归 FS 层计数器（删除即扣减），域层不得介入
+	}
+	if pool := vs.Pool(volName); pool != nil {
+		pool.ReleaseCommitted(charge)
 	}
 }
 

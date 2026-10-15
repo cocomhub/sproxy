@@ -472,25 +472,12 @@ func (o externalVolumeOps) ExternalDelete(ctx context.Context, owner, volName, r
 		h.logger.ErrorContext(ctx, "外部卷删除失败", "volume", volName, "path", remotePath, "error", derr.Error())
 		return false, &files.HTTPError{Status: http.StatusInternalServerError, Message: "删除失败"}
 	}
-	// 委托子池释放（过渡层）：嵌套封装卷（DelegatePool 挂载）删除后把占用字节归还委托子
-	// Scope（父链聚合到底层卷池）——与上传写面的保留 Commit 对称。普通外部卷无委托池
-	// （Pool(name) 非委托）→ no-op（容量由 FS 层 CapacityFS 释放）。
-	h.releaseWrapperPoolAfterDelete(volName, e.Size)
+	// 配额释放（owner 全局账本 + 委托卷容量池）**不在本层**：域侧 `deleteExternalVolume` 在
+	// `ExternalDelete` 成功返回后统一调 `releaseExternalDeleteQuota`（删除前实测记账字节，
+	// 与写入侧 `settleSize` 同口径）——这是委派池的**唯一**域层释放点。此前本层另有一次
+	// `releaseWrapperPoolAfterDelete`，与域侧对同一委托子 Scope 重复归还（F3：底座池少计 ⇒
+	// 过度准入），已移除：一次删除只允许一处释放。
 	return true, nil
-}
-
-// releaseWrapperPoolAfterDelete 在外部卷删除成功后释放委托子池（嵌套封装卷配额归还）。
-// 非委托卷 / 未装配 → no-op。size 为删除对象的实际字节（externalVolumeOps 已 Stat）。
-func (h *Handlers) releaseWrapperPoolAfterDelete(volName string, size int64) {
-	if h.volSet == nil {
-		return
-	}
-	if !h.volSet.IsDelegated(volName) {
-		return
-	}
-	if dp := h.volSet.Pool(volName); dp != nil {
-		dp.ReleaseCommitted(size)
-	}
 }
 
 // externalVolumeKey 计算外部卷对象操作（Delete/Stat/List/Rename 等）的 FS 键：
