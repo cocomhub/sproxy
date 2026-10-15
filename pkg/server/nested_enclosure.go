@@ -219,6 +219,14 @@ func DetachEnclosureVolume(set *registry.Set, log *slog.Logger, v volume.Volume)
 	if set == nil {
 		return
 	}
+	// **与装配共用同一临界区**（2026-10-15 高风险区审核发现）：拆除的最后一步是**擦除占用区间**
+	// （不可逆），而 attach 的「读卷集校验足迹 → 写卷集登记」与之必须互斥。否则「删封装卷 A +
+	// 在同一区间新建封装卷 B」并发时，A 的擦除可能落在 B **已写入的新内容**上 ⇒ B 数据被删
+	// （且 B 的装配校验当时看到的是「空区间」⇒ 不会察觉）。
+	// 代价：擦除最长 30s（见 eraseEnclosureRegion 的 ctx 超时）会阻塞并发的卷装配——正确性优先
+	// （建卷是低频操作，而被误擦的数据不可恢复）。
+	enclosureAttachMu.Lock()
+	defer enclosureAttachMu.Unlock()
 	if log == nil {
 		log = slog.Default()
 	}
