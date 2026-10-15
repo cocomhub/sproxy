@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,5 +103,43 @@ func TestCloudArchiveToVolume_OccupiedSubdir_403(t *testing.T) {
 	// 对照：非占用路径转存成功（防「一刀切拒绝」）。
 	if rec := post("free/s.tar.gz"); rec.Code != http.StatusOK {
 		t.Fatalf("非占用路径转存 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCloudArchiveToVolume_RecordsAudit F8：统一转存成功/失败各留一条服务端审计事件
+// （同步 HTTP 路径无任务级审计作用域，按备份等旁路写面口径补审计行）。
+func TestCloudArchiveToVolume_RecordsAudit(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	var buf bytes.Buffer
+	h.auditLogger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	id := createCompletedTask(t, mgr, "audited.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"a.tar.gz","target_volume":"vault"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("转存 = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	row := buf.String()
+	if !strings.Contains(row, `"action":"cloud_archive"`) || !strings.Contains(row, `"object":"vault"`) {
+		t.Fatalf("缺少转存审计行: %s", row)
+	}
+	if !strings.Contains(row, `"result":"success"`) {
+		t.Fatalf("转存审计结果应为 success: %s", row)
+	}
+	// 失败路径：目标已存在（同名二次转存 → 409）必须留 error 审计行。
+	buf.Reset()
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"a.tar.gz","target_volume":"vault"}`))
+	req2.SetPathValue("id", id)
+	h.cloudArchiveTask(rec2, req2)
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("同名二次转存 = %d, want 409", rec2.Code)
+	}
+	if failed := buf.String(); !strings.Contains(failed, `"result":"error"`) {
+		t.Fatalf("失败转存应留 error 审计行: %s", failed)
 	}
 }

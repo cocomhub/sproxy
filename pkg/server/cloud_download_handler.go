@@ -1039,6 +1039,10 @@ func (h *Handlers) cloudArchiveToVolume(
 		Rel:         rel,
 		Owner:       t.Owner,
 	})
+	// 统一转存审计（F8）：本路径是**同步 HTTP**（不经 cloud manager ⇒ 无任务级审计作用域 /
+	// download·transfer span）。按备份等旁路写面的既有口径补一条服务端审计事件，保证
+	// 「谁在何时把什么转存到哪个卷」可经 /api/audit 追溯。
+	h.recordArchiveTransferAudit(r.Context(), t, scheme, rel, len(t.Entries), terr)
 	if terr != nil {
 		// 目标已存在（拒绝静默覆盖）是客户端可解冲突 → 409（非 500）。
 		if errors.Is(terr, transfer.ErrExists) {
@@ -1076,6 +1080,22 @@ func (h *Handlers) archiveVolumeWriteGate(ctx context.Context, fs syncpkg.FS, ow
 		return func() {}, http.StatusConflict, "目标正被其他写者占用，请稍后重试"
 	}
 	return release, 0, ""
+}
+
+// recordArchiveTransferAudit 记录统一转存（归档 → 外部卷）的服务端审计事件（F8）。
+// 同步 HTTP 路径没有 cloud 任务级审计作用域（见 cloudArchiveToVolume），以服务端审计行补齐
+// 「谁把什么转存到哪个卷」的可追溯性——与 backup 旁路写面同口径（recordBackupAudit）。
+// 文案只含卷名/键/scheme 等非敏感结构信息，不含 URL/凭据。
+func (h *Handlers) recordArchiveTransferAudit(ctx context.Context, t archiveVolumeTransfer, scheme, rel string, count int, terr error) {
+	result, detail := AuditResultSuccess, fmt.Sprintf("scheme=%s key=%s files=%d encrypt=%t", scheme, rel, count, t.Encrypt)
+	if terr != nil {
+		result = AuditResultError
+		detail += " error=" + terr.Error()
+	}
+	h.RecordAudit(ctx, AuditEvent{
+		Action: "cloud_archive", ObjectType: "volume", Object: t.TargetVolume,
+		Result: result, Detail: detail,
+	})
 }
 
 // archiveEntries 把 groupFiles 转为 SourceEntry（打开源文件作 Reader；size/mtime 填真值）。
