@@ -5,12 +5,16 @@
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
 // global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件三处经 typeof 守卫引用：
 //   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
+// global: uploadFiles / checkResumableUploads / resumeUpload（upload.js，上传执行与断点续传入口：
+//   uploadFiles 由 file-input change 调用、checkResumableUploads 在 DOMContentLoaded 初始化与
+//   上传完成后调用、resumeUpload 由 transferResume 经 typeof 守卫调用）
 // global: volManageFormHtml / volManageListHtml / composeNestedTarget / composeCapacityText（vol-manage-format.js，「卷管理」tab 渲染 + 容量单位拼接）
 // global: auditRowsHtml（audit-rows-format.js，任务「审计」弹窗行渲染；经 showTaskAudit 调用）
 // global: videoPlayerModalHtml（video-player.js，视频播放弹窗 HTML；经 showVideoPlayer 调用）
 // global: trashTableHtml（trash-format.js，回收站表渲染）
 // global: notifyTableHtml（notify-format.js，通知表渲染）
 // global: credentialsPanelHtml（credentials-format.js，凭据面板渲染）
+// global: credAddBody（credentials-format.js，凭据新增请求体构造：credAdd 经 coreRequest 提交）
 // global: secretsPanelHtml / secretExportValue（secrets-format.js，密钥面板渲染与导出取值）
 // global: syncConflictsHtml / conflictResolveQuery（sync-conflicts-format.js，冲突表渲染与解决请求路径）
 // global: auditExportBlob / auditExportFilename / auditExportRows / notifyTestSummary（audit-export.js，审计导出的 blob/文件名/统计）
