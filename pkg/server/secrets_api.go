@@ -290,16 +290,11 @@ func (h *Handlers) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "secret 不存在", status)
 		return
 	}
-	if err := h.deleteSecretFile(r.Context(), mgr, name); err != nil {
+	// secrets.Manager 唯一句柄经 fs.Delete 删除（name 已由 Exists 确认合法）。
+	if err := mgr.Remove(r.Context(), name); err != nil {
 		h.logger.Error("删除 secret 失败", "name", name, "err", err)
 		http.Error(w, "删除 secret 失败", http.StatusInternalServerError)
 		return
 	}
 	sendJSONResponse(w, map[string]string{"name": name, "deleted": "true"}, http.StatusOK)
-}
-
-// deleteSecretFile 删除 secret 文件（fs.Delete，Exists 已确认存在）。
-func (h *Handlers) deleteSecretFile(ctx context.Context, mgr *secrets.Manager, name string) error {
-	// secrets.Manager 唯一句柄经 fs.Delete 删除（name 已由 Exists 确认合法）。
-	return mgr.Remove(ctx, name)
 }
