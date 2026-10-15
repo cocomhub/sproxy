@@ -323,8 +323,9 @@ func (h *Handlers) locateOwnerFileForFiles(owner, rel string) (files.FileLocatio
 	return files.FileLocation{VolumeName: loc.volumeName, Tenant: loc.tenant}, true
 }
 
-// routeUploadForTarget 为统一写内核（WriteTarget 显式卷：S3/DAV/版本恢复）定卷：ACL 校验 +
-// 单候选双预留，**不做唯一性查重**（覆盖写语义——这些写面允许覆盖同 rel）。
+// routeUploadForTarget 为统一写内核（WriteTarget 显式卷：S3 单对象 PUT / DAV / 版本恢复 /
+// presign 直传登记）定卷：ACL 校验 + 写保护 + 单候选双预留，**不做唯一性查重**（覆盖写语义
+// ——这些写面允许覆盖同 rel）。
 func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) (files.UploadRoute, error) {
 	if h.volSet == nil {
 		return h.routeUploadForFiles(owner, rel, volName, size, "")
@@ -338,9 +339,18 @@ func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) 
 	if !ok || !v.Authorize(owner) {
 		return files.UploadRoute{}, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
 	}
+	// 写保护（用户语义 #6，与 routeUploadSingle / routeUpload 自动路由同口径）：目标卷该 rel
+	// 命中被封装卷占用的底层子目录 → 403。统一写内核的显式卷分支此前**不经**占用判定 ⇒
+	// S3 单对象 PUT、presign 直传登记（RegisterDirectUpload）、DAV、版本恢复可写进「只读」
+	// 占用目录，破坏封装卷不变量（旁路闭环缺口 F2/F5）。
+	if err := h.checkWrapperOccupiedWrite(v.Name, userVisibleRelOf(rel)); err != nil {
+		return files.UploadRoute{}, &files.HTTPError{Status: http.StatusForbidden, Message: err.Error()}
+	}
 	route, err := h.reserveVolume(owner, rel, v.Name, size)
 	if err != nil {
-		return files.UploadRoute{}, err
+		// 预留失败必须是契约错误（*files.HTTPError）：调用方（s3WriteError / DAV / presign）
+		// 只认该类型，裸 *routeError 会退化成 500（配额满应 507、越权应 403）。
+		return files.UploadRoute{}, toFilesHTTPError(err)
 	}
 	release := route.release
 	return files.UploadRoute{

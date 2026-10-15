@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/transfer"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
@@ -1004,6 +1005,14 @@ func (h *Handlers) cloudArchiveToVolume(
 		return
 	}
 	rel := loc.FSPath()
+	// 写保护（嵌套封装占用子目录只读，旁路闭环 F1）：目标命中被封装卷占用的底层子目录 →
+	// 403 **写前预检**（不落盘）。本路径由服务端自己执行写（不是客户端直写后端）且
+	// target_path 客户端可控，此前无占用判定 ⇒ 可落进「只读」占用目录、破坏封装不变量。
+	// 坐标与 pkg/cloud 下载转存的 occupiedWriteGuard 同口径（用户可见相对路径）。
+	if err := h.checkWrapperOccupiedWrite(t.TargetVolume, volume.UserVisibleRel(rel)); err != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: err.Error()}, http.StatusForbidden)
+		return
+	}
 	// 本地 staging 配额统一接线（与 cloud 下载转存一致；无独立配额 → 直通零回归）。
 	// 打包流长度未知（size=0）由 gate 的 reservingReader 按实际读取量增量预留（#767 原生
 	// 支持）——不得再在装配层额外预留（会双计）。
