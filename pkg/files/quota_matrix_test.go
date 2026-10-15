@@ -95,3 +95,118 @@ func TestQuotaLedgerMatrix_WriteOverwriteRenameDelete(t *testing.T) {
 		})
 	}
 }
+
+// TestQuotaLedgerMatrix_CopyTrashDir 扩展对账矩阵：复制 / 回收站 / 目录足迹三组操作，
+// 每组**每步**断言账本自洽（与上一个矩阵同口径：差值为正 = 幽灵占用，为负 = 少记）。
+//
+// 覆盖的缺陷类（每一条在本项目历史上都出现过）：
+//   - 复制漏记账（同卷复制 = 新对象 ⇒ 全额计；去重关闭时不得共享占用）；
+//   - 软删**误释放**（回收站保留 ⇒ 释放会让用户「删了就有空间」但文件还在）；
+//   - 清空回收站**漏释放**（trash 条目删除时释放口径不同源 ⇒ 幽灵占用）；
+//   - 目录 meta 足迹（mkdir 收、rmdir 放，含祖先链差分）。
+func TestQuotaLedgerMatrix_CopyTrashDir(t *testing.T) {
+	t.Parallel()
+	const foot = int64(2 << 20)
+	const dirFoot = int64(1 << 20)
+	flavors := []struct {
+		name   string
+		env    func(*testing.T) *dirsEnv
+		charge func(int64) int64
+	}{
+		{"明文本地", writeTargetEnv, func(n int64) int64 { return n }},
+		{"卷自报足迹", func(t *testing.T) *dirsEnv {
+			t.Helper()
+			e := writeTargetEnv(t)
+			e.svc.rt.phys = fakePhysFootprint{foot: foot, dirFoot: dirFoot, root: e.tenantFor("alice").Root()}
+			return e
+		}, func(int64) int64 { return foot }},
+	}
+	for _, f := range flavors {
+		t.Run(f.name, func(t *testing.T) {
+			t.Parallel()
+			e := f.env(t)
+			ctx := context.Background()
+			sc := e.quotaScopeFor("alice", "user/a.bin")
+			if sc == nil {
+				t.Fatal("owner Scope 不可用")
+			}
+			assertUsage := func(step string, want int64) {
+				t.Helper()
+				if got := sc.Usage(); got != want {
+					t.Fatalf("%s 后 owner 配额=%d want %d（差 %+d）", step, got, want, got-want)
+				}
+			}
+
+			// 1) 写入 a ⇒ charge
+			payload := bytes.Repeat([]byte("a"), 64_000)
+			if _, err := e.svc.WriteTarget(ctx, WriteTargetInput{
+				Owner: "alice", RemotePath: "a.bin", ClientSize: int64(len(payload)),
+			}, bytes.NewReader(payload)); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			one := f.charge(int64(len(payload)))
+			assertUsage("write", one)
+
+			// 2) 同卷复制 a→b ⇒ 新对象全额计（去重关闭）
+			if _, err := e.svc.CopyFile(ctx, CopyFileInput{Owner: "alice", From: "a.bin", To: "b.bin"}); err != nil {
+				t.Fatalf("copy: %v", err)
+			}
+			assertUsage("copy", 2*one)
+
+			// 3) 软删 + 清空回收站（**仅本地卷型**）：
+			//    回收站是本地卷能力（trash 桶在本地租户根）。软删 ⇒ 保留 ⇒ 记账**不变**
+			//    （若释放，用户会「删了就有空间」而文件还在）；清空回收站 ⇒ 真正消失 ⇒ 释放。
+			//    注：卷自报足迹卷在**生产中**必然是外部卷 ⇒ 无本地回收站、软删 **fail-closed**
+			//    （禁静默降级为不可恢复硬删，见 `delete_soft_external_test.go`）；而「本地路由 +
+			//    足迹能力」是不存在的组合 ⇒ 本用例不构造它（避免用不真实的夹具断言错误契约）。
+			if f.name != "卷自报足迹" {
+				if _, err := e.svc.DeleteFile(ctx, DeleteFileInput{
+					Owner: "alice", RemotePath: "a.bin", SkipChecksumVerify: true, SoftDelete: true,
+				}); err != nil {
+					t.Fatalf("本地卷软删应成功: %v", err)
+				}
+				assertUsage("soft delete", 2*one)
+				if err := e.svc.EmptyTrash(ctx, "alice"); err != nil {
+					t.Fatalf("empty trash: %v", err)
+				}
+				assertUsage("empty trash", one)
+			}
+
+			// 5) 硬删 b：本地卷型此时只剩 b（a 已随回收站清空）⇒ 归零；卷自报足迹卷型跳过了
+			//    回收站步骤 ⇒ a 仍在 ⇒ 应剩 one（顺带覆盖「非最后对象释放」路径）。
+			if _, err := e.svc.DeleteFile(ctx, DeleteFileInput{
+				Owner: "alice", RemotePath: "b.bin", SkipChecksumVerify: true,
+			}); err != nil {
+				t.Fatalf("hard delete: %v", err)
+			}
+			wantAfterDelete := int64(0)
+			if f.name == "卷自报足迹" {
+				wantAfterDelete = one
+			}
+			assertUsage("hard delete", wantAfterDelete)
+			if f.name == "卷自报足迹" {
+				// 收尾：删掉最后一个对象 ⇒ 必须归零（覆盖「最后对象释放」路径）。
+				if _, err := e.svc.DeleteFile(ctx, DeleteFileInput{
+					Owner: "alice", RemotePath: "a.bin", SkipChecksumVerify: true,
+				}); err != nil {
+					t.Fatalf("hard delete a: %v", err)
+				}
+				assertUsage("hard delete a（最后一个）", 0)
+			}
+
+			// 6) 目录足迹：mkdir 收（含祖先链差分）、rmdir 放 ⇒ 回到 0
+			if _, err := e.svc.MakeDir(ctx, "alice", "videos", ""); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			wantAfterMkdir := int64(0)
+			if f.name == "卷自报足迹" {
+				wantAfterMkdir = dirFoot // 该卷型目录 meta 也按物理足迹计
+			}
+			assertUsage("mkdir", wantAfterMkdir)
+			if _, err := e.svc.RemoveDir(ctx, "alice", "videos", "", true); err != nil {
+				t.Fatalf("rmdir: %v", err)
+			}
+			assertUsage("rmdir", 0)
+		})
+	}
+}
