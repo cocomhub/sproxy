@@ -247,6 +247,29 @@ test('cloudDownloadFormHtml includes transfer volume selector + three behaviors'
   assert.match(html, /vault/);
 });
 
+test('cloudDownloadFormHtml 过滤服务端必然拒绝的转存候选（B-M1：本地卷/secrets）', () => {
+  const html = r.cloudDownloadFormHtml({ volumes: [
+    { name: 'main', type: 'local' },
+    { name: '', type: '' },
+    { name: 'mykeys', type: 'secrets' },
+    { name: 'bd', type: 'baidupcs' },
+    { name: 'vault', type: 'secretdata' }
+  ], current: '' });
+  assert.ok(html.includes('bd'), '外部卷应保留');
+  assert.ok(html.includes('vault'), '封装卷（secretdata）可选作转存目标');
+  assert.ok(!html.includes('mykeys'), 'secrets 密钥卷应被过滤（服务端 400）');
+  assert.ok(!html.includes('>main<'), '本地卷应被过滤（无外部后端，服务端 400）');
+});
+
+test('isTransferTargetVolume 判定口径', () => {
+  assert.ok(r.isTransferTargetVolume({ name: 'bd', type: 'baidupcs' }));
+  assert.ok(r.isTransferTargetVolume({ name: 'v', type: 'secretdata' }));
+  assert.ok(!r.isTransferTargetVolume({ name: 'm', type: 'local' }));
+  assert.ok(!r.isTransferTargetVolume({ name: 'k', type: 'secrets' }));
+  assert.ok(!r.isTransferTargetVolume({ name: 'x', type: '' }));
+  assert.ok(!r.isTransferTargetVolume(null));
+});
+
 // ---- 审计面板 ----
 test('auditTableHtml 空事件 → 空占位', () => {
   const html = r.auditTableHtml([]);

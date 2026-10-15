@@ -7,6 +7,21 @@
 //   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
 // global: volManageFormHtml / volManageListHtml / composeNestedTarget / composeCapacityText（vol-manage-format.js，「卷管理」tab 渲染 + 容量单位拼接）
 // global: auditRowsHtml（audit-rows-format.js，任务「审计」弹窗行渲染；经 showTaskAudit 调用）
+// global: videoPlayerModalHtml（video-player.js，视频播放弹窗 HTML；经 showVideoPlayer 调用）
+// global: trashTableHtml（trash-format.js，回收站表渲染）
+// global: notifyTableHtml（notify-format.js，通知表渲染）
+// global: credentialsPanelHtml（credentials-format.js，凭据面板渲染）
+// global: secretsPanelHtml / secretExportValue（secrets-format.js，密钥面板渲染与导出取值）
+// global: syncConflictsHtml / conflictResolveQuery（sync-conflicts-format.js，冲突表渲染与解决请求路径）
+// global: auditExportBlob / auditExportFilename / auditExportRows / notifyTestSummary（audit-export.js，审计导出的 blob/文件名/统计）
+// global: previewImageUrl / previewOriginalUrl（image-preview.js，图片预览 URL 派生）
+// global: volumeOpsBarHtml / volumeOpLabel / volumeOpQuery（volume-ops.js，卷操作按钮条与操作文案/请求路径）
+// global: clearCancelledUpload / pauseUploadSession / removeUploadSession / setTransferStore（upload.js，
+//   传输通道条目的取消/暂停/移除与传输 store 注入；setTransferStore 经 typeof 守卫调用）
+//
+// 说明：以上均为**跨文件隐式全局**（index.html script 顺序保证提供方先于 app.js 加载，调用点
+// 运行期解引用）。新增/改名任何一项都必须同步本清单——`node --check` 不做跨文件符号解析，
+// 漏改会在运行期才炸（见 CLAUDE.md「跨文件隐式全局陷阱」记录）。
 
 const BASE = '';
 // SproxySig 请求签名认证（AccessKey/AccessKeySecret/AccessKeyID）。Secret 只存本端计算签名，
@@ -2409,8 +2424,9 @@ async function showCloudDownloadPreview(action) {
   let behaviorFormOpts = { volumes: [], current: '' };
   try {
     const volRes = await sc.files.volumes();
-    behaviorFormOpts.volumes = (volRes && Array.isArray(volRes.volumes) ? volRes.volumes : [])
-      .map(function (v) { return v && v.name; }).filter(Boolean);
+    // 传对象（含 type）而非仅卷名：cloudDownloadFormHtml 按 type 过滤掉服务端必然拒绝的
+    // 候选（本地卷无外部后端、secrets 密钥卷）——B-M1。
+    behaviorFormOpts.volumes = (volRes && Array.isArray(volRes.volumes) ? volRes.volumes : []);
   } catch (e) { /* 卷面失败不阻断：不转存仍可提交 */ }
   previewHtml += appRender.cloudDownloadFormHtml(behaviorFormOpts);
 

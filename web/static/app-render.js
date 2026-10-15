@@ -127,7 +127,21 @@
   // previewKind(name)：扩展名 → 'image' | 'text' | 'download'（previewFile 的归类逻辑）。
   const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
   const TEXT_EXT = ['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'];
+  // isTransferTargetVolume(v)：转存目标卷候选判定（B-M1）。服务端
+  // `checkTransferVolumePreflight` 要求目标是**已装配的外部卷**且拒绝 secrets 密钥卷：
+  //   - secrets：密钥卷（secret 名禁路径分隔符），非通用转存目标 → 400；
+  //   - local / 空 type：本地卷（含默认卷）无外部后端（volSet.External 为 nil）→ 400。
+  // 前端据此过滤候选，避免「选中即 400」（文案明确但仍是用户可见故障）。
+  function isTransferTargetVolume(v) {
+    if (!v || !v.name) return false;
+    const t = String(v.type || '').toLowerCase();
+    return t !== '' && t !== 'local' && t !== 'secrets';
+  }
+
   // 视频扩展名集合（文件行「▶ 播放」入口判定，标准 <video> Range 播放）——唯一实现点。
+  // 口径：**浏览器原生可播**集，与服务端 integrity 的「是视频文件」集不等价——服务端
+  // `pkg/integrity/ext/video.VideoChecker.Matches` 额外认 .flv/.wmv（可 ffprobe 校验，
+  // 但浏览器不原生播放 ⇒ 此处不给 ▶ 入口）；两侧已对齐 .m4v（同 mp4 容器，可播且可校验）。
   const VIDEO_EXT = ['mp4', 'mkv', 'webm', 'avi', 'mov', 'ts', 'm4v'];
   // isVideoName(name)：文件名是否视频（扩展名 ∈ VIDEO_EXT，大小写不敏感）。
   function isVideoName(name) {
@@ -1008,6 +1022,9 @@
     const vols = Array.isArray(o.volumes) ? o.volumes : [];
     const current = o.current == null ? '' : String(o.current);
     let html = '<div class="cloud-behavior-form" style="margin:12px 0;padding:10px 12px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-container);">';
+    // 候选过滤（B-M1）：服务端 checkTransferVolumePreflight 只接受「已装配的外部卷」且拒绝
+    // secrets 密钥卷——本地卷/默认卷与密钥卷选中即 400（用户可见故障）。对象条目按 type 过滤；
+    // 纯字符串条目（无 type 信息）保持原样（不下判）。
     html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">下载行为配置（留空 = 保持默认：不转存、保留服务端副本）</div>';
     // 转存目标卷下拉
     html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
@@ -1017,6 +1034,7 @@
     for (const v of vols) {
       const name = (typeof v === 'string') ? v : (v && v.name);
       if (!name) continue;
+      if (typeof v !== 'string' && !isTransferTargetVolume(v)) continue;
       const sel = (name === current) ? ' selected' : '';
       html += '<option value="' + escHtml(name) + '"' + sel + '>' + escHtml(name) + '</option>';
     }
@@ -1068,7 +1086,7 @@
 
   return {
     escHtml, formatSize, parseSizeText, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
-    stripCloudId, isVideoName,
+    stripCloudId, isVideoName, isTransferTargetVolume,
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
