@@ -111,9 +111,10 @@ func TestVolumeCategoryFor_InjectedClassifierWins(t *testing.T) {
 func TestList_ExternalVolume_Category_ThirdPartyWrapperType(t *testing.T) {
 	t.Parallel()
 	const typ = "files-category-third-party-wrapper"
-	// 幂等登记（入口无撤销版本，与 pkg/volume/registry 的同名用例同口径）；唯一类型名
-	// 保证不与其它用例/生产注册撞名。
+	// 登记为 wrapper category（与生产封装处理层注册同路径），用例结束经
+	// UnmarkWrapperTypeForTest 撤销——免全局永久登记污染其它用例。
 	registry.MarkWrapperType(typ)
+	t.Cleanup(func() { registry.UnmarkWrapperTypeForTest(typ) })
 
 	e := newDirsEnv(t)
 	e.volumeClassifier = registryForwardClassifier{} // 装配层等价适配器

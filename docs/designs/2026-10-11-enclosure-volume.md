@@ -82,15 +82,18 @@ volumes:
     root: /data/main
 
   - name: vault                      # 封装卷
-    type: enclosure
+    type: secretdata                 # **wrapper 类型**（处理层名）；`type: enclosure` 不是可写类型
     extra:
       source: "main:private/vault"   # <源卷名>:<子路径>；子路径可空 = 整卷封装
-      wrapper: secretdata            # 封装处理层（注册名；可扩展）
+      wrapper: secretdata            # 封装处理层（注册名；缺省 = 卷类型本身，可扩展）
       secret_url: "secrets://keys/vault"   # wrapper 自身配置透传
       source_read_mode: hidden       # hidden(默认,读404+列举过滤) | readable(只读透视)
       allow_direct_url: false        # 默认 false：禁止 302 直链（禁客户端直连源存储）
       max_bytes: 8GiB                # 封装卷自身上限；缺省=仅受源卷池约束（继承）
 ```
+
+> 唯一声明形态 = **wrapper 类型 + `extra.source`**（见 `IsDeclared`）：`type: enclosure` 曾是
+> 通用底座的书写形式之一，现已**纯内部化**——config 校验与建卷 API 均 fail-closed 拒绝该写法。
 
 - 源为外部卷（`baidupcs`/`s3`/…）：**已接入**（2026-10-13）。源卷没有 `*storage.Root` ⇒ 封印
   经 `pkg/volume/enclosure/sealfs.go` 的 **FS 级封印装饰器**（`SealFS`）施加，并套在**装配处**：

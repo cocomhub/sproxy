@@ -180,6 +180,12 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
   列举/下载/删除不可见**（遗留①，已修）。注意：旧例外布局下已落盘的数据在新键空间下不可见
   （该能力未发布，无迁移包袱）。
 - **历史路径零回归**：`target: local + extra.root`（config/CLI）为本地根整卷，不进互斥占用校验。
+- **唯一可写声明形态 = wrapper 类型 + `extra.source`**：`type` 就是处理层名（`secretdata`/
+  `secrets`），wrapper 缺省即卷类型本身。`type: enclosure` **不是可写卷类型**——配置校验
+  （`Config.Validate`）与建卷 API（`POST /api/volumes/user`）均 fail-closed 拒绝并提示改用
+  wrapper 类型 + source/target；`enclosure.TypeEnclosure` 仅作内部装配标识（日志/诊断）保留。
+  wrapper 类型而**无** `extra.source` 的卷不是封装声明（如 `target: local` 的本地整卷形态），
+  走按类型分派的常规构造。
 
 ### 3.9 阶段 2 迁移状态
 
@@ -202,6 +208,7 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 | ② | 嵌套封装 `target:` → 封装装配（翻译层 + 运行期装配/拆除闭环；过渡文件与逐面 guard 全删） | 已完成 |
 | ⑤ | enclosure **内部化**（方案甲）：嵌套封装卷的对外 `Type` 保持 wrapper 类型（secretdata/secrets/…），装配由**声明判据**（`enclosure.IsDeclared`）接管而非按类型分派——修正「type=enclosure」造成的 `SchemeOf` 无协议（cloud 转存/归档被拒）、`CategoryOf≠wrapper`（建卷表单/防环失据）、API/CLI 回显泄漏内部机制 | 已完成 |
 | ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只写目标卷 FS、不经路由 commit，删除时仍对 owner 全局 Scope 做未曾提交的释放） | 已完成（写入侧结算：转存写成功后按 `TargetQuotaScopeFor`/`TargetPhysChargeFor` 与删除侧**同账本同口径**差分入账） |
+| ⑥ | enclosure **纯内部化**：`IsDeclared` 判据收敛为「wrapper 类型 + `extra.source`」（去 `type: enclosure` 分支与条件式 wrapper 回落）；`type: enclosure` 在 config 校验与建卷 API 处 fail-closed 拒绝；`ErrMissingSource`/`ErrMissingWrapper` 随判据收紧成为不可达死哨兵 → 移除 | 已完成 |
 
 ## 4. 寻址
 
@@ -211,6 +218,10 @@ secretdata://<卷>/<path>        # secretdata 卷内文件路径
 ```
 
 - 服务启动**默认创建一个本地卷作默认 secrets 卷**（`secrets://default/`，落 `<storage_root>/secrets/`）。
+- **多 secrets 卷并存时默认卷选取是确定性的**（`pkg/server/secrets_api.go`）：显式
+  `extra.default: true` > 基础 secrets 卷（非嵌套派生，即无 `extra.source`）> 嵌套派生的 secrets
+  卷；同档按**卷名升序**。不依赖配置/登记顺序（历史实现在 `volSet.All()` 取首个 `type: secrets`，
+  既顺序依赖又会被归一后出现的嵌套 secrets 卷抢占管理面）。
 - 寻址由装配层 `registry.ResolveURL` 处理；`secretdata://` 全集 `sproxy 寻址`（`volumes[]` 装配时经
   registry 注入）。
 

@@ -186,8 +186,10 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 
 ## 2026-10-12：封装卷 wrapper 生产装配用例（`cmd/sproxy/secret_register_test.go`，串行 +1）
 
-`TestEnclosureWrapper_Secretdata_ProductionAssembly` 钉住「`type: enclosure` + `wrapper:
-secretdata` 的生产装配路径可用」（wrapper 注册 / 声明解析 / 补装 / 写读往返 / 真值报告）。
+`TestEnclosureWrapper_Secretdata_ProductionAssembly` 钉住「wrapper 类型（`type: secretdata`）+
+`extra.source` 的生产装配路径可用」（wrapper 注册 / 声明解析 / 补装 / 写读往返 / 真值报告）。
+> 历史注：该用例早期夹具写作 `type: enclosure` + `wrapper: secretdata`；`type: enclosure` 已
+> **纯内部化**（不是可写卷类型），夹具随之改为 wrapper 类型声明。
 **不可并行的理由（与既有 `TestRegisterSecretVolumeBackends_Unconditional` 同类）**：
 它必须走**生产注册路径**，因此触及两个进程级单例——① `enclosure` wrapper 注册表（全局，
 `RegisterWrapper` 重复注册 panic，只能进程内注册一次）；② `secretDataSet`（`atomic.Pointer`，

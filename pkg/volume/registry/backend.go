@@ -292,6 +292,18 @@ func MarkWrapperType(typ string) {
 	wrapperTypes[typ] = true
 }
 
+// UnmarkWrapperTypeForTest 移除测试登记的 wrapper category 标记（测试辅助：跨包测试经
+// MarkWrapperType 登记 fake 处理层后清理，防全局永久登记污染共享投影表；镜像
+// UnregisterBackendForTest / UnmarkDeferredTypeForTest 语义）。生产代码不得调用。
+//
+// 注册表内不会出现的保留值（空串/本地类型）无标记可清 → no-op（不 panic：清理路径不应反过来
+// 制造故障）。
+func UnmarkWrapperTypeForTest(typ string) {
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	delete(wrapperTypes, typ)
+}
+
 // backendCategory 由后端类型推导 schema category：
 //   - "secrets"/"secretdata"/"egress"（基线封装/密钥卷）或**已登记的处理层类型**
 //     （MarkWrapperType，见 wrapperTypes）→ "wrapper"；
