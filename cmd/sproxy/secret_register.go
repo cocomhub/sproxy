@@ -5,12 +5,15 @@ package main
 
 // secret_register.go 是 secret 加密卷的装配（设计 docs/designs/2026-10-01-secret-volume.md
 // §9）：把 secrets 卷（secret 文件管理）与 secretdata 卷（加密数据 wrapper）注册为
-// volumes[] 的 backend 插件，并处理「启动默认建本地卷作默认 secrets 卷」。
+// volumes[] 的 backend 插件。
 //
 // 装配顺序（secretdata 依赖 secrets 卷；secrets 卷可嵌套）：
-//  1. 装配默认 secrets 卷（本地卷 secrets/ 目录）；
-//  2. 装配配置的 secrets 卷（Extra.target 的 secrets/ 目录）；
-//  3. 装配 secretdata 卷（secret_url → secrets 卷读密钥）。
+//  1. 装配配置声明的 secrets 卷（Extra.target 的 secrets/ 目录）；
+//  2. 装配 config 声明的 secretdata 卷（secret_url → secrets 卷读密钥，推迟装配）。
+//
+// **默认 secrets 不是装配对象**（用户裁定 2026-10-15）：它是 per-owner 的
+// `<storage_root>/<owner>/secrets/` 桶，由 `/api/secrets` 按请求 owner 解析并按需派生
+// （pkg/server/secretsManagerFor），故本文件不再有「启动默认建本地卷」这一步。
 //
 // secrets 卷由装配层把底层卷的 secrets/ 前缀视图 FS 注入（secrets.NewBackend 签名），
 // secretdata 卷由装配层解析 secret_url 到密钥字节后注入（secretdata.NewBackend 签名）。
@@ -20,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -37,7 +41,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
-	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // ---- secrets backend ----
@@ -55,26 +58,19 @@ func secretsLocalFS(rootDir string) syncpkg.FS {
 // secretsFSFor 解析 secrets 目录（绝对路径 absDir）的 FS 视图：
 //   - **落在某个已装配卷根之内** → `server.NewRootSecretsFS(volRoot, <卷根相对目录>, logger)`：
 //     经 Root ⇒ at-rest 透明加解密、封印、用户可见长度全部生效（加密卷上密钥密文落盘），
-//     权限 0600 经 `ChmodSecret` 回调保持（无兼容迁移：见 `pkg/server/secrets_fs.go` 文件头）；
+//     权限 0600 经 `ChmodSecret` 回调保持（该回调由 `secrets.NewBackend` 依 FS 能力**自动**
+//     接线，见其文档；无兼容迁移：见 `pkg/server/secrets_fs.go` 文件头）；
 //   - **独立目录**（不在任何卷根内）→ 裸 `NewLocalFS`（无卷语义可经，零回归；R26 已登记）。
 //
 // 为什么按「路径归属」而不是按配置来源判定：`extra.root`/`storage_root` 都只是路径文本，
-// 是否落在卷根内是**部署事实**——按事实判定才能一处收口两种装配入口（默认 secrets 卷与
-// `type: secrets` 卷）。
-func secretsFSFor(set *registry.Set, absDir string, logger *slog.Logger, local bool) (syncpkg.FS, []secrets.ManagerOption) {
+// 是否落在卷根内是**部署事实**——按事实判定才能一处收口 `type: secrets` 卷的装配入口。
+func secretsFSFor(set *registry.Set, absDir string, logger *slog.Logger) syncpkg.FS {
 	clean := filepath.Clean(absDir)
 	if rt, relDir, ok := owningVolumeRoot(set, clean); ok {
-		fs := server.NewRootSecretsFS(rt, relDir, logger)
-		opts := []secrets.ManagerOption{}
-		if local {
-			if c, cok := fs.(interface{ ChmodSecret(name string) error }); cok {
-				opts = append(opts, secrets.WithLocalChmod(c.ChmodSecret))
-			}
-		}
-		return fs, opts
+		return server.NewRootSecretsFS(rt, relDir, logger)
 	}
 	// 独立目录：保持既有裸 LocalFS 语义（无卷语义可经 ⇒ 无加解密/封印可依附，R26 已登记）。
-	return syncpkg.NewLocalFS(clean, logger), nil
+	return syncpkg.NewLocalFS(clean, logger)
 }
 
 // owningVolumeRoot 在已装配卷集中查找**包含** dir 的卷根（返回该根与 dir 的卷根相对路径）。
@@ -100,10 +96,10 @@ func owningVolumeRoot(set *registry.Set, dir string) (*storage.Root, string, boo
 	return nil, "", false
 }
 
-// secretsDirFSFor 是 secretsFSFor 的「目录 + /secrets 拼接」变体（默认 secrets 卷形态：
-// 传卷根，内部补 secrets/ 段）。
-func secretsDirFSFor(set *registry.Set, rootDir string, logger *slog.Logger) (syncpkg.FS, []secrets.ManagerOption) {
-	return secretsFSFor(set, filepath.Join(rootDir, "secrets"), logger, true)
+// secretsDirFSFor 是 secretsFSFor 的「目录 + /secrets 拼接」变体（`type: secrets` + `target: local`
+// 形态：传父目录，内部补 secrets/ 段）。
+func secretsDirFSFor(set *registry.Set, rootDir string, logger *slog.Logger) syncpkg.FS {
+	return secretsFSFor(set, filepath.Join(rootDir, "secrets"), logger)
 }
 
 // registerSecretsBackendWithFS 注册 secrets backend 类型构造器（可测试）：
@@ -149,15 +145,12 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 		// `root` 是**父目录**（secrets 目录 = <root>/secrets，与 `secretsLocalFS` 同布局）：
 		// 必须经 secretsDirFSFor 拼接 `secrets` 段——直接传 root 会让视图指向父目录本身，
 		// 密钥文件按名落错位置（e2e 实测：secretdata 卷 secret_url 解析失败 → boot fail）。
-		fs, mopts := secretsDirFSFor(secretDataSet.Load(), root, nil)
-		_ = mopts
+		fs := secretsDirFSFor(secretDataSet.Load(), root, nil)
 		return fs, nil
 	default:
 		return nil, fmt.Errorf("secrets backend: 卷 %q target=%q 需由装配层解析注入（外部卷 secrets/ 视图；嵌套形态由装配层翻译为封装声明）", v.Name, t)
 	}
 }
-
-// ---- secrets 卷本地默认装配 ----
 
 // ---- secretdata backend ----
 
@@ -230,10 +223,25 @@ var setupSecretdataOnce sync.Once
 
 // defaultSecretdataSecret 解析密钥：Extra.secret_url（secrets://<卷>/<name>）经
 // set.ResolveURL 读取（通用 URL 能力；scheme 由 secrets backend 注册声明）。
+//
+// **两条寻址路径**（用户裁定 2026-10-15）：
+//  1. authority = 空 / `default` / `default-secrets` → **per-owner 默认桶**
+//     （`<storage_root>/<owner>/secrets/`）：需要 ctx 中的 owner（`secrets.WithOwner`，由带身份的
+//     建卷请求注入，见 pkg/server/userVolumeHandler）。装配期（boot）没有请求身份 ⇒ 无法定位该桶，
+//     显式 fail-closed 并给出替代写法（服务级声明请用**显式命名**的 secrets 卷）。
+//  2. 其它 authority = **显式声明的 secrets 卷名**（`volumes[]` 中 `type: secrets`，含多层嵌套
+//     封装链）→ 既有的 `set.ResolveURL` 按卷名分派。
 func defaultSecretdataSecret(ctx context.Context, v volume.Volume, set *registry.Set) ([]byte, error) {
 	secretURL, _ := v.Extra["secret_url"].(string)
 	if strings.TrimSpace(secretURL) == "" {
 		return nil, fmt.Errorf("secretdata backend: 卷 %q 需配置 extra.secret_url（secrets://<卷>/<name>）", v.Name)
+	}
+	name, nerr := secrets.NameFromURL(secretURL)
+	if nerr != nil {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 的 extra.secret_url=%q 非法: %w", v.Name, secretURL, nerr)
+	}
+	if isDefaultSecretsAuth(secretURLAuth(secretURL)) {
+		return perOwnerDefaultSecret(ctx, v, set, secretURL, name)
 	}
 	rc, err := set.ResolveURL(ctx, secretURL)
 	if err != nil {
@@ -248,6 +256,56 @@ func defaultSecretdataSecret(ctx context.Context, v volume.Volume, set *registry
 		return nil, fmt.Errorf("secretdata backend: 卷 %q 密钥 %q 为空（fail-closed）", v.Name, secretURL)
 	}
 	return data, nil
+}
+
+// isDefaultSecretsAuth 判定 URL authority 是否指向 **per-owner 默认 secrets 桶**：
+// 空 / `default` / `default-secrets`（后者是本仓默认卷名的唯一事实源）。
+func isDefaultSecretsAuth(auth string) bool {
+	switch auth {
+	case "", "default", secrets.DefaultVolumeName:
+		return true
+	}
+	return false
+}
+
+// perOwnerDefaultSecret 在**有 owner 上下文**时解析 per-owner 默认桶里的密钥；无 owner
+// （装配期/服务级声明）→ 明确 fail-closed 并指明替代写法。
+func perOwnerDefaultSecret(ctx context.Context, v volume.Volume, set *registry.Set, secretURL, name string) ([]byte, error) {
+	owner := secrets.OwnerFromContext(ctx)
+	if owner == "" {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 的 extra.secret_url=%q 指向 per-owner 默认 secrets 桶，"+
+			"但当前上下文无 owner（装配期/服务级声明无请求身份，无法定位该桶）；请改用**显式命名**的 secrets 卷"+
+			"（volumes[] 中 type: secrets 卷，如 secrets://<卷名>/<name>），或经带身份的建卷请求"+
+			"（POST /api/volumes/user）创建本卷", v.Name, secretURL)
+	}
+	mgr, err := server.SecretsManagerForOwner(set, owner, nil)
+	if err != nil {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 解析 owner %q 的默认 secrets 桶失败: %w", v.Name, owner, err)
+	}
+	data, rerr := mgr.Read(ctx, name)
+	if rerr != nil {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 读 owner %q 默认桶的密钥 %q 失败: %w", v.Name, owner, name, rerr)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("secretdata backend: 卷 %q 的 owner %q 密钥 %q 为空（fail-closed）", v.Name, owner, name)
+	}
+	return data, nil
+}
+
+// secretURLAuth 从 `secrets://<卷>/<name>` 形态里取 authority（卷名段）；解析失败返回空串。
+// 与 pkg/volume/registry.ResolveURL 的寻址口径一致（authority = 卷名；Opaque 形态取首段）。
+func secretURLAuth(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	if u.Host != "" {
+		return u.Host
+	}
+	if before, _, ok := strings.Cut(u.Opaque, "/"); ok {
+		return before
+	}
+	return u.Opaque
 }
 
 // resolveTargetFS 解析 secretdata 的底层卷 FS：`target: ""/local` + extra.root（config/CLI
@@ -514,36 +572,6 @@ func registerEnclosureWrappers() {
 
 // ---- 公共装配入口 ----
 
-func ensureDefaultSecretsVolume(ctx context.Context, set *registry.Set, defaultRoot string, logger *slog.Logger) (*secrets.Manager, error) {
-	const regName = "default-secrets"
-	if be := set.External(regName); be != nil {
-		// 已有同名卷（用户显式配置）——取出其 FS 视图返回。
-		if fs := be.FS(); fs != nil {
-			return secrets.NewManager(trusted.Guard(fs), regName, true), nil
-		}
-	}
-	// 设计 §6.1/§9：默认 secrets 卷落 <StorageRoot>/secrets 恰一次——secretsLocalFS
-	// 内部已把入参拼 /secrets，此处直接传 defaultRoot，避免双 append（secrets/secrets
-	// 层级错误）。
-	root := defaultRoot
-	fs, mopts := secretsDirFSFor(set, root, logger)
-	mgr := secrets.NewManager(fs, regName, true, mopts...)
-	// 统一用 secrets backend（实现 URLResolver，secrets:// 可寻址）而非裸 adapter：
-	// 默认卷也是 URL 可寻址目标（secrets://default/ 或 secrets://<name>/）。
-	be, err := secrets.NewBackend(ctx, volume.Volume{Name: regName, Type: "secrets",
-		Extra: map[string]any{"target": "local", "root": defaultRoot}}, fs)
-	if err != nil {
-		return nil, fmt.Errorf("装配默认 secrets 卷 backend 失败: %w", err)
-	}
-	if err := set.AddExternalVolume(volume.Volume{Name: regName, Type: "secrets", Extra: map[string]any{"target": "local", "root": defaultRoot}}, be); err != nil {
-		return nil, fmt.Errorf("装配默认 secrets 卷失败: %w", err)
-	}
-	if logger != nil {
-		logger.Info("默认 secrets 卷已装配", "volume", regName, "root", root)
-	}
-	return mgr, nil
-}
-
 // secretDataSet 是 secretdata 后端解析密钥所依赖的装配后卷集持有者。
 // secretdata backend 工厂在 registry.NewBackend 时才调用 resolver 解析 secret_url，
 // 而装配后卷集（registry.Set）要到 RegisterRoutes 卷集合装配完成后才可用——故 resolver
@@ -603,18 +631,20 @@ func registerSecretSchemas() {
 	})
 }
 
-// setupSecretBackends 装配 secrets + secretdata 后端并确保默认 secrets 卷。需在
-// RegisterRoutes（卷集合装配完成后）调用；localRoot 为默认卷物理根。注册（工厂）部分
-// 经 registerSecretVolumeBackends 无条件先行（见 setupServerCore），本函数负责把已装配
-// 卷集 Store 进 secretDataSet（供工厂懒读）+ 确保默认 secrets 卷 + **补装 config 声明的
-// secretdata 卷**（Imp-2 时序修复：assembleVolumes 因 set 未就绪跳过了其 backend 构造，
-// 此处 set 已就绪、按卷元数据逐个构造并挂回 Set.External）。
+// setupSecretBackends 装配 secrets + secretdata 后端。需在 RegisterRoutes（卷集合装配完成后）
+// 调用；localRoot 为默认卷物理根。注册（工厂）部分经 registerSecretVolumeBackends 无条件先行
+// （见 setupServerCore），本函数负责把已装配卷集 Store 进 secretDataSet（供工厂懒读）+
+// **补装 config 声明的 secretdata 卷**（Imp-2 时序修复：assembleVolumes 因 set 未就绪跳过了其
+// backend 构造，此处 set 已就绪、按卷元数据逐个构造并挂回 Set.External）。
+//
+// **不再装配「全局默认 secrets 卷」**（用户裁定 2026-10-15）：默认 secrets 是 **per-owner** 的
+// ——每个 owner 租户根下的 `secrets/` 桶，由 `/api/secrets` 按请求 owner 解析并首次使用自动
+// 派生（`pkg/server/secretsManagerFor`）。故此处没有任何默认 secrets 卷需要装配，也不存在
+// 「多个全局 secrets 卷选哪个」的模型。
 //
 // **fail-closed 语义（方案 A 修复轮 I1）**：仅**配置声明的 secretdata/secrets 卷补装失败**
 // 返回错误（调用方 root.go 视为 boot fail，与本地卷 load failure 同层——operator 显式声明的
-// 加密封装不得静默消失）；**默认 secrets 卷**（`<StorageRoot>/secrets`，可选能力）装配失败仅
-// WARN 降级、不阻断 boot（不存在默认卷不致命，仅当 config 引用 secrets://default 时才在
-// 补装阶段 fail-closed）。
+// 加密封装不得静默消失）。
 func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot string, logger *slog.Logger) error {
 	if set == nil {
 		return fmt.Errorf("secret backends: volSet 未装配")
@@ -626,10 +656,6 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	// 装配完成后 Store 卷集，供 registerSecretVolumeBackends 注册的 secretdata 工厂
 	// 在后续 NewBackend 时经 ResolveURL(secrets://...) 解析密钥。
 	secretDataSet.Store(set)
-	// 默认 secrets 卷为可选能力：失败仅 WARN 降级（不阻断 boot）。
-	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, log); err != nil {
-		log.Warn("默认 secrets 卷装配失败（默认 secrets 降级为不可用，不阻断启动）", "err", err)
-	}
 	// 补装 config 声明的 secretdata 卷：assembleVolumes 已把卷元数据登记进 set
 	// （deferred 类型跳过 backend 构造），此处 set 已就绪、secretdata 工厂可解析密钥。
 	// **嵌套封装卷**（`extra.target: "<卷>/<子目录>"`）不走本路径——其 backend 由

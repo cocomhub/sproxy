@@ -89,9 +89,9 @@ func pikpakMasterKeyManager(volRoot *storage.Root, storageRoot string, log *slog
 		if c, ok := fs.(interface{ ChmodSecret(name string) error }); ok {
 			opts = append(opts, secrets.WithLocalChmod(c.ChmodSecret))
 		}
-		return secrets.NewManager(fs, "default-secrets", true, opts...)
+		return secrets.NewManager(fs, secrets.DefaultVolumeName, true, opts...)
 	}
-	return secrets.NewManager(secretsLocalFS(storageRoot), "default-secrets", true)
+	return secrets.NewManager(secretsLocalFS(storageRoot), secrets.DefaultVolumeName, true)
 }
 
 // withExclusiveLock 用 O_CREATE|O_EXCL 锁文件串行化跨进程临界区（Windows 上 O_EXCL

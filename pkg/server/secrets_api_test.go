@@ -6,8 +6,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,34 +21,12 @@ import (
 
 // secrets_api_test.go 覆盖 /api/secrets 端点的 handler 逻辑（创建/列表/导出/删除）。
 //
-// 装配：RegisterRoutes 本身不装配 secrets 卷（那是 cmd/sproxy setupSecretBackends 的
-// 职责）；本测试侧手动经 h.Volumes().AddExternalVolume 装配 secrets ExternalBackend，
-// 再直接调用 handler（白盒，绕开 auth 层干扰——secret 端点的认证面由路由注册验证）。
-func newTestSecretsServer(t *testing.T, modifyCfg func(*Config)) (*Handlers, string, string) {
-	t.Helper()
-	h, tmpDir := newSecretsHandlers(t, modifyCfg)
+// 寻址模型（用户裁定 2026-10-15）：默认 secrets 卷是 **per-owner** 的——每个 owner 租户根下的
+// `secrets/` 桶（`<storage_root>/<owner>/secrets/`），由**请求 owner** 解析、首次使用自动派生。
+// 故本测试显式注入请求主体（`withActor`）并断言**磁盘落点**按 owner 隔离；不再有任何「默认
+// secrets 卷装配」步骤（这也是被删掉的冗余模型的回归锚点）。
 
-	// 装配默认 secrets 卷（ExternalBackend）到 volSet，模拟 cmd/sproxy setupSecretBackends。
-	secretsRoot := filepath.Join(tmpDir, "secrets")
-	if err := os.MkdirAll(secretsRoot, 0o700); err != nil {
-		t.Fatalf("mkdir secrets: %v", err)
-	}
-	fs := syncpkg.NewLocalFS(secretsRoot, nil)
-	be, err := secrets.NewBackend(t.Context(), volume.Volume{Name: "default-secrets", Type: "secrets",
-		Extra: map[string]any{"target": "local", "root": tmpDir}}, fs)
-	if err != nil {
-		t.Fatalf("new secrets backend: %v", err)
-	}
-	if err := h.Volumes().AddExternalVolume(volume.Volume{Name: "default-secrets", Type: "secrets",
-		Extra: map[string]any{"target": "local", "root": tmpDir}}, be); err != nil {
-		t.Fatalf("attach secrets volume: %v", err)
-	}
-	return h, secretsRoot, tmpDir
-}
-
-// newSecretsHandlers 装配 secret 端点测试用 Handlers（**不**装配任何 secrets 卷）——供需要
-// 自行控制 secrets 卷集合（数量/形态/登记顺序）的用例使用；newTestSecretsServer 在其上补装
-// 默认 secrets 卷。
+// newSecretsHandlers 装配 secret 端点测试用 Handlers（含真实存储根 ⇒ 租户可用）。
 func newSecretsHandlers(t *testing.T, modifyCfg func(*Config)) (*Handlers, string) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -88,30 +64,22 @@ func newSecretsHandlers(t *testing.T, modifyCfg func(*Config)) (*Handlers, strin
 	return h, tmpDir
 }
 
-// attachTestSecretsVolume 装配一个测试用 secrets 卷（独立本地根），返回其 Manager（供
-// 「默认卷选取」用例按指针比对）。
-func attachTestSecretsVolume(t *testing.T, h *Handlers, name string, extra map[string]any, root string) *secrets.Manager {
-	t.Helper()
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatalf("mkdir %s: %v", name, err)
+// ownerReq 构造带操作主体（SproxySig AK）的请求：/api/secrets 的 owner 归属取自请求 ctx
+// （ownerFromRequest ⊕ normalizeOwner）。空 owner = 未认证 → anonymous 租户。
+func ownerReq(method, target, body, owner string) *http.Request {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	if owner == "" {
+		return req
 	}
-	v := volume.Volume{Name: name, Type: "secrets", Extra: extra}
-	be, err := secrets.NewBackend(t.Context(), v, syncpkg.NewLocalFS(root, nil))
-	if err != nil {
-		t.Fatalf("new secrets backend %s: %v", name, err)
-	}
-	if err := h.Volumes().AddExternalVolume(v, be); err != nil {
-		t.Fatalf("attach secrets volume %s: %v", name, err)
-	}
-	return secrets.ManagerOfExternal(be)
+	return req.WithContext(withActor(req.Context(), owner))
 }
 
 // callSecretsHandler 白盒分发到对应 secret handler 方法（绕过 authMiddleware/路由层，
-// 聚焦 handler 逻辑；认证面由 TestSecretsRoutesRegistered 验证）。
+// 聚焦 handler 逻辑；认证面由 TestSecretsRoutesRegistered 验证）。owner 为请求主体。
 // method/target 支持：POST /api/secrets、GET /api/secrets、GET /api/secrets/{name}、
 // DELETE /api/secrets/{name}。
-func callSecretsHandler(h *Handlers, method, target, body string) (int, string) {
-	req := httptest.NewRequest(method, target, strings.NewReader(body))
+func callSecretsHandler(h *Handlers, owner, method, target, body string) (int, string) {
+	req := ownerReq(method, target, body, owner)
 	rec := httptest.NewRecorder()
 	switch {
 	case method == http.MethodPost:
@@ -138,12 +106,27 @@ func callJSONHandler(h http.Handler, method, target, body string) (int, string) 
 	return rec.Code, rec.Body.String()
 }
 
+// secretsOnDisk 返回 owner 默认 secrets 桶内某 secret 的物理路径（<root>/<owner>/secrets/<name>）。
+func secretsOnDisk(root, owner, name string) string {
+	return filepath.Join(root, owner, "secrets", name)
+}
+
+// readSecretOnDisk 读 owner 桶内的 secret 文件内容（trim）。不存在/读失败即 Fatal。
+func readSecretOnDisk(t *testing.T, root, owner, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(secretsOnDisk(root, owner, name))
+	if err != nil {
+		t.Fatalf("读磁盘 secret %s/%s: %v", owner, name, err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // TestSecretsRoutesRegistered 验证 /api/secrets 四端点已在主 mux 注册：直接经
 // h.Handler()（含路由）请求，非 404 即证明路由存在（loopback 测试模式放行认证，
 // 故不断言 401，只断言「路由命中」）。
 func TestSecretsRoutesRegistered(t *testing.T) {
 	t.Parallel()
-	h, _, _ := newTestSecretsServer(t, nil)
+	h, _ := newSecretsHandlers(t, nil)
 	// POST 主 mux 面。
 	code, body := callJSONHandler(h.Handler(), http.MethodPost, "/api/secrets", `{"name":"x","mode":"random"}`)
 	if code == http.StatusNotFound {
@@ -166,11 +149,12 @@ func decJSON(t *testing.T, body string, v any) {
 
 const testSecretHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+// TestSecretsCreateRandom 创建随机 secret：服务端生成 64-hex 并落**请求者 owner** 的桶。
 func TestSecretsCreateRandom(t *testing.T) {
 	t.Parallel()
-	h, secretsRoot, _ := newTestSecretsServer(t, nil)
+	h, tmpDir := newSecretsHandlers(t, nil)
 
-	code, body := callSecretsHandler(h, http.MethodPost, "/api/secrets", `{"name":"rand1","mode":"random"}`)
+	code, body := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets", `{"name":"rand1","mode":"random"}`)
 	if code != http.StatusOK {
 		t.Fatalf("创建随机 secret 状态=%d body=%s", code, body)
 	}
@@ -182,27 +166,97 @@ func TestSecretsCreateRandom(t *testing.T) {
 	if len(resp.Value) != 64 {
 		t.Errorf("随机 secret 返回长度=%d 应 64 hex", len(resp.Value))
 	}
-	// 服务端生成的 secret 应已落盘（可读回）。
-	mgr := h.secretsManager()
-	if mgr == nil {
-		t.Fatal("secretsManager 反取失败")
+	// 落盘断言：<root>/alice/secrets/rand1（owner 桶，非全局目录）。
+	if got := readSecretOnDisk(t, tmpDir, "alice", "rand1"); got != resp.Value {
+		t.Errorf("磁盘值=%q 与返回 %q 不一致", got, resp.Value)
 	}
-	back, err := mgr.Read(context.Background(), "rand1")
-	if err != nil {
-		t.Fatalf("Read rand1: %v", err)
+	// Manager 链路可读回（同一 owner 解析出的句柄）。
+	mgr, err := h.secretsManagerFor("alice")
+	if err != nil || mgr == nil {
+		t.Fatalf("secretsManagerFor(alice): mgr=%v err=%v", mgr, err)
 	}
-	if string(back) != resp.Value {
-		t.Errorf("落盘值=%s 与返回 %s 不一致", back, resp.Value)
+	back, rerr := mgr.Read(context.Background(), "rand1")
+	if rerr != nil || string(back) != resp.Value {
+		t.Errorf("Read 回读 err=%v value=%q", rerr, back)
 	}
-	_ = secretsRoot
 }
 
+// TestSecretsAnonymousOwner 未认证请求落 anonymous 租户的桶（owner 归一语义不变）。
+func TestSecretsAnonymousOwner(t *testing.T) {
+	t.Parallel()
+	h, tmpDir := newSecretsHandlers(t, nil)
+	code, body := callSecretsHandler(h, "", http.MethodPost, "/api/secrets", `{"name":"anon1","mode":"random"}`)
+	if code != http.StatusOK {
+		t.Fatalf("未认证创建状态=%d body=%s", code, body)
+	}
+	if _, err := os.Stat(secretsOnDisk(tmpDir, "anonymous", "anon1")); err != nil {
+		t.Errorf("未认证 secret 应落 <root>/anonymous/secrets/anon1: %v", err)
+	}
+}
+
+// TestSecretsPerOwnerIsolation 是本重构的**核心不变量**：同名 secret 在不同 owner 下互不可见
+// （先前实现是所有 owner 共享 `<storage_root>/secrets/` 单目录，无隔离）。
+//
+// 断言维度：值不同（各自生成）→ 列表各自独立 → 导出互不串 → 删除互不影响 → 磁盘落点分叉。
+func TestSecretsPerOwnerIsolation(t *testing.T) {
+	t.Parallel()
+	h, tmpDir := newSecretsHandlers(t, nil)
+	const name = "same-name"
+
+	// 两名 owner 各建同名 secret。
+	_, aBody := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets", `{"name":"`+name+`","mode":"random"}`)
+	var aliceRes secretCreateResponse
+	decJSON(t, aBody, &aliceRes)
+	_, bBody := callSecretsHandler(h, "bob", http.MethodPost, "/api/secrets", `{"name":"`+name+`","mode":"random"}`)
+	var bobRes secretCreateResponse
+	decJSON(t, bBody, &bobRes)
+
+	if aliceRes.Value == "" || bobRes.Value == "" || aliceRes.Value == bobRes.Value {
+		t.Fatalf("同名 secret 的两个 owner 值应各自独立且非空：alice=%q bob=%q", aliceRes.Value, bobRes.Value)
+	}
+	// 磁盘：两个不同路径、内容各自等于本 owner 的返回值。
+	if got := readSecretOnDisk(t, tmpDir, "alice", name); got != aliceRes.Value {
+		t.Errorf("alice 磁盘值=%q want %q", got, aliceRes.Value)
+	}
+	if got := readSecretOnDisk(t, tmpDir, "bob", name); got != bobRes.Value {
+		t.Errorf("bob 磁盘值=%q want %q", got, bobRes.Value)
+	}
+	// 导出各自独立。
+	_, aExp := callSecretsHandler(h, "alice", http.MethodGet, "/api/secrets/"+name, "")
+	var aE secretCreateResponse
+	decJSON(t, aExp, &aE)
+	_, bExp := callSecretsHandler(h, "bob", http.MethodGet, "/api/secrets/"+name, "")
+	var bE secretCreateResponse
+	decJSON(t, bExp, &bE)
+	if aE.Value != aliceRes.Value || bE.Value != bobRes.Value {
+		t.Errorf("导出串号：alice=%q bob=%q", aE.Value, bE.Value)
+	}
+	// bob 删除不影响 alice。
+	if code, _ := callSecretsHandler(h, "bob", http.MethodDelete, "/api/secrets/"+name, ""); code != http.StatusOK {
+		t.Errorf("bob 删除应 200 得 %d", code)
+	}
+	if _, err := os.Stat(secretsOnDisk(tmpDir, "alice", name)); err != nil {
+		t.Errorf("bob 删除后 alice 的 secret 应仍在: %v", err)
+	}
+	// 反向：bob 视角已空，alice 视角仍在。
+	if code, body := callSecretsHandler(h, "bob", http.MethodGet, "/api/secrets", ""); code != http.StatusOK || strings.Contains(body, name) {
+		t.Errorf("bob 列表应不含已删的 %s: code=%d body=%s", name, code, body)
+	}
+	_, aList := callSecretsHandler(h, "alice", http.MethodGet, "/api/secrets", "")
+	var lr secretsListResponse
+	decJSON(t, aList, &lr)
+	if len(lr.Secrets) != 1 || lr.Secrets[0] != name {
+		t.Errorf("alice 列表=%v（应 [%s]）", lr.Secrets, name)
+	}
+}
+
+// TestSecretsCreateImport 导入路径（客户端本地派生结果上传）+ 非法值/mode fail-closed。
 func TestSecretsCreateImport(t *testing.T) {
 	t.Parallel()
-	h, _, _ := newTestSecretsServer(t, nil)
+	h, tmpDir := newSecretsHandlers(t, nil)
 
 	// 合法导入：客户端本地派生结果上传。
-	code, body := callSecretsHandler(h, http.MethodPost, "/api/secrets", `{"name":"imp1","mode":"import","value":"`+testSecretHex+`","origin":"passphrase"}`)
+	code, body := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets", `{"name":"imp1","mode":"import","value":"`+testSecretHex+`","origin":"passphrase"}`)
 	if code != http.StatusOK {
 		t.Fatalf("导入 secret 状态=%d body=%s", code, body)
 	}
@@ -211,10 +265,8 @@ func TestSecretsCreateImport(t *testing.T) {
 	if resp.Name != "imp1" || resp.Origin != "passphrase" || resp.Value != "" {
 		t.Errorf("响应=%+v（应 name=imp1 origin=passphrase 无 value）", resp)
 	}
-	mgr := h.secretsManager()
-	back, err := mgr.Read(context.Background(), "imp1")
-	if err != nil || string(back) != testSecretHex {
-		t.Errorf("导入落盘=%s err=%v", back, err)
+	if got := readSecretOnDisk(t, tmpDir, "alice", "imp1"); got != testSecretHex {
+		t.Errorf("导入落盘=%q want %q", got, testSecretHex)
 	}
 
 	// 非法值 fail-closed：非 hex / 短 / 空。
@@ -223,33 +275,38 @@ func TestSecretsCreateImport(t *testing.T) {
 		{"短", `{"name":"bad2","mode":"import","value":"abcdef"}`},
 		{"空value", `{"name":"bad3","mode":"import","value":""}`},
 	} {
-		bc, bbody := callSecretsHandler(h, http.MethodPost, "/api/secrets", bad.body)
+		bc, bbody := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets", bad.body)
 		if bc != http.StatusBadRequest {
 			t.Errorf("%s: 应 400 得 %d body=%s", bad.name, bc, bbody)
 		}
 	}
 
 	// 未知 mode fail-closed。
-	uc, _ := callSecretsHandler(h, http.MethodPost, "/api/secrets", `{"name":"m1","mode":"bogus"}`)
+	uc, _ := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets", `{"name":"m1","mode":"bogus"}`)
 	if uc != http.StatusBadRequest {
 		t.Errorf("未知 mode 应 400 得 %d", uc)
 	}
 }
 
+// TestSecretsListExportDelete 列表（排序）/导出/删除（不存在 fail-closed）+ 删除后不可读。
 func TestSecretsListExportDelete(t *testing.T) {
 	t.Parallel()
-	h, _, _ := newTestSecretsServer(t, nil)
+	h, _ := newSecretsHandlers(t, nil)
+	const owner = "alice"
 
-	// 预置两个 secret。
-	if _, err := h.secretsManager().Create(context.Background(), "aaa"); err != nil {
-		t.Fatalf("Create aaa: %v", err)
+	mgr, err := h.secretsManagerFor(owner)
+	if err != nil {
+		t.Fatalf("secretsManagerFor: %v", err)
 	}
-	if _, err := h.secretsManager().Import(context.Background(), "bbb", []byte(testSecretHex)); err != nil {
-		t.Fatalf("Import bbb: %v", err)
+	if _, cerr := mgr.Create(context.Background(), "aaa"); cerr != nil {
+		t.Fatalf("Create aaa: %v", cerr)
+	}
+	if _, ierr := mgr.Import(context.Background(), "bbb", []byte(testSecretHex)); ierr != nil {
+		t.Fatalf("Import bbb: %v", ierr)
 	}
 
 	// 列表（排序）。
-	code, body := callSecretsHandler(h, http.MethodGet, "/api/secrets", "")
+	code, body := callSecretsHandler(h, owner, http.MethodGet, "/api/secrets", "")
 	if code != http.StatusOK {
 		t.Fatalf("列表状态=%d body=%s", code, body)
 	}
@@ -260,7 +317,7 @@ func TestSecretsListExportDelete(t *testing.T) {
 	}
 
 	// 导出。
-	code, body = callSecretsHandler(h, http.MethodGet, "/api/secrets/bbb", "")
+	code, body = callSecretsHandler(h, owner, http.MethodGet, "/api/secrets/bbb", "")
 	if code != http.StatusOK {
 		t.Fatalf("导出状态=%d body=%s", code, body)
 	}
@@ -271,21 +328,21 @@ func TestSecretsListExportDelete(t *testing.T) {
 	}
 
 	// 删除不存在 fail-closed（404）。
-	code, _ = callSecretsHandler(h, http.MethodDelete, "/api/secrets/nope", "")
+	code, _ = callSecretsHandler(h, owner, http.MethodDelete, "/api/secrets/nope", "")
 	if code != http.StatusNotFound {
 		t.Errorf("删除不存在应 404 得 %d", code)
 	}
 
 	// 删除存在。
-	code, body = callSecretsHandler(h, http.MethodDelete, "/api/secrets/aaa", "")
+	code, body = callSecretsHandler(h, owner, http.MethodDelete, "/api/secrets/aaa", "")
 	if code != http.StatusOK {
 		t.Fatalf("删除状态=%d body=%s", code, body)
 	}
-	if _, err := h.secretsManager().Read(context.Background(), "aaa"); err == nil {
+	if _, rerr := mgr.Read(context.Background(), "aaa"); rerr == nil {
 		t.Error("删除后 Read 应失败（secret 已移除）")
 	}
 	// 列表只剩 bbb。
-	lc, lbody := callSecretsHandler(h, http.MethodGet, "/api/secrets", "")
+	lc, lbody := callSecretsHandler(h, owner, http.MethodGet, "/api/secrets", "")
 	decJSON(t, lbody, &lr)
 	if lc != http.StatusOK {
 		t.Errorf("删除后列表状态=%d", lc)
@@ -295,207 +352,92 @@ func TestSecretsListExportDelete(t *testing.T) {
 	}
 }
 
-// TestSecretsErrorClassification 验证错误分类（哨兵错误 → 400/500，不误分类）：
-//   - import 非法值 → 400（客户端输入）；
-//   - 落盘 IO 故障 → 500（服务端故障，**不**误报 400）。
-//
-// 用一个注入 write 失败的 mock FS（沿用 secrets.Import 的 FS 接口）验证。
-func TestSecretsErrorClassification(t *testing.T) {
-	t.Parallel()
-
-	// 1. 非法值 → 400（既有测试已覆盖，此处锁定哨兵分类路径）。
-	h1, _, _ := newTestSecretsServer(t, nil)
-	code, _ := callSecretsHandler(h1, http.MethodPost, "/api/secrets",
-		`{"name":"bad","mode":"import","value":"not-a-hex-value-here"}`)
-	if code != http.StatusBadRequest {
-		t.Errorf("import 非法值应 400 得 %d", code)
-	}
-
-	// 2. 落盘 IO 故障 → 500：构造 write 恒失败的 mock FS 装配 secrets 卷。
-	tmpDir := t.TempDir()
-	cfg := Default()
-	cfg.StorageRoot = tmpDir
-	cfg.ChunkSize = 4 << 10
-	cfg.LogLevel = "error"
-	var cfgPtr atomic.Pointer[Config]
-	cfgPtr.Store(cfg)
-	mux := http.NewServeMux()
-	noAuth := defaultNoAuthRegOpts()
-	h2 := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:                   mux,
-		CfgPtr:                &cfgPtr,
-		Version:               "test-version",
-		BuildAt:               "test-buildat",
-		Logger:                testLogger(),
-		AuditLogger:           testLogger(),
-		CredentialRing:        noAuth.CredentialRing,
-		CredentialStore:       noAuth.CredentialStore,
-		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
-	})
-	t.Cleanup(func() { _ = h2.Close() })
-
-	failingFS := &failWriteFS{inner: syncpkg.NewLocalFS(filepath.Join(tmpDir, "secrets"), nil)}
-	be, err := secrets.NewBackend(t.Context(), volume.Volume{Name: "default-secrets", Type: "secrets",
-		Extra: map[string]any{"target": "local", "root": tmpDir}}, failingFS)
-	if err != nil {
-		t.Fatalf("new secrets backend: %v", err)
-	}
-	if err := h2.Volumes().AddExternalVolume(volume.Volume{Name: "default-secrets", Type: "secrets",
-		Extra: map[string]any{"target": "local", "root": tmpDir}}, be); err != nil {
-		t.Fatalf("attach secrets volume: %v", err)
-	}
-
-	// import 合法值但落盘失败 → 500（服务端 IO，非客户端输入错误）。
-	code, body := callSecretsHandler(h2, http.MethodPost, "/api/secrets",
-		`{"name":"ok","mode":"import","value":"`+testSecretHex+`"}`)
-	if code != http.StatusInternalServerError {
-		t.Errorf("落盘失败应 500 得 %d body=%s", code, body)
-	}
-}
-
-// failWriteFS 包装 sync.FS，WriteFile 恒失败（注入落盘 IO 故障）。
-type failWriteFS struct {
-	inner syncpkg.FS
-}
-
-func (f *failWriteFS) ListDir(ctx context.Context, path string) ([]syncpkg.Entry, error) {
-	return f.inner.ListDir(ctx, path)
-}
-func (f *failWriteFS) Stat(ctx context.Context, path string) (*syncpkg.Entry, error) {
-	return f.inner.Stat(ctx, path)
-}
-func (f *failWriteFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
-	return f.inner.OpenRead(ctx, path)
-}
-func (f *failWriteFS) WriteFile(ctx context.Context, path string, r io.Reader, size int64, mtime int64) error {
-	return fmt.Errorf("注入: 磁盘写失败")
-}
-func (f *failWriteFS) Rename(ctx context.Context, from, to string) error {
-	return f.inner.Rename(ctx, from, to)
-}
-func (f *failWriteFS) Delete(ctx context.Context, path string) error {
-	return f.inner.Delete(ctx, path)
-}
-func (f *failWriteFS) MakeDir(ctx context.Context, path string) error {
-	return f.inner.MakeDir(ctx, path)
-}
-
 // TestSecretsCreateInvalidName 验证 name 校验（空/含分隔符/点）在 HTTP 层 fail-closed。
 func TestSecretsCreateInvalidName(t *testing.T) {
 	t.Parallel()
-	h, _, _ := newTestSecretsServer(t, nil)
+	h, _ := newSecretsHandlers(t, nil)
 
 	for _, bad := range []string{"", "a/b", ".", ".."} {
-		code, _ := callSecretsHandler(h, http.MethodPost, "/api/secrets", `{"name":"`+bad+`","mode":"random"}`)
+		code, _ := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets", `{"name":"`+bad+`","mode":"random"}`)
 		if code != http.StatusBadRequest {
 			t.Errorf("非法名 %q 应 400 得 %d", bad, code)
 		}
 	}
 }
 
-// TestSecretsManagerUnavailable 验证 secrets 卷未装配时 fail-closed（503）。
-func TestSecretsManagerUnavailable(t *testing.T) {
+// TestSecretsHandler_TenantUnavailable 请求者租户不可用（未装配存储根）→ 503 fail-closed
+// （绝不回落全局根写 secret）。
+func TestSecretsHandler_TenantUnavailable(t *testing.T) {
 	t.Parallel()
-	// 复用 all-routes 服务器（不装配 secrets 卷）。
-	mux := http.NewServeMux()
-	noAuth := defaultNoAuthRegOpts()
-	cfg := Default()
-	cfg.StorageRoot = t.TempDir()
-	cfg.ChunkSize = 4 << 10
-	cfg.LogLevel = "error"
-	var cfgPtr atomic.Pointer[Config]
-	cfgPtr.Store(cfg)
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:                   mux,
-		CfgPtr:                &cfgPtr,
-		Version:               "test-version",
-		BuildAt:               "test-buildat",
-		Logger:                testLogger(),
-		AuditLogger:           testLogger(),
-		CredentialRing:        noAuth.CredentialRing,
-		CredentialStore:       noAuth.CredentialStore,
-		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
-	})
-	t.Cleanup(func() { _ = h.Close() })
-	mgr := h.secretsManager()
-	if mgr != nil {
-		t.Fatal("未装配 secrets 卷时 secretsManager 应返回 nil")
-	}
-	code, _ := callSecretsHandler(h, http.MethodPost, "/api/secrets", `{"name":"x","mode":"random"}`)
+	var h Handlers // 未装配 tenants/globalRoot
+	code, _ := callSecretsHandler(&h, "alice", http.MethodPost, "/api/secrets", `{"name":"x","mode":"random"}`)
 	if code != http.StatusServiceUnavailable {
-		t.Errorf("未装配时创建应 503 得 %d", code)
+		t.Errorf("租户不可用时创建应 503 得 %d", code)
+	}
+	if _, err := h.secretsManagerFor("alice"); err == nil {
+		t.Error("tenantFor 不可用时 secretsManagerFor 应返回错误")
 	}
 }
 
-// TestSecretsManager_PrefersBasicOverNested 默认 secrets 卷选取**确定性**：多 secrets 卷并存
-// （嵌套派生的 secrets + 基础 secrets）时，恒选**基础卷**（`extra.source` 为空者）——与登记
-// 顺序无关。历史实现对 volSet.All() 取首个 type=secrets ⇒ 顺序依赖，且归一后出现的嵌套卷会
-// 抢先命中管理面。
+// TestSecretsHandler_BucketDerivationFailure 桶派生失败（IO 故障）→ 500（服务端故障，
+// **不**误报 503/400）。用「<root>/<owner>/secrets 处已存在同名**文件**」逼出 MkdirAll 失败。
+func TestSecretsHandler_BucketDerivationFailure(t *testing.T) {
+	t.Parallel()
+	h, tmpDir := newSecretsHandlers(t, nil)
+	ownerDir := filepath.Join(tmpDir, "alice")
+	if err := os.MkdirAll(ownerDir, 0o755); err != nil {
+		t.Fatalf("mkdir owner: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ownerDir, "secrets"), []byte("占位文件"), 0o600); err != nil {
+		t.Fatalf("write 占位文件: %v", err)
+	}
+	code, body := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets",
+		`{"name":"ok","mode":"import","value":"`+testSecretHex+`"}`)
+	if code != http.StatusInternalServerError {
+		t.Errorf("桶派生失败应 500 得 %d body=%s", code, body)
+	}
+}
+
+// TestSecretsDefaultIgnoresAssembledSecretsVolumes 锁定**去冗余**：`/api/secrets` 恒作用于
+// 请求 owner 的桶——**不受** registry 中已装配的 `type: secrets` 卷（含嵌套派生形态）影响。
 //
-// 变异：把排序改回「首个胜出」→ nested-first 子用例红。
-func TestSecretsManager_PrefersBasicOverNested(t *testing.T) {
+// 历史（本重构删除）：多 secrets 卷并存时按 `extra.default` 标记 / 基础卷优先 / 卷名升序做
+// **确定性选取**；per-owner 后默认桶唯一确定，该模型整体消失。本用例即使装配名为
+// `default-secrets` 的卷，也断言管理面仍落 owner 桶（不被卷抢占）。
+func TestSecretsDefaultIgnoresAssembledSecretsVolumes(t *testing.T) {
 	t.Parallel()
-	for _, order := range []string{"nested-first", "plain-first"} {
-		t.Run(order, func(t *testing.T) {
-			t.Parallel()
-			h, tmp := newSecretsHandlers(t, nil)
-			attachNested := func() *secrets.Manager {
-				return attachTestSecretsVolume(t, h, "nested-secrets",
-					map[string]any{"source": "main:alice/user/keys"}, filepath.Join(tmp, "nested-keys"))
-			}
-			attachPlain := func() *secrets.Manager {
-				return attachTestSecretsVolume(t, h, "plain-secrets",
-					map[string]any{"target": "local", "root": tmp}, filepath.Join(tmp, "plain-keys"))
-			}
-			var nested, plain *secrets.Manager
-			if order == "nested-first" {
-				nested, plain = attachNested(), attachPlain()
-			} else {
-				plain, nested = attachPlain(), attachNested()
-			}
-			got := h.secretsManager()
-			if got == nil {
-				t.Fatal("secretsManager 应返回基础 secrets 卷的 Manager")
-			}
-			if got != plain {
-				t.Fatalf("默认 secrets 卷应为基础卷（非嵌套派生），got %p want %p", got, plain)
-			}
-			if got == nested {
-				t.Fatal("嵌套派生的 secrets 卷不得抢占密钥管理面")
-			}
-		})
+	h, tmpDir := newSecretsHandlers(t, nil)
+
+	// 装配两个 secrets 卷：① 与默认卷同名的全局卷；② 嵌套派生形态。
+	legacyRoot := filepath.Join(tmpDir, "legacy-secrets-root")
+	if err := os.MkdirAll(legacyRoot, 0o700); err != nil {
+		t.Fatalf("mkdir legacy root: %v", err)
 	}
-}
-
-// TestSecretsManager_ExplicitDefaultMarkerWins 显式默认标记（`extra.default: true`）压过
-// 「基础卷优先」规则——管理员可显式指定管理面归属，不受形态启发式支配。
-func TestSecretsManager_ExplicitDefaultMarkerWins(t *testing.T) {
-	t.Parallel()
-	h, tmp := newSecretsHandlers(t, nil)
-	nested := attachTestSecretsVolume(t, h, "nested-secrets",
-		map[string]any{"source": "main:alice/user/keys", "default": true}, filepath.Join(tmp, "nested-keys"))
-	plain := attachTestSecretsVolume(t, h, "plain-secrets",
-		map[string]any{"target": "local", "root": tmp}, filepath.Join(tmp, "plain-keys"))
-
-	got := h.secretsManager()
-	if got != nested {
-		t.Fatalf("显式 extra.default=true 的卷应胜出（含嵌套派生），got %p want %p (plain=%p)", got, nested, plain)
+	for _, v := range []volume.Volume{
+		{Name: secrets.DefaultVolumeName, Type: "secrets", Extra: map[string]any{"target": "local", "root": tmpDir}},
+		{Name: "nested-secrets", Type: "secrets", Extra: map[string]any{"source": "main:alice/user/keys"}},
+	} {
+		be, err := secrets.NewBackend(t.Context(), v, syncpkg.NewLocalFS(legacyRoot, nil))
+		if err != nil {
+			t.Fatalf("new backend %s: %v", v.Name, err)
+		}
+		if err := h.Volumes().AddExternalVolume(v, be); err != nil {
+			t.Fatalf("attach %s: %v", v.Name, err)
+		}
 	}
-}
 
-// TestSecretsManager_TieBreakByNameDeterministic 同档（同为基础 secrets 卷）无显式标记时，
-// 按**卷名升序**选取——声明顺序不再影响结果（名是声明序之外唯一的稳定序）。
-func TestSecretsManager_TieBreakByNameDeterministic(t *testing.T) {
-	t.Parallel()
-	h, tmp := newSecretsHandlers(t, nil)
-	// 逆名序登记：先 zeta 后 alpha，期望仍选 alpha。
-	zeta := attachTestSecretsVolume(t, h, "zeta-secrets",
-		map[string]any{"target": "local", "root": tmp}, filepath.Join(tmp, "zeta"))
-	alpha := attachTestSecretsVolume(t, h, "alpha-secrets",
-		map[string]any{"target": "local", "root": tmp}, filepath.Join(tmp, "alpha"))
-
-	got := h.secretsManager()
-	if got != alpha {
-		t.Fatalf("同档应按卷名升序选取（alpha），got %p want %p (zeta=%p)", got, alpha, zeta)
+	// 管理面写入：恒落请求 owner 的桶。
+	code, body := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets", `{"name":"mine","mode":"random"}`)
+	if code != http.StatusOK {
+		t.Fatalf("创建状态=%d body=%s", code, body)
+	}
+	var resp secretCreateResponse
+	decJSON(t, body, &resp)
+	if got := readSecretOnDisk(t, tmpDir, "alice", "mine"); got != resp.Value {
+		t.Errorf("管理面应落 <root>/alice/secrets/mine，磁盘=%q want %q", got, resp.Value)
+	}
+	// 已装配的 secrets 卷目录内不得出现该 secret（不被抢占）。
+	if _, err := os.Stat(filepath.Join(legacyRoot, "mine")); err == nil {
+		t.Error("secret 不得落到已装配的 secrets 卷（默认桶恒 per-owner）")
 	}
 }

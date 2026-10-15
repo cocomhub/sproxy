@@ -3,8 +3,12 @@
 
 // Package secrets 是 secret 文件管理封装卷（设计 docs/designs/2026-10-01-secret-volume.md
 // §6.1）：底层指向任意卷的 `secrets/` 目录（可以是 local/baidupcs/s3/webdav，
-// 也可以是 secret_data 加密卷——嵌套封装）。寻址 `secrets://<卷名>/<name>`，
-// 默认卷可省略。管理 API：创建（随机 32B hex 密钥）/ 列 / 选默认 / 读取。
+// 也可以是 secret_data 加密卷——嵌套封装）。显式卷寻址 `secrets://<卷名>/<name>`。
+// 管理 API：创建（随机 32B hex 密钥）/ 列 / 读 / 删。
+//
+// **默认卷是 per-owner 的**（用户裁定 2026-10-15）：`DefaultVolumeName` 在每个 owner 的租户根下
+// 各有一个独立桶，由 `/api/secrets` 按**请求 owner 上下文**解析（见 pkg/server），免声明、
+// 首次使用自动派生。本包只提供按 FS 视图操作的 Manager，不含 owner 概念。
 //
 // secrets 卷只存普通文件（secret 文件本身不加密）；本地盘创建时权限 0600
 // （ssh 密钥式），外部盘（baidupcs/s3）无权限要求（能拿到 = 有权限）。
@@ -26,6 +30,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
+
+// DefaultVolumeName 是 **per-owner 默认 secrets 卷名**（用户裁定 2026-10-15）：每个 owner 各有一个
+// 同名默认 secrets 卷，落该 owner 的租户根 `secrets/` 目录（`<storage_root>/<owner>/secrets/`）
+// ——同名 per-owner 隔离、免声明、owner 首次使用时自动派生。
+//
+// 它**不是** registry 里的已装配卷：寻址由**请求 owner 上下文**决定（服务端
+// `Handlers.secretsManagerFor`），故 `secrets://default-secrets/<name>` 一类 URL 在**无 owner
+// 上下文**的服务级声明（如 secretdata 的 `extra.secret_url`，装配期解析）中不可寻址——服务级
+// 声明须引用**显式命名**的 secrets 卷（跨 owner 共享库）。该常量是「默认卷名」的唯一事实源
+// （服务端管理面与本包文案共用），避免字面量散落。
+const DefaultVolumeName = "default-secrets"
 
 // ErrNotFound 是读取/删除不存在的 secret 的哨兵错误。
 var ErrNotFound = errors.New("secrets: secret 不存在")
@@ -251,6 +266,58 @@ func (m *Manager) SelectDefault(ctx context.Context, defaultSecret string) (stri
 	return valid[0], nil
 }
 
+// ---- owner 上下文（per-owner 默认桶寻址） ----
+
+// ownerCtxKey 是 ctx 中「当前操作 owner」的私有键类型：**唯一读写入口**为 WithOwner /
+// OwnerFromContext（值随 ctx 传递，无包级可变状态 ⇒ 天然并发安全，无需 seam 替换）。
+type ownerCtxKey struct{}
+
+// WithOwner 把「当前操作的 owner」放入 ctx。
+//
+// 为什么需要：默认 secrets 卷（`DefaultVolumeName`）是 **per-owner** 的桶，而 `secret_url` 的
+// 服务级解析（cmd/sproxy.defaultSecretdataSecret）发生在**没有 HTTP 身份**的装配代码里。装配期
+// （boot）确实没有 owner ⇒ 不可寻址（显式报错）；但**运行期**由某 owner 发起建卷（
+// `POST /api/volumes/user`）时，请求上下文里有 owner ⇒ 该请求内构造的后端可解析到**它自己的**
+// 默认桶（`secrets://default-secrets/<name>` 语义闭环）。
+//
+// 空 owner 原样返回（不改写 ctx，便于调用方无分支调用）。
+func WithOwner(ctx context.Context, owner string) context.Context {
+	if strings.TrimSpace(owner) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, ownerCtxKey{}, owner)
+}
+
+// OwnerFromContext 返回 ctx 中的 owner（未设置 → 空串）。
+func OwnerFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(ownerCtxKey{}).(string)
+	return s
+}
+
+// NameFromURL 解析 `secrets://<卷>/<name>`（兼容 Opaque 形态 `secrets://<name>`）里的 secret 名，
+// 并做命名校验（非空、不含路径分隔符、非 `.`/`..`）。**唯一实现**：`backend.OpenURL` 与
+// 服务级 per-owner 解析共用，避免两处解析口径漂移。
+func NameFromURL(urlStr string) (string, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return "", fmt.Errorf("secrets: OpenURL 解析 %q 失败: %w", urlStr, err)
+	}
+	if !strings.EqualFold(u.Scheme, "secrets") {
+		return "", fmt.Errorf("secrets: 不支持 scheme %q（需 secrets://）", u.Scheme)
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	if u.Opaque != "" && u.Host == "" {
+		if _, after, ok := strings.Cut(u.Opaque, "/"); ok {
+			name = after
+		}
+	}
+	name = strings.TrimSpace(name)
+	if !validSecretName(name) {
+		return "", fmt.Errorf("%w %q", ErrInvalidSecretName, name)
+	}
+	return name, nil
+}
+
 // ---- ExternalBackend 适配 ----
 
 // backend 是 secrets 卷的 registry.ExternalBackend 实现：持 Manager + sync.FS 视图。
@@ -278,25 +345,12 @@ var _ registry.URLResolver = (*backend)(nil)
 // OpenURL 解析 secrets://<卷>/<name> 并读取 secret 内容（RFC 3986）。
 //
 // 语义：authority（u.Host）= 卷名（dispatcher 已按卷名定位到本后端实例，此处不再
-// 校验卷名）；path = secret 名（禁空、禁含 /，沿用 Manager 命名校验）。fail-closed：
-// 非法 URL / 空名 / 读取失败 → 明确错误。
+// 校验卷名）；path = secret 名（禁空、禁含 /，沿用 Manager 命名校验；解析在 NameFromURL
+// ——唯一实现）。fail-closed：非法 URL / 空名 / 读取失败 → 明确错误。
 func (b *backend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
-	u, err := url.Parse(urlStr)
+	name, err := NameFromURL(urlStr)
 	if err != nil {
-		return nil, fmt.Errorf("secrets: OpenURL 解析 %q 失败: %w", urlStr, err)
-	}
-	if !strings.EqualFold(u.Scheme, "secrets") {
-		return nil, fmt.Errorf("secrets: 不支持 scheme %q（需 secrets://）", u.Scheme)
-	}
-	name := strings.TrimPrefix(u.Path, "/")
-	if u.Opaque != "" && u.Host == "" {
-		if _, after, ok := strings.Cut(u.Opaque, "/"); ok {
-			name = after
-		}
-	}
-	name = strings.TrimSpace(name)
-	if !validSecretName(name) {
-		return nil, fmt.Errorf("%w %q", ErrInvalidSecretName, name)
+		return nil, err
 	}
 	data, err := b.mgr.Read(ctx, name)
 	if err != nil {
@@ -312,9 +366,14 @@ func (b *backend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, er
 //     由装配层把底层后端 FS 的 `secrets/` 前缀视图传入（本函数不建前缀，由装配
 //     按 target 类型决定——见 cmd/sproxy/secret_register.go）。
 //
+// **0600 加固回调自动接线**（2026-10-15 修复静默失效）：本地目标（`isLocalTarget`）且视图
+// 自带 `ChmodSecret(name) error` 能力（如经 `storage.Root` 的 `server.NewRootSecretsFS`）时，
+// 自动注入 `WithLocalChmod`——此前该回调只在装配层局部变量里**被丢弃**（`_ = mopts`），
+// 于是经 Root 的视图（不是 `*LocalFS`）落到 `localChmod` 的类型断言 ⇒ **静默跳过权限收紧**。
+//
 // 说明：本函数签名设计为接收**已就绪的 secrets/ 视图 FS**（构造解耦，便于装配层
 // 递归解析 secrets→secretdata 嵌套），故 Extra 只消费 target/root 元数据用于错误
-// 文案与默认目录；实际 FS 由装配层经 NewManagerWithFS 注入。
+// 文案与默认目录；实际 FS 由装配层经本函数的 fs 参数注入。
 func NewBackend(ctx context.Context, v volume.Volume, fs syncpkg.FS) (registry.ExternalBackend, error) {
 	if v.Type == "" || v.Type == volume.TypeLocal {
 		return nil, fmt.Errorf("secrets backend: 卷 %q 类型 %q 不是外部 secrets 卷", v.Name, v.Type)
@@ -322,7 +381,14 @@ func NewBackend(ctx context.Context, v volume.Volume, fs syncpkg.FS) (registry.E
 	if fs == nil {
 		return nil, fmt.Errorf("secrets backend: 卷 %q 底层 FS 未注入", v.Name)
 	}
-	mgr := NewManager(fs, v.Name, isLocalTarget(v))
+	local := isLocalTarget(v)
+	var opts []ManagerOption
+	if local {
+		if c, ok := fs.(interface{ ChmodSecret(name string) error }); ok {
+			opts = append(opts, WithLocalChmod(c.ChmodSecret))
+		}
+	}
+	mgr := NewManager(fs, v.Name, local, opts...)
 	return &backend{mgr: mgr, fs: fs}, nil
 }
 

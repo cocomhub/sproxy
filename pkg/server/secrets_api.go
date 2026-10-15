@@ -9,91 +9,110 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
-	"sort"
 	"strings"
 
-	"github.com/cocomhub/sproxy/pkg/volume"
-	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
+	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
 
-// secrets_api.go 是 secret 卷的 HTTP 管理面（接线：CLI/Web 创建/列表/导出/删除 secret）。
+// secrets_api.go 是 **per-owner 默认 secrets 卷** 的 HTTP 管理面（CLI/Web 创建/列表/导出/删除
+// secret）。
 //
-// 与通用文件 API 的关系（客观约束，2026-10-04 核实）：secrets 卷是 **ExternalBackend**
-// （secret_register.go 以 AddExternalVolume 装配到 external map），而通用 /upload /download
-// /api/files 的 ?volume= 只解析**本地卷**（volSet.Root/volumeTenant 走 roots/caches），
-// 外部卷不被通用文件 API 命中。故 secret 管理必须走**专用 /api/secrets 端点**——
+// 寻址模型（用户裁定 2026-10-15）：默认 secrets 卷**不是 registry 里的已装配卷**，而是每个
+// owner 租户根下的 `secrets/` 桶（`<storage_root>/<owner>/secrets/`）——由**请求 owner** 唯一
+// 决定（`secretsManagerFor`）。owner 首次使用即自动派生该桶（免声明）。
+//
+// 与通用文件 API 的关系（客观约束，2026-10-04 核实）：通用 /upload /download /api/files 的
+// `?volume=` 与 `?subdir=` 只解析**功能桶**（user/cloud/archive/…），`<owner>/secrets/` 既不
+// 在桶白名单内也不被用户面路径映射触达。故 secret 管理必须走**专用 /api/secrets 端点**——
 // 这同时是正确安全设计（secret 不混入普通文件列表、不被通用删除/列表误管理）。
 //
-// 服务端只做「校验 + 落盘到 secrets 卷」，**不参与任何口令/密钥派生**：
+// 服务端只做「校验 + 落盘到 owner 的 secrets 桶」，**不参与任何口令/密钥派生**：
 //   - mode=random：服务端 crypto/rand 生成 32B→hex，返回给创建者（供立即备份）。
-//   - mode=import / passphrase：客户端传 `value`（本地派生结果），服务端校验 64-hex 后写卷。
+//   - mode=import / passphrase：客户端传 `value`（本地派生结果），服务端校验 64-hex 后写盘。
 //
 // 原始口令永不传输到本层。
 
-// secretVolumeType 是 secret 封装卷的 volume.Type（装配层 AddExternalVolume 用）。
-const secretVolumeType = "secrets"
-
-// secretsDefaultKey 是「显式默认 secrets 卷」标记键（`volumes[].extra.default: true`）：
-// 多 secrets 卷并存时，被标记者为 `/api/secrets` 管理面的操作对象。缺省不设（false）。
-const secretsDefaultKey = "default"
-
-// secretsVolumeTier 是默认 secrets 卷的**优先级档**（数值小者优先）：
+// secretsBucketDir 是 per-owner 默认 secrets 桶在**租户根**下的目录名：密钥文件落
+// `<storage_root>/<owner>/secrets/<name>`（用户裁定 2026-10-15：每个 owner 各自的默认 secrets
+// 卷——同名 per-owner 隔离、免声明、owner 首次使用时自动派生）。
 //
-//	0 = 显式默认标记（extra.default: true）；
-//	1 = 基础 secrets 卷（非嵌套派生，无 extra.source）；
-//	2 = 嵌套派生的 secrets 卷（区域视图上的 secrets，由 wrapper 装配在其它卷的子目录上）。
+// 为什么不再装配「全局默认 secrets 卷」：那是一个**所有 owner 共享同一目录**的单卷模型，
+// 无隔离；且多 secrets 卷并存时需要「选哪个」的启发式（`secretsVolumeTier` + `extra.default`
+// 标记），是纯粹的模型冗余。per-owner 后默认桶由请求 owner 唯一确定。
+const secretsBucketDir = "secrets"
+
+// errSecretsTenantUnavailable 标记「请求者租户不可用」（未装配存储根 / 非法 owner）——
+// handler 据此回 503（能力不可用）而非 500（服务端故障）。
+var errSecretsTenantUnavailable = errors.New("secrets: owner 租户不可用")
+
+// SecretsManagerForOwner 返回 **owner 的默认 secrets 桶** Manager（per-owner 隔离）。
 //
-// 「基础卷优先于嵌套派生卷」的理由：`/api/secrets` 是**密钥管理面**，其语义读者是「服务级
-// 密钥目录」；嵌套派生的 secrets 卷是某个子区域的视图，语义上是「该区域的密钥」，不应因
-// 配置声明顺序（或规范化后 All() 的顺序）而抢占管理面。
-func secretsVolumeTier(v volume.Volume) int {
-	if b, _ := v.Extra[secretsDefaultKey].(bool); b {
-		return 0
+// 与 `Handlers.secretsManagerFor` 的唯一差别是租户来源：本函数从**卷集**取默认卷根
+// （`set.Tenant(set.Default().Name, owner)`），供**装配期/服务级解析器**在有 owner 上下文时使用
+// （如 `secret_url: secrets://default-secrets/<name>` 的运行期解析）；HTTP 管理面用 Handlers 版
+// （走 `h.tenants` 缓存。`h.globalRoot == set.DefaultRoot()`，故两者同父根、同加密态）。
+//
+// 未装配卷集 / 默认卷无本地根 / owner 非法 → `errSecretsTenantUnavailable`（fail-closed，
+// 绝不回落全局根）。
+func SecretsManagerForOwner(set *registry.Set, owner string, logger *slog.Logger) (*secrets.Manager, error) {
+	if set == nil {
+		return nil, fmt.Errorf("%w: 卷集未装配（owner %q）", errSecretsTenantUnavailable, normalizeOwner(owner))
 	}
-	if raw, _ := v.Extra[enclosure.SourceKey].(string); strings.TrimSpace(raw) != "" {
-		return 2
+	tnt := set.Tenant(set.Default().Name, normalizeOwner(owner), logger)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, fmt.Errorf("%w: owner %q", errSecretsTenantUnavailable, normalizeOwner(owner))
 	}
-	return 1
+	return secretsManagerFromTenant(tnt, logger)
 }
 
-// secretsManager 返回**默认 secrets 卷**的 Manager，未装配/不可用返回 nil（调用方 fail-closed：
-// 不可用即报错，不静默写错卷）。
-//
-// 选取规则（**确定性**，彻底消除「配置声明顺序首个胜出」歧义——历史实现对 `volSet.All()` 取
-// 首个 `type: secrets`，既是顺序依赖，也会被归一后出现的嵌套 secrets 卷抢先命中）：
-//  1. 候选 = 已装配外部句柄且能反取 `*secrets.Manager` 的 `type: secrets` 卷；
-//  2. 按 `secretsVolumeTier` 升序（显式默认标记 > 基础 secrets 卷 > 嵌套派生）；
-//  3. 同档按**卷名升序**（声明序之外唯一的稳定序）。
-//
-// 不依赖 `volSet.DefaultExternal()`：那是「首个登记的外部卷」，用户名下先装配 baidupcs 等
-// 时它就不是 secrets 卷（历史注释已指出该陷阱）。
-func (h *Handlers) secretsManager() *secrets.Manager {
-	if h.volSet == nil {
+// secretsManagerFromTenant 在 owner 的租户根上派生默认 secrets 桶并构造 Manager：
+//  1. 首次使用**自动派生**桶：`<tenantRoot>/secrets/`（MkdirAll 0700，幂等）；
+//  2. 经 `NewRootSecretsFS` 取视图（at-rest 透明加解密 + 封印 + 用户可见长度）并注入 0600
+//     加固回调 —— 与既有「卷内 secrets/ 目录」口径一致（R26 登记项闭环）。
+func secretsManagerFromTenant(tnt *storage.Tenant, logger *slog.Logger) (*secrets.Manager, error) {
+	rt := tnt.Root()
+	if err := rt.MkdirAll(secretsBucketDir, 0o700); err != nil {
+		return nil, fmt.Errorf("secrets: 派生 owner %q 的默认 secrets 桶失败: %w", tnt.ID, err)
+	}
+	fs := NewRootSecretsFS(rt, secretsBucketDir, logger)
+	var opts []secrets.ManagerOption
+	if c, ok := fs.(interface{ ChmodSecret(name string) error }); ok {
+		opts = append(opts, secrets.WithLocalChmod(c.ChmodSecret))
+	}
+	return secrets.NewManager(fs, secrets.DefaultVolumeName, true, opts...), nil
+}
+
+// secretsManagerFor 返回 **owner 的默认 secrets 卷** Manager（HTTP 管理面：租户来自
+// `h.tenantFor`，空 owner 归一 anonymous）。解析步骤见 secretsManagerFromTenant。
+func (h *Handlers) secretsManagerFor(owner string) (*secrets.Manager, error) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, fmt.Errorf("%w: owner %q", errSecretsTenantUnavailable, normalizeOwner(owner))
+	}
+	return secretsManagerFromTenant(tnt, h.logger)
+}
+
+// secretManagerOrFail 解析**请求者 owner** 的默认 secrets 卷 Manager；失败时已写响应并返回 nil
+// （四个 handler 共用同一 owner 贯穿与错误分类，避免各写一份）。
+func (h *Handlers) secretManagerOrFail(w http.ResponseWriter, r *http.Request) *secrets.Manager {
+	owner := ownerFromRequest(r)
+	mgr, err := h.secretsManagerFor(owner)
+	if err == nil {
+		return mgr
+	}
+	if errors.Is(err, errSecretsTenantUnavailable) {
+		h.log().WarnContext(r.Context(), "secrets: 请求者租户不可用（默认 secrets 桶无法解析）",
+			"owner", normalizeOwner(owner), "err", err)
+		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return nil
 	}
-	cands := make([]volume.Volume, 0, 2)
-	for _, v := range h.volSet.All() {
-		if v.Type != secretVolumeType {
-			continue
-		}
-		if secrets.ManagerOfExternal(h.volSet.External(v.Name)) == nil {
-			continue // 未装配/装配失败：不可用候选不进排序
-		}
-		cands = append(cands, v)
-	}
-	if len(cands) == 0 {
-		return nil
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		ti, tj := secretsVolumeTier(cands[i]), secretsVolumeTier(cands[j])
-		if ti != tj {
-			return ti < tj
-		}
-		return cands[i].Name < cands[j].Name
-	})
-	return secrets.ManagerOfExternal(h.volSet.External(cands[0].Name))
+	h.log().Error("secrets: 默认 secrets 桶派生失败", "owner", normalizeOwner(owner), "err", err)
+	http.Error(w, "secrets 卷不可用", http.StatusInternalServerError)
+	return nil
 }
 
 // createSecretRequest 是 POST /api/secrets 请求体。
@@ -124,13 +143,12 @@ type secretCreateResponse struct {
 // **响应脱敏 + 服务端日志记原始错误**（2026-10-04 用户要求可排障）：客户端只见
 // 脱敏文案（不泄漏 FS 路径/内部细节）；原始错误（含 %w 链）经 h.logger.Error 落服务端
 // 日志——安全与可排查性兼得，不违反「禁止静默失败」纪律。
-// msgSecretsUnavailable 是 secrets 卷未装配/不可用的共用错误文案（S1192 收敛）。
-const msgSecretsUnavailable = "secrets 卷未装配/不可用"
+// msgSecretsUnavailable 是默认 secrets 桶不可解析（请求者租户不可用）的共用错误文案（S1192 收敛）。
+const msgSecretsUnavailable = "secrets 卷不可用（请求者租户未装配存储根）"
 
 func (h *Handlers) createSecretHandler(w http.ResponseWriter, r *http.Request) {
-	mgr := h.secretsManager()
+	mgr := h.secretManagerOrFail(w, r)
 	if mgr == nil {
-		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	var req createSecretRequest
@@ -198,9 +216,8 @@ type secretsListResponse struct {
 
 // listSecretsHandler 处理 GET /api/secrets：列出卷内全部 secret 名（排序）。
 func (h *Handlers) listSecretsHandler(w http.ResponseWriter, r *http.Request) {
-	mgr := h.secretsManager()
+	mgr := h.secretManagerOrFail(w, r)
 	if mgr == nil {
-		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	names, err := mgr.List(r.Context())
@@ -215,9 +232,8 @@ func (h *Handlers) listSecretsHandler(w http.ResponseWriter, r *http.Request) {
 // exportSecretHandler 处理 GET /api/secrets/{name}：导出 secret 内容（明文 hex）。
 // 供备份/迁移（CLI secret export / web 下载）。不存在 fail-closed。
 func (h *Handlers) exportSecretHandler(w http.ResponseWriter, r *http.Request) {
-	mgr := h.secretsManager()
+	mgr := h.secretManagerOrFail(w, r)
 	if mgr == nil {
-		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	name := r.PathValue("name")
@@ -243,9 +259,8 @@ func (h *Handlers) exportSecretHandler(w http.ResponseWriter, r *http.Request) {
 // deleteSecretHandler 处理 DELETE /api/secrets/{name}：删除 secret。
 // 不存在 fail-closed（不静默 no-op）。
 func (h *Handlers) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
-	mgr := h.secretsManager()
+	mgr := h.secretManagerOrFail(w, r)
 	if mgr == nil {
-		http.Error(w, msgSecretsUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	name := r.PathValue("name")

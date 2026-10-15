@@ -142,47 +142,6 @@ func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 	}
 }
 
-// TestEnsureDefaultSecretsVolume 启动默认建本地卷作默认 secrets 卷（§9.1）。
-func TestEnsureDefaultSecretsVolume(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	set := newTestSet(t)
-	root := t.TempDir()
-	mgr, err := ensureDefaultSecretsVolume(ctx, set, root, nil)
-	if err != nil {
-		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
-	}
-	if mgr == nil {
-		t.Fatal("返回 nil Manager")
-	}
-	if set.External("default-secrets") == nil {
-		t.Fatal("默认 secrets 卷未挂到 Set.External")
-	}
-	// 通过 Manager 创建并读回一个 secret，验证链路可用。
-	if _, cerr := mgr.Create(ctx, "testkey"); cerr != nil {
-		t.Fatalf("Create: %v", cerr)
-	}
-	if got, rerr := mgr.Read(ctx, "testkey"); rerr != nil || len(got) == 0 {
-		t.Errorf("Read: got=%d len err=%v", len(got), rerr)
-	}
-	// 默认 secrets 卷应恰落 <root>/secrets（设计 §6.1/§9），不得双重 append 成
-	// <root>/secrets/secrets。
-	if _, serr := os.Stat(filepath.Join(root, "secrets", "testkey")); serr != nil {
-		t.Errorf("默认 secrets 卷未落 <root>/secrets/testkey: %v", serr)
-	}
-	if _, serr := os.Stat(filepath.Join(root, "secrets", "secrets", "testkey")); serr == nil {
-		t.Error("默认 secrets 卷错误落到 <root>/secrets/secrets（双重 append）")
-	}
-	// 幂等：重复调用不报错、返回同一 Manager（读取同一密钥）。
-	mgr2, err := ensureDefaultSecretsVolume(ctx, set, root, nil)
-	if err != nil {
-		t.Fatalf("二次装配: %v", err)
-	}
-	if got, err := mgr2.Read(ctx, "testkey"); err != nil || len(got) == 0 {
-		t.Errorf("二次装配读回: err=%v", err)
-	}
-}
-
 // TestRegisterSecretsBackendWithFS 注册 secrets backend 类型后 registry 可分派构造（含底层 FS 注入）。
 func TestRegisterSecretsBackendWithFS(t *testing.T) {
 	t.Parallel()
@@ -228,18 +187,13 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 	ctx := context.Background()
 	set := newTestSet(t)
 	localRoot := t.TempDir()
-	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, nil); err != nil {
-		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
-	}
 	// 生产装配 setupSecretBackends 会调用 registerSecretsBackend()（声明协议 "secrets"，
 	// 供 secret_url 的 ResolveURL 寻址）。此处显式调用使本测试**自包含**——不依赖
 	// 其它测试触发 registerSecretsOnce 的套件顺序（隔离运行/-shuffle 也能通过）。
 	registerSecretsBackend()
-	// 给 secretdata 卷造密钥：在默认 secrets 卷建一个。
-	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
-	if mgr == nil {
-		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
-	}
+	// 密钥来源：**显式声明的 secrets 卷**（默认 secrets 卷是 per-owner 的、非已装配卷，
+	// 装配期无 owner 上下文不可寻址——见 defaultSecretdataSecret）。
+	mgr := assembleTestSecretsVolume(t, ctx, set, "keys", localRoot)
 	if _, err := mgr.Create(ctx, "datakey"); err != nil {
 		t.Fatalf("Create key: %v", err)
 	}
@@ -254,7 +208,7 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 	v := volume.Volume{Name: "sd", Type: typ, RootDir: dataRoot, Extra: map[string]any{
 		"target":     "local",
 		"root":       dataRoot,
-		"secret_url": "secrets://default/datakey",
+		"secret_url": "secrets://keys/datakey",
 	}}
 	be, err := registry.NewBackend(ctx, v)
 	if err != nil {
@@ -280,7 +234,7 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 //   - registerSecretVolumeBackends 早于卷装配即注册 secrets/secretdata 生产类型
 //     （config 声明 type:secretdata/secrets 卷时 assembleVolumes 不会「未注册后端」panic）；
 //   - setupSecretBackends 把装配卷集 Store 进 secretDataSet → 生产 "secretdata" 类型经
-//     secret_url（secrets://default/datakey）解析密钥 → NewBackend → 透明加解密可用。
+//     secret_url（secrets://keys/datakey）解析密钥 → NewBackend → 透明加解密可用。
 //
 // 本测试操作全局单例（secretDataSet 持有者 + 生产类型注册 Once），故不并行（t.Parallel）
 // 以免与其它读该持有者的用例互踩；对外只依赖本测试自己造的 test set（newTestSet）。
@@ -295,20 +249,14 @@ func TestRegisterSecretVolumeBackends_Unconditional(t *testing.T) {
 	if !hasBackendType("secrets") {
 		t.Fatal("生产 secrets 类型未注册")
 	}
-	// 第二步：卷装配（模拟 RegisterRoutes 完成后）——默认卷 + 默认 secrets 卷 + Store 集成卷。
+	// 第二步：卷装配（模拟 RegisterRoutes 完成后）——Store 已装配卷集供 secretdata 工厂懒解析。
 	set := newTestSet(t)
 	localRoot := t.TempDir()
 	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
 		t.Fatalf("setupSecretBackends: %v", err)
 	}
-	if set.External("default-secrets") == nil {
-		t.Fatal("默认 secrets 卷未挂到 Set.External")
-	}
-	// 造密钥 + 经生产 "secretdata" 类型 NewBackend（走 secretDataSet 懒解析）。
-	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
-	if mgr == nil {
-		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
-	}
+	// 密钥来源 = 显式声明的 secrets 卷（默认 secrets 卷 per-owner，非已装配卷）。
+	mgr := assembleTestSecretsVolume(t, ctx, set, "keys", localRoot)
 	if _, err := mgr.Create(ctx, "datakey"); err != nil {
 		t.Fatalf("Create key: %v", err)
 	}
@@ -316,7 +264,7 @@ func TestRegisterSecretVolumeBackends_Unconditional(t *testing.T) {
 	v := volume.Volume{Name: "sd", Type: "secretdata", RootDir: dataRoot, Extra: map[string]any{
 		"target":     "local",
 		"root":       dataRoot,
-		"secret_url": "secrets://default/datakey",
+		"secret_url": "secrets://keys/datakey",
 	}}
 	be, err := registry.NewBackend(ctx, v)
 	if err != nil {
@@ -383,14 +331,8 @@ func TestSetupSecretBackends_Secretdata_MultiTarget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	set := newTestSet(t)
-	if _, err := ensureDefaultSecretsVolume(ctx, set, t.TempDir(), nil); err != nil {
-		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
-	}
 	registerSecretsBackend()
-	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
-	if mgr == nil {
-		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
-	}
+	mgr := assembleTestSecretsVolume(t, ctx, set, "keys", t.TempDir())
 	if _, err := mgr.Create(ctx, "datakey"); err != nil {
 		t.Fatalf("Create key: %v", err)
 	}
@@ -404,7 +346,7 @@ func TestSetupSecretBackends_Secretdata_MultiTarget(t *testing.T) {
 	v := volume.Volume{Name: "sd", Type: typ, RootDir: primaryRoot, Extra: map[string]any{
 		"target":     "local",
 		"root":       primaryRoot,
-		"secret_url": "secrets://default/datakey",
+		"secret_url": "secrets://keys/datakey",
 		"targets":    []string{replicaRoot},
 	}}
 	be, err := registry.NewBackend(ctx, v)
@@ -471,7 +413,7 @@ func TestSecretdataBackend_PreAssembly_NoSet(t *testing.T) {
 	v := volume.Volume{Name: "sd", Type: "secretdata", RootDir: "/tmp", Extra: map[string]any{
 		"target":     "local",
 		"root":       "/tmp",
-		"secret_url": "secrets://default/datakey",
+		"secret_url": "secrets://keys/datakey",
 	}}
 	be, err := registry.NewBackend(ctx, v)
 	if err == nil {
@@ -489,7 +431,8 @@ func TestSecretdataBackend_PreAssembly_NoSet(t *testing.T) {
 // Capacity），set 就绪后本函数遍历 set.All 找到未装配的 secretdata 卷 → registry.NewBackend
 // （此时 secretDataSet 已 Store、secrets 卷可 ResolveURL）→ AttachExternal 挂回 Set。断言：
 //   - config 声明 secretdata 卷补装后可寻址（Set.External 非 nil）且透明加解密可用；
-//   - secrets 卷（config 声明 + 默认）优先装配，secretdata 的 secret_url 可解析。
+//   - secretdata 的 `secret_url` 指向**显式声明的 secrets 卷**时可解析（默认 secrets 卷自
+//     2026-10-15 起是 per-owner 的，不在已装配卷集内）。
 func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	// sproxy:serial: 依赖生产注册路径的全局单例（secretDataSet + 生产类型 Once）。
 	ctx := context.Background()
@@ -513,7 +456,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		Extra: map[string]any{
 			"target":     "local",
 			"root":       dataRoot,
-			"secret_url": "secrets://default/datakey",
+			"secret_url": "secrets://keys/datakey",
 		}}
 	set := registry.NewSet(
 		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, vault},
@@ -524,21 +467,16 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	)
 	t.Cleanup(func() { _ = set.Close() })
 
-	// 先建默认 secrets 卷 + 造密钥（setupSecretBackends 补装 secretdata 卷时需解析
-	// secrets://default/datakey——密钥须先于补装存在）。
-	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, nil); err != nil {
-		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
-	}
-	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
-	if mgr == nil {
-		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
-	}
+	// 先建**显式声明的 secrets 卷** + 造密钥（setupSecretBackends 补装 secretdata 卷时需解析
+	// secrets://keys/datakey——密钥须先于补装存在；默认 secrets 卷是 per-owner 的，装配期无
+	// owner 上下文不可寻址）。
+	mgr := assembleTestSecretsVolume(t, ctx, set, "keys", localRoot)
 	if _, err := mgr.Create(ctx, "datakey"); err != nil {
 		t.Fatalf("Create key: %v", err)
 	}
 
-	// setupSecretBackends：Store set + 确保默认 secrets 卷（幂等）+ 补装 config 声明
-	// secretdata 卷（此时密钥已存在、secrets 卷可 ResolveURL）。
+	// setupSecretBackends：Store set + 补装 config 声明 secretdata 卷（此时密钥已存在、
+	// secrets 卷可 ResolveURL）。
 	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
 		t.Fatalf("setupSecretBackends: %v", err)
 	}
@@ -566,7 +504,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 			{Name: "main", Root: mainDir, VolCapacity: 1 << 30},
 			{Name: "vault", Type: "secretdata", Extra: map[string]any{
 				"target":     "main/videos",
-				"secret_url": "secrets://default/datakey",
+				"secret_url": "secrets://keys/datakey",
 			}},
 		}
 		if verr := cfg.Validate(); verr != nil {
@@ -594,7 +532,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 			t.Fatalf("CategoryOf(%q)=%q, want wrapper（建卷表单/防环校验据它判封装语义）", v.Type, got)
 		}
 
-		// ② 生产 boot 顺序：setupSecretBackends（默认 secrets 卷 + 普通 secretdata 补装）→
+		// ② 生产 boot 顺序：setupSecretBackends（Store 卷集 + 普通 secretdata 补装）→
 		// 造密钥 → enclosure.AttachAll（嵌套封装卷由此装配）。
 		if serr := setupSecretBackends(ctx, vols, cfg.StorageRoot, discardLoggerMain()); serr != nil {
 			t.Fatalf("setupSecretBackends: %v", serr)
@@ -602,10 +540,9 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		if vols.External("vault") != nil {
 			t.Fatal("嵌套封装卷不得由 setupSecretBackends 按类型分派补装（须交 enclosure.AttachAll）")
 		}
-		mgr := secrets.ManagerOfExternal(vols.External("default-secrets"))
-		if mgr == nil {
-			t.Fatal("默认 secrets 卷不可用（密钥无法创建）")
-		}
+		// 密钥来源：显式声明的 secrets 卷（默认 secrets 卷自 2026-10-15 起是 per-owner 的，
+		// 装配期无 owner 上下文 ⇒ 不可作服务器级 secret_url 目标）。
+		mgr := assembleTestSecretsVolume(t, ctx, vols, "keys", cfg.StorageRoot)
 		if _, kerr := mgr.Create(ctx, "datakey"); kerr != nil {
 			t.Fatalf("Create key: %v", kerr)
 		}
@@ -648,6 +585,126 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 			t.Fatal("封装卷写入应以密文落盘（分块加密未生效）")
 		}
 	})
+
+	// **多层嵌套链 + 显式自定义 secrets 卷**（用户裁定 2026-10-15 第 2/3 点）：
+	// per-owner 自动桶是「零配置默认」，但**不排除**显式声明的自定义 secrets 卷——底层可为任意
+	// 卷链。本子用例把链条拉到 4 层并全程经生产装配路径：
+	//
+	//	keys（type: secrets，本地）            ← 手工放置的密钥文件（文档工作流）
+	//	vault（secretdata over main）           ← 用 keys/datakey 作加密密钥
+	//	deepkeys（secrets over vault/keys-area）← 密钥库自身落在**加密区**内（secrets over secretdata）
+	//	deep（secretdata over main，运行期建）  ← secret_url 引用 deepkeys/master（跨加密层的密钥解析）
+	//
+	// 断言：每层装配成功 + 数据面读回一致 + 各层物理落点为密文；变异（enclosure 组合能力退化 /
+	// secret_url 不支持嵌套 secrets 卷）→ 本子用例红。
+	t.Run("multi_layer_nesting_chain", func(t *testing.T) {
+		registerEnclosureWrappers() // 生产封装处理层（secretdata/secrets wrapper）
+		base := t.TempDir()
+		mainDir := filepath.Join(base, "main")
+		keysDir := filepath.Join(base, "keys")
+		if err := os.MkdirAll(mainDir, 0o755); err != nil {
+			t.Fatalf("mkdir main: %v", err)
+		}
+		// 底层密钥**手工放置**（docs/secret-volume.md §2 的部署工作流）：<keys>/secrets/datakey。
+		if err := os.MkdirAll(filepath.Join(keysDir, "secrets"), 0o700); err != nil {
+			t.Fatalf("mkdir keys/secrets: %v", err)
+		}
+		const chainKey = "6f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8"
+		if werr := os.WriteFile(filepath.Join(keysDir, "secrets", "datakey"), []byte(chainKey), 0o600); werr != nil {
+			t.Fatalf("write datakey: %v", werr)
+		}
+
+		cfg := server.Default()
+		cfg.Addr = "127.0.0.1:0"
+		cfg.StorageRoot = mainDir
+		cfg.Volumes = []server.VolumeConfig{
+			{Name: "main", Root: mainDir, VolCapacity: 1 << 30},
+			// 显式自定义 secrets 卷（本地密钥目录；`extra.root` 是**父目录**，内部补 /secrets）。
+			{Name: "keys", Type: "secrets", Extra: map[string]any{"target": "local", "root": keysDir}},
+			// 第 1 层：加密数据区（密钥取自 keys）。
+			{Name: "vault", Type: "secretdata", Extra: map[string]any{
+				"target": "main/vault-area", "secret_url": "secrets://keys/datakey",
+			}},
+			// 第 2 层：secrets over secretdata（密钥库落在**加密区**内 = 多层嵌套链）。
+			{Name: "deepkeys", Type: "secrets", Extra: map[string]any{"target": "vault/keys-area"}},
+		}
+		if verr := cfg.Validate(); verr != nil {
+			t.Fatalf("cfg.Validate: %v", verr)
+		}
+		var chainCfgPtr atomic.Pointer[server.Config]
+		chainCfgPtr.Store(cfg)
+		h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
+			Mux: http.NewServeMux(), CfgPtr: &chainCfgPtr, Logger: discardLoggerMain(),
+			Version: "test", BuildAt: "test",
+		})
+		t.Cleanup(func() { _ = h.Close() })
+		vols := h.Volumes()
+
+		if serr := setupSecretBackends(ctx, vols, cfg.StorageRoot, discardLoggerMain()); serr != nil {
+			t.Fatalf("setupSecretBackends: %v", serr)
+		}
+		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); aerr != nil {
+			t.Fatalf("AttachAll（多层链装配）: %v", aerr)
+		}
+
+		// ① 第 0/1 层：显式 secrets 卷 + 加密数据区。
+		for _, name := range []string{"keys", "vault"} {
+			if layerBE := vols.External(name); layerBE == nil || layerBE.FS() == nil {
+				t.Fatalf("卷 %q 未装配", name)
+			}
+		}
+		// ② 第 2 层：secrets over secretdata（wrapper 组合能力）。
+		deepBE := vols.External("deepkeys")
+		if deepBE == nil || deepBE.FS() == nil {
+			t.Fatal("secrets over secretdata（多层嵌套链）未装配")
+		}
+		deepMgr := secrets.ManagerOfExternal(deepBE)
+		if deepMgr == nil {
+			t.Fatal("嵌套 Secrets 卷 Manager 反取失败")
+		}
+		key, kerr := deepMgr.Create(ctx, "master")
+		if kerr != nil {
+			t.Fatalf("在嵌套（经加密区）secrets 卷里创建密钥失败: %v", kerr)
+		}
+		// 物理落点：密钥经 secretdata 透明加解密 ⇒ 明文不得出现在磁盘任何文件中。
+		if plaintextOnDisk(t, filepath.Join(mainDir, "vault-area"), string(key)) {
+			t.Fatal("嵌套 secrets 卷的密钥应以密文落盘（secrets over secretdata 未生效）")
+		}
+
+		// ③ 第 3 层（运行期建卷）：secretdata 的 secret_url 引用**嵌套 secrets 卷**里的密钥
+		// （`secrets://deepkeys/master`）——解析要穿过「读取该卷 → 其底层经 vault 解密」整条链。
+		deepVol := volume.Volume{Name: "deep", Type: "secretdata", Extra: map[string]any{
+			"target": "main/deep-area", "secret_url": "secrets://deepkeys/master",
+		}}
+		tv, nested := server.TranslateNestedVolume(deepVol)
+		if !nested {
+			t.Fatal("嵌套 target 语法应被翻译为封装声明")
+		}
+		if aerr := server.AttachEnclosureVolume(ctx, vols, discardLoggerMain(), cfg.StorageRoot, tv); aerr != nil {
+			t.Fatalf("引用嵌套 secrets 卷的 secretdata 装配失败（多层链断链）: %v", aerr)
+		}
+		dbe := vols.External("deep")
+		if dbe == nil || dbe.FS() == nil {
+			t.Fatal("第 3 层（引用嵌套 secrets 卷的 secretdata）未装配")
+		}
+		const body = "multi layer chain payload"
+		const key2 = "alice/user/chain.bin"
+		if werr := dbe.FS().WriteFile(ctx, key2, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+			t.Fatalf("第 3 层写入: %v", werr)
+		}
+		rc3, oerr := dbe.FS().OpenRead(ctx, key2)
+		if oerr != nil {
+			t.Fatalf("第 3 层读回: %v", oerr)
+		}
+		got3, rerr3 := io.ReadAll(rc3)
+		_ = rc3.Close()
+		if rerr3 != nil || string(got3) != body {
+			t.Fatalf("第 3 层读回=%q err=%v，want %q", got3, rerr3, body)
+		}
+		if plaintextOnDisk(t, filepath.Join(mainDir, "deep-area"), body) {
+			t.Fatal("第 3 层写入应以密文落盘")
+		}
+	})
 	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
@@ -662,10 +719,85 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	}
 }
 
+// TestSecretdataVolume_PerOwnerDefaultSecrets per-owner 默认 secrets 桶的 `secret_url` 寻址
+// （用户裁定 2026-10-15 第 3 点）：authority = `default-secrets`（或 `default`/空）→ **请求 owner
+// 的**默认桶（`<默认卷根>/<owner>/secrets/`，与 `/api/secrets` 同一份密钥）；解析需要 ctx 中的
+// owner（带身份的建卷请求注入，见 pkg/server createUserVolumeHandler 的 `secrets.WithOwner`）。
+// 无 owner（装配期服务级声明）→ fail-closed 并提示替代写法（显式命名 secrets 卷）。
+//
+// 变异：把 per-owner 分支改回「一律拒绝」→ ① 红；去掉 owner 归属直接读共享目录 → ③ 红
+// （bob 会读到 alice 的密钥）。
+func TestSecretdataVolume_PerOwnerDefaultSecrets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	set := newTestSet(t)
+	typ := "secretdata-perowner-test"
+	registerSecretdataBackendWithFS(typ, func(ctx context.Context, v volume.Volume) ([]byte, error) {
+		return defaultSecretdataSecret(ctx, v, set)
+	})
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
+
+	// alice 的默认桶里造密钥（与 /api/secrets 同源：server.SecretsManagerForOwner）。
+	mgr, err := server.SecretsManagerForOwner(set, "alice", nil)
+	if err != nil {
+		t.Fatalf("SecretsManagerForOwner: %v", err)
+	}
+	if _, cerr := mgr.Create(ctx, "datakey"); cerr != nil {
+		t.Fatalf("Create key: %v", cerr)
+	}
+
+	dataRoot := t.TempDir()
+	sd := volume.Volume{Name: "sd", Type: typ, RootDir: dataRoot, Extra: map[string]any{
+		"target":     "local",
+		"root":       dataRoot,
+		"secret_url": "secrets://default-secrets/datakey",
+	}}
+
+	// ① 带 owner 上下文 → 解析到该 owner 的桶，透明加解密可用。
+	be, berr := registry.NewBackend(secrets.WithOwner(ctx, "alice"), sd)
+	if berr != nil {
+		t.Fatalf("带 owner 上下文构造应成功（per-owner 默认桶）: %v", berr)
+	}
+	t.Cleanup(func() { _ = be.Close() })
+	const body = "per-owner secret payload"
+	if werr := be.FS().WriteFile(ctx, "a.bin", strings.NewReader(body), int64(len(body)), 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	rc, oerr := be.FS().OpenRead(ctx, "a.bin")
+	if oerr != nil {
+		t.Fatalf("OpenRead: %v", oerr)
+	}
+	got, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr != nil || string(got) != body {
+		t.Fatalf("读回=%q err=%v，want %q", got, rerr, body)
+	}
+	// 磁盘落点：密钥在 alice 的默认桶（不是共享目录、也不是别人桶）。
+	if _, serr := os.Stat(filepath.Join(set.DefaultRoot().AbsPath(), "alice", "secrets", "datakey")); serr != nil {
+		t.Errorf("密钥应落 <默认卷根>/alice/secrets/datakey: %v", serr)
+	}
+
+	// ② 无 owner（装配期/服务级声明）→ fail-closed + 替代写法提示。
+	be2, err2 := registry.NewBackend(ctx, sd)
+	if err2 == nil {
+		_ = be2.Close()
+		t.Fatal("装配期（无 owner 上下文）应拒绝解析 per-owner 默认桶")
+	}
+	if !strings.Contains(err2.Error(), "无 owner") || !strings.Contains(err2.Error(), "显式命名") {
+		t.Errorf("错误应说明无 owner 上下文并给出替代写法, got %v", err2)
+	}
+
+	// ③ 跨 owner：bob 的桶里没有该密钥 → 构造失败（不串号、不回落 alice 或共享目录）。
+	if be3, err3 := registry.NewBackend(secrets.WithOwner(ctx, "bob"), sd); err3 == nil {
+		_ = be3.Close()
+		t.Fatal("bob 默认桶无该密钥时应失败（不得读到 alice 的密钥）")
+	}
+}
+
 // TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail（修复轮 I1 守护）：config
 // 声明 type:secretdata 卷补装失败 → `setupSecretBackends` 返回错误（调用方 boot fail，
 // fail-closed）——不得再 WARN 静默降级。注入失败：secret_url 指向不存在的密钥
-// （secrets://default/nokey）→ 补装 `registry.NewBackend` 解析失败 → 返回错误并指明卷名。
+// （secrets://keys/nokey）→ 补装 `registry.NewBackend` 解析失败 → 返回错误并指明卷名。
 func TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail(t *testing.T) {
 	// sproxy:serial: 依赖生产注册路径全局单例（secretDataSet + 生产类型 Once）。
 	ctx := context.Background()
@@ -686,7 +818,7 @@ func TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail(t *testing.T
 		Extra: map[string]any{
 			"target":     "local",
 			"root":       dataRoot,
-			"secret_url": "secrets://default/nokey", // 密钥不存在 → 补装解析失败
+			"secret_url": "secrets://keys/nokey", // 密钥不存在 → 补装解析失败
 		}}
 	set := registry.NewSet(
 		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, vault},
@@ -705,47 +837,6 @@ func TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "vault") {
 		t.Errorf("错误应指明失败卷名 vault，got %v", err)
-	}
-}
-
-// TestSetupSecretBackends_DefaultSecretsFail_NotFatal（修复轮 I1 守护）：**默认 secrets 卷**
-// 装配失败仅降级（WARN，不阻断 boot）——卷集已含同名 "default-secrets" 卷元数据（无
-// external）→ ensureDefaultSecretsVolume 的 AddExternalVolume 因重名失败 → setupSecretBackends
-// 记 WARN 继续，返回 nil（与 config 声明卷补装失败的 boot fail 区分）。
-func TestSetupSecretBackends_DefaultSecretsFail_NotFatal(t *testing.T) {
-	// sproxy:serial: 依赖生产注册路径全局单例（secretDataSet + 生产类型 Once）。
-	ctx := context.Background()
-	registerSecretVolumeBackends()
-	t.Cleanup(func() { secretDataSet.Store(nil) })
-
-	localRoot := t.TempDir()
-	root := filepath.Join(t.TempDir(), "default")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	rt, rerr := storage.OpenRoot(root)
-	if rerr != nil {
-		t.Fatalf("OpenRoot: %v", rerr)
-	}
-	// 卷集 volumes 已含 "default-secrets" 卷元数据（无 external）→ 默认 secrets 卷无法
-	// AddExternalVolume（重名）→ ensureDefaultSecretsVolume 失败（默认 secrets 降级）。
-	set := registry.NewSet(
-		[]volume.Volume{
-			{Name: "default", Type: volume.TypeLocal, RootDir: root},
-			{Name: "default-secrets", Type: "secrets", RootDir: localRoot,
-				Extra: map[string]any{"target": "local", "root": localRoot}},
-		},
-		map[string]*storage.Root{"default": rt},
-		map[string]registry.ExternalBackend{},
-		map[string]*quota.Pool{"default": quota.NewPool(0)},
-		"default",
-	)
-	t.Cleanup(func() { _ = set.Close() })
-
-	// 默认 secrets 卷装配失败 → 仅降级，不返回错误（不阻断 boot）；无 config 声明 secretdata
-	// 卷，补装循环为空。
-	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
-		t.Fatalf("默认 secrets 卷失败应仅降级（WARN，不阻断 boot），got %v", err)
 	}
 }
 
@@ -919,7 +1010,7 @@ func TestEnclosureWrapper_Secretdata_ProductionAssembly(t *testing.T) {
 		{Name: "main", Type: volume.TypeLocal, RootDir: root},
 		{Name: "vault", Type: volume.TypeSecretdata, Extra: map[string]any{
 			"source":     "main:alice/user/vault",
-			"secret_url": "secrets://default/datakey",
+			"secret_url": "secrets://keys/datakey",
 		}},
 	}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, map[string]registry.ExternalBackend{},
@@ -931,16 +1022,14 @@ func TestEnclosureWrapper_Secretdata_ProductionAssembly(t *testing.T) {
 		t.Fatalf("生产装配下封装声明应可解析（wrapper: secretdata 须已注册）: %v", perr)
 	}
 
-	// 默认 secrets 卷 + 密钥（secretdata 的 secret_url 解析目标）。
+	// 显式声明的 secrets 卷 + 密钥（secretdata 的 secret_url 解析目标；默认 secrets 卷自
+	// 2026-10-15 起是 per-owner 的、不在已装配卷集内 ⇒ 装配期无 owner 上下文不可寻址）。
 	localRoot := t.TempDir()
 	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
 		t.Fatalf("setupSecretBackends: %v", err)
 	}
 	t.Cleanup(func() { secretDataSet.Store(nil) })
-	mgr := secrets.ManagerOfExternal(set.External("default-secrets"))
-	if mgr == nil {
-		t.Fatal("默认 secrets 卷反取失败")
-	}
+	mgr := assembleTestSecretsVolume(t, ctx, set, "keys", localRoot)
 	if _, cerr := mgr.Create(ctx, "datakey"); cerr != nil {
 		t.Fatalf("Create key: %v", cerr)
 	}
@@ -1026,15 +1115,19 @@ func findPlaintext(t *testing.T, root, needle string) string {
 	return found
 }
 
-// TestDefaultSecretsVolume_EncryptedRoot_StoresCiphertext 默认 secrets 卷落在**默认卷根**下的
-// `secrets/`：若该卷启用了 at-rest 加密（`extra.encrypt`），密钥文件必须同样**加密落盘**
-// ——此前装配用裸 `NewLocalFS(<storage_root>/secrets)`（纯 os I/O）⇒ 卷内容全加密而**密钥明文**
+// TestSecretsVolume_EncryptedRoot_StoresCiphertext `type: secrets`（target=local）卷落在**受管
+// 卷根**下时：若该卷启用了 at-rest 加密（`extra.encrypt`），密钥文件必须同样**加密落盘**
+// ——此前装配可能用裸 `NewLocalFS(<root>/secrets)`（纯 os I/O）⇒ 卷内容全加密而**密钥明文**
 // 落盘，at-rest 加密对该配置形同虚设（门禁 R26 登记项里记的「待裁定」项）。
 //
-// 判据：磁盘字节不得等于明文 hex 密钥，且经 Manager 读回应与创建值一致。
+// 装配走生产两步（`secretsDirFSFor` 解析视图 + `secrets.NewBackend` 构造，不经全局注册表 ⇒ 可并发）。
 //
-// 变异：装配回退裸 LocalFS → 本用例红。
-func TestDefaultSecretsVolume_EncryptedRoot_StoresCiphertext(t *testing.T) {
+// 判据：磁盘字节不得等于明文 hex 密钥；经 Manager 读回与创建值一致；本地 0600 加固保留
+// （`ChmodSecret` 回调由 NewBackend 依视图能力自动接线——经 Root 的视图不是 `*LocalFS`，
+// 仅靠旧的类型断言会**静默跳过**加固）。
+//
+// 变异：装配回退裸 LocalFS → 密文/权限断言红。
+func TestSecretsVolume_EncryptedRoot_StoresCiphertext(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1052,9 +1145,15 @@ func TestDefaultSecretsVolume_EncryptedRoot_StoresCiphertext(t *testing.T) {
 	t.Cleanup(func() { _ = set.Close() })
 	registerSecretsBackend()
 
-	mgr, err := ensureDefaultSecretsVolume(ctx, set, root, nil)
-	if err != nil {
-		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
+	v := volume.Volume{Name: "cfg-secrets", Type: "secrets", RootDir: root,
+		Extra: map[string]any{"target": "local", "root": root}}
+	be, berr := secrets.NewBackend(ctx, v, secretsDirFSFor(set, root, nil))
+	if berr != nil {
+		t.Fatalf("secrets.NewBackend: %v", berr)
+	}
+	mgr := secrets.ManagerOfExternal(be)
+	if mgr == nil {
+		t.Fatal("ManagerOfExternal 反取失败")
 	}
 	key, err := mgr.Create(ctx, "datakey")
 	if err != nil {
@@ -1075,7 +1174,7 @@ func TestDefaultSecretsVolume_EncryptedRoot_StoresCiphertext(t *testing.T) {
 		}
 	}
 	if string(raw) == string(key) {
-		t.Fatalf("加密默认卷上的 secret 不得明文落盘（got %q）", raw)
+		t.Fatalf("加密卷上的 secret 不得明文落盘（got %q）", raw)
 	}
 	got, err := mgr.Read(ctx, "datakey")
 	if err != nil {
@@ -1086,8 +1185,8 @@ func TestDefaultSecretsVolume_EncryptedRoot_StoresCiphertext(t *testing.T) {
 	}
 }
 
-// TestSecretsDirFSFor_SubdirLayoutAndRootSemantics `type: secrets`/默认 secrets 卷的**目录布局**
-// 必须是 `<root>/secrets/<名>`（两个入口同布局），且落在受管卷根内的那部分必须**经 Root**
+// TestSecretsDirFSFor_SubdirLayoutAndRootSemantics `type: secrets` 卷的**目录布局**
+// 必须是 `<root>/secrets/<名>`，且落在受管卷根内的那部分必须**经 Root**
 // （封印/加解密/迁移随之生效）。此前的实现把**父目录**本身当键空间（漏拼 `/secrets`）⇒ 密钥
 // 文件落错位置、`secret_url` 解析失败 → secretdata 卷装配 boot fail（e2e_cli_secretdata 实测）。
 //
@@ -1104,7 +1203,7 @@ func TestSecretsDirFSFor_SubdirLayoutAndRootSemantics(t *testing.T) {
 		map[string]*storage.Root{"main": rt},
 		map[string]registry.ExternalBackend{}, nil, "main")
 	t.Cleanup(func() { _ = set.Close() })
-	fsys, _ := secretsDirFSFor(set, dir, nil)
+	fsys := secretsDirFSFor(set, dir, nil)
 	ctx := context.Background()
 	if werr := fsys.WriteFile(ctx, "datakey", strings.NewReader("v"), 1, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
