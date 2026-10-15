@@ -338,3 +338,77 @@ func TestParse_MaxBytesHumanReadable(t *testing.T) {
 		t.Fatalf("max_bytes=8GiB 应解析为 %d, got %d", int64(8)<<30, decls[0].MaxBytes)
 	}
 }
+
+// TestParse_RejectsFootprintOverlap 互斥占用（阶段 2 迁移保留的独有能力）：同基底卷上两条
+// **互不相关**的声明的封印足迹不得重叠（父/子/同目录）——否则两卷映射到的键集合相交，
+// 一方写入落进另一方的封印区间（互相覆写 / 数据不可见）。
+//
+// 与 ErrConflictClaim 的分工：精确相等仍走 ErrConflictClaim（既有用例），本判据覆盖
+// 「一方区域落在另一方之内」这类此前漏放的形态。
+// 变异：去掉 validateFootprints → 下面前 4 例不再报错 → 红。
+func TestParse_RejectsFootprintOverlap(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	cases := []struct {
+		name     string
+		pathA    string
+		pathB    string
+		conflict bool
+	}{
+		{"父吃子", "private", "private/vault", true},
+		{"子被父吃", "private/vault", "private", true},
+		{"整卷吃一切", "", "private", true},
+		{"兄弟分支不冲突", "photos", "movies", false},
+		{"深层兄弟不冲突", "a/photos", "a/movies", false},
+		{"不同 owner 桶不冲突", "alice/user", "bob/user", false},
+	}
+	for _, tc := range cases {
+		vols := []volume.Volume{
+			{Name: "main"},
+			encVol("a", "main:"+tc.pathA, nil),
+			encVol("b", "main:"+tc.pathB, nil),
+		}
+		_, err := Parse(vols)
+		if tc.conflict && !errors.Is(err, ErrFootprintOverlap) {
+			t.Errorf("%s: %q vs %q 应拒绝(ErrFootprintOverlap), got %v", tc.name, tc.pathA, tc.pathB, err)
+		}
+		if !tc.conflict && err != nil {
+			t.Errorf("%s: %q vs %q 不应冲突, got %v", tc.name, tc.pathA, tc.pathB, err)
+		}
+	}
+}
+
+// TestParse_ChainNestingAllowsFootprintOverlap 链内叠加（`outer: inner:`、`outer: inner:sub`）
+// **允许**足迹重叠：外层变换的是内层已变换的字节，两者本就共用同一物理区间，封印象限由最外层
+// 承担。变异：把链内判定去掉 → 本用例（master 既有的嵌套拓扑用例同形）变红。
+func TestParse_ChainNestingAllowsFootprintOverlap(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	vols := []volume.Volume{
+		{Name: "main"},
+		encVol("inner", "main:base", nil),
+		encVol("outer", "inner:", nil),     // 整内层（足迹 base ≡ inner）
+		encVol("deeper", "outer:sub", nil), // 内层子区域（足迹 base/sub ⊂ base）
+	}
+	decls, err := Parse(vols)
+	if err != nil {
+		t.Fatalf("链内叠加应允许足迹重叠, got %v", err)
+	}
+	if len(decls) != 3 {
+		t.Fatalf("应 3 条声明, got %d", len(decls))
+	}
+}
+
+// TestParse_MixedChainRejected 混链（owner 限定与卷根专有混用）无法给出唯一足迹 ⇒ fail-closed。
+func TestParse_MixedChainRejected(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	vols := []volume.Volume{
+		{Name: "main"},
+		encVol("inner", "main:private/vault", nil), // 卷根专有
+		encVol("outer", "inner:alice/user", nil),   // owner 限定（第二段 user 是保留桶名）
+	}
+	if _, err := Parse(vols); err == nil {
+		t.Fatal("混链应 fail-closed 拒绝")
+	}
+}

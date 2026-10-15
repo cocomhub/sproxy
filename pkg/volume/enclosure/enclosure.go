@@ -34,16 +34,20 @@ const MaxNestingDepth = 8
 
 // 声明解析错误（装配期 fail-closed；错误必须可归因到具体卷）。
 var (
-	ErrMissingSource   = errors.New("enclosure: 缺少 extra.source（格式 <源卷>:<子路径>）")
-	ErrBadSource       = errors.New("enclosure: extra.source 格式非法")
-	ErrMissingWrapper  = errors.New("enclosure: 缺少 extra.wrapper（封装处理层注册名）")
-	ErrUnknownWrapper  = errors.New("enclosure: extra.wrapper 未注册")
-	ErrSourceNotFound  = errors.New("enclosure: 源卷不存在")
-	ErrSelfEnclosure   = errors.New("enclosure: 不可封装自身")
-	ErrEnclosureCycle  = errors.New("enclosure: 封装链成环")
-	ErrTooDeep         = errors.New("enclosure: 封装嵌套超过深度上限")
-	ErrConflictClaim   = errors.New("enclosure: 同一源路径被多个封装卷声明")
-	ErrSourceEncrypted = errors.New("enclosure: 源卷已启用 at-rest 加密（禁止双重变换）")
+	ErrMissingSource  = errors.New("enclosure: 缺少 extra.source（格式 <源卷>:<子路径>）")
+	ErrBadSource      = errors.New("enclosure: extra.source 格式非法")
+	ErrMissingWrapper = errors.New("enclosure: 缺少 extra.wrapper（封装处理层注册名）")
+	ErrUnknownWrapper = errors.New("enclosure: extra.wrapper 未注册")
+	ErrSourceNotFound = errors.New("enclosure: 源卷不存在")
+	ErrSelfEnclosure  = errors.New("enclosure: 不可封装自身")
+	ErrEnclosureCycle = errors.New("enclosure: 封装链成环")
+	ErrTooDeep        = errors.New("enclosure: 封装嵌套超过深度上限")
+	ErrConflictClaim  = errors.New("enclosure: 同一源路径被多个封装卷声明")
+	// ErrFootprintOverlap 是**足迹重叠**互斥哨兵：两条互不相关的声明在同一基底卷上的封印足迹
+	// 相互覆盖（父/子/同目录）⇒ 拒绝。与 ErrConflictClaim（精确相等）互补——本判据覆盖
+	// 「一方声明的区域落在另一方区域之内」这类精确比较漏掉的形态（互相覆写/数据不可见）。
+	ErrFootprintOverlap = errors.New("enclosure: 两条声明的封印足迹重叠（互斥占用）")
+	ErrSourceEncrypted  = errors.New("enclosure: 源卷已启用 at-rest 加密（禁止双重变换）")
 	// 历史：ErrExternalSourceTo（跨外部卷封装未接入，装配期拒绝）已随「FS 级封印装饰器」
 	// （sealfs.go）落地而移除——外部/远端源卷现在经装配处 SealBackend 注入封印，语义与
 	// 本地源一致（读 hidden/readable、写恒拒）。
@@ -199,9 +203,112 @@ func Parse(vols []volume.Volume) ([]Decl, error) {
 	if err := validateTopology(decls); err != nil {
 		return nil, err
 	}
+	// 足迹重叠互斥（**互斥占用**）：同基底卷上两条互不相关的声明不得有重叠的封印足迹。
+	// 必须在拓扑校验之后（链形态已被确认），且在排序之前（失败即拒绝装配）。
+	if err := validateFootprints(decls); err != nil {
+		return nil, err
+	}
 	// 拓扑序：源在前（稳定排序保证同层按声明序）。
 	sort.SliceStable(decls, func(i, j int) bool { return depthOf(decls[i], decls) < depthOf(decls[j], decls) })
 	return decls, nil
+}
+
+// validateFootprints 拒绝**互斥占用冲突**：两条既非同一封装链（无祖先/后代关系）又落在同一
+// 基底卷上的声明，其封印足迹不得相互覆盖（父/子/同目录）。重叠意味着两卷映射到的键集合相交——
+// 一方写入的字节会落进另一方的封印区间（互相覆写 / 数据不可见），故此形态必须 fail-closed。
+//
+// **链内重叠是设计允许的**（`outer: inner:` 这类逐层叠加：外层把内层已变换的字节再变换一次，
+// 两者本就共用同一物理区间，封印象限由最外层承担）——故仅兄弟分支互斥。
+func validateFootprints(decls []Decl) error {
+	fps, err := declFootprints(decls)
+	if err != nil {
+		return err
+	}
+	byVol := make(map[string]Decl, len(decls))
+	for _, d := range decls {
+		byVol[d.Vol] = d
+	}
+	for i := range fps {
+		for j := i + 1; j < len(fps); j++ {
+			if fps[i].vol != fps[j].vol || chainRelated(decls[i], decls[j], byVol) {
+				continue
+			}
+			if pathsOverlapAny(fps[i].paths, fps[j].paths) {
+				return fmt.Errorf("%w: 卷 %q 与 %q 在基底卷 %q 上的封印足迹重叠（父/子/同目录互斥）",
+					ErrFootprintOverlap, fps[i].who, fps[j].who, fps[i].vol)
+			}
+		}
+	}
+	return nil
+}
+
+// declFootprint 是一条声明在其**基底卷**上的足迹（基底卷名 + 足迹路径集合 + 声明卷名）。
+type declFootprint struct {
+	vol   string
+	who   string
+	paths []string
+}
+
+// declFootprints 逐条声明算出「基底卷 + 封印足迹路径集合」（顺序与 decls 一致）。
+func declFootprints(decls []Decl) ([]declFootprint, error) {
+	out := make([]declFootprint, 0, len(decls))
+	for _, d := range decls {
+		baseVol, rules, err := EffectiveFootprint(d, decls)
+		if err != nil {
+			// 混链（owner 限定与卷根专有混用）无法给出唯一足迹 ⇒ fail-closed（装配处同样会拒）。
+			return nil, fmt.Errorf("封装卷 %q 封印足迹无法解析（fail-closed）: %w", d.Vol, err)
+		}
+		paths := make([]string, 0, len(rules))
+		for _, r := range rules {
+			paths = append(paths, r.Path)
+		}
+		out = append(out, declFootprint{vol: baseVol, who: d.Vol, paths: paths})
+	}
+	return out, nil
+}
+
+// chainRelated 报告两条声明是否处于同一条封装链上（互为祖先/后代）——链内叠加是设计允许的。
+func chainRelated(a, b Decl, byVol map[string]Decl) bool {
+	return followsChain(a, b.Vol, byVol) || followsChain(b, a.Vol, byVol)
+}
+
+// followsChain 沿 Source 链向上，报告链上是否出现 target。
+func followsChain(start Decl, target string, byVol map[string]Decl) bool {
+	seen := map[string]bool{start.Vol: true}
+	for cur := start; ; {
+		if cur.Source == target {
+			return true
+		}
+		next, ok := byVol[cur.Source]
+		if !ok || seen[next.Vol] {
+			return false
+		}
+		seen[next.Vol] = true
+		cur = next
+	}
+}
+
+// pathsOverlapAny 报告两组卷根相对路径中是否存在一对重叠（相等 / 一方是另一方祖先目录）。
+// **空路径 = 整卷封印** ⇒ 与任意路径重叠（含另一条空路径）。
+func pathsOverlapAny(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if pathsOverlap(x, y) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pathsOverlap 判定两条卷根相对路径是否重叠（空 = 整卷，覆盖一切）。语义与 db 层「父/子/同目录」
+// 互斥一致：a==b，或 b 位于 a 之下，或 a 位于 b 之下。
+func pathsOverlap(a, b string) bool {
+	a, b = strings.Trim(a, "/"), strings.Trim(b, "/")
+	if a == "" || b == "" {
+		return true // 整卷封印覆盖卷内任意路径
+	}
+	return a == b || strings.HasPrefix(b, a+"/") || strings.HasPrefix(a, b+"/")
 }
 
 // parseOne 解析单个封装卷配置（纯函数，便于单测）。
