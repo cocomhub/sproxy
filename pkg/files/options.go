@@ -261,6 +261,7 @@ type config struct {
 	fileMeta      FileMetaPolicy
 	externalOps   ExternalVolumeOps
 	phys          VolumePhysFootprinter
+	volTypes      VolumeTypeClassifier
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -283,6 +284,12 @@ func WithPhysFootprinter(p VolumePhysFootprinter) Option {
 
 func WithExternalOps(ops ExternalVolumeOps) Option {
 	return func(c *config) { c.externalOps = ops }
+}
+
+// WithVolumeTypeClassifier 注入卷类型分类能力（wrapper 展示分类的事实源，见
+// VolumeTypeClassifier）。默认：未注入 → 领域侧回落内置基线名单（零回归；生产装配恒注入）。
+func WithVolumeTypeClassifier(tc VolumeTypeClassifier) Option {
+	return func(c *config) { c.volTypes = tc }
 }
 
 func WithVolumes(v VolumeRouter) Option {

@@ -153,14 +153,29 @@ func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 	}, nil
 }
 
-// volumeCategoryFor 从卷后端类型推导展示分类：wrapper 加密/封装卷（secretdata/secrets/
-// egress）→ "wrapper"，其余类型 → ""（不填，omitempty 不出现）。与
-// pkg/volume/registry.backendCategory 的 wrapper 命名集保持一致（R2 门禁禁止本包
-// import pkg/volume/registry，故按字面量判等——见 service.go 领域边界注释）。
-func volumeCategoryFor(typ string) string {
+// volumeCategoryWrapper 是 wrapper 分类的展示值（**跨层 JSON 契约**：Web UI 卷徽标按它显示
+// 🔒；与 registry 的 schema category 字面量同值）。空串 = 不填（`omitempty` 不出现在 JSON）。
+const volumeCategoryWrapper = "wrapper"
+
+// volumeCategoryFor 从卷后端类型推导展示分类：wrapper 加密/封装卷 → "wrapper"，其余类型 →
+// ""（不填，omitempty 不出现）。
+//
+// **分类事实源是装配层注入的 VolumeTypeClassifier**（转发 `registry.CategoryOf`——它含
+// wrapper 处理层注册表的动态投影，新增 wrapper 类型只须在 registry 侧登记即可被识别）；
+// pkg/files 是**另一个领域**，不得 import pkg/volume/registry（门禁 R2），故经能力接口取用。
+//
+// **未注入时回落内置基线名单**（secretdata/secrets/egress）：仅供测试与旧装配路径零回归，
+// 生产装配恒注入（pkg/server handlers.go 的 `WithVolumeTypeClassifier`）。
+func (s *Service) volumeCategoryFor(typ string) string {
+	if tc := s.rt.volTypeClassifier(); tc != nil {
+		if tc.CategoryOf(typ) == volumeCategoryWrapper {
+			return volumeCategoryWrapper
+		}
+		return ""
+	}
 	switch typ {
 	case "secretdata", "secrets", "egress":
-		return "wrapper"
+		return volumeCategoryWrapper
 	}
 	return ""
 }
@@ -170,8 +185,9 @@ func volumeCategoryFor(typ string) string {
 //
 // 为什么不支持时也走索引：本地卷恒走索引（索引是本地卷的权威视图），接缝只负责外部卷。
 //
-// 展示分类（VolumeCategory）：按卷后端类型标注 wrapper 加密/封装卷（secretdata/secrets/
-// egress → "wrapper"），供 Web UI 卷徽标细化；其余类型不填。
+// 展示分类（VolumeCategory）：按卷后端类型标注 wrapper 加密/封装卷（经注入的
+// VolumeTypeClassifier 判 category，见 volumeCategoryFor）→ "wrapper"，供 Web UI 卷徽标
+// 细化；其余类型不填。
 func (s *Service) listExternalVolume(ctx context.Context, q ListQuery, owner, subdir, volFilter string) (ListResult, bool, error) {
 	if volFilter == "" {
 		return ListResult{}, false, nil
@@ -190,7 +206,7 @@ func (s *Service) listExternalVolume(ctx context.Context, q ListQuery, owner, su
 	// 按卷后端类型补展示分类（wrapper 加密卷 → "wrapper"，本地卷不填；Web UI 卷徽标用）。
 	cat := ""
 	if v, ok := s.rt.volSet().ByName(volFilter); ok {
-		cat = volumeCategoryFor(v.Type)
+		cat = s.volumeCategoryFor(v.Type)
 	}
 	for i := range entries {
 		entries[i].VolumeCategory = cat

@@ -459,6 +459,9 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 			files.WithFileLocks(rt),
 			// F1：外部卷对象的硬删接缝（外部卷无 *storage.Root，其对象此前无用户可见删除入口）。
 			files.WithExternalOps(externalVolumeOps{h: h}),
+			// 卷类型分类（决策 3：去领域侧硬编码 wrapper 名单）——分类事实源在
+			// registry.CategoryOf，经 filesVolumeSet 转发注入。
+			files.WithVolumeTypeClassifier(filesVolumeSet{Set: h.volSet}),
 			files.WithChunkedUploads(rt),
 			files.WithVersioning(rt),
 			files.WithDedup(rt),

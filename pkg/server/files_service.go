@@ -79,6 +79,15 @@ type filesVolumeSet struct {
 	*registry.Set
 }
 
+// CategoryOf 实现 files.VolumeTypeClassifier：把卷**类型 → schema category** 分类转发给
+// registry.CategoryOf——「哪些类型是 wrapper」的唯一事实源（含 wrapper 处理层注册表的动态
+// 投影，见 enclosure.RegisterWrapper → registry.MarkWrapperType）。领域包不得 import
+// registry（门禁 R2），故经本适配器注入（装配处 WithVolumeTypeClassifier）。
+//
+// 无状态转发：不读嵌入的 *registry.Set（nil 也安全），故装配处传 `filesVolumeSet{Set: h.volSet}`
+// 与其它适配器同形。
+func (a filesVolumeSet) CategoryOf(typ string) string { return registry.CategoryOf(typ) }
+
 // ExternalVolume 实现 files.ExternalVolumeSource：按卷名返回外部卷目录浏览能力。
 // 未知/非外部卷（本地卷）→ nil（List 的 `?volume=` 回落既有本地聚合，零回归）。
 func (a filesVolumeSet) ExternalVolume(name string) files.ExternalVolume {

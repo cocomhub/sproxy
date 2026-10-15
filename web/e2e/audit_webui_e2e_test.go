@@ -49,8 +49,9 @@ import (
 )
 
 // auditVaultType 是 e2e 建卷使用的加密封装卷类型名。用真实类型名 "secretdata"——
-// 前端卷徽标分类按字面类型判 wrapper（volumeCategoryFor 硬编码 secretdata/secrets/egress，
-// 见 pkg/files/read_ops.go），测试须用真名才能验证「卷徽标分类（wrapper 🔒）」链路。
+// 前端卷徽标分类的事实源是 registry.CategoryOf（装配层注入 files.VolumeTypeClassifier，
+// 见 pkg/files/read_ops.go 的 volumeCategoryFor），测试须用真名才能验证「卷徽标分类
+// （wrapper 🔒）」链路。
 // 工厂构造 secretdata.NewBackend（测试密钥 + 测试卷根，规避 secrets 卷依赖）；web/e2e
 // 不经 cmd/sproxy，注册 "secretdata" 不与生产装配冲突。
 //

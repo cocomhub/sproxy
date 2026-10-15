@@ -96,6 +96,9 @@ type dirsEnv struct {
 	fileMeta bool
 	// externalOps 是外部卷对象操作接缝替身（非 nil 时注入 Service；MoveFile/外部卷用例用）。
 	externalOps ExternalVolumeOps
+	// volumeClassifier 是卷类型分类能力替身（非 nil 时经 WithVolumeTypeClassifier 注入；
+	// nil = 未注入 → 领域侧回落内置基线名单，见 volumeCategoryFor）。
+	volumeClassifier VolumeTypeClassifier
 	// uploading 是替身锁池（TryMark/Acquire 共用，rebuild 时重置——与旧 deps() 每次新建
 	// &sync.Map{} 同语义）。
 	uploading sync.Map
@@ -177,6 +180,9 @@ func (e *dirsEnv) newService() *Service {
 	}
 	if e.externalOps != nil {
 		opts = append(opts, WithExternalOps(e.externalOps))
+	}
+	if e.volumeClassifier != nil {
+		opts = append(opts, WithVolumeTypeClassifier(e.volumeClassifier))
 	}
 	if e.metrics != nil {
 		opts = append(opts, WithMetrics(e.metrics))

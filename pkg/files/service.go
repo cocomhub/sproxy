@@ -237,6 +237,24 @@ type ExternalDeleter interface {
 	Delete(ctx context.Context, volumeName, owner, rel string) error
 }
 
+// VolumeTypeClassifier 是卷**类型 → schema category**的分类能力（可选注入，经
+// WithVolumeTypeClassifier）：CategoryOf(typ) 返回 wrapper|linked|mt-local|""。
+//
+// 为什么需要它：卷的展示分类（`volume_category`）事实源是 `registry.CategoryOf`——它含
+// **wrapper 处理层注册表的动态投影**（enclosure.RegisterWrapper 经 MarkWrapperType 登记），
+// 而 pkg/files 不得 import pkg/volume/registry（门禁 R2：跨域消费走能力接口），故由装配层
+// 适配器转发注入。
+//
+// **未注入 → 领域侧回落内置基线名单**（见 Service.volumeCategoryFor：secretdata/secrets/
+// egress，零回归兜底；生产装配恒注入）。因此新增 wrapper 类型**只须在 registry 侧登记**
+// 即可被列表分类识别，无需改动领域包。
+type VolumeTypeClassifier interface {
+	// CategoryOf 返回类型 typ 的 schema category。实现方按 registry 语义给出：
+	// wrapper 封装卷 → "wrapper"、本地类型 → "mt-local"、其余外部类型 → "linked"；
+	// 领域侧只在 == "wrapper" 时填展示分类，其余一律留空。
+	CategoryOf(typ string) string
+}
+
 // ExternalVolumeDeleter 是 VolumeSet 的**可选扩展**：按卷名返回外部卷删除能力。
 // 未知卷名/非外部卷（本地卷）→ nil。files 域在删除路径用类型断言探测——
 // 断言失败 = 未提供外部删除能力，delete 走既有本地卷路径（零回归）。
