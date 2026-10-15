@@ -45,7 +45,7 @@ const nestedTargetKey = "target"
 // TranslateNestedVolume 把嵌套封装声明翻译为**装配侧声明词汇**：
 //
 //	{Type: "secretdata", Extra: {target: "main/videos", …}}
-//	→ {Type: "secretdata", Extra: {source: "main:videos", wrapper: "secretdata", target: "main/videos", …}}
+//	→ {Type: "secretdata", Extra: {source: "main:videos", target: "main/videos", …}}
 //
 // **Type 原样保留**（方案甲）：本卷的对外身份/协议/分类仍按 wrapper 类型语义；`extra.source`
 // 的存在使其被 `enclosure.IsDeclared` 判为封装声明，从而在装配期走 enclosure 路径
@@ -60,7 +60,10 @@ const nestedTargetKey = "target"
 //     `target: local` + `extra.root` 的本地整卷形态：历史语义照旧）。
 //
 // **保留 original `target` 键**：① 用户面回显/审计仍是用户输入的原语法；② `secrets` 处理层的
-// isLocalTarget 依赖它判本地/远端权限语义；③ 翻译幂等（同一 target 恒产出同一 source）。
+// isLocalTarget 依赖它判本地/远端权限语义；③ 翻译幂等（同一 target 恒产出同一 extra）。
+//
+// **不产出 `extra.wrapper`**（2026-10-15 用户裁定）：wrapper 恒等于卷类型，该键是冗余声明——
+// 装配侧读取仍兼容手写配置，但翻译层不再书写（详见函数内注释）。
 func TranslateNestedVolume(v volume.Volume) (volume.Volume, bool) {
 	typ, extra, ok := TranslateNestedDecl(v.Type, v.Extra, v.Capacity)
 	if !ok {
@@ -90,7 +93,11 @@ func TranslateNestedDecl(typ string, extra map[string]any, capacity int64) (stri
 		out[k] = val
 	}
 	out[enclosure.SourceKey] = base + ":" + sub
-	out[enclosure.WrapperKey] = typ
+	// **不写 `extra.wrapper`**（用户裁定 2026-10-15：该键冗余）：处理层恒等于卷类型本身
+	// （`parseOne` 缺省回落 v.Type；显式写出且不一致时 `ErrWrapperMismatch` fail-closed）。
+	// 写下它只会制造「卷类型 vs 处理层」双份事实源；同时清除调用方传入的陈旧键
+	// （`delete` 对缺失键是 no-op ⇒ 幂等收敛）。
+	delete(out, enclosure.WrapperKey)
 	// 卷级容量 → 声明自身上限（`extra.max_bytes`）：封装卷的 `UserVolume.Capacity`/`vol_capacity`
 	// 是**自身上限**，装配侧对应物是 `max_bytes`（缺省 0 = 仅受源卷池约束 = 继承）。显式配置的
 	// max_bytes 优先（不覆盖）。

@@ -70,8 +70,12 @@ func TestConfigDeclaredNested_AssemblesViaEnclosure(t *testing.T) {
 	if !ok || v.Type != configWireTestType {
 		t.Fatalf("嵌套封装卷的 Type 应保持 wrapper 类型: ok=%v type=%q", ok, v.Type)
 	}
-	if v.Extra["source"] != "main:videos" || v.Extra["wrapper"] != configWireTestType {
+	if v.Extra["source"] != "main:videos" {
 		t.Fatalf("翻译产物 extra 错误: %+v", v.Extra)
+	}
+	// wrapper 键不再写出（冗余键，wrapper 恒等于卷类型；见 TranslateNestedDecl）。
+	if _, has := v.Extra["wrapper"]; has {
+		t.Fatalf("翻译不得写冗余 wrapper 键: %+v", v.Extra)
 	}
 	if v.Extra["target"] != "main/videos" {
 		t.Fatalf("用户面 target 应保留（回显/幂等）: %+v", v.Extra)
@@ -170,8 +174,10 @@ func TestTranslateNestedVolume(t *testing.T) {
 		if got.Extra["source"] != tc.wantSrc {
 			t.Errorf("%s: 翻译产物错误 type=%q extra=%+v", tc.name, got.Type, got.Extra)
 		}
-		if got.Extra["wrapper"] != tc.vol.Type {
-			t.Errorf("%s: wrapper 应为原 type, got %v", tc.name, got.Extra["wrapper"])
+		// wrapper 键**不再写出**（用户裁定 2026-10-15：wrapper 恒等于卷类型 ⇒ 冗余键，
+		// 装配侧读取时缺省回落 v.Type；显式写出且不一致则 fail-closed）。
+		if _, has := got.Extra["wrapper"]; has {
+			t.Errorf("%s: 翻译不得再写冗余 wrapper 键, got %v", tc.name, got.Extra["wrapper"])
 		}
 		if got.Extra["target"] != tc.vol.Extra["target"] {
 			t.Errorf("%s: 原 target 应保留（回显/审计）", tc.name)

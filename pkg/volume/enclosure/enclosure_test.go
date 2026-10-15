@@ -108,6 +108,7 @@ func TestParse_ValidDeclAndSealRules(t *testing.T) {
 func TestParse_Rejects(t *testing.T) {
 	t.Parallel()
 	registerTestWrapper(t, "basetest")
+	registerTestWrapper(t, "othertest") // 供「wrapper 与卷类型不一致」用例（两值都已注册）
 	base := func(extra map[string]any) volume.Volume {
 		e := map[string]any{}
 		maps.Copy(e, extra)
@@ -122,6 +123,9 @@ func TestParse_Rejects(t *testing.T) {
 		{"source 穿越", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main:../x"})}, ErrBadSource},
 		{"源卷不存在", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "nope:x"})}, ErrSourceNotFound},
 		{"wrapper 未注册", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "ghost", "source": "main:x"})}, ErrUnknownWrapper},
+		// wrapper 键冗余：显式写出时**必须等于卷类型**（唯一声明形态 = wrapper 类型 + source），
+		// 指向另一个已注册处理层 ⇒ fail-closed（不在两值间猜哪个是处理层）。
+		{"wrapper 与卷类型不一致", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "othertest", "source": "main:x"})}, ErrWrapperMismatch},
 		{"自封装", []volume.Volume{base(map[string]any{"wrapper": "basetest", "source": "vault:x"})}, ErrSelfEnclosure},
 		{"read_mode 非法", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main:x", "source_read_mode": "public"})}, ErrBadReadMode},
 		{"max_bytes 负", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main:x", "max_bytes": float64(-1)})}, ErrBadMaxBytes},

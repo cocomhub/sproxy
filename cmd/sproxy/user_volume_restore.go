@@ -21,6 +21,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -101,6 +102,15 @@ func setVolumeReady(set *registry.Set, base string) bool {
 // （store 字节零变化：同一份 store 在迁移前后都能恢复）。返回是否恢复成功（false = 单卷跳过，
 // 不阻塞其余卷）。
 func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log *slog.Logger, uv server.UserVolume) bool {
+	// 存量记录显式拒绝（决策④，2026-10-15）：`type: enclosure` 自 f97e9346a 起不是可写卷类型，
+	// 且**历史实现也从不持久化该 type**（翻译层只在内存改写 Type，store 恒存用户面原形态
+	// `wrapper 类型 + extra.target`；建卷 API 对该 type 在落盘前即失败）。故正常 store 不会出现
+	// 该记录——若出现（人工编辑/外部工具写入），按「明确拒绝并告警」处理，绝不猜测其 wrapper。
+	if uv.Type == enclosure.TypeEnclosure {
+		log.Warn("用户卷恢复拒绝：type=enclosure 是内部装配机制，不是可持久化卷类型"+
+			"（请把该记录改写为 wrapper 类型 + extra.source）", "volume", uv.Name, "owner", uv.Owner)
+		return false
+	}
 	v := volumeFromUserVolume(uv)
 	ctx := context.Background()
 	tv, nested := server.TranslateNestedVolume(v)

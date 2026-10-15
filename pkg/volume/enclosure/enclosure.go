@@ -47,7 +47,10 @@ const TypeEnclosure = "enclosure"
 const (
 	// SourceKey 是源视图字段：`<源卷>:<子路径>`（子路径空 = 整卷）。
 	SourceKey = "source"
-	// WrapperKey 是处理层注册名字段（缺省回落卷类型本身——嵌套声明形态下二者恒等）。
+	// WrapperKey 是处理层注册名字段。**冗余键**：唯一声明形态是「wrapper 类型 + extra.source」，
+	// 故处理层恒等于卷类型本身（`extra.wrapper` 缺省即卷类型；显式写出时须与之一致，否则
+	// `ErrWrapperMismatch` fail-closed）。装配层翻译（pkg/server.TranslateNestedDecl）**不再写**
+	// 该键；读取保留仅为兼容手写配置。
 	WrapperKey = "wrapper"
 )
 
@@ -60,11 +63,15 @@ const MaxNestingDepth = 8
 var (
 	ErrBadSource      = errors.New("enclosure: extra.source 格式非法")
 	ErrUnknownWrapper = errors.New("enclosure: extra.wrapper 未注册")
-	ErrSourceNotFound = errors.New("enclosure: 源卷不存在")
-	ErrSelfEnclosure  = errors.New("enclosure: 不可封装自身")
-	ErrEnclosureCycle = errors.New("enclosure: 封装链成环")
-	ErrTooDeep        = errors.New("enclosure: 封装嵌套超过深度上限")
-	ErrConflictClaim  = errors.New("enclosure: 同一源路径被多个封装卷声明")
+	// ErrWrapperMismatch：显式写出的 `extra.wrapper` 与卷类型不一致 ⇒ fail-closed。
+	// wrapper 恒等于卷类型（唯一声明形态 = wrapper 类型 + extra.source），二者分裂会让
+	// 「卷描述类型」（协议/分类/回显）与「实际处理层」失真——冗余键只能冗余，不能指向别的层。
+	ErrWrapperMismatch = errors.New("enclosure: extra.wrapper 与卷类型不一致")
+	ErrSourceNotFound  = errors.New("enclosure: 源卷不存在")
+	ErrSelfEnclosure   = errors.New("enclosure: 不可封装自身")
+	ErrEnclosureCycle  = errors.New("enclosure: 封装链成环")
+	ErrTooDeep         = errors.New("enclosure: 封装嵌套超过深度上限")
+	ErrConflictClaim   = errors.New("enclosure: 同一源路径被多个封装卷声明")
 	// ErrFootprintOverlap 是**足迹重叠**互斥哨兵：两条互不相关的声明在同一基底卷上的封印足迹
 	// 相互覆盖（父/子/同目录）⇒ 拒绝。与 ErrConflictClaim（精确相等）互补——本判据覆盖
 	// 「一方声明的区域落在另一方区域之内」这类精确比较漏掉的形态（互相覆写/数据不可见）。
@@ -395,12 +402,18 @@ func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
 	wrapper = strings.TrimSpace(wrapper)
 	if wrapper == "" {
 		// 嵌套声明（wrapper 类型 + source）：处理层即卷类型本身——用户面身份与实现同源，
-		// 不重复书写 wrapper 键（`type: secretdata` 的封装卷 wrapper 恒为 secretdata）。
+		// 装配层不再书写该冗余键（`type: secretdata` 的封装卷 wrapper 恒为 secretdata）。
 		// IsDeclared 已保证 v.Type 是**已注册**的处理层名 ⇒ 此处回落恒有解。
 		wrapper = v.Type
 	}
 	if _, ok := LookupWrapper(wrapper); !ok {
 		return Decl{}, fmt.Errorf("%w: %q（卷 %q）", ErrUnknownWrapper, wrapper, v.Name)
+	}
+	if !strings.EqualFold(wrapper, v.Type) {
+		// 显式写出的 wrapper 与卷类型不一致 ⇒ fail-closed（不在两值之间「猜」哪个是处理层：
+		// 内部机制与对外身份必须同源）。
+		return Decl{}, fmt.Errorf("%w: extra.wrapper=%q（卷 %q 类型 %q）——wrapper 恒等于卷类型，请删除该冗余键",
+			ErrWrapperMismatch, wrapper, v.Name, v.Type)
 	}
 
 	mode, err := parseReadMode(v)
