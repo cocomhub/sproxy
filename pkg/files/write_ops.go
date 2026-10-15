@@ -37,26 +37,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// userVisibleRel 把租户根内相对路径（user/<path>）归一为用户可见相对路径（<path>），
-// 与占用 Subdir（卷根相对的用户可见坐标）对齐比较。
-func userVisibleRel(rel string) string {
-	return strings.TrimPrefix(rel, "user/")
-}
-
-// rejectOccupiedWrite 判定写目标（volName 卷 + userRel 用户可见相对路径）是否命中被封装卷
-// 占用的子目录（用户语义 #6 写保护：原始底层卷该子目录禁止写、只能读）。命中返回
-// HTTPError{403}（错误文案即对外回包）；未命中 / 未装配写保护返回 nil。
-func (s *Service) rejectOccupiedWrite(volName, userRel string) error {
-	g := s.rt.occupiedWriteGuard()
-	if g == nil {
-		return nil
-	}
-	if err := g.CheckOccupiedWrite(volName, userRel); err != nil {
-		return &HTTPError{Status: http.StatusForbidden, Message: err.Error()}
-	}
-	return nil
-}
-
 // WriteFileInput 是上传（写文件）的领域入参。**不含任何 HTTP 类型**：`Mtime` 由调用方从
 // `X-File-MTime` 头解析后传入（0 = 不设置）。
 type WriteFileInput struct {
@@ -677,34 +657,6 @@ func pathUnder(base, p string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
-// volumeNameForTenant 返回 tnt 所在卷名（多卷）。判定：比对租户根物理绝对路径与各卷根
-// <卷根>/<owner>（卷上租户由 volumeTenant 恰以该路径 OpenRoot 建立，clean 后精确相等）。
-// volSet nil / 租户不可用 / 未命中任何卷 → 空。O(n)（n = 卷数，个位数），低频路径可接受。
-func (s *Service) volumeNameForTenant(tnt *storage.Tenant) string {
-	if tnt == nil || tnt.Root() == nil || s.rt.volSet() == nil {
-		return ""
-	}
-	tenantAbs, ok := tnt.Root().Abs("")
-	if !ok {
-		return ""
-	}
-	tenantAbs = filepath.Clean(tenantAbs)
-	for _, v := range s.rt.volSet().All() {
-		rt := s.rt.volSet().Root(v.Name)
-		if rt == nil {
-			continue
-		}
-		volOwnerAbs, ok2 := rt.Abs(tnt.ID)
-		if !ok2 {
-			continue
-		}
-		if filepath.Clean(volOwnerAbs) == tenantAbs {
-			return v.Name
-		}
-	}
-	return ""
-}
-
 // ---- 目录族域操作（mkdir / rmdir）----
 //
 // 命名说明：域操作用 MakeDir / RemoveDir（与 sync.FS.MakeDir 同词），HTTP 处理器仍叫
@@ -756,10 +708,6 @@ func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (
 	}
 	if target == nil || target.Root() == nil {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidDirPath}
-	}
-	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——目标目录命中占用子目录 → 拒绝创建。
-	if err := s.rejectOccupiedWrite(s.volumeNameForTenant(target), userVisibleRel(rel)); err != nil {
-		return MakeDirResult{}, err
 	}
 	// 目录足迹预留/结算（配额模型 v3）：secretdata 的 dir meta blob pad 到 1–2MB/级，且 MkdirAll
 	// 会**递归创建祖先链** ⇒ 预留物理上界，成功后按链差分结算（多预留自动归还）；无能力 ⇒ 零回归。
@@ -893,14 +841,6 @@ func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string,
 	targets := s.collectRmdirTargets(owner, rel, tnt0)
 	if len(targets) == 0 {
 		return RemoveDirResult{}, &HTTPError{Status: http.StatusNotFound, Message: "目录不存在"}
-	}
-
-	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——任一命中卷的该目录路径命中
-	// 占用子目录 → 拒绝 rmdir（fail-closed，占用目录禁止删）。
-	for _, tg := range targets {
-		if err := s.rejectOccupiedWrite(tg.volName, userVisibleRel(rel)); err != nil {
-			return RemoveDirResult{}, err
-		}
 	}
 
 	// 符号链接 / 非目录检查与 TOCTOU 二次检查：在首个命中卷（默认卷优先）执行，错误语义与
@@ -1223,17 +1163,6 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 			return res, extErr
 		}
 		return RenameFileResult{}, locErr
-	}
-
-	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——源侧命中占用子目录 → 拒绝重命名
-	// （评审 CRIT-2：同卷 rename 源侧仅目标侧守卫曾漏——把占用子目录密文同卷 rename 出占用
-	// 目录 = 从占用目录「搬走/删源」，与跨卷 move 源侧守卫同构，破坏封装）。
-	if err := s.rejectOccupiedWrite(homeVol, userVisibleRel(fromRel)); err != nil {
-		return RenameFileResult{}, err
-	}
-	// 写保护（用户语义 #6）：目标（写侧）路径命中占用子目录 → 拒绝重命名。
-	if err := s.rejectOccupiedWrite(homeVol, userVisibleRel(toRel)); err != nil {
-		return RenameFileResult{}, err
 	}
 
 	// AD-4 唯一性：目标 rel 不得已存在于 owner 视图其它卷（否则 rename 后同逻辑路径跨卷
@@ -1721,10 +1650,6 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	if handled {
 		return res, locErr
 	}
-	// 写保护（用户语义 #6）：被封装卷占用的底层子目录只读——目标路径命中占用子目录 → 拒绝删除。
-	if err := s.rejectOccupiedWrite(homeVol, userVisibleRel(rel)); err != nil {
-		return DeleteFileResult{}, err
-	}
 
 	// ---- TOCTOU 加固（2026-09-17）：rename-to-quarantine ----
 	// 原实现「基于 fd 校验 checksum → 关闭 → root.Remove(rel)」存在窗口：校验与删除之间
@@ -1898,31 +1823,20 @@ func (s *Service) deleteExternalObject(ctx context.Context, owner, volName, rel,
 	return true, nil
 }
 
-// releaseExternalDeleteQuota 释放外部卷删除后的 owner 配额与（委托）卷容量池。charge 是
-// **删除前**实测/折算出的记账字节，与写入侧 `settleSize` 同源（0 = 无可测字节 ⇒ 不释放）。
+// releaseExternalDeleteQuota 释放外部卷删除后的 owner 配额。charge 是**删除前**实测/折算出的
+// 记账字节，与写入侧 `settleSize` 同源（0 = 无可测字节 ⇒ 不释放）。
 //
-// **卷池释放的持有方分工（F3：唯一释放点）**：只有**委托子 Scope**（嵌套封装卷，占用由装配层
-// 路由 `reserveVolumePool` 提交进子 Scope）需要域层归还；其余外部卷的池由 FS 层
-// `CapacityFS` 计数器在删除时自行扣减（路由探测预留早已释放、从未提交）⇒ 域层再扣一次就是
-// **重复释放**（把同池其它文件/子 Scope 的占用一并抹掉 ⇒ 少计 ⇒ 过度准入）。故此处按
-// `DelegatedPoolSource` 判定后才动卷池，且这是该池**唯一的**域层释放点（装配层删除接缝不得重复）。
-func (s *Service) releaseExternalDeleteQuota(owner, rel, volName string, charge int64) {
+// **卷容量池不在此释放**（阶段 2 迁移）：外部卷（含封装卷）的池由 FS 层 `CapacityFS` 计数器
+// 在删除时自行扣减（路由探测预留早已释放、从未提交）⇒ 域层再扣一次就是**重复释放**（把同池
+// 其它文件的占用一并抹掉 ⇒ 少计 ⇒ 过度准入）。此前「委托子 Scope」需要域层例外归还，是因为其
+// 占用由装配层路由提交；迁移到 `quota.NewPoolWithParent` 继承池后，封装卷池也是 FS 层计数器
+// 记账，与普通外部卷同型 ⇒ 例外随之消失。
+func (s *Service) releaseExternalDeleteQuota(owner, rel, _ string, charge int64) {
 	if charge <= 0 {
 		return
 	}
 	if scope := s.rt.quotaScope(owner, rel); scope != nil {
 		scope.ReleaseUsage(charge)
-	}
-	vs := s.rt.volSet()
-	if vs == nil {
-		return
-	}
-	d, ok := vs.(DelegatedPoolSource)
-	if !ok || !d.IsDelegated(volName) {
-		return // 非委托卷：容量账本归 FS 层计数器（删除即扣减），域层不得介入
-	}
-	if pool := vs.Pool(volName); pool != nil {
-		pool.ReleaseCommitted(charge)
 	}
 }
 

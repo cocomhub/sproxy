@@ -23,6 +23,7 @@ import (
 // 调用方给定，用于「底层池满 / 余量校验」场景）。
 func newNestedWrapperQuotaHandlers(t *testing.T, mainCapacity int64) (*Handlers, *UserVolumeStore) {
 	t.Helper()
+	markEnclosureDeferred()
 	registerUserVolWrapBackend() // wrapper 类型（Schema target, allow_wrapper）
 	registerNestedRootBackend()  // 可读写底层 backend（FS = LocalFS(root)）
 	cfg := Default()
@@ -72,16 +73,24 @@ func TestWrapperQuota_UploadAggregatesToBase_DeleteReleases(t *testing.T) {
 		t.Fatalf("上传 vault/secret.bin = %d, want 200 (body: %s)", status, resp)
 	}
 	basePool := h.volSet.Pool("main")
-	if got := basePool.Usage(); got != int64(len(body)) {
-		t.Fatalf("上传后 main 池 Usage()=%d, want %d（子 Scope 父链聚合）", got, len(body))
+	vaultPool := h.volSet.Pool("vault")
+	if vaultPool == nil || vaultPool.Parent() != basePool {
+		t.Fatalf("vault 池应继承 main 池（NewPoolWithParent），got %+v", vaultPool)
 	}
-	// 封装卷自身池（委托的子 Scope）Usage 为自身字节。
-	if got := h.volSet.Pool("vault").Usage(); got != int64(len(body)) {
-		t.Fatalf("vault 委托池 Usage()=%d, want %d", got, len(body))
+	if got := vaultPool.Usage(); got <= 0 {
+		t.Fatal("上传后 vault 继承池 Usage 应 > 0（容量记账未接线）")
 	}
+	// 父链聚合：封装卷池的提交传播到底层 main 池（同一字节只在父池计一次）。
+	if got, want := basePool.Usage(), vaultPool.Usage(); got != want {
+		t.Fatalf("上传后 main 池 Usage()=%d ≠ vault 池 %d（继承父链聚合断裂）", got, want)
+	}
+	charge := vaultPool.Usage()
 
 	// 删除文件按实际字节 ReleaseCommitted（写面删除路径同方法，父链传播到底层池）。
-	h.volSet.Pool("vault").ReleaseCommitted(int64(len(body)))
+	vaultPool.ReleaseCommitted(charge)
+	if got := vaultPool.Usage(); got != 0 {
+		t.Fatalf("释放后 vault 池 Usage()=%d, want 0", got)
+	}
 	if got := basePool.Usage(); got != 0 {
 		t.Fatalf("释放后 main 池 Usage()=%d, want 0（父链释放）", got)
 	}
@@ -198,10 +207,14 @@ func TestWrapperQuota_ChainedNested_AggregatesToBase(t *testing.T) {
 	if st, resp := writeMuxUpload(t, fmux, "deep.bin", "wrapB", body); st != http.StatusOK {
 		t.Fatalf("上传 wrapB/deep.bin = %d, want 200 (body: %s)", st, resp)
 	}
-	if got := h.volSet.Pool("main").Usage(); got != int64(len(body)) {
-		t.Fatalf("链式上传后 main 池 Usage()=%d, want %d（三层父链聚合）", got, len(body))
+	// 链式嵌套：wrapB 的有效源卷（EffectiveTarget 沿链回溯）是基底 main ⇒ 其继承池直挂
+	// main 池，提交聚合到 main（不在中间层重复计一次）。
+	if got := h.volSet.Pool("wrapB").Usage(); got <= 0 {
+		t.Fatal("链式上传后 wrapB 池 Usage 应 > 0")
 	}
-	if got := h.volSet.Pool("wrapB").Usage(); got != int64(len(body)) {
-		t.Fatalf("wrapB 委托池 Usage()=%d, want %d", got, len(body))
+	// main 池 = wrapA 池 + wrapB 池之和（两层封装各自的 FS 层计数器都挂 main 之下、逐层计量
+	// ——与装配期 inheritPools 的 EffectiveTarget 口径一致）；判据是「聚合确实到达基底」。
+	if got, wb := h.volSet.Pool("main").Usage(), h.volSet.Pool("wrapB").Usage(); got < wb {
+		t.Fatalf("链式上传后 main 池 Usage()=%d < wrapB 池 %d（继承父链聚合断裂）", got, wb)
 	}
 }

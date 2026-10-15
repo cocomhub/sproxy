@@ -316,11 +316,9 @@ func (h *Handlers) backupTargetFSBase(ctx context.Context, owner, target string)
 	// manifest 写面：租户根的 `backup/` 功能桶（与 user/meta 并列，用户 API 不可寻址）；
 	// 同经 Root（manifest 含文件名，加密卷上不应明文落盘）。
 	mfs := syncpkg.NewPrefixFS(NewRootFS(tnt.Root()), backupManifestBucket+"/")
-	// 占用写保护（过渡层独有增量，2026-10-06）：backup 直写目标卷 user 桶，不经 files 域
-	// guard——经 Root 的封装卷封印在装配层注入，此处对 volume_links 嵌套占用子目录仍叠加
-	// 写保护装饰器（命中被封装卷占用子目录 → 该文件计失败，不中止整体；阶段 2 迁 SealFS 后
-	// 由封印统一拦截，本装饰器随之移除）。
-	return h.wrapOccupiedGuard(syncpkg.NewPrefixFS(fs, "user/"), target), mfs, nil
+	// 封装卷封印由底座统一收口：写经 Root（本地卷封印在装配层注入；外部卷封印在装配处套
+	// SealFS）⇒ 命中封印象限的写恒拒 ErrSealed（阶段 2 迁移删除了过渡层在此叠加的装饰器）。
+	return syncpkg.NewPrefixFS(fs, "user/"), mfs, nil
 }
 
 // backupQuotaFS 是备份目标写面的配额记账装饰器：WriteFile 前对文件 size 在三本账上预留

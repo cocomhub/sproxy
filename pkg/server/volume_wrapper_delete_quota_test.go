@@ -47,9 +47,12 @@ func TestWrapperDeleteQuota_MultiFile_ExactRelease(t *testing.T) {
 	if charge1 <= 0 {
 		t.Fatalf("上传 f1 后委托池 Usage 无增量（%d → %d）：记账未接线", p0, p1)
 	}
-	if got := s1 - s0; got != charge1 {
-		t.Fatalf("f1：owner Scope 增量=%d ≠ 委托池增量=%d（双账本口径不一致）", got, charge1)
+	if got := s1 - s0; got <= 0 {
+		t.Fatalf("f1：owner 全局 Scope 增量=%d（未记账）", got)
 	}
+	// 注：池账本（物理落盘字节，含元数据 sidecar）与 owner 全局 Scope（逻辑字节）**口径不同**
+	// （阶段 2 迁移后封装卷池由 FS 层计数器按实际写入计量），故不要求两者数值相等；本用例的
+	// 判据是「删除精确回落」（见下）。
 	if st, resp := writeMuxUpload(t, mux, "f2.bin", "vault", f2); st != 200 {
 		t.Fatalf("上传 f2.bin = %d (body: %s)", st, resp)
 	}
@@ -58,8 +61,8 @@ func TestWrapperDeleteQuota_MultiFile_ExactRelease(t *testing.T) {
 	if charge2 <= 0 {
 		t.Fatalf("上传 f2 后委托池 Usage 无增量（%d → %d）", p1, p2)
 	}
-	if got := s2 - s1; got != charge2 {
-		t.Fatalf("f2：owner Scope 增量=%d ≠ 委托池增量=%d", got, charge2)
+	if got := s2 - s1; got <= 0 {
+		t.Fatalf("f2：owner 全局 Scope 增量=%d（未记账）", got)
 	}
 	if got := basePool.Usage(); got != p2 {
 		t.Fatalf("底座池 Usage()=%d ≠ 委托池 Usage()=%d（父链聚合断裂）", got, p2)

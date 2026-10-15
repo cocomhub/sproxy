@@ -226,15 +226,6 @@ type Handlers struct {
 	// 相关 /api/volumes/user 路由返回 400）。**它是运行时用户卷的唯一事实源**（重启由
 	// ScanRestore 恢复；历史 `configWriter` YAML 写回机制已随阶段 2 迁移移除）。
 	userVolumes *UserVolumeStore
-	// volumeLinks 是嵌套封装（已创建卷 + 新子目录）的互斥占用 + 关联标注索引
-	// （volume_links.go）。懒创建；装配期从 userVolumes 扫描重建（防重启丢失）。
-	volumeLinks      *volumeLinksRegistry
-	rebuildLinksOnce sync.Once
-	// linksRestored 标记占用关联是否已从 userVolumes store 重建（tryRestoreLinks 原子幂等；
-	// 修复 Once 首次 null-store 空重建 / ScanRestore 失败不重试的可靠性缺口——store 就绪或
-	// 扫描成功前的每次 links() 调用都尝试恢复）。
-	linksRestored  atomic.Bool
-	restoreLinksMu sync.Mutex
 	// credentialRing 是 SproxySig 凭据权威表（AK→多 SK 条目，凭据 store 化后取代
 	// cfg.AccessKeys）。RegisterRoutes 装配：opts.CredentialRing 显式注入（测试/
 	// xfer 集成）优先；否则从 opts.CredentialStore 载入（见 bootstrapCredentials）。
@@ -473,7 +464,6 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 			files.WithDedup(rt),
 			files.WithAudit(rt),
 			files.WithEventSink(rt),
-			files.WithOccupiedWriteGuard(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 			files.WithBandwidthLimiter(rt),
 		}

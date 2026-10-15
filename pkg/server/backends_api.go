@@ -66,7 +66,7 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 	// ⇒ 占用判定只能在签发期做（complete 的登记拦截虽有纵深，但那时「只读」目录里已经躺了一个
 	// 未登记、不计配额的游离对象）。GET 不拦——占用目录是只读而非不可读。
 	if method == http.MethodPut {
-		if oerr := h.presignOccupiedGuard(typ, owner, path); oerr != nil {
+		if oerr := h.presignSealedGuard(typ, owner, path); oerr != nil {
 			http.Error(w, oerr.Error(), http.StatusForbidden)
 			return
 		}
@@ -217,20 +217,21 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 	sendJSONResponse(w, map[string]string{"ok": "registered"}, http.StatusOK)
 }
 
-// presignOccupiedGuard 在**签发期**对「被封装卷占用的底层子目录」fail-closed 拒绝（评审 F2）：
-// presign 的 PUT URL 由客户端直传对象存储，服务端看不到那次写 ⇒ 只能在签发时拦。
+// presignSealedGuard 在**签发期**对「落在封装封印区间内」的目标 fail-closed 拒绝：
+// presign 的 PUT URL 由客户端直传对象存储，**绕过一切 FS 装饰器与 storage.Root 封印**
+// ⇒ 服务端看不到那次写，只能在签发时按封印规则拦（这是唯一无法靠底座封印收口的写面）。
 //
-// 判定与登记侧（complete → RegisterDirectUpload → routeUploadForTarget → checkWrapperOccupiedWrite）
-// **同源同坐标**：命中的卷是「该 type 解析出的已配置卷」，坐标是卷内**用户可见相对路径**
-// （presignRemoteRel 剥掉 `<owner>/user/` 前缀，正是占用 Subdir 的口径）。
+// 坐标：`path` 是收敛后的**卷根相对键** `<owner>/<bucket>/<rel>`（`presignPathFor` 产出，
+// 与 `volume.Location.FSPath()` 同形），正是封印规则（`storage.SealRule.Path`）的命名空间。
+//
 // 无已配置卷（裸后端）或该类型对调用方不可用（ACL 拒绝）时返回 nil——后者由
 // presignBackendError 统一分档 403，不得在此抢先改变错误码。
-func (h *Handlers) presignOccupiedGuard(typ, owner, path string) error {
+func (h *Handlers) presignSealedGuard(typ, owner, path string) error {
 	vol, matched, err := h.presignVolumeFor(typ, owner)
 	if err != nil || !matched {
 		return nil
 	}
-	return h.checkWrapperOccupiedWrite(vol.Name, presignRemoteRel(owner, path))
+	return h.enclosureSealedAt(vol.Name, path)
 }
 
 // presignRemoteRel 从收敛后的预签名路径（`<owner>/user/<rel>`）取出**用户桶相对路径**

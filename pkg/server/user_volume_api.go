@@ -27,6 +27,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -100,7 +101,7 @@ func validateWrapperTarget(name string, f registry.FieldSchema, extra map[string
 	}
 	// 嵌套形态：校验对象为卷名段（子目录不是卷）。
 	base := target
-	if b, _, ok := volume.SplitNestedTarget(target); ok {
+	if b, _, ok := ParseNestedTarget(target); ok {
 		base = b
 	}
 	if !volumeInSet(allowed, base) {
@@ -137,7 +138,7 @@ func wrapperTargetOfSet(vols []volume.Volume, name string) (string, bool) {
 		if !ok || strings.TrimSpace(t) == "" {
 			return "", false
 		}
-		if base, _, nested := volume.SplitNestedTarget(t); nested {
+		if base, _, nested := ParseNestedTarget(t); nested {
 			return base, true
 		}
 		return t, true
@@ -200,29 +201,38 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
-	// 嵌套封装 target（`<卷>/<子目录>`）额外校验：互斥占用 + 子目录必须不存在（409）。
-	// 非嵌套 target（local+root 等）零回归。
-	if err := h.validateNestedWrapperTarget(r.Context(), req.Extra); err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
-		return
-	}
-	// 配额委托容量预检（方案B，2026-10-06）：封装卷设 capacity 须 ≤ 底层卷池余量
-	// （超出 → 400「超出底层卷可用配额」；不设则 Scope 0 不限、由底层卷反向管理）。
-	if err := h.validateWrapperQuotaCapacity(req.Extra, req.Capacity); err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
-		return
-	}
 	// 用户卷强制 owner-only ACL（评审 S1，2026-10-06）：新卷注入 Mode=Allow + 单 owner
 	// 白名单，使 data 面（列表/下载/wrapper 底层/转存目标）对非 owner fail-closed——此前
 	// 注入零值 ACL（Mode==""）令 volume.Authorize 对**任意 owner** 恒 true，跨 owner 枚举
 	// /写滥用/封装成链。已存卷（旧 store 文件）零值兼容不静默收紧，仅新卷 owner-only。
 	acl := volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{owner: {}}}
+	v := volume.Volume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
+	// 嵌套封装（`target: <卷>/<子目录>`）翻译为 enclosure 声明形态后走底座装配路径
+	// （阶段 2 迁移）：声明校验（含**足迹重叠互斥**）+ 封印注入 + 配额继承 + 后端构造
+	// 全部由 attachEnclosureVolume 完成；持久化仍存**原形态**（store 字节零变化）。
+	if tv, nested := TranslateNestedVolume(v); nested {
+		if err := validateNewEnclosure(h.volSet, tv, req.Capacity); err != nil {
+			sendJSONResponse(w, map[string]string{"error": err.Error()}, enclosureErrStatus(err))
+			return
+		}
+		uv := UserVolume{Name: req.Name, Type: req.Type, Owner: owner, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
+		if err := h.userVolumes.Create(owner, uv); err != nil {
+			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
+			return
+		}
+		if aerr := AttachEnclosureVolume(r.Context(), h.volSet, h.logger, h.userVolumes.Root(), tv); aerr != nil {
+			_ = h.userVolumes.Delete(owner, req.Name)
+			sendJSONResponse(w, map[string]string{"error": "装配失败: " + aerr.Error()}, http.StatusBadRequest)
+			return
+		}
+		sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
+		return
+	}
 	// fail-fast 试构造：type 已注册 + extra 合法（registry.NewBackend 分派）。
 	// 失败 → 400（未注册 backend / 凭据缺失等），不落盘。
 	// Capacity 回填（B3-I1）：委托配额经底层池子 Scope 生效，Volume.Capacity 一并带配额，
 	// 使 /api/volumes（卷仪表）与 /api/volumes/user（卷管理）对封装卷显示一致容量——此前
 	// 建卷不加 Capacity，仪表读 v.Capacity 恒 0 显示「不限」与实际 507 冲突。
-	v := volume.Volume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
 	be, err := registry.NewBackend(r.Context(), v)
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": "type 未注册或 extra 非法: " + err.Error()}, http.StatusBadRequest)
@@ -263,25 +273,40 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "register failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	// 创建成功后登记嵌套封装占用关联（互斥占用生命周期：删底层卷查引用 409、删封装卷清关联）。
-	// register 内做互斥重叠判定（防并发建卷重叠子目录 TOCTOU，fail-close）：冲突 → 回滚
-	// 已建卷（Set 移除 + store 删除，尽力一致），返回占用 409。
-	if !h.registerWrapperLink(owner, req.Name, req.Extra) {
-		_ = h.volSet.RemoveExternalVolume(req.Name)
-		_ = h.userVolumes.Delete(owner, req.Name)
-		sendJSONResponse(w, map[string]string{"error": errVolumeDirOccupied.Error()}, http.StatusConflict)
-		return
-	}
-	// 配额委托挂载（方案B）：在底层卷容量池挂占用子目录 Scope（capacity 已前置校验 ≤ 底层
-	// 余量，此处失败仅底层池不可用/重复委托等防御路径）→ 回滚已建卷 + 清关联，尽力一致。
-	if err := h.registerWrapperQuota(req.Name, req.Extra, req.Capacity); err != nil {
-		_ = h.volSet.RemoveExternalVolume(req.Name)
-		_ = h.userVolumes.Delete(owner, req.Name)
-		h.clearWrapperLinks(req.Name)
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
-		return
-	}
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
+}
+
+// validateNewEnclosure 建卷前置校验（嵌套封装，无副作用）：① 声明合法性（含足迹重叠互斥）；
+// ② capacity 不超有效源卷池余量（过度承诺的运行期快速失败——即便不校验，父链聚合也会在写入时
+// 507，但此处能给出可读的 400）。
+func validateNewEnclosure(set *registry.Set, tv volume.Volume, capacity int64) error {
+	d, decls, err := validateEnclosureDecl(set, tv)
+	if err != nil {
+		return err
+	}
+	base, _ := enclosure.EffectiveTarget(d, decls)
+	if pool := set.Pool(base); pool != nil {
+		mx := pool.MaxBytes()
+		if mx > 0 && capacity > 0 {
+			avail := mx - pool.Usage() - pool.Reserved()
+			if capacity > avail {
+				return fmt.Errorf("超出底层卷可用配额（capacity=%d > 余量=%d，底层卷 %q）", capacity, avail, base)
+			}
+		}
+	}
+	return nil
+}
+
+// enclosureErrStatus 把封装声明校验错误映射为 HTTP 状态码：**互斥占用冲突**（足迹重叠/同一路径
+// 双声明，两者都是「该区间已被别的封装卷占用」）→ 409；其余（缺 source/未注册 wrapper/环/超深/
+// 源卷不存在/源卷已加密）→ 400。哨兵由 pkg/volume/enclosure 单一提供，不做字符串匹配。
+func enclosureErrStatus(err error) int {
+	switch {
+	case errors.Is(err, enclosure.ErrFootprintOverlap), errors.Is(err, enclosure.ErrConflictClaim):
+		return http.StatusConflict
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 // listUserVolumesHandler 处理 GET /api/volumes/user。只列 owner 自己的卷。
@@ -384,9 +409,11 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "卷被活跃同步任务引用，请先取消任务"}, http.StatusConflict)
 		return
 	}
-	// 嵌套封装关联：本卷是其它封装卷的底层且仍有引用 → 409（先删引用方，防占用悬空）。
-	if h.links().hasRefs(name) {
-		sendJSONResponse(w, map[string]string{"error": "卷是封装卷的底层卷（存在嵌套封装引用），请先删除引用它的封装卷"}, http.StatusConflict)
+	// 嵌套封装引用检查（阶段 2 迁移：声明即事实源）：本卷若被其它封装声明的 `source` 直接
+	// 引用（`<本卷>:<子路径>`）→ 409（先删引用方，防占用悬空）。查「声明的 Source 指向它」
+	// 取代过渡层的 links 注册表——声明集合本身就是权威（config/store 即事实源）。
+	if refs := h.enclosureRefsOf(name); len(refs) > 0 {
+		sendJSONResponse(w, map[string]string{"error": "卷是封装卷的底层卷（存在嵌套封装引用: " + strings.Join(refs, ", ") + "），请先删除引用它的封装卷"}, http.StatusConflict)
 		return
 	}
 	// 先删 store 元数据（失败则 Set 不变，无需回滚），再摘除运行时卷，最后清计数文件。
@@ -412,13 +439,32 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// **不删容量计数文件**：卷删除仅移除元数据/句柄，远端已写入的字节仍在（本系统不删
 	// 远端内容）；保留 used 使同名重建时 Load 到旧占用（否则 delete+recreate 把上限变成
 	// 「每轮限额 × 轮数」，绕过「Σ占用 ≤ 卷限额」）。计数文件为安全保留，非泄漏。
-	// 删除成功：若本卷是封装卷（曾占用底层子目录），清除其占用关联与配额委托（生命周期闭环）
-	// + 清理占用子目录残留（C5：配额归还底层池 + 重建同目录不 409；I-③：先整流删除卷内
-	// 数据再删目录——带数据封装卷不留密文残留、子目录可复用）。
-	h.clearWrapperLinks(name)
-	h.clearWrapperQuota(name)
-	h.cleanupWrapperBaseDir(v.Extra)
+	// 删除成功：若本卷是嵌套封装卷（用户面 target 语法），拆除底座侧的落地物——回收源卷封印
+	// （否则源区间永久只读）、归还并摘除继承容量池、擦除独占区间内容（阶段 2 迁移：取代过渡层
+	// 的 clearWrapperLinks/clearWrapperQuota/cleanupWrapperBaseDir）。
+	if tv, nested := TranslateNestedVolume(volumeFromUserVolume(*v)); nested {
+		DetachEnclosureVolume(h.volSet, h.logger, tv)
+	}
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
+}
+
+// enclosureRefsOf 返回在**当前声明集合**中以 name 作为直接 source（底层卷）的封装卷名
+// （删底层卷前查引用 → 409）。声明即事实源：不需要任何运行期注册表。
+func (h *Handlers) enclosureRefsOf(name string) []string {
+	if h == nil || h.volSet == nil {
+		return nil
+	}
+	decls, err := enclosure.Parse(h.volSet.All())
+	if err != nil {
+		return nil // 声明集合当前非法（运维侧问题）：不阻塞删除（另有装配期 fail-closed 兜底）
+	}
+	var out []string
+	for _, d := range decls {
+		if d.Source == name {
+			out = append(out, d.Vol)
+		}
+	}
+	return out
 }
 
 // SetUserVolumeStore 注入用户卷 store（装配层 new 后调用；nil 清除，路由返回 400）。

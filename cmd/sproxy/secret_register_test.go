@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
 
@@ -646,19 +648,44 @@ func TestSetupSecretBackends_DefaultSecretsFail_NotFatal(t *testing.T) {
 	}
 }
 
-// TestSetupSecretBackends_NestedWrapper_RestartAdopt（评审 CRIT-①，2026-10-07）：config 声明
-// 嵌套封装卷重启时其自建底层子目录已存在——二次补装应**收养复用**（adoptNestedDir ctx 标记）
-// 而非「需新空子目录」boot-fail。同一 storage root 首次装配创建 default/videos + backend，随后
-// 「重启」用同一 config 新建 set 再补装 → 应成功且 backend 可寻址；不带标记的普通 ctx 对
-// 已存在子目录仍 fail-closed（fresh 运行时建卷语义）。
-func TestSetupSecretBackends_NestedWrapper_RestartAdopt(t *testing.T) {
-	// sproxy:serial: 依赖生产注册路径全局单例（secretDataSet + 生产类型 Once）。
-	ctx := context.Background()
-	registerSecretVolumeBackends()
-	t.Cleanup(func() { secretDataSet.Store(nil) })
+// reattachWrapType 是「重启重装配」用例专用的封装处理层名（避免与生产注册表冲突）。
+const reattachWrapType = "reattach-secretdata-test"
 
-	localRoot := t.TempDir()
-	dataRoot := t.TempDir()
+// reattachWrapper 用**真实 secretdata**（固定密钥）做处理层：足以验证「二次装配复用既有字节
+// 且能解密读回」，同时不触碰生产全局注册路径。
+type reattachWrapper struct{}
+
+func (reattachWrapper) Name() string { return reattachWrapType }
+
+func (reattachWrapper) Build(ctx context.Context, v volume.Volume, src syncpkg.FS, _ map[string]any) (registry.ExternalBackend, error) {
+	tmp, terr := os.MkdirTemp("", "reattach-tmp")
+	if terr != nil {
+		return nil, terr
+	}
+	return secretdata.NewBackend(ctx, v, src, secretdata.Options{
+		Secret: []byte("reattach-fixed-key-material-01"), MetaPadBytes: 4096, TempDir: tmp,
+	})
+}
+
+var reattachWrapperOnce sync.Once
+
+func registerReattachWrapper() {
+	reattachWrapperOnce.Do(func() { enclosure.RegisterWrapper(reattachWrapper{}) })
+}
+
+// TestEnclosureVolume_RestartReattach（阶段 2 迁移：重启收养语义的底座等价物）：嵌套封装卷在
+// 迁移后是 **enclosure 声明**（`source: default:videos` + `wrapper: <处理层>`），装配由
+// `applyEnclosureSeals`（封印）+ `AttachAll`（推迟装配）完成。
+//
+// 重启时底层子目录（default/videos）**已经存在且含上次写入的字节**——过渡层为此需要
+// `adoptNestedDir` 标记做「自建目录收养」（否则「需新空子目录」boot-fail）；enclosure 底座
+// **没有「子目录须不存在」前置条件**（区域本就是既有数据的落点，同一区间可被声明唯一占有），
+// 故二次装配天然成功且复用既有字节——本用例钉住该等价能力（去掉它 = 重启 boot-fail 回归）。
+func TestEnclosureVolume_RestartReattach(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	registerReattachWrapper()
+
 	root := filepath.Join(t.TempDir(), "default")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("mkdir default: %v", err)
@@ -667,62 +694,97 @@ func TestSetupSecretBackends_NestedWrapper_RestartAdopt(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("OpenRoot: %v", rerr)
 	}
-	mkVault := func() volume.Volume {
-		return volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot,
-			Capacity: 100,
-			Extra: map[string]any{
-				"target":     "default/videos", // 嵌套封装：底层 default 的新子目录
-				"secret_url": "secrets://default/datakey",
-			}}
+	vols := []volume.Volume{
+		{Name: "default", Type: volume.TypeLocal, RootDir: root},
+		{Name: "vault", Type: enclosure.TypeEnclosure, Capacity: 100, Extra: map[string]any{
+			"source": "default:videos", "wrapper": reattachWrapType,
+		}},
 	}
 	newSet := func() *registry.Set {
 		return registry.NewSet(
-			[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, mkVault()},
+			append([]volume.Volume(nil), vols...),
 			map[string]*storage.Root{"default": rt},
 			map[string]registry.ExternalBackend{},
 			map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
 			"default",
 		)
 	}
+	// 装配步骤与生产 boot 顺序一致：源卷封印（assembleVolumes 内做）→ 封装后端补装。
+	attach := func(set *registry.Set) {
+		t.Helper()
+		if serr := rt.SetSeals([]storage.SealRule{{Path: "videos", Wrapper: "vault", Mode: storage.SealHidden}}); serr != nil {
+			t.Fatalf("SetSeals: %v", serr)
+		}
+		if aerr := enclosure.AttachAll(ctx, set, nil, enclosure.AttachOptions{StorageRoot: t.TempDir()}); aerr != nil {
+			t.Fatalf("AttachAll: %v", aerr)
+		}
+	}
 
-	// 首次装配：建默认 secrets 卷 + 密钥 + 补装 vault（创建嵌套子目录 default/videos）。
 	set := newSet()
 	t.Cleanup(func() { _ = set.Close() })
-	if _, err := ensureDefaultSecretsVolume(ctx, set, localRoot, nil); err != nil {
-		t.Fatalf("ensureDefaultSecretsVolume: %v", err)
+	attach(set)
+	be := set.External("vault")
+	if be == nil || be.FS() == nil {
+		t.Fatal("首次装配后 vault backend 应可寻址")
 	}
-	if mgr := secrets.ManagerOfExternal(set.External("default-secrets")); mgr != nil {
-		if _, err := mgr.Create(ctx, "datakey"); err != nil {
-			t.Fatalf("Create datakey: %v", err)
+	const body = "persisted across restart"
+	if werr := be.FS().WriteFile(ctx, "alice/user/keep.bin", strings.NewReader(body), int64(len(body)), 0); werr != nil {
+		t.Fatalf("写入封装卷: %v", werr)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "videos")); serr != nil {
+		t.Fatalf("装配后应有 default/videos 区域: %v", serr)
+	}
+	// 物理落点在区域之内（前缀映射生效，未外溢到源卷其它位置）：区域内有真实字节，
+	// 且源卷根除 LAYOUT_VERSION 外无新增顶层条目。
+	if n := dirBytes(t, filepath.Join(root, "videos")); n == 0 {
+		t.Fatal("封装字节应落地 default/videos 之内（区域内应有落盘字节）")
+	}
+	ents, rerr2 := os.ReadDir(root)
+	if rerr2 != nil {
+		t.Fatalf("ReadDir: %v", rerr2)
+	}
+	for _, e := range ents {
+		if e.Name() != "videos" && e.Name() != "LAYOUT_VERSION" {
+			t.Fatalf("封装卷不应在源卷根新增其它条目: %s", e.Name())
 		}
-	} else {
-		t.Fatal("默认 secrets 卷 ManagerOfExternal 反取失败")
-	}
-	if err := setupSecretBackends(ctx, set, localRoot, nil); err != nil {
-		t.Fatalf("首次 setupSecretBackends: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "videos")); err != nil {
-		t.Fatalf("首次装配应创建 default/videos 子目录: %v", err)
 	}
 
-	// 重启收养：同一 config 声明、子目录已存在——setupSecretBackends 应成功（收养而非 boot-fail）。
+	// 「重启」：同一声明、子目录已存在且含数据 → 二次装配必须成功（无收养门禁）且旧数据可读回。
 	set2 := newSet()
 	t.Cleanup(func() { _ = set2.Close() })
-	if _, err := ensureDefaultSecretsVolume(ctx, set2, localRoot, nil); err != nil {
-		t.Fatalf("重启 ensureDefaultSecretsVolume: %v", err)
+	attach(set2)
+	be2 := set2.External("vault")
+	if be2 == nil || be2.FS() == nil {
+		t.Fatal("重启后 vault backend 应可寻址且 FS 可用（enclosure 无「子目录须不存在」门禁）")
 	}
-	if err := setupSecretBackends(ctx, set2, localRoot, nil); err != nil {
-		t.Fatalf("重启收养应成功（CRIT-①，不得「需新空子目录」boot-fail）: %v", err)
+	rc, oerr := be2.FS().OpenRead(ctx, "alice/user/keep.bin")
+	if oerr != nil {
+		t.Fatalf("重启后应能读回既有数据: %v", oerr)
 	}
-	if be := set2.External("vault"); be == nil || be.FS() == nil {
-		t.Fatal("重启收养后 vault backend 应可寻址且 FS 可用")
+	defer func() { _ = rc.Close() }()
+	got, rerr2 := io.ReadAll(rc)
+	if rerr2 != nil {
+		t.Fatalf("ReadAll: %v", rerr2)
 	}
+	if string(got) != body {
+		t.Fatalf("重启后数据应为 %q, got %q", body, got)
+	}
+}
 
-	// fresh 语义守护：不带 adoptNestedDir 标记的普通 ctx 对已存在子目录仍 fail-closed
-	// （运行时 POST /api/volumes/user 新建不会吞掉冲突目录）。
-	if _, err := resolveNestedTargetFS(ctx, "vault", "default/videos"); err == nil {
-		t.Fatal("无收养标记的 resolveNestedTargetFS 对已存在子目录应报错（TOCTOU/fresh 建卷语义）")
-	}
+// dirBytes 返回目录树下全部文件的字节合计（离路径/不可读目录跳过）。
+func dirBytes(t *testing.T, dir string) int64 {
+	t.Helper()
+	var total int64
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // 遍历容错：仅统计已可读文件字节
+		}
+		if info, ierr := d.Info(); ierr == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // TestEnclosureWrapper_Secretdata_ProductionAssembly（S4/S5 收尾）：
@@ -985,10 +1047,11 @@ func TestDefaultSecretsFS_LocalTargetSubdirLayout(t *testing.T) {
 // 装配（阶段 2 迁移的 target→enclosure 翻译会产出该形态，故必须注册）。
 // 变异：去掉 registerEnclosureWrappers 里的 secretsWrapper 注册 → 本用例红。
 //
-// sproxy:serial: 生产注册路径（全局 wrapper 注册表 Once），不并发。
+// 可并发：只用封装处理层注册（Once + RWMutex 读安全）与**本用例自建**的卷集，不触碰
+// secretDataSet 等跨用例全局状态。
 func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	registerSecretVolumeBackends()
 	registerEnclosureWrappers()
 
 	if w, ok := enclosure.LookupWrapper("secrets"); !ok || w.Name() != "secrets" {
@@ -1009,7 +1072,6 @@ func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, map[string]registry.ExternalBackend{},
 		map[string]*quota.Pool{"main": quota.NewPool(0), "keys": quota.NewPool(0)}, "main")
 	t.Cleanup(func() { _ = set.Close() })
-	t.Cleanup(func() { secretDataSet.Store(nil) })
 
 	if _, perr := enclosure.Parse(vols); perr != nil {
 		t.Fatalf("secrets 封装声明应可解析（wrapper 须已注册）: %v", perr)

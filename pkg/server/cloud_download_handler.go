@@ -25,7 +25,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/transfer"
-	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
@@ -43,26 +42,14 @@ func isStorageFull(err error) bool {
 
 // checkTransferACL 校验转存目标卷对 owner 的 ACL（H2/R1：防跨租户覆写）。
 // transfer 为 nil 或卷放行 → 返回 ""；卷未装配/ACL 拒绝 → 返回错误文案（调用方 403）。
-// 写保护（用户语义 #6，旁路闭环 2026-10-06）：显式转存路径命中被封装卷占用的底层子目录 →
-// 同样返回错误文案（创建时即拒绝，避免下载完成才撞 403）。自动派生路径（Path 空，首段为
-// 任务 ID 不可预判）由转存写前 guard（CloudDownloadManager.OccupiedWriteGuard）兜底。
+// checkTransferACL 校验转存目标的卷 ACL（阶段 2 迁移后「占用子目录只读」由底座封印收口：
+// 目标卷属外部/封装卷时，写入经其后端 FS 的封印装饰器恒拒 —— 不再在此重复判定）。
 func (h *Handlers) checkTransferACL(owner string, transfer *cloud.TransferSpec) string {
 	if transfer == nil {
 		return ""
 	}
 	if !h.volumeAllowedFor(owner, transfer.Volume) {
 		return fmt.Sprintf("转存目标卷 %q 对当前用户不可用（ACL 拒绝）", transfer.Volume)
-	}
-	if transfer.Path != "" && h.volSet != nil {
-		if v, ok := h.volSet.ByName(transfer.Volume); ok {
-			// Location 强类型：transfer.Path 即用户可见相对路径（user 桶相对），
-			// 解析校验存在性/键空间（ResolveUserLocation 失败 = 路径非法 → 跳过占用检查）。
-			if _, kerr := v.ResolveUserLocation(owner, transfer.Path); kerr == nil {
-				if occErr := h.checkWrapperOccupiedWrite(transfer.Volume, transfer.Path); occErr != nil {
-					return occErr.Error()
-				}
-			}
-		}
 	}
 	return ""
 }
@@ -1005,14 +992,6 @@ func (h *Handlers) cloudArchiveToVolume(
 		return
 	}
 	rel := loc.FSPath()
-	// 写保护（嵌套封装占用子目录只读，旁路闭环 F1）：目标命中被封装卷占用的底层子目录 →
-	// 403 **写前预检**（不落盘）。本路径由服务端自己执行写（不是客户端直写后端）且
-	// target_path 客户端可控，此前无占用判定 ⇒ 可落进「只读」占用目录、破坏封装不变量。
-	// 坐标与 pkg/cloud 下载转存的 occupiedWriteGuard 同口径（用户可见相对路径）。
-	if err := h.checkWrapperOccupiedWrite(t.TargetVolume, volume.UserVisibleRel(rel)); err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: err.Error()}, http.StatusForbidden)
-		return
-	}
 	// 本地 staging 配额统一接线（与 cloud 下载转存一致；无独立配额 → 直通零回归）。
 	// 打包流长度未知（size=0）由 gate 的 reservingReader 按实际读取量增量预留（#767 原生
 	// 支持）——不得再在装配层额外预留（会双计）。

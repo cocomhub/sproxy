@@ -3,36 +3,65 @@
 
 package server
 
-// volume_wrapper_nested_test.go 提供「config 声明嵌套封装卷（secretdata + target=<卷>/<子目录>）」
-// 的测试装配夹具，与生产 `setupSecretBackends` + `WireConfigNestedWrappers` 顺序/形态一致。
+// volume_wrapper_nested_test.go 提供「config 声明嵌套封装卷（`type: <wrapper 名>` +
+// `extra.target=<卷>/<子目录>`）」的测试装配夹具，与生产装配顺序/形态一致。
+//
+// 阶段 2 迁移后：用户面 target 语法在**装配层翻译**为 enclosure 声明（`extra.source` +
+// `extra.wrapper`，见 nested_enclosure.go），底层由 enclosure 底座装配——故夹具需注册一个
+// **同名封装处理层**（`enclosure.RegisterWrapper`）让翻译生效，后端即「区域视图上的
+// secretdata」（与过渡期的 SubFS 装配物理落点等价）。
+//
 // 被 volume_wrapper_delete_quota_test.go（删除链路配额）与 volume_wrapper_root_list_test.go
 // （根目录列举）共用。
 
 import (
 	"context"
+	"os"
+	"sync"
 	"testing"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 )
 
-// nestedSecretType 是测试用「推迟装配」的外部卷类型名（避开生产 "secretdata"，防污染共享
-// 标记表——本地注册 + t.Cleanup 移除）。
+// nestedSecretType 是测试用封装处理层类型名（避开生产 "secretdata"，防污染共享注册表）。
 const nestedSecretType = "nested-secretdata-test"
 
+// nestedSecretWrapper 把「区域视图上的 secretdata」注册为封装处理层（与生产
+// secretdataWrapper 同构，密钥固定、临时目录每次新建）。
+type nestedSecretWrapper struct{}
+
+func (nestedSecretWrapper) Name() string { return nestedSecretType }
+
+func (nestedSecretWrapper) Build(ctx context.Context, v volume.Volume, src syncpkg.FS, _ map[string]any) (registry.ExternalBackend, error) {
+	tmp, terr := os.MkdirTemp("", "nested-secret-tmp")
+	if terr != nil {
+		return nil, terr
+	}
+	return secretdata.NewBackend(ctx, v, src, secretdata.Options{
+		Secret: []byte("nested-delete-quota-key-01"), MetaPadBytes: 4096, TempDir: tmp,
+	})
+}
+
+var registerNestedSecretOnce sync.Once
+
+func registerNestedSecretWrapper() {
+	registerNestedSecretOnce.Do(func() { enclosure.RegisterWrapper(nestedSecretWrapper{}) })
+}
+
 // newNestedSecretWrapperHandlers 装配「config 声明嵌套封装卷」的测试 Handlers：
-// main 本地卷（容量 mainCap，0 = 不限）+ 卷 store + config 声明的嵌套封装卷 vault
-// （type=nestedSecretType，target=main/videos）→ AttachExternal(真实 secretdata 后端，
-// 底层 = SubFS(mainRoot, videos)) + WireConfigNestedWrappers（link + DelegatePool）。
-// 与生产 `setupSecretBackends` + `WireConfigNestedWrappers` 的顺序/形态一致。
+// main 本地卷（容量 mainCap，0 = 不限）+ 卷 store + config 声明的封装卷 vault
+// （type=nestedSecretType，target=main/videos）——经装配期**翻译**落到 enclosure 底座
+// （封印注入 + 容量池继承 + 后端补装），与生产装配路径同形。
 //
 // extra 追加额外的本地卷（如跨卷 move 的目标卷）——不传则形态与既有一致（调用方零改动）。
 func newNestedSecretWrapperHandlers(t *testing.T, mainCap int64, extra ...VolumeConfig) *Handlers {
 	t.Helper()
-	registry.MarkDeferredType(nestedSecretType)
-	t.Cleanup(func() { registry.UnmarkDeferredTypeForTest(nestedSecretType) })
+	markEnclosureDeferred()
+	registerNestedSecretWrapper()
 
 	mainDir := t.TempDir()
 	cfg := Default()
@@ -46,28 +75,9 @@ func newNestedSecretWrapperHandlers(t *testing.T, mainCap int64, extra ...Volume
 	}
 	h := buildVolSetHandlers(t, cfg)
 	h.SetUserVolumeStore(NewUserVolumeStore(mainDir))
-
-	// 补装外部后端（生产：setupSecretBackends → AttachExternal）。
-	base := syncpkg.NewLocalFS(mainDir, nil)
-	if err := base.MakeDir(context.Background(), "videos"); err != nil {
-		t.Fatalf("MakeDir videos: %v", err)
-	}
-	sub, err := syncpkg.NewSubFS(base, "videos")
-	if err != nil {
-		t.Fatalf("NewSubFS: %v", err)
-	}
-	be, err := secretdata.NewBackend(context.Background(),
-		volume.Volume{Name: "vault", Type: nestedSecretType,
-			Extra: map[string]any{"target": "main/videos"}}, sub,
-		secretdata.Options{Secret: []byte("nested-delete-quota-key-01"), MetaPadBytes: 4096, TempDir: t.TempDir()})
-	if err != nil {
-		t.Fatalf("secretdata.NewBackend: %v", err)
-	}
-	if aerr := h.volSet.AttachExternal("vault", be); aerr != nil {
-		t.Fatalf("AttachExternal: %v", aerr)
-	}
-	if werr := h.WireConfigNestedWrappers(); werr != nil {
-		t.Fatalf("WireConfigNestedWrappers: %v", werr)
+	// 装配期只登记元数据 + 池（推迟装配）；后端补装与生产 setupServerCore 同层。
+	if aerr := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{StorageRoot: mainDir}); aerr != nil {
+		t.Fatalf("AttachAll: %v", aerr)
 	}
 	return h
 }

@@ -82,6 +82,15 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 	if len(cfg.Volumes) == 0 {
 		return nil, fmt.Errorf("卷集合装配失败：volumes 为空（契约要求 Volumes 恒 ≥1）")
 	}
+	// **用户面 target 语法翻译**（阶段 2 迁移）：config 声明 `type: <wrapper>` +
+	// `extra.target: "<卷>/<子目录>"` 的嵌套封装卷先翻译为 enclosure 声明（内存副本，不改入参
+	// cfg）——后续按 `type: enclosure` 走「推迟装配 + 封印注入 + 配额继承」的底座路径。用户面
+	// 语法与持久化形态都保持不变（store/config 字节零变化）。
+	if hasNestedDecl(cfg.Volumes) {
+		norm := *cfg
+		norm.Volumes = normalizeNestedVolumes(cfg.Volumes)
+		cfg = &norm
+	}
 	acc := &volumeAccum{
 		roots:    make(map[string]*storage.Root, len(cfg.Volumes)),
 		external: make(map[string]registry.ExternalBackend, len(cfg.Volumes)),
@@ -115,6 +124,32 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 		return nil, serr
 	}
 	return registry.NewSet(acc.volumes, acc.roots, acc.external, acc.pools, acc.defaultName), nil
+}
+
+// hasNestedDecl 报告卷列表中是否存在「可翻译的用户面嵌套封装声明」（决定是否走翻译副本路径；
+// 无则完全零开销、零行为变化）。
+func hasNestedDecl(vols []VolumeConfig) bool {
+	for _, vc := range vols {
+		if _, _, ok := TranslateNestedDecl(vc.Type, vc.Extra, int64(vc.VolCapacity)); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeNestedVolumes 返回翻译后的卷配置副本（不改入参切片/映射；未命中的卷原样保留）。
+func normalizeNestedVolumes(vols []VolumeConfig) []VolumeConfig {
+	out := make([]VolumeConfig, len(vols))
+	copy(out, vols)
+	for i := range out {
+		typ, extra, ok := TranslateNestedDecl(out[i].Type, out[i].Extra, int64(out[i].VolCapacity))
+		if !ok {
+			continue
+		}
+		out[i].Type = typ
+		out[i].Extra = extra
+	}
+	return out
 }
 
 // closeOpenedVolumes 回收装配中途已打开的卷根（失败路径清理）。与原 vs.Close() 在装配失败点上
@@ -501,18 +536,9 @@ func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size
 		return 0
 	})
 	var volFullErr error
-	var occupiedErr error
 	for _, v := range ordered {
-		// 写保护：候选卷该 rel 命中占用子目录 → 跳过该候选（安全优先，不静默落到占用目录）。
-		if err := h.checkWrapperOccupiedWrite(v.Name, userVisibleRelOf(rel)); err != nil {
-			occupiedErr = err
-			continue
-		}
 		route, err := h.reserveVolume(owner, rel, v.Name, size)
 		if err == nil {
-			// M7（2026-10-06）：自动路由跳过被占用候选后落到其它卷——Warn 提示
-			// 「目录已被封装卷占用」（行为不变：落到可用候选；全部候选被占用时由 403 透传文案）。
-			h.noteAutoRouteOccupiedSkip(owner, rel, v.Name, occupiedErr)
 			return route, nil
 		}
 		var re *routeError
@@ -522,24 +548,10 @@ func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size
 		}
 		return nil, err // owner 全局满 / 其它：直接返回
 	}
-	if occupiedErr != nil && volFullErr == nil {
-		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, occupiedErr.Error(), occupiedErr)
-	}
 	if volFullErr != nil {
 		return nil, volFullErr
 	}
 	return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, quota.ErrStorageFull)
-}
-
-// noteAutoRouteOccupiedSkip 记录「自动路由跳过被封装卷占用的候选卷」的 Warn（M7，2026-10-06）：
-// 用户不带 volume 上传命中被占用子目录（如 main/videos 被封装卷占用）时，自动路由跳过该候选
-// 落到其它卷——日志提示，避免「静默落无关卷」无痕。occupiedErr nil → 空操作。
-func (h *Handlers) noteAutoRouteOccupiedSkip(owner, rel, targetVol string, occupiedErr error) {
-	if occupiedErr == nil {
-		return
-	}
-	h.logger.Warn("自动路由：跳过被封装卷占用的候选卷（用户可指定 volume 上传）",
-		"owner", owner, "rel", rel, "target_volume", targetVol, "occupied", occupiedErr.Error())
 }
 
 // routeUploadLegacy 旧装配路径（volSet nil）预留：默认租户 + owner 全局 Scope 预留（单卷零回归）。
@@ -567,10 +579,6 @@ func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, che
 	v, ok := h.volSet.ByName(volName)
 	if !ok || !v.Authorize(owner) {
 		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
-	}
-	// 写保护：被封装卷占用的底层子目录只读——显式卷/forceHome 目标命中占用子目录 → 403。
-	if err := h.checkWrapperOccupiedWrite(volName, userVisibleRelOf(rel)); err != nil {
-		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, err.Error(), err)
 	}
 	if checkUnique {
 		if err := h.checkVolumeUniqueness(owner, rel, v.Name, view); err != nil {
@@ -639,23 +647,10 @@ func (h *Handlers) reserveVolumePool(route *volumeRoute, volName string, externa
 		return newRouteError(routeErrVolFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 	}
 	if external != nil {
-		// 外部卷：卷级容量由 FS 层 CapacityFS 权威记账（本次仅探测用于路由/快速失败，
-		// 立即释放防双计）。**委托子池例外**：嵌套封装卷（DelegatePool 挂载）容量委托到底层
-		// 卷池的子 Scope，保留 Commit 以维持父链聚合（整体不超底层配额；过渡层语义，
-		// 阶段 2 迁 enclosure 的 EffectiveTarget 后移除本例外）。
-		//
-		// **已知取舍（F4，存量非融合引入；现有测试 base 恒为本地卷故未暴露）**：当底层卷是
-		// **config 声明的外部卷**时，其 FS 链本身含 CapacityFS 计数器（`assembleExternalVolume`
-		// 的 `capacity.WrapBackend`，计数器复用同一底层池）⇒ 本函数保留的委托 Commit 与
-		// FS 层计数**对同一字节各计一次**（底座池占用翻倍 ⇒ 约一半容量即 507，方向保守）。
-		// 不在此「无脑释放探测预留」的原因：委托子 Scope 同时承担**封装卷自身 capacity 上限**
-		// 与父链聚合，释放后该上限静默失效（把过度限制换成失去限制）。正确修法需要 quota 层
-		// 表达「只在本层限额、不再向父链聚合」的委托形态（或让装配层在检测到底座已由
-		// CapacityFS 记账时改用该形态），属设计变更——本地底座（LocalFS，无 CapacityFS）无此问题。
-		if h.volSet.IsDelegated(volName) {
-			route.pool, route.poolRes = pool, res
-			return nil
-		}
+		// 外部卷：卷级容量由 FS 层 CapacityFS 权威记账（本次仅探测用于路由/快速失败，立即释放防
+		// 双计）。封装卷同理：其池是 `quota.NewPoolWithParent(源卷池, max_bytes)` 的继承池，
+		// 占用由 FS 层计数器提交进自身池后沿父链聚合（阶段 2 迁移移除了旧的「委托子 Scope 例外
+		// ——保留 Commit」分支：例外曾为维持父链聚合而存在，而继承池的提交天然聚合）。
 		res.Release()
 		return nil
 	}

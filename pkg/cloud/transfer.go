@@ -132,14 +132,6 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 		targetWriteLock:     m.targetWriteLock,
 		resumeSelfOverwrite: task.resumeSelfOverwrite,
 	}
-	// 写保护（嵌套封装占用子目录只读，旁路闭环 2026-10-06）：转存目标命中被封装卷占用的
-	// 底层子目录 → 拒绝转存（**写前预检**，不落盘不留钉子文件）。转存直写目标卷 FS、
-	// 不经 files 域 guard，占用判定由装配层注入（nil = 不启用）。
-	if m.occupiedWriteGuard != nil {
-		if err := m.occupiedWriteGuard(task.Transfer.Volume, volume.UserVisibleRel(env.rel)); err != nil {
-			return nil, env.result, err
-		}
-	}
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
 	tr, lerr := m.transferLoop(env)
 	if tr != nil {

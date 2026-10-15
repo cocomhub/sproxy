@@ -271,25 +271,6 @@ func decoratorsForGate() []decoratorSpec {
 	blockExempt := map[string]string{
 		"BlockAccessor": "有意不转发：引擎回退语义需 Capability 探测（设计 §8）",
 	}
-	// 过渡层写保护装饰器（嵌套封装占用子目录只读，2026-10-06）：仅实现基础 FS 方法 +
-	// 写方法占用判定（读透传不拦），**不转发任何可选能力**——阶段 2 迁 SealFS（封印在
-	// storage.Root/enclosure 层统一拦截）后移除，届时从本清单删除。
-	wrapperWriteGuardExempt := map[string]string{
-		"BlockAccessor":       "写保护装饰器不转发可选能力（基础方法 + 写判定）",
-		"Copier":              "写保护装饰器不转发可选能力",
-		"DirectURLProvider":   "写保护装饰器不转发可选能力",
-		"Linker":              "写保护装饰器不转发可选能力",
-		"LocalVolume":         "写保护装饰器不转发可选能力",
-		"MetaExtraUpdater":    "写保护装饰器不转发可选能力",
-		"Mover":               "写保护装饰器不转发可选能力",
-		"Provider":            "写保护装饰器不转发可选能力（FileMeta 由内层经其它装饰器转发）",
-		"RangeReader":         "写保护装饰器不转发可选能力",
-		"ReserveSpace":        "写保护装饰器不转发可选能力",
-		"StagedPathReuse":     "写保护装饰器不转发可选能力",
-		"StagingQuotaCapable": "写保护装饰器不转发可选能力",
-		"StagingQuotaExempt":  "写保护装饰器不转发可选能力",
-		"WriteIfAbsent":       "写保护装饰器不转发可选能力",
-	}
 	return []decoratorSpec{
 		{typeName: "TrustedVolumeFS", pkgDir: "pkg/volume/trusted", exempt: blockExempt},
 		{typeName: "MetaBucketGuard", pkgDir: "pkg/volume/trusted", exempt: blockExempt},
@@ -306,8 +287,5 @@ func decoratorsForGate() []decoratorSpec {
 		// 同步 pull 本地目标的配额装饰器（评审 P2：此前只实现基础 7 方法，把内层能力全剥掉
 		// ⇒ meta.Provider/WriteIfAbsent/Mover/RangeReader 等断言恒 false 静默降级）。
 		{typeName: "quotaLocalFS", pkgDir: "pkg/syncexec", exempt: blockExempt},
-		// 过渡层：嵌套封装占用子目录写保护（pkg/server volume_links + pkg/syncexec 本地写侧）。
-		{typeName: "occupiedGuardFS", pkgDir: "pkg/server", exempt: wrapperWriteGuardExempt},
-		{typeName: "guardedLocalFS", pkgDir: "pkg/syncexec", exempt: wrapperWriteGuardExempt},
 	}
 }

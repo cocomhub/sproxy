@@ -535,18 +535,4 @@ func (h *Handlers) s3TenantFor(owner string, r *http.Request) *storage.Tenant {
 	return h.tenantFor(owner)
 }
 
-// s3BucketVolName 返回 S3 请求的目标卷名：ctx 中 bucket 卷段已装配卷 → 该卷名；否则默认卷名
-// （volSet 未装配 → ""，占用检查回落空卷语义不拦截）。
-func (h *Handlers) s3BucketVolName(r *http.Request) string {
-	if vol, _ := r.Context().Value(s3BucketCtxKey{}).(string); vol != "" && h.volSet != nil {
-		if _, ok := h.volSet.ByName(vol); ok {
-			return vol
-		}
-	}
-	if h.volSet != nil {
-		return h.volSet.Default().Name
-	}
-	return ""
-}
-
 // s3DispatchObject 按方法分发 GET/PUT/DELETE（统一写/读/删内核）。

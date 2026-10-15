@@ -215,13 +215,6 @@ func (r filesRuntime) Route(owner, rel, explicitVol string, size int64, forceHom
 	return r.h.routeUploadForFiles(owner, rel, explicitVol, size, forceHomeVol)
 }
 
-// CheckOccupiedWrite 实现 files.OccupiedWriteGuard：判定 volName 卷上 userRel（用户可见相对
-// 路径，如 videos/x）的写是否命中被封装卷占用的子目录（用户语义 #6 写保护）。命中返回
-// errVolumeOccupiedReadOnly（装配层映射 403）；未命中返回 nil。
-func (r filesRuntime) CheckOccupiedWrite(volName, userRel string) error {
-	return r.h.checkWrapperOccupiedWrite(volName, userRel)
-}
-
 func (r filesRuntime) RouteTarget(owner, rel, volName string, size int64) (files.UploadRoute, error) {
 	route, err := r.h.routeUploadForTarget(owner, rel, volName, size)
 	if err != nil {
@@ -333,13 +326,6 @@ func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) 
 	v, ok := h.volSet.ByName(volName)
 	if !ok || !v.Authorize(owner) {
 		return files.UploadRoute{}, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
-	}
-	// 写保护（用户语义 #6，与 routeUploadSingle / routeUpload 自动路由同口径）：目标卷该 rel
-	// 命中被封装卷占用的底层子目录 → 403。统一写内核的显式卷分支此前**不经**占用判定 ⇒
-	// S3 单对象 PUT、presign 直传登记（RegisterDirectUpload）、DAV、版本恢复可写进「只读」
-	// 占用目录，破坏封装卷不变量（旁路闭环缺口 F2/F5）。
-	if err := h.checkWrapperOccupiedWrite(v.Name, userVisibleRelOf(rel)); err != nil {
-		return files.UploadRoute{}, &files.HTTPError{Status: http.StatusForbidden, Message: err.Error()}
 	}
 	route, err := h.reserveVolume(owner, rel, v.Name, size)
 	if err != nil {

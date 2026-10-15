@@ -38,7 +38,6 @@ func newWrapperReview4API(t *testing.T, volumes []VolumeConfig) (string, *Handle
 		t.Fatalf("cfg.Validate: %v", err)
 	}
 	h := buildVolSetHandlers(t, cfg)
-	wrapperFSVolSet.Store(h.volSet)
 	store := NewUserVolumeStore(cfg.StorageRoot)
 	h.SetUserVolumeStore(store)
 
@@ -125,36 +124,6 @@ func TestWrapperDelete_ChecksumGate(t *testing.T) {
 	}
 }
 
-// TestWrapperRename_SourceOccupied403（评审 CRIT-2）：同卷 rename 源侧命中被封装卷占用的
-// 子目录 → 403（此前仅目标侧守卫，占用子目录密文可同卷 rename 出占用目录破坏封装）。
-func TestWrapperRename_SourceOccupied403(t *testing.T) {
-	mainRoot := t.TempDir()
-	base, _ := newWrapperReview4API(t, []VolumeConfig{{Name: "main", Root: mainRoot, VolCapacity: 1 << 20}})
-	if rec := wrapperJSON(t, base, http.MethodPost, "/api/volumes/user", map[string]any{
-		"name": "videos", "type": wrapperFSType,
-		"extra": map[string]any{"target": "main/videos"},
-	}); rec.Code != http.StatusOK {
-		t.Fatalf("建封装卷 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
-	// 源文件直接落盘 main/alice/user/videos/x.txt（占用目录内，API 上传会被写保护拦）。
-	if err := os.MkdirAll(filepath.Join(mainRoot, "alice", "user", "videos"), 0o755); err != nil {
-		t.Fatalf("mkdir source dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(mainRoot, "alice", "user", "videos", "x.txt"), []byte("src"), 0o600); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
-	// rename videos/x.txt → safe/x.txt：源侧占用 → 403（目标 safe 非占用，此前仅目标守卫放行）。
-	path := "/rename?from=" + url.QueryEscape("videos/x.txt") + "&to=" + url.QueryEscape("safe/x.txt")
-	status, body := review4Req(t, base, http.MethodPost, path,
-		map[string]string{headerFileChecksum: sha256hex([]byte("src"))})
-	if status != http.StatusForbidden {
-		t.Fatalf("rename 源侧占用 = %d, want 403 (body: %s)", status, body)
-	}
-	if _, err := os.Stat(filepath.Join(mainRoot, "alice", "user", "videos", "x.txt")); err != nil {
-		t.Fatalf("被拒绝的 rename 不应搬走源文件: %v", err)
-	}
-}
-
 // TestWrapperDelete_WithData_CleansDir（评审 I-③）：删带数据封装卷先整流删除卷内密文，再清
 // 占用子目录——不留残留、重建同目录可复用（此前空目录才清、有数据残留 + 409）。
 func TestWrapperDelete_WithData_CleansDir(t *testing.T) {
@@ -192,56 +161,6 @@ func TestWrapperDelete_WithData_CleansDir(t *testing.T) {
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("删后重建同目录 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
-}
-
-// TestWrapperMove_TargetWrapper_ClearMessage（评审 I-④）：move 目标=封装卷 → 明确 400
-// （「封装卷不能作目标」，非误导性「无效的文件路径」）；源侧占用 403 优先于目标类型检查。
-func TestWrapperMove_TargetWrapper_ClearMessage(t *testing.T) {
-	mainRoot := t.TempDir()
-	base, _ := newWrapperReview4API(t, []VolumeConfig{{Name: "main", Root: mainRoot, VolCapacity: 1 << 20}})
-	// 建两个封装卷：wrapB（目标）+ videos（占用 main/videos 供源侧守卫用例）。
-	if rec := wrapperJSON(t, base, http.MethodPost, "/api/volumes/user", map[string]any{
-		"name": "wrapB", "type": wrapperFSType,
-		"extra": map[string]any{"target": "main/wrapdir"},
-	}); rec.Code != http.StatusOK {
-		t.Fatalf("建 wrapB = %d, want 200", rec.Code)
-	}
-	if rec := wrapperJSON(t, base, http.MethodPost, "/api/volumes/user", map[string]any{
-		"name": "videos", "type": wrapperFSType,
-		"extra": map[string]any{"target": "main/videos"},
-	}); rec.Code != http.StatusOK {
-		t.Fatalf("建 videos = %d, want 200", rec.Code)
-	}
-	// 普通文件落盘 main/alice/user/a.txt。
-	if err := os.MkdirAll(filepath.Join(mainRoot, "alice", "user"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(mainRoot, "alice", "user", "a.txt"), []byte("aa"), 0o600); err != nil {
-		t.Fatalf("write a.txt: %v", err)
-	}
-	// move a.txt main→wrapB：目标=封装卷（master 底座 moveFileViaService 支持外部卷目标——
-	// 复制经统一写内核 + 删源经接缝）→ 200 成功，文件落到 wrapB 的 SubFS 视图。
-	status, body := moveVolume(t, base, "main", "wrapB", "a.txt")
-	if status != http.StatusOK {
-		t.Fatalf("move 目标封装卷 = %d, want 200 (body: %s)", status, body)
-	}
-	if _, err := os.Stat(filepath.Join(mainRoot, "wrapdir", "alice", "user", "a.txt")); err != nil {
-		t.Fatalf("move 后文件应落到 wrapB 子目录视图: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(mainRoot, "alice", "user", "a.txt")); !os.IsNotExist(err) {
-		t.Fatal("move 后源侧 a.txt 应删除")
-	}
-	// 源侧占用优先：main/videos/x 落盘 → move main→wrapB → 403（源侧守卫先于目标类型检查）。
-	if err := os.MkdirAll(filepath.Join(mainRoot, "alice", "user", "videos"), 0o755); err != nil {
-		t.Fatalf("mkdir videos: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(mainRoot, "alice", "user", "videos", "x.txt"), []byte("src"), 0o600); err != nil {
-		t.Fatalf("write videos/x.txt: %v", err)
-	}
-	status, body = moveVolume(t, base, "main", "wrapB", "videos/x.txt")
-	if status != http.StatusForbidden {
-		t.Fatalf("源侧占用 + 目标封装卷 = %d, want 403（源侧守卫优先）(body: %s)", status, body)
 	}
 }
 

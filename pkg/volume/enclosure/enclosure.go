@@ -174,6 +174,22 @@ func (d Decl) KeySpacePrefix() string {
 	return p + "/"
 }
 
+// SealsByBaseVolume 按**最终落盘卷**聚合全部声明的封印规则（装配期注入与运行期增删共用，
+// 保证「署名集合」只有一套口径）。返回值是「基底卷名 → 该卷上全部封印规则」；同一声明沿
+// 封装链只能落到唯一基底卷，链内多层在同一区间上的规则会累加（更深的规则 Path 更长，
+// `storage.SealAt` 按最长优先给出归因）。
+func SealsByBaseVolume(decls []Decl) (map[string][]storage.SealRule, error) {
+	out := make(map[string][]storage.SealRule, len(decls))
+	for _, d := range decls {
+		baseVol, rules, err := EffectiveFootprint(d, decls)
+		if err != nil {
+			return nil, fmt.Errorf("封装卷 %q 封印足迹解析失败（fail-closed）: %w", d.Vol, err)
+		}
+		out[baseVol] = append(out[baseVol], rules...)
+	}
+	return out, nil
+}
+
 // Parse 解析全部封装声明并做装配期校验（环/自封装/深度/唯一性/wrapper 注册/源态互斥）。
 // 返回顺序按拓扑序（源在前，便于装配时先建源再建封装卷）。
 func Parse(vols []volume.Volume) ([]Decl, error) {

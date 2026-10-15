@@ -40,10 +40,10 @@ func volumeFromUserVolume(uv server.UserVolume) volume.Volume {
 // restoreUserVolumes 扫描全部 owner 的用户卷并恢复进 set（运行时外部卷注册）。单卷失败
 // 跳过 + 告警；store 扫描本身失败 → 返回错误（装配 fail-closed）。
 //
-// **链式委托依赖排序（评审 G，2026-10-07）**：嵌套封装卷恢复需要其底层卷先恢复（DelegatePool
-// 依赖底层池就绪）。原实现依赖 ScanRestore 的 (owner,name) 序，base 名序在 wrapper 后时
-// DelegatePool 早失败 → 配额委托静默不生效。现按依赖分轮：每轮只恢复「底层已就绪」的卷，
-// 无进展轮对剩余卷逐卷落旧行为（单卷跳过 + 告警，避免死循环）。
+// **依赖排序（阶段 2 迁移后仍需要）**：嵌套封装卷（enclosure）的装配需要其源卷已登记进卷集
+// （`enclosure.SourceFS` 取源特权视图）。原实现依赖 ScanRestore 的 (owner,name) 序，源卷名序在
+// 封装卷之后时装配早失败。故按依赖分轮：每轮只恢复「源卷已就绪」的卷，无进展轮对剩余卷逐卷
+// 落旧行为（单卷跳过 + 告警，避免死循环）。
 func restoreUserVolumes(set *registry.Set, store *server.UserVolumeStore, log *slog.Logger) error {
 	if set == nil || store == nil {
 		return nil // 防御：未装配卷集合/用户卷 store 时不恢复
@@ -60,7 +60,7 @@ func restoreUserVolumes(set *registry.Set, store *server.UserVolumeStore, log *s
 			return nil
 		}
 		if !progress {
-			// 无进展：剩余卷底层不可恢复（被跳过/缺失）→ 逐个落位（单卷失败即告警跳过），
+			// 无进展：剩余卷源卷不可恢复（被跳过/缺失）→ 逐个落位（单卷失败即告警跳过），
 			// 避免死循环（兼容旧行为，装配容忍单盘坏）。
 			for _, uv := range next {
 				restoreOneUserVolume(set, store, log, uv)
@@ -71,14 +71,14 @@ func restoreUserVolumes(set *registry.Set, store *server.UserVolumeStore, log *s
 	}
 }
 
-// restoreReadyRound 处理一轮链式恢复：把「底层已就绪」的卷恢复进 set，底层未就绪（嵌套依赖）
+// restoreReadyRound 处理一轮依赖恢复：把「源卷已就绪」的卷恢复进 set，源卷未就绪（嵌套依赖）
 // 的卷放入 next 待下轮。返回本轮是否有进展（任一卷被处理）。
 func restoreReadyRound(set *registry.Set, store *server.UserVolumeStore, log *slog.Logger, pending []server.UserVolume, next *[]server.UserVolume) bool {
 	progress := false
 	for _, uv := range pending {
 		base, _, nested := splitNestedUVTarget(uv)
 		if nested && !setVolumeReady(set, base) {
-			*next = append(*next, uv) // 底层未就绪 → 暂缓本轮（依赖后置）。
+			*next = append(*next, uv) // 源卷未就绪 → 暂缓本轮（依赖后置）。
 			continue
 		}
 		restoreOneUserVolume(set, store, log, uv)
@@ -87,66 +87,61 @@ func restoreReadyRound(set *registry.Set, store *server.UserVolumeStore, log *sl
 	return progress
 }
 
-// setVolumeReady 判定底层卷 base 已装配进 set（DelegatePool 依赖其存在）。
+// setVolumeReady 判定源卷 base 已装配进 set（封装卷装配依赖其存在）。
 func setVolumeReady(set *registry.Set, base string) bool {
 	_, ok := set.ByName(base)
 	return ok
 }
 
-// restoreOneUserVolume 恢复单卷（C1，2026-10-06）：后端构造 → 嵌套分支不包 CapacityFS 计数器
-// （计量统一走委托子 Scope）→ AddExternalVolume → 嵌套卷重建 DelegatePool（配额委托重启恢复）。
-// **重启收养（CRIT-①）**：嵌套卷自建底层子目录重启时已存在——构造 ctx 置 adoptNestedDir 标记
-// （store 记录即「本卷声明占用」）使 resolveNestedTargetFS 复用，而非「已存在（需新空子目录）」
-// 跳过。返回是否恢复成功（false = 单卷跳过，不阻塞其余卷）。
+// restoreOneUserVolume 恢复单卷：**嵌套封装卷**（用户面 target 语法）经装配层翻译为 enclosure
+// 声明后走 `server.AttachEnclosureVolume`（声明校验 + 封印注入 + 容量池继承 + 后端构造一体），
+// 其余类型维持 `registry.NewBackend` + CapacityFS 计数器包装。
+//
+// 翻译与建卷路径共用 `server.TranslateNestedVolume`（单一实现）；持久化仍是原形态
+// （store 字节零变化：同一份 store 在迁移前后都能恢复）。返回是否恢复成功（false = 单卷跳过，
+// 不阻塞其余卷）。
 func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log *slog.Logger, uv server.UserVolume) bool {
 	v := volumeFromUserVolume(uv)
 	ctx := context.Background()
-	if _, _, nested := splitNestedUVTarget(uv); nested {
-		ctx = adoptNestedDir(ctx)
+	tv, nested := server.TranslateNestedVolume(v)
+	if nested {
+		// 封装卷的容量计量经**继承池**（父链聚合到源卷池）+ 持久化计数器（AttachEnclosureVolume
+		// 内包 CapacityFS），与本进程内建卷路径同源 ⇒ 重启前后额度口径一致。
+		if err := server.AttachEnclosureVolume(ctx, set, log, store.Root(), tv); err != nil {
+			log.Warn("用户卷恢复跳过（封装卷装配失败）", "volume", uv.Name, "owner", uv.Owner, "error", err)
+			return false
+		}
+		log.Info("用户卷已恢复", "volume", uv.Name, "owner", uv.Owner, "type", uv.Type, "capacity", uv.Capacity, "enclosure", true)
+		return true
 	}
 	be, bErr := registry.NewBackend(ctx, v)
 	if bErr != nil {
 		log.Warn("用户卷恢复跳过（后端构造失败）", "volume", uv.Name, "owner", uv.Owner, "error", bErr)
 		return false
 	}
-	// 嵌套封装卷（target=`<卷>/<子目录>`）：容量经**底层池委托子 Scope** 计（与运行时
-	// create 一致，C1 统一计量），**不**包 CapacityFS 计数器——此前 restore 包 C2 counter
-	// 而 create 裸 AddExternalVolume，重启后计数器从 0 起、已存字节不计入 → 容量额度翻倍。
-	base, subdir, nested := splitNestedUVTarget(uv)
-	if !nested {
-		// C2 卷级计数：包 CapacityFS（counter 持久化 <root>/<owner>/meta/volume/<name>.capacity，
-		// **非 .json**——避开 UserVolumeStore 的 *.json 扫描）。限额 = UserVolume.Capacity。
-		counterPath := filepath.Join(store.Root(), uv.Owner, "meta", "volume", uv.Name+".capacity")
-		cnt, cErr := capacity.Load(counterPath, uv.Capacity)
-		if cErr != nil {
-			log.Warn("用户卷容量恢复失败（按新计数器）", "volume", uv.Name, "owner", uv.Owner, "error", cErr)
-			cnt = capacity.NewCounter(uv.Capacity, counterPath)
-		} else if cnt.CorruptSnapshot() {
-			log.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", uv.Name, "owner", uv.Owner, "path", counterPath)
-		}
-		be = capacity.WrapBackend(be, cnt)
+	// C2 卷级计数：包 CapacityFS（counter 持久化 <root>/<owner>/meta/volume/<name>.capacity，
+	// **非 .json**——避开 UserVolumeStore 的 *.json 扫描）。限额 = UserVolume.Capacity。
+	counterPath := filepath.Join(store.Root(), uv.Owner, "meta", "volume", uv.Name+".capacity")
+	cnt, cErr := capacity.Load(counterPath, uv.Capacity)
+	if cErr != nil {
+		log.Warn("用户卷容量恢复失败（按新计数器）", "volume", uv.Name, "owner", uv.Owner, "error", cErr)
+		cnt = capacity.NewCounter(uv.Capacity, counterPath)
+	} else if cnt.CorruptSnapshot() {
+		log.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", uv.Name, "owner", uv.Owner, "path", counterPath)
 	}
+	be = capacity.WrapBackend(be, cnt)
 	if aErr := set.AddExternalVolume(v, be); aErr != nil {
 		log.Warn("用户卷恢复跳过（注册失败）", "volume", uv.Name, "owner", uv.Owner, "error", aErr)
 		_ = be.Close()
 		return false
 	}
-	// C1 委托池重建：嵌套封装卷重启后重建配额委托——否则 Set.Pool(vol)=nil →
-	// reserveVolume 跳过卷池预留 → 底层池满时不再整体 507、capacity 上限静默失效。
-	// 链式嵌套（base 本身是待恢复封装卷）依赖 ScanRestore 的 (owner, name) 排序先恢复
-	// 底层；顺序颠倒时 DelegatePool 因底层池未就绪失败 → 告警跳过（装配容忍单卷坏）。
-	if nested {
-		if _, dErr := set.DelegatePool(uv.Name, base, subdir, uv.Capacity); dErr != nil {
-			log.Warn("用户卷委托池重建失败（配额委托不生效，需重建该封装卷）", "volume", uv.Name, "owner", uv.Owner, "error", dErr)
-		}
-	}
-	log.Info("用户卷已恢复", "volume", uv.Name, "owner", uv.Owner, "type", uv.Type, "capacity", uv.Capacity, "nested", nested)
+	log.Info("用户卷已恢复", "volume", uv.Name, "owner", uv.Owner, "type", uv.Type, "capacity", uv.Capacity, "enclosure", false)
 	return true
 }
 
-// splitNestedUVTarget 从 UserVolume.Extra 解析嵌套封装 target（`<卷>/<子目录>`）。
-// 非嵌套 / 无 target → (空,空,false)。
+// splitNestedUVTarget 从 UserVolume.Extra 解析嵌套封装 target（`<卷>/<子目录>`）的**源卷段**
+// （依赖排序只需源卷名）。非嵌套 / 无 target → ok=false。
 func splitNestedUVTarget(uv server.UserVolume) (base, subdir string, ok bool) {
 	target, _ := uv.Extra["target"].(string)
-	return volume.SplitNestedTarget(target)
+	return server.ParseNestedTarget(target)
 }

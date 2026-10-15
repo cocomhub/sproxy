@@ -16,77 +16,17 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
-	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
-
-// wrapperFSType 是测试用「真实 FS 封装后端」：按 target=<卷>/<子目录> 在底层卷 MakeDir +
-// SubFS 包装（仿 secretdata resolveNestedTargetFS），使封装卷可真实上传/删除文件。
-const wrapperFSType = "wrap-fs-test"
-
-// wrapperFSBackend 是真实 FS 的封装后端（FS=SubFS；Schema 声明 target 字段）。
-type wrapperFSBackend struct {
-	fs syncpkg.FS
-}
-
-func (b *wrapperFSBackend) FS() syncpkg.FS { return b.fs }
-func (b *wrapperFSBackend) Close() error   { return nil }
-func (b *wrapperFSBackend) Schema() []registry.FieldSchema {
-	return []registry.FieldSchema{{
-		Key: "target", Label: "底层卷", Type: "volume-select",
-		Required: true, AllowWrapper: true,
-	}}
-}
-
-// wrapperFSVolSet 是测试用包级卷集引用（工厂按 target 解析底层卷 FS，仿 secretDataSet）。
-var wrapperFSVolSet atomic.Pointer[registry.Set]
-
-var registerWrapperFSOnce sync.Once
-
-func registerWrapperFSBackend() {
-	registerWrapperFSOnce.Do(func() {
-		registry.RegisterBackend(wrapperFSType, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-			t, _ := v.Extra["target"].(string)
-			base, subdir, ok := volume.SplitNestedTarget(t)
-			if !ok {
-				return nil, fmt.Errorf("wrap-fs: 需嵌套 target <卷>/<子目录>, got %q", t)
-			}
-			set := wrapperFSVolSet.Load()
-			if set == nil {
-				return nil, fmt.Errorf("wrap-fs: volSet 未就绪")
-			}
-			inner, ok := set.FSFor(base)
-			if !ok {
-				return nil, fmt.Errorf("wrap-fs: 底层卷 %q 不可用", base)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := inner.MakeDir(ctx, subdir); err != nil {
-				return nil, fmt.Errorf("wrap-fs: MakeDir %s/%s: %w", base, subdir, err)
-			}
-			fs, err := syncpkg.NewSubFS(inner, subdir)
-			if err != nil {
-				return nil, fmt.Errorf("wrap-fs: SubFS %s/%s: %w", base, subdir, err)
-			}
-			return &wrapperFSBackend{fs: fs}, nil
-		})
-	})
-}
 
 // newWrapperDeleteAPI 装配封装卷删除测试服务（main 本地卷 + 真实 FS 封装后端 + 用户卷 store
 // + 卷 API/上传/删除/move mux）。返回 (URL, Handlers)。
@@ -100,7 +40,6 @@ func newWrapperDeleteAPI(t *testing.T, volumes []VolumeConfig) (string, *Handler
 		t.Fatalf("cfg.Validate: %v", err)
 	}
 	h := buildVolSetHandlers(t, cfg)
-	wrapperFSVolSet.Store(h.volSet)
 	store := NewUserVolumeStore(cfg.StorageRoot)
 	h.SetUserVolumeStore(store)
 
@@ -225,11 +164,14 @@ func TestWrapperDelete_QuotaRelease_CapacityDisplay(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("上传封装卷 = %d, want 200 (body: %s)", status, respBody)
 	}
-	if got := h.volSet.Pool("videos").Usage(); got != int64(len(body)) {
-		t.Fatalf("委托子池 Usage=%d want %d", got, len(body))
+	// 继承池（阶段 2 迁移：Pool(videos) = NewPoolWithParent(Pool(main), max_bytes)）：
+	// 上传经 FS 层容量计数器入账，提交沿父链聚合到底层 main 池（同一字节只在父池计一次）。
+	vp, mp := h.volSet.Pool("videos"), h.volSet.Pool("main")
+	if vp.Usage() <= 0 {
+		t.Fatal("上传后封装卷继承池 Usage 应 > 0（容量记账未接线）")
 	}
-	if got := h.volSet.Pool("main").Usage(); got != int64(len(body)) {
-		t.Fatalf("底层池 Usage=%d want %d（委托父链聚合）", got, len(body))
+	if mp.Usage() != vp.Usage() {
+		t.Fatalf("底层池 Usage=%d ≠ 封装卷池 %d（继承父链聚合断裂）", mp.Usage(), vp.Usage())
 	}
 
 	// C2：标准 delete（?volume=videos）删除封装卷内文件 —— 200（此前 404）+ 委托子池释放。
@@ -238,77 +180,39 @@ func TestWrapperDelete_QuotaRelease_CapacityDisplay(t *testing.T) {
 		t.Fatalf("封装卷内文件 delete = %d, want 200 (body: %s)", status, delBody)
 	}
 	if got := h.volSet.Pool("videos").Usage(); got != 0 {
-		t.Fatalf("删除后委托子池 Usage=%d want 0（C2 删除归还）", got)
+		t.Fatalf("删除后封装卷继承池 Usage=%d want 0（C2 删除归还）", got)
 	}
 	if got := h.volSet.Pool("main").Usage(); got != 0 {
 		t.Fatalf("删除后底层池 Usage=%d want 0", got)
 	}
 
-	// C5：删封装卷（无残留数据 → 清理空占用子目录）→ 重建同目录成功（不再 409）。
-	// 先清掉测试上传留下的空 `main/videos/<owner>/user/`（+ 其空的 owner 层）内部桶目录
-	// （wrapper 生命周期残留，非封装卷删除清理范围——封装卷删除只清自己 MakeDir 的空占用
-	// 目录；键空间恒 owner 维度，故残留深度比旧布局多一层 owner）。
-	if rerr := os.RemoveAll(filepath.Join(mainRoot, "videos", "alice")); rerr != nil {
-		t.Fatalf("清理测试残留 user 桶失败: %v", rerr)
-	}
+	// C5：删封装卷 → 拆除闭环（回收源卷封印 + 归还并摘除继承池 + **擦除独占区间内容**）
+	// → 重建同区间成功（enclosure 无「子目录须不存在」前置条件，重建天然可行）。
 	rec = wrapperJSON(t, url, http.MethodDelete, "/api/volumes/user?name=videos", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("删封装卷 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
 	if _, err := os.Stat(filepath.Join(mainRoot, "videos")); !os.IsNotExist(err) {
-		t.Fatalf("删封装卷后占用子目录 main/videos 应被清理（无数据残留）, stat err=%v", err)
+		t.Fatalf("删封装卷后占用区间 main/videos 应被擦除（不留密文残留）, stat err=%v", err)
 	}
 	if p := h.volSet.Pool("videos"); p != nil {
-		t.Fatalf("删封装卷后 Pool(videos) 应移除委托（nil）, got %+v", p)
+		t.Fatalf("删封装卷后 Pool(videos) 应摘除登记（nil）, got %+v", p)
+	}
+	if rule := h.volSet.Root("main").SealAt("videos/x"); rule != nil {
+		t.Fatalf("删封装卷后源卷封印应被回收（否则区间永久只读）, got %+v", rule)
 	}
 	rec = wrapperJSON(t, url, http.MethodPost, "/api/volumes/user", map[string]any{
 		"name": "videos", "type": wrapperFSType,
 		"extra": map[string]any{"target": "main/videos"},
 	})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("删后重建同目录封装卷 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
-}
-
-// TestWrapperMove_SourceOccupied403（I2）：跨卷 move 源侧（from 卷）命中被封装卷占用的
-// 子目录 → 403（源侧不许搬）；目标侧占用同样 403。
-func TestWrapperMove_SourceOccupied403(t *testing.T) {
-	mainRoot := t.TempDir()
-	diskRoot := t.TempDir()
-	url, _ := newWrapperDeleteAPI(t, []VolumeConfig{
-		{Name: "main", Root: mainRoot, VolCapacity: 1 << 20},
-		{Name: "disk2", Root: diskRoot, VolCapacity: 1 << 20},
-	})
-	// 占用 main/videos。
-	if rec := wrapperJSON(t, url, http.MethodPost, "/api/volumes/user", map[string]any{
-		"name": "videos", "type": wrapperFSType,
-		"extra": map[string]any{"target": "main/videos"},
-	}); rec.Code != http.StatusOK {
-		t.Fatalf("建封装卷 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
-	// 源文件直接落盘 main/alice/user/videos/x.txt（该路径被写保护，不能经 API 上传）。
-	if err := os.MkdirAll(filepath.Join(mainRoot, "alice", "user", "videos"), 0o755); err != nil {
-		t.Fatalf("mkdir source dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(mainRoot, "alice", "user", "videos", "x.txt"), []byte("src"), 0o600); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
-	// move main→disk2：源侧命中占用子目录 videos → 403（此前只拦目标侧，可被搬出）。
-	status, body := moveVolume(t, url, "main", "disk2", "videos/x.txt")
-	if status != http.StatusForbidden {
-		t.Fatalf("move 源侧占用 = %d, want 403 (body: %s)", status, body)
+		t.Fatalf("删后重建同区间封装卷 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
 }
 
 // wrapperCounterUsage 返回封装卷的 FS 层容量计数（外部卷容量由 CapacityFS 计数器权威记账
-// ——create 时 capacity.WrapBackend 包装）。
-//
-// 与**委托子池**的关系（勿混淆，二者都在动，职责不同）：嵌套封装卷的上传/删除在路由侧
-// 保留委托子 Scope 的 Commit/Release（`reserveVolumePool` 的 IsDelegated 分支 + 域侧
-// `releaseExternalDeleteQuota`），用于「父链聚合到底层池 + 封装卷自身 capacity 上限」；
-// 本函数读的计数器只在**底层卷是外部卷**（其 FS 链含 CapacityFS）时才同步增长——
-// 此时同一字节会同时进「委托子 Scope 父链」与「底层 FS 计数器」（已知取舍，见
-// reserveVolumePool 注释的 F4 段）。
+// ——装配时 `capacity.WrapBackend` 包装，计数提交进该卷**继承池**并沿父链聚合到源卷池）。
+// 阶段 2 迁移后这是封装卷占用的**唯一**账本来源（路由侧对封装卷只做探测 + 立即释放）。
 func wrapperCounterUsage(t *testing.T, h *Handlers, volName string) int64 {
 	t.Helper()
 	be := h.volSet.External(volName)

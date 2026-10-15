@@ -464,18 +464,6 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 		return status, resp
 	}
 
-	// I2（2026-10-06）：写保护**源侧**——from 卷该 rel 落在被封装卷占用的子目录 → 禁止搬出
-	// （占目录「只读」语义对「move 搬走 = 删源」同样成立，否则密文可经 move 从源侧被搬出/
-	// 删除，破坏封装卷）。rebalance 逐文件复用本函数，自动继承此守卫。**置于目标卷校验
-	// 之前**（评审 I-④）：目标=封装卷时源侧 403 优先，不被目标类型错误掩盖。
-	if err := h.checkWrapperOccupiedWrite(fromVol, userVisibleRelOf(rel)); err != nil {
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "volume_move", ObjectType: "file", Object: remotePath,
-			Result: AuditResultDenied, Detail: "源卷目录已被封装卷占用，禁止搬出",
-		})
-		return moveErrResp(http.StatusForbidden, err.Error())
-	}
-
 	// 目标卷租户与容量池（写盘 root）。目标卷为封装卷/外部卷（无 tenant root）→ **明确报错**
 	// （评审 I-④）：不再返回误导性「无效的文件路径」，直接点明「封装卷不可作跨卷 move 目标」。
 	toTnt := h.volumeTenant(toVol, owner)
@@ -483,15 +471,6 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 		return moveErrResp(http.StatusBadRequest, "目标卷不支持跨卷移动（封装卷/外部卷不能作 move 目标）")
 	}
 	toRoot := toTnt.Root()
-	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：目标卷 toVol 该 rel 命中被封装卷占用的
-	// 子目录 → 拒绝 move（跨卷 move 经 crossVolumeCopy 直写目标卷，不经 files 域 guard）。
-	if err := h.checkWrapperOccupiedWrite(toVol, userVisibleRelOf(rel)); err != nil {
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "volume_move", ObjectType: "file", Object: remotePath,
-			Result: AuditResultDenied, Detail: "目标卷目录已被封装卷占用，只读",
-		})
-		return moveErrResp(http.StatusForbidden, err.Error())
-	}
 	mc := &moveFileCtx{
 		r: r, owner: owner, remotePath: remotePath,
 		fromVol: fromVol, toVol: toVol, rel: rel,
