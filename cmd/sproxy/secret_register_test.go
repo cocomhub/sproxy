@@ -720,6 +720,153 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		}
 	})
 
+	// **外部底座多层链**（docs/secret-volume.md 批次表 ⑦ 举例「secrets over secretdata over
+	// baidupcs」）：把多层嵌套链的底座从本地卷换成**外部卷**（用测试注册的外部后端替身替代需要
+	// 真实账号/网络的 baidupcs/s3——外部源的键空间/封印/特权视图接线口径一致，差别只在后端实现），
+	// 钉住「外部源封印 + 加密 + secrets」三能力组合：
+	//   - ① 外部源封印在**装配处**注入（套在该后端 `FS()` 上）⇒ 直连外部后端写封装区恒 `ErrSealed`
+	//     （未封印区域照常可写 = 零回归）；
+	//   - ② 封装卷经 `UnsealedSource` 特权视图仍可读写自己的区间（封印不挡自己）；
+	//   - ③ secretdata 的密文真落在**外部后端的键空间**内；
+	//   - ④ 最上层 secrets 的密钥经加密层以密文落盘。
+	//
+	//	main（本地默认卷）
+	//	keys（type: secrets，本地）              ← 手工放置的密钥文件（文档部署工作流）
+	//	ext（外部卷，测试替身）                   ← 链条底座（模拟 baidupcs/s3 等外部后端）
+	//	vault（secretdata over ext/vault-area）   ← 加密层落在**外部后端**上
+	//	deepkeys（secrets over vault/keys-area）  ← 密钥库自身落在加密区（= 批次表 ⑦ 的形态）
+	//
+	// 变异：装配处不包装外部后端（`injectSeals` 略过 `acc.external`）→ ① 红；`SourceFS` 对外部源
+	// 改回裸 `be.FS()`（不取 `UnsealedSource`）→ 补装期前置校验/写入被自己的封印拒 → 红。
+	t.Run("multi_layer_chain_over_external_source", func(t *testing.T) {
+		registerEnclosureWrappers() // 生产封装处理层（secretdata/secrets wrapper）
+		// 外部底座后端：测试注册的唯一类型名 + t.Cleanup 反注册（不改全局 seam ⇒ 并行安全模式）。
+		const extType = "testext-chain-base"
+		extDir := t.TempDir()
+		registry.RegisterBackend(extType, func(_ context.Context, _ volume.Volume) (registry.ExternalBackend, error) {
+			return chainExtBackend{fs: syncpkg.NewLocalFS(extDir, nil)}, nil
+		})
+		t.Cleanup(func() { registry.UnregisterBackendForTest(extType) })
+
+		base := t.TempDir()
+		mainDir := filepath.Join(base, "main")
+		keysDir := filepath.Join(base, "keys")
+		if err := os.MkdirAll(mainDir, 0o755); err != nil {
+			t.Fatalf("mkdir main: %v", err)
+		}
+		// 底层密钥**手工放置**（与上一子用例同工作流）：<keys>/secrets/datakey。
+		if err := os.MkdirAll(filepath.Join(keysDir, "secrets"), 0o700); err != nil {
+			t.Fatalf("mkdir keys/secrets: %v", err)
+		}
+		const chainKey = "7f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8"
+		if werr := os.WriteFile(filepath.Join(keysDir, "secrets", "datakey"), []byte(chainKey), 0o600); werr != nil {
+			t.Fatalf("write datakey: %v", werr)
+		}
+
+		cfg := server.Default()
+		cfg.Addr = "127.0.0.1:0"
+		cfg.StorageRoot = mainDir
+		cfg.Volumes = []server.VolumeConfig{
+			{Name: "main", Root: mainDir, VolCapacity: 1 << 30},
+			{Name: "keys", Type: "secrets", Extra: map[string]any{"target": "local", "root": keysDir}},
+			// 外部底座：非本地类型 ⇒ assembleVolumes 走 registry.NewBackend（外部卷路径）。
+			{Name: "ext", Type: extType, VolCapacity: 1 << 30},
+			{Name: "vault", Type: "secretdata", Extra: map[string]any{
+				"target": "ext/vault-area", "secret_url": "secrets://keys/datakey",
+			}},
+			{Name: "deepkeys", Type: "secrets", Extra: map[string]any{"target": "vault/keys-area"}},
+		}
+		if verr := cfg.Validate(); verr != nil {
+			t.Fatalf("cfg.Validate: %v", verr)
+		}
+		var extCfgPtr atomic.Pointer[server.Config]
+		extCfgPtr.Store(cfg)
+		h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
+			Mux: http.NewServeMux(), CfgPtr: &extCfgPtr, Logger: discardLoggerMain(),
+			Version: "test", BuildAt: "test",
+		})
+		t.Cleanup(func() { _ = h.Close() })
+		vols := h.Volumes()
+
+		// 生产 boot 顺序（四步）：Store → 先行补装 → AttachAll（外部底座链由此装配）→ 后置补装。
+		if serr := storeSecretDataSet(vols); serr != nil {
+			t.Fatalf("storeSecretDataSet: %v", serr)
+		}
+		if serr := attachSecretdataVolumes(ctx, vols, cfg.StorageRoot, discardLoggerMain(), secretdataRefsIndependent); serr != nil {
+			t.Fatalf("attachSecretdataVolumes（先行）: %v", serr)
+		}
+		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); aerr != nil {
+			t.Fatalf("AttachAll（外部底座链装配）: %v", aerr)
+		}
+
+		// ① 各层装配成功（含外部底座 + 两层封装）。
+		for _, name := range []string{"keys", "ext", "vault", "deepkeys"} {
+			if layerBE := vols.External(name); layerBE == nil || layerBE.FS() == nil {
+				t.Fatalf("卷 %q 未装配", name)
+			}
+		}
+		// ② 外部源封印：直连外部后端写封装区（含封装区内的子路径）→ 恒拒且可归因 ErrSealed。
+		extView := vols.External("ext").FS()
+		for _, key := range []string{"vault-area/x.bin", "vault-area/alice/user/x.bin"} {
+			if werr := extView.WriteFile(ctx, key, strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+				t.Fatalf("外部源封印路径 %q 直连写入必须被拒（ErrSealed）, got %v", key, werr)
+			}
+		}
+		// 外部卷未封印区域照常可写（零回归：封印不误伤底座其余键空间）。
+		if werr := extView.WriteFile(ctx, "plain/x.bin", strings.NewReader("ok"), 2, 0); werr != nil {
+			t.Fatalf("外部卷未封印路径写应放行, got %v", werr)
+		}
+		// ③ vault（secretdata over 外部源）：经特权视图读写往返，密文落外部后端。
+		const body = "external base chain payload"
+		const dataKey = "alice/user/ext.bin"
+		vbe := vols.External("vault")
+		if werr := vbe.FS().WriteFile(ctx, dataKey, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+			t.Fatalf("vault（secretdata over 外部源）写入: %v", werr)
+		}
+		rc, oerr := vbe.FS().OpenRead(ctx, dataKey)
+		if oerr != nil {
+			t.Fatalf("vault 读回: %v", oerr)
+		}
+		got, rerr := io.ReadAll(rc)
+		_ = rc.Close()
+		if rerr != nil || string(got) != body {
+			t.Fatalf("vault 读回=%q err=%v，want %q", got, rerr, body)
+		}
+		if plaintextOnDisk(t, extDir, body) {
+			t.Fatal("vault 写入应以密文落到外部后端（分块加密未生效）")
+		}
+		// 正锚点（防假绿）：密文确实落在**外部后端**的物理目录里——否则上面「无明文」的断言可能空跑。
+		countExtFiles := func() int {
+			n := 0
+			_ = filepath.WalkDir(extDir, func(_ string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					n++
+				}
+				return nil
+			})
+			return n
+		}
+		afterVault := countExtFiles()
+		if afterVault == 0 {
+			t.Fatal("vault 写入未落到外部后端物理目录（外部底座链未真正经外部源）")
+		}
+		// ④ 最上层 secrets（secrets over secretdata over 外部源）：密钥创建成功且密文落盘。
+		deepMgr := secrets.ManagerOfExternal(vols.External("deepkeys"))
+		if deepMgr == nil {
+			t.Fatal("外部底座链的最上层 Secrets 卷 Manager 反取失败")
+		}
+		key, kerr := deepMgr.Create(ctx, "master")
+		if kerr != nil {
+			t.Fatalf("在外部底座链的最上层 secrets 卷里创建密钥失败: %v", kerr)
+		}
+		if plaintextOnDisk(t, extDir, string(key)) {
+			t.Fatal("外部底座链上的密钥应以密文落盘（secrets over secretdata 未生效）")
+		}
+		if countExtFiles() <= afterVault {
+			t.Fatal("最上层 secrets 的密钥未落到外部后端物理目录（多层链未真正落在外部底座上）")
+		}
+	})
+
 	// **config 声明顺序限制解除**（2026-10-15）：把「引用嵌套 secrets 卷」的场景从运行期建卷
 	// （上一子用例的第 3 层）提前到 **config 声明**——config 里同时声明「嵌套 secrets 卷」与
 	// 「`secret_url` 指向它的 secretdata 卷」。这要求装配序为
@@ -1436,6 +1583,15 @@ func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
 
 // plaintextOnDisk 报告 dir 下任一文件内容包含明文子串（封装卷落盘不变量：区域内的字节恒为
 // 密文容器/meta，不含明文负载）。
+// chainExtBackend 是「外部底座多层链」用例的 fake 外部后端（只提供 FS/Close，镜像
+// pkg/server 的 fakeExtBackend）：物理落点是一个本地临时目录，便于断言「密文落盘」与
+// 「封印直连写被拒」。它替代 baidupcs/s3 这类需要真实账号/网络的外部后端——装配侧对二者的
+// 接线口径相同（registry.NewBackend 构造 → 封印套在 be.FS() → 封装卷取 UnsealedSource 特权视图）。
+type chainExtBackend struct{ fs syncpkg.FS }
+
+func (b chainExtBackend) FS() syncpkg.FS { return b.fs }
+func (b chainExtBackend) Close() error   { return nil }
+
 func plaintextOnDisk(t *testing.T, dir, plaintext string) bool {
 	t.Helper()
 	found := false

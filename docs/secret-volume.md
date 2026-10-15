@@ -198,6 +198,13 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
   事实源**（配置校验 / 建卷 API / 存量卷恢复三处引用，无日志/诊断/构造用途）。
   wrapper 类型而**无** `extra.source` 的卷不是封装声明（如 `target: local` 的本地整卷形态），
   走按类型分派的常规构造。
+- **覆盖（test）**：多层嵌套链由 `cmd/sproxy/secret_register_test.go` 钉住——
+  `TestSetupSecretBackends_ConfigSecretdata_Assembled/multi_layer_nesting_chain`（**本地底座**：
+  `secrets` over `secretdata` 的四层链）与同父用例的 `multi_layer_chain_over_external_source`
+  （**外部底座**：`secrets` over `secretdata` over 外部卷——以测试注册的外部后端替身替代需要真实
+  账号/网络的 baidupcs/s3；两者装配接线口径相同：外部源封印套在该后端 `FS()` 上、封装卷经
+  `UnsealedSource` 取特权视图）。断言覆盖各层装配、写读往返、密文真落到**外部后端的物理目录**
+  与「直连外部后端写封装区恒 `storage.ErrSealed`」。
 
 ### 3.9 阶段 2 迁移状态
 
