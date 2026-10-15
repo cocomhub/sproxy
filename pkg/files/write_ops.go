@@ -629,16 +629,52 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 
 // volumeNameForRoot 返回 root 所在卷名（多卷）；旧装配（volSet nil）或未命中返回空。
 // 用于索引条目记录物理归属（与搜索结果 volume 字段语义一致：目录为空，文件带卷名）。
+//
+// 判定**不得只比指针**（D2）：多卷装配下同一逻辑根会有多个实例——自动路由写入用的 root 与
+// `volSet.Root(name)` 并非同一指针（租户缓存 / OpenRoot 各建一次）⇒ 指针相等恒 false，上传
+// 落库的卷归属恒为空（/api/files 不显示卷 badge、「过滤卷 = main」漏掉这些文件）。
+// 改为**物理路径比对**：root 是该卷根自身**或**其下租户根（`<卷根>/<owner>`）即归属该卷；
+// 多卷根互为嵌套时取**最长匹配**（最具体者胜）。
 func (s *Service) volumeNameForRoot(root *storage.Root) string {
-	if root == nil || s.rt.volSet() == nil {
+	vs := s.rt.volSet()
+	if root == nil || vs == nil {
 		return ""
 	}
-	for _, v := range s.rt.volSet().All() {
-		if s.rt.volSet().Root(v.Name) == root {
-			return v.Name
+	rootAbs, ok := root.Abs("")
+	if !ok {
+		return ""
+	}
+	best, bestLen := "", -1
+	for _, v := range vs.All() {
+		vr := vs.Root(v.Name)
+		if vr == nil {
+			continue
+		}
+		if vr == root {
+			return v.Name // 快路径：同一实例
+		}
+		volAbs, vok := vr.Abs("")
+		if !vok || !pathUnder(volAbs, rootAbs) {
+			continue
+		}
+		if len(volAbs) > bestLen {
+			best, bestLen = v.Name, len(volAbs)
 		}
 	}
-	return ""
+	return best
+}
+
+// pathUnder 报告 p（规范绝对路径）是否等于 base 或位于 base 之下（子路径）。
+func pathUnder(base, p string) bool {
+	base, p = filepath.Clean(base), filepath.Clean(p)
+	if base == p {
+		return true
+	}
+	rel, err := filepath.Rel(base, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 // volumeNameForTenant 返回 tnt 所在卷名（多卷）。判定：比对租户根物理绝对路径与各卷根
