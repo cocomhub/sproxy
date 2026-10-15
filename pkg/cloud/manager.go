@@ -276,6 +276,10 @@ type CloudDownloadManager struct {
 	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveLocation 键空间计算）。
 	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
 	volumeFor func(volume string) (volume.Volume, bool)
+	// targetScopeFor 解析转存产物所在的 owner 配额 Scope（见 CloudManagerOptions 同名选项）。
+	targetScopeFor func(owner, userBucketRel string) *quota.Scope
+	// targetPhysChargeFor 测量转存目标对象的记账字节（与删除侧同一测量函数；见同名选项）。
+	targetPhysChargeFor func(volume, owner, remotePath string) (int64, bool)
 	// stagingQuotaFor 返回 owner 的本地 staging 配额钩子（装配层注入；nil = 无独立
 	// staging 配额，转存不包 gate——零回归）。
 	stagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
@@ -385,6 +389,18 @@ type CloudManagerOptions struct {
 	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
 	// nil = 转存不可用（与 TransferFSFor 同门）。
 	VolumeFor func(volume string) (volume.Volume, bool)
+	// TargetQuotaScopeFor 返回转存**产物所在**的 owner 配额 Scope：键空间为「用户桶相对路径」
+	// （`user/<rel>`，与 HTTP 上传路由的预留/结算、删除侧的释放是**同一个解析器**——装配层
+	// 注入 Handlers.quotaScopeFor / files.Runtime.ScopeFor）。转存写成功后按它结算（见
+	// transfer.go 的 settleTransferCharge）：否则删除该产物时 `releaseExternalDeleteQuota`
+	// 会做「未曾提交的释放」（幻影释放 ⇒ 扣同账本其它占用 ⇒ 少计/过度准入）。nil = 不结算
+	// （零回归：未装配配额的部署无 Scope 可结算）。
+	TargetQuotaScopeFor func(owner, userBucketRel string) *quota.Scope
+	// TargetPhysChargeFor 返回转存目标对象的**记账字节**（物理足迹优先，与删除侧
+	// `files.physChargeFor` 同一测量函数；装配层注入 filesPhysFootprinter.PhysFootprint）。
+	// nil / ok=false ⇒ 回落目标卷 Stat 大小（与删除侧 ExternalStat 回落同义）。
+	// **必须与释放侧同源**：写入侧按逻辑字节记、释放侧按物理字节放会让账本恒偏。
+	TargetPhysChargeFor func(volume, owner, remotePath string) (int64, bool)
 	// IntegrityLookup 按文件名分发完整性校验器（integrity.Lookup 代理）。
 	// nil = 无校验器（语义校验跳过视为通过——Review Focus 1：未装配不误报 damaged）。
 	IntegrityLookup func(name string) integrity.Checker
@@ -432,34 +448,36 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 	applyCloudConfigDefaults(cfg)
 
 	mgr := &CloudDownloadManager{
-		tasks:            make(map[string]*CloudTask),
-		uploadsDir:       uploadsDir,
-		tenantFor:        tenantFor,
-		checksumStoreFor: checksumStoreFor,
-		quotaFor:         qf,
-		listTenants:      listTenants,
-		storage:          sm,
-		logger:           slogutil.Default(logger),
-		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
-		transferSem:      make(chan struct{}, cfg.TransferConcurrency),
-		checkMemSem:      newCheckMemSem(int64(cfg.MaxCheckMemBytes)),
-		checkMemMax:      int64(cfg.MaxCheckMemBytes),
-		config:           cfg,
-		dl:               newDefaultDownloader(cfg),
-		transferFSFor:    opts.TransferFSFor,
-		volumeFor:        opts.VolumeFor,
-		stagingQuotaFor:  opts.StagingQuotaFor,
-		targetWriteLock:  opts.TargetWriteLock,
-		integrityLookup:  opts.IntegrityLookup,
-		removeFile:       opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
-		cancelFuncs:      make(map[string]context.CancelFunc),
-		running:          make(map[string]bool),
-		metrics:          &CloudMetrics{},
-		dirtyTasks:       make(map[string]struct{}),
-		flushNow:         make(chan struct{}, 1),
-		stopFlush:        make(chan struct{}),
-		stopCleanup:      make(chan struct{}),
-		groups:           make(map[string]*CloudTaskGroup),
+		tasks:               make(map[string]*CloudTask),
+		uploadsDir:          uploadsDir,
+		tenantFor:           tenantFor,
+		checksumStoreFor:    checksumStoreFor,
+		quotaFor:            qf,
+		listTenants:         listTenants,
+		storage:             sm,
+		logger:              slogutil.Default(logger),
+		semaphore:           make(chan struct{}, cfg.MaxConcurrent),
+		transferSem:         make(chan struct{}, cfg.TransferConcurrency),
+		checkMemSem:         newCheckMemSem(int64(cfg.MaxCheckMemBytes)),
+		checkMemMax:         int64(cfg.MaxCheckMemBytes),
+		config:              cfg,
+		dl:                  newDefaultDownloader(cfg),
+		transferFSFor:       opts.TransferFSFor,
+		volumeFor:           opts.VolumeFor,
+		stagingQuotaFor:     opts.StagingQuotaFor,
+		targetWriteLock:     opts.TargetWriteLock,
+		targetScopeFor:      opts.TargetQuotaScopeFor,
+		targetPhysChargeFor: opts.TargetPhysChargeFor,
+		integrityLookup:     opts.IntegrityLookup,
+		removeFile:          opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
+		cancelFuncs:         make(map[string]context.CancelFunc),
+		running:             make(map[string]bool),
+		metrics:             &CloudMetrics{},
+		dirtyTasks:          make(map[string]struct{}),
+		flushNow:            make(chan struct{}, 1),
+		stopFlush:           make(chan struct{}),
+		stopCleanup:         make(chan struct{}),
+		groups:              make(map[string]*CloudTaskGroup),
 	}
 
 	mgr.logger.Info("cloud download manager initialized",

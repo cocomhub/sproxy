@@ -200,7 +200,7 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 | ① | 外部卷键空间统一 owner 维度（去掉嵌套封装 owner-less 例外；转存与读写列举同键，遗留①） | 已完成 |
 | ③（部分） | 删除 `pkg/server/config_writer.go`：运行时用户卷持久化归一 `user_volume_store` 台账 | 已完成 |
 | ② | 嵌套封装 `target:` → `enclosure`（翻译层 + 运行期装配/拆除闭环；过渡文件与逐面 guard 全删） | 已完成 |
-| ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只写目标卷 FS、不经路由 commit，删除时仍对 owner 全局 Scope 做未曾提交的释放） | 待做（需「释放==曾提交」判定，独立设计变更） |
+| ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只写目标卷 FS、不经路由 commit，删除时仍对 owner 全局 Scope 做未曾提交的释放） | 已完成（写入侧结算：转存写成功后按 `TargetQuotaScopeFor`/`TargetPhysChargeFor` 与删除侧**同账本同口径**差分入账） |
 
 ## 4. 寻址
 

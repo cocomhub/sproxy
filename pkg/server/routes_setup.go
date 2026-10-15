@@ -524,6 +524,16 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 		VolumeFor: func(volumeName string) (volume.Volume, bool) {
 			return vs.ByName(volumeName)
 		},
+		// TargetQuotaScopeFor：转存产物所在的 owner 配额 Scope（**与删除侧释放、HTTP 上传路由
+		// 预留同一解析器** h.quotaScopeFor ⇒ 同一账本对象）。转存写成功后据此结算（遗留②
+		// 「幻影释放」修复：不结算则删除该产物的释放会扣同账本其它占用）。
+		TargetQuotaScopeFor: h.quotaScopeFor,
+		// TargetPhysChargeFor：转存对象的记账字节（**与删除侧 physChargeFor 同一测量函数**
+		// filesPhysFootprinter.PhysFootprint）——secretdata 的 pad/parity 逻辑不可推，两处
+		// 必须同源，否则写入侧按逻辑记、释放侧按物理放 ⇒ 账本恒偏。
+		TargetPhysChargeFor: func(volumeName, owner, remotePath string) (int64, bool) {
+			return filesPhysFootprinter{h: h}.PhysFootprint(volumeName, owner, remotePath)
+		},
 		// IntegrityLookup：完整性语义校验器分发（image/tar 标准库 + ext/video ffprobe，
 		// 经 pkg/integrity 注册表）。nil = 语义校验跳过（生产必须装配，否则 --integrity-must-pass
 		// 无效果——P1-1 最终审查修复）。
