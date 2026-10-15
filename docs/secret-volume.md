@@ -157,20 +157,22 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 
 封装卷（secretdata/secrets）支持以「已创建卷 + **新空子目录**」作为底层根，**不新建底层卷**：
 
-- **target 语法**：`<卷名>/<新子目录>`（如 `main/videos`，子目录可多级 `a/b`）；必须含子目录。
-- **子目录必须不存在**：建卷校验确认当前不存在 → 409「目录已存在」（防与底层卷既有数据混合）；
-  校验通过后 `MakeDir` 创建空目录，再套可写封装子视图（密文/secret 文件落 `<卷>/<子目录>/`）。
-- **互斥占用**：底层卷某目录被占用后，该目录及父/子目录（路径重叠，`pathsOverlap`：
-  `a==b || b 以 a/ 开头 || a 以 b/ 开头`）均不可再被其它封装卷选作底层 → 409。同卷不同分支
-  （`main/photos` vs `main/movies`）、跨卷互不影响。
-- **关联标注**：建封装卷登记「底层卷 → {subdir, wrapper}」；删底层卷有引用 → 409；删封装卷清
-  关联；重启经用户卷 store 装配期重建（防丢失）。
-- **写保护**：被占用目录**只读可查、禁止修改**——装配层写面判定
-  `pkg/server.checkWrapperOccupiedWrite`（按 links 坐标命中 → 403 fail-closed，覆盖 files 域
-  上传/分块 complete/删除/批量/rename/mkdir/rmdir/版本 restore）、直写卷根旁路面的
-  `occupiedGuardFS` 装饰器（`pkg/server/volume_links.go`）、统一写内核显式卷分支
-  （S3 单对象 PUT / DAV / presign 直送登记）与统一转存（cloud 下载转存 + 归档→卷）；
-  读路径（ListDir/Stat/OpenRead 与 `/api/files` 列举）一律不拦。
+- **target 语法（用户面，保留兼容）**：`<卷名>/<子目录>`（如 `main/videos`，子目录可多级
+  `a/b`）；必须含子目录。装配层把该语法**翻译**为底座声明形态（`type: enclosure` +
+  `extra.source: "<卷>:<子目录>"` + `extra.wrapper: <原 type>`，见
+  `pkg/server/nested_enclosure.go`）——持久化形态与用户面语法零变化（Web UI/sclient/config
+  输入不破），物理落点亦不变（`<基卷根>/<子目录>/…`）。
+- **互斥占用**：同基底卷上两条**互不相关**声明的封印足迹不得重叠（父/子/同目录）→ 装配期
+  fail-closed（`enclosure.ErrFootprintOverlap`；精确相等另有 `ErrConflictClaim`）。链内叠加
+  （`outer: inner:` 逐层封装）**允许**重叠——外层变换的是内层已变换的字节，封印象限由最外层
+  承担。同卷不同分支（`main/photos` vs `main/movies`）、跨卷互不影响。**不再有「子目录必须
+  不存在」前置条件**：区域本就是既有数据的落点，同一区间可被声明唯一占有（重建/重启天然可复用）。
+- **写保护（只读）**：源区间对**一切直连操作**关闭——写恒拒（`storage.ErrSealed`，HTTP 409，
+  无配置开关，含「移入/移出封印区」），读默认按「不存在」处理（404 + 父目录列举过滤），可用
+  `source_read_mode: readable` 放开只读透视。强制点是**公共底座**而非逐面补丁：本地源卷在
+  `storage.Root`（HTTP/API/S3/上传/块写/版本/回收站/分享/预览/搜索索引全部经它），外部/远端
+  源卷在后端 FS 的装配处（`enclosure.SealFS`）。唯一例外是 **S3 预签名直传**（客户端直连
+  对象存储，绕过一切 FS 装饰器）——只能签发期按封印规则拦截（`presignSealedGuard`）。
 - **键空间（阶段 2 迁移①起）**：封装卷与其它外部卷**同口径**——所有读写/删除/列举/转存/
   镜像/du 统一经 `volume.ResolveUserLocation().FSPath()`，即卷内键恒为
   `<owner>/user/<rel>`（物理落盘 `<底层卷>/<子目录>/<owner>/user/<rel>`）。此前过渡实现给
@@ -179,25 +181,26 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
   （该能力未发布，无迁移包袱）。
 - **历史路径零回归**：`target: local + extra.root`（config/CLI）为本地根整卷，不进互斥占用校验。
 
-### 3.9 过渡层与阶段 2 迁移状态
+### 3.9 阶段 2 迁移状态
 
-嵌套封装（§3.8）当前由**过渡层**实现（本分支引入）：`target: <卷>/<新子目录>` 语法 +
-`pkg/sync.SubFS` 子目录视图 + `pkg/server/volume_links.go`（互斥占用/写保护/关联标注）+ 
-`registry.Set.DelegatePool` 配额委托 + `cmd/sproxy` 的 `resolveNestedTargetFS`/重启收养。
-
-master 底座已有**更正统的同能力机制**：`type: enclosure` + `extra.source: "<源卷>:<子路径>"`
-+ `extra.wrapper`（见 `docs/config.md`、设计文档 `docs/designs/2026-10-11-enclosure-volume.md`）：
+嵌套封装（§3.8）**已完成迁移**到 master 底座（`type: enclosure` + `extra.source: "<源卷>:<子路径>"`
++ `extra.wrapper`，见 `docs/config.md`、设计文档 `docs/designs/2026-10-11-enclosure-volume.md`）：
 源目录封印（`storage.SealRule` 唯一事实源，写恒拒/读 hidden|readable）、`sync.PrefixFS` 区域
-视图、`enclosure.AttachAll` 推迟装配、`quota.NewPoolWithParent` 容量继承、owner 限定声明的
-调用方键映射。**方向是把过渡层迁到该底座并删除过渡文件**，迁移清单与文件级映射见
-`docs/archive/stage2-migration.md`（或分支报告）；已完成的批次：
+视图、`enclosure.AttachAll` 推迟装配、`quota.NewPoolWithParent` 容量继承。用户面 `target:` 语法
+在**装配层翻译**为底座声明（config 装配 / 建卷 API / 重启恢复三入口共用
+`pkg/server.TranslateNestedVolume`），持久化形态与物理落点均不变（无数据迁移）。
+
+过渡层（`pkg/sync.SubFS`、`pkg/server.volume_links.go`、`pkg/volume/nested_target.go`、
+`registry.Set.DelegatePool/IsDelegated`、逐面 `checkWrapperOccupiedWrite`/`occupiedGuardFS`/
+`syncexec.WriteGuard`、`resolveNestedTargetFS`/`adoptNestedDir` 重启收养）**已全部删除**。
+迁移清单与文件级映射见 `docs/archive/stage2-migration.md`；当前状态：
 
 | 批次 | 内容 | 状态 |
 |---|---|---|
 | ① | 外部卷键空间统一 owner 维度（去掉嵌套封装 owner-less 例外；转存与读写列举同键，遗留①） | 已完成 |
 | ③（部分） | 删除 `pkg/server/config_writer.go`：运行时用户卷持久化归一 `user_volume_store` 台账 | 已完成 |
-| ② | 嵌套封装 `target:` → `enclosure`（SubFS/volume_links/DelegatePool/重启收养一并移除） | 待做 |
-| ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只探测不 commit，删除做幻影释放） | 待做（需「释放==曾提交」判定） |
+| ② | 嵌套封装 `target:` → `enclosure`（翻译层 + 运行期装配/拆除闭环；过渡文件与逐面 guard 全删） | 已完成 |
+| ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只写目标卷 FS、不经路由 commit，删除时仍对 owner 全局 Scope 做未曾提交的释放） | 待做（需「释放==曾提交」判定，独立设计变更） |
 
 ## 4. 寻址
 
