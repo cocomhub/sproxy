@@ -4,7 +4,7 @@
 package cloud
 
 // manager_audit_cleanup_test.go 钉住审计文件卫生（对抗性评审 R1）：审计 sink 文件
-// （<TMPDIR>/sproxy-audit/<taskID>.audit.log）随任务删除/TTL 过期清理——防每任务一文件
+// （<用户缓存目录>/sproxy/audit/<taskID>.audit.log）随任务删除/TTL 过期清理——防每任务一文件
 // 无限累积（删除/过期路径此前不动审计文件）。
 
 import (

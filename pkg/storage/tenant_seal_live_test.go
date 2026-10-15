@@ -128,19 +128,15 @@ func TestTenantRoot_SealsConcurrentParentSwap(t *testing.T) {
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
-	wg.Add(1)
-	go func() { // 写者：反复重设/清空父根封印（模拟运行期增删封装卷）
-		defer wg.Done()
-		for i := 0; i < 200; i++ {
+	wg.Go(func() { // 写者：反复重设/清空父根封印（模拟运行期增删封装卷）
+		for range 200 {
 			_ = parent.SetSeals([]SealRule{{Path: "alice/user/docs", Wrapper: "vault"}})
 			_ = parent.SetSeals(nil)
 		}
 		close(stop)
-	}()
-	for g := 0; g < 3; g++ {
-		wg.Add(1)
-		go func() { // 读者：持续做封印判定（Stat/MkdirAll/Seals）
-			defer wg.Done()
+	})
+	for range 3 {
+		wg.Go(func() { // 读者：持续做封印判定（Stat/MkdirAll/Seals）
 			for {
 				select {
 				case <-stop:
@@ -151,7 +147,7 @@ func TestTenantRoot_SealsConcurrentParentSwap(t *testing.T) {
 				_ = root.MkdirAll("user/other", 0o755)
 				_ = root.Seals()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

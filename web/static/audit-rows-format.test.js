@@ -85,3 +85,36 @@ test('auditRowsHtml 完整性状态为空不渲染；未知状态转义防注入
   assert.match(both, /完整性: 完整性异常 ×2/);
   assert.match(both, /integrity: 语义校验失败，重下重试/);
 });
+// ---- 审核修复（2026-10-15）：数值列不得依赖「服务端一定发数字」的隐式不变式 ----
+
+test('auditRowsHtml 数值列遇非数字类型必须转义（防类型漂移成注入面）', () => {
+  // 服务端字段是 int64，但 meta 是 any（多层埋点写入）⇒ 类型漂移时必须转义而非原样拼接。
+  const html = auditRowsHtml({ rows: [{
+    type: 'encrypt', step: 'encrypt', dur_ms: '<img src=x onerror=alert(1)>',
+    bytes: '"><script>bad()</script>',
+    bw_bps: 'x<b>y</b>',
+    meta: { cipher_bytes: '<svg onload=alert(1)>', algorithm: 'ok' },
+  }] });
+  assert.ok(html.indexOf('<img') === -1, 'dur_ms 字符串不得原样输出');
+  assert.ok(html.indexOf('<script>') === -1, 'bytes 字符串不得原样输出');
+  assert.ok(html.indexOf('<b>') === -1, 'bw_bps 字符串不得原样输出');
+  assert.ok(html.indexOf('<svg') === -1, 'cipher_bytes 字符串不得原样输出');
+  assert.match(html, /&lt;img/);
+  assert.match(html, /&lt;svg/);
+});
+
+test('auditRowsHtml 非有限数（NaN/Infinity）不渲染为字面量', () => {
+  const html = auditRowsHtml({ rows: [{ type: 'download', step: 'x', dur_ms: NaN, bytes: Infinity, bw_bps: -Infinity }] });
+  assert.ok(html.indexOf('NaN') === -1, 'NaN 不应出现在表格里');
+  assert.ok(html.indexOf('Infinity') === -1, 'Infinity 不应出现在表格里');
+});
+
+test('auditRowsHtml 不产生内联 style（样式统一走 style.css .audit-* class）', () => {
+  const html = auditRowsHtml({ rows: [
+    { type: 'encrypt', step: 'encrypt', dur_ms: 30, bytes: 1024, meta: { cipher_bytes: 2048, algorithm: 'a' } },
+    { type: 'download', step: 'download', dur_ms: 120, bytes: 2048, bw_bps: 4096, node: 'n1', err: 'e' },
+  ] });
+  assert.ok(html.indexOf('style="') === -1, '渲染函数不得写内联 style');
+  assert.match(html, /class="audit-table"/);
+  assert.match(html, /class="audit-cell"/);
+});

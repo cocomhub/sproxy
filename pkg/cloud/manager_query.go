@@ -248,6 +248,6 @@ func (m *CloudDownloadManager) deleteTaskFiles(t *CloudTask, taskID string) {
 		cs.Delete(relKey)
 		m.logger.Debug("checksum deleted", "task_id", taskID, "rel", relKey)
 	}
-	// 清理审计 sink 文件（R1：任务删除即清，防 <TMPDIR>/sproxy-audit/ 无限累积）。
+	// 清理审计 sink 文件（R1：任务删除即清，防 <用户缓存目录>/sproxy/audit/ 无限累积）。
 	m.removeTaskAuditFile(taskID)
 }

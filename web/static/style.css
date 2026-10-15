@@ -262,3 +262,25 @@ tr:hover td { background: var(--bg-hover); }
   background: #000;
   border-radius: 4px;
 }
+
+/* ---- 任务审计面板（audit-rows-format.js；渲染函数不写内联 style）---- */
+.audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.audit-thead-row {
+  background: var(--bg-hover);
+}
+.audit-th {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+.audit-cell {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+.audit-plain {
+  color: var(--text-secondary);
+}

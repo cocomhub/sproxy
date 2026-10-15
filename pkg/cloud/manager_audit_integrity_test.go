@@ -149,12 +149,12 @@ func TestCloudTask_Audit_DownloadFail_IntegrityDamaged(t *testing.T) {
 	}
 }
 
-// integrityDecisionRows 返回 Type=resource + Step="integrity" 的逐次决策审计行
+// integrityDecisionRows 返回 Type=log（通用事件行）+ Step="integrity" 的逐次决策审计行
 // （checkDownloadIntegrity 各裁决分支经 audit.From(dlCtx).Log 写入）。
 func integrityDecisionRows(rows []audit.Row) []audit.Row {
 	var out []audit.Row
 	for i := range rows {
-		if rows[i].Type == audit.TypeResource && rows[i].Step == "integrity" {
+		if rows[i].Type == audit.TypeLog && rows[i].Step == "integrity" {
 			out = append(out, rows[i])
 		}
 	}

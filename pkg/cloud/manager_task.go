@@ -401,7 +401,7 @@ func (m *CloudDownloadManager) auditIntegrityDecision(ctx context.Context, decis
 	args := make([]any, 0, 2+len(kv))
 	args = append(args, "decision", decision)
 	args = append(args, kv...)
-	l.Log(audit.TypeResource, audit.LevelInfo, "integrity", args...)
+	l.Log(audit.TypeLog, audit.LevelInfo, "integrity", args...)
 }
 
 // handleIntegrityMismatch 处理语义校验失败的收敛判定：累计「本地 checksum 一致仍异常」
@@ -619,9 +619,10 @@ func (m *CloudDownloadManager) cleanupCloudIfNotNeeded(task *CloudTask, destPath
 }
 
 // newTaskAuditScope 构造任务级审计作用域（Logger + 收口 func）：
-//   - sink 落 `<TMPDIR>/sproxy-audit/<taskID>.audit.log`（无配置的临时目录回落，见
-//     auditSinkDir）；NodeID 暂不注入（云任务无节点身份概念，空即省略）。
-//   - 任意失败（sink 建不了/NewScope 错）返回 (nil, noop)——审计是可降级能力，绝不阻塞下载。
+//   - sink 落 `<用户缓存目录>/sproxy/audit/<taskID>.audit.log`（见 auditSinkDir；
+//     私有目录，不落共享临时目录）；NodeID 暂不注入（云任务无节点身份概念，空即省略）。
+//   - 任意失败（取不到私有目录/sink 建不了/NewScope 错）返回 (nil, noop)——审计是可降级能力，
+//     绝不阻塞下载；但**告警可见**（禁静默降级：宁可禁用也不落到他人可读/可改的位置）。
 //
 // 返回的 close 函数需在下载 goroutine 收尾（defer）调用：Flush + 把 sink 中全部行复制进
 // task.Audit（终态任务持久化）+ 关闭底层 FileSink。
@@ -642,9 +643,18 @@ func (m *CloudDownloadManager) newTaskAuditScope(task *CloudTask) (*audit.Logger
 	return l, func() { m.finalizeTaskAudit(l, sink, task) }
 }
 
-// auditSinkDir 返回审计 sink 目录（无配置时回落系统临时目录，避免扰动 storage 桶布局）。
+// auditSinkDir 返回审计 sink 目录：**用户私有**缓存目录 `<UserCacheDir>/sproxy/audit`。
+//
+// 安全理由（实测缺口）：旧实现回落共享系统临时目录（/tmp/sproxy-audit）——路径可预测，
+// 同机攻击者可**预置**同名目录或符号链接 ⇒ 审计文件被读取/删除/篡改/重定向（审计是证据，
+// 完整性失效）。故不再回落共享路径；取不到私有目录时返回空串 ⇒ NewScopeSink 报错 ⇒
+// 审计**禁用**（fail-closed + 告警），而不是降级到共享路径。
 func (m *CloudDownloadManager) auditSinkDir() string {
-	return filepath.Join(os.TempDir(), "sproxy-audit")
+	cd, err := os.UserCacheDir()
+	if err != nil || cd == "" {
+		return ""
+	}
+	return filepath.Join(cd, "sproxy", "audit")
 }
 
 // injectTaskAudit 为任务创建一个审计作用域并注入 ctx/dlCtx，返回 (新ctx, 新dlCtx, close)。

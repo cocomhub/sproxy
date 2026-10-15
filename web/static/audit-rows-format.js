@@ -10,21 +10,29 @@
 //   - download 行：dur_ms / bytes / bw_bps；完整性判定（meta.integrity_status + integrity_sames，
 //     非空才显示；verified/damaged/unverified 中文文案，damaged ×N 附重下一致次数）进「说明」列；
 //   - err（异常说明）与 algorithm / node 归入「说明」列。
-// 纯函数可 node --test，不依赖 DOM。样式统一 var(--…) 禁内联亮色 hex；HTML 转义复用
-// appRender.escHtml（禁自建 escHtml）；字节大小复用 appRender.formatSize（禁自建 formatSize）。
+// 纯函数可 node --test，不依赖 DOM。样式统一走 CSS class（`style.css` 的 .audit-* 系列，
+// 禁渲染函数内联 style）；HTML 转义复用 appRender.escHtml（禁自建 escHtml）；
+// 字节大小复用 appRender.formatSize（禁自建 formatSize）。
 // 非 UMD：顶层 function + 底部 module.exports（Node require），浏览器靠 script 顺序挂全局。
 // global: appRender（app-render.js，转义/格式化）
 
 'use strict';
 
-// _num(n)：null/undefined → '-'；否则原样字符串（审计遥测保整数精度，不 formatSize）。
+// _num(n)：null/undefined → '-'；**数字**原样字符串（审计遥测保整数精度，不 formatSize）；
+// 非数字 ⇒ **转义后输出**。服务端这些字段虽是 int64，但 `meta` 是 `any`（且审计行由
+// 多层埋点写入）——旧实现无条件 `String(n)` 拼接，一旦类型漂移（如 cipher_bytes 变字符串）
+// 就是注入面 ⇒ 此处不依赖「服务端一定发数字」这一隐式不变式。
 function _num(n) {
-  return n == null ? '-' : String(n);
+  if (n == null) return '-';
+  if (typeof n === 'number') return Number.isFinite(n) ? String(n) : '-';
+  return appRender.escHtml(String(n));
 }
 
-// _sizeTxt(n)：字节体积 → appRender.formatSize（复用共享实现）；null/undefined → '-'。
+// _sizeTxt(n)：字节体积 → appRender.formatSize（复用共享实现）；非有限数 → '-'（与 _num
+// 同口径：不把 NaN/Infinity 之类无意义值渲染成字面量）；非数字 → 转义后输出。
 function _sizeTxt(n) {
-  return n == null ? '-' : appRender.formatSize(n);
+  if (typeof n === 'number') return Number.isFinite(n) ? appRender.formatSize(n) : '-';
+  return n == null ? '-' : appRender.escHtml(String(n));
 }
 
 // _escHtml(s)：复用 appRender.escHtml（禁自建）。
@@ -68,14 +76,14 @@ function _detailText(r) {
   return parts.join('；');
 }
 
-// _cell(content) → 单个 <td>（共享样式 token，禁内联亮色）。
+// _cell(content) → 单个 <td>（样式在 style.css .audit-cell，禁内联）。
 function _cell(content) {
-  return '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + content + '</td>';
+  return '<td class="audit-cell">' + content + '</td>';
 }
 
 // _th(text) → 单个表头 <th>。
 function _th(text) {
-  return '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">' + text + '</th>';
+  return '<th class="audit-th">' + text + '</th>';
 }
 
 // auditRowsHtml(opts) → 审计行表格 HTML 字符串。
@@ -84,8 +92,8 @@ function auditRowsHtml(opts) {
   const o = opts || {};
   const rows = Array.isArray(o.rows) ? o.rows : [];
   if (rows.length === 0) return '<div class="empty-msg">暂无审计记录</div>';
-  let h = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
-  h += '<thead><tr style="background:var(--bg-hover);">' +
+  let h = '<table class="audit-table">';
+  h += '<thead><tr class="audit-thead-row">' +
     _th('类型') + _th('级别') + _th('步骤') + _th('耗时') + _th('数据') + _th('带宽') + _th('说明') +
     '</tr></thead><tbody>';
   rows.forEach(function (r) {
@@ -94,11 +102,12 @@ function auditRowsHtml(opts) {
     h += _cell(_escHtml(r.type || '-'));
     h += _cell(_escHtml(r.level || '-'));
     h += _cell(_escHtml(r.step || r.type || '-'));
-    h += _cell(_num(r.dur_ms) === '-' ? '-' : _num(r.dur_ms) + ' ms');
+    const dur = _num(r.dur_ms);
+    h += _cell(dur === '-' ? '-' : dur + ' ms');
     // 数据列：encrypt 行并排明文 bytes vs 密文 meta.cipher_bytes；其余行显示 bytes。
     if (r.type === 'encrypt' && r.meta && r.meta.cipher_bytes != null) {
-      h += _cell('<span style="color:var(--text-secondary);">明文 </span>' + _num(r.bytes) +
-        '<span style="color:var(--text-secondary);"> → 密文 </span>' + _num(r.meta.cipher_bytes));
+      h += _cell('<span class="audit-plain">明文 </span>' + _num(r.bytes) +
+        '<span class="audit-plain"> → 密文 </span>' + _num(r.meta.cipher_bytes));
     } else {
       h += _cell(_num(r.bytes));
     }

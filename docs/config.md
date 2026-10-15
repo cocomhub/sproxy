@@ -98,7 +98,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `audit.buffer_size` | int | `2048` | 有界内存环形审计缓冲条数（`GET /api/audit` 回看最近操作）；`0` = 关闭（返回空表）；负值非法 |
 | `audit.max_size` | ByteSize | `0`（关闭） | 审计日志轮转阈值（roadmap 11.5-⑥，如 `"10MiB"`）：>0 时按文件大小轮转（`audit.log` → `audit.log.1` … `audit.log.N`，保留 `max_archives` 份归档）；`0`/缺省 = 关闭轮转（零回归） |
 | `audit.max_archives` | int | `3` | 轮转保留归档份数（`audit.log.1` … `audit.log.N`）；`0` = 轮转即删不留档 |
-| `audit.enabled` | bool | `false` | **预留（未接线）**：通用 span 审计开关（`pkg/audit`，云下载/转存/加密阶段）；默认关。当前 span sink 目录未配置化（默认 `<系统临时目录>/sproxy-audit/`） |
+| `audit.enabled` | bool | `false` | **预留（未接线）**：通用 span 审计开关（`pkg/audit`，云下载/转存/加密阶段）；默认关。span sink 目录当前不可配（见下行；默认**用户私有缓存目录**） |
 | `audit.dir` | string | (空) | **预留（未接线）**：通用 span 审计 sink 根目录 |
 | `audit.archive.enabled` | bool | `false` | **预留**：span 审计**归档默认关**（规格 §4.5 未来扩展——`Archiver` 接口已预留、配置暂未接线）；开启需同时配置 `volume` + `path` |
 | `audit.archive.volume` | string | (空) | **预留**：归档目标卷（如 `secretdata://audit`） |
@@ -125,7 +125,9 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `notify.feed_max` | int | `20` | `/api/notify/feed` 最大条目数（roadmap 11.7-⑦）：`<=0` 默认 20，上限 50 |
 | `notify.feed_token` | string | (空) | `/api/notify/feed` 可选访问令牌（roadmap 11.7-⑦）：空 = 公开可读（默认零回归）；非空 = GET /api/notify/feed 必须带 `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401 空 body（防 token 枚举）。feed 会暴露审计信息——生产建议配置。token 不随 SIGHUP 重载（重启生效） |
 > 审计**默认落盘**：`RecordAudit` append JSON lines 到 `<默认卷根>/audit/audit.log`（合适位置自动选择，无需配置目录），重启后 `/api/audit` 可查历史；打开失败降级为仅内存（审计绝不阻断启动）。明文 JSON（审计行不含密钥/凭据）
-> 通用 span 审计（`pkg/audit`，云下载/转存/加密阶段耗时与字节）与上表并列：每任务独立 sink 文件（`<scopeID>.audit.log` 每行一行 JSON，权限 0600），随任务持久化（`CloudTask.audit`）；当前 sink 目录无配置、归档默认关（`audit.archive.*` 预留未接线，见上表）
+> 通用 span 审计（`pkg/audit`，云下载/转存/加密阶段耗时与字节）与上表并列：每任务独立 sink 文件（`<scopeID>.audit.log` 每行一行 JSON，权限 0600），随任务持久化（`CloudTask.audit`）；归档默认关（`audit.archive.*` 预留未接线，见上表）
+>
+> span sink 目录 = **用户私有缓存目录** `<UserCacheDir>/sproxy/audit`（Linux 通常 `~/.cache/sproxy/audit`），目录以 0700 创建、拒绝符号链接与非私有权限；取不到私有目录时**审计禁用并告警**（不回落共享 `/tmp`——共享路径可预测，同机他人可预置目录/软链读取或篡改审计）。
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |
 | `max_chunk_size` | int64 | `0` | 仅客户端配置，服务端忽略 |

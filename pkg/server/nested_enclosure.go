@@ -28,6 +28,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"time"
 
@@ -89,9 +90,7 @@ func TranslateNestedDecl(typ string, extra map[string]any, capacity int64) (stri
 		return typ, extra, false
 	}
 	out := make(map[string]any, len(extra)+2)
-	for k, val := range extra {
-		out[k] = val
-	}
+	maps.Copy(out, extra)
 	out[enclosure.SourceKey] = base + ":" + sub
 	// **不写 `extra.wrapper`**（用户裁定 2026-10-15：该键冗余）：处理层恒等于卷类型本身
 	// （`parseOne` 缺省回落 v.Type；显式写出且不一致时 `ErrWrapperMismatch` fail-closed）。

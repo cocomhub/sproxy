@@ -3,7 +3,16 @@
 
 // Package audit 提供通用审计日志核心：作用域 Logger（NewScope）承载跨层 span
 // （Begin/End/Fail）、即时单行计量（Log/Err）、跨函数数据粘合（Save/Get）与多维度观测
-// （With）。行由 Sink 落盘（后续 FileSink 每任务独立文件），行本身是纯 JSON 可序列化结构。
+// （With/Set）。行由 Sink 落盘（后续 FileSink 每任务独立文件），行本身是纯 JSON 可序列化结构。
+//
+// # 与 pkg/server 审计（/api/audit）的边界
+//
+// 本包是**任务级遥测审计**（作用域 = 一个下载/转存任务，行 = 阶段耗时/带宽/明密文对比等），
+// 消费方是任务详情与 Web UI 任务审计弹窗；`pkg/server` 的 `AuditEvent`（RecordAudit +
+// ring/store + `/api/audit`）是**全局敏感操作审计**（谁在何时对哪个对象做了什么，跨租户
+// 全局视图）。两者模型/过滤/生命周期/消费方均不同，**当前并行存在**；`TypeSensitive` 的
+// 「预迁移现有 server/audit」是**未完成的迁移计划**（尚未接线）。新增埋点时按上边界选择：
+// 「操作级安全审计」→ server/audit；「任务执行遥测」→ 本包。
 //
 // 线程安全：Logger 的方法可在并发下调用；rows 经 Sink.Append 同步落底。nil Logger（以及
 // nil Span）上所有方法均安全 no-op，故 From(ctx) 返回 nil 时可放心链式调用。
@@ -26,9 +35,13 @@ const (
 	TypeDownload  Type = "download"  // 下载
 	TypeTransfer  Type = "transfer"  // 转存
 	TypeEncrypt   Type = "encrypt"   // 加密/解密阶段
-	TypeResource  Type = "resource"  // CPU/内存采样行
+	TypeResource  Type = "resource"  // CPU/内存采样行（**专用**：采样类遥测，勿复用为通用事件）
 	TypeSensitive Type = "sensitive" // 敏感操作（预迁移现有 server/audit）
 	TypeError     Type = "error"     // 错误
+	// TypeLog 是**通用事件行**（无专属类型的 Log/未知步骤）。此前未知步骤与
+	// `Log(TypeResource,…)` 都落到 TypeResource ⇒ 类型列把「完整性裁决」等非采样行
+	// 谎报为「资源采样」，与设计文档（TypeResource = CPU/内存采样）不一致。
+	TypeLog Type = "log"
 )
 
 // Level 是审计行的严重级别。
@@ -71,12 +84,14 @@ type Sink interface {
 	Close() error
 }
 
-// Filter 用于筛选 Recent 结果；空字段表示不筛选。
+// Filter 用于筛选 Recent 结果；空字段表示不筛选。Limit > 0 时最多返回 Limit 条
+// （按写入序从最早开始，读到足够即停 ⇒ 避免大文件全量读入内存）。
 type Filter struct {
 	Type  Type
 	Level Level
 	Dim   Dimension
 	Step  string
+	Limit int
 }
 
 // Archiver 是归档钩子接口（预留，默认不归档）：把作用域已记录的行归档到所选卷/路径。
@@ -132,24 +147,32 @@ func NewScope(scopeID string, opts ScopeOpts) (*Logger, error) {
 	}, nil
 }
 
-// With 返回同作用域、换维度的派生子 Logger（拷贝，共享 sink/scope state）。kv 键值对写入
-// 作用域共享 kvStore，供跨维度 Save/Get 读取。nil Logger 返回 nil。
-func (l *Logger) With(d Dimension, kv ...any) *Logger {
+// With 返回同作用域、换维度的派生子 Logger（拷贝，共享 sink/scope state）。
+// **纯派生**：不产生副作用（键值写入走 Set——此前 With 顺带写共享 kvStore，
+// 「派生」方法改共享状态是隐蔽副作用，调用方难以预期）。nil Logger 返回 nil。
+func (l *Logger) With(d Dimension) *Logger {
 	if l == nil {
 		return nil
 	}
 	nl := *l
 	nl.dim = d
-	if len(kv) > 1 {
-		nl.state.mu.Lock()
-		for i := 0; i+1 < len(kv); i += 2 {
-			if k, ok := kv[i].(string); ok {
-				nl.state.kv[k] = kv[i+1]
-			}
-		}
-		nl.state.mu.Unlock()
-	}
 	return &nl
+}
+
+// Set 把键值对写入作用域共享 kvStore（供跨维度/跨函数 Save/Get 读取），返回接收者
+// 以便链式调用。奇数项或非 string key 忽略。nil Logger 安全 no-op（返回 nil）。
+func (l *Logger) Set(kv ...any) *Logger {
+	if l == nil || len(kv) < 2 {
+		return l
+	}
+	l.state.mu.Lock()
+	for i := 0; i+1 < len(kv); i += 2 {
+		if k, ok := kv[i].(string); ok {
+			l.state.kv[k] = kv[i+1]
+		}
+	}
+	l.state.mu.Unlock()
+	return l
 }
 
 // Span 是单个步骤的计时跨度：Begin 创建，End/Fail 收口并落行。
@@ -160,10 +183,12 @@ type Span struct {
 	level Level
 	start time.Time
 	kv    []any // Begin 时预置的键值对（End/Fail 时先于 End 参数应用）
+	done  bool  // 已收口（End/Fail 幂等：重复调用不重复落行、不再刷新耗时）
 }
 
 // Begin 开启一个步骤 span，step 拟定为 Type（step 命中已知 Type 值则用之，否则回落
-// TypeResource）。kv 为起始附加键值对。nil Logger 返回可安全调用但落空的 Span。
+// 通用事件类型 TypeLog——**不再回落 TypeResource**：那是采样专用类型，回落会让类型列
+// 把普通步骤谎报为资源采样）。kv 为起始附加键值对。nil Logger 返回可安全调用但落空的 Span。
 func (l *Logger) Begin(step string, kv ...any) *Span {
 	if l == nil {
 		return &Span{}
@@ -178,11 +203,13 @@ func (l *Logger) Begin(step string, kv ...any) *Span {
 	}
 }
 
-// End 收尾 span：填 DurMS，应用 Begin/End 键值对，落一行到 Sink。
+// End 收尾 span：填 DurMS，应用 Begin/End 键值对，落一行到 Sink。**幂等**：重复调用
+// 不重复落行（否则同一操作出现多行、且第二次的 DurMS 更大 ⇒ 审计数据自相矛盾）。
 func (s *Span) End(kv ...any) {
-	if s == nil || s.l == nil {
+	if s == nil || s.l == nil || s.done {
 		return
 	}
+	s.done = true
 	l := s.l
 	r := Row{
 		Type:    s.typ,
@@ -199,10 +226,12 @@ func (s *Span) End(kv ...any) {
 
 // Fail 以错误收尾 span：级别置为 LevelError 并携带 err，落库。kv 为附加键值对
 // （与 End 同语义：bytes/bw_bps 映射到对应字段，其余汇聚进 Meta；可为空）。
+// **幂等**（与 End 同）：End 后再 Fail / 重复 Fail 均忽略。
 func (s *Span) Fail(err error, kv ...any) {
-	if s == nil || s.l == nil {
+	if s == nil || s.l == nil || s.done {
 		return
 	}
+	s.done = true
 	l := s.l
 	r := Row{
 		Type:    s.typ,
@@ -331,6 +360,9 @@ func (l *Logger) appendRow(r *Row) {
 
 // applyKV 把键值对映射到 Row：key "bytes"→Bytes、"bw_bps"→BandwidthBps，其余汇聚进
 // Meta（map）。无法成对的 kv（奇数项或非 string key）忽略。
+//
+// bytes/bw_bps 的值**必须是数值**：不可数值化时不再静默写 0（审计里「0 字节」是
+// 有效语义，把「类型写错」记成 0 会污染审计数据）⇒ 原值保留进 Meta 并置 0。
 func applyKV(r *Row, kv []any) {
 	for i := 0; i+1 < len(kv); i += 2 {
 		k, ok := kv[i].(string)
@@ -340,59 +372,74 @@ func applyKV(r *Row, kv []any) {
 		v := kv[i+1]
 		switch k {
 		case "bytes":
-			r.Bytes = toInt64(v)
-		case "bw_bps":
-			r.BandwidthBps = toInt64(v)
-		default:
-			m, _ := r.Meta.(map[string]any)
-			if m == nil {
-				m = make(map[string]any, len(kv)/2)
-				r.Meta = m
+			if n, ok := asInt64(v); ok {
+				r.Bytes = n
+			} else {
+				putMeta(r, k, v)
 			}
-			m[k] = v
+		case "bw_bps":
+			if n, ok := asInt64(v); ok {
+				r.BandwidthBps = n
+			} else {
+				putMeta(r, k, v)
+			}
+		default:
+			putMeta(r, k, v)
 		}
 	}
 }
 
-// toInt64 宽容地数值化为 int64；无法识别返回 0。
-func toInt64(v any) int64 {
+// putMeta 把键值写入 Row.Meta（懒建 map）。
+func putMeta(r *Row, k string, v any) {
+	m, _ := r.Meta.(map[string]any)
+	if m == nil {
+		m = make(map[string]any, 4)
+		r.Meta = m
+	}
+	m[k] = v
+}
+
+// asInt64 宽容地把数值类型转 int64；**不可识别返回 false**（调用方决定如何处置，
+// 不再静默 0）。
+func asInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int:
-		return int64(n)
+		return int64(n), true
 	case int8:
-		return int64(n)
+		return int64(n), true
 	case int16:
-		return int64(n)
+		return int64(n), true
 	case int32:
-		return int64(n)
+		return int64(n), true
 	case int64:
-		return n
+		return n, true
 	case uint:
-		return int64(n)
+		return int64(n), true
 	case uint8:
-		return int64(n)
+		return int64(n), true
 	case uint16:
-		return int64(n)
+		return int64(n), true
 	case uint32:
-		return int64(n)
+		return int64(n), true
 	case uint64:
-		return int64(n)
+		return int64(n), true
 	case float32:
-		return int64(n)
+		return int64(n), true
 	case float64:
-		return int64(n)
+		return int64(n), true
 	default:
-		return 0
+		return 0, false
 	}
 }
 
-// stepType 把步骤名映射为审计类型：步骤名命中已知类型值则用之，否则回落 TypeResource。
+// stepType 把步骤名映射为审计类型：步骤名命中已知类型值则用之，否则回落通用事件类型
+// TypeLog。**TypeError 也在命中集内**（此前遗漏 ⇒ `Begin("error")` 被谎报为资源采样）。
 func stepType(step string) Type {
 	switch Type(step) {
-	case TypeAPI, TypeDownload, TypeTransfer, TypeEncrypt, TypeResource, TypeSensitive:
+	case TypeAPI, TypeDownload, TypeTransfer, TypeEncrypt, TypeResource, TypeSensitive, TypeError, TypeLog:
 		return Type(step)
 	default:
-		return TypeResource
+		return TypeLog
 	}
 }
 
