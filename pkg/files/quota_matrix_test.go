@@ -210,3 +210,94 @@ func TestQuotaLedgerMatrix_CopyTrashDir(t *testing.T) {
 		})
 	}
 }
+
+// TestQuotaLedgerMatrix_VersionAndNestedDir 扩展对账矩阵：版本对象（覆盖写触发）+ 多层/幂等 mkdir。
+//
+// 覆盖的缺陷类：
+//   - 版本对象**独立记账**（覆盖写保存旧版本 ⇒ 它是独立对象，必须计自己的占用；漏记 = 少记；
+//     重复计 = 幽灵占用）；硬删主文件后版本仍可恢复 ⇒ 版本占用**必须保留**；
+//   - 多层 mkdir 的**祖先链差分**（a/b/c 一次建三级）与**幂等 mkdir**（已存在 ⇒ 零增量）；
+//   - rmdir 递归释放与 mkdir 对称。
+//
+// 注：版本桶（`version/`）是**本地**租户桶 ⇒ 版本对象按本地物理口径记账（与主文件同源）；
+// 「卷自报足迹」卷型在生产中是外部卷、其版本对象仍落本地 version 桶 ⇒ 不构造该混合（同上个用例）。
+func TestQuotaLedgerMatrix_VersionAndNestedDir(t *testing.T) {
+	t.Parallel()
+	flavors := []struct {
+		name   string
+		env    func(*testing.T) *dirsEnv
+		charge func(int64) int64
+	}{
+		{"明文本地", writeTargetEnv, func(n int64) int64 { return n }},
+		{"加密本地", encryptedEnv, storage.EncryptedPhysicalSize},
+	}
+	for _, f := range flavors {
+		t.Run(f.name, func(t *testing.T) {
+			t.Parallel()
+			e := f.env(t)
+			e.versioningEnabled = true // 覆盖写保存旧版本
+			e.rebuild()
+			ctx := context.Background()
+			// 两个桶各自的 Scope：主文件落 `user/`、版本对象落 `version/`（独立桶 ⇒ 独立记账）。
+			sc := e.quotaScopeFor("alice", "user/v.bin")
+			verSc := e.quotaScopeFor("alice", "version")
+			if sc == nil || verSc == nil {
+				t.Fatal("owner Scope 不可用")
+			}
+			assertUsage := func(step string, wantUser, wantVer int64) {
+				t.Helper()
+				if got := sc.Usage(); got != wantUser {
+					t.Fatalf("%s 后 user 桶配额=%d want %d（差 %+d）", step, got, wantUser, got-wantUser)
+				}
+				if got := verSc.Usage(); got != wantVer {
+					t.Fatalf("%s 后 version 桶配额=%d want %d（差 %+d）", step, got, wantVer, got-wantVer)
+				}
+			}
+
+			// 1) 上传 v1（**必须走上传路径**：版本化只在该路径生效——统一写内核 WriteTarget
+			//    明确不含版本预处理，见 writeTargetSettle 注释）
+			v1 := bytes.Repeat([]byte("1"), 40_000)
+			if rr := e.upload(t, "alice", "v.bin", v1, sha256Hex(v1), 0); rr.Code != 200 {
+				t.Fatalf("upload v1: code=%d body=%s", rr.Code, rr.Body.String())
+			}
+			assertUsage("upload v1", f.charge(int64(len(v1))), 0)
+
+			// 2) 覆盖上传 v2 ⇒ 旧内容进版本桶（**独立对象**）⇒ user 桶计 v2、version 桶计 v1
+			v2 := bytes.Repeat([]byte("2"), 70_000)
+			if rr := e.upload(t, "alice", "v.bin", v2, sha256Hex(v2), 0); rr.Code != 200 {
+				t.Fatalf("upload v2: code=%d body=%s", rr.Code, rr.Body.String())
+			}
+			assertUsage("overwrite v2（版本对象独立计）", f.charge(int64(len(v2))), f.charge(int64(len(v1))))
+
+			// 3) 硬删主文件 ⇒ 版本仍可恢复 ⇒ **版本占用必须保留**（不得随主文件释放）
+			if _, err := e.svc.DeleteFile(ctx, DeleteFileInput{
+				Owner: "alice", RemotePath: "v.bin", SkipChecksumVerify: true,
+			}); err != nil {
+				t.Fatalf("hard delete: %v", err)
+			}
+			assertUsage("hard delete（版本保留）", 0, f.charge(int64(len(v1))))
+
+			// 4) 多层 mkdir（a/b/c 一次三级）：本地卷无目录足迹能力 ⇒ 免费（零增量）。
+			before := sc.Usage()
+			if _, err := e.svc.MakeDir(ctx, "alice", "a/b/c", ""); err != nil {
+				t.Fatalf("mkdir a/b/c: %v", err)
+			}
+			if got := sc.Usage() - before; got != 0 {
+				t.Fatalf("本地卷多层 mkdir 增量=%d want 0", got)
+			}
+			// 5) 幂等 mkdir（已存在）⇒ 零增量
+			before = sc.Usage()
+			if _, err := e.svc.MakeDir(ctx, "alice", "a/b/c", ""); err != nil {
+				t.Fatalf("mkdir 幂等: %v", err)
+			}
+			if got := sc.Usage() - before; got != 0 {
+				t.Fatalf("幂等 mkdir 增量=%d want 0", got)
+			}
+			// 6) rmdir 递归 ⇒ 回到版本占用
+			if _, err := e.svc.RemoveDir(ctx, "alice", "a", "", true); err != nil {
+				t.Fatalf("rmdir a: %v", err)
+			}
+			assertUsage("rmdir（回到版本占用）", 0, f.charge(int64(len(v1))))
+		})
+	}
+}
