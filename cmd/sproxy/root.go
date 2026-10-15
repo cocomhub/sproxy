@@ -1173,15 +1173,14 @@ func (rt *runServerRuntime) setupServerCore() error {
 	if err := enclosure.AttachAll(ctx, h.Volumes(), logger, enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); err != nil {
 		return fmt.Errorf("封装卷装配失败（配置声明的封装卷补装 boot fail）：%w", err)
 	}
-	// C4（2026-10-06 用户裁决，过渡层）：config 声明嵌套封装卷接线 + 完整性检查 + 运行时写回。
-	//  1. WireConfigNestedWrappers：对 config volumes 段声明 `target: <卷>/<子目录>` 的封装卷
-	//     登记互斥占用 + 写保护 + 配额委托（fail-closed，登记失败即启动失败，杜绝声明不生效）；
-	//  2. SetConfigWriter：/api/volumes/user 创建/删除后写回 config volumes 段（重启不丢卷）。
+	// C4（2026-10-06 用户裁决，过渡层）：config 声明嵌套封装卷接线 + 完整性检查。
+	// WireConfigNestedWrappers：对 config volumes 段声明 `target: <卷>/<子目录>` 的封装卷
+	// 登记互斥占用 + 写保护 + 配额委托（fail-closed，登记失败即启动失败，杜绝声明不生效）。
+	// **运行时用户卷的持久化由 user_volume_store 台账承担**（重建/恢复见 restoreUserVolumes）：
+	// 历史「创建/删除后写回 config volumes 段」的 FileConfigWriter 已随阶段 2 迁移移除
+	// （同一职责两套机制，台账是权威且与卷元数据经 Root 的设计一致）。
 	if err := h.WireConfigNestedWrappers(); err != nil {
 		return err
-	}
-	if cfgFile != "" {
-		h.SetConfigWriter(server.NewFileConfigWriter(cfgFile))
 	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。

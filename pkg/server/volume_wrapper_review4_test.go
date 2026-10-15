@@ -16,7 +16,6 @@ package server
 // 无法与其它用例并行——非并发测试。
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -355,46 +354,5 @@ func TestWrapperList_OccupiedSubdir_ReadOnly(t *testing.T) {
 	st, body = review4Req(t, base, http.MethodGet, "/api/files?volume=main", nil)
 	if st != http.StatusOK {
 		t.Fatalf("主列表 main = %d, want 200 (body: %s)", st, body)
-	}
-}
-
-// failingConfigWriter 是评审 I-4 的测试 mock：AppendVolume 成功、RemoveVolume 恒失败——
-// 模拟「config 文件不可写/格式非法」下删除路径应终止删除（卷保留）。
-type failingConfigWriter struct{}
-
-func (f *failingConfigWriter) AppendVolume(v UserVolume) error { return nil }
-func (f *failingConfigWriter) RemoveVolume(name string) error {
-	return fmt.Errorf("config 文件不可写（测试注入）")
-}
-
-// TestWrapperDelete_ConfigRemoveFail_Aborts（评审 I-4，2026-10-07）：删除封装卷时 config
-// 写回**先行**且失败即终止删除——否则「store 已删 + config 残留」会生成重启复活的僵尸卷 +
-// 子目录 409。断言：config RemoveVolume 失败 → DELETE 返回 500、卷仍在 store/Set（可列出）。
-func TestWrapperDelete_ConfigRemoveFail_Aborts(t *testing.T) {
-	mainRoot := t.TempDir()
-	url, h := newWrapperReview4API(t, []VolumeConfig{{Name: "main", Root: mainRoot, VolCapacity: 1 << 30}})
-	// 建封装卷（configWriter nil 创建路径不写回，volume 正常创建）。
-	if rec := wrapperJSON(t, url, http.MethodPost, "/api/volumes/user", map[string]any{
-		"name": "videos", "type": wrapperFSType,
-		"extra": map[string]any{"target": "main/videos"},
-	}); rec.Code != http.StatusOK {
-		t.Fatalf("建封装卷 = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
-	// 注入失败写回器 → DELETE 应 500、卷保留（未删 Set/store/links）。
-	h.SetConfigWriter(&failingConfigWriter{})
-	rec := wrapperJSON(t, url, http.MethodDelete, "/api/volumes/user?name=videos", nil)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("config 写回失败删除 = %d, want 500（删除终止）(body: %s)", rec.Code, rec.Body.String())
-	}
-	// 卷仍在（store/Set/占用关联未清除——不是僵尸路径）。
-	if v, err := h.userVolumes.Get("alice", "videos"); err != nil || v == nil {
-		t.Fatalf("config 写回失败后卷应保留在 store: v=%+v err=%v", v, err)
-	}
-	if h.volSet.External("videos") == nil {
-		t.Fatal("config 写回失败后卷不应从 Set 移除")
-	}
-	// 占用关联仍在（links 未清）。
-	if refs := h.links().refsOfBase("main"); len(refs) != 1 {
-		t.Fatalf("config 写回失败后占用关联应保留: %+v", refs)
 	}
 }

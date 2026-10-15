@@ -244,11 +244,12 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		h.logger.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", req.Name, "owner", owner, "path", counterPath)
 	}
 	be = capacity.WrapBackend(be, counter)
-	// store 落盘（重名拒绝）。
+	// store 落盘（重名拒绝）——**store 是运行时用户卷的唯一事实源**（重启由 ScanRestore
+	// 恢复；历史 config YAML 写回机制已随阶段 2 迁移移除）。
 	// Owner 一并设置（C4 CRITICAL 复测补直）：owner 以参数为准，使本链产出的 UserVolume
-	// 同时携带正确 Owner 与 ACL。config 写回（下方 AppendVolume(uv)）已改以 ACL.Owners 为
-	// 准（见 config_writer.volumeEntryNode），Owner 字段是冗余保底（store.Create 内部亦按
-	// owner 参数回填，二者一致），供任何以 UserVolume.Owner 为键的消费方读取不改。
+	// 同时携带正确 Owner 与 ACL（ACL 是键空间稳定性的载体：owner-only ⇒ 重启后 Shared()
+	// 与键空间不变，见 user_volume_store 的 ACL 持久化用例），Owner 字段供任何以
+	// UserVolume.Owner 为键的消费方读取。
 	// 生效上限（可能来自继承）落元数据（master F6）——否则重启 restore 会用请求里的 0 把
 	// 继承的上限抹掉。
 	uv := UserVolume{Name: req.Name, Type: req.Type, Owner: owner, Capacity: counter.Capacity(), Extra: req.Extra, ACL: acl}
@@ -279,19 +280,6 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		h.clearWrapperLinks(req.Name)
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
-	}
-	// C4 config 写回（2026-10-06 用户裁决）：创建成功后把卷追加到 config volumes 段，
-	// 重启后卷不丢。写回失败 → 回滚已建卷（Set/store/links/配额），保持一致性。
-	if h.configWriter != nil {
-		if err := h.configWriter.AppendVolume(uv); err != nil {
-			h.logger.Error("用户卷创建：config 写回失败，回滚建卷", "volume", req.Name, "owner", owner, "error", err)
-			_ = h.volSet.RemoveExternalVolume(req.Name)
-			_ = h.userVolumes.Delete(owner, req.Name)
-			h.clearWrapperLinks(req.Name)
-			h.clearWrapperQuota(req.Name)
-			sendJSONResponse(w, map[string]string{"error": "卷已创建但 config 写回失败，已回滚（config 文件不可写或格式非法）"}, http.StatusInternalServerError)
-			return
-		}
 	}
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
@@ -368,7 +356,7 @@ func isSensitiveVolumeKey(k string) bool {
 // 流程：owner 派生 → store.Get（不存在/跨 owner → 404）→ syncmgr 引用检查（活跃任务
 // 引用 → 409）→ Set.RemoveExternalVolume（Close 后端）→ store.Delete。
 //
-//nolint:gocognit // S3776: 用户卷删除装配流程（master F9 flush + 过渡层 config 写回/关联清理，2026-10）；阶段 2 迁 enclosure 后拆分
+//nolint:gocognit // S3776: 用户卷删除装配流程（master F9 flush + 过渡层关联/子目录清理，2026-10）；阶段 2 迁 enclosure 后拆分
 func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Request) { // NOSONAR: S3776 — 同理由
 	owner := normalizeOwner(ownerFromRequest(r))
 	if h.userVolumes == nil {
@@ -400,18 +388,6 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	if h.links().hasRefs(name) {
 		sendJSONResponse(w, map[string]string{"error": "卷是封装卷的底层卷（存在嵌套封装引用），请先删除引用它的封装卷"}, http.StatusConflict)
 		return
-	}
-	// I-4（评审，2026-10-07）：config 写回**先行**（任何删除副作用前）——失败即终止删除
-	// （500，卷原样保留）。否则「store 已删 + config 写回失败」→ config 残留使已删封装卷
-	// 重启复活并重占子目录（僵尸卷 + 409 阻塞重建），运维须手工清 config 行。config 先行
-	// 保证「删除成功 ⇒ config 已一致移除」；其后任一步失败卷仍在 store → 重启由
-	// restoreUserVolumes 恢复（store 是权威，非僵尸；RemoveVolume 对未声明卷 no-op）。
-	if h.configWriter != nil {
-		if err := h.configWriter.RemoveVolume(name); err != nil {
-			h.logger.Error("用户卷删除：config 写回失败，删除终止（卷保留）", "volume", name, "owner", owner, "error", err)
-			sendJSONResponse(w, map[string]string{"error": "删除终止：config 文件不可写或格式非法（卷保留，请修复 config 后重试）"}, http.StatusInternalServerError)
-			return
-		}
 	}
 	// 先删 store 元数据（失败则 Set 不变，无需回滚），再摘除运行时卷，最后清计数文件。
 	if err := h.userVolumes.Delete(owner, name); err != nil {
@@ -448,10 +424,4 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 // SetUserVolumeStore 注入用户卷 store（装配层 new 后调用；nil 清除，路由返回 400）。
 func (h *Handlers) SetUserVolumeStore(s *UserVolumeStore) {
 	h.userVolumes = s
-}
-
-// SetConfigWriter 注入 config 写回能力（C4，2026-10-06）：/api/volumes/user 创建/删除后
-// 把卷写回 config 文件 volumes 段（重启不丢）。nil = 不写回（零回归）。
-func (h *Handlers) SetConfigWriter(w ConfigWriter) {
-	h.configWriter = w
 }
