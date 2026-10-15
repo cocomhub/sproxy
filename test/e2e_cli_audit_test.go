@@ -63,7 +63,7 @@ func TestE2E_CLI_Audit_SecretVolumeChain(t *testing.T) {
 	if werr := os.WriteFile(videoFile, content, 0o600); werr != nil {
 		t.Fatalf("写测试视频文件: %v", werr)
 	}
-	env.sclient(t, env.TmpDir, "--volume", "vault", "upload", "movie.mp4")
+	env.sclient(t, env.TmpDir, "upload", "movie.mp4", "vault:/")
 
 	// 磁盘副作用：vault 卷底层是加密容器（无明文逻辑名/无明文内容）——「加密落盘」证据。
 	assertSecretLayoutAnonymity(t, vaultRoot, "user", "movie.mp4", "user/movie.mp4")
