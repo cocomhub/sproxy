@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	normpkg "golang.org/x/text/unicode/norm"
 )
@@ -85,44 +86,160 @@ func (e *sealedError) Unwrap() error {
 	return fs.ErrNotExist
 }
 
-// SetSeals 注入封印规则（装配期一次性；nil/空切片 = 无封印，行为零回归）。
-// 规则路径会被归一（去前后空白/斜杠、Clean）；**空字符串 = 整卷封印**（覆盖卷内任意路径，
-// 由 enclosure「空子路径 = 整卷封装」产出）；非法（纯空白、绝对、含 ..、越出 root）返回错误。
+// SetSeals 注入封印规则（装配期与**运行期封装卷增删**都经它整体重设；nil/空切片 = 无封印，
+// 行为零回归）。规则路径会被归一（去前后空白/斜杠、Clean）；**空字符串 = 整卷封印**（覆盖卷内
+// 任意路径，由 enclosure「空子路径 = 整卷封装」产出）；非法（纯空白、绝对、含 ..、越出 root）
+// 返回错误。
+//
+// 并发：规则集经原子指针整体替换（读者恒见新或旧的完整集合，绝不见撕裂切片）。
 func (rt *Root) SetSeals(rules []SealRule) error {
-	if len(rules) == 0 {
-		rt.seals = nil
+	out, err := rt.prepareSeals(rules)
+	if err != nil {
+		return err
+	}
+	if len(out) == 0 {
+		rt.seals.Store(nil)
 		return nil
+	}
+	rt.seals.Store(&out)
+	return nil
+}
+
+// prepareSeals 归一 + 校验（供 `SetSeals` 处理**外部输入**）：路径去空白/斜杠并 Clean，
+// **空字符串 = 整卷封印**，非法（纯空白、绝对、含 ..、越出 root）返回错误。随后经
+// `expandSealRules` 补齐短名别名与排序。
+func (rt *Root) prepareSeals(rules []SealRule) ([]SealRule, error) {
+	if len(rules) == 0 {
+		return nil, nil
 	}
 	out := make([]SealRule, 0, len(rules))
 	for _, r := range rules {
 		clean, err := normalizeSealPath(r.Path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if _, ok := rt.Abs(clean); !ok {
-			return fmt.Errorf("storage: 封印路径非法 %q", r.Path)
+			return nil, fmt.Errorf("storage: 封印路径非法 %q", r.Path)
 		}
 		rr := r
 		rr.Path = clean
 		out = append(out, rr)
+	}
+	return rt.expandSealRules(out), nil
+}
+
+// expandSealRules 短名别名展开 + 深度降序排序（**无错误路径**）：`SetSeals` 与租户子根
+// **派生封印**共用，保证两条来源的规则口径一致——尤其是 8.3 短名别名必须按**承载该路径的根**
+// 解析（规则已归一，故此处只需补别名与排序）。
+func (rt *Root) expandSealRules(rules []SealRule) []SealRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]SealRule, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, r)
 		// **8.3 短名别名展开**（平台能力；非 Windows 恒 no-op）：文件系统可为一个长名分配短名，
 		// 二者指向同一文件——只按长名词法比较会漏封短名路径（fail-closed 方向：多封不多放）。
-		out = append(out, sealAliasesOf(rt, rr)...)
+		out = append(out, sealAliasesOf(rt, r)...)
 	}
 	// 按路径长度降序：更深的规则优先（嵌套封印时给出更精确的 wrapper 归因）。
 	slices.SortFunc(out, func(a, b SealRule) int { return len(b.Path) - len(a.Path) })
-	rt.seals = out
+	return out
+}
+
+// deriveSealsFromParent 把本根封印安装为「**派生自 parent 的实时视图**」（仅供租户子根，
+// 见 tenant_resolve.go 的封印传播）：
+//   - 每次封印判定按 parent 当前规则集翻译（剥去本租户 owner 段）后判定 ⇒ 父卷根封印的
+//     **运行期变更**（新增/删除封装卷）立即对本租户生效，无需任何缓存失效动作；
+//   - 结果按「父根规则集身份」缓存（`SetSeals` 每次构造新切片 ⇒ 指针变化即版本变化），
+//     故常规路径零分配，且 8.3 短名别名仍按**本租户根**路径展开（不因实时求值而丢失）。
+//
+// 必须在对象发布（入缓存/被共享）之前调用一次（sealSource 此后只读）。
+func (rt *Root) deriveSealsFromParent(parent *Root, owner string) {
+	d := &sealDerive{self: rt, parent: parent, owner: owner}
+	rt.sealSource = d.rules
+}
+
+// sealDerive 计算并缓存租户子根的派生封印。
+type sealDerive struct {
+	self   *Root
+	parent *Root
+	owner  string
+	cache  atomic.Pointer[derivedSeals]
+}
+
+// derivedSeals 是一次派生结果 + 其依据的父根规则集身份（指针比较即版本比较）。
+type derivedSeals struct {
+	version *[]SealRule
+	rules   []SealRule
+}
+
+// rules 返回当前生效的派生封印（父根规则集未变 → 命中缓存）。
+//
+// 翻译结果**无需再校验**：父根规则已由 `SetSeals`（prepareSeals）归一/校验过，翻译只剥去
+// 与 owner 相同的首段（剥后仍是本根内的相对路径）⇒ 只补别名展开与排序（无错误路径），
+// 故本函数既不会失败、也不会把「写保护」降级成静默放行。
+func (d *sealDerive) rules() []SealRule {
+	src := d.parent.seals.Load()
+	if src == nil {
+		return nil // 父根无封印（未注入/已清空）⇒ 本根无封印
+	}
+	if c := d.cache.Load(); c != nil && c.version == src {
+		return c.rules
+	}
+	out := d.self.expandSealRules(translateSealsForTenant(*src, d.owner))
+	d.cache.Store(&derivedSeals{version: src, rules: out})
+	return out
+}
+
+// sealRules 返回当前生效的封印规则（**不拷贝**——调用方只能读）：
+//   - 普通卷（无派生来源）：本根规则集快照；
+//   - 租户子根（有派生来源）：父根**实时派生**规则 ∪ 本根**显式注入**规则——前者让运行期封装卷
+//     增删立即生效，后者（`SetSeals` 直接作用于租户子根）不被父根变化悄悄抹掉。
+//
+// 两条来源通常只有一条非空（父根无封装 / 租户无额外注入）⇒ 常规路径零分配。
+func (rt *Root) sealRules() []SealRule {
+	local := rt.localSealRules()
+	if rt.sealSource == nil {
+		return local
+	}
+	derived := rt.sealSource()
+	switch {
+	case len(local) == 0:
+		return derived
+	case len(derived) == 0:
+		return local
+	default:
+		return mergeSealRules(derived, local)
+	}
+}
+
+// localSealRules 返回本根**显式注入**的规则集（不含父根派生；未注入 → nil）。
+func (rt *Root) localSealRules() []SealRule {
+	if p := rt.seals.Load(); p != nil {
+		return *p
+	}
 	return nil
+}
+
+// mergeSealRules 合并两组规则并按深度降序排序（与 SetSeals 同口径：更深规则优先，给出更精确的
+// wrapper 归因）。仅在「两来源同时非空」时调用（罕见），故允许一次分配。
+func mergeSealRules(a, b []SealRule) []SealRule {
+	out := make([]SealRule, 0, len(a)+len(b))
+	out = append(out, a...)
+	out = append(out, b...)
+	slices.SortFunc(out, func(x, y SealRule) int { return len(y.Path) - len(x.Path) })
+	return out
 }
 
 // Seals 返回封印规则副本（诊断/上层视图用）。
 func (rt *Root) Seals() []SealRule {
-	return append([]SealRule(nil), rt.seals...)
+	return append([]SealRule(nil), rt.sealRules()...)
 }
 
 // SealAt 返回覆盖 rel 的封印规则（无则 nil）。语义为**前缀**匹配：rel == rule.Path 或
 // rel 位于 rule.Path 之下。
-func (rt *Root) SealAt(rel string) *SealRule { return SealAt(rt.seals, rel) }
+func (rt *Root) SealAt(rel string) *SealRule { return SealAt(rt.sealRules(), rel) }
 
 // SealAt 在规则集内查找命中 rel 的封印规则（无命中 → nil）。**语义与 Root 完全一致**——
 // 导出供「FS 级封印装饰器」（外部卷/远端后端视图，无 *storage.Root）复用，确保本地与外部
@@ -163,19 +280,20 @@ func SealError(rule *SealRule, rel string, write bool) error {
 // sealCheck 是统一入口：write=true 恒拒绝（ErrSealed）；write=false 时按模式返回
 // SealHidden=密封不存在错误 / SealReadable=nil。
 func (rt *Root) sealCheck(rel string, write bool) error {
-	return SealError(SealAt(rt.seals, rel), rel, write)
+	return SealError(SealAt(rt.sealRules(), rel), rel, write)
 }
 
 // sealFilterEntries 在 SealHidden 模式下从目录列举中过滤掉「自身被封印」的条目
 // （SealReadable 保留——只读透视语义要求可见）。dir 为被列举目录的 root 相对路径。
 func (rt *Root) sealFilterEntries(dir string, entries []os.DirEntry) []os.DirEntry {
-	if len(rt.seals) == 0 || len(entries) == 0 {
+	rules := rt.sealRules()
+	if len(rules) == 0 || len(entries) == 0 {
 		return entries
 	}
 	out := entries[:0:0]
 	for _, e := range entries {
 		child := path.Join(dir, e.Name())
-		rule := rt.SealAt(child)
+		rule := SealAt(rules, child)
 		if rule != nil && rule.Mode == SealHidden {
 			continue
 		}
