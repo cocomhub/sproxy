@@ -171,7 +171,33 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
   `occupiedGuardFS` 装饰器（`pkg/server/volume_links.go`）、统一写内核显式卷分支
   （S3 单对象 PUT / DAV / presign 直送登记）与统一转存（cloud 下载转存 + 归档→卷）；
   读路径（ListDir/Stat/OpenRead 与 `/api/files` 列举）一律不拦。
+- **键空间（阶段 2 迁移①起）**：封装卷与其它外部卷**同口径**——所有读写/删除/列举/转存/
+  镜像/du 统一经 `volume.ResolveUserLocation().FSPath()`，即卷内键恒为
+  `<owner>/user/<rel>`（物理落盘 `<底层卷>/<子目录>/<owner>/user/<rel>`）。此前过渡实现给
+  嵌套封装卷开过 owner-less 例外（`user/<rel>`），导致 **cloud 转存写入的文件落错位置、
+  列举/下载/删除不可见**（遗留①，已修）。注意：旧例外布局下已落盘的数据在新键空间下不可见
+  （该能力未发布，无迁移包袱）。
 - **历史路径零回归**：`target: local + extra.root`（config/CLI）为本地根整卷，不进互斥占用校验。
+
+### 3.9 过渡层与阶段 2 迁移状态
+
+嵌套封装（§3.8）当前由**过渡层**实现（本分支引入）：`target: <卷>/<新子目录>` 语法 +
+`pkg/sync.SubFS` 子目录视图 + `pkg/server/volume_links.go`（互斥占用/写保护/关联标注）+ 
+`registry.Set.DelegatePool` 配额委托 + `cmd/sproxy` 的 `resolveNestedTargetFS`/重启收养。
+
+master 底座已有**更正统的同能力机制**：`type: enclosure` + `extra.source: "<源卷>:<子路径>"`
++ `extra.wrapper`（见 `docs/config.md`、设计文档 `docs/designs/2026-10-11-enclosure-volume.md`）：
+源目录封印（`storage.SealRule` 唯一事实源，写恒拒/读 hidden|readable）、`sync.PrefixFS` 区域
+视图、`enclosure.AttachAll` 推迟装配、`quota.NewPoolWithParent` 容量继承、owner 限定声明的
+调用方键映射。**方向是把过渡层迁到该底座并删除过渡文件**，迁移清单与文件级映射见
+`docs/archive/stage2-migration.md`（或分支报告）；已完成的批次：
+
+| 批次 | 内容 | 状态 |
+|---|---|---|
+| ① | 外部卷键空间统一 owner 维度（去掉嵌套封装 owner-less 例外；转存与读写列举同键，遗留①） | 已完成 |
+| ③（部分） | 删除 `pkg/server/config_writer.go`：运行时用户卷持久化归一 `user_volume_store` 台账 | 已完成 |
+| ② | 嵌套封装 `target:` → `enclosure`（SubFS/volume_links/DelegatePool/重启收养一并移除） | 待做 |
+| ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只探测不 commit，删除做幻影释放） | 待做（需「释放==曾提交」判定） |
 
 ## 4. 寻址
 
