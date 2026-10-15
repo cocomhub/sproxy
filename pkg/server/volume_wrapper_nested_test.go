@@ -27,7 +27,9 @@ const nestedSecretType = "nested-secretdata-test"
 // （type=nestedSecretType，target=main/videos）→ AttachExternal(真实 secretdata 后端，
 // 底层 = SubFS(mainRoot, videos)) + WireConfigNestedWrappers（link + DelegatePool）。
 // 与生产 `setupSecretBackends` + `WireConfigNestedWrappers` 的顺序/形态一致。
-func newNestedSecretWrapperHandlers(t *testing.T, mainCap int64) *Handlers {
+//
+// extra 追加额外的本地卷（如跨卷 move 的目标卷）——不传则形态与既有一致（调用方零改动）。
+func newNestedSecretWrapperHandlers(t *testing.T, mainCap int64, extra ...VolumeConfig) *Handlers {
 	t.Helper()
 	registry.MarkDeferredType(nestedSecretType)
 	t.Cleanup(func() { registry.UnmarkDeferredTypeForTest(nestedSecretType) })
@@ -35,10 +37,10 @@ func newNestedSecretWrapperHandlers(t *testing.T, mainCap int64) *Handlers {
 	mainDir := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = mainDir
-	cfg.Volumes = []VolumeConfig{
+	cfg.Volumes = append([]VolumeConfig{
 		{Name: "main", Root: mainDir, VolCapacity: ByteSize(mainCap)},
 		{Name: "vault", Type: nestedSecretType, Extra: map[string]any{"target": "main/videos"}},
-	}
+	}, extra...)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("cfg.Validate: %v", err)
 	}

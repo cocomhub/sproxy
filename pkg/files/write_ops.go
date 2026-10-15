@@ -1836,26 +1836,13 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, rel, remotePa
 		}
 	}
 	for _, name := range vols {
-		// **删除前**取记账字节（对象删除后已不可测量）：① 卷自报实测足迹优先（secretdata 的
-		// parity + meta pad 无法由逻辑长度推出）；② 无足迹能力（多数外部卷：s3/webdav/baidupcs、
-		// 以及键空间不经足迹索引的嵌套封装卷）→ 回落实测逻辑大小——与写入侧 `settleSize` 的
-		// ②③ 档同源（无能力时写入按 written/PhysicalSize 记账），保证「释放量 == 提交量」。
-		charge := int64(0)
-		if n, ok := s.physChargeFor(name, owner, remotePath); ok {
-			charge = n
-		} else if n, _, serr := ops.ExternalStat(ctx, owner, name, remotePath); serr == nil && n > 0 {
-			charge = n
-		}
-		deleted, derr := ops.ExternalDelete(ctx, owner, name, remotePath, input.ExpectedChecksum)
+		deleted, derr := s.deleteExternalObject(ctx, owner, name, rel, remotePath, input.ExpectedChecksum)
 		if derr != nil {
 			return true, DeleteFileResult{}, derr
 		}
 		if !deleted {
 			continue
 		}
-		// 释放配额（与写入侧同口径：`settleSize` 记的就是这个量）。此前外部卷删除**完全不释放**
-		// ⇒ owner 配额与卷池随每次删除永久虚高（幽灵占用/假 507）。
-		s.releaseExternalDeleteQuota(owner, rel, name, charge)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "外部卷硬删 volume="+name)
 		return true, DeleteFileResult{RemotePath: remotePath,
 			Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
@@ -1869,6 +1856,46 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, rel, remotePa
 		return true, res, err
 	}
 	return true, DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
+}
+
+// deleteExternalObject 在外部卷 volName 上硬删 owner 的 remotePath（经装配层接缝），**成功删除
+// 后**归还配额（owner 全局 Scope + 委托子池，见 releaseExternalDeleteQuota）。返回 deleted=false
+// 表示对象不存在（未删除 ⇒ 不释放）。
+//
+// **这是「外部卷删对象」的单一实现**：delete 链路（deleteExternalVolume 遍历候选卷）与跨卷
+// move 的删源（deleteMovedSource，源为外部卷）共用——两条链路删的是同一类对象，释放口径必须
+// 只有一套，否则任一路径独立演化就会漏释放（幽灵占用/假 507）或重复释放（少计 ⇒ 过度准入）。
+//
+// charge 必须在**删除前**测量（对象删除后已不可测量）：① 卷自报实测足迹优先（secretdata 的
+// parity + meta pad 无法由逻辑长度推出）；② 无足迹能力（多数外部卷：s3/webdav/baidupcs、
+// 以及键空间不经足迹索引的嵌套封装卷）→ 回落实测逻辑大小——与写入侧 `settleSize` 的 ②③ 档
+// 同源（无能力时写入按 written/PhysicalSize 记账），保证「释放量 == 提交量」。
+//
+// rel 是**用户桶相对路径**（`user/<name>`，与 owner 全局 Scope 的键空间一致）；remotePath 是
+// 用户可见路径（外部卷键解析用）。两者在 delete 链路里分别来自 Tenant.UserRel 与校验后入参，
+// 在 move 链路里由调用方同源派生。
+func (s *Service) deleteExternalObject(ctx context.Context, owner, volName, rel, remotePath, expectedChecksum string) (bool, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return false, nil // 未装配接缝：未删除（调用方按「外部卷无入口」处理）
+	}
+	charge := int64(0)
+	if n, ok := s.physChargeFor(volName, owner, remotePath); ok {
+		charge = n
+	} else if n, _, serr := ops.ExternalStat(ctx, owner, volName, remotePath); serr == nil && n > 0 {
+		charge = n
+	}
+	deleted, derr := ops.ExternalDelete(ctx, owner, volName, remotePath, expectedChecksum)
+	if derr != nil {
+		return false, derr
+	}
+	if !deleted {
+		return false, nil
+	}
+	// 释放配额（与写入侧同口径：`settleSize` 记的就是这个量）。此前外部卷删除**完全不释放**
+	// ⇒ owner 配额与卷池随每次删除永久虚高（幽灵占用/假 507）。
+	s.releaseExternalDeleteQuota(owner, rel, volName, charge)
+	return true, nil
 }
 
 // releaseExternalDeleteQuota 释放外部卷删除后的 owner 配额与（委托）卷容量池。charge 是

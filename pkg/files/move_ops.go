@@ -95,6 +95,18 @@ func (s *Service) MoveFile(ctx context.Context, input MoveFileInput) (MoveFileRe
 // errMoveSourceGone 标记「源已不存在」（删源 404）——MoveFile 据此按幂等成功处理。
 var errMoveSourceGone = errors.New("move: 源已不存在")
 
+// userRelForQuota 把用户可见路径映射为 owner 配额键空间（`user/<path>`）——与 delete 链路
+// （`Tenant.UserRel`）同源，保证 owner 全局 Scope 两处解析到同一层。租户不可用/路径非法时回落
+// 原路径（ScopeFor 按最长前缀解析，仅在本 owner 的 Scope 树内匹配，不会误命中他人 Scope）。
+func (s *Service) userRelForQuota(owner, remotePath string) string {
+	if tnt := s.rt.tenantOf(owner); tnt != nil {
+		if rel, ok := tnt.UserRel(remotePath); ok {
+			return rel
+		}
+	}
+	return remotePath
+}
+
 // deleteMovedSource 删除移动的源对象（**必须在目标写入成功之后**调用）。
 //   - 外部卷源（input.Src 非 nil）：经 ExternalDelete 接缝**硬删**（不经回收站——远端后端无
 //     原子 rename）；expectedChecksum 用复制时校验过的源码 SHA-256 交叉比对，防「复制后源被
@@ -102,11 +114,16 @@ var errMoveSourceGone = errors.New("move: 源已不存在")
 //   - 本地卷源：复用 DeleteFile（回收站/meta/sidecar/配额释放口径与 `delete` 完全一致）。
 func (s *Service) deleteMovedSource(ctx context.Context, owner string, input MoveFileInput, res CopyFileResult) error {
 	if input.Src != nil {
-		ops := s.rt.externalVolOps()
-		if ops == nil {
+		if s.rt.externalVolOps() == nil {
+			// 装配层既已给出外部卷只读源（input.Src），删除接缝必然同源存在；缺失 = 装配错误，
+			// fail-closed 报错而不是让「删源未执行」被当成移动成功（静默数据双份）。
 			return &HTTPError{Status: http.StatusInternalServerError, Message: "外部卷删除未装配"}
 		}
-		removed, err := ops.ExternalDelete(ctx, owner, input.FromVol, input.From, res.Checksum)
+		// **删源必须与 delete 链路同一释放路径**：跨卷 move 从嵌套封装卷（委托子池 + 父链聚合
+		// 到底座池）搬出时，源侧删源若不归还，底座池会保留幽灵占用（底座卷设容量 ⇒ 假 507）。
+		// 故这里直接复用 deleteExternalObject（域侧唯一的外部卷删对象 + 配额归还实现）。
+		rel := s.userRelForQuota(owner, input.From)
+		removed, err := s.deleteExternalObject(ctx, owner, input.FromVol, rel, input.From, res.Checksum)
 		if err != nil {
 			return err
 		}
