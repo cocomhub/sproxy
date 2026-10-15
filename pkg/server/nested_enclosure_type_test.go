@@ -212,9 +212,10 @@ func TestNestedDecl_RuntimeCreateKeepsWrapperType(t *testing.T) {
 }
 
 // TestIsDeclared_DeclarationVocabulary 钉住声明判据（装配机制的唯一事实源）：
-//   - 显式 `type: enclosure`（无论 extra 是否合法）→ 认领（缺字段由 parseOne fail-closed）；
-//   - wrapper 类型 + source → 认领（嵌套形态）；
-//   - wrapper 类型无 source / 非 wrapper 类型 → 不认领（普通卷零回归）。
+//   - **wrapper 类型** + `extra.source` → 认领（嵌套形态，唯一形态）；
+//   - wrapper 类型无 source（普通 wrapper 卷，如 target: local 的本地整卷形态）→ 不认领；
+//   - 非 wrapper 类型（含 `type: enclosure`——它不是可写卷类型，LookupWrapper 恒不命中）
+//     即使带 source → 不认领（普通卷零回归）。
 func TestIsDeclared_DeclarationVocabulary(t *testing.T) {
 	t.Parallel()
 	registerFixtureWrapper("isdeclared-wrap")
@@ -223,11 +224,10 @@ func TestIsDeclared_DeclarationVocabulary(t *testing.T) {
 		vol  volume.Volume
 		want bool
 	}{
-		{"显式 enclosure 声明", volume.Volume{Name: "v", Type: enclosure.TypeEnclosure, Extra: map[string]any{"source": "main:x", "wrapper": "isdeclared-wrap"}}, true},
-		{"enclosure 缺字段仍认领", volume.Volume{Name: "v", Type: enclosure.TypeEnclosure}, true},
 		{"嵌套 wrapper 声明", volume.Volume{Name: "v", Type: "isdeclared-wrap", Extra: map[string]any{"source": "main:x"}}, true},
 		{"wrapper 类型无 source", volume.Volume{Name: "v", Type: "isdeclared-wrap", Extra: map[string]any{"target": "main/x"}}, false},
 		{"非 wrapper 类型带 source", volume.Volume{Name: "v", Type: "plain-external", Extra: map[string]any{"source": "main:x"}}, false},
+		{"type:enclosure 不再认领（非可写类型）", volume.Volume{Name: "v", Type: enclosure.TypeEnclosure, Extra: map[string]any{"source": "main:x", "wrapper": "isdeclared-wrap"}}, false},
 		{"本地卷", volume.Volume{Name: "v", Type: volume.TypeLocal, Extra: map[string]any{"source": "main:x"}}, false},
 	}
 	for _, tc := range cases {

@@ -187,6 +187,15 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "name/type 必填"}, http.StatusBadRequest)
 		return
 	}
+	// enclosure 是**内部装配机制**，不是可建卷类型：本字段唯一合法形态是 wrapper 类型
+	// （secretdata/secrets…，经 extra.target 声明嵌套封装）。显式拒绝并提示正确写法——
+	// 否则会走到 registry.NewBackend 报「类型未注册后端」，客户端无从判断该怎么改。
+	if req.Type == enclosure.TypeEnclosure {
+		sendJSONResponse(w, map[string]string{
+			"error": "enclosure 是内部装配机制，不是可建卷类型；请用 wrapper 类型（如 secretdata/secrets）+ extra.target=\"<底层卷>/<子目录>\" 声明封装",
+		}, http.StatusBadRequest)
+		return
+	}
 	// F7（评审 P3）：**先校验卷名再拼路径/IO**——下方 counterPath 由 req.Name 拼接，而真正的
 	// 卷名校验此前只在 store.Create 内（更晚）。名字含分隔符/`..` 时会读到 meta 目录之外的
 	// `*.capacity`（且读失败直接 500），顺序与错误码都不当。此处与 store 用**同一判定**

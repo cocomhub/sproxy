@@ -55,10 +55,11 @@ func (d *directFS) DirectURL(_ context.Context, relPath string) (string, bool, e
 	return d.url + "?key=" + relPath, true, nil
 }
 
+// encVol 造一条**嵌套形态**封装声明卷：卷 Type 即处理层名（唯一声明形态，见 IsDeclared）。
 func encVol(name, src string, extra map[string]any) volume.Volume {
 	e := map[string]any{"wrapper": "basetest", "source": src}
 	maps.Copy(e, extra)
-	return volume.Volume{Name: name, Type: TypeEnclosure, Extra: e}
+	return volume.Volume{Name: name, Type: "basetest", Extra: e}
 }
 
 func TestParse_ValidDeclAndSealRules(t *testing.T) {
@@ -110,18 +111,16 @@ func TestParse_Rejects(t *testing.T) {
 	base := func(extra map[string]any) volume.Volume {
 		e := map[string]any{}
 		maps.Copy(e, extra)
-		return volume.Volume{Name: "vault", Type: TypeEnclosure, Extra: e}
+		return volume.Volume{Name: "vault", Type: "basetest", Extra: e}
 	}
 	cases := []struct {
 		name string
 		vols []volume.Volume
 		want error
 	}{
-		{"缺 source", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest"})}, ErrMissingSource},
 		{"source 无冒号", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main"})}, ErrBadSource},
 		{"source 穿越", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main:../x"})}, ErrBadSource},
 		{"源卷不存在", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "nope:x"})}, ErrSourceNotFound},
-		{"缺 wrapper", []volume.Volume{{Name: "main"}, base(map[string]any{"source": "main:x"})}, ErrMissingWrapper},
 		{"wrapper 未注册", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "ghost", "source": "main:x"})}, ErrUnknownWrapper},
 		{"自封装", []volume.Volume{base(map[string]any{"wrapper": "basetest", "source": "vault:x"})}, ErrSelfEnclosure},
 		{"read_mode 非法", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main:x", "source_read_mode": "public"})}, ErrBadReadMode},
@@ -131,6 +130,16 @@ func TestParse_Rejects(t *testing.T) {
 		if _, err := Parse(tc.vols); !errors.Is(err, tc.want) {
 			t.Errorf("%s: 应拒绝并返回 %v, got %v", tc.name, tc.want, err)
 		}
+	}
+
+	// wrapper 类型**无** `extra.source` ⇒ 不是封装声明（普通 wrapper 卷，如本地整卷形态），
+	// Parse 静默跳过而非报错——这是「缺 source/缺 wrapper 不再是错误」的落点。
+	plain := []volume.Volume{
+		{Name: "main"},
+		{Name: "vault", Type: "basetest", Extra: map[string]any{"target": "local"}},
+	}
+	if ds, derr := Parse(plain); derr != nil || len(ds) != 0 {
+		t.Errorf("wrapper 类型无 source 不应是封装声明: decls=%v err=%v", ds, derr)
 	}
 
 	// 同一源路径被两个封装卷声明 → 冲突。

@@ -4,7 +4,7 @@
 // Package enclosure 实现**通用封装卷**能力层（设计：docs/designs/2026-10-11-enclosure-volume.md）。
 //
 // 职责（且仅此四件，见设计 §2 正交契约）：
-//  1. **声明与拓扑**：解析封装声明（`IsDeclared`：显式 `type: enclosure` 或 wrapper 类型 +
+//  1. **声明与拓扑**：解析封装声明（`IsDeclared`：**已注册的 wrapper 类型** +
 //     `extra.source="<源卷>:<子路径>"`），
 //     做环检测/深度上限/路径唯一性/wrapper 互斥等装配期 fail-closed 校验；
 //  2. **源视图**：复用 `sync.PrefixFS`（键空间前缀映射，不复制视图逻辑）；
@@ -13,17 +13,15 @@
 //
 // 不负责：加解密算法（那是 wrapper）、账本（quota/capacity）、完整性 sidecar（trusted）。
 //
-// **enclosure 是装配机制，不是一种对外卷类型**：装配由**声明词汇**驱动——`extra.source`
-// （`<源卷>:<子路径>`）+ `extra.wrapper`（处理层注册名），见 `IsDeclared`。卷描述 `Type` 与
-// 装配方式**正交**，保持用户面身份：
-//   - 显式声明：`type: enclosure` + source + wrapper（通用底座形态，wrapper 可为任意处理层）；
-//   - 嵌套声明：**wrapper 类型**（如 secretdata/secrets）+ source——由装配层翻译用户面
-//     `extra.target: "<卷>/<子路径>"` 语法产出（pkg/server/nested_enclosure.go），`wrapper`
-//     即卷类型本身。
+// **enclosure 是纯内部装配机制，不是一种对外卷类型**：唯一声明形态是「**wrapper 类型**
+// （如 secretdata/secrets）+ `extra.source`」——由装配层翻译用户面 `extra.target:
+// "<卷>/<子路径>"` 语法产出（pkg/server/nested_enclosure.go），`wrapper` 即卷类型本身。
+// 卷描述 `Type` 与装配方式**正交**：嵌套封装卷的对外 Type / 协议（SchemeOf）/ 分类
+// （CategoryOf）/ API 回显全部按 wrapper 类型语义，内部机制不外泄。
 //
-// 故嵌套封装卷的对外 Type / 协议（SchemeOf）/ 分类（CategoryOf）/ API 回显全部按 wrapper
-// 类型语义，内部机制不外泄；`type: enclosure` 也不是「按类型分派的后端」——它只是底座声明
-// 的一种书写形式（装配期由声明判据接管，不经 registry.NewBackend 构造）。
+// `type: enclosure` **不是可写卷类型**（配置校验与建卷 API 均 fail-closed 拒绝，提示改用
+// wrapper 类型 + source/target）；`TypeEnclosure` 仅作内部装配标识保留（日志/诊断），
+// 亦不经 registry.NewBackend 构造。
 package enclosure
 
 import (
@@ -39,16 +37,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// TypeEnclosure 是**底座声明**的卷类型名（volumes[].type）。它只表达「本卷按封装声明装配」
-// 的书写形式之一（另一种是 wrapper 类型 + SourceKey，见 IsDeclared）——不是后端类型，
-// 不经 registry.NewBackend 构造。
+// TypeEnclosure 是**内部装配标识**（日志/诊断用），**不是可写卷类型**：`volumes[].type:
+// enclosure` 被配置校验（pkg/server/config_validate.go）与建卷 API
+// （pkg/server/user_volume_api.go）fail-closed 拒绝。唯一声明形态是「wrapper 类型 +
+// `extra.source`」（见 IsDeclared）——本常量不经 registry.NewBackend 构造。
 const TypeEnclosure = "enclosure"
 
 // 封装声明的 extra 键（**装配词汇**，与卷类型正交；pkg/server 的翻译层写、本包解析）。
 const (
 	// SourceKey 是源视图字段：`<源卷>:<子路径>`（子路径空 = 整卷）。
 	SourceKey = "source"
-	// WrapperKey 是处理层注册名字段（缺省回落卷类型本身 = 嵌套声明形态）。
+	// WrapperKey 是处理层注册名字段（缺省回落卷类型本身——嵌套声明形态下二者恒等）。
 	WrapperKey = "wrapper"
 )
 
@@ -56,10 +55,10 @@ const (
 const MaxNestingDepth = 8
 
 // 声明解析错误（装配期 fail-closed；错误必须可归因到具体卷）。
+// 注：**缺 source / 缺 wrapper 不是错误**——两者由 `IsDeclared` 判据排除在声明集合之外
+// （wrapper 类型无 `extra.source` 的卷是普通 wrapper 卷，不参与本包装配）。
 var (
-	ErrMissingSource  = errors.New("enclosure: 缺少 extra.source（格式 <源卷>:<子路径>）")
 	ErrBadSource      = errors.New("enclosure: extra.source 格式非法")
-	ErrMissingWrapper = errors.New("enclosure: 缺少 extra.wrapper（封装处理层注册名）")
 	ErrUnknownWrapper = errors.New("enclosure: extra.wrapper 未注册")
 	ErrSourceNotFound = errors.New("enclosure: 源卷不存在")
 	ErrSelfEnclosure  = errors.New("enclosure: 不可封装自身")
@@ -213,20 +212,19 @@ func SealsByBaseVolume(decls []Decl) (map[string][]storage.SealRule, error) {
 	return out, nil
 }
 
-// IsDeclared 报告卷是否为**封装声明**（参与本包装配）：
-//   - 显式声明：`type: enclosure`（source/wrapper 缺失时由 parseOne fail-closed 报错）；
-//   - 嵌套声明：**已注册 wrapper 类型** + `extra.source`（装配层翻译用户面 target 语法产出）。
+// IsDeclared 报告卷是否为**封装声明**（参与本包装配）：**已注册的 wrapper 类型** +
+// `extra.source`。
 //
-// 判据只看**声明词汇**（type 与 `extra.source`），不看卷是否「叫 enclosure」——这是「enclosure
-// 是构造方式而非一种类型」的落点：嵌套封装卷的描述 Type 保持 wrapper 类型（secretdata/
-// secrets/…），故 `registry.SchemeOf`/`CategoryOf`/API 回显全按 wrapper 语义自然成立。
+// 判据只看**声明词汇**（wrapper 类型与 `extra.source`），不看卷是否「叫 enclosure」——这是
+// 「enclosure 是构造方式而非一种类型」的落点：嵌套封装卷的描述 Type 保持 wrapper 类型
+// （secretdata/secrets/…），故 `registry.SchemeOf`/`CategoryOf`/API 回显全按 wrapper 语义自然成立。
+//
+// wrapper 类型而**无** `extra.source` 的卷不是声明（如 `type: secrets` + `target: local` 的
+// 本地整卷形态）——它是普通 wrapper 卷，走按类型分派的常规构造（零回归）。
 //
 // 装配层据此把此类卷排除在 `registry.NewBackend`（按类型分派）之外，改经 `BuildBackend`
 // 构造（依赖已装配卷集的源特权视图 ⇒ 必须推迟到卷集就绪之后）。
 func IsDeclared(v volume.Volume) bool {
-	if v.Type == TypeEnclosure {
-		return true
-	}
 	if _, ok := LookupWrapper(v.Type); !ok {
 		return false
 	}
@@ -371,13 +369,11 @@ func pathsOverlap(a, b string) bool {
 	return a == b || strings.HasPrefix(b, a+"/") || strings.HasPrefix(a, b+"/")
 }
 
-// parseOne 解析单个封装卷配置（纯函数，便于单测）。调用方须已过 `IsDeclared`（source 存在）。
+// parseOne 解析单个封装卷配置（纯函数，便于单测）。调用方须已过 `IsDeclared`（wrapper 类型
+// 已注册 + `extra.source` 非空），故格式/引用校验之外的「缺 source」「缺 wrapper」不可能发生。
 func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
 	raw, _ := v.Extra[SourceKey].(string)
 	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return Decl{}, fmt.Errorf("%w（卷 %q）", ErrMissingSource, v.Name)
-	}
 	srcVol, srcPath, ok := splitSource(raw)
 	if !ok {
 		return Decl{}, fmt.Errorf("%w: %q（卷 %q，须为 <源卷>:<子路径>）", ErrBadSource, raw, v.Name)
@@ -397,13 +393,11 @@ func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
 	}
 	wrapper, _ := v.Extra[WrapperKey].(string)
 	wrapper = strings.TrimSpace(wrapper)
-	if wrapper == "" && v.Type != TypeEnclosure {
-		// 嵌套声明（wrapper 类型 + source）：处理层即卷类型本身——用户面身份与实现同源，
-		// 不再重复书写 wrapper 键（`type: secretdata` 的封装卷 wrapper 恒为 secretdata）。
-		wrapper = v.Type
-	}
 	if wrapper == "" {
-		return Decl{}, fmt.Errorf("%w（卷 %q）", ErrMissingWrapper, v.Name)
+		// 嵌套声明（wrapper 类型 + source）：处理层即卷类型本身——用户面身份与实现同源，
+		// 不重复书写 wrapper 键（`type: secretdata` 的封装卷 wrapper 恒为 secretdata）。
+		// IsDeclared 已保证 v.Type 是**已注册**的处理层名 ⇒ 此处回落恒有解。
+		wrapper = v.Type
 	}
 	if _, ok := LookupWrapper(wrapper); !ok {
 		return Decl{}, fmt.Errorf("%w: %q（卷 %q）", ErrUnknownWrapper, wrapper, v.Name)

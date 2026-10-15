@@ -281,11 +281,11 @@ func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, 
 // **推迟装配**（两种情况，判据都是「构造依赖已装配卷集」）：
 //   - registry 标记的推迟类型（`IsDeferredType`，如 secretdata：经 secret_url → secrets
 //     卷密钥，此时 set 尚未就绪）；
-//   - **封装声明卷**（`enclosure.IsDeclared`：显式 `type: enclosure` 或 wrapper 类型 + 嵌套
-//     source）——后端构造依赖源卷特权视图，由 `enclosure.AttachAll` 在卷集就绪后补装。
-//     判据用**声明**而非类型：嵌套封装卷的描述 Type 是其 wrapper 类型（方案甲，见
-//     pkg/volume/enclosure.IsDeclared），按类型分派会误构造（secretdata 的 target 解析对
-//     嵌套 target 恒 fail-closed）或漏装配（secrets 非推迟类型）。
+//   - **封装声明卷**（`enclosure.IsDeclared`：**wrapper 类型** + `extra.source`）——后端构造
+//     依赖源卷特权视图，由 `enclosure.AttachAll` 在卷集就绪后补装。判据用**声明**而非类型：
+//     嵌套封装卷的描述 Type 是其 wrapper 类型（方案甲，见 pkg/volume/enclosure.IsDeclared），
+//     按类型分派会误构造（secretdata 的 target 解析对嵌套 target 恒 fail-closed）或漏装配
+//     （secrets 非推迟类型）。
 //
 // 两者都只登记卷元数据（volumes）与容量池（pools）：external 留空，待 RegisterRoutes 卷集合
 // 就绪后由装配层逐个构造并挂回（cmd/sproxy setupSecretBackends / enclosure.AttachAll）。

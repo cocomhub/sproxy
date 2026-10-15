@@ -133,7 +133,7 @@ func TestConfigDeclaredNested_ConflictFailClosed(t *testing.T) {
 //   - 嵌套 target + 已注册 wrapper 类型 → 翻译（补 source/wrapper，**Type 不变**，原 target 保留）；
 //   - 非嵌套（无分隔符 / `local` / 卷名或子路径空）→ 不翻译；
 //   - 非封装处理层类型 → 不翻译（普通外部卷零回归）；
-//   - 显式 `type: enclosure` 声明（非 wrapper 注册名）→ 不是「嵌套翻译」的输入（恒定不翻译）。
+//   - `type: enclosure`（内部装配标识，非可写类型 / 非 wrapper 注册名）→ 恒定不翻译。
 func TestTranslateNestedVolume(t *testing.T) {
 	t.Parallel()
 	registerFixtureWrapper("translate-test-wrap")
@@ -149,7 +149,7 @@ func TestTranslateNestedVolume(t *testing.T) {
 		{"local 不翻译", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "local"}}, false, ""},
 		{"尾斜杠不翻译", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "main/"}}, false, ""},
 		{"未注册类型不翻译", volume.Volume{Name: "v", Type: "ghost-type", Extra: map[string]any{"target": "main/videos"}}, false, ""},
-		{"显式 enclosure 声明不翻译", volume.Volume{Name: "v", Type: enclosure.TypeEnclosure, Extra: map[string]any{"target": "main/videos", "source": "main:videos"}}, false, ""},
+		{"type:enclosure（非可写类型）不翻译", volume.Volume{Name: "v", Type: enclosure.TypeEnclosure, Extra: map[string]any{"target": "main/videos", "source": "main:videos"}}, false, ""},
 		{"本地卷不翻译", volume.Volume{Name: "v", Type: volume.TypeLocal, Extra: map[string]any{"target": "main/videos"}}, false, ""},
 	}
 	for _, tc := range cases {

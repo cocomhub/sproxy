@@ -54,8 +54,8 @@ func newAttachedEnclosureSet(t *testing.T, sealPath string) (*registry.Set, *sto
 	t.Cleanup(func() { _ = rt.Close() })
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: dir},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
-			"source": "main:" + sealPath, "wrapper": "attachview",
+		{Name: "vault", Type: "attachview", Extra: map[string]any{
+			"source": "main:" + sealPath,
 		}},
 	}
 	// 按**生产装配序**：先就地累积（pools + volumes）→ applyEnclosureSeals（注入封印 + 配额父链

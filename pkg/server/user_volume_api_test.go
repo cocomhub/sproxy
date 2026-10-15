@@ -655,3 +655,29 @@ func TestFlushVolumeCounters_FlushesDirtyCounters(t *testing.T) {
 		t.Fatalf("关机 flush 后快照 used 应为 300, got %d", f.Used)
 	}
 }
+
+// TestUserVolumeAPI_Create_EnclosureTypeRejected 回归：`type: enclosure` 是**内部装配机制**，
+// 不是可建卷类型——建卷 API 必须 400 拒绝并给出正确写法提示（否则会一路走到
+// registry.NewBackend 报「类型未注册后端」，客户端无从判断该怎么改）。
+// 变异：去掉 createUserVolumeHandler 的 enclosure 分支 → 本用例拿到的错误文案不含
+// 「内部装配机制」（退化为 NewBackend 的未注册文案）→ 红。
+func TestUserVolumeAPI_Create_EnclosureTypeRejected(t *testing.T) {
+	t.Parallel()
+	h, store := newUserVolumeAPIHandlers(t, false)
+	mux := userVolWrap(h, "alice")
+
+	rec := postUserVolume(t, mux, map[string]any{
+		"name": "vault", "type": "enclosure",
+		"extra": map[string]any{"source": "main:videos", "wrapper": userVolumeTestType},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("type=enclosure 建卷应 400, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "内部装配机制") {
+		t.Fatalf("错误文案应说明 enclosure 是内部装配机制, got %s", rec.Body.String())
+	}
+	// 不落盘（fail-closed 在建卷前置校验内）。
+	if v, err := store.Get("alice", "vault"); err != nil || v != nil {
+		t.Fatalf("被拒的卷不应落盘: v=%v err=%v", v, err)
+	}
+}

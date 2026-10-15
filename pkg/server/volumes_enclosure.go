@@ -108,10 +108,10 @@ func logEnclosureDecls(log *slog.Logger, decls []enclosure.Decl) {
 	}
 }
 
-// isEnclosureDecl 报告卷声明是否走**封装装配**：显式 `type: enclosure` 或嵌套 wrapper 形态
-// （wrapper 类型 + `extra.source`）。判据单源在 `enclosure.IsDeclared`（装配词汇），本函数只做
-// 配置层（VolumeConfig）到卷描述的适配——装配期据此把此类卷排除在按类型分派的
-// `registry.NewBackend` 之外（后端由 `enclosure.AttachAll` 在卷集就绪后构造）。
+// isEnclosureDecl 报告卷声明是否走**封装装配**：wrapper 类型 + `extra.source`（唯一形态）。
+// 判据单源在 `enclosure.IsDeclared`（装配词汇），本函数只做配置层（VolumeConfig）到卷描述的
+// 适配——装配期据此把此类卷排除在按类型分派的 `registry.NewBackend` 之外（后端由
+// `enclosure.AttachAll` 在卷集就绪后构造）。
 func isEnclosureDecl(typ string, extra map[string]any) bool {
 	return enclosure.IsDeclared(volume.Volume{Type: typ, Extra: extra})
 }

@@ -61,8 +61,8 @@ type AttachOptions struct {
 	StorageRoot string
 }
 
-// AttachAll 为所有已登记的**封装声明卷**（IsDeclared：显式 `type: enclosure` 或嵌套 wrapper
-// 形态）构造后端并挂回卷集（幂等：已挂者跳过）。必须在**卷集就绪后**调用（与 secretdata
+// AttachAll 为所有已登记的**封装声明卷**（IsDeclared：**wrapper 类型** + `extra.source`）
+// 构造后端并挂回卷集（幂等：已挂者跳过）。必须在**卷集就绪后**调用（与 secretdata
 // 补装同层，fail-closed：任一卷失败返回错误）。
 // opts.StorageRoot 非空时启用持久化容量计数器（与外部卷同源）。
 func AttachAll(ctx context.Context, set *registry.Set, logger *slog.Logger, opts ...AttachOptions) error {

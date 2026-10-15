@@ -35,7 +35,7 @@ func newRegionTestSet(t *testing.T, srcPath string) (*registry.Set, string) {
 	t.Cleanup(func() { _ = rt.Close() })
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: dir},
-		{Name: "vault", Type: TypeEnclosure, Extra: map[string]any{"source": "main:" + srcPath, "wrapper": regionTestWrapper}},
+		{Name: "vault", Type: regionTestWrapper, Extra: map[string]any{"source": "main:" + srcPath}},
 	}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, nil, "main")
 	return set, dir

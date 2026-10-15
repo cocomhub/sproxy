@@ -798,8 +798,8 @@ func TestEnclosureVolume_RestartReattach(t *testing.T) {
 	}
 	vols := []volume.Volume{
 		{Name: "default", Type: volume.TypeLocal, RootDir: root},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Capacity: 100, Extra: map[string]any{
-			"source": "default:videos", "wrapper": reattachWrapType,
+		{Name: "vault", Type: reattachWrapType, Capacity: 100, Extra: map[string]any{
+			"source": "default:videos",
 		}},
 	}
 	newSet := func() *registry.Set {
@@ -917,9 +917,8 @@ func TestEnclosureWrapper_Secretdata_ProductionAssembly(t *testing.T) {
 	}
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: root},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
+		{Name: "vault", Type: volume.TypeSecretdata, Extra: map[string]any{
 			"source":     "main:alice/user/vault",
-			"wrapper":    "secretdata",
 			"secret_url": "secrets://default/datakey",
 		}},
 	}
@@ -1167,8 +1166,8 @@ func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
 	}
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: root},
-		{Name: "keys", Type: enclosure.TypeEnclosure, Extra: map[string]any{
-			"source": "main:alice/user/vault", "wrapper": "secrets",
+		{Name: "keys", Type: "secrets", Extra: map[string]any{
+			"source": "main:alice/user/vault",
 		}},
 	}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, map[string]registry.ExternalBackend{},
