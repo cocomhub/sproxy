@@ -21,10 +21,10 @@ import (
 
 // secrets_api_test.go 覆盖 /api/secrets 端点的 handler 逻辑（创建/列表/导出/删除）。
 //
-// 寻址模型（用户裁定 2026-10-15）：默认 secrets 卷是 **per-owner** 的——每个 owner 租户根下的
-// `secrets/` 桶（`<storage_root>/<owner>/secrets/`），由**请求 owner** 解析、首次使用自动派生。
-// 故本测试显式注入请求主体（`withActor`）并断言**磁盘落点**按 owner 隔离；不再有任何「默认
-// secrets 卷装配」步骤（这也是被删掉的冗余模型的回归锚点）。
+// 寻址模型（用户裁定 2026-10-15）：默认 secrets 卷是 **per-owner** 的——每个 owner 租户根下
+// **meta 桶内**的 `meta/secrets/` 目录（`<storage_root>/<owner>/meta/secrets/`），由**请求 owner**
+// 解析、首次使用自动派生。故本测试显式注入请求主体（`withActor`）并断言**磁盘落点**按 owner
+// 隔离；不再有任何「默认 secrets 卷装配」步骤（这也是被删掉的冗余模型的回归锚点）。
 
 // newSecretsHandlers 装配 secret 端点测试用 Handlers（含真实存储根 ⇒ 租户可用）。
 func newSecretsHandlers(t *testing.T, modifyCfg func(*Config)) (*Handlers, string) {
@@ -106,9 +106,10 @@ func callJSONHandler(h http.Handler, method, target, body string) (int, string) 
 	return rec.Code, rec.Body.String()
 }
 
-// secretsOnDisk 返回 owner 默认 secrets 桶内某 secret 的物理路径（<root>/<owner>/secrets/<name>）。
+// secretsOnDisk 返回 owner 默认 secrets 桶内某 secret 的物理路径
+// （`<root>/<owner>/meta/secrets/<name>`——meta 桶内，见 pkg/server/secrets_api.go 文件头）。
 func secretsOnDisk(root, owner, name string) string {
-	return filepath.Join(root, owner, "secrets", name)
+	return filepath.Join(root, owner, "meta", "secrets", name)
 }
 
 // readSecretOnDisk 读 owner 桶内的 secret 文件内容（trim）。不存在/读失败即 Fatal。
@@ -166,7 +167,7 @@ func TestSecretsCreateRandom(t *testing.T) {
 	if len(resp.Value) != 64 {
 		t.Errorf("随机 secret 返回长度=%d 应 64 hex", len(resp.Value))
 	}
-	// 落盘断言：<root>/alice/secrets/rand1（owner 桶，非全局目录）。
+	// 落盘断言：<root>/alice/meta/secrets/rand1（owner 的 meta 桶，非全局目录）。
 	if got := readSecretOnDisk(t, tmpDir, "alice", "rand1"); got != resp.Value {
 		t.Errorf("磁盘值=%q 与返回 %q 不一致", got, resp.Value)
 	}
@@ -190,7 +191,7 @@ func TestSecretsAnonymousOwner(t *testing.T) {
 		t.Fatalf("未认证创建状态=%d body=%s", code, body)
 	}
 	if _, err := os.Stat(secretsOnDisk(tmpDir, "anonymous", "anon1")); err != nil {
-		t.Errorf("未认证 secret 应落 <root>/anonymous/secrets/anon1: %v", err)
+		t.Errorf("未认证 secret 应落 <root>/anonymous/meta/secrets/anon1: %v", err)
 	}
 }
 
@@ -380,15 +381,15 @@ func TestSecretsHandler_TenantUnavailable(t *testing.T) {
 }
 
 // TestSecretsHandler_BucketDerivationFailure 桶派生失败（IO 故障）→ 500（服务端故障，
-// **不**误报 503/400）。用「<root>/<owner>/secrets 处已存在同名**文件**」逼出 MkdirAll 失败。
+// **不**误报 503/400）。用「`<root>/<owner>/meta/secrets` 处已存在同名**文件**」逼出 MkdirAll 失败。
 func TestSecretsHandler_BucketDerivationFailure(t *testing.T) {
 	t.Parallel()
 	h, tmpDir := newSecretsHandlers(t, nil)
-	ownerDir := filepath.Join(tmpDir, "alice")
-	if err := os.MkdirAll(ownerDir, 0o755); err != nil {
-		t.Fatalf("mkdir owner: %v", err)
+	metaDir := filepath.Join(tmpDir, "alice", "meta")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatalf("mkdir owner meta: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(ownerDir, "secrets"), []byte("占位文件"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(metaDir, "secrets"), []byte("占位文件"), 0o600); err != nil {
 		t.Fatalf("write 占位文件: %v", err)
 	}
 	code, body := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets",
@@ -434,10 +435,34 @@ func TestSecretsDefaultIgnoresAssembledSecretsVolumes(t *testing.T) {
 	var resp secretCreateResponse
 	decJSON(t, body, &resp)
 	if got := readSecretOnDisk(t, tmpDir, "alice", "mine"); got != resp.Value {
-		t.Errorf("管理面应落 <root>/alice/secrets/mine，磁盘=%q want %q", got, resp.Value)
+		t.Errorf("管理面应落 <root>/alice/meta/secrets/mine，磁盘=%q want %q", got, resp.Value)
 	}
 	// 已装配的 secrets 卷目录内不得出现该 secret（不被抢占）。
 	if _, err := os.Stat(filepath.Join(legacyRoot, "mine")); err == nil {
 		t.Error("secret 不得落到已装配的 secrets 卷（默认桶恒 per-owner）")
+	}
+}
+
+// TestSecretsBucket_NotCountedAsUserUsage 锁定**落点归因**（用户裁定 2026-10-15 追加）：per-owner
+// 默认 secrets 桶落在 **meta 桶内**（`<owner>/meta/secrets/`）⇒ `stats`/`du` 的桶分类把它归入
+// 服务端内部账本（meta），**不计入**该 owner 的用户文件数/用量——避免密钥字节（每 secret 60+ 字节）
+// 污染配额水位与文件计数。
+//
+// 变异锚点：把 `secretsBucketDir` 改回租户根下的裸 `secrets/`（非功能桶名 ⇒ 统计对未知段兜底成
+// 「用户文件」）→ 本用例红。
+func TestSecretsBucket_NotCountedAsUserUsage(t *testing.T) {
+	t.Parallel()
+	h, tmpDir := newSecretsHandlers(t, nil)
+	code, body := callSecretsHandler(h, "alice", http.MethodPost, "/api/secrets", `{"name":"k","mode":"random"}`)
+	if code != http.StatusOK {
+		t.Fatalf("创建 secret 状态=%d body=%s", code, body)
+	}
+	// 先确认确实落盘——否则「统计为 0」只是没写成功的假绿。
+	if _, err := os.Stat(secretsOnDisk(tmpDir, "alice", "k")); err != nil {
+		t.Fatalf("secret 未落盘（后续统计断言无意义）: %v", err)
+	}
+	files, size := h.walkUploadStats(tmpDir)
+	if files != 0 || size != 0 {
+		t.Errorf("secret 属服务端内部账本（meta 桶），不得计入用户用量：files=%d size=%d", files, size)
 	}
 }

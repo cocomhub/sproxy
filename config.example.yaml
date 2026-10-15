@@ -99,7 +99,7 @@ storage_root: "./storage"
 #   #   先建 secrets 卷（放加密密钥文件），再建 secretdata 卷引用其密钥。密钥文件（64 hex）需
 #   #   **手动放置**：在 secrets 卷底层 `<extra.root>/secrets/` 目录放一个 64-hex 文本文件
 #   #   （如 `datakey`）。也可用 CLI/Web 创建（`sclient secret create` 写入的是 **per-owner
-#   #   默认桶** `<storage_root>/<owner>/secrets/`，与显式声明的 secrets 卷不是同一目录）。
+#   #   默认桶** `<storage_root>/<owner>/meta/secrets/`，与显式声明的 secrets 卷不是同一目录）。
 #   #   - name: "mykeys"           # type=secrets：密钥管理卷（底层卷 secrets/ 目录视图）
 #   #     type: "secrets"
 #   #     extra: {target: "local", root: "./storage/keys"}  # root 必须在 extra 里（顶层 root 只服务本地卷）
@@ -122,7 +122,7 @@ storage_root: "./storage"
 #   #                              #   （MP4/MOV→go-mp4、MKV/TS/AVI→ffprobe 若有、否则 fixed）；
 #   #                              #   "fixed" = 关闭关键帧分块（定长 blocklet，可显式禁用）；
 #   #                              #   "video-keyframe" = 强制开启（需 ffmpeg 或 go-mp4 提供者装配）
-#   #   # 默认 secrets 是 **per-owner** 的（每个 owner 各自的 <storage_root>/<owner>/secrets/，免声明、
+#   #   # 默认 secrets 是 **per-owner** 的（每个 owner 各自的 <storage_root>/<owner>/meta/secrets/，免声明、
 #   #   # 首次使用时自动派生）：/api/secrets 恒作用于请求者自己的桶。**服务级声明（此处 config）没有
 #   #   # owner 上下文** ⇒ secret_url 必须指向显式命名的 secrets 卷（如 secrets://mykeys/datakey）；
 #   #   # 只有带身份的建卷请求（POST /api/volumes/user）才可写 "secrets://default-secrets/<name>"

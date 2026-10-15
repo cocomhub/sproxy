@@ -50,7 +50,8 @@ volumes:
       # max_file_bytes: 0                     # 单文件上限（0 = 不限）
 
 # 不声明 secrets 卷时：**per-owner 默认桶**（每个 owner 各自的
-#   <storage_root>/<owner>/secrets/，owner 首次使用时自动派生）。
+#   <storage_root>/<owner>/meta/secrets/，owner 首次使用时自动派生；在 meta 桶内 ⇒
+#   密钥字节不计入该 owner 的用户用量/文件数）。
 #   - 服务级声明（本示例这种 config volumes[] 写法）**没有 owner 上下文** ⇒
 #     `secret_url` 必须指向**显式命名**的 secrets 卷（如 secrets://mykeys/datakey）；
 #   - 经建卷 API（`POST /api/volumes/user`，SproxySig 身份）创建带 secret_url 的卷时，
@@ -215,7 +216,7 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 | ⑤ | enclosure **内部化**（方案甲）：嵌套封装卷的对外 `Type` 保持 wrapper 类型（secretdata/secrets/…），装配由**声明判据**（`enclosure.IsDeclared`）接管而非按类型分派——修正「type=enclosure」造成的 `SchemeOf` 无协议（cloud 转存/归档被拒）、`CategoryOf≠wrapper`（建卷表单/防环失据）、API/CLI 回显泄漏内部机制 | 已完成 |
 | ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只写目标卷 FS、不经路由 commit，删除时仍对 owner 全局 Scope 做未曾提交的释放） | 已完成（写入侧结算：转存写成功后按 `TargetQuotaScopeFor`/`TargetPhysChargeFor` 与删除侧**同账本同口径**差分入账） |
 | ⑥ | enclosure **纯内部化**：`IsDeclared` 判据收敛为「wrapper 类型 + `extra.source`」（去 `type: enclosure` 分支与条件式 wrapper 回落）；`type: enclosure` 在 config 校验与建卷 API 处 fail-closed 拒绝；`ErrMissingSource`/`ErrMissingWrapper` 随判据收紧成为不可达死哨兵 → 移除 | 已完成 |
-| ⑦ | **per-owner 默认 secrets 卷**（用户裁定 2026-10-15）：`default-secrets` 成为**每个 owner 各自的**默认桶（`<storage_root>/<owner>/secrets/`，免声明、首次使用自动派生、`/api/secrets` 恒作用于请求者桶 ⇒ per-owner 隔离）；删除「全局默认 secrets 卷 + 多全局卷确定性选取（`extra.default` 标记 / 基础卷优先 / 卷名升序）」整套模型与 `extra.wrapper` 冗余键书写；`secret_url` 双寻址：`secrets://default-secrets/<名>` → per-owner 桶（需请求 owner 上下文），其它卷名 → 显式声明的 secrets 卷（含多层嵌套链，如 secrets over secretdata over baidupcs） | 已完成 |
+| ⑦ | **per-owner 默认 secrets 卷**（用户裁定 2026-10-15）：`default-secrets` 成为**每个 owner 各自的**默认桶（`<storage_root>/<owner>/meta/secrets/`——owner 租户根的 **meta 桶**内，免声明、首次使用自动派生、`/api/secrets` 恒作用于请求者桶 ⇒ per-owner 隔离）；删除「全局默认 secrets 卷 + 多全局卷确定性选取（`extra.default` 标记 / 基础卷优先 / 卷名升序）」整套模型与 `extra.wrapper` 冗余键书写；`secret_url` 双寻址：`secrets://default-secrets/<名>` → per-owner 桶（需请求 owner 上下文），其它卷名 → 显式声明的 secrets 卷（含多层嵌套链，如 secrets over secretdata over baidupcs） | 已完成 |
 
 ## 4. 寻址
 
@@ -225,8 +226,10 @@ secretdata://<卷>/<path>        # secretdata 卷内文件路径
 ```
 
 - **默认 secrets 是 per-owner 的**（用户裁定 2026-10-15）：不再有全局单卷——每个 owner 各有
-  一个同名默认卷，落**该 owner 的租户根** `<storage_root>/<owner>/secrets/`（免声明、首次使用时
-  自动派生，MkdirAll 0700 + 密钥文件 0600）。`/api/secrets` 的创建/列表/导出/删除恒作用于
+  一个同名默认卷，落**该 owner 租户根的 meta 桶内** `<storage_root>/<owner>/meta/secrets/`（免声明、
+  首次使用时自动派生，MkdirAll 0700 + 密钥文件 0600）。放在 meta 桶内（与 `<owner>/meta/credentials.json`
+  同族）使密钥字节按**服务端内部账本**口径归类：`stats`/`du` 与容量扫描只按功能桶分类，裸的未知段会
+  被兜底算作该 owner 的**用户文件**（污染配额水位与文件计数），meta 桶则天然排除。`/api/secrets` 的创建/列表/导出/删除恒作用于
   **请求者 owner** 的桶 ⇒ 不同 owner 的同名 secret 互不可见（per-owner 隔离）。
   - 因此**没有「多个全局 secrets 卷选哪个」的模型**（`extra.default` 标记与「基础卷优先/卷名升序」
     的启发式选取已随本次重构移除）。

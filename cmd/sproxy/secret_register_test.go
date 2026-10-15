@@ -738,10 +738,10 @@ func TestSecretdataVolume_PerOwnerDefaultSecrets(t *testing.T) {
 	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 
 	// alice 的默认桶里**手工放置**密钥（与 HTTP 面 /api/secrets 写入同一路径
-	// `<默认卷根>/<owner>/secrets/<名>`；跨模块等价性由 pkg/server 的 handler 用例 +
-	// e2e 磁盘副作用断言覆盖）。
+	// `<默认卷根>/<owner>/meta/secrets/<名>`——meta 桶内；跨模块等价性由 pkg/server 的 handler
+	// 用例 + e2e 磁盘副作用断言覆盖）。
 	const aliceKey = "7c9f1a3b5d7e90123456789abcdef0123456789abcdef0123456789abcdef012"
-	aliceBucket := filepath.Join(set.DefaultRoot().AbsPath(), "alice", "secrets")
+	aliceBucket := filepath.Join(set.DefaultRoot().AbsPath(), "alice", "meta", "secrets")
 	if err := os.MkdirAll(aliceBucket, 0o700); err != nil {
 		t.Fatalf("mkdir alice bucket: %v", err)
 	}
@@ -776,8 +776,8 @@ func TestSecretdataVolume_PerOwnerDefaultSecrets(t *testing.T) {
 		t.Fatalf("读回=%q err=%v，want %q", got, rerr, body)
 	}
 	// 磁盘落点：密钥在 alice 的默认桶（不是共享目录、也不是别人桶）。
-	if _, serr := os.Stat(filepath.Join(set.DefaultRoot().AbsPath(), "alice", "secrets", "datakey")); serr != nil {
-		t.Errorf("密钥应落 <默认卷根>/alice/secrets/datakey: %v", serr)
+	if _, serr := os.Stat(filepath.Join(set.DefaultRoot().AbsPath(), "alice", "meta", "secrets", "datakey")); serr != nil {
+		t.Errorf("密钥应落 <默认卷根>/alice/meta/secrets/datakey: %v", serr)
 	}
 
 	// ② 无 owner（装配期/服务级声明）→ fail-closed + 替代写法提示。

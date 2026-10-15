@@ -32,8 +32,9 @@ import (
 )
 
 // DefaultVolumeName 是 **per-owner 默认 secrets 卷名**（用户裁定 2026-10-15）：每个 owner 各有一个
-// 同名默认 secrets 卷，落该 owner 的租户根 `secrets/` 目录（`<storage_root>/<owner>/secrets/`）
-// ——同名 per-owner 隔离、免声明、owner 首次使用时自动派生。
+// 同名默认 secrets 卷，落该 owner 租户根的 **meta 桶**内 `meta/secrets/` 目录
+// （`<storage_root>/<owner>/meta/secrets/`）——同名 per-owner 隔离、免声明、owner 首次使用时自动
+// 派生；在 meta 桶内使密钥字节不计入该 owner 的用户用量/文件数（见 pkg/server/secrets_api.go）。
 //
 // 它**不是** registry 里的已装配卷：寻址由**请求 owner 上下文**决定（服务端
 // `Handlers.secretsManagerFor`），故 `secrets://default-secrets/<name>` 一类 URL 在**无 owner

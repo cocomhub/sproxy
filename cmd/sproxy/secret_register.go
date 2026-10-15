@@ -12,8 +12,8 @@ package main
 //  2. 装配 config 声明的 secretdata 卷（secret_url → secrets 卷读密钥，推迟装配）。
 //
 // **默认 secrets 不是装配对象**（用户裁定 2026-10-15）：它是 per-owner 的
-// `<storage_root>/<owner>/secrets/` 桶，由 `/api/secrets` 按请求 owner 解析并按需派生
-// （pkg/server/secretsManagerFor），故本文件不再有「启动默认建本地卷」这一步。
+// `<storage_root>/<owner>/meta/secrets/` 目录（owner 租户根的 meta 桶内），由 `/api/secrets`
+// 按请求 owner 解析并按需派生（pkg/server/secretsManagerFor），故本文件不再有「启动默认建本地卷」这一步。
 //
 // secrets 卷由装配层把底层卷的 secrets/ 前缀视图 FS 注入（secrets.NewBackend 签名），
 // secretdata 卷由装配层解析 secret_url 到密钥字节后注入（secretdata.NewBackend 签名）。
@@ -225,7 +225,7 @@ var setupSecretdataOnce sync.Once
 //
 // **两条寻址路径**（用户裁定 2026-10-15）：
 //  1. authority = 空 / `default` / `default-secrets` → **per-owner 默认桶**
-//     （`<storage_root>/<owner>/secrets/`）：需要 ctx 中的 owner（`secrets.WithOwner`，由带身份的
+//     （`<storage_root>/<owner>/meta/secrets/`）：需要 ctx 中的 owner（`secrets.WithOwner`，由带身份的
 //     建卷请求注入，见 pkg/server/userVolumeHandler）。装配期（boot）没有请求身份 ⇒ 无法定位该桶，
 //     显式 fail-closed 并给出替代写法（服务级声明请用**显式命名**的 secrets 卷）。
 //  2. 其它 authority = **显式声明的 secrets 卷名**（`volumes[]` 中 `type: secrets`，含多层嵌套

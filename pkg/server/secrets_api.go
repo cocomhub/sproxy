@@ -22,13 +22,19 @@ import (
 // secret）。
 //
 // 寻址模型（用户裁定 2026-10-15）：默认 secrets 卷**不是 registry 里的已装配卷**，而是每个
-// owner 租户根下的 `secrets/` 桶（`<storage_root>/<owner>/secrets/`）——由**请求 owner** 唯一
-// 决定（`secretsManagerFor`）。owner 首次使用即自动派生该桶（免声明）。
+// owner 租户根下 **meta 桶内的** `meta/secrets/` 目录（`<storage_root>/<owner>/meta/secrets/`）
+// ——由**请求 owner** 唯一决定（`secretsManagerFor`）。owner 首次使用即自动派生该目录（免声明）。
+//
+// **为什么在 meta 桶内（2026-10-15 追加裁定）**：此前落租户根下的裸 `secrets/` 段——它**不在
+// 功能桶白名单内**，于是 `stats`/`du` 与容量扫描按「未知段 → 用户文件」兜底，把密钥字节（每个
+// 60+ 字节）算进该 owner 的**用户用量**（污染配额水位与文件数）。meta 桶是**服务端内部账本桶**
+// （与 `<owner>/meta/credentials.json` 同族）：天然不计入用户文件数/分类用量（仅计入租户
+// `totalUsage` 与 meta 子 Scope），且仍受同一 `storage.Root` 的 at-rest 加解密与封印语义。
 //
 // 与通用文件 API 的关系（客观约束，2026-10-04 核实）：通用 /upload /download /api/files 的
-// `?volume=` 与 `?subdir=` 只解析**功能桶**（user/cloud/archive/…），`<owner>/secrets/` 既不
-// 在桶白名单内也不被用户面路径映射触达。故 secret 管理必须走**专用 /api/secrets 端点**——
-// 这同时是正确安全设计（secret 不混入普通文件列表、不被通用删除/列表误管理）。
+// `?volume=` 与 `?subdir=` 只解析**功能桶**映射的用户面路径（恒在 `user/` 桶内），meta 桶既不由
+// 用户面路径映射触达（`remote_read` 等内部面才读写 meta）。故 secret 管理必须走**专用
+// /api/secrets 端点**——这同时是正确安全设计（secret 不混入普通文件列表、不被通用删除/列表误管）。
 //
 // 服务端只做「校验 + 落盘到 owner 的 secrets 桶」，**不参与任何口令/密钥派生**：
 //   - mode=random：服务端 crypto/rand 生成 32B→hex，返回给创建者（供立即备份）。
@@ -36,14 +42,13 @@ import (
 //
 // 原始口令永不传输到本层。
 
-// secretsBucketDir 是 per-owner 默认 secrets 桶在**租户根**下的目录名：密钥文件落
-// `<storage_root>/<owner>/secrets/<name>`（用户裁定 2026-10-15：每个 owner 各自的默认 secrets
-// 卷——同名 per-owner 隔离、免声明、owner 首次使用时自动派生）。
+// secretsBucketDir 是 per-owner 默认 secrets 桶在**租户根**下的相对目录（斜杠分隔）：密钥文件落
+// `<storage_root>/<owner>/meta/secrets/<name>`（用户裁定 2026-10-15：每个 owner 各自的默认
+// secrets 卷——同名 per-owner 隔离、免声明、owner 首次使用时自动派生）。
 //
-// 为什么不再装配「全局默认 secrets 卷」：那是一个**所有 owner 共享同一目录**的单卷模型，
-// 无隔离；且多 secrets 卷并存时需要「选哪个」的启发式（`secretsVolumeTier` + `extra.default`
-// 标记），是纯粹的模型冗余。per-owner 后默认桶由请求 owner 唯一确定。
-const secretsBucketDir = "secrets"
+// **在 meta 桶内**（见文件头「为什么在 meta 桶内」）：secret 字节属服务端内部账本口径，
+// 不得计入该 owner 的用户用量/文件数（`stats`/`du`/容量扫描按功能桶分类，未知段会兜底成用户文件）。
+const secretsBucketDir = "meta/secrets"
 
 // errSecretsTenantUnavailable 标记「请求者租户不可用」（未装配存储根 / 非法 owner）——
 // handler 据此回 503（能力不可用）而非 500（服务端故障）。
@@ -78,7 +83,7 @@ func ReadOwnerDefaultSecret(ctx context.Context, set *registry.Set, owner, name 
 }
 
 // secretsManagerFromTenant 在 owner 的租户根上派生默认 secrets 桶并构造 Manager：
-//  1. 首次使用**自动派生**桶：`<tenantRoot>/secrets/`（MkdirAll 0700，幂等）；
+//  1. 首次使用**自动派生**桶：`<tenantRoot>/meta/secrets/`（MkdirAll 0700，幂等）；
 //  2. 经 `NewRootSecretsFS` 取视图（at-rest 透明加解密 + 封印 + 用户可见长度）并注入 0600
 //     加固回调 —— 与既有「卷内 secrets/ 目录」口径一致（R26 登记项闭环）。
 func secretsManagerFromTenant(tnt *storage.Tenant, logger *slog.Logger) (*secrets.Manager, error) {
