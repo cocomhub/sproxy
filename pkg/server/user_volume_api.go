@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
 
 // errVolumeCycle 是封装卷底层卷成环引用哨兵错误：建卷时沿 target 链向上遍历，若回落到
@@ -221,8 +222,12 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// （方案甲：卷 Type 保持 wrapper 类型，内部机制不出现在卷描述里）：声明校验
 	// （含**足迹重叠互斥**）+ 封印注入 + 配额继承 + 后端构造全部由 AttachEnclosureVolume
 	// 完成；持久化仍存**原形态**（store 字节零变化）。
+	// **owner 贯穿**（2026-10-15）：后端构造在请求内发生 ⇒ 把请求 owner 注入 ctx，使
+	// `extra.secret_url: secrets://default-secrets/<name>` 能解析到**本 owner 的**默认桶
+	// （per-owner 默认 secrets 卷的「谁创建 = 谁的桶」语义闭环）。
+	volCtx := secrets.WithOwner(r.Context(), owner)
 	if tv, nested := TranslateNestedVolume(v); nested {
-		if err := validateNewEnclosure(r.Context(), h.volSet, tv, req.Capacity); err != nil {
+		if err := validateNewEnclosure(volCtx, h.volSet, tv, req.Capacity); err != nil {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, enclosureErrStatus(err))
 			return
 		}
@@ -231,7 +236,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 			return
 		}
-		if aerr := AttachEnclosureVolume(r.Context(), h.volSet, h.logger, h.userVolumes.Root(), tv); aerr != nil {
+		if aerr := AttachEnclosureVolume(volCtx, h.volSet, h.logger, h.userVolumes.Root(), tv); aerr != nil {
 			_ = h.userVolumes.Delete(owner, req.Name)
 			sendJSONResponse(w, map[string]string{"error": "装配失败: " + aerr.Error()}, http.StatusBadRequest)
 			return
@@ -244,7 +249,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// Capacity 回填（B3-I1）：委托配额经底层池子 Scope 生效，Volume.Capacity 一并带配额，
 	// 使 /api/volumes（卷仪表）与 /api/volumes/user（卷管理）对封装卷显示一致容量——此前
 	// 建卷不加 Capacity，仪表读 v.Capacity 恒 0 显示「不限」与实际 507 冲突。
-	be, err := registry.NewBackend(r.Context(), v)
+	be, err := registry.NewBackend(volCtx, v)
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": "type 未注册或 extra 非法: " + err.Error()}, http.StatusBadRequest)
 		return

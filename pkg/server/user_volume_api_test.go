@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
 
 // userVolumeTestType 是用户卷 API 测试用的 fake backend 类型（全局注册一次）。
@@ -138,6 +139,45 @@ func userVolWrap(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("GET /api/volumes/user", wrap(h.listUserVolumesHandler))
 	mux.HandleFunc("DELETE /api/volumes/user", wrap(h.deleteUserVolumeHandler))
 	return mux
+}
+
+// userVolOwnerProbeTypePrefix 是「owner 上下文探针」后端类型名前缀：每用例注册**唯一类型名**
+// （+ t.Cleanup 反注册）⇒ 探针状态是闭包局部变量，与其它并行用例零共享（无需全局可变状态）。
+const userVolOwnerProbeTypePrefix = "user-vol-owner-probe-"
+
+// ownerProbeBackend 是最小 ExternalBackend（建卷路径只要求 FS/Close；容量包装会再叠一层）。
+type ownerProbeBackend struct{}
+
+func (ownerProbeBackend) FS() syncpkg.FS { return nil }
+func (ownerProbeBackend) Close() error   { return nil }
+
+// TestUserVolumeAPI_Create_InjectsOwnerIntoBackendCtx 锁定**建卷路径的 owner 贯穿**
+// （用户裁定 2026-10-15 第 3 点的前提）：后端构造发生在请求内，故必须把请求 owner 注入构造
+// ctx —— 只有这样 `extra.secret_url: secrets://default-secrets/<名>` 才能解析到**本 owner 的**
+// per-owner 默认桶（`secrets.OwnerFromContext` 的唯一生产者就是该处 wiring）。
+//
+// 探针方式：注册一个把 ctx owner 记入闭包的假后端（唯一类型名 ⇒ 可并行、无全局状态）。
+// 变异：去掉 createUserVolumeHandler 里的 `secrets.WithOwner(...)` → 探针读到空 owner → 红。
+func TestUserVolumeAPI_Create_InjectsOwnerIntoBackendCtx(t *testing.T) {
+	t.Parallel()
+	h, _ := newUserVolumeAPIHandlers(t, false)
+
+	typ := userVolOwnerProbeTypePrefix + "alice"
+	var seenOwner string
+	registry.RegisterBackend(typ, func(ctx context.Context, _ volume.Volume) (registry.ExternalBackend, error) {
+		seenOwner = secrets.OwnerFromContext(ctx)
+		return ownerProbeBackend{}, nil
+	})
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
+
+	mux := userVolWrap(h, "alice")
+	rec := postUserVolume(t, mux, map[string]any{"name": "probe", "type": typ, "extra": map[string]any{}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if seenOwner != "alice" {
+		t.Fatalf("后端构造 ctx 中的 owner = %q, want alice（建卷路径未贯穿 owner ⇒ per-owner secret_url 不可解析）", seenOwner)
+	}
 }
 
 // postUserVolume 发送创建用户卷请求。
