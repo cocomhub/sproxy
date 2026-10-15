@@ -171,9 +171,9 @@ func TestWrapperDelete_WithData_CleansDir(t *testing.T) {
 	if status, _, respBody := volumeUpload(t, base, "a.bin", body, "videos"); status != http.StatusOK {
 		t.Fatalf("上传封装卷 = %d, want 200 (body: %s)", status, respBody)
 	}
-	// 数据落盘密文（main/videos/user 存在）。
-	if _, err := os.Stat(filepath.Join(mainRoot, "videos", "user")); err != nil {
-		t.Fatalf("封装卷数据应已落盘 main/videos/user: %v", err)
+	// 数据落盘密文（main/videos/<owner>/user 存在——键空间恒 owner 维度）。
+	if _, err := os.Stat(filepath.Join(mainRoot, "videos", "alice", "user")); err != nil {
+		t.Fatalf("封装卷数据应已落盘 main/videos/alice/user: %v", err)
 	}
 	// 删封装卷（带数据）：整流删除卷内数据 + 清占用子目录。
 	rec := wrapperJSON(t, base, http.MethodDelete, "/api/volumes/user?name=videos", nil)
@@ -227,7 +227,7 @@ func TestWrapperMove_TargetWrapper_ClearMessage(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("move 目标封装卷 = %d, want 200 (body: %s)", status, body)
 	}
-	if _, err := os.Stat(filepath.Join(mainRoot, "wrapdir", "user", "a.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(mainRoot, "wrapdir", "alice", "user", "a.txt")); err != nil {
 		t.Fatalf("move 后文件应落到 wrapB 子目录视图: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(mainRoot, "alice", "user", "a.txt")); !os.IsNotExist(err) {
@@ -276,7 +276,7 @@ func TestWrapperDelete_CrossOwnerACL(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("非 owner 删他人封装卷 = %d, want 404（不泄存在性）(body: %s)", rec.Code, rec.Body.String())
 	}
-	if _, err := os.Stat(filepath.Join(mainRoot, "videos", "user")); err != nil {
+	if _, err := os.Stat(filepath.Join(mainRoot, "videos", "alice", "user")); err != nil {
 		t.Fatalf("bob 删除不应影响 alice 封装卷数据: %v", err)
 	}
 }

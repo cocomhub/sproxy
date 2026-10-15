@@ -245,11 +245,10 @@ func TestWrapperDelete_QuotaRelease_CapacityDisplay(t *testing.T) {
 	}
 
 	// C5：删封装卷（无残留数据 → 清理空占用子目录）→ 重建同目录成功（不再 409）。
-	// 先清掉测试上传留下的空 `main/videos/user/` 内部桶目录（wrapper 生命周期残留，
-	// 非封装卷删除清理范围——封装卷删除只清自己 MakeDir 的空占用目录）。
-	// 先清掉测试上传留下的空 `main/videos/user/` 内部桶目录（wrapper 生命周期残留，
-	// 非封装卷删除清理范围——封装卷删除只清自己 MakeDir 的空占用目录）。
-	if rerr := os.Remove(filepath.Join(mainRoot, "videos", "user")); rerr != nil {
+	// 先清掉测试上传留下的空 `main/videos/<owner>/user/`（+ 其空的 owner 层）内部桶目录
+	// （wrapper 生命周期残留，非封装卷删除清理范围——封装卷删除只清自己 MakeDir 的空占用
+	// 目录；键空间恒 owner 维度，故残留深度比旧布局多一层 owner）。
+	if rerr := os.RemoveAll(filepath.Join(mainRoot, "videos", "alice")); rerr != nil {
 		t.Fatalf("清理测试残留 user 桶失败: %v", rerr)
 	}
 	rec = wrapperJSON(t, url, http.MethodDelete, "/api/volumes/user?name=videos", nil)

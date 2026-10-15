@@ -36,16 +36,9 @@ type externalUploadSink struct {
 // 桶自身（2026-10-06 修复：TrimPrefix("user","user/") 不命中会把 "user" 当桶内路径，产生
 // "user/user" 残留空目录）。
 //
-// **嵌套封装卷例外（过渡层）**：嵌套 target（`<卷>/<新子目录>`，SubFS 视图到底层卷子目录）
-// 的键空间 = 租户根 rel **原样**（`user/<name>`）——SubFS 的 subdir 前缀之下直接是 user 桶，
-// owner 已由卷层隔离（SubFS 工厂按 owner 定向到底层卷）。若按 ResolveUserLocation 恒加
-// `<owner>/` 前缀，会在子目录内多一层 owner 目录（`videos/alice/user/…`），数据错位。
+// 键空间**恒 owner 维度**（`<owner>/user/<rel>`，含嵌套封装卷）——与读/删/列举/转存同一
+// 口径（单一路径映射，无卷类型分支）。
 func (s *externalUploadSink) ownerKey(rel string) (string, error) {
-	if target, _ := s.v.Extra["target"].(string); target != "" {
-		if _, _, nested := volume.SplitNestedTarget(target); nested {
-			return rel, nil
-		}
-	}
 	stripped := rel
 	switch {
 	case rel == "user":

@@ -122,14 +122,9 @@ type filesExternalDeleter struct {
 // 桶目录自身 "user" → 桶内空路径，防 "user/user" 残留）。基于 locator：ResolveUserLocation
 // 解析 + FSPath 拼接（键拼接只在 FSPath，调用方不自行改路径）。
 //
-// **嵌套封装卷例外（过渡层）**：嵌套 target（SubFS 视图）键空间 = 租户根 rel 原样
-// （user/<name>）——与 externalVolumeKey 同构，防子目录内多一层 owner。
+// 键空间**恒 owner 维度**（`<owner>/user/<rel>`，含嵌套封装卷）：所有外部卷走同一
+// locator，调用方（上传/删除/列举/转存/镜像/du）不需要区分卷类型。
 func (a filesExternalDeleter) ownerKey(owner, rel string) (string, error) {
-	if target, _ := a.v.Extra["target"].(string); target != "" {
-		if _, _, nested := volume.SplitNestedTarget(target); nested {
-			return rel, nil
-		}
-	}
 	stripped := rel
 	switch {
 	case rel == "user":
@@ -491,24 +486,12 @@ func (o externalVolumeOps) ExternalDelete(ctx context.Context, owner, volName, r
 }
 
 // externalVolumeKey 计算外部卷对象操作（Delete/Stat/List/Rename 等）的 FS 键：
-//   - **嵌套封装卷例外（过渡层）**：嵌套 target（`<卷>/<新子目录>`，SubFS 视图）的键空间 =
-//     租户根 rel `user/<remotePath>` 原样（与 externalUploadSink.ownerKey 同构——SubFS 的
-//     subdir 前缀之下直接是 user 桶，owner 已由卷层隔离；否则 `alice/user/…` 多一层目录，
-//     上传/删除/列表键不一致）；
-//   - 其余外部卷（远端独立键空间）：ResolveUserLocation 解析 + FSPath（恒 owner 前缀隔离）。
+// **全部外部卷统一经 `ResolveUserLocation` + `FSPath()` 解析**（恒 `<owner>/user/<rel>`，
+// owner 维度隔离）。调用方（上传 / 删除 / 列举 / 转存 / 跨卷 move / 镜像 / du）共用同一
+// 映射口径，不存在卷类型分支。
 //
 // 返回 (key, false) = 路径非法（ResolveUserLocation 失败），调用方按未命中处理。
 func externalVolumeKey(v volume.Volume, owner, remotePath string) (string, bool) {
-	if target, _ := v.Extra["target"].(string); target != "" {
-		if _, _, nested := volume.SplitNestedTarget(target); nested {
-			if remotePath == "" {
-				// 卷根（用户可见根）⇒ 桶目录自身，**不得拖尾斜杠**："user/" 含空段，
-				// 可信链的路径校验直接拒绝 ⇒ 封装卷根列举恒 500（D1）。
-				return "user", true
-			}
-			return "user/" + remotePath, true
-		}
-	}
 	loc, kerr := v.ResolveUserLocation(owner, remotePath)
 	if kerr != nil {
 		return "", false

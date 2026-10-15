@@ -173,8 +173,8 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 			continue
 		}
 		fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
-		// 嵌套封装卷例外（过渡层）：SubFS 视图键空间 = 租户根 rel 原样（user/<name>），
-		// owner 已由卷层隔离——与上传 externalUploadSink.ownerKey 同构（防 alice/user/… 多一层）。
+		// 键 = 用户可见路径经**唯一映射入口**（externalVolumeKey：ResolveUserLocation +
+		// FSPath，恒 `<owner>/user/<rel>`）——与上传/删除/列举/转存同口径。
 		ownerKey, kOK := externalVolumeKey(v, owner, stripped)
 		if !kOK {
 			// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
