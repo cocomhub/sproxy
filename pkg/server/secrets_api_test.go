@@ -28,6 +28,31 @@ import (
 // 再直接调用 handler（白盒，绕开 auth 层干扰——secret 端点的认证面由路由注册验证）。
 func newTestSecretsServer(t *testing.T, modifyCfg func(*Config)) (*Handlers, string, string) {
 	t.Helper()
+	h, tmpDir := newSecretsHandlers(t, modifyCfg)
+
+	// 装配默认 secrets 卷（ExternalBackend）到 volSet，模拟 cmd/sproxy setupSecretBackends。
+	secretsRoot := filepath.Join(tmpDir, "secrets")
+	if err := os.MkdirAll(secretsRoot, 0o700); err != nil {
+		t.Fatalf("mkdir secrets: %v", err)
+	}
+	fs := syncpkg.NewLocalFS(secretsRoot, nil)
+	be, err := secrets.NewBackend(t.Context(), volume.Volume{Name: "default-secrets", Type: "secrets",
+		Extra: map[string]any{"target": "local", "root": tmpDir}}, fs)
+	if err != nil {
+		t.Fatalf("new secrets backend: %v", err)
+	}
+	if err := h.Volumes().AddExternalVolume(volume.Volume{Name: "default-secrets", Type: "secrets",
+		Extra: map[string]any{"target": "local", "root": tmpDir}}, be); err != nil {
+		t.Fatalf("attach secrets volume: %v", err)
+	}
+	return h, secretsRoot, tmpDir
+}
+
+// newSecretsHandlers 装配 secret 端点测试用 Handlers（**不**装配任何 secrets 卷）——供需要
+// 自行控制 secrets 卷集合（数量/形态/登记顺序）的用例使用；newTestSecretsServer 在其上补装
+// 默认 secrets 卷。
+func newSecretsHandlers(t *testing.T, modifyCfg func(*Config)) (*Handlers, string) {
+	t.Helper()
 	tmpDir := t.TempDir()
 
 	cfg := Default()
@@ -57,27 +82,28 @@ func newTestSecretsServer(t *testing.T, modifyCfg func(*Config)) (*Handlers, str
 		CredentialStore:       noAuth.CredentialStore,
 		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
 	})
-
-	// 装配默认 secrets 卷（ExternalBackend）到 volSet，模拟 cmd/sproxy setupSecretBackends。
-	secretsRoot := filepath.Join(tmpDir, "secrets")
-	if err := os.MkdirAll(secretsRoot, 0o700); err != nil {
-		t.Fatalf("mkdir secrets: %v", err)
-	}
-	fs := syncpkg.NewLocalFS(secretsRoot, nil)
-	be, err := secrets.NewBackend(t.Context(), volume.Volume{Name: "default-secrets", Type: "secrets",
-		Extra: map[string]any{"target": "local", "root": tmpDir}}, fs)
-	if err != nil {
-		t.Fatalf("new secrets backend: %v", err)
-	}
-	if err := h.Volumes().AddExternalVolume(volume.Volume{Name: "default-secrets", Type: "secrets",
-		Extra: map[string]any{"target": "local", "root": tmpDir}}, be); err != nil {
-		t.Fatalf("attach secrets volume: %v", err)
-	}
-
 	t.Cleanup(func() {
 		_ = h.Close()
 	})
-	return h, secretsRoot, tmpDir
+	return h, tmpDir
+}
+
+// attachTestSecretsVolume 装配一个测试用 secrets 卷（独立本地根），返回其 Manager（供
+// 「默认卷选取」用例按指针比对）。
+func attachTestSecretsVolume(t *testing.T, h *Handlers, name string, extra map[string]any, root string) *secrets.Manager {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", name, err)
+	}
+	v := volume.Volume{Name: name, Type: "secrets", Extra: extra}
+	be, err := secrets.NewBackend(t.Context(), v, syncpkg.NewLocalFS(root, nil))
+	if err != nil {
+		t.Fatalf("new secrets backend %s: %v", name, err)
+	}
+	if err := h.Volumes().AddExternalVolume(v, be); err != nil {
+		t.Fatalf("attach secrets volume %s: %v", name, err)
+	}
+	return secrets.ManagerOfExternal(be)
 }
 
 // callSecretsHandler 白盒分发到对应 secret handler 方法（绕过 authMiddleware/路由层，
@@ -398,5 +424,78 @@ func TestSecretsManagerUnavailable(t *testing.T) {
 	code, _ := callSecretsHandler(h, http.MethodPost, "/api/secrets", `{"name":"x","mode":"random"}`)
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("未装配时创建应 503 得 %d", code)
+	}
+}
+
+// TestSecretsManager_PrefersBasicOverNested 默认 secrets 卷选取**确定性**：多 secrets 卷并存
+// （嵌套派生的 secrets + 基础 secrets）时，恒选**基础卷**（`extra.source` 为空者）——与登记
+// 顺序无关。历史实现对 volSet.All() 取首个 type=secrets ⇒ 顺序依赖，且归一后出现的嵌套卷会
+// 抢先命中管理面。
+//
+// 变异：把排序改回「首个胜出」→ nested-first 子用例红。
+func TestSecretsManager_PrefersBasicOverNested(t *testing.T) {
+	t.Parallel()
+	for _, order := range []string{"nested-first", "plain-first"} {
+		t.Run(order, func(t *testing.T) {
+			t.Parallel()
+			h, tmp := newSecretsHandlers(t, nil)
+			attachNested := func() *secrets.Manager {
+				return attachTestSecretsVolume(t, h, "nested-secrets",
+					map[string]any{"source": "main:alice/user/keys"}, filepath.Join(tmp, "nested-keys"))
+			}
+			attachPlain := func() *secrets.Manager {
+				return attachTestSecretsVolume(t, h, "plain-secrets",
+					map[string]any{"target": "local", "root": tmp}, filepath.Join(tmp, "plain-keys"))
+			}
+			var nested, plain *secrets.Manager
+			if order == "nested-first" {
+				nested, plain = attachNested(), attachPlain()
+			} else {
+				plain, nested = attachPlain(), attachNested()
+			}
+			got := h.secretsManager()
+			if got == nil {
+				t.Fatal("secretsManager 应返回基础 secrets 卷的 Manager")
+			}
+			if got != plain {
+				t.Fatalf("默认 secrets 卷应为基础卷（非嵌套派生），got %p want %p", got, plain)
+			}
+			if got == nested {
+				t.Fatal("嵌套派生的 secrets 卷不得抢占密钥管理面")
+			}
+		})
+	}
+}
+
+// TestSecretsManager_ExplicitDefaultMarkerWins 显式默认标记（`extra.default: true`）压过
+// 「基础卷优先」规则——管理员可显式指定管理面归属，不受形态启发式支配。
+func TestSecretsManager_ExplicitDefaultMarkerWins(t *testing.T) {
+	t.Parallel()
+	h, tmp := newSecretsHandlers(t, nil)
+	nested := attachTestSecretsVolume(t, h, "nested-secrets",
+		map[string]any{"source": "main:alice/user/keys", "default": true}, filepath.Join(tmp, "nested-keys"))
+	plain := attachTestSecretsVolume(t, h, "plain-secrets",
+		map[string]any{"target": "local", "root": tmp}, filepath.Join(tmp, "plain-keys"))
+
+	got := h.secretsManager()
+	if got != nested {
+		t.Fatalf("显式 extra.default=true 的卷应胜出（含嵌套派生），got %p want %p (plain=%p)", got, nested, plain)
+	}
+}
+
+// TestSecretsManager_TieBreakByNameDeterministic 同档（同为基础 secrets 卷）无显式标记时，
+// 按**卷名升序**选取——声明顺序不再影响结果（名是声明序之外唯一的稳定序）。
+func TestSecretsManager_TieBreakByNameDeterministic(t *testing.T) {
+	t.Parallel()
+	h, tmp := newSecretsHandlers(t, nil)
+	// 逆名序登记：先 zeta 后 alpha，期望仍选 alpha。
+	zeta := attachTestSecretsVolume(t, h, "zeta-secrets",
+		map[string]any{"target": "local", "root": tmp}, filepath.Join(tmp, "zeta"))
+	alpha := attachTestSecretsVolume(t, h, "alpha-secrets",
+		map[string]any{"target": "local", "root": tmp}, filepath.Join(tmp, "alpha"))
+
+	got := h.secretsManager()
+	if got != alpha {
+		t.Fatalf("同档应按卷名升序选取（alpha），got %p want %p (zeta=%p)", got, alpha, zeta)
 	}
 }

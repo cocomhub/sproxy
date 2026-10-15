@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
 
@@ -32,26 +35,65 @@ import (
 // secretVolumeType 是 secret 封装卷的 volume.Type（装配层 AddExternalVolume 用）。
 const secretVolumeType = "secrets"
 
-// secretsManager 返回装配后的 secrets 卷 Manager（按卷类型定位，不依赖默认卷次序——
-// DefaultExternal() 是首个外部卷，可能不是 secrets（用户先装配 baidupcs 等）。
-// 未装配/装配失败返回 nil（调用方 fail-closed：不可用即报错，不静默写错卷）。
+// secretsDefaultKey 是「显式默认 secrets 卷」标记键（`volumes[].extra.default: true`）：
+// 多 secrets 卷并存时，被标记者为 `/api/secrets` 管理面的操作对象。缺省不设（false）。
+const secretsDefaultKey = "default"
+
+// secretsVolumeTier 是默认 secrets 卷的**优先级档**（数值小者优先）：
+//
+//	0 = 显式默认标记（extra.default: true）；
+//	1 = 基础 secrets 卷（非嵌套派生，无 extra.source）；
+//	2 = 嵌套派生的 secrets 卷（区域视图上的 secrets，由 wrapper 装配在其它卷的子目录上）。
+//
+// 「基础卷优先于嵌套派生卷」的理由：`/api/secrets` 是**密钥管理面**，其语义读者是「服务级
+// 密钥目录」；嵌套派生的 secrets 卷是某个子区域的视图，语义上是「该区域的密钥」，不应因
+// 配置声明顺序（或规范化后 All() 的顺序）而抢占管理面。
+func secretsVolumeTier(v volume.Volume) int {
+	if b, _ := v.Extra[secretsDefaultKey].(bool); b {
+		return 0
+	}
+	if raw, _ := v.Extra[enclosure.SourceKey].(string); strings.TrimSpace(raw) != "" {
+		return 2
+	}
+	return 1
+}
+
+// secretsManager 返回**默认 secrets 卷**的 Manager，未装配/不可用返回 nil（调用方 fail-closed：
+// 不可用即报错，不静默写错卷）。
+//
+// 选取规则（**确定性**，彻底消除「配置声明顺序首个胜出」歧义——历史实现对 `volSet.All()` 取
+// 首个 `type: secrets`，既是顺序依赖，也会被归一后出现的嵌套 secrets 卷抢先命中）：
+//  1. 候选 = 已装配外部句柄且能反取 `*secrets.Manager` 的 `type: secrets` 卷；
+//  2. 按 `secretsVolumeTier` 升序（显式默认标记 > 基础 secrets 卷 > 嵌套派生）；
+//  3. 同档按**卷名升序**（声明序之外唯一的稳定序）。
+//
+// 不依赖 `volSet.DefaultExternal()`：那是「首个登记的外部卷」，用户名下先装配 baidupcs 等
+// 时它就不是 secrets 卷（历史注释已指出该陷阱）。
 func (h *Handlers) secretsManager() *secrets.Manager {
 	if h.volSet == nil {
 		return nil
 	}
+	cands := make([]volume.Volume, 0, 2)
 	for _, v := range h.volSet.All() {
 		if v.Type != secretVolumeType {
 			continue
 		}
-		be := h.volSet.External(v.Name)
-		if be == nil {
-			continue
+		if secrets.ManagerOfExternal(h.volSet.External(v.Name)) == nil {
+			continue // 未装配/装配失败：不可用候选不进排序
 		}
-		if mgr := secrets.ManagerOfExternal(be); mgr != nil {
-			return mgr
-		}
+		cands = append(cands, v)
 	}
-	return nil
+	if len(cands) == 0 {
+		return nil
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		ti, tj := secretsVolumeTier(cands[i]), secretsVolumeTier(cands[j])
+		if ti != tj {
+			return ti < tj
+		}
+		return cands[i].Name < cands[j].Name
+	})
+	return secrets.ManagerOfExternal(h.volSet.External(cands[0].Name))
 }
 
 // createSecretRequest 是 POST /api/secrets 请求体。
