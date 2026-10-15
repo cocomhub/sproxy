@@ -82,10 +82,11 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 	if len(cfg.Volumes) == 0 {
 		return nil, fmt.Errorf("卷集合装配失败：volumes 为空（契约要求 Volumes 恒 ≥1）")
 	}
-	// **用户面 target 语法翻译**（阶段 2 迁移）：config 声明 `type: <wrapper>` +
-	// `extra.target: "<卷>/<子目录>"` 的嵌套封装卷先翻译为 enclosure 声明（内存副本，不改入参
-	// cfg）——后续按 `type: enclosure` 走「推迟装配 + 封印注入 + 配额继承」的底座路径。用户面
-	// 语法与持久化形态都保持不变（store/config 字节零变化）。
+	// **用户面 target 语法翻译**（方案甲）：config 声明 `type: <wrapper>` +
+	// `extra.target: "<卷>/<子目录>"` 的嵌套封装卷翻译出装配侧声明词汇（`extra.source`/
+	// `extra.wrapper`，内存副本，不改入参 cfg）——卷 **Type 保持不变**（对外身份是 wrapper
+	// 类型），随之被 `enclosure.IsDeclared` 判为封装声明 ⇒ 走「推迟装配 + 封印注入 + 配额继承」
+	// 的 enclosure 路径。用户面语法与持久化形态都保持不变（store/config 字节零变化）。
 	if hasNestedDecl(cfg.Volumes) {
 		norm := *cfg
 		norm.Volumes = normalizeNestedVolumes(cfg.Volumes)
@@ -277,14 +278,19 @@ func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, 
 // assembleExternalVolume 装配单个外部卷（registry.NewBackend 构造 + 容量池 + 卷记录），
 // 就地写入累积集合；无本地根（roots 不含）。
 //
-// **推迟装配类型（registry.IsDeferredType，如 secretdata）**：构造依赖已装配卷集
-// （secretdata 经 secret_url → secrets 卷密钥），此时 set 尚未就绪，强行 NewBackend
-// 恒失败（Imp-2 时序修复）。故跳过 backend 构造，仅登记卷元数据（volumes）与容量池
-// （pools）；external 留空，待 RegisterRoutes 卷集合就绪后由装配层
-// （cmd/sproxy setupSecretBackends）用 set + registry.NewBackend 逐个构造并
-// AttachExternal 补装（config 声明卷与默认卷同路径）。
+// **推迟装配**（两种情况，判据都是「构造依赖已装配卷集」）：
+//   - registry 标记的推迟类型（`IsDeferredType`，如 secretdata：经 secret_url → secrets
+//     卷密钥，此时 set 尚未就绪）；
+//   - **封装声明卷**（`enclosure.IsDeclared`：显式 `type: enclosure` 或 wrapper 类型 + 嵌套
+//     source）——后端构造依赖源卷特权视图，由 `enclosure.AttachAll` 在卷集就绪后补装。
+//     判据用**声明**而非类型：嵌套封装卷的描述 Type 是其 wrapper 类型（方案甲，见
+//     pkg/volume/enclosure.IsDeclared），按类型分派会误构造（secretdata 的 target 解析对
+//     嵌套 target 恒 fail-closed）或漏装配（secrets 非推迟类型）。
+//
+// 两者都只登记卷元数据（volumes）与容量池（pools）：external 留空，待 RegisterRoutes 卷集合
+// 就绪后由装配层逐个构造并挂回（cmd/sproxy setupSecretBackends / enclosure.AttachAll）。
 func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc *volumeAccum) error {
-	if registry.IsDeferredType(vc.Type) {
+	if registry.IsDeferredType(vc.Type) || isEnclosureDecl(vc.Type, vc.Extra) {
 		acc.pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
 		acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, ""))
 		log.Info("外部卷推迟装配（依赖已装配卷集，set 就绪后补装）", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))

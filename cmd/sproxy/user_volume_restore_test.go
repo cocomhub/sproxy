@@ -21,7 +21,7 @@ import (
 )
 
 // registerUVRestoreWrapper 为测试类型注册**同名封装处理层**：使「该类型 + 嵌套 target」的用户
-// 卷声明在恢复时被翻译为 enclosure 声明（阶段 2 迁移后嵌套装配的先决条件）。
+// 卷声明在恢复时被翻译出封装声明词汇（嵌套装配的先决条件；卷 Type 保持 wrapper 类型）。
 func registerUVRestoreWrapper() {
 	uvRestoreWrapperOnce.Do(func() {
 		enclosure.RegisterWrapper(uvRestorePassthru{})

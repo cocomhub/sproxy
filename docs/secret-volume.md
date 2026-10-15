@@ -158,10 +158,10 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 封装卷（secretdata/secrets）支持以「已创建卷 + **新空子目录**」作为底层根，**不新建底层卷**：
 
 - **target 语法（用户面，保留兼容）**：`<卷名>/<子目录>`（如 `main/videos`，子目录可多级
-  `a/b`）；必须含子目录。装配层把该语法**翻译**为底座声明形态（`type: enclosure` +
-  `extra.source: "<卷>:<子目录>"` + `extra.wrapper: <原 type>`，见
-  `pkg/server/nested_enclosure.go`）——持久化形态与用户面语法零变化（Web UI/sclient/config
-  输入不破），物理落点亦不变（`<基卷根>/<子目录>/…`）。
+  `a/b`）；必须含子目录。装配层把该语法**翻译**为装配侧声明词汇（`extra.source: "<卷>:<子目录>"`
+  + `extra.wrapper: <原 type>`，见 `pkg/server/nested_enclosure.go`）——**卷描述 Type 保持
+  wrapper 类型**（enclosure 只是内部装配机制，不是对外卷类型；见 §3.9），持久化形态与用户面
+  语法零变化（Web UI/sclient/config 输入不破），物理落点亦不变（`<基卷根>/<子目录>/…`）。
 - **互斥占用**：同基底卷上两条**互不相关**声明的封印足迹不得重叠（父/子/同目录）→ 装配期
   fail-closed（`enclosure.ErrFootprintOverlap`；精确相等另有 `ErrConflictClaim`）。链内叠加
   （`outer: inner:` 逐层封装）**允许**重叠——外层变换的是内层已变换的字节，封印象限由最外层
@@ -183,7 +183,7 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 
 ### 3.9 阶段 2 迁移状态
 
-嵌套封装（§3.8）**已完成迁移**到 master 底座（`type: enclosure` + `extra.source: "<源卷>:<子路径>"`
+嵌套封装（§3.8）**已完成迁移**到通用封装底座（**声明词汇**：`extra.source: "<源卷>:<子路径>"`
 + `extra.wrapper`，见 `docs/config.md`、设计文档 `docs/designs/2026-10-11-enclosure-volume.md`）：
 源目录封印（`storage.SealRule` 唯一事实源，写恒拒/读 hidden|readable）、`sync.PrefixFS` 区域
 视图、`enclosure.AttachAll` 推迟装配、`quota.NewPoolWithParent` 容量继承。用户面 `target:` 语法
@@ -199,7 +199,8 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 |---|---|---|
 | ① | 外部卷键空间统一 owner 维度（去掉嵌套封装 owner-less 例外；转存与读写列举同键，遗留①） | 已完成 |
 | ③（部分） | 删除 `pkg/server/config_writer.go`：运行时用户卷持久化归一 `user_volume_store` 台账 | 已完成 |
-| ② | 嵌套封装 `target:` → `enclosure`（翻译层 + 运行期装配/拆除闭环；过渡文件与逐面 guard 全删） | 已完成 |
+| ② | 嵌套封装 `target:` → 封装装配（翻译层 + 运行期装配/拆除闭环；过渡文件与逐面 guard 全删） | 已完成 |
+| ⑤ | enclosure **内部化**（方案甲）：嵌套封装卷的对外 `Type` 保持 wrapper 类型（secretdata/secrets/…），装配由**声明判据**（`enclosure.IsDeclared`）接管而非按类型分派——修正「type=enclosure」造成的 `SchemeOf` 无协议（cloud 转存/归档被拒）、`CategoryOf≠wrapper`（建卷表单/防环失据）、API/CLI 回显泄漏内部机制 | 已完成 |
 | ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只写目标卷 FS、不经路由 commit，删除时仍对 owner 全局 Scope 做未曾提交的释放） | 已完成（写入侧结算：转存写成功后按 `TargetQuotaScopeFor`/`TargetPhysChargeFor` 与删除侧**同账本同口径**差分入账） |
 
 ## 4. 寻址

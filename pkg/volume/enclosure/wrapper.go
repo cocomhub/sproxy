@@ -34,6 +34,9 @@ var (
 )
 
 // RegisterWrapper 注册封装处理层（重复注册同名 panic——装配期 fail-fast，防静默覆盖）。
+// 同时把名字登记为 registry 的 **wrapper category**（单源：哪些类型是 wrapper 由本注册表
+// 决定；registry 反向 import 会成环，故经 MarkWrapperType 登记其投影）——建卷表单/防环校验
+// 与「封装卷可选作底层」的判定都消费该分类。
 func RegisterWrapper(w Wrapper) {
 	if w == nil || w.Name() == "" {
 		panic("enclosure: RegisterWrapper 需要非空 Name")
@@ -44,6 +47,7 @@ func RegisterWrapper(w Wrapper) {
 		panic("enclosure: wrapper 重复注册: " + w.Name())
 	}
 	wrappers[w.Name()] = w
+	registry.MarkWrapperType(w.Name())
 }
 
 // LookupWrapper 按名取处理层（未注册 → ok=false）。

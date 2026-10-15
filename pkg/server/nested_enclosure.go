@@ -3,12 +3,17 @@
 
 package server
 
-// nested_enclosure.go 是**嵌套封装的用户面语法 → master enclosure 底座**的翻译与运行期装配
-// （阶段 2 迁移）。
+// nested_enclosure.go 是**嵌套封装的用户面语法 → enclosure 装配机制**的翻译与运行期装配
+// （阶段 2 迁移 / 方案甲：enclosure 内部化）。
 //
 // 用户面语法（历史语义，保留不破）：`type: <wrapper 名>` + `extra.target: "<源卷>/<子路径>"`
-// ——「以已创建卷的子目录作底层」的封装卷。底座声明形态：`type: enclosure` +
-// `extra.source: "<源卷>:<子路径>"` + `extra.wrapper: <wrapper 名>`。
+// ——「以已创建卷的子目录作底层」的封装卷。装配侧词汇（enclosure 包的声明词汇）：`extra.source:
+// "<源卷>:<子路径>"`（+ 可选 `extra.wrapper`，缺省即卷类型）。
+//
+// **卷描述 Type 不因翻译而改变**（方案甲）：嵌套封装卷的对外 Type 恒为 wrapper 类型
+// （secretdata/secrets/…），只多了「按封装声明装配」这一**内部机制**——否则会泄漏内部实现且
+// 连锁丢能力：`SchemeOf(type)` 无协议（cloud 转存/归档被拒）、`CategoryOf(type)` 非 wrapper
+// （建卷表单/防环校验失据）、`/api/volumes`/CLI/config 回显 type=enclosure。
 //
 // 为什么在装配层翻译而不是改用户面 schema：已存 config / 用户卷 store / Web UI 表单 / sclient
 // 建卷输入都用 target 字段（该字段由后端 schema 声明为 volume-select），直接换语法会一次性打断
@@ -16,8 +21,8 @@ package server
 // （config 装配 / 建卷 API / 重启恢复）共用同一实现。
 //
 // **翻译只在内存中发生**：持久化的 `UserVolume`/config 一律保持原形态（store 字节零变化，
-// 不产生二次迁移）；每次装配/恢复时再翻译一次。幂等：已翻译形态的 type 是 enclosure，而
-// enclosure 不是 wrapper 注册名 ⇒ 不会再被翻译。
+// 不产生二次迁移）；每次装配/恢复时再翻译一次。幂等：翻译产物是 (wrapper 类型, source,
+// target) 三元组的纯函数结果，重复翻译得到同一 extra，且不会命中「非嵌套」分支。
 
 import (
 	"context"
@@ -37,10 +42,14 @@ import (
 // nestedTargetKey 是用户面「底层卷/子目录」字段名（后端 schema 声明的 volume-select 字段）。
 const nestedTargetKey = "target"
 
-// TranslateNestedVolume 把嵌套封装声明翻译为 enclosure 声明形态：
+// TranslateNestedVolume 把嵌套封装声明翻译为**装配侧声明词汇**：
 //
 //	{Type: "secretdata", Extra: {target: "main/videos", …}}
-//	→ {Type: "enclosure", Extra: {source: "main:videos", wrapper: "secretdata", target: "main/videos", …}}
+//	→ {Type: "secretdata", Extra: {source: "main:videos", wrapper: "secretdata", target: "main/videos", …}}
+//
+// **Type 原样保留**（方案甲）：本卷的对外身份/协议/分类仍按 wrapper 类型语义；`extra.source`
+// 的存在使其被 `enclosure.IsDeclared` 判为封装声明，从而在装配期走 enclosure 路径
+// （跳过按类型分派的 registry.NewBackend，改经 enclosure.BuildBackend 构造）。
 //
 // 返回 (翻译结果, 是否发生翻译)；未翻译时原卷原样返回（调用方走既有路径，零回归）。
 //
@@ -51,7 +60,7 @@ const nestedTargetKey = "target"
 //     `target: local` + `extra.root` 的本地整卷形态：历史语义照旧）。
 //
 // **保留 original `target` 键**：① 用户面回显/审计仍是用户输入的原语法；② `secrets` 处理层的
-// isLocalTarget 依赖它判本地/远端权限语义；③ 幂等（type 已换成 enclosure ⇒ 下次调用恒定不翻译）。
+// isLocalTarget 依赖它判本地/远端权限语义；③ 翻译幂等（同一 target 恒产出同一 source）。
 func TranslateNestedVolume(v volume.Volume) (volume.Volume, bool) {
 	typ, extra, ok := TranslateNestedDecl(v.Type, v.Extra, v.Capacity)
 	if !ok {
@@ -80,15 +89,15 @@ func TranslateNestedDecl(typ string, extra map[string]any, capacity int64) (stri
 	for k, val := range extra {
 		out[k] = val
 	}
-	out["source"] = base + ":" + sub
-	out["wrapper"] = typ
-	// 卷级容量 → 声明自身上限（`extra.max_bytes`）：过渡层的 `UserVolume.Capacity` 是封装卷
-	// 自身上限，底座对应物是 `max_bytes`（缺省 0 = 仅受源卷池约束 = 继承）。显式配置的
+	out[enclosure.SourceKey] = base + ":" + sub
+	out[enclosure.WrapperKey] = typ
+	// 卷级容量 → 声明自身上限（`extra.max_bytes`）：封装卷的 `UserVolume.Capacity`/`vol_capacity`
+	// 是**自身上限**，装配侧对应物是 `max_bytes`（缺省 0 = 仅受源卷池约束 = 继承）。显式配置的
 	// max_bytes 优先（不覆盖）。
 	if _, has := out["max_bytes"]; !has && capacity > 0 {
 		out["max_bytes"] = capacity
 	}
-	return enclosure.TypeEnclosure, out, true
+	return typ, out, true // Type 不变：对外身份恒为 wrapper 类型（enclosure 是内部装配机制）
 }
 
 // ParseNestedTarget 解析用户面嵌套语法 `<卷名>/<子路径>`：返回 base（卷名）+ sub（子路径，
@@ -131,8 +140,9 @@ func validateEnclosureDecl(set *registry.Set, v volume.Volume) (enclosure.Decl, 
 	return d, decls, nil
 }
 
-// attachEnclosureVolume 在**运行期**登记并装配一个（已翻译的）enclosure 卷：建卷 API 与重启
-// 恢复共用。调用约定：v 尚未登记进卷集（本函数负责登记元数据 + 句柄 + 容量池）。
+// AttachEnclosureVolume 在**运行期**登记并装配一个（已翻译的）封装声明卷：建卷 API 与重启
+// 恢复共用。调用约定：v 尚未登记进卷集（本函数负责登记元数据 + 句柄 + 容量池）；v 的 Type 是
+// wrapper 类型（方案甲：enclosure 只是装配机制，不写进卷描述），登记进卷集的即该形态。
 //
 // 步骤（与装配期 `applyEnclosureSeals` + `enclosure.AttachAll` 同口径，只是作用于「已有卷集
 // + 一个新卷」）：

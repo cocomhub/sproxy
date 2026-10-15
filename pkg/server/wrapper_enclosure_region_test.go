@@ -52,7 +52,6 @@ func assertUserDataIntact(t *testing.T, dir string) {
 // owner 限定声明覆盖既有用户数据目录 → 装配 fail-closed（不带病启动）。
 func TestEnclosureRegion_BootRejectsPopulatedOwnerRegion(t *testing.T) {
 	t.Parallel()
-	markEnclosureDeferred()
 	registerNestedSecretWrapper()
 	mainDir := t.TempDir()
 	dir := populateOrdinaryDir(t, mainDir, "alice/user/docs")
@@ -77,7 +76,6 @@ func TestEnclosureRegion_BootRejectsPopulatedOwnerRegion(t *testing.T) {
 // TestEnclosureRegion_BootAllowsFreshOrOwnRegion 启动路径正例：空区间 / 仅本卷自建结构 ⇒ 装配通过。
 func TestEnclosureRegion_BootAllowsFreshOrOwnRegion(t *testing.T) {
 	t.Parallel()
-	markEnclosureDeferred()
 	registerNestedSecretWrapper()
 	mainDir := t.TempDir()
 	// 本卷自建结构形态（LAYOUT_VERSION + meta 桶 + 随机容器目录）：重启收养必须通过。

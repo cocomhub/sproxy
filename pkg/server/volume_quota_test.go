@@ -23,7 +23,6 @@ import (
 // 调用方给定，用于「底层池满 / 余量校验」场景）。
 func newNestedWrapperQuotaHandlers(t *testing.T, mainCapacity int64) (*Handlers, *UserVolumeStore) {
 	t.Helper()
-	markEnclosureDeferred()
 	registerUserVolWrapBackend() // wrapper 类型（Schema target, allow_wrapper）
 	registerNestedRootBackend()  // 可读写底层 backend（FS = LocalFS(root)）
 	cfg := Default()

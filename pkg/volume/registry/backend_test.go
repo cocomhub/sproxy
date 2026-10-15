@@ -360,3 +360,30 @@ func TestCategoryOf_WrapperNames(t *testing.T) {
 		t.Fatalf("CategoryOf(baidupcs) = %q, want linked", got)
 	}
 }
+
+// TestMarkWrapperType_CategoryProjection 钉住**处理层注册的项目投影**：封装处理层注册表
+// （enclosure.RegisterWrapper）经 MarkWrapperType 登记名字后，该类型即按 wrapper category
+// 归类（建卷表单/防环校验消费）——「哪些类型是 wrapper」的事实源是处理层注册表，registry
+// 只持投影（不能反向 import）。重复登记幂等；空串/本地类型 panic（装配期 fail-fast）。
+func TestMarkWrapperType_CategoryProjection(t *testing.T) {
+	t.Parallel()
+	const typ = "wrapper-mark-projection-test"
+	if got := CategoryOf(typ); got != "linked" {
+		t.Fatalf("未登记类型 %q 应归 linked，got %q", typ, got)
+	}
+	MarkWrapperType(typ)
+	if got := CategoryOf(typ); got != "wrapper" {
+		t.Fatalf("登记后 %q 应为 wrapper category，got %q", typ, got)
+	}
+	MarkWrapperType(typ) // 幂等：重复登记不 panic
+	for _, bad := range []string{"", "local"} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("MarkWrapperType(%q) 应 panic（保留值）", bad)
+				}
+			}()
+			MarkWrapperType(bad)
+		}()
+	}
+}

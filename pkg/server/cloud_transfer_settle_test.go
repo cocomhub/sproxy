@@ -21,20 +21,22 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
-	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
-// registerSettleTransferProtocol 为夹具的嵌套封装卷（装配层翻译后类型 = enclosure 底座）声明
-// 转存协议——`transferDone` 需 scheme 生成转存 URL（生产由各后端类型自行声明协议）。
-// 仅声明协议不参与构造（enclosure 是**推迟装配**类型，assembleVolumes 不调其构造器）；
-// t.Cleanup 解绑，防污染共享注册表。
+// registerSettleTransferProtocol 为夹具的嵌套封装卷**按 wrapper 类型**声明转存协议：
+// `transferDone` 需 scheme 生成转存 URL（生产由各后端类型自行声明协议，如 secretdata ⋯）。
+//
+// 方案甲要点：嵌套封装卷的卷描述 Type 是 wrapper 类型（不是内部机制名 enclosure），故协议必须
+// 按该类型反查可得——这正是本用例的回归点（把 Type 改回 enclosure ⇒ `SchemeOf` 无协议 ⇒
+// 创建即拒 ⇒ 红）。工厂不参与构造（嵌套声明由 enclosure 路径装配），t.Cleanup 解绑防污染
+// 共享注册表。
 func registerSettleTransferProtocol(t *testing.T) {
 	t.Helper()
-	registry.RegisterBackend(enclosure.TypeEnclosure, func(_ context.Context, _ volume.Volume) (registry.ExternalBackend, error) {
+	registry.RegisterBackend(nestedSecretType, func(_ context.Context, _ volume.Volume) (registry.ExternalBackend, error) {
 		return nil, errString("settle-test: 类型仅用于声明协议")
 	}, "settle-transfer")
-	t.Cleanup(func() { registry.UnregisterBackendForTest(enclosure.TypeEnclosure) })
+	t.Cleanup(func() { registry.UnregisterBackendForTest(nestedSecretType) })
 }
 
 // startSettleSource 启动返回固定内容的源站（转存源）。

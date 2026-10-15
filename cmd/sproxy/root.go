@@ -1138,9 +1138,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 封装处理层（wrapper）注册：必须在 enclosure.Parse 之前（RegisterRoutes →
 	// assembleVolumes 内解析声明；未注册的 wrapper 判 ErrUnknownWrapper = boot fail）。
 	registerEnclosureWrappers()
-	// 封装卷类型标记「推迟装配」：其后端构造依赖已装配卷集（源卷特权视图），
-	// 与 secretdata 同型时序；封印注入在 assembleVolumes 内完成，后端在此之后补装。
-	enclosure.MarkDeferred()
+	// 封装卷的推迟装配不需要「按类型标记」：装配层按**声明**判据（enclosure.IsDeclared：
+	// 显式 type: enclosure 或 wrapper 类型 + extra.source）跳过 registry.NewBackend，
+	// 卷集就绪后由 enclosure.AttachAll 补装。
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:                 rt.mux,
 		CfgPtr:              &cfgPtr,

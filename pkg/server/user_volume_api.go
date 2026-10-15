@@ -208,9 +208,10 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// /写滥用/封装成链。已存卷（旧 store 文件）零值兼容不静默收紧，仅新卷 owner-only。
 	acl := volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{owner: {}}}
 	v := volume.Volume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
-	// 嵌套封装（`target: <卷>/<子目录>`）翻译为 enclosure 声明形态后走底座装配路径
-	// （阶段 2 迁移）：声明校验（含**足迹重叠互斥**）+ 封印注入 + 配额继承 + 后端构造
-	// 全部由 attachEnclosureVolume 完成；持久化仍存**原形态**（store 字节零变化）。
+	// 嵌套封装（`target: <卷>/<子目录>`）翻译出封装声明词汇后走 enclosure 装配路径
+	// （方案甲：卷 Type 保持 wrapper 类型，内部机制不出现在卷描述里）：声明校验
+	// （含**足迹重叠互斥**）+ 封印注入 + 配额继承 + 后端构造全部由 AttachEnclosureVolume
+	// 完成；持久化仍存**原形态**（store 字节零变化）。
 	if tv, nested := TranslateNestedVolume(v); nested {
 		if err := validateNewEnclosure(r.Context(), h.volSet, tv, req.Capacity); err != nil {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, enclosureErrStatus(err))

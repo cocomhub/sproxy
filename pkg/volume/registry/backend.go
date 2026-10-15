@@ -124,6 +124,12 @@ var (
 	// 无法经「构造读 SchemaProvider」得到 schema，故装配期登记静态表（BackendSchemas /
 	// BackendSchema 优先读静态表，未登记才回落构造读 SchemaProvider）。
 	staticSchemas = map[string][]FieldSchema{}
+	// wrapperTypes 是**动态登记**的 wrapper category 类型集合（MarkWrapperType）：封装处理层
+	// 注册表（enclosure.RegisterWrapper）在注册时单向登记——「哪些类型是 wrapper」的事实源
+	// 是处理层注册表本身，而 registry 不能反向 import enclosure（成环），故用登记入口解耦。
+	// 与 backendCategory 的静态基线表（secrets/secretdata/egress）合并使用：静态表覆盖
+	// 「尚未/不会注册处理层」的既有类型（如 egress），登记表覆盖新注册的处理层。
+	wrapperTypes = map[string]bool{}
 )
 
 // MarkDeferredType 把后端类型标记为「推迟装配」：assembleVolumes 对 config 声明该类型
@@ -272,21 +278,50 @@ type BackendSchemaInfo struct {
 	Fields   []FieldSchema `json:"fields"`
 }
 
+// MarkWrapperType 把后端类型登记为 **wrapper category**（封装处理层语义）：由
+// `enclosure.RegisterWrapper` 在注册处理层时调用——「哪些类型是 wrapper」的事实源是处理层
+// 注册表，registry 只持有其投影（不能反向 import enclosure，见 wrapperTypes 注释）。
+//
+// 重复登记幂等；空类型名/本地类型 panic（与 RegisterBackend 同纪律：编程错误应装配期 fail-fast）。
+func MarkWrapperType(typ string) {
+	if typ == "" || typ == volume.TypeLocal {
+		panic(fmt.Sprintf("registry: 非法 wrapper 类型 %q（空串与 %q 保留给本地卷）", typ, volume.TypeLocal))
+	}
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	wrapperTypes[typ] = true
+}
+
 // backendCategory 由后端类型推导 schema category：
-//   - "secrets"/"secretdata"/"egress"（封装/密钥卷）→ "wrapper"；
+//   - "secrets"/"secretdata"/"egress"（基线封装/密钥卷）或**已登记的处理层类型**
+//     （MarkWrapperType，见 wrapperTypes）→ "wrapper"；
 //   - 本地卷 → "mt-local"；
 //   - 其余外部类型 → "linked"。
 //
 // 注册表内不会出现本地类型（RegisterBackend 拒绝空串与 TypeLocal），"mt-local" 分支为
 // 防御性覆盖（该分支仅对未注册的本地类型概念成立）。
 func backendCategory(typ string) string {
-	switch typ {
-	case "secrets", "secretdata", "egress":
+	backendMu.RLock()
+	isWrapper := isWrapperCategoryLocked(typ)
+	backendMu.RUnlock()
+	if isWrapper {
 		return "wrapper"
-	case "", "local":
+	}
+	switch typ {
+	case "", volume.TypeLocal:
 		return "mt-local"
 	default:
 		return "linked"
+	}
+}
+
+// isWrapperCategoryLocked 判定 wrapper category（调用方须持 backendMu）。
+func isWrapperCategoryLocked(typ string) bool {
+	switch typ {
+	case "secrets", "secretdata", "egress":
+		return true // 静态基线：既有封装/密钥卷类型（egress 无处理层注册，恒走本分支）
+	default:
+		return wrapperTypes[typ]
 	}
 }
 

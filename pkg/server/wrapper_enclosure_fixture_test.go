@@ -141,22 +141,16 @@ func (w passthruWrapper) Build(_ context.Context, _ volume.Volume, src syncpkg.F
 
 var fixtureWrapperOnce sync.Map // name → *sync.Once
 
-// markEnclosureDeferred 把 enclosure 类型标记为「推迟装配」（生产在 cmd/sproxy
-// `enclosure.MarkDeferred()` 内做；pkg/server 测试需自建标记，否则 assembleVolumes 会对
-// type=enclosure 卷调 registry.NewBackend 而报「未注册后端」）。
-var markEnclosureDeferredOnce sync.Once
-
-func markEnclosureDeferred() { markEnclosureDeferredOnce.Do(enclosure.MarkDeferred) }
-
 // registerFixtureWrapper 注册测试用封装处理层（同名幂等；`RegisterWrapper` 重复注册会 panic）。
+// 无需任何「类型推迟标记」：装配层按**声明**判据（enclosure.IsDeclared）跳过 registry.NewBackend
+// ——显式 `type: enclosure` 与嵌套 wrapper 类型同样无需标记为 deferred。
 func registerFixtureWrapper(name string) {
-	markEnclosureDeferred()
 	onceAny, _ := fixtureWrapperOnce.LoadOrStore(name, &sync.Once{})
 	onceAny.(*sync.Once).Do(func() { enclosure.RegisterWrapper(passthruWrapper{name: name}) })
 }
 
 // wrapperFSType 是「真实 FS 封装后端」类型名：按用户面语法 `target=<卷>/<子目录>` 以已创建卷
-// 的子目录作封装根（经装配层翻译为 enclosure 声明；处理层只看得到区域相对视图）。
+// 的子目录作封装根（经装配层翻译出封装声明词汇、走 enclosure 装配；处理层只看得到区域相对视图）。
 const wrapperFSType = "wrap-fs-test"
 
 // registerWrapperFSBackend 注册 wrapperFSType 的封装处理层（幂等）。
@@ -190,7 +184,7 @@ func registerNestedRootBackend() {
 			return &nestedRootBackend{fs: syncpkg.NewLocalFS(root, nil)}, nil
 		})
 		// 同名的封装处理层：使 `type: nestedRootType` + `extra.target: "<卷>/<子>"` 的声明
-		// 被翻译为 enclosure 声明（nestedRootType 已被注册为 wrapper ⇒ 判定通过）。
+		// 被判为封装声明（nestedRootType 已被注册为 wrapper ⇒ 嵌套翻译 + IsDeclared 判定通过）。
 		registerFixtureWrapper(nestedRootType)
 	})
 }
@@ -209,7 +203,6 @@ func (e errString) Error() string { return string(e) }
 // 可作嵌套底层的用户卷类型 + 封装处理层）。
 func newNestedWrapperAPIHandlers(t *testing.T) (*Handlers, *UserVolumeStore) {
 	t.Helper()
-	markEnclosureDeferred()
 	registerUserVolWrapBackend()
 	registerNestedRootBackend()
 	registerWrapperFSBackend()

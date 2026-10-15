@@ -40,7 +40,11 @@ storage_root: "./storage"
   # 封装卷自身经服务器处理读写（不受封印影响）。支持嵌套（封装另一个封装卷，路径逐层拼接）与
   # 深度上限 8；跨外部卷源当前装配期显式拒绝（禁静默降级）。
   #   - name: "vault"
-  #     type: "enclosure"
+  #     type: "enclosure"            # 声明形态之一（通用底座）。嵌套语法的写法是
+  #                                  # `type: <wrapper 类型>` + extra.target: "<卷>/<子目录>"
+  #                                  # （如 type: secretdata + target: main/videos）——装配层翻译
+  #                                  # 出同样的声明词汇，但**卷 Type 保持 wrapper 类型**（不写
+  #                                  # enclosure）：协议/分类/回显都按 wrapper 语义。
   #     extra:
   #       # <源卷名>:<子路径>（子路径可空 = 整卷封装）。子路径为**卷根相对**：客户端可达路径
   #       # 恒为 <卷根>/<owner>/<bucket>/<rel>，故要封印「客户端本来能直连的区间」须写

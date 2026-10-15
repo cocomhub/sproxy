@@ -8,7 +8,7 @@
 
 | 能力 | 过渡层（本分支） | master 底座（目标） |
 |---|---|---|
-| 声明语法 | `type: secretdata` + `extra.target: "<卷>/<子目录>"` | `type: enclosure` + `extra.source: "<源卷>:<子路径>"` + `extra.wrapper: secretdata` |
+| 声明语法 | `type: secretdata` + `extra.target: "<卷>/<子目录>"` | 封装声明词汇 `extra.source: "<源卷>:<子路径>"` + `extra.wrapper: secretdata`（**后续演进**：嵌套形态保留原 `type` + target，翻译层只补声明词汇——见 `docs/secret-volume.md` §3.9 批次⑤） |
 | 源视图 | `pkg/sync.SubFS`（子目录前缀视图，可写） | `sync.PrefixFS` + `enclosure.NewFS`（区域相对视图，含直链抑制/能力透传/身份归因） |
 | 装配 | `cmd/sproxy.resolveNestedTargetFS` + `adoptNestedDir` 重启收养 | `enclosure.Parse` + `AttachAll`（推迟装配，`sourceFS` 取特权源视图） |
 | 互斥占用 | `volumeLinksRegistry`（`PathsOverlap` 父/子/同目录重叠） | `enclosure.Parse` 的足迹重叠校验（**已补**：`ErrFootprintOverlap`，链内叠加允许、兄弟分支互斥） |

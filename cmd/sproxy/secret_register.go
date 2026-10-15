@@ -132,8 +132,9 @@ func registerSecretsBackend() {
 // secrets/ 目录；其余外部 target（baidupcs/s3/加密卷整卷）→ fail-closed 报错（需装配层
 // 显式解析注入）。
 //
-// **嵌套不再在此处理**（阶段 2 迁移）：`target: "<卷>/<子目录>"` 由装配层翻译为 enclosure
-// 声明（`enclosure.Parse` + `AttachAll`，wrapper = secrets），后端不经本解析器构造。
+// **嵌套不再在此处理**（方案甲）：`target: "<卷>/<子目录>"` 由装配层翻译出封装声明词汇
+// （`extra.source`/`extra.wrapper`，见 pkg/server/nested_enclosure.go）后经
+// `enclosure.Parse` + `AttachAll` 装配（wrapper = secrets），后端不经本解析器构造。
 func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 	t, _ := v.Extra["target"].(string)
 	switch t {
@@ -152,7 +153,7 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 		_ = mopts
 		return fs, nil
 	default:
-		return nil, fmt.Errorf("secrets backend: 卷 %q target=%q 需由装配层解析注入（外部卷 secrets/ 视图；嵌套封装请用 enclosure 声明）", v.Name, t)
+		return nil, fmt.Errorf("secrets backend: 卷 %q target=%q 需由装配层解析注入（外部卷 secrets/ 视图；嵌套形态由装配层翻译为封装声明）", v.Name, t)
 	}
 }
 
@@ -252,8 +253,8 @@ func defaultSecretdataSecret(ctx context.Context, v volume.Volume, set *registry
 // resolveTargetFS 解析 secretdata 的底层卷 FS：`target: ""/local` + extra.root（config/CLI
 // 历史路径）→ 本地根整卷（保持原行为，零回归）；其余形态 fail-closed（需装配层注入）。
 //
-// **嵌套不再在此处理**（阶段 2 迁移）：`target: "<卷>/<子目录>"` 由装配层翻译为 enclosure
-// 声明（wrapper = secretdata），后端经 `enclosure.BuildBackend` 构造（源视图 = PrefixFS）。
+// **嵌套不再在此处理**（方案甲）：`target: "<卷>/<子目录>"` 由装配层翻译出封装声明词汇后经
+// `enclosure.BuildBackend` 构造（wrapper = secretdata，源视图 = PrefixFS）。
 func resolveTargetFS(_ context.Context, v volume.Volume) (syncpkg.FS, error) {
 	t, _ := v.Extra["target"].(string)
 	switch t {
@@ -264,7 +265,7 @@ func resolveTargetFS(_ context.Context, v volume.Volume) (syncpkg.FS, error) {
 		}
 		return syncpkg.NewLocalFS(root, nil), nil
 	default:
-		return nil, fmt.Errorf("secretdata backend: 卷 %q target=%q 需由装配层解析注入（嵌套封装请用 enclosure 声明）", v.Name, t)
+		return nil, fmt.Errorf("secretdata backend: 卷 %q target=%q 需由装配层解析注入（嵌套形态由装配层翻译为封装声明）", v.Name, t)
 	}
 }
 
@@ -631,6 +632,9 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 	}
 	// 补装 config 声明的 secretdata 卷：assembleVolumes 已把卷元数据登记进 set
 	// （deferred 类型跳过 backend 构造），此处 set 已就绪、secretdata 工厂可解析密钥。
+	// **嵌套封装卷**（`extra.target: "<卷>/<子目录>"`）不走本路径——其 backend 由
+	// `enclosure.AttachAll` 装配（源特权视图 + wrapper），本函数按类型分派会给它构造
+	// 「target 解析失败」的错误后端（方案甲：此类卷 Type 仍是 secretdata，须用声明判据排除）。
 	// 任一卷补装失败 → 返回错误（boot fail，fail-closed）。
 	for _, v := range set.All() {
 		if v.Type != volume.TypeSecretdata {
@@ -638,6 +642,9 @@ func setupSecretBackends(ctx context.Context, set *registry.Set, localRoot strin
 		}
 		if set.External(v.Name) != nil {
 			continue // 已装配（测试自注册类型等）
+		}
+		if enclosure.IsDeclared(v) {
+			continue // 嵌套封装卷：由 enclosure.AttachAll 补装（同一 boot 阶段，紧随其后）
 		}
 		if err := attachSecretdataVolume(ctx, set, v, localRoot, log); err != nil {
 			return err

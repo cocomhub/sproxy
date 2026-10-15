@@ -93,9 +93,9 @@ func setVolumeReady(set *registry.Set, base string) bool {
 	return ok
 }
 
-// restoreOneUserVolume 恢复单卷：**嵌套封装卷**（用户面 target 语法）经装配层翻译为 enclosure
-// 声明后走 `server.AttachEnclosureVolume`（声明校验 + 封印注入 + 容量池继承 + 后端构造一体），
-// 其余类型维持 `registry.NewBackend` + CapacityFS 计数器包装。
+// restoreOneUserVolume 恢复单卷：**嵌套封装卷**（用户面 target 语法）经装配层翻译出封装声明
+// 词汇后走 `server.AttachEnclosureVolume`（声明校验 + 封印注入 + 容量池继承 + 后端构造一体；
+// 卷描述 Type 保持 wrapper 类型），其余类型维持 `registry.NewBackend` + CapacityFS 计数器包装。
 //
 // 翻译与建卷路径共用 `server.TranslateNestedVolume`（单一实现）；持久化仍是原形态
 // （store 字节零变化：同一份 store 在迁移前后都能恢复）。返回是否恢复成功（false = 单卷跳过，

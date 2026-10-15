@@ -19,9 +19,12 @@ import (
 // attach.go 负责**推迟装配**（deferred）：封装卷的后端构造依赖「已装配的源卷集」
 // （需要源卷的特权视图 FS），而 assembleVolumes 执行时 set 尚未就绪 —— 与 secretdata 同型
 // 时序问题。故：
-//   - 装配期：仅登记卷元数据 + 容量池（registry.MarkDeferredType），并注入源卷封印；
+//   - 装配期：仅登记卷元数据 + 容量池（装配层按 `IsDeclared` 判据跳过 registry.NewBackend），
+//     并注入源卷封印；
 //   - set 就绪后：AttachAll 按声明拓扑序构造后端（Decl.Build）并挂回 Set.External。
-func MarkDeferred() { registry.MarkDeferredType(TypeEnclosure) }
+//
+// 判据是**声明**（IsDeclared）而非卷类型：嵌套封装卷的描述 Type 是 wrapper 类型
+// （secretdata/secrets/…），装配层同样必须跳过按类型分派的构造——见 IsDeclared 注释。
 
 // EffectiveTarget 沿封装链回溯出**最终落盘的（本地/外部）卷与路径**：
 // 嵌套时路径逐层拼接（内层 Path + 外层 Path），使封印与容量归集落在真正承载字节的那一层。
@@ -58,8 +61,9 @@ type AttachOptions struct {
 	StorageRoot string
 }
 
-// AttachAll 为所有已登记 `type: enclosure` 卷构造后端并挂回卷集（幂等：已挂者跳过）。
-// 必须在**卷集就绪后**调用（与 secretdata 补装同层，fail-closed：任一卷失败返回错误）。
+// AttachAll 为所有已登记的**封装声明卷**（IsDeclared：显式 `type: enclosure` 或嵌套 wrapper
+// 形态）构造后端并挂回卷集（幂等：已挂者跳过）。必须在**卷集就绪后**调用（与 secretdata
+// 补装同层，fail-closed：任一卷失败返回错误）。
 // opts.StorageRoot 非空时启用持久化容量计数器（与外部卷同源）。
 func AttachAll(ctx context.Context, set *registry.Set, logger *slog.Logger, opts ...AttachOptions) error {
 	var opt AttachOptions
@@ -155,7 +159,8 @@ func BuildBackend(ctx context.Context, set *registry.Set, d Decl, v volume.Volum
 //
 //   - 本地源：`NewLocalFS(卷根绝对路径)`（与 DAV/旧 secretdata 同型；封印在 storage.Root
 //     层，LocalFS 绕开封印正是「特权」的含义）；
-//   - 封装源（嵌套）：内层封装卷的后端 FS（已是带前缀视图，外层再叠自己的前缀）；
+//   - 封装源（嵌套）：内层**封装声明卷**的后端 FS（已是带前缀视图，外层再叠自己的前缀）
+//     ——判据是 IsDeclared（不是 `Type == enclosure`：嵌套封装卷的 Type 是其 wrapper 类型）；
 //   - 其它外部源（baidupcs/s3/…）：后端 FS 的**未封印**视图（封印层由装配层在
 //     applyEnclosureSeals 中套在该后端的 FS 上；此处只剥封印层 ⇒ 特权）。
 func SourceFS(set *registry.Set, d Decl) (syncpkg.FS, error) {
@@ -170,7 +175,7 @@ func SourceFS(set *registry.Set, d Decl) (syncpkg.FS, error) {
 		}
 		return syncpkg.NewLocalFS(rt.AbsPath(), nil), nil
 	}
-	if v.Type == TypeEnclosure {
+	if IsDeclared(v) {
 		be := set.External(d.Source)
 		if be == nil {
 			return nil, fmt.Errorf("enclosure: 内层封装卷 %q 后端未装配（卷 %q；装配顺序应为源在前）", d.Source, d.Vol)

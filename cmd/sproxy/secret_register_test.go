@@ -9,16 +9,19 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -547,6 +550,104 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	if be.FS() == nil {
 		t.Fatal("secretdata backend FS 为 nil")
 	}
+
+	// **嵌套封装卷（方案甲）**：`type: secretdata` + 用户面 `extra.target: "<卷>/<子目录>"` 的
+	// config 声明走**生产完整链路**——RegisterRoutes（assembleVolumes 内翻译出声明词汇 + 注入
+	// 封印 + 按**声明判据**跳过按类型分派）→ setupSecretBackends（必须**跳过**它：按类型分派会
+	// 给 target=main/videos 构造「需由装配层解析注入」的错误后端 ⇒ boot fail）→
+	// enclosure.AttachAll（真实 secretdata wrapper 经 main/videos 区域视图装配）。断言见子用例注释。
+	t.Run("nested_target_keeps_wrapper_type", func(t *testing.T) {
+		registerEnclosureWrappers() // 生产封装处理层（secretdata/secrets wrapper）
+		mainDir := t.TempDir()
+		cfg := server.Default()
+		cfg.Addr = "127.0.0.1:0"
+		cfg.StorageRoot = mainDir
+		cfg.Volumes = []server.VolumeConfig{
+			{Name: "main", Root: mainDir, VolCapacity: 1 << 30},
+			{Name: "vault", Type: "secretdata", Extra: map[string]any{
+				"target":     "main/videos",
+				"secret_url": "secrets://default/datakey",
+			}},
+		}
+		if verr := cfg.Validate(); verr != nil {
+			t.Fatalf("cfg.Validate: %v", verr)
+		}
+		var nestedCfgPtr atomic.Pointer[server.Config] // 独立于外层用例的 cfgPtr（避免遮蔽）
+		nestedCfgPtr.Store(cfg)
+		h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
+			Mux: http.NewServeMux(), CfgPtr: &nestedCfgPtr, Logger: discardLoggerMain(),
+			Version: "test", BuildAt: "test",
+		})
+		t.Cleanup(func() { _ = h.Close() })
+		vols := h.Volumes()
+
+		// ① 卷描述 Type 保持 wrapper 类型（enclosure 只是内部装配机制）⇒ 协议/分类/回显全按
+		// wrapper 语义（此前 type=enclosure 会让 SchemeOf 无协议、CategoryOf≠wrapper）。
+		v, ok := vols.ByName("vault")
+		if !ok || v.Type != "secretdata" {
+			t.Fatalf("嵌套封装卷的 Type 应保持 secretdata: ok=%v type=%q", ok, v.Type)
+		}
+		if got := registry.SchemeOf(v.Type); got != "secretdata" {
+			t.Fatalf("SchemeOf(%q)=%q, want secretdata（无协议则 cloud 转存/归档创建即拒）", v.Type, got)
+		}
+		if got := registry.CategoryOf(v.Type); got != "wrapper" {
+			t.Fatalf("CategoryOf(%q)=%q, want wrapper（建卷表单/防环校验据它判封装语义）", v.Type, got)
+		}
+
+		// ② 生产 boot 顺序：setupSecretBackends（默认 secrets 卷 + 普通 secretdata 补装）→
+		// 造密钥 → enclosure.AttachAll（嵌套封装卷由此装配）。
+		if serr := setupSecretBackends(ctx, vols, cfg.StorageRoot, discardLoggerMain()); serr != nil {
+			t.Fatalf("setupSecretBackends: %v", serr)
+		}
+		if vols.External("vault") != nil {
+			t.Fatal("嵌套封装卷不得由 setupSecretBackends 按类型分派补装（须交 enclosure.AttachAll）")
+		}
+		mgr := secrets.ManagerOfExternal(vols.External("default-secrets"))
+		if mgr == nil {
+			t.Fatal("默认 secrets 卷不可用（密钥无法创建）")
+		}
+		if _, kerr := mgr.Create(ctx, "datakey"); kerr != nil {
+			t.Fatalf("Create key: %v", kerr)
+		}
+		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); aerr != nil {
+			t.Fatalf("AttachAll: %v", aerr)
+		}
+
+		// ③ 写保护：源区间封印生效（占用区间只读）。
+		rt := vols.Root("main")
+		if rt == nil {
+			t.Fatal("main 本地根未装配")
+		}
+		if rule := rt.SealAt("videos/x.bin"); rule == nil || rule.Wrapper != "vault" {
+			t.Fatalf("源卷 main 的 videos 区间应被 vault 封印, rules=%+v", rt.Seals())
+		}
+
+		// ④ 数据面：真实 secretdata 封装后端（区域视图上的分块加密）——读回一致 + 落盘为密文。
+		nbe := vols.External("vault")
+		if nbe == nil || nbe.FS() == nil {
+			t.Fatal("嵌套封装卷后端未挂回卷集（enclosure 装配失败）")
+		}
+		const body = "nested enclosure payload"
+		const key = "alice/user/n.bin"
+		if werr := nbe.FS().WriteFile(ctx, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+			t.Fatalf("封装卷写入: %v", werr)
+		}
+		rc2, oerr := nbe.FS().OpenRead(ctx, key)
+		if oerr != nil {
+			t.Fatalf("封装卷读回: %v", oerr)
+		}
+		got, rerr := io.ReadAll(rc2)
+		_ = rc2.Close()
+		if rerr != nil || string(got) != body {
+			t.Fatalf("读回=%q err=%v, want %q", got, rerr, body)
+		}
+		if n := dirBytes(t, filepath.Join(mainDir, "videos")); n == 0 {
+			t.Fatal("物理落点应为 main/videos 区域（前缀映射失效？）")
+		}
+		if plaintextOnDisk(t, filepath.Join(mainDir, "videos"), body) {
+			t.Fatal("封装卷写入应以密文落盘（分块加密未生效）")
+		}
+	})
 	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
@@ -674,7 +775,8 @@ func registerReattachWrapper() {
 }
 
 // TestEnclosureVolume_RestartReattach（阶段 2 迁移：重启收养语义的底座等价物）：嵌套封装卷在
-// 迁移后是 **enclosure 声明**（`source: default:videos` + `wrapper: <处理层>`），装配由
+// 迁移后是**封装声明**（`source: default:videos` + `wrapper: <处理层>`，卷 Type 保持 wrapper
+// 类型），装配由
 // `applyEnclosureSeals`（封印）+ `AttachAll`（推迟装配）完成。
 //
 // 重启时底层子目录（default/videos）**已经存在且含上次写入的字节**——过渡层为此需要
@@ -1109,4 +1211,25 @@ func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
 	if !strings.Contains(filepath.ToSlash(found), "/alice/user/vault/") {
 		t.Fatalf("封装内容应落在声明的 source 子树内, got %s", found)
 	}
+}
+
+// plaintextOnDisk 报告 dir 下任一文件内容包含明文子串（封装卷落盘不变量：区域内的字节恒为
+// 密文容器/meta，不含明文负载）。
+func plaintextOnDisk(t *testing.T, dir, plaintext string) bool {
+	t.Helper()
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil // 遍历错误/目录跳过（命中明文才是断言目标）
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil
+		}
+		if strings.Contains(string(data), plaintext) {
+			found = true
+		}
+		return nil
+	})
+	return found
 }

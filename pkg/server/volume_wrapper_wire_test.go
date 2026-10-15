@@ -3,9 +3,10 @@
 
 package server
 
-// volume_wrapper_wire_test.go 验证 **config 声明嵌套封装卷的装配接线**（阶段 2 迁移后）：
-// 用户面 `type: <wrapper 名>` + `extra.target: "<卷>/<子目录>"` 在装配期被翻译为 enclosure
-// 声明（`nested_enclosure.go: TranslateNestedVolume`），随之而来的是底座三项能力：
+// volume_wrapper_wire_test.go 验证 **config 声明嵌套封装卷的装配接线**（方案甲：enclosure
+// 内部化）：用户面 `type: <wrapper 名>` + `extra.target: "<卷>/<子目录>"` 在装配期被翻译出装配侧
+// 声明词汇（`nested_enclosure.go: TranslateNestedVolume`，**Type 保持 wrapper 类型**），随之而来
+// 的是 enclosure 装配的三项能力：
 //
 //   - **封印注入**：源卷（main）在该子区间上封印——客户端直连读写被拒（写恒拒 ErrSealed、
 //     读按 hidden 视为不存在）；这是「占用子目录只读」的唯一强制点（取代过渡层的 links +
@@ -46,9 +47,10 @@ func registerConfigWireBackend() {
 	})
 }
 
-// TestConfigDeclaredNested_TranslatedToEnclosure 装配 config 声明嵌套封装卷：
-// 翻译为 enclosure 声明 → 源卷封印生效 + 容量池继承源卷池。
-func TestConfigDeclaredNested_TranslatedToEnclosure(t *testing.T) {
+// TestConfigDeclaredNested_AssemblesViaEnclosure 装配 config 声明嵌套封装卷：
+// 卷描述 Type 保持 wrapper 类型（enclosure 是内部装配机制），后端经 enclosure 路径装配
+// ⇒ 源卷封印生效 + 容量池继承源卷池。
+func TestConfigDeclaredNested_AssemblesViaEnclosure(t *testing.T) {
 	t.Parallel()
 	mainRoot := t.TempDir()
 	cfg := Default()
@@ -63,10 +65,10 @@ func TestConfigDeclaredNested_TranslatedToEnclosure(t *testing.T) {
 	registerConfigWireBackend()
 	h := buildVolSetHandlers(t, cfg)
 
-	// 翻译结果：注册进卷集的形态是 enclosure（用户面 Extra 不变，仅内存翻译）。
+	// 翻译结果：卷描述 Type **不变**（仍是 wrapper 类型），只多出装配侧声明词汇（仅内存翻译）。
 	v, ok := h.volSet.ByName("vault")
-	if !ok || v.Type != enclosure.TypeEnclosure {
-		t.Fatalf("config 声明应翻译为 enclosure 卷: ok=%v type=%q", ok, v.Type)
+	if !ok || v.Type != configWireTestType {
+		t.Fatalf("嵌套封装卷的 Type 应保持 wrapper 类型: ok=%v type=%q", ok, v.Type)
 	}
 	if v.Extra["source"] != "main:videos" || v.Extra["wrapper"] != configWireTestType {
 		t.Fatalf("翻译产物 extra 错误: %+v", v.Extra)
@@ -127,11 +129,11 @@ func TestConfigDeclaredNested_ConflictFailClosed(t *testing.T) {
 	}
 }
 
-// TestTranslateNestedVolume 用户面 → enclosure 声明的翻译语义（纯函数，钉住兼容面）：
-//   - 嵌套 target + 已注册 wrapper 类型 → 翻译（type/extra 改写，原 target 保留）；
+// TestTranslateNestedVolume 用户面 → 装配侧声明词汇的翻译语义（纯函数，钉住兼容面）：
+//   - 嵌套 target + 已注册 wrapper 类型 → 翻译（补 source/wrapper，**Type 不变**，原 target 保留）；
 //   - 非嵌套（无分隔符 / `local` / 卷名或子路径空）→ 不翻译；
 //   - 非封装处理层类型 → 不翻译（普通外部卷零回归）；
-//   - 已翻译形态（type=enclosure）→ 幂等不再翻译。
+//   - 显式 `type: enclosure` 声明（非 wrapper 注册名）→ 不是「嵌套翻译」的输入（恒定不翻译）。
 func TestTranslateNestedVolume(t *testing.T) {
 	t.Parallel()
 	registerFixtureWrapper("translate-test-wrap")
@@ -147,7 +149,7 @@ func TestTranslateNestedVolume(t *testing.T) {
 		{"local 不翻译", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "local"}}, false, ""},
 		{"尾斜杠不翻译", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "main/"}}, false, ""},
 		{"未注册类型不翻译", volume.Volume{Name: "v", Type: "ghost-type", Extra: map[string]any{"target": "main/videos"}}, false, ""},
-		{"已是 enclosure 幂等", volume.Volume{Name: "v", Type: enclosure.TypeEnclosure, Extra: map[string]any{"target": "main/videos", "source": "main:videos"}}, false, ""},
+		{"显式 enclosure 声明不翻译", volume.Volume{Name: "v", Type: enclosure.TypeEnclosure, Extra: map[string]any{"target": "main/videos", "source": "main:videos"}}, false, ""},
 		{"本地卷不翻译", volume.Volume{Name: "v", Type: volume.TypeLocal, Extra: map[string]any{"target": "main/videos"}}, false, ""},
 	}
 	for _, tc := range cases {
@@ -162,7 +164,10 @@ func TestTranslateNestedVolume(t *testing.T) {
 			}
 			continue
 		}
-		if got.Type != enclosure.TypeEnclosure || got.Extra["source"] != tc.wantSrc {
+		if got.Type != tc.vol.Type {
+			t.Errorf("%s: 翻译不得改写 Type（对外身份 = wrapper 类型），got %q want %q", tc.name, got.Type, tc.vol.Type)
+		}
+		if got.Extra["source"] != tc.wantSrc {
 			t.Errorf("%s: 翻译产物错误 type=%q extra=%+v", tc.name, got.Type, got.Extra)
 		}
 		if got.Extra["wrapper"] != tc.vol.Type {
@@ -174,7 +179,7 @@ func TestTranslateNestedVolume(t *testing.T) {
 	}
 }
 
-// TestTranslateNestedVolume_CapacityToMaxBytes 卷级容量翻译为声明自身上限（过渡层语义等价）：
+// TestTranslateNestedVolume_CapacityToMaxBytes 卷级容量翻译为声明自身上限（语义等价）：
 // 显式 max_bytes 优先，不被 capacity 覆盖。
 func TestTranslateNestedVolume_CapacityToMaxBytes(t *testing.T) {
 	t.Parallel()
