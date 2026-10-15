@@ -165,8 +165,12 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
   （`main/photos` vs `main/movies`）、跨卷互不影响。
 - **关联标注**：建封装卷登记「底层卷 → {subdir, wrapper}」；删底层卷有引用 → 409；删封装卷清
   关联；重启经用户卷 store 装配期重建（防丢失）。
-- **写保护**：被占用目录**只读可查、禁止修改**（`sync.ReadonlySubFS`：WriteFile/Rename/Delete/
-  MakeDir fail-closed，ListDir/Stat/OpenRead 透传）。
+- **写保护**：被占用目录**只读可查、禁止修改**——装配层写面判定
+  `pkg/server.checkWrapperOccupiedWrite`（按 links 坐标命中 → 403 fail-closed，覆盖 files 域
+  上传/分块 complete/删除/批量/rename/mkdir/rmdir/版本 restore）、直写卷根旁路面的
+  `occupiedGuardFS` 装饰器（`pkg/server/volume_links.go`）、统一写内核显式卷分支
+  （S3 单对象 PUT / DAV / presign 直送登记）与统一转存（cloud 下载转存 + 归档→卷）；
+  读路径（ListDir/Stat/OpenRead 与 `/api/files` 列举）一律不拦。
 - **历史路径零回归**：`target: local + extra.root`（config/CLI）为本地根整卷，不进互斥占用校验。
 
 ## 4. 寻址
