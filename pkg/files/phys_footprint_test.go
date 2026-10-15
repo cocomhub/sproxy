@@ -36,6 +36,14 @@ func (f fakePhysFootprint) PhysFootprint(volName, owner, remotePath string) (int
 	if f.foot <= 0 {
 		return 0, false
 	}
+	// 存在性感知（与生产语义同构）：足迹是**实测**值——对象不存在就没有足迹。
+	// 缺此判据时「新建写」的旧值差分会被误判为「已有足迹」⇒ 覆盖写/新建账目全错
+	// （对账矩阵实测：新建写后配额 0 或翻倍）。
+	if f.root != nil {
+		if _, err := f.root.Stat("user/" + strings.Trim(remotePath, "/")); err != nil {
+			return 0, false
+		}
+	}
 	return f.foot, true
 }
 
@@ -82,7 +90,9 @@ func TestWriteTarget_VolumeReportedFootprintWins(t *testing.T) {
 	t.Parallel()
 	e := writeTargetEnv(t)
 	const foot = int64(3 << 20) // 1KB 文件在 secretdata 上物理 ≈3MB（meta pad + 内容）
-	e.svc.rt.phys = fakePhysFootprint{foot: foot}
+	// root 非 nil ⇒ 替身按「对象是否存在」报告足迹（与生产语义同构）：否则**新建写**会被
+	// 误判为「已有足迹」（旧值差分取到足迹）⇒ 账目反向漂移（实测 Usage=0）。
+	e.svc.rt.phys = fakePhysFootprint{foot: foot, root: e.tenantFor("alice").Root()}
 	ctx := context.Background()
 	payload := bytes.Repeat([]byte("z"), 1024)
 

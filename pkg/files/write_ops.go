@@ -152,10 +152,11 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	}
 
 	// 覆盖写场景先统计旧文件大小 prev（双 Adjust 差分用）。
-	prev := int64(0)
+	measuredPrev := int64(0)
 	if stat, statErr := root.Stat(rel); statErr == nil {
-		prev = stat.Size()
+		measuredPrev = stat.Size()
 	}
+	prev := s.prevCharge(route, owner, remotePath, measuredPrev)
 
 	// 内容寻址去重（roadmap P1，dedup.enabled）：
 	//   - 覆盖写（prev>0）：先从台账摘除本 rel 的旧内容引用（旧 checksum 可能另有引用；
@@ -228,10 +229,12 @@ func feedChecksumRewindable(src io.Reader, hasher io.Writer) (io.Reader, error) 
 // 无原子写/去重/版本/台账——外部卷是远程后端，这些本地 inode 语义天然不适用。
 func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, a externalWriteArgs) (WriteFileResult, error) {
 	// 覆盖写场景先统计旧文件大小 prev（双 Adjust 差分用）。
-	prev := int64(0)
+	measuredPrev := int64(0)
 	if sz, ok, serr := a.route.Sink.Stat(ctx, a.rel); serr == nil && ok {
-		prev = sz
+		measuredPrev = sz
 	}
+	// 旧值必须与结算同源（见 prevCharge 注释）：卷自报足迹优先，否则测量值。
+	prev := s.prevCharge(a.route, a.input.Owner, a.remotePath, measuredPrev)
 	if derr := a.route.Sink.MakeDir(ctx, path.Dir(a.rel)); derr != nil {
 		a.route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", a.remotePath)
@@ -1563,6 +1566,11 @@ type DeleteFileInput struct {
 	// AllowMissing 为 true 时「文件不存在（含默认卷被 ACL 排除而对 owner 不可见）」按**幂等
 	// 成功**返回（Idempotent=true），false 时返回 404。批量族用 true（重放安全），单条 API 用 false。
 	AllowMissing bool
+	// chargedHint 是**内部**字段（同包使用，不对外）：删除**前**捕获的记账金额（与结算同源）。
+	// 为什么必须提前捕获：删除流程先把文件 rename 到 quarantine（原路径不可测），而卷自报足迹
+	// （secretdata 的 meta pad/parity）只能由**卷能力**按原路径给出 ⇒ 改名后就只剩测量值（少释放
+	// ⇒ 幽灵占用）。非 0 时优先于测量值。
+	chargedHint int64
 	// SoftDelete 为 true 时软删：checksum 校验成功后移到 trash 桶（回收站，roadmap P2）
 	// 而非删除；不释放配额（可恢复）。默认 false 零回归。
 	SoftDelete bool
@@ -1660,6 +1668,13 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	//
 	// 选择依据：atomicRenameRoot 是替换语义且重试有界（storage.Rename），quarantine 名带
 	// 纳秒时间戳与同 rel 并发删除者天然隔离（两者都会先 rename，后到者 rename 失败返回错误）。
+	// 删除前捕获**记账金额**（与结算同源，见 DeleteFileInput.chargedHint）：quarantine 改名之后
+	// 原路径不可测，而卷自报足迹（secretdata 的 meta pad/parity）只能由卷能力按原路径给出
+	// ⇒ 不改名前的这一刻是唯一能取到「与结算同额」的时机（否则释放只能回落测量值 ⇒ 少释放
+	// ⇒ owner 配额与卷池永久虚高，对账矩阵实测：3MB 足迹卷硬删后仍留 ≈3MB）。
+	if n, ok := s.physChargeFor(homeVol, owner, remotePath); ok {
+		input.chargedHint = n
+	}
 	quarRel, handled, res, qErr := s.renameToDeleteQuarantine(ctx, root, rel, remotePath, input, logger)
 	if handled {
 		return res, qErr
@@ -2032,7 +2047,20 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 	}
 	// **删除前**取记账字节：卷自报实测足迹（secretdata 的 parity/meta pad 只能实测）优先，
 	// 否则回落「解密视图逻辑长度 → 所在卷物理」折算。删除后索引已无该对象 ⇒ 必须在此取。
+	// 释放金额必须与**结算同源**（见 prevCharge 注释）：卷自报足迹优先——secretdata 的 meta pad
+	// 与 parity 无法由测量值推出，用测量值（逻辑/折算）释放会**少释放** ⇒ owner 配额与卷池永久
+	// 虚高（幽灵占用 / 假 507）。此处仍在删除前（对象存在 ⇒ 足迹可测）。
 	charge := physicalCharge(f.root, info.Size())
+	switch {
+	case input.chargedHint > 0:
+		// 删除前已捕获（与结算同源，见 DeleteFileInput.chargedHint）：首选——此刻原路径已被
+		// rename 到 quarantine，卷能力按原路径取不到足迹。
+		charge = input.chargedHint
+	default:
+		if n, ok := s.physChargeFor(homeVol, f.owner, f.remotePath); ok {
+			charge = n
+		}
+	}
 	if n, ok := s.physChargeFor(homeVol, f.owner, f.remotePath); ok {
 		charge = n
 	}
@@ -2270,12 +2298,15 @@ func (s *Service) writeTargetLocalSettle(ctx context.Context, owner, rel, remote
 		return WriteTargetResult{}, dirCreateHTTPError(mkdirErr)
 	}
 	// 覆盖写差分 prev（Exclusive 时 prev 必 0——O_EXCL 创建；NoQuota 时仍预读供 size 语义）。
-	prev := int64(0)
+	// 旧值必须与结算**同源**（见 prevCharge 注释）：卷自报足迹卷（secretdata）测量到的是逻辑
+	// 长度而结算是物理足迹 ⇒ 直接用测量值会让每次覆盖写泄漏 `(足迹 − 逻辑)` 字节的幽灵占用。
+	measuredPrev := int64(0)
 	if !input.Exclusive {
 		if st, serr := root.Stat(rel); serr == nil && st != nil {
-			prev = st.Size()
+			measuredPrev = st.Size()
 		}
 	}
+	prev := s.prevCharge(route, owner, remotePath, measuredPrev)
 
 	var serverChecksum string
 	var written int64

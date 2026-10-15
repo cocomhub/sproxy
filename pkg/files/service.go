@@ -470,6 +470,20 @@ func (s *Service) physChargeFor(volName, owner, remotePath string) (int64, bool)
 	return n, true
 }
 
+// prevCharge 返回覆盖写场景的**旧值**——必须与**结算同源**。
+//
+// 为什么（对账矩阵实测的幽灵占用）：结算走 `settleSize`（**卷自报足迹优先**），而旧值原先用
+// **测量尺寸**——对 secretdata 这类卷，测量到的是**逻辑**长度、结算是**物理**足迹（meta pad
+// + parity）⇒ `Commit/Adjust(prev, new)` 每次覆盖写都泄漏 `(足迹 − 逻辑)` 字节的幽灵占用
+// （实测 3MB 足迹卷覆盖写后配额多记 ≈3MB，且随覆盖次数累积 ⇒ 假 507）。
+// 故旧值优先取**同一来源**的卷自报足迹；能力缺失时回落测量值（明文/加密本地两口径本就一致）。
+func (s *Service) prevCharge(route UploadRoute, owner, remotePath string, measured int64) int64 {
+	if n, ok := s.physChargeFor(route.VolumeName, owner, remotePath); ok {
+		return n
+	}
+	return measured
+}
+
 // Commit 结算双账本（prev → written 差分）。
 //
 // **口径契约（易错）**：两个参数都必须是**物理**字节——`prev` 来自 `root.Stat`（加密卷上已是密文
