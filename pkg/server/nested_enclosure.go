@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"maps"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -162,7 +163,18 @@ func validateEnclosureDecl(set *registry.Set, v volume.Volume) (enclosure.Decl, 
 //
 // 链式嵌套（源卷本身也是封装卷）天然可用：`Parse` 返回拓扑序，且封印/配额经
 // `EffectiveTarget`/`EffectiveFootprint` 落到真正的基底卷。
+// enclosureAttachMu 串行化运行期封装卷装配（校验 → 封印 → 配额 → 登记）。
+//
+// 为什么必须串行化（2026-10-15 代码审核 B 轮发现）：装配是「**读**卷集校验足迹 → **写**卷集
+// 登记」的**非原子**序列，而「同基底卷上两条无祖先关系的声明不得重叠」这条互斥占用不变量
+// 正是靠该校验维持。两个并发建卷请求可**同时通过校验**（TOCTOU）⇒ 两卷登记进同一足迹区间
+// ⇒ 互斥被破坏（删其一会擦除另一卷的数据，见本函数内 CheckFootprintRegionsFree 的注释）。
+// 锁只覆盖装配临界区；建卷是低频操作，串行化成本可忽略。
+var enclosureAttachMu sync.Mutex
+
 func AttachEnclosureVolume(ctx context.Context, set *registry.Set, log *slog.Logger, storageRoot string, v volume.Volume) error {
+	enclosureAttachMu.Lock()
+	defer enclosureAttachMu.Unlock()
 	if log == nil {
 		log = slog.Default()
 	}

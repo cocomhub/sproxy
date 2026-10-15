@@ -7,7 +7,10 @@ package main
 // 翻译走 enclosure 底座；其余类型走 registry.NewBackend）→ 注册进卷集（单卷失败跳过 + 告警）。
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -275,4 +278,44 @@ func TestRestoreUserVolumes_ChainedPoolOrder(t *testing.T) {
 	if pz.Usage() != 0 {
 		t.Fatalf("zzz 自身无占用（aaa 的字节不经 zzz 池记账）: %d", pz.Usage())
 	}
+}
+
+// TestWarnOpenACLUserVolumes 钉住「存量卷 ACL 未收紧」的启动可观测性（2026-10-15 代码审核 A 轮）：
+// S1 的 owner-only 注入只覆盖新建/恢复路径，**旧 store 文件零值 ACL = 默认开放**（任意 owner
+// 可枚举/写）⇒ 必须启动时汇总告警（此前完全静默）。判据与 volume.Authorize 同源。
+func TestWarnOpenACLUserVolumes(t *testing.T) {
+	t.Parallel()
+	ownerOnly := server.UserVolume{Name: "v1", Owner: "alice",
+		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}}}
+	legacyZero := server.UserVolume{Name: "v2", Owner: "bob"}                                           // 旧文件：零值 ACL
+	legacyDeny := server.UserVolume{Name: "v3", Owner: "carol", ACL: volume.ACL{Mode: volume.ModeDeny}} // 默认开放
+	allowEmpty := server.UserVolume{Name: "v4", Owner: "dave", ACL: volume.ACL{Mode: volume.ModeAllow}} // 白名单空
+
+	// 全 owner-only ⇒ 不告警。
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	warnOpenACLUserVolumes([]server.UserVolume{ownerOnly}, log)
+	if buf.Len() != 0 {
+		t.Fatalf("owner-only 卷不应告警，got: %s", buf.String())
+	}
+
+	// 含未收紧卷 ⇒ 单条聚合告警，含数量与卷名样本。
+	buf.Reset()
+	warnOpenACLUserVolumes([]server.UserVolume{ownerOnly, legacyZero, legacyDeny, allowEmpty}, log)
+	got := buf.String()
+	if !strings.Contains(got, "ACL 未收紧") {
+		t.Fatalf("应告警 ACL 未收紧，got: %s", got)
+	}
+	for _, want := range []string{"count=3", "bob/v2", "carol/v3", "dave/v4"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("告警应含 %q，got: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "alice/v1") {
+		t.Errorf("owner-only 卷不应出现在告警样本里，got: %s", got)
+	}
+
+	// 空列表 / nil logger：安全 no-op。
+	warnOpenACLUserVolumes(nil, log)
+	warnOpenACLUserVolumes([]server.UserVolume{legacyZero}, nil)
 }

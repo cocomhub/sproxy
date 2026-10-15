@@ -53,6 +53,10 @@ func restoreUserVolumes(set *registry.Set, store *server.UserVolumeStore, log *s
 	if err != nil {
 		return err
 	}
+	// 存量卷 ACL 可观测性（2026-10-15 代码审核 A 轮发现）：S1 的「用户卷强制 owner-only ACL」
+	// 只在**创建/恢复时注入**；**旧 store 文件无 acl 字段** ⇒ 读回零值 ACL（Mode=="" =
+	// 默认开放）⇒ 该卷对**任意 owner** 可枚举/可写，而此前**无任何提示**（静默 ✗）。
+	warnOpenACLUserVolumes(uvs, log)
 	pending := uvs
 	for {
 		var next []server.UserVolume
@@ -86,6 +90,33 @@ func restoreReadyRound(set *registry.Set, store *server.UserVolumeStore, log *sl
 		progress = true
 	}
 	return progress
+}
+
+// warnOpenACLUserVolumes 汇总告警「ACL 未收紧（默认开放）」的存量用户卷。
+//
+// 判据与 `volume.Authorize` 同源：非 `ModeAllow`（零值/ModeDeny）即「默认开放 + 黑名单」语义
+// ⇒ 对任意 owner 放行；即 ModeAllow 但白名单为空也同样无有效授权（属配置异常）。
+// 单条聚合日志（数量 + 前若干个卷名），避免多卷部署启动刷屏。
+func warnOpenACLUserVolumes(uvs []server.UserVolume, log *slog.Logger) {
+	if log == nil || len(uvs) == 0 {
+		return
+	}
+	var open []string
+	for _, uv := range uvs {
+		if uv.ACL.Mode == volume.ModeAllow && len(uv.ACL.Owners) > 0 {
+			continue // 已按 owner-only 收紧（新建/恢复路径注入）
+		}
+		open = append(open, uv.Owner+"/"+uv.Name)
+	}
+	if len(open) == 0 {
+		return
+	}
+	sample := open
+	if len(sample) > 5 {
+		sample = sample[:5]
+	}
+	log.Warn("存量用户卷 ACL 未收紧（默认开放：任意 owner 可枚举/写）——建议显式配置 ACL 或重建为 owner-only",
+		"count", len(open), "sample", sample)
 }
 
 // setVolumeReady 判定源卷 base 已装配进 set（封装卷装配依赖其存在）。
