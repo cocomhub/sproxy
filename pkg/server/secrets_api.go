@@ -49,24 +49,32 @@ const secretsBucketDir = "secrets"
 // handler 据此回 503（能力不可用）而非 500（服务端故障）。
 var errSecretsTenantUnavailable = errors.New("secrets: owner 租户不可用")
 
-// SecretsManagerForOwner 返回 **owner 的默认 secrets 桶** Manager（per-owner 隔离）。
+// ReadOwnerDefaultSecret 读取 **owner 默认 secrets 桶**里的一个 secret（一次性：打开租户 →
+// 归属校验/读取 → 关闭），供**服务级解析器**在有 owner 上下文时使用
+// （`secret_url: secrets://default-secrets/<名>` 的运行期解析）。
 //
-// 与 `Handlers.secretsManagerFor` 的唯一差别是租户来源：本函数从**卷集**取默认卷根
-// （`set.Tenant(set.Default().Name, owner)`），供**装配期/服务级解析器**在有 owner 上下文时使用
-// （如 `secret_url: secrets://default-secrets/<name>` 的运行期解析）；HTTP 管理面用 Handlers 版
-// （走 `h.tenants` 缓存。`h.globalRoot == set.DefaultRoot()`，故两者同父根、同加密态）。
+// 与 `Handlers.secretsManagerFor` 的差别是租户来源：本函数经 `storage.OpenTenant` **临时**打开
+// `<默认卷根>/<owner>`（用完即关）——**刻意不建第二份租户缓存**：默认卷的租户缓存权威由
+// `h.tenants`（`Handlers.tenantFor`）单一持有（约定见 `registry.Set.Tenant` 与
+// `Handlers.volumeTenant`：默认卷一律走 `tenantFor`，避免同路径双句柄/双缓存）。
+// 加解密态与封印规则继承自同一父根（`set.DefaultRoot()`）⇒ 与 HTTP 面读写的是同一批字节。
 //
-// 未装配卷集 / 默认卷无本地根 / owner 非法 → `errSecretsTenantUnavailable`（fail-closed，
-// 绝不回落全局根）。
-func SecretsManagerForOwner(set *registry.Set, owner string, logger *slog.Logger) (*secrets.Manager, error) {
-	if set == nil {
-		return nil, fmt.Errorf("%w: 卷集未装配（owner %q）", errSecretsTenantUnavailable, normalizeOwner(owner))
+// 失败 fail-closed：卷集未装配 / 默认卷无本地根 / owner 非法 → `errSecretsTenantUnavailable`；
+// 桶内无该 secret → 底层读错误（调用方包装）。
+func ReadOwnerDefaultSecret(ctx context.Context, set *registry.Set, owner, name string, logger *slog.Logger) ([]byte, error) {
+	if set == nil || set.DefaultRoot() == nil {
+		return nil, fmt.Errorf("%w: 卷集未装配或默认卷无本地根（owner %q）", errSecretsTenantUnavailable, normalizeOwner(owner))
 	}
-	tnt := set.Tenant(set.Default().Name, normalizeOwner(owner), logger)
-	if tnt == nil || tnt.Root() == nil {
-		return nil, fmt.Errorf("%w: owner %q", errSecretsTenantUnavailable, normalizeOwner(owner))
+	tnt, err := storage.OpenTenant(set.DefaultRoot(), normalizeOwner(owner))
+	if err != nil {
+		return nil, fmt.Errorf("%w: owner %q: %w", errSecretsTenantUnavailable, normalizeOwner(owner), err)
 	}
-	return secretsManagerFromTenant(tnt, logger)
+	defer func() { _ = tnt.Root().Close() }() // 临时句柄：用完即关（不参与默认卷租户缓存）
+	mgr, merr := secretsManagerFromTenant(tnt, logger)
+	if merr != nil {
+		return nil, merr
+	}
+	return mgr.Read(ctx, name)
 }
 
 // secretsManagerFromTenant 在 owner 的租户根上派生默认 secrets 桶并构造 Manager：

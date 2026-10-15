@@ -737,13 +737,16 @@ func TestSecretdataVolume_PerOwnerDefaultSecrets(t *testing.T) {
 	})
 	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 
-	// alice 的默认桶里造密钥（与 /api/secrets 同源：server.SecretsManagerForOwner）。
-	mgr, err := server.SecretsManagerForOwner(set, "alice", nil)
-	if err != nil {
-		t.Fatalf("SecretsManagerForOwner: %v", err)
+	// alice 的默认桶里**手工放置**密钥（与 HTTP 面 /api/secrets 写入同一路径
+	// `<默认卷根>/<owner>/secrets/<名>`；跨模块等价性由 pkg/server 的 handler 用例 +
+	// e2e 磁盘副作用断言覆盖）。
+	const aliceKey = "7c9f1a3b5d7e90123456789abcdef0123456789abcdef0123456789abcdef012"
+	aliceBucket := filepath.Join(set.DefaultRoot().AbsPath(), "alice", "secrets")
+	if err := os.MkdirAll(aliceBucket, 0o700); err != nil {
+		t.Fatalf("mkdir alice bucket: %v", err)
 	}
-	if _, cerr := mgr.Create(ctx, "datakey"); cerr != nil {
-		t.Fatalf("Create key: %v", cerr)
+	if werr := os.WriteFile(filepath.Join(aliceBucket, "datakey"), []byte(aliceKey), 0o600); werr != nil {
+		t.Fatalf("write alice datakey: %v", werr)
 	}
 
 	dataRoot := t.TempDir()

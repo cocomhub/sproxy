@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -240,7 +239,7 @@ func defaultSecretdataSecret(ctx context.Context, v volume.Volume, set *registry
 	if nerr != nil {
 		return nil, fmt.Errorf("secretdata backend: 卷 %q 的 extra.secret_url=%q 非法: %w", v.Name, secretURL, nerr)
 	}
-	if isDefaultSecretsAuth(secretURLAuth(secretURL)) {
+	if secrets.IsDefaultVolumeRef(secretURL) {
 		return perOwnerDefaultSecret(ctx, v, set, secretURL, name)
 	}
 	rc, err := set.ResolveURL(ctx, secretURL)
@@ -258,16 +257,6 @@ func defaultSecretdataSecret(ctx context.Context, v volume.Volume, set *registry
 	return data, nil
 }
 
-// isDefaultSecretsAuth 判定 URL authority 是否指向 **per-owner 默认 secrets 桶**：
-// 空 / `default` / `default-secrets`（后者是本仓默认卷名的唯一事实源）。
-func isDefaultSecretsAuth(auth string) bool {
-	switch auth {
-	case "", "default", secrets.DefaultVolumeName:
-		return true
-	}
-	return false
-}
-
 // perOwnerDefaultSecret 在**有 owner 上下文**时解析 per-owner 默认桶里的密钥；无 owner
 // （装配期/服务级声明）→ 明确 fail-closed 并指明替代写法。
 func perOwnerDefaultSecret(ctx context.Context, v volume.Volume, set *registry.Set, secretURL, name string) ([]byte, error) {
@@ -278,11 +267,9 @@ func perOwnerDefaultSecret(ctx context.Context, v volume.Volume, set *registry.S
 			"（volumes[] 中 type: secrets 卷，如 secrets://<卷名>/<name>），或经带身份的建卷请求"+
 			"（POST /api/volumes/user）创建本卷", v.Name, secretURL)
 	}
-	mgr, err := server.SecretsManagerForOwner(set, owner, nil)
-	if err != nil {
-		return nil, fmt.Errorf("secretdata backend: 卷 %q 解析 owner %q 的默认 secrets 桶失败: %w", v.Name, owner, err)
-	}
-	data, rerr := mgr.Read(ctx, name)
+	// 一次性租户句柄读取（`server.ReadOwnerDefaultSecret`）：**不建第二份默认卷租户缓存**
+	// （默认卷租户缓存权威由 Handlers.tenantFor 单一持有，见其文档与 registry.Set.Tenant）。
+	data, rerr := server.ReadOwnerDefaultSecret(ctx, set, owner, name, nil)
 	if rerr != nil {
 		return nil, fmt.Errorf("secretdata backend: 卷 %q 读 owner %q 默认桶的密钥 %q 失败: %w", v.Name, owner, name, rerr)
 	}
@@ -290,22 +277,6 @@ func perOwnerDefaultSecret(ctx context.Context, v volume.Volume, set *registry.S
 		return nil, fmt.Errorf("secretdata backend: 卷 %q 的 owner %q 密钥 %q 为空（fail-closed）", v.Name, owner, name)
 	}
 	return data, nil
-}
-
-// secretURLAuth 从 `secrets://<卷>/<name>` 形态里取 authority（卷名段）；解析失败返回空串。
-// 与 pkg/volume/registry.ResolveURL 的寻址口径一致（authority = 卷名；Opaque 形态取首段）。
-func secretURLAuth(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return ""
-	}
-	if u.Host != "" {
-		return u.Host
-	}
-	if before, _, ok := strings.Cut(u.Opaque, "/"); ok {
-		return before
-	}
-	return u.Opaque
 }
 
 // resolveTargetFS 解析 secretdata 的底层卷 FS：`target: ""/local` + extra.root（config/CLI

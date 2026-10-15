@@ -294,6 +294,29 @@ func OwnerFromContext(ctx context.Context) string {
 	return s
 }
 
+// IsDefaultVolumeRef 判定 `secrets://<authority>/<名>` 的 authority 是否指向 **per-owner 默认桶**：
+// 空 / `default` / `DefaultVolumeName`。**唯一实现**：服务级解析（cmd/sproxy）与任何需要区分
+// 「默认桶 vs 显式命名卷」的调用方共用，避免判定口径漂移。
+func IsDefaultVolumeRef(urlStr string) bool {
+	u, err := url.Parse(strings.TrimSpace(urlStr))
+	if err != nil {
+		return false
+	}
+	auth := u.Host
+	if auth == "" {
+		if before, _, ok := strings.Cut(u.Opaque, "/"); ok {
+			auth = before
+		} else {
+			auth = u.Opaque
+		}
+	}
+	switch strings.TrimSpace(auth) {
+	case "", "default", DefaultVolumeName:
+		return true
+	}
+	return false
+}
+
 // NameFromURL 解析 `secrets://<卷>/<name>`（兼容 Opaque 形态 `secrets://<name>`）里的 secret 名，
 // 并做命名校验（非空、不含路径分隔符、非 `.`/`..`）。**唯一实现**：`backend.OpenURL` 与
 // 服务级 per-owner 解析共用，避免两处解析口径漂移。
