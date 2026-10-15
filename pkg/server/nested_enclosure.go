@@ -154,6 +154,13 @@ func AttachEnclosureVolume(ctx context.Context, set *registry.Set, log *slog.Log
 	if err != nil {
 		return err
 	}
+	// 防误删前置校验（与旧过渡层 adoptableNestedDir 同语义，阶段 2 迁移补回）：声明足迹区间若
+	// **已存在且含非本卷内容**（普通目录形态 / 被文件占据）→ fail-closed 拒绝装配。缺此校验时，
+	// owner 限定声明（`target: <卷>/<owner>/user/<目录>`，足迹 = 用户真实数据区）覆盖既有目录后，
+	// 删除该封装卷会擦除整个区间（eraseEnclosureRegion）⇒ 用户数据损失。
+	if rerr := enclosure.CheckFootprintRegionsFree(ctx, set, d, decls); rerr != nil {
+		return fmt.Errorf("封装卷 %q 目标区间不可独占: %w", v.Name, rerr)
+	}
 	base, _ := enclosure.EffectiveTarget(d, decls)
 	if err := applyEnclosureSealsFor(set, decls, base); err != nil {
 		return err

@@ -15,6 +15,7 @@ package server
 //   - owner 校验：所有操作以请求主体（ownerFromRequest）为准，跨 owner 404 防枚举。
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -211,7 +212,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// （阶段 2 迁移）：声明校验（含**足迹重叠互斥**）+ 封印注入 + 配额继承 + 后端构造
 	// 全部由 attachEnclosureVolume 完成；持久化仍存**原形态**（store 字节零变化）。
 	if tv, nested := TranslateNestedVolume(v); nested {
-		if err := validateNewEnclosure(h.volSet, tv, req.Capacity); err != nil {
+		if err := validateNewEnclosure(r.Context(), h.volSet, tv, req.Capacity); err != nil {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, enclosureErrStatus(err))
 			return
 		}
@@ -277,12 +278,16 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 }
 
 // validateNewEnclosure 建卷前置校验（嵌套封装，无副作用）：① 声明合法性（含足迹重叠互斥）；
-// ② capacity 不超有效源卷池余量（过度承诺的运行期快速失败——即便不校验，父链聚合也会在写入时
+// ② 足迹区间可独占（防误删：既有非本卷内容 ⇒ 拒绝，见 enclosure.CheckFootprintRegionsFree）；
+// ③ capacity 不超有效源卷池余量（过度承诺的运行期快速失败——即便不校验，父链聚合也会在写入时
 // 507，但此处能给出可读的 400）。
-func validateNewEnclosure(set *registry.Set, tv volume.Volume, capacity int64) error {
+func validateNewEnclosure(ctx context.Context, set *registry.Set, tv volume.Volume, capacity int64) error {
 	d, decls, err := validateEnclosureDecl(set, tv)
 	if err != nil {
 		return err
+	}
+	if rerr := enclosure.CheckFootprintRegionsFree(ctx, set, d, decls); rerr != nil {
+		return rerr
 	}
 	base, _ := enclosure.EffectiveTarget(d, decls)
 	if pool := set.Pool(base); pool != nil {
@@ -298,11 +303,13 @@ func validateNewEnclosure(set *registry.Set, tv volume.Volume, capacity int64) e
 }
 
 // enclosureErrStatus 把封装声明校验错误映射为 HTTP 状态码：**互斥占用冲突**（足迹重叠/同一路径
-// 双声明，两者都是「该区间已被别的封装卷占用」）→ 409；其余（缺 source/未注册 wrapper/环/超深/
-// 源卷不存在/源卷已加密）→ 400。哨兵由 pkg/volume/enclosure 单一提供，不做字符串匹配。
+// 双声明/**声明与既有内容冲突**，都是「该区间已被占用」）→ 409；其余（缺 source/未注册 wrapper/环/
+// 超深/源卷不存在/源卷已加密）→ 400。哨兵由 pkg/volume/enclosure 单一提供，不做字符串匹配。
 func enclosureErrStatus(err error) int {
 	switch {
-	case errors.Is(err, enclosure.ErrFootprintOverlap), errors.Is(err, enclosure.ErrConflictClaim):
+	case errors.Is(err, enclosure.ErrFootprintOverlap),
+		errors.Is(err, enclosure.ErrConflictClaim),
+		errors.Is(err, enclosure.ErrRegionOccupied):
 		return http.StatusConflict
 	default:
 		return http.StatusBadRequest

@@ -83,7 +83,7 @@ func attachAllWithOpts(ctx context.Context, set *registry.Set, logger *slog.Logg
 		log = logger
 	}
 	for _, d := range decls {
-		if err := attachOne(ctx, set, d, opt); err != nil {
+		if err := attachOne(ctx, set, d, decls, opt); err != nil {
 			return err
 		}
 		baseVol, basePath := EffectiveTarget(d, decls)
@@ -94,14 +94,19 @@ func attachAllWithOpts(ctx context.Context, set *registry.Set, logger *slog.Logg
 	return nil
 }
 
-// attachOne 补装单个封装卷（已装配则跳过）。
-func attachOne(ctx context.Context, set *registry.Set, d Decl, opt AttachOptions) error {
+// attachOne 补装单个封装卷（已装配则跳过）。补装前做**足迹区间防误删前置校验**（见 region.go）：
+// 声明区间已含非本卷内容（普通目录形态/被文件占据）时 fail-closed 拒绝补装——否则该封装卷
+// 一旦被删除，`eraseEnclosureRegion` 会擦除整个区间（含既有用户数据）。
+func attachOne(ctx context.Context, set *registry.Set, d Decl, all []Decl, opt AttachOptions) error {
 	if set.External(d.Vol) != nil {
 		return nil // 已装配（测试自注册类型等）
 	}
 	v, ok := set.ByName(d.Vol)
 	if !ok {
 		return fmt.Errorf("enclosure: 卷 %q 未登记", d.Vol)
+	}
+	if rerr := CheckFootprintRegionsFree(ctx, set, d, all); rerr != nil {
+		return fmt.Errorf("enclosure: 卷 %q 补装前置校验失败: %w", d.Vol, rerr)
 	}
 	be, berr := BuildBackend(ctx, set, d, v, opt)
 	if berr != nil {
