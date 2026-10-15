@@ -326,20 +326,29 @@ func TestParseLocation_FailClosed(t *testing.T) {
 	}
 }
 
-// TestResolveLocation_AnonymousOwnerRejected E-MAJOR-6 回归：字面 "anonymous" owner
-// 拒绝（与空 owner 归一键空间重合防交叉互覆）；空 owner 放行（归一 anonymous）。
-func TestResolveLocation_AnonymousOwnerRejected(t *testing.T) {
+// TestResolveLocation_AnonymousOwnerAccepted 匿名口径统一（2026-10-15 用户裁定，修正 E-MAJOR-6）：
+// 字面 "anonymous" 与空 owner **都放行**，且归一到**同一键空间**（`anonymous/user/...`）。
+//
+// 为什么翻转原守卫：本仓**全链路的匿名规范形就是字面 "anonymous"**——`storage.NormalizeOwner("")`
+// → "anonymous"、配置 ACL（`Owners: ["anonymous"]`）、建卷 ACL 白名单、`Authorize` 判定
+// 用的都是字面，而 `FSPath` 又把「空」与「字面」归一到同一键；原守卫在此拒绝字面 ⇒ 出现
+// 「ACL 已授权、路径却非法」的自相矛盾：匿名（未认证/loopback）访问**外部/封装卷**必失败
+// （本地卷不经卷层解析 ⇒ 无症状，故长期未被发现）。
+// 真正的隔离应在**凭据层**（禁止创建名为 "anonymous" 的 AK），不在键空间入口。
+func TestResolveLocation_AnonymousOwnerAccepted(t *testing.T) {
 	t.Parallel()
-	for _, bad := range []Owner{"anonymous"} { // 字面 anonymous（NormalizeOwner 不归一大小写）
-		if _, err := sharedVolume().ResolveLocation(bad, "user", "f.txt"); err == nil {
-			t.Errorf("字面 %q owner 应被拒绝（与匿名键空间重合）", bad)
-		}
-	}
-	loc, err := sharedVolume().ResolveLocation("", "user", "f.txt")
+	empty, err := sharedVolume().ResolveLocation("", "user", "f.txt")
 	if err != nil {
-		t.Fatalf("空 owner 应放行（归一 anonymous）: %v", err)
+		t.Fatalf("空 owner 应放行（匿名）: %v", err)
 	}
-	if loc.FSPath() != "anonymous/user/f.txt" {
-		t.Fatalf("空 owner 键=%q want anonymous/user/f.txt", loc.FSPath())
+	lit, err := sharedVolume().ResolveLocation("anonymous", "user", "f.txt")
+	if err != nil {
+		t.Fatalf("字面 anonymous owner 应放行（匿名规范形）: %v", err)
+	}
+	if empty.FSPath() != lit.FSPath() {
+		t.Fatalf("两种匿名写法必须归一到同一键空间：%q vs %q", empty.FSPath(), lit.FSPath())
+	}
+	if want := "anonymous/user/f.txt"; lit.FSPath() != want {
+		t.Fatalf("字面 anonymous 键=%q want %q", lit.FSPath(), want)
 	}
 }

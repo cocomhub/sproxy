@@ -159,12 +159,16 @@ func (v Volume) ResolveLocation(owner Owner, bucket Bucket, rel Path) (Location,
 	// （owner=user 撞车 → sidecar 桶段判错），且 owner 含 `/` 会跨 owner 键交错。
 	// 转存/上传经卷键空间唯一入口 ResolveLocation——此处是纵深防御（注册口未拦）。
 	// **空 owner 放行**：空 = 匿名（FSPath 归一 anonymous），既有转存/上传语义合法。
-	// E-MAJOR-6 修复：owner 字面 "anonymous"（AnonymousOwner）**拒绝**——字面 anonymous
-	// 账号与空 owner 归一（FSPath → anonymous/user/...）键空间完全重合，匿名数据与账号
-	// 数据交叉/互覆（且 ACL 语义混淆）。空 owner（将归一为 anonymous）是唯一合法匿名
-	// 入口。
-	if owner != "" && (owner == storage.AnonymousOwner ||
-		!storage.ValidSegmentName(owner) || storage.IsReservedBucketName(owner)) {
+	//
+	// **字面 "anonymous" 同样放行**（2026-10-15 用户裁定，修正 E-MAJOR-6）：
+	// 本仓**全链路的匿名规范形就是字面 "anonymous"**——`storage.NormalizeOwner("")` →
+	// "anonymous"、配置 ACL（`Owners: ["anonymous"]`）、建卷 ACL 白名单、`Authorize` 判定
+	// 用的都是字面；而 `FSPath` 又把「空」与「字面」归一到**同一键空间**（`anonymous/...`）。
+	// E-MAJOR-6 原守卫在此**拒绝字面**，造成「ACL 已授权、路径却非法」的自相矛盾：
+	// 匿名（未认证/loopback）访问任何**外部/封装卷**必失败（本地卷不经卷层解析 ⇒ 无症状，
+	// 故长期未被发现）。真正的隔离应在**凭据层**（禁止创建名为 "anonymous" 的 AK），
+	// 而不是让键空间入口与 ACL 口径相反。
+	if owner != "" && (!storage.ValidSegmentName(owner) || storage.IsReservedBucketName(owner)) {
 		return Location{}, ErrInvalidUserPath
 	}
 	// 2. bucket 校验（单段合法名——防桶名注入/多段拼写）。
