@@ -88,10 +88,7 @@ func (h *Handlers) listVolumesHandler(w http.ResponseWriter, r *http.Request) {
 // volumeStatusMeta 返回单卷的 usage + 健康状态（列表循环内收敛 gocognit）：
 // usage 优先取容量池；外部卷（type != local）优先卷级计数（UsageProvider），状态走探针缓存。
 func (h *Handlers) volumeStatusMeta(v volume.Volume, owner string) (int64, string) {
-	var usage int64
-	if p := h.volSet.Pool(v.Name); p != nil {
-		usage = p.Usage()
-	}
+	usage := h.volumeUsage(v)   // 单一查询面（配额层 → 容量池 → 后端 UsageProvider）
 	state := volumeStateHealthy // 本地卷恒 healthy
 	if v.Type != "" && v.Type != volume.TypeLocal {
 		if be := h.volSet.External(v.Name); be != nil {

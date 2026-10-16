@@ -23,7 +23,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
-	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // Metrics 使用 atomic 计数器收集请求统计数据。
@@ -783,20 +782,10 @@ func (m *Metrics) renderVolumeWatermark(h *Handlers, v volume.Volume) {
 	}
 }
 
-// volumeUsageOf 计算卷当前已用字节（本地卷取容量池 Usage，外部卷优先 UsageProvider）。
+// volumeUsageOf 计算卷当前已用字节（**薄委托** `Handlers.volumeUsage` 的单一实现，
+// 见 volume_usage.go；此处保留函数名以免改动多处调用点，但**不得**再放独立逻辑 ✗）。
 func volumeUsageOf(h *Handlers, v volume.Volume) int64 {
-	var usage int64
-	if p := h.volSet.Pool(v.Name); p != nil {
-		usage = p.Usage()
-	}
-	if v.Type != "" && v.Type != volume.TypeLocal {
-		if be := h.volSet.External(v.Name); be != nil {
-			if up, ok := be.(registry.UsageProvider); ok {
-				usage = up.Usage()
-			}
-		}
-	}
-	return usage
+	return h.volumeUsage(v)
 }
 
 // MetricsHandler 返回 GET /metrics 的 HTTP handler。
