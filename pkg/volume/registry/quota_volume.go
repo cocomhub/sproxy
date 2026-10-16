@@ -165,37 +165,68 @@ type Reservation struct {
 
 // Reserve 为 owner 预占 n 字节（**严格上界**，G1 机制）。任一侧拒绝（配额/卷容量不足）⇒
 // 回滚已取得的一侧并返回 nil（**不允许只入一半账** ✓）。无配额能力 ⇒ (nil, nil) = no-op。
-func (q *QuotaVolume) Reserve(owner string, n int64) (*Reservation, error) {
+func (q *QuotaVolume) Reserve(key syncpkg.LogicalKey, n int64) (*Reservation, error) {
 	if q == nil || n <= 0 {
 		return nil, nil
 	}
-	r := &Reservation{}
-	if sc := q.scopeFor(owner); sc != nil {
-		rr, err := sc.TryReserve(n)
-		if err != nil {
-			return nil, err
-		}
-		r.scope, r.scopeRes = sc, rr
+	// **零值键 = 未声明归属** ⇒ 显式不记账（禁按路径反推 ✗ —— 封装卷路径不可归属 ✓）。
+	if key.IsZero() {
+		q.warnNoAttribution(n)
+		return nil, nil
 	}
-	if q.counter != nil {
-		// counter 形态：TryAdd = 预占（超限 fail-closed ✓）；与 pool **互斥**（禁双账本 ✗）。
-		if err := q.counter.TryAdd(n); err != nil {
-			r.Release()
-			return nil, err
-		}
-		r.counter, r.n = q.counter, n
-	} else if q.pool != nil {
-		rr, err := q.pool.TryReserve(n)
-		if err != nil {
-			r.Release()
-			return nil, err
-		}
-		r.pool, r.poolRes = q.pool, rr
+	r := &Reservation{}
+	if err := q.reserveUser(r, key, n); err != nil {
+		return nil, err
+	}
+	if err := q.reserveVolume(r, n); err != nil {
+		r.Release() // 回滚已取得的每用户侧预留（**禁半入账** ✗）
+		return nil, err
 	}
 	if r.scopeRes == nil && r.poolRes == nil && r.counter == nil {
 		return nil, nil
 	}
 	return r, nil
+}
+
+// warnNoAttribution 记录「未声明归属」的可观测痕迹（遵守「生效状态必须可观测」✓）。
+func (q *QuotaVolume) warnNoAttribution(n int64) {
+	if q.log != nil {
+		q.log.Debug("quota: 写入未声明归属（LogicalKey 零值）⇒ 跳过记账", "n", n)
+	}
+}
+
+// reserveUser 取得**每用户侧**预留（失败 ⇒ 调用方直接返回，此时尚未取得任何预留 ✓）。
+func (q *QuotaVolume) reserveUser(r *Reservation, key syncpkg.LogicalKey, n int64) error {
+	sc := q.scopeFor(key.Owner)
+	if sc == nil {
+		return nil
+	}
+	rr, err := sc.TryReserve(n)
+	if err != nil {
+		return err
+	}
+	r.scope, r.scopeRes = sc, rr
+	return nil
+}
+
+// reserveVolume 取得**整卷侧**预留：counter 权威优先，与 pool **互斥**（禁双账本 ✗）。
+func (q *QuotaVolume) reserveVolume(r *Reservation, n int64) error {
+	if q.counter != nil {
+		if err := q.counter.TryAdd(n); err != nil {
+			return err
+		}
+		r.counter, r.n = q.counter, n
+		return nil
+	}
+	if q.pool == nil {
+		return nil
+	}
+	rr, err := q.pool.TryReserve(n)
+	if err != nil {
+		return err
+	}
+	r.pool, r.poolRes = q.pool, rr
+	return nil
 }
 
 // Commit 把预留结算为实际占用（**prev → written 差分**；`prev <= 0` = 新文件）。
@@ -258,11 +289,11 @@ func (r *Reservation) Release() {
 
 // AdjustUsage 覆盖写/改名结算（**无需预留**）：把 owner 的占用从 prev 调整到 written。
 // 整卷侧同样以 counter 为权威（非 nil 时不用 pool ✗）。
-func (q *QuotaVolume) AdjustUsage(owner string, prev, written int64) {
-	if q == nil || written < 0 {
+func (q *QuotaVolume) AdjustUsage(key syncpkg.LogicalKey, prev, written int64) {
+	if q == nil || written < 0 || key.IsZero() {
 		return
 	}
-	if sc := q.scopeFor(owner); sc != nil {
+	if sc := q.scopeFor(key.Owner); sc != nil {
 		sc.Adjust(prev, written)
 	}
 	if q.counter != nil {
@@ -279,11 +310,11 @@ func (q *QuotaVolume) AdjustUsage(owner string, prev, written int64) {
 }
 
 // ReleaseUsage 释放 owner 的 n 字节已确认占用（**删除成功后**调用；两侧各自钳 0，重复调用安全）。
-func (q *QuotaVolume) ReleaseUsage(owner string, n int64) {
-	if q == nil || n <= 0 {
+func (q *QuotaVolume) ReleaseUsage(key syncpkg.LogicalKey, n int64) {
+	if q == nil || n <= 0 || key.IsZero() {
 		return
 	}
-	if sc := q.scopeFor(owner); sc != nil {
+	if sc := q.scopeFor(key.Owner); sc != nil {
 		sc.ReleaseUsage(n)
 	}
 	if q.counter != nil {

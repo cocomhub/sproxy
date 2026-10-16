@@ -69,7 +69,7 @@ func TestQuotaVolume_TwoLedgersAndNoDoubleCount(t *testing.T) {
 	}
 
 	// ② 新文件：Reserve → Commit(0, 8192) ⇒ 两侧 = 8192。
-	res, err := qv.Reserve("alice", 8192)
+	res, err := qv.Reserve(syncpkg.LogicalKey{Owner: "alice", Rel: "user/a.bin"}, 8192)
 	if err != nil || res == nil {
 		t.Fatalf("Reserve: res=%v err=%v", res, err)
 	}
@@ -82,7 +82,7 @@ func TestQuotaVolume_TwoLedgersAndNoDoubleCount(t *testing.T) {
 	}
 
 	// ③ **覆盖写**：Reserve → Commit(8192, 20480) ⇒ 两侧 = 20480（旧值释放，不双计）。
-	res2, err := qv.Reserve("alice", 20480)
+	res2, err := qv.Reserve(syncpkg.LogicalKey{Owner: "alice", Rel: "user/a.bin"}, 20480)
 	if err != nil || res2 == nil {
 		t.Fatalf("Reserve(覆盖): res=%v err=%v", res2, err)
 	}
@@ -92,7 +92,7 @@ func TestQuotaVolume_TwoLedgersAndNoDoubleCount(t *testing.T) {
 	}
 
 	// ④ 删除释放 ⇒ 两侧归零。
-	qv.ReleaseUsage("alice", 20480)
+	qv.ReleaseUsage(syncpkg.LogicalKey{Owner: "alice", Rel: "user/a.bin"}, 20480)
 	if scope.Usage() != 0 || pool.Usage() != 0 {
 		t.Fatalf("删除释放后：scope=%d pool=%d，want 0/0", scope.Usage(), pool.Usage())
 	}
@@ -105,7 +105,7 @@ func TestQuotaVolume_ReserveRollbackOnPoolReject(t *testing.T) {
 	scope := userPool.Scope("/tenant/alice/user", 1<<20)
 	qv := NewQuotaVolume(fakeQuotaInner{name: "v1"}, func(string) *quota.Scope { return scope }, pool, nil, nil)
 
-	if _, err := qv.Reserve("alice", 4096); err == nil {
+	if _, err := qv.Reserve(syncpkg.LogicalKey{Owner: "alice", Rel: "user/a.bin"}, 4096); err == nil {
 		t.Fatal("池不足时 Reserve 应报错")
 	}
 	// **不半入账**：Scope 侧已取得的预留必须归还。
@@ -198,7 +198,7 @@ func TestQuotaVolume_CounterIsSingleVolumeAuthority(t *testing.T) {
 	}
 
 	// 预留 → 结算：counter 恰好记 written，池恒为 0（**禁双账本** ✗）。
-	res, err := qv.Reserve("alice", 8192)
+	res, err := qv.Reserve(syncpkg.LogicalKey{Owner: "alice", Rel: "user/a.bin"}, 8192)
 	if err != nil || res == nil {
 		t.Fatalf("Reserve: res=%v err=%v", res, err)
 	}
@@ -211,23 +211,52 @@ func TestQuotaVolume_CounterIsSingleVolumeAuthority(t *testing.T) {
 	}
 
 	// 覆盖写：8192 → 20480 ⇒ counter = 20480（旧值释放，非 28672 ✗）。
-	res2, _ := qv.Reserve("alice", 20480)
+	res2, _ := qv.Reserve(syncpkg.LogicalKey{Owner: "alice", Rel: "user/a.bin"}, 20480)
 	res2.Commit(8192, 20480)
 	if used, _ := qv.VolumeUsed(); used != 20480 {
 		t.Fatalf("覆盖写后 counter.Used=%d want 20480（旧值须释放）", used)
 	}
 	// 释放 ⇒ 归零。
-	qv.ReleaseUsage("alice", 20480)
+	qv.ReleaseUsage(syncpkg.LogicalKey{Owner: "alice", Rel: "user/a.bin"}, 20480)
 	if used, _ := qv.VolumeUsed(); used != 0 {
 		t.Fatalf("释放后 counter.Used=%d want 0", used)
 	}
 	// 超限 fail-closed（写前准入）。
-	if _, err := qv.Reserve("alice", (1<<20)+1); err == nil {
+	if _, err := qv.Reserve(syncpkg.LogicalKey{Owner: "alice", Rel: "user/a.bin"}, (1<<20)+1); err == nil {
 		t.Fatal("超限时 Reserve 应报错（fail-closed）")
 	}
 	// counter 形态下 SetCapacity 为 no-op（不得误改池）。
 	qv.SetCapacity(4096)
 	if got := qv.Capacity(); got != 1<<20 {
 		t.Fatalf("counter 形态下 SetCapacity 应 no-op，got=%d", got)
+	}
+}
+
+// ---- 片 4：LogicalKey 归属键（设计 §9.5）----
+
+// TestQuotaVolume_ZeroKeyMeansNoAccounting 断言**零值键 = 未声明归属 ⇒ 显式不记账**：
+// 两侧账本（每用户 Scope + 整卷 counter）**均不得**变化 —— 禁按路径反推 ✗（封装卷路径不可归属 ✓）。
+//
+// 变异：去掉 `key.IsZero()` 守卫 ⇒ 会按 `key.Owner`（空串）解析出 owner="" 的 Scope ⇒ 记账 ⇒ 红。
+func TestQuotaVolume_ZeroKeyMeansNoAccounting(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(1 << 20)
+	userPool := quota.NewPool(1 << 20)
+	scope := userPool.Scope("/tenant/alice/user", 1<<20)
+	counter := &fakeVolumeCounter{capacity: 1 << 20}
+	qv := NewQuotaVolume(fakeQuotaInner{name: "v1"}, func(string) *quota.Scope { return scope }, pool, counter, nil)
+
+	// 零值键：Reserve 应返回 (nil, nil)（无预留 ⇒ 调用方无副作用）。
+	res, err := qv.Reserve(syncpkg.LogicalKey{}, 8192)
+	if err != nil || res != nil {
+		t.Fatalf("零值键 Reserve 应返回 (nil,nil)，got res=%v err=%v", res, err)
+	}
+	qv.AdjustUsage(syncpkg.LogicalKey{}, 0, 8192)
+	qv.ReleaseUsage(syncpkg.LogicalKey{}, 8192)
+	if scope.Usage() != 0 || pool.Usage() != 0 {
+		t.Fatalf("零值键不得记账：scope=%d pool=%d，want 0/0", scope.Usage(), pool.Usage())
+	}
+	if used, _ := qv.VolumeUsed(); used != 0 {
+		t.Fatalf("零值键不得计入整卷权威：counter.Used=%d，want 0", used)
 	}
 }
