@@ -390,6 +390,27 @@ func CategoryOf(typ string) string {
 	return backendCategory(typ)
 }
 
+// KindOf 返回卷的**结构性类型**（统一存储卷模型 M0/M1，设计 §11）。
+//
+// 判据**单源**在本注册表的 wrapper 事实源（`isWrapperCategoryLocked`：静态基线
+// secrets/secretdata/egress + 处理层动态登记 `MarkWrapperType`），**不重复**任何
+// 「哪些 type 是 wrapper」的清单 ✗：
+//   - wrapper 类型 ⇒ `volume.KindWrapper`（视图层，**不注册配额层**）；
+//   - 其余（含 `""`/`local`、baidupcs/s3/ftp/sftp/federated/cluster 等）⇒ `volume.KindStorage`
+//     （承载真实字节，**需要配额层**）。
+//
+// 注意：本函数**不**额外校验 `Extra["source"]` —— 封装声明（wrapper 类型 **且** source 非空）
+// 由 `enclosure.Parse` 在装配期校验（非法组合装配期即拒），故运行期类型分类只需按类型。
+func KindOf(v volume.Volume) volume.Kind {
+	backendMu.RLock()
+	isWrapper := isWrapperCategoryLocked(v.Type)
+	backendMu.RUnlock()
+	if isWrapper {
+		return volume.KindWrapper
+	}
+	return volume.KindStorage
+}
+
 // BackendSchema 返回单后端类型的创建表单 schema（副本；nil = 无字段）。
 //
 // 读取顺序：先查静态表（RegisterBackendSchema——构造无关、装配期登记，生产 wrapper 类型
