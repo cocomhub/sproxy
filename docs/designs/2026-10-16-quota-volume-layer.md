@@ -410,6 +410,44 @@ h.alertEngine.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
 足迹/上界）、片 3a/3b（整卷权威统一 + 唯一入口 + R29）、片 5（per-owner 预警静默 no-op 修复）、
 片 6（漂移证伪 + 回收站边界不变式）、M5 步 1（死代码 `Set.FSFor` 删除）。
 
+### 9.5 片 4a 决议：`LogicalKey` **形状** + **通道形态**（2026-10-16）
+
+**取证** ✓：`sync.FS` 接口（`pkg/sync/entry.go:54`）：
+```go
+WriteFile(ctx context.Context, path string, r io.Reader, size int64, mt int64) error
+```
+非测试调用点 **120 处** ✗；`sync.FS` 实现 **15+**（`LocalFS`/`PrefixFS`/`EncryptedFS`/
+`StagingQuotaGateFS`/`rootFSCore`/`remoteFS`/`subPathFS`/`CapacityFS`/`backupQuotaFS`/
+`davMetaFS`/`rootSecretsFS`/`enclosure`/`secretdata`/外部卷族 ✓）。
+
+#### 🔑 形状：`LogicalKey{Owner, Rel string}` —— **只有 `owner` 是丢失的信息**
+**关键洞察** ✓：路径参数 `path` **已经携带** `bucket/rel`（客户端可达路径恒 `<卷根>/<owner>/<bucket>/<rel>` ✓）；
+封装卷内部名（随机容器 + 内容哈希）丢掉的**只是 `owner`** ✗ —— 但它同时**丢失了「原 `rel` 用于作用域
+最长前缀解析」的能力** ✗（配额按功能桶/子目录最长前缀定 Scope ✓）⇒ 两者都要 ✓。
+⇒ 即：`LogicalKey` = **写内核已有的 `(owner, remotePath)` 对** ✓（`Service.settleSize(route, owner,
+remotePath, written)` ✓）—— 不是新概念，而是**把这个对从写内核下传到卷内** ✓。
+
+**为何不用单一字符串键** ✗：字符串需重新解析（且“拼回去再拆开”是归属漂移的经典根因 ✗）；
+结构化两字段让**非法状态不可表示** ✓（与仓内 `Location`/`Ref` 一致 ✓）。
+**零值语义** ✓：`LogicalKey{}` = **无归属**（调用方不声明 ⇒ 配额层**显式不记账** ✗，**禁**猜 ✗）——
+与「未判定不得当 Storage ✗」同型。
+
+#### 📡 通道形态：**参数**（决议 #1）
+```go
+WriteFile(ctx context.Context, key sync.LogicalKey, path string, r io.Reader, size, mtime int64) error
+```
+**为何参数而非 context** ✗（决议 #1 已定）：context 隐式会让**漏传 = 静默错归属** ✗（本会话反复
+出现的缺陷类 ✓）；参数使**编译器强制**每个调用点表态 ✓（要么传真归属 ✓、要么显式 `LogicalKey{}` ✓）。
+
+#### 迁移序（4b，机械但量大）
+1. **先加参数**（接口 + 15+ 实现 + 120 调用点，**编译器驱动** ✗）——调用点绝大多数传
+   `LogicalKey{}`（它们**不在**封装卷下、`path` 已可归属 ✓）；
+2. **再在封装卷下传**（secretdata 写入时传真实 `(owner, rel)` ✓）——**同一片内**（禁双形态 ✗）；
+3. **配额层消费**（`QuotaVolume.Reserve(key, n)` 按 key 归属 ✓）；
+4. **回归矩阵** ✓：4 类历史漂移（单位不一致 / 释放≠结算 / 归属丢失 / 静默降级）逐项用例 ✓。
+**风险提示** ✓：步骤 1 纯机械（编译器强制 ✓），步骤 2 是**语义变更**（配额层开始记账 ⇒
+**同片必须删上层重复记账** ✗，否则双计 ✗ —— 已实证 `committed += 2×size` ✗）。
+
 ---
 
 ## 10. 风险与回退
