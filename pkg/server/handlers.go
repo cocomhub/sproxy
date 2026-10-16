@@ -796,6 +796,25 @@ func (h *Handlers) quotaBucketFor(owner, bucket string) *quota.Scope {
 	return rootSc.Resolve(segs[1:])
 }
 
+// ownerQuotaScope 返回 owner 的**根配额 Scope**（该 owner 全部用量的聚合点）。
+//
+// **为何需要它（而不是 `quotaScopeFor(owner, "")`）**：`quotaScopeFor` 首行
+// `segs := strings.Split(rel, "/")` ⇒ `rel == ""` 时 `segs[0] == ""` ⇒ **恒返回 nil** ✗
+// ⇒ 调用方会静默拿到「无配额」✗（`rel == ""` 的调用点全仓仅一处：配额预警读取器 ✓）。
+//
+// **为何根 Scope 的 Usage 就是「该 owner 的用量」**（2026-10-16 核实 ✓）：
+// `type Scope struct{ pool *Pool }`，而 `Mount`/`EnsureScope` 经 `newScope` 创建**子 Pool**
+// （`parent: p`，各自持有 `committed`/`maxBytes` ✓）⇒ `Scope.Usage()` 返回 **`p.committed`
+// = 该节点自己的**用量 ✓（**不是**全局池用量 ✗）；且 `commitUp` 沿 `parent` 链逐层累计 ⇒
+// **根节点 committed = 该 owner 全子树用量** ✓、`MaxBytes()` = 该 owner 的配额上限 ✓。
+func (h *Handlers) ownerQuotaScope(owner string) *quota.Scope {
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	root, _ := h.ensureTenantQuotaLocked(owner)
+	return root
+}
+
 // quotaScopeFor 按文件实际相对路径（rel，含功能桶前缀，如 "user/dir/f.txt"）解析最长前缀
 // 配额子 Scope（http route 式）：rel 首段 = 功能桶根，沿其 children 段树逐级下探；最长前缀
 // 命中（如 rel="user/videos/hd/a.mkv" 且装配了 "user/videos/hd" → 返回该子 Scope）；
