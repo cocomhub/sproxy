@@ -353,6 +353,16 @@ h.alertEngine.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
 | **③ 删除前捕获** | `write_ops.go:1676`（`DeleteFileInput.chargedHint` ✓）、`prevCharge`（覆盖写旧值 ✓） | 原路径已消失 ⇒ **必须在改名/删除前捕获** ✓ |
 | **④ 其它** | `chunked_upload.go:1420`、`dir_charge.go:134`、`cloud_archive_handler.go:742`、`files_service.go:1096`、`write_ops.go:1291/1854/2080` | 各异 |
 
+**⚠️ 该漂移候选已于同日【证伪】✗✓**（片 6 第 1 步实测）：外部/封装卷的软删被**显式拒绝**
+（`?soft=true` ⇒ 400「外部卷暂不支持回收站删除：请改用硬删」，`pkg/files/write_ops.go:1772`
+的 fail-closed 分支，注释自证「禁静默降级」）⇒ **回收站释放路径只作用于本地卷** ✗；
+而本地卷的**结算侧同样走公式**（`RootPhysSizer`，无自报能力）⇒ **两族来源永不重叠** ✓ ⇒
+`释放 == 结算` 成立 ✓。硬删路径走 `DeleteFileInput.chargedHint`/`prevCharge`（本就**卷自报
+足迹优先** ✓）⇒ 同源 ✓。**回归用例**：`TestWrapperSoftDelete_RefusedFailClosedAndNoSideEffect`
+（钉住「拒绝 + **零副作用**」）✓。⇒ 片 6 的「释放 ≠ 结算」**不需要**~20 站重构 ✗。
+
+（以下为**原始嫌疑记录**，保留以留存该判断路径。）
+
 **🔴 漂移候选（**尚未用测试证实** ✗ —— 按本会话纪律不得无证据断言 ✓）**：对 **secretdata** 这类
 「物理量含**公式不可推**的部分」的卷（meta blob pad 到 `[base, 2·base)`、XOR parity 可达逻辑 2× ✓）：
 **结算**走卷自报足迹（`VolumePhysFootprinter.PhysFootprint` ✓，含 meta pad ✓），而**回收站释放**
