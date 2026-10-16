@@ -4,7 +4,9 @@
 package server
 
 import (
+	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -71,3 +73,24 @@ var (
 	_ registry.ExternalBackend = (*localBackend)(nil)
 	_ registry.StorageVolume   = (*localBackend)(nil)
 )
+
+// registerLocalBackendOnce 保证注册幂等（`RegisterBackend` 重复注册即 panic ⇒ 多次装配
+// （生产 / 测试）不得重复调用）。
+var registerLocalBackendOnce sync.Once
+
+// RegisterLocalBackend 把本地卷注册为**普通后端**（M1b）：`registry.NewBackend` 从此可统一
+// 分派本地卷，装配层特例分支（`Type == "" || TypeLocal`）可在后续分片删除（M5）。
+//
+// **不声明任何协议 scheme**：本地卷不经 URL 寻址（`scheme://卷/路径` 是外部/封装卷语义 ✓）。
+// 根目录取自 `v.RootDir`（配置层 `volumes[].root` ✓）；加密/布局逻辑复用
+// `OpenLocalVolumeRoot`（见 `NewLocalBackend` ✓）。
+//
+// **注册 ≠ 用户可创建**：建卷 API / 创建表单 / 预签名面另由 `IsUserCreatableBackendType`
+// 排除本地 ✓（否则可指定任意 `RootDir` ⇒ 路径/权限面 ✗）。
+func RegisterLocalBackend() {
+	registerLocalBackendOnce.Do(func() {
+		registry.RegisterBackend(volume.TypeLocal, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
+			return NewLocalBackend(v, v.RootDir, slog.Default())
+		})
+	})
+}

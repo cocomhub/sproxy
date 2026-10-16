@@ -1407,6 +1407,10 @@ func (rt *runServerRuntime) setupSyncConflictIndex(exec *syncexec.Executor, h *s
 func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *server.Handlers, logger *slog.Logger) {
 	cfg := rt.cfg
 	registerBaidupcsBackend()
+	// **本地卷注册为普通后端**（统一存储卷模型 M1b）：`registry.NewBackend` 从此可统一分派
+	// 本地卷（`Type == ""` 归一为 `local`），装配层特例分支（M5）随后删除。
+	// 注册 ≠ 用户可创建：建卷 API/表单/预签名面由 `IsUserCreatableBackendType` 排除本地 ✓。
+	server.RegisterLocalBackend()
 	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.StagingQuotaTrackerFor, h.TrustedWrapOptions())
 	webdav.RegisterWebDAVBackend()
 	sftp.RegisterSFTPBackend()
