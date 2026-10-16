@@ -258,6 +258,9 @@ raw `root.OpenFile`（meta sidecar / s3 part / 块写暂存 / 索引快照 ✓�
 
 ## 9. 分片与验收矩阵
 
+> **进展（2026-10-16）**：片 1（`Kind()` ✓ M0/M1a/M1b）、片 2（本地卷自报足迹/上界 ✓）**已完成**；
+> 片 3 已拆为 **3a（整卷权威统一，已完成）** + **3b（5 个装配点收敛，待做）**——见 §9.1。
+
 | 片 | 内容 | 验收（每片独立可回退 ✓） |
 |---|---|---|
 | **0** | 链构造**收敛一处**（纯重构 ✓） | 全量绿 + e2e 行为不变 ✓ |
@@ -268,6 +271,40 @@ raw `root.OpenFile`（meta sidecar / s3 part / 块写暂存 / 索引快照 ✓�
 | **5** | `QuotaVolume` 接管**用户**配额 + 联邦查询端点 | 跨卷求和一致性 ✓ + ACL 收敛（只返回可访问卷 ✓） |
 | **6** | `charged_bytes` 落该层 + **删除**上层启发式（`prevCharge`/`chargedHint` ✓） | 「释放 = 结算」不变式 ✓ |
 | **7** | per-volume **持久账本** + 对账自校验 | 崩溃/重启/跨进程 ✓ |
+
+---
+
+### 9.1 片 3 具体计划（2026-10-16 取证）
+
+**现状取证（重要）**：「整卷容量记账」今天散在 **5 个装配点**各自 `capacity.WrapBackend(be, counter)`：
+
+| # | 位置 | 形态 |
+|---|---|---|
+| 1 | `pkg/server/volumes.go:317`（配置外部卷） | `NewPoolCounterPersistent` / `NewPoolCounter`（池同源 ✓） |
+| 2 | `pkg/server/user_volume_api.go:280`（用户建卷） | `NewCounter`（持久化文件 ✓） |
+| 3 | `pkg/volume/enclosure/attach.go:151,154`（封装卷） | 池同源 ✓ |
+| 4 | `cmd/sproxy/secret_register.go:734`（secretdata） | 池同源 ✓ |
+| 5 | `cmd/sproxy/user_volume_restore.go:173`（恢复） | `NewCounter`（持久化 ✓） |
+
+⇒ 这正是 §0 根因的**标准形态** ✗：记账是**横切关注点**，却实现成 **5 个调用点各自的义务**——
+**漏一处即「静默无限额」**（新卷型/新装配路径不会报错 ✗）。
+
+**🔴 关键约束（实现前必须知道，否则会撞墙）**：`pkg/volume/capacity` **已 import**
+`pkg/volume/registry`（用 `registry.ExternalBackend` ✓）⇒ `registry` **不能**反向 import `capacity`
+（成环 ✗）⇒ `QuotaVolume` **不能**直接调用 `capacity.Wrap` ✗。
+
+**解决方案（片 3a ✓ 已落地）**：在 **`registry` 侧定义消费者最小接口** `VolumeCounter`
+（`TryAdd/Release/Used/Capacity` ✓）——Go 接口是**结构性**的 ⇒ `capacity.Counter` 的两种实现
+（`PoolCounter` ✓ / `VolumeCapacityCounter` ✓）**天然满足**，**零 import** ✓。⇒ 配额层因此
+**无需知道**整卷账本的实现形态（内存池 / 持久文件 ✓）。
+
+**片 3b（待做，机械收敛）**：把 5 处的 `capacity.WrapBackend` 改为**构造 `QuotaVolume` 并注入 counter**
+（**同片删除旧包装** ✗，否则双账本 ✗）；验收：① 既有容量用例（`capacity_fs_test` / `volume_quota_test`
+/ `metrics_capacity_test` ✓）全绿；② **新增「恰好一次」断言**（同一卷写入 N 字节 ⇒ `Used == N`，
+**非 2N** ✗）；③ 对账矩阵 ✓。
+
+**为何先做 3a 而不直接改 5 处**：3a 让「整卷权威单一」**可表达** ✓，并把 3b 降为**纯注入点替换** ✓
+（风险从「5 处语义变更」降为「5 处参数替换」✓）；且 3a 的「恰好一次」测试是 3b 的**安全网** ✓。
 
 ---
 

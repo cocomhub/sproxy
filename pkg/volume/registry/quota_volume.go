@@ -30,22 +30,49 @@ import (
 // UserScopeResolver 按 owner 解析该用户的配额 Scope（nil = 该用户无配额约束 ⇒ no-op）。
 type UserScopeResolver func(owner string) *quota.Scope
 
+// VolumeCounter 是**整卷容量记账**的最小抽象（片 3）。
+//
+// **为何在此重复定义而不 import `pkg/volume/capacity`**：`capacity` 已 import 本包
+// （`registry.ExternalBackend` ✓）⇒ 反向 import **成环** ✗。Go 接口是**结构性**的 ⇒ 在**消费者侧**
+// 定义最小接口是惯用法 ✓，且它同时容纳**两种**既有实现：
+//   - `capacity.PoolCounter`（配置卷：复用卷容量池 `quota.Pool` ✓，与路由/指标同源 ✓）；
+//   - `capacity.VolumeCapacityCounter`（用户卷：持久化文件态 ✓，重启恢复 ✓）。
+//
+// ⇒ 配额层因此**无需知道**整卷账本的实现形态（内存池 / 持久文件 ✓）⇒ 「整卷权威单一」可
+// **统一表达** ✓（片 3b 把 5 个装配点的 `capacity.WrapBackend` 收敛到本层时，只改注入点 ✓）。
+type VolumeCounter interface {
+	// TryAdd 在写入前累计 size；超限返回包装后的 ErrVolumeFull 且**不改变** used（fail-closed）。
+	TryAdd(size int64) error
+	// Release 在删除/覆盖/改名后释放。
+	Release(size int64)
+	// Used 返回当前占用（记账字节）。
+	Used() int64
+	// Capacity 返回上限（0 = 不限）。
+	Capacity() int64
+}
+
 // QuotaVolume 是「**每用户 + 整卷**」配额层。
 //
 // 并发：与 `quota.Scope`/`quota.Pool` 一致（其内部持锁 ✓）；本类型无自有可变状态 ✓。
 type QuotaVolume struct {
-	inner  StorageVolume
-	scopes UserScopeResolver
-	pool   *quota.Pool // 整卷容量池（nil ⇒ 不限制）
-	log    *slog.Logger
+	inner   StorageVolume
+	scopes  UserScopeResolver
+	pool    *quota.Pool   // 整卷容量池（nil ⇒ 不限制）
+	counter VolumeCounter // 整卷容量**权威**（非 nil 时优先于 pool —— 片 3）
+	log     *slog.Logger
 }
 
 // NewQuotaVolume 包装存储卷为配额层（`inner` 必须非 nil：配额层不制造卷）。
-func NewQuotaVolume(inner StorageVolume, scopes UserScopeResolver, pool *quota.Pool, log *slog.Logger) *QuotaVolume {
+//
+// `counter` 是**整卷容量权威**（片 3 ✓）：配置卷传 `capacity.PoolCounter`（与卷池同源 ✓）、
+// 用户卷传 `capacity.VolumeCapacityCounter`（持久化 ✓）；`nil` ⇒ 回落到 `pool` 语义（与 M4a 同 ✓）。
+// **两者不得同时生效**（同时存在就是双账本 ✗）：非 nil 的 `counter` **优先**，且 `pool` 仅作
+// 每用户 Scope 的容器（本层不会向它做整卷记账 ✗）。
+func NewQuotaVolume(inner StorageVolume, scopes UserScopeResolver, pool *quota.Pool, counter VolumeCounter, log *slog.Logger) *QuotaVolume {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &QuotaVolume{inner: inner, scopes: scopes, pool: pool, log: log}
+	return &QuotaVolume{inner: inner, scopes: scopes, pool: pool, counter: counter, log: log}
 }
 
 // ---- StorageVolume（委托；**不加变换** —— 这正是「与真实字节之间无变换层」的含义 ✓）----
@@ -61,30 +88,54 @@ func (q *QuotaVolume) Inner() StorageVolume { return q.inner }
 // ---- 整卷配额 ----
 
 // Capacity 返回整卷上限字节（0 = 不限制）。
+//
+// **权威优先**：注入的 `counter` 优先于 `pool`（片 3 ✓）—— 否则同一卷会有**两个**整卷账本 ✗。
 func (q *QuotaVolume) Capacity() int64 {
-	if q == nil || q.pool == nil {
+	if q == nil {
+		return 0
+	}
+	if q.counter != nil {
+		return q.counter.Capacity()
+	}
+	if q.pool == nil {
 		return 0
 	}
 	return q.pool.MaxBytes()
 }
 
+// VolumeUsed 返回整卷已用（记账字节）。(used, ok)；ok=false = 无整卷权威（未知，禁当 0 ✗）。
+func (q *QuotaVolume) VolumeUsed() (int64, bool) {
+	if q == nil {
+		return 0, false
+	}
+	if q.counter != nil {
+		return q.counter.Used(), true
+	}
+	if q.pool == nil {
+		return 0, false
+	}
+	return q.pool.Usage(), true
+}
+
 // SetCapacity 运行期调整整卷上限（0 = 取消上限）。无池 ⇒ no-op（不制造池）。
+//
+// **仅池形态可调**：`counter` 形态的上限由各自实现持有（`PoolCounter` 委托池 ⇒ 经 `pool` 生效；
+// 持久化计数器按卷声明重建 ⇒ 不在本层改 ✗）—— 未知形态静默 no-op 是可接受的，因为**无副作用** ✓。
 func (q *QuotaVolume) SetCapacity(n int64) {
-	if q == nil || q.pool == nil {
+	if q == nil || q.pool == nil || q.counter != nil {
 		return
 	}
 	q.pool.SetMaxBytes(n)
 }
 
 // VolumeStats 返回 (已用, 总量, ok)。被包装卷实现 `volume.StatsProvider` 时**优先用后端真值**
-// （外部卷可报远端总量 ✓）；否则用整卷池（已用 = committed、总量 = 上限 ✓）。
+// （外部卷可报远端总量 ✓）；否则用整卷权威（`counter` 优先 ✓，再回落整卷池 ✓）。
 func (q *QuotaVolume) VolumeStats() (used, total int64, ok bool) {
 	if q == nil {
 		return 0, 0, false
 	}
-	if q.pool != nil {
-		used, total, ok = q.pool.Usage(), q.pool.MaxBytes(), true
-	}
+	used, ok = q.VolumeUsed()
+	total = q.Capacity()
 	if sp, sok := q.inner.(volume.StatsProvider); sok {
 		if bu, bt, bok := sp.VolumeStats(); bok {
 			if bu > 0 {
@@ -108,6 +159,8 @@ type Reservation struct {
 	scopeRes *quota.Reservation
 	pool     *quota.Pool
 	poolRes  *quota.Reservation
+	counter  VolumeCounter // 整卷权威（counter 形态；非 nil ⇒ **不用** pool 做整卷记账 ✗）
+	n        int64         // 整卷侧预留量（结算差分用）
 }
 
 // Reserve 为 owner 预占 n 字节（**严格上界**，G1 机制）。任一侧拒绝（配额/卷容量不足）⇒
@@ -124,7 +177,14 @@ func (q *QuotaVolume) Reserve(owner string, n int64) (*Reservation, error) {
 		}
 		r.scope, r.scopeRes = sc, rr
 	}
-	if q.pool != nil {
+	if q.counter != nil {
+		// counter 形态：TryAdd = 预占（超限 fail-closed ✓）；与 pool **互斥**（禁双账本 ✗）。
+		if err := q.counter.TryAdd(n); err != nil {
+			r.Release()
+			return nil, err
+		}
+		r.counter, r.n = q.counter, n
+	} else if q.pool != nil {
 		rr, err := q.pool.TryReserve(n)
 		if err != nil {
 			r.Release()
@@ -132,7 +192,7 @@ func (q *QuotaVolume) Reserve(owner string, n int64) (*Reservation, error) {
 		}
 		r.pool, r.poolRes = q.pool, rr
 	}
-	if r.scopeRes == nil && r.poolRes == nil {
+	if r.scopeRes == nil && r.poolRes == nil && r.counter == nil {
 		return nil, nil
 	}
 	return r, nil
@@ -156,6 +216,19 @@ func (r *Reservation) Commit(prev, written int64) {
 			r.scopeRes.Commit(written)
 		}
 	}
+	// counter 形态：把预留 `n` 收敛到 `written`（覆盖写额外释放 `prev`）——
+	// 净释放 = n + prev − written ✓（这正是「恰好一次」：counter 只被这一处调整 ✓）。
+	if r.counter != nil {
+		if d := r.n + prev - written; d > 0 {
+			r.counter.Release(d)
+		} else if d < 0 {
+			// 实测 **超出**预留（如未声明长度的大写入）：字节已在盘上 ⇒ **必须记账** ✓
+			// （决议 #5：半途失败按实测结算 ✓）。此处忽略错误：`TryAdd` 的 fail-closed 是
+			// **写前准入**语义，而这里是**写后结算**（不记账 = 幽灵占用 ✗，比超额更坏）。
+			_ = r.counter.TryAdd(-d)
+		}
+		r.counter, r.n = nil, 0 // 防重复结算
+	}
 	if r.poolRes != nil {
 		if prev > 0 {
 			r.pool.Adjust(prev, written)
@@ -171,6 +244,10 @@ func (r *Reservation) Release() {
 	if r == nil {
 		return
 	}
+	if r.counter != nil {
+		r.counter.Release(r.n)
+		r.counter, r.n = nil, 0
+	}
 	if r.scopeRes != nil {
 		r.scopeRes.Release()
 	}
@@ -180,12 +257,21 @@ func (r *Reservation) Release() {
 }
 
 // AdjustUsage 覆盖写/改名结算（**无需预留**）：把 owner 的占用从 prev 调整到 written。
+// 整卷侧同样以 counter 为权威（非 nil 时不用 pool ✗）。
 func (q *QuotaVolume) AdjustUsage(owner string, prev, written int64) {
 	if q == nil || written < 0 {
 		return
 	}
 	if sc := q.scopeFor(owner); sc != nil {
 		sc.Adjust(prev, written)
+	}
+	if q.counter != nil {
+		if d := written - prev; d > 0 {
+			_ = q.counter.TryAdd(d)
+		} else if d < 0 {
+			q.counter.Release(-d)
+		}
+		return
 	}
 	if q.pool != nil {
 		q.pool.Adjust(prev, written)
@@ -199,6 +285,10 @@ func (q *QuotaVolume) ReleaseUsage(owner string, n int64) {
 	}
 	if sc := q.scopeFor(owner); sc != nil {
 		sc.ReleaseUsage(n)
+	}
+	if q.counter != nil {
+		q.counter.Release(n)
+		return
 	}
 	if q.pool != nil {
 		q.pool.ReleaseCommitted(n)

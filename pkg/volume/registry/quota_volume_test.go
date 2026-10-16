@@ -19,6 +19,8 @@ package registry
 // 变异：`Reservation.Commit` 覆盖写分支改成只 `Commit(written)`（不释放 prev）⇒ 覆盖写断言红。
 
 import (
+	"errors"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -59,7 +61,7 @@ func TestQuotaVolume_TwoLedgersAndNoDoubleCount(t *testing.T) {
 	pool := quota.NewPool(1 << 20)
 	userPool := quota.NewPool(1 << 20)
 	scope := userPool.Scope("/tenant/alice/user", 1<<20)
-	qv := NewQuotaVolume(fakeQuotaInner{name: "v1", fs: syncpkg.NewLocalFS(t.TempDir(), nil)}, func(string) *quota.Scope { return scope }, pool, nil)
+	qv := NewQuotaVolume(fakeQuotaInner{name: "v1", fs: syncpkg.NewLocalFS(t.TempDir(), nil)}, func(string) *quota.Scope { return scope }, pool, nil, nil)
 
 	// ① 委托 + 「不加变换」。
 	if qv.Name() != "v1" || qv.Kind() != volume.KindStorage || qv.FS() == nil {
@@ -101,7 +103,7 @@ func TestQuotaVolume_ReserveRollbackOnPoolReject(t *testing.T) {
 	pool := quota.NewPool(100) // 整卷池极小 ⇒ 必拒
 	userPool := quota.NewPool(1 << 20)
 	scope := userPool.Scope("/tenant/alice/user", 1<<20)
-	qv := NewQuotaVolume(fakeQuotaInner{name: "v1"}, func(string) *quota.Scope { return scope }, pool, nil)
+	qv := NewQuotaVolume(fakeQuotaInner{name: "v1"}, func(string) *quota.Scope { return scope }, pool, nil, nil)
 
 	if _, err := qv.Reserve("alice", 4096); err == nil {
 		t.Fatal("池不足时 Reserve 应报错")
@@ -118,7 +120,7 @@ func TestQuotaVolume_ReserveRollbackOnPoolReject(t *testing.T) {
 func TestQuotaVolume_FootprintDelegationAndExplicitUnsupported(t *testing.T) {
 	t.Parallel()
 	// 实现能力的替身 ⇒ 委托。
-	qv := NewQuotaVolume(fakeQuotaInner{name: "v1", footprint: 8244, fpOK: true, maxPhys: 8300}, nil, nil, nil)
+	qv := NewQuotaVolume(fakeQuotaInner{name: "v1", footprint: 8244, fpOK: true, maxPhys: 8300}, nil, nil, nil, nil)
 	if n, ok := qv.Footprint("alice", "user/a.txt"); !ok || n != 8244 {
 		t.Fatalf("Footprint 应委托替身：n=%d ok=%v", n, ok)
 	}
@@ -126,7 +128,7 @@ func TestQuotaVolume_FootprintDelegationAndExplicitUnsupported(t *testing.T) {
 		t.Fatalf("MaxPhysical 应委托替身：got=%d", got)
 	}
 	// 能力缺失 ⇒ **显式不支持**（不静默回落成逻辑值）。
-	bare := NewQuotaVolume(bareQuotaInner{name: "v2"}, nil, nil, nil)
+	bare := NewQuotaVolume(bareQuotaInner{name: "v2"}, nil, nil, nil, nil)
 	if n, ok := bare.Footprint("alice", "user/a.txt"); ok || n != 0 {
 		t.Fatalf("能力缺失时 Footprint 必须显式 ok=false，got n=%d ok=%v", n, ok)
 	}
@@ -138,7 +140,7 @@ func TestQuotaVolume_FootprintDelegationAndExplicitUnsupported(t *testing.T) {
 func TestQuotaVolume_WholeVolumeCapacity(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(4096)
-	qv := NewQuotaVolume(fakeQuotaInner{name: "v1"}, nil, pool, nil)
+	qv := NewQuotaVolume(fakeQuotaInner{name: "v1"}, nil, pool, nil, nil)
 	if got := qv.Capacity(); got != 4096 {
 		t.Fatalf("Capacity=%d want 4096", got)
 	}
@@ -148,5 +150,84 @@ func TestQuotaVolume_WholeVolumeCapacity(t *testing.T) {
 	}
 	if used, total, ok := qv.VolumeStats(); !ok || total != 8192 || used != 0 {
 		t.Fatalf("VolumeStats=(%d,%d,%v) want (0,8192,true)", used, total, ok)
+	}
+}
+
+// ---- 设计 §9.1 片 3a：整卷权威统一（counter 形态）----
+
+// fakeVolumeCounter 是最小 VolumeCounter 实现（内存计数，带上限 fail-closed）。
+type fakeVolumeCounter struct {
+	mu       sync.Mutex
+	used     int64
+	capacity int64
+}
+
+func (f *fakeVolumeCounter) TryAdd(n int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.capacity > 0 && f.used+n > f.capacity {
+		return errors.New("volume capacity exceeded")
+	}
+	f.used += n
+	return nil
+}
+func (f *fakeVolumeCounter) Release(n int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.used -= n
+	if f.used < 0 {
+		f.used = 0
+	}
+}
+func (f *fakeVolumeCounter) Used() int64     { f.mu.Lock(); defer f.mu.Unlock(); return f.used }
+func (f *fakeVolumeCounter) Capacity() int64 { return f.capacity }
+
+// TestQuotaVolume_CounterIsSingleVolumeAuthority 断言片 3a：
+// 注入 counter 后整卷权威**唯一**（counter 优先，池**不**参与整卷记账）⇒ **恰好一次**（禁双账本 ✗）。
+func TestQuotaVolume_CounterIsSingleVolumeAuthority(t *testing.T) {
+	t.Parallel()
+	pool := quota.NewPool(1 << 20)
+	counter := &fakeVolumeCounter{capacity: 1 << 20}
+	qv := NewQuotaVolume(fakeQuotaInner{name: "v1"}, nil, pool, counter, nil)
+
+	if got := qv.Capacity(); got != 1<<20 {
+		t.Fatalf("Capacity=%d want %d（counter 为权威）", got, 1<<20)
+	}
+	if used, ok := qv.VolumeUsed(); !ok || used != 0 {
+		t.Fatalf("VolumeUsed=(%d,%v) want (0,true)", used, ok)
+	}
+
+	// 预留 → 结算：counter 恰好记 written，池恒为 0（**禁双账本** ✗）。
+	res, err := qv.Reserve("alice", 8192)
+	if err != nil || res == nil {
+		t.Fatalf("Reserve: res=%v err=%v", res, err)
+	}
+	res.Commit(0, 8192)
+	if used, _ := qv.VolumeUsed(); used != 8192 {
+		t.Fatalf("结算后 counter.Used=%d want 8192", used)
+	}
+	if pool.Usage() != 0 {
+		t.Fatalf("pool.Usage=%d 必须为 0（counter 形态下池不参与整卷记账，否则 = 2× ✗）", pool.Usage())
+	}
+
+	// 覆盖写：8192 → 20480 ⇒ counter = 20480（旧值释放，非 28672 ✗）。
+	res2, _ := qv.Reserve("alice", 20480)
+	res2.Commit(8192, 20480)
+	if used, _ := qv.VolumeUsed(); used != 20480 {
+		t.Fatalf("覆盖写后 counter.Used=%d want 20480（旧值须释放）", used)
+	}
+	// 释放 ⇒ 归零。
+	qv.ReleaseUsage("alice", 20480)
+	if used, _ := qv.VolumeUsed(); used != 0 {
+		t.Fatalf("释放后 counter.Used=%d want 0", used)
+	}
+	// 超限 fail-closed（写前准入）。
+	if _, err := qv.Reserve("alice", (1<<20)+1); err == nil {
+		t.Fatal("超限时 Reserve 应报错（fail-closed）")
+	}
+	// counter 形态下 SetCapacity 为 no-op（不得误改池）。
+	qv.SetCapacity(4096)
+	if got := qv.Capacity(); got != 1<<20 {
+		t.Fatalf("counter 形态下 SetCapacity 应 no-op，got=%d", got)
 	}
 }
