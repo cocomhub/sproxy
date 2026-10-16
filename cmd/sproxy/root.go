@@ -1361,6 +1361,9 @@ func (rt *runServerRuntime) setupSync(h *server.Handlers) error {
 	// 本地侧 Root 感知（评审 P0）：sync push/pull 的本地 FS 经 storage.Root ⇒ at-rest
 	// 透明加解密 + 封印语义（此前裸 LocalFS 会在加密卷上落明文/传密文）。
 	exec.TenantRootFS = h.SyncTenantRootFS
+	// 记账口径与 TenantRootFS **同源**：本地目标经 NewRootFS 透明加密落盘 ⇒ 逐文件配额
+	// 必须按物理字节记（2026-10-16 高风险区审核修复：此前按逻辑 ⇒ owner Scope 少记）。
+	exec.TenantPhysSize = h.SyncTenantPhysSize
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
 	exec.SetScopeResolver(h.SyncScopeFor())
 	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：同步本地写侧（pull/双向）直写默认卷 user

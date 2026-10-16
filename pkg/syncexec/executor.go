@@ -41,6 +41,12 @@ type Executor struct {
 	// 一律裸 `NewLocalFS(绝对路径)`——加密卷上 pull 落明文、push 上传密文）。
 	// nil = 回落路径式 LocalFS（测试/未接线装配；生产应注入）。
 	TenantRootFS func(owner string) (syncpkg.FS, bool)
+	// TenantPhysSize 是**可选**的「记账口径提供者」：按 owner 返回本卷的**物理**字节折算
+	// （nil = 恒等）。与 `TenantRootFS` **必须同源**：`TenantRootFS` 返回的 FS 经
+	// `NewRootFS` **透明加密**落盘（物理 > 逻辑），而逐文件配额记账用的是源条目 `size`
+	// （**逻辑**）⇒ 不折算会**少记** `(物理 − 逻辑)`（owner 配额侧永不收敛 ⇒ 可超真实配额，G1）。
+	// 装配层注入 `h.SyncTenantPhysSize`（`files.RootPhysSizer` 同源）。
+	TenantPhysSize func(owner string) func(int64) int64
 	// TenantScope 按任务 owner 解析租户 user 桶配额 Scope（nil 时不启用逐文件预留，
 	// 由 syncmgr 占位/对账机制兜底——兼容未装配 Scope 的旧装配）。写前逐文件
 	// TryReserve(文件 size) 是"写前 guard"，写成功 Commit(actual) 使 user 桶等额入账。
@@ -161,6 +167,18 @@ type quotaLocalFS struct {
 	// sync pull 同样生效。
 	owner    string
 	scopeFor func(owner, rel string) *quota.Scope
+	// phys 是本卷的**记账口径折算**（nil = 恒等；加密卷 ⇒ `EncryptedPhysicalSize`）。
+	// 见 `Executor.TenantPhysSize` 的注释：本地目标经 `NewRootFS` 透明加密落盘，
+	// 而 `size` 是源条目的**逻辑**长度 ⇒ 不折算会少记（可超真实配额，G1）。
+	phys func(int64) int64
+}
+
+// physSize 把**逻辑**字节折算为本卷**记账口径**（物理）；nil / 非正值 ⇒ 原样（明文卷零回归）。
+func (q *quotaLocalFS) physSize(n int64) int64 {
+	if n <= 0 || q.phys == nil {
+		return n
+	}
+	return q.phys(n)
 }
 
 func (q *quotaLocalFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
@@ -185,17 +203,21 @@ func (q *quotaLocalFS) WriteFile(ctx context.Context, relPath string, r io.Reade
 	if scope == nil {
 		return q.inner.WriteFile(ctx, relPath, r, size, mtime)
 	}
-	res, err := scope.TryReserve(size)
+	// 记账口径（2026-10-16 高风险区审核修复）：本地目标经 `TenantRootFS`（生产 = `NewRootFS`）
+	// **透明加密落盘** ⇒ 预留与结算都必须按**物理**字节；`size` 是源条目的**逻辑**长度。
+	charge := q.physSize(size)
+	res, err := scope.TryReserve(charge)
 	if err != nil {
 		return err // 配额不足：该文件失败（ActionError），不中止整体同步
 	}
-	// 委托 inner.WriteFile（其 copyWithCtx 已做 ctx 感知拷贝）。成功 Commit(size)——
-	// 源条目 size 即已知真实大小（与 engine 的 BytesDone/进度一致）；失败 Release 归还。
+	// 委托 inner.WriteFile（其 copyWithCtx 已做 ctx 感知拷贝）。成功 Commit(charge)——
+	// 源条目 size 即已知真实**逻辑**大小（与 engine 的 BytesDone/进度一致），入账前折算为物理；
+	// 失败 Release 归还。
 	if werr := q.inner.WriteFile(ctx, relPath, r, size, mtime); werr != nil {
 		res.Release()
 		return werr
 	}
-	res.Commit(size)
+	res.Commit(charge)
 	return nil
 }
 
@@ -302,6 +324,7 @@ func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTas
 		// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
 		// 该租户无配额，退化为直写）。装配层注入的 ParseScope 见 Handlers.SyncQuotaScope。
 		scopeFor: e.scopeFor,
+		phys:     e.physFor(task.Owner),
 	}
 	return remoteFS, dstFS, []func(){closeRemote}, nil
 }
@@ -311,6 +334,15 @@ func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTas
 // 桶——当源推送；评审第 2 轮 P0 回归）。抽为单一事实源，供 push 与 runBoth 共用。
 func (e *Executor) pushSourceFS(tenantRoot, owner string) syncpkg.FS {
 	return syncpkg.NewPrefixFS(e.localFS(tenantRoot, owner), "user/")
+}
+
+// physFor 返回该 owner 本卷的**记账口径折算**（nil = 恒等）。与 `TenantRootFS` 同源注入：
+// 本地目标经 `NewRootFS` 透明加密落盘 ⇒ 逐文件配额必须按**物理**字节记（见字段注释）。
+func (e *Executor) physFor(owner string) func(int64) int64 {
+	if e.TenantPhysSize == nil {
+		return nil
+	}
+	return e.TenantPhysSize(owner)
 }
 
 // localFS 返回本地侧 FS：优先 **Root 感知**提供者（加密/封印语义正确），否则回落路径式 LocalFS。
@@ -616,6 +648,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		inner:    e.newLocalPullFS(tenantRoot, task.Owner),
 		owner:    task.Owner,
 		scopeFor: e.scopeFor,
+		phys:     e.physFor(task.Owner),
 	}
 	pullErr := engine.Sync(ctx, remoteFS, pullJobDst, pullJob)
 	if ctx.Err() != nil {
