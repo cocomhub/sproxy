@@ -448,6 +448,20 @@ WriteFile(ctx context.Context, key sync.LogicalKey, path string, r io.Reader, si
 **风险提示** ✓：步骤 1 纯机械（编译器强制 ✓），步骤 2 是**语义变更**（配额层开始记账 ⇒
 **同片必须删上层重复记账** ✗，否则双计 ✗ —— 已实证 `committed += 2×size` ✗）。
 
+#### 🔴 脚本化迁移的**强制守卫**（2026-10-17 事故记录）
+
+首次尝试用 `os.walk(<repo root>)` 批量改 `WriteFile` 签名 ⇒ **误入 `.worktrees/`** ✗ ——
+那里是**其他分支的独立工作树**（含未提交 WIP ✗）⇒ 一次改动了 **228 个文件**（跨 3 个 worktree ✗）。
+**已用逆向正则外科式完整恢复** ✓（只撤销插入的 `key LogicalKey` 参数 ⇒ **不动任何无关 WIP** ✓）；
+主树 `git checkout -- .` 恢复干净 ✓。
+
+**⇒ 强制规则（后续任何仓级脚本化改动）** ✓：
+1. **必须排除** `.worktrees/`（以及任何嵌套 worktree ✗）—— 推荐只遍历 `pkg/`、`cmd/`、`internal/`、
+   `test/`、`web/` 这些**显式白名单**目录 ✓，**禁止**从仓库根 `walk` ✗；
+2. 改动前先 `git worktree list` 确认边界 ✓；
+3. 恢复优先用**逆向变换**（外科式 ✓）而不是 `checkout` ✗ —— `checkout` 会连带毁掉**无关 WIP** ✗；
+4. 落盘前先 `git status --porcelain` 在**每个 worktree** 各查一次 ✓。
+
 ---
 
 ## 10. 风险与回退
