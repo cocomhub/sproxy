@@ -578,3 +578,34 @@ type StatsProvider interface{ VolumeStats() (used, total int64, ok bool) }
 **方法论** ✓：这是本会话第 **N** 次「**修前先验证前提**」救回错误改动 ✓ —— 而本次的证据**就在代码注释里**
 （`SourceFS` 的 doc 已写明「特权视图 / raw 是特权含义」✓）⇒ **动一个「看起来像缺陷」的 raw 视图前，
 必须先读它的 doc 与消费者** ✓（能力断言、双重变换风险、封印语义三条缺一不可 ✓）。
+
+---
+
+## 12. PR 范围与后续计划（2026-10-17 用户裁定）
+
+### 本 PR（#814）交付范围 —— **完整功能 PR，可独立合并** ✓
+
+| 片 | 内容 | 状态 |
+|---|---|---|
+| M0 | `volume.Kind` + 能力接口（`Footprinter`/`PhysBound`/`CapacityOwner`/`StatsProvider`）+ `registry.KindOf` | ✅ |
+| M1a/M1b | `localBackend` 统一契约 + `local` 注册为普通后端（含 2 个 API 面守卫） | ✅ |
+| M2a / M2 撤销 | `pkg/rootfs` 下移；**raw 视图前提被证伪** ⇒ 撤销 + 勘误 | ✅ |
+| M3 | `Set.Root` 访问器 21→14 + **R28 棘轮门禁** | ✅ |
+| M4a | `QuotaVolume` 双账本骨架（**覆盖写双计**真缺陷修复） | ✅ |
+| 片 2 | 本地卷自报**物理足迹/写前上界**（加密卷 = 密文长度） | ✅ |
+| 片 3a/3b | 整卷权威统一（`VolumeCounter`）+ **唯一入口** `WrapStorageVolume` + **R29 门禁**（含**能力静默丢失**自伤修复） | ✅ |
+| 片 5 | **per-owner 配额预警静默 no-op 修复**（`ownerQuotaScope`） | ✅ |
+| 片 6 步 1 | 「释放 ≠ 结算」漂移嫌疑**证伪** + 回收站边界不变式（拒绝 + 零副作用） | ✅ |
+| M5 步 1 | 删死代码 `Set.FSFor` + R26 白名单同步 | ✅ |
+| 接线 | `QuotaVolume` 可达 + 卷用量**单一查询面**（收敛两处重复逻辑） | ✅ |
+| 片 4a / 4b 步① | `LogicalKey{Owner,Rel}` 形状决议 + 类型 + 配额层 API 采用（零值显式不记账） | ✅ |
+
+### 后续 PR（**不在本 PR**，用户裁定 2026-10-17）
+
+1. **原方案迁移** ✓：`sync.FS.WriteFile` 签名变更（+`key LogicalKey` 参数，全仓破坏性）
+   —— **单独 PR** ✓。本 PR 已完成其**前置**（`LogicalKey` 类型 + 配额层消费侧 API ✓）；
+   迁移本身需**逐文件手工**（实测：~22 非测试调用点 + ~56 实现签名 + ~30 测试 mock；
+   四类边界：未命名参数 mock ✗ / 同名不同接口 ✗ / 多行调用 ✗ / 子包限定符 ✗）。
+2. **片 6 完整**：`charged_bytes` 记录化 + 释放侧唯一入口 + ~20 站迁移（**同片删旧计算**）。
+3. **M5 剩余**：装配层 `Type=="" || TypeLocal` 特例合并（本地卷经 `registry.NewBackend` 统一分派）。
+4. **片 5 剩余**：per-user 配额**按卷持有** + 联邦查询端点（含 Web UI ⇒ Playwright e2e）。
