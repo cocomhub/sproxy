@@ -188,15 +188,33 @@ type s3CompleteSettlement struct {
 	prev  int64
 }
 
+// s3TargetPhysSize 返回目标文件的**落盘**字节数（加密卷 = 密文长度）——结算口径的唯一事实源。
+//
+// stat 失败/为 0 时回落 fallback（parts 合计）：宁可沿用逻辑值，也不记 0——0 会把已落盘的
+// 字节**完全漏账**（比少记 overhead 更差）。
+func s3TargetPhysSize(root *storage.Root, rel string, fallback int64) int64 {
+	if info, err := root.Stat(rel); err == nil && info != nil && info.Size() > 0 {
+		return info.Size()
+	}
+	return fallback
+}
+
 // commitTarget 把目标文件计入账本：覆盖写按 prev→total 差分，新文件按 0→total。
 //
 // 此处**不做预留**：这批字节在 part 上传时已预留+提交（上传期强制额度），complete 只是
 // 把它们从 parts 释放再转到目标；若在此处再预留 total 会把同一批字节双计（峰值 ≈ 2×），
 // 使「配额刚好等于文件大小」的 multipart 上传恒被 507 拒绝。
-func (s *s3CompleteSettlement) commitTarget(total int64) {
+//
+// **口径（2026-10-16 高风险区审核修复）**：入账尺寸取**目标落盘真值**（`root.Stat` = 加密卷上
+// 的密文长度），而非 `total`（= parts 的**明文**合计——in-flight part 是明文暂存）。目标经
+// `writeUserVisible` **透明加密** ⇒ 用 total 会把已落盘字节**少记** `(物理 − 逻辑)`；且 `prev`
+// 本就取自 `root.Stat`（**物理**）⇒ 用 total 会是**混口径 Adjust**（覆盖写双向出错）。
+// 与归档路径（`cloudArchiveSettleQuota` 的 `actual = root.Stat(rel).Size()`）同源。
+func (s *s3CompleteSettlement) commitTarget(root *storage.Root, rel string, total int64) {
 	if s == nil || total < 0 {
 		return
 	}
+	total = s3TargetPhysSize(root, rel, total)
 	if s.scope != nil {
 		s.scope.Adjust(s.prev, total)
 	}
@@ -385,8 +403,8 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 	if !ok {
 		return
 	}
-	// 10. 目标计入（parts → 目标，净账 = 目标大小）。
-	settle.commitTarget(total)
+	// 10. 目标计入（parts → 目标，净账 = 目标大小；口径折算在 commitTarget 内，见其注释）。
+	settle.commitTarget(plan.root, plan.rel, total)
 
 	_ = plan.root.Remove(chunkPrefix + multipartPartPrefix + plan.uploadID + ".meta")
 	// M1 修复：multipart complete 是本地旁路写（root 直写不经 files.Service）——补
