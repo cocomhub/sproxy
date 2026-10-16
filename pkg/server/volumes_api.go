@@ -485,7 +485,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	if ls, lerr := userVisibleSize(fromRoot, rel); lerr == nil {
 		size = ls
 	}
-	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(owner, rel, toVol, size)
+	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(owner, rel, toVol, mc.toRoot, size)
 	if !rOk {
 		return status, resp
 	}
@@ -605,7 +605,33 @@ func (h *Handlers) moveCheckUnique(r *http.Request, owner, remotePath, fromVol, 
 
 // moveReserveTarget 目标侧双账本预留（owner 全局 → 目标卷池，防中间超限）；任一失败回滚已预留。
 // 返回 (scope 预留, 卷池预留, owner 全局 scope, 状态码, 响应体, 是否可继续)。
-func (h *Handlers) moveReserveTarget(owner, rel, toVol string, size int64) (*quota.Reservation, *quota.Reservation, *quota.Scope, int, UploadResponse, bool) {
+// physSizeFor 按**卷口径**折算记账字节（加密卷 ⇒ 密文长度；nil / 非加密卷 ⇒ 恒等）。
+//
+// 与 `pkg/files` 的 `files.RootPhysSizer` **同源实现**（同一事实源，禁各写一份公式）；
+// 用于跨卷 move 的记账（2026-10-16 高风险区审核修复，见 `moveReserveTarget` 注释）。
+func physSizeFor(root *storage.Root, n int64) int64 {
+	if n <= 0 {
+		return n
+	}
+	if f := files.RootPhysSizer(root); f != nil {
+		return f(n)
+	}
+	return n
+}
+
+// toCharge 返回目标卷侧的**记账字节**（物理口径）：目标经 `writeUserVisible` 透明加密落盘
+// ⇒ 必须按物理记，否则加密卷上**少记** `(物理 − 逻辑)`（可超真实配额，G1）。
+func (mc *moveFileCtx) toCharge(n int64) int64 { return physSizeFor(mc.toRoot, n) }
+
+// fromCharge 返回源卷侧的**记账字节**（物理口径）：源内容在**上传时**已按物理入账
+// （`files.settleSize`）⇒ 释放必须同口径，否则按逻辑释放会**少释放** ⇒ 幽灵占用/假 507。
+func (mc *moveFileCtx) fromCharge(n int64) int64 { return physSizeFor(mc.fromRoot, n) }
+
+func (h *Handlers) moveReserveTarget(owner, rel, toVol string, toRoot *storage.Root, size int64) (*quota.Reservation, *quota.Reservation, *quota.Scope, int, UploadResponse, bool) {
+	// 记账口径（2026-10-16 高风险区审核修复）：预留必须按**目标卷物理占用**（与上传路径
+	// `files.settleSize` 同源）。`size` 是**用户可见长度**（明文，见调用方注释），而目标经
+	// `writeUserVisible` 透明加密落盘 ⇒ 按逻辑预留会在加密卷上**少预留** `(物理 − 逻辑)`。
+	size = physSizeFor(toRoot, size)
 	toPool := h.volSet.Pool(toVol)
 	scope := h.quotaScopeFor(owner, rel)
 	var scopeRes, poolRes *quota.Reservation
@@ -708,11 +734,13 @@ func (h *Handlers) moveDeleteSource(mc *moveFileCtx, written int64, scope *quota
 // **只 commit to 侧**、绝不 from 侧再释放（否则 owner 全局 + from 卷池各欠计 S，PR-D F1）；
 // 回包按成功（源消失但数据已落目标卷，移动语义完成）。
 func (h *Handlers) moveCommitConcurrentDeleted(mc *moveFileCtx, written int64, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
+	// 口径：to 侧按**目标卷物理**记账（见 `toCharge`）；from 侧由并发 delete 释放（不在此）。
+	toCharge := mc.toCharge(written)
 	if scopeRes != nil {
-		scopeRes.Commit(written)
+		scopeRes.Commit(toCharge)
 	}
 	if poolRes != nil {
-		poolRes.Commit(written)
+		poolRes.Commit(toCharge)
 	}
 	// 评审 I-②（2026-10-07）：move 成功同步搜索索引（源条目移除 + 目标卷条目写入），
 	// 否则源卷列表 stale 幽灵文件、目标卷缺失/错位。
@@ -749,17 +777,23 @@ func (h *Handlers) moveRollbackSourceDelete(mc *moveFileCtx, rmErr error, scopeR
 // moveCommitRelease 正常移动路径结算：双 commit（to 侧预留对账为实际占用 written）
 // + from 侧释放（owner 全局 + from 卷池）。
 func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quota.Scope, scopeRes, poolRes *quota.Reservation) (int, UploadResponse) {
+	// 记账口径（2026-10-16 高风险区审核修复）：**两侧各自折算**，不可混用同一个 `written`：
+	//   - to 侧（charge）：目标卷**物理**占用（目标经 `writeUserVisible` 加密落盘）；
+	//   - from 侧（release）：源卷**记账值**（源内容在上传时已按物理入账）——按逻辑释放会少释放
+	//     ⇒ 幽灵占用/假 507（与「to 侧按逻辑记」的方向相反，两侧都会漂移）。
+	toCharge := mc.toCharge(written)
+	fromCharge := mc.fromCharge(written)
 	if scopeRes != nil {
-		scopeRes.Commit(written)
+		scopeRes.Commit(toCharge)
 	}
 	if poolRes != nil {
-		poolRes.Commit(written)
+		poolRes.Commit(toCharge)
 	}
 	if scope != nil {
-		scope.ReleaseUsage(written)
+		scope.ReleaseUsage(fromCharge)
 	}
 	if fromPool := h.volSet.Pool(mc.fromVol); fromPool != nil {
-		fromPool.ReleaseCommitted(written)
+		fromPool.ReleaseCommitted(fromCharge)
 	}
 	// 评审 I-②（2026-10-07）：move 成功同步搜索索引（源条目移除 + 目标卷条目写入），
 	// 否则源卷列表 stale 幽灵文件、目标卷缺失/错位。
