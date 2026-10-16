@@ -190,24 +190,6 @@ func (vs *Set) External(name string) ExternalBackend {
 	return vs.external[name]
 }
 
-func (vs *Set) FSFor(name string) (syncpkg.FS, bool) {
-	vs.mu.RLock()
-	be := vs.external[name]
-	vs.mu.RUnlock()
-	if be != nil {
-		fs := be.FS()
-		return fs, fs != nil
-	}
-	v, ok := vs.ByName(name)
-	if !ok {
-		return nil, false
-	}
-	if v.RootDir == "" {
-		return nil, false
-	}
-	return syncpkg.NewLocalFS(v.RootDir, nil), true
-}
-
 // ResolveURL 按 URL 寻址内容：`scheme://<卷名>/<路径>`。
 //
 // 解析步骤：
