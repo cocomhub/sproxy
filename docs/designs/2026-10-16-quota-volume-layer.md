@@ -268,3 +268,79 @@ raw `root.OpenFile`（meta sidecar / s3 part / 块写暂存 / 索引快照 ✓�
   **结构性实现** ✓ —— 那些分片在此找到了**唯一正确归属**（配额层 ✓）。
 - `2026-10-11-enclosure-volume.md` 的「封装卷配额继承源卷」✓ 由 §1.4 的「封装卷零配额代码」**取代** ✓。
 - R25/R26 门禁从「白名单纪律」升级为「**接口保证**」✓（§3、§5）。
+
+---
+
+## 11. 统一存储卷模型与渐进迁移
+
+### 11.1 现状：**数据面已统一，存储身份未统一** ✗
+
+| 面 | 现状 | 证据 |
+|---|---|---|
+| **数据面（读写）** | ✅ **已统一** —— 本地与外部都经 `sync.FS` | `ExternalBackend` 仅 `FS() + Close()`（`registry/backend.go:21` ✓）；本地经 `NewRootFS`/`FSFor` ✓ |
+| **存储身份** | 🔴 **未统一** —— `*storage.Root` 是非测试源码的**局部特例** | `storage.Root` 出现 **254 次** ✗；`ExternalBackend` 121 次 ✓ |
+| **装配分派** | 🔴 **本地是特例** —— 不在 `backendFactories` 里 | `volume.go:26`「`Type == "" || TypeLocal` **走本地卷路径**；外部后端用各自字面量」✗ |
+| **类型分类** | ⚠️ **部分存在** —— registry 已有 `backendCategory` 静态基线 + `wrapperTypes` 动态登记 | `registry/backend.go:127-131` ✓ |
+| **能力探测** | ✅ **已成熟** —— 可选能力接口模式 | `Presigner` / `URLResolver` / `VolumeStatsProvider` / `StagingQuotaCapable` / `WriteIfAbsent` / `ReserveSpace` ✓ |
+
+### 11.2 两个**绕行点**（必须先关，否则统一模型无意义）✗
+
+| 位置 | 现状 | 后果 |
+|---|---|---|
+| `Set.FSFor(name)`（`registry/set.go:177`） | 本地 → **`LocalFS(RootDir)`** ✗ | 绕过 `storage.Root` ⇒ **加密卷读密文/写明文 + 绕过封印** ✗ |
+| `enclosure.SourceFS`（`enclosure/attach.go:166`） | 本地源 → **`LocalFS(rt.AbsPath())`** ✗ | 同上，且**配额层看不到封装卷写入** ✗（§3 P0-a ✓） |
+
+⇒ 二者同属 **R26「卷根直连适配器」** 族 ✓（历史 P0 全出自「绝对路径 + 裸 os」✗）。
+
+### 11.3 目标模型：**必需核心 + 可选能力**（沿用既有哲学 ✓）
+
+```go
+// pkg/volume 新增：存储卷的**统一身份**（数据面 + 控制面 + 生命周期）
+type StorageVolume interface {
+    Name() string
+    Kind() Kind              // §1.2：Storage | Wrapper（显式 ✓）
+    FS() syncpkg.FS          // 数据面（**已经是**统一面 ✓）
+    Close() error            // 生命周期（与 ExternalBackend 同形 ✓）
+}
+
+// 可选能力（类型断言，缺省即不支持——与 Presigner/ReserveSpace 同模式 ✓）
+type Footprinter   interface{ Footprint(owner, rel string) (int64, bool) }  // 物理足迹（§1.3 ✓）
+type PhysBound     interface{ MaxPhysical(owner, rel string, logical int64) int64 }
+type CapacityOwner interface{ Capacity() int64; SetCapacity(int64) }        // 整卷配额 ✓
+type StatsProvider interface{ VolumeStats() (used, total int64, ok bool) }
+```
+
+**要点**：
+1. **`local` 成为普通后端** ✓ —— 注册 `backendFactories[volume.TypeLocal]` ✓，构造器返回 `StorageVolume`（包 `storage.Root` ✓）。
+   装配层**删掉** `Type == "" || TypeLocal` 特例分支 ✓（空串归一为 `TypeLocal` 后统一分派 ✓）。
+2. **`storage.Root` 成为 local 后端的内部实现细节** ✓ —— 不出现在接口上；254 处调用点逐步迁移 ✓。
+3. **两阶段构造保留** ✓（`deferredBackends` ✓：secretdata/secrets 依赖卷集 ✓）。
+4. **可选能力而非大接口** ✓ —— 外部后端只需 `FS()+Close()` ✓（今天已经如此 ✓，**零回归** ✓）。
+
+### 11.4 渐进迁移（每片独立可验证 + 可回退 ✓）
+
+| 片 | 内容 | 行为变更 | 验收 |
+|---|---|---|---|
+| **M0** | 定义 `StorageVolume`/`Kind`/可选能力接口（**加法式** ✓） | 无 ✓ | 编译期断言（各卷实现）✓ |
+| **M1** | 注册 `local` 后端（返回 `StorageVolume` 包 root ✓）；装配层**先并存**（特例分支委派到新后端 ✓） | **无** ✓ | 全量绿 + e2e 不变 ✓ |
+| **M2** | **关闭两个绕行点** ✓（`FSFor`/`SourceFS` → 返回卷的 FS ✓） | **有**（加密本地卷对封装卷/嵌套写**现在会正确加解密 + 封印生效** ✓ = 修缺陷 ✓） | 加密卷封装/嵌套 e2e + 封印 fail-closed ✓ |
+| **M3** | `Set.Root()` 调用点迁移（254 处 → 收缩 ✓）；**棘轮门禁**（只减不增 ✓，同 R14/serial 预算 ✓） | 无 ✓ | 棘轮断言 + 逐包迁移 ✓ |
+| **M4** | 配额层挂到**每个** `StorageVolume` ✓（§9 片 3–5 ✓） | 有（记账口径 ✓） | 对账矩阵 ✓ |
+| **M5** | **删除**特例分支与 `Set.Root()` ✗ | 无 ✓ | 门禁 + 全量 ✓ |
+
+**棘轮（关键防回退）** ✓：新增门禁断言「非测试源码中 `Set.Root(` / `storage.Root` 直接使用**不得增加**」✓ ——
+既有 R26 白名单在此**同步收缩** ✓（M2 后 2 处 → 0 处 ✓）。
+
+### 11.5 收益
+
+1. **特例消失** ✓：本地/外部同形 ⇒ 新后端（新云盘/S3 兼容/集群卷 ✓）**只需实现 5 个方法** ✓。
+2. **绕行点归零** ✓：加密/封印/配额对**所有**卷路径一致 ✓（消灭历史 P0 的整族 ✗）。
+3. **配额层有了唯一挂载点** ✓（§1 ✓）——这正是 §3 P0-c（链构造收敛）的**结构性解法** ✓。
+4. **可观测/可门禁** ✓：`Kind()` + 棘轮 ⇒ 「谁绕过卷模型」成为**编译/门禁可见** ✓。
+
+### 11.6 与 §9 的关系
+
+**M0–M2 是 §9 片 0–1 的具体化** ✓，且 **M2 同时完成 §3 的 P0-a** ✓；
+**M3 的棘轮**是 §3 P0-b（raw `storage.Root` 划界）的**可执行版本** ✓。
+⇒ 两套分片**可合并为一条线**：M0 → M1 → **M2（=P0-a）** → M3（=P0-b 棘轮） → M4（=§9 片 3–5） → M5。
+
