@@ -117,8 +117,13 @@ func TestVisibleIO_EncryptedVolumeCiphertextAtRestPlaintextVisible(t *testing.T)
 	if n != int64(len(body)) {
 		t.Fatalf("UserVisibleSize = %d, want %d（明文长度，非密文）", n, len(body))
 	}
-	// ④ 路径拼接辅助（薄包装依赖）。
-	if RelJoin("user", "s.txt") != "user/s.txt" || RelDir("user/s.txt") != "user" {
-		t.Fatal("RelJoin/RelDir 语义错误")
+	// ④ 路径辅助的**文档语义**（薄包装依赖）：
+	//    - `RelDir` 是**卷根归一器**（`""` → `"."`，与 `storage.Root` API 同约定），**不是** `path.Dir`；
+	//    - `RelJoin` 在 rel 为空/`.` 时只返回 name（避免前导 `/` 或 `./`）。
+	if RelDir("") != "." || RelDir("user/s.txt") != "user/s.txt" {
+		t.Fatalf("RelDir 语义错误：空串应归一为 \".\"，其余原样透传（got %q / %q）", RelDir(""), RelDir("user/s.txt"))
+	}
+	if RelJoin("", "s.txt") != "s.txt" || RelJoin(".", "s.txt") != "s.txt" || RelJoin("user", "s.txt") != "user/s.txt" {
+		t.Fatalf("RelJoin 语义错误（got %q / %q / %q）", RelJoin("", "s.txt"), RelJoin(".", "s.txt"), RelJoin("user", "s.txt"))
 	}
 }
