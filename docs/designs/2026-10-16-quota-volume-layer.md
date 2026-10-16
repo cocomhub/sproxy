@@ -341,6 +341,38 @@ h.alertEngine.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
 **在片 6 落地前不得**用「全局用量冒充 owner 用量」✗（那是把静默 no-op 换成静默**误报** ✗，更坏）。
 ⇒ 本项**显式挂起**并在此存档，防后人重踩 ✓。
 
+### 9.3 片 6 取证：释放侧 **~20 处各自计算** vs 结算侧 **单源**（2026-10-16）
+
+**现状（实测）** ✓：**结算侧已单源**（`Service.settleSize` = 卷自报足迹优先 ⇒ `UploadRoute.PhysicalSize` ⇒ 恒等 ✓）；
+但**释放侧仍散在 ~20 处各自计算** ✗：
+
+| 来源族 | 代表站点 | 依据 |
+|---|---|---|
+| **① 公式折算** | `trash.go:280,287`（`physicalCharge(root,size)` ✓）、`write_ops.go:935` | `RootPhysSizer` ⇒ `storage.EncryptedPhysicalSize`（**仅加密卷** ✓） |
+| **② `Stat` 已物理** | `version_store.go:276`、`write_ops.go:971/997/1516`、`dav_meta.go:94` | 加密卷上 `Stat` 已是密文长度 ✓（注释自证「不再折算」✓） |
+| **③ 删除前捕获** | `write_ops.go:1676`（`DeleteFileInput.chargedHint` ✓）、`prevCharge`（覆盖写旧值 ✓） | 原路径已消失 ⇒ **必须在改名/删除前捕获** ✓ |
+| **④ 其它** | `chunked_upload.go:1420`、`dir_charge.go:134`、`cloud_archive_handler.go:742`、`files_service.go:1096`、`write_ops.go:1291/1854/2080` | 各异 |
+
+**🔴 漂移候选（**尚未用测试证实** ✗ —— 按本会话纪律不得无证据断言 ✓）**：对 **secretdata** 这类
+「物理量含**公式不可推**的部分」的卷（meta blob pad 到 `[base, 2·base)`、XOR parity 可达逻辑 2× ✓）：
+**结算**走卷自报足迹（`VolumePhysFootprinter.PhysFootprint` ✓，含 meta pad ✓），而**回收站释放**
+走 `physicalCharge`（`EncryptedPhysicalSize` 公式 ✗，**覆盖不到 meta pad** ✗）⇒ 理论上
+**少释放 = 幽灵占用 / 假 507** ✗。
+**待验证** ✓：需构造「secretdata + 软删 + owner 配额」用例，断言 `结算额 == 释放额` ✓
+（**片 6 的第一件事就是这个回归用例** ✓，先红再修 ✗）。
+
+**片 6 交付形状** ✓（按决议 #7：**同片内删旧加新** ✗）：
+1. **写时记录** `charged_bytes`（落对象 meta `Extra` ✓ —— `FileMeta.Extra map[string]any` ✓ +
+   `sync.MetaExtraUpdater.UpdateMetaExtra` 旁路写入 ✓，已有先例：`cloud/transfer.go:412/528` ✓）；
+2. **释放侧唯一入口** `releaseChargeFor(route, owner, remotePath, fallback)`：
+   ① 已记录 ⇒ 读记录（**同源** ✓）；② 对象仍在 ⇒ 卷自报足迹 ✓（= `prevCharge` 现有逻辑 ✓）；
+   ③ 对象已消失（改名/删除后）⇒ **必须在操作前捕获** ✓（`chargedHint` 模式 ✓）；
+3. **逐站迁移** ~20 处到该入口（**同片删旧计算** ✗）；
+4. **不变式测试** ✓：`结算额 == 释放额`（对每个卷型 ✓，含 secretdata ✓）+ 变异命中。
+
+**为何不本轮做** ✓：~20 站迁移 + 记录机制 + 每卷型回归 = 体量与片 4 同量级 ✗；
+且**第 1 步（回归用例）必须先红** ✗ —— 否则可能是在修一个**不存在**的漂移 ✗（本会话已有 P0-a 先例 ✓）。
+
 ---
 
 ## 10. 风险与回退
