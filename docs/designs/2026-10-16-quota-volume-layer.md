@@ -306,6 +306,38 @@ raw `root.OpenFile`（meta sidecar / s3 part / 块写暂存 / 索引快照 ✓�
 **为何先做 3a 而不直接改 5 处**：3a 让「整卷权威单一」**可表达** ✓，并把 3b 降为**纯注入点替换** ✓
 （风险从「5 处语义变更」降为「5 处参数替换」✓）；且 3a 的「恰好一次」测试是 3b 的**安全网** ✓。
 
+### 9.2 片 5 取证：一个**静默 no-op** 缺陷 + 一个 **API 缺口**（2026-10-16）
+
+**🔴 缺陷（真实、已定位，未修）**：`pkg/server/routes_setup.go:113` 的**配额预警读取器**：
+
+```go
+h.alertEngine.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
+	sc := h.quotaScopeFor(owner, "")
+	if sc == nil { return 0, 0 }
+	return sc.Usage(), sc.MaxBytes()
+})
+```
+
+`quotaScopeFor(owner, rel)` 首行即：`segs := strings.Split(rel, "/")` ⇒ 当 `rel == ""` 时
+`segs[0] == ""` ⇒ **恒返回 nil** ✗ ⇒ 读取器**永远拿到 (0,0)** ⇒ **per-owner 配额预警静默失效** ✗
+（无日志、无指标、无报错 ✓ —— 「生效状态不可观测」✗）。且 `rel == ""` 的调用点**全仓仅此一处** ✓
+（`grep 'quotaScopeFor([^,]*, "")'`）⇒ 非通用陷阱，而是**此处用错了 API** ✓。
+
+**🔴 为何不能简单改成「owner 根 scope」** ✗：owner 根由
+`ensureTenantQuotaLocked` 首返回值给出（`h.globalPool.Scope("/tenant/"+owner, quotaBytes)` ✓），
+但 **`quota.Scope.Usage()` 返回的是 `s.pool.Usage()`**（**整个池**的用量 ✗，非该节点的 ✗）⇒
+直接用会报**全局**用量 ⇒ 所有 owner 的预警**互相干扰** ✗（正是 `stagingQuotaPool` 注释里
+警告过的跨租户干扰形态 ✗）。
+
+**⇒ 真正的缺口** ✓：`quota.Scope` **没有 per-node（子树）用量访问器** ✗ —— `Usage()`/`Reserved()`/
+`MaxBytes()`/`Available()`/`UsageByBucket()` **全部委托给池** ✗。⇒ 「owner 用量」目前**无法从
+现有 API 读出** ✗ ⇒ 这不是拼写错，而是 **API 缺口** ✓。
+
+**归属** ✓：该缺口正是 **片 6（`charged_bytes` 记录化）**要补的能力 ✓（「结算 = 释放同源」
+的记录化必然要求在**节点**上记录已确认占用 ⇒ 顺带提供 per-node 用量 ✓）。
+**在片 6 落地前不得**用「全局用量冒充 owner 用量」✗（那是把静默 no-op 换成静默**误报** ✗，更坏）。
+⇒ 本项**显式挂起**并在此存档，防后人重踩 ✓。
+
 ---
 
 ## 10. 风险与回退

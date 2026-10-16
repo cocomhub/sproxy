@@ -110,6 +110,18 @@ func (h *Handlers) initStorageLayout(vs *registry.Set, cfg *Config, log *slog.Lo
 		// 配额预警（roadmap P2）：per-owner 水位轮询（owner_quotas 达阈值 → 通知）。
 		h.alertEngine.SetOwnerList(h.SyncTenantList())
 		h.alertEngine.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
+			// 🔴 **已知缺陷（2026-10-16 定位，挂起待修）**：`quotaScopeFor(owner, "")` 的 `rel==""`
+			// 会被判为「非功能桶首段」而**恒返回 nil** ✗ ⇒ 本读取器**永远得到 (0,0)** ⇒
+			// per-owner 配额预警**静默失效** ✗（无日志/指标 ✗）。
+			//
+			// **为何不直接改成 owner 根 scope** ✗：`quota.Scope.Usage()/MaxBytes()` 都委托**池**
+			// （`s.pool.Usage()` ✗）⇒ 拿到的是**全局**用量 ⇒ 会让所有 owner 预警**互相干扰** ✗
+			// （比静默 no-op **更坏** ✗）。
+			//
+			// **根因是 API 缺口** ✓：`quota.Scope` 无 per-node（子树）用量访问器 ✗ ⇒ 「owner 用量」
+			// 当前**无法从现有 API 读出** ✗。归属 **片 6（`charged_bytes` 记录化）** ✓ —— 那项必然
+			// 要求在**节点**上记录已确认占用 ⇒ 顺带提供 per-node 用量 ✓。
+			// 详见设计 §9.2（已存档，防后人重踩）。
 			sc := h.quotaScopeFor(owner, "")
 			if sc == nil {
 				return 0, 0
