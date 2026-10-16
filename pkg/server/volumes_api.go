@@ -254,7 +254,8 @@ func (h *Handlers) moveNeedsDomainPath(fromVol, toVol string) bool {
 	if h.volSet == nil {
 		return false
 	}
-	return h.volSet.Root(fromVol) == nil || h.volSet.Root(toVol) == nil
+	// 任一侧为外部/封装卷（无本地根）⇒ 必须走域侧（files.Service）而非路径式实现。
+	return !h.volSet.HasLocalRoot(fromVol) || !h.volSet.HasLocalRoot(toVol)
 }
 
 // moveFileViaService 经域侧执行跨卷移动（涉及外部/加密卷）。装配层只解析**只读源**：源为

@@ -763,7 +763,7 @@ func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, 
 	if vs != nil {
 		if v, ok := vs.ByName(volName); !ok || !v.Authorize(owner) {
 			return MakeDirResult{}, true, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
-		} else if vs.Root(volName) != nil {
+		} else if vs.HasLocalRoot(volName) {
 			return MakeDirResult{}, false, nil // 本地卷 → 交本地流程
 		}
 	}
@@ -896,7 +896,7 @@ func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath
 	if vs := s.rt.volSet(); vs != nil {
 		if v, ok := vs.ByName(volName); !ok || !v.Authorize(owner) {
 			return RemoveDirResult{}, true, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
-		} else if vs.Root(volName) != nil {
+		} else if vs.HasLocalRoot(volName) {
 			return RemoveDirResult{}, false, nil // 本地卷 → 交本地流程
 		}
 	}
@@ -1864,14 +1864,14 @@ func (s *Service) externalCandidateVolumes(owner, explicitVol string) []string {
 	}
 	if explicitVol != "" {
 		v, ok := vs.ByName(explicitVol)
-		if !ok || !v.Authorize(owner) || vs.Root(explicitVol) != nil {
+		if !ok || !v.Authorize(owner) || vs.HasLocalRoot(explicitVol) {
 			return nil
 		}
 		return []string{explicitVol}
 	}
 	var out []string
 	for _, v := range vs.All() {
-		if !v.Authorize(owner) || vs.Root(v.Name) != nil {
+		if !v.Authorize(owner) || vs.HasLocalRoot(v.Name) {
 			continue
 		}
 		out = append(out, v.Name)

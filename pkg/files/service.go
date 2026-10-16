@@ -193,6 +193,10 @@ type VolumeSet interface {
 	All() []volume.Volume
 	ByName(name string) (volume.Volume, bool)
 	Root(name string) *storage.Root
+	// HasLocalRoot 报告该卷是否为**本地根形态**（有 *storage.Root；外部/封装卷为 false）。
+	// M3：取代 `Root(name) != nil` 这类**间接探针**（把「是否本地卷」语义显式化，并减少裸
+	// root 访问器面；`Root` 的剩余调用点由 archcheck R28 棘轮登记）。
+	HasLocalRoot(name string) bool
 	Pool(name string) *quota.Pool
 }
 

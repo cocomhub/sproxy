@@ -135,8 +135,24 @@ func (vs *Set) DefaultRoot() *storage.Root {
 
 // Root 返回指定卷名的根句柄（未知卷名返回 nil）。
 // 外部卷（非本地）不在 roots——调用方应走 External(name)。
+// Root 返回本地卷根（**仅本地卷**；外部/封装卷无本地根 ⇒ nil）。
+//
+// ⚠️ **装配层专用**（M3）：调用方应优先用 `HasLocalRoot`（探针）或统一存储卷视图
+// （`StorageVolume`/`FS`）；直接用本函数拿裸 root 的点由 **R28 棘轮**登记（只降不升，
+// 每条需写「为什么必需 root 而非 FS/接口」）✓。
 func (vs *Set) Root(name string) *storage.Root {
 	return vs.roots[name]
+}
+
+// HasLocalRoot 报告该卷是否为**本地根形态**（有 `*storage.Root`；外部/封装卷为 false）。
+//
+// 用途（M3）：取代 `Root(name) != nil` / `== nil` 这类**间接探针**（把「是否本地卷」的语义
+// 显式化 ✓，并减少裸 root 访问器面 ✓）。与 `KindOf` 的区别：`KindOf` 分「存储/封装」；
+// 本函数分「**本地根 / 非本地根**」（外部卷也是 `KindStorage` 但无本地 root ✓）。
+func (vs *Set) HasLocalRoot(name string) bool {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	return vs.roots[name] != nil
 }
 
 // DefaultExternal 返回默认外部卷句柄（**配置声明序中首个 AddExternalVolume 登记的外部卷**；
@@ -433,7 +449,7 @@ func (vs *Set) Close() error {
 // 「按卷取/建 cache」。log 仅在**首次为某卷创建 cache 时**生效（与既有「首次创建才记日志」
 // 一致）；卷名以 `volume` 字段记入每条告警。
 func (vs *Set) Tenant(volName, owner string, log *slog.Logger) *storage.Tenant {
-	if vs.Root(volName) == nil {
+	if !vs.HasLocalRoot(volName) {
 		return nil
 	}
 	vs.cacheMu.Lock()

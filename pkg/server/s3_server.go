@@ -135,8 +135,8 @@ func (h *Handlers) s3ListBuckets(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><ListAllMyBucketsResult><Owner><ID>sproxy</ID><DisplayName>sproxy</DisplayName></Owner><Buckets>`)
 	if h.volSet != nil {
 		for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
-			// 只列本地卷（Root(name) != nil = 本地形态；外部卷无 user 桶语义不列）。
-			if h.volSet.Root(v.Name) != nil {
+			// 只列本地卷（`HasLocalRoot` = 本地根形态；外部卷无 user 桶语义不列）。
+			if h.volSet.HasLocalRoot(v.Name) {
 				fmt.Fprintf(&b, `<Bucket><Name>%s</Name><CreationDate>%s</CreationDate></Bucket>`,
 					xmlEscapeText(v.Name), time.Now().UTC().Format(time.RFC3339))
 			}
