@@ -731,7 +731,7 @@ func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Vol
 			log.Warn("secretdata 卷容量快照恢复失败，本次进程从零累计", "volume", v.Name, "error", cerr)
 			counter = capacity.NewPoolCounter(pool)
 		}
-		be = capacity.WrapBackend(be, counter)
+		be = capacity.WrapStorageVolume(v.Name, be, counter, nil, pool)
 	}
 	if aerr := set.AttachExternal(v.Name, be); aerr != nil {
 		return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)

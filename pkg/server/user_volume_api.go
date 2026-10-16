@@ -277,7 +277,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	if counter.CorruptSnapshot() {
 		h.logger.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", req.Name, "owner", owner, "path", counterPath)
 	}
-	be = capacity.WrapBackend(be, counter)
+	be = capacity.WrapStorageVolume(req.Name, be, counter, nil, nil)
 	// store 落盘（重名拒绝）——**store 是运行时用户卷的唯一事实源**（重启由 ScanRestore
 	// 恢复；历史 config YAML 写回机制已随阶段 2 迁移移除）。
 	// Owner 一并设置（C4 CRITICAL 复测补直）：owner 以参数为准，使本链产出的 UserVolume

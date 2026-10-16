@@ -170,7 +170,7 @@ func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log 
 	} else if cnt.CorruptSnapshot() {
 		log.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", uv.Name, "owner", uv.Owner, "path", counterPath)
 	}
-	be = capacity.WrapBackend(be, cnt)
+	be = capacity.WrapStorageVolume(uv.Name, be, cnt, nil, nil)
 	if aErr := set.AddExternalVolume(v, be); aErr != nil {
 		log.Warn("用户卷恢复跳过（注册失败）", "volume", uv.Name, "owner", uv.Owner, "error", aErr)
 		_ = be.Close()
