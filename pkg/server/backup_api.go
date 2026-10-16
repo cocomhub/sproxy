@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/backup"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -266,7 +267,15 @@ func (h *Handlers) backupTargetFS(ctx context.Context, owner, target string) (ba
 		sm = h.storageMgr
 	}
 	if scope != nil || pool != nil || sm != nil {
-		fs = &backupQuotaFS{inner: fs, scope: scope, pool: pool, sm: sm, cat: capacity.CategoryChunked, log: h.logger}
+		// 记账口径：**本地卷目标**按该卷的物理口径折算（加密卷 = 密文长度；明文卷 = 恒等）；
+		// 外部卷无本地密文语义（远端 Stat 即真值）⇒ 恒等。必须与上传路径同源（`files.RootPhysSizer`）。
+		var phys func(int64) int64
+		if h.volSet.External(target) == nil {
+			if tnt := h.volumeTenant(target, owner); tnt != nil {
+				phys = files.RootPhysSizer(tnt.Root())
+			}
+		}
+		fs = &backupQuotaFS{inner: fs, scope: scope, pool: pool, sm: sm, cat: capacity.CategoryChunked, log: h.logger, phys: phys}
 	}
 	return backupTarget{data: fs, manifest: mfs}, nil
 }
@@ -332,6 +341,26 @@ type backupQuotaFS struct {
 	sm    *capacity.StorageManager // 持久容量账本（仅本地卷目标；nil = 未装配或外部卷）
 	cat   capacity.StorageCategory // 记账类别（与用户文件写面一致）
 	log   *slog.Logger
+	// phys 是本卷的**记账口径折算**（nil = 恒等）：加密卷 ⇒ `storage.EncryptedPhysicalSize`。
+	//
+	// 为什么必须有（2026-10-16 高风险区审核发现）：本装饰器的记账口径必须与**上传路径**同源
+	// （`files.settleSize` ⇒ 物理），否则加密卷上「**备份按逻辑记账、上传按物理记账**」⇒
+	// owner Scope **少记**（磁盘实际占用 = 物理 > 逻辑），且 owner 配额侧**永不收敛**（只有卷池
+	// 靠磁盘扫描收敛）⇒ **可超真实配额**（违反 G1「绝不超真实配额」）。
+	//
+	// 链路依据：本地目标 = `PrefixFS(Guard(Wrap(NewRootFS(tnt.Root()))))` ⇒ `RootFS.Stat` 返回
+	// `LogicalSize`（**逻辑**）、`RootFS.WriteFile` 经 `writeUserVisible` **透明加密** ⇒ 落盘为
+	// 物理。故所有进入账本的尺寸都必须先经本字段折算。
+	phys func(int64) int64
+}
+
+// physSize 把**逻辑**字节折算为本卷的**记账口径**（物理占用）；nil / 非正值 ⇒ 原样返回。
+// **每个值只折算一次**（调用点：`statSize` 与 `WriteFile` 入口），避免双重折算。
+func (q *backupQuotaFS) physSize(n int64) int64 {
+	if n <= 0 || q.phys == nil {
+		return n
+	}
+	return q.phys(n)
 }
 
 // backupReservation 是 scope+pool+持久账本三预留的聚合（任一为空则跳过）。
@@ -457,6 +486,9 @@ func (q *backupQuotaFS) reserve(size int64) (*backupReservation, error) {
 }
 
 func (q *backupQuotaFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+	// 记账口径折算（见 `phys` 字段注释）：**入账前**把逻辑长度折成本卷物理占用。
+	// 只在此处折一次，下方 reserve/Adjust/Commit/smAdopt 均以折算后的值为准。
+	size = q.physSize(size)
 	// 覆盖写差分（P1）：备份引擎对 manifest 不匹配的同 rel 做覆盖写、且每轮重写 manifest；
 	// 原实现只 TryReserve+Commit(size) 而无 prev 差分 → 旧字节永不释放，Scope/池随每轮备份
 	// 单调上涨 → 后续上传/备份被 507 误拒（对照上传路径 Commit(prev,written) 与 multipart
@@ -491,12 +523,15 @@ func (q *backupQuotaFS) WriteFile(ctx context.Context, relPath string, r io.Read
 }
 
 // statSize 取目标已存在文件大小（不存在/目录/失败 → 0）。
+//
+// 口径：`inner.Stat`（链尾 `RootFS`）返回的是 **`LogicalSize`（明文长度）** ⇒ 必须折算为物理，
+// 否则覆盖写的 `prev` 与结算值不同源 ⇒ 每次覆盖写泄漏 `(物理 − 逻辑)`（幽灵占用/反向漂移）。
 func (q *backupQuotaFS) statSize(ctx context.Context, relPath string) int64 {
 	e, err := q.inner.Stat(ctx, relPath)
 	if err != nil || e == nil || e.IsDir {
 		return 0
 	}
-	return e.Size
+	return q.physSize(e.Size)
 }
 
 // releaseBytes 从 scope/pool 扣减已确认占用 n（删除/覆盖改名时对称释放，C-MAJOR-2 同语义）。
