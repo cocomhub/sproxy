@@ -190,18 +190,6 @@ func (vs *Set) External(name string) ExternalBackend {
 	return vs.external[name]
 }
 
-// FSFor 返回指定卷名的同步 FS 视图（**底层 raw 视图**：本地卷 = 裸 `LocalFS(RootDir)`，
-// **不经** `storage.Root` 的透明加解密/封印）。
-//
-// ⚠️ **raw 是有意的**（2026-10-16 复核裁定，设计 §11）：本函数面向**内部布局/特权面**
-// （需读写卷内密文形态或绕开封印），与「用户内容读写入口」（`pkg/rootfs` 的
-// `OpenUserVisibleRead`/`WriteUserVisible`，透明加解密 + 封印生效）**语义不同** ⇒ 用户内容面
-// **不得**走本函数 ✗。
-//
-// ⚠️ **无生产调用点**（2026-10-16 复核：非测试源码仅本定义 ✓）⇒ 仅测试/潜在误用面；
-// M5 收敛时评估**删除**（删前需确认无隐藏依赖）✓。
-//
-// 对本方法做**读**（RLock）：BottomFS 由外部句柄/Cache 持有，装配分离，读到即用（不常驻副本）。
 func (vs *Set) FSFor(name string) (syncpkg.FS, bool) {
 	vs.mu.RLock()
 	be := vs.external[name]

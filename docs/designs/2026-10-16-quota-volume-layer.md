@@ -342,7 +342,7 @@ raw `root.OpenFile`（meta sidecar / s3 part / 块写暂存 / 索引快照 ✓�
 
 | 位置 | 现状 | 后果 |
 |---|---|---|
-| `Set.FSFor(name)`（`registry/set.go:177`） | 本地 → **`LocalFS(RootDir)`** ✗ | 绕过 `storage.Root` ⇒ **加密卷读密文/写明文 + 绕过封印** ✗ |
+| ~~`Set.FSFor(name)`~~（**已删除**，2026-10-16） | 曾是本地 → **`LocalFS(RootDir)`** ✗；复核证实**零调用点**（连测试都没有 ✗，`grep '\.FSFor('` 无命中）⇒ **死代码** ⇒ 已删 ✓ | 原后果：绕过 `storage.Root` ⇒ 加密卷读密文/写明文 + 绕过封印 ✗ —— **随删除消失** ✓ |
 | `enclosure.SourceFS`（`enclosure/attach.go:166`） | 本地源 → **`LocalFS(rt.AbsPath())`** ✗ | 同上，且**配额层看不到封装卷写入** ✗（§3 P0-a ✓） |
 
 ⇒ 二者同属 **R26「卷根直连适配器」** 族 ✓（历史 P0 全出自「绝对路径 + 裸 os」✗）。
