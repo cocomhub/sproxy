@@ -16,6 +16,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +84,12 @@ type dirsEnv struct {
 	volSet      *registry.Set           // nil = 单卷（旧装配语义）
 	volDirs     map[string]string       // 卷名 → 卷根绝对路径（断言磁盘副作用用）
 	pools       map[string]*quota.Pool
+	// volRoots 是 enableVolumes 为本地卷建好的根句柄（enableExternalVolume 重建卷集时
+	// 复用，registry.NewSet 需要完整 roots 表）。与 volSet.roots 同源。
+	volRoots map[string]*storage.Root
+	// externalVols 是卷名 → 外部卷目录浏览能力（任务 7 fake）：testRuntime.Volumes()
+	// 经 dirsExternalSet 包装成 ExternalVolumeSource，供 List 的 ?volume=<外部卷> 路由。
+	externalVols map[string]ExternalVolume
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
@@ -90,6 +98,9 @@ type dirsEnv struct {
 	fileMeta bool
 	// externalOps 是外部卷对象操作接缝替身（非 nil 时注入 Service；MoveFile/外部卷用例用）。
 	externalOps ExternalVolumeOps
+	// volumeClassifier 是卷类型分类能力替身（非 nil 时经 WithVolumeTypeClassifier 注入；
+	// nil = 未注入 → 领域侧回落内置基线名单，见 volumeCategoryFor）。
+	volumeClassifier VolumeTypeClassifier
 	// uploading 是替身锁池（TryMark/Acquire 共用，rebuild 时重置——与旧 deps() 每次新建
 	// &sync.Map{} 同语义）。
 	uploading sync.Map
@@ -101,12 +112,13 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 	t.Helper()
 	root := t.TempDir()
 	e := &dirsEnv{
-		root:     root,
-		logger:   testLogger(),
-		pool:     quota.NewPool(0),
-		tenants:  map[string]*storage.Tenant{},
-		checksum: map[string]*checksum.ChecksumStore{},
-		buckets:  map[string]*quota.Scope{},
+		root:         root,
+		logger:       testLogger(),
+		pool:         quota.NewPool(0),
+		tenants:      map[string]*storage.Tenant{},
+		checksum:     map[string]*checksum.ChecksumStore{},
+		buckets:      map[string]*quota.Scope{},
+		externalVols: map[string]ExternalVolume{},
 	}
 	e.rebuild()
 	t.Cleanup(func() {
@@ -171,6 +183,9 @@ func (e *dirsEnv) newService() *Service {
 	if e.externalOps != nil {
 		opts = append(opts, WithExternalOps(e.externalOps))
 	}
+	if e.volumeClassifier != nil {
+		opts = append(opts, WithVolumeTypeClassifier(e.volumeClassifier))
+	}
 	if e.metrics != nil {
 		opts = append(opts, WithMetrics(e.metrics))
 	}
@@ -200,7 +215,7 @@ func (r testRuntime) Volumes() VolumeSet {
 	if r.e.volSet == nil {
 		return nil
 	}
-	return r.e.volSet
+	return dirsExternalSet{Set: r.e.volSet, ext: r.e.externalVols}
 }
 
 func (r testRuntime) Tenant(volName, owner string) *storage.Tenant {
@@ -341,6 +356,7 @@ func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 	roots := map[string]*storage.Root{}
 	e.volDirs = map[string]string{}
 	e.pools = map[string]*quota.Pool{}
+	e.volRoots = map[string]*storage.Root{}
 	for i, name := range names {
 		dir := e.root
 		if i > 0 {
@@ -351,6 +367,7 @@ func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 			t.Fatalf("OpenRoot(%s): %v", name, err)
 		}
 		roots[name] = rt
+		e.volRoots[name] = rt
 		e.volDirs[name] = dir
 		e.pools[name] = quota.NewPool(0)
 		vols = append(vols, volume.Volume{Name: name, RootDir: dir})
@@ -895,4 +912,37 @@ func (e *dirsEnv) withEventSink(sink EventListener) *Service {
 	e.eventSink = sink
 	e.rebuild()
 	return e.svc
+}
+
+// TestDirCreateHTTPError_Attributable 钉住「建目录失败可归因」（2026-10-15 代码审核第 6 项）：
+// 此前一律 500 + 固定文案「创建目录失败」⇒ 真实原因被吞掉（客户端与 CI 都无从判断，实测定位时
+// 只能临时插桩）。现在：卷层路径非法 ⇒ 400 + reasonPathInvalid；无权 ⇒ 403；其余 ⇒ 500 但**携带原因**。
+func TestDirCreateHTTPError_Attributable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantReason string
+		wantSub    string
+	}{
+		{"路径非法", volume.ErrInvalidUserPath, http.StatusBadRequest, reasonPathInvalid, "非法用户路径"},
+		{"路径非法（%w 包装）", fmt.Errorf("封装卷写路径: %w", volume.ErrInvalidUserPath), http.StatusBadRequest, reasonPathInvalid, "非法用户路径"},
+		{"无权", volume.ErrVolumeNotAuthorized, http.StatusForbidden, "", "无权访问"},
+		{"其它", errors.New("no space left on device"), http.StatusInternalServerError, "", "no space left"},
+	} {
+		he := dirCreateHTTPError(tc.err)
+		if he.Status != tc.wantStatus {
+			t.Errorf("%s: status=%d want %d", tc.name, he.Status, tc.wantStatus)
+		}
+		if he.Reason != tc.wantReason {
+			t.Errorf("%s: reason=%q want %q", tc.name, he.Reason, tc.wantReason)
+		}
+		if !strings.Contains(he.Message, errMsgCreateDirFailed) {
+			t.Errorf("%s: 应保留原语义文案前缀，got %q", tc.name, he.Message)
+		}
+		if !strings.Contains(he.Message, tc.wantSub) {
+			t.Errorf("%s: 应携带原因 %q，got %q", tc.name, tc.wantSub, he.Message)
+		}
+	}
 }

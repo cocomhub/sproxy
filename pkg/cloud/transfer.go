@@ -18,8 +18,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -53,6 +55,7 @@ type transferEnv struct {
 	scheme        string
 	loc           volume.OwnerBucketLocator // 强类型位置（owner/bucket/path 未拼接）
 	rel           string                    // loc 的 FS 键（Volume.FSPath 唯一拼接点）
+	remotePath    string                    // loc 的**客户端可见相对路径**（桶内；配额 Scope 与删除侧共用键）
 	destPath      string
 	task          *CloudTask
 	result        *downloader.Result
@@ -126,7 +129,8 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 	// 转存执行上下文（S107 收敛）：目标卷/路径/产物/结果/重下回调全程不变。
 	// loc 是强类型位置（owner/bucket/path 未拼接），rel 是其 FS 键（FSPath 唯一拼接点）。
 	env := &transferEnv{
-		ctx: ctx, targetFS: targetFS, scheme: scheme, loc: loc, rel: rel, remote: remote,
+		ctx: ctx, targetFS: targetFS, scheme: scheme, loc: loc, rel: rel,
+		remotePath: string(loc.Path()), remote: remote,
 		destPath: destPath, task: task, result: result, retryDownload: retryDownload,
 		targetWriteLock:     m.targetWriteLock,
 		resumeSelfOverwrite: task.resumeSelfOverwrite,
@@ -316,9 +320,14 @@ func (m *CloudDownloadManager) retryTransferFile(env *transferEnv) (*downloader.
 
 // transferOnce 执行一次转存：生成目标目录 → 配额预检 → 复制 destPath 到目标卷 → 返回 URL。
 func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
+	// 审计：transfer 阶段 span（audit.From 经 env.ctx 取用；无 ctx logger 时 no-op）。
+	// 加密卷目标的 WriteFile 在 secretdata 包内独立记 encrypt span（此处不感知加密）。
+	trAudit := audit.From(env.ctx)
+	trSpan := trAudit.Begin("transfer")
 	dir := path.Dir(env.rel)
 	if dir != "." && dir != "/" {
 		if err := ensureTransferDir(env.ctx, env.targetFS, dir); err != nil {
+			trSpan.Fail(err)
 			return "", err
 		}
 	}
@@ -328,15 +337,18 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	//   - 用户配额：非远程网盘卷（secretdata/本地）→ 走 cloud 桶租户 Scope 探测；
 	//     远程网盘卷（s3/baidupcs 等）用户配额直接通过（容量由卷自身管）。
 	if err := m.transferQuotaGate(env); err != nil {
+		trSpan.Fail(err)
 		return "", err
 	}
 	f, err := os.Open(env.destPath)
 	if err != nil {
+		trSpan.Fail(err)
 		return "", fmt.Errorf("transfer: 打开本地产物: %w", err)
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
+		trSpan.Fail(err)
 		return "", fmt.Errorf("transfer: 本地产物 stat: %w", err)
 	}
 	// W1/W3：转存目标须唯一、拒绝静默覆盖。优先用卷的 WriteIfAbsent 原子能力（若实现）
@@ -344,16 +356,27 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	// 覆盖仍被拒）。机制化：使用方只查能力接口，不硬编码每类卷的存在性语义。
 	// done=true = 幂等命中（目标已持有相同内容，崩溃窗口已交付）→ 直接返回 URL；
 	// 否则常规路径写后读回校验。
+	//
+	// 配额结算（遗留②修复）：写前实测本对象当前记账字节，写后按**差分**结算进 owner 配额
+	// 账本（与删除侧 releaseExternalDeleteQuota 同账本、同一测量口径）——本路径不经 pkg/files
+	// 路由写内核，此前从不结算 ⇒ 删除该产物即「未曾提交的释放」（幻影释放）。
+	// 失败路径同样按实测差分收敛：本次未写入 → diff=0（不自造占用）；写了一半 → 记实际落盘字节。
+	chargeBefore := m.transferTargetCharge(env)
 	done, werr := writeTransferOnce(env, f, st.Size(), st.ModTime().Unix())
+	m.settleTransferCharge(env, chargeBefore)
 	if werr != nil {
+		trSpan.Fail(werr)
 		return "", werr
 	}
 	if done {
+		trSpan.End("bytes", st.Size())
 		return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
 	}
 	if err := m.readbackVerify(env); err != nil {
+		trSpan.Fail(err)
 		return "", err
 	}
+	trSpan.End("bytes", st.Size())
 	return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
 }
 
@@ -631,6 +654,62 @@ func sanitizeTransferName(name string) string {
 		return "file"
 	}
 	return name
+}
+
+// transferTargetCharge 返回转存目标对象当前的**记账字节**（与删除侧
+// `releaseExternalDeleteQuota` 的测量同源，两处必须同口径，否则账本恒偏）：
+//
+//	① 卷自报实测物理足迹（装配层注入 TargetPhysChargeFor = files.physChargeFor 同一函数；
+//	   覆盖 secretdata 这类「逻辑不可推」的 pad/parity 占用）；
+//	② 回落目标卷 Stat 大小（与删除侧 ExternalStat 回落同义）。
+//
+// 对象不存在 / 不可测 → 0（调用方按「未占用」处理）。
+func (m *CloudDownloadManager) transferTargetCharge(env *transferEnv) int64 {
+	if m.targetPhysChargeFor != nil {
+		vol := env.task.Transfer.Volume
+		if n, ok := m.targetPhysChargeFor(vol, env.task.Owner, env.remotePath); ok && n > 0 {
+			return n
+		}
+	}
+	e, err := env.targetFS.Stat(env.ctx, env.rel)
+	if err != nil || e == nil {
+		return 0
+	}
+	return e.Size
+}
+
+// settleTransferCharge 把本次转存的产物字节**差分结算**进 owner 配额账本（写入侧落账，
+// 使删除侧的释放有据可依——遗留②「幻影释放」根治）。
+//
+// 语义：`committed += (写后实测 − 写前实测)`——新建对象只记新增，覆盖写/任务内重试只记增量
+// （重试写同内容 ⇒ 差分为 0，不重复计），失败路径同理自洽（未写入 → 0；部分写入 → 实际字节）。
+// 账本即 `TargetQuotaScopeFor` 解析出的 Scope（与 HTTP 上传路由预留、删除侧释放**同一对象**）。
+//
+// 不做准入（`Adjust` 只记账）：准入由 `transferQuotaGate` 的写前探测负责（早失败）；此处若
+// 强行提交被拒会让「文件已落盘但账本未记」再现同类不一致。
+func (m *CloudDownloadManager) settleTransferCharge(env *transferEnv, before int64) {
+	scope := m.transferTargetScope(env)
+	if scope == nil {
+		return
+	}
+	after := m.transferTargetCharge(env)
+	if after == before {
+		return
+	}
+	scope.Adjust(before, after)
+	m.logger.Debug("转存目标配额结算（owner 账本）", "volume", env.task.Transfer.Volume,
+		"owner", env.task.Owner, "path", env.remotePath, "before", before, "after", after)
+}
+
+// transferTargetScope 解析转存产物的 owner 配额 Scope：键空间 = **用户桶相对路径**
+// （`user/<rel>`），与 HTTP 上传（route.Reserve/Commit）及删除释放（Tenant.UserRel）同一
+// 解析器 ⇒ 三方结算同一账本。未装配配额（resolver 为 nil / 返回 nil）→ nil（零回归）。
+func (m *CloudDownloadManager) transferTargetScope(env *transferEnv) *quota.Scope {
+	if m.targetScopeFor == nil {
+		return nil
+	}
+	rel := path.Join(string(env.loc.Bucket()), string(env.loc.Path()))
+	return m.targetScopeFor(env.task.Owner, rel)
 }
 
 // transferFS 解析转存目标卷的 (FS 视图, 协议 scheme)。

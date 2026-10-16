@@ -5,8 +5,8 @@
 
 // e2e_cli_secret_test.go 覆盖 sclient secret 命令族的端到端（真二进制 + 子进程）：
 //
-//   - secret create（随机）：服务端生成并返回 64-hex，secret 落盘到默认 secrets 卷
-//     （<uploadsDir>/secrets/<name>），磁盘副作用断言；
+//   - secret create（随机）：服务端生成并返回 64-hex，secret 落盘到**请求者 owner 的默认
+//     secrets 桶**（`<uploadsDir>/<owner>/meta/secrets/<name>`，owner = SproxySig AK），磁盘副作用断言；
 //   - secret list：列出已创建 secret（排序）；
 //   - secret export：明文导出到文件（--plain），内容与落盘一致；
 //   - secret delete：删除后磁盘文件消失、list 不再包含、重复删除报错（fail-closed）。
@@ -50,10 +50,12 @@ func hasSecretNamed(names []string, name string) bool {
 	return false
 }
 
-// secretOnDisk 返回默认 secrets 卷本地视图路径（<uploadsDir>/secrets/<name>）。
-// 服务器 setupSecretBackends 把默认 secrets 卷装配到 <storage_root>/secrets。
+// secretOnDisk 返回**请求者 owner** 的默认 secrets 桶内某 secret 的物理路径：
+// `<uploadsDir>/<owner>/meta/secrets/<name>`（meta 桶内，见 pkg/server/secrets_api.go 文件头）。
+// 默认 secrets 是 per-owner 的（用户裁定 2026-10-15），owner = SproxySig AccessKey（本 harness
+// 用 e2eTestAK 认证 ⇒ 租户目录名即该 AK）。
 func secretOnDisk(env *cliEnv, name string) string {
-	return filepath.Join(env.StorageRoot, "secrets", name)
+	return filepath.Join(env.StorageRoot, e2eTestAK, "meta", "secrets", name)
 }
 
 // TestE2E_CLI_Secret_CRUD 覆盖 secret 命令族完整生命周期（真服务 + 子进程）：
@@ -90,7 +92,7 @@ func TestE2E_CLI_Secret_CRUD(t *testing.T) {
 		t.Fatalf("create 输出未提取到 64-hex secret 值：\n%s", out)
 	}
 
-	// 磁盘副作用：secret 落盘到 <uploadsDir>/secrets/myvault，内容 = 返回值。
+	// 磁盘副作用：secret 落盘到 <uploadsDir>/<owner>/meta/secrets/myvault，内容 = 返回值。
 	onDisk := secretOnDisk(env, "myvault")
 	data, err := os.ReadFile(onDisk)
 	if err != nil {

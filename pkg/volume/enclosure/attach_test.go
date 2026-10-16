@@ -98,7 +98,7 @@ func TestAttachAll_BuildsBackendWithPrefixView(t *testing.T) {
 	}
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: dir},
-		{Name: "vault", Type: TypeEnclosure, Extra: map[string]any{"source": "main:base", "wrapper": "capture_a"}},
+		{Name: "vault", Type: "capture_a", Extra: map[string]any{"source": "main:base"}},
 	}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, nil, "main")
 
@@ -134,7 +134,7 @@ func TestAttachAll_Idempotent(t *testing.T) {
 	t.Cleanup(func() { _ = rt.Close() })
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: dir},
-		{Name: "vault", Type: TypeEnclosure, Extra: map[string]any{"source": "main:base", "wrapper": "capture_b"}},
+		{Name: "vault", Type: "capture_b", Extra: map[string]any{"source": "main:base"}},
 	}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, nil, "main")
 	if aerr := AttachAll(context.Background(), set, nil); aerr != nil {
@@ -166,7 +166,7 @@ func TestAttachAll_WrapsCapacityAccounting(t *testing.T) {
 	}
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: dir},
-		{Name: "vault", Type: TypeEnclosure, Extra: map[string]any{"source": "main:base", "wrapper": "capture_pool"}},
+		{Name: "vault", Type: "capture_pool", Extra: map[string]any{"source": "main:base"}},
 	}
 	pools := map[string]*quota.Pool{"vault": quota.NewPool(4)}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, pools, "main")
@@ -217,7 +217,7 @@ func TestBuild_WiresProtectionLayerIntoSourceView(t *testing.T) {
 	w := newCaptureWrapper(t, "capture_prot")
 	src := &protSrcFS{}
 	d := Decl{Vol: "vault", Source: "main", Path: "alice/user/vault", Wrapper: "capture_prot"}
-	if _, err := d.Build(context.Background(), volume.Volume{Name: "vault", Type: TypeEnclosure}, src); err != nil {
+	if _, err := d.Build(context.Background(), volume.Volume{Name: "vault"}, src); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	view := w.gotView()
@@ -250,7 +250,7 @@ func TestBuild_WiresProtectionLayerIntoSourceView(t *testing.T) {
 	// ④ 显式 allow_direct_url 时透传，且以**源键**（加前缀）询问源存储。
 	d2 := d
 	d2.AllowDirectURL = true
-	if _, err := d2.Build(context.Background(), volume.Volume{Name: "vault", Type: TypeEnclosure}, src); err != nil {
+	if _, err := d2.Build(context.Background(), volume.Volume{Name: "vault"}, src); err != nil {
 		t.Fatalf("Build(allow): %v", err)
 	}
 	dp2, ok := w.gotView().(syncpkg.DirectURLProvider)

@@ -1077,7 +1077,7 @@ type LeaderElector interface {
 | **V4** | **统一对话框/确认组件** | 替换原生 confirm/prompt：`showConfirm(title, desc, danger, onOk)` + 进度对话框 + 可取消；样式/键盘/ARIA 统一（[设计](./designs/2026-09-28-webui-dialog-component.md)） | S2 |
 | **V5** | **拖拽上传放置区 + 上传进度所见即所得** | 全局拖拽放置高亮区 + 上传队列卡片（文件名/大小/进度/速度/剩余/暂停取消）+ 完成 toast 跳转（[设计](./designs/2026-09-28-webui-drag-upload-queue.md)） | S2 |
 | **V6** | **所见即所得反馈体系** | 危险操作二次确认颜色分级、操作成功定位（删除后停留原目录/重命名后高亮）、骨架屏加载、空态引导文案（[设计](./designs/2026-09-28-webui-wysiwyg-feedback.md)） | S2 |
-| **V7** | **外部卷（egress/secretdata）Web UI** | 集群出口播放器 + 外部卷文件浏览：① 视频播放器组件（点击视频行 → `<video src="/download?volume=<卷>&filename=...">` Range 播放）；② `/api/files` 接外部卷 ListDir（clusterFS 已有 ListDir，仅需 files.Service 挂接），holder_owner 专属浏览区（卷徽标/只读标记 + 播放入口）——2026-10-06 集群出口评审待办（用户裁定后续统一完善 UI） | S2 |
+| **V7** | **外部卷（egress/secretdata）Web UI** | 集群出口播放器 + 外部卷文件浏览：① 视频播放器组件（点击视频行 → `<video src="/download?volume=<卷>&filename=...">` Range 播放）；② `/api/files` 接外部卷 `ListDir`（明文目录浏览）——**已落地（①②，2026-10-06）**：`web/static/video-player.js` 播放器组件 + 文件页视频行「▶ 播放」弹窗（Range 标准播放）；`GET /api/files?volume=` 透传外部卷明文目录（`volume_category` 徽标 + 文件页卷下拉切换）。残余责任：holder_owner 专属浏览区 + 统一完善 UI（用户裁定后续统一完善） | S2 |
 
 ### 13.2 可交互 Hub 拓扑（V1 专题）
 

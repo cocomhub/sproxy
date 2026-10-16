@@ -34,20 +34,26 @@ storage_root: "./storage"
 #                               #   零值 false = 私密（外部卷经服务端转发，不暴露原始存储 URL）；
 #                               #   显式 true = 下载时 302 跳到后端直链（流量不经服务端，需后端支持直链）。
 #                               #   仅明文外部卷（baidupcs 等）消费；secretdata 密文卷恒服务端解密（忽略本字段）。
-#   # 封装卷示例（type=enclosure，2026-10-11 通用封装机制）：声明占用某个已装配卷的根/子目录，
+#   # 封装卷示例（2026-10-11 通用封装机制）：声明占用某个已装配卷的根/子目录，
   # 由注册的封装处理器（wrapper）提供变换后的访问（如 secretdata 加密）。
   # 装配后**源目录在源卷侧被封印**：直连写操作恒拒（409）、默认读按不存在（404）且列举过滤；
   # 封装卷自身经服务器处理读写（不受封印影响）。支持嵌套（封装另一个封装卷，路径逐层拼接）与
   # 深度上限 8；跨外部卷源当前装配期显式拒绝（禁静默降级）。
+  #
+  # **唯一声明形态 = wrapper 类型 + extra.source**（`type` 就是处理层名，如 secretdata/secrets）：
+  # 卷描述 Type 保持 wrapper 类型 ⇒ 协议（SchemeOf）/分类（CategoryOf）/API 回显全按 wrapper 语义。
+  # `type: "enclosure"` **不是可写卷类型**——配置校验与建卷 API 均 fail-closed 拒绝。
+  # 用户面亦可用嵌套语法 `extra.target: "<卷>/<子目录>"`（见下 secret 加密卷示例），装配层翻译出
+  # 同样的声明词汇（`extra.source`）后走同一装配路径。
   #   - name: "vault"
-  #     type: "enclosure"
+  #     type: "secretdata"             # 处理层名（= wrapper 类型）
   #     extra:
   #       # <源卷名>:<子路径>（子路径可空 = 整卷封装）。子路径为**卷根相对**：客户端可达路径
   #       # 恒为 <卷根>/<owner>/<bucket>/<rel>，故要封印「客户端本来能直连的区间」须写
   #       # "<源卷>:<owner>/user/<子路径>"（如 main:alice/user/vault）；写 "main:private/vault"
   #       # 表示封装卷根专有区间（客户端不可寻址，封印属防御纵深）。
   #       source: "main:alice/user/vault" # <源卷名>:<卷根相对子路径>
-  #       wrapper: "secretdata"          # 封装处理器注册名（生产已注册：secretdata）
+  #       # wrapper 键冗余：恒等于卷类型本身（装配层不再书写；显式写出且不一致 → 启动 fail-closed）。
   #       secret_url: "secrets://keys/vault"   # wrapper 自身配置（此处为密钥来源；secrets://<卷>/<名>）
   #       source_read_mode: "hidden"     # hidden(默认，读 404+列举过滤) | readable(只读透视，便于迁移)
   #       allow_direct_url: false        # 默认禁止 302 直链（禁客户端直连源存储）
@@ -90,19 +96,18 @@ storage_root: "./storage"
 #   #     type: "s3"
 #   #     extra: {endpoint: "127.0.0.1:9000", bucket: "sproxy", access_key: "minioadmin", secret_key: "minioadmin"}
 #   # secret 加密卷示例（type=secrets + type=secretdata，走 Secretdata 透明加密卷）：
-#   #   先建 secrets 卷（放加密密钥文件；可本地默认卷 secrets/ 目录——见下），再建
-#   #   secretdata 卷引用其密钥。密钥文件（64 hex）需**手动放置**：在 secrets 卷底层
-#   #   <root>/secrets/ 目录放一个 64-hex 文本文件（如 `datakey`）；当前 sclient/Web UI
-#   #   尚未接通加密卷文件面，`trust login` 不创建卷内密钥文件（修复轮 M4 标注）。
+#   #   先建 secrets 卷（放加密密钥文件），再建 secretdata 卷引用其密钥。密钥文件（64 hex）需
+#   #   **手动放置**：在 secrets 卷底层 `<extra.root>/secrets/` 目录放一个 64-hex 文本文件
+#   #   （如 `datakey`）。也可用 CLI/Web 创建（`sclient secret create` 写入的是 **per-owner
+#   #   默认桶** `<storage_root>/<owner>/meta/secrets/`，与显式声明的 secrets 卷不是同一目录）。
 #   #   - name: "mykeys"           # type=secrets：密钥管理卷（底层卷 secrets/ 目录视图）
 #   #     type: "secrets"
-#   #     root: "./storage/keys"   # Extra.target=local（缺省）→ <root>/secrets/ 下存密钥
-#   #     extra: {target: "local"}
+#   #     extra: {target: "local", root: "./storage/keys"}  # root 必须在 extra 里（顶层 root 只服务本地卷）
 #   #   - name: "vault"            # type=secretdata：透明加密封装卷（卷内文件加密落盘）
 #   #     type: "secretdata"
-#   #     root: "./storage/vault"
 #   #     extra:
 #   #       target: "local"        # 底层卷本地根（secretdata 卷自身物理落盘处）
+#   #       root: "./storage/vault"
 #   #       secret_url: "secrets://mykeys/datakey"   # 从 mykeys secrets 卷读密钥（必填）
 #   #       algorithm: "shardseal/aes-256-gcm"       # KDF 档位（缺省 = 默认档 standard，N=2^14）
 #   #          可选 "-high"（保守 N=2^17，~202ms，真实 scrypt 内存 128MiB/次）、"-low"
@@ -117,8 +122,11 @@ storage_root: "./storage"
 #   #                              #   （MP4/MOV→go-mp4、MKV/TS/AVI→ffprobe 若有、否则 fixed）；
 #   #                              #   "fixed" = 关闭关键帧分块（定长 blocklet，可显式禁用）；
 #   #                              #   "video-keyframe" = 强制开启（需 ffmpeg 或 go-mp4 提供者装配）
-#   #   # 只用默认 secrets 卷（不配 secrets 卷）：secret_url 写 "secrets://default/<name>"，
-#   #   # 默认卷自动落 <storage_root>/secrets/。
+#   #   # 默认 secrets 是 **per-owner** 的（每个 owner 各自的 <storage_root>/<owner>/meta/secrets/，免声明、
+#   #   # 首次使用时自动派生）：/api/secrets 恒作用于请求者自己的桶。**服务级声明（此处 config）没有
+#   #   # owner 上下文** ⇒ secret_url 必须指向显式命名的 secrets 卷（如 secrets://mykeys/datakey）；
+#   #   # 只有带身份的建卷请求（POST /api/volumes/user）才可写 "secrets://default-secrets/<name>"
+#   #   # （解析到该 owner 自己的桶）。
 #     vol_capacity: "100GiB"   # 本卷容量上限（支持人类可读大小或纯数字字节；0 = 不限）。auto 路由按容量换卷。
 #     mirror_to: "disk2"       # 镜像目标卷名（可选，仅本地卷）：本卷 user 桶按 mirror_interval 周期复制到目标卷
 #                               #   （源保留；目标一致跳过、不一致覆盖收敛；配置校验拒自指/不存在/成环）
@@ -165,6 +173,22 @@ server_timeouts:
 log_level: "info"
 log_format: "text"
 max_header_bytes: 1048576
+
+# ---- 审计（audit）----
+# 服务端写路径审计（GET /api/audit 回看最近操作，落盘 <默认卷根>/audit/audit.log）。
+# audit:
+#   buffer_size: 2048         # 有界内存环形缓冲条数；0 = 关闭（返回空表）；负值非法
+#   max_size: ""              # 审计日志轮转大小（ByteSize，如 "10MiB"）；0/缺省 = 关闭轮转
+#   max_archives: 3           # 轮转保留归档份数（audit.log.1 … audit.log.N；0 = 轮转即删）
+#   # ---- 通用 span 审计（云下载/转存/加密阶段耗时与字节，pkg/audit）----
+#   # 每任务独立 sink 文件（每行一行 JSON）；当前 sink 目录未配置化（默认系统临时目录），
+#   # 下述字段为规格 §4.5 预留（接口已定义，配置暂未接线）：
+#   enabled: false            # 预留：span 审计开关（默认关，未接线）
+#   dir: ""                   # 预留：span 审计 sink 根目录（未接线）
+#   archive:                  # 预留：把 span 审计归档到所选卷——**默认不归档**
+#     enabled: false          #   开启需选卷 + 路径（未来接线后生效）
+#     volume: ""              #   归档目标卷（如 secretdata://audit）
+#     path: ""                #   归档目标卷内路径
 
 # Web 领域方法传输行为（默认隧道）。
 # web:

@@ -361,3 +361,49 @@ func SealBackend(be registry.ExternalBackend, rules []storage.SealRule) registry
 	}
 	return &sealBackend{ExternalBackend: be, fs: NewSealFS(be.FS(), rules)}
 }
+
+// SealedAt 在后端（可含「调用方面 owner 映射」与封印装饰层）上查覆盖 rootRel 的封印规则
+// （无封印/未覆盖 → nil）。
+//
+// 供**旁路写面**复用同一份匹配语义：此类通道不经后端 FS 视图（如 S3 预签名直传由客户端直连
+// 对象存储），封印装饰器无从拦截，只能在签发期按规则判定。逐层剥开 owner 映射与封印装饰，
+// 任一层的规则命中即返回（多层串联 = 规则并集，与读写路径的封锁效果一致）。
+func SealedAt(be registry.ExternalBackend, rootRel string) *storage.SealRule {
+	for be != nil {
+		switch t := be.(type) {
+		case *sealBackend:
+			if sfs, ok := t.fs.(*SealFS); ok {
+				if r := storage.SealAt(sfs.rules, rootRel); r != nil {
+					return r
+				}
+			}
+			be = t.ExternalBackend
+		case *ownerFacingBackend:
+			be = t.ExternalBackend
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// ApplyBackendSeals 返回「恰好施加 rules 封印」的后端：已封印的后端先**剥净**封印层，再按
+// rules 重新施加（rules 空 = 纯剥离 ⇒ 返回裸后端）。
+//
+// 与 SealBackend 的分工：SealBackend 用于**装配期一次性**注入（层只加不撤）；本函数用于
+// **运行期声明增删**——必须让封印规则集合与「当前声明集合」恒等，否则删除封装卷后旧规则
+// 永久残留（源区间被无故封印：数据不可见 + 无法复用）。剥净再施加也保证任一时刻只有一个
+// 封印层（`Rules()` 可读、诊断不歧义；等价性上多层叠加虽同样保守，但不可回收）。
+func ApplyBackendSeals(be registry.ExternalBackend, rules []storage.SealRule) registry.ExternalBackend {
+	for {
+		sb, ok := be.(*sealBackend)
+		if !ok || sb.ExternalBackend == nil {
+			break
+		}
+		be = sb.ExternalBackend
+	}
+	if be == nil || len(rules) == 0 {
+		return be
+	}
+	return SealBackend(be, rules)
+}

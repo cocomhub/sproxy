@@ -267,8 +267,8 @@ func TestParse_OwnerQualifiedDetection(t *testing.T) {
 	registerOwnerFSTestWrapper()
 	vols := []volume.Volume{
 		{Name: "ext", Type: "s3"},
-		{Name: "vault", Type: TypeEnclosure, Extra: map[string]any{
-			"source": "ext:alice/user/vault", "wrapper": ownerFSTestWrapperName,
+		{Name: "vault", Type: ownerFSTestWrapperName, Extra: map[string]any{
+			"source": "ext:alice/user/vault",
 		}},
 	}
 	decls, err := Parse(vols)

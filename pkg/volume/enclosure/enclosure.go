@@ -4,13 +4,24 @@
 // Package enclosure 实现**通用封装卷**能力层（设计：docs/designs/2026-10-11-enclosure-volume.md）。
 //
 // 职责（且仅此四件，见设计 §2 正交契约）：
-//  1. **声明与拓扑**：解析 volumes[] 的 `type: enclosure` + `extra.source="<源卷>:<子路径>"`，
+//  1. **声明与拓扑**：解析封装声明（`IsDeclared`：**已注册的 wrapper 类型** +
+//     `extra.source="<源卷>:<子路径>"`），
 //     做环检测/深度上限/路径唯一性/wrapper 互斥等装配期 fail-closed 校验；
 //  2. **源视图**：复用 `sync.PrefixFS`（键空间前缀映射，不复制视图逻辑）；
 //  3. **封印规则**：产出 `storage.SealRule[]` 供源卷注入（写恒拒 / 读可配 404 或只读透视）；
 //  4. **直连防护**：抑制 `DirectURL`（默认禁 302 直连源存储）并补 `MetaExtraUpdater` 透传。
 //
 // 不负责：加解密算法（那是 wrapper）、账本（quota/capacity）、完整性 sidecar（trusted）。
+//
+// **enclosure 是纯内部装配机制，不是一种对外卷类型**：唯一声明形态是「**wrapper 类型**
+// （如 secretdata/secrets）+ `extra.source`」——由装配层翻译用户面 `extra.target:
+// "<卷>/<子路径>"` 语法产出（pkg/server/nested_enclosure.go），`wrapper` 即卷类型本身。
+// 卷描述 `Type` 与装配方式**正交**：嵌套封装卷的对外 Type / 协议（SchemeOf）/ 分类
+// （CategoryOf）/ API 回显全部按 wrapper 类型语义，内部机制不外泄。
+//
+// `type: enclosure` **不是可写卷类型**（配置校验与建卷 API 均 fail-closed 拒绝，提示改用
+// wrapper 类型 + source/target）；`TypeEnclosure` 的唯一用途是这些**拒绝判据的单一事实源**
+// （无日志/诊断/构造用途），亦不经 registry.NewBackend 构造。
 package enclosure
 
 import (
@@ -26,24 +37,48 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// TypeEnclosure 是封装卷的卷类型名（volumes[].type）。
+// TypeEnclosure 是**拒绝判据的单一事实源**（唯一用途），**不是可写卷类型**：`volumes[].type:
+// enclosure` 在三处显式拒收——配置校验（pkg/server/config_validate.go.validateVolumeIdentity）、
+// 建卷 API（pkg/server/user_volume_api.go）、存量记录的恢复路径
+// （cmd/sproxy/user_volume_restore.go，拒绝 + Warn）；无任何其他引用（无日志/诊断/构造用途）。
+// 唯一声明形态是「wrapper 类型 + `extra.source`」（见 IsDeclared）——本常量不经
+// registry.NewBackend 构造。
 const TypeEnclosure = "enclosure"
+
+// 封装声明的 extra 键（**装配词汇**，与卷类型正交；pkg/server 的翻译层写、本包解析）。
+const (
+	// SourceKey 是源视图字段：`<源卷>:<子路径>`（子路径空 = 整卷）。
+	SourceKey = "source"
+	// WrapperKey 是处理层注册名字段。**冗余键**：唯一声明形态是「wrapper 类型 + extra.source」，
+	// 故处理层恒等于卷类型本身（`extra.wrapper` 缺省即卷类型；显式写出时须与之一致，否则
+	// `ErrWrapperMismatch` fail-closed）。装配层翻译（pkg/server.TranslateNestedDecl）**不再写**
+	// 该键；读取保留仅为兼容手写配置。
+	WrapperKey = "wrapper"
+)
 
 // MaxNestingDepth 是封装嵌套深度上限（防配置环/自引用导致的装配期递归失控）。
 const MaxNestingDepth = 8
 
 // 声明解析错误（装配期 fail-closed；错误必须可归因到具体卷）。
+// 注：**缺 source / 缺 wrapper 不是错误**——两者由 `IsDeclared` 判据排除在声明集合之外
+// （wrapper 类型无 `extra.source` 的卷是普通 wrapper 卷，不参与本包装配）。
 var (
-	ErrMissingSource   = errors.New("enclosure: 缺少 extra.source（格式 <源卷>:<子路径>）")
-	ErrBadSource       = errors.New("enclosure: extra.source 格式非法")
-	ErrMissingWrapper  = errors.New("enclosure: 缺少 extra.wrapper（封装处理层注册名）")
-	ErrUnknownWrapper  = errors.New("enclosure: extra.wrapper 未注册")
+	ErrBadSource      = errors.New("enclosure: extra.source 格式非法")
+	ErrUnknownWrapper = errors.New("enclosure: extra.wrapper 未注册")
+	// ErrWrapperMismatch：显式写出的 `extra.wrapper` 与卷类型不一致 ⇒ fail-closed。
+	// wrapper 恒等于卷类型（唯一声明形态 = wrapper 类型 + extra.source），二者分裂会让
+	// 「卷描述类型」（协议/分类/回显）与「实际处理层」失真——冗余键只能冗余，不能指向别的层。
+	ErrWrapperMismatch = errors.New("enclosure: extra.wrapper 与卷类型不一致")
 	ErrSourceNotFound  = errors.New("enclosure: 源卷不存在")
 	ErrSelfEnclosure   = errors.New("enclosure: 不可封装自身")
 	ErrEnclosureCycle  = errors.New("enclosure: 封装链成环")
 	ErrTooDeep         = errors.New("enclosure: 封装嵌套超过深度上限")
 	ErrConflictClaim   = errors.New("enclosure: 同一源路径被多个封装卷声明")
-	ErrSourceEncrypted = errors.New("enclosure: 源卷已启用 at-rest 加密（禁止双重变换）")
+	// ErrFootprintOverlap 是**足迹重叠**互斥哨兵：两条互不相关的声明在同一基底卷上的封印足迹
+	// 相互覆盖（父/子/同目录）⇒ 拒绝。与 ErrConflictClaim（精确相等）互补——本判据覆盖
+	// 「一方声明的区域落在另一方区域之内」这类精确比较漏掉的形态（互相覆写/数据不可见）。
+	ErrFootprintOverlap = errors.New("enclosure: 两条声明的封印足迹重叠（互斥占用）")
+	ErrSourceEncrypted  = errors.New("enclosure: 源卷已启用 at-rest 加密（禁止双重变换）")
 	// 历史：ErrExternalSourceTo（跨外部卷封装未接入，装配期拒绝）已随「FS 级封印装饰器」
 	// （sealfs.go）落地而移除——外部/远端源卷现在经装配处 SealBackend 注入封印，语义与
 	// 本地源一致（读 hidden/readable、写恒拒）。
@@ -170,6 +205,42 @@ func (d Decl) KeySpacePrefix() string {
 	return p + "/"
 }
 
+// SealsByBaseVolume 按**最终落盘卷**聚合全部声明的封印规则（装配期注入与运行期增删共用，
+// 保证「署名集合」只有一套口径）。返回值是「基底卷名 → 该卷上全部封印规则」；同一声明沿
+// 封装链只能落到唯一基底卷，链内多层在同一区间上的规则会累加（更深的规则 Path 更长，
+// `storage.SealAt` 按最长优先给出归因）。
+func SealsByBaseVolume(decls []Decl) (map[string][]storage.SealRule, error) {
+	out := make(map[string][]storage.SealRule, len(decls))
+	for _, d := range decls {
+		baseVol, rules, err := EffectiveFootprint(d, decls)
+		if err != nil {
+			return nil, fmt.Errorf("封装卷 %q 封印足迹解析失败（fail-closed）: %w", d.Vol, err)
+		}
+		out[baseVol] = append(out[baseVol], rules...)
+	}
+	return out, nil
+}
+
+// IsDeclared 报告卷是否为**封装声明**（参与本包装配）：**已注册的 wrapper 类型** +
+// `extra.source`。
+//
+// 判据只看**声明词汇**（wrapper 类型与 `extra.source`），不看卷是否「叫 enclosure」——这是
+// 「enclosure 是构造方式而非一种类型」的落点：嵌套封装卷的描述 Type 保持 wrapper 类型
+// （secretdata/secrets/…），故 `registry.SchemeOf`/`CategoryOf`/API 回显全按 wrapper 语义自然成立。
+//
+// wrapper 类型而**无** `extra.source` 的卷不是声明（如 `type: secrets` + `target: local` 的
+// 本地整卷形态）——它是普通 wrapper 卷，走按类型分派的常规构造（零回归）。
+//
+// 装配层据此把此类卷排除在 `registry.NewBackend`（按类型分派）之外，改经 `BuildBackend`
+// 构造（依赖已装配卷集的源特权视图 ⇒ 必须推迟到卷集就绪之后）。
+func IsDeclared(v volume.Volume) bool {
+	if _, ok := LookupWrapper(v.Type); !ok {
+		return false
+	}
+	raw, _ := v.Extra[SourceKey].(string)
+	return strings.TrimSpace(raw) != ""
+}
+
 // Parse 解析全部封装声明并做装配期校验（环/自封装/深度/唯一性/wrapper 注册/源态互斥）。
 // 返回顺序按拓扑序（源在前，便于装配时先建源再建封装卷）。
 func Parse(vols []volume.Volume) ([]Decl, error) {
@@ -181,7 +252,7 @@ func Parse(vols []volume.Volume) ([]Decl, error) {
 	decls := make([]Decl, 0)
 	claimed := map[string]string{} // "<source>:<path>" → wrapper 卷名
 	for _, v := range vols {
-		if v.Type != TypeEnclosure {
+		if !IsDeclared(v) {
 			continue
 		}
 		d, err := parseOne(v, byName)
@@ -199,18 +270,119 @@ func Parse(vols []volume.Volume) ([]Decl, error) {
 	if err := validateTopology(decls); err != nil {
 		return nil, err
 	}
+	// 足迹重叠互斥（**互斥占用**）：同基底卷上两条互不相关的声明不得有重叠的封印足迹。
+	// 必须在拓扑校验之后（链形态已被确认），且在排序之前（失败即拒绝装配）。
+	if err := validateFootprints(decls); err != nil {
+		return nil, err
+	}
 	// 拓扑序：源在前（稳定排序保证同层按声明序）。
 	sort.SliceStable(decls, func(i, j int) bool { return depthOf(decls[i], decls) < depthOf(decls[j], decls) })
 	return decls, nil
 }
 
-// parseOne 解析单个封装卷配置（纯函数，便于单测）。
-func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
-	raw, _ := v.Extra["source"].(string)
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return Decl{}, fmt.Errorf("%w（卷 %q）", ErrMissingSource, v.Name)
+// validateFootprints 拒绝**互斥占用冲突**：两条既非同一封装链（无祖先/后代关系）又落在同一
+// 基底卷上的声明，其封印足迹不得相互覆盖（父/子/同目录）。重叠意味着两卷映射到的键集合相交——
+// 一方写入的字节会落进另一方的封印区间（互相覆写 / 数据不可见），故此形态必须 fail-closed。
+//
+// **链内重叠是设计允许的**（`outer: inner:` 这类逐层叠加：外层把内层已变换的字节再变换一次，
+// 两者本就共用同一物理区间，封印象限由最外层承担）——故仅兄弟分支互斥。
+func validateFootprints(decls []Decl) error {
+	fps, err := declFootprints(decls)
+	if err != nil {
+		return err
 	}
+	byVol := make(map[string]Decl, len(decls))
+	for _, d := range decls {
+		byVol[d.Vol] = d
+	}
+	for i := range fps {
+		for j := i + 1; j < len(fps); j++ {
+			if fps[i].vol != fps[j].vol || chainRelated(decls[i], decls[j], byVol) {
+				continue
+			}
+			if pathsOverlapAny(fps[i].paths, fps[j].paths) {
+				return fmt.Errorf("%w: 卷 %q 与 %q 在基底卷 %q 上的封印足迹重叠（父/子/同目录互斥）",
+					ErrFootprintOverlap, fps[i].who, fps[j].who, fps[i].vol)
+			}
+		}
+	}
+	return nil
+}
+
+// declFootprint 是一条声明在其**基底卷**上的足迹（基底卷名 + 足迹路径集合 + 声明卷名）。
+type declFootprint struct {
+	vol   string
+	who   string
+	paths []string
+}
+
+// declFootprints 逐条声明算出「基底卷 + 封印足迹路径集合」（顺序与 decls 一致）。
+func declFootprints(decls []Decl) ([]declFootprint, error) {
+	out := make([]declFootprint, 0, len(decls))
+	for _, d := range decls {
+		baseVol, rules, err := EffectiveFootprint(d, decls)
+		if err != nil {
+			// 混链（owner 限定与卷根专有混用）无法给出唯一足迹 ⇒ fail-closed（装配处同样会拒）。
+			return nil, fmt.Errorf("封装卷 %q 封印足迹无法解析（fail-closed）: %w", d.Vol, err)
+		}
+		paths := make([]string, 0, len(rules))
+		for _, r := range rules {
+			paths = append(paths, r.Path)
+		}
+		out = append(out, declFootprint{vol: baseVol, who: d.Vol, paths: paths})
+	}
+	return out, nil
+}
+
+// chainRelated 报告两条声明是否处于同一条封装链上（互为祖先/后代）——链内叠加是设计允许的。
+func chainRelated(a, b Decl, byVol map[string]Decl) bool {
+	return followsChain(a, b.Vol, byVol) || followsChain(b, a.Vol, byVol)
+}
+
+// followsChain 沿 Source 链向上，报告链上是否出现 target。
+func followsChain(start Decl, target string, byVol map[string]Decl) bool {
+	seen := map[string]bool{start.Vol: true}
+	for cur := start; ; {
+		if cur.Source == target {
+			return true
+		}
+		next, ok := byVol[cur.Source]
+		if !ok || seen[next.Vol] {
+			return false
+		}
+		seen[next.Vol] = true
+		cur = next
+	}
+}
+
+// pathsOverlapAny 报告两组卷根相对路径中是否存在一对重叠（相等 / 一方是另一方祖先目录）。
+// **空路径 = 整卷封印** ⇒ 与任意路径重叠（含另一条空路径）。
+func pathsOverlapAny(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if pathsOverlap(x, y) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pathsOverlap 判定两条卷根相对路径是否重叠（空 = 整卷，覆盖一切）。语义与 db 层「父/子/同目录」
+// 互斥一致：a==b，或 b 位于 a 之下，或 a 位于 b 之下。
+func pathsOverlap(a, b string) bool {
+	a, b = strings.Trim(a, "/"), strings.Trim(b, "/")
+	if a == "" || b == "" {
+		return true // 整卷封印覆盖卷内任意路径
+	}
+	return a == b || strings.HasPrefix(b, a+"/") || strings.HasPrefix(a, b+"/")
+}
+
+// parseOne 解析单个封装卷配置（纯函数，便于单测）。调用方须已过 `IsDeclared`（wrapper 类型
+// 已注册 + `extra.source` 非空），故格式/引用校验之外的「缺 source」「缺 wrapper」不可能发生。
+func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
+	raw, _ := v.Extra[SourceKey].(string)
+	raw = strings.TrimSpace(raw)
 	srcVol, srcPath, ok := splitSource(raw)
 	if !ok {
 		return Decl{}, fmt.Errorf("%w: %q（卷 %q，须为 <源卷>:<子路径>）", ErrBadSource, raw, v.Name)
@@ -228,13 +400,22 @@ func parseOne(v volume.Volume, byName map[string]volume.Volume) (Decl, error) {
 	if enc, _ := src.Extra["encrypt"].(bool); enc {
 		return Decl{}, fmt.Errorf("%w（封装卷 %q 的源卷 %q 已加密）", ErrSourceEncrypted, v.Name, srcVol)
 	}
-	wrapper, _ := v.Extra["wrapper"].(string)
+	wrapper, _ := v.Extra[WrapperKey].(string)
 	wrapper = strings.TrimSpace(wrapper)
 	if wrapper == "" {
-		return Decl{}, fmt.Errorf("%w（卷 %q）", ErrMissingWrapper, v.Name)
+		// 嵌套声明（wrapper 类型 + source）：处理层即卷类型本身——用户面身份与实现同源，
+		// 装配层不再书写该冗余键（`type: secretdata` 的封装卷 wrapper 恒为 secretdata）。
+		// IsDeclared 已保证 v.Type 是**已注册**的处理层名 ⇒ 此处回落恒有解。
+		wrapper = v.Type
 	}
 	if _, ok := LookupWrapper(wrapper); !ok {
 		return Decl{}, fmt.Errorf("%w: %q（卷 %q）", ErrUnknownWrapper, wrapper, v.Name)
+	}
+	if !strings.EqualFold(wrapper, v.Type) {
+		// 显式写出的 wrapper 与卷类型不一致 ⇒ fail-closed（不在两值之间「猜」哪个是处理层：
+		// 内部机制与对外身份必须同源）。
+		return Decl{}, fmt.Errorf("%w: extra.wrapper=%q（卷 %q 类型 %q）——wrapper 恒等于卷类型，请删除该冗余键",
+			ErrWrapperMismatch, wrapper, v.Name, v.Type)
 	}
 
 	mode, err := parseReadMode(v)

@@ -227,3 +227,46 @@ func TestManager_ChmodHookInvoked(t *testing.T) {
 		t.Fatalf("本地加固回调应被调用一次且带 secret 名, got %v", got)
 	}
 }
+
+// TestVolumeFromURL_And_IsDefaultVolumeRef 锁定 `secrets://` URL 的 **authority（卷名）解析**
+// 与「是否 per-owner 默认桶」判定（同一实现的两种用法：装配层按卷名判「secret_url 是否指向封装
+// 声明卷」，服务级解析按判定分流到 per-owner 桶）。
+//
+// 变异：把 authority 解析改回 `u.Path`（或漏掉 Opaque 兼容）→ `secrets://keys/datakey` 的卷名
+// 解析不再是 keys，装配层分轮判据随之失效 ⇒ 红。
+func TestVolumeFromURL_And_IsDefaultVolumeRef(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		url       string
+		wantVol   string // VolumeFromURL 期望值（"" = 空 authority）
+		isDefault bool   // IsDefaultVolumeRef 期望值
+		wantErr   bool   // VolumeFromURL 期望报错（非法 URL）
+	}{
+		{"secrets://keys/datakey", "keys", false, false},
+		{"secrets://default-secrets/master", DefaultVolumeName, true, false},
+		{"secrets://default/k", "default", true, false},
+		// opaque 形态（无 authority）：`secrets://datakey` 经 url.Parse 落在 Opaque 段
+		// （NameFromURL 亦按此形态取 secret 名，故卷名解析须与之一致，不得当成默认桶）。
+		{"secrets://datakey", "datakey", false, false},
+	}
+	for _, tc := range cases {
+		vol, err := VolumeFromURL(tc.url)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("VolumeFromURL(%q) err=%v wantErr=%v", tc.url, err, tc.wantErr)
+		}
+		if vol != tc.wantVol {
+			t.Errorf("VolumeFromURL(%q)=%q want %q", tc.url, vol, tc.wantVol)
+		}
+		if got := IsDefaultVolumeRef(tc.url); got != tc.isDefault {
+			t.Errorf("IsDefaultVolumeRef(%q)=%v want %v", tc.url, got, tc.isDefault)
+		}
+	}
+	// 非法 URL：VolumeFromURL 报错（调用方按各自口径处理），IsDefaultVolumeRef 恒 false
+	// （不得把「解析不出来」当成「默认桶」）。
+	if _, err := VolumeFromURL("secrets://%zz/bad"); err == nil {
+		t.Error("非法 URL 应返回错误")
+	}
+	if IsDefaultVolumeRef("secrets://%zz/bad") {
+		t.Error("非法 URL 不得判为 per-owner 默认桶引用")
+	}
+}

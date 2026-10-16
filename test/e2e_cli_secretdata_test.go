@@ -56,7 +56,7 @@ func newSecretReader(t *testing.T, root string, secret []byte) *secretdata.Secre
 }
 
 // seedSecretKey 在 secrets 卷的本地视图落盘密钥文件（<keysRoot>/secrets/datakey）——
-// 服务器 setupSecretBackends 启动期即解析 secret_url 读该文件，须先于服务器启动存在。
+// 服务器装配期即解析 secret_url 读该文件（补装 config 声明的 secretdata 卷），须先于服务器启动存在。
 func seedSecretKey(t *testing.T, keysRoot string) []byte {
 	t.Helper()
 	secret := []byte(secretKeyBytes)
@@ -177,7 +177,7 @@ func TestE2E_CLI_Secretdata_VolumeAssembledAndInterop(t *testing.T) {
 	env := startCLIEnv(t, extraConfig)
 
 	// 1) 装配成功（Imp-2 守护）：server 正常 boot（healthz OK 已由 startCLIEnv 保证——
-	// setupSecretBackends 补装失败会导致启动失败）；GET /api/volumes 可见两卷。
+	// 装配期补装失败会导致启动失败）；GET /api/volumes 可见两卷。
 	var vols volListResp
 	getJSON(t, env.BaseURL+"/api/volumes", &vols)
 	for _, name := range []string{"mykeys", "vault"} {

@@ -24,8 +24,12 @@ Secret 加密卷把「写入自动分块加密、读取自动解密」沉淀为�
 
 ## 2. 快速开始
 
-在 `volumes[]` 下声明 **secrets 卷（先）** + **secretdata 卷（后）**。secretdata 卷通过
-`extra.secret_url` 引用已存在的 secrets 卷读取密钥（依赖顺序：secretdata 引用的 secrets 卷必须先装配）。
+在 `volumes[]` 下声明 **secrets 卷** + **secretdata 卷**。secretdata 卷通过
+`extra.secret_url` 引用 secrets 卷读取密钥。**声明顺序无关**（2026-10-15）：装配按**服务级四步序**
+进行——① Store 已装配卷集 → ② 先行补装「不依赖封装声明卷」的 secretdata 卷 → ③ 封装声明卷补装
+（`enclosure.AttachAll`，嵌套 secrets/secretdata 链由此装配）→ ④ 后置补装「`secret_url` 指向封装声明卷」
+的 secretdata 卷；故 secretdata 卷既可与被引用的 secrets 卷同处 config 且顺序任意，也可引用**嵌套**
+（`extra.target: "<卷>/<子目录>"`）的 secrets 卷。
 
 ```yaml
 volumes:
@@ -35,22 +39,28 @@ volumes:
 
   - name: "mykeys"             # type=secrets：密钥管理卷（底层卷 secrets/ 目录视图）
     type: "secrets"
-    root: "./storage/keys"     # extra.target=local（缺省）→ <root>/secrets/ 下存密钥
     extra:
-      target: "local"
+      target: "local"          # local（缺省）= 本地 `<root>/secrets/` 目录下存密钥
+      root: "./storage/keys"   # 注意：**必须写在 extra 里**（顶层 root 只服务本地卷，外部卷忽略）
 
   - name: "vault"              # type=secretdata：透明加密封装卷（卷内文件加密落盘）
     type: "secretdata"
-    root: "./storage/vault"
     extra:
       target: "local"          # 底层卷本地根（secretdata 卷自身物理落盘处）
+      root: "./storage/vault"
       secret_url: "secrets://mykeys/datakey"  # 从 mykeys secrets 卷读密钥（必填）
       # algorithm: "shardseal/aes-256-gcm"    # KDF 档位（缺省 = 默认档 standard）
       # erasure: false                         # XOR parity（实验性，可选）
       # max_file_bytes: 0                     # 单文件上限（0 = 不限）
 
-# 只用默认 secrets 卷也可（不配 secrets 卷）：
-#   secret_url 写 "secrets://default/<name>"，默认卷自动落 <storage_root>/secrets/。
+# 不声明 secrets 卷时：**per-owner 默认桶**（每个 owner 各自的
+#   <storage_root>/<owner>/meta/secrets/，owner 首次使用时自动派生；在 meta 桶内 ⇒
+#   密钥字节不计入该 owner 的用户用量/文件数）。
+#   - 服务级声明（本示例这种 config volumes[] 写法）**没有 owner 上下文** ⇒
+#     `secret_url` 必须指向**显式命名**的 secrets 卷（如 secrets://mykeys/datakey）；
+#   - 经建卷 API（`POST /api/volumes/user`，SproxySig 身份）创建带 secret_url 的卷时，
+#     可写 `secrets://default-secrets/<name>` → 解析到**该 owner 自己的**默认桶
+#     （谁创建 = 谁的桶；与 `sclient secret create` / `/api/secrets` 同一份密钥）。
 ```
 
 密钥文件（`secrets://mykeys/datakey`）需**手动放置**：在 secrets 卷底层 `<root>/secrets/` 目录放一个
@@ -85,14 +95,14 @@ sclient sealfile info ./sealed --key ./datakey
 
 | extra 键 | 默认 | 说明 |
 |----------|------|------|
-| `target` | `local` | 底层卷名；`local` = 本地 `<root>/secrets/` 目录。外部 target（baidupcs/s3/webdav/加密卷嵌套）为预留片，当前仅 local 子集可用 |
-| `root` | 卷根 | `target=local` 时的本地根目录 |
+| `target` | `local` | 底层卷名；`local` = 本地 `<root>/secrets/` 目录。**嵌套封装（2026-10-06）**：`<卷名>/<新子目录>`（如 `main/videos`）引用已创建卷的**新空子目录**作封装根——子目录须当前不存在，同卷路径重叠互斥占用（见 §3.4）。其余外部 target（baidupcs/s3/webdav/加密卷整卷）为预留片 |
+| `root` | 无（必填） | `target=local` 时的本地根目录——**写在 `extra` 内**；它是**父目录**，`secrets/` 段由装配层拼接（密钥落 `<root>/secrets/<名>`） |
 
 ### 3.2 secretdata 卷（`type: "secretdata"`）
 
 | extra 键 | 默认 | 说明 |
 |----------|------|------|
-| `target` | `local` | 底层卷根（secretdata 物理落盘处）。外部 target（baidupcs/s3/webdav/嵌套）为预留片 |
+| `target` | `local` | 底层卷根（secretdata 物理落盘处）。**嵌套封装（2026-10-06）**：`<卷名>/<新子目录>`（如 `main/videos`）引用已创建卷的新空子目录作封装根——MakeDir 创建空目录 + 可写封装子视图，密文落 `<卷>/<子目录>/`；子目录须不存在，互斥占用防重复选底层（§3.4）。其余外部 target（baidupcs/s3/webdav/加密卷整卷）为预留片 |
 | `root` | 卷根 | `target=local` 时的本地根 |
 | `secret_url` | 必填 | `secrets://<卷>/<name>`，从 secrets 卷读密钥；引用的 secrets 卷须先装配 |
 | `algorithm` | `shardseal/aes-256-gcm` | **KDF 阶段档位**，见 §3.3 |
@@ -153,6 +163,74 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 段（独立加密分块文件），任一分块丢失/损坏可由其余分块 XOR 复原。纯 stdlib，**未生产验证**，默认关
 闭。
 
+### 3.8 嵌套封装（`target: <卷名>/<新子目录>`，2026-10-06 用户确认语义）
+
+封装卷（secretdata/secrets）支持以「已创建卷 + **新空子目录**」作为底层根，**不新建底层卷**：
+
+- **target 语法（用户面，保留兼容）**：`<卷名>/<子目录>`（如 `main/videos`，子目录可多级
+  `a/b`）；必须含子目录。装配层把该语法**翻译**为装配侧声明词汇（`extra.source: "<卷>:<子目录>"`，
+  见 `pkg/server/nested_enclosure.go`；`extra.wrapper` 是冗余键**不再书写**——处理层恒等于卷
+  类型本身，装配侧缺省回落 v.Type，显式写出且不一致则 fail-closed）——**卷描述 Type 保持
+  wrapper 类型**（enclosure 只是内部装配机制，不是对外卷类型；见 §3.9），持久化形态与用户面
+  语法零变化（Web UI/sclient/config 输入不破），物理落点亦不变（`<基卷根>/<子目录>/…`）。
+- **互斥占用**：同基底卷上两条**互不相关**声明的封印足迹不得重叠（父/子/同目录）→ 装配期
+  fail-closed（`enclosure.ErrFootprintOverlap`；精确相等另有 `ErrConflictClaim`）。链内叠加
+  （`outer: inner:` 逐层封装）**允许**重叠——外层变换的是内层已变换的字节，封印象限由最外层
+  承担。同卷不同分支（`main/photos` vs `main/movies`）、跨卷互不影响。**不再有「子目录必须
+  不存在」前置条件**：区域本就是既有数据的落点，同一区间可被声明唯一占有（重建/重启天然可复用）。
+- **写保护（只读）**：源区间对**一切直连操作**关闭——写恒拒（`storage.ErrSealed`，HTTP 409，
+  无配置开关，含「移入/移出封印区」），读默认按「不存在」处理（404 + 父目录列举过滤），可用
+  `source_read_mode: readable` 放开只读透视。强制点是**公共底座**而非逐面补丁：本地源卷在
+  `storage.Root`（HTTP/API/S3/上传/块写/版本/回收站/分享/预览/搜索索引全部经它），外部/远端
+  源卷在后端 FS 的装配处（`enclosure.SealFS`）。唯一例外是 **S3 预签名直传**（客户端直连
+  对象存储，绕过一切 FS 装饰器）——只能签发期按封印规则拦截（`presignSealedGuard`）。
+- **键空间（阶段 2 迁移①起）**：封装卷与其它外部卷**同口径**——所有读写/删除/列举/转存/
+  镜像/du 统一经 `volume.ResolveUserLocation().FSPath()`，即卷内键恒为
+  `<owner>/user/<rel>`（物理落盘 `<底层卷>/<子目录>/<owner>/user/<rel>`）。此前过渡实现给
+  嵌套封装卷开过 owner-less 例外（`user/<rel>`），导致 **cloud 转存写入的文件落错位置、
+  列举/下载/删除不可见**（遗留①，已修）。注意：旧例外布局下已落盘的数据在新键空间下不可见
+  （该能力未发布，无迁移包袱）。
+- **历史路径零回归**：`target: local + extra.root`（config/CLI）为本地根整卷，不进互斥占用校验。
+- **唯一可写声明形态 = wrapper 类型 + `extra.source`**：`type` 就是处理层名（`secretdata`/
+  `secrets`），wrapper 缺省即卷类型本身。`type: enclosure` **不是可写卷类型**——配置校验
+  （`Config.Validate`）与建卷 API（`POST /api/volumes/user`）均 fail-closed 拒绝并提示改用
+  wrapper 类型 + source/target；`enclosure.TypeEnclosure` 的唯一用途是这些**拒绝判据的单一
+  事实源**（配置校验 / 建卷 API / 存量卷恢复三处引用，无日志/诊断/构造用途）。
+  wrapper 类型而**无** `extra.source` 的卷不是封装声明（如 `target: local` 的本地整卷形态），
+  走按类型分派的常规构造。
+- **覆盖（test）**：多层嵌套链由 `cmd/sproxy/secret_register_test.go` 钉住——
+  `TestSetupSecretBackends_ConfigSecretdata_Assembled/multi_layer_nesting_chain`（**本地底座**：
+  `secrets` over `secretdata` 的四层链）与同父用例的 `multi_layer_chain_over_external_source`
+  （**外部底座**：`secrets` over `secretdata` over 外部卷——以测试注册的外部后端替身替代需要真实
+  账号/网络的 baidupcs/s3；两者装配接线口径相同：外部源封印套在该后端 `FS()` 上、封装卷经
+  `UnsealedSource` 取特权视图）。断言覆盖各层装配、写读往返、密文真落到**外部后端的物理目录**
+  与「直连外部后端写封装区恒 `storage.ErrSealed`」。
+
+### 3.9 阶段 2 迁移状态
+
+嵌套封装（§3.8）**已完成迁移**到通用封装底座（**声明词汇**：`extra.source: "<源卷>:<子路径>"`
+（`extra.wrapper` 仅为兼容读取的冗余键），见 `docs/config.md`、设计文档 `docs/designs/2026-10-11-enclosure-volume.md`）：
+源目录封印（`storage.SealRule` 唯一事实源，写恒拒/读 hidden|readable）、`sync.PrefixFS` 区域
+视图、`enclosure.AttachAll` 推迟装配、`quota.NewPoolWithParent` 容量继承。用户面 `target:` 语法
+在**装配层翻译**为底座声明（config 装配 / 建卷 API / 重启恢复三入口共用
+`pkg/server.TranslateNestedVolume`），持久化形态与物理落点均不变（无数据迁移）。
+
+过渡层（`pkg/sync.SubFS`、`pkg/server.volume_links.go`、`pkg/volume/nested_target.go`、
+`registry.Set.DelegatePool/IsDelegated`、逐面 `checkWrapperOccupiedWrite`/`occupiedGuardFS`/
+`syncexec.WriteGuard`、`resolveNestedTargetFS`/`adoptNestedDir` 重启收养）**已全部删除**。
+迁移清单与文件级映射见 `docs/archive/stage2-migration.md`；当前状态：
+
+| 批次 | 内容 | 状态 |
+|---|---|---|
+| ① | 外部卷键空间统一 owner 维度（去掉嵌套封装 owner-less 例外；转存与读写列举同键，遗留①） | 已完成 |
+| ③（部分） | 删除 `pkg/server/config_writer.go`：运行时用户卷持久化归一 `user_volume_store` 台账 | 已完成 |
+| ② | 嵌套封装 `target:` → 封装装配（翻译层 + 运行期装配/拆除闭环；过渡文件与逐面 guard 全删） | 已完成 |
+| ⑤ | enclosure **内部化**（方案甲）：嵌套封装卷的对外 `Type` 保持 wrapper 类型（secretdata/secrets/…），装配由**声明判据**（`enclosure.IsDeclared`）接管而非按类型分派——修正「type=enclosure」造成的 `SchemeOf` 无协议（cloud 转存/归档被拒）、`CategoryOf≠wrapper`（建卷表单/防环失据）、API/CLI 回显泄漏内部机制 | 已完成 |
+| ④ | 遗留②「owner Scope 幻影释放」（cloud 转存只写目标卷 FS、不经路由 commit，删除时仍对 owner 全局 Scope 做未曾提交的释放） | 已完成（写入侧结算：转存写成功后按 `TargetQuotaScopeFor`/`TargetPhysChargeFor` 与删除侧**同账本同口径**差分入账） |
+| ⑥ | enclosure **纯内部化**：`IsDeclared` 判据收敛为「wrapper 类型 + `extra.source`」（去 `type: enclosure` 分支与条件式 wrapper 回落）；`type: enclosure` 在 config 校验与建卷 API 处 fail-closed 拒绝；`ErrMissingSource`/`ErrMissingWrapper` 随判据收紧成为不可达死哨兵 → 移除 | 已完成 |
+| ⑧ | **config 声明顺序限制解除**（2026-10-15）：装配序拆为四步（Store 卷集 → 先行补装 → `enclosure.AttachAll` → 后置补装），使 config 可同时声明「嵌套 secrets 卷」与「`secret_url` 指向它的 secretdata 卷」（旧序下密钥解析遇「源卷后端未装配」必然 boot fail）。判据取**静态声明**（`secretdataRefsEnclosureVolume`），不靠「试装失败」的错误文案重试 | 已完成 |
+| ⑦ | **per-owner 默认 secrets 卷**（用户裁定 2026-10-15）：`default-secrets` 成为**每个 owner 各自的**默认桶（`<storage_root>/<owner>/meta/secrets/`——owner 租户根的 **meta 桶**内，免声明、首次使用自动派生、`/api/secrets` 恒作用于请求者桶 ⇒ per-owner 隔离）；删除「全局默认 secrets 卷 + 多全局卷确定性选取（`extra.default` 标记 / 基础卷优先 / 卷名升序）」整套模型与 `extra.wrapper` 冗余键书写；`secret_url` 双寻址：`secrets://default-secrets/<名>` → per-owner 桶（需请求 owner 上下文），其它卷名 → 显式声明的 secrets 卷（含多层嵌套链，如 secrets over secretdata over baidupcs） | 已完成 |
+
 ## 4. 寻址
 
 ```
@@ -160,7 +238,30 @@ secrets://<卷>/<name>           # secrets 卷内 secret 名（默认卷可省�
 secretdata://<卷>/<path>        # secretdata 卷内文件路径
 ```
 
-- 服务启动**默认创建一个本地卷作默认 secrets 卷**（`secrets://default/`，落 `<storage_root>/secrets/`）。
+- **默认 secrets 是 per-owner 的**（用户裁定 2026-10-15）：不再有全局单卷——每个 owner 各有
+  一个同名默认卷，落**该 owner 租户根的 meta 桶内** `<storage_root>/<owner>/meta/secrets/`（免声明、
+  首次使用时自动派生，MkdirAll 0700 + 密钥文件 0600）。放在 meta 桶内（与 `<owner>/meta/credentials.json`
+  同族）使密钥字节按**服务端内部账本**口径归类：`stats`/`du` 与容量扫描只按功能桶分类，裸的未知段会
+  被兜底算作该 owner 的**用户文件**（污染配额水位与文件计数），meta 桶则天然排除。`/api/secrets` 的创建/列表/导出/删除恒作用于
+  **请求者 owner** 的桶 ⇒ 不同 owner 的同名 secret 互不可见（per-owner 隔离）。
+  - 因此**没有「多个全局 secrets 卷选哪个」的模型**（`extra.default` 标记与「基础卷优先/卷名升序」
+    的启发式选取已随本次重构移除）。
+  - **显式自定义 secrets 卷并存**：`volumes[]` 里声明的 `type: secrets` 卷（本地 root，或经
+    `extra.source`/`extra.target` 封装在任意已装配卷/子目录之上——含多层嵌套链，如
+    `secrets` over `secretdata` over `baidupcs`）仍然支持，供跨 owner 共享密钥库/Federation 等场景；
+    它们只是**不被默认寻址**（`/api/secrets` 恒用 per-owner 桶）。
+  - **边界（owner 限定的封装声明可封印密钥桶 ⇒ fail-closed，不静默损坏）**：per-owner 桶位于
+    owner 租户根的 **meta 桶内**，而 owner 限定封装声明的封印足迹覆盖该 owner 的**全部保留功能桶**
+    （`storage.ReservedBucketNames()`：user/cloud/archive/chunk/version/**meta**/trash/backup）。
+    故若显式把封装区声明到 `<owner>/meta/…`（覆盖到 `meta/secrets`），该 owner 的密钥桶会同被封印
+    ⇒ `/api/secrets` 读写与该 owner 的 `secret_url`（per-owner 默认桶）密钥解析**全部 fail-closed**
+    （拒绝而非腐坏；`errors.Is(err, storage.ErrSealed)`）。属稀有显式配置——需要封装的目录请避开 `meta/`。
+- **`secret_url` 的两条寻址路径**（`pkg/volume/secretdata` 消费）：
+  - `secrets://default-secrets/<name>`（亦接受 `secrets://default/<name>`）：per-owner 默认桶——
+    需要**请求 owner 上下文**（带身份的建卷请求注入），装配期（boot / config 声明）无 owner ⇒
+    fail-closed 并提示改用显式命名的 secrets 卷；
+  - `secrets://<卷名>/<name>`：该**显式声明**的 secrets 卷（须先装配；`default-secrets` 之外的名字
+    不与 per-owner 桶冲突）。
 - 寻址由装配层 `registry.ResolveURL` 处理；`secretdata://` 全集 `sproxy 寻址`（`volumes[]` 装配时经
   registry 注入）。
 
@@ -298,11 +399,15 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   「存在即引用」，删源或删副本都安全、重启天然恢复）／跨容器**字节拷贝**（内容零改动，不重新加密）；
   跨卷复制因目标卷独立密钥仍需重新加密。
   文档首个 secret 密钥需手工放置（无 CLI 交互创建）。
-- **卷声明顺序无关（2026-10-13 实测修正）**：`setupSecretBackends` 在**全卷集装配完成之后**补装
-  secretdata（`MarkDeferred`），故 `type: secretdata` 卷可以声明在 secrets 卷之前——e2e
-  `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets` 钉住（此前文档声称「必须先装配好」，已不成立）。
-  **仍预留**：secrets 卷外部 target（嵌套封装）与 secretdata 外部 target（baidupcs/s3/webdav/嵌套），
-  当前仅 `target=local` 可用（配置成外部 target 会 fail-closed 报错，不静默降级）。
+- **卷声明顺序无关（2026-10-13 实测修正；2026-10-15 扩展到嵌套 secrets 卷）**：补装在**全卷集装配
+  完成之后**进行（secretdata 走 `MarkDeferred`，嵌套封装卷走 `enclosure.IsDeclared` 判据），四步序见 §2；
+  故 `type: secretdata` 卷既可与被引用的 secrets 卷任意排序，也可让 `secret_url` 指向**嵌套** secrets
+  卷。锚点：e2e `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets`（平铺顺序无关）+ 单测
+  `TestSetupSecretBackends_ConfigSecretdata_Assembled/config_secretdata_refs_nested_secrets`
+  （config 声明「嵌套 secrets 卷 + 引用它的 secretdata 卷」，旧序必红）。
+  **仍预留**：**对象存储**类外部 target（baidupcs/s3/webdav）与 secretdata 的外部 target——当前
+  secretdata 仅 `target=local` 可用（配外部 target 会 fail-closed 报错，不静默降级）；secrets 卷的
+  嵌套封装 target 已支持（多层链如 secrets over secretdata）。
 - **空文件不可写**（有意取舍）：分块存储要求至少一个数据分块（承载 meta 引用 + 内容哈希锚定），空
   文件 `EncryptShards` 报错 fail-closed。
 - **随机访问粒度**：`OpenRangeRead` 当前下载整块再定位 blocklet，未做逐 blocklet 只取所需段（注释

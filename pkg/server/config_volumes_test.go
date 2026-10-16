@@ -78,6 +78,10 @@ func TestVolumesConfig_Validate(t *testing.T) {
 		{"非首卷空 root", func(c *Config) {
 			c.Volumes = append(c.Volumes, VolumeConfig{Name: "disk2"})
 		}, "root"},
+		{"type=enclosure 不可写（内部装配机制）", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{Name: "vault", Type: "enclosure",
+				Extra: map[string]any{"source": "default:x", "wrapper": "secretdata"}})
+		}, "内部装配机制"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

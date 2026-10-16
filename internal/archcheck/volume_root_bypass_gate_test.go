@@ -49,6 +49,7 @@ var localFSCallAllowlist = map[string]string{
 	"cmd/sproxy/pikpak_secretstore.go": "pikpak 凭据的 **shardseal 加密容器**底层（内容已由 secretdata 加密，非明文密钥材料）；其**主密钥**已改经 Root（`pikpakMasterKeyManager` → `server.NewRootSecretsFS`）",
 	"pkg/syncexec/executor.go":         "**回落路径**：仅当装配层未注入 TenantRootFS（测试/未接线）时生效；生产恒注入经 Root 的提供者（cmd/sproxy 装配）",
 	"cmd/sclient/sealfile.go":          "**本地独立工具**（sclient 本地加解密，不连服务器、不涉受管卷根）：NewLocalFS 构造**用户指定独立目录**的卷视图（无卷语义可依附）；产物作为 secretdata 卷加载时由服务器 `resolveTargetFS` 经 secretdata 写内核重新装配，非卷根直连旁路",
+	"pkg/volume/registry/set.go":       "`Set.FSFor` 提供**卷级 FS 视图**给嵌套封装/secretdata 工厂（assembly 经 set 注入 FS 句柄）；registry 层不依赖 storage.Root（不可 import pkg/server 的 NewRootFS——循环依赖），且本地卷回落路径只在嵌套封装工厂使用（其底层被封装时由装配处 SealAt 封印）",
 }
 
 // findLocalFSCalls 解析单个 Go 源文件，返回 `NewLocalFS(...)` 调用表达式的行号（AST 精确

@@ -223,7 +223,8 @@ type Handlers struct {
 	volSet *registry.Set
 
 	// userVolumes 是用户自有卷 store（U3：per-owner volume meta 持久化；nil = 未装配，
-	// 相关 /api/volumes/user 路由返回 400）。
+	// 相关 /api/volumes/user 路由返回 400）。**它是运行时用户卷的唯一事实源**（重启由
+	// ScanRestore 恢复；历史 `configWriter` YAML 写回机制已随阶段 2 迁移移除）。
 	userVolumes *UserVolumeStore
 	// credentialRing 是 SproxySig 凭据权威表（AK→多 SK 条目，凭据 store 化后取代
 	// cfg.AccessKeys）。RegisterRoutes 装配：opts.CredentialRing 显式注入（测试/
@@ -458,6 +459,9 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 			files.WithFileLocks(rt),
 			// F1：外部卷对象的硬删接缝（外部卷无 *storage.Root，其对象此前无用户可见删除入口）。
 			files.WithExternalOps(externalVolumeOps{h: h}),
+			// 卷类型分类（决策 3：去领域侧硬编码 wrapper 名单）——分类事实源在
+			// registry.CategoryOf，经 filesVolumeSet 转发注入。
+			files.WithVolumeTypeClassifier(filesVolumeSet{Set: h.volSet}),
 			files.WithChunkedUploads(rt),
 			files.WithVersioning(rt),
 			files.WithDedup(rt),

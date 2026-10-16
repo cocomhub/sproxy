@@ -60,6 +60,7 @@ type runtime struct {
 	fileMeta      FileMetaPolicy
 	externalOps   ExternalVolumeOps
 	phys          VolumePhysFootprinter
+	volTypes      VolumeTypeClassifier
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
@@ -173,6 +174,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		fileMeta:     cfg.fileMeta,
 		externalOps:  cfg.externalOps,
 		phys:         cfg.phys,
+		volTypes:     cfg.volTypes,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default
@@ -225,6 +227,9 @@ func (r *runtime) volSet() VolumeSet { return r.volumes.Volumes() }
 
 // externalVolOps 返回外部卷对象操作接缝（未装配 → nil，调用方跳过外部卷分支 = 零回归）。
 func (r *runtime) externalVolOps() ExternalVolumeOps { return r.externalOps }
+
+// volTypeClassifier 返回卷类型分类能力（未注入 → nil，调用方回落内置基线名单）。
+func (r *runtime) volTypeClassifier() VolumeTypeClassifier { return r.volTypes }
 
 func (r *runtime) volumeTenant(volName, owner string) *storage.Tenant {
 	return r.volumes.Tenant(volName, owner)

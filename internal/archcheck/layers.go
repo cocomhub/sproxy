@@ -12,12 +12,13 @@ package archcheck
 // 「必须登记依赖」的范围，登记一个包就会拖出它整条子图（pkg/tunnel →
 // xfer / mux / hub / …），门禁根本落不了地。
 var Managed = map[string]bool{
+	"github.com/cocomhub/sproxy/pkg/audit":            true, // 本工作新增（audit 域）：通用审计日志包
 	"github.com/cocomhub/sproxy/pkg/pathguard":        true,
 	"github.com/cocomhub/sproxy/pkg/checksum":         true,
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": true, // NOSONAR: S1192 — 层规则以 import path 为键，多表天然重复
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  true, // NOSONAR: S1192 — 层规则以 import path 为键，多表天然重复
 	"github.com/cocomhub/sproxy/pkg/files":            true,
-	// 可信卷 FileMeta 模型/计算/校验子包（本工作新增）：被 pkg/files、pkg/cloud、
+	// 可信卷 FileMeta 模型/计算/校验子包（master 新增）：被 pkg/files、pkg/cloud、
 	// pkg/sync 消费；零 pkg/* 内部依赖除 storage/volume（G0）⇒ G0。
 	"github.com/cocomhub/sproxy/pkg/files/meta":           true,
 	"github.com/cocomhub/sproxy/pkg/syncmgr":              true,
@@ -49,9 +50,11 @@ var Managed = map[string]bool{
 var Levels = map[string]int{
 	// ---- G0 基础库（零 pkg/* 内部依赖，实测）----
 	"github.com/cocomhub/sproxy/pkg/accesskey": 0,
-	"github.com/cocomhub/sproxy/pkg/certmgr":   0,
-	"github.com/cocomhub/sproxy/pkg/checksum":  0,
-	// 可信卷 FileMeta 模型/计算/校验（本工作新增）：只导入 storage/volume（G0）。
+	// 本工作新增（audit 域）：通用审计日志包，零 pkg/* 依赖（仅标准库），故 G0。
+	"github.com/cocomhub/sproxy/pkg/audit":    0,
+	"github.com/cocomhub/sproxy/pkg/certmgr":  0,
+	"github.com/cocomhub/sproxy/pkg/checksum": 0,
+	// 可信卷 FileMeta 模型/计算/校验（master 新增）：只导入 storage/volume（G0）。
 	// **必须 G0**：pkg/sync（G0，staging gate 引用 meta）导入它——若登 G1 则 R1 报
 	// 「L0 导入 L1」。
 	"github.com/cocomhub/sproxy/pkg/files/meta":    0,

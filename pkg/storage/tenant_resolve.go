@@ -131,13 +131,14 @@ func openTenant(parent *Root, owner string, cfg tenantConfig) (*Tenant, error) {
 	// `<owner>/user/<x>` 在本租户根内的等价位置是 `user/<x>`（剥去 owner 段）；未以某 owner
 	// 开头的规则属卷根专有区间（客户端不可寻址），原样注入作防御纵深（多封无害）。
 	// 只读透视/写恒拒语义不变（封装卷持特权视图，不受影响）。
-	if seals := parent.Seals(); len(seals) > 0 {
-		if serr := tenantRoot.SetSeals(translateSealsForTenant(seals, owner)); serr != nil {
-			cfg.warn("租户子根封印注入失败（fail-closed）", "owner", owner, "error", serr)
-			_ = tenantRoot.Close()
-			return nil, fmt.Errorf("storage: OpenTenant: 租户子根封印注入失败: %w", serr)
-		}
-	}
+	//
+	// **实时求值（不在创建时快照）**：源卷封印可在**运行期**变更（新增/删除封装卷 →
+	// server.AttachEnclosureVolume/DetachEnclosureVolume 重设该卷根封印），而租户子根句柄被
+	// TenantCache 缓存、此后不再经 OpenTenant ⇒ 快照会让已缓存租户**绕过新封印**
+	// （客户端经租户根写 `<user>/<sub>/…` 直入封装区间：写保护失效窗口）。
+	// 故安装派生实时来源（deriveSealsFromParent：按父根当前规则翻译 + 本根别名展开 + 版本缓存）
+	// ——与父根变更天然同步，既不需要「缓存失效 + 关闭在用租户句柄」生命周期动作，也无每判定分配。
+	tenantRoot.deriveSealsFromParent(parent, owner)
 	t, err := NewTenant(owner, tenantRoot)
 	if err != nil {
 		cfg.warn("创建租户失败（fail-closed）", "owner", owner, "error", err)

@@ -29,7 +29,7 @@ func writeBytes(t *testing.T, name string, data []byte) string {
 func TestVideoChecker_Matches(t *testing.T) {
 	t.Parallel()
 	c := VideoChecker{}
-	for _, name := range []string{"a.mp4", "b.mkv", "c.webm", "d.mov", "e.ts", "f.avi", "g.flv", "h.wmv", "u.MP4"} {
+	for _, name := range []string{"a.mp4", "b.mkv", "c.webm", "d.mov", "e.ts", "f.avi", "g.flv", "h.wmv", "i.m4v", "u.MP4"} {
 		if !c.Matches(name) {
 			t.Errorf("Matches(%q) = false, want true", name)
 		}

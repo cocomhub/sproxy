@@ -39,10 +39,13 @@ func pikpakEncryptedSecretStore(ctx context.Context, volRoot *storage.Root, stor
 	if err := os.MkdirAll(secRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("pikpak secret store: mkdir secrets dir: %w", err)
 	}
-	// 主密钥是**密钥材料**，必须与默认 secrets 卷同口径存储：卷根可用时经 `storage.Root`
-	// （at-rest 加密卷上密文落盘 + 封印 + 历史明文一次性迁移），否则回落裸 LocalFS
-	// （无卷语义可依附的场景，如独立目录/未装配测试）。口径必须与 `ensureDefaultSecretsVolume`
-	// 一致——两个写入者用不同形态写同一目录会让对方读到「密文当密钥」（永久性损坏）。
+	// 主密钥是**密钥材料**，必须与「写同一目录的其它 secrets 写入者」同口径存储：卷根可用时经
+	// `storage.Root`（at-rest 加密卷上密文落盘 + 封印 + 历史明文一次性迁移），否则回落裸 LocalFS
+	// （无卷语义可依附的场景，如独立目录/未装配测试）。本目录 `<storageRoot>/secrets` 正是
+	// 「`type: secrets` 卷 + `extra.root: <storageRoot>`」的 secrets 目录（该类型布局恒为
+	// `<root>/secrets`，见 secretsLocalFS）：两侧形态不一致会让对方读到「密文当密钥」
+	// （永久性损坏）。注：造「全局默认 secrets 卷」的旧模型（ensureDefaultSecretsVolume）已随
+	// per-owner 默认桶重构删除（现默认 secrets 恒 per-owner），本条不变量与该函数无关。
 	mgr := pikpakMasterKeyManager(volRoot, storageRoot, log)
 	// 主密钥首次创建需**原子**（F3）：双进程并发首装（服务端首启 + CLI 首个 add）各生成
 	// 不同随机密钥会 last-writer-wins 分裂、既有加密凭据不可解。用 O_EXCL 锁文件把
@@ -89,9 +92,9 @@ func pikpakMasterKeyManager(volRoot *storage.Root, storageRoot string, log *slog
 		if c, ok := fs.(interface{ ChmodSecret(name string) error }); ok {
 			opts = append(opts, secrets.WithLocalChmod(c.ChmodSecret))
 		}
-		return secrets.NewManager(fs, "default-secrets", true, opts...)
+		return secrets.NewManager(fs, secrets.DefaultVolumeName, true, opts...)
 	}
-	return secrets.NewManager(secretsLocalFS(storageRoot), "default-secrets", true)
+	return secrets.NewManager(secretsLocalFS(storageRoot), secrets.DefaultVolumeName, true)
 }
 
 // withExclusiveLock 用 O_CREATE|O_EXCL 锁文件串行化跨进程临界区（Windows 上 O_EXCL

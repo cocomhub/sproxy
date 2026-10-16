@@ -139,11 +139,17 @@ func (vs *Set) Root(name string) *storage.Root {
 	return vs.roots[name]
 }
 
-// DefaultExternal 返回默认外部卷句柄（首个 AddExternalVolume 登记的外部卷；无外部卷返回
-// nil）。用途：URL 解析的空/"default" authority 的协议默认寻址目标。装配顺序决定默认
-// （ensureDefaultSecretsVolume 先注册 → 即默认 secrets 卷），firstExternal 显式记录首个
-// 登记卷名，不再依赖 map 随机迭代序（早期问题 P5）；firstExternal 指向的卷被移除后按
-// volumes 声明序重算，保证多次调用恒返回同一（装配序首个存活的）外部卷。
+// DefaultExternal 返回默认外部卷句柄（**配置声明序中首个 AddExternalVolume 登记的外部卷**；
+// 无外部卷返回 nil）。用途：URL 解析的空/"default" authority 的协议默认寻址目标。
+//
+// **不存在「默认卷」的特化角色**（2026-10-15 per-owner 默认桶重构后）：`secrets://` 的空/
+// `default`/`default-secrets` authority 在 `secretdata` 侧由 `secrets.IsDefaultVolumeRef`
+// **前置改道** per-owner 桶（cmd/sproxy.secret_register.defaultSecretdataSecret），不流到此处
+// ⇒ 本函数只服务「未指定卷名」的一般协议寻址，其默认值纯由声明序决定（原
+// `ensureDefaultSecretsVolume` 「先注册即默认 secrets 卷」的模型已随该重构删除）。
+// firstExternal 显式记录首个登记卷名，不再依赖 map 随机迭代序（早期问题 P5）；
+// firstExternal 指向的卷被移除后按 volumes 声明序重算，保证多次调用恒返回同一（装配序首个
+// 存活的）外部卷。
 func (vs *Set) DefaultExternal() ExternalBackend {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
@@ -166,6 +172,29 @@ func (vs *Set) External(name string) ExternalBackend {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
 	return vs.external[name]
+}
+
+// FSFor 返回指定卷名的同步 FS 视图（统一底层层解析入口，嵌套封装/写保护复用）：
+//   - 外部卷 → External(name).FS()（未知/无 FS → (nil,false)）；
+//   - 本地卷 → 以 RootDir 构造 LocalFS（RootDir 空 → (nil,false)）。
+//
+// 对本方法做**读**（RLock）：BottomFS 由外部句柄/Cache 持有，装配分离，读到即用（不常驻副本）。
+func (vs *Set) FSFor(name string) (syncpkg.FS, bool) {
+	vs.mu.RLock()
+	be := vs.external[name]
+	vs.mu.RUnlock()
+	if be != nil {
+		fs := be.FS()
+		return fs, fs != nil
+	}
+	v, ok := vs.ByName(name)
+	if !ok {
+		return nil, false
+	}
+	if v.RootDir == "" {
+		return nil, false
+	}
+	return syncpkg.NewLocalFS(v.RootDir, nil), true
 }
 
 // ResolveURL 按 URL 寻址内容：`scheme://<卷名>/<路径>`。
@@ -221,6 +250,39 @@ func (vs *Set) ResolveURL(ctx context.Context, url string) (io.ReadCloser, error
 		return nil, fmt.Errorf("registry: ResolveURL %q 失败: %w", url, err)
 	}
 	return rc, nil
+}
+
+// SetPool 登记/替换某卷的容量池（运行期新增封装卷「配额继承源卷」用）：装配层以
+// `quota.NewPoolWithParent(有效源卷池, max_bytes)` 建池后经本方法登记，使 `Pool(name)`
+// 恒返回该继承池（提交进自身池即沿父链聚合到源卷池，无需任何委托分支）。
+//
+// nil 池合法：清空该卷的池登记（删封装卷时回收）。
+func (vs *Set) SetPool(name string, p *quota.Pool) {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if p == nil {
+		delete(vs.pools, name)
+		return
+	}
+	vs.pools[name] = p
+}
+
+// ReplaceExternal 替换已登记卷的外部后端句柄（**不** Close 旧句柄——由调用方按语义决定：
+// 封印装饰变化时旧句柄只是被包了一层，其底层资源仍由新句柄持有）。未登记的卷名 → 明确错误。
+//
+// 用途：运行期新增/删除封装声明时，源卷的封印装饰必须随之更新（`enclosure.ApplyBackendSeals`
+// 产出新句柄）；外部/远端源卷没有 storage.Root 可就地改封印，只能换句柄。
+func (vs *Set) ReplaceExternal(name string, be ExternalBackend) error {
+	if be == nil {
+		return fmt.Errorf("registry: 替换外部卷 %q 的句柄为 nil", name)
+	}
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if _, ok := vs.external[name]; !ok {
+		return fmt.Errorf("registry: 外部卷 %q 不存在（无法替换句柄）", name)
+	}
+	vs.external[name] = be
+	return nil
 }
 
 // AddExternalVolume 在运行时注册外部卷（用户卷，U1）：追加卷元数据 + 外部句柄。
@@ -316,7 +378,16 @@ func (vs *Set) AttachExternal(name string, be ExternalBackend) error {
 }
 
 // Pool 返回指定卷名的容量池（未知卷名返回 nil）。
+//
+// 封装卷（enclosure）的池由装配层以 `quota.NewPoolWithParent(有效源卷池, max_bytes)` 建好后
+// 经 `SetPool` 登记（阶段 2 迁移：取代旧的「底层池占用子目录 Scope」委托形态）——消费方
+// （reserveVolume/路由排序/metrics/reconcile 等）经本方法统一拿池，TryReserve/Adjust/释放自动
+// 沿父链聚合到源卷池，整体不超源卷配额。
+//
+// 持读锁读取（`SetPool` 允许运行期登记继承池，与高频读并发）。
 func (vs *Set) Pool(name string) *quota.Pool {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
 	return vs.pools[name]
 }
 

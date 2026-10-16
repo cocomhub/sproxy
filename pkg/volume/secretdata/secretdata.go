@@ -38,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
@@ -528,8 +529,18 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 }
 
 // rangeReadBytes 逐块只下载/解密含 [offset,end) 的 blocklet 段并拼接覆盖区间明文。
-func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) ([]byte, error) {
-	var out []byte
+// 审计：Range 读取侧 decrypt 阶段 span（读取/播放侧解密路径——视频关键帧 seek 时每段独立
+// 解密，aggregate 到单次 range 读；Bytes = 返回明文段总长）。无 ctx logger 时 no-op
+// （与写入侧 encrypt span 对称）。
+func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) (out []byte, err error) {
+	decSpan := audit.From(ctx).Begin("decrypt")
+	defer func() {
+		if err != nil {
+			decSpan.Fail(err)
+			return
+		}
+		decSpan.End("bytes", int64(len(out)))
+	}()
 	for _, ci := range e.meta.Chunks {
 		if ci.Offset >= end || ci.Offset+ci.OrigSize <= offset {
 			continue // 该块与目标区间不相交 → 不下载
@@ -883,7 +894,21 @@ func (s *SecretdataFS) beginWrite(expected int64) (int64, int64, func(), error) 
 // 仅加密入口不同（wc.reader 可 seek → 流式；wc.data 为 nil、size 已给定）。
 // video-keyframe 模式由 EncryptShardsReader 内部按 seek 判定（非 keyframe 才流式；
 // keyframe 上层回退 ReadAll——parseOnce 全文扫描与 tee 哈希冲突，见设计 §5）。
-func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) error {
+func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr error) {
+	// 审计：encrypt 阶段 span（与 writeFileEncrypted 对称；仅 ctx 携带 audit logger 时
+	// 生效，nil-safe no-op）。明文 = wc.size，密文 = 分块物理字节（physBytesOf 同 commitEntry
+	// 口径）。流式路径此前缺此埋点——转存到加密卷（WriteIfAbsent 走流式）审计无 encrypt 行。
+	encSpan := audit.From(ctx).Begin("encrypt")
+	var cipherBytes int64
+	defer func() {
+		if retErr != nil {
+			encSpan.Fail(retErr)
+			return
+		}
+		// applyKV 把 "bytes"→Bytes，"encrypted"/"cipher_bytes"/"algorithm" 进 Meta。
+		encSpan.End("bytes", wc.size, "encrypted", true, "cipher_bytes", cipherBytes,
+			"algorithm", s.auditAlgoName())
+	}()
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
 		s.rollbackWrite(ctx, nil, wc.created)
@@ -926,9 +951,10 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) error {
 		s.rollbackWrite(ctx, uploaded, wc.created)
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
+	cipherBytes = physBytesOf(out.Meta, int64(len(metaBlob)), false)
 	return s.commitEntry(ctx, wc, &metaEntry{
 		size: wc.size, mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
-		phys: physBytesOf(out.Meta, int64(len(metaBlob)), false),
+		phys: cipherBytes,
 	}, uploaded)
 }
 
@@ -962,7 +988,20 @@ func (s *SecretdataFS) endWrite() {
 }
 
 // writeFileEncrypted 常规（非去重）路径：分块加密 → 上传分块 + meta → 原子切换索引。
-func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) error {
+func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err error) {
+	// 审计：encrypt 阶段 span（仅 ctx 携带 audit logger 时生效；nil-safe no-op）。
+	// 明密文对比 + 密文字节：明文 = len(data)，密文 = 临时分块目录字节和（见下）。
+	encSpan := audit.From(ctx).Begin("encrypt")
+	var cipherBytes int64
+	defer func() {
+		if err != nil {
+			encSpan.Fail(err)
+			return
+		}
+		// applyKV 把 "bytes"→Bytes，"encrypted"/"cipher_bytes"/"algorithm" 进 Meta。
+		encSpan.End("bytes", int64(len(wc.data)), "encrypted", true, "cipher_bytes", cipherBytes,
+			"algorithm", s.auditAlgoName())
+	}()
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
 		s.rollbackWrite(ctx, nil, wc.created)
@@ -980,6 +1019,8 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) erro
 		s.rollbackWrite(ctx, nil, wc.created)
 		return fmt.Errorf("secretdata: 分块加密失败: %w", cerr)
 	}
+	// 密文体积 = 临时目录内数据分块字节和（不含 meta，meta 单独加密上传）。
+	cipherBytes = sumDirFileBytes(tmp)
 	// 逻辑层 mtime 记入 meta.Original.MTime（EncryptShards 用临时文件 ModTime=now，
 	// 非调用方 mtime）；meta 名锚定内容 → 改名后重新加密。
 	out.Meta.Original.MTime = mtimeString(wc.mtime)
@@ -1015,6 +1056,35 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) erro
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
 		phys: physBytesOf(out.Meta, int64(len(metaBlob)), false),
 	}, uploaded)
+}
+
+// auditAlgoName 返回本卷加密算法的注册标识（含档位后缀，如 shardseal/aes-256-gcm、
+// -high、-low），供审计 Meta 的 algorithm 字段（公文明密文对比埋点的算法档位）。从
+// s.algoVer 经注册表读权威名；注册表异常回落 opts.Algorithm（NewFS 恒把空值归一为
+// 已注册名，该回落理论不可达，仅防御）。
+func (s *SecretdataFS) auditAlgoName() string {
+	if alg, ok := shardseal.AlgoByVersion(s.algoVer); ok {
+		return alg.Name
+	}
+	return s.opts.Algorithm
+}
+
+// sumDirFileBytes 递归统计 dir 下所有常规文件字节和（审计密文体积用；目录不存在/不可读显式
+// 返回 0——加密失败路径本就由其它分支分类）。
+func sumDirFileBytes(dir string) (total int64) {
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if info, ierr := d.Info(); ierr == nil && info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // commitEntry 原子提交索引并推进 volVersion + usage。提交前再持锁校验 CAS：

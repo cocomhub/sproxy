@@ -27,8 +27,9 @@ func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFromRequest(r)
 	// 多卷支持（roadmap P1 残余）：?volume=<name> 显式选卷（ACL 校验）；
 	// 缺省走默认卷（tenantFor 零回归）。
+	volName := r.URL.Query().Get("volume")
 	var tnt *storage.Tenant
-	if vol := r.URL.Query().Get("volume"); vol != "" {
+	if vol := volName; vol != "" {
 		if h.volSet == nil {
 			http.Error(w, "卷集合未装配", http.StatusBadRequest)
 			return

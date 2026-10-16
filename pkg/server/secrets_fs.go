@@ -6,8 +6,9 @@ package server
 // secrets_fs.go 是「**卷内 secrets/ 目录** → secrets 卷视图」的适配器：把 secrets 读写接回
 // `storage.Root`（而不是裸 `os` I/O 的 `sync.NewLocalFS`）。
 //
-// 为什么必须经 Root（门禁 R26 的登记项在此闭环）：默认 secrets 卷落在
-// `<storage_root>/secrets` —— 即**默认卷根之下**。裸 `NewLocalFS` 会让该目录绕过 Root 的
+// 为什么必须经 Root（门禁 R26 的登记项在此闭环）：secrets 目录落在**受管卷根之下**——默认
+// per-owner 桶是 `<storage_root>/<owner>/meta/secrets`（默认卷根之下的租户 meta 桶内），显式
+// 声明的 `type: secrets` 卷目标同样在卷根内。裸 `NewLocalFS` 会让该目录绕过 Root 的
 // ① at-rest 透明加解密 ② 封印 ③ 用户可见长度/容量接线。后果对**加密默认卷**尤其严重：卷内容
 // 全加密，而**密钥文件明文落盘** ⇒ at-rest 加密对该配置形同虚设（拿到磁盘即拿到密钥）。此前
 // 该缺陷记在 R26 白名单的「待裁定」里。
@@ -34,7 +35,7 @@ import (
 // rootSecretsFS 把 `<卷根>/<dirRel>` 目录暴露为 secrets 键空间（键 = 裸 secret 名）。
 type rootSecretsFS struct {
 	root   *storage.Root
-	dirRel string // 卷根相对目录（如 "secrets"）
+	dirRel string // 卷根相对目录（如 "meta/secrets"）
 	logger *slog.Logger
 }
 

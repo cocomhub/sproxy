@@ -3,19 +3,44 @@
 
 package main
 
-// user_volume_restore_test.go 验证用户卷重启恢复（U4）：ScanRestore → NewBackend →
-// Set.AddExternalVolume（单卷失败跳过 + 告警，其余恢复）。
+// user_volume_restore_test.go 验证用户卷重启恢复（U4）：ScanRestore →（嵌套封装卷经装配层
+// 翻译走 enclosure 底座；其余类型走 registry.NewBackend）→ 注册进卷集（单卷失败跳过 + 告警）。
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
+
+// registerUVRestoreWrapper 为测试类型注册**同名封装处理层**：使「该类型 + 嵌套 target」的用户
+// 卷声明在恢复时被翻译出封装声明词汇（嵌套装配的先决条件；卷 Type 保持 wrapper 类型）。
+func registerUVRestoreWrapper() {
+	uvRestoreWrapperOnce.Do(func() {
+		enclosure.RegisterWrapper(uvRestorePassthru{})
+	})
+}
+
+var uvRestoreWrapperOnce sync.Once
+
+// uvRestorePassthru 是「原样透传源视图」的封装处理层替身（只做区域映射，不改字节）。
+type uvRestorePassthru struct{}
+
+func (uvRestorePassthru) Name() string { return uvRestoreTestType }
+
+func (uvRestorePassthru) Build(_ context.Context, _ volume.Volume, src syncpkg.FS, _ map[string]any) (registry.ExternalBackend, error) {
+	return &fakeUVRestoreBackend{fs: src}, nil
+}
 
 // uvRestoreTestType 是 cmd 侧测试后端类型（唯一，避免与生产 baidupcs 冲突）。
 const uvRestoreTestType = "user-vol-restore-test"
@@ -31,9 +56,9 @@ func registerUVRestoreBackend() {
 	})
 }
 
-type fakeUVRestoreBackend struct{}
+type fakeUVRestoreBackend struct{ fs syncpkg.FS }
 
-func (f *fakeUVRestoreBackend) FS() syncpkg.FS { return nil }
+func (f *fakeUVRestoreBackend) FS() syncpkg.FS { return f.fs }
 func (f *fakeUVRestoreBackend) Close() error   { return nil }
 
 // fakeUVRestoreFS 占位 FS 类型（不实例化；ExternalBackend.FS 返回 nil 已满足接口）。
@@ -108,4 +133,189 @@ func TestRestoreUserVolumes(t *testing.T) {
 	if v, ok := set.ByName("disk-1"); !ok || v.Type != uvRestoreTestType || v.Capacity != 100 {
 		t.Fatalf("disk-1 元数据 = %+v, want type=%s cap=100", v, uvRestoreTestType)
 	}
+}
+
+// TestRestoreUserVolumes_NestedInheritsSourcePool（阶段 2 迁移）：封装卷（用户面
+// `target: "<源卷>/<子目录>"`）重启恢复后，其容量池必须是**继承源卷池的子池**
+// （`quota.NewPoolWithParent(源卷池, max_bytes)`）——取代过渡层的 `DelegatePool` 子 Scope。
+// 语义等价物：提交进自身池即沿父链聚合到源卷池（整体不超源卷配额），且 `max_bytes`
+// （= UserVolume.Capacity）作为自身上限生效。
+//
+// 变异：去掉 restore 路径的封装装配（或翻译）→ Pool(wrap)==nil → 红。
+func TestRestoreUserVolumes_NestedInheritsSourcePool(t *testing.T) {
+	t.Parallel()
+	registerUVRestoreBackend()
+	registerUVRestoreWrapper()
+
+	root := t.TempDir()
+	rt, oerr := storage.OpenRoot(root)
+	if oerr != nil {
+		t.Fatalf("OpenRoot: %v", oerr)
+	}
+	store := server.NewUserVolumeStore(t.TempDir())
+	if err := store.Create("alice", server.UserVolume{
+		Name: "wrap", Type: uvRestoreTestType, Capacity: 50,
+		Extra: map[string]any{"target": "base/xyz"},
+	}); err != nil {
+		t.Fatalf("store.Create(wrap): %v", err)
+	}
+	// 非嵌套用户卷（不受影响：按普通外部卷 + CapacityFS 计数器恢复）。
+	if err := store.Create("alice", server.UserVolume{Name: "plain", Type: uvRestoreTestType, Capacity: 30}); err != nil {
+		t.Fatalf("store.Create(plain): %v", err)
+	}
+
+	basePool := quota.NewPool(1000)
+	set := registry.NewSet(
+		[]volume.Volume{{Name: "base", Type: volume.TypeLocal, RootDir: root}},
+		map[string]*storage.Root{"base": rt},
+		map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"base": basePool},
+		"base",
+	)
+	t.Cleanup(func() { _ = set.Close() })
+	if err := restoreUserVolumes(set, store, discardLoggerMain()); err != nil {
+		t.Fatalf("restoreUserVolumes: %v", err)
+	}
+	// 继承池已建（MaxBytes = UserVolume.Capacity；父 = 源卷池）。
+	p := set.Pool("wrap")
+	if p == nil {
+		t.Fatal("wrap 继承池未重建（Pool(wrap) = nil）——配额上限重启后失效")
+	}
+	if p.MaxBytes() != 50 {
+		t.Fatalf("wrap 继承池 MaxBytes=%d want 50", p.MaxBytes())
+	}
+	if p.Parent() != basePool {
+		t.Fatal("wrap 池应挂到源卷池之下（配额继承）")
+	}
+	// 父链聚合：子池入账自动传播到底层池。
+	res, rerr := p.TryReserve(10)
+	if rerr != nil {
+		t.Fatalf("TryReserve: %v", rerr)
+	}
+	res.Commit(10)
+	if p.Usage() != 10 {
+		t.Fatalf("wrap 子池 Usage=%d want 10", p.Usage())
+	}
+	if basePool.Usage() != 10 {
+		t.Fatalf("base 底层池 Usage=%d want 10（继承父链聚合）", basePool.Usage())
+	}
+	// 非嵌套卷不建继承池（回落 pools——本 set 无该卷池 → nil）。
+	if set.Pool("plain") != nil {
+		t.Fatalf("plain 不应有继承池（非嵌套 target 不继承）")
+	}
+	// 源卷封印生效（占用区间只读是封装卷的核心不变量）。
+	if rt.SealAt("xyz/x") == nil {
+		t.Fatalf("恢复封装卷后源卷 base 的 xyz 区间应被封印, rules=%+v", rt.Seals())
+	}
+}
+
+// TestRestoreUserVolumes_ChainedPoolOrder（阶段 2 迁移）：链式嵌套恢复按依赖分轮——
+// 底层卷名序在封装卷后（base "zzz" 名序在 wrapper "aaa" 之后，ScanRestore 按 (owner,name)
+// 升序返回 aaa 先于 zzz）时，封装卷的装配不再因源卷未就绪而早失败。断言两层继承池均重建且
+// 外层池挂在**内层池**之下（父链一路聚合到基底 base 卷池）。
+func TestRestoreUserVolumes_ChainedPoolOrder(t *testing.T) {
+	t.Parallel()
+	registerUVRestoreBackend()
+	registerUVRestoreWrapper()
+
+	baseRoot := t.TempDir()
+	rt, oerr := storage.OpenRoot(baseRoot)
+	if oerr != nil {
+		t.Fatalf("OpenRoot: %v", oerr)
+	}
+	store := server.NewUserVolumeStore(t.TempDir())
+	// 名称序：aaa < zzz（ScanRestore 升序返回 aaa 先），zzz 是 aaa 的底层。
+	if err := store.Create("alice", server.UserVolume{
+		Name: "aaa", Type: uvRestoreTestType, Capacity: 20,
+		Extra: map[string]any{"target": "zzz/xyz"},
+	}); err != nil {
+		t.Fatalf("store.Create(aaa): %v", err)
+	}
+	if err := store.Create("alice", server.UserVolume{
+		Name: "zzz", Type: uvRestoreTestType, Capacity: 30,
+		Extra: map[string]any{"target": "base/x1"},
+	}); err != nil {
+		t.Fatalf("store.Create(zzz): %v", err)
+	}
+
+	basePool := quota.NewPool(1000)
+	set := registry.NewSet(
+		[]volume.Volume{{Name: "base", Type: volume.TypeLocal, RootDir: baseRoot}},
+		map[string]*storage.Root{"base": rt},
+		map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"base": basePool},
+		"base",
+	)
+	t.Cleanup(func() { _ = set.Close() })
+	if err := restoreUserVolumes(set, store, discardLoggerMain()); err != nil {
+		t.Fatalf("restoreUserVolumes: %v", err)
+	}
+	// zzz 继承池已重建（源 base）。
+	pz := set.Pool("zzz")
+	if pz == nil || pz.MaxBytes() != 30 {
+		t.Fatalf("zzz 继承池未重建（base 名序在后不应影响源卷）: %+v", pz)
+	}
+	// aaa 继承池已重建（挂 zzz 池之下）——链式依赖未因排序早失败。
+	pa := set.Pool("aaa")
+	if pa == nil || pa.MaxBytes() != 20 {
+		t.Fatalf("aaa 继承池未重建（依赖 zzz，先扫到的 aaa 应被分轮推迟）: %+v", pa)
+	}
+	// 继承挂在**有效源卷**（Enclosure.EffectiveTarget 沿链回溯到真正承载字节的基底卷）之下：
+	// 链式嵌套的两个池都直挂 base 池（与装配期 inheritPools 同口径——避免同一字节在中间层
+	// 重复计一次）。
+	if pa.Parent() != basePool {
+		t.Fatal("aaa 池应挂在有效源卷 base 池之下（EffectiveTarget 回溯）")
+	}
+	// 父链聚合：aaa 入账传导到底层 base 池。
+	res, rerr := pa.TryReserve(7)
+	if rerr != nil {
+		t.Fatalf("TryReserve: %v", rerr)
+	}
+	res.Commit(7)
+	if basePool.Usage() != 7 {
+		t.Fatalf("父链聚合失败: base=%d want 7", basePool.Usage())
+	}
+	if pz.Usage() != 0 {
+		t.Fatalf("zzz 自身无占用（aaa 的字节不经 zzz 池记账）: %d", pz.Usage())
+	}
+}
+
+// TestWarnOpenACLUserVolumes 钉住「存量卷 ACL 未收紧」的启动可观测性（2026-10-15 代码审核 A 轮）：
+// S1 的 owner-only 注入只覆盖新建/恢复路径，**旧 store 文件零值 ACL = 默认开放**（任意 owner
+// 可枚举/写）⇒ 必须启动时汇总告警（此前完全静默）。判据与 volume.Authorize 同源。
+func TestWarnOpenACLUserVolumes(t *testing.T) {
+	t.Parallel()
+	ownerOnly := server.UserVolume{Name: "v1", Owner: "alice",
+		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}}}
+	legacyZero := server.UserVolume{Name: "v2", Owner: "bob"}                                           // 旧文件：零值 ACL
+	legacyDeny := server.UserVolume{Name: "v3", Owner: "carol", ACL: volume.ACL{Mode: volume.ModeDeny}} // 默认开放
+	allowEmpty := server.UserVolume{Name: "v4", Owner: "dave", ACL: volume.ACL{Mode: volume.ModeAllow}} // 白名单空
+
+	// 全 owner-only ⇒ 不告警。
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	warnOpenACLUserVolumes([]server.UserVolume{ownerOnly}, log)
+	if buf.Len() != 0 {
+		t.Fatalf("owner-only 卷不应告警，got: %s", buf.String())
+	}
+
+	// 含未收紧卷 ⇒ 单条聚合告警，含数量与卷名样本。
+	buf.Reset()
+	warnOpenACLUserVolumes([]server.UserVolume{ownerOnly, legacyZero, legacyDeny, allowEmpty}, log)
+	got := buf.String()
+	if !strings.Contains(got, "ACL 未收紧") {
+		t.Fatalf("应告警 ACL 未收紧，got: %s", got)
+	}
+	for _, want := range []string{"count=3", "bob/v2", "carol/v3", "dave/v4"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("告警应含 %q，got: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "alice/v1") {
+		t.Errorf("owner-only 卷不应出现在告警样本里，got: %s", got)
+	}
+
+	// 空列表 / nil logger：安全 no-op。
+	warnOpenACLUserVolumes(nil, log)
+	warnOpenACLUserVolumes([]server.UserVolume{legacyZero}, nil)
 }

@@ -61,8 +61,8 @@ func TestApplyEnclosureSeals_InjectsAndBlocksDirectAccess(t *testing.T) {
 	acc := volAccumForTest(t, dir)
 	acc.volumes = []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
-			"source": "main:private/vault", "wrapper": "testsealwrapper",
+		{Name: "vault", Type: "testsealwrapper", Extra: map[string]any{
+			"source": "main:private/vault",
 		}},
 	}
 	if err := applyEnclosureSeals(nil, acc); err != nil {
@@ -111,8 +111,8 @@ func TestApplyEnclosureSeals_WholeVolumeSealsEntireSource(t *testing.T) {
 	acc := volAccumForTest(t, dir)
 	acc.volumes = []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
-			"source": "main:", "wrapper": "testsealwrapper", // 空子路径 = 整卷封装
+		{Name: "vault", Type: "testsealwrapper", Extra: map[string]any{
+			"source": "main:", // 空子路径 = 整卷封装
 		}},
 	}
 	if err := applyEnclosureSeals(nil, acc); err != nil {
@@ -146,15 +146,20 @@ func TestApplyEnclosureSeals_NoDeclZeroRegression(t *testing.T) {
 	}
 }
 
-// TestApplyEnclosureSeals_InvalidDeclFailsClosed 声明非法（如缺 wrapper）⇒ 装配失败且可归因。
+// TestApplyEnclosureSeals_InvalidDeclFailsClosed 声明非法（`extra.wrapper` 未注册）⇒ 装配失败且可归因。
+//
+// **自带注册**：判据 `IsDeclared` 要求「卷类型是已注册 wrapper」——若依赖同文件其它用例先注册
+// （sealWrapOnce），并行调度下本用例可能在注册前执行 ⇒ 波动的 nil 错误（实测 `./...` 全量跑
+// 偶发红）。故本用例显式调用幂等注册（与同胞用例同口径）。
 func TestApplyEnclosureSeals_InvalidDeclFailsClosed(t *testing.T) {
 	t.Parallel()
+	registerSealTestWrapper()
 	acc := volAccumForTest(t, t.TempDir())
 	acc.volumes = []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{"source": "main:x"}},
+		{Name: "vault", Type: "testsealwrapper", Extra: map[string]any{"source": "main:x", "wrapper": "ghost-wrapper"}},
 	}
-	if err := applyEnclosureSeals(nil, acc); !errors.Is(err, enclosure.ErrMissingWrapper) {
+	if err := applyEnclosureSeals(nil, acc); !errors.Is(err, enclosure.ErrUnknownWrapper) {
 		t.Fatalf("非法声明应 fail-closed 且可归因, got %v", err)
 	}
 }
@@ -186,8 +191,8 @@ func TestApplyEnclosureSeals_ExternalSourceSealedViaBackendFS(t *testing.T) {
 	}
 	acc.volumes = []volume.Volume{
 		{Name: "ext", Type: "s3"},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
-			"source": "ext:alice/user/vault", "wrapper": "testsealwrapper",
+		{Name: "vault", Type: "testsealwrapper", Extra: map[string]any{
+			"source": "ext:alice/user/vault",
 		}},
 	}
 	if err := applyEnclosureSeals(nil, acc); err != nil {
@@ -254,8 +259,8 @@ func TestApplyEnclosureSeals_ExternalWholeVolume(t *testing.T) {
 	}
 	acc.volumes = []volume.Volume{
 		{Name: "ext", Type: "s3"},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
-			"source": "ext:", "wrapper": "testsealwrapper",
+		{Name: "vault", Type: "testsealwrapper", Extra: map[string]any{
+			"source": "ext:",
 		}},
 	}
 	if err := applyEnclosureSeals(nil, acc); err != nil {
@@ -281,8 +286,8 @@ func TestApplyEnclosureSeals_ExternalSourceMissingBackendFailsClosed(t *testing.
 	}
 	acc.volumes = []volume.Volume{
 		{Name: "ext", Type: "s3"},
-		{Name: "vault", Type: enclosure.TypeEnclosure, Extra: map[string]any{
-			"source": "ext:alice/user/vault", "wrapper": "testsealwrapper",
+		{Name: "vault", Type: "testsealwrapper", Extra: map[string]any{
+			"source": "ext:alice/user/vault",
 		}},
 	}
 	if err := applyEnclosureSeals(nil, acc); err == nil {

@@ -3,9 +3,10 @@
 
 package server
 
-// backends_api.go 实现 backend 列表 API（V4）：GET /api/backends 返回已注册卷后端类型
-// （registry.BackendTypes()），供 Web UI「我的用户卷」创建表单 type 下拉动态感知——
-// 未来任何新 backend（S3/…）只 RegisterBackend 注册即自动出现在前端，无需改前端代码。
+// backends_api.go 实现 backend 列表 API（V4）：GET /api/backends 返回已注册卷后端类型 +
+// per-type schema（registry.BackendSchemas()），供 Web UI「我的用户卷」创建表单 type 下拉
+// 动态感知 + schema 驱动字段渲染——未来任何新 backend（S3/…）只 RegisterBackend 注册
+// （并按需实现 SchemaProvider）即自动出现在前端，无需改前端代码。
 
 import (
 	"context"
@@ -25,13 +26,15 @@ import (
 )
 
 type backendsListResponse struct {
-	Backends []string `json:"backends"`
+	Backends []registry.BackendSchemaInfo `json:"backends"`
 }
 
-// backendsHandler 处理 GET /api/backends。返回 registry 已注册后端类型列表（动态）。
-// 不依赖 volSet（注册表是包级状态，与卷集合装配无关）——未装配卷集合也返回已注册类型。
+// backendsHandler 处理 GET /api/backends。返回 registry 已注册后端类型的
+// type→(category, fields) schema 列表（动态）。Label 留空缺省（前端按 type 显示）；
+// 未实现 SchemaProvider 的类型 fields 为空数组。不依赖 volSet（注册表是包级状态，
+// 与卷集合装配无关）——未装配卷集合也返回已注册类型。
 func (h *Handlers) backendsHandler(w http.ResponseWriter, r *http.Request) {
-	sendJSONResponse(w, backendsListResponse{Backends: registry.BackendTypes()}, http.StatusOK)
+	sendJSONResponse(w, backendsListResponse{Backends: registry.BackendSchemas()}, http.StatusOK)
 }
 
 // backendPresignHandler 处理 POST /api/backends/{type}/presign?path=&method=&expires=：
@@ -39,6 +42,7 @@ func (h *Handlers) backendsHandler(w http.ResponseWriter, r *http.Request) {
 // 未注册 type → 404；后端不支持 Presign → 405；缺 path / method 非法 → 400。
 func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request) {
 	typ := r.PathValue("type")
+	owner := normalizeOwner(ownerFromRequest(r))
 	path, perr := h.presignPathFor(r)
 	if perr != nil {
 		http.Error(w, perr.Error(), http.StatusForbidden)
@@ -58,7 +62,16 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 		}
 		expires = n
 	}
-	be, err := h.presignBackendFor(r.Context(), typ, normalizeOwner(ownerFromRequest(r)))
+	// 占用写保护（评审 F2 首要闭合点）：PUT 直传由客户端对对象存储发起，服务端**看不到那次写**
+	// ⇒ 占用判定只能在签发期做（complete 的登记拦截虽有纵深，但那时「只读」目录里已经躺了一个
+	// 未登记、不计配额的游离对象）。GET 不拦——占用目录是只读而非不可读。
+	if method == http.MethodPut {
+		if oerr := h.presignSealedGuard(typ, owner, path); oerr != nil {
+			http.Error(w, oerr.Error(), http.StatusForbidden)
+			return
+		}
+	}
+	be, err := h.presignBackendFor(r.Context(), typ, owner)
 	if err != nil {
 		h.presignBackendError(w, typ, err)
 		return
@@ -172,7 +185,7 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 	if matched {
 		// path 形态 = `<owner>/user/<rel>`（presignOwnerKey 保证桶为 user）⇒ RemotePath 取
 		// **user 桶相对路径**（与 HTTP 上传/远程写面同一约定：Tenant.UserRel 会补 user/ 前缀）。
-		rel, _ := strings.CutPrefix(strings.TrimPrefix(path, owner+"/"), "user/")
+		rel := presignRemoteRel(owner, path)
 		if _, rerr := h.fileService().RegisterDirectUpload(r.Context(), files.DirectUploadInput{
 			Owner: owner, RemotePath: rel, Volume: vol.Name, Size: size, SHA256: sha,
 		}); rerr != nil {
@@ -202,6 +215,31 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		return
 	}
 	sendJSONResponse(w, map[string]string{"ok": "registered"}, http.StatusOK)
+}
+
+// presignSealedGuard 在**签发期**对「落在封装封印区间内」的目标 fail-closed 拒绝：
+// presign 的 PUT URL 由客户端直传对象存储，**绕过一切 FS 装饰器与 storage.Root 封印**
+// ⇒ 服务端看不到那次写，只能在签发时按封印规则拦（这是唯一无法靠底座封印收口的写面）。
+//
+// 坐标：`path` 是收敛后的**卷根相对键** `<owner>/<bucket>/<rel>`（`presignPathFor` 产出，
+// 与 `volume.Location.FSPath()` 同形），正是封印规则（`storage.SealRule.Path`）的命名空间。
+//
+// 无已配置卷（裸后端）或该类型对调用方不可用（ACL 拒绝）时返回 nil——后者由
+// presignBackendError 统一分档 403，不得在此抢先改变错误码。
+func (h *Handlers) presignSealedGuard(typ, owner, path string) error {
+	vol, matched, err := h.presignVolumeFor(typ, owner)
+	if err != nil || !matched {
+		return nil
+	}
+	return h.enclosureSealedAt(vol.Name, path)
+}
+
+// presignRemoteRel 从收敛后的预签名路径（`<owner>/user/<rel>`）取出**用户桶相对路径**
+// （无 `user/` 前缀）——签发期占用判定（presignOccupiedGuard）与登记（backendPresignCompleteHandler
+// → DirectUploadInput.RemotePath）共用同一映射，防两处键口径漂移。
+func presignRemoteRel(owner, path string) string {
+	rel, _ := strings.CutPrefix(strings.TrimPrefix(path, owner+"/"), "user/")
+	return rel
 }
 
 // presignSizeParam 解析登记用的 size（非负整数，必填）。

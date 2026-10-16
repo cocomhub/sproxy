@@ -55,10 +55,11 @@ func (d *directFS) DirectURL(_ context.Context, relPath string) (string, bool, e
 	return d.url + "?key=" + relPath, true, nil
 }
 
+// encVol 造一条**嵌套形态**封装声明卷：卷 Type 即处理层名（唯一声明形态，见 IsDeclared）。
 func encVol(name, src string, extra map[string]any) volume.Volume {
 	e := map[string]any{"wrapper": "basetest", "source": src}
 	maps.Copy(e, extra)
-	return volume.Volume{Name: name, Type: TypeEnclosure, Extra: e}
+	return volume.Volume{Name: name, Type: "basetest", Extra: e}
 }
 
 func TestParse_ValidDeclAndSealRules(t *testing.T) {
@@ -107,22 +108,24 @@ func TestParse_ValidDeclAndSealRules(t *testing.T) {
 func TestParse_Rejects(t *testing.T) {
 	t.Parallel()
 	registerTestWrapper(t, "basetest")
+	registerTestWrapper(t, "othertest") // 供「wrapper 与卷类型不一致」用例（两值都已注册）
 	base := func(extra map[string]any) volume.Volume {
 		e := map[string]any{}
 		maps.Copy(e, extra)
-		return volume.Volume{Name: "vault", Type: TypeEnclosure, Extra: e}
+		return volume.Volume{Name: "vault", Type: "basetest", Extra: e}
 	}
 	cases := []struct {
 		name string
 		vols []volume.Volume
 		want error
 	}{
-		{"缺 source", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest"})}, ErrMissingSource},
 		{"source 无冒号", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main"})}, ErrBadSource},
 		{"source 穿越", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main:../x"})}, ErrBadSource},
 		{"源卷不存在", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "nope:x"})}, ErrSourceNotFound},
-		{"缺 wrapper", []volume.Volume{{Name: "main"}, base(map[string]any{"source": "main:x"})}, ErrMissingWrapper},
 		{"wrapper 未注册", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "ghost", "source": "main:x"})}, ErrUnknownWrapper},
+		// wrapper 键冗余：显式写出时**必须等于卷类型**（唯一声明形态 = wrapper 类型 + source），
+		// 指向另一个已注册处理层 ⇒ fail-closed（不在两值间猜哪个是处理层）。
+		{"wrapper 与卷类型不一致", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "othertest", "source": "main:x"})}, ErrWrapperMismatch},
 		{"自封装", []volume.Volume{base(map[string]any{"wrapper": "basetest", "source": "vault:x"})}, ErrSelfEnclosure},
 		{"read_mode 非法", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main:x", "source_read_mode": "public"})}, ErrBadReadMode},
 		{"max_bytes 负", []volume.Volume{{Name: "main"}, base(map[string]any{"wrapper": "basetest", "source": "main:x", "max_bytes": float64(-1)})}, ErrBadMaxBytes},
@@ -131,6 +134,16 @@ func TestParse_Rejects(t *testing.T) {
 		if _, err := Parse(tc.vols); !errors.Is(err, tc.want) {
 			t.Errorf("%s: 应拒绝并返回 %v, got %v", tc.name, tc.want, err)
 		}
+	}
+
+	// wrapper 类型**无** `extra.source` ⇒ 不是封装声明（普通 wrapper 卷，如本地整卷形态），
+	// Parse 静默跳过而非报错——这是「缺 source/缺 wrapper 不再是错误」的落点。
+	plain := []volume.Volume{
+		{Name: "main"},
+		{Name: "vault", Type: "basetest", Extra: map[string]any{"target": "local"}},
+	}
+	if ds, derr := Parse(plain); derr != nil || len(ds) != 0 {
+		t.Errorf("wrapper 类型无 source 不应是封装声明: decls=%v err=%v", ds, derr)
 	}
 
 	// 同一源路径被两个封装卷声明 → 冲突。
@@ -336,5 +349,79 @@ func TestParse_MaxBytesHumanReadable(t *testing.T) {
 	}
 	if decls[0].MaxBytes != 8<<30 {
 		t.Fatalf("max_bytes=8GiB 应解析为 %d, got %d", int64(8)<<30, decls[0].MaxBytes)
+	}
+}
+
+// TestParse_RejectsFootprintOverlap 互斥占用（阶段 2 迁移保留的独有能力）：同基底卷上两条
+// **互不相关**的声明的封印足迹不得重叠（父/子/同目录）——否则两卷映射到的键集合相交，
+// 一方写入落进另一方的封印区间（互相覆写 / 数据不可见）。
+//
+// 与 ErrConflictClaim 的分工：精确相等仍走 ErrConflictClaim（既有用例），本判据覆盖
+// 「一方区域落在另一方之内」这类此前漏放的形态。
+// 变异：去掉 validateFootprints → 下面前 4 例不再报错 → 红。
+func TestParse_RejectsFootprintOverlap(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	cases := []struct {
+		name     string
+		pathA    string
+		pathB    string
+		conflict bool
+	}{
+		{"父吃子", "private", "private/vault", true},
+		{"子被父吃", "private/vault", "private", true},
+		{"整卷吃一切", "", "private", true},
+		{"兄弟分支不冲突", "photos", "movies", false},
+		{"深层兄弟不冲突", "a/photos", "a/movies", false},
+		{"不同 owner 桶不冲突", "alice/user", "bob/user", false},
+	}
+	for _, tc := range cases {
+		vols := []volume.Volume{
+			{Name: "main"},
+			encVol("a", "main:"+tc.pathA, nil),
+			encVol("b", "main:"+tc.pathB, nil),
+		}
+		_, err := Parse(vols)
+		if tc.conflict && !errors.Is(err, ErrFootprintOverlap) {
+			t.Errorf("%s: %q vs %q 应拒绝(ErrFootprintOverlap), got %v", tc.name, tc.pathA, tc.pathB, err)
+		}
+		if !tc.conflict && err != nil {
+			t.Errorf("%s: %q vs %q 不应冲突, got %v", tc.name, tc.pathA, tc.pathB, err)
+		}
+	}
+}
+
+// TestParse_ChainNestingAllowsFootprintOverlap 链内叠加（`outer: inner:`、`outer: inner:sub`）
+// **允许**足迹重叠：外层变换的是内层已变换的字节，两者本就共用同一物理区间，封印象限由最外层
+// 承担。变异：把链内判定去掉 → 本用例（master 既有的嵌套拓扑用例同形）变红。
+func TestParse_ChainNestingAllowsFootprintOverlap(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	vols := []volume.Volume{
+		{Name: "main"},
+		encVol("inner", "main:base", nil),
+		encVol("outer", "inner:", nil),     // 整内层（足迹 base ≡ inner）
+		encVol("deeper", "outer:sub", nil), // 内层子区域（足迹 base/sub ⊂ base）
+	}
+	decls, err := Parse(vols)
+	if err != nil {
+		t.Fatalf("链内叠加应允许足迹重叠, got %v", err)
+	}
+	if len(decls) != 3 {
+		t.Fatalf("应 3 条声明, got %d", len(decls))
+	}
+}
+
+// TestParse_MixedChainRejected 混链（owner 限定与卷根专有混用）无法给出唯一足迹 ⇒ fail-closed。
+func TestParse_MixedChainRejected(t *testing.T) {
+	t.Parallel()
+	registerTestWrapper(t, "basetest")
+	vols := []volume.Volume{
+		{Name: "main"},
+		encVol("inner", "main:private/vault", nil), // 卷根专有
+		encVol("outer", "inner:alice/user", nil),   // owner 限定（第二段 user 是保留桶名）
+	}
+	if _, err := Parse(vols); err == nil {
+		t.Fatal("混链应 fail-closed 拒绝")
 	}
 }

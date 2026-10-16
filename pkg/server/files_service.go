@@ -14,6 +14,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +36,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
@@ -66,7 +69,147 @@ func (r filesRuntime) Volumes() files.VolumeSet {
 	if r.h.volSet == nil {
 		return nil
 	}
-	return r.h.volSet
+	return filesVolumeSet{Set: r.h.volSet}
+}
+
+// filesVolumeSet 把 *registry.Set 适配为 files.VolumeSet + files.ExternalVolumeSource：
+// 外部卷目录浏览能力经 registry.Set.External(name).FS()（sync.FS）适配为领域接口。
+// 嵌入 *registry.Set 继承 VolumeSet 方法（Default/All/ByName/Root/Pool），外部能力新增。
+type filesVolumeSet struct {
+	*registry.Set
+}
+
+// CategoryOf 实现 files.VolumeTypeClassifier：把卷**类型 → schema category** 分类转发给
+// registry.CategoryOf——「哪些类型是 wrapper」的唯一事实源（含 wrapper 处理层注册表的动态
+// 投影，见 enclosure.RegisterWrapper → registry.MarkWrapperType）。领域包不得 import
+// registry（门禁 R2），故经本适配器注入（装配处 WithVolumeTypeClassifier）。
+//
+// 无状态转发：不读嵌入的 *registry.Set（nil 也安全），故装配处传 `filesVolumeSet{Set: h.volSet}`
+// 与其它适配器同形。
+func (a filesVolumeSet) CategoryOf(typ string) string { return registry.CategoryOf(typ) }
+
+// ExternalVolume 实现 files.ExternalVolumeSource：按卷名返回外部卷目录浏览能力。
+// 未知/非外部卷（本地卷）→ nil（List 的 `?volume=` 回落既有本地聚合，零回归）。
+func (a filesVolumeSet) ExternalVolume(name string) files.ExternalVolume {
+	be := a.External(name)
+	if be == nil {
+		return nil
+	}
+	fsys := be.FS()
+	if fsys == nil {
+		return nil
+	}
+	return filesExternalVolume{fs: fsys}
+}
+
+// ExternalDeleter 实现 files.ExternalVolumeDeleter（C2，2026-10-06）：按卷名返回外部卷删除
+// 能力。未知/非外部卷（本地卷）/FS 不可用 → nil（delete 走既有本地卷路径，零回归）。
+// key 语义与上传 externalUploadSink 一致：ResolveUserPath 统一计算（owner 前缀/键空间适配）。
+func (a filesVolumeSet) ExternalDeleter(name string) files.ExternalDeleter {
+	be := a.External(name)
+	if be == nil {
+		return nil
+	}
+	fsys := be.FS()
+	if fsys == nil {
+		return nil
+	}
+	v, ok := a.ByName(name)
+	if !ok {
+		return nil
+	}
+	return filesExternalDeleter{fs: fsys, v: v}
+}
+
+// filesExternalDeleter 把 sync.FS + 卷描述适配为 files.ExternalDeleter。
+type filesExternalDeleter struct {
+	fs syncpkg.FS
+	v  volume.Volume
+}
+
+// ownerKey 把域侧 rel（user/<name>）映射为外部卷键（与 externalUploadSink 同一算法：
+// 桶目录自身 "user" → 桶内空路径，防 "user/user" 残留）。基于 locator：ResolveUserLocation
+// 解析 + FSPath 拼接（键拼接只在 FSPath，调用方不自行改路径）。
+//
+// 键空间**恒 owner 维度**（`<owner>/user/<rel>`，含嵌套封装卷）：所有外部卷走同一
+// locator，调用方（上传/删除/列举/转存/镜像/du）不需要区分卷类型。
+func (a filesExternalDeleter) ownerKey(owner, rel string) (string, error) {
+	stripped := rel
+	switch {
+	case rel == "user":
+		stripped = ""
+	case strings.HasPrefix(rel, "user/"):
+		stripped = strings.TrimPrefix(rel, "user/")
+	}
+	loc, err := a.v.ResolveUserLocation(owner, stripped)
+	if err != nil {
+		return "", err
+	}
+	return loc.FSPath(), nil
+}
+
+// StatSize 实现 files.ExternalDeleter。
+func (a filesExternalDeleter) StatSize(ctx context.Context, _, owner, rel string) (int64, bool, error) {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return 0, false, err
+	}
+	e, serr := a.fs.Stat(ctx, key)
+	if serr != nil {
+		return 0, false, serr
+	}
+	if e == nil {
+		return 0, false, nil
+	}
+	if e.IsDir {
+		return 0, true, nil
+	}
+	return e.Size, true, nil
+}
+
+// FileChecksum 实现 files.ExternalFileChecksum（评审 CRIT-1）：从外部卷 FS 流式读取明文
+// 内容计算 SHA-256（hex）。外部卷（secretdata 等）的 FS 读即解密密文 → 明文指纹，与上传
+// 时的客户端 checksum 可比。不可用/目录 → 返回错误（调用方 500 保留，不静默删）。
+func (a filesExternalDeleter) FileChecksum(ctx context.Context, _, owner, rel string) (string, error) {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return "", err
+	}
+	rc, oerr := a.fs.OpenRead(ctx, key)
+	if oerr != nil {
+		return "", oerr
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, cerr := io.Copy(h, rc); cerr != nil {
+		return "", cerr
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// Delete 实现 files.ExternalDeleter。
+func (a filesExternalDeleter) Delete(ctx context.Context, _, owner, rel string) error {
+	key, err := a.ownerKey(owner, rel)
+	if err != nil {
+		return err
+	}
+	return a.fs.Delete(ctx, key)
+}
+
+// filesExternalVolume 把 sync.FS 的 ListDir 适配为 files.ExternalVolume
+// （[]syncpkg.Entry → []files.ExternalEntry，只保留 Name/IsDir/Size 明文视图）。
+type filesExternalVolume struct{ fs syncpkg.FS }
+
+func (a filesExternalVolume) ListDir(ctx context.Context, rel string) ([]files.ExternalEntry, error) {
+	entries, err := a.fs.ListDir(ctx, rel)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]files.ExternalEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, files.ExternalEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size})
+	}
+	return out, nil
 }
 
 func (r filesRuntime) Tenant(volName, owner string) *storage.Tenant {
@@ -177,8 +320,9 @@ func (h *Handlers) locateOwnerFileForFiles(owner, rel string) (files.FileLocatio
 	return files.FileLocation{VolumeName: loc.volumeName, Tenant: loc.tenant}, true
 }
 
-// routeUploadForTarget 为统一写内核（WriteTarget 显式卷：S3/DAV/版本恢复）定卷：ACL 校验 +
-// 单候选双预留，**不做唯一性查重**（覆盖写语义——这些写面允许覆盖同 rel）。
+// routeUploadForTarget 为统一写内核（WriteTarget 显式卷：S3 单对象 PUT / DAV / 版本恢复 /
+// presign 直传登记）定卷：ACL 校验 + 写保护 + 单候选双预留，**不做唯一性查重**（覆盖写语义
+// ——这些写面允许覆盖同 rel）。
 func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) (files.UploadRoute, error) {
 	if h.volSet == nil {
 		return h.routeUploadForFiles(owner, rel, volName, size, "")
@@ -194,7 +338,9 @@ func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) 
 	}
 	route, err := h.reserveVolume(owner, rel, v.Name, size)
 	if err != nil {
-		return files.UploadRoute{}, err
+		// 预留失败必须是契约错误（*files.HTTPError）：调用方（s3WriteError / DAV / presign）
+		// 只认该类型，裸 *routeError 会退化成 500（配额满应 507、越权应 403）。
+		return files.UploadRoute{}, toFilesHTTPError(err)
 	}
 	release := route.release
 	return files.UploadRoute{
@@ -271,12 +417,12 @@ func (h *Handlers) externalRemotePath(ctx context.Context, owner, volName, rel0,
 	if !ok {
 		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 	}
-	loc, kerr := v.ResolveUserLocation(owner, rel0)
-	if kerr != nil {
+	key, ok := externalVolumeKey(v, owner, rel0)
+	if !ok {
 		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 	}
 	// 基于 locator：FS 键仅在此经 FSPath 拼接（唯一拼接点）。
-	ownerKey := loc.FSPath()
+	ownerKey := key
 	e, serr := fsys.Stat(ctx, ownerKey)
 	if serr != nil || e == nil || e.IsDir {
 		return files.DownloadPath{}, &files.HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
@@ -308,11 +454,10 @@ func (o externalVolumeOps) ExternalDelete(ctx context.Context, owner, volName, r
 	if !ok || !v.Authorize(owner) {
 		return false, nil // 未授权 → 不命中（404，不泄卷存在性）
 	}
-	loc, kerr := v.ResolveUserLocation(owner, remotePath)
-	if kerr != nil {
+	key, ok := externalVolumeKey(v, owner, remotePath)
+	if !ok {
 		return false, nil
 	}
-	key := loc.FSPath()
 	e, serr := fsys.Stat(ctx, key)
 	if serr != nil || e == nil || e.IsDir {
 		return false, nil // 不存在/不可 stat → 未命中
@@ -327,7 +472,26 @@ func (o externalVolumeOps) ExternalDelete(ctx context.Context, owner, volName, r
 		h.logger.ErrorContext(ctx, "外部卷删除失败", "volume", volName, "path", remotePath, "error", derr.Error())
 		return false, &files.HTTPError{Status: http.StatusInternalServerError, Message: "删除失败"}
 	}
+	// 配额释放（owner 全局账本 + 委托卷容量池）**不在本层**：域侧 `deleteExternalVolume` 在
+	// `ExternalDelete` 成功返回后统一调 `releaseExternalDeleteQuota`（删除前实测记账字节，
+	// 与写入侧 `settleSize` 同口径）——这是委派池的**唯一**域层释放点。此前本层另有一次
+	// `releaseWrapperPoolAfterDelete`，与域侧对同一委托子 Scope 重复归还（F3：底座池少计 ⇒
+	// 过度准入），已移除：一次删除只允许一处释放。
 	return true, nil
+}
+
+// externalVolumeKey 计算外部卷对象操作（Delete/Stat/List/Rename 等）的 FS 键：
+// **全部外部卷统一经 `ResolveUserLocation` + `FSPath()` 解析**（恒 `<owner>/user/<rel>`，
+// owner 维度隔离）。调用方（上传 / 删除 / 列举 / 转存 / 跨卷 move / 镜像 / du）共用同一
+// 映射口径，不存在卷类型分支。
+//
+// 返回 (key, false) = 路径非法（ResolveUserLocation 失败），调用方按未命中处理。
+func externalVolumeKey(v volume.Volume, owner, remotePath string) (string, bool) {
+	loc, kerr := v.ResolveUserLocation(owner, remotePath)
+	if kerr != nil {
+		return "", false
+	}
+	return loc.FSPath(), true
 }
 
 // ExternalList 实现 files.ExternalVolumeOps：经**同一可信链**（`Guard(Wrap(be.FS()))`）
@@ -347,11 +511,11 @@ func (o externalVolumeOps) ExternalList(ctx context.Context, owner, volName, sub
 	if !ok || !v.Authorize(owner) {
 		return nil, false, nil // 未授权/未知 → 不命中（404，不泄卷存在性）
 	}
-	loc, kerr := v.ResolveUserLocation(owner, subdir)
-	if kerr != nil {
+	key, ok := externalVolumeKey(v, owner, subdir)
+	if !ok {
 		return nil, true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-	entries, lerr := fsys.ListDir(ctx, loc.FSPath())
+	entries, lerr := fsys.ListDir(ctx, key)
 	if lerr != nil {
 		if errors.Is(lerr, os.ErrNotExist) {
 			return nil, true, nil // 目录不存在 = 空列表
@@ -382,17 +546,17 @@ func (o externalVolumeOps) ExternalStat(ctx context.Context, owner, volName, rem
 	if !ok || !v.Authorize(owner) {
 		return -1, "", nil
 	}
-	loc, kerr := v.ResolveUserLocation(owner, remotePath)
-	if kerr != nil {
+	key, ok := externalVolumeKey(v, owner, remotePath)
+	if !ok {
 		return -1, "", &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-	e, serr := fsys.Stat(ctx, loc.FSPath())
+	e, serr := fsys.Stat(ctx, key)
 	if serr != nil || e == nil || e.IsDir {
 		return -1, "", nil
 	}
 	cs := ""
 	if pv, ok := fsys.(meta.Provider); ok {
-		if fm, ferr := pv.FileMeta(ctx, loc.FSPath()); ferr == nil && fm != nil {
+		if fm, ferr := pv.FileMeta(ctx, key); ferr == nil && fm != nil {
 			cs = fm.TotalSHA256
 		}
 	}
@@ -450,16 +614,16 @@ func (h *Handlers) externalCopyKeys(owner, volName, fromRemote, toRemote string)
 	if !ok || !v.Authorize(owner) {
 		return "", "", nil, false
 	}
-	srcLoc, srcErr := v.ResolveUserLocation(owner, fromRemote)
-	dstLoc, dstErr := v.ResolveUserLocation(owner, toRemote)
-	if srcErr != nil || dstErr != nil {
+	srcKey, srcOK := externalVolumeKey(v, owner, fromRemote)
+	dstKey, dstOK := externalVolumeKey(v, owner, toRemote)
+	if !srcOK || !dstOK {
 		return "", "", nil, true // 已裁决（路径非法）→ 由调用方映射 400
 	}
 	fsys, ok := h.externalFSFor(volName)
 	if !ok {
 		return "", "", nil, false
 	}
-	return srcLoc.FSPath(), dstLoc.FSPath(), fsys, true
+	return srcKey, dstKey, fsys, true
 }
 
 // prepareExternalCopyDest 目标已存在处理：默认 409（不静默覆盖）；force 时先删（幂等）。

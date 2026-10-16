@@ -32,9 +32,20 @@ type externalUploadSink struct {
 
 // ownerKey 映射域侧 rel → 外部卷键（ResolveUserLocation 解析 + FSPath 拼接；
 // 域侧 rel 形如 user/<name>，剥桶前缀后传 user 桶相对路径。**基于 locator 操作**——
-// 键拼接只在 FSPath，调用方不自行改路径）。
+// 键拼接只在 FSPath，调用方不自行改路径）。桶目录自身（"user"）剥桶前缀为空 → 键 = user
+// 桶自身（2026-10-06 修复：TrimPrefix("user","user/") 不命中会把 "user" 当桶内路径，产生
+// "user/user" 残留空目录）。
+//
+// 键空间**恒 owner 维度**（`<owner>/user/<rel>`，含嵌套封装卷）——与读/删/列举/转存同一
+// 口径（单一路径映射，无卷类型分支）。
 func (s *externalUploadSink) ownerKey(rel string) (string, error) {
-	stripped := strings.TrimPrefix(rel, "user/")
+	stripped := rel
+	switch {
+	case rel == "user":
+		stripped = ""
+	case strings.HasPrefix(rel, "user/"):
+		stripped = strings.TrimPrefix(rel, "user/")
+	}
 	loc, err := s.v.ResolveUserLocation(s.owner, stripped)
 	if err != nil {
 		return "", err

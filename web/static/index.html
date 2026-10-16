@@ -36,6 +36,11 @@
         <option value="">auto</option>
       </select>
     </label>
+    <label for="volume-filter" style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-secondary);white-space:nowrap;" title="文件列表卷过滤（默认全部卷；选中后切到该卷明文目录，含加密卷）">过滤卷
+      <select id="volume-filter" aria-label="列表卷过滤" style="padding:5px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;color:var(--text-primary);background:var(--bg-input);">
+        <option value="">全部卷</option>
+      </select>
+    </label>
     <button type="button" id="refresh-btn" class="btn btn-secondary">刷新列表</button>
     <input type="text" id="search-input" placeholder="搜索文件…" aria-label="搜索文件" style="padding:6px 10px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;flex:1;min-width:160px;">
     <button type="button" id="search-btn" class="btn btn-primary">搜索</button>
@@ -113,6 +118,7 @@
       <button type="button" id="hub-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Hub</button>
       <button type="button" id="audit-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">审计</button>
       <button type="button" id="volumes-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">卷</button>
+      <button type="button" id="vol-manage-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">卷管理</button>
       <button type="button" id="credentials-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">凭据</button>
       <button type="button" id="secret-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Secret</button>
       <button type="button" id="sync-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">同步冲突</button>
@@ -123,6 +129,7 @@
     <div id="hub-panel" style="display:none;"></div>
     <div id="audit-panel" style="display:none;"></div>
     <div id="volumes-panel" style="display:none;"></div>
+    <div id="vol-manage-panel" style="display:none;"></div>
     <div id="credentials-panel" style="display:none;"></div>
     <div id="secret-panel" style="display:none;"></div>
     <div id="sync-panel" style="display:none;"></div>
@@ -237,6 +244,25 @@
   </div>
 </div>
 
+<!-- 视频播放器弹窗（标准 <video> Range 播放） -->
+<div id="video-player-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;">
+  <div id="video-player-body" style="width:100%;max-width:960px;"></div>
+</div>
+
+<!-- 任务审计弹窗（传输页云任务「审计」行 → auditRowsHtml 渲染） -->
+<div id="audit-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:760px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:16px;">任务审计</h3>
+      <button type="button" id="audit-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
+    </div>
+    <div id="audit-body" style="max-height:56vh;overflow-y:auto;"></div>
+    <div style="margin-top:16px;text-align:right;">
+      <button type="button" id="audit-close-modal-btn" class="btn btn-primary">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script src="sclient/sha256.js"></script>
 <script src="sclient/crypto.js"></script>
 <script src="sclient/sig.js"></script>
@@ -273,9 +299,12 @@
 <script src="volume-ops.js"></script>
 <script src="credentials-format.js"></script>
 <script src="secrets-format.js"></script>
+<script src="vol-manage-format.js"></script>
+<script src="audit-rows-format.js"></script>
 <script src="sync-conflicts-format.js"></script>
 <script src="mesh-status-format.js"></script>
 <script src="trash-format.js"></script>
+<script src="video-player.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 )
 
 // validateIPList 校验一条 IP/CIDR 列表并原地归一：CIDR 原样（ParseCIDR 优先），
@@ -983,16 +984,35 @@ func (c *Config) validateVolumes() (map[string]bool, error) {
 	return seen, nil
 }
 
-// validateVolumeEntry 校验单个卷条目（名称/根/容量/保留/tier/ACL 含 mesh_readers）。
-// seen/seenRoots 为跨卷状态（名称唯一 + 词法等值 root 防呆），由调用方持有。
-func validateVolumeEntry(v *VolumeConfig, seen, seenRoots map[string]bool) error {
+// validateVolumeIdentity 校验卷**身份**：名称合法性 + 名称唯一 + 类型可写性。名称复用
+// `storage.ValidSegmentName` 段名规则（拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名与非法字符），
+// 与租户/桶段名校验同一权威。seen 为跨卷状态（名称唯一），由调用方持有。
+//
+// `type: enclosure` 在此 fail-closed 拒绝：它是**内部装配机制**，不是可写卷类型（唯一声明形态是
+// wrapper 类型 + `extra.source`，见 pkg/volume/enclosure.IsDeclared）。不在此拦会让它一路走到
+// `registry.NewBackend` 报「类型未注册后端」，运维无从判断该怎么改。
+func validateVolumeIdentity(v *VolumeConfig, seen map[string]bool) error {
 	if !storage.ValidSegmentName(v.Name) {
 		return fmt.Errorf("卷名 %q 非法（拒绝空/绝对/..、.__ 前缀、Windows 保留名与非法字符）", v.Name)
+	}
+	if v.Type == enclosure.TypeEnclosure {
+		return fmt.Errorf("卷 %q type=%q 非法：enclosure 是内部装配机制，不是可写卷类型；"+
+			"请改用 wrapper 类型（如 secretdata/secrets）+ extra.source=\"<源卷>:<子路径>\"（装配词汇）"+
+			"或 extra.target=\"<源卷>/<子路径>\"（用户面嵌套语法）", v.Name, v.Type)
 	}
 	if seen[v.Name] {
 		return fmt.Errorf("卷名重复 %q", v.Name)
 	}
 	seen[v.Name] = true
+	return nil
+}
+
+// validateVolumeEntry 校验单个卷条目（根/容量/保留/tier/ACL 含 mesh_readers）。
+// seen/seenRoots 为跨卷状态（名称唯一 + 词法等值 root 防呆），由调用方持有。
+func validateVolumeEntry(v *VolumeConfig, seen, seenRoots map[string]bool) error {
+	if err := validateVolumeIdentity(v, seen); err != nil {
+		return err
+	}
 	if v.Root == "" && (v.Type == "" || v.Type == volume.TypeLocal) {
 		return fmt.Errorf("卷 %q root 为空（非首卷需显式指定挂载根）", v.Name)
 	}

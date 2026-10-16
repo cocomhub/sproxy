@@ -73,6 +73,9 @@ const (
 	logListenClosed     = "listen and serve closed"
 	logHandlersCloseErr = "handlers close error"
 	errFmtListenServe   = "listen and serve error: %w"
+	// errFmtSecretAssembly 是配置声明的加密卷补装失败的统一 boot-fail 文案（四步装配序中三步共用，
+	// 收敛字面量；封装卷补装另有更具体的文案）。
+	errFmtSecretAssembly = "secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w"
 )
 
 var (
@@ -1138,9 +1141,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 封装处理层（wrapper）注册：必须在 enclosure.Parse 之前（RegisterRoutes →
 	// assembleVolumes 内解析声明；未注册的 wrapper 判 ErrUnknownWrapper = boot fail）。
 	registerEnclosureWrappers()
-	// 封装卷类型标记「推迟装配」：其后端构造依赖已装配卷集（源卷特权视图），
-	// 与 secretdata 同型时序；封印注入在 assembleVolumes 内完成，后端在此之后补装。
-	enclosure.MarkDeferred()
+	// 封装卷的推迟装配不需要「按类型标记」：装配层按**声明**判据（enclosure.IsDeclared：
+	// 显式 type: enclosure 或 wrapper 类型 + extra.source）跳过 registry.NewBackend，
+	// 卷集就绪后由 enclosure.AttachAll 补装。
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:                 rt.mux,
 		CfgPtr:              &cfgPtr,
@@ -1158,20 +1161,30 @@ func (rt *runServerRuntime) setupServerCore() error {
 		XferMetrics:         xferMetricsProvider{},
 	})
 	rt.h = h
-	// secret 加密卷装配（无条件，与 sync 开关解耦——Imp-1）：确保默认 secrets 卷 +
-	// Store 已装配卷集到 secretDataSet（供 secretdata 工厂懒解析密钥）。RegisterRoutes
-	// 内部 assembleVolumes 已处理 config 声明卷；此处补默认卷与运行时密钥解析接线。
-	// 失败即 boot fail（fail-closed，I1 修复）：setupSecretBackends 返回的 error **仅**来自
-	// 配置声明的 secretdata/secrets 卷补装失败（operator 显式声明的加密封装不得静默消失——
-	// 与本地卷 load failure 同层）；默认 secrets 卷失败已在函数内降级为 WARN。
-	if err := setupSecretBackends(ctx, h.Volumes(), cfg.StorageRoot, logger); err != nil {
-		return fmt.Errorf("secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w", err)
+	// secret 加密卷装配（无条件，与 sync 开关解耦——Imp-1）。**四步装配序**（2026-10-15 修复
+	// 声明顺序限制，详见 cmd/sproxy/secret_register.go 文件内「装配序」注释）：
+	//   ① Store 已装配卷集（供 secretdata 工厂与封装 wrapper 懒解析密钥）；
+	//   ② 先行补装「不依赖封装声明卷」的 config 声明 secretdata 卷（封装卷的源可能是它们）；
+	//   ③ 封装声明卷补装（enclosure/secrets 嵌套链由此装配）；
+	//   ④ 后置补装「secret_url 指向封装声明卷」的 config 声明 secretdata 卷。
+	// 旧序（②④合一且整体早于 ③）令「config 同时声明嵌套 secrets 卷 + 引用它的 secretdata 卷」
+	// 必然 boot fail（密钥解析时源卷后端尚未装配）。
+	// 任一步失败即 boot fail（fail-closed，I1）：错误**仅**来自配置声明的加密/封装卷补装失败
+	// （operator 显式声明的加密封装不得静默消失——与本地卷 load failure 同层）。
+	if err := storeSecretDataSet(h.Volumes()); err != nil {
+		return fmt.Errorf(errFmtSecretAssembly, err)
 	}
-	// 封装卷后端补装（推迟装配）：set 已就绪 → 按声明拓扑序构造 wrapper 后端并挂回，
-	// 源视图直接持有源 FS（封印注入在 assembleVolumes 阶段已完成，这里只做特权读写视图）。
-	// 失败即 boot fail（fail-closed）：operator 显式声明的封装卷不得静默消失。
+	if err := attachSecretdataVolumes(ctx, h.Volumes(), cfg.StorageRoot, logger, secretdataRefsIndependent); err != nil {
+		return fmt.Errorf(errFmtSecretAssembly, err)
+	}
+	// 封装卷后端补装（推迟装配，master 底座）：set 已就绪 → 按声明拓扑序构造 wrapper 后端
+	// 并挂回，源视图直接持有源 FS（封印注入在 assembleVolumes 阶段已完成，这里只做特权
+	// 读写视图）。失败即 boot fail（fail-closed）：operator 显式声明的封装卷不得静默消失。
 	if err := enclosure.AttachAll(ctx, h.Volumes(), logger, enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); err != nil {
 		return fmt.Errorf("封装卷装配失败（配置声明的封装卷补装 boot fail）：%w", err)
+	}
+	if err := attachSecretdataVolumes(ctx, h.Volumes(), cfg.StorageRoot, logger, secretdataRefsEnclosure); err != nil {
+		return fmt.Errorf(errFmtSecretAssembly, err)
 	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
@@ -1348,8 +1361,13 @@ func (rt *runServerRuntime) setupSync(h *server.Handlers) error {
 	// 本地侧 Root 感知（评审 P0）：sync push/pull 的本地 FS 经 storage.Root ⇒ at-rest
 	// 透明加解密 + 封印语义（此前裸 LocalFS 会在加密卷上落明文/传密文）。
 	exec.TenantRootFS = h.SyncTenantRootFS
+	// 记账口径与 TenantRootFS **同源**：本地目标经 NewRootFS 透明加密落盘 ⇒ 逐文件配额
+	// 必须按物理字节记（2026-10-16 高风险区审核修复：此前按逻辑 ⇒ owner Scope 少记）。
+	exec.TenantPhysSize = h.SyncTenantPhysSize
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
 	exec.SetScopeResolver(h.SyncScopeFor())
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：同步本地写侧（pull/双向）直写默认卷 user
+	// 桶，不经 files 域 guard——注入默认卷占用写保护（命中被封装卷占用子目录 → 该文件失败）。
 	rt.setupSyncConflictIndex(exec, h, logger)
 	setupMeshFSFactory(exec, cfg, h, logger)
 	rt.setupSyncVolumeBackends(exec, h, logger)
@@ -1394,9 +1412,13 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()
 	s3ext.RegisterS3Backend()
+	// linked（外部）类型基础建卷 schema（D2）：这些后端未实现 SchemaProvider，登记静态
+	// **建卷表单** schema（url/凭据字段）使 Web UI「卷管理」建卷表单可提交（后端自带
+	// fail-fast 校验 extra）。与类型注册同步，/api/backends 恒先见类型后有正常表单。
+	registerLinkedBackendSchemas()
 	// 注：secret 加密卷装配已从本函数移出——见 setupServerCore（registerSecretVolumeBackends
-	// 早于 RegisterRoutes 注册后端类型 + RegisterRoutes 后无条件 setupSecretBackends 确保
-	// 默认 secrets 卷），不再被 setupSync 早退门控（Imp-1 装配门控修复）。
+	// 早于 RegisterRoutes 注册后端类型 + RegisterRoutes 后无条件按四步装配序补装 config 声明的
+	// 加密/封装卷），不再被 setupSync 早退门控（Imp-1 装配门控修复）。
 	if hubC, err := newMeshHubClient(cfg, cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID); err == nil && hubC != nil {
 		// 联邦卷回写（roadmap P2）：写面走独立服务名 volwrite（#494 写面会话）。
 		federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),

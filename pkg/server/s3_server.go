@@ -394,6 +394,11 @@ func (h *Handlers) s3ReadBody(w http.ResponseWriter, r *http.Request) ([]byte, b
 			limit = int64(cfg.MaxUploadBytes)
 		}
 	}
+	// 无 body（DELETE/HEAD 直调 handler 的测试路径 r.Body 可为 nil；生产路径服务器恒填
+	// http.NoBody，零回归）——直接跳过读（验签用空 body 哈希）。
+	if r.Body == nil {
+		return nil, true
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
@@ -529,3 +534,5 @@ func (h *Handlers) s3TenantFor(owner string, r *http.Request) *storage.Tenant {
 	}
 	return h.tenantFor(owner)
 }
+
+// s3DispatchObject 按方法分发 GET/PUT/DELETE（统一写/读/删内核）。

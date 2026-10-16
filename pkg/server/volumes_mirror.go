@@ -609,11 +609,15 @@ func (h *Handlers) externalReadSource(ctx context.Context, owner, volName, remot
 		return nil
 	}
 	fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
-	loc, kerr := v.ResolveUserLocation(owner, remotePath)
-	if kerr != nil {
+	// 键解析**与全仓其它外部卷操作同源**（externalVolumeKey）：统一 `ResolveUserLocation +
+	// FSPath`（恒 `<owner>/user/<rel>`），无卷类型分支。此前这里直接用 `ResolveUserLocation`
+	// 而部分路径（下载/删除/列举/转存）曾对嵌套封装卷用 owner-less 键 ⇒ 两套口径并存时
+	// 只读源 key 错位 → 跨卷 move/copy 从封装卷搬出恒 404「源文件不存在」（F2/§8.1 实测）；
+	// 键空间统一（阶段 2 迁移①）后两条链恒等值。
+	key, ok := externalVolumeKey(v, owner, remotePath)
+	if !ok {
 		return nil
 	}
-	key := loc.FSPath()
 	e, serr := fsys.Stat(ctx, key)
 	if serr != nil || e == nil || e.IsDir {
 		return nil

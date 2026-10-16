@@ -148,14 +148,15 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	if mkdirErr := root.MkdirAll(filepath.Dir(rel), 0755); mkdirErr != nil {
 		route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", mkdirErr.Error())
-		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+		return WriteFileResult{}, dirCreateHTTPError(mkdirErr)
 	}
 
 	// 覆盖写场景先统计旧文件大小 prev（双 Adjust 差分用）。
-	prev := int64(0)
+	measuredPrev := int64(0)
 	if stat, statErr := root.Stat(rel); statErr == nil {
-		prev = stat.Size()
+		measuredPrev = stat.Size()
 	}
+	prev := s.prevCharge(route, owner, remotePath, measuredPrev)
 
 	// 内容寻址去重（roadmap P1，dedup.enabled）：
 	//   - 覆盖写（prev>0）：先从台账摘除本 rel 的旧内容引用（旧 checksum 可能另有引用；
@@ -228,14 +229,16 @@ func feedChecksumRewindable(src io.Reader, hasher io.Writer) (io.Reader, error) 
 // 无原子写/去重/版本/台账——外部卷是远程后端，这些本地 inode 语义天然不适用。
 func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, a externalWriteArgs) (WriteFileResult, error) {
 	// 覆盖写场景先统计旧文件大小 prev（双 Adjust 差分用）。
-	prev := int64(0)
+	measuredPrev := int64(0)
 	if sz, ok, serr := a.route.Sink.Stat(ctx, a.rel); serr == nil && ok {
-		prev = sz
+		measuredPrev = sz
 	}
-	if derr := a.route.Sink.MakeDir(ctx, filepath.Dir(a.rel)); derr != nil {
+	// 旧值必须与结算同源（见 prevCharge 注释）：卷自报足迹优先，否则测量值。
+	prev := s.prevCharge(a.route, a.input.Owner, a.remotePath, measuredPrev)
+	if derr := a.route.Sink.MakeDir(ctx, path.Dir(a.rel)); derr != nil {
 		a.route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", a.remotePath)
-		return WriteFileResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+		return WriteFileResult{}, dirCreateHTTPError(derr)
 	}
 	// checksum 计算与底层写入解耦（修复 #763 回归）：外部卷无原子写，需写后比对 SHA-256。
 	// 可 seek 源会被独立一遍读满算 checksum，再原（可 seek）源交给 sink（见 feedChecksumRewindable）。
@@ -609,16 +612,52 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 
 // volumeNameForRoot 返回 root 所在卷名（多卷）；旧装配（volSet nil）或未命中返回空。
 // 用于索引条目记录物理归属（与搜索结果 volume 字段语义一致：目录为空，文件带卷名）。
+//
+// 判定**不得只比指针**（D2）：多卷装配下同一逻辑根会有多个实例——自动路由写入用的 root 与
+// `volSet.Root(name)` 并非同一指针（租户缓存 / OpenRoot 各建一次）⇒ 指针相等恒 false，上传
+// 落库的卷归属恒为空（/api/files 不显示卷 badge、「过滤卷 = main」漏掉这些文件）。
+// 改为**物理路径比对**：root 是该卷根自身**或**其下租户根（`<卷根>/<owner>`）即归属该卷；
+// 多卷根互为嵌套时取**最长匹配**（最具体者胜）。
 func (s *Service) volumeNameForRoot(root *storage.Root) string {
-	if root == nil || s.rt.volSet() == nil {
+	vs := s.rt.volSet()
+	if root == nil || vs == nil {
 		return ""
 	}
-	for _, v := range s.rt.volSet().All() {
-		if s.rt.volSet().Root(v.Name) == root {
-			return v.Name
+	rootAbs, ok := root.Abs("")
+	if !ok {
+		return ""
+	}
+	best, bestLen := "", -1
+	for _, v := range vs.All() {
+		vr := vs.Root(v.Name)
+		if vr == nil {
+			continue
+		}
+		if vr == root {
+			return v.Name // 快路径：同一实例
+		}
+		volAbs, vok := vr.Abs("")
+		if !vok || !pathUnder(volAbs, rootAbs) {
+			continue
+		}
+		if len(volAbs) > bestLen {
+			best, bestLen = v.Name, len(volAbs)
 		}
 	}
-	return ""
+	return best
+}
+
+// pathUnder 报告 p（规范绝对路径）是否等于 base 或位于 base 之下（子路径）。
+func pathUnder(base, p string) bool {
+	base, p = filepath.Clean(base), filepath.Clean(p)
+	if base == p {
+		return true
+	}
+	rel, err := filepath.Rel(base, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 // ---- 目录族域操作（mkdir / rmdir）----
@@ -635,7 +674,9 @@ type MakeDirResult struct {
 // MakeDir 在 owner 视图内**首个卷**（默认卷优先）创建目录树。
 //
 // 错误语义（*HTTPError）：400 = dirname 为空 / 路径非法 / 租户不可用；500 = 创建失败。
-func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (MakeDirResult, error) {
+//
+//nolint:gocognit // S3776: 写面 MakeDir 装配流程（含过渡层占用写保护分支，2026-10-06）；阶段 2 迁 enclosure 后拆分
+func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (MakeDirResult, error) { // NOSONAR: S3776 — 同理由
 	if dirname == "" {
 		return MakeDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "dirname 不能为空"}
 	}
@@ -769,7 +810,9 @@ type RemoveDirResult struct {
 //   - 400：dirname 为空 / 路径非法 / 租户不可用 / 目标不是目录 / 目标为符号链接 / 未带 force
 //   - 404：目录不存在（任何卷上都没有）
 //   - 500：访问目录失败 / 删除失败
-func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string, force bool) (RemoveDirResult, error) {
+//
+//nolint:gocognit // S3776: 写面 RemoveDir 装配流程（含过渡层占用写保护分支，2026-10-06）；阶段 2 迁 enclosure 后拆分
+func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string, force bool) (RemoveDirResult, error) { // NOSONAR: S3776 — 同理由
 	if dirname == "" {
 		return RemoveDirResult{}, &HTTPError{Status: http.StatusBadRequest, Message: "dirname 不能为空"}
 	}
@@ -1523,6 +1566,11 @@ type DeleteFileInput struct {
 	// AllowMissing 为 true 时「文件不存在（含默认卷被 ACL 排除而对 owner 不可见）」按**幂等
 	// 成功**返回（Idempotent=true），false 时返回 404。批量族用 true（重放安全），单条 API 用 false。
 	AllowMissing bool
+	// chargedHint 是**内部**字段（同包使用，不对外）：删除**前**捕获的记账金额（与结算同源）。
+	// 为什么必须提前捕获：删除流程先把文件 rename 到 quarantine（原路径不可测），而卷自报足迹
+	// （secretdata 的 meta pad/parity）只能由**卷能力**按原路径给出 ⇒ 改名后就只剩测量值（少释放
+	// ⇒ 幽灵占用）。非 0 时优先于测量值。
+	chargedHint int64
 	// SoftDelete 为 true 时软删：checksum 校验成功后移到 trash 桶（回收站，roadmap P2）
 	// 而非删除；不释放配额（可恢复）。默认 false 零回归。
 	SoftDelete bool
@@ -1620,6 +1668,13 @@ func (s *Service) DeleteFile(ctx context.Context, input DeleteFileInput) (Delete
 	//
 	// 选择依据：atomicRenameRoot 是替换语义且重试有界（storage.Rename），quarantine 名带
 	// 纳秒时间戳与同 rel 并发删除者天然隔离（两者都会先 rename，后到者 rename 失败返回错误）。
+	// 删除前捕获**记账金额**（与结算同源，见 DeleteFileInput.chargedHint）：quarantine 改名之后
+	// 原路径不可测，而卷自报足迹（secretdata 的 meta pad/parity）只能由卷能力按原路径给出
+	// ⇒ 不改名前的这一刻是唯一能取到「与结算同额」的时机（否则释放只能回落测量值 ⇒ 少释放
+	// ⇒ owner 配额与卷池永久虚高，对账矩阵实测：3MB 足迹卷硬删后仍留 ≈3MB）。
+	if n, ok := s.physChargeFor(homeVol, owner, remotePath); ok {
+		input.chargedHint = n
+	}
 	quarRel, handled, res, qErr := s.renameToDeleteQuarantine(ctx, root, rel, remotePath, input, logger)
 	if handled {
 		return res, qErr
@@ -1721,21 +1776,13 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, rel, remotePa
 		}
 	}
 	for _, name := range vols {
-		// **删除前**取记账字节（卷自报实测足迹优先；删除后对象已不在卷上 ⇒ 无法再测）。
-		charge := int64(0)
-		if n, ok := s.physChargeFor(name, owner, remotePath); ok {
-			charge = n
-		}
-		deleted, derr := ops.ExternalDelete(ctx, owner, name, remotePath, input.ExpectedChecksum)
+		deleted, derr := s.deleteExternalObject(ctx, owner, name, rel, remotePath, input.ExpectedChecksum)
 		if derr != nil {
 			return true, DeleteFileResult{}, derr
 		}
 		if !deleted {
 			continue
 		}
-		// 释放配额（与写入侧同口径：`settleSize` 记的就是这个量）。此前外部卷删除**完全不释放**
-		// ⇒ owner 配额与卷池随每次删除永久虚高（幽灵占用/假 507）。
-		s.releaseExternalDeleteQuota(owner, rel, name, charge)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultSuccess, "外部卷硬删 volume="+name)
 		return true, DeleteFileResult{RemotePath: remotePath,
 			Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, nil
@@ -1751,19 +1798,60 @@ func (s *Service) deleteExternalVolume(ctx context.Context, owner, rel, remotePa
 	return true, DeleteFileResult{}, &HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}
 }
 
-// releaseExternalDeleteQuota 释放外部卷删除后的 owner 配额与卷容量池（口径与写入侧同源）。
-// charge 是**删除前**实测/折算出的记账字节（0 = 无记账能力 ⇒ 不释放，保持既有行为）。
-func (s *Service) releaseExternalDeleteQuota(owner, rel, volName string, charge int64) {
+// deleteExternalObject 在外部卷 volName 上硬删 owner 的 remotePath（经装配层接缝），**成功删除
+// 后**归还配额（owner 全局 Scope + 委托子池，见 releaseExternalDeleteQuota）。返回 deleted=false
+// 表示对象不存在（未删除 ⇒ 不释放）。
+//
+// **这是「外部卷删对象」的单一实现**：delete 链路（deleteExternalVolume 遍历候选卷）与跨卷
+// move 的删源（deleteMovedSource，源为外部卷）共用——两条链路删的是同一类对象，释放口径必须
+// 只有一套，否则任一路径独立演化就会漏释放（幽灵占用/假 507）或重复释放（少计 ⇒ 过度准入）。
+//
+// charge 必须在**删除前**测量（对象删除后已不可测量）：① 卷自报实测足迹优先（secretdata 的
+// parity + meta pad 无法由逻辑长度推出）；② 无足迹能力（多数外部卷：s3/webdav/baidupcs、
+// 以及键空间不经足迹索引的嵌套封装卷）→ 回落实测逻辑大小——与写入侧 `settleSize` 的 ②③ 档
+// 同源（无能力时写入按 written/PhysicalSize 记账），保证「释放量 == 提交量」。
+//
+// rel 是**用户桶相对路径**（`user/<name>`，与 owner 全局 Scope 的键空间一致）；remotePath 是
+// 用户可见路径（外部卷键解析用）。两者在 delete 链路里分别来自 Tenant.UserRel 与校验后入参，
+// 在 move 链路里由调用方同源派生。
+func (s *Service) deleteExternalObject(ctx context.Context, owner, volName, rel, remotePath, expectedChecksum string) (bool, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return false, nil // 未装配接缝：未删除（调用方按「外部卷无入口」处理）
+	}
+	charge := int64(0)
+	if n, ok := s.physChargeFor(volName, owner, remotePath); ok {
+		charge = n
+	} else if n, _, serr := ops.ExternalStat(ctx, owner, volName, remotePath); serr == nil && n > 0 {
+		charge = n
+	}
+	deleted, derr := ops.ExternalDelete(ctx, owner, volName, remotePath, expectedChecksum)
+	if derr != nil {
+		return false, derr
+	}
+	if !deleted {
+		return false, nil
+	}
+	// 释放配额（与写入侧同口径：`settleSize` 记的就是这个量）。此前外部卷删除**完全不释放**
+	// ⇒ owner 配额与卷池随每次删除永久虚高（幽灵占用/假 507）。
+	s.releaseExternalDeleteQuota(owner, rel, volName, charge)
+	return true, nil
+}
+
+// releaseExternalDeleteQuota 释放外部卷删除后的 owner 配额。charge 是**删除前**实测/折算出的
+// 记账字节，与写入侧 `settleSize` 同源（0 = 无可测字节 ⇒ 不释放）。
+//
+// **卷容量池不在此释放**（阶段 2 迁移）：外部卷（含封装卷）的池由 FS 层 `CapacityFS` 计数器
+// 在删除时自行扣减（路由探测预留早已释放、从未提交）⇒ 域层再扣一次就是**重复释放**（把同池
+// 其它文件的占用一并抹掉 ⇒ 少计 ⇒ 过度准入）。此前「委托子 Scope」需要域层例外归还，是因为其
+// 占用由装配层路由提交；迁移到 `quota.NewPoolWithParent` 继承池后，封装卷池也是 FS 层计数器
+// 记账，与普通外部卷同型 ⇒ 例外随之消失。
+func (s *Service) releaseExternalDeleteQuota(owner, rel, _ string, charge int64) {
 	if charge <= 0 {
 		return
 	}
 	if scope := s.rt.quotaScope(owner, rel); scope != nil {
 		scope.ReleaseUsage(charge)
-	}
-	if vs := s.rt.volSet(); vs != nil {
-		if pool := vs.Pool(volName); pool != nil {
-			pool.ReleaseCommitted(charge)
-		}
 	}
 }
 
@@ -1959,7 +2047,20 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 	}
 	// **删除前**取记账字节：卷自报实测足迹（secretdata 的 parity/meta pad 只能实测）优先，
 	// 否则回落「解密视图逻辑长度 → 所在卷物理」折算。删除后索引已无该对象 ⇒ 必须在此取。
+	// 释放金额必须与**结算同源**（见 prevCharge 注释）：卷自报足迹优先——secretdata 的 meta pad
+	// 与 parity 无法由测量值推出，用测量值（逻辑/折算）释放会**少释放** ⇒ owner 配额与卷池永久
+	// 虚高（幽灵占用 / 假 507）。此处仍在删除前（对象存在 ⇒ 足迹可测）。
 	charge := physicalCharge(f.root, info.Size())
+	switch {
+	case input.chargedHint > 0:
+		// 删除前已捕获（与结算同源，见 DeleteFileInput.chargedHint）：首选——此刻原路径已被
+		// rename 到 quarantine，卷能力按原路径取不到足迹。
+		charge = input.chargedHint
+	default:
+		if n, ok := s.physChargeFor(homeVol, f.owner, f.remotePath); ok {
+			charge = n
+		}
+	}
 	if n, ok := s.physChargeFor(homeVol, f.owner, f.remotePath); ok {
 		charge = n
 	}
@@ -2194,15 +2295,18 @@ func (s *Service) writeTargetLocalSettle(ctx context.Context, owner, rel, remote
 	if mkdirErr := root.MkdirAll(filepath.Dir(rel), 0o755); mkdirErr != nil {
 		route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", mkdirErr.Error())
-		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+		return WriteTargetResult{}, dirCreateHTTPError(mkdirErr)
 	}
 	// 覆盖写差分 prev（Exclusive 时 prev 必 0——O_EXCL 创建；NoQuota 时仍预读供 size 语义）。
-	prev := int64(0)
+	// 旧值必须与结算**同源**（见 prevCharge 注释）：卷自报足迹卷（secretdata）测量到的是逻辑
+	// 长度而结算是物理足迹 ⇒ 直接用测量值会让每次覆盖写泄漏 `(足迹 − 逻辑)` 字节的幽灵占用。
+	measuredPrev := int64(0)
 	if !input.Exclusive {
 		if st, serr := root.Stat(rel); serr == nil && st != nil {
-			prev = st.Size()
+			measuredPrev = st.Size()
 		}
 	}
+	prev := s.prevCharge(route, owner, remotePath, measuredPrev)
 
 	var serverChecksum string
 	var written int64
@@ -2315,10 +2419,10 @@ func (s *Service) writeTargetExternalSettle(ctx context.Context, logger *slog.Lo
 	if sz, ok, serr := route.Sink.Stat(ctx, rel); serr == nil && ok {
 		prev = sz
 	}
-	if derr := route.Sink.MakeDir(ctx, filepath.Dir(rel)); derr != nil {
+	if derr := route.Sink.MakeDir(ctx, path.Dir(rel)); derr != nil {
 		route.Release()
 		logger.ErrorContext(ctx, errMsgCreateDirFailed, "error", derr.Error(), "file_name", remotePath)
-		return WriteTargetResult{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateDirFailed}
+		return WriteTargetResult{}, dirCreateHTTPError(derr)
 	}
 	hasher := sha256.New()
 	passSrc, ferr := feedChecksumRewindable(src, hasher)

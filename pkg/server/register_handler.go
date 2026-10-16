@@ -18,6 +18,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/otp"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // 审计 action 常量（注册域）。
@@ -265,6 +266,20 @@ func (h *Handlers) registerCredentialHandler(w http.ResponseWriter, r *http.Requ
 	// 已执行 MaxBytesReader + json 解码（白名单）+ drainAndVerifyBody；失败写 400 并 return。
 	var req registerCredentialRequest
 	if h.validateCredentialBody(w, r, &req) {
+		return
+	}
+
+	// 注册 owner 校验（2026-10-15 代码审核第 5 项修正版）：owner 是**键空间命名空间**，
+	// 必须满足租户/卷层的段名规则；并**显式拒绝字面 anonymous**——它是「未认证 / loopback」
+	// 的保留租户（`storage.NormalizeOwner("")` 的归一目标）。若允许注册成具名账号，该账号会与
+	// 匿名数据**共用同一键空间与 ACL 条目**（这正是 E-MAJOR-6 的原意，现落到凭据入口这个
+	// 正确位置——卷层只做纵深防御）。空 owner 合法（由 AddRegistration 归一为 AK 名，R2-N4）。
+	if oerr := validateRegistrationOwner(req.Owner); oerr != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: auditActionCredRegisterDenied, ObjectType: "credential", Object: "*",
+			Result: AuditResultDenied, Detail: oerr.Error(),
+		})
+		sendJSONResponse(w, map[string]any{"error": oerr.Error()}, http.StatusBadRequest)
 		return
 	}
 
@@ -1191,4 +1206,25 @@ func (h *Handlers) ownerRegistered(owner string) bool {
 		}
 	}
 	return false
+}
+
+// validateRegistrationOwner 校验注册请求的 owner 字段。
+//
+// 规则（与租户/卷层口径一致）：
+//   - 空串合法：由 `Ring.AddRegistration` 归一为 AK 名（R2-N4，既有语义）；
+//   - 字面 "anonymous" **拒绝**：匿名保留租户，仅由未认证/loopback 路径使用（否则与匿名数据
+//     共用键空间与 ACL 条目）；
+//   - 其余须为合法段名且不得为保留功能桶名（user/meta/cloud/…）——否则该 owner 在卷层
+//     解析必失败（fail-closed，但属可提前拦下的配置错误）。
+func validateRegistrationOwner(owner string) error {
+	if owner == "" {
+		return nil
+	}
+	if owner == storage.AnonymousOwner {
+		return fmt.Errorf("owner %q 是保留的匿名租户（未认证/loopback 使用），不可注册为账号", owner)
+	}
+	if !storage.ValidSegmentName(owner) || storage.IsReservedBucketName(owner) {
+		return fmt.Errorf("owner %q 非法：须为合法段名且不得为保留功能桶名（user/meta/cloud/archive/chunk/version/trash）", owner)
+	}
+	return nil
 }

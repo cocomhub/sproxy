@@ -173,8 +173,10 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 			continue
 		}
 		fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
-		loc, kerr := v.ResolveUserLocation(owner, stripped)
-		if kerr != nil {
+		// 键 = 用户可见路径经**唯一映射入口**（externalVolumeKey：ResolveUserLocation +
+		// FSPath，恒 `<owner>/user/<rel>`）——与上传/删除/列举/转存同口径。
+		ownerKey, kOK := externalVolumeKey(v, owner, stripped)
+		if !kOK {
 			// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
 			continue
 		}
@@ -185,8 +187,6 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 		if !egressOwnerMatch(v, owner) {
 			continue // 非该 owner 请求 egress 卷 → 不命中（404，不泄卷存在性）
 		}
-		// 基于 locator 操作：FS 键仅在调用 FS 方法时经 FSPath 拼接（唯一拼接点）。
-		ownerKey := loc.FSPath()
 		e, err := fsys.Stat(r.Context(), ownerKey)
 		if err != nil || e == nil || e.IsDir {
 			continue // 该卷无此文件/目录 → 下一候选

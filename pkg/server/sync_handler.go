@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -116,6 +117,21 @@ func (h *Handlers) SyncTenantRootFS(owner string) (syncpkg.FS, bool) {
 		return nil, false
 	}
 	return NewRootFS(tnt.Root()), true
+}
+
+// SyncTenantPhysSize 返回该租户卷的**记账口径折算**（加密卷 ⇒ 密文长度；明文 ⇒ 恒等 / nil），
+// 供 `pkg/syncexec` 的逐文件配额记账按同一口径折算（2026-10-16 高风险区审核修复）。
+//
+// 为何必须：sync pull 的本地目标经 `SyncTenantRootFS` = `NewRootFS(tnt.Root())` ⇒ **透明加密
+// 落盘**（物理 > 逻辑），而逐文件记账此前用源条目 `size`（**逻辑**）⇒ owner Scope **少记**
+// （且 owner 配额侧**永不收敛**，只有卷池靠磁盘扫描收敛）⇒ **可超真实配额**（违反 G1）。
+// 与 `pkg/files` 的 `RootPhysSizer` **同源**（同一事实源，禁各写一份公式）。
+func (h *Handlers) SyncTenantPhysSize(owner string) func(int64) int64 {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	return files.RootPhysSizer(tnt.Root())
 }
 
 func (h *Handlers) syncTenantRoot(owner string) (userRootAbs, persistDirAbs string, ok bool) {

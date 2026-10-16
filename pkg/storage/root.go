@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,9 +28,15 @@ type Root struct {
 	r    *os.Root
 	base string // 绝对路径（供 Abs/Chtimes 等派生）
 	// enc 是 at-rest 加密态（roadmap P2 残余）：非 nil 时 Open/OpenFile 返回
-	// seals 是卷级封印规则（封装卷占用的源卷子路径；装配期经 SetSeals 注入，之后不可变）。
-	// nil = 无封印（行为零回归）。封印语义见 seal.go。
-	seals []SealRule
+	// seals 是卷级封印规则（封装卷占用的源卷子路径；装配期经 SetSeals 注入）。
+	// **原子指针**：运行期新增/删除封装卷会重设源卷封印（server 侧 Attach/Detach），
+	// 与各写面/读面高频的 SealAt 判定并发——普通切片赋值会撕读（数据竞争）。
+	// 载荷不可变：SetSeals 每次构造新切片后整体换指针，读者拿到即用。
+	seals atomic.Pointer[[]SealRule]
+	// sealSource 是**实时封印来源**（仅租户子根使用，见 tenant_resolve.go 的封印传播）：
+	// 非 nil 时封印每次判定实时求值（翻译父卷根当前规则），使父根封印的运行期变更立即生效；
+	// 该字段只在对象发布前写入（openTenant 内），此后只读 ⇒ 无竞争。
+	sealSource func() []SealRule
 	// 解密 reader / 加密 writer（透明）。OpenRoot 后经 SetEncryption 注入。
 	enc *rootEnc
 }

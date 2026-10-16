@@ -9,6 +9,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 )
 
@@ -27,6 +28,8 @@ import (
 // 跨外部卷源（baidupcs/s3/…）：封印经 `enclosure.SealBackend` 套在**该后端 FS 上**（装配处
 // 就地包装）⇒ 所有 `be.FS()` 调用者自动继承封印；封装卷自身经 `enclosure.UnsealedSource`
 // 取未封印特权视图（只剥封印层，配额/可信装饰器保留）。
+
+// applyEnclosureSeals 按封装声明注入封印 + 配额继承（见文件头）。
 func applyEnclosureSeals(log *slog.Logger, acc *volumeAccum) error {
 	decls, err := enclosure.Parse(acc.volumes)
 	if err != nil {
@@ -103,4 +106,12 @@ func logEnclosureDecls(log *slog.Logger, decls []enclosure.Decl) {
 			"effective_source", baseVol, "effective_path", basePath,
 			"read_mode", mode, "allow_direct_url", d.AllowDirectURL, "max_bytes", d.MaxBytes)
 	}
+}
+
+// isEnclosureDecl 报告卷声明是否走**封装装配**：wrapper 类型 + `extra.source`（唯一形态）。
+// 判据单源在 `enclosure.IsDeclared`（装配词汇），本函数只做配置层（VolumeConfig）到卷描述的
+// 适配——装配期据此把此类卷排除在按类型分派的 `registry.NewBackend` 之外（后端由
+// `enclosure.AttachAll` 在卷集就绪后构造）。
+func isEnclosureDecl(typ string, extra map[string]any) bool {
+	return enclosure.IsDeclared(volume.Volume{Type: typ, Extra: extra})
 }
