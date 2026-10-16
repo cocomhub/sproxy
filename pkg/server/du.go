@@ -70,7 +70,7 @@ func (h *Handlers) duHandler(w http.ResponseWriter, r *http.Request) {
 	// **外部卷**（加密/远端卷：无本地 Root）：走**外部 FS** 递归统计。此前恒 404——`locateForRead`
 	// 需要本地租户，而外部卷没有 ⇒ `du <外部卷>:/…` 不可用（实测）。
 	if explicitVolEarly := r.URL.Query().Get("volume"); explicitVolEarly != "" {
-		if v, ok := h.volSet.ByName(explicitVolEarly); ok && h.volSet.Root(explicitVolEarly) == nil {
+		if v, ok := h.volSet.ByName(explicitVolEarly); ok && !h.volSet.HasLocalRoot(explicitVolEarly) {
 			h.duExternalVolume(w, r, owner, v, remotePath)
 			return
 		}

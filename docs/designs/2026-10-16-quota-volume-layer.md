@@ -133,15 +133,30 @@ MaxPhysical(owner, rel string, logical int64) int64    // 写前上界（= 该�
 
 ## 3. 前置条件（**阻断项**，必须先做）
 
-### 🔴 P0-a：封装卷必须**经存储卷接口**读写（今天绕行 ✗）
+### ✅ P0-a（**已撤销**，2026-10-16 复核）：`SourceFS` 的 raw 视图是**有意设计**，不是缺陷
 
-实测：`enclosure.SourceFS`（`pkg/volume/enclosure/attach.go:166`）对**本地源卷**返回
-**`syncpkg.NewLocalFS(rt.AbsPath(), nil)`** ✗ —— **裸路径 FS，绕过存储卷接口** ⇒
-配额层**看不到**封装卷的写入 ✗✓。
+**原假设（错）** ✗：`enclosure.SourceFS`（`pkg/volume/enclosure/attach.go`）对本地源卷返回
+裸 `syncpkg.NewLocalFS(rt.AbsPath())` ⇒ 「绕过存储卷接口/封印」✗ ⇒ 要改为经 `RootFS` ✓。
 
-⇒ 必须把 `SourceFS` 改为返回**存储卷的 FS 视图**（经 `RootFS`/卷接口 ✓，携带 `LogicalKey` ✓）。
-**注意**：这与既有的 **R26「卷根直连适配器」棘轮** 同族 ✓（历史 P0 全出自「绝对路径 + 裸 os」✗）
-⇒ 本片做完后，R26 白名单可**收缩** ✓。
+**复核证据（推翻）** ✓：
+- `SourceFS` 的代码注释**本就写明**「取源卷的**特权视图**（封印前语义：**直接 raw 视图，不受封印
+  影响** —— 封装卷**必须能读写被封区间**；客户端则只能经封装卷由服务器处理）」，且「**LocalFS
+  绕开封印正是「特权」的含义**」✓ —— 这是**声明式裁定**，非疏漏 ✓；
+- **必须是 raw（非透明）**：封装卷（如 `secretdata`）**自行加密并写入密文**（分块/目录 meta 均
+  密文形态）⇒ 换成 `pkg/rootfs` 的透明入口会 **双重加密** ✗（且读回无法解释）✓；
+- **必须不受封印**：封装卷的全部读写都在源卷**被封区间**内 —— 「封装」正是「由 wrapper 代理
+  访问该区间」⇒ 受封印则封装卷自身无法工作 ✗；客户端侧仍由 `storage.Root` 封印拦下 ✓；
+- **能力面**：消费者依赖 `syncpkg.LocalVolume` 等可选能力（`secretdata.go:608` 断言 ✓）⇒
+  换成仅实现核心 7 方法的适配器会**静默丢能力** ✗。
+
+⇒ **`SourceFS` 不得改为 `rootfs.New(...)`** ✓；M2（关闭两个绕行点）**整体撤销** ✓。
+
+**副产品（仍有价值）**：
+- `Set.FSFor` **无生产调用点**（非测试源码仅本定义 ✓）⇒ raw 语义已在注释中显式标注为「内部
+  布局/特权面，**用户内容面不得走**」✓，并列为 **M5 候选删除** ✓；
+- **R26 白名单不需收缩**（两者均为有意 raw）✓ —— 原先「修完可收缩」的推论一并撤销 ✓；
+- **能力面差异已取证**（`LocalFS` 实现 14 个可选能力接口中的多个，而 Root 适配器仅核心 7 方法 ✓）
+  ⇒ 任何「把 raw 视图换成透明适配器」的改动**必须先逐项核对消费者** ✓。
 
 ### 🔴 P0-b：`storage.Root` 直操作路径必须划界
 
@@ -224,21 +239,27 @@ raw `root.OpenFile`（meta sidecar / s3 part / 块写暂存 / 索引快照 ✓�
 
 ---
 
-## 8. 决议表（未定则不实施）
+## 8. 决议表（**已裁定**，2026-10-16 用户「按建议处理」）
 
-| # | 决议 | 建议 |
-|---|---|---|
-| 1 | 归属通道形态 | `LogicalKey` **参数**（非 context ✓，与既有「显式传递优于 context 隐式」一致 ✓） |
-| 2 | 上界来源 | 卷自报 `MaxPhysical`（唯一可行 ✓） |
-| 3 | 豁免清单 | staging / S3 part / meta sidecar / 索引快照 / probe / 云任务 —— 逐项**签字** ✓ |
-| 4 | 配额层次序 | 在 `Wrap/Seal/Guard` **之下**（先拒后记 ✓）—— 逐卷确认 ✓ |
-| 5 | 失败语义 | 半途失败**按实测结算** ✓（非释放 ✓） |
-| 6 | 跨进程 | 要求 **per-volume 持久账本** ✓（否则 G1 不可宣称 ✗） |
-| 7 | 迁移方式 | 严格「**先删上层、再加底层**」✓（并行期 = 双计 ✗，已实证 `committed += 2×size` ✗） |
+> 状态：**7 项全部按建议值裁定** ✓ ⇒ 实施时**不再逐项请示** ✓；若实施中发现某条**前提不成立**
+> （本会话已有先例：P0-a 被证伪 ✗），则**停下来出证据 + 提修正案** ✓，不得静默偏离 ✗。
+
+| # | 决议 | **裁定值**（= 建议值 ✓） | 裁定理由 |
+|---|---|---|---|
+| 1 | 归属通道形态 | `LogicalKey` **参数**（非 context ✓） | 与既有「显式传递优于 context 隐式」一致 ✓；context 隐式会让**漏传=静默错归属** ✗（本会话反复出现的缺陷类 ✓） |
+| 2 | 上界来源 | 卷自报 `MaxPhysical`（唯一可行 ✓） | 没有一种卷的物理尺寸能由调用方推出 ✗（加密=公式、外部=远端 stat ✓） |
+| 3 | 豁免清单 | staging / S3 part / meta sidecar / 索引快照 / probe / 云任务 —— **逐项签字** ✓ | 这些**不是用户内容**（或已由各自机制记账 ✓）⇒ 重复记账 = 双计 ✗；**每项须在实现 PR 里给出「为何豁免」的一句证据** ✓ |
+| 4 | 配额层次序 | 在 `Wrap/Seal/Guard` **之下**（先拒后记 ✓） | 拒绝必须发生在**任何字节落盘之前** ✓；在装饰器之上会让封印/变换**先执行再拒绝** ✗ |
+| 5 | 失败语义 | 半途失败**按实测结算** ✓（非释放 ✗） | 已落盘字节是**真实占用** ✓（释放会让账本小于磁盘 ⇒ 伪 507 类 ✗） |
+| 6 | 跨进程 | 要求 **per-volume 持久账本** ✓（否则 G1 不可宣称 ✗） | 进程内树 ⇒ 跨进程盲区 ✗；账本**随卷走** ✓（卷删除/迁移结构性正确 ✓） |
+| 7 | 迁移方式 | 严格「**先删上层、再加底层**」✓ | 并行期 = 双计 ✗（已实证 `committed += 2×size` ✗）；⇒ **禁跨片并存** ✓，每片**同片内删旧加新** ✓ |
 
 ---
 
 ## 9. 分片与验收矩阵
+
+> **进展（2026-10-16）**：片 1（`Kind()` ✓ M0/M1a/M1b）、片 2（本地卷自报足迹/上界 ✓）**已完成**；
+> 片 3 已拆为 **3a（整卷权威统一，已完成）** + **3b（5 个装配点收敛，待做）**——见 §9.1。
 
 | 片 | 内容 | 验收（每片独立可回退 ✓） |
 |---|---|---|
@@ -250,6 +271,196 @@ raw `root.OpenFile`（meta sidecar / s3 part / 块写暂存 / 索引快照 ✓�
 | **5** | `QuotaVolume` 接管**用户**配额 + 联邦查询端点 | 跨卷求和一致性 ✓ + ACL 收敛（只返回可访问卷 ✓） |
 | **6** | `charged_bytes` 落该层 + **删除**上层启发式（`prevCharge`/`chargedHint` ✓） | 「释放 = 结算」不变式 ✓ |
 | **7** | per-volume **持久账本** + 对账自校验 | 崩溃/重启/跨进程 ✓ |
+
+---
+
+### 9.1 片 3 具体计划（2026-10-16 取证）
+
+**现状取证（重要）**：「整卷容量记账」今天散在 **5 个装配点**各自 `capacity.WrapBackend(be, counter)`：
+
+| # | 位置 | 形态 |
+|---|---|---|
+| 1 | `pkg/server/volumes.go:317`（配置外部卷） | `NewPoolCounterPersistent` / `NewPoolCounter`（池同源 ✓） |
+| 2 | `pkg/server/user_volume_api.go:280`（用户建卷） | `NewCounter`（持久化文件 ✓） |
+| 3 | `pkg/volume/enclosure/attach.go:151,154`（封装卷） | 池同源 ✓ |
+| 4 | `cmd/sproxy/secret_register.go:734`（secretdata） | 池同源 ✓ |
+| 5 | `cmd/sproxy/user_volume_restore.go:173`（恢复） | `NewCounter`（持久化 ✓） |
+
+⇒ 这正是 §0 根因的**标准形态** ✗：记账是**横切关注点**，却实现成 **5 个调用点各自的义务**——
+**漏一处即「静默无限额」**（新卷型/新装配路径不会报错 ✗）。
+
+**🔴 关键约束（实现前必须知道，否则会撞墙）**：`pkg/volume/capacity` **已 import**
+`pkg/volume/registry`（用 `registry.ExternalBackend` ✓）⇒ `registry` **不能**反向 import `capacity`
+（成环 ✗）⇒ `QuotaVolume` **不能**直接调用 `capacity.Wrap` ✗。
+
+**解决方案（片 3a ✓ 已落地）**：在 **`registry` 侧定义消费者最小接口** `VolumeCounter`
+（`TryAdd/Release/Used/Capacity` ✓）——Go 接口是**结构性**的 ⇒ `capacity.Counter` 的两种实现
+（`PoolCounter` ✓ / `VolumeCapacityCounter` ✓）**天然满足**，**零 import** ✓。⇒ 配额层因此
+**无需知道**整卷账本的实现形态（内存池 / 持久文件 ✓）。
+
+**片 3b（待做，机械收敛）**：把 5 处的 `capacity.WrapBackend` 改为**构造 `QuotaVolume` 并注入 counter**
+（**同片删除旧包装** ✗，否则双账本 ✗）；验收：① 既有容量用例（`capacity_fs_test` / `volume_quota_test`
+/ `metrics_capacity_test` ✓）全绿；② **新增「恰好一次」断言**（同一卷写入 N 字节 ⇒ `Used == N`，
+**非 2N** ✗）；③ 对账矩阵 ✓。
+
+**为何先做 3a 而不直接改 5 处**：3a 让「整卷权威单一」**可表达** ✓，并把 3b 降为**纯注入点替换** ✓
+（风险从「5 处语义变更」降为「5 处参数替换」✓）；且 3a 的「恰好一次」测试是 3b 的**安全网** ✓。
+
+### 9.2 片 5 取证：per-owner 配额预警**静默 no-op** 缺陷 + **结论更正**（2026-10-16）
+
+> ⚠️ **本节后半部分的「API 缺口」结论已于同日更正为错误** ✗ —— 正确结论见下方「更正」段。
+> 保留原文是为了留存「**从调用点断言 API 语义而不看数据模型**」这个错误路径 ✓。
+
+**🔴 缺陷（真实、已定位，未修）**：`pkg/server/routes_setup.go:113` 的**配额预警读取器**：
+
+```go
+h.alertEngine.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
+	sc := h.quotaScopeFor(owner, "")
+	if sc == nil { return 0, 0 }
+	return sc.Usage(), sc.MaxBytes()
+})
+```
+
+`quotaScopeFor(owner, rel)` 首行即：`segs := strings.Split(rel, "/")` ⇒ 当 `rel == ""` 时
+`segs[0] == ""` ⇒ **恒返回 nil** ✗ ⇒ 读取器**永远拿到 (0,0)** ⇒ **per-owner 配额预警静默失效** ✗
+（无日志、无指标、无报错 ✓ —— 「生效状态不可观测」✗）。且 `rel == ""` 的调用点**全仓仅此一处** ✓
+（`grep 'quotaScopeFor([^,]*, "")'`）⇒ 非通用陷阱，而是**此处用错了 API** ✓。
+
+**🔴 为何不能简单改成「owner 根 scope」** ✗：owner 根由
+`ensureTenantQuotaLocked` 首返回值给出（`h.globalPool.Scope("/tenant/"+owner, quotaBytes)` ✓），
+但 **`quota.Scope.Usage()` 返回的是 `s.pool.Usage()`**（**整个池**的用量 ✗，非该节点的 ✗）⇒
+直接用会报**全局**用量 ⇒ 所有 owner 的预警**互相干扰** ✗（正是 `stagingQuotaPool` 注释里
+警告过的跨租户干扰形态 ✗）。
+
+**⇒ 真正的缺口** ✓：`quota.Scope` **没有 per-node（子树）用量访问器** ✗ —— `Usage()`/`Reserved()`/
+`MaxBytes()`/`Available()`/`UsageByBucket()` **全部委托给池** ✗。⇒ 「owner 用量」目前**无法从
+现有 API 读出** ✗ ⇒ 这不是拼写错，而是 **API 缺口** ✓。
+
+**归属** ✓：该缺口正是 **片 6（`charged_bytes` 记录化）**要补的能力 ✓（「结算 = 释放同源」
+的记录化必然要求在**节点**上记录已确认占用 ⇒ 顺带提供 per-node 用量 ✓）。
+**在片 6 落地前不得**用「全局用量冒充 owner 用量」✗（那是把静默 no-op 换成静默**误报** ✗，更坏）。
+⇒ 本项**显式挂起**并在此存档，防后人重踩 ✓。
+
+### 9.3 片 6 取证：释放侧 **~20 处各自计算** vs 结算侧 **单源**（2026-10-16）
+
+**现状（实测）** ✓：**结算侧已单源**（`Service.settleSize` = 卷自报足迹优先 ⇒ `UploadRoute.PhysicalSize` ⇒ 恒等 ✓）；
+但**释放侧仍散在 ~20 处各自计算** ✗：
+
+| 来源族 | 代表站点 | 依据 |
+|---|---|---|
+| **① 公式折算** | `trash.go:280,287`（`physicalCharge(root,size)` ✓）、`write_ops.go:935` | `RootPhysSizer` ⇒ `storage.EncryptedPhysicalSize`（**仅加密卷** ✓） |
+| **② `Stat` 已物理** | `version_store.go:276`、`write_ops.go:971/997/1516`、`dav_meta.go:94` | 加密卷上 `Stat` 已是密文长度 ✓（注释自证「不再折算」✓） |
+| **③ 删除前捕获** | `write_ops.go:1676`（`DeleteFileInput.chargedHint` ✓）、`prevCharge`（覆盖写旧值 ✓） | 原路径已消失 ⇒ **必须在改名/删除前捕获** ✓ |
+| **④ 其它** | `chunked_upload.go:1420`、`dir_charge.go:134`、`cloud_archive_handler.go:742`、`files_service.go:1096`、`write_ops.go:1291/1854/2080` | 各异 |
+
+**⚠️ 该漂移候选已于同日【证伪】✗✓**（片 6 第 1 步实测）：外部/封装卷的软删被**显式拒绝**
+（`?soft=true` ⇒ 400「外部卷暂不支持回收站删除：请改用硬删」，`pkg/files/write_ops.go:1772`
+的 fail-closed 分支，注释自证「禁静默降级」）⇒ **回收站释放路径只作用于本地卷** ✗；
+而本地卷的**结算侧同样走公式**（`RootPhysSizer`，无自报能力）⇒ **两族来源永不重叠** ✓ ⇒
+`释放 == 结算` 成立 ✓。硬删路径走 `DeleteFileInput.chargedHint`/`prevCharge`（本就**卷自报
+足迹优先** ✓）⇒ 同源 ✓。**回归用例**：`TestWrapperSoftDelete_RefusedFailClosedAndNoSideEffect`
+（钉住「拒绝 + **零副作用**」）✓。⇒ 片 6 的「释放 ≠ 结算」**不需要**~20 站重构 ✗。
+
+（以下为**原始嫌疑记录**，保留以留存该判断路径。）
+
+**🔴 漂移候选（**尚未用测试证实** ✗ —— 按本会话纪律不得无证据断言 ✓）**：对 **secretdata** 这类
+「物理量含**公式不可推**的部分」的卷（meta blob pad 到 `[base, 2·base)`、XOR parity 可达逻辑 2× ✓）：
+**结算**走卷自报足迹（`VolumePhysFootprinter.PhysFootprint` ✓，含 meta pad ✓），而**回收站释放**
+走 `physicalCharge`（`EncryptedPhysicalSize` 公式 ✗，**覆盖不到 meta pad** ✗）⇒ 理论上
+**少释放 = 幽灵占用 / 假 507** ✗。
+**待验证** ✓：需构造「secretdata + 软删 + owner 配额」用例，断言 `结算额 == 释放额` ✓
+（**片 6 的第一件事就是这个回归用例** ✓，先红再修 ✗）。
+
+**片 6 交付形状** ✓（按决议 #7：**同片内删旧加新** ✗）：
+1. **写时记录** `charged_bytes`（落对象 meta `Extra` ✓ —— `FileMeta.Extra map[string]any` ✓ +
+   `sync.MetaExtraUpdater.UpdateMetaExtra` 旁路写入 ✓，已有先例：`cloud/transfer.go:412/528` ✓）；
+2. **释放侧唯一入口** `releaseChargeFor(route, owner, remotePath, fallback)`：
+   ① 已记录 ⇒ 读记录（**同源** ✓）；② 对象仍在 ⇒ 卷自报足迹 ✓（= `prevCharge` 现有逻辑 ✓）；
+   ③ 对象已消失（改名/删除后）⇒ **必须在操作前捕获** ✓（`chargedHint` 模式 ✓）；
+3. **逐站迁移** ~20 处到该入口（**同片删旧计算** ✗）；
+4. **不变式测试** ✓：`结算额 == 释放额`（对每个卷型 ✓，含 secretdata ✓）+ 变异命中。
+
+**为何不本轮做** ✓：~20 站迁移 + 记录机制 + 每卷型回归 = 体量与片 4 同量级 ✗；
+且**第 1 步（回归用例）必须先红** ✗ —— 否则可能是在修一个**不存在**的漂移 ✗（本会话已有 P0-a 先例 ✓）。
+
+### 9.4 片 4 前提复核：`LogicalKey` **对当前架构不是必需**（2026-10-16 取证）
+
+**实测（三条）** ✓：
+1. **`LogicalKey` 全仓零命中**（`grep -rn LogicalKey --include=*.go pkg/ cmd/` ⇒ 无输出 ✗）
+   ⇒ 它是**纯设计概念**，从未实现 ✓；
+2. **`QuotaVolume` 零生产调用点**（`grep -rn 'QuotaVolume|\.Reserve\(|VolumeUsed\('` 除
+   `pkg/volume/registry` 自身外 ⇒ 无输出 ✗）⇒ M4a/M4b 的配额层**完全未接线** ✓；
+3. **归属解析发生在封装卷【之上】** ✓：`Service.settleSize(route UploadRoute, owner, remotePath string,
+   written int64)` 由**写内核**传入 `owner`/`remotePath` ✓ ⇒ 不依赖卷内路径可归属 ✗。
+
+**⇒ 结论** ✓：`LogicalKey`（把归属**下传**到卷内）只服务**本设计的§1.1 目标分层**（配额层包在
+**存储卷**上 ⇒ 到达它时路径已是封装卷内部名 ✗）—— **不是**当前架构的正确性所需 ✓。
+⇒ **片 4（`sync.FS.WriteFile` 签名变更 + 82 调用点）在「消灭缺陷」维度上收益为 0** ✗
+（本会话已分别验证：整卷侧已单源 ✓（片 3b 唯一入口）、每用户侧已单源 ✓（片 6 证伪漂移）、
+四类历史漂移均已修复或证伪 ✓）。
+⇒ **它的真实价值 = 架构一致性**（让「配额权威在卷」成立 ✓）⇒ **属于重构/迁移，不属于修复** ✗；
+在未证明「当前双位置（写内核 + 卷容量装饰器）会造成**具体**缺陷」之前，**不建议**做 ✗
+（代价：82 调用点 + 每卷型回归 = 全库最大一片 ✗）。
+
+**待用户裁定** ✓：① 片 4 **缓做/不做**（本文档倾向「缓做」✗）；② `QuotaVolume`（M4a/M4b，
+当前零调用点 ✗）是**接线**（找一个真实消费者）还是**回收**（避免死代码 ✗）——两者均需先定
+「配额权威是否真要进卷」这个**方向性**裁定 ✓。
+
+**本会话已完成的真实收益（与片 4 无关）** ✓：M4a（双账本骨架 + 覆盖写双计修复）、片 2（卷自报
+足迹/上界）、片 3a/3b（整卷权威统一 + 唯一入口 + R29）、片 5（per-owner 预警静默 no-op 修复）、
+片 6（漂移证伪 + 回收站边界不变式）、M5 步 1（死代码 `Set.FSFor` 删除）。
+
+### 9.5 片 4a 决议：`LogicalKey` **形状** + **通道形态**（2026-10-16）
+
+**取证** ✓：`sync.FS` 接口（`pkg/sync/entry.go:54`）：
+```go
+WriteFile(ctx context.Context, path string, r io.Reader, size int64, mt int64) error
+```
+非测试调用点 **120 处** ✗；`sync.FS` 实现 **15+**（`LocalFS`/`PrefixFS`/`EncryptedFS`/
+`StagingQuotaGateFS`/`rootFSCore`/`remoteFS`/`subPathFS`/`CapacityFS`/`backupQuotaFS`/
+`davMetaFS`/`rootSecretsFS`/`enclosure`/`secretdata`/外部卷族 ✓）。
+
+#### 🔑 形状：`LogicalKey{Owner, Rel string}` —— **只有 `owner` 是丢失的信息**
+**关键洞察** ✓：路径参数 `path` **已经携带** `bucket/rel`（客户端可达路径恒 `<卷根>/<owner>/<bucket>/<rel>` ✓）；
+封装卷内部名（随机容器 + 内容哈希）丢掉的**只是 `owner`** ✗ —— 但它同时**丢失了「原 `rel` 用于作用域
+最长前缀解析」的能力** ✗（配额按功能桶/子目录最长前缀定 Scope ✓）⇒ 两者都要 ✓。
+⇒ 即：`LogicalKey` = **写内核已有的 `(owner, remotePath)` 对** ✓（`Service.settleSize(route, owner,
+remotePath, written)` ✓）—— 不是新概念，而是**把这个对从写内核下传到卷内** ✓。
+
+**为何不用单一字符串键** ✗：字符串需重新解析（且“拼回去再拆开”是归属漂移的经典根因 ✗）；
+结构化两字段让**非法状态不可表示** ✓（与仓内 `Location`/`Ref` 一致 ✓）。
+**零值语义** ✓：`LogicalKey{}` = **无归属**（调用方不声明 ⇒ 配额层**显式不记账** ✗，**禁**猜 ✗）——
+与「未判定不得当 Storage ✗」同型。
+
+#### 📡 通道形态：**参数**（决议 #1）
+```go
+WriteFile(ctx context.Context, key sync.LogicalKey, path string, r io.Reader, size, mtime int64) error
+```
+**为何参数而非 context** ✗（决议 #1 已定）：context 隐式会让**漏传 = 静默错归属** ✗（本会话反复
+出现的缺陷类 ✓）；参数使**编译器强制**每个调用点表态 ✓（要么传真归属 ✓、要么显式 `LogicalKey{}` ✓）。
+
+#### 迁移序（4b，机械但量大）
+1. **先加参数**（接口 + 15+ 实现 + 120 调用点，**编译器驱动** ✗）——调用点绝大多数传
+   `LogicalKey{}`（它们**不在**封装卷下、`path` 已可归属 ✓）；
+2. **再在封装卷下传**（secretdata 写入时传真实 `(owner, rel)` ✓）——**同一片内**（禁双形态 ✗）；
+3. **配额层消费**（`QuotaVolume.Reserve(key, n)` 按 key 归属 ✓）；
+4. **回归矩阵** ✓：4 类历史漂移（单位不一致 / 释放≠结算 / 归属丢失 / 静默降级）逐项用例 ✓。
+**风险提示** ✓：步骤 1 纯机械（编译器强制 ✓），步骤 2 是**语义变更**（配额层开始记账 ⇒
+**同片必须删上层重复记账** ✗，否则双计 ✗ —— 已实证 `committed += 2×size` ✗）。
+
+#### 🔴 脚本化迁移的**强制守卫**（2026-10-17 事故记录）
+
+首次尝试用 `os.walk(<repo root>)` 批量改 `WriteFile` 签名 ⇒ **误入 `.worktrees/`** ✗ ——
+那里是**其他分支的独立工作树**（含未提交 WIP ✗）⇒ 一次改动了 **228 个文件**（跨 3 个 worktree ✗）。
+**已用逆向正则外科式完整恢复** ✓（只撤销插入的 `key LogicalKey` 参数 ⇒ **不动任何无关 WIP** ✓）；
+主树 `git checkout -- .` 恢复干净 ✓。
+
+**⇒ 强制规则（后续任何仓级脚本化改动）** ✓：
+1. **必须排除** `.worktrees/`（以及任何嵌套 worktree ✗）—— 推荐只遍历 `pkg/`、`cmd/`、`internal/`、
+   `test/`、`web/` 这些**显式白名单**目录 ✓，**禁止**从仓库根 `walk` ✗；
+2. 改动前先 `git worktree list` 确认边界 ✓；
+3. 恢复优先用**逆向变换**（外科式 ✓）而不是 `checkout` ✗ —— `checkout` 会连带毁掉**无关 WIP** ✗；
+4. 落盘前先 `git status --porcelain` 在**每个 worktree** 各查一次 ✓。
 
 ---
 
@@ -287,7 +498,7 @@ raw `root.OpenFile`（meta sidecar / s3 part / 块写暂存 / 索引快照 ✓�
 
 | 位置 | 现状 | 后果 |
 |---|---|---|
-| `Set.FSFor(name)`（`registry/set.go:177`） | 本地 → **`LocalFS(RootDir)`** ✗ | 绕过 `storage.Root` ⇒ **加密卷读密文/写明文 + 绕过封印** ✗ |
+| ~~`Set.FSFor(name)`~~（**已删除**，2026-10-16） | 曾是本地 → **`LocalFS(RootDir)`** ✗；复核证实**零调用点**（连测试都没有 ✗，`grep '\.FSFor('` 无命中）⇒ **死代码** ⇒ 已删 ✓ | 原后果：绕过 `storage.Root` ⇒ 加密卷读密文/写明文 + 绕过封印 ✗ —— **随删除消失** ✓ |
 | `enclosure.SourceFS`（`enclosure/attach.go:166`） | 本地源 → **`LocalFS(rt.AbsPath())`** ✗ | 同上，且**配额层看不到封装卷写入** ✗（§3 P0-a ✓） |
 
 ⇒ 二者同属 **R26「卷根直连适配器」** 族 ✓（历史 P0 全出自「绝对路径 + 裸 os」✗）。
@@ -344,3 +555,57 @@ type StatsProvider interface{ VolumeStats() (used, total int64, ok bool) }
 **M3 的棘轮**是 §3 P0-b（raw `storage.Root` 划界）的**可执行版本** ✓。
 ⇒ 两套分片**可合并为一条线**：M0 → M1 → **M2（=P0-a）** → M3（=P0-b 棘轮） → M4（=§9 片 3–5） → M5。
 
+---
+
+## 勘误（2026-10-16 复核）：**M2 整体撤销**，P0-a 不成立
+
+**结论** ✗：`SourceFS`（`pkg/volume/enclosure/attach.go`）与 `Set.FSFor`（`pkg/volume/registry/set.go`）
+的**本地卷 raw 视图**都是**有意设计**，不是「绕过加解密/封印」的缺陷 —— 详见 §3 的 P0-a 条（已改为
+「已撤销」并附四项证据 ✓）。**M2b / M2c 不再实施** ✗。
+
+**为何这是重要修正** ✓：若按原计划把两处换成 `pkg/rootfs` 的透明适配器，会造成：
+① **双重加密**（封装卷自行写密文 ✓）；② **封印特权访问失效**（封装卷必须能读写被封区间 ✓）；
+③ **静默丢能力**（消费者依赖 `syncpkg.LocalVolume` 等 ✓）。
+
+**仍然有效并保留的成果** ✓：
+- **M2a**（本分支已落地 ✓）：适配器与用户可见读写入口下移到 `pkg/rootfs` —— 其价值独立于 M2 ✓
+  （「用户内容读写唯一入口」现在可被**下层包**复用，且 R25 门禁白名单已同步 ✓）；
+- **M1/M1b**（`local` 注册为普通后端 + 用户可创建面守卫 ✓）与 **M0**（`Kind`/`StorageVolume`/
+  `registry.KindOf` ✓）**不受影响** ✓；
+- 后续分片改为：**M3**（`Set.Root()` 254 处迁移 + 棘轮门禁 ✓；`FSFor` 列为**候选删除** ✓）→
+  **M4**（配额层挂每个 `StorageVolume` ✓）→ **M5**（删除 `Type == "" || TypeLocal` 特例分支 ✓）。
+
+**方法论** ✓：这是本会话第 **N** 次「**修前先验证前提**」救回错误改动 ✓ —— 而本次的证据**就在代码注释里**
+（`SourceFS` 的 doc 已写明「特权视图 / raw 是特权含义」✓）⇒ **动一个「看起来像缺陷」的 raw 视图前，
+必须先读它的 doc 与消费者** ✓（能力断言、双重变换风险、封印语义三条缺一不可 ✓）。
+
+---
+
+## 12. PR 范围与后续计划（2026-10-17 用户裁定）
+
+### 本 PR（#814）交付范围 —— **完整功能 PR，可独立合并** ✓
+
+| 片 | 内容 | 状态 |
+|---|---|---|
+| M0 | `volume.Kind` + 能力接口（`Footprinter`/`PhysBound`/`CapacityOwner`/`StatsProvider`）+ `registry.KindOf` | ✅ |
+| M1a/M1b | `localBackend` 统一契约 + `local` 注册为普通后端（含 2 个 API 面守卫） | ✅ |
+| M2a / M2 撤销 | `pkg/rootfs` 下移；**raw 视图前提被证伪** ⇒ 撤销 + 勘误 | ✅ |
+| M3 | `Set.Root` 访问器 21→14 + **R28 棘轮门禁** | ✅ |
+| M4a | `QuotaVolume` 双账本骨架（**覆盖写双计**真缺陷修复） | ✅ |
+| 片 2 | 本地卷自报**物理足迹/写前上界**（加密卷 = 密文长度） | ✅ |
+| 片 3a/3b | 整卷权威统一（`VolumeCounter`）+ **唯一入口** `WrapStorageVolume` + **R29 门禁**（含**能力静默丢失**自伤修复） | ✅ |
+| 片 5 | **per-owner 配额预警静默 no-op 修复**（`ownerQuotaScope`） | ✅ |
+| 片 6 步 1 | 「释放 ≠ 结算」漂移嫌疑**证伪** + 回收站边界不变式（拒绝 + 零副作用） | ✅ |
+| M5 步 1 | 删死代码 `Set.FSFor` + R26 白名单同步 | ✅ |
+| 接线 | `QuotaVolume` 可达 + 卷用量**单一查询面**（收敛两处重复逻辑） | ✅ |
+| 片 4a / 4b 步① | `LogicalKey{Owner,Rel}` 形状决议 + 类型 + 配额层 API 采用（零值显式不记账） | ✅ |
+
+### 后续 PR（**不在本 PR**，用户裁定 2026-10-17）
+
+1. **原方案迁移** ✓：`sync.FS.WriteFile` 签名变更（+`key LogicalKey` 参数，全仓破坏性）
+   —— **单独 PR** ✓。本 PR 已完成其**前置**（`LogicalKey` 类型 + 配额层消费侧 API ✓）；
+   迁移本身需**逐文件手工**（实测：~22 非测试调用点 + ~56 实现签名 + ~30 测试 mock；
+   四类边界：未命名参数 mock ✗ / 同名不同接口 ✗ / 多行调用 ✗ / 子包限定符 ✗）。
+2. **片 6 完整**：`charged_bytes` 记录化 + 释放侧唯一入口 + ~20 站迁移（**同片删旧计算**）。
+3. **M5 剩余**：装配层 `Type=="" || TypeLocal` 特例合并（本地卷经 `registry.NewBackend` 统一分派）。
+4. **片 5 剩余**：per-user 配额**按卷持有** + 联邦查询端点（含 Web UI ⇒ Playwright e2e）。

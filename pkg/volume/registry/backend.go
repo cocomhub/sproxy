@@ -170,10 +170,13 @@ func UnmarkDeferredTypeForTest(typ string) {
 //
 // 重复注册同一类型 → panic（编程错误，仿标准库 Register 语义——重复注册意味着
 // 两个包声明了同一类型的所有权，装配期应 fail-fast 暴露而非静默覆盖）。
-// 空类型名 → panic（type 空串 = 本地卷，不允许被外部后端占用）。
+// 空类型名 → panic（type 空串请先归一为 `volume.TypeLocal`）。
+// **`volume.TypeLocal` 允许注册**（统一存储卷模型 M1b）：本地卷成为**普通后端**，装配层特例
+// 分支（`Type == "" || TypeLocal`）随后删除。用户可创建面（建卷 API / 创建表单 / 预签名）
+// 另由 `IsUserCreatableBackendType` 排除本地 ✓（注册 ≠ 用户可创建）。
 func RegisterBackend(typ string, f BackendFactory, protocols ...string) {
-	if typ == "" || typ == volume.TypeLocal {
-		panic(fmt.Sprintf("registry: 非法后端类型 %q（空串与 %q 保留给本地卷）", typ, volume.TypeLocal))
+	if typ == "" {
+		panic(fmt.Sprintf("registry: 非法后端类型 %q（空串请归一为 %q）", typ, volume.TypeLocal))
 	}
 	if f == nil {
 		panic(fmt.Sprintf("registry: 后端类型 %q 的构造器为 nil", typ))
@@ -214,10 +217,12 @@ func SchemeOf(typ string) string {
 }
 
 func NewBackend(ctx context.Context, v volume.Volume) (ExternalBackend, error) {
-	typ := v.Type
-	if typ == "" || typ == volume.TypeLocal {
-		return nil, fmt.Errorf("registry: 卷 %q 类型 %q 是本地卷（不应经后端构造器分派）", v.Name, typ)
+	// 空串归一为 TypeLocal（与装配层「`Type == ""` 等义 local」一致）⇒ **统一分派**。
+	// M1b 前这里硬拒 local（「不应经后端构造器分派」）；现在本地卷也是普通后端 ✓。
+	if v.Type == "" {
+		v.Type = volume.TypeLocal
 	}
+	typ := v.Type
 	backendMu.RLock()
 	f, ok := backendFactories[typ]
 	backendMu.RUnlock()
@@ -307,11 +312,9 @@ func UnmarkWrapperTypeForTest(typ string) {
 // backendCategory 由后端类型推导 schema category：
 //   - "secrets"/"secretdata"/"egress"（基线封装/密钥卷）或**已登记的处理层类型**
 //     （MarkWrapperType，见 wrapperTypes）→ "wrapper"；
-//   - 本地卷 → "mt-local"；
+//   - 本地卷 → "mt-local"（`local` 现已可注册（M1b）⇒ 本分支不再是死分支；但 `BackendSchemas`
+//     排除本地 ⇒ 建卷表单清单仍不含它 ✓）；
 //   - 其余外部类型 → "linked"。
-//
-// 注册表内不会出现本地类型（RegisterBackend 拒绝空串与 TypeLocal），"mt-local" 分支为
-// 防御性覆盖（该分支仅对未注册的本地类型概念成立）。
 func backendCategory(typ string) string {
 	backendMu.RLock()
 	isWrapper := isWrapperCategoryLocked(typ)
@@ -390,6 +393,27 @@ func CategoryOf(typ string) string {
 	return backendCategory(typ)
 }
 
+// KindOf 返回卷的**结构性类型**（统一存储卷模型 M0/M1，设计 §11）。
+//
+// 判据**单源**在本注册表的 wrapper 事实源（`isWrapperCategoryLocked`：静态基线
+// secrets/secretdata/egress + 处理层动态登记 `MarkWrapperType`），**不重复**任何
+// 「哪些 type 是 wrapper」的清单 ✗：
+//   - wrapper 类型 ⇒ `volume.KindWrapper`（视图层，**不注册配额层**）；
+//   - 其余（含 `""`/`local`、baidupcs/s3/ftp/sftp/federated/cluster 等）⇒ `volume.KindStorage`
+//     （承载真实字节，**需要配额层**）。
+//
+// 注意：本函数**不**额外校验 `Extra["source"]` —— 封装声明（wrapper 类型 **且** source 非空）
+// 由 `enclosure.Parse` 在装配期校验（非法组合装配期即拒），故运行期类型分类只需按类型。
+func KindOf(v volume.Volume) volume.Kind {
+	backendMu.RLock()
+	isWrapper := isWrapperCategoryLocked(v.Type)
+	backendMu.RUnlock()
+	if isWrapper {
+		return volume.KindWrapper
+	}
+	return volume.KindStorage
+}
+
 // BackendSchema 返回单后端类型的创建表单 schema（副本；nil = 无字段）。
 //
 // 读取顺序：先查静态表（RegisterBackendSchema——构造无关、装配期登记，生产 wrapper 类型
@@ -415,6 +439,11 @@ func BackendSchemas() []BackendSchemaInfo {
 	backendMu.RLock()
 	types := make([]string, 0, len(backendFactories))
 	for typ := range backendFactories {
+		// **本地卷不出现在用户可创建类型清单**（M1b 零行为变更）：`local` 已注册为普通后端，
+		// 但建卷表单/类型下拉只列**用户可创建**的外部/封装类型 ✓（见 IsUserCreatableBackendType）。
+		if typ == volume.TypeLocal {
+			continue
+		}
 		types = append(types, typ)
 	}
 	backendMu.RUnlock()
@@ -453,9 +482,27 @@ func UnregisterBackendForTest(typ string) {
 
 // IsBackendRegistered 报告类型是否已注册后端工厂（供 API 区分「未注册」与「构造失败」——
 // 此前一律映射 404「后端类型未注册」，缺配置的真实类型也误报未注册）。
+//
+// 语义是**字面真实**的「已注册」✓（`local` 注册后为 true ✓）。用户可创建面请用
+// `IsUserCreatableBackendType`（本地卷不在其列 ✓）。
 func IsBackendRegistered(typ string) bool {
 	backendMu.RLock()
 	defer backendMu.RUnlock()
 	_, ok := backendFactories[typ]
 	return ok
+}
+
+// IsUserCreatableBackendType 报告该类型是否为**用户可创建**的后端类型（建卷 API / 创建表单 /
+// 预签名面）。
+//
+// **`local` 不是**：本地卷由**配置声明**（`volumes[]`，含 `Root`/加密 key）⇒ 不允许运行期
+// 创建，否则调用方可指定任意 `RootDir` ⇒ **路径/权限面** ✗。空串同样不是（归一为 local）。
+//
+// 与 `IsBackendRegistered` 的差别是**语义**而非实现：前者问「能否由用户建卷」，后者问
+// 「工厂是否已注册」（M1b 后 local 已注册 ⇒ 后者为 true ✓）。
+func IsUserCreatableBackendType(typ string) bool {
+	if typ == "" || typ == volume.TypeLocal {
+		return false
+	}
+	return IsBackendRegistered(typ)
 }

@@ -37,6 +37,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -486,6 +487,53 @@ func Wrap(fs syncpkg.FS, c Counter) *CapacityFS {
 	return &CapacityFS{inner: fs, counter: c}
 }
 
+// WrapStorageVolume 是「**整卷容量** + **配额层**」的**唯一构造入口**（设计 §9.1 片 3b）。
+//
+// **为何收敛到一处**：整卷记账此前散在 **5 个装配点**各自 `WrapBackend`（配置卷 / 用户卷 /
+// 封装卷 / secretdata / 恢复）⇒ **漏一处即「静默无限额」** ✗（新卷型、新装配路径不会报错）——
+// 这正是设计 §0 的根因形态：记账是**横切关注点**却实现成 **N 个调用点各自的义务**。
+// 本函数把「`CapacityFS` 执行 + `QuotaVolume` 持有」绑定为**一个原子动作** ⇒ **不可能只做一半** ✓；
+// 并由 R29 门禁钉住（非测试源码不得直接调 `WrapBackend`）。
+//
+// **单账本保证**（**不是**两个账本 ✗）：`QuotaVolume` 与 `CapacityFS` 共享**同一个 `counter`
+// 实例** ✓ ⇒ ① **执行**（写路径拦截、fail-closed）由 `CapacityFS` 负责；② **查询与结算**
+// （`Capacity`/`VolumeUsed`/`Reserve` 的整卷侧）由 `QuotaVolume` 负责 —— 二者是同一本账 ✓。
+// 故本函数不得传入两个不同来源的计数器 ✗。
+//
+// 分工边界（避免误改）：本函数**不**改变写路径的强制点（仍在 `CapacityFS` ✓）⇒ 行为不变 ✓；
+// 当写内核改由 `QuotaVolume.Reserve` 统一预占时（设计片 5/6），才**同片删除** `CapacityFS`
+// 的重复强制 ✗（现在删就是丢强制 ✗）。
+func WrapStorageVolume(name string, be registry.ExternalBackend, counter Counter, scopes registry.UserScopeResolver, pool *quota.Pool) registry.ExternalBackend {
+	if be == nil {
+		return nil
+	}
+	qv := registry.NewQuotaVolume(storageVolumeOf{name: name, ExternalBackend: be}, scopes, pool, counter, nil)
+	// 🔴 **能力透传必须走原后端 `be`**（不是 `qv`）：`Backend` 以**内嵌**方式转发后端级可选能力
+	// （`HealthProbe` / `Presigner` / `URLResolver` / `VolumeStatsProvider` / `StagingQuota*`）——
+	// 若内嵌 `qv`（只有 Name/Kind/FS/Close ✗），这些能力会**静默丢失** ✗（实测：外部卷探针由
+	// healthy/degraded 退化为 unknown ✗，`volumes_probe_test.go` 当场拦下 ✓）。
+	// ⇒ **数据面**取配额层视图（`qv.FS()`，与 `be.FS()` 同一实例 ✓）、**能力面**取原后端 ✓。
+	// `quota` 字段暴露配额层（统一查询面 ✓），与 `fs` 的 counter 共享同一实例 ✓（单账本）。
+	return &Backend{ExternalBackend: be, fs: Wrap(qv.FS(), counter), quota: qv}
+}
+
+// storageVolumeOf 把「外部后端 + 已知卷名」提升为**统一存储卷视图**。
+//
+// 为何需要：`registry.ExternalBackend` 只有 `FS()+Close()`（无 `Name()`/`Kind()` ✗）而
+// `registry.StorageVolume` 要求四方法。上游装配点本就知道卷名 ⇒ **显式传入**
+// （禁从 FS 反推卷名 ✗：那会把存储身份变成隐式契约）。
+//
+// **Kind 恒为 `KindStorage`**：本入口**仅**用于承载真实字节的存储卷
+// （配置卷/用户卷/secretdata 底层卷等）。封装卷（`KindWrapper`）按设计 §1.4
+// **零配额代码** ✗ ⇒ 它们不走本入口（保留 `WrapBackend`，见 R29 登记理由）。
+type storageVolumeOf struct {
+	registry.ExternalBackend
+	name string
+}
+
+func (s storageVolumeOf) Name() string      { return s.name }
+func (s storageVolumeOf) Kind() volume.Kind { return volume.KindStorage }
+
 // Counter 返回底层计数器（查询/持久化）。
 func (f *CapacityFS) Counter() Counter { return f.counter }
 
@@ -808,12 +856,27 @@ func (f *CapacityFS) ExemptStagingQuota() bool {
 // （HealthProbe/VolumeStatsProvider/Presigner/URLResolver）透明转发，不因记账包装而隐藏。
 type Backend struct {
 	registry.ExternalBackend
-	fs *CapacityFS
+	fs    *CapacityFS
+	quota *registry.QuotaVolume // 非 nil = 经唯一入口 WrapStorageVolume 构造（配额层可达 ✓）
 }
 
 // WrapBackend 包装外部卷 backend（FS 经 CapacityFS 记账）。
 func WrapBackend(be registry.ExternalBackend, c Counter) *Backend {
 	return &Backend{ExternalBackend: be, fs: Wrap(be.FS(), c)}
+}
+
+// Quota 返回该卷的**配额层**（`WrapStorageVolume` 构造时为非 nil ✓；经 `WrapBackend` 直包时为 nil ✗）。
+//
+// **为何需要它**（用户裁定 2026-10-16：「接线到真实消费者」）：`QuotaVolume` 是「整卷容量 +
+// 每用户配额」的**统一查询面**（`Capacity`/`VolumeUsed`/`VolumeStats` ✓）；装配时若不暴露它，
+// 消费方只能各自拼「池 Usage + 后端 UsageProvider」（全仓已有**两份重复** ✗）⇒ 多源即多漂移面 ✗。
+//
+// 单账本保证：`Quota()` 的 counter 与 `fs` 的 `CapacityFS` **共享同一实例** ✓（见 `WrapStorageVolume`）。
+func (b *Backend) Quota() *registry.QuotaVolume {
+	if b == nil {
+		return nil
+	}
+	return b.quota
 }
 
 // FS 返回带卷级记账的 FS。

@@ -558,7 +558,8 @@ func (h *Handlers) isExternalVolumeName(name string) bool {
 	if _, ok := h.volSet.ByName(name); !ok {
 		return false
 	}
-	return h.volSet.Root(name) == nil
+	// 无本地根（外部/封装卷）⇒ 不走路径式镜像。
+	return !h.volSet.HasLocalRoot(name)
 }
 
 // copyViaService 走 files.Service.CopyFile（通用复制：目标路径可不同 / force / 含外部卷）。

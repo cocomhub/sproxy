@@ -36,7 +36,10 @@ var rootCallRe = regexp.MustCompile(`(?m)\b(?:root|\.Root\(\))\.(?:Open|OpenFile
 // 只允许「内部布局读写」：meta sidecar、s3 part/会话、删除/目录类——这些不属用户内容读写
 // 入口，走 openUserVisibleRead 反而破坏语义（如 meta 读密文形态、part 明文暂存是刻意取舍）。
 var userIOCallAllowlist = map[string]string{
-	"pkg/server/user_visible_io.go": "用户内容读写唯一入口（OpenDecrypted/OpenFileEncrypted 分派）",
+	// **唯一入口实现**（M2a 2026-10-16 从 pkg/server 下移到 pkg/rootfs：`pkg/volume/registry`
+	// 与 `pkg/volume/enclosure` 需要同一入口来关闭 FSFor/SourceFS 绕行点，而它们不能 import
+	// `pkg/server`（成环）；`pkg/server/user_visible_io.go` 现为**薄包装**，不含 root.Open* ✓）。
+	"pkg/rootfs/visible_io.go":      "用户内容读写唯一入口（OpenDecrypted/OpenFileEncrypted 分派）",
 	"pkg/files/write_ops.go":        "统一写内核（WriteTarget 的 writeUserVisibleOpenExcl 是 O_EXCL 用户可见入口变体；其余 root.Open/OpenFile 均为内部 meta/删除）",
 	"pkg/server/files_service.go":   "meta sidecar 读写（mrel/meta 桶；不读用户内容本身）",
 	"pkg/server/meta_remote.go":     "跨节点 meta 面：读持有侧 sidecar 原始字节（meta 桶；不读用户内容本身，见评审 P2-10）",

@@ -1,0 +1,32 @@
+# `Set.Root(...)` 卷根访问器登记表（R28）：file<TAB>max_calls<TAB>reason
+#
+# 背景：`registry.Set.Root(name) *storage.Root` 让调用方**直接拿到裸卷根**，绕过统一存储卷视图
+# （`StorageVolume`/`FS` + 能力接口）。它是「装配层伸手进卷集拿 root」的点，也是 M3 要收缩的面。
+#
+# 与 R26/R27 的关系：R26 管「`NewLocalFS` 直连路径」（根本不进 Root）；R27 管「`be.FS()` 直连」
+# （外部卷封印绕过）；**R28 管「经 `Set.Root` 拿裸 root」**（进了 Root 但绕过统一视图）。
+#
+# 口径（文本计数，**偏严不偏松**，与 R27 一致）：统计非测试源码中 `(volSet|vs|set|volumes|vols).Root(`
+# 的**文本出现次数**（注释里的同名文本也计入）。`max_calls` = 该文件允许的最大次数；**只降不升**。
+#
+# 收敛方式（M3 已完成的示范）：把 `Root(name) != nil` / `== nil` 这类**间接探针**改为
+# `Set.HasLocalRoot(name)`（语义显式化）。**2026-10-16 已迁移 7 处探针（21 → 14）**：
+# `pkg/files/copy_ops.go`×2、`pkg/files/write_ops.go`×4、`pkg/volume/registry/set.go`×1。
+#
+# 剩余 12 处（+2 处注释）均为**真需 root**：所需方法（`Abs`/`Stat`/`SealAt`/`ListOwners`/
+# `OpenDecrypted`/`OpenFileEncrypted`/`LogicalSize`…）**不在** `FS`（7 方法）与 `StorageVolume`
+# （Name/Kind/FS/Close）之内 —— `storage.Root` 有 **32 个导出方法**，把调用方全迁到统一视图需要
+# 32 方法巨型接口或重写写内核，均非迁移（M3 复核结论）。故此处**棘轮 + 逐条理由**。
+#
+# 新增/增加次数 ⇒ 门禁红 ⇒ 必须先确认「能否用 `HasLocalRoot`/`FS`/能力接口替代」，不能才登记理由。
+pkg/files/read.go	1	读路径解析卷根后走 Root 的 OpenDecrypted/Stat（用户可见读语义，FS 无法表达）
+pkg/files/version_store.go	1	版本桶操作需 Root 的 OpenDecrypted/AtomicRename（版本原子替换）
+pkg/files/write_ops.go	2	统一写内核：写/删路径需 Root 的 OpenFileEncrypted/Remove/Stat（内核本身就是用户可见语义层）；另 1 处为注释
+pkg/server/handlers.go	1	owner→卷根绝对路径映射：需 Root.Abs（绝对路径互操作，FS 无此语义）
+pkg/server/nested_enclosure.go	2	封印判定：需 Root.SealAt（封印控制面，FS 不暴露）
+pkg/server/volumes.go	2	卷内文件存在性探测（Root.Stat）与租户绝对路径映射（Root.Abs）
+pkg/server/volume_export.go	1	注释（说明 `volSet.Root("")` 为 nil 的语义）
+pkg/server/volume_retention.go	1	卷级版本清理：需 storage.ListOwners(root) 扫描卷根磁盘
+pkg/volume/enclosure/attach.go	1	封装卷**特权源视图**（R26 已登记：必须在封印注入前取得且不受封印影响）
+cmd/sproxy/pikpak_register.go	1	装配期：取默认卷根构造 pikpak 凭据存储（含 Root 入口的密钥管理）
+cmd/sproxy/secret_register.go	1	装配期：按卷根构造 secrets 存储（secretsFSFor 经 Root 含 0600 回调）

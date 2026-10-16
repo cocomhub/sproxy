@@ -110,7 +110,13 @@ func (h *Handlers) initStorageLayout(vs *registry.Set, cfg *Config, log *slog.Lo
 		// 配额预警（roadmap P2）：per-owner 水位轮询（owner_quotas 达阈值 → 通知）。
 		h.alertEngine.SetOwnerList(h.SyncTenantList())
 		h.alertEngine.SetQuotaUsageReader(func(owner string) (used, capVal int64) {
-			sc := h.quotaScopeFor(owner, "")
+			// 🔴 **修复（2026-10-16）**：此前用 `h.quotaScopeFor(owner, "")` —— 而 `rel == ""` 会被
+			// 判为「非功能桶首段」并**恒返回 nil** ✗ ⇒ 读取器**永远得到 (0,0)** ⇒
+			// **per-owner 配额预警静默失效** ✗（无日志/指标/报错 ✗）。
+			// 改用 `ownerQuotaScope`（owner 根 Scope）—— 其 `committed` 经 `commitUp` 沿父链累计
+			// ⇒ **就是该 owner 的全子树用量** ✓（**不是**全局池用量 ✗：每个树节点本身是一个
+			// `Pool`，`Scope.Usage()` 返回 `p.committed` ✓），`MaxBytes()` = 该 owner 的配额上限 ✓。
+			sc := h.ownerQuotaScope(owner)
 			if sc == nil {
 				return 0, 0
 			}

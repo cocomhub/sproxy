@@ -128,7 +128,7 @@ func (s *Service) copyWithinVolume(ctx context.Context, owner, srcVol, dstVol st
 	if !ok || !v.Authorize(owner) {
 		return CopyFileResult{}, true, &HTTPError{Status: 404, Message: errMsgFileNotFound}
 	}
-	if vs.Root(srcVol) != nil {
+	if vs.HasLocalRoot(srcVol) {
 		return CopyFileResult{}, false, nil // 本地卷 → 写内核
 	}
 	size, checksum, serr := ops.ExternalStat(ctx, owner, srcVol, from)
@@ -268,7 +268,7 @@ func (s *Service) localDstRoot(owner string, a copyArgs) (*storage.Root, bool) {
 		return tnt.Root(), true
 	}
 	vs := s.rt.volSet()
-	if vs != nil && vs.Root(a.dstVol) == nil {
+	if vs != nil && !vs.HasLocalRoot(a.dstVol) {
 		return nil, false // 外部卷
 	}
 	tnt := s.rt.volumeTenant(a.dstVol, owner)

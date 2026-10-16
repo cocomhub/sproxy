@@ -244,6 +244,14 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 		return
 	}
+	// **用户可创建类型**守卫（M1b）：本地卷**不允许**经建卷 API 创建 —— 本地卷由**配置声明**
+	// （`volumes[]` 含 `Root`/加密 key）；若允许，调用方可指定任意 `RootDir` ⇒ **路径/权限面** ✗。
+	// 此前该拒绝由 `registry.NewBackend` 硬拒 local 实现；M1b 后 `NewBackend("local")` 可用
+	// ⇒ 守卫**前移到此**，保证建卷 API 行为**不变** ✓（空串类型同样拒，与今日一致 ✓）。
+	if !registry.IsUserCreatableBackendType(v.Type) {
+		sendJSONResponse(w, map[string]string{"error": "type 未注册或 extra 非法: 不支持的类型 " + v.Type}, http.StatusBadRequest)
+		return
+	}
 	// fail-fast 试构造：type 已注册 + extra 合法（registry.NewBackend 分派）。
 	// 失败 → 400（未注册 backend / 凭据缺失等），不落盘。
 	// Capacity 回填（B3-I1）：委托配额经底层池子 Scope 生效，Volume.Capacity 一并带配额，
@@ -269,7 +277,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	if counter.CorruptSnapshot() {
 		h.logger.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", req.Name, "owner", owner, "path", counterPath)
 	}
-	be = capacity.WrapBackend(be, counter)
+	be = capacity.WrapStorageVolume(req.Name, be, counter, nil, nil)
 	// store 落盘（重名拒绝）——**store 是运行时用户卷的唯一事实源**（重启由 ScanRestore
 	// 恢复；历史 config YAML 写回机制已随阶段 2 迁移移除）。
 	// Owner 一并设置（C4 CRITICAL 复测补直）：owner 以参数为准，使本链产出的 UserVolume

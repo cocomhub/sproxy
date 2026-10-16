@@ -99,7 +99,9 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 // （真实类型被错报 404「未注册」，生产上直传端点实际不可用）。无配置卷时回落按 type
 // 构造（纯内存/测试后端可用）。
 func (h *Handlers) presignBackendFor(ctx context.Context, typ, owner string) (registry.ExternalBackend, error) {
-	if !registry.IsBackendRegistered(typ) {
+	// **用户可创建类型**守卫（M1b）：`local` 已注册为普通后端，但预签名面只服务
+	// 用户可创建的外部/封装类型 ✓（否则 `typ=local` 会从 404 变为可构造 ⇒ 行为变更 ✗）。
+	if !registry.IsUserCreatableBackendType(typ) {
 		return nil, errPresignTypeUnregistered
 	}
 	if v, ok, err := h.presignVolumeFor(typ, owner); err != nil {
