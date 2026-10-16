@@ -48,7 +48,10 @@ func TestVolumeUsage_PrefersQuotaLayer(t *testing.T) {
 		}
 	}
 
-	if got := h.volumeUsage(volume.Volume{Name: volName, Type: "s3"}); got != 4096 {
+	// 卷类型留空（本地/遗留形态）⇒ **跳过** UsageProvider 覆盖分支。
+	// 为何必须如此：`capacity.Backend` 自身实现 `UsageProvider.Usage()`（返回**同一计数器**），
+	// 若用 `Type:"s3"` 则该分支会**掩盖**配额层分支 ⇒ 用例失去判别力（实测：变异不红）。
+	if got := h.volumeUsage(volume.Volume{Name: volName}); got != 4096 {
 		t.Fatalf("volumeUsage=%d，want 4096（应取**配额层**计数器值；0 表示退回旧池逻辑）", got)
 	}
 	if q := h.volumeQuotaLayer(volName); q == nil {
