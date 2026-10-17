@@ -147,7 +147,18 @@ func BuildBackend(ctx context.Context, set *registry.Set, d Decl, v volume.Volum
 	// 此前用单文件快照（`NewPoolCounterPersistent`/`NewPoolCounter`）——单写者假设，
 	// 多进程共享同一卷时丢失更新；且封装卷 `RootDir==""` 被 `reconcileVolumesFromDisk`
 	// 跳过 ⇒ 重启后归零。账本对两者都成立。
-	return capacity.WrapBackend(be, capacity.NewVolumeCounter(be.FS(), pool.MaxBytes(), pool)), nil
+	//
+	// **账本底座取「区域相对视图」（wrapper 面），不经 owner 映射**（评审 B2）：
+	// owner 限定封装卷（用户面 `target: <卷>/<owner>/<bucket>/<子>`）的调用方面
+	// `FS()` 是 ownerFS，键要求 `<owner>/<保留桶>/...` ⇒ 账本目录 `meta/quota` 无法写入
+	// ⇒ OpenLedgerFS 失败 ⇒ 降级内存 ⇒ 重启配额归零（fail-open，主用形态）。
+	// `UnsealedSource()` 取回 wrapper 面（每封装卷独立实例、区域相对）⇒ 账本可写、
+	// 按区域隔离、持久化。
+	ledgerFS := be.FS()
+	if u, ok := be.(interface{ UnsealedSource() syncpkg.FS }); ok {
+		ledgerFS = u.UnsealedSource()
+	}
+	return capacity.WrapBackend(be, capacity.NewVolumeCounter(ledgerFS, pool.MaxBytes(), pool)), nil
 }
 
 // SourceFS 取源卷的**特权视图**（封印前语义：直接 raw 视图，不受封印影响——封装卷必须能
