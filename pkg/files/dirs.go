@@ -44,9 +44,10 @@ func dirCreateHTTPError(derr error) *HTTPError {
 // rmdirFileStat 是 rmdir 配额释放收集项：每个被删文件的完整相对路径（含功能桶前缀）、
 // 字节数与所在卷租户根（meta sidecar 删除/配额释放需要——C2 修复：rmdir 联动删 meta）。
 type rmdirFileStat struct {
-	rel  string
-	size int64
-	root *storage.Root
+	rel     string
+	size    int64
+	root    *storage.Root
+	volName string
 }
 
 // sumRootDirFiles 递归收集租户根内 rel 子树下所有普通文件（符号链接跳过）的 {rel, size}，
