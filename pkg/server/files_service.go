@@ -850,7 +850,7 @@ func copyThenDeleteExternal(ctx context.Context, fsys syncpkg.FS, srcKey, dstKey
 	if oerr != nil {
 		return oerr
 	}
-	werr := fsys.WriteFile(ctx, dstKey, rc, e.Size, e.MTime)
+	werr := fsys.WriteFile(ctx, syncpkg.LogicalKey{}, dstKey, rc, e.Size, e.MTime)
 	_ = rc.Close()
 	if werr != nil {
 		return werr

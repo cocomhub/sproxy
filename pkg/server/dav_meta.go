@@ -96,7 +96,7 @@ func (d *davMetaFS) removeMeta(p string) {
 	}
 }
 
-func (d *davMetaFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (d *davMetaFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	// **统一写内核**（WriteTarget）：锁（同键空间，防同 rel 并发写错位）+ 显式卷（DAV
 	// 的 ?volume= 已解析为 d.volName，默认卷空）+ 原子写 + 双账本 + sidecar 内置 + 台账，
 	// 不再自建 davMetaFS 的直写/锁/sidecar 样板。
@@ -113,7 +113,7 @@ func (d *davMetaFS) WriteFile(ctx context.Context, p string, r io.Reader, size, 
 		}
 		return nil
 	}
-	if err := d.FS.WriteFile(ctx, p, r, size, mtime); err != nil {
+	if err := d.FS.WriteFile(ctx, key, p, r, size, mtime); err != nil {
 		return err
 	}
 	d.writeMeta(ctx, p)

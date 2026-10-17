@@ -387,7 +387,7 @@ func runSealfileEncrypt(ios cli.IOStreams, cmd *cobra.Command, f *sealfileFlags,
 		return fmt.Errorf("打开源文件失败: %w", oerr)
 	}
 	defer rc.Close()
-	werr := fs.WriteFile(cmd.Context(), rel, rc, st.Size(), st.ModTime().UnixNano())
+	werr := fs.WriteFile(cmd.Context(), syncpkg.LogicalKey{}, rel, rc, st.Size(), st.ModTime().UnixNano())
 	if werr != nil {
 		return fmt.Errorf("加密写入失败: %w", werr)
 	}

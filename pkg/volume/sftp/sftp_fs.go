@@ -206,7 +206,7 @@ func (f *SFTPFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, e
 
 // WriteFile 全量覆盖写入（先写临时文件再 rename，防半写状态）。
 // mtime 由服务端决定（SFTP 无标准 mtime 设置；需要时 backend 层可扩展）。
-func (f *SFTPFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (f *SFTPFS) WriteFile(ctx context.Context, key sync.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	abs := f.abs(relPath)
 	if err := f.ensureParentDirs(ctx, relPath); err != nil {
 		return err

@@ -412,7 +412,7 @@ func assertWriteOpsWriteFile(t *testing.T, fs syncpkg.FS, cfg *server.Config) []
 	// WriteFile（内容 + mtime）
 	body := []byte("remote-fs-write")
 	const mtime = int64(1_700_000_000)
-	if wErr := fs.WriteFile(t.Context(), "d/a.bin", bytes.NewReader(body), int64(len(body)), mtime); wErr != nil {
+	if wErr := fs.WriteFile(t.Context(), syncpkg.LogicalKey{}, "d/a.bin", bytes.NewReader(body), int64(len(body)), mtime); wErr != nil {
 		t.Fatalf("WriteFile: %v", wErr)
 	}
 	abs := filepath.Join(cfg.StorageRoot, testOwner, "user", "d", "a.bin")

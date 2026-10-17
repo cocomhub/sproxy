@@ -1334,7 +1334,7 @@ func (m *serverMemFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, er
 	}
 	return nil, os.ErrNotExist
 }
-func (m *serverMemFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+func (m *serverMemFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err

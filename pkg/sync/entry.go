@@ -51,7 +51,7 @@ type FS interface {
 	ListDir(ctx context.Context, path string) ([]Entry, error)
 	Stat(ctx context.Context, path string) (*Entry, error)
 	OpenRead(ctx context.Context, path string) (io.ReadCloser, error)
-	WriteFile(ctx context.Context, path string, r io.Reader, size int64, mtime int64) error
+	WriteFile(ctx context.Context, key LogicalKey, path string, r io.Reader, size int64, mtime int64) error
 	Rename(ctx context.Context, from, to string) error
 	Delete(ctx context.Context, path string) error
 	MakeDir(ctx context.Context, path string) error

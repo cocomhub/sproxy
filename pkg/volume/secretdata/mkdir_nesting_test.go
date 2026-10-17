@@ -56,7 +56,7 @@ func TestMakeDir_PhysicalNesting(t *testing.T) {
 
 	// ④ 嵌套目录内写读一致（容器链完整）。
 	payload := bytes.Repeat([]byte("n"), 4096)
-	if werr := fs.WriteFile(ctx, "a/b/c/f.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
+	if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a/b/c/f.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
 		t.Fatalf("嵌套写: %v", werr)
 	}
 	rc, oerr := fs.OpenRead(ctx, "a/b/c/f.bin")

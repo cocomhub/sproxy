@@ -31,7 +31,7 @@ func TestWriteFile_SeekableSizeHonored(t *testing.T) {
 	}
 	payload := []byte("encrypted-content-123") // 21B
 	declared := int64(18)                      // 声明 18B（故意少于实际）
-	if err := sfs.WriteFile(context.Background(), "pikpak/t1/movie.mp4", bytes.NewReader(payload), declared, 0); err != nil {
+	if err := sfs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "pikpak/t1/movie.mp4", bytes.NewReader(payload), declared, 0); err != nil {
 		t.Fatalf("WriteFile(seekable): %v", err)
 	}
 	rc, rerr := sfs.OpenRead(context.Background(), "pikpak/t1/movie.mp4")
@@ -59,7 +59,7 @@ func TestWriteFile_NonSeekableReadsAll(t *testing.T) {
 	}
 	payload := []byte("encrypted-content-123")             // 21B
 	plain := struct{ io.Reader }{bytes.NewReader(payload)} // 丢弃 Seeker
-	if err := sfs.WriteFile(context.Background(), "nonseek.bin", plain, 18, 0); err != nil {
+	if err := sfs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "nonseek.bin", plain, 18, 0); err != nil {
 		t.Fatalf("WriteFile(non-seek): %v", err)
 	}
 	rc, rerr := sfs.OpenRead(context.Background(), "nonseek.bin")
@@ -108,7 +108,7 @@ func TestWriteFile_LocalFSSourceStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if werr := sfs.WriteFile(context.Background(), "restored/src.bin", rc, int64(len(payload)), 0); werr != nil {
+	if werr := sfs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "restored/src.bin", rc, int64(len(payload)), 0); werr != nil {
 		t.Fatalf("WriteFile(本地源流式): %v", werr)
 	}
 	// 还原一致。

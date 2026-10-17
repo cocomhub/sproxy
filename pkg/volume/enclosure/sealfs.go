@@ -154,11 +154,11 @@ func (s *SealFS) DirectURL(ctx context.Context, relPath string) (string, bool, e
 }
 
 // WriteFile 写：被封印 ⇒ ErrSealed（409）。
-func (s *SealFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (s *SealFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	if err := s.writeErr(p); err != nil {
 		return err
 	}
-	return s.FS.WriteFile(ctx, p, r, size, mtime)
+	return s.FS.WriteFile(ctx, key, p, r, size, mtime)
 }
 
 // WriteIfAbsent 原子唯一写：被封印 ⇒ ErrSealed（不得返回 (false,nil)——会被读成「已存在」）。

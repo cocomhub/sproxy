@@ -19,7 +19,7 @@ func TestPrefixFS_KeySpaceMapping(t *testing.T) {
 	inner := &extFS{files: map[string]string{}}
 	p := syncpkg.NewPrefixFS(inner, "alice/user/")
 	ctx := context.Background()
-	if err := p.WriteFile(ctx, "docs/a.txt", strings.NewReader("hi"), 2, 0); err != nil {
+	if err := p.WriteFile(ctx, syncpkg.LogicalKey{}, "docs/a.txt", strings.NewReader("hi"), 2, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if inner.files["alice/user/docs/a.txt"] != "hi" {

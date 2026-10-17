@@ -6,7 +6,6 @@ require (
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
 	github.com/cocomhub/sproxy/pkg/integrity/ext/video v0.0.0
-	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0
 	github.com/cocomhub/sproxy/pkg/telemetry/ext/otel v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0
@@ -31,6 +30,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.19.0 // indirect
@@ -156,3 +156,5 @@ replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../pkg/tunnel/xf
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ../../pkg/tunnel/xfer/ext/quic
 
 replace github.com/cocomhub/sproxy/pkg/volume/ext/pikpak => ../../pkg/volume/ext/pikpak
+
+replace github.com/cocomhub/sproxy/pkg/volume/ext/s3 => ../../pkg/volume/ext/s3

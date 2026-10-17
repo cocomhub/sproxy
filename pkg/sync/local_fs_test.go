@@ -164,7 +164,7 @@ func TestLocalFS_WriteFile(t *testing.T) {
 	t.Parallel()
 	l, _ := testLocalFS(t)
 	mtime := time.Unix(1700000000, 0).UnixNano()
-	err := l.WriteFile(context.Background(), "sub/file.txt", strings.NewReader("hello"), 5, mtime)
+	err := l.WriteFile(context.Background(), LogicalKey{}, "sub/file.txt", strings.NewReader("hello"), 5, mtime)
 	if err != nil {
 		t.Fatalf("WriteFile error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestLocalFS_WriteFile_EmptyFile(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	l, _ := testLocalFS(t)
-	err := l.WriteFile(context.Background(), "empty.txt", strings.NewReader(""), 0, 123)
+	err := l.WriteFile(context.Background(), LogicalKey{}, "empty.txt", strings.NewReader(""), 0, 123)
 	if err != nil {
 		t.Fatalf("WriteFile error: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestLocalFS_Rename(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	l, _ := testLocalFS(t)
-	if err := l.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 1); err != nil {
+	if err := l.WriteFile(context.Background(), LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Rename(context.Background(), "a.txt", "b.txt"); err != nil {
@@ -220,7 +220,7 @@ func TestLocalFS_Delete(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	l, _ := testLocalFS(t)
-	if err := l.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 1); err != nil {
+	if err := l.WriteFile(context.Background(), LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Delete(context.Background(), "a.txt"); err != nil {
@@ -269,7 +269,7 @@ func TestLocalFS_PathTraversal(t *testing.T) {
 			}
 			return err
 		},
-		"WriteFile": func(p string) error { return l.WriteFile(ctx, p, strings.NewReader("x"), 1, 1) },
+		"WriteFile": func(p string) error { return l.WriteFile(ctx, LogicalKey{}, p, strings.NewReader("x"), 1, 1) },
 		"Rename":    func(p string) error { return l.Rename(ctx, p, "ok.txt") },
 		"Delete":    func(p string) error { return l.Delete(ctx, p) },
 		"MakeDir":   func(p string) error { return l.MakeDir(ctx, p) },
@@ -290,7 +290,7 @@ func TestLocalFS_WindowsSeparator(t *testing.T) {
 	l, root := testLocalFS(t)
 	ctx := context.Background()
 	// 正斜杠 relPath → 落地为 Windows 原生反斜杠
-	if err := l.WriteFile(ctx, "sub/file.txt", strings.NewReader("x"), 1, 1); err != nil {
+	if err := l.WriteFile(ctx, LogicalKey{}, "sub/file.txt", strings.NewReader("x"), 1, 1); err != nil {
 		t.Fatalf("WriteFile(正斜杠) error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "sub", "file.txt")); err != nil {
@@ -303,7 +303,7 @@ func TestLocalFS_WindowsSeparator(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		// 反斜杠输入在 Windows 上被归一为正斜杠处理
-		if err := l.WriteFile(ctx, `win\file.txt`, strings.NewReader("y"), 1, 1); err != nil {
+		if err := l.WriteFile(ctx, LogicalKey{}, `win\file.txt`, strings.NewReader("y"), 1, 1); err != nil {
 			t.Fatalf("WriteFile(反斜杠) error: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(root, "win", "file.txt")); err != nil {
@@ -387,7 +387,7 @@ func TestLocalFS_CtxCancelled(t *testing.T) {
 		"ListDir":  func() error { _, err := l.ListDir(ctx, ""); return err },
 		"OpenRead": func() error { _, err := l.OpenRead(ctx, "a.txt"); return err },
 		"WriteFile": func() error {
-			return l.WriteFile(ctx, "b.txt", strings.NewReader("x"), 1, 1)
+			return l.WriteFile(ctx, LogicalKey{}, "b.txt", strings.NewReader("x"), 1, 1)
 		},
 		"Rename":  func() error { return l.Rename(ctx, "a.txt", "c.txt") },
 		"Delete":  func() error { return l.Delete(ctx, "a.txt") },
@@ -427,7 +427,7 @@ func TestLocalFS_SymlinkEscape(t *testing.T) {
 		t.Fatalf("ListDir 逃逸应被拒绝")
 	}
 	// 写逃逸
-	if err := l.WriteFile(ctx, "escape/evil.txt", strings.NewReader("x"), 1, 1); err == nil {
+	if err := l.WriteFile(ctx, LogicalKey{}, "escape/evil.txt", strings.NewReader("x"), 1, 1); err == nil {
 		t.Fatalf("WriteFile 逃逸应被拒绝")
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "evil.txt")); err == nil {
@@ -469,7 +469,7 @@ func TestLocalFS_SymlinkInsideRootOK(t *testing.T) {
 		t.Fatalf("大小不符: %d", e.Size)
 	}
 	// 写入 Root 内符号链接目标也允许
-	if err := l.WriteFile(context.Background(), "link/b.txt", strings.NewReader("x"), 1, 1); err != nil {
+	if err := l.WriteFile(context.Background(), LogicalKey{}, "link/b.txt", strings.NewReader("x"), 1, 1); err != nil {
 		t.Fatalf("Root 内符号链接写入应允许: %v", err)
 	}
 }

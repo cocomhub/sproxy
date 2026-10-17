@@ -54,7 +54,7 @@ func TestWriteRealMP4_KeyframeMode_FullRoundtrip(t *testing.T) {
 
 	fs := newFSWithKeyframe(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "real.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "real.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(real.mp4): %v", err)
 	}
 	e := fs.index["real.mp4"]
@@ -99,7 +99,7 @@ func TestWriteRealMP4_KeyframeMode_RangeRead(t *testing.T) {
 
 	fs := newFSWithKeyframe(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "real.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "real.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(real.mp4): %v", err)
 	}
 	// 读中间一段（seek 场景）：偏移取文件 1/3、长度 1/3。

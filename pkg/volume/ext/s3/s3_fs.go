@@ -343,17 +343,17 @@ func (f *S3FS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, err
 // 内建自动分片 + 失败自动 Abort 防孤儿；PartSize 透传可配分片大小）+ 显式失败重试
 // （UploadRetries 次退避，**需可 Seek 源**——可信卷写面为 TeeReader 时不重试并显式归因）；
 // 小文件（< 阈值）单 PutObject 零回归。
-func (f *S3FS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (f *S3FS) WriteFile(ctx context.Context, key sync.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	// size<0（未知长度）：透传给 minio（其内部走 putObjectMultipartStreamNoLength 流式读
 	// 到 EOF）。**不得钳为 0**——那会声明 0 字节却带非空 body（数据丢失/语义冲突）。
 
 	mo := multipartOptsFromConfig(f.cfg)
-	key := f.keyFor(relPath)
+	objKey := f.keyFor(relPath)
 	if shouldMultipart(size, mo.threshold) {
 		// 大文件 multipart：透传 PartSize（已归一 >=5MiB）；minio 自动分片 + 失败 Abort。
 		if err := putObjectWithRetry(ctx, f.putter, uploadParams{
 			bucket:  f.bucket,
-			key:     key,
+			key:     objKey,
 			opts:    minio.PutObjectOptions{PartSize: uint64(mo.partSize)},
 			retries: mo.retries,
 		}, r, size); err != nil {
@@ -365,7 +365,7 @@ func (f *S3FS) WriteFile(ctx context.Context, relPath string, r io.Reader, size,
 	// 小文件：单 PutObject（minio <16MiB 单原子 PUT）零回归。
 	if err := putObjectWithRetry(ctx, f.putter, uploadParams{
 		bucket:  f.bucket,
-		key:     key,
+		key:     objKey,
 		opts:    minio.PutObjectOptions{},
 		retries: mo.retries,
 	}, r, size); err != nil {
@@ -409,9 +409,9 @@ func (f *S3FS) Delete(ctx context.Context, relPath string) error {
 // MakeDir 创建目录（零字节占位对象 key+"/"；已存在 → PutObject 覆盖幂等）。
 
 func (f *S3FS) MakeDir(ctx context.Context, relPath string) error {
-	key := f.keyFor(relPath) + "/"
+	objKey := f.keyFor(relPath) + "/"
 
-	_, err := f.client.PutObject(ctx, f.bucket, key, bytes.NewReader(nil), 0, minio.PutObjectOptions{})
+	_, err := f.client.PutObject(ctx, f.bucket, objKey, bytes.NewReader(nil), 0, minio.PutObjectOptions{})
 
 	if err != nil {
 		return fmt.Errorf("s3: MakeDir %q（占位对象）: %w", relPath, err)

@@ -198,10 +198,10 @@ func (q *quotaLocalFS) MakeDir(ctx context.Context, p string) error { return q.i
 
 // WriteFile 先按 relPath 解析子 Scope 并 TryReserve(size)，写成功 Commit(actual) 入账；
 // 失败 Release 归还。scopeFor 为 nil 时退化为直写。
-func (q *quotaLocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (q *quotaLocalFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	scope := q.examScope(relPath)
 	if scope == nil {
-		return q.inner.WriteFile(ctx, relPath, r, size, mtime)
+		return q.inner.WriteFile(ctx, key, relPath, r, size, mtime)
 	}
 	// 记账口径（2026-10-16 高风险区审核修复）：本地目标经 `TenantRootFS`（生产 = `NewRootFS`）
 	// **透明加密落盘** ⇒ 预留与结算都必须按**物理**字节；`size` 是源条目的**逻辑**长度。
@@ -213,7 +213,7 @@ func (q *quotaLocalFS) WriteFile(ctx context.Context, relPath string, r io.Reade
 	// 委托 inner.WriteFile（其 copyWithCtx 已做 ctx 感知拷贝）。成功 Commit(charge)——
 	// 源条目 size 即已知真实**逻辑**大小（与 engine 的 BytesDone/进度一致），入账前折算为物理；
 	// 失败 Release 归还。
-	if werr := q.inner.WriteFile(ctx, relPath, r, size, mtime); werr != nil {
+	if werr := q.inner.WriteFile(ctx, key, relPath, r, size, mtime); werr != nil {
 		res.Release()
 		return werr
 	}

@@ -265,7 +265,7 @@ func TestUserVolumeAPI_List_OwnerFilter(t *testing.T) {
 
 	// C3：卷级计数 usage 填充——经 FS 写入 42 字节后列表反映（创建期即包 CapacityFS）。
 	if err := h.volSet.External("alice-disk").FS().WriteFile(
-		context.Background(), "f.bin", bytes.NewReader(make([]byte, 42)), 42, 0); err != nil {
+		context.Background(), syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(make([]byte, 42)), 42, 0); err != nil {
 		t.Fatalf("写入用户卷: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/volumes/user", nil)
@@ -581,7 +581,7 @@ func TestUserVolumeAPI_DeleteRecreateKeepsUsage(t *testing.T) {
 	if rec := postUserVolume(t, mux, body); rec.Code != http.StatusOK {
 		t.Fatalf("create = %d (%s)", rec.Code, rec.Body.String())
 	}
-	if err := h.volSet.External("ud").FS().WriteFile(context.Background(), "f.bin", bytes.NewReader(make([]byte, 42)), 42, 0); err != nil {
+	if err := h.volSet.External("ud").FS().WriteFile(context.Background(), syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(make([]byte, 42)), 42, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// delete

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // TestFS_LWWLastWriteWins 同路径两次写 → 后写者胜。
@@ -27,11 +29,11 @@ func TestFS_LWWLastWriteWins(t *testing.T) {
 	fs = fs.WithWriter(w)
 
 	// 第一次写（旧 mtime）。
-	if err := fs.WriteFile(ctx, "a.txt", strings.NewReader("v1"), 2, time.Now().Add(-time.Hour).UnixNano()); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "a.txt", strings.NewReader("v1"), 2, time.Now().Add(-time.Hour).UnixNano()); err != nil {
 		t.Fatalf("write v1: %v", err)
 	}
 	// 第二次写（新 mtime）→ LWW 覆盖。
-	if err := fs.WriteFile(ctx, "a.txt", strings.NewReader("v2"), 2, time.Now().UnixNano()); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "a.txt", strings.NewReader("v2"), 2, time.Now().UnixNano()); err != nil {
 		t.Fatalf("write v2: %v", err)
 	}
 	// 写面应反映 v2 内容（后写覆盖 = LWW）。
@@ -48,7 +50,7 @@ func TestFS_LWWWithoutWriter_ErrReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.WriteFile(ctx, "a.txt", strings.NewReader("x"), 1, time.Now().UnixNano()); !errors.Is(err, ErrReadOnly) {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, time.Now().UnixNano()); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("未注入 Writer 应 ErrReadOnly, got %v", err)
 	}
 }

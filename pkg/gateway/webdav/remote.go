@@ -95,8 +95,8 @@ func (s *subPathFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, erro
 	return s.inner.OpenRead(ctx, s.join(p))
 }
 
-func (s *subPathFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
-	return s.inner.WriteFile(ctx, s.join(p), r, size, mtime)
+func (s *subPathFS) WriteFile(ctx context.Context, key sync.LogicalKey, p string, r io.Reader, size, mtime int64) error {
+	return s.inner.WriteFile(ctx, key, s.join(p), r, size, mtime)
 }
 
 func (s *subPathFS) Rename(ctx context.Context, from, to string) error {

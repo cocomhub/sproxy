@@ -81,7 +81,7 @@ func TestRootFS_WriteReadDeleteAtRootKey(t *testing.T) {
 	t.Parallel()
 	fsys, _ := newRootFSFixture(t)
 	ctx := context.Background()
-	if err := fsys.WriteFile(ctx, "sub/new.bin", bytes.NewReader([]byte("hello")), 5, 0); err != nil {
+	if err := fsys.WriteFile(ctx, syncpkg.LogicalKey{}, "sub/new.bin", bytes.NewReader([]byte("hello")), 5, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, err := fsys.OpenRead(ctx, "sub/new.bin")

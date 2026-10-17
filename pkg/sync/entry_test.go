@@ -169,7 +169,7 @@ func (m *mockFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) 
 	return io.NopCloser(bytes.NewReader(e.Data)), nil
 }
 
-func (m *mockFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (m *mockFS) WriteFile(ctx context.Context, key LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err

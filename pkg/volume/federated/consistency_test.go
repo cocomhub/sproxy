@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -83,7 +85,7 @@ func TestFederated_LWW_ZeroRegression(t *testing.T) {
 	}
 	w := &memWriterFS{}
 	fs = fs.WithWriter(w)
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), storagepkg.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("lww WriteFile = %v, want 直转成功", err)
 	}
 	if !w.writeCalled {
@@ -102,7 +104,7 @@ func TestFederated_VersionMatch_Writes(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	fs = fs.WithWriter(w).WithConflictMode(ConflictVersion)
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("v4"), 2, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), storagepkg.LogicalKey{}, "a.txt", strings.NewReader("v4"), 2, 0); err != nil {
 		t.Fatalf("version 匹配 WriteFile = %v, want 成功", err)
 	}
 	if len(w.checks) != 1 || w.checks[0] != "a.txt" {
@@ -129,7 +131,7 @@ func TestFederated_VersionMismatch_409(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	fs = fs.WithWriter(w).WithConflictMode(ConflictVersion)
-	err = fs.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0)
+	err = fs.WriteFile(context.Background(), storagepkg.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0)
 	var vce *VersionConflictError
 	if !errors.As(err, &vce) {
 		t.Fatalf("版本不匹配应返回 VersionConflictError, got %v", err)
@@ -156,7 +158,7 @@ func TestFederated_Conflict_CreatesFile(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	fs = fs.WithWriter(w).WithConflictMode(ConflictConflict)
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("new"), 3, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), storagepkg.LogicalKey{}, "a.txt", strings.NewReader("new"), 3, 0); err != nil {
 		t.Fatalf("conflict WriteFile = %v, want 成功（旧文件保留 + 新内容写入）", err)
 	}
 	if len(w.renames) != 1 || w.renames[0][0] != "a.txt" {
@@ -186,7 +188,7 @@ func TestFederated_Conflict_NoExisting_DirectWrite(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	fs = fs.WithWriter(w).WithConflictMode(ConflictConflict)
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), storagepkg.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("conflict 模式不存在直写 = %v, want 成功", err)
 	}
 	if len(w.renames) != 0 {
@@ -217,7 +219,7 @@ func TestFederated_UnsupportedWriter_FailFast(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	fs = fs.WithWriter(&memWriterFS{}).WithConflictMode(ConflictVersion)
-	if werr := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0); !errors.Is(werr, ErrVersionedUnsupported) {
+	if werr := fs.WriteFile(context.Background(), storagepkg.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0); !errors.Is(werr, ErrVersionedUnsupported) {
 		t.Fatalf("非 VersionedWriter + version 模式 WriteFile = %v, want ErrVersionedUnsupported", werr)
 	}
 }

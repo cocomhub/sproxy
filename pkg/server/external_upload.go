@@ -68,7 +68,7 @@ func (s *externalUploadSink) WriteFile(ctx context.Context, path string, r io.Re
 	if err != nil {
 		return err
 	}
-	return s.fs.WriteFile(ctx, key, r, size, mtime)
+	return s.fs.WriteFile(ctx, syncpkg.LogicalKey{}, key, r, size, mtime)
 }
 
 // Stat 实现 files.UploadSink：返回路径大小（覆盖写差分用；不存在 → (0,false,nil)）。

@@ -47,7 +47,7 @@ func (e *Engine) syncFileMerge3(f *fileTransfer) bool {
 
 	merged, conflicted, hunks := Merge3(base, ours, base)
 	e.logger().Info("M3-DBG", "conflicted", conflicted, "base", string(base), "ours", string(ours), "dst", f.dstPath)
-	if err := f.dst.WriteFile(f.ctx, f.dstPath, bytes.NewReader(merged), int64(len(merged)), f.srcE.MTime); err != nil {
+	if err := f.dst.WriteFile(f.ctx, LogicalKey{}, f.dstPath, bytes.NewReader(merged), int64(len(merged)), f.srcE.MTime); err != nil {
 		e.logger().Warn("三方合并写目标失败，回退整文件复制", "path", f.dstPath, "error", err)
 		return false
 	}

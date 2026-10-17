@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
@@ -135,7 +137,7 @@ func TestSFTPFS_WriteReadDelete(t *testing.T) {
 
 	ctx := context.Background()
 	content := []byte("hello sftp 中文内容")
-	if err := fs.WriteFile(ctx, "dir/a.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "dir/a.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// 读回验证。
@@ -189,7 +191,7 @@ func TestSFTPFS_MakeDirRename(t *testing.T) {
 	if err := fs.MakeDir(ctx, "sub"); err != nil {
 		t.Fatalf("MakeDir 幂等: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "sub/b.txt", bytes.NewReader([]byte("b")), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "sub/b.txt", bytes.NewReader([]byte("b")), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := fs.Rename(ctx, "sub/b.txt", "sub/c.txt"); err != nil {

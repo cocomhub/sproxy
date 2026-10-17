@@ -81,7 +81,7 @@ func TestShardsealSecretdataCrossLayer(t *testing.T) {
 		t.Fatalf("NewFS: %v", err)
 	}
 	ctx := context.Background()
-	if werr := fs.WriteFile(ctx, "dir/cross.bin", bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+	if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "dir/cross.bin", bytes.NewReader(content), int64(len(content)), 0); werr != nil {
 		t.Fatal(werr)
 	}
 	// 读回（secretdata 侧）。

@@ -34,7 +34,7 @@ func TestFileMeta_FromWrittenFile(t *testing.T) {
 	}
 	ctx := context.Background()
 	content := bytes.Repeat([]byte("secretdata meta provider 内容 "), 50) // ~1.3KB
-	if wErr := fs.WriteFile(ctx, "f.bin", bytes.NewReader(content), int64(len(content)), 0); wErr != nil {
+	if wErr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(content), int64(len(content)), 0); wErr != nil {
 		t.Fatalf("WriteFile: %v", wErr)
 	}
 	fm, err := fs.FileMeta(ctx, "f.bin")
@@ -122,7 +122,7 @@ func TestUpdateMetaExtra(t *testing.T) {
 	}
 	ctx := context.Background()
 	content := bytes.Repeat([]byte("update-meta-extra "), 50)
-	if wErr := fs.WriteFile(ctx, "f.bin", bytes.NewReader(content), int64(len(content)), 0); wErr != nil {
+	if wErr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(content), int64(len(content)), 0); wErr != nil {
 		t.Fatalf("WriteFile: %v", wErr)
 	}
 	// 更新 Extra → 读回验证 damaged 标记写入卷内 shardseal.Meta。

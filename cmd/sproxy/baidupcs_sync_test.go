@@ -165,7 +165,7 @@ func TestSetupBaidupcsFSFactory_RegistryLookup(t *testing.T) {
 		t.Fatal("工厂应返回非 nil FS")
 	}
 	// 用 FS 真跑一次 WriteFile（fake 内存网盘）→ 证明装配链路可用（Set.External → StorageFS）。
-	if writeErr := fs.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); writeErr != nil {
+	if writeErr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); writeErr != nil {
 		t.Fatalf("WriteFile: %v", writeErr)
 	}
 	rc, openErr := fs.OpenRead(context.Background(), "x.txt")
@@ -204,7 +204,7 @@ func TestSetupBaidupcsFSFactory_PrefixViewKeepsSidecarHidden(t *testing.T) {
 	}
 	defer closeFn()
 
-	if werr := fs.WriteFile(context.Background(), "docs/x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); werr != nil {
+	if werr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "docs/x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	// ① 主文件落 `<owner>/user/<rel>`（与 HTTP 上传/转存/备份同键空间）。
@@ -279,7 +279,7 @@ func TestBaidupcs_OpenURL_ProtocolRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newBaidupcsBackendWithFactory: %v", err)
 	}
-	if werr := be.FS().WriteFile(context.Background(), "pikpak/o.bin", bytes.NewReader([]byte("baidupcs-openurl-content")), 24, 0); werr != nil {
+	if werr := be.FS().WriteFile(context.Background(), syncpkg.LogicalKey{}, "pikpak/o.bin", bytes.NewReader([]byte("baidupcs-openurl-content")), 24, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	set := registry.NewSet(nil, nil, nil, nil, "")
@@ -377,7 +377,7 @@ func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 		t.Fatalf("工厂查 disk1: %v", err)
 	}
 	defer close1()
-	if writeErr := fs1.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("disk1-data")), 9, 0); writeErr != nil {
+	if writeErr := fs1.WriteFile(context.Background(), syncpkg.LogicalKey{}, "x.txt", bytes.NewReader([]byte("disk1-data")), 9, 0); writeErr != nil {
 		t.Fatalf("disk1 WriteFile: %v", writeErr)
 	}
 	// C1 修复后键空间带用户桶前缀（<owner>/user/<rel>，与 HTTP 上传/下载/转存同形）。
@@ -529,7 +529,7 @@ func TestNewBaidupcsBackend_FromVolumeExtra(t *testing.T) {
 		t.Fatal("FS 不应为 nil")
 	}
 	// 用 FS 真跑一次 WriteFile（fake 内存网盘）→ 证明构造链路可用（Extra→Storage→StorageFS）。
-	if writeErr := fs.WriteFile(context.Background(), "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); writeErr != nil {
+	if writeErr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "x.txt", bytes.NewReader([]byte("netdisk")), 7, 0); writeErr != nil {
 		t.Fatalf("WriteFile: %v", writeErr)
 	}
 	rc, openErr := fs.OpenRead(context.Background(), "x.txt")
@@ -681,7 +681,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 		t.Fatalf("工厂 ownerA: %v", err)
 	}
 	// WriteFile 触发 staging 预留 → scopeA 上限 3，5 字节应超限拒绝（quota per-owner 生效）。
-	if fsA.WriteFile(context.Background(), "a.txt", bytes.NewReader([]byte("hello")), 5, 0) == nil {
+	if fsA.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.txt", bytes.NewReader([]byte("hello")), 5, 0) == nil {
 		t.Fatal("WriteFile(alice 5B) 应超限失败（scopeA 上限 3——per-owner quota 生效）")
 	}
 	if got := scopeA.Usage(); got != 0 {
@@ -698,7 +698,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("工厂 ownerB: %v", err)
 	}
-	if werr := fsB.WriteFile(context.Background(), "b.txt", bytes.NewReader([]byte("world")), 5, 0); werr != nil {
+	if werr := fsB.WriteFile(context.Background(), syncpkg.LogicalKey{}, "b.txt", bytes.NewReader([]byte("world")), 5, 0); werr != nil {
 		t.Fatalf("WriteFile(bob): %v", werr)
 	}
 	// bob 上限 100：WriteFile 成功（预留→上传→释放，Usage 归 0——记账窗口在传输中）。
@@ -713,7 +713,7 @@ func TestSetupBaidupcsFactory_OwnerScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("工厂 ownerC: %v", err)
 	}
-	if werr := fsC.WriteFile(context.Background(), "c.txt", bytes.NewReader([]byte("data")), 4, 0); werr != nil {
+	if werr := fsC.WriteFile(context.Background(), syncpkg.LogicalKey{}, "c.txt", bytes.NewReader([]byte("data")), 4, 0); werr != nil {
 		t.Fatalf("WriteFile(carol 无配额): %v", werr)
 	}
 }

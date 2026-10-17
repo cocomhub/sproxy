@@ -99,7 +99,7 @@ func (r *recordingFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error) 
 	return nil, nil
 }
 func (r *recordingFS) OpenRead(context.Context, string) (io.ReadCloser, error) { return nil, nil }
-func (r *recordingFS) WriteFile(_ context.Context, p string, _ io.Reader, size, _ int64) error {
+func (r *recordingFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, _ io.Reader, size, _ int64) error {
 	r.writes.Add(1)
 	r.mu.Lock()
 	r.sizes[p] = size
@@ -131,7 +131,7 @@ func TestCapacityFS_WriteAddsAndDeleteReleases(t *testing.T) {
 	c := NewCounter(100, "")
 	fs := Wrap(inner, c)
 
-	if err := fs.WriteFile(context.Background(), "a.txt", nil, 30, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.txt", nil, 30, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if got := c.Used(); got != 30 {
@@ -156,10 +156,10 @@ func TestCapacityFS_WriteExceedsCapacity_Rejected(t *testing.T) {
 	c := NewCounter(50, "")
 	fs := Wrap(inner, c)
 
-	if err := fs.WriteFile(context.Background(), "a.txt", nil, 30, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.txt", nil, 30, 0); err != nil {
 		t.Fatalf("WriteFile(30): %v", err)
 	}
-	if err := fs.WriteFile(context.Background(), "b.txt", nil, 30, 0); err == nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "b.txt", nil, 30, 0); err == nil {
 		t.Fatal("WriteFile(30) 超限（60>50）应返回错误")
 	}
 	if got := c.Used(); got != 30 {
@@ -179,10 +179,10 @@ func TestCapacityFS_OverwriteAdjustsDelta(t *testing.T) {
 	fs := Wrap(inner, c)
 	ctx := context.Background()
 
-	if err := fs.WriteFile(ctx, "x.bin", nil, 30, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "x.bin", nil, 30, 0); err != nil {
 		t.Fatalf("WriteFile(30): %v", err)
 	}
-	if err := fs.WriteFile(ctx, "x.bin", nil, 10, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "x.bin", nil, 10, 0); err != nil {
 		t.Fatalf("覆盖写小文件: %v", err)
 	}
 	if got := c.Used(); got != 10 {
@@ -190,7 +190,7 @@ func TestCapacityFS_OverwriteAdjustsDelta(t *testing.T) {
 	}
 	// 净增 50（10 → 60）超限（10+50>50）→ 拒绝，且不触达 inner。
 	writesBefore := inner.writes.Load()
-	if err := fs.WriteFile(ctx, "x.bin", nil, 60, 0); err == nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "x.bin", nil, 60, 0); err == nil {
 		t.Fatal("覆盖写净增超限应拒绝")
 	}
 	if got := c.Used(); got != 10 {
@@ -209,10 +209,10 @@ func TestCapacityFS_RenameFreesTarget(t *testing.T) {
 	fs := Wrap(inner, c)
 	ctx := context.Background()
 
-	if err := fs.WriteFile(ctx, "src.bin", nil, 20, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "src.bin", nil, 20, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.WriteFile(ctx, "dst.bin", nil, 15, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "dst.bin", nil, 15, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := c.Used(); got != 35 {
@@ -242,7 +242,7 @@ func (m *measuringFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error) 
 	return nil, nil
 }
 func (m *measuringFS) OpenRead(context.Context, string) (io.ReadCloser, error) { return nil, nil }
-func (m *measuringFS) WriteFile(_ context.Context, p string, r io.Reader, size, _ int64) error {
+func (m *measuringFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, _ int64) error {
 	n := size
 	if r != nil {
 		w, _ := io.Copy(io.Discard, r)
@@ -264,14 +264,14 @@ func TestCapacityFS_UnknownSizeUsesMeasured(t *testing.T) {
 	pool := quota.NewPool(100)
 	fs := Wrap(&measuringFS{sizes: map[string]int64{}}, NewPoolCounter(pool))
 	content := strings.Repeat("x", 30)
-	if err := fs.WriteFile(context.Background(), "a.bin", strings.NewReader(content), -1, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.bin", strings.NewReader(content), -1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if got := pool.Usage(); got != 30 {
 		t.Fatalf("未知长度应按实测入账 30, got %d", got)
 	}
 	// 已知长度超限仍 fail-closed。
-	if err := fs.WriteFile(context.Background(), "b.bin", nil, 80, 0); err == nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "b.bin", nil, 80, 0); err == nil {
 		t.Fatal("30+80 超限应拒绝")
 	}
 }
@@ -427,7 +427,7 @@ func (f *commitThenErrFS) Stat(_ context.Context, p string) (*syncpkg.Entry, err
 	return nil, nil
 }
 func (f *commitThenErrFS) OpenRead(context.Context, string) (io.ReadCloser, error) { return nil, nil }
-func (f *commitThenErrFS) WriteFile(_ context.Context, p string, r io.Reader, size, _ int64) error {
+func (f *commitThenErrFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, _ int64) error {
 	n := size
 	if r != nil {
 		w, _ := io.Copy(io.Discard, r)
@@ -465,7 +465,7 @@ func (f *noWriteErrFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error)
 	return nil, nil
 }
 func (f *noWriteErrFS) OpenRead(context.Context, string) (io.ReadCloser, error) { return nil, nil }
-func (f *noWriteErrFS) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+func (f *noWriteErrFS) WriteFile(context.Context, syncpkg.LogicalKey, string, io.Reader, int64, int64) error {
 	return errors.New("local: 写失败（对象未变）")
 }
 func (f *noWriteErrFS) Rename(context.Context, string, string) error { return nil }
@@ -484,7 +484,7 @@ func TestCapacityFS_WriteFailureKeepsCommittedAccounting(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(100)
 	fs := Wrap(&commitThenErrFS{sizes: map[string]int64{}}, NewPoolCounter(pool))
-	if err := fs.WriteFile(context.Background(), "a.bin", strings.NewReader(strings.Repeat("x", 40)), 40, 0); err == nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.bin", strings.NewReader(strings.Repeat("x", 40)), 40, 0); err == nil {
 		t.Fatal("应返回写错误")
 	}
 	if got := pool.Usage(); got != 40 {
@@ -505,7 +505,7 @@ func TestCapacityFS_WriteFailureNotPersistedRollsBack(t *testing.T) {
 	}
 	pre.Commit(10)
 	// 覆盖写声明 50（净增预留 40），写失败且未落盘 → 占用应保持 10。
-	if err := fs.WriteFile(context.Background(), "a.bin", nil, 50, 0); err == nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.bin", nil, 50, 0); err == nil {
 		t.Fatal("应返回写错误")
 	}
 	if got := pool.Usage(); got != 10 {
@@ -519,7 +519,7 @@ func TestCapacityFS_WriteFailureStatUnverifiableBiasesHigh(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(100)
 	fs := Wrap(&statErrFS{commitThenErrFS{sizes: map[string]int64{}}}, NewPoolCounter(pool))
-	if err := fs.WriteFile(context.Background(), "a.bin", nil, 30, 0); err == nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.bin", nil, 30, 0); err == nil {
 		t.Fatal("应返回写错误")
 	}
 	if got := pool.Usage(); got != 30 {
@@ -554,7 +554,7 @@ func TestCapacityFS_DeclaredSizeNilReader(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(100)
 	fs := Wrap(&measuringFS{sizes: map[string]int64{}}, NewPoolCounter(pool))
-	if err := fs.WriteFile(context.Background(), "a.bin", nil, 30, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.bin", nil, 30, 0); err != nil {
 		t.Fatalf("WriteFile(nil reader): %v", err)
 	}
 	if got := pool.Usage(); got != 30 {

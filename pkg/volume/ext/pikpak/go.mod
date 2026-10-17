@@ -20,4 +20,8 @@ module github.com/cocomhub/sproxy/pkg/volume/ext/pikpak
 
 go 1.27
 
-require github.com/cocomhub/sproxy v0.0.0-20261008134855-8b2a42ff4439
+require github.com/cocomhub/sproxy v0.0.0
+
+require golang.org/x/text v0.42.0 // indirect
+
+replace github.com/cocomhub/sproxy => ../../../..

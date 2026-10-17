@@ -15,6 +15,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // TestWrapperKeyspace_TransferEqualsReadWrite 转存写点 == 读写列举点（含端到端可见性）。
@@ -56,7 +58,7 @@ func TestWrapperKeyspace_TransferEqualsReadWrite(t *testing.T) {
 		t.Fatal("vault 转存写面不可用")
 	}
 	payload := []byte("transfer-payload")
-	if werr := fsys.WriteFile(context.Background(), transferKey, strings.NewReader(string(payload)),
+	if werr := fsys.WriteFile(context.Background(), storagepkg.LogicalKey{}, transferKey, strings.NewReader(string(payload)),
 		int64(len(payload)), 0); werr != nil {
 		t.Fatalf("按转存键写入失败: %v", werr)
 	}

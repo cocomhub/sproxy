@@ -50,11 +50,11 @@ func (f *faultWriteFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, erro
 func (f *faultWriteFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return f.wrap.OpenRead(ctx, p)
 }
-func (f *faultWriteFS) WriteFile(ctx context.Context, p string, r io.Reader, size int64, mtime int64) error {
+func (f *faultWriteFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size int64, mtime int64) error {
 	if f.failPath(p) {
 		return fmt.Errorf("faultWriteFS: 模拟写失败 %s", p)
 	}
-	return f.wrap.WriteFile(ctx, p, r, size, mtime)
+	return f.wrap.WriteFile(ctx, key, p, r, size, mtime)
 }
 func (f *faultWriteFS) Rename(ctx context.Context, from, to string) error {
 	return f.wrap.Rename(ctx, from, to)
@@ -93,7 +93,7 @@ func TestOptimisticLock_BaseVersionPersistsAcrossReload(t *testing.T) {
 	// 阶段 1：写入，记下写前版本与落盘 meta.BaseVersion。
 	fs1 := newFSSharedInner(t, inner)
 	cur := fs1.CurrentVersion() // 0
-	if err := fs1.WriteFile(ctx, "a.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
+	if err := fs1.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if got := fs1.CurrentVersion(); got != cur+1 {
@@ -166,8 +166,8 @@ func (f *faultDeleteFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, err
 func (f *faultDeleteFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return f.wrap.OpenRead(ctx, p)
 }
-func (f *faultDeleteFS) WriteFile(ctx context.Context, p string, r io.Reader, size int64, mtime int64) error {
-	return f.wrap.WriteFile(ctx, p, r, size, mtime)
+func (f *faultDeleteFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size int64, mtime int64) error {
+	return f.wrap.WriteFile(ctx, key, p, r, size, mtime)
 }
 func (f *faultDeleteFS) Rename(ctx context.Context, from, to string) error {
 	return f.wrap.Rename(ctx, from, to)
@@ -194,7 +194,7 @@ func TestDelete_BestEffortPhysical_NoLedgerDrift(t *testing.T) {
 	ctx := context.Background()
 	fs := newFSSharedInner(t, inner)
 
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	usage0 := fs.Usage()
@@ -286,7 +286,7 @@ func TestOverwrite_Failure_RollsBackNewKeepsOld(t *testing.T) {
 	ctx := context.Background()
 
 	// v1 写入。
-	if err := fs.WriteFile(ctx, "ov.bin", bytes.NewReader(data(800)), 800, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "ov.bin", bytes.NewReader(data(800)), 800, 0); err != nil {
 		t.Fatalf("WriteFile v1: %v", err)
 	}
 	oldEntry := fs.index["ov.bin"]
@@ -298,7 +298,7 @@ func TestOverwrite_Failure_RollsBackNewKeepsOld(t *testing.T) {
 	inner.mu.Lock()
 	inner.fail = 1
 	inner.mu.Unlock()
-	if err := fs.WriteFile(ctx, "ov.bin", bytes.NewReader(data(1000)), 1000, 0); err == nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "ov.bin", bytes.NewReader(data(1000)), 1000, 0); err == nil {
 		t.Fatal("覆盖写中途 meta 上传失败应返回错误")
 	}
 
@@ -350,7 +350,7 @@ func TestDelete_MetaDeleteFailure_PreservesChunksNoGhost(t *testing.T) {
 	}
 	fs := newFSSharedInner(t, inner)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["a.bin"]
@@ -406,7 +406,7 @@ func TestLoadIndex_SameRelConflict_KeepsNewerVersion(t *testing.T) {
 	ctx := context.Background()
 	v1 := data(800)
 	v2 := data(1000)
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(v1), int64(len(v1)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(v1), int64(len(v1)), 0); err != nil {
 		t.Fatalf("WriteFile v1: %v", err)
 	}
 	verAfterV1 := fs.CurrentVersion()
@@ -415,7 +415,7 @@ func TestLoadIndex_SameRelConflict_KeepsNewerVersion(t *testing.T) {
 	inner.mu.Lock()
 	inner.fail = 1
 	inner.mu.Unlock()
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(v2), int64(len(v2)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(v2), int64(len(v2)), 0); err != nil {
 		t.Fatalf("覆盖写 v2: %v", err)
 	}
 	if fs.CurrentVersion() != verAfterV1+1 {

@@ -163,7 +163,7 @@ func TestRegisterSecretsBackendWithFS(t *testing.T) {
 		t.Fatal("backend 或 FS 为 nil")
 	}
 	// 用 FS 真跑一次：写 + 读。
-	if werr := be.FS().WriteFile(context.Background(), "k", strings.NewReader("val"), 3, 0); werr != nil {
+	if werr := be.FS().WriteFile(context.Background(), syncpkg.LogicalKey{}, "k", strings.NewReader("val"), 3, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, err := be.FS().OpenRead(context.Background(), "k")
@@ -215,7 +215,7 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 	// 直接 WriteFile/OpenRead 透明加解密。
-	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, err := be.FS().OpenRead(ctx, "a.mp4")
@@ -271,7 +271,7 @@ func TestRegisterSecretVolumeBackends_Unconditional(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBackend(生产 secretata): %v", err)
 	}
-	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, err := be.FS().OpenRead(ctx, "a.mp4")
@@ -354,7 +354,7 @@ func TestSetupSecretBackends_Secretdata_MultiTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
-	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, err := be.FS().OpenRead(ctx, "a.mp4")
@@ -573,7 +573,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		}
 		const body = "nested enclosure payload"
 		const key = "alice/user/n.bin"
-		if werr := nbe.FS().WriteFile(ctx, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+		if werr := nbe.FS().WriteFile(ctx, syncpkg.LogicalKey{}, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
 			t.Fatalf("封装卷写入: %v", werr)
 		}
 		rc2, oerr := nbe.FS().OpenRead(ctx, key)
@@ -703,7 +703,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		}
 		const body = "multi layer chain payload"
 		const key2 = "alice/user/chain.bin"
-		if werr := dbe.FS().WriteFile(ctx, key2, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+		if werr := dbe.FS().WriteFile(ctx, syncpkg.LogicalKey{}, key2, strings.NewReader(body), int64(len(body)), 0); werr != nil {
 			t.Fatalf("第 3 层写入: %v", werr)
 		}
 		rc3, oerr := dbe.FS().OpenRead(ctx, key2)
@@ -808,19 +808,19 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		// ② 外部源封印：直连外部后端写封装区（含封装区内的子路径）→ 恒拒且可归因 ErrSealed。
 		extView := vols.External("ext").FS()
 		for _, key := range []string{"vault-area/x.bin", "vault-area/alice/user/x.bin"} {
-			if werr := extView.WriteFile(ctx, key, strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+			if werr := extView.WriteFile(ctx, syncpkg.LogicalKey{}, key, strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
 				t.Fatalf("外部源封印路径 %q 直连写入必须被拒（ErrSealed）, got %v", key, werr)
 			}
 		}
 		// 外部卷未封印区域照常可写（零回归：封印不误伤底座其余键空间）。
-		if werr := extView.WriteFile(ctx, "plain/x.bin", strings.NewReader("ok"), 2, 0); werr != nil {
+		if werr := extView.WriteFile(ctx, syncpkg.LogicalKey{}, "plain/x.bin", strings.NewReader("ok"), 2, 0); werr != nil {
 			t.Fatalf("外部卷未封印路径写应放行, got %v", werr)
 		}
 		// ③ vault（secretdata over 外部源）：经特权视图读写往返，密文落外部后端。
 		const body = "external base chain payload"
 		const dataKey = "alice/user/ext.bin"
 		vbe := vols.External("vault")
-		if werr := vbe.FS().WriteFile(ctx, dataKey, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+		if werr := vbe.FS().WriteFile(ctx, syncpkg.LogicalKey{}, dataKey, strings.NewReader(body), int64(len(body)), 0); werr != nil {
 			t.Fatalf("vault（secretdata over 外部源）写入: %v", werr)
 		}
 		rc, oerr := vbe.FS().OpenRead(ctx, dataKey)
@@ -948,7 +948,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		const body = "config-nested-secret payload"
 		const key = "alice/user/n.bin"
 		vbe := vols.External("vault")
-		if werr := vbe.FS().WriteFile(ctx, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+		if werr := vbe.FS().WriteFile(ctx, syncpkg.LogicalKey{}, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
 			t.Fatalf("vault 写入: %v", werr)
 		}
 		rc, oerr := vbe.FS().OpenRead(ctx, key)
@@ -964,7 +964,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 			t.Fatal("vault 写入应以密文落盘（分块加密未生效）")
 		}
 	})
-	if werr := be.FS().WriteFile(ctx, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, "a.mp4", strings.NewReader("hello secret"), 12, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, err := be.FS().OpenRead(ctx, "a.mp4")
@@ -1023,7 +1023,7 @@ func TestSecretdataVolume_PerOwnerDefaultSecrets(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = be.Close() })
 	const body = "per-owner secret payload"
-	if werr := be.FS().WriteFile(ctx, "a.bin", strings.NewReader(body), int64(len(body)), 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", strings.NewReader(body), int64(len(body)), 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, oerr := be.FS().OpenRead(ctx, "a.bin")
@@ -1187,7 +1187,7 @@ func TestEnclosureVolume_RestartReattach(t *testing.T) {
 		t.Fatal("首次装配后 vault backend 应可寻址")
 	}
 	const body = "persisted across restart"
-	if werr := be.FS().WriteFile(ctx, "alice/user/keep.bin", strings.NewReader(body), int64(len(body)), 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, "alice/user/keep.bin", strings.NewReader(body), int64(len(body)), 0); werr != nil {
 		t.Fatalf("写入封装卷: %v", werr)
 	}
 	if _, serr := os.Stat(filepath.Join(root, "videos")); serr != nil {
@@ -1316,7 +1316,7 @@ func TestEnclosureWrapper_Secretdata_ProductionAssembly(t *testing.T) {
 	// 3) 写读往返：用户可见明文。
 	const body = "hello enclosure volume"
 	key := "alice/user/docs/x.bin" // 面级键 = <owner>/<bucket>/<rel>（FSPath 形态）
-	if werr := be.FS().WriteFile(ctx, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
 		t.Fatalf("封装卷写入: %v", werr)
 	}
 	rc, oerr := be.FS().OpenRead(ctx, key)
@@ -1475,7 +1475,7 @@ func TestSecretsDirFSFor_SubdirLayoutAndRootSemantics(t *testing.T) {
 	t.Cleanup(func() { _ = set.Close() })
 	fsys := secretsDirFSFor(set, dir, nil)
 	ctx := context.Background()
-	if werr := fsys.WriteFile(ctx, "datakey", strings.NewReader("v"), 1, 0); werr != nil {
+	if werr := fsys.WriteFile(ctx, syncpkg.LogicalKey{}, "datakey", strings.NewReader("v"), 1, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	if _, serr := os.Stat(filepath.Join(dir, "secrets", "datakey")); serr != nil {
@@ -1488,7 +1488,7 @@ func TestSecretsDirFSFor_SubdirLayoutAndRootSemantics(t *testing.T) {
 	if serr := rt.SetSeals([]storage.SealRule{{Path: "secrets", Wrapper: "vault"}}); serr != nil {
 		t.Fatalf("SetSeals: %v", serr)
 	}
-	if werr := fsys.WriteFile(ctx, "k2", strings.NewReader("v"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+	if werr := fsys.WriteFile(ctx, syncpkg.LogicalKey{}, "k2", strings.NewReader("v"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
 		t.Fatalf("封印应生效（经 Root 的视图）, got %v", werr)
 	}
 }
@@ -1504,7 +1504,7 @@ func TestDefaultSecretsFS_LocalTargetSubdirLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("defaultSecretsFS: %v", err)
 	}
-	if werr := fsys.WriteFile(context.Background(), "datakey", strings.NewReader("v"), 1, 0); werr != nil {
+	if werr := fsys.WriteFile(context.Background(), syncpkg.LogicalKey{}, "datakey", strings.NewReader("v"), 1, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	if _, serr := os.Stat(filepath.Join(root, "secrets", "datakey")); serr != nil {
@@ -1556,7 +1556,7 @@ func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
 	// secrets 后端把源视图当文件树用：写入即可读回（内容明文——秘密文件本身靠封印保护）。
 	const body = "s3cr3t-key-material"
 	key := "alice/user/k1"
-	if werr := be.FS().WriteFile(ctx, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, key, strings.NewReader(body), int64(len(body)), 0); werr != nil {
 		t.Fatalf("secrets 封装卷写入: %v", werr)
 	}
 	rc, oerr := be.FS().OpenRead(ctx, key)

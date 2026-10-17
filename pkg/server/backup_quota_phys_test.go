@@ -37,7 +37,7 @@ func TestBackupQuotaFS_ChargedPhysicalBytes(t *testing.T) {
 	ctx := context.Background()
 	const n = 8192
 
-	if err := q.WriteFile(ctx, "a.bin", strings.NewReader(strings.Repeat("x", n)), n, 0); err != nil {
+	if err := q.WriteFile(ctx, storage.LogicalKey{}, "a.bin", strings.NewReader(strings.Repeat("x", n)), n, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if got, want := scope.Usage(), phys(n); got != want {
@@ -48,7 +48,7 @@ func TestBackupQuotaFS_ChargedPhysicalBytes(t *testing.T) {
 	}
 
 	// 覆盖写：`prev`（来自 inner.Stat = 逻辑）同样必须折算，否则泄漏 (物理−逻辑)。
-	if err := q.WriteFile(ctx, "a.bin", strings.NewReader(strings.Repeat("y", 2*n)), 2*n, 0); err != nil {
+	if err := q.WriteFile(ctx, storage.LogicalKey{}, "a.bin", strings.NewReader(strings.Repeat("y", 2*n)), 2*n, 0); err != nil {
 		t.Fatalf("WriteFile(覆盖): %v", err)
 	}
 	if got, want := scope.Usage(), phys(2*n); got != want {
@@ -72,7 +72,7 @@ func TestBackupQuotaFS_NilPhysIsIdentity(t *testing.T) {
 	inner := &backupSizedMemFS{backupMemFS{files: map[string]string{}}}
 	q := &backupQuotaFS{inner: inner, scope: scope}
 	const n = 4096
-	if err := q.WriteFile(context.Background(), "p.bin", strings.NewReader(strings.Repeat("z", n)), n, 0); err != nil {
+	if err := q.WriteFile(context.Background(), storage.LogicalKey{}, "p.bin", strings.NewReader(strings.Repeat("z", n)), n, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if got := scope.Usage(); got != n {

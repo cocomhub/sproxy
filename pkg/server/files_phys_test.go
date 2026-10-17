@@ -67,7 +67,7 @@ func TestFilesPhysFootprinter_SecretdataVolume(t *testing.T) {
 	}
 	// ③ 文件足迹实测：小文件的物理 ≥ meta pad（4KiB）。
 	payload := bytes.Repeat([]byte("p"), 64)
-	if werr := be.FS().WriteFile(ctx, "alice/user/a/b/c/f.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, syncpkg.LogicalKey{}, "alice/user/a/b/c/f.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
 		t.Fatalf("底层 WriteFile: %v", werr)
 	}
 	fp, okF := p.PhysFootprint("vault", "alice", "a/b/c/f.bin")

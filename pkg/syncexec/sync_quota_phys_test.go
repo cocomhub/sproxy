@@ -37,7 +37,7 @@ func TestQuotaLocalFS_ChargedPhysicalBytes(t *testing.T) {
 		scopeFor: func(string, string) *quota.Scope { return scope },
 		phys:     storage.EncryptedPhysicalSize,
 	}
-	if err := q.WriteFile(context.Background(), "f.bin", strings.NewReader(strings.Repeat("x", n)), n, 0); err != nil {
+	if err := q.WriteFile(context.Background(), syncpkg.LogicalKey{}, "f.bin", strings.NewReader(strings.Repeat("x", n)), n, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if got, want := scope.Usage(), storage.EncryptedPhysicalSize(n); got != want {
@@ -56,7 +56,7 @@ func TestQuotaLocalFS_ChargedPhysicalBytes(t *testing.T) {
 		owner:    "alice",
 		scopeFor: func(string, string) *quota.Scope { return scope2 },
 	}
-	if err := q2.WriteFile(context.Background(), "p.bin", strings.NewReader(strings.Repeat("y", n)), n, 0); err != nil {
+	if err := q2.WriteFile(context.Background(), syncpkg.LogicalKey{}, "p.bin", strings.NewReader(strings.Repeat("y", n)), n, 0); err != nil {
 		t.Fatalf("WriteFile(明文卷): %v", err)
 	}
 	if got := scope2.Usage(); got != n {

@@ -48,7 +48,7 @@ func (f *extFS) OpenRead(_ context.Context, p string) (io.ReadCloser, error) {
 	}
 	return io.NopCloser(strings.NewReader(content)), nil
 }
-func (f *extFS) WriteFile(_ context.Context, p string, r io.Reader, _ int64, _ int64) error {
+func (f *extFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, r io.Reader, _ int64, _ int64) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -451,8 +451,8 @@ func (m *metaProviderExtFS) Stat(ctx context.Context, p string) (*syncpkg.Entry,
 func (m *metaProviderExtFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return m.inner.OpenRead(ctx, p)
 }
-func (m *metaProviderExtFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return m.inner.WriteFile(ctx, p, r, sz, mt)
+func (m *metaProviderExtFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return m.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (m *metaProviderExtFS) Rename(ctx context.Context, f, t string) error {
 	return m.inner.Rename(ctx, f, t)

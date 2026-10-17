@@ -37,13 +37,13 @@ func TestGC_OptionalTool_CleansOrphanChunkPreservesLive(t *testing.T) {
 	}
 	ctx := context.Background()
 	c := data(500)
-	if err := fs.WriteFile(ctx, "live.bin", bytes.NewReader(c), int64(len(c)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "live.bin", bytes.NewReader(c), int64(len(c)), 0); err != nil {
 		t.Fatal(err)
 	}
 	entry := fs.index["live.bin"]
 	// 注入孤儿分块（hex 名 = KindChunk，无 meta 引用）到同容器。
 	orphan := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" // 40 hex，无 -/_/@
-	if werr := fs.inner.WriteFile(ctx, path.Join(entry.dirSeg, orphan), bytes.NewReader(data(64)), 64, 0); werr != nil {
+	if werr := fs.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(entry.dirSeg, orphan), bytes.NewReader(data(64)), 64, 0); werr != nil {
 		t.Fatal(werr)
 	}
 	if ent, _ := fs.inner.Stat(ctx, path.Join(entry.dirSeg, orphan)); ent == nil {

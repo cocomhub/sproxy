@@ -13,6 +13,8 @@ import (
 	"io"
 	"testing"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/minio/minio-go/v7"
 )
 
@@ -50,7 +52,7 @@ func TestS3FS_Multipart_LargeFile(t *testing.T) {
 	ctx := context.Background()
 	// 3MiB 内容（> 阈值；分片 5MiB 下限 → minio 仍自动 multipart）。
 	content := bytes.Repeat([]byte("x"), 3<<20)
-	if err := fs.WriteFile(ctx, "mp/big.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "mp/big.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(大文件): %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "mp/big.bin")
@@ -73,7 +75,7 @@ func TestS3FS_Multipart_SmallFileZeroRegression(t *testing.T) {
 	fs := newTestS3FS(t) // 默认阈值 64MiB：小文件单 PutObject
 	ctx := context.Background()
 	content := []byte("small file")
-	if err := fs.WriteFile(ctx, "small/x.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "small/x.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(小文件): %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "small/x.txt")
@@ -103,7 +105,7 @@ func TestS3FS_Multipart_Retry(t *testing.T) {
 	fs.putter = &failingPutter{inner: orig, failTimes: 1, attempt: &attempt}
 	defer func() { fs.putter = orig }()
 
-	if err := fs.WriteFile(ctx, "mp/retry.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "mp/retry.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(重试): %v", err)
 	}
 	if attempt < 2 {

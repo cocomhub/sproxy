@@ -253,7 +253,7 @@ func TestClusterFS_WriteReadOnly(t *testing.T) {
 	}
 	defer be.Close()
 	fs := be.FS()
-	if err := fs.WriteFile(context.Background(), "x", nil, 0, 0); err == nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "x", nil, 0, 0); err == nil {
 		t.Fatal("WriteFile 应 fail-closed")
 	}
 	if err := fs.Delete(context.Background(), "x"); err == nil {

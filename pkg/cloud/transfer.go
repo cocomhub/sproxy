@@ -770,7 +770,7 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 	} else if e != nil {
 		return false, nil // 已存在，拒绝覆写
 	}
-	if err := env.targetFS.WriteFile(env.ctx, env.rel, r, size, mtime); err != nil {
+	if err := env.targetFS.WriteFile(env.ctx, syncpkg.LogicalKey{}, env.rel, r, size, mtime); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -796,7 +796,7 @@ func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 	// E-M2（damaged 自愈）：resumeSelfOverwrite（damaged 任务重下）允许首写覆盖本任务
 	// 先前写过的目标卷副本——旧损坏副本需被新下载内容替换，不走唯一性拒绝。
 	if env.resumeSelfOverwrite || env.writeCount > 0 {
-		if err := env.targetFS.WriteFile(env.ctx, env.rel, r, size, mtime); err != nil {
+		if err := env.targetFS.WriteFile(env.ctx, syncpkg.LogicalKey{}, env.rel, r, size, mtime); err != nil {
 			return false, fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, err)
 		}
 		env.writeCount++

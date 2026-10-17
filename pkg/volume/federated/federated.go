@@ -155,7 +155,7 @@ func (f *FS) OpenRangeRead(ctx context.Context, path string, offset, size int64)
 //   - conflict：CheckVersion 发现远端已存在 → 旧文件改名 `<path>.conflict-<ts>` 保留双方
 //     （sync 既有惯例命名，冲突文件进用户卷视图可被冲突索引/API 消费），再以
 //     「期望不存在」写新内容；rename 失败 → 500（不写新内容，防丢旧内容）。
-func (f *FS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (f *FS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	if f.w == nil {
 		return ErrReadOnly
 	}
@@ -189,7 +189,7 @@ func (f *FS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtim
 		}
 		return vw.WriteFileVersioned(ctx, path, r, size, mtime, -1)
 	default: // ConflictLWW：直转，零回归
-		return f.w.WriteFile(ctx, path, r, size, mtime)
+		return f.w.WriteFile(ctx, key, path, r, size, mtime)
 	}
 }
 

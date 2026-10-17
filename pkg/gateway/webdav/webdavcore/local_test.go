@@ -56,7 +56,7 @@ func (m *memFS) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error)
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
-func (m *memFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
+func (m *memFS) WriteFile(ctx context.Context, key filesync.LogicalKey, rel string, r io.Reader, size, mtime int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, err := io.ReadAll(r)

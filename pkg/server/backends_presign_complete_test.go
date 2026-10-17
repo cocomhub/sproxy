@@ -40,10 +40,12 @@ func (*completeTestFS) ListDir(context.Context, string) ([]sync.Entry, error) { 
 func (*completeTestFS) OpenRead(context.Context, string) (io.ReadCloser, error) {
 	return nil, os.ErrNotExist
 }
-func (*completeTestFS) WriteFile(context.Context, string, io.Reader, int64, int64) error { return nil }
-func (*completeTestFS) Rename(context.Context, string, string) error                     { return nil }
-func (*completeTestFS) Delete(context.Context, string) error                             { return nil }
-func (*completeTestFS) MakeDir(context.Context, string) error                            { return nil }
+func (*completeTestFS) WriteFile(context.Context, sync.LogicalKey, string, io.Reader, int64, int64) error {
+	return nil
+}
+func (*completeTestFS) Rename(context.Context, string, string) error { return nil }
+func (*completeTestFS) Delete(context.Context, string) error         { return nil }
+func (*completeTestFS) MakeDir(context.Context, string) error        { return nil }
 
 func (b *completeTestBackend) FS() sync.FS  { return &completeTestFS{entries: b.entries} }
 func (b *completeTestBackend) Close() error { return nil }

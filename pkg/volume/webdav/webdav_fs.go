@@ -268,7 +268,7 @@ func (f *WebDAVFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser,
 // 写前确保父目录（逐级 MKCOL，幂等）：真实 WebDAV 服务端（Nextcloud 等）PUT 到
 // 不存在的父目录会 409；引擎 push 时目录条目在 SyncEmptyDirs=false 下不建目录（ActionSkipped），
 // 故此处按需逐级建父目录（目录已存在 → MKCOL 405 → 幂等忽略）。
-func (f *WebDAVFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (f *WebDAVFS) WriteFile(ctx context.Context, key sync.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	if err := f.ensureParentDirs(ctx, relPath); err != nil {
 		return err
 	}

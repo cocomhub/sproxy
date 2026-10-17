@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -44,10 +46,10 @@ func TestExternalVolume_CapacityEnforcedAtFSLayer(t *testing.T) {
 	fs := be.FS()
 	ctx := context.Background()
 
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(make([]byte, 60)), 60, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "a.bin", bytes.NewReader(make([]byte, 60)), 60, 0); err != nil {
 		t.Fatalf("写入 60 应成功: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "b.bin", bytes.NewReader(make([]byte, 60)), 60, 0); err == nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "b.bin", bytes.NewReader(make([]byte, 60)), 60, 0); err == nil {
 		t.Fatal("第二次写 60 超限（120>100）应被拒绝")
 	}
 	if got := h.volSet.Pool("ext").Usage(); got != 60 {

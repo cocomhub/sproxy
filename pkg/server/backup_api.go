@@ -485,7 +485,7 @@ func (q *backupQuotaFS) reserve(size int64) (*backupReservation, error) {
 	return &res, nil
 }
 
-func (q *backupQuotaFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (q *backupQuotaFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	// 记账口径折算（见 `phys` 字段注释）：**入账前**把逻辑长度折成本卷物理占用。
 	// 只在此处折一次，下方 reserve/Adjust/Commit/smAdopt 均以折算后的值为准。
 	size = q.physSize(size)
@@ -499,9 +499,9 @@ func (q *backupQuotaFS) WriteFile(ctx context.Context, relPath string, r io.Read
 		return fmt.Errorf("备份目标配额不足: %w", err)
 	}
 	if res == nil {
-		return q.inner.WriteFile(ctx, relPath, r, size, mtime)
+		return q.inner.WriteFile(ctx, key, relPath, r, size, mtime)
 	}
-	if werr := q.inner.WriteFile(ctx, relPath, r, size, mtime); werr != nil {
+	if werr := q.inner.WriteFile(ctx, key, relPath, r, size, mtime); werr != nil {
 		res.Release()
 		return werr
 	}

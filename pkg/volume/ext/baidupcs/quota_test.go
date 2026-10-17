@@ -110,7 +110,7 @@ func TestQuota_StagingReserveRelease(t *testing.T) {
 	// 2026-10-10：staging 配额由 caller 侧 per-request 包装实例记账（卷共享单例不再注入）。
 	g := syncpkg.WrapStagingQuota(fs, qt)
 
-	if err := g.WriteFile(context.Background(), "f.txt", strings.NewReader("data"), 4, 0); err != nil {
+	if err := g.WriteFile(context.Background(), syncpkg.LogicalKey{}, "f.txt", strings.NewReader("data"), 4, 0); err != nil {
 		t.Fatal(err)
 	}
 	if qt.reserved.Load() != 4 {
@@ -128,7 +128,7 @@ func TestQuota_ReserveFail_Aborts(t *testing.T) {
 	qt.failRes.Store(true)
 	g := syncpkg.WrapStagingQuota(fs, qt)
 
-	err := g.WriteFile(context.Background(), "f.txt", strings.NewReader("data"), 4, 0)
+	err := g.WriteFile(context.Background(), syncpkg.LogicalKey{}, "f.txt", strings.NewReader("data"), 4, 0)
 	if err == nil {
 		t.Fatal("ReserveUsage 失败时 WriteFile 应报错")
 	}
@@ -149,7 +149,7 @@ func TestSyncFS_WriteFile_Quota_Tracked(t *testing.T) {
 	qt := &fakeQuotaTracker{}
 	g := syncpkg.WrapStagingQuota(fs, qt)
 
-	if err := g.WriteFile(context.Background(), "a/b.txt", strings.NewReader("hello"), 5, 0); err != nil {
+	if err := g.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a/b.txt", strings.NewReader("hello"), 5, 0); err != nil {
 		t.Fatal(err)
 	}
 	if qt.released.Load() != 5 {

@@ -313,7 +313,7 @@ func (r *rangeReadCloser) Close() error { return r.f.Close() }
 // （审查 I-3：本地 FS 阻塞 IO 也尊重取消语义，为远程实现立规范）。
 // 原子写（可信卷自愈）：同一目录 CreateTemp → CopyWithCtx → fsync → Rename 覆盖——
 // 崩溃/失败只留临时文件或旧完整文件，绝不留下半写目标（转存首写失败后下次覆盖可自愈）。
-func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (l *LocalFS) WriteFile(ctx context.Context, key LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -510,7 +510,7 @@ func (l *LocalFS) Copy(ctx context.Context, from, to string) error {
 	if err != nil || srcE == nil {
 		return fmt.Errorf("copy: stat 源 %s: %v", from, err)
 	}
-	return l.WriteFile(ctx, to, rc, srcE.Size, srcE.MTime)
+	return l.WriteFile(ctx, LogicalKey{}, to, rc, srcE.Size, srcE.MTime)
 }
 
 // Link 同卷硬链接（sync.Linker 能力）：目标指向源同一 inode，两名字共享内容。

@@ -147,7 +147,7 @@ func writeManifest(ctx context.Context, fs syncpkg.FS, key string, files map[str
 		return fmt.Errorf("序列化 manifest 失败: %w", err)
 	}
 	tmp := key + ".tmp"
-	if err := fs.WriteFile(ctx, tmp, bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, tmp, bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		return fmt.Errorf("写 manifest 临时文件失败: %w", err)
 	}
 	if err := fs.Rename(ctx, tmp, key); err != nil {
@@ -385,5 +385,5 @@ func writeOnce(ctx context.Context, src, dst syncpkg.FS, rel string, size, mtime
 		return fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer rc.Close()
-	return dst.WriteFile(ctx, rel, rc, size, mtime)
+	return dst.WriteFile(ctx, syncpkg.LogicalKey{}, rel, rc, size, mtime)
 }

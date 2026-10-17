@@ -46,7 +46,7 @@ func (s *SecretdataFS) writeErasureParity(ctx context.Context, container string,
 		return fmt.Errorf("secretdata: parity 分块加密失败: %w", berr)
 	}
 	p := path.Join(container, enc.ChunkNames[0])
-	if werr := s.inner.WriteFile(ctx, p, bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
+	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, p, bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
 		return fmt.Errorf("secretdata: 上传 parity %s 失败: %w", enc.ChunkNames[0], werr)
 	}
 	*uploaded = append(*uploaded, p)

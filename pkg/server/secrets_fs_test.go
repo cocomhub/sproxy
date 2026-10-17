@@ -47,7 +47,7 @@ func TestRootSecretsFS_EncryptedVolumeStoresCiphertext(t *testing.T) {
 	rt := newEncryptedSecretsRoot(t)
 	fsys := NewRootSecretsFS(rt, "secrets", nil)
 	const secret = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-	if err := fsys.WriteFile(context.Background(), "datakey", strings.NewReader(secret), int64(len(secret)), 0); err != nil {
+	if err := fsys.WriteFile(context.Background(), storage.LogicalKey{}, "datakey", strings.NewReader(secret), int64(len(secret)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	abs, ok := rt.Abs("secrets/datakey")
@@ -83,7 +83,7 @@ func TestRootSecretsFS_SealedDirDenied(t *testing.T) {
 		t.Fatalf("SetSeals: %v", serr)
 	}
 	fsys := NewRootSecretsFS(rt, "secrets", nil)
-	werr := fsys.WriteFile(context.Background(), "k", strings.NewReader("v"), 1, 0)
+	werr := fsys.WriteFile(context.Background(), storage.LogicalKey{}, "k", strings.NewReader("v"), 1, 0)
 	if !errors.Is(werr, storage.ErrSealed) {
 		t.Fatalf("封印路径写入应被拒（ErrSealed）, got %v", werr)
 	}
@@ -105,7 +105,7 @@ func TestRootSecretsFS_ChmodSecretHardensMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("视图类型 = %T", fsys)
 	}
-	if err := fsys.WriteFile(context.Background(), "k", strings.NewReader("v"), 1, 0); err != nil {
+	if err := fsys.WriteFile(context.Background(), storage.LogicalKey{}, "k", strings.NewReader("v"), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	abs, _ := rt.Abs("secrets/k")

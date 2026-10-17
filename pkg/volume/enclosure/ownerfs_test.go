@@ -58,7 +58,7 @@ func TestOwnerFS_MapsExactlyIntoDeclaredRegion(t *testing.T) {
 	if err := view.MakeDir(ctx, "alice/user/docs"); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
-	if err := view.WriteFile(ctx, "alice/user/docs/x.bin", strings.NewReader("payload"), 7, 0); err != nil {
+	if err := view.WriteFile(ctx, syncpkg.LogicalKey{}, "alice/user/docs/x.bin", strings.NewReader("payload"), 7, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	want := filepath.Join(root, "alice", "user", "vault", "docs", "x.bin")
@@ -82,7 +82,7 @@ func TestOwnerFS_MapsExactlyIntoDeclaredRegion(t *testing.T) {
 	}
 	// wrapper 面（区域相对键）：同一源 FS 上，`a.bin` 落在区域根下。
 	regionFace := NewFS(syncpkg.NewLocalFS(root, nil), Decl{Vol: "vault", Source: "ext", Path: "alice/user/vault", Owner: "alice", Sub: "vault", Wrapper: ownerFSTestWrapperName})
-	if err := regionFace.WriteFile(ctx, "a.bin", strings.NewReader("w"), 1, 0); err != nil {
+	if err := regionFace.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", strings.NewReader("w"), 1, 0); err != nil {
 		t.Fatalf("wrapper 面写入: %v", err)
 	}
 	if _, serr := os.Stat(filepath.Join(root, "alice", "user", "vault", "a.bin")); serr != nil {
@@ -102,7 +102,7 @@ func TestOwnerFS_FootprintCoversAllReservedBuckets(t *testing.T) {
 	}
 	for _, b := range buckets {
 		key := "alice/" + b + "/obj.bin"
-		if err := view.WriteFile(ctx, key, strings.NewReader("x"), 1, 0); err != nil {
+		if err := view.WriteFile(ctx, syncpkg.LogicalKey{}, key, strings.NewReader("x"), 1, 0); err != nil {
 			t.Fatalf("桶 %s 写入应放行（在白名单与足迹内）: %v", b, err)
 		}
 		want := filepath.Join(root, "alice", b, "vault", "obj.bin")
@@ -146,7 +146,7 @@ func TestOwnerFS_RejectsOutOfFootprintAndBadKeys(t *testing.T) {
 		if _, err := view.Stat(ctx, c.key); !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("键 %q（%s）应按不存在拒绝, got %v", c.key, c.why, err)
 		}
-		if werr := view.WriteFile(ctx, c.key, strings.NewReader("x"), 1, 0); !errors.Is(werr, fs.ErrNotExist) {
+		if werr := view.WriteFile(ctx, syncpkg.LogicalKey{}, c.key, strings.NewReader("x"), 1, 0); !errors.Is(werr, fs.ErrNotExist) {
 			t.Fatalf("键 %q（%s）写应按不存在拒绝, got %v", c.key, c.why, werr)
 		}
 	}

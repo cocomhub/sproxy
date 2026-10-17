@@ -162,7 +162,7 @@ func (f *StorageFS) validatePath(relPath string) (string, error) {
 	return clean, nil
 }
 
-func (f *StorageFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

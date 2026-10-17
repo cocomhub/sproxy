@@ -101,8 +101,8 @@ func (p *PrefixFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, er
 }
 
 // WriteFile 写文件（加前缀）。
-func (p *PrefixFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
-	return p.FS.WriteFile(ctx, p.Key(path), r, size, mtime)
+func (p *PrefixFS) WriteFile(ctx context.Context, key LogicalKey, path string, r io.Reader, size, mtime int64) error {
+	return p.FS.WriteFile(ctx, key, p.Key(path), r, size, mtime)
 }
 
 // WriteIfAbsent 转发原子唯一写（加前缀）；底层未实现 → ErrUnsupported（调用方回落）。

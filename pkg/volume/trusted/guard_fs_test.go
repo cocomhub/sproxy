@@ -26,7 +26,7 @@ func TestGuard_MetaBucketDenied(t *testing.T) {
 
 	// 写 meta 桶（共享卷 owner 前缀 + 独享）→ 拒绝。
 	for _, p := range []string{"meta/creds.json", "alice/meta/sidecar.meta"} {
-		if err := g.WriteFile(ctx, p, strings.NewReader("x"), 1, 0); err == nil {
+		if err := g.WriteFile(ctx, syncpkg.LogicalKey{}, p, strings.NewReader("x"), 1, 0); err == nil {
 			t.Fatalf("写 meta 桶 %q 应拒绝（业务层隔离）", p)
 		}
 		if _, err := g.Stat(ctx, p); err == nil {
@@ -50,13 +50,13 @@ func TestGuard_NonMetaBucketAllowed(t *testing.T) {
 
 	// user 桶 + 用户子目录叫 meta（桶段=user，放行——用户裁定目录可叫保留名）。
 	for _, p := range []string{"user/a.txt", "alice/user/a.txt", "user/dir/meta/x.txt"} {
-		if err := g.WriteFile(ctx, p, strings.NewReader("ok"), 2, 0); err != nil {
+		if err := g.WriteFile(ctx, syncpkg.LogicalKey{}, p, strings.NewReader("ok"), 2, 0); err != nil {
 			t.Fatalf("非 meta 桶 %q 应放行: %v", p, err)
 		}
 	}
 	// cloud/backup 功能命名空间放行（各有着落点）。
 	for _, p := range []string{"cloud/t1/f.bin", "backup/manifest.json"} {
-		if err := g.WriteFile(ctx, p, strings.NewReader("ok"), 2, 0); err != nil {
+		if err := g.WriteFile(ctx, syncpkg.LogicalKey{}, p, strings.NewReader("ok"), 2, 0); err != nil {
 			t.Fatalf("功能命名空间 %q 应放行: %v", p, err)
 		}
 	}
@@ -111,7 +111,7 @@ func TestGuard_PathNormalizationDenied(t *testing.T) {
 		if _, err := g.Stat(ctx, p); err == nil {
 			t.Fatalf("路径 %q 应拒绝（归一/逃逸）", p)
 		}
-		if err := g.WriteFile(ctx, p, strings.NewReader("x"), 1, 0); err == nil {
+		if err := g.WriteFile(ctx, syncpkg.LogicalKey{}, p, strings.NewReader("x"), 1, 0); err == nil {
 			t.Fatalf("写路径 %q 应拒绝", p)
 		}
 	}

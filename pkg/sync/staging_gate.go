@@ -100,16 +100,16 @@ func (g *StagingQuotaGateFS) Stat(ctx context.Context, path string) (*Entry, err
 func (g *StagingQuotaGateFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 	return g.inner.OpenRead(ctx, path)
 }
-func (g *StagingQuotaGateFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (g *StagingQuotaGateFS) WriteFile(ctx context.Context, key LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	if g.quota == nil {
-		return g.inner.WriteFile(ctx, path, r, size, mtime)
+		return g.inner.WriteFile(ctx, key, path, r, size, mtime)
 	}
 	if size > 0 {
 		if err := g.quota.ReserveUsage(ctx, size); err != nil {
 			return err
 		}
 		defer g.quota.ReleaseUsage(size)
-		return g.inner.WriteFile(ctx, path, r, size, mtime)
+		return g.inner.WriteFile(ctx, key, path, r, size, mtime)
 	}
 	// **未知长度**（ContentLength=-1 / copyMeta 类，评审 F3）：写前无从预留，改为读取中按
 	// **实测**增量预留——配额耗尽时 Read 阻塞（写路径获得背压），写完释放实测总量。此前直接
@@ -117,7 +117,7 @@ func (g *StagingQuotaGateFS) WriteFile(ctx context.Context, path string, r io.Re
 	// 打满本地盘而配额不可见）。
 	rr := newReservingReader(ctx, g.quota, r)
 	defer rr.release()
-	return g.inner.WriteFile(ctx, path, rr, size, mtime)
+	return g.inner.WriteFile(ctx, key, path, rr, size, mtime)
 }
 func (g *StagingQuotaGateFS) Rename(ctx context.Context, from, to string) error {
 	return g.inner.Rename(ctx, from, to)

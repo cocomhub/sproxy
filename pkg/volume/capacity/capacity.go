@@ -575,7 +575,7 @@ func (f *CapacityFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, err
 	return f.inner.OpenRead(ctx, p)
 }
 
-func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (f *CapacityFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	prev := f.innerSize(ctx, relPath)
 	// 声明长度已知（>0）时先预留（超限 fail-closed 拒绝写入）；未知/非法（<=0，如
 	// 分块传输 ContentLength=-1 / copyMeta）不预留，写后按**实测字节**结算。
@@ -589,7 +589,7 @@ func (f *CapacityFS) WriteFile(ctx context.Context, relPath string, r io.Reader,
 		}
 	}
 	cr := &countingReader{r: r}
-	if err := f.inner.WriteFile(ctx, relPath, cr, size, mtime); err != nil {
+	if err := f.inner.WriteFile(ctx, key, relPath, cr, size, mtime); err != nil {
 		// **写错误 ≠ 未落盘**（评审 F2）：远端后端无原子 rename，响应超时/连接中断时对象
 		// 可能已提交——此前一律 Release(reserved) 假定未落盘 ⇒ used 永久偏低（限额可穿透）。
 		// 改为 Stat 复核实测并结算（无法复核则保留预留，宁可偏高）。

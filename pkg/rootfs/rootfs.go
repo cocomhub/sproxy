@@ -111,7 +111,7 @@ func (c *rootFSCore) OpenRead(ctx context.Context, p string) (io.ReadCloser, err
 }
 
 // WriteFile 以用户可见语义写入（加密卷透明加密落盘；封印路径恒拒）。
-func (c *rootFSCore) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (c *rootFSCore) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

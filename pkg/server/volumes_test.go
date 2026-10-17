@@ -397,7 +397,7 @@ var _ syncpkg.FS = syncFSV3{}
 func (syncFSV3) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
 func (syncFSV3) Stat(context.Context, string) (*syncpkg.Entry, error)     { return nil, nil }
 func (syncFSV3) OpenRead(context.Context, string) (io.ReadCloser, error)  { return nil, nil }
-func (syncFSV3) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+func (syncFSV3) WriteFile(context.Context, syncpkg.LogicalKey, string, io.Reader, int64, int64) error {
 	return nil
 }
 func (syncFSV3) Rename(context.Context, string, string) error { return nil }

@@ -40,7 +40,7 @@ type recFS struct {
 	written    []string
 }
 
-func (r *recFS) WriteFile(_ context.Context, path string, _ io.Reader, _, _ int64) error {
+func (r *recFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, path string, _ io.Reader, _, _ int64) error {
 	r.written = append(r.written, path)
 	return nil
 }
@@ -216,7 +216,7 @@ func TestFS_KeySpaceAndIdentity(t *testing.T) {
 	t.Parallel()
 	rec := &recFS{}
 	f := NewFS(rec, Decl{Vol: "vault", Source: "main", Path: "private/vault", Wrapper: "secretdata"})
-	if err := f.WriteFile(context.Background(), "docs/a.bin", bytes.NewReader([]byte("x")), 1, 0); err != nil {
+	if err := f.WriteFile(context.Background(), syncpkg.LogicalKey{}, "docs/a.bin", bytes.NewReader([]byte("x")), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if len(rec.written) != 1 || rec.written[0] != "private/vault/docs/a.bin" {
@@ -243,7 +243,7 @@ func TestDecl_Build_PassesPrefixViewToWrapper(t *testing.T) {
 		t.Fatalf("wrapper 应收到源视图, built=%d", w.built)
 	}
 	// 源视图必须是加前缀的 PrefixFS（wrapper 只经视图读写，不得绕过）。
-	if err := w.gotSrc.WriteFile(context.Background(), "k.bin", bytes.NewReader(nil), 0, 0); err != nil {
+	if err := w.gotSrc.WriteFile(context.Background(), syncpkg.LogicalKey{}, "k.bin", bytes.NewReader(nil), 0, 0); err != nil {
 		t.Fatalf("视图写入: %v", err)
 	}
 	if len(rec.written) != 1 || rec.written[0] != "private/vault/k.bin" {

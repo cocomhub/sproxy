@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/minio/minio-go/v7"
 )
 
@@ -119,7 +121,7 @@ func TestWriteFile_MultipartRouting(t *testing.T) {
 			if tc.size > 8<<20 { // 超大内容裁剪避免内存浪费（仅验证路由）
 				content = content[:8<<20]
 			}
-			if err := fs.WriteFile(t.Context(), "x.bin", bytes.NewReader(content), tc.size, 0); err != nil {
+			if err := fs.WriteFile(t.Context(), storagepkg.LogicalKey{}, "x.bin", bytes.NewReader(content), tc.size, 0); err != nil {
 				t.Fatalf("WriteFile: %v", err)
 			}
 			if len(rec.calls) != 1 {

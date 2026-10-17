@@ -179,7 +179,7 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	// 与其它 sidecar 落盘点一致：目标父目录先建（meta.Provider 短路场景——meta 由卷自身
 	// 提供、可能从未落过 sidecar → `meta/` 目录不存在，直接 WriteFile 必失败被吞）。
 	t.ensureMetaDir(ctx, meta.MetaPath(rel))
-	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+	if werr := t.inner.WriteFile(ctx, syncpkg.LogicalKey{}, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		return fmt.Errorf("trusted: meta 更新落盘失败: %w", werr)
 	}
 	// B-MAJOR 修复：写后交叉比对（复用 verifyWriteMeta）——写前校验与落盘之间仍存在
@@ -268,7 +268,7 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 	if merr != nil {
 		return
 	}
-	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+	if werr := t.inner.WriteFile(ctx, syncpkg.LogicalKey{}, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		t.logMetaWarn("persistCalcMeta", rel, werr)
 	}
 }
@@ -409,7 +409,7 @@ func (t *TrustedVolumeFS) copyMeta(ctx context.Context, from, to string) {
 	// B-MINOR：目标父目录先建（与 Rename 的 MakeDir 一致——Copy 到新子目录时
 	// meta/<新dir> 可能不存在，直接 WriteFile 会失败被吞成无 meta 孤儿）。
 	t.ensureMetaDir(ctx, dst)
-	if werr := t.inner.WriteFile(ctx, dst, rc, srcSize, 0); werr != nil {
+	if werr := t.inner.WriteFile(ctx, syncpkg.LogicalKey{}, dst, rc, srcSize, 0); werr != nil {
 		// A-MAJOR-6 修复：联动失败记日志（原静默吞错）——可观测，读侧不校验。
 		t.logMetaWarn("Copy", to, werr)
 		// 目标旧 sidecar 描述旧内容 → 失效（防陈旧 meta 固化）。
@@ -579,7 +579,7 @@ func (t *TrustedVolumeFS) chunkSizeFor(size int64) int64 {
 // 产生数百万 ChunkMeta（meta JSON GB 级：落盘爆配额/读侧 OOM）。钳到
 // minMetaChunkSize（1MiB）保 chunk 数上限；同时按 size 自适应的上限天然（ChunkSizeForSize
 // 最大 32MiB）不设额外上限。
-func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
+func (t *TrustedVolumeFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, rel string, r io.Reader, size, mtime int64) error {
 	// 计算 meta：读一遍流（同时喂给 inner 写）。meta 恒生成（用户裁定：只关校验不关
 	// meta——桶隔离/凭据保护不随校验开关变化）。
 	chunkSize := t.chunkSizeFor(size)
@@ -599,7 +599,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	if ferr != nil {
 		return ferr
 	}
-	if err := t.inner.WriteFile(ctx, rel, writeSrc, size, mtime); err != nil {
+	if err := t.inner.WriteFile(ctx, key, rel, writeSrc, size, mtime); err != nil {
 		return err
 	}
 	// 尾块已由 Finish 收尾（Write 路径不足 chunkSize 的尾块 Finish 内 flush）。
@@ -644,7 +644,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, rel string, r io.Reader
 	//   - 外部卷（本装饰器路径）：meta 经 inner.WriteFile 计入**卷自身真实占用**——远程网盘
 	//     容量/配额由卷后端自管（超限 WriteFile 失败），不进入 owner 全局 Scope 预留
 	//     （外部卷上传 reserveVolume 只按主文件 size 预留；meta 字节由卷容量约束，合理）。
-	if werr := t.inner.WriteFile(ctx, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+	if werr := t.inner.WriteFile(ctx, key, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
 		// meta 落盘失败：主文件已成功——不失败主写（meta 可下次读时补），记日志语义
 		// 由调用方/审计处理；此处返回主写成功（meta 缺失时读侧不校验）。
 		// C1 修复：**删旧 sidecar**（best-effort）——覆盖写场景旧 meta 描述旧内容，

@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // ---- 内存 fake FTP 服务端（纯标准库）----
@@ -519,7 +521,7 @@ func TestFTPFS_WriteReadDelete(t *testing.T) {
 
 	ctx := context.Background()
 	content := []byte("hello ftp 中文内容")
-	if err := fs.WriteFile(ctx, "dir/a.txt", strings.NewReader(string(content)), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "dir/a.txt", strings.NewReader(string(content)), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "dir/a.txt")
@@ -571,7 +573,7 @@ func TestFTPFS_MakeDirRename(t *testing.T) {
 	if err := fs.MakeDir(ctx, "sub"); err != nil {
 		t.Fatalf("MakeDir 幂等: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "sub/b.txt", strings.NewReader("b"), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "sub/b.txt", strings.NewReader("b"), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := fs.Rename(ctx, "sub/b.txt", "sub/c.txt"); err != nil {
@@ -678,7 +680,7 @@ func TestFTPFS_Stat_NonNotFoundReply_FailClosed(t *testing.T) {
 		return 500, "SIZE not implemented"
 	})
 	// 已存在文件 + fake server SIZE 恒回 500（命令不支持）→ Stat 必须报错而非 (nil,nil)。
-	if werr := fs.WriteFile(context.Background(), "exists.txt", strings.NewReader("data"), 4, 0); werr != nil {
+	if werr := fs.WriteFile(context.Background(), storagepkg.LogicalKey{}, "exists.txt", strings.NewReader("data"), 4, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	_, err := fs.Stat(context.Background(), "exists.txt")

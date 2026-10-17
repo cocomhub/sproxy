@@ -89,7 +89,7 @@ func TestEnclosureAttach_UnsealedWriteOK_SourceDirectDenied(t *testing.T) {
 		t.Fatal("封装卷后端应已补装")
 	}
 	// ① 封装卷写成功（不受封印影响）。
-	if werr := be.FS().WriteFile(context.Background(), "a.bin", bytes.NewReader([]byte("plain-data")), 9, 0); werr != nil {
+	if werr := be.FS().WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.bin", bytes.NewReader([]byte("plain-data")), 9, 0); werr != nil {
 		t.Fatalf("封装卷写入不应被封印影响: %v", werr)
 	}
 	// ② 数据确实落在源卷的封装区间（前缀映射生效）。
@@ -135,7 +135,7 @@ func TestEnclosureAttach_InheritsSourcePool(t *testing.T) {
 	}
 	// 经封装卷写入 → 占用沿父链聚合（同一字节只计一次：父池 == 子池占用，不翻倍）。
 	be := set.External("vault")
-	if werr := be.FS().WriteFile(context.Background(), "b.bin", bytes.NewReader(make([]byte, 10)), 10, 0); werr != nil {
+	if werr := be.FS().WriteFile(context.Background(), syncpkg.LogicalKey{}, "b.bin", bytes.NewReader(make([]byte, 10)), 10, 0); werr != nil {
 		t.Fatalf("写入: %v", werr)
 	}
 	if got := vaultPool.Usage(); got != 10 {

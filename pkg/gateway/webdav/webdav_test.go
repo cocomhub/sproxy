@@ -123,7 +123,7 @@ func (m *memFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (m *memFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (m *memFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	data, err := io.ReadAll(r)
