@@ -259,6 +259,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/volumes/user", h.createUserVolumeHandler)
 	localMux.HandleFunc("GET /api/volumes/user", h.listUserVolumesHandler)
 	localMux.HandleFunc("DELETE /api/volumes/user", h.deleteUserVolumeHandler)
+	// 配额查询**联邦化**（片 5）：用户视图 = 对「该用户可访问的卷」求和（设计 §1.5）。
+	localMux.HandleFunc("GET /api/quota", h.userQuotaHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	// secret 卷管理 API（roadmap/secret 接线）：隧道内层裸注册（隧道加密即认证，同
@@ -408,6 +410,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 用户卷 API（U3：per-owner 用户自有卷，仅外部类型；fileRoute 认证 + owner 派生）
 	srvMux.HandleFunc("POST /api/volumes/user", h.fileRoute(h.createUserVolumeHandler))
 	srvMux.HandleFunc("GET /api/volumes/user", h.fileRouteRead(h.listUserVolumesHandler))
+	// 配额查询**联邦化**（片 5）：只读子组（owner 恒取自认证 ⇒ 不得指定他人 ✗）。
+	srvMux.HandleFunc("GET /api/quota", h.fileRouteRead(h.userQuotaHandler))
 	srvMux.HandleFunc("DELETE /api/volumes/user", h.fileRoute(h.deleteUserVolumeHandler))
 	// backend 列表 API（V4：动态感知已注册后端类型；fileRoute[Read] 认证）
 	srvMux.HandleFunc("GET /api/backends", h.fileRouteRead(h.backendsHandler))
