@@ -615,3 +615,102 @@ type StatsProvider interface{ VolumeStats() (used, total int64, ok bool) }
      + `GET /api/quota`（owner **恒取自认证** ✓，不接受请求参数 ✗）。
    - **仍待**：写侧**按卷持有**（= 片 4 步骤③ / 片 6，与「删上层重复记账」同片 ✗）+ Web UI 呈现
      （改 UI 须补 Playwright e2e ✗）+ 跨进程/持久账本（片 7 ✓）。
+
+---
+
+## 13. 写侧统一：`QuotaVolume` 作为**唯一记账权威**（目标架构，2026-10-17 定稿）
+
+> 用户指示（2026-10-17）：「**注意选最佳形式组织架构，无需考虑兼容**」⇒ 本节给出**目标形态**，
+> 实施时**不留兼容层 / 不并存双形态**（§10 的「迁移严格先删后加」✓）。
+
+### 13.1 现状取证（**实测**，非估计）
+
+| 项 | 实测 | 说明 |
+|---|---|---|
+| `route.Release()` 调用点 | **52** | 失败路径双回滚 |
+| `UploadRoute.Scope` / `ScopeRes` / `Pool` / `PoolRes` / `PhysSize` | 各 **27–28** | 记账字段消费点 |
+| 测试引用（`ScopeRes`/`PoolRes`/`PhysSize`/`UploadRoute{`） | **50** | mock 与断言 |
+| `settleSize` 调用点 | **6**（非测试） | 写内核结算 |
+| `CapacityFS` 内池预占点 | **7** | 🔴 **前提已被证伪**（2026-10-17 实证）：**不是**重复预留 ✗ —— 外部/封装卷的池预留**立即 `Release()`**（注释：「仅探测用于路由/快速失败，立即释放防双计」✓）；**本地卷**才由 `UploadRoute.Pool` 结算（本地卷不包 `CapacityFS`）⇒ 真缺陷是**「整卷记账权威」按卷类型分治**（同一概念两个权威 ✗） |
+| `chunked_store.go` 会话级预留 | `Reservation` / `PoolRes` / `StorageMgrReserved` **三套** | 分块上传独立面 |
+
+**结论**：这是**跨多会话的原子重构** ⇒ 必须一次成型（禁半成品 ✗）。
+
+### 13.2 目标形态（**单一记账权威**）
+
+```go
+// pkg/files —— 路由只带「去哪写」+「一本账」；记账细节全部内聚到 QuotaVolume。
+type UploadRoute struct {
+    VolumeName string
+    Tenant     *storage.Tenant   // 本地卷写面
+    Sink       UploadSink        // 外部卷写面（非 nil 时优先）
+    Key        syncpkg.LogicalKey // 归属键（真实 (owner, bucket/rel)）
+    Quota      *registry.QuotaVolume // 唯一配额权威（nil = 该卷无配额层）
+    Res        *registry.Reservation // 双账本预留句柄（一次 Reserve 覆盖两侧）
+}
+```
+
+`registry.QuotaVolume` 侧（已有，只需补齐命名与语义）：
+
+```go
+Reserve(key, upperBound) (*Reservation, error) // 严格上界（两侧任一侧拒绝 ⇒ 全回滚）
+Reservation.Commit(prev, written)              // 结算（覆盖写差分；两侧各自幂等）
+Reservation.Release()                          // 双回滚
+Footprint(owner, rel) (int64, bool)            // **卷自报**物理足迹（释放侧同源）
+MaxPhysical(owner, rel, logical) int64         // 写前上界（**公式只写在卷里**）
+```
+
+**写内核（`files.Service`）的唯一流程**：
+
+1. 路由（`routeUpload*`）→ 解析卷 + `Key` + 取 `Quota`；
+2. **上界**：`bound := Quota.MaxPhysical(key.Owner, key.Rel, clientSize)`；
+3. **预占**：`res, err := Quota.Reserve(key, bound)`（不足 ⇒ 507/排队重试）；
+4. **写**：经 `Sink` 或 `Tenant.Root()`；
+5. **结算**：`settled := Quota.Footprint(...)`（失败则 `bound`）→ `res.Commit(prev, settled)`；
+6. **失败**：`res.Release()`。
+
+### 13.3 为何这是**最佳形式**（对比当前形态）
+
+| 维度 | 当前（`UploadRoute` 自带账本） ✗ | 目标（`QuotaVolume` 单一权威） ✓ |
+|---|---|---|
+| 记账职责 | 横切关注点**外泄到路由结构**（5 个字段 + 装配层 `rt.phys` 间接）✗ | 内聚在**卷**（唯一权威）✓ |
+| 物理尺寸公式 | 散在调用方（`PhysSize` 由装配层注入）✗ | **只写在卷里**（`Footprint`/`MaxPhysical`）✓ |
+| 双账本一致性 | 靠「调用点都记得同时 Commit 两侧」✗ | `Reservation` **一次覆盖两侧**（半入账不可表示）✓ |
+| 整卷权威 | **按卷类型分治** ✗：本地卷 ⇒ `UploadRoute.Pool`；外部/封装卷 ⇒ `CapacityFS` （同一概念两个权威 ⇒ 改一处漏一处） | 统一到 `QuotaVolume`（`counter`/`pool` 单实例）⇒ **单本账** ✓ |
+| 归属 | `(owner, rel)` 由调用方各自持有 ✗ | `LogicalKey` **显式下传**（封装卷亦可归属）✓ |
+| 新增写面 | 必须复制 5 字段装配 ✗ | 只传 `Key` + 取 `Quota` ✓ |
+
+### 13.4 迁移步骤（**原子**，一次成型）
+
+1. **`registry.QuotaVolume` 补齐**：`Reserve` 返回 `*Reservation`（已有）；新增便捷
+   `Settle(key, prev, written)` 与 `FootprintOr(key, fallback)`（**唯一**足迹口径）；
+2. **`pkg/files.UploadRoute` 换形**：删 `Scope`/`ScopeRes`/`Pool`/`PoolRes`/`PhysSize`/`Release`，
+   加 `Key`/`Quota`/`Res`；`Commit`/`Release` 改为委托 `Res`；
+3. **统一整卷权威**：把 `CapacityFS` 的池预占（7 处）与 `UploadRoute.Pool`（本地卷路径）
+   **一并**收敛到 `QuotaVolume.Reserve` 的**整卷侧**（`VolumeCounter`/`pool` 单实例 ⇒ 单本账 ✓）
+   —— **注意**：这不是「删重复」✗（前提已证伪 ✓），而是**消灭按卷类型分治的两个权威** ✓；
+4. **装配层**（`pkg/server/files_service.go` 的 2 个适配 + `volumes.go` 的 4 个 `routeUpload*`）
+   改为解析 `Quota` + `Key`；
+5. **分块上传**（`chunked_store.go`/`chunked_upload.go`）：三套会话预留收敛为一套
+   `*registry.Reservation`（`json:"-"` 句柄语义不变 ⇒ 重启后重算）；
+6. **释放侧**（片 6）：`charged_bytes` 落 `FileMeta.Extra`（本地卷）/ 独立 ledger（外部卷），
+   **删除** `prevCharge`/`chargedHint` 启发式 ⇒ 「释放 = 结算」成为**结构性不变式**。
+
+### 13.5 验证策略（**必须有判别力**）
+
+| 不变式 | 用例 | 变异（须红） |
+|---|---|---|
+| **恰好 1×（无 2×）** | 单次写入后 `scope.Usage()==size` 且 `pool.Usage()==size`，**本地卷与外部/封装卷结果一致** | 让两条权威路径**同时**记账 ⇒ 红（2×） |
+| 覆盖写不双计 | `Commit(prev, written)` 后两侧 = `written` | 去掉差分 ⇒ 红 |
+| 上界 ≥ 实测 | `MaxPhysical ≥ Footprint`（加密卷 + secretdata） | 用逻辑长度当上界 ⇒ 红 |
+| 失败全回滚 | 写入失败后两侧**零残留** | 只回滚一侧 ⇒ 红 |
+| 释放 = 结算 | 删除后两侧归零（**含 secretdata meta pad**） | 用逻辑长度释放 ⇒ 红（幽灵占用） |
+| 零值键不记账 | `LogicalKey{}` ⇒ 两侧不变 + 可观测告警 | 去掉守卫 ⇒ 红 |
+
+### 13.6 风险与回退
+
+- **最大风险**：步骤 3（删 `CapacityFS` 池预占）与步骤 4（装配层）**同时**上线 ⇒ 若装配层漏改，
+  整卷记账会**暂时消失**（少计 ⇒ 可超限）✗ ⇒ 必须由 §13.5 第一行的「无 `2×size` + 恰好 1×」
+  双向断言钉住 ✓；
+- **回退**：整体 revert（原子 ✓）；不留半成品形态 ✓；
+- **不改**：`storage.Root` / 封装卷 / 卷类型装配（本片只动**记账归属** ✓）。
