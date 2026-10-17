@@ -2053,16 +2053,17 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 	charge := physicalCharge(f.root, info.Size())
 	switch {
 	case input.chargedHint > 0:
-		// 删除前已捕获（与结算同源，见 DeleteFileInput.chargedHint）：首选——此刻原路径已被
+		// 删除前已捕获（与结算同源，见 DeleteFileInput.chargedHint）：**首选**——此刻原路径已被
 		// rename 到 quarantine，卷能力按原路径取不到足迹。
+		//
+		// 此处**不得**再追加一次 `physChargeFor` 兜底：那会无条件覆盖本分支（2026-10-17 审核
+		// 实测：序列化假能力下释放量被改写为删除中间态的二次查询值 ⇒ 释放量错误）。
+		// 释放不足 = 幽灵占用/假 507；释放过多 = 配额虚低 ⇒ 超限写入通过。
 		charge = input.chargedHint
 	default:
 		if n, ok := s.physChargeFor(homeVol, f.owner, f.remotePath); ok {
 			charge = n
 		}
-	}
-	if n, ok := s.physChargeFor(homeVol, f.owner, f.remotePath); ok {
-		charge = n
 	}
 	if err := f.root.Remove(quarRel); err != nil {
 		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
