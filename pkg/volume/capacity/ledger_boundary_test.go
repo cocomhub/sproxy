@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -165,5 +166,92 @@ func TestLedgerCounter_ReleaseClampedToZero(t *testing.T) {
 	c.Release(80) // 释放超出入账：钳到 0，不得拖负
 	if got := c.Used(); got != 0 {
 		t.Fatalf("Release 钳制后 Used=%d, want 0（未修必红：负漂移 %d）", got, got)
+	}
+}
+
+// TestLedgerCounter_CompactKeepsTotalAndReapsEmpty 周期压缩接线：Compact 折叠分片进基线
+// （Total 不变）+ ReapEmptyShards 回收空分片并从索引摘除（评审 S1/S3）。
+func TestLedgerCounter_CompactKeepsTotalAndReapsEmpty(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	fsys := syncpkg.NewLocalFS(dir, nil)
+	led, err := OpenLedgerFS(fsys, LedgerDirName, "compact-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewLedgerCounter(led, 1000)
+	if err := c.TryAdd(400); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	// 压缩后 Total 不变（增量已折入基线，分片被截断为空）。
+	if got := c.Used(); got != 400 {
+		t.Fatalf("Compact 后 Used=%d, want 400", got)
+	}
+	shardPath := filepath.Join(dir, "meta/quota", led.shardName())
+	shardData, serr := os.ReadFile(shardPath)
+	if serr != nil {
+		t.Fatalf("分片文件应存在（空内容）: %v", serr)
+	}
+	if strings.TrimSpace(string(shardData)) != "" {
+		t.Fatalf("Compact 后分片应为空, got %q", shardData)
+	}
+	// 再写入：新增量进分片（基线 400 + 增量 100）。
+	if err := c.TryAdd(100); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Used(); got != 500 {
+		t.Fatalf("压缩后再写 Used=%d, want 500", got)
+	}
+	// 回收空分片：分片非空 ⇒ 不得回收；Compact 后再回收 ⇒ 删除 + 摘索引。
+	if err := c.ReapEmptyShards(); err != nil {
+		t.Fatalf("ReapEmptyShards: %v", err)
+	}
+	if _, err := os.Stat(shardPath); err != nil {
+		t.Fatalf("非空分片不得被回收: %v", err)
+	}
+	if err := c.Compact(); err != nil {
+		t.Fatalf("第二次 Compact: %v", err)
+	}
+	if err := c.ReapEmptyShards(); err != nil {
+		t.Fatalf("第二次 ReapEmptyShards: %v", err)
+	}
+	if _, err := os.Stat(shardPath); !os.IsNotExist(err) {
+		t.Fatalf("空分片应被回收删除: %v", err)
+	}
+	// 回收后 Total 不变（增量已折入基线）。
+	if got := c.Used(); got != 500 {
+		t.Fatalf("回收后 Used=%d, want 500", got)
+	}
+}
+
+// TestWriteVolumeState_AtomicWriteNoTmpResidue 状态文件原子写：读回完整两行、无 .tmp 残留
+// （评审 S4——直接写崩溃会残缺 ⇒ LoadVolumeLimit 返回 0 ⇒ 上限被抹成「不限」）。
+func TestWriteVolumeState_AtomicWriteNoTmpResidue(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "v.limit")
+	if err := WriteVolumeState(path, 100, 60); err != nil {
+		t.Fatalf("WriteVolumeState: %v", err)
+	}
+	b, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 2 || lines[0] != "100" || lines[1] != "60" {
+		t.Fatalf("状态文件内容 %q, want 两行 100/60", string(b))
+	}
+	// LoadVolumeLimit/LoadVolumeUsed 读回一致。
+	if got := LoadVolumeLimit(path, 0, false); got != 100 {
+		t.Fatalf("LoadVolumeLimit=%d, want 100", got)
+	}
+	if got := LoadVolumeUsed(path); got != 60 {
+		t.Fatalf("LoadVolumeUsed=%d, want 60", got)
+	}
+	// 无 .tmp 残留（原子 rename 成功）。
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("原子写后不得残留 .tmp: %v", err)
 	}
 }

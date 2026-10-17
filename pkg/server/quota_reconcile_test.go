@@ -9,13 +9,20 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 func TestScanAndRecalculate_ReconcilesTenantScopes(t *testing.T) {
@@ -301,4 +308,64 @@ func TestReconcile_Subdir_SkipPropagates(t *testing.T) {
 		t.Fatalf("hd Reserved()=%d want 20（预留保留）", got)
 	}
 	rr.Release()
+}
+
+// truthReportingFS 包装 extFS，实现 TrueUsageReporter（固定真值）：验证对账把账本
+// （LedgerCounter）收敛到物理真值（评审 S2 接线——此前仅 pool 收敛、账本仍逻辑口径）。
+type truthReportingFS struct {
+	*extFS
+	truth int64
+}
+
+func (f *truthReportingFS) TrueUsage() (int64, bool)          { return f.truth, true }
+func (f *truthReportingFS) TrueSize(rel string) (int64, bool) { return 0, false }
+
+// TestReconcile_CorrectsLedgerToTruth 对账周期把账本收敛到真值：逻辑记账 1000、
+// 物理真值 5000（如加密卷 pad 膨胀）⇒ reconcile 后 `LedgerCounter.Used()` 必须为 5000
+// （此前只调 `pool.Adjust`，账本查询/强制面仍逻辑口径 ⇒ 展示与强制漂移）。
+func TestReconcile_CorrectsLedgerToTruth(t *testing.T) {
+	t.Parallel()
+	typ := fmt.Sprintf("truth-ext-%d", time.Now().UnixNano())
+	truth := &truthReportingFS{extFS: &extFS{files: map[string]string{}}, truth: 5000}
+	registry.RegisterBackend(typ, func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
+		return &fsBackend{fs: truth}, nil
+	})
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
+
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Volumes = []VolumeConfig{
+		{Name: "main", Root: cfg.StorageRoot},
+		{Name: "ext", Type: typ, VolCapacity: ByteSize(10000)},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	h := buildVolSetHandlers(t, cfg)
+	be := h.volSet.External("ext")
+	if be == nil {
+		t.Fatal("ext 未装配")
+	}
+	ctx := context.Background()
+	if err := be.FS().WriteFile(ctx, storage.LogicalKey{}, "a.bin", strings.NewReader(strings.Repeat("x", 1000)), 1000, 0); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	lc := h.volumeLedgerCounter("ext")
+	if lc == nil {
+		t.Fatal("ext 账本不可达")
+	}
+	if got := lc.Used(); got != 1000 {
+		t.Fatalf("逻辑记账 Used=%d, want 1000", got)
+	}
+	// 对账：账本收敛到真值 5000（池与账本同收敛）。
+	h.reconcileVolumes(map[string]map[string]map[string]int64{
+		"ext": {"": {"user": 1000}},
+	})
+	if got := lc.Used(); got != 5000 {
+		t.Fatalf("对账后账本 Used=%d, want 5000（评审 S2：账本必须收敛到真值）", got)
+	}
+	// 池同源收敛。
+	if got := h.volSet.Pool("ext").Usage(); got != 5000 {
+		t.Fatalf("对账后池 Usage=%d, want 5000", got)
+	}
 }

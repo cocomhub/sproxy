@@ -281,7 +281,18 @@ func WriteVolumeState(path string, limit, used int64) error {
 		return err
 	}
 	body := strconv.FormatInt(limit, 10) + "\n" + strconv.FormatInt(used, 10) + "\n"
-	return os.WriteFile(path, []byte(body), 0o644) //nolint:gosec // 同上
+	// **原子写**（评审 S4）：直接 os.WriteFile 崩溃会留下残缺文件 ⇒ `LoadVolumeLimit`
+	// 解析失败返回 0 ⇒ 已持久化上限被抹成「不限」（`delete+recreate` 绕过限额，fail-open ✗）。
+	// tmp + rename 原子替换 ⇒ 正式文件恒为完整两行；失败清理 tmp、旧文件保持。
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil { //nolint:gosec // 同上
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // volumeNodeID 返回本进程的账本节点标识（hostname + pid）。

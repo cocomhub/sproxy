@@ -119,6 +119,8 @@ type ledgerStore interface {
 	list() ([]string, error)
 	// truncate 清空文件（不存在 ⇒ 空操作）。
 	truncate(name string) error
+	// deleteFile 删除文件（不存在 ⇒ 空操作）。供空分片回收（ReapEmptyShards）使用。
+	deleteFile(name string) error
 	// close 释放句柄（幂等）。
 	close() error
 }
@@ -196,6 +198,16 @@ func (s *osStore) truncate(name string) error {
 	return os.Truncate(filepath.Join(s.dir, name), 0)
 }
 
+func (s *osStore) deleteFile(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := os.Remove(filepath.Join(s.dir, name))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (s *osStore) close() error { return nil }
 
 // ---- memStore：内存实现（**降级兜底**）----
@@ -245,6 +257,13 @@ func (s *memStore) list() ([]string, error) {
 }
 
 func (s *memStore) truncate(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.files, name)
+	return nil
+}
+
+func (s *memStore) deleteFile(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.files, name)
@@ -491,6 +510,15 @@ func (s *fsStore) truncate(name string) error {
 		return s.degradeLocked().truncate(name)
 	}
 	return nil
+}
+
+func (s *fsStore) deleteFile(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a := s.activeLocked(); a != nil {
+		return a.deleteFile(name)
+	}
+	return s.fs.Delete(context.Background(), s.path(name))
 }
 
 func (s *fsStore) close() error { return nil }
@@ -754,6 +782,107 @@ func (l *Ledger) Compact() error {
 	return nil
 }
 
+// reapEmptyShards 回收**空分片**（内容为空 = 已被本/他进程 Compact 截断，增量已折入其
+// 基线）并同步从索引摘除。非空死亡分片**保留**（正确性优先：其增量仍计入全局和，数量有界
+// 于历史进程数）。供周期对账接线（评审 S1/S3——分片/索引随重启单调增长）。
+func (l *Ledger) reapEmptyShards() error {
+	if l == nil || l.store == nil {
+		return errors.New("capacity: 账本未打开")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	reaped := l.emptyShardNamesLocked()
+	if len(reaped) == 0 {
+		return nil
+	}
+	if ierr := l.unindexShardsLocked(reaped); ierr != nil {
+		return ierr
+	}
+	for _, raw := range reaped {
+		_ = l.store.deleteFile(raw)
+	}
+	return nil
+}
+
+// emptyShardNamesLocked 返回索引内内容为空的 shard 名（增量已折入基线 ⇒ 可安全回收）。
+func (l *Ledger) emptyShardNamesLocked() []string {
+	names, err := l.shardNamesLocked()
+	if err != nil {
+		return nil
+	}
+	var empty []string
+	for _, raw := range names {
+		base := raw
+		if i := strings.LastIndex(raw, "/"); i >= 0 {
+			base = raw[i+1:]
+		}
+		if !strings.HasPrefix(base, ledgerShardPrefix) || !strings.HasSuffix(base, ledgerShardSuffix) {
+			continue
+		}
+		b, ok, rerr := l.store.readFile(raw)
+		if rerr != nil || !ok {
+			continue
+		}
+		if strings.TrimSpace(string(b)) != "" {
+			continue
+		}
+		empty = append(empty, raw)
+	}
+	return empty
+}
+
+// unindexShardsLocked 从索引中摘除指定分片登记（重写索引，保留其余行）。
+//
+// **基线保留**（评审实测：直接摘除 shard 行会连带丢失其 snap——`shardNamesLocked` 从
+// shard 行**派生** snap，shard 行没了则基线不可见 ⇒ Total 归零 ✗）。故空 shard 的基线
+// **非零**时以**独立 snap 行**写入索引（`shardNamesLocked` 对非 shard 行不派生 ⇒ 无双计）；
+// 基线为零（从未折叠）⇒ 直接摘除。
+func (l *Ledger) unindexShardsLocked(drop []string) error {
+	ib, ok, ierr := l.store.readFile(ledgerIndexName)
+	if ierr != nil || !ok {
+		return nil
+	}
+	dropSet := make(map[string]bool, len(drop))
+	for _, d := range drop {
+		dropSet[d] = true
+	}
+	var kept []string
+	for line := range strings.SplitSeq(string(ib), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if !dropSet[name] {
+			kept = append(kept, name)
+			continue
+		}
+		// 摘除空 shard：基线（snap.<node>）非零 ⇒ 独立登记保留（否则 Total 归零 ✗）。
+		if snap := l.retainSnapOfShardLocked(name); snap != "" {
+			kept = append(kept, snap)
+		}
+	}
+	return l.store.writeAtomic(ledgerIndexName, []byte(strings.Join(kept, "\n")+"\n"))
+}
+
+// retainSnapOfShardLocked 空 shard 的基线（snap.<node>）非零时返回其名（以独立行保留，
+// `shardNamesLocked` 对非 shard 行不派生 ⇒ 无双计）；基线为零/缺失 ⇒ ""（直接摘除）。
+func (l *Ledger) retainSnapOfShardLocked(name string) string {
+	base := name
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		base = name[i+1:]
+	}
+	if !strings.HasPrefix(base, ledgerShardPrefix) || !strings.HasSuffix(base, ledgerShardSuffix) {
+		return ""
+	}
+	node := strings.TrimSuffix(strings.TrimPrefix(base, ledgerShardPrefix), ledgerShardSuffix)
+	snap := ledgerSnapPrefix + node
+	nb, nok, nerr := l.store.readFile(snap)
+	if nerr != nil || !nok || strings.TrimSpace(string(nb)) == "0" {
+		return ""
+	}
+	return snap
+}
+
 // Close 关闭账本（释放句柄；**不删文件**——分片是持久账本的一部分）。
 func (l *Ledger) Close() error {
 	if l == nil || l.store == nil {
@@ -987,3 +1116,21 @@ func (c *LedgerCounter) Degraded() bool {
 
 // Flush 满足 Counter 的可选接口（账本每次 Add 即时落盘 ⇒ 空操作）。
 func (c *LedgerCounter) Flush() error { return nil }
+
+// Compact 折叠**本进程分片**进本进程基线并截断分片（周期对账接线——控制本进程分片
+// 单调增长，评审 S1/S3）。
+func (c *LedgerCounter) Compact() error {
+	if c == nil || c.l == nil {
+		return nil
+	}
+	return c.l.Compact()
+}
+
+// ReapEmptyShards 回收**空分片**并摘除索引登记（防历史进程分片文件堆积，评审 S1/S3）。
+// 空分片 = 已被各进程 Compact 截断（增量已折入基线）⇒ 删除安全；非空死亡分片保留。
+func (c *LedgerCounter) ReapEmptyShards() error {
+	if c == nil || c.l == nil {
+		return nil
+	}
+	return c.l.reapEmptyShards()
+}
