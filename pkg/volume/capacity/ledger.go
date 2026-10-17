@@ -302,7 +302,7 @@ func newFSStore(fsys syncpkg.FS, dir string) (*fsStore, error) {
 	// （部分实现 MakeDir 失败但不报错）⇒ 任一不成立即返回错误 ⇒ 上层退回内存账本。
 	ctx := context.Background()
 	cur := ""
-	for _, seg := range strings.Split(strings.Trim(dir, "/"), "/") {
+	for seg := range strings.SplitSeq(strings.Trim(dir, "/"), "/") {
 		if seg == "" {
 			continue
 		}
@@ -393,7 +393,7 @@ func (s *fsStore) readFileLocked(name string) ([]byte, bool, error) {
 func (s *fsStore) writeLocked(name string, b []byte) error {
 	ctx := context.Background()
 	cur := ""
-	for _, seg := range strings.Split(strings.Trim(s.dir, "/"), "/") {
+	for seg := range strings.SplitSeq(strings.Trim(s.dir, "/"), "/") {
 		if seg == "" {
 			continue
 		}
@@ -564,7 +564,7 @@ func (l *Ledger) registerShardLocked() error {
 		return err
 	}
 	if ok {
-		for _, line := range strings.Split(string(b), "\n") {
+		for line := range strings.SplitSeq(string(b), "\n") {
 			if strings.TrimSpace(line) == name {
 				l.registered = true
 				return nil
@@ -599,7 +599,7 @@ func (l *Ledger) shardNamesLocked() ([]string, error) {
 		return nil, nil
 	}
 	var out []string
-	for _, line := range strings.Split(string(b), "\n") {
+	for line := range strings.SplitSeq(string(b), "\n") {
 		n := strings.TrimSpace(line)
 		if n == "" {
 			continue
