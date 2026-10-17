@@ -54,7 +54,8 @@
     return p < 0 ? 0 : (p > 100 ? 100 : p);
   }
 
-  // volumeQuotaTableHtml 渲染「按卷」配额表（数据来自 GET /api/volumes 的 usage/capacity）。
+  // volumeQuotaTableHtml 渲染「按卷」配额表（数据来自 GET /api/quota 的逐卷明细：
+  // `{volume, used, capacity, has_quota}`，与 `pkg/server/quota_federated.go` 契约一致）。
   function volumeQuotaTableHtml(vols) {
     if (!vols || vols.length === 0) {
       return '<div class="empty-msg">暂无可显示的卷。</div>';
@@ -66,12 +67,12 @@
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">占用</th>';
     html += '</tr></thead><tbody>';
     for (const v of vols) {
-      const pct = usagePercent(v.usage, v.capacity, v.has_quota !== false, v.unlimited === true);
+      const pct = usagePercent(v.used, v.capacity, v.has_quota !== false, v.unlimited === true);
       const pctTxt = pct == null ? '—' : pct + '%';
       html += '<tr>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(v.name) + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(v.volume) + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">'
-        + escHtml(quotaCell(v.usage, v.capacity, v.has_quota !== false, v.unlimited === true)) + '</td>';
+        + escHtml(quotaCell(v.used, v.capacity, v.has_quota !== false, v.unlimited === true)) + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(pctTxt) + '</td>';
       html += '</tr>';
     }
@@ -80,7 +81,7 @@
   }
 
   // federatedQuotaHtml 渲染联邦配额汇总（GET /api/quota）：总计 + 逐卷明细 + 不完整提示。
-  // `f` 形状：{ has_quota, unlimited, used, capacity, partial, volumes:[{name,used,capacity,has_quota,unlimited}] }
+  // `f` 形状：{ has_quota, unlimited, used, capacity, partial, volumes:[{volume,used,capacity,has_quota,unlimited}] }
   function federatedQuotaHtml(f) {
     if (!f) return '<div class="empty-msg">暂无配额数据。</div>';
     let html = '<div class="quota-summary" style="font-size:14px;margin-bottom:8px;">';

@@ -43,9 +43,10 @@ test('usagePercent：正常态取整并钳位到 [0,100]', () => {
 
 test('volumeQuotaTableHtml：空列表给空态；正常渲染卷名与单元格', () => {
   assert.match(q.volumeQuotaTableHtml([]), /empty-msg/);
+  // 真实后端形状（GET /api/quota 的逐卷明细：volume/used/capacity/has_quota）。
   const html = q.volumeQuotaTableHtml([
-    { name: 'v1', usage: 1024, capacity: 2048, has_quota: true },
-    { name: 'v2', usage: 0, capacity: 0, has_quota: false },
+    { volume: 'v1', used: 1024, capacity: 2048, has_quota: true },
+    { volume: 'v2', used: 0, capacity: 0, has_quota: false },
   ]);
   assert.match(html, /v1/);
   assert.match(html, /1\.0 KB \/ 2\.0 KB/);
@@ -62,7 +63,7 @@ test('federatedQuotaHtml：partial=true 必须显式提示汇总不完整', () =
 });
 
 test('HTML 转义：卷名含尖括号不得注入', () => {
-  const html = q.volumeQuotaTableHtml([{ name: '<img src=x>', usage: 1, capacity: 2, has_quota: true }]);
+  const html = q.volumeQuotaTableHtml([{ volume: '<img src=x>', used: 1, capacity: 2, has_quota: true }]);
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /&lt;img/);
 });
