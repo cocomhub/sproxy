@@ -126,6 +126,15 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 		return 0, fmt.Errorf("检查源文件失败: %w", statErr)
 	}
 	srcSize := srcInfo.Size()
+	// 记账口径（与写路径 `settleSize` **同源**）：**卷自报实测足迹优先**——secretdata 的 meta
+	// blob pad 与 XOR parity 无法由 Stat/公式推出（其 Stat 只含内容容器）。能力缺失 ⇒ 回落
+	// Stat 尺寸（明文/加密本地两口径本就一致）。
+	// 版本是源文件的**同内容拷贝**（同卷同内容 ⇒ 同足迹），故预留直接取源文件足迹。
+	volName := volumeNameForTenant(s.rt.volSet(), tnt)
+	reserveSize := srcSize
+	if n, hasFoot := s.physChargeFor(volName, owner, userRel); hasFoot {
+		reserveSize = n
+	}
 
 	versionID := newVersionID()
 	verDir, ok := tnt.FeatureRel("version", userRel)
@@ -145,7 +154,7 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	// fail-open，防借版本反复写把卷堆满）。
 	// srcSize 来自 Stat（加密卷上已是**物理**长度），而版本文件是源文件的同内容拷贝 ⇒ 物理大小相同
 	// ⇒ 预留直接用 srcSize（不再折算）；提交侧 written 是**明文**字节 ⇒ 由 commitVersionQuota 折算。
-	scopeRes, poolRes, release, err := s.reserveVersionQuota(owner, tnt, srcSize)
+	scopeRes, poolRes, release, err := s.reserveVersionQuota(owner, tnt, reserveSize)
 	if err != nil {
 		return 0, err
 	}
@@ -155,7 +164,8 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	}
 
 	// P5 配额对账：双 Commit(actual)（多预留部分自动归还，预留转 committed）。
-	commitVersionQuota(root, scopeRes, poolRes, written)
+	// 提交量按**与写入侧同源**的口径取（版本文件自身路径的卷自报足迹优先）。
+	commitVersionQuota(scopeRes, poolRes, s.versionCommitCharge(volName, owner, verRel, root, written))
 
 	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
 	s.cleanupOldVersions(userRel, tnt, owner)
@@ -251,15 +261,25 @@ func (s *Service) copyVersionFile(root *storage.Root, fullRel, verRel, userRel, 
 }
 
 // commitVersionQuota 写盘成功后按实际字节双 Commit（多预留部分自动归还，预留转 committed）。
-// 口径与写入/释放侧一致（加密卷按物理占用；root 为版本文件所在卷租户根）。
-func commitVersionQuota(root *storage.Root, scopeRes, poolRes *quota.Reservation, written int64) {
-	written = physicalCharge(root, written)
+// charge 由调用方按**与写路径同源**的口径算好（`Service.versionCommitCharge`：卷自报足迹优先、
+// 公式回落）——本函数**不再折算**：折算只允许发生在单一入口，否则「谁折算了」不可知 ⇒
+// 双重折算（过度释放/幽灵占用）或漏折算（配额虚低 ⇒ 超限写入通过）都是静默错。
+func commitVersionQuota(scopeRes, poolRes *quota.Reservation, charge int64) {
 	if scopeRes != nil {
-		scopeRes.Commit(written)
+		scopeRes.Commit(charge)
 	}
 	if poolRes != nil {
-		poolRes.Commit(written)
+		poolRes.Commit(charge)
 	}
+}
+
+// versionCommitCharge 返回版本文件提交时应记账的字节（口径与写路径 `settleSize` 同源）：
+// ① 卷自报实测足迹（版本文件**自身路径**——与预留同源、与释放同源）；② 回落公式折算。
+func (s *Service) versionCommitCharge(volName, owner, remotePath string, root *storage.Root, written int64) int64 {
+	if n, ok := s.physChargeFor(volName, owner, remotePath); ok {
+		return n
+	}
+	return physicalCharge(root, written)
 }
 
 // ReleaseVersionUsage 释放 version 桶 Scope 中已确认占用的版本文件字节（P5）。
@@ -389,6 +409,12 @@ func (s *Service) removeVersionEntry(verDir string, root *storage.Root, name str
 	var delSize int64
 	if info, sErr := root.Stat(delRel); sErr == nil {
 		delSize = info.Size()
+	}
+	// 释放口径必须与**提交同源**（见 versionCommitCharge）：卷自报实测足迹优先——否则
+	// secretdata 卷提交按足迹、释放按 Stat/公式 ⇒ 每次版本回收都泄漏 (足迹 − 公式) 的幽灵占用。
+	// 仍在 `root.Remove` **之前**取（对象存在 ⇒ 足迹可测）。
+	if n, ok := s.physChargeFor(volumeNameForTenant(s.rt.volSet(), tnt), owner, delRel); ok {
+		delSize = n
 	}
 	if err := root.Remove(delRel); err != nil {
 		s.rt.logger().Warn("删除旧版本文件失败", "path", delRel, "error", err)
@@ -611,6 +637,36 @@ func (s *Service) saveVersionBeforeOverwrite(owner, remotePath string, tnt *stor
 // 下沉为本地实现——它只读**同一个**注入的卷集合、返回**同一个** `*quota.Pool` 对象
 // （不持第二份缓存/状态），并由 `pkg/server/helper_impl_drift_test.go` 的源码级等价断言
 // 守卫两份实现。
+// volumeNameForTenant 返回租户根所在卷的卷名（无卷集合/租户不可用/租户根不在任何卷根下 ⇒ ""）。
+//
+// 为什么单独一份（不复用 `volumePoolForTenant`）：后者与 `pkg/server.volumePoolForTenant`
+// 由 `helper_impl_drift_test.go` 的**源码体等价断言**守卫（两份实现必须逐字同构），改动其体
+// 会连带破坏该守卫；而「取卷名」是版本记账的独立需求。
+func volumeNameForTenant(vs VolumeSet, tnt *storage.Tenant) string {
+	if vs == nil || tnt == nil || tnt.Root() == nil {
+		return ""
+	}
+	tenantAbs, ok := tnt.Root().Abs("")
+	if !ok {
+		return ""
+	}
+	tenantAbs = filepath.Clean(tenantAbs)
+	for _, v := range vs.All() {
+		rt := vs.Root(v.Name)
+		if rt == nil {
+			continue
+		}
+		volOwnerAbs, ok2 := rt.Abs(tnt.ID)
+		if !ok2 {
+			continue
+		}
+		if filepath.Clean(volOwnerAbs) == tenantAbs {
+			return v.Name
+		}
+	}
+	return ""
+}
+
 func volumePoolForTenant(vs VolumeSet, tnt *storage.Tenant) *quota.Pool {
 	if vs == nil || tnt == nil || tnt.Root() == nil {
 		return nil

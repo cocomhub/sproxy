@@ -1,0 +1,47 @@
+fix(files): 版本字节按卷自报足迹记账（secretdata 少计 ⇒ 可超限）
+
+## 真实缺陷（2026-10-17 审核取证 + 判别用例实证）
+
+`SaveVersion` 的版本记账**两处都覆盖不到 secretdata 的真实物理占用**：
+
+- **预留**取 `tnt.Root().Stat(fullRel).Size()` —— secretdata 的 `Stat` 只含**内容容器**，
+  **不含** meta blob pad（pad 到 [base, 2·base)，默认 1–2MB/文件，尺寸混淆设计）、**不含** XOR parity；
+- **提交/释放**取 `physicalCharge(root, written)`（**公式**线性折算）。
+
+而 versioning 由**全局配置** `Versioning.Enabled` 控制（**非按卷**）⇒ **secretdata 卷可达**
+⇒ 版本字节**少计** ⇒ owner 配额与卷容量池低于真实占用 ⇒ **可超限**（不安全方向；
+与 `prevCharge` 注释所述「少释放 = 幽灵占用/假 507」同源）。
+
+**实测**：1KB 级版本在足迹替身下 `version 桶 Usage=11`（逻辑长度），应为 `3145728`（足迹）。
+
+## 修复（与写路径 `settleSize` **同源**）
+
+口径统一为「**卷自报实测足迹优先，公式只作能力缺失时的回落**」：
+
+- 预留：`physChargeFor(volName, owner, userRel)` 优先（版本是源文件**同内容拷贝** ⇒ 同足迹）；
+- 提交：新增 `Service.versionCommitCharge`（版本文件**自身路径**的足迹优先）⇒ 与预留、释放**三者同源**；
+- 释放：`removeVersionEntry` 同样优先取版本文件足迹（否则提交按足迹、释放按公式 ⇒ 每次回收泄漏
+  `(足迹 − 公式)` 的幽灵占用）；
+- `commitVersionQuota` 改为接收**已算好**的 charge（**不再内部折算**）——折算只允许发生在单一入口，
+  否则「谁折算了」不可知 ⇒ 双重折算/漏折算都是静默错；
+- 新增 `volumeNameForTenant`（**不复用** `volumePoolForTenant`：后者由
+  `helper_impl_drift_test.go` 的源码体等价断言守卫两份实现必须逐字同构，改动其体会破坏该守卫）。
+
+## 验证（TDD + 变异）
+
+新增 `pkg/files/version_charge_authority_test.go`：
+
+| 阶段 | 结果 |
+|---|---|
+| 修复前 | `version 桶 Usage=11`（逻辑长度）⇒ **红** |
+| 修复后 | `Usage=3145728`（足迹）⇒ **绿** |
+| 变异（提交侧去掉足迹优先） | `Usage=11` ⇒ **红**；还原 ⇒ 绿 |
+
+**夹具坑（记档）**：既有 `fakePhysFootprint` 的存在性判定硬编码 `user/` 前缀 ⇒ 版本桶键
+（`version/<userRel>/<id>`）被误判为「不存在」而回落公式 ⇒ 一度**假绿**。改用无前缀假设的
+`constPhysFootprint` 后才取得判别力。
+
+## 门禁
+
+`gofmt`/`goimports` 净；`go vet ./pkg/files/...` 净；
+`go test ./pkg/files/... ./pkg/server/...` 全绿（含既有 `quota_settlement_test.go` 的版本释放用例）。
