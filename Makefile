@@ -213,6 +213,7 @@ web-test:
 	@node --check web/static/credentials-format.js
 	@node --check web/static/secrets-format.js
 	@node --check web/static/vol-manage-format.js
+	@node --check web/static/quota-format.js
 	@node --check web/static/sync-conflicts-format.js
 	@node --check web/static/mesh-status-format.js
 	@node --check web/static/trash-format.js
@@ -234,6 +235,7 @@ web-test:
 	node --test web/static/events.test.js
 	node --test web/static/notify-format.test.js
 	node --test web/static/audit-export.test.js
+	node --test web/static/quota-format.test.js
 	node --test web/static/audit-rows-format.test.js
 	node --test web/static/image-preview.test.js
 	node --test web/static/video-player.test.js

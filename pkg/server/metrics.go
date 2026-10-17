@@ -916,6 +916,11 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeMetric(&b, "sproxy_quota_ledger_degraded_total", "counter",
 		"Writes rejected because the quota ledger is degraded",
 		capacity.LedgerDegradedCount())
+	// 账本退回内存（卷 FS 承载不了账本）：进程内强制仍在，但**跨进程可见性失效** ⇒
+	// 必须可告警（「降级必须可观测」是既定原则，设计 §3.6.2）。
+	writeMetric(&b, "sproxy_quota_ledger_mem_fallback_total", "counter",
+		"Volumes whose quota ledger fell back to in-memory (cross-process visibility lost; local enforcement retained)",
+		capacity.LedgerMemFallbackCount())
 
 	// 备份/同步任务计数（roadmap 11.5-⑪）：配合 SproxyBackupSyncFailures 告警。
 	writeMetric(&b, "sproxy_backup_tasks_total", "counter", "Total backup/sync tasks recorded", m.backupTasks.Load())
