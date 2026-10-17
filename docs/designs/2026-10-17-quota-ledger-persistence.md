@@ -120,6 +120,27 @@ quota.Pool ──► LedgerPool（新，pkg/quota 或 pkg/volume/capacity 层）
 - **owner/bucket scope 的持久化**：`EnsureScope` 建 scope 时**按所在卷**决定是否挂 ledger
   （同一个 owner 在不同卷上可有不同策略：本地卷内存、共享卷 ledger）。
 
+### §3.3b 🔴 **唯一实现原则**（用户裁定 2026-10-17：避免多套同时存在导致复杂性）
+
+本包此前有**两套**持久化计数器（`VolumeCapacityCounter` 单文件快照、`PoolCounter` + 快照），
+**都是「单写者」假设**（进程内读-改-写）⇒ 多进程共享同一卷时二者都会**丢失更新**。
+⇒ 裁定：**分片日志账本取代二者**，成为卷级容量记账的**唯一实现** ✗（不并存、不留兼容层 ✗）。
+
+| 旧机制 | 处置 |
+|---|---|
+| `VolumeCapacityCounter`（`NewCounter`/`Load`/`LoadForCreate`/`VolumeCounterPath`） | **删除** |
+| `PoolCounter` / `NewPoolCounter` / `NewPoolCounterPersistent` | **删除** |
+| `LedgerCounter`（分片日志，跨进程正确） | **唯一实现** ✓ |
+
+**落点**（§3.5）：账本建在**原始 `be.FS()`** 上（不经 `CapacityFS`）⇒ **天然不自记账** ✓；
+`WrapStorageVolume`（唯一构造入口，R29 门禁）内取得 `raw := be.FS()` 复用 ⇒ **不新增 R27 直连** ✓。
+**否决**「在 `CapacityFS` 内加保留前缀排除」✗（要在 9 个计账方法各加判断 ⇒ 易漏 ✗）。
+
+**本地卷**：不挂账本（各节点自有磁盘 ⇒ 内存账本本就正确）⇒ **零 I/O** ✓；
+其卷级上限仍由既有内存 `quota.Pool` 路径承担（**不同代码路径**，非重复机制 ✓）。
+
+---
+
 ### §3.4 与既有机制的关系（**不重复造**）
 
 | 既有机制 | 本设计如何用它 |

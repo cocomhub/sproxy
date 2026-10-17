@@ -216,6 +216,10 @@ func TestLedger_NodeSanitized(t *testing.T) {
 	if l.Node() == "host/1:2" {
 		t.Fatalf("节点标识必须归一为文件名安全片段，got %q", l.Node())
 	}
+	// 分片**惰性创建**（首次追加才落文件）：只读场景不留空文件。
+	if aerr := l.Add(1); aerr != nil {
+		t.Fatal(aerr)
+	}
 	shards, err := ListLedgerShards(dir)
 	if err != nil {
 		t.Fatal(err)
