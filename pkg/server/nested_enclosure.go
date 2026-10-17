@@ -194,7 +194,7 @@ func AttachEnclosureVolume(ctx context.Context, set *registry.Set, log *slog.Log
 		return err
 	}
 	inheritEnclosurePool(set, decls, d)
-	be, berr := enclosure.BuildBackend(ctx, set, d, v, enclosure.AttachOptions{StorageRoot: storageRoot})
+	be, berr := enclosure.BuildBackend(ctx, set, d, v, enclosure.AttachOptions{})
 	if berr != nil {
 		return berr
 	}

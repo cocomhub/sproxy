@@ -504,7 +504,6 @@ type Ledger struct {
 	store   ledgerStore
 	node    string
 	corrupt bool
-	shards  int
 	// registered 记录本进程分片是否已登记进索引（进程内一次即可 ⇒ 避免每次追加都读+写索引）。
 	registered bool
 }
@@ -521,20 +520,6 @@ func OpenLedger(dir, node string) (*Ledger, error) {
 // OpenLedgerFS 打开**卷内**账本：账本文件经 fsys（**原始卷 FS**，非 `CapacityFS` ⇒ 不自记账）。
 func OpenLedgerFS(fsys syncpkg.FS, dir, node string) (*Ledger, error) {
 	st, err := newFSStore(fsys, dir)
-	if err != nil {
-		return nil, err
-	}
-	return newLedger(st, node)
-}
-
-// OpenLedgerLocal 打开**节点本地**账本（明文目录，不经卷 FS）。
-//
-// 供**加密卷**（secretdata）使用：账本若写在加密卷 FS 上，分片/索引文件会被加密为
-// 随机名**内容分块** ⇒ 卷物理布局被污染（E2E「内容分块清空」断言实测拦截），且干扰
-// 卷内对账/GC。secretdata `target: local` 是**单实例**专用（无跨进程共享需求）⇒
-// 落节点本地目录语义正确，重启仍从已占用起算 ✓。
-func OpenLedgerLocal(dir, node string) (*Ledger, error) {
-	st, err := newOSStore(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +670,6 @@ func (l *Ledger) scanLocked() (int64, bool) {
 		return 0, false
 	}
 	var total int64
-	shards := 0
 	corrupt := false
 	for _, raw := range names {
 		// **必须取 basename**：`fsStore.list()` 底层是 `syncpkg.FS.ListDir`，其 `Entry.Name`
@@ -706,7 +690,6 @@ func (l *Ledger) scanLocked() (int64, bool) {
 				continue
 			}
 			total += n
-			shards++
 		case strings.HasPrefix(name, ledgerShardPrefix) && strings.HasSuffix(name, ledgerShardSuffix):
 			n, ok := l.readShardLocked(raw)
 			if !ok {
@@ -714,10 +697,8 @@ func (l *Ledger) scanLocked() (int64, bool) {
 				continue
 			}
 			total += n
-			shards++
 		}
 	}
-	l.shards = shards
 	if corrupt {
 		l.markCorruptLocked()
 		return 0, false
@@ -784,15 +765,6 @@ func (l *Ledger) Close() error {
 }
 
 // LedgerShards 返回最近一次扫描发现的分片/基线文件数（诊断/测试用）。
-func (l *Ledger) LedgerShards() int {
-	if l == nil {
-		return 0
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.shards
-}
-
 // readNumberLocked 读单个十进制整数文件（缺文件 ⇒ 0,true；不可解析 ⇒ 0,false）。
 func (l *Ledger) readNumberLocked(name string) (int64, bool) {
 	b, ok, err := l.store.readFile(name)
@@ -1015,6 +987,3 @@ func (c *LedgerCounter) Degraded() bool {
 
 // Flush 满足 Counter 的可选接口（账本每次 Add 即时落盘 ⇒ 空操作）。
 func (c *LedgerCounter) Flush() error { return nil }
-
-// CorruptSnapshot 保留旧接口语义：账本降级即等价于「快照不可用」（装配层据此告警）。
-func (c *LedgerCounter) CorruptSnapshot() bool { return c.Degraded() }

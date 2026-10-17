@@ -553,7 +553,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		if _, kerr := mgr.Create(ctx, "datakey"); kerr != nil {
 			t.Fatalf("Create key: %v", kerr)
 		}
-		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); aerr != nil {
+		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{}); aerr != nil {
 			t.Fatalf("AttachAll: %v", aerr)
 		}
 
@@ -654,7 +654,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		if serr := attachSecretdataVolumes(ctx, vols, cfg.StorageRoot, discardLoggerMain(), secretdataRefsIndependent); serr != nil {
 			t.Fatalf("attachSecretdataVolumes（先行）: %v", serr)
 		}
-		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); aerr != nil {
+		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{}); aerr != nil {
 			t.Fatalf("AttachAll（多层链装配）: %v", aerr)
 		}
 		if serr := attachSecretdataVolumes(ctx, vols, cfg.StorageRoot, discardLoggerMain(), secretdataRefsEnclosure); serr != nil {
@@ -795,7 +795,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		if serr := attachSecretdataVolumes(ctx, vols, cfg.StorageRoot, discardLoggerMain(), secretdataRefsIndependent); serr != nil {
 			t.Fatalf("attachSecretdataVolumes（先行）: %v", serr)
 		}
-		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); aerr != nil {
+		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{}); aerr != nil {
 			t.Fatalf("AttachAll（外部底座链装配）: %v", aerr)
 		}
 
@@ -931,7 +931,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		if vols.External("vault") != nil {
 			t.Fatal("引用嵌套 secrets 卷的 secretdata 卷不得在 AttachAll 之前补装（此时密钥不可解析）")
 		}
-		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{StorageRoot: cfg.StorageRoot}); aerr != nil {
+		if aerr := enclosure.AttachAll(ctx, vols, discardLoggerMain(), enclosure.AttachOptions{}); aerr != nil {
 			t.Fatalf("AttachAll（嵌套 secrets 卷装配）: %v", aerr)
 		}
 		if serr := attachSecretdataVolumes(ctx, vols, cfg.StorageRoot, discardLoggerMain(), secretdataRefsEnclosure); serr != nil {
@@ -1174,7 +1174,7 @@ func TestEnclosureVolume_RestartReattach(t *testing.T) {
 		if serr := rt.SetSeals([]storage.SealRule{{Path: "videos", Wrapper: "vault", Mode: storage.SealHidden}}); serr != nil {
 			t.Fatalf("SetSeals: %v", serr)
 		}
-		if aerr := enclosure.AttachAll(ctx, set, nil, enclosure.AttachOptions{StorageRoot: t.TempDir()}); aerr != nil {
+		if aerr := enclosure.AttachAll(ctx, set, nil, enclosure.AttachOptions{}); aerr != nil {
 			t.Fatalf("AttachAll: %v", aerr)
 		}
 	}

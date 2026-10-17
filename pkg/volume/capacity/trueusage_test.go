@@ -98,9 +98,9 @@ func TestTrueUsageOf_UnwrapsDecorators(t *testing.T) {
 	}
 }
 
-// TestPoolCounter_CorrectTo_TrueValueWins 真值修正：可增可减、防下溢归零、不动 reserved、
+// TestLedgerCounter_CorrectTo_TrueValueWins 真值修正：可增可减、防下溢归零、不动 reserved、
 // 修正后立即持久化（快照可读回）。
-func TestPoolCounter_CorrectTo_TrueValueWins(t *testing.T) {
+func TestLedgerCounter_CorrectTo_TrueValueWins(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(1000)
 	pc := newTestLedgerCounter(t, pool)
@@ -150,9 +150,9 @@ func TestPoolCounter_CorrectTo_TrueValueWins(t *testing.T) {
 	res.Release()
 }
 
-// TestPoolCounter_CorrectFrom_FallsBackWhenUnknown 「不掌握真值」必须回落到既有记账，
+// TestLedgerCounter_CorrectFrom_FallsBackWhenUnknown 「不掌握真值」必须回落到既有记账，
 // 绝不静默降级为 0（否则会凭空释放配额 = 上限失效）。
-func TestPoolCounter_CorrectFrom_FallsBackWhenUnknown(t *testing.T) {
+func TestLedgerCounter_CorrectFrom_FallsBackWhenUnknown(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(1000)
 	pc := newTestLedgerCounter(t, pool)
@@ -217,5 +217,7 @@ func newTestLedgerCounter(t *testing.T, pool *quota.Pool) *LedgerCounter {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewLedgerCounter(led, pool.MaxBytes())
+	// WithPool 必须接：CorrectTo/CorrectFrom 经 mirrorToPool 镜像到池,否则
+	// 「修正不得触碰 reserved/上限保持」断言空转(S7 修复)。
+	return NewLedgerCounter(led, pool.MaxBytes()).WithPool(pool)
 }

@@ -75,7 +75,7 @@ func newNestedSecretWrapperHandlers(t *testing.T, mainCap int64, extra ...Volume
 	h := buildVolSetHandlers(t, cfg)
 	h.SetUserVolumeStore(NewUserVolumeStore(mainDir))
 	// 装配期只登记元数据 + 池（推迟装配）；后端补装与生产 setupServerCore 同层。
-	if aerr := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{StorageRoot: mainDir}); aerr != nil {
+	if aerr := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{}); aerr != nil {
 		t.Fatalf("AttachAll: %v", aerr)
 	}
 	return h

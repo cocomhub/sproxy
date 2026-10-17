@@ -197,9 +197,9 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		}, http.StatusBadRequest)
 		return
 	}
-	// F7（评审 P3）：**先校验卷名再拼路径/IO**——下方 counterPath 由 req.Name 拼接，而真正的
+	// F7（评审 P3）：**先校验卷名再拼路径/IO**——下方 limitPath 由 req.Name 拼接，而真正的
 	// 卷名校验此前只在 store.Create 内（更晚）。名字含分隔符/`..` 时会读到 meta 目录之外的
-	// `*.capacity`（且读失败直接 500），顺序与错误码都不当。此处与 store 用**同一判定**
+	// `*.limit`（且读失败直接 500），顺序与错误码都不当。此处与 store 用**同一判定**
 	// （storage.ValidSegmentName），提前使路径安全不依赖下游副作用。
 	if !storage.ValidSegmentName(req.Name) {
 		sendJSONResponse(w, map[string]string{"error": "卷名非法"}, http.StatusBadRequest)

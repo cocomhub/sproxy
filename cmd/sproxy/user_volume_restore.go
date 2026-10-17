@@ -162,7 +162,7 @@ func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log 
 	}
 	// C2 卷级计数：包 CapacityFS。计数器是**唯一实现**（分片日志账本，建在**原始**卷 FS 上
 	// ⇒ 不自记账、跨进程正确、重启从已占用起算）。限额 = 元数据里的**生效上限**
-	// （创建/重建时经 `LoadVolumeLimitForCreate` 处理 F6 继承后落库）。
+	// （创建/重建时经 `capacity.LoadVolumeLimit` 处理 F6 继承后落库）。
 	statePath := capacity.VolumeLimitPath(store.Root(), uv.Owner, uv.Name)
 	baselineUsed := capacity.LoadVolumeUsed(statePath)
 	// 账本落点：secretdata（加密卷）按**底层本地性**（探测在 WrapStorageVolume 内部）——

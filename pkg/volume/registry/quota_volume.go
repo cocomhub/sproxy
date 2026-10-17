@@ -34,11 +34,10 @@ type UserScopeResolver func(owner string) *quota.Scope
 //
 // **为何在此重复定义而不 import `pkg/volume/capacity`**：`capacity` 已 import 本包
 // （`registry.ExternalBackend` ✓）⇒ 反向 import **成环** ✗。Go 接口是**结构性**的 ⇒ 在**消费者侧**
-// 定义最小接口是惯用法 ✓，且它同时容纳**两种**既有实现：
-//   - `capacity.PoolCounter`（配置卷：复用卷容量池 `quota.Pool` ✓，与路由/指标同源 ✓）；
-//   - `capacity.VolumeCapacityCounter`（用户卷：持久化文件态 ✓，重启恢复 ✓）。
+// 定义最小接口是惯用法 ✓。生产实现**唯一** = `capacity.LedgerCounter`（分片日志账本，
+// 2026-10-17 迁移后旧 `PoolCounter`/`VolumeCapacityCounter` 已删除）。
 //
-// ⇒ 配额层因此**无需知道**整卷账本的实现形态（内存池 / 持久文件 ✓）⇒ 「整卷权威单一」可
+// ⇒ 配额层因此**无需知道**整卷账本的实现形态（分片日志 / 跨进程 ✓）⇒ 「整卷权威单一」可
 // **统一表达** ✓（片 3b 把 5 个装配点的 `capacity.WrapBackend` 收敛到本层时，只改注入点 ✓）。
 type VolumeCounter interface {
 	// TryAdd 在写入前累计 size；超限返回包装后的 ErrVolumeFull 且**不改变** used（fail-closed）。
@@ -64,8 +63,8 @@ type QuotaVolume struct {
 
 // NewQuotaVolume 包装存储卷为配额层（`inner` 必须非 nil：配额层不制造卷）。
 //
-// `counter` 是**整卷容量权威**（片 3 ✓）：配置卷传 `capacity.PoolCounter`（与卷池同源 ✓）、
-// 用户卷传 `capacity.VolumeCapacityCounter`（持久化 ✓）；`nil` ⇒ 回落到 `pool` 语义（与 M4a 同 ✓）。
+// `counter` 是**整卷容量权威**（片 3 ✓）：生产唯一实现 `capacity.LedgerCounter`（分片日志
+// 账本，跨进程正确 + 重启从已占用起算 ✓）；`nil` ⇒ 回落到 `pool` 语义（与 M4a 同 ✓）。
 // **两者不得同时生效**（同时存在就是双账本 ✗）：非 nil 的 `counter` **优先**，且 `pool` 仅作
 // 每用户 Scope 的容器（本层不会向它做整卷记账 ✗）。
 func NewQuotaVolume(inner StorageVolume, scopes UserScopeResolver, pool *quota.Pool, counter VolumeCounter, log *slog.Logger) *QuotaVolume {
@@ -119,8 +118,9 @@ func (q *QuotaVolume) VolumeUsed() (int64, bool) {
 
 // SetCapacity 运行期调整整卷上限（0 = 取消上限）。无池 ⇒ no-op（不制造池）。
 //
-// **仅池形态可调**：`counter` 形态的上限由各自实现持有（`PoolCounter` 委托池 ⇒ 经 `pool` 生效；
-// 持久化计数器按卷声明重建 ⇒ 不在本层改 ✗）—— 未知形态静默 no-op 是可接受的，因为**无副作用** ✓。
+// **仅池形态可调**：`counter` 形态（生产唯一实现 `LedgerCounter`）的上限由装配时
+// `maxBytes` 固化、上限独立落节点本地 `.limit` 文件 ⇒ 运行期不在本层改 ✗ ——
+// 静默 no-op 是可接受的，因为**无副作用** ✓。
 func (q *QuotaVolume) SetCapacity(n int64) {
 	if q == nil || q.pool == nil || q.counter != nil {
 		return

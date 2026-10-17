@@ -53,12 +53,11 @@ type Counter interface {
 	Release(size int64)
 	Used() int64
 	Capacity() int64
-	// Flush 把待落盘的变更写入快照（幂等；无变更 no-op）。
+	// Flush 是落盘钩子（幂等；账本实现为 no-op）。
 	//
-	// **落盘策略（评审 F9）**：**增加**（TryAdd）恒同步落盘——崩溃丢「增加」= used 偏低 =
-	// 限额放宽（不可接受）；**减少**（Release）只标脏，由 Flush / 待写计数达阈值 / 下次增加
-	// 触发——崩溃最多丢「减少」→ 重启后 used 偏高 → fail-closed（安全方向）。如此同卷写/删
-	// 不再每次各付 tmp+fsync+rename+fsync(dir) 并在 mu 上串行化。
+	// **账本策略（2026-10-17 唯一实现）**：每次增减**即时追加**分片日志（Add 同步落盘），
+	// 崩溃最多丢「未 flush 的增量」= 少计（fail-open 方向，由对账周期收敛）；减少方向由
+	// Release 钳制防负漂移。旧单文件计数器的「减少节流」策略已随其删除。
 	Flush() error
 }
 
@@ -326,8 +325,13 @@ func newVolumeLedgerCounter(raw syncpkg.FS, maxBytes int64, pool *quota.Pool, ba
 
 // newVolumeLedgerCounterLocal 在**节点本地**明文目录上建账本并适配为卷级计数器
 // （加密卷专用；语义与 newVolumeLedgerCounter 一致，只是落点不经卷 FS）。
+//
+// 供**加密卷**（secretdata）使用：账本若写在加密卷 FS 上，分片/索引文件会被加密为
+// 随机名**内容分块** ⇒ 卷物理布局被污染（E2E「内容分块清空」断言实测拦截），且干扰
+// 卷内对账/GC。secretdata `target: local` 是**单实例**专用（无跨进程共享需求）⇒
+// 落节点本地目录语义正确，重启仍从已占用起算 ✓。
 func newVolumeLedgerCounterLocal(dir string, maxBytes int64, pool *quota.Pool, baselineUsed int64) *LedgerCounter {
-	led, err := OpenLedgerLocal(dir, volumeNodeID())
+	led, err := OpenLedger(dir, volumeNodeID())
 	if err != nil {
 		// 节点本地目录（节点盘）建账本失败 = **环境故障**（权限/磁盘）。**不得降级内存** ✗：
 		// 降级 ⇒ 重启后账本空、used 回到陈旧基线 ⇒ 限额放宽（fail-open，本包最危险形态）。

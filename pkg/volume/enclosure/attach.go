@@ -55,16 +55,13 @@ func EffectiveTarget(d Decl, all []Decl) (baseVol, basePath string) {
 }
 
 // AttachOptions 是补装的装配参数（可选；零值 = 与旧行为一致）。
-type AttachOptions struct {
-	// StorageRoot 是 count/状态文件所在根（用于**持久化**卷容量计数器）。为空则计数器不持久
-	// （重启后封装卷 `max_bytes` 的 committed 会归零——生产必须传）。
-	StorageRoot string
-}
+// **无字段**：历史 `StorageRoot`（旧 PoolCounter 持久化落点）已随分片日志账本迁移删除
+// （账本建在卷 FS 上、落点由内部决定）——保留空结构仅为调用方签名兼容，勿再添加字段。
+type AttachOptions struct{}
 
 // AttachAll 为所有已登记的**封装声明卷**（IsDeclared：**wrapper 类型** + `extra.source`）
 // 构造后端并挂回卷集（幂等：已挂者跳过）。必须在**卷集就绪后**调用（与 secretdata
 // 补装同层，fail-closed：任一卷失败返回错误）。
-// opts.StorageRoot 非空时启用持久化容量计数器（与外部卷同源）。
 func AttachAll(ctx context.Context, set *registry.Set, logger *slog.Logger, opts ...AttachOptions) error {
 	var opt AttachOptions
 	if len(opts) > 0 {

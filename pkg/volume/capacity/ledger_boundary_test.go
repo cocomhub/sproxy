@@ -40,11 +40,9 @@ func TestLedgerCounter_ConcurrentTryAddNeverOverruns(t *testing.T) {
 	const iters = 300
 	var wg sync.WaitGroup
 	var overrun atomic.Bool
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < iters; i++ {
+	for range workers {
+		wg.Go(func() {
+			for range iters {
 				if err := c.TryAdd(60); err == nil {
 					// 成功一次即 +60；并发判定若非原子，总和可冲到 120>max。
 					if got, _ := c.l.Total(); got > max {
@@ -53,7 +51,7 @@ func TestLedgerCounter_ConcurrentTryAddNeverOverruns(t *testing.T) {
 					}
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if overrun.Load() {
