@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -164,7 +165,14 @@ func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log 
 	// （创建/重建时经 `LoadVolumeLimitForCreate` 处理 F6 继承后落库）。
 	statePath := capacity.VolumeLimitPath(store.Root(), uv.Owner, uv.Name)
 	baselineUsed := capacity.LoadVolumeUsed(statePath)
-	be = capacity.WrapStorageVolume(uv.Name, be, nil, nil, uv.Capacity, baselineUsed)
+	// 账本落点：secretdata（加密卷）落**节点本地**明文目录（写卷 FS 上会被加密成随机
+	// 内容分块，污染卷物理布局）；其余类型默认卷内账本（跨进程可见）。与建卷路径同口径。
+	opts := []capacity.WrapOption{}
+	if uv.Type == volume.TypeSecretdata {
+		opts = append(opts, capacity.WithLedgerDir(
+			filepath.Join(store.Root(), uv.Owner, "meta", "quota", uv.Name)))
+	}
+	be = capacity.WrapStorageVolume(uv.Name, be, nil, nil, uv.Capacity, baselineUsed, opts...)
 	if lerr := capacity.WriteVolumeState(statePath, uv.Capacity, baselineUsed); lerr != nil {
 		log.Warn("用户卷状态持久化失败（重建将无法继承上限/用量）", "volume", uv.Name, "owner", uv.Owner, "error", lerr)
 	}

@@ -346,6 +346,12 @@ func (s *fsStore) readFile(name string) ([]byte, bool, error) {
 		// 与「不存在」语义彻底分离 ✓（原则 1：只用「按名读/写」两个原语）。
 		return nil, false, nil
 	}
+	if rc == nil {
+		// 卷 FS 契约违规（OpenRead 返回 nil reader 且无错误——最小 mock / 畸形实现）：
+		// **绝不 nil 解引用 panic**（实测 UI e2e 的 fakeFS 触发）。视为不存在 ⇒ 账本读到空
+		// （首次运行语义），不误伤真实卷、不影响 fail-closed 损坏判定。
+		return nil, false, nil
+	}
 	defer rc.Close()
 	b, rerr := io.ReadAll(rc)
 	if rerr != nil {
@@ -481,6 +487,20 @@ func OpenLedger(dir, node string) (*Ledger, error) {
 // OpenLedgerFS 打开**卷内**账本：账本文件经 fsys（**原始卷 FS**，非 `CapacityFS` ⇒ 不自记账）。
 func OpenLedgerFS(fsys syncpkg.FS, dir, node string) (*Ledger, error) {
 	st, err := newFSStore(fsys, dir)
+	if err != nil {
+		return nil, err
+	}
+	return newLedger(st, node)
+}
+
+// OpenLedgerLocal 打开**节点本地**账本（明文目录，不经卷 FS）。
+//
+// 供**加密卷**（secretdata）使用：账本若写在加密卷 FS 上，分片/索引文件会被加密为
+// 随机名**内容分块** ⇒ 卷物理布局被污染（E2E「内容分块清空」断言实测拦截），且干扰
+// 卷内对账/GC。secretdata `target: local` 是**单实例**专用（无跨进程共享需求）⇒
+// 落节点本地目录语义正确，重启仍从已占用起算 ✓。
+func OpenLedgerLocal(dir, node string) (*Ledger, error) {
+	st, err := newOSStore(dir)
 	if err != nil {
 		return nil, err
 	}

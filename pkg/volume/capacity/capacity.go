@@ -114,16 +114,29 @@ func Wrap(fs syncpkg.FS, c Counter) *CapacityFS {
 // 分工边界（避免误改）：本函数**不**改变写路径的强制点（仍在 `CapacityFS` ✓）⇒ 行为不变 ✓；
 // 当写内核改由 `QuotaVolume.Reserve` 统一预占时（设计片 5/6），才**同片删除** `CapacityFS`
 // 的重复强制 ✗（现在删就是丢强制 ✗）。
-func WrapStorageVolume(name string, be registry.ExternalBackend, scopes registry.UserScopeResolver, pool *quota.Pool, maxBytes, baselineUsed int64) registry.ExternalBackend {
+func WrapStorageVolume(name string, be registry.ExternalBackend, scopes registry.UserScopeResolver, pool *quota.Pool, maxBytes, baselineUsed int64, opts ...WrapOption) registry.ExternalBackend {
 	if be == nil {
 		return nil
 	}
-	// **唯一实现**：卷级记账 = 分片日志账本，建在**原始**卷 FS 上（不经 `CapacityFS`
-	// ⇒ 天然不自记账）。节点标识**内部自算**（hostname+pid）⇒ 装配点无选项 plumbing
-	// ⇒ **不可能漏接**（此前 5 个装配点各自 NewPoolCounter* 正是「漏一处即静默无限额」的根因）。
-	// `be.FS()` 只取一次（同一实例），既作账本底座也作数据面 ⇒ **不新增直连调用**。
+	cfg := wrapConfig{}
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
+	// **唯一实现**：卷级记账 = 分片日志账本。账本底座默认是**原始**卷 FS（不经 `CapacityFS`
+	// ⇒ 天然不自记账）；加密卷（secretdata）经 `WithLedgerDir` 改落**节点本地**明文目录
+	// （写加密卷上会被加密成随机 blob，污染卷物理布局 ✗）。节点标识**内部自算**（hostname+pid）
+	// ⇒ 装配点无选项 plumbing ⇒ **不可能漏接**（此前 5 个装配点各自 NewPoolCounter* 正是
+	// 「漏一处即静默无限额」的根因）。
+	var counter *LedgerCounter
+	// `be.FS()` 只取一次（同一实例），既作数据面也（默认）作账本底座 ⇒ **不新增直连调用**。
 	raw := be.FS()
-	counter := newVolumeLedgerCounter(raw, maxBytes, pool, baselineUsed)
+	if cfg.ledgerDir != "" {
+		counter = newVolumeLedgerCounterLocal(cfg.ledgerDir, maxBytes, pool, baselineUsed)
+	} else {
+		counter = newVolumeLedgerCounter(raw, maxBytes, pool, baselineUsed)
+	}
 	qv := registry.NewQuotaVolume(storageVolumeOf{name: name, ExternalBackend: be}, scopes, pool, counter, nil)
 	// 🔴 **能力透传必须走原后端 `be`**（不是 `qv`）：`Backend` 以**内嵌**方式转发后端级可选能力
 	// （`HealthProbe` / `Presigner` / `URLResolver` / `VolumeStatsProvider` / `StagingQuota*`）——
@@ -132,6 +145,24 @@ func WrapStorageVolume(name string, be registry.ExternalBackend, scopes registry
 	// ⇒ **数据面**取配额层视图（`qv.FS()`，与 `be.FS()` 同一实例 ✓）、**能力面**取原后端 ✓。
 	// `quota` 字段暴露配额层（统一查询面 ✓），与 `fs` 的 counter 共享同一实例 ✓（单账本）。
 	return &Backend{ExternalBackend: be, fs: Wrap(raw, counter), quota: qv}
+}
+
+// WrapOption 定制 WrapStorageVolume 的装配行为。
+type WrapOption func(*wrapConfig)
+
+type wrapConfig struct {
+	// ledgerDir 非空 ⇒ 账本落**节点本地**明文目录（否则默认建在卷 FS 上）。
+	ledgerDir string
+}
+
+// WithLedgerDir 指定账本的**节点本地**落点（明文目录）。
+//
+// 默认账本建在卷 FS 上（`be.FS()`）；对**加密卷**（secretdata）必须传：账本写加密卷上
+// 会被加密成随机名**内容分块** ⇒ 污染卷物理布局（E2E「内容分块清空」断言实测拦截）✗。
+// 本地目录语义：secretdata `target: local` 为**单实例**专用（无跨进程共享需求）⇒
+// 落节点本地目录正确，重启仍从已占用起算 ✓。
+func WithLedgerDir(dir string) WrapOption {
+	return func(c *wrapConfig) { c.ledgerDir = dir }
 }
 
 // storageVolumeOf 把「外部后端 + 已知卷名」提升为**统一存储卷视图**。
@@ -249,6 +280,32 @@ func newVolumeLedgerCounter(raw syncpkg.FS, maxBytes int64, pool *quota.Pool, ba
 	if err != nil {
 		// 卷 FS 承载不了账本（不支持建目录/列目录）⇒ **退回内存账本**：
 		// 进程内上限**仍然强制**（不静默放宽 ✗），只是失去跨进程可见性 ⇒ 计数 + 告警。
+		ledgerMemFallback.Add(1)
+		mem, merr := OpenMemLedger(volumeNodeID())
+		if merr != nil {
+			return &LedgerCounter{max: maxBytes, initErr: merr}
+		}
+		if baselineUsed > 0 {
+			_ = mem.Add(baselineUsed)
+		}
+		return NewLedgerCounter(mem, maxBytes).WithPool(pool)
+	}
+	// 基线注入（幂等）：仅当账本**当前为空**时写入 ⇒ 不会因重复装配而翻倍 ✓。
+	if baselineUsed > 0 {
+		if cur, ok := led.Total(); ok && cur == 0 {
+			_ = led.Add(baselineUsed)
+		}
+	}
+	return NewLedgerCounter(led, maxBytes).WithPool(pool)
+}
+
+// newVolumeLedgerCounterLocal 在**节点本地**明文目录上建账本并适配为卷级计数器
+// （加密卷专用；语义与 newVolumeLedgerCounter 一致，只是落点不经卷 FS）。
+func newVolumeLedgerCounterLocal(dir string, maxBytes int64, pool *quota.Pool, baselineUsed int64) *LedgerCounter {
+	led, err := OpenLedgerLocal(dir, volumeNodeID())
+	if err != nil {
+		// 本地目录建账本失败（权限/磁盘）⇒ **退回内存账本**：进程内上限仍然强制，
+		// 只失去重启起算 ⇒ 计数 + 告警（不静默放宽 ✗）。
 		ledgerMemFallback.Add(1)
 		mem, merr := OpenMemLedger(volumeNodeID())
 		if merr != nil {
