@@ -638,17 +638,60 @@ type StatsProvider interface{ VolumeStats() (used, total int64, ok bool) }
 
 ### 13.2 目标形态（**单一记账权威**）
 
+#### 🔴 分层约束（**2026-10-17 实证，推翻本节初稿**）
+
+初稿写 `UploadRoute{Quota *registry.QuotaVolume}` ✗ —— **架构非法**：`internal/archcheck/layers.go`
+把 `pkg/files` 定为 **L1**、`pkg/volume/registry` 定为 **L2**，且该文件注释明写：
+
+> 「卷集合与容量核算经领域自定义窄接口（`files.VolumeSet` / `files.StorageManager`）由装配层注入
+> （见 `pkg/files/service.go`）。**此处若被"补回"子包依赖，门禁 R2 会报红**。」
+
+⇒ `pkg/files` **不得** import `pkg/volume/registry` ✗（由 **R2 门禁**强制 ✓）。
+⇒ 正确形态 = 仓库**既定模式**：**领域侧拥有窄接口 + 装配层适配**（依赖倒置 ✓）。
+
+#### 目标形态（**依赖倒置**）
+
 ```go
-// pkg/files —— 路由只带「去哪写」+「一本账」；记账细节全部内聚到 QuotaVolume。
+// pkg/files —— 领域侧**自己拥有**的窄接口（只含写内核真正需要的三个动作）。
+// 装配层以 *registry.QuotaVolume 适配（pkg/server，L2 之上，可 import registry ✓）。
+type QuotaAuthority interface {
+    Reserve(key syncpkg.LogicalKey, upperBound int64) (QuotaReservation, error)
+    Footprint(owner, rel string) (int64, bool)   // **卷自报**物理足迹（释放侧同源）
+    MaxPhysical(owner, rel string, logical int64) int64 // 写前上界（**公式只写在卷里**）
+}
+
+// QuotaReservation 是**双账本预留句柄**的领域视图（一次 Reserve 覆盖两侧）。
+type QuotaReservation interface {
+    Commit(prev, written int64) // 结算（覆盖写差分；两侧各自幂等）
+    Release()                   // 双回滚
+}
+
+// pkg/files —— 路由只带「去哪写」+「一本账句柄」；记账细节全部内聚在权威实现里。
 type UploadRoute struct {
     VolumeName string
-    Tenant     *storage.Tenant   // 本地卷写面
-    Sink       UploadSink        // 外部卷写面（非 nil 时优先）
+    Tenant     *storage.Tenant    // 本地卷写面
+    Sink       UploadSink         // 外部卷写面（非 nil 时优先）
     Key        syncpkg.LogicalKey // 归属键（真实 (owner, bucket/rel)）
-    Quota      *registry.QuotaVolume // 唯一配额权威（nil = 该卷无配额层）
-    Res        *registry.Reservation // 双账本预留句柄（一次 Reserve 覆盖两侧）
+    Quota      QuotaAuthority     // 该卷的配额权威（nil = 该卷无配额层 ⇒ 不记账）
+    Res        QuotaReservation   // 预留句柄（nil = 未预留）
 }
 ```
+
+**适配层**（`pkg/server`，本片新增 `filesQuotaAdapter`）：
+
+```go
+type quotaAuthorityAdapter struct{ q *registry.QuotaVolume }
+func (a quotaAuthorityAdapter) Reserve(k syncpkg.LogicalKey, n int64) (files.QuotaReservation, error) {
+    r, err := a.q.Reserve(k, n)
+    if err != nil || r == nil { return nil, err }
+    return r, nil // *registry.Reservation 结构性满足 files.QuotaReservation（两方法同名同形）
+}
+func (a quotaAuthorityAdapter) Footprint(owner, rel string) (int64, bool) { return a.q.Footprint(owner, rel) }
+func (a quotaAuthorityAdapter) MaxPhysical(o, r string, n int64) int64    { return a.q.MaxPhysical(o, r, n) }
+```
+
+⇒ **零新增依赖方向** ✓（`pkg/files` 只依赖自己拥有的接口 ✓；装配层依赖 `registry` ✓ —— 与
+`files.VolumeSet`/`files.StorageManager` 同型 ✓）。
 
 `registry.QuotaVolume` 侧（已有，只需补齐命名与语义）：
 
@@ -685,7 +728,9 @@ MaxPhysical(owner, rel, logical) int64         // 写前上界（**公式只写�
 1. **`registry.QuotaVolume` 补齐**：`Reserve` 返回 `*Reservation`（已有）；新增便捷
    `Settle(key, prev, written)` 与 `FootprintOr(key, fallback)`（**唯一**足迹口径）；
 2. **`pkg/files.UploadRoute` 换形**：删 `Scope`/`ScopeRes`/`Pool`/`PoolRes`/`PhysSize`/`Release`，
-   加 `Key`/`Quota`/`Res`；`Commit`/`Release` 改为委托 `Res`；
+   加 `Key`/`Quota`(=`QuotaAuthority` 窄接口)/`Res`(=`QuotaReservation`)；`Commit`/`Release` 改为
+   委托 `Res`（**保留同名方法** ⇒ 现有 **52 处 `route.Release()` 调用点零改动** ✓）；
+   新增领域侧窄接口 + `pkg/server` 适配器（依赖倒置，见 §13.2）；
 3. **统一整卷权威**：把 `CapacityFS` 的池预占（7 处）与 `UploadRoute.Pool`（本地卷路径）
    **一并**收敛到 `QuotaVolume.Reserve` 的**整卷侧**（`VolumeCounter`/`pool` 单实例 ⇒ 单本账 ✓）
    —— **注意**：这不是「删重复」✗（前提已证伪 ✓），而是**消灭按卷类型分治的两个权威** ✓；
