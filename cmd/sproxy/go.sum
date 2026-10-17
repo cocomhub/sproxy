@@ -40,8 +40,6 @@ github.com/cocomhub/buildinfo v0.0.1 h1:WJfxtfhTBBXm1h/NKq2U652dEedukvOKR4XDbUvm
 github.com/cocomhub/buildinfo v0.0.1/go.mod h1:SVZ3qv5aEGELCz90dJOVro1CPk//yPjjfG/iMPqYVTw=
 github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0 h1:O/2H5zvdU56wpwnQhOxdftqhMjoosGyDnw0x/dqbF4w=
 github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0/go.mod h1:b0ZB7RxOAmOUSpUJpOQUVe5fI9OLMfWagDRn/UT3X4M=
-github.com/cocomhub/sproxy/pkg/volume/ext/s3 v0.17.0 h1:xdgKvAksrtTwzL/Z8dB+e4mRJPhwb3EEEgpHqnhMaDE=
-github.com/cocomhub/sproxy/pkg/volume/ext/s3 v0.17.0/go.mod h1:oFxHBJRmmnQV/l4T4vbg/aN+s1H/ivGrT6urIg+nsGM=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/couchbase/go-couchbase v0.0.0-20200519150804-63f3cdb75e0d/go.mod h1:TWI8EKQMs5u5jLKW/tsb9VwauIrMIxQG1r5fMsswK5U=

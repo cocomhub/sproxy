@@ -1,2 +1,2 @@
-github.com/cocomhub/sproxy v0.0.0-20261008134855-8b2a42ff4439 h1:lbDhpz8qDJeFtG3ccgunXsOV92+p2pNNV/F+IpbuMuQ=
-github.com/cocomhub/sproxy v0.0.0-20261008134855-8b2a42ff4439/go.mod h1:K8N/2L4rIdIPge9pH52O0KRMQ4RgtHiTrLl8iH383lU=
+golang.org/x/text v0.42.0 h1:JbOZXgfeCPU9gacVtYliJqOhD+zhrEqK4LfdpmlUZqI=
+golang.org/x/text v0.42.0/go.mod h1:ojzP1Z+2QtioaF8DTtO8K5q7JWVVYwZKenzujK0Zd0E=
