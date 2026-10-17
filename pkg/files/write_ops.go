@@ -864,7 +864,7 @@ func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string,
 	for _, tg := range targets {
 		// 目录自身足迹：**删除前**取链基准（删除后 dir meta 已不在卷上 ⇒ 无法再测）。
 		dirBefore, dirOK := s.dirChainBefore(owner, remotePath, tg.volName)
-		dirFiles, rmErr := s.removeDirOnVolume(tg, rel, remotePath)
+		dirFiles, rmErr := s.removeDirOnVolume(owner, tg, rel, remotePath)
 		if rmErr != nil {
 			return RemoveDirResult{}, rmErr
 		}
@@ -930,9 +930,10 @@ func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath
 func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat) {
 	for _, f := range allFiles {
 		if scope := s.rt.quotaScope(owner, f.rel); scope != nil {
-			// f.size 来自 ReadDir 的 Info()（加密卷上**已是物理**长度）⇒ 与写入侧物理口径天然一致，
-			// **不再折算**（见 UploadRoute.Commit 的口径说明）。
-			scope.ReleaseUsage(f.size)
+			// 口径与写入侧一致（卷自报足迹优先；见 releaseChargeFor）——`f.size` 来自
+			// ReadDir Info()，对 secretdata 只含内容容器（不含 parity/meta pad）⇒ 直接用它
+			// 会**少释放**（幽灵占用/假 507）。
+			scope.ReleaseUsage(s.releaseChargeFor(f.volName, owner, strings.TrimPrefix(f.rel, "user/"), f.size))
 		}
 	}
 	// C2 修复：rmdir 删除 user 子树后联动删除各文件 meta sidecar（meta 功能桶）并
@@ -1052,10 +1053,14 @@ func rmdirPrimaryCheck(root *storage.Root, rel string) error {
 
 // removeDirOnVolume 删除单个卷上的目录子树并返回树内文件 {rel,size}（per-file 分键释放
 // owner 全局 Scope 用）；同时按所在卷释放卷容量池。
-func (s *Service) removeDirOnVolume(tg rmTarget, rel, remotePath string) ([]rmdirFileStat, error) {
+func (s *Service) removeDirOnVolume(owner string, tg rmTarget, rel, remotePath string) ([]rmdirFileStat, error) {
 	root := tg.tnt.Root()
 	var dirFiles []rmdirFileStat
 	sumRootDirFiles(root, rel, &dirFiles)
+	// 打上卷名：`cleanupRemovedDir` 跨卷聚合后仍能按**所在卷**取自报足迹（per-file 释放）。
+	for i := range dirFiles {
+		dirFiles[i].volName = tg.volName
+	}
 	if rmErr := root.RemoveAll(rel); rmErr != nil {
 		s.rt.logger().Error("删除目录失败", "dir", remotePath, "error", rmErr)
 		return nil, &HTTPError{Status: http.StatusInternalServerError, Message: "删除目录失败"}
@@ -1065,7 +1070,7 @@ func (s *Service) removeDirOnVolume(tg rmTarget, rel, remotePath string) ([]rmdi
 		if pool := s.rt.volSet().Pool(tg.volName); pool != nil {
 			var volBytes int64
 			for _, f := range dirFiles {
-				volBytes += f.size // 来自 ReadDir Info() ⇒ 已是物理长度
+				volBytes += s.releaseChargeFor(tg.volName, owner, strings.TrimPrefix(f.rel, "user/"), f.size)
 			}
 			if volBytes > 0 {
 				pool.ReleaseCommitted(volBytes)
@@ -1178,6 +1183,7 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 	if renErr := s.renameInHome(ctx, renameHomeArgs{
 		owner:            owner,
 		root:             root,
+		volName:          homeVol,
 		fromRel:          fromRel,
 		toRel:            toRel,
 		from:             from,
@@ -1398,11 +1404,26 @@ func (s *Service) rejectRenameDestOnOtherVolume(owner, toRel, homeVol string) er
 	return nil
 }
 
+// releaseChargeFor 返回某对象**释放**时应扣减的字节——与结算**同源**（口径契约，见 `settleSize`/
+// `prevCharge` 的注释）：**卷自报实测足迹优先**，回落调用方给出的物理尺寸。
+//
+// 为什么释放侧不能直接用 `Stat`/`ReadDir` 尺寸：对 **secretdata** 这类封装卷，它们只看到
+// **内容容器**（不含 XOR parity、不含 pad 到 [base,2·base) 的 meta blob）⇒ 结算按足迹、释放按
+// Stat ⇒ 每次操作泄漏 `(足迹 − Stat)` 的**幽灵占用**（假 507）；反向（多释放）则配额虚低 ⇒
+// 超限写入通过。两条都是静默错，故统一收口到本函数。
+func (s *Service) releaseChargeFor(volName, owner, remotePath string, fallback int64) int64 {
+	if n, ok := s.physChargeFor(volName, owner, remotePath); ok {
+		return n
+	}
+	return fallback
+}
+
 // renameHomeArgs 是 renameInHome 的参数集合（go:S107：参数过多时收敛为结构体）。
 // 只放**领域**入参——不含 http.ResponseWriter（域方法不写响应，失败以 *HTTPError 表达）。
 type renameHomeArgs struct {
 	owner            string
 	root             *storage.Root
+	volName          string
 	fromRel          string
 	toRel            string
 	from             string
@@ -1496,7 +1517,7 @@ func (s *Service) renameWithQuotaTransfer(ctx context.Context, a renameHomeArgs)
 	if statErr != nil {
 		return false, nil // 源文件 stat 失败（理论不可达）：不记账，继续原链路。
 	}
-	size := srcInfo.Size()
+	size := s.releaseChargeFor(a.volName, a.owner, a.from, srcInfo.Size())
 	// 目标键先 TryReserve（子目录/租户/全局逐级检查，配额不足拒绝移动避免超限），
 	// 成功后再原子 Rename，最后源键 ReleaseUsage。若 Rename 失败则 Release 归还目标预留。
 	toRes, err := toScope.TryReserve(size)
@@ -1511,7 +1532,8 @@ func (s *Service) renameWithQuotaTransfer(ctx context.Context, a renameHomeArgs)
 		a.logger.ErrorContext(ctx, "重命名失败", "from", a.from, "to", a.to, "error", err.Error())
 		return true, &HTTPError{Status: http.StatusInternalServerError, Message: "重命名失败"}
 	}
-	// size 来自 `a.root.Stat`（加密卷上已是**物理**长度）⇒ 预留/结算/释放天然同口径，不再折算。
+	// size 已按**与结算同源**的口径算好（卷自报足迹优先；见 releaseChargeFor）⇒
+	// 预留/结算/释放三者天然同口径，不再折算。
 	toRes.Commit(size)
 	fromScope.ReleaseUsage(size)
 	s.renameChecksumIndex(a)
