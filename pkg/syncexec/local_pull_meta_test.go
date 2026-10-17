@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 )
 
@@ -30,7 +32,7 @@ func TestNewLocalPullFS_WritesSidecarUnderMetaBucket(t *testing.T) {
 	ctx := context.Background()
 
 	content := []byte("pulled-content-0123456789")
-	if err := fs.WriteFile(ctx, "docs/a.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "docs/a.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// 主文件在 user 桶。
@@ -70,11 +72,11 @@ func TestNewLocalPullFS_OverwriteRefreshesSidecar(t *testing.T) {
 	ctx := context.Background()
 
 	old := []byte("old-content")
-	if err := fs.WriteFile(ctx, "a.txt", bytes.NewReader(old), int64(len(old)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "a.txt", bytes.NewReader(old), int64(len(old)), 0); err != nil {
 		t.Fatal(err)
 	}
 	newer := []byte("newer-content-longer-than-before")
-	if err := fs.WriteFile(ctx, "a.txt", bytes.NewReader(newer), int64(len(newer)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "a.txt", bytes.NewReader(newer), int64(len(newer)), 0); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(tenantRoot, "meta", "a.txt.meta"))

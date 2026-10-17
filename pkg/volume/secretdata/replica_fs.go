@@ -73,14 +73,14 @@ func (r *replicaFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, e
 
 // WriteFile 把同一内容写入全部 target（读一次、逐 target 写）。任一 target 写失败 →
 // best-effort 回滚已写 target（保持副本间一致：写全部成功才算成功），并返回错误。
-func (r *replicaFS) WriteFile(ctx context.Context, path string, reader io.Reader, size, mtime int64) error {
+func (r *replicaFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, reader io.Reader, size, mtime int64) error {
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return fmt.Errorf("replica: 读待写内容失败: %w", err)
 	}
 	var written []int
 	for i, fs := range r.targets {
-		if werr := fs.WriteFile(ctx, path, bytes.NewReader(data), int64(len(data)), mtime); werr != nil {
+		if werr := fs.WriteFile(ctx, key, path, bytes.NewReader(data), int64(len(data)), mtime); werr != nil {
 			for _, j := range written {
 				_ = r.targets[j].Delete(ctx, path) // best-effort 回滚已写副本
 			}

@@ -61,7 +61,7 @@ func TestLoadIndex_HighTier_PeakMemory_OneOffBaseline(t *testing.T) {
 	const n = 4
 	for i := range n {
 		content := data(200 + i)
-		if werr := fs.WriteFile(ctx, fmt.Sprintf("dir%d/f%d.bin", i, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+		if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, fmt.Sprintf("dir%d/f%d.bin", i, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
 			t.Fatalf("WriteFile(high): %v", werr)
 		}
 	}
@@ -130,7 +130,7 @@ func TestLoadIndex_HighTier_BoundedConcurrency_Slow(t *testing.T) {
 	const n = 3 // 少量文件即可覆盖多容器/多 meta 并发派生路径
 	for i := range n {
 		content := data(100 + i)
-		if werr := fs.WriteFile(ctx, fmt.Sprintf("dir%d/f%d.bin", i%2, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+		if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, fmt.Sprintf("dir%d/f%d.bin", i%2, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
 			t.Fatalf("WriteFile(high): %v", werr)
 		}
 	}

@@ -92,7 +92,7 @@ func TestTrueUsage_MatchesOnDiskBytes(t *testing.T) {
 	rels := []string{"a.txt", "dir/b.bin", "dir/sub/c.dat"}
 	for i, rel := range rels {
 		data := bytes.Repeat([]byte{byte('a' + i)}, 300+i*17)
-		if err := fs.WriteFile(context.Background(), rel, bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, rel, bytes.NewReader(data), int64(len(data)), 0); err != nil {
 			t.Fatalf("写 %s: %v", rel, err)
 		}
 	}
@@ -131,7 +131,7 @@ func TestTrueUsage_ErasureIncludesParity(t *testing.T) {
 	fs := newFS(t)
 	fs.opts.Erasure = true
 	data := bytes.Repeat([]byte("parity-payload-"), 400) // 小块策略 → 多分块
-	if err := fs.WriteFile(context.Background(), "p.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "p.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("写: %v", err)
 	}
 	e := fs.index["p.bin"]
@@ -169,7 +169,7 @@ func TestTrueUsage_DedupCountsSharedOnce(t *testing.T) {
 	fs.opts.Dedup = true
 	payload := bytes.Repeat([]byte("same-content-for-dedup"), 300)
 	for _, rel := range []string{"d1.bin", "d2.bin"} {
-		if err := fs.WriteFile(context.Background(), rel, bytes.NewReader(payload), int64(len(payload)), 0); err != nil {
+		if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, rel, bytes.NewReader(payload), int64(len(payload)), 0); err != nil {
 			t.Fatalf("写 %s: %v", rel, err)
 		}
 	}
@@ -220,7 +220,7 @@ func TestTrueUsage_AfterReloadMatches(t *testing.T) {
 		t.Fatalf("NewFS: %v", err)
 	}
 	payload := bytes.Repeat([]byte("reload-truth"), 250)
-	if werr := fs1.WriteFile(context.Background(), "r.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
+	if werr := fs1.WriteFile(context.Background(), syncpkg.LogicalKey{}, "r.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
 		t.Fatalf("写: %v", werr)
 	}
 	before, _ := fs1.TrueUsage()

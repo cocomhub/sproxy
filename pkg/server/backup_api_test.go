@@ -296,10 +296,10 @@ func TestBackupQuotaFS_ReserveFailureIsolated(t *testing.T) {
 	inner := newBackupMemFS()
 	q := &backupQuotaFS{inner: inner, scope: scope, pool: nil}
 
-	if err := q.WriteFile(context.Background(), "a.txt", strings.NewReader("12345"), 5, 0); err != nil {
+	if err := q.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.txt", strings.NewReader("12345"), 5, 0); err != nil {
 		t.Fatalf("5B 写入应成功: %v", err)
 	}
-	if err := q.WriteFile(context.Background(), "b.txt", strings.NewReader(strings.Repeat("x", 20)), 20, 0); err == nil {
+	if err := q.WriteFile(context.Background(), syncpkg.LogicalKey{}, "b.txt", strings.NewReader(strings.Repeat("x", 20)), 20, 0); err == nil {
 		t.Fatal("20B 超出 5B 上限应被拒绝（配额绕过 → 红）")
 	}
 	if inner.has("b.txt") {
@@ -326,7 +326,7 @@ func (m *backupMemFS) has(p string) bool {
 
 func (m *backupMemFS) get(p string) string { return m.files[p] }
 
-func (m *backupMemFS) WriteFile(_ context.Context, rel string, r io.Reader, _ int64, _ int64) error {
+func (m *backupMemFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, rel string, r io.Reader, _ int64, _ int64) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -380,7 +380,7 @@ func TestBackupQuotaFS_OverwriteReleasesPrev(t *testing.T) {
 	q := &backupQuotaFS{inner: inner, scope: scope, pool: volPool}
 	ctx := context.Background()
 	for i := range 3 {
-		if err := q.WriteFile(ctx, "a.txt", strings.NewReader(strings.Repeat("x", 10)), 10, 0); err != nil {
+		if err := q.WriteFile(ctx, syncpkg.LogicalKey{}, "a.txt", strings.NewReader(strings.Repeat("x", 10)), 10, 0); err != nil {
 			t.Fatalf("第 %d 次覆盖写: %v", i+1, err)
 		}
 	}
@@ -391,7 +391,7 @@ func TestBackupQuotaFS_OverwriteReleasesPrev(t *testing.T) {
 		t.Fatalf("覆盖写后 volPool.Usage=%d want 10", got)
 	}
 	// 改名到新名（覆盖既有 30B 目标）→ 目标旧字节释放。
-	if err := q.WriteFile(ctx, "b.txt", strings.NewReader(strings.Repeat("y", 30)), 30, 0); err != nil {
+	if err := q.WriteFile(ctx, syncpkg.LogicalKey{}, "b.txt", strings.NewReader(strings.Repeat("y", 30)), 30, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.Rename(ctx, "a.txt", "b.txt"); err != nil {
@@ -422,28 +422,28 @@ func TestBackupQuotaFS_DurableCapacityLedger(t *testing.T) {
 	ctx := context.Background()
 	usage := func() int64 { return sm.UsageByCategory()[capacity.CategoryChunked] }
 
-	if err := q.WriteFile(ctx, "a.txt", strings.NewReader(strings.Repeat("x", 40)), 40, 0); err != nil {
+	if err := q.WriteFile(ctx, syncpkg.LogicalKey{}, "a.txt", strings.NewReader(strings.Repeat("x", 40)), 40, 0); err != nil {
 		t.Fatalf("40B 写入: %v", err)
 	}
 	if got := usage(); got != 40 {
 		t.Fatalf("写入后持久账本=%d want 40（本地备份写面未记账 → 红）", got)
 	}
 	// 覆盖写差分：同 rel 覆盖为 10B → 账本 10（旧字节释放，不累加）。
-	if err := q.WriteFile(ctx, "a.txt", strings.NewReader(strings.Repeat("y", 10)), 10, 0); err != nil {
+	if err := q.WriteFile(ctx, syncpkg.LogicalKey{}, "a.txt", strings.NewReader(strings.Repeat("y", 10)), 10, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := usage(); got != 10 {
 		t.Fatalf("覆盖写后持久账本=%d want 10（旧字节未释放）", got)
 	}
 	// 新文件 50 → 60。
-	if err := q.WriteFile(ctx, "b.txt", strings.NewReader(strings.Repeat("z", 50)), 50, 0); err != nil {
+	if err := q.WriteFile(ctx, syncpkg.LogicalKey{}, "b.txt", strings.NewReader(strings.Repeat("z", 50)), 50, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := usage(); got != 60 {
 		t.Fatalf("新文件后持久账本=%d want 60", got)
 	}
 	// 超限（剩余 40，写 60）→ 拒绝且账本不变（预留已回退，无泄漏）。
-	if err := q.WriteFile(ctx, "c.txt", strings.NewReader(strings.Repeat("w", 60)), 60, 0); err == nil {
+	if err := q.WriteFile(ctx, syncpkg.LogicalKey{}, "c.txt", strings.NewReader(strings.Repeat("w", 60)), 60, 0); err == nil {
 		t.Fatal("超限写应被拒绝")
 	}
 	if got := usage(); got != 60 {
@@ -457,7 +457,7 @@ func TestBackupQuotaFS_DurableCapacityLedger(t *testing.T) {
 		t.Fatalf("删除后持久账本=%d want 10", got)
 	}
 	// 覆盖改名（目标旧字节释放；源字节已在写时计入）→ 仍 10。
-	if err := q.WriteFile(ctx, "d.txt", strings.NewReader(strings.Repeat("q", 30)), 30, 0); err != nil {
+	if err := q.WriteFile(ctx, syncpkg.LogicalKey{}, "d.txt", strings.NewReader(strings.Repeat("q", 30)), 30, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.Rename(ctx, "a.txt", "d.txt"); err != nil {

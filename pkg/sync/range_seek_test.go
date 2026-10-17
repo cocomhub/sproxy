@@ -28,7 +28,7 @@ func newRangeSeekerEnv(t *testing.T, content []byte) (*countingRangeFS, string) 
 	t.Helper()
 	root := t.TempDir()
 	fs := NewLocalFS(root, nil)
-	if err := fs.WriteFile(context.Background(), "file.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(context.Background(), LogicalKey{}, "file.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	cfs := &countingRangeFS{LocalFS: fs}
@@ -229,7 +229,7 @@ type openOnlyFS struct{ data []byte }
 
 func (o *openOnlyFS) ListDir(context.Context, string) ([]Entry, error) { return nil, nil }
 func (o *openOnlyFS) Stat(context.Context, string) (*Entry, error)     { return nil, nil }
-func (o *openOnlyFS) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+func (o *openOnlyFS) WriteFile(context.Context, LogicalKey, string, io.Reader, int64, int64) error {
 	return nil
 }
 func (o *openOnlyFS) Rename(context.Context, string, string) error { return nil }

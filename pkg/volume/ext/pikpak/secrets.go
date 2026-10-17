@@ -64,7 +64,7 @@ func (s *FSSecretStore) Write(ctx context.Context, name string, data []byte) err
 	if !validSecretStoreName(name) {
 		return fmt.Errorf("pikpak secret store: 非法 secret 名 %q", name)
 	}
-	if err := s.fs.WriteFile(ctx, name, bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := s.fs.WriteFile(ctx, syncpkg.LogicalKey{}, name, bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		return fmt.Errorf("pikpak secret store: 写 %s: %w", name, err)
 	}
 	return nil

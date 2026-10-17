@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/spf13/cobra"
 )
@@ -334,7 +336,7 @@ func TestResolveSealfileReadName(t *testing.T) {
 		t.Fatalf("newSealfileFS: %v", err)
 	}
 	content := strings.NewReader("read-name-test")
-	if werr := fs.WriteFile(context.Background(), sealfileRel("test", "doc.bin"), content, 14, 0); werr != nil {
+	if werr := fs.WriteFile(context.Background(), storagepkg.LogicalKey{}, sealfileRel("test", "doc.bin"), content, 14, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	cmd := &cobra.Command{Use: "decrypt"}

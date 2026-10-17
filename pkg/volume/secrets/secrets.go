@@ -125,7 +125,7 @@ func (m *Manager) Create(ctx context.Context, name string) ([]byte, error) {
 // writeSecret 把 secret 密钥字节写入 `secrets/<name>`（本地 0600）。Create 与
 // CreateFromPassphrase 共用落盘路径（IO 逻辑单一实现，任一改权限语义两者一致）。
 func (m *Manager) writeSecret(ctx context.Context, name string, key []byte) error {
-	if err := m.fs.WriteFile(ctx, name, bytes.NewReader(key), int64(len(key)), 0); err != nil {
+	if err := m.fs.WriteFile(ctx, syncpkg.LogicalKey{}, name, bytes.NewReader(key), int64(len(key)), 0); err != nil {
 		return fmt.Errorf("secrets: 写入 %q 失败: %w", name, err)
 	}
 	if m.local {

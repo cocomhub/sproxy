@@ -121,7 +121,7 @@ func (f *clusterFS) OpenRangeRead(ctx context.Context, path string, offset, size
 
 // 写方法（出口集群卷只读）：WriteFile/Rename/Delete/MakeDir 恒返回错误——出口只转发
 // 数据不写持有节点；fail-closed（静默成功会让上层把"没写"当"已写"）。
-func (f *clusterFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (f *clusterFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	return errEgressReadOnly
 }
 func (f *clusterFS) Rename(ctx context.Context, from, to string) error { return errEgressReadOnly }

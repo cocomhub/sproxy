@@ -72,7 +72,7 @@ func (e *EncryptedFS) OpenRead(ctx context.Context, path string) (io.ReadCloser,
 // 密文大小（= pipe 实际字节，无明文 size 可用）。密文大小 = 明文 + 每块 ~28B 开销
 // （nonce 12 + tag 16）。此差异由调用方按 opaque 处理（Stat 返回密文大小，diff 层
 // 若按 size 比对需理解该卷是加密卷——见 NewEncryptedFS 文档）。
-func (e *EncryptedFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (e *EncryptedFS) WriteFile(ctx context.Context, key LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
@@ -97,7 +97,7 @@ func (e *EncryptedFS) WriteFile(ctx context.Context, path string, r io.Reader, s
 		}
 		errCh <- nil
 	}()
-	err := e.inner.WriteFile(ctx, path, pr, size, mtime)
+	err := e.inner.WriteFile(ctx, key, path, pr, size, mtime)
 	// 等待加密 goroutine 完成（收集其错误；WriteFile 失败时 CloseWithError 已传播）。
 	encErr := <-errCh
 	if err == nil {

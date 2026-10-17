@@ -43,7 +43,7 @@ func TestOpenRangeRead_UsesSegmentRangeReads(t *testing.T) {
 	}
 	ctx := context.Background()
 	content := data(512) // 跨多块
-	if werr := fs.WriteFile(ctx, "movie.mp4", bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+	if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "movie.mp4", bytes.NewReader(content), int64(len(content)), 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	// 读中间一段 [200,300)（应只涉少数 blocklet 段）。
@@ -95,7 +95,7 @@ func TestOpenRangeRead_NonRangeBackendFallsBack(t *testing.T) {
 	}
 	ctx := context.Background()
 	content := data(600)
-	if werr := fs.WriteFile(ctx, "a.mp4", bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+	if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.mp4", bytes.NewReader(content), int64(len(content)), 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, err := fs.OpenRangeRead(ctx, "a.mp4", 250, 150)

@@ -195,12 +195,12 @@ func (o *ownerFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error)
 	return o.FS.OpenRead(ctx, src)
 }
 
-func (o *ownerFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (o *ownerFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	src, err := o.key(p)
 	if err != nil {
 		return err
 	}
-	return o.FS.WriteFile(ctx, src, r, size, mtime)
+	return o.FS.WriteFile(ctx, key, src, r, size, mtime)
 }
 
 func (o *ownerFS) MakeDir(ctx context.Context, p string) error {

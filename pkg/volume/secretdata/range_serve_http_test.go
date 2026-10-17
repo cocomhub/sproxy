@@ -29,7 +29,7 @@ func TestServeContent_RangeSeeker_Secretdata(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	content := data(4096) // 跨多块（Block 64-128B → 32+ 块）
-	if err := fs.WriteFile(ctx, "movie.mp4", io.NopCloser(bytesReader(content)), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "movie.mp4", io.NopCloser(bytesReader(content)), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestServeContent_RangeSeeker_FullRead(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	content := data(2048)
-	if err := fs.WriteFile(ctx, "movie.mp4", io.NopCloser(bytesReader(content)), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "movie.mp4", io.NopCloser(bytesReader(content)), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 

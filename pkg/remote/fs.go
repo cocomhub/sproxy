@@ -125,7 +125,7 @@ var _ syncpkg.FS = (*remoteFS)(nil)
 // 当成"已写"（数据丢失型缺陷），而回落读面链路会绕过「写面独立授权」的安全边界。
 
 // WriteFile 写入 path；size 为调用方声明的字节数，mtime 为 Unix 秒（0 = 不设置）。
-func (f *remoteFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (f *remoteFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	p, err := normalizeRelPath(path)
 	if err != nil {
 		return err

@@ -83,7 +83,7 @@ func TestSyncEngine_BaiduToLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 预置网盘文件
-	if wErr := fs.WriteFile(ctx, "x.txt", strings.NewReader("netdisk"), 7, 0); wErr != nil {
+	if wErr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "x.txt", strings.NewReader("netdisk"), 7, 0); wErr != nil {
 		t.Fatal(wErr)
 	}
 	dstRoot := t.TempDir()

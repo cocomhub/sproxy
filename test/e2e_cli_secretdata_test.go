@@ -191,7 +191,7 @@ func TestE2E_CLI_Secretdata_VolumeAssembledAndInterop(t *testing.T) {
 	fs := newSecretReader(t, vaultRoot, secret)
 	ctx := context.Background()
 	content := []byte("secret volume e2e payload: 加密卷目录隐私与即时物理删验证")
-	if err := fs.WriteFile(ctx, "docs/top.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "docs/top.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("secretdata WriteFile: %v", err)
 	}
 
@@ -270,7 +270,7 @@ func TestE2E_CLI_Secretdata_MultiTargetReplica(t *testing.T) {
 	}
 	fs := be.FS()
 	content := []byte("multi-target replica content")
-	if werr := fs.WriteFile(context.Background(), "rep.txt", bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+	if werr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "rep.txt", bytes.NewReader(content), int64(len(content)), 0); werr != nil {
 		t.Fatalf("多 target WriteFile: %v", werr)
 	}
 	// 读回内容一致。

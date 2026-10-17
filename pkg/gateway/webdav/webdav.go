@@ -286,7 +286,7 @@ func (w *writeFile) flush() error {
 	if w.info != nil {
 		mtime = w.info.MTime
 	}
-	return w.fs.WriteFile(w.ctx, w.rel, bytes.NewReader(w.buf.Bytes()), int64(w.buf.Len()), mtime)
+	return w.fs.WriteFile(w.ctx, sync.LogicalKey{}, w.rel, bytes.NewReader(w.buf.Bytes()), int64(w.buf.Len()), mtime)
 }
 
 // 编译期断言。

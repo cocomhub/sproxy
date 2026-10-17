@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // TestListDir_NoDuplicateDirAcrossSources 钉住**跨源去重**（用户实测 2026-10-14：secretdata 卷
@@ -37,7 +39,7 @@ func TestListDir_NoDuplicateDirAcrossSources(t *testing.T) {
 		t.Fatalf("空目录 list(1) 中 2 出现 %d 次（应 1 次）: %v", got["2"], got)
 	}
 	// 写入文件后（索引前缀也会贡献目录条目）
-	if err := fs.WriteFile(ctx, "1/2/f.bin", bytes.NewReader(bytes.Repeat([]byte("x"), 64)), 64, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "1/2/f.bin", bytes.NewReader(bytes.Repeat([]byte("x"), 64)), 64, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	got := count("1")

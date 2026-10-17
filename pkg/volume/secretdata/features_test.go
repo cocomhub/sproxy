@@ -49,7 +49,7 @@ func TestMTimeScatter_DefaultRandomized(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	const orig = int64(1_800_000_000_000_000_000)
-	if err := fs.WriteFile(ctx, "s.bin", bytes.NewReader(data(300)), 300, orig); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "s.bin", bytes.NewReader(data(300)), 300, orig); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["s.bin"]
@@ -90,7 +90,7 @@ func TestMTimeScatter_DefaultRandomized(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("NewFS(PreserveMTime): %v", perr)
 	}
-	if err := fsP.WriteFile(ctx, "p.bin", bytes.NewReader(data(300)), 300, orig); err != nil {
+	if err := fsP.WriteFile(ctx, syncpkg.LogicalKey{}, "p.bin", bytes.NewReader(data(300)), 300, orig); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	pe := fsP.index["p.bin"]
@@ -130,10 +130,10 @@ func TestDedup_SameContentSharedBlob(t *testing.T) {
 	fs := newDedupFS(t)
 	ctx := context.Background()
 	content := data(500)
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile a: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "b.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "b.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile b: %v", err)
 	}
 	a, b := fs.index["a.bin"], fs.index["b.bin"]
@@ -208,7 +208,7 @@ func TestOptimisticLock_VersionConflict(t *testing.T) {
 	}
 
 	// DeleteIfVersion：一致成功。
-	if err := fs.WriteFile(ctx, "d.bin", bytes.NewReader(data(30)), 30, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "d.bin", bytes.NewReader(data(30)), 30, 0); err != nil {
 		t.Fatalf("WriteFile d: %v", err)
 	}
 	want := fs.CurrentVersion()
@@ -216,7 +216,7 @@ func TestOptimisticLock_VersionConflict(t *testing.T) {
 		t.Errorf("DeleteIfVersion 一致应成功: %v", err)
 	}
 	// DeleteIfVersion 冲突。
-	if err := fs.WriteFile(ctx, "d2.bin", bytes.NewReader(data(40)), 40, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "d2.bin", bytes.NewReader(data(40)), 40, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := fs.DeleteIfVersion(ctx, "d2.bin", want); !errors.Is(err, ErrVersionConflict) {
@@ -231,7 +231,7 @@ func TestDelete_ImmediatePhysicalCleanup(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["a.bin"]
@@ -286,10 +286,10 @@ func TestUsage_Accumulates(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.WriteFile(ctx, "b.bin", bytes.NewReader(data(400)), 400, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "b.bin", bytes.NewReader(data(400)), 400, 0); err != nil {
 		t.Fatal(err)
 	}
 	if fs.Usage() != 700 {
@@ -301,14 +301,14 @@ func TestUsage_Accumulates(t *testing.T) {
 	if fs.Usage() != 400 {
 		t.Errorf("删后 usage=%d，want 400", fs.Usage())
 	}
-	if err := fs.WriteFile(ctx, "c.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "c.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
 		t.Fatal(err)
 	}
 	if fs.Usage() != 500 {
 		t.Errorf("再写后 usage=%d，want 500", fs.Usage())
 	}
 	// 覆盖：b 400→200。
-	if err := fs.WriteFile(ctx, "b.bin", bytes.NewReader(data(200)), 200, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "b.bin", bytes.NewReader(data(200)), 200, 0); err != nil {
 		t.Fatal(err)
 	}
 	if fs.Usage() != 300 {
@@ -338,7 +338,7 @@ func TestGC_PreservesLiveFiles(t *testing.T) {
 		name := fmt.Sprintf("f%02d.bin", i)
 		c := data(200 + i*13) // 各文件内容互不相同
 		contents[name] = c
-		if err := fs.WriteFile(ctx, name, bytes.NewReader(c), int64(len(c)), 0); err != nil {
+		if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, name, bytes.NewReader(c), int64(len(c)), 0); err != nil {
 			t.Fatalf("WriteFile %s: %v", name, err)
 		}
 	}
@@ -385,7 +385,7 @@ func TestGC_ReusesIndex_NoMetaReread(t *testing.T) {
 	for i := range n {
 		name := fmt.Sprintf("f%02d.bin", i)
 		c := data(200 + i*7)
-		if werr := fs.WriteFile(ctx, name, bytes.NewReader(c), int64(len(c)), 0); werr != nil {
+		if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, name, bytes.NewReader(c), int64(len(c)), 0); werr != nil {
 			t.Fatalf("WriteFile %s: %v", name, werr)
 		}
 	}
@@ -442,8 +442,8 @@ func (c *countingFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, er
 func (c *countingFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
 	return c.wrap.Stat(ctx, p)
 }
-func (c *countingFS) WriteFile(ctx context.Context, p string, r io.Reader, size int64, mtime int64) error {
-	return c.wrap.WriteFile(ctx, p, r, size, mtime)
+func (c *countingFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size int64, mtime int64) error {
+	return c.wrap.WriteFile(ctx, key, p, r, size, mtime)
 }
 func (c *countingFS) Rename(ctx context.Context, from, to string) error {
 	return c.wrap.Rename(ctx, from, to)
@@ -495,8 +495,8 @@ func (f *faultMetaReadFS) OpenRead(ctx context.Context, p string) (io.ReadCloser
 	}
 	return f.wrap.OpenRead(ctx, p)
 }
-func (f *faultMetaReadFS) WriteFile(ctx context.Context, p string, r io.Reader, size int64, mtime int64) error {
-	return f.wrap.WriteFile(ctx, p, r, size, mtime)
+func (f *faultMetaReadFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size int64, mtime int64) error {
+	return f.wrap.WriteFile(ctx, key, p, r, size, mtime)
 }
 func (f *faultMetaReadFS) Rename(ctx context.Context, from, to string) error {
 	return f.wrap.Rename(ctx, from, to)
@@ -533,7 +533,7 @@ func TestGC_MountMetaReadFault_PreservesLiveFile(t *testing.T) {
 	}
 	// 阶段 2：向同容器注入一个孤儿分块（无任何 meta 引用，应被 GC 清理）。
 	orphanChunk := path.Join(e1.dirSeg, "000000000000000000000000000000000000")
-	if werr := realInner.WriteFile(ctx, orphanChunk, bytes.NewReader(data(64)), 64, 0); werr != nil {
+	if werr := realInner.WriteFile(ctx, syncpkg.LogicalKey{}, orphanChunk, bytes.NewReader(data(64)), 64, 0); werr != nil {
 		t.Fatalf("写孤儿分块: %v", werr)
 	}
 	// 阶段 3：模拟挂载瞬时故障——f1.bin 的 meta blob 在 loadIndex 期间读失败（跳过）。
@@ -612,7 +612,7 @@ func TestGC_MountMetaReadFault_UnconfirmedSkipsChunkSweep(t *testing.T) {
 		chunkPaths = append(chunkPaths, path.Join(e1.dirSeg, ci.FileName))
 	}
 	orphanChunk := path.Join(e1.dirSeg, "111111111111111111111111111111111111")
-	if werr := realInner.WriteFile(ctx, orphanChunk, bytes.NewReader(data(64)), 64, 0); werr != nil {
+	if werr := realInner.WriteFile(ctx, syncpkg.LogicalKey{}, orphanChunk, bytes.NewReader(data(64)), 64, 0); werr != nil {
 		t.Fatalf("写孤儿分块: %v", werr)
 	}
 	// 故障持续（fail 很大）：loadIndex 跳过 + GC 重确认也失败 → 未确认 → 全不清。

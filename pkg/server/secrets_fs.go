@@ -66,7 +66,7 @@ func (f *rootSecretsFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, 
 }
 
 // WriteFile 经 Root 写入（加密卷透明加密落盘；封印路径恒拒）。
-func (f *rootSecretsFS) WriteFile(ctx context.Context, p string, r io.Reader, _, _ int64) error {
+func (f *rootSecretsFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, _, _ int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

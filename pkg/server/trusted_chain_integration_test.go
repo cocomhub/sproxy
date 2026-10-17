@@ -73,7 +73,7 @@ func TestTrustedChain_FullStackWriteMetaVerify(t *testing.T) {
 	rel := "user/docs/a.bin"
 	body := bytes.Repeat([]byte("chain-"), 200)
 	// ② 写整链（Gate 预留 → Wrap 写 sidecar → CapacityFS 记账）。
-	if werr := chain.WriteFile(ctx, rel, bytes.NewReader(body), int64(len(body)), 0); werr != nil {
+	if werr := chain.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(body), int64(len(body)), 0); werr != nil {
 		t.Fatalf("整链 WriteFile: %v", werr)
 	}
 	if tracker.reserved != int64(len(body)) || tracker.released != int64(len(body)) {

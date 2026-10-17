@@ -51,7 +51,7 @@ func TestRootFS_PlainVolumeRoundTrip(t *testing.T) {
 
 	fs := New(root)
 	ctx := context.Background()
-	if werr := fs.WriteFile(ctx, "user/a.txt", strings.NewReader("hello"), 5, 0); werr != nil {
+	if werr := fs.WriteFile(ctx, storage.LogicalKey{}, "user/a.txt", strings.NewReader("hello"), 5, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	e, serr := fs.Stat(ctx, "user/a.txt")

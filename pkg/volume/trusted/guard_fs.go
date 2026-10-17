@@ -139,11 +139,11 @@ func (g *MetaBucketGuard) OpenRead(ctx context.Context, p string) (io.ReadCloser
 }
 
 // WriteFile 委托 inner（meta 桶路径 → 拒绝——业务层不能写 sidecar/凭据）。
-func (g *MetaBucketGuard) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (g *MetaBucketGuard) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	if err := g.guardPath(p); err != nil {
 		return err
 	}
-	return g.inner.WriteFile(ctx, p, r, size, mtime)
+	return g.inner.WriteFile(ctx, key, p, r, size, mtime)
 }
 
 // Rename 委托 inner（源/目标任一路径触达 meta 桶 → 拒绝）。

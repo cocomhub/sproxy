@@ -8,6 +8,8 @@ import (
 	"context"
 	"testing"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/audit"
 )
 
@@ -32,7 +34,7 @@ func TestSecretWrite_EmitsEncryptAuditRow(t *testing.T) {
 
 	content := data(2000) // 跨多分块
 	ctx := audit.WithContext(context.Background(), l)
-	if err := fs.WriteFile(ctx, "enc.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "enc.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatal(err)
 	}
 

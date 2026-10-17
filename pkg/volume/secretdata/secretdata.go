@@ -595,7 +595,7 @@ func decryptRangeBlocklet(keyBytes, salt, blob []byte, blockOffset int64, bl sha
 	return plain[segStart-bl.Offset : segEnd-bl.Offset], nil
 }
 
-func (s *SecretdataFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
+func (s *SecretdataFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, rel string, r io.Reader, size, mtime int64) error {
 	return s.writeFile(ctx, strings.TrimPrefix(rel, "/"), r, size, mtime, -1)
 }
 
@@ -947,7 +947,7 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		return uerr
 	}
 	mt := s.blobMTime(wc.mtime)
-	if werr := s.inner.WriteFile(ctx, path.Join(wc.container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
+	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(wc.container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
 		s.rollbackWrite(ctx, uploaded, wc.created)
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
@@ -1048,7 +1048,7 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 		return uerr
 	}
 	mt := s.blobMTime(wc.mtime)
-	if werr := s.inner.WriteFile(ctx, path.Join(wc.container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
+	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(wc.container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
 		s.rollbackWrite(ctx, uploaded, wc.created)
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
@@ -1151,7 +1151,7 @@ func (s *SecretdataFS) uploadChunks(ctx context.Context, container, tmp string, 
 			return fmt.Errorf("secretdata: 读本地分块 %s 失败: %w", cn, rerr)
 		}
 		p := path.Join(container, cn)
-		if werr := s.inner.WriteFile(ctx, p, bytes.NewReader(blob), int64(len(blob)), mt); werr != nil {
+		if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, p, bytes.NewReader(blob), int64(len(blob)), mt); werr != nil {
 			return fmt.Errorf("secretdata: 上传分块 %s 失败: %w", cn, werr)
 		}
 		*uploaded = append(*uploaded, p)
@@ -1931,7 +1931,7 @@ func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, paren
 	if nerr != nil {
 		return "", "", "", 0, nerr
 	}
-	if werr := s.inner.WriteFile(ctx, path.Join(c, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
+	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(c, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
 		return "", "", "", 0, fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
 	return c, dirID, name, int64(len(blob)), nil
@@ -2363,7 +2363,7 @@ func (s *SecretdataFS) copyBlob(ctx context.Context, src, dst string, mtime int6
 	if e, serr := s.inner.Stat(ctx, src); serr == nil && e != nil && e.MTime > 0 {
 		mt = e.MTime
 	}
-	if werr := s.inner.WriteFile(ctx, dst, bytes.NewReader(data), int64(len(data)), mt); werr != nil {
+	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, dst, bytes.NewReader(data), int64(len(data)), mt); werr != nil {
 		return fmt.Errorf("secretdata: 写入目标 blob %s 失败: %w", dst, werr)
 	}
 	return nil
@@ -2432,7 +2432,7 @@ func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string,
 		return "", nerr
 	}
 	mt := dirMetaMTime(dm.MTime)
-	if werr := s.inner.WriteFile(ctx, path.Join(container, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mt)); werr != nil {
+	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(container, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mt)); werr != nil {
 		return "", fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
 	return name, nil

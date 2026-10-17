@@ -158,7 +158,7 @@ func (m *memFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (m *memFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (m *memFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -249,7 +249,7 @@ func (m *meterFS) trackPeak(n int64) {
 	}
 }
 
-func (m *meterFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (m *meterFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	cur := m.active.Add(1)
 	m.trackPeak(cur)
 	// 两段式确定性汇合：
@@ -268,7 +268,7 @@ func (m *meterFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mt
 		m.trackPeak(m.active.Load())
 	}
 	defer m.active.Add(-1)
-	return m.FS.WriteFile(ctx, p, r, size, mtime)
+	return m.FS.WriteFile(ctx, key, p, r, size, mtime)
 }
 
 // ---- 测试 ----
@@ -356,7 +356,7 @@ func TestBackup_ManifestChecksumMismatchForcesFullRescan(t *testing.T) {
 	}
 	// 篡改：保留条目但把 checksum 改成另一值（验证**损坏/篡改**语义：不可信 manifest 不得导致跳过）。
 	tampered := `{"files":{"a.txt":{"size":5,"mtime":1000}},"checksum":"deadbeef"}`
-	if err := dst.WriteFile(context.Background(), ManifestRel,
+	if err := dst.WriteFile(context.Background(), syncpkg.LogicalKey{}, ManifestRel,
 		strings.NewReader(tampered), int64(len(tampered)), 0); err != nil {
 		t.Fatalf("写入篡改 manifest 失败: %v", err)
 	}

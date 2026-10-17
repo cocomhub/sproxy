@@ -43,17 +43,17 @@ func TestCapacityFS_PoolCounter_OverwriteDelete(t *testing.T) {
 	fs := Wrap(newRecordingFS(), NewPoolCounter(pool))
 	ctx := context.Background()
 
-	if err := fs.WriteFile(ctx, "x.bin", nil, 80, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "x.bin", nil, 80, 0); err != nil {
 		t.Fatalf("WriteFile(80): %v", err)
 	}
-	if err := fs.WriteFile(ctx, "x.bin", nil, 20, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "x.bin", nil, 20, 0); err != nil {
 		t.Fatalf("覆盖写小文件: %v", err)
 	}
 	if got := pool.Usage(); got != 20 {
 		t.Fatalf("覆盖写后池 Usage = %d, want 20", got)
 	}
 	// 净增 90（20→110）超限 → 拒绝。
-	if err := fs.WriteFile(ctx, "x.bin", nil, 110, 0); err == nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "x.bin", nil, 110, 0); err == nil {
 		t.Fatal("覆盖写净增超限应拒绝")
 	}
 	if got := pool.Usage(); got != 20 {

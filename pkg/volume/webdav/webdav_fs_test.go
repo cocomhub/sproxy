@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -280,7 +282,7 @@ func TestWebDAVFS_WriteRead(t *testing.T) {
 	fs := newClient(t, ts.URL)
 
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "dir/file.txt", strings.NewReader("hello webdav"), 12, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "dir/file.txt", strings.NewReader("hello webdav"), 12, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "dir/file.txt")
@@ -477,7 +479,7 @@ func TestWebDAVFS_Auth_Bearer(t *testing.T) {
 	fs := newClient(t, ts.URL, WithBearerToken("tok-123"))
 
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "tok.txt", strings.NewReader("t"), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "tok.txt", strings.NewReader("t"), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	srv.mu.Lock()
@@ -496,7 +498,7 @@ func TestWebDAVFS_PathJoin(t *testing.T) {
 	fs := newClient(t, ts.URL+"/remote.php/webdav")
 
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "nested/deep/file.txt", strings.NewReader("x"), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "nested/deep/file.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	srv.mu.Lock()

@@ -33,11 +33,11 @@ type writeCountingFS struct {
 	writes []string
 }
 
-func (w *writeCountingFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (w *writeCountingFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	w.mu.Lock()
 	w.writes = append(w.writes, p)
 	w.mu.Unlock()
-	return w.FS.WriteFile(ctx, p, r, size, mtime)
+	return w.FS.WriteFile(ctx, key, p, r, size, mtime)
 }
 
 func (w *writeCountingFS) takeWrites() []string {

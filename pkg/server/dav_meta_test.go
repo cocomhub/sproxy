@@ -119,7 +119,7 @@ func TestDavMetaFS_CapabilityForwardingAndMetaLink(t *testing.T) {
 	}
 
 	// 写面 + Move 重链：先写（生成 sidecar），再 Move → 目标必须有 sidecar、源不得残留。
-	if werr := d.WriteFile(ctx, "a.bin", strings.NewReader("hello"), 5, 0); werr != nil {
+	if werr := d.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", strings.NewReader("hello"), 5, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	if _, oerr := root.Stat(meta.MetaPath("user/a.bin")); oerr != nil {

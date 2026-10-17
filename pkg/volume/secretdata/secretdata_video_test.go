@@ -40,7 +40,7 @@ func TestWriteFile_VideoSelectsKeyframeMode(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	content := data(1000)
-	if err := fs.WriteFile(ctx, "clip.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "clip.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(clip.mp4): %v", err)
 	}
 	e := fs.index["clip.mp4"]
@@ -61,7 +61,7 @@ func TestWriteFile_NonVideoKeepsFixed(t *testing.T) {
 
 	fs := newFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "note.txt", bytes.NewReader(data(500)), 500, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "note.txt", bytes.NewReader(data(500)), 500, 0); err != nil {
 		t.Fatalf("WriteFile(note.txt): %v", err)
 	}
 	e := fs.index["note.txt"]
@@ -79,7 +79,7 @@ func TestWriteFile_NoProviderKeepsFixed(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "clip.mp4", bytes.NewReader(data(600)), 600, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "clip.mp4", bytes.NewReader(data(600)), 600, 0); err != nil {
 		t.Fatalf("WriteFile(clip.mp4 未注册): %v", err)
 	}
 	e := fs.index["clip.mp4"]
@@ -102,7 +102,7 @@ func TestWriteFile_NonMP4ContainerKeepsFixed(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	for _, name := range []string{"clip.mkv", "clip.webm", "clip.avi"} {
-		if err := fs.WriteFile(ctx, name, bytes.NewReader(data(500)), 500, 0); err != nil {
+		if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, name, bytes.NewReader(data(500)), 500, 0); err != nil {
 			t.Fatalf("WriteFile(%s): %v", name, err)
 		}
 		e := fs.index[name]
@@ -130,7 +130,7 @@ func TestWriteFile_ExplicitBlockletModeFixed(t *testing.T) {
 		t.Fatalf("NewFS: %v", err)
 	}
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "clip.mp4", bytes.NewReader(data(500)), 500, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "clip.mp4", bytes.NewReader(data(500)), 500, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["clip.mp4"]
@@ -157,7 +157,7 @@ func TestWriteFile_ExplicitBlockletModeKeyframe(t *testing.T) {
 		t.Fatalf("NewFS: %v", err)
 	}
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "note.txt", bytes.NewReader(data(500)), 500, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "note.txt", bytes.NewReader(data(500)), 500, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["note.txt"]

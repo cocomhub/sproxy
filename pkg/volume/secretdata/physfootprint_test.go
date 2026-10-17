@@ -41,7 +41,7 @@ func physEnv(t *testing.T, opts Options) *SecretdataFS {
 func physWrite(t *testing.T, fs *SecretdataFS, rel string, n int) {
 	t.Helper()
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, rel, bytes.NewReader(bytes.Repeat([]byte("q"), n)), int64(n), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(bytes.Repeat([]byte("q"), n)), int64(n), 0); err != nil {
 		t.Fatalf("WriteFile %s(%d): %v", rel, n, err)
 	}
 }

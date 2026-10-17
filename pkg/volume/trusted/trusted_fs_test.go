@@ -61,8 +61,8 @@ func (p *providerFS) Stat(ctx context.Context, path string) (*syncpkg.Entry, err
 func (p *providerFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 	return p.inner.OpenRead(ctx, path)
 }
-func (p *providerFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
-	return p.inner.WriteFile(ctx, path, r, size, mtime)
+func (p *providerFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, r io.Reader, size, mtime int64) error {
+	return p.inner.WriteFile(ctx, key, path, r, size, mtime)
 }
 func (p *providerFS) Rename(ctx context.Context, from, to string) error {
 	return p.inner.Rename(ctx, from, to)
@@ -86,7 +86,7 @@ func TestWrite_GeneratesMeta(t *testing.T) {
 	tv := Wrap(inner, Options{})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("trusted content 可信内容 "), 200) // ~4KB
-	if err := tv.WriteFile(ctx, "user/dir/a.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/dir/a.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// .meta 落 meta 桶（inner 可见——占配额语义：meta 是底层文件之一）。
@@ -132,7 +132,7 @@ func TestWrite_ExtraCarried(t *testing.T) {
 	tv := Wrap(inner, Options{Extra: map[string]any{"creator": "alice", "email": "a@x.io", "priority": "high"}})
 	ctx := context.Background()
 	data := []byte("extra test")
-	if err := tv.WriteFile(ctx, "e.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "e.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, _ := inner.OpenRead(ctx, meta.MetaPath("e.bin"))
@@ -154,7 +154,7 @@ func TestDelete_RemovesMeta(t *testing.T) {
 	tv := Wrap(inner, Options{})
 	ctx := context.Background()
 	data := []byte("to delete")
-	if err := tv.WriteFile(ctx, "d.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "d.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := tv.Delete(ctx, "d.bin"); err != nil {
@@ -172,7 +172,7 @@ func TestRename_MovesMeta(t *testing.T) {
 	tv := Wrap(inner, Options{})
 	ctx := context.Background()
 	data := []byte("to rename")
-	if err := tv.WriteFile(ctx, "r.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "r.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := tv.Rename(ctx, "r.bin", "sub/r2.bin"); err != nil {
@@ -194,7 +194,7 @@ func TestMetaAlwaysGenerated(t *testing.T) {
 	tv := Wrap(inner, Options{})
 	ctx := context.Background()
 	data := []byte("meta always")
-	if err := tv.WriteFile(ctx, "n.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "n.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if e, err := inner.Stat(ctx, meta.MetaPath("n.bin")); err != nil || e == nil {
@@ -209,7 +209,7 @@ func TestWrite_ZeroByte(t *testing.T) {
 	inner := newInner(t)
 	tv := Wrap(inner, Options{})
 	ctx := context.Background()
-	if err := tv.WriteFile(ctx, "empty.bin", bytes.NewReader(nil), 0, 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "empty.bin", bytes.NewReader(nil), 0, 0); err != nil {
 		t.Fatalf("0 字节文件写入可信卷应成功: %v", err)
 	}
 	e, err := inner.Stat(ctx, "empty.bin")
@@ -252,13 +252,15 @@ type noCapsFS struct{}
 
 var _ syncpkg.FS = (*noCapsFS)(nil)
 
-func (*noCapsFS) ListDir(context.Context, string) ([]syncpkg.Entry, error)         { return nil, nil }
-func (*noCapsFS) Stat(context.Context, string) (*syncpkg.Entry, error)             { return nil, nil }
-func (*noCapsFS) OpenRead(context.Context, string) (io.ReadCloser, error)          { return nil, nil }
-func (*noCapsFS) WriteFile(context.Context, string, io.Reader, int64, int64) error { return nil }
-func (*noCapsFS) Rename(context.Context, string, string) error                     { return nil }
-func (*noCapsFS) Delete(context.Context, string) error                             { return nil }
-func (*noCapsFS) MakeDir(context.Context, string) error                            { return nil }
+func (*noCapsFS) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
+func (*noCapsFS) Stat(context.Context, string) (*syncpkg.Entry, error)     { return nil, nil }
+func (*noCapsFS) OpenRead(context.Context, string) (io.ReadCloser, error)  { return nil, nil }
+func (*noCapsFS) WriteFile(context.Context, syncpkg.LogicalKey, string, io.Reader, int64, int64) error {
+	return nil
+}
+func (*noCapsFS) Rename(context.Context, string, string) error { return nil }
+func (*noCapsFS) Delete(context.Context, string) error         { return nil }
+func (*noCapsFS) MakeDir(context.Context, string) error        { return nil }
 
 // TestMoveCopyLink_MetaLinkage C1 修复：Move/Copy 成功后联动 sidecar（目标带可信
 // meta、源 meta 不孤儿）；Link 复制 sidecar。
@@ -271,7 +273,7 @@ func TestMoveCopyLink_MetaLinkage(t *testing.T) {
 	}
 	ctx := context.Background()
 	data := []byte("meta-linkage")
-	if err := tv.WriteFile(ctx, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if e, err := inner.Stat(ctx, "meta/f.bin.meta"); err != nil || e == nil {
@@ -328,7 +330,7 @@ func TestTrustedVolumeFS_RenameDirMigratesMetaSubtree(t *testing.T) {
 	}
 	for _, rel := range []string{"user/dir/a.bin", "user/dir/sub/b.bin"} {
 		body := []byte("body-" + rel)
-		if err := tv.WriteFile(ctx, rel, bytes.NewReader(body), int64(len(body)), 0); err != nil {
+		if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(body), int64(len(body)), 0); err != nil {
 			t.Fatalf("WriteFile(%s): %v", rel, err)
 		}
 	}
@@ -379,7 +381,7 @@ func (d *metaDirGateFS) MakeDir(_ context.Context, p string) error {
 	d.made[p] = true
 	return nil
 }
-func (d *metaDirGateFS) WriteFile(_ context.Context, p string, _ io.Reader, _ int64, _ int64) error {
+func (d *metaDirGateFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, _ io.Reader, _ int64, _ int64) error {
 	if !d.made[path.Dir(p)] {
 		return errors.New("meta 目录未建: " + path.Dir(p))
 	}
@@ -396,7 +398,7 @@ func TestUpdateMetaExtra_EnsuresMetaDir(t *testing.T) {
 	ctx := context.Background()
 	// 预置合法 sidecar（FileMeta 前置校验需读到它）。
 	sidecar := `{"version":1,"size":0,"total_sha256":"` + strings.Repeat("a", 64) + `","chunk_size":1,"chunks":null}`
-	if err := inner.WriteFile(ctx, "meta/x.bin.meta", strings.NewReader(sidecar), int64(len(sidecar)), 0); err != nil {
+	if err := inner.WriteFile(ctx, syncpkg.LogicalKey{}, "meta/x.bin.meta", strings.NewReader(sidecar), int64(len(sidecar)), 0); err != nil {
 		t.Fatalf("预置 sidecar: %v", err)
 	}
 	gate := &metaDirGateFS{inner: inner, made: map[string]bool{}}
@@ -450,7 +452,7 @@ func TestWrite_SizeDeclaredWrong_SelfHeals(t *testing.T) {
 	data := bytes.Repeat([]byte("m1-selfheal "), 100) // ~1.1KB
 	// 声明 size 远小于实写（如 Content-Length 撒谎/传输截断误报）——WriteFile 应自愈
 	// 产出基于实写的正确 meta，而非返回错误。
-	if err := tv.WriteFile(ctx, "user/s.bin", bytes.NewReader(data), 10, 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/s.bin", bytes.NewReader(data), 10, 0); err != nil {
 		t.Fatalf("size 声明失真应自愈（产出实写 meta 而非报错）: %v", err)
 	}
 	// 主文件实写完整。
@@ -487,7 +489,7 @@ func TestWrite_ChunkSizeFloor(t *testing.T) {
 	tv := Wrap(inner, Options{ChunkSize: 1}) // 1B 分块（恶意配置）
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("floor-chunk-"), 1000) // ~12KB
-	if err := tv.WriteFile(ctx, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, rerr := inner.OpenRead(ctx, "meta/f.bin.meta")
@@ -522,7 +524,7 @@ func TestUpdateMetaExtra_C5(t *testing.T) {
 	}
 	ctx := context.Background()
 	data := []byte("update-meta-extra-c5")
-	if err := tv.WriteFile(ctx, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/f.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// 一致 → 更新成功，Extra 写入。
@@ -537,7 +539,7 @@ func TestUpdateMetaExtra_C5(t *testing.T) {
 		t.Fatalf("Extra 应有 source_integrity=damaged, got %v", fm.Extra)
 	}
 	// 篡改主文件（内容变、meta 未变）→ 更新跳过（不覆盖 meta）。
-	if err := inner.WriteFile(ctx, "user/f.bin", bytes.NewReader(append([]byte("tampered-"), data...)), int64(len(data))+8, 0); err != nil {
+	if err := inner.WriteFile(ctx, syncpkg.LogicalKey{}, "user/f.bin", bytes.NewReader(append([]byte("tampered-"), data...)), int64(len(data))+8, 0); err != nil {
 		t.Fatalf("篡改写入: %v", err)
 	}
 	if err := tv.UpdateMetaExtra(ctx, "user/f.bin", map[string]any{"k": "v"}); err == nil {
@@ -608,7 +610,7 @@ func TestTrustedVolumeFS_RenameStaleTargetMetaInvalidated(t *testing.T) {
 	inner := newInner(t)
 	tv := Wrap(inner, Options{}).(*TrustedVolumeFS)
 	ctx := context.Background()
-	if err := tv.WriteFile(ctx, "user/t.bin", strings.NewReader("old-target"), 10, 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/t.bin", strings.NewReader("old-target"), 10, 0); err != nil {
 		t.Fatal(err)
 	}
 	// 前置：目标应有 sidecar（**必须关闭句柄**：Windows 上未关句柄会让后续
@@ -619,7 +621,7 @@ func TestTrustedVolumeFS_RenameStaleTargetMetaInvalidated(t *testing.T) {
 		_ = rc.Close()
 	}
 	// 源**无 sidecar**（直接经 inner 写，模拟旁路写/存量数据）。
-	if err := inner.WriteFile(ctx, "user/s.bin", strings.NewReader("new"), 3, 0); err != nil {
+	if err := inner.WriteFile(ctx, syncpkg.LogicalKey{}, "user/s.bin", strings.NewReader("new"), 3, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tv.Rename(ctx, "user/s.bin", "user/t.bin"); err != nil {
@@ -637,10 +639,10 @@ func TestTrustedVolumeFS_CopyStaleTargetMetaInvalidated(t *testing.T) {
 	inner := newInner(t)
 	tv := Wrap(inner, Options{}).(*TrustedVolumeFS)
 	ctx := context.Background()
-	if err := tv.WriteFile(ctx, "user/t.bin", strings.NewReader("old-target"), 10, 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/t.bin", strings.NewReader("old-target"), 10, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := inner.WriteFile(ctx, "user/s.bin", strings.NewReader("new"), 3, 0); err != nil {
+	if err := inner.WriteFile(ctx, syncpkg.LogicalKey{}, "user/s.bin", strings.NewReader("new"), 3, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tv.Copy(ctx, "user/s.bin", "user/t.bin"); err != nil {
@@ -658,11 +660,11 @@ func TestTrustedVolumeFS_CopyStaleTargetMetaInvalidated(t *testing.T) {
 // failMetaFS 主文件写成功、meta 路径写失败（注入 meta 落盘故障）。
 type failMetaFS struct{ *syncpkg.LocalFS }
 
-func (f *failMetaFS) WriteFile(ctx context.Context, rel string, r io.Reader, size, mtime int64) error {
+func (f *failMetaFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, rel string, r io.Reader, size, mtime int64) error {
 	if rel == "meta" || strings.HasPrefix(rel, "meta/") || strings.Contains(rel, "/meta/") {
 		return errors.New("injected: meta write failure")
 	}
-	return f.LocalFS.WriteFile(ctx, rel, r, size, mtime)
+	return f.LocalFS.WriteFile(ctx, key, rel, r, size, mtime)
 }
 
 // TestTrustedVolumeFS_MetaWriteFailureKeepsMainFile F3：meta 落盘失败不得失败主写，
@@ -672,16 +674,16 @@ func TestTrustedVolumeFS_MetaWriteFailureKeepsMainFile(t *testing.T) {
 	inner := newInner(t)
 	tv := Wrap(inner, Options{}).(*TrustedVolumeFS)
 	ctx := context.Background()
-	if err := tv.WriteFile(ctx, "user/a.bin", strings.NewReader("v1-content"), 10, 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/a.bin", strings.NewReader("v1-content"), 10, 0); err != nil {
 		t.Fatal(err)
 	}
 	stale := strings.Repeat("s", 64)
-	if err := inner.WriteFile(ctx, meta.MetaPath("user/a.bin"), strings.NewReader(stale), int64(len(stale)), 0); err != nil {
+	if err := inner.WriteFile(ctx, syncpkg.LogicalKey{}, meta.MetaPath("user/a.bin"), strings.NewReader(stale), int64(len(stale)), 0); err != nil {
 		t.Fatal(err)
 	}
 	fail := &failMetaFS{LocalFS: inner}
 	tvF := Wrap(fail, Options{}).(*TrustedVolumeFS)
-	if err := tvF.WriteFile(ctx, "user/a.bin", strings.NewReader("v2-content"), 10, 0); err != nil {
+	if err := tvF.WriteFile(ctx, syncpkg.LogicalKey{}, "user/a.bin", strings.NewReader("v2-content"), 10, 0); err != nil {
 		t.Fatalf("meta 失败不得失败主写: %v", err)
 	}
 	// 主文件已是新内容。
@@ -717,7 +719,7 @@ func TestTrustedVolumeFS_IsLocalBranch_RemoteSkipsReadback(t *testing.T) {
 	}
 	ctx := context.Background()
 	data := []byte("remote-content")
-	if err := tv.WriteFile(ctx, "user/r.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/r.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatal(err)
 	}
 	rc, err := inner.OpenRead(ctx, meta.MetaPath("user/r.bin"))
@@ -782,7 +784,7 @@ func TestTrustedVolumeFS_VerifyWriteMetaRemote(t *testing.T) {
 	// ① size 不一致（远端静默截断/写错对象）→ sidecar 必须被失效。
 	inner1 := newInner(t)
 	tv1 := Wrap(&remoteVerifyFS{LocalFS: inner1, sizeDelta: -7}, Options{}).(*TrustedVolumeFS)
-	if err := tv1.WriteFile(ctx, "user/a.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+	if err := tv1.WriteFile(ctx, syncpkg.LogicalKey{}, "user/a.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if e, err := inner1.Stat(ctx, meta.MetaPath("user/a.bin")); err == nil && e != nil {
@@ -792,7 +794,7 @@ func TestTrustedVolumeFS_VerifyWriteMetaRemote(t *testing.T) {
 	// ② 末块内容不一致（尾部静默损坏）→ sidecar 必须被失效。
 	inner2 := newInner(t)
 	tv2 := Wrap(&remoteVerifyFS{LocalFS: inner2, corruptLast: true}, Options{}).(*TrustedVolumeFS)
-	if err := tv2.WriteFile(ctx, "user/b.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+	if err := tv2.WriteFile(ctx, syncpkg.LogicalKey{}, "user/b.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if e, err := inner2.Stat(ctx, meta.MetaPath("user/b.bin")); err == nil && e != nil {
@@ -802,7 +804,7 @@ func TestTrustedVolumeFS_VerifyWriteMetaRemote(t *testing.T) {
 	// ③ 一致（正常远端）→ sidecar 必须保留（不误伤）。
 	inner3 := newInner(t)
 	tv3 := Wrap(&remoteVerifyFS{LocalFS: inner3}, Options{}).(*TrustedVolumeFS)
-	if err := tv3.WriteFile(ctx, "user/c.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+	if err := tv3.WriteFile(ctx, syncpkg.LogicalKey{}, "user/c.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if e, err := inner3.Stat(ctx, meta.MetaPath("user/c.bin")); err != nil || e == nil {
@@ -836,14 +838,14 @@ func TestTrustedVolumeFS_VerifyWriteMetaLocalLightweight(t *testing.T) {
 	mrel := meta.MetaPath(rel)
 	writeMain := func(data []byte) {
 		t.Helper()
-		if err := inner.WriteFile(ctx, rel, bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		if err := inner.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(data), int64(len(data)), 0); err != nil {
 			t.Fatal(err)
 		}
 	}
 	writeSidecar := func() {
 		t.Helper()
 		_ = inner.Delete(ctx, mrel)
-		if err := inner.WriteFile(ctx, mrel, bytes.NewReader([]byte(`{"version":1}`)), 14, 0); err != nil {
+		if err := inner.WriteFile(ctx, syncpkg.LogicalKey{}, mrel, bytes.NewReader([]byte(`{"version":1}`)), 14, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -891,7 +893,7 @@ type seekSpyFS struct {
 	sawMain  atomic.Bool
 }
 
-func (s *seekSpyFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (s *seekSpyFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	if !strings.HasSuffix(p, ".meta") {
 		_, ok := r.(io.Seeker)
 		s.seekable.Store(ok)
@@ -900,10 +902,10 @@ func (s *seekSpyFS) WriteFile(ctx context.Context, p string, r io.Reader, size, 
 			buf := make([]byte, size)
 			_, _ = ra.ReadAt(buf, 0) // 第一遍（模拟哈希 pass）
 			_, _ = ra.ReadAt(buf, 0) // 第二遍（模拟分块 pass）
-			return s.LocalFS.WriteFile(ctx, p, bytes.NewReader(buf), size, mtime)
+			return s.LocalFS.WriteFile(ctx, key, p, bytes.NewReader(buf), size, mtime)
 		}
 	}
-	return s.LocalFS.WriteFile(ctx, p, r, size, mtime)
+	return s.LocalFS.WriteFile(ctx, key, p, r, size, mtime)
 }
 
 // TestWrite_SeekableSourcePreservesSeekAndMeta：可 seek 源 → inner 收到**可 seek** reader
@@ -914,7 +916,7 @@ func TestWrite_SeekableSourcePreservesSeekAndMeta(t *testing.T) {
 	tv := Wrap(inner, Options{})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("seekable content 可流式 "), 300)
-	if err := tv.WriteFile(ctx, "user/s.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/s.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if !inner.sawMain.Load() {
@@ -946,7 +948,7 @@ func TestWrite_NonSeekableSourceFallsBackToTee(t *testing.T) {
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("nonseek 纯流 "), 300)
 	plain := struct{ io.Reader }{bytes.NewReader(data)}
-	if err := tv.WriteFile(ctx, "user/n.bin", plain, int64(len(data)), 0); err != nil {
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/n.bin", plain, int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if inner.seekable.Load() {
@@ -990,7 +992,7 @@ func TestUpdateMetaExtra_RemoteBoundedPrecheck(t *testing.T) {
 	// ① 一致 → 更新成功（远端有界前置判据不得误杀正常路径）。
 	inner1 := newInner(t)
 	tv1 := Wrap(&remoteVerifyFS{LocalFS: inner1}, Options{}).(*TrustedVolumeFS)
-	if err := tv1.WriteFile(ctx, "user/a.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+	if err := tv1.WriteFile(ctx, syncpkg.LogicalKey{}, "user/a.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := tv1.UpdateMetaExtra(ctx, "user/a.bin", map[string]any{"source_integrity": "damaged"}); err != nil {
@@ -1000,11 +1002,11 @@ func TestUpdateMetaExtra_RemoteBoundedPrecheck(t *testing.T) {
 	// ② size 错位（并发覆盖/截断）→ 拒绝更新，且**未动 meta**（区分于写后失效）。
 	inner2 := newInner(t)
 	tv2 := Wrap(&remoteVerifyFS{LocalFS: inner2}, Options{}).(*TrustedVolumeFS)
-	if err := tv2.WriteFile(ctx, "user/b.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+	if err := tv2.WriteFile(ctx, syncpkg.LogicalKey{}, "user/b.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
 		t.Fatal(err)
 	}
 	truncated := body[:len(body)-5]
-	if err := inner2.WriteFile(ctx, "user/b.bin", bytes.NewReader(truncated), int64(len(truncated)), 0); err != nil {
+	if err := inner2.WriteFile(ctx, syncpkg.LogicalKey{}, "user/b.bin", bytes.NewReader(truncated), int64(len(truncated)), 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tv2.UpdateMetaExtra(ctx, "user/b.bin", map[string]any{"k": "v"}); err == nil {
@@ -1017,12 +1019,12 @@ func TestUpdateMetaExtra_RemoteBoundedPrecheck(t *testing.T) {
 	// ③ 同长度、末块被改写（size 判据不可见）→ 末块 sha256 判据必须拒绝。
 	inner3 := newInner(t)
 	tv3 := Wrap(&remoteVerifyFS{LocalFS: inner3}, Options{}).(*TrustedVolumeFS)
-	if err := tv3.WriteFile(ctx, "user/c.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
+	if err := tv3.WriteFile(ctx, syncpkg.LogicalKey{}, "user/c.bin", bytes.NewReader(body), int64(len(body)), 0); err != nil {
 		t.Fatal(err)
 	}
 	tampered := append([]byte(nil), body...)
 	tampered[len(tampered)-1] ^= 0xFF
-	if err := inner3.WriteFile(ctx, "user/c.bin", bytes.NewReader(tampered), int64(len(tampered)), 0); err != nil {
+	if err := inner3.WriteFile(ctx, syncpkg.LogicalKey{}, "user/c.bin", bytes.NewReader(tampered), int64(len(tampered)), 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tv3.UpdateMetaExtra(ctx, "user/c.bin", map[string]any{"k": "v"}); err == nil {

@@ -386,14 +386,14 @@ type gateFS struct {
 	once       sync.Once
 }
 
-func (g *gateFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (g *gateFS) WriteFile(ctx context.Context, key LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	g.once.Do(func() { close(g.firstWrite) })
 	select {
 	case <-g.release:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return g.FS.WriteFile(ctx, p, r, size, mtime)
+	return g.FS.WriteFile(ctx, LogicalKey{}, p, r, size, mtime)
 }
 
 func TestEngineSync_ContextCancelMidSync(t *testing.T) {
@@ -440,11 +440,11 @@ type failWriteFS struct {
 	failPath string
 }
 
-func (f *failWriteFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (f *failWriteFS) WriteFile(ctx context.Context, key LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	if p == f.failPath {
 		return errors.New("注入的写入失败")
 	}
-	return f.FS.WriteFile(ctx, p, r, size, mtime)
+	return f.FS.WriteFile(ctx, LogicalKey{}, p, r, size, mtime)
 }
 
 func TestEngineSync_ContinueOnError(t *testing.T) {

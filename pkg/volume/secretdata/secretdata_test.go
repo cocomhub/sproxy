@@ -73,7 +73,7 @@ func TestWriteReadRoundtrip(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	content := data(1000) // 跨多块
-	if err := fs.WriteFile(ctx, "movie.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "movie.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "movie.mp4")
@@ -94,7 +94,7 @@ func TestWrite_ThenStatAndList(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "a.bin", bytes.NewReader(data(200)), 200, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", bytes.NewReader(data(200)), 200, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	ent, err := fs.Stat(ctx, "a.bin")
@@ -248,7 +248,7 @@ func TestDelete(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "del.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "del.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := fs.Delete(ctx, "del.bin"); err != nil {
@@ -283,7 +283,7 @@ func TestOpenRangeRead(t *testing.T) {
 	}
 	ctx := context.Background()
 	content := data(300)
-	if err := fs.WriteFile(ctx, "r.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "r.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -344,7 +344,7 @@ func TestLoadIndexFromExistingVolume(t *testing.T) {
 	fs := newFS(t)
 	ctx := context.Background()
 	content := data(1000)
-	if err := fs.WriteFile(ctx, "persisted.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "persisted.mp4", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// 用同一底层 FS 新建一个 FS（模拟挂载旧卷）→ 应能从容器目录 meta → path、文件 meta → name
@@ -372,7 +372,7 @@ func TestWrongSecretFails(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "w.bin", bytes.NewReader(data(1000)), 1000, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "w.bin", bytes.NewReader(data(1000)), 1000, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// 用错误密钥建 FS 读（索引已载入但解密失败）。
@@ -388,7 +388,7 @@ func TestWrongSecretFails(t *testing.T) {
 // writeContent 写定长内容文件（断言 helper）。
 func writeContent(t *testing.T, fs *SecretdataFS, ctx context.Context, name string, n int) {
 	t.Helper()
-	if err := fs.WriteFile(ctx, name, bytes.NewReader(data(n)), int64(n), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, name, bytes.NewReader(data(n)), int64(n), 0); err != nil {
 		t.Fatalf("WriteFile %s: %v", name, err)
 	}
 }
@@ -1251,7 +1251,7 @@ func TestLoadIndex_LargeVolume(t *testing.T) {
 			sem <- struct{}{} // 写卷并发上界（setup 阶段）
 			defer func() { <-sem }()
 			name := fmt.Sprintf("dir%d/f%d.bin", i%8, i)
-			if err := fs.WriteFile(ctx, name, bytes.NewReader(data(40+i)), int64(40+i), 0); err != nil {
+			if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, name, bytes.NewReader(data(40+i)), int64(40+i), 0); err != nil {
 				t.Errorf("WriteFile %s: %v", name, err)
 			}
 		}(i)
@@ -1340,8 +1340,8 @@ func (f *faultListFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error
 func (f *faultListFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return f.wrap.OpenRead(ctx, p)
 }
-func (f *faultListFS) WriteFile(ctx context.Context, p string, r io.Reader, size int64, mtime int64) error {
-	return f.wrap.WriteFile(ctx, p, r, size, mtime)
+func (f *faultListFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size int64, mtime int64) error {
+	return f.wrap.WriteFile(ctx, key, p, r, size, mtime)
 }
 func (f *faultListFS) Rename(ctx context.Context, from, to string) error {
 	return f.wrap.Rename(ctx, from, to)
@@ -1369,14 +1369,14 @@ func TestWriteFile_MaxFileBytesCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 超过上限 → ErrMaxFileBytes（未落盘）。
-	if werr := fs.WriteFile(context.Background(), "big.bin", bytes.NewReader(data(5000)), 5000, 0); !errors.Is(werr, ErrMaxFileBytes) {
+	if werr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "big.bin", bytes.NewReader(data(5000)), 5000, 0); !errors.Is(werr, ErrMaxFileBytes) {
 		t.Fatalf("超限应返回 ErrMaxFileBytes，got %v", werr)
 	}
 	if e, statErr := fs.Stat(context.Background(), "big.bin"); statErr != nil || e != nil {
 		t.Error("超限文件不应落盘（index 无条目）")
 	}
 	// 未超限正常写入 + 读回。
-	if werr := fs.WriteFile(context.Background(), "ok.bin", bytes.NewReader(data(300)), 300, 0); werr != nil {
+	if werr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "ok.bin", bytes.NewReader(data(300)), 300, 0); werr != nil {
 		t.Fatalf("未超限写失败: %v", werr)
 	}
 	rc, err := fs.OpenRead(context.Background(), "ok.bin")
@@ -1397,7 +1397,7 @@ func TestWriteFile_EmptyFileFails(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "empty.txt", bytes.NewReader(nil), 0, 0); err == nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "empty.txt", bytes.NewReader(nil), 0, 0); err == nil {
 		t.Fatal("空文件写入应报错（fail-closed），却成功")
 	}
 	if e, _ := fs.Stat(ctx, "empty.txt"); e != nil {
@@ -1434,7 +1434,7 @@ func TestWriteFile_LongPathAndBasename_Roundtrip(t *testing.T) {
 	longName := strings.Repeat("n", 300) + ".bin" // >254 字节 basename
 	deep := "d0/d1/d2/d3/d4/d5/d6/d7/" + longName // 8 层嵌套
 	content := data(500)
-	if err := fs.WriteFile(ctx, deep, bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, deep, bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("超长路径 WriteFile: %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, deep)
@@ -1481,14 +1481,14 @@ func TestConcurrentReadWriteDelete_Stress(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			content := data(60 + i)
-			if err := fs.WriteFile(ctx, fmt.Sprintf("keep/f%d.bin", i), bytes.NewReader(content), int64(len(content)), 0); err != nil {
+			if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, fmt.Sprintf("keep/f%d.bin", i), bytes.NewReader(content), int64(len(content)), 0); err != nil {
 				t.Errorf("keep 写: %v", err)
 			}
 		}(i)
 		go func(i int) {
 			defer wg.Done()
 			content := data(80 + i)
-			if err := fs.WriteFile(ctx, fmt.Sprintf("del/f%d.bin", i), bytes.NewReader(content), int64(len(content)), 0); err != nil {
+			if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, fmt.Sprintf("del/f%d.bin", i), bytes.NewReader(content), int64(len(content)), 0); err != nil {
 				t.Errorf("del 写: %v", err)
 			}
 		}(i)
@@ -1820,7 +1820,7 @@ func TestLoadIndex_LoadGate_BoundedConcurrency(t *testing.T) {
 	const n = 3 // 少量文件即可覆盖多容器/多 meta 并发派生路径
 	for i := range n {
 		content := data(100 + i)
-		if werr := fs.WriteFile(ctx, fmt.Sprintf("dir%d/f%d.bin", i%2, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+		if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, fmt.Sprintf("dir%d/f%d.bin", i%2, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
 			t.Fatalf("WriteFile: %v", werr)
 		}
 	}
@@ -1863,7 +1863,7 @@ func TestLoadIndex_LoadGate_PeakMemoryWithinBudget(t *testing.T) {
 	const n = 4
 	for i := range n {
 		content := data(200 + i)
-		if werr := fs.WriteFile(ctx, fmt.Sprintf("dir%d/f%d.bin", i, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
+		if werr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, fmt.Sprintf("dir%d/f%d.bin", i, i), bytes.NewReader(content), int64(len(content)), 0); werr != nil {
 			t.Fatalf("WriteFile: %v", werr)
 		}
 	}
@@ -1916,7 +1916,7 @@ func TestSecretdataBackend_OpenURL(t *testing.T) {
 	}
 	b := &backend{fs: sfs}
 	payload := []byte("encrypted-content-123")
-	if werr := sfs.WriteFile(context.Background(), "pikpak/t1/movie.mp4", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
+	if werr := sfs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "pikpak/t1/movie.mp4", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
 		t.Fatal(werr)
 	}
 	rc, rerr := b.OpenURL(context.Background(), "secretdata://myvault/pikpak/t1/movie.mp4")
@@ -2099,7 +2099,7 @@ func TestSecretdata_RemoveDir(t *testing.T) {
 	if err := fs.MakeDir(ctx, "keep"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.WriteFile(ctx, "keep/f.bin", bytes.NewReader([]byte("payload")), 7, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "keep/f.bin", bytes.NewReader([]byte("payload")), 7, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := fs.RemoveDir(ctx, "keep"); err == nil {

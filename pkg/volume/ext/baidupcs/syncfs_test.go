@@ -111,7 +111,7 @@ func TestStorageFS_Stat_Missing(t *testing.T) {
 func TestStorageFS_WriteRead(t *testing.T) {
 	t.Parallel()
 	fs := newTestStorageFS(t)
-	if err := fs.WriteFile(context.Background(), "f.txt", strings.NewReader("data"), 4, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "f.txt", strings.NewReader("data"), 4, 0); err != nil {
 		t.Fatal(err)
 	}
 	rc, err := fs.OpenRead(context.Background(), "f.txt")
@@ -131,7 +131,7 @@ func TestStorageFS_WriteRead(t *testing.T) {
 func TestStorageFS_Delete(t *testing.T) {
 	t.Parallel()
 	fs := newTestStorageFS(t)
-	if err := fs.WriteFile(context.Background(), "f.txt", strings.NewReader("data"), 4, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "f.txt", strings.NewReader("data"), 4, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := fs.Delete(context.Background(), "f.txt"); err != nil {
@@ -146,7 +146,7 @@ func TestStorageFS_Delete(t *testing.T) {
 func TestStorageFS_Rename(t *testing.T) {
 	t.Parallel()
 	fs := newTestStorageFS(t)
-	if err := fs.WriteFile(context.Background(), "from.txt", strings.NewReader("data"), 4, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "from.txt", strings.NewReader("data"), 4, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := fs.Rename(context.Background(), "from.txt", "to.txt"); err != nil {
@@ -198,12 +198,12 @@ func TestStorageFS_WriteFile_RejectsTraversalSegments(t *testing.T) {
 	fs := newTestStorageFS(t)
 	ctx := context.Background()
 	for _, bad := range []string{"../x", "a/../b", "docs/../../etc/passwd", "a//b", "./a", "/"} {
-		if err := fs.WriteFile(ctx, bad, strings.NewReader("x"), 1, 0); err == nil {
+		if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, bad, strings.NewReader("x"), 1, 0); err == nil {
 			t.Errorf("路径 %q 应被拒绝（逐段校验）", bad)
 		}
 	}
 	// 合法路径不受影响。
-	if err := fs.WriteFile(ctx, "docs/a.txt", strings.NewReader("x"), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "docs/a.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("合法路径不应被拒: %v", err)
 	}
 }
@@ -241,7 +241,7 @@ func TestStorageFS_WriteFile_ReusesCtxStagedPath(t *testing.T) {
 	}
 	ctx := syncpkg.WithStagedLocalPath(context.Background(), staged)
 	// 传入的 reader 在复用分支必须**不被消费**（staging 已完成）。
-	if err := fs.WriteFile(ctx, "docs/a.bin", strings.NewReader("SHOULD-NOT-BE-USED"), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "docs/a.bin", strings.NewReader("SHOULD-NOT-BE-USED"), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(复用): %v", err)
 	}
 	if got := st.files["docs/a.bin"].data; string(got) != string(content) {
@@ -264,7 +264,7 @@ func TestStorageFS_WriteFile_SingleLocalStaging(t *testing.T) {
 	st := newFakeStorage()
 	fs := &StorageFS{s: st, temp: t.TempDir()}
 	content := strings.Repeat("single-stage-", 64)
-	if err := fs.WriteFile(context.Background(), "docs/b.bin", strings.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "docs/b.bin", strings.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if got := string(st.files["docs/b.bin"].data); got != content {

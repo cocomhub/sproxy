@@ -201,7 +201,7 @@ func TestApplyEnclosureSeals_ExternalSourceSealedViaBackendFS(t *testing.T) {
 	be := acc.external["ext"]
 	view := be.FS()
 	// 写：恒拒（可归因 ErrSealed）——覆盖「直连外部卷后端」的十余处调用者。
-	if werr := view.WriteFile(ctx, "alice/user/vault/x.bin", strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+	if werr := view.WriteFile(ctx, syncpkg.LogicalKey{}, "alice/user/vault/x.bin", strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
 		t.Fatalf("外部卷封印路径写入必须被拒（ErrSealed）, got %v", werr)
 	}
 	// 读：hidden ⇒ 同时可归因 fs.ErrNotExist 与 ErrSealed。
@@ -209,7 +209,7 @@ func TestApplyEnclosureSeals_ExternalSourceSealedViaBackendFS(t *testing.T) {
 		t.Fatalf("外部卷封印路径读应按「不存在」且可归因, got %v", rerr)
 	}
 	// 列举过滤：hidden 下不泄漏封装布局。
-	if err := raw.WriteFile(ctx, "alice/user/vault/real.bin", strings.NewReader("payload"), 7, 0); err != nil {
+	if err := raw.WriteFile(ctx, syncpkg.LogicalKey{}, "alice/user/vault/real.bin", strings.NewReader("payload"), 7, 0); err != nil {
 		t.Fatal(err)
 	}
 	entries, lerr := view.ListDir(ctx, "alice/user")
@@ -225,12 +225,12 @@ func TestApplyEnclosureSeals_ExternalSourceSealedViaBackendFS(t *testing.T) {
 	// 的同名子树下 ⇒ 这些桶**同样必须被封印**（否则客户端可直连源卷改写 sidecar/版本，绕过服务端）。
 	for _, b := range storage.ReservedBucketNames() {
 		key := "alice/" + b + "/vault/x.bin"
-		if werr := view.WriteFile(ctx, key, strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+		if werr := view.WriteFile(ctx, syncpkg.LogicalKey{}, key, strings.NewReader("p"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
 			t.Fatalf("桶 %s 的足迹子路径直连写入必须被拒（否则可绕过封装卷）, got %v", b, werr)
 		}
 	}
 	// 未封印路径不受影响（零回归）。
-	if werr := view.WriteFile(ctx, "alice/user/other/ok.bin", strings.NewReader("ok"), 2, 0); werr != nil {
+	if werr := view.WriteFile(ctx, syncpkg.LogicalKey{}, "alice/user/other/ok.bin", strings.NewReader("ok"), 2, 0); werr != nil {
 		t.Fatalf("同卷未封印路径写应放行, got %v", werr)
 	}
 	// 特权视图：封装卷自身仍能读写被封区间（只剥封印层 ⇒ 源卷配额/可信装饰器保留）。
@@ -238,7 +238,7 @@ func TestApplyEnclosureSeals_ExternalSourceSealedViaBackendFS(t *testing.T) {
 	if priv == nil {
 		t.Fatal("未封印特权视图应可用")
 	}
-	if werr := priv.WriteFile(ctx, "alice/user/vault/by-enclosure.bin", strings.NewReader("plain"), 5, 0); werr != nil {
+	if werr := priv.WriteFile(ctx, syncpkg.LogicalKey{}, "alice/user/vault/by-enclosure.bin", strings.NewReader("plain"), 5, 0); werr != nil {
 		t.Fatalf("特权视图必须能写入被封区间, got %v", werr)
 	}
 	if _, serr := raw.Stat(ctx, "alice/user/vault/by-enclosure.bin"); serr != nil {
@@ -268,7 +268,7 @@ func TestApplyEnclosureSeals_ExternalWholeVolume(t *testing.T) {
 	}
 	view := acc.external["ext"].FS()
 	for _, p := range []string{"alice/user/a.bin", "meta/x.meta", "deep/nested/p.bin"} {
-		if werr := view.WriteFile(ctx, p, strings.NewReader("x"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
+		if werr := view.WriteFile(ctx, syncpkg.LogicalKey{}, p, strings.NewReader("x"), 1, 0); !errors.Is(werr, storage.ErrSealed) {
 			t.Fatalf("整卷封印下 %s 写入必须被拒, got %v", p, werr)
 		}
 	}

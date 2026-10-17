@@ -57,7 +57,7 @@ func (m *memFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error
 	}
 	return io.NopCloser(strings.NewReader(string(b))), nil
 }
-func (m *memFS) WriteFile(ctx context.Context, path string, r io.Reader, size int64, mtime int64) error {
+func (m *memFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, r io.Reader, size int64, mtime int64) error {
 	if m.writeFn != nil {
 		if err := m.writeFn(path); err != nil {
 			return err
@@ -77,7 +77,7 @@ func (m *memFS) WriteIfAbsent(ctx context.Context, path string, r io.Reader, siz
 	if _, exists := m.files[path]; exists {
 		return false, nil
 	}
-	if err := m.WriteFile(ctx, path, r, size, mtime); err != nil {
+	if err := m.WriteFile(ctx, syncpkg.LogicalKey{}, path, r, size, mtime); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -758,8 +758,8 @@ func (b *baseCapableFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, err
 func (b *baseCapableFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return b.inner.OpenRead(ctx, p)
 }
-func (b *baseCapableFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return b.inner.WriteFile(ctx, p, r, sz, mt)
+func (b *baseCapableFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return b.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (b *baseCapableFS) Rename(ctx context.Context, f, t string) error {
 	return b.inner.Rename(ctx, f, t)
@@ -781,8 +781,8 @@ func (q *nilNilFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
 func (q *nilNilFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return q.inner.OpenRead(ctx, p)
 }
-func (q *nilNilFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return q.inner.WriteFile(ctx, p, r, sz, mt)
+func (q *nilNilFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return q.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (q *nilNilFS) Rename(ctx context.Context, f, t string) error { return q.inner.Rename(ctx, f, t) }
 func (q *nilNilFS) Delete(ctx context.Context, p string) error    { return q.inner.Delete(ctx, p) }
@@ -940,8 +940,8 @@ func (q *quotaDenyFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error
 func (q *quotaDenyFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return q.inner.OpenRead(ctx, p)
 }
-func (q *quotaDenyFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return q.inner.WriteFile(ctx, p, r, sz, mt)
+func (q *quotaDenyFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return q.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (q *quotaDenyFS) Rename(ctx context.Context, f, t string) error {
 	return q.inner.Rename(ctx, f, t)
@@ -1148,8 +1148,8 @@ func (l *localVolumeFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, err
 func (l *localVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return l.inner.OpenRead(ctx, p)
 }
-func (l *localVolumeFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return l.inner.WriteFile(ctx, p, r, sz, mt)
+func (l *localVolumeFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return l.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (l *localVolumeFS) Rename(ctx context.Context, f, t string) error {
 	return l.inner.Rename(ctx, f, t)
@@ -1201,8 +1201,8 @@ func (n *noCapMemFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error)
 func (n *noCapMemFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return n.inner.OpenRead(ctx, p)
 }
-func (n *noCapMemFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return n.inner.WriteFile(ctx, p, r, sz, mt)
+func (n *noCapMemFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return n.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (n *noCapMemFS) Rename(ctx context.Context, f, t string) error { return n.inner.Rename(ctx, f, t) }
 func (n *noCapMemFS) Delete(ctx context.Context, p string) error    { return n.inner.Delete(ctx, p) }
@@ -1302,7 +1302,7 @@ func (s *staticMetaFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, erro
 func (s *staticMetaFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(s.data)), nil
 }
-func (s *staticMetaFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+func (s *staticMetaFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
 	b, _ := io.ReadAll(r)
 	s.data = b
 	return nil
@@ -1499,8 +1499,8 @@ func (e *exemptFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
 func (e *exemptFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return e.inner.OpenRead(ctx, p)
 }
-func (e *exemptFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return e.inner.WriteFile(ctx, p, r, sz, mt)
+func (e *exemptFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return e.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (e *exemptFS) Rename(ctx context.Context, f, t string) error { return e.inner.Rename(ctx, f, t) }
 func (e *exemptFS) Delete(ctx context.Context, p string) error    { return e.inner.Delete(ctx, p) }
@@ -1524,8 +1524,8 @@ func (c *capableFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) 
 func (c *capableFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return c.inner.OpenRead(ctx, p)
 }
-func (c *capableFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return c.inner.WriteFile(ctx, p, r, sz, mt)
+func (c *capableFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return c.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (c *capableFS) Rename(ctx context.Context, f, t string) error { return c.inner.Rename(ctx, f, t) }
 func (c *capableFS) Delete(ctx context.Context, p string) error    { return c.inner.Delete(ctx, p) }

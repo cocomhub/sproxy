@@ -114,7 +114,7 @@ func TestAttachAll_BuildsBackendWithPrefixView(t *testing.T) {
 		t.Fatal("wrapper 应收到源视图")
 	}
 	// 经视图写入 → 必须落在 <dir>/base/ 下（证明前缀已生效）。
-	if werr := view.WriteFile(context.Background(), "x.bin", bytes.NewReader([]byte("v")), 1, 0); werr != nil {
+	if werr := view.WriteFile(context.Background(), syncpkg.LogicalKey{}, "x.bin", bytes.NewReader([]byte("v")), 1, 0); werr != nil {
 		t.Fatalf("视图写入: %v", werr)
 	}
 	if _, serr := os.Stat(filepath.Join(dir, "base", "x.bin")); serr != nil {
@@ -178,12 +178,12 @@ func TestAttachAll_WrapsCapacityAccounting(t *testing.T) {
 		t.Fatal("封装卷后端应已挂回")
 	}
 	// 超限写入（10B > max_bytes=4B）必须被拒。
-	werr := be.FS().WriteFile(context.Background(), "x.bin", bytes.NewReader(make([]byte, 10)), 10, 0)
+	werr := be.FS().WriteFile(context.Background(), syncpkg.LogicalKey{}, "x.bin", bytes.NewReader(make([]byte, 10)), 10, 0)
 	if werr == nil {
 		t.Fatal("超过封装卷 max_bytes 的写入必须被拒")
 	}
 	// 未超限写入成功并入账。
-	if werr := be.FS().WriteFile(context.Background(), "y.bin", bytes.NewReader(make([]byte, 3)), 3, 0); werr != nil {
+	if werr := be.FS().WriteFile(context.Background(), syncpkg.LogicalKey{}, "y.bin", bytes.NewReader(make([]byte, 3)), 3, 0); werr != nil {
 		t.Fatalf("未超限写入应成功: %v", werr)
 	}
 	if got := pools["vault"].Usage(); got != 3 {
@@ -197,7 +197,7 @@ type protSrcFS struct {
 	writes []string
 }
 
-func (f *protSrcFS) WriteFile(_ context.Context, p string, _ io.Reader, _, _ int64) error {
+func (f *protSrcFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, _ io.Reader, _, _ int64) error {
 	f.writes = append(f.writes, p)
 	return nil
 }
@@ -241,7 +241,7 @@ func TestBuild_WiresProtectionLayerIntoSourceView(t *testing.T) {
 		t.Fatalf("身份归因缺失: %+v", fs.Decl())
 	}
 	// ③ 前缀映射仍在（薄层不得改变键空间）。
-	if werr := view.WriteFile(context.Background(), "d/x.bin", strings.NewReader("v"), 1, 0); werr != nil {
+	if werr := view.WriteFile(context.Background(), syncpkg.LogicalKey{}, "d/x.bin", strings.NewReader("v"), 1, 0); werr != nil {
 		t.Fatalf("视图写入: %v", werr)
 	}
 	if len(src.writes) != 1 || src.writes[0] != "alice/user/vault/d/x.bin" {

@@ -47,7 +47,7 @@ type drainFS struct {
 	read int
 }
 
-func (s *drainFS) WriteFile(_ context.Context, _ string, r io.Reader, _ int64, _ int64) error {
+func (s *drainFS) WriteFile(_ context.Context, key LogicalKey, _ string, r io.Reader, _ int64, _ int64) error {
 	n, err := io.Copy(io.Discard, r)
 	s.read = int(n)
 	return err
@@ -61,7 +61,7 @@ func (s *baseFS) Stat(context.Context, string) (*Entry, error)     { return nil,
 func (s *baseFS) OpenRead(context.Context, string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
-func (s *baseFS) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+func (s *baseFS) WriteFile(context.Context, LogicalKey, string, io.Reader, int64, int64) error {
 	s.written++
 	return nil
 }
@@ -101,7 +101,7 @@ func TestStagingQuotaGate_WriteFileReserveRelease(t *testing.T) {
 	rq := &recQuota{}
 	g := WrapStagingQuota(inner, rq)
 
-	if err := g.WriteFile(context.Background(), "user/f.bin", strings.NewReader("x"), 7, 0); err != nil {
+	if err := g.WriteFile(context.Background(), LogicalKey{}, "user/f.bin", strings.NewReader("x"), 7, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if inner.written != 1 {
@@ -120,7 +120,7 @@ func TestStagingQuotaGate_NilQuotaPassthrough(t *testing.T) {
 	t.Parallel()
 	inner := &baseFS{}
 	g := WrapStagingQuota(inner, nil)
-	if err := g.WriteFile(context.Background(), "user/f.bin", strings.NewReader("x"), 7, 0); err != nil {
+	if err := g.WriteFile(context.Background(), LogicalKey{}, "user/f.bin", strings.NewReader("x"), 7, 0); err != nil {
 		t.Fatalf("nil quota 应直通: %v", err)
 	}
 	if inner.written != 1 {
@@ -216,7 +216,7 @@ func TestApplyStagingQuota_ProductionShapeWrapsGate(t *testing.T) {
 	if !ok {
 		t.Fatalf("最内层不自管/不豁免时必须包 gate（P0 回归）, got %T", out)
 	}
-	if err := g.WriteFile(context.Background(), "user/f.bin", strings.NewReader("x"), 5, 0); err != nil {
+	if err := g.WriteFile(context.Background(), LogicalKey{}, "user/f.bin", strings.NewReader("x"), 5, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if len(rq.reserved) != 1 || len(rq.released) != 1 {
@@ -276,7 +276,7 @@ func TestStagingQuotaGate_UnknownLengthStreamsReservation(t *testing.T) {
 	g := WrapStagingQuota(inner, rq)
 
 	// size=-1 模拟 ContentLength 未知。
-	if err := g.WriteFile(context.Background(), "user/f.bin", strings.NewReader(payload), -1, 0); err != nil {
+	if err := g.WriteFile(context.Background(), LogicalKey{}, "user/f.bin", strings.NewReader(payload), -1, 0); err != nil {
 		t.Fatalf("WriteFile(unknown size): %v", err)
 	}
 	if inner.read != len(payload) {

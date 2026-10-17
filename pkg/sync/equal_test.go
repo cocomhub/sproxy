@@ -22,7 +22,7 @@ func newFS(t *testing.T) *LocalFS {
 // writeFile 写本地文件（经 FS 原子写）。
 func writeFile(t *testing.T, fs *LocalFS, rel string, data []byte) {
 	t.Helper()
-	if err := fs.WriteFile(context.Background(), rel, bytes.NewReader(data), int64(len(data)), 0); err != nil {
+	if err := fs.WriteFile(context.Background(), LogicalKey{}, rel, bytes.NewReader(data), int64(len(data)), 0); err != nil {
 		t.Fatalf("WriteFile %s: %v", rel, err)
 	}
 }
@@ -104,8 +104,8 @@ func (s *stripChecksumFS) Stat(ctx context.Context, path string) (*Entry, error)
 func (s *stripChecksumFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 	return s.inner.OpenRead(ctx, path)
 }
-func (s *stripChecksumFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
-	return s.inner.WriteFile(ctx, p, r, size, mtime)
+func (s *stripChecksumFS) WriteFile(ctx context.Context, key LogicalKey, p string, r io.Reader, size, mtime int64) error {
+	return s.inner.WriteFile(ctx, LogicalKey{}, p, r, size, mtime)
 }
 func (s *stripChecksumFS) Rename(ctx context.Context, f, t string) error {
 	return s.inner.Rename(ctx, f, t)
@@ -125,10 +125,10 @@ func TestEqual_StreamFallback(t *testing.T) {
 	for i := range big {
 		big[i] = byte(i % 251)
 	}
-	if err := src.WriteFile(ctx, "big.bin", bytes.NewReader(big), int64(len(big)), 0); err != nil {
+	if err := src.WriteFile(ctx, LogicalKey{}, "big.bin", bytes.NewReader(big), int64(len(big)), 0); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if err := dst.WriteFile(ctx, "big.bin", bytes.NewReader(big), int64(len(big)), 0); err != nil {
+	if err := dst.WriteFile(ctx, LogicalKey{}, "big.bin", bytes.NewReader(big), int64(len(big)), 0); err != nil {
 		t.Fatalf("write dst: %v", err)
 	}
 	ok, err := Equal(ctx, src, "big.bin", dst, "big.bin")
@@ -141,7 +141,7 @@ func TestEqual_StreamFallback(t *testing.T) {
 	bad := make([]byte, len(big))
 	copy(bad, big)
 	bad[len(big)/2+7] ^= 0xFF // 跨分段边界差异
-	if wErr := dst.WriteFile(ctx, "big.bin", bytes.NewReader(bad), int64(len(bad)), 0); wErr != nil {
+	if wErr := dst.WriteFile(ctx, LogicalKey{}, "big.bin", bytes.NewReader(bad), int64(len(bad)), 0); wErr != nil {
 		t.Fatalf("rewrite dst: %v", wErr)
 	}
 	ok, err = Equal(ctx, src, "big.bin", dst, "big.bin")
@@ -174,10 +174,10 @@ func TestEqual_CrossAlgoSingleField_NoStringCompare(t *testing.T) {
 	dst := &crossAlgoFS{inner: newFS(t), algo: "md5", checksum: "dst-md5"}
 	ctx := context.Background()
 	content := []byte("same-content-for-cross-algo")
-	if err := src.WriteFile(ctx, "a.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := src.WriteFile(ctx, LogicalKey{}, "a.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if err := dst.WriteFile(ctx, "a.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := dst.WriteFile(ctx, LogicalKey{}, "a.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("write dst: %v", err)
 	}
 	ok, err := Equal(ctx, src, "a.bin", dst, "a.bin")
@@ -212,8 +212,8 @@ func (c *crossAlgoFS) Stat(ctx context.Context, path string) (*Entry, error) {
 func (c *crossAlgoFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 	return c.inner.OpenRead(ctx, path)
 }
-func (c *crossAlgoFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
-	return c.inner.WriteFile(ctx, p, r, size, mtime)
+func (c *crossAlgoFS) WriteFile(ctx context.Context, key LogicalKey, p string, r io.Reader, size, mtime int64) error {
+	return c.inner.WriteFile(ctx, LogicalKey{}, p, r, size, mtime)
 }
 func (c *crossAlgoFS) Rename(ctx context.Context, f, t string) error {
 	return c.inner.Rename(ctx, f, t)

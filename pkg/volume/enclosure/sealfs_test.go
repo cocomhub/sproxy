@@ -70,7 +70,7 @@ func TestSealFS_WriteOperationsRejected(t *testing.T) {
 	sf, raw := newSealFSFixture(t)
 	sealed := "private/vault/f.bin"
 
-	assertSealedWrite(t, sf.WriteFile(ctx, sealed, strings.NewReader("x"), 1, 0), "WriteFile")
+	assertSealedWrite(t, sf.WriteFile(ctx, syncpkg.LogicalKey{}, sealed, strings.NewReader("x"), 1, 0), "WriteFile")
 	assertSealedWrite(t, sf.MakeDir(ctx, "private/vault/sub"), "MakeDir")
 	assertSealedWrite(t, sf.Delete(ctx, sealed), "Delete")
 	assertSealedWrite(t, sf.Rename(ctx, sealed, "user/moved.bin"), "Rename 移出封印区")
@@ -81,7 +81,7 @@ func TestSealFS_WriteOperationsRejected(t *testing.T) {
 		t.Fatalf("WriteIfAbsent 应被拒（不得返回 false,nil——会被读成「已存在」）, got %v", werr)
 	}
 	// 非封印路径不受影响（零回归）。
-	if werr := sf.WriteFile(ctx, "private/other/ok.bin", strings.NewReader("ok"), 2, 0); werr != nil {
+	if werr := sf.WriteFile(ctx, syncpkg.LogicalKey{}, "private/other/ok.bin", strings.NewReader("ok"), 2, 0); werr != nil {
 		t.Fatalf("非封印路径写应放行, got %v", werr)
 	}
 	if _, serr := raw.Stat(ctx, "private/other/ok.bin"); serr != nil {
@@ -94,7 +94,7 @@ func TestSealFS_ReadOperationsHidden(t *testing.T) {
 	ctx := context.Background()
 	sf, raw := newSealFSFixture(t)
 	// 底层真实存在（证明「不可读」是封印所致，而非本来就没有）。
-	if err := raw.WriteFile(ctx, "private/vault/f.bin", strings.NewReader("payload"), 7, 0); err != nil {
+	if err := raw.WriteFile(ctx, syncpkg.LogicalKey{}, "private/vault/f.bin", strings.NewReader("payload"), 7, 0); err != nil {
 		t.Fatal(err)
 	}
 	assertSealedRead(t, func() error { _, err := sf.OpenRead(ctx, "private/vault/f.bin"); return err }(), "OpenRead")
@@ -125,7 +125,7 @@ func TestSealFS_ReadableModeAllowsReadsRejectsWrites(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	raw := syncpkg.NewLocalFS(t.TempDir(), nil)
-	if err := raw.WriteFile(ctx, "private/vault/f.bin", strings.NewReader("payload"), 7, 0); err != nil {
+	if err := raw.WriteFile(ctx, syncpkg.LogicalKey{}, "private/vault/f.bin", strings.NewReader("payload"), 7, 0); err != nil {
 		t.Fatal(err)
 	}
 	sf := NewSealFS(raw, []storage.SealRule{{Path: "private/vault", Wrapper: "vault", Mode: storage.SealReadable}})
@@ -136,7 +136,7 @@ func TestSealFS_ReadableModeAllowsReadsRejectsWrites(t *testing.T) {
 	}
 	_ = rc.Close()
 	// 写仍绝对禁止。
-	assertSealedWrite(t, sf.WriteFile(ctx, "private/vault/f.bin", strings.NewReader("x"), 1, 0), "readable 写")
+	assertSealedWrite(t, sf.WriteFile(ctx, syncpkg.LogicalKey{}, "private/vault/f.bin", strings.NewReader("x"), 1, 0), "readable 写")
 }
 
 func TestSealFS_InnerIsPrivileged(t *testing.T) {
@@ -148,7 +148,7 @@ func TestSealFS_InnerIsPrivileged(t *testing.T) {
 	if inner == nil {
 		t.Fatal("Innermost 应能解包封印装饰器")
 	}
-	if werr := inner.WriteFile(ctx, "private/vault/f.bin", bytes.NewReader([]byte("plain")), 5, 0); werr != nil {
+	if werr := inner.WriteFile(ctx, syncpkg.LogicalKey{}, "private/vault/f.bin", bytes.NewReader([]byte("plain")), 5, 0); werr != nil {
 		t.Fatalf("特权视图必须能写入被封区间（封装卷自身）, got %v", werr)
 	}
 	// 而封印视图仍拒绝直连读（同一底层）。
@@ -175,7 +175,7 @@ func TestSealFS_WholeVolumeRule(t *testing.T) {
 	ctx := context.Background()
 	raw := syncpkg.NewLocalFS(t.TempDir(), nil)
 	sf := NewSealFS(raw, []storage.SealRule{{Path: "", Wrapper: "vault"}}) // 空路径 = 整卷封印
-	assertSealedWrite(t, sf.WriteFile(ctx, "any/path.bin", strings.NewReader("x"), 1, 0), "整卷封印写")
+	assertSealedWrite(t, sf.WriteFile(ctx, syncpkg.LogicalKey{}, "any/path.bin", strings.NewReader("x"), 1, 0), "整卷封印写")
 	assertSealedRead(t, func() error { _, err := sf.OpenRead(ctx, "any/path.bin"); return err }(), "整卷封印读")
 }
 

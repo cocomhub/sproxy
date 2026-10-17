@@ -443,7 +443,7 @@ func assertFSWritesFailClosed(t *testing.T, fs syncpkg.FS) {
 	ctx := context.Background()
 	// 写：本客户端未配置写面拨号器 ⇒ 四个方法都必须 fail-closed（不得静默成功）
 	for name, err := range map[string]error{
-		"WriteFile": fs.WriteFile(ctx, "docs/new.bin", strings.NewReader("x"), 1, time.Now().Unix()),
+		"WriteFile": fs.WriteFile(ctx, syncpkg.LogicalKey{}, "docs/new.bin", strings.NewReader("x"), 1, time.Now().Unix()),
 		"Rename":    fs.Rename(ctx, "docs/a.bin", "docs/b.bin"),
 		"Delete":    fs.Delete(ctx, "docs/a.bin"),
 		"MakeDir":   fs.MakeDir(ctx, "docs/sub"),

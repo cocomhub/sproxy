@@ -33,7 +33,7 @@ type fakeFS struct{}
 func (fakeFS) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
 func (fakeFS) Stat(context.Context, string) (*syncpkg.Entry, error)     { return nil, nil }
 func (fakeFS) OpenRead(context.Context, string) (io.ReadCloser, error)  { return nil, nil }
-func (fakeFS) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+func (fakeFS) WriteFile(context.Context, syncpkg.LogicalKey, string, io.Reader, int64, int64) error {
 	return nil
 }
 func (fakeFS) Rename(context.Context, string, string) error { return nil }

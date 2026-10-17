@@ -129,7 +129,7 @@ func TestFS_WriteRejected(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "x", strings.NewReader(""), 0, 0); !errors.Is(err, ErrReadOnly) {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "x", strings.NewReader(""), 0, 0); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("WriteFile err = %v, want ErrReadOnly", err)
 	}
 	if err := fs.Rename(ctx, "a", "b"); !errors.Is(err, ErrReadOnly) {

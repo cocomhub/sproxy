@@ -308,7 +308,7 @@ func (e *Engine) syncFile(ctx context.Context, src, dst FS, job *Job, d *DiffEnt
 			return
 		}
 	}
-	werr := dst.WriteFile(ctx, dstPath, rc, srcE.Size, srcE.MTime)
+	werr := dst.WriteFile(ctx, LogicalKey{}, dstPath, rc, srcE.Size, srcE.MTime)
 	if werr != nil {
 		e.restoreTmp(ctx, dst, dstPath, tmpPath)
 		rec(FileResult{Path: dstPath, Action: ActionError, Error: fmt.Sprintf("写入目标失败: %v", werr)})

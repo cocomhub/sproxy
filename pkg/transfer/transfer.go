@@ -133,7 +133,7 @@ func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, 
 			return ErrExists
 		}
 	}
-	return dest.WriteFile(ctx, rel, r, size, mtime)
+	return dest.WriteFile(ctx, syncpkg.LogicalKey{}, rel, r, size, mtime)
 }
 
 // executePacked 预处理后转存：聚合流写目标卷。

@@ -56,7 +56,7 @@ func TestParity_RecoverMissingBlock(t *testing.T) {
 	t.Parallel()
 	fs := newErasureFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "f.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["f.bin"]
@@ -75,7 +75,7 @@ func TestParity_RecoverMissingBlock(t *testing.T) {
 		t.Run(fmt.Sprintf("chunk%d", i), func(t *testing.T) {
 			t.Parallel()
 			fs2 := newErasureFS(t)
-			if err := fs2.WriteFile(ctx, "f.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+			if err := fs2.WriteFile(ctx, syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 				t.Fatalf("WriteFile: %v", err)
 			}
 			e2 := fs2.index["f.bin"]
@@ -107,7 +107,7 @@ func TestParity_SecondMissingFails(t *testing.T) {
 	t.Parallel()
 	fs := newErasureFS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "f.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(data(300)), 300, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["f.bin"]
@@ -132,7 +132,7 @@ func TestParity_RangeReadRecoversMissingBlock(t *testing.T) {
 	fs := newErasureFS(t)
 	ctx := context.Background()
 	content := data(300)
-	if err := fs.WriteFile(ctx, "f.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["f.bin"]
@@ -181,7 +181,7 @@ func TestMultiTarget_ReplicaRead(t *testing.T) {
 		t.Fatalf("NewFSMultiplicas: %v", err)
 	}
 	content := data(500)
-	if err := fs.WriteFile(ctx, "m.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "m.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	e := fs.index["m.bin"]
@@ -236,7 +236,7 @@ func TestMultiTarget_ReplicaLocalVolumeDelegation(t *testing.T) {
 		t.Fatal("多 target 主 target 外部（未实现 LocalVolume）→ 整体应外部（IsLocalVolume false）")
 	}
 	// 写读确认副本机制仍工作。
-	if err := fs.WriteFile(ctx, "m.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "m.bin", bytes.NewReader(data(100)), 100, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, rerr := fs.OpenRead(ctx, "m.bin")
@@ -258,8 +258,8 @@ func (n *noLocalVolumeFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, e
 func (n *noLocalVolumeFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return n.inner.OpenRead(ctx, p)
 }
-func (n *noLocalVolumeFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
-	return n.inner.WriteFile(ctx, p, r, sz, mt)
+func (n *noLocalVolumeFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	return n.inner.WriteFile(ctx, key, p, r, sz, mt)
 }
 func (n *noLocalVolumeFS) Rename(ctx context.Context, f, t string) error {
 	return n.inner.Rename(ctx, f, t)

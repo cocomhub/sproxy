@@ -66,7 +66,7 @@ type fakeFS struct{}
 func (f *fakeFS) ListDir(_ context.Context, _ string) ([]syncpkg.Entry, error) { return nil, nil }
 func (f *fakeFS) Stat(_ context.Context, _ string) (*syncpkg.Entry, error)     { return nil, nil }
 func (f *fakeFS) OpenRead(_ context.Context, _ string) (io.ReadCloser, error)  { return nil, nil }
-func (f *fakeFS) WriteFile(_ context.Context, _ string, _ io.Reader, _ int64, _ int64) error {
+func (f *fakeFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, _ string, _ io.Reader, _ int64, _ int64) error {
 	return nil
 }
 func (f *fakeFS) Rename(_ context.Context, _, _ string) error { return nil }

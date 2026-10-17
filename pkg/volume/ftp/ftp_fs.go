@@ -450,7 +450,7 @@ func (d *dataReadCloser) Close() error {
 
 // WriteFile 全量覆盖写入（STOR；先建父目录）。
 // mtime 由服务端决定（FTP 无标准 mtime 设置；需要时 backend 层可扩展）。
-func (f *FTPFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (f *FTPFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	if err := f.ensureParentDirs(ctx, relPath); err != nil {
 		return err
 	}

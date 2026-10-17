@@ -52,7 +52,7 @@ func TestLocalBackend_PlainVolumeRoundTrip(t *testing.T) {
 		t.Fatal("FS() 不应为 nil")
 	}
 	ctx := context.Background()
-	if werr := fs.WriteFile(ctx, "user/a.txt", strings.NewReader("hello"), 5, 0); werr != nil {
+	if werr := fs.WriteFile(ctx, storage.LogicalKey{}, "user/a.txt", strings.NewReader("hello"), 5, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	rc, oerr := fs.OpenRead(ctx, "user/a.txt")
@@ -91,7 +91,7 @@ func TestLocalBackend_EncryptedVolumeCiphertextOnDisk(t *testing.T) {
 	const body = "top secret body"
 	fs := be.FS()
 	ctx := context.Background()
-	if werr := fs.WriteFile(ctx, "user/s.txt", strings.NewReader(body), int64(len(body)), 0); werr != nil {
+	if werr := fs.WriteFile(ctx, storage.LogicalKey{}, "user/s.txt", strings.NewReader(body), int64(len(body)), 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	raw, rerr := os.ReadFile(filepath.Join(dir, "user", "s.txt"))
@@ -148,7 +148,7 @@ func TestLocalBackend_FootprintIsDiskTruth(t *testing.T) {
 
 	const body = "0123456789"
 	ctx := context.Background()
-	if werr := be.FS().WriteFile(ctx, "alice/user/a.txt", strings.NewReader(body), int64(len(body)), 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, storage.LogicalKey{}, "alice/user/a.txt", strings.NewReader(body), int64(len(body)), 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	raw, serr := os.Stat(filepath.Join(dir, "alice", "user", "a.txt"))
@@ -197,7 +197,7 @@ func TestLocalBackend_EncryptedFootprintIsCiphertextAndBoundDominates(t *testing
 	logical := int64(4096)
 	body := bytes.Repeat([]byte{'x'}, int(logical))
 	ctx := context.Background()
-	if werr := be.FS().WriteFile(ctx, "alice/user/big.bin", bytes.NewReader(body), logical, 0); werr != nil {
+	if werr := be.FS().WriteFile(ctx, storage.LogicalKey{}, "alice/user/big.bin", bytes.NewReader(body), logical, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	raw, serr := os.Stat(filepath.Join(dir, "alice", "user", "big.bin"))

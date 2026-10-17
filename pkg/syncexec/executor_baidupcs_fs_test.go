@@ -94,7 +94,7 @@ func (f *fakeBaidupcsFS) OpenRead(_ context.Context, p string) (io.ReadCloser, e
 	return io.NopCloser(strings.NewReader(body)), nil
 }
 
-func (f *fakeBaidupcsFS) WriteFile(_ context.Context, p string, r io.Reader, _ int64, _ int64) error {
+func (f *fakeBaidupcsFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, r io.Reader, _ int64, _ int64) error {
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -197,7 +197,7 @@ func TestExecutor_Run_BaidupcsRemote(t *testing.T) {
 	}
 
 	// pull：网盘卷 → 本地。
-	if wErr := fake.WriteFile(context.Background(), "b.txt", strings.NewReader("baidupcs pull payload"), 0, 0); wErr != nil {
+	if wErr := fake.WriteFile(context.Background(), syncpkg.LogicalKey{}, "b.txt", strings.NewReader("baidupcs pull payload"), 0, 0); wErr != nil {
 		t.Fatalf("预置网盘卷文件: %v", wErr)
 	}
 	pullRes, pullErr := exec.Run(context.Background(), &syncmgr.SyncTask{

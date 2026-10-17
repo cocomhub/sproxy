@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"time"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 )
 
@@ -250,7 +252,7 @@ func versionConflictErr(sv, expected int64) error {
 
 // uploadBlob 上传数据/元数据字节到底层（mtime 打散由调用方给定 mt）。
 func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt int64) error {
-	return s.inner.WriteFile(ctx, p, bytes.NewReader(data), int64(len(data)), mt)
+	return s.inner.WriteFile(ctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt)
 }
 
 // encryptContentSingle 把整文件内容按单分块策略加密，返回 EncryptionResult 与该分块

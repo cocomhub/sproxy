@@ -88,7 +88,7 @@ func (f *e2eFSV3) OpenRead(_ context.Context, p string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(content)), nil
 }
 
-func (f *e2eFSV3) WriteFile(_ context.Context, p string, r io.Reader, _ int64, _ int64) error {
+func (f *e2eFSV3) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, r io.Reader, _ int64, _ int64) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -199,10 +199,10 @@ func TestVolumeFrameworkE2E_ExternalFS_Roundtrip(t *testing.T) {
 // extE2EWriteAndListRoot 写 sub/a.txt + b.txt，断言根目录列表含 b.txt 与 sub 目录。
 func extE2EWriteAndListRoot(t *testing.T, fs syncpkg.FS) {
 	t.Helper()
-	if wErr := fs.WriteFile(context.Background(), "sub/a.txt", strings.NewReader("hello-e2e"), 9, 0); wErr != nil {
+	if wErr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "sub/a.txt", strings.NewReader("hello-e2e"), 9, 0); wErr != nil {
 		t.Fatalf("WriteFile: %v", wErr)
 	}
-	if wErr := fs.WriteFile(context.Background(), "b.txt", strings.NewReader("world"), 5, 0); wErr != nil {
+	if wErr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "b.txt", strings.NewReader("world"), 5, 0); wErr != nil {
 		t.Fatalf("WriteFile b.txt: %v", wErr)
 	}
 	entries, listErr := fs.ListDir(context.Background(), "")

@@ -59,7 +59,7 @@ func TestLocalFS_OpenRangeRead_LengthContract(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	fs := NewLocalFS(dir, nil)
-	if err := fs.WriteFile(context.Background(), "f.bin", strings.NewReader("0123456789"), 10, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), LogicalKey{}, "f.bin", strings.NewReader("0123456789"), 10, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	ctx := context.Background()

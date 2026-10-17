@@ -39,7 +39,7 @@ func (m *memFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	}
 	return nil, os.ErrNotExist
 }
-func (m *memFS) WriteFile(ctx context.Context, p string, r io.Reader, sz, mt int64) error {
+func (m *memFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -54,7 +54,7 @@ func (m *memFS) WriteIfAbsent(ctx context.Context, p string, r io.Reader, sz, mt
 	if _, ok := m.files[p]; ok {
 		return false, nil
 	}
-	if err := m.WriteFile(ctx, p, r, sz, mt); err != nil {
+	if err := m.WriteFile(ctx, syncpkg.LogicalKey{}, p, r, sz, mt); err != nil {
 		return false, err
 	}
 	return true, nil
