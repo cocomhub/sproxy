@@ -16,7 +16,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -160,17 +159,15 @@ func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log 
 		log.Warn("用户卷恢复跳过（后端构造失败）", "volume", uv.Name, "owner", uv.Owner, "error", bErr)
 		return false
 	}
-	// C2 卷级计数：包 CapacityFS（counter 持久化 <root>/<owner>/meta/volume/<name>.capacity，
-	// **非 .json**——避开 UserVolumeStore 的 *.json 扫描）。限额 = UserVolume.Capacity。
-	counterPath := filepath.Join(store.Root(), uv.Owner, "meta", "volume", uv.Name+".capacity")
-	cnt, cErr := capacity.Load(counterPath, uv.Capacity)
-	if cErr != nil {
-		log.Warn("用户卷容量恢复失败（按新计数器）", "volume", uv.Name, "owner", uv.Owner, "error", cErr)
-		cnt = capacity.NewCounter(uv.Capacity, counterPath)
-	} else if cnt.CorruptSnapshot() {
-		log.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", uv.Name, "owner", uv.Owner, "path", counterPath)
+	// C2 卷级计数：包 CapacityFS。计数器是**唯一实现**（分片日志账本，建在**原始**卷 FS 上
+	// ⇒ 不自记账、跨进程正确、重启从已占用起算）。限额 = 元数据里的**生效上限**
+	// （创建/重建时经 `LoadVolumeLimitForCreate` 处理 F6 继承后落库）。
+	statePath := capacity.VolumeLimitPath(store.Root(), uv.Owner, uv.Name)
+	baselineUsed := capacity.LoadVolumeUsed(statePath)
+	be = capacity.WrapStorageVolume(uv.Name, be, nil, nil, uv.Capacity, baselineUsed)
+	if lerr := capacity.WriteVolumeState(statePath, uv.Capacity, baselineUsed); lerr != nil {
+		log.Warn("用户卷状态持久化失败（重建将无法继承上限/用量）", "volume", uv.Name, "owner", uv.Owner, "error", lerr)
 	}
-	be = capacity.WrapStorageVolume(uv.Name, be, cnt, nil, nil)
 	if aErr := set.AddExternalVolume(v, be); aErr != nil {
 		log.Warn("用户卷恢复跳过（注册失败）", "volume", uv.Name, "owner", uv.Owner, "error", aErr)
 		_ = be.Close()

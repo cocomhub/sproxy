@@ -723,15 +723,9 @@ func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Vol
 	if berr != nil {
 		return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败（boot fail）: %w", v.Name, berr)
 	}
-	// 卷级容量记账（FS 层）：与非延迟外部卷同—包 CapacityFS（PoolCounter 复用该卷
-	// vol_capacity 池，并**持久化**——重启后仍从已占用起算）。
+	// 卷级容量记账（FS 层）：与非延迟外部卷同—包 CapacityFS（**唯一实现**：分片日志账本）。
 	if pool := set.Pool(v.Name); pool != nil {
-		counter, cerr := capacity.NewPoolCounterPersistent(pool, capacity.VolumeCounterPath(localRoot, v.Name))
-		if cerr != nil {
-			log.Warn("secretdata 卷容量快照恢复失败，本次进程从零累计", "volume", v.Name, "error", cerr)
-			counter = capacity.NewPoolCounter(pool)
-		}
-		be = capacity.WrapStorageVolume(v.Name, be, counter, nil, pool)
+		be = capacity.WrapStorageVolume(v.Name, be, nil, pool, pool.MaxBytes(), 0)
 	}
 	if aerr := set.AttachExternal(v.Name, be); aerr != nil {
 		return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)

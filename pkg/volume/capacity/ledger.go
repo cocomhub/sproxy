@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -71,6 +72,13 @@ const (
 	ledgerShardSuffix = ".log"
 	// LedgerDirName 是账本在**卷根**下的保留目录名（全卷语义 ⇒ 不放在 `<owner>/` 下）。
 	LedgerDirName = "meta/quota"
+	// ledgerIndexName 是**分片索引**文件名：账本内全部分片名的登记表（每行一个）。
+	//
+	// **为何需要索引**（实测教训）：账本**不能**依赖 `syncpkg.FS.ListDir` 枚举分片 ——
+	// 探针实测 `LocalFS.ListDir("meta/quota")` 对**存在且含文件**的目录返回 **0 条目** ✗
+	// ⇒ 账本恒读到 0 且 `ok=true`（不降级 ⇒ **静默错** ✗）。索引只用「读/写」两个最基础能力
+	// ⇒ 在任何支持读写的卷 FS 上都成立 ✓。
+	ledgerIndexName = "shards"
 )
 
 // ledgerCorruptShards 是**进程级**「账本分片损坏/不可解析」计数（可观测面）。
@@ -84,6 +92,16 @@ var ledgerDegraded atomic.Int64
 
 // LedgerDegradedCount 返回本进程累计的「因账本降级而拒绝写入」次数。
 func LedgerDegradedCount() int64 { return ledgerDegraded.Load() }
+
+// ledgerMemFallback 是**进程级**「卷 FS 无法承载账本 ⇒ 退回内存账本」计数。
+// 语义：**进程内强制仍在**（上限不会被放宽），但**跨进程可见性失效** ⇒ 必须可告警。
+var ledgerMemFallback atomic.Int64
+
+// LedgerMemFallbackCount 返回本进程累计的「账本退回内存」次数。
+func LedgerMemFallbackCount() int64 { return ledgerMemFallback.Load() }
+
+// OpenMemLedger 构造**内存账本**（降级兜底；语义与卷内账本一致，只是不跨进程）。
+func OpenMemLedger(node string) (*Ledger, error) { return newLedger(newMemStore(), node) }
 
 // ledgerStore 抽象账本的存储。
 //
@@ -107,17 +125,19 @@ type ledgerStore interface {
 
 // ---- osStore：本地目录实现（测试与本地场景）----
 
+// osStore 每次追加**即开即关**（不缓存句柄）：① 跨平台安全——Windows 上持有句柄会让
+// 目录删除失败（`t.TempDir` 清理实测报 "used by another process"）；② 消除句柄泄漏面。
+// 代价是每次追加一次 open，对账本这种小写入可接受（生产走 `fsStore`）。
 type osStore struct {
-	dir  string
-	mu   sync.Mutex
-	hand map[string]*os.File
+	dir string
+	mu  sync.Mutex
 }
 
 func newOSStore(dir string) (*osStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("capacity: 创建账本目录失败: %w", err)
 	}
-	return &osStore{dir: dir, hand: map[string]*os.File{}}, nil
+	return &osStore{dir: dir}, nil
 }
 
 func (s *osStore) readFile(name string) ([]byte, bool, error) {
@@ -134,17 +154,13 @@ func (s *osStore) readFile(name string) ([]byte, bool, error) {
 func (s *osStore) appendLine(name, line string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, ok := s.hand[name]
-	if !ok {
-		var err error
-		f, err = os.OpenFile(filepath.Join(s.dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644) //nolint:gosec // 账本随卷
-		if err != nil {
-			return err
-		}
-		s.hand[name] = f
+	f, err := os.OpenFile(filepath.Join(s.dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644) //nolint:gosec // 账本随卷
+	if err != nil {
+		return err
 	}
-	_, err := f.WriteString(line)
-	return err
+	defer f.Close()
+	_, werr := f.WriteString(line)
+	return werr
 }
 
 func (s *osStore) writeAtomic(name string, b []byte) error {
@@ -175,26 +191,67 @@ func (s *osStore) list() ([]string, error) {
 }
 
 func (s *osStore) truncate(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// 关闭句柄后按**路径**截断：Windows 上对 `O_APPEND|O_WRONLY` 句柄调 `Truncate` 会
+	// 按**路径**截断：Windows 上对 `O_APPEND|O_WRONLY` 句柄调 `Truncate` 会
 	// "Access is denied"（实测）⇒ 路径式截断跨平台可靠。
-	if f, ok := s.hand[name]; ok {
-		_ = f.Close()
-		delete(s.hand, name)
-	}
 	return os.Truncate(filepath.Join(s.dir, name), 0)
 }
 
-func (s *osStore) close() error {
+func (s *osStore) close() error { return nil }
+
+// ---- memStore：内存实现（**降级兜底**）----
+
+// memStore 是账本的**内存**实现：当卷 FS 无法承载账本（不支持建目录/列目录，如测试替身或
+// 特殊卷型）时使用。**仍然只有一套机制**（`Ledger`/`LedgerCounter` 不变），代价只是
+// **失去跨进程可见性**（进程内强制仍在）⇒ 必须计入 `LedgerMemFallbackCount` 并可告警，
+// 绝不静默（「限额被静默放宽」是最危险形态；而「跨进程失效」同样是必须可观测的降级）。
+type memStore struct {
+	mu    sync.Mutex
+	files map[string][]byte
+}
+
+func newMemStore() *memStore { return &memStore{files: map[string][]byte{}} }
+
+func (s *memStore) readFile(name string) ([]byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k, f := range s.hand {
-		_ = f.Close()
-		delete(s.hand, k)
-	}
+	b, ok := s.files[name]
+	return b, ok, nil
+}
+
+func (s *memStore) appendLine(name, line string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.files[name] = append(s.files[name], []byte(line)...)
 	return nil
 }
+
+func (s *memStore) writeAtomic(name string, b []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	s.files[name] = cp
+	return nil
+}
+
+func (s *memStore) list() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.files))
+	for k := range s.files {
+		out = append(out, k)
+	}
+	return out, nil
+}
+
+func (s *memStore) truncate(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.files, name)
+	return nil
+}
+
+func (s *memStore) close() error { return nil }
 
 // ---- fsStore：卷内 syncpkg.FS 实现（生产用）----
 
@@ -205,17 +262,63 @@ type fsStore struct {
 	fs  syncpkg.FS
 	dir string
 	mu  sync.Mutex
+	// mem 是**运行时降级兜底**：卷 FS 写失败（不支持建目录/写入语义不符/远端异常）⇒ 转内存账本，
+	// **保留进程内强制**，只失去跨进程可见性 ⇒ 计入 `LedgerMemFallbackCount()` 可告警。
+	// 为什么是**运行时**而非构造期判定：部分卷 FS 的 `MakeDir`/`Stat` 语义宽松（构造期看不出来），
+	// 只有真写一次才暴露 ⇒ 首次失败即降级（透明、仍一套机制）。
+	mem *memStore
+}
+
+// activeLocked 返回当前生效的存储（已降级 ⇒ 内存）。
+func (s *fsStore) activeLocked() ledgerStore {
+	if s.mem != nil {
+		return s.mem
+	}
+	return nil
+}
+
+// degrade 是**显式降级**入口（幂等 + 计数）：供「索引写失败」等场景主动切内存兜底。
+func (s *fsStore) degrade() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.degradeLocked()
+}
+
+// degradeLocked 切到内存兜底（幂等 + 计数）。
+func (s *fsStore) degradeLocked() *memStore {
+	if s.mem == nil {
+		s.mem = newMemStore()
+		ledgerMemFallback.Add(1)
+	}
+	return s.mem
 }
 
 func newFSStore(fsys syncpkg.FS, dir string) (*fsStore, error) {
 	if fsys == nil {
 		return nil, errors.New("capacity: 卷内账本需要 FS")
 	}
-	// 建目录（幂等）：已存在时部分实现返回错误 ⇒ 以 Stat 复核，存在即接受。
-	if err := fsys.MakeDir(context.Background(), dir); err != nil {
-		if _, serr := fsys.Stat(context.Background(), dir); serr != nil {
-			return nil, fmt.Errorf("capacity: 创建卷内账本目录失败: %w", err)
+	// 建目录：**逐级**创建（卷 FS 的 MakeDir 不保证递归 ⇒ 直接建 `meta/quota` 会失败，
+	// 实测报「写账本分片失败: ... cannot find the file specified」），并在建完后**复核存在性**
+	// （部分实现 MakeDir 失败但不报错）⇒ 任一不成立即返回错误 ⇒ 上层退回内存账本。
+	ctx := context.Background()
+	cur := ""
+	for _, seg := range strings.Split(strings.Trim(dir, "/"), "/") {
+		if seg == "" {
+			continue
 		}
+		if cur == "" {
+			cur = seg
+		} else {
+			cur += "/" + seg
+		}
+		if err := fsys.MakeDir(ctx, cur); err != nil {
+			if _, serr := fsys.Stat(ctx, cur); serr != nil {
+				return nil, fmt.Errorf("capacity: 创建卷内账本目录 %q 失败: %w", cur, err)
+			}
+		}
+	}
+	if _, serr := fsys.Stat(ctx, dir); serr != nil {
+		return nil, fmt.Errorf("capacity: 卷内账本目录 %q 不可用: %w", dir, serr)
 	}
 	return &fsStore{fs: fsys, dir: dir}, nil
 }
@@ -228,13 +331,20 @@ func (s *fsStore) path(name string) string {
 }
 
 func (s *fsStore) readFile(name string) ([]byte, bool, error) {
+	s.mu.Lock()
+	if a := s.activeLocked(); a != nil {
+		s.mu.Unlock()
+		return a.readFile(name)
+	}
+	s.mu.Unlock()
 	rc, err := s.fs.OpenRead(context.Background(), s.path(name))
 	if err != nil {
-		// FS 抽象通常无 IsNotExist 等价物 ⇒ 以 Stat 区分「不存在」（正常）与「不可读」（降级）。
-		if _, serr := s.fs.Stat(context.Background(), s.path(name)); serr != nil {
-			return nil, false, nil
-		}
-		return nil, false, err
+		// **读失败 = 不存在**（ok=false），**不**用 `Stat` 判断存在性 ✗：卷 FS 的 `Stat` 语义
+		// 宽松（实测 `LocalFS.Stat` 对不存在路径也可能成功 ⇒ 会把「首次运行、索引尚未创建」
+		// 误判为「损坏」⇒ 整个账本报错 ✗）。
+		// **损坏**由**内容**判定（分片内容不可解析 ⇒ `scanLocked` 标 corrupt ⇒ fail-closed ✓），
+		// 与「不存在」语义彻底分离 ✓（原则 1：只用「按名读/写」两个原语）。
+		return nil, false, nil
 	}
 	defer rc.Close()
 	b, rerr := io.ReadAll(rc)
@@ -247,26 +357,80 @@ func (s *fsStore) readFile(name string) ([]byte, bool, error) {
 func (s *fsStore) appendLine(name, line string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if a := s.activeLocked(); a != nil {
+		return a.appendLine(name, line)
+	}
 	// 卷 FS 无 O_APPEND 语义 ⇒ 读旧 + 整体原子重写。
 	// 代价：每次追加一次读+写 ⇒ 仅**共享卷**走账本（本地卷零 I/O）。
-	old, _, err := s.readFile(name)
+	old, _, err := s.readFileLocked(name)
 	if err != nil {
-		return err
+		return s.degradeLocked().appendLine(name, line)
 	}
 	buf := make([]byte, 0, len(old)+len(line))
 	buf = append(buf, old...)
 	buf = append(buf, line...)
-	return s.writeAtomic(name, buf)
+	if werr := s.writeLocked(name, buf); werr != nil {
+		return s.degradeLocked().appendLine(name, line)
+	}
+	return nil
+}
+
+// readFileLocked / writeLocked 是**不经降级判断**的裸 FS 操作（调用方已持锁）。
+func (s *fsStore) readFileLocked(name string) ([]byte, bool, error) {
+	ctx := context.Background()
+	rc, err := s.fs.OpenRead(ctx, s.path(name))
+	if err != nil {
+		return nil, false, nil // 读失败 = 不存在（见 readFile 的说明）
+	}
+	defer rc.Close()
+	b, rerr := io.ReadAll(rc)
+	if rerr != nil {
+		return nil, false, rerr
+	}
+	return b, true, nil
+}
+
+func (s *fsStore) writeLocked(name string, b []byte) error {
+	ctx := context.Background()
+	cur := ""
+	for _, seg := range strings.Split(strings.Trim(s.dir, "/"), "/") {
+		if seg == "" {
+			continue
+		}
+		if cur == "" {
+			cur = seg
+		} else {
+			cur += "/" + seg
+		}
+		_ = s.fs.MakeDir(ctx, cur)
+	}
+	return s.fs.WriteFile(ctx, syncpkg.LogicalKey{}, s.path(name), bytes.NewReader(b), int64(len(b)), 0)
 }
 
 func (s *fsStore) writeAtomic(name string, b []byte) error {
-	return s.fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, s.path(name), bytes.NewReader(b), int64(len(b)), 0)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a := s.activeLocked(); a != nil {
+		return a.writeAtomic(name, b)
+	}
+	if err := s.writeLocked(name, b); err != nil {
+		return s.degradeLocked().writeAtomic(name, b)
+	}
+	return nil
 }
 
 func (s *fsStore) list() ([]string, error) {
+	s.mu.Lock()
+	if a := s.activeLocked(); a != nil {
+		s.mu.Unlock()
+		return a.list()
+	}
+	s.mu.Unlock()
 	entries, err := s.fs.ListDir(context.Background(), s.dir)
 	if err != nil {
-		return nil, err
+		// 目录不可列（未创建/不支持）⇒ 视作「尚无账本文件」而非降级：
+		// 首次写入会真正触发降级判定。
+		return nil, nil
 	}
 	out := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -278,7 +442,15 @@ func (s *fsStore) list() ([]string, error) {
 }
 
 func (s *fsStore) truncate(name string) error {
-	return s.fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, s.path(name), bytes.NewReader(nil), 0, 0)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a := s.activeLocked(); a != nil {
+		return a.truncate(name)
+	}
+	if err := s.writeLocked(name, nil); err != nil {
+		return s.degradeLocked().truncate(name)
+	}
+	return nil
 }
 
 func (s *fsStore) close() error { return nil }
@@ -293,6 +465,8 @@ type Ledger struct {
 	node    string
 	corrupt bool
 	shards  int
+	// registered 记录本进程分片是否已登记进索引（进程内一次即可 ⇒ 避免每次追加都读+写索引）。
+	registered bool
 }
 
 // OpenLedger 打开本地目录上的账本（测试与本地场景）。
@@ -355,6 +529,9 @@ func (l *Ledger) Add(delta int64) error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.registerShardLocked(); err != nil {
+		return fmt.Errorf("capacity: 登记账本分片失败: %w", err)
+	}
 	if err := l.store.appendLine(l.shardName(), strconv.FormatInt(delta, 10)+"\n"); err != nil {
 		return fmt.Errorf("capacity: 写账本分片失败: %w", err)
 	}
@@ -374,8 +551,70 @@ func (l *Ledger) Total() (int64, bool) {
 	return l.scanLocked()
 }
 
+// registerShardLocked 确保**本进程分片**已登记进索引（幂等；进程内只做一次）。
+//
+// 索引是账本内**唯一的枚举来源**（见 `ledgerIndexName` 说明：不依赖 ListDir 枚举能力）。
+func (l *Ledger) registerShardLocked() error {
+	if l.registered {
+		return nil
+	}
+	name := l.shardName()
+	b, ok, err := l.store.readFile(ledgerIndexName)
+	if err != nil {
+		return err
+	}
+	if ok {
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.TrimSpace(line) == name {
+				l.registered = true
+				return nil
+			}
+		}
+	}
+	buf := make([]byte, 0, len(b)+len(name)+1)
+	buf = append(buf, b...)
+	buf = append(buf, []byte(name+"\n")...)
+	if werr := l.store.writeAtomic(ledgerIndexName, buf); werr != nil {
+		// 索引写不进去（卷 FS 不支持在该路径写入等）⇒ **显式降级**（不是把错误抛给写路径 ✗）：
+		// 进程内强制仍在 ✓、跨进程可见性失效 ✓ 且**可观测** ✓（`LedgerMemFallbackCount` + 告警）。
+		// 这符合「跨进程 = best-effort、降级必须可观测」的既定原则（设计 §3.6.2）。
+		if d, ok := l.store.(interface{ degrade() }); ok {
+			d.degrade()
+		}
+		l.registered = true
+		return nil
+	}
+	l.registered = true
+	return nil
+}
+
+// shardNamesLocked 返回账本内全部分片与基线名（**来自索引**，不依赖 ListDir 枚举能力）。
+// 基线名由分片名**派生**（`shard.<node>.log` ⇒ `snap.<node>`）⇒ 索引只需登记分片。
+func (l *Ledger) shardNamesLocked() ([]string, error) {
+	b, ok, err := l.store.readFile(ledgerIndexName)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		n := strings.TrimSpace(line)
+		if n == "" {
+			continue
+		}
+		out = append(out, n)
+		if strings.HasPrefix(n, ledgerShardPrefix) && strings.HasSuffix(n, ledgerShardSuffix) {
+			node := strings.TrimSuffix(strings.TrimPrefix(n, ledgerShardPrefix), ledgerShardSuffix)
+			out = append(out, ledgerSnapPrefix+node)
+		}
+	}
+	return out, nil
+}
+
 func (l *Ledger) scanLocked() (int64, bool) {
-	names, err := l.store.list()
+	names, err := l.shardNamesLocked()
 	if err != nil {
 		l.markCorruptLocked()
 		return 0, false
@@ -383,10 +622,20 @@ func (l *Ledger) scanLocked() (int64, bool) {
 	var total int64
 	shards := 0
 	corrupt := false
-	for _, name := range names {
+	for _, raw := range names {
+		// **必须取 basename**：`fsStore.list()` 底层是 `syncpkg.FS.ListDir`，其 `Entry.Name`
+		// 在多数卷实现里是**含目录前缀的完整键**（实测 `meta/quota/shard.seed.log`）⇒ 直接用
+		// `HasPrefix("shard.")` 会**全部漏掉** ⇒ 账本恒读到 0（且 `ok=true` ⇒ 不降级、静默错 ✗）。
+		name := raw
+		if i := strings.LastIndex(raw, "/"); i >= 0 {
+			name = raw[i+1:]
+		}
 		switch {
 		case strings.HasPrefix(name, ledgerSnapPrefix):
-			n, ok := l.readNumberLocked(name)
+			// **读取必须用原始名**（`raw`）：`fsStore.readFile` 会再拼一次目录前缀
+			// ⇒ 若传 basename 则路径正确、传 raw 也对；但传「已去掉前缀的名字」会双拼 ✗。
+			// 统一：**分类看 basename、读取用 raw**（两种 store 都自洽）。
+			n, ok := l.readNumberLocked(raw)
 			if !ok {
 				corrupt = true
 				continue
@@ -394,7 +643,7 @@ func (l *Ledger) scanLocked() (int64, bool) {
 			total += n
 			shards++
 		case strings.HasPrefix(name, ledgerShardPrefix) && strings.HasSuffix(name, ledgerShardSuffix):
-			n, ok := l.readShardLocked(name)
+			n, ok := l.readShardLocked(raw)
 			if !ok {
 				corrupt = true
 				continue
@@ -556,7 +805,15 @@ func ListLedgerShards(dir string) ([]string, error) {
 type LedgerCounter struct {
 	l   *Ledger
 	max int64
-	mu  sync.Mutex
+	// pool 可选：**镜像**本进程视图（既有契约「与路由/指标/对账同源」——`pool.Usage()` 被
+	// 卷路由、`sproxy_storage_usage_bytes` 指标、对账矩阵消费）。账本是**跨进程真值**，
+	// pool 是**本进程视图**：强制与查询都以账本为准，pool 仅作下游读取面 ⇒ 二者可能不等
+	// （其他进程写入时 pool < 账本），这是**正确**的（pool 不再是权威）。
+	pool *quota.Pool
+	// initErr 非 nil = 账本**构造/上限持久化失败** ⇒ 一切写入 fail-closed，
+	// 绝不静默无额度（「限额被静默放宽」是本项目认定的最危险形态）。
+	initErr error
+	mu      sync.Mutex
 	// reserved 是本进程在途预留（不进账本：预留是瞬态的，崩溃后由对账兜底）。
 	reserved int64
 }
@@ -566,12 +823,28 @@ func NewLedgerCounter(l *Ledger, max int64) *LedgerCounter {
 	return &LedgerCounter{l: l, max: max}
 }
 
+// WithPool 让计数器同时**镜像**到卷容量池（保持既有「与路由/指标/对账同源」契约）。
+// nil ⇒ 不镜像（测试/无池场景）。
+func (c *LedgerCounter) WithPool(p *quota.Pool) *LedgerCounter {
+	if c != nil {
+		c.pool = p
+	}
+	return c
+}
+
 // TryAdd 在**全局和**上累计 size：超限（或账本降级）⇒ 返回错误且**不改变**账本。
 func (c *LedgerCounter) TryAdd(size int64) error {
 	if size <= 0 {
 		return nil
 	}
-	if c == nil || c.l == nil {
+	if c == nil {
+		return ErrLedgerDegraded
+	}
+	if c.initErr != nil {
+		ledgerDegraded.Add(1)
+		return fmt.Errorf("%w: 账本不可用（%v），拒绝写入", ErrLedgerDegraded, c.initErr)
+	}
+	if c.l == nil {
 		return ErrLedgerDegraded
 	}
 	total, ok := c.l.Total()
@@ -585,7 +858,43 @@ func (c *LedgerCounter) TryAdd(size int64) error {
 	if c.max > 0 && total+reserved+size > c.max {
 		return fmt.Errorf("%w: used=%d reserved=%d size=%d max=%d", ErrVolumeFull, total, reserved, size, c.max)
 	}
-	return c.l.Add(size)
+	// **父链上限校验（必须）**：`c.max` 只是**本卷**上限；卷池可能是**子池**（封装卷继承源卷、
+	// 用户卷挂在全局池下）⇒ 祖先上限同样必须拦住 ✗。旧实现靠 `pool.TryReserve`（`reserveUp`
+	// 沿父链逐层校验）覆盖了这一点；仅比对 `c.max` 会**漏掉父链** ⇒ 多计（实测：封装卷无自身
+	// 上限、父池 10B，仍把 347B 的 meta 计了进去 ⇒ 353 vs 6 ✗）。
+	var poolRes *quota.Reservation
+	if c.pool != nil {
+		r, rerr := c.pool.TryReserve(size)
+		if rerr != nil {
+			return fmt.Errorf("%w: %v", ErrVolumeFull, rerr)
+		}
+		poolRes = r
+	}
+	if err := c.l.Add(size); err != nil {
+		if poolRes != nil {
+			poolRes.Release()
+		}
+		return err
+	}
+	if poolRes != nil {
+		poolRes.Commit(size)
+	}
+	return nil
+}
+
+// mirrorToPool 把增量镜像到卷容量池（下游读取面）。
+//
+// 注意：`TryAdd` **不用**它（那条路径必须走 `pool.TryReserve` 以覆盖**父链上限校验** ✗），
+// 只有 `Release`/`CorrectTo`（减少/修正，无「是否放行」语义）才用它。
+func (c *LedgerCounter) mirrorToPool(delta int64) {
+	if c == nil || c.pool == nil || delta == 0 {
+		return
+	}
+	if delta > 0 {
+		c.pool.Adjust(0, delta)
+		return
+	}
+	c.pool.Adjust(-delta, 0)
 }
 
 // Release 释放（删除/覆盖/改名后）已确认占用。
@@ -593,7 +902,10 @@ func (c *LedgerCounter) Release(size int64) {
 	if c == nil || c.l == nil || size <= 0 {
 		return
 	}
-	_ = c.l.Add(-size)
+	if err := c.l.Add(-size); err != nil {
+		return
+	}
+	c.mirrorToPool(-size)
 }
 
 // Used 返回**全局**已用（Σ 所有分片）。账本降级 ⇒ 返回 0 并由 `Degraded()` 报告。
@@ -613,7 +925,7 @@ func (c *LedgerCounter) Capacity() int64 { return c.max }
 
 // Degraded 报告底层账本是否降级（写路径应据此 fail-closed 并告警）。
 func (c *LedgerCounter) Degraded() bool {
-	if c == nil || c.l == nil {
+	if c == nil || c.l == nil || c.initErr != nil {
 		return true
 	}
 	return c.l.Degraded()

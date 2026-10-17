@@ -43,11 +43,9 @@ func federatedFixture(t *testing.T, vols []volume.Volume, withQuota int, default
 		}
 		aliceScope := quota.NewPool(1<<20).Scope("/tenant/alice", 1<<20)
 		scopes[v.Name] = aliceScope
-		counter := capacity.NewCounter(1<<20, t.TempDir()+"/"+v.Name+".capacity")
 		wrapped := capacity.WrapStorageVolume(
 			v.Name,
 			bareBE{fs: syncpkg.NewLocalFS(t.TempDir(), nil)},
-			counter,
 			func(owner string) *quota.Scope {
 				if owner == "alice" {
 					return aliceScope
@@ -55,6 +53,8 @@ func federatedFixture(t *testing.T, vols []volume.Volume, withQuota int, default
 				return nil
 			},
 			quota.NewPool(1<<20),
+			1<<20,
+			0,
 		)
 		if err := vs.AttachExternal(v.Name, wrapped); err != nil {
 			t.Fatalf("AttachExternal(%s): %v", v.Name, err)
@@ -166,7 +166,6 @@ func TestFederatedUserQuota_UnlimitedVolumeMakesTotalUnlimited(t *testing.T) {
 		wrapped := capacity.WrapStorageVolume(
 			item.name,
 			bareBE{fs: syncpkg.NewLocalFS(t.TempDir(), nil)},
-			capacity.NewCounter(1<<20, t.TempDir()+"/"+item.name+".capacity"),
 			func(owner string) *quota.Scope {
 				if owner == "alice" {
 					return item.scope
@@ -174,6 +173,8 @@ func TestFederatedUserQuota_UnlimitedVolumeMakesTotalUnlimited(t *testing.T) {
 				return nil
 			},
 			quota.NewPool(1<<20),
+			1<<20,
+			0,
 		)
 		if err := vs.AttachExternal(item.name, wrapped); err != nil {
 			t.Fatalf("AttachExternal(%s): %v", item.name, err)

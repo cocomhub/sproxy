@@ -143,15 +143,11 @@ func BuildBackend(ctx context.Context, set *registry.Set, d Decl, v volume.Volum
 	if pool == nil {
 		return be, nil
 	}
-	// 计数器**持久化**（与外部卷同源，`capacity.VolumeCounterPath`）：此前用非持久
-	// `NewPoolCounter`，而封装卷 `RootDir==""` 被 `reconcileVolumesFromDisk` 跳过 ⇒
-	// 重启后 committed 归零、`max_bytes` 被突破（评审 P1）。
-	if opt.StorageRoot != "" {
-		if counter, cerr := capacity.NewPoolCounterPersistent(pool, capacity.VolumeCounterPath(opt.StorageRoot, d.Vol)); cerr == nil {
-			return capacity.WrapBackend(be, counter), nil
-		}
-	}
-	return capacity.WrapBackend(be, capacity.NewPoolCounter(pool)), nil
+	// 计数器：**唯一实现**（分片日志账本，建在原始卷 FS 上 ⇒ 不自记账、跨进程正确）。
+	// 此前用单文件快照（`NewPoolCounterPersistent`/`NewPoolCounter`）——单写者假设，
+	// 多进程共享同一卷时丢失更新；且封装卷 `RootDir==""` 被 `reconcileVolumesFromDisk`
+	// 跳过 ⇒ 重启后归零。账本对两者都成立。
+	return capacity.WrapBackend(be, capacity.NewVolumeCounter(be.FS(), pool.MaxBytes(), pool)), nil
 }
 
 // SourceFS 取源卷的**特权视图**（封印前语义：直接 raw 视图，不受封印影响——封装卷必须能

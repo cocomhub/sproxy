@@ -103,18 +103,18 @@ func TestTrueUsageOf_UnwrapsDecorators(t *testing.T) {
 func TestPoolCounter_CorrectTo_TrueValueWins(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(1000)
-	pc := NewPoolCounter(pool)
+	pc := newTestLedgerCounter(t, pool)
 	if err := pc.TryAdd(400); err != nil {
 		t.Fatalf("TryAdd: %v", err)
 	}
-	if pool.Usage() != 400 {
-		t.Fatalf("初始占用应为 400, got %d", pool.Usage())
+	if pc.Used() != 400 {
+		t.Fatalf("初始占用应为 400, got %d", pc.Used())
 	}
 
 	// 真值更大（逻辑记账低估，如加密卷 pad 膨胀）→ 上调到真值。
 	pc.CorrectTo(1500)
-	if pool.Usage() != 1500 {
-		t.Fatalf("修正后应为真值 1500, got %d", pool.Usage())
+	if pc.Used() != 1500 {
+		t.Fatalf("修正后应为真值 1500, got %d", pc.Used())
 	}
 	// 真值优先于上限：修正暴露超限，但不得被截断（否则失真被掩盖）。
 	if pool.MaxBytes() != 1000 {
@@ -127,12 +127,12 @@ func TestPoolCounter_CorrectTo_TrueValueWins(t *testing.T) {
 
 	// 真值更小（逻辑记账高估，如去重/纠删码）→ 下调，且不会低于 0。
 	pc.CorrectTo(300)
-	if pool.Usage() != 300 {
-		t.Fatalf("修正后应为 300, got %d", pool.Usage())
+	if pc.Used() != 300 {
+		t.Fatalf("修正后应为 300, got %d", pc.Used())
 	}
 	pc.CorrectTo(-5)
-	if pool.Usage() != 0 {
-		t.Fatalf("负真值应按 0 处理, got %d", pool.Usage())
+	if pc.Used() != 0 {
+		t.Fatalf("负真值应按 0 处理, got %d", pc.Used())
 	}
 
 	// 在途预留不被修正误伤：预留后 CorrectTo 只动 committed。
@@ -144,8 +144,8 @@ func TestPoolCounter_CorrectTo_TrueValueWins(t *testing.T) {
 	if pool.Reserved() != 100 {
 		t.Fatalf("修正不得触碰 reserved, got %d", pool.Reserved())
 	}
-	if pool.Usage() != 500 {
-		t.Fatalf("committed 应为 500, got %d", pool.Usage())
+	if pc.Used() != 500 {
+		t.Fatalf("committed 应为 500, got %d", pc.Used())
 	}
 	res.Release()
 }
@@ -155,7 +155,7 @@ func TestPoolCounter_CorrectTo_TrueValueWins(t *testing.T) {
 func TestPoolCounter_CorrectFrom_FallsBackWhenUnknown(t *testing.T) {
 	t.Parallel()
 	pool := quota.NewPool(1000)
-	pc := NewPoolCounter(pool)
+	pc := newTestLedgerCounter(t, pool)
 	if err := pc.TryAdd(250); err != nil {
 		t.Fatal(err)
 	}
@@ -166,13 +166,13 @@ func TestPoolCounter_CorrectFrom_FallsBackWhenUnknown(t *testing.T) {
 	if got, ok := pc.CorrectFrom(&usageFakeFS{ok: false}); ok || got != 250 {
 		t.Fatalf("ok=false 应不修正且保持当前占用, got=%d ok=%v", got, ok)
 	}
-	if pool.Usage() != 250 {
-		t.Fatalf("回落场景不得改动账本, got %d", pool.Usage())
+	if pc.Used() != 250 {
+		t.Fatalf("回落场景不得改动账本, got %d", pc.Used())
 	}
 
 	got, ok := pc.CorrectFrom(&usageFakeFS{bytes: 900, ok: true})
-	if !ok || got != 900 || pool.Usage() != 900 {
-		t.Fatalf("真值可用时应修正到 900, got=%d ok=%v usage=%d", got, ok, pool.Usage())
+	if !ok || got != 900 || pc.Used() != 900 {
+		t.Fatalf("真值可用时应修正到 900, got=%d ok=%v usage=%d", got, ok, pc.Used())
 	}
 }
 
@@ -206,4 +206,16 @@ func TestNewPoolWithParent_EncapsulationInheritsSource(t *testing.T) {
 	if _, err := limited.TryReserve(150); !errors.Is(err, quota.ErrStorageFull) {
 		t.Fatalf("应受自身上限约束, got %v", err)
 	}
+}
+
+// newTestLedgerCounter 是测试用账本计数器（唯一实现）：上限取自传入 pool（保持用例语义），
+// 账本落在临时目录。断言须用 `pc.Used()`（账本即权威）——旧 `pc.Used()` 属已删的
+// PoolCounter 适配（它把 pool 当存储），账本不再借用 pool 的计数器。
+func newTestLedgerCounter(t *testing.T, pool *quota.Pool) *LedgerCounter {
+	t.Helper()
+	led, err := OpenLedger(t.TempDir(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewLedgerCounter(led, pool.MaxBytes())
 }

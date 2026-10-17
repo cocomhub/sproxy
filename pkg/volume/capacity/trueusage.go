@@ -8,7 +8,7 @@ import (
 )
 
 // trueusage.go 实现「**让知道真实占用的卷层修正账本**」机制（2026-10-11 用户要求）：
-// 容量账本（PoolCounter/Pool）在正常情况下按**声明/逻辑**大小记账，遇到会改变物理落盘量的
+// 容量账本（LedgerCounter/Pool）在正常情况下按**声明/逻辑**大小记账，遇到会改变物理落盘量的
 // 卷层（at-rest 加密的 meta pad、去重、纠删码、压缩、封装卷的封装开销…）就会出现
 // 「逻辑记账 ≠ 真实占用」的失真（评审实证：加密卷 1GiB 限额实际可落 ~1.5TiB）。
 //
@@ -70,14 +70,24 @@ func TrueUsageOf(fs syncpkg.FS) (TrueUsageReporter, bool) {
 // 与 Adjust 同域、同约束（调用方须保证本池无挂载子层 Scope）：只动 committed，
 // 不触碰 reserved（在途预留不被误伤），可正可负且防下溢归零（quota.adjustUp 语义），
 // 修正后立即持久化快照（best-effort；无 path 为 no-op）。负值按 0 处理。
-func (p *PoolCounter) CorrectTo(bytes int64) {
+func (c *LedgerCounter) CorrectTo(bytes int64) {
 	if bytes < 0 {
 		bytes = 0
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.pool.Adjust(p.pool.Usage(), bytes)
-	p.persistLocked()
+	if c == nil || c.l == nil {
+		return
+	}
+	// 账本语义：把**全局和**修正为真值 ⇒ 追加 (真值 − 当前和) 的增量（可正可负）。
+	// 不再需要「修正后持久化」：账本每次 Add 即落盘。
+	cur, ok := c.l.Total()
+	if !ok {
+		return
+	}
+	delta := bytes - cur
+	if err := c.l.Add(delta); err != nil {
+		return
+	}
+	c.mirrorToPool(delta)
 }
 
 // CorrectFrom 用真值报告者修正账本，返回修正后的占用与是否发生修正：
@@ -86,18 +96,14 @@ func (p *PoolCounter) CorrectTo(bytes int64) {
 //
 // 这是「卷层修正账本」的推荐入口（装配层/对账路径调用），调用方在 false 时应回落
 // 既有对账（磁盘扫描 / backend Stats）。
-func (p *PoolCounter) CorrectFrom(reporter TrueUsageReporter) (int64, bool) {
+func (c *LedgerCounter) CorrectFrom(reporter TrueUsageReporter) (int64, bool) {
 	if reporter == nil {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		return p.pool.Usage(), false
+		return c.Used(), false
 	}
 	bytes, ok := reporter.TrueUsage()
 	if !ok {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		return p.pool.Usage(), false
+		return c.Used(), false
 	}
-	p.CorrectTo(bytes)
+	c.CorrectTo(bytes)
 	return bytes, true
 }

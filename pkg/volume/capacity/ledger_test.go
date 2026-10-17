@@ -19,41 +19,13 @@ import (
 
 const ledgerGiB = int64(1) << 30
 
-// TestLedger_LocalOnlyCounterExceeds 是 **S0 反例**（缺陷的可判定证据）：
-// 既有的单文件快照计数器（`VolumeCapacityCounter`）在**两个进程共享同一路径**时
-// 各看各的内存值 ⇒ **双双通过** ⇒ 实际占用超限。
-//
-// 本用例**故意断言「超限会发生」**：它钉住的是「为什么必须引入分片账本」这一事实。
-// 一旦有人把 LedgerCounter 换回 VolumeCapacityCounter/PoolCounter（单文件），
-// TestLedger_CrossProcessVisibility 会红；本用例则记录被替换对象的真实语义。
-func TestLedger_LocalOnlyCounterExceeds(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "vol.capacity")
-	const cap10 = 10 * ledgerGiB
+// 注：原 S0 反例 `TestLedger_LocalOnlyCounterExceeds`（用**旧单文件计数器**证明
+// 「多进程共享同一路径 ⇒ 双双通过 ⇒ 超限」）已随旧计数器删除而移除 —— 其使命已完成：
+// 该事实作为**删除旧两套机制的理由**记录在设计文档 §3.3b（唯一实现原则）。
 
-	// 两个「进程」各自打开同一路径的计数器（各自内存 used 独立）。
-	p1 := NewCounter(cap10, path)
-	p2 := NewCounter(cap10, path)
-
-	// 预置「已用 9GiB」（模拟已有占用）：各自 TryAdd 9GiB。
-	if err := p1.TryAdd(9 * ledgerGiB); err != nil {
-		t.Fatalf("p1 预置: %v", err)
-	}
-	if err := p2.TryAdd(9 * ledgerGiB); err != nil {
-		t.Fatalf("p2 预置: %v", err)
-	}
-	// 两个进程各再写 1GiB：各自都认为「9+1 ≤ 10」⇒ 都通过 ⇒ 实际 11GiB（超限）。
-	if err := p1.TryAdd(ledgerGiB); err != nil {
-		t.Fatalf("p1 追加应通过（它只看到自己的 9GiB）: %v", err)
-	}
-	if err := p2.TryAdd(ledgerGiB); err != nil {
-		t.Fatalf("p2 追加应通过（它只看到自己的 9GiB）: %v", err)
-	}
-	// 事实：两进程各自记录 10GiB ⇒ 总和 20GiB，而卷限 10GiB ⇒ 超限（这就是缺陷）。
-	if got := p1.Used() + p2.Used(); got <= cap10 {
-		t.Fatalf("单文件计数器应表现出「各看各的」⇒ 总和 %d 应 > 卷限 %d（否则本用例失去意义）", got, cap10)
-	}
-}
+// 注：原 S0 反例（用**旧单文件计数器**证明「多进程共享同一路径 ⇒ 双双通过 ⇒ 总和超限」）
+// 已随旧两套计数器删除而移除 —— 其使命已完成：该事实作为**删除旧机制的理由**记录在设计
+// 文档 §3.3b（唯一实现原则）。当前只有分片日志账本一套，跨进程正确性由下方用例守护。
 
 // TestLedger_CrossProcessVisibility 是**核心不变量**（S2）：共享卷上，
 // 一个进程的追加必须被另一个进程在**判定**时看见 ⇒ 超限被拒。
@@ -186,6 +158,12 @@ func TestLedger_CorruptShardFailClosed(t *testing.T) {
 	// 另一个进程的分片损坏（不可解析）。
 	if err := os.WriteFile(filepath.Join(dir, ledgerShardPrefix+"other"+ledgerShardSuffix), []byte("not-a-number\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	// 让坏分片**进入索引**：索引是账本内唯一枚举来源（不依赖 ListDir ⇒ 见 ledgerIndexName 说明）
+	// ⇒ 不登记就不会被扫描，用例将失去意义。
+	if ierr := os.WriteFile(filepath.Join(dir, ledgerIndexName),
+		[]byte(ledgerShardPrefix+"other"+ledgerShardSuffix+"\n"), 0o644); ierr != nil {
+		t.Fatal(ierr)
 	}
 	before := CorruptLedgerCount()
 	c := NewLedgerCounter(l, 1000)

@@ -908,11 +908,14 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	// sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes 消费；从卷集合注入）。
 	m.renderVolumeWatermarks(&b, h)
 
-	// 容量快照损坏计数（F5）：计数文件是占用量的唯一权威记录，损坏即 used 归零（限额被放宽
-	// 一轮）；除启动 Warn 外必须有可告警面（反复损坏=反复放大）。
-	writeMetric(&b, "sproxy_volume_capacity_corrupt_total", "counter",
-		"Volume capacity snapshots found corrupt or version-unknown (usage reset to 0; limit temporarily unenforced)",
-		capacity.CorruptSnapshotCount())
+	// 配额账本（**唯一实现**）的健康面：分片损坏与「降级 ⇒ 拒写」都必须可告警
+	// （「限额被静默放宽」是本项目认定的最危险形态）。
+	writeMetric(&b, "sproxy_quota_ledger_corrupt_total", "counter",
+		"Quota ledger shards found corrupt/unparsable (writes fail closed until repaired)",
+		capacity.CorruptLedgerCount())
+	writeMetric(&b, "sproxy_quota_ledger_degraded_total", "counter",
+		"Writes rejected because the quota ledger is degraded",
+		capacity.LedgerDegradedCount())
 
 	// 备份/同步任务计数（roadmap 11.5-⑪）：配合 SproxyBackupSyncFailures 告警。
 	writeMetric(&b, "sproxy_backup_tasks_total", "counter", "Total backup/sync tasks recorded", m.backupTasks.Load())
