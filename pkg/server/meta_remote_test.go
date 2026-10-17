@@ -56,7 +56,7 @@ func (f *errProviderFS) FileMeta(context.Context, string) (*meta.FileMeta, error
 var _ meta.Provider = (*errProviderFS)(nil)
 
 // missingFS 是「读不存在键回 os.ErrNotExist」的最小 FS（真实外部 FS 口径——
-// extFS.OpenRead 用 io.ErrUnexpectedEOF 是它自己的测试取舍），用于验证真缺失 → 404。
+// 与 extFS.OpenRead 已统一为 os.ErrNotExist），用于验证真缺失 → 404。
 type missingFS struct{ *extFS }
 
 func (f *missingFS) OpenRead(_ context.Context, p string) (io.ReadCloser, error) {

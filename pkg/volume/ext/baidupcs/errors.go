@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -46,7 +47,11 @@ func mapPCSError(err error) error {
 
 	switch {
 	case containsAny(lower, "not found", "no such file", "does not exist", "文件不存在", "目录不存在"):
-		return fmt.Errorf("%w: %v", ErrNotFound, err)
+		// 双哨兵：保留 `ErrNotFound`（既有调用方 errors.Is 依赖，binary_meta_test 锁定），
+		// 同时可被 `errors.Is(err, os.ErrNotExist)` 识别（项目 not-exist 约定，见
+		// enclosure/region.go）——容量账本 fsStore 据此区分「首次运行空账本」与
+		// 「真读取错误」（前者当空、后者判 corrupt fail-closed）。
+		return fmt.Errorf("%w: %w", ErrNotFound, os.ErrNotExist)
 	case containsAny(lower, "already exists", "file exists", "文件已存在", "同名文件"):
 		return fmt.Errorf("%w: %v", ErrAlreadyExists, err)
 	case containsAny(lower, "permission denied", "access denied", "未登录", "cookie", "权限", "登录"):

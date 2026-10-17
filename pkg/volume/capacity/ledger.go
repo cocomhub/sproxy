@@ -285,12 +285,37 @@ func (s *fsStore) degrade() {
 }
 
 // degradeLocked 切到内存兜底（幂等 + 计数）。
+//
+// **播种**（评审 A2）：降级时把卷内账本的**索引 + 全部分片/基线**复制进内存账本——
+// 否则降级瞬间已记账占用从 `Total()` 视角清零（配额 fail-open ✗，探针实测：写入
+// 4096 后降级 Total 掉到 0 且 ok=true）。复制后降级前后扫描同构：本进程后续增量
+// append 到自己的分片（索引已含 ⇒ 可见）✓。读索引失败 ⇒ 空起点（降级即异常，
+// 由 `LedgerMemFallbackCount` 告警覆盖；宁从 0 起算继续进程内强制）。
 func (s *fsStore) degradeLocked() *memStore {
 	if s.mem == nil {
 		s.mem = newMemStore()
+		s.seedMemFromVolumeLocked()
 		ledgerMemFallback.Add(1)
 	}
 	return s.mem
+}
+
+// seedMemFromVolumeLocked 把卷内账本的**索引 + 分片/基线**复制进内存账本（降级播种）。
+func (s *fsStore) seedMemFromVolumeLocked() {
+	ib, ok, ierr := s.readFileLocked(ledgerIndexName)
+	if ierr != nil || !ok {
+		return // 索引读失败/缺失 ⇒ 空起点（降级即异常，由 LedgerMemFallbackCount 告警）
+	}
+	_ = s.mem.writeAtomic(ledgerIndexName, ib)
+	for line := range strings.SplitSeq(string(ib), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if vb, vok, verr := s.readFileLocked(name); verr == nil && vok {
+			_ = s.mem.writeAtomic(name, vb)
+		}
+	}
 }
 
 func newFSStore(fsys syncpkg.FS, dir string) (*fsStore, error) {
@@ -339,12 +364,15 @@ func (s *fsStore) readFile(name string) ([]byte, bool, error) {
 	s.mu.Unlock()
 	rc, err := s.fs.OpenRead(context.Background(), s.path(name))
 	if err != nil {
-		// **读失败 = 不存在**（ok=false），**不**用 `Stat` 判断存在性 ✗：卷 FS 的 `Stat` 语义
-		// 宽松（实测 `LocalFS.Stat` 对不存在路径也可能成功 ⇒ 会把「首次运行、索引尚未创建」
-		// 误判为「损坏」⇒ 整个账本报错 ✗）。
-		// **损坏**由**内容**判定（分片内容不可解析 ⇒ `scanLocked` 标 corrupt ⇒ fail-closed ✓），
-		// 与「不存在」语义彻底分离 ✓（原则 1：只用「按名读/写」两个原语）。
-		return nil, false, nil
+		// 区分「确定不存在」与「真错误」（评审 A3）：不存在（ok=false,nil）照旧——
+		// 首次运行/索引未建的「空账本」语义；**真错误**（远端抖动/连接重置等）上抛
+		// ⇒ `scanLocked` 标 corrupt ⇒ fail-closed 拒写。此前一律吞成「不存在」⇒
+		// 分片被当 0、`appendLine` 把历史重写为单行 ⇒ 限额 fail-open ✗（探针实测
+		// flaky FS ⇒ Total=0 ok=true）。
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
 	}
 	if rc == nil {
 		// 卷 FS 契约违规（OpenRead 返回 nil reader 且无错误——最小 mock / 畸形实现）：
@@ -387,7 +415,12 @@ func (s *fsStore) readFileLocked(name string) ([]byte, bool, error) {
 	ctx := context.Background()
 	rc, err := s.fs.OpenRead(ctx, s.path(name))
 	if err != nil {
-		return nil, false, nil // 读失败 = 不存在（见 readFile 的说明）
+		// 与 readFile 同口径：真错误（非「确定不存在」）上抛，调用方据此降级/拒写，
+		// **不得**吞成不存在（否则 appendLine 会把历史分片重写为单行，数据丢失 ✗）。
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
 	}
 	defer rc.Close()
 	b, rerr := io.ReadAll(rc)
@@ -617,6 +650,17 @@ func (l *Ledger) shardNamesLocked() ([]string, error) {
 		return nil, err
 	}
 	if !ok {
+		// 索引缺失（评审 A4）：**仅卷内持久化账本**（fsStore）且本进程分片**已登记过**
+		// ⇒ 索引曾存在、现丢失 = 异常 ⇒ 按损坏处理（fail-closed 拒写），不得静默归零
+		// （限额放宽 ✗，探针实测：删除索引后 Total=0 ok=true、分片仍在盘上）。
+		// **内存降级**（memStore）的空索引是降级态正常形态（可被降级播种填充，也可能
+		// 为空）⇒ 不得误判（否则降级卷恒拒写；TestWrapper 系实测拦截）。从未登记 ⇒
+		// 首次运行，空账本合法。
+		if l.registered {
+			if _, isMem := l.store.(*memStore); !isMem {
+				return nil, fmt.Errorf("%w: 索引文件丢失但本进程分片已登记", ErrLedgerDegraded)
+			}
+		}
 		return nil, nil
 	}
 	var out []string
@@ -834,9 +878,10 @@ type LedgerCounter struct {
 	// initErr 非 nil = 账本**构造/上限持久化失败** ⇒ 一切写入 fail-closed，
 	// 绝不静默无额度（「限额被静默放宽」是本项目认定的最危险形态）。
 	initErr error
-	mu      sync.Mutex
-	// reserved 是本进程在途预留（不进账本：预留是瞬态的，崩溃后由对账兜底）。
-	reserved int64
+	// mu 串行化进程内「检查-再追加」（TryAdd）与 Release 钳制：`l.Total()`（锁 l.mu）
+	// 与 `l.Add()`（再锁 l.mu）之间必须原子，否则并发 TryAdd 都读同一 total 双过双入账
+	// 可超限（评审 A1，探针实测 552/3000 次超限）。锁序恒 c.mu → l.mu（无反向嵌套）。
+	mu sync.Mutex
 }
 
 // NewLedgerCounter 构造共享卷卷级计数器（max<=0 表示不限）。
@@ -868,16 +913,17 @@ func (c *LedgerCounter) TryAdd(size int64) error {
 	if c.l == nil {
 		return ErrLedgerDegraded
 	}
+	// 进程内「检查-再追加」原子段（c.mu）：并发 TryAdd 若都读同一 total 再各自 Add，
+	// 双过双入账 ⇒ 超限（评审 A1，探针实测 552/3000 次超限、最大 total=120>100）。
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	total, ok := c.l.Total()
 	if !ok {
 		ledgerDegraded.Add(1)
 		return fmt.Errorf("%w: 无法确定该卷占用，拒绝写入", ErrLedgerDegraded)
 	}
-	c.mu.Lock()
-	reserved := c.reserved
-	c.mu.Unlock()
-	if c.max > 0 && total+reserved+size > c.max {
-		return fmt.Errorf("%w: used=%d reserved=%d size=%d max=%d", ErrVolumeFull, total, reserved, size, c.max)
+	if c.max > 0 && total+size > c.max {
+		return fmt.Errorf("%w: used=%d size=%d max=%d", ErrVolumeFull, total, size, c.max)
 	}
 	// **父链上限校验（必须）**：`c.max` 只是**本卷**上限；卷池可能是**子池**（封装卷继承源卷、
 	// 用户卷挂在全局池下）⇒ 祖先上限同样必须拦住 ✗。旧实现靠 `pool.TryReserve`（`reserveUp`
@@ -921,6 +967,21 @@ func (c *LedgerCounter) mirrorToPool(delta int64) {
 // Release 释放（删除/覆盖/改名后）已确认占用。
 func (c *LedgerCounter) Release(size int64) {
 	if c == nil || c.l == nil || size <= 0 {
+		return
+	}
+	// 防负漂移（评审 A7）：删除**从未入账**的字节（建卷前已存在 / 绕过包装的写入）会把
+	// 账本总和拖负 ⇒ TryAdd 以负基线放行更多（fail-open ✗）。钳制：当前总和不足时
+	// 只释放到 0——账本偏高（fail-closed 方向），由对账收敛。
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	total, ok := c.l.Total()
+	if !ok {
+		return // 无法确定 ⇒ 不释放（保持账本现值，不误放行）
+	}
+	if size > total {
+		size = total
+	}
+	if size <= 0 {
 		return
 	}
 	if err := c.l.Add(-size); err != nil {
