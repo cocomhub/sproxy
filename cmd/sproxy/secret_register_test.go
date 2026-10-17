@@ -1610,3 +1610,82 @@ func plaintextOnDisk(t *testing.T, dir, plaintext string) bool {
 	})
 	return found
 }
+
+// TestSecretdataVolume_QuotaAtFSLayer 钉住 **secretdata 卷配额接线**（用户要求「各种卷
+// 操作后配额正确」）：config 声明 secretdata 卷（target local ⇒ WithLedgerDirIfLocal 本地
+// 账本）上传记账、超限拒绝、删除释放——配额在 FS 层真实生效且与池同源。
+func TestSecretdataVolume_QuotaAtFSLayer(t *testing.T) {
+	t.Parallel()
+	registerSecretVolumeBackends()
+	t.Cleanup(func() { secretDataSet.Store(nil) })
+
+	localRoot := t.TempDir()
+	dataRoot := t.TempDir()
+	root := filepath.Join(t.TempDir(), "default")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rt, rerr := storage.OpenRoot(root)
+	if rerr != nil {
+		t.Fatalf("OpenRoot: %v", rerr)
+	}
+	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot, Capacity: 100,
+		Extra: map[string]any{"target": "local", "root": dataRoot, "secret_url": "secrets://keys/datakey"}}
+	set := registry.NewSet(
+		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, vault},
+		map[string]*storage.Root{"default": rt},
+		map[string]registry.ExternalBackend{},
+		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
+		"default",
+	)
+	t.Cleanup(func() { _ = set.Close() })
+
+	ctx := context.Background()
+	mgr := assembleTestSecretsVolume(t, ctx, set, "keys", localRoot)
+	if _, err := mgr.Create(ctx, "datakey"); err != nil {
+		t.Fatalf("Create key: %v", err)
+	}
+	if err := storeSecretDataSet(set); err != nil {
+		t.Fatalf("storeSecretDataSet: %v", err)
+	}
+	if err := attachSecretdataVolumes(ctx, set, localRoot, nil, secretdataRefsIndependent); err != nil {
+		t.Fatalf("attachSecretdataVolumes: %v", err)
+	}
+	be := set.External("vault")
+	if be == nil {
+		t.Fatal("vault 未装配")
+	}
+	fs := be.FS()
+
+	// 1) 首次写 60 记账成功（secretdata 加密卷 + 本地账本链路）。
+	if err := fs.WriteFile(ctx, storage.LogicalKey{}, "a.bin", strings.NewReader(strings.Repeat("x", 60)), 60, 0); err != nil {
+		t.Fatalf("写入 60 应成功: %v", err)
+	}
+	if got := set.Pool("vault").Usage(); got != 60 {
+		t.Fatalf("写入后卷用量 %d, want 60", got)
+	}
+	// 2) 二次写 60 超限（120>100）必须被拒。
+	if err := fs.WriteFile(ctx, storage.LogicalKey{}, "b.bin", strings.NewReader(strings.Repeat("y", 60)), 60, 0); err == nil {
+		t.Fatal("第二次写 60 超限应被拒绝")
+	}
+	if got := set.Pool("vault").Usage(); got != 60 {
+		t.Fatalf("超限拒绝后卷用量 %d, want 60（不得入账）", got)
+	}
+	// 3) Delete 释放 → 池归零。
+	if err := fs.Delete(ctx, "a.bin"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got := set.Pool("vault").Usage(); got != 0 {
+		t.Fatalf("删除后卷用量 %d, want 0", got)
+	}
+	// 4) 释放后可再写（配额回路打通）。
+	if err := fs.WriteFile(ctx, storage.LogicalKey{}, "c.bin", strings.NewReader(strings.Repeat("z", 60)), 60, 0); err != nil {
+		t.Fatalf("释放后写入 60 应成功: %v", err)
+	}
+	// 5) 账本落**节点本地**（target local ⇒ WithLedgerDirIfLocal 生效）——不污染加密卷
+	//    物理布局（否则账本 blob 混入 secretdata 内容分块）。这条钉住接线：若本地账本
+	//    未生效，目录不存在 ⇒ 本断言必红。
+	if _, err := os.Stat(filepath.Join(localRoot, "meta", "quota", "vault")); err != nil {
+		t.Fatalf("secretdata 卷账本应落节点本地目录（WithLedgerDirIfLocal 未生效）: %v", err)
+	}
+}
