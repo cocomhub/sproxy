@@ -352,18 +352,13 @@ func (h *Handlers) listUserVolumesHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// C3：每卷带本系统已用/限额（外部卷容量纳管查询）。
-	// 来源说明（评审 B4 Minor #5）：/api/volumes/user 的 usage 取后端 UsageProvider（外部卷
-	// 计数），/api/volumes（卷仪表）取容量池 Pool.Usage()（委托子 Scope）——两条链对封装卷
-	// 来源不同（仪表读委托池、本列表读后端计数，后端非 UsageProvider 时 0）。当前 UI 卷管理
-	// 列表不渲染 usage 列、仪表/进度条只消费 /api/volumes，无用户影响；将来在本列表加 usage
-	// 列须先统一来源（封装卷读 Pool.Usage() 与仪表一致）。
+	//
+	// **来源统一**（2026-10-17）：经 `volumeUsage` **单一查询面**（配额层 → 容量池 → 后端
+	// `UsageProvider`）—— 此前本列表自持一份 `UsageProvider` 覆盖（与 `/api/volumes` 仪表
+	// 双链 ⇒ **多漂移面**），已收敛为唯一实现（门禁 R30 钉住）。
 	for i := range vols {
 		if h.volSet != nil {
-			if be := h.volSet.External(vols[i].Name); be != nil {
-				if up, ok := be.(registry.UsageProvider); ok {
-					vols[i].Usage = up.Usage()
-				}
-			}
+			vols[i].Usage = h.volumeUsage(volume.Volume{Name: vols[i].Name, Type: vols[i].Type})
 		}
 		// 敏感信息防护（D-CRITICAL 修复）：store.Get 已把 ExtraEnc 解密回填 Extra——
 		// 直接序列化会把凭据（bduss/stoken/access_key/secret_key 等）明文回传给浏览器。
