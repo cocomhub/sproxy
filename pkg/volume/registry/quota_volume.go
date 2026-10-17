@@ -150,6 +150,40 @@ func (q *QuotaVolume) VolumeStats() (used, total int64, ok bool) {
 	return used, total, ok
 }
 
+// ---- 每用户读侧（片 5：用户配额**按卷持有** ⇒ 联邦查询的**单卷**入口）----
+
+// UserUsage 返回 owner 在**本卷**的已用字节（记账口径）。(used, ok)。
+//
+// **ok=false = 无每用户权威**（未装配 resolver / 该 owner 未登记）⇒ **未知** ✗ —— 调用方
+// **禁当 0** ✗（联邦求和会把「不知道」静默算成「零用量」⇒ 少算 ✗）；与 `VolumeUsed` 同型 ✓。
+//
+// `owner` 按调用方契约传入（本层**不再归一** ✗ —— 避免双口径；`LogicalKey.Owner` 亦为原始值 ✓）。
+// 返回的是该 owner 根 Scope 的**节点级**用量（`commitUp` 沿父链累计 ⇒ 等于该 owner 全子树 ✓）。
+func (q *QuotaVolume) UserUsage(owner string) (int64, bool) {
+	if q == nil {
+		return 0, false
+	}
+	sc := q.scopeFor(owner)
+	if sc == nil {
+		return 0, false
+	}
+	return sc.Usage(), true
+}
+
+// UserCapacity 返回 owner 在**本卷**的上限字节（0 = 不限）。(cap, ok)；ok=false 语义同 `UserUsage`。
+//
+// 运行期改额（`SetMaxBytes`）后读侧跟随 ⇒ 配额调整**无需重建卷** ✓。
+func (q *QuotaVolume) UserCapacity(owner string) (int64, bool) {
+	if q == nil {
+		return 0, false
+	}
+	sc := q.scopeFor(owner)
+	if sc == nil {
+		return 0, false
+	}
+	return sc.MaxBytes(), true
+}
+
 // ---- 每用户配额（双账本预留句柄，与 `UploadRoute.Commit` 同形）----
 
 // Reservation 是配额层的**双账本预留句柄**（每用户 Scope + 整卷池）。两侧各自至多一次

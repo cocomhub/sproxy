@@ -609,3 +609,9 @@ type StatsProvider interface{ VolumeStats() (used, total int64, ok bool) }
 2. **片 6 完整**：`charged_bytes` 记录化 + 释放侧唯一入口 + ~20 站迁移（**同片删旧计算**）。
 3. **M5 剩余**：装配层 `Type=="" || TypeLocal` 特例合并（本地卷经 `registry.NewBackend` 统一分派）。
 4. **片 5 剩余**：per-user 配额**按卷持有** + 联邦查询端点（含 Web UI ⇒ Playwright e2e）。
+   - **已交付（读侧，PR 见 git）**：`QuotaVolume.UserUsage/UserCapacity`（**单卷**每用户读侧 ✓）
+     + `Handlers.federatedUserQuota`（**唯一**汇总入口：只遍历 `AllowedVolumes` ⇒ ACL 收敛 ✓；
+     无权威卷 `HasQuota=false` + 整体 `Partial=true` ⇒ **未知≠0** ✓；上限 0 = 不限 ⇒ `Unlimited` ✓）
+     + `GET /api/quota`（owner **恒取自认证** ✓，不接受请求参数 ✗）。
+   - **仍待**：写侧**按卷持有**（= 片 4 步骤③ / 片 6，与「删上层重复记账」同片 ✗）+ Web UI 呈现
+     （改 UI 须补 Playwright e2e ✗）+ 跨进程/持久账本（片 7 ✓）。
