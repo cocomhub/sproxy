@@ -348,9 +348,10 @@ func (s *fsStore) readFile(name string) ([]byte, bool, error) {
 	}
 	if rc == nil {
 		// 卷 FS 契约违规（OpenRead 返回 nil reader 且无错误——最小 mock / 畸形实现）：
-		// **绝不 nil 解引用 panic**（实测 UI e2e 的 fakeFS 触发）。视为不存在 ⇒ 账本读到空
-		// （首次运行语义），不误伤真实卷、不影响 fail-closed 损坏判定。
-		return nil, false, nil
+		// **绝不 nil 解引用 panic**（实测 UI e2e 的 fakeFS 触发）。同时**不得视为不存在** ✗：
+		// 那会让账本读空 ⇒ used 欠计 ⇒ 限额放宽（fail-open，本包最危险形态）。按「无法确定」
+		// 返回错误 ⇒ `scanLocked` 标 corrupt ⇒ **fail-closed** 拒写，直到修复。
+		return nil, false, fmt.Errorf("capacity: OpenRead 返回 nil reader（卷 FS 契约违规）: %s", s.path(name))
 	}
 	defer rc.Close()
 	b, rerr := io.ReadAll(rc)

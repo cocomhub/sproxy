@@ -273,11 +273,12 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// ⇒ 不持久 ✗），而「delete+recreate 不得归零绕过限额」是**硬要求** ✓ ⇒ 创建时把本地基线
 	// **注入**账本（幂等：仅当账本为空时写）✓。账本仍是权威（强制与查询都用它）✓。
 	baselineUsed := capacity.LoadVolumeUsed(limitPath)
-	// 账本落点：secretdata（加密卷）落**节点本地**明文目录（写卷 FS 上会被加密成随机
-	// 内容分块，污染卷物理布局）；其余类型默认卷内账本（跨进程可见）。
+	// 账本落点：secretdata（加密卷）按**底层本地性**（探测在 WrapStorageVolume 内部）——
+	// 本地 ⇒ 落**节点本地**明文目录（写卷 FS 上会被加密成随机内容分块，污染卷物理布局）；
+	// 共享 ⇒ 账本留卷 FS（跨进程正确，配额不被绕过）。其余类型默认卷内账本。
 	opts := []capacity.WrapOption{}
 	if v.Type == volume.TypeSecretdata {
-		opts = append(opts, capacity.WithLedgerDir(
+		opts = append(opts, capacity.WithLedgerDirIfLocal(
 			filepath.Join(h.userVolumes.Root(), owner, "meta", "quota", req.Name)))
 	}
 	be = capacity.WrapStorageVolume(req.Name, be, nil, nil, limit, baselineUsed, opts...)

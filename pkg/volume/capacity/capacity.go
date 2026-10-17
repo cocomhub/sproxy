@@ -132,9 +132,17 @@ func WrapStorageVolume(name string, be registry.ExternalBackend, scopes registry
 	var counter *LedgerCounter
 	// `be.FS()` 只取一次（同一实例），既作数据面也（默认）作账本底座 ⇒ **不新增直连调用**。
 	raw := be.FS()
-	if cfg.ledgerDir != "" {
+	switch {
+	case cfg.ledgerDir != "":
 		counter = newVolumeLedgerCounterLocal(cfg.ledgerDir, maxBytes, pool, baselineUsed)
-	} else {
+	case cfg.ledgerDirIfLocal != "":
+		// 本地性探测在此（已取 raw）：仅本地卷落节点本地账本；共享卷账本留卷 FS。
+		if lv, ok := raw.(syncpkg.LocalVolume); ok && lv.IsLocalVolume() {
+			counter = newVolumeLedgerCounterLocal(cfg.ledgerDirIfLocal, maxBytes, pool, baselineUsed)
+		} else {
+			counter = newVolumeLedgerCounter(raw, maxBytes, pool, baselineUsed)
+		}
+	default:
 		counter = newVolumeLedgerCounter(raw, maxBytes, pool, baselineUsed)
 	}
 	qv := registry.NewQuotaVolume(storageVolumeOf{name: name, ExternalBackend: be}, scopes, pool, counter, nil)
@@ -153,6 +161,9 @@ type WrapOption func(*wrapConfig)
 type wrapConfig struct {
 	// ledgerDir 非空 ⇒ 账本落**节点本地**明文目录（否则默认建在卷 FS 上）。
 	ledgerDir string
+	// ledgerDirIfLocal 非空 ⇒ 账本落**节点本地**明文目录——**仅当卷 FS 自述本地**
+	// （单实例专用）时；非本地（共享底层）⇒ 账本留卷 FS。
+	ledgerDirIfLocal string
 }
 
 // WithLedgerDir 指定账本的**节点本地**落点（明文目录）。
@@ -163,6 +174,20 @@ type wrapConfig struct {
 // 落节点本地目录正确，重启仍从已占用起算 ✓。
 func WithLedgerDir(dir string) WrapOption {
 	return func(c *wrapConfig) { c.ledgerDir = dir }
+}
+
+// WithLedgerDirIfLocal 指定账本的**节点本地**落点——**仅当卷 FS 自述本地**时生效。
+//
+// **为什么按本地性而非卷类型门控**（安全评审 2026-10-18）：加密卷（secretdata）在卷 FS 上
+// 写账本会被加密成随机 blob（污染卷物理布局，E2E 断言拦截）⇒ 需要落本地；但若该加密卷的
+// 底层是**共享卷**（多实例并发访问），落节点本地会**失去跨进程可见性** ⇒ 各实例独立计数
+// ⇒ 配额强制被绕过（可超限）。故仅**本地**卷落本地账本；共享卷保留卷内账本（跨进程正确，
+// 代价是 blob 形态——共享卷无「内容分块清空」判据）。
+//
+// 本地性探测在 `WrapStorageVolume` **内部**完成（已取卷 FS 一次）⇒ 装配点不再出现
+// 卷 FS 直连（R27 门禁：`internal/archcheck/external_fs_calls.tsv` 无新增登记）。
+func WithLedgerDirIfLocal(dir string) WrapOption {
+	return func(c *wrapConfig) { c.ledgerDirIfLocal = dir }
 }
 
 // storageVolumeOf 把「外部后端 + 已知卷名」提升为**统一存储卷视图**。
@@ -304,17 +329,12 @@ func newVolumeLedgerCounter(raw syncpkg.FS, maxBytes int64, pool *quota.Pool, ba
 func newVolumeLedgerCounterLocal(dir string, maxBytes int64, pool *quota.Pool, baselineUsed int64) *LedgerCounter {
 	led, err := OpenLedgerLocal(dir, volumeNodeID())
 	if err != nil {
-		// 本地目录建账本失败（权限/磁盘）⇒ **退回内存账本**：进程内上限仍然强制，
-		// 只失去重启起算 ⇒ 计数 + 告警（不静默放宽 ✗）。
-		ledgerMemFallback.Add(1)
-		mem, merr := OpenMemLedger(volumeNodeID())
-		if merr != nil {
-			return &LedgerCounter{max: maxBytes, initErr: merr}
-		}
-		if baselineUsed > 0 {
-			_ = mem.Add(baselineUsed)
-		}
-		return NewLedgerCounter(mem, maxBytes).WithPool(pool)
+		// 节点本地目录（节点盘）建账本失败 = **环境故障**（权限/磁盘）。**不得降级内存** ✗：
+		// 降级 ⇒ 重启后账本空、used 回到陈旧基线 ⇒ 限额放宽（fail-open，本包最危险形态）。
+		// 按 fail-closed：该卷拒绝新写入（`initErr` ⇒ TryAdd 拒 + Degraded 告警），
+		// 直到运维修复本地目录。与卷 FS 版（newVolumeLedgerCounter）区分：卷 FS 承载不了
+		// ⇒ 内存降级（跨进程 best-effort）；节点盘失败 ⇒ 全局故障，必须 fail-closed。
+		return &LedgerCounter{max: maxBytes, initErr: err}
 	}
 	// 基线注入（幂等）：仅当账本**当前为空**时写入 ⇒ 不会因重复装配而翻倍 ✓。
 	if baselineUsed > 0 {

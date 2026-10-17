@@ -724,12 +724,13 @@ func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Vol
 		return fmt.Errorf("secret backends: 补装 secretdata 卷 %q 失败（boot fail）: %w", v.Name, berr)
 	}
 	// 卷级容量记账（FS 层）：与非延迟外部卷同—包 CapacityFS（**唯一实现**：分片日志账本）。
-	// 账本落**节点本地**明文目录（`<storageRoot>/meta/quota/<卷名>/`）：secretdata 是加密卷，
-	// 账本写卷 FS 上会被加密成随机名**内容分块**，污染卷物理布局（E2E「内容分块清空」断言
-	// 实测拦截）；`target: local` 单实例专用 ⇒ 无跨进程共享需求，落本地语义正确。
+	// 账本落点按**底层本地性**（本地性探测在 WrapStorageVolume 内部）：`target: local`
+	// （单实例专用）⇒ 落**节点本地**明文目录（`<storageRoot>/meta/quota/<卷名>/`）——
+	// secretdata 是加密卷，账本写卷 FS 上会被加密成随机名**内容分块**，污染卷物理布局
+	// （E2E「内容分块清空」断言实测拦截）；共享底层 ⇒ 账本留卷 FS（跨进程正确，配额不被绕过）。
 	if pool := set.Pool(v.Name); pool != nil {
 		be = capacity.WrapStorageVolume(v.Name, be, nil, pool, pool.MaxBytes(), 0,
-			capacity.WithLedgerDir(filepath.Join(localRoot, "meta", "quota", v.Name)))
+			capacity.WithLedgerDirIfLocal(filepath.Join(localRoot, "meta", "quota", v.Name)))
 	}
 	if aerr := set.AttachExternal(v.Name, be); aerr != nil {
 		return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)

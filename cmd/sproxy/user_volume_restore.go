@@ -165,11 +165,12 @@ func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log 
 	// （创建/重建时经 `LoadVolumeLimitForCreate` 处理 F6 继承后落库）。
 	statePath := capacity.VolumeLimitPath(store.Root(), uv.Owner, uv.Name)
 	baselineUsed := capacity.LoadVolumeUsed(statePath)
-	// 账本落点：secretdata（加密卷）落**节点本地**明文目录（写卷 FS 上会被加密成随机
-	// 内容分块，污染卷物理布局）；其余类型默认卷内账本（跨进程可见）。与建卷路径同口径。
+	// 账本落点：secretdata（加密卷）按**底层本地性**（探测在 WrapStorageVolume 内部）——
+	// 本地 ⇒ 落**节点本地**明文目录（写卷 FS 上会被加密成随机内容分块，污染卷物理布局）；
+	// 共享 ⇒ 账本留卷 FS（跨进程正确，配额不被绕过）。与建卷路径同口径。
 	opts := []capacity.WrapOption{}
 	if uv.Type == volume.TypeSecretdata {
-		opts = append(opts, capacity.WithLedgerDir(
+		opts = append(opts, capacity.WithLedgerDirIfLocal(
 			filepath.Join(store.Root(), uv.Owner, "meta", "quota", uv.Name)))
 	}
 	be = capacity.WrapStorageVolume(uv.Name, be, nil, nil, uv.Capacity, baselineUsed, opts...)
