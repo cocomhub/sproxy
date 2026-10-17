@@ -141,7 +141,7 @@ func TestLedger_CompactPreservesTotal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if err := l.Add(100); err != nil {
 			t.Fatal(err)
 		}
