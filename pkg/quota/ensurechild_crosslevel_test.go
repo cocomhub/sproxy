@@ -39,6 +39,12 @@ func TestEnsureChild_RejectsChildExceedingIntermediateLimit(t *testing.T) {
 	if got := a.Allocated(); got != 100 {
 		t.Fatalf("成功后 a.allocated=100（记在其直接子 b 上），实际 %d", got)
 	}
+	// **逐级记账**判别断言：嵌套分配必须让**每一级**祖先都看到（root 的 allocated 语义是
+	// 「Σ 其直接子上限」⇒ a(100) + b(100) = 200）。只记最近一级祖先的实现会漏掉 root
+	// ⇒ root 的「未分配额度」视图虚高（可观测性缺陷）。
+	if got := p.Allocated(); got != 200 {
+		t.Fatalf("成功后 root.allocated=200（a=100 + b=100），实际 %d（未修必红：只记最近一级祖先）", got)
+	}
 }
 
 // 覆盖边界（如实记录）：**原子性**（并发改额不得把父 allocated 记重）无法构造确定性判别用例——
