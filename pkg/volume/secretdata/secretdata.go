@@ -276,6 +276,10 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if err := os.MkdirAll(opts.TempDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secretdata: 创建临时目录 %s 失败: %w", opts.TempDir, err)
 	}
+	// **启动清理陈旧明文残留**（Step 3，2026-10-18）：Step 2 起读路径**按需解密、不落任何临时
+	// 文件** ⇒ temp 目录里任何 `decrypt-*` 都只能是**升级前崩溃**遗留的明文 ⇒ 启动时 best-effort
+	// 清除，避免明文长期驻留磁盘。写路径的临时物是**密文**（分块目录），前缀不同、不会被误删。
+	cleanupStaleReadTemp(opts.TempDir)
 	fs := &SecretdataFS{
 		inner: inner, secret: opts.Secret, opts: opts, algoVer: algoVer, temp: opts.TempDir, ownedTemp: ownedTemp,
 		index: map[string]*metaEntry{}, dirs: map[string]struct{}{}, dirSegs: map[string]string{},
@@ -517,22 +521,51 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 	if e.meta == nil {
 		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
 	}
-	// **收敛到按需解密句柄**（Step 2）：区间视图 = 同一 reader 的 [offset, offset+size) 窗口
-	// ⇒ 不再把整个区间物化进内存（此前 `rangeReadBytes` 返回整段切片），且底层支持
-	// RangeReader 时只拉目标 blocklet 段的密文（最小下载）。返回类型**只暴露 io.ReadCloser**
-	// （刻意不暴露 Seek：区间视图的 seek 语义易误用；既有调用方 RangeSeeker/DAV 只需要有界流）。
-	r, oerr := s.openReader(ctx, rel)
-	if oerr != nil {
-		return nil, oerr
+	// **本函数是既有「按需随机读」原语**（blocklet 级定位 + 最小下载 + erasure 感知），
+	// 由 `sync.RangeSeeker`（通用 RangeReader→io.ReadSeeker 适配器，4MiB 窗口）与 DAV/Range
+	// 消费方共用 ⇒ **不重复实现定位/解密**。
+	if size < 0 || offset < 0 || size > e.meta.Original.Size-offset {
+		return nil, fmt.Errorf("secretdata: 区间 [%d,%d) 越出文件（size=%d）", offset, offset+size, e.meta.Original.Size)
 	}
-	if size < 0 || offset < 0 || size > r.size-offset {
-		_ = r.Close()
-		return nil, fmt.Errorf("secretdata: 区间 [%d,%d) 越出文件（size=%d）", offset, offset+size, r.size)
+	if size == 0 {
+		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
-	r.pos = offset
-	r.limitEnd = offset + size
-	r.seq = false // 区间视图不是「从 0 起的顺序读」⇒ 不做整文件校验
-	return &rangeReadCloser{r: r}, nil
+	// 复用 fileLevelKey（salt 解码 + 一次派生）——**唯一**的文件级密钥派生入口，避免各处重复。
+	keyBytes, salt, kerr := s.fileLevelKey(e)
+	if kerr != nil {
+		return nil, kerr
+	}
+	out, rerr := s.rangeReadBytes(ctx, e, keyBytes, salt, offset, offset+size)
+	if rerr != nil {
+		return nil, rerr
+	}
+	return io.NopCloser(bytes.NewReader(out)), nil
+}
+
+// rangeReadBytes 逐块只下载/解密含 [offset,end) 的 blocklet 段并拼接覆盖区间明文。
+// 审计：Range 读取侧 decrypt 阶段 span（读取/播放侧解密路径——视频关键帧 seek 时每段独立
+// 解密，aggregate 到单次 range 读；Bytes = 返回明文段总长）。无 ctx logger 时 no-op
+// （与写入侧 encrypt span 对称）。
+func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) (out []byte, err error) {
+	decSpan := audit.From(ctx).Begin("decrypt")
+	defer func() {
+		if err != nil {
+			decSpan.Fail(err)
+			return
+		}
+		decSpan.End("bytes", int64(len(out)))
+	}()
+	for _, ci := range e.meta.Chunks {
+		if ci.Offset >= end || ci.Offset+ci.OrigSize <= offset {
+			continue // 该块与目标区间不相交 → 不下载
+		}
+		seg, rerr := s.readChunkRangeBytes(ctx, e, keyBytes, salt, ci, offset, end)
+		if rerr != nil {
+			return nil, rerr
+		}
+		out = append(out, seg...)
+	}
+	return out, nil
 }
 
 // readChunkBlob 读取底层单个分块 blob（仅含目标区间的块被下载）。去重引用文件的数据
@@ -1270,13 +1303,12 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 	if e.meta == nil {
 		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
 	}
-	// **按需解密、可 seek、不落任何临时文件**（2026-10-18 架构级根治 Step 2）：
-	// Step 1 已去掉密文 staging（峰值 2× → 1×），本步把明文临时文件也去掉（temp → 0）——
-	// 只解密「当前读位置所在的 blocklet」并缓存（内存上界 = 单 blocklet），复用既有段级解密
-	// `readChunkRangeBytes`（底层支持 RangeReader 时只拉目标段密文；缺失块仍可走 erasure 恢复）。
-	// 返回的句柄实现 io.ReadSeeker + io.Closer（消费侧下载/Range/逐块校验强要求可 seek）。
-	// 整文件 SHA-256 改为「从头顺序读完时于 EOF 校验」（语义变化已在设计文档与 §9 说明；
-	// 逐 blocklet 的 GCM 认证始终生效，消费侧 VerifyReadSeeker 另有逐块校验层）。
+	// **复用既有原语，不重复实现随机访问**（2026-10-18 重新整合）：
+	// 随机读的唯一原语是 `OpenRangeRead`（blocklet 级定位 + 最小下载 + erasure 感知），
+	// 而 `sync.RangeSeeker` 早已是「RangeReader → io.ReadSeeker」的通用适配器（4MiB 窗口、
+	// 跨窗续读、ctx 闭包捕获不存 struct）。故 `OpenRead` = **RangeSeeker(over 本卷 OpenRangeRead)**
+	// + 一个**薄**装饰器（整文件 SHA-256 校验 + 读侧上限），**不落任何临时文件**（temp → 0）。
+	// 消费侧 io.ReadSeeker 强要求由此满足（不牺牲可用性）。
 	return s.openReader(ctx, rel)
 }
 

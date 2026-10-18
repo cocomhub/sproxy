@@ -35,7 +35,7 @@
 | `Secret` | 必填 | 密钥字节（装配层经 `secret_url` 从 secrets 卷读取注入） |
 | `Algorithm` | `shardseal/aes-256-gcm` | KDF 档位（`-high` / `-low` 切换；跨档 fail-closed） |
 | `Block` | random 1MiB-200MiB | 分块策略（blocklet 默认 fixed 64KB-4MB） |
-| `TempDir` | 系统随机临时目录 | 本地临时空间（0700） |
+| `TempDir` | 系统随机临时目录 | **写路径**本地临时空间（0700）。读路径自 2026-10-18 起**按需解密、不落任何临时文件**（temp → 0）；启动时会清理目录内 `decrypt-*` 明文残留（升级前崩溃遗留） |
 | `MetaPadBytes` | `Block.Min` | meta pad 目标基准（`+rand()`，受 196B R 地板） |
 | `PreserveMTime` | false | 默认 blob mtime 打散（0-48h 偏移）；true 才透传原始 |
 | `Dedup` | false | **预留，装配层不接线**（整文件内容去重未来由独立子系统承接） |

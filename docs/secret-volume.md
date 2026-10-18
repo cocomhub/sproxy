@@ -433,17 +433,17 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 | 文档/注释漂移 6 处（README「mtime/模式」与「副本卷名」、§3.5「按 mtime 排序」、§8.2 旧「非原地改名」、`files_phys.go` 头注释自相矛盾等） | **P2**：注释强于实现会误导维护者 | 逐条按实现勘误（1 条经复核**证伪**、未改：`writeFileStream` 的 keyframe 注释与 `shardseal.go:337`/上层回退设计一致） |
 
 **已登记残余（如实记录，未修）**：
-- **读放大（2026-10-18 实测修正范围与根因）**：`openRead` 先把**全部分块密文**复制进临时目录
-  （`view-*`）再解密**整份明文**（`decrypt-*`）⇒ 峰值临时盘 ≈ **2× 文件**；内存 ≈ **2× 单块**
-  （默认块上界 200 MiB ⇒ 单路并发读最坏 ~400 MiB RSS）。**范围修正（原描述过宽）**：**播放/Range
-  不落 temp**（`OpenRangeRead` 全程内存解密 + `external_source` 走 RangeSeeker）⇒ 受影响的是
-  **批量路径**：删除/改名前的 `FileChecksum`、跨卷移动/复制的 `copyThenDeleteExternal`、同步比对的
-  `streamEqual`（**两侧同时 OpenRead ⇒ 最坏 4×**）、备份源、以及无 RangeReader 后端的回退。
-  **根因（两条，均已取证）**：① `shardseal.DecryptFile(meta, chunkDir, dstFile, secret)` 是**路径型
-  API**（要求本地分块目录）⇒ 密文必须落盘；② 消费侧**强要求 `io.ReadSeeker`**（`pkg/files/read.go`
-  的断言 + `meta/verify.go` 构造时 `Seek(0,End)`）⇒ 明文必须落盘换取可 seek。
-  **`MaxFileBytes` 只护写路径**（读路径无上限）——原「能防大文件读放大」的假设**已证伪**。
-  根治方向见 §9.2（架构级重设计：读侧与写侧 `EncryptShardsReader` 对称的流式解密 + 按需 blocklet 解密）。
+- ~~读放大~~ **已根治（2026-10-18，Step 1 + Step 2）**：读路径不再复制密文、也不再落明文——
+  `openRead` 返回**按需解密、可 seek** 的句柄（`pkg/volume/secretdata/read_seeker.go`）：只解密
+  「当前读位置所在的 blocklet」并缓存（内存上界 = 单 blocklet；legacy meta 无 blocklet 索引时
+  退化为单块），**temp → 0**；底层实现 `RangeReader` 时只拉目标 blocklet 段的密文（最小下载），
+  缺失块仍可走 parity 恢复。**语义变化（已文档化）**：整文件 SHA-256 由「服务首字节之前全量校验」
+  改为「从头顺序读完时于 EOF 校验」——逐 blocklet 的 GCM 认证始终生效，且下载路径消费侧
+  `meta.VerifyReadSeeker` 另有逐块校验层 ⇒ 端到端保证不减；任何 seek 使该顺序校验失效。
+  顺带修复：parity 恢复结果现按 `ci.OrigSHA256` 校验（此前缺失多于一块时会静默返回垃圾 ✗）。
+  **启动清理**：temp 内 `decrypt-*` 明文残留（升级前崩溃遗留）在 `NewFS` 时清除。
+  已知残余：legacy meta（无 blocklet 索引）读时内存退化为单块；读句柄持 ctx 以保留审计 span 与
+  取消语义（`containedctx` 门禁已按理由豁免）。
 - **外部/加密卷账本不收敛（2026-10-18 测量结论；本轮按用户裁定只测量、不改行为）**：
   **机制已确证**——账本（`LedgerCounter`）→ 真值（`TrueUsageReporter`）的收敛**唯一入口**是
   `Handlers.correctLedgerToTruth`，它只被 `adjustVolumePool` 调用，而后者只对出现在
