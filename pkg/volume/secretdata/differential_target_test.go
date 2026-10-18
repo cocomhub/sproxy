@@ -71,8 +71,8 @@ func (f *fakeRemoteFS) ListDir(_ context.Context, p string) ([]syncpkg.Entry, er
 		}
 		rest := name[len(prefix):]
 		seg := rest
-		if i := strings.IndexByte(rest, '/'); i >= 0 {
-			seg = rest[:i]
+		if before, _, ok := strings.Cut(rest, "/"); ok {
+			seg = before
 			if !seen[seg] {
 				seen[seg] = true
 				out = append(out, syncpkg.Entry{Name: seg, Path: path.Join(p, seg), IsDir: true})
@@ -123,16 +123,20 @@ func (f *fakeRemoteFS) OpenRangeRead(_ context.Context, p string, offset, size i
 	if offset < 0 || size < 0 || offset > int64(len(b)) {
 		return nil, fmt.Errorf("fakeRemoteFS: 区间越界")
 	}
-	end := offset + size
-	if end > int64(len(b)) {
-		end = int64(len(b))
-	}
+	end := min(offset+size, int64(len(b)))
 	f.rangeReads++
 	f.rangeBytes += end - offset
 	return io.NopCloser(bytes.NewReader(b[offset:end])), nil
 }
 
-func (f *fakeRemoteFS) WriteFile(_ context.Context, _ syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
+func (f *fakeRemoteFS) WriteFile(ctx context.Context, _ syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
+	// 模拟 baidupcs 的 **ctx 暂存复用分支**（其 WriteFile 自取 ctx 中的已暂存路径 ⇒ 不再落第二份）：
+	// 使本差分测试成为外部卷的忠实模型（能力面 + 复用语义一致）。
+	if f.stagedReuse {
+		if sp, ok := syncpkg.StagedLocalPathFrom(ctx); ok {
+			return f.WriteFromStagedPath(ctx, p, sp, size, mtime)
+		}
+	}
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -421,8 +425,18 @@ func TestDifferential_LocalVsExternalTarget(t *testing.T) {
 	if lrr == 0 || lrrb == 0 {
 		t.Error("支持 RangeReader 的远端：Range 读不应退化为整对象下载（定点读为 0）✗")
 	}
-	if lsw == 0 || lic == 0 {
-		// 记录（非断言失败）：当前实现未复用暂存路径 ⇒ 远端内部仍拷贝一份（roadmap ① 修复目标）。
-		t.Logf("差异记录（roadmap ① 待修）：分块上传未复用暂存路径 ⇒ 远端内部冗余拷贝 %d 字节（stagedWrites=%d）", lic, lsw)
+	// 性能判据（锁定 2026-10-18 修复）：**凡有本地路径的写**（= 加密分块）都必须经既有
+	// `StagedPathReuse` 机制复用暂存 ⇒ 内层**不得**再落第二份 staging（峰值 1×）。
+	// 口径说明：meta blob 是**内存态**（无本地路径）⇒ 走普通 `WriteFile`、内层按需拷贝，
+	// 属**设计如此**（不额外落本地文件）⇒ 判据取「内部拷贝字节 == 普通写字节」（即**没有任何
+	// 分块**被内层二次拷贝）。修复前实测：stagedWrites=0 且 internalCopies≈加密后大小 ✗ ⇒ 必红。
+	if lsw == 0 {
+		t.Errorf("分块上传未复用调用方暂存路径（stagedWrites=0）⇒ 外部 target 会冗余落第二份 ✗")
+	}
+	if lsb < int64(len(payload)) {
+		t.Errorf("经暂存复用上传的字节 %d 少于明文大小 %d（应覆盖全部分块）✗", lsb, len(payload))
+	}
+	if lic != lwb {
+		t.Errorf("内部 staging 拷贝 %d 字节 ≠ 普通写字节 %d ⇒ 有分块被内层二次拷贝（未复用暂存）✗", lic, lwb)
 	}
 }

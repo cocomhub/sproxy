@@ -1213,15 +1213,33 @@ func (s *SecretdataFS) blobMTime(mtime int64) int64 {
 func (s *SecretdataFS) uploadChunks(ctx context.Context, container, tmp string, mtime int64, chunkNames []string, uploaded *[]string) error {
 	mt := s.blobMTime(mtime)
 	for _, cn := range chunkNames {
-		blob, rerr := os.ReadFile(filepath.Join(tmp, cn))
-		if rerr != nil {
-			return fmt.Errorf("secretdata: 读本地分块 %s 失败: %w", cn, rerr)
+		local := filepath.Join(tmp, cn)
+		// **流式上传**（2026-10-18 性能修复）：此前 `os.ReadFile` 把整块读进内存（单块上限可达
+		// 200MiB ✗）再以 reader 交给内层；改为直接以**本地分块文件**为源 ⇒ 内存 O(1)（不整块驻留）。
+		f, oerr := os.Open(local)
+		if oerr != nil {
+			return fmt.Errorf("secretdata: 打开本地分块 %s 失败: %w", cn, oerr)
 		}
-		p := path.Join(container, cn)
-		if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, p, bytes.NewReader(blob), int64(len(blob)), mt); werr != nil {
+		size, serr := f.Seek(0, io.SeekEnd)
+		if serr == nil {
+			_, serr = f.Seek(0, io.SeekStart)
+		}
+		if serr != nil {
+			f.Close()
+			return fmt.Errorf("secretdata: 取本地分块 %s 长度失败: %w", cn, serr)
+		}
+		// **复用调用方暂存路径**（既有 staging 架构，`syncpkg.StagedPathReuse` 的 ctx 传递形态）：
+		// 把本地分块路径放入 ctx ⇒ 支持该能力的内层（如 baidupcs）**直接消费该路径**，不再落第二份
+		// staging（实测外部 target 曾因此冗余拷贝 ≈ 加密后大小 ✗）⇒ 本地峰值 1×、省一次拷贝。
+		// 生命周期契约（pkg/sync/stagedpath.go）：stagedPath **只读**——本函数返回前不得删除它；
+		// 调用方在全部上传完成后才 `RemoveAll(tmp)`（本函数之外，安全）。
+		wctx := syncpkg.WithStagedLocalPath(ctx, local)
+		werr := s.inner.WriteFile(wctx, syncpkg.LogicalKey{}, path.Join(container, cn), f, size, mt)
+		f.Close()
+		if werr != nil {
 			return fmt.Errorf("secretdata: 上传分块 %s 失败: %w", cn, werr)
 		}
-		*uploaded = append(*uploaded, p)
+		*uploaded = append(*uploaded, path.Join(container, cn))
 	}
 	return nil
 }
