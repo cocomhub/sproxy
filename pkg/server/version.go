@@ -174,6 +174,12 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	// 版本文件尺寸一律取**逻辑（用户可见明文）长度**（P1 修复，2026-10-19）：at-rest 加密卷上
+	// `Stat().Size()` 是**密文**长度（C = P + 每块 28B 头，见 storage.Root.LogicalSize 注释），
+	// 而恢复写入的是明文、配额预留/结算/释放一律按逻辑长度（docs/api.md）。此前用
+	// `verInfo.Size()`（源自 Root().Stat）⇒ 加密卷上按密文记账，且声明的 ClientSize 大于
+	// 实际可读明文 ⇒ 流式写规划越界/失败。
+	verSize := versionLogicalSize(verLoc, verRel, verInfo)
 
 	// 目标卷 = user 文件**当前**所在卷（AD-4：不因跨卷恢复分叉出双份；版本字节不迁移，
 	// 配额仍计在原卷池）。文件已不可定位（已删除）→ 回落版本文件所在卷（与旧孤儿恢复一致）。
@@ -191,7 +197,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// scope 按目标 user 桶 rel 解析（与 upload 同一键），子目录配额逐级检查自动生效。
 	// 卷容量池同族（T6c 安全② reserve-then-commit）：恢复新增/覆盖的 user 字节先 TryReserve
 	// **目标卷**容量池（user 字节物理落在目标卷，写前封顶），任一侧配额不足 → 507 拒绝恢复。
-	scope, pool, res, poolRes, prev, releaseRes, ok := h.reserveRestoreQuota(w, r, remotePath, owner, targetRel, dstTnt, verInfo)
+	scope, pool, res, poolRes, prev, releaseRes, ok := h.reserveRestoreQuota(w, r, remotePath, owner, targetRel, dstTnt, verSize)
 	if !ok {
 		return
 	}
@@ -200,7 +206,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// （temp + fsync + 原子 rename，MkdirAll 目标父目录），避免把文件写回源卷造成双份。
 	written, ok := h.restoreCopyVersionFile(&versionRestoreCopyCtx{
 		w: w, r: r, remotePath: remotePath, versionIDStr: versionIDStr,
-		owner: owner, verLoc: verLoc, verRel: verRel, dstRoot: dstRoot, dstVol: dstVol,
+		owner: owner, verLoc: verLoc, verRel: verRel, verSize: verSize, dstRoot: dstRoot, dstVol: dstVol,
 		targetRel: targetRel, releaseRes: releaseRes,
 	})
 	if !ok {
@@ -339,7 +345,7 @@ func (h *Handlers) backupBeforeRestore(w http.ResponseWriter, r *http.Request, r
 // Adjust(prev, actual) / 新文件 Commit(actual) / 失败 Release()。scope 按目标 user 桶
 // rel 解析（与 upload 同一键），卷容量池同族（T6c 安全② reserve-then-commit），任一侧
 // 配额不足 → 507 拒绝恢复（ok=false）。
-func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, remotePath, owner, targetRel string, dstTnt *storage.Tenant, verInfo os.FileInfo) (*quota.Scope, *quota.Pool, *quota.Reservation, *quota.Reservation, int64, func(), bool) {
+func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, remotePath, owner, targetRel string, dstTnt *storage.Tenant, verSize int64) (*quota.Scope, *quota.Pool, *quota.Reservation, *quota.Reservation, int64, func(), bool) {
 	scope := h.quotaScopeFor(owner, targetRel)
 	pool := h.volumePoolForTenant(dstTnt)
 	prev := int64(0)
@@ -348,7 +354,7 @@ func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, r
 	}
 	var res, poolRes *quota.Reservation
 	if scope != nil {
-		rr, reserveErr := scope.TryReserve(verInfo.Size())
+		rr, reserveErr := scope.TryReserve(verSize)
 		if reserveErr != nil {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: "version_restore", ObjectType: "file", Object: remotePath,
@@ -360,7 +366,7 @@ func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, r
 		res = rr
 	}
 	if pool != nil {
-		rr, reserveErr := pool.TryReserve(verInfo.Size())
+		rr, reserveErr := pool.TryReserve(verSize)
 		if reserveErr != nil {
 			if res != nil {
 				res.Release()
@@ -395,6 +401,7 @@ type versionRestoreCopyCtx struct {
 	versionIDStr string
 	verLoc       *files.VersionLocation
 	verRel       string
+	verSize      int64 // 版本文件的**逻辑（明文）长度**：与 reserveRestoreQuota 同源（见 versionLogicalSize）
 	dstRoot      *storage.Root
 	dstVol       string
 	targetRel    string
@@ -425,16 +432,15 @@ func (h *Handlers) restoreCopyVersionFile(rc *versionRestoreCopyCtx) (int64, boo
 		// 版本恢复：**必须传真实长度**（P2 修复，2026-10-19）。此前恒传 -1（未知长度）——
 		// 对加密卷（secretdata）而言「可 seek 源 + 未知长度」会命中 `ErrUnknownSourceSize`
 		// 守卫（流式分块规划需要确定长度）⇒ 版本恢复到加密卷恒失败（旧实现同样失败，但错误
-		// 文案误导为「空文件不可分块」）。此处按版本文件的真实（逻辑）长度声明；取不到时
-		// 保持 -1（fail-closed，文案已明确）。
-		restoreSize := int64(-1)
-		if vst, verr := rc.verLoc.Tenant.Root().Stat(rc.verRel); verr == nil && vst != nil {
-			restoreSize = vst.Size()
-		}
+		// 文案误导为「空文件不可分块」）。
+		//
+		// 尺寸取 `rc.verSize`（版本查找结果的**逻辑长度**）而**不是**现场 Stat：它与配额预留
+		// （reserveRestoreQuota）**同源**，且加密卷上按明文长度（见 versionLogicalSize）——
+		// 否则声明长度与预留金额不一致、且可能大于实际可读明文。
 		res, werr := h.fileService().WriteTarget(rc.r.Context(), files.WriteTargetInput{
 			Owner: rc.owner, RemotePath: strings.TrimPrefix(rc.targetRel, "user/"),
 			Volume: rc.dstVol, Verify: false, NoLock: true, NoQuota: true, NoRecord: true,
-			ClientSize: restoreSize,
+			ClientSize: rc.verSize,
 		}, src)
 		if werr != nil {
 			rc.releaseRes()
@@ -648,7 +654,31 @@ func (h *Handlers) findDeleteVersionFile(w http.ResponseWriter, r *http.Request,
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVersionFileMissing}, http.StatusNotFound)
 		return nil, "", 0, false
 	}
-	return verLoc, verRel, verInfo.Size(), true
+	return verLoc, verRel, versionLogicalSize(verLoc, verRel, verInfo), true
+}
+
+// versionLogicalSize 返回版本文件的**逻辑（用户可见明文）长度**：配额预留/结算/释放与写路径
+// 声明一律按它记账（P1 修复，2026-10-19）。
+//
+// 为何不能用 `Stat().Size()`：at-rest 加密卷上它是**密文**长度（C = P + 每块 28B 头，见
+// `storage.Root.LogicalSize` 注释），而版本文件是经 `OpenFileEncrypted` 写入的（加密卷上为
+// 密文）、恢复时经 `OpenDecrypted` 读出的却是**明文** P 字节 ⇒ 按 C 记账会多计（满额时误 507），
+// 且声明的 ClientSize = C > P 会让流式分块规划越界。`docs/api.md` 明确要求配额释放用
+// `Root.LogicalSize`。
+//
+// 非加密卷上 LogicalSize 等同 Stat().Size()（无额外代价）；加密卷上 O(块数) 次短读（版本恢复
+// 为低频一次性操作，可接受）。LogicalSize 不可用（报错）时回落 `verInfo.Size()`（best-effort，
+// 不劣于旧行为）。
+func versionLogicalSize(loc *files.VersionLocation, verRel string, verInfo os.FileInfo) int64 {
+	if loc != nil {
+		if n, err := loc.Tenant.Root().LogicalSize(verRel); err == nil {
+			return n
+		}
+	}
+	if verInfo != nil {
+		return verInfo.Size()
+	}
+	return 0
 }
 
 // removeVersionFileForRequest 按请求路径删除版本文件本身（DELETE /api/versions 专用）：

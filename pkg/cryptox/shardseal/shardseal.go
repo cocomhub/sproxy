@@ -125,7 +125,7 @@ func EncryptShardsBytes(data []byte, origName, outDir string, secret []byte, pol
 	return encryptShards(data, srcMeta{name: origName, size: int64(len(data)), mtime: time.Now(), mode: 0o600}, blobDest{outDir: outDir}, secret, policy, padTarget, v)
 }
 
-// ChunkSink 是**单个数据分块 blob 的落点**（EncryptShardsReaderTo 参数）：每产出一块即调用一次，
+// ChunkSink 是**单个数据分块 blob 的落点**（EncryptShardsReaderToChunks 参数）：每产出一块即调用一次，
 // name 为该块最终 blob 名（三段哈希命名，与落盘变体逐字节一致）、blob 为该块密文字节。
 // 生命周期：blob 仅在调用期间有效——sink 若要保留（如异步上传）须自行拷贝。
 //
@@ -135,7 +135,7 @@ type ChunkSink func(name string, blob []byte) error
 
 // blobDest 是加密产物的落点（两条形态，同一实现）：
 //   - outDir 非空（EncryptShards/Bytes/Reader）：分块与 meta 都写入该目录（既有行为，逐字节不变）；
-//   - sinkMode（EncryptShardsReaderTo）：**数据分块**逐块交给 chunkSink（不落盘；chunkSink 为 nil
+//   - sinkMode（EncryptShardsReaderToChunks）：**数据分块**逐块交给 chunkSink（不落盘；chunkSink 为 nil
 //     时只取 meta 信息的调用方 ⇒ 分块也不落盘），meta **不落盘**——它的密文以
 //     `EncryptionResult.MetaBlob`（+ MetaName）返回给调用方（加密卷写路径本就在内存持有 meta
 //     再自行上传，meta 的临时落盘是冗余 I/O）。
@@ -186,16 +186,9 @@ func EncryptShardsReader(src io.Reader, size int64, origName, outDir string, sec
 	return encryptShardsReaderTo(src, size, origName, blobDest{outDir: outDir}, secret, policy, padTarget, v)
 }
 
-// EncryptShardsReaderTo 与 EncryptShardsReader 同构，但**数据分块 blob 不落盘**：逐块交给 sink
-// （块级交错，见 ChunkSink），meta blob 不落盘、经 `EncryptionResult.MetaBlob`/`MetaName` 返回。
-// 分块命名、密文字节、meta 内容与落盘变体**逐字节一致**（同一实现：落盘变体 = 写 outDir 的 sink）。
-// sink 为 nil 时等价于「不落任何 blob」（只产出 meta 信息，供只需元数据的调用方）。
-func EncryptShardsReaderTo(src io.Reader, size int64, origName string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion, sink ChunkSink) (*EncryptionResult, error) {
-	return encryptShardsReaderTo(src, size, origName, blobDest{chunkSink: sink, sinkMode: true}, secret, policy, padTarget, v)
-}
-
-// EncryptShardsReaderToChunks 与 EncryptShardsReaderTo 同构，但**不加密 meta**（
-// MetaBlob/MetaName 留空）：供「meta 归属字段（如 mtime / 乐观锁版本）在加密期间才定型」的调用方
+// EncryptShardsReaderToChunks 与 EncryptShardsReader 同构，但**数据分块 blob 不落盘**（逐块交给
+// sink，见 ChunkSink）且**不加密 meta**（MetaBlob/MetaName 留空，故不接收 padTarget）：供
+// 「meta 归属字段（如 mtime / 乐观锁版本）在加密期间才定型」的调用方
 // **自行按最终 meta 明文加密落盘**——否则内部先加密一份（当时字段未定型）会被丢弃、调用方再加密
 // 一次，白做一遍 AES+JSON 序列化（P2 性能修复，2026-10-19）。数据分块的命名/密文字节与其它变体
 // **逐字节一致**（同一实现）。padTarget 由调用方自行加密 meta 时决定，故本入口不接收它。
@@ -408,7 +401,10 @@ func (s *sectionReader) Read(p []byte) (int, error) {
 // （内存 O(块上限)），加密写盘；块布局/命名/元数据与 encryptWriteChunks 一致（group 已由
 // 预扫描哈希给定，blob 名与 encryptShards 相同）。src 为 io.ReaderAt（已由 EncryptShardsReader
 // 归一为 ReaderAt）；PlanBlocklets 收到 *sectionReader 同现双能力（Reader+ReaderAt）。
-// video-keyframe parseOnce 需全文扫描，本期由上层走 ReadAll 回退，本路径不动 keyframe。
+// video-keyframe：本路径**支持** keyframe 规划——parseOnce 接收 io.ReaderAt（下方把
+// *sectionReader 交给 PlanBlocklets），经 ReaderAt 扫描关键帧表即可，与逐块加密兼容；
+// 上层**无** ReadAll 回退分支（见 shardseal_stream_test.go:TestEncryptShardsReader_VideoKeyframeParity
+// 与 docs/secret-volume.md §9.1）。
 func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, group string, dest blobDest, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo

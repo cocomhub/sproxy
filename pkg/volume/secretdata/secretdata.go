@@ -104,10 +104,12 @@ type Options struct {
 	// 字节大小配置统一 sizex.ByteSize（2026-10-03 用户裁决：禁止 config 裸 int64 字节
 	// 字段）；与 size 比较处显式 int64 转换。
 	//
-	// 背景（Imp-2 已知限制）：当前写路径为「先 io.ReadAll 全文 → 分块加密」，加密核心
-	// 采用内存明文变体（EncryptShardsBytes，峰值 1× 文件）；未做逐块流式（blocklet 双层
-	// 规划 + meta 名锚定全内容哈希要求先有完整明文）。故超限拦截是「大文件内存防护」的
-	// 兜底，部署侧按卷容量/内存设置。
+	// 背景（2026-10-19 更正）：写路径**已有逐块流式变体**——可 seek 源走
+	// `writeFileStream`（`EncryptShardsReaderToChunks` 逐块产出 + 块级交错上传，内存 O(1 块)）；
+	// 非 seek 源与 dedup/erasure 仍走内存明文变体（`EncryptShardsBytes`，峰值 1× 文件）。
+	// 故超限拦截是「**内存写路径**大文件防护」的兜底，部署侧按卷容量/内存设置。
+	// 注：`size<0`（未知长度）时按声明值的预检不可用，内存路径改按本上限 +1 读取并超限拒绝
+	// （`readAllBounded`，2026-10-19），流式路径对未知长度直接 fail-closed（ErrUnknownSourceSize）。
 	MaxFileBytes sizex.ByteSize
 }
 
@@ -746,7 +748,7 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	}
 	// 即时物理删（删即释放）：meta + 全部分块 + parity 一次删完（best-effort；去重文件
 	// 释放去重池引用 + 删本容器 meta）。
-	s.removeVersionMeta(key, e)
+	s.removeVersionMeta(ctx, key, e)
 	// 一次性提交内存态：移出索引、扣 usage、推进版本、回收空目录（原子，无半态）。
 	delete(s.index, key)
 	s.volVersion++
@@ -855,9 +857,14 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 		}
 		return s.writeFileStreamEntry(ctx, rel, r, size, mtime, expected, ifAbsent)
 	}
-	data, err := io.ReadAll(r)
+	// 上限兜底（P2 修复，2026-10-19）：上面的预检按**声明 size** 判定，`size<0`（chunked / 未知
+	// 长度）时它**无法生效** ⇒ 内存路径的 ReadAll 会随流无界增长（大文件整读 ⇒ OOM）。
+	// 配置了 MaxFileBytes（>0）时按**上限 +1** 读，超限即 fail-closed（与流式路径对未知长度
+	// 的拒绝同一口径）；未配置（0=不限）时保持既有「读全」语义
+	// （TestWriteFile_NonSeekableReadsAll 显式锁定，不得回归）。
+	data, err := readAllBounded(r, size, int64(s.opts.MaxFileBytes))
 	if err != nil {
-		return fmt.Errorf("secretdata: 读明文失败: %w", err)
+		return err
 	}
 	// **size 不匹配告警**（2026-10-18 用户裁定；零行为变更）：内存路径按设计「读全」（非 seek 源
 	// 回退 ReadAll，忽略调用方声明 size，见 TestWriteFile_NonSeekableReadsAll 锁定），而流式路径
@@ -902,6 +909,28 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 		return s.writeFileDedup(ctx, wc)
 	}
 	return s.writeFileEncrypted(ctx, wc)
+}
+
+// readAllBounded 读取整份明文：声明长度已知（size>=0）或未配置上限（maxBytes<=0）时等价于
+// io.ReadAll；**未知长度（size<0）且配置了上限**时按上限 +1 读，超限返回 ErrMaxFileBytes
+// （与写路径按声明 size 的预检同一哨兵）——防 chunked/未知长度上传绕过 MaxFileBytes 后
+// 把任意大小内容整读进内存（P2 修复，2026-10-19）。
+func readAllBounded(r io.Reader, size, maxBytes int64) ([]byte, error) {
+	if size >= 0 || maxBytes <= 0 {
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, fmt.Errorf("secretdata: 读明文失败: %w", err)
+		}
+		return data, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("secretdata: 读明文失败: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%w: 未知长度源超过上限 %d（size 未声明 ⇒ 预检不可用）", ErrMaxFileBytes, maxBytes)
+	}
+	return data, nil
 }
 
 // canStream 判定 r 是否可流式加密（io.Seeker / io.ReaderAt 之一）。
@@ -1306,7 +1335,7 @@ func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntr
 		// 早已在 RLock 内取到条目、随后无锁读分块 ⇒ 「要么读到新内容、要么报错、绝不返回
 		// 混合/陈旧内容」的既有承诺不受影响。附带收益：删除判定与执行相对索引变更**原子化**
 		// ⇒ 关闭「并发 CopyFile 在判定之后、删除之前采纳旧分块集合」的窗口。
-		s.removeVersionMeta(wc.rel, prev)
+		s.removeVersionMeta(ctx, wc.rel, prev)
 	}
 	s.mu.Unlock()
 	return nil
@@ -1375,7 +1404,17 @@ func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, lo
 // 「可重读」= 本次调用返回后仍能按**路径重新打开**同一内容（本地文件 / 调用方已暂存路径）：
 // 只有这样的源才能在产物不可用时重算（重读 + 重加密），也才能支撑块级交错丢弃产物（见
 // docs/roadmap.md ①-附 §2 回退链）。管道 / 内存 reader 等一次性源返回 ""。
+// sourcePathProvider 是「包装了本地可重读源」的 reader 暴露路径的**结构化约定**（双方各自
+// 声明接口，避免 pkg/volume 反向依赖 pkg/files）：限速包装（pkg/files.rateLimitReadAtReader）
+// 会透传它 ⇒ 限速开启时块级交错的回退链②（源可重读 ⇒ 降级内存交付）仍然可用。
+type sourcePathProvider interface{ SourcePath() string }
+
 func replayableSourcePath(r io.Reader) string {
+	if sp, ok := r.(sourcePathProvider); ok {
+		if p := sp.SourcePath(); p != "" {
+			return p
+		}
+	}
 	f, ok := r.(*os.File)
 	if !ok {
 		return ""
@@ -1397,14 +1436,26 @@ func replayableSourcePath(r io.Reader) string {
 // 单次远端删除的正常上限并给回滚集合（通常 1..N 个 blob）留足余量。
 const rollbackTimeout = 30 * time.Second
 
+// boundedCleanupCtx 返回**清理动作**（回滚删已上传 blob / 删旧版本 meta+分块）使用的 ctx：
+// **不受调用方取消影响**（否则客户端断开/上层 deadline 场景下清理立即失败 ⇒ 远端孤儿、
+// 或删除路径留下幽灵条目），但**必须有界**——远端 Delete/ListDir 挂起会**持卷锁**（s.mu）
+// 把整卷读写拖死，无界等待不可接受。
+//
+// 单一机制（P2 修复，2026-10-19）：回滚与「成功路径删旧版本」（removeVersionMeta）此前
+// 两种写法——后者用裸 context.Background()（**无界**）⇒ 与本函数同源风险未收口。
+func boundedCleanupCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+}
+
 // rollbackWrite 失败回滚：删除本次已上传的新 meta/分块；再回收本次新建且已成空的容器
 // （目录 meta + 注销映射，删新留旧，F-2）。保有他人并发写入内容的容器不删（安全）。
 func (s *SecretdataFS) rollbackWrite(ctx context.Context, uploaded []string, created []dirCreation) {
 	// 清理必须**不受调用方 ctx 取消影响**（P2 修复，2026-10-19）：写失败常伴随 ctx 取消/
 	// 超时（客户端断开、上层 deadline）——若用已取消的 ctx 做 Delete/ListDir，底层立即返回
 	// ctx.Err() ⇒ 已上传分块/meta 全部残留为远端孤儿。回滚是本卷自身的补偿动作，不随调用方
-	// 取消而放弃；但必须有界（见 rollbackTimeout），否则挂起的远端 I/O 会持锁拖死整卷。
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	// 取消而放弃；但必须有界（见 rollbackTimeout / boundedCleanupCtx），否则挂起的远端 I/O
+	// 会持锁拖死整卷。
+	cctx, cancel := boundedCleanupCtx(ctx)
 	defer cancel()
 	for _, p := range uploaded {
 		_ = s.inner.Delete(cctx, p)
@@ -1491,7 +1542,8 @@ func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container
 	delete(s.dirMTime, dirPath)
 }
 
-// openRead：读取逻辑路径 → 还原解密到临时文件 → 返回 ReadCloser。
+// openRead：读取逻辑路径 → 返回按需解密的 ReadCloser（**不落任何临时文件**：见
+// read_seeker.go 的按需解密 + 既有 sync.RangeSeeker 窗口；temp → 0）。
 func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser, error) {
 	s.mu.RLock()
 	e, ok := s.index[rel]
@@ -2903,13 +2955,16 @@ func (s *SecretdataFS) stagingTracker() syncpkg.StagingQuotaTracker {
 }
 
 // stagingReserve 为一次写路径的**本地临时物**预留 staging 配额，返回幂等释放函数。
-// 记账口径 = 明文大小的**密文上界**（`cipherPeak`：本地分块目录装的是密文块 > 明文）
+// 记账口径 = 明文大小的**密文近似上界**（`cipherPeak`：本地分块目录装的是密文块 > 明文；
+// 「近似」= video-keyframe 密集关键帧可超出该比值，见 cipherPeak 注释）
 // + **2×metaPadTarget**（每文件一个 meta blob 的 pad 上界）。预留失败（配额不足/ctx 取消）
 // ⇒ 调用方必须 fail-closed（不落临时物）。未装配配额（nil）⇒ 直通（返回 no-op 释放），
 // 与 gate 的零回归口径一致。
 func (s *SecretdataFS) stagingReserve(ctx context.Context, size int64) (func(), error) {
-	// 密文块总量上界 + 纠错卷 parity 段上界 + meta pad 上界（后者为「每文件一个 meta blob」的
-	// 历史口径；本路径 meta 实为内存态上传、不落 temp，属保守余量，保留不改）。
+	// 密文块总量上界 + 纠错卷 parity 段上界 + meta pad 上界。后者**不是**多余余量：本路径
+	// （内存写路径 / 去重）经 `EncryptShardsBytes` 的落盘形态产出 meta ⇒ temp 内确有 1 份
+	// meta blob（大小 ≈ metaPadTarget）⇒ 记 2×（1× 实际 + 1× 抖动/实现余量）。
+	// （块级交错路径的 meta 才是内存态直传，见 stagingReserveInterleaved。）
 	need := cipherPeak(max(size, 0)) + s.erasureParityPeak() + 2*int64(s.metaPadTarget())
 	return s.stagingReserveBytes(ctx, need)
 }
@@ -3007,14 +3062,19 @@ func addDirKeysLocked(dirs map[string]struct{}, rel string) {
 //   - 反向（分块先删、meta 后删）的幽灵方向（破坏 §6.2「重启不复现」）：meta 删失败但
 //     分块已删 → 重启把非 Deleted 的 meta 重建为条目（meta 声明 size、分块已缺、OpenRead
 //     失败），且 GC 视非 Deleted meta 为存活而永久保护不清理。**故 meta 恒最先删**。
-func (s *SecretdataFS) removeVersionMeta(ownerKey string, e *metaEntry) {
+func (s *SecretdataFS) removeVersionMeta(ctx context.Context, ownerKey string, e *metaEntry) {
 	if e == nil || e.meta == nil {
 		return
 	}
+	// 远端删除一律走**有界且不被调用方取消打断**的清理 ctx（P2 修复，2026-10-19）：本函数
+	// 在 s.mu **写锁内**被调用（commitEntry / deleteFile / dedup 提交），远端 Delete 挂起会
+	// 持锁拖死整卷；裸 context.Background() 则完全没有上限。与 rollbackWrite 同一机制。
+	cctx, cancel := boundedCleanupCtx(ctx)
+	defer cancel()
 	// 先删本容器 meta（重启重建锚点）：meta 删**失败** → 立即返回、分块全保留 → 重启重建
 	// 完整文件（删除丢失的安全失败，无幽灵/坏数据）；meta 删成功才继续删分块 + parity
 	// （分块删失败 → 无 meta 引用，成孤儿，可选 GC 上收）。
-	if err := s.inner.Delete(context.Background(), path.Join(e.dirSeg, e.metaName)); err != nil {
+	if err := s.inner.Delete(cctx, path.Join(e.dirSeg, e.metaName)); err != nil {
 		return // meta 删失败：分块保留（反幽灵：meta 声明的 size 与分块俱在）
 	}
 	if e.dataDir != "" {
@@ -3029,10 +3089,10 @@ func (s *SecretdataFS) removeVersionMeta(ownerKey string, e *metaEntry) {
 	}
 	dir := s.dataSeg(e)
 	for _, ci := range e.meta.Chunks {
-		_ = s.inner.Delete(context.Background(), path.Join(dir, ci.FileName))
+		_ = s.inner.Delete(cctx, path.Join(dir, ci.FileName))
 	}
 	if p := e.meta.Parity; p != nil && p.FileName != "" {
-		_ = s.inner.Delete(context.Background(), path.Join(dir, p.FileName))
+		_ = s.inner.Delete(cctx, path.Join(dir, p.FileName))
 	}
 }
 

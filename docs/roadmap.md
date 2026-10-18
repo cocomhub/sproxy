@@ -1261,8 +1261,30 @@ type LeaderElector interface {
      使上层重算可行。③ 的判据按设计原文取「源是否**路径**可重读（本地文件/已暂存路径）」。
   4. **「先登记后上传」未覆盖全部上传点**（2026-10-19 新发现，本轮未改）：主写路径的分块/meta 已改
      「先登记后上传」（内层「写成功但复核失败」时可从回滚集合删除），但下列上传点仍是「写后登记」——
-     目录 meta（`secretdata.go` `createContainerLocked`）、同卷复制（`copyContentBlobs`/`copyBlob`）、
-     改名（`writeRenamedMetaLocked`）、`copyFileLocked`（`copy.go`）、**dedup 命中路径**（`features.go`
-     `writeFileDedupHit`：失败时仅 `releasePoolRef`、不删已落 meta）。**影响**：这些路径遇内层
-     write-then-fail 会在远端留孤儿 blob（无数据丢失，属空间泄漏，由既有可选 GC 兜底）。
+     目录 meta（`secretdata.go` `writeDirMetaLocked`，经 `updateDirMetaLocked` 用于目录改名/移动）、
+     同卷复制（`copy.go` `CopyFile`：meta 写入失败无登记/清理）、`copyContentBlobs`/`copyBlob`、
+     改名（`writeRenamedMetaLocked`）、**dedup 命中路径**（`features.go` `writeFileDedupHit`：失败时仅
+     `releasePoolRef`、不删已落 meta）。注：`UpdateMetaExtra`（`meta_provider.go`）用第三种写法
+     （失败即显式 `Delete`）——已覆盖，但同属未收敛族。**影响**：这些路径遇内层 write-then-fail 会在远端
+     留孤儿 blob（无数据丢失，属空间泄漏，由既有可选 GC 兜底）。
      **最小修法**：抽 `uploadAndTrack`（登记→上传→失败即删）并让上述点统一调用。
+  5. **第三轮代码审核（2026-10-19，三路独立 fresh-context）新增残余**（均已登记，未在本轮修复）：
+     - **远端「md5 非权威 + 未报 size」时零校验接受**（`baidupcs/storage.go` `verifyUnreliableMD5Size`）：
+       此时既不比 md5 也不比 size，仅 Warn 后接受（R5-I1「无校验能力≠损坏」的既有裁定）。若远端确实
+       被写成空/截断对象，本进程判成功 ⇒ 后续下载才暴露。建议后续评估：改为「返回 ok=false 走一次
+       有界重试，仍无 size 才接受」或加读侧校验开关。
+     - **流式路径「声明 size < 实际源长度」时静默截断**（内存路径有 Warn，流式无）——已在
+       `docs/secret-volume.md` §9.1 记为已知口径差异，此处补记「建议流式路径也补 Warn」。
+     - **限速包装曾使交错路径失效**：已修（`limitReader` 现透传 `Seek`/`ReadAt`/`SourcePath` 且
+       `ReadAt` 计入令牌桶）——留档备查，避免后续再引入「包装即丢能力」。
+     - **dedup 的 `CopyFile` 丢失 `dataDir` 指向**（副本分块找不到 ⇒ 静默不可读；`Options.Dedup` 装配层
+       未接线 ⇒ 生产不可达）。
+     - **commit/CAS 逻辑三份重复**（`writeFileDedupMiss` 内联提交块 vs `commitDedupEntry` vs `commitEntry`）
+       ⇒ 后续语义修正需改三处，漏改即静默偏差（同上：dedup 未接线）。
+     - **`stagingDegradeReason` 按中文文案子串判「配额不足」**（`strings.Contains(err, "配额")`）：
+       `StagingQuotaTracker` 无哨兵错误 ⇒ 文案一变即静默落入 default（降级原因失真）。建议加
+       `ErrStagingQuotaExceeded` 之类哨兵 + `errors.Is`。
+     - **baidupcs「非权威 md5 + size 不符」直接致命失败**（绕过 `putRetryLoop` 的有界重试）：最终一致
+       窗口内可能误判（取向需裁定：fail-closed 更安全、有界重试更宽容）。
+     - **内存交付降级无全局背压**：staging 配额不足时降级为内存交付（单次 ≤ 单块上限，有界），但并发
+       多次降级无全局上限（既有非 seek 源内存写路径同样如此，非本轮回退链引入）。

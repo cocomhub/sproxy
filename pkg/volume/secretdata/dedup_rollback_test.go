@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"strings"
 	"testing"
 
@@ -90,5 +91,53 @@ func TestDedup_MissUploadFailure_NoPoolBlobOrphan(t *testing.T) {
 	inner.failN = 0
 	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "d/f.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
 		t.Fatalf("回滚后重写应成功: %v", werr)
+	}
+}
+
+// TestDedup_MissMetaUploadFail_NoMetaOrphan（P2 修复，2026-10-19）：去重 miss 路径的 **meta 上传**
+// write-then-fail——此前 metaPath **不在回滚集合内**（只有池分块在）⇒ 内层「写成功但复核失败」
+// 时 meta blob 永久孤儿（与池分块同类，且与本 PR「先登记后上传」口径不一致）。
+// 修：metaPath 在上传前登记进 uploaded，两处显式 Delete(metaPath) 由 rollbackWrite 统一承担。
+//
+// 变异：去掉 `uploaded = append(uploaded, metaPath)` ⇒ 底层残留 file meta blob ⇒ 本用例必红。
+func TestDedup_MissMetaUploadFail_NoMetaOrphan(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	inner := &failAfterWriteFS{FS: syncpkg.NewLocalFS(root, nil), pred: func(p string) bool {
+		return shardseal.IsMetaName(path.Base(p)) // 仅 **file meta**（dir meta 标记为 q，不受影响）
+	}}
+	sfs, err := NewFS(inner, Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+		Dedup:     true,
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	if merr := sfs.MakeDir(ctx, "d"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	payload := bytes.Repeat([]byte("dedup-meta-orphan-"), 64)
+	werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "d/f.bin", bytes.NewReader(payload), int64(len(payload)), 0)
+	if werr == nil {
+		t.Fatal("meta 上传 write-then-fail ⇒ WriteFile 必须失败 ✗")
+	}
+	if !strings.Contains(werr.Error(), "上传去重 meta 失败") {
+		t.Fatalf("夹具未命中去重 meta 上传失败分支: %v", werr)
+	}
+	if !inner.fired {
+		t.Fatal("夹具失效：未观测到 file meta 的内层写")
+	}
+	sfs.mu.RLock()
+	e := sfs.index["d/f.bin"]
+	sfs.mu.RUnlock()
+	if e != nil {
+		t.Fatal("meta 上传失败后不得留下索引条目（半态）✗")
+	}
+	if orphans := residualDataBlobs(t, root); len(orphans) != 0 {
+		t.Fatalf("去重 meta 上传失败回滚后底层残留 %d 个非目录 blob（远端孤儿）✗: %v", len(orphans), orphans)
 	}
 }

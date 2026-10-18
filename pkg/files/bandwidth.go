@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -269,8 +270,63 @@ func limitReader(l BandwidthLimiter, owner string, r io.Reader) io.Reader {
 	if b == nil {
 		return r
 	}
-	return &rateLimitReader{bucket: b, r: r}
+	base := rateLimitReader{bucket: b, r: r}
+	// **透传随机读能力**（P2 修复，2026-10-19）：下游流式卷（如 secretdata）按
+	// io.Seeker/io.ReaderAt 判定能否走「逐块流式 + 块级交错」路径（secretdata.canStream）。
+	// 若这里只暴露 Read，源被降级为纯流 ⇒ 整份明文进内存 + 本地临时峰值回到 O(文件)，
+	// 且「源可重读」判据失效（staging 配额不足时直接 fail-closed 而非降级）——等于**限速
+	// 开关静默关掉交错上传与回退链**。故内层同时支持 ReaderAt + Seeker 时返回增强包装。
+	if ra, aok := r.(io.ReaderAt); aok {
+		if sk, sok := r.(io.Seeker); sok {
+			return &rateLimitReadAtReader{rateLimitReader: base, ra: ra, s: sk}
+		}
+	}
+	return &base
 }
+
+// rateLimitReadAtReader 在限速 Reader 之上**透传 Seek / ReadAt**（见 limitReader 注释）。
+//
+// 关键：ReadAt 也必须**计入限速**（随机读若不消耗令牌 = 限速被架空）；Seek 不消耗带宽，
+// 直接透传。
+type rateLimitReadAtReader struct {
+	rateLimitReader
+	ra io.ReaderAt
+	s  io.Seeker
+}
+
+// ReadAt 限速随机读：先读实际 n 字节，再按 n 消费配额（与 Read 同口径）。
+func (r *rateLimitReadAtReader) ReadAt(p []byte, off int64) (int, error) {
+	n, err := r.ra.ReadAt(p, off)
+	if n > 0 && r.bucket != nil {
+		if werr := r.bucket.WaitN(context.Background(), int64(n)); werr != nil {
+			return n, fmt.Errorf("带宽限速等待失败: %w", werr)
+		}
+	}
+	return n, err
+}
+
+// Seek 透传（定位不消耗带宽）。
+func (r *rateLimitReadAtReader) Seek(offset int64, whence int) (int64, error) {
+	return r.s.Seek(offset, whence)
+}
+
+// SourcePath 透传内层的**本地可重读路径**（若有）：secretdata 的块级交错回退链按它判定
+// 「源可重读 ⇒ 本地 staging 不可用时降级为内存交付」（见 pkg/volume/secretdata.replayableSourcePath）。
+// 结构化约定（双方各自声明接口），避免 pkg/volume 反向依赖 pkg/files。
+func (r *rateLimitReadAtReader) SourcePath() string {
+	if sp, ok := r.r.(interface{ SourcePath() string }); ok {
+		return sp.SourcePath()
+	}
+	if f, ok := r.r.(*os.File); ok {
+		return f.Name()
+	}
+	return ""
+}
+
+var (
+	_ io.ReaderAt = (*rateLimitReadAtReader)(nil)
+	_ io.Seeker   = (*rateLimitReadAtReader)(nil)
+)
 
 // limitResponseWriter 用 owner 桶包装 countingWriter 为限速 ResponseWriter
 // （bucket=nil 时原样返回 countingWriter，保持原行为）。

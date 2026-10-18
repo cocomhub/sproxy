@@ -44,7 +44,11 @@ func (s *SecretdataFS) CurrentVersion() int64 {
 func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err error) {
 	defer func() {
 		if err != nil {
-			s.pruneCreatedDirs(ctx, wc.created)
+			// 回收本次新建的空容器：走**既有回滚机制**（rollbackWrite，uploaded=nil）——它用
+			// `WithTimeout(WithoutCancel(ctx), rollbackTimeout)` 做清理 ⇒ 调用方 ctx 取消/超时时
+			// 仍能回收（此前直接传 ctx ⇒ 取消场景 Delete/ListDir 立即失败，留空容器 + 目录 meta；
+			// 与主写路径的回滚同口径，单一机制）。
+			s.rollbackWrite(ctx, nil, wc.created)
 		}
 	}()
 	key := shardseal.Hash256(wc.data) // 整文件内容完整 SHA-256（256-bit，== 单分块 Chunks[0].OrigSHA256，重启后可重建）
@@ -142,6 +146,11 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 		return err
 	}
 	metaPath := path.Join(wc.container, name)
+	// **先登记后上传**（同 uploadLocalChunk 口径，P2 修复 2026-10-19）：meta blob 名含随机
+	// salt/padding（不复用）⇒ 内层「写成功但复核失败」时它已落远端，必须能从回滚集合删除
+	// （否则永久孤儿）。登记后下方两处显式 `Delete(metaPath)` 由 rollbackWrite 统一承担
+	// （单一机制，避免“同一清理写两遍”）。
+	uploaded = append(uploaded, metaPath)
 	if werr := s.uploadBlob(ctx, metaPath, metaBlob, mt); werr != nil {
 		s.rollbackWrite(ctx, uploaded, nil)
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
@@ -152,14 +161,12 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
 		if _, ok := s.index[wc.rel]; ok {
 			s.mu.Unlock()
-			_ = s.inner.Delete(ctx, metaPath)
 			s.rollbackWrite(ctx, uploaded, nil)
 			return errEntryExists
 		}
 	}
 	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
-		_ = s.inner.Delete(ctx, metaPath)
 		s.rollbackWrite(ctx, uploaded, nil)
 		return versionConflictErr(wc.sv, wc.expected)
 	}
@@ -188,7 +195,7 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 		// chunkSetStillReferenced 遍历 s.index，要求持 s.mu；锁外调用 = 运行时
 		// fatal error: concurrent map iteration and map write，见
 		// TestConcurrentOverwrite_NoIndexDataRace）。并发读语义不变。
-		s.removeVersionMeta(wc.rel, prev)
+		s.removeVersionMeta(ctx, wc.rel, prev)
 	}
 	s.mu.Unlock()
 	return nil
@@ -234,7 +241,7 @@ func (s *SecretdataFS) commitDedupEntry(ctx context.Context, wc writeCtx, e *met
 		// chunkSetStillReferenced 遍历 s.index，要求持 s.mu；锁外调用 = 运行时
 		// fatal error: concurrent map iteration and map write，见
 		// TestConcurrentOverwrite_NoIndexDataRace）。并发读语义不变。
-		s.removeVersionMeta(wc.rel, prev)
+		s.removeVersionMeta(ctx, wc.rel, prev)
 	}
 	s.mu.Unlock()
 	return nil
