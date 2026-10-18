@@ -394,15 +394,22 @@ func (s *fsStore) readFile(name string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	if rc == nil {
-		// 卷 FS 契约违规（OpenRead 返回 nil reader 且无错误——最小 mock / 畸形实现）：
-		// **绝不 nil 解引用 panic**（实测 UI e2e 的 fakeFS 触发）。同时**不得视为不存在** ✗：
-		// 那会让账本读空 ⇒ used 欠计 ⇒ 限额放宽（fail-open，本包最危险形态）。按「无法确定」
-		// 返回错误 ⇒ `scanLocked` 标 corrupt ⇒ **fail-closed** 拒写，直到修复。
-		return nil, false, fmt.Errorf("capacity: OpenRead 返回 nil reader（卷 FS 契约违规）: %s", s.path(name))
+		// **契约二**：不存在以 `(nil, nil)` 表达（**项目约定**，见 `pkg/volume/enclosure/region.go`
+		// 的 regionAbsent 注释：「不存在的两种契约：返回 os/fs.ErrNotExist，**或**按 sync.FS
+		// 契约返回 (nil, nil)」）⇒ 按「不存在」处理（首次运行 = 空账本）。
+		// 既**绝不** nil 解引用 panic ✓，也**不得**判损坏 fail-closed ✗——后者会让任何按该
+		// 约定实现的卷 FS 上账本恒拒写（该卷完全不可用 ✗；实测 ledger_nilreader_contract_test）。
+		// 「真错误 ⇒ 不可确定 ⇒ fail-closed」由下面的 `err != nil` 分支单独保证（语义分离 ✓）。
+		return nil, false, nil
 	}
 	defer rc.Close()
 	b, rerr := io.ReadAll(rc)
 	if rerr != nil {
+		// 读**期间**才暴露的不存在（惰性/流式后端）同样按「不存在」处理；其余读错误
+		// ⇒ 不可确定 ⇒ 上抛，由 `scanLocked` 判 corrupt（fail-closed ✓）。
+		if errors.Is(rerr, os.ErrNotExist) {
+			return nil, false, nil
+		}
 		return nil, false, rerr
 	}
 	return b, true, nil
@@ -441,9 +448,15 @@ func (s *fsStore) readFileLocked(name string) ([]byte, bool, error) {
 		}
 		return nil, false, err
 	}
+	if rc == nil {
+		return nil, false, nil // 契约二：(nil, nil) = 不存在（同 readFile）
+	}
 	defer rc.Close()
 	b, rerr := io.ReadAll(rc)
 	if rerr != nil {
+		if errors.Is(rerr, os.ErrNotExist) {
+			return nil, false, nil
+		}
 		return nil, false, rerr
 	}
 	return b, true, nil

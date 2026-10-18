@@ -36,6 +36,7 @@ import (
 	"fmt"
 
 	"io"
+	"os"
 
 	"path"
 
@@ -331,10 +332,35 @@ func (f *S3FS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, err
 	rc, err := f.client.GetObject(ctx, f.bucket, f.keyFor(relPath), minio.GetObjectOptions{})
 
 	if err != nil {
+		// **项目 not-exist 约定**（见 pkg/volume/enclosure/region.go 的 regionAbsent）：
+		// 「不存在」必须满足 `errors.Is(err, os/fs.ErrNotExist)`——卷内账本据此区分
+		// 「不存在（= 空账本，首次运行）」与「真错误（⇒ 不可确定 ⇒ 判损坏 ⇒ fail-closed
+		// 拒写）」。裸错误会被判为真错误 ⇒ **该 S3 卷全部写入被拒** ✗。
+		if isNotFound(err) {
+			return nil, fmt.Errorf("s3: GetObject %q: %w: %w", relPath, err, os.ErrNotExist)
+		}
 		return nil, fmt.Errorf("s3: GetObject %q: %w", relPath, err)
 	}
 
-	return rc, nil
+	// minio 的 GetObject 是**惰性**的：缺失键的错误在**首次 Read** 才出现 ⇒ 读期同样必须
+	// 映射（否则账本把读期「不存在」当「真错误」⇒ 判损坏 ⇒ 该 S3 卷不可写 ✗）。
+	return &notExistMappedReader{ReadCloser: rc, rel: relPath}, nil
+}
+
+// notExistMappedReader 把**读取期**才暴露的「不存在」映射为 `os.ErrNotExist`（项目约定）。
+// 真错误与 EOF 原样透传：真错误必须保持「不可确定」⇒ 账本 fail-closed 拒写，
+// **绝不**降级为「不存在」（那会让账本把读失败当空账本 ⇒ 限额 fail-open，最危险形态 ✗）。
+type notExistMappedReader struct {
+	io.ReadCloser
+	rel string
+}
+
+func (r *notExistMappedReader) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && isNotFound(err) {
+		return n, fmt.Errorf("s3: 读取 %q: %w: %w", r.rel, err, os.ErrNotExist)
+	}
+	return n, err
 }
 
 // WriteFile 写入对象（PutObject；S3 无 mtime 直接设置——服务端 LastModified 决定）。
