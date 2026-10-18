@@ -1156,3 +1156,45 @@ type LeaderElector interface {
 
 > **本章状态核对（2026-09-28）**：以下 Web UI 硬伤与集群状态均源码实证（行号如上）。
 > 既有 11/12 章 64 份设计文档 + 82 项全覆盖标准继续有效；本章为新增方向。
+
+## secretdata 生产化待办（用户裁定 2026-10-18）
+
+**优先级**：① 基于**百度网盘**的 secretdata 生产功能（完整/稳定/可用/**高性能**）→ ② secrets 按卷格式存取
+→ ③ 回收站各卷独立 + 汇总展示 → ④ 容量/配额收敛（生产级可长期维护）→ ⑤ 其余（不影响基础使用，记录待办）。
+
+### ① secretdata over 外部卷（baidupcs 优先）——**最高优先**
+- [ ] **接线核实与收口**：`type: secretdata` + `extra.target: "<外部卷>/<子目录>"`（嵌套形态，装配层经
+      `TranslateNestedDecl` 翻译为封装声明）在**外部源**上的端到端可用性——装配层已支持（`pkg/volume/enclosure/attach.go`
+      列出 s3/baidupcs/pikpak/cluster 等外部源），但**当前无任何测试覆盖**（e2e 只覆盖 local target）；
+      `docs/secret-volume.md §9` 的「对象存储类外部 target 仍预留」措辞疑为 stale ⇒ 按实测更正。
+- [ ] **性能：消除分块二次本地拷贝**：secretdata 上传每个加密分块用 `s.inner.WriteFile(ctx, key, path, reader, …)`
+      ⇒ 目标卷（baidupcs）会**再落一份本地 staging**（其 `WriteFromStagedPath` / `WithStagedLocalPath` 已具备）。
+      修：把 secretdata 的**临时分块路径**经 `syncpkg.WithStagedLocalPath`（或 `WriteFromStagedPath`）交给内层
+      ⇒ 峰值 1×、省一次本地拷贝（与既有 staging 架构一致，不另造机制）。
+- [ ] **读性能**：确认走 `RangeReader` 段级快路径（baidupcs 已实现 `OpenRangeRead`）⇒ 最小下载；量化
+      「每 4MiB 窗口的 HTTP 请求数」与顺序读吞吐（需实测）。
+- [ ] **稳定性**：远端错误 ⇒ 写失败 + 回滚不留半态（已有）；补「远端超时/重试/断连」下的集成测试
+      （用实现 `RangeReader` + `StagedPathReuse` 的**假外部 FS** 覆盖整链，避免依赖真实网盘凭据）。
+- [ ] **用户面**：`extra.target` 文档 + `config.example.yaml` 示例 + 建卷 API/Web UI 的嵌套建卷路径核对。
+
+### ② secrets 按卷格式存取（用户裁定：URI 读 + 缓存 + 隔离真实存储结构）
+- [ ] secrets 文件改**经卷存取**（按该卷格式加密/封印），使用方仍按 `secrets://<卷>/<名>` 读并缓存；
+      当前 `cmd/sproxy/secret_register.go` 用裸 `NewLocalFS(<root>/secrets)` ⇒ 在**加密默认卷上为明文**（R26 已登记）。
+- [ ] **迁移口径（禁静默降级）**：既有明文 secret 文件在加密卷上 ⇒ 显式迁移（读明文 → 经 Root 加密写 → 校验 →
+      删旧）或显式拒绝 + 运维命令；补 e2e。
+
+### ③ 回收站：各卷独立 + 汇总展示（用户裁定：避免过多复杂度，参考常见 OS 策略）
+- [ ] 软删落**文件所在卷**的 trash（已是）；列表/恢复/清空**按各卷独立**操作 + 提供**跨卷汇总视图**；
+      API 增 `volume` 维度；Web UI 补真浏览器 e2e（硬规则）。
+
+### ④ 容量/配额收敛（必须生产级、可长期维护）
+- [ ] 本地加密卷容量真值接 root 物理扫描（消除 ~0.1% 逻辑口径偏差）。
+- [ ] presign 直传 per-volume 记账/预检（#44① 的 (a) 半；默认禁 + 经写内核登记已做）。
+- [ ] 多 target 副本字节入账（`targets` 实验能力）。
+
+### ⑤ 其余（不影响基础使用）
+- [ ] `TransferFSFor` 第三返回值语义 / `DisableDoubleDownloadVerify` 规格-实现缺口。
+- [ ] Windows 文件锁 flake（`pkg/tunnel/hub` 持久化偶发）。
+- [ ] legacy meta（无 blocklet 索引）读内存退化为单块。
+- [ ] `Decl.SourceKey(owner)`（设计 §5；跨外部卷源封装前置）。
+- [ ] 卷非空但根不可解析时放行（与错密钥挂载期不可区分，既有锁定语义）；两条写路径 size 口径差异（既有锁定）。
