@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,9 +43,12 @@ func TestCloudDownloadManager_RecoverTasksNoUnlockedMapWrite(t *testing.T) {
 	// 由本用例在断言完成后关闭通道 ⇒ 下载随即失败、goroutine 退出（不挂住 mgr.Close）。
 	var mgr *CloudDownloadManager // 先声明：handler 闭包需要引用（实际赋值在下方，早于任何请求）
 	hold := make(chan struct{})
-	// 注：`defer close(hold)` 必须**在** `defer srv.Close()` **之后**注册（LIFO ⇒ 先执行），
-	// 否则 srv.Close() 会等待仍阻塞在 `<-hold` 的 handler ⇒ 用例自身死锁（CI 实测挂满 5min）。
-	defer close(hold)
+	// **放行在途 handler 的唯一入口**（幂等）：① 断言完成后显式调用（让下载失败、goroutine 退出）；
+	// ② defer 保底（LIFO 顺序：本 defer 注册在 srv.Close() 之后 ⇒ 先执行，否则 srv.Close() 会等待
+	// 仍阻塞在 `<-hold` 的 handler ⇒ 死锁，CI 实测挂满 5min）。
+	var holdOnce sync.Once
+	releaseHold := func() { holdOnce.Do(func() { close(hold) }) }
+	defer releaseHold()
 	// **确定性判据**（比 -race 可靠）：下载 goroutine 在**首次请求**时记录它看到的 m.tasks 条数。
 	// 修复后（先收集 → 持锁批量插入 → **之后**才启动 goroutine）⇒ 必为 N；缺陷版在循环中启动
 	// goroutine ⇒ 记录到 < N。`go` 语句提供 happens-before ⇒ 该读取必然发生在插入之后 ⇒ 判定确定。
@@ -104,5 +108,17 @@ func TestCloudDownloadManager_RecoverTasksNoUnlockedMapWrite(t *testing.T) {
 	mgr.mu.RUnlock()
 	if got != n {
 		t.Fatalf("m.tasks 条目=%d, want %d", got, n)
+	}
+
+	// **收尾顺序（CI 实测教训，2026-10-18，两轮才对）**：
+	//   ① 先 `releaseHold()` 放行仍阻塞在 handler 的下载 goroutine——**必须最先**做：`CancelTask`
+	//      会等待该任务的 goroutine 退出，而它正阻塞在 handler 的 `<-hold` 上 ⇒ 先取消即**死锁**
+	//      （实测挂起栈：测试自身停在 WaitGroup.Wait，goroutine 停在 handler 的 `<-hold`）✗；
+	//   ② 再取消全部任务：本用例的恢复路径会**重启**全部 downloading 任务，服务端 500 后它们进入
+	//      **重试循环**（任务超时 3h），只靠 `Close()` 的 30s 等待会让收尾在 CI 上拖到**整包 5m 超时**
+	//      （实测 4m54s ⇒ `Test (ubuntu, +Vault)` fail ✗）。取消是确定性的：任务停止 ⇒ goroutine 退出。
+	releaseHold()
+	for _, id := range ids {
+		_ = mgr.CancelTask(id, "")
 	}
 }
