@@ -149,8 +149,10 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 ### 3.5 preserve_mtime
 
 默认（`false`）底层 blob mtime = 原始 mtime + 随机偏移（0-48h），打散同文件分片的时间聚类特征；
-逻辑层 Stat/ListDir 恒用 meta 密文内原始 mtime 排序，不受打散影响。`preserve_mtime: true` 才透传
-原始 mtime（展示按时间排序用）。
+逻辑层 Stat/ListDir **暴露** meta 密文内原始 mtime（UnixNano；文件条目有值、目录条目恒 0），
+不受打散影响；`preserve_mtime: true` 才把原始 mtime 也透传到底层 blob。
+**2026-10-18 勘误**：旧文案称「恒用 mtime 排序」与实现不符——列表**排序**是「目录优先 + 名称升序」，
+且此前 `Entry.MTime` 根本没填（上层 `ModTime` 因此恒 0，已修）。
 
 ### 3.6 targets（多副本，实验性）
 
@@ -366,7 +368,8 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   `WriteTarget` 外部卷分支（#765 统一写内核）与外部卷对象接缝（Stat 明文 checksum / 列举 /
   改名 / 硬删）覆盖加密卷的文件面；e2e `TestE2E_CLI_Secretdata_CliFileOps` 钉住
   upload/list/meta/download/mv/delete 全链。**仍限**：`list` 未指定 `--volume` 时只列本地卷
-  （外部/加密卷需显式 `--volume`，见下节已知限制）；文件**改名**非原地改名（见已知限制）
+  （外部/加密卷需显式 `--volume`，见下节已知限制）；文件**改名**已收口为「只重写 meta」（O(meta)，
+  内容零改动，2026-10-13；旧文案「非原地改名」已过时）
 - **内容寻址去重**（由独立内容寻址子系统承接；Dedup 预留的权威落点）
 
 ### 8.3 KDF 档位扩展
@@ -415,3 +418,59 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 - **流式写覆盖边界**：可 seek 源（multipart 上传 / `*os.File` / 转存本地产物 / sync / 备份恢复 /
   video-keyframe 块模式 / trusted 装饰器）均走流式；**纯流**（无 seek）与**加密同步 `io.Pipe`**
   回退整读；**带宽限速启用时**（`rateLimitReader` 包装剥 seek）也回退整读（功能不变，仅内存不省）。
+
+### 9.1 生产加固审核（2026-10-18）已修 + 已登记残余
+
+**本批已修（4 路独立子 agent 对抗审核 + 主管逐条复核，均为确定性用例先红后绿）**：
+| 缺陷 | 性质 | 修法 |
+|---|---|---|
+| 覆盖写清理旧版本时 `chunkSetStillReferenced` **在锁外**遍历 `s.index` | **P1**：Go `fatal error: concurrent map iteration and map write`（不可 recover ⇒ 打崩服务） | 判定与删除回到锁内（与 `Delete` 路径一致）；确定性用例 `TestConcurrentOverwrite_NoIndexDataRace`（预置大索引拉长窗口 ⇒ 修复前必红） |
+| 同卷**跨容器**移动逐 blob `Rename`（真 mv）且 meta 最后搬 | **P1**：崩在中途 ⇒ 源 meta 引用已被搬走的分块、目标分块无引用被 GC 清扫 ⇒ **单文件永久不可恢复** | 改为「**复制分块 → 搬/换 meta → 最后删源**」（与 §5 设计一致）；用例 `TestRename_CrossContainer_CrashAtAnyStep_NoDataLoss`（枚举每个崩溃点，修复前 k=1..8 全部「源与目标都不可读」） |
+| **目录**跨父移动「先搬容器、后写 meta」 | **P1**：崩在两步之间 ⇒ 物理位置 ≠ meta 声明 ⇒ 加载侧严格校验 fail-closed ⇒ **整卷拒挂载 = 启动失败** | ① 顺序改为**先写 meta、后搬容器**（中间态信息不丢）；② 加载侧新增 `repairInterruptedDirMoves` **按 meta 声明位置确定性修复**（新序=完成、旧序遗留态=回滚），旧扁平布局仍 fail-closed（判据：物理父**不是已识别容器**）；用例 `TestRenameDir_InterruptedMove_CrashAtAnyStep_MountsAndKeepsData` |
+| `Stat`/`ListDir` **不填 `Entry.MTime`** | **P2**：上层 `ModTime` 恒 0（`list --json`/`meta` 的 `mod_time` 为 0，并削弱同步比对） | 暴露 `metaEntry.mtime`（UnixNano）；用例 `TestStat_ListDir_ExposeLogicalMTime`（含重启后重载） |
+| 内存写路径 `writeCtx` **漏填 size** | **P2**：`Usage()` 记账恒 +0（覆盖写还会误减） | 显式填 `size`；两条写路径口径对齐（声明 size 时按 size 截断，与流式一致） |
+| 流式路径的 Erasure 分支传 `data=nil` | **P2**（当前不可达的**陷阱**） | 改为显式 fail-closed + 准确错误信息（放宽分流条件时不会静默写坏 parity） |
+| 文档/注释漂移 6 处（README「mtime/模式」与「副本卷名」、§3.5「按 mtime 排序」、§8.2 旧「非原地改名」、`files_phys.go` 头注释自相矛盾等） | **P2**：注释强于实现会误导维护者 | 逐条按实现勘误（1 条经复核**证伪**、未改：`writeFileStream` 的 keyframe 注释与 `shardseal.go:337`/上层回退设计一致） |
+
+**已登记残余（如实记录，未修）**：
+- **读放大（2026-10-18 实测修正范围与根因）**：`openRead` 先把**全部分块密文**复制进临时目录
+  （`view-*`）再解密**整份明文**（`decrypt-*`）⇒ 峰值临时盘 ≈ **2× 文件**；内存 ≈ **2× 单块**
+  （默认块上界 200 MiB ⇒ 单路并发读最坏 ~400 MiB RSS）。**范围修正（原描述过宽）**：**播放/Range
+  不落 temp**（`OpenRangeRead` 全程内存解密 + `external_source` 走 RangeSeeker）⇒ 受影响的是
+  **批量路径**：删除/改名前的 `FileChecksum`、跨卷移动/复制的 `copyThenDeleteExternal`、同步比对的
+  `streamEqual`（**两侧同时 OpenRead ⇒ 最坏 4×**）、备份源、以及无 RangeReader 后端的回退。
+  **根因（两条，均已取证）**：① `shardseal.DecryptFile(meta, chunkDir, dstFile, secret)` 是**路径型
+  API**（要求本地分块目录）⇒ 密文必须落盘；② 消费侧**强要求 `io.ReadSeeker`**（`pkg/files/read.go`
+  的断言 + `meta/verify.go` 构造时 `Seek(0,End)`）⇒ 明文必须落盘换取可 seek。
+  **`MaxFileBytes` 只护写路径**（读路径无上限）——原「能防大文件读放大」的假设**已证伪**。
+  根治方向见 §9.2（架构级重设计：读侧与写侧 `EncryptShardsReader` 对称的流式解密 + 按需 blocklet 解密）。
+- **外部/加密卷账本不收敛（2026-10-18 测量结论；本轮按用户裁定只测量、不改行为）**：
+  **机制已确证**——账本（`LedgerCounter`）→ 真值（`TrueUsageReporter`）的收敛**唯一入口**是
+  `Handlers.correctLedgerToTruth`，它只被 `adjustVolumePool` 调用，而后者只对出现在
+  `volumeBuckets` 里的卷执行；`reconcileVolumesFromDisk` 明确**跳过 `RootDir == ""` 的卷**
+  （外部/加密卷无 `storage.Root`）⇒ **secretdata 等外部卷的账本永不收敛** ✗（证据：
+  `pkg/server/quota_reconcile.go:157`、`:168-175`、`:312-341`）。
+  **影响方向**：漂移只来自写/删路径的记账误差（两侧现已同源取卷自报足迹）⇒ **不自愈** ✗；
+  高估 ⇒ 提前 507（保守，可用性损失）；低估 ⇒ 可超限（超售）。
+  **建议修法（下轮，3 行级、可安全论证）**：在跳过分支里对 `RootDir == ""` 的卷同样调用
+  `h.correctLedgerToTruth(v.Name)`——无真值报告者时该函数是 no-op，而 secretdata **已实现**
+  `TrueUsage`（`volumeTrueUsage` 经 `volSet.External` + `TrueUsageOf` 取到）⇒ 直接获得收敛。
+  **仍需专项验证**：端到端测量漂移量级与「在途预留 vs 真值修正」的交互（`CorrectFrom` 修正
+  committed，预留另计）。
+- **明文临时残留**：读路径的解密产物是本地临时文件，仅 `Close` 时删除 ⇒ 进程崩溃可能残留（系统临时目录）。
+- **多 target 副本未纳管**：副本根用裸 `NewLocalFS` 直建，不经 registry ⇒ 不占卷容量池/账本，
+  `reconcileVolumesFromDisk` 只扫有 `RootDir` 的卷 ⇒ 副本字节不参与对账（该能力本身标「实验性」）。
+- **外部卷账本真值收敛不可达（待验）**：`quota_reconcile` 的 `correctLedgerToTruth ← adjustVolumePool`
+  只对有 `RootDir` 的卷调用，secretdata 卷无 `RootDir` ⇒ 该卷 LedgerCounter 不收敛到 `TrueUsage`
+  （机制已确认；实际可绕过的超限窗口取决于写路径按 `PhysFootprint` 的结算，**需专项实测**）。
+- **目录条目 `Entry.MTime` 恒 0**：目录 mtime 不在内存索引（`dirs` 是集合）⇒ 只有文件条目有 mtime。
+- ~~复制 vs 并发覆盖写~~ **已证伪（2026-10-18 复核，非残余）**：`CopyFile` **全程持 `s.mu` 写锁**
+  （`copy.go:42-43`），而覆盖写的旧版本清理也已锁内化（P1 修复）⇒ 二者**无法交错**，副本不可能引用
+  被并发删除的分块。附带观察（性能非正确性）：`CopyFile` 在跨容器情形会**持锁做内容 I/O**，
+  大文件复制期间会阻塞其它写者（后续可评估「锁内只做判定、锁外做拷贝」）。
+- **卷非空却无可用根容器时挂载仍放行**：根目录 meta 缺失/损坏/父引用断裂 ⇒ 子容器父链断裂、索引
+  近乎为空，而 `NewFS` 仍成功 ⇒ 用户看到「空卷」（静默空视图）。**未修**：与「密钥错误」在挂载期不可
+  区分，且既有用例 `TestWrongSecretFails` 显式锁定「挂载放行、读时失败」的语义（便于运维诊断）⇒ 需
+  产品口径（是否给「卷非空但根不可解析」单独的 fail-closed 判据）。
+- **两条写路径对声明 size 的口径不同**：流式（可 seek）按 size 读、多余丢弃；内存（非 seek）读全、
+  **忽略**声明 size（`TestWriteFile_NonSeekableReadsAll` 锁定）。**未修**：统一会破坏既有锁定场景。
