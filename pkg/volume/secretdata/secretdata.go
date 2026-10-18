@@ -1204,7 +1204,17 @@ func (s *SecretdataFS) dirHasContentLocked(d string) bool {
 // 全部文件（目录 meta + 遗留/孤儿分块）并注销 dirSegs/dirs/dirIDs/dirParents。调用方持
 // s.mu；仅当目录确为空（dirHasContentLocked==false）时调用，删除全部文件是安全的。
 func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container, dirPath string) {
-	if inner, err := s.inner.ListDir(ctx, container); err == nil {
+	inner, err := s.inner.ListDir(ctx, container)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// **列目录失败必须 fail-closed**（独立审核 P2，2026-10-18）：此前仅在 `err == nil` 时进
+		// 循环，失败即**静默跳过删除**，却仍注销内存映射 ⇒ 磁盘上目录 meta 仍在（重启后 loadIndex
+		// 扫到 ⇒ **目录"复活"**：幽灵空目录），且容器删除必然失败（残留层级）。改为：**不注销映射、
+		// 不删容器**并显式告警 ⇒ 本会话内该目录仍可见（与磁盘一致），下次 rmdir 再尝试回收。
+		slog.Warn("secretdata: 列目录失败，跳过空容器回收（保留内存映射，防重启后幽灵目录）",
+			"container", container, "dir", dirPath, "error", err)
+		return
+	}
+	{
 		for _, f := range inner {
 			if !f.IsDir {
 				// 目录 meta blob 的落盘字节从真值累计中扣减（列目录时顺带求和 ⇒ 零额外 I/O）。
@@ -2049,6 +2059,9 @@ func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName
 	}
 	if newName != oldName {
 		_ = s.inner.Delete(ctx, path.Join(container, oldName))
+		// 注：独立审核曾疑「改名不更新 dirPhysTotal ⇒ 真值漂移」——**已实测证伪**（2026-10-18）：
+		// 目录 meta blob 的落盘长度与内容无关（pad 目标随机但最终长度恒定，实测 5 次改名恒 353B）
+		// ⇒ 改名不产生漂移，故**不引入**额外的 Stat/累计更新（避免无收益 I/O 与推测性代码）。
 	}
 	return nil
 }
