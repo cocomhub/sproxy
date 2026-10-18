@@ -24,6 +24,8 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/syncmgr":              true,
 	"github.com/cocomhub/sproxy/pkg/downloader":           true,
 	"github.com/cocomhub/sproxy/pkg/cloud":                true,
+	"github.com/cocomhub/sproxy/pkg/compressx":            true, // 转存内核的预处理依赖（历史未登记，随 pkg/transfer 一并纳入）
+	"github.com/cocomhub/sproxy/pkg/transfer":             true, // 统一转存内核（pkg/cloud 转存路径复用其读回校验）
 	"github.com/cocomhub/sproxy/pkg/remote":               true,
 	"github.com/cocomhub/sproxy/pkg/sync/httptransport":   true,
 	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil": true,
@@ -51,9 +53,11 @@ var Levels = map[string]int{
 	// ---- G0 基础库（零 pkg/* 内部依赖，实测）----
 	"github.com/cocomhub/sproxy/pkg/accesskey": 0,
 	// 本工作新增（audit 域）：通用审计日志包，零 pkg/* 依赖（仅标准库），故 G0。
-	"github.com/cocomhub/sproxy/pkg/audit":    0,
-	"github.com/cocomhub/sproxy/pkg/certmgr":  0,
-	"github.com/cocomhub/sproxy/pkg/checksum": 0,
+	"github.com/cocomhub/sproxy/pkg/audit":   0,
+	"github.com/cocomhub/sproxy/pkg/certmgr": 0,
+	// 压缩/解压基础库（G0：零 pkg/* 内部依赖）——转存内核预处理使用。
+	"github.com/cocomhub/sproxy/pkg/compressx": 0,
+	"github.com/cocomhub/sproxy/pkg/checksum":  0,
 	// 可信卷 FileMeta 模型/计算/校验（master 新增）：只导入 storage/volume（G0）。
 	// **必须 G0**：pkg/sync（G0，staging gate 引用 meta）导入它——若登 G1 则 R1 报
 	// 「L0 导入 L1」。
@@ -103,10 +107,13 @@ var Levels = map[string]int{
 	// 本工作新增（cloud 域抽取 S4-B）：云下载**领域包**（任务/分组生命周期 + 持久化 +
 	// 容量/配额结算）。只导入 G0 顶层包（checksum/cloudfilename/quota/storage/downloader），
 	// 容量核算经消费方窄接口（cloud.StorageManager）由装配层注入 ⇒ G1。
-	"github.com/cocomhub/sproxy/pkg/cloud":  1,
-	"github.com/cocomhub/sproxy/pkg/files":  1,
-	"github.com/cocomhub/sproxy/pkg/socks5": 1,
-	"github.com/cocomhub/sproxy/pkg/tunnel": 1,
+	"github.com/cocomhub/sproxy/pkg/cloud": 1,
+	"github.com/cocomhub/sproxy/pkg/files": 1,
+	// 统一转存内核（Execute/writeUnique/读回校验唯一实现）：仅 import pkg/sync(0)、
+	// pkg/files/meta(0) ⇒ L1；被 pkg/cloud(1) 同层复用（同层 import 合法，见 pkg/files）。
+	"github.com/cocomhub/sproxy/pkg/transfer": 1,
+	"github.com/cocomhub/sproxy/pkg/socks5":   1,
+	"github.com/cocomhub/sproxy/pkg/tunnel":   1,
 
 	// ---- G2 装配层 ----
 	"github.com/cocomhub/sproxy/pkg/client": 2,
