@@ -24,6 +24,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // trashDefaultTTL 是回收站默认保留期（7d）。
@@ -119,12 +120,108 @@ func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, qua
 
 // RestoreTrash 恢复回收站文件回 user/ 原路径（trashRel 形如 trash/<orig>.__deleted__<nano>）。
 func (s *Service) RestoreTrash(ctx context.Context, owner, trashRel string) error {
+	return s.RestoreTrashIn(ctx, owner, "", trashRel)
+}
+
+// TrashVolumeRoot 是回收站操作的**单卷视图**（卷名 + 该 owner 的租户根）。
+type TrashVolumeRoot struct {
+	Volume string
+	Root   *storage.Root
+}
+
+// TrashRoots 返回回收站操作应遍历的卷视图（用户裁定 2026-10-19 ③：**各卷独立 + 汇总展示**）：
+//
+//   - volume != "" ⇒ 只该卷（须为**本地根形态**且 owner 可访问；否则明确报错，不静默回落）；
+//   - volume == "" ⇒ **汇总**：owner 允许的**全部本地卷**（默认卷在前）。
+//
+// 为什么必须遍历各卷：软删落**文件所在卷**的 trash（`softDeleteToTrash(root=<文件所在卷>)`），
+// 而此前列表/恢复/清空只认默认卷 ⇒ 其它卷（user 卷/外部卷）的条目**不可见、不可恢复**（记档缺陷）。
+func (s *Service) TrashRoots(owner, volumeName string) ([]TrashVolumeRoot, error) {
 	owner = normalizeOwner(owner)
-	tnt := s.rt.tenantOf(owner)
-	if tnt == nil || tnt.Root() == nil {
-		return &HTTPError{Status: 400, Message: "无效的路径"}
+	if volumeName != "" {
+		return s.trashRootForVolume(owner, volumeName)
 	}
-	root := tnt.Root()
+	return s.trashRootsAll(owner)
+}
+
+// trashRootForVolume 解析**指定卷**的回收站视图（须本地根形态且 owner 可访问；否则明确报错，
+// 不静默回落默认卷——回落会让调用方以为操作的是目标卷）。
+func (s *Service) trashRootForVolume(owner, volumeName string) ([]TrashVolumeRoot, error) {
+	vs := s.rt.volSet()
+	if vs != nil && !vs.HasLocalRoot(volumeName) {
+		return nil, &HTTPError{Status: 400, Message: "该卷不支持回收站（非本地卷）"}
+	}
+	tnt := s.rt.volumeTenant(volumeName, owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, &HTTPError{Status: 404, Message: "卷不存在或无权访问"}
+	}
+	return []TrashVolumeRoot{{Volume: volumeName, Root: tnt.Root()}}, nil
+}
+
+// trashRootsAll 解析**汇总**视图：默认卷在前（单卷客户端看到的顺序不变）+ owner 允许的其余
+// 本地卷（按声明序去重）。
+func (s *Service) trashRootsAll(owner string) ([]TrashVolumeRoot, error) {
+	vs := s.rt.volSet()
+	var out []TrashVolumeRoot
+	seen := map[string]bool{}
+	add := func(name string, root *storage.Root) {
+		if root == nil || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, TrashVolumeRoot{Volume: name, Root: root})
+	}
+	if tnt := s.rt.tenantOf(owner); tnt != nil && tnt.Root() != nil {
+		add(volumeNameForTenant(vs, tnt), tnt.Root())
+	}
+	if vs != nil {
+		for _, v := range volume.AllowedVolumes(vs.All(), owner) {
+			if !vs.HasLocalRoot(v.Name) {
+				continue // 外部/封装卷无本地根 ⇒ 无 trash 桶可遍历
+			}
+			if tnt := s.rt.volumeTenant(v.Name, owner); tnt != nil {
+				add(v.Name, tnt.Root())
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, &HTTPError{Status: 400, Message: "无效的路径"}
+	}
+	return out, nil
+}
+
+// RestoreTrashIn 按卷恢复回收站条目：volume != "" ⇒ 只在该卷；volume == "" ⇒ **跨卷定位**
+// （条目只存在于软删时所在的卷）。
+//
+// 定位判据是**先存在性探测**（`trashEntryExists`）而非「尝试后按错误分类」：底层
+// `Root.AtomicRename` 的「源不存在」会被其**重试层包装**成不可用 `os.IsNotExist` 分类的形态
+// （实测文案「重命名失败（已达最大重试次数 5）: … cannot find the file specified」）⇒ 依赖错误
+// 分类会把「该卷没有此条目」误判为真实故障（500）。存在性探测与底层错误措辞解耦，确定且可诊断。
+func (s *Service) RestoreTrashIn(ctx context.Context, owner, volumeName, trashRel string) error {
+	roots, rerr := s.TrashRoots(owner, volumeName)
+	if rerr != nil {
+		return rerr
+	}
+	for _, vr := range roots {
+		if !s.trashEntryExists(vr.Root, trashRel) {
+			continue
+		}
+		return s.restoreTrashAt(ctx, vr.Root, trashRel)
+	}
+	return &HTTPError{Status: 404, Message: "回收站条目不存在"}
+}
+
+// trashEntryExists 报告该卷的 trash 桶里是否存在该条目（跨卷定位判据，见 RestoreTrashIn）。
+func (s *Service) trashEntryExists(root *storage.Root, trashRel string) bool {
+	if root == nil || trashRel == "" {
+		return false
+	}
+	_, err := root.Stat(trashRel)
+	return err == nil
+}
+
+// restoreTrashAt 在给定卷根上恢复条目（原 RestoreTrash 主体）。
+func (s *Service) restoreTrashAt(ctx context.Context, root *storage.Root, trashRel string) error {
 	// 解析原 rel：去掉 trash/ 前缀 + __deleted__ 后缀。
 	if !strings.HasPrefix(trashRel, trashPrefix) {
 		return &HTTPError{Status: 400, Message: "无效的回收站路径"}
@@ -207,12 +304,33 @@ func restoreTrashMetaSuffix(root *storage.Root, flat, nano string) string {
 // ReleaseUsage 对称（否则 owner Scope 永久虚高直至重启）。
 // C-MAJOR-2：trash 条目为**分层树**（逐段 base64 保留目录层级）——递归遍历清理。
 func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
-	owner = normalizeOwner(owner)
-	tnt := s.rt.tenantOf(owner)
-	if tnt == nil || tnt.Root() == nil {
-		return &HTTPError{Status: 400, Message: "无效的路径"}
+	return s.EmptyTrashIn(ctx, owner, "", false)
+}
+
+// EmptyTrashIn 清空回收站：volume != "" ⇒ 只清该卷；all ⇒ **汇总清空全部卷**；
+// 二者皆无 ⇒ 只清**默认卷**（既有语义，零回归——破坏性默认不静默扩大）。
+func (s *Service) EmptyTrashIn(ctx context.Context, owner, volumeName string, all bool) error {
+	if volumeName == "" && !all {
+		tnt := s.rt.tenantOf(normalizeOwner(owner))
+		if tnt == nil || tnt.Root() == nil {
+			return &HTTPError{Status: 400, Message: "无效的路径"}
+		}
+		return s.emptyTrashAt(owner, volumeNameForTenant(s.rt.volSet(), tnt), tnt.Root())
 	}
-	root := tnt.Root()
+	roots, rerr := s.TrashRoots(owner, volumeName)
+	if rerr != nil {
+		return rerr
+	}
+	for _, vr := range roots {
+		if err := s.emptyTrashAt(owner, vr.Volume, vr.Root); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// emptyTrashAt 清空给定卷根的 trash 桶（原 EmptyTrash 主体；volumeName 供配额释放同口径）。
+func (s *Service) emptyTrashAt(owner, volumeName string, root *storage.Root) error {
 	trashAbs, ok := root.Abs("trash")
 	if !ok {
 		return nil
@@ -231,7 +349,7 @@ func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 		entryRel := trashEntryRel(trashAbs, absPath)
 		// 释放量必须与**预留量**同口径（用户可见逻辑长度，非磁盘密文长度）——见
 		// trashEntryReleaseSize；文件仍存在（下面才 Remove）故 LogicalSize 可取。
-		s.releaseTrashEntryQuota(owner, volumeNameForTenant(s.rt.volSet(), tnt), root, entryRel)
+		s.releaseTrashEntryQuota(owner, volumeName, root, entryRel)
 		_ = root.Remove(entryRel)
 		return nil
 	})
@@ -317,19 +435,42 @@ func trashEntryReleaseSize(root *storage.Root, rel string) int64 {
 // 返回清理条数。按 mtime 判定（软删时的 mtime 由 rename 保持）。
 // C-MAJOR-2：trash 条目为**分层树**——递归遍历，过期条目（文件）删除 + 释放配额。
 func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Duration) (int, error) {
-	owner = normalizeOwner(owner)
-	tnt := s.rt.tenantOf(owner)
-	if tnt == nil || tnt.Root() == nil {
-		return 0, nil
+	return s.CleanupTrashIn(ctx, owner, "", false, ttl)
+}
+
+// CleanupTrashIn 按卷 TTL 清理（语义同 EmptyTrashIn：volume 指定卷 / all 全部卷 / 皆无 = 默认卷）。
+func (s *Service) CleanupTrashIn(ctx context.Context, owner, volumeName string, all bool, ttl time.Duration) (int, error) {
+	if volumeName == "" && !all {
+		tnt := s.rt.tenantOf(normalizeOwner(owner))
+		if tnt == nil || tnt.Root() == nil {
+			return 0, nil
+		}
+		return s.cleanupTrashAt(owner, volumeNameForTenant(s.rt.volSet(), tnt), tnt.Root(), ttl)
 	}
-	root := tnt.Root()
+	roots, rerr := s.TrashRoots(owner, volumeName)
+	if rerr != nil {
+		return 0, rerr
+	}
+	total := 0
+	for _, vr := range roots {
+		n, err := s.cleanupTrashAt(owner, vr.Volume, vr.Root, ttl)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// cleanupTrashAt 在给定卷根上做 TTL 清理（原 CleanupTrash 主体）。
+func (s *Service) cleanupTrashAt(owner, volumeName string, root *storage.Root, ttl time.Duration) (int, error) {
 	trashAbs, ok := root.Abs("trash")
 	if !ok {
 		return 0, nil
 	}
 	now := time.Now()
 	cleaned := 0
-	err := filepath.WalkDir(trashAbs, s.cleanupTrashWalk(owner, volumeNameForTenant(s.rt.volSet(), tnt), root, trashAbs, ttl, now, &cleaned))
+	err := filepath.WalkDir(trashAbs, s.cleanupTrashWalk(owner, volumeName, root, trashAbs, ttl, now, &cleaned))
 	if err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}

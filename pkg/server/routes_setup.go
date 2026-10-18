@@ -226,7 +226,9 @@ func (h *Handlers) trashGCTask(cfg *Config) Task {
 				ttl = 7 * 24 * time.Hour
 			}
 			for _, owner := range h.SyncTenantList()() {
-				_, _ = h.fileService().CleanupTrash(context.Background(), owner, ttl)
+				// all=true：**各卷** trash 都要按 TTL 过期（软删落文件所在卷；此前只清默认卷
+				// ⇒ 其它卷的条目永不过期，记档缺陷 2026-10-19 ③）。
+				_, _ = h.fileService().CleanupTrashIn(context.Background(), owner, "", true, ttl)
 			}
 		},
 	}

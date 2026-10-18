@@ -651,8 +651,45 @@ async function downloadDirArchive(dirPath) {
   } catch (e) { showToast('打包下载失败: ' + e.message, 'error'); }
 }
 
-// --- 回收站 ---
-// showTrash 拉取 /api/trash 并渲染（文件 tab 旁入口；未装配 → 空提示）。
+// --- 回收站（多卷：各卷独立管理 + 汇总展示；用户裁定 2026-10-19 ③）---
+// trashVolumeSel 是当前卷筛选（空串 = 全部卷）。模块级以跨重渲染/重开面板保持用户选择。
+let trashVolumeSel = '';
+// wireTrashPanel 绑定卷筛选与两个清空动作。**用 onclick/onchange 赋值**（非 addEventListener）：
+// 筛选切换会重渲染并重新调用本函数，赋值语义天然避免重复绑定。
+function wireTrashPanel(panel, entries) {
+  const sel = panel.querySelector('#trash-volume-filter');
+  if (sel) {
+    sel.onchange = function () {
+      trashVolumeSel = sel.value;
+      panel.innerHTML = trashTableHtml(entries, trashVolumeSel);
+      wireTrashPanel(panel, entries);
+    };
+  }
+  const volBtn = panel.querySelector('#trash-empty-vol-btn');
+  if (volBtn) {
+    volBtn.onclick = async function () {
+      const scope = trashVolumeSel ? ('卷 ' + trashVolumeSel) : '默认卷';
+      if (!confirm('确认清空' + scope + '的回收站？此操作不可撤销。')) return;
+      const q = trashVolumeSel ? ('?volume=' + encodeURIComponent(trashVolumeSel)) : '';
+      try {
+        await sclientTransport.coreRequest('POST', '/api/trash/empty' + q, {});
+        void showTrash();
+      } catch (e) { showToast('清空失败: ' + e.message, 'error'); }
+    };
+  }
+  const allBtn = panel.querySelector('#trash-empty-all-btn');
+  if (allBtn) {
+    allBtn.onclick = async function () {
+      if (!confirm('确认清空全部卷的回收站？此操作不可撤销。')) return;
+      try {
+        await sclientTransport.coreRequest('POST', '/api/trash/empty?all=1', {});
+        void showTrash();
+      } catch (e) { showToast('清空失败: ' + e.message, 'error'); }
+    };
+  }
+}
+// showTrash 拉取 /api/trash（**汇总**：后端返回 owner 可见各本地卷的条目）并渲染（文件 tab 旁入口；
+// 未装配 → 空提示）。筛选为**前端过滤**（一次请求拿到全部，切换卷不重复请求）。
 async function showTrash() {
   const panel = document.getElementById('trash-panel');
   if (!panel) return;
@@ -660,17 +697,24 @@ async function showTrash() {
   try {
     const res = await sclientTransport.coreRequest('GET', '/api/trash', {});
     const data = sclientUtil.decodeJSON(res.body);
-    panel.innerHTML = trashTableHtml(data.entries || []);
+    const entries = data.entries || [];
+    panel.innerHTML = trashTableHtml(entries, trashVolumeSel);
     // 恢复按钮委托（event delegation）。
     panel.querySelectorAll('.trash-restore-btn').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         const rel = btn.dataset.trashRel;
+        const row = btn.closest('tr');
+        const vol = row ? row.querySelector('td').textContent : '';
+        // 传卷名：后端缺省也能跨卷定位，但显式传卷可避免同名条目歧义、并少一次探测。
+        const q = '/api/trash/restore?file=' + encodeURIComponent(rel) +
+          (vol ? '&volume=' + encodeURIComponent(vol) : '');
         try {
-          await sclientTransport.coreRequest('POST', '/api/trash/restore?file=' + encodeURIComponent(rel), {});
+          await sclientTransport.coreRequest('POST', q, {});
           void showTrash();
         } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
       });
     });
+    wireTrashPanel(panel, entries);
   } catch (e) { panel.innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
 }
 
