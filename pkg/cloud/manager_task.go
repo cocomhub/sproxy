@@ -51,7 +51,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	// 预留存储空间（全局账本 storageMgr 保留，供 /api/stats 与既有测试；租户配额并行）。
 	reserved := totalSize
 	if reserved <= 0 {
-		reserved = cloudReservePlaceholder // 1 GiB 保底
+		// 未知大小：自适应占位（可用空间按并发分摊；见 placeholderFor 的根因说明）。
+		reserved = m.placeholderFor()
 	}
 	if err := m.storage.TryReserveCloud(reserved); err != nil {
 		m.logger.Warn("storage full, cloud download rejected",

@@ -249,11 +249,12 @@ func (m *CloudDownloadManager) reserveCloudResumeLocked(task *CloudTask) (int64,
 	if task.ReservedSize != 0 {
 		return 0, nil
 	}
-	if err := m.storage.TryReserveCloud(cloudReservePlaceholder); err != nil {
+	placeholder := m.placeholderFor() // 自适应占位（同 CreateTask；见 placeholderFor 根因说明）
+	if err := m.storage.TryReserveCloud(placeholder); err != nil {
 		return 0, err
 	}
-	task.ReservedSize = cloudReservePlaceholder
-	return cloudReservePlaceholder, nil
+	task.ReservedSize = placeholder
+	return placeholder, nil
 }
 
 // discardForceResumeFiles force 续传时丢弃旧产物（结果文件 + .partial + .partial.etag）并回拨
