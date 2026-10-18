@@ -679,7 +679,13 @@ func (a *quotaSinkAdapter) Committed() int64 { return a.acc.Committed() }
 func (a *quotaSinkAdapter) Finish(success bool, oldSize int64) {
 	if success {
 		a.acc.ReleaseReserve()
-		a.scope.ReleaseUsage(oldSize)
+		// **必须走 account 的 ReleaseCommitted**（独立复审 P1，2026-10-18）：旧实现只
+		// `a.scope.ReleaseUsage(oldSize)` ⇒ 只回拨 bucket，**不减 acc.committed** ⇒ 账户与 Scope
+		// 分叉（账户恒大于磁盘足迹）。后果：`discardTaskOutputForRedownload` 用账户作「唯一权威」
+		// 回拨时会**多释放**（ReleaseCommittedUp 只钳本层 committed，层内无归属）⇒ 吃掉同桶
+		// 邻居的份额（邻居欠计 ⇒ 短时可越 owner/卷配额，fail-open）。ReleaseCommitted 幂等、
+		// 钳上界，并**同时**回拨 Scope ⇒ 一处收敛、两账同源。
+		a.acc.ReleaseCommitted(oldSize)
 	} else {
 		a.acc.ReleaseReserve()
 	}

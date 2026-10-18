@@ -68,8 +68,13 @@ func VerifyReadback(ctx context.Context, fs syncpkg.FS, rel, wantSHA256 string) 
 		blockHash := sha256.New()
 		// 每块窗口：MultiWriter 同时喂块哈希与整文件哈希（块连续覆盖 [0,Size) ⇒ 顺序推进正确）。
 		mw := io.MultiWriter(blockHash, totalSHA)
-		if _, ierr := io.CopyN(mw, rc, c.Size); ierr != nil {
-			return fmt.Errorf("transfer: 分块 %d 读回失败（%q）: %w", i, rel, ierr)
+		if n, ierr := io.CopyN(mw, rc, c.Size); ierr != nil || n != c.Size {
+			// **短读 = 可证明的内容错**（独立复审 P2，2026-10-18）：io.CopyN 在源提前 EOF 时
+			// 返回 io.EOF（written<n 且 err==nil ⇒ err=EOF），旧实现把它归为"读取 I/O 失败"
+			// ⇒ 不删产物 ⇒ 调用方重试撞 WriteIfAbsent ⇒ **ErrExists 永久阻断**（该 rel 不可交付，
+			// 与内核自述"内容不一致 ⇒ 删除产物"契约矛盾）。截断属 mismatch ⇒ 删除 + 失败。
+			return fmt.Errorf("%w: 分块 %d 短读（目标被截断？读到 %d/%d 字节，%q）",
+				ErrReadbackMismatch, i, n, c.Size, rel)
 		}
 		if got := hex.EncodeToString(blockHash.Sum(nil)); got != c.SHA256 {
 			return fmt.Errorf("%w: 分块 %d 内容不一致（%q）", ErrReadbackMismatch, i, rel)

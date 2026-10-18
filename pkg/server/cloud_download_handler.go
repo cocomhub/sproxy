@@ -1024,6 +1024,11 @@ func (h *Handlers) cloudArchiveToVolume(
 		Scheme:      scheme,
 		Volume:      t.TargetVolume,
 		Rel:         rel,
+		// 写后读回校验受既有 trusted_volume.skip_verify 约束（独立复审 P1，2026-10-18）：
+		// 该开关的文档（docs/config.md）与启动告警（volumes.go warnIfVerifySkipped）都宣称覆盖
+		// 「下载/**转存**读侧数据校验」，但本轮新增的内核读回默认执行 ⇒ 对远端卷（OpenRead =
+		// 一次全量下载）无法关闭、且文档与行为矛盾。此处接线到同一配置源（与 cloud 转存一致）。
+		SkipVerify: h.verifySkipped(),
 	})
 	// 统一转存审计（F8）：本路径是**同步 HTTP**（不经 cloud manager ⇒ 无任务级审计作用域 /
 	// download·transfer span）。按备份等旁路写面的既有口径补一条服务端审计事件，保证

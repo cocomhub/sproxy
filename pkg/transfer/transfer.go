@@ -69,11 +69,12 @@ type TransferRequest struct {
 	// Overwrite 是否允许覆盖已存在目标（false = WriteIfAbsent 拒绝）。
 	Overwrite bool
 	// SkipVerify 跳过写后读回校验（默认执行；见 readback.go。仅极端性能场景使用——
-	// 校验是"存储层静默损坏"的唯一防线）。
+	// 校验是"存储层静默损坏"的唯一防线）。生产接线：trusted_volume.skip_verify
+	// （见 pkg/server/cloud_download_handler.go 的归档转存调用点）。
 	SkipVerify bool
-	// WantSHA256 是调用方已知的**权威整文件摘要**（可选；非空时读回校验额外比对它，
-	// 防"写侧 meta 也按损坏内容生成"的自洽却错误）。
-	WantSHA256 string
+	// 注：曾有 WantSHA256（调用方权威摘要）——**全仓无生产者**（独立复审 2026-10-18）⇒ 已删除
+	// （与已删的 Owner 同纪律）。能力保留在 `VerifyReadback(ctx, fs, rel, wantSHA256)` 形参上，
+	// 由 pkg/cloud 的下载转存路径传入 result.Checksum 使用。
 }
 
 // Execute 执行一次传输：写 source 流（经预处理）到目标卷 rel。
@@ -116,7 +117,7 @@ func verifyAfterWrite(ctx context.Context, req TransferRequest, rel string) erro
 	if req.SkipVerify {
 		return nil
 	}
-	verr := VerifyReadback(ctx, req.Destination, rel, req.WantSHA256)
+	verr := VerifyReadback(ctx, req.Destination, rel, "")
 	switch {
 	case verr == nil, errors.Is(verr, ErrNoProviderMeta):
 		return nil
@@ -228,8 +229,17 @@ func executePacked(ctx context.Context, req TransferRequest, rel string) (string
 
 // packedWrite 打包流的覆盖保护写：复用 writeUnique（WriteIfAbsent 优先，拒绝覆盖；
 // 装饰器 ErrUnsupported 回落 WriteFile）。
+//
+// **size 必须传 -1（未知长度），不得传 0**（独立复审 P1，2026-10-18）：打包流的长度只有读到
+// EOF 才知道，而 0 的语义是「空对象」。s3 后端对此有明写契约（`pkg/volume/ext/s3/s3_fs.go:373`）：
+// 「size<0（未知长度）透传给 minio（走 putObjectMultipartStreamNoLength 读到 EOF）。**不得钳为 0**
+// ——那会声明 0 字节却带非空 body（**数据丢失**/语义冲突）」。实测机制：minio `api.go:1050`
+// `if metadata.contentLength == 0 { req.Body = nil }` ⇒ body 被丢弃、对象 0 字节；同时
+// trusted 的 Calculator 走 TeeReader 收不到字节 ⇒ sidecar 也记「空文件」⇒ **读回校验自洽通过**
+// （结构性不可检出，因为归档路径无权威摘要可比），而 `io.Pipe` 读端从未被读 ⇒ pack goroutine
+// 永久阻塞 ⇒ HTTP 处理 goroutine 泄漏。
 func packedWrite(ctx context.Context, req TransferRequest, rel string, pr io.Reader) error {
-	return writeUnique(ctx, req.Destination, rel, pr, 0, 0, req.Overwrite)
+	return writeUnique(ctx, req.Destination, rel, pr, -1, 0, req.Overwrite)
 }
 
 // targetURL 生成目标 URL（<scheme>://<volume>/<rel>；路径段 percent-encode，

@@ -95,3 +95,32 @@ func TestExecute_ReadbackMatchSucceeds(t *testing.T) {
 		t.Fatalf("成功时产物必须保留（err=%v）", serr)
 	}
 }
+
+// TestExecute_TruncatedTargetDeletesAndFails 短读/截断属**可证明的内容错**（应删除产物）。
+// 未修必红：旧实现把 io.CopyN 的提前 EOF 归为普通 I/O 错误 ⇒ 不删 ⇒ 重试撞 WriteIfAbsent
+// ⇒ ErrExists 永久阻断（该 rel 不可交付）。
+func TestExecute_TruncatedTargetDeletesAndFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	inner := syncpkg.NewLocalFS(t.TempDir(), nil)
+	const full = "GOOD-CONTENT-1234"
+	fs := &corruptingMetaFS{LocalFS: inner, good: goodMeta(t, full)}
+	truncated := full[:len(full)-4] // 比 meta 少 4 字节
+
+	_, err := Execute(ctx, TransferRequest{
+		Entries:     []SourceEntry{{Rel: "src.bin", Size: int64(len(truncated)), Reader: strings.NewReader(truncated)}},
+		Destination: fs,
+		Scheme:      "sproxy",
+		Volume:      "vol",
+		Rel:         "dst.bin",
+	})
+	if err == nil {
+		t.Fatal("目标被截断必须失败")
+	}
+	if !errors.Is(err, ErrReadbackMismatch) {
+		t.Fatalf("截断必须归为 ErrReadbackMismatch（可证明内容错 ⇒ 删产物），实际 %v", err)
+	}
+	if e, serr := inner.Stat(ctx, "dst.bin"); serr == nil && e != nil {
+		t.Fatalf("截断产物必须删除（未修必红：残留 ⇒ 重试被 ErrExists 永久阻断）: %+v", e)
+	}
+}
