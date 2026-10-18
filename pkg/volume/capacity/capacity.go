@@ -630,7 +630,9 @@ func (f *CapacityFS) Link(ctx context.Context, from, to string) error {
 //     调用点静默跳过 ⇒ 文档宣称的「双层配额预检」实际是 no-op）；
 //  3. 无池/无上限（Capacity<=0）= 卷无独立配额概念 ⇒ ErrUnsupported（调用方跳过）。
 //
-// 注：size 为**预期落盘**大小；调用方对压缩/加密后尺寸未知时传源大小 ⇒ 偏保守（fail-closed）。
+// 注：size 为**预期落盘**大小。调用方对压缩/加密后尺寸未知时传**源大小** ⇒ 判定偏保守（fail-closed
+// 方向）；但若目标卷实际落盘远小于源大小（如高压缩比归档），本预检可能**假拒**（对调用方表现为
+// 507/ErrStorageFull，而写入本可成功）——这是 fail-closed 的可用性代价（独立复审 P2 如实标注）。
 func (f *CapacityFS) ReserveSpace(ctx context.Context, p string, size int64) error {
 	if rs, ok := f.inner.(syncpkg.ReserveSpace); ok {
 		if err := rs.ReserveSpace(ctx, p, size); !errors.Is(err, syncpkg.ErrUnsupported) {

@@ -1356,31 +1356,51 @@ const maxContainerDepth = 64
 // 校验布局——**旧扁平布局不支持、无兼容**（fail-closed 拒绝挂载）。
 func (s *SecretdataFS) dirContainers(ctx context.Context, root []syncpkg.Entry) ([]string, error) {
 	var out []string
-	var walk func(prefix string, entries []syncpkg.Entry, depth int) error
-	walk = func(prefix string, entries []syncpkg.Entry, depth int) error {
-		if depth > maxContainerDepth {
-			return fmt.Errorf("secretdata: 容器树深度超过上限 %d（目录 %q）", maxContainerDepth, prefix)
-		}
-		for _, e := range entries {
-			if !e.IsDir {
-				continue
-			}
-			p := path.Join(prefix, e.Name)
-			out = append(out, p)
-			sub, lerr := s.inner.ListDir(ctx, p)
-			if lerr != nil {
-				return fmt.Errorf("列容器 %q 失败: %w", p, lerr)
-			}
-			if werr := walk(p, sub, depth+1); werr != nil {
-				return werr
-			}
-		}
-		return nil
-	}
-	if werr := walk("", root, 0); werr != nil {
-		return nil, werr
+	if err := s.walkContainers(ctx, "", root, 0, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// walkContainers 递归收集容器目录（depth 防异常/恶意深树导致栈/IO 爆炸）。
+// 独立复审 P2 修复：对 ErrNotExist 容忍（并发删除/GC 是良性的），与
+// scanContainerDirMeta/loadContainerFileMetas 一致（见 listSubContainer）。
+func (s *SecretdataFS) walkContainers(ctx context.Context, prefix string, entries []syncpkg.Entry, depth int, out *[]string) error {
+	if depth > maxContainerDepth {
+		return fmt.Errorf("secretdata: 容器树深度超过上限 %d（目录 %q）", maxContainerDepth, prefix)
+	}
+	for _, e := range entries {
+		if !e.IsDir {
+			continue
+		}
+		p := path.Join(prefix, e.Name)
+		*out = append(*out, p)
+		sub, skip, err := s.listSubContainer(ctx, p)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if werr := s.walkContainers(ctx, p, sub, depth+1, out); werr != nil {
+			return werr
+		}
+	}
+	return nil
+}
+
+// listSubContainer 列子容器：ErrNotExist（并发删除/GC）⇒ skip=true（不算故障）；其它错误上抛。
+// 与 scanContainerDirMeta/loadContainerFileMetas 的处置**保持一致**（独立复审 P2，2026-10-18：
+// 此前这里对 ErrNotExist 也直接拒绝挂载 ⇒ 与那两处不一致）。
+func (s *SecretdataFS) listSubContainer(ctx context.Context, p string) ([]syncpkg.Entry, bool, error) {
+	sub, err := s.inner.ListDir(ctx, p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("列容器 %q 失败: %w", p, err)
+	}
+	return sub, false, nil
 }
 
 // validateNestedContainers 校验**只支持嵌套布局**（用户口径 2026-10-14：不支持旧格式目录、无兼容）。

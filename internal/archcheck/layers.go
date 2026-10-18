@@ -109,8 +109,9 @@ var Levels = map[string]int{
 	// 容量核算经消费方窄接口（cloud.StorageManager）由装配层注入 ⇒ G1。
 	"github.com/cocomhub/sproxy/pkg/cloud": 1,
 	"github.com/cocomhub/sproxy/pkg/files": 1,
-	// 统一转存内核（Execute/writeUnique/读回校验唯一实现）：仅 import pkg/sync(0)、
-	// pkg/files/meta(0) ⇒ L1；被 pkg/cloud(1) 同层复用（同层 import 合法，见 pkg/files）。
+	// 统一转存内核（Execute/writeUnique/读回校验唯一实现）：import pkg/sync(0)、pkg/files/meta(0)、
+	// pkg/compressx(0)、pkg/files(1) ⇒ 取 max+1 = 1（L1）；被 pkg/cloud(1) 同层复用（同层 import
+	// 合法，见 pkg/files）。独立复审 D-P2-7：此前注释只列了前两项，与真实 import 图不符。
 	"github.com/cocomhub/sproxy/pkg/transfer": 1,
 	"github.com/cocomhub/sproxy/pkg/socks5":   1,
 	"github.com/cocomhub/sproxy/pkg/tunnel":   1,

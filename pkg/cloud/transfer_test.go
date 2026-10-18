@@ -1532,3 +1532,39 @@ func (c *capableFS) Delete(ctx context.Context, p string) error    { return c.in
 func (c *capableFS) MakeDir(ctx context.Context, p string) error   { return c.inner.MakeDir(ctx, p) }
 
 var _ syncpkg.StagingQuotaCapable = (*capableFS)(nil)
+
+// TestVerifyByFileMeta_WantMismatchMapsToContentMismatch 覆盖 `ErrReadbackWantMismatch` →
+// `ErrTransferContentMismatch` 的**映射分支**（独立复审 A-P2-4：既有
+// TestVerifyByFileMeta_LocalTamperDetected 的 meta 由**原始**内容生成、目标写的是**篡改**内容
+// ⇒ 在分块比对处即失败（ErrReadbackMismatch → ErrTransferTarget），want 分支**不可达**）。
+//
+// 本用例让 meta 与**写入内容自洽**（模拟"写侧 meta 也按损坏内容生成"的自洽却错误），只有
+// result.Checksum（下载器权威）不同 ⇒ 必须映射为 ErrTransferContentMismatch（→ 文件异常重下载）。
+// 直测映射函数（不经 transferDone 全链路：那里的"本地产物 vs 权威校验和"前置校验会先拦下，
+// 使 want 分支仍不可达——这正是既有用例未覆盖它的原因）。
+func TestVerifyByFileMeta_WantMismatchMapsToContentMismatch(t *testing.T) {
+	t.Parallel()
+	full := []byte(strings.Repeat("dc2-original-", 30))
+	tampered := []byte(strings.Repeat("dc2-tampered-", 30))
+	// meta 与写入内容自洽；权威 checksum 仍是 full ⇒ 仅 want 分支能捕获。
+	fm := &meta.FileMeta{
+		Version: 1, Size: int64(len(tampered)),
+		TotalSHA256: refSHA256(tampered), ChunkSize: 1024,
+		Chunks: []meta.ChunkMeta{{Index: 0, Offset: 0, Size: int64(len(tampered)), SHA256: refSHA256(tampered)}},
+	}
+	fs := &staticMetaFS{data: tampered, fm: fm}
+	env := &transferEnv{
+		ctx:      context.Background(),
+		targetFS: fs,
+		rel:      "w.bin",
+		task:     &CloudTask{ID: "task-want", Transfer: &TransferSpec{Volume: "vol-w"}},
+		result:   &downloader.Result{Checksum: refSHA256(full), Size: int64(len(full))},
+	}
+	err := verifyByFileMeta(env)
+	if err == nil {
+		t.Fatal("meta 自洽但与本地产物权威校验和不一致 → 必须报错（否则损坏内容静默入库）")
+	}
+	if !errors.Is(err, ErrTransferContentMismatch) {
+		t.Fatalf("应归 ErrTransferContentMismatch（→ 文件异常重下载），实际 %v", err)
+	}
+}
