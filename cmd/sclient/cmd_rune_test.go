@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -541,7 +541,7 @@ func TestListCommand_ServerError(t *testing.T) {
 // ---- Config command error paths ----
 
 func TestConfigCommand_UnknownSubcommand(t *testing.T) {
-	cfgSvc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return sclientcfg.New("") }}
+	cfgSvc := &cliConfigProvider{cfgFile: filepath.Join(t.TempDir(), "config.yaml")}
 
 	var buf strings.Builder
 	cmd := NewCmdConfig(nil, cli.IOStreams{ErrOut: &buf}, new(string), cfgSvc)
@@ -553,7 +553,7 @@ func TestConfigCommand_UnknownSubcommand(t *testing.T) {
 }
 
 func TestConfigCommand_SetMissingValue(t *testing.T) {
-	cfgSvc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return sclientcfg.New("") }}
+	cfgSvc := &cliConfigProvider{cfgFile: filepath.Join(t.TempDir(), "config.yaml")}
 
 	var buf strings.Builder
 	cmd := NewCmdConfig(nil, cli.IOStreams{ErrOut: &buf}, new(string), cfgSvc)
@@ -847,9 +847,18 @@ func TestResolveOutputPath_ConflictAppendsSuffix(t *testing.T) {
 // 因此测试直接调用 RunE 函数
 
 func TestConfigShowCmd_Integration(t *testing.T) {
-	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://test:18083"}}
+	// 统一 context：config show 从 config.yaml 合成视图读取。
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: "http://test:18083"})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "sg"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	if err := contextcfg.Save(ccfg, cfgPath); err != nil {
+		t.Fatal(err)
+	}
 	var buf strings.Builder
-	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, cfgSvc)
+	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &cfgPath, &cliConfigProvider{cfgFile: cfgPath})
 	err := cmd.RunE(cmd, []string{"show"})
 	if err != nil {
 		t.Fatalf("config show command failed: %v", err)

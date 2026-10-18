@@ -48,7 +48,7 @@ func TestE2E_CLI_UpgradeCheckJSON(t *testing.T) {
 	bin := e2eBinPath(t, "cmd/sclient")
 	tmp := t.TempDir()
 	cmd := exec.Command(bin,
-		"--config", filepath.Join(tmp, "sclient.yaml"),
+		"--config", filepath.Join(tmp, "config.yaml"),
 		"upgrade", "--check", "--json",
 		"--api-base", ts.URL+"/repos/cocomhub/sproxy",
 		"--release-base", ts.URL,
@@ -131,7 +131,7 @@ func TestE2E_CLI_UpgradeFull(t *testing.T) {
 	}
 
 	cmd := exec.Command(target,
-		"--config", filepath.Join(tmp, "sclient.yaml"),
+		"--config", filepath.Join(tmp, "config.yaml"),
 		"upgrade", "--to", tag, "--force",
 		"--api-base", ts.URL+"/repos/cocomhub/sproxy",
 		"--release-base", ts.URL,

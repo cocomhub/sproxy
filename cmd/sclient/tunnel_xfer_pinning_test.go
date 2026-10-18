@@ -16,7 +16,7 @@ import (
 
 	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -175,9 +175,10 @@ func startPinningTunnelServer(t *testing.T, key []byte, id *tunnel.Identity, ser
 	return addr, cancel, cleanup
 }
 
-// newTunnelXferCmd 构造真实 factory 的 sclient tunnel 命令：
-// 配置 access_key/access_key_secret（派生隧道密钥使握手执行）、hub_url（xfer 拨号地址）、
-// peer_fingerprints（对端 pin）；本端身份写入 XDG 配置目录。
+// newTunnelXferCmd 构造真实 factory 的 sclient tunnel 命令（统一 context 配置）：
+// config.yaml（context 模型）携带 access_key/access_key_secret（派生隧道密钥使
+// 握手执行）、hub_url（xfer 拨号地址）、peer_fingerprints（对端 pin）；本端身份写入
+// XDG 配置目录。
 func newTunnelXferCmd(t *testing.T, hubAddr, serverFP string, localID *tunnel.Identity, ios cli.IOStreams) *cobra.Command {
 	t.Helper()
 	dir := t.TempDir()
@@ -190,19 +191,41 @@ func newTunnelXferCmd(t *testing.T, hubAddr, serverFP string, localID *tunnel.Id
 		t.Fatalf("写入身份文件失败: %v", err)
 	}
 
-	// 客户端配置：access_key/secret 派生隧道密钥，peer_fingerprints 指定对端 pin。
-	cfg := filepath.Join(dir, "sclient.yaml")
-	cfgBody := "server_url: https://127.0.0.1:1\n" +
-		"access_key: " + testutil.TestAccessKey() + "\n" +
-		"access_key_secret: " + testutil.TestKey() + "\n" +
-		"hub_url: " + hubAddr + "\n" +
-		"peer_fingerprints:\n  - " + serverFP + "\n"
-	if err := os.WriteFile(cfg, []byte(cfgBody), 0600); err != nil {
+	// 客户端配置（统一 context 模型）：access_key/secret 派生隧道密钥，
+	// peer_fingerprints 指定对端 pin；env 段携带 server_url/hub_url。
+	cfg := filepath.Join(dir, "sproxy", "config.yaml")
+	if mkErr := os.MkdirAll(filepath.Dir(cfg), 0o700); mkErr != nil {
+		t.Fatalf("mkdir config dir: %v", mkErr)
+	}
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "default"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{
+		Name: "default", ServerURL: "https://127.0.0.1:1", HubURL: hubAddr,
+	})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{
+		Name: "default",
+		// 旧平铺字段映射：access_key/access_key_secret/peer_fingerprints。
+		AccessKey:       testutil.TestAccessKey(),
+		AccessKeySecret: testutil.TestKey(),
+	})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "default", Environment: "default", User: "default"})
+	// PeerFingerprints 属连接面（env 段）：
+	ccfg.Environments[0].PeerFingerprints = []string{serverFP}
+	if err := contextcfg.Save(ccfg, cfg); err != nil {
 		t.Fatalf("写入配置文件失败: %v", err)
 	}
 
-	provider := sclientcfg.New(cfg)
-	factory := clientfactory.New(cfg, func() clientfactory.CfgBinder { return provider })
+	factory := clientfactory.NewWithContext(cfg, nil, func() *contextcfg.Resolved {
+		cc, lerr := contextcfg.Load(cfg)
+		if lerr != nil {
+			return nil
+		}
+		resolved, rerr := contextcfg.Resolve(cc, contextcfg.ResolveArgs{})
+		if rerr != nil {
+			return nil
+		}
+		return resolved
+	})
 	cmd := NewCmdTunnel(factory, ios)
 	cmd.Flags().String("output", "", "指定下载文件的输出路径")
 	return cmd

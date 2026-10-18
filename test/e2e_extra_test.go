@@ -279,9 +279,8 @@ func TestE2E_SclientCLI(t *testing.T) {
 
 	// sclient list: use a temp config to avoid local tunnel interference.
 	// （v2 skey-id 必传：config 必须带 access_key_id 精确匹配服务端 seed 条目。）
-	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
-	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\naccess_key_id: %s\n", baseURL, e2eTestAK, e2eTestSK, e2eTestID)
-	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := writeContextConfigYAML(t, cfgPath, baseURL, e2eTestAK, e2eTestSK, e2eTestID); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(binPath, "list", "--config", cfgPath)
@@ -500,9 +499,14 @@ func TestE2E_SproxySigAuth(t *testing.T) {
 	}
 
 	// sclient list（SproxySig 签名）→ 退出码 0（未签名会 401 → 非零退出）。
-	// 服务端日志可确认 GET /api/files 被签名请求命中并返回 200。
+	// 统一 context：无 config.yaml 时连服务端命令 fail-closed → 用 --config 指向
+	// 临时 config.yaml（env 段 server_url + user 段凭据）。
 	bin := e2eBinPath(t, "cmd/sclient")
-	args := []string{"list", "--server", baseURL, "--access-key", ak, "--access-key-secret", sk, "--access-key-id", e2eTestID}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if werr := writeContextConfigYAML(t, cfgPath, baseURL, ak, sk, e2eTestID); werr != nil {
+		t.Fatalf("write config.yaml: %v", werr)
+	}
+	args := []string{"list", "--config", cfgPath}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = e2eModuleRoot()
 	var stdout, stderr bytes.Buffer

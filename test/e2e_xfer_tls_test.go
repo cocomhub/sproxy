@@ -332,10 +332,8 @@ func TestE2E_XferTLS_SClientCLI(t *testing.T) {
 	// ~/.config/sproxy/sclient.yaml 或用户身份文件干扰（memory: cli-test-config-isolation）。
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(cliDir, "config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(cliDir, "cache"))
-	cfgPath := filepath.Join(cliDir, "sclient.yaml")
-	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\naccess_key_id: %s\n",
-		env.baseURL, e2eTestAK, e2eTestSK, e2eTestID)
-	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0600); err != nil {
+	cfgPath := filepath.Join(cliDir, "config.yaml")
+	if err := writeContextConfigYAML(t, cfgPath, env.baseURL, e2eTestAK, e2eTestSK, e2eTestID); err != nil {
 		t.Fatal(err)
 	}
 	outPath := filepath.Join(cliDir, "out.json")

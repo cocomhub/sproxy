@@ -275,8 +275,8 @@ func startSClientRelay(t *testing.T, hubURL, nodeID, ak, sk string) func() {
 	binPath := e2eBinPath(t, "cmd/sclient")
 
 	// 配置隔离（I74）：--config 指向临时配置，避免加载本地 ~/.config/sproxy/sclient.yaml。
-	configPath := filepath.Join(tmpDir, "sclient.yaml")
-	if err := os.WriteFile(configPath, []byte("server_url: "+hubURL+"\n"), 0644); err != nil {
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := writeMinimalConfigYAML(t, configPath); err != nil {
 		t.Fatalf("write sclient config: %v", err)
 	}
 
@@ -462,8 +462,8 @@ func startSClientRelayService(t *testing.T, hubURL, nodeID, serviceSpec, ak, sk 
 	binPath := e2eBinPath(t, "cmd/sclient")
 
 	// 配置隔离（I74）：--config 指向临时配置，避免加载本地 ~/.config/sproxy/sclient.yaml。
-	configPath := filepath.Join(tmpDir, "sclient.yaml")
-	if err := os.WriteFile(configPath, []byte("server_url: "+hubURL+"\n"), 0644); err != nil {
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := writeMinimalConfigYAML(t, configPath); err != nil {
 		t.Fatalf("write sclient config: %v", err)
 	}
 
@@ -502,9 +502,10 @@ func startSClientMeshConnect(t *testing.T, hubURL, service, ak, sk string, extra
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
 
-	// 配置隔离：--config 指向临时配置（避免加载本地 ~/.config/sproxy/sclient.yaml）
-	configPath := filepath.Join(tmpDir, "sclient.yaml")
-	if err := os.WriteFile(configPath, []byte("server_url: "+hubURL+"\n"), 0644); err != nil {
+	// 配置隔离（统一 context）：--config 指向临时 config.yaml（env 段 + user 段凭据，
+	// 使 mesh connect 的 SproxySig 签名走 context 模型合成视图）。
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := writeContextConfigYAML(t, configPath, hubURL, ak, sk, e2eTestID); err != nil {
 		t.Fatalf("write sclient config: %v", err)
 	}
 	// S115：端口分配采用「bind 端口 0 → close → 子进程再绑定」参考模式；TOCTOU 窗口

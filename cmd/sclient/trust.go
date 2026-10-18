@@ -84,74 +84,51 @@ func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 				return fmt.Errorf("SK 轮换失败: %w", err)
 			}
 
-			// 回填配置：新 SK + 新 sk_id（本地持久化；旧 SK 在 config 中不再需要）。
-			// context 模式：回写当前 context user 段；平铺模式：回写平铺配置。
+			// 回填配置：新 SK + 新 sk_id（统一 context：写回当前 context user 段）。
 			newSecret := hex.EncodeToString(res.NewSecret)
-			if trustRenewBackfillContext(cfgFile, res, newSecret, ios) {
-				return nil
-			}
-			return trustRenewBackfillFlat(cfgSvc, cfgFile, res, newSecret, ios)
+			return trustRenewBackfillContext(cfgFile, res, newSecret, ios)
 		},
 	}
 	return cmd
 }
 
-// trustRenewBackfillContext 尝试把轮换后的 SK 回填到 context 配置（当前 context 的
-// user 段）。context 未启用（配置不存在/无 context/无 user）或保存失败返回 false，
-// 由调用方回落平铺配置回填。
-func trustRenewBackfillContext(cfgFile *string, res *client.RenewResult, newSecret string, ios cli.IOStreams) bool {
+// trustRenewBackfillContext 把轮换后的 SK 回填到 context 配置（当前 context 的
+// user 段）。统一 context 后这是唯一回填路径：配置不存在/无 context/无 user/保存
+// 失败都 fail-closed 报错（不再静默回落平铺）。
+func trustRenewBackfillContext(cfgFile *string, res *client.RenewResult, newSecret string, ios cli.IOStreams) error {
 	if cfgFile == nil || *cfgFile == "" {
-		return false
+		return fmt.Errorf("配置文件路径为空，无法回填轮换后的 SK")
 	}
 	cc, cerr := contextcfg.Load(*cfgFile)
-	if cerr != nil || len(cc.Contexts) == 0 || cc.CurrentContext == "" {
-		return false
+	if cerr != nil {
+		return fmt.Errorf("加载 context 配置失败: %w", cerr)
+	}
+	if len(cc.Contexts) == 0 || cc.CurrentContext == "" {
+		return fmt.Errorf("未找到当前 context（请先 sclient context use <name>）")
 	}
 	cur := cc.FindContext(cc.CurrentContext)
 	if cur == nil || cur.User == "" {
-		return false
+		return fmt.Errorf("当前 context 无 user（请先 sclient context set --user-name <u>）")
 	}
 	u := cc.FindUser(cur.User)
 	if u == nil {
-		return false
+		return fmt.Errorf("当前 context user %q 不存在", cur.User)
 	}
 	u.AccessKeySecret = newSecret
 	u.AccessKeyID = res.SKID
 	if u.AccessKey == "" {
 		u.AccessKey = res.AK
 	}
-	if contextcfg.Save(cc, *cfgFile) != nil {
-		return false
+	if err := contextcfg.Save(cc, *cfgFile); err != nil {
+		return fmt.Errorf("保存 context 配置失败: %w", err)
 	}
 	fmt.Fprintf(ios.Out, "SK 已轮换: ak=%s sk_id=%s 有效期至 %s (新 SK 已写入 context user %s，立即生效)\n",
 		res.AK, res.SKID, trustSKExpiryText(res.ExpiresAt), cur.User)
-	return true
-}
-
-// trustRenewBackfillFlat 把轮换后的 SK 回填到平铺配置（沿用 trust renew 的
-// SaveConfig 模式；防御：config 写入路径必须存在，生产由 root.go 生成默认路径）。
-func trustRenewBackfillFlat(cfgSvc ConfigProvider, cfgFile *string, res *client.RenewResult, newSecret string, ios cli.IOStreams) error {
-	cfg, cerr := cfgSvc.LoadConfig()
-	if cerr != nil {
-		ios.WriteErrLine("加载配置失败: %v", cerr)
-		return fmt.Errorf("加载配置失败: %w", cerr)
-	}
-	cfg.AccessKeySecret = newSecret
-	cfg.AccessKeyID = res.SKID
-	if cfg.AccessKey == "" {
-		cfg.AccessKey = res.AK
-	}
-	if *cfgFile == "" {
-		return fmt.Errorf("配置文件路径为空，无法回填轮换后的 SK")
-	}
-	if err := client.SaveConfig(cfg, *cfgFile); err != nil {
-		ios.WriteErrLine("保存配置失败: %v", err)
-		return fmt.Errorf("保存配置失败: %w", err)
-	}
-	fmt.Fprintf(ios.Out, "SK 已轮换: ak=%s sk_id=%s 有效期至 %s (新 SK 已写入配置，立即生效)\n",
-		res.AK, res.SKID, trustSKExpiryText(res.ExpiresAt))
 	return nil
 }
+
+// trustRenewBackfillFlat 已删除（统一 context 配置：renew 回填唯一路径 = config.yaml
+// 的 user 段，不再有平铺 sclient.yaml 形态）。
 
 // trustSKExpiryText 格式化 SK 有效期显示文案（zero = 永久，否则 RFC3339）。
 func trustSKExpiryText(t time.Time) string {

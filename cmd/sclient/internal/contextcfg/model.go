@@ -31,6 +31,9 @@ type Environment struct {
 	NodeID    string `yaml:"node_id,omitempty" json:"node_id,omitempty"`
 	CAFile    string `yaml:"ca_file,omitempty" json:"ca_file,omitempty"`
 	Insecure  bool   `yaml:"insecure,omitempty" json:"insecure,omitempty"`
+	// PeerFingerprints 是对端身份指纹 pinning 列表（64 hex / sha256:<64 hex>；
+	// xfer 隧道握手 fail-closed 校验）。自旧平铺迁移/统一配置后承载。
+	PeerFingerprints []string `yaml:"peer_fingerprints,omitempty" json:"peer_fingerprints,omitempty"`
 	// ProtocolSaltKey 是协议域分离盐自定义密钥（64 hex；派生替换默认 sproxy 盐
 	// 防协议指纹识别）。⚠️ 必须与握手对端（服务端/stealth 二进制）使用相同 key。
 	ProtocolSaltKey string       `yaml:"protocol_salt_key,omitempty" json:"protocol_salt_key,omitempty"`
@@ -38,8 +41,8 @@ type Environment struct {
 	STUN            []string     `yaml:"stun,omitempty" json:"stun,omitempty"`
 	VirtualSubnet   string       `yaml:"virtual_subnet,omitempty" json:"virtual_subnet,omitempty"`
 	// Timeout（秒）/ ChunkSize（字节）是旧平铺迁移携带的调优项（非 context 核心
-	// 字段；其余旧字段——MaxChunkSize/PeerFingerprints/AllowTransportFallback——
-	// 迁移不携带，需要时由用户在 context set / config set 补齐）。
+	// 字段；其余旧字段——MaxChunkSize/AllowTransportFallback——迁移不携带，需要时
+	// 由用户在 context set / config set 补齐）。
 	Timeout   int   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	ChunkSize int64 `yaml:"chunk_size,omitempty" json:"chunk_size,omitempty"`
 }
@@ -62,13 +65,25 @@ type Context struct {
 }
 
 // Config 是 context 配置文件的根结构（新单一事实源 ~/.config/sproxy/config.yaml）。
+// Sealfile 段承载 sealfile 本地加解密命令族的配置回落值（原在旧平铺 sclient.yaml
+// 的 `sealfile:` 段；统一 context 后迁入顶层）。
 type Config struct {
 	APIVersion     string         `yaml:"apiVersion" json:"apiVersion"`
 	Kind           string         `yaml:"kind" json:"kind"`
 	CurrentContext string         `yaml:"current-context,omitempty" json:"current-context,omitempty"`
+	Sealfile       *Sealfile      `yaml:"sealfile,omitempty" json:"sealfile,omitempty"`
 	Environments   []*Environment `yaml:"environments" json:"environments"`
 	Users          []*User        `yaml:"users" json:"users"`
 	Contexts       []*Context     `yaml:"contexts" json:"contexts"`
+}
+
+// Sealfile 是 sealfile 配置段结构（config.yaml 顶层 `sealfile:` 段）。
+type Sealfile struct {
+	Key         string         `yaml:"key,omitempty" json:"key,omitempty"`
+	Algorithm   string         `yaml:"algorithm,omitempty" json:"algorithm,omitempty"`
+	BlockPolicy map[string]any `yaml:"block_policy,omitempty" json:"block_policy,omitempty"`
+	OutDir      string         `yaml:"out_dir,omitempty" json:"out_dir,omitempty"`
+	Owner       string         `yaml:"owner,omitempty" json:"owner,omitempty"`
 }
 
 // NewDefault 返回带版本/类型标识的空模型（供新配置初始化）。

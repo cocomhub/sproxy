@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -30,9 +29,9 @@ func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec, ak, sk stri
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
 
-	// 配置隔离（I74）：--config 指向临时配置，避免加载本地 ~/.config/sproxy/sclient.yaml。
-	configPath := filepath.Join(tmpDir, "sclient.yaml")
-	if err := os.WriteFile(configPath, []byte("server_url: "+hubURL+"\n"), 0644); err != nil {
+	// 配置隔离（统一 context）：--config 指向临时 config.yaml（env 段 hub + user 段凭据）。
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := writeContextConfigYAML(t, configPath, hubURL, ak, sk, e2eTestID); err != nil {
 		t.Fatalf("write sclient config: %v", err)
 	}
 
@@ -112,8 +111,8 @@ func startSClientMeshNodeObservable(t *testing.T, hubURL, nodeID, serviceSpec st
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
 
-	configPath := filepath.Join(tmpDir, "sclient.yaml")
-	if err := os.WriteFile(configPath, []byte("server_url: "+hubURL+"\n"), 0644); err != nil {
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := writeContextConfigYAML(t, configPath, hubURL, ak, sk, e2eTestID); err != nil {
 		t.Fatalf("write sclient config: %v", err)
 	}
 	wsURL := strings.Replace(hubURL, "http://", "ws://", 1) + "/ws"
