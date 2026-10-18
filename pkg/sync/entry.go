@@ -119,6 +119,11 @@ type Linker interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命�
 // 语义：WriteFile 先落本地 staging 再上传——本地磁盘须防占满，写入计入配额
 // （预留 → 上传完成释放）。实现方（装配层）注入，不依赖具体配额池类型。
 // 与 ReserveSpace（目标卷容量预检）区分：StagingQuotaTracker 管**本地暂存**占用。
+// ErrStagingQuotaExceeded 是「本地 staging 配额不足」的**哨兵错误**（P2 修复，2026-10-19）：
+// 供上层用 errors.Is 判定降级原因，而不是匹配错误文案子串（文案一变即静默落入 default）。
+// 生产者为门卫（StagingQuotaGateFS）与自管卷（secretdata 的 stagingReserve 包装）。
+var ErrStagingQuotaExceeded = errors.New("本地 staging 配额不足")
+
 type StagingQuotaTracker interface {
 	// ReserveUsage 预留 size 字节（本地 staging 写入前调用）。本地磁盘不足 → 实现方
 	// **排队等待**（受 ctx 约束：释放信号/ctx.Done 中断）；返回错误 = 拒绝本次写入。

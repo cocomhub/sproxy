@@ -121,8 +121,10 @@ func TestOpenRead_TempPeakBoundedByPlaintextSize(t *testing.T) {
 	if sawStaging {
 		t.Fatalf("读路径仍在把全部分块密文 staging 到 temp（view-*）⇒ 峰值 ≈2× 文件 ✗（采样 %d 次）", samples)
 	}
-	if maxEntries > 1 {
-		t.Fatalf("读期间 temp 同时存在 %d 个条目（应只有 1 份明文）⇒ 存在额外落盘 ✗", maxEntries)
+	// 目标已是「按需解密、**不落任何临时文件**」（temp → 0，见 read_seeker.go）：阈值取 0，
+	// 否则「读路径退化为写一份明文临时文件」这种回归会绿过（判据选在无法区分 0/1 的位置）。
+	if maxEntries > 0 {
+		t.Fatalf("读期间 temp 存在 %d 个条目（应为 0：按需解密不落临时文件）⇒ 读路径退化 ✗", maxEntries)
 	}
 
 	// ④ 整文件校验仍必须生效：篡改**最后一个**分块的密文 ⇒ 读必须失败（不得返回坏内容）。

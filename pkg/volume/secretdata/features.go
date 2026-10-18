@@ -44,7 +44,11 @@ func (s *SecretdataFS) CurrentVersion() int64 {
 func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err error) {
 	defer func() {
 		if err != nil {
-			s.pruneCreatedDirs(ctx, wc.created)
+			// 回收本次新建的空容器：走**既有回滚机制**（rollbackWrite，uploaded=nil）——它用
+			// `WithTimeout(WithoutCancel(ctx), rollbackTimeout)` 做清理 ⇒ 调用方 ctx 取消/超时时
+			// 仍能回收（此前直接传 ctx ⇒ 取消场景 Delete/ListDir 立即失败，留空容器 + 目录 meta；
+			// 与主写路径的回滚同口径，单一机制）。
+			s.rollbackWrite(ctx, nil, wc.created)
 		}
 	}()
 	key := shardseal.Hash256(wc.data) // 整文件内容完整 SHA-256（256-bit，== 单分块 Chunks[0].OrigSHA256，重启后可重建）
@@ -59,7 +63,8 @@ func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err err
 		s.mu.Unlock()
 		return s.writeFileDedupMiss(ctx, wc, key, dir, mt)
 	}
-	b.refs++ // 原子预留引用（锁内）：上传/提交失败再回滚，防并发 last-ref 删后悬空
+	s.retainPoolEntry(b.meta) // 原子预留引用（锁内，与 unrefPoolEntry 对称的单一实现）：
+	// 上传/提交失败再回滚，防并发 last-ref 删后悬空
 	tpl := b.meta
 	s.mu.Unlock()
 	return s.writeFileDedupHit(ctx, wc, key, dir, mt, tpl)
@@ -94,14 +99,18 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, wc writeCtx, key, 
 		return err
 	}
 	metaPath := path.Join(wc.container, name)
-	if werr := s.uploadBlob(ctx, metaPath, blob, mt); werr != nil {
+	// **先登记后上传**（P2 修复，2026-10-19）：此前 meta 上传失败只 `releasePoolRef`、**不删**
+	// 已落 meta ⇒ 内层「写成功但复核失败」时永久孤儿（与本轮其它上传点同口径，单一机制）。
+	uploaded := []string{}
+	if werr := s.uploadBlobTracked(ctx, &uploaded, metaPath, blob, mt); werr != nil {
+		s.rollbackWrite(ctx, uploaded, nil)
 		s.releasePoolRef(key)
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
 	}
 	if cerr := s.commitDedupEntry(ctx, wc, &metaEntry{
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: ref, dataDir: dir,
 		phys: physBytesOf(ref, int64(len(blob)), true),
-	}, []string{metaPath}); cerr != nil {
+	}, uploaded); cerr != nil {
 		s.releasePoolRef(key) // 提交失败/版本冲突：释放预留
 		return cerr
 	}
@@ -111,15 +120,23 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, wc writeCtx, key, 
 // writeFileDedupMiss 池未命中：单分块加密，分块上传到池容器 + meta 上传到自身容器；
 // 锁内登记池条目（refs=1）。并发未命中（同内容双首写）时保留各自私有分块，不覆盖他人。
 func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key, dir string, mt int64) error {
-	o, chunkBytes, err := s.encryptContentSingle(wc.data, wc.rel)
-	if err != nil {
-		return err
+	// 本地 staging：单分块密文目录（自管记账，与主写路径同口径）——去重池 blob 先落本地再上传
+	// （与常规分块同口径：经 uploadLocalChunk 复用调用方暂存路径）。
+	tmp, cleanup, terr := s.dedupStagingDir(ctx, int64(len(wc.data)))
+	if terr != nil {
+		return terr
+	}
+	defer cleanup()
+	// **先登记后上传**（P2 修复，2026-10-19）：池 blob 名含随机 salt/nonce（不复用）⇒ 内层
+	// 「写成功但复核失败」返回错误时 blob 已落远端，必须能从回滚集合删除，否则**永久孤儿**
+	// （与主写路径 uploadLocalChunk / 交错内存交付同口径）。
+	uploaded := []string{}
+	o, _, uerr := s.encryptAndUploadDedupChunk(ctx, wc, dir, tmp, mt, &uploaded)
+	if uerr != nil {
+		s.rollbackWrite(ctx, uploaded, nil)
+		return uerr
 	}
 	chunkName := o.ChunkNames[0]
-	chunkPath := path.Join(dir, chunkName)
-	if werr := s.uploadBlob(ctx, chunkPath, chunkBytes, mt); werr != nil {
-		return fmt.Errorf("secretdata: 上传去重分块失败: %w", werr)
-	}
 	meta := o.Meta
 	meta.Original.Name = path.Base(wc.rel)
 	meta.Original.MTime = mtimeString(wc.mtime)
@@ -130,106 +147,43 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 	meta.Extra["dedup"] = dir // string（Extra 统一 map[string]any，2026-10-07 用户裁定）
 	name, metaBlob, err := s.encryptMetaBlob(meta)
 	if err != nil {
-		_ = s.inner.Delete(ctx, chunkPath)
+		s.rollbackWrite(ctx, uploaded, nil)
 		return err
 	}
 	metaPath := path.Join(wc.container, name)
+	// **先登记后上传**（同 uploadLocalChunk 口径，P2 修复 2026-10-19）：meta blob 名含随机
+	// salt/padding（不复用）⇒ 内层「写成功但复核失败」时它已落远端，必须能从回滚集合删除
+	// （否则永久孤儿）。登记后下方两处显式 `Delete(metaPath)` 由 rollbackWrite 统一承担
+	// （单一机制，避免“同一清理写两遍”）。
+	uploaded = append(uploaded, metaPath)
 	if werr := s.uploadBlob(ctx, metaPath, metaBlob, mt); werr != nil {
-		_ = s.inner.Delete(ctx, chunkPath)
+		s.rollbackWrite(ctx, uploaded, nil)
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
 	}
-	s.mu.Lock()
-	if wc.ifAbsent {
-		// WriteIfAbsent：目标已存在（含本次写期间被并发者抢先提交）→ 清理本写上传、
-		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
-		if _, ok := s.index[wc.rel]; ok {
-			s.mu.Unlock()
-			_ = s.inner.Delete(ctx, chunkPath)
-			_ = s.inner.Delete(ctx, metaPath)
-			return errEntryExists
-		}
-	}
-	if wc.expected >= 0 && s.volVersion != wc.sv {
-		s.mu.Unlock()
-		_ = s.inner.Delete(ctx, chunkPath)
-		_ = s.inner.Delete(ctx, metaPath)
-		return versionConflictErr(wc.sv, wc.expected)
-	}
-	// 并发未命中（同 ID 双首写）：已有池条目则保留其 blob 作他人共享，本文件持自有
-	// 分块（不覆盖 —— 覆盖会让他人 blob 丢引用）。entry 引用分块仍在本容器 dataDir。
-	if _, exists := s.dedupPool[key]; !exists {
-		s.dedupPool[key] = &dedupBlob{name: chunkName, refs: 1, meta: meta, phys: contentPhysBytes(meta)}
-	}
-	prev := s.index[wc.rel]
-	s.index[wc.rel] = &metaEntry{
+	// **锁内提交走单一实现**（commitLocked，P2 收敛 2026-10-19）：池登记作为 preInstall 在
+	// CAS 通过后、安装条目前执行（与原先内联块语义一致）。
+	entry := &metaEntry{
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: meta,
 		dataDir: dir, baseVersion: wc.newVer,
 		phys: physBytesOf(meta, int64(len(metaBlob)), true),
 	}
-	addDirKeysLocked(s.dirs, wc.rel)
-	s.volVersion = wc.newVer
-	s.usage += int64(len(wc.data))
-	if prev != nil {
-		s.usage -= prev.size
-		if s.usage < 0 {
-			s.usage = 0
+	return s.commitLocked(ctx, wc, entry, int64(len(wc.data)), func() {
+		// 并发未命中（同 ID 双首写）：已有池条目则保留其 blob 作他人共享，本文件持自有
+		// 分块（不覆盖 —— 覆盖会让他人 blob 丢引用）。entry 引用分块仍在本容器 dataDir。
+		if _, exists := s.dedupPool[key]; !exists {
+			s.dedupPool[key] = &dedupBlob{name: chunkName, refs: 1, meta: meta, phys: contentPhysBytes(meta)}
 		}
-	}
-	if prev != nil {
-		// 同 commitEntry：**旧版本清理必须在锁内**（removeVersionMeta →
-		// chunkSetStillReferenced 遍历 s.index，要求持 s.mu；锁外调用 = 运行时
-		// fatal error: concurrent map iteration and map write，见
-		// TestConcurrentOverwrite_NoIndexDataRace）。并发读语义不变。
-		s.removeVersionMeta(wc.rel, prev)
-	}
-	s.mu.Unlock()
-	return nil
+	}, func() { s.rollbackWrite(ctx, uploaded, nil) })
 }
 
 // commitDedupEntry 提交去重条目：持锁 CAS（expected ≥0 须 volVersion==sv），以写路径
 // 分配的 newVer 定型版本（Imp-1：与落盘 meta.BaseVersion 一致，不再锁内 +1 重算）。
 // 失败清理本次上传路径并返回版本冲突错误（调用方负责回滚池预留引用）。
+// commitDedupEntry 去重路径的锁内提交（薄封装：走单一实现 commitLocked，P2 收敛 2026-10-19）。
 func (s *SecretdataFS) commitDedupEntry(ctx context.Context, wc writeCtx, e *metaEntry, cleanPaths []string) error {
-	s.mu.Lock()
-	if wc.ifAbsent {
-		// WriteIfAbsent：目标已存在（含本次写期间被并发者抢先提交）→ 清理本写上传、
-		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
-		if _, ok := s.index[wc.rel]; ok {
-			s.mu.Unlock()
-			for _, p := range cleanPaths {
-				_ = s.inner.Delete(ctx, p)
-			}
-			return errEntryExists
-		}
-	}
-	if wc.expected >= 0 && s.volVersion != wc.sv {
-		s.mu.Unlock()
-		for _, p := range cleanPaths {
-			_ = s.inner.Delete(ctx, p)
-		}
-		return versionConflictErr(wc.sv, wc.expected)
-	}
-	prev := s.index[wc.rel]
-	s.index[wc.rel] = e
-	e.baseVersion = wc.newVer
-	addDirKeysLocked(s.dirs, wc.rel)
-	s.volVersion = wc.newVer
-	s.usage += int64(len(wc.data))
-	if prev != nil {
-		s.usage -= prev.size
-		if s.usage < 0 {
-			s.usage = 0
-		}
-	}
-	if prev != nil {
-		// 同 commitEntry：**旧版本清理必须在锁内**（removeVersionMeta →
-		// chunkSetStillReferenced 遍历 s.index，要求持 s.mu；锁外调用 = 运行时
-		// fatal error: concurrent map iteration and map write，见
-		// TestConcurrentOverwrite_NoIndexDataRace）。并发读语义不变。
-		s.removeVersionMeta(wc.rel, prev)
-	}
-	s.mu.Unlock()
-	return nil
+	return s.commitLocked(ctx, wc, e, int64(len(wc.data)), nil, func() {
+		s.rollbackWrite(ctx, cleanPaths, nil)
+	})
 }
 
 // releasePoolRef 释放去重池预留引用：归零时物理删 blob 并删除池条目。
@@ -259,35 +213,52 @@ func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt
 	return s.inner.WriteFile(ctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt)
 }
 
-// encryptContentSingle 把整文件内容按单分块策略加密，返回 EncryptionResult 与该分块
-// 字节（去重池 blob 载体；单分块 OrigSHA256 == 整文件内容哈希）。走 EncryptShardsBytes
-// 内存变体（Imp-2 部分修复：不再写临时源 + 二次整读，峰值 1× 文件）。
-func (s *SecretdataFS) encryptContentSingle(data []byte, rel string) (*shardseal.EncryptionResult, []byte, error) {
-	if len(data) == 0 {
-		return nil, nil, fmt.Errorf("secretdata: 空内容不可去重")
+// dedupStagingDir 为去重写路径准备本地临时目录（自管 staging 配额记账），返回释放函数
+// （幂等：释放配额 + 删目录）。
+func (s *SecretdataFS) dedupStagingDir(ctx context.Context, size int64) (string, func(), error) {
+	release, rerr := s.stagingReserve(ctx, size)
+	if rerr != nil {
+		return "", nil, rerr
 	}
-	// 本地 staging 配额（自管记账，与主写路径同口径）。
-	releaseStaging, sres := s.stagingReserve(context.Background(), int64(len(data)))
-	if sres != nil {
-		return nil, nil, sres
+	tmp, terr := os.MkdirTemp(s.temp, "chunks-dedup-*")
+	if terr != nil {
+		release()
+		return "", nil, fmt.Errorf("secretdata: 创建去重临时目录失败: %w", terr)
 	}
-	defer releaseStaging()
-	tmp, err := os.MkdirTemp(s.temp, "chunks-dedup-*")
+	return tmp, func() { release(); _ = os.RemoveAll(tmp) }, nil
+}
+
+// encryptAndUploadDedupChunk 把去重整文件内容按单分块加密（落 tmp）并上传到池容器 dir
+// （经既有暂存复用机制交付本地路径 ⇒ 内层零二次拷贝），返回加密结果与池内底层路径。
+// **先登记后上传**：目标路径在调用内层前追加到 *uploaded（同 uploadLocalChunk 口径），
+// 供调用方在内层「写成功但复核失败」时回滚删除（池 blob 名随机不复用 ⇒ 否则永久孤儿）。
+func (s *SecretdataFS) encryptAndUploadDedupChunk(ctx context.Context, wc writeCtx, dir, tmp string, mt int64, uploaded *[]string) (*shardseal.EncryptionResult, string, error) {
+	o, chunkLocal, err := s.encryptContentSingle(wc.data, wc.rel, tmp)
 	if err != nil {
-		return nil, nil, err
+		return nil, "", err
 	}
-	defer os.RemoveAll(tmp)
+	if werr := s.uploadLocalChunk(ctx, dir, o.ChunkNames[0], chunkLocal, mt, uploaded); werr != nil {
+		return nil, "", fmt.Errorf("secretdata: 上传去重分块失败: %w", werr)
+	}
+	return o, path.Join(dir, o.ChunkNames[0]), nil
+}
+
+// encryptContentSingle 把整文件内容按单分块策略加密，分块写入调用方给定的 tmp 目录（调用方负责
+// 临时目录生命周期与 staging 配额），返回 EncryptionResult 与该单块分块的**本地路径**
+// （去重池 blob 载体 / parity 密文；单分块 OrigSHA256 == 整文件内容哈希）。
+// 走 EncryptShardsBytes 内存变体（Imp-2 部分修复：不再写临时源 + 二次整读，峰值 1× 文件），
+// 上传一律经 uploadLocalChunk 复用调用方暂存路径（不把整块读进内存再交 reader）。
+func (s *SecretdataFS) encryptContentSingle(data []byte, rel, tmp string) (*shardseal.EncryptionResult, string, error) {
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("secretdata: 空内容不可单块加密")
+	}
 	bmin := min(int64(len(data)), int64(16))
 	policy := shardseal.BlockPolicy{Mode: "random", Min: int64(len(data)), Max: int64(len(data)), BlockletMin: bmin, BlockletMax: int64(len(data))}
 	out, err := shardseal.EncryptShardsBytes(data, sanitizeName(rel), tmp, s.secret, policy, s.metaPadTarget(), s.algoVer)
 	if err != nil {
-		return nil, nil, fmt.Errorf("secretdata: 去重单块分块加密失败: %w", err)
+		return nil, "", fmt.Errorf("secretdata: 单块分块加密失败: %w", err)
 	}
-	blob, rerr := os.ReadFile(filepath.Join(tmp, out.ChunkNames[0]))
-	if rerr != nil {
-		return nil, nil, rerr
-	}
-	return out, blob, nil
+	return out, filepath.Join(tmp, out.ChunkNames[0]), nil
 }
 
 // encryptMetaBlob 把 meta 明文加密为统一格式 blob 并锚定其名字（三段哈希真实，含 padding）。

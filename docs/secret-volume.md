@@ -95,14 +95,14 @@ sclient sealfile info ./sealed --key ./datakey
 
 | extra 键 | 默认 | 说明 |
 |----------|------|------|
-| `target` | `local` | 底层卷名；`local` = 本地 `<root>/secrets/` 目录。**嵌套封装（2026-10-06）**：`<卷名>/<新子目录>`（如 `main/videos`）引用已创建卷的**新空子目录**作封装根——子目录须当前不存在，同卷路径重叠互斥占用（见 §3.4）。其余外部 target（baidupcs/s3/webdav/加密卷整卷）为预留片 |
+| `target` | `local` | 底层卷名；`local` = 本地 `<root>/secrets/` 目录。**嵌套封装（2026-10-06）**：`<卷名>/<新子目录>`（如 `main/videos`）引用已创建卷的**新空子目录**作封装根——子目录须当前不存在，同卷路径重叠互斥占用（见 §3.4）。**外部源底座（2026-10-19 更正）**：嵌套形态 `<外部卷>/<子目录>` 已支持（s3/baidupcs/pikpak/cluster 等外部源作封装底层，装配层接线 + 外部后端替身单测覆盖，暂无真实网盘 e2e，见 §9.1）；仅「外部卷**整卷**」（`target: <外部卷名>` 无 `/`）仍为预留片 |
 | `root` | 无（必填） | `target=local` 时的本地根目录——**写在 `extra` 内**；它是**父目录**，`secrets/` 段由装配层拼接（密钥落 `<root>/secrets/<名>`） |
 
 ### 3.2 secretdata 卷（`type: "secretdata"`）
 
 | extra 键 | 默认 | 说明 |
 |----------|------|------|
-| `target` | `local` | 底层卷根（secretdata 物理落盘处）。**嵌套封装（2026-10-06）**：`<卷名>/<新子目录>`（如 `main/videos`）引用已创建卷的新空子目录作封装根——MakeDir 创建空目录 + 可写封装子视图，密文落 `<卷>/<子目录>/`；子目录须不存在，互斥占用防重复选底层（§3.4）。其余外部 target（baidupcs/s3/webdav/加密卷整卷）为预留片 |
+| `target` | `local` | 底层卷根（secretdata 物理落盘处）。**嵌套封装（2026-10-06）**：`<卷名>/<新子目录>`（如 `main/videos`）引用已创建卷的新空子目录作封装根——MakeDir 创建空目录 + 可写封装子视图，密文落 `<卷>/<子目录>/`；子目录须不存在，互斥占用防重复选底层（§3.4）。**外部源底座（2026-10-19 更正）**：嵌套形态 `<外部卷>/<子目录>` 已支持（s3/baidupcs/pikpak/cluster 等外部源作封装底层，装配层接线 + 外部后端替身单测覆盖，暂无真实网盘 e2e，见 §9.1）；仅「外部卷**整卷**」（`target: <外部卷名>` 无 `/`）仍为预留片 |
 | `root` | 卷根 | `target=local` 时的本地根 |
 | `secret_url` | 必填 | `secrets://<卷>/<name>`，从 secrets 卷读密钥；引用的 secrets 卷须先装配 |
 | `algorithm` | `shardseal/aes-256-gcm` | **KDF 阶段档位**，见 §3.3 |
@@ -408,9 +408,10 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   卷。锚点：e2e `TestE2E_CLI_Secretdata_DeclaredBeforeSecrets`（平铺顺序无关）+ 单测
   `TestSetupSecretBackends_ConfigSecretdata_Assembled/config_secretdata_refs_nested_secrets`
   （config 声明「嵌套 secrets 卷 + 引用它的 secretdata 卷」，旧序必红）。
-  **仍预留**：**对象存储**类外部 target（baidupcs/s3/webdav）与 secretdata 的外部 target——当前
-  secretdata 仅 `target=local` 可用（配外部 target 会 fail-closed 报错，不静默降级）；secrets 卷的
-  嵌套封装 target 已支持（多层链如 secrets over secretdata）。
+  **两种 target 形态**（2026-10-19 校正）：① **嵌套子目录** `target: "<源卷>/<子路径>"`——已支持，由装配层
+  翻译为封装声明（`extra.source` + `enclosure.BuildBackend`，如「外部/远端卷的某个子目录作加密层底层」）；
+  ② **独立整卷** `target: "<外部卷名>"`（无 `/`）——**未支持**，解析不到嵌套语法 ⇒ `resolveTargetFS` fail-closed（不静默降级为本地）。
+  secrets 卷的嵌套封装 target 已支持（多层链如 secrets over secretdata 亦然）。
 - **空文件不可写**（有意取舍）：分块存储要求至少一个数据分块（承载 meta 引用 + 内容哈希锚定），空
   文件 `EncryptShards` 报错 fail-closed。
 - **随机访问粒度（2026-10-18 更正）**：底层实现 `RangeReader` 时（LocalFS/S3 等）`OpenRangeRead`
@@ -430,9 +431,9 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 | 同卷**跨容器**移动逐 blob `Rename`（真 mv）且 meta 最后搬 | **P1**：崩在中途 ⇒ 源 meta 引用已被搬走的分块、目标分块无引用被 GC 清扫 ⇒ **单文件永久不可恢复** | 改为「**复制分块 → 搬/换 meta → 最后删源**」（与 §5 设计一致）；用例 `TestRename_CrossContainer_CrashAtAnyStep_NoDataLoss`（枚举每个崩溃点，修复前 k=1..8 全部「源与目标都不可读」） |
 | **目录**跨父移动「先搬容器、后写 meta」 | **P1**：崩在两步之间 ⇒ 物理位置 ≠ meta 声明 ⇒ 加载侧严格校验 fail-closed ⇒ **整卷拒挂载 = 启动失败** | ① 顺序改为**先写 meta、后搬容器**（中间态信息不丢）；② 加载侧新增 `repairInterruptedDirMoves` **按 meta 声明位置确定性修复**（新序=完成、旧序遗留态=回滚），旧扁平布局仍 fail-closed（判据：物理父**不是已识别容器**）；用例 `TestRenameDir_InterruptedMove_CrashAtAnyStep_MountsAndKeepsData` |
 | `Stat`/`ListDir` **不填 `Entry.MTime`** | **P2**：上层 `ModTime` 恒 0（`list --json`/`meta` 的 `mod_time` 为 0，并削弱同步比对） | 暴露 `metaEntry.mtime`（UnixNano）；用例 `TestStat_ListDir_ExposeLogicalMTime`（含重启后重载） |
-| 内存写路径 `writeCtx` **漏填 size** | **P2**：`Usage()` 记账恒 +0（覆盖写还会误减） | 显式填 `size`；两条写路径口径对齐（声明 size 时按 size 截断，与流式一致） |
+| 内存写路径 `writeCtx` **漏填 size** | **P2**：`Usage()` 记账恒 +0（覆盖写还会误减） | 显式填 `size`（`commitEntry`/覆盖写清理按 `wc.size` 记账）。**注**：两条写路径对**调用方声明 size** 的口径仍**有意不同**（流式按 size 读、内存读全），已自陈并列为已登记残余（见本节末项） |
 | 流式路径的 Erasure 分支传 `data=nil` | **P2**（当前不可达的**陷阱**） | 改为显式 fail-closed + 准确错误信息（放宽分流条件时不会静默写坏 parity） |
-| 文档/注释漂移 6 处（README「mtime/模式」与「副本卷名」、§3.5「按 mtime 排序」、§8.2 旧「非原地改名」、`files_phys.go` 头注释自相矛盾等） | **P2**：注释强于实现会误导维护者 | 逐条按实现勘误（1 条经复核**证伪**、未改：`writeFileStream` 的 keyframe 注释与 `shardseal.go:337`/上层回退设计一致） |
+| 文档/注释漂移 6 处（README「mtime/模式」与「副本卷名」、§3.5「按 mtime 排序」、§8.2 旧「非原地改名」、`files_phys.go` 头注释自相矛盾、`writeFileStream` 的 keyframe 注释等） | **P2**：注释强于实现会误导维护者 | 逐条按实现勘误。**更正（2026-10-19）**：此前“keyframe 走上层 ReadAll 回退”的结论已被**证伪**——`shardseal` 的 keyframe parseOnce 经 io.ReaderAt 扫描、与流式逐块加密兼容，**上层无 ReadAll 回退分支**（`shardseal_stream_test.go:TestEncryptShardsReader_VideoKeyframeParity` 锁定），该条注释已一并修正 |
 
 **已登记残余（如实记录，未修）**：
 - ~~读放大~~ **已根治（2026-10-18，Step 1 + Step 2）**：读路径不再复制密文、也不再落明文——

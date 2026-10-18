@@ -6,12 +6,14 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 )
 
 // TestWriteFile_SeekableStreamsToEncryptShardsReader 锁定：可 seek 输入（bytes.Reader）
@@ -123,5 +125,47 @@ func TestWriteFile_LocalFSSourceStreams(t *testing.T) {
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("还原不一致：got %d bytes want %d", len(got), len(payload))
+	}
+}
+
+// TestWriteFile_UnknownSizeBoundedByMaxFileBytes（P2 修复，2026-10-19）：配置 MaxFileBytes 时，
+// **未知长度（size<0）+ 非 seek 源**（chunked 上传形态）此前走内存路径的裸 io.ReadAll ⇒
+// 「按声明 size 预检」失效 ⇒ 任意大小内容整读进内存（OOM）。修后按「上限 +1」读并超限
+// fail-closed（与流式路径对未知长度的拒绝同一口径）；未配置上限（0=不限）时保持既有「读全」。
+//
+// 变异：把 readAllBounded 改回裸 io.ReadAll ⇒ ① 超限用例必红（写成功而非报错）。
+func TestWriteFile_UnknownSizeBoundedByMaxFileBytes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	newFS := func(t *testing.T, max int64) *SecretdataFS {
+		t.Helper()
+		sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil), Options{
+			Secret: []byte("test-secret-key-32bytes-abcdefgh"), MaxFileBytes: sizex.ByteSize(max),
+		})
+		if err != nil {
+			t.Fatalf("NewFS: %v", err)
+		}
+		return sfs
+	}
+	// ① 超限 + size=-1 ⇒ 必须 fail-closed（ErrMaxFileBytes，与写路径预检同哨兵）
+	sfs := newFS(t, 64)
+	big := struct{ io.Reader }{bytes.NewReader(bytes.Repeat([]byte("x"), 200))} // 丢弃 Seeker
+	err := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "big.bin", big, -1, 0)
+	if err == nil {
+		t.Fatal("未知长度源超过 MaxFileBytes 必须失败（否则无界整读内存）✗")
+	}
+	if !errors.Is(err, ErrMaxFileBytes) {
+		t.Fatalf("应为 ErrMaxFileBytes（与写路径预检同哨兵），实测: %v", err)
+	}
+	// ② 未超限 + size=-1 ⇒ 仍须成功（上限不得过度收紧）
+	small := struct{ io.Reader }{bytes.NewReader(bytes.Repeat([]byte("y"), 32))}
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "small.bin", small, -1, 0); werr != nil {
+		t.Fatalf("未超限的未知长度源应成功: %v", werr)
+	}
+	// ③ 未配置上限（0=不限）⇒ 保持既有「读全」语义（不回归 TestWriteFile_NonSeekableReadsAll）
+	sfs2 := newFS(t, 0)
+	big2 := struct{ io.Reader }{bytes.NewReader(bytes.Repeat([]byte("z"), 200))}
+	if werr := sfs2.WriteFile(ctx, syncpkg.LogicalKey{}, "unbounded.bin", big2, -1, 0); werr != nil {
+		t.Fatalf("未配置上限时未知长度源应读全成功: %v", werr)
 	}
 }

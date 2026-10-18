@@ -59,8 +59,16 @@ func (s *SecretdataFS) CopyFile(ctx context.Context, from, to string) error {
 	// 同容器 ⇒ 分块**原地共享**（存在即引用；零 blob 写）；跨容器 ⇒ 分块字节拷贝（零加解密）。
 	// 两种情形都**不写任何标记/dataDir**：布局事实由「meta 所在容器 vs 分块所在容器」表达，
 	// 共享事实由「两份 meta 引用同一批 blob」表达 —— 重启由索引天然恢复，无新元数据字段。
-	if targetContainer != s.dataSeg(src) {
-		if cerr := s.copyContentBlobs(ctx, src, targetContainer); cerr != nil {
+	// **去重池引用条目**（src.dataDir != ""）：分块在全卷共享的池容器 ⇒ 既不拷贝也不改指向，
+	// 副本必须**保留 dataDir**（P2 修复，2026-10-19：此前新条目不带 dataDir ⇒ 副本去目标容器
+	// 找分块 ⇒ 静默不可读），并**增加池引用计数**（否则任一方删除可能归零、池 blob 被物理删）。
+	shareContent := targetContainer == s.dataSeg(src) || src.dataDir != ""
+	uploaded := []string{}
+	if !shareContent {
+		copied, cerr := s.copyContentBlobs(ctx, src, targetContainer)
+		uploaded = append(uploaded, copied...)
+		if cerr != nil {
+			s.rollbackWrite(ctx, uploaded, nil)
 			return cerr
 		}
 	}
@@ -71,21 +79,29 @@ func (s *SecretdataFS) CopyFile(ctx context.Context, from, to string) error {
 	cp.BaseVersion = s.volVersion + 1
 	name, blob, merr := s.encryptMetaBlob(cp)
 	if merr != nil {
+		s.rollbackWrite(ctx, uploaded, nil)
 		return merr
 	}
 	metaPath := path.Join(targetContainer, name)
-	if werr := s.uploadBlob(ctx, metaPath, blob, src.mtime); werr != nil {
+	// **先登记后上传** + 失败回滚（P2 修复，2026-10-19）：此前 meta 上传失败时已拷贝的分块
+	// （跨容器）会留孤儿。
+	if werr := s.uploadBlobTracked(ctx, &uploaded, metaPath, blob, src.mtime); werr != nil {
+		s.rollbackWrite(ctx, uploaded, nil)
 		return werr
 	}
 	s.index[t] = &metaEntry{
 		size: src.size, mtime: src.mtime, dirSeg: targetContainer, metaName: name,
-		meta: cp, baseVersion: cp.BaseVersion,
+		dataDir: src.dataDir, // 去重池指向（"" = 自包含布局）
+		meta:    cp, baseVersion: cp.BaseVersion,
 		// phys（独立审核 P1，2026-10-18）：`TrueUsage`（Σ e.phys）/`PhysFootprint` 与对账
 		// `correctLedgerToTruth` 的**权威回写**都直接吃该字段 ⇒ 漏设即 `phys==0` ⇒ 真值少计
 		// ⇒ 对账把卷池**压到低于磁盘**（复制 4KiB 文件实际新增 1–2MiB meta blob，却只记 4KiB）。
 		// 口径与上面的分块处理一一对应：同容器 ⇒ 分块**原地共享**（已由源条目计入）⇒ 只计新
 		// meta blob（含 pad）；跨容器 ⇒ 分块（+parity）已**字节拷贝** ⇒ 计 meta + 内容 + parity。
-		phys: physBytesOf(cp, int64(len(blob)), targetContainer == s.dataSeg(src)),
+		phys: physBytesOf(cp, int64(len(blob)), shareContent),
+	}
+	if src.dataDir != "" {
+		s.retainPoolEntry(cp) // 与源共享同一池 blob ⇒ 引用 +1（与 unrefPoolEntry 对称）
 	}
 	addDirKeysLocked(s.dirs, t)
 	s.volVersion = cp.BaseVersion

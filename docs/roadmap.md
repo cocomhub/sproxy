@@ -1156,3 +1156,130 @@ type LeaderElector interface {
 
 > **本章状态核对（2026-09-28）**：以下 Web UI 硬伤与集群状态均源码实证（行号如上）。
 > 既有 11/12 章 64 份设计文档 + 82 项全覆盖标准继续有效；本章为新增方向。
+
+## secretdata 生产化待办（用户裁定 2026-10-18）
+
+**优先级**：① 基于**百度网盘**的 secretdata 生产功能（完整/稳定/可用/**高性能**）→ ② secrets 按卷格式存取
+→ ③ 回收站各卷独立 + 汇总展示 → ④ 容量/配额收敛（生产级可长期维护）→ ⑤ 其余（不影响基础使用，记录待办）。
+
+### ① secretdata over 外部卷（baidupcs 优先）——**最高优先**
+- [ ] **接线核实与收口**：`type: secretdata` + `extra.target: "<外部卷>/<子目录>"`（嵌套形态，装配层经
+      `TranslateNestedDecl` 翻译为封装声明）在**外部源**上的端到端可用性——装配层已支持（`pkg/volume/enclosure/attach.go`
+      列出 s3/baidupcs/pikpak/cluster 等外部源）；**单测已覆盖**（外部后端替身，`cmd/sproxy/secret_register_test.go`
+      的 `TestSetupSecretBackends_ConfigSecretdata_Assembled` / `multi_layer_chain_over_external_source` 子用例），
+      但**缺真实网盘 e2e**（e2e 只覆盖 local target）（2026-10-19 更正：此前记为「无任何测试覆盖」已 stale）。
+      `docs/secret-volume.md §3/§9` 的「对象存储类外部 target 仍预留」措辞已按实测更正（仅「外部卷**整卷**」仍预留）。
+- [ ] **性能：消除分块二次本地拷贝**：secretdata 上传每个加密分块用 `s.inner.WriteFile(ctx, key, path, reader, …)`
+      ⇒ 目标卷（baidupcs）会**再落一份本地 staging**（其 `WriteFromStagedPath` / `WithStagedLocalPath` 已具备）。
+      修：把 secretdata 的**临时分块路径**经 `syncpkg.WithStagedLocalPath`（或 `WriteFromStagedPath`）交给内层
+      ⇒ 峰值 1×、省一次本地拷贝（与既有 staging 架构一致，不另造机制）。
+- [ ] **读性能**：确认走 `RangeReader` 段级快路径（baidupcs 已实现 `OpenRangeRead`）⇒ 最小下载；量化
+      「每 4MiB 窗口的 HTTP 请求数」与顺序读吞吐（需实测）。
+- [ ] **稳定性**：远端错误 ⇒ 写失败 + 回滚不留半态（已有）；补「远端超时/重试/断连」下的集成测试
+      （用实现 `RangeReader` + `StagedPathReuse` 的**假外部 FS** 覆盖整链，避免依赖真实网盘凭据）。
+- [ ] **用户面**：`extra.target` 文档 + `config.example.yaml` 示例 + 建卷 API/Web UI 的嵌套建卷路径核对。
+
+### ② secrets 按卷格式存取（用户裁定：URI 读 + 缓存 + 隔离真实存储结构）
+- [ ] secrets 文件改**经卷存取**（按该卷格式加密/封印），使用方仍按 `secrets://<卷>/<名>` 读并缓存；
+      当前 `cmd/sproxy/secret_register.go` 用裸 `NewLocalFS(<root>/secrets)` ⇒ 在**加密默认卷上为明文**（R26 已登记）。
+- [ ] **迁移口径（禁静默降级）**：既有明文 secret 文件在加密卷上 ⇒ 显式迁移（读明文 → 经 Root 加密写 → 校验 →
+      删旧）或显式拒绝 + 运维命令；补 e2e。
+
+### ③ 回收站：各卷独立 + 汇总展示（用户裁定：避免过多复杂度，参考常见 OS 策略）
+- [ ] 软删落**文件所在卷**的 trash（已是）；列表/恢复/清空**按各卷独立**操作 + 提供**跨卷汇总视图**；
+      API 增 `volume` 维度；Web UI 补真浏览器 e2e（硬规则）。
+
+### ④ 容量/配额收敛（必须生产级、可长期维护）
+- [ ] 本地加密卷容量真值接 root 物理扫描（消除 ~0.1% 逻辑口径偏差）。
+- [ ] presign 直传 per-volume 记账/预检（#44① 的 (a) 半；默认禁 + 经写内核登记已做）。
+- [ ] 多 target 副本字节入账（`targets` 实验能力）。
+
+### ⑤ 其余（不影响基础使用）
+- [ ] `TransferFSFor` 第三返回值语义 / `DisableDoubleDownloadVerify` 规格-实现缺口。
+- [ ] Windows 文件锁 flake（`pkg/tunnel/hub` 持久化偶发）。
+- [ ] legacy meta（无 blocklet 索引）读内存退化为单块。
+- [ ] `Decl.SourceKey(owner)`（设计 §5；跨外部卷源封装前置）。
+- [ ] 卷非空但根不可解析时放行（与错密钥挂载期不可区分，既有锁定语义）；两条写路径 size 口径差异（既有锁定）。
+
+### ①-附：百度网盘「秒传收敛」下的本地临时空间策略（2026-10-18 用户提出）
+
+**领域约束（已取证）**：多分片上传后远端 md5 **非权威**（`MD5Unreliable`，`md5 (可能不正确)`）；
+**checksum 只在「同一文件重复上传（秒传）」命中后才收敛** —— 现实现已有该机制：
+`putAttempt` = 存在性检查 → 上传 → **ETag 复核 → 不匹配则 `RapidUpload` 刷新**（`adapter.go`，
+未命中码 31079）。
+
+**两种策略对比**（本地临时物 = 加密后产物）：
+
+| 维度 | S1 占本地临时空间（保留加密产物） | S2 重复计算（重读源 + 重加密） |
+|---|---|---|
+| 本地峰值 | 当前：**O(整个文件)** ✗（先全部加密落 temp 再上传） | O(1 块)（只留当前块） |
+| CPU/IO | 0（直接复用） | AES-GCM 重算 + 源重读（KDF 每文件一次，成本主要在加密/IO） |
+| 可重试性 | **强**：秒传刷新只读本地文件 | **仅当源可重读**；HTTP body / 纯流 **不可重读** ⇒ 无法重算 ✗ |
+| 秒传收敛 | 同一文件重复上传即可刷新 ✓ | 需先重算再刷新（多一轮 CPU/IO ✗） |
+| 崩溃残留 | 本地孤儿（可清）+ 远端已上传块需回滚 | 同左 |
+
+**关键洞察**：secretdata 是**分块存储**（每块一个对象）⇒ **秒传天然是「按块」的** ⇒ **无需**保留
+「整份加密文件」✗；每块上传时其本地文件**本来就在场**（加密产物）⇒ 秒传刷新**零重算** ✓。
+
+**推荐形态（混合 + 块级交错）**：
+1. **块级交错**（encrypt 块 k → 上传块 k → 丢弃）：本地 staging = **O(1 块)**（默认块 1–200MiB，
+   块内 blocklet 更细）⇒ 「空间不足」在多数场景**自然消失** ✓；秒传按块刷新 ✓；失败用既有
+   `rollbackWrite(uploaded…)` 回滚 ✓（远端孤儿由可选 GC/清理兜底，如实登记）。
+2. **回退链（回答「空间不足能否回退到重复计算」）**：
+   ① 产物在场 ⇒ **复用**（S1，零成本）→ ② 源**可重读**（本地文件/已暂存路径）⇒ **重算**（S2）→
+   ③ 都不可行（源已消费 + 产物已清）⇒ **fail-closed**（明确错误，绝不静默接受不可校验的写 ✗）。
+3. **空间治理**：沿用**既有** staging 配额（本卷自管，见 `stagingReserve`）⇒ 不足时按①→②→③ 回退，
+   而不是直接失败（除非源不可重读）。
+4. **不推荐**：长期保留「整份加密文件」✗（峰值 O(file)、崩溃残留、与按需/流式方向相悖；
+   且分块存储下**无必要**）。
+
+**实施状态（2026-10-18，块级交错已落地）**：
+
+- ✅ **块级交错上传**：`shardseal.EncryptShardsReaderToChunks`（新 sink 抽象：分块逐块交调用方、meta **不**在 shardseal 内加密，
+  `EncryptionResult.MetaBlob/MetaName` 留空、由调用方按最终 meta 自行加密一次）⇒ `secretdata.writeFileStream` 走 sink：**加密一块 → 上传一块 →
+  丢弃**，meta 留到末尾且**内存态**上传。实测（≈510KiB / 32KiB 块 = 16 块，
+  `TestWriteFile_InterleavedChunkUploadLocalPeakO1Block`）：本地分块副本峰值 **16 → 1**（O(file) → O(1 块)）。
+  staging 配额预留口径同步改为「单块上界 + meta pad」（`stagingReserveInterleaved`），不再随文件线性增长。
+- ✅ **所有分块上传点统一经 `WithStagedLocalPath`**（`uploadLocalChunk`）：数据分块、**parity**、**dedup**
+  单分块（此前 parity/dedup 走 `bytes.NewReader` 内存交付 ⇒ 内层二次落 staging）。
+- ✅ **回退链**：本地产物不可落盘（**临时目录不可用**）或 staging **配额**不足时——源**可重读**
+  （本地文件 / 已暂存路径，`replayableSourcePath`）⇒ 降级**内存交付**（写仍成功）；源不可重读
+  （管道 / 内存 reader）⇒ **fail-closed**（明确错误，无半态）。内层重试/秒传刷新期间本地产物**必须在场**
+  （生命周期契约：stagedPath 只读，删除一律在内层返回后）——已由「内层多遍读」用例锁定。
+  注：回退链只覆盖**落盘前**的可用性判定（临时目录不可用 / 配额拒绝）；**交错期间**落本地块
+  （`os.WriteFile`）失败时整次写直接失败并回滚，不回退。
+- ✅ **差分用例**：秒传收敛场景（fake 模拟多分片 md5 非权威 → 秒传刷新命中/未命中）+ 本地峰值对照
+  （峰值 ≤ 1 块；未命中 ⇒ fail-closed 无半态）。
+- ⚠️ **已知残余（如实登记）**：
+  1. **崩溃（非错误返回）时远端可能留孤儿块**：交错丢弃后进程崩溃 ⇒ 已上传块无记录 ⇒ 由既有可选 GC/清理兜底
+     （与删除路径的孤儿方向同源，见 `docs/secret-volume.md` §6.2）。
+  2. **内存写路径未交错**（`writeFileEncrypted`：非 seek 源 `io.ReadAll` 后整目录落 temp，本地峰值仍 O(file)；
+     dedup/erasure 走该路径）——未做原因：该路径明文已在内存（内存峰值 O(file) 才是主瓶颈）、且 parity 需全部
+     明文分块；交错需再引入一层 sink 分发且对 erasure/dedup 语义影响面更大。
+  3. **回退链的「重算」（②）落在上层**：本层不做单块重加密（无 per-block 加密 API；重算 = 上层重试整次写，
+     见 `pkg/backup.transferWithRetry`）⇒ 本层保证「源不被消费/销毁 + 失败返回明确错误 + 完整回滚」，
+     使上层重算可行。③ 的判据按设计原文取「源是否**路径**可重读（本地文件/已暂存路径）」。
+  4. **「先登记后上传」未覆盖全部上传点**（2026-10-19 新发现，本轮未改）：主写路径的分块/meta 已改
+     「先登记后上传」（内层「写成功但复核失败」时可从回滚集合删除），但下列上传点仍是「写后登记」——
+     目录 meta（`secretdata.go` `writeDirMetaLocked`，经 `updateDirMetaLocked` 用于目录改名/移动）、
+     同卷复制（`copy.go` `CopyFile`：meta 写入失败无登记/清理）、`copyContentBlobs`/`copyBlob`、
+     改名（`writeRenamedMetaLocked`）、**dedup 命中路径**（`features.go` `writeFileDedupHit`：失败时仅
+     `releasePoolRef`、不删已落 meta）。注：`UpdateMetaExtra`（`meta_provider.go`）用第三种写法
+     （失败即显式 `Delete`）——已覆盖，但同属未收敛族。**影响**：这些路径遇内层 write-then-fail 会在远端
+     留孤儿 blob（无数据丢失，属空间泄漏，由既有可选 GC 兜底）。
+     **最小修法**：抽 `uploadAndTrack`（登记→上传→失败即删）并让上述点统一调用。
+  5. **第三轮代码审核（2026-10-19，三路独立 fresh-context）发现 → 本轮已全部销账** ✓
+     （commit `807dc24b3`：降级哨兵分类 · 失败清理单一机制 · dedup 复制保 dataDir/引用 · 提交单一实现
+     `commitLocked` · 锁内远端删除全收口有界 ctx · baidupcs size 不符走有界重试 · 流式路径 size 告警）。
+     **仍未做（需产品裁定 / 非正确性问题）**：
+     - **远端「md5 非权威 + 未报 size」时零校验接受**（`baidupcs/storage.go` `verifyUnreliableMD5Size`）：
+       既不比 md5 也不比 size，仅 Warn 后接受——这是 R5-I1「无校验能力≠损坏」的**既有用户裁定**，
+       改成 fail-closed 会拒绝合法上传（远端确实可能不报 size），加 readback 又与本仓既有裁定
+       「必须 md5 一致才算上传成功」（已移除 readback 接受捷径）冲突 ⇒ **需裁定取向**。
+     - **内存交付降级无全局背压**：staging 配额不足时降级为内存交付（单次 ≤ 单块上限，有界），
+       并发多次降级无全局上限（既有非 seek 源内存写路径同样如此，非本轮回退链引入）⇒ 需引入
+       全局并发上限/配置项，属策略决策。
+     - **内存写路径（`writeFileEncrypted`）未交错**（见上方残余 2）：其明文**已在内存** ⇒ 交错只能把
+       本地 temp 峰值从 O(文件) 降到 O(单块)（内存峰值不变）⇒ 收益有限、需新增 Bytes 形态的 sink 入口。
+     - **限速包装曾使交错路径失效**：已修（`limitReader` 现透传 `Seek`/`ReadAt`/`SourcePath` 且
+       `ReadAt` 计入令牌桶）——留档备查，避免后续再引入「包装即丢能力」。

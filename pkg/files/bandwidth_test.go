@@ -4,7 +4,11 @@
 package files
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -86,5 +90,70 @@ func TestLimiterPerOwner(t *testing.T) {
 	}
 	if err := lm.BucketFor("fast").WaitN(context.Background(), 1<<20); err != nil {
 		t.Fatalf("fast owner WaitN 应不受 slow 影响: %v", err)
+	}
+}
+
+// TestLimitReader_PreservesRandomReadAndStaysLimited（P2 修复，2026-10-19）：限速包装必须
+// **透传** io.Seeker/io.ReaderAt——否则下游流式卷（secretdata）按能力判定（canStream）会把
+// 可 seek 源当成纯流 ⇒ 整份明文进内存、本地临时峰值回到 O(文件)，且块级交错的回退链②
+// （源可重读 ⇒ 降级内存交付）失效。即：**限速开关会静默关掉本轮的交错上传与回退链**。
+// 同时 ReadAt 必须**仍受限速**（随机读若绕开令牌桶 = 限速被架空），Seek 不消耗带宽。
+//
+// 变异：limitReader 去掉 ReaderAt/Seeker 透传分支 ⇒ 能力断言必红；ReadAt 直通不 WaitN ⇒
+// 「第二次 ReadAt 仍在阻塞」断言必红。
+func TestLimitReader_PreservesRandomReadAndStaysLimited(t *testing.T) {
+	t.Parallel()
+	src := filepath.Join(t.TempDir(), "src.bin")
+	if err := os.WriteFile(src, bytes.Repeat([]byte("x"), 4096), 0o600); err != nil {
+		t.Fatalf("写源: %v", err)
+	}
+	f, err := os.Open(src)
+	if err != nil {
+		t.Fatalf("打开源: %v", err)
+	}
+	defer f.Close()
+
+	// ① limiter=nil（默认关）⇒ 原样返回，能力与路径零回归。
+	if got := limitReader(nil, "o", f); got != io.Reader(f) {
+		t.Fatal("limiter=nil 时必须原样返回源（零回归）")
+	}
+	// ② 该 owner 无桶（不限速）⇒ 原样返回。
+	none := NewBandwidthLimiter(func(string) *TokenBucket { return nil })
+	if got := limitReader(none, "o", f); got != io.Reader(f) {
+		t.Fatal("无该 owner 桶时必须原样返回源（零回归）")
+	}
+	// ③ 限速生效 ⇒ 透传 Seeker/ReaderAt/SourcePath，且 ReadAt 计入令牌桶。
+	bucket := NewTokenBucket(1, 1) // 1B/s、burst 1B：第二次读 1B 必阻塞
+	lim := NewBandwidthLimiter(func(string) *TokenBucket { return bucket })
+	got := limitReader(lim, "o", f)
+	if _, ok := got.(io.Seeker); !ok {
+		t.Fatal("限速包装必须透传 io.Seeker（否则流式卷走内存路径）✗")
+	}
+	ra, ok := got.(io.ReaderAt)
+	if !ok {
+		t.Fatal("限速包装必须透传 io.ReaderAt（否则 secretdata 块级交错失效）✗")
+	}
+	sp, ok := got.(interface{ SourcePath() string })
+	if !ok || sp.SourcePath() != src {
+		t.Fatalf("限速包装必须透传 SourcePath（回退链②判据），实测 %v", sp)
+	}
+	buf := make([]byte, 1)
+	if _, rerr := ra.ReadAt(buf, 0); rerr != nil {
+		t.Fatalf("首次 ReadAt 应成功: %v", rerr)
+	}
+	done := make(chan struct{})
+	go func() { _, _ = ra.ReadAt(buf, 1); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("第二次 ReadAt 未受限速（随机读绕开令牌桶）✗")
+	case <-time.After(80 * time.Millisecond):
+		// 仍在等令牌（1B/s ⇒ ~1s 后自然放行）⇒ ReadAt 确实计入限速 ✓
+	}
+	// ④ 非 seek 源 ⇒ **不得**假装有随机读能力（假能力会让下游走 ReadAt 并失败）。
+	plain := io.NopCloser(bytes.NewReader([]byte("abc"))) // NopCloser 不实现 Seeker/ReaderAt
+	if got2 := limitReader(lim, "o", plain); got2 != io.Reader(plain) {
+		if _, ok := got2.(io.ReaderAt); ok {
+			t.Fatal("非 seek 源不得被包装出 ReaderAt 能力（假能力误导下游）✗")
+		}
 	}
 }
