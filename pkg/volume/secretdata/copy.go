@@ -80,6 +80,12 @@ func (s *SecretdataFS) CopyFile(ctx context.Context, from, to string) error {
 	s.index[t] = &metaEntry{
 		size: src.size, mtime: src.mtime, dirSeg: targetContainer, metaName: name,
 		meta: cp, baseVersion: cp.BaseVersion,
+		// phys（独立审核 P1，2026-10-18）：`TrueUsage`（Σ e.phys）/`PhysFootprint` 与对账
+		// `correctLedgerToTruth` 的**权威回写**都直接吃该字段 ⇒ 漏设即 `phys==0` ⇒ 真值少计
+		// ⇒ 对账把卷池**压到低于磁盘**（复制 4KiB 文件实际新增 1–2MiB meta blob，却只记 4KiB）。
+		// 口径与上面的分块处理一一对应：同容器 ⇒ 分块**原地共享**（已由源条目计入）⇒ 只计新
+		// meta blob（含 pad）；跨容器 ⇒ 分块（+parity）已**字节拷贝** ⇒ 计 meta + 内容 + parity。
+		phys: physBytesOf(cp, int64(len(blob)), targetContainer == s.dataSeg(src)),
 	}
 	addDirKeysLocked(s.dirs, t)
 	s.volVersion = cp.BaseVersion
