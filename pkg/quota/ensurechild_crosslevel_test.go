@@ -39,11 +39,48 @@ func TestEnsureChild_RejectsChildExceedingIntermediateLimit(t *testing.T) {
 	if got := a.Allocated(); got != 100 {
 		t.Fatalf("成功后 a.allocated=100（记在其直接子 b 上），实际 %d", got)
 	}
-	// **逐级记账**判别断言：嵌套分配必须让**每一级**祖先都看到（root 的 allocated 语义是
-	// 「Σ 其直接子上限」⇒ a(100) + b(100) = 200）。只记最近一级祖先的实现会漏掉 root
-	// ⇒ root 的「未分配额度」视图虚高（可观测性缺陷）。
+	// **子树语义 + 形态无关**判别断言：每级 allocated = 该级**子树内全部上限之和**
+	// ⇒ b 的上限同时记到 a 与 root ⇒ root.allocated == 200（a=100 + b=100）。
+	// 关键不是这个数，而是**形态无关**：同样的逻辑树用 `a.EnsureChild(["b"],100)` 装配也必须
+	// 得到同一结果（见 TestEnsureChild_FormIndependent）。
 	if got := p.Allocated(); got != 200 {
-		t.Fatalf("成功后 root.allocated=200（a=100 + b=100），实际 %d（未修必红：只记最近一级祖先）", got)
+		t.Fatalf("成功后 root.allocated=200（子树：a=100 + b=100），实际 %d", got)
+	}
+}
+
+// TestEnsureChild_FormIndependent 钉住**结构不变式：同一逻辑树与调用形态无关**（独立复审 P1）。
+//
+// 缺陷（我的首版修法）：逐级记账只上溯到**调用目标 p** ⇒ 同一棵树用 Pool 形态装配会被拒、
+// 用 Scope 形态却通过（实测：`p.EnsureChild(["a"],1000)` 后 `p.EnsureChild(["a","b"],1)` 报
+// 「分配超限」，而 `a.EnsureChild(["b"],1)` 通过）。修法：上溯到**全局根**。
+func TestEnsureChild_FormIndependent(t *testing.T) {
+	t.Parallel()
+	const rootMax, aMax, bMax = 1000, 900, 50
+	// 形态一：从根一次给全路径。
+	p1 := NewPool(rootMax)
+	if _, err := p1.EnsureChild([]string{"a"}, aMax); err != nil {
+		t.Fatalf("形态一 步骤1: %v", err)
+	}
+	_, err1 := p1.EnsureChild([]string{"a", "b"}, bMax)
+	// 形态二：先建 a，再从 a 建 b（同一逻辑树）。
+	p2 := NewPool(rootMax)
+	a2, err := p2.EnsureChild([]string{"a"}, aMax)
+	if err != nil {
+		t.Fatalf("形态二 步骤1: %v", err)
+	}
+	_, err2 := a2.EnsureChild([]string{"b"}, bMax)
+
+	if (err1 == nil) != (err2 == nil) {
+		t.Fatalf("同一逻辑树因调用形态不同结果不同（形态相关 ⇒ 缺陷）：Pool=%v Scope=%v", err1, err2)
+	}
+	if err1 != nil {
+		t.Fatalf("合法树（Σ子树上限 %d+%d ≤ %d）不应被拒: %v", aMax, bMax, rootMax, err1)
+	}
+	if got, want := p1.Allocated(), p2.Allocated(); got != want {
+		t.Fatalf("形态一 root.allocated=%d ≠ 形态二 %d（形态相关）", got, want)
+	}
+	if got, want := p1.Allocated(), int64(aMax+bMax); got != want {
+		t.Fatalf("root.allocated=%d, want %d（子树上限之和）", got, want)
 	}
 }
 

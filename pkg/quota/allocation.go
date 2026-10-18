@@ -147,23 +147,31 @@ func (p *Pool) EnsureChild(segs []string, maxBytes int64) (*Scope, error) {
 		return nil, errors.New("quota: nil pool")
 	}
 	maxBytes = nonNeg(maxBytes)
-	cur, err := p.ensureChildTarget(segs)
-	if err != nil {
-		return nil, err
-	}
-	// 串行化用**全局根**的 allocMu：一次调用可能触及多级节点的 allocated（含 root），
-	// 而并发调用可能来自不同子树（各自的 p 不同）⇒ 只有全局根锁能覆盖共享祖先的更新。
+	// 串行化用**全局根**的 allocMu，且必须**覆盖节点定位与创建**（独立复审 P2，2026-10-18）：
+	// 定位内含 childWithSegment(RLock) + newScope(锁写)；若置于锁外，并发同段调用会各自创建
+	// **重复兄弟节点**并重复记账（幽灵节点 + 父 allocated 记重 ⇒ 后续合法分配假失败）。
+	// 锁序：allocMu → node.mu（本函数与调用链内不得反向获取）。
 	root := p
 	for root.parent != nil {
 		root = root.parent
 	}
 	root.allocMu.Lock()
 	defer root.allocMu.Unlock()
+	cur, created, err := p.ensureChildTarget(segs)
+	if err != nil {
+		return nil, err
+	}
 	cur.mu.RLock()
 	old := cur.maxBytes
 	cur.mu.RUnlock()
 	if delta := maxBytes - old; delta != 0 {
-		if aerr := p.adjustAncestorAllocationsLocked(cur, delta); aerr != nil {
+		// 记账归属＝**直接父**（见 adjustParentAllocationLocked）；失败 ⇒ 摘除本次新建的中间层
+		// 节点（独立复审 P3：此前新建节点留在树里 ⇒ 树结构已变、可被 Resolve 命中，与
+		// 「超额 ⇒ 不改动任何状态」承诺矛盾）。
+		if aerr := p.adjustSubtreeAllocationsLocked(cur, delta); aerr != nil {
+			for _, n := range created {
+				n.detachLocked()
+			}
 			return nil, aerr
 		}
 		cur.mu.Lock()
@@ -173,9 +181,13 @@ func (p *Pool) EnsureChild(segs []string, maxBytes int64) (*Scope, error) {
 	return &Scope{pool: cur}, nil
 }
 
-// ensureChildTarget 沿 segs 定位末节点（中间层以 max=0 创建），并拒绝空路径。
-func (p *Pool) ensureChildTarget(segs []string) (*Pool, error) {
+// ensureChildTarget 沿 segs 定位末节点（中间层以 max=0 创建），返回末节点与**本次新建的节点**
+// （供记账失败时回滚）。全空段（如 [""]）必须拒绝（独立复审 P2）：此前只判 len(segs)==0 ⇒ 这类
+// 输入返回 cur==p，随后记账会沿祖先一路走到**全局根**（正是自陈的「双计」形态）。
+func (p *Pool) ensureChildTarget(segs []string) (*Pool, []*Pool, error) {
 	cur := p
+	descended := false
+	var created []*Pool
 	for _, seg := range segs {
 		if seg == "" {
 			continue
@@ -183,28 +195,34 @@ func (p *Pool) ensureChildTarget(segs []string) (*Pool, error) {
 		child := cur.childWithSegment(seg)
 		if child == nil {
 			child = cur.newScope(seg, 0)
+			created = append(created, child.pool)
 		}
 		cur = child.pool
+		descended = true
 	}
-	if cur == p && len(segs) == 0 {
-		return nil, errors.New("quota: EnsureChild 需要非空路径")
+	if !descended {
+		return nil, nil, errors.New("quota: EnsureChild 需要非空路径段")
 	}
-	return cur, nil
+	return cur, created, nil
 }
 
-// adjustAncestorAllocationsLocked 把 leaf 的上限变化 delta 逐级记到**到调用目标 p 为止**的祖先上
-// （每级 allocated 的语义即「Σ 其直接子上限」）——这是「Σ 子节点上限 ≤ 父节点上限」在**每一层**
-// 成立的关键：只记起始节点会让中间层不受约束。不含更上层：p 创建时已在它的父上记过账，再往上
-// 会双计（实测：走到全局根会让根 allocated 虚高 ⇒ 后续合法分配假失败）。
-// 任一级拒绝 ⇒ 已记账的祖先**逐级回滚**并返回错误（保持「超额 ⇒ 不改动任何状态」承诺）。
-// 调用方须持全局根 allocMu；delta>0 走校验+回滚，delta<0 为归还（不会失败）。
-func (p *Pool) adjustAncestorAllocationsLocked(leaf *Pool, delta int64) error {
+// adjustSubtreeAllocationsLocked 把 leaf 的上限变化 delta 记到**它的每个祖先直到全局根**。
+//
+// **语义（权威规格 I1 的落地）**：每个节点的 `allocated` = 该节点**子树内所有节点上限之和**
+// ——即"这个子树占用了父多少额度"。故 leaf 上限变化必须同时反映到**每一级祖先**（含根）。
+// 这样「目录配额 ≤ 用户配额 ≤ 卷上限」在任何深度都成立（既有用例
+// `model_v3_probe_test.go:127-131` 钉住的正是这一点）。
+//
+// **必须走到全局根，不能只走到调用目标 `p`**（独立复审 P1，2026-10-18 实测反例）：只走到 p 会让
+// 同一逻辑树**因调用形态不同结果不同**（`p.EnsureChild(["a"],1000)` 后 `p.EnsureChild(["a","b"],1)`
+// 被拒，而 `a.EnsureChild(["b"],1)` 同树通过）——这是**形态相关**缺陷（结构不变式被调用方式影响）。
+// 走到全局根后两种形态完全等价（两者都从 leaf.parent 上溯到同一根）。
+// 任一级拒绝 ⇒ 已记账者**逐级回滚**（保持「超额 ⇒ 不改动任何状态」承诺）。
+// 调用方须持全局根 allocMu；delta<0 为归还（不会失败）。
+func (p *Pool) adjustSubtreeAllocationsLocked(leaf *Pool, delta int64) error {
 	if delta < 0 {
 		for anc := leaf.parent; anc != nil; anc = anc.parent {
 			anc.subAllocated(-delta)
-			if anc == p {
-				break
-			}
 		}
 		return nil
 	}
@@ -217,11 +235,26 @@ func (p *Pool) adjustAncestorAllocationsLocked(leaf *Pool, delta int64) error {
 			return err
 		}
 		done = append(done, anc)
-		if anc == p {
-			break
-		}
 	}
 	return nil
+}
+
+// detachLocked 从父节点的 children 中摘除自身（EnsureChild 记账失败时回滚本次新建的节点；
+// 调用方须持全局根 allocMu）。锁序同 EnsureChild（allocMu → node.mu）。
+func (p *Pool) detachLocked() {
+	parent := p.parent
+	if parent == nil {
+		return
+	}
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	kept := parent.children[:0]
+	for _, c := range parent.children {
+		if c.pool != p {
+			kept = append(kept, c)
+		}
+	}
+	parent.children = kept
 }
 
 // EnsureChild 是 Scope 侧的同一入口（在本节点之下创建/改额子节点并同步分配账本）。
