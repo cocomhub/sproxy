@@ -1268,23 +1268,18 @@ type LeaderElector interface {
      （失败即显式 `Delete`）——已覆盖，但同属未收敛族。**影响**：这些路径遇内层 write-then-fail 会在远端
      留孤儿 blob（无数据丢失，属空间泄漏，由既有可选 GC 兜底）。
      **最小修法**：抽 `uploadAndTrack`（登记→上传→失败即删）并让上述点统一调用。
-  5. **第三轮代码审核（2026-10-19，三路独立 fresh-context）新增残余**（均已登记，未在本轮修复）：
+  5. **第三轮代码审核（2026-10-19，三路独立 fresh-context）发现 → 本轮已全部销账** ✓
+     （commit `807dc24b3`：降级哨兵分类 · 失败清理单一机制 · dedup 复制保 dataDir/引用 · 提交单一实现
+     `commitLocked` · 锁内远端删除全收口有界 ctx · baidupcs size 不符走有界重试 · 流式路径 size 告警）。
+     **仍未做（需产品裁定 / 非正确性问题）**：
      - **远端「md5 非权威 + 未报 size」时零校验接受**（`baidupcs/storage.go` `verifyUnreliableMD5Size`）：
-       此时既不比 md5 也不比 size，仅 Warn 后接受（R5-I1「无校验能力≠损坏」的既有裁定）。若远端确实
-       被写成空/截断对象，本进程判成功 ⇒ 后续下载才暴露。建议后续评估：改为「返回 ok=false 走一次
-       有界重试，仍无 size 才接受」或加读侧校验开关。
-     - **流式路径「声明 size < 实际源长度」时静默截断**（内存路径有 Warn，流式无）——已在
-       `docs/secret-volume.md` §9.1 记为已知口径差异，此处补记「建议流式路径也补 Warn」。
+       既不比 md5 也不比 size，仅 Warn 后接受——这是 R5-I1「无校验能力≠损坏」的**既有用户裁定**，
+       改成 fail-closed 会拒绝合法上传（远端确实可能不报 size），加 readback 又与本仓既有裁定
+       「必须 md5 一致才算上传成功」（已移除 readback 接受捷径）冲突 ⇒ **需裁定取向**。
+     - **内存交付降级无全局背压**：staging 配额不足时降级为内存交付（单次 ≤ 单块上限，有界），
+       并发多次降级无全局上限（既有非 seek 源内存写路径同样如此，非本轮回退链引入）⇒ 需引入
+       全局并发上限/配置项，属策略决策。
+     - **内存写路径（`writeFileEncrypted`）未交错**（见上方残余 2）：其明文**已在内存** ⇒ 交错只能把
+       本地 temp 峰值从 O(文件) 降到 O(单块)（内存峰值不变）⇒ 收益有限、需新增 Bytes 形态的 sink 入口。
      - **限速包装曾使交错路径失效**：已修（`limitReader` 现透传 `Seek`/`ReadAt`/`SourcePath` 且
        `ReadAt` 计入令牌桶）——留档备查，避免后续再引入「包装即丢能力」。
-     - **dedup 的 `CopyFile` 丢失 `dataDir` 指向**（副本分块找不到 ⇒ 静默不可读；`Options.Dedup` 装配层
-       未接线 ⇒ 生产不可达）。
-     - **commit/CAS 逻辑三份重复**（`writeFileDedupMiss` 内联提交块 vs `commitDedupEntry` vs `commitEntry`）
-       ⇒ 后续语义修正需改三处，漏改即静默偏差（同上：dedup 未接线）。
-     - **`stagingDegradeReason` 按中文文案子串判「配额不足」**（`strings.Contains(err, "配额")`）：
-       `StagingQuotaTracker` 无哨兵错误 ⇒ 文案一变即静默落入 default（降级原因失真）。建议加
-       `ErrStagingQuotaExceeded` 之类哨兵 + `errors.Is`。
-     - **baidupcs「非权威 md5 + size 不符」直接致命失败**（绕过 `putRetryLoop` 的有界重试）：最终一致
-       窗口内可能误判（取向需裁定：fail-closed 更安全、有界重试更宽容）。
-     - **内存交付降级无全局背压**：staging 配额不足时降级为内存交付（单次 ≤ 单块上限，有界），但并发
-       多次降级无全局上限（既有非 seek 源内存写路径同样如此，非本轮回退链引入）。
