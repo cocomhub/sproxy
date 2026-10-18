@@ -140,7 +140,8 @@ func TestOpenRead_TempPeakBoundedByPlaintextSize(t *testing.T) {
 	}
 	blobBytes, _ := io.ReadAll(blob)
 	_ = blob.Close()
-	blobBytes[len(blobBytes)-1] ^= 0xff // 破坏 GCM tag
+	// 破坏 blob **中段**的密文（尾部可能落在 GCM 覆盖区之外 ⇒ 判据会假绿 ✗）。
+	blobBytes[len(blobBytes)/2] ^= 0xff
 	if werr := raw.WriteFile(ctx, syncpkg.LogicalKey{}, blobPath,
 		bytes.NewReader(blobBytes), int64(len(blobBytes)), 0); werr != nil {
 		t.Fatalf("写回被篡改分块失败: %v", werr)

@@ -19,7 +19,6 @@ package secretdata
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -518,51 +517,22 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 	if e.meta == nil {
 		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
 	}
-	if size < 0 || offset < 0 || size > e.meta.Original.Size-offset {
-		return nil, fmt.Errorf("secretdata: 区间 [%d,%d) 越出文件（size=%d）", offset, offset+size, e.meta.Original.Size)
+	// **收敛到按需解密句柄**（Step 2）：区间视图 = 同一 reader 的 [offset, offset+size) 窗口
+	// ⇒ 不再把整个区间物化进内存（此前 `rangeReadBytes` 返回整段切片），且底层支持
+	// RangeReader 时只拉目标 blocklet 段的密文（最小下载）。返回类型**只暴露 io.ReadCloser**
+	// （刻意不暴露 Seek：区间视图的 seek 语义易误用；既有调用方 RangeSeeker/DAV 只需要有界流）。
+	r, oerr := s.openReader(ctx, rel)
+	if oerr != nil {
+		return nil, oerr
 	}
-	if size == 0 {
-		return io.NopCloser(bytes.NewReader(nil)), nil
+	if size < 0 || offset < 0 || size > r.size-offset {
+		_ = r.Close()
+		return nil, fmt.Errorf("secretdata: 区间 [%d,%d) 越出文件（size=%d）", offset, offset+size, r.size)
 	}
-	salt, serr := base64.StdEncoding.DecodeString(e.meta.Salt)
-	if serr != nil || len(salt) != shardseal.SaltLen {
-		return nil, fmt.Errorf("secretdata: 文件 meta salt 非法: %v", serr)
-	}
-	keyBytes, kerr := shardseal.DeriveKey(s.secret, salt, e.meta.AlgoVersion)
-	if kerr != nil {
-		return nil, fmt.Errorf("secretdata: 派生文件密钥失败: %w", kerr)
-	}
-	out, rerr := s.rangeReadBytes(ctx, e, keyBytes, salt, offset, offset+size)
-	if rerr != nil {
-		return nil, rerr
-	}
-	return io.NopCloser(bytes.NewReader(out)), nil
-}
-
-// rangeReadBytes 逐块只下载/解密含 [offset,end) 的 blocklet 段并拼接覆盖区间明文。
-// 审计：Range 读取侧 decrypt 阶段 span（读取/播放侧解密路径——视频关键帧 seek 时每段独立
-// 解密，aggregate 到单次 range 读；Bytes = 返回明文段总长）。无 ctx logger 时 no-op
-// （与写入侧 encrypt span 对称）。
-func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) (out []byte, err error) {
-	decSpan := audit.From(ctx).Begin("decrypt")
-	defer func() {
-		if err != nil {
-			decSpan.Fail(err)
-			return
-		}
-		decSpan.End("bytes", int64(len(out)))
-	}()
-	for _, ci := range e.meta.Chunks {
-		if ci.Offset >= end || ci.Offset+ci.OrigSize <= offset {
-			continue // 该块与目标区间不相交 → 不下载
-		}
-		seg, rerr := s.readChunkRangeBytes(ctx, e, keyBytes, salt, ci, offset, end)
-		if rerr != nil {
-			return nil, rerr
-		}
-		out = append(out, seg...)
-	}
-	return out, nil
+	r.pos = offset
+	r.limitEnd = offset + size
+	r.seq = false // 区间视图不是「从 0 起的顺序读」⇒ 不做整文件校验
+	return &rangeReadCloser{r: r}, nil
 }
 
 // readChunkBlob 读取底层单个分块 blob（仅含目标区间的块被下载）。去重引用文件的数据
@@ -1300,34 +1270,14 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 	if e.meta == nil {
 		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
 	}
-	// **不落密文 staging**（2026-10-18 架构级修复 Step 1）：此前先把**全部分块密文**复制进
-	// `s.temp/view-*`，再经 `shardseal.DecryptFile` 把整份明文写进 `s.temp/decrypt-*`
-	// ⇒ 峰值临时盘 ≈ **2× 文件** ✗（根因是 DecryptFile 的「本地目录 → 本地文件」路径型 API）。
-	// 现改为逐块**直接从底层读密文**、解密后写入明文临时文件：一次派生 + 逐块 GCM 认证 +
-	// 长度校验 + 末尾**整文件 SHA-256** 校验，语义与 DecryptFile 完全一致（同一实现）
-	// ⇒ 峰值 = 1× 明文（用例 TestOpenRead_TempPeakBoundedByPlaintextSize 钉住）。
-	dec, derr := shardseal.NewChunkDecryptor(s.secret, e.meta)
-	if derr != nil {
-		return nil, derr
-	}
-	tmp, err := os.CreateTemp(s.temp, "decrypt-*")
-	if err != nil {
-		return nil, fmt.Errorf("secretdata: 创建解密临时文件失败: %w", err)
-	}
-	cleanup := func() {
-		tmp.Close()
-		_ = os.Remove(tmp.Name())
-	}
-	src := func(ci shardseal.ChunkInfo) ([]byte, error) { return s.readChunkBlobOrErase(ctx, e, ci) }
-	if derr := dec.DecryptAllTo(tmp, src); derr != nil {
-		cleanup()
-		return nil, derr
-	}
-	if _, serr := tmp.Seek(0, 0); serr != nil {
-		cleanup()
-		return nil, serr
-	}
-	return &cleanupReadCloser{rc: tmp, path: tmp.Name()}, nil
+	// **按需解密、可 seek、不落任何临时文件**（2026-10-18 架构级根治 Step 2）：
+	// Step 1 已去掉密文 staging（峰值 2× → 1×），本步把明文临时文件也去掉（temp → 0）——
+	// 只解密「当前读位置所在的 blocklet」并缓存（内存上界 = 单 blocklet），复用既有段级解密
+	// `readChunkRangeBytes`（底层支持 RangeReader 时只拉目标段密文；缺失块仍可走 erasure 恢复）。
+	// 返回的句柄实现 io.ReadSeeker + io.Closer（消费侧下载/Range/逐块校验强要求可 seek）。
+	// 整文件 SHA-256 改为「从头顺序读完时于 EOF 校验」（语义变化已在设计文档与 §9 说明；
+	// 逐 blocklet 的 GCM 认证始终生效，消费侧 VerifyReadSeeker 另有逐块校验层）。
+	return s.openReader(ctx, rel)
 }
 
 // dirScan 是容器目录 meta 扫描结果（loadIndex Phase 1，并行产生）。
