@@ -675,8 +675,12 @@ func (r *recordBinaryAdapter) Copy(ctx context.Context, from, to string) error  
 func (r *recordBinaryAdapter) Delete(ctx context.Context, remotePath string) error { return nil }
 
 // unreliableMD5Adapter 模拟 binary-only 模式的 `meta`：远端 ETag 非权威整文件 md5
-// （服务端标注「可能不正确」）——不得据此做相等断言。
-type unreliableMD5Adapter struct{ inner *fakeStorageAdapter }
+// （服务端标注「可能不正确」）——不得据此做相等断言。sizeSkew 非 0 时在 Meta 中上报
+// 偏离的 size（模拟「内容不符/写少」）。
+type unreliableMD5Adapter struct {
+	inner    *fakeStorageAdapter
+	sizeSkew int64
+}
 
 func (a *unreliableMD5Adapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
 	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
@@ -703,7 +707,50 @@ func (a *unreliableMD5Adapter) Meta(ctx context.Context, remotePath string) (*Ob
 	}
 	m.ETag = "00000000000000000000000000000000" // 非整文件 md5（片组合/不确定）
 	m.MD5Unreliable = true
+	m.Size += a.sizeSkew
 	return m, nil
+}
+
+// TestStorage_Put_UnreliableMD5SizeMismatchRejected（P2 修复，2026-10-19）：md5 非权威
+// （无校验能力）**不允许接受任意内容**——仍必须比对 size；远端 size 与本地不符 ⇒ fail-closed。
+// 变异：去掉 putCheckAfterUpload 的 size 断言 ⇒ 本用例（Put 返回 nil）必红。
+func TestStorage_Put_UnreliableMD5SizeMismatchRejected(t *testing.T) {
+	t.Parallel()
+	ad := &unreliableMD5Adapter{inner: newFakeStorageAdapter(), sizeSkew: 1}
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("unreliable-md5-size-mismatch-", 40)
+	if _, err := s.Put(context.Background(), "m.bin", strings.NewReader(content)); err == nil {
+		t.Fatal("远端 md5 非权威且 size 不符 ⇒ 必须拒绝（不得静默接受错误内容）✗")
+	}
+}
+
+// TestRapidUploaderOf_FallbackTransparent（P2 修复，2026-10-19）：renewAuthoritativeMD5 此前
+// **未遗传** binaryAdapter→Fallback 的库秒传能力（只有 refreshByRapidUpload 遗传）⇒ 默认装配下
+// 「远端 md5 非权威」永远刷不出权威 md5。现两者共用 rapidUploaderOf ⇒ 本用例锁定遗传。
+// 变异：把 rapidUploaderOf 中的 binaryAdapter 分支去掉 ⇒ binaryAdapter+Fallback 用例必红。
+func TestRapidUploaderOf_FallbackTransparent(t *testing.T) {
+	t.Parallel()
+	// ① 适配器直接实现 → 命中。
+	direct := newTestStorage(t, &multipartETagAdapter{inner: newFakeStorageAdapter()})
+	if _, ok := direct.rapidUploaderOf(); !ok {
+		t.Error("直接实现 rapidUploader 的适配器应命中")
+	}
+	// ② binaryAdapter + 库 Fallback 实现 rapidUploader → 必须透传命中。
+	fb := &multipartETagAdapter{inner: newFakeStorageAdapter()}
+	ba := newBinaryAdapter(AdapterConfig{Logger: testLogger(), Fallback: fb})
+	bs := newTestStorage(t, ba)
+	got, ok := bs.rapidUploaderOf()
+	if !ok {
+		t.Fatal("binaryAdapter + 库 Fallback（rapidUploader）应透传命中（否则 renewAuthoritativeMD5 无法刷新）✗")
+	}
+	if got != rapidUploader(fb) {
+		t.Fatalf("应返回 Fallback 的 rapidUploader，实测 %T", got)
+	}
+	// ③ binaryAdapter + 无 rapidUploader 能力的 Fallback → 不命中。
+	bs2 := newTestStorage(t, newBinaryAdapter(AdapterConfig{Logger: testLogger(), Fallback: &recordBinaryAdapter{}}))
+	if _, ok2 := bs2.rapidUploaderOf(); ok2 {
+		t.Error("Fallback 无 rapidUploader 能力时不应命中")
+	}
 }
 
 // TestStorage_Put_BinaryOnlyUnreliableMD5Accepted EXT-2 回归：binary-only 模式上传后远端
