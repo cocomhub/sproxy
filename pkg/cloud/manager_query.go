@@ -148,7 +148,11 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 	// 的存储账本一致——否则 partial 残留但账本释放，可累计突破 max_storage_bytes
 	// 配额。goroutine 可能仍在响应 cancel 收尾（Windows 下删除被占用文件会失败），
 	// 删除失败时由 executeDownload 的取消路径（removeTaskDir）兜底。
-	m.removeTaskDir(t.Owner, id)
+	// 兜底清理：失败不阻断取消（executeDownload 的取消路径会重试），但**不得静默**（可观测）。
+	if rerr := m.removeTaskDir(t.Owner, id); rerr != nil {
+		m.logger.Warn("cancel: remove task dir failed (executeDownload 取消路径会兜底重试)",
+			"task_id", id, "error", rerr)
+	}
 
 	// 终态持久化失败会丢失 cancelled 状态（重启后可能被当作 downloading 重启），必须显式报错
 	if err := m.saveTask(t); err != nil {

@@ -513,6 +513,8 @@ type expiredCloudTask struct {
 	reservedSize   int64
 	scopeCommitted int64
 	wasPending     bool // 仅用于日志：区分「孤儿 pending 兜底清理」与普通终态过期
+	// task 指向原任务对象：删除失败时回填重试（独立复审 P2，2026-10-18）。nil = 已确认清理。
+	task *CloudTask
 }
 
 // collectExpiredCloudTasks 在锁内扫描任务表，收集到期应清理的条目并同步从内存移除。
@@ -534,10 +536,11 @@ func (m *CloudDownloadManager) collectExpiredCloudTasks(now time.Time) []expired
 			reservedSize:   t.ReservedSize,
 			scopeCommitted: accountCommittedOf(t),
 			wasPending:     t.Status == "pending",
+			task:           t,
 		})
-		t.ReservedSize = 0 // 释放后归零，防二次释放
-		// account 由 releaseTaskScope 收敛释放（见下方 scopeCommitted 释放）
-		delete(m.tasks, id)
+		// **不在收集阶段删表项/归零**（独立复审 P2，2026-10-18）：删除是 I/O（锁外执行）且可能失败，
+		// 若此处就丢弃任务，失败后既无法重试、又必须归还账本（否则永久虚占）⇒ 只能 fail-open
+		// （字节仍在盘上而账本已归还）。改为：由 cleanupExpiredCloudItem **确认删除成功后**再摘除。
 	}
 	return expired
 }
@@ -574,7 +577,26 @@ func (m *CloudDownloadManager) cleanupExpiredCloudItem(item expiredCloudTask) {
 	if root := m.cloudStateRootFor(item.owner); root != nil {
 		_ = root.Remove(cloudStateRel + "/" + item.id + ".json")
 	}
-	m.removeTaskDir(item.owner, item.taskID)
+	// **删除确认后再归还**（独立复审 P2，2026-10-18）：删除失败 ⇒ 保留占账并**回填任务**由下一轮
+	// 过期清理重试（否则"保留占账"会变成永久虚占，而"照常归还"是 fail-open）。
+	if rerr := m.removeTaskDir(item.owner, item.taskID); rerr != nil {
+		m.logger.Error("expired task dir removal failed; keeping quota charged and will retry",
+			"task_id", item.taskID, "owner", item.owner, "error", rerr)
+		if item.task != nil {
+			m.mu.Lock()
+			item.task.UpdatedAt = time.Now() // 顺延，下一轮 TTL 到期再试
+			m.tasks[item.id] = item.task
+			m.mu.Unlock()
+		}
+		return
+	}
+	m.mu.Lock()
+	// 删除已确认：摘除表项并归零（防二次释放）。
+	if item.task != nil {
+		item.task.ReservedSize = 0
+		delete(m.tasks, item.id)
+	}
+	m.mu.Unlock()
 	if item.reservedSize > 0 {
 		m.storage.ReleaseCloud(item.reservedSize)
 	}

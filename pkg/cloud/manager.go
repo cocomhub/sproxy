@@ -624,12 +624,14 @@ func (m *CloudDownloadManager) TaskDirFor(owner, taskID string) string {
 }
 
 // removeTaskDir 尽力删除 owner 租户下任务文件目录（租户不可用时为空操作）。
-func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) {
+// removeTaskDir 删除任务目录；返回错误供调用方做「删除确认后再归还」（os.RemoveAll 对不存在的
+// 路径返回 nil ⇒ nil 即"确认消失"）。独立复审 P2，2026-10-18：此前恒忽略错误。
+func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) error {
 	dir := m.TaskDirFor(owner, taskID)
 	if dir == "" {
-		return
+		return nil
 	}
-	_ = os.RemoveAll(dir)
+	return os.RemoveAll(dir)
 }
 
 // removeTaskDirWithRetry 删除任务文件目录，并对瞬时占用做有界重试（见 removeWithRetry）。

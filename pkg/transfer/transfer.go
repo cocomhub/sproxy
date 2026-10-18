@@ -108,6 +108,13 @@ func runTransfer(ctx context.Context, req TransferRequest, rel string) (string, 
 	return executeIndividual(ctx, req, rel)
 }
 
+// **已知残余（独立复审 P3，2026-10-18 如实记录）**：若目标 rel 上残留**陈旧 sidecar**（旧对象已删
+// 但 meta 删除 best-effort 失败）且本次 meta 落盘与失效删除**双双失败**（trusted 的
+// persistCalcMeta/invalidateMeta 退避耗尽），则读回会拿旧 meta 与**正确的新内容**比对 ⇒
+// ErrReadbackMismatch ⇒ 这里会**删除正确对象**。触发需双故障（低概率），且设计 §8.9 的既定策略是
+// "读侧 fail-closed、由显式写路径修复"（不含删主文件）。缓解方向：无 `wantSHA256` 交叉确认时不删
+// （代价：截断残骸需人工清理）——留待产品裁定。
+//
 // verifyAfterWrite 是**写后读回校验**的唯一调用点（实现见 readback.go）：
 // 目标卷有 meta.Provider 时按 meta 逐块 + 整文件比对 + 尾排检查 ⇒ 存储层静默截断/损坏不再被
 // 当成功（此前本内核只查「存在且非空」）。内容不一致 ⇒ **删除产物 + 失败**（fail-closed，不得

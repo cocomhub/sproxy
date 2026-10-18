@@ -1033,7 +1033,9 @@ func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx con
 	m.mu.RUnlock()
 	if !exists {
 		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
-		m.removeTaskDir(task.Owner, task.ID)
+		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
+			m.logger.Warn("remove task dir failed after task deletion", "task_id", task.ID, "error", rerr)
+		}
 		return true
 	}
 	if downloadErr == nil {
@@ -1058,7 +1060,10 @@ func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx con
 	// 可能残留的任务文件（CancelTask 的 RemoveAll 在 Windows 下可能因文件被占用失败）。
 	if dlCtx.Err() == context.Canceled {
 		m.logger.Info("download cancelled", "task_id", task.ID)
-		m.removeTaskDir(task.Owner, task.ID)
+		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
+			m.logger.Warn("cancelled: remove task dir failed (CancelTask 已兜底，可能为 Windows 占用)",
+				"task_id", task.ID, "error", rerr)
+		}
 		return true
 	}
 	m.failTask(task, downloadErr.Error())
@@ -1079,7 +1084,10 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 	if !ok {
 		m.mu.Unlock()
 		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
-		m.removeTaskDir(task.Owner, task.ID)
+		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
+			m.logger.Warn("remove task dir failed (best-effort 兜底清理，不阻断终态)",
+				"task_id", task.ID, "error", rerr)
+		}
 		return
 	}
 	if stored.Status == "cancelled" {
@@ -1087,7 +1095,10 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 		m.logger.Info("download finished after cancel, discarding result", "task_id", task.ID)
 		// 取消即放弃：连同 .partial/.partial.etag 一并清理（CancelTask 已释放存储
 		// 并尝试删除，这里兜底），保持磁盘与已归零账本一致。
-		m.removeTaskDir(task.Owner, task.ID)
+		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
+			m.logger.Warn("discard after cancel: remove task dir failed (CancelTask 已兜底)",
+				"task_id", task.ID, "error", rerr)
+		}
 		return
 	}
 

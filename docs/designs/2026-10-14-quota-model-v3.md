@@ -237,3 +237,16 @@ S2（物理足迹）再把「结算值」改为**物理**⇒ 口径正确。**�
 3. **存量回落**：无 `charged_bytes` 的对象删除 ⇒ 回落测量释放 + metric 计数（不静默）。
 4. **变异**：① 释放改回测量 ⇒ 加密卷一致性用例红；② 写侧不记记录 ⇒ 释放回落到测量 ⇒ 红；
    ③ `PhysSize` 改恒等 ⇒ 物理正确性用例红。
+
+## 已知残余（独立复审 2026-10-18 登记）
+
+1. **等待队列的丢唤醒窗口（非功能丢失）**：释放侧 `broadcastLocked` **不持 `cond.L`**（等待侧用根
+   节点上独立于 `node.mu` 的 mutex）⇒ 广播可能落在「判定不足 → Wait」窗口内被丢弃，等待者睡到
+   `WaitReserve` 超时（≤30s）后重试成功。**不直接补锁**的原因：释放发生在子节点、队列在根，等待侧
+   锁序为 `cond.L → node.mu`，释放侧已持 `node.mu` ⇒ 补锁即反向（ABBA 死锁）。修复方向：单锁
+   （`cond.L` 即状态锁）或全局配额锁。参照 `pkg/quota/staging_tracker.go`（释放侧持 `cond.L` 广播）。
+2. **分配账本尚未在生产装配接线**：生产配额树仍由 `Pool.Scope`/`Scope.Mount`/`EnsureScope` 构建
+   （不记分配账）⇒ `Allocated()/Unallocated()` 目前为 0/失真、I1 在这些节点上尚无强制点（用量侧
+   I2 不受影响）。接线计划见 §S4。
+3. **陈旧 sidecar 双故障下可能删除正确对象**（pkg/transfer 读回校验；见其 `verifyAfterWrite` 注释）。
+4. **cloud 转存读回在写锁释放后执行**（并发写窗口；见 `pkg/cloud/transfer.go` 的 readbackVerify 注释）。

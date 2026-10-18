@@ -451,6 +451,11 @@ func verifyByFileMeta(env *transferEnv) error {
 	//   · 无 Provider/meta 不可读 ⇒ errNoProviderMeta（调用方回落流式对 result.Checksum）；
 	//   · 内容与卷 meta 不一致 ⇒ 卷静默损坏（重试卷 ErrTransferTarget）；
 	//   · 内容与下载权威校验和不一致 ⇒ 本地产物损坏/截断（文件异常重下载 ErrTransferContentMismatch）。
+	// **已知残余（独立复审 P3，2026-10-18 如实记录；预存缺陷，非本轮引入）**：本读回在
+	// `writeTransferOnce` 的写锁**释放之后**执行（`transferOnce` 先写后校验），并发写者（HTTP
+	// 上传/DAV/S3 同 rel）在窗口内覆盖会被误判为「卷静默损坏/本地产物损坏」。对照：归档路径的
+	// 写锁由 archiveVolumeWriteGate 持有至 Execute 返回 ⇒ 内核读回在锁内（语义更强）。
+	// 修复方向：把本调用移入 writeTransferOnce 的锁作用域内。
 	verr := transfer.VerifyReadback(env.ctx, env.targetFS, env.rel, env.result.Checksum)
 	switch {
 	case verr == nil:

@@ -410,7 +410,15 @@ func (p *Pool) OperationalReserve() int64 {
 }
 
 // broadcastLocked 唤醒等待者：**统一广播到根节点**（任一层释放都可能让等待者满足）。
-// Cond.Broadcast 不要求持锁；这里在持锁下调用以与状态变更同临界区（避免丢唤醒）。
+//
+// **已知残余（独立复审 P2，2026-10-18 如实记录，此前注释声称"已避免丢唤醒"是不成立的）**：
+// 本广播**不持 `cond.L`**（等待侧用的是根节点上**独立于 `node.mu`** 的 mutex）⇒ 状态变更与广播
+// 不属同一临界区 ⇒ 存在理论上的**丢唤醒**窗口：广播落在「等待者已判定不足 → 尚未 Wait」之间会被
+// 丢弃，等待者只能睡到 deadline（WaitReserve 超时 ≤30s）后重试（重试可成功 ⇒ **非功能丢失**，
+// 不会永久失败）。对照：pkg/quota/staging_tracker.go 的释放侧**持 `cond.L`** 广播（同仓正确范式）。
+// **为何不在此处直接补锁**：释放发生在**子节点**、队列在**根**，而等待侧的锁序是
+// `cond.L → node.mu`；释放侧已持 `node.mu` ⇒ 补锁即反向 ⇒ ABBA 死锁。正确修复需架构级改动
+// （单锁：令 `cond.L` 即状态锁；或全局配额锁），见设计文档的「已知残余」小节。
 func (p *Pool) broadcastLocked() {
 	if c := p.rootCond(); c != nil {
 		c.Broadcast()
