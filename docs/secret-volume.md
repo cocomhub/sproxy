@@ -446,31 +446,14 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   **启动清理**：temp 内 `decrypt-*` 明文残留（升级前崩溃遗留）在 `NewFS` 时清除。
   已知残余：legacy meta（无 blocklet 索引）读时内存退化为单块；读句柄持 ctx 以保留审计 span 与
   取消语义（`containedctx` 门禁已按理由豁免）。
-- **外部/加密卷账本不收敛（2026-10-18 测量结论；本轮按用户裁定只测量、不改行为）**：
-  **机制已确证**——账本（`LedgerCounter`）→ 真值（`TrueUsageReporter`）的收敛**唯一入口**是
-  `Handlers.correctLedgerToTruth`，它只被 `adjustVolumePool` 调用，而后者只对出现在
-  `volumeBuckets` 里的卷执行；`reconcileVolumesFromDisk` 明确**跳过 `RootDir == ""` 的卷**
-  （外部/加密卷无 `storage.Root`）⇒ **secretdata 等外部卷的账本永不收敛** ✗（证据：
-  `pkg/server/quota_reconcile.go:157`、`:168-175`、`:312-341`）。
-  **影响方向**：漂移只来自写/删路径的记账误差（两侧现已同源取卷自报足迹）⇒ **不自愈** ✗；
-  高估 ⇒ 提前 507（保守，可用性损失）；低估 ⇒ 可超限（超售）。
-  **建议修法（下轮，3 行级、可安全论证）**：在跳过分支里对 `RootDir == ""` 的卷同样调用
-  `h.correctLedgerToTruth(v.Name)`——无真值报告者时该函数是 no-op，而 secretdata **已实现**
-  `TrueUsage`（`volumeTrueUsage` 经 `volSet.External` + `TrueUsageOf` 取到）⇒ 直接获得收敛。
-  **仍需专项验证**：端到端测量漂移量级与「在途预留 vs 真值修正」的交互（`CorrectFrom` 修正
-  committed，预留另计）。
-- ~~明文临时残留~~ **已根治（2026-10-18）**：读路径**不再落任何临时文件**（按需解密）⇒ 不再产生
-  明文残留；升级前崩溃遗留的 `decrypt-*` 由 `NewFS` 启动清理（写路径的临时物是**密文**分块目录，不误删）。
-- **多 target 副本未纳管**：副本根用裸 `NewLocalFS` 直建，不经 registry ⇒ 不占卷容量池/账本，
-  `reconcileVolumesFromDisk` 只扫有 `RootDir` 的卷 ⇒ 副本字节不参与对账（该能力本身标「实验性」）。
-- **外部卷账本真值收敛不可达（待验）**：`quota_reconcile` 的 `correctLedgerToTruth ← adjustVolumePool`
-  只对有 `RootDir` 的卷调用，secretdata 卷无 `RootDir` ⇒ 该卷 LedgerCounter 不收敛到 `TrueUsage`
-  （机制已确认；实际可绕过的超限窗口取决于写路径按 `PhysFootprint` 的结算，**需专项实测**）。
-- **目录条目 `Entry.MTime` 恒 0**：目录 mtime 不在内存索引（`dirs` 是集合）⇒ 只有文件条目有 mtime。
-- ~~复制 vs 并发覆盖写~~ **已证伪（2026-10-18 复核，非残余）**：`CopyFile` **全程持 `s.mu` 写锁**
-  （`copy.go:42-43`），而覆盖写的旧版本清理也已锁内化（P1 修复）⇒ 二者**无法交错**，副本不可能引用
-  被并发删除的分块。附带观察（性能非正确性）：`CopyFile` 在跨容器情形会**持锁做内容 I/O**，
-  大文件复制期间会阻塞其它写者（后续可评估「锁内只做判定、锁外做拷贝」）。
+- ~~外部/加密卷账本不收敛~~ **已修复（2026-10-18）**：账本 → 真值收敛的唯一入口
+  `correctLedgerToTruth` 此前只被 `adjustVolumePool` 调用，而后者只对出现在 `volumeBuckets` 里的卷
+  执行；`reconcileVolumesFromDisk` 明确跳过 `RootDir == ""` 的卷（外部/加密卷无本地根）⇒ 这类卷的
+  LedgerCounter **永不收敛** ✗。**修法**：在跳过分支里对这类卷**只**做账本真值收敛
+  （`h.correctLedgerToTruth(v.Name)`；不做本地桶扫描——无本地根，扫描语义不适用；无真值报告者时是
+  no-op ⇒ 未接线卷零回归）。回归用例只走**生产入口** `reconcileVolumesFromDisk`
+  （既有用例走 `reconcileVolumes` 直接喂桶 ⇒ 绕过该门、掩盖了缺口），**变异验证**：撤销修复 ⇒ 必红。
+
 - **卷非空却无可用根容器时挂载仍放行**：根目录 meta 缺失/损坏/父引用断裂 ⇒ 子容器父链断裂、索引
   近乎为空，而 `NewFS` 仍成功 ⇒ 用户看到「空卷」（静默空视图）。**未修**：与「密钥错误」在挂载期不可
   区分，且既有用例 `TestWrongSecretFails` 显式锁定「挂载放行、读时失败」的语义（便于运维诊断）⇒ 需
