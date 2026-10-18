@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -689,19 +690,46 @@ func (l *Ledger) shardNamesLocked() ([]string, error) {
 		}
 		return nil, nil
 	}
+	out := indexNames(b)
+	// **本进程的 shard/snap 必须恒被枚举**（独立审核 P0，2026-10-18）：索引是唯一枚举来源，
+	// 但本进程分片可能被 `reapEmptyShards` 摘除（**不区分归属**：本进程自己刚 `Compact()`
+	// 截断为空的那一个、或**他进程**回收本进程的空分片）⇒ 而 `registerShardLocked` 的
+	// `registered` 是**粘性**标志（进程内只登记一次）⇒ 此后 `Add` 只追加文件、不再登记索引
+	// ⇒ 本进程全部增量对 `Total()` **不可见**：卷容量上限静默放宽（`TryAdd` 基于被冻结的
+	// 旧总和），且期间一旦重启则增量**永久不参与求和**（丢账）。
+	// 本进程两个文件名**确定可知** ⇒ 直接并入枚举（去重 ⇒ 无双计；不存在 ⇒ 读取视为 0）。
+	for _, own := range []string{l.shardName(), l.snapName()} {
+		if !slices.Contains(out, own) {
+			out = append(out, own)
+		}
+	}
+	return out, nil
+}
+
+// indexNames 从索引内容解析出待枚举的名字：每行原样，外加由 shard 行**派生**的 snap 行
+// （`shard.<node>.log` ⇒ `snap.<node>`；基线名派生自分片名 ⇒ 索引只需登记分片）。
+func indexNames(b []byte) []string {
 	var out []string
+	seen := make(map[string]bool, 8)
+	add := func(n string) {
+		if n == "" || seen[n] {
+			return
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
 	for line := range strings.SplitSeq(string(b), "\n") {
 		n := strings.TrimSpace(line)
 		if n == "" {
 			continue
 		}
-		out = append(out, n)
+		add(n)
 		if strings.HasPrefix(n, ledgerShardPrefix) && strings.HasSuffix(n, ledgerShardSuffix) {
 			node := strings.TrimSuffix(strings.TrimPrefix(n, ledgerShardPrefix), ledgerShardSuffix)
-			out = append(out, ledgerSnapPrefix+node)
+			add(ledgerSnapPrefix + node)
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (l *Ledger) scanLocked() (int64, bool) {
