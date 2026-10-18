@@ -257,6 +257,11 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 		meta.FixSizeFromChunks(fm)
 	}
 	if meta.Validate(fm) != nil {
+		// 与 WriteFile 的 C1 修复**对称**（独立审核 P1，2026-10-18）：主文件已写成功但 meta 无法
+		// 生成 ⇒ **必须失效旧 sidecar**——残留描述旧内容的 meta 会让读路径按旧分块校验新内容
+		// 恒失配（硬失败）⇒ **文件被固化不可读**；失效后退化为 missing（读侧不校验，下次覆盖写
+		// 自愈）。
+		t.invalidateMeta(ctx, rel)
 		return
 	}
 	fm.Name = path.Base(filepath.ToSlash(rel))
@@ -266,9 +271,13 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 	fm.Extra = cloneExtra(t.opts.Extra)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
+		t.invalidateMeta(ctx, rel) // 同上：不得留陈旧 sidecar（主文件已是新内容）
 		return
 	}
 	if werr := t.inner.WriteFile(ctx, syncpkg.LogicalKey{}, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+		// meta 落盘失败 ⇒ 主文件已是**新内容**而旧 sidecar 描述**旧内容** ⇒ 必须失效，
+		// 否则读路径按旧分块校验新内容恒失配（文件固化不可读）。
+		t.invalidateMeta(ctx, rel)
 		t.logMetaWarn("persistCalcMeta", rel, werr)
 	}
 }
@@ -617,7 +626,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey,
 			// 读路径 FileMeta 成功解析旧哈希、按旧分块校验新内容恒失配（硬失败，与
 			// missing（读侧不校验）不同，文件被固化不可读）。删后退化为 missing（读侧不校验，
 			// 下次覆盖写自愈）。
-			_ = t.inner.Delete(ctx, meta.MetaPath(rel))
+			t.invalidateMeta(ctx, rel)
 			return fmt.Errorf("trusted: 写入后 meta 校验失败（size %d vs 实写，sidecar 未落）: %w", size, err)
 		}
 	}
@@ -630,7 +639,7 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey,
 		// C1 修复：Marshal 失败同样删旧 sidecar（主文件已写成功）——残留描述旧内容的
 		// 陈旧 meta 会使读路径按旧分块校验新内容恒失配（硬失败固化）；删后退化为
 		// missing（读侧不校验，下次覆盖写自愈）。
-		_ = t.inner.Delete(ctx, meta.MetaPath(rel))
+		t.invalidateMeta(ctx, rel)
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
 	}
 	// E-MAJOR 修复：写 meta 前确保 sidecar 父目录存在（与 Move/Copy/Rename 的
