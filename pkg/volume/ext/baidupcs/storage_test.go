@@ -722,8 +722,15 @@ func TestStorage_Put_UnreliableMD5SizeMismatchRejected(t *testing.T) {
 	ad := &unreliableMD5Adapter{inner: newFakeStorageAdapter(), sizeSkew: 1}
 	s := newTestStorage(t, ad)
 	content := strings.Repeat("unreliable-md5-size-mismatch-", 40)
-	if _, err := s.Put(context.Background(), "m.bin", strings.NewReader(content)); err == nil {
-		t.Fatal("远端 md5 非权威且 size 不符 ⇒ 必须拒绝（不得静默接受错误内容）✗")
+	// P2 修复（2026-10-19）：size 不符不再「立即致命」，而走 putRetryLoop 的**有界重试**
+	// （容忍上传后最终一致窗口）——重试耗尽仍不符 ⇒ **ErrTransient 终态**（仍 fail-closed，
+	// 绝不静默接受错误内容）。
+	_, err := s.Put(context.Background(), "m.bin", strings.NewReader(content))
+	if err == nil {
+		t.Fatal("远端 md5 非权威且 size 持续不符 ⇒ 重试耗尽后必须失败（不得静默接受错误内容）✗")
+	}
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("size 持续不符应以 ErrTransient 终态返回（可重试语义），实测: %v", err)
 	}
 }
 

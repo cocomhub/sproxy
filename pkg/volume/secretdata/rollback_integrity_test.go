@@ -168,7 +168,8 @@ func TestStagingDegradeReason_ClassifiesCtxVsQuota(t *testing.T) {
 		{"ctx 超时", context.DeadlineExceeded, "调用方上下文超时"},
 		{"磁盘满", syscall.ENOSPC, "本地临时目录磁盘满"},
 		{"磁盘满（包装）", fmt.Errorf("mkdir: %w", syscall.ENOSPC), "本地临时目录磁盘满"},
-		{"配额", errors.New("secretdata: 本地 staging 配额不足（防本地磁盘打满）: boom"), "staging 配额不足"},
+		{"配额（哨兵链）", fmt.Errorf("secretdata: %w: boom", syncpkg.ErrStagingQuotaExceeded), "staging 配额不足"},
+		{"裸 tracker 文案（无哨兵、不含「配额」二字）", errors.New("quota: 等待本地 staging 空间超时（5s）"), "本地临时目录不可用"},
 		{"临时目录", os.ErrPermission, "本地临时目录不可用"},
 		{"nil（不应 panic）", nil, "本地临时目录不可用"},
 	}

@@ -855,6 +855,7 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 			return fmt.Errorf("%w（size=%d；可 seek 源未知长度 ⇒ 无法规划分块）："+
 				"请提供确定长度，或让源不可 seek 以走内存路径", ErrUnknownSourceSize, size)
 		}
+		warnStreamSizeMismatch(rel, r, size)
 		return s.writeFileStreamEntry(ctx, rel, r, size, mtime, expected, ifAbsent)
 	}
 	// 上限兜底（P2 修复，2026-10-19）：上面的预检按**声明 size** 判定，`size<0`（chunked / 未知
@@ -931,6 +932,34 @@ func readAllBounded(r io.Reader, size, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: 未知长度源超过上限 %d（size 未声明 ⇒ 预检不可用）", ErrMaxFileBytes, maxBytes)
 	}
 	return data, nil
+}
+
+// warnStreamSizeMismatch 在流式写路径前对「声明 size 与源文件实际大小不符」告警（**行为不变**，
+// 仅可观测性）：流式路径按声明 size 读（多余内容丢弃）、内存路径按实际长度落盘，两条路径口径
+// **有意不同**（见 writeFileOpt 注），但调用方谎报/算错 size 时此前流式路径**静默截断**且无日志
+// （P2 修复，2026-10-19）。抽成函数亦降低 writeFileOpt 的认知复杂度（gocognit 门禁）。
+func warnStreamSizeMismatch(rel string, r io.Reader, size int64) {
+	n, ok := sourceFileSize(r)
+	if !ok || n == size {
+		return
+	}
+	slog.Warn("secretdata: 流式写路径声明 size 与源文件实际大小不一致（流式按声明 size 读、"+
+		"多余内容丢弃；内存路径按实际长度落盘）",
+		"rel", rel, "declared_size", size, "source_size", n)
+}
+
+// sourceFileSize 返回源的**实际字节数**（仅本地常规文件，与 replayableSourcePath 同一判据）：
+// 供流式写路径对「声明 size 与实际不符」告警（内存路径按实际长度落盘，两条路径口径有意不同）。
+func sourceFileSize(r io.Reader) (int64, bool) {
+	f, ok := r.(*os.File)
+	if !ok {
+		return 0, false
+	}
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		return 0, false
+	}
+	return st.Size(), true
 }
 
 // canStream 判定 r 是否可流式加密（io.Seeker / io.ReaderAt 之一）。
@@ -1137,7 +1166,7 @@ func stagingDegradeReason(err error) string {
 		return "调用方上下文超时"
 	case errors.Is(err, syscall.ENOSPC):
 		return "本地临时目录磁盘满"
-	case err != nil && strings.Contains(err.Error(), "配额"):
+	case errors.Is(err, syncpkg.ErrStagingQuotaExceeded):
 		return "staging 配额不足"
 	default:
 		return "本地临时目录不可用"
@@ -1296,49 +1325,65 @@ func sumDirFileBytes(dir string) (total int64) {
 // （last-write-wins）。newVer 由 writeFile 在锁内一次性分配（== sv+1）并在写路径全程
 // 固定——commit 直接采用它，保证内存 e.baseVersion == 落盘 meta.BaseVersion == 卷版本
 // 恒等（Imp-1 修复：不再锁内 +1 重算致落盘版本漂移）。
-func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntry, uploaded []string) error {
+// commitLocked 是**锁内提交**的单一实现（P2 收敛，2026-10-19）：主写路径、去重命中、去重 miss
+// 三处此前各自抄一遍「CAS + 安装条目 + usage 记账 + 旧版本清理」，任何语义修正都需改三处、漏改
+// 即静默偏差。调用方**不得持锁**（本函数自行加锁）。
+//
+//   - usageBytes：计入 s.usage 的字节（主写路径 = wc.size；去重路径 = len(wc.data)）；
+//   - preInstall：锁内、CAS 通过后、安装条目前的额外动作（去重池登记；nil = 无）；
+//   - onFail：CAS 失败/目标已存在时的清理（回滚本次已上传 blob；**必须**用有界清理，见
+//     rollbackWrite）。
+//
+// **旧版本清理必须在锁内**（P1 修复，2026-10-18）：removeVersionMeta → chunkSetStillReferenced
+// **遍历 s.index**，其文档明确「调用方须持 s.mu」（Delete 路径正是如此）。此前主路径在
+// s.mu.Unlock() **之后**调用 ⇒ 与其它 goroutine 的索引写入并发 ⇒ Go 运行时
+// **fatal error: concurrent map iteration and map write**（不可 recover，进程级崩溃）——
+// 已由确定性用例 TestConcurrentOverwrite_NoIndexDataRace 实证（修复前必红）。删除 I/O 放锁内与
+// Delete 路径一致；**并发读语义不变**：在途读旧条目的 openRead 早已在 RLock 内取到条目、随后
+// 无锁读分块 ⇒「要么读到新内容、要么报错、绝不返回混合/陈旧内容」的既有承诺不受影响。
+// 附带收益：删除判定与执行相对索引变更**原子化** ⇒ 关闭「并发 CopyFile 在判定之后、删除之前
+// 采纳旧分块集合」的窗口。
+func (s *SecretdataFS) commitLocked(ctx context.Context, wc writeCtx, e *metaEntry, usageBytes int64, preInstall func(), onFail func()) error {
 	s.mu.Lock()
 	if wc.ifAbsent {
 		// WriteIfAbsent：目标已存在（含本次写期间被并发者抢先提交）→ 回滚本写上传、
 		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
 		if _, ok := s.index[wc.rel]; ok {
 			s.mu.Unlock()
-			s.rollbackWrite(ctx, uploaded, wc.created)
+			onFail()
 			return errEntryExists
 		}
 	}
 	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
-		s.rollbackWrite(ctx, uploaded, wc.created)
-		return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", s.volVersion, wc.expected, ErrVersionConflict)
+		onFail()
+		return versionConflictErr(wc.sv, wc.expected)
+	}
+	if preInstall != nil {
+		preInstall()
 	}
 	prev := s.index[wc.rel]
 	s.index[wc.rel] = e
 	e.baseVersion = wc.newVer
 	addDirKeysLocked(s.dirs, wc.rel)
 	s.volVersion = wc.newVer
-	s.usage += wc.size
+	s.usage += usageBytes
 	if prev != nil {
 		s.usage -= prev.size
 		if s.usage < 0 {
 			s.usage = 0
 		}
-	}
-	if prev != nil {
-		// **旧版本清理必须在锁内**（P1 修复，2026-10-18）：removeVersionMeta →
-		// chunkSetStillReferenced **遍历 s.index**，其文档明确「调用方须持 s.mu」
-		// （Delete 路径正是如此）。此前在 s.mu.Unlock() **之后**调用 ⇒ 与其它 goroutine
-		// 的索引写入并发 ⇒ Go 运行时 **fatal error: concurrent map iteration and map
-		// write**（**不可 recover**，进程级崩溃）——已由确定性用例
-		// TestConcurrentOverwrite_NoIndexDataRace 实证（修复前必红）。
-		// 删除 I/O 放锁内与 Delete 路径一致；**并发读语义不变**：在途读旧条目的 openRead
-		// 早已在 RLock 内取到条目、随后无锁读分块 ⇒ 「要么读到新内容、要么报错、绝不返回
-		// 混合/陈旧内容」的既有承诺不受影响。附带收益：删除判定与执行相对索引变更**原子化**
-		// ⇒ 关闭「并发 CopyFile 在判定之后、删除之前采纳旧分块集合」的窗口。
 		s.removeVersionMeta(ctx, wc.rel, prev)
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// commitEntry 主写路径提交（薄封装：走单一实现 commitLocked，见其文档的锁内清理理由）。
+func (s *SecretdataFS) commitEntry(ctx context.Context, wc writeCtx, e *metaEntry, uploaded []string) error {
+	return s.commitLocked(ctx, wc, e, wc.size, nil, func() {
+		s.rollbackWrite(ctx, uploaded, wc.created)
+	})
 }
 
 // blobMTime 返回底层 blob 文件系统 mtime：默认 = 原始 mtime + 随机偏移（0-48h，防同文件
@@ -1360,6 +1405,38 @@ func (s *SecretdataFS) uploadChunks(ctx context.Context, container, tmp string, 
 		}
 	}
 	return nil
+}
+
+// uploadBlobTracked 上传**内存 blob**并**先登记后上传**（登记进调用方的回滚集合；调用方失败时
+// 统一 rollbackWrite）。与 uploadLocalChunk / interleavedChunkSink 同口径——**单一机制**
+// （roadmap ①-附残余 4 提出的 uploadAndTrack 收敛，P2 修复 2026-10-19）。
+func (s *SecretdataFS) uploadBlobTracked(ctx context.Context, uploaded *[]string, p string, data []byte, mt int64) error {
+	*uploaded = append(*uploaded, p)
+	return s.uploadBlob(ctx, p, data, mt)
+}
+
+// uploadAndCleanupOnFail 上传**内存 blob**，失败时立即按**有界清理 ctx** 删除（「无调用方回滚
+// 集合」场景的单一机制）：内层可能「写成功但复核失败」返回错误（远端 blob 已存在）⇒ 不删即
+// **永久孤儿**；blob 名含随机 salt/padding（不复用）⇒ 未真正上传时删除只是 no-op（不误删他人内容）。
+func (s *SecretdataFS) uploadAndCleanupOnFail(ctx context.Context, p string, data []byte, mt int64) error {
+	if werr := s.uploadBlob(ctx, p, data, mt); werr != nil {
+		s.rollbackWrite(ctx, []string{p}, nil)
+		return werr
+	}
+	return nil
+}
+
+// retainPoolEntry 增加去重池引用（与 unrefPoolEntry 对称；调用方须持 s.mu）。同卷复制/去重
+// 命中都会让新条目与源**共享同一池 blob** ⇒ 必须 +1，否则任一方删除即可能归零、池 blob 被物理
+// 删除而另一方悬空（P2 修复，2026-10-19：此前 CopyFile 既丢 dataDir 也不加引用）。
+func (s *SecretdataFS) retainPoolEntry(mm *shardseal.Meta) {
+	if !s.opts.Dedup || mm == nil || len(mm.Chunks) == 0 {
+		return
+	}
+	key := mm.Chunks[0].OrigSHA256
+	if b, ok := s.dedupPool[key]; ok && b.name == mm.Chunks[0].FileName {
+		b.refs++
+	}
 }
 
 // uploadLocalChunk 上传**一个已落本地的密文分块**（分块/blob 通用）到 container，并把已上传
@@ -2688,7 +2765,9 @@ func (s *SecretdataFS) writeRenamedMetaLocked(ctx context.Context, e *metaEntry,
 	if merr != nil {
 		return "", nil, merr
 	}
-	if werr := s.uploadBlob(ctx, path.Join(targetContainer, name), blob, e.mtime); werr != nil {
+	// **失败即清理**（P2 修复，2026-10-19）：改名新 meta 是「写后登记」族漏点——内层写成功但
+	// 复核失败时该 blob 已落远端，调用方的回滚只在**后续步骤**失败时执行 ⇒ 这里是唯一收口点。
+	if werr := s.uploadAndCleanupOnFail(ctx, path.Join(targetContainer, name), blob, e.mtime); werr != nil {
 		return "", nil, werr
 	}
 	return name, nm, nil
@@ -2711,7 +2790,9 @@ func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, from stri
 	// 正常）⇒ 用户侧表现为**静默数据丢失**（幽灵条目）。⇒ 被兄弟引用时改**字节拷贝**（内容
 	// 零改动、不重加密），原分块留给兄弟；且**不得** `deleteFileBlobs`（那会删掉兄弟的分块）。
 	if s.chunkSetStillReferenced(from, e) {
-		if cerr := s.copyContentBlobs(ctx, e, targetContainer); cerr != nil {
+		// 已复制项**不**在此回滚：后续步骤（meta 搬移）失败时残留的目标 blob 交既有可选 GC 上收
+		// ——目标容器可能已有**同内容** blob（内容寻址命名）被他人引用，盲目删除会破坏他人条目。
+		if _, cerr := s.copyContentBlobs(ctx, e, targetContainer); cerr != nil {
 			return cerr
 		}
 		srcMeta := path.Join(e.dirSeg, e.metaName)
@@ -2740,7 +2821,8 @@ func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, from stri
 	// ② 搬/换 meta 是**单文件原子**步；③ **最后**才删源分块。⇒ 崩溃后要么源完整、要么目标
 	// 完整，**不丢数据**。代价：同卷跨容器移动不再是零拷贝 mv 而是字节复制（正确性优先；
 	// 跨容器移动是低频操作，**同容器改名/移动**仍走 O(meta) 零 blob 写路径）。
-	if cerr := s.copyContentBlobs(ctx, e, targetContainer); cerr != nil {
+	// 已复制项不在此回滚（同上：目标容器可能已有同内容 blob 被他人引用；残留交 GC）。
+	if _, cerr := s.copyContentBlobs(ctx, e, targetContainer); cerr != nil {
 		return cerr
 	}
 	if sameBase {
@@ -2762,34 +2844,32 @@ func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, from stri
 // copyContentBlobs 把条目的**内容分块 + parity** 物理复制到目标容器（不复制 meta——
 // 改名路径的 meta 由 renameFileLocked 单独按新名写入）。内容零改动（纯字节复制，保 blob
 // mtime）；去重文件分块在池容器 ⇒ 无需搬移，直接返回。失败回滚已复制项。
-func (s *SecretdataFS) copyContentBlobs(ctx context.Context, e *metaEntry, targetContainer string) error {
-	var uploaded []string
-	rollback := func() {
-		for _, p := range uploaded {
-			_ = s.inner.Delete(ctx, p)
-		}
-	}
+func (s *SecretdataFS) copyContentBlobs(ctx context.Context, e *metaEntry, targetContainer string) ([]string, error) {
 	if e.dataDir != "" {
-		return nil // 去重文件：分块在池容器不动
+		return nil, nil // 去重文件：分块在池容器（全卷共享）⇒ 不拷贝（副本保留 dataDir 指向池）
 	}
+	var uploaded []string
+	rollback := func() { s.rollbackWrite(ctx, uploaded, nil) } // 有界且不被调用方取消打断（P2 修复 2026-10-19）
 	for _, ci := range e.meta.Chunks {
 		dst := path.Join(targetContainer, ci.FileName)
+		// **先登记后拷贝**（P2 修复，2026-10-19）：内层「写成功但复核失败」时目标 blob 已落远端，
+		// 登记在后即漏 ⇒ 孤儿。
+		uploaded = append(uploaded, dst)
 		if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, ci.FileName), dst, e.mtime); cerr != nil {
 			rollback()
-			return cerr
+			return nil, cerr
 		}
-		uploaded = append(uploaded, dst)
 	}
 	// Erasure parity：随文件一并搬移（目标保留 XOR 冗余、源 parity 不再孤立）。
 	if p := e.meta.Parity; p != nil {
 		dst := path.Join(targetContainer, p.FileName)
+		uploaded = append(uploaded, dst)
 		if cerr := s.copyBlob(ctx, path.Join(e.dirSeg, p.FileName), dst, e.mtime); cerr != nil {
 			rollback()
-			return cerr
+			return nil, cerr
 		}
-		uploaded = append(uploaded, dst)
 	}
-	return nil
+	return uploaded, nil
 }
 
 // deleteContentBlobs 删条目在源容器的**内容分块 + parity**（**不动 meta**）：跨容器移动的
@@ -2799,11 +2879,14 @@ func (s *SecretdataFS) deleteContentBlobs(ctx context.Context, e *metaEntry) {
 	if e.dataDir != "" {
 		return
 	}
+	// 调用方持 s.mu（移动/删除收尾）⇒ 远端删除必须**有界**（挂起即持锁拖死整卷，P2 修复 2026-10-19）。
+	cctx, cancel := boundedCleanupCtx(ctx)
+	defer cancel()
 	for _, ci := range e.meta.Chunks {
-		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, ci.FileName))
+		_ = s.inner.Delete(cctx, path.Join(e.dirSeg, ci.FileName))
 	}
 	if p := e.meta.Parity; p != nil && p.FileName != "" {
-		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, p.FileName))
+		_ = s.inner.Delete(cctx, path.Join(e.dirSeg, p.FileName))
 	}
 }
 
@@ -2887,7 +2970,9 @@ func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string,
 		return "", nerr
 	}
 	mt := dirMetaMTime(dm.MTime)
-	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(container, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mt)); werr != nil {
+	// **失败即清理**（P2 修复，2026-10-19）：内层「写成功但复核失败」时 dir meta blob 已落远端，
+	// 不删即永久孤儿（此前是「写后登记」族漏点之一）。
+	if werr := s.uploadAndCleanupOnFail(ctx, path.Join(container, name), blob, s.blobMTime(mt)); werr != nil {
 		return "", fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
 	return name, nil
@@ -3022,7 +3107,8 @@ func (s *SecretdataFS) stagingReserveBytes(ctx context.Context, need int64) (fun
 		return func() {}, nil
 	}
 	if err := q.ReserveUsage(ctx, need); err != nil {
-		return nil, fmt.Errorf("secretdata: 本地 staging 配额不足（防本地磁盘打满）: %w", err)
+		// 包**哨兵**（%w 链首）：上层按 errors.Is 判定降级原因，不匹配文案子串（P2 修复，2026-10-19）。
+		return nil, fmt.Errorf("secretdata: %w（防本地磁盘打满）: %w", syncpkg.ErrStagingQuotaExceeded, err)
 	}
 	var once sync.Once
 	return func() { once.Do(func() { q.ReleaseUsage(need) }) }, nil
@@ -3079,7 +3165,7 @@ func (s *SecretdataFS) removeVersionMeta(ctx context.Context, ownerKey string, e
 	}
 	if e.dataDir != "" {
 		// 预留去重池记账（opts.Dedup 时生效；池 blob 的物理删由下方存在性判定统一裁决）。
-		s.unrefPoolEntry(e)
+		s.unrefPoolEntry(cctx, e)
 	}
 	// **共享分块（同卷复制）的「存在即引用」裁决**：仍有其他条目引用同一
 	// (数据容器, 分块名集合) ⇒ 不删（源与副本谁先删都安全）；否则物理删分块 + parity。
@@ -3141,7 +3227,7 @@ func sameChunkNames(a, b *shardseal.Meta) bool {
 // unrefPoolEntry 释放去重池引用：引用计数归零时物理删除池 blob。调用方须持 s.mu。
 // 若池条目不存在或 blob 名与条目不符（并发 miss 的私有分块）→ 不递减，私有分块留待
 // GC 清孤儿（不误删他人共享 blob）。
-func (s *SecretdataFS) unrefPoolEntry(e *metaEntry) {
+func (s *SecretdataFS) unrefPoolEntry(ctx context.Context, e *metaEntry) {
 	if !s.opts.Dedup || e == nil || e.meta == nil || len(e.meta.Chunks) == 0 {
 		return
 	}
@@ -3154,7 +3240,10 @@ func (s *SecretdataFS) unrefPoolEntry(e *metaEntry) {
 	b.refs--
 	if b.refs <= 0 {
 		if s.dedupDir != "" {
-			_ = s.inner.Delete(context.Background(), path.Join(s.dedupDir, b.name))
+			// 与其它锁内远端删除同口径：**有界且不被调用方取消打断**（P2 修复，2026-10-19）。
+			cctx, cancel := boundedCleanupCtx(ctx)
+			_ = s.inner.Delete(cctx, path.Join(s.dedupDir, b.name))
+			cancel()
 		}
 		delete(s.dedupPool, key)
 	}

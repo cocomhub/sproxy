@@ -63,7 +63,8 @@ func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err err
 		s.mu.Unlock()
 		return s.writeFileDedupMiss(ctx, wc, key, dir, mt)
 	}
-	b.refs++ // 原子预留引用（锁内）：上传/提交失败再回滚，防并发 last-ref 删后悬空
+	s.retainPoolEntry(b.meta) // 原子预留引用（锁内，与 unrefPoolEntry 对称的单一实现）：
+	// 上传/提交失败再回滚，防并发 last-ref 删后悬空
 	tpl := b.meta
 	s.mu.Unlock()
 	return s.writeFileDedupHit(ctx, wc, key, dir, mt, tpl)
@@ -98,14 +99,18 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, wc writeCtx, key, 
 		return err
 	}
 	metaPath := path.Join(wc.container, name)
-	if werr := s.uploadBlob(ctx, metaPath, blob, mt); werr != nil {
+	// **先登记后上传**（P2 修复，2026-10-19）：此前 meta 上传失败只 `releasePoolRef`、**不删**
+	// 已落 meta ⇒ 内层「写成功但复核失败」时永久孤儿（与本轮其它上传点同口径，单一机制）。
+	uploaded := []string{}
+	if werr := s.uploadBlobTracked(ctx, &uploaded, metaPath, blob, mt); werr != nil {
+		s.rollbackWrite(ctx, uploaded, nil)
 		s.releasePoolRef(key)
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
 	}
 	if cerr := s.commitDedupEntry(ctx, wc, &metaEntry{
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: ref, dataDir: dir,
 		phys: physBytesOf(ref, int64(len(blob)), true),
-	}, []string{metaPath}); cerr != nil {
+	}, uploaded); cerr != nil {
 		s.releasePoolRef(key) // 提交失败/版本冲突：释放预留
 		return cerr
 	}
@@ -155,96 +160,30 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 		s.rollbackWrite(ctx, uploaded, nil)
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
 	}
-	s.mu.Lock()
-	if wc.ifAbsent {
-		// WriteIfAbsent：目标已存在（含本次写期间被并发者抢先提交）→ 清理本写上传、
-		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
-		if _, ok := s.index[wc.rel]; ok {
-			s.mu.Unlock()
-			s.rollbackWrite(ctx, uploaded, nil)
-			return errEntryExists
-		}
-	}
-	if wc.expected >= 0 && s.volVersion != wc.sv {
-		s.mu.Unlock()
-		s.rollbackWrite(ctx, uploaded, nil)
-		return versionConflictErr(wc.sv, wc.expected)
-	}
-	// 并发未命中（同 ID 双首写）：已有池条目则保留其 blob 作他人共享，本文件持自有
-	// 分块（不覆盖 —— 覆盖会让他人 blob 丢引用）。entry 引用分块仍在本容器 dataDir。
-	if _, exists := s.dedupPool[key]; !exists {
-		s.dedupPool[key] = &dedupBlob{name: chunkName, refs: 1, meta: meta, phys: contentPhysBytes(meta)}
-	}
-	prev := s.index[wc.rel]
-	s.index[wc.rel] = &metaEntry{
+	// **锁内提交走单一实现**（commitLocked，P2 收敛 2026-10-19）：池登记作为 preInstall 在
+	// CAS 通过后、安装条目前执行（与原先内联块语义一致）。
+	entry := &metaEntry{
 		size: int64(len(wc.data)), mtime: wc.mtime, dirSeg: wc.container, metaName: name, meta: meta,
 		dataDir: dir, baseVersion: wc.newVer,
 		phys: physBytesOf(meta, int64(len(metaBlob)), true),
 	}
-	addDirKeysLocked(s.dirs, wc.rel)
-	s.volVersion = wc.newVer
-	s.usage += int64(len(wc.data))
-	if prev != nil {
-		s.usage -= prev.size
-		if s.usage < 0 {
-			s.usage = 0
+	return s.commitLocked(ctx, wc, entry, int64(len(wc.data)), func() {
+		// 并发未命中（同 ID 双首写）：已有池条目则保留其 blob 作他人共享，本文件持自有
+		// 分块（不覆盖 —— 覆盖会让他人 blob 丢引用）。entry 引用分块仍在本容器 dataDir。
+		if _, exists := s.dedupPool[key]; !exists {
+			s.dedupPool[key] = &dedupBlob{name: chunkName, refs: 1, meta: meta, phys: contentPhysBytes(meta)}
 		}
-	}
-	if prev != nil {
-		// 同 commitEntry：**旧版本清理必须在锁内**（removeVersionMeta →
-		// chunkSetStillReferenced 遍历 s.index，要求持 s.mu；锁外调用 = 运行时
-		// fatal error: concurrent map iteration and map write，见
-		// TestConcurrentOverwrite_NoIndexDataRace）。并发读语义不变。
-		s.removeVersionMeta(ctx, wc.rel, prev)
-	}
-	s.mu.Unlock()
-	return nil
+	}, func() { s.rollbackWrite(ctx, uploaded, nil) })
 }
 
 // commitDedupEntry 提交去重条目：持锁 CAS（expected ≥0 须 volVersion==sv），以写路径
 // 分配的 newVer 定型版本（Imp-1：与落盘 meta.BaseVersion 一致，不再锁内 +1 重算）。
 // 失败清理本次上传路径并返回版本冲突错误（调用方负责回滚池预留引用）。
+// commitDedupEntry 去重路径的锁内提交（薄封装：走单一实现 commitLocked，P2 收敛 2026-10-19）。
 func (s *SecretdataFS) commitDedupEntry(ctx context.Context, wc writeCtx, e *metaEntry, cleanPaths []string) error {
-	s.mu.Lock()
-	if wc.ifAbsent {
-		// WriteIfAbsent：目标已存在（含本次写期间被并发者抢先提交）→ 清理本写上传、
-		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
-		if _, ok := s.index[wc.rel]; ok {
-			s.mu.Unlock()
-			for _, p := range cleanPaths {
-				_ = s.inner.Delete(ctx, p)
-			}
-			return errEntryExists
-		}
-	}
-	if wc.expected >= 0 && s.volVersion != wc.sv {
-		s.mu.Unlock()
-		for _, p := range cleanPaths {
-			_ = s.inner.Delete(ctx, p)
-		}
-		return versionConflictErr(wc.sv, wc.expected)
-	}
-	prev := s.index[wc.rel]
-	s.index[wc.rel] = e
-	e.baseVersion = wc.newVer
-	addDirKeysLocked(s.dirs, wc.rel)
-	s.volVersion = wc.newVer
-	s.usage += int64(len(wc.data))
-	if prev != nil {
-		s.usage -= prev.size
-		if s.usage < 0 {
-			s.usage = 0
-		}
-	}
-	if prev != nil {
-		// 同 commitEntry：**旧版本清理必须在锁内**（removeVersionMeta →
-		// chunkSetStillReferenced 遍历 s.index，要求持 s.mu；锁外调用 = 运行时
-		// fatal error: concurrent map iteration and map write，见
-		// TestConcurrentOverwrite_NoIndexDataRace）。并发读语义不变。
-		s.removeVersionMeta(ctx, wc.rel, prev)
-	}
-	s.mu.Unlock()
-	return nil
+	return s.commitLocked(ctx, wc, e, int64(len(wc.data)), nil, func() {
+		s.rollbackWrite(ctx, cleanPaths, nil)
+	})
 }
 
 // releasePoolRef 释放去重池预留引用：归零时物理删 blob 并删除池条目。

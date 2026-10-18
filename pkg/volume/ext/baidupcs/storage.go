@@ -432,6 +432,11 @@ func (s *Storage) checkAfterUploadUnreliableMD5(ctx context.Context, key string,
 	s.log.Warn("远端 md5 非权威（rapidupload 刷新后仍非权威），md5 复核跳过",
 		"key", key, "remote_etag", meta.ETag, "attempt", attempt)
 	if verr := s.verifyUnreliableMD5Size(key, st, meta, attempt); verr != nil {
+		if errors.Is(verr, errSizeMismatchRetry) {
+			s.log.Warn("上传后远端 size 与本地不一致（md5 非权威）⇒ 交有界重试复核",
+				"key", key, "local_size", st.size, "remote_size", meta.Size, "attempt", attempt)
+			return meta, false, nil // ok=false ⇒ putRetryLoop 下一轮（退避 + rapidupload 刷新）
+		}
 		return nil, false, verr
 	}
 	return meta, true, nil
@@ -446,12 +451,19 @@ func (s *Storage) verifyUnreliableMD5Size(key string, st *stagedUpload, meta *Ob
 			"key", key, "local_size", st.size, "remote_etag", meta.ETag, "attempt", attempt)
 		return nil
 	}
+	// size 不符 ⇒ **不**直接致命失败，而是返回 ok=false 走 putRetryLoop 的**有界重试**
+	// （P2 修复，2026-10-19）：上传后存在最终一致窗口，窗口内远端可能先报未刷新的元数据；
+	// 直接 fail-closed 会误判合法上传（且绕过既有退避重试）。重试耗尽仍不符 ⇒ putRetryLoop
+	// 返回 ErrTransient（**仍然 fail-closed，绝不静默接受错误内容**）。
 	if meta.Size > 0 && meta.Size != st.size {
-		return fmt.Errorf("baidupcs: 上传后远端 size %d 与本地 %d 不一致（md5 非权威，按 size 校验拒绝接受）",
-			meta.Size, st.size)
+		return errSizeMismatchRetry
 	}
 	return nil
 }
+
+// errSizeMismatchRetry 是「远端 size 与本地不符」的内部信号（**不**外泄为致命错误）：由
+// checkAfterUploadUnreliableMD5 转为 (meta, ok=false) 交给 putRetryLoop 有界重试。
+var errSizeMismatchRetry = errors.New("baidupcs: 上传后远端 size 与本地不一致（待重试复核）")
 
 // rapidUploaderOf 返回本 Storage 的秒传能力适配器：适配器**直接实现**优先；binaryAdapter
 // （生产默认装配）时**透传 Fallback 的库秒传能力**（与 metadata() 同构）。无能力返回 (nil,false)。
