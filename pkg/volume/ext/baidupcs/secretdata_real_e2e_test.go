@@ -30,6 +30,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -78,8 +79,26 @@ func TestE2E_SecretdataOverBaidupcs(t *testing.T) {
 	}
 	lib := newLibraryAdapter(pcs, testLogger())
 	ad := newBinaryAdapter(AdapterConfig{BinaryPath: binPath, Logger: testLogger(), Fallback: lib})
+
+	// **卷根必须是专用子目录**（不能是网盘根 ✗）：secretdata 启动要遍历卷根建索引
+	// （`loadIndex` → `walkContainers`），而 binaryAdapter.List 走 CLI **逐目录**列举 ⇒ 指向
+	// 网盘根会遍历整个网盘（WSL 实测 35min 未完成 ✗）。生产装配同样总是用**卷根子目录**
+	// （卷的 `extra.root`）⇒ 这里对齐生产语义。目录经一次 upload 创建（Adapter 无 Mkdir）。
+	root := "/来自：本地电脑/sproxy-e2e-secretdata"
+	seedCtx, seedCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	keep := filepath.Join(tmpRoot, "keep.txt")
+	if werr := os.WriteFile(keep, []byte("keep"), 0o600); werr != nil {
+		seedCancel()
+		t.Fatalf("写 keep: %v", werr)
+	}
+	if uerr := ad.Upload(seedCtx, keep, root+"/keep.txt", true); uerr != nil {
+		seedCancel()
+		t.Fatalf("创建卷根目录（%s）失败: %v", root, uerr)
+	}
+	seedCancel()
+
 	st, serr := NewStorage(StorageConfig{
-		Root: "/来自：本地电脑", TempDir: tmpRoot + "/store", Adapter: ad, Logger: testLogger(),
+		Root: root, TempDir: tmpRoot + "/store", Adapter: ad, Logger: testLogger(),
 	})
 	if serr != nil {
 		t.Fatalf("NewStorage: %v", serr)
@@ -148,6 +167,10 @@ func TestE2E_SecretdataOverBaidupcs(t *testing.T) {
 	}
 	if _, oerr := sfs.OpenRead(ctx, rel); oerr == nil {
 		t.Fatal("删除后仍可打开 ⇒ 删除未生效 ✗")
+	}
+	// 收尾：删远端 keep（best-effort；容器 meta 等路径锚点保留）。
+	if derr := st.Delete(context.Background(), "keep.txt"); derr != nil {
+		t.Logf("清理远端 keep 失败（可忽略）: %v", derr)
 	}
 	after, _ := fetchRemoteBlobs(t, ctx, fs)
 	for _, b := range after {
