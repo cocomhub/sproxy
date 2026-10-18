@@ -121,8 +121,10 @@ func TestScope_GlobalCapExceeded(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	root := NewPool(10)
-	a := root.Scope("/a", 100)
-	b := root.Scope("/b", 100)
+	// 子限额 0（不限制）⇒ 不触发 I1（分配账本）；本用例验证的是**用量**层面的全局兜底
+	// （a/b 各自未超自身上限，但全局 6+6>10 必须拒绝）。
+	a := root.Scope("/a", 0)
+	b := root.Scope("/b", 0)
 	resA, err := a.TryReserve(6) // 全局 6/10
 	if err != nil {
 		t.Fatalf("a 预留失败: %v", err)
@@ -160,7 +162,9 @@ func TestPool_SetMaxBytes(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	root := NewPool(10)
-	s := root.Scope("/t", 100)
+	// 子限额 0（不限制）⇒ 不触发 I1（分配账本）；本用例验证的是**运行时改全局上限**的行为
+	// （10 拒绝 → 扩到 50 放行 → 0=不限 放行），子池上限由其它用例覆盖。
+	s := root.Scope("/t", 0)
 	if _, err := s.TryReserve(20); !errors.Is(err, ErrStorageFull) {
 		t.Fatalf("全局上限 10 应拒绝 20, got %v", err)
 	}
@@ -344,7 +348,8 @@ func testExactSubpool(t *testing.T) {
 func testExactGlobal(t *testing.T) {
 	t.Helper()
 	root := NewPool(10) // 全局兜底 10
-	s := root.Scope("/t", 100)
+	// 子上限 = 10（I1 合法：Σ 直接子上限 ≤ 父可用 10）；本用例意图是"全局恰好打满"。
+	s := root.Scope("/t", 10)
 	r1, err := s.TryReserve(5)
 	if err != nil {
 		t.Fatalf("TryReserve(5): %v", err)
@@ -353,9 +358,9 @@ func testExactGlobal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TryReserve(5) #2: %v（5+5 恰好打满应成功）", err)
 	}
-	// Available 是 scope 自身账本（上限 100）计算：10/100 → 90；全局 10 的约束
+	// Available 是 scope 自身账本（上限 10，I1 合法）计算：10/10 → 0；全局 10 的约束
 	// 体现在 TryReserve 父链校验，而非 available()——此处同时锁定全局恰好打满通过。
-	if got, want := s.Available(), int64(90); got != want {
+	if got, want := s.Available(), int64(0); got != want {
 		t.Fatalf("Available=%d want %d（子池 100 减已用 10）", got, want)
 	}
 	if _, err := s.TryReserve(1); !errors.Is(err, ErrStorageFull) {
@@ -374,7 +379,10 @@ func TestScope_MultiLevelParentChain(t *testing.T) {
 	root := NewPool(1000)
 	a := root.Scope("/a", 50)      // 中间层上限 50
 	user := a.Mount("/user", 20)   // 最内层上限 20
-	cloud := a.Mount("/cloud", 50) // 兄弟作用域（聚合隔离验证）
+	cloud := a.Mount("/cloud", 30) // 兄弟作用域（聚合隔离验证）
+	// 注：cloud 上限由 50 改为 30 —— 分配账本接线后 I1 强制「Σ 子树上限 ≤ 父可用上限」，
+	// 20+50=70 > 50 会被**建树时**拒绝（旧 fixture 写于记账未生效时期）。20+30=50 恰好合法，
+	// 且下方断言的都是**用量**（committed/reserved）语义，数值不受影响。
 	if got, want := user.MaxBytes(), int64(20); got != want {
 		t.Fatalf("user.MaxBytes=%d want %d", got, want)
 	}

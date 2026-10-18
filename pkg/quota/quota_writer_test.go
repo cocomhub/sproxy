@@ -72,7 +72,8 @@ func TestQuotaWriterAutoTopUp(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	root := NewPool(30) // 全局兜底 30
-	s := root.Scope("/t", 100)
+	// 子上限 = 30（I1 合法：Σ 直接子上限 ≤ 父可用）；本用例意图是"全局兜底 + 自动补留"。
+	s := root.Scope("/t", 30)
 	w, err := NewQuotaWriter(s, io.Discard, 10) // 先预留 10
 	if err != nil {
 		t.Fatalf("NewQuotaWriter: %v", err)
@@ -199,10 +200,20 @@ func quotaWriterFinishAbandon(t *testing.T) {
 
 // quotaWriterFinishConstructorExcessRefused 断言构造预留超 scope 上限被拒绝。
 func quotaWriterFinishConstructorExcessRefused(t *testing.T) {
-	root := NewPool(10)
-	s := root.Scope("/t", 100)
+	// I1 合法树：子上限 10 ≤ 父可用 100（此前用 root=10 + Scope("/t",100) —— 那是 I1 违规，
+	// 接线分配账本后**在建树时**即被拒绝，见下断言）。
+	root := NewPool(100)
+	s := root.Scope("/t", 10)
 	if _, err := NewQuotaWriter(s, io.Discard, 11); !errors.Is(err, ErrStorageFull) {
 		t.Fatalf("NewQuotaWriter 超限应拒绝, got %v", err)
+	}
+	// **I1 强制点**（独立复审 B-P2-4 根因修复）：Σ 子树上限 > 父可用上限 ⇒ 建树即原子失败（nil）。
+	over := NewPool(10)
+	if got := over.Scope("/t", 100); got != nil {
+		t.Fatal("Σ 子树上限(100) > 父可用(10) 必须被拒绝（返回 nil；fail-closed）")
+	}
+	if got := over.Allocated(); got != 0 {
+		t.Fatalf("I1 拒绝必须原子（不改动任何状态），allocated=%d want 0", got)
 	}
 }
 

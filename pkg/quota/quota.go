@@ -86,8 +86,30 @@ func (p *Pool) TryReserve(estimate int64) (*Reservation, error) {
 }
 
 // Scope 返回挂载到根池上的新子作用域（路径化叠加，maxBytes<=0 不限制）。
+//
+// **与 EnsureChild 同一记账实现**（`setChildLimit`；独立复审 B-P2-4 根因修复，2026-10-18）：
+// 此前只建节点**不记分配账** ⇒ 生产环境 `Allocated()/Unallocated()` 为 0/失真、I1 无强制点。
+// 超额（Σ 子树上限 > 父可用上限）⇒ **原子失败并返回 nil**（调用方必须判空；fail-closed）。
 func (p *Pool) Scope(path string, maxBytes int64) *Scope {
-	return p.newScope(path, maxBytes)
+	sc, _ := p.newChildWithLimit(path, maxBytes)
+	return sc
+}
+
+// newChildWithLimit 建（或复用）path 子节点并把上限设为 maxBytes，**同步分配账本**。
+// 超额 ⇒ 回滚新建节点并返回错误（路径语义同 newScope：路径化叠加，joinPath 保留前导 "/"）。
+func (p *Pool) newChildWithLimit(path string, maxBytes int64) (*Scope, error) {
+	child := p.childWithSegment(lastSegment(path))
+	var created []*Pool
+	if child == nil {
+		child = p.newScope(path, 0)
+		created = append(created, child.pool)
+	}
+	var serr error
+	p.withWaitLock(func() { serr = p.setChildLimit(child.pool, maxBytes, created) })
+	if serr != nil {
+		return nil, serr
+	}
+	return child, nil
 }
 
 // Usage 返回本池聚合占用（含子孙作用域传播）。
@@ -212,23 +234,41 @@ func (p *Pool) ResolvePath(path string) *Scope {
 // EnsureScope 拆段逐级下探挂载：已存在的子层复用，不存在的现建（maxBytes 应用于最终层，
 // 中间层 0 = 不限制）。返回最终段的 Scope。用于装配期把配置路径（如 user/videos/hd）
 // 展开为多层嵌套子作用域。
+// EnsureScope 拆段逐级下探挂载到本池下（已存在复用，不存在现建），返回最终段 Scope。
+//
+// **与 EnsureChild 同一记账实现**（见 Pool.Scope 注释）：末段上限走 `setChildLimit`（同步分配
+// 账本 + I1 强制）；超额 ⇒ 原子失败并返回 nil（fail-closed）。
 func (p *Pool) EnsureScope(segs []string, maxBytes int64) *Scope {
+	sc, _ := p.ensureScopeWithLimit(segs, maxBytes)
+	return sc
+}
+
+// ensureScopeWithLimit 是 EnsureScope 的实现：逐段下探（中间层 0），末段设上限并记账。
+func (p *Pool) ensureScopeWithLimit(segs []string, maxBytes int64) (*Scope, error) {
 	cur := p
-	for i, seg := range segs {
+	var created []*Pool
+	descended := false
+	for _, seg := range segs {
 		if seg == "" {
 			continue
 		}
 		child := cur.childWithSegment(seg)
 		if child == nil {
-			mb := int64(0)
-			if i == len(segs)-1 {
-				mb = maxBytes
-			}
-			child = cur.newScope(seg, mb)
+			child = cur.newScope(seg, 0)
+			created = append(created, child.pool)
 		}
 		cur = child.pool
+		descended = true
 	}
-	return &Scope{pool: cur}
+	if !descended {
+		return nil, errors.New("quota: EnsureScope 需要非空路径段")
+	}
+	var serr error
+	p.withWaitLock(func() { serr = p.setChildLimit(cur, maxBytes, created) })
+	if serr != nil {
+		return nil, serr
+	}
+	return &Scope{pool: cur}, nil
 }
 
 // childWithSegment 返回 path 末段恰为 seg 的直接子层 Scope（children 段序查找）。
@@ -484,12 +524,16 @@ type Scope struct {
 
 // Mount 返回该作用域下的子作用域（路径继续叠加；maxBytes 省略时 0 = 不限制）。
 // 命名避开与类型同名（Scope.Scope 阅读歧义），语义即"挂载子作用域"。
+// Mount 在本作用域下挂载路径化子 Scope（maxBytes 省略/0 = 不限制）。
+//
+// **与 EnsureChild 同一记账实现**（见 Pool.Scope 注释）：超额 ⇒ 原子失败并返回 nil（fail-closed）。
 func (s *Scope) Mount(path string, maxBytes ...int64) *Scope {
 	var mb int64
 	if len(maxBytes) > 0 {
 		mb = maxBytes[0]
 	}
-	return s.pool.newScope(path, mb)
+	sc, _ := s.pool.newChildWithLimit(path, mb)
+	return sc
 }
 
 // Resolve 沿本作用域 children 段树按路径段逐级下探（http route 式），返回最深匹配子作用域。

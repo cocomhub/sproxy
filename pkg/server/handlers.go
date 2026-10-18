@@ -713,6 +713,16 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 		bucketLimits = quotaBucketLimitsFromCfg(cfg)
 	}
 	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
+	if s == nil {
+		// **超售 ⇒ fail-closed**（独立复审 B-P2-4 根因修复 + 用户裁定启用 I1 强制）：Σ 租户配额
+		// 超过全局上限 ⇒ 分配被 I1 原子拒绝。**不能**返回 nil（那会让写路径**静默无配额**）⇒
+		// 返回**拒写配额树**（任何非零预留失败 ⇒ 写被 507 拒绝）。**不缓存**：管理员调大全局上限
+		// 后下一个请求自动恢复。
+		h.logger.Error("tenant quota allocation refused by I1 (Σ owner quotas exceed global limit); "+
+			"writes for this owner will be rejected until the global limit is raised",
+			"owner", owner, "owner_quota_bytes", quotaBytes)
+		return h.deniedTenantQuota()
+	}
 	buckets := make(map[string]*quota.Scope, len(quotaBucketNames)+len(bucketLimits))
 	for _, b := range quotaBucketNames {
 		buckets[b] = s.Mount(b, 0)
@@ -720,6 +730,19 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 	mountBucketLimitScopes(buckets, bucketLimits)
 	h.quotaScopes[owner] = s
 	h.quotaBuckets[owner] = buckets
+	return s, buckets
+}
+
+// deniedTenantQuota 返回**拒写**的租户配额树：全局上限 1 字节 ⇒ 任何 >1 字节的预留必失败
+// （超售导致租户配额无法分配时的 fail-closed 载体；见 ensureTenantQuotaLocked）。
+// 所有节点上限传 0（不限制）⇒ 建树本身永不因 I1 失败（可安全作为兜底）。
+func (h *Handlers) deniedTenantQuota() (*quota.Scope, map[string]*quota.Scope) {
+	pool := quota.NewPool(1)
+	s := pool.Scope("/tenant/_denied", 0)
+	buckets := make(map[string]*quota.Scope, len(quotaBucketNames))
+	for _, b := range quotaBucketNames {
+		buckets[b] = s.Mount(b, 0)
+	}
 	return s, buckets
 }
 

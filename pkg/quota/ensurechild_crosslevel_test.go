@@ -39,12 +39,11 @@ func TestEnsureChild_RejectsChildExceedingIntermediateLimit(t *testing.T) {
 	if got := a.Allocated(); got != 100 {
 		t.Fatalf("成功后 a.allocated=100（记在其直接子 b 上），实际 %d", got)
 	}
-	// **子树语义 + 形态无关**判别断言：每级 allocated = 该级**子树内全部上限之和**
-	// ⇒ b 的上限同时记到 a 与 root ⇒ root.allocated == 200（a=100 + b=100）。
-	// 关键不是这个数，而是**形态无关**：同样的逻辑树用 `a.EnsureChild(["b"],100)` 装配也必须
-	// 得到同一结果（见 TestEnsureChild_FormIndependent）。
-	if got := p.Allocated(); got != 200 {
-		t.Fatalf("成功后 root.allocated=200（子树：a=100 + b=100），实际 %d", got)
+	// **carve-out 语义 + 形态无关**判别断言：allocated = Σ **直接子**上限 ⇒ b 的上限记在 a 上，
+	// root 只含 a ⇒ root.allocated == 100。关键不是这个数，而是**形态无关**：同样的逻辑树用
+	// `a.EnsureChild(["b"],100)` 装配必须得到同一结果（见 TestEnsureChild_FormIndependent）。
+	if got := p.Allocated(); got != 100 {
+		t.Fatalf("成功后 root.allocated=100（只含直接子 a），实际 %d", got)
 	}
 }
 
@@ -79,8 +78,8 @@ func TestEnsureChild_FormIndependent(t *testing.T) {
 	if got, want := p1.Allocated(), p2.Allocated(); got != want {
 		t.Fatalf("形态一 root.allocated=%d ≠ 形态二 %d（形态相关）", got, want)
 	}
-	if got, want := p1.Allocated(), int64(aMax+bMax); got != want {
-		t.Fatalf("root.allocated=%d, want %d（子树上限之和）", got, want)
+	if got, want := p1.Allocated(), int64(aMax); got != want {
+		t.Fatalf("root.allocated=%d, want %d（只含直接子 a 的上限；b 记在 a 上）", got, want)
 	}
 }
 

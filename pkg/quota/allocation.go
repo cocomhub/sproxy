@@ -12,7 +12,9 @@ import (
 // allocation.go 实现 **配额分配账本**（配额模型 v3，2026-10-14 用户裁定）。
 //
 // 结构：**卷（物理上限）→ 用户（每卷独立配额）→ 目录（目录级最大配额）**。
-// 不变式：**Σ 子节点上限 ≤ 父节点上限**（父上限 0 = 不限 ⇒ 不做约束）。
+// 不变式 I1：**Σ **直接子**节点上限 ≤ 父节点可用上限**（父上限 0 = 不限 ⇒ 不做约束）——
+// **carve-out（额度再切分）模型**：子额度是父额度的再切分 ⇒ 只记直接父，不逐级上溯
+// （逐级会双计：alice(600) 与 alice/user/videos(300) 会把祖父记成 900）。
 // 「未分配额度」= 父上限 − Σ子上限 ⇒ 直接支撑「每卷总/已分配/剩余」的可见性。
 //
 // **与用量严格分离**：分配是**策略额度**（允许谁用多少），用量是**实际占用**（committed/reserved）。
@@ -163,39 +165,47 @@ func (p *Pool) EnsureChild(segs []string, maxBytes int64) (*Scope, error) {
 	return sc, err
 }
 
+// setChildLimit 把 leaf 的上限设为 maxBytes 并**同步分配账本**——**唯一记账实现**（I1 强制点）。
+// 调用方须持全局根 waitMu（本函数内部取全局根 allocMu）；超额 ⇒ **原子失败**（不改动任何状态，
+// 含回滚本次新建节点）。delta==0 为空操作。
+//
+// **为何抽出来**：生产装配路径（server 的 ensureTenantQuotaLocked）用 `Pool.Scope`/`Scope.Mount`/
+// `EnsureScope` 建树，其**路径语义**与 `EnsureChild` 的逐段拼接不同（joinPath 保留前导 "/"）⇒
+// 不能直接委托；但**记账必须同一实现**（独立复审 B-P2-4：否则又是"多套同时存在"，且生产环境
+// Allocated()/Unallocated() 恒 0/失真、I1 无强制点）。故三者与本函数共用同一记账。
+func (p *Pool) setChildLimit(leaf *Pool, maxBytes int64, created []*Pool) error {
+	// 串行化用**全局根**的 allocMu（覆盖读旧值/记账/写新上限）。锁序：waitMu → allocMu → node.mu。
+	p.rootPool().allocMu.Lock()
+	defer p.rootPool().allocMu.Unlock()
+	leaf.mu.RLock()
+	old := leaf.maxBytes
+	leaf.mu.RUnlock()
+	delta := maxBytes - old
+	if delta == 0 {
+		return nil
+	}
+	if aerr := p.adjustParentAllocationLocked(leaf, delta); aerr != nil {
+		// 记账归属＝**直接父**（carve-out 模型，见 adjustParentAllocationLocked）；失败 ⇒ 摘除新建节点
+		// （独立复审 P3：此前新建节点留在树里 ⇒ 树结构已变，与「超额 ⇒ 不改动任何状态」矛盾）。
+		for _, n := range created {
+			n.detachLocked()
+		}
+		return aerr
+	}
+	leaf.mu.Lock()
+	leaf.maxBytes = maxBytes
+	leaf.mu.Unlock()
+	return nil
+}
+
 // ensureChildLocked 是 EnsureChild 在**根等待锁内**的实现（语义见 EnsureChild 注释）。
 func (p *Pool) ensureChildLocked(segs []string, maxBytes int64) (*Scope, error) {
-	maxBytes = nonNeg(maxBytes)
-	// 串行化用**全局根**的 allocMu，且必须**覆盖节点定位与创建**（独立复审 P2，2026-10-18）：
-	// 定位内含 childWithSegment(RLock) + newScope(锁写)；若置于锁外，并发同段调用会各自创建
-	// **重复兄弟节点**并重复记账（幽灵节点 + 父 allocated 记重 ⇒ 后续合法分配假失败）。
-	// 锁序：allocMu → node.mu（本函数与调用链内不得反向获取）。
-	root := p
-	for root.parent != nil {
-		root = root.parent
-	}
-	root.allocMu.Lock()
-	defer root.allocMu.Unlock()
 	cur, created, err := p.ensureChildTarget(segs)
 	if err != nil {
 		return nil, err
 	}
-	cur.mu.RLock()
-	old := cur.maxBytes
-	cur.mu.RUnlock()
-	if delta := maxBytes - old; delta != 0 {
-		// 记账归属＝**直接父**（见 adjustParentAllocationLocked）；失败 ⇒ 摘除本次新建的中间层
-		// 节点（独立复审 P3：此前新建节点留在树里 ⇒ 树结构已变、可被 Resolve 命中，与
-		// 「超额 ⇒ 不改动任何状态」承诺矛盾）。
-		if aerr := p.adjustSubtreeAllocationsLocked(cur, delta); aerr != nil {
-			for _, n := range created {
-				n.detachLocked()
-			}
-			return nil, aerr
-		}
-		cur.mu.Lock()
-		cur.maxBytes = maxBytes
-		cur.mu.Unlock()
+	if lerr := p.setChildLimit(cur, nonNeg(maxBytes), created); lerr != nil {
+		return nil, lerr
 	}
 	return &Scope{pool: cur}, nil
 }
@@ -225,37 +235,28 @@ func (p *Pool) ensureChildTarget(segs []string) (*Pool, []*Pool, error) {
 	return cur, created, nil
 }
 
-// adjustSubtreeAllocationsLocked 把 leaf 的上限变化 delta 记到**它的每个祖先直到全局根**。
+// adjustParentAllocationLocked 把 leaf 的上限变化 delta 记到**它的直接父**。
 //
-// **语义（权威规格 I1 的落地）**：每个节点的 `allocated` = 该节点**子树内所有节点上限之和**
-// ——即"这个子树占用了父多少额度"。故 leaf 上限变化必须同时反映到**每一级祖先**（含根）。
-// 这样「目录配额 ≤ 用户配额 ≤ 卷上限」在任何深度都成立（既有用例
-// `model_v3_probe_test.go:127-131` 钉住的正是这一点）。
+// **语义＝carve-out（额度再切分）模型**（权威规格 I1 的落地，2026-10-18 定稿）：每个节点的
+// `allocated` = **Σ 其直接子节点的上限**（即"切出去给子节点的额度"）。子节点的额度是**父节点额度的
+// 再切分** ⇒ 只记直接父；**记到祖父会双计**（实测：`alice(600)` + `alice/user/videos(300)` 会把
+// 祖父记成 600+300=900 ⇒ 同卷第二个租户 `bob(400)` 被误拒 ✗）。
+// 「目录配额 ≤ 用户配额 ≤ 卷上限」的**实际约束**由**用量**沿父链强制（`reserveUp`：committed+
+// reserved+n ≤ 每层可用上限）——分配账本只负责「切分额度不超额」这一层。
 //
-// **必须走到全局根，不能只走到调用目标 `p`**（独立复审 P1，2026-10-18 实测反例）：只走到 p 会让
-// 同一逻辑树**因调用形态不同结果不同**（`p.EnsureChild(["a"],1000)` 后 `p.EnsureChild(["a","b"],1)`
-// 被拒，而 `a.EnsureChild(["b"],1)` 同树通过）——这是**形态相关**缺陷（结构不变式被调用方式影响）。
-// 走到全局根后两种形态完全等价（两者都从 leaf.parent 上溯到同一根）。
-// 任一级拒绝 ⇒ 已记账者**逐级回滚**（保持「超额 ⇒ 不改动任何状态」承诺）。
+// 形态无关性（独立复审 P1）：记账只依赖 leaf.parent ⇒ `p.EnsureChild(["a","b"],1)` 与
+// `a.EnsureChild(["b"],1)` 结果**必然一致**。
 // 调用方须持全局根 allocMu；delta<0 为归还（不会失败）。
-func (p *Pool) adjustSubtreeAllocationsLocked(leaf *Pool, delta int64) error {
+func (p *Pool) adjustParentAllocationLocked(leaf *Pool, delta int64) error {
+	parent := leaf.parent
+	if parent == nil {
+		return nil // 叶即根（ensureChildTarget/ensureScopeWithLimit 已拒绝全空段）
+	}
 	if delta < 0 {
-		for anc := leaf.parent; anc != nil; anc = anc.parent {
-			anc.subAllocated(-delta)
-		}
+		parent.subAllocated(-delta)
 		return nil
 	}
-	var done []*Pool
-	for anc := leaf.parent; anc != nil; anc = anc.parent {
-		if err := anc.addAllocated(delta); err != nil {
-			for _, r := range done {
-				r.subAllocated(delta)
-			}
-			return err
-		}
-		done = append(done, anc)
-	}
-	return nil
+	return parent.addAllocated(delta)
 }
 
 // detachLocked 从父节点的 children 中摘除自身（EnsureChild 记账失败时回滚本次新建的节点；
