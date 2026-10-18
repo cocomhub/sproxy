@@ -231,7 +231,7 @@ func (s *Service) EmptyTrash(ctx context.Context, owner string) error {
 		entryRel := trashEntryRel(trashAbs, absPath)
 		// 释放量必须与**预留量**同口径（用户可见逻辑长度，非磁盘密文长度）——见
 		// trashEntryReleaseSize；文件仍存在（下面才 Remove）故 LogicalSize 可取。
-		s.releaseTrashEntryQuota(owner, root, entryRel)
+		s.releaseTrashEntryQuota(owner, volumeNameForTenant(s.rt.volSet(), tnt), root, entryRel)
 		_ = root.Remove(entryRel)
 		return nil
 	})
@@ -260,7 +260,7 @@ func trashEntryRel(trashAbs, absPath string) string {
 // B-C1 修复：入参 entryName 是**含 trash/ 前缀的完整条目路径**（与软删命名一致）——
 // 原实现传裸 e.Name() 与 guard HasPrefix("trash/") 不匹配 → 恒早退（配额释放死代码）。
 // 调用方（EmptyTrash/CleanupTrash）传 `trashPrefix + e.Name()`。
-func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entryName string) {
+func (s *Service) releaseTrashEntryQuota(owner, volName string, root *storage.Root, entryName string) {
 	size := trashEntryReleaseSize(root, entryName)
 	if size <= 0 {
 		return
@@ -270,21 +270,26 @@ func (s *Service) releaseTrashEntryQuota(owner string, root *storage.Root, entry
 	if !ok {
 		return
 	}
+	// **释放金额与写入/结算同源**（独立复审「释放≠结算」类根治，2026-10-18）：条目此刻仍**存在于
+	// trash 路径**（下面才 Remove）⇒ 可对**其自身路径**取卷自报实测足迹（`PhysFootprint` 按 rel
+	// 查索引，软删改名后索引随迁）。此前只用公式折算 ⇒ 对 `footprint ≠ 公式` 的卷（secretdata 的
+	// parity + meta pad）**少释放** ⇒ 幽灵占用/假 507。能力缺失/条目不在索引 ⇒ 回落原公式。
 	// meta 条目（软删随迁命名 <flat>.meta.__deleted__）→ 释放 meta/<origRel>.meta。
 	if before0, ok0 := strings.CutSuffix(before, trashMetaMarker); ok0 {
 		flat := before0
 		origRel := unflattenRel(flat)
 		mrel := meta.MetaPath(origRel)
 		if scope := s.rt.quotaScope(owner, mrel); scope != nil {
-			// 口径与写入侧一致（加密卷按物理占用；见 phys_size.go 的不变式）。
-			scope.ReleaseUsage(physicalCharge(root, size))
+			// meta 侧写入按 **Stat 物理长度**记账（见 write_ops.go 的 metaSize 注释）⇒ 回落值为
+			// 原始 size（**不再**折算），足迹能力可用时以实测为准。
+			scope.ReleaseUsage(s.releaseChargeFor(volName, owner, entryName, size))
 		}
 		return
 	}
 	// 主条目 → 释放 user 桶原 rel。
 	origRel := unflattenRel(before)
 	if scope := s.rt.quotaScope(owner, origRel); scope != nil {
-		scope.ReleaseUsage(physicalCharge(root, size))
+		scope.ReleaseUsage(s.releaseChargeFor(volName, owner, entryName, physicalCharge(root, size)))
 	}
 }
 
@@ -324,7 +329,7 @@ func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Durat
 	}
 	now := time.Now()
 	cleaned := 0
-	err := filepath.WalkDir(trashAbs, s.cleanupTrashWalk(owner, root, trashAbs, ttl, now, &cleaned))
+	err := filepath.WalkDir(trashAbs, s.cleanupTrashWalk(owner, volumeNameForTenant(s.rt.volSet(), tnt), root, trashAbs, ttl, now, &cleaned))
 	if err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}
@@ -333,7 +338,7 @@ func (s *Service) CleanupTrash(ctx context.Context, owner string, ttl time.Durat
 
 // cleanupTrashWalk 是 CleanupTrash 的 WalkDir 回调（S107 拆分降 gocognit）：过期文件
 // 删除 + 释放原 rel 配额（与 EmptyTrash 对称）；目录跳过（内容由子条目处理）。
-func (s *Service) cleanupTrashWalk(owner string, root *storage.Root, trashAbs string, ttl time.Duration, now time.Time, cleaned *int) fs.WalkDirFunc {
+func (s *Service) cleanupTrashWalk(owner, volName string, root *storage.Root, trashAbs string, ttl time.Duration, now time.Time, cleaned *int) fs.WalkDirFunc {
 	return func(absPath string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -352,7 +357,7 @@ func (s *Service) cleanupTrashWalk(owner string, root *storage.Root, trashAbs st
 			return nil // 未过期
 		}
 		entryRel := trashEntryRel(trashAbs, absPath)
-		s.releaseTrashEntryQuota(owner, root, entryRel)
+		s.releaseTrashEntryQuota(owner, volName, root, entryRel)
 		if root.Remove(entryRel) == nil {
 			*cleaned++
 		}
