@@ -148,7 +148,7 @@ type CloudDownloadConfig struct {
 	AllowPrivate        bool          // 允许私有 IP 下载（仅测试用）
 	DownloadTimeout     time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
 	IdleTimeout         time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
-	MaxRetries          int           // 失败重试次数，默认 10
+	MaxRetries          int           // **总尝试次数**（含首次），默认 10；重试 = MaxRetries−1（runRetryLoop 为 `for attempt := range maxRetries`）
 	RetryDelay          time.Duration // 重试间隔，默认 10s
 	Downloader          string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
 	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；**<=0（含 0/负值/缺省）一律按
@@ -862,9 +862,9 @@ type TransferSpec struct {
 	Volume string `json:"volume"`
 	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<owner>/<taskID>/<filename>）。
 	Path string `json:"path,omitempty"`
-	// OwnerPrefix 是共享卷的 owner 隔离前缀（服务端按卷共享性注入，非客户端可配）。
-	// 共享卷（内容不共享）落盘强制 owner 前缀防跨 owner 覆写；独享卷为空（用户直接操作）。
-	OwnerPrefix string `json:"-"`
+	// 注：曾有 OwnerPrefix 字段（注释称「共享卷的 owner 隔离前缀，服务端注入」）——**无任何
+	// 生产者/消费者**（独立审核 2026-10-18 确证）⇒ 已删除。owner 隔离由 `volume.ResolveLocation`
+	// 恒 owner 前缀承担（pkg/volume/volume_path.go），该字段声称的「注入」从未存在。
 }
 
 // TaskParams 是云端下载任务的「三行为」语义参数（S107 收敛 + 正交性显式化）：

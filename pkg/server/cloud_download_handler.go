@@ -1024,7 +1024,6 @@ func (h *Handlers) cloudArchiveToVolume(
 		Scheme:      scheme,
 		Volume:      t.TargetVolume,
 		Rel:         rel,
-		Owner:       t.Owner,
 	})
 	// 统一转存审计（F8）：本路径是**同步 HTTP**（不经 cloud manager ⇒ 无任务级审计作用域 /
 	// download·transfer span）。按备份等旁路写面的既有口径补一条服务端审计事件，保证

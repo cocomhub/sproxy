@@ -102,8 +102,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		TotalSize:    totalSize,
 		ReservedSize: reserved,
 		// 浅拷贝 Transfer：组内多子任务共享同一请求指针时，各任务独立持有副本——
-		// 否则 transferDone 的 OwnerPrefix 原地写（共享卷）对并发组转存构成 write-write
-		// 数据竞争（同值写入，-race 可报）。深度只拷贝顶层字段（Volume/Path/OwnerPrefix）。
+		// 避免并发组转存对同一 spec 的写-写竞争（同值写入，-race 可报）。深度只拷贝顶层字段
+		// （Volume/Path 等；此前注释提及的 OwnerPrefix 字段已删除——它从无生产者/消费者）。
 		Transfer:          cloneTransferSpec(params.Transfer),
 		DownloadLocal:     params.DownloadLocal,
 		Save:              params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）

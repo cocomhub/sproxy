@@ -20,6 +20,9 @@ var ErrStorageFull = errors.New("storage quota exceeded")
 // Pool 是配额账本节点（根池，或某个 Scope 的底层账本）。
 // 账本记录已确认占用 committed 与预留中 reserved；可用额度 = maxBytes − (committed + reserved)。
 type Pool struct {
+	// allocMu 串行化**跨层**分配账本更新（EnsureChild 一次调用会改动多级节点的 allocated ⇒
+	// 读旧值/记账/写新上限必须整体原子）。锁序：allocMu → mu；不得反向获取。
+	allocMu   sync.Mutex
 	mu        sync.RWMutex
 	maxBytes  int64 // 0 = 不限制
 	committed int64

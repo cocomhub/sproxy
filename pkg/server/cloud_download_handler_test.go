@@ -937,14 +937,16 @@ func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
 // 配额满时 POST /api/cloud/download 返回 507（InsufficientStorage）+ 无任务残留 + Scope 0。
 //
 // 说明：handler 提交恒为未知大小（totalSize=-1），创建期同步配额门是全局 storageMgr
-// 的 1 GiB 占位预留（m.storage.TryReserve(cloudReservePlaceholder)）；租户 Scope 的容量
-// 预检仅在已知大小路径（totalSize>0）触发，未知大小的租户配额在写盘流 NewQuotaWriter
-// 占位预留时执行（异步失败，不返回 507）。因此本测试把全局 storageMgr 上限压到占位之下
+// 的自适应占位预留（m.storage.TryReserveCloud(placeholderFor()) = min(1 GiB, 可用空间/并发)，
+// 下限 cloudReservePlaceholderMin=16 MiB）；租户 Scope 的容量预检仅在已知大小路径
+// （totalSize>0）触发，未知大小的租户配额在写盘流 NewQuotaWriter 占位预留时执行（异步失败，
+// 不返回 507）。因此本测试把全局 storageMgr 上限压到**下限之下**（8 MiB < 16 MiB 下限）
 // 触发同步 507，并断言 Scope 不因失败的创建留下任何占用（双轨无泄漏）。
 func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	dir := t.TempDir()
-	// 全局 max = 512MB < 1 GiB 占位 → 未知大小任务创建即 507。
-	sm := capacity.NewStorageManager(dir, 512*1024*1024, nil, testLogger())
+	// 全局 max = 8 MiB < 占位下限 16 MiB → 未知大小任务创建即 507（自适应占位见
+	// cloudReservePlaceholderMin：下限保证小配额卷也不会被超大占位吃光）。
+	sm := capacity.NewStorageManager(dir, 8*1024*1024, nil, testLogger())
 	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,

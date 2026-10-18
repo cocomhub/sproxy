@@ -63,8 +63,9 @@ type TransferRequest struct {
 	Volume string
 	// Rel 是目标相对路径（含文件名；空 = 自动派生由调用方填）。
 	Rel string
-	// Owner 是请求者（ACL/配额判定）。
-	Owner string
+	// 注：曾有 Owner 字段（注释称「ACL/配额判定」）——**全仓无生产者/消费者**（独立审核
+	// 2026-10-18 确证）⇒ 已删除：owner 归属由卷路径层 `volume.ResolveLocation` 恒 owner 前缀
+	// 承担，转存内核不需要（也不需要读它做判定，避免"声明了却没生效"的假隔离）。
 	// Overwrite 是否允许覆盖已存在目标（false = WriteIfAbsent 拒绝）。
 	Overwrite bool
 }

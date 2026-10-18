@@ -21,6 +21,8 @@ import (
 // 用法（配置路径唯一入口）：`pool.EnsureChild(segs, maxBytes)` —— 创建/改额并同步分配账本；
 // 内部解析（只读用量）继续用 `ResolvePath/EnsureScope`（不涉及分配）。
 
+// 注：`Pool.allocMu`（quota.go）是跨层分配账本更新的唯一临界区（见 EnsureChild）。
+
 // Allocation 是一次分配额度的句柄（可改额/归还）。
 type Allocation struct {
 	mu       sync.Mutex
@@ -145,9 +147,36 @@ func (p *Pool) EnsureChild(segs []string, maxBytes int64) (*Scope, error) {
 		return nil, errors.New("quota: nil pool")
 	}
 	maxBytes = nonNeg(maxBytes)
-	// 定位/创建末节点（中间层 max 0）。
+	cur, err := p.ensureChildTarget(segs)
+	if err != nil {
+		return nil, err
+	}
+	// 串行化用**全局根**的 allocMu：一次调用可能触及多级节点的 allocated（含 root），
+	// 而并发调用可能来自不同子树（各自的 p 不同）⇒ 只有全局根锁能覆盖共享祖先的更新。
+	root := p
+	for root.parent != nil {
+		root = root.parent
+	}
+	root.allocMu.Lock()
+	defer root.allocMu.Unlock()
+	cur.mu.RLock()
+	old := cur.maxBytes
+	cur.mu.RUnlock()
+	if delta := maxBytes - old; delta != 0 {
+		if aerr := p.adjustAncestorAllocationsLocked(cur, delta); aerr != nil {
+			return nil, aerr
+		}
+		cur.mu.Lock()
+		cur.maxBytes = maxBytes
+		cur.mu.Unlock()
+	}
+	return &Scope{pool: cur}, nil
+}
+
+// ensureChildTarget 沿 segs 定位末节点（中间层以 max=0 创建），并拒绝空路径。
+func (p *Pool) ensureChildTarget(segs []string) (*Pool, error) {
 	cur := p
-	for i, seg := range segs {
+	for _, seg := range segs {
 		if seg == "" {
 			continue
 		}
@@ -156,27 +185,43 @@ func (p *Pool) EnsureChild(segs []string, maxBytes int64) (*Scope, error) {
 			child = cur.newScope(seg, 0)
 		}
 		cur = child.pool
-		_ = i // 中间层仅作路径承载
 	}
 	if cur == p && len(segs) == 0 {
 		return nil, errors.New("quota: EnsureChild 需要非空路径")
 	}
-	// 同步分配（末节点上限从旧值调整为新值）。
-	cur.mu.RLock()
-	old := cur.maxBytes
-	cur.mu.RUnlock()
-	delta := maxBytes - old
-	if delta > 0 {
-		if err := p.addAllocated(delta); err != nil {
-			return nil, err
+	return cur, nil
+}
+
+// adjustAncestorAllocationsLocked 把 leaf 的上限变化 delta 逐级记到**到调用目标 p 为止**的祖先上
+// （每级 allocated 的语义即「Σ 其直接子上限」）——这是「Σ 子节点上限 ≤ 父节点上限」在**每一层**
+// 成立的关键：只记起始节点会让中间层不受约束。不含更上层：p 创建时已在它的父上记过账，再往上
+// 会双计（实测：走到全局根会让根 allocated 虚高 ⇒ 后续合法分配假失败）。
+// 任一级拒绝 ⇒ 已记账的祖先**逐级回滚**并返回错误（保持「超额 ⇒ 不改动任何状态」承诺）。
+// 调用方须持全局根 allocMu；delta>0 走校验+回滚，delta<0 为归还（不会失败）。
+func (p *Pool) adjustAncestorAllocationsLocked(leaf *Pool, delta int64) error {
+	if delta < 0 {
+		for anc := leaf.parent; anc != nil; anc = anc.parent {
+			anc.subAllocated(-delta)
+			if anc == p {
+				break
+			}
 		}
-	} else if delta < 0 {
-		p.subAllocated(-delta)
+		return nil
 	}
-	cur.mu.Lock()
-	cur.maxBytes = maxBytes
-	cur.mu.Unlock()
-	return &Scope{pool: cur}, nil
+	var done []*Pool
+	for anc := leaf.parent; anc != nil; anc = anc.parent {
+		if err := anc.addAllocated(delta); err != nil {
+			for _, r := range done {
+				r.subAllocated(delta)
+			}
+			return err
+		}
+		done = append(done, anc)
+		if anc == p {
+			break
+		}
+	}
+	return nil
 }
 
 // EnsureChild 是 Scope 侧的同一入口（在本节点之下创建/改额子节点并同步分配账本）。
