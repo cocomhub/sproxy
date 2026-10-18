@@ -96,9 +96,16 @@ func LedgerDegradedCount() int64 { return ledgerDegraded.Load() }
 
 // ledgerMemFallback 是**进程级**「卷 FS 无法承载账本 ⇒ 退回内存账本」计数。
 // 语义：**进程内强制仍在**（上限不会被放宽），但**跨进程可见性失效** ⇒ 必须可告警。
+// ledgerBaselineFail 计数**基线注入失败**次数（盘满/远端抖动）。注入失败 ⇒ 基线丢失 ⇒
+// 同名重建后从 0 起算（fail-open）⇒ 必须 fail-closed 拒写并在此可观测（独立审核 P2，2026-10-18）。
+var ledgerBaselineFail atomic.Int64
+
 var ledgerMemFallback atomic.Int64
 
 // LedgerMemFallbackCount 返回本进程累计的「账本退回内存」次数。
+// LedgerBaselineFailCount 返回基线注入失败次数（>0 ⇒ 该卷已 fail-closed 拒写，待运维介入）。
+func LedgerBaselineFailCount() int64 { return ledgerBaselineFail.Load() }
+
 func LedgerMemFallbackCount() int64 { return ledgerMemFallback.Load() }
 
 // OpenMemLedger 构造**内存账本**（降级兜底；语义与卷内账本一致，只是不跨进程）。
@@ -1040,6 +1047,27 @@ func (c *LedgerCounter) WithPool(p *quota.Pool) *LedgerCounter {
 	return c
 }
 
+// withLock 是 LedgerCounter **唯一**的账本变更临界区：所有变更（TryAdd / Release / CorrectTo）
+// 都必须经它执行，`total` 只在锁内交给回调。
+//
+// 为何收敛到一处（独立审核 P2，2026-10-18）：`TryAdd`/`Release` 各自持 c.mu 做「读 total →
+// 判定 → Add」，而 `CorrectTo` **漏在锁外**（读 Total 与 Add 之间可被并发变更插入）⇒ 基于陈旧
+// total 计算增量 ⇒ 两个并发 CorrectTo 各自读 cur=0 并各加 T ⇒ **双计**（Used=2T）；与 TryAdd
+// 交错则超限判定失真。把「读 → 判定 → 变更」收敛到单一原语后，**漏锁在结构上不可能** ✓。
+func (c *LedgerCounter) withLock(fn func(total int64) error) error {
+	if c == nil || c.l == nil {
+		return ErrLedgerDegraded
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	total, ok := c.l.Total()
+	if !ok {
+		ledgerDegraded.Add(1)
+		return fmt.Errorf("%w: 无法确定该卷占用", ErrLedgerDegraded)
+	}
+	return fn(total)
+}
+
 // TryAdd 在**全局和**上累计 size：超限（或账本降级）⇒ 返回错误且**不改变**账本。
 func (c *LedgerCounter) TryAdd(size int64) error {
 	if size <= 0 {
@@ -1057,13 +1085,12 @@ func (c *LedgerCounter) TryAdd(size int64) error {
 	}
 	// 进程内「检查-再追加」原子段（c.mu）：并发 TryAdd 若都读同一 total 再各自 Add，
 	// 双过双入账 ⇒ 超限（评审 A1，探针实测 552/3000 次超限、最大 total=120>100）。
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	total, ok := c.l.Total()
-	if !ok {
-		ledgerDegraded.Add(1)
-		return fmt.Errorf("%w: 无法确定该卷占用，拒绝写入", ErrLedgerDegraded)
-	}
+	return c.withLock(func(total int64) error { return c.addWithinLock(total, size) })
+}
+
+// addWithinLock 在 `withLock` 的**唯一临界区**内执行「本卷上限 → 父链上限 → 入账 → 提交池预留」。
+// 抽成子函数只为把 TryAdd 的认知复杂度留在阈值内（临界区语义不变）。
+func (c *LedgerCounter) addWithinLock(total, size int64) error {
 	if c.max > 0 && total+size > c.max {
 		return fmt.Errorf("%w: used=%d size=%d max=%d", ErrVolumeFull, total, size, c.max)
 	}
@@ -1114,22 +1141,19 @@ func (c *LedgerCounter) Release(size int64) {
 	// 防负漂移（评审 A7）：删除**从未入账**的字节（建卷前已存在 / 绕过包装的写入）会把
 	// 账本总和拖负 ⇒ TryAdd 以负基线放行更多（fail-open ✗）。钳制：当前总和不足时
 	// 只释放到 0——账本偏高（fail-closed 方向），由对账收敛。
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	total, ok := c.l.Total()
-	if !ok {
-		return // 无法确定 ⇒ 不释放（保持账本现值，不误放行）
-	}
-	if size > total {
-		size = total
-	}
-	if size <= 0 {
-		return
-	}
-	if err := c.l.Add(-size); err != nil {
-		return
-	}
-	c.mirrorToPool(-size)
+	_ = c.withLock(func(total int64) error {
+		if size > total {
+			size = total
+		}
+		if size <= 0 {
+			return nil
+		}
+		if err := c.l.Add(-size); err != nil {
+			return err
+		}
+		c.mirrorToPool(-size)
+		return nil
+	})
 }
 
 // Used 返回**全局**已用（Σ 所有分片）。账本降级 ⇒ 返回 0 并由 `Degraded()` 报告。

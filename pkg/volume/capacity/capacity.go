@@ -321,14 +321,22 @@ func newVolumeLedgerCounter(raw syncpkg.FS, maxBytes int64, pool *quota.Pool, ba
 			return &LedgerCounter{max: maxBytes, initErr: merr}
 		}
 		if baselineUsed > 0 {
-			_ = mem.Add(baselineUsed)
+			if aerr := mem.Add(baselineUsed); aerr != nil {
+				ledgerBaselineFail.Add(1)
+				return &LedgerCounter{max: maxBytes, initErr: fmt.Errorf("capacity: 基线注入失败（内存账本）: %w", aerr)}
+			}
 		}
 		return NewLedgerCounter(mem, maxBytes).WithPool(pool)
 	}
 	// 基线注入（幂等）：仅当账本**当前为空**时写入 ⇒ 不会因重复装配而翻倍 ✓。
 	if baselineUsed > 0 {
 		if cur, ok := led.Total(); ok && cur == 0 {
-			_ = led.Add(baselineUsed)
+			if aerr := led.Add(baselineUsed); aerr != nil {
+				// 注入失败 ⇒ **基线丢失** ⇒ 同名重建后从 0 起算 ⇒ 限额放宽（fail-open，本包最危险
+				// 形态）⇒ 按 fail-closed 拒写 + 计数可观测（独立审核 P2，2026-10-18）。
+				ledgerBaselineFail.Add(1)
+				return &LedgerCounter{max: maxBytes, initErr: fmt.Errorf("capacity: 基线注入失败: %w", aerr)}
+			}
 		}
 	}
 	return NewLedgerCounter(led, maxBytes).WithPool(pool)
@@ -354,7 +362,12 @@ func newVolumeLedgerCounterLocal(dir string, maxBytes int64, pool *quota.Pool, b
 	// 基线注入（幂等）：仅当账本**当前为空**时写入 ⇒ 不会因重复装配而翻倍 ✓。
 	if baselineUsed > 0 {
 		if cur, ok := led.Total(); ok && cur == 0 {
-			_ = led.Add(baselineUsed)
+			if aerr := led.Add(baselineUsed); aerr != nil {
+				// 注入失败 ⇒ **基线丢失** ⇒ 同名重建后从 0 起算 ⇒ 限额放宽（fail-open，本包最危险
+				// 形态）⇒ 按 fail-closed 拒写 + 计数可观测（独立审核 P2，2026-10-18）。
+				ledgerBaselineFail.Add(1)
+				return &LedgerCounter{max: maxBytes, initErr: fmt.Errorf("capacity: 基线注入失败: %w", aerr)}
+			}
 		}
 	}
 	return NewLedgerCounter(led, maxBytes).WithPool(pool)

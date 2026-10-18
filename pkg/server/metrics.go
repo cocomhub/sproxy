@@ -922,6 +922,12 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		"Volumes whose quota ledger fell back to in-memory (cross-process visibility lost; local enforcement retained)",
 		capacity.LedgerMemFallbackCount())
 
+	// 基线注入失败（盘满/远端抖动）⇒ 基线丢失 ⇒ 重建后从 0 起算（fail-open）⇒ 该卷已
+	// fail-closed 拒写；此计数是唯一的可观测面（独立审核 P2，2026-10-18）。
+	writeMetric(&b, "sproxy_quota_ledger_baseline_fail_total", "counter",
+		"Volumes whose quota ledger baseline injection failed (volume is fail-closed until fixed)",
+		capacity.LedgerBaselineFailCount())
+
 	// 备份/同步任务计数（roadmap 11.5-⑪）：配合 SproxyBackupSyncFailures 告警。
 	writeMetric(&b, "sproxy_backup_tasks_total", "counter", "Total backup/sync tasks recorded", m.backupTasks.Load())
 	writeMetric(&b, "sproxy_backup_tasks_failed_total", "counter", "Total backup/sync tasks that failed", m.backupTasksFailed.Load())

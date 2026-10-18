@@ -79,15 +79,19 @@ func (c *LedgerCounter) CorrectTo(bytes int64) {
 	}
 	// 账本语义：把**全局和**修正为真值 ⇒ 追加 (真值 − 当前和) 的增量（可正可负）。
 	// 不再需要「修正后持久化」：账本每次 Add 即落盘。
-	cur, ok := c.l.Total()
-	if !ok {
-		return
-	}
-	delta := bytes - cur
-	if err := c.l.Add(delta); err != nil {
-		return
-	}
-	c.mirrorToPool(delta)
+	// **必须走唯一临界区**（独立审核 P2，2026-10-18）：此前读 Total 与 Add 在锁外，两个并发
+	// CorrectTo 会各自读 cur=0 并各加真值 ⇒ 双计（Used=2×真值）。
+	_ = c.withLock(func(cur int64) error {
+		delta := bytes - cur
+		if delta == 0 {
+			return nil
+		}
+		if err := c.l.Add(delta); err != nil {
+			return err
+		}
+		c.mirrorToPool(delta)
+		return nil
+	})
 }
 
 // CorrectFrom 用真值报告者修正账本，返回修正后的占用与是否发生修正：

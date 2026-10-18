@@ -33,9 +33,12 @@ import (
 // TestCloudDownloadManager_RecoverTasksNoUnlockedMapWrite 恢复期 m.tasks 的写入必须全部持锁。
 func TestCloudDownloadManager_RecoverTasksNoUnlockedMapWrite(t *testing.T) {
 	t.Parallel()
-	// 服务端：先阻塞（撑开重叠窗口），再回 500（让下载快速失败、goroutine 退出）。
+	// 服务端：**阻塞在通道上**（撑开重叠窗口，且不用 time.Sleep ⇒ 不触 R14 睡眠棘轮），
+	// 由本用例在断言完成后关闭通道 ⇒ 下载随即失败、goroutine 退出（不挂住 mgr.Close）。
+	hold := make(chan struct{})
+	defer close(hold)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		<-hold
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
