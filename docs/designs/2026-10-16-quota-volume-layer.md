@@ -607,6 +607,14 @@ type StatsProvider interface{ VolumeStats() (used, total int64, ok bool) }
    迁移本身需**逐文件手工**（实测：~22 非测试调用点 + ~56 实现签名 + ~30 测试 mock；
    四类边界：未命名参数 mock ✗ / 同名不同接口 ✗ / 多行调用 ✗ / 子包限定符 ✗）。
 2. **片 6 完整**：`charged_bytes` 记录化 + 释放侧唯一入口 + ~20 站迁移（**同片删旧计算**）。
+   - **实际落地方式（2026-10-18 定稿，与设想不同但目标一致）**：未引入「记录值」存储（需新
+     ledger + 迁移 + 陈旧风险），改为**同源捕获**——释放金额一律取**卷自报实测足迹**
+     （`physChargeFor` / 装配层 `ReleaseChargeFor`），并要求调用方在**删除/改名之前**捕获
+     （对象存在 ⇒ 足迹可测）。已覆盖 **24 处**调用点（写/删/改/版本/回收站/回收清理/覆盖写）。
+     **关键洞察**：软删条目**仍存在于 trash 路径** ⇒ 可对**其自身路径**取足迹（`PhysFootprint`
+     按 rel 查索引、改名后索引随迁）⇒ 无需记录化即可同源。
+     **残余**：`charged_bytes` 记录化对「对象已不可测且**不在** trash 索引」的场景仍有价值（当前无
+     此类场景）⇒ 留待出现真实需求再评估。
 3. **M5 剩余**：装配层 `Type=="" || TypeLocal` 特例合并（本地卷经 `registry.NewBackend` 统一分派）。
 4. **片 5 剩余**：per-user 配额**按卷持有** + 联邦查询端点（含 Web UI ⇒ Playwright e2e）。
    - **已交付（读侧，PR 见 git）**：`QuotaVolume.UserUsage/UserCapacity`（**单卷**每用户读侧 ✓）
