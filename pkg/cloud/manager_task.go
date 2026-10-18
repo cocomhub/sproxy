@@ -1475,18 +1475,20 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 	}
 	tr, newResult, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
 		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
-		// NM2：删旧文件前回拨其已计字节（account committed / 全局账本），否则重下再次
-		// commit → 账本双倍（Scope 虚高）。回拨后磁盘=0、账本=0，重下从零计。
-		// 释放按**磁盘真值**（stat destPath）而非外层 result.Size：动态源重下后尺寸可能
-		// 与首次不同（NM2 Minor：用旧 size 释放会让 committed 与磁盘偏离，finalize 只
-		// Adjust 向上取 max 不抹平虚高）。
+		// 清账：删旧产物并回拨其已计字节（account committed），否则重下再次 commit ⇒ 账本
+		// 双倍（Scope 虚高）。回拨后磁盘=0、账本=0，重下从零计。
+		//
+		// **金额取自账户权威记录**（ReleaseAllCommitted），不再从 result.Size / stat 推断：
+		// 此前闭包捕获的是**外层 result**（只在 transferDone 返回后才被 newResult 更新），且
+		// os.Stat(destPath) 在本路径恒失败（产物已由失败的 transfer 移走/清理）⇒ 第 2 次及以后
+		// 的重下仍用**第 1 次**的 Size ⇒ 动态源两次尺寸不同时 committed 与实际偏离（少释放 ⇒
+		// 幽灵占用 ⇒ 假 507；多释放 ⇒ 短时超限）。
+		//
+		// **不回拨全局占位**（ReservedSize）：任务仍在运行、产物将被重下重建，占位是本任务磁盘
+		// 上界，应保持（否则重下期间的保护被削弱）；它由任务终结路径统一释放。
+		// **fail-closed 顺序**：确认产物消失后才回拨（删除失败则不回拨，避免"账本已减而字节仍在"）。
 		m.logger.Warn("transfer 文件异常，重新下载", "task_id", task.ID, "filename", task.Filename)
-		diskSize := result.Size
-		if st, serr := os.Stat(destPath); serr == nil {
-			diskSize = st.Size()
-		}
-		m.releaseDownloadedBytes(task, diskSize)
-		_ = os.Remove(destPath)
+		m.discardTaskOutputForRedownload(task, destPath)
 		return m.runRetryLoop(ctx, dlCtx, task, destPath)
 	})
 	if terr != nil {
@@ -1644,6 +1646,28 @@ func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 //   - 租户 Scope：account 已 commitUp 该字节 → 按磁盘真值 reconcile（减量 Adjust）。
 //
 // 磁盘侧由调用方删文件。account 保留（重下继续复用同一 account，增量 commit）。
+// discardTaskOutputForRedownload 丢弃重下前的旧产物，并**按账户权威记录**回拨租户 Scope 占用。
+//
+// 金额取自账户自身（ReleaseAllCommitted）⇒ 调用方无从传错尺寸（旧路径传闭包捕获的旧
+// result.Size，动态源下与实际 committed 不符 ⇒ 少释放 ⇒ 幽灵占用 ⇒ 假 507）。
+// **fail-closed 顺序**：确认产物消失后才回拨（删除失败则不回拨，避免「账本已减而字节仍在」；
+// 该占用由任务终结路径统一释放）。**不回拨全局占位**（ReservedSize）：任务仍在运行、产物将被
+// 重下重建，占位是本任务的磁盘上界，应保持。
+func (m *CloudDownloadManager) discardTaskOutputForRedownload(task *CloudTask, destPath string) {
+	rerr := m.removeFileOrDefault()(destPath)
+	if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		m.logger.Warn("重下前删除旧产物失败，不回拨账本（任务终结时统一释放）",
+			"task_id", task.ID, "error", rerr)
+		return
+	}
+	if task.account == nil {
+		return
+	}
+	if released := task.account.ReleaseAllCommitted(); released > 0 {
+		m.logger.Info("重下前回拨账本（账户权威记录）", "task_id", task.ID, "released", released)
+	}
+}
+
 func (m *CloudDownloadManager) releaseDownloadedBytes(task *CloudTask, size int64) {
 	if size <= 0 {
 		return

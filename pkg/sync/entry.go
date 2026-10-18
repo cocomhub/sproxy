@@ -71,9 +71,12 @@ type WriteIfAbsent interface { // NOSONAR: S8196 — 能力接口（非 -er 角�
 // 卷后端实现则转存前预分配空间检查——成功返回 nil；不足返回 error（fail-closed 不转存）。
 // 未实现 = 卷无独立配额概念（由用户配额/全局账本管），转存侧跳过卷配额检查。
 //
-// 机制化：使用方（pkg/cloud 转存）只查询该能力，不在调用侧硬编码每类卷的容量语义；
-// 外部网盘卷（s3/baidupcs 等）在各自后端实现（有配额 API），本地/加密卷可依赖
-// Volume.Capacity（装配层）或全局账本。
+// 机制化：使用方（pkg/cloud 转存）只查询该能力，不在调用侧硬编码每类卷的容量语义。
+// **实现位置**：卷容量层 `volume/capacity.CapacityFS`（用本卷池的可用额度做只读预检）——
+// 它是所有卷（本地/加密/外部网盘）装配后共同的容量权威；外部后端若自带配额 API 可自行
+// 实现本接口，CapacityFS 会**优先**采用其判断，未实现/ErrUnsupported 时回落到本卷池。
+// （注：此前文档称「外部网盘卷在各自后端实现」并不成立——实测 s3/baidupcs/pikpak 均未实现，
+// 装饰器只转发 ⇒ 调用点恒得 ErrUnsupported ⇒ 预检形同不存在；2026-10-18 已由容量层落地。）
 type ReserveSpace interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
 	ReserveSpace(ctx context.Context, relPath string, size int64) error
 }

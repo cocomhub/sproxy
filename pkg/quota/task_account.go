@@ -88,6 +88,24 @@ func (a *TaskAccount) ReleaseCommitted(n int64) {
 	a.committed -= n
 }
 
+// ReleaseAllCommitted 释放本账户**全部**已确认占用并返回释放量（重下前清账：磁盘=0 ⇒ 账本=0）。
+//
+// 这是「丢弃本任务产物」场景的**唯一权威**入口：金额取自账户自身记录，调用方无需（也无法）
+// 传尺寸——传外部尺寸（如下载结果 result.Size）在**动态源**下会与实际 committed 不符：
+// 少释放 ⇒ 幽灵占用（后续同租户下载假 507）；多释放 ⇒ 短时超限（ReleaseCommitted 只钳上界，
+// 钳不住偏小）。幂等：committed<=0 空操作返回 0。
+func (a *TaskAccount) ReleaseAllCommitted() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := a.committed
+	if n <= 0 {
+		return 0
+	}
+	a.scope.ReleaseUsage(n)
+	a.committed = 0
+	return n
+}
+
 // NewTaskAccountReconcile 以「0 预留」创建 account（磁盘真值 reconcile 路径：
 // failTask 手动落盘/旧语义测试场景——字节已在盘上，无需 reserve，直接 AdjustCommitted）。
 // 与 NewTaskAccount 区别：不调 reserveUp（0 预留不会因租户上限被拒）。

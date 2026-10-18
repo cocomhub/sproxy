@@ -621,12 +621,33 @@ func (f *CapacityFS) Link(ctx context.Context, from, to string) error {
 	return lk.Link(ctx, from, to)
 }
 
-// ReserveSpace 委托 inner（卷自管理容量预检；inner 未实现 → ErrUnsupported）。
+// ReserveSpace 卷容量预检（写前 fail-closed；只读，不预留——权威预留由写路径 TryAdd 完成）。
+//
+// 三级判定（独立审核 P2，2026-10-18 根因修复）：
+//  1. 内层实现（真实网盘后端的配额 API）⇒ 用它的**权威**判断；它返回 ErrUnsupported 才继续；
+//  2. 否则用**本层池**的只读可用额度（Capacity − Used）判断——本层就是该卷容量的权威，
+//     这是「本地/加密卷依赖 Volume.Capacity」的实际落地（此前只转发 ⇒ 恒 ErrUnsupported ⇒
+//     调用点静默跳过 ⇒ 文档宣称的「双层配额预检」实际是 no-op）；
+//  3. 无池/无上限（Capacity<=0）= 卷无独立配额概念 ⇒ ErrUnsupported（调用方跳过）。
+//
+// 注：size 为**预期落盘**大小；调用方对压缩/加密后尺寸未知时传源大小 ⇒ 偏保守（fail-closed）。
 func (f *CapacityFS) ReserveSpace(ctx context.Context, p string, size int64) error {
 	if rs, ok := f.inner.(syncpkg.ReserveSpace); ok {
-		return rs.ReserveSpace(ctx, p, size)
+		if err := rs.ReserveSpace(ctx, p, size); !errors.Is(err, syncpkg.ErrUnsupported) {
+			return err
+		}
 	}
-	return fmt.Errorf("capacity: 底层未实现 ReserveSpace: %w", syncpkg.ErrUnsupported)
+	capacity := f.counter.Capacity()
+	if capacity <= 0 {
+		return fmt.Errorf("capacity: 卷 %q 无容量上限（无卷级配额概念）: %w", p, syncpkg.ErrUnsupported)
+	}
+	if size <= 0 {
+		return nil
+	}
+	if left := capacity - f.counter.Used(); left < size {
+		return fmt.Errorf("capacity: 卷 %q 容量不足（可用 %d < 需要 %d）", p, left, size)
+	}
+	return nil
 }
 
 // IsLocalVolume 委托 inner（未实现默认外部）。
