@@ -113,7 +113,7 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 	if err != nil {
 		return nil, fmt.Errorf("shardseal: stat 源文件失败: %w", err)
 	}
-	return encryptShards(data, srcMeta{name: filepath.Base(srcFile), size: st.Size(), mtime: st.ModTime(), mode: uint32(st.Mode().Perm()), path: srcFile}, outDir, secret, policy, padTarget, v)
+	return encryptShards(data, srcMeta{name: filepath.Base(srcFile), size: st.Size(), mtime: st.ModTime(), mode: uint32(st.Mode().Perm()), path: srcFile}, blobDest{outDir: outDir}, secret, policy, padTarget, v)
 }
 
 // EncryptShardsBytes 把已读入内存的明文加密为分块 + meta（EncryptShards 的内存变体）。
@@ -122,7 +122,54 @@ func EncryptShards(srcFile, outDir string, secret []byte, policy BlockPolicy, pa
 // 与临时源变体行为一致——临时源以 sanitizeName 命名、EncryptShards 取 filepath.Base）。
 // 语义与 EncryptShards 相同（统一落盘格式、meta 名三段锚定最终 blob）。
 func EncryptShardsBytes(data []byte, origName, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
-	return encryptShards(data, srcMeta{name: origName, size: int64(len(data)), mtime: time.Now(), mode: 0o600}, outDir, secret, policy, padTarget, v)
+	return encryptShards(data, srcMeta{name: origName, size: int64(len(data)), mtime: time.Now(), mode: 0o600}, blobDest{outDir: outDir}, secret, policy, padTarget, v)
+}
+
+// ChunkSink 是**单个数据分块 blob 的落点**（EncryptShardsReaderTo 参数）：每产出一块即调用一次，
+// name 为该块最终 blob 名（三段哈希命名，与落盘变体逐字节一致）、blob 为该块密文字节。
+// 生命周期：blob 仅在调用期间有效——sink 若要保留（如异步上传）须自行拷贝。
+//
+// 用途（块级交错，docs/roadmap.md ①-附）：调用方可在收到每块时立即上传并丢弃本地副本
+// ⇒ 本地临时峰值从 O(整个文件) 降到 **O(1 块)**；分块命名/布局/meta 与落盘变体完全一致。
+type ChunkSink func(name string, blob []byte) error
+
+// blobDest 是加密产物的落点（两条形态，同一实现）：
+//   - outDir 非空（EncryptShards/Bytes/Reader）：分块与 meta 都写入该目录（既有行为，逐字节不变）；
+//   - sinkMode（EncryptShardsReaderTo）：**数据分块**逐块交给 chunkSink（不落盘；chunkSink 为 nil
+//     时只取 meta 信息的调用方 ⇒ 分块也不落盘），meta **不落盘**——它的密文以
+//     `EncryptionResult.MetaBlob`（+ MetaName）返回给调用方（加密卷写路径本就在内存持有 meta
+//     再自行上传，meta 的临时落盘是冗余 I/O）。
+type blobDest struct {
+	outDir    string
+	chunkSink ChunkSink
+	sinkMode  bool
+}
+
+// writeChunk 落一个数据分块（sink 形态 = 交调用方/丢弃，落盘形态 = 写 outDir）。
+func (d blobDest) writeChunk(name string, blob []byte) error {
+	if d.sinkMode {
+		if d.chunkSink == nil {
+			return nil // 只取 meta 信息的调用方：分块不落盘也不交付
+		}
+		return d.chunkSink(name, blob)
+	}
+	return writeBlobFile(d.outDir, name, blob)
+}
+
+// writeMeta 落 meta blob（sink 形态 = 不落盘，经 EncryptionResult.MetaBlob 返回）。
+func (d blobDest) writeMeta(name string, blob []byte) error {
+	if d.sinkMode {
+		return nil
+	}
+	return writeBlobFile(d.outDir, name, blob)
+}
+
+// writeBlobFile 把 blob 写为 outDir/name（0600）。
+func writeBlobFile(outDir, name string, blob []byte) error {
+	if err := os.WriteFile(filepath.Join(outDir, name), blob, 0o600); err != nil {
+		return fmt.Errorf("shardseal: 写 %s 失败: %w", name, err)
+	}
+	return nil
 }
 
 // EncryptShardsReader 流式分块加密：src 提供整文件随机读（可 seek），逐块 ReadAt + 流式哈希，
@@ -131,6 +178,19 @@ func EncryptShardsBytes(data []byte, origName, outDir string, secret []byte, pol
 // src 须实现 io.Seeker / io.ReaderAt（multipart.File、*os.File、SectionReader 等）；
 // 纯流不可 seek 时回退 io.ReadAll（功能不变，仅内存不省）。
 func EncryptShardsReader(src io.Reader, size int64, origName, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
+	return encryptShardsReaderTo(src, size, origName, blobDest{outDir: outDir}, secret, policy, padTarget, v)
+}
+
+// EncryptShardsReaderTo 与 EncryptShardsReader 同构，但**数据分块 blob 不落盘**：逐块交给 sink
+// （块级交错，见 ChunkSink），meta blob 不落盘、经 `EncryptionResult.MetaBlob`/`MetaName` 返回。
+// 分块命名、密文字节、meta 内容与落盘变体**逐字节一致**（同一实现：落盘变体 = 写 outDir 的 sink）。
+// sink 为 nil 时等价于「不落任何 blob」（只产出 meta 信息，供只需元数据的调用方）。
+func EncryptShardsReaderTo(src io.Reader, size int64, origName string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion, sink ChunkSink) (*EncryptionResult, error) {
+	return encryptShardsReaderTo(src, size, origName, blobDest{chunkSink: sink, sinkMode: true}, secret, policy, padTarget, v)
+}
+
+// encryptShardsReaderTo 是流式两个公开入口的共享实现（落盘形态 / sink 形态同一代码路径）。
+func encryptShardsReaderTo(src io.Reader, size int64, origName string, dest blobDest, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
 	ra, ok := src.(io.ReaderAt)
 	if !ok {
 		if s, ok2 := src.(io.Seeker); ok2 {
@@ -140,10 +200,10 @@ func EncryptShardsReader(src io.Reader, size int64, origName, outDir string, sec
 			if rerr != nil {
 				return nil, fmt.Errorf("shardseal: 读源失败: %w", rerr)
 			}
-			return encryptShards(data, srcMeta{name: origName, size: size, mtime: time.Now(), mode: 0o600}, outDir, secret, policy, padTarget, v)
+			return encryptShards(data, srcMeta{name: origName, size: size, mtime: time.Now(), mode: 0o600}, dest, secret, policy, padTarget, v)
 		}
 	}
-	return encryptShardsAt(ra, size, srcMeta{name: origName, size: size, mtime: time.Now(), mode: 0o600}, outDir, secret, policy, padTarget, v)
+	return encryptShardsAt(ra, size, srcMeta{name: origName, size: size, mtime: time.Now(), mode: 0o600}, dest, secret, policy, padTarget, v)
 }
 
 // readSeekerFrom 把 io.Seeker 同时兼 io.Reader 的实现（如 multipart.File / *os.File
@@ -178,7 +238,7 @@ type srcMeta struct {
 // encryptShards 是 EncryptShards 系列的核心（共享实现，控制认知复杂度 #727）。
 // data 为整文件明文；src 为逻辑元数据（来源变体提供：文件变体取 os.Stat，内存变体取
 // len/调用方）。
-func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
+func encryptShards(data []byte, src srcMeta, dest blobDest, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
 	blocksPlanner, blockletsPlanner := policy.Planner()
 	if blocksPlanner == nil || blockletsPlanner == nil {
 		return nil, fmt.Errorf("shardseal: 未知分块策略 %q 或 blocklet 模式 %q", policy.Mode, policy.BlockletMode)
@@ -219,7 +279,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner, srcPath: src.path}, data, key, salt, group, outDir, v)
+	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner, srcPath: src.path}, data, key, salt, group, dest, v)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -236,7 +296,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 		}
 	}
 
-	metaName, merr := encryptWriteMeta(res, key, salt, group, outDir, padTarget)
+	metaName, merr := encryptWriteMeta(res, key, salt, group, dest, padTarget)
 	if merr != nil {
 		return nil, merr
 	}
@@ -247,7 +307,7 @@ func encryptShards(data []byte, src srcMeta, outDir string, secret []byte, polic
 // encryptShardsAt 流式分块加密（EncryptShardsReader 的核心）：src 提供整文件随机读。
 // 先一次流式哈希（io.Copy，O(1) 内存）得整文件 SHA256+组签，再逐块 ReadAt 加密写盘，
 // 内存峰值 O(单块上限)。磁盘格式、meta 与块布局/命名与 encryptShards 完全一致（向后兼容）。
-func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, outDir string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
+func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, dest blobDest, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion) (*EncryptionResult, error) {
 	blocksPlanner, blockletsPlanner := policy.Planner()
 	if blocksPlanner == nil || blockletsPlanner == nil {
 		return nil, fmt.Errorf("shardseal: 未知分块策略 %q 或 blocklet 模式 %q", policy.Mode, policy.BlockletMode)
@@ -293,7 +353,7 @@ func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, outDir strin
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunksAt(&chunkPlan{blocks: blocks, blp: blockletsPlanner}, &sectionReader{ra: src, sz: size}, key, salt, group, outDir, v)
+	names, chunkInfos, cerr := encryptWriteChunksAt(&chunkPlan{blocks: blocks, blp: blockletsPlanner}, &sectionReader{ra: src, sz: size}, key, salt, group, dest, v)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -305,7 +365,7 @@ func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, outDir strin
 				"file", srcMetaV.name, "size", srcMetaV.size, "failures", len(fails))
 		}
 	}
-	metaName, merr := encryptWriteMeta(res, key, salt, group, outDir, padTarget)
+	metaName, merr := encryptWriteMeta(res, key, salt, group, dest, padTarget)
 	if merr != nil {
 		return nil, merr
 	}
@@ -335,7 +395,7 @@ func (s *sectionReader) Read(p []byte) (int, error) {
 // 预扫描哈希给定，blob 名与 encryptShards 相同）。src 为 io.ReaderAt（已由 EncryptShardsReader
 // 归一为 ReaderAt）；PlanBlocklets 收到 *sectionReader 同现双能力（Reader+ReaderAt）。
 // video-keyframe parseOnce 需全文扫描，本期由上层走 ReadAll 回退，本路径不动 keyframe。
-func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, group, outDir string, v AlgoVersion) ([]string, []ChunkInfo, error) {
+func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, group string, dest blobDest, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo
 	for _, b := range plan.blocks {
@@ -351,7 +411,7 @@ func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, gr
 		if eerr != nil {
 			return nil, nil, eerr
 		}
-		name, nerr := chunkBlobNameAndWrite(enc, group, outDir)
+		name, nerr := chunkBlobNameAndWrite(enc, group, dest)
 		if nerr != nil {
 			return nil, nil, nerr
 		}
@@ -402,7 +462,7 @@ func planSrcSize(plan *chunkPlan) int64 {
 // [R][8B 密文长][salt][nonce][ct+tag]。meta 名三段锚定最终 blob：首/末段 = 同一加密
 // meta blob 的两窗口（offset 0/16）base62，中段 = HMAC 分组盲签——磁盘上不出现明文
 // meta JSON，也不出现 meta 明文哈希（明文哈希可被内容存在性探测，匿名性收敛）。
-func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group, outDir string, padTarget int) (string, error) {
+func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group string, dest blobDest, padTarget int) (string, error) {
 	metaJSON, err := json.Marshal(res.Meta)
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 序列化失败: %w", err)
@@ -420,8 +480,8 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group, outDir str
 	if nerr != nil {
 		return "", nerr
 	}
-	if err := os.WriteFile(filepath.Join(outDir, metaName), metaBlob, 0o600); err != nil {
-		return "", fmt.Errorf("shardseal: 写 meta %s 失败: %w", metaName, err)
+	if werr := dest.writeMeta(metaName, metaBlob); werr != nil {
+		return "", werr
 	}
 	return metaName, nil
 }
@@ -430,14 +490,14 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group, outDir str
 // 抽方法控制认知复杂度 #727 gocognit=15）。首尾段 = 同一加密 blob 的不同窗口
 // （offset 0/16）base62 编码，中段 = HMAC 分组盲签；ChunkName 段长非法返回 error
 // （不 panic，fail-closed）。
-func chunkBlobNameAndWrite(enc []byte, group, outDir string) (string, error) {
+func chunkBlobNameAndWrite(enc []byte, group string, dest blobDest) (string, error) {
 	encA, encB := Hash48Pair(enc, 0, 16) // 单次 SHA-256 取两窗口（大块省一次哈希）
 	name, nerr := ChunkName(encA, group, encB)
 	if nerr != nil {
 		return "", nerr
 	}
-	if werr := os.WriteFile(filepath.Join(outDir, name), enc, 0o600); werr != nil {
-		return "", fmt.Errorf("shardseal: 写分块 %s 失败: %w", name, werr)
+	if werr := dest.writeChunk(name, enc); werr != nil {
+		return "", werr
 	}
 	return name, nil
 }
@@ -473,7 +533,7 @@ func injectPlannerSrcPath(plan *chunkPlan, blockOffset int64) {
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
 // 分块处理，抽方法控制认知复杂度 #727 gocognit=15）。Index 为 0 基顺序号；每块按
 // blocklet 规划细分并记录 BlockletInfo（随机访问索引）。
-func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, outDir string, v AlgoVersion) ([]string, []ChunkInfo, error) {
+func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group string, dest blobDest, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo
 	for _, b := range plan.blocks {
@@ -489,7 +549,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, o
 		}
 		// 新命名：首尾段 = 同一加密 blob 的不同窗口（offset 0/16）base62 编码，无明文哈希外泄；
 		// 中段 = HMAC 分组盲签（同文件共享）。注意 ChunkName 签名 (encA, group, encB)。
-		name, nerr := chunkBlobNameAndWrite(enc, group, outDir)
+		name, nerr := chunkBlobNameAndWrite(enc, group, dest)
 		if nerr != nil {
 			return nil, nil, nerr
 		}

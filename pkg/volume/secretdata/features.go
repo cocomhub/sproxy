@@ -111,15 +111,18 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, wc writeCtx, key, 
 // writeFileDedupMiss 池未命中：单分块加密，分块上传到池容器 + meta 上传到自身容器；
 // 锁内登记池条目（refs=1）。并发未命中（同内容双首写）时保留各自私有分块，不覆盖他人。
 func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key, dir string, mt int64) error {
-	o, chunkBytes, err := s.encryptContentSingle(wc.data, wc.rel)
-	if err != nil {
-		return err
+	// 本地 staging：单分块密文目录（自管记账，与主写路径同口径）——去重池 blob 先落本地再上传
+	// （与常规分块同口径：经 uploadLocalChunk 复用调用方暂存路径）。
+	tmp, cleanup, terr := s.dedupStagingDir(ctx, int64(len(wc.data)))
+	if terr != nil {
+		return terr
+	}
+	defer cleanup()
+	o, chunkPath, uerr := s.encryptAndUploadDedupChunk(ctx, wc, dir, tmp, mt)
+	if uerr != nil {
+		return uerr
 	}
 	chunkName := o.ChunkNames[0]
-	chunkPath := path.Join(dir, chunkName)
-	if werr := s.uploadBlob(ctx, chunkPath, chunkBytes, mt); werr != nil {
-		return fmt.Errorf("secretdata: 上传去重分块失败: %w", werr)
-	}
 	meta := o.Meta
 	meta.Original.Name = path.Base(wc.rel)
 	meta.Original.MTime = mtimeString(wc.mtime)
@@ -259,35 +262,51 @@ func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt
 	return s.inner.WriteFile(ctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt)
 }
 
-// encryptContentSingle 把整文件内容按单分块策略加密，返回 EncryptionResult 与该分块
-// 字节（去重池 blob 载体；单分块 OrigSHA256 == 整文件内容哈希）。走 EncryptShardsBytes
-// 内存变体（Imp-2 部分修复：不再写临时源 + 二次整读，峰值 1× 文件）。
-func (s *SecretdataFS) encryptContentSingle(data []byte, rel string) (*shardseal.EncryptionResult, []byte, error) {
-	if len(data) == 0 {
-		return nil, nil, fmt.Errorf("secretdata: 空内容不可去重")
+// dedupStagingDir 为去重写路径准备本地临时目录（自管 staging 配额记账），返回释放函数
+// （幂等：释放配额 + 删目录）。
+func (s *SecretdataFS) dedupStagingDir(ctx context.Context, size int64) (string, func(), error) {
+	release, rerr := s.stagingReserve(ctx, size)
+	if rerr != nil {
+		return "", nil, rerr
 	}
-	// 本地 staging 配额（自管记账，与主写路径同口径）。
-	releaseStaging, sres := s.stagingReserve(context.Background(), int64(len(data)))
-	if sres != nil {
-		return nil, nil, sres
+	tmp, terr := os.MkdirTemp(s.temp, "chunks-dedup-*")
+	if terr != nil {
+		release()
+		return "", nil, fmt.Errorf("secretdata: 创建去重临时目录失败: %w", terr)
 	}
-	defer releaseStaging()
-	tmp, err := os.MkdirTemp(s.temp, "chunks-dedup-*")
+	return tmp, func() { release(); _ = os.RemoveAll(tmp) }, nil
+}
+
+// encryptAndUploadDedupChunk 把去重整文件内容按单分块加密（落 tmp）并上传到池容器 dir
+// （经既有暂存复用机制交付本地路径 ⇒ 内层零二次拷贝），返回加密结果与池内底层路径。
+func (s *SecretdataFS) encryptAndUploadDedupChunk(ctx context.Context, wc writeCtx, dir, tmp string, mt int64) (*shardseal.EncryptionResult, string, error) {
+	o, chunkLocal, err := s.encryptContentSingle(wc.data, wc.rel, tmp)
 	if err != nil {
-		return nil, nil, err
+		return nil, "", err
 	}
-	defer os.RemoveAll(tmp)
+	uploaded := []string{}
+	if werr := s.uploadLocalChunk(ctx, dir, o.ChunkNames[0], chunkLocal, mt, &uploaded); werr != nil {
+		return nil, "", fmt.Errorf("secretdata: 上传去重分块失败: %w", werr)
+	}
+	return o, path.Join(dir, o.ChunkNames[0]), nil
+}
+
+// encryptContentSingle 把整文件内容按单分块策略加密，分块写入调用方给定的 tmp 目录（调用方负责
+// 临时目录生命周期与 staging 配额），返回 EncryptionResult 与该单块分块的**本地路径**
+// （去重池 blob 载体 / parity 密文；单分块 OrigSHA256 == 整文件内容哈希）。
+// 走 EncryptShardsBytes 内存变体（Imp-2 部分修复：不再写临时源 + 二次整读，峰值 1× 文件），
+// 上传一律经 uploadLocalChunk 复用调用方暂存路径（不把整块读进内存再交 reader）。
+func (s *SecretdataFS) encryptContentSingle(data []byte, rel, tmp string) (*shardseal.EncryptionResult, string, error) {
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("secretdata: 空内容不可单块加密")
+	}
 	bmin := min(int64(len(data)), int64(16))
 	policy := shardseal.BlockPolicy{Mode: "random", Min: int64(len(data)), Max: int64(len(data)), BlockletMin: bmin, BlockletMax: int64(len(data))}
 	out, err := shardseal.EncryptShardsBytes(data, sanitizeName(rel), tmp, s.secret, policy, s.metaPadTarget(), s.algoVer)
 	if err != nil {
-		return nil, nil, fmt.Errorf("secretdata: 去重单块分块加密失败: %w", err)
+		return nil, "", fmt.Errorf("secretdata: 单块分块加密失败: %w", err)
 	}
-	blob, rerr := os.ReadFile(filepath.Join(tmp, out.ChunkNames[0]))
-	if rerr != nil {
-		return nil, nil, rerr
-	}
-	return out, blob, nil
+	return out, filepath.Join(tmp, out.ChunkNames[0]), nil
 }
 
 // encryptMetaBlob 把 meta 明文加密为统一格式 blob 并锚定其名字（三段哈希真实，含 padding）。

@@ -6,6 +6,8 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // 模拟百度秒传索引的 md5 语义，非安全用途
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -439,4 +441,222 @@ func TestDifferential_LocalVsExternalTarget(t *testing.T) {
 	if lic != lwb {
 		t.Errorf("内部 staging 拷贝 %d 字节 ≠ 普通写字节 %d ⇒ 有分块被内层二次拷贝（未复用暂存）✗", lic, lwb)
 	}
+}
+
+// fakeRapidFS 在 fakeRemoteFS 之上模拟**百度网盘 putAttempt 语义**（本轮差分扩展）：
+// 多分片上传后远端 md5 **非权威**（`MD5Unreliable`）⇒ ETag 复核不匹配 ⇒ **秒传（RapidUpload）
+// 刷新**（读**本地产物**算 md5/分块 md5；命中才把远端 md5 刷新为权威整文件 md5）⇒ 再次复核。
+// 这正是 docs/roadmap.md ①-附 的领域约束：checksum 只在秒传命中后收敛。
+//
+// rapidIndex=false 模拟「秒传未命中」（内容不在秒传索引）⇒ 有界重试耗尽 ⇒ 报错（fail-closed）。
+type fakeRapidFS struct {
+	*fakeRemoteFS
+	rapidIndex bool
+
+	rmu          sync.Mutex
+	uploads      int               // 真正发生的传输次数（未命中秒传才 +1）
+	uploadBytes  int64             // 真正传输的字节
+	refreshHits  int               // 秒传刷新命中次数
+	refreshMiss  int               // 秒传刷新未命中次数
+	refreshReads int               // 刷新时读**本地产物**的次数
+	refreshErr   error             // 刷新时读本地产物失败（产物被提前删除）
+	auth         map[string]string // 远端**权威** md5（秒传刷新命中后写入；缺失 = 非权威）
+}
+
+func newFakeRapidFS(rapidIndex bool) *fakeRapidFS {
+	return &fakeRapidFS{fakeRemoteFS: newFakeRemoteFS(true, true), rapidIndex: rapidIndex}
+}
+
+// WriteFile 模拟「存在性检查 → 上传 → ETag 复核 → 不匹配则秒传刷新 → 再复核」，最多 3 轮。
+// 每轮都必须能重读调用方交付的本地路径（md5/分块 md5 与刷新都用它）。
+func (f *fakeRapidFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
+	sp, _ := syncpkg.StagedLocalPathFrom(ctx)
+	if sp == "" {
+		// 内存态写（文件 meta / 目录 meta 无本地路径，设计如此）：走普通上传，不参与秒传收敛。
+		return f.fakeRemoteFS.WriteFile(ctx, key, p, r, size, mtime)
+	}
+	content, err := os.ReadFile(sp)
+	if err != nil {
+		f.rmu.Lock()
+		if f.refreshErr == nil {
+			f.refreshErr = err
+		}
+		f.rmu.Unlock()
+		return fmt.Errorf("fakeRapidFS: 读本地产物失败: %w", err)
+	}
+	localMD5 := md5Hex(content)
+	for attempt := 1; attempt <= 3; attempt++ {
+		// ① 存在性检查：秒传/ETag 一致 ⇒ 直接完成（零传输）。
+		if ok, e := f.authoritative(p, localMD5); e != nil {
+			return e
+		} else if ok {
+			return nil
+		}
+		// ② 上传（模拟多分片：远端 md5 非权威）。
+		if err := f.WriteFromStagedPath(ctx, p, sp, size, mtime); err != nil {
+			return err
+		}
+		f.rmu.Lock()
+		f.uploads++
+		f.uploadBytes += int64(len(content))
+		f.rmu.Unlock()
+		// ③ ETag 复核：非权威 ⇒ 秒传刷新（重读本地产物）。
+		f.rmu.Lock()
+		f.refreshReads++
+		f.rmu.Unlock()
+		if _, rerr := os.ReadFile(sp); rerr != nil {
+			f.rmu.Lock()
+			if f.refreshErr == nil {
+				f.refreshErr = rerr
+			}
+			f.rmu.Unlock()
+			return fmt.Errorf("fakeRapidFS: 秒传刷新读本地产物失败（产物已清）: %w", rerr)
+		}
+		if f.rapidIndex {
+			// 内容刚上传 ⇒ 秒传索引可命中 ⇒ 远端 md5 刷新为权威值 ⇒ 下一轮复核一致。
+			f.rmu.Lock()
+			f.refreshHits++
+			f.rmu.Unlock()
+			f.setAuthoritative(p, localMD5)
+			continue
+		}
+		f.rmu.Lock()
+		f.refreshMiss++
+		f.rmu.Unlock()
+	}
+	return fmt.Errorf("fakeRapidFS: 秒传未命中且复核不匹配超过 3 次（fail-closed）")
+}
+
+func (f *fakeRapidFS) authoritative(p, wantMD5 string) (bool, error) {
+	f.rmu.Lock()
+	defer f.rmu.Unlock()
+	md5s, ok := f.auth[p]
+	if !ok {
+		return false, nil
+	}
+	return md5s == wantMD5, nil
+}
+
+func (f *fakeRapidFS) setAuthoritative(p, md5v string) {
+	f.rmu.Lock()
+	defer f.rmu.Unlock()
+	if f.auth == nil {
+		f.auth = map[string]string{}
+	}
+	f.auth[p] = md5v
+}
+
+// md5Hex 计算内容 md5（**仅模拟百度秒传索引语义**，非安全用途）。
+func md5Hex(b []byte) string {
+	h := md5.New() //nolint:gosec // 模拟百度秒传索引的 md5，非安全用途
+	_, _ = h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// TestDifferential_RapidUploadConvergence 是**秒传收敛**场景的最小差分扩展（docs/roadmap.md
+// ①-附）：同一 512KiB 多分块对象分别写「本地卷 target（对照组）」与「秒传型外部 target
+// （fake，模拟百度 putAttempt：多分片上传后 md5 非权威 → ETag 不匹配 → 秒传刷新 → 权威 md5）」。
+//
+// 断言（同时锁定本轮交错上传的三条性质）：
+//
+//	① **功能一致**：读回内容/尺寸与对照组逐项一致；
+//	② **秒传按块刷新**：每个分块都以**本地产物**为源交付（暂存复用），刷新命中次数 == 传输次数
+//	   ⇒ 无整文件重传、无二次落 staging；且刷新读本地产物**从未失败**（产物在内层调用期间在场）；
+//	③ **本地临时峰值**：写期间本地分块副本数峰值 ≤ 1（**O(1 块)**，而非 O(整个文件)）。
+//
+// 变异验证：撤销交错（分块全部先落 temp）⇒ ③ 的峰值断言必红；分块改回内存交付（不交本地路径）
+// ⇒ ② 的暂存复用/刷新断言必红。
+func TestDifferential_RapidUploadConvergence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte("rapid-upload-convergence-"), 20*1024) // 500KiB（多分块）
+	tempDir := t.TempDir()
+	rapid := newFakeRapidFS(true)
+	probe := &interleaveProbeFS{FS: rapid, tempDir: tempDir, stageReads: 1}
+	opts := Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		TempDir:   tempDir,
+		Block:     shardseal.BlockPolicy{Min: 32 << 10, Max: 32 << 10},
+	}
+
+	// 对照组：本地卷 target。
+	localFS, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil), opts)
+	if err != nil {
+		t.Fatalf("NewFS(local): %v", err)
+	}
+	if werr := localFS.WriteFile(ctx, syncpkg.LogicalKey{}, "d/f.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
+		t.Fatalf("WriteFile(local): %v", werr)
+	}
+	want := readAll(t, localFS, ctx, "d/f.bin")
+
+	// 实验组：秒传型外部 target。
+	rapidFS, err := NewFS(probe, opts)
+	if err != nil {
+		t.Fatalf("NewFS(rapid): %v", err)
+	}
+	if werr := rapidFS.WriteFile(ctx, syncpkg.LogicalKey{}, "d/f.bin", bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
+		t.Fatalf("WriteFile(rapid): %v", werr)
+	}
+	got := readAll(t, rapidFS, ctx, "d/f.bin")
+	if !bytes.Equal(got, want) || !bytes.Equal(got, payload) {
+		t.Fatalf("功能不一致：实验组 %d 字节 vs 对照组 %d 字节", len(got), len(want))
+	}
+
+	writes, maxLocalFiles, stagedWrites, _, _, entries, stageReadErr := probe.snapshot()
+	rapid.rmu.Lock()
+	uploads, uploadBytes, hits, misses, refreshReads, refreshErr := rapid.uploads, rapid.uploadBytes, rapid.refreshHits, rapid.refreshMiss, rapid.refreshReads, rapid.refreshErr
+	rapid.rmu.Unlock()
+	t.Logf("实验组实测：内层写 %d 次（分块经暂存复用 %d 次）· 本地分块副本峰值 %d（逐次 %v）", writes, stagedWrites, maxLocalFiles, entries)
+	t.Logf("秒传收敛实测：真实传输 %d 次/%d 字节 · 刷新命中 %d · 未命中 %d · 刷新读本地产物 %d 次（错误=%v）",
+		uploads, uploadBytes, hits, misses, refreshReads, refreshErr)
+
+	if stageReadErr != nil || refreshErr != nil {
+		t.Fatalf("内层/秒传刷新读本地产物失败（产物未在内层调用期间保持在场）: %v / %v", stageReadErr, refreshErr)
+	}
+	if misses != 0 || hits == 0 {
+		t.Fatalf("秒传刷新应全部命中（hits=%d misses=%d）⇒ 未收敛 ✗", hits, misses)
+	}
+	if hits != uploads {
+		t.Fatalf("秒传刷新命中 %d != 真实传输 %d ⇒ 存在未刷新/重复传输 ✗", hits, uploads)
+	}
+	if uploadBytes != int64(len(payload)) && uploadBytes < int64(len(payload)) {
+		t.Fatalf("真实传输字节 %d 少于明文 %d ⇒ 有分块未上传 ✗", uploadBytes, len(payload))
+	}
+	if maxLocalFiles > 1 {
+		t.Fatalf("本地分块副本峰值 %d ⇒ 未交错（应 O(1 块)）✗ 逐次 %v", maxLocalFiles, entries)
+	}
+}
+
+// TestDifferential_RapidUploadMiss_FailClosed 是**对照组**：秒传**未命中**（内容不在秒传索引）
+// ⇒ 复核恒不匹配 ⇒ 有界重试耗尽 ⇒ 必须 fail-closed（明确错误 + 无半态），绝不静默接受
+// 「内容未必一致」的写（docs/roadmap.md ①-附 §2 ③ 的同型语义）。
+func TestDifferential_RapidUploadMiss_FailClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte("rapid-upload-miss-"), 16*1024)
+	tempDir := t.TempDir()
+	rapid := newFakeRapidFS(false) // 秒传索引不可用 ⇒ 恒未命中
+	probe := &interleaveProbeFS{FS: rapid, tempDir: tempDir, stageReads: 1}
+	rapidFS, err := NewFS(probe, Options{
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, TempDir: tempDir,
+		Block: shardseal.BlockPolicy{Min: 32 << 10, Max: 32 << 10},
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	werr := rapidFS.WriteFile(ctx, syncpkg.LogicalKey{}, "d/f.bin", bytes.NewReader(payload), int64(len(payload)), 0)
+	if werr == nil {
+		t.Fatal("秒传未命中 + 复核不匹配 ⇒ 必须报错（fail-closed）✗")
+	}
+	if st, serr := rapidFS.Stat(ctx, "d/f.bin"); serr != nil || st != nil {
+		t.Fatalf("失败写不得留下半态（Stat=%v err=%v）✗", st, serr)
+	}
+	rapid.rmu.Lock()
+	misses, uploads := rapid.refreshMiss, rapid.uploads
+	rapid.rmu.Unlock()
+	if misses == 0 || uploads == 0 {
+		t.Fatalf("探针失效：未观测到秒传未命中/重试（misses=%d uploads=%d）", misses, uploads)
+	}
+	t.Logf("秒传未命中实测：重试传输 %d 次 · 刷新未命中 %d 次 ⇒ fail-closed（无半态）", uploads, misses)
 }

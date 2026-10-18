@@ -10,7 +10,6 @@ package secretdata
 // parity 段自身按统一 blob 格式加密落盘（独立分块文件），有 secret 即可独立解密。
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -25,7 +24,8 @@ import (
 // writeErasureParity 在写路径为 out 的 ≥2 个数据分块生成 XOR parity 段：
 //  1. 从整文件明文按 meta 分块偏移切出各分块明文；
 //  2. 各分块按 max 长补零对齐 → XORParity 得 parity 明文（maxLen 长）；
-//  3. 单块加密 parity 明文 → 独立分块 blob，上传到底层数据目录；
+//  3. 单块加密 parity 明文 → 独立分块 blob（落在调用方给定的 tmp 目录），经既有暂存复用机制
+//     上传到底层数据目录（见 uploadLocalChunk）；
 //  4. 记录 meta.Parity（FileName/PlainLen/EncSize/ChunkCount），并把上传路径追加到 uploaded。
 //
 // 须在 encryptMetaBlob 之前调用（meta 需含 parity 引用）。非纠错 / 单分块文件跳过。
@@ -34,7 +34,7 @@ import (
 // BlockletTypeParity(0x13)——validateBlocklets 拒绝与已用区间重叠的非数据段，单个 0x13
 // 段会与非空数据区间冲突；parity 语义由 meta.Parity 承载（等价、不误读），0x13 常量保持
 // 预留槽位供未来演化。
-func (s *SecretdataFS) writeErasureParity(ctx context.Context, container string, out *shardseal.EncryptionResult, data []byte, mtime int64, uploaded *[]string) error {
+func (s *SecretdataFS) writeErasureParity(ctx context.Context, container, tmp string, out *shardseal.EncryptionResult, data []byte, mtime int64, uploaded *[]string) error {
 	plains, err := chunkPlainTexts(data, out.Meta.Chunks)
 	if err != nil {
 		return err
@@ -43,19 +43,19 @@ func (s *SecretdataFS) writeErasureParity(ctx context.Context, container string,
 	if perr != nil {
 		return fmt.Errorf("secretdata: parity 计算失败: %w", perr)
 	}
-	enc, blob, berr := s.encryptContentSingle(parity, "parity")
+	enc, local, berr := s.encryptContentSingle(parity, "parity", tmp)
 	if berr != nil {
 		return fmt.Errorf("secretdata: parity 分块加密失败: %w", berr)
 	}
-	p := path.Join(container, enc.ChunkNames[0])
-	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, p, bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
+	// 与数据分块同口径：以**本地分块文件**为源上传，并经 `WithStagedLocalPath` 交内层复用
+	// （内层跨其上传/重试/秒传刷新复用同一路径；源 ∈ 本地文件 ⇒ 零二次拷贝、秒传零重算）。
+	if werr := s.uploadLocalChunk(ctx, container, enc.ChunkNames[0], local, s.blobMTime(mtime), uploaded); werr != nil {
 		return fmt.Errorf("secretdata: 上传 parity %s 失败: %w", enc.ChunkNames[0], werr)
 	}
-	*uploaded = append(*uploaded, p)
 	out.Meta.Parity = &shardseal.ParityInfo{
 		FileName:   enc.ChunkNames[0],
 		PlainLen:   maxLen,
-		EncSize:    int64(len(blob)),
+		EncSize:    enc.Meta.Chunks[0].EncSize,
 		ChunkCount: len(out.Meta.Chunks),
 	}
 	return nil

@@ -1230,3 +1230,27 @@ type LeaderElector interface {
    而不是直接失败（除非源不可重读）。
 4. **不推荐**：长期保留「整份加密文件」✗（峰值 O(file)、崩溃残留、与按需/流式方向相悖；
    且分块存储下**无必要**）。
+
+**实施状态（2026-10-18，块级交错已落地）**：
+
+- ✅ **块级交错上传**：`shardseal.EncryptShardsReaderTo`（新 sink 抽象：分块逐块交调用方、meta 不落盘，
+  以 `EncryptionResult.MetaBlob` 返回）⇒ `secretdata.writeFileStream` 走 sink：**加密一块 → 上传一块 →
+  丢弃**，meta 留到末尾且**内存态**上传。实测（512KiB / 32KiB 块）：本地分块副本峰值 **18 → 1**（O(file) → O(1 块)）。
+  staging 配额预留口径同步改为「单块上界 + meta pad」（`stagingReserveInterleaved`），不再随文件线性增长。
+- ✅ **所有分块上传点统一经 `WithStagedLocalPath`**（`uploadLocalChunk`）：数据分块、**parity**、**dedup**
+  单分块（此前 parity/dedup 走 `bytes.NewReader` 内存交付 ⇒ 内层二次落 staging）。
+- ✅ **回退链**：本地产物不可落盘（临时目录不可用/ENOSPC）或 staging **配额**不足时——源**可重读**
+  （本地文件 / 已暂存路径，`replayableSourcePath`）⇒ 降级**内存交付**（写仍成功）；源不可重读
+  （管道 / 内存 reader）⇒ **fail-closed**（明确错误，无半态）。内层重试/秒传刷新期间本地产物**必须在场**
+  （生命周期契约：stagedPath 只读，删除一律在内层返回后）——已由「内层多遍读」用例锁定。
+- ✅ **差分用例**：秒传收敛场景（fake 模拟多分片 md5 非权威 → 秒传刷新命中/未命中）+ 本地峰值对照
+  （峰值 ≤ 1 块；未命中 ⇒ fail-closed 无半态）。
+- ⚠️ **已知残余（如实登记）**：
+  1. **崩溃（非错误返回）时远端可能留孤儿块**：交错丢弃后进程崩溃 ⇒ 已上传块无记录 ⇒ 由既有可选 GC/清理兜底
+     （与删除路径的孤儿方向同源，见 `docs/secret-volume.md` §6.2）。
+  2. **内存写路径未交错**（`writeFileEncrypted`：非 seek 源 `io.ReadAll` 后整目录落 temp，本地峰值仍 O(file)；
+     dedup/erasure 走该路径）——未做原因：该路径明文已在内存（内存峰值 O(file) 才是主瓶颈）、且 parity 需全部
+     明文分块；交错需再引入一层 sink 分发且对 erasure/dedup 语义影响面更大。
+  3. **回退链的「重算」（②）落在上层**：本层不做单块重加密（无 per-block 加密 API；重算 = 上层重试整次写，
+     见 `pkg/backup.transferWithRetry`）⇒ 本层保证「源不被消费/销毁 + 失败返回明确错误 + 完整回滚」，
+     使上层重算可行。③ 的判据按设计原文取「源是否**路径**可重读（本地文件/已暂存路径）」。
