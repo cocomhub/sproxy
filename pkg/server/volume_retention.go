@@ -317,6 +317,9 @@ func (h *Handlers) removeVersionFile(tnt *storage.Tenant, owner, rel string, ent
 	if info, err := root.Stat(delRel); err == nil {
 		delSize = info.Size()
 	}
+	// 释放口径与写入/结算**同源**（独立复审「释放≠结算」类根治，2026-10-18）：必须在 Remove
+	// **之前**取卷自报实测足迹——否则对 secretdata（parity + meta pad）少释放 ⇒ 幽灵占用/假 507。
+	delSize = h.fileService().ReleaseChargeFor(tnt, owner, delRel, delSize)
 	if err := root.Remove(delRel); err != nil {
 		return err
 	}

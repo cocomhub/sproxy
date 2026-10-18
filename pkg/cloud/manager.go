@@ -148,7 +148,7 @@ type CloudDownloadConfig struct {
 	AllowPrivate        bool          // 允许私有 IP 下载（仅测试用）
 	DownloadTimeout     time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
 	IdleTimeout         time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
-	MaxRetries          int           // 失败重试次数，默认 10
+	MaxRetries          int           // **总尝试次数**（含首次），默认 10；重试 = MaxRetries−1（runRetryLoop 为 `for attempt := range maxRetries`）
 	RetryDelay          time.Duration // 重试间隔，默认 10s
 	Downloader          string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
 	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；**<=0（含 0/负值/缺省）一律按
@@ -166,8 +166,35 @@ type CloudDownloadConfig struct {
 	ExitDial func(ctx context.Context, addr string) (net.Conn, error)
 }
 
-// cloudReservePlaceholder 未知大小任务的存储占位大小（1 GiB）。
+// cloudReservePlaceholder 未知大小任务的存储占位**上界**（1 GiB）。
 const cloudReservePlaceholder = int64(1024 * 1024 * 1024)
+
+// cloudReservePlaceholderMin 是未知大小任务的占位**下限**（低于此值视为真的没空间）。
+const cloudReservePlaceholderMin = int64(16 * 1024 * 1024)
+
+// placeholderFor 返回未知大小任务的存储占位：取「上界 1 GiB」与「**当前可用空间 / 并发槽**」
+// 的较小值，下限 cloudReservePlaceholderMin。
+//
+// 为何不能是固定 1 GiB（独立审核 P3，2026-10-18）：固定常量**既不是上界也不是紧估计** ✗ ——
+// 批量/组下载（MaxBatchURLs 默认 100）创建 N 条未知大小任务时各占 1 GiB ⇒ 50 GiB 上限下
+// N≥50 即把额度吃光 ⇒ **合法的中小文件下载被 507 拒**（用户可见故障），而占位本就只是估计
+// （完成/失败时按磁盘真值收敛：reconcileReservedSize / stored.ReservedSize = result.Size）。
+// 改为「可用空间按并发分摊」⇒ 单任务不能独占、N 条并发不耗尽额度；可用空间极小时仍由下限
+// 兜住 ⇒ 真正没空间时照旧 fail-closed（507）。
+func (m *CloudDownloadManager) placeholderFor() int64 {
+	placeholder := cloudReservePlaceholder
+	if maxBytes := m.storage.MaxBytes(); maxBytes > 0 {
+		free := maxBytes - m.storage.Usage()
+		slots := max(int64(m.maxConcurrent), 1)
+		if share := free / slots; share < placeholder {
+			placeholder = share
+		}
+	}
+	if placeholder < cloudReservePlaceholderMin {
+		placeholder = cloudReservePlaceholderMin
+	}
+	return placeholder
+}
 
 // ownerVisible 判定任务 owner 对请求者 owner 是否可见（多租户隔离规则，与
 // syncmgr.ownerVisible 一致）：
@@ -255,8 +282,11 @@ type StorageManager interface {
 }
 
 type CloudDownloadManager struct {
-	tasks            map[string]*CloudTask
-	mu               sync.RWMutex
+	tasks map[string]*CloudTask
+	mu    sync.RWMutex
+	// maxConcurrent 是下载并发上限（构造时从配置固化）：placeholderFor 用它把**未知大小任务**的
+	// 占位按「可用空间 / 并发槽」分摊（避免固定 1 GiB 占位在批量创建时吃光额度 ⇒ 虚假 507）。
+	maxConcurrent    int
 	uploadsDir       string
 	tenantFor        TenantResolver   // 按任务 owner 解析租户（空 owner → anonymous）
 	checksumStoreFor ChecksumResolver // 按任务 owner 解析 per-tenant checksum 存储
@@ -466,6 +496,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		volumeFor:           opts.VolumeFor,
 		stagingQuotaFor:     opts.StagingQuotaFor,
 		targetWriteLock:     opts.TargetWriteLock,
+		maxConcurrent:       cfg.MaxConcurrent,
 		targetScopeFor:      opts.TargetQuotaScopeFor,
 		targetPhysChargeFor: opts.TargetPhysChargeFor,
 		integrityLookup:     opts.IntegrityLookup,
@@ -593,12 +624,14 @@ func (m *CloudDownloadManager) TaskDirFor(owner, taskID string) string {
 }
 
 // removeTaskDir 尽力删除 owner 租户下任务文件目录（租户不可用时为空操作）。
-func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) {
+// removeTaskDir 删除任务目录；返回错误供调用方做「删除确认后再归还」（os.RemoveAll 对不存在的
+// 路径返回 nil ⇒ nil 即"确认消失"）。独立复审 P2，2026-10-18：此前恒忽略错误。
+func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) error {
 	dir := m.TaskDirFor(owner, taskID)
 	if dir == "" {
-		return
+		return nil
 	}
-	_ = os.RemoveAll(dir)
+	return os.RemoveAll(dir)
 }
 
 // removeTaskDirWithRetry 删除任务文件目录，并对瞬时占用做有界重试（见 removeWithRetry）。
@@ -648,7 +681,13 @@ func (a *quotaSinkAdapter) Committed() int64 { return a.acc.Committed() }
 func (a *quotaSinkAdapter) Finish(success bool, oldSize int64) {
 	if success {
 		a.acc.ReleaseReserve()
-		a.scope.ReleaseUsage(oldSize)
+		// **必须走 account 的 ReleaseCommitted**（独立复审 P1，2026-10-18）：旧实现只
+		// `a.scope.ReleaseUsage(oldSize)` ⇒ 只回拨 bucket，**不减 acc.committed** ⇒ 账户与 Scope
+		// 分叉（账户恒大于磁盘足迹）。后果：`discardTaskOutputForRedownload` 用账户作「唯一权威」
+		// 回拨时会**多释放**（ReleaseCommittedUp 只钳本层 committed，层内无归属）⇒ 吃掉同桶
+		// 邻居的份额（邻居欠计 ⇒ 短时可越 owner/卷配额，fail-open）。ReleaseCommitted 幂等、
+		// 钳上界，并**同时**回拨 Scope ⇒ 一处收敛、两账同源。
+		a.acc.ReleaseCommitted(oldSize)
 	} else {
 		a.acc.ReleaseReserve()
 	}
@@ -831,9 +870,9 @@ type TransferSpec struct {
 	Volume string `json:"volume"`
 	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<owner>/<taskID>/<filename>）。
 	Path string `json:"path,omitempty"`
-	// OwnerPrefix 是共享卷的 owner 隔离前缀（服务端按卷共享性注入，非客户端可配）。
-	// 共享卷（内容不共享）落盘强制 owner 前缀防跨 owner 覆写；独享卷为空（用户直接操作）。
-	OwnerPrefix string `json:"-"`
+	// 注：曾有 OwnerPrefix 字段（注释称「共享卷的 owner 隔离前缀，服务端注入」）——**无任何
+	// 生产者/消费者**（独立审核 2026-10-18 确证）⇒ 已删除。owner 隔离由 `volume.ResolveLocation`
+	// 恒 owner 前缀承担（pkg/volume/volume_path.go），该字段声称的「注入」从未存在。
 }
 
 // TaskParams 是云端下载任务的「三行为」语义参数（S107 收敛 + 正交性显式化）：

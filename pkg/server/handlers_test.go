@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -49,6 +50,9 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 		skipFileMetaAssembly: true,
 	}
 	t.Cleanup(func() { _ = h.Close() })
+	// 测试夹具：把「配额不足 ⇒ 排队重试」的等待上限压到最小（生产恒 0 = 30s 默认，语义不变）——
+	// 否则大量「能放下但当前用量不够」的用例各白等 30s，累计触发 5min 包超时（CI 实测）。
+	h.quotaWaitTimeout = 50 * time.Millisecond
 	return h
 }
 

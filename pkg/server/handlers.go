@@ -217,6 +217,10 @@ type Handlers struct {
 	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
 	archiveUsage map[string]map[string]int64
 	tenantMu     sync.Mutex // 串行化 checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
+	// quotaWaitTimeout 是写路径「配额不足 ⇒ 排队重试」的等待上限（**0 = quota.DefaultWaitTimeout**，
+	// 即用户裁定 2026-10-14 的 30s 语义）。**仅供测试夹具注入小值**（生产恒 0，语义不变）——否则
+	// 大量「请求能放下、但当前用量不够」的用例各自白等 30s，CI 实测累计触发 5min 包超时。
+	quotaWaitTimeout time.Duration
 	// volSet 是装配后的卷集合（RegisterRoutes 装配；nil = 未装配卷功能的旧装配路径，如
 	// 测试手工构造的 Handlers）。默认卷语义：globalRoot 字段 = 默认卷根、tenantFor 走默认卷。
 	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。
@@ -713,6 +717,16 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 		bucketLimits = quotaBucketLimitsFromCfg(cfg)
 	}
 	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
+	if s == nil {
+		// **超售 ⇒ fail-closed**（独立复审 B-P2-4 根因修复 + 用户裁定启用 I1 强制）：Σ 租户配额
+		// 超过全局上限 ⇒ 分配被 I1 原子拒绝。**不能**返回 nil（那会让写路径**静默无配额**）⇒
+		// 返回**拒写配额树**（任何非零预留失败 ⇒ 写被 507 拒绝）。**不缓存**：管理员调大全局上限
+		// 后下一个请求自动恢复。
+		h.logger.Error("tenant quota allocation refused by I1 (Σ owner quotas exceed global limit); "+
+			"writes for this owner will be rejected until the global limit is raised",
+			"owner", owner, "owner_quota_bytes", quotaBytes)
+		return h.deniedTenantQuota()
+	}
 	buckets := make(map[string]*quota.Scope, len(quotaBucketNames)+len(bucketLimits))
 	for _, b := range quotaBucketNames {
 		buckets[b] = s.Mount(b, 0)
@@ -720,6 +734,19 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 	mountBucketLimitScopes(buckets, bucketLimits)
 	h.quotaScopes[owner] = s
 	h.quotaBuckets[owner] = buckets
+	return s, buckets
+}
+
+// deniedTenantQuota 返回**拒写**的租户配额树：全局上限 1 字节 ⇒ 任何 >1 字节的预留必失败
+// （超售导致租户配额无法分配时的 fail-closed 载体；见 ensureTenantQuotaLocked）。
+// 所有节点上限传 0（不限制）⇒ 建树本身永不因 I1 失败（可安全作为兜底）。
+func (h *Handlers) deniedTenantQuota() (*quota.Scope, map[string]*quota.Scope) {
+	pool := quota.NewPool(1)
+	s := pool.Scope("/tenant/_denied", 0)
+	buckets := make(map[string]*quota.Scope, len(quotaBucketNames))
+	for _, b := range quotaBucketNames {
+		buckets[b] = s.Mount(b, 0)
+	}
 	return s, buckets
 }
 

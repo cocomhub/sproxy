@@ -1,0 +1,10 @@
+# 决策驱动的配额能力登记表（门禁 quota_capability_wiring_gate_test.go 强制，R31）。
+#
+# 背景：此类能力**实现完整、注释写明用户裁定**，但装配层从未接线 ⇒ 静默 no-op ⇒
+# 裁定落空且无任何报错。导出符号不被 deadcode 工具发现（导出即「非死」）⇒ 需本门禁。
+#
+# 规则：status=wired ⇒ 必须在 pkg/quota 之外的非测试源码里有调用点；unwired ⇒ 必须写理由。
+# symbol	status	理由（unwired 必填）
+WaitReserve	wired
+SetOperationalReserve	wired
+OperationalReserve	unwired	仅诊断读取（展示/测试用）；当前未接 /metrics 与 UI，故无生产读取方。

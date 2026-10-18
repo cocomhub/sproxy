@@ -1204,15 +1204,33 @@ func (s *SecretdataFS) dirHasContentLocked(d string) bool {
 // 全部文件（目录 meta + 遗留/孤儿分块）并注销 dirSegs/dirs/dirIDs/dirParents。调用方持
 // s.mu；仅当目录确为空（dirHasContentLocked==false）时调用，删除全部文件是安全的。
 func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container, dirPath string) {
-	if inner, err := s.inner.ListDir(ctx, container); err == nil {
-		for _, f := range inner {
-			if !f.IsDir {
-				// 目录 meta blob 的落盘字节从真值累计中扣减（列目录时顺带求和 ⇒ 零额外 I/O）。
-				if shardseal.ClassifyName(f.Name) == shardseal.KindDirMeta && f.Size > 0 {
-					s.dirPhysTotal = max(s.dirPhysTotal-f.Size, 0)
-				}
-				_ = s.inner.Delete(ctx, path.Join(container, f.Name))
-			}
+	inner, err := s.inner.ListDir(ctx, container)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// **列目录失败必须 fail-closed**（独立审核 P2，2026-10-18）：此前仅在 `err == nil` 时进
+		// 循环，失败即**静默跳过删除**，却仍注销内存映射 ⇒ 磁盘上目录 meta 仍在（重启后 loadIndex
+		// 扫到 ⇒ **目录"复活"**：幽灵空目录），且容器删除必然失败（残留层级）。改为：**不注销映射、
+		// 不删容器**并显式告警 ⇒ 本会话内该目录仍可见（与磁盘一致），下次 rmdir 再尝试回收。
+		slog.Warn("secretdata: 列目录失败，跳过空容器回收（保留内存映射，防重启后幽灵目录）",
+			"container", container, "dir", dirPath, "error", err)
+		return
+	}
+	// 逐文件删除：**失败必须 fail-closed**（独立复审 P2，2026-10-18）——此前 `_ =` 忽略错误 ⇒
+	// 文件仍在盘上却继续走后面的「删容器 + 注销映射」⇒ 容器删不掉（残留）且映射已丢 ⇒ 重启后
+	// 该目录 meta 又被扫到（幽灵目录"复活"），与上面 ListDir 分支的处置不一致。
+	// 删除失败则保留映射并告警，下次 rmdir 再尝试回收。
+	for _, f := range inner {
+		if f.IsDir {
+			continue
+		}
+		// 目录 meta blob 的落盘字节从真值累计中扣减（列目录时顺带求和 ⇒ 零额外 I/O）。
+		if shardseal.ClassifyName(f.Name) == shardseal.KindDirMeta && f.Size > 0 {
+			s.dirPhysTotal = max(s.dirPhysTotal-f.Size, 0)
+		}
+		if ferr := s.inner.Delete(ctx, path.Join(container, f.Name)); ferr != nil && !errors.Is(ferr, os.ErrNotExist) {
+			s.dirPhysTotal += f.Size // 回滚上面的扣减（文件仍在盘上 ⇒ 真值必须与磁盘一致）
+			slog.Warn("secretdata: 删除容器内残留文件失败，跳过空容器回收（保留内存映射）",
+				"container", container, "dir", dirPath, "file", f.Name, "error", ferr)
+			return
 		}
 	}
 	// 容器目录本身也删除（物理嵌套下必须回收：子容器已先删 ⇒ 目录为空可删；残留空容器目录会让
@@ -1315,15 +1333,17 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	if cerr != nil {
 		return fmt.Errorf("secretdata: 扫描容器树失败（拒绝空视图挂载）: %w", cerr)
 	}
-	scans := scanAllContainerDirMetas(ctx, s, containers)
+	scans, serr := scanAllContainerDirMetas(ctx, s, containers)
+	if serr != nil {
+		return serr
+	}
 	byID := dirMetaTable(scans)
 	res := s.resolveContainerPaths(ctx, byID, scans)
 	// **只支持嵌套布局**（用户口径 2026-10-14：不支持旧格式目录、无兼容）⇒ 旧扁平布局 fail-closed。
 	if verr := s.validateNestedContainers(res); verr != nil {
 		return verr
 	}
-	loadAllFileMetas(ctx, s, res)
-	return nil
+	return loadAllFileMetas(ctx, s, res)
 }
 
 // maxContainerDepth 是容器树递归深度上限（防御异常/恶意深树导致栈/IO 爆炸；正常逻辑树远小于此）。
@@ -1336,31 +1356,51 @@ const maxContainerDepth = 64
 // 校验布局——**旧扁平布局不支持、无兼容**（fail-closed 拒绝挂载）。
 func (s *SecretdataFS) dirContainers(ctx context.Context, root []syncpkg.Entry) ([]string, error) {
 	var out []string
-	var walk func(prefix string, entries []syncpkg.Entry, depth int) error
-	walk = func(prefix string, entries []syncpkg.Entry, depth int) error {
-		if depth > maxContainerDepth {
-			return fmt.Errorf("secretdata: 容器树深度超过上限 %d（目录 %q）", maxContainerDepth, prefix)
-		}
-		for _, e := range entries {
-			if !e.IsDir {
-				continue
-			}
-			p := path.Join(prefix, e.Name)
-			out = append(out, p)
-			sub, lerr := s.inner.ListDir(ctx, p)
-			if lerr != nil {
-				return fmt.Errorf("列容器 %q 失败: %w", p, lerr)
-			}
-			if werr := walk(p, sub, depth+1); werr != nil {
-				return werr
-			}
-		}
-		return nil
-	}
-	if werr := walk("", root, 0); werr != nil {
-		return nil, werr
+	if err := s.walkContainers(ctx, "", root, 0, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// walkContainers 递归收集容器目录（depth 防异常/恶意深树导致栈/IO 爆炸）。
+// 独立复审 P2 修复：对 ErrNotExist 容忍（并发删除/GC 是良性的），与
+// scanContainerDirMeta/loadContainerFileMetas 一致（见 listSubContainer）。
+func (s *SecretdataFS) walkContainers(ctx context.Context, prefix string, entries []syncpkg.Entry, depth int, out *[]string) error {
+	if depth > maxContainerDepth {
+		return fmt.Errorf("secretdata: 容器树深度超过上限 %d（目录 %q）", maxContainerDepth, prefix)
+	}
+	for _, e := range entries {
+		if !e.IsDir {
+			continue
+		}
+		p := path.Join(prefix, e.Name)
+		*out = append(*out, p)
+		sub, skip, err := s.listSubContainer(ctx, p)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if werr := s.walkContainers(ctx, p, sub, depth+1, out); werr != nil {
+			return werr
+		}
+	}
+	return nil
+}
+
+// listSubContainer 列子容器：ErrNotExist（并发删除/GC）⇒ skip=true（不算故障）；其它错误上抛。
+// 与 scanContainerDirMeta/loadContainerFileMetas 的处置**保持一致**（独立复审 P2，2026-10-18：
+// 此前这里对 ErrNotExist 也直接拒绝挂载 ⇒ 与那两处不一致）。
+func (s *SecretdataFS) listSubContainer(ctx context.Context, p string) ([]syncpkg.Entry, bool, error) {
+	sub, err := s.inner.ListDir(ctx, p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("列容器 %q 失败: %w", p, err)
+	}
+	return sub, false, nil
 }
 
 // validateNestedContainers 校验**只支持嵌套布局**（用户口径 2026-10-14：不支持旧格式目录、无兼容）。
@@ -1453,8 +1493,9 @@ func maxParallelLoads(alg *shardseal.Algorithm) int {
 
 // scanAllContainerDirMetas Phase 1：按容器并行扫描目录 meta（解密 + 旧格式 fail-closed）。
 // 经 s.loadGate 限并发（Imp-C：单次 scrypt 派生内存随 KDF 档位，无界并行会内存爆炸）。
-func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers []string) []dirScan {
+func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers []string) ([]dirScan, error) {
 	scans := make([]dirScan, len(containers))
+	errs := make([]error, len(containers))
 	var wg sync.WaitGroup
 	for i, c := range containers {
 		wg.Add(1)
@@ -1463,7 +1504,11 @@ func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers [
 			s.loadGate <- struct{}{} // 派生并发上界（scrypt 内存）
 			defer func() { <-s.loadGate }()
 			scans[i] = dirScan{container: c}
-			dm, blobLen, hasFiles, ok := s.scanContainerDirMeta(ctx, c)
+			dm, blobLen, hasFiles, ok, serr := s.scanContainerDirMeta(ctx, c)
+			if serr != nil {
+				errs[i] = serr
+				return
+			}
 			if ok {
 				scans[i].dm = dm
 				scans[i].dirPhys = blobLen
@@ -1472,7 +1517,12 @@ func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers [
 		}(i, c)
 	}
 	wg.Wait()
-	return scans
+	for _, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+	}
+	return scans, nil
 }
 
 // dirMetaTable 建 dir_id → dirMeta 表（parent 链解析用）。
@@ -1517,38 +1567,55 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 }
 
 // loadAllFileMetas Phase 3：各容器文件 meta 并行解密登记索引。
-func loadAllFileMetas(ctx context.Context, s *SecretdataFS, res []dirRes) {
+func loadAllFileMetas(ctx context.Context, s *SecretdataFS, res []dirRes) error {
 	var wg sync.WaitGroup
-	for _, r := range res {
+	errs := make([]error, len(res))
+	for i, r := range res {
 		if !r.ok {
 			continue
 		}
 		wg.Add(1)
-		go func(r dirRes) {
+		go func(i int, r dirRes) {
 			defer wg.Done()
-			s.loadContainerFileMetas(ctx, r.container, r.rel)
-		}(r)
+			errs[i] = s.loadContainerFileMetas(ctx, r.container, r.rel)
+		}(i, r)
 	}
 	wg.Wait()
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // scanContainerDirMeta 定位容器目录 meta 并解密（旧格式 fail-closed）。返回
 // (dirMeta, 容器是否含文件 meta, 是否找到可解析目录 meta)。目录 meta 缺失/损坏/旧格式
 // → dm=nil；含文件 meta 时记日志（fail-closed：不压平到根，避免跨容器同名遮蔽，F-1）。
-func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container string) (*dirMeta, int64, bool, bool) {
+func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container string) (*dirMeta, int64, bool, bool, error) {
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil {
-		return nil, 0, false, false
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			// 容器在扫描与列目录之间消失（并发删除/GC）⇒ 视为不存在，不算"不完整视图"。
+			return nil, 0, false, false, nil
+		}
+		// **容器级列目录失败必须 fail-closed**（独立审核 P2，2026-10-18）：此前静默 return ⇒
+		// 该容器**全部文件**不进索引（用户看到"文件消失"）且**零日志**；更危险的是 GC 复用内存
+		// 索引（gcMarkIndex）⇒ 会把缺失的 meta 当孤儿**清扫**（数据丢失），另有 BaseVersion 只
+		// 基于残余索引 ⇒ 重启后 resolveSameRelConflict 可能把新上传内容换回旧内容（内容回滚）。
+		// 与本文件既有原则一致：「挂载失败比静默空视图安全」（见 loadIndex 首层 ListDir 注释）。
+		return nil, 0, false, false,
+			fmt.Errorf("secretdata: 列容器 %q 失败（拒绝不完整视图挂载）: %w", container, err)
 	}
 	hasFiles := hasFileMeta(inner)
 	if dm, blobLen, found := scanContainerDirMetaBlob(ctx, s, container, inner, hasFiles); found {
-		return dm, blobLen, hasFiles, true
+		return dm, blobLen, hasFiles, true, nil
 	}
 	if hasFiles {
 		slog.Warn("secretdata: 容器缺少可解析目录 meta，跳过恢复其中文件（fail-closed）",
 			"container", container)
 	}
-	return nil, 0, hasFiles, false
+	return nil, 0, hasFiles, false, nil
 }
 
 // scanContainerDirMetaBlob 定位并解密容器内目录 meta（旧格式 fail-closed 判定明确并专用
@@ -1629,10 +1696,15 @@ func logicalDirName(dirPath string) string {
 
 // loadContainerFileMetas 并行解密容器内全部文件 meta 并登记索引（Imp-2：容器内文件并行）。
 // 经 s.loadGate 限并发（Imp-C：单次 scrypt 派生内存随 KDF 档位，无界并行会内存爆炸）。
-func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, dirPath string) {
+func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, dirPath string) error {
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil {
-		return
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			return nil // 容器已消失（并发删除）⇒ 非"不完整视图"
+		}
+		// 同 scanContainerDirMeta：容器级列目录失败必须 fail-closed（否则索引不完整 ⇒ GC 误清扫
+		// /BaseVersion 回退）。此处在 Phase 3（文件 meta 登记），同样拒绝不完整视图。
+		return fmt.Errorf("secretdata: 列容器 %q 失败（拒绝不完整视图挂载）: %w", container, err)
 	}
 	var wg sync.WaitGroup
 	for _, f := range inner {
@@ -1648,6 +1720,7 @@ func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, di
 		}(f)
 	}
 	wg.Wait()
+	return nil
 }
 
 // loadContainerFileMeta 解密单个文件 meta 并登记索引（逻辑 rel = 容器逻辑路径 + basename，
@@ -2049,6 +2122,9 @@ func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName
 	}
 	if newName != oldName {
 		_ = s.inner.Delete(ctx, path.Join(container, oldName))
+		// 注：独立审核曾疑「改名不更新 dirPhysTotal ⇒ 真值漂移」——**已实测证伪**（2026-10-18）：
+		// 目录 meta blob 的落盘长度与内容无关（pad 目标随机但最终长度恒定，实测 5 次改名恒 353B）
+		// ⇒ 改名不产生漂移，故**不引入**额外的 Stat/累计更新（避免无收益 I/O 与推测性代码）。
 	}
 	return nil
 }
@@ -2173,7 +2249,7 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 		moved.meta = nm
 		moved.metaName = name
 	}
-	if rerr := s.relocateRenamedBlobsLocked(ctx, e, targetContainer, sameBase); rerr != nil {
+	if rerr := s.relocateRenamedBlobsLocked(ctx, from, e, targetContainer, sameBase); rerr != nil {
 		if !sameBase {
 			// 回滚刚写的新 meta（避免重启后新路径出现重影条目）。
 			_ = s.inner.Delete(ctx, path.Join(targetContainer, moved.metaName))
@@ -2213,9 +2289,30 @@ func (s *SecretdataFS) writeRenamedMetaLocked(ctx context.Context, e *metaEntry,
 //   - 跨容器 + 改名：只搬内容分块（**绝不复制旧 meta**——否则重启会按旧 basename 重建幽灵条目）。
 //
 // 删源为 best-effort（残留孤儿交 GC）；调用方持有 s.mu。
-func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, e *metaEntry, targetContainer string, sameBase bool) error {
+func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, from string, e *metaEntry, targetContainer string, sameBase bool) error {
 	if e.dirSeg == targetContainer {
 		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
+		return nil
+	}
+	// **共享集合搬不动，只能复制一份**（独立审核 P1，2026-10-18）：同容器复制会让两份 meta
+	// 引用**同一批分块 blob**（存在即引用）。若此处按 mv 物理搬走分块，兄弟条目的 meta 仍指向
+	// **原容器**里的分块名 ⇒ 其 OpenRead 报「读底层分块失败」，而 ListDir/Stat 仍可见（size
+	// 正常）⇒ 用户侧表现为**静默数据丢失**（幽灵条目）。⇒ 被兄弟引用时改**字节拷贝**（内容
+	// 零改动、不重加密），原分块留给兄弟；且**不得** `deleteFileBlobs`（那会删掉兄弟的分块）。
+	if s.chunkSetStillReferenced(from, e) {
+		if cerr := s.copyContentBlobs(ctx, e, targetContainer); cerr != nil {
+			return cerr
+		}
+		srcMeta := path.Join(e.dirSeg, e.metaName)
+		if sameBase {
+			// meta 名派生自分块内容 ⇒ 改名/改路径不换名 ⇒ 必须搬到目标容器，否则目标条目解析不到。
+			if merr := s.inner.Rename(ctx, srcMeta, path.Join(targetContainer, e.metaName)); merr != nil {
+				return fmt.Errorf("secretdata: 搬移 meta blob 失败: %w", merr)
+			}
+		} else {
+			// 新 meta 已由 writeRenamedMetaLocked 写好 ⇒ 删源 meta（**只删 meta**，不碰分块）。
+			_ = s.inner.Delete(ctx, srcMeta)
+		}
 		return nil
 	}
 	// **用底层卷的 mv**（用户口径 2026-10-14）：blob 优先 `s.inner.Rename` 直接搬（后端支持真 mv

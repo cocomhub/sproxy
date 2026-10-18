@@ -127,7 +127,10 @@ func TestQuotaTree_EnsureChildAllocation(t *testing.T) {
 	if _, err := alice.EnsureChild([]string{"user", "videos"}, 200); err != nil {
 		t.Fatalf("目录配额 200（≤ alice 300）: %v", err)
 	}
-	if _, err := alice.EnsureChild([]string{"user", "videos"}, 400); err == nil {
-		t.Fatal("目录配额超过 alice 上限必须失败")
+	// carve-out 语义（2026-10-18 定稿）：额度只记**直接父** ⇒ 中间层 user 无上限时不约束其子。
+	// 该断言原期望"目录配额 > alice 上限即失败"，那需要逐级上溯（会双计，见 I1 定稿）。
+	// 保留意图：**直接父**为有限额时，其子超额必须失败（把 videos 挂到有限额的 alice 下）。
+	if _, err := alice.EnsureChild([]string{"videos"}, 400); err == nil {
+		t.Fatal("直接子配额超过 alice 上限（300）必须失败")
 	}
 }

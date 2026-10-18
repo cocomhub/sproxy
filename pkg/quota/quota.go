@@ -20,6 +20,15 @@ var ErrStorageFull = errors.New("storage quota exceeded")
 // Pool 是配额账本节点（根池，或某个 Scope 的底层账本）。
 // 账本记录已确认占用 committed 与预留中 reserved；可用额度 = maxBytes − (committed + reserved)。
 type Pool struct {
+	// waitMu 是**根等待锁**（仅根池实例有效）：等待侧在 `root.cond.L`（即本锁）下做 double-check
+	// 与 Wait，释放/放宽侧在**同一把锁**下变更状态并广播 ⇒ 广播不可能落在「已判定不足 → 尚未
+	// Wait」的窗口内（独立复审 P2 根因修复，2026-10-18：此前注释声称"在持锁下调用…避免丢唤醒"
+	// 并不成立——释放侧并未持 cond.L，等待者只能睡到超时 ≤30s）。
+	// **全局锁序：waitMu → allocMu → node.mu；任何路径不得反向获取**（否则 ABBA 死锁）。
+	waitMu sync.Mutex
+	// allocMu 串行化**跨层**分配账本更新（EnsureChild 一次调用会改动多级节点的 allocated ⇒
+	// 读旧值/记账/写新上限必须整体原子）。锁序：allocMu → mu；不得反向获取。
+	allocMu   sync.Mutex
 	mu        sync.RWMutex
 	maxBytes  int64 // 0 = 不限制
 	committed int64
@@ -46,7 +55,8 @@ type Pool struct {
 // NewPool 创建根配额池。maxBytes<=0 表示不限制。
 func NewPool(maxBytes int64) *Pool {
 	p := &Pool{maxBytes: maxBytes}
-	p.cond = sync.NewCond(&sync.Mutex{})
+	// cond 的 L 即**根等待锁**（见 Pool.waitMu）：与释放侧同锁 ⇒ 结构上消除丢唤醒。
+	p.cond = sync.NewCond(&p.waitMu)
 	return p
 }
 
@@ -76,8 +86,30 @@ func (p *Pool) TryReserve(estimate int64) (*Reservation, error) {
 }
 
 // Scope 返回挂载到根池上的新子作用域（路径化叠加，maxBytes<=0 不限制）。
+//
+// **与 EnsureChild 同一记账实现**（`setChildLimit`；独立复审 B-P2-4 根因修复，2026-10-18）：
+// 此前只建节点**不记分配账** ⇒ 生产环境 `Allocated()/Unallocated()` 为 0/失真、I1 无强制点。
+// 超额（Σ 子树上限 > 父可用上限）⇒ **原子失败并返回 nil**（调用方必须判空；fail-closed）。
 func (p *Pool) Scope(path string, maxBytes int64) *Scope {
-	return p.newScope(path, maxBytes)
+	sc, _ := p.newChildWithLimit(path, maxBytes)
+	return sc
+}
+
+// newChildWithLimit 建（或复用）path 子节点并把上限设为 maxBytes，**同步分配账本**。
+// 超额 ⇒ 回滚新建节点并返回错误（路径语义同 newScope：路径化叠加，joinPath 保留前导 "/"）。
+func (p *Pool) newChildWithLimit(path string, maxBytes int64) (*Scope, error) {
+	child := p.childWithSegment(lastSegment(path))
+	var created []*Pool
+	if child == nil {
+		child = p.newScope(path, 0)
+		created = append(created, child.pool)
+	}
+	var serr error
+	p.withWaitLock(func() { serr = p.setChildLimit(child.pool, maxBytes, created) })
+	if serr != nil {
+		return nil, serr
+	}
+	return child, nil
 }
 
 // Usage 返回本池聚合占用（含子孙作用域传播）。
@@ -106,9 +138,12 @@ func (p *Pool) MaxBytes() int64 {
 // SetMaxBytes 运行时调整本池上限（0 = 不限制）。仅影响后续 TryReserve/Reservation 校验，
 // 不回溯既有 committed/reserved。
 func (p *Pool) SetMaxBytes(n int64) {
-	p.mu.Lock()
-	p.maxBytes = n
-	p.mu.Unlock()
+	p.withWaitLock(func() {
+		p.mu.Lock()
+		p.maxBytes = n
+		p.broadcastLocked() // 放宽上限释放了额度 ⇒ 唤醒等待者（收紧时的多余唤醒无害：等待者会重检）
+		p.mu.Unlock()
+	})
 }
 
 // UsageByBucket 从本池向下递归收集所有 Scope 的 committed 占用，key 为完整路径。
@@ -124,13 +159,15 @@ func (p *Pool) UsageByBucket() map[string]int64 {
 // 已卸载/无占用 → 幂等空操作。释放先于摘除：父池 committed 含本子池已传播的占用，先 release
 // 到父链再摘除使父池账本不虚增。
 func (p *Pool) ReleaseCommittedAndUnmount() {
-	if used := p.Usage(); used > 0 {
-		p.releaseCommittedUp(used)
-	}
-	if p.parent == nil {
-		return
-	}
-	(&Scope{pool: p}).Unmount()
+	p.withWaitLock(func() {
+		if used := p.Usage(); used > 0 {
+			p.releaseCommittedUp(used)
+		}
+		if p.parent == nil {
+			return
+		}
+		(&Scope{pool: p}).Unmount()
+	})
 }
 
 // Adjust 调整本池已确认占用（reconcile 收敛用，diff 语义）：committed += (next − prev)，
@@ -140,7 +177,7 @@ func (p *Pool) ReleaseCommittedAndUnmount() {
 // 参数），否则直接校准本池 committed 会与子层 adjustUp 传播产生双计——server 侧每卷容量池
 // （pkg/volume/registry.Set 的 pools）为独立根池、T3 未挂子层，reconcile 用它把池收敛到磁盘实际。
 func (p *Pool) Adjust(prev, next int64) {
-	p.adjustUp(next - prev)
+	p.withWaitLock(func() { p.adjustUp(next - prev) })
 }
 
 // ReleaseCommitted 释放本池已确认占用 n（文件/版本删除按实际删除字节从 committed 扣减）。
@@ -150,7 +187,7 @@ func (p *Pool) Adjust(prev, next int64) {
 // 只调本池自身（根池无父链），不触碰 reserved，防下溢归零（绝不反负）。n<=0 为空操作。
 // 调用方须保证本池无挂载子层 Scope（与 Adjust 同约束——server 侧每卷容量池为独立根池）。
 func (p *Pool) ReleaseCommitted(n int64) {
-	p.releaseCommittedUp(nonNeg(n))
+	p.withWaitLock(func() { p.releaseCommittedUp(nonNeg(n)) })
 }
 
 // newScope 创建路径为父路径拼接 path 的新子作用域，其底层账本挂到本池之下。
@@ -160,7 +197,7 @@ func (p *Pool) newScope(path string, maxBytes int64) *Scope {
 		parent:   p,
 		path:     joinPath(p.path, path),
 	}
-	child.cond = sync.NewCond(&sync.Mutex{})
+	child.cond = sync.NewCond(&p.rootPool().waitMu) // 只根池的 cond 被使用；统一指向根等待锁
 	s := &Scope{pool: child}
 	p.mu.Lock()
 	p.children = append(p.children, s)
@@ -197,23 +234,41 @@ func (p *Pool) ResolvePath(path string) *Scope {
 // EnsureScope 拆段逐级下探挂载：已存在的子层复用，不存在的现建（maxBytes 应用于最终层，
 // 中间层 0 = 不限制）。返回最终段的 Scope。用于装配期把配置路径（如 user/videos/hd）
 // 展开为多层嵌套子作用域。
+// EnsureScope 拆段逐级下探挂载到本池下（已存在复用，不存在现建），返回最终段 Scope。
+//
+// **与 EnsureChild 同一记账实现**（见 Pool.Scope 注释）：末段上限走 `setChildLimit`（同步分配
+// 账本 + I1 强制）；超额 ⇒ 原子失败并返回 nil（fail-closed）。
 func (p *Pool) EnsureScope(segs []string, maxBytes int64) *Scope {
+	sc, _ := p.ensureScopeWithLimit(segs, maxBytes)
+	return sc
+}
+
+// ensureScopeWithLimit 是 EnsureScope 的实现：逐段下探（中间层 0），末段设上限并记账。
+func (p *Pool) ensureScopeWithLimit(segs []string, maxBytes int64) (*Scope, error) {
 	cur := p
-	for i, seg := range segs {
+	var created []*Pool
+	descended := false
+	for _, seg := range segs {
 		if seg == "" {
 			continue
 		}
 		child := cur.childWithSegment(seg)
 		if child == nil {
-			mb := int64(0)
-			if i == len(segs)-1 {
-				mb = maxBytes
-			}
-			child = cur.newScope(seg, mb)
+			child = cur.newScope(seg, 0)
+			created = append(created, child.pool)
 		}
 		cur = child.pool
+		descended = true
 	}
-	return &Scope{pool: cur}
+	if !descended {
+		return nil, errors.New("quota: EnsureScope 需要非空路径段")
+	}
+	var serr error
+	p.withWaitLock(func() { serr = p.setChildLimit(cur, maxBytes, created) })
+	if serr != nil {
+		return nil, serr
+	}
+	return &Scope{pool: cur}, nil
 }
 
 // childWithSegment 返回 path 末段恰为 seg 的直接子层 Scope（children 段序查找）。
@@ -393,10 +448,12 @@ func (p *Pool) SetOperationalReserve(n int64) {
 	if n < 0 {
 		n = 0
 	}
-	p.mu.Lock()
-	p.reserve = n
-	p.broadcastLocked()
-	p.mu.Unlock()
+	p.withWaitLock(func() {
+		p.mu.Lock()
+		p.reserve = n
+		p.broadcastLocked() // 下调运维余量即释放额度 ⇒ 唤醒等待者
+		p.mu.Unlock()
+	})
 }
 
 // OperationalReserve 返回运维余量。
@@ -407,7 +464,15 @@ func (p *Pool) OperationalReserve() int64 {
 }
 
 // broadcastLocked 唤醒等待者：**统一广播到根节点**（任一层释放都可能让等待者满足）。
-// Cond.Broadcast 不要求持锁；这里在持锁下调用以与状态变更同临界区（避免丢唤醒）。
+//
+// **已知残余（独立复审 P2，2026-10-18 如实记录，此前注释声称"已避免丢唤醒"是不成立的）**：
+// 本广播**不持 `cond.L`**（等待侧用的是根节点上**独立于 `node.mu`** 的 mutex）⇒ 状态变更与广播
+// 不属同一临界区 ⇒ 存在理论上的**丢唤醒**窗口：广播落在「等待者已判定不足 → 尚未 Wait」之间会被
+// 丢弃，等待者只能睡到 deadline（WaitReserve 超时 ≤30s）后重试（重试可成功 ⇒ **非功能丢失**，
+// 不会永久失败）。对照：pkg/quota/staging_tracker.go 的释放侧**持 `cond.L`** 广播（同仓正确范式）。
+// **为何不在此处直接补锁**：释放发生在**子节点**、队列在**根**，而等待侧的锁序是
+// `cond.L → node.mu`；释放侧已持 `node.mu` ⇒ 补锁即反向 ⇒ ABBA 死锁。正确修复需架构级改动
+// （单锁：令 `cond.L` 即状态锁；或全局配额锁），见设计文档的「已知残余」小节。
 func (p *Pool) broadcastLocked() {
 	if c := p.rootCond(); c != nil {
 		c.Broadcast()
@@ -416,11 +481,29 @@ func (p *Pool) broadcastLocked() {
 
 // rootCond 返回根节点的等待队列（parent 构造后不可变 ⇒ 无需加锁读取）。
 func (p *Pool) rootCond() *sync.Cond {
+	return p.rootPool().cond
+}
+
+// rootPool 返回根池（parent 构造后不可变 ⇒ 无需加锁读取）。
+func (p *Pool) rootPool() *Pool {
 	cur := p
 	for cur.parent != nil {
 		cur = cur.parent
 	}
-	return cur.cond
+	return cur
+}
+
+// withWaitLock 在**根等待锁**下执行 fn（fn 内部做状态变更 + 广播）。**所有释放/放宽可用额度的
+// 公开入口必须走它**：与等待侧的 double-check/Wait 互斥 ⇒ 结构上消除丢唤醒（见 waitMu 注释）。
+// 锁序：waitMu → allocMu → node.mu（fn 内只可向内获取，不得反向）。
+func (p *Pool) withWaitLock(fn func()) {
+	if p == nil {
+		return
+	}
+	root := p.rootPool()
+	root.waitMu.Lock()
+	defer root.waitMu.Unlock()
+	fn()
 }
 
 // joinPath 拼接父子路径，处理空段与多余分隔符。
@@ -441,12 +524,16 @@ type Scope struct {
 
 // Mount 返回该作用域下的子作用域（路径继续叠加；maxBytes 省略时 0 = 不限制）。
 // 命名避开与类型同名（Scope.Scope 阅读歧义），语义即"挂载子作用域"。
+// Mount 在本作用域下挂载路径化子 Scope（maxBytes 省略/0 = 不限制）。
+//
+// **与 EnsureChild 同一记账实现**（见 Pool.Scope 注释）：超额 ⇒ 原子失败并返回 nil（fail-closed）。
 func (s *Scope) Mount(path string, maxBytes ...int64) *Scope {
 	var mb int64
 	if len(maxBytes) > 0 {
 		mb = maxBytes[0]
 	}
-	return s.pool.newScope(path, mb)
+	sc, _ := s.pool.newChildWithLimit(path, mb)
+	return sc
 }
 
 // Resolve 沿本作用域 children 段树按路径段逐级下探（http route 式），返回最深匹配子作用域。
@@ -479,7 +566,7 @@ func (s *Scope) TryReserve(estimate int64) (*Reservation, error) {
 // 超额释放只扣**本层实际持有量**：n 超过本层 committed 时本层归零，且只向上传播本层实际生效的
 // 增量——祖先层中其它子桶的占用不会被连带扣减（详见 releaseCommittedUp）。非正数视为空操作。
 func (s *Scope) ReleaseUsage(n int64) {
-	s.pool.releaseCommittedUp(nonNeg(n))
+	s.pool.withWaitLock(func() { s.pool.releaseCommittedUp(nonNeg(n)) })
 }
 
 // Adjust 调整已确认占用（覆盖写同文件尺寸变化场景，diff 语义）。
@@ -489,7 +576,7 @@ func (s *Scope) ReleaseUsage(n int64) {
 // 负向传播同样按**本层实际生效的增量**：降幅超过本层 committed 时本层归零，只向上传播本层
 // 实际扣掉的量，不连带扣减祖先层中其它子桶的占用（详见 releaseCommittedUp）。
 func (s *Scope) Adjust(prev, next int64) {
-	s.pool.adjustUp(next - prev)
+	s.pool.withWaitLock(func() { s.pool.adjustUp(next - prev) })
 }
 
 // Pool 返回该作用域的底层配额账本（引用场景：把子作用域当作 *Pool 上交上层统一入账——
@@ -558,7 +645,7 @@ func (r *Reservation) Release() {
 	if !r.done.CompareAndSwap(false, true) {
 		return
 	}
-	r.pool.releaseUp(r.amount)
+	r.pool.withWaitLock(func() { r.pool.releaseUp(r.amount) })
 }
 
 // nonNeg 把负数归零（estimate/actual/释放量不允许为负）。

@@ -539,6 +539,10 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// P5 版本桶配额：删除前记录文件大小，删除成功后释放**版本所在卷**的版本桶 Scope 与卷池。
+	// 释放口径与写入/结算**同源**（独立复审「释放≠结算」类根治，2026-10-18）：必须在删除
+	// **之前**取卷自报实测足迹（`findDeleteVersionFile` 只给了 Stat 尺寸）——否则对 secretdata
+	// （parity + meta pad）少释放 ⇒ 幽灵占用/假 507。
+	delSize = h.fileService().ReleaseChargeFor(verLoc.Tenant, owner, verRel, delSize)
 	if !h.removeVersionFileForRequest(w, r, remotePath, versionIDStr, verLoc, verRel) {
 		return
 	}

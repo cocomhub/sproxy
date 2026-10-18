@@ -5,6 +5,7 @@ package quota
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -43,6 +44,11 @@ func NewQuotaWriter(s *Scope, w io.Writer, estimate int64) (*QuotaWriter, error)
 
 // newQuotaWriterExact 创建 QuotaWriter 并精确预留 amount（size==0 时预留 0）。
 func newQuotaWriterExact(s *Scope, w io.Writer, amount int64) (*QuotaWriter, error) {
+	if s == nil || s.pool == nil {
+		// 防御（独立复审 B-P2-4 接线后新增路径）：配额 Scope 可能因**分配失败**（超售 ⇒ I1 拒绝）
+		// 而为 nil ⇒ 必须 fail-closed 报错，不得 panic。
+		return nil, fmt.Errorf("quota: 配额 Scope 不可用（分配被拒/未装配）: %w", ErrStorageFull)
+	}
 	if err := s.pool.reserveUp(amount); err != nil {
 		return nil, err
 	}

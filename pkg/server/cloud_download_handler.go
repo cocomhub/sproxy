@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1009,6 +1010,13 @@ func (h *Handlers) cloudArchiveToVolume(
 		return
 	}
 	defer release()
+	// owner 配额结算的**前置测量**（独立审核 P1，2026-10-18）：写成功后必须按**与删除侧同一
+	// Scope 解析器 + 同一物理足迹测量函数**结算——否则删除该产物时 releaseExternalDeleteQuota
+	// 会做「**未曾提交的释放**」（幻影释放 ⇒ 扣同账本其它占用 ⇒ 少计 ⇒ 可超 owner 配额）。
+	// 键空间与 cloud 下载转存一致：Scope 键 = `<bucket>/<path>`（即 `user/<rel>`）。
+	chargeScope := h.quotaScopeFor(t.Owner, path.Join(string(loc.Bucket()), string(loc.Path())))
+	chargeUserRel := archiveTargetRel(t.TargetPath, archiveName)
+	chargeBefore := h.archiveTargetCharge(t.TargetVolume, t.Owner, rel, chargeUserRel)
 	url, terr := transfer.Execute(r.Context(), transfer.TransferRequest{
 		Entries:     t.Entries,
 		Preprocess:  pre,
@@ -1016,7 +1024,11 @@ func (h *Handlers) cloudArchiveToVolume(
 		Scheme:      scheme,
 		Volume:      t.TargetVolume,
 		Rel:         rel,
-		Owner:       t.Owner,
+		// 写后读回校验受既有 trusted_volume.skip_verify 约束（独立复审 P1，2026-10-18）：
+		// 该开关的文档（docs/config.md）与启动告警（volumes.go warnIfVerifySkipped）都宣称覆盖
+		// 「下载/**转存**读侧数据校验」，但本轮新增的内核读回默认执行 ⇒ 对远端卷（OpenRead =
+		// 一次全量下载）无法关闭、且文档与行为矛盾。此处接线到同一配置源（与 cloud 转存一致）。
+		SkipVerify: h.verifySkipped(),
 	})
 	// 统一转存审计（F8）：本路径是**同步 HTTP**（不经 cloud manager ⇒ 无任务级审计作用域 /
 	// download·transfer span）。按备份等旁路写面的既有口径补一条服务端审计事件，保证
@@ -1032,10 +1044,44 @@ func (h *Handlers) cloudArchiveToVolume(
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "transfer failed: " + terr.Error()}, http.StatusInternalServerError)
 		return
 	}
+	// 写成功 ⇒ 计入 owner 配额（差分：覆盖写用 before/after）。
+	settleArchiveCharge(chargeScope, chargeBefore, h.archiveTargetCharge(t.TargetVolume, t.Owner, rel, chargeUserRel))
 	if onSuccess != nil {
 		onSuccess(url)
 	}
 	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url, TaskCount: len(t.Entries)}, http.StatusOK)
+}
+
+// settleArchiveCharge 把归档转存产物计入 owner 配额。before = 写入前实测、after = 写入后实测
+// （覆盖写按差分，不双计）；scope 为 nil（未装配配额）或 after == before ⇒ 无操作（零回归）。
+//
+// **必须与删除侧同源**（独立审核 P1，2026-10-18）：删除侧 releaseExternalDeleteQuota 会从同一
+// Scope 释放 physChargeFor 实测字节；若写侧不结算，那次释放就是「**未曾提交的释放**」⇒ 扣掉同
+// 账本其它对象的占用 ⇒ 少计 ⇒ 后续写入沿父链检查时放行 ⇒ **可超出 owner 配额**。
+func settleArchiveCharge(scope *quota.Scope, before, after int64) {
+	if scope == nil || after == before {
+		return
+	}
+	scope.Adjust(before, after)
+}
+
+// archiveTargetCharge 返回归档转存产物的**记账字节**：① 卷自报物理足迹优先（与删除侧
+// files.physChargeFor 同一测量函数 filesPhysFootprinter.PhysFootprint）——secretdata 的
+// pad/parity 逻辑不可推，两处必须同源；② 无足迹能力（多数外部卷）⇒ 回落卷内实测大小
+// （与删除侧 ExternalStat 回落同档）。fsRel 是卷内完整键（`<owner>/user/<rel>`），userRel 是
+// 用户桶相对路径（足迹解析用）。
+func (h *Handlers) archiveTargetCharge(volName, owner, fsRel, userRel string) int64 {
+	if n, ok := (filesPhysFootprinter{h: h}).PhysFootprint(volName, owner, userRel); ok && n > 0 {
+		return n
+	}
+	fs, _, _, ok := h.externalVolumeTransferFS(volName)
+	if !ok || fs == nil {
+		return 0
+	}
+	if e, err := fs.Stat(context.Background(), fsRel); err == nil && e != nil {
+		return e.Size
+	}
+	return 0
 }
 
 // archiveVolumeWriteGate 是统一转存的写前门：目标卷容量预检（ReserveSpace 可选能力，

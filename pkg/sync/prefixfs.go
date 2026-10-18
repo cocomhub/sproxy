@@ -60,7 +60,17 @@ func (p *PrefixFS) Key(k string) string {
 }
 
 // strip 把桶键空间路径剥回调用方键空间。
+// strip 把底层 FS 键还原为视图相对键。
+//
+// **视图根必须互逆**（独立审核 P1，2026-10-18）：`Key("")` 返回 `trimSuffixSlash(Prefix)`
+// （如 `"user"`，**去掉尾斜杠**），若只按 `Prefix`（`"user/"`）去前缀则 `strip("user") == "user"`
+// ✗（应为 `""`）⇒ 根条目的 `Path` 泄漏内层桶键 ⇒ 下游把它当**用户路径**用：备份空子树时
+// `WalkEntries` 原样返回根条目 ⇒ 目标 `PrefixFS("user/")` 上 `MakeDir("user")` ⇒ **幽灵目录
+// `user/user`**；同步/删除传播也会按错路径 `Stat`/`Delete`。⇒ 显式映射回视图根 `""`。
 func (p *PrefixFS) strip(k string) string {
+	if k == trimSuffixSlash(p.Prefix) {
+		return ""
+	}
 	return trimPrefix(k, p.Prefix)
 }
 

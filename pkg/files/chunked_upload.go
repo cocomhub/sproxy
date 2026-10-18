@@ -1391,6 +1391,10 @@ func (s *Service) backupCompleteVersion(tnt *storage.Tenant, rel, owner, filenam
 		// rename 前 stat 旧文件大小（覆盖写）；新文件场景 old=0。
 		if st, statErr := tnt.Root().Stat(rel); statErr == nil {
 			prev = st.Size()
+			// **与结算同源**（独立复审「释放≠结算」类根治，2026-10-18）：`prev` 会进
+			// `Adjust(prev,total)`/`ReleaseUsage(prev)`，而写入侧结算按**卷自报实测足迹** ⇒ 用
+			// `Stat` 尺寸对 secretdata 会每次覆盖写泄漏 (足迹 − 逻辑) 的幽灵占用。改名之前取足迹。
+			prev = s.releaseChargeFor(volumeNameForTenant(s.rt.volSet(), tnt), owner, rel, prev)
 		}
 	}
 	return overwrote, prev

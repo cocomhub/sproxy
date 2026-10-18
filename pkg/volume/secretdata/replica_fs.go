@@ -50,8 +50,26 @@ func (r *replicaFS) Stat(ctx context.Context, path string) (*syncpkg.Entry, erro
 	return r.targets[0].Stat(ctx, path)
 }
 
+// Rename 在**全部 target** 上执行改名（与 WriteFile/Delete 同一 target 集合）。
+//
+// 为何必须全 target（独立审核 P1，2026-10-18）：此前只改 `targets[0]`，而 WriteFile/Delete
+// 都是**全 target** ⇒ mv 后副本仍留在**源路径**，随后 `deleteFileBlobs`（经 replicaFS.Delete
+// 全 target）会把副本的**源**副本删掉 ⇒ 副本**既无源也无目标** ⇒ 主 target 故障时回退读副本
+// 失败 = **静默数据丢失**。⇒ 与写/删同集合，且失败时回滚已改名的 target（对齐 WriteFile 的
+// 「失败即回滚」约定），绝不静默分叉。
 func (r *replicaFS) Rename(ctx context.Context, from, to string) error {
-	return r.targets[0].Rename(ctx, from, to)
+	renamed := make([]int, 0, len(r.targets))
+	for i, fs := range r.targets {
+		if err := fs.Rename(ctx, from, to); err != nil {
+			// best-effort 回滚已改名的 target（把 to 改回 from），保持 target 集合一致。
+			for _, j := range renamed {
+				_ = r.targets[j].Rename(ctx, to, from)
+			}
+			return fmt.Errorf("replica: 改名 target[%d] %s -> %s 失败（已回滚）: %w", i, from, to, err)
+		}
+		renamed = append(renamed, i)
+	}
+	return nil
 }
 
 func (r *replicaFS) MakeDir(ctx context.Context, path string) error {

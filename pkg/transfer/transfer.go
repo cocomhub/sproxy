@@ -63,10 +63,18 @@ type TransferRequest struct {
 	Volume string
 	// Rel 是目标相对路径（含文件名；空 = 自动派生由调用方填）。
 	Rel string
-	// Owner 是请求者（ACL/配额判定）。
-	Owner string
+	// 注：曾有 Owner 字段（注释称「ACL/配额判定」）——**全仓无生产者/消费者**（独立审核
+	// 2026-10-18 确证）⇒ 已删除：owner 归属由卷路径层 `volume.ResolveLocation` 恒 owner 前缀
+	// 承担，转存内核不需要（也不需要读它做判定，避免"声明了却没生效"的假隔离）。
 	// Overwrite 是否允许覆盖已存在目标（false = WriteIfAbsent 拒绝）。
 	Overwrite bool
+	// SkipVerify 跳过写后读回校验（默认执行；见 readback.go。仅极端性能场景使用——
+	// 校验是"存储层静默损坏"的唯一防线）。生产接线：trusted_volume.skip_verify
+	// （见 pkg/server/cloud_download_handler.go 的归档转存调用点）。
+	SkipVerify bool
+	// 注：曾有 WantSHA256（调用方权威摘要）——**全仓无生产者**（独立复审 2026-10-18）⇒ 已删除
+	// （与已删的 Owner 同纪律）。能力保留在 `VerifyReadback(ctx, fs, rel, wantSHA256)` 形参上，
+	// 由 pkg/cloud 的下载转存路径传入 result.Checksum 使用。
 }
 
 // Execute 执行一次传输：写 source 流（经预处理）到目标卷 rel。
@@ -82,11 +90,50 @@ func Execute(ctx context.Context, req TransferRequest) (string, error) {
 	if rel == "" {
 		rel = AutoRel(req.Entries[0].Rel)
 	}
-	// 预处理流组织：None = 单文件直写；Pack = 聚合流后直写。
+	url, err := runTransfer(ctx, req, rel)
+	if err != nil {
+		return "", err
+	}
+	if verr := verifyAfterWrite(ctx, req, rel); verr != nil {
+		return "", verr
+	}
+	return url, nil
+}
+
+// runTransfer 按预处理形态分派：None = 单文件直写；Pack = 聚合流后直写。
+func runTransfer(ctx context.Context, req TransferRequest, rel string) (string, error) {
 	if req.Preprocess != nil {
 		return executePacked(ctx, req, rel)
 	}
 	return executeIndividual(ctx, req, rel)
+}
+
+// **已知残余（独立复审 P3，2026-10-18 如实记录）**：若目标 rel 上残留**陈旧 sidecar**（旧对象已删
+// 但 meta 删除 best-effort 失败）且本次 meta 落盘与失效删除**双双失败**（trusted 的
+// persistCalcMeta/invalidateMeta 退避耗尽），则读回会拿旧 meta 与**正确的新内容**比对 ⇒
+// ErrReadbackMismatch ⇒ 这里会**删除正确对象**。触发需双故障（低概率），且设计 §8.9 的既定策略是
+// "读侧 fail-closed、由显式写路径修复"（不含删主文件）。缓解方向：无 `wantSHA256` 交叉确认时不删
+// （代价：截断残骸需人工清理）——留待产品裁定。
+//
+// verifyAfterWrite 是**写后读回校验**的唯一调用点（实现见 readback.go）：
+// 目标卷有 meta.Provider 时按 meta 逐块 + 整文件比对 + 尾排检查 ⇒ 存储层静默截断/损坏不再被
+// 当成功（此前本内核只查「存在且非空」）。内容不一致 ⇒ **删除产物 + 失败**（fail-closed，不得
+// 留损坏对象）；无 Provider / meta 不可读 ⇒ 跳过（卷无 meta 概念）；meta 非法或读取 I/O 失败
+// ⇒ 报错但**不删**（无法证明内容错）。
+func verifyAfterWrite(ctx context.Context, req TransferRequest, rel string) error {
+	if req.SkipVerify {
+		return nil
+	}
+	verr := VerifyReadback(ctx, req.Destination, rel, "")
+	switch {
+	case verr == nil, errors.Is(verr, ErrNoProviderMeta):
+		return nil
+	case errors.Is(verr, ErrReadbackMismatch), errors.Is(verr, ErrReadbackWantMismatch):
+		_ = req.Destination.Delete(ctx, rel)
+		return verr
+	default:
+		return verr
+	}
 }
 
 // executeIndividual 纯转存：单条目直写目标卷（复用 WriteIfAbsent 原子写）。
@@ -120,6 +167,14 @@ func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, 
 			case err == nil:
 				return ErrExists
 			case !errors.Is(err, syncpkg.ErrUnsupported):
+				// **写失败必须清理残骸**（独立审核 P2，2026-10-18）：非原子后端（s3 单 PUT 原子，
+				// 但 webdav/ftp/baidupcs 等非原子）写中途失败会在目标路径留下**半截对象** ⇒ 若不清
+				// 理，后续每次重试都会因「目标已存在」被判 ErrExists ⇒ **永久阻断**（用户只能人工
+				// 删对象，resume 也走同一路径），且半截对象成为孤儿（其字节已由 settleTransferCharge
+				// 计入 owner 配额）。与 executePacked 的「pack 失败即删」同纪律。
+				// 安全性：本分支只在 Overwrite=false 且**存在性检查已通过**（目标原本不存在）后进入
+				// ⇒ 该 rel 上的对象只能是本次写的残骸 ⇒ 删除正确。
+				_ = dest.Delete(ctx, rel)
 				return err
 			}
 			// ErrUnsupported = 能力探针（未消费 reader）→ 降级存在性检查。
@@ -133,7 +188,14 @@ func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, 
 			return ErrExists
 		}
 	}
-	return dest.WriteFile(ctx, syncpkg.LogicalKey{}, rel, r, size, mtime)
+	if werr := dest.WriteFile(ctx, syncpkg.LogicalKey{}, rel, r, size, mtime); werr != nil {
+		if !overwrite {
+			// 同上：Overwrite=false 时该 rel 上的对象只能是本次残骸 ⇒ 清理，保证重试可自愈。
+			_ = dest.Delete(ctx, rel)
+		}
+		return werr
+	}
+	return nil
 }
 
 // executePacked 预处理后转存：聚合流写目标卷。
@@ -174,8 +236,17 @@ func executePacked(ctx context.Context, req TransferRequest, rel string) (string
 
 // packedWrite 打包流的覆盖保护写：复用 writeUnique（WriteIfAbsent 优先，拒绝覆盖；
 // 装饰器 ErrUnsupported 回落 WriteFile）。
+//
+// **size 必须传 -1（未知长度），不得传 0**（独立复审 P1，2026-10-18）：打包流的长度只有读到
+// EOF 才知道，而 0 的语义是「空对象」。s3 后端对此有明写契约（`pkg/volume/ext/s3/s3_fs.go:373`）：
+// 「size<0（未知长度）透传给 minio（走 putObjectMultipartStreamNoLength 读到 EOF）。**不得钳为 0**
+// ——那会声明 0 字节却带非空 body（**数据丢失**/语义冲突）」。实测机制：minio `api.go:1050`
+// `if metadata.contentLength == 0 { req.Body = nil }` ⇒ body 被丢弃、对象 0 字节；同时
+// trusted 的 Calculator 走 TeeReader 收不到字节 ⇒ sidecar 也记「空文件」⇒ **读回校验自洽通过**
+// （结构性不可检出，因为归档路径无权威摘要可比），而 `io.Pipe` 读端从未被读 ⇒ pack goroutine
+// 永久阻塞 ⇒ HTTP 处理 goroutine 泄漏。
 func packedWrite(ctx context.Context, req TransferRequest, rel string, pr io.Reader) error {
-	return writeUnique(ctx, req.Destination, rel, pr, 0, 0, req.Overwrite)
+	return writeUnique(ctx, req.Destination, rel, pr, -1, 0, req.Overwrite)
 }
 
 // targetURL 生成目标 URL（<scheme>://<volume>/<rel>；路径段 percent-encode，

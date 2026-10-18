@@ -57,6 +57,16 @@ func (s *Scope) WaitReserve(ctx context.Context, n int64, timeout time.Duration)
 		if !errors.Is(err, ErrStorageFull) {
 			return nil, err
 		}
+		// **不可能容纳 ⇒ 立即失败，不排队**（严格上界判据）：若 n 超过某一层的
+		// `maxBytes − 运维余量`（即使该层 committed/reserved 全归零也放不下）⇒ 等待**永远不会
+		// 成功** ⇒ 排队只会白等满超时。
+		// 实测（CI `Test (ubuntu, +Vault)` 超时 5min）：R31 把 WaitReserve 接入上传主路径后，
+		// 全仓大量「请求 > 上限」的用例各自白等 30s（DefaultWaitTimeout）累计触发测试超时；
+		// 生产表现为「确定的 507 也要先挂 30s」（可用性回归）。
+		if s.pool.canNeverFit(n) {
+			return nil, fmt.Errorf("%w: 请求 %d 字节超过容量上限（即使全部释放也无法容纳，不排队）",
+				ErrStorageFull, n)
+		}
 		if werr := s.pool.waitRound(ctx, n, deadline); werr != nil {
 			return nil, werr
 		}
@@ -69,6 +79,21 @@ func (p *Pool) WaitReserve(ctx context.Context, n int64, timeout time.Duration) 
 		return nil, errors.New("quota: nil pool")
 	}
 	return (&Scope{pool: p}).WaitReserve(ctx, n, timeout)
+}
+
+// canNeverFit 判断 n 是否**在任何释放下都无法容纳**：只要有一层满足 `n > maxBytes − 运维余量`
+// （即该层全部容量都给它也不够）⇒ 永远等不到 ⇒ 调用方必须立即失败（见 WaitReserve）。
+// 无上限层（maxBytes<=0）不构成约束。
+func (p *Pool) canNeverFit(n int64) bool {
+	for cur := p; cur != nil; cur = cur.parent {
+		cur.mu.RLock()
+		limit := cur.usableLocked()
+		cur.mu.RUnlock()
+		if limit > 0 && n > limit {
+			return true
+		}
+	}
+	return false
 }
 
 // waitRound 执行一轮「不足 → 排队等待」：**持根节点锁**先 double-check（释放可能刚刚发生 ⇒ 立即返回

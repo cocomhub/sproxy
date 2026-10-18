@@ -159,6 +159,11 @@ func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int
 	}
 	recovered, restarted := 0, 0
 	var orphanPendingGroups []string
+	// 先**收集**，循环内不动 `m.tasks`：循环里会为 downloading 任务启动下载 goroutine，
+	// 而无锁写与它们的持锁访问并发 ⇒ data race（`-race` 实测），极端时序下
+	// `fatal error: concurrent map read and map write` 崩溃，且发生在启动阶段（任务状态已被
+	// 部分改写 ⇒ 重启再次触发）。评审 P1，2026-10-18。
+	var pending []recoveredTask
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -176,30 +181,61 @@ func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int
 		// 重启后以磁盘实际占用为基准重算 ReservedSize，
 		// 与 StorageManager 启动扫描的计数器保持一致（不信任崩溃前持久化的占位值）
 		m.reconcileReservedSize(&task)
-		m.tasks[task.ID] = &task
 		recovered++
+		pending = append(pending, recoveredTask{task: &task, restart: task.Status == "downloading"})
+	}
 
-		// 仅重启 downloading 状态的任务（崩溃前正在下载）。
-		// pending 任务不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
-		// 就崩溃导致意外启动的边界情况。
-		switch task.Status {
-		case "downloading":
-			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
+	// 持锁**一次性**插入：此后 `m.tasks` 对一切持锁访问者可见且完整（不再有无锁写）。
+	m.insertRecoveredTasksLocked(pending)
+
+	// 再按状态处理（启动下载 / 孤儿 pending）：此刻循环已结束，不存在无锁写与 goroutine 并发。
+	restarted, orphanPendingGroups = m.activateRecoveredTasks(pending, orphanPendingGroups)
+	return recovered, restarted, orphanPendingGroups
+}
+
+// recoveredTask 是恢复循环收集到的一条任务及其后续处置。
+type recoveredTask struct {
+	task    *CloudTask
+	restart bool
+}
+
+// insertRecoveredTasksLocked 持锁**一次性**插入恢复集（此后 `m.tasks` 对一切持锁访问者
+// 可见且完整）。与 `activateRecoveredTasks` 拆开，就是为了让「map 写入」与「启动 goroutine」
+// 在时间上彻底分离（评审 P1：边插边启会与 goroutine 的持锁访问并发 ⇒ data race）。
+func (m *CloudDownloadManager) insertRecoveredTasksLocked(pending []recoveredTask) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range pending {
+		m.tasks[p.task.ID] = p.task
+	}
+}
+
+// activateRecoveredTasks 在恢复循环**结束之后**按状态处置：重启 downloading（崩溃前正在
+// 下载）、把孤儿 pending 转失败。返回 restarted 计数与孤儿组名。
+func (m *CloudDownloadManager) activateRecoveredTasks(pending []recoveredTask, orphanGroups []string) (int, []string) {
+	restarted := 0
+	for _, p := range pending {
+		if p.restart {
+			m.logger.Info("restarting interrupted download", "task_id", p.task.ID, "url", p.task.URL)
 			m.mu.Lock()
-			m.running[task.ID] = true
+			m.running[p.task.ID] = true
 			m.mu.Unlock()
 			m.wg.Add(1)
-			go m.executeDownload(context.Background(), &task)
+			go m.executeDownload(context.Background(), p.task)
 			restarted++
-		case "pending":
+			continue
+		}
+		// 仅重启 downloading；pending 不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
+		// 就崩溃导致意外启动的边界情况。
+		if p.task.Status == "pending" {
 			// 孤儿 pending：已落盘却从未启动（详见 failOrphanPendingTask）。
-			m.failOrphanPendingTask(&task)
-			if task.GroupID != "" {
-				orphanPendingGroups = append(orphanPendingGroups, task.GroupID)
+			m.failOrphanPendingTask(p.task)
+			if p.task.GroupID != "" {
+				orphanGroups = append(orphanGroups, p.task.GroupID)
 			}
 		}
 	}
-	return recovered, restarted, orphanPendingGroups
+	return restarted, orphanGroups
 }
 
 // failOrphanPendingTask 把恢复出来的「已持久化 pending、但从未启动」任务转终态。
@@ -477,6 +513,8 @@ type expiredCloudTask struct {
 	reservedSize   int64
 	scopeCommitted int64
 	wasPending     bool // 仅用于日志：区分「孤儿 pending 兜底清理」与普通终态过期
+	// task 指向原任务对象：删除失败时回填重试（独立复审 P2，2026-10-18）。nil = 已确认清理。
+	task *CloudTask
 }
 
 // collectExpiredCloudTasks 在锁内扫描任务表，收集到期应清理的条目并同步从内存移除。
@@ -498,10 +536,11 @@ func (m *CloudDownloadManager) collectExpiredCloudTasks(now time.Time) []expired
 			reservedSize:   t.ReservedSize,
 			scopeCommitted: accountCommittedOf(t),
 			wasPending:     t.Status == "pending",
+			task:           t,
 		})
-		t.ReservedSize = 0 // 释放后归零，防二次释放
-		// account 由 releaseTaskScope 收敛释放（见下方 scopeCommitted 释放）
-		delete(m.tasks, id)
+		// **不在收集阶段删表项/归零**（独立复审 P2，2026-10-18）：删除是 I/O（锁外执行）且可能失败，
+		// 若此处就丢弃任务，失败后既无法重试、又必须归还账本（否则永久虚占）⇒ 只能 fail-open
+		// （字节仍在盘上而账本已归还）。改为：由 cleanupExpiredCloudItem **确认删除成功后**再摘除。
 	}
 	return expired
 }
@@ -538,7 +577,26 @@ func (m *CloudDownloadManager) cleanupExpiredCloudItem(item expiredCloudTask) {
 	if root := m.cloudStateRootFor(item.owner); root != nil {
 		_ = root.Remove(cloudStateRel + "/" + item.id + ".json")
 	}
-	m.removeTaskDir(item.owner, item.taskID)
+	// **删除确认后再归还**（独立复审 P2，2026-10-18）：删除失败 ⇒ 保留占账并**回填任务**由下一轮
+	// 过期清理重试（否则"保留占账"会变成永久虚占，而"照常归还"是 fail-open）。
+	if rerr := m.removeTaskDir(item.owner, item.taskID); rerr != nil {
+		m.logger.Error("expired task dir removal failed; keeping quota charged and will retry",
+			"task_id", item.taskID, "owner", item.owner, "error", rerr)
+		if item.task != nil {
+			m.mu.Lock()
+			item.task.UpdatedAt = time.Now() // 顺延，下一轮 TTL 到期再试
+			m.tasks[item.id] = item.task
+			m.mu.Unlock()
+		}
+		return
+	}
+	m.mu.Lock()
+	// 删除已确认：摘除表项并归零（防二次释放）。
+	if item.task != nil {
+		item.task.ReservedSize = 0
+		delete(m.tasks, item.id)
+	}
+	m.mu.Unlock()
 	if item.reservedSize > 0 {
 		m.storage.ReleaseCloud(item.reservedSize)
 	}

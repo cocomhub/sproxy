@@ -282,6 +282,16 @@ func (s *Service) versionCommitCharge(volName, owner, remotePath string, root *s
 	return physicalCharge(root, written)
 }
 
+// ReleaseChargeFor 返回对象在**释放时**应归还的记账字节：卷自报**实测足迹**优先（与写入/结算
+// `settleSize` 同源），能力缺失/对象不可测 ⇒ 回落 fallback。
+//
+// **装配层必须在删除/改名之前调用**（对象存在 ⇒ 足迹可测）——否则对 `footprint ≠ 公式` 的卷
+// （secretdata 的 parity + meta pad）会**少释放** ⇒ 幽灵占用/假 507（独立复审「释放≠结算」类
+// 根治，2026-10-18：pkg/server 的版本删除/回收清理此前直接用 `root.Stat` 尺寸）。
+func (s *Service) ReleaseChargeFor(tnt *storage.Tenant, owner, rel string, fallback int64) int64 {
+	return s.releaseChargeFor(volumeNameForTenant(s.rt.volSet(), tnt), owner, rel, fallback)
+}
+
 // ReleaseVersionUsage 释放 version 桶 Scope 中已确认占用的版本文件字节（P5）。
 // 删除版本文件后按删除前 stat 的文件大小释放，避免 version 桶 committed 虚高
 // 依赖周期扫描自愈。tnt 为版本文件所在卷租户——版本字节同时释放所在卷容量池

@@ -51,7 +51,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	// 预留存储空间（全局账本 storageMgr 保留，供 /api/stats 与既有测试；租户配额并行）。
 	reserved := totalSize
 	if reserved <= 0 {
-		reserved = cloudReservePlaceholder // 1 GiB 保底
+		// 未知大小：自适应占位（可用空间按并发分摊；见 placeholderFor 的根因说明）。
+		reserved = m.placeholderFor()
 	}
 	if err := m.storage.TryReserveCloud(reserved); err != nil {
 		m.logger.Warn("storage full, cloud download rejected",
@@ -101,8 +102,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		TotalSize:    totalSize,
 		ReservedSize: reserved,
 		// 浅拷贝 Transfer：组内多子任务共享同一请求指针时，各任务独立持有副本——
-		// 否则 transferDone 的 OwnerPrefix 原地写（共享卷）对并发组转存构成 write-write
-		// 数据竞争（同值写入，-race 可报）。深度只拷贝顶层字段（Volume/Path/OwnerPrefix）。
+		// 避免并发组转存对同一 spec 的写-写竞争（同值写入，-race 可报）。深度只拷贝顶层字段
+		// （Volume/Path 等；此前注释提及的 OwnerPrefix 字段已删除——它从无生产者/消费者）。
 		Transfer:          cloneTransferSpec(params.Transfer),
 		DownloadLocal:     params.DownloadLocal,
 		Save:              params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
@@ -1032,7 +1033,9 @@ func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx con
 	m.mu.RUnlock()
 	if !exists {
 		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
-		m.removeTaskDir(task.Owner, task.ID)
+		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
+			m.logger.Warn("remove task dir failed after task deletion", "task_id", task.ID, "error", rerr)
+		}
 		return true
 	}
 	if downloadErr == nil {
@@ -1057,7 +1060,10 @@ func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx con
 	// 可能残留的任务文件（CancelTask 的 RemoveAll 在 Windows 下可能因文件被占用失败）。
 	if dlCtx.Err() == context.Canceled {
 		m.logger.Info("download cancelled", "task_id", task.ID)
-		m.removeTaskDir(task.Owner, task.ID)
+		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
+			m.logger.Warn("cancelled: remove task dir failed (CancelTask 已兜底，可能为 Windows 占用)",
+				"task_id", task.ID, "error", rerr)
+		}
 		return true
 	}
 	m.failTask(task, downloadErr.Error())
@@ -1078,7 +1084,10 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 	if !ok {
 		m.mu.Unlock()
 		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
-		m.removeTaskDir(task.Owner, task.ID)
+		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
+			m.logger.Warn("remove task dir failed (best-effort 兜底清理，不阻断终态)",
+				"task_id", task.ID, "error", rerr)
+		}
 		return
 	}
 	if stored.Status == "cancelled" {
@@ -1086,7 +1095,10 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 		m.logger.Info("download finished after cancel, discarding result", "task_id", task.ID)
 		// 取消即放弃：连同 .partial/.partial.etag 一并清理（CancelTask 已释放存储
 		// 并尝试删除，这里兜底），保持磁盘与已归零账本一致。
-		m.removeTaskDir(task.Owner, task.ID)
+		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
+			m.logger.Warn("discard after cancel: remove task dir failed (CancelTask 已兜底)",
+				"task_id", task.ID, "error", rerr)
+		}
 		return
 	}
 
@@ -1227,11 +1239,16 @@ func (m *CloudDownloadManager) persistCompleted(stored *CloudTask, task *CloudTa
 // reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）；account 实时记账已覆盖
 // sink 路径（committed==result.Size）；releaseTaskScope 按 account.Release 回拨。
 func (m *CloudDownloadManager) completeStorageFull(stored *CloudTask, destPath string, result *downloader.Result, reserved int64) {
-	m.releaseTaskScope(stored)
-	m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
-	stored.ReservedSize = 0
+	// **删除确认后再归还**（独立复审 P2，2026-10-18）：此前先 releaseTaskScope/ReleaseCloud 再删除
+	// ⇒ 删除失败时「字节仍在盘上而账本已归还」（fail-open：租户可越限至下次扫描）。与同轮 DeleteTask
+	// 的修复同纪律（见 manager_query.go 的 taskPayloadLeft 注释）。删除失败则**保持占账**，由过期
+	// 清理路径重试删除（其释放同样以删除成功为前提）。
 	removeErr := removeWithRetry(func() error { return m.removeFileOrDefault()(destPath) })
-	if removeErr != nil {
+	if removeErr == nil {
+		m.releaseTaskScope(stored)
+		m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
+		stored.ReservedSize = 0
+	} else {
 		m.logger.Error("storage full after download, remove file failed",
 			"task_id", stored.ID, "path", destPath, "error", removeErr)
 	}
@@ -1340,18 +1357,20 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFile
 // 调用方持 m.mu 写锁；删除失败并入 task.Error 保持可观测。
 func (m *CloudDownloadManager) failTaskOnStorageFull(task *CloudTask, errMsg string) {
 	oldReserved := task.ReservedSize
-	// 文件将被整体删除：先释放旧占位，避免磁盘清空后账本仍虚高
-	// （TryReserve 已失败、未增加任何预留）。
-	if oldReserved > 0 {
-		m.storage.ReleaseCloud(oldReserved)
-	}
-	m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
-	task.ReservedSize = 0
 	// 顺序不变量同 storage-full-after-download 分支：先删任务目录、后发布 failed，
 	// 否则观察者可能读到 failed 时 .partial / 最终文件仍在盘上（同一类可观测窗口）。
 	// 删除失败同样做有界重试（见 removeWithRetry），耗尽后并入 task.Error 保持可观测。
 	removeErr := m.removeTaskDirWithRetry(task.Owner, task.ID)
-	if removeErr != nil {
+	// **删除确认后再归还**（独立复审 P2，2026-10-18）：此前先释放旧占位 + releaseTaskScope 再删除
+	// ⇒ 删除失败时「字节仍在盘上而账本已归还」（fail-open）。改为：仅当删除成功（或目录已不存在）
+	// 才归还；失败则保持占账，由过期清理路径重试删除。
+	if removeErr == nil {
+		if oldReserved > 0 {
+			m.storage.ReleaseCloud(oldReserved)
+		}
+		m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
+		task.ReservedSize = 0
+	} else {
 		m.logger.Error("storage full after download, remove task dir failed",
 			"task_id", task.ID, "owner", task.Owner, "error", removeErr)
 	}
@@ -1474,18 +1493,20 @@ func (m *CloudDownloadManager) transferAfterDownload(ctx, dlCtx context.Context,
 	}
 	tr, newResult, terr := m.transferDone(ctx, task, destPath, result, func(c context.Context) (*downloader.Result, error) {
 		// 文件异常重下载：清空后按 runRetryLoop 语义重下（续传禁用——文件已损坏）。
-		// NM2：删旧文件前回拨其已计字节（account committed / 全局账本），否则重下再次
-		// commit → 账本双倍（Scope 虚高）。回拨后磁盘=0、账本=0，重下从零计。
-		// 释放按**磁盘真值**（stat destPath）而非外层 result.Size：动态源重下后尺寸可能
-		// 与首次不同（NM2 Minor：用旧 size 释放会让 committed 与磁盘偏离，finalize 只
-		// Adjust 向上取 max 不抹平虚高）。
+		// 清账：删旧产物并回拨其已计字节（account committed），否则重下再次 commit ⇒ 账本
+		// 双倍（Scope 虚高）。回拨后磁盘=0、账本=0，重下从零计。
+		//
+		// **金额取自账户权威记录**（ReleaseAllCommitted），不再从 result.Size / stat 推断：
+		// 此前闭包捕获的是**外层 result**（只在 transferDone 返回后才被 newResult 更新），且
+		// os.Stat(destPath) 在本路径恒失败（产物已由失败的 transfer 移走/清理）⇒ 第 2 次及以后
+		// 的重下仍用**第 1 次**的 Size ⇒ 动态源两次尺寸不同时 committed 与实际偏离（少释放 ⇒
+		// 幽灵占用 ⇒ 假 507；多释放 ⇒ 短时超限）。
+		//
+		// **不回拨全局占位**（ReservedSize）：任务仍在运行、产物将被重下重建，占位是本任务磁盘
+		// 上界，应保持（否则重下期间的保护被削弱）；它由任务终结路径统一释放。
+		// **fail-closed 顺序**：确认产物消失后才回拨（删除失败则不回拨，避免"账本已减而字节仍在"）。
 		m.logger.Warn("transfer 文件异常，重新下载", "task_id", task.ID, "filename", task.Filename)
-		diskSize := result.Size
-		if st, serr := os.Stat(destPath); serr == nil {
-			diskSize = st.Size()
-		}
-		m.releaseDownloadedBytes(task, diskSize)
-		_ = os.Remove(destPath)
+		m.discardTaskOutputForRedownload(task, destPath)
 		return m.runRetryLoop(ctx, dlCtx, task, destPath)
 	})
 	if terr != nil {
@@ -1643,6 +1664,28 @@ func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 //   - 租户 Scope：account 已 commitUp 该字节 → 按磁盘真值 reconcile（减量 Adjust）。
 //
 // 磁盘侧由调用方删文件。account 保留（重下继续复用同一 account，增量 commit）。
+// discardTaskOutputForRedownload 丢弃重下前的旧产物，并**按账户权威记录**回拨租户 Scope 占用。
+//
+// 金额取自账户自身（ReleaseAllCommitted）⇒ 调用方无从传错尺寸（旧路径传闭包捕获的旧
+// result.Size，动态源下与实际 committed 不符 ⇒ 少释放 ⇒ 幽灵占用 ⇒ 假 507）。
+// **fail-closed 顺序**：确认产物消失后才回拨（删除失败则不回拨，避免「账本已减而字节仍在」；
+// 该占用由任务终结路径统一释放）。**不回拨全局占位**（ReservedSize）：任务仍在运行、产物将被
+// 重下重建，占位是本任务的磁盘上界，应保持。
+func (m *CloudDownloadManager) discardTaskOutputForRedownload(task *CloudTask, destPath string) {
+	rerr := m.removeFileOrDefault()(destPath)
+	if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		m.logger.Warn("重下前删除旧产物失败，不回拨账本（任务终结时统一释放）",
+			"task_id", task.ID, "error", rerr)
+		return
+	}
+	if task.account == nil {
+		return
+	}
+	if released := task.account.ReleaseAllCommitted(); released > 0 {
+		m.logger.Info("重下前回拨账本（账户权威记录）", "task_id", task.ID, "released", released)
+	}
+}
+
 func (m *CloudDownloadManager) releaseDownloadedBytes(task *CloudTask, size int64) {
 	if size <= 0 {
 		return

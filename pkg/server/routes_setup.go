@@ -71,6 +71,10 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*AuditRing, *AuditStore)
 func (h *Handlers) initStorageLayout(vs *registry.Set, cfg *Config, log *slog.Logger) {
 	h.globalRoot = vs.DefaultRoot()
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
+	// 运维余量接线（独立审核 P2，2026-10-18）：`Pool.SetOperationalReserve` 此前**零生产
+	// 调用点** ⇒ `p.reserve` 恒 0 ⇒ usableLocked 不扣余量 ⇒ 用户裁定的「绝不磁盘打满」
+	// 从未生效。此处按配置接入（0 = 不保留，零回归）。
+	h.globalPool.SetOperationalReserve(cfg.OperationalReserveBytes)
 	// 默认卷租户：预建 meta 桶（per-tenant checksum / 凭据记录落点）。非默认卷由
 	// pkg/volume/registry 按卷各持一个缓存（不预建 meta，见 Set.Tenant）。
 	h.tenants = storage.NewTenantCache(h.globalRoot,

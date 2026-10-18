@@ -30,7 +30,7 @@
 
 | # | 不变式 | 强制点 |
 |---|---|---|
-| I1 | `Σ 子节点上限 ≤ 父节点可用上限` | 配置路径 `EnsureChild`（超额**原子失败**） |
+| I1 | `Σ **直接子**节点上限 ≤ 父节点可用上限`（**carve-out 模型**：子额度是父额度的再切分 ⇒ `allocated` = Σ 直接子上限，只记**直接父**；逐级上溯会双计。`EnsureChild`/`Pool.Scope`/`Scope.Mount`/`EnsureScope` 共用同一记账实现；超额**原子失败**） | 配置路径（上述四者，超额 ⇒ 原子失败/nil） |
 | I2 | `节点 committed + reserved ≤ 节点可用上限` | `reserveUp` **沿父链**校验（一次调用同时校验 目录→用户→卷） |
 | I3 | `可用上限 = maxBytes − 运维余量` | `usableLocked()`；运维余量仅卷根设置 |
 | I4 | **`预占 ≥ 实际物理占用`** | 卷策略 `ChargeForCreate` 返回严格上界；e2e 硬断言 |
@@ -237,3 +237,18 @@ S2（物理足迹）再把「结算值」改为**物理**⇒ 口径正确。**�
 3. **存量回落**：无 `charged_bytes` 的对象删除 ⇒ 回落测量释放 + metric 计数（不静默）。
 4. **变异**：① 释放改回测量 ⇒ 加密卷一致性用例红；② 写侧不记记录 ⇒ 释放回落到测量 ⇒ 红；
    ③ `PhysSize` 改恒等 ⇒ 物理正确性用例红。
+
+## 已知残余（独立复审 2026-10-18 登记）
+
+1. ~~等待队列的丢唤醒窗口~~ **已修复（2026-10-18，根因解决）**：`cond.L` 改为**根等待锁**
+   `Pool.waitMu`，全部释放/放宽入口（`ReleaseUsage`/`Adjust`/`ReleaseCommitted`/
+   `ReleaseCommittedAndUnmount`/`SetMaxBytes`/`SetOperationalReserve`/`EnsureChild`/
+   `Allocation.Release|Set`/`Reservation.Release`）经 `Pool.withWaitLock` 在**同一把锁**下变更 +
+   广播 ⇒ 广播不可能落在「判定不足 → Wait」窗口内。全局锁序：`waitMu → allocMu → node.mu`。
+   结构性保证＝**门禁 R34**（`internal/archcheck/quota_waitlock_gate_test.go` + `quota_waitlock.tsv`，
+   11 个入口登记；变异验证：去掉任一包裹 ⇒ 必红）；行为面＝`TestWaitReserve_WokenByDeepChildRelease`。
+2. **分配账本尚未在生产装配接线**：生产配额树仍由 `Pool.Scope`/`Scope.Mount`/`EnsureScope` 构建
+   （不记分配账）⇒ `Allocated()/Unallocated()` 目前为 0/失真、I1 在这些节点上尚无强制点（用量侧
+   I2 不受影响）。接线计划见 §S4。
+3. **陈旧 sidecar 双故障下可能删除正确对象**（pkg/transfer 读回校验；见其 `verifyAfterWrite` 注释）。
+4. **cloud 转存读回在写锁释放后执行**（并发写窗口；见 `pkg/cloud/transfer.go` 的 readbackVerify 注释）。

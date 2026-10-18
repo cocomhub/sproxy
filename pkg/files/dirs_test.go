@@ -65,6 +65,9 @@ type dirsEnv struct {
 	versioningRetention   time.Duration
 	// dedupEnabled 为 true 时注入内容寻址去重能力（DedupStoreFor 懒建 per-owner 台账）。
 	dedupEnabled bool
+	// phys 是可选的卷物理足迹能力（默认 nil = 无该能力，回落公式）——供「释放与结算同源」
+	// 类用例注入与公式不同的足迹（模拟 secretdata 的 parity + meta pad）。
+	phys VolumePhysFootprinter
 	// contentIndex 为 true 时启用内容索引（WithContentIndex）——默认 false 零回归。
 	contentIndex bool
 	// metrics 非 nil 时注入为领域计量能力（断言 RecordUpload/RecordDelete 调用）。
@@ -179,6 +182,9 @@ func (e *dirsEnv) newService() *Service {
 	}
 	if e.fileMeta {
 		opts = append(opts, WithFileMeta(testMetaPolicy{}))
+	}
+	if e.phys != nil {
+		opts = append(opts, WithPhysFootprinter(e.phys))
 	}
 	if e.externalOps != nil {
 		opts = append(opts, WithExternalOps(e.externalOps))

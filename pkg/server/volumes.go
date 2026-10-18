@@ -563,7 +563,13 @@ func (h *Handlers) routeUploadLegacy(owner, rel string, size int64) (*volumeRout
 	}
 	route := &volumeRoute{tenant: tnt, scope: h.quotaScopeFor(owner, rel)}
 	if route.scope != nil {
-		res, err := route.scope.TryReserve(size)
+		// **排队等待重试**（独立审核 P2，2026-10-18）：`Scope.WaitReserve` 此前**零生产调用点**
+		// ⇒ 用户裁定（2026-10-14）的「严格上界预占 + 不够时**继续队列重试等待**」从未生效，
+		// 「真正放得下的文件最终一定成功」落空（一次 507 直接拒）。不足时排队等待释放广播，
+		// **超时（默认 30s）后才**按容量不足失败。
+		// 残余（如实记录）：未串入请求 ctx（本函数签名无 ctx，需经 files.Runtime 逐层 plumbing）
+		// ⇒ 客户端断连时仍等到超时（有界 30s），不影响正确性。
+		res, err := route.scope.WaitReserve(context.Background(), size, h.quotaWaitTimeout)
 		if err != nil {
 			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}
@@ -613,7 +619,13 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 	}
 	route := &volumeRoute{volumeName: volName, tenant: tnt, sink: external, scope: h.quotaScopeFor(owner, rel)}
 	if route.scope != nil {
-		res, err := route.scope.TryReserve(size)
+		// **排队等待重试**（独立审核 P2，2026-10-18）：`Scope.WaitReserve` 此前**零生产调用点**
+		// ⇒ 用户裁定（2026-10-14）的「严格上界预占 + 不够时**继续队列重试等待**」从未生效，
+		// 「真正放得下的文件最终一定成功」落空（一次 507 直接拒）。不足时排队等待释放广播，
+		// **超时（默认 30s）后才**按容量不足失败。
+		// 残余（如实记录）：未串入请求 ctx（本函数签名无 ctx，需经 files.Runtime 逐层 plumbing）
+		// ⇒ 客户端断连时仍等到超时（有界 30s），不影响正确性。
+		res, err := route.scope.WaitReserve(context.Background(), size, h.quotaWaitTimeout)
 		if err != nil {
 			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}
