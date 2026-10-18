@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -153,7 +155,8 @@ func TestStagingQuotaExhausted_ReplayableSourceFallsBack(t *testing.T) {
 }
 
 // TestStagingDegradeReason_ClassifiesCtxVsQuota（P2-3）：降级原因文案必须区分 ctx 取消/超时与
-// 配额拒绝——此前无日志且把 ctx 取消也说成「配额不足」。
+// 配额拒绝——此前无日志且把 ctx 取消也说成「配额不足」。P2 补（2026-10-19）：单列磁盘满
+// （ENOSPC）与可复用的 nil（原 `err==nil` 死分支已删，nil 仍安全走默认文案）。
 func TestStagingDegradeReason_ClassifiesCtxVsQuota(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -163,8 +166,11 @@ func TestStagingDegradeReason_ClassifiesCtxVsQuota(t *testing.T) {
 	}{
 		{"ctx 取消", context.Canceled, "调用方上下文已取消"},
 		{"ctx 超时", context.DeadlineExceeded, "调用方上下文超时"},
+		{"磁盘满", syscall.ENOSPC, "本地临时目录磁盘满"},
+		{"磁盘满（包装）", fmt.Errorf("mkdir: %w", syscall.ENOSPC), "本地临时目录磁盘满"},
 		{"配额", errors.New("secretdata: 本地 staging 配额不足（防本地磁盘打满）: boom"), "staging 配额不足"},
 		{"临时目录", os.ErrPermission, "本地临时目录不可用"},
+		{"nil（不应 panic）", nil, "本地临时目录不可用"},
 	}
 	for _, c := range cases {
 		if got := stagingDegradeReason(c.err); got != c.want {

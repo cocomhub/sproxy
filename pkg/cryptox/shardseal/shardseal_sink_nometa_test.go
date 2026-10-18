@@ -70,6 +70,20 @@ func TestEncryptShardsReaderToChunks_SkipsMetaKeepsChunks(t *testing.T) {
 	if berr != nil {
 		t.Fatalf("EncryptMetaJSON: %v", berr)
 	}
+	// **meta blob 必须真正参与还原**（不得自证式丢弃 `_ = metaBlob`）：先独立解密得落盘 meta，
+	// 再用它跑真实读路径 DecryptFile（分块 + meta 均由磁盘还原）。
+	plainMeta, dmerr := DecryptMetaStandalone(secret, metaBlob)
+	if dmerr != nil {
+		t.Fatalf("独立解密调用方加密的 meta blob: %v", dmerr)
+	}
+	var persisted Meta
+	if uerr := json.Unmarshal(plainMeta, &persisted); uerr != nil {
+		t.Fatalf("反序列化落盘 meta: %v", uerr)
+	}
+	if persisted.Original.Name != "f.bin" || persisted.Salt != res.Meta.Salt || len(persisted.Chunks) != len(res.Meta.Chunks) {
+		t.Fatalf("落盘 meta 与内存 meta 不一致（name=%q salt=%q chunks=%d）",
+			persisted.Original.Name, persisted.Salt, len(persisted.Chunks))
+	}
 	dir := t.TempDir()
 	for name, blob := range blobs {
 		if werr := os.WriteFile(filepath.Join(dir, name), blob, 0o600); werr != nil {
@@ -77,7 +91,7 @@ func TestEncryptShardsReaderToChunks_SkipsMetaKeepsChunks(t *testing.T) {
 		}
 	}
 	dst := filepath.Join(t.TempDir(), "out.bin")
-	if derr := DecryptFile(res.Meta, dir, dst, secret); derr != nil {
+	if derr := DecryptFile(&persisted, dir, dst, secret); derr != nil {
 		t.Fatalf("skipMeta 产物经真实读路径还原失败: %v", derr)
 	}
 	got, rerr := os.ReadFile(dst)
@@ -87,5 +101,4 @@ func TestEncryptShardsReaderToChunks_SkipsMetaKeepsChunks(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("还原内容不一致（%d vs %d 字节）", len(got), len(payload))
 	}
-	_ = metaBlob
 }

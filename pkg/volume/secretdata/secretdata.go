@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
@@ -951,10 +952,10 @@ func (s *SecretdataFS) beginWrite(expected int64) (int64, int64, func(), error) 
 // writeFileStream 流式写路径（可 seek 源）：逐块加密 + 流式哈希 + **块级交错上传**，内存峰值
 // O(单块上限)、本地临时峰值 O(1 块)。与 writeFileEncrypted 同构（临时目录 → 加密 → 上传 →
 // commit），差别在：
-//   - `wc.reader` 可 seek ⇒ 走 EncryptShardsReaderTo（逐块产出即上传，不再先把整份分块落 temp）；
+//   - `wc.reader` 可 seek ⇒ 走 EncryptShardsReaderToChunks（逐块产出即上传，不再先把整份分块落 temp）；
 //   - meta 需要**全部分块**的信息（哈希/偏移/parity）⇒ 必须留到最后，以内存态写出（不落盘）。
 //
-// video-keyframe 模式由 EncryptShardsReaderTo 内部按 seek 判定（非 keyframe 才流式；
+// video-keyframe 模式由 EncryptShardsReaderToChunks 内部按 seek 判定（非 keyframe 才流式；
 // keyframe 亦走流式——parseOnce 经 io.ReaderAt 扫描关键帧表，与逐块加密兼容，上层**无**
 // ReadAll 回退分支，见 shardseal_stream_test.go:TestEncryptShardsReader_VideoKeyframeParity）。
 func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr error) {
@@ -1101,13 +1102,13 @@ func (s *SecretdataFS) beginInterleavedUpload(ctx context.Context, wc writeCtx, 
 // 使用）：区分「调用方 ctx 取消或超时」与「配额拒绝」，避免把 ctx 取消说成配额不足。
 func stagingDegradeReason(err error) string {
 	switch {
-	case err == nil:
-		return "本地临时目录不可用"
 	case errors.Is(err, context.Canceled):
 		return "调用方上下文已取消"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "调用方上下文超时"
-	case strings.Contains(err.Error(), "配额"):
+	case errors.Is(err, syscall.ENOSPC):
+		return "本地临时目录磁盘满"
+	case err != nil && strings.Contains(err.Error(), "配额"):
 		return "staging 配额不足"
 	default:
 		return "本地临时目录不可用"
@@ -1390,14 +1391,21 @@ func replayableSourcePath(r io.Reader) string {
 	return name
 }
 
+// rollbackTimeout 是回滚清理（删已上传 blob + 回收空容器）的硬上限：回滚不能随调用方
+// 取消而放弃（见 rollbackWrite），但也**不能无界**——远端 Delete/ListDir 挂起会永久阻塞，
+// 且 pruneCreatedDirs 持 s.mu 做 I/O ⇒ 可以拖死整卷（P2 修复，2026-10-19）。30s 覆盖
+// 单次远端删除的正常上限并给回滚集合（通常 1..N 个 blob）留足余量。
+const rollbackTimeout = 30 * time.Second
+
 // rollbackWrite 失败回滚：删除本次已上传的新 meta/分块；再回收本次新建且已成空的容器
 // （目录 meta + 注销映射，删新留旧，F-2）。保有他人并发写入内容的容器不删（安全）。
 func (s *SecretdataFS) rollbackWrite(ctx context.Context, uploaded []string, created []dirCreation) {
 	// 清理必须**不受调用方 ctx 取消影响**（P2 修复，2026-10-19）：写失败常伴随 ctx 取消/
 	// 超时（客户端断开、上层 deadline）——若用已取消的 ctx 做 Delete/ListDir，底层立即返回
 	// ctx.Err() ⇒ 已上传分块/meta 全部残留为远端孤儿。回滚是本卷自身的补偿动作，不随调用方
-	// 取消而放弃。
-	cctx := context.WithoutCancel(ctx)
+	// 取消而放弃；但必须有界（见 rollbackTimeout），否则挂起的远端 I/O 会持锁拖死整卷。
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
 	for _, p := range uploaded {
 		_ = s.inner.Delete(cctx, p)
 	}
@@ -2900,23 +2908,38 @@ func (s *SecretdataFS) stagingTracker() syncpkg.StagingQuotaTracker {
 // ⇒ 调用方必须 fail-closed（不落临时物）。未装配配额（nil）⇒ 直通（返回 no-op 释放），
 // 与 gate 的零回归口径一致。
 func (s *SecretdataFS) stagingReserve(ctx context.Context, size int64) (func(), error) {
-	return s.stagingReserveBytes(ctx, cipherPeak(max(size, 0))+2*int64(s.metaPadTarget()))
+	// 密文块总量上界 + 纠错卷 parity 段上界 + meta pad 上界（后者为「每文件一个 meta blob」的
+	// 历史口径；本路径 meta 实为内存态上传、不落 temp，属保守余量，保留不改）。
+	need := cipherPeak(max(size, 0)) + s.erasureParityPeak() + 2*int64(s.metaPadTarget())
+	return s.stagingReserveBytes(ctx, need)
 }
 
-// cipherPeak 返回**明文大小 ≤ plainBytes 的单块密文长度上界**（staging 预留口径，P2 修复
+// cipherPeak 返回**明文大小 ≤ plainBytes 的单块密文长度近似上界**（staging 预留口径，P2 修复
 // 2026-10-19）：本地分块副本是**密文块**（sink 形态直接落加密后的 blob），其长度 > 明文——
 // 密文 = [blob 头 R128 + 8B 长度 + 32B salt] + boot 段 + 段序列（每段 12B nonce + 明文 +
 // 16B tag）+ 段间随机间隙（<64B each）+ 索引块（每段一条 JSON 条目）。按明文预留会**低估**
-// 实际落盘量（多段/多间隙时尤甚），故统一按含头/tag/索引的上界预留。
+// 实际落盘量（多段/多间隙时尤甚），故统一按含头/tag/索引的近似上界预留。
 //
-// 上界取 plain + plain/32 + 512：plain/32（≈3.1%）覆盖每段 nonce/tag/间隙/索引开销——
-// fixed 段规划实测 <0.2%（4MB 段），video-keyframe 的 GOP 边界远疏于此；512B 覆盖 blob
-// 固定头 + boot 段 + 索引块头 + 抖动余量。
+// 近似口径取 plain + plain/32 + 512：plain/32（≈3.1%）覆盖每段 nonce/tag/间隙/索引开销——
+// fixed 段规划实测 <0.2%（4MB 段）；**但 video-keyframe 的密集关键帧**会产生远超 plain/32 的
+// 极小段（段头/索引开销占比放大）⇒ 本值是**工程近似、非形式化最坏界**（staging 是本卷自管的
+// 软门，超预留不损坏数据，仅可能触发内存降级）。512B 覆盖 blob 固定头 + boot 段 + 索引块头 + 抖动余量。
 func cipherPeak(plainBytes int64) int64 {
 	if plainBytes <= 0 {
 		return 0
 	}
 	return plainBytes + plainBytes/32 + 512
+}
+
+// erasureParityPeak 返回纠错卷额外写入本地 temp 的 parity 段上界：parity 明文 ≤ 单分块明文
+// 上界（policy.Max）⇒ 其密文上界 = cipherPeak(policy.Max)。此前 staging 预留漏计 parity，
+// 使纠错卷本地临时物被低估（P2 修复，2026-10-19）。非纠错卷 / 无有效块上界 ⇒ 0。
+// 注：parity 仅在分块数 ≥2 时生成；单分块文件会多预留一个块上界（保守，不误拒大文件）。
+func (s *SecretdataFS) erasureParityPeak() int64 {
+	if !s.opts.Erasure || s.opts.Block.Max <= 0 {
+		return 0
+	}
+	return cipherPeak(int64(s.opts.Block.Max))
 }
 
 // stagingReserveInterleaved 为**块级交错**写路径预留本地 staging 配额：本地峰值 = 单个分块密文
@@ -2928,8 +2951,10 @@ func (s *SecretdataFS) stagingReserveInterleaved(ctx context.Context, size int64
 		peak = int64(policy.Max)
 	}
 	// 本地副本是**密文块**（> 明文）⇒ 按密文上界预留（cipherPeak），避免低估导致实际落盘
-	// 超出预留（P2 修复，2026-10-19）。
-	return s.stagingReserveBytes(ctx, cipherPeak(peak)+2*int64(s.metaPadTarget()))
+	// 超出预留（P2 修复，2026-10-19）。**不再叠加 meta pad**：本路径 meta 走内存态直传、
+	// 不落 temp（P2 修复，2026-10-19）——此前叠加 2×metaPad（默认 1–2MiB）使小块文件预留
+	// 3–5× 实际 temp，触发不必要的内存降级。纠错不走本路径（流式与 Erasure 互斥），故无 parity 项。
+	return s.stagingReserveBytes(ctx, cipherPeak(peak))
 }
 
 // stagingReserveBytes 按**显式字节数**预留 staging 配额（口径见 stagingReserve 注释）。

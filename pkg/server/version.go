@@ -422,10 +422,19 @@ func (h *Handlers) restoreCopyVersionFile(rc *versionRestoreCopyCtx) (int64, boo
 		}
 		defer src.Close()
 
+		// 版本恢复：**必须传真实长度**（P2 修复，2026-10-19）。此前恒传 -1（未知长度）——
+		// 对加密卷（secretdata）而言「可 seek 源 + 未知长度」会命中 `ErrUnknownSourceSize`
+		// 守卫（流式分块规划需要确定长度）⇒ 版本恢复到加密卷恒失败（旧实现同样失败，但错误
+		// 文案误导为「空文件不可分块」）。此处按版本文件的真实（逻辑）长度声明；取不到时
+		// 保持 -1（fail-closed，文案已明确）。
+		restoreSize := int64(-1)
+		if vst, verr := rc.verLoc.Tenant.Root().Stat(rc.verRel); verr == nil && vst != nil {
+			restoreSize = vst.Size()
+		}
 		res, werr := h.fileService().WriteTarget(rc.r.Context(), files.WriteTargetInput{
 			Owner: rc.owner, RemotePath: strings.TrimPrefix(rc.targetRel, "user/"),
 			Volume: rc.dstVol, Verify: false, NoLock: true, NoQuota: true, NoRecord: true,
-			ClientSize: int64(-1),
+			ClientSize: restoreSize,
 		}, src)
 		if werr != nil {
 			rc.releaseRes()

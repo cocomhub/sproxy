@@ -1165,8 +1165,10 @@ type LeaderElector interface {
 ### ① secretdata over 外部卷（baidupcs 优先）——**最高优先**
 - [ ] **接线核实与收口**：`type: secretdata` + `extra.target: "<外部卷>/<子目录>"`（嵌套形态，装配层经
       `TranslateNestedDecl` 翻译为封装声明）在**外部源**上的端到端可用性——装配层已支持（`pkg/volume/enclosure/attach.go`
-      列出 s3/baidupcs/pikpak/cluster 等外部源），但**当前无任何测试覆盖**（e2e 只覆盖 local target）；
-      `docs/secret-volume.md §9` 的「对象存储类外部 target 仍预留」措辞疑为 stale ⇒ 按实测更正。
+      列出 s3/baidupcs/pikpak/cluster 等外部源）；**单测已覆盖**（外部后端替身，`cmd/sproxy/secret_register_test.go`
+      的 `TestSetupSecretBackends_ConfigSecretdata_Assembled` / `multi_layer_chain_over_external_source` 子用例），
+      但**缺真实网盘 e2e**（e2e 只覆盖 local target）（2026-10-19 更正：此前记为「无任何测试覆盖」已 stale）。
+      `docs/secret-volume.md §3/§9` 的「对象存储类外部 target 仍预留」措辞已按实测更正（仅「外部卷**整卷**」仍预留）。
 - [ ] **性能：消除分块二次本地拷贝**：secretdata 上传每个加密分块用 `s.inner.WriteFile(ctx, key, path, reader, …)`
       ⇒ 目标卷（baidupcs）会**再落一份本地 staging**（其 `WriteFromStagedPath` / `WithStagedLocalPath` 已具备）。
       修：把 secretdata 的**临时分块路径**经 `syncpkg.WithStagedLocalPath`（或 `WriteFromStagedPath`）交给内层
@@ -1233,9 +1235,10 @@ type LeaderElector interface {
 
 **实施状态（2026-10-18，块级交错已落地）**：
 
-- ✅ **块级交错上传**：`shardseal.EncryptShardsReaderTo`（新 sink 抽象：分块逐块交调用方、meta 不落盘，
-  以 `EncryptionResult.MetaBlob` 返回）⇒ `secretdata.writeFileStream` 走 sink：**加密一块 → 上传一块 →
-  丢弃**，meta 留到末尾且**内存态**上传。实测（≈570KiB / 32KiB 块 = 18 块）：本地分块副本峰值 **18 → 1**（O(file) → O(1 块)）。
+- ✅ **块级交错上传**：`shardseal.EncryptShardsReaderToChunks`（新 sink 抽象：分块逐块交调用方、meta **不**在 shardseal 内加密，
+  `EncryptionResult.MetaBlob/MetaName` 留空、由调用方按最终 meta 自行加密一次）⇒ `secretdata.writeFileStream` 走 sink：**加密一块 → 上传一块 →
+  丢弃**，meta 留到末尾且**内存态**上传。实测（≈510KiB / 32KiB 块 = 16 块，
+  `TestWriteFile_InterleavedChunkUploadLocalPeakO1Block`）：本地分块副本峰值 **16 → 1**（O(file) → O(1 块)）。
   staging 配额预留口径同步改为「单块上界 + meta pad」（`stagingReserveInterleaved`），不再随文件线性增长。
 - ✅ **所有分块上传点统一经 `WithStagedLocalPath`**（`uploadLocalChunk`）：数据分块、**parity**、**dedup**
   单分块（此前 parity/dedup 走 `bytes.NewReader` 内存交付 ⇒ 内层二次落 staging）。
@@ -1256,3 +1259,10 @@ type LeaderElector interface {
   3. **回退链的「重算」（②）落在上层**：本层不做单块重加密（无 per-block 加密 API；重算 = 上层重试整次写，
      见 `pkg/backup.transferWithRetry`）⇒ 本层保证「源不被消费/销毁 + 失败返回明确错误 + 完整回滚」，
      使上层重算可行。③ 的判据按设计原文取「源是否**路径**可重读（本地文件/已暂存路径）」。
+  4. **「先登记后上传」未覆盖全部上传点**（2026-10-19 新发现，本轮未改）：主写路径的分块/meta 已改
+     「先登记后上传」（内层「写成功但复核失败」时可从回滚集合删除），但下列上传点仍是「写后登记」——
+     目录 meta（`secretdata.go` `createContainerLocked`）、同卷复制（`copyContentBlobs`/`copyBlob`）、
+     改名（`writeRenamedMetaLocked`）、`copyFileLocked`（`copy.go`）、**dedup 命中路径**（`features.go`
+     `writeFileDedupHit`：失败时仅 `releasePoolRef`、不删已落 meta）。**影响**：这些路径遇内层
+     write-then-fail 会在远端留孤儿 blob（无数据丢失，属空间泄漏，由既有可选 GC 兜底）。
+     **最小修法**：抽 `uploadAndTrack`（登记→上传→失败即删）并让上述点统一调用。

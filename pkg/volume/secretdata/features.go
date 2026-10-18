@@ -118,8 +118,13 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 		return terr
 	}
 	defer cleanup()
-	o, chunkPath, uerr := s.encryptAndUploadDedupChunk(ctx, wc, dir, tmp, mt)
+	// **先登记后上传**（P2 修复，2026-10-19）：池 blob 名含随机 salt/nonce（不复用）⇒ 内层
+	// 「写成功但复核失败」返回错误时 blob 已落远端，必须能从回滚集合删除，否则**永久孤儿**
+	// （与主写路径 uploadLocalChunk / 交错内存交付同口径）。
+	uploaded := []string{}
+	o, _, uerr := s.encryptAndUploadDedupChunk(ctx, wc, dir, tmp, mt, &uploaded)
 	if uerr != nil {
+		s.rollbackWrite(ctx, uploaded, nil)
 		return uerr
 	}
 	chunkName := o.ChunkNames[0]
@@ -133,12 +138,12 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 	meta.Extra["dedup"] = dir // string（Extra 统一 map[string]any，2026-10-07 用户裁定）
 	name, metaBlob, err := s.encryptMetaBlob(meta)
 	if err != nil {
-		_ = s.inner.Delete(ctx, chunkPath)
+		s.rollbackWrite(ctx, uploaded, nil)
 		return err
 	}
 	metaPath := path.Join(wc.container, name)
 	if werr := s.uploadBlob(ctx, metaPath, metaBlob, mt); werr != nil {
-		_ = s.inner.Delete(ctx, chunkPath)
+		s.rollbackWrite(ctx, uploaded, nil)
 		return fmt.Errorf("secretdata: 上传去重 meta 失败: %w", werr)
 	}
 	s.mu.Lock()
@@ -147,15 +152,15 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 		// 返回 errEntryExists（调用方映射为 (false,nil)），绝不覆盖他人条目。
 		if _, ok := s.index[wc.rel]; ok {
 			s.mu.Unlock()
-			_ = s.inner.Delete(ctx, chunkPath)
 			_ = s.inner.Delete(ctx, metaPath)
+			s.rollbackWrite(ctx, uploaded, nil)
 			return errEntryExists
 		}
 	}
 	if wc.expected >= 0 && s.volVersion != wc.sv {
 		s.mu.Unlock()
-		_ = s.inner.Delete(ctx, chunkPath)
 		_ = s.inner.Delete(ctx, metaPath)
+		s.rollbackWrite(ctx, uploaded, nil)
 		return versionConflictErr(wc.sv, wc.expected)
 	}
 	// 并发未命中（同 ID 双首写）：已有池条目则保留其 blob 作他人共享，本文件持自有
@@ -279,13 +284,14 @@ func (s *SecretdataFS) dedupStagingDir(ctx context.Context, size int64) (string,
 
 // encryptAndUploadDedupChunk 把去重整文件内容按单分块加密（落 tmp）并上传到池容器 dir
 // （经既有暂存复用机制交付本地路径 ⇒ 内层零二次拷贝），返回加密结果与池内底层路径。
-func (s *SecretdataFS) encryptAndUploadDedupChunk(ctx context.Context, wc writeCtx, dir, tmp string, mt int64) (*shardseal.EncryptionResult, string, error) {
+// **先登记后上传**：目标路径在调用内层前追加到 *uploaded（同 uploadLocalChunk 口径），
+// 供调用方在内层「写成功但复核失败」时回滚删除（池 blob 名随机不复用 ⇒ 否则永久孤儿）。
+func (s *SecretdataFS) encryptAndUploadDedupChunk(ctx context.Context, wc writeCtx, dir, tmp string, mt int64, uploaded *[]string) (*shardseal.EncryptionResult, string, error) {
 	o, chunkLocal, err := s.encryptContentSingle(wc.data, wc.rel, tmp)
 	if err != nil {
 		return nil, "", err
 	}
-	uploaded := []string{}
-	if werr := s.uploadLocalChunk(ctx, dir, o.ChunkNames[0], chunkLocal, mt, &uploaded); werr != nil {
+	if werr := s.uploadLocalChunk(ctx, dir, o.ChunkNames[0], chunkLocal, mt, uploaded); werr != nil {
 		return nil, "", fmt.Errorf("secretdata: 上传去重分块失败: %w", werr)
 	}
 	return o, path.Join(dir, o.ChunkNames[0]), nil

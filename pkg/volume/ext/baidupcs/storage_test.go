@@ -4,15 +4,18 @@
 package baidupcs
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // 测试双算法校验
 	"encoding/hex"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -724,6 +727,49 @@ func TestStorage_Put_UnreliableMD5SizeMismatchRejected(t *testing.T) {
 	}
 }
 
+// TestStorage_Put_UnreliableMD5RemoteSizeZero_WarnsAndAccepts（F4，2026-10-19）：远端把**非空**
+// 对象报 0 字节（Size<=0）且本地 size>0 时，md5 非权威 ⇒ 既无法按 md5 也无法按 size 校验——
+// 此前**静默**接受；修后必须显式 Warn（不改行为：远端确实可能不报 size）。
+//
+// 变异：去掉 putCheckAfterUpload 的 Size<=0 Warn ⇒ 日志断言必红。
+func TestStorage_Put_UnreliableMD5RemoteSizeZero_WarnsAndAccepts(t *testing.T) {
+	t.Parallel()
+	content := strings.Repeat("unreliable-md5-zero-size-", 40)
+	ad := &unreliableMD5Adapter{inner: newFakeStorageAdapter(), sizeSkew: -int64(len(content))}
+	var buf syncBuf
+	s, err := NewStorage(StorageConfig{
+		Root: "/baidu", TempDir: t.TempDir(), Adapter: ad,
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if _, perr := s.Put(context.Background(), "z.bin", strings.NewReader(content)); perr != nil {
+		t.Fatalf("远端未给 size 时应告警但接受（不得拒绝合法内容）: %v", perr)
+	}
+	if !strings.Contains(buf.String(), "未给出 size") {
+		t.Fatalf("远端 size<=0 且本地非空时必须显式告警，实测日志:\n%s", buf.String())
+	}
+}
+
+// syncBuf 是并发安全的日志缓冲（slog handler 可能被多 goroutine 写入）。
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 // TestRapidUploaderOf_FallbackTransparent（P2 修复，2026-10-19）：renewAuthoritativeMD5 此前
 // **未遗传** binaryAdapter→Fallback 的库秒传能力（只有 refreshByRapidUpload 遗传）⇒ 默认装配下
 // 「远端 md5 非权威」永远刷不出权威 md5。现两者共用 rapidUploaderOf ⇒ 本用例锁定遗传。
@@ -776,8 +822,9 @@ func TestStorage_Put_BinaryOnlyUnreliableMD5Accepted(t *testing.T) {
 // unreliableMD5RapidAdapter 是「远端 md5 非权威 + **有秒传能力**」的替身：RapidUpload 后
 // 远端 md5 变权威（整文件 md5），用于验证 M6 的「先刷新重验」路径。
 type unreliableMD5RapidAdapter struct {
-	inner    *unreliableMD5Adapter
-	rapidHit bool
+	inner     *unreliableMD5Adapter
+	rapidHit  bool
+	rapidPath string // 最近一次 RapidUpload 收到的 remotePath（断言「刷新打对路径」）
 }
 
 func (a *unreliableMD5RapidAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
@@ -809,6 +856,7 @@ func (a *unreliableMD5RapidAdapter) Meta(ctx context.Context, remotePath string)
 }
 func (a *unreliableMD5RapidAdapter) RapidUpload(ctx context.Context, remotePath string, st *stagedUpload) (bool, error) {
 	a.rapidHit = true
+	a.rapidPath = remotePath
 	return true, nil
 }
 
@@ -819,6 +867,8 @@ var _ rapidUploader = (*unreliableMD5RapidAdapter)(nil)
 // 非权威时**必须先经 rapidupload 刷新**再判定，而不是直接接受——否则「必须 md5 一致」在
 // 分片上传（>4MiB）路径被架空（任何 md5 不匹配都会被同一句「可能不正确」放过）。
 // 变异：去掉 renewAuthoritativeMD5 调用 → rapidHit=false → 红。
+// 判别力修复（P1，2026-10-19）：调用点此前误传裸 key（接口要求 remote 路径）⇒ fake 忽略
+// remotePath 时假绿。本用例断言 RapidUpload 收到的是 s.remotePath(key)（root 前缀 + 前导 /）。
 func TestStorage_Put_UnreliableMD5RefreshedByRapidUpload(t *testing.T) {
 	t.Parallel()
 	ad := &unreliableMD5RapidAdapter{inner: &unreliableMD5Adapter{inner: newFakeStorageAdapter()}}
@@ -829,6 +879,13 @@ func TestStorage_Put_UnreliableMD5RefreshedByRapidUpload(t *testing.T) {
 	}
 	if !ad.rapidHit {
 		t.Fatal("远端 md5 非权威时应先触发 rapidupload 刷新（M6）")
+	}
+	wantRemote, rerr := s.remotePath("r.bin")
+	if rerr != nil {
+		t.Fatalf("remotePath: %v", rerr)
+	}
+	if ad.rapidPath != wantRemote {
+		t.Fatalf("rapidupload 刷新必须打 remote 路径 %q（含 root 前缀），实收 %q ✗", wantRemote, ad.rapidPath)
 	}
 	m, err := s.Stat(context.Background(), "r.bin")
 	if err != nil || m == nil {
