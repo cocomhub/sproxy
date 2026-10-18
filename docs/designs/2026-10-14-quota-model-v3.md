@@ -240,11 +240,13 @@ S2（物理足迹）再把「结算值」改为**物理**⇒ 口径正确。**�
 
 ## 已知残余（独立复审 2026-10-18 登记）
 
-1. **等待队列的丢唤醒窗口（非功能丢失）**：释放侧 `broadcastLocked` **不持 `cond.L`**（等待侧用根
-   节点上独立于 `node.mu` 的 mutex）⇒ 广播可能落在「判定不足 → Wait」窗口内被丢弃，等待者睡到
-   `WaitReserve` 超时（≤30s）后重试成功。**不直接补锁**的原因：释放发生在子节点、队列在根，等待侧
-   锁序为 `cond.L → node.mu`，释放侧已持 `node.mu` ⇒ 补锁即反向（ABBA 死锁）。修复方向：单锁
-   （`cond.L` 即状态锁）或全局配额锁。参照 `pkg/quota/staging_tracker.go`（释放侧持 `cond.L` 广播）。
+1. ~~等待队列的丢唤醒窗口~~ **已修复（2026-10-18，根因解决）**：`cond.L` 改为**根等待锁**
+   `Pool.waitMu`，全部释放/放宽入口（`ReleaseUsage`/`Adjust`/`ReleaseCommitted`/
+   `ReleaseCommittedAndUnmount`/`SetMaxBytes`/`SetOperationalReserve`/`EnsureChild`/
+   `Allocation.Release|Set`/`Reservation.Release`）经 `Pool.withWaitLock` 在**同一把锁**下变更 +
+   广播 ⇒ 广播不可能落在「判定不足 → Wait」窗口内。全局锁序：`waitMu → allocMu → node.mu`。
+   结构性保证＝**门禁 R34**（`internal/archcheck/quota_waitlock_gate_test.go` + `quota_waitlock.tsv`，
+   11 个入口登记；变异验证：去掉任一包裹 ⇒ 必红）；行为面＝`TestWaitReserve_WokenByDeepChildRelease`。
 2. **分配账本尚未在生产装配接线**：生产配额树仍由 `Pool.Scope`/`Scope.Mount`/`EnsureScope` 构建
    （不记分配账）⇒ `Allocated()/Unallocated()` 目前为 0/失真、I1 在这些节点上尚无强制点（用量侧
    I2 不受影响）。接线计划见 §S4。

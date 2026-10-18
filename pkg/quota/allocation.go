@@ -77,7 +77,8 @@ func (a *Allocation) Release() {
 		return
 	}
 	a.released = true
-	a.pool.subAllocated(a.amount)
+	// 归还额度 ⇒ 在根等待锁下变更（消除丢唤醒；锁序 a.mu → waitMu → node.mu）。
+	a.pool.withWaitLock(func() { a.pool.subAllocated(a.amount) })
 }
 
 // Set 调整本次分配额度为 n（差额分配/归还）；超额 ⇒ 错误且额度不变（原子）。
@@ -97,7 +98,8 @@ func (a *Allocation) Set(n int64) error {
 			return err
 		}
 	} else if delta < 0 {
-		a.pool.subAllocated(-delta)
+		// 缩额释放了额度 ⇒ 在根等待锁下变更（消除丢唤醒）。
+		a.pool.withWaitLock(func() { a.pool.subAllocated(-delta) })
 	}
 	a.amount = n
 	return nil
@@ -151,6 +153,18 @@ func (p *Pool) EnsureChild(segs []string, maxBytes int64) (*Scope, error) {
 	if p == nil {
 		return nil, errors.New("quota: nil pool")
 	}
+	// 变更分配账本会改变可用额度 ⇒ 走**根等待锁**（锁序 waitMu → allocMu → node.mu）⇒
+	// 与等待侧的 double-check/Wait 互斥（消除丢唤醒）。
+	var (
+		sc  *Scope
+		err error
+	)
+	p.withWaitLock(func() { sc, err = p.ensureChildLocked(segs, maxBytes) })
+	return sc, err
+}
+
+// ensureChildLocked 是 EnsureChild 在**根等待锁内**的实现（语义见 EnsureChild 注释）。
+func (p *Pool) ensureChildLocked(segs []string, maxBytes int64) (*Scope, error) {
 	maxBytes = nonNeg(maxBytes)
 	// 串行化用**全局根**的 allocMu，且必须**覆盖节点定位与创建**（独立复审 P2，2026-10-18）：
 	// 定位内含 childWithSegment(RLock) + newScope(锁写)；若置于锁外，并发同段调用会各自创建
