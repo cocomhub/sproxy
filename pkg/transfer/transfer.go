@@ -120,6 +120,14 @@ func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, 
 			case err == nil:
 				return ErrExists
 			case !errors.Is(err, syncpkg.ErrUnsupported):
+				// **写失败必须清理残骸**（独立审核 P2，2026-10-18）：非原子后端（s3 单 PUT 原子，
+				// 但 webdav/ftp/baidupcs 等非原子）写中途失败会在目标路径留下**半截对象** ⇒ 若不清
+				// 理，后续每次重试都会因「目标已存在」被判 ErrExists ⇒ **永久阻断**（用户只能人工
+				// 删对象，resume 也走同一路径），且半截对象成为孤儿（其字节已由 settleTransferCharge
+				// 计入 owner 配额）。与 executePacked 的「pack 失败即删」同纪律。
+				// 安全性：本分支只在 Overwrite=false 且**存在性检查已通过**（目标原本不存在）后进入
+				// ⇒ 该 rel 上的对象只能是本次写的残骸 ⇒ 删除正确。
+				_ = dest.Delete(ctx, rel)
 				return err
 			}
 			// ErrUnsupported = 能力探针（未消费 reader）→ 降级存在性检查。
@@ -133,7 +141,14 @@ func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, 
 			return ErrExists
 		}
 	}
-	return dest.WriteFile(ctx, syncpkg.LogicalKey{}, rel, r, size, mtime)
+	if werr := dest.WriteFile(ctx, syncpkg.LogicalKey{}, rel, r, size, mtime); werr != nil {
+		if !overwrite {
+			// 同上：Overwrite=false 时该 rel 上的对象只能是本次残骸 ⇒ 清理，保证重试可自愈。
+			_ = dest.Delete(ctx, rel)
+		}
+		return werr
+	}
+	return nil
 }
 
 // executePacked 预处理后转存：聚合流写目标卷。
