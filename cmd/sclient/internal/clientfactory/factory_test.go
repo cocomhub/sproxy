@@ -11,10 +11,9 @@ import (
 
 	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-	"gopkg.in/yaml.v3"
 )
 
 func TestFactory_Constructor(t *testing.T) {
@@ -47,43 +46,20 @@ func TestMockFactory_NilService(t *testing.T) {
 	}
 }
 
-// mockCfgBinder 实现 CfgBinder 接口，用于生产 Factory 测试。
-type mockCfgBinder struct {
-	data map[string]any
-}
-
-func (m *mockCfgBinder) BindPFlag(key string, flag *pflag.Flag) {}
-
-func (m *mockCfgBinder) Unmarshal(obj any) error {
-	// 使用 yaml 作为中介：map → yaml bytes → struct。
-	// Config 结构体使用 yaml/mapstructure 蛇形键（如 peer_fingerprints、hub_url），
-	// json.Unmarshal 无法匹配下划线键，故此处用 yaml。
-	data, err := yaml.Marshal(m.data)
-	if err != nil {
-		return err
-	}
-	return yaml.Unmarshal(data, obj)
-}
-
 func TestFactory_NewClient_NilProvider(t *testing.T) {
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return nil })
+	f := factoryFromResolved(t, nil)
 	cmd := &cobra.Command{}
 	svc, err := f.NewClient(cmd)
 	if err == nil {
-		t.Fatal("expected error for nil provider")
+		t.Fatal("expected error for nil resolved")
 	}
 	if svc != nil {
-		t.Fatal("expected nil service when provider is nil")
+		t.Fatal("expected nil service when resolved is nil")
 	}
 }
 
 func TestFactory_NewClient_WithConfig(t *testing.T) {
-	binder := &mockCfgBinder{
-		data: map[string]any{
-			"server_url": "http://127.0.0.1:18083",
-		},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := factoryFromResolvedData(t, map[string]any{"server_url": "http://127.0.0.1:18083"}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	svc, err := f.NewClient(cmd)
@@ -96,12 +72,7 @@ func TestFactory_NewClient_WithConfig(t *testing.T) {
 }
 
 func TestFactory_NewClient_FlagOverridesServer(t *testing.T) {
-	binder := &mockCfgBinder{
-		data: map[string]any{
-			"server_url": "http://original:8080",
-		},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := factoryFromResolvedData(t, map[string]any{"server_url": "http://original:8080"}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	cmd.Flags().String("auth-token", "", "")
@@ -123,35 +94,66 @@ func TestFactory_NewClient_FlagOverridesServer(t *testing.T) {
 // 原用例名为 WithAuthToken 并以 `auth_token` 作夹具，但那套机制（明文 Bearer）已由 SproxySig v2
 // 取代且 factory **不再读取任何 auth_token 键**（全仓无生产引用）——旧名字会误导读者以为仍在支持，
 // 故按实际语义重命名，并把该键降为「必须被忽略的历史键」。
+//
+// 统一 context 后配置是结构化的（env/user 段），不存在「顶层未知键」；本测试改为验证
+// **contextcfg 模型含未使用字段（如 Volume 覆盖）不影响装配**。
 func TestFactory_NewClient_ToleratesUnknownConfigKeys(t *testing.T) {
-	binder := &mockCfgBinder{
-		data: map[string]any{
-			"server_url":      "http://127.0.0.1:18083",
-			"auth_token":      "legacy-bearer-must-be-ignored",
-			"some_future_key": true,
-		},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: "http://127.0.0.1:18083"})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "sg"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg", Volume: "v-extra"})
+	f := factoryFromResolved(t, ccfg)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	svc, err := f.NewClient(cmd)
 	if err != nil {
-		t.Fatalf("配置含无关/历史键不应导致装配失败, got: %v", err)
+		t.Fatalf("配置含未使用字段不应导致装配失败, got: %v", err)
 	}
 	if svc == nil {
 		t.Fatal("expected non-nil service")
 	}
 }
 
-// setXDGConfigHome 在测试中替换 xdg.ConfigHome 为临时目录，并注册恢复。
-// 注意：本测试不使用 t.Parallel()，避免与其他读取 xdg.ConfigHome 的测试并发冲突。
-func setXDGConfigHome(t *testing.T) string {
+// factoryFromResolved 构造统一 context 模式的测试 factory：resolvedFn 从给定
+// contextcfg 模型解析（模拟 PersistentPreRunE 的 resolvedContext 注入）。
+func factoryFromResolved(t *testing.T, cc *contextcfg.Config) clientfactory.Factory {
 	t.Helper()
-	dir := t.TempDir()
-	old := xdg.ConfigHome
-	xdg.ConfigHome = dir
-	t.Cleanup(func() { xdg.ConfigHome = old })
-	return dir
+	return clientfactory.NewWithContext("", nil, func() *contextcfg.Resolved {
+		resolved, err := contextcfg.Resolve(cc, contextcfg.ResolveArgs{})
+		if err != nil {
+			return nil
+		}
+		return resolved
+	})
+}
+
+// factoryFromResolvedData 从键值数据构造 config.yaml 模型（env 段 + user 段）。
+func factoryFromResolvedData(t *testing.T, envData, userData map[string]any) clientfactory.Factory {
+	t.Helper()
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	env := &contextcfg.Environment{Name: "sg"}
+	if v, ok := envData["server_url"].(string); ok {
+		env.ServerURL = v
+	}
+	if v, ok := envData["hub_url"].(string); ok {
+		env.HubURL = v
+	}
+	if v, ok := envData["peer_fingerprints"].([]string); ok {
+		env.PeerFingerprints = v
+	}
+	ccfg.Environments = append(ccfg.Environments, env)
+	u := &contextcfg.User{Name: "sg"}
+	if v, ok := userData["access_key"].(string); ok {
+		u.AccessKey = v
+	}
+	if v, ok := userData["access_key_secret"].(string); ok {
+		u.AccessKeySecret = v
+	}
+	ccfg.Users = append(ccfg.Users, u)
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	return factoryFromResolved(t, ccfg)
 }
 
 // writeCorruptIdentity 在 XDG 配置目录写入损坏的身份文件。
@@ -169,13 +171,13 @@ func writeCorruptIdentity(t *testing.T, dir string) {
 // TestFactory_NewClient_CorruptIdentity_NonXferStillWorks 验证 M-1 懒加载：
 // 身份文件损坏不应导致 upload/download/list 等非 xfer 命令全部不可用。
 func TestFactory_NewClient_CorruptIdentity_NonXferStillWorks(t *testing.T) {
-	dir := setXDGConfigHome(t)
+	dir := t.TempDir()
+	oldConfigHome := xdg.ConfigHome
+	xdg.ConfigHome = dir
+	t.Cleanup(func() { xdg.ConfigHome = oldConfigHome })
 	writeCorruptIdentity(t, dir)
 
-	binder := &mockCfgBinder{
-		data: map[string]any{"server_url": "http://127.0.0.1:18083"},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := factoryFromResolvedData(t, map[string]any{"server_url": "http://127.0.0.1:18083"}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	svc, err := f.NewClient(cmd)
@@ -190,16 +192,16 @@ func TestFactory_NewClient_CorruptIdentity_NonXferStillWorks(t *testing.T) {
 // TestFactory_NewClient_Xfer_CorruptIdentity_ErrorsWithRecovery 验证 M-1：
 // xfer 隧道模式消费身份，损坏时 fail-closed 报错并给出恢复路径（sclient identity generate --force）。
 func TestFactory_NewClient_Xfer_CorruptIdentity_ErrorsWithRecovery(t *testing.T) {
-	dir := setXDGConfigHome(t)
+	dir := t.TempDir()
+	oldConfigHome := xdg.ConfigHome
+	xdg.ConfigHome = dir
+	t.Cleanup(func() { xdg.ConfigHome = oldConfigHome })
 	writeCorruptIdentity(t, dir)
 
-	binder := &mockCfgBinder{
-		data: map[string]any{
-			"server_url": "http://127.0.0.1:18083",
-			"hub_url":    "127.0.0.1:9999",
-		},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := factoryFromResolvedData(t, map[string]any{
+		"server_url": "http://127.0.0.1:18083",
+		"hub_url":    "127.0.0.1:9999",
+	}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	cmd.Flags().String("xfer", "", "")
@@ -223,21 +225,22 @@ func TestFactory_NewClient_Xfer_IdentityAndPinWired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := setXDGConfigHome(t)
+	dir := t.TempDir()
+	oldConfigHome := xdg.ConfigHome
+	xdg.ConfigHome = dir
+	t.Cleanup(func() { xdg.ConfigHome = oldConfigHome })
 	if err = tunnel.SaveIdentity(id, filepath.Join(dir, "sproxy", "identity.json")); err != nil {
 		t.Fatal(err)
 	}
 
-	binder := &mockCfgBinder{
-		data: map[string]any{
-			"server_url":        "http://127.0.0.1:18083",
-			"hub_url":           "127.0.0.1:9999",
-			"access_key":        "ak-00000000000000000000000000000000",
-			"access_key_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			"peer_fingerprints": []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-		},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := factoryFromResolvedData(t, map[string]any{
+		"server_url":        "http://127.0.0.1:18083",
+		"hub_url":           "127.0.0.1:9999",
+		"peer_fingerprints": []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+	}, map[string]any{
+		"access_key":        "ak-00000000000000000000000000000000",
+		"access_key_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	cmd.Flags().String("xfer", "", "")
@@ -270,18 +273,18 @@ func TestFactory_NewClient_Xfer_NoKey_FailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := setXDGConfigHome(t)
+	dir := t.TempDir()
+	oldConfigHome := xdg.ConfigHome
+	xdg.ConfigHome = dir
+	t.Cleanup(func() { xdg.ConfigHome = oldConfigHome })
 	if err = tunnel.SaveIdentity(id, filepath.Join(dir, "sproxy", "identity.json")); err != nil {
 		t.Fatal(err)
 	}
 
-	binder := &mockCfgBinder{
-		data: map[string]any{
-			"server_url": "http://127.0.0.1:18083",
-			"hub_url":    "127.0.0.1:9999",
-		},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := factoryFromResolvedData(t, map[string]any{
+		"server_url": "http://127.0.0.1:18083",
+		"hub_url":    "127.0.0.1:9999",
+	}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	cmd.Flags().String("xfer", "", "")
@@ -301,15 +304,14 @@ func TestFactory_NewClient_Xfer_NoKey_FailsClosed(t *testing.T) {
 // TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds 验证：xfer 模式无身份、无 peer_fingerprints、
 // 无 access_key_secret 时仍正常创建客户端（无 pinning 预期，向后兼容）。
 func TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds(t *testing.T) {
-	setXDGConfigHome(t) // 空 XDG：无身份文件
+	oldConfigHome := xdg.ConfigHome
+	xdg.ConfigHome = t.TempDir()
+	t.Cleanup(func() { xdg.ConfigHome = oldConfigHome })
 
-	binder := &mockCfgBinder{
-		data: map[string]any{
-			"server_url": "http://127.0.0.1:18083",
-			"hub_url":    "127.0.0.1:9999",
-		},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := factoryFromResolvedData(t, map[string]any{
+		"server_url": "http://127.0.0.1:18083",
+		"hub_url":    "127.0.0.1:9999",
+	}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	cmd.Flags().String("xfer", "", "")
@@ -329,15 +331,12 @@ func TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds(t *testing.T) {
 // TestFactory_NewClient_PeerFingerprintsNonXfer_FailsClosed 验证：配置了 peer_fingerprints
 // 但命令不走 xfer 隧道时 fail-closed 报错（而非仅 Warn），防止用户误以为受 pinning 保护。
 func TestFactory_NewClient_PeerFingerprintsNonXfer_FailsClosed(t *testing.T) {
-	binder := &mockCfgBinder{
-		data: map[string]any{
-			"server_url": "http://127.0.0.1:18083",
-			"peer_fingerprints": []string{
-				"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			},
+	f := factoryFromResolvedData(t, map[string]any{
+		"server_url": "http://127.0.0.1:18083",
+		"peer_fingerprints": []string{
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
-	}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
 	_, err := f.NewClient(cmd)

@@ -86,31 +86,39 @@ func TestConfigCmd_HasSubcommands(t *testing.T) {
 }
 
 func TestConfigCmd_ShowWithConfig(t *testing.T) {
-	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://test:18083"}}
+	// 统一 context：config show 从 config.yaml 合成视图读取。
+	cfgPath := writeContextFixture(t)
 	var buf strings.Builder
-	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, new(string), cfgSvc)
+	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &cfgPath, &cliConfigProvider{cfgFile: cfgPath})
 	err := cmd.RunE(cmd, []string{"show"})
 	if err != nil {
 		t.Fatalf("config show command failed: %v", err)
 	}
-	if !strings.Contains(buf.String(), "http://test:18083") {
-		t.Errorf("expected output to contain server URL, got: %s", buf.String())
+	if !strings.Contains(buf.String(), "https://a:18083") {
+		t.Errorf("expected output to contain env server URL, got: %s", buf.String())
 	}
 }
 
 func TestConfigCmd_Set(t *testing.T) {
 	cfgDir := t.TempDir()
-	cfgPath := filepath.Join(cfgDir, "sclient.yaml")
+	cfgPath := filepath.Join(cfgDir, "config.yaml")
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: "http://old:18083"})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "sg"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	if err := contextcfg.Save(ccfg, cfgPath); err != nil {
+		t.Fatal(err)
+	}
 
-	cfgSvc := &testConfigProvider{cfg: client.DefaultConfig()}
-	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &cfgPath, cfgSvc)
+	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &cfgPath, &cliConfigProvider{cfgFile: cfgPath})
 	// 直接调用 RunE，避免 cobra subcommand 路由（set 不是子命令而是 positional arg）
 	err := cmd.RunE(cmd, []string{"set", "server_url", "http://new:18083"})
 	if err != nil {
 		t.Fatalf("config set failed: %v", err)
 	}
 
-	// 验证文件已被写入磁盘且内容正确
+	// 验证 config.yaml 的 env 段已被写入磁盘且内容正确
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("config file was not written: %v", err)

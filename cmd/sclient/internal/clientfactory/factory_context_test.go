@@ -4,6 +4,7 @@
 package clientfactory_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
@@ -107,18 +108,20 @@ func TestFactory_NewClient_ResolvedFlagOverrides(t *testing.T) {
 	}
 }
 
-// TestFactory_NewClient_ResolvedNil_FallsBackToFlat 验证：resolved 注入返回 nil
-// → 回落旧平铺路径（cfgProvider 解析），双模式零破坏。
+// TestFactory_NewClient_ResolvedNil_FailsClosed 验证：resolved 注入返回 nil
+// （无 config.yaml / 解析失败）→ fail-closed 报错指引创建，不再回落平铺。
 func TestFactory_NewClient_ResolvedNil_FallsBackToFlat(t *testing.T) {
 	t.Parallel()
-	binder := &mockCfgBinder{data: map[string]any{"server_url": "http://flat:18083"}}
-	f := clientfactory.NewWithContext("test.yaml", func() clientfactory.CfgBinder { return binder }, func() *contextcfg.Resolved { return nil })
+	f := clientfactory.NewWithContext("test.yaml", nil, func() *contextcfg.Resolved { return nil })
 	svc, err := f.NewClient(contextCmd())
-	if err != nil {
-		t.Fatalf("NewClient（回落平铺）: %v", err)
+	if err == nil {
+		t.Fatal("resolved nil 应 fail-closed 报错（不再回落平铺）")
 	}
-	if svc.ServerURL() != "http://flat:18083" {
-		t.Errorf("回落平铺 server = %q, want http://flat:18083", svc.ServerURL())
+	if !strings.Contains(err.Error(), "config.yaml") {
+		t.Fatalf("错误应提示 config.yaml, got: %v", err)
+	}
+	if svc != nil {
+		t.Fatalf("失败时不应返回 svc: %+v", svc)
 	}
 }
 

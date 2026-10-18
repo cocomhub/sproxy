@@ -907,7 +907,7 @@ sclient sealfile info <输出目录> [文件名] --key <密钥>
 - **加载到 sproxy**：产物目录配置为 `type: secretdata` 卷（`extra.root` 指向产物目录 +
   `secret_url` 指向同一密钥文件），播放器直接 Range 播放（`/download?filename=<名>&volume=<卷名>`）。
 
-**配置段（sclient.yaml）**：
+**配置段（config.yaml 顶层）**：
 
 ```yaml
 sealfile:
@@ -930,6 +930,6 @@ sealfile:
 | `路径包含父级引用 '..'` | 客户端预拦截了不安全路径，去掉 `..` 或用绝对路径 |
 | `tunnel error (HTTP 401)` | 外层 `POST /tunnel` SproxySig 验签失败（凭据缺失/非法/过期/重放），检查 `access_key`/`access_key_secret` 是否与服务端凭据 Ring 一致 |
 | `tunnel error (HTTP 400)` | 隧道密钥与服务端不一致，或网络中间层破坏了请求体 |
-| `unauthorized` (401) | SproxySig 签名缺失/非法/过期（服务端凭据 Ring 非空时），检查 `~/.config/sproxy/sclient.yaml` 的 `access_key`/`access_key_secret` 是否与服务端一致 |
+| `unauthorized` (401) | SproxySig 签名缺失/非法/过期（服务端凭据 Ring 非空时），检查 `~/.config/sproxy/config.yaml` 当前 context user 段的 `access_key`/`access_key_secret` 是否与服务端一致（或 `sclient trust login` 重新绑定） |
 | `源文件 SHA-256 校验失败` | mv 期间本地文件已变，刷新本地 checksum 后重试 |
 | `文件已存在但 checksum 不匹配` (409) | 服务端已有同名文件且内容不同，先 mv 或 delete |

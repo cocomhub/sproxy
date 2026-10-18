@@ -142,18 +142,38 @@ func TestE2E_CLI_Sealfile_DecryptRoundtrip(t *testing.T) {
 }
 
 // TestE2E_CLI_Sealfile_KeyfileAndConfig 链路 3：--key 密钥文件 + 配置回落
-// （sealfile.key/out_dir 写入 sclient.yaml；CLI flag 缺省时从配置读取）。
+// （sealfile.key/out_dir 写入 config.yaml 顶层；CLI flag 缺省时从配置读取）。
 func TestE2E_CLI_Sealfile_KeyfileAndConfig(t *testing.T) {
 	t.Parallel()
 	env, keysRoot := newSealfileEnv(t)
 
-	// 配置文件（sclient 读 sealfile.key / sealfile.out_dir / sealfile.owner）。
-	cfgPath := filepath.Join(env.TmpDir, "sclient.yaml")
-	cfgBody := fmt.Sprintf("sealfile:\n  key: %q\n  out_dir: %q\n  owner: test\n",
+	// 统一 context：把 sealfile 段写入 config.yaml 顶层（手写 YAML，test 包不 import
+	// internal contextcfg）。
+	cfgBody := fmt.Sprintf(`apiVersion: sclient/v1
+kind: Config
+current-context: e2e
+sealfile:
+  key: %q
+  out_dir: %q
+  owner: test
+environments:
+  - name: e2e
+    server_url: %q
+users:
+  - name: e2e
+    access_key: %q
+    access_key_secret: %q
+    access_key_id: %q
+contexts:
+  - name: e2e
+    environment: e2e
+    user: e2e
+`,
 		filepath.Join(keysRoot, "secrets", "datakey"),
-		filepath.Join(env.TmpDir, "sealed-cfg"))
-	if werr := os.WriteFile(cfgPath, []byte(cfgBody), 0o600); werr != nil {
-		t.Fatalf("写 sclient.yaml: %v", werr)
+		filepath.Join(env.TmpDir, "sealed-cfg"),
+		env.BaseURL, e2eTestAK, e2eTestSK, e2eTestID)
+	if werr := os.WriteFile(env.configYAMLPath(), []byte(cfgBody), 0o600); werr != nil {
+		t.Fatalf("写 config.yaml: %v", werr)
 	}
 
 	content := []byte("config-回落-payload")
@@ -163,14 +183,14 @@ func TestE2E_CLI_Sealfile_KeyfileAndConfig(t *testing.T) {
 	}
 
 	// 无 --key / --output-dir / --owner：回落配置（owner 也回落 test）。
-	out := env.sclient(t, env.TmpDir, "--config", cfgPath,
+	out := env.sclient(t, env.TmpDir,
 		"sealfile", "encrypt", "cfg.txt")
 	if !strings.Contains(out, "cfg.txt") {
 		t.Fatalf("encrypt 输出应含文件名, got:\n%s", out)
 	}
 	// 配置 out_dir/owner 生效：产物经 SecretdataFS 逻辑读取可见（磁盘是加密容器，
 	// 无明文 test/user/cfg.txt 路径，不能 os.Stat 明文——info 按配置回落 owner 定位）。
-	infoOut := env.sclient(t, env.TmpDir, "--config", cfgPath,
+	infoOut := env.sclient(t, env.TmpDir,
 		"sealfile", "info", filepath.Join(env.TmpDir, "sealed-cfg"))
 	if !strings.Contains(infoOut, "cfg.txt") {
 		t.Fatalf("info 应列出配置 out_dir 产物 cfg.txt, got:\n%s", infoOut)

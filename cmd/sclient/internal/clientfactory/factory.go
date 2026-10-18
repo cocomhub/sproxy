@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -145,9 +146,16 @@ type CfgBinder interface {
 	Unmarshal(obj any) error
 }
 
-// factory 是生产实现，封装配置加载 + flag 覆盖 + 客户端构造。
+// errConfigNotFound 是「未找到配置文件」哨兵：统一 context 配置后，任何需要
+// server_url/凭据的命令在无 config.yaml 时 fail-closed 报错并指引创建（不再静默
+// 回落旧平铺或默认值——v1 双源分裂的根治）。定义在 clientfactory（工厂 fail-closed
+// 判定处），cmd/sclient 复用同一哨兵。
+var ErrConfigNotFound = errors.New("未找到配置文件 config.yaml：请先运行 `sclient context set <name> --env-name <e> --user-name <u>` 创建上下文（或用 --config 指定配置文件路径）")
+
+// factory 是生产实现，封装 context 模型配置 + flag 覆盖 + 客户端构造。
 // resolvedFn 是延迟获取 context 解析结果的函数（config.yaml 解析成功时非 nil）；
-// 非 nil → 从 Resolved 构建（新 context 模型）；nil → 回落旧平铺 cfgProvider 路径。
+// 统一 context 后不再有平铺回落——resolvedFn 返回 nil 时 fail-closed 报错
+// （无 config.yaml / 解析失败都不静默用默认值，v1 双源分裂的根治）。
 type factory struct {
 	cfgFile     string
 	cfgProvider func() CfgBinder
@@ -188,6 +196,7 @@ func ResolvedToClientConfig(r *contextcfg.Resolved) *client.Config {
 		cfg.NodeID = env.NodeID
 		cfg.XferCAFile = env.CAFile
 		cfg.XferInsecure = env.Insecure
+		cfg.PeerFingerprints = append(cfg.PeerFingerprints, env.PeerFingerprints...)
 		if env.Timeout > 0 {
 			cfg.Timeout = env.Timeout
 		}
@@ -214,24 +223,18 @@ func ResolvedToClientConfig(r *contextcfg.Resolved) *client.Config {
 	return cfg
 }
 
-// NewClient 从配置加载和 flag 覆盖创建 *client.FileClient。
-// 双模式：resolvedFn 非 nil（context 模型解析成功）→ 从 Resolved 构建；
-// nil → 回落旧平铺 cfgProvider 路径（既有用户/测试零破坏）。
+// NewClient 从 context 模型配置加载和 flag 覆盖创建 *client.FileClient。
+// 统一 context 后：resolvedFn 非 nil（config.yaml 解析成功）→ 从 Resolved 构建；
+// nil（无配置/损坏/引用缺失）→ fail-closed 报错指引创建，不静默回落默认值。
 func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
-	if f.resolvedFn != nil {
-		if r := f.resolvedFn(); r != nil {
-			return f.newClientFromResolved(cmd, r)
-		}
+	if f.resolvedFn == nil {
+		return nil, fmt.Errorf("配置未初始化（无 context 解析器）")
 	}
-	p := f.cfgProvider()
-	if p == nil {
-		return nil, fmt.Errorf("配置未初始化")
+	r := f.resolvedFn()
+	if r == nil {
+		return nil, ErrConfigNotFound
 	}
-	cfg, err := client.LoadFromProvider(p)
-	if err != nil {
-		return nil, fmt.Errorf("加载配置失败: %w", err)
-	}
-	return f.buildClient(cmd, cfg)
+	return f.newClientFromResolved(cmd, r)
 }
 
 // newClientFromResolved 从 context 解析结果构建客户端（env+user 合成视图 + flag 覆盖）。

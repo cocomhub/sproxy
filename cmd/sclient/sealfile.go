@@ -56,13 +56,14 @@ const (
 // errSealfileKeyMissing 是密钥缺失哨兵错误（三子命令共用文案）。
 var errSealfileKeyMissing = errors.New("未提供密钥：--key 需 64 hex 字面量或 secrets 卷密钥文件路径（sclient secret export --plain 产物）")
 
-// sealfileCfg 是 sealfile 配置段结构（viper 键 sealfile.*；CLI flag > 配置 > 默认）。
+// sealfileCfg 是 sealfile 配置段结构（config.yaml 顶层 `sealfile:` 段；CLI flag > 配置 > 默认）。
+// 字段与 contextcfg.Sealfile 对齐（yaml/mapstructure 蛇形键）。
 type sealfileCfg struct {
-	Key         string         `mapstructure:"key"`
-	Algorithm   string         `mapstructure:"algorithm"`
-	BlockPolicy map[string]any `mapstructure:"block_policy"`
-	OutDir      string         `mapstructure:"out_dir"`
-	Owner       string         `mapstructure:"owner"`
+	Key         string         `mapstructure:"key" yaml:"key"`
+	Algorithm   string         `mapstructure:"algorithm" yaml:"algorithm"`
+	BlockPolicy map[string]any `mapstructure:"block_policy" yaml:"block_policy"`
+	OutDir      string         `mapstructure:"out_dir" yaml:"out_dir"`
+	Owner       string         `mapstructure:"owner" yaml:"owner"`
 }
 
 // NewCmdSealfile 创建 sealfile 命令族（本地加解密，不连服务端）。

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -94,16 +95,21 @@ func TestTrustRenew_UpdatesConfig(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(trustRenewHandler(t, ak, oldSKHex, env)))
 	defer srv.Close()
 
-	// 隔离配置文件（不触碰真实用户配置）。
+	// 隔离配置文件（统一 context 模型，不触碰真实用户配置）。
 	cfgDir := t.TempDir()
-	cfgPath := filepath.Join(cfgDir, "sclient.yaml")
-	cfg := client.DefaultConfig()
-	cfg.ServerURL = srv.URL
-	cfg.AccessKey = ak
-	cfg.AccessKeySecret = oldSKHex
-	if err := client.SaveConfig(cfg, cfgPath); err != nil {
+	cfgPath := filepath.Join(cfgDir, "config.yaml")
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: srv.URL})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{
+		Name: "sg", AccessKey: ak, AccessKeySecret: oldSKHex,
+	})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	if err := contextcfg.Save(ccfg, cfgPath); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	// cfgSvc 的合成视图供 newTrustDirectClient 取 server_url（renew 直连模式）。
+	cfg := &client.Config{ServerURL: srv.URL, AccessKey: ak, AccessKeySecret: oldSKHex}
 
 	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, oldSKHex))
 	factory := clientfactory.NewMock(svc, nil)
@@ -123,16 +129,17 @@ func TestTrustRenew_UpdatesConfig(t *testing.T) {
 		t.Errorf("expected sk_id in output, got: %s", buf.String())
 	}
 
-	// 配置文件必须已持久化新 SK 与 sk_id（回填）。
-	reloaded, err := client.LoadConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("reload config: %v", err)
+	// 配置文件必须已持久化新 SK 与 sk_id（回填到 config.yaml 的 user 段）。
+	reloadedCfg, lerr := contextcfg.Load(cfgPath)
+	if lerr != nil {
+		t.Fatalf("reload config: %v", lerr)
 	}
-	if reloaded.AccessKeySecret != hex.EncodeToString(newSK) {
-		t.Errorf("access_key_secret 未回填: got %q want %q", reloaded.AccessKeySecret, hex.EncodeToString(newSK))
+	ru := reloadedCfg.FindUser(reloadedCfg.FindContext(reloadedCfg.CurrentContext).User)
+	if ru.AccessKeySecret != hex.EncodeToString(newSK) {
+		t.Errorf("access_key_secret 未回填: got %q want %q", ru.AccessKeySecret, hex.EncodeToString(newSK))
 	}
-	if reloaded.AccessKeyID != "skey-newentry1234" {
-		t.Errorf("access_key_id 未回填: got %q", reloaded.AccessKeyID)
+	if ru.AccessKeyID != "skey-newentry1234" {
+		t.Errorf("access_key_id 未回填: got %q", ru.AccessKeyID)
 	}
 }
 
@@ -624,14 +631,18 @@ func TestTrustRenew_ConfigIsolation(t *testing.T) {
 	defer srv.Close()
 
 	cfgDir := t.TempDir()
-	cfgPath := filepath.Join(cfgDir, "sclient.yaml")
-	cfg := client.DefaultConfig()
-	cfg.ServerURL = srv.URL
-	cfg.AccessKey = ak
-	cfg.AccessKeySecret = oldSKHex
-	if err := client.SaveConfig(cfg, cfgPath); err != nil {
+	cfgPath := filepath.Join(cfgDir, "config.yaml")
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: srv.URL})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{
+		Name: "sg", AccessKey: ak, AccessKeySecret: oldSKHex,
+	})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	if err := contextcfg.Save(ccfg, cfgPath); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	cfg := &client.Config{ServerURL: srv.URL, AccessKey: ak, AccessKeySecret: oldSKHex}
 
 	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, oldSKHex))
 	factory := clientfactory.NewMock(svc, nil)
@@ -642,12 +653,12 @@ func TestTrustRenew_ConfigIsolation(t *testing.T) {
 		t.Fatalf("trust renew failed: %v", err)
 	}
 
-	// 配置目录下只有我们创建的 sclient.yaml；没有其它文件被写入。
+	// 配置目录下只有我们创建的 config.yaml；没有其它文件被写入。
 	entries, err := os.ReadDir(cfgDir)
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "sclient.yaml" {
-		t.Fatalf("expected only sclient.yaml in config dir, got %v", entries)
+	if len(entries) != 1 || entries[0].Name() != "config.yaml" {
+		t.Fatalf("expected only config.yaml in config dir, got %v", entries)
 	}
 }

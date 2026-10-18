@@ -37,14 +37,12 @@ func buildSClient(t *testing.T) string {
 	return binPath
 }
 
-// sclientConfig 生成隔离的临时配置：server_url + access_key/access_key_secret。
-// 不用 --server 单独 flag，避免读取用户本地 ~/.config/sproxy/sclient.yaml 干扰。
+// sclientConfig 生成隔离的临时配置（统一 context config.yaml）：env 段 server_url +
+// user 段凭据。不用 --server 单独 flag，避免读取用户本地配置干扰。
 func sclientConfig(t *testing.T, baseURL string) string {
 	t.Helper()
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
-	content := "server_url: " + baseURL + "\naccess_key: " + e2eTestAK + "\naccess_key_secret: " + e2eTestSK + "\naccess_key_id: " + e2eTestID + "\n"
-	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := writeContextConfigYAML(t, cfgPath, baseURL, e2eTestAK, e2eTestSK, e2eTestID); err != nil {
 		t.Fatal(err)
 	}
 	return cfgPath

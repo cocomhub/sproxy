@@ -472,7 +472,7 @@ contexts:
 - **解析优先级**：`--context` > `--env`+`--user` > `current-context` > 旧 `SCLIENT_ENV` 映射。
 - **脚本化**：`sclient --env sg-prod --user alice upload big.bin`；环境变量 `SCLIENT_CONTEXT` / `SCLIENT_ENV` / `SCLIENT_USER` 同效。
 
-**迁移（零破坏）**：启动时检测到旧 `~/.config/sproxy/sclient.yaml`（或 `SCLIENT_ENV` 对应 `sclient.<env>.yaml`）且无 config.yaml → 自动导入为 context（名 = env 或 default），打印「已导入为 context <name>；旧文件保留可删」。
+**迁移（一次性）**：启动时检测到旧 `~/.config/sproxy/sclient.yaml` 且无 config.yaml → 自动导入为 context（名 = default 或 `--env` 指定），打印「已导入为 context <name>；旧文件保留可删」。迁移后**不再读取旧文件**。
 
 **上下文切换命令**：
 
@@ -489,24 +489,30 @@ sclient user list / user use <name>   # 切用户
 
 **凭据命令作用于当前 context**：`trust register [username]` 用当前 env 注册并**自动切到该用户**；`trust login [username]` / `trust renew` 作用于当前 context 的 env/user 段。
 
-## 客户端配置（sclient）
+## 客户端配置（sclient，统一 context 模型）
 
-sclient 的配置默认路径基于 XDG：
+**唯一配置文件 = config.yaml**（environments/users/contexts 三件套，context 模型单一
+事实源），默认路径基于 XDG：
 
 | 平台 | 路径 |
 |---|---|
-| Linux | `~/.config/sproxy/sclient.yaml` |
-| macOS | `~/Library/Application Support/sproxy/sclient.yaml` |
-| Windows | `%LOCALAPPDATA%/sproxy/sclient.yaml` |
+| Linux | `~/.config/sproxy/config.yaml` |
+| macOS | `~/Library/Application Support/sproxy/config.yaml` |
+| Windows | `%LOCALAPPDATA%/sproxy/config.yaml` |
 
-旧路径 `~/.sclient.yaml` 仍会被读取并提示迁移。`--config` flag 可覆盖默认路径。
+`--config` flag 可覆盖默认路径（指向任意 config.yaml）。旧平铺 `sclient.yaml` 只在
+**首次运行**（无 config.yaml 时）自动迁移一次；迁移后不再读取，旧文件保留可删。
+历史路径 `~/.sclient.yaml` 仅提示不再使用。
 
-环境变量前缀 `SCLIENT_`（例如 `SCLIENT_SERVER_URL=http://proxy:18083`）。
+**SCLIENT_ENV 仅作 `--env` 默认值**（覆盖 current-context 的 environment），不再选择
+配置文件路径（v1 曾按 `SCLIENT_ENV=prod → sclient.prod.yaml` 切换文件，已废除）。
 
-**多环境**：`SCLIENT_ENV` 环境变量选择 env 后缀配置文件（如 `SCLIENT_ENV=prod` →
-`~/.config/sproxy/sclient.prod.yaml`）。为空用默认 `sclient.yaml`，便于同一台机器维护
-prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI flag > 环境变量 >
-配置文件 > 默认值**。
+**无 config.yaml 时**：需要 server_url/凭据的命令（上传/下载/trust/config 等）
+fail-closed 报错并指引 `sclient context set` 创建；本地命令（version/sealfile/
+genkey/identity 等）不受影响。
+
+**凭据写入唯一路径**：`trust login` / `trust renew` / `trust register` 回填
+config.yaml 的 user 段（不再有平铺形态）。
 
 完整字段：
 
@@ -712,12 +718,21 @@ rate_limit:
 ### 客户端
 
 ```yaml
-# ~/.config/sproxy/sclient.yaml
-server_url: "https://proxy.example.com"
-access_key: "ak-meshA-3f8a..."
-access_key_secret: "0123...（64 hex，与服务端该 AK 对应的 SK 一致，见首启日志 / `sclient trust` 输出的 SK）"
-check_checksum: true
-chunk_size: 8388608    # 8 MiB
+# ~/.config/sproxy/config.yaml（context 模型单一事实源）
+apiVersion: sclient/v1
+kind: Config
+current-context: default
+environments:
+  - name: default
+    server_url: "https://proxy.example.com"
+users:
+  - name: default
+    access_key: "ak-meshA-3f8a..."
+    access_key_secret: "0123...（64 hex，与服务端该 AK 对应的 SK 一致，见首启日志 / `sclient trust` 输出的 SK）"
+contexts:
+  - name: default
+    environment: default
+    user: default
 ```
 
 ## 百度网盘后端（BaiduPCS plugin）

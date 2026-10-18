@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -40,13 +41,18 @@ const (
 	totpTestNonce = "11223344556677889900aabbccddeeff"
 )
 
-// trustLoginEnv 是 trust login 命令测试的完整 mock 环境：
+// newTrustLoginEnv 创建 trust login 测试环境：
 //   - srv：httptest 服务端（register/nonce/login 三端点按需注册远程行为）；
-//   - cfgPath / cfg：隔离配置文件 + 初始配置（ServerURL=srv.URL）；
+//   - cfgPath / cfg：隔离 config.yaml（context 模型）+ 初始配置（ServerURL=srv.URL）；
 //   - svc：mock factory 返回的无凭据 FileClient（WithSendNoAuth 短路签名，M14）。
 //
 // 生成的 session SK（sessionSK）由 mock login 端点构造 KindTOTPWrap 信封包裹，断言
 // 命令回填它就是解出的明文。
+//
+// 注意：trustLoginEnv.execute 用 testConfigProvider（返回 env.cfg）作为 cfgSvc——
+// 统一 context 后 cfgSvc.LoadConfig 由 cliConfigProvider 从 config.yaml 解析，但
+// runTrustLogin 的回填判定已不再依赖 cfgSvc（全部走 contextcfg 读写 config.yaml），
+// 故 execute 仍传 env.cfg 仅作 server_url 回落兼容。
 type trustLoginEnv struct {
 	srv       *httptest.Server
 	cfgPath   string
@@ -125,11 +131,20 @@ func newTrustLoginEnv(t *testing.T, registerAdmin bool) *trustLoginEnv {
 	env.srv = httptest.NewServer(mux)
 	t.Cleanup(env.srv.Close)
 
-	// 隔离配置文件。
-	cfgPath := filepath.Join(t.TempDir(), "sclient.yaml")
+	// 隔离配置文件（统一 context 模型）：config.yaml 带 current-context，env 段
+	// server_url=srv.URL；user 段留空（登录回填三件套到 user 段）。
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: env.srv.URL})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "alice"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "alice"})
+	if err := contextcfg.Save(ccfg, cfgPath); err != nil {
+		t.Fatalf("save context config: %v", err)
+	}
+	env.cfgPath = cfgPath
 	cfg := client.DefaultConfig()
 	cfg.ServerURL = env.srv.URL
-	env.cfgPath = cfgPath
 	env.cfg = cfg
 
 	// 无凭据客户端：零凭据构造 + 显式短路签名（M14）。防御性断言三字段为空。
@@ -162,14 +177,27 @@ func (e *trustLoginEnv) register(t *testing.T, args ...string) (*strings.Builder
 	return &out, &errOut, err
 }
 
-// reload 重新加载隔离配置文件（断言回填结果）。
+// reload 重新加载隔离配置文件（断言回填结果；统一 context 后读 config.yaml 的 user 段）。
 func (e *trustLoginEnv) reload(t *testing.T) *client.Config {
 	t.Helper()
-	cfg, err := client.LoadConfig(e.cfgPath)
+	ccfg, err := contextcfg.Load(e.cfgPath)
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	return cfg
+	cur := ccfg.FindContext(ccfg.CurrentContext)
+	if cur == nil || cur.User == "" {
+		t.Fatalf("current context 无 user: %+v", ccfg)
+	}
+	u := ccfg.FindUser(cur.User)
+	if u == nil {
+		t.Fatalf("current user %q 不存在", cur.User)
+	}
+	return &client.Config{
+		ServerURL:       ccfg.FindEnvironment(cur.Environment).ServerURL,
+		AccessKey:       u.AccessKey,
+		AccessKeySecret: u.AccessKeySecret,
+		AccessKeyID:     u.AccessKeyID,
+	}
 }
 
 // assertNoAuthHeaders 断言所有 TOTP RPC 均未携带 Authorization 头（M14 无凭据客户端）。
@@ -370,17 +398,28 @@ func TestTrustLogin_ManualAK(t *testing.T) {
 	}
 }
 
+// presetUserCreds 把旧凭据预置到当前 context 的 user 段（D4 覆盖确认/--overwrite 用例）。
+func (e *trustLoginEnv) presetUserCreds(t *testing.T, ak, secret, id string) {
+	t.Helper()
+	ccfg, err := contextcfg.Load(e.cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cur := ccfg.FindContext(ccfg.CurrentContext)
+	u := ccfg.FindUser(cur.User)
+	u.AccessKey = ak
+	u.AccessKeySecret = secret
+	u.AccessKeyID = id
+	if err := contextcfg.Save(ccfg, e.cfgPath); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
 // TestTrustLogin_OverwriteConfirm_No（D4）：预置非空 access_key_secret → 输入 n →
 // 中止非零退出、config 未被覆盖。
 func TestTrustLogin_OverwriteConfirm_No(t *testing.T) {
 	env := newTrustLoginEnv(t, false)
-	env.cfg.AccessKey = "ak-old-0123456789abcdef"
-	env.cfg.AccessKeySecret = strings.Repeat("ab", 32)
-	env.cfg.AccessKeyID = "skey-old-aaaaaaaa"
-	// 初始配置落盘：D4 覆盖确认断言「磁盘上的旧凭据未被改写」。
-	if err := client.SaveConfig(env.cfg, env.cfgPath); err != nil {
-		t.Fatalf("save initial config: %v", err)
-	}
+	env.presetUserCreds(t, "ak-old-0123456789abcdef", strings.Repeat("ab", 32), "skey-old-aaaaaaaa")
 
 	// 用已有凭据：预置非空 access_key_secret（可能来自 renew 的长命 SK）→ D4
 	// 覆盖确认出现在动态码之后——stdin 首行为动态码、第二行为覆盖确认。
@@ -401,12 +440,7 @@ func TestTrustLogin_OverwriteConfirm_No(t *testing.T) {
 // TestTrustLogin_OverwriteConfirm_Yes（D4）：输入 y → 覆盖确认通过 → 回填成功。
 func TestTrustLogin_OverwriteConfirm_Yes(t *testing.T) {
 	env := newTrustLoginEnv(t, false)
-	env.cfg.AccessKey = "ak-old-0123456789abcdef"
-	env.cfg.AccessKeySecret = strings.Repeat("ab", 32)
-	env.cfg.AccessKeyID = "skey-old-aaaaaaaa"
-	if err := client.SaveConfig(env.cfg, env.cfgPath); err != nil {
-		t.Fatalf("save initial config: %v", err)
-	}
+	env.presetUserCreds(t, "ak-old-0123456789abcdef", strings.Repeat("ab", 32), "skey-old-aaaaaaaa")
 
 	_, _, err := env.execute(t, totpTestCode+"\ny\n")
 	if err != nil {
@@ -427,12 +461,7 @@ func TestTrustLogin_OverwriteConfirm_Yes(t *testing.T) {
 // TestTrustLogin_OverwriteFlag（D4 --overwrite）：跳过覆盖确认直接回填。
 func TestTrustLogin_OverwriteFlag(t *testing.T) {
 	env := newTrustLoginEnv(t, false)
-	env.cfg.AccessKey = "ak-old-0123456789abcdef"
-	env.cfg.AccessKeySecret = strings.Repeat("ab", 32)
-	env.cfg.AccessKeyID = "skey-old-aaaaaaaa"
-	if err := client.SaveConfig(env.cfg, env.cfgPath); err != nil {
-		t.Fatalf("save initial config: %v", err)
-	}
+	env.presetUserCreds(t, "ak-old-0123456789abcdef", strings.Repeat("ab", 32), "skey-old-aaaaaaaa")
 
 	// stdin 只有动态码（无覆盖确认输入）——--overwrite 跳过确认。
 	_, _, err := env.execute(t, totpTestCode+"\n", "--overwrite")
@@ -457,7 +486,7 @@ func TestTrustLogin_ConfigIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "sclient.yaml" {
-		t.Fatalf("expected only sclient.yaml in config dir, got %v", entries)
+	if len(entries) != 1 || entries[0].Name() != "config.yaml" {
+		t.Fatalf("expected only config.yaml in config dir, got %v", entries)
 	}
 }

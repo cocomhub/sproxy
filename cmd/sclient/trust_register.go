@@ -47,22 +47,13 @@ func newCmdTrustRegister(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 
 // runTrustRegister 执行 trust register 全流程。
 //
-// 双模式：config.yaml（context 模型）存在且解析成功 → 用当前 context 的 env 注册 +
-// 自动切 user + 回填到 Users 段；config.yaml 不存在 → 回落旧平铺路径（既有语义，
-// 零破坏——回填 access_key 到平铺配置）。
+// runTrustRegister 执行 trust register 全流程（统一 context：server_url 来自当前
+// context 的 env；注册成功后自动切 user + 回填 access_key 到 Users 段）。
 func runTrustRegister(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string, owner string) error {
-	serverURL, contextMode := trustContextServerURL(cfgFile, ios)
-	if !contextMode {
-		cfg, err := loadTrustLoginConfig(cfgSvc)
-		if err != nil {
-			ios.WriteErrLine("加载配置失败: %v", err)
-			return fmt.Errorf("加载配置失败: %w", err)
-		}
-		if cfg.ServerURL == "" {
-			ios.WriteErrLine("未配置 server_url（无法连接 TOTP 服务端）")
-			return fmt.Errorf("未配置 server_url（无法连接 TOTP 服务端）")
-		}
-		serverURL = cfg.ServerURL
+	serverURL, err := trustServerURLFromConfig(cfgFile)
+	if err != nil {
+		ios.WriteErrLine("加载配置失败: %v", err)
+		return fmt.Errorf("加载配置失败: %w", err)
 	}
 
 	noAuthOpts := []client.Option{client.WithSendNoAuth(true)}
@@ -84,10 +75,7 @@ func runTrustRegister(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams
 	}
 	trustRegisterPrintResult(ios, res)
 
-	if contextMode {
-		return trustRegisterBackfillContext(cfgFile, res, ios)
-	}
-	return trustRegisterBackfillFlat(cfgSvc, cfgFile, res, ios)
+	return trustRegisterBackfillContext(cfgFile, res, ios)
 }
 
 // trustRegisterPrintResult 打印注册结果与 TOTP 密钥。base32_secret 属凭据（S49）：
@@ -143,23 +131,5 @@ func trustRegisterBackfillContext(cfgFile *string, res *client.TOTPRegisterResul
 	return nil
 }
 
-// trustRegisterBackfillFlat 平铺模式回填：回填 access_key（供后续 `trust login`
-// 默认使用；无 session SK 故 secret/id 不回填——登录成功后才写入）。沿用 trust renew
-// 的 SaveConfig 模式；防御：config 写入路径必须存在（生产由 root.go 生成默认路径）。
-func trustRegisterBackfillFlat(cfgSvc ConfigProvider, cfgFile *string, res *client.TOTPRegisterResult, ios cli.IOStreams) error {
-	if *cfgFile == "" {
-		return fmt.Errorf("配置文件路径为空，无法回填注册的 access_key")
-	}
-	cfg, cerr := loadTrustLoginConfig(cfgSvc)
-	if cerr != nil {
-		ios.WriteErrLine("加载配置失败: %v", cerr)
-		return fmt.Errorf("加载配置失败: %w", cerr)
-	}
-	cfg.AccessKey = res.AK
-	if err := client.SaveConfig(cfg, *cfgFile); err != nil {
-		ios.WriteErrLine("保存配置失败: %v", err)
-		return fmt.Errorf("保存配置失败: %w", err)
-	}
-	fmt.Fprintf(ios.Out, "已回填 access_key=%s（待登录成功后回填 access_key_secret）\n", res.AK)
-	return nil
-}
+// trustRegisterBackfillFlat 已删除（统一 context 配置：register 回填唯一路径 =
+// config.yaml 的 Users 段 + 自动切 user，不再有平铺 sclient.yaml 形态）。
