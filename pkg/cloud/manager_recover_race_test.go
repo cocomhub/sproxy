@@ -16,7 +16,12 @@ package cloud
 //   - 造 N 条 `downloading` 持久化任务 ⇒ 恢复会为每条启动一个下载 goroutine；
 //   - 服务端**先阻塞 ~200ms 再回错** ⇒ 这些 goroutine 在整个恢复循环期间**都活着**（把无锁写
 //     与持锁访问的重叠窗口撑到最大），随后自行退出（不会挂住 mgr.Close）；
-//   - 单轮恢复 + 语义断言（recovered/restarted/可见条目）⇒ 无状态漂移，判定确定。
+//   - 单轮恢复 + 语义断言（recovered/restarted/可见条目）⇒ 无状态漂移。
+//
+// **判别力如实说明**：`-race` 对本缺陷的检出是**概率性**的（交错窗口极短；实测同一用例在
+// 通道阻塞与 sleep 两种形态下一次红一次绿 ✗）。因此本用例是**冒烟**，真正的锁定靠
+// `internal/archcheck/recover_ordering_gate_test.go`（结构：恢复必须先完成 map 写入、
+// **之后**才启动 goroutine —— 顺序颠倒即必红）。
 //
 // 修好后（先收集 → 持锁批量插入 → **之后**才启动 goroutine）必须干净；去掉锁必被 -race 捕获。
 
@@ -35,8 +40,12 @@ func TestCloudDownloadManager_RecoverTasksNoUnlockedMapWrite(t *testing.T) {
 	t.Parallel()
 	// 服务端：**阻塞在通道上**（撑开重叠窗口，且不用 time.Sleep ⇒ 不触 R14 睡眠棘轮），
 	// 由本用例在断言完成后关闭通道 ⇒ 下载随即失败、goroutine 退出（不挂住 mgr.Close）。
+	var mgr *CloudDownloadManager // 先声明：handler 闭包需要引用（实际赋值在下方，早于任何请求）
 	hold := make(chan struct{})
 	defer close(hold)
+	// **确定性判据**（比 -race 可靠）：下载 goroutine 在**首次请求**时记录它看到的 m.tasks 条数。
+	// 修复后（先收集 → 持锁批量插入 → **之后**才启动 goroutine）⇒ 必为 N；缺陷版在循环中启动
+	// goroutine ⇒ 记录到 < N。`go` 语句提供 happens-before ⇒ 该读取必然发生在插入之后 ⇒ 判定确定。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-hold
 		w.WriteHeader(http.StatusInternalServerError)
@@ -45,7 +54,7 @@ func TestCloudDownloadManager_RecoverTasksNoUnlockedMapWrite(t *testing.T) {
 
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1<<30, nil, testLogger())
-	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
+	mgr, _ = newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	const n = 40
