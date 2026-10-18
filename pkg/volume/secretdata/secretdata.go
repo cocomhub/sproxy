@@ -186,6 +186,14 @@ type SecretdataFS struct {
 	// ownedTemp 标记 temp 目录由 NewFS 自建（os.MkdirTemp 随机目录），
 	// backend.Close 负责清理；显式配置的 TempDir 不清理（调用方所有）。
 	ownedTemp bool
+	// stagingQuota 是**本地 staging 配额**句柄（装配层经 StagingQuotaCapable 注入，
+	// 2026-10-18）：本卷的写路径会在 temp 目录落**加密分块目录 + meta blob**（≈ 明文 + pad），
+	// 这些本地临时物由本卷**自管记账**（ReserveUsage/ReleaseUsage）——复用装配层既有的
+	// 独立 staging Scope（`syncpkg.ApplyStagingQuota` 的 StagingQuotaCapable 分支），
+	// 不另造机制；未装配（nil）= 不记账（与 gate 的零回归口径一致）。
+	// stagingMu 保护注入与读（装配期注入、服务期读取）。
+	stagingMu    sync.RWMutex
+	stagingQuota syncpkg.StagingQuotaTracker
 
 	mu      sync.RWMutex
 	index   map[string]*metaEntry
@@ -944,6 +952,13 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		encSpan.End("bytes", wc.size, "encrypted", true, "cipher_bytes", cipherBytes,
 			"algorithm", s.auditAlgoName())
 	}()
+	// 本地 staging 配额：写 temp 前预留、结束后释放（自管记账，见 stagingReserve 注释）。
+	releaseStaging, sres := s.stagingReserve(ctx, wc.size)
+	if sres != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return sres
+	}
+	defer releaseStaging()
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
 		s.rollbackWrite(ctx, nil, wc.created)
@@ -1041,6 +1056,13 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 		encSpan.End("bytes", int64(len(wc.data)), "encrypted", true, "cipher_bytes", cipherBytes,
 			"algorithm", s.auditAlgoName())
 	}()
+	// 本地 staging 配额：写 temp 前预留、结束后释放（自管记账，见 stagingReserve 注释）。
+	releaseStaging, sres := s.stagingReserve(ctx, wc.size)
+	if sres != nil {
+		s.rollbackWrite(ctx, nil, wc.created)
+		return sres
+	}
+	defer releaseStaging()
 	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
 	if err != nil {
 		s.rollbackWrite(ctx, nil, wc.created)
@@ -2674,6 +2696,53 @@ func mtimeString(mtime int64) string {
 		return ""
 	}
 	return time.Unix(0, mtime).UTC().Format(time.RFC3339Nano)
+}
+
+// ---- 本地 staging 配额自管（StagingQuotaCapable，2026-10-18）----
+//
+// 为什么自管而非让装配层的 StagingQuotaGateFS 代理记账：
+//   - gate 只能看见**经本卷 FS 的 WriteFile**，按「逻辑上传量」代理预留——而本卷真正的本地
+//     临时物是 temp 目录里的**加密分块目录**（≈ 明文大小）**加每个文件的 meta blob pad**
+//     （1–2MiB），gate 既看不到 meta pad、也无法与实际并发临时占用对齐；
+//   - 本卷写入目标卷（内层 FS）的字节是**最终数据**、不是 staging——由内层卷自己的容量/配额
+//     记账 ⇒ 由本卷自管可避免与内层卷**双计**。
+//
+// 复用同一套机制（同一个 `syncpkg.StagingQuotaTracker` + 装配层独立 staging Scope），
+// 仅把记账点从「gate 代理」改为「本卷在真正写 temp 前后预留/释放」。
+var _ syncpkg.StagingQuotaCapable = (*SecretdataFS)(nil)
+
+// WithStagingQuota 注入本地 staging 配额句柄（装配层调用；nil = 不记账）。
+func (s *SecretdataFS) WithStagingQuota(q syncpkg.StagingQuotaTracker) {
+	s.stagingMu.Lock()
+	s.stagingQuota = q
+	s.stagingMu.Unlock()
+}
+
+// stagingTracker 读取当前配额句柄（未注入 ⇒ nil）。
+func (s *SecretdataFS) stagingTracker() syncpkg.StagingQuotaTracker {
+	s.stagingMu.RLock()
+	defer s.stagingMu.RUnlock()
+	return s.stagingQuota
+}
+
+// stagingReserve 为一次写路径的**本地临时物**预留 staging 配额，返回幂等释放函数。
+// 记账口径 = 明文大小（加密分块目录 ≈ 明文）+ **2×metaPadTarget**（每文件一个 meta blob 的
+// pad 上界）。预留失败（配额不足/ctx 取消）⇒ 调用方必须 fail-closed（不落临时物）。
+// 未装配配额（nil）⇒ 直通（返回 no-op 释放），与 gate 的零回归口径一致。
+func (s *SecretdataFS) stagingReserve(ctx context.Context, size int64) (func(), error) {
+	q := s.stagingTracker()
+	if q == nil {
+		return func() {}, nil
+	}
+	need := max(size, 0) + 2*int64(s.metaPadTarget())
+	if need <= 0 {
+		return func() {}, nil
+	}
+	if err := q.ReserveUsage(ctx, need); err != nil {
+		return nil, fmt.Errorf("secretdata: 本地 staging 配额不足（防本地磁盘打满）: %w", err)
+	}
+	var once sync.Once
+	return func() { once.Do(func() { q.ReleaseUsage(need) }) }, nil
 }
 
 // parentDirOf 返回逻辑文件 rel 所在逻辑目录（根为 ""）。

@@ -266,6 +266,12 @@ func (s *SecretdataFS) encryptContentSingle(data []byte, rel string) (*shardseal
 	if len(data) == 0 {
 		return nil, nil, fmt.Errorf("secretdata: 空内容不可去重")
 	}
+	// 本地 staging 配额（自管记账，与主写路径同口径）。
+	releaseStaging, sres := s.stagingReserve(context.Background(), int64(len(data)))
+	if sres != nil {
+		return nil, nil, sres
+	}
+	defer releaseStaging()
 	tmp, err := os.MkdirTemp(s.temp, "chunks-dedup-*")
 	if err != nil {
 		return nil, nil, err
