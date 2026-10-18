@@ -68,6 +68,12 @@ type TransferRequest struct {
 	// 承担，转存内核不需要（也不需要读它做判定，避免"声明了却没生效"的假隔离）。
 	// Overwrite 是否允许覆盖已存在目标（false = WriteIfAbsent 拒绝）。
 	Overwrite bool
+	// SkipVerify 跳过写后读回校验（默认执行；见 readback.go。仅极端性能场景使用——
+	// 校验是"存储层静默损坏"的唯一防线）。
+	SkipVerify bool
+	// WantSHA256 是调用方已知的**权威整文件摘要**（可选；非空时读回校验额外比对它，
+	// 防"写侧 meta 也按损坏内容生成"的自洽却错误）。
+	WantSHA256 string
 }
 
 // Execute 执行一次传输：写 source 流（经预处理）到目标卷 rel。
@@ -83,11 +89,43 @@ func Execute(ctx context.Context, req TransferRequest) (string, error) {
 	if rel == "" {
 		rel = AutoRel(req.Entries[0].Rel)
 	}
-	// 预处理流组织：None = 单文件直写；Pack = 聚合流后直写。
+	url, err := runTransfer(ctx, req, rel)
+	if err != nil {
+		return "", err
+	}
+	if verr := verifyAfterWrite(ctx, req, rel); verr != nil {
+		return "", verr
+	}
+	return url, nil
+}
+
+// runTransfer 按预处理形态分派：None = 单文件直写；Pack = 聚合流后直写。
+func runTransfer(ctx context.Context, req TransferRequest, rel string) (string, error) {
 	if req.Preprocess != nil {
 		return executePacked(ctx, req, rel)
 	}
 	return executeIndividual(ctx, req, rel)
+}
+
+// verifyAfterWrite 是**写后读回校验**的唯一调用点（实现见 readback.go）：
+// 目标卷有 meta.Provider 时按 meta 逐块 + 整文件比对 + 尾排检查 ⇒ 存储层静默截断/损坏不再被
+// 当成功（此前本内核只查「存在且非空」）。内容不一致 ⇒ **删除产物 + 失败**（fail-closed，不得
+// 留损坏对象）；无 Provider / meta 不可读 ⇒ 跳过（卷无 meta 概念）；meta 非法或读取 I/O 失败
+// ⇒ 报错但**不删**（无法证明内容错）。
+func verifyAfterWrite(ctx context.Context, req TransferRequest, rel string) error {
+	if req.SkipVerify {
+		return nil
+	}
+	verr := VerifyReadback(ctx, req.Destination, rel, req.WantSHA256)
+	switch {
+	case verr == nil, errors.Is(verr, ErrNoProviderMeta):
+		return nil
+	case errors.Is(verr, ErrReadbackMismatch), errors.Is(verr, ErrReadbackWantMismatch):
+		_ = req.Destination.Delete(ctx, rel)
+		return verr
+	default:
+		return verr
+	}
 }
 
 // executeIndividual 纯转存：单条目直写目标卷（复用 WriteIfAbsent 原子写）。

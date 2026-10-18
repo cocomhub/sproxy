@@ -20,9 +20,9 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/downloader"
-	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/transfer"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -445,75 +445,26 @@ var ErrTransferContentMismatch = errors.New("transfer: content checksum mismatch
 // 跨信任边界静默损坏逐分块定位（比整文件单哈希精确）；无 Provider → errNoProviderMeta
 // 由调用方回落流式。校验通过返回 nil。
 func verifyByFileMeta(env *transferEnv) error {
-	pv, ok := env.targetFS.(meta.Provider)
-	if !ok {
+	// **收敛**（2026-10-18 独立审核根因修复）：读回校验的**唯一实现**在 pkg/transfer
+	// （readback.go）——此前本包与转存内核各有一套（两路径两保证：内核只查"存在且非空"）。
+	// 此处仅做哨兵映射，保持本包既有的路由语义不变：
+	//   · 无 Provider/meta 不可读 ⇒ errNoProviderMeta（调用方回落流式对 result.Checksum）；
+	//   · 内容与卷 meta 不一致 ⇒ 卷静默损坏（重试卷 ErrTransferTarget）；
+	//   · 内容与下载权威校验和不一致 ⇒ 本地产物损坏/截断（文件异常重下载 ErrTransferContentMismatch）。
+	verr := transfer.VerifyReadback(env.ctx, env.targetFS, env.rel, env.result.Checksum)
+	switch {
+	case verr == nil:
+		return nil
+	case errors.Is(verr, transfer.ErrNoProviderMeta):
 		return errNoProviderMeta
+	case errors.Is(verr, transfer.ErrReadbackWantMismatch):
+		return fmt.Errorf("%w: %v", ErrTransferContentMismatch, verr)
+	case errors.Is(verr, transfer.ErrReadbackMismatch):
+		return fmt.Errorf("%w: %v", ErrTransferTarget, verr)
+	default:
+		// meta 非法 / 读取 I/O 失败 ⇒ 卷状态异常（非回落，可观测）。
+		return fmt.Errorf("%w: %v", ErrTransferTarget, verr)
 	}
-	fm, err := pv.FileMeta(env.ctx, env.rel)
-	if err != nil {
-		// meta 读失败（sidecar 缺失/未启用）→ 回落流式（不误报损坏）。
-		return errNoProviderMeta
-	}
-	// M7a 修复：先 Validate FileMeta——装饰器内部已 Validate，但 Provider 接口不保证
-	// （非装饰卷/畸形 Provider 返回 c.Size<0 或 Offset 空洞 → CopyN 走错误路径）。
-	// 校验失败视为目标卷 meta 非法（ErrTransferTarget，非回落流式——畸形 meta 是卷
-	// 状态异常，可观测）。
-	if verr := meta.Validate(fm); verr != nil {
-		return fmt.Errorf("%w: 目标卷 meta 非法: %v", ErrTransferTarget, verr)
-	}
-	rc, rerr := env.targetFS.OpenRead(env.ctx, env.rel)
-	if rerr != nil {
-		return fmt.Errorf("%w: 读回分块校验失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, rerr)
-	}
-	defer rc.Close()
-	// B/E-CRITICAL 修复：**按 meta 记录的实际分块边界（Offset/Size）逐块流式重算比对**
-	// ——secretdata 随机分块（1-200MB 均匀随机）用固定 ChunkSize 重切必然错位，恒误报
-	// 损坏。此处逐块按 Size 读回窗口重算该块 SHA256，同时喂整文件 TotalSHA256 累计：
-	// 随机分块与等长分块都精确。
-	totalSHA := sha256.New()
-	for i, c := range fm.Chunks {
-		blockHash := sha256.New()
-		// 每块窗口：MultiWriter 同时喂块哈希与整文件哈希（块连续覆盖 [0,Size)，
-		// 流位置顺序推进即正确）。
-		mw := io.MultiWriter(blockHash, totalSHA)
-		if _, ierr := io.CopyN(mw, rc, c.Size); ierr != nil {
-			return fmt.Errorf("%w: 分块 %d 读回失败（目标卷 %q）: %v", ErrTransferTarget, i, env.task.Transfer.Volume, ierr)
-		}
-		gotSHA := hex.EncodeToString(blockHash.Sum(nil))
-		if gotSHA != c.SHA256 {
-			return fmt.Errorf("%w: 转存后分块 %d 不一致（卷静默损坏？）", ErrTransferTarget, i)
-		}
-	}
-	// D-MAJOR-1 修复：**drain 余量 + 断言实读 == fm.Size**——原循环按 fm.Chunks 覆盖
-	// 窗口读（合法前缀即通过），目标卷内容 = 合法前缀+尾部垃圾时，分块哈希/TotalSHA256/
-	// result.Checksum 三对都只覆盖前缀 → 尾追加的损坏文件被判可信。此处读尽余量：
-	// 若目标比 meta 长（尾部追加）→ 余量非空 → 拒绝（卷静默损坏）。
-	var trailing int64
-	if n, terr := io.Copy(io.Discard, rc); terr != nil {
-		return fmt.Errorf("%w: 读回尾排检查失败（目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, terr)
-	} else {
-		trailing = n
-	}
-	if trailing != 0 {
-		return fmt.Errorf("%w: 转存后内容长于 meta（尾部追加 %d B，卷静默损坏？）", ErrTransferTarget, trailing)
-	}
-	// 整文件 TotalSHA256 与 meta 一致（权威认证：内容整体没被篡改，与分块粒度无关）。
-	totalHex := hex.EncodeToString(totalSHA.Sum(nil))
-	if totalHex != fm.TotalSHA256 {
-		return fmt.Errorf("%w: 转存后内容与 meta 不一致（TotalSHA256 %s ≠ %s，卷静默损坏？）",
-			ErrTransferTarget, totalHex, fm.TotalSHA256)
-	}
-	// D-C2 修复：**与下载权威校验和最终比对**——分块/整文件校验只证明「目标卷内容 ==
-	// 写侧 meta」，但 meta 由**写入流**生成（本地产物被篡改/截断时 meta 也按篡改内容
-	// 生成，自洽却错误入库）。必须与 result.Checksum（下载器权威 sha256）比对，否则
-	// 本地产物损坏被静默转存（metaProvider 卷——secretdata 短路不包装饰器——尤其
-	// 此路径，原流式回落有此比对而 verifyByFileMeta 缺失）。
-	if env.result.Checksum != "" && totalHex != env.result.Checksum {
-		return fmt.Errorf("%w: 转存后内容与下载校验和不一致 %s ≠ %s（本地产物损坏/截断？）",
-			ErrTransferContentMismatch, totalHex, env.result.Checksum)
-	}
-	// 分块校验通过 → 内容与写侧 meta 一致（跨信任边界无静默损坏）。
-	return nil
 }
 
 // recordDamagedSource 把源完整性 damaged 标记写入目标卷 meta.Extra（旁路记录——
