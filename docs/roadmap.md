@@ -1179,15 +1179,33 @@ type LeaderElector interface {
       （用实现 `RangeReader` + `StagedPathReuse` 的**假外部 FS** 覆盖整链，避免依赖真实网盘凭据）。
 - [ ] **用户面**：`extra.target` 文档 + `config.example.yaml` 示例 + 建卷 API/Web UI 的嵌套建卷路径核对。
 
-### ② secrets 按卷格式存取（用户裁定：URI 读 + 缓存 + 隔离真实存储结构）
-- [ ] secrets 文件改**经卷存取**（按该卷格式加密/封印），使用方仍按 `secrets://<卷>/<名>` 读并缓存；
-      当前 `cmd/sproxy/secret_register.go` 用裸 `NewLocalFS(<root>/secrets)` ⇒ 在**加密默认卷上为明文**（R26 已登记）。
-- [ ] **迁移口径（禁静默降级）**：既有明文 secret 文件在加密卷上 ⇒ 显式迁移（读明文 → 经 Root 加密写 → 校验 →
-      删旧）或显式拒绝 + 运维命令；补 e2e。
+### ② secrets 按卷格式存取（用户裁定：URI 读 + 缓存 + 隔离真实存储结构）——**已完成** ✓（2026-10-19 核实销账）
+- ✅ **经卷存取（按卷格式加密/封印）**：`cmd/sproxy/secret_register.go` 的 `secretsFSFor` 按**路径归属**
+  （部署事实，而非配置来源）判定——落在受管卷根内 ⇒ `server.NewRootSecretsFS`（走 `storage.Root`：
+  at-rest 透明加解密 + 封印 + 用户可见长度/容量接线；`pkg/server/secrets_api.go`、`pikpak` 主密钥同源）；
+  仅「**独立目录**」（不在任何卷根内，无卷语义可依附）保留裸 `NewLocalFS`，该回退分支已在 R26 门禁登记。
+- ✅ **使用方按 URI 配置读 + 隔离真实存储结构**：消费方只写 `extra.secret_url: secrets://<卷>/<名>`
+  （`secrets.NameFromURL` / `backend.OpenURL`），**完全不见底层布局**；内容在**装配期读一次并缓存注入**
+  （`defaultSecretdataSecret` → `secretdata.NewBackend` 持有密钥字节）；运行期读取点仅 `AccountPool.Use`
+  （会话级冷路径）与 secrets API ⇒ **无热点，无需额外读缓存**（如未来出现每请求读取再按需加缓存）。
+- ✅ **迁移口径（禁静默降级）**：用户裁定 2026-10-13「尚未上线 ⇒ 无兼容负担」——secrets **一律加密形态**，
+  不做「历史明文识别 / 读时迁移」；非加密容器按存储层既有报错 **fail-closed**（不静默降级、不自动改写）；
+  上线后若确需迁移，按彼时口径单独立项（记档于 `pkg/server/secrets_fs.go` 文件头）。
+- **取证**：`go test ./pkg/volume/secrets/ ./pkg/server/` secrets 用例全绿 · `internal/archcheck` R26
+  （`TestVolumeRootBypass`）通过 · `cmd/sproxy/secret_register_test.go` 的 `plaintextOnDisk` 断言
+  （加密卷上密钥不明文落盘）通过。
 
 ### ③ 回收站：各卷独立 + 汇总展示（用户裁定：避免过多复杂度，参考常见 OS 策略）
-- [ ] 软删落**文件所在卷**的 trash（已是）；列表/恢复/清空**按各卷独立**操作 + 提供**跨卷汇总视图**；
-      API 增 `volume` 维度；Web UI 补真浏览器 e2e（硬规则）。
+- [x] 软删落**文件所在卷**的 trash（`softDeleteToTrash(root=<文件所在卷>)` ✓ 已是）。
+- [ ] **列表/恢复/清空按各卷独立 + 跨卷汇总视图**（**已定位缺口** 2026-10-19）：`pkg/server/trash.go`
+      的 `listTrashHandler` 只用 `h.tenantFor(owner)` 的**默认卷根**（`root.Abs("trash")`）⇒ 其它卷
+      （`user` 卷 / 外部卷）里软删的文件**不可见、不可恢复** ✗；`EmptyTrash(owner)` 同限默认卷 ✗。
+      **实施**：① 服务面加卷维度（`ListTrash(owner, volume)` / `RestoreTrash(owner, trashRel, volume)` /
+      `EmptyTrash(owner, volume)`，`volume==""` = 汇总/全部）；② 卷枚举复用既有 `h.Volumes()`
+      （`registry.Set`）+ `walkExportVolumes` 的 owner 卷遍历口径；③ API `GET /api/trash?volume=`、
+      `POST /api/trash/restore`（加 `volume`）、`POST /api/trash/empty?volume=`，条目带 `volume` 字段；
+      ④ Web UI 增卷列 + 卷筛选（**硬规则**：Playwright 真浏览器 e2e + 纯函数 `node --test`）；
+      ⑤ `CleanupTrash`/`trashGCTask` 同步覆盖各卷。
 
 ### ④ 容量/配额收敛（必须生产级、可长期维护）
 - [ ] 本地加密卷容量真值接 root 物理扫描（消除 ~0.1% 逻辑口径偏差）。
