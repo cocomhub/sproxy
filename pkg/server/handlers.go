@@ -217,6 +217,10 @@ type Handlers struct {
 	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
 	archiveUsage map[string]map[string]int64
 	tenantMu     sync.Mutex // 串行化 checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
+	// quotaWaitTimeout 是写路径「配额不足 ⇒ 排队重试」的等待上限（**0 = quota.DefaultWaitTimeout**，
+	// 即用户裁定 2026-10-14 的 30s 语义）。**仅供测试夹具注入小值**（生产恒 0，语义不变）——否则
+	// 大量「请求能放下、但当前用量不够」的用例各自白等 30s，CI 实测累计触发 5min 包超时。
+	quotaWaitTimeout time.Duration
 	// volSet 是装配后的卷集合（RegisterRoutes 装配；nil = 未装配卷功能的旧装配路径，如
 	// 测试手工构造的 Handlers）。默认卷语义：globalRoot 字段 = 默认卷根、tenantFor 走默认卷。
 	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。

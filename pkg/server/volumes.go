@@ -569,7 +569,7 @@ func (h *Handlers) routeUploadLegacy(owner, rel string, size int64) (*volumeRout
 		// **超时（默认 30s）后才**按容量不足失败。
 		// 残余（如实记录）：未串入请求 ctx（本函数签名无 ctx，需经 files.Runtime 逐层 plumbing）
 		// ⇒ 客户端断连时仍等到超时（有界 30s），不影响正确性。
-		res, err := route.scope.WaitReserve(context.Background(), size, 0)
+		res, err := route.scope.WaitReserve(context.Background(), size, h.quotaWaitTimeout)
 		if err != nil {
 			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}
@@ -625,7 +625,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 		// **超时（默认 30s）后才**按容量不足失败。
 		// 残余（如实记录）：未串入请求 ctx（本函数签名无 ctx，需经 files.Runtime 逐层 plumbing）
 		// ⇒ 客户端断连时仍等到超时（有界 30s），不影响正确性。
-		res, err := route.scope.WaitReserve(context.Background(), size, 0)
+		res, err := route.scope.WaitReserve(context.Background(), size, h.quotaWaitTimeout)
 		if err != nil {
 			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}

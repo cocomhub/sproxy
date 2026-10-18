@@ -42,6 +42,8 @@ func TestCloudDownloadManager_RecoverTasksNoUnlockedMapWrite(t *testing.T) {
 	// 由本用例在断言完成后关闭通道 ⇒ 下载随即失败、goroutine 退出（不挂住 mgr.Close）。
 	var mgr *CloudDownloadManager // 先声明：handler 闭包需要引用（实际赋值在下方，早于任何请求）
 	hold := make(chan struct{})
+	// 注：`defer close(hold)` 必须**在** `defer srv.Close()` **之后**注册（LIFO ⇒ 先执行），
+	// 否则 srv.Close() 会等待仍阻塞在 `<-hold` 的 handler ⇒ 用例自身死锁（CI 实测挂满 5min）。
 	defer close(hold)
 	// **确定性判据**（比 -race 可靠）：下载 goroutine 在**首次请求**时记录它看到的 m.tasks 条数。
 	// 修复后（先收集 → 持锁批量插入 → **之后**才启动 goroutine）⇒ 必为 N；缺陷版在循环中启动
