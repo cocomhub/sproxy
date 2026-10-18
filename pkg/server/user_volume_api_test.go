@@ -16,17 +16,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume"
-	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
 )
@@ -654,45 +651,6 @@ func TestUserVolumeAPI_RecreateInheritsCapacity(t *testing.T) {
 		"extra": map[string]any{"bduss": "t"}})
 	if got := capOf(); got != 0 {
 		t.Fatalf("unlimited:true 应不限, got %d", got)
-	}
-}
-
-// TestFlushVolumeCounters_FlushesDirtyCounters 回归（F9 接线）：关机路径必须把各外部卷
-// 计数器的待落盘变更写入快照——`Release` 已节流，不 flush 会让本次进程的删除量丢失，
-// 重启后 used 偏高（伪 507）且逐次累积。
-func TestFlushVolumeCounters_FlushesDirtyCounters(t *testing.T) {
-	t.Parallel()
-	path := capacity.VolumeCounterPath(t.TempDir(), "v1")
-	cnt, err := capacity.NewPoolCounterPersistent(quota.NewPool(1000), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if aerr := cnt.TryAdd(400); aerr != nil { // 增加恒同步落盘
-		t.Fatal(aerr)
-	}
-	cnt.Release(100) // 减少节流：快照仍 400
-
-	vs := registry.NewSet(nil, nil, nil, nil, "")
-	if aerr := vs.AddExternalVolume(volume.Volume{Name: "v1", Type: "baidupcs"},
-		capacity.WrapBackend(&extBackend{fs: &extFS{files: map[string]string{}}}, cnt)); aerr != nil {
-		t.Fatalf("AddExternalVolume: %v", aerr)
-	}
-	h := &Handlers{volSet: vs, logger: testLogger()}
-	h.flushVolumeCounters()
-
-	// 快照必须已反映「减少」（400-100=300）。
-	raw, rerr := os.ReadFile(path)
-	if rerr != nil {
-		t.Fatalf("读快照: %v", rerr)
-	}
-	var f struct {
-		Used int64 `json:"used"`
-	}
-	if uerr := json.Unmarshal(raw, &f); uerr != nil {
-		t.Fatalf("解析快照: %v", uerr)
-	}
-	if f.Used != 300 {
-		t.Fatalf("关机 flush 后快照 used 应为 300, got %d", f.Used)
 	}
 }
 

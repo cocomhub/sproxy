@@ -66,6 +66,13 @@ var stateWriteExemptFiles = []string{
 	"pkg/server/share.go",
 	// 用户卷 meta（P2）：<meta>/volume/<name>.json。
 	"pkg/server/user_volume_store.go",
+	// 卷级容量**本地状态**（配额唯一实现，2026-10-17）：<meta>/volume/<name>.limit（两行 limit/used）。
+	// 与 `user_volume_store.go` 同域（同目录、同生命周期）：上限是**配置**、用量是**基线种子**，
+	// 二者都须落**节点本地**（不依赖卷 FS 能力 ⇒ F6 与「用量不归零」恒成立）⇒ 不由 StateStore 承载。
+	"pkg/volume/capacity/capacity.go",
+	// 卷内账本（分片日志）：<卷根>/meta/quota/{shards,shard.*.log,snap.*}。落**卷内保留区**
+	// （跨进程可见是账本唯一目的），非节点本地 state ⇒ 不属 StateStore 管辖。
+	"pkg/volume/capacity/ledger.go",
 	// 云任务/组状态（P2）：<meta>/cloud/...。
 	"pkg/cloud/manager_persist.go",
 	// 同步冲突索引与任务状态（P2）：<meta>/sync/...。

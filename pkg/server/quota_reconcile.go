@@ -152,31 +152,87 @@ func (h *Handlers) adjustVolumePool(name string, tenantBuckets map[string]map[st
 	if h.volSet == nil {
 		return
 	}
+	// **账本修正独立于 pool**（评审 S2）：用户卷无 pool（下方 early-return 前）此前完全
+	// 不收敛 ⇒ 查询/强制面（LedgerCounter）恒逻辑口径；此处先行把账本收敛到真值。
+	h.correctLedgerToTruth(name)
 	pool := h.volSet.Pool(name)
 	if pool == nil || pool.Reserved() > 0 {
 		return
 	}
+	pool.Adjust(pool.Usage(), h.truthPreferredVolumeUsage(name, scannedVolumeUsage(tenantBuckets)))
+}
+
+// correctLedgerToTruth 把卷账本（LedgerCounter）收敛到真值报告者（评审 S2——此前仅
+// pool 收敛、账本仍逻辑口径 ⇒ 展示与强制漂移）。`CorrectFrom` 对无报告者/未接线卷为
+// no-op（回落 Used）。
+func (h *Handlers) correctLedgerToTruth(name string) {
+	rep, ok := h.volumeTrueUsage(name)
+	if !ok {
+		return
+	}
+	if lc := h.volumeLedgerCounter(name); lc != nil {
+		lc.CorrectFrom(rep)
+	}
+}
+
+// scannedVolumeUsage 归集卷的磁盘扫描占用（功能桶键之和）。
+func scannedVolumeUsage(tenantBuckets map[string]map[string]int64) int64 {
 	var total int64
 	for _, buckets := range tenantBuckets {
 		for _, b := range quotaBucketNames {
 			total += buckets[b]
 		}
 	}
-	// **真值优先**（设计 2026-10-11 §10 与 §12.1 第 2 项）：处理器层（secretdata 等）知道本
-	// 卷物理落盘字节（内容分块 + meta pad + parity），优先采信并与磁盘扫描值交叉校验；
-	// ok=false（未接线/无报告者）回落扫描值，**不静默降级为 0**（本地裸卷的物理真值本来
-	// 就由扫描直接给出）。两者都可得且差异超容差 → 告警（防「扫描口径遗漏封装开销」再次失真）。
-	if rep, ok := h.volumeTrueUsage(name); ok {
-		truth, tok := rep.TrueUsage()
-		if tok {
-			if diff := truth - total; diff != 0 && absInt64(diff) > volumeTruthTolerance(total) {
-				h.logger.Warn("卷真值与磁盘扫描不一致，以真值为准（差异可能来自目录 meta/孤儿 blob/扫描口径）",
-					"volume", name, "truth", truth, "scanned", total, "diff", diff)
-			}
-			total = truth
+	return total
+}
+
+// truthPreferredVolumeUsage 取「真值优先」的卷占用：处理器层（secretdata 等）知道物理
+// 落盘字节（内容分块 + meta pad + parity），优先采信并与扫描值交叉校验（差异超容差告警）；
+// ok=false（无报告者）回落扫描值，**不静默降级为 0**（设计 2026-10-11 §10 与 §12.1）。
+func (h *Handlers) truthPreferredVolumeUsage(name string, total int64) int64 {
+	rep, ok := h.volumeTrueUsage(name)
+	if !ok {
+		return total
+	}
+	truth, tok := rep.TrueUsage()
+	if !tok {
+		return total
+	}
+	if diff := truth - total; diff != 0 && absInt64(diff) > volumeTruthTolerance(total) {
+		h.logger.Warn("卷真值与磁盘扫描不一致，以真值为准（差异可能来自目录 meta/孤儿 blob/扫描口径）",
+			"volume", name, "truth", truth, "scanned", total, "diff", diff)
+	}
+	return truth
+}
+
+// volumeLedgerCounter 返回某卷的账本计数器（分片日志账本；非 `*capacity.Backend` 装配
+// ——封印包装等——返回 nil ⇒ 该卷不参与账本修正/压缩）。
+func (h *Handlers) volumeLedgerCounter(name string) *volcapacity.LedgerCounter {
+	if h.volSet == nil {
+		return nil
+	}
+	be := h.volSet.External(name)
+	if bc, ok := be.(*volcapacity.Backend); ok {
+		if lc, ok := bc.Counter().(*volcapacity.LedgerCounter); ok {
+			return lc
 		}
 	}
-	pool.Adjust(pool.Usage(), total)
+	return nil
+}
+
+// compactVolumeLedger 周期压缩账本分片 + 回收空分片（评审 S1/S3——分片/索引随重启单调增长）。
+// best-effort：压缩/回收失败只留日志，不阻塞对账主流程。
+func (h *Handlers) compactVolumeLedger(name string) {
+	lc := h.volumeLedgerCounter(name)
+	if lc == nil {
+		return
+	}
+	if cerr := lc.Compact(); cerr != nil {
+		h.logger.Warn("账本分片压缩失败（分片继续增长，对账仍正确）", "volume", name, "error", cerr)
+	}
+	if rerr := lc.ReapEmptyShards(); rerr != nil {
+		h.logger.Warn("账本空分片回收失败", "volume", name, "error", rerr)
+	}
 }
 
 // volumeTruthTolerance 是「真值 vs 磁盘扫描」交叉校验的容差：绝对下限 1MiB 或扫描值的 5%，
@@ -244,6 +300,8 @@ func (h *Handlers) reconcileVolumes(volumeBuckets map[string]map[string]map[stri
 	h.reconcileQuotaScopes(agg)
 	for volName, tenantBuckets := range volumeBuckets {
 		h.adjustVolumePool(volName, tenantBuckets)
+		// 账本分片压缩 + 空分片回收（评审 S1/S3）：周期对账是自然触发点。
+		h.compactVolumeLedger(volName)
 	}
 }
 

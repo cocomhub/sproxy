@@ -502,7 +502,7 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 	e, ok := s.index[key]
 	s.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("secretdata: 文件 %q 不存在", rel)
+		return nil, fmt.Errorf("secretdata: 文件 %q 不存在: %w", rel, os.ErrNotExist)
 	}
 	if e.meta == nil {
 		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
@@ -1234,7 +1234,7 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 	e, ok := s.index[rel]
 	s.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("secretdata: 文件 %q 不存在", rel)
+		return nil, fmt.Errorf("secretdata: 文件 %q 不存在: %w", rel, os.ErrNotExist)
 	}
 	if e.meta == nil {
 		return nil, fmt.Errorf("secretdata: %q 是目录", rel)

@@ -197,9 +197,9 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		}, http.StatusBadRequest)
 		return
 	}
-	// F7（评审 P3）：**先校验卷名再拼路径/IO**——下方 counterPath 由 req.Name 拼接，而真正的
+	// F7（评审 P3）：**先校验卷名再拼路径/IO**——下方 limitPath 由 req.Name 拼接，而真正的
 	// 卷名校验此前只在 store.Create 内（更晚）。名字含分隔符/`..` 时会读到 meta 目录之外的
-	// `*.capacity`（且读失败直接 500），顺序与错误码都不当。此处与 store 用**同一判定**
+	// `*.limit`（且读失败直接 500），顺序与错误码都不当。此处与 store 用**同一判定**
 	// （storage.ValidSegmentName），提前使路径安全不依赖下游副作用。
 	if !storage.ValidSegmentName(req.Name) {
 		sendJSONResponse(w, map[string]string{"error": "卷名非法"}, http.StatusBadRequest)
@@ -263,21 +263,28 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// 卷级容量记账（FS 层）：从**创建期**即包 CapacityFS（此前只有重启 restore 才包，
-	// 新建卷在本次进程内 Capacity 不生效——顺手修）。计数器持久化到与 restore 相同的
-	// 路径 <root>/<owner>/meta/volume/<name>.capacity（**非 .json**：避开 UserVolumeStore
-	// 的 *.json 扫描，防计数文件被误当卷元数据）；重启后 Load 续用。
-	counterPath := filepath.Join(h.userVolumes.Root(), owner, "meta", "volume", req.Name+".capacity")
-	// F6：`capacity:0` 且未显式 unlimited ⇒ **继承同名卷已持久化的上限**（删除用户卷时刻意
-	// 保留 `.capacity`，因为远端字节仍在）——否则 delete+recreate 写 capacity:0 即解除上限。
-	counter, lerr := capacity.LoadForCreate(counterPath, req.Capacity, req.Unlimited)
-	if lerr != nil {
-		sendJSONResponse(w, map[string]string{"error": "容量快照读取失败: " + lerr.Error()}, http.StatusInternalServerError)
-		return
+	// 新建卷在本次进程内 Capacity 不生效——顺手修）。计数器是**唯一实现**（分片日志账本，
+	// 建在**原始**卷 FS 上 ⇒ 不自记账、跨进程正确、重启从已占用起算）。
+	// F6（用户裁定 2026-10-12）：`capacity:0` 且未显式 unlimited ⇒ **继承已持久化上限**
+	// （远端字节仍在）——否则 delete+recreate 写 capacity:0 即解除上限。
+	limitPath := capacity.VolumeLimitPath(h.userVolumes.Root(), owner, req.Name)
+	limit := capacity.LoadVolumeLimit(limitPath, req.Capacity, req.Unlimited)
+	// 用量基线（**恒可用的本地状态**）：卷内账本是 best-effort（卷 FS 可能承载不了 ⇒ 内存降级
+	// ⇒ 不持久 ✗），而「delete+recreate 不得归零绕过限额」是**硬要求** ✓ ⇒ 创建时把本地基线
+	// **注入**账本（幂等：仅当账本为空时写）✓。账本仍是权威（强制与查询都用它）✓。
+	baselineUsed := capacity.LoadVolumeUsed(limitPath)
+	// 账本落点：secretdata（加密卷）按**底层本地性**（探测在 WrapStorageVolume 内部）——
+	// 本地 ⇒ 落**节点本地**明文目录（写卷 FS 上会被加密成随机内容分块，污染卷物理布局）；
+	// 共享 ⇒ 账本留卷 FS（跨进程正确，配额不被绕过）。其余类型默认卷内账本。
+	opts := []capacity.WrapOption{}
+	if v.Type == volume.TypeSecretdata {
+		opts = append(opts, capacity.WithLedgerDirIfLocal(
+			filepath.Join(h.userVolumes.Root(), owner, "meta", "quota", req.Name)))
 	}
-	if counter.CorruptSnapshot() {
-		h.logger.Warn("用户卷容量快照损坏，已重置计数（从零累计）", "volume", req.Name, "owner", owner, "path", counterPath)
+	be = capacity.WrapStorageVolume(req.Name, be, nil, nil, limit, baselineUsed, opts...)
+	if lerr := capacity.WriteVolumeState(limitPath, limit, baselineUsed); lerr != nil {
+		h.logger.Warn("用户卷状态持久化失败（重建将无法继承上限/用量）", "volume", req.Name, "owner", owner, "error", lerr)
 	}
-	be = capacity.WrapStorageVolume(req.Name, be, counter, nil, nil)
 	// store 落盘（重名拒绝）——**store 是运行时用户卷的唯一事实源**（重启由 ScanRestore
 	// 恢复；历史 config YAML 写回机制已随阶段 2 迁移移除）。
 	// Owner 一并设置（C4 CRITICAL 复测补直）：owner 以参数为准，使本链产出的 UserVolume
@@ -286,7 +293,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// UserVolume.Owner 为键的消费方读取。
 	// 生效上限（可能来自继承）落元数据（master F6）——否则重启 restore 会用请求里的 0 把
 	// 继承的上限抹掉。
-	uv := UserVolume{Name: req.Name, Type: req.Type, Owner: owner, Capacity: counter.Capacity(), Extra: req.Extra, ACL: acl}
+	uv := UserVolume{Name: req.Name, Type: req.Type, Owner: owner, Capacity: limit, Extra: req.Extra, ACL: acl}
 	if err := h.userVolumes.Create(owner, uv); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 		return
@@ -445,6 +452,14 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	if err := h.userVolumes.Delete(owner, name); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
+	}
+	// 用量基线快照（**本地状态，恒可用**）：账本可能因卷 FS 能力而内存降级（不持久 ✗）⇒
+	// 「delete+recreate 不得归零绕过限额」必须由本地状态兜住（设计 §3.6.3）✓。
+	if lerr := capacity.WriteVolumeState(
+		capacity.VolumeLimitPath(h.userVolumes.Root(), owner, name),
+		v.Capacity, h.volumeUsage(volumeFromUserVolume(*v))); lerr != nil {
+		h.logger.Warn("用户卷删除：用量基线持久化失败（重建将无法继承用量）",
+			"volume", name, "owner", owner, "error", lerr)
 	}
 	// F9：摘除前把计数快照 flush（`Release` 是节流的）——否则本次进程对该卷的删除量丢失，
 	// 同名重建时 used 偏高（伪 507）。best-effort + 可观测。

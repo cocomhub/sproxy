@@ -12,7 +12,6 @@ package server
 // ⇒ 若 `volumeUsage` 真的走配额层，返回值 = 计数器值（≠ 池值）；若退回旧逻辑 ⇒ 返回池值 ⇒ 红。
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -36,12 +35,18 @@ func TestVolumeUsage_PrefersQuotaLayer(t *testing.T) {
 	// 容量池**故意不装配** ⇒ 判别力最强：走配额层 ⇒ 4096；退回旧逻辑 ⇒ 0（无池）。
 	pool := quota.NewPool(1 << 20)
 
-	// 配额层用**独立计数器**（持久化文件态）：已用 4096。
-	counter := capacity.NewCounter(1<<20, filepath.Join(t.TempDir(), "vq.capacity"))
-	if err := counter.TryAdd(4096); err != nil {
-		t.Fatalf("TryAdd: %v", err)
+	// 配额层即**卷自己的账本**（唯一实现）：预置 4096 须写进**该卷账本目录**的分片
+	// （用不同 node ⇒ Σ 全部 shard 生效）。不能再建「独立计数器」——那样卷内账本仍为 0，
+	// 用例会失去判别力（实测 volumeUsage=0）。
+	volFS := syncpkg.NewLocalFS(t.TempDir(), nil)
+	seed, serr := capacity.OpenLedgerFS(volFS, capacity.LedgerDirName, "seed-node")
+	if serr != nil {
+		t.Fatal(serr)
 	}
-	wrapped := capacity.WrapStorageVolume(volName, bareBE{fs: syncpkg.NewLocalFS(t.TempDir(), nil)}, counter, nil, pool)
+	if aerr := seed.Add(4096); aerr != nil {
+		t.Fatalf("seed ledger: %v", aerr)
+	}
+	wrapped := capacity.WrapStorageVolume(volName, bareBE{fs: volFS}, nil, pool, 1<<20, 0)
 	if be := h.volSet.External(volName); be == nil {
 		if err := h.volSet.AttachExternal(volName, wrapped); err != nil {
 			t.Fatalf("AttachExternal: %v", err)

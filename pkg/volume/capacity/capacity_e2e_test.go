@@ -48,7 +48,11 @@ func (m *memFS) MakeDir(context.Context, string) error { return nil }
 func TestCapacityFS_SyncEngine_ExceedsRejected(t *testing.T) {
 	t.Parallel()
 	inner := newMemFS()
-	c := NewCounter(50, "") // 限额 50 字节
+	led, lerr := OpenLedger(t.TempDir(), "test")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	c := NewLedgerCounter(led, 50) // 限额 50 字节
 	fs := Wrap(inner, c)
 
 	// 先写入 30 字节（占 60% 限额）。

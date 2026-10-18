@@ -279,6 +279,18 @@ func TestMetricsHandler_FullOutput(t *testing.T) {
 			t.Errorf("expected metrics output to contain %q", c)
 		}
 	}
+	// 配额账本健康面（I3 接线钉住）：三个指标必须出现在 /metrics 输出——
+	// 「降级/损坏/内存回退必须可观测」是配额功能硬要求，漏接线即静默放宽。
+	// 值随进程级计数浮动，只断言指标名出现（不锁具体值）。
+	for _, name := range []string{
+		"sproxy_quota_ledger_corrupt_total",
+		"sproxy_quota_ledger_degraded_total",
+		"sproxy_quota_ledger_mem_fallback_total",
+	} {
+		if !strings.Contains(output, name) {
+			t.Errorf("expected metrics output to contain %q", name)
+		}
+	}
 }
 
 func TestMetricsHandler_NilMetrics(t *testing.T) {
