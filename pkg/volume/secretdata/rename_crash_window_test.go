@@ -68,6 +68,7 @@ func (f *crashPointFS) Delete(ctx context.Context, p string) error {
 // （= 重启），断言 **源或目标至少一方内容完整可读**（且内容逐字节等于原文）；两者都不可读即红。
 // 修复前：k 落在「分块已 mv 走、meta 尚未搬」时，源与目标**都不可读** ⇒ 必红。
 func TestRename_CrossContainer_CrashAtAnyStep_NoDataLoss(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	want := bytes.Repeat([]byte("crash-window-payload-"), 300) // 多分块，放大中间态
 

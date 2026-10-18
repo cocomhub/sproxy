@@ -23,6 +23,7 @@ import (
 // 判据：写入时声明的 mtime 必须在 Stat / ListDir / **重启后重新加载**三条路径上逐位一致
 // （meta 内以 RFC3339Nano 存储 ⇒ UnixNano 往返无损）。
 func TestStat_ListDir_ExposeLogicalMTime(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const mt = int64(1730000000123456789) // UnixNano，非整秒（验证纳秒精度不丢）
 

@@ -12,8 +12,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"log/slog"
 	"os"
@@ -540,17 +540,10 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group, o
 // DecryptFile 用 meta + 分块还原原始文件到 dstFile。
 // meta：meta 内容；chunkDir：分块所在目录；dstFile：还原目标；secret：密钥。
 func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
-	if err := validateMeta(meta); err != nil {
-		return err
-	}
-	// 每文件只派生一次 key（meta.Salt 是文件级盐；逐块重复 scrypt 在 N=2^17 下
-	// 不可接受——S5344 提升参数后派生开销放大，整文件一次派生保持解密线性）。
-	// 派生版本由 meta.algo_version 决定（validateMeta 已确保版本注册已知）。
-	salt, err := decodeSalt(meta)
-	if err != nil {
-		return err
-	}
-	key, err := DeriveKey(secret, salt, meta.AlgoVersion)
+	// **唯一实现**（2026-10-18 架构级修复 Step 1）：本函数 = ChunkDecryptor + 「本地目录」来源 +
+	// 「本地文件」目标。对外行为与错误语义（含「整文件校验失败 ⇒ 删残件」）保持不变；
+	// 需要不落密文临时文件的调用方直接用 ChunkDecryptor 注入自己的来源。
+	dec, err := NewChunkDecryptor(secret, meta)
 	if err != nil {
 		return err
 	}
@@ -562,22 +555,22 @@ func DecryptFile(meta *Meta, chunkDir, dstFile string, secret []byte) error {
 	if err != nil {
 		return fmt.Errorf("shardseal: 创建还原文件 %s 失败: %w", dstFile, err)
 	}
-	full := sha256.New() // 还原同时累加整文件 SHA-256，用于 meta.Original.SHA256 全量校验
-	if err := writeDecryptedChunks(f, meta, chunkDir, key, salt, full); err != nil {
+	derr := dec.DecryptAllTo(f, func(ci ChunkInfo) ([]byte, error) {
+		blob, rerr := os.ReadFile(filepath.Join(chunkDir, ci.FileName))
+		if rerr != nil {
+			return nil, fmt.Errorf("shardseal: 读分块 %s 失败: %w", ci.FileName, rerr)
+		}
+		return blob, nil
+	})
+	if derr != nil {
 		f.Close()
-		return err
+		if errors.Is(derr, ErrIntegrityMismatch) {
+			_ = os.Remove(dstFile) // 与旧行为一致：整文件校验失败删残件
+		}
+		return derr
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("shardseal: 关闭还原文件失败: %w", err)
-	}
-	// 设计 §5：meta.Original.SHA256 供解密后全量校验。只按等长逐块比对
-	// 不够——等长交换/重排分块会静默产出错内容。此处对重组明文做整文件 SHA-256，
-	// 与 meta 不一致即判失败（fail-closed，并删除残file）。
-	if want := meta.Original.SHA256; want != "" {
-		if hex.EncodeToString(full.Sum(nil)) != want {
-			_ = os.Remove(dstFile)
-			return fmt.Errorf("shardseal: 还原内容完整性校验失败（sha256 不匹配）")
-		}
 	}
 	return nil
 }
@@ -595,31 +588,6 @@ func decodeSalt(meta *Meta) ([]byte, error) {
 		return nil, fmt.Errorf("shardseal: meta salt 长度 %d，应为 %d", len(salt), SaltLen)
 	}
 	return salt, nil
-}
-
-// writeDecryptedChunks 逐块解密写入 f 并累加整文件 SHA-256（DecryptFile 的分块处理，
-// 抽方法控制认知复杂度 #727 gocognit=15）。任何分块失败返回错误（f 由调用方 Close）。
-// key 与 salt 是 DecryptFile 派生一次的文件密钥与文件级盐（decryptBlock 内做块内
-// salt 一致性校验）。
-func writeDecryptedChunks(f *os.File, meta *Meta, chunkDir string, key, salt []byte, full hash.Hash) error {
-	for _, ci := range meta.Chunks {
-		blob, err := os.ReadFile(filepath.Join(chunkDir, ci.FileName))
-		if err != nil {
-			return fmt.Errorf("shardseal: 读分块 %s 失败: %w", ci.FileName, err)
-		}
-		plain, err := decryptBlock(key, salt, blob)
-		if err != nil {
-			return err
-		}
-		if int64(len(plain)) != ci.OrigSize {
-			return fmt.Errorf("shardseal: 分块 %s 解密长度 %d 不匹配 meta %d", ci.FileName, len(plain), ci.OrigSize)
-		}
-		if _, err := f.Write(plain); err != nil {
-			return fmt.Errorf("shardseal: 写还原文件失败: %w", err)
-		}
-		full.Write(plain)
-	}
-	return nil
 }
 
 // MediaKindOf 依据文件名扩展名返回媒体**容器族**标识（blocklet 自动选型判据）。secretdata

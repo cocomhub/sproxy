@@ -1300,39 +1300,31 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 	if e.meta == nil {
 		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
 	}
+	// **不落密文 staging**（2026-10-18 架构级修复 Step 1）：此前先把**全部分块密文**复制进
+	// `s.temp/view-*`，再经 `shardseal.DecryptFile` 把整份明文写进 `s.temp/decrypt-*`
+	// ⇒ 峰值临时盘 ≈ **2× 文件** ✗（根因是 DecryptFile 的「本地目录 → 本地文件」路径型 API）。
+	// 现改为逐块**直接从底层读密文**、解密后写入明文临时文件：一次派生 + 逐块 GCM 认证 +
+	// 长度校验 + 末尾**整文件 SHA-256** 校验，语义与 DecryptFile 完全一致（同一实现）
+	// ⇒ 峰值 = 1× 明文（用例 TestOpenRead_TempPeakBoundedByPlaintextSize 钉住）。
+	dec, derr := shardseal.NewChunkDecryptor(s.secret, e.meta)
+	if derr != nil {
+		return nil, derr
+	}
 	tmp, err := os.CreateTemp(s.temp, "decrypt-*")
 	if err != nil {
 		return nil, fmt.Errorf("secretdata: 创建解密临时文件失败: %w", err)
 	}
-	// 唯一临时分块目录（审查 F-5：固定 view/view-<hash> 并发读同文件有竞态窗口）。
-	chunkLocalDir, err := os.MkdirTemp(s.temp, "view-*")
-	if err != nil {
+	cleanup := func() {
 		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, err
+		_ = os.Remove(tmp.Name())
 	}
-	defer os.RemoveAll(chunkLocalDir)
-	for _, ci := range e.meta.Chunks {
-		blob, rerr := s.readChunkBlobOrErase(ctx, e, ci)
-		if rerr != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, rerr
-		}
-		if werr := os.WriteFile(filepath.Join(chunkLocalDir, ci.FileName), blob, 0o600); werr != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, werr
-		}
-	}
-	if derr := shardseal.DecryptFile(e.meta, chunkLocalDir, tmp.Name(), s.secret); derr != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+	src := func(ci shardseal.ChunkInfo) ([]byte, error) { return s.readChunkBlobOrErase(ctx, e, ci) }
+	if derr := dec.DecryptAllTo(tmp, src); derr != nil {
+		cleanup()
 		return nil, derr
 	}
 	if _, serr := tmp.Seek(0, 0); serr != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		cleanup()
 		return nil, serr
 	}
 	return &cleanupReadCloser{rc: tmp, path: tmp.Name()}, nil

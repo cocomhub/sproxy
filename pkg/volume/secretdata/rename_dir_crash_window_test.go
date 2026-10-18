@@ -25,6 +25,7 @@ import (
 // 断言 ① **挂载必须成功**（不得 boot fail）② 文件内容在**源或目标**之一**逐字节完整可读**
 // （至少一处，不允许两处都不可读）。修复前：崩溃落在两步之间 ⇒ 挂载直接失败 ⇒ 必红。
 func TestRenameDir_InterruptedMove_CrashAtAnyStep_MountsAndKeepsData(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	want := bytes.Repeat([]byte("dir-move-payload-"), 200)
 

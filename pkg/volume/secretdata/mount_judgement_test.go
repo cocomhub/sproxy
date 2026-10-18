@@ -23,6 +23,7 @@ import (
 //
 // 本用例钉住第二种：删掉根容器的目录 meta（子容器完好）后，挂载必须**报错**（而不是静默空视图）。
 func TestLoadIndex_RootDirMetaMissing_FailsClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	inner := syncpkg.NewLocalFS(dir, nil)

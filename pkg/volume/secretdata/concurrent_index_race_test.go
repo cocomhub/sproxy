@@ -27,6 +27,7 @@ import (
 // 持续写新 rel（持续改索引）⇒ 两个访问必然重叠（不依赖调度运气，`-race` 与运行时 map 并发
 // 检测都能稳定命中）。变异验证：把 `removeVersionMeta` 移回解锁之后 ⇒ 本用例必红。
 func TestConcurrentOverwrite_NoIndexDataRace(t *testing.T) {
+	t.Parallel()
 	fs := newFS(t)
 	ctx := context.Background()
 
