@@ -1235,14 +1235,16 @@ type LeaderElector interface {
 
 - ✅ **块级交错上传**：`shardseal.EncryptShardsReaderTo`（新 sink 抽象：分块逐块交调用方、meta 不落盘，
   以 `EncryptionResult.MetaBlob` 返回）⇒ `secretdata.writeFileStream` 走 sink：**加密一块 → 上传一块 →
-  丢弃**，meta 留到末尾且**内存态**上传。实测（512KiB / 32KiB 块）：本地分块副本峰值 **18 → 1**（O(file) → O(1 块)）。
+  丢弃**，meta 留到末尾且**内存态**上传。实测（≈570KiB / 32KiB 块 = 18 块）：本地分块副本峰值 **18 → 1**（O(file) → O(1 块)）。
   staging 配额预留口径同步改为「单块上界 + meta pad」（`stagingReserveInterleaved`），不再随文件线性增长。
 - ✅ **所有分块上传点统一经 `WithStagedLocalPath`**（`uploadLocalChunk`）：数据分块、**parity**、**dedup**
   单分块（此前 parity/dedup 走 `bytes.NewReader` 内存交付 ⇒ 内层二次落 staging）。
-- ✅ **回退链**：本地产物不可落盘（临时目录不可用/ENOSPC）或 staging **配额**不足时——源**可重读**
+- ✅ **回退链**：本地产物不可落盘（**临时目录不可用**）或 staging **配额**不足时——源**可重读**
   （本地文件 / 已暂存路径，`replayableSourcePath`）⇒ 降级**内存交付**（写仍成功）；源不可重读
   （管道 / 内存 reader）⇒ **fail-closed**（明确错误，无半态）。内层重试/秒传刷新期间本地产物**必须在场**
   （生命周期契约：stagedPath 只读，删除一律在内层返回后）——已由「内层多遍读」用例锁定。
+  注：回退链只覆盖**落盘前**的可用性判定（临时目录不可用 / 配额拒绝）；**交错期间**落本地块
+  （`os.WriteFile`）失败时整次写直接失败并回滚，不回退。
 - ✅ **差分用例**：秒传收敛场景（fake 模拟多分片 md5 非权威 → 秒传刷新命中/未命中）+ 本地峰值对照
   （峰值 ≤ 1 块；未命中 ⇒ fail-closed 无半态）。
 - ⚠️ **已知残余（如实登记）**：
