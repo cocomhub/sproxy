@@ -1,0 +1,32 @@
+# OpenRead not-exist 契约登记表（门禁 openread_notexist_gate_test.go 强制）。
+# 规则：任何含 `func (...) OpenRead(` 实现的非测试文件必须在此登记，并写明其「不存在」
+# 的表达方式（项目约定：errors.Is(err, os.ErrNotExist) 或返回 (nil, nil)）。
+# 背景：卷内账本（pkg/volume/capacity）据「不存在 vs 真错误」区分「空账本」与
+# 「不可确定 => 判损坏 => fail-closed 拒写」。后端把「不存在」表达成裸错误 => 该卷恒拒写；
+# 反之把真错误当不存在 => 账本读空 => 限额 fail-open。两侧都是生产级事故。
+# file	not-exist 机制
+pkg/gateway/webdav/remote.go	subPathFS：转发 inner（不改变 not-exist 语义）
+pkg/remote/fs.go	remoteFS：Client.Open，404 已包装 os.ErrNotExist
+pkg/rootfs/rootfs.go	rootFSCore：转发底层 Root（继承其语义）
+pkg/server/backup_api.go	backupQuotaFS：装饰器转发 inner
+pkg/server/secrets_fs.go	rootSecretsFS：转发 inner
+pkg/sync/encrypted.go	EncryptedFS：装饰器转发 inner
+pkg/sync/httptransport/http_transport.go	FileClient.OpenDownload，404 已包装 os.ErrNotExist
+pkg/sync/local_fs.go	os.Open（*os.PathError 满足 os.ErrNotExist）
+pkg/sync/prefixfs.go	PrefixFS：转发 inner（未实现=外部卷约定）
+pkg/sync/staging_gate.go	StagingQuotaGateFS：转发 inner
+pkg/syncexec/executor.go	quotaLocalFS：转发 inner
+pkg/volume/capacity/capacity.go	CapacityFS：装饰器转发 inner
+pkg/volume/enclosure/ownerfs.go	ownerFS：转发 wrapper 面
+pkg/volume/enclosure/sealfs.go	SealFS：转发 inner
+pkg/volume/ext/baidupcs/syncfs.go	mapPCSError 包装 os.ErrNotExist（not-exist 约定）
+pkg/volume/ext/cluster/fs.go	转发持有侧本地 FS（继承其语义）
+pkg/volume/ext/s3/s3_fs.go	isNotFound + notExistMappedReader（含读期惰性错误）
+pkg/volume/federated/federated.go	多后端聚合：转发选中后端
+pkg/volume/ftp/ftp_fs.go	ftpOpenRejectErr：550 + not-found 文案 ⇒ 包装 os.ErrNotExist
+pkg/volume/secretdata/replica_fs.go	replicaFS：转发主/副本 FS
+pkg/volume/secretdata/secretdata.go	openRead 包装 os.ErrNotExist
+pkg/volume/sftp/sftp_fs.go	pkg/sftp 对 no-such-file 返回 os.ErrNotExist（库保证）
+pkg/volume/trusted/guard_fs.go	MetaBucketGuard：转发 inner
+pkg/volume/trusted/trusted_fs.go	TrustedVolumeFS：转发 inner
+pkg/volume/webdav/webdav_fs.go	404 ⇒ 包装 os.ErrNotExist

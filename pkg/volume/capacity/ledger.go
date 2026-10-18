@@ -388,12 +388,12 @@ func (s *fsStore) readFile(name string) ([]byte, bool, error) {
 		// ⇒ `scanLocked` 标 corrupt ⇒ fail-closed 拒写。此前一律吞成「不存在」⇒
 		// 分片被当 0、`appendLine` 把历史重写为单行 ⇒ 限额 fail-open ✗（探针实测
 		// flaky FS ⇒ Total=0 ok=true）。
-		if errors.Is(err, os.ErrNotExist) {
+		if syncpkg.IsNotExist(err) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
-	if rc == nil {
+	if syncpkg.Absent(nil, rc) {
 		// **契约二**：不存在以 `(nil, nil)` 表达（**项目约定**，见 `pkg/volume/enclosure/region.go`
 		// 的 regionAbsent 注释：「不存在的两种契约：返回 os/fs.ErrNotExist，**或**按 sync.FS
 		// 契约返回 (nil, nil)」）⇒ 按「不存在」处理（首次运行 = 空账本）。
@@ -407,7 +407,7 @@ func (s *fsStore) readFile(name string) ([]byte, bool, error) {
 	if rerr != nil {
 		// 读**期间**才暴露的不存在（惰性/流式后端）同样按「不存在」处理；其余读错误
 		// ⇒ 不可确定 ⇒ 上抛，由 `scanLocked` 判 corrupt（fail-closed ✓）。
-		if errors.Is(rerr, os.ErrNotExist) {
+		if syncpkg.IsNotExist(rerr) {
 			return nil, false, nil
 		}
 		return nil, false, rerr
@@ -443,18 +443,18 @@ func (s *fsStore) readFileLocked(name string) ([]byte, bool, error) {
 	if err != nil {
 		// 与 readFile 同口径：真错误（非「确定不存在」）上抛，调用方据此降级/拒写，
 		// **不得**吞成不存在（否则 appendLine 会把历史分片重写为单行，数据丢失 ✗）。
-		if errors.Is(err, os.ErrNotExist) {
+		if syncpkg.IsNotExist(err) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
-	if rc == nil {
+	if syncpkg.Absent(nil, rc) {
 		return nil, false, nil // 契约二：(nil, nil) = 不存在（同 readFile）
 	}
 	defer rc.Close()
 	b, rerr := io.ReadAll(rc)
 	if rerr != nil {
-		if errors.Is(rerr, os.ErrNotExist) {
+		if syncpkg.IsNotExist(rerr) {
 			return nil, false, nil
 		}
 		return nil, false, rerr
