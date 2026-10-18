@@ -1228,11 +1228,16 @@ func (m *CloudDownloadManager) persistCompleted(stored *CloudTask, task *CloudTa
 // reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）；account 实时记账已覆盖
 // sink 路径（committed==result.Size）；releaseTaskScope 按 account.Release 回拨。
 func (m *CloudDownloadManager) completeStorageFull(stored *CloudTask, destPath string, result *downloader.Result, reserved int64) {
-	m.releaseTaskScope(stored)
-	m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
-	stored.ReservedSize = 0
+	// **删除确认后再归还**（独立复审 P2，2026-10-18）：此前先 releaseTaskScope/ReleaseCloud 再删除
+	// ⇒ 删除失败时「字节仍在盘上而账本已归还」（fail-open：租户可越限至下次扫描）。与同轮 DeleteTask
+	// 的修复同纪律（见 manager_query.go 的 taskPayloadLeft 注释）。删除失败则**保持占账**，由过期
+	// 清理路径重试删除（其释放同样以删除成功为前提）。
 	removeErr := removeWithRetry(func() error { return m.removeFileOrDefault()(destPath) })
-	if removeErr != nil {
+	if removeErr == nil {
+		m.releaseTaskScope(stored)
+		m.storage.ReleaseCloud(reserved) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
+		stored.ReservedSize = 0
+	} else {
 		m.logger.Error("storage full after download, remove file failed",
 			"task_id", stored.ID, "path", destPath, "error", removeErr)
 	}
@@ -1341,18 +1346,20 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFile
 // 调用方持 m.mu 写锁；删除失败并入 task.Error 保持可观测。
 func (m *CloudDownloadManager) failTaskOnStorageFull(task *CloudTask, errMsg string) {
 	oldReserved := task.ReservedSize
-	// 文件将被整体删除：先释放旧占位，避免磁盘清空后账本仍虚高
-	// （TryReserve 已失败、未增加任何预留）。
-	if oldReserved > 0 {
-		m.storage.ReleaseCloud(oldReserved)
-	}
-	m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
-	task.ReservedSize = 0
 	// 顺序不变量同 storage-full-after-download 分支：先删任务目录、后发布 failed，
 	// 否则观察者可能读到 failed 时 .partial / 最终文件仍在盘上（同一类可观测窗口）。
 	// 删除失败同样做有界重试（见 removeWithRetry），耗尽后并入 task.Error 保持可观测。
 	removeErr := m.removeTaskDirWithRetry(task.Owner, task.ID)
-	if removeErr != nil {
+	// **删除确认后再归还**（独立复审 P2，2026-10-18）：此前先释放旧占位 + releaseTaskScope 再删除
+	// ⇒ 删除失败时「字节仍在盘上而账本已归还」（fail-open）。改为：仅当删除成功（或目录已不存在）
+	// 才归还；失败则保持占账，由过期清理路径重试删除。
+	if removeErr == nil {
+		if oldReserved > 0 {
+			m.storage.ReleaseCloud(oldReserved)
+		}
+		m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
+		task.ReservedSize = 0
+	} else {
 		m.logger.Error("storage full after download, remove task dir failed",
 			"task_id", task.ID, "owner", task.Owner, "error", removeErr)
 	}

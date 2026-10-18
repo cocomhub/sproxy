@@ -3,7 +3,10 @@
 
 package transfer
 
-// readback.go 是**转存写后读回校验的唯一实现**（独立审核 P2 收敛，2026-10-18）。
+// readback.go 是**「按目标卷 FileMeta 读回校验」的唯一实现**（独立审核 P2 收敛，2026-10-18）。
+// （措辞收窄，独立复审 D-P2-1：pkg/cloud 对**无 meta.Provider 的卷**另有一条**流式回落**读回
+// ——`OpenRead` + 整文件 sha256 对下载器权威校验和，见 pkg/cloud/transfer.go 的 verifyByFileMeta
+// 回落分支。二者判据不同（前者自洽于卷内 meta、后者交叉于下载结果），非重复实现。）
 //
 // **根因**：此前只有 pkg/cloud 的下载转存路径做读回校验（verifyByFileMeta），而统一的转存
 // 内核（本包）只查「目标存在且非空」⇒ **同一语义、两条写路径、两套保证**：归档/通用转存路径

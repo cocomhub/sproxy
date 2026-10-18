@@ -73,3 +73,54 @@ func TestRemoveEmptyContainer_ListDirFailureKeepsMappings(t *testing.T) {
 // 探针（5 次改名）显示目录 meta blob 落盘长度恒为 353B、dirPhysTotal 恒 677 ⇒ 与内容无关
 // （pad 目标随机但最终长度恒定）⇒ 改名**不产生漂移** ⇒ 不做改动、也不保留无判别力用例。
 // 若未来 meta 格式变化导致长度随内容变（届时该不变量会破），应在此补**能变红**的用例。
+
+// failDeleteFS 让指定路径的 Delete 失败（其余委托）——模拟残留文件删不掉的场景。
+type failDeleteFS struct {
+	*syncpkg.LocalFS
+	path string
+}
+
+func (f *failDeleteFS) Delete(ctx context.Context, p string) error {
+	if p == f.path {
+		return errors.New("injected: delete failure")
+	}
+	return f.LocalFS.Delete(ctx, p)
+}
+
+// TestRemoveEmptyContainer_PerFileDeleteFailureKeepsMappings 逐文件删除失败也必须 fail-closed。
+// 未修必红：旧实现 `_ = Delete` 忽略错误 ⇒ 继续删容器（必失败）+ 注销映射 ⇒ 磁盘残留 meta
+// ⇒ 重启后 loadIndex 扫到 ⇒ 幽灵目录"复活"（与 ListDir 分支的处置不一致）。
+func TestRemoveEmptyContainer_PerFileDeleteFailureKeepsMappings(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	inner := syncpkg.NewLocalFS(t.TempDir(), nil)
+	fs, err := NewFS(inner, Options{Secret: []byte("test-secret-key-000"), Algorithm: testAlgo})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	if merr := fs.MakeDir(ctx, "a"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	container := fs.dirSegs["a"]
+	if container == "" {
+		t.Fatal("前置：容器未建立")
+	}
+	// 找到容器内的目录 meta blob，并让它的 Delete 失败。
+	entries, lerr := inner.ListDir(ctx, container)
+	if lerr != nil || len(entries) == 0 {
+		t.Fatalf("前置：容器内应有目录 meta（err=%v n=%d）", lerr, len(entries))
+	}
+	victim := container + "/" + entries[0].Name
+	fs.inner = &failDeleteFS{LocalFS: inner, path: victim}
+
+	fs.mu.Lock()
+	fs.removeEmptyContainerLocked(ctx, container, "a")
+	fs.mu.Unlock()
+
+	fs.mu.RLock()
+	_, stillMapped := fs.dirSegs["a"]
+	fs.mu.RUnlock()
+	if !stillMapped {
+		t.Fatal("逐文件删除失败时映射**不得**注销（未修必红：磁盘 meta 仍在 ⇒ 重启后幽灵目录复活）")
+	}
+}

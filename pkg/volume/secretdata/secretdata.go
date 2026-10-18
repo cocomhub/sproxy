@@ -1214,15 +1214,23 @@ func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container
 			"container", container, "dir", dirPath, "error", err)
 		return
 	}
-	{
-		for _, f := range inner {
-			if !f.IsDir {
-				// 目录 meta blob 的落盘字节从真值累计中扣减（列目录时顺带求和 ⇒ 零额外 I/O）。
-				if shardseal.ClassifyName(f.Name) == shardseal.KindDirMeta && f.Size > 0 {
-					s.dirPhysTotal = max(s.dirPhysTotal-f.Size, 0)
-				}
-				_ = s.inner.Delete(ctx, path.Join(container, f.Name))
-			}
+	// 逐文件删除：**失败必须 fail-closed**（独立复审 P2，2026-10-18）——此前 `_ =` 忽略错误 ⇒
+	// 文件仍在盘上却继续走后面的「删容器 + 注销映射」⇒ 容器删不掉（残留）且映射已丢 ⇒ 重启后
+	// 该目录 meta 又被扫到（幽灵目录"复活"），与上面 ListDir 分支的处置不一致。
+	// 删除失败则保留映射并告警，下次 rmdir 再尝试回收。
+	for _, f := range inner {
+		if f.IsDir {
+			continue
+		}
+		// 目录 meta blob 的落盘字节从真值累计中扣减（列目录时顺带求和 ⇒ 零额外 I/O）。
+		if shardseal.ClassifyName(f.Name) == shardseal.KindDirMeta && f.Size > 0 {
+			s.dirPhysTotal = max(s.dirPhysTotal-f.Size, 0)
+		}
+		if ferr := s.inner.Delete(ctx, path.Join(container, f.Name)); ferr != nil && !errors.Is(ferr, os.ErrNotExist) {
+			s.dirPhysTotal += f.Size // 回滚上面的扣减（文件仍在盘上 ⇒ 真值必须与磁盘一致）
+			slog.Warn("secretdata: 删除容器内残留文件失败，跳过空容器回收（保留内存映射）",
+				"container", container, "dir", dirPath, "file", f.Name, "error", ferr)
+			return
 		}
 	}
 	// 容器目录本身也删除（物理嵌套下必须回收：子容器已先删 ⇒ 目录为空可删；残留空容器目录会让
