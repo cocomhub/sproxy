@@ -918,6 +918,12 @@ sproxy_gc_cycles 42
 
 ### 预签名直传（`POST /api/backends/{type}/presign`）
 
+> **卷上默认禁（2026-10-18，#44① (b)）**：`method=PUT` 且目标命中**已配置卷**时，服务端
+> **默认拒绝（403）** —— PUT 由客户端直传对象存储，服务端**看不到那次写**；`presign/complete`
+> 只是事后登记 ⇒ 客户端可 PUT 后不调 complete，在卷内留下**未记账对象**（owner 配额永不收敛）。
+> 需在该卷配置显式开启 `extra.allow_presign: true` 才放行（默认禁 + 按卷豁免）。
+> `method=GET`（读）不受限；无已配置卷的裸后端不受影响。
+
 服务端持凭据为客户端签发对象存储直传 URL（当前 `s3`），客户端 PUT 后经登记端点确认。
 
 query 参数：`path`（卷内相对路径，必填）、`method`（`PUT`/`GET`，必填）、`expires`（正整数秒，可选）。
@@ -929,6 +935,10 @@ query 参数：`path`（卷内相对路径，必填）、`method`（`PUT`/`GET`�
 - 响应 `{"url": "…"}`；未注册类型 → 404；后端不支持预签名 → 405；`method`/`expires` 非法 → 400。
 
 ### 预签名登记（`POST /api/backends/{type}/presign/complete`）
+
+> **登记是义务，不是可选**：complete 经**统一写内核**（`ContentPresent` 模式）完成存在性/size
+> 校验（fail-closed）+ **双账本结算**（owner 配额 + 卷容量池）+ 元数据/台账 —— 与普通上传同一套
+> 记账原语。客户端须声明 `size` 与 `sha256`（服务端无法在直传后廉价读取对象内容）；缺任一 ⇒ 400。
 
 客户端直传完成后**登记**：服务端按上述同一 owner 收敛路径校验对象存在且大小与声明一致，并经
 **统一写内核**（内容已在位模式）完成登记。

@@ -48,26 +48,17 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, perr.Error(), http.StatusForbidden)
 		return
 	}
-	method := strings.ToUpper(r.URL.Query().Get("method"))
-	if method != http.MethodPut && method != http.MethodGet {
-		http.Error(w, "method 需为 PUT 或 GET", http.StatusBadRequest)
+	method, expires, merr := presignRequestParams(r)
+	if merr != nil {
+		http.Error(w, merr.Error(), http.StatusBadRequest)
 		return
-	}
-	expires := int64(0)
-	if es := r.URL.Query().Get("expires"); es != "" {
-		n, err := strconv.ParseInt(es, 10, 64)
-		if err != nil || n <= 0 {
-			http.Error(w, "expires 需为正整数秒", http.StatusBadRequest)
-			return
-		}
-		expires = n
 	}
 	// 占用写保护（评审 F2 首要闭合点）：PUT 直传由客户端对对象存储发起，服务端**看不到那次写**
 	// ⇒ 占用判定只能在签发期做（complete 的登记拦截虽有纵深，但那时「只读」目录里已经躺了一个
 	// 未登记、不计配额的游离对象）。GET 不拦——占用目录是只读而非不可读。
 	if method == http.MethodPut {
-		if oerr := h.presignSealedGuard(typ, owner, path); oerr != nil {
-			http.Error(w, oerr.Error(), http.StatusForbidden)
+		if gerr := h.presignPutGuards(typ, owner, path); gerr != nil {
+			http.Error(w, gerr.Error(), http.StatusForbidden)
 			return
 		}
 	}
@@ -234,6 +225,59 @@ func (h *Handlers) presignSealedGuard(typ, owner, path string) error {
 		return nil
 	}
 	return h.enclosureSealedAt(vol.Name, path)
+}
+
+// presignRequestParams 解析并校验 presign 请求的 query 参数（method / expires）。
+func presignRequestParams(r *http.Request) (method string, expires int64, err error) {
+	method = strings.ToUpper(r.URL.Query().Get("method"))
+	if method != http.MethodPut && method != http.MethodGet {
+		return "", 0, errors.New("method 需为 PUT 或 GET")
+	}
+	if es := r.URL.Query().Get("expires"); es != "" {
+		n, perr := strconv.ParseInt(es, 10, 64)
+		if perr != nil || n <= 0 {
+			return "", 0, errors.New("expires 需为正整数秒")
+		}
+		expires = n
+	}
+	return method, expires, nil
+}
+
+// presignPutGuards 汇总 PUT 直传的**签发期**守卫（顺序固定：封印 → 卷默认禁）。
+//
+// 二者都在签发期拦截，因为 PUT 由客户端**直传对象存储**、服务端看不到那次写：
+//
+//	① 封印区间（`presignSealedGuard`）——直传绕过一切 FS 装饰器与 storage.Root 封印；
+//	② 卷目标默认禁（`presignVolumeWriteGuard`）——未调 complete 即留未记账对象（评审 §158 收口 ②）。
+func (h *Handlers) presignPutGuards(typ, owner, path string) error {
+	if err := h.presignSealedGuard(typ, owner, path); err != nil {
+		return err
+	}
+	return h.presignVolumeWriteGuard(typ, owner)
+}
+
+// presignVolumeWriteGuard 对**卷目标**的 PUT 直传 fail-closed **默认拒绝**（评审 §158 收口 ②）。
+//
+// 缺口：presign 的 PUT 由客户端**直传对象存储** ⇒ 服务端看不到那次写；`.../presign/complete`
+// 只是事后登记（(a) 已实现：统一写内核结算双账本 + meta）⇒ 客户端可 PUT 后**不调 complete**，
+// 在卷内留下**未记账对象**（owner 配额永不收敛、无 sidecar/台账）✗。签发期的封印/占用守卫只
+// 判断「该不该签」，**无法阻止直传本身** ⇒ 唯一能拦住的位置就是这里。
+//
+// 语义 = **默认禁 + 按卷显式豁免**：需在该卷配置设 `extra.allow_presign: true`
+// （与 `extra.encrypt` 同款卷级布尔，读法复用 `vcExtraBool`）。
+// 无已配置卷（裸后端，无卷语义）或 ACL 拒绝 ⇒ 返回 nil（后者由 presignBackendError 统一分档
+// 403，不得在此抢先改变错误码——与 presignSealedGuard 同纪律）。
+func (h *Handlers) presignVolumeWriteGuard(typ, owner string) error {
+	v, matched, err := h.presignVolumeFor(typ, owner)
+	if err != nil || !matched {
+		return nil
+	}
+	if vcExtraBool(v.Extra, "allow_presign") {
+		return nil
+	}
+	return fmt.Errorf("卷 %q 上默认禁用预签名直传：PUT 由客户端直传对象存储，服务端看不到该次写，"+
+		"未调用 presign/complete 的对象会绕过 owner 配额与元数据登记（卷内留下未记账对象）；"+
+		"请改用普通上传，或在该卷配置显式设置 extra.allow_presign: true 承担该风险", v.Name)
 }
 
 // presignRemoteRel 从收敛后的预签名路径（`<owner>/user/<rel>`）取出**用户桶相对路径**
