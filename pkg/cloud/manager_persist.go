@@ -159,6 +159,11 @@ func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int
 	}
 	recovered, restarted := 0, 0
 	var orphanPendingGroups []string
+	// 先**收集**，循环内不动 `m.tasks`：循环里会为 downloading 任务启动下载 goroutine，
+	// 而无锁写与它们的持锁访问并发 ⇒ data race（`-race` 实测），极端时序下
+	// `fatal error: concurrent map read and map write` 崩溃，且发生在启动阶段（任务状态已被
+	// 部分改写 ⇒ 重启再次触发）。评审 P1，2026-10-18。
+	var pending []recoveredTask
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -176,30 +181,61 @@ func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int
 		// 重启后以磁盘实际占用为基准重算 ReservedSize，
 		// 与 StorageManager 启动扫描的计数器保持一致（不信任崩溃前持久化的占位值）
 		m.reconcileReservedSize(&task)
-		m.tasks[task.ID] = &task
 		recovered++
+		pending = append(pending, recoveredTask{task: &task, restart: task.Status == "downloading"})
+	}
 
-		// 仅重启 downloading 状态的任务（崩溃前正在下载）。
-		// pending 任务不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
-		// 就崩溃导致意外启动的边界情况。
-		switch task.Status {
-		case "downloading":
-			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
+	// 持锁**一次性**插入：此后 `m.tasks` 对一切持锁访问者可见且完整（不再有无锁写）。
+	m.insertRecoveredTasksLocked(pending)
+
+	// 再按状态处理（启动下载 / 孤儿 pending）：此刻循环已结束，不存在无锁写与 goroutine 并发。
+	restarted, orphanPendingGroups = m.activateRecoveredTasks(pending, orphanPendingGroups)
+	return recovered, restarted, orphanPendingGroups
+}
+
+// recoveredTask 是恢复循环收集到的一条任务及其后续处置。
+type recoveredTask struct {
+	task    *CloudTask
+	restart bool
+}
+
+// insertRecoveredTasksLocked 持锁**一次性**插入恢复集（此后 `m.tasks` 对一切持锁访问者
+// 可见且完整）。与 `activateRecoveredTasks` 拆开，就是为了让「map 写入」与「启动 goroutine」
+// 在时间上彻底分离（评审 P1：边插边启会与 goroutine 的持锁访问并发 ⇒ data race）。
+func (m *CloudDownloadManager) insertRecoveredTasksLocked(pending []recoveredTask) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range pending {
+		m.tasks[p.task.ID] = p.task
+	}
+}
+
+// activateRecoveredTasks 在恢复循环**结束之后**按状态处置：重启 downloading（崩溃前正在
+// 下载）、把孤儿 pending 转失败。返回 restarted 计数与孤儿组名。
+func (m *CloudDownloadManager) activateRecoveredTasks(pending []recoveredTask, orphanGroups []string) (int, []string) {
+	restarted := 0
+	for _, p := range pending {
+		if p.restart {
+			m.logger.Info("restarting interrupted download", "task_id", p.task.ID, "url", p.task.URL)
 			m.mu.Lock()
-			m.running[task.ID] = true
+			m.running[p.task.ID] = true
 			m.mu.Unlock()
 			m.wg.Add(1)
-			go m.executeDownload(context.Background(), &task)
+			go m.executeDownload(context.Background(), p.task)
 			restarted++
-		case "pending":
+			continue
+		}
+		// 仅重启 downloading；pending 不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
+		// 就崩溃导致意外启动的边界情况。
+		if p.task.Status == "pending" {
 			// 孤儿 pending：已落盘却从未启动（详见 failOrphanPendingTask）。
-			m.failOrphanPendingTask(&task)
-			if task.GroupID != "" {
-				orphanPendingGroups = append(orphanPendingGroups, task.GroupID)
+			m.failOrphanPendingTask(p.task)
+			if p.task.GroupID != "" {
+				orphanGroups = append(orphanGroups, p.task.GroupID)
 			}
 		}
 	}
-	return recovered, restarted, orphanPendingGroups
+	return restarted, orphanGroups
 }
 
 // failOrphanPendingTask 把恢复出来的「已持久化 pending、但从未启动」任务转终态。
