@@ -108,7 +108,7 @@ sclient sealfile info ./sealed --key ./datakey
 | `algorithm` | `shardseal/aes-256-gcm` | **KDF 阶段档位**，见 §3.3 |
 | `block_policy` | `{mode: random, min: 1MiB, max: 200MiB}` | 分块策略（§3.4） |
 | `meta_pad_bytes` | `min_block_size` | meta 加密落盘的 pad 目标基准（§3.4） |
-| `temp_dir` | 系统临时随机目录 | 本地临时空间（0700） |
+| `temp_dir` | 系统临时随机目录 | **写路径**临时空间（0700）。读路径自 2026-10-18 起**不落任何临时文件**（按需解密）；启动时会清理该目录内 `decrypt-*` 明文残留（升级前崩溃遗留） |
 | `preserve_mtime` | `false` | 默认 blob mtime 打散；`true` 才透传原始 mtime（§3.5） |
 | `gc_interval` | `0`（禁用） | 后台孤儿/墓碑 GC 周期（§6；可选维护工具，默认关） |
 | `max_file_bytes` | `0`（不限） | 单文件上限（文件级总闸；流式路径按声明 size 预检，§9） |
@@ -413,8 +413,10 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   嵌套封装 target 已支持（多层链如 secrets over secretdata）。
 - **空文件不可写**（有意取舍）：分块存储要求至少一个数据分块（承载 meta 引用 + 内容哈希锚定），空
   文件 `EncryptShards` 报错 fail-closed。
-- **随机访问粒度**：`OpenRangeRead` 当前下载整块再定位 blocklet，未做逐 blocklet 只取所需段（注释
-  已纠偏）；blocklet 索引已内建，逐段随机访问接线留后续。
+- **随机访问粒度（2026-10-18 更正）**：底层实现 `RangeReader` 时（LocalFS/S3 等）`OpenRangeRead`
+  **已按 blocklet 段局部读取**——只拉含目标区间的段密文 + 一次块头 salt（不再整块下载）；仅
+  **未实现 `RangeReader` 的底层**才回退「整块下载 + 段内定位」。块内 blocklet 索引内建；`OpenRead`
+  的可 seek 句柄经 `sync.RangeSeeker`（4MiB 窗口、跨窗续读）复用**同一**原语，无第二套实现。
 - **流式写覆盖边界**：可 seek 源（multipart 上传 / `*os.File` / 转存本地产物 / sync / 备份恢复 /
   video-keyframe 块模式 / trusted 装饰器）均走流式；**纯流**（无 seek）与**加密同步 `io.Pipe`**
   回退整读；**带宽限速启用时**（`rateLimitReader` 包装剥 seek）也回退整读（功能不变，仅内存不省）。
@@ -457,7 +459,8 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   `TrueUsage`（`volumeTrueUsage` 经 `volSet.External` + `TrueUsageOf` 取到）⇒ 直接获得收敛。
   **仍需专项验证**：端到端测量漂移量级与「在途预留 vs 真值修正」的交互（`CorrectFrom` 修正
   committed，预留另计）。
-- **明文临时残留**：读路径的解密产物是本地临时文件，仅 `Close` 时删除 ⇒ 进程崩溃可能残留（系统临时目录）。
+- ~~明文临时残留~~ **已根治（2026-10-18）**：读路径**不再落任何临时文件**（按需解密）⇒ 不再产生
+  明文残留；升级前崩溃遗留的 `decrypt-*` 由 `NewFS` 启动清理（写路径的临时物是**密文**分块目录，不误删）。
 - **多 target 副本未纳管**：副本根用裸 `NewLocalFS` 直建，不经 registry ⇒ 不占卷容量池/账本，
   `reconcileVolumesFromDisk` 只扫有 `RootDir` 的卷 ⇒ 副本字节不参与对账（该能力本身标「实验性」）。
 - **外部卷账本真值收敛不可达（待验）**：`quota_reconcile` 的 `correctLedgerToTruth ← adjustVolumePool`
