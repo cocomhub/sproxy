@@ -2173,7 +2173,7 @@ func (s *SecretdataFS) renameFileLocked(ctx context.Context, from, to string) er
 		moved.meta = nm
 		moved.metaName = name
 	}
-	if rerr := s.relocateRenamedBlobsLocked(ctx, e, targetContainer, sameBase); rerr != nil {
+	if rerr := s.relocateRenamedBlobsLocked(ctx, from, e, targetContainer, sameBase); rerr != nil {
 		if !sameBase {
 			// 回滚刚写的新 meta（避免重启后新路径出现重影条目）。
 			_ = s.inner.Delete(ctx, path.Join(targetContainer, moved.metaName))
@@ -2213,9 +2213,30 @@ func (s *SecretdataFS) writeRenamedMetaLocked(ctx context.Context, e *metaEntry,
 //   - 跨容器 + 改名：只搬内容分块（**绝不复制旧 meta**——否则重启会按旧 basename 重建幽灵条目）。
 //
 // 删源为 best-effort（残留孤儿交 GC）；调用方持有 s.mu。
-func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, e *metaEntry, targetContainer string, sameBase bool) error {
+func (s *SecretdataFS) relocateRenamedBlobsLocked(ctx context.Context, from string, e *metaEntry, targetContainer string, sameBase bool) error {
 	if e.dirSeg == targetContainer {
 		_ = s.inner.Delete(ctx, path.Join(e.dirSeg, e.metaName))
+		return nil
+	}
+	// **共享集合搬不动，只能复制一份**（独立审核 P1，2026-10-18）：同容器复制会让两份 meta
+	// 引用**同一批分块 blob**（存在即引用）。若此处按 mv 物理搬走分块，兄弟条目的 meta 仍指向
+	// **原容器**里的分块名 ⇒ 其 OpenRead 报「读底层分块失败」，而 ListDir/Stat 仍可见（size
+	// 正常）⇒ 用户侧表现为**静默数据丢失**（幽灵条目）。⇒ 被兄弟引用时改**字节拷贝**（内容
+	// 零改动、不重加密），原分块留给兄弟；且**不得** `deleteFileBlobs`（那会删掉兄弟的分块）。
+	if s.chunkSetStillReferenced(from, e) {
+		if cerr := s.copyContentBlobs(ctx, e, targetContainer); cerr != nil {
+			return cerr
+		}
+		srcMeta := path.Join(e.dirSeg, e.metaName)
+		if sameBase {
+			// meta 名派生自分块内容 ⇒ 改名/改路径不换名 ⇒ 必须搬到目标容器，否则目标条目解析不到。
+			if merr := s.inner.Rename(ctx, srcMeta, path.Join(targetContainer, e.metaName)); merr != nil {
+				return fmt.Errorf("secretdata: 搬移 meta blob 失败: %w", merr)
+			}
+		} else {
+			// 新 meta 已由 writeRenamedMetaLocked 写好 ⇒ 删源 meta（**只删 meta**，不碰分块）。
+			_ = s.inner.Delete(ctx, srcMeta)
+		}
 		return nil
 	}
 	// **用底层卷的 mv**（用户口径 2026-10-14）：blob 优先 `s.inner.Rename` 直接搬（后端支持真 mv
