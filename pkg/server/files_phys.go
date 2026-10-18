@@ -18,8 +18,10 @@ import (
 //
 // 断言必须**穿透装饰器**（Guard/Wrap/CapacityFS/StagingQuotaGateFS）：`externalFSFor` 返回的是
 // 可信链（`Guard(Wrap(be.FS()))`），能力方法在链上某个真实实现上 ⇒ **沿链向内找首个实现者**
-// （`physFS`；#786 教训：装饰器层断言会把「支持」判成「不支持」而静默回落；**不能**用
-// `syncpkg.Innermost`——`SecretdataFS` 自身实现 `Inner()`，会被误当装饰器剥掉）。
+// （`physFS`；#786 教训：装饰器层断言会把「支持」判成「不支持」而静默回落）。能力断言用
+// `syncpkg.Innermost`（见下方 physFS；**不在业务代码里手写 Inner 链遍历**——R22 门禁）。
+// 2026-10-18 勘误：旧头注释称「不能用 Innermost，因为 SecretdataFS 自身实现 Inner()」，
+// 与代码事实相反（secretdata 包内**无** `func (*SecretdataFS) Inner()`）⇒ 已删该错误理由。
 
 // filesPhysFootprinter 实现 files.VolumePhysFootprinter。
 type filesPhysFootprinter struct{ h *Handlers }

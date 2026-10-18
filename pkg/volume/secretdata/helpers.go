@@ -5,25 +5,10 @@ package secretdata
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 )
-
-// cleanupReadCloser 是解密读的 ReadCloser：Close 时同时删除临时解密文件。
-type cleanupReadCloser struct {
-	rc   io.ReadCloser
-	path string
-}
-
-func (c *cleanupReadCloser) Read(p []byte) (int, error) { return c.rc.Read(p) }
-func (c *cleanupReadCloser) Close() error {
-	err := c.rc.Close()
-	_ = os.Remove(c.path)
-	return err
-}
 
 // encryptContent 把明文内容分块加密写到 outDir，返回分块与 meta 信息。
 // 走 shardseal.EncryptShardsBytes（内存变体，避免写临时源 + 二次整读——Imp-2 部分修复：

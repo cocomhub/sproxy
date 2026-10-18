@@ -119,8 +119,17 @@ func TestParity_SecondMissingFails(t *testing.T) {
 			t.Fatalf("delete chunk %s: %v", ci.FileName, err)
 		}
 	}
-	if _, err := fs.OpenRead(ctx, "f.bin"); err == nil {
-		t.Error("删 2 块后应 fail-closed（k-of-k+1 只容忍 1 块丢失），却解码成功")
+	// 语义（2026-10-18 Step 2）：读路径改为**按需解密**后，失败从「open 即报错」变为
+	// 「读中途报错」（设计已文档化；逐 blocklet GCM + 恢复结果按 ci.OrigSHA256 校验共同保证
+	// 绝不返回静默错内容）⇒ 判据改为「open 或**读**必须失败」。
+	rc, oerr := fs.OpenRead(ctx, "f.bin")
+	if oerr != nil {
+		return // open 即失败同样满足 fail-closed
+	}
+	_, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr == nil {
+		t.Error("删 2 块后应 fail-closed（k-of-k+1 只容忍 1 块丢失），却完整解码成功")
 	}
 }
 

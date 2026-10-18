@@ -12,7 +12,9 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"path"
 
@@ -142,33 +144,31 @@ func (s *SecretdataFS) recoverMissingPlaintext(ctx context.Context, e *metaEntry
 	if rerr != nil {
 		return nil, rerr
 	}
-	return rec[:ci.OrigSize], nil
+	plain := rec[:ci.OrigSize]
+	if verr := verifyRecoveredChunk(ci, plain); verr != nil {
+		return nil, verr
+	}
+	return plain, nil
 }
 
 // readChunkBlobOrErase 读取分块 ci 的 blob；底层缺失且纠错启用 → 恢复明文后用**文件级
 // key/salt** 重加密为单 blocklet blob（DecryptFile 走统一 blob 解密，blob 内 salt==meta.Salt
-// 一致性校验可过；长度 == ci.OrigSize、整文件 SHA-256 全量校验仍有效）。
-func (s *SecretdataFS) readChunkBlobOrErase(ctx context.Context, e *metaEntry, ci shardseal.ChunkInfo) ([]byte, error) {
-	blob, err := s.readChunkBlob(ctx, e, ci)
-	if err == nil {
-		return blob, nil
+// verifyRecoveredChunk 校验 parity 恢复出的分块明文与 meta 记录一致（fail-closed）。
+//
+// 为什么必须有：k-of-k+1 的 XOR parity **只能恢复一块**——缺失多于一块时 RecoverFromParity 仍会
+// 「成功」返回**垃圾**（XOR 组合无自校验）。旧读路径靠「服务首字节之前」的整文件 SHA-256 兜底；
+// 读路径流式化后（2026-10-18 Step 2）该校验移到 EOF ⇒ 恢复路径必须**自己**按 ci.OrigSHA256
+// 校验，否则会把垃圾当明文返回（静默错内容 ✗）。无 OrigSHA256 时**拒绝**（恢复结果无从校验）。
+func verifyRecoveredChunk(ci shardseal.ChunkInfo, plain []byte) error {
+	if ci.OrigSHA256 == "" {
+		return fmt.Errorf("secretdata: 分块 %s 无 OrigSHA256，恢复结果无法校验（fail-closed）", ci.FileName)
 	}
-	if !s.opts.Erasure || e.meta.Parity == nil {
-		return nil, err
+	sum := sha256.Sum256(plain)
+	if hex.EncodeToString(sum[:]) != ci.OrigSHA256 {
+		return fmt.Errorf("%w: 分块 %s 由 parity 恢复的内容与 meta 记录不符（缺失块数超过 parity 能力）",
+			shardseal.ErrIntegrityMismatch, ci.FileName)
 	}
-	plain, perr := s.recoverMissingPlaintext(ctx, e, ci)
-	if perr != nil {
-		return nil, fmt.Errorf("secretdata: 读分块 %s 失败且纠错恢复失败: %w", ci.FileName, perr)
-	}
-	key, salt, kerr := s.fileLevelKey(e)
-	if kerr != nil {
-		return nil, kerr
-	}
-	blob, cerr := shardseal.EncryptChunkStandalone(key, salt, plain, e.meta.AlgoVersion)
-	if cerr != nil {
-		return nil, fmt.Errorf("secretdata: 重加密恢复分块 %s 失败: %w", ci.FileName, cerr)
-	}
-	return blob, nil
+	return nil
 }
 
 // fileLevelKey 返回条目的文件级派生 key 与盐（meta.Salt base64 解码 + DeriveKey）。

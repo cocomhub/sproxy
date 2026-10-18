@@ -333,6 +333,13 @@ func (h *Handlers) reconcileVolumesFromDisk() {
 		// 就得按容器拆分子目录字节，反而与底层池形成双计；复杂度/风险高于收益，故按可记录
 		// 取舍保留跳过（对账收敛的正确性由写入/删除两侧同口径 + 重启重建兜底）。
 		if v.RootDir == "" {
+			// **外部/封装卷也要收敛账本**（2026-10-18 修复）：此前直接 `continue` ⇒ 连
+			// `correctLedgerToTruth`（账本 → 真值报告者）都不执行；而该函数的**唯一**调用点是
+			// `adjustVolumePool`，后者只对出现在 volumeBuckets 里的卷执行 ⇒ 外部/加密卷的
+			// LedgerCounter **永不收敛** ✗（展示与强制面长期漂移：高估 ⇒ 提前 507；低估 ⇒ 可超限）。
+			// 此处对这类卷**只**做账本真值收敛（不做本地桶扫描——它们没有本地根，扫描语义不适用）；
+			// 无真值报告者时 `correctLedgerToTruth` 是 no-op（未接线卷零回归）。
+			h.correctLedgerToTruth(v.Name)
 			continue
 		}
 		buckets, _, err := capacity.ScanStorageDir(v.RootDir)

@@ -7,8 +7,10 @@
 
 ## 能力
 
-- **透明加解密**：`WriteFile` 分块加密落盘，`OpenRead` 解密还原；逻辑 Stat/ListDir 用 meta 内原始
-  mtime/模式，不受底层 blob 形态影响。
+- **透明加解密**：`WriteFile` 分块加密落盘，`OpenRead` 解密还原；逻辑 Stat/ListDir 暴露 meta 内原始
+  **mtime（UnixNano；文件条目有值，目录条目恒 0）**，不受底层 blob 形态影响。注意两点保真：
+  ① `syncpkg.Entry` **没有 Mode 字段** ⇒ 「模式」不在接口层交付；② 列表**排序**是「目录优先 +
+  名称升序」，**不是**按 mtime（2026-10-18 勘误：旧文案称「用 mtime 排序」与实现不符）。
 - **底层全匿名布局**：无顶层 `data`/`meta` 目录；一个逻辑目录 = 一个随机命名容器目录（5-30
   `[a-z0-9]`），内含目录 meta（`@` 标记）、文件 meta（`-`/`_` 标记）、加密分块（无标记）。
 - **物理嵌套（2026-10-14，唯一支持的布局）**：子容器落在**父容器目录内** ⇒ 底层目录树与逻辑目录树
@@ -22,7 +24,7 @@
   （`fs.GC()` 或配置 >0），作孤儿/墓碑兜底清理。
 - **冗余（实验性）**：`Options.Erasure` 启用 XOR parity（k-of-k+1，纯 stdlib），任一分块丢失/损坏
   可由其余分块复原；未生产验证、默认关。
-- **多 target 复制（实验性）**：`Options.Targets` 声明副本卷名，写路径复制自包含容器到全部 target、
+- **多 target 复制（实验性）**：`Options.Targets` 声明副本**本地路径**（非卷名），写路径复制自包含容器到全部 target、
   读主失败回退副本（当前仅多 local root）。
 - **寻址**：装配后 `secretdata://<卷名>/<path>` 可被 registry 寻址；密钥寻址 `secrets://<卷>/<name>`。
 
@@ -33,13 +35,13 @@
 | `Secret` | 必填 | 密钥字节（装配层经 `secret_url` 从 secrets 卷读取注入） |
 | `Algorithm` | `shardseal/aes-256-gcm` | KDF 档位（`-high` / `-low` 切换；跨档 fail-closed） |
 | `Block` | random 1MiB-200MiB | 分块策略（blocklet 默认 fixed 64KB-4MB） |
-| `TempDir` | 系统随机临时目录 | 本地临时空间（0700） |
+| `TempDir` | 系统随机临时目录 | **写路径**本地临时空间（0700）。读路径自 2026-10-18 起**按需解密、不落任何临时文件**（temp → 0）；启动时会清理目录内 `decrypt-*` 明文残留（升级前崩溃遗留） |
 | `MetaPadBytes` | `Block.Min` | meta pad 目标基准（`+rand()`，受 196B R 地板） |
 | `PreserveMTime` | false | 默认 blob mtime 打散（0-48h 偏移）；true 才透传原始 |
 | `Dedup` | false | **预留，装配层不接线**（整文件内容去重未来由独立子系统承接） |
 | `GCInterval` | 0（禁用） | 后台孤儿/墓碑 GC 周期（可选维护工具） |
 | `Erasure` | false | XOR parity 纠错（**实验性**，默认关） |
-| `Targets` | 空 | 多 target 副本卷名（装配元数据；副本 FS 由装配层注入） |
+| `Targets` | 空 | 多 target 副本的**本地路径列表**（`extra.targets`，装配层逐个 `NewLocalFS`；**不是卷名**） |
 | `MaxFileBytes` | 0（不限） | 单文件上限（读取全文前按 size 拦截，内存防护） |
 
 字节大小字段统一 `pkg/units/sizex.ByteSize`（可读 `"1GiB"`/`"5GB"`/纯数字）。

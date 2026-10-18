@@ -175,12 +175,14 @@ func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key,
 			s.usage = 0
 		}
 	}
-	s.mu.Unlock()
 	if prev != nil {
-		// 同 commitEntry：锁外 best-effort 删旧版本（M-8 并发语义——索引已切新、旧分块
-		// 无引用；并发在途读旧条目可能读到已删分块而报错，属可接受读-写语义，非损坏）。
+		// 同 commitEntry：**旧版本清理必须在锁内**（removeVersionMeta →
+		// chunkSetStillReferenced 遍历 s.index，要求持 s.mu；锁外调用 = 运行时
+		// fatal error: concurrent map iteration and map write，见
+		// TestConcurrentOverwrite_NoIndexDataRace）。并发读语义不变。
 		s.removeVersionMeta(wc.rel, prev)
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -219,12 +221,14 @@ func (s *SecretdataFS) commitDedupEntry(ctx context.Context, wc writeCtx, e *met
 			s.usage = 0
 		}
 	}
-	s.mu.Unlock()
 	if prev != nil {
-		// 同 commitEntry：锁外 best-effort 删旧版本（M-8 并发语义——索引已切新、旧分块
-		// 无引用；并发在途读旧条目可能读到已删分块而报错，属可接受读-写语义，非损坏）。
+		// 同 commitEntry：**旧版本清理必须在锁内**（removeVersionMeta →
+		// chunkSetStillReferenced 遍历 s.index，要求持 s.mu；锁外调用 = 运行时
+		// fatal error: concurrent map iteration and map write，见
+		// TestConcurrentOverwrite_NoIndexDataRace）。并发读语义不变。
 		s.removeVersionMeta(wc.rel, prev)
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -262,6 +266,12 @@ func (s *SecretdataFS) encryptContentSingle(data []byte, rel string) (*shardseal
 	if len(data) == 0 {
 		return nil, nil, fmt.Errorf("secretdata: 空内容不可去重")
 	}
+	// 本地 staging 配额（自管记账，与主写路径同口径）。
+	releaseStaging, sres := s.stagingReserve(context.Background(), int64(len(data)))
+	if sres != nil {
+		return nil, nil, sres
+	}
+	defer releaseStaging()
 	tmp, err := os.MkdirTemp(s.temp, "chunks-dedup-*")
 	if err != nil {
 		return nil, nil, err
