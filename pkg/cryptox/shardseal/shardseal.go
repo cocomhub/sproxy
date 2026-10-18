@@ -143,6 +143,10 @@ type blobDest struct {
 	outDir    string
 	chunkSink ChunkSink
 	sinkMode  bool
+	// skipMeta（仅 sink 形态使用）报告调用方**自行**按最终 meta 明文加密落盘（其 meta 归属
+	// 字段如 mtime/BaseVersion 在加密期间才定型）⇒ 本实现不加密 meta（MetaBlob/MetaName 留空），
+	// 消除「先加密一份、再按变更后的字段重加密」的冗余计算（见 EncryptShardsReaderToChunks）。
+	skipMeta bool
 }
 
 // writeChunk 落一个数据分块（sink 形态 = 交调用方/丢弃，落盘形态 = 写 outDir）。
@@ -156,7 +160,8 @@ func (d blobDest) writeChunk(name string, blob []byte) error {
 	return writeBlobFile(d.outDir, name, blob)
 }
 
-// writeMeta 落 meta blob（sink 形态 = 不落盘，经 EncryptionResult.MetaBlob 返回）。
+// writeMeta 落 meta blob（sink 形态 = 不落盘，经 EncryptionResult.MetaBlob 返回；
+// skipMeta 形态 = 完全跳过加密，由调用方自行产出）。
 func (d blobDest) writeMeta(name string, blob []byte) error {
 	if d.sinkMode {
 		return nil
@@ -187,6 +192,15 @@ func EncryptShardsReader(src io.Reader, size int64, origName, outDir string, sec
 // sink 为 nil 时等价于「不落任何 blob」（只产出 meta 信息，供只需元数据的调用方）。
 func EncryptShardsReaderTo(src io.Reader, size int64, origName string, secret []byte, policy BlockPolicy, padTarget int, v AlgoVersion, sink ChunkSink) (*EncryptionResult, error) {
 	return encryptShardsReaderTo(src, size, origName, blobDest{chunkSink: sink, sinkMode: true}, secret, policy, padTarget, v)
+}
+
+// EncryptShardsReaderToChunks 与 EncryptShardsReaderTo 同构，但**不加密 meta**（
+// MetaBlob/MetaName 留空）：供「meta 归属字段（如 mtime / 乐观锁版本）在加密期间才定型」的调用方
+// **自行按最终 meta 明文加密落盘**——否则内部先加密一份（当时字段未定型）会被丢弃、调用方再加密
+// 一次，白做一遍 AES+JSON 序列化（P2 性能修复，2026-10-19）。数据分块的命名/密文字节与其它变体
+// **逐字节一致**（同一实现）。padTarget 由调用方自行加密 meta 时决定，故本入口不接收它。
+func EncryptShardsReaderToChunks(src io.Reader, size int64, origName string, secret []byte, policy BlockPolicy, v AlgoVersion, sink ChunkSink) (*EncryptionResult, error) {
+	return encryptShardsReaderTo(src, size, origName, blobDest{chunkSink: sink, sinkMode: true, skipMeta: true}, secret, policy, 0, v)
 }
 
 // encryptShardsReaderTo 是流式两个公开入口的共享实现（落盘形态 / sink 形态同一代码路径）。
@@ -463,6 +477,9 @@ func planSrcSize(plan *chunkPlan) int64 {
 // meta blob 的两窗口（offset 0/16）base62，中段 = HMAC 分组盲签——磁盘上不出现明文
 // meta JSON，也不出现 meta 明文哈希（明文哈希可被内容存在性探测，匿名性收敛）。
 func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group string, dest blobDest, padTarget int) (string, error) {
+	if dest.skipMeta {
+		return "", nil // 调用方自行按最终 meta 明文加密（见 EncryptShardsReaderToChunks）
+	}
 	metaJSON, err := json.Marshal(res.Meta)
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 序列化失败: %w", err)

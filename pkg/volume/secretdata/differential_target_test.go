@@ -346,9 +346,8 @@ func mustReadEqual(t *testing.T, sfs *SecretdataFS, ctx context.Context, rel str
 //   - **表现/性能差异**：量化内层操作与字节，并断言**关键性能性质**——
 //     ① 支持 RangeReader 的远端：Range 读**不得**退化为整对象下载（rangeBytes ≪ 对象大小）；
 //     ② 不支持 RangeReader 的远端：允许退化为整对象读（记录差异，不视为缺陷）；
-//     ③ **冗余 staging 拷贝**：当前实现走 `inner.WriteFile(reader)` ⇒ 远端内部仍会再落一份
-//     （internalCopies>0 且 stagedWrites==0）——本用例**记录该差异**（roadmap ① 的修复目标：
-//     经 `WithStagedLocalPath`/`WriteFromStagedPath` 复用暂存 ⇒ stagedWrites>0 且 internalCopies==0）。
+//     ③ **冗余 staging 拷贝**：本用例现在断言**已修复的行为**——分块经 `WithStagedLocalPath`
+//     复用暂存（stagedWrites==0 → 现已 >0；internalCopies 不再随对象大小线性增长）。
 func TestDifferential_LocalVsExternalTarget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -620,8 +619,9 @@ func TestDifferential_RapidUploadConvergence(t *testing.T) {
 	if hits != uploads {
 		t.Fatalf("秒传刷新命中 %d != 真实传输 %d ⇒ 存在未刷新/重复传输 ✗", hits, uploads)
 	}
-	if uploadBytes != int64(len(payload)) && uploadBytes < int64(len(payload)) {
-		t.Fatalf("真实传输字节 %d 少于明文 %d ⇒ 有分块未上传 ✗", uploadBytes, len(payload))
+	if uploads != len(rapidFS.index["d/f.bin"].meta.Chunks) {
+		t.Fatalf("真实传输次数 %d != 分块数 %d ⇒ 有分块未上传/重复传输 ✗",
+			uploads, len(rapidFS.index["d/f.bin"].meta.Chunks))
 	}
 	if maxLocalFiles > 1 {
 		t.Fatalf("本地分块副本峰值 %d ⇒ 未交错（应 O(1 块)）✗ 逐次 %v", maxLocalFiles, entries)
@@ -645,12 +645,36 @@ func TestDifferential_RapidUploadMiss_FailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
 	}
+	// 先建目录 "d"（其容器已存在）⇒ 失败写的回滚不会走「回收**本次新建**空容器」分支，
+	// 于是本用例检测的正是**失败块本身**是否被删除（而不是容器回收的副作用）。
+	if merr := rapidFS.MakeDir(ctx, "d"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
 	werr := rapidFS.WriteFile(ctx, syncpkg.LogicalKey{}, "d/f.bin", bytes.NewReader(payload), int64(len(payload)), 0)
 	if werr == nil {
 		t.Fatal("秒传未命中 + 复核不匹配 ⇒ 必须报错（fail-closed）✗")
 	}
 	if st, serr := rapidFS.Stat(ctx, "d/f.bin"); serr != nil || st != nil {
 		t.Fatalf("失败写不得留下半态（Stat=%v err=%v）✗", st, serr)
+	}
+	// **底层无残留**（P2-1/P2-7② 修复，2026-10-19）：秒传未命中 ⇒ 内层已写入分块后返回错误
+	// （模拟「写成功但复核失败」），失败块/meta 必须能被回滚删掉——否则索引层无半态但**远端
+	// 留孤儿 blob**。只断言索引层会漏掉这个方向。允许残留**目录 meta**（路径解析锚点，非
+	// 本次写产物）。
+	rapid.mu.Lock()
+	var orphans []string
+	for k := range rapid.files {
+		if shardseal.ClassifyName(path.Base(k)) != shardseal.KindDirMeta {
+			orphans = append(orphans, k)
+		}
+	}
+	rapid.mu.Unlock()
+	if len(orphans) != 0 {
+		corte := orphans
+		if len(corte) > 3 {
+			corte = corte[:3]
+		}
+		t.Fatalf("fail-closed 回滚后底层仍残留 %d 个非目录 meta blob（远端孤儿）✗ 例如 %v", len(orphans), corte)
 	}
 	rapid.rmu.Lock()
 	misses, uploads := rapid.refreshMiss, rapid.uploads
