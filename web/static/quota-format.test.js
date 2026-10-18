@@ -62,6 +62,30 @@ test('federatedQuotaHtml：partial=true 必须显式提示汇总不完整', () =
   assert.doesNotMatch(clean, /quota-partial/);
 });
 
+test('federatedQuotaHtml：partial=true 时合计**不得**被当精确值（须标为下界）', () => {
+  // 后端契约（pkg/server/quota_federated.go）：顶层**无** has_quota，未知信号是 Partial，
+  // 且 Used/Capacity 是「Σ 有权威卷」= **下界**（未知部分未计入）。
+  // 「消费方必须显式处置（禁当完整值 ✗）」⇒ 合计必须带下界标记。
+  const partial = q.federatedQuotaHtml({
+    used: 1024, capacity: 4096, unlimited: false, partial: true,
+    volumes: [{ volume: 'v1', used: 1024, capacity: 4096, has_quota: true }],
+  });
+  assert.match(partial, /≥/, '不完整合计必须标下界 ≥');
+  assert.match(partial, /汇总不完整/);
+
+  // 对照组：完整合计**不得**出现下界标记（否则失去区分力）。
+  const full = q.federatedQuotaHtml({
+    used: 1024, capacity: 4096, unlimited: false, partial: false,
+    volumes: [{ volume: 'v1', used: 1024, capacity: 4096, has_quota: true }],
+  });
+  assert.doesNotMatch(full, /≥/);
+});
+
+test('usagePercent：不完整合计不得给出百分比（下界算比例会误导）', () => {
+  assert.strictEqual(q.usagePercent(1024, 4096, true, false, true), null);
+  assert.strictEqual(q.usagePercent(1024, 4096, true, false, false), 25);
+});
+
 test('HTML 转义：卷名含尖括号不得注入', () => {
   const html = q.volumeQuotaTableHtml([{ volume: '<img src=x>', used: 1, capacity: 2, has_quota: true }]);
   assert.doesNotMatch(html, /<img/);

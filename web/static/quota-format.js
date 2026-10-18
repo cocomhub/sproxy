@@ -39,16 +39,20 @@
   // quotaCell 渲染「已用 / 上限」单元格。三态：
   //   未知（hasQuota===false）→ 「未知」；不限（unlimited 或 capacity<=0）→ 「N / 不限」；
   //   正常 → 「N / M」。
-  function quotaCell(used, capacity, hasQuota, unlimited) {
+  //
+  // incomplete=true ⇒ 该值是**下界**（后端 `Partial=true`：部分卷无权威数据，未知部分未计入）
+  // ⇒ 必须标 `≥`，不得当精确值呈现（后端契约：禁当完整值 ✗）。
+  function quotaCell(used, capacity, hasQuota, unlimited, incomplete) {
     if (hasQuota === false) return '未知';
-    const u = formatSize(used == null ? 0 : used);
+    const u = (incomplete === true ? '≥ ' : '') + formatSize(used == null ? 0 : used);
     if (unlimited === true || capacity == null || capacity <= 0) return u + ' / 不限';
-    return u + ' / ' + formatSize(capacity);
+    return u + ' / ' + (incomplete === true ? '≥ ' : '') + formatSize(capacity);
   }
 
-  // usagePercent 返回 0..100 的整数百分比；不限/未知 → null（**不**编造 0）。
-  function usagePercent(used, capacity, hasQuota, unlimited) {
-    if (hasQuota === false || unlimited === true) return null;
+  // usagePercent 返回 0..100 的整数百分比；不限/未知/不完整 → null（**不**编造 0，
+  // 也不拿**下界**去算比例——那会把「未知」伪装成「占用低」✗）。
+  function usagePercent(used, capacity, hasQuota, unlimited, incomplete) {
+    if (hasQuota === false || unlimited === true || incomplete === true) return null;
     if (capacity == null || capacity <= 0) return null;
     const p = Math.round(((used == null ? 0 : used) / capacity) * 100);
     return p < 0 ? 0 : (p > 100 ? 100 : p);
@@ -81,14 +85,17 @@
   }
 
   // federatedQuotaHtml 渲染联邦配额汇总（GET /api/quota）：总计 + 逐卷明细 + 不完整提示。
-  // `f` 形状：{ has_quota, unlimited, used, capacity, partial, volumes:[{volume,used,capacity,has_quota,unlimited}] }
+  // `f` 形状（与 pkg/server/quota_federated.go 契约一致，**顶层无 has_quota** ✗）：
+  //   { owner, used, capacity, unlimited, partial, volumes:[{volume,kind,used,capacity,has_quota}] }
+  // 语义：used/capacity 是「Σ 有权威卷」= **下界**；`partial=true` ⇒ 含未知部分 ⇒ 必须显式处置。
   function federatedQuotaHtml(f) {
     if (!f) return '<div class="empty-msg">暂无配额数据。</div>';
+    const incomplete = f.partial === true;
     let html = '<div class="quota-summary" style="font-size:14px;margin-bottom:8px;">';
     html += '<strong>合计：</strong>'
-      + escHtml(quotaCell(f.used, f.capacity, f.has_quota !== false, f.unlimited === true));
-    if (f.partial === true) {
-      // 未知 ≠ 0：汇总含未知项 ⇒ 必须显式提示，否则用户会把「未知」当成「已用空」。
+      + escHtml(quotaCell(f.used, f.capacity, true, f.unlimited === true, incomplete));
+    if (incomplete) {
+      // 未知 ≠ 0：汇总含未知项 ⇒ 数值是下界（已由 quotaCell 标 ≥），并显式提示。
       html += ' <span class="quota-partial" style="color:var(--text-muted);font-size:12px;">'
         + '（汇总不完整：部分卷无权威数据）</span>';
     }
