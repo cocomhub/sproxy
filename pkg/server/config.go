@@ -1043,6 +1043,10 @@ type Config struct {
 
 	// 存储空间控制
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
+	// OperationalReserveBytes 是**运维余量**（非配额物理字节保留）：全局池可用上限 =
+	// max_storage_bytes − 本值 ⇒ 「**绝不磁盘打满**」由它保证（用户裁定 2026-10-14）。
+	// 0 = 不保留（默认，向后兼容）。经 Pool.SetOperationalReserve 接线，usableLocked 会扣除。
+	OperationalReserveBytes int64 `yaml:"operational_reserve_bytes" mapstructure:"operational_reserve_bytes"`
 
 	// 云端下载配置
 	CloudSyncThreshold int64         `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`
