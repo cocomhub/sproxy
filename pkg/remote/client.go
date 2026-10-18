@@ -447,6 +447,13 @@ func (c *Client) Open(ctx context.Context, ref Ref, opts ...OpenOption) (io.Read
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode == http.StatusNotFound {
+		// **项目 not-exist 约定**（见 pkg/sync.IsNotExist）：卷内账本据「不存在 vs 真错误」
+		// 区分「空账本（首次运行）」与「不可确定 ⇒ 判损坏 ⇒ fail-closed 拒写」⇒
+		// 404 必须包装 os.ErrNotExist，否则该卷账本恒拒写（整卷不可用 ✗）。
+		defer func() { _ = resp.Body.Close() }()
+		return nil, fmt.Errorf("remote: download %q: %w: %w", ref.Path, responseError("download", resp), os.ErrNotExist)
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		defer func() { _ = resp.Body.Close() }()
 		return nil, responseError("download", resp)

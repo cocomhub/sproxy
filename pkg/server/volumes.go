@@ -305,16 +305,9 @@ func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc 
 	acc.pools[vc.Name] = pool
 	// 卷级容量记账在 FS 层（capacity.CapacityFS）：凡经 be.FS() 的写路径（上传/转存/
 	// 同步 push/备份/服务端 Copy·Move）都被同一卷级计数器拦截，保障所有用户占用之和
-	// 不超卷总额度。PoolCounter 复用本卷容量池（路由/指标/对账同源）并**持久化**
-	// （重启后仍从已占用起算，防“重启归零→反复写满”）。
-	counter, cerr := capacity.NewPoolCounterPersistent(pool, capacity.VolumeCounterPath(cfg.StorageRoot, vc.Name))
-	if cerr != nil {
-		log.Warn("外部卷容量快照恢复失败，本次进程从零累计", "volume", vc.Name, "error", cerr)
-		counter = capacity.NewPoolCounter(pool)
-	} else if counter.CorruptSnapshot() {
-		log.Warn("外部卷容量快照损坏，本次进程从零累计", "volume", vc.Name)
-	}
-	acc.external[vc.Name] = capacity.WrapStorageVolume(vc.Name, be, counter, nil, pool)
+	// 不超卷总额度。计数器是**唯一实现**（分片日志账本，跨进程正确 + 重启从已占用起算）；
+	// 节点标识与落点由 capacity 内部决定 ⇒ 装配点不可能漏接。
+	acc.external[vc.Name] = capacity.WrapStorageVolume(vc.Name, be, nil, pool, int64(vc.VolCapacity), 0)
 	acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, ""))
 	log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
 	return nil

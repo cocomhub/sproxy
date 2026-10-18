@@ -19,8 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"strings"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -130,5 +128,7 @@ func countRegionShape(ctx context.Context, src syncpkg.FS, rel string) (dirs, fi
 // regionAbsent 报告错误是否表示「区间不存在」（不存在的两种契约：返回 os/fs.ErrNotExist，
 // 或按 sync.FS 契约返回 (nil, nil)——后者由调用方判空，不经本函数）。
 func regionAbsent(err error) bool {
-	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist)
+	// **单一实现**：not-exist 约定已收敛到 `pkg/sync`（本函数原为唯一判定点，现仅委托；
+	// 保留壳函数以不改调用方）。
+	return syncpkg.IsNotExist(err)
 }

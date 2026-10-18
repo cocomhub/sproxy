@@ -89,7 +89,7 @@ func TestNestedDecl_ConfigKeepsWrapperType(t *testing.T) {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
 	h := buildVolSetHandlers(t, cfg)
-	if aerr := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{StorageRoot: mainDir}); aerr != nil {
+	if aerr := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{}); aerr != nil {
 		t.Fatalf("AttachAll: %v", aerr)
 	}
 

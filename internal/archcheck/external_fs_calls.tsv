@@ -23,8 +23,8 @@ pkg/server/volumes.go	3	卷路由/装配套接 + externalVolumeTransferFS（转�
 pkg/server/volumes_enclosure.go	2	封装装配：**封印注入点本身**
 pkg/server/volumes_mirror.go	1	外部卷只读源构造
 pkg/sync/staging_gate.go	1	staging 门卫下探（非外部卷后端）
-pkg/volume/capacity/capacity.go	5	容量装饰器包装（封印内层，保留配额语义）；+1（片 3b 唯一入口 `WrapStorageVolume` 取 `qv.FS()` 作为数据面视图——与 `be.FS()` **同一实例** ✓，不新增封印绕过面）
-pkg/volume/enclosure/attach.go	1	封装取源特权视图（UnsealedSource）
+pkg/volume/capacity/capacity.go	7	容量装饰器包装（封印内层，保留配额语义）；片 3b 唯一入口 `WrapStorageVolume` 取 `be.FS()` 作数据面视图（与 `qv.FS()` **同一实例**）；+1 = **账本底座**：分片日志账本建在**原始卷 FS** 上（绕过 `CapacityFS` ⇒ 天然不自记账），只读写保留元数据区 `meta/quota/`（账本自身），不触碰用户内容；+1（2026-10-17：账本底座与数据面统一取 `be.FS()` 一次，替代旧 `qv.FS()` 视图——同一实例、不改语义）⇒ **不新增封印绕过面**
+pkg/volume/enclosure/attach.go	2	封装取源特权视图（UnsealedSource）；+1 = 卷级计数器构造需在**原始卷 FS** 上建账本（`NewVolumeCounter(be.FS(), ...)`）——与既有 `WrapBackend(be, ...)` 用**同一实例**，只写 `meta/quota/` 保留区 ⇒ 不新增封印绕过面
 pkg/volume/enclosure/sealfs.go	7	封印装饰器自身（Inner/UnsealedFS/SealBackend）
 pkg/volume/registry/set.go	2	Set.FSFor：嵌套封装/secretdata 工厂经 set 取卷 FS 视图（装配处注入；registry 不依赖 storage.Root，底层被封装时由装配处 SealAt 封印）
 
@@ -32,3 +32,4 @@ pkg/volume/enclosure/fs.go	1	新增直连点：需评估封印影响
 pkg/volume/enclosure/ownerfs.go	4	调用方面 owner 映射视图（be.FS() 取区域视图做底座）+ 真值键翻译
 pkg/server/files_phys.go	1	卷自报物理足迹能力查询（配额模型 v3）：经 externalFSFor 取装饰链后 Innermost 取能力实现，仅做**元数据查询**（对象尺寸），不读写内容；调用点仅限用户刚写入/正在删除的对象（已经过封印路径校验）⇒ 无封印写绕过
 pkg/volume/registry/quota_volume.go	1	配额层**纯委托**：`FS()` 透传被包装卷视图（**不加变换**）—— 不新增外部卷直连点，非封印绕过面
+pkg/volume/capacity/ledger.go	1	账本自身的读写（`meta/quota/` 保留区）：按名读写 shard/snap/index 三个小文件（**只读/写，不列目录、不原子 rename** —— 设计 §3.6 原则 1）；不触碰用户内容、不经封印语义 ⇒ 非封印绕过面

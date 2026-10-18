@@ -676,6 +676,8 @@ func isFileGroupedRoute(path string) bool {
 		// 主 mux 面挂 fileRoute/fileRouteRead——须与 isReadOnlyFileRoute 同源补成员
 		// （漏列 → fileRoute 判定「不在文件组」500，防接线错误静默放行）。
 		"/api/secrets",
+		// 联邦配额视图（GET /api/quota，只读；fileRouteRead 包装须与两组清单同源补成员）。
+		"/api/quota",
 		// 分块上传/下载（主 mux 面均挂 fileRoute[Read]——见 RegisterRoutes 装配处清单）；
 		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。
 		"/upload/init", "/upload/chunk", "/upload/status", "/upload/sessions", "/upload/complete",
@@ -721,7 +723,7 @@ func isReadOnlyFileRoute(path, method string) bool {
 	case "/download", "/api/files", "/api/files/stat", "/api/files/search", "/api/du",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
 		routeVolumesBase, "/api/volumes/user", "/api/volumes/export", "/api/shares",
-		"/api/secrets":
+		"/api/secrets", "/api/quota":
 		return true
 	}
 	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {

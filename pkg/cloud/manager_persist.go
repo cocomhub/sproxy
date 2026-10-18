@@ -98,8 +98,23 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 		m.logger.Warn("创建持久化目录失败", "dir", cloudStateRel, "error", err)
 		return err
 	}
-	if err := writeRootFile(root, cloudStateRel+"/"+t.ID+".json", data); err != nil {
+	// **原子写**：唯一 tmp（随机段）+ AtomicRename。`writeRootFile` 是 O_TRUNC 截断写
+	// （非原子），completed 终态保存（persistCompleted）与 flushLoop 进度批量保存**并发**
+	// 写同一任务文件时，截断+写交错会写出损坏 JSON ⇒ 重启恢复 unmarshal 失败、任务丢失
+	// （TestCloudDownloadManager_GroupLifecycleAndPersistence 在 CI -race 下实测偶发）。
+	// 每次保存写**自己的 tmp**（互不截断），rename 原子 ⇒ 正式文件恒为某个**完整**快照。
+	// tmp 以 `.tmp.<hex>` 结尾（非 `.json`）⇒ 恢复扫描（按 `.json` 后缀过滤）不会误读半写文件。
+	var suffix [4]byte
+	_, _ = rand.Read(suffix[:])
+	rel := cloudStateRel + "/" + t.ID + ".json"
+	tmpRel := rel + ".tmp." + hex.EncodeToString(suffix[:])
+	if err := writeRootFile(root, tmpRel, data); err != nil {
 		m.logger.Warn("failed to persist task", "id", t.ID, "error", err)
+		return err
+	}
+	if err := root.AtomicRename(tmpRel, rel); err != nil {
+		_ = root.Remove(tmpRel) // rename 失败清理 tmp；正式文件保持旧版本（不损坏）
+		m.logger.Warn("failed to persist task (rename)", "id", t.ID, "error", err)
 		return err
 	}
 	return nil

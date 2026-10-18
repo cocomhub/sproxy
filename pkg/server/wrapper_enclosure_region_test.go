@@ -68,7 +68,7 @@ func TestEnclosureRegion_BootRejectsPopulatedOwnerRegion(t *testing.T) {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
 	h := buildVolSetHandlers(t, cfg)
-	err := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{StorageRoot: mainDir})
+	err := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{})
 	if !errors.Is(err, enclosure.ErrRegionOccupied) {
 		t.Fatalf("覆盖既有用户数据目录的声明应装配失败（ErrRegionOccupied），got %v", err)
 	}
@@ -101,7 +101,7 @@ func TestEnclosureRegion_BootAllowsFreshOrOwnRegion(t *testing.T) {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
 	h := buildVolSetHandlers(t, cfg)
-	if err := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{StorageRoot: mainDir}); err != nil {
+	if err := enclosure.AttachAll(context.Background(), h.volSet, testLogger(), enclosure.AttachOptions{}); err != nil {
 		t.Fatalf("空/本卷结构区间应可装配，got %v", err)
 	}
 	if h.volSet.External("vault") == nil {

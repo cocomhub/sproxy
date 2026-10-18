@@ -56,7 +56,11 @@ func TestTrustedChain_FullStackWriteMetaVerify(t *testing.T) {
 	// 生产链路（顺序与装配一致）：CapacityFS 在卷侧，Wrap 生成 sidecar，Guard 隔离 meta 桶，
 	// Gate 是装配层最外层的 staging 强制门卫。
 	base := syncpkg.NewLocalFS(filepath.ToSlash(filepath.Join(dir, "anonymous")), testLogger())
-	capFS := volcap.Wrap(base, volcap.NewPoolCounter(quota.NewPool(0)))
+	led, lerr := volcap.OpenLedger(t.TempDir(), "test")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	capFS := volcap.Wrap(base, volcap.NewLedgerCounter(led, 0))
 	wrapped := trusted.Wrap(capFS, trusted.Options{Logger: testLogger()})
 	guarded := trusted.Guard(wrapped)
 	tracker := &recordingTracker{}

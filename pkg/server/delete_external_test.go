@@ -39,12 +39,16 @@ func (f *delAwareExtFS) Delete(_ context.Context, p string) error {
 }
 
 // externalDeleteEnv 装配「本地默认卷 main + 外部卷 baidu（FS 经 CapacityFS 记账）」的 Handlers。
-func externalDeleteEnv(t *testing.T, objs map[string]string) (*Handlers, *extFS, *capacity.PoolCounter) {
+func externalDeleteEnv(t *testing.T, objs map[string]string) (*Handlers, *extFS, *capacity.LedgerCounter) {
 	t.Helper()
 	base := &extFS{files: objs}
 	fs := &delAwareExtFS{extFS: base}
 	pool := quota.NewPool(1000)
-	cnt := capacity.NewPoolCounter(pool)
+	led, lerr := capacity.OpenLedger(t.TempDir(), "test")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	cnt := capacity.NewLedgerCounter(led, pool.MaxBytes())
 	wrapped := capacity.Wrap(fs, cnt)
 	h := newExternalEnvWithFS(t, "baidu", wrapped)
 	return h, base, cnt

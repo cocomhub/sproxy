@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -198,12 +199,12 @@ func (f *FTPFS) openData(cmd string) (net.Conn, func(), error) {
 	if err := f.command(cmd); err != nil { //nolint:govet // 命令发送与读响应成对，短变量域清晰
 		return nil, nil, err
 	}
-	code, _, err = f.readReply()
+	code, msg, err = f.readReply()
 	if err != nil {
 		return nil, nil, err
 	}
-	if code != 150 && code != 125 {
-		return nil, nil, fmt.Errorf("ftp: %s 被拒（%d）", cmd, code)
+	if rerr := ftpOpenRejectErr(cmd, code, msg); rerr != nil {
+		return nil, nil, rerr
 	}
 	dn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 30*time.Second)
 	if err != nil {
@@ -419,6 +420,25 @@ func ftpIsNotFoundMsg(msg string) bool {
 		}
 	}
 	return false
+}
+
+// ftpOpenRejectErr 把数据命令（LIST/RETR/STOR）的**控制连接回复**映射为错误。
+//
+// 返回 nil 表示回复是 150/125（数据连接已建立，非负回复）。
+//
+// **项目 not-exist 约定**（见 pkg/sync/notexist.go）：`550 + not-found 文案` 必须包装
+// `os.ErrNotExist` —— 卷内账本据「不存在 vs 真错误」区分「空账本（首次运行）」与
+// 「不可确定 => 判损坏 => fail-closed 拒写」；裸错误会被判真错误 => 该 FTP 卷账本恒拒写
+// （整卷不可用）。其余负回复（含 550 权限拒绝：550 同时承载 not-found 与 permission
+// denied，须按文案区分）必须 fail-closed，与 SIZE 同口径。
+func ftpOpenRejectErr(cmd string, code int, msg string) error {
+	if code == 150 || code == 125 {
+		return nil
+	}
+	if code == 550 && ftpIsNotFoundMsg(msg) {
+		return fmt.Errorf("ftp: %s 目标不存在: %w", cmd, os.ErrNotExist)
+	}
+	return fmt.Errorf("ftp: %s 被拒（%d）", cmd, code)
 }
 
 // OpenRead 读取文件（RETR）→ io.ReadCloser。

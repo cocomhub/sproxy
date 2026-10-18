@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -253,7 +254,11 @@ func (f *WebDAVFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser,
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
-		return nil, fmt.Errorf("webdav: GET %q: 文件不存在", relPath)
+		// **项目 not-exist 约定**（见 pkg/volume/enclosure/region.go 的 regionAbsent）：
+		// 「不存在」必须满足 `errors.Is(err, os/fs.ErrNotExist)`——卷内账本据此区分
+		// 「不存在（= 空账本）」与「真错误（= 不可确定 ⇒ 判损坏 ⇒ fail-closed 拒写）」。
+		// 裸错误会被判为真错误 ⇒ **该 WebDAV 卷全部写入被拒** ✗。
+		return nil, fmt.Errorf("webdav: GET %q: 文件不存在: %w", relPath, os.ErrNotExist)
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()

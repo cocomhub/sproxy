@@ -1105,6 +1105,7 @@ async function showVolumes() {
     let html = '<div style="font-weight:600;margin:4px 0 8px;">存储卷</div>' + appRender.volumesTableHtml(vols);
     html += volumeOpsBarHtml(vols); // B1：copy/move/rebalance 操作按钮
     html += userVolumesSectionHtml();
+  html += quotaSectionHtml();
     html += volumeHealthSectionHtml();
     panel.innerHTML = html;
     wireUserVolumeEvents(panel);
@@ -1116,9 +1117,44 @@ async function showVolumes() {
   }
 }
 
+// ---- 配额区（卷面板内「配额」，用户确认：面板内新增区） ----
+
+// quotaSectionHtml 返回「配额」区骨架：容器 + 刷新按钮（数据来自 GET /api/quota 联邦视图）。
+// 渲染全部走纯模块 quotaFormat（可 node:test 直测）；此处只做 DOM 与网络。
+function quotaSectionHtml() {
+  return '<div class="settings-section">'
+    + '<h3 style="margin-bottom:8px;">配额</h3>'
+    + '<div id="quota-panel"><div style="color:var(--text-muted);font-size:13px;">加载中...</div></div>'
+    + '<button type="button" id="quota-refresh" style="margin-top:8px;">刷新</button>'
+    + '<div id="quota-msg" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></div>'
+    + '</div>';
+}
+
+// loadQuota 拉取联邦配额并渲染（走 sclientTransport.coreRequest ⇒ 自动 SproxySig 签名）。
+// 旧服务端（404）⇒ 显式提示降级，不静默（与 CLI 同口径）。
+async function loadQuota() {
+  const panel = document.getElementById('quota-panel');
+  const msg = document.getElementById('quota-msg');
+  if (!panel) return;
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/quota', {});
+    if (res.status === 404) {
+      panel.innerHTML = '<div class="empty-msg">当前服务端不支持联邦配额视图。</div>';
+      if (msg) msg.textContent = '服务端版本较旧：/api/quota 不可用。';
+      return;
+    }
+    if (res.status !== 200) throw new Error('HTTP ' + res.status);
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = quotaFormat.federatedQuotaHtml(data);
+    if (msg) msg.textContent = '';
+  } catch (err) {
+    panel.innerHTML = '<div class="empty-msg">配额加载失败。</div>';
+    if (msg) msg.textContent = String(err && err.message ? err.message : err);
+  }
+}
+
 // ---- 用户卷区（卷面板内「我的用户卷」，用户确认：面板内新增区） ----
 
-// userVolumesSectionHtml 返回「我的用户卷」区骨架：创建表单 + 列表容器 + 错误提示位。
 // userVolumesSectionHtml 返回「我的用户卷」区骨架：创建表单 + 列表容器 + 错误提示位。
 // type 下拉初始用静态默认（baidupcs|webdav）；loadUserVolumes 拉取 /api/backends 后
 // 动态填充（未来任何新 backend 自动出现——V4 backend 列表 API）。
@@ -1226,6 +1262,9 @@ function wireUserVolumeEvents(panel) {
     listEl.addEventListener('click', onUserVolumeListClick);
   }
   void loadUserVolumes();
+  void loadQuota();
+  const quotaRefresh = document.getElementById("quota-refresh");
+  if (quotaRefresh) quotaRefresh.addEventListener("click", () => { void loadQuota(); });
 }
 
 // setMsgText：安全写提示位（msg 可能不存在，如面板未渲染）。

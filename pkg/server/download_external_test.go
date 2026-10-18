@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -44,7 +45,11 @@ func (f *extFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error) {
 func (f *extFS) OpenRead(_ context.Context, p string) (io.ReadCloser, error) {
 	content, ok := f.files[p]
 	if !ok {
-		return nil, io.ErrUnexpectedEOF
+		// not-exist 必须返回 os.ErrNotExist（项目约定，见 enclosure/region.go：卷 FS 的
+		// 「不存在」统一 errors.Is(os/fs.ErrNotExist)）——容量账本 fsStore 据此区分
+		// 「首次运行空账本」与「真读取错误」；io.ErrUnexpectedEOF 会被当读失败
+		// ⇒ 账本判 corrupt ⇒ 拒写。
+		return nil, os.ErrNotExist
 	}
 	return io.NopCloser(strings.NewReader(content)), nil
 }
@@ -66,7 +71,7 @@ func (f *extFS) DirectURL(_ context.Context, relPath string) (string, bool, erro
 		return "", false, nil
 	}
 	if _, ok := f.files[relPath]; !ok {
-		return "", true, io.ErrUnexpectedEOF
+		return "", true, os.ErrNotExist
 	}
 	return f.dlink, true, nil
 }
@@ -75,7 +80,7 @@ func (f *extFS) DirectURL(_ context.Context, relPath string) (string, bool, erro
 func (f *extFS) OpenRangeRead(_ context.Context, p string, offset, size int64) (io.ReadCloser, error) {
 	content, ok := f.files[p]
 	if !ok {
-		return nil, io.ErrUnexpectedEOF
+		return nil, os.ErrNotExist
 	}
 	if offset < 0 || offset+size > int64(len(content)) {
 		return nil, io.ErrUnexpectedEOF
