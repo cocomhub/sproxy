@@ -1325,15 +1325,17 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	if cerr != nil {
 		return fmt.Errorf("secretdata: 扫描容器树失败（拒绝空视图挂载）: %w", cerr)
 	}
-	scans := scanAllContainerDirMetas(ctx, s, containers)
+	scans, serr := scanAllContainerDirMetas(ctx, s, containers)
+	if serr != nil {
+		return serr
+	}
 	byID := dirMetaTable(scans)
 	res := s.resolveContainerPaths(ctx, byID, scans)
 	// **只支持嵌套布局**（用户口径 2026-10-14：不支持旧格式目录、无兼容）⇒ 旧扁平布局 fail-closed。
 	if verr := s.validateNestedContainers(res); verr != nil {
 		return verr
 	}
-	loadAllFileMetas(ctx, s, res)
-	return nil
+	return loadAllFileMetas(ctx, s, res)
 }
 
 // maxContainerDepth 是容器树递归深度上限（防御异常/恶意深树导致栈/IO 爆炸；正常逻辑树远小于此）。
@@ -1463,8 +1465,9 @@ func maxParallelLoads(alg *shardseal.Algorithm) int {
 
 // scanAllContainerDirMetas Phase 1：按容器并行扫描目录 meta（解密 + 旧格式 fail-closed）。
 // 经 s.loadGate 限并发（Imp-C：单次 scrypt 派生内存随 KDF 档位，无界并行会内存爆炸）。
-func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers []string) []dirScan {
+func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers []string) ([]dirScan, error) {
 	scans := make([]dirScan, len(containers))
+	errs := make([]error, len(containers))
 	var wg sync.WaitGroup
 	for i, c := range containers {
 		wg.Add(1)
@@ -1473,7 +1476,11 @@ func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers [
 			s.loadGate <- struct{}{} // 派生并发上界（scrypt 内存）
 			defer func() { <-s.loadGate }()
 			scans[i] = dirScan{container: c}
-			dm, blobLen, hasFiles, ok := s.scanContainerDirMeta(ctx, c)
+			dm, blobLen, hasFiles, ok, serr := s.scanContainerDirMeta(ctx, c)
+			if serr != nil {
+				errs[i] = serr
+				return
+			}
 			if ok {
 				scans[i].dm = dm
 				scans[i].dirPhys = blobLen
@@ -1482,7 +1489,12 @@ func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers [
 		}(i, c)
 	}
 	wg.Wait()
-	return scans
+	for _, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+	}
+	return scans, nil
 }
 
 // dirMetaTable 建 dir_id → dirMeta 表（parent 链解析用）。
@@ -1527,38 +1539,55 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 }
 
 // loadAllFileMetas Phase 3：各容器文件 meta 并行解密登记索引。
-func loadAllFileMetas(ctx context.Context, s *SecretdataFS, res []dirRes) {
+func loadAllFileMetas(ctx context.Context, s *SecretdataFS, res []dirRes) error {
 	var wg sync.WaitGroup
-	for _, r := range res {
+	errs := make([]error, len(res))
+	for i, r := range res {
 		if !r.ok {
 			continue
 		}
 		wg.Add(1)
-		go func(r dirRes) {
+		go func(i int, r dirRes) {
 			defer wg.Done()
-			s.loadContainerFileMetas(ctx, r.container, r.rel)
-		}(r)
+			errs[i] = s.loadContainerFileMetas(ctx, r.container, r.rel)
+		}(i, r)
 	}
 	wg.Wait()
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // scanContainerDirMeta 定位容器目录 meta 并解密（旧格式 fail-closed）。返回
 // (dirMeta, 容器是否含文件 meta, 是否找到可解析目录 meta)。目录 meta 缺失/损坏/旧格式
 // → dm=nil；含文件 meta 时记日志（fail-closed：不压平到根，避免跨容器同名遮蔽，F-1）。
-func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container string) (*dirMeta, int64, bool, bool) {
+func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container string) (*dirMeta, int64, bool, bool, error) {
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil {
-		return nil, 0, false, false
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			// 容器在扫描与列目录之间消失（并发删除/GC）⇒ 视为不存在，不算"不完整视图"。
+			return nil, 0, false, false, nil
+		}
+		// **容器级列目录失败必须 fail-closed**（独立审核 P2，2026-10-18）：此前静默 return ⇒
+		// 该容器**全部文件**不进索引（用户看到"文件消失"）且**零日志**；更危险的是 GC 复用内存
+		// 索引（gcMarkIndex）⇒ 会把缺失的 meta 当孤儿**清扫**（数据丢失），另有 BaseVersion 只
+		// 基于残余索引 ⇒ 重启后 resolveSameRelConflict 可能把新上传内容换回旧内容（内容回滚）。
+		// 与本文件既有原则一致：「挂载失败比静默空视图安全」（见 loadIndex 首层 ListDir 注释）。
+		return nil, 0, false, false,
+			fmt.Errorf("secretdata: 列容器 %q 失败（拒绝不完整视图挂载）: %w", container, err)
 	}
 	hasFiles := hasFileMeta(inner)
 	if dm, blobLen, found := scanContainerDirMetaBlob(ctx, s, container, inner, hasFiles); found {
-		return dm, blobLen, hasFiles, true
+		return dm, blobLen, hasFiles, true, nil
 	}
 	if hasFiles {
 		slog.Warn("secretdata: 容器缺少可解析目录 meta，跳过恢复其中文件（fail-closed）",
 			"container", container)
 	}
-	return nil, 0, hasFiles, false
+	return nil, 0, hasFiles, false, nil
 }
 
 // scanContainerDirMetaBlob 定位并解密容器内目录 meta（旧格式 fail-closed 判定明确并专用
@@ -1639,10 +1668,15 @@ func logicalDirName(dirPath string) string {
 
 // loadContainerFileMetas 并行解密容器内全部文件 meta 并登记索引（Imp-2：容器内文件并行）。
 // 经 s.loadGate 限并发（Imp-C：单次 scrypt 派生内存随 KDF 档位，无界并行会内存爆炸）。
-func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, dirPath string) {
+func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, dirPath string) error {
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil {
-		return
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			return nil // 容器已消失（并发删除）⇒ 非"不完整视图"
+		}
+		// 同 scanContainerDirMeta：容器级列目录失败必须 fail-closed（否则索引不完整 ⇒ GC 误清扫
+		// /BaseVersion 回退）。此处在 Phase 3（文件 meta 登记），同样拒绝不完整视图。
+		return fmt.Errorf("secretdata: 列容器 %q 失败（拒绝不完整视图挂载）: %w", container, err)
 	}
 	var wg sync.WaitGroup
 	for _, f := range inner {
@@ -1658,6 +1692,7 @@ func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, di
 		}(f)
 	}
 	wg.Wait()
+	return nil
 }
 
 // loadContainerFileMeta 解密单个文件 meta 并登记索引（逻辑 rel = 容器逻辑路径 + basename，
