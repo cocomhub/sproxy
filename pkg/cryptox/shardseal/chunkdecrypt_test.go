@@ -23,7 +23,11 @@ func TestChunkDecryptor_SourceInjectedAndFailClosed(t *testing.T) {
 	src, want := writeTestFile(t)
 	outDir := t.TempDir()
 	secret := []byte("chunk-decryptor-secret")
-	res, err := EncryptShards(src, outDir, secret, testPolicy(), 0, AlgoV1GCM)
+	// **确定性定长分块**（不用 testPolicy() 的随机块长）：本用例要用「等长块交换」验证整文件
+	// SHA-256 才是拦住重排的那道闸，块长随机时可能找不到等长对 ⇒ 判据失效/flaky ✗
+	// （CI 实测：ubuntu 上因随机块长导致 t.Fatal「未找到等长块对」而失败）。
+	res, err := EncryptShards(src, outDir, secret,
+		BlockPolicy{Mode: "random", Min: 512, Max: 512, BlockletMin: 128, BlockletMax: 512}, 0, AlgoV1GCM)
 	if err != nil {
 		t.Fatalf("EncryptShards: %v", err)
 	}
