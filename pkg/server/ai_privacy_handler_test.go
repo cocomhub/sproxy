@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -66,7 +67,7 @@ func TestAIPrivacyEndpoint_Purge(t *testing.T) {
 	if !contains(rec.Body.String(), "deleted") {
 		t.Fatalf("响应缺 deleted: %s", rec.Body.String())
 	}
-	evts := h.readAuditEvents(audit.EntryFilter{}, 10, true)
+	evts := h.readAuditEvents(context.Background(), audit.EntryFilter{}, 10, true)
 	if len(evts) != 1 || evts[0].Action != "ai.privacy_purge" {
 		t.Fatalf("应记 1 条 ai.privacy_purge: %+v", evts)
 	}

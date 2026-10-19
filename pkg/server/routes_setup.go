@@ -814,7 +814,7 @@ func runAuditArchive(cfg *Config, j *audit.FileJournal, log *slog.Logger) {
 	keep := max(cfg.Audit.ArchiveKeep, 0)
 	// 实际写能力来自 pkg/sync（与云端下载→转存同源：FS + WriteIfAbsent 幂等写）；
 	// 审计包只做编排与护栏，不自造 sink 接口 ✓。
-	arch := audit.FSArchiver{FS: syncpkg.NewLocalFS(cfg.Audit.ArchiveDir, log)}
+	arch := audit.FSArchiver{FS: newColdArchiveFS(cfg.Audit.ArchiveDir, log)}
 	rep, err := audit.ArchiveSealed(context.Background(), j, arch, keep)
 	if err != nil {
 		log.Warn("审计冷段归档失败（封段保留在本地，下轮重试）", "error", err, "archive_dir", cfg.Audit.ArchiveDir)
@@ -851,4 +851,12 @@ func newSealArchiveHook(cfg *Config, log *slog.Logger) (hook func(), bind func(*
 	}
 	bind = func(j *audit.FileJournal) { jp.Store(j) }
 	return hook, bind
+}
+
+// newColdArchiveFS 构造**冷段归档目录**的 FS（`pkg/sync.LocalFS`）。
+//
+// 收敛点：审计归档（写）与冷段读取（读）**共用同一构造**，且 `sync.NewLocalFS` 在全仓只出现在
+// 本文件（R26 门禁白名单只需登记一处；将来换外部/加密卷 FS 也只改这里 ✓）。
+func newColdArchiveFS(dir string, log *slog.Logger) syncpkg.FS {
+	return syncpkg.NewLocalFS(dir, log)
 }

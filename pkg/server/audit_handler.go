@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -53,9 +54,9 @@ func auditFilterFromQuery(q map[string][]string, timeKey string) (audit.EntryFil
 // readAuditEvents 是读面的**唯一实现**：优先全量落盘历史（合规段族），未装配则回落内存索引。
 //   - newestFirst=true（列表）：按时间倒序并应用 limit；
 //   - newestFirst=false（导出）：按时间正序全量（供 collector 顺序回放）。
-func (h *Handlers) readAuditEvents(f audit.EntryFilter, limit int, newestFirst bool) []AuditEvent {
+func (h *Handlers) readAuditEvents(ctx context.Context, f audit.EntryFilter, limit int, newestFirst bool) []AuditEvent {
 	if h.auditJournal != nil {
-		return h.readAuditFromJournal(f, limit, newestFirst)
+		return h.readAuditFromJournal(ctx, f, limit, newestFirst)
 	}
 	if h.auditSvc != nil {
 		lf := f
@@ -71,25 +72,61 @@ func (h *Handlers) readAuditEvents(f audit.EntryFilter, limit int, newestFirst b
 	return []AuditEvent{}
 }
 
-// readAuditFromJournal 读**全量落盘历史**（合规段族）并按需倒序 + limit。
-func (h *Handlers) readAuditFromJournal(f audit.EntryFilter, limit int, newestFirst bool) []AuditEvent {
-	es, err := h.auditJournal.Read(f) // 升序（(Node, Seq)）
-	if err != nil {
-		logger := h.auditLogger
-		if logger == nil {
-			logger = slog.Default()
+// readAuditFromJournal 读**全量历史**：热段（Journal） **+** 冷段（已归档段），按需倒序 + limit。
+//
+// 冷段经 `audit.QueryCold` 读取（`pkg/sync.FS` + `RangeReader`/流式 ⇒ 远端/加密卷同样适用、
+// 按需不整文件下载 ✓）；两段历史都是**升序**（冷 = 更旧，热 = 更新）⇒ 这里做一次归并，
+// 使「在线热段」与「已归档冷段」共用**同一读取入口**（导出与查询不各写一套 ✗）。
+func (h *Handlers) readAuditFromJournal(ctx context.Context, f audit.EntryFilter, limit int, newestFirst bool) []AuditEvent {
+	hot, herr := h.auditJournal.Read(f) // 升序（(Node, Seq)）
+	if herr != nil {
+		h.auditWarn("审计热段读取失败（忽略热段继续冷段）", herr)
+		hot = nil
+	}
+	var cold []audit.Entry
+	// 最新优先且热段已够数 ⇒ 更旧的冷段不可能进入结果 ⇒ 跳过（按需，不做无效 IO ✓）。
+	skippable := newestFirst && limit > 0 && len(hot) >= limit
+	if !skippable {
+		if dir := h.auditColdDir(); dir != "" {
+			es, cerr := audit.QueryCold(ctx, newColdArchiveFS(dir, h.auditLogger), []string{""}, f, 0)
+			if cerr != nil {
+				h.auditWarn("审计冷段读取失败（忽略冷段继续）", cerr)
+			} else {
+				cold = es
+			}
 		}
-		logger.Warn("审计读取失败（返回空）", "error", err.Error())
-		return []AuditEvent{}
 	}
-	if !newestFirst {
-		return auditEventsFromEntries(es)
+	merged := make([]audit.Entry, 0, len(cold)+len(hot))
+	merged = append(merged, cold...) // 更旧
+	merged = append(merged, hot...)
+	if newestFirst {
+		slices.Reverse(merged)
 	}
-	slices.Reverse(es)
-	if limit > 0 && len(es) > limit {
-		es = es[:limit]
+	if limit > 0 && len(merged) > limit {
+		merged = merged[:limit]
 	}
-	return auditEventsFromEntries(es)
+	return auditEventsFromEntries(merged)
+}
+
+// auditColdDir 返回冷段归档目录（`audit.archive_dir`；空 = 未启用归档）。
+func (h *Handlers) auditColdDir() string {
+	if h.cfgPtr == nil {
+		return ""
+	}
+	cfg := h.cfgPtr.Load()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Audit.ArchiveDir
+}
+
+// auditWarn 记录审计读面告警（失败不打断读：审计读面 best-effort，但必须留痕 ✓）。
+func (h *Handlers) auditWarn(msg string, err error) {
+	logger := h.auditLogger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn(msg, "error", err.Error())
 }
 
 // auditHandler 处理 GET /api/audit——Web UI 审计日志查看面板。
@@ -123,7 +160,7 @@ func (h *Handlers) auditHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events := h.readAuditEvents(f, limit, true)
+	events := h.readAuditEvents(r.Context(), f, limit, true)
 	sendJSONResponse(w, auditResponse{Events: events, Total: len(events)}, http.StatusOK)
 }
 
@@ -141,5 +178,5 @@ func (h *Handlers) auditExportHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "after_ts 参数非法，需为 RFC3339 时间（如 2026-09-01T12:00:00Z）", http.StatusBadRequest)
 		return
 	}
-	sendJSONResponse(w, h.readAuditEvents(f, 0, false), http.StatusOK)
+	sendJSONResponse(w, h.readAuditEvents(r.Context(), f, 0, false), http.StatusOK)
 }
