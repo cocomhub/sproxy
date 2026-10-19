@@ -651,6 +651,9 @@ func (h *Handlers) reserveVolumePool(ctx context.Context, route *volumeRoute, vo
 	if need <= 0 {
 		return nil // 净增为 0（覆盖写更小/等大）：无需卷池探测
 	}
+	// **暂不排队**（保留 TryReserve）：本路径的等待语义需先定（哪些调用方期望「立即 507」、
+	// 哪些期望「排队等空间」），否则会把测试/交互从「立即失败」变成 30s 等待（实测 pkg/server 整包超时 ✗）。
+	// 排队收敛待「该路径的等待语义」裁定后单独进行（R36-a 已登记为 pending）。
 	res, err := pool.TryReserve(need)
 	if err != nil {
 		if route.scopeRes != nil {

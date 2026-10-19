@@ -354,6 +354,9 @@ func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, r
 	}
 	var res, poolRes *quota.Reservation
 	if scope != nil {
+		// **暂不排队**（保留 TryReserve）：本路径的等待语义需先定（哪些调用方期望「立即 507」、
+		// 哪些期望「排队等空间」），否则会把测试/交互从「立即失败」变成 30s 等待（实测 pkg/server 整包超时 ✗）。
+		// 排队收敛待「该路径的等待语义」裁定后单独进行（R36-a 已登记为 pending）。
 		rr, reserveErr := scope.TryReserve(verSize)
 		if reserveErr != nil {
 			h.RecordAudit(r.Context(), AuditEvent{
@@ -366,6 +369,9 @@ func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, r
 		res = rr
 	}
 	if pool != nil {
+		// **暂不排队**（保留 TryReserve）：本路径的等待语义需先定（哪些调用方期望「立即 507」、
+		// 哪些期望「排队等空间」），否则会把测试/交互从「立即失败」变成 30s 等待（实测 pkg/server 整包超时 ✗）。
+		// 排队收敛待「该路径的等待语义」裁定后单独进行（R36-a 已登记为 pending）。
 		rr, reserveErr := pool.TryReserve(verSize)
 		if reserveErr != nil {
 			if res != nil {
