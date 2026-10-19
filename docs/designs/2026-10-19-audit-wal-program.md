@@ -76,7 +76,7 @@ SPDX-License-Identifier: Apache-2.0
 | **W1 通用等待** | 新建 `pkg/waitq`；`quota`（**等待侧 + 释放侧同提交**）/`staging`/`cloud 内存` 适配；**获取路径收敛（两层 ~40 处）**；惊群/背压/优先级/指标 | — | 迁移等价用例 + W17 回归 + R36 |
 | **M1-8 审计配额治理**（依赖 W1） | 热段**有界保留**（自身上界）+ `max_total_bytes` 非零默认 + 达上限轮转/归档/有界丢弃 | W1 | 配额/有界保留用例 |
 | **M2 WAL 化** | `Save` 落盘（`KindState`+`Seq`）；`Resume(ReplayApplier)`/`ListScopes`/`MarkDone`（**提交记录语义**）；两级序；段布局（合规=全局段 / 任务=按 scope 段）；`Journal.Rewrite` 接口化 | M1 | 崩溃重放/幂等契约/提交语义用例 |
-| **M3 统一恢复协调器** | `pkg/recovery`：注册中心；收敛 cloud/sync/chunked 三处 `recover*`（**首版保留 legacy 兜底**）；接线 baidupcs 断点；上传/下载块级校验 | M2 | 崩溃恢复 e2e（真实 kill）+ R37 |
+| **M3 统一恢复协调器** | `pkg/recovery`（**考虑降为 `pkg/audit/recovery` 子包**，避免为「注册中心+编排」新增顶层包）：注册中心；收敛 **3 处既有 `recover*`**（cloud/sync/chunked）+ **2 处新增**（baidupcs 断点接线、下载块级校验）；**首版保留 legacy 兜底** | M2 | 崩溃恢复 e2e（真实 kill）+ R37 |
 | **S4 面与文档**（原名 S3，**改名避免与 S3 网关混淆**） | Web UI（审计新字段/筛选 + 等待可观测）；docs（`api.md`/`config.md`/`gates.md`）；**真浏览器 e2e** | M1/W1 | R10 + UI e2e |
 | **M4 归档到外部/加密卷**（后续） | sealed 段 → 外置归档适配器 → 写内核 → 保留用户路径 → 热段回收；跨热/冷段 `Query`；归档↔轮转护栏 | M2 | 归档往返（含加密/外部卷）+ 失败不丢热段 |
 
@@ -190,7 +190,8 @@ SPDX-License-Identifier: Apache-2.0
 | `audit.local_reserve_bytes` | 256 MiB | **自身上界语义**（非物理预留，§5.4.2） |
 | `audit.fail_closed` | `false` | 合规可选 |
 | `audit.sync.<kind>` / `audit.sync.scope.<id>`（**单一形态**，删 `sync_mode`） | `event=batch`、`span=batch`、`state/done=always`、`resource=batch` | 落盘策略（scope > Kind > 全局） |
-| `audit.retained_owner` | **空串（默认不启用保留用户）** | 启用时建议 `__audit__` |
+| `audit.batch_max_lines` / `audit.batch_max_interval` | `256` / `200ms` | SyncBatch 的 group commit 阈值（**审核：必须入配置表**，否则性能判据不可执行） |
+| `audit.retained_owner`（**与 `archive_owner` 合并为单键**，默认空串 = 使用内置保留名 `__audit__`） | **空串** | 审计数据保留 owner；空 = 内置 `__audit__`（**与“默认启用保留 owner”不矛盾**：默认启用保留 owner、默认**不允许**改为用户 owner） |
 | `audit.archive_volume` / `archive_path` / `local_keep_segments` | 空 / 空 / 4 | M4 |
 | `waitq.<resource>.{timeout,max_waiters,priority}` | 30s / 1000 / normal | 按资源登记 |
 
@@ -203,7 +204,8 @@ SPDX-License-Identifier: Apache-2.0
 - 不做审计内容加密（明文 + 0700/0600；归档走加密卷）；
 - 不为采样行开逐行 fsync；
 - **不把「从不排队」的限额（审计热段）建模为 `waitq.Resource`**（语义错配）；
-- 不重写 `pkg/files` 锁体系。
+- 不重写 `pkg/files` 锁体系；
+- **不新建第 4 套 append-only 实现**：`pkg/state.LocalAppendStore`（`pkg/state/append_local.go:17`，注释即写「审计/事件」）**当前零生产调用** ⇒ 需在 M1 写明取舍：**采用 `pkg/audit.Journal` 并废弃/改造 `LocalAppendStore`**（或反之），不得两套共存（否则与「唯一提供方/唯一实现」矛盾）。
 
 ---
 
@@ -260,6 +262,21 @@ SPDX-License-Identifier: Apache-2.0
 | revA P2-4/revB P2：TTL 会删 WAL 行 | E25 + M1-13 |
 | revA/revB/revC：计数与路径清单（~130/~35；7 条路径） | 订正：**115 处/20 文件**（+29/3）；**两层 ~40 处** |
 | revC C6：门禁失控风险 | 新增 `docs/gates.md` + R 号双向校验 |
+
+### 14. 修订记录（v4，第二轮独立审核）
+
+| 审核发现 | 处置 |
+|---|---|
+| **三路均报 P1：`Entry.Owner` 无写侧来源** + `Principal.Owner` 用户可控 | audit-service §5.7 新增「Owner 写侧来源」5 条规则（单一来源 = AK 租户键；**严禁** `Principal.Owner`）+ M1-2 + E28 + 用例 |
+| **revC P1：§5.7 门语义自相矛盾** | 改**单轴**（权限轴 = `Owner`；`Dim2` 降为 UI 归类） |
+| **revB P1：保留名封堵单点 + 前提 2 自毁** | §5.6 改为 4 个身份/配置来源封堵 + 硬约束（**不得**改 `ValidSegmentName`/`IsReservedBucketName`） |
+| **revC P1：§5.8 前提错误（只有 1 个受支持 admin）** | §5.8 现状订正 + 多 admin/`audit.read` 授予机制列为 M1-11 **前置** |
+| **revA P1：段族矛盾 / 节点 seq 未续号 / Prune vs Rewrite** | §5.4.1 段族隔离 + E27；§4.1 节点 seq 持久化 + 载入排序；§4.2 统一 `Rewrite`+`Index.Prune` |
+| 计数订正（三路均质疑） | `RecordAudit` **108/19** · `recordFileAudit` **29/4** · 配额侧共 **48 处**（层 B 8） |
+| revC C1：单 PR 不现实 | **保持单 PR（用户裁定）**，但**提交按 P1–P8 批次边界**：P1 包骨架+facade+M1-12/13+R35-d → P2 M1-3 迁移+缺口+middleware+R35-a/c → P3 M1-9/M1-11/R35-e → P4 W1 → P5 M1-8 → P6 M2 → P7 M3+R37 → P8 S4 |
+| revC C4：性能阈值缺失 | §8 补 `batch_max_lines`/`batch_max_interval`；验收阈值 = 「注入 500ms 慢 Journal 时业务 handler P99 增量 < X ms」+ HDD/SSD 吞吐基线 |
+| revC C5：既有 append-only 原语 | §9 增 `pkg/state.LocalAppendStore` 取舍（不得两套共存） |
+| revC C2：门禁口径 | R35-b 标口径待定（localMux 处置）；R36-b 口径 = **根 module `go list ./...`**（不下探嵌套 module ⇒ `kad.go` 自动不入扫描面） |
 
 ### 13. 裁定记录（v3，2026-10-19 用户问答）
 

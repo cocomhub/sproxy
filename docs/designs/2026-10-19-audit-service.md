@@ -133,13 +133,18 @@ type Entry struct {
     // 合规语义（**契约字段不加 omitempty** ⇒ /api/audit 字段出现性与现状一致）
     Action  string `json:"action"`
     Actor   string `json:"actor"`
-    Owner   string `json:"owner"`            // **归属租户（权限过滤的权威字段；非 Actor）** —— 见 §5.7
+    // Owner = **归属租户**（权限过滤的**唯一权威字段**）—— 来源规则见 §5.7（**绝不用 `Principal.Owner`**）
+    Owner   string `json:"owner"`
+    // Type 保留旧 `Row.Type` 语义（8 值：api/download/transfer/encrypt/resource/sensitive/error/log）
+    // ⇒ 旧文件/旧 collector 按 type 过滤仍可用（审核：E14 round-trip 必须有 Type）
+    Type    Type   `json:"type,omitempty"`
     Mesh    string `json:"mesh"`
     ObjType string `json:"object_type"`
     Object  string `json:"object"`
     Result  Result `json:"result"`
     Detail  string `json:"detail"`
-    Dim2    Dim2   `json:"dim2"`            // **两维**：user | system（§5.7）；现有 Dimension(DimTask/DimSystem) 保留兼容
+    // Dim2 = **UI 归类维度**（user | system），**不是权限轴**（审核：单轴 = Owner，见 §5.7）
+    Dim2    Dim2   `json:"dim2"`
     // 新增结构化字段（纯增量）
     Volume    string `json:"volume,omitempty"`
     RequestID string `json:"request_id,omitempty"`
@@ -155,10 +160,13 @@ type Entry struct {
 }
 ```
 
-**两级序（审核修订 P1-1）**：
+**两级序（审核修订 P1-1/P1-3）**：
 - **scope 内**：`Seq` 是权威顺序（`Resume` 重放依赖它）；
-- **全局段**（合规时间线）：per-scope `Seq` **不构成全序** ⇒ 全局序 = `(NodeID, 节点级单调 seq)`；`/api/audit` 倒序与 `/api/audit/export` 升序契约**保持不变**（按全局序，同值再按段内 offset 稳定）。
-- `Filter`/`Query`/export 的排序语义在接口注释里**显式声明**，并有回归用例锁定。
+- **全局段**（合规时间线）：per-scope `Seq` **不构成全序** ⇒ 全局序 = `(NodeID, 节点级单调 seq)`；
+- **节点 seq 跨重启必须续号**（审核 P1-3）：节点 `begin seq` **持久化到段元数据**（否则重启归零 ⇒ 新行排在旧行之前 ⇒ 倒序/升序契约破 ✗）；
+- **载入排序改为按 `(NodeID, seq)`**（TS 仅用于展示与 `Filter.Since`；现有 `sortAuditByTS` 与「append 序 == TS 序」假设需同步改造）；
+- **单机退化**：单进程单节点 ⇒ `NodeID` 恒同一值，全局序退化为节点 seq（设计显式声明，非隐含）；
+- **四条现有契约逐条保留**（回归用例锁定）：① `/api/audit` 时间倒序 ② `/api/audit/export` 升序 ③ limit clamp（100/500）④ 载入排序稳定（改按 (NodeID,seq)）。
 
 **对外契约（必须保留，审核修订）**：`/api/audit` 的**信封 `{events,total}`** 与 export 的**顶层数组 + 升序**不变；Web UI 消费字段（`action/actor/mesh/object_type/object/result/detail/ts`）不变 ⇒ UI 零改动。
 
@@ -170,7 +178,9 @@ type Journal interface {
     Read(f Filter) ([]Entry, error)
     Segments() []SegmentInfo
     Rotate(reason string) error
-    Rewrite(keep func(Entry) bool) error  // 审核修订：TTL/清理经接口（不再触碰非导出字段）
+    // Rewrite 按谓词剔行（TTL/清理**唯一**入口，不再触碰非导出字段）—— 内存与磁盘在同一
+    // Journal 事务内完成（审核：避免两次独立调用在并发 Append 下不一致）
+    Rewrite(keep func(Entry) bool) error
     Close() error
 }
 
@@ -179,7 +189,9 @@ type Index interface {
     Query(f Filter) []Entry          // 排序语义见 §4.1（倒序 + limit 提前停）
     Len() int
     ApproxBytes() int64
-    Evict(n int) []Entry             // 仅逐出**已持久化**条目
+    Evict(n int) []Entry             // 仅逐出**已持久化**条目（按条数）
+    // Prune 按谓词逐出（**按龄**清理用；审核：`Evict(n)` 无法表达 cutoff）
+    Prune(keep func(Entry) bool) int
 }
 
 type Notifier interface{ Notify(ctx context.Context, e Entry) }  // 实现**不得 panic**（库侧仍 recover 兜底）
@@ -273,7 +285,8 @@ func (s *Service) Close() error
 
 1. 内存达 T1 上限且**无法持久化**（磁盘满/Journal 持续失败）⇒ **丢弃最旧** + `audit_dropped++` + 告警 + `KindRotate(reason=disk_full)`（**不得无界增长 ⇒ OOM**）；
 2. `Evict` 优先逐出**已持久化**条目；仅当「未持久化条目已达内存上限」才丢未持久化条目（同上计数）；
-3. `fail_closed=true` ⇒ 该变更操作**快速失败**（不静默丢）。
+3. `fail_closed=true` ⇒ 该变更操作**快速失败**（不静默丢）；
+4. **（审核 P1）段族隔离**：`max_total_bytes`/T8/有界丢弃**只作用于「合规段族」**；**「任务/WAL 段族」以不丢失为硬约束**——容量不足时表现为**拒绝新的 `Open`**（业务侧可重试）而**绝不丢弃已有任务状态**。两族共用 `Journal` 实现与格式，但**物理分目录**（合规 `<root>/__audit__/compliance/`、任务 `<root>/__audit__/tasks/<scope>/`）。
 
 **5.4.2 关于「预留」的诚实表述（审核 P1-5）**：`local_reserve_bytes` **只保证「审计自身不因膨胀而失控」**，**不保证**「用户把共享文件系统写满后审计仍可写」（无 `fallocate`/独立分区时不可能 ✗）。⇒ 需真保证时：**热段置于独立分区/卷**，或用 `fallocate` 预分配；本设计**默认按「自身上界」语义**并在文档/配置注释里写清（不再过度承诺）。
 
@@ -289,10 +302,15 @@ func (s *Service) Close() error
 
 **推荐：是**（保留 owner + 混合存储：热段本地 append-only + 冷段归档到保留用户卷内路径），理由：复用配额/加密/外部卷/版本/回收站/统一恢复。
 
-**前提条件（审核 P1，必须先做，否则红线形同虚设）**：
-1. **保留该名字**：`validateRegistrationOwner`（`register_handler.go`）与 AK/owner 入口**保留 `__` 前缀（至少 `__audit__`）**，fail-closed 拒绝注册；补单测；
-2. **段名层**：`ValidSegmentName`/`IsReservedBucketName` 增 `__` 保留前缀判定（或由 ① 承担）；
-3. 命名建议 `__audit__`（待裁定 O6）。
+**前提条件（审核 P1，必须先做，否则红线形同虚设）**：保留判定必须加在**身份/配置来源层**（共 4 个来源），**不得**改存储层段名校验：
+1. **注册入口**：`validateRegistrationOwner`（`register_handler.go:1219`）拒绝 `__` 前缀（至少 `__audit__`），fail-closed + 单测；
+2. **卷配置来源**：`mesh_readers[].owner`（`config_validate.go:1084` 目前只 `ValidSegmentName`）⇒ 拒绝 `__` 前缀；
+3. **API Key 来源**：`api_keys[].name`（`validateAPIKeys`，`config_validate.go:872`，**目前完全不校验 name**）⇒ 拒绝 `__` 前缀（否则 `name: __audit__` 即得 owner）；
+4. **宿主注入认证器**：`authenticated()` 得到的 `Principal.AK` 需校验非 `__` 前缀（防宿主认证器返回保留 owner）。
+
+> **硬约束（审核 P1-4）**：**不得**给 `ValidSegmentName`/`IsReservedBucketName` 加 `__` 前缀判定 ✗ —— `NewTenant`（`tenant.go:43,49`）/`OpenTenant`/`ResolveLocation` 均调它们，加严会**连 `__audit__` 自身一起拒掉**（保留 owner 无法建租户、归档不可用）。保留判定只属于**身份层**；存储层 `__` 前缀**保持合法**。
+5. **热段目录命名（审核 P2）**：热段置于 `<卷根>/__audit__/`（**不再用 `<卷根>/audit/`**）—— `audit` 会被租户枚举当成租户名且**可被注册占用**（与审计目录同目录）；`__` 前缀与既有跳过规则一致。
+6. 命名建议 `__audit__`（待裁定 O6）。
 
 **安全红线（实现时锁死 + 测试矩阵）**：
 1. 普通用户**不可读/写/删**该 owner 路径（文件面 / DAV / S3 / 分享 / 回收站 / 版本 / 卷导出导入 / 备份 全部拒绝 403）；
@@ -321,10 +339,17 @@ func (s *Service) Close() error
 
 **判定权威字段 = `Entry.Owner`**（**不是** `Actor`）：`Actor` 是访问键（AK/SproxySig/mesh），`Owner` 才是数据归属；二者可能不同（管理员/中继代表他人操作）⇒ **过滤必须用 `Owner`**。
 
+**`Owner` 的写侧来源（审核 P1-1：这是本模型成立的前提，原设计缺失）**：
+1. **单一来源 = AK 派生的租户键**（`ActorFrom(ctx)` / 新增 `TenantFrom(ctx)`）——**严禁**用 `Principal.Owner` ✗：它在 `pkg/authn/authn.go` 注释即写「**不参与落桶**」、由 OIDC/LDAP 的 **IdP claim 填充**（`oidc.go:205,228`）⇒ **用户可控**，用它作权限判据 = 改 claim 即跨租户读（`auth_seam_test.go:163-186` 已把「Owner 不参与落桶」钉成契约）；
+2. **请求面**：`RecordAudit`/`Emit` 在 `Owner == ""` 时经 ctx 回填；APIKey / loopback 路径的合成 `Principal` 需补 Owner（当前无 ✗）；
+3. **「目标 owner」语义点**（管理员/中继代表他人操作）：显式传 Owner（如 `remote_read/remote_write` 的 `tgt.owner`、user volume 建删的目标 owner、quota set 的目标 owner）——这些点**当前把 owner 塞进了 `Actor`** ✗，需拆分；
+4. **后台/周期点**（无 ctx）：显式赋 Owner（系统事件可为空串）+ 合成 scope；
+5. **零值语义（fail-closed）**：`Owner == ""` 的条目对**非管理员一律不可见**（**绝不**因「空 owner」而放行 ✗）；管理员可见全部。
+
 **服务端强制（不可由客户端放宽）**：
-1. 非管理员 ⇒ 处理器**强制注入** `Filter.Owner = <caller owner>` 且 `Dim2 ∈ {user, system-with-my-owner}`；**忽略**客户端传入的 `owner`/`dim`（或取**交集**，永不并集）；
+1. **权限轴 = 单轴 `Owner`**（审核：`Dim2` **不是**权限轴，仅 UI 归类）：非管理员 ⇒ 处理器**强制注入** `Filter.Owner = <caller 的 AK 租户键>`；**忽略**客户端传入的 `owner`/`dim`/`actor`/`mesh`（**不得**取并集，也不得以「存在性探针」形式透出他人数据）；
 2. 管理员 ⇒ 可省略 owner（全量）或指定任意 owner；
-3. **脱敏规则**（非管理员）：仅返回 `action/object_type/object/result/ts/detail(脱敏)`；**不返回** `actor/mesh/source_ip/request_id/node/meta`；
+3. **脱敏规则**（非管理员）：仅返回 `action/object_type/object/result/ts` + **内容级清洗后的 `detail`**（白名单化：抹除 `ak-*`/`oidc-*`/`sk_id=`/AK 标识/内部绝对路径/卷名/他人标识）；**不返回** `actor/mesh/source_ip/request_id/node/meta/type`；
 4. `export` 与 `list` **同一门 + 同一过滤**（不得只保护 list）；
 5. localMux 侧纳入同一门（现状裸注册）；
 6. 未认证 ⇒ 401（不变）；已认证但越权 ⇒ 403。
@@ -343,8 +368,9 @@ func (s *Service) Close() error
 
 **结论**：**推荐保留系统 owner（`__audit__`）**；**存到管理员 owner 会显著妨碍多管理员扩展** ✗。
 
-**现状事实（取证）**：
-- 角色来自 AK（`admin/user/reader/node`，`requireRole` 分组判定）⇒ **多管理员天然支持**（N 个 AK 带 `Role=admin`）；
+**现状事实（取证，审核订正）**：
+- 角色来自 AK（`admin/user/reader/node`，`requireRole` 分组判定）；
+- **但当前只有 1 个受支持的 admin**（审核 P1-4）：`resolveRegistrationRole`（`accesskey/ring.go:502-504`）——「全 ring 无 admin ⇒ 首注册恒授 admin；**入参请求 admin ⇒ 降级 user**」；`parseAKAddRole`（`credentials_handler.go:662-668`）明确「role 仅支持 node/user（**admin 不可经此创建**，防二主接管）」；测试里用 `Snapshot+Replace` 直改 Role 属非生产路径。⇒ 数据模型**可承载** N 个 `Role=admin`，但**无受支持的多 admin 授予入口**；
 - **`owner = ak`**（`s3_server.go:132,340`、`register_handler.go:389`）⇒ **每个管理员是不同 owner**；
 - **配额按 owner 记账**（`Pool.EnsureScope(segs…)`）；
 - 系统侧目前**只有 `anonymous` 一个保留 owner**，无系统 owner 概念。
@@ -372,8 +398,8 @@ func (s *Service) Close() error
 **关键区分**：**保留 owner（存储键空间）≠ 用户账号（身份）** —— 审计数据**不需要身份**，只需要一个**稳定的命名空间**；给审计开一个能登录的账号只会增加**权限提升面**与凭据管理负担 ⇒ **不推荐专门审计账号**，推荐**保留 owner**。
 
 **多管理员下的额外设计点**：
-1. **权限位优于单角色**（已修订 Q12）：M1-11 门禁按 **`admin` 或新增能力位 `audit.read`** —— 未来可加「审计员（只读、无管理权）」角色而**不必授予 admin** ✓（这正是多管理员/多角色扩展性的关键）；
-2. **审计读也要审计**（红线 9）：`action=audit.read` 入系统维度 ⇒ 多管理员之间的读取可追溯；
+1. **权限位优于单角色**（已修订 Q12）：门禁按 **`admin` 或新增能力位 `audit.read`**；**但多 admin / `audit.read` 的授予机制当前不存在** ⇒ 列为 **M1-11 的显式前置**（否则红线 9「审计读也要审计」无法验证）：需先提供受控的「第二管理员 / 审计员」授予入口（建议：`register` 首条之外的 admin 授予需**双人确认或显式配置**，避免二主接管风险）；
+2. **审计读也要审计**（红线 9）：`action=audit.read` 入系统维度 ⇒ 管理员之间的读取可追溯；**但需限流**（E29：同一 caller 时间窗内至多 N 条）且读路径产生的事件**不参与本次返回**（防分页游标漂移）；
 3. **归档卷不绑管理员**（红线 10）；
 4. **`owner` 判定用 `Entry.Owner`**（§5.7）—— 与“管理员/中继代表他人操作”一致。
 
@@ -418,7 +444,7 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 
 | # | 场景 | 处理 |
 |---|---|---|
-| E1 | 无作用域的审计 | `Emit` 在 `*Scope` 上 ⇒ 请求路径天然有 scope；**后台/周期作业必须自开合成 scope**（`system:<job>`，如 `volumes_mirror`、`tier_manager`、`verifyPeriodicTask`、`cmd/sproxy` 启动期）——**不是拒绝而是强制开 scope**（审核 P1：否则薄委托会丢审计） |
+| E1 | 无作用域的审计 | `Emit` 在 `*Scope` 上 ⇒ 请求路径天然有 scope；**后台/周期作业必须自开合成 scope**（**不是拒绝而是强制开 scope**，否则薄委托会丢审计）。**合成 scope 登记表（审核 P2-6，实施时逐条落实）**：`volumes_mirror`（`:153/193/205/223/285/294/386/501`，逐卷 ctx）· `tier_manager:310` · `routes_setup` 周期 verify（`:253`）· `cmd/sproxy/root.go:1277`（AI 事件消费者回调）· 启动期装配事件 ⇒ 命名 `system:<job>`（如 `system:mirror`）。 |
 | E2 | 轮转与并发 Emit | 段切换持 `Service.mu`（仅指针/队列，**不跨 fsync**）；切换期间行入新段队列 |
 | E3 | fsync 失败 | 计数 + 告警 + 重试；达内存上限 ⇒ **有界丢弃**（§5.4.1）；`fail_closed` ⇒ 快速失败 |
 | E4 | 内存逐出 vs 未落盘 | 优先逐出已持久化；未持久化达上限才丢（计数）⇒ **内存有界**（§5.4.1） |
@@ -431,7 +457,7 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 | E11 | 读取即轮转抖动 | `min_rotate_interval` 冷却 |
 | E12 | 审计阻塞业务 | 默认 best-effort + **单写者 + 有界队列**；`SyncBatch` 默认；压测判据 |
 | E13 | 禁用态 | `disabled` 剖面 ⇒ no-op Service（`Emit` 静默成功 + 计数），零回归 |
-| E14 | 迁移期双格式 | 旧 `AuditEvent`/`Row` 文件与新 `Entry` **可并存读取**（`Level/Dim` 已补 ⇒ round-trip） |
+| E14 | 迁移期双格式 | 旧 `AuditEvent`/`Row` 文件与新 `Entry` **可并存读取**：`Level/Dim` 已补；**另需 `Type`（旧 `Row` 的 8 值语义）与 `TS`（旧 `Row` 无 TS ⇒ 载入时按段内序/文件 mtime 补）** ⇒ 否则旧 collector/前端按 `type` 过滤失效（审核 P2-4） |
 | E15 | 总容量上限 | `max_total_bytes` **非零安全默认** + T8 |
 | E16 | 审计写审计（递归） | `Meta["no_audit"]=true` ⇒ 写内核跳过审计 |
 | E17 | 配额不足 / 自举兜底 | 热段达上限 ⇒ 轮转 + 归档；归档失败 ⇒ **有界内存 + 计数丢弃**（§5.4.1） |
@@ -443,7 +469,10 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 | **E23** | **归档↔轮转并发** | 目标段引用/占用判据；回收前校验未被归档占用 |
 | **E24** | **seal→open 崩溃窗口** | 先 open+fsync 新段再 seal 旧段 ⇒ 已 Append 行崩溃后可见 |
 | **E25** | **TTL 重写 vs WAL 段** | TTL/清理只作用于合规全局段（经 `Journal.Rewrite` 接口），**绝不触碰** WAL/任务段 |
-| **E26** | **读面无 ACL（审核 P0）** | **两维权限模型**（§5.7）：非管理员只能读自己的维度 + 脱敏；管理员全量；`reader ⇒ 403`（系统维度）/ 空集（用户视图未就绪）用例 |
+| **E26** | **读面无 ACL（审核 P0）** | **单轴 Owner 过滤 + 脱敏**（§5.7）：非管理员仅见 `Owner==self`（含管理员对自己处置的跨维条目）且**脱敏**；系统条目（Owner 为空/他人）不可见；管理员全量；`reader` 对系统条目 ⇒ 空集而非 403（单轴下无「硬门」语义二义） |
+| **E27** | **段族隔离（审核 P1）** | 容量上限/T8/有界丢弃**只作用于合规段族**；任务/WAL 段族**永不丢弃**（不足 ⇒ 拒绝新 `Open`）⇒ 保障「任务不丢失」 |
+| **E28** | **Owner 缺失（fail-closed）** | `Owner==""` 条目对非管理员**一律不可见**；**绝不**因空 owner 而放行；补断言用例 |
+| **E29** | **`audit.read` 自放大** | 读审计会写审计 ⇒ 管理员轮询可挤出合法条目/分页游标漂移 ⇒ **同一 caller 时间窗内至多 N 条** + 读路径产生的事件**不参与本次返回** |
 
 ---
 
@@ -454,8 +483,8 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 | 步骤 | 内容 | 验证 |
 |---|---|---|
 | M1-1 | `pkg/audit` 核心（`Entry/Kind/Service/Scope/Journal/Index/Notifier/Clock/Policy/CapabilitySet`）+ null-object + `Options.resolve` | 新包单测；旧测试全绿 |
-| M1-2 | `pkg/server.RecordAudit` **薄委托**（字段映射等价、scope 语义新增）；**后台/周期审计点补合成 scope**（E1） | 现有 863+519+… 行用例通过（见 M1-3 限制） |
-| M1-3 | **`AuditStore`/`AuditRing` 迁移（已裁定：方案②彻底）**：类型**迁入 `pkg/audit`**（`audit.EventStore` / `audit.RingIndex`）；`volume_retention.go` 的内部字段访问改为 **`Journal.Prune(cutoff)` / `Index.Evict`** 接口；白盒测试（`audit_test.go:321-323`、`audit_rotation_test.go` 的 `logPath/archivePath`、`audit_handler_test.go` 的 `auditRing.Recent`）随之迁移或改经公开访问器（`Segments()/ArchivePath(n)`）；**删除「原地通过」表述** | 迁移完成 + `volume_retention.go` 不再触碰非导出字段 + 现有语义（倒序/limit/export 升序/轮转文件名与份数/信封）逐条保留用例通过 |
+| M1-2 | `pkg/server.RecordAudit` **薄委托**（字段映射等价、scope 语义新增）；**后台/周期审计点补合成 scope**（E1 登记表）；**新增 `Owner` 填充（§5.7 规则 1–5）**：ctx 回填（AK 租户键）+ 目标 owner 显式传 + 空值 fail-closed | 现有用例通过（按 M1-3 迁移后的形态）+ `Owner` 填充用例（含 OIDC 主体把 Owner claim 改为他人 ⇒ 读不到对方条目） |
+| M1-3 | **`AuditStore`/`AuditRing` 迁移（已裁定：方案②彻底）**：类型**迁入 `pkg/audit`**（`audit.EventStore` / `audit.RingIndex`）；`volume_retention.go` 的内部字段访问改为 **`Journal.Rewrite(keep)`**（统一接口名；**不再叫 `Prune`**）+ `Index.Prune(keep)`，且**内存与磁盘在同一 Journal 事务内完成**（审核 P1-4）；白盒测试迁移面（实测）：`audit_test.go:321-323`（`h.auditStore.mu/.file`）· `audit_rotation_test.go`（`st.logPath/archivePath`）· `audit_ring_test.go`（`ring.Recent`）· `ai_privacy_handler_test.go:62`（`h.auditRing.Recent`）· `volume_retention_test.go:36,62`（`*AuditStore` 类型/`h.auditStore=`）——改经公开访问器（`Segments()/ArchivePath(n)/Recent`）或随类型迁入；**删除「原地通过」表述** | 迁移完成 + `volume_retention.go` 不再触碰非导出字段 + 四条现有语义（倒序/limit/export 升序/轮转文件名与份数/信封）逐条保留用例通过 |
 | M1-4 | **覆盖缺口补齐**（§1 P1-c **全表**，含 share/sync-HTTP/DAV 全部变更/cloud groups/notify/test）+ `auditMiddleware` 传输层兜底 | 新增业务审计用例；**兜底事件标 `fidelity=transport` 且不计入覆盖达标**（审核 P1-2） |
 | M1-5 | 结构化字段（volume/request_id/source_ip/size/dur）+ 丢弃/失败/panic 计数 + `fail_closed` 选项 | 用例 + 指标断言 |
 | M1-6 | 轮转四触发 + 读取即轮转 + 递归护栏（E22）+ 段切换耐久（E24） | 可注入 Clock 的确定性用例 |
@@ -463,7 +492,7 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 | M1-8 | **（依赖 W1）** 热段配额治理（`audit.local` 经外置适配器注册 `waitq.Resource`）+ 有界保留（§5.4.1） | 配额/有界保留用例 |
 | M1-9 | **保留 owner 前提**（§5.6 前提 1–3）+ 拒绝面（红线 1–5） | 越权矩阵 403 用例 |
 | M1-10 | `CapabilitySet` + 策略族选择 + 规范剖面 | 各剖面生效断言 |
-| **M1-11** | **读面权限（审核 P0）**：管理员门（`requireRole(admin)`）+ **服务端强制 owner 过滤骨架 + 脱敏层**（§5.7）；主 mux + localMux 同一门 | `reader`：系统维度 ⇒ 403；用户维度未就绪 ⇒ **空集**（绝不回退全量）；`owner` 参数不可放宽过滤 |
+| **M1-11** | **读面权限（审核 P0）**：**单轴 Owner 过滤**（§5.7，`Dim2` 不作权限轴）+ 脱敏层（含 `detail` 内容清洗）+ **忽略客户端 `owner/dim/actor/mesh`**；主 mux + localMux 同一判定（按 ctx 身份，**不按路由**）；**前置**：多 admin / `audit.read` 授予机制（§5.8）；**同步改造用例**：`rbac_roles_test.go:455-458`（`reader 200 ⇒ 空集/403`）、`audit_handler_test.go:181-218` 与 `audit_export_test.go:232-259`（直调 handler 无 Principal ⇒ 需带身份构造） | 非管理员仅见自己且**脱敏**（断言无 actor/source_ip/request_id）；系统条目空集；客户端参数不可放宽；OIDC 改 claim 不能跨租户 |
 | **M1-12** | **权限收紧**：热段 0700/0600（含 `AuditStore` 0755/0644 收口 + 既有文件收紧） | 权限位断言 |
 | **M1-13** | **TTL 与 WAL 隔离**（E25）：清理只作用于合规全局段 | 用例：TTL 重写后 WAL 段完好 |
 | **M4（后续）** | 归档到外部/加密卷（外置适配器）+ 跨热/冷段 `Query` | 归档往返（含加密/外部卷）+ 失败不丢热段 |
@@ -472,9 +501,9 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 
 | 门禁 | 断言 |
 |---|---|
-| R35-a | `Emit`/`RecordAudit` 调用点必须在登记表（**基线按实测：`RecordAudit` 115 处/20 文件 + `recordFileAudit` 29 处/3 文件**）；棘轮只减不增 |
-| R35-b | **所有变更型路由**必须经 `auditMiddleware`（或登记豁免 + 理由）；**transport 兜底事件不计入覆盖达标** |
-| R35-c | `pkg/server` 不得定义审计条目类型/落盘实现（只装配） |
+| R35-a | `Emit`/`RecordAudit`/`recordFileAudit` 调用点必须在登记表（**基线按实测重测**：`RecordAudit` **108 处/19 文件** + `recordFileAudit` **29 处/4 文件**，口径 = 排除 `*_test.go` 与定义处）；棘轮只减不增 |
+| R35-b | **变更型路由**必须经 `auditMiddleware`（或登记豁免 + 理由）；**transport 兜底事件不计入覆盖达标**；**口径待定**：`localMux` 全量变更型路由**不经 `authMiddleware`**（如 `POST /api/secrets`、`PUT /api/config`，`routes.go:270-292`）⇒ 需另定装配点或显式登记豁免（否则假绿/误报） |
+| R35-c | **非 `pkg/audit` 源码不得定义审计条目类型 / 结果常量 / 审计接口**（当前 `pkg/files/options.go:213` 的 `Auditor` 接口与 `pkg/files/service.go:677-679` 的 `auditResult*` 常量属第三套抽象 ⇒ 需收敛） |
 | **R35-d** | `pkg/audit` **不得同时导出两套 span/kv API**（除 facade） |
 | **R35-e** | `/api/audit` `/api/audit/export` 必须：① 管理员门；② **服务端强制 owner 过滤**（非管理员不得通过参数放宽）；③ `export` 与 `list` 同一门与同一过滤（或登记豁免 + 理由） |
 | R37（M2 后） | 长任务必须 `Open` 作用域（可续跑） |
@@ -503,6 +532,13 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 ### 9.3 测试纪律
 
 `t.Parallel()` 默认 · **禁新增 `time.Sleep`**（R14 棘轮；用注入 Clock / `Stats()`）· serial 预算棘轮 · 每包必须有测试。
+
+**审核补充的用例与纪律**：
+- **Owner 填充正确性**（P1-1）：ctx 回填 / 目标 owner 显式传 / 空值 fail-closed（E28）/ OIDC 改 claim 跨租户被拒；
+- **脱敏矩阵**：逐字段 + `detail` 内容清洗 + 非管理员传 `owner=X`/`actor=Y`/`dim=system` 均被忽略；
+- **SyncBatch 边界**：≤`batch_max_lines` 或 ≤`batch_max_interval` 触发**一次** fsync（计数断言）；
+- **逃生舱**（红线 11）：`audit.archive_owner` 生效与风险提示；
+- **真实 kill e2e 不可并行** ⇒ 登记 `serial_budgets.tsv` 并同步 `docs/testing/virtual-time-conversions.md`（仓硬规则 R18）；先例：`test/chaos/node.go:154 Kill9`（含 Windows 分支）。
 
 ---
 
@@ -555,7 +591,7 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 | revA/revB P1：E1 与后台审计点冲突 | E1 改为**强制开合成 scope**；M1-2 补后台点 |
 | revB P1：WAL 幂等被写成库保证 | **`ReplayApplier` 契约 + 红灯用例**（§4.2/§6.2） |
 | revB P1：`MarkDone` 顺序未定义 | **定义为副作用后的提交记录**（§6.1） |
-| revB P1：「ring/store 用例原地通过」不成立 | **M1-3 改为二选一方案** + 删该表述 |
+| revB P1：「ring/store 用例原地通过」不成立 | **M1-3 已裁定方案②**（彻底迁移）；接口统一为 `Journal.Rewrite` + `Index.Prune`（v4 修正命名二义） |
 | revB P1：waitq I1 对 quota 适配不可达 | **waitq.md 修订**：释放侧显式接线 |
 | revB P1：热段「预留」过度承诺 | **§5.4.2 诚实表述**（自身上界 ≠ 物理预留） |
 | revB P1：多节点本地段 + Lease 矛盾 | **单机模型**（E9/O11） |
@@ -584,3 +620,27 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 | 获取路径收敛范围 | **两层一并收敛**（quota + capacity） | waitq.md §8.2/§7（`Group` 原子） |
 | 审计读面权限 | **两维模型**（用户维度/系统维度；非管理员脱敏读自己；管理员全量；服务端强制） | **§5.7**（新增）+ M1-11 + E26 + R35-e + §9.1 用例 |
 | 审计存储归属（2026-10-19 追问） | **保留系统 owner `__audit__`**（非管理员 owner；非审计账号）；多管理员靠**角色/能力位**而非所有权 ⇒ 可平滑扩展；新增红线 9（审计读也要审计）/10（归档卷不绑管理员）/11（逃生舱 `audit.archive_owner`） | **§5.8**（新增，含多管理员障碍分析） |
+
+### 14. 修订记录（v4，第二轮独立审核——三路收敛到同一批 P1）
+
+| 审核发现 | 处置 |
+|---|---|
+| **三路均报 P1：`Entry.Owner` 无写侧来源**（`AuditEvent` 无 owner；files 域签名无 owner；无 `OwnerFrom(ctx)`） | **§5.7 新增「Owner 写侧来源」5 条规则** + M1-2 增 Owner 填充 + E28 fail-closed + 用例 |
+| **revB P1：`Principal.Owner` 用户可控（IdP claim，不参与落桶）** ⇒ 用它作判据可跨租户读 | §5.7 规则 1 **严禁** `Principal.Owner`；单一来源 = AK 租户键；补 OIDC 用例 |
+| **revC P1：§5.7 门语义自相矛盾**（硬 403 vs 空集/自读） | **改单轴**：权限轴 = `Owner`（`Dim2` 降为 UI 归类）⇒ 二义消失；E26/R35-e/§9.1 同步 |
+| **revB P1：保留名封堵只在注册单点**（`mesh_readers.owner`/`api_keys.name`/宿主 AK 均可注入） | §5.6 前提改为 **4 个身份/配置来源**逐一封堵（含 `api_keys.name` 当前完全不校验） |
+| **revB P1：前提 2 会自毁 `__audit__`**（`NewTenant`/`ResolveLocation` 调那两个函数） | §5.6 增**硬约束**：不得改 `ValidSegmentName`/`IsReservedBucketName` |
+| **revC P1：§5.8 前提错误**（实际只有 1 个受支持 admin） | §5.8 现状订正 + 把「多 admin/`audit.read` 授予机制」列为 M1-11 前置 |
+| **revA P1：段族矛盾**（共用一条流 vs 全局/按 scope 段） | §5.4.1 新增第 4 条**段族隔离** + E27（任务族永不丢弃） |
+| **revA P1：两级序缺节点 seq 跨重启续号** | §4.1 增「节点 begin seq 持久化 + 载入改按 (NodeID,seq) + 单机退化 + 四条契约」 |
+| **revA P1：`Prune` vs `Rewrite` 命名二义 + `Evict(n)` 无法表达按龄** | §4.2 统一 `Rewrite(keep)` + `Index.Prune(keep)` + 同事务 |
+| revA/revB/revC P2：计数不符（115/20、29/3、layer A 26/33、~40） | 实测订正：**108/19** · **29/4** · 配额侧共 **48 处**（层 B 8 处）；R35-a 口径写明 |
+| revB P2：`audit` 目录与租户命名空间冲突（可被注册/被当租户） | §5.6 前提 5：热段改 `<卷根>/__audit__/` |
+| revB P2：脱敏只列字段、未做内容清洗；`?actor=` 可作存在性探针 | §5.7 强制项 1/3：忽略客户端参数 + `detail` 白名单化清洗 |
+| revB P2：M1-11 会破坏既有直调用例与 `rbac` 用例 | M1-11 增「同步改造用例」清单（4 个文件） |
+| revB P2：`audit.read` 自放大无护栏 | E29（限流 + 读事件不入本次返回） |
+| revC P2：R35-c 漏 `pkg/files` 第三套审计抽象 | R35-c 扩为「非 `pkg/audit` 不得定义审计类型/常量/接口」 |
+| revC P2：R35-b/R35-d 口径不可判定（localMux / facade 无法区分） | R35-b 标注口径待定 + localMux 处置；R35-d 需给机械化判据 |
+| revC P2：性能阈值缺失（batch 参数未入配置表） | program.md §8 补 `batch_max_lines`/`batch_max_interval` 默认值 + 可执行阈值 |
+| revC C1：单 PR 不现实 ⇒ 建议分批 | **保持单 PR（用户裁定）**，但**提交按 P1–P8 批次边界**（每批=可独立验证的 commit） |
+| revC C5：`Dim2` 对权限判定冗余；`pkg/state.LocalAppendStore` 是既有 append-only（零生产调用）；`pkg/recovery` 是否顶层包 | ① 采单轴（已做）；② 需写明与 `LocalAppendStore` 的取舍（避免第 4 套实现）⇒ 见 program.md 修订；③ `pkg/recovery` 考虑降为 `pkg/audit/recovery` 子包 |
