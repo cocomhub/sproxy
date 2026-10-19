@@ -631,7 +631,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 集群写面门（roadmap 12.1-2）：writeGuard 非 nil 时**外层 srvMux 同样受门**
 	// （cloud/config/sync/credentials 等非文件组写路由在此层）——apiHandler 只覆盖
 	// 隧道内层，外层必须独立挂 writeGuardMiddleware。
-	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(h.writeGuardMiddleware(srvMux))))
+	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(h.auditMiddleware(h.writeGuardMiddleware(srvMux)))))
 
 	return h
 }
