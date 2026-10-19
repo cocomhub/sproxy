@@ -525,7 +525,12 @@ func (h *Handlers) handleNoCredentials(w http.ResponseWriter, r *http.Request, c
 	if allow && isLoopbackRemote(r.RemoteAddr) {
 		// R4-I2：回环直通合成最小 Principal 写入 ctx，使 requireRole(principal, user)
 		// 放行该路径（4A 回环读取语义零回归）。AK 留空 → 按 anonymous 租户落桶。
-		r = r.WithContext(withPrincipal(r.Context(), &Principal{Role: string(accesskey.RoleUser)}))
+		role := string(accesskey.RoleUser)
+		if h.insecureLoopbackRole != "" {
+			// 装配/测试瞬态（如管理员类 e2e）：默认 user，生产不设置 ⇒ 零影响。
+			role = h.insecureLoopbackRole
+		}
+		r = r.WithContext(withPrincipal(r.Context(), &Principal{Role: role}))
 		next(w, r)
 		return
 	}

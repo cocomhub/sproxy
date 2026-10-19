@@ -250,6 +250,10 @@ type Handlers struct {
 	// 注入的 ExternalAuthHandlers.Routes() 收集，注册时同时挂主 mux 与隧道内层
 	// localMux（浏览器隧道模式下登录页可达）。nil = 未配置（零回归：无外部端点）。
 	externalAuthRoutes []authn.ExternalAuthRoute
+	// insecureLoopbackRole 是无认证回环兜底合成的 Principal 角色（装配/测试瞬态；
+	// 空 ⇒ 默认 user，生产零影响）。管理员类 UI/接口的 e2e 需要它以 admin 运行：
+	// 审计读面是 admin-only（M1-11），否则扫描器/测试无法覆盖审计面板。
+	insecureLoopbackRole string
 	// allowInsecureLoopback 是无认证兜底开关（读取优先级：opts 注入 > cfg 配置）。
 	// 仅调试语义：ring 为空时放行 loopback 来源（见 handleNoCredentials）。
 	allowInsecureLoopback bool

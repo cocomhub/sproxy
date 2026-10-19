@@ -9,6 +9,8 @@ package e2e
 // 真浏览器 + 真实服务端（testServer），验证按钮渲染 + 点击触发对应 API。
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -18,7 +20,7 @@ import (
 
 // TestAudit_ExportButton 审计 tab 含导出按钮；点击触发 GET /api/audit/export。
 func TestAudit_ExportButton(t *testing.T) {
-	baseURL, _, cleanup := testServer(t)
+	baseURL, _, cleanup := testServerAdmin(t)
 	defer cleanup()
 
 	page, stop := pageFixture(t)
@@ -52,9 +54,70 @@ func TestAudit_ExportButton(t *testing.T) {
 	}
 }
 
+// TestAudit_FilterRows S4：审计面板筛选栏（动作/租户/结果/类别）真实浏览器验证。
+//
+// 覆盖三条用户可见行为：① 筛选栏渲染且计数摘要反映总数；② 输入不存在的动作 ⇒ 立即收敛为 0 条
+// （**纯前端筛选，不重新请求**）；③ 点「清除」恢复全部。筛选逻辑本身由
+// web/static/audit-filter.test.js（node --test）覆盖，本用例验证 DOM 接线与渲染。
+func TestAudit_FilterRows(t *testing.T) {
+	baseURL, _, cleanup := testServerAdmin(t)
+	defer cleanup()
+
+	// 播种至少一条审计事件：上传是 mutating 请求，auditMiddleware/业务审计会落一条
+	// （S4 用例需要 N ≥ 1 才能区分「共 N 条」与「显示 0 / N 条」）。
+	// 用 POST /api/notify/test：管理员可用、mutating（auditMiddleware + 业务审计各留一条），
+	// 且不依赖卷权限（上传需要 owner/卷授权，回环兜底主体无 AK ⇒ 403 volume not allowed）。
+	if code, body := postJSON(t, baseURL+"/api/notify/test", nil); code != http.StatusOK {
+		t.Fatalf("播种审计事件（notify/test）失败: code=%d body=%s", code, body)
+	}
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	if _, err := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("goto: %v", err)
+	}
+	if err := page.Locator("#stats-btn").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("click stats-btn: %v", err)
+	}
+	if err := page.Locator("#audit-tab").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("click audit-tab: %v", err)
+	}
+	// ① 筛选栏渲染 + 摘要为「共 N 条」
+	if err := waitLoc(page, "#audit-filter-action", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("筛选栏未渲染: %v", err)
+	}
+	if err := waitLoc(page, "#audit-filter-summary", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("计数摘要未渲染: %v", err)
+	}
+	total := func() string {
+		txt, _ := page.Locator("#audit-filter-summary").InnerText()
+		return strings.TrimSpace(txt)
+	}
+	before := total()
+	if !strings.HasPrefix(before, "共 ") || !strings.HasSuffix(before, " 条") {
+		t.Fatalf("未筛选时应显示「共 N 条」, got %q", before)
+	}
+	if before == "共 0 条" {
+		t.Fatalf("播种后应有审计事件（否则无法验证筛选收敛）, got %q", before)
+	}
+
+	// ② 输入不存在的动作 ⇒ 立即 0 条（不发新请求）
+	if err := page.Locator("#audit-filter-action").Fill("zzz-no-such-action"); err != nil {
+		t.Fatalf("fill action filter: %v", err)
+	}
+	waitTextVisible(t, page, "#audit-filter-summary", "显示 0 / ", 5000)
+
+	// ③ 清除 ⇒ 恢复全部
+	if err := page.Locator("#audit-filter-reset").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("click reset: %v", err)
+	}
+	waitTextVisible(t, page, "#audit-filter-summary", before, 5000)
+}
+
 // TestStatsPanel_NotifyTestButton 统计 tab 通知区含测试按钮；点击触发 POST /api/notify/test。
 func TestStatsPanel_NotifyTestButton(t *testing.T) {
-	baseURL, _, cleanup := testServer(t)
+	baseURL, _, cleanup := testServerAdmin(t)
 	defer cleanup()
 
 	page, stop := pageFixture(t)
@@ -84,4 +147,21 @@ func TestStatsPanel_NotifyTestButton(t *testing.T) {
 	if got := resp.Status(); got != http.StatusOK && got != http.StatusBadRequest {
 		t.Fatalf("POST /api/notify/test status = %d, want 200（未装配时 400 可接受）", got)
 	}
+}
+
+// postJSON 发一个 JSON POST 并返回状态码与响应体（e2e 内联 helper）。
+func postJSON(t *testing.T, url string, payload []byte) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }

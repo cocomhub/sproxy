@@ -134,5 +134,11 @@ func (h *Handlers) isAuditAdmin(actor string) bool {
 // 的过滤视图 + 脱敏（actor/source_ip/request_id）」；**绝不**在视图未就绪时放宽为全量回退，
 // 且 `Owner == ""` 的条目对非管理员恒不可见。
 func (h *Handlers) auditReadAllowed(r *http.Request) bool {
+	// **主体自身角色优先**：已认证主体（含 OIDC/装配层注入、回环无认证兜底）的 Principal.Role
+	// 就是权威角色，不再要求 AK 一定存在于凭据环（否则「无 AK 的管理员主体」会被判非管理员，
+	// 例如管理员类 UI e2e 与服务端自同步链路）。回退保留按 AK 查环的旧行为。
+	if p := PrincipalFrom(r.Context()); p != nil && p.Role == "admin" {
+		return true
+	}
 	return h.isAuditAdmin(ActorFrom(r.Context()))
 }

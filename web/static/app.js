@@ -1538,21 +1538,80 @@ function hubTopologySvg(nodes) { return appRender.topologySvg(nodes); }
 // showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 与隧道两条路径均可达
 // （/api/audit 同时注册主 mux（authMiddleware）与 localMux（隧道加密即认证））。
 // 加载失败渲染通用错误占位（不展示原始错误细节，minimal）。
+// 审计面板状态：一次拉取最近 200 条，筛选在**客户端**完成（audit-filter.js 纯函数，见 R10 单测）。
+// 不额外请求 ⇒ 不改变读面权限语义（行已由服务端按单轴 Owner 过滤/脱敏）。
+let auditEventsCache = [];
+let auditFilterState = null;
+
 async function showAudit() {
-  document.getElementById('audit-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  const panel = document.getElementById('audit-panel');
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
     const data = await sc.audit.list({ limit: 200 });
-    const events = data?.events || [];
-    document.getElementById('audit-panel').innerHTML =
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
-      '<span style="font-weight:600;">审计日志（最近 200 条）</span>' +
-      '<button type="button" id="audit-export-btn" class="btn btn-sm btn-secondary" title="导出全量审计事件为 JSON 文件">导出</button>' +
-      '</div>' + auditTableHtml(events);
+    auditEventsCache = data?.events || [];
+    auditFilterState = auditFilter.auditFilterEmpty();
+    panel.innerHTML = auditFilterBarHtml();
     const exportBtn = document.getElementById('audit-export-btn');
     if (exportBtn) exportBtn.addEventListener('click', auditExport);
+    bindAuditFilters();
+    auditRenderTable();
   } catch (e) {
-    document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计数据请求失败: ' + e.message + '</div>';
+    panel.innerHTML = '<div class="empty-msg">审计数据请求失败: ' + e.message + '</div>';
   }
+}
+
+// auditFilterBarHtml 渲染筛选栏 + 表格容器（id 固定，供事件绑定与 e2e 使用）。
+function auditFilterBarHtml() {
+  const inputStyle = 'padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:transparent;color:inherit;';
+  return '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;">' +
+    '<span style="font-weight:600;">审计日志</span>' +
+    '<input id="audit-filter-action" type="text" placeholder="动作包含…" title="按动作子串筛选（不区分大小写）" style="' + inputStyle + 'width:130px;">' +
+    '<input id="audit-filter-owner" type="text" placeholder="归属租户包含…" title="按 owner 子串筛选" style="' + inputStyle + 'width:130px;">' +
+    '<select id="audit-filter-result" title="按结果精确筛选" style="' + inputStyle + '">' +
+    '<option value="">全部结果</option><option value="success">成功</option><option value="denied">拒绝</option><option value="error">失败</option>' +
+    '</select>' +
+    '<select id="audit-filter-kind" title="按条目类别精确筛选" style="' + inputStyle + '">' +
+    '<option value="">全部类别</option><option value="event">事件</option><option value="state">状态</option>' +
+    '<option value="span">步骤</option><option value="resource">资源</option><option value="done">终态</option><option value="rotate">轮转</option>' +
+    '</select>' +
+    '<span id="audit-filter-summary" style="color:var(--text-muted);"></span>' +
+    '<button type="button" id="audit-filter-reset" class="btn btn-sm btn-secondary" title="清除全部筛选条件">清除</button>' +
+    '<button type="button" id="audit-export-btn" class="btn btn-sm btn-secondary" title="导出全量审计事件为 JSON 文件">导出</button>' +
+    '<div id="audit-table" style="flex-basis:100%;"></div>' +
+    '</div>';
+}
+
+// bindAuditFilters 绑定筛选控件（input/change 即时生效）与「清除」按钮。
+function bindAuditFilters() {
+  const map = { action: '#audit-filter-action', owner: '#audit-filter-owner', result: '#audit-filter-result', kind: '#audit-filter-kind' };
+  Object.keys(map).forEach(function (k) {
+    const el = document.querySelector(map[k]);
+    if (!el) return;
+    const onInput = function () { auditFilterState[k] = el.value; auditRenderTable(); };
+    el.addEventListener('input', onInput);
+    el.addEventListener('change', onInput);
+  });
+  const reset = document.getElementById('audit-filter-reset');
+  if (reset) {
+    reset.addEventListener('click', function () {
+      auditFilterState = auditFilter.auditFilterEmpty();
+      Object.keys(map).forEach(function (k) {
+        const el = document.querySelector(map[k]);
+        if (el) el.value = '';
+      });
+      auditRenderTable();
+    });
+  }
+}
+
+// auditRenderTable 用当前筛选条件重渲染表格与计数摘要（不发请求）。
+function auditRenderTable() {
+  const filter = auditFilterState || auditFilter.auditFilterEmpty();
+  const rows = auditFilter.auditFilterRows(auditEventsCache, filter);
+  const table = document.getElementById('audit-table');
+  if (table) table.innerHTML = auditTableHtml(rows);
+  const sum = document.getElementById('audit-filter-summary');
+  if (sum) sum.textContent = auditFilter.auditFilterSummary(auditEventsCache.length, rows.length);
 }
 
 // auditExport 拉取 /api/audit/export（时间正序 JSON 数组）→ 浏览器下载 audit-<ts>.json。

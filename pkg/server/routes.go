@@ -59,6 +59,9 @@ type RegisterRoutesOpts struct {
 	// 使无凭据测试直连被兜底放行。为一次性读取（不写入 cfg，避免 SIGHUP/cfgPtr
 	// 并发覆盖污染；多测试并发各用独立 RegisterRoutes，无竞态）。
 	AllowInsecureLoopback bool
+	// InsecureLoopbackRole 覆盖无认证回环兜底合成的 Principal 角色（**装配/测试瞬态**，
+	// 空 ⇒ user）。仅供 e2e/本地联调需要管理员身份的场景（如审计读面 admin-only）。
+	InsecureLoopbackRole string
 	// CredentialRing 是 SproxySig 凭据表（Ring）。nil 时 RegisterRoutes 自动装配：
 	// 从 CredentialStore 载入；仍空则 **U3 零凭据启动**——不生成 anonymous，系统以
 	// 零凭据等待注册（register 公开端点唯一入口，首位回环注册者原子授 admin）。
@@ -186,6 +189,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		totpPending:      newTotpPendingTable(),
 		// 测试注入空 Ring 时的无认证调试兜底（一次性读取；生产走 cfg.AllowInsecureLoopback）。
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
+		insecureLoopbackRole:  opts.InsecureLoopbackRole,
 		volSet:                vs,
 		xferMetrics:           opts.XferMetrics,
 		writeGuard:            opts.WriteGuard,
