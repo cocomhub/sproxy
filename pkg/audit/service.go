@@ -110,6 +110,12 @@ func New(opts Options) (*Service, error) {
 		failFast: opts.FailClosed,
 		ctx:      opts.CtxFields,
 	}
+	// **写入失败绝不静默**：persist 在 best-effort 下会吞掉 Journal.Append 的错误（审计不得阻断
+	// 业务），因此必须至少有一条可见通道 —— 未注入 Logger 时兜底标准日志，否则落盘失败将完全
+	// 不可见（上层可能把 nil 误读为「已提交」；2026-10-20 M3 排查教训）。
+	if eff.logger == nil {
+		eff.logger = slog.Default()
+	}
 	if eff.clock == nil {
 		eff.clock = systemClock{}
 	}
