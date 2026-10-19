@@ -1,0 +1,8 @@
+# 门禁 R37：统一恢复清单（设计 docs/designs/2026-10-19-audit-service.md §8.2 + program M3）
+#   form = orchestration  协调器构造的**唯一**装配点（子系统不得自行编排恢复）
+#        | legacy          已接入协调器（legacy 兜底：子系统自有持久化，触发点收敛）
+#        | scope           已接入协调器（WAL 作用域 + ReplayApplier）
+#        | legacy-pending  **尚未接入**（棘轮：数量只减不增；接入后改 form 并下调 maxLegacyPending）
+# 列：file|symbol|form|kind|note
+pkg/server/recovery_wiring.go|runStartupRecovery|orchestration|-|统一恢复唯一编排入口（setupRecovery + Coordinator.Run）
+pkg/cloud/manager_persist.go|recoverTasksFromDir|legacy-pending|cloud|云下载任务台账恢复（内嵌于 NewCloudDownloadManager，待拆「构造/恢复」后注册为 legacy）
