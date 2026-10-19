@@ -397,6 +397,10 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	// 返回快照副本：SubmitAndStartGroup 返回的指针与 m.groups 共享，下载 goroutine
 	// 可能在 json.Marshal 期间并发写组状态字段（UpdateGroupStatus），需副本隔离防 data race。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "cloud_group_create", ObjectType: "task", Object: group.ID, Result: AuditResultSuccess,
+		Detail: "urls=" + fmt.Sprintf("%d", len(normalized)),
+	})
 	snapshot, ok := h.cloudMgr.GetGroup(group.ID, ActorFrom(r.Context()))
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "group created but not found"}, http.StatusInternalServerError)

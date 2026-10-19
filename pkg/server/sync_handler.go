@@ -400,6 +400,11 @@ func (h *Handlers) syncResolveConflict(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("写回冲突文件失败: %v", werr)}, http.StatusInternalServerError)
 		return
 	}
+	// 冲突解决 = 覆盖写入（破坏性）⇒ 必须审计（记路径与选择）。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "sync_conflict_resolve", ObjectType: "file", Object: item.Path, Result: AuditResultSuccess,
+		Detail: "choice=" + body.Choice + " id=" + id,
+	})
 	sendJSONResponse(w, map[string]any{"success": true, "path": item.Path}, http.StatusOK)
 }
 

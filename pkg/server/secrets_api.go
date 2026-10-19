@@ -192,6 +192,10 @@ func (h *Handlers) createSecretRandom(w http.ResponseWriter, r *http.Request, mg
 		http.Error(w, "secret 创建失败", http.StatusInternalServerError)
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "secret_create", ObjectType: "secret", Object: name, Result: AuditResultSuccess,
+		Detail: "mode=random",
+	})
 	sendJSONResponse(w, secretCreateResponse{
 		Name: name, Value: string(key), Origin: "random",
 	}, http.StatusOK)
@@ -217,6 +221,10 @@ func (h *Handlers) createSecretImport(w http.ResponseWriter, r *http.Request, mg
 	if origin == "" {
 		origin = "import"
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "secret_create", ObjectType: "secret", Object: req.Name, Result: AuditResultSuccess,
+		Detail: "mode=" + origin,
+	})
 	sendJSONResponse(w, secretCreateResponse{
 		Name: req.Name, Origin: origin, Message: "ok",
 	}, http.StatusOK)
@@ -264,6 +272,10 @@ func (h *Handlers) exportSecretHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 明文返回（hex 文本）；调用方负责后续保护（默认加密/自保管）。
+	// 导出 = 明文外泄风险点（安全敏感，必须可追溯）。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "secret_export", ObjectType: "secret", Object: name, Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, secretCreateResponse{
 		Name: name, Value: string(data), Origin: "export",
 	}, http.StatusOK)
