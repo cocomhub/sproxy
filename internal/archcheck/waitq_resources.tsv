@@ -4,3 +4,4 @@
 # 格式（用 | 分隔，避免制表符转义问题）：<文件>|<适配器类型>|<资源名模式>|<label>|<单位>|<超时>|<MaxWaiters>|<优先级>
 pkg/quota/waitq_adapter.go|poolResource|quota:<节点路径>|quota|字节|h.quotaWaitTimeout（默认30s）|0（无界）|Normal
 pkg/quota/staging_tracker.go|stagingResource|staging:<节点路径>|staging|字节|stagingWaitTimeout（5s）|0（无界）|Normal
+pkg/storage/capacity/wait.go|capacityResource|capacity:<类别>|capacity|字节|capacity.DefaultWaitTimeout（30s）|0（无界）|Normal

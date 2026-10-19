@@ -841,7 +841,7 @@ func (h *Handlers) cloudArchiveReserveQuota(ctx context.Context, w http.Response
 		}
 		res = rr
 	} else if h.storageMgr != nil {
-		if reserveErr := h.storageMgr.TryReserve(pre, capacity.CategoryCloud); reserveErr != nil {
+		if reserveErr := h.storageMgr.WaitReserve(ctx, pre, capacity.CategoryCloud, capacity.DefaultWaitTimeout); reserveErr != nil {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)

@@ -475,7 +475,7 @@ func (q *backupQuotaFS) reserve(ctx context.Context, size int64) (*backupReserva
 		return nil, err
 	}
 	if q.sm != nil {
-		if err := q.sm.TryReserve(size, q.cat); err != nil {
+		if err := q.sm.WaitReserve(ctx, size, q.cat, capacity.DefaultWaitTimeout); err != nil {
 			res.releaseScope()
 			res.releasePool()
 			return nil, err
