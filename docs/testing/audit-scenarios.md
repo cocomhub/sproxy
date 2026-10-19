@@ -58,7 +58,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 
 | 动作 | 断言用例 | 状态 |
 | --- | --- | --- |
-| `secret_create` / `secret_delete` / `secret_export` | — | ⬜ GAP（**必须断言不含密钥明文**） |
+| `secret_create` / `secret_delete` / `secret_export` | `pkg/server/audit_secret_scenarios_test.go`（含**明文红线**与失败留痕） | ✅ |
 | `backend_presign` / `backend_presign_complete`（含被拒） | — | ⬜ GAP |
 | `share_create` / `share_revoke` | — | ⬜ GAP |
 | `sync_task_create` / `sync_conflict_resolve` | — | ⬜ GAP |
@@ -80,7 +80,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 
 | 优先级 | 缺口 | 风险 | 建议用例形态 |
 | --- | --- | --- | --- |
-| P1 | `secret_*`（3） | **密钥泄露**：必须断言条目里**不含明文/密钥材料** | `newAuditTestServer` + 建/删/导出密钥 ⇒ 断言 action + detail 不含 secret |
+| ~~P1~~ ✅ | ~~`secret_*`（3）~~ | 已补：`audit_secret_scenarios_test.go`（明文红线 + 失败留痕） | — |
 | P1 | `backend_presign*`（2，含被拒） | presign 是越权高发点 | 允许/拒绝两路 ⇒ 断言 `result` 分别为 success/denied |
 | P2 | 卷管理（8） | 管理员高危操作无审计断言 | 复用 `newVolumesAPIServer(t, actor, volumes, mod)` + `h.readAuditEvents` 断言（本文件已示范 `volume_move`） |
 | P2 | `share_*`（2） | 外链分享 = 数据外流 | 创建/撤销 ⇒ 断言 action + object=分享 id |

@@ -180,15 +180,29 @@ func (h *Handlers) createSecretHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// auditSecretFailed 为**失败**的 secret 操作补一条审计（成功路径已各自埋点）。
+//
+// 安全语义（设计 §9.1）：`secret_export` 的失败——尤其 400（非法名/路径穿越）——是**攻击信号**，
+// 必须留痕；反之 Detail **只写状态码**，绝不写入 secret 值或其派生（审计条目本身是低权限可读面
+// 的潜在扩散点，见 §5.7）。
+func (h *Handlers) auditSecretFailed(r *http.Request, action, name string, status int) {
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: action, ObjectType: "secret", Object: name, Result: "failed",
+		Detail: fmt.Sprintf("失败（HTTP %d）", status),
+	})
+}
+
 // createSecretRandom 处理 mode=random：服务端生成随机 secret，返回 value 供备份。
 func (h *Handlers) createSecretRandom(w http.ResponseWriter, r *http.Request, mgr *secrets.Manager, name string) {
 	key, err := mgr.Create(r.Context(), name)
 	if err != nil {
 		if errors.Is(err, secrets.ErrInvalidSecretName) {
+			h.auditSecretFailed(r, "secret_create", name, http.StatusBadRequest)
 			http.Error(w, "secret 创建失败", http.StatusBadRequest)
 			return
 		}
 		h.logger.Error("创建随机 secret 落盘失败", "name", name, "err", err)
+		h.auditSecretFailed(r, "secret_create", name, http.StatusInternalServerError)
 		http.Error(w, "secret 创建失败", http.StatusInternalServerError)
 		return
 	}
@@ -210,10 +224,12 @@ func (h *Handlers) createSecretImport(w http.ResponseWriter, r *http.Request, mg
 	_, err := mgr.Import(r.Context(), req.Name, []byte(req.Value))
 	if err != nil {
 		if errors.Is(err, secrets.ErrInvalidSecretName) || errors.Is(err, secrets.ErrInvalidSecretValue) {
+			h.auditSecretFailed(r, "secret_create", req.Name, http.StatusBadRequest)
 			http.Error(w, "secret 导入失败", http.StatusBadRequest)
 			return
 		}
 		h.logger.Error("导入 secret 落盘失败", "name", req.Name, "err", err)
+		h.auditSecretFailed(r, "secret_create", req.Name, http.StatusInternalServerError)
 		http.Error(w, "secret 导入失败", http.StatusInternalServerError)
 		return
 	}
@@ -268,6 +284,7 @@ func (h *Handlers) exportSecretHandler(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusInternalServerError
 			h.logger.Error("读取 secret 失败", "name", name, "err", err)
 		}
+		h.auditSecretFailed(r, "secret_export", name, status)
 		http.Error(w, "读取 secret 失败", status)
 		return
 	}
@@ -299,6 +316,7 @@ func (h *Handlers) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil && !errors.Is(err, secrets.ErrInvalidSecretName) {
 			h.logger.Error("删除前探测 secret 失败", "name", name, "err", err)
 		}
+		h.auditSecretFailed(r, "secret_delete", name, status)
 		http.Error(w, "secret 不存在", status)
 		return
 	}
