@@ -17,6 +17,11 @@
 //   - `Applier` **必须幂等**（同 (scope, Seq) 重复应用零副作用）—— 幂等是**使用方契约**；
 //   - 未注册前缀的作用域**不静默丢弃**：计入报告 `Unknown` 且不 `MarkDone`（可观测、可补注册）。
 //
+// 两种恢复形态（**按 Kind 互斥**，同一任务族只能选一种 ⇒ 绝不一次恢复两遍）：
+//   - 作用域恢复（新）：`Register(Registration{Prefix, Factory})` —— 任务写 WAL 作用域，协调器重放；
+//   - legacy 兜底（既有子系统）：`RegisterLegacy(Legacy{Kind, Recover})` —— 子系统自有持久化，
+//     只把**启动恢复的触发点**收敛到协调器（首版保留，迁移完成后删除注册）。
+//
 // 本包只依赖 `pkg/audit`（不依赖 cloud/syncexec 等业务包）⇒ 由装配层（pkg/server）注册各任务族，
 // 避免包间循环依赖。
 package recovery
@@ -51,6 +56,28 @@ type Registration struct {
 	Factory ApplierFactory
 }
 
+// Legacy 是**既有子系统**的恢复入口（设计 M3「首版保留 legacy 兜底」）。
+//
+// 适用：子系统自有持久化（不写 audit 作用域），如 cloud 下载的任务台账、分块上传的 staging、
+// syncexec 的冲突记录。收敛目标是**启动恢复只有一个编排点**（Coordinator.Run），而不是让每个
+// 子系统在各自构造函数里自行扫描目录。
+//
+// 迁移路径：某子系统改为「作用域 + ReplayApplier」后，**删除**其 Legacy 注册（RegisterLegacy
+// 与 Register 按 Kind 互斥 ⇒ 二者不会同时存在，避免一次恢复跑两遍）。
+type Legacy struct {
+	// Kind 是任务族名（与 Registration.Kind 同域，二者**互斥**）。
+	Kind string
+	// Recover 执行一次恢复，返回恢复的任务数（实现需**幂等**：重复调用不重复执行业务副作用）。
+	Recover func(ctx context.Context) (int, error)
+}
+
+// LegacyResult 是单个 legacy 恢复入口的结果。
+type LegacyResult struct {
+	Kind      string
+	Recovered int
+	Err       error
+}
+
 // Options 控制一次协调运行。
 type Options struct {
 	// Limit >0 时本次最多处理该数量的未完成作用域（分批启动，避免同时压垮下游）。
@@ -79,10 +106,19 @@ type Report struct {
 	Failed  int           // 失败（保持未完成，可重试）
 	Unknown int           // 未注册前缀的数量（⚠ 需补注册）
 	Results []ScopeResult // 逐个作用域结果
+
+	// LegacyRecovered 是 legacy 入口恢复的任务总数；Legacy 是逐个入口结果。
+	LegacyRecovered int
+	Legacy          []LegacyResult
 }
 
 // Err 返回首个错误（用于调用方决定是否告警）。
 func (r *Report) Err() error {
+	for _, lg := range r.Legacy {
+		if lg.Err != nil {
+			return lg.Err
+		}
+	}
 	for _, res := range r.Results {
 		if res.Err != nil {
 			return res.Err
@@ -93,8 +129,8 @@ func (r *Report) Err() error {
 
 // String 生成一行摘要（日志友好）。
 func (r *Report) String() string {
-	return fmt.Sprintf("recovery: total=%d resumed=%d skipped=%d failed=%d unknown=%d",
-		r.Total, r.Resumed, r.Skipped, r.Failed, r.Unknown)
+	return fmt.Sprintf("recovery: total=%d resumed=%d skipped=%d failed=%d unknown=%d legacy=%d/%d",
+		r.Total, r.Resumed, r.Skipped, r.Failed, r.Unknown, r.LegacyRecovered, len(r.Legacy))
 }
 
 // Coordinator 统一恢复协调器（**结构体**，无全局态；并发安全）。
@@ -102,8 +138,9 @@ type Coordinator struct {
 	svc    *audit.Service
 	logger *slog.Logger
 
-	mu   sync.RWMutex
-	regs []Registration
+	mu     sync.RWMutex
+	regs   []Registration
+	legacy []Legacy
 }
 
 // New 构造协调器。svc 为 nil ⇒ Run 返回错误（fail-closed：恢复不可静默失效）。
@@ -133,7 +170,39 @@ func (c *Coordinator) Register(r Registration) error {
 			return fmt.Errorf("%w: %q（kind=%s 与 %s 冲突）", ErrDuplicatePrefix, r.Prefix, r.Kind, old.Kind)
 		}
 	}
+	for _, lg := range c.legacy {
+		if lg.Kind == r.Kind {
+			return fmt.Errorf("%w: kind %q 已注册为 legacy 恢复，不能再注册作用域恢复", ErrDuplicatePrefix, r.Kind)
+		}
+	}
 	c.regs = append(c.regs, r)
+	return nil
+}
+
+// RegisterLegacy 注册既有子系统的恢复入口。
+//
+// **与作用域注册按 Kind 互斥**（同一任务族只能有一种恢复形态）：否则一次 Run 会把同一批任务
+// 恢复两遍（legacy 一遍 + 作用域重放一遍）⇒ 业务副作用重复执行。
+func (c *Coordinator) RegisterLegacy(l Legacy) error {
+	if l.Kind == "" {
+		return fmt.Errorf("recovery: Legacy.Kind 不能为空")
+	}
+	if l.Recover == nil {
+		return fmt.Errorf("recovery: Legacy.Recover 不能为空（kind=%s）", l.Kind)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, old := range c.legacy {
+		if old.Kind == l.Kind {
+			return fmt.Errorf("%w: legacy kind %q 重复注册", ErrDuplicatePrefix, l.Kind)
+		}
+	}
+	for _, reg := range c.regs {
+		if reg.Kind == l.Kind {
+			return fmt.Errorf("%w: kind %q 已注册为作用域恢复，不能再注册 legacy", ErrDuplicatePrefix, l.Kind)
+		}
+	}
+	c.legacy = append(c.legacy, l)
 	return nil
 }
 
@@ -164,6 +233,13 @@ func (c *Coordinator) Run(ctx context.Context, opts Options) (*Report, error) {
 		return nil, fmt.Errorf("recovery: 扫描未完成作用域失败: %w", err)
 	}
 	rep := &Report{Total: len(infos), Results: make([]ScopeResult, 0, len(infos))}
+	// **顺序**：legacy 子系统先恢复（存储/下载器/会话状态就绪），再做作用域重放（业务副作用）。
+	c.runLegacy(ctx, rep)
+	if opts.FailFast {
+		if err := rep.Err(); err != nil {
+			return rep, err
+		}
+	}
 	for _, info := range infos {
 		if cerr := ctx.Err(); cerr != nil {
 			return rep, cerr
@@ -187,6 +263,40 @@ func (c *Coordinator) Run(ctx context.Context, opts Options) (*Report, error) {
 	}
 	c.logReport(rep)
 	return rep, nil
+}
+
+// runLegacy 依次执行 legacy 恢复入口（**隔离**：一个子系统失败不影响其它子系统与作用域重放）。
+func (c *Coordinator) runLegacy(ctx context.Context, rep *Report) {
+	c.mu.RLock()
+	items := make([]Legacy, len(c.legacy))
+	copy(items, c.legacy)
+	c.mu.RUnlock()
+	for _, l := range items {
+		if err := ctx.Err(); err != nil {
+			rep.Legacy = append(rep.Legacy, LegacyResult{Kind: l.Kind, Err: err})
+			rep.Failed++
+			continue
+		}
+		n, err := safeRecover(ctx, l)
+		rep.Legacy = append(rep.Legacy, LegacyResult{Kind: l.Kind, Recovered: n, Err: err})
+		if err != nil {
+			rep.Failed++
+			c.logger.Error("recovery: legacy 恢复失败（其它子系统继续）", "kind", l.Kind, "err", err)
+			continue
+		}
+		rep.LegacyRecovered += n
+		c.logger.Info("recovery: legacy 恢复完成", "kind", l.Kind, "recovered", n)
+	}
+}
+
+// safeRecover 调用 legacy 入口并**兜住 panic**（E21 同类：恢复路径不得把启动打崩）。
+func safeRecover(ctx context.Context, l Legacy) (n int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovery: legacy %s panic: %v", l.Kind, r)
+		}
+	}()
+	return l.Recover(ctx)
 }
 
 // recoverOne 处理单个作用域：匹配任务族 ⇒ Resume（执行副作用）⇒ **成功后** MarkDone。
