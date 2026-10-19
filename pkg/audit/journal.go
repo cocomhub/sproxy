@@ -210,6 +210,11 @@ type FileJournalConfig struct {
 	// MaxSize / MaxArchives 是段大小轮转阈值与归档份数（0 ⇒ 不轮转 / 不留档）。
 	MaxSize     int64
 	MaxArchives int
+	// MaxTotalBytes 是**全部段（热 + 归档）总字节硬上限**（设计 §5.4 T8 / E15 / M1-8）。
+	// 0 ⇒ 不限制（不推荐：审核 P1-3 要求**非零安全默认**，装配层按 4×local_reserve 提供）。
+	// 达上限 ⇒ 先删**最旧归档**（有界保留）；删尽仍放不下（如单段已超上限）⇒ **有界丢弃**
+	// 本次条目（计入 Metrics.IncrDrop，不报错——审计是 best-effort，绝不因满盘阻塞业务）。
+	MaxTotalBytes int64
 	// GlobalName 是 LayoutGlobal 下的段文件名（默认 "compliance.audit.log"）。
 	GlobalName string
 	// Clock / Metrics / Logger 可注入（测试确定性 + 可观测）。
@@ -240,6 +245,7 @@ type FileJournal struct {
 	batchIv    time.Duration
 	maxSize    int64
 	maxArch    int
+	maxTotal   int64
 	globalName string
 	clock      Clock
 	metrics    Metrics
@@ -268,6 +274,7 @@ func NewFileJournal(cfg FileJournalConfig) (*FileJournal, error) {
 		batchIv:    cfg.BatchInterval,
 		maxSize:    cfg.MaxSize,
 		maxArch:    cfg.MaxArchives,
+		maxTotal:   cfg.MaxTotalBytes,
 		globalName: cfg.GlobalName,
 		clock:      cfg.Clock,
 		metrics:    cfg.Metrics,
@@ -337,6 +344,9 @@ func (j *FileJournal) Append(e Entry) error {
 	if err := j.rotateIfTooBigLocked(path); err != nil {
 		return err
 	}
+	if dropped, err := j.enforceTotalLocked(path); err != nil || dropped {
+		return err // dropped ⇒ 本次条目按**有界丢弃**处理（已计数），不视为写入失败
+	}
 	return j.writeEntryLocked(path, e)
 }
 
@@ -354,6 +364,80 @@ func (j *FileJournal) rotateIfTooBigLocked(path string) error {
 		return rerr
 	}
 	return nil
+}
+
+// enforceTotalLocked 在写入前把「全部段（热 + 归档）总字节」压到 MaxTotalBytes 内（M1-8 /
+// 设计 §5.4.1 T8、E15）：① 未超 ⇒ 放行；② 超 ⇒ 从**最旧归档**（.N 最大者）开始删除
+// （有界保留，计入 IncrEvict —— 已持久化数据的**受控淘汰**，不是丢失）；③ 归档删尽仍放不下
+// （如单段已超上限）⇒ **有界丢弃**本次条目并返回 dropped=true（计入 IncrDrop）。
+//
+// 语义边界（设计审核 P1）：本函数只作用于**合规段族**的 Journal 实例；任务/WAL 段族以
+// 「不丢失」为硬约束（调用方不配置 MaxTotalBytes ⇒ 不触发本治理）。
+func (j *FileJournal) enforceTotalLocked(incomingPath string) (dropped bool, err error) {
+	if j.maxTotal <= 0 {
+		return false, nil
+	}
+	total, arch, terr := j.totalAndArchivesLocked()
+	if terr != nil {
+		return false, terr
+	}
+	if total <= j.maxTotal {
+		return false, nil
+	}
+	// 从最旧归档删起（archiveIndex 大者更旧）。
+	sort.Slice(arch, func(a, b int) bool { return archiveIndex(arch[a].Path) > archiveIndex(arch[b].Path) })
+	for _, s := range arch {
+		if total <= j.maxTotal {
+			break
+		}
+		if rmErr := os.Remove(s.Path); rmErr == nil {
+			total -= s.Size
+			j.metrics.IncrEvict(1)
+		}
+	}
+	if total > j.maxTotal {
+		// 归档删尽仍超限（如热段本身已达上限）：**丢弃本次条目**（有界丢弃，不阻塞业务）。
+		j.metrics.IncrDrop(1)
+		return true, nil
+	}
+	_ = incomingPath
+	return false, nil
+}
+
+// totalAndArchivesLocked 返回全部段总字节与**归档段**列表（调用方须持 j.mu）。
+func (j *FileJournal) totalAndArchivesLocked() (int64, []SegmentInfo, error) {
+	names, err := j.segmentFilesLocked()
+	if err != nil {
+		return 0, nil, err
+	}
+	var total int64
+	arch := make([]SegmentInfo, 0, len(names))
+	for _, name := range names {
+		st, serr := os.Stat(name)
+		if serr != nil {
+			continue
+		}
+		total += st.Size()
+		base := filepath.Base(name)
+		if segmentBase(base) != base { // 归档 .N ⇒ 已封段
+			arch = append(arch, SegmentInfo{Path: name, Sealed: true, Size: st.Size()})
+		}
+	}
+	return total, arch, nil
+}
+
+// archiveIndex 解析归档名尾部的序号（`audit.log.3` ⇒ 3；非归档 ⇒ 0）。
+func archiveIndex(path string) int {
+	base := filepath.Base(path)
+	i := strings.LastIndex(base, ".")
+	if i < 0 || i == len(base)-1 {
+		return 0
+	}
+	n, err := strconv.Atoi(base[i+1:])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // writeEntryLocked 序列化并写入段文件（按 SyncMode 落盘）。

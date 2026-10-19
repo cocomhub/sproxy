@@ -60,13 +60,14 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 
 	var journal *audit.FileJournal
 	j, err := audit.NewFileJournal(audit.FileJournalConfig{
-		Dir:         dir,
-		Layout:      audit.LayoutGlobal, // 合规段族：全局时间线（便于合规导出/检索）
-		GlobalName:  "audit.log",        // 沿用既有段文件名（与历史迁移同源，便于运维识别）
-		SyncMode:    audit.SyncBatch,    // 策略族默认：批量 + 阈值 flush（设计 §5.2）
-		MaxSize:     int64(cfg.Audit.MaxSize),
-		MaxArchives: cfg.Audit.MaxArchives,
-		Logger:      log,
+		Dir:           dir,
+		Layout:        audit.LayoutGlobal, // 合规段族：全局时间线（便于合规导出/检索）
+		GlobalName:    "audit.log",        // 沿用既有段文件名（与历史迁移同源，便于运维识别）
+		SyncMode:      audit.SyncBatch,    // 策略族默认：批量 + 阈值 flush（设计 §5.2）
+		MaxSize:       int64(cfg.Audit.MaxSize),
+		MaxArchives:   cfg.Audit.MaxArchives,
+		MaxTotalBytes: int64(cfg.Audit.MaxTotalBytes),
+		Logger:        log,
 	})
 	if err != nil {
 		// 启动期行为可配（设计 §5.6 点 6 / M1-14）：默认**降级**（审计绝不阻断启动）；

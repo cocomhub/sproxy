@@ -182,6 +182,10 @@ type AuditConfig struct {
 	MaxSize ByteSize `yaml:"max_size" mapstructure:"max_size"`
 	// MaxArchives 是保留归档份数（audit.log.1 … audit.log.N）；默认 3；0 = 轮转即删不留档。
 	MaxArchives int `yaml:"max_archives" mapstructure:"max_archives"`
+	// MaxTotalBytes 是审计**全部段（热 + 归档）总字节硬上限**（设计 M1-8 / T8）：
+	// 达上限先删最旧归档；删尽仍放不下则有界丢弃新条目（计入 audit_dropped，绝不阻塞业务）。
+	// 默认 1 GiB（**非零安全默认**，防磁盘打满 —— 用户要求 ⑩）；0 = 不限（不推荐）。
+	MaxTotalBytes ByteSize `yaml:"max_total_bytes" mapstructure:"max_total_bytes"`
 	// Disabled 显式关闭审计（默认 false = 启用）：读面返回空表、写入 no-op，且**不创建**
 	// 任何审计目录/文件（与 buffer_size=0 的区别：后者只关内存环形缓冲，落盘仍在）。
 	Disabled bool `yaml:"disabled" mapstructure:"disabled"`
