@@ -11,15 +11,24 @@ package quota
 // 单一实现，不重复。实现 StagingQuotaTracker 语义：
 //
 //	ReserveUsage(ctx, size) → scope.TryReserve(size) + res.Commit(size) // 入账 committed
-//	                         不足 → 等待（cond；Release 广播 / ctx.Done / 超时中断）
-//	ReleaseUsage(size)     → scope.ReleaseUsage(size) + cond.Broadcast() // 唤醒等待者
+//	                         不足 → 排队等待（pkg/waitq；Release 唤醒 / ctx.Done / 超时中断）
+//	ReleaseUsage(size)     → scope.ReleaseUsage(size) + queue.NotifyAll() // 唤醒等待者
+//
+// **等待队列已收敛到通用能力包 pkg/waitq**（设计 docs/designs/2026-10-19-waitq.md §8）：
+// 私有 `sync.Cond` + 观察者 goroutine（ctx/超时打断）全部删除 —— 超时/取消由 waitq 的
+// select + timer 承担（**无常驻 goroutine**），丢唤醒由「锁协作入队」结构性闭合
+// （`AcquireUnder` 在 `q.mu` 内完成「查 + 入队」，与 `ReleaseUsage` 的「改账 + 唤醒」
+// 串行化在同一把锁上）。
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/waitq"
 )
 
 // stagingWaitTimeout 是 staging 配额排队等待超时（本地磁盘不足等待释放的最长时限）。
@@ -29,33 +38,108 @@ import (
 const stagingWaitTimeout = 5 * time.Second
 
 // StagingTracker 是 staging 配额记账 + 排队等待实现（基于独立 quota.Scope）。
-// 不足时排队（sync.Cond 等待 Release 广播 / ctx 取消 / 超时）；不依赖具体配额池类型。
 type StagingTracker struct {
 	scope *Scope
-	cond  *sync.Cond // 排队等待：Release 广播唤醒
+	// mu 是**等待协调锁**：等待侧的「查 + 入队」（waitq.AcquireUnder 的 lock）与释放侧的
+	// 「改账 + 唤醒」都在它之内 ⇒ 丢唤醒窗口结构性闭合（评审 F4 的保证以锁协作形式保留）。
+	mu    sync.Mutex
+	queue *waitq.Queue
 	// waitTimeout 是排队等待超时（<=0 = stagingWaitTimeout）；测试可注入缩短。
 	waitTimeout time.Duration
-	// waitRounds 是**进入 cond.Wait 的次数**（测试可观测：替代固定 Sleep 做时序同步）。
+	// waitRounds 是**「确认不足」的轮次**（测试可观测：替代固定 Sleep 做时序同步）：
+	// 首次不足即入队等待（计 1），此后每次被唤醒重试仍不足再计 1 —— 与迁移前
+	// 「每次进入 cond.Wait 计一轮」在时序同步上等价（每次等待前必有一次不足判定）。
 	waitRounds atomic.Int64
-	// watchers 是**观察者 goroutine 计数**（每次 ReserveUsage 至多 1 个；m7：此前每轮等待
-	// 都 spawn 一个 → 高竞争下 goroutine churn + 野 Broadcast）。测试断言其有界。
+	// watchers 是**观察者 goroutine 计数**：waitq 以 select + timer 实现超时/取消，
+	// **不再有观察者 goroutine** ⇒ 恒为 0（比迁移前「每次调用至多 1 个」更强的保证）。
+	// 保留字段是为了让既有回归用例（m7）继续断言「有界」这一不变量。
 	watchers atomic.Int64
-	// beforeWait 是**测试钩子**（生产恒 nil）：在「确认不足、即将进入等待」的竞态窗口点
-	// 调用（**不持 cond.L**，仅用于把「释放恰在 TryReserve 失败与 Wait 之间发生」确定化）。
+	// beforeWait 是**测试钩子**（生产恒 nil）：在「确认不足、即将进入等待」的窗口点调用
+	// （**锁外**，仅用于把「释放恰在 TryReserve 失败与入队之间发生」确定化）。
+	// 锁协作入队后，该窗口内的释放**不可能**被丢弃（等待者的快速尝试在锁内必然看到）。
 	beforeWait func()
 }
 
 // NewStagingTracker 构造 staging 配额记账器（scope 为独立 staging Scope）。
 func NewStagingTracker(scope *Scope) *StagingTracker {
-	return &StagingTracker{scope: scope, cond: sync.NewCond(&sync.Mutex{}), waitTimeout: stagingWaitTimeout}
+	q := &StagingTracker{scope: scope, waitTimeout: stagingWaitTimeout}
+	q.queue = waitq.New(waitq.Options{
+		DefaultWait: stagingWaitTimeout,
+		AgeBoost:    stagingWaitTimeout,
+		Metrics:     stagingMetrics{tracker: q},
+	})
+	return q
 }
 
-// ReserveUsage 预留 size 字节（本地 staging 写入前）。不足 → 排队等待（ctx 取消 /
-// 等待超时中断）；返回错误 = 拒绝本次写入（永久不足快速失败）。
-//
-// 超时判据基于**绝对 deadline**（非 timer.Stop 结果）——避免「空间刚好释放但 timeout
-// 定时器已触发」的边界误判：每次唤醒先重试 TryReserve，仅当已过 deadline 且抢占
-// 仍失败才报超时。
+// stagingResource 是 staging Scope 的 waitq.Resource 适配器：TryAcquire = TryReserve +
+// Commit（入账 committed，语义与迁移前一致）；Release = ReleaseUsage（回滚路径）。
+type stagingResource struct {
+	scope   *Scope
+	tracker *StagingTracker
+}
+
+// Name 实现 waitq.Resource。
+func (r stagingResource) Name() string {
+	if r.scope == nil || r.scope.pool == nil {
+		return "staging:unknown"
+	}
+	return "staging:" + r.scope.pool.waitqPath()
+}
+
+// Capacity 实现 waitq.Resource：staging scope 的可用上限（0 = 无上限）。
+func (r stagingResource) Capacity() int64 {
+	if r.scope == nil || r.scope.pool == nil {
+		return 0
+	}
+	limit, _ := r.scope.pool.waitqLimits()
+	return limit
+}
+
+// Used 实现 waitq.Resource：`Capacity() - 剩余可用`。
+func (r stagingResource) Used() int64 {
+	if r.scope == nil || r.scope.pool == nil {
+		return 0
+	}
+	limit, free := r.scope.pool.waitqLimits()
+	return limit - free
+}
+
+// TryAcquire 实现 waitq.Resource：预留并**立即提交**（staging 语义 = 占用已确认）；
+// 不足返回 waitq.ErrInsufficient 触发排队。
+func (r stagingResource) TryAcquire(n int64) error {
+	res, err := r.scope.TryReserve(n)
+	if err != nil {
+		if errors.Is(err, ErrStorageFull) {
+			// **不足即计一轮**（waitRounds 的既有语义：每次「确认不足」为一轮 —— 首次不足
+			// 即入队等待，此后每次被唤醒重试仍不足再计一轮）。既有回归用例据此做确定性同步。
+			if r.tracker != nil {
+				r.tracker.waitRounds.Add(1)
+			}
+			return waitq.ErrInsufficient
+		}
+		return err
+	}
+	res.Commit(n)
+	return nil
+}
+
+// Release 实现 waitq.Resource：**仅回滚/放弃路径**生效（正常成功路径由调用方持有已提交额度）。
+func (r stagingResource) Release(n int64) {
+	r.scope.ReleaseUsage(n)
+}
+
+// stagingMetrics 把 waitq 的等待者变化接到 waitRounds（保留既有可观测契约）。
+type stagingMetrics struct{ tracker *StagingTracker }
+
+// IncWaiters 实现 waitq.Metrics：**不**在此计数（轮次由适配器在「不足」时计，
+// 语义见 waitRounds 注释；两处都计会双重计数）。
+func (m stagingMetrics) IncWaiters(int) {}
+
+// ObserveWait 实现 waitq.Metrics（无指标后端接入；保留扩展点）。
+func (m stagingMetrics) ObserveWait(_ time.Duration, _ string) {}
+
+// ReserveUsage 预留 size 字节（TryReserve + Commit）；不足则**排队等待**（释放唤醒 /
+// ctx 取消 / 超时）。超时或取消返回可识别错误（装配层映射为单文件 ActionError）。
 func (q *StagingTracker) ReserveUsage(ctx context.Context, size int64) error {
 	if size <= 0 {
 		return nil
@@ -64,107 +148,50 @@ func (q *StagingTracker) ReserveUsage(ctx context.Context, size int64) error {
 	if timeout <= 0 {
 		timeout = stagingWaitTimeout
 	}
-	deadline := time.Now().Add(timeout)
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	// 观察者**懒起且至多 1 个**（见 waitWatcher）：快路径零 goroutine；仅在真正进入等待时
-	// 创建，供 ctx 取消/超时 `Broadcast` 打断 `cond.Wait`（m7：此前**每轮等待**各 spawn 一个
-	// → 高竞争下 goroutine churn + 野 Broadcast）。
-	w := &waitWatcher{}
-	defer w.stop()
-	for {
-		if res, err := q.scope.TryReserve(size); err == nil {
-			res.Commit(size)
-			return nil
-		}
-		// 不足：进入一轮排队等待（含持锁 double-check / ctx / deadline 判定）。
-		done, err := q.waitRound(ctx, size, deadline, timeout, timer, w)
-		if err != nil {
-			return err
-		}
-		if done {
-			return nil
-		}
-	}
-}
-
-// waitRound 执行「不足 → 排队等待」的一轮：**持 cond.L** 先 double-check（闭死 TryReserve
-// 失败与 Wait 之间的释放窗口，评审 F4），再判 ctx/deadline，最后 arm + Wait。
-// 返回 done=true 表示本轮已成功预留；err != nil 表示应终止（ctx 取消 / 排队超时）。
-func (q *StagingTracker) waitRound(ctx context.Context, size int64, deadline time.Time,
-	timeout time.Duration, timer *time.Timer, w *waitWatcher) (bool, error) {
 	if q.beforeWait != nil {
-		q.beforeWait() // 测试钩子：窗口点（不持锁）
+		q.beforeWait() // 测试钩子：窗口点（锁外；锁协作入队后该窗口的释放不会被丢弃）
 	}
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
-	if res, rerr := q.scope.TryReserve(size); rerr == nil {
-		res.Commit(size)
-		return true, nil
+	// 锁协作入队：等待侧「查 + 入队」与 ReleaseUsage「改账 + 唤醒」同锁（q.mu）⇒ 无丢唤醒。
+	_, err := q.queue.AcquireUnder(ctx, waitq.Request{
+		Group:    []waitq.Resource{stagingResource{scope: q.scope, tracker: q}},
+		N:        size,
+		Priority: waitq.Normal,
+		Timeout:  timeout,
+		Label:    "staging",
+	}, &q.mu)
+	if err == nil {
+		return nil // 适配器已 TryReserve + Commit（额度已入账）
 	}
-	if cerr := ctx.Err(); cerr != nil {
-		return false, fmt.Errorf("quota: 等待本地 staging 空间中断: %w", cerr)
-	}
-	if time.Until(deadline) <= 0 {
-		// deadline 后最后一次尝试：释放可能与超时同时发生，避免误报。
-		if res, rerr := q.scope.TryReserve(size); rerr == nil {
-			res.Commit(size)
-			return true, nil
-		}
-		return false, fmt.Errorf("quota: 等待本地 staging 空间超时（%s）", timeout)
-	}
-	w.arm(q, ctx, timer)
-	q.waitRounds.Add(1) // 进入等待（测试据此同步，无需固定 Sleep）
-	q.cond.Wait()       // 释放 cond.L；被唤醒后 defer 重新解锁
-	return false, nil
-}
-
-// waitWatcher 承载一次 ReserveUsage 的等待观察者（懒起一次；stop 幂等）。
-// 抽取原因：让 ReserveUsage 保持可读（gocognit 阈值）且观察者语义单点。
-type waitWatcher struct {
-	interrupt chan struct{}
-	armed     bool
-}
-
-// arm 首次进入等待时启动观察者：ctx 取消 / 超时 → Broadcast 打断所有等待者重新评估。
-// **调用方持 cond.L**（与 Wait 同一临界区）——观察者取锁后才 Broadcast，故信号不会落在
-// 「尚未 Wait」的窗口里（F4 的另一半：唤醒不可丢）。
-func (w *waitWatcher) arm(q *StagingTracker, ctx context.Context, timer *time.Timer) {
-	if w.armed {
-		return
-	}
-	w.armed = true
-	w.interrupt = make(chan struct{})
-	q.watchers.Add(1)
-	go func() {
-		select {
-		case <-ctx.Done():
-		case <-timer.C:
-		case <-w.interrupt:
-			return
-		}
-		q.cond.L.Lock() // 等待者持锁直至 Wait 释放 ⇒ 此锁必在 Wait 之后取得
-		q.cond.Broadcast()
-		q.cond.L.Unlock()
-	}()
-}
-
-// stop 停止观察者（未 arm 时 no-op；重复调用安全由调用方一次性 defer 保证）。
-func (w *waitWatcher) stop() {
-	if w.interrupt != nil {
-		close(w.interrupt)
+	switch {
+	case errors.Is(err, waitq.ErrTimeout):
+		// deadline 后仍不足：释放可能与超时同时发生 ⇒ 交由调用方按单文件错误处理（与迁移前同文案）。
+		return fmt.Errorf("quota: 等待本地 staging 空间超时（%s）", timeout)
+	case errors.Is(err, waitq.ErrTooLarge):
+		// 不可能容纳（> staging 配额）⇒ **立即失败**（迁移前需白等满超时；此处为改进，非能力丢失）。
+		return fmt.Errorf("quota: 本地 staging 配额不足（请求 %d 字节超过上限，即使全部释放也无法容纳）", size)
+	case errors.Is(err, waitq.ErrQueueFull):
+		return fmt.Errorf("quota: 本地 staging 等待队列已满: %w", err)
+	case ctx.Err() != nil:
+		return fmt.Errorf("quota: 等待本地 staging 空间中断: %w", ctx.Err())
+	default:
+		return err
 	}
 }
 
 // ReleaseUsage 释放 size 字节（上传成功或失败后调用；唤醒排队等待者）。
-// **持 cond.L 释放+广播**（评审 F4）：否则广播可能落在等待者「TryReserve 失败 → Wait」
-// 的窗口里被永久丢失。锁序：cond.L → scope.mu（与 ReserveUsage 同序，无环）。
+//
+// 顺序要点（与 Pool.withWaitLock 同型）：
+//  1. 在 q.mu 内**改账**（与等待侧的「查 + 入队」同锁 ⇒ 丢唤醒窗口闭合）；
+//  2. 在**释放 q.mu 之后**唤醒：队列的「额度是否够」判据要读账本（scope 的 pool.mu），
+//     持 q.mu 唤醒虽不直接冲突，但保持「唤醒不持任何本层锁」的一致纪律更安全。
 func (q *StagingTracker) ReleaseUsage(size int64) {
 	if size <= 0 {
 		return
 	}
-	q.cond.L.Lock()
+	q.mu.Lock()
 	q.scope.ReleaseUsage(size)
-	q.cond.Broadcast() // 唤醒排队等待者
-	q.cond.L.Unlock()
+	q.mu.Unlock()
+	if q.queue != nil {
+		q.queue.NotifyAll()
+	}
 }
