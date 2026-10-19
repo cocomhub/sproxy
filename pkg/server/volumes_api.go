@@ -480,7 +480,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	if ls, lerr := userVisibleSize(fromRoot, rel); lerr == nil {
 		size = ls
 	}
-	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(owner, rel, toVol, mc.toRoot, size)
+	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(r.Context(), owner, rel, toVol, mc.toRoot, size)
 	if !rOk {
 		return status, resp
 	}
@@ -619,7 +619,7 @@ func (mc *moveFileCtx) toCharge(n int64) int64 { return physSizeFor(mc.toRoot, n
 // （`files.settleSize`）⇒ 释放必须同口径，否则按逻辑释放会**少释放** ⇒ 幽灵占用/假 507。
 func (mc *moveFileCtx) fromCharge(n int64) int64 { return physSizeFor(mc.fromRoot, n) }
 
-func (h *Handlers) moveReserveTarget(owner, rel, toVol string, toRoot *storage.Root, size int64) (*quota.Reservation, *quota.Reservation, *quota.Scope, int, UploadResponse, bool) {
+func (h *Handlers) moveReserveTarget(ctx context.Context, owner, rel, toVol string, toRoot *storage.Root, size int64) (*quota.Reservation, *quota.Reservation, *quota.Scope, int, UploadResponse, bool) {
 	// 记账口径（2026-10-16 高风险区审核修复）：预留必须按**目标卷物理占用**（与上传路径
 	// `files.settleSize` 同源）。`size` 是**用户可见长度**（明文，见调用方注释），而目标经
 	// `writeUserVisible` 透明加密落盘 ⇒ 按逻辑预留会在加密卷上**少预留** `(物理 − 逻辑)`。
@@ -628,14 +628,14 @@ func (h *Handlers) moveReserveTarget(owner, rel, toVol string, toRoot *storage.R
 	scope := h.quotaScopeFor(owner, rel)
 	var scopeRes, poolRes *quota.Reservation
 	if scope != nil {
-		rr, rerr := scope.TryReserve(size)
+		rr, rerr := scope.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
 		if rerr != nil {
 			return nil, nil, nil, http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
 		}
 		scopeRes = rr
 	}
 	if toPool != nil {
-		rr, rerr := toPool.TryReserve(size)
+		rr, rerr := toPool.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
 		if rerr != nil {
 			if scopeRes != nil {
 				scopeRes.Release()
