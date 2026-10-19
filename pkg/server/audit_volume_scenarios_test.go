@@ -33,36 +33,7 @@ func newVolumeAuditServer(t *testing.T) (string, *Handlers, string) {
 	}
 	url, h, _ := newVolumesAPIServer(t, "admin", vols, nil)
 
-	j, err := audit.NewFileJournal(audit.FileJournalConfig{
-		Dir:        filepath.Join(base, "audit-hot"),
-		Layout:     audit.LayoutGlobal,
-		GlobalName: "audit.log",
-		SyncMode:   audit.SyncNone,
-		Logger:     testLogger(),
-	})
-	if err != nil {
-		t.Fatalf("NewFileJournal: %v", err)
-	}
-	t.Cleanup(func() { _ = j.Close() })
-	caps := audit.FullCapabilities()
-	svc, serr := audit.New(audit.Options{
-		Journal: j,
-		Index:   audit.NewRingIndex(256),
-		Logger:  testLogger(),
-		Policy:  audit.Policy{MaxMemoryEntries: 256},
-		Caps:    &caps,
-		CtxFields: audit.ContextFields{
-			Actor: ActorFrom,
-			Owner: ActorFrom,
-			Mesh:  MeshFrom,
-		},
-	})
-	if serr != nil {
-		t.Fatalf("audit.New: %v", serr)
-	}
-	// 直接挂到 Handlers 上（测试内同包）：此后所有 RecordAudit 都进这套服务 ✓。
-	h.auditSvc = svc
-	h.auditJournal = j
+	attachTestAudit(t, h) // 与生产同构的审计接线（收敛到唯一助手）
 	return url, h, base
 }
 

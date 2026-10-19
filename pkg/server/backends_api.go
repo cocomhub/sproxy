@@ -25,6 +25,44 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
+// presignStatusWriter 记录响应状态码（供**失败审计**使用）。
+//
+// 为什么用包装层而不是在每个失败点各调一次：presign/complete 的失败形态多且分散
+// （403 ACL/占用/封印、400 参数、404 未注册/对象不存在、405 不支持、500 构造失败），
+// 逐个 early return 埋点既易漏、又会在新增分支时再次漏掉 ✗ ⇒ 只观察**最终状态码**，
+// 一次覆盖全部失败路径（含将来新增的分支）✓。
+type presignStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+// WriteHeader 记录首个状态码（后续重复调用按 net/http 语义忽略）。
+func (w *presignStatusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Write 在未显式 WriteHeader 时按 200 记账。
+func (w *presignStatusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// auditPresignFailed 为**失败**的预签名签发/登记补一条审计（成功路径已各自埋点）。
+//
+// 设计 §9.1 要求 denied/error 也留痕：presign 是「用服务端凭据换直传 URL」的高危面，
+// 403（ACL/占用/封印）与 400（参数篡改）恰恰是**攻击信号**，此刻无审计 ⇒ 事后不可追。
+func (h *Handlers) auditPresignFailed(r *http.Request, action, typ string, status int) {
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: action, ObjectType: "backend", Object: typ, Result: "failed",
+		Detail: fmt.Sprintf("失败（HTTP %d）", status),
+	})
+}
+
 type backendsListResponse struct {
 	Backends []registry.BackendSchemaInfo `json:"backends"`
 }
@@ -41,6 +79,17 @@ func (h *Handlers) backendsHandler(w http.ResponseWriter, r *http.Request) {
 // 按 type 从注册表构造临时后端 → 断言 Presigner → 返回签名 URL（签名 v4 直传）。
 // 未注册 type → 404；后端不支持 Presign → 405；缺 path / method 非法 → 400。
 func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request) {
+	sw := &presignStatusWriter{ResponseWriter: w}
+	defer func() {
+		if sw.status >= http.StatusBadRequest {
+			h.auditPresignFailed(r, "backend_presign", r.PathValue("type"), sw.status)
+		}
+	}()
+	h.backendPresignCore(sw, r)
+}
+
+// backendPresignCore 是 presign 的实际逻辑（失败审计由包装层按最终状态码统一补）。
+func (h *Handlers) backendPresignCore(w http.ResponseWriter, r *http.Request) {
 	typ := r.PathValue("type")
 	owner := normalizeOwner(ownerFromRequest(r))
 	path, perr := h.presignPathFor(r)
@@ -153,6 +202,17 @@ func (h *Handlers) presignBackendError(w http.ResponseWriter, typ string, err er
 // 客户端直传完成后登记——服务端确认对象已存在（sync.FS.Stat）。
 // 未注册 type → 404；对象不存在 → 404（fail-closed）。
 func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.Request) {
+	sw := &presignStatusWriter{ResponseWriter: w}
+	defer func() {
+		if sw.status >= http.StatusBadRequest {
+			h.auditPresignFailed(r, "backend_presign_complete", r.PathValue("type"), sw.status)
+		}
+	}()
+	h.backendPresignCompleteCore(sw, r)
+}
+
+// backendPresignCompleteCore 是 complete 的实际逻辑（失败审计由包装层统一补）。
+func (h *Handlers) backendPresignCompleteCore(w http.ResponseWriter, r *http.Request) {
 	typ := r.PathValue("type")
 	path, perr := h.presignPathFor(r)
 	if perr != nil {
