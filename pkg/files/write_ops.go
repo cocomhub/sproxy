@@ -737,6 +737,9 @@ func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (
 	s.rt.logger().Info("目录已创建", "dir", remotePath)
 	// 文件变更事件：mkdir 成功。
 	s.rt.publishFileEvent(EventMkdir, owner, rel, 0)
+	// 审计（域层 ⇒ 覆盖 HTTP/DAV/S3/CLI）：本地默认路径建目录成功
+	// （显式卷分支在 makeDirExplicitVolume 内单独记，两分支互斥不重复）。
+	s.rt.recordFileAudit(ctx, "mkdir", remotePath, auditResultSuccess, "volume="+volName)
 	return MakeDirResult{RemotePath: remotePath}, nil
 }
 
@@ -931,6 +934,9 @@ func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath
 	s.releaseDirChainDiff(owner, dirRel, remotePath, volName, dirBefore, dirOK)
 	s.rt.logger().Info("目录已删除（外部卷）", "dir", remotePath, "volume", volName)
 	s.rt.publishFileEvent(EventRmdir, owner, remotePath, 0)
+	// 审计：显式卷路径删目录成功（本地路径在 RemoveDir 内单独记，两分支互斥不重复）。
+	s.rt.recordFileAudit(ctx, "rmdir", remotePath, auditResultSuccess,
+		"volume="+volName+" force="+fmt.Sprintf("%t", force))
 	return RemoveDirResult{RemotePath: remotePath}, true, nil
 }
 

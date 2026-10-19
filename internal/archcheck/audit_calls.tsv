@@ -1,14 +1,14 @@
-# 门禁 R35-a：审计调用点**棘轮基线**（文件级：未登记文件出现调用点即红；计数只减不增）。
+# 门禁 R35-a：审计调用点**棘轮基线**（只减不增）。
 # 设计 docs/designs/2026-10-19-audit-service.md §8.2：审计能力唯一由 pkg/audit 提供，
 # 调用点必须登记；新增业务审计经统一 API（pkg/audit.Service.Emit / files 域 recordFileAudit），
-# 不得新增散点实现。覆盖缺口补齐属合法新增（随覆盖更新本表）。
+# 不得新增散点实现（本表只减不增）。
 # 格式：<文件>	<调用点数>	<备注>
 cmd/sproxy/root.go	1	
 pkg/files/chunked_upload.go	1	
 pkg/files/copy_ops.go	3	
-pkg/files/tags.go	1	标签更新（唯一 HTTP 入口；TagFiles 无 ctx）
+pkg/files/tags.go	1	
 pkg/files/trash.go	6	
-pkg/files/write_ops.go	30	域层写面（mkdir/rmdir/upload/delete/rename…，覆盖全 face）
+pkg/files/write_ops.go	32	
 pkg/server/ai_insight_handler.go	6	
 pkg/server/ai_privacy.go	1	
 pkg/server/archive.go	1	
