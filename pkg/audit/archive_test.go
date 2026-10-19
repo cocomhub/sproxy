@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -226,59 +227,67 @@ func TestArchiveSealed_RequiresDeps(t *testing.T) {
 	}
 }
 
-// TestDirArchiver_RoundtripAndIdempotent 目录适配器：往返内容一致 + 重复归档幂等。
-func TestDirArchiver_RoundtripAndIdempotent(t *testing.T) {
+// memSink 是 SegmentSink 的测试替身（内存 map；可注入失败）。
+type memSink struct {
+	objs map[string][]byte
+	fail bool
+}
+
+func (m *memSink) Put(_ context.Context, p string, r io.Reader, _ int64) error {
+	if m.fail {
+		return errors.New("目的地不可写（测试替身）")
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	if m.objs == nil {
+		m.objs = map[string][]byte{}
+	}
+	m.objs[p] = b
+	return nil
+}
+
+func (m *memSink) Size(_ context.Context, p string) (int64, bool, error) {
+	b, ok := m.objs[p]
+	if !ok {
+		return 0, false, nil
+	}
+	return int64(len(b)), true, nil
+}
+
+// TestSinkArchiver_WritesAndIsIdempotent 写目的地（经 SegmentSink 能力）+ 幂等（同大小不重写）。
+func TestSinkArchiver_WritesAndIsIdempotent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	j := newArchiveJournal(t)
-	sealSegments(t, j, 12)
-
-	segs, _ := j.Segments()
-	var sealed []SegmentInfo
-	var totalBytes int64
-	for _, s := range segs {
-		if s.Sealed {
-			sealed = append(sealed, s)
-			totalBytes += s.Size
-		}
-	}
-	if len(sealed) == 0 {
-		t.Fatal("测试前提不成立：无封段")
-	}
-	dst := filepath.Join(t.TempDir(), "cold")
-	rep, err := ArchiveSealed(ctx, j, DirArchiver{Dir: dst}, 0)
+	sink := &memSink{}
+	a := SinkArchiver{Sink: sink, Now: func() time.Time { return time.Unix(0, 0).UTC() }}
+	seg := SegmentInfo{Path: "/hot/audit.log.2", Size: 5, Sealed: true}
+	ref, err := a.Archive(ctx, seg, strings.NewReader("hello"))
 	if err != nil {
-		t.Fatalf("ArchiveSealed: %v", err)
+		t.Fatalf("Archive: %v", err)
 	}
-	if rep.Archived != len(sealed) || rep.Failed != 0 {
-		t.Fatalf("应归档全部封段: %+v", rep)
+	if got := sink.objs[ref]; string(got) != "hello" {
+		t.Fatalf("归档内容不符: %q", string(got))
 	}
-	var gotBytes int64
-	for _, s := range sealed {
-		b, rerr := os.ReadFile(filepath.Join(dst, filepath.Base(s.Path)))
-		if rerr != nil {
-			t.Fatalf("读回归档文件失败 %s: %v", s.Path, rerr)
-		}
-		if int64(len(b)) != s.Size {
-			t.Fatalf("往返大小不符 %s: got=%d want=%d", s.Path, len(b), s.Size)
-		}
-		gotBytes += int64(len(b))
+	// 幂等：目标已有同大小副本 ⇒ 第二次不再写（用不可读的 reader 证明它没被消费）。
+	ref2, err2 := a.Archive(ctx, seg, strings.NewReader("XXXXX"))
+	if err2 != nil || ref2 != ref {
+		t.Fatalf("幂等路径应返回同一 ref: ref=%s err=%v", ref2, err2)
 	}
-	if gotBytes != totalBytes {
-		t.Fatalf("往返总字节不符: got=%d want=%d", gotBytes, totalBytes)
+	if string(sink.objs[ref]) != "hello" {
+		t.Fatalf("幂等路径不得覆盖已有内容: %q", string(sink.objs[ref]))
 	}
+}
 
-	// 幂等：再归档同一批（构造一个新封段场景不必要）——直接对目录适配器重复喂同一段。
-	f, oerr := os.Open(filepath.Join(dst, filepath.Base(sealed[0].Path)))
-	if oerr != nil {
-		t.Fatalf("open archived: %v", oerr)
+// TestSinkArchiver_ErrorPropagates 目的地写失败 ⇒ 返回错误（上层据此保留本地段）。
+func TestSinkArchiver_ErrorPropagates(t *testing.T) {
+	t.Parallel()
+	a := SinkArchiver{Sink: &memSink{fail: true}}
+	if _, err := a.Archive(context.Background(), SegmentInfo{Path: "/x/audit.log.1", Size: 1}, strings.NewReader("z")); err == nil {
+		t.Fatal("写失败应返回错误")
 	}
-	defer f.Close()
-	ref1, err1 := DirArchiver{Dir: dst}.Archive(ctx, sealed[0], f)
-	if err1 != nil {
-		t.Fatalf("重复归档应成功（幂等）: %v", err1)
-	}
-	if ref1 == "" {
-		t.Fatal("幂等路径也应返回 ref")
+	if _, err := (SinkArchiver{}).Archive(context.Background(), SegmentInfo{}, strings.NewReader("")); err == nil {
+		t.Fatal("缺少 SegmentSink 应返回错误（fail-closed）")
 	}
 }

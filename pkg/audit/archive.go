@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // SegmentArchiver 把**已封（sealed）**的合规段归档到外部目的地（外部卷 / 加密卷 / 远端）。
@@ -119,55 +121,6 @@ func archiveOne(ctx context.Context, a SegmentArchiver, seg SegmentInfo, rep *Ar
 	return nil
 }
 
-// DirArchiver 是**目录目的地**的参考实现（冷段本地目录 / 挂载的外部卷；加密与远端由别的
-// Archiver 实现）。语义：
-//   - 目标文件名为 `<段文件名>`（如 `audit.log.3`）；
-//   - **幂等**：目标已存在且大小一致 ⇒ 直接返回既有 ref（不重复写、不覆盖）；
-//   - 原子：先写 `*.tmp-<rand>` 再 rename（半成品不会伪装成已归档）。
-type DirArchiver struct {
-	// Dir 是目的地目录（不存在则按 0700 创建）。
-	Dir string
-}
-
-// Archive 实现 SegmentArchiver（见类型注释的幂等/原子语义）。
-func (d DirArchiver) Archive(ctx context.Context, seg SegmentInfo, r io.Reader) (string, error) {
-	if d.Dir == "" {
-		return "", fmt.Errorf("audit: DirArchiver 需要 Dir")
-	}
-	if err := ensurePrivateDir(d.Dir); err != nil {
-		return "", err
-	}
-	dst := filepath.Join(d.Dir, filepath.Base(seg.Path))
-	if st, err := os.Stat(dst); err == nil && seg.Size > 0 && st.Size() == seg.Size {
-		return dst, nil // 幂等：目的地已有完整副本
-	}
-	tmp := dst + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("audit: 创建归档文件失败: %w", err)
-	}
-	n, cpErr := io.Copy(f, r)
-	if cpErr == nil && seg.Size > 0 && n != seg.Size {
-		cpErr = fmt.Errorf("audit: 归档长度不符（读 %d，期望 %d）", n, seg.Size)
-	}
-	if cpErr == nil {
-		cpErr = f.Sync()
-	}
-	if cerr := f.Close(); cpErr == nil {
-		cpErr = cerr
-	}
-	if cpErr != nil {
-		_ = os.Remove(tmp) // 不留半成品
-		return "", cpErr
-	}
-	if rerr := os.Rename(tmp, dst); rerr != nil {
-		_ = os.Remove(tmp)
-		return "", fmt.Errorf("audit: 归档落位失败: %w", rerr)
-	}
-	_ = ctx
-	return dst, nil
-}
-
 // sealedSegments 返回**封段**并按**最旧优先**排序（archiveIndex 大者更旧）。
 func sealedSegments(j *FileJournal) ([]SegmentInfo, error) {
 	segs, err := j.Segments()
@@ -184,4 +137,51 @@ func sealedSegments(j *FileJournal) ([]SegmentInfo, error) {
 		return archiveIndex(sealed[i].Path) > archiveIndex(sealed[k].Path)
 	})
 	return sealed, nil
+}
+
+// SegmentSink 是归档**目的地写能力**（由装配层用 `pkg/sync.FS` 适配：LocalFS / 外部卷 / 加密卷
+// / 云端都用同一套 `WriteFile` 语义 ⇒ 审计包**不依赖**任何存储实现，也不重复实现拷贝 ✗）。
+//
+// 与 `pkg/sync.FS.WriteFile(ctx, key, path, r, size, mtime)` 同形（去掉 LogicalKey/幂等上下文，
+// 这两个由装配层适配时补齐）。
+type SegmentSink interface {
+	// Put 写入整个对象（覆盖语义由实现决定）；size 为声明字节数。
+	Put(ctx context.Context, path string, r io.Reader, size int64) error
+	// Size 返回已有对象大小；exists=false 表示不存在（归档侧据此**幂等跳过**）。
+	Size(ctx context.Context, path string) (n int64, exists bool, err error)
+}
+
+// SinkArchiver 是把封段写入 `SegmentSink` 的归档实现（**唯一的通用实现**）。
+//
+// 幂等：目标已存在且大小一致 ⇒ 直接返回既有 ref（不重复写）；否则覆盖写。
+// 路径：`<prefix>/<UTC 日期>/<段文件名>`（同一段名在同一天恒定 ⇒ 幂等可判定 ✓）。
+type SinkArchiver struct {
+	Sink   SegmentSink
+	Prefix string           // 空 ⇒ 默认 "audit-archive"
+	Now    func() time.Time // 可注入（测试确定性）
+}
+
+// Archive 实现 SegmentArchiver。
+func (a SinkArchiver) Archive(ctx context.Context, seg SegmentInfo, r io.Reader) (string, error) {
+	if a.Sink == nil {
+		return "", fmt.Errorf("audit: SinkArchiver 需要 SegmentSink（装配层用 pkg/sync.FS 适配）")
+	}
+	prefix := a.Prefix
+	if prefix == "" {
+		prefix = "audit-archive"
+	}
+	now := a.Now
+	if now == nil {
+		now = time.Now
+	}
+	rel := path.Join(prefix, now().UTC().Format("20060102"), filepath.Base(seg.Path))
+	if n, exists, err := a.Sink.Size(ctx, rel); err != nil {
+		return "", fmt.Errorf("audit: 查询归档目标失败: %w", err)
+	} else if exists && seg.Size > 0 && n == seg.Size {
+		return rel, nil // 幂等：已有完整副本
+	}
+	if err := a.Sink.Put(ctx, rel, r, seg.Size); err != nil {
+		return "", fmt.Errorf("audit: 写入归档目标失败: %w", err)
+	}
+	return rel, nil
 }

@@ -44,6 +44,7 @@ import (
 // localFSCallAllowlist 是允许在非测试源码中调用 `sync.NewLocalFS(...)` 的文件（module 相对
 // 路径）→ 理由（必须回答「为什么可以不经 storage.Root」）。
 var localFSCallAllowlist = map[string]string{
+	"pkg/server/audit_archive_sink.go": "**审计冷段归档目录**（`audit.archive_dir`，用户显式配置的独立冷存储目录，可挂载任意卷）：它不在任何受管用户卷根内 ⇒ 无卷/配额语义可依附；归档写入即经该 FS 的 `WriteFile`（与 pkg/sync 的云端转存同源），不是用户内容路径",
 	"pkg/volume/enclosure/attach.go":   "封装卷**特权源视图**（必须在封印注入前取得、且不得受封印影响）；源为 at-rest 加密卷时装配期已 ErrSourceEncrypted 显式拒绝（禁双重变换）",
 	"cmd/sproxy/secret_register.go":    "**独立目录**回退分支（目标目录不在任何受管卷根内 ⇒ 无卷语义可依附）；落在卷根内的 secrets 目录已改经 Root（`secretsFSFor` → `server.NewRootSecretsFS`，含 0600 回调）",
 	"cmd/sproxy/pikpak_secretstore.go": "pikpak 凭据的 **shardseal 加密容器**底层（内容已由 secretdata 加密，非明文密钥材料）；其**主密钥**已改经 Root（`pikpakMasterKeyManager` → `server.NewRootSecretsFS`）",

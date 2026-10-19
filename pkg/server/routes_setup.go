@@ -812,7 +812,9 @@ func registerHubRoutes(h *Handlers, srvMux, localMux *http.ServeMux, opts Regist
 // 为什么在装配层：归档目的地（挂载的冷卷目录）属部署配置；原语与护栏都在 pkg/audit（单一实现）。
 func runAuditArchive(cfg *Config, j *audit.FileJournal, log *slog.Logger) {
 	keep := max(cfg.Audit.ArchiveKeep, 0)
-	rep, err := audit.ArchiveSealed(context.Background(), j, audit.DirArchiver{Dir: cfg.Audit.ArchiveDir}, keep)
+	// 实际写能力来自 pkg/sync（与云端下载→转存同源）；审计包只做编排与护栏。
+	sink := audit.SinkArchiver{Sink: newColdSegmentSink(cfg.Audit.ArchiveDir, log)}
+	rep, err := audit.ArchiveSealed(context.Background(), j, sink, keep)
 	if err != nil {
 		log.Warn("审计冷段归档失败（封段保留在本地，下轮重试）", "error", err, "archive_dir", cfg.Audit.ArchiveDir)
 		return
