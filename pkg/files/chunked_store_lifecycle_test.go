@@ -10,6 +10,7 @@ package files
 // 包内零覆盖。
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,7 +26,7 @@ type fakeCapacity struct {
 	tryHook func()
 }
 
-func (f *fakeCapacity) TryReserveChunked(int64) error {
+func (f *fakeCapacity) TryReserveChunked(context.Context, int64) error {
 	if f.tryHook != nil {
 		f.tryHook()
 	}

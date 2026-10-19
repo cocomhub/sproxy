@@ -453,7 +453,7 @@ func (s *Service) initNewSession(ctx context.Context, i *chunkedInit, session *C
 		// P5 回退：quota 未装配（route.ScopeRes nil，volSet nil 旧装配 / globalPool nil）
 		// 时回退旧 storageMgr 全局预留；未完成会话删除/过期时按 StorageMgrReserved 释放
 		// （已完成会话不释放，见 DeleteSession）。
-		reserved, published, ok := s.p5FallbackReserve(i.w, i.store, session, req)
+		reserved, published, ok := s.p5FallbackReserve(ctx, i.w, i.store, session, req)
 		if !ok {
 			return false
 		}
@@ -486,8 +486,8 @@ func (s *Service) initNewSession(ctx context.Context, i *chunkedInit, session *C
 
 // p5FallbackReserve P5 回退预留：quota 未装配（route.ScopeRes nil）时回退旧 storageMgr
 // 全局预留。返回 (reservedBytes, published)；失败已清理会话并回 507（ok=false）。
-func (s *Service) p5FallbackReserve(w http.ResponseWriter, store *UploadStore, session *ChunkedUploadSession, req *ChunkedInitRequest) (int64, bool, bool) {
-	if err := s.rt.storageManager().TryReserveChunked(session.TotalSize); err != nil {
+func (s *Service) p5FallbackReserve(ctx context.Context, w http.ResponseWriter, store *UploadStore, session *ChunkedUploadSession, req *ChunkedInitRequest) (int64, bool, bool) {
+	if err := s.rt.storageManager().TryReserveChunked(ctx, session.TotalSize); err != nil {
 		store.cleanupSessionIfCurrent(session.UploadID, session)
 		s.rt.logger().Warn("storage full, chunked upload rejected",
 			"file_name", req.Filename,
