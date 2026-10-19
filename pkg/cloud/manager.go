@@ -282,6 +282,9 @@ type StorageManager interface {
 }
 
 type CloudDownloadManager struct {
+	// recovered 是 RecoverAll 的幂等守卫（M3 统一恢复协调器；重复调用不得重复挂载任务）。
+	recovered atomic.Bool
+
 	tasks map[string]*CloudTask
 	mu    sync.RWMutex
 	// maxConcurrent 是下载并发上限（构造时从配置固化）：placeholderFor 用它把**未知大小任务**的
@@ -391,6 +394,11 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 // CloudManagerOptions 是 NewCloudDownloadManager 的装配参数（S107：8 参数 → 结构体）。
 // 除 Config 外均可省略（对应 resolver 为 nil 时回退为不可用，写路径 fail-closed）。
 type CloudManagerOptions struct {
+	// DeferRecovery 为 true 时**构造期不执行**任务恢复，改由统一恢复协调器
+	// （pkg/recovery legacy 注册）在启动恢复阶段调用 RecoverAll 触发（M3）。
+	// 默认 false ⇒ 构造期恢复（既有行为，零变更）。
+	DeferRecovery bool
+
 	UploadsDir       string
 	Storage          StorageManager
 	TenantFor        TenantResolver
@@ -504,6 +512,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		cancelFuncs:         make(map[string]context.CancelFunc),
 		running:             make(map[string]bool),
 		metrics:             &CloudMetrics{},
+		recovered:           atomic.Bool{}, // M3：RecoverAll 幂等守卫
 		dirtyTasks:          make(map[string]struct{}),
 		flushNow:            make(chan struct{}, 1),
 		stopFlush:           make(chan struct{}),
@@ -546,10 +555,10 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 	// 顺序不能倒：recoverGroups 会按 m.tasks 修剪组内已不存在的任务引用，故必须先恢复任务；
 	// 而孤儿 pending 所属的组记录要到 recoverGroups 之后才在内存里，故组状态刷新只能放在其后
 	// （否则 UpdateGroupStatus 会因组不存在而空转，Web UI 会一直看到 downloading）。
-	orphanPendingGroups := mgr.recoverTasks()
-	mgr.recoverGroups()
-	for _, gid := range orphanPendingGroups {
-		mgr.UpdateGroupStatus(gid)
+	// M3：抽成 RecoverAll（唯一入口，幂等）。默认构造期即执行（零行为变更 ✓）；
+	// 装配层置 DeferRecovery=true 时改由统一恢复协调器触发。
+	if !opts.DeferRecovery {
+		mgr.recoverOnConstruct()
 	}
 
 	// 启动过期任务清理 (wg 跟踪)
@@ -563,6 +572,14 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 	})
 
 	return mgr
+}
+
+// recoverOnConstruct 是构造期的默认恢复调用（M3：真正实现在 RecoverAll；此处只负责告警）。
+// 拆成 helper 只为把 NewCloudDownloadManager 的认知复杂度留在门禁阈值内。
+func (mgr *CloudDownloadManager) recoverOnConstruct() {
+	if _, err := mgr.RecoverAll(); err != nil {
+		mgr.logger.Warn("cloud download recovery failed", "error", err)
+	}
 }
 
 // cloudDirFor 返回 owner 租户 cloud 桶的绝对路径（<root>/<tenant>/cloud）。
