@@ -78,7 +78,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		if scope := m.quotaScope(owner); scope != nil {
 			// 临时预留探测：TryReserve 沿父链校验（租户根 owner_quota + globalPool max），
 			// 满足则立即 Release（探测不落地 committed）。满足=放行；不满足=507。
-			probe, err := scope.TryReserve(totalSize)
+			err := scope.ProbeReserve(totalSize)
 			if err != nil {
 				m.storage.ReleaseCloud(reserved)
 				m.logger.Warn("storage full, cloud download rejected",
@@ -88,7 +88,6 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 				)
 				return nil, quota.ErrStorageFull
 			}
-			probe.Release()
 		}
 	}
 

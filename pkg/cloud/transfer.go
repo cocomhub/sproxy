@@ -867,11 +867,10 @@ func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
 	if !env.remote {
 		if scope := m.quotaScope(env.task.Owner); scope != nil {
 			if env.result.Size > 0 {
-				probe, err := scope.TryReserve(env.result.Size)
+				err := scope.ProbeReserve(env.result.Size)
 				if err != nil {
 					return fmt.Errorf("%w: 用户配额不足（转存目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
 				}
-				probe.Release()
 			}
 		}
 	}

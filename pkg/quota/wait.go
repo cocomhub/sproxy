@@ -100,6 +100,27 @@ func (s *Scope) WaitReserve(ctx context.Context, n int64, timeout time.Duration)
 	return nil, fmt.Errorf("quota: 等待成功后未能取回预留（内部错误）: %w", ErrStorageFull)
 }
 
+// ProbeReserve 是**校验型**预留（探测式）：预留 n 后**立即释放**，只用于沿父链校验
+// 「是否放得下」（副作用 = 校验租户根/全局上限），**不排队** —— 探测语义 ≠ 等待语义。
+//
+// 设计 docs/designs/2026-10-19-waitq.md §8.2「探测式」：明确为校验型 ⇒ 收敛为**具名 API**
+// （不再让调用方散落「TryReserve + Release」两行 —— 漏掉 Release 会永久泄漏 reserved，
+// 是真实的账本风险）。
+func (s *Scope) ProbeReserve(n int64) error {
+	if s == nil || s.pool == nil {
+		return errors.New("quota: nil scope")
+	}
+	if n <= 0 {
+		return nil // 零/负字节无需探测（与 WaitReserve 的零字节直通一致）
+	}
+	res, err := s.TryReserve(n)
+	if err != nil {
+		return err
+	}
+	res.Release()
+	return nil
+}
+
 // WaitReserve 是 Pool 侧的同一入口（在本节点上预留并排队等待）。
 func (p *Pool) WaitReserve(ctx context.Context, n int64, timeout time.Duration) (*Reservation, error) {
 	if p == nil {
