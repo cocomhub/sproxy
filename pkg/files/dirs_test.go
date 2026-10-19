@@ -235,7 +235,7 @@ func (r testRuntime) Locate(owner, rel string) (FileLocation, bool) {
 	return r.e.locateOwnerFile(owner, rel)
 }
 
-func (r testRuntime) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+func (r testRuntime) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
 	if r.e.routeUpload == nil {
 		return UploadRoute{}, nil
 	}
@@ -243,7 +243,7 @@ func (r testRuntime) Route(owner, rel, explicitVol string, size int64, forceHome
 }
 
 // RouteTarget 显式卷（不查重）：回落 dirsEnv.routeUpload 的显式卷形态（替身 routeUploadDefault 不查重）。
-func (r testRuntime) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+func (r testRuntime) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
 	return r.e.routeUpload(owner, rel, volName, size, "")
 }
 

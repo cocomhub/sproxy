@@ -220,12 +220,12 @@ func (r filesRuntime) Locate(owner, rel string) (files.FileLocation, bool) {
 	return r.h.locateOwnerFileForFiles(owner, rel)
 }
 
-func (r filesRuntime) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (files.UploadRoute, error) {
-	return r.h.routeUploadForFiles(owner, rel, explicitVol, size, forceHomeVol)
+func (r filesRuntime) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (files.UploadRoute, error) {
+	return r.h.routeUploadForFiles(ctx, owner, rel, explicitVol, size, forceHomeVol)
 }
 
-func (r filesRuntime) RouteTarget(owner, rel, volName string, size int64) (files.UploadRoute, error) {
-	route, err := r.h.routeUploadForTarget(owner, rel, volName, size)
+func (r filesRuntime) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (files.UploadRoute, error) {
+	route, err := r.h.routeUploadForTarget(ctx, owner, rel, volName, size)
 	if err != nil {
 		return files.UploadRoute{}, err
 	}
@@ -323,9 +323,9 @@ func (h *Handlers) locateOwnerFileForFiles(owner, rel string) (files.FileLocatio
 // routeUploadForTarget 为统一写内核（WriteTarget 显式卷：S3 单对象 PUT / DAV / 版本恢复 /
 // presign 直传登记）定卷：ACL 校验 + 写保护 + 单候选双预留，**不做唯一性查重**（覆盖写语义
 // ——这些写面允许覆盖同 rel）。
-func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) (files.UploadRoute, error) {
+func (h *Handlers) routeUploadForTarget(ctx context.Context, owner, rel, volName string, size int64) (files.UploadRoute, error) {
 	if h.volSet == nil {
-		return h.routeUploadForFiles(owner, rel, volName, size, "")
+		return h.routeUploadForFiles(ctx, owner, rel, volName, size, "")
 	}
 	owner = normalizeOwner(owner)
 	view := volume.AllowedVolumes(h.volSet.All(), owner)
@@ -336,7 +336,7 @@ func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) 
 	if !ok || !v.Authorize(owner) {
 		return files.UploadRoute{}, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
 	}
-	route, err := h.reserveVolume(owner, rel, v.Name, size)
+	route, err := h.reserveVolume(ctx, owner, rel, v.Name, size)
 	if err != nil {
 		// 预留失败必须是契约错误（*files.HTTPError）：调用方（s3WriteError / DAV / presign）
 		// 只认该类型，裸 *routeError 会退化成 500（配额满应 507、越权应 403）。
@@ -353,8 +353,8 @@ func (h *Handlers) routeUploadForTarget(owner, rel, volName string, size int64) 
 
 // routeUploadForFiles 把 routeUpload 的结果适配为子包的值类型，
 // 并把 *routeError 映射为子包的 HTTPError（保持状态码与文案逐字不变）。
-func (h *Handlers) routeUploadForFiles(owner, rel, explicitVol string, size int64, forceHomeVol string) (files.UploadRoute, error) {
-	route, err := h.routeUpload(owner, rel, explicitVol, size, forceHomeVol)
+func (h *Handlers) routeUploadForFiles(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (files.UploadRoute, error) {
+	route, err := h.routeUpload(ctx, owner, rel, explicitVol, size, forceHomeVol)
 	if err != nil {
 		return files.UploadRoute{}, toFilesHTTPError(err)
 	}

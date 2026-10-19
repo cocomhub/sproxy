@@ -499,7 +499,7 @@ func (s *Service) resolveWriteHomeHandled(ctx context.Context, owner, rel, remot
 // （路由拒绝按类型映射 403/409/507，内部错误 → 500）；route.Tenant 不可用 → 400。
 // 返回的 route 必满足 route.Tenant 与 route.Tenant.Root() 非 nil（调用方可直接落盘）。
 func (s *Service) routeWriteUpload(ctx context.Context, logger *slog.Logger, owner, rel string, input WriteFileInput, forceHomeVol, remotePath string) (UploadRoute, error) {
-	route, routeErr := s.rt.routeUpload(owner, rel, input.ExplicitVol, input.ClientSize, forceHomeVol)
+	route, routeErr := s.rt.routeUpload(ctx, owner, rel, input.ExplicitVol, input.ClientSize, forceHomeVol)
 	if routeErr != nil {
 		logger.WarnContext(ctx, "上传卷路由拒绝", "file_name", remotePath, "error", routeErr.Error())
 		if he, ok := errors.AsType[*HTTPError](routeErr); ok {
@@ -2225,7 +2225,7 @@ func (s *Service) WriteTarget(ctx context.Context, input WriteTargetInput, src i
 	var route UploadRoute
 	var routeErr error
 	if input.Volume != "" {
-		route, routeErr = s.rt.routeTarget(owner, rel, input.Volume, input.ClientSize)
+		route, routeErr = s.rt.routeTarget(ctx, owner, rel, input.Volume, input.ClientSize)
 	} else {
 		route, routeErr = s.routeWriteUpload(ctx, logger, owner, rel, WriteFileInput{
 			Owner: owner, RemotePath: remotePath, ExplicitVol: "",

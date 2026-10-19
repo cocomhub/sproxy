@@ -257,7 +257,7 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 
 	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
 	// 预检 + 会话创建/续传 + 新会话路由预留与在途临时文件。详细语义见 createChunkedSession。
-	session, reused, ok := s.createChunkedSession(&chunkedInit{w: w, r: r, store: store, owner: owner, rel: rel, explicitVol: explicitVol, forceHomeVol: forceHomeVol}, &req, chunkSize)
+	session, reused, ok := s.createChunkedSession(r.Context(), &chunkedInit{w: w, r: r, store: store, owner: owner, rel: rel, explicitVol: explicitVol, forceHomeVol: forceHomeVol}, &req, chunkSize)
 	if !ok {
 		return
 	}
@@ -302,7 +302,7 @@ type chunkedInit struct {
 
 // createChunkedSession 同名会话冲突预检 + 会话创建/续传（GetOrCreateSession）+ 新会话
 // 路由预留与在途临时文件装配（initNewSession）。返回 (session, reused, ok)。
-func (s *Service) createChunkedSession(i *chunkedInit, req *ChunkedInitRequest, chunkSize int64) (*ChunkedUploadSession, bool, bool) {
+func (s *Service) createChunkedSession(ctx context.Context, i *chunkedInit, req *ChunkedInitRequest, chunkSize int64) (*ChunkedUploadSession, bool, bool) {
 	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
 	// 预检：存在未完成同名会话但 checksum/大小不一致 → 拒绝（避免同目标两个在途会话）。
 	if !s.rejectConflictingSession(i.w, i.store, req) {
@@ -322,7 +322,7 @@ func (s *Service) createChunkedSession(i *chunkedInit, req *ChunkedInitRequest, 
 		// （507 时清理 session 返回 507，不创建临时名）；tnt 为 route 目标卷租户（temp/complete
 		// 同卷 rename 原子）。单卷旧装配（volSet nil）：routeUpload 回落既有 scope TryReserve
 		// 语义；scope 未装配（quota nil）时回退旧 storageMgr 预留（与改造前一致，零回归）。
-		if !s.initNewSession(i, session, req) {
+		if !s.initNewSession(ctx, i, session, req) {
 			return nil, false, false
 		}
 	}
@@ -425,8 +425,8 @@ func (s *Service) rejectConflictingSession(w http.ResponseWriter, store *UploadS
 // initNewSession 对新会话执行路由预留（routeUpload 定卷 + 双 TryReserve / P5 回退预留）
 // 与在途整临时文件创建（O_EXCL + Truncate 预占位）。任一失败清理会话并回 4xx/5xx，
 // 返回 false；发布结果校验失败（会话已被并发删除/接管）→ 整体回滚（abortInitOrphanRollback）。
-func (s *Service) initNewSession(i *chunkedInit, session *ChunkedUploadSession, req *ChunkedInitRequest) bool {
-	route, routeErr := s.rt.routeUpload(i.owner, i.rel, i.explicitVol, req.TotalSize, i.forceHomeVol)
+func (s *Service) initNewSession(ctx context.Context, i *chunkedInit, session *ChunkedUploadSession, req *ChunkedInitRequest) bool {
+	route, routeErr := s.rt.routeUpload(ctx, i.owner, i.rel, i.explicitVol, req.TotalSize, i.forceHomeVol)
 	if routeErr != nil {
 		i.store.cleanupSessionIfCurrent(session.UploadID, session)
 		s.sendUploadRouteError(i.w, i.r, req.Filename, routeErr)

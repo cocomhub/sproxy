@@ -239,13 +239,13 @@ func (r *runtime) locateOwnerFile(owner, rel string) (FileLocation, bool) {
 	return r.volumes.Locate(owner, rel)
 }
 
-func (r *runtime) routeUpload(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
-	return r.volumes.Route(owner, rel, explicitVol, size, forceHomeVol)
+func (r *runtime) routeUpload(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	return r.volumes.Route(ctx, owner, rel, explicitVol, size, forceHomeVol)
 }
 
 // routeTarget 为统一写内核显式卷定卷（RouteTarget：ACL + 双预留，不查重——覆盖写语义）。
-func (r *runtime) routeTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
-	return r.volumes.RouteTarget(owner, rel, volName, size)
+func (r *runtime) routeTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
+	return r.volumes.RouteTarget(ctx, owner, rel, volName, size)
 }
 
 func (r *runtime) quotaScope(owner, rel string) *quota.Scope {

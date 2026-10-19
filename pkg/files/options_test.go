@@ -335,12 +335,12 @@ func (v testVolumes) Tenant(volName, owner string) *storage.Tenant {
 	return v.tenant(volName, owner)
 }
 func (v testVolumes) Locate(owner, rel string) (FileLocation, bool) { return v.locate(owner, rel) }
-func (v testVolumes) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+func (v testVolumes) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
 	return v.route(owner, rel, explicitVol, size, forceHomeVol)
 }
 
 // RouteTarget 显式卷（不查重）：回落 v.route（测试替身 route 钩子不查重）。
-func (v testVolumes) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
+func (v testVolumes) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
 	return v.route(owner, rel, volName, size, "")
 }
 

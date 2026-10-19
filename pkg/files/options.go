@@ -135,10 +135,10 @@ type VolumeRouter interface {
 	Locate(owner, rel string) (FileLocation, bool)
 	// Route 为写路径定卷并预留双账本（owner 全局 Scope + 卷容量池）。
 	// 显式卷（explicitVol 非空）语义：ACL 校验 + **唯一性查重**（HTTP 上传覆盖策略）。
-	Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
 	// RouteTarget 为**统一写内核**显式卷定卷（ACL 校验 + 双预留，**不做唯一性查重**——
 	// 覆盖写语义：S3/DAV/版本恢复允许覆盖同 rel）。
-	RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error)
+	RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error)
 }
 
 // VolumePhysFootprinter 由**掌握物理布局**的卷实现（secretdata 等）：向配额账本报告对象的
@@ -420,7 +420,7 @@ func (s singleVolume) Locate(owner, rel string) (FileLocation, bool) {
 // Route 复刻单卷写路由语义（pkg/server.routeUpload 的 h.volSet == nil 分支）：恒默认租户；
 // 装配了配额时在 owner 全局 Scope 上预留（单卷无卷容量池）；未装配时无预留。
 // 租户不可用时 Tenant 为 nil，由 Upload 回 400；配额不足回 507。
-func (s singleVolume) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+func (s singleVolume) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
 	route := UploadRoute{Tenant: s.tenants.TenantFor(owner), PhysSize: TenantPhysSizer(s.tenants.TenantFor(owner))}
 	if s.quota != nil {
 		if scope := s.quota.ScopeFor(owner, rel); scope != nil {
@@ -443,8 +443,8 @@ func (s singleVolume) Route(owner, rel, explicitVol string, size int64, forceHom
 }
 
 // RouteTarget 单卷形态：唯一根即目标（同 Route，不查重）。
-func (s singleVolume) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
-	return s.Route(owner, rel, volName, size, "")
+func (s singleVolume) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
+	return s.Route(ctx, owner, rel, volName, size, "")
 }
 
 // defaultDownloadPaths 未注入下载路径解析时的默认：仅普通文件（kind 为空）。
