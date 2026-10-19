@@ -1,14 +1,13 @@
-# 门禁 R36-a：**配额/容量获取入口调用点棘轮**（只减不增）——非测试源码不得新增直接调用
-# TryReserve / WaitReserve / TryReserveChunked / semaphore.Weighted；新增获取路径必须走 pkg/waitq
-# （Acquire/AcquireUnder）或登记到白名单适配器文件。设计 docs/designs/2026-10-19-waitq.md §8.2/§8.3。
+# 门禁 R36-a：**配额/容量获取入口调用点棘轮**（只减不增）——非测试源码不得新增**直接**调用
+# `TryReserve`/`TryReserveChunked`/`semaphore.Weighted`；获取路径应走 pkg/waitq（`Acquire`/
+# `AcquireUnder`）或 `quota.Scope.WaitReserve`（收敛后的排队入口，**允许**），或登记到白名单适配器文件。
+# 设计 docs/designs/2026-10-19-waitq.md §8.2/§8.3。
 #
 # 分类（class 列）：
 #   adapter   = waitq 适配层（合法调用点，白名单文件）
 #   probe     = 校验/对账型（探测式：预留即释放或 Release(pre)+TryReserve(actual)）⇒ **不排队**
-#               （设计 §8.2「探测式」明确语义；已收敛为具名 API 或按豁免登记）
-#   pending   = 待收敛（应经 waitq.Acquire 排队重试）—— **这是收敛待办清单**
+#   pending   = 待收敛（应改走 WaitReserve 排队重试或 waitq.Acquire）—— **收敛待办清单**
 # 格式：<文件>	<调用点数>	<whitelist>	<class>
-pkg/quota/wait.go	6	yes	adapter
 pkg/syncmgr/manager.go	5	no	pending
 pkg/server/backup_api.go	4	no	probe
 pkg/server/sync_handler.go	4	no	pending
@@ -16,13 +15,12 @@ pkg/server/volumes_api.go	4	no	pending
 pkg/cloud/manager_task.go	3	no	pending
 pkg/server/cloud_download_handler.go	3	no	probe
 pkg/server/files_service.go	3	no	pending
-pkg/server/volumes.go	3	no	pending
 pkg/cloud/manager.go	2	no	pending
 pkg/files/dir_charge.go	2	no	pending
 pkg/files/version_store.go	2	no	pending
-pkg/files/write_ops.go	2	no	pending
 pkg/quota/quota.go	2	no	pending
 pkg/quota/staging_tracker.go	2	yes	adapter
+pkg/quota/wait.go	2	yes	adapter
 pkg/server/cloud_service.go	2	no	pending
 pkg/server/s3_part_ledger.go	2	no	pending
 pkg/server/version.go	2	no	pending
@@ -35,6 +33,7 @@ pkg/files/options.go	1	no	pending
 pkg/files/service.go	1	no	pending
 pkg/quota/waitq_adapter.go	1	yes	adapter
 pkg/server/cloud_archive_handler.go	1	no	probe
+pkg/server/volumes.go	1	no	pending
 pkg/storage/capacity/manager.go	1	no	pending
 pkg/syncexec/executor.go	1	no	pending
 pkg/volume/capacity/ledger.go	1	no	pending

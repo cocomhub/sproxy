@@ -85,7 +85,9 @@ func readTSVRows(t *testing.T, name, sep string) [][]string {
 }
 
 // quotaAcquireRe 匹配配额/容量获取入口（与生成基线时的口径一致；注释行不算）。
-var quotaAcquireRe = regexp.MustCompile(`TryReserve|WaitReserve|semaphore\.Weighted`)
+// 口径说明：**只禁「直接」获取**（TryReserve* / semaphore.Weighted）；`WaitReserve` 是
+// **收敛后的入口**（内部即 waitq.AcquireUnder + 根等待锁）⇒ 允许，且它是迁移的目标形态。
+var quotaAcquireRe = regexp.MustCompile(`TryReserve|semaphore\.Weighted`)
 
 // TestR36a_NoNewDirectAcquirePaths 棘轮：新增「直接获取」调用点即红（必须先收敛到 waitq
 // 或登记到白名单适配器文件）。
