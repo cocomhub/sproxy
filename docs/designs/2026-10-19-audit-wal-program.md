@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # 总体方案：统一审计 + 通用等待 + 中断继续（WAL）
 
-> 状态：**设计 v2（经 3 路独立 fresh-context 对抗审核并逐条证伪后修订；待你确认后实施）**。
+> 状态：**设计 v6（经三轮独立 fresh-context 对抗审核并逐条证伪后修订）**；待你确认后实施。
 > 本文件是**总纲**；包级细化见 [`2026-10-19-audit-service.md`](./2026-10-19-audit-service.md)（`pkg/audit`，E1–E26）
 > 与 [`2026-10-19-waitq.md`](./2026-10-19-waitq.md)（`pkg/waitq`，W1–W18）。
 
@@ -24,8 +24,8 @@ SPDX-License-Identifier: Apache-2.0
 | **审计落盘纳入配额（防磁盘打满）** | 热段**有界保留**（`local_reserve_bytes` 自身上界 + `max_total_bytes` **非零安全默认**）；冷段走卷配额 |
 | **审计可归档到外部存储卷** | 长期留存复用**卷/外部卷/加密卷**；本地只留热段（**M4**） |
 | **保留审计/系统 owner 管理审计数据** | **保留系统 owner `__audit__`**（**非**管理员 owner、**非**审计账号；前提：**注册入口保留该名**）+ **11 条安全红线**（含读面两维权限、TTL 隔离、权限收紧、审计读也要审计、归档卷不绑管理员）；多管理员靠**角色/能力位**扩展（§5.8） |
-| **（用户追问）tunnel 鉴权模型** | **tunnel 只是传输层**：内层**强制鉴权**（与主 mux 同一 middleware）；三类显式路由（public / node / user），**取消「裸注册」类别**；tunnel key = 节点身份（`Role=node`）而非用户身份 ⇒ **所有操作都是用户行为、可被管控**（§2.5） |
-| **（用户追问）审计空间 = 新用户类型** | `accesskey.RoleSystem="system"` 的**真实租户**（配额/卷/加密/回收站/版本/镜像/巡检**全部复用**）+ **类型级禁止登录**（一处生效，非逐面豁免）+ **启动期保证存在（fail-fast）** |
+| **（用户追问）tunnel 鉴权模型** | **A 改良版**（第三轮审核纠正 B）：保留既有 ctx 身份透传（不破坏 Web UI/SDK/remote）；**单一路由分类表**同时服务两 mux；**xfer 登记为 transport 类**；**public 白名单含 externalAuthRoutes/notify-feed**；补**非文件组角色门**（`PUT /api/config`、`/dav/`、`/s3/` 等）⇒ 「所有操作可被管控」（§2.5） |
+| **（用户追问）审计空间 = 新用户类型** | `accesskey.RoleSystem="system"` 的真实租户（配额/卷/加密/回收站/版本**复用**）+ **类型级禁止登录**；**但隔离的真正来源 = 租户键（AK）seam 的保留名拒绝**（`IsValidAK` **零调用点** ✗、`UpsertAK` 只查非空 ✗）——不依赖角色轴（角色轴全域收口是**独立后续项**，§5.6） |
 | **生产可用后补测试与自动恢复** | 各业务审计场景用例 + 崩溃恢复用例（真实 kill）+ 回归锁定 |
 | **全系统中断继续（WAL）** | 任务不丢失、崩溃后可续跑；**幂等是使用方契约**（`ReplayApplier`）+ `MarkDone` = 提交记录 |
 | **审计读面权限（已裁定）** | **两维模型**：用户维度（owner 读自己 + **脱敏**）/ 系统维度（**仅管理员**）/ 跨维条目（owner 脱敏可见）；**服务端强制过滤**（客户端不可放宽）；`export` 与 `list` 同一门 |
@@ -68,29 +68,31 @@ SPDX-License-Identifier: Apache-2.0
 
 **关键**：**审计与中断继续共用一条 append-only 流** ⇒ 恢复过程本身也是审计证据；**但 TTL/清理只作用于合规全局段，绝不触碰 WAL 段**（E25）。
 
-### 2.5 tunnel 鉴权模型（架构级决策，用户 2026-10-19 追问）
+### 2.5 tunnel 鉴权模型（架构级决策 —— **第三轮审核后纠正**）
 
-**问题**：tunnel 场景下应（A）用**专用 middleware 直接把内层请求当作「该 tunnel 用户」鉴权通过**，还是（B）tunnel 下**可能不同用户 ⇒ 必须强制鉴权**？
+**问题**：tunnel 场景下应（A）用专用 middleware 把内层请求当作「该 tunnel 用户」处理，还是（B）强制内层鉴权？
 
-**现状取证**：`localMux`（隧道内层）共 **105 条裸注册** ✗，注释自陈「**隧道加密即认证**」「与…同模式」（`routes.go`）；只有主 mux 有 `authMiddleware`；`Principal` 已有 4 类型 `user/reader/node/admin`（`pkg/accesskey`）；隧道客户端**透传 ctx**（`tunnel/handler_client.go:141`）。
+**审核纠正（我上一轮的 B 建议是错的）**——硬证据：
+- **浏览器 Web UI 默认走隧道且内层不带凭据** ✗：`web/static/sclient/transport.js:322` 显式**剥离 `authorization`**（「外层有独立签名」），`:169` 按 `tunnelDefault` 选模式，而 `config_defaults.go:83` `Tunnel: true` ⇒ **B 会让整个 Web UI 401** ✗；
+- **服务端到服务端内层无凭据** ✗：`pkg/remote/client.go:326` / `write.go:209` 裸 `NewRequestWithContext`（身份=静态密钥/指纹 `WithPeerFingerprints`）⇒ B 会击穿 mesh 同步 / 联邦卷 / cluster 卷 / WebDAV remote ✗；
+- **「tunnel key = node 身份」不成立** ✗：隧道密钥由**任意角色**主体的 Secret 派生（`auth.go` `tunnelDerivedKey`），`/tunnel` 仅 `authMiddleware`（**无** `requireRole(node)`）；
+- **`/tunnel` 路径其实已有每请求用户归属** ✓（`handler_client.go` 透传 ctx → `ownerFromRequest`=`ActorFrom`=`Principal.AK`）⇒ 我原先说的「单一伪用户」是**误判** ✗；SDK/CLI 侧**已带 SproxySig**（`client_request.go:57-68`）✓。
 
-| 方案 | 优点 | 缺点（本质） |
-|---|---|---|
-| **A 专用 middleware 视为「该 tunnel 用户」通过** | 改动小（105 处不动） | ① 隧道流量全部归属**单一伪用户** ⇒ 配额/审计/ACL **无法按用户管控** ✗；② 制造**特权旁路**（tunnel key 泄露 = 该伪用户全部权限）✗；③ 与「所有操作都是用户行为」理念冲突 ✗；④ **豁免面 = 105 处 + 每个新路由** ⇒ 正是用户点名的「**各种豁免容易疏漏**」✗ |
-| **B tunnel 只是传输层，内层强制鉴权（推荐 ✓）** | ① **一套鉴权**（与主 mux 同一 middleware ⇒ 收敛 ✓）；② 每请求归属**具体用户** ⇒ 配额/审计/ACL 全正确 ✓；③ **fail-closed**：新增路由默认受保护 ⇒ **零豁免面** ✓；④ tunnel key = **传输/节点级**身份（`Role=node` ✓ **已是既有用户类型**）而非用户身份 ⇒ 职责清晰 ✓ | ① 内层请求必须携带用户凭据（CLI `--access-key`/SproxySig 路径**已存在** ✓）；② 需把 105 处裸注册迁到统一 middleware（工作量，但**正是收敛目标** ✓） |
+**真正的缺口（与 A/B 之争正交）**：
+1. **非文件组路由缺角色门**（**两个 mux 都有** ✗）：`PUT /api/config` 仅 `authMiddleware`（`routes.go:436`，reader 可改运行期配置 ✗）；`/dav/` 仅 `authMiddleware`（`:601`）；`/s3/` **无任何中间件**（`:608`，SigV4 在 handler 内且**不查角色** ✗）；
+2. **xfer/mux 直连路径无身份**（`tunnel_mux.go` 用进程 ctx ⇒ `localMuxGate` 对 `principal==nil` **fail-open 跳过** ✗）。
 
-**推荐：B（强制鉴权）** —— 与用户理念「**所有操作都是用户行为、可以被管控**」一致 ✓；且与 §5.6 的「审计租户 = 用户类型 `system`」同一思想（**用类型统一判定，不用豁免**）✓。
+**采纳方案：A 改良版（推荐 ✓）**：
+1. **保留既有传输层身份透传**（`/tunnel` 用 ctx `Principal`；**不做内层二次鉴权** ✓ ⇒ 不破坏 Web UI / SDK / remote ✓）；
+2. **单一「路由分类表」作为唯一事实源**（`pattern → class`，`class ∈ {public, auth, reader, user, node, admin}`），**同时服务两个 mux**（消除「两个面不一致」✗）；
+3. **xfer/mux 显式登记为 transport 类**（身份来源 = 握手密钥/指纹 ✓）——**承认它是一类，而不是宣称「零豁免」** ✗；
+4. **public 白名单必须完整**：`register`/`nonce`/`login` + **`externalAuthRoutes`（OIDC/LDAP 登录/回调，`routes.go:330`）** + **`notify/feed`（`routes.go:299`）** ✓（否则隧道模式下登录页/订阅不可达 ✗）；
+5. **hub/mesh 用户面不得归为 node 类** ✗（`/api/hub/*`、`/api/mesh/status|acl`、`/api/signal/*` 在隧道内是**用户面**：`routes_setup.go:691-706` 注释明示「保证浏览器隧道模式下 sclient.hub.* 全部可达」）⇒ 逐路由分类，不放 `requireRole(node)`；
+6. **门禁 R38**：非测试源码中每个 `localMux.Handle*` **pattern 必须归类**（未归类即红，**deny-by-default** ✓；现 `isFileGroupedRoute` 是 fail-open ✗）；**基线 113**（`routes.go` 105 + `routes_setup.go` 8）⇒ 目标：**0 未归类** ✓。
 
-**落地形态（三类显式路由，**取消「裸注册」类别**）**：
-1. **public**（显式白名单）：`register`/`login`/`nonce`/健康检查 —— 仅此一类免鉴权 ✓；
-2. **node/mesh**：`requireRole(node)`（`Role=node` 已有 ✓）；
-3. **user**：`requireRole(user|reader|admin)` ✓；
-⇒ 主 mux 与 localMux **共用同一套中间件与同一分类**（差异仅传输层：直连 vs tunnel）✓。
+**对 M1-11 的影响**：localMux 面**已有 ctx 身份** ⇒ 审计读面的 owner 过滤在隧道下可直接生效 ✓（无需先做内层鉴权）✓；**但 M1-11 的「localMux 直调用例无 Principal」仍需带身份构造** ✓（revB 已列）。
 
-**门禁 R38**：非测试源码中 `localMux.Handle*` 必须经统一中间件（或登记为 public + 理由）⇒ **裸注册只减不增**（基线 105，收敛到 0）✓。
-
-**对 M1-11 的影响**：审计读面在隧道下同样按 **ctx 身份**做 owner 过滤 ⇒ 消除 revB 指出的「直调用例无 Principal」矛盾 ✓（隧道不再是「无身份的旁路」✓）。
-
+**「所有操作都是用户行为、可被管控」如何达成**：靠 **分类表 + 角色门全域收口**（第 1–5 点）✓，**不靠**内层二次鉴权 ✗。
 ---
 
 ## 3. 阶段划分与顺序（**审核修订：依赖显式化 + 阶段改名**）
@@ -123,7 +125,7 @@ SPDX-License-Identifier: Apache-2.0
 | 覆盖完备（变更路由） | 缺口含 share/sync/DAV/notify 等 | `auditMiddleware` 兜底（**不计达标**）+ 缺口补齐 |
 | 结构化字段 | 部分 | volume/request_id/source_ip/size/dur |
 | 有界保留 + 丢弃/失败/panic 计数 | 无 | §5.4.1（审计）+ `Metrics` |
-| **读面权限** | **无（P0）** | **两维模型**（§5.7）：用户维度（脱敏）/ 系统维度（仅管理员）/ 服务端强制过滤 |
+| **读面权限** | **无（P0）** | **单轴 `Owner` 过滤 + 脱敏**（§5.7；`Dim2` 已删） |
 | **保留 owner 名保护** | **可被占用** | 注册入口保留 `__` 前缀 |
 | **权限** | 0755/0644 | 0700/0600 |
 | 归档到卷 | `Archiver` 预留 | M4 外置适配器 |
@@ -164,7 +166,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 域 | 编号 | 详见 |
 |---|---|---|
-| 审计 | **E1–E26**（含 E21 panic 隔离 · E22 轮转递归 · E23 归档↔轮转 · E24 seal→open 耐久 · E25 TTL vs WAL · E26 读面无 ACL） | audit-service.md §7 |
+| 审计 | **E1–E29**（含 E27 段族隔离 · E28 Owner 缺失 fail-closed · E29 audit.read 自限） |
 | 等待 | **W1–W18**（含 W17 迁移期双队列 · W18 两层预留） | waitq.md §6 |
 | 恢复 | 崩溃重放 / 幂等 / 提交语义 / 残留 staging+resume / 异常块修正 | 本文件 §6 + `docs/archive/architecture-task-recovery.md` |
 
@@ -199,7 +201,7 @@ SPDX-License-Identifier: Apache-2.0
 | R36-b | 禁新增 `sync.Cond`（基线：`quota.go:46`、`staging_tracker.go:35`；**`kad.go:246` 显式排除**） |
 | R36-c | `Resource` 适配器登记（名/label/单位/超时/MaxWaiters/优先级） |
 | R37 | 长任务必须 `Open` 作用域 |
-| **R38** | **非测试源码中 `localMux.Handle*` 必须经统一鉴权中间件**（或登记 public + 理由）⇒ 裸注册**只减不增**（基线 105 ⇒ 目标 0） |
+| **R38** | 每个 `localMux.Handle*` pattern **必须归类**（public/auth/reader/user/node/admin/transport），**未归类即红**（deny-by-default）；基线 **113**（routes.go 105 + routes_setup.go 8）⇒ 目标 0 未归类；同时断言**两个 mux 的分类表同源** |
 | **R34（升级）** | 释放入口须在 `withWaitLock` 内**且**调 `Notify`/`Adjust` |
 | **门禁登记表** | 新增 `docs/gates.md`（R 号 / 文件 / 断言 / 基线）+ 测试断言「R 号双向出现」 |
 
@@ -241,12 +243,12 @@ SPDX-License-Identifier: Apache-2.0
 |---|---|---|
 | Q1/Q2/Q5 | ~~fail_closed / 段布局 / 阶段顺序~~ | **已裁定**（v1 问答） |
 | Q6 | 优先级配置化 | 先内部常量 |
-| Q7 | 保留 owner 命名 | `__audit__`（前提：注册入口保留 `__`） |
+| Q7 | 保留名 | **已定**：审计**租户** `audit`（身份层保留名）+ 热段目录 `<卷根>/__audit__/hot/`（`__` 前缀 ⇒ `ListOwners` 跳过）；**legacy `<卷根>/audit/audit.log` 需迁移**（同址冲突，第三轮审核） |
 | Q8 | `local_reserve_bytes` / 归档阈值 | 256 MiB / 70% 或 N 段 |
 | Q9 | 热段是否加密 | 先明文 + 0700/0600 |
 | **Q10** | **`max_total_bytes` 默认值** | 建议 `local_reserve_bytes × 4`（非零安全默认） |
 | ~~Q11~~ | ~~单机模型~~ | **已裁定：本期单机**（跨节点恢复另立专题） |
-| ~~Q12~~ | ~~读面角色~~ | **已裁定：两维权限模型**（audit-service §5.7）+ **权限位 `admin` 或 `audit.read`**（多管理员/多角色可扩展：未来可加「审计员」而不授 admin）；M1-11 先落管理员门 + 过滤骨架，用户维度视图低优先级后续 |
+| ~~Q12~~ | ~~读面角色~~ | **已定（单轴）**：权限轴 = `Owner`（`Dim2` 删除）；门禁按 `admin` 或 `audit.read` 能力位；**多 admin/`audit.read` 授予机制 = 独立后续项**（非 M1-11 前置，第三轮审核纠正） |
 | ~~Q13~~ | ~~层 B 是否本期收敛~~ | **已裁定：两层一并收敛**（`Group` 原子，不留半入账） |
 | ~~Q14~~ | ~~`AuditStore` 迁移方案~~ | **已裁定：② 彻底**（类型迁入 `pkg/audit`；`Journal.Prune`/`Index.Evict` + 白盒测试迁移） |
 
@@ -254,7 +256,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 11. 实施清单（评审通过后按序执行）
 
-1. **M1**：`pkg/audit` 统一能力 + 薄委托 + **M1-3 二选一迁移** + 覆盖缺口全表 + `auditMiddleware` + 结构化字段/计数 + 轮转 T1–T8 + **M1-11 读面 ACL** + **M1-12 权限收紧** + **M1-13 TTL 隔离** + 门禁 R35（含 d/e）；
+1. **M1**：`pkg/audit` 统一能力 + 薄委托 + **M1-3 ②迁移** + 覆盖缺口全表 + `auditMiddleware` + 结构化字段/计数 + 轮转 T1–T8 + **M1-9 保留名 seam** + **M1-10 CapabilitySet** + **M1-11 读面单轴权限** + **M1-12 权限收紧** + **M1-13 TTL 隔离** + **M1-14 审计租户（Role=system，启动期可配）** + **M1-15 路由分类表（A 改良版，R38）** + 门禁 R35(a–e)；
 2. **W1**：`pkg/waitq` + 适配器（**等待侧+释放侧同提交**）+ 路径收敛（两层）+ 门禁 R36（含 R34 升级）；
 3. **M1-8**：审计热段配额治理（有界保留）；
 4. **M2**：WAL（`ReplayApplier` 契约 + 提交语义 + 两级序 + `Journal.Rewrite`）；
@@ -286,7 +288,7 @@ SPDX-License-Identifier: Apache-2.0
 | revA P1-6：fsync 全站串行 | 单写者 + 压测判据 |
 | revA P1-7：阶段依赖不自洽 | §3 显式：**M1-8 依赖 W1** |
 | revA P2-4/revB P2：TTL 会删 WAL 行 | E25 + M1-13 |
-| revA/revB/revC：计数与路径清单（~130/~35；7 条路径） | 订正：**115 处/20 文件**（+29/3）；**两层 ~40 处** |
+| revA/revB/revC：计数与路径清单 | 实测：`RecordAudit` **108/19** · `recordFileAudit` **29/3** · 配额侧 **48**（层 A 40 + 层 B 8）· localMux **113** |
 | revC C6：门禁失控风险 | 新增 `docs/gates.md` + R 号双向校验 |
 
 ### 14. 修订记录（v4，第二轮独立审核）
@@ -299,7 +301,7 @@ SPDX-License-Identifier: Apache-2.0
 | **revC P1：§5.8 前提错误（只有 1 个受支持 admin）** | §5.8 现状订正 + 多 admin/`audit.read` 授予机制列为 M1-11 **前置** |
 | **revA P1：段族矛盾 / 节点 seq 未续号 / Prune vs Rewrite** | §5.4.1 段族隔离 + E27；§4.1 节点 seq 持久化 + 载入排序；§4.2 统一 `Rewrite`+`Index.Prune` |
 | 计数订正（三路均质疑） | `RecordAudit` **108/19** · `recordFileAudit` **29/4** · 配额侧共 **48 处**（层 B 8） |
-| revC C1：单 PR 不现实 | **保持单 PR（用户裁定）**，但**提交按 P1–P8 批次边界**：P1 包骨架+facade+M1-12/13+R35-d → P2 M1-3 迁移+缺口+middleware+R35-a/c → P3 M1-9/M1-11/R35-e → P4 W1 → P5 M1-8 → P6 M2 → P7 M3+R37 → P8 S4 |
+| revC C1：单 PR 不现实 | **保持单 PR（用户裁定）**，但提交按批次：P1 包骨架+facade+M1-12/13+R35-d → P2 M1-3 迁移+缺口+middleware+R35-a/c → **P3 M1-15 路由分类表（先于 M1-11，避免返工）** → P4 M1-11 单轴读面权限+R35-e → P5 M1-14 审计租户+R38 → P6 W1 → P7 M1-8 → P8 M2 → P9 M3 → P10 S4（**若仍过大，M1-14/M1-15/M3 可拆独立 PR**） |
 | revC C4：性能阈值缺失 | §8 补 `batch_max_lines`/`batch_max_interval`；验收阈值 = 「注入 500ms 慢 Journal 时业务 handler P99 增量 < X ms」+ HDD/SSD 吞吐基线 |
 | revC C5：既有 append-only 原语 | §9 增 `pkg/state.LocalAppendStore` 取舍（不得两套共存） |
 | revC C2：门禁口径 | R35-b 标口径待定（localMux 处置）；R36-b 口径 = **根 module `go list ./...`**（不下探嵌套 module ⇒ `kad.go` 自动不入扫描面） |
@@ -313,3 +315,21 @@ SPDX-License-Identifier: Apache-2.0
 | 获取路径收敛范围 | **两层一并收敛**（quota + capacity） |
 | 审计读面权限 | **两维模型**（用户维度脱敏可读自己 / 系统维度仅管理员 / 服务端强制）⇒ audit-service §5.7 |
 | 审计存储归属（追问） | **保留系统 owner**（非管理员 owner / 非审计账号）；多管理员靠角色/能力位而非所有权 ⇒ 可平滑扩展 ⇒ audit-service §5.8 |
+
+### 15. 修订记录（v6，第三轮独立审核）
+
+| 审核发现（三路） | 处置 |
+|---|---|
+| **revA P1-1/P1-2/P1-3（推翻我上一轮的 B 建议）**：浏览器隧道模式**剥离 `authorization`**（`transport.js:322`）+ `web.tunnel` 默认 true（`config_defaults.go:83`）；`pkg/remote` 内层无凭据（`client.go:326`/`write.go:209`）；「tunnel key=node 身份」不成立 | **§2.5 整节重写为 A 改良版**：保留 ctx 身份透传 + 单一分类表（两 mux 同源）+ xfer 登记 transport 类 + public 白名单补 `externalAuthRoutes`/`notify-feed` + 补非文件组角色门；R38 改「pattern 必须归类（deny-by-default），基线 113」 |
+| **revA P1-4**：public 白名单漏 OIDC/LDAP 路由与 notify/feed | 已补（§2.5 第 4 点） |
+| **revA P2-2 / revB P1**：`/s3/` **无任何中间件**、`/dav/` 与 `PUT /api/config` 无角色门（两个 mux 都有）⇒「角色轴全域强制」是**独立前置**，不是既成事实 | 记入 §2.5 缺口 1 + §5.6「不依赖角色轴」 |
+| **revB/revC P1**：保留名封堵**打错字段**（租户键 = **AK**，`IsValidAK` **零调用点**，`UpsertAK` 只查非空 ⇒ `AK=="audit"` 可造） | audit-service §5.6 前置改为**租户键 seam**（`IsValidAK` 收口 + 租户解析 seam 保留名拒绝 + `api_keys.name` + 注册 + `mesh_readers.owner`） |
+| **revB P1-4 / revA P2-4 / revC P1-3**：`audit` 租户名与**既有 `<卷根>/audit/audit.log` 同址**，且 `audit` 今天已被 `ListOwners` 当租户枚举 | §5.6 增**迁移口径**（legacy → `__audit__/hot/`）+ 身份层保留名含 `audit` |
+| **revB P1-4**：启动期 fail-fast 与「审计 best-effort」冲突 + `disabled` 剖面被拖死 | 改为 `audit.startup.fail_fast`（**默认 false**，符合仓 bool 纪律）⇒ 默认降级只读 + 告警；与 `disabled`/`buffer_size` 解耦 |
+| **revB P1**：未知 Role 在 `authMiddleware`-only 面**静默放行** | `requireRole` 显式 `case RoleSystem: deny` + `resolveRegistrationRole` 角色白名单（`user|node`） |
+| **revC P1-1**：M1-11 前置（多 admin 授予）自相矛盾且无批次 | **移出前置**（单列为后续项）；M1-11 范围 = 单轴过滤 + 脱敏 + 空集兜底 |
+| **revC P1-4**：`/api/hub|mesh|signal` 是**用户面**（隧道可达）⇒ 不得归 node 类 | §2.5 第 5 点：逐路由分类，不放 `requireRole(node)` |
+| **revC P1-5**：计数不符（115/20、29/3~4、R38 105） | 统一为 **108/19 + 29/3 + R38 113** |
+| **revC P1-6 / P2-6**：残留「两维模型」「`__audit__` 租户名」「E1–E26」「v2 状态头」「§13 仍写 `Prune`」「段族目录不一致」 | 本文件与 audit-service 同步订正（v6） |
+| **revC C2/C3（过度设计）**：单 PR 不可行；可简化 | ① **删 `Dim2`**（单轴）；② tunnel 用「整 mux + 分类表」而非逐处迁移；③ waitq 一期只做 quota+staging 适配；④ M3 降为 `pkg/audit/recovery` 子包并可延后；⑤ M1-14/M1-15 单列批次（可拆独立 PR） |
+| **revC C5（顺序返工）** | **M1-15 先于 M1-11**（否则 localMux 分支无法验证）；M1-14 的路径决策先于 M1-3 落盘改写 |
