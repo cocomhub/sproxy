@@ -74,3 +74,37 @@ func TestRunAuditArchive_DisabledWhenNoDir(t *testing.T) {
 		t.Fatal("默认应为空（不归档）")
 	}
 }
+
+// TestOnSeal_ArchivesOnRotation 轮转触发归档（M4 第 1 项）：append 到轮转阈值 ⇒ 冷目录出现归档文件。
+// 复用生产同一套接线 `newSealArchiveHook`（避免测试里重复实现一遍护栏）。
+func TestOnSeal_ArchivesOnRotation(t *testing.T) {
+	t.Parallel()
+	hot := filepath.Join(t.TempDir(), "hot")
+	cold := filepath.Join(t.TempDir(), "cold")
+	cfg := &Config{}
+	cfg.Audit.ArchiveDir = cold
+	cfg.Audit.ArchiveKeep = 0
+
+	hook, bind := newSealArchiveHook(cfg, testLogger())
+	j, err := audit.NewFileJournal(audit.FileJournalConfig{
+		Dir: hot, Layout: audit.LayoutGlobal, GlobalName: "audit.log",
+		SyncMode: audit.SyncNone, MaxSize: 200, MaxArchives: 8,
+		OnSeal: hook,
+	})
+	if err != nil {
+		t.Fatalf("NewFileJournal: %v", err)
+	}
+	t.Cleanup(func() { _ = j.Close() })
+	bind(j)
+
+	for range 12 {
+		if aerr := j.Append(audit.Entry{Scope: "system", Kind: audit.KindEvent, Action: "t",
+			TS: time.Now(), Detail: strings.Repeat("q", 80)}); aerr != nil {
+			t.Fatalf("Append: %v", aerr)
+		}
+	}
+	ents, derr := os.ReadDir(cold)
+	if derr != nil || len(ents) == 0 {
+		t.Fatalf("轮转后冷目录应有归档文件: err=%v len=%d", derr, len(ents))
+	}
+}

@@ -20,6 +20,9 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 
+	"sync"
+	"sync/atomic"
+
 	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/cloud"
@@ -59,6 +62,8 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 	migrateLegacyAuditDir(filepath.Join(root, "audit"), dir, log)
 
 	var journal *audit.FileJournal
+	// 封段回调（M4）：轮转产生封段 ⇒ 立即归档（在 Journal 锁外触发，见 pkg/audit 契约）。
+	onSeal, bindJournal := newSealArchiveHook(cfg, log)
 	j, err := audit.NewFileJournal(audit.FileJournalConfig{
 		Dir:           dir,
 		Layout:        audit.LayoutGlobal, // 合规段族：全局时间线（便于合规导出/检索）
@@ -67,6 +72,7 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 		MaxSize:       int64(cfg.Audit.MaxSize),
 		MaxArchives:   cfg.Audit.MaxArchives,
 		MaxTotalBytes: int64(cfg.Audit.MaxTotalBytes),
+		OnSeal:        onSeal,
 		Logger:        log,
 	})
 	if err != nil {
@@ -80,6 +86,7 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 			"error", err.Error())
 	} else {
 		journal = j
+		bindJournal(j) // 供封段回调使用（此后轮转即触发归档）
 	}
 
 	// M4 冷段归档：**复用** pkg/audit 的归档原语（ArchiveSealed + DirArchiver），不另造写路径。
@@ -813,4 +820,32 @@ func runAuditArchive(cfg *Config, j *audit.FileJournal, log *slog.Logger) {
 	if rep.Archived > 0 || rep.Failed > 0 {
 		log.Info("审计冷段归档完成", "summary", rep.String(), "archive_dir", cfg.Audit.ArchiveDir)
 	}
+}
+
+// newSealArchiveHook 返回「封段 → 归档」回调与 journal 绑定函数（M4）。
+//
+// 护栏：
+//   - 回调仅在 `archive_dir` 非空时生效（默认不归档）；
+//   - 用 `atomic.Pointer` 拿 journal 自身（回调由轮转触发，早于局部变量赋值时跳过 ✓ 不 panic）；
+//   - **TryLock 单飞**：已有归档在跑 ⇒ 本次跳过（下一轮轮转会再次触发，且封段仍在本地 ⇒ 不丢）；
+//   - 回调内**不写**同一 Journal（只读段文件 + 归档），因此不会递归轮转 ✓。
+func newSealArchiveHook(cfg *Config, log *slog.Logger) (hook func(), bind func(*audit.FileJournal)) {
+	var jp atomic.Pointer[audit.FileJournal]
+	var mu sync.Mutex
+	hook = func() {
+		if cfg.Audit.ArchiveDir == "" {
+			return
+		}
+		j := jp.Load()
+		if j == nil {
+			return
+		}
+		if !mu.TryLock() {
+			return
+		}
+		defer mu.Unlock()
+		runAuditArchive(cfg, j, log)
+	}
+	bind = func(j *audit.FileJournal) { jp.Store(j) }
+	return hook, bind
 }

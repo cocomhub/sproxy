@@ -217,6 +217,14 @@ type FileJournalConfig struct {
 	MaxTotalBytes int64
 	// GlobalName 是 LayoutGlobal 下的段文件名（默认 "compliance.audit.log"）。
 	GlobalName string
+	// OnSeal 是**封段回调**（M4：轮转产生新封段后触发，用于归档）。
+	//
+	// 契约（三条，缺一不可）：
+	//   - **在 Journal 锁之外**调用（回调内可安全调 `Segments()`/`ArchiveSealed`，不会自死锁）；
+	//   - **同步**执行 ⇒ 必须快，或实现方自行单飞/限流（本回调在写路径上）；
+	//   - **不得**再向同一 Journal 写入（否则递归轮转 ✗）。
+	// 空段轮转（无内容可归档）**不触发**；多次轮转合并为一次回调。
+	OnSeal func()
 	// Clock / Metrics / Logger 可注入（测试确定性 + 可观测）。
 	Clock   Clock
 	Metrics Metrics
@@ -251,6 +259,9 @@ type FileJournal struct {
 	metrics    Metrics
 	logger     *slog.Logger
 
+	onSeal      func()
+	sealPending bool // 有封段尚未通知（在锁外触发后清零）
+
 	mu     sync.Mutex
 	files  map[string]*os.File
 	unsync int // SyncBatch 下未 flush 的行数
@@ -276,6 +287,7 @@ func NewFileJournal(cfg FileJournalConfig) (*FileJournal, error) {
 		maxArch:    cfg.MaxArchives,
 		maxTotal:   cfg.MaxTotalBytes,
 		globalName: cfg.GlobalName,
+		onSeal:     cfg.OnSeal,
 		clock:      cfg.Clock,
 		metrics:    cfg.Metrics,
 		logger:     cfg.Logger,
@@ -327,8 +339,15 @@ func (j *FileJournal) segmentPath(e Entry) (string, error) {
 	return filepath.Join(j.dir, j.globalName), nil
 }
 
-// Append 追加条目（按策略落盘；超 MaxSize 时先轮转）。
+// Append 追加条目（按策略落盘；超 MaxSize 时先轮转，随后在**锁外**触封段回调）。
 func (j *FileJournal) Append(e Entry) error {
+	err := j.appendLocked(e)
+	j.fireSealIfPending()
+	return err
+}
+
+// appendLocked 是 Append 的持锁主体（拆出只为把封段回调放到锁外）。
+func (j *FileJournal) appendLocked(e Entry) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.closed {
@@ -665,8 +684,16 @@ func (j *FileJournal) Segments() ([]SegmentInfo, error) {
 	return out, nil
 }
 
-// Rotate 封当前段（按原因；设计 §5.3 的段切换：先确保新段可写，再移旧段）。
+// Rotate 封当前段（按原因；设计 §5.3 的段切换：先确保新段可写，再移旧段），
+// 随后在**锁外**触封段回调。
 func (j *FileJournal) Rotate(reason string) error {
+	err := j.rotateAllLocked(reason)
+	j.fireSealIfPending()
+	return err
+}
+
+// rotateAllLocked 是 Rotate 的持锁主体（拆出只为把封段回调放到锁外）。
+func (j *FileJournal) rotateAllLocked(reason string) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.closed {
@@ -702,10 +729,31 @@ func (j *FileJournal) rotateLocked(path, reason string) error {
 	if err := os.Rename(path, archivePath(path, 1)); err != nil {
 		return err
 	}
+	j.sealPending = true // 产生了新封段：等锁外统一通知（空段在上面已 early return）
 	if j.logger != nil {
 		j.logger.Info("audit: 段轮转", "path", path, "reason", reason)
 	}
 	return nil
+}
+
+// fireSealIfPending 在**锁外**触封段回调（一次合并多轮轮转；回调 panic 被隔离，绝不影响写入）。
+func (j *FileJournal) fireSealIfPending() {
+	j.mu.Lock()
+	pend := j.sealPending
+	j.sealPending = false
+	cb := j.onSeal
+	j.mu.Unlock()
+	if !pend || cb == nil {
+		return
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil && j.logger != nil {
+				j.logger.Error("audit: 封段回调 panic（已隔离）", "panic", r)
+			}
+		}()
+		cb()
+	}()
 }
 
 // closeSegmentLocked 同步并关闭段句柄（不存在则跳过）。
