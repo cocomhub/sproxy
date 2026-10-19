@@ -308,6 +308,12 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 		sendJSONResponse(w, map[string]string{"error": "register failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
+	// 审计：**外部卷**创建成功（此前只有嵌套封装分支埋点 ✗ ⇒ 普通外部卷建卷无痕，
+	// 而建卷是资源分配类操作，必须可追溯；与封装分支同一 action/object 语义）。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "user_volume_create", ObjectType: "volume", Object: req.Name, Result: AuditResultSuccess,
+		Detail: "type=" + req.Type,
+	})
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 

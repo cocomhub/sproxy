@@ -9,6 +9,9 @@
 「已覆盖」= 存在测试在**同一用例内**产生该动作并断言其审计行（不是"测试文件里出现过这个词"）。
 判定命令（可重复执行）：
 
+> ⚠️ **常量陷阱**：部分动作名以**常量**定义（如 `auditActionCredAKAdd = "credential_ak_add"`），
+> 只检索字面量会把已有测试误判为 GAP ⇒ 必须同时按常量名检索（`grep -rn 'auditActionCred' --include=*_test.go`）。
+
 ```bash
 # 埋点动作清单（非测试源码）
 grep -rhoE 'Action: *"[^"]+"' --include=*.go pkg/ | sed 's/.*"\(.*\)"/\1/' | sort -u
@@ -48,11 +51,12 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | 动作 | 断言用例 | 状态 |
 | --- | --- | --- |
 | `volume_move` | `pkg/server/audit_volume_scenarios_test.go`（本文件引入） | ✅ |
-| `volume_rebalance` | — | ⬜ GAP |
-| `volume_copy` / `volume_mirror` | — | ⬜ GAP |
-| `volume_import` / `volume_export` | — | ⬜ GAP |
-| `volume_tier_promote` / `volume_tier_downgrade` | — | ⬜ GAP |
-| `user_volume_create` / `user_volume_delete` | — | ⬜ GAP |
+| `volume_rebalance` | `pkg/server/audit_volume_admin_scenarios_test.go` | ✅ |
+| `volume_copy` | 同上（跨卷复制断言 object 含文件名） | ✅ |
+| `volume_import` / `volume_export` | `pkg/server/audit_volume_export_scenarios_test.go` | ✅ |
+| `volume_mirror` | — | ⬜ GAP（镜像巡检由后台 pass 驱动，需注入 tier/mirror 状态） |
+| `volume_tier_promote` / `volume_tier_downgrade` | — | ⬜ GAP（读晋升/降级是后台/读路径副作用，需 tier 管理器驱动） |
+| `user_volume_create` / `user_volume_delete` | `pkg/server/audit_user_volume_scenarios_test.go`（**并修掉外部卷建卷无审计**） | ✅ |
 
 ### 2.4 密钥 / presign / 分享 / 同步 / 凭据
 
@@ -60,10 +64,11 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | --- | --- | --- |
 | `secret_create` / `secret_delete` / `secret_export` | `pkg/server/audit_secret_scenarios_test.go`（含**明文红线**与失败留痕） | ✅ |
 | `backend_presign` / `backend_presign_complete`（含被拒） | `pkg/server/audit_presign_scenarios_test.go`（成功 + 404 被拒） | ✅ |
-| `share_create` / `share_revoke` | — | ⬜ GAP |
+| `share_create` / `share_revoke` | `pkg/server/audit_share_scenarios_test.go`（object=token） | ✅ |
 | `sync_task_create` / `sync_conflict_resolve` | — | ⬜ GAP |
 | `mesh_read` / `mesh_write` | `pkg/remote/remote_read_test.go`、`remote_write_test.go` | ✅ |
-| `credential_register` / `_login` / `_renew` / `_ak_*` / `_sk_*` | — | ⬜ GAP |
+| `credential_register` / `_register_denied` / `_ak_delete` / `_sk_delete` / `_persist_error` | `pkg/server/register_handler_test.go`、`credentials_handler_test.go`（**按常量断言**） | ✅ |
+| `credential_login` / `_renew` / `_ak_add` / `_ak_list` / `_sk_list` / `_sk_expire` | — | ⬜ GAP |
 | `config_update` / `verify` / `backup` | `pkg/server/audit_test.go`、`cmd/sproxy/*_test.go` | ✅ |
 
 ### 2.5 传输层 / 读面
@@ -82,11 +87,13 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | --- | --- | --- | --- |
 | ~~P1~~ ✅ | ~~`secret_*`（3）~~ | 已补：`audit_secret_scenarios_test.go`（明文红线 + 失败留痕） | — |
 | ~~P1~~ ✅ | ~~`backend_presign*`（2，含被拒）~~ | 已补：`audit_presign_scenarios_test.go`（状态码观察器覆盖全部失败分支） | — |
-| P2 | 卷管理（8） | 管理员高危操作无审计断言 | 复用 `newVolumesAPIServer(t, actor, volumes, mod)` + `h.readAuditEvents` 断言（本文件已示范 `volume_move`） |
-| P2 | `share_*`（2） | 外链分享 = 数据外流 | 创建/撤销 ⇒ 断言 action + object=分享 id |
-| P2 | `sync_task_create` / `sync_conflict_resolve`（2） | 同步改数据 | 建任务/解决冲突 ⇒ 断言 |
-| P3 | `credential_*`（6） | 认证面变更 | 复用 `register_handler_test.go` harness |
-| P3 | `cloud_group_*`（2） | 组操作 | 复用 cloud group 测试 harness |
+| ~~P2~~ ✅ | ~~卷管理 rebalance/copy/import/export/user_volume~~ | 已补（`audit_volume_admin_scenarios_test.go`、`audit_volume_export_scenarios_test.go`、`audit_user_volume_scenarios_test.go`） | — |
+| ~~P2~~ ✅ | ~~`share_*`（2）~~ | 已补（`audit_share_scenarios_test.go`） | — |
+| P2 | `sync_task_create` / `sync_conflict_resolve`（2） | 同步改数据 | 建任务可直驱 `h.syncCreateTask`；冲突解决需先造冲突（真实 sync 执行） |
+| P2 | `cloud_group_create` / `cloud_group_delete`（2） | 组操作（批量下载=批量落盘） | 复用 `setupCloudTestServer`（需暴露 `*Handlers` 才能读审计） |
+| P3 | `volume_mirror` / `volume_tier_*`（3） | 后台搬迁/分层 | 注入 tier/mirror 状态后驱动 pass |
+| P3 | `credential_login/renew/ak_add/ak_list/sk_list/sk_expire`（6） | 认证面变更 | 复用 `newTestServerCreds` + 签名请求 |
+| P3 | `ai.embed`（1） | 嵌入调用无断言 | 断言 action + 不含文本内容 |
 
 ## 4. 编写纪律（§9.3）
 
