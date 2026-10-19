@@ -14,50 +14,52 @@ import (
 )
 
 // TestSecretWrite_EmitsEncryptAuditRow 验证加密卷 WriteFile 已在 encrypt 阶段接入 pkg/audit：
-// ctx 携带审计 logger 时，写文件会落一行 Type=encrypt，Meta 含 encrypted=true 且 cipher_bytes>0
-// （明密文对比字节），Row.Bytes 为明文长度。无 ctx logger 时 no-op（既有行为零回归，
-// 由其它上下文为 Background 的既有用例覆盖——它们不报错即证明 audit 不阻塞写路径）。
+// ctx 携带审计服务时，写文件会落一条 Kind=span/Type=encrypt，Meta 含 encrypted=true 且
+// cipher_bytes>0（明密文对比字节），Bytes 为明文长度。无 ctx 服务时 no-op（零回归，
+// 由其它 Background ctx 的既有用例覆盖——不报错即证明审计不阻塞写路径）。
 func TestSecretWrite_EmitsEncryptAuditRow(t *testing.T) {
 	t.Parallel()
 	fs := newFS(t)
 
 	scopeID := "enc-audit-test"
-	sink, err := audit.NewScopeSink(t.TempDir(), scopeID)
-	if err != nil {
-		t.Fatal(err)
+	j, jerr := audit.NewFileJournal(audit.FileJournalConfig{
+		Dir: t.TempDir(), Layout: audit.LayoutPerScope, Scope: audit.ScopeID(scopeID),
+		SyncMode: audit.SyncAlways,
+	})
+	if jerr != nil {
+		t.Fatalf("NewFileJournal: %v", jerr)
 	}
-	defer func() { _ = sink.Close() }()
-	l, err := audit.NewScope(scopeID, audit.ScopeOpts{Sink: sink})
-	if err != nil {
-		t.Fatal(err)
+	defer func() { _ = j.Close() }()
+	svc, serr := audit.New(audit.Options{Journal: j})
+	if serr != nil {
+		t.Fatalf("audit.New: %v", serr)
+	}
+	sc, oerr := svc.Open(context.Background(), audit.ScopeID(scopeID))
+	if oerr != nil {
+		t.Fatalf("Open: %v", oerr)
 	}
 
 	content := data(2000) // 跨多分块
-	ctx := audit.WithContext(context.Background(), l)
+	ctx := audit.WithScope(audit.WithService(context.Background(), svc), sc)
 	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "enc.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatal(err)
 	}
 
-	var enc *audit.Row
-	for i, r := range sink.Recent(audit.Filter{}) {
-		if r.Type == audit.TypeEncrypt {
-			enc = &sink.Recent(audit.Filter{})[i]
-			break
-		}
+	rows, rerr := j.Read(audit.EntryFilter{Kind: audit.KindSpan, Type: audit.TypeEncrypt})
+	if rerr != nil {
+		t.Fatalf("Read: %v", rerr)
 	}
-	if enc == nil {
-		t.Fatalf("应含 Type=%q 行，实际 rows: %+v", audit.TypeEncrypt, sink.Recent(audit.Filter{}))
+	if len(rows) == 0 {
+		t.Fatalf("应含 Type=%q 行，实际 rows: %+v", audit.TypeEncrypt, rows)
 	}
+	enc := rows[0]
 	if enc.DurMS < 0 {
 		t.Fatalf("encrypt DurMS 应为 >=0，got %d", enc.DurMS)
 	}
 	if enc.Bytes != int64(len(content)) {
 		t.Fatalf("encrypt Bytes 应为明文长度 %d，got %d", len(content), enc.Bytes)
 	}
-	meta, ok := enc.Meta.(map[string]any)
-	if !ok {
-		t.Fatalf("encrypt Meta 应为 map，got %T", enc.Meta)
-	}
+	meta := enc.Meta
 	if meta["encrypted"] != true {
 		t.Fatalf("encrypt meta.encrypted 应为 true，got %v", meta["encrypted"])
 	}

@@ -24,7 +24,7 @@ import (
 
 // waitAuditRows 轮询任务审计行非空（finalizeTaskAudit 在 executeDownload 收尾时把 sink
 // 行拷入 task.Audit；同步路径已完成，轮询仅为防时序抖动，与既有审计用例一致）。
-func waitAuditRows(t *testing.T, mgr *CloudDownloadManager, id string) []audit.Row {
+func waitAuditRows(t *testing.T, mgr *CloudDownloadManager, id string) []audit.Entry {
 	t.Helper()
 	testutil.WaitFor(t, 10*time.Second, func() bool {
 		snap, ok := mgr.SnapshotTask(id, "")
@@ -38,7 +38,7 @@ func waitAuditRows(t *testing.T, mgr *CloudDownloadManager, id string) []audit.R
 }
 
 // findAuditRowByType 返回首条指定 Type 的审计行（无则 nil）。
-func findAuditRowByType(rows []audit.Row, typ audit.Type) *audit.Row {
+func findAuditRowByType(rows []audit.Entry, typ audit.Type) *audit.Entry {
 	for i := range rows {
 		if rows[i].Type == typ {
 			return &rows[i]
@@ -94,10 +94,7 @@ func TestCloudTask_Audit_DownloadEnd_IntegrityVerified(t *testing.T) {
 	if dlRow.Level != audit.LevelInfo {
 		t.Fatalf("完成路径 download 行应为 Info 级，got %q", dlRow.Level)
 	}
-	meta, ok := dlRow.Meta.(map[string]any)
-	if !ok {
-		t.Fatalf("download Meta 应为 map，got %T", dlRow.Meta)
-	}
+	meta := dlRow.Meta
 	if got := metaString(meta, "integrity_status"); got != "verified" {
 		t.Fatalf("download End 行 integrity_status 应为 verified，got %q", got)
 	}
@@ -137,10 +134,7 @@ func TestCloudTask_Audit_DownloadFail_IntegrityDamaged(t *testing.T) {
 	if !strings.Contains(dlRow.Err, "integrity") {
 		t.Fatalf("Fail 行 Err 应含 integrity 关键字，got %q", dlRow.Err)
 	}
-	meta, ok := dlRow.Meta.(map[string]any)
-	if !ok {
-		t.Fatalf("download Meta 应为 map，got %T", dlRow.Meta)
-	}
+	meta := dlRow.Meta
 	if got := metaString(meta, "integrity_status"); got != "damaged" {
 		t.Fatalf("Fail 行 integrity_status 应归一为 damaged，got %q", got)
 	}
@@ -151,8 +145,8 @@ func TestCloudTask_Audit_DownloadFail_IntegrityDamaged(t *testing.T) {
 
 // integrityDecisionRows 返回 Type=log（通用事件行）+ Step="integrity" 的逐次决策审计行
 // （checkDownloadIntegrity 各裁决分支经 audit.From(dlCtx).Log 写入）。
-func integrityDecisionRows(rows []audit.Row) []audit.Row {
-	var out []audit.Row
+func integrityDecisionRows(rows []audit.Entry) []audit.Entry {
+	var out []audit.Entry
 	for i := range rows {
 		if rows[i].Type == audit.TypeLog && rows[i].Step == "integrity" {
 			out = append(out, rows[i])
@@ -162,10 +156,11 @@ func integrityDecisionRows(rows []audit.Row) []audit.Row {
 }
 
 // integrityDecisionsOf 汇总各行 decision Meta 值（供 assertHasIntegrityDecision 报错展示）。
-func integrityDecisionsOf(rows []audit.Row) []string {
+func integrityDecisionsOf(rows []audit.Entry) []string {
 	var out []string
 	for i := range rows {
-		if m, ok := rows[i].Meta.(map[string]any); ok {
+		m := rows[i].Meta
+		{
 			out = append(out, metaString(m, "decision"))
 		}
 	}
@@ -173,10 +168,11 @@ func integrityDecisionsOf(rows []audit.Row) []string {
 }
 
 // assertHasIntegrityDecision 断言逐次决策审计行中存在指定 decision 值。
-func assertHasIntegrityDecision(t *testing.T, rows []audit.Row, want string) {
+func assertHasIntegrityDecision(t *testing.T, rows []audit.Entry, want string) {
 	t.Helper()
 	for i := range rows {
-		if m, ok := rows[i].Meta.(map[string]any); ok && metaString(m, "decision") == want {
+		m := rows[i].Meta
+		if metaString(m, "decision") == want {
 			return
 		}
 	}
@@ -184,9 +180,10 @@ func assertHasIntegrityDecision(t *testing.T, rows []audit.Row, want string) {
 }
 
 // findIntegrityDecisionRow 返回指定 decision 的首条决策行（无则 nil）。
-func findIntegrityDecisionRow(rows []audit.Row, decision string) *audit.Row {
+func findIntegrityDecisionRow(rows []audit.Entry, decision string) *audit.Entry {
 	for i := range rows {
-		if m, ok := rows[i].Meta.(map[string]any); ok && metaString(m, "decision") == decision {
+		m := rows[i].Meta
+		if metaString(m, "decision") == decision {
 			return &rows[i]
 		}
 	}
@@ -216,7 +213,7 @@ func TestCloudTask_Audit_IntegrityDecision_Released(t *testing.T) {
 	if dlRow == nil {
 		t.Fatalf("应含 download 行，实际 %+v", rows)
 	}
-	meta, _ := dlRow.Meta.(map[string]any)
+	meta := dlRow.Meta
 	if got := metaString(meta, "integrity_status"); got != "damaged" {
 		t.Fatalf("download 行 integrity_status 应为 damaged，got %q", got)
 	}
@@ -234,7 +231,7 @@ func TestCloudTask_Audit_IntegrityDecision_Released(t *testing.T) {
 	if rel == nil {
 		t.Fatal("应含 release 决策行")
 	}
-	rmeta, _ := rel.Meta.(map[string]any)
+	rmeta := rel.Meta
 	if got := metaString(rmeta, "integrity_checker"); got != "image/*" {
 		t.Fatalf("release 决策行 integrity_checker 应为 image/*，got %q", got)
 	}
@@ -264,7 +261,7 @@ func TestCloudTask_Audit_IntegrityDecision_Blocked(t *testing.T) {
 	if dlRow == nil {
 		t.Fatalf("应含 download 行，实际 %+v", rows)
 	}
-	meta, _ := dlRow.Meta.(map[string]any)
+	meta := dlRow.Meta
 	if got := metaString(meta, "integrity_status"); got != "damaged" {
 		t.Fatalf("阻断 Fail 行 integrity_status 应归一 damaged，got %q", got)
 	}
@@ -304,7 +301,7 @@ func TestCloudTask_Audit_IntegrityUnverified(t *testing.T) {
 	if dlRow == nil {
 		t.Fatalf("应含 download 行，实际 %+v", rows)
 	}
-	meta, _ := dlRow.Meta.(map[string]any)
+	meta := dlRow.Meta
 	if got := metaString(meta, "integrity_status"); got != "unverified" {
 		t.Fatalf("download 行 integrity_status 应为 unverified，got %q", got)
 	}
@@ -317,7 +314,7 @@ func TestCloudTask_Audit_IntegrityUnverified(t *testing.T) {
 	if skip == nil {
 		t.Fatalf("应含 skip 决策行，实际 decisions: %v", integrityDecisionsOf(decRows))
 	}
-	skmeta, _ := skip.Meta.(map[string]any)
+	skmeta := skip.Meta
 	if got := metaString(skmeta, "reason"); got != "mem_quota" {
 		t.Fatalf("skip 决策行 reason 应为 mem_quota，got %q", got)
 	}

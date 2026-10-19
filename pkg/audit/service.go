@@ -150,6 +150,66 @@ func (s *Service) Capabilities() CapabilitySet { return s.eff.caps }
 // Disabled 报告是否为禁用剖面（no-op）。
 func (s *Service) Disabled() bool { return s.eff.caps.disabled() }
 
+// svcCtxKey / scCtxKey 是审计服务与作用域在 ctx 中的键（替代旧 WithContext/From 的语义）。
+type svcCtxKey struct{}
+
+type scCtxKey struct{}
+
+// WithScope 把作用域句柄注入 ctx：**过程 span（Begin/BeginSpan）的作用域来源**。
+// 与旧 API「NewScope 绑定 scopeID 的 logger 经 ctx 传递」语义等效（这里拆成 Service + Scope）。
+func WithScope(ctx context.Context, sc *Scope) context.Context {
+	if sc == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, scCtxKey{}, sc)
+}
+
+// ScopeFrom 返回 ctx 中的作用域句柄（未注入 ⇒ nil）。
+func ScopeFrom(ctx context.Context) *Scope {
+	if ctx == nil {
+		return nil
+	}
+	sc, _ := ctx.Value(scCtxKey{}).(*Scope)
+	return sc
+}
+
+// WithService 把审计服务注入 ctx（供下游 span/事件取用；nil 服务 ⇒ 原样返回）。
+func WithService(ctx context.Context, s *Service) context.Context {
+	if s == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, svcCtxKey{}, s)
+}
+
+// ServiceFrom 返回 ctx 中的审计服务（未注入 ⇒ nil；调用方须 nil-safe —— 链式安全）。
+func ServiceFrom(ctx context.Context) *Service {
+	if ctx == nil {
+		return nil
+	}
+	s, _ := ctx.Value(svcCtxKey{}).(*Service)
+	return s
+}
+
+// BeginSpan 在 ctx 上开始一个过程步骤：**nil-safe**（无服务/能力关闭 ⇒ 返回 nil，
+// End/Fail 均为 no-op）—— 与旧 `From(ctx).Begin(step)` 的链式安全语义等效。
+func BeginSpan(ctx context.Context, step string, kv ...any) *Step {
+	s := ServiceFrom(ctx)
+	if s == nil || s.eff.caps.disabled() || !s.eff.caps.Spans {
+		return nil
+	}
+	return s.Begin(ctx, step, kv...)
+}
+
+// Log 写一条通用事件行（等价旧 Logger.Log(Type, Level, step, kv...)；kv 键值映射到 Entry）。
+func (s *Service) Log(ctx context.Context, t Type, lvl Level, step string, kv ...any) error {
+	if s == nil {
+		return nil
+	}
+	e := Entry{Kind: KindEvent, Type: t, Level: lvl, Step: step}
+	applyEntryKV(&e, kv)
+	return s.write(ctx, e)
+}
+
 // Scope 是作用域句柄（**唯一可写入口**：Emit 定义在它上面）。
 type Scope struct {
 	svc *Service
@@ -198,6 +258,12 @@ func (s *Service) Emit(ctx context.Context, e Entry) error {
 func (s *Service) Begin(ctx context.Context, step string, kv ...any) *Step {
 	base := Entry{}
 	s.fillContext(ctx, &base)
+	// 作用域来源：ctx 注入的 Scope；未注入 ⇒ **合成作用域** system（设计 E1：后台/周期作业
+	// 必须自开合成作用域 ⇒ 绝不出现「无作用域」条目）。
+	base.Scope = ScopeID("system")
+	if sc := ScopeFrom(ctx); sc != nil {
+		base.Scope = sc.ID()
+	}
 	return &Step{svc: s, step: step, start: s.eff.clock.Now(), kv: kv, base: base}
 }
 
@@ -240,6 +306,7 @@ func (s *Service) writeStep(base Entry, step string, start time.Time, errMsg str
 	}
 	e := base
 	e.Kind = stepKind(step)
+	e.Type = stepType(step)
 	e.Step = step
 	e.DurMS = s.eff.clock.Since(start).Milliseconds()
 	e.StartMS = e.DurMS

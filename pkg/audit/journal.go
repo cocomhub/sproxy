@@ -198,6 +198,10 @@ type FileJournalConfig struct {
 	Dir string
 	// Layout 决定段文件组织方式（默认 LayoutGlobal）。
 	Layout Layout
+	// Scope 限定本 Journal 的**作用域**（LayoutPerScope 时只读写该作用域的段文件）。
+	// 必须设置：同一目录下多任务共存时，否则 Read 会读到**其它作用域**的行
+	// （旧 FileSink 是 per-scope 文件 + per-scope 读取，隔离语义必须保留）。
+	Scope ScopeID
 	// SyncMode 决定落盘强度（默认 SyncAlways：合规与 WAL 证据级）。
 	SyncMode SyncMode
 	// BatchLines / BatchInterval 仅 SyncBatch 生效（0 ⇒ 默认 256 行 / 200ms）。
@@ -230,6 +234,7 @@ const (
 type FileJournal struct {
 	dir        string
 	layout     Layout
+	scope      ScopeID
 	syncMode   SyncMode
 	batchLines int
 	batchIv    time.Duration
@@ -257,6 +262,7 @@ func NewFileJournal(cfg FileJournalConfig) (*FileJournal, error) {
 	j := &FileJournal{
 		dir:        cfg.Dir,
 		layout:     cfg.Layout,
+		scope:      cfg.Scope,
 		syncMode:   cfg.SyncMode,
 		batchLines: cfg.BatchLines,
 		batchIv:    cfg.BatchInterval,
@@ -298,6 +304,14 @@ func (j *FileJournal) Dir() string { return j.dir }
 // segmentPath 计算条目所属段文件路径（按 Layout 分族）。
 func (j *FileJournal) segmentPath(e Entry) (string, error) {
 	if j.layout == LayoutPerScope {
+		// 作用域绑定的 Journal：条目作用域为空则补为本 Journal 的作用域；非空则必须一致
+		// （防「把 A 任务的行写进 B 任务的段」）。
+		if e.Scope == "" {
+			e.Scope = j.scope
+		}
+		if j.scope != "" && e.Scope != j.scope {
+			return "", fmt.Errorf("audit: 条目作用域 %q 与本 Journal 作用域 %q 不一致", e.Scope, j.scope)
+		}
 		if !validScopeID(e.Scope) {
 			return "", fmt.Errorf("audit: 非法 scopeID %q（段文件按作用域命名）", e.Scope)
 		}
@@ -312,6 +326,9 @@ func (j *FileJournal) Append(e Entry) error {
 	defer j.mu.Unlock()
 	if j.closed {
 		return ErrClosed
+	}
+	if e.Scope == "" {
+		e.Scope = j.scope
 	}
 	path, err := j.segmentPath(e)
 	if err != nil {
@@ -376,7 +393,9 @@ func (j *FileJournal) openLocked(path string) (*os.File, error) {
 	if f, ok := j.files[path]; ok {
 		return f, nil
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	// 复用 openAuditFile：Unix 下 O_NOFOLLOW 原子拒符号链接；非 Unix 下先 Lstat 校验
+	// （**审计文件写入目标可预测 ⇒ 必须防重定向**，与旧 FileSink 同一安全契约）。
+	f, err := openAuditFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -452,14 +471,22 @@ func (j *FileJournal) segmentFilesLocked() ([]string, error) {
 		return nil, err
 	}
 	var out []string
+	prefix := ""
+	if j.layout == LayoutPerScope && j.scope != "" {
+		prefix = string(j.scope) + ".audit.log"
+	}
 	for _, de := range des {
 		if de.IsDir() {
 			continue
 		}
 		name := de.Name()
-		if strings.HasSuffix(name, ".audit.log") || strings.Contains(name, ".audit.log.") {
-			out = append(out, filepath.Join(j.dir, name))
+		if !strings.HasSuffix(name, ".audit.log") && !strings.Contains(name, ".audit.log.") {
+			continue
 		}
+		if prefix != "" && !strings.HasPrefix(name, prefix) {
+			continue // 作用域绑定：只读本作用域的段（含其归档 .N）
+		}
+		out = append(out, filepath.Join(j.dir, name))
 	}
 	sort.Strings(out)
 	return out, nil

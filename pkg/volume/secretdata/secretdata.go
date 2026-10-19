@@ -562,7 +562,7 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 // 解密，aggregate 到单次 range 读；Bytes = 返回明文段总长）。无 ctx logger 时 no-op
 // （与写入侧 encrypt span 对称）。
 func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) (out []byte, err error) {
-	decSpan := audit.From(ctx).Begin("decrypt")
+	decSpan := audit.BeginSpan(ctx, "decrypt")
 	defer func() {
 		if err != nil {
 			decSpan.Fail(err)
@@ -1020,7 +1020,7 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 	// 审计：encrypt 阶段 span（与 writeFileEncrypted 对称；仅 ctx 携带 audit logger 时
 	// 生效，nil-safe no-op）。明文 = wc.size，密文 = 分块物理字节（physBytesOf 同 commitEntry
 	// 口径）。流式路径此前缺此埋点——转存到加密卷（WriteIfAbsent 走流式）审计无 encrypt 行。
-	encSpan := audit.From(ctx).Begin("encrypt")
+	encSpan := audit.BeginSpan(ctx, "encrypt")
 	var cipherBytes int64
 	defer func() {
 		if retErr != nil {
@@ -1216,7 +1216,7 @@ func (s *SecretdataFS) endWrite() {
 func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err error) {
 	// 审计：encrypt 阶段 span（仅 ctx 携带 audit logger 时生效；nil-safe no-op）。
 	// 明密文对比 + 密文字节：明文 = len(data)，密文 = 临时分块目录字节和（见下）。
-	encSpan := audit.From(ctx).Begin("encrypt")
+	encSpan := audit.BeginSpan(ctx, "encrypt")
 	var cipherBytes int64
 	defer func() {
 		if err != nil {

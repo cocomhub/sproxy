@@ -322,8 +322,7 @@ func (m *CloudDownloadManager) retryTransferFile(env *transferEnv) (*downloader.
 func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	// 审计：transfer 阶段 span（audit.From 经 env.ctx 取用；无 ctx logger 时 no-op）。
 	// 加密卷目标的 WriteFile 在 secretdata 包内独立记 encrypt span（此处不感知加密）。
-	trAudit := audit.From(env.ctx)
-	trSpan := trAudit.Begin("transfer")
+	trSpan := audit.BeginSpan(env.ctx, "transfer")
 	dir := path.Dir(env.rel)
 	if dir != "." && dir != "/" {
 		if err := ensureTransferDir(env.ctx, env.targetFS, dir); err != nil {

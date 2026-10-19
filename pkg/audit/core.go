@@ -5,6 +5,7 @@ package audit
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -14,6 +15,38 @@ import (
 // 与既有 legacy API（audit.go 的 Row/Sink/Logger/Span）的关系：同一份实现、同一个模型 ——
 // 新 API 是唯一实现，legacy 是**门面**（见 legacy.go，门禁 R35-d）。本文件只放**数据与策略**，
 // 不含落盘/索引/服务实现（分别在 journal.go / index.go / service.go）。
+
+// Type 是审计行的事件类型（一类业务动作）—— 与旧 Row.Type 同名同值（数据兼容，非第二实现）。
+type Type string
+
+const (
+	TypeAPI       Type = "api"       // HTTP API 调用
+	TypeDownload  Type = "download"  // 下载
+	TypeTransfer  Type = "transfer"  // 转存
+	TypeEncrypt   Type = "encrypt"   // 加密/解密阶段
+	TypeResource  Type = "resource"  // CPU/内存采样行（专用：采样类遥测）
+	TypeSensitive Type = "sensitive" // 敏感操作
+	TypeError     Type = "error"     // 错误
+	TypeLog       Type = "log"       // 通用事件行（无专属类型的 Log/未知步骤）
+)
+
+// Level 是审计行的严重级别。
+type Level string
+
+const (
+	LevelDebug Level = "debug"
+	LevelInfo  Level = "info"
+	LevelWarn  Level = "warn"
+	LevelError Level = "error"
+)
+
+// Dimension 用于按观测维度划分审计行（任务 / 系统）。
+type Dimension string
+
+const (
+	DimTask   Dimension = "task"
+	DimSystem Dimension = "system"
+)
 
 // Kind 是条目类别（统一旧 Row.Type 与合规事件）。
 type Kind string
@@ -300,15 +333,29 @@ func (c CapabilitySet) enabled(k Kind) bool {
 	}
 }
 
-// stepKind 由步骤名推断类别（兼容 legacy stepType 的语义，但只用于**未知类别**的兜底）。
+// stepKind 由步骤名推断条目类别（过程步骤 ⇒ KindSpan；采样 ⇒ KindResource）。
 func stepKind(step string) Kind {
-	switch {
-	case strings.HasPrefix(step, "resource"):
+	if strings.HasPrefix(step, "resource") {
 		return KindResource
+	}
+	return KindSpan
+}
+
+// stepType 由步骤名推断事件类型（Type）—— 等价旧 stepType 的职责：
+// 下载/转存/加解密/采样各自成类，其余归 TypeLog。**必须设置**，否则按 Type 过滤的
+// 查询（云任务审计报告、加密卷 encrypt span 断言）会全部落空。
+func stepType(step string) Type {
+	switch {
+	case strings.HasPrefix(step, "download"):
+		return TypeDownload
+	case strings.HasPrefix(step, "transfer"):
+		return TypeTransfer
 	case strings.HasPrefix(step, "encrypt"), strings.HasPrefix(step, "decrypt"):
-		return KindSpan
+		return TypeEncrypt
+	case strings.HasPrefix(step, "resource"):
+		return TypeResource
 	default:
-		return KindSpan
+		return TypeLog
 	}
 }
 
@@ -346,4 +393,45 @@ func putEntryMeta(e *Entry, k string, v any) {
 		e.Meta = make(map[string]any, 4)
 	}
 	e.Meta[k] = v
+}
+
+// asInt64 宽容地把数值类型转 int64；**不可识别返回 false**（调用方决定处置，不静默写 0 ——
+// 审计里「0 字节」是有效语义，把类型写错记成 0 会污染数据）。
+func asInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int8:
+		return int64(n), true
+	case int16:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case uint:
+		return int64(n), true
+	case uint8:
+		return int64(n), true
+	case uint16:
+		return int64(n), true
+	case uint32:
+		return int64(n), true
+	case uint64:
+		return int64(n), true
+	case float32:
+		return int64(n), true
+	case float64:
+		return int64(n), true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i, true
+		}
+		if f, err := n.Float64(); err == nil {
+			return int64(f), true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
 }
