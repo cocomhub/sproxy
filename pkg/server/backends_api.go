@@ -82,6 +82,10 @@ func (h *Handlers) backendPresignHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "预签名失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "backend_presign", ObjectType: "backend", Object: typ, Result: AuditResultSuccess,
+		Detail: "presign 直传 URL 已签发",
+	})
 	sendJSONResponse(w, map[string]string{"url": u}, http.StatusOK)
 }
 
@@ -185,6 +189,10 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 			h.presignRegisterError(w, rerr)
 			return
 		}
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "backend_presign_complete", ObjectType: "backend", Object: typ, Result: AuditResultSuccess,
+			Detail: "直传对象已登记",
+		})
 		sendJSONResponse(w, map[string]string{"ok": "registered"}, http.StatusOK)
 		return
 	}
@@ -207,6 +215,10 @@ func (h *Handlers) backendPresignCompleteHandler(w http.ResponseWriter, r *http.
 		http.Error(w, "对象不存在（直传未完成或路径错误）", http.StatusNotFound)
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "backend_presign_complete", ObjectType: "backend", Object: typ, Result: AuditResultSuccess,
+		Detail: "直传对象已登记",
+	})
 	sendJSONResponse(w, map[string]string{"ok": "registered"}, http.StatusOK)
 }
 

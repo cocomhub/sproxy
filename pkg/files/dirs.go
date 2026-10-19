@@ -105,7 +105,6 @@ func (s *Service) Mkdir(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
 		return
 	}
-	s.rt.recordFileAudit(r.Context(), "mkdir", res.RemotePath, auditResultSuccess, "目录已创建")
 	s.sendJSON(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已创建: %s", res.RemotePath)}, http.StatusOK)
 }
 
@@ -126,7 +125,6 @@ func (s *Service) Rmdir(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
 		return
 	}
-	s.rt.recordFileAudit(r.Context(), "rmdir", res.RemotePath, auditResultSuccess, "目录已删除")
 	s.sendJSON(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已删除: %s", res.RemotePath)}, http.StatusOK)
 }
 

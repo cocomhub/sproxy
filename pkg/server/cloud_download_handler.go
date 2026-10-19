@@ -310,6 +310,9 @@ func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
 		Action: "cloud_delete", ObjectType: "task", Object: id,
 		Result: AuditResultSuccess,
 	})
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "cloud_group_delete", ObjectType: "task", Object: id, Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
 

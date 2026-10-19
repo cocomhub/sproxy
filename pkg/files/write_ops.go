@@ -792,6 +792,8 @@ func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, 
 	s.settleDirCharge(dirCharge)
 	s.rt.logger().Info("目录已创建（外部卷）", "dir", remotePath, "volume", volName)
 	s.rt.publishFileEvent(EventMkdir, owner, remotePath, 0)
+	// 审计（**服务层** ⇒ 覆盖 HTTP/DAV/S3/CLI 全部写面）：目录创建成功。
+	s.rt.recordFileAudit(ctx, "mkdir", remotePath, auditResultSuccess, "volume="+volName)
 	return MakeDirResult{RemotePath: remotePath}, true, nil
 }
 
@@ -880,6 +882,9 @@ func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string,
 	s.rt.logger().Info("目录已删除", "dir", remotePath)
 	// 文件变更事件：rmdir 成功。
 	s.rt.publishFileEvent(EventRmdir, owner, rel, 0)
+	// 审计（**服务层** ⇒ 覆盖 HTTP/DAV/S3/CLI 全部写面）：目录删除成功（破坏性操作必须可追溯）。
+	s.rt.recordFileAudit(ctx, "rmdir", remotePath, auditResultSuccess,
+		"volume="+volName+" force="+fmt.Sprintf("%t", force))
 	return RemoveDirResult{RemotePath: remotePath}, nil
 }
 

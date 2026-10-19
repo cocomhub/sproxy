@@ -210,6 +210,10 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 	if !isNew {
 		status = http.StatusOK
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "sync_task_create", ObjectType: "task", Object: snapshot.ID, Result: AuditResultSuccess,
+		Detail: "同步任务已创建",
+	})
 	sendJSONResponse(w, snapshot, status)
 }
 

@@ -813,5 +813,8 @@ func (h *Handlers) revokeShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "share_revoke", ObjectType: "share", Object: token, Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, ShareCreateResponse{Success: true, Message: "分享链接已撤销"}, http.StatusOK)
 }

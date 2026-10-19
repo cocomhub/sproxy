@@ -296,5 +296,8 @@ func (h *Handlers) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "删除 secret 失败", http.StatusInternalServerError)
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "secret_delete", ObjectType: "secret", Object: name, Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, map[string]string{"name": name, "deleted": "true"}, http.StatusOK)
 }
