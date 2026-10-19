@@ -26,8 +26,8 @@ SPDX-License-Identifier: Apache-2.0
 | **保留审计/系统用户管理审计数据** | 保留 owner（前提：**注册入口保留该名**）+ **8 条安全红线**（含**读面 ACL**、TTL 隔离、权限收紧） |
 | **生产可用后补测试与自动恢复** | 各业务审计场景用例 + 崩溃恢复用例（真实 kill）+ 回归锁定 |
 | **全系统中断继续（WAL）** | 任务不丢失、崩溃后可续跑；**幂等是使用方契约**（`ReplayApplier`）+ `MarkDone` = 提交记录 |
-| **（审核新增）审计读面必须鉴权到管理员** | `/api/audit` `/api/audit/export` ⇒ `requireRole(admin)`/`audit.read` |
-| **（审核新增）单机模型** | 段在本地 ⇒ **跨节点恢复不在本期**（不做无 fencing 的 `Lease`） |
+| **审计读面权限（已裁定）** | **两维模型**：用户维度（owner 读自己 + **脱敏**）/ 系统维度（**仅管理员**）/ 跨维条目（owner 脱敏可见）；**服务端强制过滤**（客户端不可放宽）；`export` 与 `list` 同一门 |
+| **单机模型（已裁定）** | 段在本地 ⇒ **跨节点恢复不在本期**（不做无 fencing 的 `Lease`） |
 
 ---
 
@@ -72,7 +72,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 阶段 | 内容 | 依赖 | 交付判据 |
 |---|---|---|---|
-| **M1 审计收敛** | `pkg/audit` 统一能力（Entry/Scope/Service/Journal/Index/Notifier/Clock/Policy/CapabilitySet + null-object）；`RecordAudit` 薄委托；**`AuditStore/AuditRing` 迁移（二选一方案）**；**补覆盖缺口全表**；`auditMiddleware`；结构化字段 + 计数 + fail-closed；**轮转 T1–T8**；**M1-9 保留 owner 前提 + 拒绝面**；**M1-11 读面 ACL**；**M1-12 权限收紧**；**M1-13 TTL 与 WAL 隔离** | — | 旧用例通过（按 M1-3 选定方案）+ 新业务审计用例 + R35 |
+| **M1 审计收敛** | `pkg/audit` 统一能力（Entry/Scope/Service/Journal/Index/Notifier/Clock/Policy/CapabilitySet + null-object）；`RecordAudit` 薄委托；**`AuditStore/AuditRing` 迁移（已裁定：②彻底 — 类型迁入 `pkg/audit`）**；**补覆盖缺口全表**；`auditMiddleware`；结构化字段 + 计数 + fail-closed；**轮转 T1–T8**；**M1-9 保留 owner 前提 + 拒绝面**；**M1-11 读面权限（两维模型）**；**M1-12 权限收紧**；**M1-13 TTL 与 WAL 隔离** | — | 旧语义逐条保留用例通过（倒序/limit/export 升序/轮转文件名/信封）+ 新业务审计用例 + R35 |
 | **W1 通用等待** | 新建 `pkg/waitq`；`quota`（**等待侧 + 释放侧同提交**）/`staging`/`cloud 内存` 适配；**获取路径收敛（两层 ~40 处）**；惊群/背压/优先级/指标 | — | 迁移等价用例 + W17 回归 + R36 |
 | **M1-8 审计配额治理**（依赖 W1） | 热段**有界保留**（自身上界）+ `max_total_bytes` 非零默认 + 达上限轮转/归档/有界丢弃 | W1 | 配额/有界保留用例 |
 | **M2 WAL 化** | `Save` 落盘（`KindState`+`Seq`）；`Resume(ReplayApplier)`/`ListScopes`/`MarkDone`（**提交记录语义**）；两级序；段布局（合规=全局段 / 任务=按 scope 段）；`Journal.Rewrite` 接口化 | M1 | 崩溃重放/幂等契约/提交语义用例 |
@@ -98,7 +98,7 @@ SPDX-License-Identifier: Apache-2.0
 | 覆盖完备（变更路由） | 缺口含 share/sync/DAV/notify 等 | `auditMiddleware` 兜底（**不计达标**）+ 缺口补齐 |
 | 结构化字段 | 部分 | volume/request_id/source_ip/size/dur |
 | 有界保留 + 丢弃/失败/panic 计数 | 无 | §5.4.1（审计）+ `Metrics` |
-| **读面 ACL** | **无（P0）** | `requireRole(admin)` |
+| **读面权限** | **无（P0）** | **两维模型**（§5.7）：用户维度（脱敏）/ 系统维度（仅管理员）/ 服务端强制过滤 |
 | **保留 owner 名保护** | **可被占用** | 注册入口保留 `__` 前缀 |
 | **权限** | 0755/0644 | 0700/0600 |
 | 归档到卷 | `Archiver` 预留 | M4 外置适配器 |
@@ -119,7 +119,7 @@ SPDX-License-Identifier: Apache-2.0
 | 多资源原子（**两层预留**） | 特化 | ✓ `Group` |
 | 可观测（指标/Stats） | 仅测试计数 | ✓ |
 | 使用方扩展（内存/CPU/带宽） | ✗ | ✓ `Resource` |
-| 获取路径收敛 | **两层 ~40 处** | 经唯一 `Acquire`（探测式登记豁免） |
+| 获取路径收敛 | **两层 ~40 处** | 经唯一 `Acquire`（**已裁定：两层一并收敛**；探测式登记豁免） |
 
 ### 4.3 中断继续
 
@@ -169,7 +169,7 @@ SPDX-License-Identifier: Apache-2.0
 | R35-b | 变更型路由必须经 `auditMiddleware`（豁免登记）；**transport 兜底不计达标** |
 | R35-c | `pkg/server` 不得定义审计条目类型/落盘实现 |
 | **R35-d** | `pkg/audit` 不得同时导出两套 span/kv API（除 facade） |
-| **R35-e** | `/api/audit` `/api/audit/export` 必须 `requireRole`（豁免登记） |
+| **R35-e** | `/api/audit` `/api/audit/export` 必须：① 管理员门；② **服务端强制 owner 过滤**（非管理员不得放宽）；③ `export` 与 `list` 同一门与同一过滤（豁免登记） |
 | R36-a | 禁直接 `TryReserve`/`WaitReserve`/`TryReserveChunked`/`semaphore.Weighted`（白名单 + **基线全量登记**，§8.2 of waitq.md） |
 | R36-b | 禁新增 `sync.Cond`（基线：`quota.go:46`、`staging_tracker.go:35`；**`kad.go:246` 显式排除**） |
 | R36-c | `Resource` 适配器登记（名/label/单位/超时/MaxWaiters/优先级） |
@@ -217,10 +217,10 @@ SPDX-License-Identifier: Apache-2.0
 | Q8 | `local_reserve_bytes` / 归档阈值 | 256 MiB / 70% 或 N 段 |
 | Q9 | 热段是否加密 | 先明文 + 0700/0600 |
 | **Q10** | **`max_total_bytes` 默认值** | 建议 `local_reserve_bytes × 4`（非零安全默认） |
-| **Q11** | **单机模型是否接受** | 建议接受（跨节点恢复另立专题） |
-| **Q12** | **读面角色** | `requireRole(admin)` 复用现成角色，或新增 `audit.read` |
-| **Q13** | **层 B（容量管理）是否本期收敛** | 建议是（`Group` 原子才不留半入账） |
-| **Q14** | **`AuditStore` 迁移方案 ①保守/②彻底** | 建议 ①（类型留 `pkg/server`，策略/接口搬 `pkg/audit`）——改动最小、零回归风险 |
+| ~~Q11~~ | ~~单机模型~~ | **已裁定：本期单机**（跨节点恢复另立专题） |
+| ~~Q12~~ | ~~读面角色~~ | **已裁定：两维权限模型**（audit-service §5.7；M1-11 先落管理员门 + 过滤骨架，用户维度视图低优先级后续） |
+| ~~Q13~~ | ~~层 B 是否本期收敛~~ | **已裁定：两层一并收敛**（`Group` 原子，不留半入账） |
+| ~~Q14~~ | ~~`AuditStore` 迁移方案~~ | **已裁定：② 彻底**（类型迁入 `pkg/audit`；`Journal.Prune`/`Index.Evict` + 白盒测试迁移） |
 
 ---
 
@@ -260,3 +260,12 @@ SPDX-License-Identifier: Apache-2.0
 | revA P2-4/revB P2：TTL 会删 WAL 行 | E25 + M1-13 |
 | revA/revB/revC：计数与路径清单（~130/~35；7 条路径） | 订正：**115 处/20 文件**（+29/3）；**两层 ~40 处** |
 | revC C6：门禁失控风险 | 新增 `docs/gates.md` + R 号双向校验 |
+
+### 13. 裁定记录（v3，2026-10-19 用户问答）
+
+| 项 | 裁定 |
+|---|---|
+| `AuditStore`/`AuditRing` 下沉 | **② 彻底**（类型迁入 `pkg/audit`）⇒ M1-3 含 `Journal.Prune`/`Index.Evict` + 白盒测试迁移 |
+| 中断继续集群语义 | **本期单机** |
+| 获取路径收敛范围 | **两层一并收敛**（quota + capacity） |
+| 审计读面权限 | **两维模型**（用户维度脱敏可读自己 / 系统维度仅管理员 / 服务端强制）⇒ audit-service §5.7 |
