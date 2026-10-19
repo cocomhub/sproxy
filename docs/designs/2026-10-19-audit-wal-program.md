@@ -22,6 +22,10 @@ SPDX-License-Identifier: Apache-2.0
 | **等待能力通用可扩展** | `pkg/waitq` 提供抽象；使用方实现 `Resource`（磁盘/内存/CPU/带宽…） |
 | **生产可用后补测试与自动恢复** | 各业务**审计场景用例** + **崩溃恢复用例** + 回归锁定 |
 | **全系统中断继续（WAL）** | 任务不丢失、崩溃后可续跑（`ListScopes/Resume/MarkDone/Lease`） |
+| **包提供全部能力，使用方按场景选择** | 合规形态/span/采样/WAL/归档/加密存储/配额治理均为**可选能力**；使用方声明 `CapabilitySet` |
+| **审计落盘纳入配额**（防磁盘打满） | 本地热段**预留额度**（不与用户竞争）+ 卷内归档走**卷配额** |
+| **审计可归档到外部存储卷** | 长期留存复用**卷/外部卷/加密卷**；本地只留热段（占用有上界） |
+| **保留审计/系统用户管理审计数据** | 保留 owner 复用配额/加密/外部卷/版本/回收站/统一恢复；**5 条安全红线** |
 
 ---
 
@@ -65,8 +69,9 @@ SPDX-License-Identifier: Apache-2.0
 | **M2 WAL 化** | `Save` 落盘（`KindState`+`Seq`）；`Resume/ListScopes/MarkDone/Lease`；段布局（合规=全局段 / 任务=按 scope 段）；`Archiver` 接线 | M1 | 崩溃重放/幂等/已完成跳过用例 |
 | **M3 统一恢复协调器** | `pkg/recovery`：注册中心（装配层启动编排）；收敛 cloud/sync/chunked 三处 `recover*`；**接线 baidupcs 断点**；**上传/下载块级校验**（`meta.VerifyReadSeeker`）；崩溃恢复 e2e | M2 | 崩溃恢复 e2e + R37 |
 | **S3 面与文档** | Web UI（审计新字段/筛选 + 等待可观测）；docs（`api.md`/`config.md`/设计交叉引用）；**真浏览器 e2e** | M1/W1 | R10 + UI e2e |
+| **M4 归档到外部/加密卷**（后续阶段） | sealed 段 → 写内核 → 保留用户卷内路径 → 热段回收；`Query` 跨热/冷段；归档失败**不丢热段** | M2 | 归档往返用例（含加密卷/外部卷） |
 
-**顺序理由**：M1 先（统一日志形态是 M2 的载体）；W1 独立可与 M1 并行（同分支顺序做，避免多 PR）；M2 在 M1 后（`Save` 落盘复用统一 Journal）；M3 在 M2 后（协调器消费 `ListScopes/Resume`）；S3 最后（面）。
+**顺序理由**：M1 先（统一日志形态是 M2 的载体）；W1 独立可与 M1 并行（同分支顺序做，避免多 PR）；M2 在 M1 后（`Save` 落盘复用统一 Journal）；M3 在 M2 后（协调器消费 `ListScopes/Resume`）；S3 最后（面）；**M4 为后续阶段**（用户裁定「后续规划支持归档到外部存储卷」，依赖 M2 的段与摘要）。
 
 > 原「S1 配额收敛」**并入 W1**（`waitq` + 适配器即收敛），不再单列。
 
@@ -89,6 +94,11 @@ SPDX-License-Identifier: Apache-2.0
 | 归档到卷 | 预留未接线 | 接线 |
 | WAL（Save 落盘/Seq/Resume/ListScopes/MarkDone/Lease） | 无 | 全 |
 | 无全局变量 / 可注入 Clock | 混用 | 全结构体 |
+| **能力选择性启用**（CapabilitySet） | 无 | 使用方按场景声明（合规形态=可选） |
+| **落盘策略族**（Always/Batch/None/Memory） | 硬编码 | 包提供，使用方选择（scope > Kind > 全局） |
+| **存储配额治理**（本地预留 + 卷配额） | 无 | §5.4（注册为 `waitq.Resource`） |
+| **归档到外部/加密卷** | `Archiver` 预留 | §5.5（走写内核 ⇒ 复用配额/加密/版本/多卷） |
+| **保留用户（系统用户）** | 无 | §5.6（复用外部卷/加密卷；5 条安全红线） |
 
 ### 4.2 等待
 
@@ -184,6 +194,11 @@ SPDX-License-Identifier: Apache-2.0
 | `audit.fail_closed` | `false` | E3 合规可选 |
 | `audit.sync_mode`（按 Kind 覆盖） | `event=always, span=batch, resource=batch` | §5.2 落盘策略 |
 | `waitq.<resource>.timeout` / `.max_waiters` / `.priority` | 30s / 1000 / normal | 按资源登记（沿用 `quota_wait_timeout` 语义） |
+| `audit.local_reserve_bytes` | 256 MiB | 本地热段**预留额度**（不与用户数据竞争） |
+| `audit.max_total_bytes` | `0`（不限，部署应显式设） | 本地热段硬上限 ⇒ 超限即轮转/归档 |
+| `audit.sync.<kind>` / `audit.sync.scope.<id>` | `event/done/state=always`、`span/resource=batch` | 落盘策略族选择（scope > Kind > 全局） |
+| `audit.retained_owner` | `__audit__`（待裁定 O6） | 审计数据保留用户（冷段归档归属） |
+| `audit.archive_volume` / `audit.archive_path` / `audit.local_keep_segments` | 空 / 空 / 4 | M4：归档目标卷与热段保留份数 |
 
 ---
 
@@ -201,12 +216,15 @@ SPDX-License-Identifier: Apache-2.0
 
 | # | 项 | 建议 |
 |---|---|---|
-| Q1 | `audit.fail_closed` 默认 | 建议 `false`（best-effort 零回归），合规部署显式开 |
-| Q2 | 段布局（合规全局段 vs 按 scope 段） | 建议**两者并存**：合规=全局段、任务/WAL=按 scope 段 |
+| ~~Q1~~ | ~~`audit.fail_closed` 默认~~ | **已裁定**：默认 best-effort（零回归），合规部署显式开启 |
+| ~~Q2~~ | ~~段布局~~ | **已裁定**：**两者并存**（合规=全局段、任务/WAL=按 scope 段） |
 | Q3 | 是否保留 R34 | 建议保留为冗余保险，稳定一版后退役 |
 | Q4 | `ratelimit` 并发槽是否迁入 `waitq` | 建议先不迁（语义非阻塞），仅统一指标 |
-| Q5 | 阶段顺序是否接受 M1 → W1 → M2 → M3 → S3（单分支单 PR） | 建议接受（你已裁定「避免多 PR」） |
+| ~~Q5~~ | ~~阶段顺序~~ | **已裁定**：单分支单 PR，M1 → W1 → M2 → M3 → S3 |
 | Q6 | 优先级是否配置化 | 建议先内部常量，需要再配置化 |
+| Q7 | 保留 owner 命名（`__audit__` vs `_system`） | 见 audit-service.md O6 |
+| Q8 | 本地热段预留额度 / 归档阈值默认值 | 见 audit-service.md O7/O8（256 MiB / 70% 或 N 段） |
+| Q9 | 本地热段是否也加密（现为明文 + 0700） | 建议先明文（与现状一致）；若要求则归档后统一加密卷（M4） |
 
 ---
 
@@ -217,4 +235,5 @@ SPDX-License-Identifier: Apache-2.0
 3. **M2**：`Save` 落盘 / `Seq` / `Resume` / `ListScopes` / `MarkDone` / `Lease` / `Archiver` + 恢复用例；
 4. **M3**：`pkg/recovery` 协调器 + 收敛 5 处 + baidupcs 断点接线 + 块级校验 + 崩溃 e2e + 门禁 R37；
 5. **S3**：Web UI（审计字段/筛选 + 等待可观测）+ docs + 真浏览器 e2e；
-6. 全量验证：`go test ./...`（含 serial/sleep 棘轮）+ `make lint` + `make check-ci` + e2e + 零丢失验证。
+6. **M4（后续阶段）**：归档到外部/加密卷 + `Query` 跨热/冷段 + 保留用户路径；
+7. 全量验证：`go test ./...`（含 serial/sleep 棘轮）+ `make lint` + `make check-ci` + e2e + 零丢失验证。
