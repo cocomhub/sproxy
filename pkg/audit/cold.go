@@ -5,36 +5,33 @@ package audit
 
 // cold.go 是 **冷段（已归档段）读取**（M4：跨热/冷段 Query 的冷侧）。
 //
-// 设计目标（用户 2026-10-20 明示）：**归档后的内容必须支持按需/随机读取**，不得为了看一段就
-// 必须整文件下载。三层能力（使用方按场景选择，互不强制）：
-//
-//  1. `ListArchive`：枚举冷段 + **有界**探测首/尾行时间（首行 + 末尾窗口）⇒ 可按时间范围
-//     **跳过整个文件**（不必打开全部冷段）；
-//  2. `ColdSegment.OpenRange`：**字节级随机读**（`io.SectionReader`）⇒ O(1) seek + 只读所需区间；
-//  3. `StreamColdSegment` / `StreamFrom`：**条目流式**读取（逐行解码 + 谓词早停，内存 O(一行)）。
+// 两条用户裁定（2026-10-20）决定了这里的形状：
+//  1. **复用既有能力**：归档与「云端下载 → 转存」同类 ⇒ 冷段存放/读取都走 **`pkg/sync.FS`**
+//     （本地目录 / 外部卷 / 加密卷 / 远端同一套语义），**不自造 store/sink 接口** ✗；
+//  2. **按需/随机读取**：必须能只读所需片段 —— 用 FS 的可选能力 **`RangeReader`**（`OpenRangeRead`）
+//     做**字节区间读**；条目级读取用**流式 + 早停**（内存 O(一行)，与段大小无关 ✓）。
 //
 // 冷段与热段**同格式**（都是 Journal 段文件）⇒ 解码复用 `decodeSegmentLine`（单一实现 ✓）。
-// 远端/加密卷的冷段由装配层用 `pkg/sync` 的 `FS`（`ListDir`/`Stat`/**`RangeReader`**）实现
-// 同一套 `SegmentStore` 接口 ✓ —— 审计包不依赖任何存储实现 ✓。
 
 import (
 	"bufio"
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
+	"path"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // ColdSegment 描述一个**已归档**的段文件（含时间范围，用于整文件级跳过）。
 //
-// First/Last 由 `ListArchive` **有界**探测；零值表示探测失败/空段（调用方应保守读取，不跳过）。
+// First/Last 由 `ListCold` **有界**探测；零值表示探测失败/空段（调用方应保守读取，不跳过）。
 type ColdSegment struct {
-	Path  string    // 路径
+	Path  string    // FS 内相对路径
 	Index int       // 归档序号（`audit.log.3` ⇒ 3；越大越旧）
 	Size  int64     // 字节数
 	First time.Time // 首条条目时间
@@ -54,125 +51,114 @@ func segmentNameMatches(name string) bool {
 	return strings.Contains(name, "audit.log")
 }
 
-// ListArchive 枚举冷段目录下的段文件，按**最旧优先**排序（序号大者更旧）。
+// ListCold **递归**枚举 `fs` 上 `root` 下的冷段，最旧优先（目录 asc = 日期序，段序号 desc）。
 //
-// 只做 Stat + 首/尾行探测（有界读）⇒ 即使成千上万冷段也是「每文件少量小读」，不把内容读进内存。
-func ListArchive(dir string) ([]ColdSegment, error) {
-	if strings.TrimSpace(dir) == "" {
-		return nil, fmt.Errorf("audit: ListArchive 需要目录")
+// 只做 Stat + 有界首/尾探测 ⇒ 每文件少量小读，不把内容读进内存 ✓。
+func ListCold(ctx context.Context, fs syncpkg.FS, root string) ([]ColdSegment, error) {
+	if fs == nil {
+		return nil, fmt.Errorf("audit: ListCold 需要 pkg/sync.FS")
 	}
-	if _, err := os.Stat(dir); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // 尚无冷段：不是错误（归档关闭/尚未轮转）
+	ents, err := syncpkg.WalkEntries(ctx, fs, root, true, false, nil)
+	if err != nil {
+		if syncpkg.IsNotExist(err) {
+			return nil, nil // 尚无冷段：不是错误
 		}
 		return nil, fmt.Errorf("audit: 枚举冷段失败: %w", err)
 	}
-	var out []ColdSegment
-	// **递归**：归档按 `<prefix>/<UTC 日期>/<段名>` 落盘（见 SinkArchiver）⇒ 必须下探日期子目录。
-	walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil // 单个坏项不阻断枚举（冷段目录可能被外部改动）
+	out := make([]ColdSegment, 0, len(ents))
+	for _, e := range ents {
+		if e.IsDir {
+			continue
 		}
-		if d.IsDir() || !segmentNameMatches(d.Name()) {
-			return nil
+		name := path.Base(e.Path)
+		if !segmentNameMatches(name) {
+			continue
 		}
-		info, ierr := d.Info()
-		if ierr != nil {
-			return nil
-		}
-		seg := ColdSegment{Path: path, Size: info.Size(), Index: archiveIndex(d.Name())}
-		seg.First, seg.Last = probeSegmentTimes(path, seg.Size)
+		seg := ColdSegment{Path: e.Path, Size: e.Size, Index: archiveIndex(name)}
+		seg.First, seg.Last = probeSegmentTimes(ctx, fs, seg.Path, seg.Size)
 		out = append(out, seg)
-		return nil
-	})
-	if walkErr != nil {
-		return nil, fmt.Errorf("audit: 枚举冷段失败: %w", walkErr)
 	}
-	// **最旧优先**：日期目录（YYYYMMDD）字典序即时间序 ⇒ 先按路径、再按段序号降序。
 	sort.SliceStable(out, func(i, k int) bool {
-		di, dk := filepath.Dir(out[i].Path), filepath.Dir(out[k].Path)
+		di, dk := path.Dir(out[i].Path), path.Dir(out[k].Path)
 		if di != dk {
-			return di < dk // 日期目录（YYYYMMDD）字典序 = 时间序（旧在前）
+			return di < dk
 		}
-		return out[i].Index > out[k].Index // 同目录内序号大者更旧
+		return out[i].Index > out[k].Index
 	})
 	return out, nil
 }
 
 // probeSegmentTimes 有界探测段的首/末条目时间（失败 ⇒ 零值，调用方保守读取）。
-func probeSegmentTimes(path string, size int64) (first, last time.Time) {
-	f, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	// 首行
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
-	if sc.Scan() {
-		if e, ok := decodeScannedLine(sc); ok {
-			first = e.TS
-		}
-	}
+func probeSegmentTimes(ctx context.Context, fs syncpkg.FS, p string, size int64) (first, last time.Time) {
+	first = probeFirstTS(ctx, fs, p)
 	if size <= 0 {
 		return first, first
 	}
-
-	// 末行：读尾部窗口，取最后一个完整行
-	off := max(size-tailProbeBytes, 0)
-	buf := make([]byte, size-off)
-	if _, rerr := f.ReadAt(buf, off); rerr != nil && rerr != io.EOF {
-		return first, first
-	}
-	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
-	for _, line := range slices.Backward(lines) {
-		if line == "" {
-			continue
-		}
-		if e, ok := decodeSegmentLine([]byte(line + "\n")); ok {
-			last = e.TS
-			break
-		}
-	}
+	last = probeLastTS(ctx, fs, p, size)
 	if last.IsZero() {
 		last = first
 	}
 	return first, last
 }
 
-// sectionReadCloser 把 `io.SectionReader` 与底层文件配对，Close 时**同时**关闭文件。
-//
-// 为什么不用 `io.NopCloser`：它吞掉 Close ⇒ 文件句柄泄漏 ✗（实测会让临时目录清理失败，
-// 且长跑进程会耗尽 fd）。
-type sectionReadCloser struct {
-	r io.Reader
-	c io.Closer
-}
-
-func (s sectionReadCloser) Read(p []byte) (int, error) { return s.r.Read(p) }
-
-func (s sectionReadCloser) Close() error { return s.c.Close() }
-
-// OpenRange 返回该冷段的**字节区间**读取器（O(1) seek，不整文件加载 ✓）。
-//
-// n <= 0 表示读到文件末尾；越界由 `io.SectionReader` 自动截断。
-func (c ColdSegment) OpenRange(off, n int64) (io.ReadCloser, error) {
-	if off < 0 {
-		return nil, fmt.Errorf("audit: 冷段区间偏移不能为负: %d", off)
+// probeFirstTS 区间读前 64KiB 取首条时间（FS 无区间能力时退化为流式读首行）。
+func probeFirstTS(ctx context.Context, fs syncpkg.FS, p string) time.Time {
+	if rr := syncpkg.AssertRangeReader(fs); rr != nil {
+		if b, _, err := syncpkg.RangeReadAll(rr, ctx, p, 0, 64<<10); err == nil {
+			if e, ok := firstEntry(b); ok {
+				return e.TS
+			}
+			return time.Time{}
+		}
 	}
-	f, err := os.Open(c.Path)
+	rc, err := fs.OpenRead(ctx, p)
 	if err != nil {
-		return nil, fmt.Errorf("audit: 打开冷段失败: %w", err)
+		return time.Time{}
 	}
-	remain := max(c.Size-off, 0)
-	if n <= 0 || n > remain {
-		n = remain
+	defer rc.Close()
+	sc := bufio.NewScanner(rc)
+	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	if sc.Scan() {
+		if e, ok := decodeScannedLine(sc); ok {
+			return e.TS
+		}
 	}
-	return sectionReadCloser{r: io.NewSectionReader(f, off, n), c: f}, nil
+	return time.Time{}
 }
 
-// SkipByTime 报告该冷段是否可以**整文件跳过**（利用 First/Last；时间未知 ⇒ 不跳过）。
+// probeLastTS 区间读尾部窗口取末条时间（只取小段，远端也只传输该窗口 ✓）。
+func probeLastTS(ctx context.Context, fs syncpkg.FS, p string, size int64) time.Time {
+	rr := syncpkg.AssertRangeReader(fs)
+	if rr == nil {
+		return time.Time{}
+	}
+	off := max(size-tailProbeBytes, 0)
+	b, _, err := syncpkg.RangeReadAll(rr, ctx, p, off, size-off)
+	if err != nil {
+		return time.Time{}
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	for _, line := range slices.Backward(lines) {
+		if line == "" {
+			continue
+		}
+		if e, ok := decodeSegmentLine([]byte(line + "\n")); ok {
+			return e.TS
+		}
+	}
+	return time.Time{}
+}
+
+// firstEntry 从字节窗口解析第一条完整行。
+func firstEntry(b []byte) (Entry, bool) {
+	idx := strings.IndexByte(string(b), '\n')
+	if idx < 0 {
+		return Entry{}, false
+	}
+	return decodeSegmentLine(b[:idx+1])
+}
+
+// SkipByTime 报告该冷段是否可以**整文件跳过**（时间未知 ⇒ 不跳过）。
 func (c ColdSegment) SkipByTime(f EntryFilter) bool {
 	if f.Since.IsZero() || c.Last.IsZero() {
 		return false
@@ -180,20 +166,42 @@ func (c ColdSegment) SkipByTime(f EntryFilter) bool {
 	return !c.Last.After(f.Since)
 }
 
+// OpenRange 用 FS 的 **`RangeReader`** 能力读字节区间（远端卷也只传输所需区间 ✓）。
+//
+// FS 未实现该能力 ⇒ 返回 `syncpkg.ErrUnsupported`（调用方应显式处置，**不得**静默整文件下载 ✗）。
+func OpenRange(ctx context.Context, fs syncpkg.FS, seg ColdSegment, off, n int64) (io.ReadCloser, error) {
+	if fs == nil {
+		return nil, fmt.Errorf("audit: 需要 pkg/sync.FS")
+	}
+	rr := syncpkg.AssertRangeReader(fs)
+	if rr == nil {
+		return nil, fmt.Errorf("audit: 该 FS 不支持区间读（%w）", syncpkg.ErrUnsupported)
+	}
+	if n <= 0 || (seg.Size > 0 && off+n > seg.Size) {
+		n = seg.Size - off
+	}
+	if n < 0 {
+		n = 0
+	}
+	return rr.OpenRangeRead(ctx, seg.Path, off, n)
+}
+
 // StreamColdSegment **流式**读取一个冷段：逐行解码 → 过滤 → fn；fn 返回 false 即早停。
-func StreamColdSegment(ctx context.Context, c ColdSegment, f EntryFilter, fn func(Entry) bool) error {
-	if fn == nil {
+//
+// 用 `OpenRead` 全程流式（内存 O(一行)）——需要「只取某段字节」时用 `OpenRange` ✓。
+func StreamColdSegment(ctx context.Context, fs syncpkg.FS, seg ColdSegment, f EntryFilter, fn func(Entry) bool) error {
+	if fn == nil || fs == nil {
 		return nil
 	}
-	fh, err := os.Open(c.Path)
+	rc, err := fs.OpenRead(ctx, seg.Path)
 	if err != nil {
 		return fmt.Errorf("audit: 打开冷段失败: %w", err)
 	}
-	defer fh.Close()
-	return scanEntries(ctx, fh, f, fn)
+	defer rc.Close()
+	return scanEntries(ctx, rc, f, fn)
 }
 
-// scanEntries 是冷段流式读取的**唯一实现**（本地文件与 SegmentStore 共用）。
+// scanEntries 是冷段流式读取的**唯一实现**。
 func scanEntries(ctx context.Context, r io.Reader, f EntryFilter, fn func(Entry) bool) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
@@ -230,85 +238,34 @@ func decodeScannedLine(sc *bufio.Scanner) (Entry, bool) {
 	return decodeSegmentLine(buf)
 }
 
-// SegmentStore 是冷段的**读取能力**（本地目录 / 外部卷 / 加密卷由装配层适配）。
-//
-// 契约：`OpenRange` 必须支持**任意字节区间**（远端卷用 `sync.RangeReader` 实现）⇒ 调用方只读
-// 所需区间，绝不整文件下载 ✓。
-type SegmentStore interface {
-	// List 枚举冷段（实现应带 First/Last 以便按时间跳过整文件；未知可留零值 ⇒ 保守读取）。
-	List(ctx context.Context) ([]ColdSegment, error)
-	// OpenRange 打开 [off, off+n) 区间（n<=0 ⇒ 到末尾）。
-	OpenRange(ctx context.Context, seg ColdSegment, off, n int64) (io.ReadCloser, error)
-}
-
-// LocalSegmentStore 是本地目录适配器（远端/加密卷由装配层用 `sync.FS` + `RangeReader` 实现同一接口）。
-type LocalSegmentStore struct{ Dir string }
-
-// List 实现 SegmentStore（本地枚举 + 有界首/尾探测）。
-func (l LocalSegmentStore) List(context.Context) ([]ColdSegment, error) {
-	return ListArchive(l.Dir)
-}
-
-// OpenRange 实现 SegmentStore（本地 SectionReader：O(1) seek ✓）。
-func (l LocalSegmentStore) OpenRange(_ context.Context, seg ColdSegment, off, n int64) (io.ReadCloser, error) {
-	return seg.OpenRange(off, n)
-}
-
-// StreamFrom 流式读取该段（逐行 + 谓词早停；内存 O(一行)）。
-func StreamFrom(ctx context.Context, store SegmentStore, seg ColdSegment, f EntryFilter, fn func(Entry) bool) error {
-	if store == nil || fn == nil {
-		return nil
-	}
-	rc, err := store.OpenRange(ctx, seg, 0, 0)
-	if err != nil {
-		return err
-	}
-	defer rc.Close()
-	return scanEntries(ctx, rc, f, fn)
-}
-
-// QueryColdStore 在若干 `SegmentStore` 上查询（最旧优先、流式、早停、按时间跳过整文件）。
+// QueryCold 在 `fs` 的 `roots` 上查询冷段（最旧优先、流式、早停、按时间整文件跳过）。
 //
 // **收敛点**：热段走 `FileJournal.Read`，冷段走本函数；两者共用 `EntryFilter.Match` +
 // `decodeSegmentLine` ⇒ 过滤/解码只有一份实现 ✓。
-func QueryColdStore(ctx context.Context, stores []SegmentStore, f EntryFilter, limit int) ([]Entry, error) {
+func QueryCold(ctx context.Context, fs syncpkg.FS, roots []string, f EntryFilter, limit int) ([]Entry, error) {
 	var out []Entry
-	for _, st := range stores {
-		hit, err := queryOneStore(ctx, st, f, limit, &out)
+	for _, root := range roots {
+		segs, err := ListCold(ctx, fs, root)
 		if err != nil {
 			return nil, err
 		}
-		if hit {
-			return out, nil
+		for _, seg := range segs {
+			if seg.SkipByTime(f) {
+				continue
+			}
+			limitHit := false
+			sErr := StreamColdSegment(ctx, fs, seg, f, func(e Entry) bool {
+				out = append(out, e)
+				limitHit = limit > 0 && len(out) >= limit
+				return !limitHit
+			})
+			if sErr != nil {
+				return nil, sErr
+			}
+			if limitHit {
+				return out, nil
+			}
 		}
 	}
 	return out, nil
-}
-
-// queryOneStore 查一个 SegmentStore（按段最旧优先 + 流式早停），把结果追加到 out。
-// 返回 hit=true 表示已达 limit（调用方应立即返回）。拆出只为把 QueryColdStore 的复杂度留在阈值内。
-func queryOneStore(ctx context.Context, st SegmentStore, f EntryFilter, limit int, out *[]Entry) (hit bool, err error) {
-	if st == nil {
-		return false, nil
-	}
-	segs, err := st.List(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, seg := range segs {
-		if seg.SkipByTime(f) {
-			continue
-		}
-		sErr := StreamFrom(ctx, st, seg, f, func(e Entry) bool {
-			*out = append(*out, e)
-			return limit <= 0 || len(*out) < limit
-		})
-		if sErr != nil {
-			return false, sErr
-		}
-		if limit > 0 && len(*out) >= limit {
-			return true, nil
-		}
-	}
-	return false, nil
 }

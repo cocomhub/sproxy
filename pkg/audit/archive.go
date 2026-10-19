@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // SegmentArchiver 把**已封（sealed）**的合规段归档到外部目的地（外部卷 / 加密卷 / 远端）。
@@ -139,32 +141,24 @@ func sealedSegments(j *FileJournal) ([]SegmentInfo, error) {
 	return sealed, nil
 }
 
-// SegmentSink 是归档**目的地写能力**（由装配层用 `pkg/sync.FS` 适配：LocalFS / 外部卷 / 加密卷
-// / 云端都用同一套 `WriteFile` 语义 ⇒ 审计包**不依赖**任何存储实现，也不重复实现拷贝 ✗）。
+// FSArchiver 把封段写入 **`pkg/sync` 的 FS 能力**（**唯一**通用实现）。
 //
-// 与 `pkg/sync.FS.WriteFile(ctx, key, path, r, size, mtime)` 同形（去掉 LogicalKey/幂等上下文，
-// 这两个由装配层适配时补齐）。
-type SegmentSink interface {
-	// Put 写入整个对象（覆盖语义由实现决定）；size 为声明字节数。
-	Put(ctx context.Context, path string, r io.Reader, size int64) error
-	// Size 返回已有对象大小；exists=false 表示不存在（归档侧据此**幂等跳过**）。
-	Size(ctx context.Context, path string) (n int64, exists bool, err error)
-}
-
-// SinkArchiver 是把封段写入 `SegmentSink` 的归档实现（**唯一的通用实现**）。
+// 为什么复用 FS 而不是自造 sink 接口（用户裁定 2026-10-20）：归档与「云端下载 → 转存」同类，
+// 目标可能是本地目录 / 外部卷 / 加密卷 / 远端；这些语义已由 `pkg/sync.FS` 统一表达
+// （`WriteFile`、可选的 **`WriteIfAbsent`** 幂等写、`Stat`）⇒ 审计包只选能力，不复制实现 ✓。
 //
-// 幂等：目标已存在且大小一致 ⇒ 直接返回既有 ref（不重复写）；否则覆盖写。
-// 路径：`<prefix>/<UTC 日期>/<段文件名>`（同一段名在同一天恒定 ⇒ 幂等可判定 ✓）。
-type SinkArchiver struct {
-	Sink   SegmentSink
-	Prefix string           // 空 ⇒ 默认 "audit-archive"
+// 幂等：底层实现 `WriteIfAbsent` ⇒ 直接用它（目标存在即不覆盖、返回 written=false）；
+// 未实现 ⇒ 退化为 `Stat` + `WriteFile`（大小一致视为已完成），并在两处都保持「不静默覆盖」语义。
+type FSArchiver struct {
+	FS     syncpkg.FS
+	Prefix string           // 空 ⇒ "audit-archive"
 	Now    func() time.Time // 可注入（测试确定性）
 }
 
 // Archive 实现 SegmentArchiver。
-func (a SinkArchiver) Archive(ctx context.Context, seg SegmentInfo, r io.Reader) (string, error) {
-	if a.Sink == nil {
-		return "", fmt.Errorf("audit: SinkArchiver 需要 SegmentSink（装配层用 pkg/sync.FS 适配）")
+func (a FSArchiver) Archive(ctx context.Context, seg SegmentInfo, r io.Reader) (string, error) {
+	if a.FS == nil {
+		return "", fmt.Errorf("audit: FSArchiver 需要 pkg/sync.FS（装配层注入）")
 	}
 	prefix := a.Prefix
 	if prefix == "" {
@@ -175,13 +169,22 @@ func (a SinkArchiver) Archive(ctx context.Context, seg SegmentInfo, r io.Reader)
 		now = time.Now
 	}
 	rel := path.Join(prefix, now().UTC().Format("20060102"), filepath.Base(seg.Path))
-	if n, exists, err := a.Sink.Size(ctx, rel); err != nil {
-		return "", fmt.Errorf("audit: 查询归档目标失败: %w", err)
-	} else if exists && seg.Size > 0 && n == seg.Size {
-		return rel, nil // 幂等：已有完整副本
+
+	// 可选能力查询（仓库既有范式：使用方类型断言查能力，不在调用侧硬编码实现语义）。
+	writer, hasWriteIfAbsent := a.FS.(syncpkg.WriteIfAbsent)
+	if !hasWriteIfAbsent {
+		// 退化路径：先看目标是否已存在且大小一致（幂等），再普通写。
+		if e, err := a.FS.Stat(ctx, rel); err == nil && e != nil && seg.Size > 0 && e.Size == seg.Size {
+			return rel, nil
+		}
+		if err := a.FS.WriteFile(ctx, syncpkg.LogicalKey{}, rel, r, seg.Size, 0); err != nil {
+			return "", fmt.Errorf("audit: 写归档目标失败: %w", err)
+		}
+		return rel, nil
 	}
-	if err := a.Sink.Put(ctx, rel, r, seg.Size); err != nil {
-		return "", fmt.Errorf("audit: 写入归档目标失败: %w", err)
+	// 首选：既有幂等写能力（目标已存在 ⇒ 不覆盖、written=false）。
+	if _, err := writer.WriteIfAbsent(ctx, rel, r, seg.Size, 0); err != nil {
+		return "", fmt.Errorf("audit: 写归档目标（WriteIfAbsent）失败: %w", err)
 	}
 	return rel, nil
 }

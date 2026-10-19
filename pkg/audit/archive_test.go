@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // memArchiver 把归档内容记在内存里（测试替身；可注入失败）。
@@ -227,67 +229,49 @@ func TestArchiveSealed_RequiresDeps(t *testing.T) {
 	}
 }
 
-// memSink 是 SegmentSink 的测试替身（内存 map；可注入失败）。
-type memSink struct {
-	objs map[string][]byte
-	fail bool
-}
-
-func (m *memSink) Put(_ context.Context, p string, r io.Reader, _ int64) error {
-	if m.fail {
-		return errors.New("目的地不可写（测试替身）")
-	}
-	b, err := io.ReadAll(r)
-	if err != nil {
-		return err
-	}
-	if m.objs == nil {
-		m.objs = map[string][]byte{}
-	}
-	m.objs[p] = b
-	return nil
-}
-
-func (m *memSink) Size(_ context.Context, p string) (int64, bool, error) {
-	b, ok := m.objs[p]
-	if !ok {
-		return 0, false, nil
-	}
-	return int64(len(b)), true, nil
-}
-
-// TestSinkArchiver_WritesAndIsIdempotent 写目的地（经 SegmentSink 能力）+ 幂等（同大小不重写）。
-func TestSinkArchiver_WritesAndIsIdempotent(t *testing.T) {
+// TestFSArchiver_WritesViaSyncCapability 经 `pkg/sync.FS`（真实 LocalFS）写入并**幂等不覆盖**。
+//
+// 幂等来自既有能力 `sync.WriteIfAbsent`（LocalFS/PrefixFS/StagingQuotaGateFS 均已实现）⇒
+// 审计包不自造 sink 接口 ✓。
+func TestFSArchiver_WritesViaSyncCapability(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	sink := &memSink{}
-	a := SinkArchiver{Sink: sink, Now: func() time.Time { return time.Unix(0, 0).UTC() }}
+	dir := t.TempDir()
+	fsys := syncpkg.NewLocalFS(dir, nil)
+	a := FSArchiver{FS: fsys, Now: func() time.Time { return time.Unix(0, 0).UTC() }}
 	seg := SegmentInfo{Path: "/hot/audit.log.2", Size: 5, Sealed: true}
+
 	ref, err := a.Archive(ctx, seg, strings.NewReader("hello"))
 	if err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
-	if got := sink.objs[ref]; string(got) != "hello" {
+	rc, oerr := fsys.OpenRead(ctx, ref)
+	if oerr != nil {
+		t.Fatalf("OpenRead(%s): %v", ref, oerr)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "hello" {
 		t.Fatalf("归档内容不符: %q", string(got))
 	}
-	// 幂等：目标已有同大小副本 ⇒ 第二次不再写（用不可读的 reader 证明它没被消费）。
+
+	// 幂等：目标已存在 ⇒ 不覆盖（第二次写不同内容，读回仍应是 hello）。
 	ref2, err2 := a.Archive(ctx, seg, strings.NewReader("XXXXX"))
 	if err2 != nil || ref2 != ref {
 		t.Fatalf("幂等路径应返回同一 ref: ref=%s err=%v", ref2, err2)
 	}
-	if string(sink.objs[ref]) != "hello" {
-		t.Fatalf("幂等路径不得覆盖已有内容: %q", string(sink.objs[ref]))
+	rc2, _ := fsys.OpenRead(ctx, ref)
+	again, _ := io.ReadAll(rc2)
+	_ = rc2.Close()
+	if string(again) != "hello" {
+		t.Fatalf("幂等路径不得覆盖: %q", string(again))
 	}
 }
 
-// TestSinkArchiver_ErrorPropagates 目的地写失败 ⇒ 返回错误（上层据此保留本地段）。
-func TestSinkArchiver_ErrorPropagates(t *testing.T) {
+// TestFSArchiver_RequiresFS fail-closed：未注入 FS ⇒ 明确报错。
+func TestFSArchiver_RequiresFS(t *testing.T) {
 	t.Parallel()
-	a := SinkArchiver{Sink: &memSink{fail: true}}
-	if _, err := a.Archive(context.Background(), SegmentInfo{Path: "/x/audit.log.1", Size: 1}, strings.NewReader("z")); err == nil {
-		t.Fatal("写失败应返回错误")
-	}
-	if _, err := (SinkArchiver{}).Archive(context.Background(), SegmentInfo{}, strings.NewReader("")); err == nil {
-		t.Fatal("缺少 SegmentSink 应返回错误（fail-closed）")
+	if _, err := (FSArchiver{}).Archive(context.Background(), SegmentInfo{}, strings.NewReader("")); err == nil {
+		t.Fatal("缺少 FS 应返回错误")
 	}
 }

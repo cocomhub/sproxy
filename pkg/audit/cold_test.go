@@ -3,11 +3,10 @@
 
 package audit
 
-// cold_test.go 锁定 M4「冷段**按需/随机**读取」：
-//  ① 字节区间读（`OpenRange`）：只读所需区间，**不整文件加载**；
-//  ② 条目流式 + **早停**：`limit` 满足即停，内存 O(一行)；
-//  ③ 时间范围**整文件跳过**（`SkipByTime`）：`Since` 晚于段末条 ⇒ 不打开该文件；
-//  ④ 枚举跳过归档半成品（`.tmp`），且带首/尾时间（有界探测）。
+// cold_test.go 锁定 M4「冷段**按需/随机**读取」（全部经 `pkg/sync.FS` 能力，用真实 `LocalFS`）：
+//  ① 递归枚举 + 首/尾时间探测 + 跳过 `.tmp`；
+//  ② 字节区间读（`RangeReader`/`OpenRangeRead`）：只读所需区间；
+//  ③ 条目流式 + 早停（`limit`）；④ 时间范围整文件跳过。
 
 import (
 	"context"
@@ -18,14 +17,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// writeColdSegments 造两个「冷段」文件（手工写 JSON 行，模拟已归档的段）。
-func writeColdSegments(t *testing.T) (dir string, tsList []time.Time) {
+// writeColdTree 在 FS 根下造「冷段」文件：两个日期子目录各 1 段（模拟归档布局）。
+func writeColdTree(t *testing.T) (dir string, fs syncpkg.FS, tsList []time.Time) {
 	t.Helper()
 	dir = t.TempDir()
+	fs = syncpkg.NewLocalFS(dir, nil)
 	base := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
-	write := func(name string, from int) {
+	writeSeg := func(rel string, from int) {
 		var b strings.Builder
 		for i := range 3 {
 			e := Entry{Scope: "system", Seq: uint64(from + i + 1), Kind: KindEvent,
@@ -35,32 +37,37 @@ func writeColdSegments(t *testing.T) (dir string, tsList []time.Time) {
 			b.WriteString("\n")
 			tsList = append(tsList, e.TS)
 		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(b.String()), 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
+		abs := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(abs, []byte(b.String()), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
 		}
 	}
-	write("audit.log.2", 0) // 更旧（index 2）
-	write("audit.log.1", 3) // 更新
+	writeSeg("audit-archive/20261019/audit.log.2", 0) // 更旧日期
+	writeSeg("audit-archive/20261020/audit.log.1", 3) // 更新日期
 	// 半成品（必须被枚举忽略）
-	if err := os.WriteFile(filepath.Join(dir, "audit.log.9.tmp"), []byte("half"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "audit-archive/20261020/audit.log.9.tmp"), []byte("half"), 0o600); err != nil {
 		t.Fatalf("write tmp: %v", err)
 	}
-	return dir, tsList
+	return dir, fs, tsList
 }
 
-// TestListArchive_ProbesTimesAndSkipsTmp 枚举冷段：带首/尾时间、跳过 .tmp、最旧优先。
-func TestListArchive_ProbesTimesAndSkipsTmp(t *testing.T) {
+// TestListCold_RecursiveProbeAndSkipTmp 递归枚举（日期子目录）+ 首/尾时间 + 跳过 .tmp + 时间序。
+func TestListCold_RecursiveProbeAndSkipTmp(t *testing.T) {
 	t.Parallel()
-	dir, _ := writeColdSegments(t)
-	segs, err := ListArchive(dir)
+	ctx := context.Background()
+	_, fs, _ := writeColdTree(t)
+	segs, err := ListCold(ctx, fs, "")
 	if err != nil {
-		t.Fatalf("ListArchive: %v", err)
+		t.Fatalf("ListCold: %v", err)
 	}
 	if len(segs) != 2 {
-		t.Fatalf("应只枚举 2 个冷段（跳过 .tmp）, got %d", len(segs))
+		t.Fatalf("应枚举 2 个冷段（跳过 .tmp、递归日期目录）, got %d", len(segs))
 	}
-	if segs[0].Index != 2 {
-		t.Fatalf("应最旧优先（index 2 在前）, got %d", segs[0].Index)
+	if !strings.Contains(segs[0].Path, "20261019") {
+		t.Fatalf("应最旧优先（20261019 在前）, got %s", segs[0].Path)
 	}
 	for _, s := range segs {
 		if s.First.IsZero() || s.Last.IsZero() || s.Last.Before(s.First) {
@@ -69,66 +76,59 @@ func TestListArchive_ProbesTimesAndSkipsTmp(t *testing.T) {
 	}
 }
 
-// TestColdSegment_OpenRange 只读指定字节区间（随机读，不整文件加载）。
-func TestColdSegment_OpenRange(t *testing.T) {
+// TestOpenRange_SectionRead 区间读：与整文件对应区间一致；越界自动截断。
+func TestOpenRange_SectionRead(t *testing.T) {
 	t.Parallel()
-	dir, _ := writeColdSegments(t)
-	segs, err := ListArchive(dir)
+	ctx := context.Background()
+	dir, fs, _ := writeColdTree(t)
+	segs, err := ListCold(ctx, fs, "")
 	if err != nil || len(segs) == 0 {
-		t.Fatalf("ListArchive: %v", err)
+		t.Fatalf("ListCold: %v", err)
 	}
 	seg := segs[0]
-	full, rerr := os.ReadFile(seg.Path)
+	full, rerr := os.ReadFile(filepath.Join(dir, filepath.FromSlash(seg.Path)))
 	if rerr != nil {
 		t.Fatalf("read full: %v", rerr)
 	}
-	// 取中间 40 字节，断言与整文件对应区间一致（证明是定点读）。
 	const off, n = 20, 40
-	rc, oerr := seg.OpenRange(off, n)
+	rc, oerr := OpenRange(ctx, fs, seg, off, n)
 	if oerr != nil {
 		t.Fatalf("OpenRange: %v", oerr)
 	}
-	defer rc.Close()
 	part, _ := io.ReadAll(rc)
-	if len(part) != n {
-		t.Fatalf("区间长度=%d, want %d", len(part), n)
+	_ = rc.Close()
+	if len(part) != n || string(part) != string(full[off:off+n]) {
+		t.Fatalf("区间内容不符: len=%d", len(part))
 	}
-	if string(part) != string(full[off:off+n]) {
-		t.Fatalf("区间内容与整文件不一致")
-	}
-	// 越界区间自动截断（不 panic）。
-	rc2, _ := seg.OpenRange(seg.Size-5, 100)
-	defer rc2.Close()
+	rc2, _ := OpenRange(ctx, fs, seg, seg.Size-5, 100)
 	tail, _ := io.ReadAll(rc2)
+	_ = rc2.Close()
 	if len(tail) != 5 {
 		t.Fatalf("越界应按剩余截断为 5, got %d", len(tail))
 	}
 }
 
-// TestQueryColdStore_EarlyStopAndFilter 流式 + 过滤 + limit 早停。
-func TestQueryColdStore_EarlyStopAndFilter(t *testing.T) {
+// TestQueryCold_EarlyStopAndFilter 流式 + 过滤 + limit 早停。
+func TestQueryCold_EarlyStopAndFilter(t *testing.T) {
 	t.Parallel()
-	dir, _ := writeColdSegments(t)
-	store := LocalSegmentStore{Dir: dir}
+	ctx := context.Background()
+	_, fs, _ := writeColdTree(t)
 
-	all, err := QueryColdStore(context.Background(), []SegmentStore{store}, EntryFilter{}, 0)
+	all, err := QueryCold(ctx, fs, []string{""}, EntryFilter{}, 0)
 	if err != nil {
-		t.Fatalf("QueryColdStore: %v", err)
+		t.Fatalf("QueryCold: %v", err)
 	}
 	if len(all) != 6 {
 		t.Fatalf("应读到 2 段 × 3 条 = 6 条, got %d", len(all))
 	}
-	// 最旧优先：第一条应来自 audit.log.2（Seq 1）。
 	if all[0].Seq != 1 {
 		t.Fatalf("应按最旧段优先, first seq=%d", all[0].Seq)
 	}
-	// limit 早停
-	two, err := QueryColdStore(context.Background(), []SegmentStore{store}, EntryFilter{}, 2)
+	two, err := QueryCold(ctx, fs, []string{""}, EntryFilter{}, 2)
 	if err != nil || len(two) != 2 {
 		t.Fatalf("limit=2 ⇒ 2 条, got %d err=%v", len(two), err)
 	}
-	// 过滤（Action 不匹配 ⇒ 0 条）
-	none, _ := QueryColdStore(context.Background(), []SegmentStore{store}, EntryFilter{Action: "nope"}, 0)
+	none, _ := QueryCold(ctx, fs, []string{""}, EntryFilter{Action: "nope"}, 0)
 	if len(none) != 0 {
 		t.Fatalf("过滤应无命中, got %d", len(none))
 	}
@@ -137,9 +137,9 @@ func TestQueryColdStore_EarlyStopAndFilter(t *testing.T) {
 // TestSkipByTime_SkipsWholeSegment Since 晚于段末条 ⇒ 整文件跳过（不打开）。
 func TestSkipByTime_SkipsWholeSegment(t *testing.T) {
 	t.Parallel()
-	dir, ts := writeColdSegments(t)
-	segs, _ := ListArchive(dir)
-	// 取全局最晚时间 + 1h ⇒ 所有段都应被判定为可跳过。
+	ctx := context.Background()
+	_, fs, ts := writeColdTree(t)
+	segs, _ := ListCold(ctx, fs, "")
 	var last time.Time
 	for _, x := range ts {
 		if x.After(last) {
@@ -147,17 +147,10 @@ func TestSkipByTime_SkipsWholeSegment(t *testing.T) {
 		}
 	}
 	f := EntryFilter{Since: last.Add(time.Hour)}
-	skipped := 0
 	for _, s := range segs {
-		if s.SkipByTime(f) {
-			skipped++
+		if !s.SkipByTime(f) {
+			t.Fatalf("应可整文件跳过: %+v", s)
 		}
-	}
-	if skipped != len(segs) {
-		t.Fatalf("所有段都应可整文件跳过: skipped=%d total=%d", skipped, len(segs))
-	}
-	// 反向：无时间过滤 ⇒ 一律不跳过（保守读取）。
-	for _, s := range segs {
 		if s.SkipByTime(EntryFilter{}) {
 			t.Fatal("无 Since 时不得跳过")
 		}
