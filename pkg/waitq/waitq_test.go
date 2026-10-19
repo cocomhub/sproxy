@@ -404,3 +404,50 @@ func TestQueue_Isolation(t *testing.T) {
 		t.Fatalf("两队列均不应有等待者: q1=%d q2=%d", q1.Waiting(), q2.Waiting())
 	}
 }
+
+// TestAcquireUnder_ClosesLostWakeupWindow 证明**锁协作**闭合了丢唤醒窗口（设计 §3.1 I1）：
+// 释放恰好发生在等待者「查失败之后、入队之前」时，若「查 + 入队」与「改状态 + 唤醒」不在同一把
+// 锁内，等待者会睡到超时（红灯）；同一把锁下，等待者的快速尝试必然成功、根本不入队（绿灯）。
+//
+// 确定性交错（无 sleep）：释放侧先持锁 ⇒ 在锁内改状态 + NotifyAll（此时队列为空 ⇒ 唤醒「丢失」）
+// ⇒ 放锁 ⇒ 等待者进入临界区 ⇒ 其快速尝试成功 ⇒ 立即返回。
+func TestAcquireUnder_ClosesLostWakeupWindow(t *testing.T) {
+	t.Parallel()
+	res := newFakeRes("quota", 100)
+	q := New(Options{MaxWaiters: 4, DefaultWait: 150 * time.Millisecond})
+
+	hold, err := q.Acquire(context.Background(), Request{Group: []Resource{res}, N: 100, Priority: Normal})
+	if err != nil {
+		t.Fatalf("首次获取: %v", err)
+	}
+
+	var mu sync.Mutex // 外部锁（= 释放侧的 withWaitLock）
+	mu.Lock()         // 释放侧先持锁
+	done := make(chan *Lease, 1)
+	go func() {
+		l, aerr := q.AcquireUnder(context.Background(), Request{
+			Group: []Resource{res}, N: 100, Priority: Normal, Timeout: 2 * time.Second,
+		}, &mu)
+		if aerr != nil {
+			t.Errorf("锁协作下应成功（不得丢唤醒）: %v", aerr)
+		}
+		done <- l
+	}()
+	// 释放侧在**持锁**期间改状态 + 唤醒：此刻队列为空 ⇒ 若实现无锁协作，这次唤醒就丢了。
+	hold.Release()
+	q.NotifyAll()
+	mu.Unlock()
+
+	select {
+	case l := <-done:
+		if l == nil {
+			t.Fatal("应获得 lease（无锁协作时会睡到超时并返回错误）")
+		}
+		l.Release()
+	case <-time.After(5 * time.Second):
+		t.Fatal("锁协作失败：释放发生在等待者查失败之后仍丢唤醒（等待者睡到超时）")
+	}
+	if s := q.Stats(); s.TimedOut != 0 {
+		t.Fatalf("不应发生超时, stats=%+v", s)
+	}
+}

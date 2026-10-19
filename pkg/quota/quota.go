@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/cocomhub/sproxy/pkg/waitq"
 )
 
 // ErrStorageFull 表示配额超限（子作用域上限或全局兜底上限）。
@@ -20,10 +22,11 @@ var ErrStorageFull = errors.New("storage quota exceeded")
 // Pool 是配额账本节点（根池，或某个 Scope 的底层账本）。
 // 账本记录已确认占用 committed 与预留中 reserved；可用额度 = maxBytes − (committed + reserved)。
 type Pool struct {
-	// waitMu 是**根等待锁**（仅根池实例有效）：等待侧在 `root.cond.L`（即本锁）下做 double-check
-	// 与 Wait，释放/放宽侧在**同一把锁**下变更状态并广播 ⇒ 广播不可能落在「已判定不足 → 尚未
-	// Wait」的窗口内（独立复审 P2 根因修复，2026-10-18：此前注释声称"在持锁下调用…避免丢唤醒"
-	// 并不成立——释放侧并未持 cond.L，等待者只能睡到超时 ≤30s）。
+	// waitMu 是**根等待锁**（仅根池实例有效）：等待侧在 `root.waitq.Queue.AcquireUnder` 的
+	// lock 参数（即本锁）下完成「快速尝试 + 入队」，释放/放宽侧在**同一把锁**下变更状态并
+	// NotifyAll（withWaitLock）⇒ 唤醒不可能落在「已判定不足 → 尚未入队」的窗口内
+	// （独立复审 P2 根因修复 2026-10-18；2026-10-19 迁移到 pkg/waitq 时以 AcquireUnder 的
+	// 锁协作形式**保持**该保证 —— 设计 §3.1 I1）。
 	// **全局锁序：waitMu → allocMu → node.mu；任何路径不得反向获取**（否则 ABBA 死锁）。
 	waitMu sync.Mutex
 	// allocMu 串行化**跨层**分配账本更新（EnsureChild 一次调用会改动多级节点的 allocated ⇒
@@ -41,9 +44,16 @@ type Pool struct {
 	// 字节**保留，配额（用量 + 分配）只能用到 `maxBytes - reserve` ⇒「绝对禁止磁盘打满」由
 	// 预留保证而非事后对账。仅卷根设置；子节点为 0。
 	reserve int64
-	// cond 是等待队列（配额不足时排队重试；释放广播唤醒）。每节点各有一个，但**等待统一挂根节点**
-	// （任何一层的释放都应唤醒等待者）。
-	cond *sync.Cond
+	// queue 是**通用等待队列**（pkg/waitq；仅根池实例有效）：配额不足时排队重试。
+	// 收敛自原私有 sync.Cond 实现（设计 docs/designs/2026-10-19-waitq.md §8），
+	// 能力不变（严格上界 / 沿父链 / 不可能容纳立即失败 / 超时取消 / 等待轮次可观测）。
+	queue *waitq.Queue
+	// holderMu/holders 暂存「已预留但尚未被调用方接管」的 Reservation（键 = 请求 holder），
+	// 由 waitq 适配器写入、WaitReserve 取回（见 waitq_adapter.go）。
+	holderMu sync.Mutex
+	holders  map[string]*Reservation
+	// waitSeq 生成请求 holder 唯一键。
+	waitSeq atomic.Uint64
 	// waitRounds 是**进入等待的轮次计数**（仅用于可观测性/测试确定性同步：轮询它即可知道
 	// 「等待者确实进入了等待」，避免固定 time.Sleep；与 staging_tracker 的 waitRounds 同型）。
 	waitRounds atomic.Int64
@@ -55,8 +65,14 @@ type Pool struct {
 // NewPool 创建根配额池。maxBytes<=0 表示不限制。
 func NewPool(maxBytes int64) *Pool {
 	p := &Pool{maxBytes: maxBytes}
-	// cond 的 L 即**根等待锁**（见 Pool.waitMu）：与释放侧同锁 ⇒ 结构上消除丢唤醒。
-	p.cond = sync.NewCond(&p.waitMu)
+	// 等待队列（根池）：MaxWaiters=0 ⇒ 无界（保持既有能力：此前 sync.Cond 队列亦无界；
+	// 有界是可选的后续开关，不在此处默认收紧）。AgeBoost 提供反饿死提升（同级请求仍按
+	// 入队序 FIFO ⇒ 与既有行为一致）。
+	p.queue = waitq.New(waitq.Options{
+		DefaultWait: DefaultWaitTimeout,
+		AgeBoost:    DefaultWaitTimeout,
+		Metrics:     waitqMetrics{root: p},
+	})
 	return p
 }
 
@@ -141,7 +157,6 @@ func (p *Pool) SetMaxBytes(n int64) {
 	p.withWaitLock(func() {
 		p.mu.Lock()
 		p.maxBytes = n
-		p.broadcastLocked() // 放宽上限释放了额度 ⇒ 唤醒等待者（收紧时的多余唤醒无害：等待者会重检）
 		p.mu.Unlock()
 	})
 }
@@ -197,7 +212,6 @@ func (p *Pool) newScope(path string, maxBytes int64) *Scope {
 		parent:   p,
 		path:     joinPath(p.path, path),
 	}
-	child.cond = sync.NewCond(&p.rootPool().waitMu) // 只根池的 cond 被使用；统一指向根等待锁
 	s := &Scope{pool: child}
 	p.mu.Lock()
 	p.children = append(p.children, s)
@@ -311,7 +325,6 @@ func (p *Pool) reserveUp(n int64) error {
 		return ErrStorageFull
 	}
 	p.reserved += n
-	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil {
 		if err := p.parent.reserveUp(n); err != nil {
@@ -334,7 +347,6 @@ func (p *Pool) commitUp(amount, actual int64) {
 	p.mu.Lock()
 	p.reserved -= amount
 	p.committed += actual
-	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil {
 		p.parent.commitUp(amount, actual)
@@ -357,7 +369,6 @@ func (p *Pool) releaseUp(n int64) {
 	p.mu.Lock()
 	actual := min(n, p.reserved)
 	p.reserved -= actual
-	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil && actual > 0 {
 		p.parent.releaseUp(actual)
@@ -376,7 +387,6 @@ func (p *Pool) releaseCommittedUp(n int64) {
 	p.mu.Lock()
 	actual := min(n, p.committed)
 	p.committed -= actual
-	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil && actual > 0 {
 		p.parent.releaseCommittedUp(actual)
@@ -398,7 +408,6 @@ func (p *Pool) adjustUp(diff int64) {
 		actual = -p.committed
 	}
 	p.committed += actual
-	p.broadcastLocked()
 	p.mu.Unlock()
 	if p.parent != nil && actual != 0 {
 		p.parent.adjustUp(actual)
@@ -451,7 +460,6 @@ func (p *Pool) SetOperationalReserve(n int64) {
 	p.withWaitLock(func() {
 		p.mu.Lock()
 		p.reserve = n
-		p.broadcastLocked() // 下调运维余量即释放额度 ⇒ 唤醒等待者
 		p.mu.Unlock()
 	})
 }
@@ -461,27 +469,6 @@ func (p *Pool) OperationalReserve() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.reserve
-}
-
-// broadcastLocked 唤醒等待者：**统一广播到根节点**（任一层释放都可能让等待者满足）。
-//
-// **已知残余（独立复审 P2，2026-10-18 如实记录，此前注释声称"已避免丢唤醒"是不成立的）**：
-// 本广播**不持 `cond.L`**（等待侧用的是根节点上**独立于 `node.mu`** 的 mutex）⇒ 状态变更与广播
-// 不属同一临界区 ⇒ 存在理论上的**丢唤醒**窗口：广播落在「等待者已判定不足 → 尚未 Wait」之间会被
-// 丢弃，等待者只能睡到 deadline（WaitReserve 超时 ≤30s）后重试（重试可成功 ⇒ **非功能丢失**，
-// 不会永久失败）。对照：pkg/quota/staging_tracker.go 的释放侧**持 `cond.L`** 广播（同仓正确范式）。
-// **为何不在此处直接补锁**：释放发生在**子节点**、队列在**根**，而等待侧的锁序是
-// `cond.L → node.mu`；释放侧已持 `node.mu` ⇒ 补锁即反向 ⇒ ABBA 死锁。正确修复需架构级改动
-// （单锁：令 `cond.L` 即状态锁；或全局配额锁），见设计文档的「已知残余」小节。
-func (p *Pool) broadcastLocked() {
-	if c := p.rootCond(); c != nil {
-		c.Broadcast()
-	}
-}
-
-// rootCond 返回根节点的等待队列（parent 构造后不可变 ⇒ 无需加锁读取）。
-func (p *Pool) rootCond() *sync.Cond {
-	return p.rootPool().cond
 }
 
 // rootPool 返回根池（parent 构造后不可变 ⇒ 无需加锁读取）。
@@ -502,8 +489,17 @@ func (p *Pool) withWaitLock(fn func()) {
 	}
 	root := p.rootPool()
 	root.waitMu.Lock()
-	defer root.waitMu.Unlock()
 	fn()
+	root.waitMu.Unlock()
+	// **释放侧唤醒的唯一收口**（设计 §3.1 I1）。两点要点：
+	//  1. 唤醒在 **fn() 之后**：此时状态变更已完成 ⇒ 不会漏掉「刚入队的等待者」；
+	//  2. 唤醒在 **释放 waitMu 之后**：fn() 内部可能持有 node.mu，而队列的
+	//     「额度是否够」判据要读账本（node.mu）⇒ 持锁唤醒会**自死锁**（RWMutex 不可重入）。
+	// 丢唤醒窗口仍闭合：等待侧的「查 + 入队」在 waitMu 内原子于本处的状态变更 ⇒
+	// 等待者要么在状态变更前查到容量（不入队），要么已入队（本次唤醒必达）。
+	if root.queue != nil {
+		root.queue.NotifyAll()
+	}
 }
 
 // joinPath 拼接父子路径，处理空段与多余分隔符。

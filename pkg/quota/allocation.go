@@ -53,7 +53,6 @@ func (p *Pool) addAllocated(n int64) error {
 		return fmt.Errorf("quota: 分配超限（已分配 %d + 本次 %d > 可用上限 %d）", p.allocated, n, p.usableLocked())
 	}
 	p.allocated += n
-	p.broadcastLocked()
 	return nil
 }
 
@@ -65,7 +64,6 @@ func (p *Pool) subAllocated(n int64) {
 	if p.allocated < 0 {
 		p.allocated = 0
 	}
-	p.broadcastLocked()
 }
 
 // Release 归还本次分配（幂等）。

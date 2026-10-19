@@ -206,15 +206,45 @@ func (NullMetrics) IncWaiters(int) {}
 // ObserveWait 实现 Metrics。
 func (NullMetrics) ObserveWait(time.Duration, string) {}
 
-// Acquire 是等待获取资源的**唯一入口**：
+// Acquire 是等待获取资源的入口（无外部锁协作；等价 AcquireUnder(ctx, req, nil)）。
 //
-//   - 先尝试（I3 double-check）；成功即返回 Lease；
-//   - 请求量**永远不可能**满足（> Capacity，且 Capacity > 0）⇒ 立即 ErrTooLarge（不排队）；
-//   - 否则入队等待；超时/取消/关闭返回对应错误；
-//   - 被 Notify 唤醒后**重新尝试**（失败则继续等，不忙等）。
-//
-// 资源获取是**原子**的（多资源按 Name 排序，失败逆序回滚，I4）。
+// **若释放侧的状态变更与唤醒在同一把锁下**（推荐形态，见 AcquireUnder），必须改用 AcquireUnder
+// 并传入那把锁 —— 否则存在丢唤醒窗口（等待者睡到超时；**非功能丢失**但可用性退化）。
 func (q *Queue) Acquire(ctx context.Context, req Request) (*Lease, error) {
+	return q.AcquireUnder(ctx, req, nil)
+}
+
+// noopLocker 是 AcquireUnder 的默认「锁」：不提供互斥，仅用于复用同一实现。
+type noopLocker struct{}
+
+func (noopLocker) Lock()   {}
+func (noopLocker) Unlock() {}
+
+// AcquireUnder 是 Acquire 的**锁协作**形式：在 lock 保护下完成「快速尝试 + 入队」，随后释放
+// lock 再等待（**等待期间不持 lock**）。
+//
+// 为何需要它（丢唤醒的**唯一**结构性闭合方式）：释放侧通常是「改状态 → 唤醒」，等待侧是
+// 「查状态 → 入队」。若两者不在**同一把锁**下，就存在窗口：
+//
+//	等待者：查状态（不足）        ┐
+//	释放者：        改状态 + 唤醒  │ 队列里还没有等待者 ⇒ 唤醒丢失
+//	等待者：                入队   ┘ ⇒ 睡到超时（重试可成功 ⇒ 非功能丢失，但可用性退化）
+//
+// 把「查 + 入队」放进与释放侧**同一把** lock 内，窗口即被结构性消除：
+// 释放要么发生在等待者的临界区**之前**（则等待者的快速尝试必然成功、根本不入队），要么
+// 发生在**之后**（则等待者已在队列中，唤醒必达）。
+//
+// 契约：
+//   - lock 必须与释放侧调用 Notify/NotifyAll 时持有的锁是**同一把**（否则协作无效）；
+//   - **锁序**：调用方须保证 `lock → Queue 内部锁`（本方法在持 lock 时取内部锁并 enqueue），
+//     且任何路径不得反向获取（否则 ABBA 死锁）；
+//   - lock 为 nil ⇒ 退化为无协作（等价 Acquire）。
+//
+// 其余语义与 Acquire 完全一致（canNeverFit 立即失败、I3 重新尝试、I5 有界、错误哨兵相同）。
+func (q *Queue) AcquireUnder(ctx context.Context, req Request, lock sync.Locker) (*Lease, error) {
+	if lock == nil {
+		lock = noopLocker{}
+	}
 	if req.N <= 0 {
 		return nil, fmt.Errorf("waitq: N must be > 0, got %d", req.N)
 	}
@@ -235,19 +265,24 @@ func (q *Queue) Acquire(ctx context.Context, req Request) (*Lease, error) {
 	}
 
 	start := q.clock.Now()
-	// 快速路径（I3）。
-	if lease, err := q.tryAll(req); err == nil {
+
+	// **临界区**（lock）：快速尝试 + 入队必须原子于释放侧的「改状态 + 唤醒」⇒ 无丢唤醒窗口。
+	lock.Lock()
+	lease, ferr := q.tryAll(req)
+	if ferr == nil {
+		lock.Unlock()
 		q.metrics.ObserveWait(0, "ok")
 		q.mu.Lock()
 		q.stats.Acquired++
 		q.mu.Unlock()
 		return lease, nil
-	} else if !errors.Is(err, ErrInsufficient) {
-		return nil, err
 	}
-
-	// 慢路径：入队等待。
-	w, err := q.enqueue(req)
+	if !errors.Is(ferr, ErrInsufficient) {
+		lock.Unlock()
+		return nil, ferr
+	}
+	w, err := q.enqueue(req) // 持 lock 入队（内部取 q.mu；锁序 lock → q.mu）
+	lock.Unlock()
 	if err != nil {
 		q.metrics.ObserveWait(q.clock.Since(start), resultFor(err))
 		return nil, err
