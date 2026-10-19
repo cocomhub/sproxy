@@ -12,14 +12,13 @@ package recovery
 //
 // 这验证的是 WAL 的核心承诺：**证据级落盘 + 无需优雅关闭即可续跑**（SyncAlways 已 fsync）。
 //
-// ⚠️ **待查异常（2026-10-20，未解决，勿删）**：`crash-before-commit-replays` 场景实测
-// 「`Coordinator.Run` 报 `Resumed=true`/`States=2`，但 `MarkDone` 未落盘（`ListScopes` 仍
-// `Done=false` 且 `LastSeq` 未增长）」，且**同一 Service 随后 `Save` 可正常写入**、
-// 直接对同一目录新建 Service 调 `MarkDone` 也正常。⇒ 与「预存段目录」无关，疑为
-// `Service`/`Scope` 侧 `MarkDone` 的静默分支（`st.done` / 能力门）与协调器交互
-// （`persist` 在 best-effort 下**吞掉** `Append` 错误、且 `Options.Logger` 未落到 `eff.logger`
-// 时连告警都没有 ⇒ 极难观测）。**下一步**：给 `Service` 加「写入被吞」可观测点（metrics +
-// 强制 logger），再复跑本场景；调查清楚后把该子用例补回（它是 M3 的关键 e2e）。
+// 🔎 **2026-10-20 查清并修复的真因（重要）**：曾观察到「提交记录没生效、作用域永远未完成」，
+// 根因在 `pkg/audit`：`Service.seq` 是**纯内存** map ⇒ **进程重启后序号归零** ⇒ 重启后写入的
+// `KindDone`（提交记录）只拿到 `Seq=1`，而历史 `KindState` 已是 `Seq=1/2` ⇒ 恢复路径以
+// 「该作用域**最大 Seq** 的条目为末条」判定 ⇒ **提交记录被当成更早的条目而忽略** ⇒ 作用域永远
+// 「未完成」⇒ **每轮启动都重复执行同一任务**（副作用重复，正是设计 §6.1 禁止的失败模式）。
+// 修复：`Service.initSeq` —— 每个作用域在本进程首次写入前从 Journal 取已知最大 Seq 作为起点
+// （只升不降；回归用例 `pkg/audit/seq_restart_test.go`，变异验证命中）。
 
 import (
 	"context"
@@ -102,6 +101,40 @@ func TestCrashRecovery_RealKill(t *testing.T) {
 		// **强杀**：不 Close、不 Flush，模拟进程被 kill -9。
 		os.Exit(crashExitCode)
 	}
+
+	t.Run("crash-before-commit-replays", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "wal")
+		runCrashChild(t, crashBeforeDone, dir)
+
+		// 父进程：全新 Service（等价「重启后」）⇒ 协调器必须续跑。
+		svc := crashAudit(t, dir)
+		rec := &recorder{}
+		c := New(svc, quietLogger())
+		if err := c.Register(Registration{Kind: "cloud", Prefix: "task.cloud",
+			Factory: func(audit.ScopeID) (audit.ReplayApplier, bool) { return rec, true }}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		rep, err := c.Run(context.Background(), Options{})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if rep.Total != 1 || rep.Resumed != 1 || rep.Failed != 0 || rep.Unknown != 0 {
+			t.Fatalf("崩溃前未提交的作用域必须被恢复: %s", rep)
+		}
+		if len(rec.seqs) != 2 {
+			t.Fatalf("应重放 2 条状态（未优雅关闭也必须可读）, got %v", rec.seqs)
+		}
+		// 提交后不再残留未完成作用域；再跑一次是幂等的。
+		left, _ := svc.ListScopes(context.Background(), audit.ScopeStateFilter{UnfinishedOnly: true})
+		if len(left) != 0 {
+			t.Fatalf("恢复后不应残留未完成作用域: %+v", left)
+		}
+		rep2, _ := c.Run(context.Background(), Options{})
+		if rep2.Total != 0 || len(rec.seqs) != 2 {
+			t.Fatalf("第二次运行必须幂等: %s seqs=%v", rep2, rec.seqs)
+		}
+	})
 
 	t.Run("crash-after-commit-skips", func(t *testing.T) {
 		t.Parallel()

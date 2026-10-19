@@ -75,11 +75,13 @@ type effective struct {
 type Service struct {
 	eff effective
 
-	mu     sync.Mutex
-	seq    map[ScopeID]uint64 // 每作用域单调 seq
-	scopes map[ScopeID]*scopeRuntime
-	last   time.Time // 最近一次轮转（T3 防抖）
-	dirty  int       // 自上次轮转以来的条目数（T2/T3 判据）
+	mu  sync.Mutex
+	seq map[ScopeID]uint64 // 每作用域单调 seq（**跨进程续号**，见 initSeq）
+	// seqInit 记录本进程内已从 Journal 取过 seq 起点的作用域（一次读取，之后走内存）。
+	seqInit map[ScopeID]bool
+	scopes  map[ScopeID]*scopeRuntime
+	last    time.Time // 最近一次轮转（T3 防抖）
+	dirty   int       // 自上次轮转以来的条目数（T2/T3 判据）
 	// unsynced 是「已进内存但落盘失败」的条目数（有界保留时优先计为**丢失**；设计 §5.4.1）。
 	unsynced int
 	closed   bool
@@ -143,10 +145,11 @@ func New(opts Options) (*Service, error) {
 		}
 	}
 	return &Service{
-		eff:    eff,
-		seq:    make(map[ScopeID]uint64),
-		scopes: make(map[ScopeID]*scopeRuntime),
-		last:   eff.clock.Now(),
+		eff:     eff,
+		seq:     make(map[ScopeID]uint64),
+		seqInit: make(map[ScopeID]bool),
+		scopes:  make(map[ScopeID]*scopeRuntime),
+		last:    eff.clock.Now(),
 	}, nil
 }
 
@@ -419,8 +422,58 @@ func (s *Service) write(ctx context.Context, e Entry) error {
 	return nil
 }
 
+// Seq 的**跨进程单调性**（设计 §4.1：scope 内 Seq 是权威顺序；2026-10-20 修 P0）。
+//
+// 为什么必须从 Journal 续号：`seq` 是内存 map，进程重启后归零 ⇒ 重启后的**首条写入**会拿到
+// `Seq=1`。而恢复路径（`ListScopes`/`Resume`）以「该作用域**最大 Seq** 的条目为末条」判定
+// 是否已提交 ⇒ 重启后写入的 `KindDone`（提交记录）会因为 Seq 比历史状态更小而**被忽略** ⇒
+// 作用域永远显示「未完成」⇒ 恢复**每轮启动都重复执行同一任务**（副作用重复 ✗）。
+//
+// 代价：每个作用域在本进程**首次写入**时读一次该作用域的条目（作用域数量与任务数量同量级，
+// 且后续写入全走内存）。作用域不存在条目 ⇒ 起点 0。
+
+// initSeq 确保该作用域的 seq 起点已从 Journal 载入（幂等；并发安全）。
+func (s *Service) initSeq(scope ScopeID) {
+	s.mu.Lock()
+	done := s.seqInit[scope]
+	s.mu.Unlock()
+	if done {
+		return
+	}
+	floor := s.seqFloor(scope) // Journal 读：**不持 s.mu**
+	s.mu.Lock()
+	if !s.seqInit[scope] {
+		if cur := s.seq[scope]; cur < floor {
+			s.seq[scope] = floor
+		}
+		s.seqInit[scope] = true
+	}
+	s.mu.Unlock()
+}
+
+// seqFloor 返回 Journal 中该作用域已出现的最大 Seq（读失败 ⇒ 0，退化为进程内单调）。
+func (s *Service) seqFloor(scope ScopeID) uint64 {
+	if scope == "" {
+		return 0
+	}
+	entries, err := s.eff.journal.Read(EntryFilter{Scope: scope})
+	if err != nil {
+		return 0
+	}
+	var max uint64
+	for i := range entries {
+		if entries[i].Seq > max {
+			max = entries[i].Seq
+		}
+	}
+	return max
+}
+
 // prepare 分配 seq、补全字段并做能力门；返回 nil 表示「能力未启用 ⇒ 静默跳过」。
 func (s *Service) prepare(ctx context.Context, e Entry) (*Entry, error) {
+	// **跨进程续号**：先确保本进程内该作用域的 seq 起点已从 Journal 载入（不持 s.mu，
+	// 避免把 Journal 读放进写锁临界区）。见 initSeq 的注释说明为何必须这么做。
+	s.initSeq(e.Scope)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
