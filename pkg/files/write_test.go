@@ -13,6 +13,7 @@ package files
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -60,7 +61,7 @@ func (e *dirsEnv) locateOwnerFileDefault(owner, rel string) (FileLocation, bool)
 // （owner Scope 由 quotaScopeFor 解析、卷容量池由 volSet.Pool 提供），使写面的
 // 预留/提交/释放走与生产相同的双账本语义（dedup 配额只计首份的断言依赖它）。
 // 显式卷 ACL/唯一性与容量路由语义不在替身范围（那些分支由 pkg/server 的集成测试覆盖）。
-func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+func (e *dirsEnv) routeUploadDefault(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
 	owner = normalizeOwner(owner)
 	tnt := e.tenantFor(owner)
 	if tnt == nil || tnt.Root() == nil {
@@ -420,7 +421,7 @@ func TestService_Upload_RouteErrorMapsStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newDirsEnv(t)
 			env.enableWriteDefaults()
-			env.routeUpload = func(string, string, string, int64, string) (UploadRoute, error) {
+			env.routeUpload = func(context.Context, string, string, string, int64, string) (UploadRoute, error) {
 				return UploadRoute{}, tc.err
 			}
 			env.rebuild()

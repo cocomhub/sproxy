@@ -1264,7 +1264,7 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 任务 8 O-1：覆盖动作记审计（沿用 upload_handler 覆盖写审计写法，Action=overwrite）。
 	// 与单次上传的差异见 backupCompleteVersion。rename 前 stat 旧文件大小（覆盖写）；新文件
 	// 场景 old=0。
-	overwrote, prev := s.backupCompleteVersion(tnt, rel, owner, session.Filename)
+	overwrote, prev := s.backupCompleteVersion(r.Context(), tnt, rel, owner, session.Filename)
 	finalChecksum := session.FileChecksum
 	// at-rest 加密卷：在途明文（可续传）在 finalize 单遍加密落位——raw rename 会把明文
 	// 直接落盘（at-rest 加密被绕过、/download 解密失败 = 文件不可读，评审 P0 的分块上传面）。
@@ -1377,11 +1377,11 @@ func (s *Service) sendCompleteMergeError(w http.ResponseWriter, uploadID string,
 // SaveVersion 把旧文件复制进 version 桶（version 桶 Scope 记账），不改 user 桶 committed；
 // 失败 best-effort。同时捕获目标旧大小 prev（rename 前 stat；新文件场景 old=0）。
 // 返回 overwrote（是否实际保存了版本）与 prev（覆盖写 Adjust 差分用）。
-func (s *Service) backupCompleteVersion(tnt *storage.Tenant, rel, owner, filename string) (overwrote bool, prev int64) {
+func (s *Service) backupCompleteVersion(ctx context.Context, tnt *storage.Tenant, rel, owner, filename string) (overwrote bool, prev int64) {
 	if rel != "" && tnt != nil && tnt.Root() != nil {
 		if s.rt.versioningEnabled() {
 			if _, sErr := tnt.Root().Stat(rel); sErr == nil {
-				if _, vErr := s.SaveVersion(strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
+				if _, vErr := s.SaveVersion(ctx, strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
 					s.rt.logger().Warn("保存文件版本失败", "file_name", filename, "error", vErr)
 				} else {
 					overwrote = true

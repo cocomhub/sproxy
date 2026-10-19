@@ -433,16 +433,16 @@ func (r *backupReservation) smAdopt(prev int64) {
 }
 
 // reserveMemory 预留 Scope 与卷池（二者可空，任一失败自动回退已成功的一侧）。
-func (r *backupReservation) reserveMemory(size int64, scope *quota.Scope, pool *quota.Pool) error {
+func (r *backupReservation) reserveMemory(ctx context.Context, size int64, scope *quota.Scope, pool *quota.Pool) error {
 	if scope != nil {
-		s, err := scope.TryReserve(size)
+		s, err := scope.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
 		if err != nil {
 			return err
 		}
 		r.scope = s
 	}
 	if pool != nil {
-		p, err := pool.TryReserve(size)
+		p, err := pool.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
 		if err != nil {
 			r.releaseScope()
 			return err
@@ -466,12 +466,12 @@ func (r *backupReservation) releasePool() {
 	}
 }
 
-func (q *backupQuotaFS) reserve(size int64) (*backupReservation, error) {
+func (q *backupQuotaFS) reserve(ctx context.Context, size int64) (*backupReservation, error) {
 	if q.scope == nil && q.pool == nil && q.sm == nil {
 		return nil, nil
 	}
 	res := backupReservation{sm: q.sm, cat: q.cat, log: q.log}
-	if err := res.reserveMemory(size, q.scope, q.pool); err != nil {
+	if err := res.reserveMemory(ctx, size, q.scope, q.pool); err != nil {
 		return nil, err
 	}
 	if q.sm != nil {
@@ -494,7 +494,7 @@ func (q *backupQuotaFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, r
 	// 单调上涨 → 后续上传/备份被 507 误拒（对照上传路径 Commit(prev,written) 与 multipart
 	// Adjust(prev,total)）。
 	prev := q.statSize(ctx, relPath)
-	res, err := q.reserve(size)
+	res, err := q.reserve(ctx, size)
 	if err != nil {
 		return fmt.Errorf("备份目标配额不足: %w", err)
 	}

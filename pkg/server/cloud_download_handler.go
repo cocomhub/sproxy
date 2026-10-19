@@ -648,7 +648,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
-	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, totalSourceSize)
+	res, pre, ok := h.cloudArchiveReserveQuota(r.Context(), w, owner, totalSourceSize)
 	if !ok {
 		return
 	}
@@ -822,7 +822,7 @@ func (h *Handlers) cloudArchiveMaxBytesOK(w http.ResponseWriter, totalSize int64
 
 // cloudArchiveReserveQuota 打包前做总量限制（cloud_archive_max_bytes）+ 配额预留
 // （scope 优先单步；storageMgr 仅作回退）。返回 false 表示已回错误响应包。
-func (h *Handlers) cloudArchiveReserveQuota(w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Reservation, int64, bool) {
+func (h *Handlers) cloudArchiveReserveQuota(ctx context.Context, w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Reservation, int64, bool) {
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
 	if !h.cloudArchiveMaxBytesOK(w, totalSourceSize) {
 		return nil, 0, false
@@ -832,7 +832,7 @@ func (h *Handlers) cloudArchiveReserveQuota(w http.ResponseWriter, owner string,
 	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
 	var res *quota.Reservation
 	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
-		rr, reserveErr := scope.TryReserve(pre)
+		rr, reserveErr := scope.WaitReserve(ctx, pre, quota.DefaultWaitTimeout)
 		if reserveErr != nil {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),

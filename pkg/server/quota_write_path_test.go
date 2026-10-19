@@ -9,6 +9,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -442,7 +443,7 @@ func TestVersionQuota_CommitAndRelease(t *testing.T) {
 	}
 
 	// 保存版本（覆盖前备份）
-	vid, err := env.h.fileService().SaveVersion("f.txt", tnt, "alice")
+	vid, err := env.h.fileService().SaveVersion(context.Background(), "f.txt", tnt, "alice")
 	if err != nil {
 		t.Fatalf("saveVersion: %v", err)
 	}

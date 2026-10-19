@@ -560,7 +560,7 @@ func (s *Service) handleDuplicateFile(ctx context.Context, owner string, homeTnt
 	// 接缝注释），故本处**无控制流残差**。
 	if s.rt.versioningEnabled() {
 		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本（homeTnt 即旧文件所在卷）
-		s.saveVersionBeforeOverwrite(owner, remotePath, homeTnt)
+		s.saveVersionBeforeOverwrite(ctx, owner, remotePath, homeTnt)
 		// 审查 I-3：覆盖动作记审计（含旧版本已保存的信息）。
 		s.rt.recordFileAudit(ctx, "overwrite", remotePath, auditResultSuccess, "覆盖现有文件（版本已保存）")
 		return nil, true, nil // 继续执行写入流程，用新内容覆盖现有文件（home=本卷）
@@ -746,7 +746,7 @@ func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (
 // mkdirLocalWithCharge 在本地卷上建目录并按**目录足迹**记账（预留 → MkdirAll → 结算）。
 // 失败路径归还预留（Commit/Release 二选一）。记账口径见 dir_charge.go。
 func (s *Service) mkdirLocalWithCharge(ctx context.Context, owner, rel, remotePath, volName string, root *storage.Root) error {
-	dirCharge, dcErr := s.reserveDirCharge(owner, rel, remotePath, volName)
+	dirCharge, dcErr := s.reserveDirCharge(ctx, owner, rel, remotePath, volName)
 	if dcErr != nil {
 		return dcErr
 	}
@@ -785,7 +785,7 @@ func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, 
 			dirRel = r
 		}
 	}
-	dirCharge, dcErr := s.reserveDirCharge(owner, dirRel, remotePath, volName)
+	dirCharge, dcErr := s.reserveDirCharge(ctx, owner, dirRel, remotePath, volName)
 	if dcErr != nil {
 		return MakeDirResult{}, true, dcErr
 	}

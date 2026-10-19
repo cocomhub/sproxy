@@ -425,7 +425,7 @@ func (s singleVolume) Route(ctx context.Context, owner, rel, explicitVol string,
 	if s.quota != nil {
 		if scope := s.quota.ScopeFor(owner, rel); scope != nil {
 			// 预留与结算同口径（加密卷按物理占用预留，见 UploadRoute.PhysSize）。
-			res, err := scope.TryReserve(route.PhysicalSize(size))
+			res, err := scope.WaitReserve(ctx, route.PhysicalSize(size), quota.DefaultWaitTimeout)
 			if err != nil {
 				return UploadRoute{}, &HTTPError{Status: http.StatusInsufficientStorage, Message: "存储配额不足"}
 			}

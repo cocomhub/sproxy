@@ -9,18 +9,16 @@
 #   pending   = 待收敛（应改走 WaitReserve 排队重试或 waitq.Acquire）—— **收敛待办清单**
 # 格式：<文件>	<调用点数>	<whitelist>	<class>
 pkg/syncmgr/manager.go	5	no	pending
-pkg/server/backup_api.go	4	no	probe
 pkg/server/sync_handler.go	4	no	pending
 pkg/server/volumes_api.go	4	no	pending
 pkg/cloud/manager_task.go	3	no	pending
-pkg/server/cloud_download_handler.go	3	no	probe
 pkg/server/files_service.go	3	no	pending
 pkg/cloud/manager.go	2	no	pending
-pkg/files/dir_charge.go	2	no	pending
-pkg/files/version_store.go	2	no	pending
 pkg/quota/quota.go	2	no	pending
 pkg/quota/staging_tracker.go	2	yes	adapter
 pkg/quota/wait.go	2	yes	adapter
+pkg/server/backup_api.go	2	no	probe
+pkg/server/cloud_download_handler.go	2	no	probe
 pkg/server/cloud_service.go	2	no	pending
 pkg/server/s3_part_ledger.go	2	no	pending
 pkg/server/version.go	2	no	pending
@@ -29,7 +27,6 @@ pkg/volume/registry/quota_volume.go	2	no	pending
 pkg/cloud/manager_lifecycle.go	1	no	pending
 pkg/cloud/manager_membudget.go	1	no	pending
 pkg/files/chunked_upload.go	1	no	pending
-pkg/files/options.go	1	no	pending
 pkg/files/service.go	1	no	pending
 pkg/quota/waitq_adapter.go	1	yes	adapter
 pkg/server/cloud_archive_handler.go	1	no	probe

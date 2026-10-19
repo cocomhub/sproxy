@@ -329,7 +329,7 @@ func (h *Handlers) resolveRestoreDestination(owner, targetRel string, verLoc *fi
 // backupBeforeRestore 在恢复执行前保存当前版本（回滚前备份）到目标卷（文件所在卷），
 // 备份失败时记审计 + 500 拒绝执行恢复并返回 false。
 func (h *Handlers) backupBeforeRestore(w http.ResponseWriter, r *http.Request, remotePath, versionIDStr, owner string, dstTnt *storage.Tenant) bool {
-	if _, err := h.fileService().SaveVersion(remotePath, dstTnt, owner); err != nil {
+	if _, err := h.fileService().SaveVersion(r.Context(), remotePath, dstTnt, owner); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "恢复前备份失败: " + versionIDStr,

@@ -4,6 +4,7 @@
 package files
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -50,7 +51,7 @@ type dirCharge struct {
 
 // reserveDirCharge 为「即将创建的目录」预留物理上界（无能力/无配额 ⇒ 惰性零值，无副作用）。
 // 失败（配额/卷容量不足）⇒ 507 fail-closed（与文件写入同语义）。
-func (s *Service) reserveDirCharge(owner, rel, remotePath, volName string) (dirCharge, error) {
+func (s *Service) reserveDirCharge(ctx context.Context, owner, rel, remotePath, volName string) (dirCharge, error) {
 	c := dirCharge{volName: volName, owner: owner, remotePath: remotePath}
 	if s.rt.phys == nil || remotePath == "" {
 		return c, nil
@@ -61,7 +62,7 @@ func (s *Service) reserveDirCharge(owner, rel, remotePath, volName string) (dirC
 	}
 	need := bound * int64(dirChainLen(remotePath))
 	if sc := s.rt.quotaScope(owner, rel); sc != nil {
-		res, err := sc.TryReserve(need)
+		res, err := sc.WaitReserve(ctx, need, quota.DefaultWaitTimeout)
 		if err != nil {
 			return c, &HTTPError{Status: http.StatusInsufficientStorage, Message: errMsgStorageQuotaExceeded}
 		}
@@ -69,7 +70,7 @@ func (s *Service) reserveDirCharge(owner, rel, remotePath, volName string) (dirC
 	}
 	if vs := s.rt.volSet(); vs != nil && volName != "" {
 		if pool := vs.Pool(volName); pool != nil {
-			res, err := pool.TryReserve(need)
+			res, err := pool.WaitReserve(ctx, need, quota.DefaultWaitTimeout)
 			if err != nil {
 				c.release()
 				return c, &HTTPError{Status: http.StatusInsufficientStorage, Message: errMsgStorageQuotaExceeded}
