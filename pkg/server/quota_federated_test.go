@@ -216,3 +216,17 @@ func TestUserQuotaHandler_OwnerFromAuthNotRequest(t *testing.T) {
 		t.Fatalf("used=%d，want 1234", got.Used)
 	}
 }
+
+// TestFederatedUserQuota_IncludesWaitStats 等待可观测（S4）：有配额池的卷参与 Wait 汇总。
+func TestFederatedUserQuota_IncludesWaitStats(t *testing.T) {
+	t.Parallel()
+	h, _ := federatedFixture(t, []volume.Volume{{Name: "v1"}, {Name: "v2"}}, 2, "v1")
+
+	got := h.federatedUserQuota("alice")
+	if got.Wait.Volumes != 2 {
+		t.Fatalf("Wait.Volumes=%d，want 2（每个有配额池的可访问卷都应参与汇总）", got.Wait.Volumes)
+	}
+	if got.Wait.Waiting != 0 || got.Wait.TimedOut != 0 || got.Wait.QueueFull != 0 {
+		t.Fatalf("无等待/无超时/无背压时统计应为零: %+v", got.Wait)
+	}
+}

@@ -91,3 +91,25 @@ test('HTML 转义：卷名含尖括号不得注入', () => {
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /&lt;img/);
 });
+
+test('waitStatsHtml：无观测面返回空串；有观测面渲染关键计数', function () {
+  const qf = require('./quota-format.js');
+  assert.strictEqual(qf.waitStatsHtml(null), '');
+  // 空对象也是「有 wait 字段」⇒ 渲染全零块（不隐藏）；只有 null/非对象才返回空串。
+  const zero = qf.waitStatsHtml({});
+  assert.ok(zero.indexOf('等待中 0') >= 0);
+  const none = qf.waitStatsHtml({ volumes: 0, waiting: 99 });
+  assert.ok(none.indexOf('quota-wait') >= 0 && none.indexOf('未启用等待队列') >= 0);
+  const html = qf.waitStatsHtml({
+    volumes: 2, waiting: 3, max_waiting: 7, acquired: 10,
+    timed_out: 4, canceled: 1, queue_full: 2, too_large: 5, total_wait_ms: 1000,
+  });
+  assert.ok(html.indexOf('id="quota-wait"') >= 0);
+  assert.ok(html.indexOf('等待中 3') >= 0);
+  assert.ok(html.indexOf('峰值 7') >= 0);
+  assert.ok(html.indexOf('超时 4') >= 0);
+  assert.ok(html.indexOf('背压 2') >= 0);
+  assert.ok(html.indexOf('不可满足 5') >= 0);
+  // 平均等待 = total_wait_ms / acquired = 1000/10 = 100ms
+  assert.ok(html.indexOf('平均等待 100ms') >= 0);
+});

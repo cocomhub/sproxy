@@ -136,6 +136,25 @@ func (p *Pool) Usage() int64 {
 }
 
 // Reserved 返回本池聚合预留。
+// WaitStats 返回该池**根池**等待队列的统计快照（S4「等待可观测」）。
+//
+// 语义：只有根池持有 waitq 队列（子池共享根池的排队能力）⇒ 这里沿 parent 上溯；
+// 未配置队列/nil 池 ⇒ 零值（表示「无等待观测面」，不是「没有等待」的另一种说法 —— 调用方
+// 用 Pool 是否存在来判断观测面是否可用）。
+func (p *Pool) WaitStats() waitq.Stats {
+	if p == nil {
+		return waitq.Stats{}
+	}
+	root := p
+	for root.parent != nil {
+		root = root.parent
+	}
+	if root.queue == nil {
+		return waitq.Stats{}
+	}
+	return root.queue.Stats()
+}
+
 func (p *Pool) Reserved() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

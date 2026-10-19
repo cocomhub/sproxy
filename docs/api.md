@@ -1003,3 +1003,36 @@ query 参数：`action` / `actor`（精确相等过滤）、`after_ts`（RFC3339
 | 413 | 请求体超过限制 |
 | 416 | Range 越界 |
 | 500 | 服务端写文件、目录失败 |
+
+## 配额与等待（`GET /api/quota`）
+
+返回**认证用户自己**的跨卷配额视图（owner 恒取自请求认证，不接受请求参数指定 owner）。
+
+```json
+{
+  "owner": "alice",
+  "used": 1048576,
+  "capacity": 1073741824,
+  "unlimited": false,
+  "partial": false,
+  "volumes": [
+    {"volume": "main", "kind": "local", "used": 1048576, "capacity": 1073741824, "has_quota": true}
+  ],
+  "wait": {
+    "volumes": 1, "waiting": 0, "max_waiting": 3,
+    "acquired": 42, "timed_out": 1, "canceled": 0,
+    "queue_full": 0, "too_large": 2, "total_wait_ms": 1200
+  }
+}
+```
+
+字段语义（`used` / `capacity` 只是「Σ 有权威卷」的**下界**，`partial=true` 表示含未知部分）：
+
+- `has_quota=false` ⇒ 该卷**无每用户权威** ⇒ `used`/`capacity` **未知**（禁当 0 消费）；
+- `capacity=0` 且 `unlimited=true` ⇒ 该卷对该用户**不限**（不是「零配额」）；
+- **`wait`（S4 等待可观测）**：跨**有配额池**的可访问卷汇总的等待队列统计 ——
+  `volumes` 为参与卷数（0 ⇒ 该账户可访问卷未启用等待队列），`waiting` 当前等待者、
+  `max_waiting` 历史峰值、`acquired`/`timed_out`/`canceled` 结果计数、
+  `queue_full` 背压拒绝（对应 429）、`too_large` 超容量立即拒绝（不排队）、
+  `total_wait_ms` 成功获取者累计等待。
+  无配额池的卷**不计入**（不伪造「零等待」）。
