@@ -186,6 +186,11 @@ type AuditConfig struct {
 	// 达上限先删最旧归档；删尽仍放不下则有界丢弃新条目（计入 audit_dropped，绝不阻塞业务）。
 	// 默认 1 GiB（**非零安全默认**，防磁盘打满 —— 用户要求 ⑩）；0 = 不限（不推荐）。
 	MaxTotalBytes ByteSize `yaml:"max_total_bytes" mapstructure:"max_total_bytes"`
+	// ArchiveDir 是**冷段归档目录**（M4）：非空时启动期把封段归档到该目录并回收本地封段。
+	// 指向一个挂载的冷存储卷目录（加密卷由卷自身提供 at-rest 加密）；空 ⇒ 不归档（默认）。
+	ArchiveDir string `yaml:"archive_dir" mapstructure:"archive_dir"`
+	// ArchiveKeep 是本地**保留**的最新封段数（0 = 全部归档；默认 0，建议按查询窗口显式配置）。
+	ArchiveKeep int `yaml:"archive_keep" mapstructure:"archive_keep"`
 	// Disabled 显式关闭审计（默认 false = 启用）：读面返回空表、写入 no-op，且**不创建**
 	// 任何审计目录/文件（与 buffer_size=0 的区别：后者只关内存环形缓冲，落盘仍在）。
 	Disabled bool `yaml:"disabled" mapstructure:"disabled"`

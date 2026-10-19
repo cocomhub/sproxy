@@ -82,6 +82,12 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 		journal = j
 	}
 
+	// M4 冷段归档：**复用** pkg/audit 的归档原语（ArchiveSealed + DirArchiver），不另造写路径。
+	// 归档到挂载的冷卷目录（加密卷的 at-rest 加密由卷自身提供）；失败**不丢段**（原语保证）。
+	if journal != nil && cfg.Audit.ArchiveDir != "" {
+		runAuditArchive(cfg, journal, log)
+	}
+
 	caps := audit.FullCapabilities()
 	var jr audit.Journal = audit.NullJournal{}
 	if journal != nil {
@@ -787,5 +793,24 @@ func registerHubRoutes(h *Handlers, srvMux, localMux *http.ServeMux, opts Regist
 		localMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.hubRemoveNodeHandler)
 		localMux.HandleFunc("GET /api/hub/stats", h.hubStatsHandler)
 		localMux.HandleFunc("GET /api/hub/services", h.hubServicesHandler)
+	}
+}
+
+// runAuditArchive 把封段归档到 `audit.archive_dir`（M4；**复用** pkg/audit 原语）。
+//
+// 语义（与 pkg/audit.ArchiveSealed 一致）：
+//   - 只归档**封段**（活跃段绝不归档）；失败**不丢段**（本地保留、下轮重试）；
+//   - 保留最新 `audit.archive_keep` 个封段在本地（0 = 全部归档；建议按查询窗口显式配置）。
+//
+// 为什么在装配层：归档目的地（挂载的冷卷目录）属部署配置；原语与护栏都在 pkg/audit（单一实现）。
+func runAuditArchive(cfg *Config, j *audit.FileJournal, log *slog.Logger) {
+	keep := max(cfg.Audit.ArchiveKeep, 0)
+	rep, err := audit.ArchiveSealed(context.Background(), j, audit.DirArchiver{Dir: cfg.Audit.ArchiveDir}, keep)
+	if err != nil {
+		log.Warn("审计冷段归档失败（封段保留在本地，下轮重试）", "error", err, "archive_dir", cfg.Audit.ArchiveDir)
+		return
+	}
+	if rep.Archived > 0 || rep.Failed > 0 {
+		log.Info("审计冷段归档完成", "summary", rep.String(), "archive_dir", cfg.Audit.ArchiveDir)
 	}
 }
