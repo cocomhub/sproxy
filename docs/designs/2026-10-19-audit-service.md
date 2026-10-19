@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # 统一审计服务（`pkg/audit`）—— 作用域化 / 内存活跃索引 + 轮转 / 结构体能力 / WAL 续跑
 
-> 状态：**设计 v2（经 3 路独立 fresh-context 对抗审核并逐条证伪后修订；待你确认后实施）**。
+> 状态：**设计 v6（经三轮独立 fresh-context 对抗审核并逐条证伪后修订）**；待你确认后实施。
 > 用户裁定（2026-10-19）：① 审计能力**必须由 `audit` 包提供**（禁到处实现）；
 > ② 必须**抽象**，**所有审计都有各自的作用域**；③ **活跃记录在内存**加速访问，
 > **内存超配置 / 内容过时 / 人工读取等场景立刻触发轮转**；④ 能力**必须由结构体提供**（禁全局变量）；
@@ -28,7 +28,7 @@ SPDX-License-Identifier: Apache-2.0
 | 读面 | `Recent(Filter)`（包内） | `ring.Recent` + `/api/audit` + `/api/audit/export` + Web UI |
 | 扩展 | `Sink` 可插拔、`Archiver` **预留未接线** | `notifyCenter.Dispatch`（通知中心） |
 | 状态 | 跨步骤 kv（`Save/Get`）**仅内存** | 无作用域/状态概念 |
-| 消费者 | cloud 任务、secretdata（encrypt/decrypt span）、transfer | **`RecordAudit` ≈115 处 / 20 文件**（非测试；另 files 域 `recordFileAudit` ≈29 处 / 3 文件） |
+| 消费者 | cloud 任务、secretdata（encrypt/decrypt span）、transfer | **`RecordAudit` 实测 108 处 / 19 文件**（非测试；另 files 域 `recordFileAudit` **29 处 / 3 文件**） |
 
 **结构性缺陷**：
 
@@ -143,8 +143,7 @@ type Entry struct {
     Object  string `json:"object"`
     Result  Result `json:"result"`
     Detail  string `json:"detail"`
-    // Dim2 = **UI 归类维度**（user | system），**不是权限轴**（审核：单轴 = Owner，见 §5.7）
-    Dim2    Dim2   `json:"dim2"`
+    // （`Dim2` 已删除：v4 裁定权限轴为单轴 `Owner`；用户/系统仅由 UI 归类，不入模型）
     // 新增结构化字段（纯增量）
     Volume    string `json:"volume,omitempty"`
     RequestID string `json:"request_id,omitempty"`
@@ -286,7 +285,7 @@ func (s *Service) Close() error
 1. 内存达 T1 上限且**无法持久化**（磁盘满/Journal 持续失败）⇒ **丢弃最旧** + `audit_dropped++` + 告警 + `KindRotate(reason=disk_full)`（**不得无界增长 ⇒ OOM**）；
 2. `Evict` 优先逐出**已持久化**条目；仅当「未持久化条目已达内存上限」才丢未持久化条目（同上计数）；
 3. `fail_closed=true` ⇒ 该变更操作**快速失败**（不静默丢）；
-4. **（审核 P1）段族隔离**：`max_total_bytes`/T8/有界丢弃**只作用于「合规段族」**；**「任务/WAL 段族」以不丢失为硬约束**——容量不足时表现为**拒绝新的 `Open`**（业务侧可重试）而**绝不丢弃已有任务状态**。两族共用 `Journal` 实现与格式，但**物理分目录**（合规 `<root>/__audit__/compliance/`、任务 `<root>/__audit__/tasks/<scope>/`）。
+4. **（审核 P1）段族隔离**：`max_total_bytes`/T8/有界丢弃**只作用于「合规段族」**；**「任务/WAL 段族」以不丢失为硬约束**——容量不足时表现为**拒绝新的 `Open`**（业务侧可重试）而**绝不丢弃已有任务状态**。两族共用 `Journal` 实现与格式，但**物理分目录**（合规 `<root>/__audit__/hot/`、任务 `<root>/__audit__/tasks/<scope>/`）。
 
 **5.4.2 关于「预留」的诚实表述（审核 P1-5）**：`local_reserve_bytes` **只保证「审计自身不因膨胀而失控」**，**不保证**「用户把共享文件系统写满后审计仍可写」（无 `fallocate`/独立分区时不可能 ✗）。⇒ 需真保证时：**热段置于独立分区/卷**，或用 `fallocate` 预分配；本设计**默认按「自身上界」语义**并在文档/配置注释里写清（不再过度承诺）。
 
@@ -310,16 +309,20 @@ func (s *Service) Close() error
 | 卷 / 加密 / 外部卷 | **直接复用** | 复用（但路径 ACL 需豁免） |
 | 回收站 / 版本 / 保留策略 | **直接复用**（语义正确：审计数据也有生命周期） | 需逐面豁免（**易疏漏**） |
 | 镜像 / 完整性巡检 | **直接复用**（`ListOwners` 枚举到它 ⇒ 审计数据也被镜像/巡检 ✓ 消除 revB 指出的冗余缺口） | 被 `ListOwners` 跳过（`__` 前缀）⇒ **永不镜像/巡检** ✗ |
-| 可见性 / ACL | 由**用户类型**统一判定（`requireRole` 已有 4 类型先例 ✓） | 需在每个面加「这是保留 owner ⇒ 拒绝」✗ |
+| 可见性 / ACL | **由租户键（AK）seam 统一判定**（保留名拒绝 + 无 ACL 条目）；**不依赖角色轴**（角色轴全域收口是**独立后续项**：`/s3/` 无中间件、`/dav/` 与 `PUT /api/config` 无角色门 ✗） | 需在每个面加「这是保留 owner ⇒ 拒绝」✗ |
 | 禁止登录 | **类型级禁止（一处生效）** | 需在每个身份入口封堵（且未来新入口仍会漏）✗ |
 | 理念一致性 | **所有操作都是用户行为、都可被管控** ✓ | 引入「非用户」旁路 ✗ |
 
 **具体设计（零豁免、全复用）**：
 1. **新用户类型**：`accesskey.RoleSystem = "system"`（与既有 `user/reader/node/admin` 并列 —— **已有先例**）；
 2. **禁止登录（一处生效）**：`parseAKAddRole`（`credentials_handler.go:662`，**已拒 admin** ⇒ 同一先例）加 `system` 拒绝；`resolveRegistrationRole` **永不授予** `system`；该类型**无任何凭据** ⇒ 不可认证（登录/注册对 `Role=system` fail-closed）；
-3. **不可被用户占用**：`validateRegistrationOwner` + `mesh_readers[].owner`（`config_validate.go:1084`）+ `api_keys[].name`（`validateAPIKeys`，**当前完全不校验**）+ 宿主注入 `Principal.AK` **四处**统一拒绝保留名 —— 建议经**一个归一函数**实现（收敛，非散点）；
-4. **启动期保证存在（用户硬要求）**：在 `initStorageLayout`（`routes_setup.go`，**已预建 `anonymous` 租户** ⇒ 同一先例）**预建审计租户**（租户根 + 功能桶 + 配额 Scope + `bucket_limits`）；**创建失败 ⇒ fail-fast 拒启**（绝不静默以「无审计空间」运行）；
-5. **命名与目录（消除命名空间冲突）**：审计**租户**名 = `audit`（**无 `__` 前缀** ⇒ 参与 `ListOwners` ⇒ 镜像/巡检/配额/用量全部生效）；**热段目录** = `<卷根>/__audit__/hot/`（`__` 前缀 ⇒ 被 `ListOwners` 跳过 ⇒ 不污染租户空间）；两者**不再同名同址**（v4 前的冲突已消除）；
+3. **不可被占用 —— 隔离点是「租户键（AK）seam」，不是 Role**（第三轮审核纠正）：
+   - **租户/ACL/配额的身份键 = `Principal.AK`**（`ownerFromRequest`=`ActorFrom`=`Principal.AK`）⇒ 能压成审计租户的是**一个叫 `audit` 的 AK**；
+   - **实测漏洞**：`accesskey.IsValidAK` **全仓零调用点**、`UpsertAK` 只查非空、`POST /api/credentials`(`akAdd`) 的 `readAKAddRequest` 不校验 AK/owner ⇒ **管理员可造出 `AK=="audit"`** ⇒ 该 AK 经认证后即可读写删审计租户；
+   - ⇒ 收口（**收敛到一处**）：① `akAdd`/`UpsertAK` seam 校验 `IsValidAK` + 拒绝保留名；② **租户解析唯一入口**（`tenantFor`/`ActorFrom` 消费点）对保留名集合 {`anonymous`,`audit`} fail-closed；③ `api_keys[].name`（当前**完全不校验**）；④ `mesh_readers[].owner`；⑤ 注册入口 `validateRegistrationOwner`；
+   - **不依赖角色轴**（与上表一致）；`Role=system` 的价值收窄为「显式类型 + 一处禁止登录」，**不**承担可见性判定。
+4. **启动期保证存在（用户硬要求）**：在 `initStorageLayout`（**已预建 `anonymous` 租户** ⇒ 同一先例）**预建审计租户**（租户根 + 功能桶 + 配额 Scope + `bucket_limits`）；**失败策略可配**：`audit.startup.fail_fast`（**bool 默认 false**，符合仓纪律）——默认**降级为「只读审计 + 告警 + 拒绝新写入（有界队列）」**（与审计 best-effort 定位一致），合规部署显式开启；**与 `disabled` 剖面/`buffer_size` 解耦**（不得因关闭审计而拒启）；
+5. **命名与目录 + 迁移口径（第三轮审核）**：审计**租户**名 = `audit`（**无 `__` 前缀** ⇒ 参与 `ListOwners` ⇒ 配额/用量/巡检生效）；**热段/任务段** = `<卷根>/__audit__/hot/`、`<卷根>/__audit__/tasks/<scope>/`（`__` 前缀 ⇒ 被 `ListOwners` 跳过）；**⚠️ legacy 同址冲突**：现有 `AuditStore` 落 `<卷根>/audit/audit.log`（`routes_setup.go:51`）与租户根**同址** ⇒ 需**迁移**（`audit.log`/归档移入 `__audit__/hot/`）并在升级时声明行为；`audit` 加入**身份层保留名**（`ListOwners` 今日已把它当租户枚举）；
 6. **保留名的实现位置**：仍**不得**改 `ValidSegmentName`/`IsReservedBucketName`（硬约束）——保留判定只在**身份/配置层**（第 3 点的 4 个来源 + 归一函数）。
 
 > **为何比「保留 owner + 豁免」更好**：用户点名「**各种豁免容易疏漏**」——豁免是「N 个面 × M 个新功能」的**乘法面** ✗；用户类型是「**一处类型判定**」的**加法面** ✓。且审计数据**本就该**有配额/生命周期/镜像/加密（它是数据，不是特殊物）✓。
@@ -339,7 +342,7 @@ func (s *Service) Close() error
 11. **逃生舱（默认关闭）**：`audit.owner` 默认 `audit`（**租户名**，`Role=system`）；**不允许**改为普通用户 owner；
 12. **（启动期）审计空间不存在 ⇒ fail-fast 拒启**（不静默降级为「无审计空间」）。
 
-### 5.7 审计权限模型（两维：用户维度 / 系统维度）—— **审核 P0 的正式设计**
+### 5.7 审计权限模型（**单轴 `Owner`**；用户/系统仅作 UI 归类）
 
 **问题**：现状 `/api/audit` 与 `/api/audit/export` 仅认证、无角色门 ⇒ 最低权限主体可读**跨租户全局证据链**（`rbac_roles_test.go:455-458` 还把它锁成契约）。
 
@@ -405,7 +408,7 @@ func (s *Service) Close() error
 | 多管理员可见性 | **角色/能力位**决定（RBAC）⇒ 加管理员 = 改凭据，**零存储变更** | 所有权决定 ⇒ 加管理员需授权/迁移 |
 | 管理员轮换/注销 | **零影响**（与身份解耦） | 归属断裂风险 |
 | 配额 | **独立配额节点**（不占任何人的个人配额） | 占该管理员配额 |
-| 删除语义 | 无文件面、无用户面删除路径 ⇒ **不可篡改/不可删** | 按该 owner 的用户面规则（可删） |
+| 删除语义 | **受 `volume_retention` 约束**（审计冷段有生命周期，与 E25 一致）；热段/WAL 段不受 TTL | 按该 owner 的用户面规则（可删） |
 | 加密/外部卷/版本/回收站 | **复用**（归档走写内核） | 复用 |
 | 身份 | **无凭据、不可登录、不可注册** | 需绑定一个真实管理员身份 |
 
@@ -454,7 +457,7 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 
 ---
 
-## 7. 边界场景（E1–E26）
+## 7. 边界场景（E1–E29）
 
 | # | 场景 | 处理 |
 |---|---|---|
@@ -515,7 +518,7 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 
 | 门禁 | 断言 |
 |---|---|
-| R35-a | `Emit`/`RecordAudit`/`recordFileAudit` 调用点必须在登记表（**基线按实测重测**：`RecordAudit` **108 处/19 文件** + `recordFileAudit` **29 处/4 文件**，口径 = 排除 `*_test.go` 与定义处）；棘轮只减不增 |
+| R35-a | `Emit`/`RecordAudit`/`recordFileAudit` 调用点必须在登记表（**基线实测**：`RecordAudit` **108/19** + `recordFileAudit` **29/3**，口径=排除 `*_test.go` 与定义处）；棘轮只减不增 |
 | R35-b | **变更型路由**必须经 `auditMiddleware`（或登记豁免 + 理由）；**transport 兜底事件不计入覆盖达标**；**口径待定**：`localMux` 全量变更型路由**不经 `authMiddleware`**（如 `POST /api/secrets`、`PUT /api/config`，`routes.go:270-292`）⇒ 需另定装配点或显式登记豁免（否则假绿/误报） |
 | R35-c | **非 `pkg/audit` 源码不得定义审计条目类型 / 结果常量 / 审计接口**（当前 `pkg/files/options.go:213` 的 `Auditor` 接口与 `pkg/files/service.go:677-679` 的 `auditResult*` 常量属第三套抽象 ⇒ 需收敛） |
 | **R35-d** | `pkg/audit` **不得同时导出两套 span/kv API**（除 facade） |
@@ -583,7 +586,7 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 
 | # | 项 | 建议 |
 |---|---|---|
-| O6 | 保留 owner 命名 | `__audit__`（前提：注册入口保留 `__` 前缀） |
+| O6 | 审计空间命名 | **已定**：租户 `audit`（身份层保留名）+ 热段 `<卷根>/__audit__/hot/` + 任务段 `__audit__/tasks/<scope>/`；legacy `<卷根>/audit/` 需迁移（§5.6 点 5） |
 | O7 | `local_reserve_bytes` 默认 | 256 MiB（**语义 = 自身上界，非物理预留**） |
 | O8 | 归档触发阈值 | 热段 > 预留 70% 或 sealed 段 > N |
 | O9 | 本地热段是否加密 | 先明文 + 0700/0600；M4 归档统一走加密卷 |
@@ -629,7 +632,7 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 
 | 项 | 裁定 | 设计落点 |
 |---|---|---|
-| `AuditStore`/`AuditRing` 下沉方案 | **② 彻底**（类型迁入 `pkg/audit`） | M1-3（含 `Journal.Prune`/`Index.Evict` + 白盒测试迁移） |
+| `AuditStore`/`AuditRing` 下沉方案 | **② 彻底**（类型迁入 `pkg/audit`） | M1-3（含 **`Journal.Rewrite(keep)` + `Index.Prune(keep)`** + 白盒测试迁移） |
 | 中断继续集群语义 | **本期单机** | §2.11 / E9（跨节点恢复另立专题） |
 | 获取路径收敛范围 | **两层一并收敛**（quota + capacity） | waitq.md §8.2/§7（`Group` 原子） |
 | 审计读面权限 | **两维模型**（用户维度/系统维度；非管理员脱敏读自己；管理员全量；服务端强制） | **§5.7**（新增）+ M1-11 + E26 + R35-e + §9.1 用例 |
@@ -668,3 +671,16 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 | 理念 | **所有操作都是用户行为、可被管控** ⇒ 用**类型/角色统一判定**（加法面）而非**逐面豁免**（乘法面，易疏漏） | §5.6 / §2.5 |
 
 > 本节替代 v4 的「保留 owner + 4 来源封堵」形态：**4 来源封堵仍保留**（作为保留名不可占用的实现），但**不再依赖逐面豁免** —— 可见性/可写性由**用户类型**统一判定。
+
+### 16. 修订记录（v6，第三轮独立审核）
+
+| 审核发现 | 处置 |
+|---|---|
+| **revB/revC P1：保留名封堵打错字段**（租户键 = AK；`IsValidAK` 零调用点；`UpsertAK` 只查非空 ⇒ `AK=="audit"` 可造） | **§5.6 点 3 重写**：隔离点 = **租户键 seam**（5 处收口），**不依赖角色轴** |
+| **revB P1：「用户类型统一判定」前提被代码证伪**（`/s3/` 无中间件、`/dav/` 与 `PUT /api/config` 无角色门） | 表格「可见性/ACL」行改为「由租户键 seam 判定」；角色轴全域收口列为**独立后续项** |
+| **revB P1-4 / revA P2-4 / revC P1-3：`audit` 与 legacy `<卷根>/audit/` 同址 + 今日已被当租户枚举** | §5.6 点 5 增**迁移口径** + `audit` 入身份层保留名；段族目录统一（`hot`/`tasks`） |
+| **revB P1-4：启动期 fail-fast 代价高且与 best-effort 冲突** | §5.6 点 4 改 `audit.startup.fail_fast`（**默认 false** ⇒ 降级只读 + 告警）；与 `disabled`/`buffer_size` 解耦 |
+| **revB P1：未知 Role 在 authMiddleware-only 面静默放行** | `requireRole` 显式 `case RoleSystem: deny` + `resolveRegistrationRole` 角色白名单（见 program.md §15） |
+| **revC P1-6 / P2-6：残留「两维模型」「`__audit__` 租户名」「E1–E26」「v2 状态头」「`Journal.Prune`」** | 全部订正（标题单轴、E1–E29、v6、`Rewrite`+`Prune`、O6 更新） |
+| **revC C3：`Dim2` 冗余** | **从 `Entry` 删除**（权限轴单轴 `Owner`；用户/系统仅 UI 归类） |
+| **revC C2：单 PR 不可行** | 保持单 PR（用户裁定），批次见 program.md §15；M1-14/M1-15 单列且可拆独立 PR |
