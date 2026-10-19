@@ -1,30 +1,31 @@
 # 门禁 R36-a：**配额/容量获取入口调用点棘轮**（只减不增）——非测试源码不得新增**直接**调用
-# `TryReserve`/`semaphore.Weighted`（**只计方法调用**：定义行与接口声明不计）。获取路径应走
-# pkg/waitq 或收敛后的具名排队入口（`quota.Scope/Pool.WaitReserve`、
-# `capacity.StorageManager.WaitReserve`、`files.StorageManager.WaitReserveChunked` —— **允许**）。
-# 设计 docs/designs/2026-10-19-waitq.md §8.2/§8.3。
+# `TryReserve`/`semaphore.Weighted`（**只计方法调用**）。获取路径应走 pkg/waitq 或收敛后的具名排队入口
+# （`quota.Scope/Pool.WaitReserve`、`capacity.StorageManager.WaitReserve`、
+# `files.StorageManager.WaitReserveChunked` —— **允许**）。设计 docs/designs/2026-10-19-waitq.md §8.2/§8.3。
 #
-# 分类（class 列）：
-#   adapter   = waitq 适配层 / 跨包转发适配器（合法调用点）
-#   probe     = 设计明确**不排队**：① best-effort 占位 ② **锁内调用** ③ **逐文件 guard**（失败该文件并继续）
-#               ④ 内存预算（另片）⑤ **等待语义未定**（改等待会把「立即 507」变成 30s 阻塞，见代码注释）
-#   pending   = 待收敛（应改走 WaitReserve 排队重试）—— **收敛待办清单**
+# 分类（class 列）与判定依据（**收敛前三问**：① 期望立即失败还是排队？② 是否锁内？③ 是否逐项 guard？）：
+#   adapter = waitq 适配层 / 跨包转发适配器 / **卷层预留适配器内部**（合法调用点）
+#   probe   = 设计明确**不排队**：
+#     · best-effort 占位（失败降级）· 锁内调用（与写锁互斥）· 逐文件 guard（失败该文件并继续）
+#     · 内存预算（另片）· **等待语义未定**（改等待会把「立即 507」变 30s 阻塞）
+#     · **S3 客户端语义**期望立即错误 · **对账型**（Release(pre)+TryReserve(actual)，失败仅告警）
+#   pending = 待收敛（**真实预留路径**，需补 ctx 后改走 WaitReserve）—— **收敛待办清单**
 # 格式：<文件>	<调用点数>	<whitelist>	<class>
 pkg/cloud/manager_task.go	3	no	probe
 pkg/quota/wait.go	2	yes	adapter
-pkg/server/s3_part_ledger.go	2	no	pending
+pkg/server/s3_part_ledger.go	2	no	probe
 pkg/server/sync_handler.go	2	yes	adapter
 pkg/server/version.go	2	no	probe
 pkg/server/volumes_api.go	2	no	pending
 pkg/server/volumes_mirror.go	2	no	pending
 pkg/syncmgr/manager.go	2	no	probe
-pkg/volume/registry/quota_volume.go	2	no	pending
-pkg/cloud/manager_lifecycle.go	1	no	pending
+pkg/volume/registry/quota_volume.go	2	yes	adapter
+pkg/cloud/manager_lifecycle.go	1	no	probe
 pkg/quota/staging_tracker.go	1	yes	adapter
 pkg/quota/waitq_adapter.go	1	yes	adapter
-pkg/server/backup_api.go	1	no	pending
-pkg/server/cloud_archive_handler.go	1	no	pending
-pkg/server/cloud_download_handler.go	1	no	pending
+pkg/server/backup_api.go	1	no	probe
+pkg/server/cloud_archive_handler.go	1	no	probe
+pkg/server/cloud_download_handler.go	1	no	probe
 pkg/server/cloud_service.go	1	yes	adapter
 pkg/server/files_service.go	1	yes	adapter
 pkg/server/volumes.go	1	no	probe
