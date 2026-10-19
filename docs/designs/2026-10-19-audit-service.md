@@ -453,6 +453,20 @@ Open(scopeID) ─▶ active ─(Save 落盘 KindState, Seq++)─▶ active
 ### 6.3 与 M3 统一恢复协调器的关系
 
 `docs/archive/architecture-task-recovery.md`（用户 2026-10-10 裁定）要求统一恢复协调器收敛 5 处独立实现。本设计的 `ListScopes/Resume` 是**注册与重放原语**；M3 = 在其上建**协调器 + 注册中心**。
+
+**M3 已落地（`pkg/recovery`）**：`Coordinator`（结构体、无全局态）持有注册表
+（`Registration{Kind, Prefix, Factory}`，前缀唯一、**最长前缀优先**），`Run` 依次：
+`ListScopes(unfinished)` → 按前缀匹配任务族 → `Resume`（**执行副作用**）→ **成功后** `MarkDone`
+（提交记录，顺序不可颠倒）→ 汇总 `Report`（resumed/skipped/failed/unknown）。
+
+**作用域命名约定**：`<kind>.<id>`，前缀形如 `task.cloud` / `task.syncexec` / `task.chunked`。
+分隔符必须是 **`.`**（不能是 `:`）：`ScopeID` 白名单为 `[A-Za-z0-9._-]`（E8 路径安全；段文件按作用域
+命名，`:` 在 Windows 文件名非法）。协调器按 `s == prefix || strings.HasPrefix(s, prefix+".")` 匹配，
+因此 `task.cloud` 与 `task.cloud.backup` 不会互相误匹配。
+
+**可观测与安全边界**：未注册前缀的作用域**计入 `unknown` 且保持未完成**（绝不静默丢弃、绝不写提交
+记录）；单个任务失败 ⇒ `failed` 计数并**保持未完成**（下次启动重试），默认不阻断其它任务（`FailFast`
+可显式开启）；未配置 `audit.Service` ⇒ `Run` 直接报错（恢复不可静默失效）。
 **兼容兜底（审核 A5）**：M3 首版**保留 legacy 扫描兜底**（无 WAL 状态的在途任务回落现有 `recover*`），一个版本后删。
 
 ---
