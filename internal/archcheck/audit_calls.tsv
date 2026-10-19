@@ -7,7 +7,7 @@ cmd/sproxy/root.go	1
 pkg/files/chunked_upload.go	1	
 pkg/files/copy_ops.go	3	
 pkg/files/trash.go	6	
-pkg/files/write_ops.go	27	域层写面（含 mkdir/rmdir/upload 等，覆盖全 face）
+pkg/files/write_ops.go	30	域层写面（mkdir/rmdir/upload/delete/rename…，覆盖全 face）
 pkg/server/ai_insight_handler.go	6	
 pkg/server/ai_privacy.go	1	
 pkg/server/archive.go	1	
@@ -26,6 +26,7 @@ pkg/server/secrets_api.go	1
 pkg/server/share.go	1	
 pkg/server/sync_handler.go	1	
 pkg/server/tier_manager.go	1	
+pkg/server/user_volume_api.go	2	
 pkg/server/verify.go	1	
 pkg/server/version.go	15	
 pkg/server/volume_export.go	2	

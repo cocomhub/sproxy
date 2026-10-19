@@ -141,6 +141,8 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 			return WriteFileResult{}, werr
 		}
 		res.VolumeName = route.VolumeName
+		// 审计：外部/远端 sink 直写路径上传成功。
+		s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultSuccess, "volume="+route.VolumeName+" sink=true")
 		return res, nil
 	}
 	root := route.Tenant.Root()
@@ -169,6 +171,8 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	// 安全边界：台账 per-tenant（owner 隔离）；只同卷硬链（跨卷不合并）。
 	f := &fileOp{ctx: ctx, root: root, owner: owner, remotePath: remotePath, logger: logger}
 	if res, handled, dedupErr := s.tryDedupUploadHandled(f, rel, prev, input, route); handled {
+		// 审计：去重命中（零拷贝硬链）也属成功上传，必须可追溯（与主路径同 action）。
+		s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultSuccess, "volume="+route.VolumeName+" dedup=true")
 		return res, dedupErr
 	}
 
@@ -178,6 +182,8 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 		return WriteFileResult{}, err
 	}
 	res.VolumeName = route.VolumeName
+	// 审计（域层 ⇒ 覆盖 HTTP/DAV/S3/CLI）：新文件上传成功（含物理占用与卷归属）。
+	s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultSuccess, "volume="+route.VolumeName)
 	return res, nil
 }
 

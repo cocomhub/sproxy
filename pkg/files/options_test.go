@@ -153,8 +153,9 @@ func TestNew_Options_QuotaLedgerMetricsAudit(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("删除应 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(audits) != 1 || audits[0] != "delete|f.txt|success" {
-		t.Fatalf("审计应为 delete|f.txt|success, got %v", audits)
+	// 本轮补齐「upload 成功」审计（此前只记 overwrite/error）⇒ 期望 = 上传成功 + 删除成功两行。
+	if len(audits) != 2 || audits[0] != "upload|f.txt|success" || audits[1] != "delete|f.txt|success" {
+		t.Fatalf("审计应为 upload|f.txt|success + delete|f.txt|success, got %v", audits)
 	}
 	if metrics.deleteCalls != 1 {
 		t.Fatalf("删除计量应 1 次, got %d", metrics.deleteCalls)

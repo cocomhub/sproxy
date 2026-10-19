@@ -241,6 +241,10 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 			sendJSONResponse(w, map[string]string{"error": "装配失败: " + aerr.Error()}, http.StatusBadRequest)
 			return
 		}
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "user_volume_create", ObjectType: "volume", Object: req.Name, Result: AuditResultSuccess,
+			Detail: "type=" + req.Type,
+		})
 		sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 		return
 	}
@@ -485,6 +489,10 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	if tv, nested := TranslateNestedVolume(volumeFromUserVolume(*v)); nested {
 		DetachEnclosureVolume(h.volSet, h.logger, tv)
 	}
+	// 审计：用户卷删除成功（破坏性操作必须可追溯）。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "user_volume_delete", ObjectType: "volume", Object: name, Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, map[string]bool{"success": true}, http.StatusOK)
 }
 
