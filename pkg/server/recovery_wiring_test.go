@@ -59,7 +59,7 @@ func (a *wiringApplier) Apply(_ context.Context, _ audit.ScopeID, seq uint64, st
 func TestSetupRecovery_SkipsWithoutRegistrations(t *testing.T) {
 	t.Parallel()
 	svc := wiringAudit(t)
-	if c := setupRecovery(svc, wiringLogger()); c != nil {
+	if c := setupRecovery(svc, wiringLogger(), nil, nil); c != nil {
 		t.Fatal("未注册任务族时应返回 nil（跳过，避免空转全量扫段）")
 	}
 	// runStartupRecovery 对 nil 协调器必须是安全 no-op。
@@ -71,7 +71,7 @@ func TestSetupRecovery_NilAuditService(t *testing.T) {
 	t.Parallel()
 	reg := recovery.Registration{Kind: "cloud", Prefix: "task.cloud",
 		Factory: func(audit.ScopeID) (audit.ReplayApplier, bool) { return &wiringApplier{}, true }}
-	if c := setupRecovery(nil, wiringLogger(), reg); c != nil {
+	if c := setupRecovery(nil, wiringLogger(), []recovery.Registration{reg}, nil); c != nil {
 		t.Fatal("审计服务为 nil 时应跳过（不静默假装已恢复）")
 	}
 }
@@ -89,10 +89,10 @@ func TestSetupRecovery_ResumesScopeEndToEnd(t *testing.T) {
 		t.Fatalf("Save: %v", serr)
 	}
 	ap := &wiringApplier{}
-	coord := setupRecovery(svc, wiringLogger(), recovery.Registration{
+	coord := setupRecovery(svc, wiringLogger(), []recovery.Registration{{
 		Kind: "cloud", Prefix: "task.cloud",
 		Factory: func(audit.ScopeID) (audit.ReplayApplier, bool) { return ap, true },
-	})
+	}}, nil)
 	if coord == nil {
 		t.Fatal("有注册任务族时应构造协调器")
 	}
@@ -108,10 +108,10 @@ func TestSetupRecovery_ResumesScopeEndToEnd(t *testing.T) {
 		t.Fatalf("恢复后应无未完成作用域（提交记录已写）, got %+v", left)
 	}
 	// 再次启动恢复：幂等（零动作、副作用不重放）。
-	runStartupRecovery(ctx, setupRecovery(svc, wiringLogger(), recovery.Registration{
+	runStartupRecovery(ctx, setupRecovery(svc, wiringLogger(), []recovery.Registration{{
 		Kind: "cloud", Prefix: "task.cloud",
 		Factory: func(audit.ScopeID) (audit.ReplayApplier, bool) { return ap, true },
-	}), wiringLogger())
+	}}, nil), wiringLogger())
 	if len(ap.seqs) != 1 {
 		t.Fatalf("第二次启动不得重放副作用, got %v", ap.seqs)
 	}
@@ -122,10 +122,10 @@ func TestSetupRecovery_BadRegistrationSkipped(t *testing.T) {
 	t.Parallel()
 	svc := wiringAudit(t)
 	fac := func(audit.ScopeID) (audit.ReplayApplier, bool) { return &wiringApplier{}, true }
-	coord := setupRecovery(svc, wiringLogger(),
-		recovery.Registration{Kind: "cloud", Prefix: "task.cloud", Factory: fac},
-		recovery.Registration{Kind: "dup", Prefix: "task.cloud", Factory: fac},
-	)
+	coord := setupRecovery(svc, wiringLogger(), []recovery.Registration{
+		{Kind: "cloud", Prefix: "task.cloud", Factory: fac},
+		{Kind: "dup", Prefix: "task.cloud", Factory: fac},
+	}, nil)
 	if coord == nil {
 		t.Fatal("存在有效注册时应构造协调器（冲突项只跳过）")
 	}

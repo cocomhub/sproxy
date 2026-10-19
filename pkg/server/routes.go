@@ -140,13 +140,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 审计服务装配：有界内存环形缓冲 + 落盘存储（BufferSize>0 时启用；打开失败
 	// 降级 ring-only，审计绝不阻断启动）。详细语义见 setupAuditServices。
 	auditSvc, auditJournal := setupAuditServices(cfg, log)
-	// M3：统一恢复协调器 = 启动恢复的**单一起点**。首版未注册任务族 ⇒ 跳过（零行为变更）；
-	// 各任务族（cloud/sync/chunked 的 legacy 兜底 或 WAL 作用域恢复）后续在此注册。
-	if coord := setupRecovery(auditSvc, log); coord != nil {
-		//nolint:gosec // G118: 启动期后台恢复无请求作用域上下文；runStartupRecovery 内以
-		// startupRecoveryTimeout 约束（超时即放弃本轮 ⇒ 作用域保持未完成、下次启动重试，恢复幂等）。
-		go runStartupRecovery(context.Background(), coord, log)
-	}
 
 	// 卷集合装配（多卷，任务 3）：按 cfg.Volumes 逐卷 MkdirAll + storage.OpenRoot
 	// （LAYOUT_VERSION 写入/校验）+ 卷容量 Pool + ACL 解析。缺省形态（YAML 只配
@@ -227,6 +220,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.initSchedulerTasks(cfg, log)
 	// 初始化 StorageManager 和 CloudDownloadManager。详细语义见 initStorageManagers。
 	h.initStorageManagers(vs, cfg, log, opts)
+
+	// M3：统一恢复协调器 = **启动恢复的唯一编排点**。放在存储/云下载等子系统装配**之后**
+	// （legacy 恢复需要看到已就绪的 manager；此处仍属单线程装配期 ⇒ 无数据竞争）。
+	// 顺序：legacy 先（子系统资源就绪）→ 再 WAL 作用域重放。
+	if coord := setupRecovery(auditSvc, log, nil, cloudLegacies(h)); coord != nil {
+		//nolint:gosec // G118: 启动期后台恢复无请求作用域上下文；runStartupRecovery 内以
+		// startupRecoveryTimeout 约束（超时即放弃本轮 ⇒ 作用域保持未完成、下次启动重试，恢复幂等）。
+		go runStartupRecovery(context.Background(), coord, log)
+	}
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
 	localMux := http.NewServeMux()

@@ -27,14 +27,22 @@ const startupRecoveryTimeout = 5 * time.Minute
 //
 // 无注册任务族 ⇒ 返回 nil（**跳过**）：否则每次启动都会全量扫一遍审计段（合规段可达 GiB 级），
 // 却无任何任务可恢复 —— 明确跳过并留日志，而不是空转。
-func setupRecovery(auditSvc *audit.Service, log *slog.Logger, regs ...recovery.Registration) *recovery.Coordinator {
-	if len(regs) == 0 {
+func setupRecovery(auditSvc *audit.Service, log *slog.Logger, regs []recovery.Registration, legacies []recovery.Legacy) *recovery.Coordinator {
+	if len(regs) == 0 && len(legacies) == 0 {
 		log.Info("统一恢复：未注册任务族，跳过（M3 单一起点已就绪）")
 		return nil
 	}
-	if auditSvc == nil || auditSvc.Disabled() {
-		// 审计关闭 ⇒ 没有 WAL 作用域可恢复：显式记录，不静默假装已恢复。
-		log.Warn("统一恢复：审计服务不可用（关闭或未装配），作用域恢复跳过")
+	useAudit := auditSvc != nil && !auditSvc.Disabled()
+	if !useAudit {
+		// 审计关闭 ⇒ 没有 WAL 作用域可恢复；但 **legacy 子系统与本能力无关**，仍须触发
+		// （否则关审计就等于关掉云任务恢复 ✗）。
+		log.Warn("统一恢复：审计服务不可用（关闭或未装配），跳过作用域恢复（legacy 兜底照常执行）")
+		auditSvc = nil
+		regs = nil
+	}
+	if len(regs) == 0 && len(legacies) == 0 {
+		// 作用域注册全被跳过、又没有 legacy ⇒ 确实无事可做：显式返回 nil（不假装恢复过）。
+		log.Warn("统一恢复：无可执行的恢复入口（作用域恢复需审计；无 legacy 注册）")
 		return nil
 	}
 	c := recovery.New(auditSvc, log)
@@ -44,7 +52,30 @@ func setupRecovery(auditSvc *audit.Service, log *slog.Logger, regs ...recovery.R
 			log.Error("统一恢复：任务族注册失败", "kind", r.Kind, "prefix", r.Prefix, "error", err)
 		}
 	}
+	for _, lg := range legacies {
+		if err := c.RegisterLegacy(lg); err != nil {
+			log.Error("统一恢复：legacy 注册失败", "kind", lg.Kind, "error", err)
+		}
+	}
 	return c
+}
+
+// cloudLegacies 返回云下载任务的 legacy 恢复入口（M3：其恢复触发点从构造函数收敛到协调器）。
+//
+// 为什么是 legacy 而不是 WAL 作用域：云任务已有自己的持久化台账（meta/cloud/*.json）与
+// 2026-10-18 修过 race 的恢复语义（收集→持锁一次性插入→再激活）；本步只收敛**触发点**，
+// 不重写其恢复逻辑（设计 M3「首版保留 legacy 兜底」）。
+func cloudLegacies(h *Handlers) []recovery.Legacy {
+	if h == nil || h.cloudMgr == nil {
+		return nil
+	}
+	mgr := h.cloudMgr
+	return []recovery.Legacy{{
+		Kind: "cloud",
+		Recover: func(context.Context) (int, error) {
+			return mgr.RecoverAll()
+		},
+	}}
 }
 
 // runStartupRecovery 执行一次启动恢复（**同步**：调用方在后台 goroutine 中调用即可）。

@@ -218,19 +218,15 @@ func (c *Coordinator) Registrations() []Registration {
 
 // Run 扫描未完成作用域并逐个恢复（幂等：重复运行对已提交作用域零动作）。
 func (c *Coordinator) Run(ctx context.Context, opts Options) (*Report, error) {
-	if c == nil || c.svc == nil {
-		return nil, fmt.Errorf("recovery: 协调器未配置 audit.Service")
+	if err := c.precheck(); err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	infos, err := c.svc.ListScopes(ctx, audit.ScopeStateFilter{
-		UnfinishedOnly: true,
-		Since:          opts.Since,
-		Limit:          opts.Limit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("recovery: 扫描未完成作用域失败: %w", err)
+	infos, lerr := c.listUnfinished(ctx, opts)
+	if lerr != nil {
+		return nil, lerr
 	}
 	rep := &Report{Total: len(infos), Results: make([]ScopeResult, 0, len(infos))}
 	// **顺序**：legacy 子系统先恢复（存储/下载器/会话状态就绪），再做作用域重放（业务副作用）。
@@ -297,6 +293,39 @@ func safeRecover(ctx context.Context, l Legacy) (n int, err error) {
 		}
 	}()
 	return l.Recover(ctx)
+}
+
+// precheck 校验协调器可用性：nil、以及「既无 audit.Service 又无 legacy」⇒ fail-closed。
+// 拆成 helper 只为把 Run 的认知复杂度留在门禁阈值内（语义不变）。
+func (c *Coordinator) precheck() error {
+	if c == nil {
+		return fmt.Errorf("recovery: 协调器为 nil")
+	}
+	c.mu.RLock()
+	hasLegacy := len(c.legacy) > 0
+	c.mu.RUnlock()
+	if c.svc == nil && !hasLegacy {
+		// 无审计服务且无 legacy ⇒ 无事可做：fail-closed 报错（恢复不可静默失效）。
+		return fmt.Errorf("recovery: 协调器未配置 audit.Service 且无 legacy 恢复入口")
+	}
+	return nil
+}
+
+// listUnfinished 扫描未完成作用域（svc 为 nil ⇒ 只有 legacy 恢复 ⇒ 返回空）。
+// 拆成 helper 只为把 Run 的认知复杂度留在门禁阈值内（语义不变）。
+func (c *Coordinator) listUnfinished(ctx context.Context, opts Options) ([]audit.ScopeInfo, error) {
+	if c.svc == nil {
+		return nil, nil
+	}
+	infos, err := c.svc.ListScopes(ctx, audit.ScopeStateFilter{
+		UnfinishedOnly: true,
+		Since:          opts.Since,
+		Limit:          opts.Limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("recovery: 扫描未完成作用域失败: %w", err)
+	}
+	return infos, nil
 }
 
 // recoverOne 处理单个作用域：匹配任务族 ⇒ Resume（执行副作用）⇒ **成功后** MarkDone。

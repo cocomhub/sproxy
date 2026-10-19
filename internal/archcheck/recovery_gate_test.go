@@ -25,7 +25,7 @@ import (
 
 // maxLegacyPending 是 R37 的棘轮基线：尚未接入协调器的既有自恢复实现数量**只减不增**。
 // 收紧（接入协调器）后必须**同步下调**本常量（与 TSV 一起改）。
-const maxLegacyPending = 1
+const maxLegacyPending = 0
 
 // orchestratorFile 是**唯一**允许构造恢复协调器的装配文件。
 const orchestratorFile = "pkg/server/recovery_wiring.go"

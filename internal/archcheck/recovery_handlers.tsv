@@ -5,4 +5,4 @@
 #        | legacy-pending  **尚未接入**（棘轮：数量只减不增；接入后改 form 并下调 maxLegacyPending）
 # 列：file|symbol|form|kind|note
 pkg/server/recovery_wiring.go|runStartupRecovery|orchestration|-|统一恢复唯一编排入口（setupRecovery + Coordinator.Run）
-pkg/cloud/manager_persist.go|recoverTasksFromDir|legacy-pending|cloud|云下载任务台账恢复（内嵌于 NewCloudDownloadManager，待拆「构造/恢复」后注册为 legacy）
+pkg/server/recovery_wiring.go|cloudLegacies|legacy|cloud|云下载任务恢复（触发点已从构造函数收敛到统一协调器；RecoverAll 幂等）

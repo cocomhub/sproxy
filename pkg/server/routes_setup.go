@@ -569,8 +569,11 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 	if opts.CloudExitDial != nil {
 		cloudCfg.ExitDial = opts.CloudExitDial
 	}
+	// M3：云任务的启动恢复**唯一触发点** = 统一恢复协调器（见 routes.go 的 setupRecovery）。
+	// 构造期不恢复（DeferRecovery）⇒ 子系统不再各自「扫自己的目录」。
 	h.cloudMgr = cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{
-		UploadsDir: vs.Default().RootDir, Storage: cloudStorageManager{m: sm},
+		DeferRecovery: true,
+		UploadsDir:    vs.Default().RootDir, Storage: cloudStorageManager{m: sm},
 		TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor,
 		ListTenants: h.listTenantIDs, Logger: log.With("component", "cloud"),
 		Config: cloudCfg,
