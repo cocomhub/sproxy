@@ -44,7 +44,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | 回收站 `restore` / `empty`（单卷 + `all=1`） | `pkg/server/trash_test.go`、`trash_multivolume_test.go` | ✅ |
 | `version_restore` / `version_delete` | `pkg/server/audit_test.go` | ✅ |
 | `cloud_archive` / `cloud_cancel` / `cloud_delete` | `pkg/server/cloud_audit_e2e_test.go`、`audit_test.go` | ✅ |
-| `cloud_group_create` / `cloud_group_delete` | — | ⬜ **GAP** |
+| `cloud_group_create` / `cloud_group_delete` | `pkg/server/audit_cloud_group_scenarios_test.go`（**并修掉「删任务误记 cloud_group_delete」+ 真组删除无痕**） | ✅ |
 
 ### 2.3 卷管理（**最大缺口**）
 
@@ -65,7 +65,8 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | `secret_create` / `secret_delete` / `secret_export` | `pkg/server/audit_secret_scenarios_test.go`（含**明文红线**与失败留痕） | ✅ |
 | `backend_presign` / `backend_presign_complete`（含被拒） | `pkg/server/audit_presign_scenarios_test.go`（成功 + 404 被拒） | ✅ |
 | `share_create` / `share_revoke` | `pkg/server/audit_share_scenarios_test.go`（object=token） | ✅ |
-| `sync_task_create` / `sync_conflict_resolve` | — | ⬜ GAP |
+| `sync_task_create` | `pkg/server/audit_sync_scenarios_test.go` | ✅ |
+| `sync_conflict_resolve` | — | ⬜ GAP（需先由真实同步执行产生冲突） |
 | `mesh_read` / `mesh_write` | `pkg/remote/remote_read_test.go`、`remote_write_test.go` | ✅ |
 | `credential_register` / `_register_denied` / `_ak_delete` / `_sk_delete` / `_persist_error` | `pkg/server/register_handler_test.go`、`credentials_handler_test.go`（**按常量断言**） | ✅ |
 | `credential_login` / `_renew` / `_ak_add` / `_ak_list` / `_sk_list` / `_sk_expire` | — | ⬜ GAP |
@@ -89,11 +90,12 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | ~~P1~~ ✅ | ~~`backend_presign*`（2，含被拒）~~ | 已补：`audit_presign_scenarios_test.go`（状态码观察器覆盖全部失败分支） | — |
 | ~~P2~~ ✅ | ~~卷管理 rebalance/copy/import/export/user_volume~~ | 已补（`audit_volume_admin_scenarios_test.go`、`audit_volume_export_scenarios_test.go`、`audit_user_volume_scenarios_test.go`） | — |
 | ~~P2~~ ✅ | ~~`share_*`（2）~~ | 已补（`audit_share_scenarios_test.go`） | — |
-| P2 | `sync_task_create` / `sync_conflict_resolve`（2） | 同步改数据 | 建任务可直驱 `h.syncCreateTask`；冲突解决需先造冲突（真实 sync 执行） |
-| P2 | `cloud_group_create` / `cloud_group_delete`（2） | 组操作（批量下载=批量落盘） | 复用 `setupCloudTestServer`（需暴露 `*Handlers` 才能读审计） |
+| ~~P2~~ ✅ | ~~`sync_task_create`~~ | 已补（`audit_sync_scenarios_test.go`） | — |
+| P2 | `sync_conflict_resolve`（1） | 同步改数据 | 需先跑真实同步产生冲突，再 resolve |
+| ~~P2~~ ✅ | ~~`cloud_group_create` / `cloud_group_delete`~~ | 已补（`audit_cloud_group_scenarios_test.go`） | — |
 | P3 | `volume_mirror` / `volume_tier_*`（3） | 后台搬迁/分层 | 注入 tier/mirror 状态后驱动 pass |
 | P3 | `credential_login/renew/ak_add/ak_list/sk_list/sk_expire`（6） | 认证面变更 | 复用 `newTestServerCreds` + 签名请求 |
-| P3 | `ai.embed`（1） | 嵌入调用无断言 | 断言 action + 不含文本内容 |
+| P3 | `ai.embed` | **未埋点**（`ActionAIEmbed` 常量存在但全仓无 `Action:` 使用点） | 先决定是否要该事件；要则补埋点 + 断言（**不含文本内容**） |
 
 ## 4. 编写纪律（§9.3）
 

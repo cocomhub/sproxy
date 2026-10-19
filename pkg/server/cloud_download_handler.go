@@ -310,9 +310,8 @@ func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
 		Action: "cloud_delete", ObjectType: "task", Object: id,
 		Result: AuditResultSuccess,
 	})
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "cloud_group_delete", ObjectType: "task", Object: id, Result: AuditResultSuccess,
-	})
+	// （历史坑）此处曾额外记一条 `cloud_group_delete`，object 是**任务 ID** ✗：
+	// 既误导取证（任务删除被当成组删除），又让真正的组删除无痕。已移入 cloudDeleteGroup。
 	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
 
@@ -525,9 +524,16 @@ func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), msgNotFound) {
 			status = http.StatusNotFound
 		}
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "cloud_group_delete", ObjectType: "task", Object: id,
+			Result: AuditResultError, Detail: err.Error(),
+		})
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "cloud_group_delete", ObjectType: "task", Object: id, Result: AuditResultSuccess,
+	})
 	// 组归档文件联动删除（桶归档名或外部卷转存 URL）。失败仅记日志
 	// （组删除已完成，归档残留由周期扫描校准兜底；不把归档清理失败当作组删除失败）。
 	if archiveFile != "" {
