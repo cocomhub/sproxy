@@ -69,7 +69,8 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | `sync_conflict_resolve` | — | ⬜ GAP（需先由真实同步执行产生冲突） |
 | `mesh_read` / `mesh_write` | `pkg/remote/remote_read_test.go`、`remote_write_test.go` | ✅ |
 | `credential_register` / `_register_denied` / `_ak_delete` / `_sk_delete` / `_persist_error` | `pkg/server/register_handler_test.go`、`credentials_handler_test.go`（**按常量断言**） | ✅ |
-| `credential_login` / `_renew` / `_ak_add` / `_ak_list` / `_sk_list` / `_sk_expire` | — | ⬜ GAP |
+| `credential_ak_list` / `_ak_add` / `_sk_list` / `_renew` / `_sk_expire` | `pkg/server/audit_credential_scenarios_test.go`（并断言**不含 SK 明文**） | ✅ |
+| `credential_login` | — | ⬜ GAP（需 TOTP 流程） |
 | `config_update` / `verify` / `backup` | `pkg/server/audit_test.go`、`cmd/sproxy/*_test.go` | ✅ |
 
 ### 2.5 传输层 / 读面
@@ -94,7 +95,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | P2 | `sync_conflict_resolve`（1） | 同步改数据 | 需先跑真实同步产生冲突，再 resolve |
 | ~~P2~~ ✅ | ~~`cloud_group_create` / `cloud_group_delete`~~ | 已补（`audit_cloud_group_scenarios_test.go`） | — |
 | P3 | `volume_mirror` / `volume_tier_*`（3） | 后台搬迁/分层 | 注入 tier/mirror 状态后驱动 pass |
-| P3 | `credential_login/renew/ak_add/ak_list/sk_list/sk_expire`（6） | 认证面变更 | 复用 `newTestServerCreds` + 签名请求 |
+| P2 | `credential_login`（1） | 登录面 | 需 TOTP 生成（`register_handler_test` 已有 TOTP 工具） |
 | P3 | `ai.embed` | **未埋点**（`ActionAIEmbed` 常量存在但全仓无 `Action:` 使用点） | 先决定是否要该事件；要则补埋点 + 断言（**不含文本内容**） |
 
 ## 4. 编写纪律（§9.3）
