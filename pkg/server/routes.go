@@ -136,7 +136,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 审计服务装配：有界内存环形缓冲 + 落盘存储（BufferSize>0 时启用；打开失败
 	// 降级 ring-only，审计绝不阻断启动）。详细语义见 setupAuditServices。
-	auditRing, auditStore := setupAuditServices(cfg, log)
+	auditSvc, auditJournal := setupAuditServices(cfg, log)
 
 	// 卷集合装配（多卷，任务 3）：按 cfg.Volumes 逐卷 MkdirAll + storage.OpenRoot
 	// （LAYOUT_VERSION 写入/校验）+ 卷容量 Pool + ACL 解析。缺省形态（YAML 只配
@@ -169,8 +169,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		noncePool:         sproxysig.NewNoncePool(),
 		totpNoncePool:     newTotpNoncePool(),
 		tracer:            opts.Tracer,
-		auditRing:         auditRing,
-		auditStore:        auditStore,
+		auditSvc:          auditSvc,
+		auditJournal:      auditJournal,
 		notifyCenter:      newNotifyCenterFromConfig(cfg.Notify, log),
 		alertEngine:       newAlertEngineFromConfig(cfg.Alerts, log),
 		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见

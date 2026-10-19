@@ -465,31 +465,56 @@ func (j *FileJournal) readAllLocked() ([]Entry, error) {
 }
 
 // segmentFilesLocked 列出本目录下的段文件（含归档 .N）。
+// 匹配规则（与 Layout 对齐，且必须认**配置的全局段名**）：
+//   - LayoutGlobal：name == GlobalName（或其归档 GlobalName.N）；
+//   - LayoutPerScope：name == <scope>.audit.log（或其归档 .N）；作用域绑定时只列本作用域。
 func (j *FileJournal) segmentFilesLocked() ([]string, error) {
 	des, err := os.ReadDir(j.dir)
 	if err != nil {
 		return nil, err
 	}
 	var out []string
-	prefix := ""
-	if j.layout == LayoutPerScope && j.scope != "" {
-		prefix = string(j.scope) + ".audit.log"
-	}
 	for _, de := range des {
 		if de.IsDir() {
 			continue
 		}
-		name := de.Name()
-		if !strings.HasSuffix(name, ".audit.log") && !strings.Contains(name, ".audit.log.") {
+		if !j.matchSegmentName(de.Name()) {
 			continue
 		}
-		if prefix != "" && !strings.HasPrefix(name, prefix) {
-			continue // 作用域绑定：只读本作用域的段（含其归档 .N）
-		}
-		out = append(out, filepath.Join(j.dir, name))
+		out = append(out, filepath.Join(j.dir, de.Name())) // **真实文件名**（保留归档后缀）
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// matchSegmentName 判定目录项是否属于本 Journal 的段（含归档 .N）。
+func (j *FileJournal) matchSegmentName(name string) bool {
+	base := segmentBase(name)
+	if j.layout == LayoutPerScope {
+		if !strings.HasSuffix(base, ".audit.log") {
+			return false
+		}
+		if j.scope != "" && !strings.HasPrefix(base, string(j.scope)+".audit.log") {
+			return false
+		}
+		return true
+	}
+	return base == j.globalName
+}
+
+// segmentBase 返回段基名（去掉归档 .N 后缀；非归档返回原名）。
+func segmentBase(name string) string {
+	idx := strings.LastIndex(name, ".")
+	if idx <= 0 {
+		return name
+	}
+	if _, err := strconv.Atoi(name[idx+1:]); err != nil {
+		return name
+	}
+	if !strings.Contains(name[:idx], ".log") {
+		return name
+	}
+	return name[:idx]
 }
 
 // readSegmentFile 逐行解析段文件（**丢弃不完整尾行与解析失败行**；设计 E5）。
@@ -546,7 +571,7 @@ func (j *FileJournal) Segments() ([]SegmentInfo, error) {
 			continue
 		}
 		base := filepath.Base(name)
-		sealed := strings.Contains(base, ".audit.log.")
+		sealed := segmentBase(base) != base // 归档 .N ⇒ 已封段
 		scope := ScopeID("")
 		if j.layout == LayoutPerScope && !sealed {
 			scope = ScopeID(strings.TrimSuffix(base, ".audit.log"))

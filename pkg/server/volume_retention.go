@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
+
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -82,7 +84,7 @@ func (h *Handlers) volumeRetentionPassFor(volName string) {
 		h.retentionCleanShares(v.Retention.ShareTTL, now, log)
 	}
 	// 审计：仅默认卷（单点权威）；按龄截断内存事件 + 落盘 audit.log 同步重写。
-	if v.Retention.AuditTTL > 0 && h.auditStore != nil {
+	if v.Retention.AuditTTL > 0 && h.auditJournal != nil {
 		h.retentionCleanAudit(v.Retention.AuditTTL, now, log)
 	}
 }
@@ -191,28 +193,16 @@ func (h *Handlers) retentionCleanShares(ttl time.Duration, now time.Time, log *s
 // 落盘同步重写：保留窗口内行（TS >= cutoff），写入临时文件后原子重命名
 // （audit.log 为 append-only JSON lines；重写不破坏审计连续性）。
 func (h *Handlers) retentionCleanAudit(ttl time.Duration, now time.Time, log *slog.Logger) {
+	if h.auditJournal == nil {
+		return
+	}
 	cutoff := now.Add(-ttl)
-	st := h.auditStore
-	// 内存：仅保留 TS >= cutoff 的事件。
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	kept := st.events[:0]
-	for _, ev := range st.events {
-		if !ev.TS.Before(cutoff) {
-			kept = append(kept, ev)
-		}
-	}
-	st.events = kept
-	// 落盘同步重写（audit.log → tmp → rename）：先关闭当前 append 句柄——
-	// Windows 下对仍被打开的文件 Rename 覆盖会失败；重写后句柄置 nil，下次 Append 懒重开。
-	if st.file != nil {
-		_ = st.file.Close()
-		st.file = nil
-	}
-	if st.logPath != "" {
-		if err := rewriteAuditLog(st.logPath, cutoff, log); err != nil {
-			log.Warn("卷级 retention：审计日志重写失败（内存已截断，落盘待下次）", "error", err)
-		}
+	// TTL 只作用于**合规段族**（本 journal 即合规族；任务/WAL 族不受 TTL 约束 —— 设计 E25/M1-13）。
+	// 内存与磁盘在同一 Journal 事务内完成（Rewrite 内部实现：读入 → 过滤 → tmp → rename）。
+	if err := h.auditJournal.Rewrite(func(e audit.Entry) bool {
+		return !e.TS.Before(cutoff)
+	}); err != nil {
+		log.Warn("卷级 retention：审计日志重写失败（下次重试）", "error", err.Error())
 	}
 }
 

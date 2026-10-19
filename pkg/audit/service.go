@@ -598,6 +598,29 @@ func (s *Service) Query(ctx context.Context, f EntryFilter) ([]Entry, error) {
 	return s.eff.journal.Read(f)
 }
 
+// Recent 返回**最新在前**的审计条目（HTTP 读面用）。
+// 与 Query 的区别：Recent **不做**「读取触发轮转」（避免读请求反复触发轮转），
+// 只读内存活跃索引；无索引时读 Journal 并反转为最新在前。
+func (s *Service) Recent(f EntryFilter) []Entry {
+	if s == nil {
+		return nil
+	}
+	if s.eff.caps.Index && s.eff.index.Len() > 0 {
+		return s.eff.index.Query(f)
+	}
+	es, err := s.eff.journal.Read(f)
+	if err != nil {
+		return nil
+	}
+	for i, j := 0, len(es)-1; i < j; i, j = i+1, j-1 {
+		es[i], es[j] = es[j], es[i]
+	}
+	if f.Limit > 0 && len(es) > f.Limit {
+		es = es[:f.Limit]
+	}
+	return es
+}
+
 // Rotate 显式轮转（T4；reason 记入轮转标记与指标）。
 func (s *Service) Rotate(ctx context.Context, reason string) error {
 	if s == nil {

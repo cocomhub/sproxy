@@ -13,8 +13,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/audit"
 
 	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -39,26 +43,86 @@ import (
 // （合适位置自动选择，无需配置目录）。打开失败记错误并降级为 ring-only
 // （审计绝不阻断启动）；装载失败同样降级。
 // 轮转（roadmap 11.5-⑥）：audit.max_size > 0 时按大小轮转 + 保留 max_archives 份归档。
-func setupAuditServices(cfg *Config, log *slog.Logger) (*AuditRing, *AuditStore) {
-	var auditRing *AuditRing
-	if cfg.Audit.BufferSize > 0 {
-		auditRing = NewAuditRing(cfg.Audit.BufferSize)
+func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.FileJournal) {
+	if cfg.Audit.BufferSize <= 0 {
+		return nil, nil // 显式 0 = 关闭（读面返回空表）
+	}
+	root := resolveDefaultVolumeRoot(cfg)
+	// 热段目录 = <卷根>/__audit__/hot/：`__` 前缀被 ListOwners 跳过 ⇒ 不污染租户命名空间
+	// （旧位置 <卷根>/audit/ 会被当租户枚举且可被注册占用 —— 见设计 §5.6 点 5）。
+	dir := filepath.Join(root, "__audit__", "hot")
+	migrateLegacyAuditDir(filepath.Join(root, "audit"), dir, log)
+
+	var journal *audit.FileJournal
+	j, err := audit.NewFileJournal(audit.FileJournalConfig{
+		Dir:         dir,
+		Layout:      audit.LayoutGlobal, // 合规段族：全局时间线（便于合规导出/检索）
+		GlobalName:  "audit.log",        // 沿用既有段文件名（与历史迁移同源，便于运维识别）
+		SyncMode:    audit.SyncBatch,    // 策略族默认：批量 + 阈值 flush（设计 §5.2）
+		MaxSize:     int64(cfg.Audit.MaxSize),
+		MaxArchives: cfg.Audit.MaxArchives,
+		Logger:      log,
+	})
+	if err != nil {
+		log.Error("审计落盘装配失败（降级为仅内存）", "error", err.Error())
+	} else {
+		journal = j
 	}
 
-	var auditStore *AuditStore
-	if cfg.Audit.BufferSize > 0 {
-		root := resolveDefaultVolumeRoot(cfg)
-		store, err := NewAuditStore(filepath.Join(root, "audit", "audit.log"), log, AuditRotationConfig{
-			MaxSize:     int64(cfg.Audit.MaxSize),
-			MaxArchives: cfg.Audit.MaxArchives,
-		})
-		if err != nil {
-			log.Error("审计落盘装配失败（降级为仅内存）", "error", err.Error())
-		} else {
-			auditStore = store
-		}
+	caps := audit.FullCapabilities()
+	var jr audit.Journal = audit.NullJournal{}
+	if journal != nil {
+		jr = journal
 	}
-	return auditRing, auditStore
+	svc, serr := audit.New(audit.Options{
+		Journal: jr,
+		Index:   audit.NewRingIndex(cfg.Audit.BufferSize),
+		Logger:  log,
+		Policy:  audit.Policy{MaxMemoryEntries: cfg.Audit.BufferSize},
+		Caps:    &caps,
+		CtxFields: audit.ContextFields{
+			Actor: ActorFrom,
+			Owner: ActorFrom, // 租户键 = AK（设计 §5.7 规则 1；严禁 Principal.Owner）
+			Mesh:  MeshFrom,
+		},
+	})
+	if serr != nil {
+		log.Error("审计服务装配失败（审计关闭）", "error", serr.Error())
+		return nil, journal
+	}
+	return svc, journal
+}
+
+// migrateLegacyAuditDir 把旧位置 <卷根>/audit/ 的审计段一次性迁入新位置（best-effort）。
+// 不做静默丢弃：迁移失败只记日志（旧文件保留在原处，不影响启动）。
+func migrateLegacyAuditDir(legacyDir, newDir string, log *slog.Logger) {
+	des, err := os.ReadDir(legacyDir)
+	if err != nil {
+		return // 不存在或不可读：无历史可迁
+	}
+	if merr := os.MkdirAll(newDir, 0o700); merr != nil {
+		log.Warn("审计热段目录创建失败", "dir", newDir, "error", merr.Error())
+		return
+	}
+	for _, de := range des {
+		if de.IsDir() {
+			continue
+		}
+		name := de.Name()
+		if !strings.HasSuffix(name, "audit.log") && !strings.Contains(name, "audit.log.") {
+			continue
+		}
+		from := filepath.Join(legacyDir, name)
+		to := filepath.Join(newDir, name)
+		if _, serr := os.Stat(to); serr == nil {
+			continue // 目标已存在：不覆盖
+		}
+		if rerr := os.Rename(from, to); rerr != nil {
+			log.Warn("审计历史迁移失败（保留原处）", "from", from, "error", rerr.Error())
+			continue
+		}
+		log.Info("审计历史已迁移到新热段目录", "from", from, "to", to)
+	}
 }
 
 // initStorageLayout 装配多租户存储布局：默认卷租户缓存 + 全局配额池 + 预创建

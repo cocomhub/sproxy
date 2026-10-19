@@ -150,6 +150,7 @@ type EntryFilter struct {
 	Action string
 	Actor  string
 	Owner  string
+	Mesh   string
 	Object string
 	Result Result
 	Since  time.Time // 保留 TS.After(Since) 的条目（零值不过滤）
@@ -184,13 +185,16 @@ func (f EntryFilter) matchIdentity(e Entry) bool {
 
 // matchSubject 判定主体类字段（动作/主体/归属/对象/结果）。
 func (f EntryFilter) matchSubject(e Entry) bool {
-	if f.Action != "" && e.Action != f.Action {
+	if f.Action != "" && !actionMatches(e.Action, f.Action) {
 		return false
 	}
 	if f.Actor != "" && e.Actor != f.Actor {
 		return false
 	}
 	if f.Owner != "" && e.Owner != f.Owner {
+		return false
+	}
+	if f.Mesh != "" && e.Mesh != f.Mesh {
 		return false
 	}
 	if f.Object != "" && e.Object != f.Object {
@@ -434,4 +438,14 @@ func asInt64(v any) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// actionMatches 保留既有 action 过滤语义：过滤器**以 "." 结尾** ⇒ 前缀族匹配
+// （如 "ai." 命中 "ai.summarize"/"ai.tag"）；否则精确相等。
+// 契约来源：pkg/server 原 AuditFilter.actionMatches（前缀族用例见 TestActionMatches_PrefixFamily）。
+func actionMatches(action, filter string) bool {
+	if strings.HasSuffix(filter, ".") {
+		return strings.HasPrefix(action, filter)
+	}
+	return action == filter
 }

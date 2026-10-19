@@ -493,7 +493,7 @@ func TestAuditHandler_PersistDir_RestartRetainsHistory(t *testing.T) {
 }
 
 // TestAuditHandler_AuditDefaultPersist 验证审计**默认落盘**（用户决策：落盘到合适位置，
-// 无需配置目录）：缺省配置下 delete 事件落盘到 <存储根>/audit/audit.log。
+// 无需配置目录）：缺省配置下 delete 事件落盘到 <存储根>/__audit__/hot/audit.log。
 func TestAuditHandler_AuditDefaultPersist(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr, _ := newAuditTestServer(t, nil)
@@ -508,10 +508,11 @@ func TestAuditHandler_AuditDefaultPersist(t *testing.T) {
 	}
 	resp.Body.Close()
 	// 默认落盘：存储根下 audit 目录与 audit.log 存在，且含 delete 事件。
-	logPath := filepath.Join(cfgPtr.Load().StorageRoot, "audit", "audit.log")
+	// 热段目录 = <卷根>/__audit__/hot/（`__` 前缀被 ListOwners 跳过，不污染租户命名空间）。
+	logPath := filepath.Join(cfgPtr.Load().StorageRoot, "__audit__", "hot", "audit.log")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
-		t.Fatalf("默认落盘应创建 audit/audit.log: %v", err)
+		t.Fatalf("默认落盘应创建 __audit__/hot/audit.log: %v", err)
 	}
 	if !bytes.Contains(data, []byte("delete")) {
 		t.Fatalf("audit.log 应含 delete 事件, got: %s", data)

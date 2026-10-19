@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
+
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -103,14 +105,12 @@ type Handlers struct {
 	// nil = 未注入（视图只反映配置态）。
 	meshRuntimeInfo func() MeshRuntimeInfo
 
-	// auditRing 是有界内存环形审计缓冲（cfg.Audit.BufferSize，默认 2048；0=关闭）。
-	// RegisterRoutes 按 cfg 装配（BufferSize>0 时创建）；RecordAudit 在 TS 填充后
-	// 挂钩 Add，所有审计录入点自动进 ring。nil = 关闭（GET /api/audit 返回空表）。
-	auditRing *AuditRing
-	// auditStore 是审计落盘存储（默认启用，<默认卷根>/audit/audit.log；打开失败降级 nil = 仅内存）。
-	// 启用时 RecordAudit 同时 append 落盘（JSON lines），重启载入历史；/api/audit
-	// 查询优先走 auditStore（全量），未装配时回落 ring。
-	auditStore *AuditStore
+	// auditSvc 是**唯一审计服务**（pkg/audit）：条目写入、内存活跃索引、轮转与策略。
+	// 由 setupAuditServices 装配；cfg.Audit.BufferSize=0 ⇒ nil（审计关闭，读面返回空表）。
+	auditSvc *audit.Service
+	// auditJournal 是**合规段族**落盘后端（全量历史，供 /api/audit 与导出读取）。
+	// 打开失败 ⇒ nil（降级为仅内存索引），审计绝不阻断启动。
+	auditJournal *audit.FileJournal
 	// notifyCenter 是通知中心（roadmap P0；cfg.Notify.Enabled 时由 RegisterRoutes
 	// 装配）。RecordAudit 末尾 dispatch（异步 goroutine，绝不阻塞审计/业务）。
 	// nil = 未启用（零回归）。
