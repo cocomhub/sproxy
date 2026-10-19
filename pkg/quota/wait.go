@@ -121,6 +121,15 @@ func (s *Scope) ProbeReserve(n int64) error {
 	return nil
 }
 
+// ProbeReserve 是 Pool 侧的校验型探测（与 Scope.ProbeReserve 对称）：预留后立即释放，
+// 只用于校验「是否放得下」（不排队）。
+func (p *Pool) ProbeReserve(n int64) error {
+	if p == nil {
+		return errors.New("quota: nil pool")
+	}
+	return (&Scope{pool: p}).ProbeReserve(n)
+}
+
 // WaitReserve 是 Pool 侧的同一入口（在本节点上预留并排队等待）。
 func (p *Pool) WaitReserve(ctx context.Context, n int64, timeout time.Duration) (*Reservation, error) {
 	if p == nil {

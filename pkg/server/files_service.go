@@ -44,11 +44,11 @@ import (
 // 子包不得见 capacity.StorageCategory，故类别由本适配器固定为 CategoryChunked。
 type filesStorageManager struct{ m *capacity.StorageManager }
 
-// TryReserveChunked 预留分块上传的全局容量：**收敛到容量层等待入口**
+// WaitReserveChunked 预留分块上传的全局容量：**收敛到容量层等待入口**
 // （capacity.StorageManager.WaitReserve）⇒ 容量不足时**排队重试**（释放唤醒 / ctx 取消 /
 // 超时），而不是立即 507 —— 与配额层同款语义（用户裁定「严格上界预占 + 不够时继续队列重试等待」）。
 // 保留本方法（P5 回退路径：quota 未装配时的全局容量回退）——**能力不丢失**。
-func (a filesStorageManager) TryReserveChunked(ctx context.Context, n int64) error {
+func (a filesStorageManager) WaitReserveChunked(ctx context.Context, n int64) error {
 	return a.m.WaitReserve(ctx, n, capacity.CategoryChunked, capacity.DefaultWaitTimeout)
 }
 func (a filesStorageManager) ReleaseChunked(n int64) { a.m.Release(n, capacity.CategoryChunked) }

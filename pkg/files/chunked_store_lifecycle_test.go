@@ -26,7 +26,7 @@ type fakeCapacity struct {
 	tryHook func()
 }
 
-func (f *fakeCapacity) TryReserveChunked(context.Context, int64) error {
+func (f *fakeCapacity) WaitReserveChunked(context.Context, int64) error {
 	if f.tryHook != nil {
 		f.tryHook()
 	}

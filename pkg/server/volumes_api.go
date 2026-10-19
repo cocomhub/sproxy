@@ -513,18 +513,15 @@ func (h *Handlers) moveProbeMetaQuota(owner, rel, toVol string, size int64) (int
 		return 0, UploadResponse{}, true
 	}
 	if scope := h.quotaScopeFor(owner, meta.MetaPath(rel)); scope != nil {
-		r, rerr := scope.TryReserve(est)
-		if rerr != nil {
+		// 校验型探测（收敛为具名 API：预留即释放，不排队）。
+		if rerr := scope.ProbeReserve(est); rerr != nil {
 			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
 		}
-		r.Release()
 	}
 	if pool := h.volSet.Pool(toVol); pool != nil {
-		r, rerr := pool.TryReserve(est)
-		if rerr != nil {
+		if rerr := pool.ProbeReserve(est); rerr != nil {
 			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
 		}
-		r.Release()
 	}
 	return 0, UploadResponse{}, true
 }
