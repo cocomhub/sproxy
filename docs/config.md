@@ -98,6 +98,8 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `audit.buffer_size` | int | `2048` | 有界内存环形审计缓冲条数（`GET /api/audit` 回看最近操作）；`0` = 关闭（返回空表）；负值非法 |
 | `audit.max_size` | ByteSize | `0`（关闭） | 审计日志轮转阈值（roadmap 11.5-⑥，如 `"10MiB"`）：>0 时按文件大小轮转（`audit.log` → `audit.log.1` … `audit.log.N`，保留 `max_archives` 份归档）；`0`/缺省 = 关闭轮转（零回归） |
 | `audit.max_archives` | int | `3` | 轮转保留归档份数（`audit.log.1` … `audit.log.N`）；`0` = 轮转即删不留档 |
+| `audit.disabled` | bool | `false` | 显式关闭审计：读面返回空表、写入 no-op，且**不创建**任何审计目录/文件（与 `buffer_size=0` 的区别：后者只关内存环形缓冲，落盘仍在） |
+| `audit.startup.fail_fast` | bool | `false` | 审计落盘/服务装配失败时是否**中止启动**（`true` ⇒ panic ⇒ 进程退出，用于「合规要求审计必须可用」的部署）；**默认 `false` = 降级为仅内存 + Error 告警**（审计绝不阻断启动）。开启可避免「以为有审计、实际没落盘」的静默失效 |
 | `audit.enabled` | bool | `false` | **预留（未接线）**：通用 span 审计开关（`pkg/audit`，云下载/转存/加密阶段）；默认关。span sink 目录当前不可配（见下行；默认**用户私有缓存目录**） |
 | `audit.dir` | string | (空) | **预留（未接线）**：通用 span 审计 sink 根目录 |
 | `audit.archive.enabled` | bool | `false` | **预留**：span 审计**归档默认关**（规格 §4.5 未来扩展——`Archiver` 接口已预留、配置暂未接线）；开启需同时配置 `volume` + `path` |

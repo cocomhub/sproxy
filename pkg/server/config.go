@@ -182,6 +182,20 @@ type AuditConfig struct {
 	MaxSize ByteSize `yaml:"max_size" mapstructure:"max_size"`
 	// MaxArchives 是保留归档份数（audit.log.1 … audit.log.N）；默认 3；0 = 轮转即删不留档。
 	MaxArchives int `yaml:"max_archives" mapstructure:"max_archives"`
+	// Disabled 显式关闭审计（默认 false = 启用）：读面返回空表、写入 no-op，且**不创建**
+	// 任何审计目录/文件（与 buffer_size=0 的区别：后者只关内存环形缓冲，落盘仍在）。
+	Disabled bool `yaml:"disabled" mapstructure:"disabled"`
+	// Startup 是审计的**启动期行为**（设计 docs/designs/2026-10-19-audit-service.md
+	// §5.6 点 6 / M1-14）。
+	Startup AuditStartupConfig `yaml:"startup" mapstructure:"startup"`
+}
+
+// AuditStartupConfig 是审计启动期行为配置（audit.startup.*）。
+type AuditStartupConfig struct {
+	// FailFast = true 时，审计落盘/服务装配失败即**中止启动**（panic ⇒ 进程退出），
+	// 用于「合规要求审计必须可用」的部署；**默认 false** ⇒ 降级为仅内存 + Error 告警
+	// （与既有行为逐字节一致：审计绝不阻断启动）。
+	FailFast bool `yaml:"fail_fast" mapstructure:"fail_fast"`
 }
 
 // ArchiveConfig 是归档配置。

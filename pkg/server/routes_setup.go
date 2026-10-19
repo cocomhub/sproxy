@@ -44,8 +44,13 @@ import (
 // （审计绝不阻断启动）；装载失败同样降级。
 // 轮转（roadmap 11.5-⑥）：audit.max_size > 0 时按大小轮转 + 保留 max_archives 份归档。
 func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.FileJournal) {
+	if cfg.Audit.Disabled {
+		// 显式关闭（audit.disabled=true）：不建目录、不落盘、读面空表（审计完全 off）。
+		log.Warn("审计已显式关闭（audit.disabled=true）")
+		return nil, nil
+	}
 	if cfg.Audit.BufferSize <= 0 {
-		return nil, nil // 显式 0 = 关闭（读面返回空表）
+		return nil, nil // 显式 0 = 关闭内存环形缓冲（读面返回空表；落盘仍按下方装配）
 	}
 	root := resolveDefaultVolumeRoot(cfg)
 	// 热段目录 = <卷根>/__audit__/hot/：`__` 前缀被 ListOwners 跳过 ⇒ 不污染租户命名空间
@@ -64,7 +69,14 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 		Logger:      log,
 	})
 	if err != nil {
-		log.Error("审计落盘装配失败（降级为仅内存）", "error", err.Error())
+		// 启动期行为可配（设计 §5.6 点 6 / M1-14）：默认**降级**（审计绝不阻断启动）；
+		// 显式 fail_fast=true（合规部署要求审计必须可用）⇒ 中止启动，避免「以为有审计、
+		// 实际没落盘」的静默失效 —— 这是审计最危险的失败形态（设计 §5.4.2 同旨）。
+		if cfg.Audit.Startup.FailFast {
+			panic("audit: 落盘装配失败且 audit.startup.fail_fast=true（配置要求审计必须可用）: " + err.Error())
+		}
+		log.Error("审计落盘装配失败（降级为仅内存；如需中止启动请设 audit.startup.fail_fast=true）",
+			"error", err.Error())
 	} else {
 		journal = j
 	}
@@ -87,6 +99,9 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 		},
 	})
 	if serr != nil {
+		if cfg.Audit.Startup.FailFast {
+			panic("audit: 服务装配失败且 audit.startup.fail_fast=true: " + serr.Error())
+		}
 		log.Error("审计服务装配失败（审计关闭）", "error", serr.Error())
 		return nil, journal
 	}
