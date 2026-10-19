@@ -208,6 +208,7 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 
 	// ACL 视图（AD-6/§8）：from/to 都必须在 owner 视图内，否则 403（不泄卷存在性）。
 	if !h.volumeAllowedFor(owner, fromVol) || !h.volumeAllowedFor(owner, toVol) {
+		h.auditVolumeMoveIfFailed(r, remotePath, fromVol, toVol, http.StatusForbidden)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
@@ -230,6 +231,7 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	// delete 路径（本地卷）。
 	if h.moveNeedsDomainPath(fromVol, toVol) {
 		status, resp := h.moveFileViaService(r, owner, remotePath, fromVol, toVol)
+		h.auditVolumeMoveIfFailed(r, remotePath, fromVol, toVol, status)
 		sendJSONResponse(w, resp, status)
 		return
 	}
@@ -238,7 +240,23 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	// 锁 + 源校验 + 唯一性查重 + 双预留 + 复制 + 删源 + commit/release。
 	// 返回 (状态码, 响应体)。move 与 rebalance 共用同一原子语义（rebalance 逐文件调用）。
 	status, resp := h.moveFileBetweenVolumes(r, owner, remotePath, fromVol, toVol)
+	h.auditVolumeMoveIfFailed(r, remotePath, fromVol, toVol, status)
 	sendJSONResponse(w, resp, status)
+}
+
+// auditVolumeMoveIfFailed 为**失败**的跨卷移动补一条审计（成功路径各分派点已各自埋点）。
+//
+// 设计 §9.1 要求 denied/error 也留痕：此前 ACL 403、源不存在 404、并发 409、容量不足 507
+// 等路径**一条审计都没有** ✗ ⇒ 事后无法回答「谁尝试移动过什么」。收敛为**单一补充点**：
+// 只在顶层分派后按状态码判定，避免在十几处 early return 各写一次。
+func (h *Handlers) auditVolumeMoveIfFailed(r *http.Request, remotePath, fromVol, toVol string, status int) {
+	if status == http.StatusOK {
+		return // 成功路径由各自分派点埋点（含 detail 里的字节数）
+	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "volume_move", ObjectType: "file", Object: remotePath, Result: "failed",
+		Detail: fmt.Sprintf("%s → %s 失败（HTTP %d）", fromVol, toVol, status),
+	})
 }
 
 // moveNeedsDomainPath 报告跨卷移动是否必须走域侧组合路径（涉及**非本地卷**）：
