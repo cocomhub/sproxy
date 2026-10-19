@@ -14,6 +14,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > 历史：早期版本曾包含 `/{host}/{filepath...}` HTTPS 透明转发与 `/bandwidth` 端点，已于重构移除，定位收敛为文件服务 + 隧道。
 
+## 能力矩阵与收敛原则（**写代码前先查表**）
+
+> 目标：**不要重复实现已有能力**。新增需求先查本表；表里没有、但形态相近的，在**既有能力包**
+> 里加一个**可选能力接口**（+ `Assert*` 查询助手）并在相关实现补齐 —— **不要**在消费包里
+> 另造同形接口。判据：若两个包出现语义相同的接口/函数，就是重复实现 ✗。
+
+| 能力 | 提供方（唯一实现） | 关键 API | 约定 / 用法 |
+| --- | --- | --- | --- |
+| 文件系统读写（本地/外部/加密/远端统一） | `pkg/sync` | `FS`：`ListDir`/`Stat`/`OpenRead`/`WriteFile`/`Rename`/`Delete`/`MakeDir` | 卷层的 `volume.Volume.FS()` 就是这个接口；**换目的地只换 FS** |
+| 幂等写（目标存在即不覆盖） | `pkg/sync` | 可选 `WriteIfAbsent`（类型断言查询） | LocalFS / PrefixFS / StagingQuotaGateFS 已实现；归档/转存类写入首选 |
+| 区间随机读 | `pkg/sync` | 可选 `RangeReader.OpenRangeRead` + `AssertRangeReader` + `RangeReadAll` | 远端只传输所需区间；未实现 ⇒ `ErrUnsupported`（**不得**静默整文件下载 ✗） |
+| 递归枚举 | `pkg/sync` | `WalkEntries(ctx, fs, root, recursive, followSymlinks, filters)` | 取代手写 walk |
+| 卷侧容量预检 | `pkg/sync` | 可选 `ReserveSpace` | 转存前预检（fail-closed） |
+| 目录/对象扩展元数据 | `pkg/sync` | 可选 `MetaExtraUpdater` + `AssertMetaExtraUpdater` | 可信卷 sidecar |
+| 直传 URL（presign 类） | `pkg/sync` | 可选 `DirectURLProvider` + `AssertDirectURL` | |
+| 用户可见文件写/读（锁 + 双账本 + sidecar + 台账） | `pkg/files` | `Service.WriteTarget` / `WriteFile` / `OpenPath` / `StatPath` | **用户内容必须走这里**；不要直连 `storage.Root`/裸 FS ✗（R25/R26） |
+| 卷解析与归属 | `pkg/volume` + `registry` | `Volume.FS()`、`ResolveUserLocation`、`QuotaVolume`（`UserUsage`/`WaitStats`） | 外部/加密/封装卷都走同一层 |
+| 配额记账与等待 | `pkg/quota` | `Scope/Pool.WaitReserve`、`ProbeReserve`、`Pool.WaitStats` | 排队能力由 `pkg/waitq` 提供 |
+| 通用等待/排队 | `pkg/waitq` | `Queue.Acquire/AcquireUnder`、`Stats`、`Resource` 适配器 | 新排队场景复用；**禁止**再写 `sync.Cond` ✗（R36-b） |
+| 统一任务恢复（WAL 续跑） | `pkg/recovery` | `Coordinator.Register/RegisterLegacy/Run` | 长任务必须 `Open` 作用域；恢复只走协调器（R37） |
+| 审计（唯一提供方） | `pkg/audit` | `Service`/`Scope`/`Entry`/`Journal`；`ArchiveSealed`+`SegmentArchiver`；`QueryCold`/`OpenRange`；`OnSeal` | 归档与冷读均经 `pkg/sync.FS`；**不要**另造 sink/store 接口 ✗ |
+| 云下载/转存内核 | `pkg/transfer` + `pkg/cloud` | `Execute` / `writeUnique` / 预处理器选型 | 归档=转存+预处理，复用同一内核 |
+| HTTP 传输隔离 | `pkg/netutil` | `IsolatedTransport()` | 禁裸 `&http.Transport{}`（R19） |
+
+### 收敛原则（必须遵守）
+
+1. **先查表**：动手前确认能力矩阵里是否已有同类实现；有则复用（含"少写一个适配层"）。
+2. **缺口的正确姿势 = 扩展能力包**：在 `pkg/sync` / `pkg/volume` / `pkg/files` 等**能力包**新增
+   **可选能力接口** + `Assert*` 查询助手，并在相关实现（LocalFS/PrefixFS/各卷 FS/装饰器）补齐；
+   消费方只做「查能力 → 用能力」。这样所有消费方共享一份实现 ✓。
+3. **消费包禁止定义与既有能力同形的接口**：曾出现 `audit.SegmentSink`（≈ `WriteIfAbsent`）与
+   `audit.SegmentStore`（≈ `FS.ListDir`+`RangeReader`）被新造后又删除 ✗ —— 这是反面教材。
+4. **同一语义只留一份实现**：解码/过滤/拷贝/等待/配额记账等，跨层共用；出现第二份就是缺陷。
+5. **"我加个适配层"的念头要停一下**：先问「这个能力能否上移到既有能力包？」，能则上移；
+   确实只能在装配层做的（需要多子系统装配态）才留在 `pkg/server`，并写明理由。
+6. **构造点收敛**：同一类对象（如冷段目录 FS）只保留**一个构造函数**，便于门禁白名单与替换
+   （例：`newColdArchiveFS`，`sync.NewLocalFS` 全仓仅此一处）。
+7. **门禁兜底**：新增直连点会被 R19（Transport）/R25（用户内容经 Root）/R26（`NewLocalFS` 白名单）
+   /R34/R36（配额/等待）/R37（恢复）/R38（路由）拦住 ⇒ 先想"扩展能力"，而不是加白名单 ✗；
+   确需例外时必须写明「为什么可以不经既有能力」。
+
 ## 协作与流程硬规则
 
 > **以 `AGENTS.md` 的「协作与流程硬规则」（第 1–17 条）为单一事实源**，本文不重复维护副本。

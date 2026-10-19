@@ -37,7 +37,7 @@ func TestReadAuditEvents_MergesHotAndCold(t *testing.T) {
 	t.Cleanup(func() { _ = j.Close() })
 
 	const total = 12
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if aerr := j.Append(audit.Entry{Scope: "system", Kind: audit.KindEvent, Action: "t",
 			TS: time.Unix(int64(1700000000+i), 0).UTC(), Detail: strings.Repeat("m", 80)}); aerr != nil {
 			t.Fatalf("Append #%d: %v", i, aerr)
