@@ -1163,6 +1163,12 @@ type LeaderElector interface {
 → ③ 回收站各卷独立 + 汇总展示 → ④ 容量/配额收敛（生产级可长期维护）→ ⑤ 其余（不影响基础使用，记录待办）。
 
 ### ① secretdata over 外部卷（baidupcs 优先）——**最高优先**
+- [x] **真实网盘 e2e（2026-10-19 补）**：`pkg/volume/ext/baidupcs/secretdata_real_e2e_test.go`
+      （`//go:build e2e`；运行时从 BaiduPCS-Go 配置读 BDUSS ⇒ 无凭据**干净 t.Skip**，CI 恒绿 ✓）覆盖：
+      secretdata over **真实**百度网盘的「写入 → 读回逐字节一致」· **远端每一个 blob 都不含明文标记**
+      （加密卷在外部卷上不泄明文——本特性的核心价值 ✓）· 覆盖写 · 删除 · 分块上传**复用调用方暂存路径**
+      （内层收到 `*os.File` ⇒ 块级交错/零二次拷贝的性能前提在**真实链路**成立，而非仅 fake ✓）。
+      运行：`cd pkg/volume/ext/baidupcs && GOWORK=off go test -tags=e2e -run TestE2E_SecretdataOverBaidupcs -count=1 -v`
 - [ ] **接线核实与收口**：`type: secretdata` + `extra.target: "<外部卷>/<子目录>"`（嵌套形态，装配层经
       `TranslateNestedDecl` 翻译为封装声明）在**外部源**上的端到端可用性——装配层已支持（`pkg/volume/enclosure/attach.go`
       列出 s3/baidupcs/pikpak/cluster 等外部源）；**单测已覆盖**（外部后端替身，`cmd/sproxy/secret_register_test.go`
