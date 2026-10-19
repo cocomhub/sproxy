@@ -225,9 +225,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （legacy 恢复需要看到已就绪的 manager；此处仍属单线程装配期 ⇒ 无数据竞争）。
 	// 顺序：legacy 先（子系统资源就绪）→ 再 WAL 作用域重放。
 	if coord := setupRecovery(auditSvc, log, nil, cloudLegacies(h)); coord != nil {
-		//nolint:gosec // G118: 启动期后台恢复无请求作用域上下文；runStartupRecovery 内以
-		// startupRecoveryTimeout 约束（超时即放弃本轮 ⇒ 作用域保持未完成、下次启动重试，恢复幂等）。
-		go runStartupRecovery(context.Background(), coord, log)
+		// **同步**执行：与「云任务构造期恢复」的既有语义一致（恢复完成再对外服务），
+		// 且不留下跨生命周期的后台 goroutine（否则 Close 后仍可能持有存储文件句柄 ✗——
+		// 实测会让测试/运维的目录清理失败）。runStartupRecovery 内以 startupRecoveryTimeout 兜底。
+		runStartupRecovery(context.Background(), coord, log)
 	}
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
