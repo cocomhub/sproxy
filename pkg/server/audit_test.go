@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/audit"
 
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -58,6 +59,10 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 		AuditLogger: auditLogger,
 	}
 	withTestCreds(&opts)
+	// 审计读面自 M1-11（审核 P0）起 admin-only ⇒ 本文件的审计**语义**用例（过滤/limit/
+	// 导出/隧道可达）以管理员主体运行；**角色矩阵**（reader ⇒ 403、admin ⇒ 200）由
+	// rbac_roles_test.go 覆盖 —— 两组互补，避免语义用例被权限门淹没。
+	setKeyRole(t, opts.CredentialRing, testAccessKey, accesskey.RoleAdmin)
 	h := RegisterRoutes(t.Context(), opts)
 
 	ts := httptest.NewServer(h.Handler())
@@ -788,6 +793,10 @@ func TestRequestLog_RecordsActor(t *testing.T) {
 		AuditLogger: testLogger(),
 	}
 	withTestCreds(&opts)
+	// 审计读面自 M1-11（审核 P0）起 admin-only ⇒ 本文件的审计**语义**用例（过滤/limit/
+	// 导出/隧道可达）以管理员主体运行；**角色矩阵**（reader ⇒ 403、admin ⇒ 200）由
+	// rbac_roles_test.go 覆盖 —— 两组互补，避免语义用例被权限门淹没。
+	setKeyRole(t, opts.CredentialRing, testAccessKey, accesskey.RoleAdmin)
 	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {

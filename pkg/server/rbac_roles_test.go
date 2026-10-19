@@ -452,10 +452,18 @@ func TestRBAC_ReaderForbiddenOnAdminRoutes(t *testing.T) {
 	if st := signedGetStatus(t, url, "/api/credentials", readerTestAK, readerTestSK); st != http.StatusForbidden {
 		t.Fatalf("reader GET /api/credentials status = %d, want 403（管理端点 admin-only）", st)
 	}
-	// /api/audit 主 mux 是 authMiddleware（无 requireRole）——reader 可读属现状
-	// （管理端点 admin 门禁强化不在本片；credential 已 403 证明 reader 非 admin）。
-	if st := signedGetStatus(t, url, "/api/audit", readerTestAK, readerTestSK); st != http.StatusOK {
-		t.Fatalf("reader GET /api/audit status = %d, want 200（authMiddleware 现状）", st)
+	// 审计读面（M1-11 / 审核 P0）：reader **必须 403**（此前 authMiddleware 无 requireRole
+	// ⇒ reader 可读全量审计，跨租户证据链泄露）。
+	if st := signedGetStatus(t, url, "/api/audit", readerTestAK, readerTestSK); st != http.StatusForbidden {
+		t.Fatalf("reader GET /api/audit status = %d, want 403（审计读面 admin-only，M1-11）", st)
+	}
+	// 对照：admin 可读（证明 403 来自角色判定而非路由/鉴权损坏）。
+	if st := signedGetStatus(t, url, "/api/audit", testAdminKey, testAdminSecret); st != http.StatusOK {
+		t.Fatalf("admin GET /api/audit status = %d, want 200", st)
+	}
+	// 导出面同款（同为敏感运维面）。
+	if st := signedGetStatus(t, url, "/api/audit/export", readerTestAK, readerTestSK); st != http.StatusForbidden {
+		t.Fatalf("reader GET /api/audit/export status = %d, want 403", st)
 	}
 }
 

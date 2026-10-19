@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
@@ -115,4 +116,23 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 		"detail", evt.Detail,
 		"ts", evt.TS.Format(time.RFC3339Nano),
 	)
+}
+
+// isAuditAdmin 判定请求主体是否为审计读面管理员（与 /api/credentials、/api/usage/report
+// **同源**：账号级 Key.Role==RoleAdmin；经 ctx 身份解析 ⇒ 主 mux 与隧道内层的裁决一致，
+// 不需要两套路由包装）。
+func (h *Handlers) isAuditAdmin(actor string) bool {
+	return actor != "" && h.getRole(actor) == "admin"
+}
+
+// auditReadAllowed 是审计读面的权限裁决（设计 docs/designs/2026-10-19-audit-service.md
+// §5.7 / M1-11，**审核 P0**）：仅管理员可读全量。非管理员（含未认证主体与隧道内非管理员
+// 主体）**一律拒绝** —— 审计条目含 actor/mesh/object/detail/source_ip/request_id/volume，
+// 是最低权限主体可读的**全局证据链**，泄露面随 secrets/presign/DAV/S3/sync 全量纳入而放大。
+//
+// 安全默认（fail-closed）：将来开放「用户维度视图」时，必须在本函数内改为「返回该 owner
+// 的过滤视图 + 脱敏（actor/source_ip/request_id）」；**绝不**在视图未就绪时放宽为全量回退，
+// 且 `Owner == ""` 的条目对非管理员恒不可见。
+func (h *Handlers) auditReadAllowed(r *http.Request) bool {
+	return h.isAuditAdmin(ActorFrom(r.Context()))
 }

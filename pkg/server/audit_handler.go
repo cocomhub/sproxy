@@ -101,6 +101,10 @@ func (h *Handlers) readAuditFromJournal(f audit.EntryFilter, limit int, newestFi
 //
 // query 参数：limit（默认 100，>500 clamp）、action/actor/mesh、since（RFC3339，非法 ⇒ 400）。
 func (h *Handlers) auditHandler(w http.ResponseWriter, r *http.Request) {
+	if !h.auditReadAllowed(r) {
+		sendJSONResponse(w, map[string]string{"error": "审计读面仅限管理员"}, http.StatusForbidden)
+		return
+	}
 	q := r.URL.Query()
 
 	limit := defaultAuditListLimit
@@ -128,6 +132,10 @@ func (h *Handlers) auditHandler(w http.ResponseWriter, r *http.Request) {
 // 与 /api/audit 同一读面实现（readAuditEvents），导出为全量正序（运维面：CLI/脚本/collector）。
 // query 参数：action/actor/mesh（同 /api/audit）、after_ts（RFC3339，非法 ⇒ 400）。
 func (h *Handlers) auditExportHandler(w http.ResponseWriter, r *http.Request) {
+	if !h.auditReadAllowed(r) {
+		sendJSONResponse(w, map[string]string{"error": "审计读面仅限管理员"}, http.StatusForbidden)
+		return
+	}
 	f, ok := auditFilterFromQuery(r.URL.Query(), "after_ts")
 	if !ok {
 		http.Error(w, "after_ts 参数非法，需为 RFC3339 时间（如 2026-09-01T12:00:00Z）", http.StatusBadRequest)
