@@ -84,11 +84,14 @@ func (r *RingIndex) Add(e Entry) {
 
 // Query 返回命中的条目（**最新在前**），limit<=0 时返回全部命中。
 func (r *RingIndex) Query(f EntryFilter) []Entry {
-	if r == nil || r.capacity == 0 || r.size == 0 {
+	if r == nil {
 		return nil
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.capacity == 0 || r.size == 0 {
+		return nil
+	}
 	limit := f.Limit
 	if limit <= 0 {
 		limit = r.size
@@ -126,11 +129,16 @@ func (r *RingIndex) ApproxBytes() int64 {
 
 // Evict 逐出最旧的 n 条（返回被逐出条目，最旧在前）。
 func (r *RingIndex) Evict(n int) []Entry {
-	if r == nil || n <= 0 || r.size == 0 {
+	if r == nil || n <= 0 {
 		return nil
 	}
+	// ⚠️ `size` 必须在锁内读：Evict/Prune/Add 都会在锁内写它，锁外读 = data race
+	// （CI -race 实测：`Evict` 的 guard 与另一 goroutine 的 `r.size -= n` 并发 ✗）。
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.size == 0 {
+		return nil
+	}
 	if n > r.size {
 		n = r.size
 	}
@@ -154,11 +162,14 @@ func (r *RingIndex) Evict(n int) []Entry {
 // Prune 按谓词逐出（keep=false 的条目被移除；返回逐出条数）。
 // 语义：保持剩余条目的相对顺序（重建内部环）。
 func (r *RingIndex) Prune(keep func(Entry) bool) int {
-	if r == nil || r.size == 0 {
+	if r == nil {
 		return 0
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.size == 0 {
+		return 0
+	}
 	oldest := (r.head - r.size + r.capacity*2) % r.capacity
 	kept := make([]Entry, 0, r.size)
 	var dropped int
