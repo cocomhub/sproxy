@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -219,5 +220,138 @@ func TestDeleteLastFile_KeepsInFlightWrite(t *testing.T) {
 	_ = rc2.Close()
 	if rerr2 != nil || !bytes.Equal(got2, payload) {
 		t.Fatalf("重启后内容不一致: err=%v len=%d want=%d", rerr2, len(got2), len(payload))
+	}
+}
+
+// failDirMetaDeleteFS 让「目录 meta blob」的删除失败（模拟改名第二步失败 ⇒ 容器内并存两个 meta）。
+type failDirMetaDeleteFS struct {
+	wrap  syncpkg.FS
+	armed bool
+}
+
+func (f *failDirMetaDeleteFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return f.wrap.ListDir(ctx, p)
+}
+func (f *failDirMetaDeleteFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	return f.wrap.Stat(ctx, p)
+}
+func (f *failDirMetaDeleteFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	return f.wrap.OpenRead(ctx, p)
+}
+func (f *failDirMetaDeleteFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
+	return f.wrap.WriteFile(ctx, key, p, r, size, mtime)
+}
+func (f *failDirMetaDeleteFS) Rename(ctx context.Context, from, to string) error {
+	return f.wrap.Rename(ctx, from, to)
+}
+func (f *failDirMetaDeleteFS) Delete(ctx context.Context, p string) error {
+	if f.armed && shardseal.ClassifyName(path.Base(p)) == shardseal.KindDirMeta {
+		return fmt.Errorf("failDirMetaDeleteFS: 模拟旧目录 meta 删除失败 %s", p)
+	}
+	return f.wrap.Delete(ctx, p)
+}
+func (f *failDirMetaDeleteFS) MakeDir(ctx context.Context, p string) error {
+	return f.wrap.MakeDir(ctx, p)
+}
+
+// TestRenameDir_StaleDirMeta_DeterministicArbitration 目录改名后旧 meta 删除失败（容器内并存两个
+// 目录 meta）时，加载必须**确定性**取最新 meta（改名不静默回退，且多次重挂载结果一致）。
+func TestRenameDir_StaleDirMeta_DeterministicArbitration(t *testing.T) {
+	root := t.TempDir()
+	inner := &failDirMetaDeleteFS{wrap: syncpkg.NewLocalFS(root, nil)}
+	fs := newFSSharedInner(t, inner)
+	ctx := context.Background()
+
+	now := time.Now().UnixNano()
+	if err := fs.MakeDir(ctx, "old-dir"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "old-dir/a.bin", bytes.NewReader([]byte("hello")), 5, now); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	inner.armed = true
+	// 让新旧 meta 的 mtime **确定不同**（仲裁以「最新时间」为准；同 tick 相等会退化为按名字
+	// 兜底 ⇒ 与「新旧」无关）。少量等待换取用例确定性。
+	<-time.After(20 * time.Millisecond)
+	if err := fs.Rename(ctx, "old-dir", "new-dir"); err != nil {
+		t.Fatalf("改名（旧 meta 清理失败不应报错）: %v", err)
+	}
+
+	// 至少重挂载两次：两次结果必须一致，且都指向新名字（此前按 ListDir 顺序取第一个 ⇒ 可能回退）。
+	for i := range 2 {
+		fs2 := newFSSharedInner(t, syncpkg.NewLocalFS(root, nil))
+		if e, serr := fs2.Stat(ctx, "new-dir/a.bin"); serr != nil || e == nil {
+			t.Fatalf("第 %d 次重挂载：改名后的文件在新路径不可见 (entry=%v, err=%v)", i+1, e, serr)
+		}
+		if e, _ := fs2.Stat(ctx, "old-dir/a.bin"); e != nil {
+			t.Fatalf("第 %d 次重挂载：旧路径仍可见（双 meta 未按最新仲裁 ⇒ 改名静默回退）", i+1)
+		}
+		rc, oerr := fs2.OpenRead(ctx, "new-dir/a.bin")
+		if oerr != nil {
+			t.Fatalf("第 %d 次重挂载读取: %v", i+1, oerr)
+		}
+		got, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		if string(got) != "hello" {
+			t.Fatalf("第 %d 次重挂载内容 = %q, want hello", i+1, got)
+		}
+	}
+}
+
+// TestReadSeeker_SeekToSamePositionKeepsEOFVerify Seek(0,End)+Seek(0,Start)（http.ServeContent /
+// Range 服务的固定姿势）不得使「EOF 整文件校验」失效。
+func TestReadSeeker_SeekToSamePositionKeepsEOFVerify(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	fs := newFSSharedInner(t, syncpkg.NewLocalFS(root, nil))
+	payload := bytes.Repeat([]byte("seek-verify-"), 4096) // ≈49KiB
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "f.bin", bytes.NewReader(payload), int64(len(payload)), time.Now().UnixNano()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	rc, err := fs.OpenRead(ctx, "f.bin")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer rc.Close()
+	rs, ok := rc.(io.ReadSeeker)
+	if !ok {
+		t.Fatal("读句柄必须实现 io.ReadSeeker")
+	}
+	// Range 服务的固定姿势：取大小 → 回到开头 → 顺序读完。
+	size, serr := rs.Seek(0, io.SeekEnd)
+	if serr != nil || size != int64(len(payload)) {
+		t.Fatalf("Seek(End) = (%d, %v), want (%d, nil)", size, serr, len(payload))
+	}
+	if _, serr := rs.Seek(0, io.SeekStart); serr != nil {
+		t.Fatalf("Seek(Start): %v", serr)
+	}
+	got, rerr := io.ReadAll(rs)
+	if rerr != nil {
+		t.Fatalf("顺序读失败（校验被 Seek 误关闭后仍应正常返回；此处失败说明读路径异常）: %v", rerr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("内容不一致: %d vs %d", len(got), len(payload))
+	}
+
+	// 反向断言：**哈希不匹配必须在 EOF 报错**（证明校验确实生效，而非「谁都没校验」）。
+	// 真实句柄的 want 来自条目 meta（正确哈希），这里拿新句柄把 want 改成错误值即可。
+	rc2, oerr2 := fs.OpenRead(ctx, "f.bin")
+	if oerr2 != nil {
+		t.Fatalf("二次 open: %v", oerr2)
+	}
+	defer rc2.Close()
+	v, isV := rc2.(*verifyOnEOF)
+	if !isV {
+		t.Fatalf("读句柄应为 *verifyOnEOF, got %T", rc2)
+	}
+	v.want = strings.Repeat("0", 64)
+	if _, serr := v.Seek(0, io.SeekEnd); serr != nil {
+		t.Fatalf("verify Seek(End): %v", serr)
+	}
+	if _, serr := v.Seek(0, io.SeekStart); serr != nil {
+		t.Fatalf("verify Seek(Start): %v", serr)
+	}
+	if _, rerr := io.ReadAll(v); rerr == nil {
+		t.Fatal("整文件哈希不匹配必须在 EOF 报错（Seek 回原位不应关闭校验）")
 	}
 }

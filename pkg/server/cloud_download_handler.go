@@ -587,10 +587,34 @@ func (h *Handlers) deleteGroupArchive(owner, archiveFile string) error {
 	if !ok {
 		return fmt.Errorf("归档目标卷 %q 未装配", volName)
 	}
+	// **配额释放（与写侧同源）**：组归档转存外部卷的产物在写入时经 `settleArchiveCharge` 计入
+	// owner 账本（P2 修复，2026-10-21：此前删除路径只删对象、不释放 ⇒ 配额虚高，可能误 507；
+	// 虽然磁盘对账会在 ≤30min 内冲掉，但属于可避免的窗口）。删除前**实测**记账字节（与写侧
+	// `archiveTargetCharge` 同一函数 ⇒ 不会「未曾提交的释放」），删除成功后按同一 Scope 释放。
+	charge := h.archiveTargetCharge(volName, owner, fsKey, userRelFromFSKey(owner, fsKey))
 	if err := fs.Delete(context.Background(), fsKey); err != nil {
 		return fmt.Errorf("删除外部卷归档 %q: %w", fsKey, err)
 	}
+	if charge > 0 {
+		if scope := h.quotaScopeFor(owner, path.Join("user", userRelFromFSKey(owner, fsKey))); scope != nil {
+			scope.ReleaseUsage(charge)
+		}
+	}
 	return nil
+}
+
+// userRelFromFSKey 把外部卷内部键 `<owner>/user/<rel>` 还原为用户桶相对路径 `<rel>`
+// （`archiveTargetCharge` 的 PhysFootprint 需要该口径；与写侧 `archiveTargetRel` 同键空间）。
+// 形态不符（非 `<owner>/user/` 前缀）时原样返回，交由调用方的足迹/Stat 兜底。
+func userRelFromFSKey(owner, fsKey string) string {
+	prefix := owner + "/user/"
+	if after, ok := strings.CutPrefix(fsKey, prefix); ok {
+		return after
+	}
+	if rest, ok := strings.CutPrefix(fsKey, "user/"); ok {
+		return rest
+	}
+	return fsKey
 }
 
 // cloudArchiveGroup 处理 POST /api/cloud/groups/{id}/archive。// 收集组内所有已完成子任务的文件打包为单个 tar.gz（未完成任务跳过并记录）。

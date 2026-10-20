@@ -591,7 +591,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 // recoverOnConstruct 是构造期的默认恢复调用（M3：真正实现在 RecoverAll；此处只负责告警）。
 // 拆成 helper 只为把 NewCloudDownloadManager 的认知复杂度留在门禁阈值内。
 func (mgr *CloudDownloadManager) recoverOnConstruct() {
-	if _, err := mgr.RecoverAll(); err != nil {
+	if _, err := mgr.RecoverAll(context.Background()); err != nil {
 		mgr.logger.Warn("cloud download recovery failed", "error", err)
 	}
 }

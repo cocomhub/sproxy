@@ -224,7 +224,7 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 | `test/e2e_restart_matrix_test.go` | 2 | 状态矩阵用例：每个子用例都构建/启动真实 sproxy 子进程并独占存储根与端口（全局资源，不可并行）。 |
 | `test/e2e_restart_upload_test.go` | 1 | 分块上传中断用例：真实进程 kill -9 + 同根重启，端口/进程生命周期独占。 |
 | `pkg/audit/prod_hardening_test.go` | 3 | 审计读面/冷段/续号：需构造多段大文件与真实 FileJournal（段文件 O(size) 写盘），无固定等待、收益为零。 |
-| `pkg/cloud/prod_hardening_test.go` | 1 | 孤儿组恢复：依赖 CloudDownloadManager 的内部状态机与持久化目录，单独用例不可并行。 |
+| `pkg/cloud/prod_hardening_test.go` | 2 | 孤儿组恢复 / 启动恢复取消：依赖 CloudDownloadManager 内部状态机（含幂等守卫）与共享持久化目录，不可并行。 |
 | `pkg/cloud/prod_hardening_transfer_test.go` | 1 | 转存残骸自清：注入式 FS 状态机（armed/重试）与用例一一对应，不可并行共享。 |
-| `pkg/server/prod_hardening_test.go` | 1 | 归档 checksum：需真实 storage.Root + 磁盘产物核算，用例级独占临时根。 |
-| `pkg/volume/secretdata/prod_hardening_test.go` | 2 | 卷锁/在途写并发：死锁用例需独占卷实例并带超时断言，不可并行。 |
+| `pkg/server/prod_hardening_test.go` | 2 | 归档 checksum / 组归档删除配额：需真实 storage.Root、临时根与 owner 配额池（共享 `h.globalPool`），用例级独占。 |
+| `pkg/volume/secretdata/prod_hardening_test.go` | 4 | 卷锁/在途写并发/目录 meta 仲裁/Eof 校验：均在**同一时间轴**上构造真实卷状态（死锁用例带 10s 超时断言、仲裁用例需真实 mtime 次序），并行会互相干扰计时与全局 slog 输出。 |

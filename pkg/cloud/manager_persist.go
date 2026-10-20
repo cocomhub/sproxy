@@ -131,7 +131,7 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 //
 // 返回值：因孤儿 pending 转终态而需要刷新状态的组 ID。调用方必须在 recoverGroups **之后**
 // 调用 UpdateGroupStatus——组记录比任务晚恢复，此刻刷新会因组不存在而空转。
-func (m *CloudDownloadManager) recoverTasks() (int, []string) {
+func (m *CloudDownloadManager) recoverTasks(ctx context.Context) (int, []string) {
 	recovered := 0
 	restarted := 0
 	unreadable := 0
@@ -141,7 +141,7 @@ func (m *CloudDownloadManager) recoverTasks() (int, []string) {
 		if root == nil {
 			continue
 		}
-		n1, n2, orphans, skipped := m.recoverTasksFromDir(root)
+		n1, n2, orphans, skipped := m.recoverTasksFromDir(ctx, root)
 		recovered += n1
 		restarted += n2
 		unreadable += skipped
@@ -162,19 +162,21 @@ func (m *CloudDownloadManager) recoverTasks() (int, []string) {
 // RecoverAll 是云任务**启动恢复的唯一入口**（M3 统一恢复协调器通过 legacy 注册调用）。
 //
 //   - **幂等**：只真正执行一次；重复/并发调用直接返回 0（绝不重复挂载任务或重复重启下载 ✗）。
+//   - **ctx 有界**：取消即停止继续恢复（装配层传入 startupRecoveryTimeout；此前签名无 ctx
+//     ⇒ 超时预算无效，恢复挂住会导致服务永不监听）。
 //   - 构造期默认已执行（`DeferRecovery=false`，即零行为变更 ✓）；装配层若把触发点交给协调器，
 //     则置 `DeferRecovery=true`，由协调器在启动恢复阶段调用本方法。
 //   - **顺序契约（不可颠倒）**：先 `recoverTasks`（按 m.tasks 修剪组内任务引用）→ 再
 //     `recoverGroups` → 最后按孤儿 pending 组刷新组状态（否则组尚不存在时 UpdateGroupStatus 空转，
 //     Web UI 会一直看到 downloading）。
-func (m *CloudDownloadManager) RecoverAll() (int, error) {
+func (m *CloudDownloadManager) RecoverAll(ctx context.Context) (int, error) {
 	if m == nil {
 		return 0, nil
 	}
 	if m.recovered.Swap(true) {
 		return 0, nil // 已执行（构造期或前一次调用）⇒ 幂等 no-op
 	}
-	recovered, orphanPendingGroups := m.recoverTasks()
+	recovered, orphanPendingGroups := m.recoverTasks(ctx)
 	m.recoverGroups()
 	for _, gid := range orphanPendingGroups {
 		m.UpdateGroupStatus(gid)
@@ -184,7 +186,7 @@ func (m *CloudDownloadManager) RecoverAll() (int, error) {
 
 // recoverTasksFromDir 解析单个租户持久化目录下的任务 JSON 并挂入 m.tasks，同时重启崩溃前
 // downloading 的任务、把孤儿 pending 转终态。返回恢复数、重启数与需要刷新状态的孤儿组 ID。
-func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int, []string, int) {
+func (m *CloudDownloadManager) recoverTasksFromDir(ctx context.Context, root *storage.Root) (int, int, []string, int) {
 	entries, err := root.ReadDir(cloudStateRel)
 	if err != nil {
 		return 0, 0, nil, 0
@@ -197,6 +199,14 @@ func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int
 	// 部分改写 ⇒ 重启再次触发）。评审 P1，2026-10-18。
 	var pending []recoveredTask
 	for _, e := range entries {
+		// **启动恢复必须有界**（P2 修复，2026-10-21）：此前 RecoverAll 不接受 ctx（装配层传的
+		// startupRecoveryTimeout 被丢弃）⇒ 状态目录很大或底层 I/O 挂死时恢复永不结束，而恢复
+		// 是 **ListenAndServe 之前**同步执行的 ⇒ 服务永不监听、日志也看不到超时原因。
+		// 契约：取消即**停止继续恢复**（已插入的条目保持原状态，下一轮启动再继续；不产生半提交）。
+		if cerr := ctx.Err(); cerr != nil {
+			m.logger.Warn("启动恢复被取消（剩余任务留待下次启动）", "error", cerr)
+			break
+		}
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}

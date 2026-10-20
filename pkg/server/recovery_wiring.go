@@ -72,8 +72,10 @@ func cloudLegacies(h *Handlers) []recovery.Legacy {
 	mgr := h.cloudMgr
 	return []recovery.Legacy{{
 		Kind: "cloud",
-		Recover: func(context.Context) (int, error) {
-			return mgr.RecoverAll()
+		// ctx 透传（P2 修复，2026-10-21）：协调器的 startupRecoveryTimeout 必须能真正中断
+		// 恢复（此前闭包丢弃 ctx ⇒ 恢复挂住会让 ListenAndServe 永不执行，预算形同装饰）。
+		Recover: func(ctx context.Context) (int, error) {
+			return mgr.RecoverAll(ctx)
 		},
 	}}
 }

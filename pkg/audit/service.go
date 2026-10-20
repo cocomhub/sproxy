@@ -21,6 +21,10 @@ import (
 // ErrInvalidScope 表示作用域标识非法（含路径穿越风险形态）。
 var ErrInvalidScope = errors.New("audit: 非法作用域标识")
 
+// ErrCapabilityUnavailable 表示「该语义在当前能力集下无法表达（落盘）」——调用方必须
+// 显式处理（不能当作成功，否则会误报已提交/已审计）。
+var ErrCapabilityUnavailable = errors.New("audit: 能力集不支持该语义")
+
 // ErrScopeClosed 表示作用域已结束（MarkDone/Close 之后不可再写）。
 var ErrScopeClosed = errors.New("audit: 作用域已结束")
 
@@ -393,6 +397,19 @@ func (sc *Scope) MarkDone(ctx context.Context) error {
 	st.done = true
 	sc.svc.mu.Unlock()
 	if !sc.svc.eff.caps.Compliance {
+		// **不得静默 no-op**（P2 修复，2026-10-21）：`KindDone` 属 Compliance 能力；若使用方只开
+		// WAL（`CapabilitySet{WAL:true, Compliance:false}`，设计允许按需启用），提交记录根本不落盘
+		// 却返回 nil ⇒ 协调器记 Resumed、下次启动重复执行副作用（与 R13 修过的 P2 同形态）。
+		// 这种组合下「提交记录」无从表达 ⇒ 显式报错，让调用方关掉恢复协调或补齐能力。
+		sc.svc.mu.Lock()
+		if cur := sc.svc.scopes[sc.id]; cur != nil {
+			cur.done = false
+		}
+		sc.svc.mu.Unlock()
+		if sc.svc.eff.caps.WAL {
+			return fmt.Errorf("%w: 能力集同时启用 WAL 但未启用 Compliance，提交记录(KindDone)无法落盘",
+				ErrCapabilityUnavailable)
+		}
 		return nil
 	}
 	if err := sc.svc.writeMode(ctx, Entry{Scope: sc.id, Kind: KindDone, Step: "done", Result: ResultSuccess}, true); err != nil {
@@ -505,6 +522,14 @@ func (s *Service) prepare(ctx context.Context, e Entry) (*Entry, error) {
 		return nil, ErrClosed
 	}
 	if st := s.scopes[e.Scope]; st != nil && st.closed && e.Kind != KindDone {
+		s.mu.Unlock()
+		return nil, ErrScopeClosed
+	}
+	// **提交后不得再写**（P2 修复，2026-10-21）：恢复判定是「最大 Seq 条目是 KindDone」，
+	// 而提交记录之后再写任何条目都会拿到更大的 Seq ⇒ 该作用域**永远未完成** ⇒ 每次启动重复
+	// 执行副作用（设计 §6.1 明令禁止的失败模式），且日志只显示「已恢复并提交」。
+	// 与 `Scope.Save` 的既有 `st.done` 检查口径一致（此前 Emit/writeStep 未拦）。
+	if st := s.scopes[e.Scope]; st != nil && st.done && e.Kind != KindDone && e.Kind != KindRotate {
 		s.mu.Unlock()
 		return nil, ErrScopeClosed
 	}

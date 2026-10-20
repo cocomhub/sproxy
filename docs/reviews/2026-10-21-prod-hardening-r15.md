@@ -122,18 +122,43 @@
 | `golangci-lint run` | 0 issues |
 | 变异验证 | 11/11 命中（本批全部修复） |
 
-## 3. 未修（记档，需决策或属可观测性）
+## 3. 第二批修复（本 PR 同一分支内跟进，2026-10-21 晚）
 
-| 项 | 级别 | 说明 / 为何未在本批 |
-| --- | --- | --- |
-| secretdata 目录改名时旧 dir meta 删除失败 ⇒ 容器内可能并存两个 dir meta | P1 | 需先定**加载期仲裁口径**（哪个 meta 权威：物理位置 / DirID / 版本），单改「加日志」不解决静默回退；属设计决策 |
-| secretdata 锁内远端 `Delete`/`ListDir` 未统一有界（`removeEmptyContainerLocked`、GC 两处） | P2 | 只在「远端/阻塞型底层」可达；与既有 `boundedCleanupCtx` 口径统一即可，随 P1 一并做 |
-| secretdata `Delete` 的 meta 物理删失败完全静默且进程内不可重试（GC 又保护它） | P2 | 既有用例把「返回成功 + 重启重建」钉为**有意方向**，改的是可观测性/重试语义，需与产品确认 |
-| secretdata 读句柄的「EOF 整文件哈希」在 `Seek` 消费方（含 `http.ServeContent`）恒失效 | P2 | 有逐 blocklet GCM + `meta.VerifyReadSeeker` 兜底，属纵深校验缺失 |
-| 百度网盘 binary-only 模式下「CLI 执行失败」被判成「路径不存在」 | P2 | 错误分类改进（`exec.ErrNotFound` 优先） |
-| 百度网盘 `List` 的精确 size 回填失败时用 `ls` 近似值当权威 | P2[推测] | 会在每轮同步反复重传；需真实网盘验证路径键一致性 |
-| 组归档转存外部卷的产物被删除时不释放 owner 配额（≤30min 被磁盘对账冲掉） | P2 | 有界影响 |
-| 审计 `.archiving.<n>` 隔离段在归档中途崩溃后不可见/不重试/不计入 `max_total_bytes` | P2 | 启动期扫描改名回原名即可，随下批做 |
-| `MarkDone` 之后仍可 `Emit`（末条不再是 KindDone ⇒ 作用域永远未完成） | P2 | 需使用方违约才触发；与 `Scope.Save` 的既有 `st.done` 检查口径不一致 |
-| WAL-only 能力集下 `MarkDone` 静默 no-op | P2 | 当前无预设触发（`CapabilitySet` 四预设都不含该组合） |
-| 启动恢复的 5 分钟预算对 legacy cloud 注册项无效（`RecoverAll` 无 ctx） | P2 | 需产品确认「恢复完成前不对外服务」是否必须 |
+上一版列在「未修」的条目已按如下口径全部落地（仍全部 TDD + 变异命中）：
+
+| 原「未修」项 | 处理 |
+| --- | --- |
+| secretdata 目录改名旧 meta 删除失败 ⇒ 容器内并存两个 dir meta，重启可能**静默回退/翻覆** | **确定性仲裁**：`dirMeta.Version` 在改名/移动时单调 +1（权威信号），仲裁键 = Version → mtime → 名字。为何不用 mtime 做主键：`ListDir` 的 `Entry.MTime` 在本卷实现上恒 0，且真实文件系统时间精度可能相等 ⇒ 退化为按**随机盐文件名**排序（实测约 50% 概率回退旧名，用例连跑 6 次复现）。旧 meta 的删除改为 `boundedCleanupCtx` + **Warn 可见**。用例：`TestRenameDir_StaleDirMeta_DeterministicArbitration`（变异：去掉 `Version++` ⇒ 红）。 |
+| secretdata 锁内远端 `Delete`/`ListDir` 未统一有界 | `removeEmptyContainerLocked` 自带 `boundedCleanupCtx`；GC 的锁内删除收敛为 `deleteKillsLocked`（同一有界 ctx）。 |
+| secretdata `Delete` 的 meta 物理删失败完全静默 | 增加 Warn（保留「先删 meta + 分块全保留」的安全失败方向不变：重启重建完整文件）。 |
+| secretdata 读句柄「EOF 整文件哈希」在 `Seek` 消费方恒失效 | 语义收紧为「**已读过数据后再跳转**才失效」：`http.ServeContent` 的 `Seek(End)→Seek(Start)` 不再关闭校验；读前位置 ≠ 0（真随机读）由 `Read` 侧判据关闭。用例：`TestReadSeeker_SeekToSamePositionKeepsEOFVerify`（含反证：错误哈希必须在 EOF 报错）。 |
+| 百度网盘 binary-only 模式下「CLI 执行失败」被判成「路径不存在」 | `isExecUnavailable` 优先分类：**有库兜底仍用库**（保持原设计），无兜底则如实上抛执行失败（绝不 `ErrNotFound`）。用例：`TestBinaryMeta_ExecutorUnavailableNotNotFound`。 |
+| 组归档转存外部卷的产物被删除时不释放 owner 配额 | 删除前用**同一** `archiveTargetCharge` 实测、删除成功后按同一 Scope `ReleaseUsage`。用例：`TestDeleteGroupArchive_ReleasesOwnerQuota`（真实 HTTP 归档 → 删除 → 账本下降）。 |
+| 审计 `.archiving.<n>` 隔离段在归档中途崩溃后不可见/不重试/不计入上限 | 启动期 `recoverQuarantinedSegments` 把隔离段改名回原名（原名被占用则取「最大序号 + 1」），Warn 可见。用例：`TestNewFileJournal_RecoversQuarantinedSegment`。 |
+| `MarkDone` 之后仍可写（末条不再是 KindDone ⇒ 作用域永远未完成） | `prepare` 对 `st.done` 的非提交类条目返回 `ErrScopeClosed`（与 `Scope.Save` 口径统一）。用例：`TestService_NoWritesAfterMarkDone`。 |
+| WAL-only 能力集下 `MarkDone` 静默 no-op | 返回 `ErrCapabilityUnavailable` 并回滚 `done`（可重试）。用例：`TestMarkDone_WALWithoutComplianceNotSilent`。 |
+| 启动恢复 5 分钟预算对 legacy cloud 注册项无效 | `RecoverAll(ctx)` / `recoverTasksFromDir(ctx, …)` 全链路下传 ctx，恢复循环逐条目检查取消；装配层闭包不再丢弃 ctx。用例：`TestRecoverAll_CanceledContextStopsRecovery`（变异：去掉 ctx 检查 ⇒ 红）。 |
+
+### 仍开（需真实环境/产品口径，非代码缺口）
+
+| 项 | 说明 |
+| --- | --- |
+| 百度网盘 `List` 的「精确 size 回填失败 ⇒ 用 `ls` 近似值当权威」 | 因果链成立但**触发条件未在真实网盘证实**（键匹配是否必然一致）；修法（回填失败置 Size=0 或标注未知）需先确定 `pkg/sync/diff` 对「未知 size」的语义，避免引入每轮重传的另一种形态。 |
+| presign 直传纳入 meta + 容量记账；回收站多卷配额释放；加密卷容量精确记账；secretdata 同卷复制优化 | 已在 roadmap 记为产品口径项（非缺陷）。 |
+
+### 已知 flake（与本 PR 无关，记录备查）
+
+- `pkg/sync` `TestEngineSync_ContextCancelMidSync`（全量并发跑时偶发，单跑/整包重跑均绿）。
+- `pkg/cloud` `TestCloudDownloadManager_TimeoutThenSuccess`（同上）。
+- `pkg/tunnel/hub` 并发 sync 用例、`pkg/server` `TestTierWarm_PromoteWarmOnRead` / `TestS3Complete_OverLimitBody_413`。
+- UI E2E `TestAuth_SaveKeysSigns`（本次 PR 首次跑红，`gh run rerun --failed` 后绿；仓库 0 个 web 文件改动）。
+
+## 4. 验证（第二批后）
+
+| 范围 | 结果 |
+| --- | --- |
+| 根 module `go test ./...`（96 包） | 全绿（`pkg/sync` 一处已知 flake，单跑绿） |
+| `pkg/volume/ext/baidupcs`（独立 module） | 全绿 |
+| e2e `-tags=e2e ./test/...` | 3 包全绿（含 19 个恢复用例） |
+| `golangci-lint run` | 0 issues |
+| 变异验证（第二批 8 项） | 8/8 命中 |
