@@ -138,9 +138,7 @@ func TestFileLock_TokenUnique(t *testing.T) {
 	seen := make(map[string]struct{}, 64)
 	var mu sync.Mutex
 	for range 64 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			v := newLockValue(uploadingLockTxn)
 			mu.Lock()
 			if _, dup := seen[v]; dup {
@@ -148,7 +146,7 @@ func TestFileLock_TokenUnique(t *testing.T) {
 			}
 			seen[v] = struct{}{}
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 }

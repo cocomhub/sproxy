@@ -37,7 +37,7 @@ func TestSyncBatch_FlushesByTime(t *testing.T) {
 	}
 
 	// 写 3 条（远小于 batchLines=1000）⇒ 只有定时器能触发 fsync。
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if aerr := j.Append(Entry{Scope: "system", Kind: KindEvent, Action: "batch_probe", Type: TypeSensitive, Result: ResultSuccess, TS: time.Now(), Seq: uint64(i + 1)}); aerr != nil {
 			t.Fatalf("Append(%d): %v", i, aerr)
 		}
@@ -64,7 +64,7 @@ func TestSyncBatch_SizeTriggerFlushesOutsideLock(t *testing.T) {
 	t.Cleanup(func() { _ = j.Close() })
 	j.syncHook = func(string) { synced.Add(1) }
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if aerr := j.Append(Entry{Scope: "system", Kind: KindEvent, Action: "batch_probe", Type: TypeSensitive, Result: ResultSuccess, TS: time.Now(), Seq: uint64(i + 1)}); aerr != nil {
 			t.Fatalf("Append(%d): %v", i, aerr)
 		}

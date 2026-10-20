@@ -185,7 +185,7 @@ func TestReadTailCold_CrossChunkLine(t *testing.T) {
 	}
 
 	head := bytes.Buffer{}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		head.Write(mk(fmt.Sprintf("head-%d", i), base.Add(time.Duration(i)*time.Second)))
 	}
 	bigObject := "big:" + strings.Repeat("x", 4<<10)

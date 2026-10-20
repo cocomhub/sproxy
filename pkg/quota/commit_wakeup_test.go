@@ -128,7 +128,7 @@ func TestWaitTimeoutErrorKindPreserved(t *testing.T) {
 // waitUntil 自旋等待条件成立（用 runtime.Gosched 让出，避免固定 sleep —— 仓库棘轮只减不增）。
 func waitUntil(t *testing.T, maxIter int, cond func() bool) {
 	t.Helper()
-	for i := 0; i < maxIter; i++ {
+	for range maxIter {
 		if cond() {
 			return
 		}

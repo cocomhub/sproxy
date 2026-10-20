@@ -66,3 +66,30 @@ C6 归档转存写前探针 · C3 释放统一走 `withWaitLock` · C4 卷池有
 NEW-1 软删失败回写 · C8/C9 quarantine 与 trash meta 的 Warn+metric+清扫 · C10 块级 seek（+`root.seekStart`） · C11 行对齐 · C12 卷名校验 · C13 两 mux 中间件同源（+门禁） · C14 SyncBatch ticker 或文档降级 · NEW-4 冷段错误传播与超时 · NEW-5 块头扫描缓存。
 
 **新增门禁**：① 两 mux 审计中间件同源；② `withWaitLock` 内禁裸释放/NotifyAll；③ 恢复路径必须覆盖所有「非终态」状态（表驱动，新增状态即红）。
+
+## 4. 修复记录（全部已落地，每个都带用例与变异验证）
+
+| 项 | 修复 | 用例 / 变异 |
+| --- | --- | --- |
+| **C1** 排队任务重启不续 | `CloudTask.Submitted` 在**启动 goroutine 之前**落盘；恢复时 `restart = downloading \|\| (pending && Submitted)`，只有「从未提交」的 pending 仍是孤儿 | `TestRecovery_QueuedSubmittedTaskRestarts` / 去掉 `Submitted` 条件 ⇒ 红 |
+| **C2** 转存窗口整文件重下 | 下载成功即持久化 `DownloadDone/Size/Checksum`；恢复时产物尺寸相符 ⇒ 跳过下载直接转存；显式 `ResumeTask` 与「文件异常重下」清标记 | `TestReuseDownloadedArtifact`（含尺寸不符不复用）/ 去掉尺寸校验 ⇒ 红 |
+| **NEW-2** 恢复静默丢任务 | `recoverTasksFromDir` 返回 skipped 并在唯一解析处累计 `metrics.RecoverySkipped`，汇总日志带 skipped | `TestRecovery_UnreadableTaskCounted` |
+| **C6** 归档转存无写前配额探针 | `probeArchiveQuota`（`Scope.ProbeReserve`，探测式不排队）在 `transfer.Execute` 前执行，不足 ⇒ 507 且不落对象 | `TestCloudArchive_ToVolume_QuotaFullRejectsBeforeWrite` / 去探针 ⇒ 红 |
+| **C3** 释放侧丢唤醒 | 新增 `commitReservation`（`actual<amount` 才走根等待锁）与 `releaseReserve`；替换 `quota_writer`/`task_account` 直调 | `TestCommitBelowReserveWakesWaiter` 等 3 例 / commit 走快路 ⇒ 红 |
+| **NEW-3** 等待失败不可区分 | `WaitReserve` 超时保留 `ErrWaitTimeout`（同时仍 `ErrStorageFull`），HTTP 层可据此给 `Retry-After` | `TestWaitTimeoutErrorKindPreserved` |
+| **C4** 卷池不排队 | 在途预留占满（`Reserved()>0`，提交/放弃后必然释放）时 `WaitReserve` 有界等待；**已提交占满仍立即 507**（无释放可能，不空等） | `TestReserveVolumePool_WaitsForInFlightReservation` / `..._CommittedFullFailsFast` / 去等待 ⇒ 红 |
+| **C7** 写锁 30min 被偷 + release 无 token | 锁值改为 ` lock:<marker>:<token>`；释放与回收一律 `CompareAndDelete`；`transferWriteLock` 用 `acquireFileLockKeepAlive`（TTL/3 续期） | `pkg/server/file_lock_token_test.go` 5 例 / release 退回 `Delete` ⇒ 红 |
+| **C8 / NEW-1 / C9** 删除与回收站静默失败 | 五处回滚收敛 `restoreQuarantine`（失败 Error + `quarantine_rel`）；软删失败**先回滚再报错**；回收站 meta 随迁失败 Warn | `pkg/files` 全包 |
+| **C10** O(offset) 解密 | `encRootReader.SeekPlain` 只读 4B 块头 + Seek 跳过整块，仅解密目标块；`seekStart` 优先走它 | `TestEncSeekPlain_*` + 接线用例 / 退回 CopyN ⇒ 红 |
+| **NEW-5** 每次 OpenDecrypted 全块头扫描 | 按「密文尺寸 + mtime」缓存明文长度（上限 4096，超出清空）；探测用独立句柄 | `pkg/storage` 回归（`TestEncryptedPhysicalSize_MatchesDiskTruth` 抓到过句柄复用回归） |
+| **C11** 冷段跨块丢条目 | `carry` 拼接跨块行（较新块首残行 + 较旧块末行） | `TestReadTailCold_CrossChunkLine`（可判定构造：边界落在指定大对象行内）/ 禁用 carry ⇒ 红 |
+| **C12** `?volume=` 伪造归属 | 中间件只绑定 `volSet.ByName` 命中的卷 | `TestAuditVolume_UnknownVolumeNotBound` |
+| **C13** 隧道内层无审计/卷维度 | 两条链路挂同一组中间件；新增门禁 **R42** 钉住同源 | `TestR42_AuditMiddlewareOnBothMuxes` / 删隧道侧 ⇒ 红 |
+| **C14** SyncBatch 无时间维度 + fsync 在锁内 | 启动 `batchFlushLoop`（默认 200ms，Close 退出）；满批次只置 `pendingFlush`，`Append` 在**锁外** fsync | `pkg/audit/batch_sync_test.go` 2 例 |
+| **NEW-4** 冷段读失败静默截断 / PurgeCold 无超时 | 读失败上抛（部分结果仍返回）；保留期清理 30s 超时 | `pkg/audit` + `pkg/server` 回归 |
+| **C5** NotifyAll / AgeBoost | **部分证伪**：`AgeBoost` 确实参与 `sortWaitersLocked` 的**有效优先级**，不是死代码；`NotifyAll` 只唤醒 `canSatisfy` 的等待者（惊群有界）。已把口径写进 `pkg/waitq` 注释，不改语义 | — |
+
+新增门禁：**R42**（两 mux 审计中间件同源）。其余两条建议门禁（`withWaitLock` 内禁裸释放、恢复路径覆盖全部非终态状态）尚未实现，登记为后续。
+
+验证：workspace `go test ./...` **96 包** · `-tags=e2e ./test/...` 3 包 · `make web-test` · `golangci-lint` 0 ·
+archcheck 全绿（含 sleep/serial 棘轮：新增固定等待已改为 `Gosched`/通道，串行用例按规范登记）。

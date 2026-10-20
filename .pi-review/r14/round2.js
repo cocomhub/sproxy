@@ -1,3 +1,8 @@
+/**
+ * Copyright 2026 The Cocomhub Authors. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // 第二轮：3 个证伪者（fresh，互不可见）。
 const NL = String.fromCharCode(10);
 const PRE = [ "你是**第二轮对抗评审的证伪者**（fresh context，只读：read/grep/find/ls）。禁止修改文件、禁止运行命令。", "仓库：D:/workdir/leon/cocomhub/sproxy（master，HEAD=49c9910ae）。本会话工作目录可能不是该仓库 ⇒ 用绝对路径读文件。", "", "你的任务**不是**重复评审，而是对第一轮的具体主张做**证伪**：默认它们是错的/夸大的，只有当代码证据无法反驳时才 CONFIRMED。", "对每条给：裁决（CONFIRMED / PARTIAL / REJECTED）、关键 file:line、一句话理由、若为 PARTIAL 说明「真实范围」与「原报告错在哪」、以及**最小修法**（含会被打破的不变量与所需测试）。", "额外要求：每条给「若该主张为假，代码里应能看到什么」并说明你是否找到了它。", "最后：本级领域是否还有**第一轮未提**的、会破坏这四条生产保证的缺陷？（重试恢复、重启续传、配额等待、数据不丢）最多 3 条，同样给证据。", "中文；只写判定与证据，不要复述原文；总长 1000 字内。" ].join(NL);

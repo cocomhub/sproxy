@@ -1,3 +1,8 @@
+/**
+ * Copyright 2026 The Cocomhub Authors. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // 第一轮对抗评审：5 个 fresh-context 只读 reviewer（不同视角，互相不可见）。
 const NL = String.fromCharCode(10);
 const PRE = [ "你是**独立对抗式代码评审员**，只读（read/grep/find/ls），禁止修改文件、禁止运行命令/测试。", "", "仓库：D:/workdir/leon/cocomhub/sproxy（分支 master，HEAD=49c9910ae）。全部代码可读。", "注意：本会话工作目录可能不是该仓库，读文件请用上面的绝对路径。", "", "规则（必须遵守，否则报告作废）：", "1. 每条结论必须给 **file:line** 证据；不许凭印象、不许「可能存在」式臆测。推断性结论单独列到「未证伪/待验证」区。", "2. 分级：P0=生产事故/数据丢失/安全；P1=功能错误或重启/重试不可靠；P2=边界与可观测性缺口；P3=可维护性。", "3. 每条结论写一句「实现正确时该断言/代码是否仍成立」——防把 bug 当契约。", "4. 报告结构：① 该领域能否生产级的结论 ② 逐条发现（file:line、复现路径、影响、建议修法）③ 未证伪/待验证 ④ 本次未覆盖的文件（诚实说明）。", "5. 中文；不要客套；不要罗列文件清单；总长 1200 字内，只写高价值发现。", "" ].join(NL);

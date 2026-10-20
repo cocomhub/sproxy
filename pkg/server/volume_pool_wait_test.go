@@ -85,7 +85,7 @@ func TestReserveVolumePool_CommittedFullFailsFast(t *testing.T) {
 // waitSpin 自旋等待条件成立（runtime.Gosched 让出，避免 time.Sleep 棘轮）。
 func waitSpin(t *testing.T, maxIter int, cond func() bool) {
 	t.Helper()
-	for i := 0; i < maxIter; i++ {
+	for range maxIter {
 		if cond() {
 			return
 		}

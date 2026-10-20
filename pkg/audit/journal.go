@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -377,9 +378,7 @@ func (j *FileJournal) flushPendingOutOfLock() {
 	}
 	j.pendingFlush = false
 	files := make(map[string]*os.File, len(j.files))
-	for p, f := range j.files {
-		files[p] = f
-	}
+	maps.Copy(files, j.files)
 	hook := j.syncHook
 	j.mu.Unlock()
 
