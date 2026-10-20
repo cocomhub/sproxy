@@ -30,6 +30,26 @@ import (
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
+// syncBuffer 是**并发安全**的 bytes.Buffer：子进程 stdout/stderr 由 os/exec 的拷贝 goroutine
+// 写入，而断言（如「日志含 unreadable on recovery」）会在主 goroutine 读取 ⇒ 裸 bytes.Buffer
+// 会被 `-race` 判数据竞争（CI ubuntu -race 实测）。
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 // restartEnv 是可重启的 sproxy 环境（真实二进制 + 固定存储根/端口）。
 type restartEnv struct {
 	tmpDir      string
@@ -42,8 +62,8 @@ type restartEnv struct {
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
-	stdout *bytes.Buffer
-	stderr *bytes.Buffer
+	stdout *syncBuffer
+	stderr *syncBuffer
 }
 
 // newRestartEnv 构建二进制并准备配置（**不启动**）。
@@ -112,7 +132,7 @@ func (e *restartEnv) boot(t *testing.T) {
 	t.Helper()
 	cmd := exec.Command(e.binPath, "--addr", e.addr, "--storage-root", e.storageRoot, "--config", e.configPath)
 	cmd.Dir = filepath.Dir(e.binPath)
-	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	stdout, stderr := &syncBuffer{}, &syncBuffer{}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sproxy: %v", err)
