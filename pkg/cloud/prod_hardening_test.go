@@ -90,6 +90,8 @@ func TestRecoverAll_CanceledContextStopsRecovery(t *testing.T) {
 	}
 	mgr.mu.Unlock()
 
+	// 构造期可能已跑过一轮恢复（DeferRecovery=false）⇒ 重置幂等守卫，让本用例真正走到恢复循环。
+	mgr.recovered.Store(false)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 进入恢复前即取消 ⇒ 必须立刻停止，不重启任何任务
 	n, err := mgr.RecoverAll(ctx)
