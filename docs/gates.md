@@ -69,6 +69,8 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `audit_calls_gate_test.go` | R30 · R31 · R34 · R35 | audit_calls_gate_test.go 是门禁 R35-a：审计调用点**棘轮**（只减不增）。 |
 | `audit_types_gate_test.go` | R35 | audit_types_gate_test.go 是门禁 R35-c：**审计类型/常量/接口的唯一实现处 = pkg/audit**。 |
 | `mutating_route_audit_gate_test.go` | R35-b | R35-b：**变更型路由必须有业务语义审计**（登记表 `mutating_route_audit.tsv` 三条 join：路由↔pattern、动作名真实存在、动作有场景证据；`pending` 受预算棘轮）。 |
+| `task_lifecycle_gate_test.go` | R43 | R43：**云任务状态机 × 重启恢复覆盖**（写入的状态必须登记；非终态不得 `keep`；`restart` 状态必须出现在 `restart :=` 判定式里）。 |
+| `quota_direct_release_gate_test.go` | R44 | R44：**账本原语直调点登记**（`commitUp`/`releaseUp`/`releaseCommittedUp` 不加锁；新增直调点必须写明为何不丢唤醒）。 |
 | `audit_mux_parity_gate_test.go` | R42 | R42：**两个 mux（主 / 隧道内层）必须挂同一组审计中间件**（`auditMiddleware` + `auditVolumeMiddleware`），防「隧道/CLI 路径无兜底审计、卷维度恒空」。 |
 | `audit_archive_prefix_gate_test.go` | R41 | R41：**审计归档前缀 `audit-archive` 只能出现在归档实现/装配点**（防证据前缀被挂到用户可见面；白名单制）。 |
 | `audit_readface_gate_test.go` | R35-e | R35-e：审计**读面**必须双 mux 注册 + 单一裁决点 `auditReadAllowed`（不得读请求参数放宽）+ 单一读管线 `readAuditEvents`。 |
