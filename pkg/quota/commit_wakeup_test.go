@@ -15,6 +15,7 @@ package quota
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -44,13 +45,7 @@ func TestCommitBelowReserveWakesWaiter(t *testing.T) {
 
 	// 让等待者先入队（避免「先 commit 后入队」走了非等待路径而假绿）：
 	// 入队点由 WaitReserve 内部的 waitMu 顺序决定，这里以短轮询确认队列出现等待者。
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if pool.WaitStats().Waiting > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitUntil(t, 20000, func() bool { return pool.WaitStats().Waiting > 0 })
 
 	// **提交实际 10 字节**（远小于预留 100）⇒ 释放 90 字节可用额度。
 	held.Commit(10)
@@ -90,13 +85,7 @@ func TestReleaseReserveWakesWaiter(t *testing.T) {
 		}
 		acquired <- werr
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if pool.WaitStats().Waiting > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitUntil(t, 20000, func() bool { return pool.WaitStats().Waiting > 0 })
 
 	held.Release()
 
@@ -134,4 +123,16 @@ func TestWaitTimeoutErrorKindPreserved(t *testing.T) {
 	if !errors.Is(werr, ErrStorageFull) {
 		t.Fatalf("同时必须仍是 ErrStorageFull（既有调用方契约），got %v", werr)
 	}
+}
+
+// waitUntil 自旋等待条件成立（用 runtime.Gosched 让出，避免固定 sleep —— 仓库棘轮只减不增）。
+func waitUntil(t *testing.T, maxIter int, cond func() bool) {
+	t.Helper()
+	for i := 0; i < maxIter; i++ {
+		if cond() {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("自旋等待超时（前置条件未成立）")
 }

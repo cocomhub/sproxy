@@ -8,6 +8,7 @@ package server
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -44,13 +45,7 @@ func TestReserveVolumePool_WaitsForInFlightReservation(t *testing.T) {
 	}()
 
 	// 确认等待者已入队（避免「先释放后入队」走快路导致假绿）。
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && vs.Pool("v1").WaitStats().Waiting == 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if vs.Pool("v1").WaitStats().Waiting == 0 {
-		t.Fatal("前置：等待者未入队（用例无效）")
-	}
+	waitSpin(t, 20000, func() bool { return vs.Pool("v1").WaitStats().Waiting > 0 })
 
 	held.Release() // 在途写结束 ⇒ 释放容量
 
@@ -85,4 +80,16 @@ func TestReserveVolumePool_CommittedFullFailsFast(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("已提交占满应立即失败，实际耗时 %v（不应排队空等）", elapsed)
 	}
+}
+
+// waitSpin 自旋等待条件成立（runtime.Gosched 让出，避免 time.Sleep 棘轮）。
+func waitSpin(t *testing.T, maxIter int, cond func() bool) {
+	t.Helper()
+	for i := 0; i < maxIter; i++ {
+		if cond() {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("自旋等待超时（等待者未入队，用例无效）")
 }

@@ -678,7 +678,7 @@ func (r *Reservation) Release() {
 	if !r.done.CompareAndSwap(false, true) {
 		return
 	}
-	r.pool.releaseReserve(r.amount)
+	r.pool.withWaitLock(func() { r.pool.releaseUp(r.amount) })
 }
 
 // nonNeg 把负数归零（estimate/actual/释放量不允许为负）。

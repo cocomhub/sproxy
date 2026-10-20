@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,16 +25,14 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
-// uniqueSuffix 生成唯一后缀（让每条种子任务有不同 URL，避免 CreateTask 去重）。
-func uniqueSuffix(submitted bool) string {
-	return fmt.Sprintf("%t-%d", submitted, time.Now().UnixNano())
-}
+// urlSeq 生成唯一后缀（让每条种子任务有不同 URL，避免 CreateTask 去重）。
+var urlSeq atomic.Uint64
 
 // seedPersistedTask 直接落盘一条任务（不启动下载），返回其 ID。
 func seedPersistedTask(t *testing.T, mgr *CloudDownloadManager, status string, submitted bool) string {
 	t.Helper()
 	// URL 必须唯一：CreateTask 对同 URL 去重（会返回既有任务，导致只落一条）。
-	url := fmt.Sprintf("http://127.0.0.1:1/%s-%s.bin", status, uniqueSuffix(submitted))
+	url := fmt.Sprintf("http://127.0.0.1:1/%s-%d.bin", status, urlSeq.Add(1))
 	task, err := mgr.CreateTask("url", url, "x.bin", 1024, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
@@ -57,7 +56,6 @@ func TestRecovery_QueuedSubmittedTaskRestarts(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	queued := seedPersistedTask(t, mgr, "pending", true)
-	time.Sleep(time.Millisecond) // 保证唯一后缀不同
 	orphan := seedPersistedTask(t, mgr, "pending", false)
 
 	mgr.mu.Lock()

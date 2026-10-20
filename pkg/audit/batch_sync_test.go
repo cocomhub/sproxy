@@ -18,6 +18,7 @@ import (
 // TestSyncBatch_FlushesByTime 定时器必须把「未满批次」的条目刷盘。
 func TestSyncBatch_FlushesByTime(t *testing.T) {
 	t.Parallel()
+	syncedCh := make(chan struct{}, 8)
 	var synced atomic.Int64
 	j, err := NewFileJournal(FileJournalConfig{
 		Dir: t.TempDir(), Layout: LayoutGlobal, GlobalName: "audit.log",
@@ -27,7 +28,13 @@ func TestSyncBatch_FlushesByTime(t *testing.T) {
 		t.Fatalf("NewFileJournal: %v", err)
 	}
 	t.Cleanup(func() { _ = j.Close() })
-	j.syncHook = func(string) { synced.Add(1) }
+	j.syncHook = func(string) {
+		synced.Add(1)
+		select {
+		case syncedCh <- struct{}{}:
+		default:
+		}
+	}
 
 	// 写 3 条（远小于 batchLines=1000）⇒ 只有定时器能触发 fsync。
 	for i := 0; i < 3; i++ {
@@ -36,11 +43,9 @@ func TestSyncBatch_FlushesByTime(t *testing.T) {
 		}
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && synced.Load() == 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if synced.Load() == 0 {
+	select {
+	case <-syncedCh:
+	case <-time.After(2 * time.Second):
 		t.Fatal("SyncBatch 未按时间刷盘（kill -9 会丢未满批次证据）")
 	}
 }
