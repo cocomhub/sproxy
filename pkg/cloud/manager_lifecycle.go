@@ -152,6 +152,12 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	task.integritySames = 0
 	task.integrityLastChecksum = ""
 	task.IntegrityStatus = ""
+	// C2 边界：**显式 resume 一律重下**（含 completed+damaged 自愈修复）⇒ 清掉「产物完整」
+	// 标记，否则恢复复用分支会把用户要修的坏产物当成好产物直接转存。
+	// 进程重启的自动恢复**不走本函数**，故 C2 的「跳过重复下载」仍生效。
+	task.DownloadDone = false
+	task.DownloadedSize = 0
+	task.DownloadedChecksum = ""
 
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	// resumeReserved 记录**本次调用**新落的占位（0 = 未新增，此时 task.ReservedSize 是任务失败时
