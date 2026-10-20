@@ -133,19 +133,27 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 func (m *CloudDownloadManager) recoverTasks() (int, []string) {
 	recovered := 0
 	restarted := 0
+	unreadable := 0
 	var orphanPendingGroups []string
 	for _, tenant := range m.listTenants() {
 		root := m.cloudStateRootFor(tenant)
 		if root == nil {
 			continue
 		}
-		n1, n2, orphans := m.recoverTasksFromDir(root)
+		n1, n2, orphans, skipped := m.recoverTasksFromDir(root)
 		recovered += n1
 		restarted += n2
+		unreadable += skipped
 		orphanPendingGroups = append(orphanPendingGroups, orphans...)
 	}
+	// NEW-2：**不可读/坏 JSON 的任务必须可观测**（此前只逐条 Warn ⇒ 汇总层面「全部成功」）。
+	if unreadable > 0 {
+		m.logger.Warn("cloud tasks unreadable on recovery (skipped, not resumable)",
+			"skipped", unreadable, "recovered", recovered)
+	}
 	if recovered > 0 {
-		m.logger.Info("cloud download tasks recovered", "count", recovered, "restarted", restarted)
+		m.logger.Info("cloud download tasks recovered", "count", recovered, "restarted", restarted,
+			"skipped", unreadable)
 	}
 	return recovered, orphanPendingGroups
 }
@@ -175,12 +183,12 @@ func (m *CloudDownloadManager) RecoverAll() (int, error) {
 
 // recoverTasksFromDir 解析单个租户持久化目录下的任务 JSON 并挂入 m.tasks，同时重启崩溃前
 // downloading 的任务、把孤儿 pending 转终态。返回恢复数、重启数与需要刷新状态的孤儿组 ID。
-func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int, []string) {
+func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int, []string, int) {
 	entries, err := root.ReadDir(cloudStateRel)
 	if err != nil {
-		return 0, 0, nil
+		return 0, 0, nil, 0
 	}
-	recovered, restarted := 0, 0
+	recovered, restarted, unreadable := 0, 0, 0
 	var orphanPendingGroups []string
 	// 先**收集**，循环内不动 `m.tasks`：循环里会为 downloading 任务启动下载 goroutine，
 	// 而无锁写与它们的持锁访问并发 ⇒ data race（`-race` 实测），极端时序下
@@ -194,18 +202,23 @@ func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int
 		data, err := readRootFile(root, cloudStateRel+"/"+e.Name())
 		if err != nil {
 			m.logger.Warn("failed to read persisted task, skipping", "file", e.Name(), "error", err)
+			unreadable++
 			continue
 		}
 		var task CloudTask
 		if err := json.Unmarshal(data, &task); err != nil {
 			m.logger.Warn("failed to unmarshal persisted task, skipping", "file", e.Name(), "error", err)
+			unreadable++
 			continue
 		}
 		// 重启后以磁盘实际占用为基准重算 ReservedSize，
 		// 与 StorageManager 启动扫描的计数器保持一致（不信任崩溃前持久化的占位值）
 		m.reconcileReservedSize(&task)
 		recovered++
-		pending = append(pending, recoveredTask{task: &task, restart: task.Status == "downloading"})
+		// C1：**已提交过**（Submitted）的 pending 任务 = 排队中/正在等并发槽 ⇒ 重启必须继续；
+		// 只有「从未被 SubmitAndStart 接管」的 pending 才是真孤儿（CreateTask 与启动之间崩溃）。
+		restart := task.Status == "downloading" || (task.Status == "pending" && task.Submitted)
+		pending = append(pending, recoveredTask{task: &task, restart: restart})
 	}
 
 	// 持锁**一次性**插入：此后 `m.tasks` 对一切持锁访问者可见且完整（不再有无锁写）。
@@ -213,7 +226,11 @@ func (m *CloudDownloadManager) recoverTasksFromDir(root *storage.Root) (int, int
 
 	// 再按状态处理（启动下载 / 孤儿 pending）：此刻循环已结束，不存在无锁写与 goroutine 并发。
 	restarted, orphanPendingGroups = m.activateRecoveredTasks(pending, orphanPendingGroups)
-	return recovered, restarted, orphanPendingGroups
+	if unreadable > 0 {
+		// 指标在**唯一解析处**累计：无论调用方是 RecoverAll 还是测试，口径一致。
+		m.metrics.RecoverySkipped.Add(int64(unreadable))
+	}
+	return recovered, restarted, orphanPendingGroups, unreadable
 }
 
 // recoveredTask 是恢复循环收集到的一条任务及其后续处置。
@@ -248,9 +265,9 @@ func (m *CloudDownloadManager) activateRecoveredTasks(pending []recoveredTask, o
 			restarted++
 			continue
 		}
-		// 仅重启 downloading；pending 不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
-		// 就崩溃导致意外启动的边界情况。
-		if p.task.Status == "pending" {
+		// 仅重启「downloading」与「已提交但仍在排队（pending+Submitted）」；**从未提交**的
+		// pending 不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart 就崩溃导致意外启动。
+		if p.task.Status == "pending" && !p.task.Submitted {
 			// 孤儿 pending：已落盘却从未启动（详见 failOrphanPendingTask）。
 			m.failOrphanPendingTask(p.task)
 			if p.task.GroupID != "" {

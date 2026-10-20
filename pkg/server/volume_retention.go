@@ -206,7 +206,12 @@ func (h *Handlers) retentionCleanAudit(ttl time.Duration, now time.Time, log *sl
 	// 超龄数据大多已搬到冷存储 ⇒ 不清理则「保留期不生效、磁盘只增不减」。
 	// 时间未知的冷段保守保留（PurgeCold 内保证）。
 	if coldFS := h.auditColdFS(); coldFS != nil {
-		if n, perr := audit.PurgeCold(context.Background(), coldFS, "", cutoff); perr != nil {
+		// R14 NEW-4：远端冷卷的 List/Delete 可能无限挂起（此前用 context.Background()）⇒
+		// 保留期任务被永久阻塞、后续清理不再推进。给单轮清理一个明确上限。
+		pctx, cancel := context.WithTimeout(context.Background(), auditColdRetentionTimeout)
+		n, perr := audit.PurgeCold(pctx, coldFS, "", cutoff)
+		cancel()
+		if perr != nil {
 			log.Warn("卷级 retention：清理过期冷段失败（部分保留，下次重试）",
 				"removed", n, "error", perr.Error())
 		} else if n > 0 {
@@ -214,6 +219,9 @@ func (h *Handlers) retentionCleanAudit(ttl time.Duration, now time.Time, log *sl
 		}
 	}
 }
+
+// auditColdRetentionTimeout 是**单轮**冷段保留期清理的时限（远端冷卷 List/Delete 不得无限挂起）。
+const auditColdRetentionTimeout = 30 * time.Second
 
 // rewriteAuditLog 把 audit.log 中 TS < cutoff 的行剔除后原子重写（tmp + rename）。
 // 源文件先读入内存并关闭句柄再 rename——Windows 下对仍被打开的 dest 文件 Rename 覆盖

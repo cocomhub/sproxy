@@ -160,3 +160,69 @@ func TestReadTailCold_ReadsBounded(t *testing.T) {
 		t.Fatalf("最后一条应是段尾最后一条, got %q", got[1].Object)
 	}
 }
+
+// TestReadTailCold_CrossChunkLine R14 C11：**跨 256KiB 块的条目不得丢失**。
+//
+// 构造是**可判定的**：先算出「段尾 256KiB」边界，并让某条大对象条目的行恰好跨过它
+// （把尾部填充量裁到 tailChunkBytes - len(big) + len(big)/2）。旧实现把该行的两半分别丢掉 ⇒
+// 整条消失。
+func TestReadTailCold_CrossChunkLine(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	fsys := syncpkg.NewLocalFS(dir, nil)
+	base := time.Unix(1_800_000_000, 0).UTC()
+
+	mk := func(object string, ts time.Time) []byte {
+		line, err := json.Marshal(Entry{
+			Scope: "system", Kind: KindEvent, Action: "cross_probe",
+			Type: "sensitive", Result: "success", Object: object, TS: ts,
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return append(line, '\n')
+	}
+
+	head := bytes.Buffer{}
+	for i := range 5 {
+		head.Write(mk(fmt.Sprintf("head-%d", i), base.Add(time.Duration(i)*time.Second)))
+	}
+	bigObject := "big:" + strings.Repeat("x", 4<<10)
+	bigLine := mk(bigObject, base.Add(100*time.Second))
+
+	// 尾部填充量：使 boundary = S - tailChunkBytes 落在 bigLine 内。
+	tailNeed := tailChunkBytes - len(bigLine) + len(bigLine)/2
+	tail := bytes.Buffer{}
+	for i := 0; tail.Len() < tailNeed; i++ {
+		tail.Write(mk(fmt.Sprintf("tail-%d:%s", i, strings.Repeat("y", 512)), base.Add(time.Duration(200+i)*time.Second)))
+	}
+	// 裁掉超出部分（按整行裁不了就保留——只要 boundary 仍落在 bigLine 内即可，下面用断言校验）。
+	content := append(append(head.Bytes(), bigLine...), tail.Bytes()...)
+	if err := os.WriteFile(filepath.Join(dir, "audit.log.1.aaaaaaaaaaaaaaaa"), content, 0o640); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// 前提断言：边界确实落在 bigLine 内部（否则用例无效）。
+	boundary := int64(len(content)) - tailChunkBytes
+	bigStart := int64(head.Len())
+	if boundary <= bigStart || boundary >= bigStart+int64(len(bigLine)) {
+		t.Fatalf("前置失败：边界 %d 未落在 big 条目 [%d,%d) 内（用例无效）",
+			boundary, bigStart, bigStart+int64(len(bigLine)))
+	}
+
+	got, err := ReadTailCold(ctx, fsys, []string{""}, EntryFilter{}, 1000)
+	if err != nil {
+		t.Fatalf("ReadTailCold: %v", err)
+	}
+	found := false
+	for _, e := range got {
+		if strings.HasPrefix(e.Object, "big:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("跨块条目丢失（C11 未修）：返回 %d 条但缺少 big 条目", len(got))
+	}
+}

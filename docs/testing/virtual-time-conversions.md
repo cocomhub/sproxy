@@ -213,3 +213,9 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 进程内共享状态（播种的 `POST /api/notify/test` 与面板读取都落在同一个 `audit.Service`）⇒ 并发会互相
 干扰（读到对方/读到空表）。注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（该文件 2 → 3，
 总数 +1，无其它文件 slack 变化）。
+
+## 串行 Test 登记理由（R14 新增）
+
+| 文件 | 串行数 | 理由 |
+| --- | --- | --- |
+| `pkg/cloud/recovery_queued_test.go` | 3 | 三个用例都直接操作**同一个** `CloudDownloadManager` 的 `m.tasks`/磁盘状态（恢复路径会启动下载 goroutine 并读写共享 map）⇒ 并行会互相污染状态；且恢复语义本身依赖「单进程内唯一一次 RecoverAll」。已用**唯一 URL + 独立 tempdir** 降低耦合，但不满足 `t.Parallel()` 的隔离前提。 |

@@ -1028,6 +1028,16 @@ func (h *Handlers) cloudArchiveToVolume(
 	// 会做「**未曾提交的释放**」（幻影释放 ⇒ 扣同账本其它占用 ⇒ 少计 ⇒ 可超 owner 配额）。
 	// 键空间与 cloud 下载转存一致：Scope 键 = `<bucket>/<path>`（即 `user/<rel>`）。
 	chargeScope := h.quotaScopeFor(t.Owner, path.Join(string(loc.Bucket()), string(loc.Path())))
+	// R14 C6：**写前配额探针**（探测式：预留后立即释放，不排队）。此前本路径只做写后
+	// `settleArchiveCharge`→`scope.Adjust`（永不失败）⇒ 配额已满时**仍会写入并越界**。
+	// 对照 cloud 下载转存（`pkg/cloud/transfer.go` 的 ProbeReserve）同口径。
+	// TotalSize 是源可见总量（上界近似）；未知（0/负）时跳过探针，由写路径自身兜底。
+	if perr := probeArchiveQuota(chargeScope, t.TotalSize); perr != nil {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: "目标卷配额不足: " + perr.Error(),
+		}, http.StatusInsufficientStorage)
+		return
+	}
 	chargeUserRel := archiveTargetRel(t.TargetPath, archiveName)
 	chargeBefore := h.archiveTargetCharge(t.TargetVolume, t.Owner, rel, chargeUserRel)
 	url, terr := transfer.Execute(r.Context(), transfer.TransferRequest{
@@ -1063,6 +1073,16 @@ func (h *Handlers) cloudArchiveToVolume(
 		onSuccess(url)
 	}
 	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url, TaskCount: len(t.Entries)}, http.StatusOK)
+}
+
+// probeArchiveQuota 是归档转存的**写前配额探针**（R14 C6）：探测式（预留后立即释放、不排队）。
+// 抽成函数以避免给 cloudArchiveToVolume 增加分支（gocognit 门禁）。scope 为 nil（未装配配额）
+// 或 size ≤ 0（打包流真实长度不可知）时跳过 —— 由写路径自身兜底。
+func probeArchiveQuota(scope *quota.Scope, size int64) error {
+	if scope == nil || size <= 0 {
+		return nil
+	}
+	return scope.ProbeReserve(size)
 }
 
 // settleArchiveCharge 把归档转存产物计入 owner 配额。before = 写入前实测、after = 写入后实测

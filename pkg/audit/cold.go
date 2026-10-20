@@ -262,7 +262,10 @@ func ReadTailCold(ctx context.Context, fs syncpkg.FS, roots []string, f EntryFil
 	if err != nil {
 		return nil, err
 	}
-	var got []Entry // 保持「新 → 旧」
+	var (
+		got      []Entry // 保持「新 → 旧」
+		firstErr error
+	)
 	for _, seg := range segs {
 		if len(got) >= limit {
 			break
@@ -273,15 +276,19 @@ func ReadTailCold(ctx context.Context, fs syncpkg.FS, roots []string, f EntryFil
 		if coldSegmentBeforeSince(seg, f) {
 			continue // 整段早于 Since 过滤 ⇒ 跳过（无需 IO）
 		}
-		batch := tailEntries(ctx, fs, seg, f, limit-len(got)) // 升序，最多 need 条
-		slices.Reverse(batch)                                 // → 降序
+		batch, berr := tailEntries(ctx, fs, seg, f, limit-len(got)) // 升序，最多 need 条
+		if berr != nil && firstErr == nil {
+			// R14 NEW-4：读失败不得静默截断（部分结果仍返回，错误上抛给调用方告警）。
+			firstErr = berr
+		}
+		slices.Reverse(batch) // → 降序
 		got = append(got, batch...)
 	}
 	if len(got) > limit {
 		got = got[:limit]
 	}
 	slices.Reverse(got) // 降序 → 全局升序
-	return got, nil
+	return got, firstErr
 }
 
 // newestFirstColdSegments 汇总所有 root 的冷段，按段内最后一条时间**倒序**（无额外 IO：
@@ -311,43 +318,69 @@ func coldSegmentBeforeSince(seg ColdSegment, f EntryFilter) bool {
 
 // tailEntries 从段尾向前按块读取，返回该段内**满足过滤、最多 need 条、升序**的条目。
 // 读够 need 条即停（不会为了一段把整段读完）。
-func tailEntries(ctx context.Context, fs syncpkg.FS, seg ColdSegment, f EntryFilter, need int) []Entry {
+//
+// **跨块行**（评审 R14 C11）：块边界可能落在某一行的中间。若只丢「块首残行」（旧实现），
+// 该行的两半会分属两个块 —— 新块里作为**首元素**被丢、旧块里作为**末元素**缺换行解码失败
+// ⇒ **整条消失**（每跨一个边界丢 1 条）。这里用 `carry` 把较新块的首残行（该行的**尾段**）
+// 传给下一（更旧）块：其**末行**正是同一行的首段 ⇒ 拼接后解码。
+func tailEntries(ctx context.Context, fs syncpkg.FS, seg ColdSegment, f EntryFilter, need int) ([]Entry, error) {
 	if seg.Size <= 0 || need <= 0 {
-		return nil
+		return nil, nil
 	}
 	rr := syncpkg.AssertRangeReader(fs)
-	var got []Entry // 新 → 旧
+	var (
+		got   []Entry // 新 → 旧
+		carry []byte  // 较新块的首残行（跨块行的尾段）
+	)
 	end := seg.Size
 	for end > 0 && len(got) < need {
 		off := max(end-tailChunkBytes, 0)
-		chunk, ok := readColdChunk(ctx, fs, rr, seg, off, end)
-		if !ok {
-			break
+		chunk, cerr := readColdChunk(ctx, fs, rr, seg, off, end)
+		if cerr != nil {
+			// R14 NEW-4：读失败必须上抛（此前 break 后返回部分结果且无错误 ⇒ 静默截断）。
+			return finishTailEntries(got, need), cerr
 		}
-		got = append(got, chunkEntriesDesc(chunk, off > 0, f, need-len(got))...)
+		batch, nextCarry := chunkEntriesDesc(chunk, off > 0, carry, f, need-len(got))
+		got = append(got, batch...)
+		carry = nextCarry
 		if off == 0 {
 			break
 		}
 		end = off
 	}
+	return finishTailEntries(got, need), nil
+}
+
+// finishTailEntries 截断到 need 并反转为升序（新→旧 ⇒ 升序）。
+func finishTailEntries(got []Entry, need int) []Entry {
 	if len(got) > need {
 		got = got[:need]
 	}
-	slices.Reverse(got) // 新→旧 ⇒ 升序
+	slices.Reverse(got)
 	return got
 }
 
-// chunkEntriesDesc 把一段区间字节解码为**降序**（新→旧）条目，最多 need 条。
-// dropFirst=true 表示区间起点可能落在行中（首行不可信，丢弃）。
-func chunkEntriesDesc(chunk []byte, dropFirst bool, f EntryFilter, need int) []Entry {
-	if need <= 0 {
-		return nil
-	}
+// chunkEntriesDesc 把一段区间字节解码为**降序**（新→旧）条目，最多 need 条；返回本块首残行
+// （`partialFirst=true` 时）供更旧的块拼接。
+//
+// partialFirst=true 表示区间起点落在行中 ⇒ 本块首元素是该行的**尾段**（不可单独解码），
+// 作为 carry 交给下一块；若上一块留下了 carry，则本块**末元素**是同一行的**首段**，拼接后解码。
+func chunkEntriesDesc(chunk []byte, partialFirst bool, carry []byte, f EntryFilter, need int) ([]Entry, []byte) {
 	lines := strings.Split(string(chunk), "\n")
-	if dropFirst && len(lines) > 0 {
+	var nextCarry []byte
+	if partialFirst {
+		nextCarry = []byte(lines[0])
 		lines = lines[1:]
 	}
-	out := make([]Entry, 0, min(len(lines), need))
+	out := make([]Entry, 0, min(len(lines), max(need, 0)))
+	// 跨块行：本块末元素 + 上一块的 carry（末元素不带换行 ⇒ 拼上 carry 与换行后完整）。
+	if len(carry) > 0 && len(lines) > 0 && lines[len(lines)-1] != "" && len(out) < need {
+		joined := lines[len(lines)-1] + string(carry)
+		if e, ok := decodeSegmentLine([]byte(joined + "\n")); ok && f.Match(e) {
+			out = append(out, e)
+		}
+		lines = lines[:len(lines)-1]
+	}
 	for i := len(lines) - 1; i >= 0 && len(out) < need; i-- {
 		if lines[i] == "" {
 			continue
@@ -356,28 +389,31 @@ func chunkEntriesDesc(chunk []byte, dropFirst bool, f EntryFilter, need int) []E
 			out = append(out, e)
 		}
 	}
-	return out
+	return out, nextCarry
 }
 
 // readColdChunk 读冷段 [off, end) 区间；无区间能力时整段读后切分（能力探测回落，不静默返回空）。
-func readColdChunk(ctx context.Context, fs syncpkg.FS, rr syncpkg.RangeReader, seg ColdSegment, off, end int64) ([]byte, bool) {
+func readColdChunk(ctx context.Context, fs syncpkg.FS, rr syncpkg.RangeReader, seg ColdSegment, off, end int64) ([]byte, error) {
 	if rr != nil {
 		b, _, err := syncpkg.RangeReadAll(rr, ctx, seg.Path, off, end-off)
 		if err != nil {
-			return nil, false
+			return nil, fmt.Errorf("audit: 冷段区间读 %s [%d,%d) 失败: %w", seg.Path, off, end, err)
 		}
-		return b, true
+		return b, nil
 	}
 	rc, oerr := fs.OpenRead(ctx, seg.Path)
 	if oerr != nil {
-		return nil, false
+		return nil, fmt.Errorf("audit: 冷段打开 %s 失败: %w", seg.Path, oerr)
 	}
 	b, rerr := io.ReadAll(rc)
 	_ = rc.Close()
-	if rerr != nil || int64(len(b)) < end {
-		return nil, false
+	if rerr != nil {
+		return nil, fmt.Errorf("audit: 冷段读取 %s 失败: %w", seg.Path, rerr)
 	}
-	return b[off:end], true
+	if int64(len(b)) < end {
+		return nil, fmt.Errorf("audit: 冷段 %s 短读（size=%d < 请求末尾 %d）", seg.Path, len(b), end)
+	}
+	return b[off:end], nil
 }
 
 // PurgeCold 删除**最后一条时间早于 cutoff** 的冷段，返回删除数量。

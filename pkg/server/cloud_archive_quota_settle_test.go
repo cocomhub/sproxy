@@ -108,3 +108,31 @@ func TestCloudArchive_ToVolume_SettlesOwnerQuota(t *testing.T) {
 			"会做「未曾提交的释放」⇒ 幻影释放 ⇒ 少计/可超 owner 配额）；实际 Usage=%d", got)
 	}
 }
+
+// TestCloudArchive_ToVolume_QuotaFullRejectsBeforeWrite 锁定 R14 C6：**写前**配额探针。
+// 修复前只做写后 `settleArchiveCharge`（`scope.Adjust` 永不失败）⇒ 配额已满仍写入并越界。
+func TestCloudArchive_ToVolume_QuotaFullRejectsBeforeWrite(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	// 池容量 1 字节：源文件 12 字节 ⇒ 探针必然失败（放不下）。
+	h.globalPool = quota.NewPool(1)
+
+	id := createCompletedTask(t, mgr, "q.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"q.tar.gz","target_volume":"vault"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("配额不足必须 507（写前探针），got status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// 不得落任何产物：目标卷上 `user/archive/q.tar.gz` 不存在。
+	fs, ok := h.externalFSFor("vault")
+	if !ok {
+		t.Fatal("前置：vault 外部卷未装配")
+	}
+	if _, serr := fs.Stat(t.Context(), "user/archive/q.tar.gz"); serr == nil {
+		t.Fatal("配额不足时不得写入目标卷（写前探针必须早于 transfer.Execute）")
+	}
+}

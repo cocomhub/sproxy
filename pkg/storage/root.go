@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -39,6 +40,11 @@ type Root struct {
 	sealSource func() []SealRule
 	// 解密 reader / 加密 writer（透明）。OpenRoot 后经 SetEncryption 注入。
 	enc *rootEnc
+	// plainSize 缓存「密文尺寸/修改时间 → 明文长度」（评审 R14 NEW-5）：此前每次
+	// `OpenDecrypted` 都重跑 `encPlaintextSize`（逐块读 4B 头，O(#blocks) syscall），
+	// 而分块下载/Range 每个请求都会开一次 ⇒ 大文件重复扫描。
+	plainSizeMu sync.Mutex
+	plainSize   map[string]plainSizeEntry
 }
 
 // rootEnc 是加密态（key 32B + GCM 复用 + 分块大小——cipher 选型）。
@@ -127,11 +133,8 @@ func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
 	// 不解密，仅走每块长度头累计明文长度（加密格式：[magic][4B chunk] 重复
 	// [4B l][nonce|ct|tag]，l = overhead + 明文长）。探测失败回落密文长度（保持旧行为）。
 	size := fi.Size()
-	if pf, perr := rt.r.Open(rel); perr == nil {
-		if ps, pserr := encPlaintextSize(pf); pserr == nil {
-			size = ps
-		}
-		_ = pf.Close()
+	if ps, ok := rt.cachedPlaintextSize(rel, fi.Size(), fi.ModTime().UnixNano()); ok {
+		size = ps
 	}
 	return &encReadCloser{r: dr, c: f, size: size, open: func() (io.Reader, error) {
 		nf, oerr := rt.r.Open(rel)
@@ -373,6 +376,45 @@ type encReadCloser struct {
 	pos  int64                     // 已读位置（Seek End 语义返回）
 }
 
+// plainSizeEntry 是明文长度缓存条目（以密文尺寸 + mtime 作为失效键）。
+type plainSizeEntry struct {
+	csize int64
+	mtime int64
+	psize int64
+}
+
+// plainSizeCacheMax 是缓存条目上限（超出即整体清空：朴素但有界，避免无界增长）。
+const plainSizeCacheMax = 4096
+
+// cachedPlaintextSize 返回明文长度（命中缓存则跳过逐块扫描）。stat 变化（尺寸/mtime）即失效。
+func (rt *Root) cachedPlaintextSize(rel string, csize, mtime int64) (int64, bool) {
+	rt.plainSizeMu.Lock()
+	if e, ok := rt.plainSize[rel]; ok && e.csize == csize && e.mtime == mtime {
+		rt.plainSizeMu.Unlock()
+		return e.psize, true
+	}
+	rt.plainSizeMu.Unlock()
+
+	// 用**独立句柄**探测：encPlaintextSize 会 seek 到文件尾，复用调用方的句柄会打乱其读位置
+	// （回归用例 TestEncryptedPhysicalSize_MatchesDiskTruth 抓到过）。
+	pf, oerr := rt.r.Open(rel)
+	if oerr != nil {
+		return 0, false
+	}
+	psize, perr := encPlaintextSize(pf)
+	_ = pf.Close()
+	if perr != nil {
+		return 0, false
+	}
+	rt.plainSizeMu.Lock()
+	if rt.plainSize == nil || len(rt.plainSize) >= plainSizeCacheMax {
+		rt.plainSize = make(map[string]plainSizeEntry, plainSizeCacheMax)
+	}
+	rt.plainSize[rel] = plainSizeEntry{csize: csize, mtime: mtime, psize: psize}
+	rt.plainSizeMu.Unlock()
+	return psize, true
+}
+
 // encRootOverhead 是加密块头外的固定开销：nonce(12B) + GCM tag(16B)。
 const encRootOverhead = 12 + 16
 
@@ -461,7 +503,11 @@ func (e *encReadCloser) Seek(offset int64, whence int) (int64, error) {
 	return 0, fmt.Errorf("storage: 解密流仅支持 Seek(0, Start) 与 Seek(0, End)（或正偏移 SeekStart）")
 }
 
-// seekStart 重开解密流并废弃前 offset 字节（正偏移时才实际丢弃）。
+// seekStart 重开解密流并定位到明文 offset（评审 R14 C10）。
+//
+// 优先走**块头跳过**（`encRootReader.SeekPlain`）：只读每块 4 字节长度头并 Seek，不解密前面的
+// 块。旧实现 `io.CopyN(io.Discard, r, offset)` 会把前面所有块解密 ⇒ 1 GiB 文件末尾 Range 请求
+// 需解密 1 GiB、8 MiB 分块的 1 GiB 下载累计约 64 GiB 解密。底层不可 Seek 时回落复制丢弃。
 func (e *encReadCloser) seekStart(offset int64) (int64, error) {
 	if e.open == nil {
 		return 0, fmt.Errorf("storage: 解密流不支持重开")
@@ -475,6 +521,14 @@ func (e *encReadCloser) seekStart(offset int64) (int64, error) {
 	e.pos = 0
 	if offset == 0 {
 		return 0, nil
+	}
+	if er, ok := r.(*encRootReader); ok {
+		if serr := er.SeekPlain(offset); serr == nil {
+			e.pos = offset
+			return offset, nil
+		} else if !errors.Is(serr, errEncSeekUnsupported) {
+			return 0, fmt.Errorf("storage: 解密流 seek 失败 %d: %w", offset, serr)
+		}
 	}
 	n, derr := io.CopyN(io.Discard, r, offset)
 	e.pos = n

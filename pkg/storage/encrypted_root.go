@@ -20,6 +20,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -234,6 +235,79 @@ func newEncRootReader(key []byte, r io.Reader) (*encRootReader, error) {
 		return nil, fmt.Errorf("storage: 非法块大小 %d", chunk)
 	}
 	return &encRootReader{gcm: gcm, r: r, chunk: chunk}, nil
+}
+
+// errEncSeekUnsupported 表示底层流不支持 Seek（调用方回落「复制丢弃」路径）。
+var errEncSeekUnsupported = errors.New("storage: 解密流底层不支持 Seek")
+
+// SeekPlain 把解密流定位到**明文偏移** off（评审 R14 C10）。
+//
+// 关键：跳过前面的块时**只读 4 字节块头并 Seek**，不解密（旧实现 `io.CopyN(io.Discard)`
+// 会把前面每一块都解密 ⇒ 1 GiB 文件的末尾 Range 需要解密 1 GiB；8 MiB 分块的 1 GiB 下载
+// 累计约 64 GiB 解密量）。定位到目标块后只解密**该块**，并丢弃块内前 skip 字节。
+func (r *encRootReader) SeekPlain(off int64) error {
+	if off < 0 {
+		return fmt.Errorf("storage: 非法明文偏移 %d", off)
+	}
+	sk, ok := r.r.(io.Seeker)
+	if !ok {
+		return errEncSeekUnsupported
+	}
+	r.remain = r.remain[:0]
+	r.done = false
+	if _, err := sk.Seek(int64(len(encRootMagic))+4, io.SeekStart); err != nil {
+		return err
+	}
+	var plainSoFar int64
+	for off > 0 {
+		l, lerr := r.readBlockLen()
+		if lerr != nil {
+			return lerr
+		}
+		plainLen := l - encRootOverhead
+		if off < plainSoFar+plainLen {
+			return r.readBlockSkip(l, off-plainSoFar)
+		}
+		plainSoFar += plainLen
+		if _, err := sk.Seek(l, io.SeekCurrent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readBlockLen 读当前块的密文长度（4B 大端）。
+func (r *encRootReader) readBlockLen() (int64, error) {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r.r, lenBuf[:]); err != nil {
+		if err == io.EOF {
+			return 0, io.ErrUnexpectedEOF
+		}
+		return 0, err
+	}
+	l := int64(binary.BigEndian.Uint32(lenBuf[:]))
+	if l <= 0 || l > int64(r.chunk)+32 {
+		return 0, fmt.Errorf("storage: 非法密文块长 %d", l)
+	}
+	return l, nil
+}
+
+// readBlockSkip 读取并解密**当前块**（密文长度 l），把明文自 skip 起挂到 remain。
+func (r *encRootReader) readBlockSkip(l, skip int64) error {
+	blob := make([]byte, l)
+	if _, err := io.ReadFull(r.r, blob); err != nil {
+		return err
+	}
+	nonceSize := r.gcm.NonceSize()
+	plain, derr := r.gcm.Open(nil, blob[:nonceSize], blob[nonceSize:], nil)
+	if derr != nil {
+		return fmt.Errorf("storage: 解密失败: %w", derr)
+	}
+	if skip > int64(len(plain)) {
+		return io.ErrUnexpectedEOF
+	}
+	r.remain = append(r.remain, plain[skip:]...)
+	return nil
 }
 
 func (r *encRootReader) Read(p []byte) (int, error) {

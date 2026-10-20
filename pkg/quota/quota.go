@@ -372,6 +372,24 @@ func (p *Pool) commitUp(amount, actual int64) {
 	}
 }
 
+// commitReservation 把一笔预留对账为实际占用（评审 R14 C3）。
+//
+// 为什么需要：`commitUp` 在 actual < amount 时**释放了可用额度**（reserved 减少多于 committed
+// 增加）⇒ 必须像其它释放入口一样在根等待锁下变更并广播，否则等待者睡到超时才 507
+// （丢唤醒）。actual ≥ amount 时不增加可用额度 ⇒ 走快路（不抢 waitMu，避免写路径被排队影响）。
+func (p *Pool) commitReservation(amount, actual int64) {
+	if actual >= amount {
+		p.commitUp(amount, actual)
+		return
+	}
+	p.withWaitLock(func() { p.commitUp(amount, actual) })
+}
+
+// releaseReserve 归还预留（放弃）——统一走根等待锁 + 广播（丢唤醒的唯一收口）。
+func (p *Pool) releaseReserve(n int64) {
+	p.withWaitLock(func() { p.releaseUp(n) })
+}
+
 // releaseUp 沿父链归还预留 n（放弃预留）。
 //
 // 只向上传播**本层实际归还量**：本层 reserved 不足 n 时（调用方重复归还/重复结算的形态——
@@ -652,7 +670,7 @@ func (r *Reservation) Commit(actual int64) {
 	if !r.done.CompareAndSwap(false, true) {
 		return
 	}
-	r.pool.commitUp(r.amount, nonNeg(actual))
+	r.pool.commitReservation(r.amount, nonNeg(actual))
 }
 
 // Release 放弃预留（归还 reserved）。

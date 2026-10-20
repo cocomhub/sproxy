@@ -160,3 +160,26 @@ func TestAuditVolume_ReadFaceFilterAndProjection(t *testing.T) {
 		t.Fatalf("读面投影应带 volume, got %+v", evs)
 	}
 }
+
+// TestAuditVolume_UnknownVolumeNotBound R14 C12：`?volume=` 必须**校验存在性**后才绑定。
+// 修复前把原始值直接绑进 ctx ⇒ 单卷部署下可伪造审计归属，并压制「单卷兜底」（真值本可唯一推出）。
+func TestAuditVolume_UnknownVolumeNotBound(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{volSet: volumeDimSet("only")}
+	attachTestAudit(t, h)
+
+	var bound string
+	hnd := h.auditVolumeMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		bound = auditVolumeFrom(r.Context())
+	}))
+	hnd.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/upload?volume=ghost", nil))
+	if bound != "" {
+		t.Fatalf("不存在的卷不得绑定进 ctx（可伪造归属），got %q", bound)
+	}
+
+	// 真实卷仍应绑定。
+	hnd.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/upload?volume=only", nil))
+	if bound != "only" {
+		t.Fatalf("存在的卷应绑定, got %q", bound)
+	}
+}

@@ -59,6 +59,17 @@ type CloudTask struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	ReservedSize int64     `json:"-"`                  // 实际预留量（storageMgr + Scope），不持久化
 	GroupID      string    `json:"group_id,omitempty"` // 所属组 ID（可选）
+	// Submitted 表示「已被 SubmitAndStart/SubmitAndStartGroup 接管」（可能仍在排队等并发槽）。
+	// 为什么需要（评审 R14 C1）：磁盘状态要等拿到并发槽才写成 downloading ⇒ 排队中的任务在
+	// 重启时仍是 pending，被当作「从未启动的孤儿」转 failed（批量任务重启后大面积不继续）。
+	// 用独立布尔而不是新增 status：pending 的**去重语义**（findByURL 吸收同 URL）必须保持不变。
+	Submitted bool `json:"submitted,omitempty"`
+	// DownloadDone/DownloadedSize/DownloadedChecksum 记录「下载产物已完整落盘」。
+	// 为什么需要（评审 R14 C2）：下载完成后产物由 `.partial` 改名而来，重启时续传逻辑只认
+	// `.partial` ⇒ 已下完的字节被丢弃、整文件重下。有了该标记，恢复时可直接进入转存。
+	DownloadDone       bool   `json:"download_done,omitempty"`
+	DownloadedSize     int64  `json:"downloaded_size,omitempty"`
+	DownloadedChecksum string `json:"downloaded_checksum,omitempty"`
 	// Transfer 是转存目标（客户端任务参数）：下载完成后把产物转存到指定卷
 	// （secretdata 自动加密 / 普通卷纯上传）。null = 不转存（仅下载本地）。
 	Transfer *TransferSpec `json:"transfer,omitempty"`
@@ -364,6 +375,9 @@ type CloudMetrics struct {
 	TasksCancelled  atomic.Int64 // 取消的任务数
 	TasksRetried    atomic.Int64 // 重试的任务数
 	BytesDownloaded atomic.Int64 // 云端下载总字节数
+	// RecoverySkipped 是启动恢复时**读不出/解析不了**而被跳过的任务数（评审 R14 NEW-2：
+	// 此前仅 Warn 跳过，不计入任何指标 ⇒ 「重启续传看起来全部成功」）。
+	RecoverySkipped atomic.Int64
 	ActiveDownloads atomic.Int64 // 当前活跃下载数
 	// 转存（transfer）指标：下载后转存到目标卷的次数/失败（含目标卷异常、文件异常）。
 	TransfersSucceeded   atomic.Int64 // 转存成功次数

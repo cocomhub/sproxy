@@ -581,6 +581,21 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	}
 	destPath := filepath.Join(taskDir, task.Filename)
 
+	// C2：**产物已完整**（下载成功后才崩在转存前/终态前）⇒ 跳过重复下载，直接进入后续阶段。
+	// 为什么必须做：下载完成时 `.partial` 已被改名成正式产物，而续传只认 `.partial`
+	// ⇒ 直接重下会把已下完的整个文件丢掉重来（TB 级源代价极高）。
+	if reused := m.reuseDownloadedArtifact(task, destPath); reused != nil {
+		m.logger.Info("cloud download: 复用已完成的下载产物，跳过重复下载",
+			"task_id", task.ID, "size", reused.Size, "transfer", task.Transfer != nil)
+		var handled bool
+		if handled, reused = m.transferAfterDownload(ctx, dlCtx, task, destPath, reused); handled {
+			return
+		}
+		m.finalizeCompleted(task, reused, destPath)
+		m.cleanupCloudIfNotNeeded(task, destPath)
+		return
+	}
+
 	// 执行下载（带重试）。审计：download 阶段 span 由 runDownloadWithAudit 包裹（收敛复杂度）——
 	// 其内部 runRetryLoop（含 #743 完整性校验管道 + 并发槽 acquire/释放）逐次执行，完整性与
 	// 审计双语义并集保留。
@@ -591,6 +606,9 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	if m.handleDownloadDone(ctx, dlCtx, task, destPath, result, downloadErr, &handedOff) {
 		return
 	}
+	// C2：下载成功 ⇒ 立即持久化「产物完整」标记（在转存/终态之前）。崩溃/被 kill 后恢复时
+	// 据此跳过重复下载；转存失败触发的「文件异常重下」与显式 resume 会清掉该标记。
+	m.markDownloadArtifactDone(task, destPath, result)
 	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
 	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
 	// 删本地重下载（两次校验和一致仍失败 → 任务失败）。KeepLocal=false 转存成功后删本地。
@@ -1689,6 +1707,50 @@ func sameTaskParams(existing *CloudTask, params TaskParams) bool {
 // **fail-closed 顺序**：确认产物消失后才回拨（删除失败则不回拨，避免「账本已减而字节仍在」；
 // 该占用由任务终结路径统一释放）。**不回拨全局占位**（ReservedSize）：任务仍在运行、产物将被
 // 重下重建，占位是本任务的磁盘上界，应保持。
+// markDownloadArtifactDone 持久化「下载产物已完整落盘」（评审 R14 C2）。
+// 失败只告警：标记是**优化**（避免重复下载），缺了仍会正确重下 —— 不得因持久化失败中断任务。
+func (m *CloudDownloadManager) markDownloadArtifactDone(task *CloudTask, destPath string, result *downloader.Result) {
+	if result == nil {
+		return
+	}
+	st, err := os.Stat(destPath)
+	if err != nil || st.Size() <= 0 {
+		return
+	}
+	m.mu.Lock()
+	task.DownloadDone = true
+	task.DownloadedSize = st.Size()
+	task.DownloadedChecksum = result.Checksum
+	m.mu.Unlock()
+	if serr := m.saveTask(task); serr != nil {
+		m.logger.Warn("persist download-done marker failed (will re-download on restart)",
+			"task_id", task.ID, "error", serr)
+	}
+}
+
+// reuseDownloadedArtifact 判定「重启后可直接复用下载产物」：标记存在且产物尺寸与记录一致。
+// 返回可用于后续转存/终态的 Result（checksum 取自持久化记录；Integrity 记为本地校验态）。
+func (m *CloudDownloadManager) reuseDownloadedArtifact(task *CloudTask, destPath string) *downloader.Result {
+	m.mu.RLock()
+	done, size, ck := task.DownloadDone, task.DownloadedSize, task.DownloadedChecksum
+	m.mu.RUnlock()
+	if !done || size <= 0 {
+		return nil
+	}
+	st, err := os.Stat(destPath)
+	if err != nil {
+		return nil
+	}
+	if st.Size() != size {
+		m.logger.Warn("下载产物尺寸与记录不符，放弃复用（将重下）",
+			"task_id", task.ID, "on_disk", st.Size(), "recorded", size)
+		return nil
+	}
+	return &downloader.Result{
+		Size: size, Checksum: ck, Integrity: downloader.ModeLocalOnly, ModTime: st.ModTime(),
+	}
+}
+
 func (m *CloudDownloadManager) discardTaskOutputForRedownload(task *CloudTask, destPath string) {
 	rerr := m.removeFileOrDefault()(destPath)
 	if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
@@ -1696,6 +1758,13 @@ func (m *CloudDownloadManager) discardTaskOutputForRedownload(task *CloudTask, d
 			"task_id", task.ID, "error", rerr)
 		return
 	}
+	// C2：产物已被删除 ⇒ 清掉「下载完成」标记，否则下一次恢复会误判产物完整而跳过下载。
+	m.mu.Lock()
+	task.DownloadDone = false
+	task.DownloadedSize = 0
+	task.DownloadedChecksum = ""
+	m.mu.Unlock()
+	_ = m.saveTask(task)
 	if task.account == nil {
 		return
 	}
