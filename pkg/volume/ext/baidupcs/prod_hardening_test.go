@@ -11,12 +11,15 @@ package baidupcs
 //     （Execute 永不返回、sync 任务永久 syncing、整卷上传锁被永久持有）。
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/qjfoidnh/BaiduPCS-Go/requester"
 	"github.com/qjfoidnh/BaiduPCS-Go/requester/uploader"
 )
 
@@ -109,5 +112,35 @@ func TestShouldTerminatePart(t *testing.T) {
 	// ③ 分片计数互相独立（同一次尝试不影响其它片）。
 	if err := u2.shouldTerminatePart(8, nil, errors.New("boom")); err != nil {
 		t.Fatalf("其它分片首次失败不应终止: %v", err)
+	}
+}
+
+// TestBaiduDURLCheck_Wiring 接线级验证：baiduDURLCheck 必须走 probeTotalSize（206 的
+// Content-Length 是区间长度，不能当总大小）。只测 probeTotalSize 会漏掉「接线改了」。
+func TestBaiduDURLCheck_Wiring(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == "" {
+			t.Errorf("探测必须带 Range 头")
+		}
+		w.Header().Set("Content-Range", "bytes 0-32767/1048576")
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(make([]byte, 1024))
+	}))
+	defer srv.Close()
+
+	cli := requester.NewHTTPClient()
+	size, resp, err := baiduDURLCheck(context.Background(), cli, srv.URL)
+	if err != nil {
+		t.Fatalf("baiduDURLCheck: %v", err)
+	}
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	if size != 1048576 {
+		t.Fatalf("探测到的总大小 = %d, want 1048576（1024 是区间长度 ⇒ 会静默截断）", size)
 	}
 }
