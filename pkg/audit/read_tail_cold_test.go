@@ -31,7 +31,7 @@ func writeColdSeg(t *testing.T, dir, name string, start time.Time, count int) st
 		t.Fatalf("mkdir: %v", err)
 	}
 	var b bytes.Buffer
-	for i := 0; i < count; i++ {
+	for i := range count {
 		line, err := json.Marshal(Entry{
 			Scope: "system", Kind: KindEvent, Action: "tail_probe",
 			Type: "sensitive", Result: "success", Object: fmt.Sprintf("%s-%d", name, i),

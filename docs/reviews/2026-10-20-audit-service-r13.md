@@ -48,12 +48,16 @@
 
 **变异验证（7 命中）**：R35-b 删登记 / 意造动作名 / pending 超预算 / 动作无场景证据；R35-e 去 export 门 / 裁决读 URL / 去 PrincipalFrom 优先。
 
-## 4. 剩余待办（未修，按严重度）
+## 4. 剩余待办
 
-| 级别 | 问题 | 建议 |
-| --- | --- | --- |
-| P3 | `audit.OpenRange` 非测试零调用（`QueryCold` 只走流式） | 读面接上按需区间读（与 `ReadTail` 同批）或删除（API 口径，需裁定） |
-| P3 | 归档卷写入的**对账口径**：`reconcileVolumePool` 按 tenant 桶校准卷占用，而 `audit-archive/` 不在任何桶内 ⇒ 若归档卷与默认卷同卷，每轮对账会把归档字节「修正」掉（卷上限被绕过） | 归档卷必须**专用且非默认卷**（配置校验）+ 回归用例；容量记账本身已由 `capacity.CapacityFS` 覆盖（无需新账本） |
+**全部关闭**（R13 共 21 项：第一轮 8 + 第二轮 9 + 第三轮 3 + 本轮 3 大项）。
+
+最后两项的处理记录：
+
+| 原项 | 结论 |
+| --- | --- |
+| `audit.OpenRange` 非测试零调用 | 接到生产：`GET /api/audit/cold/seg` 区间读（仅 admin、`path` 走 `ListCold` 白名单、区间夹紧 64KiB–4MiB、`Content-Range` 续读）；同时新增 `ReadTailCold`（修 newest-first 结果集错误 + 只读最新段尾部），`probeSegmentTimes` 早已复用 `RangeReader` |
+| 归档卷写入未接配额账本 | **前提被推翻**：容量记账已由 `capacity.CapacityFS`（FS 层，唯一 `LedgerCounter`）覆盖，`PurgeCold` 的 `Delete` 自动释放 ⇒ 无需新账本。真缺陷是**对账抹账**（`adjustVolumePool` 按 tenant 桶校准，`audit-archive/` 不在桶内）⇒ 用**归档卷专用性校验**（非默认卷 + 白名单为空的专用卷）结构性消除，并同时满足证据隔离；R41 门禁钉住前缀不被挂到用户面 |
 
 ## 5. 复核结论
 

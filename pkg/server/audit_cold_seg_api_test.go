@@ -36,7 +36,7 @@ func writeColdAuditSegment(t *testing.T, dir, name string, base time.Time, count
 		t.Fatalf("mkdir: %v", err)
 	}
 	var b strings.Builder
-	for i := 0; i < count; i++ {
+	for i := range count {
 		line, err := json.Marshal(audit.Entry{
 			Scope: "system", Kind: audit.KindEvent, Action: "cold_probe",
 			Type: audit.TypeSensitive, Result: audit.ResultSuccess,
