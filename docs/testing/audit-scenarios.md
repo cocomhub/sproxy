@@ -18,7 +18,7 @@ grep -rhoE 'Action: *"[^"]+"' --include=*.go pkg/ | sed 's/.*"\(.*\)"/\1/' | sor
 grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 's/.*"\(.*\)"/\1/' | sort -u
 ```
 
-## 2. 覆盖矩阵（2026-10-20 快照：**59/59 埋点动作已覆盖**）
+## 2. 覆盖矩阵（2026-10-20 快照：**60/60 埋点动作已覆盖**）
 
 ### 2.1 文件 / 目录（`pkg/files` + `pkg/server`）
 
@@ -94,9 +94,9 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | ~~P2~~ ✅ | ~~`sync_task_create`~~ | 已补（`audit_sync_scenarios_test.go`） | — |
 | ~~P2~~ ✅ | ~~`sync_conflict_resolve`~~ | 已补（注入真实冲突记录 + 真实 handler） | — |
 | ~~P2~~ ✅ | ~~`cloud_group_create` / `cloud_group_delete`~~ | 已补（`audit_cloud_group_scenarios_test.go`） | — |
-| — | **无剩余 GAP** | 59/59 埋点动作均有断言 | — |
+| — | **无剩余 GAP** | **60/60 埋点动作均有断言** | — |
 | ~~P2~~ ✅ | ~~`credential_login`~~ | 已补（`audit_login_scenarios_test.go`） | — |
-| P3 | `ai.embed` | **未埋点**（`ActionAIEmbed` 常量存在但全仓无 `Action:` 使用点） | 先决定是否要该事件；要则补埋点 + 断言（**不含文本内容**） |
+| P3 | `ai.embed` | `pkg/server/audit_ai_embed_scenarios_test.go` + `pkg/aiembed/observer_test.go`（服务端 wiring `NewEmbedClient` 注入 Observer；断言**不含被嵌入文本**） | ✅ |
 
 ## 4. 编写纪律（§9.3）
 

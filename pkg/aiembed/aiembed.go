@@ -43,6 +43,12 @@ type Config struct {
 	Model    string        // openai: text-embedding-3-small；ollama: nomic-embed-text
 	Dim      int           // 向量维数（<=0 → 默认 1536）
 	Timeout  time.Duration // 默认 30s
+	// Observer 是**成功一次嵌入**后的观察者（审计/可观测接缝）。
+	//
+	// 契约：只报告**规模元数据**（provider/model/条数），**绝不携带被嵌入的文本**——
+	// 文本属于用户内容，进审计/日志即扩散（设计 §5.7 同旨）；也不在失败时调用（失败由
+	// 调用方按自身语义决定是否留痕）。服务端装配时注入 `Handlers` 的 RecordAudit 包装。
+	Observer func(ctx context.Context, provider, model string, count int)
 }
 
 // Client 是 embedding 客户端。
@@ -161,6 +167,9 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	}
 	if len(raw) != len(texts) {
 		return nil, fmt.Errorf("aiembed: 响应 %d 条向量，want %d", len(raw), len(texts))
+	}
+	if c.cfg.Observer != nil {
+		c.cfg.Observer(ctx, c.cfg.Provider, c.cfg.Model, len(texts))
 	}
 	return toFloat32Vectors(raw), nil
 }
