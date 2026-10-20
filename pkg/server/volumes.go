@@ -651,10 +651,18 @@ func (h *Handlers) reserveVolumePool(ctx context.Context, route *volumeRoute, vo
 	if need <= 0 {
 		return nil // 净增为 0（覆盖写更小/等大）：无需卷池探测
 	}
-	// **暂不排队**（保留 TryReserve）：本路径的等待语义需先定（哪些调用方期望「立即 507」、
-	// 哪些期望「排队等空间」），否则会把测试/交互从「立即失败」变成 30s 等待（实测 pkg/server 整包超时 ✗）。
-	// 排队收敛待「该路径的等待语义」裁定后单独进行（R36-a 已登记为 pending）。
+	// R14 C4：**在途预留占满时排队等待**（有界），而非一律立即 507。
+	//
+	// 语义边界（刻意保守）：只有当容量被**在途预留**（`pool.Reserved() > 0`，即别的写者正在写、
+	// 提交/放弃后必然释放）占满时才等待；若满是因为**已提交数据**（`Reserved()==0`），等待没有
+	// 任何释放可能 ⇒ 立即 507（避免把「容量确实用完」变成 30s 空等）。
+	// 这与 owner Scope 的「始终排队」不同：卷池满通常意味着该换卷/清理，不该盲等。
 	res, err := pool.TryReserve(need)
+	if err != nil && pool.Reserved() > 0 {
+		if wres, werr := pool.WaitReserve(ctx, need, h.quotaWaitTimeout); werr == nil {
+			res, err = wres, nil
+		}
+	}
 	if err != nil {
 		if route.scopeRes != nil {
 			route.scopeRes.Release()

@@ -146,6 +146,15 @@ func (h *Handlers) auditVolumeMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// R14 C12：**只绑定真实存在的卷**。此前把请求里的原始值直接绑进 ctx ⇒ 单卷部署下
+		// `?volume=finance` 会伪造审计归属，并压制「单卷兜底」（真值本可唯一推出）。
+		// 不存在/未授权一律忽略（handler 自身会返回 404/403，审计不得采信未验证输入）。
+		if h.volSet != nil {
+			if _, ok := h.volSet.ByName(name); !ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 		next.ServeHTTP(w, r.WithContext(withAuditVolume(r.Context(), name)))
 	})
 }

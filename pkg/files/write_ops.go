@@ -1946,13 +1946,25 @@ func (s *Service) locateDeleteTarget(ctx context.Context, owner, rel string, inp
 	return "", tnt.Root(), false, DeleteFileResult{}, nil
 }
 
+// restoreQuarantine 把 quarantine 文件尽力还原到原 rel（删除失败/校验失败路径的回滚）。
+//
+// 评审 R14 C8：此前五处 `_ = atomicRenameRoot(...)` **静默吞错** ⇒ 回滚失败时用户视角「文件
+// 消失」，只剩一个 `.deleting.<nano>` 的怪名文件，且无任何日志/指标可查。现在失败记 Error
+// （带 quarRel，便于人工改名恢复），成功保持静默（正常路径不产生噪声）。
+func (s *Service) restoreQuarantine(ctx context.Context, root *storage.Root, quarRel, rel, remotePath string) {
+	if rerr := atomicRenameRoot(root, quarRel, rel); rerr != nil {
+		s.rt.logger().ErrorContext(ctx, "删除回滚失败：文件停留在 quarantine 名（需人工恢复）",
+			"file_name", remotePath, "rel", rel, "quarantine_rel", quarRel, "error", rerr.Error())
+	}
+}
+
 // verifyDeleteQuarantine 基于 fd 校验 quarantine 内容（打开失败 → 恢复 rel 并 500）。
 // `expectedChecksum` 为空表示「无客户端期望值」（协议面 SkipChecksumVerify）→ 只算不比对。
 // 返回文件元信息与实际 checksum；任一失败已尽力恢复原 rel 并返回 *HTTPError。
 func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root, quarRel, rel, expectedChecksum, remotePath string) (os.FileInfo, string, error) {
 	qf, qErr := root.OpenDecrypted(quarRel)
 	if qErr != nil {
-		_ = atomicRenameRoot(root, quarRel, rel) // 尽力恢复：quarantine 已在手，rel 必可回写
+		s.restoreQuarantine(ctx, root, quarRel, rel, remotePath) // 尽力恢复：quarantine 已在手，rel 必可回写
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, errMsgOpenFile)
 		s.rt.logger().ErrorContext(ctx, errMsgOpenFile, "file_name", remotePath, "error", qErr.Error())
 		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFile}
@@ -1960,13 +1972,13 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 	stater, ok := qf.(interface{ Stat() (os.FileInfo, error) })
 	if !ok {
 		qf.Close()
-		_ = atomicRenameRoot(root, quarRel, rel)
+		s.restoreQuarantine(ctx, root, quarRel, rel, remotePath)
 		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
 	}
 	info, qErr := stater.Stat()
 	if qErr != nil {
 		qf.Close()
-		_ = atomicRenameRoot(root, quarRel, rel)
+		s.restoreQuarantine(ctx, root, quarRel, rel, remotePath)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "stat 失败")
 		s.rt.logger().ErrorContext(ctx, "stat 文件失败", "file_name", remotePath, "error", qErr.Error())
 		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
@@ -1974,7 +1986,7 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 	cs, qErr := checksumReader(qf)
 	qf.Close()
 	if qErr != nil {
-		_ = atomicRenameRoot(root, quarRel, rel)
+		s.restoreQuarantine(ctx, root, quarRel, rel, remotePath)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultError, "计算 checksum 失败")
 		s.rt.logger().ErrorContext(ctx, "计算文件 checksum 失败", "file_name", remotePath, "error", qErr.Error())
 		return nil, "", &HTTPError{Status: http.StatusInternalServerError, Message: errMsgFileChecksum}
@@ -1983,7 +1995,7 @@ func (s *Service) verifyDeleteQuarantine(ctx context.Context, root *storage.Root
 	// 无 checksum 语义）→ 跳过比对；仍需打开/stat/算 checksum（审计与去重台账释放要用）。
 	if expectedChecksum != "" && !checksum.Equal(cs, expectedChecksum) {
 		// 恢复原路径：用户数据必须保留（不丢不删），并返回拒绝。
-		_ = atomicRenameRoot(root, quarRel, rel)
+		s.restoreQuarantine(ctx, root, quarRel, rel, remotePath)
 		s.rt.recordFileAudit(ctx, "delete", remotePath, auditResultDenied, "checksum 不匹配")
 		s.rt.logger().WarnContext(ctx, errMsgFileChecksum, "file_name", remotePath)
 		return nil, "", &HTTPError{Status: http.StatusBadRequest, Message: errMsgFileChecksum}
@@ -2077,7 +2089,10 @@ func (s *Service) removeOrSoftDelete(f *fileOp, homeVol, rel, quarRel string, in
 		trashRel, terr := s.softDeleteToTrash(f.ctx, f.root, quarRel, rel, info)
 		if terr != nil {
 			f.logger.ErrorContext(f.ctx, "软删失败", "file_name", f.remotePath, "error", terr.Error())
-			s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultError, "软删失败")
+			// NEW-1（R14）：软删失败**必须回滚**到原 rel —— 此前直接 500 而文件仍停在
+			// quarantine 名 ⇒ 用户视角文件消失（比 C8 更差：连 500 之后的原路径都没有）。
+			s.restoreQuarantine(f.ctx, f.root, quarRel, rel, f.remotePath)
+			s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultError, "软删失败（已回滚）")
 			return DeleteFileResult{}, true, &HTTPError{Status: 500, Message: "软删失败"}
 		}
 		s.rt.recordFileAudit(f.ctx, "delete", f.remotePath, auditResultSuccess, "软删到回收站")

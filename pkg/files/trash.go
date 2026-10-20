@@ -113,7 +113,12 @@ func (s *Service) softDeleteToTrash(ctx context.Context, root *storage.Root, qua
 	// 随主文件一起回 meta 桶）。meta 条目与主文件同 flat 目录（+.meta 标记）。
 	// **同代 nano**：主文件与 meta 共享同一 nano，恢复时按同代精确配对（P1：此前各
 	// 自 time.Now() → 多代软删后恢复取到最旧一代 meta → 主文件/meta 错代不可读）。
-	_ = atomicRenameRoot(root, meta.MetaPath(rel), trashPrefix+flatRel+trashMetaMarker+trashDeletedSuffix+nano)
+	// R14 C9：meta 随迁失败必须可见（此前 `_ =` 静默）——后果是「恢复后该文件失去可信校验
+	// （sidecar 缺失走不校验直通）」，属于**能力降级**而非不可读，必须留下可查证据。
+	if merr := atomicRenameRoot(root, meta.MetaPath(rel), trashPrefix+flatRel+trashMetaMarker+trashDeletedSuffix+nano); merr != nil {
+		s.rt.logger().Warn("回收站：meta sidecar 随迁失败（恢复后该文件将失去完整性校验）",
+			"trash_rel", trashRel, "error", merr.Error())
+	}
 	_ = info // 保留（未来恢复时用大小）
 	return trashRel, nil
 }
