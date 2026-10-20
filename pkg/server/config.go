@@ -189,6 +189,10 @@ type AuditConfig struct {
 	// ArchiveDir 是**冷段归档目录**（M4）：非空时**启动期 + 每次轮转后**把封段归档到该目录并回收本地封段。
 	// 指向一个挂载的冷存储卷目录（加密卷由卷自身提供 at-rest 加密）；空 ⇒ 不归档（默认）。
 	ArchiveDir string `yaml:"archive_dir" mapstructure:"archive_dir"`
+	// ArchiveVolume 是**冷段归档卷**（优选于 archive_dir）：非空时封段写入该卷的
+	// `audit-archive/` 前缀下 —— 加密卷 ⇒ 冷段自带 at-rest 加密，容量/配额与普通卷一致。
+	// 与 archive_dir 同时配置时**以卷为准**（卷是受管存储，语义强于裸目录）。
+	ArchiveVolume string `yaml:"archive_volume" mapstructure:"archive_volume"`
 	// ArchiveKeep 是本地**保留**的最新封段数（0 = 全部归档；默认 0，建议按查询窗口显式配置）。
 	ArchiveKeep int `yaml:"archive_keep" mapstructure:"archive_keep"`
 	// Disabled 显式关闭审计（默认 false = 启用）：读面返回空表、写入 no-op，且**不创建**

@@ -28,8 +28,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/web"
 )
 
@@ -139,7 +141,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 审计服务装配：有界内存环形缓冲 + 落盘存储（BufferSize>0 时启用；打开失败
 	// 降级 ring-only，审计绝不阻断启动）。详细语义见 setupAuditServices。
-	auditSvc, auditJournal := setupAuditServices(cfg, log)
+	// 冷段归档目的地**延迟解析**：可能是**卷**（`audit.archive_volume`）⇒ 需卷集合就绪后
+	// 才能拿到卷 FS。assemble 期先拿一个闭包，卷集合装配完成后再回填（轮转归档在运行期触发 ✓）。
+	var coldVolSet *registry.Set
+	auditSvc, auditJournal := setupAuditServices(cfg, func() syncpkg.FS {
+		return newColdArchiveFS(cfg, coldVolSet, log)
+	}, log)
 
 	// 卷集合装配（多卷，任务 3）：按 cfg.Volumes 逐卷 MkdirAll + storage.OpenRoot
 	// （LAYOUT_VERSION 写入/校验）+ 卷容量 Pool + ACL 解析。缺省形态（YAML 只配
@@ -153,6 +160,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		log.Error("卷集合装配失败", "error", err)
 		panic("卷集合装配失败: " + err.Error())
 	}
+	// 卷集合就绪 ⇒ 回填冷段归档目的地（`audit.archive_volume` 需卷 FS），并做**启动期**一次归档
+	// （此后由轮转的 OnSeal 回调触发）。归档失败只告警：封段仍在本地，下轮重试（原语保证不丢）。
+	coldVolSet = vs
+	runAuditArchive(cfg, newColdArchiveFS(cfg, vs, log), auditJournal, log)
 
 	h := &Handlers{
 		cfgPtr:            opts.CfgPtr,

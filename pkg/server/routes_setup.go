@@ -46,7 +46,7 @@ import (
 // （合适位置自动选择，无需配置目录）。打开失败记错误并降级为 ring-only
 // （审计绝不阻断启动）；装载失败同样降级。
 // 轮转（roadmap 11.5-⑥）：audit.max_size > 0 时按大小轮转 + 保留 max_archives 份归档。
-func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.FileJournal) {
+func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger) (*audit.Service, *audit.FileJournal) {
 	if cfg.Audit.Disabled {
 		// 显式关闭（audit.disabled=true）：不建目录、不落盘、读面空表（审计完全 off）。
 		log.Warn("审计已显式关闭（audit.disabled=true）")
@@ -63,7 +63,7 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 
 	var journal *audit.FileJournal
 	// 封段回调（M4）：轮转产生封段 ⇒ 立即归档（在 Journal 锁外触发，见 pkg/audit 契约）。
-	onSeal, bindJournal := newSealArchiveHook(cfg, log)
+	onSeal, bindJournal := newSealArchiveHook(cfg, coldFS, log)
 	j, err := audit.NewFileJournal(audit.FileJournalConfig{
 		Dir:           dir,
 		Layout:        audit.LayoutGlobal, // 合规段族：全局时间线（便于合规导出/检索）
@@ -89,11 +89,8 @@ func setupAuditServices(cfg *Config, log *slog.Logger) (*audit.Service, *audit.F
 		bindJournal(j) // 供封段回调使用（此后轮转即触发归档）
 	}
 
-	// M4 冷段归档：**复用** pkg/audit 的归档原语（ArchiveSealed + DirArchiver），不另造写路径。
-	// 归档到挂载的冷卷目录（加密卷的 at-rest 加密由卷自身提供）；失败**不丢段**（原语保证）。
-	if journal != nil && cfg.Audit.ArchiveDir != "" {
-		runAuditArchive(cfg, journal, log)
-	}
+	// M4 冷段归档：启动期这一次由**装配层**在卷集合就绪后触发（见 RegisterRoutes），
+	// 因为归档目的地可能是**卷**（需解析卷 FS）；轮转后的归档由 OnSeal 回调触发 ✓。
 
 	caps := audit.FullCapabilities()
 	var jr audit.Journal = audit.NullJournal{}
@@ -810,11 +807,14 @@ func registerHubRoutes(h *Handlers, srvMux, localMux *http.ServeMux, opts Regist
 //   - 保留最新 `audit.archive_keep` 个封段在本地（0 = 全部归档；建议按查询窗口显式配置）。
 //
 // 为什么在装配层：归档目的地（挂载的冷卷目录）属部署配置；原语与护栏都在 pkg/audit（单一实现）。
-func runAuditArchive(cfg *Config, j *audit.FileJournal, log *slog.Logger) {
+func runAuditArchive(cfg *Config, coldFS syncpkg.FS, j *audit.FileJournal, log *slog.Logger) {
+	if coldFS == nil || j == nil {
+		return // 未配置归档目的地（或审计未落盘）⇒ 不做任何事
+	}
 	keep := max(cfg.Audit.ArchiveKeep, 0)
 	// 实际写能力来自 pkg/sync（与云端下载→转存同源：FS + WriteIfAbsent 幂等写）；
 	// 审计包只做编排与护栏，不自造 sink 接口 ✓。
-	arch := audit.FSArchiver{FS: newColdArchiveFS(cfg.Audit.ArchiveDir, log)}
+	arch := audit.FSArchiver{FS: coldFS}
 	rep, err := audit.ArchiveSealed(context.Background(), j, arch, keep)
 	if err != nil {
 		log.Warn("审计冷段归档失败（封段保留在本地，下轮重试）", "error", err, "archive_dir", cfg.Audit.ArchiveDir)
@@ -832,11 +832,11 @@ func runAuditArchive(cfg *Config, j *audit.FileJournal, log *slog.Logger) {
 //   - 用 `atomic.Pointer` 拿 journal 自身（回调由轮转触发，早于局部变量赋值时跳过 ✓ 不 panic）；
 //   - **TryLock 单飞**：已有归档在跑 ⇒ 本次跳过（下一轮轮转会再次触发，且封段仍在本地 ⇒ 不丢）；
 //   - 回调内**不写**同一 Journal（只读段文件 + 归档），因此不会递归轮转 ✓。
-func newSealArchiveHook(cfg *Config, log *slog.Logger) (hook func(), bind func(*audit.FileJournal)) {
+func newSealArchiveHook(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger) (hook func(), bind func(*audit.FileJournal)) {
 	var jp atomic.Pointer[audit.FileJournal]
 	var mu sync.Mutex
 	hook = func() {
-		if cfg.Audit.ArchiveDir == "" {
+		if cfg.Audit.ArchiveDir == "" && cfg.Audit.ArchiveVolume == "" {
 			return
 		}
 		j := jp.Load()
@@ -847,7 +847,7 @@ func newSealArchiveHook(cfg *Config, log *slog.Logger) (hook func(), bind func(*
 			return
 		}
 		defer mu.Unlock()
-		runAuditArchive(cfg, j, log)
+		runAuditArchive(cfg, coldFS(), j, log)
 	}
 	bind = func(j *audit.FileJournal) { jp.Store(j) }
 	return hook, bind
@@ -857,6 +857,29 @@ func newSealArchiveHook(cfg *Config, log *slog.Logger) (hook func(), bind func(*
 //
 // 收敛点：审计归档（写）与冷段读取（读）**共用同一构造**，且 `sync.NewLocalFS` 在全仓只出现在
 // 本文件（R26 门禁白名单只需登记一处；将来换外部/加密卷 FS 也只改这里 ✓）。
-func newColdArchiveFS(dir string, log *slog.Logger) syncpkg.FS {
-	return syncpkg.NewLocalFS(dir, log)
+func newColdArchiveFS(cfg *Config, set *registry.Set, log *slog.Logger) syncpkg.FS {
+	if cfg == nil {
+		return nil
+	}
+	// ① 冷段归档**卷**（优选）：加密卷 ⇒ 冷段自带 at-rest 加密；容量/配额与普通卷一致。
+	if name := cfg.Audit.ArchiveVolume; name != "" {
+		if set == nil {
+			log.Warn("审计归档卷已配置但卷集合未装配（跳过归档）", "archive_volume", name)
+			return nil
+		}
+		be := set.External(name)
+		if be == nil {
+			log.Warn("审计归档卷不存在或不是外部/封装卷（跳过归档）", "archive_volume", name)
+			return nil
+		}
+		return syncpkg.NewPrefixFS(be.FS(), auditArchiveVolumePrefix)
+	}
+	// ② 裸目录（兼容既有部署）。
+	if cfg.Audit.ArchiveDir != "" {
+		return syncpkg.NewLocalFS(cfg.Audit.ArchiveDir, log)
+	}
+	return nil
 }
+
+// auditArchiveVolumePrefix 是冷段在**归档卷**内的前缀（与裸目录布局隔离，便于识别与清理）。
+const auditArchiveVolumePrefix = "audit-archive"

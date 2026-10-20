@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // maxAuditListLimit 是 GET /api/audit 的 limit 上限（超过 clamp 到该值）。
@@ -87,8 +88,8 @@ func (h *Handlers) readAuditFromJournal(ctx context.Context, f audit.EntryFilter
 	// 最新优先且热段已够数 ⇒ 更旧的冷段不可能进入结果 ⇒ 跳过（按需，不做无效 IO ✓）。
 	skippable := newestFirst && limit > 0 && len(hot) >= limit
 	if !skippable {
-		if dir := h.auditColdDir(); dir != "" {
-			es, cerr := audit.QueryCold(ctx, newColdArchiveFS(dir, h.auditLogger), []string{""}, f, 0)
+		if coldFS := h.auditColdFS(); coldFS != nil {
+			es, cerr := audit.QueryCold(ctx, coldFS, []string{""}, f, 0)
 			if cerr != nil {
 				h.auditWarn("审计冷段读取失败（忽略冷段继续）", cerr)
 			} else {
@@ -108,16 +109,23 @@ func (h *Handlers) readAuditFromJournal(ctx context.Context, f audit.EntryFilter
 	return auditEventsFromEntries(merged)
 }
 
-// auditColdDir 返回冷段归档目录（`audit.archive_dir`；空 = 未启用归档）。
-func (h *Handlers) auditColdDir() string {
+// auditColdFS 返回冷段归档存储（`audit.archive_volume` 卷优先，其次 `audit.archive_dir`）。
+//
+// 与归档写侧**共用同一构造**（`newColdArchiveFS`）⇒ 读写看到同一布局；未配置归档 ⇒ nil
+// （读面跳过冷段，零开销）。
+func (h *Handlers) auditColdFS() syncpkg.FS {
 	if h.cfgPtr == nil {
-		return ""
+		return nil
 	}
 	cfg := h.cfgPtr.Load()
 	if cfg == nil {
-		return ""
+		return nil
 	}
-	return cfg.Audit.ArchiveDir
+	logger := h.auditLogger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return newColdArchiveFS(cfg, h.volSet, logger)
 }
 
 // auditWarn 记录审计读面告警（失败不打断读：审计读面 best-effort，但必须留痕 ✓）。

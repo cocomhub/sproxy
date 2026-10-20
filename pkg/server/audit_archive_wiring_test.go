@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // TestRunAuditArchive_ArchivesSealedSegments 封段被归档到冷目录、本地回收，活跃段不受影响。
@@ -49,7 +50,7 @@ func TestRunAuditArchive_ArchivesSealedSegments(t *testing.T) {
 	cfg := &Config{}
 	cfg.Audit.ArchiveDir = cold
 	cfg.Audit.ArchiveKeep = 0 // 全部归档
-	runAuditArchive(cfg, j, testLogger())
+	runAuditArchive(cfg, newColdArchiveFS(cfg, nil, testLogger()), j, testLogger())
 
 	// ① 冷目录内出现归档文件；
 	ents, derr := os.ReadDir(cold)
@@ -85,7 +86,7 @@ func TestOnSeal_ArchivesOnRotation(t *testing.T) {
 	cfg.Audit.ArchiveDir = cold
 	cfg.Audit.ArchiveKeep = 0
 
-	hook, bind := newSealArchiveHook(cfg, testLogger())
+	hook, bind := newSealArchiveHook(cfg, func() syncpkg.FS { return newColdArchiveFS(cfg, nil, testLogger()) }, testLogger())
 	j, err := audit.NewFileJournal(audit.FileJournalConfig{
 		Dir: hot, Layout: audit.LayoutGlobal, GlobalName: "audit.log",
 		SyncMode: audit.SyncNone, MaxSize: 200, MaxArchives: 8,
