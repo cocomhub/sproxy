@@ -6,6 +6,7 @@ package baidupcs
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 
@@ -34,6 +35,10 @@ import (
 type baiduMultiUpload struct {
 	pcs        *Client
 	targetPath string
+
+	// attempts 记录每个分片的失败次数（无上限重试的终止判据，见 TmpFile 的 Terminated）。
+	attemptMu sync.Mutex
+	attempts  map[int]int
 }
 
 // newBaiduMultiUpload 构造 MultiUpload 实现。
@@ -99,6 +104,17 @@ func (u *baiduMultiUpload) TmpFile(ctx context.Context, uploadID, targetPath str
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case r := <-done:
+			// **不可恢复错误必须终止重试**（P1 修复，2026-10-21）：上游 MultiUploader 只在
+			// 收到 `*uploader.MultiError{Terminated:true}` 时停下；其余错误一律「重新入队、
+			// 零退避、无次数上限」重试（requester/uploader/multiworker.go）。此前本函数只
+			// `%w` 包一层 pcserror ⇒ 持续性分片错误（403 风控 / uploadid 失效 / 413）会让
+			// Execute **永不返回**（热循环轰 API），sync 任务永久停在 syncing 并占满并发槽，
+			// 同时 libraryAdapter.uploadMu（整卷一把）被永久持有 ⇒ 该卷后续所有上传阻塞。
+			// 与上游 CLI 层（pcsupload 的 400/401/403/413 → Terminated）同构；另外给每片
+			// 加尝试上限，堵住 5xx/网络型（非 4xx）的死循环。
+			if term := u.shouldTerminatePart(partSeq, r.resp, r.err); term != nil {
+				return nil, term
+			}
 			return r.resp, r.err
 		}
 	})
@@ -106,6 +122,48 @@ func (u *baiduMultiUpload) TmpFile(ctx context.Context, uploadID, targetPath str
 		return "", fmt.Errorf("baidupcs: upload tmp file part %d: %w", partSeq, pcsErr)
 	}
 	return md5, nil
+}
+
+// shouldTerminatePart 判定该分片失败是否必须**终止重试**（返回非 nil = 终止错误）。
+//
+// 终止判据（与上游 CLI pcsupload 同构 + 每片次数上限）：
+//   - HTTP 400/401/403/413：客户端非法操作/风控/登录失效——重试无意义（upstream 亦 Terminated）；
+//   - 同一分片连续失败超过 maxPartAttempts：堵住 5xx/网络型死循环。
+//
+// 返回的错误包成 *uploader.MultiError{Terminated:true}——上游 MultiUploader 只认这一种。
+func (u *baiduMultiUpload) shouldTerminatePart(partSeq int, resp *http.Response, err error) error {
+	if err == nil && resp != nil {
+		switch resp.StatusCode {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+			http.StatusRequestEntityTooLarge:
+			if resp.Body != nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+				_ = resp.Body.Close()
+			}
+			return &uploader.MultiError{Terminated: true, Err: fmt.Errorf(
+				"baidupcs: 上传分片 %d 被拒绝（HTTP %d）", partSeq, resp.StatusCode)}
+		}
+	}
+	if attempts := u.bumpAttempt(partSeq); attempts > maxPartAttempts {
+		return &uploader.MultiError{Terminated: true, Err: fmt.Errorf(
+			"baidupcs: 上传分片 %d 连续失败 %d 次，放弃: %w", partSeq, attempts, err)}
+	}
+	return nil
+}
+
+// maxPartAttempts 是**单片**失败重试上限（上游没有次数上限/退避；超限按 Terminated 终止，
+// 避免持续性 5xx/网络错误把上传拖成永久挂起）。
+const maxPartAttempts = 6
+
+// bumpAttempt 累计某分片的失败次数（成功一次即清零由调用方语义自然覆盖：成功不会再调）。
+func (u *baiduMultiUpload) bumpAttempt(partSeq int) int {
+	u.attemptMu.Lock()
+	defer u.attemptMu.Unlock()
+	if u.attempts == nil {
+		u.attempts = make(map[int]int)
+	}
+	u.attempts[partSeq]++
+	return u.attempts[partSeq]
 }
 
 // CreateSuperFile 合并全部分片。

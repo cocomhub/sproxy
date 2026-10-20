@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -408,31 +409,39 @@ func (m *CloudDownloadManager) recoverGroupsFromDir(root *storage.Root) int {
 
 // recoverOrphanGroups 为带 GroupID 但缺少组记录的孤儿任务重建最小组（兼容旧数据）。
 func (m *CloudDownloadManager) recoverOrphanGroups() int {
-	var orphanGroups []*CloudTaskGroup
+	// P1 修复（2026-10-21）：按 **GroupID 聚合**后一次建组。
+	//
+	// 此前在 m.groups 尚未填充的扫描阶段逐任务新建组，且 `TaskIDs` 硬编码为 `[t.ID]`、
+	// `TotalTasks: 1` ⇒ 同一 GroupID 的 N 个孤儿任务产生 N 个组对象，`m.groups[gid]` 最终
+	// 只留**最后一个**任务。后果：组视图丢成员、单个成员完成即被 `UpdateGroupStatus` 判整组
+	// completed、组级 cancel/archive/删除只作用于 1 个任务（其余继续跑并占并发/配额）。
+	//
+	// 可达路径均为生产路径：`CreateGroup` 先建子任务、最后才 `saveGroup`（该窗口崩溃/磁盘满），
+	// 以及组文件损坏（`recoverGroupsFromDir` 解析失败跳过）。
+	existing := make(map[string]struct{})
+	m.groupMu.RLock()
+	for id := range m.groups {
+		existing[id] = struct{}{}
+	}
+	m.groupMu.RUnlock()
+
+	agg := make(map[string]*CloudTaskGroup)
 	m.mu.RLock()
 	for _, t := range m.tasks {
 		if t.GroupID == "" {
 			continue
 		}
-		if _, ok := m.groups[t.GroupID]; ok {
+		if _, ok := existing[t.GroupID]; ok {
 			continue
 		}
-		group := &CloudTaskGroup{
-			ID:         t.GroupID,
-			Owner:      t.Owner, // 继承子任务 owner，避免带 owner 的组被重建为全局可见（组级隔离漏洞）
-			Name:       t.GroupID,
-			Status:     "pending",
-			TaskIDs:    []string{t.ID},
-			TotalTasks: 1,
-			CreatedAt:  t.CreatedAt,
-			UpdatedAt:  t.UpdatedAt,
-			ExpiresAt:  t.ExpiresAt,
-		}
-		orphanGroups = append(orphanGroups, group)
+		mergeOrphanTask(agg, t)
 	}
 	m.mu.RUnlock()
+
 	recovered := 0
-	for _, group := range orphanGroups {
+	for _, group := range agg {
+		// 任务来自 map 遍历 ⇒ ID 顺序不确定；排序保证重建结果可重现（测试/日志可比对）。
+		slices.Sort(group.TaskIDs)
 		m.groupMu.Lock()
 		m.groups[group.ID] = group
 		m.groupMu.Unlock()
@@ -440,6 +449,34 @@ func (m *CloudDownloadManager) recoverOrphanGroups() int {
 		recovered++
 	}
 	return recovered
+}
+
+// mergeOrphanTask 把一个孤儿任务并入其 GroupID 的聚合组（不存在则新建）。调用方持 m.mu.RLock。
+func mergeOrphanTask(agg map[string]*CloudTaskGroup, t *CloudTask) {
+	g, ok := agg[t.GroupID]
+	if !ok {
+		// 继承子任务 owner，避免带 owner 的组被重建为全局可见（组级隔离漏洞）。
+		g = &CloudTaskGroup{
+			ID:        t.GroupID,
+			Owner:     t.Owner,
+			Name:      t.GroupID,
+			Status:    "pending",
+			CreatedAt: t.CreatedAt,
+			ExpiresAt: t.ExpiresAt,
+		}
+		agg[t.GroupID] = g
+	}
+	g.TaskIDs = append(g.TaskIDs, t.ID)
+	g.TotalTasks++
+	if !t.CreatedAt.IsZero() && (g.CreatedAt.IsZero() || t.CreatedAt.Before(g.CreatedAt)) {
+		g.CreatedAt = t.CreatedAt
+	}
+	if t.UpdatedAt.After(g.UpdatedAt) {
+		g.UpdatedAt = t.UpdatedAt
+	}
+	if t.ExpiresAt.After(g.ExpiresAt) {
+		g.ExpiresAt = t.ExpiresAt
+	}
 }
 
 // pruneGroupTaskIDs 返回仍存在于 tasks 中的任务 ID 列表。

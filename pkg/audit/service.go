@@ -476,6 +476,11 @@ func (s *Service) seqFloor(scope ScopeID) uint64 {
 	if scope == "" {
 		return 0
 	}
+	// 有界优先（P1 修复，2026-10-21）：从最新段反向扫描，命中即返回。见 journalMaxSeq。
+	if max, ok := journalMaxSeq(s.eff.journal, scope); ok {
+		return max
+	}
+	// 回退：低成本不可用（第三方 Journal 实现）时全量读取取 max。
 	entries, err := s.eff.journal.Read(EntryFilter{Scope: scope})
 	if err != nil {
 		return 0

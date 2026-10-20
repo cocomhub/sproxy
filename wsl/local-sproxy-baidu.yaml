@@ -1,0 +1,43 @@
+# WSL 本地测试：百度网盘外部卷 + secretdata over 百度网盘
+# 用法：wsl -e bash -lc 'cd ~ && /home/leonli/go/bin/sproxy server --config /home/leonli/sproxy-local/local-sproxy-baidu.yaml'
+# 注意：addr 用 127.0.0.1:18084 避免与 bt 生产（18083）冲突
+addr: "127.0.0.1:18084"
+storage_root: "/home/leonli/sproxy-local/data"
+log_level: "debug"
+
+tls:
+  enabled: false
+
+sync:
+  max_concurrent: 3
+
+# 默认卷（本地）——首卷必为本地卷（装配层 fail-closed）
+volumes:
+  - name: main
+    type: local
+    root: "/home/leonli/sproxy-local/data"
+
+  # 百度网盘外部卷：网盘根 = /来自：本地电脑/sp
+  # 二进制优先（BaiduPCS-Go 在 PATH），BDUSS 兜底；local_root 为本机中间态目录
+  - name: mydisk
+    type: baidupcs
+    extra:
+      baidu_root: "/来自：本地电脑/sp"
+      binary_path: "/home/leonli/go/bin/BaiduPCS-Go"
+      bduss: ""
+      local_root: "/home/leonli/sproxy-local/baidupcs-local"
+
+  # secrets 卷（本地默认卷根下的 secrets/）：密钥供 vault 引用
+  - name: mykeys
+    type: secrets
+    extra:
+      target: local
+      root: "/home/leonli/sproxy-local/data"
+
+  # secretdata 卷：加密后写入 mydisk 网盘卷的 s/ 子目录
+  # secret_url 用显式命名 secrets 卷（服务级声明需要显式命名卷）
+  - name: vault
+    type: secretdata
+    extra:
+      target: "mydisk/s"
+      secret_url: "secrets://mykeys/datakey"

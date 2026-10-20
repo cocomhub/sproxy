@@ -88,16 +88,18 @@ func ListCold(ctx context.Context, fs syncpkg.FS, root string) ([]ColdSegment, e
 	return out, nil
 }
 
-// probeSegmentTimes 有界探测段的首/末条目时间（失败 ⇒ 零值，调用方保守读取）。
+// probeSegmentTimes 有界探测段的首/末条目时间（**失败即零值**，调用方保守对待）。
+//
+// P1 修复（2026-10-21）：此前末条探测失败时回退为「首条时间」（last = first），于是
+// PurgeCold/retention 的 `Last.IsZero()` 保留守卫**永久失效**——一个「首条 8 天前、尾部 1 小时前」
+// 的段会被整段判过期并删除（保留期内的审计证据被提前删；`since=` 查询亦会整段误跳）。
+// 正确语义：**未知就报未知**，让调用方的保守分支生效。
 func probeSegmentTimes(ctx context.Context, fs syncpkg.FS, p string, size int64) (first, last time.Time) {
 	first = probeFirstTS(ctx, fs, p)
 	if size <= 0 {
-		return first, first
+		return first, time.Time{}
 	}
 	last = probeLastTS(ctx, fs, p, size)
-	if last.IsZero() {
-		last = first
-	}
 	return first, last
 }
 
