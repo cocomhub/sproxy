@@ -726,6 +726,16 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 		return false, nil // 已存在，拒绝覆写
 	}
 	if err := env.targetFS.WriteFile(env.ctx, syncpkg.LogicalKey{}, env.rel, r, size, mtime); err != nil {
+		// **失败自清**（P1 修复，2026-10-21）：非原子写的目标卷（FTP STOR / WebDAV PUT /
+		// trusted 降级路径 / 无 WriteIfAbsent 的外部卷）写中途失败（断连、ctx 取消、磁盘满、
+		// 进程被 kill）会留下**半截对象**。此后的重试因 `writeCount==0` 仍进本分支 ⇒ Stat
+		// 命中自己留下的残骸 ⇒ 每次重试都返回「已存在（拒绝覆写）」⇒ 任务退避 3 次后 failed，
+		// 文案误指「目标卷异常」，残骸成为永久孤儿（且已计入 owner 账本）。
+		// 仅在「Stat 已确认不存在」的分支清理（本函数此时保证不碰别人的对象，唯一性语义不变）。
+		// 与 pkg/transfer/transfer.go 的 writeUnique 同纪律。
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(env.ctx), time.Minute)
+		_ = env.targetFS.Delete(cctx, env.rel)
+		cancel()
 		return false, err
 	}
 	return true, nil

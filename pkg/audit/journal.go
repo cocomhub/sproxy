@@ -5,6 +5,7 @@ package audit
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -660,9 +661,14 @@ func (j *FileJournal) ReadTail(ctx context.Context, f EntryFilter, limit int) ([
 	if err != nil {
 		return nil, err
 	}
-	// 新段优先：按归档序号降序（活跃段 archiveIndex=0 排最前）。
+	// 新段优先：按归档序号**升序**——活跃段 archiveIndex=0 排最前，封段 `.1` 最新、`.N` 最旧
+	// （`shiftArchives` 把 `.1`→`.2`，越大越旧）。
+	//
+	// P1 修复（2026-10-21）：此前是**降序**，于是先读 `.N`（最旧）并在凑满 limit 后 break ⇒
+	// `/api/audit?limit=N` 在热目录仍有封段时返回的是**最旧**的 N 条，最新事件完全不可见
+	// （且 `skippable=true` 会连带跳过冷段）。单段场景下顺序无意义，故此前测试未发现。
 	sort.SliceStable(names, func(a, b int) bool {
-		return archiveIndex(names[a]) > archiveIndex(names[b])
+		return archiveIndex(names[a]) < archiveIndex(names[b])
 	})
 	var got []Entry
 	for _, name := range names {
@@ -1110,4 +1116,120 @@ func sortEntries(es []Entry) {
 		}
 		return es[i].TS.Before(es[k].TS)
 	})
+}
+
+// ---------------------------------------------------------------- 有界 max(seq) 查询
+
+// journalMaxSeq 返回某作用域已知的最大 Seq（ok=false 表示「无法低成本确定」，调用方回退
+// 全量 Read）。**动机（P1，2026-10-21）**：`Service.seqFloor` 原本对每个作用域 `Read` 整个
+// 历史并取 max——生产合规段族是单文件全局段且默认**不轮转**（上限 `max_total_bytes` 默认
+// 1GiB）⇒ 进程重启后的**第一条审计写入**会把 1GiB 段全量解析进内存（数百万条带 Meta 的
+// Entry，峰值 GB 级）并同步阻塞该请求，小容器直接 OOM。
+//
+// 实现：FileJournal 从**最新段**开始反向扫描（段内按行逆序），命中该作用域第一条即返回
+// （Seq 单调 ⇒ 第一条就是最大）；内存占用与段大小无关（256KiB 块 + 单行 carry）。
+func journalMaxSeq(j Journal, scope ScopeID) (uint64, bool) {
+	if scope == "" {
+		return 0, true
+	}
+	switch jj := j.(type) {
+	case *FileJournal:
+		names, err := jj.snapshotSegments()
+		if err != nil {
+			return 0, false
+		}
+		// 新段优先：archiveIndex 升序（活跃段 0 最前，封段 .1 最新、.N 最旧）。
+		sort.SliceStable(names, func(a, b int) bool {
+			return archiveIndex(names[a]) < archiveIndex(names[b])
+		})
+		for _, name := range names {
+			if max, ok := maxSeqInSegmentFile(name, scope); ok {
+				return max, true
+			}
+		}
+		return 0, true // 扫完所有段都没有该作用域 ⇒ 起点 0（与旧语义一致）
+	case *MemoryJournal:
+		jj.mu.Lock()
+		defer jj.mu.Unlock()
+		var max uint64
+		for i := range jj.entries {
+			if jj.entries[i].Scope == scope && jj.entries[i].Seq > max {
+				max = jj.entries[i].Seq
+			}
+		}
+		return max, true
+	default:
+		return 0, false
+	}
+}
+
+// maxSeqInSegmentFile 从段文件**末尾**反向按行扫描，返回首个匹配 scope 条目的 Seq。
+// 内存有界（chunk + carry）；行内的 `carry` 是「跨块行」的前半段（属于更旧内容）。
+func maxSeqInSegmentFile(path string, scope ScopeID) (uint64, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, false
+	}
+	const chunk = 256 << 10
+	var carry []byte // 上一（更新）块的**首段残行**：其前部在更旧块中
+	for end := st.Size(); end > 0; {
+		start := end - chunk
+		atFileStart := start <= 0
+		if atFileStart {
+			start = 0
+		}
+		buf := make([]byte, end-start)
+		if _, rerr := f.ReadAt(buf, start); rerr != nil && !errors.Is(rerr, io.EOF) {
+			return 0, false
+		}
+		var found uint64
+		var ok bool
+		found, ok, carry = scanChunkBackward(buf, carry, scope, atFileStart)
+		if ok {
+			return found, true
+		}
+		end = start
+	}
+	return 0, false
+}
+
+// scanChunkBackward 逆序扫描一个块内的行：末元素最新。`atFileStart` 时 parts[0] 是文件首行
+// （也在本块内，最后处理）；否则 parts[0] 是跨块残行 ⇒ 作为下一（更旧）块的 carry 返回。
+// 返回 (命中的 Seq, 是否命中, 新的 carry)。
+func scanChunkBackward(buf, carry []byte, scope ScopeID, atFileStart bool) (uint64, bool, []byte) {
+	data := make([]byte, 0, len(buf)+len(carry))
+	data = append(append(data, buf...), carry...)
+	parts := bytes.Split(data, []byte{0x0a})
+	var nextCarry []byte
+	if !atFileStart {
+		nextCarry = append([]byte(nil), parts[0]...)
+	}
+	for i := len(parts) - 1; i >= 1; i-- {
+		if max, ok := seqOfLine(parts[i], scope); ok {
+			return max, true, nextCarry
+		}
+	}
+	if atFileStart {
+		if max, ok := seqOfLine(parts[0], scope); ok {
+			return max, true, nil
+		}
+	}
+	return 0, false, nextCarry
+}
+
+// seqOfLine 解码一行并返回匹配 scope 的 Seq。
+func seqOfLine(line []byte, scope ScopeID) (uint64, bool) {
+	if len(line) == 0 {
+		return 0, false
+	}
+	e, ok := decodeSegmentLine(append(line, '\n'))
+	if !ok || e.Scope != scope {
+		return 0, false
+	}
+	return e.Seq, true
 }

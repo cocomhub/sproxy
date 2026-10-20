@@ -56,8 +56,11 @@ internal/archcheck/submodule_test.go	1
 internal/archcheck/upload_side_effect_test.go	1
 internal/archcheck/web_assets_test.go	2
 internal/archcheck/xfer_send_atomicity_test.go	1
+pkg/audit/prod_hardening_test.go	3
 pkg/client/events_test.go	4
 pkg/cloud/manager_test.go	2
+pkg/cloud/prod_hardening_test.go	1
+pkg/cloud/prod_hardening_transfer_test.go	1
 pkg/cloud/quota_writer_test.go	1
 pkg/cloud/recovery_queued_test.go	4
 pkg/files/meta/meta_test.go	1
@@ -115,6 +118,7 @@ pkg/server/mesh_acl_test.go	5
 pkg/server/mesh_status_test.go	3
 pkg/server/metrics_labeled_test.go	4
 pkg/server/metrics_test.go	9
+pkg/server/prod_hardening_test.go	1
 pkg/server/quota_reconcile_test.go	7
 pkg/server/quota_write_path_test.go	17
 pkg/server/ratelimit_test.go	1
@@ -249,6 +253,7 @@ pkg/volume/ext/pikpak/hybrid_test.go	1
 pkg/volume/registry/local_backend_registration_test.go	1
 pkg/volume/registry/set_test.go	8
 pkg/volume/registry/storage_volume_kind_test.go	1
+pkg/volume/secretdata/prod_hardening_test.go	2
 pkg/volume/volume_mesh_scope_test.go	2
 pkg/volume/volume_mesh_test.go	2
 pkg/volume/volume_test.go	6

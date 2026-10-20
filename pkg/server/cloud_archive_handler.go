@@ -597,15 +597,28 @@ func createTarGz(srcRoot *storage.Root, srcRel, srcTarName string, outRoot *stor
 
 	hasher := sha256.New()
 	multiWriter := io.MultiWriter(outputFile, hasher)
-
 	gw := gzip.NewWriter(multiWriter)
-	defer gw.Close()
-
 	tw := tar.NewWriter(gw)
-	defer tw.Close()
 
+	// **收尾顺序必须显式**（P1 修复，2026-10-21）：此前 tw/gw 都是 `defer Close()`，而
+	// checksum 在 defer 之前就计算 ⇒ ① 哈希漏掉 tar 的 EOF 两块 + gzip 尾（CRC32/ISIZE）
+	// ⇒ 响应里的 checksum 100% 不等于落盘文件（客户端按它校验必然判「归档损坏」）；
+	// ② Close 的错误被丢弃且 succeeded 已置 true ⇒ 收尾失败的**截断归档**被当成功返回
+	// 且不清理。与 pkg/server/archive.go、pkg/transfer/registry.go 的既有口径统一。
 	if err := addFileToTar(tw, srcRoot, srcRel, srcTarName, logger); err != nil {
+		_ = tw.Close()
+		_ = gw.Close()
 		return "", fmt.Errorf("add file to tar: %w", err)
+	}
+	if err := tw.Close(); err != nil {
+		_ = gw.Close()
+		return "", fmt.Errorf("关闭 tar: %w", err)
+	}
+	if err := gw.Close(); err != nil {
+		return "", fmt.Errorf("关闭 gzip: %w", err)
+	}
+	if err := outputFile.Close(); err != nil {
+		return "", fmt.Errorf("关闭归档文件: %w", err)
 	}
 
 	succeeded = true
@@ -639,17 +652,26 @@ func createMultiFileTarGz(files []fileWithRelPath, outRoot *storage.Root, outRel
 
 	hasher := sha256.New()
 	multiWriter := io.MultiWriter(outputFile, hasher)
-
 	gw := gzip.NewWriter(multiWriter)
-	defer gw.Close()
-
 	tw := tar.NewWriter(gw)
-	defer tw.Close()
 
+	// 与 createTarGz 同口径（P1 修复，2026-10-21）：显式收尾 + 收尾后再算 checksum。
 	for _, f := range files {
 		if err := addFileToTar(tw, f.root, f.rel, f.tarRel, logger); err != nil {
+			_ = tw.Close()
+			_ = gw.Close()
 			return "", fmt.Errorf("add file %q to tar: %w", f.tarRel, err)
 		}
+	}
+	if err := tw.Close(); err != nil {
+		_ = gw.Close()
+		return "", fmt.Errorf("关闭 tar: %w", err)
+	}
+	if err := gw.Close(); err != nil {
+		return "", fmt.Errorf("关闭 gzip: %w", err)
+	}
+	if err := outputFile.Close(); err != nil {
+		return "", fmt.Errorf("关闭归档文件: %w", err)
 	}
 
 	succeeded = true

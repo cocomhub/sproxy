@@ -1543,6 +1543,14 @@ func (s *SecretdataFS) rollbackWrite(ctx context.Context, uploaded []string, cre
 // pruneCreatedDirs 写路径失败回滚：删除本次新建且已成空目录的容器（删除目录 meta + 注销
 // 映射）。目录内保有他者新写入文件/子目录则不删（安全不损他人）；根容器恒不删。
 func (s *SecretdataFS) pruneCreatedDirs(ctx context.Context, created []dirCreation) {
+	// **空集合必须早退**（P0 修复，2026-10-21）：本函数会取 s.mu 写锁，而 rollbackWrite 的
+	// 「无新建目录」调用方（rename/copy 路径的 metadata 上传、copyContentBlobs 回滚）**正持有
+	// s.mu**（如 writeRenamedMetaLocked 的调用方持锁）⇒ 无条件 Lock 会自锁死（sync.Mutex
+	// 不可重入），表现为该卷所有读写永久挂起、只能重启进程。created 为空时无任何回收动作，
+	// 直接返回即可（语义等价）。
+	if len(created) == 0 {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, dc := range slices.Backward(created) { // 叶子→根逆序（先回收最深空目录）
@@ -2911,6 +2919,16 @@ func (s *SecretdataFS) copyBlob(ctx context.Context, src, dst string, mtime int6
 // 且无子目录 → 删除其容器残留（目录 meta + 遗留/孤儿分块）并注销映射；遇到非空目录或根
 // 停止。调用方持有 s.mu（deleteFile 在 Lock 下调用）。
 func (s *SecretdataFS) pruneEmptyDirsLocked(ctx context.Context, from string) {
+	// **有在途写时不回收容器**（P0 修复，2026-10-21）：写路径在 ensureContainer 与 commitLocked
+	// **之间不持锁**上传分块/meta；此刻 dirHasContentLocked 只看 s.index（新条目尚未提交）⇒
+	// 会判「空目录」并 removeEmptyContainerLocked 把在途写**已上传的分块与 meta 全部删掉**
+	// （随后 commit 仍返回成功 ⇒ 幽灵条目；若底层重建容器目录则留下无目录 meta 的容器，
+	// 重启后整容器 fail-closed 跳过 ⇒ 已确认的上传永久消失）。
+	// 判据与 GC 一致（GC 亦有 writesInFlight>0 即放弃本轮的门禁）：代价只是空容器延后回收
+	// ——下一次删除/GC 会再收。
+	if s.writesInFlight > 0 {
+		return
+	}
 	d := from
 	for d != "" {
 		if s.dirHasContentLocked(d) {
