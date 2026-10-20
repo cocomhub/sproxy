@@ -93,3 +93,48 @@ NEW-1 软删失败回写 · C8/C9 quarantine 与 trash meta 的 Warn+metric+清�
 
 验证：workspace `go test ./...` **96 包** · `-tags=e2e ./test/...` 3 包 · `make web-test` · `golangci-lint` 0 ·
 archcheck 全绿（含 sleep/serial 棘轮：新增固定等待已改为 `Gosched`/通道，串行用例按规范登记）。
+
+## 5. 恢复功能的**端到端**测试覆盖（真实进程 kill -9 / 重启）
+
+新增 `test/e2e_restart_harness_test.go`（可重启的真实 sproxy 子进程：构建一次 + 固定端口 + 同一存储根）
+与两组用例：
+
+| 用例 | 验证的保证 | 关键断言 |
+| --- | --- | --- |
+| `TestE2E_Restart_CloudDownloadResumesAfterKill9` | 下载中断后**自动续传** | kill -9 重启后任务 completed；源站收到**非零起点 Range**；产物 checksum 与源一致 |
+| `TestE2E_Restart_QueuedTasksContinue` | **排队任务**重启后继续（C1） | `cloud_max_concurrent: 1` 下 3 任务，kill 后重启 ⇒ 三个全部 completed（修复前排队任务被转 failed） |
+| `TestE2E_QuotaFull_WaitsThenSucceeds` | 配额不足**自动等待重试** | 配额满时上传不立刻 507；删除旧文件后排队上传自动成功（客户端零重试）且内容正确 |
+| `TestE2E_Restart_QuotaMatchesDiskTruth` | 崩溃后**配额账本 = 磁盘真值** | 1.2 MiB/2 MiB 配额下重启：再写 1.2 MiB 必须被拒（账本没归零）；删除后可写（没幽灵占用） |
+| `TestE2E_GracefulShutdown_ResumesDownload` | **优雅停机**（SIGINT）后仍能继续 | 停机重启后任务 completed（不因优雅退出丢任务） |
+
+> 🔎 **这组 E2E 立刻抓到一处真缺陷**：`SubmitAndStart` **没有**把 `CloudTask.Submitted` 落盘
+> （早前一次变异还原把该行清掉了，而单元测试是**手写**字段 ⇒ 覆盖不到写入侧）。E2E 首跑即报
+> 「排队任务重启后被判 failed」，修复后新增单测 `TestSubmitAndStart_PersistsSubmitted` 钉住写入侧。
+> 结论：**恢复语义必须用真实进程 E2E 验证**，单测无法替代（它验证的是「机制」而不是「接线」）。
+
+## 6. 状态 × 阶段矩阵（确定性覆盖）
+
+`test/e2e_restart_matrix_test.go` 把「每种**持久化状态**」直接写到磁盘，再启动真实服务断言恢复决策
+（不依赖 kill 时机 ⇒ 稳定）；`e2e_restart_upload_test.go` 补「分块上传中断」阶段。
+
+| 阶段 / 状态 | 用例 | 期望 |
+| --- | --- | --- |
+| `pending`（从未提交） | `.../pending_unsubmitted_becomes_failed` | 转 failed（孤儿），且**不触发下载**（源站 0 请求） |
+| `pending`（已提交=排队） | `.../pending_submitted_restarts_and_completes` | 继续下载并 completed |
+| `downloading` + 有 `.partial` | `.../downloading_with_partial_resumes` | **Range 续传**（非零起点）、产物 checksum 一致 |
+| `downloading` + 空 `.partial` | `.../downloading_empty_partial_full_redownload` | 视作无进度 ⇒ 整文件下载并完成 |
+| `downloading` + 产物完整（终态前窗口） | `TestE2E_RecoveryMatrix_DownloadDoneBeforeFinalize...` | **复用产物**（源站 0 请求）并收口 completed |
+| `completed` | `.../completed_keeps_artifact_no_redownload` | 保持 completed、不重下、产物保留 |
+| `completed` + `damaged` | `.../completed_damaged_not_auto_redownloaded` | 保持原状态（**必须显式 resume** 才修复），不自动重下 |
+| `failed` | `.../failed_stays_failed` | 不复活、不触发下载 |
+| `cancelled` | `.../cancelled_stays_cancelled` | 不复活、不触发下载 |
+| 损坏任务 JSON | `.../corrupt_json_skipped_healthy_task_recovers` | 跳过 + 日志 `unreadable on recovery` + 其它任务正常完成 |
+| 半写 `.tmp.*` 残留 | `.../half_written_tmp_is_ignored` | 忽略（按 `.json` 后缀过滤），恢复不受影响 |
+| 分块上传中断（kill -9） | `TestE2E_Restart_ChunkedUploadResumesAfterKill9` | 会话块落盘跨重启存活（received 不丢）⇒ 只补剩余块即可完成，内容一致；未完成时无正式文件 |
+| WAL 提交前后（MarkDone） | 既有 `pkg/recovery/crash_e2e_test.go` | 提交前重放、提交后跳过（真实 re-exec） |
+
+> 矩阵的两处「实测反直觉」被写进用例注释：
+> ① 「下载完成、终态前」窗口里磁盘 status 仍是 `downloading`（`finalizeCompleted` 在转存之后）——
+> 所以 C2 必须靠 `download_done` 判定，不能靠 status；
+> ② 分块上传会话**不是纯内存**（已收块落盘）⇒ 重启后能断点续传（比预期更强）。
+

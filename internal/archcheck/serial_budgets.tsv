@@ -59,7 +59,7 @@ internal/archcheck/xfer_send_atomicity_test.go	1
 pkg/client/events_test.go	4
 pkg/cloud/manager_test.go	2
 pkg/cloud/quota_writer_test.go	1
-pkg/cloud/recovery_queued_test.go	3
+pkg/cloud/recovery_queued_test.go	4
 pkg/files/meta/meta_test.go	1
 pkg/files/version_id_test.go	3
 pkg/server/accept_retry_test.go	5
@@ -257,6 +257,10 @@ pkg/vpn/device_test.go	1
 test/e2e/e2e_binary_test.go	1
 test/e2e_http_proxy_test.go	1
 test/e2e_relay_test.go	4
+test/e2e_restart_cloud_test.go	2
+test/e2e_restart_matrix_test.go	2
+test/e2e_restart_quota_test.go	3
+test/e2e_restart_upload_test.go	1
 test/e2e_tunnel_accesskey_test.go	1
 test/e2e_xfer_tls_test.go	2
 web/e2e/audit_export_notify_test_e2e_test.go	3

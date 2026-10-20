@@ -14,6 +14,7 @@ package cloud
 // 自愈修复不能被「复用坏产物」短路。
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -171,5 +172,37 @@ func TestReuseDownloadedArtifact(t *testing.T) {
 	}
 	if r := mgr.reuseDownloadedArtifact(task, dest); r != nil {
 		t.Fatal("尺寸不符时不得复用（否则会把残缺文件转存出去）")
+	}
+}
+
+// TestSubmitAndStart_PersistsSubmitted C1 的**写入侧**回归：
+// 排队任务重启可继续的前提是磁盘上有 `submitted=true`。此前单测直接手写该字段 ⇒ 漏掉了
+// 「SubmitAndStart 到底有没有落盘」这一环（真实 E2E 抓到：单条提交路径根本没写）。
+func TestSubmitAndStart_PersistsSubmitted(t *testing.T) {
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 1<<30, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
+
+	// 不可达地址：任务会立刻失败，但**提交时**必须已把 submitted 落盘（与成败无关）。
+	task, err := mgr.SubmitAndStart("url", "http://127.0.0.1:1/never.bin", "never.bin", 1024, nil, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("SubmitAndStart: %v", err)
+	}
+
+	root := mgr.cloudStateRootFor("")
+	if root == nil {
+		t.Fatal("cloudStateRootFor 返回 nil")
+	}
+	data, rerr := readRootFile(root, cloudStateRel+"/"+task.ID+".json")
+	if rerr != nil {
+		t.Fatalf("读持久化任务: %v", rerr)
+	}
+	var got CloudTask
+	if uerr := json.Unmarshal(data, &got); uerr != nil {
+		t.Fatalf("解析持久化任务: %v", uerr)
+	}
+	if !got.Submitted {
+		t.Fatalf("SubmitAndStart 必须把 submitted 落盘（否则重启时排队任务被当孤儿）: %s", string(data))
 	}
 }

@@ -52,6 +52,7 @@ var testSleepBudgets = map[string]int{
 	"pkg/server/relay_stream_test.go":          1,
 	"pkg/server/notify_test.go":                4,
 	"pkg/tunnel/hub/ext/kad/kad_test.go":       1,
+	"test/e2e_restart_cloud_test.go":           1, // 慢速源站节流（模拟弱网以制造「下载中断」窗口；无可条件化替代）
 	"web/e2e/notify_panel_test.go":             1,
 	"pkg/server/metrics_test.go":               2,
 	// staging 配额排队/超时/ctx 取消用例需定时释放或取消（无事件可轮询）；边界时序语义。
