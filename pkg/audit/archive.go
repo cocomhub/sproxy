@@ -179,7 +179,7 @@ func (a FSArchiver) Archive(ctx context.Context, seg SegmentInfo, r io.Reader) (
 	}
 	prefix := a.Prefix
 	if prefix == "" {
-		prefix = "audit-archive"
+		prefix = DefaultArchivePrefix
 	}
 	now := a.Now
 	if now == nil {
@@ -215,3 +215,7 @@ func (a FSArchiver) Archive(ctx context.Context, seg SegmentInfo, r io.Reader) (
 	}
 	return finalRel, nil
 }
+
+// DefaultArchivePrefix 是冷段在归档卷内的默认前缀（**唯一定义处**；装配层复用本常量）。
+// 门禁 R41 保证该字面量只出现在归档实现/装配点，防止把它挂到用户可见面（证据隔离）。
+const DefaultArchivePrefix = "audit-archive"

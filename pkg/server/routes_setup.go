@@ -825,6 +825,7 @@ func registerHubRoutes(h *Handlers, srvMux, localMux *http.ServeMux, opts Regist
 func wireAuditColdArchive(cfg *Config, set *registry.Set, j *audit.FileJournal, log *slog.Logger) {
 	coldFS := newColdArchiveFS(cfg, set, log)
 	configured := cfg.Audit.ArchiveDir != "" || cfg.Audit.ArchiveVolume != ""
+	warnIfInvalidArchiveVolume(cfg, set, log)
 	if cfg.Audit.ArchiveVolume != "" && coldFS == nil {
 		msg := "审计归档卷无法解析（未注册/非外部·封装卷）⇒ 冷段归档已关闭；封段仍会被 max_archives 回收"
 		if cfg.Audit.Startup.FailFast {
@@ -836,6 +837,45 @@ func wireAuditColdArchive(cfg *Config, set *registry.Set, j *audit.FileJournal, 
 		j.SetArchiveUnavailable(coldFS == nil && configured)
 	}
 	runAuditArchive(cfg, coldFS, j, log)
+}
+
+// warnIfInvalidArchiveVolume 装配期校验归档卷专用性：不合法则 Error（fail_fast 时 panic）。
+// 抽成函数是为了不给 wireAuditColdArchive 增加 gocognit（门禁阈值 15）。
+func warnIfInvalidArchiveVolume(cfg *Config, set *registry.Set, log *slog.Logger) {
+	name := cfg.Audit.ArchiveVolume
+	if name == "" || set == nil {
+		return
+	}
+	v, ok := set.ByName(name)
+	if !ok {
+		return // 未注册由 newColdArchiveFS 侧处理（另一条告警路径）
+	}
+	verr := validateAuditArchiveVolume(v, set.Default().Name)
+	if verr == nil {
+		return
+	}
+	msg := "审计归档卷配置非法: " + verr.Error()
+	if cfg.Audit.Startup.FailFast {
+		panic("audit: " + msg)
+	}
+	log.Error(msg, "archive_volume", name)
+}
+
+// validateAuditArchiveVolume 校验 `audit.archive_volume` 的**专用性**（评审 R13 P2）：
+//
+//  1. **不得是默认卷**：对账（`adjustVolumePool`）按 tenant 桶校准卷占用，而 `audit-archive/`
+//     不属于任何 tenant ⇒ 与默认卷同卷时，每轮对账都会把归档字节「修正」掉 ⇒ 卷容量上限被绕过；
+//  2. **必须是专用卷**（ACL 白名单模式且白名单为空 ⇒ 任何用户都进不去）：归档的是**证据**，
+//     用户可读/可删自己的证据 = 合规语义失效。
+func validateAuditArchiveVolume(v volume.Volume, defaultName string) error {
+	if v.Name == defaultName {
+		return fmt.Errorf("归档卷 %q 不得是默认卷（对账按 tenant 桶校准卷占用，会把归档字节抹掉）", v.Name)
+	}
+	if v.ACL.Mode != volume.ModeAllow || len(v.ACL.Owners) > 0 {
+		return fmt.Errorf("归档卷 %q 必须是专用卷（acl.mode=allow 且白名单为空），当前 mode=%q owners=%d —— 证据不得对普通用户可见/可删",
+			v.Name, v.ACL.Mode, len(v.ACL.Owners))
+	}
+	return nil
 }
 
 // runAuditArchive 把封段归档到 `audit.archive_dir`（M4；**复用** pkg/audit 原语）。
@@ -927,4 +967,4 @@ func newColdArchiveFS(cfg *Config, set *registry.Set, log *slog.Logger) syncpkg.
 const auditArchiveTimeout = 5 * time.Minute
 
 // auditArchiveVolumePrefix 是冷段在**归档卷**内的前缀（与裸目录布局隔离，便于识别与清理）。
-const auditArchiveVolumePrefix = "audit-archive"
+const auditArchiveVolumePrefix = audit.DefaultArchivePrefix // 唯一定义在 pkg/audit
