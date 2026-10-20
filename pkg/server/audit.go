@@ -34,14 +34,30 @@ const (
 // 与 pkg/audit.Entry 的关系：Entry 是**统一条目模型**（唯一实现），本结构是它的**读面投影**
 // （auditEventFromEntry 是唯一转换点）。写入侧不再有第二套实现。
 type AuditEvent struct {
-	Action     string    `json:"action"`      // 操作名：delete / rename / version_restore / config_update / cloud_cancel …
-	Actor      string    `json:"actor"`       // 操作主体：AccessKey（SproxySig）或 APIKey 名；未认证为空串
-	Mesh       string    `json:"mesh"`        // 所属 mesh（SproxySig 派生；APIKey/未认证为空串）
+	Action string `json:"action"` // 操作名：delete / rename / version_restore / config_update / cloud_cancel …
+	Actor  string `json:"actor"`  // 操作主体：AccessKey（SproxySig）或 APIKey 名；未认证为空串
+	Mesh   string `json:"mesh"`   // 所属 mesh（SproxySig 派生；APIKey/未认证为空串）
+	// Owner 是**归属租户**（可选）：代表他人操作（mesh 中继/管理员代管）时必须显式给，
+	// 否则回退为 `ActorFrom(ctx)`（评审 R13 P2：此前无该字段 ⇒ 归属被记成操作者）。
+	Owner string `json:"owner,omitempty"`
+	// RequestID / SourceIP 是可选的**请求维度**（审计取证）：来自 ctx（trace id / 客户端 IP）。
+	RequestID  string    `json:"request_id,omitempty"`
+	SourceIP   string    `json:"source_ip,omitempty"`
 	ObjectType string    `json:"object_type"` // 对象类型：file / task / config
 	Object     string    `json:"object"`      // 对象标识：文件路径 / 任务 ID / config
 	Result     string    `json:"result"`      // 结果：success / denied / error
 	Detail     string    `json:"detail"`      // 补充信息（如 rename 的目标、version_id、失败原因）
 	TS         time.Time `json:"ts"`          // 事件发生时间
+}
+
+// firstNonEmpty 返回第一个非空字符串（审计 Owner 的「显式优先、否则回退」语义）。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // auditEventFromEntry 把统一审计条目投影为对外审计事件（**唯一转换点**）。
@@ -52,6 +68,9 @@ func auditEventFromEntry(e audit.Entry) AuditEvent {
 		Mesh:       e.Mesh,
 		ObjectType: e.ObjType,
 		Object:     e.Object,
+		Owner:      e.Owner,
+		RequestID:  e.RequestID,
+		SourceIP:   e.SourceIP,
 		Result:     string(e.Result),
 		Detail:     e.Detail,
 		TS:         e.TS,
@@ -89,7 +108,7 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 			Type:    audit.TypeSensitive,
 			Action:  evt.Action,
 			Actor:   evt.Actor,
-			Owner:   ActorFrom(ctx), // 租户键 = AK（非 Principal.Owner）
+			Owner:   firstNonEmpty(evt.Owner, ActorFrom(ctx)), // 显式归属优先；否则租户键 = AK（非 Principal.Owner）
 			Mesh:    evt.Mesh,
 			ObjType: evt.ObjectType,
 			Object:  evt.Object,

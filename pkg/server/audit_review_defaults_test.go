@@ -37,7 +37,7 @@ func TestAuditServices_BufferSizeZeroKeepsJournal(t *testing.T) {
 	cfg.StorageRoot = t.TempDir()
 	cfg.Audit.BufferSize = 0 // 运维按文档「只省内存」调优
 
-	svc, journal := setupAuditServices(cfg, func() syncpkg.FS { return nil }, testLogger())
+	svc, journal := setupAuditServices(cfg, func() syncpkg.FS { return nil }, audit.NullMetrics{}, testLogger())
 	if svc == nil || journal == nil {
 		t.Fatalf("buffer_size=0 不应关闭落盘：svc=%v journal=%v", svc != nil, journal != nil)
 	}

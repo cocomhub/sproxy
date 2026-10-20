@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -41,7 +42,7 @@ func auditStartupEnv(t *testing.T, mutate func(*Config)) (*Config, *slog.Logger)
 func TestAuditStartup_DefaultDegrades(t *testing.T) {
 	t.Parallel()
 	cfg, log := auditStartupEnv(t, nil)
-	svc, journal := setupAuditServices(cfg, func() syncpkg.FS { return nil }, log)
+	svc, journal := setupAuditServices(cfg, func() syncpkg.FS { return nil }, audit.NullMetrics{}, log)
 	if svc == nil {
 		t.Fatal("默认应降级为仅内存（svc 非 nil），而不是完全关闭")
 	}
@@ -66,7 +67,7 @@ func TestAuditStartup_FailFastPanics(t *testing.T) {
 			t.Fatalf("panic 信息应说明是 fail_fast 所致，got %v", r)
 		}
 	}()
-	_, _ = setupAuditServices(cfg, func() syncpkg.FS { return nil }, log)
+	_, _ = setupAuditServices(cfg, func() syncpkg.FS { return nil }, audit.NullMetrics{}, log)
 }
 
 // TestAuditStartup_DisabledTouchesNothing disabled=true：完全关闭且**无副作用**
@@ -74,7 +75,7 @@ func TestAuditStartup_FailFastPanics(t *testing.T) {
 func TestAuditStartup_DisabledTouchesNothing(t *testing.T) {
 	t.Parallel()
 	cfg, log := auditStartupEnv(t, func(c *Config) { c.Audit.Disabled = true })
-	svc, journal := setupAuditServices(cfg, func() syncpkg.FS { return nil }, log)
+	svc, journal := setupAuditServices(cfg, func() syncpkg.FS { return nil }, audit.NullMetrics{}, log)
 	if svc != nil || journal != nil {
 		t.Fatalf("disabled 应返回 (nil, nil), got svc=%v journal=%v", svc, journal)
 	}

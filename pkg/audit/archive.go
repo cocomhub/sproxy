@@ -92,7 +92,7 @@ func ArchiveSealed(ctx context.Context, j *FileJournal, a SegmentArchiver, keep 
 			rep.Err = cerr
 			return rep, cerr
 		}
-		if aerr := archiveOne(ctx, a, seg, &rep); aerr != nil {
+		if aerr := archiveOne(ctx, j, a, seg, &rep); aerr != nil {
 			rep.Failed++
 			if rep.Err == nil {
 				rep.Err = aerr
@@ -103,21 +103,35 @@ func ArchiveSealed(ctx context.Context, j *FileJournal, a SegmentArchiver, keep 
 }
 
 // archiveOne 归档单个封段：成功后**才**删除本地文件（失败保留 ⇒ 不丢证据）。
-func archiveOne(ctx context.Context, a SegmentArchiver, seg SegmentInfo, rep *ArchiveReport) error {
-	f, err := os.Open(seg.Path)
+//
+// 先经 `Journal.QuarantineSegment` 改名为独占名（锁内），再打开/上传/删除该隔离名 ⇒
+// 归档期间的轮转无法把我们的目标搬走或替换（评审 R13 P2 的 TOCTOU）。失败时尽力放回原名，
+// 放不回也**绝不删除**（宁可留下带 `.archiving.` 后缀的文件，也不丢证据）。
+func archiveOne(ctx context.Context, j *FileJournal, a SegmentArchiver, seg SegmentInfo, rep *ArchiveReport) error {
+	orig := seg.Path
+	q, qerr := j.QuarantineSegment(orig)
+	if qerr != nil {
+		return fmt.Errorf("audit: 隔离封段 %s 失败（本轮跳过，下轮重试）: %w", orig, qerr)
+	}
+	// 注意：`seg.Path` 保持**原名**（归档器据它做命名/身份，便于幂等与对账）；
+	// 只有**读取**用隔离名 ⇒ 归档期间轮转不会搬走/替换我们的目标文件。
+	f, err := os.Open(q)
 	if err != nil {
-		return fmt.Errorf("audit: 打开封段 %s 失败: %w", seg.Path, err)
+		_ = os.Rename(q, orig)
+		return fmt.Errorf("audit: 打开封段 %s 失败: %w", orig, err)
 	}
 	ref, aerr := a.Archive(ctx, seg, f)
 	cerr := f.Close()
 	if aerr != nil {
-		return fmt.Errorf("audit: 归档封段 %s 失败（本地保留）: %w", seg.Path, aerr)
+		_ = os.Rename(q, orig) // 尽力放回原名（供下轮重试）
+		return fmt.Errorf("audit: 归档封段 %s 失败（本地保留）: %w", orig, aerr)
 	}
 	if cerr != nil {
-		return fmt.Errorf("audit: 关闭封段 %s 失败（本地保留）: %w", seg.Path, cerr)
+		_ = os.Rename(q, orig)
+		return fmt.Errorf("audit: 关闭封段 %s 失败（本地保留）: %w", orig, cerr)
 	}
-	if rerr := os.Remove(seg.Path); rerr != nil {
-		return fmt.Errorf("audit: 归档成功但回收本地封段 %s 失败: %w", seg.Path, rerr)
+	if rerr := os.Remove(q); rerr != nil {
+		return fmt.Errorf("audit: 归档成功但回收隔离封段 %s 失败: %w", q, rerr)
 	}
 	rep.Archived++
 	if ref != "" {

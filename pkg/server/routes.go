@@ -144,9 +144,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 冷段归档目的地**延迟解析**：可能是**卷**（`audit.archive_volume`）⇒ 需卷集合就绪后
 	// 才能拿到卷 FS。assemble 期先拿一个闭包，卷集合装配完成后再回填（轮转归档在运行期触发 ✓）。
 	var coldVolSet *registry.Set
+	// 指标实例提前创建：审计装配（journal/service）与 Handlers 共用同一实例 ⇒ `audit_dropped`
+	// 等审计计数能经 `/metrics` 暴露（评审 R13 P1：此前无人注入 ⇒ 恒 NullMetrics）。
+	metrics := NewMetrics()
 	auditSvc, auditJournal := setupAuditServices(cfg, func() syncpkg.FS {
 		return newColdArchiveFS(cfg, coldVolSet, log)
-	}, log)
+	}, newAuditMetrics(metrics), log)
 
 	// 卷集合装配（多卷，任务 3）：按 cfg.Volumes 逐卷 MkdirAll + storage.OpenRoot
 	// （LAYOUT_VERSION 写入/校验）+ 卷容量 Pool + ACL 解析。缺省形态（YAML 只配
@@ -163,7 +166,17 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 卷集合就绪 ⇒ 回填冷段归档目的地（`audit.archive_volume` 需卷 FS），并做**启动期**一次归档
 	// （此后由轮转的 OnSeal 回调触发）。归档失败只告警：封段仍在本地，下轮重试（原语保证不丢）。
 	coldVolSet = vs
-	runAuditArchive(cfg, newColdArchiveFS(cfg, vs, log), auditJournal, log)
+	coldFS := newColdArchiveFS(cfg, vs, log)
+	if cfg.Audit.ArchiveVolume != "" && coldFS == nil {
+		// 明确区分「未配置归档」与「配置了但解析失败」：后者必须显式可见（评审 R13 P1）——
+		// 否则运行期归档静默关闭，而封段仍会被 max_archives 按份数回收 ⇒ 证据越来越少。
+		msg := "审计归档卷无法解析（未注册/非外部·封装卷）⇒ 冷段归档已关闭；封段仍会被 max_archives 回收"
+		if cfg.Audit.Startup.FailFast {
+			panic("audit: " + msg + ": " + cfg.Audit.ArchiveVolume)
+		}
+		log.Error(msg, "archive_volume", cfg.Audit.ArchiveVolume)
+	}
+	runAuditArchive(cfg, coldFS, auditJournal, log)
 
 	h := &Handlers{
 		cfgPtr:            opts.CfgPtr,
@@ -171,7 +184,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		buildAt:           opts.BuildAt,
 		logger:            log,
 		auditLogger:       auditLogger,
-		metrics:           NewMetrics(),
+		metrics:           metrics,
 		rebalanceProg:     newRebalanceProgress(),
 		shareStore:        NewShareStore(log.With("component", "share")),
 		routeTable:        opts.RouteTable,

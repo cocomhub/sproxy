@@ -46,7 +46,10 @@ import (
 // （合适位置自动选择，无需配置目录）。打开失败记错误并降级为 ring-only
 // （审计绝不阻断启动）；装载失败同样降级。
 // 轮转（roadmap 11.5-⑥）：audit.max_size > 0 时按大小轮转 + 保留 max_archives 份归档。
-func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger) (*audit.Service, *audit.FileJournal) {
+func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, am audit.Metrics, log *slog.Logger) (*audit.Service, *audit.FileJournal) {
+	if am == nil {
+		am = audit.NullMetrics{} // 兜底：未注入时保持零回归（但生产装配应注入 auditMetrics）
+	}
 	if cfg.Audit.Disabled {
 		// 显式关闭（audit.disabled=true）：不建目录、不落盘、读面空表（审计完全 off）。
 		log.Warn("审计已显式关闭（audit.disabled=true）")
@@ -74,6 +77,7 @@ func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger)
 		MaxArchives:   cfg.Audit.MaxArchives,
 		MaxTotalBytes: int64(cfg.Audit.MaxTotalBytes),
 		OnSeal:        onSeal,
+		Metrics:       am, // 丢弃/写失败/轮转可观测（评审 R13 P1）
 		Logger:        log,
 	})
 	if err != nil {
@@ -106,12 +110,16 @@ func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger)
 		Journal: jr,
 		Index:   idx,
 		Logger:  log,
+		Metrics: am,
 		Policy:  audit.Policy{MaxMemoryEntries: cfg.Audit.BufferSize},
 		Caps:    &caps,
 		CtxFields: audit.ContextFields{
 			Actor: ActorFrom,
 			Owner: ActorFrom, // 租户键 = AK（设计 §5.7 规则 1；严禁 Principal.Owner）
 			Mesh:  MeshFrom,
+			// 请求维度（评审 R13 P2）：此前未接线 ⇒ 条目里恒为空，而设计把它们列为敏感字段。
+			RequestID: auditRequestIDFrom,
+			SourceIP:  auditSourceIPFrom,
 		},
 	})
 	if serr != nil {
@@ -820,7 +828,11 @@ func runAuditArchive(cfg *Config, coldFS syncpkg.FS, j *audit.FileJournal, log *
 	// 实际写能力来自 pkg/sync（与云端下载→转存同源：FS + WriteIfAbsent 幂等写）；
 	// 审计包只做编排与护栏，不自造 sink 接口 ✓。
 	arch := audit.FSArchiver{FS: coldFS}
-	rep, err := audit.ArchiveSealed(context.Background(), j, arch, keep)
+	// 有界超时：OnSeal 回调在**写路径**上同步执行（`Append` 内），归档目标可能是远端/加密卷；
+	// 无超时会让某次业务 Emit 被整段上传拖住（评审 R13 P2）。
+	ctx, cancel := context.WithTimeout(context.Background(), auditArchiveTimeout)
+	defer cancel()
+	rep, err := audit.ArchiveSealed(ctx, j, arch, keep)
 	if err != nil {
 		log.Warn("审计冷段归档失败（封段保留在本地，下轮重试）", "error", err, "archive_dir", cfg.Audit.ArchiveDir)
 		return
@@ -868,13 +880,13 @@ func newColdArchiveFS(cfg *Config, set *registry.Set, log *slog.Logger) syncpkg.
 	}
 	// ① 冷段归档**卷**（优选）：加密卷 ⇒ 冷段自带 at-rest 加密；容量/配额与普通卷一致。
 	if name := cfg.Audit.ArchiveVolume; name != "" {
+		// 纯解析，**不**在此打日志：本函数在 `/api/audit` 每个请求都会调用一次，
+		// 配置错误时逐请求 Warn 会刷爆日志（评审 R13 P1）。装配期统一告警/可 fail-fast。
 		if set == nil {
-			log.Warn("审计归档卷已配置但卷集合未装配（跳过归档）", "archive_volume", name)
 			return nil
 		}
 		be := set.External(name)
 		if be == nil {
-			log.Warn("审计归档卷不存在或不是外部/封装卷（跳过归档）", "archive_volume", name)
 			return nil
 		}
 		return syncpkg.NewPrefixFS(be.FS(), auditArchiveVolumePrefix)
@@ -885,6 +897,9 @@ func newColdArchiveFS(cfg *Config, set *registry.Set, log *slog.Logger) syncpkg.
 	}
 	return nil
 }
+
+// auditArchiveTimeout 是单次冷段归档的时限（超时后本轮放弃、封段保留、下轮重试）。
+const auditArchiveTimeout = 5 * time.Minute
 
 // auditArchiveVolumePrefix 是冷段在**归档卷**内的前缀（与裸目录布局隔离，便于识别与清理）。
 const auditArchiveVolumePrefix = "audit-archive"

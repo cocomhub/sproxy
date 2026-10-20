@@ -18,26 +18,33 @@
 | P3 | `Entry.StartMS` 被赋成 `DurMS`（步骤开始时间字段恒等于耗时） | `pkg/audit/service.go` | 改 `start.UnixMilli()` |
 | P3（一致性） | 覆盖率矩阵把「传输层 `request_id`/`source_ip`」标为 ✅，但**中间件无测试文件**、且这两个字段生产**从未接线**（恒空） | `docs/testing/audit-scenarios.md`、`routes_setup.go:CtxFields` | 矩阵改为 ⬜ GAP 并写明原因 |
 
-## 2. 待办（按严重度登记，未在本轮修复）
+## 2. 第二轮修复（同分支后续提交）
 
-| 级别 | 问题 | 证据 | 建议 |
-| --- | --- | --- | --- |
-| P1 | `/api/audit` 读面**全量解析**热段 + 冷段（`limit` 未下推：`journal.Read` 不截断、`QueryCold(..., 0)` 永不早停），且热段读取持 `j.mu` 写锁 ⇒ 一次管理员查询可阻塞全部审计写入 | `audit_handler.go:82-95`、`journal.go:528`、`cold.go:245` | 把 `limit` 下推（`EntryFilter.Limit` + 冷段剩余预算）；热段改「尾部倒序读」或走环形索引；`Read` 接 `ctx` |
-| P1 | `audit.Metrics` 生产未注入（恒 `NullMetrics`）⇒ `audit_dropped`/`write_failed`/`hook_panics` 全部不可观测（「有界丢弃」无通道） | `routes_setup.go:100-113`、`journal.go:419` | 加 `audit.Metrics → server.Metrics` 适配器并注入；丢弃路径补限流 Warn |
-| P1 | 归档目的地不可用（卷名写错/未就绪）只有一条 Warn，运行期归档关闭，而封段仍被 `max_archives` 删除；读面静默只返回热段（无「不完整」信号） | `routes_setup.go:860-885`、`journal.go` `shiftArchives` | 装配期区分「未配置」与「配置了但解析失败」后者 fail-fast（或一次性告警 + 计数）；删除封段前要求已确认归档 |
-| P2 | 归档 `os.Remove(seg.Path)` 与并发轮转存在 TOCTOU（归档期间发生 1~2 次轮转 ⇒ 可能删掉刚搬上来、尚未归档的新段） | `archive.go`（`archiveOne`）、`journal.go:shiftArchives` | 归档前把段 rename 到独占名再处理；或让归档与轮转共用封段互斥 |
-| P2 | `Entry.RequestID`/`SourceIP` 生产未接线；`Entry.Volume` 非测试源码零赋值（卷只以 `detail="volume=..."` 文本出现） | `routes_setup.go:CtxFields`、`pkg/files/write_ops.go` | 装配层注入提取器（trace/RemoteAddr）；`RecordAudit` 增 `Volume` 字段 |
-| P2 | `mesh_read`/`mesh_write` 把**目标 owner** 塞进 `Actor`（`AuditEvent` 无 Owner 字段）⇒ 代表他人操作时归属记错 | `remote_read.go:110`、`remote_write.go:103`、`audit.go:92` | `AuditEvent` 增 `Owner`（缺省回填 `ActorFrom(ctx)`） |
-| P2 | 审计 TTL 只清热段；冷段（归档）**永不按龄删除**（`archive_keep=0` 时热段里根本没有超龄数据 ⇒ TTL 实际未生效） | `volume_retention.go:195-207`、`journal.go:Rewrite` | 冷段按 `ColdSegment.Last` 过期删除，或文档明确「TTL 仅作用热段」并禁止与归档同用 |
-| P2 | `ai.embed` 埋点存在但**无生产调用方**（`pkg/aiembed` 尚无消费方）⇒ 该动作实际不会产生；R39 只看「符号被引用」，包装函数内引用即可转绿 ⇒ **假绿** | `ai_embed_wiring.go`、`internal/archcheck/audit_action_gate_test.go` | R39 升级为「引用点在启动可达链上」（或 deadcode 式可达性）；否则登记并删动作 |
-| P2 | 设计声明的 R35-b（变更型路由必须经 `auditMiddleware`）/R35-e（读面同门同过滤）**无门禁实现**，但代码注释仍宣称 | `audit_middleware.go:21-27`、设计 §8.2 | 实现或改注释为「待实现」 |
-| P2 | `MarkDone` 先置内存 `done` 再落盘；best-effort 写失败返回 nil 且**永不重试** ⇒ 协调器误报已提交，下轮重启重复执行 | `service.go:375-400` | `KindDone` 落盘失败时回滚 `done` 并向上返回错误；或区分「内存 done / 已提交」 |
-| P2 | `OnSeal` 归档在**写路径同步**执行且用 `context.Background()`（无超时/不可取消）⇒ 某次业务 `Emit` 可能被整段上传拖住 | `routes_setup.go:818`、`journal.go:fireSealIfPending` | 回调改「标记 + 后台单飞 worker」或加超时 ctx |
-| P3 | 死代码：`rewriteAuditLog`/`filterAuditLines`/`writeAuditLinesAtomic`（约 70 行零调用）；注释仍指向不存在的 `legacy.go` | `volume_retention.go:209-283`、`audit/core.go:16` | 删除死代码 + 订正注释 |
-| P3 | `audit.OpenRange` 非测试零调用（`QueryCold` 只走流式）⇒ 「按需区间读」能力未被使用 | `pkg/audit/cold.go:172` | 在读面接上（与 P1 limit 下推同一改动）或删除 |
-| P3 | 归档卷写入未接容量/配额账本（`audit-archive/` 增长不计入卷配额） | `routes_setup.go:875` | 视产品口径决定是否 `WrapStagingQuota` |
+| 级别 | 问题 | 修复 |
+| --- | --- | --- |
+| P1 | `/api/audit` 读面**全量解析**且**持 journal 写锁**（一次管理员查询阻塞全部审计写入）；冷段 `limit` 恒传 0 ⇒ 早停永不触发 | `FileJournal.Read` 改为「锁内只 flush + 快照段名，解析在锁外」；新增 `ReadTail(ctx,f,limit)`（新段优先、收满即停）；读面把**剩余预算**下推给 `QueryCold` |
+| P1 | `audit.Metrics` 生产未注入（恒 `NullMetrics`）⇒ `audit_dropped`/写失败/钩子 panic/轮转不可观测 | 新增 `auditMetrics` 适配器 + `Metrics.AuditDropped/Evicted/WriteFailed/HookPanics` + `sproxy_audit_*` 指标渲染；装配层注入（`setupAuditServices(..., audit.Metrics, ...)`） |
+| P1 | 归档目的地不可用仅一条 Warn，运行期归档关闭而封段仍被 `max_archives` 回收 | 装配期显式校验：`archive_volume` 解析失败 ⇒ **Error**（`startup.fail_fast=true` 时 panic）；解析函数本身不再逐请求 Warn（避免日志放大） |
+| P2 | 归档 `os.Remove(seg.Path)` 与并发轮转 TOCTOU（可能删掉刚产生、未归档的新段） | 新增 `FileJournal.QuarantineSegment`（**锁内**改名为 `<name>.archiving.<n>`），归档只读/删隔离名；失败尽力放回原名，绝不删除 |
+| P2 | `Entry.RequestID`/`SourceIP` 未接线（条目恒空） | 新增 `audit_ctx.go`（ctx 携带客户端 IP + trace id 提取器）；`requestLog` 注入 IP；`CtxFields` 接线；`AuditEvent` 投影带出 |
+| P2 | `mesh_read`/`mesh_write` 把**目标 owner** 塞进 `Actor` ⇒ 归属记错 | `AuditEvent` 增 `Owner`（显式优先，否则回退 `ActorFrom(ctx)`）；两处改为 `Owner: tgt.owner` |
+| P2 | `MarkDone` 先置内存 `done` 再落盘，best-effort 吞错且**永不重试** ⇒ 协调器误报已提交、重启重复执行 | `writeMode/persistMode(strict)`：提交记录落盘失败**回滚 `done` 并上抛错误**（协调器记 Failed，下轮重试）；用例同步改为断言「必须报错 + 可重试」 |
+| P2 | `OnSeal` 归档在写路径同步执行且 `context.Background()`（无超时/不可取消） | 归档加 `auditArchiveTimeout=5min` 超时（超时本轮放弃、封段保留、下轮重试） |
+| P3 | 死代码 `rewriteAuditLog`/`filterAuditLines`/`writeAuditLinesAtomic`（约 70 行零调用） | 删除 |
 
-## 3. 复核结论
+## 3. 剩余待办（未修，按严重度）
+
+| 级别 | 问题 | 建议 |
+| --- | --- | --- |
+| P2 | `Entry.Volume` 非测试源码零赋值（卷只以 `detail="volume=..."` 文本出现） | `AuditEvent`/`RecordAudit` 增 `Volume` 并由 `pkg/files` 各写点填充 |
+| P2 | 审计 TTL 只清热段；冷段（归档）**永不按龄删除**（`archive_keep=0` 时 TTL 实际未生效） | `ArchiveSealed` 旁路增加冷段按 `ColdSegment.Last` 过期删除；或文档明确「TTL 仅作用热段」并禁止与归档同用 |
+| P2 | `ai.embed` 埋点存在但**无生产调用方**（`pkg/aiembed` 无消费方）⇒ 动作实际不会产生，R39 仍转绿（假绿） | R39 升级为「引用点在启动可达链上」（deadcode 式可达性），或删除该动作 + `NewEmbedClient` |
+| P2 | 设计声明的 R35-b（变更型路由必须经 `auditMiddleware`）/R35-e（读面同门同过滤）无门禁实现，注释仍宣称 | 实现两条门禁，或把注释改为「待实现」 |
+| P3 | `audit.OpenRange` 非测试零调用（`QueryCold` 只走流式） | 读面接上按需区间读（与 `ReadTail` 同批）或删除 |
+| P3 | 归档卷写入未接容量/配额账本（`audit-archive/` 不计入卷配额） | 视产品口径决定是否 `WrapStagingQuota` |
+| P3 | 归档目的地不可用时封段仍会被 `max_archives` 按份数回收（本轮已改为装配期 Error/fail-fast，但运行期若无归档仍按份数删） | 让 Journal 感知「归档已配置但不可用」⇒ 此时**不按份数删除**（保留至上界） |
+
+## 4. 复核结论
 
 - 修复后：`pkg/audit` / `pkg/recovery` / `pkg/server` 定向用例全绿；
   完整验证见修复提交说明（workspace 模式 `go test ./...` + `-tags=e2e ./test/...` + `golangci-lint`）。
