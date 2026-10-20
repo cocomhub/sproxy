@@ -285,7 +285,9 @@ func TestCloudDownload_DamagedBadge_RealLink(t *testing.T) {
 // TestAudit_RendersSeededEvent 审计面板：Go 侧真实 config_update 事件 seed → 点审计 tab
 // 触发 GET /api/audit?limit=200 → 断响应事件 + 表格行 + tab 切换真实生效。
 func TestAudit_RendersSeededEvent(t *testing.T) {
-	baseURL, _, cleanup := testServer(t)
+	// 审计读面自 M1-11 起 **admin-only**（fail-closed）：本用例断 `/api/audit` 200 ⇒ 必须用
+	// 管理员回环主体（`testServerAdmin`），否则 403（这是设计语义，不是回归）。
+	baseURL, _, cleanup := testServerAdmin(t)
 	defer cleanup()
 
 	// 先于 goto seed：PUT /api/config 无条件记一条 config_update success。
