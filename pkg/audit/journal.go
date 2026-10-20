@@ -271,7 +271,15 @@ type FileJournal struct {
 	mu     sync.Mutex
 	files  map[string]*os.File
 	unsync int // SyncBatch 下未 flush 的行数
-	closed bool
+	// pendingFlush 标记「本次写入后需要 fsync」（SyncBatch 满 batchLines 时置位）。
+	// 由 `Append` 在**锁外**执行 fsync（R14 C14：此前在 mu 持锁中 fsync，批量删除时把
+	// 全局写路径串行化）。
+	pendingFlush bool
+	// syncHook 仅供测试观察批量 fsync 发生（nil = 生产无副作用）。
+	syncHook func(path string)
+	// batchStop 关闭后批量定时刷盘循环退出（SyncBatch 专用）。
+	batchStop chan struct{}
+	closed    bool
 }
 
 // NewFileJournal 创建文件 Journal（目录 0700 + 段文件 0600）。
@@ -314,6 +322,11 @@ func NewFileJournal(cfg FileJournalConfig) (*FileJournal, error) {
 	if j.globalName == "" {
 		j.globalName = "compliance.audit.log"
 	}
+	// SyncBatch：启动**时间维度**批量刷盘（R14 C14）。
+	if j.syncMode == SyncBatch {
+		j.batchStop = make(chan struct{})
+		go j.batchFlushLoop(j.batchIv)
+	}
 	if j.clock == nil {
 		j.clock = systemClock{}
 	}
@@ -348,8 +361,62 @@ func (j *FileJournal) segmentPath(e Entry) (string, error) {
 // Append 追加条目（按策略落盘；超 MaxSize 时先轮转，随后在**锁外**触封段回调）。
 func (j *FileJournal) Append(e Entry) error {
 	err := j.appendLocked(e)
+	// R14 C14：批量 fsync 移出锁（此前在 `mu` 持锁中同步 ⇒ 批量删除时全局写路径被串行化）。
+	j.flushPendingOutOfLock()
 	j.fireSealIfPending()
 	return err
+}
+
+// flushPendingOutOfLock 把「已写但未 fsync」的段刷盘（锁内只做快照，fsync 在锁外）。
+// 并发 Close 会关闭文件 ⇒ 我们对已取快照的 *os.File 调 Sync 只可能返回错误，不会 panic。
+func (j *FileJournal) flushPendingOutOfLock() {
+	j.mu.Lock()
+	if !j.pendingFlush || j.closed {
+		j.mu.Unlock()
+		return
+	}
+	j.pendingFlush = false
+	files := make(map[string]*os.File, len(j.files))
+	for p, f := range j.files {
+		files[p] = f
+	}
+	hook := j.syncHook
+	j.mu.Unlock()
+
+	for p, f := range files {
+		if serr := f.Sync(); serr != nil {
+			j.noteWriteFailure(serr)
+			continue
+		}
+		if hook != nil {
+			hook(p)
+		}
+	}
+}
+
+// batchFlushLoop 是 SyncBatch 的**时间维度**刷盘（R14 C14：此前只有 256 行阈值 ⇒ kill -9 前
+// 最多 255 条证据停在 page cache，与设计「≤ batch_max_interval 一次 fsync」不符）。
+func (j *FileJournal) batchFlushLoop(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-j.batchStop:
+			return
+		case <-t.C:
+			j.mu.Lock()
+			if j.closed {
+				j.mu.Unlock()
+				return
+			}
+			if j.unsync > 0 {
+				j.unsync = 0
+				j.pendingFlush = true
+			}
+			j.mu.Unlock()
+			j.flushPendingOutOfLock()
+		}
+	}
 }
 
 // appendLocked 是 Append 的持锁主体（拆出只为把封段回调放到锁外）。
@@ -523,6 +590,8 @@ func (j *FileJournal) writeEntryLocked(path string, e Entry) error {
 			return nil
 		}
 		j.unsync = 0
+		j.pendingFlush = true // 锁外统一 fsync（见 Append）
+		return nil
 	}
 	if j.syncMode == SyncNone {
 		return nil
@@ -1014,6 +1083,9 @@ func (j *FileJournal) Close() error {
 		return nil
 	}
 	j.closed = true
+	if j.batchStop != nil {
+		close(j.batchStop) // 批量定时刷盘循环退出（幂等由 closed 标志保证）
+	}
 	var firstErr error
 	for path, f := range j.files {
 		if err := f.Sync(); err != nil && firstErr == nil {
