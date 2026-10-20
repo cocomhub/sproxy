@@ -14,6 +14,7 @@ package cloud
 // 自愈修复不能被「复用坏产物」短路。
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -69,7 +70,7 @@ func TestRecovery_QueuedSubmittedTaskRestarts(t *testing.T) {
 	if root == nil {
 		t.Fatal("cloudStateRootFor 返回 nil")
 	}
-	recovered, restarted, _, _ := mgr.recoverTasksFromDir(root)
+	recovered, restarted, _, _ := mgr.recoverTasksFromDir(context.Background(), root)
 	if recovered != 2 {
 		t.Fatalf("recovered=%d, want 2", recovered)
 	}
@@ -119,7 +120,7 @@ func TestRecovery_UnreadableTaskCounted(t *testing.T) {
 	delete(mgr.tasks, good)
 	mgr.mu.Unlock()
 
-	recovered, _, _, skipped := mgr.recoverTasksFromDir(root)
+	recovered, _, _, skipped := mgr.recoverTasksFromDir(context.Background(), root)
 	if recovered != 1 {
 		t.Fatalf("recovered=%d, want 1（坏文件不应影响好任务）", recovered)
 	}

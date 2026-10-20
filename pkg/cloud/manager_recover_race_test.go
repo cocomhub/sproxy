@@ -26,6 +26,7 @@ package cloud
 // 修好后（先收集 → 持锁批量插入 → **之后**才启动 goroutine）必须干净；去掉锁必被 -race 捕获。
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -95,7 +96,7 @@ func TestCloudDownloadManager_RecoverTasksNoUnlockedMapWrite(t *testing.T) {
 	}
 
 	// 单轮恢复：此刻 N 个下载 goroutine 均阻塞在服务端 ⇒ 与循环内无锁写全程重叠。
-	recovered, restarted, _, _ := mgr.recoverTasksFromDir(root)
+	recovered, restarted, _, _ := mgr.recoverTasksFromDir(context.Background(), root)
 	if recovered != n {
 		t.Fatalf("recovered=%d, want %d", recovered, n)
 	}

@@ -12,6 +12,7 @@ package cloud
 // 崩溃/磁盘满，或组文件损坏被跳过。
 
 import (
+	"context"
 	"slices"
 	"testing"
 
@@ -67,5 +68,41 @@ func TestRecoverOrphanGroups_AggregatesSameGroup(t *testing.T) {
 		if !found {
 			t.Fatalf("组成员缺失 %s: %v", id, group.TaskIDs)
 		}
+	}
+}
+
+// TestRecoverAll_CanceledContextStopsRecovery 启动恢复必须**可被取消**（装配层的
+// startupRecoveryTimeout 只有在 ctx 真正下传到恢复循环时才有效；恢复是
+// ListenAndServe 之前同步执行 ⇒ 挂住会让服务永不监听）。
+func TestRecoverAll_CanceledContextStopsRecovery(t *testing.T) {
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 1<<30, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
+
+	// 落两条任务（已提交的 downloading ⇒ 正常会被重启）。
+	for i := 0; i < 2; i++ {
+		seedPersistedTask(t, mgr, "downloading", true)
+	}
+	mgr.mu.Lock()
+	for id := range mgr.tasks {
+		delete(mgr.tasks, id)
+	}
+	mgr.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 进入恢复前即取消 ⇒ 必须立刻停止，不重启任何任务
+	n, err := mgr.RecoverAll(ctx)
+	if err != nil {
+		t.Fatalf("RecoverAll: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("已取消的 ctx 不应恢复任何任务, got %d", n)
+	}
+	mgr.mu.RLock()
+	left := len(mgr.tasks)
+	mgr.mu.RUnlock()
+	if left != 0 {
+		t.Fatalf("已取消的 ctx 不应插入任何任务, got %d", left)
 	}
 }
