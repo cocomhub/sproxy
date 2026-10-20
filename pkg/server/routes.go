@@ -317,6 +317,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）；外层经 authMiddleware 保护。
 	localMux.HandleFunc("GET /api/events", h.eventsHandler)
 	localMux.HandleFunc("GET /api/audit/export", h.auditExportHandler)
+	// 冷段区间读（取证式随机读；管理员门在 handler 内，白名单来自 ListCold）。
+	localMux.HandleFunc("GET /api/audit/cold/seg", h.auditColdSegHandler)
 	// 通知中心运维（roadmap P0）：历史查看 + 渠道自检（隧道内层裸注册同 audit 模式）。
 	// RSS/Atom 订阅端点（roadmap 11.7-⑦）：feed 是订阅源——localMux 裸注册
 	// （隧道加密即认证）；主 mux 侧另注册公开面（feed_token 门禁在 handler 内，
@@ -545,6 +547,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 审计导出（主 mux 面）：authMiddleware 保护，与 /api/audit 同款（导出是敏感运维
 	// 面，直连必须验签；localMux 面裸注册见上方注释）。
 	srvMux.HandleFunc("GET /api/audit/export", h.authMiddleware(h.auditExportHandler))
+	// 冷段区间读（同上；主面经 authMiddleware，管理员门在 handler 内）。
+	srvMux.HandleFunc("GET /api/audit/cold/seg", h.authMiddleware(h.auditColdSegHandler))
 	srvMux.HandleFunc("GET /api/notify/history", h.authMiddleware(h.notifyHistoryHandler))
 	srvMux.HandleFunc("POST /api/notify/test", h.authMiddleware(h.notifyTestHandler))
 	// 通知订阅端点（roadmap 11.7-⑦）：公开面（feed 是订阅源，阅读器抓取不带业务
@@ -658,7 +662,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 集群写面门（roadmap 12.1-2）：writeGuard 非 nil 时**外层 srvMux 同样受门**
 	// （cloud/config/sync/credentials 等非文件组写路由在此层）——apiHandler 只覆盖
 	// 隧道内层，外层必须独立挂 writeGuardMiddleware。
-	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(h.auditMiddleware(h.writeGuardMiddleware(srvMux)))))
+	// 链序（由外到内）：metrics → requestLog → gzip → **auditVolume**（先把卷维度绑进 ctx，
+	// 保证内层审计中间件与业务 handler 都能读到）→ audit（传输兜底）→ writeGuard → 路由。
+	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(
+		h.auditVolumeMiddleware(h.auditMiddleware(h.writeGuardMiddleware(srvMux))))))
 
 	return h
 }

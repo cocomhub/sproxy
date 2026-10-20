@@ -1567,6 +1567,7 @@ function auditFilterBarHtml() {
     '<span style="font-weight:600;">审计日志</span>' +
     '<input id="audit-filter-action" type="text" placeholder="动作包含…" title="按动作子串筛选（不区分大小写）" style="' + inputStyle + 'width:130px;">' +
     '<input id="audit-filter-owner" type="text" placeholder="归属租户包含…" title="按 owner 子串筛选" style="' + inputStyle + 'width:130px;">' +
+    '<input id="audit-filter-volume" type="text" placeholder="卷包含…" title="按卷名子串筛选（卷维度，评审 R13）" style="' + inputStyle + 'width:110px;">' +
     '<select id="audit-filter-result" title="按结果精确筛选" style="' + inputStyle + '">' +
     '<option value="">全部结果</option><option value="success">成功</option><option value="denied">拒绝</option><option value="error">失败</option>' +
     '</select>' +
@@ -1583,7 +1584,7 @@ function auditFilterBarHtml() {
 
 // bindAuditFilters 绑定筛选控件（input/change 即时生效）与「清除」按钮。
 function bindAuditFilters() {
-  const map = { action: '#audit-filter-action', owner: '#audit-filter-owner', result: '#audit-filter-result', kind: '#audit-filter-kind' };
+  const map = { action: '#audit-filter-action', owner: '#audit-filter-owner', volume: '#audit-filter-volume', result: '#audit-filter-result', kind: '#audit-filter-kind' };
   Object.keys(map).forEach(function (k) {
     const el = document.querySelector(map[k]);
     if (!el) return;

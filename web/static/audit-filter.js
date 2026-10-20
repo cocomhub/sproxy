@@ -16,10 +16,11 @@
 
 /**
  * 创建空筛选条件（UI 初值）。
- * @returns {{action:string, owner:string, result:string, kind:string}}
+ * @returns {{action:string, owner:string, result:string, kind:string, volume:string}}
  */
 function auditFilterEmpty() {
-  return { action: '', owner: '', result: '', kind: '' };
+  // volume（评审 R13）：卷维度，服务端已写入 Entry.Volume 并经读面 JSON 暴露。
+  return { action: '', owner: '', result: '', kind: '', volume: '' };
 }
 
 /**
@@ -38,7 +39,7 @@ function auditFilterNorm(v) {
  */
 function auditFilterIsActive(filter) {
   const f = filter || {};
-  return ['action', 'owner', 'result', 'kind'].some(function (k) {
+  return ['action', 'owner', 'result', 'kind', 'volume'].some(function (k) {
     return auditFilterNorm(f[k]) !== '';
   });
 }
@@ -55,6 +56,7 @@ function auditFilterRows(events, filter) {
   const owner = auditFilterNorm(f.owner);
   const result = auditFilterNorm(f.result);
   const kind = auditFilterNorm(f.kind);
+  const volume = auditFilterNorm(f.volume);
   const src = Array.isArray(events) ? events : [];
   return src.filter(function (e) {
     if (!e) return false;
@@ -62,6 +64,7 @@ function auditFilterRows(events, filter) {
     if (owner && !auditFilterNorm(e.owner).includes(owner)) return false;
     if (result && auditFilterNorm(e.result) !== result) return false;
     if (kind && auditFilterNorm(e.kind) !== kind) return false;
+    if (volume && !auditFilterNorm(e.volume).includes(volume)) return false;
     return true;
   });
 }

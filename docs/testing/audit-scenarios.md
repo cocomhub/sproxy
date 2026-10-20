@@ -106,3 +106,13 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
   `docs/testing/virtual-time-conversions.md`（R18）；
 - 复用既有 harness，不新建一套 HTTP/卷装配：`newAuditTestServer`（`audit_export_test.go`）、
   `newVolumesAPIServer`（`volumes_api_test.go`）、`assertAuditAction`（`pkg/files/audit_scenarios_test.go`）。
+
+## 卷维度与归档读面（R13 收尾）
+
+| 能力 | 用例 | 说明 |
+| --- | --- | --- |
+| 审计带卷维度 | `pkg/server/audit_volume_dimension_test.go`（7 例） | 显式 > ctx（`?volume=`/DAV/S3 绑定）> 单卷兜底 > 空；多卷**不猜**默认卷 |
+| 按卷筛选（热/冷） | 同上 + `pkg/audit/filter_volume_test.go` | `?volume=` 与 UI 筛选同一语义 |
+| 冷段尾读 | `pkg/audit/read_tail_cold_test.go`（3 例） | newest-first 返回**最新**条目；读取字节 < 段大小；与全量扫描集合等价 |
+| 冷段区间读 | `pkg/server/audit_cold_seg_api_test.go`（4 例） | 白名单/夹紧/Content-Range/非管理员 403 |
+| 归档卷专用性 | `pkg/server/audit_archive_volume_dedicated_test.go` | 默认卷、开放 ACL、非空白名单均拒绝 |

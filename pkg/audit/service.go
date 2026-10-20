@@ -35,6 +35,9 @@ type ContextFields struct {
 	Mesh      func(context.Context) string
 	RequestID func(context.Context) string
 	SourceIP  func(context.Context) string
+	// Volume 是**卷维度**（可选）：审计条目「这件事发生在哪个卷上」。
+	// 与 Owner/Actor 同构 —— 由装配层从 ctx 提取，业务调用点无需逐条传（评审 R13）。
+	Volume func(context.Context) string
 }
 
 // Options 是 Service 的构造参数（显式注入，无包级变量）。
@@ -588,6 +591,9 @@ func (s *Service) fillContext(ctx context.Context, e *Entry) {
 	}
 	if e.SourceIP == "" && s.eff.ctx.SourceIP != nil {
 		e.SourceIP = s.eff.ctx.SourceIP(ctx)
+	}
+	if e.Volume == "" && s.eff.ctx.Volume != nil {
+		e.Volume = s.eff.ctx.Volume(ctx)
 	}
 }
 

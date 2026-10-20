@@ -41,8 +41,11 @@ type AuditEvent struct {
 	// 否则回退为 `ActorFrom(ctx)`（评审 R13 P2：此前无该字段 ⇒ 归属被记成操作者）。
 	Owner string `json:"owner,omitempty"`
 	// RequestID / SourceIP 是可选的**请求维度**（审计取证）：来自 ctx（trace id / 客户端 IP）。
-	RequestID  string    `json:"request_id,omitempty"`
-	SourceIP   string    `json:"source_ip,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	SourceIP  string `json:"source_ip,omitempty"`
+	// Volume 是**卷维度**（评审 R13）：此前 Entry.Volume 从未赋值、读面也没有该字段
+	// ⇒ 取证时无法回答「这件事发生在哪个卷」。
+	Volume     string    `json:"volume,omitempty"`
 	ObjectType string    `json:"object_type"` // 对象类型：file / task / config
 	Object     string    `json:"object"`      // 对象标识：文件路径 / 任务 ID / config
 	Result     string    `json:"result"`      // 结果：success / denied / error
@@ -71,6 +74,7 @@ func auditEventFromEntry(e audit.Entry) AuditEvent {
 		Owner:      e.Owner,
 		RequestID:  e.RequestID,
 		SourceIP:   e.SourceIP,
+		Volume:     e.Volume,
 		Result:     string(e.Result),
 		Detail:     e.Detail,
 		TS:         e.TS,
@@ -84,6 +88,25 @@ func auditEventsFromEntries(es []audit.Entry) []AuditEvent {
 		out = append(out, auditEventFromEntry(e))
 	}
 	return out
+}
+
+// auditVolumeFallback 只在「既无显式值、ctx 也未绑定」时，为**单卷部署**的文件/卷域事件
+// 补上唯一卷名（此时按构造必然落在该卷，是真值而非猜测）。
+//
+// ctx 绑定值**不**在此读取：它由 `pkg/audit.Service.fillContext` 统一提取（唯一实现），
+// 本函数只处理"服务端无从得知、但可由部署形态推出"的兜底。多卷部署一律留空——自动放置
+// 可能落在非默认卷，猜默认卷会记错归属。
+func (h *Handlers) auditVolumeFallback(evt AuditEvent) string {
+	if evt.ObjectType != "file" && evt.ObjectType != "volume" {
+		return ""
+	}
+	if h.volSet == nil {
+		return ""
+	}
+	if all := h.volSet.All(); len(all) == 1 && all[0].Name != "" {
+		return all[0].Name
+	}
+	return ""
 }
 
 // RecordAudit 输出一条结构化审计日志（经**唯一审计服务** pkg/audit 写入）。
@@ -102,6 +125,9 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 		evt.TS = time.Now()
 	}
 	if h.auditSvc != nil {
+		if evt.Volume == "" && auditVolumeFrom(ctx) == "" {
+			evt.Volume = h.auditVolumeFallback(evt)
+		}
 		_ = h.auditSvc.Emit(ctx, audit.Entry{
 			Scope:   audit.ScopeID(systemAuditScope),
 			Kind:    audit.KindEvent,
@@ -114,6 +140,7 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 			Object:  evt.Object,
 			Result:  audit.Result(evt.Result),
 			Detail:  evt.Detail,
+			Volume:  evt.Volume, // 显式 > ctx（fillContext）；空则由服务端补齐
 			TS:      evt.TS,
 		})
 	}

@@ -59,6 +59,7 @@ localMux	GET /api/audit	tunnel	pkg/server/routes.go:285
 localMux	GET /api/usage/report	tunnel	pkg/server/routes.go:288
 localMux	GET /api/events	tunnel	pkg/server/routes.go:291
 localMux	GET /api/audit/export	tunnel	pkg/server/routes.go:292
+localMux	GET /api/audit/cold/seg	tunnel	pkg/server/routes.go:321
 localMux	GET /api/notify/history	tunnel	pkg/server/routes.go:297
 localMux	POST /api/notify/test	tunnel	pkg/server/routes.go:298
 localMux	GET /api/notify/feed	tunnel	pkg/server/routes.go:299
@@ -201,6 +202,7 @@ srvMux	POST /api/sync/conflicts/{id}/resolve	auth	pkg/server/routes.go:505
 srvMux	GET /api/audit	auth	pkg/server/routes.go:515
 srvMux	GET /api/events	auth	pkg/server/routes.go:517
 srvMux	GET /api/audit/export	auth	pkg/server/routes.go:520
+srvMux	GET /api/audit/cold/seg	auth	pkg/server/routes.go:551
 srvMux	GET /api/notify/history	auth	pkg/server/routes.go:521
 srvMux	POST /api/notify/test	auth	pkg/server/routes.go:522
 srvMux	GET /api/notify/feed	public	pkg/server/routes.go:526

@@ -68,6 +68,9 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `audit_action_gate_test.go` | R39 | R39：**审计动作常量必须有可达的非测试使用点**（两层判据：符号被引用 + 引用它的函数本身可达）。 |
 | `audit_calls_gate_test.go` | R30 · R31 · R34 · R35 | audit_calls_gate_test.go 是门禁 R35-a：审计调用点**棘轮**（只减不增）。 |
 | `audit_types_gate_test.go` | R35 | audit_types_gate_test.go 是门禁 R35-c：**审计类型/常量/接口的唯一实现处 = pkg/audit**。 |
+| `mutating_route_audit_gate_test.go` | R35-b | R35-b：**变更型路由必须有业务语义审计**（登记表 `mutating_route_audit.tsv` 三条 join：路由↔pattern、动作名真实存在、动作有场景证据；`pending` 受预算棘轮）。 |
+| `audit_archive_prefix_gate_test.go` | R41 | R41：**审计归档前缀 `audit-archive` 只能出现在归档实现/装配点**（防证据前缀被挂到用户可见面；白名单制）。 |
+| `audit_readface_gate_test.go` | R35-e | R35-e：审计**读面**必须双 mux 注册 + 单一裁决点 `auditReadAllowed`（不得读请求参数放宽）+ 单一读管线 `readAuditEvents`。 |
 | `capability_parity_gate_test.go` | R21 | capability_parity_gate_test.go 是「透明装饰器必须声明全部可选能力」的门禁（R21）。 |
 | `dead_symbols_test.go` | R11 | dead_symbols_test.go 是「**已确认删除的死代码不得复活**」的墓碑门禁（R11）。 |
 | `docs_cli_flags_test.go` | R15 | docs_cli_flags_test.go 是「sclient 全局选项文档不漂移」的门禁（R15）。 |

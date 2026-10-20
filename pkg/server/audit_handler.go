@@ -5,6 +5,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -41,7 +43,11 @@ func auditFilterFromQuery(q map[string][]string, timeKey string) (audit.EntryFil
 		}
 		return ""
 	}
-	f := audit.EntryFilter{Action: get("action"), Actor: get("actor"), Mesh: get("mesh")}
+	f := audit.EntryFilter{
+		Action: get("action"), Actor: get("actor"), Mesh: get("mesh"),
+		// 卷维度（评审 R13）：此前 Entry.Volume 未接线且过滤器无该维度。
+		Volume: get("volume"),
+	}
 	if s := get(timeKey); s != "" {
 		ts, err := time.Parse(time.RFC3339, s)
 		if err != nil {
@@ -84,7 +90,7 @@ func (h *Handlers) readAuditFromJournal(ctx context.Context, f audit.EntryFilter
 	skippable := newestFirst && limit > 0 && len(hot) >= limit
 	var cold []audit.Entry
 	if !skippable {
-		cold = h.readAuditCold(ctx, f, limit, len(hot))
+		cold = h.readAuditCold(ctx, f, limit, len(hot), newestFirst)
 	}
 	return auditEventsFromEntries(mergeAuditHotCold(cold, hot, limit, newestFirst))
 }
@@ -108,7 +114,7 @@ func (h *Handlers) readAuditHot(ctx context.Context, f audit.EntryFilter, limit 
 }
 
 // readAuditCold 读冷段，并把**剩余预算**下推（0 = 不设限，用于导出/正序全量）。
-func (h *Handlers) readAuditCold(ctx context.Context, f audit.EntryFilter, limit, hotLen int) []audit.Entry {
+func (h *Handlers) readAuditCold(ctx context.Context, f audit.EntryFilter, limit, hotLen int, newestFirst bool) []audit.Entry {
 	coldFS := h.auditColdFS()
 	if coldFS == nil {
 		return nil
@@ -116,6 +122,18 @@ func (h *Handlers) readAuditCold(ctx context.Context, f audit.EntryFilter, limit
 	budget := 0
 	if limit > 0 && limit-hotLen > 0 {
 		budget = limit - hotLen
+	}
+	// 方向决定读法（评审 R13 正确性 + 有界性）：
+	//   · newest-first + limit ⇒ **尾读**。`QueryCold` 逐段**从头**读且「收满即停」⇒ 最新段条目数
+	//     超过预算时返回该段**最旧**的 N 条（最新条目被截掉）⇒ 结果集错误；
+	//   · 其余（升序导出/不限量）⇒ 最旧优先扫描。
+	if newestFirst {
+		es, err := audit.ReadTailCold(ctx, coldFS, []string{""}, f, budget)
+		if err != nil {
+			h.auditWarn("审计冷段尾读失败（忽略冷段继续）", err)
+			return nil
+		}
+		return es
 	}
 	es, err := audit.QueryCold(ctx, coldFS, []string{""}, f, budget)
 	if err != nil {
@@ -200,6 +218,99 @@ func (h *Handlers) auditHandler(w http.ResponseWriter, r *http.Request) {
 
 	events := h.readAuditEvents(r.Context(), f, limit, true)
 	sendJSONResponse(w, auditResponse{Events: events, Total: len(events)}, http.StatusOK)
+}
+
+// auditColdSegHandler 处理 GET /api/audit/cold/seg——按区间读取**已归档冷段**的一段字节
+// （取证式随机读：管理员按需取任意区间，不必整段下载）。
+//
+// 参数：`path`（必须来自 ListCold 的白名单，防目录穿越）、`offset`、`length`
+// （缺省 0 / 64KiB，上限 maxColdRangeBytes）。响应带 `X-Audit-Segment-Size` 与
+// `Content-Range: bytes off-end-1/size` 便于客户端续读。
+//
+// 能力来源：`pkg/audit.OpenRange`（→ `sync.RangeReader`）—— 远端卷也只传输所需区间。
+func (h *Handlers) auditColdSegHandler(w http.ResponseWriter, r *http.Request) {
+	if !h.auditReadAllowed(r) {
+		sendJSONResponse(w, map[string]string{"error": "审计读面仅限管理员"}, http.StatusForbidden)
+		return
+	}
+	coldFS := h.auditColdFS()
+	if coldFS == nil {
+		sendJSONResponse(w, map[string]string{"error": "审计归档未启用"}, http.StatusNotFound)
+		return
+	}
+	ctx := r.Context()
+	segs, err := audit.ListCold(ctx, coldFS, "")
+	if err != nil {
+		h.auditWarn("审计冷段清单读取失败", err)
+		http.Error(w, "冷段清单不可用", http.StatusInternalServerError)
+		return
+	}
+	want := r.URL.Query().Get("path")
+	var seg audit.ColdSegment
+	found := false
+	for _, s := range segs {
+		if s.Path == want {
+			seg, found = s, true
+			break
+		}
+	}
+	if !found {
+		// 不在白名单 ⇒ 404（不区分「不存在」与「无权」，避免探测）。
+		http.NotFound(w, r)
+		return
+	}
+	off, n, ok := coldRangeParams(r, seg.Size)
+	if !ok {
+		http.Error(w, "offset/length 非法", http.StatusBadRequest)
+		return
+	}
+	rc, oerr := audit.OpenRange(ctx, coldFS, seg, off, n)
+	if oerr != nil {
+		h.auditWarn("审计冷段区间读失败", oerr)
+		http.Error(w, "冷段区间读失败", http.StatusInternalServerError)
+		return
+	}
+	defer rc.Close()
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("X-Audit-Segment-Size", strconv.FormatInt(seg.Size, 10))
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", off, off+n-1, seg.Size))
+	w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, rc)
+}
+
+// maxColdRangeBytes 是单次冷段区间读的上限（防一次拉满整段）。
+const maxColdRangeBytes = 4 << 20
+
+// coldRangeParams 解析并夹紧 (offset,length) 到 [0,size)。
+func coldRangeParams(r *http.Request, size int64) (off, n int64, ok bool) {
+	q := r.URL.Query()
+	off = 0
+	if s := q.Get("offset"); s != "" {
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || v < 0 {
+			return 0, 0, false
+		}
+		off = v
+	}
+	n = 64 << 10
+	if s := q.Get("length"); s != "" {
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || v < 0 {
+			return 0, 0, false
+		}
+		n = v
+	}
+	if n > maxColdRangeBytes {
+		n = maxColdRangeBytes
+	}
+	if off > size {
+		off = size
+	}
+	if off+n > size {
+		n = size - off
+	}
+	return off, n, true
 }
 
 // auditExportHandler 处理 GET /api/audit/export——审计日志导出（JSON 数组，按 TS 升序）。

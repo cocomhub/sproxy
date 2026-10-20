@@ -130,3 +130,22 @@ func (r *auditStatusRecorder) Write(b []byte) (int, error) {
 	}
 	return r.ResponseWriter.Write(b)
 }
+
+// auditVolumeMiddleware 把「本次请求指向的卷」绑定进 ctx（审计第 6 维，评审 R13）。
+//
+// 为什么放在中间件而不是逐 handler：卷名在各端点以 `?volume=` / 路径变量等多种方式出现，
+// 逐点绑定必然漏（130 个 RecordAudit 调用点里约 1/3 与卷相关）。请求携带卷名时统一绑定；
+// 默认卷/后端解析出的卷由解析点用 withAuditVolume 补充（缺省不写 ⇒ 不伪造）。
+func (h *Handlers) auditVolumeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("volume")
+		if name == "" {
+			name = r.PathValue("volume")
+		}
+		if name == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(withAuditVolume(r.Context(), name)))
+	})
+}

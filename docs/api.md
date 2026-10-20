@@ -960,36 +960,52 @@ query 参数：`path`（必填）、**`size`**（直传对象字节数，非负�
 
 审计日志查看与导出（敏感运维面，主 mux 需 SproxySig/APIKey 认证；隧道内层裸注册，隧道加密即认证）。
 
-> **访问模型（重要）**：这两个端点是**跨租户的全局视图**——`AuditEvent` 只有 `actor`/`mesh`
-> 维度、**没有 owner 字段**，返回的是**全系统**最近事件（含他人操作路径）。也就是说
-> **任意已认证主体都能读到全局审计**；这是**产品口径待定项**（选项：① 保持运维面全局视图
-> + 仅 admin 可达；② 给 `AuditEvent` 加 owner 维度做 per-owner 过滤）。当前实现为 ①的宽松形态，
-> 未加角色门禁——因为隧道内层（浏览器）走的是**合成最小 Principal**（非 admin），硬加
-> admin 门禁会直接打断 Web UI 审计面板。**在多租户部署中请把审计端点视为运维面访问控制项**。
+> **访问模型（重要）**：审计读面是**全系统视图**，因此**仅管理员可读**
+> （主体自身 `Role == "admin"` 优先，其次按 AK 查角色环；未认证/非管理员一律 `403`）。
+> 裁决函数 `auditReadAllowed` 是**唯一**权限点，且**不接受任何请求参数放宽**
+> （门禁 R35-e 机械保证：`/api/audit`、`/api/audit/export`、`/api/audit/cold/seg` 同一裁决）。
+> 条目已含 `owner`（归属租户）与 `volume`（卷维度）字段；将来开放「用户维度自视图」时必须在
+> 同一裁决函数内改为「该 owner 的过滤视图 + 脱敏」。
 
 ### `GET /api/audit`
 
 返回最近审计事件（按时间倒序，最新在前）：
 
 ```json
-{"events": [{"action": "delete", "actor": "ak-…", "object": "file.txt", "result": "success", "detail": "…", "ts": "2026-09-01T12:00:00Z"}], "total": 1}
+{"events": [{"action": "delete", "actor": "ak-…", "owner": "alice", "mesh": "", "volume": "vault",
+             "object_type": "file", "object": "file.txt", "result": "success", "detail": "…",
+             "request_id": "…", "source_ip": "10.0.0.2", "ts": "2026-09-01T12:00:00Z"}], "total": 1}
 ```
 
 query 参数：
 - `limit`：非负整数（默认 100，>500 clamp 到 500；非法回落默认）
-- `action` / `actor` / `mesh`：精确相等过滤（空字段不过滤）
+- `action` / `actor` / `mesh` / **`volume`**：过滤（`action` 支持前缀匹配，其余精确相等；空值不过滤）
 - `since`：RFC3339 时间，仅返回该时刻之后（`TS.After`）的事件；解析失败 400
 
-未启用审计（`audit.buffer_size=0`）时返回 200 + 空 events + total 0（不 404）。
+`volume` 语义：审计条目的**卷维度**——显式值 > 请求 `?volume=` 绑定 > 单卷部署补默认卷名；
+多卷部署中自动放置且未绑定时为**空**（不猜默认卷，避免记错归属）。
 
 ### `GET /api/audit/export`
 
 导出审计事件为 JSON 数组（按 `ts` 升序，时间正序；供日志 collector 顺序回放）。
 
-query 参数：`action` / `actor`（精确相等过滤）、`after_ts`（RFC3339，仅导出该时刻之后；解析失败 400）。
+query 参数：`action` / `actor` / `volume`（同上）、`after_ts`（RFC3339，仅导出该时刻之后；解析失败 400）。
 
 - 未启用审计时返回空数组 200
-- 审计默认落盘（<默认卷根>/audit/audit.log）：导出全量历史（含重启前事件）；落盘打开失败降级为仅内存（ring）时导出 ring 容量内全部
+- 审计默认落盘（`<默认卷根>/audit/audit.log`）：导出全量历史（含重启前事件）；冷段（归档）合并进结果
+- 读面方向：`newest-first + limit` 走**冷段尾读**（只读最新段尾部），升序导出走按时间扫描
+
+### `GET /api/audit/cold/seg`
+
+按区间读取**已归档冷段**（取证式随机读：管理员按需取任意区间，不必整段下载）。
+
+query 参数：
+- `path`：冷段键（**必须来自服务端冷段清单白名单**；不在白名单 ⇒ `404`，防目录穿越/探测）
+- `offset`：起始字节偏移（默认 `0`；非法 400；超出大小则夹紧为空区间）
+- `length`：读取长度（默认 `64KiB`，上限 `4MiB`；超出自动夹紧）
+
+响应：`200` + `application/x-ndjson` 原始字节，带 `X-Audit-Segment-Size` 与
+`Content-Range: bytes <off>-<end>-1/<size>`（便于客户端续读）。归档未启用 ⇒ `404`。
 
 ## 错误码附录
 

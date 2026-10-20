@@ -40,14 +40,24 @@
 | P2 | **R39 假绿**：只被「无调用方的导出包装」引用的动作（`ai.embed` / `NewEmbedClient`）也能转绿 | R39 增加**一层可达判据**：引用该常量的函数名必须出现在「其它非测试文件」或本文件内出现 >1 次，否则判「假绿」；`ActionAIEmbed` 登记 allowlist 并写明「接入消费方后必须删除登记」；变异等价验证：该判据恰好只命中 `ai.embed`（其余 20 个动作无误报） |
 | P2 | 归档不可用时封段仍被 `max_archives` 回收 | `FileJournal.SetArchiveUnavailable`：装配层在「归档已配置但 coldFS 解析失败」时置位 ⇒ `shiftArchives` **整轮跳过**（只跳删除不够：后续 rename 会覆盖最旧段）⇒ 证据保留，磁盘由 `max_total_bytes` 兜底；用例 `TestShiftArchives_RetainsWhenArchiveUnavailable` |
 
-## 4. 剩余待办（未修，按严重度）
+## 3.1 第三轮（续）：门禁与卷维度
 
-| 级别 | 问题 | 建议 |
+| 级别 | 问题 | 修复 |
 | --- | --- | --- |
-| P2 | `Entry.Volume` 非测试源码零赋值（卷只以 `detail="volume=..."` 文本出现） | `AuditEvent`/`RecordAudit` 增 `Volume` 并由 `pkg/files` 各写点填充 |
-| P2 | 设计声明的 R35-b（变更型路由必须经 `auditMiddleware`）/R35-e（读面同门同过滤）无门禁实现，注释仍宣称 | 实现两条门禁，或把注释改为「待实现」 |
-| P3 | `audit.OpenRange` 非测试零调用（`QueryCold` 只走流式） | 读面接上按需区间读（与 `ReadTail` 同批）或删除 |
-| P3 | 归档卷写入未接容量/配额账本（`audit-archive/` 不计入卷配额） | 视产品口径决定是否 `WrapStagingQuota` |
+| P2 | `Entry.Volume` 从未赋值；读面无该维度 ⇒ 取证无法回答「哪个卷」 | 卷做成 **ctx 第 6 维**（`ContextFields.Volume` + `fillContext` 唯一提取）；`auditVolumeMiddleware`（`?volume=`）+ DAV/S3 解析点绑定；语义「显式 > ctx > 单卷兜底 > 空」，多卷未绑定**留空**（不猜默认卷）；读面 `EntryFilter.Volume` + `?volume=` + 投影 + UI 列/筛选 + 真浏览器 e2e |
+
+**变异验证（7 命中）**：R35-b 删登记 / 意造动作名 / pending 超预算 / 动作无场景证据；R35-e 去 export 门 / 裁决读 URL / 去 PrincipalFrom 优先。
+
+## 4. 剩余待办
+
+**全部关闭**（R13 共 21 项：第一轮 8 + 第二轮 9 + 第三轮 3 + 本轮 3 大项）。
+
+最后两项的处理记录：
+
+| 原项 | 结论 |
+| --- | --- |
+| `audit.OpenRange` 非测试零调用 | 接到生产：`GET /api/audit/cold/seg` 区间读（仅 admin、`path` 走 `ListCold` 白名单、区间夹紧 64KiB–4MiB、`Content-Range` 续读）；同时新增 `ReadTailCold`（修 newest-first 结果集错误 + 只读最新段尾部），`probeSegmentTimes` 早已复用 `RangeReader` |
+| 归档卷写入未接配额账本 | **前提被推翻**：容量记账已由 `capacity.CapacityFS`（FS 层，唯一 `LedgerCounter`）覆盖，`PurgeCold` 的 `Delete` 自动释放 ⇒ 无需新账本。真缺陷是**对账抹账**（`adjustVolumePool` 按 tenant 桶校准，`audit-archive/` 不在桶内）⇒ 用**归档卷专用性校验**（非默认卷 + 白名单为空的专用卷）结构性消除，并同时满足证据隔离；R41 门禁钉住前缀不被挂到用户面 |
 
 ## 5. 复核结论
 

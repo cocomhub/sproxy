@@ -1,0 +1,79 @@
+# 门禁 R35-b：**变更型路由 → 业务语义审计**登记表（deny-by-default）。
+#
+# 设计 docs/designs/2026-10-19-audit-service.md §2.5 / R35-b：每个变更型路由（POST/PUT/PATCH/DELETE）
+# 必须留下**业务语义**审计（action/object/result）；传输层兜底事件（`http.*`，fidelity=transport）
+# **不计入**达标。本表是唯一机器可读事实源，门禁做三条 join：
+#   ① 路由表（route_classes.tsv）中的变更型 pattern ↔ 本表**双向**一一对应（新增不登记 ⇒ 红）；
+#   ② `action=` 的值必须在**非测试源码**中真实存在（字符串字面量，或同名 Action* 常量被引用）；
+#   ③ 该 action 必须出现在某个 `_test.go` 的**测试函数体内**（场景证据；防「登记了但从不发出」）。
+#
+# `pending` = 尚未接业务审计/尚无场景证据的**待办 backlog**，受 `pending_budget` 棘轮约束：
+# **只减不增**（新增变更型路由不得登记为 pending，必须直接给 action=）。
+# 文件操作类动作由 `pkg/files` 经 `recordFileAudit(ctx, "<action>", …)` 发出（不在 handler 字面量里），
+# 故这类行的登记需要人工核对场景矩阵（docs/testing/audit-scenarios.md）。
+#
+# 格式：<pattern>	<action=值 | pending>	<备注（pending 必填）>
+# pending_budget=38
+#
+DELETE /api/cloud/groups/{id}	action=cloud_group_delete	
+DELETE /api/cloud/tasks/{id}	action=cloud_delete	
+DELETE /api/secrets/{name}	action=secret_delete	
+DELETE /api/shares/{token}	action=share_revoke	
+DELETE /api/versions	action=version_delete	
+DELETE /api/volumes/user	action=user_volume_delete	
+POST /api/ai/privacy/purge	action=ai.privacy_purge	
+POST /api/archive	action=archive	
+POST /api/backends/{type}/presign	action=backend_presign	
+POST /api/backends/{type}/presign/complete	action=backend_presign_complete	
+POST /api/backup	action=backup	
+POST /api/cloud/groups	action=cloud_group_create	
+POST /api/cloud/tasks/{id}/cancel	action=cloud_cancel	
+POST /api/secrets	action=secret_create	
+POST /api/share	action=share_create	
+POST /api/sync/conflicts/{id}/resolve	action=sync_conflict_resolve	
+POST /api/sync/tasks	action=sync_task_create	
+POST /api/verify	action=verify	
+POST /api/versions/restore	action=version_restore	
+POST /api/volumes/copy	action=volume_copy	
+POST /api/volumes/import	action=volume_import	
+POST /api/volumes/move	action=volume_move	
+POST /api/volumes/user	action=user_volume_create	
+PUT /api/config	action=config_update	
+DELETE /api/credentials/{ak}	pending	handler=akDeleteHandler actions=NONE
+DELETE /api/credentials/{ak}/sk/{skID}	pending	handler=skDeleteHandler actions=NONE
+DELETE /api/hub/nodes/{id}	pending	handler=hubRemoveNodeHandler actions=NONE
+DELETE /api/sync/tasks/{id}	pending	handler=syncDeleteTask actions=NONE
+POST /api/ai/summarize	pending	handler=aiInsight actions=NONE
+POST /api/ai/tag	pending	handler=aiInsight actions=NONE
+POST /api/batch/delete	pending	handler=batchDelete actions=NONE
+POST /api/batch/rename	pending	handler=batchRename actions=NONE
+POST /api/cloud/archive	pending	handler=cloudArchiveBatch action=cloud_archive 无测试场景证据
+POST /api/cloud/download	pending	handler=cloudCreateDownload actions=NONE
+POST /api/cloud/download/batch	pending	handler=cloudCreateBatchDownload actions=NONE
+POST /api/cloud/groups/{id}/archive	pending	handler=cloudArchiveGroup action=cloud_archive 无测试场景证据
+POST /api/cloud/groups/{id}/cancel	pending	handler=cloudCancelGroup actions=NONE
+POST /api/cloud/groups/{id}/resume	pending	handler=cloudResumeGroup actions=NONE
+POST /api/cloud/tasks/{id}/archive	pending	handler=cloudArchiveTask action=cloud_archive 无测试场景证据
+POST /api/cloud/tasks/{id}/resume	pending	handler=cloudResumeTask actions=NONE
+POST /api/credentials	pending	handler=akAddHandler actions=NONE
+POST /api/credentials/{ak}/renew	pending	handler=renewCredentialHandler actions=NONE
+POST /api/credentials/{ak}/sk/{skID}/expire	pending	handler=skExpireHandler actions=NONE
+POST /api/notify/test	pending	handler=notifyTestHandler actions=notify_test,test
+POST /api/relay/stream	pending	handler=authMiddleware actions=NONE
+POST /api/signal/answer	pending	handler=authMiddleware actions=NONE
+POST /api/signal/candidate	pending	handler=authMiddleware actions=NONE
+POST /api/signal/offer	pending	handler=authMiddleware actions=NONE
+POST /api/sync/tasks/{id}/cancel	pending	handler=syncCancelTask actions=NONE
+POST /api/sync/tasks/{id}/retry	pending	handler=syncRetryTask actions=NONE
+POST /api/tags	pending	handler=tagsHandler actions=NONE
+POST /api/trash/empty	pending	handler=emptyTrashHandler actions=NONE
+POST /api/trash/restore	pending	handler=restoreTrashHandler actions=NONE
+POST /api/volumes/rebalance	pending	handler=rebalanceVolumeHandler actions=volume_move,volume_rebalance
+POST /delete	pending	handler=delete actions=NONE
+POST /mkdir	pending	handler=mkdir actions=NONE
+POST /rename	pending	handler=rename actions=NONE
+POST /rmdir	pending	handler=rmdir actions=NONE
+POST /upload	pending	handler=upload actions=NONE
+POST /upload/chunk	pending	handler=uploadChunk actions=NONE
+POST /upload/complete	pending	handler=uploadComplete actions=NONE
+POST /upload/init	pending	handler=uploadInit actions=NONE

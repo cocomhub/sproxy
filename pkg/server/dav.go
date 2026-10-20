@@ -21,6 +21,16 @@ import (
 	"github.com/cocomhub/sproxy/pkg/sync"
 )
 
+// bindVolumeForAudit 把「本次 DAV 请求作用到的卷」绑定进 ctx（审计第 6 维，评审 R13）：
+// 显式 `?volume=` 优先；缺省取默认卷（DAV 无参时按构造走默认卷）。空名不写（withAuditVolume 语义）。
+// 抽成函数是为了不给 davHandler 增加 gocognit（门禁阈值 15）。
+func (h *Handlers) bindVolumeForAudit(r *http.Request, name string) *http.Request {
+	if name == "" && h.volSet != nil {
+		name = h.volSet.Default().Name
+	}
+	return r.WithContext(withAuditVolume(r.Context(), name))
+}
+
 // davHandler 按请求者 owner 提供 WebDAV 挂载（user 桶根）。
 // 未认证 owner（空）→ anonymous 租户（allowInsecureLoopback 已由 authMiddleware 门）。
 func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
@@ -28,6 +38,8 @@ func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
 	// 多卷支持（roadmap P1 残余）：?volume=<name> 显式选卷（ACL 校验）；
 	// 缺省走默认卷（tenantFor 零回归）。
 	volName := r.URL.Query().Get("volume")
+	// 审计第 6 维（评审 R13）：显式卷或默认卷都绑定 ⇒ DAV 写操作可归属到卷。
+	r = h.bindVolumeForAudit(r, volName)
 	var tnt *storage.Tenant
 	if vol := volName; vol != "" {
 		if h.volSet == nil {

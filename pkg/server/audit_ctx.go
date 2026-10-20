@@ -49,3 +49,26 @@ func clientIPFromRemoteAddr(remoteAddr string) string {
 	}
 	return host
 }
+
+// auditVolumeCtxKey 是请求 ctx 中「卷名」的私有 key（由 auditVolumeMiddleware / 显式解析点写入）。
+type auditVolumeCtxKey struct{}
+
+// withAuditVolume 把卷名放进 ctx（供审计第 6 维提取；空名不写 ⇒ 不覆盖已有值）。
+func withAuditVolume(ctx context.Context, name string) context.Context {
+	if name == "" || ctx == nil {
+		return ctx
+	}
+	if auditVolumeFrom(ctx) == name {
+		return ctx
+	}
+	return context.WithValue(ctx, auditVolumeCtxKey{}, name)
+}
+
+// auditVolumeFrom 从 ctx 取卷名（未绑定返回空串）。
+func auditVolumeFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	name, _ := ctx.Value(auditVolumeCtxKey{}).(string)
+	return name
+}

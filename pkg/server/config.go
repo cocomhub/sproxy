@@ -190,7 +190,9 @@ type AuditConfig struct {
 	// 指向一个挂载的冷存储卷目录（加密卷由卷自身提供 at-rest 加密）；空 ⇒ 不归档（默认）。
 	ArchiveDir string `yaml:"archive_dir" mapstructure:"archive_dir"`
 	// ArchiveVolume 是**冷段归档卷**（优选于 archive_dir）：非空时封段写入该卷的
-	// `audit-archive/` 前缀下 —— 加密卷 ⇒ 冷段自带 at-rest 加密，容量/配额与普通卷一致。
+	// 归档卷根的保留前缀下（**必须专用**：ACL 白名单为空且非默认卷，见 validateAuditArchiveVolume）。
+	// at-rest 加密只在 `secretdata`/封装（enclosure）类卷成立（FS 层加密）；`extra.encrypt` 是
+	// **本地卷**特性、不能选作归档卷 ⇒ 普通外部卷上的冷段是明文（与用户文件同口径，依赖后端自身加密）。
 	// 与 archive_dir 同时配置时**以卷为准**（卷是受管存储，语义强于裸目录）。
 	ArchiveVolume string `yaml:"archive_volume" mapstructure:"archive_volume"`
 	// ArchiveKeep 是本地**保留**的最新封段数（0 = 全部归档；默认 0，建议按查询窗口显式配置）。
