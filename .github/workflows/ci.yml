@@ -150,8 +150,11 @@ jobs:
       # 根 module 覆盖率（vault 服务版）：产出 build/cover.out（CodeCov 用）并复制为
       # build/coverage/root.out（Sonar 聚合读）。子 module 覆盖由 test-submodules 产出。
       - name: go test (coverage)
+        # 与上一 job 同步传 20m：`cover-check` 默认沿用 `GOTEST_TIMEOUT ?= -timeout=5m`，
+        # 而 pkg/server 在 2 核 runner 上 race+cover 已 >5m（本地 race 实测 274s，CI 更慢）
+        # ⇒ 曾以 "panic: test timed out after 5m0s" 失败（并非用例挂死）。
         run: |
-          make cover-check
+          make cover-check GOTEST_TIMEOUT="-timeout=20m"
           mkdir -p build/coverage
           cp build/cover.out build/coverage/root.out
 
