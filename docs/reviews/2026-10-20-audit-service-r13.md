@@ -40,14 +40,20 @@
 | P2 | **R39 假绿**：只被「无调用方的导出包装」引用的动作（`ai.embed` / `NewEmbedClient`）也能转绿 | R39 增加**一层可达判据**：引用该常量的函数名必须出现在「其它非测试文件」或本文件内出现 >1 次，否则判「假绿」；`ActionAIEmbed` 登记 allowlist 并写明「接入消费方后必须删除登记」；变异等价验证：该判据恰好只命中 `ai.embed`（其余 20 个动作无误报） |
 | P2 | 归档不可用时封段仍被 `max_archives` 回收 | `FileJournal.SetArchiveUnavailable`：装配层在「归档已配置但 coldFS 解析失败」时置位 ⇒ `shiftArchives` **整轮跳过**（只跳删除不够：后续 rename 会覆盖最旧段）⇒ 证据保留，磁盘由 `max_total_bytes` 兜底；用例 `TestShiftArchives_RetainsWhenArchiveUnavailable` |
 
+## 3.1 第三轮（续）：门禁与卷维度
+
+| 级别 | 问题 | 修复 |
+| --- | --- | --- |
+| P2 | `Entry.Volume` 从未赋值；读面无该维度 ⇒ 取证无法回答「哪个卷」 | 卷做成 **ctx 第 6 维**（`ContextFields.Volume` + `fillContext` 唯一提取）；`auditVolumeMiddleware`（`?volume=`）+ DAV/S3 解析点绑定；语义「显式 > ctx > 单卷兜底 > 空」，多卷未绑定**留空**（不猜默认卷）；读面 `EntryFilter.Volume` + `?volume=` + 投影 + UI 列/筛选 + 真浏览器 e2e |
+
+**变异验证（7 命中）**：R35-b 删登记 / 意造动作名 / pending 超预算 / 动作无场景证据；R35-e 去 export 门 / 裁决读 URL / 去 PrincipalFrom 优先。
+
 ## 4. 剩余待办（未修，按严重度）
 
 | 级别 | 问题 | 建议 |
 | --- | --- | --- |
-| P2 | `Entry.Volume` 非测试源码零赋值（卷只以 `detail="volume=..."` 文本出现） | `AuditEvent`/`RecordAudit` 增 `Volume` 并由 `pkg/files` 各写点填充 |
-| P2 | 设计声明的 R35-b（变更型路由必须经 `auditMiddleware`）/R35-e（读面同门同过滤）无门禁实现，注释仍宣称 | 实现两条门禁，或把注释改为「待实现」 |
-| P3 | `audit.OpenRange` 非测试零调用（`QueryCold` 只走流式） | 读面接上按需区间读（与 `ReadTail` 同批）或删除 |
-| P3 | 归档卷写入未接容量/配额账本（`audit-archive/` 不计入卷配额） | 视产品口径决定是否 `WrapStagingQuota` |
+| P3 | `audit.OpenRange` 非测试零调用（`QueryCold` 只走流式） | 读面接上按需区间读（与 `ReadTail` 同批）或删除（API 口径，需裁定） |
+| P3 | 归档卷写入的**对账口径**：`reconcileVolumePool` 按 tenant 桶校准卷占用，而 `audit-archive/` 不在任何桶内 ⇒ 若归档卷与默认卷同卷，每轮对账会把归档字节「修正」掉（卷上限被绕过） | 归档卷必须**专用且非默认卷**（配置校验）+ 回归用例；容量记账本身已由 `capacity.CapacityFS` 覆盖（无需新账本） |
 
 ## 5. 复核结论
 
