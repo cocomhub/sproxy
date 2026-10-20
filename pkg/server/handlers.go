@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
+
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -103,14 +105,12 @@ type Handlers struct {
 	// nil = 未注入（视图只反映配置态）。
 	meshRuntimeInfo func() MeshRuntimeInfo
 
-	// auditRing 是有界内存环形审计缓冲（cfg.Audit.BufferSize，默认 2048；0=关闭）。
-	// RegisterRoutes 按 cfg 装配（BufferSize>0 时创建）；RecordAudit 在 TS 填充后
-	// 挂钩 Add，所有审计录入点自动进 ring。nil = 关闭（GET /api/audit 返回空表）。
-	auditRing *AuditRing
-	// auditStore 是审计落盘存储（默认启用，<默认卷根>/audit/audit.log；打开失败降级 nil = 仅内存）。
-	// 启用时 RecordAudit 同时 append 落盘（JSON lines），重启载入历史；/api/audit
-	// 查询优先走 auditStore（全量），未装配时回落 ring。
-	auditStore *AuditStore
+	// auditSvc 是**唯一审计服务**（pkg/audit）：条目写入、内存活跃索引、轮转与策略。
+	// 由 setupAuditServices 装配；cfg.Audit.BufferSize=0 ⇒ nil（审计关闭，读面返回空表）。
+	auditSvc *audit.Service
+	// auditJournal 是**合规段族**落盘后端（全量历史，供 /api/audit 与导出读取）。
+	// 打开失败 ⇒ nil（降级为仅内存索引），审计绝不阻断启动。
+	auditJournal *audit.FileJournal
 	// notifyCenter 是通知中心（roadmap P0；cfg.Notify.Enabled 时由 RegisterRoutes
 	// 装配）。RecordAudit 末尾 dispatch（异步 goroutine，绝不阻塞审计/业务）。
 	// nil = 未启用（零回归）。
@@ -250,6 +250,10 @@ type Handlers struct {
 	// 注入的 ExternalAuthHandlers.Routes() 收集，注册时同时挂主 mux 与隧道内层
 	// localMux（浏览器隧道模式下登录页可达）。nil = 未配置（零回归：无外部端点）。
 	externalAuthRoutes []authn.ExternalAuthRoute
+	// insecureLoopbackRole 是无认证回环兜底合成的 Principal 角色（装配/测试瞬态；
+	// 空 ⇒ 默认 user，生产零影响）。管理员类 UI/接口的 e2e 需要它以 admin 运行：
+	// 审计读面是 admin-only（M1-11），否则扫描器/测试无法覆盖审计面板。
+	insecureLoopbackRole string
 	// allowInsecureLoopback 是无认证兜底开关（读取优先级：opts 注入 > cfg 配置）。
 	// 仅调试语义：ring 为空时放行 loopback 来源（见 handleNoCredentials）。
 	allowInsecureLoopback bool

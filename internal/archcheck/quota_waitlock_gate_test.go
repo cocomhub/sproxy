@@ -76,3 +76,53 @@ func methodBody(files []string, sig string) (string, bool) {
 	}
 	return "", false
 }
+
+// TestQuotaWaitQueueWiringIsSingle 锁定 waitq 收敛后的**关键接线点**（设计 §3.1 I1）：
+//
+//  1. 等待侧必须用 `waitq.AcquireUnder` 并传入**根等待锁**（`&root.waitMu`）—— 这是丢唤醒
+//     窗口的唯一闭合点（「查 + 入队」原子于释放侧的状态变更）；用 `Acquire`（无锁协作）会让
+//     等待者睡到超时（可用性退化，且运行时用例无判别力 ⇒ 必须结构锁死）；
+//  2. 释放侧唤醒必须由 `Pool.withWaitLock` **唯一收口**（含 NotifyAll），且**在释放 waitMu
+//     之后**（fn() 内可能持 node.mu，而唤醒判据要读账本 ⇒ 持锁唤醒会自死锁，RWMutex 不可重入）；
+//  3. 不得残留旧式等待实现（sync.Cond / broadcastLocked）—— 已收敛到 pkg/waitq。
+func TestQuotaWaitQueueWiringIsSingle(t *testing.T) {
+	t.Parallel()
+	waitSrc, err := os.ReadFile("../../pkg/quota/wait.go")
+	if err != nil {
+		t.Fatalf("读取 wait.go 失败: %v", err)
+	}
+	quotaSrc, err := os.ReadFile("../../pkg/quota/quota.go")
+	if err != nil {
+		t.Fatalf("读取 quota.go 失败: %v", err)
+	}
+	wait, quota := string(waitSrc), string(quotaSrc)
+
+	// 1) 等待侧：AcquireUnder + 根等待锁。
+	if !strings.Contains(wait, "AcquireUnder(") {
+		t.Error("等待侧必须用 waitq.AcquireUnder（锁协作形式）；Acquire 无协作 ⇒ 丢唤醒窗口未闭合")
+	}
+	if !strings.Contains(wait, "&root.waitMu") {
+		t.Error("AcquireUnder 必须传入**根等待锁** &root.waitMu（与释放侧 withWaitLock 同一把）")
+	}
+
+	// 2) 释放侧：withWaitLock 唯一收口 + 唤醒在释放 waitMu 之后。
+	body, ok := methodBody([]string{quota}, "func (p *Pool) withWaitLock(")
+	if !ok {
+		t.Fatal("找不到 withWaitLock 方法体")
+	}
+	if !strings.Contains(body, "NotifyAll()") {
+		t.Error("withWaitLock 必须含 queue.NotifyAll()（释放侧唤醒的唯一收口）")
+	}
+	unlock := strings.Index(body, "root.waitMu.Unlock()")
+	notify := strings.Index(body, "NotifyAll()")
+	if unlock < 0 || notify < 0 || notify < unlock {
+		t.Error("唤醒必须在释放 waitMu **之后**（否则持 node.mu 读账本 ⇒ 自死锁）")
+	}
+
+	// 3) 不得残留旧式等待实现。
+	for _, bad := range []string{"sync.NewCond", "cond.Broadcast", "broadcastLocked"} {
+		if strings.Contains(quota, bad) {
+			t.Errorf("残留旧式等待实现 %q —— 应已收敛到 pkg/waitq（唯一实现）", bad)
+		}
+	}
+}

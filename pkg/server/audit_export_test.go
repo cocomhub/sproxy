@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
+
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -242,18 +244,24 @@ func TestAuditExport_LocalMuxReachable(t *testing.T) {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:     mux,
 		CfgPtr:  &cfgPtr,
 		Version: "test",
 		BuildAt: "test",
 		Logger:  testLogger(),
-	})
+	}
+	withTestCreds(&opts)
+	// 审计读面 M1-11（审核 P0）admin-only ⇒ 语义用例以管理员主体运行。
+	setKeyRole(t, opts.CredentialRing, testAccessKey, accesskey.RoleAdmin)
+	h := RegisterRoutes(t.Context(), opts)
 	t.Cleanup(func() { _ = h.Close() })
 
 	// 直接调 handler（localMux 注册路径 = handler 直连，无额外鉴权）。
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/audit/export", nil)
+	// 隧道内层身份来自 ctx（真实链路由隧道层注入）⇒ 直连模拟时显式注入管理员主体。
+	req = req.WithContext(withActor(req.Context(), testAccessKey))
 	h.auditExportHandler(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("localMux 面 export 应 200, got %d", rr.Code)

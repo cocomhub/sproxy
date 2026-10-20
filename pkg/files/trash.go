@@ -206,7 +206,12 @@ func (s *Service) RestoreTrashIn(ctx context.Context, owner, volumeName, trashRe
 		if !s.trashEntryExists(vr.Root, trashRel) {
 			continue
 		}
-		return s.restoreTrashAt(ctx, vr.Root, trashRel)
+		if err := s.restoreTrashAt(ctx, vr.Root, trashRel); err != nil {
+			s.rt.recordFileAudit(ctx, "trash_restore", trashRel, auditResultError, "volume="+vr.Volume)
+			return err
+		}
+		s.rt.recordFileAudit(ctx, "trash_restore", trashRel, auditResultSuccess, "volume="+vr.Volume)
+		return nil
 	}
 	return &HTTPError{Status: 404, Message: "回收站条目不存在"}
 }
@@ -315,7 +320,13 @@ func (s *Service) EmptyTrashIn(ctx context.Context, owner, volumeName string, al
 		if tnt == nil || tnt.Root() == nil {
 			return &HTTPError{Status: 400, Message: "无效的路径"}
 		}
-		return s.emptyTrashAt(owner, volumeNameForTenant(s.rt.volSet(), tnt), tnt.Root())
+		vol := volumeNameForTenant(s.rt.volSet(), tnt)
+		if err := s.emptyTrashAt(owner, vol, tnt.Root()); err != nil {
+			s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultError, "volume="+vol)
+			return err
+		}
+		s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vol+" scope=default")
+		return nil
 	}
 	roots, rerr := s.TrashRoots(owner, volumeName)
 	if rerr != nil {
@@ -323,8 +334,10 @@ func (s *Service) EmptyTrashIn(ctx context.Context, owner, volumeName string, al
 	}
 	for _, vr := range roots {
 		if err := s.emptyTrashAt(owner, vr.Volume, vr.Root); err != nil {
+			s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultError, "volume="+vr.Volume)
 			return err
 		}
+		s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vr.Volume+" all=true")
 	}
 	return nil
 }

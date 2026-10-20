@@ -88,7 +88,7 @@ func TestCloudTask_Audit_Collected(t *testing.T) {
 		t.Fatal("task.Audit 应为空（下载+转存至少两行）")
 	}
 
-	var dlRow, trRow *audit.Row
+	var dlRow, trRow *audit.Entry
 	for i := range snap.Audit {
 		r := &snap.Audit[i]
 		switch r.Type {
@@ -197,7 +197,7 @@ func TestCloudTask_Audit_EncryptRow_SecretVolume(t *testing.T) {
 		t.Fatal("SnapshotTask not found")
 	}
 
-	var encRow *audit.Row
+	var encRow *audit.Entry
 	for i := range snap.Audit {
 		r := &snap.Audit[i]
 		if r.Type == audit.TypeEncrypt && encRow == nil {
@@ -213,10 +213,7 @@ func TestCloudTask_Audit_EncryptRow_SecretVolume(t *testing.T) {
 	if encRow.Bytes != int64(len(content)) {
 		t.Fatalf("encrypt 行 Bytes 应为明文体积 %d，实际 %d", len(content), encRow.Bytes)
 	}
-	meta, ok := encRow.Meta.(map[string]any)
-	if !ok {
-		t.Fatalf("encrypt Meta 应为 map，got %T", encRow.Meta)
-	}
+	meta := encRow.Meta
 	if meta["encrypted"] != true {
 		t.Fatalf("encrypt meta.encrypted 应为 true，got %v", meta["encrypted"])
 	}

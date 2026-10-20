@@ -153,8 +153,9 @@ func TestNew_Options_QuotaLedgerMetricsAudit(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("删除应 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(audits) != 1 || audits[0] != "delete|f.txt|success" {
-		t.Fatalf("审计应为 delete|f.txt|success, got %v", audits)
+	// 本轮补齐「upload 成功」审计（此前只记 overwrite/error）⇒ 期望 = 上传成功 + 删除成功两行。
+	if len(audits) != 2 || audits[0] != "upload|f.txt|success" || audits[1] != "delete|f.txt|success" {
+		t.Fatalf("审计应为 upload|f.txt|success + delete|f.txt|success, got %v", audits)
 	}
 	if metrics.deleteCalls != 1 {
 		t.Fatalf("删除计量应 1 次, got %d", metrics.deleteCalls)
@@ -326,7 +327,7 @@ type testVolumes struct {
 	set    VolumeSet
 	tenant func(volName, owner string) *storage.Tenant
 	locate func(owner, rel string) (FileLocation, bool)
-	route  func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	route  func(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
 }
 
 func (v testVolumes) Volumes() VolumeSet { return v.set }
@@ -334,13 +335,13 @@ func (v testVolumes) Tenant(volName, owner string) *storage.Tenant {
 	return v.tenant(volName, owner)
 }
 func (v testVolumes) Locate(owner, rel string) (FileLocation, bool) { return v.locate(owner, rel) }
-func (v testVolumes) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
-	return v.route(owner, rel, explicitVol, size, forceHomeVol)
+func (v testVolumes) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	return v.route(context.Background(), owner, rel, explicitVol, size, forceHomeVol)
 }
 
 // RouteTarget 显式卷（不查重）：回落 v.route（测试替身 route 钩子不查重）。
-func (v testVolumes) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
-	return v.route(owner, rel, volName, size, "")
+func (v testVolumes) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
+	return v.route(context.Background(), owner, rel, volName, size, "")
 }
 
 // testChunked 是 ChunkedUploads 能力的测试实现。

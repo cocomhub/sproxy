@@ -118,7 +118,16 @@ func (s *StorageManager) casReserve(size int64) bool {
 // **钳 0**（评审 P2）：与 quota.Pool 的「恒不为负」不变量对齐——扫描窗口内若先被扫描
 // 覆写（ScanAndRecalculate 无条件 Store）再 Release 在途预留，`totalUsage` 会被推负，
 // 导致上限校验短暂失效（负值使 max-bytes 比较恒通过）。原子 CAS 钳到 0。
+// Release 释放 size 字节（类别 cat），并**唤醒容量等待者**（释放侧唯一收口，设计 §3.1 I1）。
+// 释放与唤醒都在**等待锁**内 ⇒ 与等待侧的「查 + 入队」（waitq.AcquireUnder 持同一把锁）
+// 互斥 ⇒ 结构性无丢唤醒。
 func (s *StorageManager) Release(size int64, cat StorageCategory) {
+	s.withWaitLock(func() { s.releaseNoLock(size, cat) })
+}
+
+// releaseNoLock 是 Release 的**无锁内部版**（调用方须已持等待锁，或明确不需唤醒 ——
+// 如 waitq 的回滚路径：那里已在锁内，再取锁会自死锁）。
+func (s *StorageManager) releaseNoLock(size int64, cat StorageCategory) {
 	if size <= 0 {
 		return
 	}

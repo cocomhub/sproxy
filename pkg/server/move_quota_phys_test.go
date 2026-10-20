@@ -21,6 +21,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,7 +49,7 @@ func TestMoveReserveTarget_ChargedPhysicalBytes(t *testing.T) {
 		t.Fatal("夹具前提不成立：目标卷应为已装配的加密卷")
 	}
 	const size = 8192 // 用户可见长度（明文）
-	_, _, scope, _, _, ok := h.moveReserveTarget("alice", "user/f.bin", "dst", tnt.Root(), size)
+	_, _, scope, _, _, ok := h.moveReserveTarget(context.Background(), "alice", "user/f.bin", "dst", tnt.Root(), size)
 	if !ok {
 		t.Fatal("预留失败（夹具/配额问题）")
 	}

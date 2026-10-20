@@ -78,7 +78,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		if scope := m.quotaScope(owner); scope != nil {
 			// 临时预留探测：TryReserve 沿父链校验（租户根 owner_quota + globalPool max），
 			// 满足则立即 Release（探测不落地 committed）。满足=放行；不满足=507。
-			probe, err := scope.TryReserve(totalSize)
+			err := scope.ProbeReserve(totalSize)
 			if err != nil {
 				m.storage.ReleaseCloud(reserved)
 				m.logger.Warn("storage full, cloud download rejected",
@@ -88,7 +88,6 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 				)
 				return nil, quota.ErrStorageFull
 			}
-			probe.Release()
 		}
 	}
 
@@ -395,14 +394,14 @@ func (m *CloudDownloadManager) checkDownloadIntegrity(ctx context.Context, task 
 // 区分「下载慢」vs「校验慢」）。logger 已注入 dlCtx（executeDownload:453），nil 时
 // no-op 绝不阻塞下载（audit.From 链式安全）。
 func (m *CloudDownloadManager) auditIntegrityDecision(ctx context.Context, decision string, kv ...any) {
-	l := audit.From(ctx)
-	if l == nil {
+	svc := audit.ServiceFrom(ctx)
+	if svc == nil {
 		return
 	}
 	args := make([]any, 0, 2+len(kv))
 	args = append(args, "decision", decision)
 	args = append(args, kv...)
-	l.Log(audit.TypeLog, audit.LevelInfo, "integrity", args...)
+	_ = svc.Log(ctx, audit.TypeLog, audit.LevelInfo, "integrity", args...)
 }
 
 // handleIntegrityMismatch 处理语义校验失败的收敛判定：累计「本地 checksum 一致仍异常」
@@ -627,21 +626,27 @@ func (m *CloudDownloadManager) cleanupCloudIfNotNeeded(task *CloudTask, destPath
 //
 // 返回的 close 函数需在下载 goroutine 收尾（defer）调用：Flush + 把 sink 中全部行复制进
 // task.Audit（终态任务持久化）+ 关闭底层 FileSink。
-func (m *CloudDownloadManager) newTaskAuditScope(task *CloudTask) (*audit.Logger, func()) {
-	sink, serr := audit.NewScopeSink(m.auditSinkDir(), task.ID)
+func (m *CloudDownloadManager) newTaskAuditScope(task *CloudTask) (*audit.Service, *audit.FileJournal, func()) {
+	j, jerr := audit.NewFileJournal(audit.FileJournalConfig{
+		Dir:      m.auditSinkDir(),
+		Layout:   audit.LayoutPerScope,   // 每任务一段（等价旧 <taskID>.audit.log）
+		Scope:    audit.ScopeID(task.ID), // **作用域绑定**：只读写本任务的段（隔离语义）
+		SyncMode: audit.SyncAlways,       // 证据级：每行 fsync（与旧 FileSink 同强度）
+		Logger:   m.logger,
+	})
+	if jerr != nil {
+		m.logger.Warn("audit journal unavailable, audit disabled for task",
+			"task_id", task.ID, "error", jerr)
+		return nil, nil, func() {}
+	}
+	svc, serr := audit.New(audit.Options{Journal: j, Logger: m.logger})
 	if serr != nil {
-		m.logger.Warn("audit sink unavailable, audit disabled for task",
-			"task_id", task.ID, "error", serr)
-		return nil, func() {}
-	}
-	l, lerr := audit.NewScope(task.ID, audit.ScopeOpts{Sink: sink})
-	if lerr != nil {
-		_ = sink.Close()
+		_ = j.Close()
 		m.logger.Warn("audit scope unavailable, audit disabled for task",
-			"task_id", task.ID, "error", lerr)
-		return nil, func() {}
+			"task_id", task.ID, "error", serr)
+		return nil, nil, func() {}
 	}
-	return l, func() { m.finalizeTaskAudit(l, sink, task) }
+	return svc, j, func() { m.finalizeTaskAudit(svc, j, task) }
 }
 
 // auditSinkDir 返回审计 sink 目录：**用户私有**缓存目录 `<UserCacheDir>/sproxy/audit`。
@@ -663,11 +668,21 @@ func (m *CloudDownloadManager) auditSinkDir() string {
 // transferAfterDownload 的转存路径用的是外层 ctx（既有语义，不改为 dlCtx 以免改变取消
 // 传播），审计 logger 必须两端可达。close 需在下载 goroutine 收尾（defer）调用。
 func (m *CloudDownloadManager) injectTaskAudit(ctx, dlCtx context.Context, task *CloudTask) (context.Context, context.Context, func()) {
-	l, close := m.newTaskAuditScope(task)
-	if l == nil {
+	svc, _, close := m.newTaskAuditScope(task)
+	if svc == nil {
 		return ctx, dlCtx, close
 	}
-	return audit.WithContext(ctx, l), audit.WithContext(dlCtx, l), close
+	// 作用域 = 任务 ID（等价旧 NewScope(task.ID) 的绑定）；span（download/transfer/encrypt）
+	// 经 ctx 取用该作用域 ⇒ 全部落在同一 <taskID>.audit.log 段。
+	sc, oerr := svc.Open(ctx, audit.ScopeID(task.ID))
+	if oerr != nil {
+		sc = nil
+	}
+	wrapped := func(c context.Context) context.Context {
+		c = audit.WithService(c, svc)
+		return audit.WithScope(c, sc)
+	}
+	return wrapped(ctx), wrapped(dlCtx), close
 }
 
 // runDownloadWithAudit 以审计 span 包裹 runRetryLoop（Begin("download") → End/Fail），
@@ -684,7 +699,7 @@ func (m *CloudDownloadManager) injectTaskAudit(ctx, dlCtx context.Context, task 
 // blocked = must-pass 阻断（任务 failed）。二者均以 integrity_status="damaged" 聚合，
 // 决策列消除「已释放损坏」与「强制阻断」的过滤歧义。
 func (m *CloudDownloadManager) runDownloadWithAudit(ctx, dlCtx context.Context, task *CloudTask, destPath string) (*downloader.Result, error) {
-	dlSpan := audit.From(dlCtx).Begin("download")
+	dlSpan := audit.BeginSpan(dlCtx, "download")
 	dlStart := time.Now()
 	result, downloadErr := m.runRetryLoop(ctx, dlCtx, task, destPath)
 	m.mu.RLock()
@@ -755,13 +770,16 @@ func sanitizeAuditErr(err error) string {
 // finalizeTaskAudit 任务收尾的审计收口：Flush（聚合 append 错误）→ 把 sink 中全部行复制进
 // task.Audit（终态任务再 saveTask 落盘，审计随任务持久化）→ 关闭底层 sink。任何失败只记
 // 日志、不阻断终态（审计为可增强能力）。
-func (m *CloudDownloadManager) finalizeTaskAudit(l *audit.Logger, sink audit.Sink, task *CloudTask) {
-	if err := l.Flush(); err != nil {
+func (m *CloudDownloadManager) finalizeTaskAudit(svc *audit.Service, j *audit.FileJournal, task *CloudTask) {
+	if err := svc.Flush(); err != nil {
 		m.logger.Warn("audit flush failed", "task_id", task.ID, "error", err)
 	}
-	rows := sink.Recent(audit.Filter{})
+	rows, rerr := j.Read(audit.EntryFilter{})
+	if rerr != nil {
+		m.logger.Warn("audit read failed", "task_id", task.ID, "error", rerr)
+	}
 	if len(rows) == 0 {
-		_ = sink.Close()
+		_ = j.Close()
 		return
 	}
 	var save bool
@@ -777,7 +795,7 @@ func (m *CloudDownloadManager) finalizeTaskAudit(l *audit.Logger, sink audit.Sin
 			m.logger.Error("persist task audit failed", "task_id", task.ID, "error", err)
 		}
 	}
-	_ = sink.Close()
+	_ = j.Close()
 }
 
 // runRetryLoop 执行带重试的下载主循环：每次尝试独立超时（超时可重试续传，用户取消

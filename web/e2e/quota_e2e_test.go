@@ -68,6 +68,17 @@ func TestE2E_QuotaPanel_RendersFederatedView(t *testing.T) {
 		t.Fatalf("渲染结果应为配额表（非 empty-msg 失败态）: %s", html)
 	}
 
+	// S4「等待可观测」：面板含等待队列统计块（#quota-wait），并展示关键计数文案。
+	if lerr := waitLoc(page, "#quota-wait", playwright.WaitForSelectorStateVisible, 5000); lerr != nil {
+		t.Fatalf("等待队列统计 #quota-wait 未出现: %v", lerr)
+	}
+	waitTxt, _ := page.Locator("#quota-wait").InnerText()
+	for _, want := range []string{"等待队列", "等待中", "峰值", "超时", "背压", "不可满足"} {
+		if !strings.Contains(waitTxt, want) {
+			t.Fatalf("等待队列统计缺少 %q: %q", want, waitTxt)
+		}
+	}
+
 	// 交互可达：刷新按钮存在且可点击，点击后重新渲染仍含数据行。
 	if lerr := waitLoc(page, "#quota-refresh", playwright.WaitForSelectorStateVisible, 5000); lerr != nil {
 		t.Fatalf("配额刷新按钮 #quota-refresh 未出现: %v", lerr)

@@ -130,7 +130,7 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 //
 // 返回值：因孤儿 pending 转终态而需要刷新状态的组 ID。调用方必须在 recoverGroups **之后**
 // 调用 UpdateGroupStatus——组记录比任务晚恢复，此刻刷新会因组不存在而空转。
-func (m *CloudDownloadManager) recoverTasks() []string {
+func (m *CloudDownloadManager) recoverTasks() (int, []string) {
 	recovered := 0
 	restarted := 0
 	var orphanPendingGroups []string
@@ -147,7 +147,30 @@ func (m *CloudDownloadManager) recoverTasks() []string {
 	if recovered > 0 {
 		m.logger.Info("cloud download tasks recovered", "count", recovered, "restarted", restarted)
 	}
-	return orphanPendingGroups
+	return recovered, orphanPendingGroups
+}
+
+// RecoverAll 是云任务**启动恢复的唯一入口**（M3 统一恢复协调器通过 legacy 注册调用）。
+//
+//   - **幂等**：只真正执行一次；重复/并发调用直接返回 0（绝不重复挂载任务或重复重启下载 ✗）。
+//   - 构造期默认已执行（`DeferRecovery=false`，即零行为变更 ✓）；装配层若把触发点交给协调器，
+//     则置 `DeferRecovery=true`，由协调器在启动恢复阶段调用本方法。
+//   - **顺序契约（不可颠倒）**：先 `recoverTasks`（按 m.tasks 修剪组内任务引用）→ 再
+//     `recoverGroups` → 最后按孤儿 pending 组刷新组状态（否则组尚不存在时 UpdateGroupStatus 空转，
+//     Web UI 会一直看到 downloading）。
+func (m *CloudDownloadManager) RecoverAll() (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	if m.recovered.Swap(true) {
+		return 0, nil // 已执行（构造期或前一次调用）⇒ 幂等 no-op
+	}
+	recovered, orphanPendingGroups := m.recoverTasks()
+	m.recoverGroups()
+	for _, gid := range orphanPendingGroups {
+		m.UpdateGroupStatus(gid)
+	}
+	return recovered, nil
 }
 
 // recoverTasksFromDir 解析单个租户持久化目录下的任务 JSON 并挂入 m.tasks，同时重启崩溃前

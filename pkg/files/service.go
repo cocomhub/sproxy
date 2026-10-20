@@ -289,7 +289,9 @@ type ExternalFileChecksum interface {
 // **typed-nil 陷阱**：nil 的具体指针装入本接口会得到非 nil 接口，使 `deps.StorageManager != nil`
 // （P5 回退路径闸门）判断失效。装配层必须先判 nil 再赋值。
 type StorageManager interface {
-	TryReserveChunked(bytes int64) error
+	// WaitReserveChunked 预留分块上传所需的全局容量（**不足时排队重试**，非立即失败）。
+	// ctx 用于在客户端断连/请求取消时立即打断等待。
+	WaitReserveChunked(ctx context.Context, bytes int64) error
 	ReleaseChunked(bytes int64)
 	Usage() int64
 	MaxBytes() int64

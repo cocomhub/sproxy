@@ -13,6 +13,7 @@ package files
 // `SaveVersion` 接口方法，也不提供 `WithSaveVersion` Option。
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -110,7 +111,7 @@ func VersionIDTime(versionID int64, fallback time.Time) time.Time {
 //
 // 导出理由：本包 SaveVersionBeforeOverwrite（供装配层上传覆盖写调用）与装配层的版本恢复
 // （恢复前备份）都调它；版本存储在本包内，故不再是接缝项。
-func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string) (int64, error) {
+func (s *Service) SaveVersion(ctx context.Context, userRel string, tnt *storage.Tenant, owner string) (int64, error) {
 	if tnt == nil || tnt.Root() == nil {
 		return 0, fmt.Errorf("保存版本: 租户不可用")
 	}
@@ -154,7 +155,7 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	// fail-open，防借版本反复写把卷堆满）。
 	// srcSize 来自 Stat（加密卷上已是**物理**长度），而版本文件是源文件的同内容拷贝 ⇒ 物理大小相同
 	// ⇒ 预留直接用 srcSize（不再折算）；提交侧 written 是**明文**字节 ⇒ 由 commitVersionQuota 折算。
-	scopeRes, poolRes, release, err := s.reserveVersionQuota(owner, tnt, reserveSize)
+	scopeRes, poolRes, release, err := s.reserveVersionQuota(ctx, owner, tnt, reserveSize)
 	if err != nil {
 		return 0, err
 	}
@@ -177,18 +178,18 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 // reserveVersionQuota 在 version 桶 Scope 与卷容量池**同时预留**版本字节（双账本，
 // reserve-then-commit，AD-7）。任一侧配额不足即释放已预留的另一侧并返回错误。返回
 // release 供调用方在失败/放弃时双 Release。
-func (s *Service) reserveVersionQuota(owner string, tnt *storage.Tenant, srcSize int64) (*quota.Reservation, *quota.Reservation, func(), error) {
+func (s *Service) reserveVersionQuota(ctx context.Context, owner string, tnt *storage.Tenant, srcSize int64) (*quota.Reservation, *quota.Reservation, func(), error) {
 	pool := volumePoolForTenant(s.rt.volSet(), tnt)
 	var scopeRes, poolRes *quota.Reservation
 	if scope := s.rt.quotaScope(owner, "version"); scope != nil {
-		rr, reserveErr := scope.TryReserve(srcSize)
+		rr, reserveErr := scope.WaitReserve(ctx, srcSize, quota.DefaultWaitTimeout)
 		if reserveErr != nil {
 			return nil, nil, nil, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
 		}
 		scopeRes = rr
 	}
 	if pool != nil {
-		rr, reserveErr := pool.TryReserve(srcSize)
+		rr, reserveErr := pool.WaitReserve(ctx, srcSize, quota.DefaultWaitTimeout)
 		if reserveErr != nil {
 			if scopeRes != nil {
 				scopeRes.Release()
@@ -606,12 +607,12 @@ func collectVolumeVersionEntries(loc *VersionLocation, remotePath string, seen m
 // 在 upload handler 中调用，如果版本管理启用则保存当前版本。tnt 为旧文件实际所在卷的租户
 // （覆盖写 stay-home 定位后的 home 卷；单卷 = 默认租户）。version/ 桶随 user/ 文件同卷（AD-5）。
 func (s *Service) SaveVersionBeforeOverwrite(r *http.Request, remotePath string, tnt *storage.Tenant) {
-	s.saveVersionBeforeOverwrite(s.rt.actorOf(r), remotePath, tnt)
+	s.saveVersionBeforeOverwrite(r.Context(), s.rt.actorOf(r), remotePath, tnt)
 }
 
 // saveVersionBeforeOverwrite 是 owner **显式**的域内实现：写面域操作（WriteFile）不需要
 // HTTP 请求，只需 owner。保留上面的 request 形状包装以兼容既有调用方（装配层与测试）。
-func (s *Service) saveVersionBeforeOverwrite(owner, remotePath string, tnt *storage.Tenant) {
+func (s *Service) saveVersionBeforeOverwrite(ctx context.Context, owner, remotePath string, tnt *storage.Tenant) {
 	if !s.rt.versioningEnabled() {
 		return
 	}
@@ -632,7 +633,7 @@ func (s *Service) saveVersionBeforeOverwrite(owner, remotePath string, tnt *stor
 		return
 	}
 	userRel := strings.TrimPrefix(fullRel, tnt.UserRoot()+"/")
-	if _, err := s.SaveVersion(userRel, tnt, owner); err != nil {
+	if _, err := s.SaveVersion(ctx, userRel, tnt, owner); err != nil {
 		s.rt.logger().Warn("保存文件版本失败", "file_name", remotePath, "error", err)
 	}
 }

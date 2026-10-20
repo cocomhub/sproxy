@@ -257,7 +257,7 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 
 	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
 	// 预检 + 会话创建/续传 + 新会话路由预留与在途临时文件。详细语义见 createChunkedSession。
-	session, reused, ok := s.createChunkedSession(&chunkedInit{w: w, r: r, store: store, owner: owner, rel: rel, explicitVol: explicitVol, forceHomeVol: forceHomeVol}, &req, chunkSize)
+	session, reused, ok := s.createChunkedSession(r.Context(), &chunkedInit{w: w, r: r, store: store, owner: owner, rel: rel, explicitVol: explicitVol, forceHomeVol: forceHomeVol}, &req, chunkSize)
 	if !ok {
 		return
 	}
@@ -302,7 +302,7 @@ type chunkedInit struct {
 
 // createChunkedSession 同名会话冲突预检 + 会话创建/续传（GetOrCreateSession）+ 新会话
 // 路由预留与在途临时文件装配（initNewSession）。返回 (session, reused, ok)。
-func (s *Service) createChunkedSession(i *chunkedInit, req *ChunkedInitRequest, chunkSize int64) (*ChunkedUploadSession, bool, bool) {
+func (s *Service) createChunkedSession(ctx context.Context, i *chunkedInit, req *ChunkedInitRequest, chunkSize int64) (*ChunkedUploadSession, bool, bool) {
 	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
 	// 预检：存在未完成同名会话但 checksum/大小不一致 → 拒绝（避免同目标两个在途会话）。
 	if !s.rejectConflictingSession(i.w, i.store, req) {
@@ -322,7 +322,7 @@ func (s *Service) createChunkedSession(i *chunkedInit, req *ChunkedInitRequest, 
 		// （507 时清理 session 返回 507，不创建临时名）；tnt 为 route 目标卷租户（temp/complete
 		// 同卷 rename 原子）。单卷旧装配（volSet nil）：routeUpload 回落既有 scope TryReserve
 		// 语义；scope 未装配（quota nil）时回退旧 storageMgr 预留（与改造前一致，零回归）。
-		if !s.initNewSession(i, session, req) {
+		if !s.initNewSession(ctx, i, session, req) {
 			return nil, false, false
 		}
 	}
@@ -425,8 +425,8 @@ func (s *Service) rejectConflictingSession(w http.ResponseWriter, store *UploadS
 // initNewSession 对新会话执行路由预留（routeUpload 定卷 + 双 TryReserve / P5 回退预留）
 // 与在途整临时文件创建（O_EXCL + Truncate 预占位）。任一失败清理会话并回 4xx/5xx，
 // 返回 false；发布结果校验失败（会话已被并发删除/接管）→ 整体回滚（abortInitOrphanRollback）。
-func (s *Service) initNewSession(i *chunkedInit, session *ChunkedUploadSession, req *ChunkedInitRequest) bool {
-	route, routeErr := s.rt.routeUpload(i.owner, i.rel, i.explicitVol, req.TotalSize, i.forceHomeVol)
+func (s *Service) initNewSession(ctx context.Context, i *chunkedInit, session *ChunkedUploadSession, req *ChunkedInitRequest) bool {
+	route, routeErr := s.rt.routeUpload(ctx, i.owner, i.rel, i.explicitVol, req.TotalSize, i.forceHomeVol)
 	if routeErr != nil {
 		i.store.cleanupSessionIfCurrent(session.UploadID, session)
 		s.sendUploadRouteError(i.w, i.r, req.Filename, routeErr)
@@ -453,7 +453,7 @@ func (s *Service) initNewSession(i *chunkedInit, session *ChunkedUploadSession, 
 		// P5 回退：quota 未装配（route.ScopeRes nil，volSet nil 旧装配 / globalPool nil）
 		// 时回退旧 storageMgr 全局预留；未完成会话删除/过期时按 StorageMgrReserved 释放
 		// （已完成会话不释放，见 DeleteSession）。
-		reserved, published, ok := s.p5FallbackReserve(i.w, i.store, session, req)
+		reserved, published, ok := s.p5FallbackReserve(ctx, i.w, i.store, session, req)
 		if !ok {
 			return false
 		}
@@ -486,8 +486,8 @@ func (s *Service) initNewSession(i *chunkedInit, session *ChunkedUploadSession, 
 
 // p5FallbackReserve P5 回退预留：quota 未装配（route.ScopeRes nil）时回退旧 storageMgr
 // 全局预留。返回 (reservedBytes, published)；失败已清理会话并回 507（ok=false）。
-func (s *Service) p5FallbackReserve(w http.ResponseWriter, store *UploadStore, session *ChunkedUploadSession, req *ChunkedInitRequest) (int64, bool, bool) {
-	if err := s.rt.storageManager().TryReserveChunked(session.TotalSize); err != nil {
+func (s *Service) p5FallbackReserve(ctx context.Context, w http.ResponseWriter, store *UploadStore, session *ChunkedUploadSession, req *ChunkedInitRequest) (int64, bool, bool) {
+	if err := s.rt.storageManager().WaitReserveChunked(ctx, session.TotalSize); err != nil {
 		store.cleanupSessionIfCurrent(session.UploadID, session)
 		s.rt.logger().Warn("storage full, chunked upload rejected",
 			"file_name", req.Filename,
@@ -1264,7 +1264,7 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 任务 8 O-1：覆盖动作记审计（沿用 upload_handler 覆盖写审计写法，Action=overwrite）。
 	// 与单次上传的差异见 backupCompleteVersion。rename 前 stat 旧文件大小（覆盖写）；新文件
 	// 场景 old=0。
-	overwrote, prev := s.backupCompleteVersion(tnt, rel, owner, session.Filename)
+	overwrote, prev := s.backupCompleteVersion(r.Context(), tnt, rel, owner, session.Filename)
 	finalChecksum := session.FileChecksum
 	// at-rest 加密卷：在途明文（可续传）在 finalize 单遍加密落位——raw rename 会把明文
 	// 直接落盘（at-rest 加密被绕过、/download 解密失败 = 文件不可读，评审 P0 的分块上传面）。
@@ -1377,11 +1377,11 @@ func (s *Service) sendCompleteMergeError(w http.ResponseWriter, uploadID string,
 // SaveVersion 把旧文件复制进 version 桶（version 桶 Scope 记账），不改 user 桶 committed；
 // 失败 best-effort。同时捕获目标旧大小 prev（rename 前 stat；新文件场景 old=0）。
 // 返回 overwrote（是否实际保存了版本）与 prev（覆盖写 Adjust 差分用）。
-func (s *Service) backupCompleteVersion(tnt *storage.Tenant, rel, owner, filename string) (overwrote bool, prev int64) {
+func (s *Service) backupCompleteVersion(ctx context.Context, tnt *storage.Tenant, rel, owner, filename string) (overwrote bool, prev int64) {
 	if rel != "" && tnt != nil && tnt.Root() != nil {
 		if s.rt.versioningEnabled() {
 			if _, sErr := tnt.Root().Stat(rel); sErr == nil {
-				if _, vErr := s.SaveVersion(strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
+				if _, vErr := s.SaveVersion(ctx, strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
 					s.rt.logger().Warn("保存文件版本失败", "file_name", filename, "error", vErr)
 				} else {
 					overwrote = true

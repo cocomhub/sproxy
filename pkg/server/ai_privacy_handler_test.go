@@ -4,10 +4,13 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/audit"
 )
 
 // TestAIPrivacyEndpoint_Disabled 验证 enabled=false → 400 零回归。
@@ -46,7 +49,12 @@ func TestAIPrivacyEndpoint_Purge(t *testing.T) {
 	t.Parallel()
 	rt := encTestRoot(t)
 	h := &Handlers{}
-	h.auditRing = NewAuditRing(100)
+	caps := audit.FullCapabilities()
+	svc, aerr := audit.New(audit.Options{Journal: audit.NewMemoryJournal(), Index: audit.NewRingIndex(100), Caps: &caps})
+	if aerr != nil {
+		t.Fatalf("audit.New: %v", aerr)
+	}
+	h.auditSvc = svc
 	h.aiPrivacy = NewAIPrivacy(true, rt, slog.Default())
 	_ = h.aiPrivacy.StoreAI(rt, "vectors", "anonymous", "a.txt", []byte("v1"))
 	req := httptest.NewRequest(http.MethodPost, "/api/ai/privacy/purge", nil)
@@ -59,7 +67,7 @@ func TestAIPrivacyEndpoint_Purge(t *testing.T) {
 	if !contains(rec.Body.String(), "deleted") {
 		t.Fatalf("响应缺 deleted: %s", rec.Body.String())
 	}
-	evts := h.auditRing.Recent(10, AuditFilter{})
+	evts := h.readAuditEvents(context.Background(), audit.EntryFilter{}, 10, true)
 	if len(evts) != 1 || evts[0].Action != "ai.privacy_purge" {
 		t.Fatalf("应记 1 条 ai.privacy_purge: %+v", evts)
 	}

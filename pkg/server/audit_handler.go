@@ -4,10 +4,15 @@
 package server
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/audit"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // maxAuditListLimit 是 GET /api/audit 的 limit 上限（超过 clamp 到该值）。
@@ -17,28 +22,134 @@ const maxAuditListLimit = 500
 const defaultAuditListLimit = 100
 
 // auditResponse 是 GET /api/audit 的响应体。
-// Events 按时间倒序（最新在前）；Total 为本次返回条数（=len(events)，经 ring
-// Recent 的 limit 截断后的实际条数，非全量命中数）。
-// 事件 TS 经 Go time.Time 默认 JSON 序列化为 RFC3339Nano 字符串。
+// Events 按时间倒序（最新在前）；Total 为本次返回条数（经 limit 截断后的实际条数）。
 type auditResponse struct {
 	Events []AuditEvent `json:"events"`
 	Total  int          `json:"total"`
 }
 
+// auditFilterFromQuery 把 query 参数映射为统一过滤条件（唯一映射点，两端点共用）。
+//   - action：**以 "." 结尾 ⇒ 前缀族**（如 "ai." 命中 "ai.summarize"），否则精确相等；
+//   - actor / mesh：精确相等；
+//   - timeKey 指定时间参数名（列表 since / 导出 after_ts）。
+//
+// 返回 (filter, ok)：时间解析失败 ⇒ ok=false（调用方回 400）。
+func auditFilterFromQuery(q map[string][]string, timeKey string) (audit.EntryFilter, bool) {
+	get := func(k string) string {
+		if v, ok := q[k]; ok && len(v) > 0 {
+			return v[0]
+		}
+		return ""
+	}
+	f := audit.EntryFilter{Action: get("action"), Actor: get("actor"), Mesh: get("mesh")}
+	if s := get(timeKey); s != "" {
+		ts, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return f, false
+		}
+		f.Since = ts
+	}
+	return f, true
+}
+
+// readAuditEvents 是读面的**唯一实现**：优先全量落盘历史（合规段族），未装配则回落内存索引。
+//   - newestFirst=true（列表）：按时间倒序并应用 limit；
+//   - newestFirst=false（导出）：按时间正序全量（供 collector 顺序回放）。
+func (h *Handlers) readAuditEvents(ctx context.Context, f audit.EntryFilter, limit int, newestFirst bool) []AuditEvent {
+	if h.auditJournal != nil {
+		return h.readAuditFromJournal(ctx, f, limit, newestFirst)
+	}
+	if h.auditSvc != nil {
+		lf := f
+		if newestFirst {
+			lf.Limit = limit
+		}
+		es := h.auditSvc.Recent(lf) // 索引最新在前
+		if !newestFirst {
+			slices.Reverse(es)
+		}
+		return auditEventsFromEntries(es)
+	}
+	return []AuditEvent{}
+}
+
+// readAuditFromJournal 读**全量历史**：热段（Journal） **+** 冷段（已归档段），按需倒序 + limit。
+//
+// 冷段经 `audit.QueryCold` 读取（`pkg/sync.FS` + `RangeReader`/流式 ⇒ 远端/加密卷同样适用、
+// 按需不整文件下载 ✓）；两段历史都是**升序**（冷 = 更旧，热 = 更新）⇒ 这里做一次归并，
+// 使「在线热段」与「已归档冷段」共用**同一读取入口**（导出与查询不各写一套 ✗）。
+func (h *Handlers) readAuditFromJournal(ctx context.Context, f audit.EntryFilter, limit int, newestFirst bool) []AuditEvent {
+	hot, herr := h.auditJournal.Read(f) // 升序（(Node, Seq)）
+	if herr != nil {
+		h.auditWarn("审计热段读取失败（忽略热段继续冷段）", herr)
+		hot = nil
+	}
+	var cold []audit.Entry
+	// 最新优先且热段已够数 ⇒ 更旧的冷段不可能进入结果 ⇒ 跳过（按需，不做无效 IO ✓）。
+	skippable := newestFirst && limit > 0 && len(hot) >= limit
+	if !skippable {
+		if coldFS := h.auditColdFS(); coldFS != nil {
+			es, cerr := audit.QueryCold(ctx, coldFS, []string{""}, f, 0)
+			if cerr != nil {
+				h.auditWarn("审计冷段读取失败（忽略冷段继续）", cerr)
+			} else {
+				cold = es
+			}
+		}
+	}
+	merged := make([]audit.Entry, 0, len(cold)+len(hot))
+	merged = append(merged, cold...) // 更旧
+	merged = append(merged, hot...)
+	if newestFirst {
+		slices.Reverse(merged)
+	}
+	if limit > 0 && len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return auditEventsFromEntries(merged)
+}
+
+// auditColdFS 返回冷段归档存储（`audit.archive_volume` 卷优先，其次 `audit.archive_dir`）。
+//
+// 与归档写侧**共用同一构造**（`newColdArchiveFS`）⇒ 读写看到同一布局；未配置归档 ⇒ nil
+// （读面跳过冷段，零开销）。
+func (h *Handlers) auditColdFS() syncpkg.FS {
+	if h.cfgPtr == nil {
+		return nil
+	}
+	cfg := h.cfgPtr.Load()
+	if cfg == nil {
+		return nil
+	}
+	logger := h.auditLogger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return newColdArchiveFS(cfg, h.volSet, logger)
+}
+
+// auditWarn 记录审计读面告警（失败不打断读：审计读面 best-effort，但必须留痕 ✓）。
+func (h *Handlers) auditWarn(msg string, err error) {
+	logger := h.auditLogger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn(msg, "error", err.Error())
+}
+
 // auditHandler 处理 GET /api/audit——Web UI 审计日志查看面板。
 //
 // 设计要点：
-//   - 双注册：主 mux 走 authMiddleware（SproxySig/APIKey 认证）；localMux（隧道
-//     内层）裸注册（隧道加密即认证，与 /api/shares、/api/stats 同模式）。审计是
-//     浏览器隧道模式下的用户面操作，隧道内层必须可达。
-//   - ring 为 nil（audit.buffer_size=0 关闭）时返回 200 + 空 events + total 0
-//     （不 404——Web UI 直接渲染空表）。
+//   - 双注册：主 mux 走 authMiddleware；localMux（隧道内层）—— 审计是浏览器隧道模式下的
+//     用户面操作，隧道内层必须可达（鉴权/可见性收敛见设计 §2.5/§5.7，属 M1-11/M1-15）。
+//   - 未启用审计（auditSvc/auditJournal 皆 nil）时返回 200 + 空 events + total 0（不 404）。
 //
-// query 参数：
-//   - limit：非负整数；默认 100；>500 clamp 到 500；非法（非整数/负）回落默认 100。
-//   - action / actor / mesh：精确相等过滤（空字段不过滤）。
-//   - since：RFC3339 时间；解析失败返回 400。
+// query 参数：limit（默认 100，>500 clamp）、action/actor/mesh、since（RFC3339，非法 ⇒ 400）。
 func (h *Handlers) auditHandler(w http.ResponseWriter, r *http.Request) {
+	if !h.auditReadAllowed(r) {
+		sendJSONResponse(w, map[string]string{"error": "审计读面仅限管理员"}, http.StatusForbidden)
+		return
+	}
 	q := r.URL.Query()
 
 	limit := defaultAuditListLimit
@@ -51,76 +162,29 @@ func (h *Handlers) auditHandler(w http.ResponseWriter, r *http.Request) {
 		limit = maxAuditListLimit
 	}
 
-	f := AuditFilter{
-		Action: q.Get("action"),
-		Actor:  q.Get("actor"),
-		Mesh:   q.Get("mesh"),
-	}
-	if s := q.Get("since"); s != "" {
-		since, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			http.Error(w, "since 参数非法，需为 RFC3339 时间（如 2026-09-01T12:00:00Z）", http.StatusBadRequest)
-			return
-		}
-		f.Since = since
+	f, ok := auditFilterFromQuery(q, "since")
+	if !ok {
+		http.Error(w, "since 参数非法，需为 RFC3339 时间（如 2026-09-01T12:00:00Z）", http.StatusBadRequest)
+		return
 	}
 
-	var events []AuditEvent
-	switch {
-	case h.auditStore != nil:
-		// 持久化启用：查询全量历史（启动载入 + 运行 append），过滤 + limit。
-		events = h.auditStore.Recent(limit, f)
-	case h.auditRing != nil:
-		events = h.auditRing.Recent(limit, f)
-	default:
-		events = []AuditEvent{}
-	}
-
+	events := h.readAuditEvents(r.Context(), f, limit, true)
 	sendJSONResponse(w, auditResponse{Events: events, Total: len(events)}, http.StatusOK)
 }
 
 // auditExportHandler 处理 GET /api/audit/export——审计日志导出（JSON 数组，按 TS 升序）。
 //
-// 与 /api/audit 的双注册模式一致：主 mux 走 authMiddleware（SproxySig/APIKey 认证），
-// localMux（隧道内层）裸注册（隧道加密即认证）。导出为运维面（CLI/脚本/日志 collector
-// 消费），不做游标分页——导出量受 ring 容量上限约束，天然有界。
-//
-// query 参数（与 /api/audit 同款语义）：
-//   - action / actor：精确相等过滤（空字段不过滤）。
-//   - after_ts：RFC3339 时间，仅导出该时刻之后（TS.After）的事件；解析失败返回 400。
-//
-// 未启用审计（ring nil）时返回空数组 200（与 /api/audit 一致，不 404）。
+// 与 /api/audit 同一读面实现（readAuditEvents），导出为全量正序（运维面：CLI/脚本/collector）。
+// query 参数：action/actor/mesh（同 /api/audit）、after_ts（RFC3339，非法 ⇒ 400）。
 func (h *Handlers) auditExportHandler(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-
-	f := AuditFilter{
-		Action: q.Get("action"),
-		Actor:  q.Get("actor"),
+	if !h.auditReadAllowed(r) {
+		sendJSONResponse(w, map[string]string{"error": "审计读面仅限管理员"}, http.StatusForbidden)
+		return
 	}
-	if s := q.Get("after_ts"); s != "" {
-		since, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			http.Error(w, "after_ts 参数非法，需为 RFC3339 时间（如 2026-09-01T12:00:00Z）", http.StatusBadRequest)
-			return
-		}
-		f.Since = since
+	f, ok := auditFilterFromQuery(r.URL.Query(), "after_ts")
+	if !ok {
+		http.Error(w, "after_ts 参数非法，需为 RFC3339 时间（如 2026-09-01T12:00:00Z）", http.StatusBadRequest)
+		return
 	}
-
-	// 导出全量（不带 limit）——ring 容量有界（默认 2048）或 auditStore 全量历史，
-	// 全量导出即完整历史。Recent 返回最新在前（倒序）；导出契约按 TS 升序（时间正序）输出。
-	var events []AuditEvent
-	switch {
-	case h.auditStore != nil:
-		events = h.auditStore.Recent(h.auditStore.Len(), f)
-	case h.auditRing != nil:
-		events = h.auditRing.Recent(h.auditRing.Capacity(), f)
-	default:
-		events = []AuditEvent{}
-	}
-
-	// 倒序 → 升序：Recent 从最新往前遍历，反转为时间正序（与 /api/audit 的倒序
-	// 展示不同——导出供日志 collector 顺序回放，正序更自然）。
-	slices.Reverse(events)
-
-	sendJSONResponse(w, events, http.StatusOK)
+	sendJSONResponse(w, h.readAuditEvents(r.Context(), f, 0, false), http.StatusOK)
 }

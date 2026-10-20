@@ -17,6 +17,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -35,6 +36,20 @@ type volumeQuotaView struct {
 	HasQuota bool `json:"has_quota"`
 }
 
+// quotaWaitView 是**等待队列可观测**快照（S4）：跨卷汇总 `pkg/waitq` 统计。
+// 语义：只统计**有配额池**的可访问卷（`volumes` 为参与卷数）；`volumes=0` ⇒ 无观测面。
+type quotaWaitView struct {
+	Volumes     int    `json:"volumes"`
+	Waiting     int    `json:"waiting"`     // 当前等待者
+	MaxWaiting  int    `json:"max_waiting"` // 历史峰值
+	Acquired    uint64 `json:"acquired"`    // 成功获取次数
+	TimedOut    uint64 `json:"timed_out"`   // 超时次数
+	Canceled    uint64 `json:"canceled"`    // 取消次数
+	QueueFull   uint64 `json:"queue_full"`  // 背压拒绝（队列已满 ⇒ 429）
+	TooLarge    uint64 `json:"too_large"`   // 不可满足（超容量 ⇒ 不排队）
+	TotalWaitMS int64  `json:"total_wait_ms"`
+}
+
 // federatedQuotaResponse 是 owner 的**跨卷汇总**视图。
 type federatedQuotaResponse struct {
 	Owner string `json:"owner"`
@@ -48,6 +63,28 @@ type federatedQuotaResponse struct {
 	// **不完整**（未知部分未计入）。消费方必须显式处置（禁当完整值 ✗）。
 	Partial bool              `json:"partial"`
 	Volumes []volumeQuotaView `json:"volumes"`
+	// Wait 是等待队列可观测快照（S4；跨可访问卷汇总）。
+	Wait quotaWaitView `json:"wait"`
+}
+
+// addWaitStats 把单卷的等待队列统计累加进跨卷视图（S4 等待可观测）。
+// 拆成 helper 只为把 federatedUserQuota 的认知复杂度留在阈值内（判定语义不变）。
+func addWaitStats(dst *quotaWaitView, q *registry.QuotaVolume) {
+	ws, ok := q.WaitStats()
+	if !ok {
+		return // 该卷无配额池 ⇒ 无观测面（不计入卷数，不伪造零等待）
+	}
+	dst.Volumes++
+	dst.Waiting += ws.Waiting
+	if ws.MaxWaiting > dst.MaxWaiting {
+		dst.MaxWaiting = ws.MaxWaiting
+	}
+	dst.Acquired += ws.Acquired
+	dst.TimedOut += ws.TimedOut
+	dst.Canceled += ws.Canceled
+	dst.QueueFull += ws.QueueFull
+	dst.TooLarge += ws.TooLarge
+	dst.TotalWaitMS += int64(ws.TotalWait / time.Millisecond)
 }
 
 // userQuotaHandler 返回**认证用户自己**的跨卷配额视图（`GET /api/quota`）。
@@ -76,6 +113,7 @@ func (h *Handlers) federatedUserQuota(owner string) federatedQuotaResponse {
 			resp.Volumes = append(resp.Volumes, view)
 			continue
 		}
+		addWaitStats(&resp.Wait, q)
 		used, ok := q.UserUsage(owner)
 		if !ok {
 			resp.Partial = true

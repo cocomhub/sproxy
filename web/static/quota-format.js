@@ -101,10 +101,32 @@
     }
     html += '</div>';
     html += volumeQuotaTableHtml(f.volumes);
+    html += waitStatsHtml(f.wait);
     return html;
   }
 
+  // waitStatsHtml 渲染等待队列统计（S4「等待可观测」）：仅在有观测面（volumes>0）时输出。
+  // 字段与 pkg/server/quota_federated.go 的 quotaWaitView 同构；id 固定 #quota-wait（e2e 用）。
+  function waitStatsHtml(w) {
+    // 只要服务端带回了 wait 对象就渲染（即使 volumes=0 也显式说明「无观测面」——
+    // 静默隐藏会让用户以为功能不存在 ✗）。
+    if (!w || typeof w !== 'object') return '';
+    const num = function (v) { return Number(v) || 0; };
+    const avg = num(w.acquired) ? Math.round(num(w.total_wait_ms) / num(w.acquired)) : 0;
+    return '<div id="quota-wait" class="quota-wait" style="font-size:13px;margin-top:8px;color:var(--text-muted);">'
+      + '<strong>等待队列：</strong>等待中 ' + num(w.waiting)
+      + ' · 峰值 ' + num(w.max_waiting)
+      + ' · 成功 ' + num(w.acquired)
+      + ' · 超时 ' + num(w.timed_out)
+      + ' · 背压 ' + num(w.queue_full)
+      + ' · 不可满足 ' + num(w.too_large)
+      + ' · 平均等待 ' + avg + 'ms'
+      + (num(w.volumes) ? '' : ' <span class="quota-wait-none">（可访问卷未启用等待队列）</span>')
+      + '</div>';
+  }
+
   return {
+    waitStatsHtml: waitStatsHtml,
     formatSize: formatSize,
     quotaCell: quotaCell,
     usagePercent: usagePercent,

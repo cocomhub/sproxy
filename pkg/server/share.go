@@ -560,6 +560,12 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	// size = 分享文件大小；rel 去 user/ 前缀（与事件流既有形态一致）。
 	h.eventBus().Publish(files.EventShare, owner, strings.TrimPrefix(rel, "user/"), fi.Size())
 
+	// 分享创建 = 授权变更（安全敏感）⇒ 必须审计（object 用 token，detail 记文件名）。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "share_create", ObjectType: "share", Object: link.Token, Result: AuditResultSuccess,
+		Detail: "file=" + link.Filename,
+	})
+
 	sendJSONResponse(w, ShareCreateResponse{
 		Success:      true,
 		Token:        link.Token,
@@ -813,5 +819,8 @@ func (h *Handlers) revokeShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "share_revoke", ObjectType: "share", Object: token, Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, ShareCreateResponse{Success: true, Message: "分享链接已撤销"}, http.StatusOK)
 }

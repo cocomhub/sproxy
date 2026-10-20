@@ -206,6 +206,10 @@ func (q *quotaLocalFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, re
 	// 记账口径（2026-10-16 高风险区审核修复）：本地目标经 `TenantRootFS`（生产 = `NewRootFS`）
 	// **透明加密落盘** ⇒ 预留与结算都必须按**物理**字节；`size` 是源条目的**逻辑**长度。
 	charge := q.physSize(size)
+	// **刻意不排队等待**（用 TryReserve 而非 WaitReserve）：逐文件 guard 的语义是
+	// 「该文件因配额失败（ActionError）并**继续同步其余文件**」，不是「阻塞 30s 等空间」——
+	// 改成等待会让一个配额不足的文件把整轮同步拖住（实测 `TestQuota_TwoConcurrentPulls_*`
+	// 由「立即失败」变为 30s 超时 ✗）。整任务的排队重试由 syncmgr 的占位/对账承担。
 	res, err := scope.TryReserve(charge)
 	if err != nil {
 		return err // 配额不足：该文件失败（ActionError），不中止整体同步

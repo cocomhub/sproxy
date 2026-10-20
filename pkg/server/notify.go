@@ -654,6 +654,10 @@ func (h *Handlers) notifyTestHandler(w http.ResponseWriter, r *http.Request) {
 			results[name] = "ok"
 		}
 	}
+	// 审计：通知渠道自检（可能外发真实消息 ⇒ 可追溯）。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "notify_test", ObjectType: "notify", Object: strings.Join(names, ","), Result: AuditResultSuccess,
+	})
 	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
 }

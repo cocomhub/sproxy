@@ -208,6 +208,7 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 
 	// ACL 视图（AD-6/§8）：from/to 都必须在 owner 视图内，否则 403（不泄卷存在性）。
 	if !h.volumeAllowedFor(owner, fromVol) || !h.volumeAllowedFor(owner, toVol) {
+		h.auditVolumeMoveIfFailed(r, remotePath, fromVol, toVol, http.StatusForbidden)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
@@ -230,6 +231,7 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	// delete 路径（本地卷）。
 	if h.moveNeedsDomainPath(fromVol, toVol) {
 		status, resp := h.moveFileViaService(r, owner, remotePath, fromVol, toVol)
+		h.auditVolumeMoveIfFailed(r, remotePath, fromVol, toVol, status)
 		sendJSONResponse(w, resp, status)
 		return
 	}
@@ -238,7 +240,23 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	// 锁 + 源校验 + 唯一性查重 + 双预留 + 复制 + 删源 + commit/release。
 	// 返回 (状态码, 响应体)。move 与 rebalance 共用同一原子语义（rebalance 逐文件调用）。
 	status, resp := h.moveFileBetweenVolumes(r, owner, remotePath, fromVol, toVol)
+	h.auditVolumeMoveIfFailed(r, remotePath, fromVol, toVol, status)
 	sendJSONResponse(w, resp, status)
+}
+
+// auditVolumeMoveIfFailed 为**失败**的跨卷移动补一条审计（成功路径各分派点已各自埋点）。
+//
+// 设计 §9.1 要求 denied/error 也留痕：此前 ACL 403、源不存在 404、并发 409、容量不足 507
+// 等路径**一条审计都没有** ✗ ⇒ 事后无法回答「谁尝试移动过什么」。收敛为**单一补充点**：
+// 只在顶层分派后按状态码判定，避免在十几处 early return 各写一次。
+func (h *Handlers) auditVolumeMoveIfFailed(r *http.Request, remotePath, fromVol, toVol string, status int) {
+	if status == http.StatusOK {
+		return // 成功路径由各自分派点埋点（含 detail 里的字节数）
+	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "volume_move", ObjectType: "file", Object: remotePath, Result: "failed",
+		Detail: fmt.Sprintf("%s → %s 失败（HTTP %d）", fromVol, toVol, status),
+	})
 }
 
 // moveNeedsDomainPath 报告跨卷移动是否必须走域侧组合路径（涉及**非本地卷**）：
@@ -480,7 +498,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	if ls, lerr := userVisibleSize(fromRoot, rel); lerr == nil {
 		size = ls
 	}
-	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(owner, rel, toVol, mc.toRoot, size)
+	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(r.Context(), owner, rel, toVol, mc.toRoot, size)
 	if !rOk {
 		return status, resp
 	}
@@ -513,18 +531,15 @@ func (h *Handlers) moveProbeMetaQuota(owner, rel, toVol string, size int64) (int
 		return 0, UploadResponse{}, true
 	}
 	if scope := h.quotaScopeFor(owner, meta.MetaPath(rel)); scope != nil {
-		r, rerr := scope.TryReserve(est)
-		if rerr != nil {
+		// 校验型探测（收敛为具名 API：预留即释放，不排队）。
+		if rerr := scope.ProbeReserve(est); rerr != nil {
 			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
 		}
-		r.Release()
 	}
 	if pool := h.volSet.Pool(toVol); pool != nil {
-		r, rerr := pool.TryReserve(est)
-		if rerr != nil {
+		if rerr := pool.ProbeReserve(est); rerr != nil {
 			return http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
 		}
-		r.Release()
 	}
 	return 0, UploadResponse{}, true
 }
@@ -622,7 +637,7 @@ func (mc *moveFileCtx) toCharge(n int64) int64 { return physSizeFor(mc.toRoot, n
 // （`files.settleSize`）⇒ 释放必须同口径，否则按逻辑释放会**少释放** ⇒ 幽灵占用/假 507。
 func (mc *moveFileCtx) fromCharge(n int64) int64 { return physSizeFor(mc.fromRoot, n) }
 
-func (h *Handlers) moveReserveTarget(owner, rel, toVol string, toRoot *storage.Root, size int64) (*quota.Reservation, *quota.Reservation, *quota.Scope, int, UploadResponse, bool) {
+func (h *Handlers) moveReserveTarget(ctx context.Context, owner, rel, toVol string, toRoot *storage.Root, size int64) (*quota.Reservation, *quota.Reservation, *quota.Scope, int, UploadResponse, bool) {
 	// 记账口径（2026-10-16 高风险区审核修复）：预留必须按**目标卷物理占用**（与上传路径
 	// `files.settleSize` 同源）。`size` 是**用户可见长度**（明文，见调用方注释），而目标经
 	// `writeUserVisible` 透明加密落盘 ⇒ 按逻辑预留会在加密卷上**少预留** `(物理 − 逻辑)`。
@@ -631,14 +646,14 @@ func (h *Handlers) moveReserveTarget(owner, rel, toVol string, toRoot *storage.R
 	scope := h.quotaScopeFor(owner, rel)
 	var scopeRes, poolRes *quota.Reservation
 	if scope != nil {
-		rr, rerr := scope.TryReserve(size)
+		rr, rerr := scope.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
 		if rerr != nil {
 			return nil, nil, nil, http.StatusInsufficientStorage, UploadResponse{Success: false, Message: msgStorageQuotaExceeded}, false
 		}
 		scopeRes = rr
 	}
 	if toPool != nil {
-		rr, rerr := toPool.TryReserve(size)
+		rr, rerr := toPool.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
 		if rerr != nil {
 			if scopeRes != nil {
 				scopeRes.Release()

@@ -315,6 +315,11 @@ func (s *Service) Tags(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: "标签操作失败"}, http.StatusInternalServerError)
 		return
 	}
+	// 审计：标签更新成功（元数据变更）。TagFiles 无 ctx，故在唯一 HTTP 入口记；
+	// 批量形态逐文件记（每个 rel 一行，便于按文件追溯）。
+	for _, rel := range rels {
+		s.rt.recordFileAudit(r.Context(), "tags_update", rel, auditResultSuccess, "tags="+strings.Join(tags, ","))
+	}
 	s.sendJSON(w, UploadResponse{Success: true, Message: "标签已更新"}, http.StatusOK)
 }
 

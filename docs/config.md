@@ -98,6 +98,12 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `audit.buffer_size` | int | `2048` | 有界内存环形审计缓冲条数（`GET /api/audit` 回看最近操作）；`0` = 关闭（返回空表）；负值非法 |
 | `audit.max_size` | ByteSize | `0`（关闭） | 审计日志轮转阈值（roadmap 11.5-⑥，如 `"10MiB"`）：>0 时按文件大小轮转（`audit.log` → `audit.log.1` … `audit.log.N`，保留 `max_archives` 份归档）；`0`/缺省 = 关闭轮转（零回归） |
 | `audit.max_archives` | int | `3` | 轮转保留归档份数（`audit.log.1` … `audit.log.N`）；`0` = 轮转即删不留档 |
+| `audit.max_total_bytes` | ByteSize | `1GiB` | 审计**全部段（热 + 归档）总字节硬上限**（设计 M1-8 / T8，防磁盘打满）：达上限先删**最旧归档**（有界保留）；删尽仍放不下则有界丢弃新条目（计入 `audit_dropped`，**绝不阻塞业务**）。`0` = 不限（不推荐） |
+| `audit.archive_dir` | string | `` | **冷段归档目录**（M4）：非空时**启动期 + 每次轮转后**把**封段**归档到该目录并回收本地封段（可指向挂载的冷卷目录；加密卷由卷自身提供 at-rest 加密）。归档**失败不丢段**（本地保留、下轮重试）。空 ⇒ 不归档 |
+| `audit.archive_keep` | int | `0` | 本地**保留**的最新封段数（便于近期查询/排障；`0` = 全部归档） |
+| `audit.archive_volume` | string | `` | **冷段归档卷**（M4，优选于 `archive_dir`）：非空时封段写入该卷的 `audit-archive/` 前缀 —— 加密/封装卷 ⇒ 冷段自带 at-rest 加密，容量/配额与普通卷一致；卷名须为**外部/封装/加密卷**（经 `Set.External` 解析；普通本地卷请用 `archive_dir`）。与 `archive_dir` 同时配置 ⇒ **以卷为准**；卷不存在 ⇒ 跳过归档并告警（不静默回落目录）。冷段**读侧**使用同一解析 ⇒ 归档后仍可查询 |
+| `audit.disabled` | bool | `false` | 显式关闭审计：读面返回空表、写入 no-op，且**不创建**任何审计目录/文件（与 `buffer_size=0` 的区别：后者只关内存环形缓冲，落盘仍在） |
+| `audit.startup.fail_fast` | bool | `false` | 审计落盘/服务装配失败时是否**中止启动**（`true` ⇒ panic ⇒ 进程退出，用于「合规要求审计必须可用」的部署）；**默认 `false` = 降级为仅内存 + Error 告警**（审计绝不阻断启动）。开启可避免「以为有审计、实际没落盘」的静默失效 |
 | `audit.enabled` | bool | `false` | **预留（未接线）**：通用 span 审计开关（`pkg/audit`，云下载/转存/加密阶段）；默认关。span sink 目录当前不可配（见下行；默认**用户私有缓存目录**） |
 | `audit.dir` | string | (空) | **预留（未接线）**：通用 span 审计 sink 根目录 |
 | `audit.archive.enabled` | bool | `false` | **预留**：span 审计**归档默认关**（规格 §4.5 未来扩展——`Archiver` 接口已预留、配置暂未接线）；开启需同时配置 `volume` + `path` |

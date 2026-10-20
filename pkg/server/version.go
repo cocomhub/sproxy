@@ -329,7 +329,7 @@ func (h *Handlers) resolveRestoreDestination(owner, targetRel string, verLoc *fi
 // backupBeforeRestore 在恢复执行前保存当前版本（回滚前备份）到目标卷（文件所在卷），
 // 备份失败时记审计 + 500 拒绝执行恢复并返回 false。
 func (h *Handlers) backupBeforeRestore(w http.ResponseWriter, r *http.Request, remotePath, versionIDStr, owner string, dstTnt *storage.Tenant) bool {
-	if _, err := h.fileService().SaveVersion(remotePath, dstTnt, owner); err != nil {
+	if _, err := h.fileService().SaveVersion(r.Context(), remotePath, dstTnt, owner); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "恢复前备份失败: " + versionIDStr,
@@ -354,6 +354,9 @@ func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, r
 	}
 	var res, poolRes *quota.Reservation
 	if scope != nil {
+		// **暂不排队**（保留 TryReserve）：本路径的等待语义需先定（哪些调用方期望「立即 507」、
+		// 哪些期望「排队等空间」），否则会把测试/交互从「立即失败」变成 30s 等待（实测 pkg/server 整包超时 ✗）。
+		// 排队收敛待「该路径的等待语义」裁定后单独进行（R36-a 已登记为 pending）。
 		rr, reserveErr := scope.TryReserve(verSize)
 		if reserveErr != nil {
 			h.RecordAudit(r.Context(), AuditEvent{
@@ -366,6 +369,9 @@ func (h *Handlers) reserveRestoreQuota(w http.ResponseWriter, r *http.Request, r
 		res = rr
 	}
 	if pool != nil {
+		// **暂不排队**（保留 TryReserve）：本路径的等待语义需先定（哪些调用方期望「立即 507」、
+		// 哪些期望「排队等空间」），否则会把测试/交互从「立即失败」变成 30s 等待（实测 pkg/server 整包超时 ✗）。
+		// 排队收敛待「该路径的等待语义」裁定后单独进行（R36-a 已登记为 pending）。
 		rr, reserveErr := pool.TryReserve(verSize)
 		if reserveErr != nil {
 			if res != nil {

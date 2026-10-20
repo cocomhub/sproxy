@@ -310,6 +310,8 @@ func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
 		Action: "cloud_delete", ObjectType: "task", Object: id,
 		Result: AuditResultSuccess,
 	})
+	// （历史坑）此处曾额外记一条 `cloud_group_delete`，object 是**任务 ID** ✗：
+	// 既误导取证（任务删除被当成组删除），又让真正的组删除无痕。已移入 cloudDeleteGroup。
 	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
 
@@ -394,6 +396,10 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	// 返回快照副本：SubmitAndStartGroup 返回的指针与 m.groups 共享，下载 goroutine
 	// 可能在 json.Marshal 期间并发写组状态字段（UpdateGroupStatus），需副本隔离防 data race。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "cloud_group_create", ObjectType: "task", Object: group.ID, Result: AuditResultSuccess,
+		Detail: "urls=" + fmt.Sprintf("%d", len(normalized)),
+	})
 	snapshot, ok := h.cloudMgr.GetGroup(group.ID, ActorFrom(r.Context()))
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "group created but not found"}, http.StatusInternalServerError)
@@ -518,9 +524,16 @@ func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), msgNotFound) {
 			status = http.StatusNotFound
 		}
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "cloud_group_delete", ObjectType: "task", Object: id,
+			Result: AuditResultError, Detail: err.Error(),
+		})
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "cloud_group_delete", ObjectType: "task", Object: id, Result: AuditResultSuccess,
+	})
 	// 组归档文件联动删除（桶归档名或外部卷转存 URL）。失败仅记日志
 	// （组删除已完成，归档残留由周期扫描校准兜底；不把归档清理失败当作组删除失败）。
 	if archiveFile != "" {
@@ -641,7 +654,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
-	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, totalSourceSize)
+	res, pre, ok := h.cloudArchiveReserveQuota(r.Context(), w, owner, totalSourceSize)
 	if !ok {
 		return
 	}
@@ -815,7 +828,7 @@ func (h *Handlers) cloudArchiveMaxBytesOK(w http.ResponseWriter, totalSize int64
 
 // cloudArchiveReserveQuota 打包前做总量限制（cloud_archive_max_bytes）+ 配额预留
 // （scope 优先单步；storageMgr 仅作回退）。返回 false 表示已回错误响应包。
-func (h *Handlers) cloudArchiveReserveQuota(w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Reservation, int64, bool) {
+func (h *Handlers) cloudArchiveReserveQuota(ctx context.Context, w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Reservation, int64, bool) {
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
 	if !h.cloudArchiveMaxBytesOK(w, totalSourceSize) {
 		return nil, 0, false
@@ -825,7 +838,7 @@ func (h *Handlers) cloudArchiveReserveQuota(w http.ResponseWriter, owner string,
 	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
 	var res *quota.Reservation
 	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
-		rr, reserveErr := scope.TryReserve(pre)
+		rr, reserveErr := scope.WaitReserve(ctx, pre, quota.DefaultWaitTimeout)
 		if reserveErr != nil {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
@@ -834,7 +847,7 @@ func (h *Handlers) cloudArchiveReserveQuota(w http.ResponseWriter, owner string,
 		}
 		res = rr
 	} else if h.storageMgr != nil {
-		if reserveErr := h.storageMgr.TryReserve(pre, capacity.CategoryCloud); reserveErr != nil {
+		if reserveErr := h.storageMgr.WaitReserve(ctx, pre, capacity.CategoryCloud, capacity.DefaultWaitTimeout); reserveErr != nil {
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)

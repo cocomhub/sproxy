@@ -137,7 +137,7 @@ func walkUploadStatsEntry(h *Handlers, root, path string, d os.DirEntry, err err
 	relSlash := filepath.ToSlash(rel)
 	if d.IsDir() {
 		// 跳过遗留 .__ 魔法目录（P5 后旧布局不再产生）与用户不可见内部目录。
-		if strings.HasPrefix(d.Name(), ".__") {
+		if strings.HasPrefix(d.Name(), ".__") || strings.HasPrefix(d.Name(), "__") {
 			return filepath.SkipDir
 		}
 		// 新布局功能桶目录（非 user）在目录层直接跳过。
@@ -198,7 +198,7 @@ func walkUploadStatsCategoryEntry(h *Handlers, root, path string, d os.DirEntry,
 	}
 	if d.IsDir() {
 		// 遗留 .__ 魔法目录与 meta 桶不计入配额（对齐 pkg/storage/capacity 扫描）。
-		if strings.HasPrefix(d.Name(), ".__") {
+		if strings.HasPrefix(d.Name(), ".__") || strings.HasPrefix(d.Name(), "__") {
 			return filepath.SkipDir
 		}
 		rel, relErr := filepath.Rel(root, path)

@@ -28,8 +28,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/web"
 )
 
@@ -59,6 +61,9 @@ type RegisterRoutesOpts struct {
 	// 使无凭据测试直连被兜底放行。为一次性读取（不写入 cfg，避免 SIGHUP/cfgPtr
 	// 并发覆盖污染；多测试并发各用独立 RegisterRoutes，无竞态）。
 	AllowInsecureLoopback bool
+	// InsecureLoopbackRole 覆盖无认证回环兜底合成的 Principal 角色（**装配/测试瞬态**，
+	// 空 ⇒ user）。仅供 e2e/本地联调需要管理员身份的场景（如审计读面 admin-only）。
+	InsecureLoopbackRole string
 	// CredentialRing 是 SproxySig 凭据表（Ring）。nil 时 RegisterRoutes 自动装配：
 	// 从 CredentialStore 载入；仍空则 **U3 零凭据启动**——不生成 anonymous，系统以
 	// 零凭据等待注册（register 公开端点唯一入口，首位回环注册者原子授 admin）。
@@ -136,7 +141,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 审计服务装配：有界内存环形缓冲 + 落盘存储（BufferSize>0 时启用；打开失败
 	// 降级 ring-only，审计绝不阻断启动）。详细语义见 setupAuditServices。
-	auditRing, auditStore := setupAuditServices(cfg, log)
+	// 冷段归档目的地**延迟解析**：可能是**卷**（`audit.archive_volume`）⇒ 需卷集合就绪后
+	// 才能拿到卷 FS。assemble 期先拿一个闭包，卷集合装配完成后再回填（轮转归档在运行期触发 ✓）。
+	var coldVolSet *registry.Set
+	auditSvc, auditJournal := setupAuditServices(cfg, func() syncpkg.FS {
+		return newColdArchiveFS(cfg, coldVolSet, log)
+	}, log)
 
 	// 卷集合装配（多卷，任务 3）：按 cfg.Volumes 逐卷 MkdirAll + storage.OpenRoot
 	// （LAYOUT_VERSION 写入/校验）+ 卷容量 Pool + ACL 解析。缺省形态（YAML 只配
@@ -150,6 +160,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		log.Error("卷集合装配失败", "error", err)
 		panic("卷集合装配失败: " + err.Error())
 	}
+	// 卷集合就绪 ⇒ 回填冷段归档目的地（`audit.archive_volume` 需卷 FS），并做**启动期**一次归档
+	// （此后由轮转的 OnSeal 回调触发）。归档失败只告警：封段仍在本地，下轮重试（原语保证不丢）。
+	coldVolSet = vs
+	runAuditArchive(cfg, newColdArchiveFS(cfg, vs, log), auditJournal, log)
 
 	h := &Handlers{
 		cfgPtr:            opts.CfgPtr,
@@ -169,8 +183,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		noncePool:         sproxysig.NewNoncePool(),
 		totpNoncePool:     newTotpNoncePool(),
 		tracer:            opts.Tracer,
-		auditRing:         auditRing,
-		auditStore:        auditStore,
+		auditSvc:          auditSvc,
+		auditJournal:      auditJournal,
 		notifyCenter:      newNotifyCenterFromConfig(cfg.Notify, log),
 		alertEngine:       newAlertEngineFromConfig(cfg.Alerts, log),
 		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见
@@ -179,6 +193,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		totpPending:      newTotpPendingTable(),
 		// 测试注入空 Ring 时的无认证调试兜底（一次性读取；生产走 cfg.AllowInsecureLoopback）。
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
+		insecureLoopbackRole:  opts.InsecureLoopbackRole,
 		volSet:                vs,
 		xferMetrics:           opts.XferMetrics,
 		writeGuard:            opts.WriteGuard,
@@ -216,6 +231,16 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.initSchedulerTasks(cfg, log)
 	// 初始化 StorageManager 和 CloudDownloadManager。详细语义见 initStorageManagers。
 	h.initStorageManagers(vs, cfg, log, opts)
+
+	// M3：统一恢复协调器 = **启动恢复的唯一编排点**。放在存储/云下载等子系统装配**之后**
+	// （legacy 恢复需要看到已就绪的 manager；此处仍属单线程装配期 ⇒ 无数据竞争）。
+	// 顺序：legacy 先（子系统资源就绪）→ 再 WAL 作用域重放。
+	if coord := setupRecovery(auditSvc, log, nil, cloudLegacies(h)); coord != nil {
+		// **同步**执行：与「云任务构造期恢复」的既有语义一致（恢复完成再对外服务），
+		// 且不留下跨生命周期的后台 goroutine（否则 Close 后仍可能持有存储文件句柄 ✗——
+		// 实测会让测试/运维的目录清理失败）。runStartupRecovery 内以 startupRecoveryTimeout 兜底。
+		runStartupRecovery(context.Background(), coord, log)
+	}
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
 	localMux := http.NewServeMux()
@@ -631,7 +656,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 集群写面门（roadmap 12.1-2）：writeGuard 非 nil 时**外层 srvMux 同样受门**
 	// （cloud/config/sync/credentials 等非文件组写路由在此层）——apiHandler 只覆盖
 	// 隧道内层，外层必须独立挂 writeGuardMiddleware。
-	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(h.writeGuardMiddleware(srvMux))))
+	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(h.auditMiddleware(h.writeGuardMiddleware(srvMux)))))
 
 	return h
 }

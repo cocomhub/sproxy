@@ -369,8 +369,14 @@ func (h *Handlers) importVolumeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 审计 object 必须是可读的卷标识：未指定 `volume` 参数时导入落在**默认卷**，
+	// 留空会让「导入到了哪个卷」无从判断 ✗ ⇒ 显式标注 (default)。
+	importVol := explicitVol
+	if importVol == "" {
+		importVol = "(default)"
+	}
 	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "volume_import", ObjectType: "volume", Object: explicitVol,
+		Action: "volume_import", ObjectType: "volume", Object: importVol,
 		Result: AuditResultSuccess, Detail: fmt.Sprintf("imported=%d skipped=%d failed=%d overwrite=%v", res.Imported, res.Skipped, res.Failed, overwrite),
 	})
 	sendJSONResponse(w, res, http.StatusOK)

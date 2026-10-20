@@ -6,10 +6,16 @@ package server
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/audit"
 )
 
-// 审计结果取值。
+// systemAuditScope 是请求面合规事件的**合成作用域**（设计 E1：所有审计都有作用域）。
+const systemAuditScope = "system"
+
+// 审计结果取值（对外视图契约）。
 const (
 	// AuditResultSuccess 表示操作成功完成。
 	AuditResultSuccess = "success"
@@ -19,31 +25,53 @@ const (
 	AuditResultError = "error"
 )
 
-// AuditEvent 是一次敏感操作的结构化审计事件。
-// 通过 RecordAudit 输出为固定 JSON 结构，可检索「谁在何时对哪个对象做了什么」。
+// AuditEvent 是一次敏感操作的结构化审计事件（**对外 JSON 视图**）。
 //
-// 字段带显式 json tag（与 stats.go / config_response 等其他 API 响应一致的下划线
-// 命名）：/api/audit 将本结构直接序列化给 Web UI，前端 app-render.auditTableHtml 按
-// 小写字段读取（action/actor/mesh/object/result/detail/ts）。无 tag 时 Go 默认按
-// 字段名（A-Action 等大写）序列化——与前端字段契约不一致，会导致审计表整行显示
-// 占位符 "-"。务必保持 tag 与前端消费字段一一对应。
+// 字段带显式 json tag：/api/audit 直接序列化给 Web UI，前端 app-render.auditTableHtml 按
+// 小写字段读取（action/actor/mesh/object_type/object/result/detail/ts）——务必与前端契约
+// 一一对应（无 tag 会按大写字段名序列化，导致审计表整行显示占位符 "-"）。
+//
+// 与 pkg/audit.Entry 的关系：Entry 是**统一条目模型**（唯一实现），本结构是它的**读面投影**
+// （auditEventFromEntry 是唯一转换点）。写入侧不再有第二套实现。
 type AuditEvent struct {
-	Action     string    `json:"action"`      // 操作名：delete / rename / version_restore / version_delete / config_update / cloud_cancel / cloud_delete
+	Action     string    `json:"action"`      // 操作名：delete / rename / version_restore / config_update / cloud_cancel …
 	Actor      string    `json:"actor"`       // 操作主体：AccessKey（SproxySig）或 APIKey 名；未认证为空串
 	Mesh       string    `json:"mesh"`        // 所属 mesh（SproxySig 派生；APIKey/未认证为空串）
 	ObjectType string    `json:"object_type"` // 对象类型：file / task / config
 	Object     string    `json:"object"`      // 对象标识：文件路径 / 任务 ID / config
 	Result     string    `json:"result"`      // 结果：success / denied / error
 	Detail     string    `json:"detail"`      // 补充信息（如 rename 的目标、version_id、失败原因）
-	TS         time.Time `json:"ts"`          // 事件发生时间（零值自动填充当前时间）
+	TS         time.Time `json:"ts"`          // 事件发生时间
 }
 
-// RecordAudit 输出一条结构化审计日志。
+// auditEventFromEntry 把统一审计条目投影为对外审计事件（**唯一转换点**）。
+func auditEventFromEntry(e audit.Entry) AuditEvent {
+	return AuditEvent{
+		Action:     e.Action,
+		Actor:      e.Actor,
+		Mesh:       e.Mesh,
+		ObjectType: e.ObjType,
+		Object:     e.Object,
+		Result:     string(e.Result),
+		Detail:     e.Detail,
+		TS:         e.TS,
+	}
+}
+
+// auditEventsFromEntries 批量投影（nil 入参 ⇒ 空切片，保持 JSON `[]` 而非 null）。
+func auditEventsFromEntries(es []audit.Entry) []AuditEvent {
+	out := make([]AuditEvent, 0, len(es))
+	for _, e := range es {
+		out = append(out, auditEventFromEntry(e))
+	}
+	return out
+}
+
+// RecordAudit 输出一条结构化审计日志（经**唯一审计服务** pkg/audit 写入）。
 //
-// 审计 logger 独立于业务 logger（Handlers.auditLogger）：固定 JSON 格式、不随
-// log_format 配置切换，保证审计行可机器检索；actor/mesh 未显式填写时自动从请求
-// ctx 读取（authMiddleware 注入）。RecordAudit 不 panic：auditLogger 为 nil 时
-// 回退 slog.Default()，审计事件绝不因日志故障中断业务。
+// actor/mesh 未显式填写时自动从请求 ctx 读取（authMiddleware 注入）；Owner 取 **AK 租户键**
+// （设计 §5.7：权限过滤的唯一权威字段 = Owner，且**不得**用 Principal.Owner——它是 IdP claim）。
+// 通知中心 dispatch 与审计 slog 行保持原语义。RecordAudit 不 panic：审计失败绝不中断业务。
 func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 	if evt.Actor == "" {
 		evt.Actor = ActorFrom(ctx)
@@ -54,19 +82,25 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 	if evt.TS.IsZero() {
 		evt.TS = time.Now()
 	}
-	// 挂钩有界内存环形缓冲：TS 填充后 Add 到 ring（ring 为 nil = 关闭，Add 静默跳过）。
-	// 所有现有录入点（delete/rename/config_update/cloud_* 等）经本函数自动进 ring，
-	// 无需逐点修改。Add 不 panic，审计链路绝不影响业务。
-	h.addToAuditRing(evt)
-	// 通知中心 dispatch（roadmap P0）：按规则路由到渠道（异步 goroutine，
-	// 绝不阻塞审计/业务）；nil = 未启用零回归。
+	if h.auditSvc != nil {
+		_ = h.auditSvc.Emit(ctx, audit.Entry{
+			Scope:   audit.ScopeID(systemAuditScope),
+			Kind:    audit.KindEvent,
+			Type:    audit.TypeSensitive,
+			Action:  evt.Action,
+			Actor:   evt.Actor,
+			Owner:   ActorFrom(ctx), // 租户键 = AK（非 Principal.Owner）
+			Mesh:    evt.Mesh,
+			ObjType: evt.ObjectType,
+			Object:  evt.Object,
+			Result:  audit.Result(evt.Result),
+			Detail:  evt.Detail,
+			TS:      evt.TS,
+		})
+	}
+	// 通知中心 dispatch：按规则路由到渠道（异步，绝不阻塞审计/业务）；nil = 未启用零回归。
 	if h.notifyCenter != nil {
 		h.notifyCenter.Dispatch(ctx, evt)
-	}
-	// 审计落盘（audit.persist_dir 启用时）：append JSON line 到日志（重启可查）。
-	// 写盘失败由 AuditStore.Append 记日志并跳过（尽力而为，绝不阻断业务）。
-	if h.auditStore != nil {
-		_ = h.auditStore.Append(evt)
 	}
 	logger := h.auditLogger
 	if logger == nil {
@@ -84,11 +118,27 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 	)
 }
 
-// addToAuditRing 把已填好 TS 的最终审计事件写入有界环形缓冲（nil ring 静默跳过）。
-// ring 容量满时环形覆盖丢弃最旧；本方法绝不 panic，审计链路不影响业务路径。
-func (h *Handlers) addToAuditRing(evt AuditEvent) {
-	if h.auditRing == nil {
-		return
+// isAuditAdmin 判定请求主体是否为审计读面管理员（与 /api/credentials、/api/usage/report
+// **同源**：账号级 Key.Role==RoleAdmin；经 ctx 身份解析 ⇒ 主 mux 与隧道内层的裁决一致，
+// 不需要两套路由包装）。
+func (h *Handlers) isAuditAdmin(actor string) bool {
+	return actor != "" && h.getRole(actor) == "admin"
+}
+
+// auditReadAllowed 是审计读面的权限裁决（设计 docs/designs/2026-10-19-audit-service.md
+// §5.7 / M1-11，**审核 P0**）：仅管理员可读全量。非管理员（含未认证主体与隧道内非管理员
+// 主体）**一律拒绝** —— 审计条目含 actor/mesh/object/detail/source_ip/request_id/volume，
+// 是最低权限主体可读的**全局证据链**，泄露面随 secrets/presign/DAV/S3/sync 全量纳入而放大。
+//
+// 安全默认（fail-closed）：将来开放「用户维度视图」时，必须在本函数内改为「返回该 owner
+// 的过滤视图 + 脱敏（actor/source_ip/request_id）」；**绝不**在视图未就绪时放宽为全量回退，
+// 且 `Owner == ""` 的条目对非管理员恒不可见。
+func (h *Handlers) auditReadAllowed(r *http.Request) bool {
+	// **主体自身角色优先**：已认证主体（含 OIDC/装配层注入、回环无认证兜底）的 Principal.Role
+	// 就是权威角色，不再要求 AK 一定存在于凭据环（否则「无 AK 的管理员主体」会被判非管理员，
+	// 例如管理员类 UI e2e 与服务端自同步链路）。回退保留按 AK 查环的旧行为。
+	if p := PrincipalFrom(r.Context()); p != nil && p.Role == "admin" {
+		return true
 	}
-	h.auditRing.Add(evt)
+	return h.isAuditAdmin(ActorFrom(r.Context()))
 }

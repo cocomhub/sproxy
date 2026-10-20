@@ -90,9 +90,11 @@ func TestStagingTracker_CtxCancel(t *testing.T) {
 	}
 }
 
-// TestStagingTracker_SingleWatcherPerCall 回归（m7，第 7 轮 MINOR）：一次 ReserveUsage 在
-// **多轮**排队等待中只允许 1 个观察者 goroutine（此前每轮等待都 spawn 一个 → 高竞争下
-// goroutine churn + 野 Broadcast）。变异：把观察者放回循环内 → watchers > 1 → 红。
+// TestStagingTracker_SingleWatcherPerCall 回归（m7 → W1 收敛后重写）：本用例原本用
+// 「不足量释放触发多轮空唤醒」来暴露「每轮等待各 spawn 一个观察者」的 goroutine churn。
+// W1 收敛后观察者 goroutine **整体消失**（waitq 以 select + timer 实现超时/取消），且
+// **不足量释放不再产生空唤醒**（waitq.NotifyAll 只唤醒「额度能满足」者 = 设计 §3.1 I2 无惊群）。
+// ⇒ 断言升级为更强的两条设计不变量：① watchers 恒 0；② 不足量释放**不**触发重试。
 func TestStagingTracker_SingleWatcherPerCall(t *testing.T) {
 	t.Parallel()
 	pool := NewPool(100)
@@ -105,23 +107,23 @@ func TestStagingTracker_SingleWatcherPerCall(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- q.ReserveUsage(ctx, 50) }() // 90+50>100 → 进入等待
-	// 触发**两轮**唤醒：每轮释放量都仍不足以满足 50（用 waitRounds 条件同步，避免固定 Sleep）。
 	testutil.WaitFor(t, 5*time.Second, func() bool { return q.waitRounds.Load() >= 1 },
-		"等待者应进入第一轮排队")
-	q.ReleaseUsage(10) // used=80 → 仍不足（130>100）→ 第二轮等待
-	testutil.WaitFor(t, 5*time.Second, func() bool { return q.waitRounds.Load() >= 2 },
-		"释放不足时应进入第二轮排队")
-	q.ReleaseUsage(30) // used=50 → 100 恰好满足
+		"等待者应进入排队")
+	// 不足量释放（used 90→80，仍 80+50>100）⇒ 按 I2 不空唤醒；随后足量释放（used=50，
+	// 50+50=100）⇒ 必被唤醒。负向面（「不足量释放不唤醒」）由 pkg/waitq 自身用例锁定
+	// （TestQueue 系列 + Notify 命中即停），此处不引入 time.Sleep 做时序断言（R14 棘轮）。
+	q.ReleaseUsage(10)
+	q.ReleaseUsage(30) // used=50 → 50+50=100 恰好满足 ⇒ 必被唤醒
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("满足后应成功: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("等待者未在释放后唤醒")
+		t.Fatal("等待者未在额度足够后唤醒（丢唤醒）")
 	}
-	if got := q.watchers.Load(); got != 1 {
-		t.Fatalf("单次 ReserveUsage 只应 spawn 1 个观察者（m7），实际 %d", got)
+	if got := q.watchers.Load(); got != 0 {
+		t.Fatalf("W1 收敛后不应有观察者 goroutine（waitq 用 select + timer），实际 %d", got)
 	}
 }
 

@@ -63,10 +63,16 @@ func (r *Ring) pruneExpiredEntriesLocked(key *Key, now time.Time) int {
 	return pruned
 }
 
-// UpsertAK 登记一个 AK（存在则更新 Owner，不重置其条目）。AK 为空返回 ErrInvalidAK。
+// UpsertAK 登记一个 AK（存在则更新 Owner，不重置其条目）。AK 为空返回 ErrInvalidAK；
+// owner 为**保留租户名**（如审计租户 `audit`）返回 ErrReservedOwner —— 这是租户键的
+// **唯一收口点**（注册 / admin 新增凭据 / 凭据改名均经此），故保留名在此一处 fail-closed
+// 即可覆盖全部用户面（设计 §5.6 前提 1–3）。
 func (r *Ring) UpsertAK(ak, owner string) error {
 	if ak == "" {
 		return ErrInvalidAK
+	}
+	if IsReservedOwner(owner) {
+		return ErrReservedOwner
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -204,3 +204,12 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 `setCacheDirForTest`（内部 `t.Setenv("XDG_CACHE_HOME", tmp)` + `xdg.Reload()`）把缓存隔离到临时目录，
 否则会读写**真实用户缓存**；`t.Setenv` 与 `t.Parallel` 互斥（Go 测试框架限制），故显式串行。
 注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（`cmd/sclient/cd_test.go 5 → 8`）。
+
+## 2026-10-20 审计面板筛选 e2e（`web/e2e/audit_export_notify_test_e2e_test.go` 2 → 3）
+
+新增 1 个串行用例 `TestAudit_FilterRows`（S4 审计面板筛选的真浏览器验证：筛选栏渲染 / 输错动作
+收敛为 0 条 / 清除恢复）。**不可并行的理由**：与同文件既有 2 例同因 —— ① Playwright 真浏览器夹具
+（`pageFixture`）每次都要启 chromium；② 用例依赖「**先播种审计事件、后读面板**」的时序，而审计服务是
+进程内共享状态（播种的 `POST /api/notify/test` 与面板读取都落在同一个 `audit.Service`）⇒ 并发会互相
+干扰（读到对方/读到空表）。注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（该文件 2 → 3，
+总数 +1，无其它文件 slack 变化）。

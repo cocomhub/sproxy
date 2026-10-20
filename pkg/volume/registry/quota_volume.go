@@ -9,6 +9,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+
+	"github.com/cocomhub/sproxy/pkg/waitq"
 )
 
 // quota_volume.go —— **配额层**（统一存储卷模型 M4a；设计
@@ -159,6 +161,15 @@ func (q *QuotaVolume) VolumeStats() (used, total int64, ok bool) {
 //
 // `owner` 按调用方契约传入（本层**不再归一** ✗ —— 避免双口径；`LogicalKey.Owner` 亦为原始值 ✓）。
 // 返回的是该 owner 根 Scope 的**节点级**用量（`commitUp` 沿父链累计 ⇒ 等于该 owner 全子树 ✓）。
+// WaitStats 返回该卷配额池的**等待队列统计**（S4「等待可观测」）。
+// ok=false ⇒ 该卷没有配额池（未启用配额层）⇒ 无观测面（禁当「零等待」消费 ✗）。
+func (q *QuotaVolume) WaitStats() (waitq.Stats, bool) {
+	if q == nil || q.pool == nil {
+		return waitq.Stats{}, false
+	}
+	return q.pool.WaitStats(), true
+}
+
 func (q *QuotaVolume) UserUsage(owner string) (int64, bool) {
 	if q == nil {
 		return 0, false

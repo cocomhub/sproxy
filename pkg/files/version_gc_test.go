@@ -12,6 +12,7 @@ package files
 // 决定，因此夹具必须从磁盘目录项出发，而不是经 SaveVersion 生成（后者无法控制时间）。
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"testing"
@@ -128,8 +129,8 @@ func TestGCExpiredVersions_MaxVersions(t *testing.T) {
 	tnt := env.tenantFor("alice")
 	for _, c := range []string{"v1-content", "v2-content", "v3-content"} {
 		writeUserFile(t, env, "alice", "user/f.txt", c)
-		if _, err := env.svc.SaveVersion("f.txt", tnt, "alice"); err != nil {
-			t.Fatalf("SaveVersion(%s): %v", c, err)
+		if _, err := env.svc.SaveVersion(context.Background(), "f.txt", tnt, "alice"); err != nil {
+			t.Fatalf("SaveVersion(context.Background(), %s): %v", c, err)
 		}
 	}
 	before, err := env.svc.CollectVersionEntries("alice", "f.txt")

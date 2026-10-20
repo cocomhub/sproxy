@@ -55,7 +55,7 @@ type dirsEnv struct {
 	// 以下为写面族（upload/rename/delete）的可选钩子：nil 时 deps() 用既有桩（既有族的
 	// 行为不变）。写面族用例在 newDirsEnv 后按需赋值并调用 rebuild() 生效。
 	locateOwnerFile func(owner, rel string) (FileLocation, bool)
-	routeUpload     func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	routeUpload     func(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
 	acquireFileLock func(owner, rel string) (func(), bool)
 	// versioningEnabled / versioningMaxVersions / versioningRetention 供覆盖写版本化分支
 	// （默认 false / 0 / 0，与迁移前装配层同缺省；Retention 0 = 不启用保留期清理）。
@@ -235,16 +235,16 @@ func (r testRuntime) Locate(owner, rel string) (FileLocation, bool) {
 	return r.e.locateOwnerFile(owner, rel)
 }
 
-func (r testRuntime) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+func (r testRuntime) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
 	if r.e.routeUpload == nil {
 		return UploadRoute{}, nil
 	}
-	return r.e.routeUpload(owner, rel, explicitVol, size, forceHomeVol)
+	return r.e.routeUpload(context.Background(), owner, rel, explicitVol, size, forceHomeVol)
 }
 
 // RouteTarget 显式卷（不查重）：回落 dirsEnv.routeUpload 的显式卷形态（替身 routeUploadDefault 不查重）。
-func (r testRuntime) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
-	return r.e.routeUpload(owner, rel, volName, size, "")
+func (r testRuntime) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
+	return r.e.routeUpload(context.Background(), owner, rel, volName, size, "")
 }
 
 func (r testRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.e.quotaScopeFor(owner, rel) }

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
@@ -194,6 +197,7 @@ func TestAuditHandler_LocalMuxReachable(t *testing.T) {
 		Logger: testLogger(),
 	}
 	withTestCreds(&opts)
+	setKeyRole(t, opts.CredentialRing, testAccessKey, accesskey.RoleAdmin)
 	h := RegisterRoutes(t.Context(), opts)
 	t.Cleanup(func() { _ = h.Close() })
 
@@ -203,6 +207,8 @@ func TestAuditHandler_LocalMuxReachable(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/audit", nil)
+	// 隧道内层身份来自请求 ctx（真实链路由隧道层注入）⇒ 直连模拟时显式注入管理员主体。
+	r = r.WithContext(withActor(r.Context(), testAccessKey))
 	lh.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("LocalHandler 直连 GET /api/audit 应为 200（隧道内层可达），got %d (body=%s)", w.Code, w.Body.String())
@@ -270,34 +276,13 @@ func helperAuditTunnelQuery(t *testing.T, url string) {
 		t.Fatalf("tunnel Do /api/audit: %v", err)
 	}
 	defer tresp.Body.Close()
-	if tresp.StatusCode != http.StatusOK {
-		t.Fatalf("tunnel /api/audit status = %d, want 200", tresp.StatusCode)
-	}
-	var payload auditResponse
-	if err := json.NewDecoder(tresp.Body).Decode(&payload); err != nil {
-		t.Fatalf("decode tunnel audit body: %v", err)
-	}
-	helperAuditTunnelAssertDeleteEvent(t, payload)
-}
-
-// helperAuditTunnelAssertDeleteEvent 断言隧道返回的
-// 审计事件中包含目标 delete 事件且 actor/TS 合法。
-func helperAuditTunnelAssertDeleteEvent(t *testing.T, payload auditResponse) {
-	t.Helper()
-	found := false
-	for _, ev := range payload.Events {
-		if ev.Action == "delete" && ev.Object == "tunnel-e2e.txt" {
-			found = true
-			if ev.Actor != testAccessKey {
-				t.Errorf("tunnel 审计 actor = %q, want %q", ev.Actor, testAccessKey)
-			}
-			if ev.TS.IsZero() {
-				t.Errorf("tunnel 审计 TS 为零值")
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("隧道 /api/audit 未返回 delete 事件（隧道内层 auditHandler 未生效）: %+v", payload.Events)
+	// 隧道内层**可达**（不是 404）+ 审计读面权限门生效（M1-11 / 审核 P0）。
+	// 本用例的隧道主体非管理员 ⇒ 期望 403；管理员主体可读的对照在
+	// rbac_roles_test.go（admin ⇒ 200）与隧道内层 admin 用例（见 LocalMuxReachable）。
+	if tresp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(tresp.Body)
+		t.Fatalf("tunnel /api/audit status = %d, want 403（隧道可达但审计读面 admin-only）; body=%s",
+			tresp.StatusCode, body)
 	}
 }
 
@@ -443,6 +428,9 @@ func TestAuditHandler_PersistDir_RestartRetainsHistory(t *testing.T) {
 	opts1 := RegisterRoutesOpts{Mux: mux1, CfgPtr: &cfgPtr1, Version: "test", BuildAt: "test", Logger: testLogger()}
 	withTestCreds(&opts1)
 	h1 := RegisterRoutes(t.Context(), opts1)
+	// 审计读面 M1-11（审核 P0）admin-only ⇒ 语义用例以管理员主体运行。
+	setKeyRole(t, h1.credentialRing, testAccessKey, accesskey.RoleAdmin)
+
 	ts1 := httptest.NewServer(h1.Handler())
 	defer func() { ts1.Close(); _ = h1.Close() }()
 
@@ -469,6 +457,7 @@ func TestAuditHandler_PersistDir_RestartRetainsHistory(t *testing.T) {
 	opts2 := RegisterRoutesOpts{Mux: mux2, CfgPtr: &cfgPtr2, Version: "test", BuildAt: "test", Logger: testLogger()}
 	withTestCreds(&opts2)
 	h2 := RegisterRoutes(t.Context(), opts2)
+	setKeyRole(t, h2.credentialRing, testAccessKey, accesskey.RoleAdmin)
 	ts2 := httptest.NewServer(h2.Handler())
 	defer func() { ts2.Close(); _ = h2.Close() }()
 
@@ -493,7 +482,7 @@ func TestAuditHandler_PersistDir_RestartRetainsHistory(t *testing.T) {
 }
 
 // TestAuditHandler_AuditDefaultPersist 验证审计**默认落盘**（用户决策：落盘到合适位置，
-// 无需配置目录）：缺省配置下 delete 事件落盘到 <存储根>/audit/audit.log。
+// 无需配置目录）：缺省配置下 delete 事件落盘到 <存储根>/__audit__/hot/audit.log。
 func TestAuditHandler_AuditDefaultPersist(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr, _ := newAuditTestServer(t, nil)
@@ -508,10 +497,11 @@ func TestAuditHandler_AuditDefaultPersist(t *testing.T) {
 	}
 	resp.Body.Close()
 	// 默认落盘：存储根下 audit 目录与 audit.log 存在，且含 delete 事件。
-	logPath := filepath.Join(cfgPtr.Load().StorageRoot, "audit", "audit.log")
+	// 热段目录 = <卷根>/__audit__/hot/（`__` 前缀被 ListOwners 跳过，不污染租户命名空间）。
+	logPath := filepath.Join(cfgPtr.Load().StorageRoot, "__audit__", "hot", "audit.log")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
-		t.Fatalf("默认落盘应创建 audit/audit.log: %v", err)
+		t.Fatalf("默认落盘应创建 __audit__/hot/audit.log: %v", err)
 	}
 	if !bytes.Contains(data, []byte("delete")) {
 		t.Fatalf("audit.log 应含 delete 事件, got: %s", data)

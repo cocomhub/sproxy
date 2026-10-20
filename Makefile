@@ -237,6 +237,8 @@ web-test:
 	node --test web/static/audit-export.test.js
 	node --test web/static/quota-format.test.js
 	node --test web/static/audit-rows-format.test.js
+	node --test web/static/audit-filter.test.js
+	node --check web/static/audit-filter.js
 	node --test web/static/image-preview.test.js
 	node --test web/static/video-player.test.js
 	node --test web/static/volume-ops.test.js

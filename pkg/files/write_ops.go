@@ -141,6 +141,8 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 			return WriteFileResult{}, werr
 		}
 		res.VolumeName = route.VolumeName
+		// 审计：外部/远端 sink 直写路径上传成功。
+		s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultSuccess, "volume="+route.VolumeName+" sink=true")
 		return res, nil
 	}
 	root := route.Tenant.Root()
@@ -169,6 +171,8 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	// 安全边界：台账 per-tenant（owner 隔离）；只同卷硬链（跨卷不合并）。
 	f := &fileOp{ctx: ctx, root: root, owner: owner, remotePath: remotePath, logger: logger}
 	if res, handled, dedupErr := s.tryDedupUploadHandled(f, rel, prev, input, route); handled {
+		// 审计：去重命中（零拷贝硬链）也属成功上传，必须可追溯（与主路径同 action）。
+		s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultSuccess, "volume="+route.VolumeName+" dedup=true")
 		return res, dedupErr
 	}
 
@@ -178,6 +182,8 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 		return WriteFileResult{}, err
 	}
 	res.VolumeName = route.VolumeName
+	// 审计（域层 ⇒ 覆盖 HTTP/DAV/S3/CLI）：新文件上传成功（含物理占用与卷归属）。
+	s.rt.recordFileAudit(ctx, "upload", remotePath, auditResultSuccess, "volume="+route.VolumeName)
 	return res, nil
 }
 
@@ -493,7 +499,7 @@ func (s *Service) resolveWriteHomeHandled(ctx context.Context, owner, rel, remot
 // （路由拒绝按类型映射 403/409/507，内部错误 → 500）；route.Tenant 不可用 → 400。
 // 返回的 route 必满足 route.Tenant 与 route.Tenant.Root() 非 nil（调用方可直接落盘）。
 func (s *Service) routeWriteUpload(ctx context.Context, logger *slog.Logger, owner, rel string, input WriteFileInput, forceHomeVol, remotePath string) (UploadRoute, error) {
-	route, routeErr := s.rt.routeUpload(owner, rel, input.ExplicitVol, input.ClientSize, forceHomeVol)
+	route, routeErr := s.rt.routeUpload(ctx, owner, rel, input.ExplicitVol, input.ClientSize, forceHomeVol)
 	if routeErr != nil {
 		logger.WarnContext(ctx, "上传卷路由拒绝", "file_name", remotePath, "error", routeErr.Error())
 		if he, ok := errors.AsType[*HTTPError](routeErr); ok {
@@ -554,7 +560,7 @@ func (s *Service) handleDuplicateFile(ctx context.Context, owner string, homeTnt
 	// 接缝注释），故本处**无控制流残差**。
 	if s.rt.versioningEnabled() {
 		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本（homeTnt 即旧文件所在卷）
-		s.saveVersionBeforeOverwrite(owner, remotePath, homeTnt)
+		s.saveVersionBeforeOverwrite(ctx, owner, remotePath, homeTnt)
 		// 审查 I-3：覆盖动作记审计（含旧版本已保存的信息）。
 		s.rt.recordFileAudit(ctx, "overwrite", remotePath, auditResultSuccess, "覆盖现有文件（版本已保存）")
 		return nil, true, nil // 继续执行写入流程，用新内容覆盖现有文件（home=本卷）
@@ -731,13 +737,16 @@ func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (
 	s.rt.logger().Info("目录已创建", "dir", remotePath)
 	// 文件变更事件：mkdir 成功。
 	s.rt.publishFileEvent(EventMkdir, owner, rel, 0)
+	// 审计（域层 ⇒ 覆盖 HTTP/DAV/S3/CLI）：本地默认路径建目录成功
+	// （显式卷分支在 makeDirExplicitVolume 内单独记，两分支互斥不重复）。
+	s.rt.recordFileAudit(ctx, "mkdir", remotePath, auditResultSuccess, "volume="+volName)
 	return MakeDirResult{RemotePath: remotePath}, nil
 }
 
 // mkdirLocalWithCharge 在本地卷上建目录并按**目录足迹**记账（预留 → MkdirAll → 结算）。
 // 失败路径归还预留（Commit/Release 二选一）。记账口径见 dir_charge.go。
 func (s *Service) mkdirLocalWithCharge(ctx context.Context, owner, rel, remotePath, volName string, root *storage.Root) error {
-	dirCharge, dcErr := s.reserveDirCharge(owner, rel, remotePath, volName)
+	dirCharge, dcErr := s.reserveDirCharge(ctx, owner, rel, remotePath, volName)
 	if dcErr != nil {
 		return dcErr
 	}
@@ -776,7 +785,7 @@ func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, 
 			dirRel = r
 		}
 	}
-	dirCharge, dcErr := s.reserveDirCharge(owner, dirRel, remotePath, volName)
+	dirCharge, dcErr := s.reserveDirCharge(ctx, owner, dirRel, remotePath, volName)
 	if dcErr != nil {
 		return MakeDirResult{}, true, dcErr
 	}
@@ -792,6 +801,8 @@ func (s *Service) makeDirExplicitVolume(ctx context.Context, owner, remotePath, 
 	s.settleDirCharge(dirCharge)
 	s.rt.logger().Info("目录已创建（外部卷）", "dir", remotePath, "volume", volName)
 	s.rt.publishFileEvent(EventMkdir, owner, remotePath, 0)
+	// 审计（**服务层** ⇒ 覆盖 HTTP/DAV/S3/CLI 全部写面）：目录创建成功。
+	s.rt.recordFileAudit(ctx, "mkdir", remotePath, auditResultSuccess, "volume="+volName)
 	return MakeDirResult{RemotePath: remotePath}, true, nil
 }
 
@@ -880,6 +891,9 @@ func (s *Service) RemoveDir(ctx context.Context, owner, dirname, volName string,
 	s.rt.logger().Info("目录已删除", "dir", remotePath)
 	// 文件变更事件：rmdir 成功。
 	s.rt.publishFileEvent(EventRmdir, owner, rel, 0)
+	// 审计（**服务层** ⇒ 覆盖 HTTP/DAV/S3/CLI 全部写面）：目录删除成功（破坏性操作必须可追溯）。
+	s.rt.recordFileAudit(ctx, "rmdir", remotePath, auditResultSuccess,
+		"volume="+volName+" force="+fmt.Sprintf("%t", force))
 	return RemoveDirResult{RemotePath: remotePath}, nil
 }
 
@@ -920,6 +934,9 @@ func (s *Service) removeDirExplicitVolume(ctx context.Context, owner, remotePath
 	s.releaseDirChainDiff(owner, dirRel, remotePath, volName, dirBefore, dirOK)
 	s.rt.logger().Info("目录已删除（外部卷）", "dir", remotePath, "volume", volName)
 	s.rt.publishFileEvent(EventRmdir, owner, remotePath, 0)
+	// 审计：显式卷路径删目录成功（本地路径在 RemoveDir 内单独记，两分支互斥不重复）。
+	s.rt.recordFileAudit(ctx, "rmdir", remotePath, auditResultSuccess,
+		"volume="+volName+" force="+fmt.Sprintf("%t", force))
 	return RemoveDirResult{RemotePath: remotePath}, true, nil
 }
 
@@ -1273,7 +1290,7 @@ func (s *Service) reserveExternalRenameTarget(ctx context.Context, ops ExternalV
 	if sc == nil {
 		return nil, nil
 	}
-	res, rerr := sc.TryReserve(s.rt.phys.PhysBound(volName, logical))
+	res, rerr := sc.WaitReserve(ctx, s.rt.phys.PhysBound(volName, logical), quota.DefaultWaitTimeout)
 	if rerr != nil {
 		return nil, &HTTPError{Status: http.StatusInsufficientStorage, Message: errMsgStorageQuotaExceeded}
 	}
@@ -1520,7 +1537,7 @@ func (s *Service) renameWithQuotaTransfer(ctx context.Context, a renameHomeArgs)
 	size := s.releaseChargeFor(a.volName, a.owner, a.from, srcInfo.Size())
 	// 目标键先 TryReserve（子目录/租户/全局逐级检查，配额不足拒绝移动避免超限），
 	// 成功后再原子 Rename，最后源键 ReleaseUsage。若 Rename 失败则 Release 归还目标预留。
-	toRes, err := toScope.TryReserve(size)
+	toRes, err := toScope.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
 	if err != nil {
 		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultDenied, renameAuditDetail("目标目录配额不足", a.to, a.origin))
 		a.logger.WarnContext(ctx, "rename 目标目录配额不足", "from", a.fromRel, "to", a.toRel, "size", size)
@@ -2208,7 +2225,7 @@ func (s *Service) WriteTarget(ctx context.Context, input WriteTargetInput, src i
 	var route UploadRoute
 	var routeErr error
 	if input.Volume != "" {
-		route, routeErr = s.rt.routeTarget(owner, rel, input.Volume, input.ClientSize)
+		route, routeErr = s.rt.routeTarget(ctx, owner, rel, input.Volume, input.ClientSize)
 	} else {
 		route, routeErr = s.routeWriteUpload(ctx, logger, owner, rel, WriteFileInput{
 			Owner: owner, RemotePath: remotePath, ExplicitVol: "",

@@ -106,7 +106,7 @@ func (e *chunkedTestEnv) Tenant(string, string) *storage.Tenant { return e.tnt }
 
 func (e *chunkedTestEnv) Locate(string, string) (FileLocation, bool) { return FileLocation{}, false }
 
-func (e *chunkedTestEnv) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+func (e *chunkedTestEnv) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
 	if e.routeHook != nil {
 		e.routeHook()
 	}
@@ -117,8 +117,8 @@ func (e *chunkedTestEnv) Route(owner, rel, explicitVol string, size int64, force
 }
 
 // RouteTarget 显式卷（不查重）：回落 Route。
-func (e *chunkedTestEnv) RouteTarget(owner, rel, volName string, size int64) (UploadRoute, error) {
-	return e.Route(owner, rel, volName, size, "")
+func (e *chunkedTestEnv) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
+	return e.Route(ctx, owner, rel, volName, size, "")
 }
 
 func (e *chunkedTestEnv) ScopeFor(string, string) *quota.Scope { return nil }

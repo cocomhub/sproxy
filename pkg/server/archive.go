@@ -97,6 +97,10 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 	if archiveCipherInvalid(req, w) {
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "archive", ObjectType: "file", Object: strings.Join(req.Files, ","), Result: AuditResultSuccess,
+		Detail: "归档流式打包已开始（tar+gzip）",
+	})
 	w.WriteHeader(http.StatusOK)
 
 	// 流式打包：io.Pipe 中 tar + gzip

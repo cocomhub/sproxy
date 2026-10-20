@@ -13,8 +13,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/audit"
+
+	"sync"
+	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -39,26 +46,109 @@ import (
 // （合适位置自动选择，无需配置目录）。打开失败记错误并降级为 ring-only
 // （审计绝不阻断启动）；装载失败同样降级。
 // 轮转（roadmap 11.5-⑥）：audit.max_size > 0 时按大小轮转 + 保留 max_archives 份归档。
-func setupAuditServices(cfg *Config, log *slog.Logger) (*AuditRing, *AuditStore) {
-	var auditRing *AuditRing
-	if cfg.Audit.BufferSize > 0 {
-		auditRing = NewAuditRing(cfg.Audit.BufferSize)
+func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger) (*audit.Service, *audit.FileJournal) {
+	if cfg.Audit.Disabled {
+		// 显式关闭（audit.disabled=true）：不建目录、不落盘、读面空表（审计完全 off）。
+		log.Warn("审计已显式关闭（audit.disabled=true）")
+		return nil, nil
+	}
+	if cfg.Audit.BufferSize <= 0 {
+		return nil, nil // 显式 0 = 关闭内存环形缓冲（读面返回空表；落盘仍按下方装配）
+	}
+	root := resolveDefaultVolumeRoot(cfg)
+	// 热段目录 = <卷根>/__audit__/hot/：`__` 前缀被 ListOwners 跳过 ⇒ 不污染租户命名空间
+	// （旧位置 <卷根>/audit/ 会被当租户枚举且可被注册占用 —— 见设计 §5.6 点 5）。
+	dir := filepath.Join(root, "__audit__", "hot")
+	migrateLegacyAuditDir(filepath.Join(root, "audit"), dir, log)
+
+	var journal *audit.FileJournal
+	// 封段回调（M4）：轮转产生封段 ⇒ 立即归档（在 Journal 锁外触发，见 pkg/audit 契约）。
+	onSeal, bindJournal := newSealArchiveHook(cfg, coldFS, log)
+	j, err := audit.NewFileJournal(audit.FileJournalConfig{
+		Dir:           dir,
+		Layout:        audit.LayoutGlobal, // 合规段族：全局时间线（便于合规导出/检索）
+		GlobalName:    "audit.log",        // 沿用既有段文件名（与历史迁移同源，便于运维识别）
+		SyncMode:      audit.SyncBatch,    // 策略族默认：批量 + 阈值 flush（设计 §5.2）
+		MaxSize:       int64(cfg.Audit.MaxSize),
+		MaxArchives:   cfg.Audit.MaxArchives,
+		MaxTotalBytes: int64(cfg.Audit.MaxTotalBytes),
+		OnSeal:        onSeal,
+		Logger:        log,
+	})
+	if err != nil {
+		// 启动期行为可配（设计 §5.6 点 6 / M1-14）：默认**降级**（审计绝不阻断启动）；
+		// 显式 fail_fast=true（合规部署要求审计必须可用）⇒ 中止启动，避免「以为有审计、
+		// 实际没落盘」的静默失效 —— 这是审计最危险的失败形态（设计 §5.4.2 同旨）。
+		if cfg.Audit.Startup.FailFast {
+			panic("audit: 落盘装配失败且 audit.startup.fail_fast=true（配置要求审计必须可用）: " + err.Error())
+		}
+		log.Error("审计落盘装配失败（降级为仅内存；如需中止启动请设 audit.startup.fail_fast=true）",
+			"error", err.Error())
+	} else {
+		journal = j
+		bindJournal(j) // 供封段回调使用（此后轮转即触发归档）
 	}
 
-	var auditStore *AuditStore
-	if cfg.Audit.BufferSize > 0 {
-		root := resolveDefaultVolumeRoot(cfg)
-		store, err := NewAuditStore(filepath.Join(root, "audit", "audit.log"), log, AuditRotationConfig{
-			MaxSize:     int64(cfg.Audit.MaxSize),
-			MaxArchives: cfg.Audit.MaxArchives,
-		})
-		if err != nil {
-			log.Error("审计落盘装配失败（降级为仅内存）", "error", err.Error())
-		} else {
-			auditStore = store
-		}
+	// M4 冷段归档：启动期这一次由**装配层**在卷集合就绪后触发（见 RegisterRoutes），
+	// 因为归档目的地可能是**卷**（需解析卷 FS）；轮转后的归档由 OnSeal 回调触发 ✓。
+
+	caps := audit.FullCapabilities()
+	var jr audit.Journal = audit.NullJournal{}
+	if journal != nil {
+		jr = journal
 	}
-	return auditRing, auditStore
+	svc, serr := audit.New(audit.Options{
+		Journal: jr,
+		Index:   audit.NewRingIndex(cfg.Audit.BufferSize),
+		Logger:  log,
+		Policy:  audit.Policy{MaxMemoryEntries: cfg.Audit.BufferSize},
+		Caps:    &caps,
+		CtxFields: audit.ContextFields{
+			Actor: ActorFrom,
+			Owner: ActorFrom, // 租户键 = AK（设计 §5.7 规则 1；严禁 Principal.Owner）
+			Mesh:  MeshFrom,
+		},
+	})
+	if serr != nil {
+		if cfg.Audit.Startup.FailFast {
+			panic("audit: 服务装配失败且 audit.startup.fail_fast=true: " + serr.Error())
+		}
+		log.Error("审计服务装配失败（审计关闭）", "error", serr.Error())
+		return nil, journal
+	}
+	return svc, journal
+}
+
+// migrateLegacyAuditDir 把旧位置 <卷根>/audit/ 的审计段一次性迁入新位置（best-effort）。
+// 不做静默丢弃：迁移失败只记日志（旧文件保留在原处，不影响启动）。
+func migrateLegacyAuditDir(legacyDir, newDir string, log *slog.Logger) {
+	des, err := os.ReadDir(legacyDir)
+	if err != nil {
+		return // 不存在或不可读：无历史可迁
+	}
+	if merr := os.MkdirAll(newDir, 0o700); merr != nil {
+		log.Warn("审计热段目录创建失败", "dir", newDir, "error", merr.Error())
+		return
+	}
+	for _, de := range des {
+		if de.IsDir() {
+			continue
+		}
+		name := de.Name()
+		if !strings.HasSuffix(name, "audit.log") && !strings.Contains(name, "audit.log.") {
+			continue
+		}
+		from := filepath.Join(legacyDir, name)
+		to := filepath.Join(newDir, name)
+		if _, serr := os.Stat(to); serr == nil {
+			continue // 目标已存在：不覆盖
+		}
+		if rerr := os.Rename(from, to); rerr != nil {
+			log.Warn("审计历史迁移失败（保留原处）", "from", from, "error", rerr.Error())
+			continue
+		}
+		log.Info("审计历史已迁移到新热段目录", "from", from, "to", to)
+	}
 }
 
 // initStorageLayout 装配多租户存储布局：默认卷租户缓存 + 全局配额池 + 预创建
@@ -489,8 +579,11 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 	if opts.CloudExitDial != nil {
 		cloudCfg.ExitDial = opts.CloudExitDial
 	}
+	// M3：云任务的启动恢复**唯一触发点** = 统一恢复协调器（见 routes.go 的 setupRecovery）。
+	// 构造期不恢复（DeferRecovery）⇒ 子系统不再各自「扫自己的目录」。
 	h.cloudMgr = cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{
-		UploadsDir: vs.Default().RootDir, Storage: cloudStorageManager{m: sm},
+		DeferRecovery: true,
+		UploadsDir:    vs.Default().RootDir, Storage: cloudStorageManager{m: sm},
 		TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor,
 		ListTenants: h.listTenantIDs, Logger: log.With("component", "cloud"),
 		Config: cloudCfg,
@@ -706,3 +799,87 @@ func registerHubRoutes(h *Handlers, srvMux, localMux *http.ServeMux, opts Regist
 		localMux.HandleFunc("GET /api/hub/services", h.hubServicesHandler)
 	}
 }
+
+// runAuditArchive 把封段归档到 `audit.archive_dir`（M4；**复用** pkg/audit 原语）。
+//
+// 语义（与 pkg/audit.ArchiveSealed 一致）：
+//   - 只归档**封段**（活跃段绝不归档）；失败**不丢段**（本地保留、下轮重试）；
+//   - 保留最新 `audit.archive_keep` 个封段在本地（0 = 全部归档；建议按查询窗口显式配置）。
+//
+// 为什么在装配层：归档目的地（挂载的冷卷目录）属部署配置；原语与护栏都在 pkg/audit（单一实现）。
+func runAuditArchive(cfg *Config, coldFS syncpkg.FS, j *audit.FileJournal, log *slog.Logger) {
+	if coldFS == nil || j == nil {
+		return // 未配置归档目的地（或审计未落盘）⇒ 不做任何事
+	}
+	keep := max(cfg.Audit.ArchiveKeep, 0)
+	// 实际写能力来自 pkg/sync（与云端下载→转存同源：FS + WriteIfAbsent 幂等写）；
+	// 审计包只做编排与护栏，不自造 sink 接口 ✓。
+	arch := audit.FSArchiver{FS: coldFS}
+	rep, err := audit.ArchiveSealed(context.Background(), j, arch, keep)
+	if err != nil {
+		log.Warn("审计冷段归档失败（封段保留在本地，下轮重试）", "error", err, "archive_dir", cfg.Audit.ArchiveDir)
+		return
+	}
+	if rep.Archived > 0 || rep.Failed > 0 {
+		log.Info("审计冷段归档完成", "summary", rep.String(), "archive_dir", cfg.Audit.ArchiveDir)
+	}
+}
+
+// newSealArchiveHook 返回「封段 → 归档」回调与 journal 绑定函数（M4）。
+//
+// 护栏：
+//   - 回调仅在 `archive_dir` 非空时生效（默认不归档）；
+//   - 用 `atomic.Pointer` 拿 journal 自身（回调由轮转触发，早于局部变量赋值时跳过 ✓ 不 panic）；
+//   - **TryLock 单飞**：已有归档在跑 ⇒ 本次跳过（下一轮轮转会再次触发，且封段仍在本地 ⇒ 不丢）；
+//   - 回调内**不写**同一 Journal（只读段文件 + 归档），因此不会递归轮转 ✓。
+func newSealArchiveHook(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger) (hook func(), bind func(*audit.FileJournal)) {
+	var jp atomic.Pointer[audit.FileJournal]
+	var mu sync.Mutex
+	hook = func() {
+		if cfg.Audit.ArchiveDir == "" && cfg.Audit.ArchiveVolume == "" {
+			return
+		}
+		j := jp.Load()
+		if j == nil {
+			return
+		}
+		if !mu.TryLock() {
+			return
+		}
+		defer mu.Unlock()
+		runAuditArchive(cfg, coldFS(), j, log)
+	}
+	bind = func(j *audit.FileJournal) { jp.Store(j) }
+	return hook, bind
+}
+
+// newColdArchiveFS 构造**冷段归档目录**的 FS（`pkg/sync.LocalFS`）。
+//
+// 收敛点：审计归档（写）与冷段读取（读）**共用同一构造**，且 `sync.NewLocalFS` 在全仓只出现在
+// 本文件（R26 门禁白名单只需登记一处；将来换外部/加密卷 FS 也只改这里 ✓）。
+func newColdArchiveFS(cfg *Config, set *registry.Set, log *slog.Logger) syncpkg.FS {
+	if cfg == nil {
+		return nil
+	}
+	// ① 冷段归档**卷**（优选）：加密卷 ⇒ 冷段自带 at-rest 加密；容量/配额与普通卷一致。
+	if name := cfg.Audit.ArchiveVolume; name != "" {
+		if set == nil {
+			log.Warn("审计归档卷已配置但卷集合未装配（跳过归档）", "archive_volume", name)
+			return nil
+		}
+		be := set.External(name)
+		if be == nil {
+			log.Warn("审计归档卷不存在或不是外部/封装卷（跳过归档）", "archive_volume", name)
+			return nil
+		}
+		return syncpkg.NewPrefixFS(be.FS(), auditArchiveVolumePrefix)
+	}
+	// ② 裸目录（兼容既有部署）。
+	if cfg.Audit.ArchiveDir != "" {
+		return syncpkg.NewLocalFS(cfg.Audit.ArchiveDir, log)
+	}
+	return nil
+}
+
+// auditArchiveVolumePrefix 是冷段在**归档卷**内的前缀（与裸目录布局隔离，便于识别与清理）。
+const auditArchiveVolumePrefix = "audit-archive"

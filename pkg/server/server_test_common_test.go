@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 

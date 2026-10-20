@@ -28,7 +28,7 @@ func TestReserveVolume_ExternalSink(t *testing.T) {
 	fs := &extFS{files: map[string]string{}}
 	h := newExternalTestEnv(t, v, fs)
 
-	route, err := h.reserveVolume("alice", "user/f.bin", "baidu", 100)
+	route, err := h.reserveVolume(context.Background(), "alice", "user/f.bin", "baidu", 100)
 	if err != nil {
 		t.Fatalf("外部卷 reserveVolume: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestExternalUploadReadRoundtrip(t *testing.T) {
 	h := newExternalTestEnv(t, v, fs)
 
 	// 1. 普通上传到外部卷（files.WriteFile 经 Sink 整流写 user/ 键）。
-	route, rerr := h.reserveVolume("alice", "user/movie.bin", "secret", 11)
+	route, rerr := h.reserveVolume(context.Background(), "alice", "user/movie.bin", "secret", 11)
 	if rerr != nil {
 		t.Fatalf("reserveVolume: %v", rerr)
 	}

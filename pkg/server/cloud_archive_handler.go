@@ -141,7 +141,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 总量限制 + 预留配额（scope 优先，storageMgr 回退；与批量/组归档同款逻辑）。
-	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, info.Size())
+	res, pre, ok := h.cloudArchiveReserveQuota(r.Context(), w, owner, info.Size())
 	if !ok {
 		return
 	}
@@ -234,7 +234,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 打包前：总量限制 + 预留配额（scope 优先，storageMgr 回退；与单任务/组归档一致）。
-	res, pre, ok := h.cloudArchiveReserveQuota(w, owner, totalSourceSize)
+	res, pre, ok := h.cloudArchiveReserveQuota(r.Context(), w, owner, totalSourceSize)
 	if !ok {
 		return
 	}

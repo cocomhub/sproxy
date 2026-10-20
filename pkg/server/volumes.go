@@ -490,11 +490,11 @@ func (r *volumeRoute) release() {
 // 返回 volumeRoute（含双预留句柄）。volSet 未装配（旧装配路径）回落既有单卷行为：
 // 默认租户 + owner 全局 Scope 预留，无卷容量池（零回归）。forceHomeVol 此时无卷语义
 // （唯一根即 home），天然 stay-home。
-func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, forceHomeVol string) (*volumeRoute, error) {
+func (h *Handlers) routeUpload(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (*volumeRoute, error) {
 	// 旧装配路径（volSet nil）：单卷零回归——默认租户 + owner 全局 Scope 预留。
 	// forceHomeVol 此时无卷语义（唯一根即 home），天然 stay-home。
 	if h.volSet == nil {
-		return h.routeUploadLegacy(owner, rel, size)
+		return h.routeUploadLegacy(ctx, owner, rel, size)
 	}
 
 	owner = normalizeOwner(owner)
@@ -507,23 +507,23 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, force
 	// 版本化覆盖写，强制回该 home 卷单候选，容量不足直接 507（reserveVolume 返回
 	// routeErrVolFull/routeErrOwnerFull，上传侧映射），不换卷——防止同 rel 跨卷双份 + owner 双计。
 	if forceHomeVol != "" {
-		return h.routeUploadSingle(owner, rel, forceHomeVol, size, false, view)
+		return h.routeUploadSingle(ctx, owner, rel, forceHomeVol, size, false, view)
 	}
 
 	// 显式指定卷：ACL 校验 + 唯一性查重（AD-4）+ 单候选双预留（无换卷）。唯一性属 HTTP
 	// 上传覆盖策略；统一写内核显式卷（S3/DAV/版本恢复）走 RouteTarget（不查重，覆盖写语义）。
 	if explicitVol != "" {
-		return h.routeUploadSingle(owner, rel, explicitVol, size, true, view)
+		return h.routeUploadSingle(ctx, owner, rel, explicitVol, size, true, view)
 	}
 
 	// 自动路由：按 placement 排序候选，依序双预留；owner 全局满不换卷、卷满换下一候选。
-	return h.routeUploadAuto(owner, rel, view, size)
+	return h.routeUploadAuto(ctx, owner, rel, view, size)
 }
 
 // routeUploadAuto 自动路由（新文件，forceHomeVol 空）：按 placement 排序候选依序双预留；
 // owner 全局满不换卷、卷满换下一候选。写保护（用户语义 #6）：候选卷该 rel 命中被封装卷
 // 占用的子目录 → 跳过该候选（不静默落到占用目录）；全部候选被占用 → 403 直接拒绝。
-func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size int64) (*volumeRoute, error) {
+func (h *Handlers) routeUploadAuto(ctx context.Context, owner, rel string, view []volume.Volume, size int64) (*volumeRoute, error) {
 	cfg := h.cfgPtr.Load()
 	placement := volume.ModePreferDefault
 	if cfg != nil && cfg.Placement != "" {
@@ -537,7 +537,7 @@ func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size
 	})
 	var volFullErr error
 	for _, v := range ordered {
-		route, err := h.reserveVolume(owner, rel, v.Name, size)
+		route, err := h.reserveVolume(ctx, owner, rel, v.Name, size)
 		if err == nil {
 			return route, nil
 		}
@@ -556,7 +556,7 @@ func (h *Handlers) routeUploadAuto(owner, rel string, view []volume.Volume, size
 
 // routeUploadLegacy 旧装配路径（volSet nil）预留：默认租户 + owner 全局 Scope 预留（单卷零回归）。
 // forceHomeVol 此时无卷语义（唯一根即 home），天然 stay-home。
-func (h *Handlers) routeUploadLegacy(owner, rel string, size int64) (*volumeRoute, error) {
+func (h *Handlers) routeUploadLegacy(ctx context.Context, owner, rel string, size int64) (*volumeRoute, error) {
 	tnt := h.tenantFor(owner)
 	if tnt == nil {
 		return nil, newRouteError(routeErrOther, http.StatusBadRequest, errMsgInvalidPath, nil)
@@ -569,7 +569,7 @@ func (h *Handlers) routeUploadLegacy(owner, rel string, size int64) (*volumeRout
 		// **超时（默认 30s）后才**按容量不足失败。
 		// 残余（如实记录）：未串入请求 ctx（本函数签名无 ctx，需经 files.Runtime 逐层 plumbing）
 		// ⇒ 客户端断连时仍等到超时（有界 30s），不影响正确性。
-		res, err := route.scope.WaitReserve(context.Background(), size, h.quotaWaitTimeout)
+		res, err := route.scope.WaitReserve(ctx, size, h.quotaWaitTimeout)
 		if err != nil {
 			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}
@@ -581,7 +581,7 @@ func (h *Handlers) routeUploadLegacy(owner, rel string, size int64) (*volumeRout
 // routeUploadSingle 单候选卷预留（forceHome 或显式 volume）：视图内校验（不在视图 → 403）
 // + 可选唯一性查重（仅显式 volume）+ 单卷双预留。写保护（用户语义 #6）：目标卷该 rel
 // 命中被封装卷占用的子目录 → 403（占用目录只读，禁止写）。
-func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, checkUnique bool, view []volume.Volume) (*volumeRoute, error) {
+func (h *Handlers) routeUploadSingle(ctx context.Context, owner, rel, volName string, size int64, checkUnique bool, view []volume.Volume) (*volumeRoute, error) {
 	v, ok := h.volSet.ByName(volName)
 	if !ok || !v.Authorize(owner) {
 		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, msgVolumeNotAllowed, nil)
@@ -591,7 +591,7 @@ func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, che
 			return nil, err
 		}
 	}
-	route, err := h.reserveVolume(owner, rel, v.Name, size)
+	route, err := h.reserveVolume(ctx, owner, rel, v.Name, size)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +607,7 @@ func (h *Handlers) routeUploadSingle(owner, rel, volName string, size int64, che
 // （volSet.External 非 nil）→ 装配 externalUploadSink（包装 External FS，key=rel 直接
 // 传给后端——外部卷键空间统一 user/<rel>，与读路径 resolveExternalDownload 一致），
 // 双账本预留照常（owner 全局 Scope + 卷容量池）。
-func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volumeRoute, error) {
+func (h *Handlers) reserveVolume(ctx context.Context, owner, rel, volName string, size int64) (*volumeRoute, error) {
 	// 预占用口径（配额模型 v3）：卷自报**物理上界**优先——secretdata 的 meta pad/parity 与逻辑
 	// 大小无关（1KB 文件物理 ≈1–2MB）⇒ 按逻辑预留会在结算（实测）时突破预留。结算按实测收敛，
 	// 多预留部分在 Commit 时自动归还。
@@ -625,13 +625,13 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 		// **超时（默认 30s）后才**按容量不足失败。
 		// 残余（如实记录）：未串入请求 ctx（本函数签名无 ctx，需经 files.Runtime 逐层 plumbing）
 		// ⇒ 客户端断连时仍等到超时（有界 30s），不影响正确性。
-		res, err := route.scope.WaitReserve(context.Background(), size, h.quotaWaitTimeout)
+		res, err := route.scope.WaitReserve(ctx, size, h.quotaWaitTimeout)
 		if err != nil {
 			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, msgStorageQuotaExceeded, err)
 		}
 		route.scopeRes = res
 	}
-	if err := h.reserveVolumePool(route, volName, external, rel, size); err != nil {
+	if err := h.reserveVolumePool(ctx, route, volName, external, rel, size); err != nil {
 		return nil, err
 	}
 	return route, nil
@@ -639,7 +639,7 @@ func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volum
 
 // reserveVolumePool 卷级容量池预留（单一出口，卸下 reserveVolume 的认知复杂度）。
 // 外部卷只探测**净增**并在成功后立即释放（容量记账权威在 FS 层 CapacityFS）。
-func (h *Handlers) reserveVolumePool(route *volumeRoute, volName string, external files.UploadSink, rel string, size int64) error {
+func (h *Handlers) reserveVolumePool(ctx context.Context, route *volumeRoute, volName string, external files.UploadSink, rel string, size int64) error {
 	pool := h.volSet.Pool(volName)
 	if pool == nil {
 		return nil
@@ -651,6 +651,9 @@ func (h *Handlers) reserveVolumePool(route *volumeRoute, volName string, externa
 	if need <= 0 {
 		return nil // 净增为 0（覆盖写更小/等大）：无需卷池探测
 	}
+	// **暂不排队**（保留 TryReserve）：本路径的等待语义需先定（哪些调用方期望「立即 507」、
+	// 哪些期望「排队等空间」），否则会把测试/交互从「立即失败」变成 30s 等待（实测 pkg/server 整包超时 ✗）。
+	// 排队收敛待「该路径的等待语义」裁定后单独进行（R36-a 已登记为 pending）。
 	res, err := pool.TryReserve(need)
 	if err != nil {
 		if route.scopeRes != nil {
