@@ -46,7 +46,7 @@ func (a *TaskAccount) CommitUp(n int64) error {
 		}
 		a.reserved = n // 补齐到本次需要
 	}
-	a.scope.pool.commitUp(n, n)
+	a.scope.pool.commitReservation(n, n)
 	a.reserved -= n
 	a.committed += n
 	return nil
@@ -131,7 +131,7 @@ func (a *TaskAccount) releaseReserveLocked() {
 	if a.reserved <= 0 {
 		return
 	}
-	a.scope.pool.releaseUp(a.reserved)
+	a.scope.pool.releaseReserve(a.reserved)
 	a.reserved = 0
 }
 

@@ -73,7 +73,7 @@ func (w *QuotaWriter) Write(p []byte) (int, error) {
 		return n, err
 	}
 	n64 := int64(n)
-	w.scope.pool.commitUp(n64, n64)
+	w.scope.pool.commitReservation(n64, n64)
 	w.reserved -= n64
 	w.written += n64
 	return n, nil
@@ -104,7 +104,7 @@ func (w *QuotaWriter) ReleaseReserve() {
 	if w.reserved <= 0 {
 		return
 	}
-	w.scope.pool.releaseUp(w.reserved)
+	w.scope.pool.releaseReserve(w.reserved)
 	w.reserved = 0
 }
 
@@ -115,11 +115,11 @@ func (w *QuotaWriter) Finish(success bool, oldSize int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if success {
-		w.scope.pool.releaseUp(w.reserved) // 释放未用 reserve
-		w.scope.ReleaseUsage(oldSize)      // 覆盖写释放旧文件占用
+		w.scope.pool.releaseReserve(w.reserved) // 释放未用 reserve
+		w.scope.ReleaseUsage(oldSize)           // 覆盖写释放旧文件占用
 	} else {
-		w.scope.ReleaseUsage(w.written)    // 回拨已 commit 部分
-		w.scope.pool.releaseUp(w.reserved) // 释放剩余 reserve
+		w.scope.ReleaseUsage(w.written)         // 回拨已 commit 部分
+		w.scope.pool.releaseReserve(w.reserved) // 释放剩余 reserve
 	}
 	w.reserved = 0
 	w.written = 0
