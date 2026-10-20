@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -78,16 +79,18 @@ func TestRecovery_QueuedSubmittedTaskRestarts(t *testing.T) {
 	mgr.mu.RLock()
 	q, okQ := mgr.tasks[queued]
 	o, okO := mgr.tasks[orphan]
-	var qStatus, oStatus string
+	var qErr, qStatus, oStatus string
 	if okQ {
-		qStatus = q.Status
+		qErr, qStatus = q.Error, q.Status
 	}
 	if okO {
 		oStatus = o.Status
 	}
 	mgr.mu.RUnlock()
-	if !okQ || qStatus == "failed" {
-		t.Fatalf("已提交的排队任务不得转 failed（实际 status=%q）", qStatus)
+	// 断言的是**孤儿判定**（C1 的缺陷），而不是终态：重启后的下载会真的跑起来（URL 不可达），
+	// 因此排队任务可能以**网络错误**失败 —— 这是正确行为；被当作孤儿才是缺陷（错误文案固定）。
+	if !okQ || strings.Contains(qErr, "interrupted before start") {
+		t.Fatalf("已提交的排队任务被误判孤儿（status=%q err=%q）——重启应继续而不是转到「从未启动」终态", qStatus, qErr)
 	}
 	if !okO || oStatus != "failed" {
 		t.Fatalf("从未提交的 pending 应转 failed（代表 CreateTask 与启动之间崩溃），实际 status=%q", oStatus)
