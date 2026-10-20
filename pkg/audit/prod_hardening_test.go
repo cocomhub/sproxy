@@ -11,6 +11,7 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -196,5 +197,124 @@ func TestMaxSeqInSegmentFile_CrossChunk(t *testing.T) {
 	}
 	if _, ok := maxSeqInSegmentFile(p, "absent"); ok {
 		t.Fatal("不存在的作用域不应命中")
+	}
+}
+
+// TestService_NoWritesAfterMarkDone 提交记录之后**不得再写**：否则末条不是 KindDone ⇒ 作用域
+// 永远「未完成」⇒ 每次启动重复执行副作用。
+func TestService_NoWritesAfterMarkDone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	j := NewMemoryJournal()
+	svc, err := New(Options{Journal: j, Clock: newFakeClock(), NodeID: "n1"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	sc, oerr := svc.Open(ctx, "task.after.done")
+	if oerr != nil {
+		t.Fatalf("Open: %v", oerr)
+	}
+	if serr := sc.Save(ctx, "step", 1); serr != nil {
+		t.Fatalf("Save: %v", serr)
+	}
+	if merr := sc.MarkDone(ctx); merr != nil {
+		t.Fatalf("MarkDone: %v", merr)
+	}
+	// 提交后再写（Span/Emit）必须被拒。
+	if serr := sc.Save(ctx, "after", 2); !errors.Is(serr, ErrScopeClosed) {
+		t.Fatalf("MarkDone 之后 Save 应返回 ErrScopeClosed, got %v", serr)
+	}
+	if eerr := sc.Emit(ctx, Entry{Action: "late", Type: "sensitive", Result: "success"}); !errors.Is(eerr, ErrScopeClosed) {
+		t.Fatalf("MarkDone 之后 Emit 应返回 ErrScopeClosed, got %v", eerr)
+	}
+	// 末条必须仍是 KindDone（恢复判定依赖它）。
+	entries, rerr := j.Read(EntryFilter{Scope: "task.after.done"})
+	if rerr != nil {
+		t.Fatalf("Read: %v", rerr)
+	}
+	if len(entries) == 0 || entries[len(entries)-1].Kind != KindDone {
+		t.Fatalf("末条应为 KindDone, got %+v", entries)
+	}
+}
+
+// TestMarkDone_WALWithoutComplianceNotSilent WAL 开、Compliance 关时提交记录无从落盘 ⇒
+// 必须显式报错（静默 no-op 会让协调器误报已提交、重启重复执行副作用）。
+func TestMarkDone_WALWithoutComplianceNotSilent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	caps := CapabilitySet{WAL: true}
+	svc, err := New(Options{Journal: NewMemoryJournal(), Clock: newFakeClock(), Caps: &caps})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = svc.Close() }()
+
+	sc, oerr := svc.Open(ctx, "task.wal.only")
+	if oerr != nil {
+		t.Fatalf("Open: %v", oerr)
+	}
+	if merr := sc.MarkDone(ctx); !errors.Is(merr, ErrCapabilityUnavailable) {
+		t.Fatalf("WAL-only 能力集下 MarkDone 必须显式报错, got %v", merr)
+	}
+	// 失败后必须允许重试（done 回滚）。
+	if merr := sc.MarkDone(ctx); !errors.Is(merr, ErrCapabilityUnavailable) {
+		t.Fatalf("MarkDone 失败后应可重试（done 必须回滚）, got %v", merr)
+	}
+}
+
+// TestNewFileJournal_RecoversQuarantinedSegment 归档中途崩溃留下的 `.archiving.` 隔离段必须
+// 在下次启动恢复为可查询/可重试的封段（此前永久不可见、不重试、不计入 max_total_bytes）。
+func TestNewFileJournal_RecoversQuarantinedSegment(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	j, err := NewFileJournal(FileJournalConfig{Dir: dir, Layout: LayoutGlobal, SyncMode: SyncAlways, Clock: systemClock{}})
+	if err != nil {
+		t.Fatalf("NewFileJournal: %v", err)
+	}
+	if aerr := j.Append(Entry{Scope: "system", Seq: 1, Kind: KindEvent, Action: "before-crash",
+		Type: "sensitive", Result: "success", TS: time.Unix(1_700_000_000, 0).UTC()}); aerr != nil {
+		t.Fatalf("Append: %v", aerr)
+	}
+	if rerr := j.Rotate("test"); rerr != nil {
+		t.Fatalf("Rotate: %v", rerr)
+	}
+	segs, serr := j.Segments()
+	if serr != nil || len(segs) == 0 {
+		t.Fatalf("Segments: %v %v", segs, serr)
+	}
+	q, qerr := j.QuarantineSegment(segs[0].Path)
+	if qerr != nil {
+		t.Fatalf("QuarantineSegment: %v", qerr)
+	}
+	if cerr := j.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+	if !strings.Contains(q, quarantineMarker) {
+		t.Fatalf("隔离名应含 %q: %s", quarantineMarker, q)
+	}
+
+	// 重启：隔离段必须被恢复，且其条目可查询。
+	j2, err := NewFileJournal(FileJournalConfig{Dir: dir, Layout: LayoutGlobal, SyncMode: SyncAlways, Clock: systemClock{}})
+	if err != nil {
+		t.Fatalf("重启 NewFileJournal: %v", err)
+	}
+	defer func() { _ = j2.Close() }()
+	if _, statErr := os.Stat(q); statErr == nil {
+		t.Fatalf("隔离名应已被恢复（文件仍在 %s）", q)
+	}
+	entries, rerr := j2.Read(EntryFilter{})
+	if rerr != nil {
+		t.Fatalf("Read: %v", rerr)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Action == "before-crash" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("恢复后的封段条目应可查询, got %d 条: %+v", len(entries), entries)
 	}
 }

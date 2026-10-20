@@ -292,6 +292,8 @@ func NewFileJournal(cfg FileJournalConfig) (*FileJournal, error) {
 	if err := ensurePrivateDir(cfg.Dir); err != nil {
 		return nil, err
 	}
+	// 归档中途崩溃留下的隔离段恢复（P2 修复，2026-10-21），必须在任何段扫描之前。
+	recoverQuarantinedSegments(cfg.Dir, cfg.Logger)
 	j := &FileJournal{
 		dir:        cfg.Dir,
 		layout:     cfg.Layout,
@@ -541,6 +543,91 @@ func archiveIndex(path string) int {
 	}
 	return n
 }
+
+// quarantineMarker 是归档隔离段的标记（`<段名>.archiving.<n>`，见 QuarantineSegment）。
+const quarantineMarker = ".archiving."
+
+// recoverQuarantinedSegments 把**归档中途崩溃**留下的隔离段改回原名（或下一个空闲归档序号）。
+//
+// 背景（P2 修复，2026-10-21）：`ArchiveSealed` 先把封段 `QuarantineSegment` 成
+// `audit.log.1.archiving.<n>`，上传成功后才删除。若进程在「改名后、删除前」被 kill/断电，
+// 该文件：① 不在 `Segments()`（`segmentBase` 得到 `audit.log.1` 不等于段基名）⇒ **永不重试**；
+// ② 不在 `Read`/`ReadTail` 的扫描名单 ⇒ 查询**永久缺一段**（证据静默不可见）；③ 不计入
+// `max_total_bytes` ⇒ 磁盘占用脱离治理。三者都无日志。
+//
+// 恢复策略（幂等、绝不删数据）：原名空闲 ⇒ 改回原名（下轮归档/查询照常）；
+// 原名已被轮转复用 ⇒ 取「当前最大序号 + 1」（语义上更旧，轮转/清理顺序仍正确）。
+func recoverQuarantinedSegments(dir string, logger *slog.Logger) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	state := newQuarantineRecoveryState(entries)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		idx := strings.Index(name, quarantineMarker)
+		if idx <= 0 {
+			continue
+		}
+		base := name[:idx]
+		target := state.freeName(base)
+		from := filepath.Join(dir, name)
+		to := filepath.Join(dir, target)
+		if rerr := os.Rename(from, to); rerr != nil {
+			if logger != nil {
+				logger.Warn("audit: 恢复隔离段失败（归档中断遗留，证据仍在但不可见）",
+					"from", from, "to", to, "error", rerr)
+			}
+			continue
+		}
+		state.mark(target)
+		if logger != nil {
+			logger.Warn("audit: 检测到归档中断遗留的隔离段，已恢复为可查询/可重试的封段",
+				"from", name, "to", target)
+		}
+	}
+}
+
+// quarantineRecoveryState 记录恢复过程中的「已占用段名」与当前最大归档序号
+// （抽出来降低主流程认知复杂度；逻辑见 recoverQuarantinedSegments 注释）。
+type quarantineRecoveryState struct {
+	taken  map[string]bool
+	maxIdx int
+}
+
+func newQuarantineRecoveryState(entries []os.DirEntry) *quarantineRecoveryState {
+	st := &quarantineRecoveryState{taken: make(map[string]bool, len(entries))}
+	for _, e := range entries {
+		name := e.Name()
+		st.taken[name] = true
+		if strings.Contains(name, quarantineMarker) {
+			continue
+		}
+		if n := archiveIndex(name); n > st.maxIdx {
+			st.maxIdx = n
+		}
+	}
+	return st
+}
+
+// freeName 返回 base 空闲的目标名：原名空闲则用原名，否则取「最大序号 + 1」后的首个空位。
+func (st *quarantineRecoveryState) freeName(base string) string {
+	if !st.taken[base] {
+		return base
+	}
+	for {
+		st.maxIdx++
+		cand := fmt.Sprintf("%s.%d", base, st.maxIdx)
+		if !st.taken[cand] {
+			return cand
+		}
+	}
+}
+
+func (st *quarantineRecoveryState) mark(name string) { st.taken[name] = true }
 
 // SetArchiveUnavailable 标记「归档已配置但目的地不可用」（装配层设置；并发安全）。
 func (j *FileJournal) SetArchiveUnavailable(v bool) { j.archiveUnavailable.Store(v) }

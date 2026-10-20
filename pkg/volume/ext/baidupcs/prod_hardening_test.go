@@ -144,3 +144,20 @@ func TestBaiduDURLCheck_Wiring(t *testing.T) {
 		t.Fatalf("探测到的总大小 = %d, want 1048576（1024 是区间长度 ⇒ 会静默截断）", size)
 	}
 }
+
+// TestBinaryMeta_ExecutorUnavailableNotNotFound 二进制不可用时必须是**故障**，不得归类为
+// 「远端路径不存在」（否则 Stat 得到 (nil,nil)，上传/跳过判定全错、真实故障被掩盖）。
+func TestBinaryMeta_ExecutorUnavailableNotNotFound(t *testing.T) {
+	t.Parallel()
+	a := newBinaryAdapter(AdapterConfig{BinaryPath: "definitely-not-a-real-baidupcs-binary-xyz"})
+	_, err := a.Meta(context.Background(), "/some/file.bin")
+	if err == nil {
+		t.Fatal("执行器不可用时必须返回错误")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("执行器不可用被误判为 ErrNotFound（会把故障当文件不存在）: %v", err)
+	}
+	if !isExecUnavailable(err) {
+		t.Fatalf("错误应可识别为「执行器不可用」: %v", err)
+	}
+}

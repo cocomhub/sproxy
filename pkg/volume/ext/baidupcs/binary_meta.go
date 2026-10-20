@@ -19,7 +19,9 @@ package baidupcs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path"
 	"regexp"
@@ -83,6 +85,13 @@ func (a *binaryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMet
 	}
 	out, err := a.runBinaryOutput(ctx, "meta", remotePath)
 	if err != nil {
+		// **执行器不可用 ≠ 路径不存在**（P2 修复，2026-10-21）：二进制缺失/不可执行时 exec 错误
+		// 文本含 "not found"（`exec: "X": executable file not found in $PATH`）⇒ 旧实现被
+		// isBinaryNotFound 命中 ⇒ 返回 ErrNotFound ⇒ Stat 得到 (nil,nil) ⇒ 上层把「执行器坏了」
+		// 当「远端文件不存在」（重传/跳过判定全错、真实故障被掩盖）。必须先判执行失败。
+		if isExecUnavailable(err) {
+			return nil, fmt.Errorf("baidupcs: 执行 BaiduPCS-Go 失败（二进制不可用，非路径不存在）: %w", err)
+		}
 		// CLI 非零退出：可能是路径不存在（走 not-found 归类再回落）。文本在错误串里
 		// （stderr 已并入，见 runBinaryOutput）——out 在失败路径恒 nil。
 		if isBinaryNotFound([]byte(err.Error())) {
@@ -109,6 +118,23 @@ func (a *binaryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMet
 		return fb.Meta(ctx, remotePath)
 	}
 	return nil, err
+}
+
+// isExecUnavailable 判定错误是否来自「执行器本身不可用」（二进制缺失/权限/无法启动），
+// 而非 CLI 正常退出后报告的远端业务错误。
+func isExecUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	var ee *exec.Error
+	if errors.As(err, &ee) {
+		return true
+	}
+	var pe *os.PathError
+	return errors.As(err, &pe) && errors.Is(pe.Err, os.ErrNotExist)
 }
 
 // isBinaryNotFound 判定 CLI 输出是否表示「路径不存在」（大小写不敏感的子串匹配）——
