@@ -1138,6 +1138,13 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 未注册即「未注册后端」启动 panic）。与 sync 开关解耦（Imp-1 装配门控修复：默认配置
 	// sync 关闭时 secret 后端不再不可达）。
 	registerSecretVolumeBackends()
+	// **卷后端类型必须早于 assembleVolumes 注册**（缺陷修复，2026-10-21）：
+	// baidupcs/webdav/sftp/ftp/s3 的类型与建卷 schema 此前在 `setupSyncVolumeBackends`
+	// （RegisterRoutes **之后**）才注册 ⇒ config 里静态声明 `type: baidupcs` 等外部卷时，
+	// `assembleVolumes → registry.NewBackend` 报「未注册后端」并 startup fail（用户实测：
+	// 只能运行期建卷绕过）。类型注册不依赖 sync 装配（baidupcs 默认工厂是
+	// `baidupcs.DefaultFactory()`），故全部前移；sync 侧 FS 工厂接线仍在 setupSync。
+	registerVolumeBackendTypes()
 	// 封装处理层（wrapper）注册：必须在 enclosure.Parse 之前（RegisterRoutes →
 	// assembleVolumes 内解析声明；未注册的 wrapper 判 ErrUnknownWrapper = boot fail）。
 	registerEnclosureWrappers()
@@ -1403,15 +1410,16 @@ func (rt *runServerRuntime) setupSyncConflictIndex(exec *syncexec.Executor, h *s
 	}
 }
 
-// setupSyncVolumeBackends 装配 V3 插件后端（baidupcs/webdav/sftp/ftp/s3/federated）。
-func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *server.Handlers, logger *slog.Logger) {
-	cfg := rt.cfg
+// registerVolumeBackendTypes 注册**外部卷后端类型**与建卷 schema（幂等；各 Register* 用
+// sync.Once 保护）。必须在 `RegisterRoutes → assembleVolumes` **之前**调用：config 静态声明
+// 的 `type: baidupcs/webdav/sftp/ftp/s3` 卷在装配期就要经 `registry.NewBackend` 构造
+// （缺陷修复，2026-10-21：此前这些注册在 RegisterRoutes 之后 ⇒ 静态声明外部卷启动失败）。
+func registerVolumeBackendTypes() {
 	registerBaidupcsBackend()
 	// **本地卷注册为普通后端**（统一存储卷模型 M1b）：`registry.NewBackend` 从此可统一分派
 	// 本地卷（`Type == ""` 归一为 `local`），装配层特例分支（M5）随后删除。
 	// 注册 ≠ 用户可创建：建卷 API/表单/预签名面由 `IsUserCreatableBackendType` 排除本地 ✓。
 	server.RegisterLocalBackend()
-	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.StagingQuotaTrackerFor, h.TrustedWrapOptions())
 	webdav.RegisterWebDAVBackend()
 	sftp.RegisterSFTPBackend()
 	ftp.RegisterFTPBackend()
@@ -1420,6 +1428,15 @@ func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *
 	// **建卷表单** schema（url/凭据字段）使 Web UI「卷管理」建卷表单可提交（后端自带
 	// fail-fast 校验 extra）。与类型注册同步，/api/backends 恒先见类型后有正常表单。
 	registerLinkedBackendSchemas()
+}
+
+// setupSyncVolumeBackends 装配 V3 插件后端（baidupcs/webdav/sftp/ftp/s3/federated）。
+func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *server.Handlers, logger *slog.Logger) {
+	cfg := rt.cfg
+	// 注：卷后端**类型**注册已前移到 setupServerCore（`registerVolumeBackendTypes`）——
+	// 否则 config 静态声明的外部卷在 assembleVolumes 时「后端未注册」而启动失败。
+	// 这里只做 sync 侧接线（需要 syncexec.Executor）。
+	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.StagingQuotaTrackerFor, h.TrustedWrapOptions())
 	// 注：secret 加密卷装配已从本函数移出——见 setupServerCore（registerSecretVolumeBackends
 	// 早于 RegisterRoutes 注册后端类型 + RegisterRoutes 后无条件按四步装配序补装 config 声明的
 	// 加密/封装卷），不再被 setupSync 早退门控（Imp-1 装配门控修复）。

@@ -335,7 +335,12 @@ async function doLogin() {
     resultEl.innerHTML = '<div style="padding:8px 0;font-size:13px;color:var(--btn-success-hover);">登录成功，会话已建立（expires ' + htmlEsc(res.sessionExpiresAt || '-') + '）</div>';
     closeLoginModal();
     showToast('登录成功，凭据已生效', 'success');
-    if (typeof refreshList === 'function') void refreshList();
+    // 凭据生效后必须**同时**刷新卷下拉与列表（缺陷修复，2026-10-21）：下拉只在
+    // DOMContentLoaded 初始化一次，登录前那次 /api/volumes 是 401 ⇒ 运行时创建的卷
+    // （如 secretdata vault）不会出现在「过滤卷」里。refreshAfterAuth 内部先刷新两个
+    // 卷下拉再刷新列表；旧版页面（无该函数）回落到仅刷新列表。
+    if (typeof refreshAfterAuth === 'function') void refreshAfterAuth();
+    else if (typeof refreshList === 'function') void refreshList();
   } catch (e) {
     resultEl.innerHTML = '<div class="empty-msg" style="color:var(--text-danger);">登录失败: ' + htmlEsc(e.message) + '</div>';
   } finally {
