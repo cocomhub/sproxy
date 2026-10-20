@@ -120,6 +120,8 @@ func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, am audit.Metrics,
 			// 请求维度（评审 R13 P2）：此前未接线 ⇒ 条目里恒为空，而设计把它们列为敏感字段。
 			RequestID: auditRequestIDFrom,
 			SourceIP:  auditSourceIPFrom,
+			// 卷维度（评审 R13）：与其余 5 维同构 ⇒ 业务调用点无需逐条传。
+			Volume: auditVolumeFrom,
 		},
 	})
 	if serr != nil {

@@ -41,7 +41,11 @@ func auditFilterFromQuery(q map[string][]string, timeKey string) (audit.EntryFil
 		}
 		return ""
 	}
-	f := audit.EntryFilter{Action: get("action"), Actor: get("actor"), Mesh: get("mesh")}
+	f := audit.EntryFilter{
+		Action: get("action"), Actor: get("actor"), Mesh: get("mesh"),
+		// 卷维度（评审 R13）：此前 Entry.Volume 未接线且过滤器无该维度。
+		Volume: get("volume"),
+	}
 	if s := get(timeKey); s != "" {
 		ts, err := time.Parse(time.RFC3339, s)
 		if err != nil {

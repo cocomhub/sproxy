@@ -38,10 +38,15 @@ func attachTestAudit(t *testing.T, h *Handlers) *audit.FileJournal {
 		Logger:  testLogger(),
 		Policy:  audit.Policy{MaxMemoryEntries: 256},
 		Caps:    &caps,
+		// 与生产 setupAudit 同构（**测试助手必须镜像生产接线**，否则维度类用例恒绿）：
+		// 卷/请求维度也注入，`Entry.Volume` 等字段才会被真实填充路径覆盖。
 		CtxFields: audit.ContextFields{
-			Actor: ActorFrom,
-			Owner: ActorFrom,
-			Mesh:  MeshFrom,
+			Actor:     ActorFrom,
+			Owner:     ActorFrom,
+			Mesh:      MeshFrom,
+			RequestID: auditRequestIDFrom,
+			SourceIP:  auditSourceIPFrom,
+			Volume:    auditVolumeFrom,
 		},
 	})
 	if serr != nil {

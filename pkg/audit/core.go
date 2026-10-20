@@ -153,6 +153,9 @@ type EntryFilter struct {
 	Mesh   string
 	Object string
 	Result Result
+	// Volume 按**卷维度**筛选（空 = 不过滤）。评审 R13：Entry.Volume 此前从未赋值、
+	// 过滤器也没有该维度 ⇒ 即便写了也筛不了。
+	Volume string
 	Since  time.Time // 保留 TS.After(Since) 的条目（零值不过滤）
 	Limit  int       // >0 时最多返回该条数（按序从最早开始）
 }
@@ -198,6 +201,9 @@ func (f EntryFilter) matchSubject(e Entry) bool {
 		return false
 	}
 	if f.Object != "" && e.Object != f.Object {
+		return false
+	}
+	if f.Volume != "" && e.Volume != f.Volume {
 		return false
 	}
 	if f.Result != "" && e.Result != f.Result {

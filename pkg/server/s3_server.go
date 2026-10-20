@@ -55,7 +55,9 @@ func (h *Handlers) s3ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 	if h.volSet != nil {
 		if vol := strings.Trim(strings.TrimPrefix(r.URL.Path, "/s3/"), "/"); vol != "" {
 			if v, exist := h.volSet.ByName(vol); exist && v.Authorize(ak) {
-				r = r.WithContext(context.WithValue(r.Context(), s3BucketCtxKey{}, vol))
+				// 审计第 6 维（评审 R13）：S3 的卷来自 bucket ⇒ 解析即绑定。
+				r = r.WithContext(withAuditVolume(
+					context.WithValue(r.Context(), s3BucketCtxKey{}, vol), vol))
 			}
 		}
 	}
@@ -256,7 +258,8 @@ func (h *Handlers) s3ResolveBucket(r *http.Request, key string) (string, *http.R
 	if vol, rest, ok := splitS3Bucket(key); ok && h.volSet != nil {
 		if _, exist := h.volSet.ByName(vol); exist {
 			key = rest
-			r = r.WithContext(context.WithValue(r.Context(), s3BucketCtxKey{}, vol))
+			r = r.WithContext(withAuditVolume(
+				context.WithValue(r.Context(), s3BucketCtxKey{}, vol), vol))
 		}
 	}
 	return key, r
