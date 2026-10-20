@@ -85,20 +85,9 @@ func (a *binaryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMet
 	}
 	out, err := a.runBinaryOutput(ctx, "meta", remotePath)
 	if err != nil {
-		// **执行器不可用 ≠ 路径不存在**（P2 修复，2026-10-21）：二进制缺失/不可执行时 exec 错误
-		// 文本含 "not found"（`exec: "X": executable file not found in $PATH`）⇒ 旧实现被
-		// isBinaryNotFound 命中 ⇒ 返回 ErrNotFound ⇒ Stat 得到 (nil,nil) ⇒ 上层把「执行器坏了」
-		// 当「远端文件不存在」（重传/跳过判定全错、真实故障被掩盖）。必须先判执行失败。
-		if isExecUnavailable(err) {
-			return nil, fmt.Errorf("baidupcs: 执行 BaiduPCS-Go 失败（二进制不可用，非路径不存在）: %w", err)
-		}
-		// CLI 非零退出：可能是路径不存在（走 not-found 归类再回落）。文本在错误串里
-		// （stderr 已并入，见 runBinaryOutput）——out 在失败路径恒 nil。
-		if isBinaryNotFound([]byte(err.Error())) {
-			if fb := a.fallbackMeta(); fb != nil {
-				return fb.Meta(ctx, remotePath)
-			}
-			return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
+		// 失败分类下沉（gocognit 门禁）——语义见 classifyMetaExecError。
+		if notFound, cerr := a.classifyMetaExecError(ctx, err); cerr != nil || notFound {
+			return a.metaFallbackOrError(ctx, remotePath, cerr, notFound)
 		}
 	} else if m, perr := parseBinaryMeta(out, remotePath); perr == nil {
 		return m, nil
@@ -118,6 +107,43 @@ func (a *binaryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMet
 		return fb.Meta(ctx, remotePath)
 	}
 	return nil, err
+}
+
+// classifyMetaExecError 把「二进制执行失败」分类为 (notFound, 上抛错误)：
+//
+//   - **执行器不可用 ≠ 路径不存在**（P2 修复，2026-10-21）：二进制缺失/不可执行时 exec 错误文本
+//     含 "not found"（`exec: "X": executable file not found in $PATH`）⇒ 旧实现被
+//     isBinaryNotFound 命中 ⇒ 返回 ErrNotFound ⇒ Stat 得到 (nil,nil) ⇒ 上层把「执行器坏了」当
+//     「远端文件不存在」（重传/跳过判定全错、真实故障被掩盖）。
+//     语义：有库兜底仍可用库（二进制优先/库兜底的设计）；无兜底则如实上抛执行失败。
+//   - CLI 正常退出/非零退出且文本表明「路径不存在」⇒ notFound=true（走 ErrNotFound 或库兜底）。
+//   - 其它失败 ⇒ 两者皆 false（继续走解析/回退分支）。
+func (a *binaryAdapter) classifyMetaExecError(_ context.Context, err error) (notFound bool, fatal error) {
+	if isExecUnavailable(err) {
+		if a.fallbackMeta() != nil {
+			notFound = true // 交由 metaFallbackOrError 走库兜底
+			return notFound, nil
+		}
+		return false, fmt.Errorf("baidupcs: 执行 BaiduPCS-Go 失败（二进制不可用，非路径不存在）: %w", err)
+	}
+	if isBinaryNotFound([]byte(err.Error())) {
+		return true, nil
+	}
+	return false, nil
+}
+
+// metaFallbackOrError 统一「库兜底优先，否则按 notFound 归一」的返回口径。
+func (a *binaryAdapter) metaFallbackOrError(ctx context.Context, remotePath string, fatal error, notFound bool) (*ObjectMeta, error) {
+	if fb := a.fallbackMeta(); fb != nil {
+		return fb.Meta(ctx, remotePath)
+	}
+	if fatal != nil {
+		return nil, fatal
+	}
+	if notFound {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
+	}
+	return nil, fmt.Errorf("baidupcs: meta %q 失败", remotePath)
 }
 
 // isExecUnavailable 判定错误是否来自「执行器本身不可用」（二进制缺失/权限/无法启动），
