@@ -282,6 +282,8 @@ test('auditTableHtml 事件行 + 时间格式化', () => {
   assert.ok(html.includes('delete'));
   assert.ok(html.includes('ak-1'));
   assert.ok(html.includes('mesh-a'));
+  assert.ok(html.includes('>卷<'), '表头应含「卷」列');
+  assert.ok(html.includes('vault-a') === false, '未给 volume 时不应凭空出现卷名');
   assert.ok(html.includes('dir/a.txt'));
   assert.ok(html.includes('to=b.txt'));
   // 时间列按 locale 格式化（toLocaleString），非原始 ISO 串。
@@ -290,7 +292,7 @@ test('auditTableHtml 事件行 + 时间格式化', () => {
 
 test('auditTableHtml 所有字段过 escHtml 防 XSS（actor/mesh/detail 重点）', () => {
   const html = r.auditTableHtml([{
-    action: '<img>', actor: '<script>actor</script>', mesh: '<b>mesh</b>',
+    action: '<img>', actor: '<script>actor</script>', mesh: '<b>mesh</b>', volume: '<em>vol</em>',
     object_type: '<i>obj</i>', object: '"onmouseover=&', result: '<u>r</u>', detail: '<svg onload=1>', ts: 'x',
   }]);
   assert.ok(!html.includes('<img>'));
@@ -298,6 +300,7 @@ test('auditTableHtml 所有字段过 escHtml 防 XSS（actor/mesh/detail 重点�
   assert.ok(!html.includes('<svg'));
   assert.ok(html.includes('&lt;script&gt;actor&lt;/script&gt;'), 'actor 应转义');
   assert.ok(html.includes('&lt;b&gt;mesh&lt;/b&gt;'), 'mesh 应转义');
+  assert.ok(html.includes('&lt;em&gt;vol&lt;/em&gt;'), 'volume 应转义');
   assert.ok(html.includes('&lt;svg onload=1&gt;'), 'detail 应转义');
   assert.ok(html.includes('&quot;onmouseover=&amp;'));
   assert.ok(!html.includes('<b>mesh</b>'), 'mesh 原始标签不应出现');

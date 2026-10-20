@@ -108,7 +108,23 @@ func TestAudit_FilterRows(t *testing.T) {
 	}
 	waitTextVisible(t, page, "#audit-filter-summary", "显示 0 / ", 5000)
 
-	// ③ 清除 ⇒ 恢复全部
+	// ③ 卷维度筛选（评审 R13）：表头含「卷」列 + 卷输入框生效（不存在的卷 ⇒ 0 条）。
+	if err := page.Locator("#audit-filter-reset").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("click reset: %v", err)
+	}
+	waitTextVisible(t, page, "#audit-filter-summary", before, 5000)
+	if err := waitLoc(page, "#audit-filter-volume", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("卷筛选输入框未渲染（卷维度 UI 未接线）: %v", err)
+	}
+	if n, _ := page.Locator("#audit-table th").Nth(4).InnerText(); strings.TrimSpace(n) != "卷" {
+		t.Fatalf("审计表第 5 列应为「卷」表头（时间/操作/主体/mesh/卷）, got %q", strings.TrimSpace(n))
+	}
+	if err := page.Locator("#audit-filter-volume").Fill("zzz-no-such-volume"); err != nil {
+		t.Fatalf("fill volume filter: %v", err)
+	}
+	waitTextVisible(t, page, "#audit-filter-summary", "显示 0 / ", 5000)
+
+	// ④ 清除 ⇒ 恢复全部
 	if err := page.Locator("#audit-filter-reset").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("click reset: %v", err)
 	}

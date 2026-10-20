@@ -388,6 +388,7 @@
     html += '<th style="' + cell + 'text-align:left;">操作</th>';
     html += '<th style="' + cell + 'text-align:left;">主体</th>';
     html += '<th style="' + cell + 'text-align:left;">mesh</th>';
+    html += '<th style="' + cell + 'text-align:left;">卷</th>';
     html += '<th style="' + cell + 'text-align:left;">对象</th>';
     html += '<th style="' + cell + 'text-align:left;">结果</th>';
     html += '<th style="' + cell + 'text-align:left;">详情</th></tr></thead><tbody>';
@@ -399,6 +400,9 @@
       html += '<td style="' + cell + '">' + escHtml(ev.action || '-') + '</td>';
       html += '<td style="' + cell + '">' + escHtml(ev.actor || '-') + '</td>';
       html += '<td style="' + cell + '">' + escHtml(ev.mesh || '-') + '</td>';
+      // 卷维度（评审 R13）：服务端 Entry.Volume → 读面 JSON volume；缺省渲染占位符
+      // （旧条目/非卷域事件为空是**正常语义**，不是缺字段）。
+      html += '<td style="' + cell + '">' + escHtml(ev.volume || '-') + '</td>';
       html += '<td style="' + cell + '">' + escHtml(ev.object || '-') + '</td>';
       html += '<td style="' + cell + '">' + escHtml(ev.result || '-') + '</td>';
       html += '<td style="' + cell + '">' + escHtml(ev.detail || '-') + '</td>';
