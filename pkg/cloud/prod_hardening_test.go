@@ -12,6 +12,7 @@ package cloud
 // 崩溃/磁盘满，或组文件损坏被跳过。
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -27,7 +28,7 @@ func TestRecoverOrphanGroups_AggregatesSameGroup(t *testing.T) {
 	const gid = "g-orphan-1"
 	const n = 3
 	ids := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		id := seedPersistedTask(t, mgr, "pending", true)
 		mgr.mu.Lock()
 		if task := mgr.tasks[id]; task != nil {
@@ -62,13 +63,7 @@ func TestRecoverOrphanGroups_AggregatesSameGroup(t *testing.T) {
 		t.Fatalf("组必须含全部 %d 个成员, got total=%d taskIDs=%v", n, group.TotalTasks, group.TaskIDs)
 	}
 	for _, id := range ids {
-		found := false
-		for _, tid := range group.TaskIDs {
-			if tid == id {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(group.TaskIDs, id)
 		if !found {
 			t.Fatalf("组成员缺失 %s: %v", id, group.TaskIDs)
 		}

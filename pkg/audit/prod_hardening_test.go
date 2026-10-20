@@ -41,7 +41,7 @@ func TestFileJournal_ReadTail_ReturnsNewestAmongSealedSegments(t *testing.T) {
 	t.Cleanup(func() { _ = j.Close() })
 
 	const total = 8
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if aerr := j.Append(Entry{
 			Node: "n1", Seq: uint64(i + 1), Scope: "system", Kind: KindEvent,
 			Action: fmt.Sprintf("act-%02d", i), Type: "sensitive", Result: "success",
@@ -146,7 +146,7 @@ func writeTwoTimeSegment(t *testing.T, dir, name string, ts1, ts2 time.Time) str
 	}
 	writeLine(ts1, "oldest")
 	pad := strings.Repeat("p", 800)
-	for i := 0; i < 100; i++ { // ≈80KiB > tailProbeBytes(64KiB)
+	for i := range 100 { // ≈80KiB > tailProbeBytes(64KiB)
 		writeLine(ts1, fmt.Sprintf("%s-%03d", pad, i))
 	}
 	writeLine(ts2, "newest")
@@ -180,7 +180,7 @@ func TestMaxSeqInSegmentFile_CrossChunk(t *testing.T) {
 		b.WriteByte('\n')
 	}
 	// ≈700KiB（跨 256KiB 块多次），目标作用域的最大 Seq 落在靠近尾部但非末条。
-	for i := 0; i < 700; i++ {
+	for i := range 700 {
 		appendEntry("other", uint64(i+1), 900)
 	}
 	appendEntry("target", 41, 900)

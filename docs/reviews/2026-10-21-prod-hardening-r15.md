@@ -103,7 +103,7 @@
   **永不返回**（热循环轰 API）：sync 任务永久 `syncing` 并占满并发槽，`libraryAdapter.uploadMu`
   （整卷一把）被永久持有 ⇒ 该卷后续所有上传阻塞。
 - 修复：`shouldTerminatePart` —— HTTP 400/401/403/413 立即 Terminated（与上游 CLI 同构）+
-  每分片 `${maxPartAttempts}` 次上限（堵 5xx/网络死循环）。
+  每分片 6 次上限（`maxPartAttempts`，堵 5xx/网络死循环）。
 - 测试：`TestShouldTerminatePart`（4xx 首击终止 / 5xx 次数上限 / 分片计数独立）；
   变异命中：禁用两条终止判据 ⇒ 红。
 
