@@ -55,14 +55,22 @@ func TestService_WriteFailureIsObserved(t *testing.T) {
 	if oerr != nil {
 		t.Fatalf("Open: %v", oerr)
 	}
-	// ① 业务不被阻断（best-effort）：Save / MarkDone 均返回 nil。
+	// ① 业务写入 best-effort：Save 返回 nil（绝不因审计失败阻断业务）。
 	if serr := sc.Save(ctx, "k", 1); serr != nil {
 		t.Fatalf("best-effort 下 Save 不应返回错误: %v", serr)
 	}
-	if merr := sc.MarkDone(ctx); merr != nil {
-		t.Fatalf("best-effort 下 MarkDone 不应返回错误: %v", merr)
+	// ② **提交记录例外**：`MarkDone` 是「任务已完成」的唯一凭据 —— 没落盘却返回 nil 会让
+	//    协调器误报「已恢复并提交」，下次重启**重复执行副作用**（评审 R13 P2）⇒ 必须报错。
+	if merr := sc.MarkDone(ctx); merr == nil {
+		t.Fatal("MarkDone 在提交记录落盘失败时必须返回错误（否则会重复执行任务）")
 	}
-	// ② 但失败必须**可观测**（两条通道之一：metrics 计数）。
+	// ③ 失败后内存 done 必须**回滚**：再次 MarkDone 仍会真正尝试写入（而不是直接 return nil）。
+	before := j.appends
+	_ = sc.MarkDone(ctx)
+	if j.appends == before {
+		t.Fatal("MarkDone 失败后应回滚 done 并允许重试")
+	}
+	// ④ 但失败必须**可观测**（两条通道之一：metrics 计数）。
 	if j.appends == 0 {
 		t.Fatal("应尝试过 Append（替身未被调用说明写入路径变了）")
 	}

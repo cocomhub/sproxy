@@ -58,7 +58,7 @@ func (w *presignStatusWriter) Write(b []byte) (int, error) {
 // 403（ACL/占用/封印）与 400（参数篡改）恰恰是**攻击信号**，此刻无审计 ⇒ 事后不可追。
 func (h *Handlers) auditPresignFailed(r *http.Request, action, typ string, status int) {
 	h.RecordAudit(r.Context(), AuditEvent{
-		Action: action, ObjectType: "backend", Object: typ, Result: "failed",
+		Action: action, ObjectType: "backend", Object: typ, Result: AuditResultError,
 		Detail: fmt.Sprintf("失败（HTTP %d）", status),
 	})
 }

@@ -317,6 +317,12 @@ func (c *Coordinator) listUnfinished(ctx context.Context, opts Options) ([]audit
 	if c.svc == nil {
 		return nil, nil
 	}
+	// 无**作用域**注册（生产常见：只有 legacy 任务族）⇒ 不必扫描审计段。
+	// 评审 R13 P1：此前只看 svc==nil，而生产恒注册 1 个 legacy ⇒ 守卫失效 ⇒ 每次启动把整个
+	// 合规日志（默认不轮转，可达 GiB）读进内存并排序，且 `system` 作用域永久报「未注册前缀」。
+	if len(c.regs) == 0 {
+		return nil, nil
+	}
 	infos, err := c.svc.ListScopes(ctx, audit.ScopeStateFilter{
 		UnfinishedOnly: true,
 		Since:          opts.Since,

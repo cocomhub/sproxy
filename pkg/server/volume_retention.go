@@ -19,13 +19,10 @@ package server
 // 卷根不可达跳过该卷（fail-closed：不清 = 安全方向，不误删）。
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
@@ -209,83 +206,6 @@ func (h *Handlers) retentionCleanAudit(ttl time.Duration, now time.Time, log *sl
 // rewriteAuditLog 把 audit.log 中 TS < cutoff 的行剔除后原子重写（tmp + rename）。
 // 源文件先读入内存并关闭句柄再 rename——Windows 下对仍被打开的 dest 文件 Rename 覆盖
 // 会 Access denied（本仓 storage.AtomicRename 同理：先关源再替）。
-func rewriteAuditLog(path string, cutoff time.Time, log *slog.Logger) error {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	kept, scanErr := filterAuditLines(f, cutoff)
-	_ = f.Close() // 关闭源句柄（rename 前必须：Windows 对打开中的 dest 拒绝覆盖）
-	if scanErr != nil {
-		return scanErr
-	}
-	return writeAuditLinesAtomic(path, kept)
-}
-
-// filterAuditLines 读审计日志行，剔除 TS < cutoff 的行与坏行（JSON 解析失败同 load 策略）。
-func filterAuditLines(f *os.File, cutoff time.Time) ([]string, error) {
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<20)
-	var kept []string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var ev AuditEvent
-		if json.Unmarshal([]byte(line), &ev) != nil {
-			continue // 坏行剔除（与 load 同策略）
-		}
-		if ev.TS.Before(cutoff) {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return kept, scanner.Err()
-}
-
-// writeAuditLinesAtomic 把保留行写入临时文件后原子替换 audit.log（tmp + rename）。
-// 目标文件已关闭句柄（调用方 filterAuditLines 后已 Close）；先删后替（与仓库
-// AtomicRename 的 Windows 语义一致）。
-func writeAuditLinesAtomic(path string, lines []string) error {
-	tmp := path + ".retention.tmp"
-	out, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	writer := bufio.NewWriter(out)
-	for _, line := range lines {
-		if _, err := writer.WriteString(line + "\n"); err != nil {
-			out.Close()
-			os.Remove(tmp)
-			return err
-		}
-	}
-	if err := writer.Flush(); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// 替换目标：先删后替（与仓库 AtomicRename 的 Windows 语义一致——rename 覆盖对
-	// 打开中/只读目标不可靠，先 Remove 再 rename 更稳；此处 dest 已关闭句柄）。
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
-}
 
 // filesVersionTime 由版本条目还原创建时间（files.VersionIDTime 语义，fallback 用当前时间——
 // 历史回绕遗留 ID 回落零值，早于任何 cutoff → 删除，与全局保留期清理同策略）。

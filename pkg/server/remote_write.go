@@ -100,7 +100,7 @@ func (wh *remoteWriteHandler) serve(w http.ResponseWriter, r *http.Request, op s
 	sw := &remoteStatusWriter{ResponseWriter: w}
 	wh.delegate(sw, r, tgt, to, op)
 	wh.h.RecordAudit(r.Context(), AuditEvent{
-		Action: "mesh_write", Actor: tgt.owner, Mesh: tgt.node,
+		Action: "mesh_write", Owner: tgt.owner, Mesh: tgt.node,
 		ObjectType: "file", Object: tgt.path,
 		Result: remoteAuditResult(sw.status),
 		Detail: "volume=" + tgt.vol.Name + " path=" + tgt.path + " op=" + op +

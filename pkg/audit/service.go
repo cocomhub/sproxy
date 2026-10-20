@@ -318,7 +318,8 @@ func (s *Service) writeStep(base Entry, step string, start time.Time, errMsg str
 	e.Type = stepType(step)
 	e.Step = step
 	e.DurMS = s.eff.clock.Since(start).Milliseconds()
-	e.StartMS = e.DurMS
+	// StartMS 是**步骤开始时刻**（评审 R13 P3：此前被赋成 DurMS ⇒ 该字段恒等于耗时且语义错误）。
+	e.StartMS = start.UnixMilli()
 	e.Err = errMsg
 	e.Level = LevelInfo
 	if errMsg != "" {
@@ -391,7 +392,18 @@ func (sc *Scope) MarkDone(ctx context.Context) error {
 	if !sc.svc.eff.caps.Compliance {
 		return nil
 	}
-	return sc.svc.write(ctx, Entry{Scope: sc.id, Kind: KindDone, Step: "done", Result: ResultSuccess})
+	if err := sc.svc.writeMode(ctx, Entry{Scope: sc.id, Kind: KindDone, Step: "done", Result: ResultSuccess}, true); err != nil {
+		// 提交记录**没落盘** ⇒ 回滚内存 done，否则：① 再次 MarkDone 直接 return nil（没有第二次机会）；
+		// ② 协调器收到 nil 会报「已恢复并提交」，而磁盘上没有 KindDone ⇒ 下次重启重复执行副作用
+		// （评审 R13 P2）。回滚 + 返回错误让上层记 Failed 并重试。
+		sc.svc.mu.Lock()
+		if cur := sc.svc.scopes[sc.id]; cur != nil {
+			cur.done = false
+		}
+		sc.svc.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // Close 结束作用域（不再接受写入）。
@@ -410,11 +422,16 @@ func (sc *Scope) Close() error {
 // write 是**唯一写入路径**：能力门 → 补字段 → 落盘 → 索引 → 通知 → 轮转判定。
 // 拆成 prepare/persist/observe/maybeRotate 四步（复杂度合规 + 职责单一）。
 func (s *Service) write(ctx context.Context, e Entry) error {
+	return s.writeMode(ctx, e, false)
+}
+
+// writeMode 是 write 的严格性可配版本（strict ⇒ 落盘失败上抛，见 persistMode）。
+func (s *Service) writeMode(ctx context.Context, e Entry, strict bool) error {
 	prepared, err := s.prepare(ctx, e)
 	if err != nil || prepared == nil {
 		return err
 	}
-	if err := s.persist(*prepared); err != nil {
+	if err := s.persistMode(*prepared, strict); err != nil {
 		return err
 	}
 	s.observe(ctx, *prepared)
@@ -506,7 +523,11 @@ func (s *Service) prepare(ctx context.Context, e Entry) (*Entry, error) {
 
 // persist 落盘（best-effort；fail-closed 时向上传播）。
 // E16：带 no_audit 标记的条目（审计/归档自身写入）**不再产生审计** ⇒ 直接跳过。
-func (s *Service) persist(e Entry) error {
+// persistMode 是 persist 的严格性可配版本。
+//
+// strict=true 用于**提交记录**（`KindDone`）：它的落盘是「任务已完成」的唯一凭据，吞错会让
+// 协调器误报已提交、下次重启重复执行副作用（评审 R13 P2）⇒ 必须把错误上抛。
+func (s *Service) persistMode(e Entry, strict bool) error {
 	if e.isNoAudit() {
 		return nil
 	}
@@ -515,7 +536,7 @@ func (s *Service) persist(e Entry) error {
 		s.mu.Lock()
 		s.unsynced++
 		s.mu.Unlock()
-		if s.eff.failFast {
+		if strict || s.eff.failFast {
 			return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 		}
 		if s.eff.logger != nil {

@@ -75,9 +75,9 @@ func TestAuditScenario_Presign(t *testing.T) {
 		switch {
 		case ev.Action == "backend_presign" && ev.Result == "success" && ev.Object == typ:
 			successSign++
-		case ev.Action == "backend_presign" && ev.Result == "failed":
+		case ev.Action == "backend_presign" && ev.Result == AuditResultError:
 			failedSign++
-		case ev.Action == "backend_presign_complete" && ev.Result == "failed":
+		case ev.Action == "backend_presign_complete" && ev.Result == AuditResultError:
 			failedComplete++
 		}
 	}

@@ -77,7 +77,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 
 | 场景 | 断言用例 | 状态 |
 | --- | --- | --- |
-| 任意变更路由 ⇒ ≥1 条事件含 `request_id` / `source_ip` | `pkg/server/audit_middleware*_test.go`（`http.` 前缀族） | ✅ |
+| 任意变更路由 ⇒ ≥1 条事件含 `request_id` / `source_ip` | — | ⬜ **GAP**（评审 R13 查实：`auditMiddleware` **无任何测试**；且 `Entry.RequestID/SourceIP` 生产**未接线**（`CtxFields` 只有 Actor/Owner/Mesh）⇒ 条目里恒为空。此前本行标 ✅ 属虚标） |
 | 读面权限矩阵（§5.7） | `pkg/server/audit_readface_perm_test.go` | ✅ |
 | 归档后仍可查询（热 + 冷合并） | `pkg/server/audit_cold_merge_test.go` | ✅ |
 | Owner 越权矩阵（读/写/删/分享/回收站 ⇒ 403） | 分散于 `pkg/server/*_test.go`（按 ACL 用例） | 🟡 分散未汇总 |
@@ -96,7 +96,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | ~~P2~~ ✅ | ~~`cloud_group_create` / `cloud_group_delete`~~ | 已补（`audit_cloud_group_scenarios_test.go`） | — |
 | — | **无剩余 GAP** | **60/60 埋点动作均有断言** | — |
 | ~~P2~~ ✅ | ~~`credential_login`~~ | 已补（`audit_login_scenarios_test.go`） | — |
-| P3 | `ai.embed` | `pkg/server/audit_ai_embed_scenarios_test.go` + `pkg/aiembed/observer_test.go`（服务端 wiring `NewEmbedClient` 注入 Observer；断言**不含被嵌入文本**） | ✅ |
+| P3 | `ai.embed` | `pkg/server/audit_ai_embed_scenarios_test.go` + `pkg/aiembed/observer_test.go`（wiring `NewEmbedClient` 注入 Observer；断言**不含被嵌入文本**） | ⚠️ 埋点/接线已就绪，但**当前无生产调用方**（`pkg/aiembed` 尚无消费方）⇒ 该动作实际不会产生；R39 只能防「符号未被引用」，防不了「被引用的包装函数无调用方」（评审 R13，记为后续） |
 
 ## 4. 编写纪律（§9.3）
 

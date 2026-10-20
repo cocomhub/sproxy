@@ -75,6 +75,9 @@ func (h *Handlers) requestLogMiddleware(next http.Handler) http.Handler {
 		h.logger.DebugContext(ctx, "收到请求", "method", r.Method, "path", r.URL.Path,
 			"remote_addr", r.RemoteAddr)
 
+		// 客户端 IP 注入 ctx（供审计 `SourceIP` 提取；评审 R13 P2）。
+		r = r.WithContext(withAuditSourceIP(r.Context(), clientIPFromRemoteAddr(r.RemoteAddr)))
+
 		mw := newMetricsResponseWriter(w)
 		next.ServeHTTP(mw, r)
 

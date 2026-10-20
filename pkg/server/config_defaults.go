@@ -92,6 +92,9 @@ func Default() *Config {
 		Audit: AuditConfig{
 			BufferSize:  2048,
 			MaxArchives: 3, // 保留 audit.log.1 … audit.log.N 共 3 份归档（MaxSize=0 不轮转，无归档产生）
+			// **非零安全默认**（评审 R13 P1）：文档与 config.go 注释都承诺 1 GiB，此前
+			// `Default()` 未赋值 ⇒ 实际为 0（不限）⇒ 审计目录可被写满且无有界丢弃 ✗。
+			MaxTotalBytes: 1 << 30,
 		},
 		// Notify 子段默认（ai_insight/ai_search/ai_quota/ai_privacy/ai_events 默认关零回归）。
 		Notify: NotifyConfig{

@@ -5,6 +5,7 @@ package audit
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -445,18 +446,52 @@ func (j *FileJournal) totalAndArchivesLocked() (int64, []SegmentInfo, error) {
 	return total, arch, nil
 }
 
-// archiveIndex 解析归档名尾部的序号（`audit.log.3` ⇒ 3；非归档 ⇒ 0）。
+// archiveIndex 解析归档名中**紧跟 `audit.log.` 的序号**（`audit.log.3` ⇒ 3；非归档 ⇒ 0）。
+//
+// 为什么要「紧跟 audit.log.」而不是「最后一个点后的数字」：冷段归档采用**内容寻址**命名
+// （`audit.log.3.<sha256:16>`，见 `FSArchiver.Archive`）⇒ 名字末尾是哈希而不是序号；
+// 若仍取最后一个点后的片段，所有冷段的 Index 都会退化成 0 ⇒ `ListCold` 的「最旧优先」排序
+// 与读面热冷合并的顺序都会退化成不确定 ✗（评审 R13 修复过程中实测）。
 func archiveIndex(path string) int {
 	base := filepath.Base(path)
-	i := strings.LastIndex(base, ".")
-	if i < 0 || i == len(base)-1 {
+	const marker = "audit.log."
+	i := strings.LastIndex(base, marker)
+	if i < 0 {
 		return 0
 	}
-	n, err := strconv.Atoi(base[i+1:])
-	if err != nil {
+	rest := base[i+len(marker):]
+	if cut := strings.IndexByte(rest, '.'); cut >= 0 {
+		rest = rest[:cut] // 丢弃内容寻址后缀（或二次轮转残留）
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n <= 0 {
 		return 0
 	}
 	return n
+}
+
+// QuarantineSegment 在**锁内**把封段改名为归档专用的独占名（`<name>.archiving.<n>`）。
+//
+// 为什么需要（评审 R13 P2）：归档是「打开段文件 → 上传（可能很久）→ 删除该路径」。期间若发生
+// 轮转，`shiftArchives` 会把 `.1` 搬成 `.2` 并产生**新的** `.1`；此时按原路径 `os.Remove` 删除的
+// 是**新段**（尚未归档）⇒ 证据丢失。改名为独占名后：轮转只按 `base.N` 形态匹配（不会碰带后缀的
+// 隔离名），删除时也只删隔离名 ⇒ 与轮转彻底解耦。
+//
+// 返回隔离后的路径；段已不存在/改名失败则返回错误（调用方跳过本轮，下轮重试）。
+func (j *FileJournal) QuarantineSegment(path string) (string, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return "", ErrClosed
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", err
+	}
+	q := fmt.Sprintf("%s.archiving.%d", path, j.clock.Now().UnixNano())
+	if err := os.Rename(path, q); err != nil {
+		return "", err
+	}
+	return q, nil
 }
 
 // writeEntryLocked 序列化并写入段文件（按 SyncMode 落盘）。
@@ -515,31 +550,72 @@ func (j *FileJournal) noteWriteFailure(err error) {
 }
 
 // Read 读取全部段并按 (Node, Seq) 排序后过滤。
+//
+// **不在读期间持写锁**（评审 R13 P1）：`Append` 需要同一把 `j.mu`，此前整段解析 + 排序都在
+// 锁内 ⇒ 一次管理员查询（`/api/audit`）会把**全部**变更型请求的审计写入阻塞到读完为止。
+// 现在只在锁内做「flush 未同步缓冲 + 快照段文件名」，解析/过滤/排序在锁外进行。
+//
+// 语义代价（有意取舍）：读到的是**快照时刻的段列表** —— 解析期间若发生轮转/归档，少数段可能
+// 已被删除 ⇒ `readSegmentFile` 失败按既有语义跳过（E5/E20），不会返回错误，也不会读到半个条目。
 func (j *FileJournal) Read(f EntryFilter) ([]Entry, error) {
+	return j.ReadContext(context.Background(), f)
+}
+
+// ReadContext 是 Read 的 ctx 版本（长日志解析期间可取消）。
+func (j *FileJournal) ReadContext(ctx context.Context, f EntryFilter) ([]Entry, error) {
+	names, err := j.snapshotSegments()
+	if err != nil {
+		return nil, err
+	}
+	entries := j.readSegments(ctx, names)
+	return filterSortLimit(entries, f, 0), nil
+}
+
+// ReadTail 返回**最新的 limit 条**（结果仍按 (Node, Seq) **升序**返回），只解析必要的段。
+//
+// 动机（评审 R13 P1）：`/api/audit?limit=N` 之前要把**全部**历史解析进内存再截断 ——
+// 审计日志默认不轮转，可达 GiB 级 ⇒ 内存/CPU 随历史线性增长。这里按「新段优先」反向解析，
+// 收集到 limit 条即停止；未命中过滤条件的段仍需读（过滤在解析后），但**已满足预算的段不再读**。
+func (j *FileJournal) ReadTail(ctx context.Context, f EntryFilter, limit int) ([]Entry, error) {
+	if limit <= 0 {
+		return j.ReadContext(ctx, f)
+	}
+	names, err := j.snapshotSegments()
+	if err != nil {
+		return nil, err
+	}
+	// 新段优先：按归档序号降序（活跃段 archiveIndex=0 排最前）。
+	sort.SliceStable(names, func(a, b int) bool {
+		return archiveIndex(names[a]) > archiveIndex(names[b])
+	})
+	var got []Entry
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for _, e := range readSegmentFileCtx(ctx, name, j.logger) {
+			if f.Match(e) {
+				got = append(got, e)
+			}
+		}
+		if len(got) >= limit {
+			break
+		}
+	}
+	sortEntries(got)
+	if len(got) > limit {
+		got = got[len(got)-limit:] // 取最新 limit 条（排序为升序 ⇒ 尾部最新）
+	}
+	return got, nil
+}
+
+// snapshotSegments 在锁内 flush 未同步缓冲并返回段文件名快照（随后解析在锁外进行）。
+func (j *FileJournal) snapshotSegments() ([]string, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.closed {
 		return nil, ErrClosed
 	}
-	entries, err := j.readAllLocked()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Entry, 0, len(entries))
-	for _, e := range entries {
-		if f.Match(e) {
-			out = append(out, e)
-		}
-	}
-	sortEntries(out)
-	if f.Limit > 0 && len(out) > f.Limit {
-		out = out[:f.Limit]
-	}
-	return out, nil
-}
-
-// readAllLocked 读取目录下全部段（**先 flush 未同步缓冲**，保证「已 Append 可见」）。
-func (j *FileJournal) readAllLocked() ([]Entry, error) {
 	if j.unsync > 0 {
 		for _, f := range j.files {
 			if err := f.Sync(); err != nil {
@@ -548,23 +624,49 @@ func (j *FileJournal) readAllLocked() ([]Entry, error) {
 		}
 		j.unsync = 0
 	}
-	names, err := j.segmentFilesLocked()
-	if err != nil {
-		return nil, err
-	}
+	return j.segmentFilesLocked()
+}
+
+// readSegments 逐个解析段文件（读取失败按既有语义跳过并记日志）。
+func (j *FileJournal) readSegments(ctx context.Context, names []string) []Entry {
 	var all []Entry
 	for _, name := range names {
-		es, rerr := readSegmentFile(name)
-		if rerr != nil {
-			// 读取失败不阻断查询（设计 E5/E20）：跳过并记日志。
-			if j.logger != nil {
-				j.logger.Warn("audit: 段文件读取失败（跳过）", "path", name, "err", rerr)
-			}
-			continue
+		if ctx.Err() != nil {
+			return all
 		}
-		all = append(all, es...)
+		all = append(all, readSegmentFileCtx(ctx, name, j.logger)...)
 	}
-	return all, nil
+	return all
+}
+
+// readSegmentFileCtx 是 readSegmentFile 的 ctx 版本（解析失败跳过并记日志）。
+func readSegmentFileCtx(ctx context.Context, path string, logger *slog.Logger) []Entry {
+	if ctx.Err() != nil {
+		return nil
+	}
+	es, err := readSegmentFile(path)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("audit: 段文件读取失败（跳过）", "path", path, "err", err)
+		}
+		return nil
+	}
+	return es
+}
+
+// filterSortLimit 过滤 → 排序 → 截断（limit<=0 不截断）。
+func filterSortLimit(entries []Entry, f EntryFilter, limit int) []Entry {
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if f.Match(e) {
+			out = append(out, e)
+		}
+	}
+	sortEntries(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // segmentFilesLocked 列出本目录下的段文件（含归档 .N）。
@@ -705,7 +807,11 @@ func (j *FileJournal) rotateAllLocked(reason string) error {
 	}
 	rotated := false
 	for _, name := range names {
-		if strings.Contains(filepath.Base(name), ".audit.log.") {
+		// 归档段判定必须用 `archiveIndex`：生产段名是 `audit.log`（不含前置点），旧的
+		// `Contains(name, ".audit.log.")` 只对默认段名 `compliance.audit.log` 成立 ⇒ 生产上会把
+		// `audit.log.1` 当在线段再轮转成 `audit.log.1.1`（该名字的 segmentBase 不再是 globalName
+		// ⇒ 从 Segments()/Read() 里消失，磁盘仍占）✗ 评审 R13 P2。
+		if archiveIndex(filepath.Base(name)) > 0 {
 			continue // 归档段不重复轮转
 		}
 		if rerr := j.rotateLocked(name, reason); rerr != nil {
@@ -801,7 +907,7 @@ func (j *FileJournal) Rewrite(keep func(Entry) bool) error {
 		return err
 	}
 	for _, name := range names {
-		if strings.Contains(filepath.Base(name), ".audit.log.") {
+		if archiveIndex(filepath.Base(name)) > 0 {
 			continue // 归档段为离线冷数据，不参与在线重写（设计 E25/§5.5）
 		}
 		if err := j.rewriteSegmentLocked(name, keep); err != nil {

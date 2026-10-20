@@ -79,26 +79,56 @@ func (h *Handlers) readAuditEvents(ctx context.Context, f audit.EntryFilter, lim
 // 按需不整文件下载 ✓）；两段历史都是**升序**（冷 = 更旧，热 = 更新）⇒ 这里做一次归并，
 // 使「在线热段」与「已归档冷段」共用**同一读取入口**（导出与查询不各写一套 ✗）。
 func (h *Handlers) readAuditFromJournal(ctx context.Context, f audit.EntryFilter, limit int, newestFirst bool) []AuditEvent {
-	hot, herr := h.auditJournal.Read(f) // 升序（(Node, Seq)）
-	if herr != nil {
-		h.auditWarn("审计热段读取失败（忽略热段继续冷段）", herr)
-		hot = nil
-	}
-	var cold []audit.Entry
+	hot := h.readAuditHot(ctx, f, limit, newestFirst)
 	// 最新优先且热段已够数 ⇒ 更旧的冷段不可能进入结果 ⇒ 跳过（按需，不做无效 IO ✓）。
 	skippable := newestFirst && limit > 0 && len(hot) >= limit
+	var cold []audit.Entry
 	if !skippable {
-		if coldFS := h.auditColdFS(); coldFS != nil {
-			es, cerr := audit.QueryCold(ctx, coldFS, []string{""}, f, 0)
-			if cerr != nil {
-				h.auditWarn("审计冷段读取失败（忽略冷段继续）", cerr)
-			} else {
-				cold = es
-			}
-		}
+		cold = h.readAuditCold(ctx, f, limit, len(hot))
 	}
+	return auditEventsFromEntries(mergeAuditHotCold(cold, hot, limit, newestFirst))
+}
+
+// readAuditHot 读热段：最新优先走 `ReadTail`（新段优先、收满即停），否则 `ReadContext`（锁外解析）。
+func (h *Handlers) readAuditHot(ctx context.Context, f audit.EntryFilter, limit int, newestFirst bool) []audit.Entry {
+	var (
+		es  []audit.Entry
+		err error
+	)
+	if newestFirst && limit > 0 {
+		es, err = h.auditJournal.ReadTail(ctx, f, limit)
+	} else {
+		es, err = h.auditJournal.ReadContext(ctx, f)
+	}
+	if err != nil {
+		h.auditWarn("审计热段读取失败（忽略热段继续冷段）", err)
+		return nil
+	}
+	return es
+}
+
+// readAuditCold 读冷段，并把**剩余预算**下推（0 = 不设限，用于导出/正序全量）。
+func (h *Handlers) readAuditCold(ctx context.Context, f audit.EntryFilter, limit, hotLen int) []audit.Entry {
+	coldFS := h.auditColdFS()
+	if coldFS == nil {
+		return nil
+	}
+	budget := 0
+	if limit > 0 && limit-hotLen > 0 {
+		budget = limit - hotLen
+	}
+	es, err := audit.QueryCold(ctx, coldFS, []string{""}, f, budget)
+	if err != nil {
+		h.auditWarn("审计冷段读取失败（忽略冷段继续）", err)
+		return nil
+	}
+	return es
+}
+
+// mergeAuditHotCold 归并热/冷（冷更旧）+ 倒序 + 截断。
+func mergeAuditHotCold(cold, hot []audit.Entry, limit int, newestFirst bool) []audit.Entry {
 	merged := make([]audit.Entry, 0, len(cold)+len(hot))
-	merged = append(merged, cold...) // 更旧
+	merged = append(merged, cold...)
 	merged = append(merged, hot...)
 	if newestFirst {
 		slices.Reverse(merged)
@@ -106,7 +136,7 @@ func (h *Handlers) readAuditFromJournal(ctx context.Context, f audit.EntryFilter
 	if limit > 0 && len(merged) > limit {
 		merged = merged[:limit]
 	}
-	return auditEventsFromEntries(merged)
+	return merged
 }
 
 // auditColdFS 返回冷段归档存储（`audit.archive_volume` 卷优先，其次 `audit.archive_dir`）。

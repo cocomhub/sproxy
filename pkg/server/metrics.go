@@ -63,6 +63,16 @@ type Metrics struct {
 	// 供「是否切换 mp4ff」的真实场景决策（metric 可聚合监控，优于翻日志）。
 	KeyframeFragmented atomic.Int64
 
+	// ---- 审计可观测（评审 R13 P1）----
+	//
+	// `audit_dropped` 是**真正丢失**（未持久化即被有界丢弃）；`audit_evicted` 是已持久化条目的
+	// 热索引逐出（不是丢失）。两者语义不同，必须分开计（设计 §5.4.1）。
+	AuditDropped     atomic.Int64
+	AuditEvicted     atomic.Int64
+	AuditWriteFailed atomic.Int64
+	AuditHookPanics  atomic.Int64
+	auditRotate      *labeledCounters[string]
+
 	// ---- W4：带标签的跨节点指标 ----
 	//
 	// 用「键 -> 计数」的互斥锁集合而非 sync.Map：这些事件频率很低（每次建链/拒绝一次），
@@ -312,6 +322,9 @@ func (g *labeledGauges[K]) samples() []labeledSample {
 // NewMetrics 创建并初始化 Metrics。
 func NewMetrics() *Metrics {
 	m := &Metrics{
+		auditRotate: newLabeledCounters(func(k string) string {
+			return fmt.Sprintf(`reason="%s"`, escapeLabel(k))
+		}),
 		meshDial: newLabeledCounters(func(k meshDialKey) string {
 			return fmt.Sprintf(`carrier="%s",node="%s",service="%s",path="%s",e2e="%t"`,
 				escapeLabel(k.carrier), escapeLabel(k.node), escapeLabel(k.service), escapeLabel(k.path), k.e2e)
@@ -577,6 +590,17 @@ func (m *Metrics) meshDialFallbackSamples() []labeledSample { return m.meshDialF
 
 func (m *Metrics) remoteWriteDeniedSamples() []labeledSample { return m.remoteWriteDenied.samples() }
 
+// auditRotateSamples 暴露审计轮转分桶样本（/metrics 渲染用）。
+func (m *Metrics) auditRotateSamples() []labeledSample { return m.auditRotate.samples() }
+
+// RecordAuditRotate 记录一次审计段轮转（按原因分桶；无 metrics 时 no-op）。
+func (m *Metrics) RecordAuditRotate(reason string) {
+	if m == nil || reason == "" {
+		reason = "unknown"
+	}
+	m.auditRotate.add(reason)
+}
+
 // RecordMeshDial 记录一次 mesh 载体建链（转发到 Metrics；无 metrics 时不 panic）。
 func (h *Handlers) RecordMeshDial(carrier, node, service, path string, fellBack bool) {
 	h.metrics.RecordMeshDial(carrier, node, service, path, fellBack)
@@ -813,6 +837,11 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	writeMetric(&b, "sproxy_files_uploaded", "counter", "Total files uploaded", m.FilesUploaded.Load())
 	writeMetric(&b, "sproxy_files_downloaded", "counter", "Total files downloaded", m.FilesDownloaded.Load())
 	writeMetric(&b, "sproxy_files_deleted", "counter", "Total files deleted", m.FilesDeleted.Load())
+	writeMetric(&b, "sproxy_audit_dropped_total", "counter", "Audit entries dropped WITHOUT being persisted (real loss)", m.AuditDropped.Load())
+	writeMetric(&b, "sproxy_audit_evicted_total", "counter", "Audit entries evicted from the hot index after being persisted (not a loss)", m.AuditEvicted.Load())
+	writeMetric(&b, "sproxy_audit_write_failed_total", "counter", "Audit journal write failures", m.AuditWriteFailed.Load())
+	writeMetric(&b, "sproxy_audit_hook_panics_total", "counter", "Audit downstream hook panics (isolated)", m.AuditHookPanics.Load())
+	writeLabeledCounter(&b, "sproxy_audit_rotate_total", "Audit segment rotations by reason", m.auditRotateSamples())
 	writeMetric(&b, "sproxy_keyframe_fmp4_total", "counter", "Uploads detected as fragmented MP4 (fMP4, no global stss) — decision input for mp4ff switch", m.KeyframeFragmented.Load())
 
 	// 传输层连接级指标（xfer TCP：FromNetConn 包装的连接消息/字节计数）。
