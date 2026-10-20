@@ -197,7 +197,7 @@ func (s *SecretdataFS) releasePoolRef(key string) {
 	b.refs--
 	if b.refs <= 0 {
 		if s.dedupDir != "" {
-			_ = s.inner.Delete(context.Background(), path.Join(s.dedupDir, b.name))
+			_ = s.inner.Delete(gcCleanupCtx(), path.Join(s.dedupDir, b.name))
 		}
 		delete(s.dedupPool, key)
 	}
@@ -397,11 +397,7 @@ func (s *SecretdataFS) gcReconfirmContainers(ctx context.Context, containers []s
 		if !s.gcReconfirmContainer(ctx, c, referenced, &kills) {
 			unconfirmed = true
 		}
-		for _, k := range kills {
-			if s.inner.Delete(ctx, path.Join(k.container, k.name)) == nil {
-				deleted++
-			}
-		}
+		deleted += s.deleteKillsLocked(ctx, kills)
 		s.mu.Unlock()
 	}
 	return unconfirmed, deleted
@@ -418,11 +414,7 @@ func (s *SecretdataFS) gcSweepContainers(ctx context.Context, containers []strin
 		}
 		kills := []gcKill{}
 		s.gcSweepOrphanChunks(ctx, c, referenced, poolRefs, &kills)
-		for _, k := range kills {
-			if s.inner.Delete(ctx, path.Join(k.container, k.name)) == nil {
-				deleted++
-			}
-		}
+		deleted += s.deleteKillsLocked(ctx, kills)
 		s.mu.Unlock()
 	}
 	return deleted
@@ -596,4 +588,26 @@ func (s *SecretdataFS) startGC(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// deleteKillsLocked 在**锁内**批量删除 GC 判定为可删的 blob（调用方持 s.mu）。删除走
+// boundedCleanupCtx（P2 修复，2026-10-21）：此前直接用调用方 ctx（GC 的 ctx 常为
+// long-lived，且不受取消影响）⇒ 远端卷上 Delete 挂起会**持整卷写锁无限等待**，与本文件
+// 「锁内远端删除必须有界」的既有判据矛盾。返回成功删除数。
+func (s *SecretdataFS) deleteKillsLocked(ctx context.Context, kills []gcKill) int {
+	cctx, cancel := boundedCleanupCtx(ctx)
+	defer cancel()
+	deleted := 0
+	for _, k := range kills {
+		if s.inner.Delete(cctx, path.Join(k.container, k.name)) == nil {
+			deleted++
+		}
+	}
+	return deleted
+}
+
+// gcCleanupCtx 是 GC 非锁内清理（去重池孤儿）的界定 ctx：不受取消影响 + 有界。
+func gcCleanupCtx() context.Context {
+	c, _ := boundedCleanupCtx(context.Background())
+	return c
 }

@@ -1584,6 +1584,12 @@ func (s *SecretdataFS) dirHasContentLocked(d string) bool {
 // 全部文件（目录 meta + 遗留/孤儿分块）并注销 dirSegs/dirs/dirIDs/dirParents。调用方持
 // s.mu；仅当目录确为空（dirHasContentLocked==false）时调用，删除全部文件是安全的。
 func (s *SecretdataFS) removeEmptyContainerLocked(ctx context.Context, container, dirPath string) {
+	// **自带界定**（P2 修复，2026-10-21）：本函数在 s.mu 写锁内被 pruneEmptyDirsLocked 直接
+	// 调用（删除路径传入的是调用方 ctx）⇒ 远端 ListDir/Delete 挂起会持锁拖死整卷，与本文件
+	// 「锁内远端删除必须有界」的既有判据（boundedCleanupCtx）一致化；已界定 ctx 再套一层无害。
+	cctx, cancel := boundedCleanupCtx(ctx)
+	defer cancel()
+	ctx = cctx
 	inner, err := s.inner.ListDir(ctx, container)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		// **列目录失败必须 fail-closed**（独立审核 P2，2026-10-18）：此前仅在 `err == nil` 时进
@@ -2110,7 +2116,50 @@ func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container strin
 
 // scanContainerDirMetaBlob 定位并解密容器内目录 meta（旧格式 fail-closed 判定明确并专用
 // 日志，不落通用缺 meta 日志——M-6 双日志噪点）。返回 (dirMeta, 是否找到可解析目录 meta)。
+// dirMetaCand 是容器内的一个**可解密**目录 meta 候选（多候选取最新时间，见 scanContainerDirMetaBlob）。
+type dirMetaCand struct {
+	dm    *dirMeta
+	name  string
+	size  int64
+	mtime int64
+}
+
 func scanContainerDirMetaBlob(ctx context.Context, s *SecretdataFS, container string, inner []syncpkg.Entry, hasFiles bool) (*dirMeta, int64, bool) {
+	cands, ok := collectDirMetaCands(ctx, s, container, inner, hasFiles)
+	if !ok || len(cands) == 0 {
+		return nil, 0, false
+	}
+	// **多目录 meta 必须确定性仲裁**（P1 修复，2026-10-21）：
+	// 目录改名/移动是「先写新 meta、后删旧 meta」两步；若第二步失败（客户端断开、远端 5xx），
+	// 容器内会并存两个可解密的目录 meta。此前**按 ListDir 顺序取第一个** ⇒ 重启后可能取到旧
+	// meta：`repairInterruptedDirMoves` 会把容器按旧声明搬回去 ⇒ 改名**静默回退**（再次重启可能
+	// 又翻回新路径），用户按新路径写入的文件也随之改名。这里改为「取**最新 mtime**」：新 meta
+	// 必然后写（同一容器内顺序执行），与「已完成但清理失败」的真实意图一致，且**可重现**。
+	// 同 mtime 时按名字排序兜底，并显式 Warn 便于运维发现清理残留。
+	slices.SortStableFunc(cands, func(a, b dirMetaCand) int {
+		if a.mtime != b.mtime {
+			if a.mtime > b.mtime {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.name, b.name)
+	})
+	if len(cands) > 1 {
+		stale := make([]string, 0, len(cands)-1)
+		for _, c := range cands[1:] {
+			stale = append(stale, c.name)
+		}
+		slog.Warn("secretdata: 容器内存在多个目录 meta（改名/移动的旧 meta 清理失败），按最新时间仲裁",
+			"container", container, "chosen", cands[0].name, "chosen_dir", cands[0].dm.Name, "stale", stale)
+	}
+	return cands[0].dm, cands[0].size, true
+}
+
+// collectDirMetaCands 收集容器内全部**可解密**目录 meta 候选。oldFormat=true 表示容器目录 meta
+// 为旧格式（调用方 fail-closed；ok=false）。损坏/读失败的候选跳过（继续尝试其余）。
+func collectDirMetaCands(ctx context.Context, s *SecretdataFS, container string, inner []syncpkg.Entry, hasFiles bool) ([]dirMetaCand, bool) {
+	var cands []dirMetaCand
 	for _, f := range inner {
 		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindDirMeta {
 			continue
@@ -2126,13 +2175,13 @@ func scanContainerDirMetaBlob(ctx context.Context, s *SecretdataFS, container st
 					slog.Warn("secretdata: 容器目录 meta 为旧格式（path 字段），跳过恢复其中文件（fail-closed）",
 						"container", container)
 				}
-				return nil, 0, false
+				return nil, false
 			}
 			continue // 其它解密失败（损坏）继续尝试容器内其余 dir meta
 		}
-		return dm, int64(len(blob)), true
+		cands = append(cands, dirMetaCand{dm: dm, name: f.Name, size: int64(len(blob)), mtime: f.MTime})
 	}
-	return nil, 0, false
+	return cands, true
 }
 
 // hasFileMeta 报告容器内是否存在文件 meta（z 标记）条目。
@@ -2617,7 +2666,16 @@ func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName
 		return werr
 	}
 	if newName != oldName {
-		_ = s.inner.Delete(ctx, path.Join(container, oldName))
+		// **有界 + 可见**（P2 修复，2026-10-21）：此前用调用方 ctx 且 `_ =` 吞错 ⇒ 客户端在
+		// 两步之间断开/远端 5xx 时留下**新旧两个目录 meta**，重启时按 ListDir 顺序任取其一
+		// ⇒ 改名「静默回退」（可能来回翻覆）；且无任何日志，运维无从发现。清理必须不随调用方
+		// 取消而放弃（否则必然失败）且有界（锁内远端 I/O 不能无限等待）。
+		cctx, cancel := boundedCleanupCtx(ctx)
+		if derr := s.inner.Delete(cctx, path.Join(container, oldName)); derr != nil && !errors.Is(derr, os.ErrNotExist) {
+			slog.Warn("secretdata: 删除旧目录 meta 失败，容器内将短暂并存两个目录 meta（加载期按最新时间仲裁）",
+				"container", container, "old", oldName, "new", newName, "error", derr)
+		}
+		cancel()
 		// 注：独立审核曾疑「改名不更新 dirPhysTotal ⇒ 真值漂移」——**已实测证伪**（2026-10-18）：
 		// 目录 meta blob 的落盘长度与内容无关（pad 目标随机但最终长度恒定，实测 5 次改名恒 353B）
 		// ⇒ 改名不产生漂移，故**不引入**额外的 Stat/累计更新（避免无收益 I/O 与推测性代码）。
@@ -3179,6 +3237,14 @@ func (s *SecretdataFS) removeVersionMeta(ctx context.Context, ownerKey string, e
 	// 完整文件（删除丢失的安全失败，无幽灵/坏数据）；meta 删成功才继续删分块 + parity
 	// （分块删失败 → 无 meta 引用，成孤儿，可选 GC 上收）。
 	if err := s.inner.Delete(cctx, path.Join(e.dirSeg, e.metaName)); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			// **可观测**（P2 修复，2026-10-21）：此前完全静默 ⇒ 用户删除「成功」（条目已移出
+			// 索引）但密文与 meta 仍在盘上；同进程内再删是幂等 no-op、GC 又把「非墓碑 = 存活」
+			// 的 meta 保护起来 ⇒ 只能重启后再删一次，运维无从发现。方向仍保持「先删 meta」的
+			// 安全失败语义（分块全保留 ⇒ 重启重建完整文件），只补告警。
+			slog.Warn("secretdata: 删除条目 meta 失败（条目已移出索引，物理残留待重启后重试/由 GC 上收）",
+				"key", ownerKey, "meta", e.metaName, "container", e.dirSeg, "error", err)
+		}
 		return // meta 删失败：分块保留（反幽灵：meta 声明的 size 与分块俱在）
 	}
 	if e.dataDir != "" {

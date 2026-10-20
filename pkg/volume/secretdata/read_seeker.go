@@ -75,6 +75,10 @@ type verifyOnEOF struct {
 	seq   bool
 	err   error
 	done  bool
+	// pos 是**本层视角**的当前逻辑位置；started 表示已经读过数据。
+	// 用于区分「取大小后回到开头」（ServeContent 的固定姿势，不算破坏顺序读）与「中途跳转」。
+	pos     int64
+	started bool
 }
 
 var (
@@ -86,9 +90,17 @@ func (v *verifyOnEOF) Read(p []byte) (int, error) {
 	if v.err != nil {
 		return 0, v.err // 校验失败持续返回（不静默变回 EOF）
 	}
+	// 真正开始顺序读之前若位置不在 0（随机读/Range 从中间开始）⇒ 整文件哈希不成立。
+	if !v.started && v.pos != 0 {
+		v.seq = false
+	}
 	n, err := v.inner.Read(p)
-	if n > 0 && v.seq {
-		v.full.Write(p[:n])
+	if n > 0 {
+		v.started = true
+		v.pos += int64(n)
+		if v.seq {
+			v.full.Write(p[:n])
+		}
 	}
 	if errors.Is(err, io.EOF) && v.seq && !v.done {
 		v.done = true
@@ -103,9 +115,18 @@ func (v *verifyOnEOF) Read(p []byte) (int, error) {
 
 func (v *verifyOnEOF) Seek(offset int64, whence int) (int64, error) {
 	pos, err := v.inner.Seek(offset, whence)
-	if err == nil && !v.done {
-		v.seq = false // 位置可能变化 ⇒ 不再是「从 0 起的顺序读」
+	if err != nil {
+		return pos, err
 	}
+	// **只有「已经读过数据后再跳转」才失效**（P2 修复，2026-10-21）：此前任何 Seek 都清 seq ⇒
+	// `http.ServeContent`/`pkg/sync` 的 Range 路径固定先 `Seek(0, SeekEnd)` 取大小、再
+	// `Seek(0, SeekStart)` 回到开头，于是「EOF 整文件 SHA-256 校验」在这些消费方**恒不生效**
+	// （静默丢失一层纵深校验）。读前取大小/回原位不破坏「从 0 起顺序读」，校验继续有效；
+	// 真正从中间开始读（读前位置 ≠ 0）由 Read 内的判据关闭校验。
+	if !v.done && v.started {
+		v.seq = false
+	}
+	v.pos = pos
 	return pos, err
 }
 
