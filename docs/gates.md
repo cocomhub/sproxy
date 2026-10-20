@@ -32,6 +32,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | 文件 | 锁定内容 |
 | --- | --- |
 | `audit_calls.tsv` | R35-a：审计调用点棘轮（唯一提供方 `pkg/audit`，非测试源码调用面白名单） |
+| `audit_action_allowlist.tsv` | R39：审计动作常量必须有非测试使用点（防「死常量」；清单**防腐化**，有引用即须删登记） |
 | `external_fs_calls.tsv` | 外部文件系统调用点登记（R26 卷根直连适配器棘轮） |
 | `openread_notexist.tsv` | OpenRead 的 not-exist 契约调用点登记 |
 | `quota_acquire_sites.tsv` | R36-a：配额/容量获取入口棘轮（adapter / probe / pending，只减不增） |
@@ -64,6 +65,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | 门禁测试文件 | 声明编号 | 头部说明（首条注释） |
 | --- | --- | --- |
 | `audit_api_gate_test.go` | R35 | audit_api_gate_test.go 是门禁 R35-d：`pkg/audit` 只能有**一套**审计 API。 |
+| `audit_action_gate_test.go` | R39 | R39：**审计动作常量必须有非测试使用点**（防死常量：动作存在但永不产生）。 |
 | `audit_calls_gate_test.go` | R30 · R31 · R34 · R35 | audit_calls_gate_test.go 是门禁 R35-a：审计调用点**棘轮**（只减不增）。 |
 | `audit_types_gate_test.go` | R35 | audit_types_gate_test.go 是门禁 R35-c：**审计类型/常量/接口的唯一实现处 = pkg/audit**。 |
 | `capability_parity_gate_test.go` | R21 | capability_parity_gate_test.go 是「透明装饰器必须声明全部可选能力」的门禁（R21）。 |
