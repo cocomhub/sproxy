@@ -54,8 +54,9 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | `volume_rebalance` | `pkg/server/audit_volume_admin_scenarios_test.go` | ✅ |
 | `volume_copy` | 同上（跨卷复制断言 object 含文件名） | ✅ |
 | `volume_import` / `volume_export` | `pkg/server/audit_volume_export_scenarios_test.go` | ✅ |
-| `volume_mirror` | — | ⬜ GAP（镜像巡检由后台 pass 驱动，需注入 tier/mirror 状态） |
-| `volume_tier_promote` / `volume_tier_downgrade` | — | ⬜ GAP（读晋升/降级是后台/读路径副作用，需 tier 管理器驱动） |
+| `volume_mirror` | `pkg/server/audit_mirror_scenarios_test.go`（`mirror_targets` + 直驱 `volumeMirrorPass`） | ✅ |
+| `volume_tier_downgrade` | `pkg/server/audit_tier_scenarios_test.go`（直驱 `scanOnce`） | ✅ |
+| `volume_tier_promote` | — | ⬜ GAP（需完整下载路由 + owner ACL 视图才能命中 `resolveTierPromote`） |
 | `user_volume_create` / `user_volume_delete` | `pkg/server/audit_user_volume_scenarios_test.go`（**并修掉外部卷建卷无审计**） | ✅ |
 
 ### 2.4 密钥 / presign / 分享 / 同步 / 凭据
@@ -66,11 +67,11 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | `backend_presign` / `backend_presign_complete`（含被拒） | `pkg/server/audit_presign_scenarios_test.go`（成功 + 404 被拒） | ✅ |
 | `share_create` / `share_revoke` | `pkg/server/audit_share_scenarios_test.go`（object=token） | ✅ |
 | `sync_task_create` | `pkg/server/audit_sync_scenarios_test.go` | ✅ |
-| `sync_conflict_resolve` | — | ⬜ GAP（需先由真实同步执行产生冲突） |
+| `sync_conflict_resolve` | `pkg/server/audit_sync_conflict_scenarios_test.go`（注入真实冲突记录后走真实 handler） | ✅ |
 | `mesh_read` / `mesh_write` | `pkg/remote/remote_read_test.go`、`remote_write_test.go` | ✅ |
 | `credential_register` / `_register_denied` / `_ak_delete` / `_sk_delete` / `_persist_error` | `pkg/server/register_handler_test.go`、`credentials_handler_test.go`（**按常量断言**） | ✅ |
 | `credential_ak_list` / `_ak_add` / `_sk_list` / `_renew` / `_sk_expire` | `pkg/server/audit_credential_scenarios_test.go`（并断言**不含 SK 明文**） | ✅ |
-| `credential_login` | — | ⬜ GAP（需 TOTP 流程） |
+| `credential_login` / `credential_login_denied` | `pkg/server/audit_login_scenarios_test.go`（TOTP 成功 + 未知 nonce 被拒；不含 nonce/密钥本体） | ✅ |
 | `config_update` / `verify` / `backup` | `pkg/server/audit_test.go`、`cmd/sproxy/*_test.go` | ✅ |
 
 ### 2.5 传输层 / 读面
@@ -92,10 +93,10 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | ~~P2~~ ✅ | ~~卷管理 rebalance/copy/import/export/user_volume~~ | 已补（`audit_volume_admin_scenarios_test.go`、`audit_volume_export_scenarios_test.go`、`audit_user_volume_scenarios_test.go`） | — |
 | ~~P2~~ ✅ | ~~`share_*`（2）~~ | 已补（`audit_share_scenarios_test.go`） | — |
 | ~~P2~~ ✅ | ~~`sync_task_create`~~ | 已补（`audit_sync_scenarios_test.go`） | — |
-| P2 | `sync_conflict_resolve`（1） | 同步改数据 | 需先跑真实同步产生冲突，再 resolve |
+| ~~P2~~ ✅ | ~~`sync_conflict_resolve`~~ | 已补（注入真实冲突记录 + 真实 handler） | — |
 | ~~P2~~ ✅ | ~~`cloud_group_create` / `cloud_group_delete`~~ | 已补（`audit_cloud_group_scenarios_test.go`） | — |
-| P3 | `volume_mirror` / `volume_tier_*`（3） | 后台搬迁/分层 | 注入 tier/mirror 状态后驱动 pass |
-| P2 | `credential_login`（1） | 登录面 | 需 TOTP 生成（`register_handler_test` 已有 TOTP 工具） |
+| P3 | `volume_tier_promote`（1） | 读时回迁 | 需完整下载路由 + owner ACL 视图（匿名 harness 解析不到对象） |
+| ~~P2~~ ✅ | ~~`credential_login`~~ | 已补（`audit_login_scenarios_test.go`） | — |
 | P3 | `ai.embed` | **未埋点**（`ActionAIEmbed` 常量存在但全仓无 `Action:` 使用点） | 先决定是否要该事件；要则补埋点 + 断言（**不含文本内容**） |
 
 ## 4. 编写纪律（§9.3）
