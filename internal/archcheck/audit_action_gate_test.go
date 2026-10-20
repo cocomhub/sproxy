@@ -10,8 +10,12 @@ package archcheck
 // 的覆盖率统计里永远挂着一个「永不出现的动作」，看起来像缺口，实际是**死常量** ✗。
 // 「动作常量存在」≠「有埋点」≠「有功能」，三者必须分别核实。
 //
-// 本门禁：`pkg/server` 非测试源码里形如 `Action*` / `auditAction*` 且值为动作名的常量，
-// 必须在本 package 的非测试源码中**被引用至少一次**（定义行本身不算）。
+// 本门禁（两级判据）：
+//  1. `pkg/server` 非测试源码里形如 `Action*` / `auditAction*` 且值为动作名的常量，必须在非测试
+//     源码中**被引用至少一次**（定义行本身不算）；
+//  2. **引用它的那个函数本身必须可达**（一层判据）：该函数名必须出现在「其它非测试文件」中，
+//     或在本文件内出现超过 1 次（声明 + 至少一处使用）。否则形如「导出包装函数 `NewEmbedClient`
+//     引用了常量，但全仓无人调用该包装」的情况会让门禁**假绿**（评审 R13：`ai.embed` 就是这样）。
 // 允许例外（登记到 `audit_action_allowlist.tsv` 并写明理由），且**清单不得腐化**：
 // 已登记但实际已有引用的条目必须删除，避免清单变成「免检名单」。
 
@@ -41,6 +45,8 @@ type auditActionRef struct {
 	File  string
 	Refs  int
 	Where []string
+	// UnreachableRefs 记录「引用点所在的函数本身无调用方」的次数（假绿来源，评审 R13）。
+	UnreachableRefs int
 }
 
 // TestAuditActionConstantsAreReferenced R39：动作常量必须在非测试源码中被使用。
@@ -101,6 +107,51 @@ func TestAuditActionConstantsAreReferenced(t *testing.T) {
 		t.Fatal("未识别到任何审计动作常量（解析口径失效？）")
 	}
 
+	// ①b 收集每个函数的名称/区间，并统计「标识符按文件出现次数」（用于一层可达判据）。
+	type funcSpan struct {
+		name       string
+		start, end token.Pos
+		file       string
+	}
+	var spans []funcSpan
+	identCount := make(map[string]map[string]int) // name -> file -> count
+	for path, af := range parsed {
+		rel := auditGateRel(root, path)
+		for _, decl := range af.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Name == nil {
+				continue
+			}
+			spans = append(spans, funcSpan{name: fd.Name.Name, start: fd.Pos(), end: fd.End(), file: rel})
+		}
+		ast.Inspect(af, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				if identCount[id.Name] == nil {
+					identCount[id.Name] = map[string]int{}
+				}
+				identCount[id.Name][rel]++
+			}
+			return true
+		})
+	}
+	// 该函数是否**可达**（一层）：名字出现在其它非测试文件，或本文件内出现 >1 次。
+	reachable := func(name, declFile string) bool {
+		for f, n := range identCount[name] {
+			if f != declFile && n > 0 {
+				return true
+			}
+		}
+		return identCount[name][declFile] > 1
+	}
+	enclosingFunc := func(pos token.Pos) (funcSpan, bool) {
+		for _, sp := range spans {
+			if pos >= sp.start && pos <= sp.end {
+				return sp, true
+			}
+		}
+		return funcSpan{}, false
+	}
+
 	// ② 统计非测试源码中的引用（排除定义处）。
 	//    注意：必须按下标取地址（`for _, r := range` 是拷贝 ⇒ 累加会丢失，本门禁第一版就踩到 ✗）。
 	for i := range refs {
@@ -119,6 +170,9 @@ func TestAuditActionConstantsAreReferenced(t *testing.T) {
 				if len(r.Where) < 3 && !containsStr(r.Where, rel) {
 					r.Where = append(r.Where, rel)
 				}
+				if sp, ok := enclosingFunc(id.Pos()); ok && !reachable(sp.name, sp.file) {
+					r.UnreachableRefs++
+				}
 				return true
 			})
 		}
@@ -133,8 +187,11 @@ func TestAuditActionConstantsAreReferenced(t *testing.T) {
 		switch {
 		case r.Refs == 0 && !allowed:
 			problems = append(problems, "死常量（无任何非测试使用点）: "+r.Name+" = "+r.Value+" @ "+r.File)
-		case r.Refs > 0 && allowed:
-			problems = append(problems, "allowlist 已失效（该常量已有 "+itoa(r.Refs)+" 处引用，应删除登记）: "+r.Name)
+		case r.Refs > 0 && r.UnreachableRefs == r.Refs && !allowed:
+			problems = append(problems, "假绿（只被『无调用方的函数』引用，实际永不产生）: "+
+				r.Name+" = "+r.Value+" @ "+r.File)
+		case r.Refs > 0 && r.UnreachableRefs < r.Refs && allowed:
+			problems = append(problems, "allowlist 已失效（该常量已有可达引用，应删除登记）: "+r.Name)
 		}
 	}
 	if len(problems) > 0 {

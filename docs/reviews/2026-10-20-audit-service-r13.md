@@ -32,19 +32,24 @@
 | P2 | `OnSeal` 归档在写路径同步执行且 `context.Background()`（无超时/不可取消） | 归档加 `auditArchiveTimeout=5min` 超时（超时本轮放弃、封段保留、下轮重试） |
 | P3 | 死代码 `rewriteAuditLog`/`filterAuditLines`/`writeAuditLinesAtomic`（约 70 行零调用） | 删除 |
 
-## 3. 剩余待办（未修，按严重度）
+## 3. 第三轮修复（纯工程决策项）
+
+| 级别 | 问题 | 修复 |
+| --- | --- | --- |
+| P2 | 审计 TTL 只清热段；冷段（归档）**永不按龄删除**（`archive_keep=0` 时 TTL 实际未生效） | 新增 `audit.PurgeCold(ctx, fs, root, cutoff)`（**时间未知的段保守保留**；单个失败不影响其余）；`retentionCleanAudit` 在 `Rewrite` 之后按同一 cutoff 清理冷段；用例 `TestPurgeCold_*` |
+| P2 | **R39 假绿**：只被「无调用方的导出包装」引用的动作（`ai.embed` / `NewEmbedClient`）也能转绿 | R39 增加**一层可达判据**：引用该常量的函数名必须出现在「其它非测试文件」或本文件内出现 >1 次，否则判「假绿」；`ActionAIEmbed` 登记 allowlist 并写明「接入消费方后必须删除登记」；变异等价验证：该判据恰好只命中 `ai.embed`（其余 20 个动作无误报） |
+| P2 | 归档不可用时封段仍被 `max_archives` 回收 | `FileJournal.SetArchiveUnavailable`：装配层在「归档已配置但 coldFS 解析失败」时置位 ⇒ `shiftArchives` **整轮跳过**（只跳删除不够：后续 rename 会覆盖最旧段）⇒ 证据保留，磁盘由 `max_total_bytes` 兜底；用例 `TestShiftArchives_RetainsWhenArchiveUnavailable` |
+
+## 4. 剩余待办（未修，按严重度）
 
 | 级别 | 问题 | 建议 |
 | --- | --- | --- |
 | P2 | `Entry.Volume` 非测试源码零赋值（卷只以 `detail="volume=..."` 文本出现） | `AuditEvent`/`RecordAudit` 增 `Volume` 并由 `pkg/files` 各写点填充 |
-| P2 | 审计 TTL 只清热段；冷段（归档）**永不按龄删除**（`archive_keep=0` 时 TTL 实际未生效） | `ArchiveSealed` 旁路增加冷段按 `ColdSegment.Last` 过期删除；或文档明确「TTL 仅作用热段」并禁止与归档同用 |
-| P2 | `ai.embed` 埋点存在但**无生产调用方**（`pkg/aiembed` 无消费方）⇒ 动作实际不会产生，R39 仍转绿（假绿） | R39 升级为「引用点在启动可达链上」（deadcode 式可达性），或删除该动作 + `NewEmbedClient` |
 | P2 | 设计声明的 R35-b（变更型路由必须经 `auditMiddleware`）/R35-e（读面同门同过滤）无门禁实现，注释仍宣称 | 实现两条门禁，或把注释改为「待实现」 |
 | P3 | `audit.OpenRange` 非测试零调用（`QueryCold` 只走流式） | 读面接上按需区间读（与 `ReadTail` 同批）或删除 |
 | P3 | 归档卷写入未接容量/配额账本（`audit-archive/` 不计入卷配额） | 视产品口径决定是否 `WrapStagingQuota` |
-| P3 | 归档目的地不可用时封段仍会被 `max_archives` 按份数回收（本轮已改为装配期 Error/fail-fast，但运行期若无归档仍按份数删） | 让 Journal 感知「归档已配置但不可用」⇒ 此时**不按份数删除**（保留至上界） |
 
-## 4. 复核结论
+## 5. 复核结论
 
 - 修复后：`pkg/audit` / `pkg/recovery` / `pkg/server` 定向用例全绿；
   完整验证见修复提交说明（workspace 模式 `go test ./...` + `-tags=e2e ./test/...` + `golangci-lint`）。

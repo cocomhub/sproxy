@@ -813,6 +813,29 @@ func registerHubRoutes(h *Handlers, srvMux, localMux *http.ServeMux, opts Regist
 	}
 }
 
+// wireAuditColdArchive 是**冷段归档装配的唯一入口**（评审 R13：集中解析/校验/首次归档）：
+//
+//  1. 解析归档目的地（`archive_volume` 卷优先，其次 `archive_dir`）；
+//  2. `archive_volume` 配置了但解析不到 ⇒ Error（`startup.fail_fast` 时 panic）——必须区分
+//     「未配置归档」与「配置了但不可用」，否则运行期归档静默关闭、封段被按份数回收；
+//  3. 归档已配置但不可用 ⇒ 标记 Journal：轮转时**整轮跳过**搬移/回收（保留证据）；
+//  4. 启动期归档一次（此后由轮转的 OnSeal 回调触发；失败不丢段、下轮重试）。
+func wireAuditColdArchive(cfg *Config, set *registry.Set, j *audit.FileJournal, log *slog.Logger) {
+	coldFS := newColdArchiveFS(cfg, set, log)
+	configured := cfg.Audit.ArchiveDir != "" || cfg.Audit.ArchiveVolume != ""
+	if cfg.Audit.ArchiveVolume != "" && coldFS == nil {
+		msg := "审计归档卷无法解析（未注册/非外部·封装卷）⇒ 冷段归档已关闭；封段仍会被 max_archives 回收"
+		if cfg.Audit.Startup.FailFast {
+			panic("audit: " + msg + ": " + cfg.Audit.ArchiveVolume)
+		}
+		log.Error(msg, "archive_volume", cfg.Audit.ArchiveVolume)
+	}
+	if j != nil {
+		j.SetArchiveUnavailable(coldFS == nil && configured)
+	}
+	runAuditArchive(cfg, coldFS, j, log)
+}
+
 // runAuditArchive 把封段归档到 `audit.archive_dir`（M4；**复用** pkg/audit 原语）。
 //
 // 语义（与 pkg/audit.ArchiveSealed 一致）：
