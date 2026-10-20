@@ -238,6 +238,148 @@ func decodeScannedLine(sc *bufio.Scanner) (Entry, bool) {
 	return decodeSegmentLine(buf)
 }
 
+// tailChunkBytes 是尾读的单次区间大小（冷段是追加写文件：最新条目在尾部）。
+const tailChunkBytes = 256 << 10
+
+// ReadTailCold 从**最新冷段**起、**从段尾向前**读，收集满足过滤的条目直到 limit，返回
+// **按 TS 升序**（与 `QueryCold` 同序，便于与热段结果合并）。
+//
+// 为什么需要（评审 R13）：
+//   - **正确性**：`QueryCold` 逐段**从头**读且「收满即停」⇒ 最新段条目数超过预算时，返回的是
+//     该段**最旧**的 N 条（最新条目被预算截掉）⇒ newest-first + limit 的结果集错误；
+//   - **有界性**：尾读只读最新段尾部若干块，不扫历史段。
+//
+// 实现要点：按段内最后一条时间**倒序**处理；每段只取「还缺多少条」（`need`）为止，
+// 因此 `limit` 小 ⇒ 只读一块；过滤不匹配时才继续向前扩展（最坏与旧实现同级）。
+func ReadTailCold(ctx context.Context, fs syncpkg.FS, roots []string, f EntryFilter, limit int) ([]Entry, error) {
+	if fs == nil {
+		return nil, fmt.Errorf("audit: ReadTailCold 需要 pkg/sync.FS")
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	segs, err := newestFirstColdSegments(ctx, fs, roots)
+	if err != nil {
+		return nil, err
+	}
+	var got []Entry // 保持「新 → 旧」
+	for _, seg := range segs {
+		if len(got) >= limit {
+			break
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
+		if coldSegmentBeforeSince(seg, f) {
+			continue // 整段早于 Since 过滤 ⇒ 跳过（无需 IO）
+		}
+		batch := tailEntries(ctx, fs, seg, f, limit-len(got)) // 升序，最多 need 条
+		slices.Reverse(batch)                                 // → 降序
+		got = append(got, batch...)
+	}
+	if len(got) > limit {
+		got = got[:limit]
+	}
+	slices.Reverse(got) // 降序 → 全局升序
+	return got, nil
+}
+
+// newestFirstColdSegments 汇总所有 root 的冷段，按段内最后一条时间**倒序**（无额外 IO：
+// ListCold 已探测 First/Last）。
+func newestFirstColdSegments(ctx context.Context, fs syncpkg.FS, roots []string) ([]ColdSegment, error) {
+	var segs []ColdSegment
+	for _, root := range roots {
+		part, err := ListCold(ctx, fs, root)
+		if err != nil {
+			return nil, err
+		}
+		segs = append(segs, part...)
+	}
+	sort.SliceStable(segs, func(i, k int) bool {
+		if !segs[i].Last.Equal(segs[k].Last) {
+			return segs[i].Last.After(segs[k].Last)
+		}
+		return segs[i].Path > segs[k].Path
+	})
+	return segs, nil
+}
+
+// coldSegmentBeforeSince 判定整段都早于 `Since` 过滤（可跳过 IO）。
+func coldSegmentBeforeSince(seg ColdSegment, f EntryFilter) bool {
+	return seg.Size > 0 && !seg.Last.IsZero() && !f.Since.IsZero() && !seg.Last.After(f.Since)
+}
+
+// tailEntries 从段尾向前按块读取，返回该段内**满足过滤、最多 need 条、升序**的条目。
+// 读够 need 条即停（不会为了一段把整段读完）。
+func tailEntries(ctx context.Context, fs syncpkg.FS, seg ColdSegment, f EntryFilter, need int) []Entry {
+	if seg.Size <= 0 || need <= 0 {
+		return nil
+	}
+	rr := syncpkg.AssertRangeReader(fs)
+	var got []Entry // 新 → 旧
+	end := seg.Size
+	for end > 0 && len(got) < need {
+		off := max(end-tailChunkBytes, 0)
+		chunk, ok := readColdChunk(ctx, fs, rr, seg, off, end)
+		if !ok {
+			break
+		}
+		got = append(got, chunkEntriesDesc(chunk, off > 0, f, need-len(got))...)
+		if off == 0 {
+			break
+		}
+		end = off
+	}
+	if len(got) > need {
+		got = got[:need]
+	}
+	slices.Reverse(got) // 新→旧 ⇒ 升序
+	return got
+}
+
+// chunkEntriesDesc 把一段区间字节解码为**降序**（新→旧）条目，最多 need 条。
+// dropFirst=true 表示区间起点可能落在行中（首行不可信，丢弃）。
+func chunkEntriesDesc(chunk []byte, dropFirst bool, f EntryFilter, need int) []Entry {
+	if need <= 0 {
+		return nil
+	}
+	lines := strings.Split(string(chunk), "\n")
+	if dropFirst && len(lines) > 0 {
+		lines = lines[1:]
+	}
+	out := make([]Entry, 0, min(len(lines), need))
+	for i := len(lines) - 1; i >= 0 && len(out) < need; i-- {
+		if lines[i] == "" {
+			continue
+		}
+		if e, ok := decodeSegmentLine([]byte(lines[i] + "\n")); ok && f.Match(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// readColdChunk 读冷段 [off, end) 区间；无区间能力时整段读后切分（能力探测回落，不静默返回空）。
+func readColdChunk(ctx context.Context, fs syncpkg.FS, rr syncpkg.RangeReader, seg ColdSegment, off, end int64) ([]byte, bool) {
+	if rr != nil {
+		b, _, err := syncpkg.RangeReadAll(rr, ctx, seg.Path, off, end-off)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	}
+	rc, oerr := fs.OpenRead(ctx, seg.Path)
+	if oerr != nil {
+		return nil, false
+	}
+	b, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr != nil || int64(len(b)) < end {
+		return nil, false
+	}
+	return b[off:end], true
+}
+
 // PurgeCold 删除**最后一条时间早于 cutoff** 的冷段，返回删除数量。
 //
 // 为什么需要（评审 R13 P2）：审计 TTL（`retention.audit_ttl`）此前只重写**在线段**；

@@ -26,7 +26,11 @@ import (
 )
 
 // auditReadHandlerNames 是审计读面 handler（新增读端点必须加入本表，否则门禁覆盖不到）。
-var auditReadHandlerNames = []string{"auditHandler", "auditExportHandler"}
+var auditReadHandlerNames = []string{"auditHandler", "auditExportHandler", "auditColdSegHandler"}
+
+// auditReadPipelineHandlers 是**返回条目**的读 handler（必须走统一读管线 readAuditEvents）；
+// 冷段区间读返回原始字节流，不经过条目管线，故不在本表（但仍必须过管理员门）。
+var auditReadPipelineHandlers = []string{"auditHandler", "auditExportHandler"}
 
 // auditReadPatterns 是必须同时存在于两个 mux 的读面 pattern。
 var auditReadPatterns = []string{"GET /api/audit", "GET /api/audit/export"}
@@ -131,12 +135,14 @@ func TestR35e_AuditReadFaceIsGated(t *testing.T) {
 		if !calls["auditReadAllowed"] {
 			noGate = append(noGate, name)
 		}
-		if !calls["readAuditEvents"] {
-			noPipeline = append(noPipeline, name)
-		}
 	}
 	if len(noGate) > 0 {
 		t.Fatalf("R35-e：读面 handler 未经 auditReadAllowed 裁决（读面必须管理员门）: %v", noGate)
+	}
+	for _, name := range auditReadPipelineHandlers {
+		if !calledNames(funcs[name])["readAuditEvents"] {
+			noPipeline = append(noPipeline, name)
+		}
 	}
 	if len(noPipeline) > 0 {
 		t.Fatalf("R35-e：读面 handler 未走统一读管线 readAuditEvents（出现第二条读路径）: %v", noPipeline)
