@@ -19,6 +19,7 @@ package server
 // 卷根不可达跳过该卷（fail-closed：不清 = 安全方向，不误删）。
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -200,6 +201,17 @@ func (h *Handlers) retentionCleanAudit(ttl time.Duration, now time.Time, log *sl
 		return !e.TS.Before(cutoff)
 	}); err != nil {
 		log.Warn("卷级 retention：审计日志重写失败（下次重试）", "error", err.Error())
+	}
+	// **冷段（已归档段）同样受保留期约束**（评审 R13 P2）：`Rewrite` 只处理在线段，而开启归档后
+	// 超龄数据大多已搬到冷存储 ⇒ 不清理则「保留期不生效、磁盘只增不减」。
+	// 时间未知的冷段保守保留（PurgeCold 内保证）。
+	if coldFS := h.auditColdFS(); coldFS != nil {
+		if n, perr := audit.PurgeCold(context.Background(), coldFS, "", cutoff); perr != nil {
+			log.Warn("卷级 retention：清理过期冷段失败（部分保留，下次重试）",
+				"removed", n, "error", perr.Error())
+		} else if n > 0 {
+			log.Info("卷级 retention：已清理过期冷段", "removed", n)
+		}
 	}
 }
 

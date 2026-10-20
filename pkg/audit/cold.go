@@ -238,6 +238,41 @@ func decodeScannedLine(sc *bufio.Scanner) (Entry, bool) {
 	return decodeSegmentLine(buf)
 }
 
+// PurgeCold 删除**最后一条时间早于 cutoff** 的冷段，返回删除数量。
+//
+// 为什么需要（评审 R13 P2）：审计 TTL（`retention.audit_ttl`）此前只重写**在线段**；
+// 一旦开启归档（`archive_keep=0` 时封段随即搬走），热段里根本没有超龄数据 ⇒ TTL 实际不生效，
+// 超期证据永久留在冷存储（磁盘只增不减 + 保留期不成立）。
+//
+// 保守语义：**时间未知**（首/尾探测失败）的段**绝不删除**（宁多留不误删）；
+// 单个删除失败记录首个错误并继续（其余照删）。
+func PurgeCold(ctx context.Context, fs syncpkg.FS, root string, cutoff time.Time) (int, error) {
+	segs, err := ListCold(ctx, fs, root)
+	if err != nil {
+		return 0, err
+	}
+	var (
+		n     int
+		first error
+	)
+	for _, seg := range segs {
+		if cerr := ctx.Err(); cerr != nil {
+			return n, cerr
+		}
+		if seg.Last.IsZero() || !seg.Last.Before(cutoff) {
+			continue
+		}
+		if derr := fs.Delete(ctx, seg.Path); derr != nil {
+			if first == nil {
+				first = fmt.Errorf("audit: 删除过期冷段 %s 失败: %w", seg.Path, derr)
+			}
+			continue
+		}
+		n++
+	}
+	return n, first
+}
+
 // QueryCold 在 `fs` 的 `roots` 上查询冷段（最旧优先、流式、早停、按时间整文件跳过）。
 //
 // **收敛点**：热段走 `FileJournal.Read`，冷段走本函数；两者共用 `EntryFilter.Match` +

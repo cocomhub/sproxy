@@ -163,20 +163,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		log.Error("卷集合装配失败", "error", err)
 		panic("卷集合装配失败: " + err.Error())
 	}
-	// 卷集合就绪 ⇒ 回填冷段归档目的地（`audit.archive_volume` 需卷 FS），并做**启动期**一次归档
-	// （此后由轮转的 OnSeal 回调触发）。归档失败只告警：封段仍在本地，下轮重试（原语保证不丢）。
+	// 卷集合就绪 ⇒ 冷段归档装配（单一入口：解析目的地 + 配置校验 + 启动期归档一次）。
 	coldVolSet = vs
-	coldFS := newColdArchiveFS(cfg, vs, log)
-	if cfg.Audit.ArchiveVolume != "" && coldFS == nil {
-		// 明确区分「未配置归档」与「配置了但解析失败」：后者必须显式可见（评审 R13 P1）——
-		// 否则运行期归档静默关闭，而封段仍会被 max_archives 按份数回收 ⇒ 证据越来越少。
-		msg := "审计归档卷无法解析（未注册/非外部·封装卷）⇒ 冷段归档已关闭；封段仍会被 max_archives 回收"
-		if cfg.Audit.Startup.FailFast {
-			panic("audit: " + msg + ": " + cfg.Audit.ArchiveVolume)
-		}
-		log.Error(msg, "archive_volume", cfg.Audit.ArchiveVolume)
-	}
-	runAuditArchive(cfg, coldFS, auditJournal, log)
+	wireAuditColdArchive(cfg, vs, auditJournal, log)
 
 	h := &Handlers{
 		cfgPtr:            opts.CfgPtr,

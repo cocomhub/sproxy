@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -246,19 +247,23 @@ const (
 
 // FileJournal 是分段文件实现（append-only + 轮转 + 原子重写）。
 type FileJournal struct {
-	dir        string
-	layout     Layout
-	scope      ScopeID
-	syncMode   SyncMode
-	batchLines int
-	batchIv    time.Duration
-	maxSize    int64
-	maxArch    int
-	maxTotal   int64
-	globalName string
-	clock      Clock
-	metrics    Metrics
-	logger     *slog.Logger
+	// archiveUnavailable 为 true 表示「归档已配置但目的地不可用」⇒ 轮转时**不**按
+	// `max_archives` 删除最旧封段（保留证据；磁盘仍受 `max_total_bytes` 约束）。
+	// 由装配层在卷集合就绪后调用 SetArchiveUnavailable 设置（评审 R13 P2）。
+	archiveUnavailable atomic.Bool
+	dir                string
+	layout             Layout
+	scope              ScopeID
+	syncMode           SyncMode
+	batchLines         int
+	batchIv            time.Duration
+	maxSize            int64
+	maxArch            int
+	maxTotal           int64
+	globalName         string
+	clock              Clock
+	metrics            Metrics
+	logger             *slog.Logger
 
 	onSeal      func()
 	sealPending bool // 有封段尚未通知（在锁外触发后清零）
@@ -469,6 +474,9 @@ func archiveIndex(path string) int {
 	}
 	return n
 }
+
+// SetArchiveUnavailable 标记「归档已配置但目的地不可用」（装配层设置；并发安全）。
+func (j *FileJournal) SetArchiveUnavailable(v bool) { j.archiveUnavailable.Store(v) }
 
 // QuarantineSegment 在**锁内**把封段改名为归档专用的独占名（`<name>.archiving.<n>`）。
 //
@@ -878,6 +886,17 @@ func (j *FileJournal) closeSegmentLocked(path string) {
 // shiftArchives 把 .N 归档依次后移（.maxArchives 丢弃）。
 func (j *FileJournal) shiftArchives(path string) {
 	if j.maxArch <= 0 {
+		return
+	}
+	// 归档**已配置但不可用**：整体跳过搬移与删除。
+	//   · 若只跳过「删除」这一步，后面的 `.1 → .2` rename 仍会**覆盖**最旧的 `.2`（Unix 语义）
+	//     ⇒ 证据照样丢 ✗；
+	//   · 跳过整轮 ⇒ 封段只增不减，磁盘由 `max_total_bytes` 兜底（有界丢弃可观测）。
+	if j.archiveUnavailable.Load() {
+		if j.logger != nil {
+			j.logger.Warn("audit: 归档不可用 ⇒ 跳过封段搬移/回收（保留证据，受 max_total_bytes 约束）",
+				"path", path, "max_archives", j.maxArch)
+		}
 		return
 	}
 	for i := j.maxArch; i >= 1; i-- {
