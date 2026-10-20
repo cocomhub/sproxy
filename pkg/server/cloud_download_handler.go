@@ -608,8 +608,8 @@ func (h *Handlers) deleteGroupArchive(owner, archiveFile string) error {
 // 形态不符（非 `<owner>/user/` 前缀）时原样返回，交由调用方的足迹/Stat 兜底。
 func userRelFromFSKey(owner, fsKey string) string {
 	prefix := owner + "/user/"
-	if strings.HasPrefix(fsKey, prefix) {
-		return strings.TrimPrefix(fsKey, prefix)
+	if after, ok := strings.CutPrefix(fsKey, prefix); ok {
+		return after
 	}
 	if rest, ok := strings.CutPrefix(fsKey, "user/"); ok {
 		return rest

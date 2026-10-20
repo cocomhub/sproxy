@@ -155,8 +155,7 @@ func isExecUnavailable(err error) bool {
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
 		return true
 	}
-	var ee *exec.Error
-	if errors.As(err, &ee) {
+	if _, ok := errors.AsType[*exec.Error](err); ok {
 		return true
 	}
 	var pe *os.PathError

@@ -81,7 +81,7 @@ func TestRecoverAll_CanceledContextStopsRecovery(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	// 落两条任务（已提交的 downloading ⇒ 正常会被重启）。
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		seedPersistedTask(t, mgr, "downloading", true)
 	}
 	mgr.mu.Lock()

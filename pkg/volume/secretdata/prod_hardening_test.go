@@ -278,7 +278,7 @@ func TestRenameDir_StaleDirMeta_DeterministicArbitration(t *testing.T) {
 	}
 
 	// 至少重挂载两次：两次结果必须一致，且都指向新名字（此前按 ListDir 顺序取第一个 ⇒ 可能回退）。
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		fs2 := newFSSharedInner(t, syncpkg.NewLocalFS(root, nil))
 		if e, serr := fs2.Stat(ctx, "new-dir/a.bin"); serr != nil || e == nil {
 			t.Fatalf("第 %d 次重挂载：改名后的文件在新路径不可见 (entry=%v, err=%v)", i+1, e, serr)
