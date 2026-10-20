@@ -18,7 +18,7 @@ grep -rhoE 'Action: *"[^"]+"' --include=*.go pkg/ | sed 's/.*"\(.*\)"/\1/' | sor
 grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 's/.*"\(.*\)"/\1/' | sort -u
 ```
 
-## 2. 覆盖矩阵（2026-10-20 快照）
+## 2. 覆盖矩阵（2026-10-20 快照：**59/59 埋点动作已覆盖**）
 
 ### 2.1 文件 / 目录（`pkg/files` + `pkg/server`）
 
@@ -55,8 +55,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | `volume_copy` | 同上（跨卷复制断言 object 含文件名） | ✅ |
 | `volume_import` / `volume_export` | `pkg/server/audit_volume_export_scenarios_test.go` | ✅ |
 | `volume_mirror` | `pkg/server/audit_mirror_scenarios_test.go`（`mirror_targets` + 直驱 `volumeMirrorPass`） | ✅ |
-| `volume_tier_downgrade` | `pkg/server/audit_tier_scenarios_test.go`（直驱 `scanOnce`） | ✅ |
-| `volume_tier_promote` | — | ⬜ GAP（需完整下载路由 + owner ACL 视图才能命中 `resolveTierPromote`） |
+| `volume_tier_downgrade` / `volume_tier_promote` | `pkg/server/audit_tier_scenarios_test.go`（直驱 `scanOnce` + 直接驱动读路径决策点 `resolveTierPromote`） | ✅ |
 | `user_volume_create` / `user_volume_delete` | `pkg/server/audit_user_volume_scenarios_test.go`（**并修掉外部卷建卷无审计**） | ✅ |
 
 ### 2.4 密钥 / presign / 分享 / 同步 / 凭据
@@ -95,7 +94,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | ~~P2~~ ✅ | ~~`sync_task_create`~~ | 已补（`audit_sync_scenarios_test.go`） | — |
 | ~~P2~~ ✅ | ~~`sync_conflict_resolve`~~ | 已补（注入真实冲突记录 + 真实 handler） | — |
 | ~~P2~~ ✅ | ~~`cloud_group_create` / `cloud_group_delete`~~ | 已补（`audit_cloud_group_scenarios_test.go`） | — |
-| P3 | `volume_tier_promote`（1） | 读时回迁 | 需完整下载路由 + owner ACL 视图（匿名 harness 解析不到对象） |
+| — | **无剩余 GAP** | 59/59 埋点动作均有断言 | — |
 | ~~P2~~ ✅ | ~~`credential_login`~~ | 已补（`audit_login_scenarios_test.go`） | — |
 | P3 | `ai.embed` | **未埋点**（`ActionAIEmbed` 常量存在但全仓无 `Action:` 使用点） | 先决定是否要该事件；要则补埋点 + 断言（**不含文本内容**） |
 

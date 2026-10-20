@@ -12,15 +12,17 @@ package server
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 )
 
-// TestAuditScenario_TierDowngrade 超阈值文件被降级 ⇒ 一条 volume_tier_downgrade。
-func TestAuditScenario_TierDowngrade(t *testing.T) {
+// TestAuditScenario_TierDowngradeAndPromote 降级（scanOnce）+ 冷读回迁（resolveTierPromote）各一条审计。
+func TestAuditScenario_TierDowngradeAndPromote(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	vols := []VolumeConfig{
@@ -51,7 +53,22 @@ func TestAuditScenario_TierDowngrade(t *testing.T) {
 		t.Errorf("result = %q, want success", ev.Result)
 	}
 
-	// ② `volume_tier_promote`（冷读回迁）需要**完整下载路由 + owner ACL 视图**才能命中
-	//    `resolveTierPromote`（本 harness 的匿名 owner 在下载面解析不到该对象 ⇒ 404）。
-	//    该动作记档为后续项（见 docs/testing/audit-scenarios.md §3）。
+	// ② 冷读回迁：直接驱动读路径的单一决策点 `resolveTierPromote`（下载 handler 对它的
+	//    调用只是「定位成功后才调用」的包装；本用例已把「对象在 cold 卷」这一前置条件摆好）。
+	r := httptest.NewRequest(http.MethodGet, "/download?filename=tier.txt", nil)
+	loc := &fileLocation{volumeName: "cold", tenant: h.volumeTenant("cold", "")}
+	dp := h.resolveTierPromote(r, "", "tier.txt", "user/tier.txt", loc)
+	if dp == nil {
+		t.Fatal("冷层文件应被回迁到 hot 卷（resolveTierPromote 返回 nil ⇒ 未回迁 ✗）")
+	}
+	if dp.volName != "hot" {
+		t.Errorf("回迁目标卷 = %q, want hot", dp.volName)
+	}
+	promoted := h.readAuditEvents(context.Background(), audit.EntryFilter{Action: "volume_tier_promote"}, 0, false)
+	if len(promoted) == 0 {
+		t.Fatal("缺少 volume_tier_promote 审计行（读时回迁改变对象所在卷，必须可追溯 ✗）")
+	}
+	if !strings.Contains(promoted[len(promoted)-1].Detail, "→") {
+		t.Errorf("detail 应含 from→to 卷, got %q", promoted[len(promoted)-1].Detail)
+	}
 }
