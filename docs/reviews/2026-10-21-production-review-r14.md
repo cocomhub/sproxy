@@ -93,3 +93,22 @@ NEW-1 软删失败回写 · C8/C9 quarantine 与 trash meta 的 Warn+metric+清�
 
 验证：workspace `go test ./...` **96 包** · `-tags=e2e ./test/...` 3 包 · `make web-test` · `golangci-lint` 0 ·
 archcheck 全绿（含 sleep/serial 棘轮：新增固定等待已改为 `Gosched`/通道，串行用例按规范登记）。
+
+## 5. 恢复功能的**端到端**测试覆盖（真实进程 kill -9 / 重启）
+
+新增 `test/e2e_restart_harness_test.go`（可重启的真实 sproxy 子进程：构建一次 + 固定端口 + 同一存储根）
+与两组用例：
+
+| 用例 | 验证的保证 | 关键断言 |
+| --- | --- | --- |
+| `TestE2E_Restart_CloudDownloadResumesAfterKill9` | 下载中断后**自动续传** | kill -9 重启后任务 completed；源站收到**非零起点 Range**；产物 checksum 与源一致 |
+| `TestE2E_Restart_QueuedTasksContinue` | **排队任务**重启后继续（C1） | `cloud_max_concurrent: 1` 下 3 任务，kill 后重启 ⇒ 三个全部 completed（修复前排队任务被转 failed） |
+| `TestE2E_QuotaFull_WaitsThenSucceeds` | 配额不足**自动等待重试** | 配额满时上传不立刻 507；删除旧文件后排队上传自动成功（客户端零重试）且内容正确 |
+| `TestE2E_Restart_QuotaMatchesDiskTruth` | 崩溃后**配额账本 = 磁盘真值** | 1.2 MiB/2 MiB 配额下重启：再写 1.2 MiB 必须被拒（账本没归零）；删除后可写（没幽灵占用） |
+| `TestE2E_GracefulShutdown_ResumesDownload` | **优雅停机**（SIGINT）后仍能继续 | 停机重启后任务 completed（不因优雅退出丢任务） |
+
+> 🔎 **这组 E2E 立刻抓到一处真缺陷**：`SubmitAndStart` **没有**把 `CloudTask.Submitted` 落盘
+> （早前一次变异还原把该行清掉了，而单元测试是**手写**字段 ⇒ 覆盖不到写入侧）。E2E 首跑即报
+> 「排队任务重启后被判 failed」，修复后新增单测 `TestSubmitAndStart_PersistsSubmitted` 钉住写入侧。
+> 结论：**恢复语义必须用真实进程 E2E 验证**，单测无法替代（它验证的是「机制」而不是「接线」）。
+

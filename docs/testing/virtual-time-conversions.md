@@ -218,4 +218,6 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 
 | 文件 | 串行数 | 理由 |
 | --- | --- | --- |
-| `pkg/cloud/recovery_queued_test.go` | 3 | 三个用例都直接操作**同一个** `CloudDownloadManager` 的 `m.tasks`/磁盘状态（恢复路径会启动下载 goroutine 并读写共享 map）⇒ 并行会互相污染状态；且恢复语义本身依赖「单进程内唯一一次 RecoverAll」。已用**唯一 URL + 独立 tempdir** 降低耦合，但不满足 `t.Parallel()` 的隔离前提。 |
+| `pkg/cloud/recovery_queued_test.go` | 4 | 三个用例都直接操作**同一个** `CloudDownloadManager` 的 `m.tasks`/磁盘状态（恢复路径会启动下载 goroutine 并读写共享 map）⇒ 并行会互相污染状态；且恢复语义本身依赖「单进程内唯一一次 RecoverAll」。已用**唯一 URL + 独立 tempdir** 降低耦合，但不满足 `t.Parallel()` 的隔离前提。第 4 个（`TestSubmitAndStart_PersistsSubmitted`）验证「提交时是否把 submitted 落盘」，同样操作共享 manager 状态。 |
+| `test/e2e_restart_cloud_test.go` | 2 | 每个用例都要**构建并启动真实 sproxy 子进程**、占用固定端口与独立存储根，并做 kill -9 / 重启；端口与进程生命周期是全局资源，不能并行。 |
+| `test/e2e_restart_quota_test.go` | 3 | 同上（真实进程 + 固定端口 + 存储根）；其中配额用例还需控制「等待/释放」时序。 |

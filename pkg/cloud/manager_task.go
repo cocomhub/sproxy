@@ -151,7 +151,11 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 		return task, nil
 	}
 	m.running[realTask.ID] = true
+	// C1：**在启动 goroutine 之前**把「已被接管」落盘。否则排队中（等并发槽）的任务磁盘仍是
+	// 裸 `pending`，重启会被当成「从未启动的孤儿」转 failed（批量任务大面积不继续）。
+	realTask.Submitted = true
 	m.mu.Unlock()
+	_ = m.saveTask(realTask)
 
 	useSync := syncCtx != nil && totalSize > 0 && totalSize < m.config.SyncThreshold
 
