@@ -229,10 +229,12 @@ func TestArchiveSealed_RequiresDeps(t *testing.T) {
 	}
 }
 
-// TestFSArchiver_WritesViaSyncCapability 经 `pkg/sync.FS`（真实 LocalFS）写入并**幂等不覆盖**。
+// TestFSArchiver_WritesViaSyncCapability 经 `pkg/sync.FS`（真实 LocalFS）写入，且**内容寻址**：
+// 同内容 ⇒ 同名（幂等），**异内容 ⇒ 不同名（绝不互相覆盖/丢弃）**。
 //
-// 幂等来自既有能力 `sync.WriteIfAbsent`（LocalFS/PrefixFS/StagingQuotaGateFS 均已实现）⇒
-// 审计包不自造 sink 接口 ✓。
+// 🔴 这条契约是评审 R13 P0 的回归锚点：旧实现用「日期 + basename」做目标名 —— 而封段名恒为
+// `audit.log.N` 且轮转会复用序号 ⇒ 同一天内同名不同内容会撞名；`WriteIfAbsent` 对已存在返回
+// `(false, nil)`，旧实现把「没写成功」当成功 ⇒ 调用方删掉本地封段 = **证据静默丢失** ✗。
 func TestFSArchiver_WritesViaSyncCapability(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -241,30 +243,59 @@ func TestFSArchiver_WritesViaSyncCapability(t *testing.T) {
 	a := FSArchiver{FS: fsys, Now: func() time.Time { return time.Unix(0, 0).UTC() }}
 	seg := SegmentInfo{Path: "/hot/audit.log.2", Size: 5, Sealed: true}
 
-	ref, err := a.Archive(ctx, seg, strings.NewReader("hello"))
+	readAll := func(ref string) string {
+		t.Helper()
+		rc, err := fsys.OpenRead(ctx, ref)
+		if err != nil {
+			t.Fatalf("OpenRead(%s): %v", ref, err)
+		}
+		defer rc.Close()
+		b, _ := io.ReadAll(rc)
+		return string(b)
+	}
+
+	refA, err := a.Archive(ctx, seg, strings.NewReader("hello"))
 	if err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
-	rc, oerr := fsys.OpenRead(ctx, ref)
-	if oerr != nil {
-		t.Fatalf("OpenRead(%s): %v", ref, oerr)
-	}
-	got, _ := io.ReadAll(rc)
-	_ = rc.Close()
-	if string(got) != "hello" {
-		t.Fatalf("归档内容不符: %q", string(got))
+	if got := readAll(refA); got != "hello" {
+		t.Fatalf("归档内容不符: %q", got)
 	}
 
-	// 幂等：目标已存在 ⇒ 不覆盖（第二次写不同内容，读回仍应是 hello）。
-	ref2, err2 := a.Archive(ctx, seg, strings.NewReader("XXXXX"))
-	if err2 != nil || ref2 != ref {
-		t.Fatalf("幂等路径应返回同一 ref: ref=%s err=%v", ref2, err2)
+	// ① 同内容 ⇒ 幂等（同名、不产生第二份）。
+	refA2, err := a.Archive(ctx, seg, strings.NewReader("hello"))
+	if err != nil || refA2 != refA {
+		t.Fatalf("同内容应返回同一 ref: ref=%s err=%v", refA2, err)
 	}
-	rc2, _ := fsys.OpenRead(ctx, ref)
-	again, _ := io.ReadAll(rc2)
-	_ = rc2.Close()
-	if string(again) != "hello" {
-		t.Fatalf("幂等路径不得覆盖: %q", string(again))
+
+	// ② **异内容 ⇒ 不同 ref 且两份内容都完好**（旧实现会返回同一 ref 且丢掉第二份 ✗）。
+	refB, err := a.Archive(ctx, seg, strings.NewReader("XXXXX"))
+	if err != nil {
+		t.Fatalf("Archive(不同内容): %v", err)
+	}
+	if refB == refA {
+		t.Fatalf("不同内容不得复用同一归档名（会覆盖/丢失证据）: %s", refB)
+	}
+	if got := readAll(refA); got != "hello" {
+		t.Fatalf("第一份被破坏: %q", got)
+	}
+	if got := readAll(refB); got != "XXXXX" {
+		t.Fatalf("第二份内容不符: %q", got)
+	}
+
+	// ③ 冷目录里应恰好两份（没有残留临时对象）。
+	ents, lerr := fsys.ListDir(ctx, "audit-archive/19700101")
+	if lerr != nil {
+		t.Fatalf("ListDir: %v", lerr)
+	}
+	var n int
+	for _, e := range ents {
+		if !e.IsDir {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("冷目录应有 2 个归档对象（含临时对象残留检查）, got %d", n)
 	}
 }
 

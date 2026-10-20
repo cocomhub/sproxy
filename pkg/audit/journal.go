@@ -445,15 +445,25 @@ func (j *FileJournal) totalAndArchivesLocked() (int64, []SegmentInfo, error) {
 	return total, arch, nil
 }
 
-// archiveIndex 解析归档名尾部的序号（`audit.log.3` ⇒ 3；非归档 ⇒ 0）。
+// archiveIndex 解析归档名中**紧跟 `audit.log.` 的序号**（`audit.log.3` ⇒ 3；非归档 ⇒ 0）。
+//
+// 为什么要「紧跟 audit.log.」而不是「最后一个点后的数字」：冷段归档采用**内容寻址**命名
+// （`audit.log.3.<sha256:16>`，见 `FSArchiver.Archive`）⇒ 名字末尾是哈希而不是序号；
+// 若仍取最后一个点后的片段，所有冷段的 Index 都会退化成 0 ⇒ `ListCold` 的「最旧优先」排序
+// 与读面热冷合并的顺序都会退化成不确定 ✗（评审 R13 修复过程中实测）。
 func archiveIndex(path string) int {
 	base := filepath.Base(path)
-	i := strings.LastIndex(base, ".")
-	if i < 0 || i == len(base)-1 {
+	const marker = "audit.log."
+	i := strings.LastIndex(base, marker)
+	if i < 0 {
 		return 0
 	}
-	n, err := strconv.Atoi(base[i+1:])
-	if err != nil {
+	rest := base[i+len(marker):]
+	if cut := strings.IndexByte(rest, '.'); cut >= 0 {
+		rest = rest[:cut] // 丢弃内容寻址后缀（或二次轮转残留）
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n <= 0 {
 		return 0
 	}
 	return n
@@ -705,7 +715,11 @@ func (j *FileJournal) rotateAllLocked(reason string) error {
 	}
 	rotated := false
 	for _, name := range names {
-		if strings.Contains(filepath.Base(name), ".audit.log.") {
+		// 归档段判定必须用 `archiveIndex`：生产段名是 `audit.log`（不含前置点），旧的
+		// `Contains(name, ".audit.log.")` 只对默认段名 `compliance.audit.log` 成立 ⇒ 生产上会把
+		// `audit.log.1` 当在线段再轮转成 `audit.log.1.1`（该名字的 segmentBase 不再是 globalName
+		// ⇒ 从 Segments()/Read() 里消失，磁盘仍占）✗ 评审 R13 P2。
+		if archiveIndex(filepath.Base(name)) > 0 {
 			continue // 归档段不重复轮转
 		}
 		if rerr := j.rotateLocked(name, reason); rerr != nil {
@@ -801,7 +815,7 @@ func (j *FileJournal) Rewrite(keep func(Entry) bool) error {
 		return err
 	}
 	for _, name := range names {
-		if strings.Contains(filepath.Base(name), ".audit.log.") {
+		if archiveIndex(filepath.Base(name)) > 0 {
 			continue // 归档段为离线冷数据，不参与在线重写（设计 E25/§5.5）
 		}
 		if err := j.rewriteSegmentLocked(name, keep); err != nil {

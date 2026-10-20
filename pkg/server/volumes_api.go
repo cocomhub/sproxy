@@ -254,7 +254,7 @@ func (h *Handlers) auditVolumeMoveIfFailed(r *http.Request, remotePath, fromVol,
 		return // 成功路径由各自分派点埋点（含 detail 里的字节数）
 	}
 	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "volume_move", ObjectType: "file", Object: remotePath, Result: "failed",
+		Action: "volume_move", ObjectType: "file", Object: remotePath, Result: AuditResultError,
 		Detail: fmt.Sprintf("%s → %s 失败（HTTP %d）", fromVol, toVol, status),
 	})
 }

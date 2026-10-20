@@ -19,12 +19,15 @@ package audit
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -168,23 +171,33 @@ func (a FSArchiver) Archive(ctx context.Context, seg SegmentInfo, r io.Reader) (
 	if now == nil {
 		now = time.Now
 	}
-	rel := path.Join(prefix, now().UTC().Format("20060102"), filepath.Base(seg.Path))
+	dir := path.Join(prefix, now().UTC().Format("20060102"))
+	base := filepath.Base(seg.Path)
 
-	// 可选能力查询（仓库既有范式：使用方类型断言查能力，不在调用侧硬编码实现语义）。
-	writer, hasWriteIfAbsent := a.FS.(syncpkg.WriteIfAbsent)
-	if !hasWriteIfAbsent {
-		// 退化路径：先看目标是否已存在且大小一致（幂等），再普通写。
-		if e, err := a.FS.Stat(ctx, rel); err == nil && e != nil && seg.Size > 0 && e.Size == seg.Size {
-			return rel, nil
-		}
-		if err := a.FS.WriteFile(ctx, syncpkg.LogicalKey{}, rel, r, seg.Size, 0); err != nil {
-			return "", fmt.Errorf("audit: 写归档目标失败: %w", err)
-		}
-		return rel, nil
+	// ① 先写**唯一临时对象**（纳秒后缀），避免并发/重入互相覆盖。
+	tmpRel := path.Join(dir, "."+base+"."+strconv.FormatInt(now().UnixNano(), 36))
+	h := sha256.New()
+	if err := a.FS.WriteFile(ctx, syncpkg.LogicalKey{}, tmpRel, io.TeeReader(r, h), seg.Size, 0); err != nil {
+		_ = a.FS.Delete(ctx, tmpRel)
+		return "", fmt.Errorf("audit: 写归档临时对象失败: %w", err)
 	}
-	// 首选：既有幂等写能力（目标已存在 ⇒ 不覆盖、written=false）。
-	if _, err := writer.WriteIfAbsent(ctx, rel, r, seg.Size, 0); err != nil {
-		return "", fmt.Errorf("audit: 写归档目标（WriteIfAbsent）失败: %w", err)
+
+	// ② **内容寻址**命名：`<basename>.<sha256:16>`。
+	//
+	// 为什么不能沿用「日期 + basename」：封段名恒为 `audit.log.N`，而轮转会**复用序号**
+	// （`.1` 被搬成 `.2`、随后又产生新的 `.1`）⇒ 同一天内同名不同内容必然撞名；而
+	// `WriteIfAbsent` 对已存在返回 `(false, nil)` ⇒ 旧实现把「没写成功」当成功，调用方随即
+	// 删除本地封段 = **审计证据静默丢失** ✗（评审 R13 P0）。
+	// 内容寻址下：同内容 ⇒ 同名（幂等 ✓）；异内容 ⇒ 不同名（绝不覆盖 ✓）。
+	sum := hex.EncodeToString(h.Sum(nil))
+	finalRel := path.Join(dir, base+"."+sum[:16])
+	if err := a.FS.Rename(ctx, tmpRel, finalRel); err != nil {
+		// 目标已存在（Windows rename 不覆盖）：同名即同内容 ⇒ 幂等成功。
+		_ = a.FS.Delete(ctx, tmpRel)
+		if e, serr := a.FS.Stat(ctx, finalRel); serr == nil && e != nil {
+			return finalRel, nil
+		}
+		return "", fmt.Errorf("audit: 归档目标 rename 失败: %w", err)
 	}
-	return rel, nil
+	return finalRel, nil
 }

@@ -318,7 +318,8 @@ func (s *Service) writeStep(base Entry, step string, start time.Time, errMsg str
 	e.Type = stepType(step)
 	e.Step = step
 	e.DurMS = s.eff.clock.Since(start).Milliseconds()
-	e.StartMS = e.DurMS
+	// StartMS 是**步骤开始时刻**（评审 R13 P3：此前被赋成 DurMS ⇒ 该字段恒等于耗时且语义错误）。
+	e.StartMS = start.UnixMilli()
 	e.Err = errMsg
 	e.Level = LevelInfo
 	if errMsg != "" {

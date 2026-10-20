@@ -52,9 +52,10 @@ func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger)
 		log.Warn("审计已显式关闭（audit.disabled=true）")
 		return nil, nil
 	}
-	if cfg.Audit.BufferSize <= 0 {
-		return nil, nil // 显式 0 = 关闭内存环形缓冲（读面返回空表；落盘仍按下方装配）
-	}
+	// 显式 `buffer_size: 0` = **只关内存环形索引**（读面改由落盘段提供；落盘仍按下方装配）。
+	// 评审 R13 P1：此前在这里直接 `return nil, nil` ⇒ journal/service 全被丢弃 = 整条审计链
+	// 被静默关闭（连文件都不建），与 config.go / docs/config.md 的说明**相反** ✗。
+	indexEnabled := cfg.Audit.BufferSize > 0
 	root := resolveDefaultVolumeRoot(cfg)
 	// 热段目录 = <卷根>/__audit__/hot/：`__` 前缀被 ListOwners 跳过 ⇒ 不污染租户命名空间
 	// （旧位置 <卷根>/audit/ 会被当租户枚举且可被注册占用 —— 见设计 §5.6 点 5）。
@@ -97,9 +98,13 @@ func setupAuditServices(cfg *Config, coldFS func() syncpkg.FS, log *slog.Logger)
 	if journal != nil {
 		jr = journal
 	}
+	var idx audit.Index = audit.NullIndex{}
+	if indexEnabled {
+		idx = audit.NewRingIndex(cfg.Audit.BufferSize)
+	}
 	svc, serr := audit.New(audit.Options{
 		Journal: jr,
-		Index:   audit.NewRingIndex(cfg.Audit.BufferSize),
+		Index:   idx,
 		Logger:  log,
 		Policy:  audit.Policy{MaxMemoryEntries: cfg.Audit.BufferSize},
 		Caps:    &caps,

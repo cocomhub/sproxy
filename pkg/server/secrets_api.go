@@ -187,7 +187,7 @@ func (h *Handlers) createSecretHandler(w http.ResponseWriter, r *http.Request) {
 // 的潜在扩散点，见 §5.7）。
 func (h *Handlers) auditSecretFailed(r *http.Request, action, name string, status int) {
 	h.RecordAudit(r.Context(), AuditEvent{
-		Action: action, ObjectType: "secret", Object: name, Result: "failed",
+		Action: action, ObjectType: "secret", Object: name, Result: AuditResultError,
 		Detail: fmt.Sprintf("失败（HTTP %d）", status),
 	})
 }
