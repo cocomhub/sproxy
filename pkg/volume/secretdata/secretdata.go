@@ -2135,8 +2135,17 @@ func scanContainerDirMetaBlob(ctx context.Context, s *SecretdataFS, container st
 	// meta：`repairInterruptedDirMoves` 会把容器按旧声明搬回去 ⇒ 改名**静默回退**（再次重启可能
 	// 又翻回新路径），用户按新路径写入的文件也随之改名。这里改为「取**最新 mtime**」：新 meta
 	// 必然后写（同一容器内顺序执行），与「已完成但清理失败」的真实意图一致，且**可重现**。
-	// 同 mtime 时按名字排序兜底，并显式 Warn 便于运维发现清理残留。
+	// 排序键：Version（改名递增）→ mtime → 名字；并显式 Warn 便于运维发现清理残留。
 	slices.SortStableFunc(cands, func(a, b dirMetaCand) int {
+		// ① 版本号（改名/移动单调递增）——权威信号，不依赖文件系统时间精度；
+		// ② mtime（兼容旧数据：旧版改名不递增版本，同版本时按写入先后）；
+		// ③ 名字（纯兜底，保证完全确定性）。
+		if av, bv := a.dm.Version, b.dm.Version; av != bv {
+			if av > bv {
+				return -1
+			}
+			return 1
+		}
 		if a.mtime != b.mtime {
 			if a.mtime > b.mtime {
 				return -1
@@ -2661,6 +2670,11 @@ func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName
 	}
 	dm.Name = newName
 	dm.ParentDirID = newParentID
+	// **版本单调递增**（P1 修复，2026-10-21）：改名/移动会给同一目录写**新** meta 并删旧 meta；
+	// 若删旧失败，容器内并存两个 meta（同一 DirID、不同 Name/Parent）。仲裁需要「哪个更新」的
+	// 权威信号——文件系统 mtime 在不同后端分辨率/精度不可靠（本地卷实测可出现相等，退化成按
+	// 随机盐文件名排序 ⇒ 约 50% 概率回退旧名）。Version 是 meta 自身字段，单调 +1 即确定。
+	dm.Version++
 	newName, werr := s.writeDirMetaLocked(ctx, container, dm)
 	if werr != nil {
 		return werr

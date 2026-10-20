@@ -270,6 +270,9 @@ func TestRenameDir_StaleDirMeta_DeterministicArbitration(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	inner.armed = true
+	// 让新旧 meta 的 mtime **确定不同**（仲裁以「最新时间」为准；同 tick 相等会退化为按名字
+	// 兜底 ⇒ 与「新旧」无关）。少量等待换取用例确定性。
+	<-time.After(20 * time.Millisecond)
 	if err := fs.Rename(ctx, "old-dir", "new-dir"); err != nil {
 		t.Fatalf("改名（旧 meta 清理失败不应报错）: %v", err)
 	}
