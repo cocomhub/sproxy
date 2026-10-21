@@ -258,8 +258,23 @@ type chunkRangeOpts struct {
 // 支持 Range 却失败应暴露）；底层不实现 RangeReader 时调用方已前置断言，此处恒 ok=true。
 func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.RangeReader, o chunkRangeOpts, offset, end int64) ([]byte, bool, error) {
 	segPath := path.Join(s.dataSeg(o.e), o.ci.FileName)
-	// 拉块头部 salt（[R 128B][8B 长][salt 32B] → salt 位于 blSaltOff 起 32B）。
-	head, ok, err := syncpkg.RangeReadAll(rr, ctx, segPath, shardseal.BlockSaltOffset(), shardseal.SaltLen)
+	// **salt + 目标段单次合并请求（2026-10-21）**：块 blob 布局为
+	// `[R 128B][8B 密文流长][salt 32B][boot 段 40B][数据段…]`，boot 后各段间仅 0-63B
+	// 随机间隙 ⇒ salt 末尾到首段起点仅 40-103B。故一次 Range 从 **salt 起点**覆盖到
+	// 末段末，再从返回的连续字节中按已知偏移切出 salt 与各段。
+	// 旧实现：salt 一次 + 每段一次 = 每块 1+N 次往返（网盘每往返 ~0.1-0.3s，是随机读慢的主因）。
+	targets := selectRangeBlocklets(o.ci.Blocklets, offset, end)
+	if len(targets) == 0 {
+		return nil, true, nil
+	}
+	saltOff := shardseal.BlockSaltOffset()
+	spanOff := saltOff
+	last := targets[len(targets)-1]
+	spanEnd := last.EncOffset + last.EncSize
+	if spanEnd <= spanOff {
+		return nil, true, fmt.Errorf("secretdata: blocklet 段区间非法（off=%d end=%d）", spanOff, spanEnd)
+	}
+	span, ok, err := syncpkg.RangeReadAll(rr, ctx, segPath, spanOff, spanEnd-spanOff)
 	if err != nil {
 		return nil, true, err
 	}
@@ -268,34 +283,13 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		// 避免下游 `fmt.Errorf("…: %w", nil)` 生成畸形错误（评审 P3 修复，2026-10-21）。
 		return nil, true, syncpkg.ErrUnsupported
 	}
-	if verr := shardseal.VerifyBlockSalt(head, o.salt); verr != nil {
+	// salt 从合并区间内切片（偏移相对 spanOff）并校验（防块被替换）。
+	saltRel := saltOff - spanOff
+	if saltRel < 0 || saltRel+shardseal.SaltLen > int64(len(span)) {
+		return nil, true, fmt.Errorf("secretdata: salt 越出合并区间（rel=%d len=%d）", saltRel, len(span))
+	}
+	if verr := shardseal.VerifyBlockSalt(span[saltRel:saltRel+shardseal.SaltLen], o.salt); verr != nil {
 		return nil, true, verr
-	}
-	// **段合并请求（coalesce，2026-10-21）**：相邻 blocklet 段在块 blob 内**近似连续**
-	// （段间仅 cryptoRandN(64) = 0-63B 随机间隙，见 shardseal.planBlockletLayout），且每段
-	// 精确位置 EncOffset/EncSize 已在 meta ⇒ **一次** Range 覆盖 [首段.EncOffset, 末段.EncOffset+
-	// 末段.EncSize)，再按已知 EncOffset 切片逐段解密。
-	// 旧实现逐段一次 RangeReadAll ⇒ N 段 = N 次请求（每次一记 RTT）；网盘场景是随机读慢的
-	// 主因之一（实测 242KB 文件 47s）。
-	targets := selectRangeBlocklets(o.ci.Blocklets, offset, end)
-	if len(targets) == 0 {
-		return nil, true, nil
-	}
-	first := targets[0]
-	last := targets[len(targets)-1]
-	spanOff := first.EncOffset
-	spanEnd := last.EncOffset + last.EncSize
-	spanSize := spanEnd - spanOff
-	if spanSize <= 0 {
-		return nil, true, fmt.Errorf("secretdata: blocklet 段区间非法（off=%d end=%d）", spanOff, spanEnd)
-	}
-	span, ok, serr := syncpkg.RangeReadAll(rr, ctx, segPath, spanOff, spanSize)
-	if serr != nil {
-		return nil, true, serr
-	}
-	if !ok {
-		// 防御：同上（ErrUnsupported ⇒ 上游走整块回落，见 readChunkRangeBytes 三分判据）。
-		return nil, true, syncpkg.ErrUnsupported
 	}
 	var out []byte
 	for _, bl := range targets {
@@ -321,7 +315,7 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 }
 
 // selectRangeBlocklets 返回与 [offset,end) 相交的**已使用** blocklet 段（保持 meta 顺序，
-// 即块内密文顺序）——供合并请求算 [首段.EncOffset, 末段.EncOffset+EncSize) 覆盖区间。
+// 即块内密文顺序）——供合并请求算 [salt 起点, 末段.EncOffset+EncSize) 覆盖区间。
 func selectRangeBlocklets(blocklets []shardseal.BlockletInfo, offset, end int64) []shardseal.BlockletInfo {
 	out := make([]shardseal.BlockletInfo, 0, len(blocklets))
 	for _, bl := range blocklets {

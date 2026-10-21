@@ -91,7 +91,9 @@ func TestOpenRangeRead_LazyFirstReadOnlyFetchesTargetSegment(t *testing.T) {
 	if probe.rangeReads != 0 || probe.wholeReads != 0 {
 		t.Fatalf("OpenRangeRead 后不应触发底层读取（惰性），got range=%d whole=%d", probe.rangeReads, probe.wholeReads)
 	}
-	// 2) 首次 Read 只拉含 offset=200 的段（首段区间应覆盖 200 且长度 ≤ 单段上限）。
+	// 2) 首次 Read 只拉「含 offset=200 的那一块」（salt 起点 + boot + 目标段，
+	//    远小于整个窗口）——而非急切物化整窗口。salt 合并（2026-10-21）后区间
+	//    从 salt 起点开始（BlockSaltOffset），含 salt 32B + gap + boot 40B 开销。
 	buf := make([]byte, 100)
 	if _, rerr := io.ReadFull(rc, buf); rerr != nil {
 		t.Fatalf("ReadFull: %v", rerr)
@@ -99,8 +101,13 @@ func TestOpenRangeRead_LazyFirstReadOnlyFetchesTargetSegment(t *testing.T) {
 	if !bytes.Equal(buf, content[200:300]) {
 		t.Fatalf("首段内容错误：got %q", buf)
 	}
-	if probe.firstRange.size > 128 {
-		t.Fatalf("首次段读区间过大（size=%d，期望 ≤ 单块/段上限）——急切物化了整个窗口", probe.firstRange.size)
+	if probe.firstRange.offset != shardseal.BlockSaltOffset() {
+		t.Fatalf("首次段读应从 salt 起点 %d 开始（salt 合并），got %d",
+			shardseal.BlockSaltOffset(), probe.firstRange.offset)
+	}
+	if probe.firstRange.size >= int64(len(content)) {
+		t.Fatalf("首次段读区间 %d ≥ 整文件/窗口 %d——急切物化了整个窗口",
+			probe.firstRange.size, len(content))
 	}
 	// 3) 整块回落未发生（段读路径正常）。
 	if probe.wholeReads != 0 {

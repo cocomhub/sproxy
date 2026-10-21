@@ -29,3 +29,57 @@ test('videoPlayerModalHtml includes video src + standard Range player', () => {
   assert.match(html, /<video/);
   assert.match(html, /src=/);
 });
+// ---- URL 票（?spx_sig=，2026-10-21 方案 B'）----
+// 浏览器原生 <video> 无法自定义请求头 ⇒ 用 `?spx_sig=` 承载 SproxySig；TTL 1h；
+// 签名覆盖业务查询（不含票自身）。
+
+const { withUrlSig, URL_SIG_TTL_MS, URL_SIG_QUERY } = require('./video-player.js');
+
+test('withUrlSig 无凭据时原样返回（回落无票 URL）', async () => {
+  globalThis.sclientSig = { signHeader: async () => 'SproxySig v=2 ak=x' };
+  // 未设置全局 accessKey/accessKeySecret ⇒ 原样返回
+  const out = await withUrlSig('filename=a.mp4');
+  assert.equal(out, 'filename=a.mp4');
+});
+
+test('withUrlSig 有凭据时拼 spx_sig 且签名覆盖业务查询、exp=1h', async () => {
+  let seen = null;
+  globalThis.sclientSig = {
+    signHeader: async (method, pathWithQuery, body, opts) => {
+      seen = { method, pathWithQuery, body, opts };
+      return 'SproxySig v=2 sig=deadbeef';
+    },
+  };
+  globalThis.accessKey = 'ak-1';
+  globalThis.accessKeySecret = 'sk-1';
+  globalThis.accessKeyID = 'skey-1';
+
+  const before = Date.now();
+  const out = await withUrlSig('filename=dir%2Fmovie.mp4&volume=vault');
+  const after = Date.now();
+
+  // 签名输入必须是不含票的业务 URL（票不能自引用）。
+  assert.equal(seen.method, 'GET');
+  assert.equal(seen.pathWithQuery, '/download?filename=dir%2Fmovie.mp4&volume=vault');
+  assert.equal(seen.opts.ak, 'ak-1');
+  assert.equal(seen.opts.secret, 'sk-1');
+  assert.equal(seen.opts.entryID, 'skey-1');
+  // exp 应为 now+1h（允许测试执行区间抖动）。
+  assert.ok(Number(seen.opts.exp) >= before + URL_SIG_TTL_MS, 'exp 应 ≥ now+1h');
+  assert.ok(Number(seen.opts.exp) <= after + URL_SIG_TTL_MS, 'exp 应 ≤ after+1h');
+  // 输出携带 URL 编码后的票。
+  assert.ok(out.startsWith('filename=dir%2Fmovie.mp4&volume=vault&' + URL_SIG_QUERY + '='));
+  assert.ok(out.includes(encodeURIComponent('SproxySig v=2 sig=deadbeef')));
+
+  delete globalThis.accessKey; delete globalThis.accessKeySecret; delete globalThis.accessKeyID;
+  delete globalThis.sclientSig;
+});
+
+test('withUrlSig 签名抛错时原样返回（不阻断播放尝试）', async () => {
+  globalThis.sclientSig = { signHeader: async () => { throw new Error('boom'); } };
+  globalThis.accessKey = 'ak-1'; globalThis.accessKeySecret = 'sk-1'; globalThis.accessKeyID = '';
+  const out = await withUrlSig('filename=a.mp4');
+  assert.equal(out, 'filename=a.mp4');
+  delete globalThis.accessKey; delete globalThis.accessKeySecret; delete globalThis.accessKeyID;
+  delete globalThis.sclientSig;
+});

@@ -3069,10 +3069,19 @@ function hideVersioning() {
 // --- 视频播放器（标准 Range 播放弹窗） ---
 // showVideoPlayer：渲染 videoPlayerModalHtml（含 <video src> + 标题 + data-close 关闭钮）
 // 到 #video-player-modal 容器并显示；关闭时暂停并卸载 video（避免播放续留内存/声音）。
-function showVideoPlayer(filename, volume) {
+async function showVideoPlayer(filename, volume) {
   const body = document.getElementById('video-player-body');
+  // 先渲染弹窗（加载态），再异步准备**带 URL 票**的播放 URL 并注入 <video>。
+  // 为何异步：URL 票由 sclientSig.signHeader（WebCrypto HMAC，Promise）计算，
+  // 签名覆盖业务查询（filename/volume），票参数 `spx_sig` 最后拼接。
   body.innerHTML = videoPlayerModalHtml({ filename: filename, volume: volume || '' });
   document.getElementById('video-player-modal').style.display = 'flex';
+  const video = body.querySelector('video');
+  if (!video) return;
+  const query = await withUrlSig(
+    videoPlayerUrl({ filename: filename, volume: volume || '' }).split('?')[1] || ''
+  );
+  video.src = '/download?' + query;
 }
 
 function hideVideoPlayer() {
@@ -3518,7 +3527,7 @@ function initDynamicEventDelegation() {
       }
       // 视频行「▶ 播放」→ 标准 <video> Range 播放弹窗（data-volume 空 = 服务端 auto 路由）。
       if (btn.hasAttribute('data-video-play')) {
-        showVideoPlayer(btn.dataset.filename, btn.dataset.volume || '');
+        void showVideoPlayer(btn.dataset.filename, btn.dataset.volume || '');
         return;
       }
 
@@ -3732,7 +3741,7 @@ function previewFile(filename) {
   const ext = filename.split('.').pop().toLowerCase();
 
   if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
-    previewImage(filename);
+    void previewImage(filename);
   } else if (['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'].includes(ext)) {
     void previewText(filename);
   } else {
@@ -3740,7 +3749,10 @@ function previewFile(filename) {
   }
 }
 
-function previewImage(filename) {
+// previewImage 展示图片预览弹窗（登录态下用 URL 票，2026-10-21）：
+// `<img>` 无法自定义 Authorization 头 ⇒ 经 previewImageUrlAsync/previewOriginalUrlAsync
+// 附加 `?spx_sig=`（无凭据时原样回落，无认证部署不受影响）。
+async function previewImage(filename) {
   const modal = document.createElement('div');
   modal.className = 'modal-overlay-img';
   modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
@@ -3748,22 +3760,32 @@ function previewImage(filename) {
   const img = document.createElement('img');
   img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;border-radius:4px;box-shadow:0 4px 24px rgba(0,0,0,.5);';
   img.alt = filename;
+  modal.appendChild(img);
+  document.body.appendChild(modal);
+
   // B4：先加载缩略图（?transform=thumb&width=1600 省带宽；服务端按需生成）。
   // 缩略图加载失败（transform 未注册/生成失败）回退原图；点击 modal 切换原图。
+  // 先插入 DOM（显示空白 img）再 await 签名 —— 避免签名期间的视觉空白无反馈。
   let thumbLoaded = false;
   img.onerror = function () {
-    if (!thumbLoaded) { img.src = previewOriginalUrl(filename); thumbLoaded = true; }
+    if (!thumbLoaded) {
+      thumbLoaded = true;
+      void previewOriginalUrlAsync(filename).then(function (u) { img.src = u; });
+    }
   };
-  img.src = previewImageUrl(filename, 1600);
+  const thumbUrl = await previewImageUrlAsync(filename, 1600);
+  img.src = thumbUrl;
   thumbLoaded = true; // 首次即视为加载原图级（onerror 只在初次失败时回退）
   // 点击：缩略图 → 原图 → 关闭（两态轮换后关闭）。
   let stage = 0;
   modal.addEventListener('click', function () {
-    if (stage === 0) { img.src = previewOriginalUrl(filename); stage = 1; }
-    else if (document.body.contains(modal)) modal.remove();
+    if (stage === 0) {
+      stage = 1;
+      void previewOriginalUrlAsync(filename).then(function (u) { img.src = u; });
+    } else if (document.body.contains(modal)) {
+      modal.remove();
+    }
   });
-  modal.appendChild(img);
-  document.body.appendChild(modal);
 }
 
 async function previewText(filename) {

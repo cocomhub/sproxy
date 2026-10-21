@@ -121,6 +121,19 @@ type RingAuthenticator struct {
 	// 存在的理由：包级 slog 既不受 RegisterRoutesOpts.Logger 控制（测试/基准注入的
 	// discard/缓冲 logger 关不掉），也不经 WithContextHandler（丢 trace_id）。
 	logger *slog.Logger
+	// urlSigTTLValue 是 **URL 票形态**（`?spx_sig=`）的 TTL 上限（2026-10-21）：默认 1h
+	// （`registration.download_token_ttl` 可配，0/缺省走 defaultURLSigTTL）。
+	// 仅作用于 URL 形态（请求头形态仍用 sproxysig 默认 5min）。由 opts 一次性注入
+	// （装配后只读，无并发写）。
+	urlSigTTLValue time.Duration
+}
+
+// urlSigTTL 返回 URL 票 TTL 上限（0/负值 → defaultURLSigTTL）。
+func (a *RingAuthenticator) urlSigTTL() time.Duration {
+	if a.urlSigTTLValue <= 0 {
+		return defaultURLSigTTL
+	}
+	return a.urlSigTTLValue
 }
 
 // RingAuthOption 是 NewRingAuthenticator 的可选配置（变参 —— 既有两参调用点无需改动）。
@@ -129,6 +142,13 @@ type RingAuthOption func(*RingAuthenticator)
 // WithRingLogger 注入 RingAuthenticator 的认证日志器（nil 回退 slogutil.Default）。
 func WithRingLogger(l *slog.Logger) RingAuthOption {
 	return func(a *RingAuthenticator) { a.logger = slogutil.Default(l) }
+}
+
+// WithURLSigTTL 注入 URL 票形态（`?spx_sig=`）的 TTL 上限（2026-10-21）：
+// 来自配置 registration.download_token_ttl（0/缺省走 defaultURLSigTTL=1h）。
+// 仅作用于 URL 形态（请求头形态仍用 sproxysig 默认 5min）。
+func WithURLSigTTL(ttl time.Duration) RingAuthOption {
+	return func(a *RingAuthenticator) { a.urlSigTTLValue = ttl }
 }
 
 // NewRingAuthenticator 构造 RingAuthenticator（ring = SproxySig 凭据表；
@@ -421,6 +441,14 @@ func (a *RingAuthenticator) verifySproxySigFromRing(r *http.Request) (*verifiedC
 	renewAK := r.PathValue("ak")
 	isSelfRenew := renewAK != "" && r.URL.Path == "/api/credentials/"+renewAK+"/renew"
 
+	// **URL 票形态（2026-10-21，方案 B'）**：浏览器原生标签（`<video>`/`<img>`/下载链接）
+	// 无法自定义请求头 ⇒ 用 `?spx_sig=<URL 编码的 SproxySig 头>` 承载授权。语义差异：
+	// 不查 nonce 池（video 多 Range 请求复用同一 URL）+ TTL 放宽（默认 1h）。
+	// 未带票/验签失败均静默回落（过期 URL 残留不误伤请求头认证）。
+	if cred := a.tryURLSig(r); cred != nil {
+		return cred, nil
+	}
+
 	// 未携带 Authorization 头：不是「非法头」，而是「未提供凭据」——认证链的常规
 	// 失败路径（后续成员仍可认证；全失败由 authMiddleware 统一 401 或回环兜底）。
 	// 此处**必须静默**：无头请求是基准 / 健康探测 / 匿名直连的常态，旧行为对它打
@@ -628,7 +656,8 @@ func (h *Handlers) runAuthenticatorChain(w http.ResponseWriter, r *http.Request,
 	// 兜底），宿主 replace 成空链不得被默认链覆盖。
 	authenticators := h.authenticators
 	if h.authenticators == nil && h.credentialRing != nil {
-		authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool, WithRingLogger(h.log()))}
+		authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool,
+			WithRingLogger(h.log()), WithURLSigTTL(h.urlSigTTLFromCfg()))}
 	}
 	if len(authenticators) > 0 {
 		var lastErr error

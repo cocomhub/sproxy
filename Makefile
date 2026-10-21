@@ -240,6 +240,7 @@ web-test:
 	node --test web/static/audit-filter.test.js
 	node --check web/static/audit-filter.js
 	node --test web/static/image-preview.test.js
+	node --test web/static/app-preview-wiring.test.js
 	node --test web/static/video-player.test.js
 	node --test web/static/volume-ops.test.js
 	node --test web/static/credentials-format.test.js

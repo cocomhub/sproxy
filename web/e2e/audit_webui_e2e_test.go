@@ -260,6 +260,11 @@ func TestAuditWebUI_CreateVault_SwitchList_PlayRange(t *testing.T) {
 	if serr != nil {
 		t.Fatalf("读取 <video> src: %v", serr)
 	}
+	// 2026-10-21：<video> src 由前端 withUrlSig 按需附加 `?spx_sig=`（URL 票）——**仅当**
+	// 页面持有凭据时（登录会话）才签票；**本 e2e 是无凭据回环环境**（日志 actor=""，服务端
+	// AllowInsecureLoopback 放行）⇒ 无凭据时不签票是正确行为（不在这里断言 spx_sig）。
+	// 「有凭据 → 带票」的口径由前端单测（video-player.test.js `withUrlSig` 用例）与
+	// 服务端 urlsig_test.go 共同锁定。
 	if !strings.Contains(src, "/download?filename=movie.mp4") {
 		t.Fatalf("<video> src = %q, want 含明文文件名 /download?filename=movie.mp4（加密卷视频行入口）", src)
 	}

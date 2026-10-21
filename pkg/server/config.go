@@ -559,6 +559,10 @@ type RegistrationConfig struct {
 	// LoginFailWindow 是 per-AK 失败锁定期（默认 15m，U4）：达 LoginFailLimit 后
 	// 锁定 LoginFailWindow 时长，到期自动解锁（无需管理员介入）。
 	LoginFailWindow time.Duration `yaml:"login_fail_window" mapstructure:"login_fail_window"`
+	// DownloadTokenTTL 是「URL 票」形态的 SproxySig 有效期（`?spx_sig=`，浏览器原生标签
+	// `<video>/<img>` 无法自定义请求头只能用 URL 承载授权）。默认 1h（用户裁定 2026-10-21）；
+	// 0/缺省 = 1h；短 TTL 降低 URL 泄露窗口，长 TTL 适配长视频连续播放。
+	DownloadTokenTTL time.Duration `yaml:"download_token_ttl" mapstructure:"download_token_ttl"`
 }
 
 // VaultConfig 是 Vault Transit 后端子配置（credential_store.vault 段，

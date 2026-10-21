@@ -288,7 +288,8 @@ func (h *Handlers) initAuthChain(opts RegisterRoutesOpts, log *slog.Logger) {
 	if opts.Authenticators != nil {
 		h.authenticators = opts.Authenticators
 	} else {
-		h.authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool, WithRingLogger(log))}
+		h.authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool,
+			WithRingLogger(log), WithURLSigTTL(h.urlSigTTLFromCfg()))}
 	}
 	// 外部认证（OIDC/LDAP，roadmap 11.7-⑥）登录面 + 认证链成员：装配层注入的
 	// ExternalAuthHandlers 追加到链尾（外部 Bearer/会话 cookie 与 SproxySig 互斥，

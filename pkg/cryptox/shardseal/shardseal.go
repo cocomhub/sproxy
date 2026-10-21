@@ -23,13 +23,35 @@ import (
 	"time"
 )
 
-// DefaultBlockPolicy 返回默认分块策略（设计 §4.1：1MB-200MB 随机；blocklet 细分 64KB-4MB
-// fixed——块内定长 blocklet，支持视频关键帧随机访问只下载/解密目标段）。
+// DefaultBlockPolicy 返回**本地卷**默认分块策略（设计 §4.1：1MB-200MB 随机；blocklet 细分
+// 64KB-4MB fixed——块内定长 blocklet，支持视频关键帧随机访问只下载/解密目标段）。
+//
+// 本地卷取 4MiB blocklet：page cache + 零网络开销，大段减少请求数、meta 更小。
 func DefaultBlockPolicy() BlockPolicy {
 	return BlockPolicy{
 		Mode: "random", Min: 1 << 20, Max: 200 << 20,
 		BlockletMode: "fixed", BlockletMin: 64 << 10, BlockletMax: 4 << 20,
 	}
+}
+
+// externalBlockletMax 是**外部/网盘卷**默认 blocklet 上限（2026-10-21 用户裁定）：256KiB。
+// 权衡（实测网盘上行 ~1MB/s、下行 ~0.5MB/s、GCM 3.5GB/s）：
+//   - blocklet **不影响上传**（上传单位是「块」= 1MB-200MB random ⇒ 3GB 恒 30 块），
+//     只影响「随机读一次下载的密文量」与 meta 大小；
+//   - 64KiB 随机读最快（range 1.37s vs 4MiB 的 10.8s），但 3GB meta 7.1MiB（挂载偏慢）；
+//   - 256KiB：单段 256KiB → 网盘 ~0.5s/段（首帧/seek 足够流畅）、3GB meta 仅 1.8MiB、
+//     解密 ~0.07ms（可忽略）——最平衡。低带宽 + 强 seek 场景可人工降 64KiB。
+//
+// 本地卷仍用 DefaultBlockPolicy（4MiB）。
+const externalBlockletMax = 256 << 10
+
+// ExternalDefaultBlockPolicy 返回**外部/网盘卷**默认分块策略：块级仍 1MB-200MB random，
+// blocklet 上限降为 256KiB（详见 externalBlockletMax 注释）。
+// 用户显式 `extra.block_policy` 优先，不受本默认影响。
+func ExternalDefaultBlockPolicy() BlockPolicy {
+	bp := DefaultBlockPolicy()
+	bp.BlockletMax = externalBlockletMax
+	return bp
 }
 
 // Planner 由 BlockPolicy 构造双层规划器（块 BlockPlanner + 块内 blocklet 规划器）。
