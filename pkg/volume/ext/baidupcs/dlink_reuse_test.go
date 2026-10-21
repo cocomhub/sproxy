@@ -28,23 +28,23 @@ import (
 	"time"
 )
 
-// countingAdapter 包装 fakeStorageAdapter：统计 DirectLink（= 直链签发）调用次数。
+// dlinkCountingAdapter 包装 fakeStorageAdapter：统计 DirectLink（= 直链签发）调用次数。
 // 经 StorageConfig.Adapter（结构体字段）注入 —— 不是包级可变 seam。
-type countingAdapter struct {
+type dlinkCountingAdapter struct {
 	*fakeStorageAdapter
 	signs atomic.Int64
 }
 
-func (c *countingAdapter) DirectLink(ctx context.Context, remotePath string) (string, bool, error) {
+func (c *dlinkCountingAdapter) DirectLink(ctx context.Context, remotePath string) (string, bool, error) {
 	c.signs.Add(1)
 	return c.fakeStorageAdapter.DirectLink(ctx, remotePath)
 }
 
 // newCountingRangeEnv 建「可计数直链签发」的 Storage + 内容服务器（直链打到 httptest）。
-func newCountingRangeEnv(t *testing.T, content string) (*Storage, *countingAdapter, string) {
+func newCountingRangeEnv(t *testing.T, content string) (*Storage, *dlinkCountingAdapter, string) {
 	t.Helper()
 	srv := newRangeTestServer(t, content, nil)
-	ad := &countingAdapter{fakeStorageAdapter: newFakeStorageAdapter()}
+	ad := &dlinkCountingAdapter{fakeStorageAdapter: newFakeStorageAdapter()}
 	ad.dlink = srv.URL + "/f.bin"
 	st, err := NewStorage(StorageConfig{
 		Root:    "/",
@@ -134,7 +134,7 @@ func TestGetRange_ExpiredDlinkResignsOnce(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	ad := &countingAdapter{fakeStorageAdapter: newFakeStorageAdapter()}
+	ad := &dlinkCountingAdapter{fakeStorageAdapter: newFakeStorageAdapter()}
 	ad.dlink = srv.URL + "/f.bin"
 	st, err := NewStorage(StorageConfig{Root: "/", TempDir: t.TempDir(), Adapter: ad, Logger: testLogger()})
 	if err != nil {
