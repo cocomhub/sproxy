@@ -40,7 +40,9 @@ func newFakeBaidupcsStorage() *fakeBaidupcsStorage {
 
 // PutFromStagedPath 实现 baidupcs.StorageAPI（staging 路径复用）：读暂存文件入内存，
 // 不删/不改调用方文件。
-func (f *fakeBaidupcsStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64) (*baidupcs.ObjectMeta, error) {
+// PutFromStagedPath 复用已暂存文件（fake：读该文件入内存、不删/不改调用方文件）。
+// hints 忽略（fake 无性能语义；签名对齐 StorageAPI）。
+func (f *fakeBaidupcsStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64, hints *baidupcs.PutHints) (*baidupcs.ObjectMeta, error) {
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
 		return nil, err

@@ -56,7 +56,8 @@ func (f *fakeStorage) Put(ctx context.Context, key string, r io.Reader) (*Object
 }
 
 // PutFromStagedPath 复用已暂存文件（fake：读该文件入内存，**不删/不改**调用方文件）。
-func (f *fakeStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64) (*ObjectMeta, error) {
+// hints 忽略（fake 无性能语义；签名对齐 StorageAPI）。
+func (f *fakeStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64, hints *PutHints) (*ObjectMeta, error) {
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
 		return nil, err

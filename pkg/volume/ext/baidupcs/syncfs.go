@@ -58,8 +58,11 @@ type StorageAPI interface {
 	// 调用方（StorageFS.Rename）回退 Copy+Delete。
 	Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error)
 	// PutFromStagedPath 复用**调用方已暂存**的本地文件路径上传（本地 staging 路径复用：
-	// 不再拷第二份；只读 stagedPath，生命周期由调用方负责）。
-	PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64) (*ObjectMeta, error)
+	// 不再拷第二份；只读 stagedPath，生命周期由调用方负责）。hints 为可选上传预计算
+	// （md5/分块列表/size；RandomBlob 标记随机新建内容），nil = 全自算（现状行为）。
+	// P1（2026-10-21）：新增 hints 参数——secretdata 交错路径每块密文顺带算 md5，
+	// 传入后跳过整块重读（省 O(块) 两遍）+ 跳过 pre-Stat（RandomBlob 秒传命中率 0）。
+	PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64, hints *PutHints) (*ObjectMeta, error)
 }
 
 // NewStorageFS 构造 StorageFS 适配层。temp 为本地中间态目录（默认 os.TempDir()）。
@@ -86,11 +89,33 @@ func (f *StorageFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath
 	if err != nil {
 		return err
 	}
-	if _, perr := f.s.PutFromStagedPath(ctx, clean, stagedPath, size); perr != nil {
+	// 通用上传提示映射（与 WriteFile 同口径）：RandomContent ⇒ RandomBlob；
+	// MD5/CRC32/Size 填充 ⇒ 整块免重扫。
+	if _, perr := f.s.PutFromStagedPath(ctx, clean, stagedPath, size, uploadHintsToPutHints(ctx)); perr != nil {
 		return mapPCSError(perr)
 	}
 	_ = mtime // 百度 API 无直接 Chtimes（与 WriteFile 同口径）
 	return nil
+}
+
+// uploadHintsToPutHints 把通用 UploadHints（写面提示）映射为 baidupcs 特化 PutHints。
+//
+// **两个维度独立**（2026-10-21 审核修复）：MD5/CRC32/Size（**校验值**，任何内容都可用 ⇒
+// 整块免重扫）与 RandomContent（**内容形态**，仅控制是否跳 pre-Stat）互不耦合——此前把
+// 校验值映射也挂在 RandomContent 门下，普通文件（外层已算 md5）的免重扫收益被丢弃。
+// 无提示 ⇒ nil（现状自算）。
+func uploadHintsToPutHints(ctx context.Context) *PutHints {
+	uh, ok := syncpkg.UploadHintsFrom(ctx)
+	if !ok {
+		return nil
+	}
+	hints := &PutHints{RandomBlob: uh.RandomContent}
+	if uh.MD5 != "" && uh.Size > 0 {
+		hints.Md5 = uh.MD5
+		hints.Size = uh.Size
+		hints.Crc32 = uh.CRC32
+	}
+	return hints
 }
 
 // ListDir 列出目录单层条目（目录+文件混合，不递归）。
@@ -177,7 +202,10 @@ func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPa
 	// 1×size，与配额 1× 预留口径一致）；否则本函数落一份 staging 后同样以「路径复用」入口
 	// 上传（不再由 Storage 内部拷第二份）。
 	if staged, ok := syncpkg.StagedLocalPathFrom(ctx); ok {
-		if _, perr := f.s.PutFromStagedPath(ctx, clean, staged, size); perr != nil {
+		// **上传提示映射同样适用于 staged 分支**（2026-10-21 修正）：调用方已暂存 + 已算
+		// md5/crc32（secretdata 交错路径）→ 经 UploadHints 免整块重扫 + 跳 pre-Stat。
+		// 此前只传 nil ⇒ RandomContent/MD5 提示在此分支被丢弃（绕过了免重扫收益）。
+		if _, perr := f.s.PutFromStagedPath(ctx, clean, staged, size, uploadHintsToPutHints(ctx)); perr != nil {
 			return mapPCSError(perr)
 		}
 		return nil
@@ -198,7 +226,10 @@ func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPa
 	}
 	// 2. 上传网盘（Storage 内部有界重试 + ETag 复核）。**以 staging 路径复用入口上传**：
 	// Storage 不再拷第二份（此前 staging-* + stage-*/basename 两份并存 = 峰值 2×size）。
-	meta, err := f.s.PutFromStagedPath(ctx, clean, tmpPath, size)
+	// P1（2026-10-21）：ctx 携带 PutHints 时透传（secretdata 交错路径每块密文顺带算
+	// md5 + RandomBlob 标记 ⇒ 跳过整块重读与 pre-Stat，省每次上传 2-3 次 API 往返）。
+	// 通用上传提示映射（RandomContent ⇒ RandomBlob 跳 pre-Stat；MD5/CRC32/Size 免整块重扫）。
+	meta, err := f.s.PutFromStagedPath(ctx, clean, tmpPath, size, uploadHintsToPutHints(ctx))
 	if err != nil {
 		return mapPCSError(err)
 	}

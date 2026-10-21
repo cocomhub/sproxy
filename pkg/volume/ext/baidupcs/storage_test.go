@@ -513,6 +513,93 @@ func TestStorage_Put_MultipartETagRefresh(t *testing.T) {
 	}
 }
 
+// TestStorage_PutFromStagedPath_HintsSkipPreStat RandomBlob 提示跳过首轮 pre-Stat
+// （内容随机新建，秒传命中率 0）——用计数 Stat 断言：RandomBlob 路径的上传前 Stat
+// 次数为 0（普通路径首轮有 pre-Stat）；上传后的复核 Stat 是**必须的**（刷新路径，不计）。
+func TestStorage_PutFromStagedPath_HintsSkipPreStat(t *testing.T) {
+	t.Parallel()
+	ad := &countingStatAdapter{inner: newFakeStorageAdapter()}
+	s := newTestStorage(t, ad)
+	content := "hints-skip-prestat-content"
+	staged := filepath.Join(s.temp, "h.bin")
+	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 普通路径：上传前有 pre-Stat（putCheckExisting）。
+	if _, err := s.PutFromStagedPath(context.Background(), "n.bin", staged, int64(len(content)), nil); err != nil {
+		t.Fatalf("PutFromStagedPath: %v", err)
+	}
+	if ad.statCalls < 2 {
+		t.Fatalf("普通路径应有 pre-Stat + 上传后复核 Stat（>=2），got %d", ad.statCalls)
+	}
+	ad.statCalls = 0
+	// RandomBlob 路径：跳过上传前 pre-Stat，但上传后复核 Stat 仍在（>=1）。
+	if _, err := s.PutFromStagedPath(context.Background(), "h.bin", staged, int64(len(content)),
+		&PutHints{RandomBlob: true}); err != nil {
+		t.Fatalf("PutFromStagedPath: %v", err)
+	}
+	if ad.statCalls != 1 {
+		t.Fatalf("RandomBlob 应跳过上传前 pre-Stat、仅留上传后复核 Stat（=1），got %d", ad.statCalls)
+	}
+}
+
+// countingStatAdapter 统计 Meta（= Stat）调用次数。
+type countingStatAdapter struct {
+	inner     *fakeStorageAdapter
+	statCalls int
+}
+
+func (a *countingStatAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
+}
+func (a *countingStatAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	return a.inner.Download(ctx, remotePath, localPath)
+}
+func (a *countingStatAdapter) Move(ctx context.Context, f, t2 string) error {
+	return a.inner.Move(ctx, f, t2)
+}
+func (a *countingStatAdapter) Copy(ctx context.Context, f, t2 string) error {
+	return a.inner.Copy(ctx, f, t2)
+}
+func (a *countingStatAdapter) Delete(ctx context.Context, remotePath string) error {
+	return a.inner.Delete(ctx, remotePath)
+}
+func (a *countingStatAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.inner.List(ctx, remotePath)
+}
+func (a *countingStatAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	a.statCalls++
+	return a.inner.Meta(ctx, remotePath)
+}
+
+var _ Adapter = (*countingStatAdapter)(nil)
+
+// TestStorage_PutFromStagedPath_RandomBlobNoHints_ScanAndBlockList（P2 改名，2026-10-21）：
+// RandomBlob **无 Md5/Size**（外层未算）⇒ 内层全自算 + **块列表必算**（红线）——不跳过
+// 任何读回；上传成功且 ETag 权威。旧名/注释「跳过块列表读回」与实现矛盾（误导）。
+func TestStorage_PutFromStagedPath_RandomBlobNoHints_ScanAndBlockList(t *testing.T) {
+	t.Parallel()
+	ad := newFakeStorageAdapter()
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("skip-blocklist-", 64)
+	staged := filepath.Join(s.temp, "blk.bin")
+	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutFromStagedPath(context.Background(), "blk.bin", staged, int64(len(content)),
+		&PutHints{RandomBlob: true}); err != nil {
+		t.Fatalf("PutFromStagedPath: %v", err)
+	}
+	// 内容与 md5 一致（小文件单传 ETag 即整文件 md5，无需刷新）。
+	m, err := s.Stat(context.Background(), "blk.bin")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if want := md5Hex(content); m.ETag != want {
+		t.Fatalf("ETag = %s, want %s", m.ETag, want)
+	}
+}
+
 // multipartETagAdapter 模拟百度分片上传：Upload 后 Stat 返回片组合 ETag（非整文件 md5），
 // RapidUpload 命中后把 ETag 刷新为整文件 md5。
 type multipartETagAdapter struct {
@@ -544,8 +631,9 @@ func (e *multipartETagAdapter) Meta(ctx context.Context, remotePath string) (*Ob
 	if err != nil {
 		return nil, err
 	}
+	// 分片语义：**首次上传后 Stat 必为片组合 ETag**（服务端 md5 为片组合/"可能不正确"），
+	// 只有 rapidupload 秒传刷新命中后才返回权威整文件 md5——真实百度行为（M4 实测）。
 	if e.multipart && !e.rapidHit && m != nil {
-		// 分片语义：真实 md5 算好前 Stat 返回"片组合"（伪造值，≠ 整文件 md5）。
 		return &ObjectMeta{Key: m.Key, Size: m.Size, ETag: "slicemd5-combo-not-whole"}, nil
 	}
 	return m, nil
@@ -920,7 +1008,7 @@ func TestStorage_PutFromStagedPath_NoPhysicalSecondCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink.linkSource = staged
-	if _, err := s.PutFromStagedPath(context.Background(), "reuse.bin", staged, int64(len(content))); err != nil {
+	if _, err := s.PutFromStagedPath(context.Background(), "reuse.bin", staged, int64(len(content)), nil); err != nil {
 		t.Fatalf("PutFromStagedPath: %v", err)
 	}
 	stagedInfo, serr := os.Stat(staged)
@@ -981,4 +1069,53 @@ func (a *recordingUploadPathAdapter) List(ctx context.Context, remotePath string
 }
 func (a *recordingUploadPathAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
 	return a.inner.Meta(ctx, remotePath)
+}
+
+// TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5 复现/回归（红线，2026-10-21）：
+// RandomBlob 跳块列表读回 ⇒ blockMD5s 空 ⇒ renewAuthoritativeMD5 bail ⇒ md5 刷新被跳过
+// （分片上传后远端 ETag 必非权威，无刷新则一致性红线被架空）。修复：块列表**必须算**。
+func TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5(t *testing.T) {
+	t.Parallel()
+	ad := &unreliableMD5RapidAdapter{inner: &unreliableMD5Adapter{inner: newFakeStorageAdapter()}}
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("repro-", 100)
+	staged := filepath.Join(s.temp, "repro.bin")
+	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutFromStagedPath(context.Background(), "repro.bin", staged, int64(len(content)),
+		&PutHints{RandomBlob: true}); err != nil {
+		t.Fatalf("PutFromStagedPath: %v", err)
+	}
+	if !ad.rapidHit {
+		t.Fatal("BUG：远端 md5 非权威 + RandomBlob ⇒ 刷新被跳过（红线违反）")
+	}
+}
+
+// TestStorage_PutFromStagedPath_HintsSkipFullScan（P2 修复，2026-10-21）：**免重扫主分支**
+// 测试锁定——全 hints（Md5+Crc32+Size+SliceMD5+BlockMD5s）时走 stageUploadFromHints，
+// **不重算 md5**（st.md5 = 调用方值）。判据：故意传**错误**的 Md5 → ETag 复核必不匹配 →
+// 有界重试耗尽 → ErrTransient（若实现重算了 md5，错误 hint 被忽略 ⇒ 上传成功 ⇒ 本用例红）。
+func TestStorage_PutFromStagedPath_HintsSkipFullScan(t *testing.T) {
+	t.Parallel()
+	ad := newFakeStorageAdapter()
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("hints-skip-full-scan-", 64)
+	staged := filepath.Join(s.temp, "scan.bin")
+	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 故意错的 md5（真值见下）——用于证明实现**采用调用方 hint** 而非重算。
+	wrongMD5 := strings.Repeat("0", 32)
+	_, err := s.PutFromStagedPath(context.Background(), "scan.bin", staged, int64(len(content)),
+		&PutHints{
+			Md5: wrongMD5, Crc32: "1", Size: int64(len(content)),
+			SliceMD5: md5Hex(content[:256]), BlockMD5s: []string{md5Hex(content)},
+		})
+	if err == nil {
+		t.Fatal("hints 携带错误 Md5 时应复核失败（证明采用了调用方 hint 而非重算）✗")
+	}
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("复核不匹配耗尽重试应以 ErrTransient 返回，实测: %v", err)
+	}
 }

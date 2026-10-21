@@ -10,12 +10,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 )
@@ -209,8 +213,19 @@ func versionConflictErr(sv, expected int64) error {
 }
 
 // uploadBlob 上传数据/元数据字节到底层（mtime 打散由调用方给定 mt）。
+// 2026-10-21：内存 blob **顺带算整块 md5/crc32** 经 UploadHints 交给内层（baidupcs
+// 免整块重扫；其它后端忽略零回归）。meta 也走这里（随机 pad 内容，同样免扫收益）。
 func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt int64) error {
-	return s.inner.WriteFile(ctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt)
+	wctx := ctx
+	if len(data) > 0 {
+		wctx = syncpkg.WithUploadHints(ctx, &syncpkg.UploadHints{
+			RandomContent: true,
+			Size:          int64(len(data)),
+			MD5:           md5HexOf(data),
+			CRC32:         strconv.FormatUint(uint64(crc32.ChecksumIEEE(data)), 10),
+		})
+	}
+	return s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt)
 }
 
 // dedupStagingDir 为去重写路径准备本地临时目录（自管 staging 配额记账），返回释放函数
@@ -237,7 +252,7 @@ func (s *SecretdataFS) encryptAndUploadDedupChunk(ctx context.Context, wc writeC
 	if err != nil {
 		return nil, "", err
 	}
-	if werr := s.uploadLocalChunk(ctx, dir, o.ChunkNames[0], chunkLocal, mt, uploaded); werr != nil {
+	if werr := s.uploadLocalChunk(ctx, dir, o.ChunkNames[0], chunkLocal, mt, chunkHash{}, uploaded); werr != nil {
 		return nil, "", fmt.Errorf("secretdata: 上传去重分块失败: %w", werr)
 	}
 	return o, path.Join(dir, o.ChunkNames[0]), nil

@@ -448,6 +448,12 @@ func vcExtraBlockPolicy(v volume.Volume) shardseal.BlockPolicy {
 		if vv, ok := m["blocklet_mode"].(string); ok && vv != "" {
 			bp.BlockletMode = vv
 		}
+		if minVal := vcPositiveInt(m["blocklet_min"]); minVal > 0 {
+			bp.BlockletMin = minVal
+		}
+		if maxVal := vcPositiveInt(m["blocklet_max"]); maxVal > 0 {
+			bp.BlockletMax = maxVal
+		}
 		if minVal := vcPositiveInt(m["min"]); minVal > 0 {
 			bp.Min = minVal
 		}

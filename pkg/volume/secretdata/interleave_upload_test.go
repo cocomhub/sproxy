@@ -6,6 +6,8 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // 测试探针自算（与被测 md5HexOf 隔离）
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -68,6 +70,35 @@ func (p *interleaveProbeFS) WriteFile(ctx context.Context, key syncpkg.LogicalKe
 	p.mu.Lock()
 	p.records = append(p.records, writeRecord{path: path, localFiles: n, staged: staged, size: size})
 	p.mu.Unlock()
+	// P1（2026-10-21）：断言**每种交付形态**（staged 数据分块 / 内存 blob·meta）都带
+	// **通用上传提示**（RandomContent + 已算好的 md5）——baidupcs 整块免重扫的接线前提。
+	// 并校验 md5 **值与被传内容一致**（防「给了 md5 但值是错的」假通过）。
+	if uh, ok := syncpkg.UploadHintsFrom(ctx); ok || true {
+		var hintErr error
+		var content []byte
+		if staged {
+			content, _ = os.ReadFile(sp)
+		} else {
+			content, _ = io.ReadAll(r)
+		}
+		switch {
+		case !ok:
+			hintErr = fmt.Errorf("上传应带 UploadHints(path=%s staged=%v)", path, staged)
+		case !uh.RandomContent:
+			hintErr = fmt.Errorf("上传应带 RandomContent 提示(path=%s)", path)
+		case uh.MD5 == "":
+			hintErr = fmt.Errorf("上传应带已算好的 MD5 提示(path=%s)", path)
+		case content != nil && uh.MD5 != md5HexOfTest(content):
+			hintErr = fmt.Errorf("MD5 提示值与内容不符(path=%s): got=%s want=%s", path, uh.MD5, md5HexOfTest(content))
+		}
+		if hintErr != nil {
+			p.mu.Lock()
+			if p.stageReadErr == nil {
+				p.stageReadErr = hintErr
+			}
+			p.mu.Unlock()
+		}
+	}
 	if !staged {
 		p.mu.Lock()
 		p.memoryWrites++
@@ -447,4 +478,11 @@ func TestWriteFile_DedupChunkUploadsViaStagedPath(t *testing.T) {
 	if !mustReadEqual(t, sfs, ctx, "d/f.bin", payload) {
 		t.Fatal("dedup 写回内容不一致")
 	}
+}
+
+// md5HexOfTest 是探针自算 md5（**独立于被测 md5HexOf**）——变异验证时被测实现被改，
+// 测试侧仍按真实内容自算 ⇒ 能抓到「提示 md5 值与内容不符」回归（两侧同函数会假绿）。
+func md5HexOfTest(b []byte) string {
+	h := md5.Sum(b) //nolint:gosec // 测试探针自算（与生产实现隔离）
+	return hex.EncodeToString(h[:])
 }

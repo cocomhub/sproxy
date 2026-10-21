@@ -19,10 +19,12 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // 密文块 md5（baidupcs ETag 复核/秒传基准），非安全用途
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -33,6 +35,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -545,42 +548,21 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 	if size == 0 {
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
+	// ctx 早检查（2026-10-21）：取消/超时的请求**不得**构造读流——即使惰性流会在首次 Read
+	// 才做 I/O，提前拒绝可让调用方立即拿到可识别的 context.Canceled（且不白建状态）。
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, fmt.Errorf("secretdata: 随机读被取消（不构造读流）: %w", cerr)
+	}
 	// 复用 fileLevelKey（salt 解码 + 一次派生）——**唯一**的文件级密钥派生入口，避免各处重复。
 	keyBytes, salt, kerr := s.fileLevelKey(e)
 	if kerr != nil {
 		return nil, kerr
 	}
-	out, rerr := s.rangeReadBytes(ctx, e, keyBytes, salt, offset, offset+size)
-	if rerr != nil {
-		return nil, rerr
-	}
-	return io.NopCloser(bytes.NewReader(out)), nil
-}
-
-// rangeReadBytes 逐块只下载/解密含 [offset,end) 的 blocklet 段并拼接覆盖区间明文。
-// 审计：Range 读取侧 decrypt 阶段 span（读取/播放侧解密路径——视频关键帧 seek 时每段独立
-// 解密，aggregate 到单次 range 读；Bytes = 返回明文段总长）。无 ctx logger 时 no-op
-// （与写入侧 encrypt span 对称）。
-func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) (out []byte, err error) {
-	decSpan := audit.BeginSpan(ctx, "decrypt")
-	defer func() {
-		if err != nil {
-			decSpan.Fail(err)
-			return
-		}
-		decSpan.End("bytes", int64(len(out)))
-	}()
-	for _, ci := range e.meta.Chunks {
-		if ci.Offset >= end || ci.Offset+ci.OrigSize <= offset {
-			continue // 该块与目标区间不相交 → 不下载
-		}
-		seg, rerr := s.readChunkRangeBytes(ctx, e, keyBytes, salt, ci, offset, end)
-		if rerr != nil {
-			return nil, rerr
-		}
-		out = append(out, seg...)
-	}
-	return out, nil
+	// **惰性流式（2026-10-21 缺陷修复）**：旧实现 `rangeReadBytes` 把窗口内全部分块
+	// 先下载+解密成 []byte 再包流 ⇒ 首帧要等整个 4MiB 窗口物化（网盘场景数秒）。
+	// 现改为 `rangeStream`（逐块「读→解→交」，首字节只需第一块）——crypto 层段级解密
+	// 能力（DecryptBlockletSegmentStandalone/decryptBlockletAt）本就支持，这里只做流式接线。
+	return newRangeStream(ctx, s, e, keyBytes, salt, offset, size), nil
 }
 
 // readChunkBlob 读取底层单个分块 blob（仅含目标区间的块被下载）。去重引用文件的数据
@@ -1108,6 +1090,10 @@ type interleavedUpload struct {
 	tmp      string
 	release  func()
 	uploaded []string
+	// chunkMD5/chunkCRC32 是当前待传密文块的整块 md5/crc32（sink 收 blob 时算好，
+	// uploadLocalChunk 交给内层 UploadHints——baidupcs 整块免重扫）。单块维度（每次覆盖）。
+	chunkMD5   string
+	chunkCRC32 string
 }
 
 // close 释放 staging 配额预留并删除本地临时目录（幂等，写路径 defer 调用）。
@@ -1184,13 +1170,17 @@ func (wc writeCtx) sourceReplayable() bool { return wc.sourcePath != "" }
 func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleavedUpload, wc writeCtx) shardseal.ChunkSink {
 	mt := s.blobMTime(wc.mtime)
 	return func(name string, blob []byte) error {
+		// P1（2026-10-21 完整收益）：sink 已持有完整密文块（内存）——顺带算整块 md5/crc32
+		// 一次（baidupcs 需要它们做 ETag 复核基准与秒传参数；此处省去 baidupcs 的整块重扫）。
+		iu.chunkMD5 = md5HexOf(blob)
+		iu.chunkCRC32 = strconv.FormatUint(uint64(crc32.ChecksumIEEE(blob)), 10)
 		if iu.mode == deliverLocalPath {
 			local := filepath.Join(iu.tmp, name)
 			if werr := os.WriteFile(local, blob, 0o600); werr != nil {
 				return fmt.Errorf("secretdata: 落本地分块 %s 失败: %w", name, werr)
 			}
 			defer func() { _ = os.Remove(local) }() // 交错：此刻之后本地不再保留该块
-			return s.uploadLocalChunk(ctx, wc.container, name, local, mt, &iu.uploaded)
+			return s.uploadLocalChunk(ctx, wc.container, name, local, mt, chunkHash{md5: iu.chunkMD5, crc32: iu.chunkCRC32}, &iu.uploaded)
 		}
 		p := path.Join(wc.container, name)
 		// **先登记后上传**（P2 修复，2026-10-19；同 uploadLocalChunk）：内层「写成功但复核
@@ -1280,7 +1270,8 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 		return uerr
 	}
 	mt := s.blobMTime(wc.mtime)
-	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(wc.container, metaName), bytes.NewReader(metaBlob), int64(len(metaBlob)), mt); werr != nil {
+	// 内存态 meta 经 uploadBlob（2026-10-21：顺带算 md5/crc32 经 UploadHints，内层免整块重扫）。
+	if werr := s.uploadBlob(ctx, path.Join(wc.container, metaName), metaBlob, mt); werr != nil {
 		s.rollbackWrite(ctx, uploaded, wc.created)
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
@@ -1400,7 +1391,7 @@ func (s *SecretdataFS) blobMTime(mtime int64) int64 {
 func (s *SecretdataFS) uploadChunks(ctx context.Context, container, tmp string, mtime int64, chunkNames []string, uploaded *[]string) error {
 	mt := s.blobMTime(mtime)
 	for _, cn := range chunkNames {
-		if err := s.uploadLocalChunk(ctx, container, cn, filepath.Join(tmp, cn), mt, uploaded); err != nil {
+		if err := s.uploadLocalChunk(ctx, container, cn, filepath.Join(tmp, cn), mt, chunkHash{}, uploaded); err != nil {
 			return err
 		}
 	}
@@ -1449,7 +1440,7 @@ func (s *SecretdataFS) retainPoolEntry(mm *shardseal.Meta) {
 //     md5 预扫 / 上传 / 重试 / 秒传刷新全部复用同一文件），不再落第二份 staging。
 //     生命周期契约（pkg/sync/stagedpath.go）：stagedPath **只读**——本函数返回前调用方不得删除它
 //     （秒传刷新要重读它），删除一律在返回后进行。
-func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, local string, mt int64, uploaded *[]string) error {
+func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, local string, mt int64, ch chunkHash, uploaded *[]string) error {
 	f, oerr := os.Open(local)
 	if oerr != nil {
 		return fmt.Errorf("secretdata: 打开本地分块 %s 失败: %w", name, oerr)
@@ -1463,6 +1454,16 @@ func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, lo
 		return fmt.Errorf("secretdata: 取本地分块 %s 长度失败: %w", name, serr)
 	}
 	wctx := syncpkg.WithStagedLocalPath(ctx, local)
+	// 通用上传提示（跨后端中性）：RandomContent 标记随机新建内容（baidupcs 识别为
+	// RandomBlob → 跳 pre-Stat；其它后端未知即忽略）；MD5 为 sink 算好的整块密文 md5
+	// （baidupcs 免整块重扫——外层已算，内层首次计算即复用，零重复计算）。
+	wctx = syncpkg.WithUploadHints(wctx, &syncpkg.UploadHints{
+		RandomContent: true,
+		Size:          size,
+		MD5:           ch.md5,
+		CRC32:         ch.crc32,
+		Path:          local,
+	})
 	dst := path.Join(container, name)
 	// **先登记后上传**（P2 修复，2026-10-19）：内层可能「写成功但复核失败」返回错误（如
 	// baidupcs 上传后 ETag 复核不匹配）⇒ 远端 blob 已存在；成功后登记会漏掉它 ⇒ 远端孤儿。
@@ -2552,7 +2553,7 @@ func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, paren
 	if nerr != nil {
 		return "", "", "", 0, nerr
 	}
-	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(c, name), bytes.NewReader(blob), int64(len(blob)), s.blobMTime(mtime)); werr != nil {
+	if werr := s.uploadBlob(ctx, path.Join(c, name), blob, s.blobMTime(mtime)); werr != nil {
 		return "", "", "", 0, fmt.Errorf("secretdata: 写目录 meta %s 失败: %w", name, werr)
 	}
 	return c, dirID, name, int64(len(blob)), nil
@@ -2981,7 +2982,7 @@ func (s *SecretdataFS) copyBlob(ctx context.Context, src, dst string, mtime int6
 	if e, serr := s.inner.Stat(ctx, src); serr == nil && e != nil && e.MTime > 0 {
 		mt = e.MTime
 	}
-	if werr := s.inner.WriteFile(ctx, syncpkg.LogicalKey{}, dst, bytes.NewReader(data), int64(len(data)), mt); werr != nil {
+	if werr := s.uploadBlob(ctx, dst, data, mt); werr != nil {
 		return fmt.Errorf("secretdata: 写入目标 blob %s 失败: %w", dst, werr)
 	}
 	return nil
@@ -3345,4 +3346,14 @@ func (s *SecretdataFS) unrefPoolEntry(ctx context.Context, e *metaEntry) {
 		}
 		delete(s.dedupPool, key)
 	}
+}
+
+// chunkHash 是密文块的整块校验值（sink 顺带算，交给内层 UploadHints）。
+type chunkHash struct{ md5, crc32 string }
+
+// md5HexOf 计算密文块整块 md5（hex；sink 顺带算，交给内层 UploadHints.MD5——
+// baidupcs 免整块重扫；密文是随机内容，md5 非安全用途，仅供百度 ETag 复核/秒传基准）。
+func md5HexOf(b []byte) string {
+	h := md5.Sum(b) //nolint:gosec // 见函数头注释
+	return hex.EncodeToString(h[:])
 }

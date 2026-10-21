@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path"
 
@@ -49,7 +50,7 @@ func (s *SecretdataFS) writeErasureParity(ctx context.Context, container, tmp st
 	}
 	// 与数据分块同口径：以**本地分块文件**为源上传，并经 `WithStagedLocalPath` 交内层复用
 	// （内层跨其上传/重试/秒传刷新复用同一路径；源 ∈ 本地文件 ⇒ 零二次拷贝、秒传零重算）。
-	if werr := s.uploadLocalChunk(ctx, container, enc.ChunkNames[0], local, s.blobMTime(mtime), uploaded); werr != nil {
+	if werr := s.uploadLocalChunk(ctx, container, enc.ChunkNames[0], local, s.blobMTime(mtime), chunkHash{}, uploaded); werr != nil {
 		return fmt.Errorf("secretdata: 上传 parity %s 失败: %w", enc.ChunkNames[0], werr)
 	}
 	out.Meta.Parity = &shardseal.ParityInfo{
@@ -194,17 +195,32 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 //
 // 底层支持 RangeReader 时：先走「按 blocklet 段局部读取」快速路径（只下载含目标区间的
 // 段密文 + 块头部 salt 一次，逐段独立解密——视频关键帧随机访问省去整块下载）。**Range
-// 段读失败时回落整块路径**（而非直接报错）：缺失块由 readChunkBlob 失败暴露、Erasure 卷
-// 走 parity 恢复——保证纠错的可用性在随机读路径上不被短路（审查 I1 修复）。无
-// RangeReader → 直接整块 io.ReadAll 回退（零回归）。
+// 段读失败时按成因三分回落/上抛**（2026-10-21 缺陷修复；不再一律回落整块——网盘场景会把
+// Range 放大成整文件下载，实测 242KB MP4 的 Range 请求 47s vs 本地 0.076s）：
+//
+//  1. 底层不支持 Range（ErrUnsupported）⇒ 回落整块（能力回退，非 Range 后端仍可用）；
+//  2. ctx 已终止（取消/超时）⇒ 立即上抛，**不回落**（取消后回落结果无人消费，只放大下载量）；
+//  3. 无 Erasure（无 parity 可恢复）⇒ 段读错误上抛（可见失败优于静默数十秒放大）；
+//  4. Erasure + parity ⇒ 仍回落整块 → parity 恢复（随机读路径的纠错不被短路，既有语义）。
+//
+// 无 RangeReader → 直接整块 io.ReadAll 回退（零回归）。
 func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
 	if rr := syncpkg.AssertRangeReader(s.inner); rr != nil {
 		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, chunkRangeOpts{e: e, keyBytes: keyBytes, salt: salt, ci: ci}, offset, end)
 		if rerr == nil && ok {
 			return seg, nil
 		}
-		// 段读失败（含块缺失）：回落整块路径。rerr 不静默吞——整块路径会重新暴露同类
-		// 失败（块缺失时 readChunkBlob 也失败 → 走 parity 恢复或 fail-closed）。
+		// 段读失败：按成因三分（见函数头注释）。ErrUnsupported = 底层能力缺失 → 回落；
+		// ctx 取消 → 上抛；无 parity → 上抛（静默放大整块是本次修复的根因）；
+		// 有 parity → 回落整块走恢复（既有 Erasure 语义）。
+		if errors.Is(rerr, syncpkg.ErrUnsupported) {
+			// 能力缺失：回落整块（非 Range 后端随机读继续可用，零回归）。
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("secretdata: 范围读取被取消（不回落整块，避免把 Range 放大成整文件下载）: %w", ctxErr)
+		} else if !s.opts.Erasure || e.meta.Parity == nil {
+			return nil, fmt.Errorf("secretdata: 范围读取失败（无 parity 可恢复，不回落整块）: %w", rerr)
+		}
+		// 其余（Erasure + parity 存在）：继续走下方整块回落 → parity 恢复。
 	}
 	blob, berr := s.readChunkBlob(ctx, e, ci)
 	if berr == nil {
@@ -248,23 +264,47 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		return nil, true, err
 	}
 	if !ok {
-		return nil, false, nil // 防御：调用方已断言，此处不应发生。
+		// 防御（调用方已 AssertRangeReader 保证 rr 非 nil，理论不可达）：返回显式哨兵，
+		// 避免下游 `fmt.Errorf("…: %w", nil)` 生成畸形错误（评审 P3 修复，2026-10-21）。
+		return nil, true, syncpkg.ErrUnsupported
 	}
 	if verr := shardseal.VerifyBlockSalt(head, o.salt); verr != nil {
 		return nil, true, verr
 	}
+	// **段合并请求（coalesce，2026-10-21）**：相邻 blocklet 段在块 blob 内**近似连续**
+	// （段间仅 cryptoRandN(64) = 0-63B 随机间隙，见 shardseal.planBlockletLayout），且每段
+	// 精确位置 EncOffset/EncSize 已在 meta ⇒ **一次** Range 覆盖 [首段.EncOffset, 末段.EncOffset+
+	// 末段.EncSize)，再按已知 EncOffset 切片逐段解密。
+	// 旧实现逐段一次 RangeReadAll ⇒ N 段 = N 次请求（每次一记 RTT）；网盘场景是随机读慢的
+	// 主因之一（实测 242KB 文件 47s）。
+	targets := selectRangeBlocklets(o.ci.Blocklets, offset, end)
+	if len(targets) == 0 {
+		return nil, true, nil
+	}
+	first := targets[0]
+	last := targets[len(targets)-1]
+	spanOff := first.EncOffset
+	spanEnd := last.EncOffset + last.EncSize
+	spanSize := spanEnd - spanOff
+	if spanSize <= 0 {
+		return nil, true, fmt.Errorf("secretdata: blocklet 段区间非法（off=%d end=%d）", spanOff, spanEnd)
+	}
+	span, ok, serr := syncpkg.RangeReadAll(rr, ctx, segPath, spanOff, spanSize)
+	if serr != nil {
+		return nil, true, serr
+	}
+	if !ok {
+		// 防御：同上（ErrUnsupported ⇒ 上游走整块回落，见 readChunkRangeBytes 三分判据）。
+		return nil, true, syncpkg.ErrUnsupported
+	}
 	var out []byte
-	for _, bl := range o.ci.Blocklets {
-		if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
-			continue
+	for _, bl := range targets {
+		rel := bl.EncOffset - spanOff
+		if rel < 0 || rel+bl.EncSize > int64(len(span)) {
+			return nil, true, fmt.Errorf("secretdata: blocklet 段 %d 越出合并区间（rel=%d enc=%d span=%d）",
+				bl.Offset, rel, bl.EncSize, len(span))
 		}
-		seg, ok, serr := syncpkg.RangeReadAll(rr, ctx, segPath, bl.EncOffset, bl.EncSize)
-		if serr != nil {
-			return nil, true, serr
-		}
-		if !ok {
-			return nil, false, nil
-		}
+		seg := span[rel : rel+bl.EncSize]
 		plain, derr := shardseal.DecryptBlockletSegmentStandalone(o.keyBytes, seg, bl, o.ci.Offset)
 		if derr != nil {
 			return nil, true, fmt.Errorf("secretdata: 解密 blocklet（offset=%d）失败: %w", bl.Offset, derr)
@@ -278,6 +318,19 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		out = append(out, plain[segStart-bl.Offset:segEnd-bl.Offset]...)
 	}
 	return out, true, nil
+}
+
+// selectRangeBlocklets 返回与 [offset,end) 相交的**已使用** blocklet 段（保持 meta 顺序，
+// 即块内密文顺序）——供合并请求算 [首段.EncOffset, 末段.EncOffset+EncSize) 覆盖区间。
+func selectRangeBlocklets(blocklets []shardseal.BlockletInfo, offset, end int64) []shardseal.BlockletInfo {
+	out := make([]shardseal.BlockletInfo, 0, len(blocklets))
+	for _, bl := range blocklets {
+		if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
+			continue
+		}
+		out = append(out, bl)
+	}
+	return out
 }
 
 // decryptChunkRangeBlob 按 meta blocklet 索引合并解密分块 blob 在 [offset,end)∩块 的明文

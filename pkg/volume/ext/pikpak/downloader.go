@@ -21,6 +21,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
+	"github.com/cocomhub/sproxy/pkg/media"
 )
 
 // DownloaderConfig 是 PikPak 下载器配置。
@@ -563,15 +564,10 @@ func pickLargestVideo(files []FileMeta) *FileMeta {
 	return best
 }
 
-// isVideo 判断是否为视频文件。
+// isVideo 判断是否为视频文件（MIME 优先，否则委托 pkg/media.IsVideoName 单一事实源）。
 func isVideo(name, mime string) bool {
 	if strings.HasPrefix(mime, "video/") {
 		return true
 	}
-	ext := strings.ToLower(filepath.Ext(name))
-	switch ext {
-	case ".mp4", ".mkv", ".mov", ".avi", ".ts", ".flv", ".wmv", ".webm":
-		return true
-	}
-	return false
+	return media.IsVideoName(name)
 }

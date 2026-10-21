@@ -8,10 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/integrity"
+	"github.com/cocomhub/sproxy/pkg/media"
 	"github.com/cocomhub/sproxy/pkg/media/ffprobe"
 )
 
@@ -73,20 +73,15 @@ func (VideoChecker) EstimateMem(path string, size int64) int64 {
 // Kind 返回类型标识（注册键，全局唯一）。
 func (VideoChecker) Kind() string { return "video/*" }
 
-// Matches 按扩展名族判定归属：.mp4/.mkv/.webm/.mov/.ts/.avi/.flv/.wmv/.m4v（不区分大小写）。
+// Matches 按扩展名族判定归属：委托 pkg/media.IsVideoName（**单一事实源**，2026-10-21
+// 收敛）——覆盖 .mp4/.mkv/.webm/.mov/.ts/.avi/.flv/.wmv/.m4v 及 rmvb/wmv/flv/mpg/3gp 等
+// 全部常见容器（大小写不敏感）。
 //
-// `.m4v` 与 `.mp4` 同容器（H.264 in MPEG-4 Part 14），ffprobe 同样可解析——此前漏列导致
-// 「有播放入口但无校验器」（Web UI `VIDEO_EXT` 含 m4v，B-M4 口径不齐）。
-// 前端 `VIDEO_EXT` 是**浏览器可播集合**，与本函数（「是视频文件」语义集）本就不等价
-// （.flv/.wmv 可被校验但浏览器不原生播放）——两侧差异只在「可否预览」，不是遗漏。
+// 语义边界：本函数（「是视频文件」集，含可 ffprobe 校验但浏览器不原生播的容器）与
+// Web UI `isVideoName`（浏览器可播子集）不等价——两侧差异只在「可否预览」，不是遗漏。
+// 收敛后断链检查见 pkg/media/vidext_test.go TestMediaKindOf_Consistency。
 func (VideoChecker) Matches(name string) bool {
-	lower := strings.ToLower(name)
-	for _, ext := range []string{".mp4", ".mkv", ".webm", ".mov", ".ts", ".avi", ".flv", ".wmv", ".m4v"} {
-		if strings.HasSuffix(lower, ext) {
-			return true
-		}
-	}
-	return false
+	return media.IsVideoName(name)
 }
 
 // Check 用 ffprobe 解析 path 指向的视频：KeyframeOffsets 无 err 且返回 ≥1 关键帧

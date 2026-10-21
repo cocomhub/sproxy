@@ -22,6 +22,14 @@ go 1.27
 
 require github.com/cocomhub/sproxy v0.0.0
 
-require golang.org/x/text v0.42.0 // indirect
+require (
+	github.com/abema/go-mp4 v1.7.3 // indirect
+	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
+)
 
 replace github.com/cocomhub/sproxy => ../../../..
+
+replace github.com/cocomhub/sproxy/pkg/media/ext/mp4 => ../../../media/ext/mp4

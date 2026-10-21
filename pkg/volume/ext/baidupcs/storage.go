@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
@@ -71,6 +72,21 @@ type Storage struct {
 	// DefaultTransport——dlink 拉取无 per-host 超时/连接池上限会占住全局池拖累
 	// 同进程其它外部请求）。per-instance 独立连接池 + ResponseHeaderTimeout 兜底。
 	httpc *http.Client
+
+	// dlinkMu 保护 dlinkCache（并发段读复用同一 key 直链时只签发一次）。
+	dlinkMu sync.Mutex
+	// dlinkCache 是 key → {url, 过期时间} 的短 TTL 直链缓存（2026-10-21 缺陷修复）：
+	// 同一文件的多次 Range GET（salt + N 个 blocklet 段）复用一次 LocateDownload，
+	// 避免每段重签（真机实测每次签发 ~0.3s，N+1 次签发是网盘随机读慢的主因之一）。
+	// 百度 dlink 自签有效 8h，本地 TTL 60s 远短于它（失效先于签名到期，安全）。
+	// 失效（CDN 非 206）⇒ 清除缓存并重签一次（自愈）。
+	dlinkCache map[string]dlinkEntry
+}
+
+// dlinkEntry 是 dlink 缓存条目（url + 本地过期时间）。
+type dlinkEntry struct {
+	url string
+	exp time.Time
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -112,7 +128,7 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 		})
 	}
 
-	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient()}, nil
+	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient(), dlinkCache: make(map[string]dlinkEntry)}, nil
 }
 
 // newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4 + R19 门禁：per-instance 独立
@@ -142,22 +158,173 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 	return s.putStaged(ctx, key, st)
 }
 
+// PutHints 是 baidupcs **后端特化**的上传提示（PutFromStagedPath 可选参数，2026-10-21）。
+// 字段全是百度 API 参数（ETag 复核基准 md5 / rapidupload 秒传 sliceMD5+crc32+blockMD5s）。
+// 通用跨后端提示见 `pkg/sync.UploadHints`（本类型是其后端 adapter 映射目标；
+// baidupcs 不直接消费 UploadHints 的 sha256/mtime 等非协议字段）。
+//
+// **「首次计算一次」契约**（用户 2026-10-21）：调用方可能只给部分字段（如只有 md5 无块列表）
+// 或全空——后端**不得**拒绝或重复整块重算：stageUpload 结构自建时**首次读一遍内容**补齐缺失
+// 字段，此后重试/刷新/复核复用该结构。调用方提供的字段（源头值）优先级最高，只补空。
+type PutHints struct {
+	// Md5 是整文件 md5（hex）。非空时跳过整块 md5 扫描（校验/秒传基准）。
+	Md5 string
+	// Crc32 是整文件 CRC32 IEEE（**十进制字符串**，rapidupload 秒传参数；空 = 自算）。
+	Crc32 string
+	// Size 是文件字节数（<=0 = 未知，按 Stat 实测）。
+	Size int64
+	// SliceMD5 是前 256KB md5（rapidupload 分片参数；空 = 后端读回补齐）。
+	SliceMD5 string
+	// BlockMD5s 是按 uploadBlockSize 分块的 md5 列表（rapidupload blockList 参数；
+	// 空 = 后端读回补齐）。**必补**：远端 md5 非权威时的秒传刷新依赖它（红线，2026-10-21）。
+	BlockMD5s []string
+	// RandomBlob 标记「内容是本次新建、随机且不可重用」（secretdata 单块密文含随机
+	// salt/nonce）——**仅**用于跳过 pre-Stat（首轮存在性检查）。
+	// **绝不跳过上传后的 md5 刷新/复核**（用户裁定 2026-10-21：必须按 md5 刷新成功保证
+	// 文件一致性，即使内容随机新建也要确保远端 meta 为权威整文件 md5）。
+	RandomBlob bool
+}
+
 // PutFromStagedPath 把**调用方已暂存**的本地文件上传为 key（本地 staging 路径复用：
 // 不再拷第二份——本地峰值 1×size，与 staging 配额 1× 预留口径一致）。
 // 契约：**只读** stagedPath（不移动/不删除；生命周期由调用方负责）。
-// size<=0 = 未知，按 Stat 实测。
-func (s *Storage) PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64) (*ObjectMeta, error) {
+// size<=0 = 未知，按 Stat 实测。hints 可空（nil = 全自算，现状行为）。
+func (s *Storage) PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64, hints *PutHints) (*ObjectMeta, error) {
 	prepared, cleanup, perr := s.prepareStagedForAdapter(stagedPath, key)
 	if perr != nil {
 		return nil, perr
 	}
 	defer cleanup()
-	st, err := s.stageUploadFromPath(ctx, prepared, key, size)
+	st, err := s.stageUploadFromPath(ctx, prepared, key, size, hints)
 	if err != nil {
 		return nil, err
 	}
 	st.tmpPath = prepared
+	// 前置秒传命中检查（P1）：真正随机新建的 blob（块名含随机 salt）秒传命中率理论为
+	// 0，首轮 putCheckExisting 的 Stat 纯属浪费一次 API 往返——带 RandomBlob 时跳过。
+	if hints != nil && hints.RandomBlob {
+		return s.putStagedSkipPreCheck(ctx, key, st)
+	}
 	return s.putStaged(ctx, key, st)
+}
+
+// putStagedSkipPreCheck 与 putStaged 同构但**跳过首轮 pre-Stat**（RandomBlob：内容随机
+// 新建，不可能秒传命中）：直接上传 → Stat 复核。省每次上传 1 次 API 往返。
+func (s *Storage) putStagedSkipPreCheck(ctx context.Context, key string, st *stagedUpload) (*ObjectMeta, error) {
+	remote, err := s.remotePath(key)
+	if err != nil {
+		return nil, err
+	}
+	meta, done, werr := s.putAttemptSkipPreCheck(ctx, key, remote, st, 1)
+	if werr != nil {
+		return nil, werr
+	}
+	if done {
+		return meta, nil
+	}
+	// 上传后复核不一致/未见 → 走既有有界重试（后续轮仍带 pre-Stat 自愈）。
+	return s.putRetryLoopFrom(ctx, key, remote, st, 2)
+}
+
+// putAttemptSkipPreCheck 与 putAttempt 同构但**跳过 putCheckExisting（pre-Stat）**：
+// RandomBlob 内容不可能在远端已存在，pre-Stat 无意义。直接 adapter.Upload + 复核。
+func (s *Storage) putAttemptSkipPreCheck(ctx context.Context, key, remote string, st *stagedUpload, attempt int) (*ObjectMeta, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, mapPCSError(err)
+	}
+	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
+		return nil, false, mapPCSError(upErr)
+	}
+	meta, done, werr := s.putCheckAfterUpload(ctx, key, st, attempt)
+	if werr != nil {
+		return nil, false, werr
+	}
+	return meta, done, nil
+}
+
+// putRetryLoopFrom 从指定 attempt 继续有界重试（putStagedSkipPreCheck 的后段复用）。
+func (s *Storage) putRetryLoopFrom(ctx context.Context, key, remote string, st *stagedUpload, from int) (*ObjectMeta, error) {
+	lastRemoteETag := ""
+	for attempt := from; attempt <= maxPutAttempts; attempt++ {
+		if err := s.backoffBeforeRetry(ctx, attempt); err != nil {
+			return nil, err
+		}
+		meta, remoteETag, err := s.putAttempt(ctx, key, remote, st, attempt)
+		if err != nil {
+			return nil, err
+		}
+		if meta != nil {
+			return meta, nil
+		}
+		if remoteETag != "" {
+			lastRemoteETag = remoteETag
+		}
+	}
+	return nil, fmt.Errorf("%w: 上传后内容复核不匹配超过 %d 次（本地 md5=%s，远端 ETag=%s）", ErrTransient, maxPutAttempts, st.md5, lastRemoteETag)
+}
+
+// stageUploadFromPath 从**已存在的本地文件**构造 stagedUpload（单遍读该文件算
+// md5/crc32，再读回算 sliceMD5/分块 md5 列表）——不新建副本。
+// hints 非 nil 时复用其预计算的 md5/size（跳过整块重读），仅 sliceMD5/分块列表缺失时
+// 按需读回补齐（兼容调用方只算了整文件 md5 的情况）。
+func (s *Storage) stageUploadFromPath(ctx context.Context, path, key string, size int64, hints *PutHints) (*stagedUpload, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, mapPCSError(err)
+	}
+	// P1：有预计算 md5/size → 跳过整块重读（secretdata 交错路径每块上传顺带累计）。
+	if hints != nil && hints.Md5 != "" && hints.Size > 0 {
+		return s.stageUploadFromHints(path, hints)
+	}
+	st, err := s.stageUploadScan(ctx, path, size)
+	if err != nil {
+		return nil, err
+	}
+	// **块列表必须算**（用户裁定 2026-10-21）：远端 md5 非权威（MD5Unreliable）时
+	// renewAuthoritativeMD5 依赖 len(st.blockMD5s)>0 才能 rapidupload 刷新；RandomBlob
+	// 若跳过读回 ⇒ 刷新被跳过 ⇒ 文件一致性红线被架空（复现用例抓到）。
+	if ferr := s.fillStagedLists(st); ferr != nil {
+		return nil, ferr
+	}
+	return st, nil
+}
+
+// stageUploadFromHints 用调用方预计算 md5/size 构造 stagedUpload（不重读块文件）。
+func (s *Storage) stageUploadFromHints(path string, hints *PutHints) (*stagedUpload, error) {
+	st := &stagedUpload{tmpPath: path, md5: hints.Md5, crc32: hints.Crc32, size: hints.Size,
+		sliceMD5: hints.SliceMD5, blockMD5s: hints.BlockMD5s}
+	// **块列表必须算**（用户裁定 2026-10-21）：秒传刷新（MD5Unreliable 路径）依赖
+	// blockMD5s>0；调用方未提供时必补读——RandomBlob 也不例外（否则刷新被架空，红线违反）。
+	if hints.SliceMD5 == "" || len(hints.BlockMD5s) == 0 {
+		if ferr := s.fillStagedLists(st); ferr != nil {
+			return nil, ferr
+		}
+	}
+	return st, nil
+}
+
+// stageUploadScan 单遍读文件算 md5/crc32。ctx 全程透传：调用方取消/超时即中断（不白扫整块）。
+func (s *Storage) stageUploadScan(ctx context.Context, path string, size int64) (*stagedUpload, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	md5h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传/ETag），非安全用途
+	crc := crc32.NewIEEE()
+	actual, copyErr := copyCtx(ctx, io.MultiWriter(md5h, crc), f)
+	if copyErr != nil {
+		return nil, copyErr
+	}
+	if size > 0 && actual != size {
+		s.log.Warn("staging 复用：声明大小与实测不一致，按实测继续",
+			"declared", size, "actual", actual, "path", path)
+	}
+	return &stagedUpload{
+		tmpPath: path,
+		md5:     hex.EncodeToString(md5h.Sum(nil)),
+		crc32:   strconv.FormatUint(uint64(crc.Sum32()), 10),
+		size:    actual,
+	}, nil
 }
 
 // prepareStagedForAdapter 保证交给 adapter 的本地文件 basename == 目标 basename：
@@ -213,41 +380,6 @@ func (s *Storage) putStaged(ctx context.Context, key string, st *stagedUpload) (
 		return nil, err
 	}
 	return s.putRetryLoop(ctx, key, remote, st)
-}
-
-// stageUploadFromPath 从**已存在的本地文件**构造 stagedUpload（单遍读该文件算
-// md5/crc32，再读回算 sliceMD5/分块 md5 列表）——不新建副本。
-func (s *Storage) stageUploadFromPath(ctx context.Context, path, key string, size int64) (*stagedUpload, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, mapPCSError(err)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	md5h := md5.New() //nolint:gosec // 百度 API 需要 md5（秒传/ETag），非安全用途
-	crc := crc32.NewIEEE()
-	actual, copyErr := copyCtx(ctx, io.MultiWriter(md5h, crc), f)
-	if copyErr != nil {
-		return nil, copyErr
-	}
-	if size > 0 && actual != size {
-		// 声明大小仅作提示：可信卷写路径已有「声明失真自愈」语义（按实写重算），此处按实测
-		// actual 继续（不因此拒绝——否则调用方声明偏小/偏大都会让上传失败）。
-		s.log.Warn("staging 复用：声明大小与实测不一致，按实测继续",
-			"declared", size, "actual", actual, "path", path)
-	}
-	st := &stagedUpload{
-		tmpPath: path,
-		md5:     hex.EncodeToString(md5h.Sum(nil)),
-		crc32:   strconv.FormatUint(uint64(crc.Sum32()), 10),
-		size:    actual,
-	}
-	if err := s.fillStagedLists(st); err != nil {
-		return nil, err
-	}
-	return st, nil
 }
 
 // putRetryLoop 有界重试主循环（cocom 对齐）：每轮先 Stat（秒传命中直接返回）→ 未命中
