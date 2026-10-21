@@ -1442,6 +1442,11 @@ func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, lo
 		return fmt.Errorf("secretdata: 取本地分块 %s 长度失败: %w", name, serr)
 	}
 	wctx := syncpkg.WithStagedLocalPath(ctx, local)
+	// P1（2026-10-21，残余 3 简单优化）：块密文是**本次新建的随机内容**（含随机 salt/
+	// nonce）——带 RandomBlob 提示经 ctx 交给内层（baidupcs StorageFS）：跳过整块 md5
+	// 重读 + 跳过 pre-Stat + ETag 非权威时不 rapidupload 刷新（命中率理论 0），省每次
+	// 上传 2-3 次 API 往返与 2 遍 O(块) 读。其它内层（本地卷等）忽略该提示零回归。
+	wctx = syncpkg.WithPutHints(wctx, syncpkg.RandomBlobHints{})
 	dst := path.Join(container, name)
 	// **先登记后上传**（P2 修复，2026-10-19）：内层可能「写成功但复核失败」返回错误（如
 	// baidupcs 上传后 ETag 复核不匹配）⇒ 远端 blob 已存在；成功后登记会漏掉它 ⇒ 远端孤儿。

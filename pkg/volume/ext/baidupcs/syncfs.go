@@ -58,8 +58,11 @@ type StorageAPI interface {
 	// 调用方（StorageFS.Rename）回退 Copy+Delete。
 	Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta, error)
 	// PutFromStagedPath 复用**调用方已暂存**的本地文件路径上传（本地 staging 路径复用：
-	// 不再拷第二份；只读 stagedPath，生命周期由调用方负责）。
-	PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64) (*ObjectMeta, error)
+	// 不再拷第二份；只读 stagedPath，生命周期由调用方负责）。hints 为可选上传预计算
+	// （md5/分块列表/size；RandomBlob 标记随机新建内容），nil = 全自算（现状行为）。
+	// P1（2026-10-21）：新增 hints 参数——secretdata 交错路径每块密文顺带算 md5，
+	// 传入后跳过整块重读（省 O(块) 两遍）+ 跳过 pre-Stat（RandomBlob 秒传命中率 0）。
+	PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64, hints *PutHints) (*ObjectMeta, error)
 }
 
 // NewStorageFS 构造 StorageFS 适配层。temp 为本地中间态目录（默认 os.TempDir()）。
@@ -86,7 +89,7 @@ func (f *StorageFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath
 	if err != nil {
 		return err
 	}
-	if _, perr := f.s.PutFromStagedPath(ctx, clean, stagedPath, size); perr != nil {
+	if _, perr := f.s.PutFromStagedPath(ctx, clean, stagedPath, size, nil); perr != nil {
 		return mapPCSError(perr)
 	}
 	_ = mtime // 百度 API 无直接 Chtimes（与 WriteFile 同口径）
@@ -177,7 +180,7 @@ func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPa
 	// 1×size，与配额 1× 预留口径一致）；否则本函数落一份 staging 后同样以「路径复用」入口
 	// 上传（不再由 Storage 内部拷第二份）。
 	if staged, ok := syncpkg.StagedLocalPathFrom(ctx); ok {
-		if _, perr := f.s.PutFromStagedPath(ctx, clean, staged, size); perr != nil {
+		if _, perr := f.s.PutFromStagedPath(ctx, clean, staged, size, nil); perr != nil {
 			return mapPCSError(perr)
 		}
 		return nil
@@ -198,7 +201,20 @@ func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPa
 	}
 	// 2. 上传网盘（Storage 内部有界重试 + ETag 复核）。**以 staging 路径复用入口上传**：
 	// Storage 不再拷第二份（此前 staging-* + stage-*/basename 两份并存 = 峰值 2×size）。
-	meta, err := f.s.PutFromStagedPath(ctx, clean, tmpPath, size)
+	// P1（2026-10-21）：ctx 携带 PutHints 时透传（secretdata 交错路径每块密文顺带算
+	// md5 + RandomBlob 标记 ⇒ 跳过整块重读与 pre-Stat，省每次上传 2-3 次 API 往返）。
+	var hints *PutHints
+	if syncpkg.RandomBlobHintsFrom(ctx) {
+		// secretdata 单块密文（随机新建内容）：跳过整块重读 + pre-Stat + rapidupload
+		// 刷新（命中率理论 0）——但 md5/分块列表仍需自算（上传复核 + 重试必需）。
+		// RandomBlob=true 使 stageUploadFromPath 不读回 sliceMD5/分块列表（不需要秒传）。
+		hints = &PutHints{RandomBlob: true}
+	} else if h, ok := syncpkg.PutHintsFrom(ctx); ok {
+		if ph, phok := h.(*PutHints); phok {
+			hints = ph
+		}
+	}
+	meta, err := f.s.PutFromStagedPath(ctx, clean, tmpPath, size, hints)
 	if err != nil {
 		return mapPCSError(err)
 	}
