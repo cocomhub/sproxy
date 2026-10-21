@@ -228,3 +228,4 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 | `pkg/cloud/prod_hardening_transfer_test.go` | 1 | 转存残骸自清：注入式 FS 状态机（armed/重试）与用例一一对应，不可并行共享。 |
 | `pkg/server/prod_hardening_test.go` | 2 | 归档 checksum / 组归档删除配额：需真实 storage.Root、临时根与 owner 配额池（共享 `h.globalPool`），用例级独占。 |
 | `pkg/volume/secretdata/prod_hardening_test.go` | 4 | 卷锁/在途写并发/目录 meta 仲裁/Eof 校验：均在**同一时间轴**上构造真实卷状态（死锁用例带 10s 超时断言、仲裁用例需真实 mtime 次序），并行会互相干扰计时与全局 slog 输出。 |
+| `cmd/sproxy/root_extra_test.go` | 5 | 进程级装配/启动用例（注册全局后端类型、信号停机等），共享包级全局状态，不可并行。 |

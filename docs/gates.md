@@ -104,6 +104,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `upload_side_effect_test.go` | R8 | upload_side_effect_test.go 是「**上传成功的副作用必须单一实现**」的门禁（R8，P2-d 配套）。 |
 | `usage_provider_gate_test.go` | R30 | usage_provider_gate_test.go 是「卷用量查询**单一查询面**」门禁（R30，2026-10-17）。 |
 | `user_io_gate_test.go` | R25 | user_io_gate_test.go 是「用户内容读写必须经用户可见入口」的门禁（R25，第 5 轮对抗评审 |
+| `volume_backend_registration_order_gate_test.go` | R45 | 门禁 **R45**：外部卷后端**类型注册**必须早于 `assembleVolumes`（`setupServerCore` 内 `registerVolumeBackendTypes()` 先于 `server.RegisterRoutes(`），且 `setupSyncVolumeBackends` 不得再回退注册类型。背景（用户实测 2026-10-21）：baidupcs/webdav/sftp/ftp/s3 的类型此前在 RegisterRoutes **之后**注册 ⇒ config 静态声明 `type: baidupcs` 等外部卷在装配期报「未注册后端」并启动失败（只能运行期建卷绕过）。 |
 | `volume_root_bypass_gate_test.go` | R26 | volume_root_bypass_gate_test.go 是「**卷根直连适配器**」门禁（R26；仓库的 R 号按设计文档 |
 | `waitq_gates_test.go` | R36 | waitq_gates_test.go 汇总 W1 收敛的两条门禁（设计 docs/designs/2026-10-19-waitq.md §8.3）： |
 | `web_assets_test.go` | R10 | web_assets_test.go 是「**Web 前端每个 JS 文件都必须被自动化测试覆盖**」的门禁（R10）。 |

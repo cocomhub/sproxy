@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/mxschmitt/playwright-go"
@@ -40,13 +39,6 @@ func TestVolumes_LoginRefreshesSelects(t *testing.T) {
 	// allow=false 期间所有 /api/volumes 返回 401（模拟「登录前无凭据」）。
 	var allow atomic.Bool
 	var volumesHits atomic.Int64
-	var evHits atomic.Int64
-	if err := page.Route("**/api/events*", func(route playwright.Route) {
-		evHits.Add(1)
-		_ = route.Continue()
-	}); err != nil {
-		t.Fatalf("Route 计数 /api/events: %v", err)
-	}
 	if err := page.Route("**/api/volumes", func(route playwright.Route) {
 		volumesHits.Add(1)
 		if !allow.Load() {
@@ -81,9 +73,11 @@ func TestVolumes_LoginRefreshesSelects(t *testing.T) {
 	reg := registerViaUI(t, page, "e2e-vol-refresh")
 	fillTOTPLogin(t, page, reg.AK, reg.Base32Secret)
 	allow.Store(true)
-	evBefore := evHits.Load()
-	if cerr := page.Locator("#do-login-btn").Click(); cerr != nil {
-		t.Fatalf("click do-login-btn: %v", cerr)
+	// 登录点击期间必须出现**新的**事件流请求（同步等待请求事件，无 Go 侧固定等待）。
+	if _, eerr := page.ExpectRequest("**/api/events*", func() error {
+		return page.Locator("#do-login-btn").Click()
+	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(15000)}); eerr != nil {
+		t.Fatalf("登录后未重新发起事件流连接 ⇒ 实时更新在登录后仍失效: %v", eerr)
 	}
 
 	// 缺陷点：旧实现登录后只 refreshList() ⇒ 两个下拉保持空（运行时卷不可见）。
@@ -101,16 +95,5 @@ func TestVolumes_LoginRefreshesSelects(t *testing.T) {
 	}
 	if cur, _ := page.Evaluate("document.getElementById('volume-filter').value"); cur != "default" {
 		t.Fatalf("过滤卷选择值 = %v, want default", cur)
-	}
-
-	// 同类问题：登录前 SSE 401 已停止且（旧实现）**不再重连** ⇒ 登录后必须重新发起连接。
-	// 判据：登录后出现新的 `GET /api/events`（SSE 是直连请求，不走隧道）。
-	deadline := time.Now().Add(10 * time.Second)
-	for evHits.Load() <= evBefore && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if evHits.Load() <= evBefore {
-		t.Fatalf("登录后未重新发起事件流连接（before=%d after=%d）⇒ 实时更新在登录后仍失效",
-			evBefore, evHits.Load())
 	}
 }
