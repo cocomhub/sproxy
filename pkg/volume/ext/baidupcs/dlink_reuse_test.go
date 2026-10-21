@@ -86,7 +86,7 @@ func TestGetRange_ReusesSingleDlinkSigning(t *testing.T) {
 	content := strings.Repeat("0123456789", 100) // 1000B
 	st, ad, key := newCountingRangeEnv(t, content)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		got := readRange(t, st, key, int64(i*100), 100)
 		if got != content[i*100:(i+1)*100] {
 			t.Fatalf("第 %d 段内容错误: %q", i, got)
@@ -105,7 +105,7 @@ func TestGetRange_ConcurrentSegmentsShareDlink(t *testing.T) {
 	st, ad, key := newCountingRangeEnv(t, content)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
