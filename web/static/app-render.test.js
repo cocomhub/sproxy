@@ -85,6 +85,30 @@ test('previewKind 归类', () => {
   assert.strictEqual(r.previewKind(null), 'download');
 });
 
+// ---- 视频播放入口判定（VIDEO_EXT 口径：浏览器原生可播子集） ----
+test('isVideoName 浏览器可播集合（大小写不敏感）', () => {
+  for (const name of ['a.mp4', 'a.MKV', 'a.webm', 'a.AVI', 'a.mov', 'a.ts', 'a.M4V']) {
+    assert.strictEqual(r.isVideoName(name), true, name + ' 应可播');
+  }
+  // 可校验但浏览器不原生播放 → 不给 ▶ 入口（与 pkg/media.IsVideoName 语义集不同）
+  for (const name of ['a.rmvb', 'a.wmv', 'a.flv', 'a.mpg', 'a.3gp', 'a.ogv']) {
+    assert.strictEqual(r.isVideoName(name), false, name + ' 浏览器不原生播 → 不给 ▶');
+  }
+  // 非视频 / 无扩展名
+  for (const name of ['a.txt', 'a.png', 'noext', '', null]) {
+    assert.strictEqual(r.isVideoName(name), false, String(name));
+  }
+});
+
+test('buildFileRowHtml 视频行有 ▶ 播放按钮、非可播视频无（rmvb/wmv 只给下载）', () => {
+  assert.ok(r.buildFileRowHtml({ name: 'a.mp4', size: 10 }, 'a.mp4').includes('file-video-play-btn'));
+  assert.ok(r.buildFileRowHtml({ name: 'MOVIE.MKV', size: 10 }, 'MOVIE.MKV').includes('file-video-play-btn'));
+  assert.ok(!r.buildFileRowHtml({ name: 'a.rmvb', size: 10 }, 'a.rmvb').includes('file-video-play-btn'),
+    'rmvb 浏览器不原生播 → 无 ▶ 入口');
+  assert.ok(!r.buildFileRowHtml({ name: 'd.mp4', is_dir: true }, 'd.mp4').includes('file-video-play-btn'),
+    '目录不给 ▶ 入口');
+});
+
 // ---- 文件列表排版（HTML 片段断言 + XSS 转义） ----
 test('buildFileRowHtml 文件行含转义 + checksum 前缀', () => {
   const html = r.buildFileRowHtml({ name: 'a<b.txt', size: 2048, checksum: 'c'.repeat(20), is_dir: false }, 'a<b.txt');
