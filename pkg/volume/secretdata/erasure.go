@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path"
 
@@ -194,17 +195,32 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 //
 // 底层支持 RangeReader 时：先走「按 blocklet 段局部读取」快速路径（只下载含目标区间的
 // 段密文 + 块头部 salt 一次，逐段独立解密——视频关键帧随机访问省去整块下载）。**Range
-// 段读失败时回落整块路径**（而非直接报错）：缺失块由 readChunkBlob 失败暴露、Erasure 卷
-// 走 parity 恢复——保证纠错的可用性在随机读路径上不被短路（审查 I1 修复）。无
-// RangeReader → 直接整块 io.ReadAll 回退（零回归）。
+// 段读失败时按成因三分回落/上抛**（2026-10-21 缺陷修复；不再一律回落整块——网盘场景会把
+// Range 放大成整文件下载，实测 242KB MP4 的 Range 请求 47s vs 本地 0.076s）：
+//
+//  1. 底层不支持 Range（ErrUnsupported）⇒ 回落整块（能力回退，非 Range 后端仍可用）；
+//  2. ctx 已终止（取消/超时）⇒ 立即上抛，**不回落**（取消后回落结果无人消费，只放大下载量）；
+//  3. 无 Erasure（无 parity 可恢复）⇒ 段读错误上抛（可见失败优于静默数十秒放大）；
+//  4. Erasure + parity ⇒ 仍回落整块 → parity 恢复（随机读路径的纠错不被短路，既有语义）。
+//
+// 无 RangeReader → 直接整块 io.ReadAll 回退（零回归）。
 func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
 	if rr := syncpkg.AssertRangeReader(s.inner); rr != nil {
 		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, chunkRangeOpts{e: e, keyBytes: keyBytes, salt: salt, ci: ci}, offset, end)
 		if rerr == nil && ok {
 			return seg, nil
 		}
-		// 段读失败（含块缺失）：回落整块路径。rerr 不静默吞——整块路径会重新暴露同类
-		// 失败（块缺失时 readChunkBlob 也失败 → 走 parity 恢复或 fail-closed）。
+		// 段读失败：按成因三分（见函数头注释）。ErrUnsupported = 底层能力缺失 → 回落；
+		// ctx 取消 → 上抛；无 parity → 上抛（静默放大整块是本次修复的根因）；
+		// 有 parity → 回落整块走恢复（既有 Erasure 语义）。
+		if errors.Is(rerr, syncpkg.ErrUnsupported) {
+			// 能力缺失：回落整块（非 Range 后端随机读继续可用，零回归）。
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("secretdata: 范围读取被取消（不回落整块，避免把 Range 放大成整文件下载）: %w", ctxErr)
+		} else if !s.opts.Erasure || e.meta.Parity == nil {
+			return nil, fmt.Errorf("secretdata: 范围读取失败（无 parity 可恢复，不回落整块）: %w", rerr)
+		}
+		// 其余（Erasure + parity 存在）：继续走下方整块回落 → parity 恢复。
 	}
 	blob, berr := s.readChunkBlob(ctx, e, ci)
 	if berr == nil {

@@ -107,7 +107,10 @@ func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 		"dedup": true,
 		// M-1：block_policy 的 min/max 用 **YAML 整数（int）**——原 vcExtraBlockPolicy
 		// 只读 float64，YAML 下 `min: 4096` 被静默忽略回退默认 1MiB-200MiB。
-		"block_policy": map[string]any{"mode": "random", "min": 4096, "max": 16384},
+		"block_policy": map[string]any{
+			"mode": "random", "min": 4096, "max": 16384,
+			"blocklet_mode": "fixed", "blocklet_min": 2048, "blocklet_max": 8192,
+		},
 		// ByteSize 统一（2026-10-03）：字节配置支持 "8MiB" 人类可读字符串与纯数字。
 		"meta_pad_bytes": "8MiB",
 		"max_file_bytes": float64(4096),
@@ -124,6 +127,12 @@ func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 	}
 	if opts.Block.Min != 4096 || opts.Block.Max != 16384 {
 		t.Errorf("block_policy YAML 整数被静默忽略: min=%d max=%d（want 4096/16384）", opts.Block.Min, opts.Block.Max)
+	}
+	// blocklet 粒度可配（2026-10-21 缺陷修复）：视频随机读要「按小加密块直接解密」——
+	// 调小 blocklet_max 让每次 Range 只拉目标小段，而非默认 64KB-4MB 的整 4MB 段。
+	if opts.Block.BlockletMode != "fixed" || opts.Block.BlockletMin != 2048 || opts.Block.BlockletMax != 8192 {
+		t.Errorf("blocklet 配置被静默忽略: mode=%q min=%d max=%d（want fixed/2048/8192）",
+			opts.Block.BlockletMode, opts.Block.BlockletMin, opts.Block.BlockletMax)
 	}
 	// ByteSize 字符串与数字形态（sizex.ByteSize 统一：人类可读 "8MiB" + 纯数字）。
 	if got := int64(opts.MetaPadBytes); got != 8<<20 {
