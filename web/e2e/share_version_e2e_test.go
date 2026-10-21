@@ -64,6 +64,15 @@ func openShareModal(t *testing.T, page playwright.Page) {
 	} else if v != "share-src.txt" {
 		t.Fatalf("#share-filename = %q, want share-src.txt（showShareModal 未预填文件名）", v)
 	}
+	// 分享源卷必须来自**文件行**的 data-volume（外部/加密卷分享靠它定位；缺失会退化为
+	// 服务端自动定位，多卷同名时可能分享错文件）。
+	hint, herr := page.Locator("#share-source-hint").InnerText()
+	if herr != nil {
+		t.Fatalf("读取 #share-source-hint: %v", herr)
+	}
+	if !strings.Contains(hint, "default") {
+		t.Fatalf("#share-source-hint = %q，应显示行卷 default（data-volume 未接线）", hint)
+	}
 }
 
 // createShareFromModal 点创建按钮 → 捕获 POST /api/share，断言 body 四字段。
@@ -83,10 +92,15 @@ func createShareFromModal(t *testing.T, page playwright.Page) {
 		TTL          string `json:"ttl"`
 		MaxDownloads int    `json:"max_downloads"`
 		OneTime      bool   `json:"one_time"`
+		Volume       string `json:"volume"`
 	}
 	requestJSON(t, req, &shareReq)
 	if shareReq.Filename != "share-src.txt" || shareReq.TTL != "24h" || shareReq.MaxDownloads != 0 || shareReq.OneTime {
 		t.Fatalf("share body = %+v, want {share-src.txt 24h 0 false}", shareReq)
+	}
+	// 卷必须随请求发出（外部/加密卷分享的正确性依赖它；缺省=自动定位）。
+	if shareReq.Volume != "default" {
+		t.Fatalf("share body volume = %q, want default（文件行的卷未接入创建请求）", shareReq.Volume)
 	}
 }
 

@@ -38,17 +38,21 @@ func newCmdTrash(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comman
 
 // newCmdTrashList 创建 trash list。
 func newCmdTrashList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	var volume string
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出回收站条目",
-		Args:  cobra.NoArgs,
+		Long: "列出回收站条目。默认**汇总** owner 可见的全部卷；--volume 只看该卷。" +
+			"\n\n各卷有独立回收站（软删落文件所在卷）：外部/加密卷（如 secretdata vault）的" +
+			"\n条目同样列出（条目带 VOLUME 列）。",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			items, err := svc.ListTrash(cmd.Context())
+			items, err := svc.ListTrash(cmd.Context(), volume)
 			if err != nil {
 				return err
 			}
@@ -62,60 +66,89 @@ func newCmdTrashList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 				ios.WriteOutLine("回收站为空")
 				return nil
 			}
-			ios.WriteOutLine("%-50s  %s", "TRASH_REL", "ORIGINAL_NAME")
+			ios.WriteOutLine("%-50s  %-16s  %s", "TRASH_REL", "VOLUME", "ORIGINAL_NAME")
 			for _, it := range items {
-				ios.WriteOutLine("%-50s  %s", it.TrashRel, it.Name)
+				vol := it.Volume
+				if vol == "" {
+					vol = "-"
+				}
+				ios.WriteOutLine("%-50s  %-16s  %s", it.TrashRel, vol, it.Name)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&volume, "volume", "", "只看该卷的回收站（缺省 = 全部卷汇总）")
+	return cmd
 }
 
 // newCmdTrashRestore 创建 trash restore <trash_rel>。
 func newCmdTrashRestore(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	var volume string
+	cmd := &cobra.Command{
 		Use:   "restore <trash_rel>",
 		Short: "恢复回收站条目（trash_rel 来自 list 输出）",
-		Args:  cobra.ExactArgs(1),
+		Long: "恢复回收站条目。缺省**跨卷定位**（条目只存在于软删时所在卷）；" +
+			"\n同名 trash_rel 有多份时用 --volume 指定卷（取自 list 的 VOLUME 列）。",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			if err := svc.RestoreTrash(cmd.Context(), args[0]); err != nil {
+			if err := svc.RestoreTrash(cmd.Context(), args[0], volume); err != nil {
 				return err
 			}
 			ios.WriteOutLine("已恢复 %s", args[0])
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&volume, "volume", "", "条目所在卷（缺省 = 跨卷定位）")
+	return cmd
 }
 
 // newCmdTrashEmpty 创建 trash empty（--yes 确认）。
 func newCmdTrashEmpty(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	var yes bool
+	var (
+		yes    bool
+		volume string
+		all    bool
+	)
 	cmd := &cobra.Command{
 		Use:   "empty",
 		Short: "清空回收站（不可恢复，需 --yes 确认）",
-		Args:  cobra.NoArgs,
+		Long: "清空回收站（不可恢复）。**安全默认只清默认卷**；用 --volume <卷> 清指定卷、" +
+			"\n--all 清全部卷（外部/加密卷的软删条目也在此清）。",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !yes {
 				return fmt.Errorf("清空回收站不可恢复，请加 --yes 确认")
+			}
+			if all && volume != "" {
+				return fmt.Errorf("--all 与 --volume 只能二选一")
 			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			if err := svc.EmptyTrash(cmd.Context()); err != nil {
+			if err := svc.EmptyTrash(cmd.Context(), volume, all); err != nil {
 				return err
 			}
-			ios.WriteOutLine("回收站已清空")
+			switch {
+			case all:
+				ios.WriteOutLine("全部卷回收站已清空")
+			case volume != "":
+				ios.WriteOutLine("卷 %s 的回收站已清空", volume)
+			default:
+				ios.WriteOutLine("回收站已清空（默认卷；--all 清全部卷）")
+			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "确认清空（不可恢复）")
+	cmd.Flags().StringVar(&volume, "volume", "", "只清该卷的回收站")
+	cmd.Flags().BoolVar(&all, "all", false, "清空**全部卷**的回收站（默认只清默认卷）")
 	return cmd
 }
 

@@ -27,11 +27,12 @@ cmd/sclient/relay_tcp_test.go	1
 cmd/sclient/relay_test.go	5
 cmd/sclient/root_test.go	6
 cmd/sclient/share_integration_test.go	1
-cmd/sclient/share_test.go	2
+cmd/sclient/share_test.go	3
 cmd/sclient/socks_test.go	2
 cmd/sclient/stat_test.go	3
 cmd/sclient/sync_test.go	17
 cmd/sclient/tlsutil_test.go	2
+cmd/sclient/trash_test.go	6
 cmd/sclient/trust_login_test.go	11
 cmd/sclient/trust_register_context_test.go	6
 cmd/sclient/trust_test.go	15

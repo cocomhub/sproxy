@@ -89,6 +89,9 @@ func (f *TextFormatter) PrintShareCreated(link *client.ShareLink, shareURL strin
 	fmt.Fprintf(f.w, "Token: %s\n", link.Token)
 	fmt.Fprintln(f.w, i18n.F("有效期至: %s", link.ExpiresAt))
 	fmt.Fprintln(f.w, i18n.F("最大下载次数: %d", link.MaxDownloads))
+	if link.Volume != "" {
+		fmt.Fprintln(f.w, i18n.F("源卷: %s", link.Volume))
+	}
 	fmt.Fprintln(f.w, i18n.F("一次性: %v", link.OneTime))
 }
 

@@ -18,7 +18,7 @@ import (
 
 func TestShareCmd_Usage(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdShare(clientfactory.NewMock(nil, nil), cli.IOStreams{})
+	cmd := NewCmdShare(clientfactory.NewMock(nil, nil), cli.IOStreams{}, nil)
 	if cmd.Use != "share" {
 		t.Errorf("expected Use=share, got %s", cmd.Use)
 	}
@@ -29,7 +29,7 @@ func TestShareCmd_Usage(t *testing.T) {
 
 func TestShareCmd_HasSubcommands(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdShare(clientfactory.NewMock(nil, nil), cli.IOStreams{})
+	cmd := NewCmdShare(clientfactory.NewMock(nil, nil), cli.IOStreams{}, nil)
 	cmds := cmd.Commands()
 	names := make(map[string]bool)
 	for _, c := range cmds {
@@ -44,7 +44,7 @@ func TestShareCmd_HasSubcommands(t *testing.T) {
 
 func TestShareCreateCmd_Flags(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdShareCreate(clientfactory.NewMock(nil, nil), cli.IOStreams{})
+	cmd := NewCmdShareCreate(clientfactory.NewMock(nil, nil), cli.IOStreams{}, nil)
 	f := cmd.Flags()
 	ttl, err := f.GetString("ttl")
 	if err != nil || ttl != "24h" {
@@ -84,7 +84,7 @@ func TestShareCmd_Integration(t *testing.T) {
 
 	// 测试 share create
 	var buf strings.Builder
-	cmd := NewCmdShareCreate(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdShareCreate(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.SetArgs([]string{"file.txt", "--ttl", "24h"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("share create failed: %v", err)
@@ -146,12 +146,46 @@ func TestShareCreateCmd_ServerError(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdShareCreate(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdShareCreate(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.Flags().Set("ttl", "24h")
 	cmd.SetArgs([]string{"test.txt"})
 	err := cmd.Execute()
 	if err == nil {
 		t.Error("expected error when server returns 500")
+	}
+}
+
+// TestShareCreate_VolumeURI 卷 URI 寻址：`share create vault:/docs/x.txt` 必须
+// ① 剥掉 URI 前缀把纯路径作为 filename；② 把卷名放进请求体 `volume`（外部/加密卷分享依赖它）。
+func TestShareCreate_VolumeURI(t *testing.T) {
+	var gotBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/share" || r.Method != http.MethodPost {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"tok","filename":"docs/x.txt","created_at":"2026-07-24T12:00:00Z","expires_at":"2026-07-25T12:00:00Z","volume":"vault"}`))
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdShareCreate(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd.SetArgs([]string{"vault:/docs/x.txt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("share create vault:/docs/x.txt: %v", err)
+	}
+	if got, _ := gotBody["filename"].(string); got != "/docs/x.txt" {
+		t.Fatalf("filename 应为剥掉卷前缀后的路径, got %q（请求体 %v）", got, gotBody)
+	}
+	if got, _ := gotBody["volume"].(string); got != "vault" {
+		t.Fatalf("请求体 volume = %q, want vault（外部/加密卷分享必须带卷名）", got)
+	}
+	if !strings.Contains(buf.String(), "vault") {
+		t.Fatalf("输出应显示源卷, got %q", buf.String())
 	}
 }

@@ -1971,15 +1971,33 @@ window.addEventListener('beforeunload', eventsStop);
 // --- 分享管理 ---
 let _shareModalVisible = false;
 
-function showShareModal(name) {
+// _shareVolume 是本次分享源所在卷（来自文件行的 data-volume；空 = 服务端自动定位）。
+// 为什么不在 createShare 里直接读 currentVolume()：文件行进来看的是**该文件实际所在卷**
+// （多卷聚合/外部卷列表下与过滤卷可能不同），行卷更准确。
+let _shareVolume = '';
+
+function showShareModal(name, volume) {
   _shareModalVisible = true;
+  _shareVolume = volume || '';
   document.getElementById('share-modal').style.display = 'flex';
   document.getElementById('share-filename').value = name || '';
+  updateShareSourceHint();
   document.getElementById('share-ttl').value = '24h';
   document.getElementById('share-max-downloads').value = '0';
   document.getElementById('share-one-time').checked = false;
   switchShareTab('create');
   void refreshShareList();
+}
+
+// updateShareSourceHint 显示「分享源卷」：行卷/过滤卷/自动定位三态可观测
+// （外部卷/加密卷分享是否带对卷，用户一眼可确认）。
+function updateShareSourceHint() {
+  const el = document.getElementById('share-source-hint');
+  if (!el) return;
+  const vol = (typeof appRender !== 'undefined' && appRender.shareVolumeFor)
+    ? appRender.shareVolumeFor(_shareVolume, (typeof currentVolume === 'function' ? currentVolume() : ''))
+    : (_shareVolume || '');
+  el.textContent = vol ? ('源卷: ' + vol) : '源卷: 自动定位（本地卷优先，未命中再扫外部卷）';
 }
 
 function hideShareModal() {
@@ -2004,9 +2022,11 @@ async function createShare() {
   const oneTime = document.getElementById('share-one-time').checked;
 
   try {
-    // 当前「过滤卷」选中时透传卷名：分享源必须定位到该卷（外部卷/加密卷尤其需要——
-    // 多卷同名 rel 时缺省会按「本地卷优先」选中错误文件）。
-    const shareVol = (typeof currentVolume === 'function') ? currentVolume() : '';
+    // 卷来源：**文件行的卷优先**（多卷聚合/外部卷列表下最准确），其次「过滤卷」当前选中值；
+    // 皆空 = 不发送（服务端自动定位）。外部卷/加密卷分享依赖它消除多卷同名歧义。
+    const shareVol = (typeof appRender !== 'undefined' && appRender.shareVolumeFor)
+      ? appRender.shareVolumeFor(_shareVolume, (typeof currentVolume === 'function' ? currentVolume() : ''))
+      : (_shareVolume || '');
     const data = await sc.share.create({
       filename: filename, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime,
       volume: shareVol || undefined,
@@ -2043,7 +2063,11 @@ function shareRowHtml(s) {
   else if (s.expires_at) expiresLabel = new Date(s.expires_at).toLocaleString();
   else expiresLabel = '-';
 
-  let html = '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + appRender.escHtml(s.filename) + '">' + appRender.escHtml(s.filename) + '</td>';
+  // 源卷徽标（服务端 list 新增 volume 字段）：外部/加密卷的分享一眼可辨（空 = 旧服务端）。
+  const volBadge = s.volume
+    ? ' <span class="vol-badge" title="卷 ' + appRender.escHtml(s.volume) + '">' + appRender.escHtml(s.volume) + '</span>'
+    : '';
+  let html = '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + appRender.escHtml(s.filename) + '">' + appRender.escHtml(s.filename) + volBadge + '</td>';
   html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);color:' + statusColor + ';">' + statusText + '</td>';
   html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + downloads + '</td>';
   html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;">' + expiresLabel + '</td>';
@@ -3485,7 +3509,7 @@ function initDynamicEventDelegation() {
         return;
       }
       if (btn.classList.contains('file-share-btn')) {
-        showShareModal(btn.dataset.filename);
+        showShareModal(btn.dataset.filename, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-preview-btn')) {
