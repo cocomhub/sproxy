@@ -251,6 +251,26 @@ func TestResolveBlockletMode_VideoWildcardHits(t *testing.T) {
 	}
 }
 
+// TestMediaKindOf_UpperCaseExt（2026-10-21 回归）：Windows/网盘场景文件名扩展名常大写
+// （WMV/RMVB/.MKV 等）。MediaKindOf 先 ToLower 再匹配——与其它扩展名判断点（integrity/
+// pikpak/preview）一致的**大小写不敏感**归一，保证大写扩展名同命中。
+func TestMediaKindOf_UpperCaseExt(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"clip.WMV":  "video/asf",
+		"clip.RMVB": "video/rm",
+		"clip.AVI":  "video/avi",
+		"clip.MKV":  "video/mkv",
+		"CLIP.MP4":  "video/mp4",
+		"e.FLV":     "video/flv",
+	}
+	for name, want := range cases {
+		if got := MediaKindOf(name); got != want {
+			t.Errorf("MediaKindOf(%q)=%q，应为 %q（扩展名大小写不敏感）", name, got, want)
+		}
+	}
+}
+
 // shardsealRegisterVideoWildcard 注册 "video" 通配 video-keyframe 提供者（测试辅助；
 // 等价装配层 media.RegisterKeyframeBackends 的 ffprobe 形态，用固定 indexer 保证确定性）。
 func shardsealRegisterVideoWildcard() {
