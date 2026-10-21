@@ -162,3 +162,29 @@
 | e2e `-tags=e2e ./test/...` | 3 包全绿（含 19 个恢复用例） |
 | `golangci-lint run` | 0 issues |
 | 变异验证（第二批 8 项） | 8/8 命中 |
+
+## 5. 第三批：用户实测问题 + 同类型普查（2026-10-21 深夜）
+
+用户报告「Web UI『过滤卷』下拉看不到运行时创建的 `vault`」。定位为**前端派生状态不刷新**
+（非服务端数据问题：`GET /api/volumes` 返回齐全），并**普查同类**一并修复：
+
+| 缺陷 | 触发 | 修复 |
+| --- | --- | --- |
+| **「过滤卷」/「上传卷」下拉不刷新** | 两下拉只在 `DOMContentLoaded` 初始化一次；登录前 `/api/volumes` 401 ⇒ 登录后不再重试 ⇒ 运行时建的卷不可见 | `refreshAfterAuth()` 统一入口（两个下拉 + 事件流 + 断点续传探测 + 打开着的监控 tab + 列表），登录成功（`login.js`）与**手动保存 AK/SK**（`saveAccessKeys`）都调用 |
+| **事件流（SSE）401 后永久停止** | 旧实现 401 直接 `return`，不留标记也不重连 ⇒ 登录后实时更新仍死 | 记 `_eventsAuthBlocked` 暂停无凭据空转重连；`eventsRestartAfterAuth()` **关闭旧流并重连**（身份变了 ⇒ 服务端 owner 过滤也不同） |
+| **断点续传列表不刷新** | `checkResumableUploads()` 只在加载时探测，登录前探测失败静默隐藏 | 纳入 `refreshAfterAuth` |
+| **监控弹窗开着时内容不刷新** | 登录前打开任意 tab 会渲染失败占位，且不重试 | `refreshAfterAuth` 检测弹窗打开态 → `statsRefresh()` 重拉**当前活动 tab** |
+| **config 静态声明 `type: baidupcs` 等外部卷启动失败** | 后端类型注册在 `RegisterRoutes`（装配）**之后** ⇒ `assembleVolumes → registry.NewBackend` 报「未注册后端」；只能运行期建卷绕过 | 新增 `registerVolumeBackendTypes()` 在 `setupServerCore` **最早**调用（类型与建卷 schema 全前移）；sync 侧只保留需要 `syncexec` 的 FS 工厂接线。门禁 **R45** 钉「注册先于装配」+「sync 阶段不得回退注册」 |
+
+**验证**：
+- 真浏览器 e2e `TestVolumes_LoginRefreshesSelects`（先把登录前 `/api/volumes` 路由拦截成 401，
+  再走真实注册 + TOTP 登录，断言两个下拉被填充 **且**出现新的 `/api/events` 连接）；
+  变异命中：① 登录后只 `refreshList()` ⇒ 红；② 不关闭旧事件流直接复用 ⇒ 红；
+- `TestRegisterVolumeBackendTypes_EnablesExternalVolumeAssembly`（生产注册函数 + `registry.NewBackend`
+  覆盖 webdav/sftp/ftp/s3/baidupcs；sftp/ftp 构造期拨号，判据为「错误来自该后端自身」而非「未注册」）；
+- 门禁 R45 变异命中：删掉 `registerVolumeBackendTypes()` 调用 ⇒ 红。
+
+**仍未做（设计级，用户已同意留后续片）**：secretdata **外部卷**重启后遗留「不可解容器」目录
+（loadIndex 清空索引后对遗留根容器既不清扫也不挂载）——需要先定语义（死亡目录 GC vs 仅索引不挂载，
+影响外部卷写放大与删除语义），不在本批范围内。
+
