@@ -171,18 +171,40 @@ func TestEncryptShardsBytes_VideoKeyframeBlobErrorSegment(t *testing.T) {
 
 // TestMediaKindOf：文件名扩展名 → 媒体容器族判据（自动选型用；I2+库选型评估定稿口径：
 // Kind 按容器族拆分，未注册的容器族由注册表回落 fixed）。
+//
+// **全量常见视频扩展名（2026-10-21 扩展）**：容器族返回具体 Kind，注册表命中（ffprobe
+// 通配 "video" 或未来专用解析器）→ video-keyframe；未命中 → 回落 fixed。
 func TestMediaKindOf(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"a.mp4":  "video/mp4", // ISO-BMFF：go-mp4 可解析（当前唯一注册）
+		"a.mp4":  "video/mp4", // ISO-BMFF：go-mp4 可解析
 		"d.mov":  "video/mp4",
-		"b.mkv":  "video/mkv", // EBML：返回 Kind，注册表未命中 → 回落 fixed
+		"m.m4v":  "video/mp4", // ISO-BMFF 变体
+		"b.mkv":  "video/mkv", // EBML
 		"c.webm": "video/mkv",
-		"e.avi":  "video/avi", // RIFF：同上
-		"f.ts":   "video/ts",  // MPEG-TS：同上
-		"g.txt":  "",
-		"h":      "",
-		"i.png":  "",
+		"e.avi":  "video/avi", // RIFF
+		"d.divx": "video/avi", // DivX（RIFF/AVI 系）
+		"f.ts":   "video/ts",  // MPEG-TS
+		"m.m2ts": "video/ts",  // Blu-ray MPEG-TS
+		"n.mts":  "video/ts",  // AVCHD MPEG-TS
+		// wmv/asf/rmvb/flv 等：容器族无专用解析器，落入 "video" 通配（装配 ffprobe 时命中）
+		"w.wmv":   "video/asf",
+		"s.asf":   "video/asf", // Advanced Systems Format
+		"r.rmvb":  "video/rm",  // RealMedia(rmvb 变体)
+		"r2.rm":   "video/rm",
+		"f.flv":   "video/flv", // FLV
+		"v.f4v":   "video/flv", // FLV 变体（H.264）
+		"g.mpg":   "video/mpeg",
+		"g2.mpeg": "video/mpeg", // MPEG-PS
+		"g3.vob":  "video/mpeg", // DVD VOB（MPEG-PS）
+		"g4.mod":  "video/mpeg", // 老式摄像机 MOD（MPEG-PS）
+		"g5.dat":  "video/mpeg", // VCD DAT（MPEG-1 PS）
+		"o.ogv":   "video/ogg",  // Ogg 容器（Theora/VP8）
+		"3.3gp":   "video/3gpp", // 3GP
+		"p.3g2":   "video/3gpp",
+		"t.txt":   "",
+		"h":       "",
+		"i.png":   "",
 	}
 	for name, want := range cases {
 		if got := MediaKindOf(name); got != want {
@@ -192,11 +214,11 @@ func TestMediaKindOf(t *testing.T) {
 }
 
 // TestResolveBlockletMode_UnregisteredKindFallsBack（库选型评估补）：返回了具体容器族
-// Kind（video/mkv/video/ts/video/avi）但注册表无对应解析器 → 回落默认 fixed（不报错，
+// Kind（video/mkv/video/ts/video/avi…）但注册表无对应解析器 → 回落默认 fixed（不报错，
 // 不「宣称支持实为必败降级」）。
 func TestResolveBlockletMode_UnregisteredKindFallsBack(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{"video/mkv", "video/ts", "video/avi"} {
+	for _, kind := range []string{"video/mkv", "video/ts", "video/avi", "video/asf", "video/rm"} {
 		p, err := ResolveBlockletMode(kind)
 		if err != nil {
 			t.Fatalf("ResolveBlockletMode(%s) 未注册应回落 fixed 而非报错: %v", kind, err)
@@ -205,4 +227,39 @@ func TestResolveBlockletMode_UnregisteredKindFallsBack(t *testing.T) {
 			t.Errorf("ResolveBlockletMode(%s) 模式=%q，应为 fixed（未注册回落）", kind, p.Mode)
 		}
 	}
+}
+
+// TestResolveBlockletMode_VideoWildcardHits（2026-10-21 扩展场景）：注册 "video" 通配
+// 提供者（装配 ffprobe 时的形态）→ 任意 video/* 容器族命中 video-keyframe（wmv/rmvb/
+// flv/mpg 等不再依赖逐扩展名解析器，由注册表裁决）。
+func TestResolveBlockletMode_VideoWildcardHits(t *testing.T) {
+	t.Cleanup(func() { UnregisterBlockletMode(BlockletModeVideoKeyframe, "video") })
+	shardsealRegisterVideoWildcard()
+	for _, kind := range []string{"video/asf", "video/rm", "video/flv", "video/mpeg", "video/ogg", "video/3gpp"} {
+		p, err := ResolveBlockletMode(kind)
+		if err != nil {
+			t.Fatalf("ResolveBlockletMode(%s) 应命中通配 video-keyframe: %v", kind, err)
+		}
+		if p.Mode != BlockletModeVideoKeyframe {
+			t.Errorf("ResolveBlockletMode(%s) 模式=%q，应为 video-keyframe（通配命中）", kind, p.Mode)
+		}
+	}
+	// 非 video 类（精确注册无、通配无）→ 回落 fixed。
+	p, err := ResolveBlockletMode("audio/mp3")
+	if err != nil || p.Mode != "fixed" {
+		t.Errorf("audio/mp3 应回落 fixed（无匹配），got mode=%q err=%v", p.Mode, err)
+	}
+}
+
+// shardsealRegisterVideoWildcard 注册 "video" 通配 video-keyframe 提供者（测试辅助；
+// 等价装配层 media.RegisterKeyframeBackends 的 ffprobe 形态，用固定 indexer 保证确定性）。
+func shardsealRegisterVideoWildcard() {
+	shardsealRegisterBlockletModeForTest("video", &fixedIndexer{frames: []int64{0}})
+}
+
+// shardsealRegisterBlockletModeForTest 注册单 kind 的 video-keyframe 提供者（测试辅助）。
+func shardsealRegisterBlockletModeForTest(kind string, idx KeyframeIndexer) {
+	RegisterBlockletMode(BlockletModeProvider{
+		Mode: BlockletModeVideoKeyframe, Kind: kind, Manager: "test-wildcard", Indexer: idx,
+	}, 1)
 }

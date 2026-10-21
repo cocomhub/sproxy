@@ -668,20 +668,43 @@ func decodeSalt(meta *Meta) ([]byte, error) {
 // 必败降级」）。
 //
 // **容器族口径（对抗评审 + 库选型评估定稿，2026-10-04）**：Kind 按容器族拆分（video/mp4、
-// video/mkv、video/ts、video/avi…），当前仅 video/mp4 有解析器（go-mp4，ISO-BMFF box）——
-// 其余容器族返回具体 Kind 但注册表未命中 → 回落 fixed。未来接入新解析器只需注册对应 Kind
-// （ebml-go→video/mkv、go-astits→video/ts），无需改本函数。
+// video/mkv、video/ts、video/avi…），注册表按容器族注册解析器（go-mp4→video/mp4、
+// ffprobe 通配→video）。2026-10-21 扩展：补全 wmv/asf、rmvb/rm、flv/f4v、mpg/mpeg/vob/
+// mod/dat、ogv、3gp/3g2、m4v、m2ts/mts、divx 等常见视频扩展名；同一容器族共享 Kind，
+// 不逐扩展名分叉（同一文件容器由容器族唯一表示）。
 func MediaKindOf(name string) string {
 	ext := strings.ToLower(path.Ext(name))
 	switch ext {
-	case ".mp4", ".mov":
-		return "video/mp4" // ISO-BMFF：go-mp4 可解析（当前唯一注册）
+	// ISO-BMFF：go-mp4 可解析（含 fMP4 降级）
+	case ".mp4", ".mov", ".m4v":
+		return "video/mp4"
+	// EBML：无解析器注册 → 回落 fixed（未来 ebml-go）
 	case ".mkv", ".webm":
-		return "video/mkv" // EBML：无解析器注册 → 回落 fixed（未来 ebml-go）
-	case ".ts":
-		return "video/ts" // MPEG-TS：无解析器注册 → 回落 fixed（未来 go-astits）
-	case ".avi":
-		return "video/avi" // RIFF：无解析器注册 → 回落 fixed（未来手写 RIFF）
+		return "video/mkv"
+	// MPEG-TS：无解析器注册 → 回落 fixed（未来 go-astits）
+	case ".ts", ".m2ts", ".mts":
+		return "video/ts"
+	// RIFF：无解析器注册 → 回落 fixed（未来手写 RIFF）
+	case ".avi", ".divx":
+		return "video/avi"
+	// ASF/WMV：ffprobe 通配命中时 video-keyframe
+	case ".wmv", ".asf":
+		return "video/asf"
+	// RealMedia：ffprobe 通配命中时 video-keyframe
+	case ".rmvb", ".rm":
+		return "video/rm"
+	// FLV：ffprobe 通配命中时 video-keyframe
+	case ".flv", ".f4v":
+		return "video/flv"
+	// MPEG-PS（mpg/mpeg/vob/mod/dat）：ffprobe 通配命中时 video-keyframe
+	case ".mpg", ".mpeg", ".vob", ".mod", ".dat":
+		return "video/mpeg"
+	// Ogg：ffprobe 通配命中时 video-keyframe
+	case ".ogv":
+		return "video/ogg"
+	// 3GPP：ffprobe 通配命中时 video-keyframe
+	case ".3gp", ".3g2":
+		return "video/3gpp"
 	default:
 		return ""
 	}
