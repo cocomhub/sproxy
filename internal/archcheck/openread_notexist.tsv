@@ -30,3 +30,4 @@ pkg/volume/sftp/sftp_fs.go	pkg/sftp 对 no-such-file 返回 os.ErrNotExist（库
 pkg/volume/trusted/guard_fs.go	MetaBucketGuard：转发 inner
 pkg/volume/trusted/trusted_fs.go	TrustedVolumeFS：转发 inner
 pkg/volume/webdav/webdav_fs.go	404 ⇒ 包装 os.ErrNotExist
+pkg/server/source_volume.go	ownerSource.OpenRead：委托（本地 openUserVisibleRead / 外部卷 FS.OpenRead），不吞错——不存在按底层 errors.Is(err, os.ErrNotExist) 原样上抛
