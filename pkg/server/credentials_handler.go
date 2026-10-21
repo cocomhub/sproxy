@@ -794,3 +794,12 @@ func credentialBodyDecodeError(err error) string {
 	}
 	return msgInvalidRequestBody
 }
+
+// urlSigTTLFromCfg 返回 URL 票形态的 TTL 上限（`registration.download_token_ttl`；
+// 0/缺省 → defaultURLSigTTL=1h）。装配后只读。
+func (h *Handlers) urlSigTTLFromCfg() time.Duration {
+	if cfg := h.cfgPtr.Load(); cfg != nil && cfg.Registration.DownloadTokenTTL > 0 {
+		return cfg.Registration.DownloadTokenTTL
+	}
+	return 0 // 0 → RingAuthenticator.urlSigTTL() 回落 defaultURLSigTTL
+}
