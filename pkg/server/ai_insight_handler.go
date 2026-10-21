@@ -10,11 +10,13 @@ package server
 //   - owner 隔离（只能洞察自己文件）+ ValidateFilePath 防穿越。
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/llmgate"
@@ -24,21 +26,27 @@ import (
 // sampleLimit 是抽样字节上限（首 4KiB，成本有界）。
 const sampleLimit = 4 << 10
 
-// aiSample 从租户存储读取文件首 4KiB（OpenDecrypted 经 at-rest 解密）。
+// aiSample 读取文件首 4KiB（**卷感知**：本地卷走 OpenDecrypted，外部卷/加密卷走卷 FS
+// 的透明解密读）。缺陷修复（2026-10-21）：此前只用 `tenantFor(owner)` 的默认租户根 ⇒
+// 位于外部卷（含 secretdata 加密卷）的文件一律「文件不存在」。
 // 返回抽样文本 + mtime；空文本 → ErrNotTextFile。
-func (h *Handlers) aiSample(owner, rel string) (string, int64, error) {
-	tenant := h.tenantFor(owner)
-	root := tenant.Root()
-	fi, err := root.Stat(rel)
-	if err != nil {
-		return "", 0, err
+func (h *Handlers) aiSample(ctx context.Context, owner, rel, volumeHint string) (string, int64, error) {
+	src, ok := h.resolveOwnerSource(ctx, owner, rel, volumeHint)
+	if !ok || src == nil {
+		return "", 0, os.ErrNotExist
 	}
-	rc, err := root.OpenDecrypted(rel)
+	rc, err := src.OpenRead(ctx)
 	if err != nil {
 		return "", 0, err
 	}
 	defer rc.Close()
-	mtime := fi.ModTime().UnixNano()
+	// 缓存键用 mtime：外部卷无本地 mtime ⇒ 用 Stat 的 MTime（FS 提供，可能为 0 = 不缓存命中退化）。
+	mtime := int64(0)
+	if src.Local != nil {
+		if fi, serr := src.Local.Stat(src.Rel); serr == nil {
+			mtime = fi.ModTime().UnixNano()
+		}
+	}
 	data, err := io.ReadAll(io.LimitReader(rc, sampleLimit))
 	if err != nil {
 		return "", 0, err
@@ -65,7 +73,12 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 		writeAIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	text, mtime, err := h.aiSample(owner, filename)
+	volName := r.URL.Query().Get("volume")
+	cacheKey := filename
+	if volName != "" {
+		cacheKey = volName + ":" + filename
+	}
+	text, mtime, err := h.aiSample(r.Context(), owner, filename, volName)
 	if err != nil {
 		if err == ErrNotTextFile {
 			writeAIError(w, http.StatusBadRequest, "非文本文件")
@@ -75,7 +88,7 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 		return
 	}
 	// 缓存命中（mtime 未变）
-	if got, _, ok, _ := ai.cache.Get(r.Context(), owner, filename, "sum", mtime); ok {
+	if got, _, ok, _ := ai.cache.Get(r.Context(), owner, cacheKey, "sum", mtime); ok {
 		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write(got)
 		return
@@ -108,7 +121,7 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 		Result: AuditResultSuccess, Detail: fmt.Sprintf("tokens≈%d", len(text)/4),
 	})
 	body, _ := json.Marshal(map[string]string{"summary": summary})
-	_ = ai.cache.Put(r.Context(), owner, filename, "sum", mtime, body)
+	_ = ai.cache.Put(r.Context(), owner, cacheKey, "sum", mtime, body)
 	w.Header().Set(headerContentType, contentTypeJSON)
 	_, _ = w.Write(body)
 }
@@ -128,7 +141,12 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		writeAIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	text, mtime, err := h.aiSample(owner, filename)
+	volName := r.URL.Query().Get("volume")
+	cacheKey := filename
+	if volName != "" {
+		cacheKey = volName + ":" + filename
+	}
+	text, mtime, err := h.aiSample(r.Context(), owner, filename, volName)
 	if err != nil {
 		if err == ErrNotTextFile {
 			writeAIError(w, http.StatusBadRequest, "非文本文件")
@@ -137,7 +155,7 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		writeAIError(w, http.StatusNotFound, "文件不存在")
 		return
 	}
-	if got, _, ok, _ := ai.cache.Get(r.Context(), owner, filename, "tag", mtime); ok {
+	if got, _, ok, _ := ai.cache.Get(r.Context(), owner, cacheKey, "tag", mtime); ok {
 		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write(got)
 		return

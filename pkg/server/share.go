@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -31,10 +32,13 @@ const (
 
 // ShareLink 表示一个文件分享链接。
 type ShareLink struct {
-	Token        string    `json:"token"`
-	Filename     string    `json:"filename"`
-	TenantID     string    `json:"-"`               // 创建者租户 ID（owner 归一化后的合法段名）
-	Rel          string    `json:"-"`               // 租户根内相对路径（user/<path>），访问时经 tenantFor().Root().Open(rel) 解析
+	Token    string `json:"token"`
+	Filename string `json:"filename"`
+	TenantID string `json:"-"` // 创建者租户 ID（owner 归一化后的合法段名）
+	Rel      string `json:"-"` // 域内路径（user/<path>）：本地卷用于 Root.Open；外部卷用于算 FS 键
+	// Volume 是分享源的**卷名**（空 = 旧记录/无卷语义）。创建时固化：文件随后被移动到别的卷
+	// 也不会让分享指向另一个同名文件（多卷同 rel 时语义确定）。
+	Volume       string    `json:"volume,omitempty"`
 	Owner        string    `json:"owner,omitempty"` // 创建者（AK / API key 名；空 = 全局/admin 兼容）
 	CreatedAt    time.Time `json:"created_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
@@ -57,6 +61,7 @@ type shareLinkPersist struct {
 	Filename      string    `json:"filename"`
 	TenantID      string    `json:"tenant_id"`
 	Rel           string    `json:"rel"`
+	Volume        string    `json:"volume,omitempty"`
 	Owner         string    `json:"owner,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	ExpiresAt     time.Time `json:"expires_at"`
@@ -73,6 +78,7 @@ func (p shareLinkPersist) toLink() *ShareLink {
 		Filename:      p.Filename,
 		TenantID:      p.TenantID,
 		Rel:           p.Rel,
+		Volume:        p.Volume,
 		Owner:         p.Owner,
 		CreatedAt:     p.CreatedAt,
 		ExpiresAt:     p.ExpiresAt,
@@ -90,6 +96,7 @@ func (l *ShareLink) toPersist() shareLinkPersist {
 		Filename:      l.Filename,
 		TenantID:      l.TenantID,
 		Rel:           l.Rel,
+		Volume:        l.Volume,
 		Owner:         l.Owner,
 		CreatedAt:     l.CreatedAt,
 		ExpiresAt:     l.ExpiresAt,
@@ -319,6 +326,7 @@ func (s *ShareStore) Create(spec shareSpec) (*ShareLink, error) {
 		Filename:      spec.Filename,
 		TenantID:      spec.TenantID,
 		Rel:           spec.Rel,
+		Volume:        spec.Volume,
 		Owner:         spec.Owner,
 		CreatedAt:     now,
 		ExpiresAt:     now.Add(spec.TTL),
@@ -505,7 +513,10 @@ type ShareCreateResponse struct {
 
 // shareCreateRequest 是 POST /api/share 的请求体解析结构。
 type shareCreateRequest struct {
-	Filename     string `json:"filename"`
+	Filename string `json:"filename"`
+	// Volume 是分享源的卷名（可选）。缺省 = 自动定位（本地卷优先，未命中再扫外部卷）；
+	// 多卷存在同名 rel 时应显式指定。外部卷/加密卷（如 secretdata vault）靠它或自动扫描命中。
+	Volume       string `json:"volume"`
 	TTL          string `json:"ttl"`
 	MaxDownloads int    `json:"max_downloads"`
 	OneTime      bool   `json:"one_time"`
@@ -532,12 +543,11 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner, root, tntID, rel, ok := h.resolveShareSource(w, r, remotePath)
+	owner, src, ok := h.resolveShareSource(w, r, remotePath, req.Volume)
 	if !ok {
 		return
 	}
-	fi, ok := validateShareSourceFile(w, root, rel)
-	if !ok {
+	if !h.validateShareSourceFile(w, src) {
 		return
 	}
 	ttl, ok := resolveShareTTL(w, req.TTL)
@@ -546,8 +556,9 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	link, err := h.shareStore.Create(shareSpec{
-		Filename: req.Filename, TenantID: tntID, Rel: rel, Owner: ActorFrom(r.Context()),
-		TTL: ttl, MaxDownloads: req.MaxDownloads, OneTime: req.OneTime, ReadOnly: req.ReadOnly,
+		Filename: req.Filename, TenantID: src.TenantID, Rel: src.Rel, Volume: src.Volume,
+		Owner: ActorFrom(r.Context()),
+		TTL:   ttl, MaxDownloads: req.MaxDownloads, OneTime: req.OneTime, ReadOnly: req.ReadOnly,
 		WatermarkSeed: req.Watermark,
 	})
 	if err != nil {
@@ -558,7 +569,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	// 分享创建 = 授权变更——发布 share 事件供订阅者感知（fileEvent 载荷只带
 	// action/owner/rel/size，**不含 token/password**，无泄露风险）。
 	// size = 分享文件大小；rel 去 user/ 前缀（与事件流既有形态一致）。
-	h.eventBus().Publish(files.EventShare, owner, strings.TrimPrefix(rel, "user/"), fi.Size())
+	h.eventBus().Publish(files.EventShare, owner, strings.TrimPrefix(src.Rel, "user/"), src.Size)
 
 	// 分享创建 = 授权变更（安全敏感）⇒ 必须审计（object 用 token，detail 记文件名）。
 	h.RecordAudit(r.Context(), AuditEvent{
@@ -593,64 +604,72 @@ func (h *Handlers) parseShareCreateRequest(w http.ResponseWriter, r *http.Reques
 	return &req, true
 }
 
-// resolveShareSource 解析分享创建请求的文件定位：owner 归一化、租户解析与相对路径、
-// 跨卷定位（T6b）——返回源 root、租户 ID、租户根内相对路径与 owner（失败时已回包，ok=false）。
-func (h *Handlers) resolveShareSource(w http.ResponseWriter, r *http.Request, remotePath string) (owner string, root *storage.Root, tntID, rel string, ok bool) {
+// resolveShareSource 解析分享创建请求的文件定位：owner 归一化 + **跨卷源定位**
+// （本地卷租户根 / 外部卷 FS，含 `secretdata` 加密卷）。
+//
+// 缺陷修复（2026-10-21）：此前只经 `locateOwnerFile`（**本地卷租户根**）定位 ⇒ 外部卷
+// （加密卷/网盘卷/S3）上的文件创建分享恒 404。现在按 `hint`（请求体/查询参数 `volume`）
+// 或自动定位（本地卷优先，未命中再扫 owner 视图内外部卷）。
+func (h *Handlers) resolveShareSource(w http.ResponseWriter, r *http.Request, remotePath, hint string) (owner string, src *ownerSource, ok bool) {
 	owner = normalizeOwner(ownerFromRequest(r))
 	tnt0 := h.tenantFor(owner)
 	if tnt0 == nil || tnt0.Root() == nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return "", nil, "", "", false
+		return "", nil, false
 	}
-	var relOK bool
-	rel, relOK = tnt0.UserRel(remotePath)
+	rel, relOK := tnt0.UserRel(remotePath)
 	if !relOK {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return "", nil, "", "", false
+		return "", nil, false
 	}
-	// 跨卷定位（T6b）：分享源文件必须在 owner 卷视图内。默认卷被 ACL 排除时默认卷遗留
-	// 不可见 → 404（fail-closed，内容不可经 token 流出）；非默认卷文件可正常创建分享
-	// （access 时经视图重新定位）。
-	tntID = tnt0.ID
-	if h.volSet != nil {
-		loc, found := h.locateOwnerFile(owner, rel)
-		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-			return "", nil, "", "", false
-		}
-		root = loc.tenant.Root()
-		tntID = loc.tenant.ID
-	} else {
-		root = tnt0.Root()
+	if hint == "" {
+		hint = r.URL.Query().Get("volume")
 	}
-	return owner, root, tntID, rel, true
+	resolved, found := h.resolveOwnerSource(r.Context(), owner, rel, hint)
+	if !found || resolved == nil {
+		// 文件不在 owner 卷视图内（ACL 收紧/卷未装配）⇒ 404 fail-closed（内容不可经 token 流出）。
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		return "", nil, false
+	}
+	return owner, resolved, true
 }
 
-// validateShareSourceFile 校验分享源文件存在、非符号链接且可读（root 相对打开，符号链接不逃逸）。
-func validateShareSourceFile(w http.ResponseWriter, root *storage.Root, rel string) (os.FileInfo, bool) {
-	// 符号链接拒绝 + 存在性校验：Lstat 不跟随链接，一次完成两者。
-	fi, lstatErr := root.Lstat(rel)
-	if lstatErr != nil {
-		if os.IsNotExist(lstatErr) {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
-		} else {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
+// validateShareSourceFile 校验分享源文件可读（本地卷拒绝符号链接/目录；外部卷在源定位阶段
+// 已 Stat 命中且非目录）。
+func (h *Handlers) validateShareSourceFile(w http.ResponseWriter, src *ownerSource) bool {
+	if src == nil {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		return false
+	}
+	if src.Local != nil {
+		// 符号链接拒绝 + 存在性校验：Lstat 不跟随链接，一次完成两者。
+		fi, lstatErr := src.Local.Lstat(src.Rel)
+		if lstatErr != nil {
+			if os.IsNotExist(lstatErr) {
+				sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+			} else {
+				sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
+			}
+			return false
 		}
-		return nil, false
+		if fi.Mode()&os.ModeSymlink != 0 {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享符号链接"}, http.StatusBadRequest)
+			return false
+		}
+		if fi.IsDir() {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享目录"}, http.StatusBadRequest)
+			return false
+		}
+		src.Size = fi.Size()
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享符号链接"}, http.StatusBadRequest)
-		return nil, false
-	}
-	// 校验可读：root 相对打开（符号链接不逃逸），立即关闭。分享链接只存 rel，
-	// 不保留句柄——访问时经 root.Open(rel) 重新解析（TOCTOU 收敛）。
-	if f, openErr := openUserVisibleRead(root, rel); openErr != nil {
+	// 校验可读：立即打开并关闭（分享只存定位，不保留句柄——访问时重新解析，TOCTOU 收敛）。
+	f, openErr := src.OpenRead(context.Background())
+	if openErr != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
-		return nil, false
-	} else {
-		_ = f.Close()
+		return false
 	}
-	return fi, true
+	_ = f.Close()
+	return true
 }
 
 // resolveShareTTL 解析并限制分享 TTL：缺省 24h，超过 maxShareTTL 取上限，非法返回错误回包。
@@ -679,65 +698,57 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	root, link, ok := h.resolveShareAccess(w, r, token)
+	src, link, ok := h.resolveShareAccess(w, r, token)
 	if !ok {
 		return
 	}
 
-	// 直接流式传输文件，不暴露文件路径（root 相对打开，符号链接不逃逸）。
+	// 直接流式传输文件，不暴露文件路径。
 	// 加密卷走**用户可见**入口（透明解密）并报**明文**长度——raw Open 会把密文原样下发
 	// （评审 P0：分享面静默损坏），密文长度当 Content-Length 还会导致客户端 unexpected EOF。
-	f, err := openUserVisibleRead(root, link.Rel)
+	// 外部卷（含 secretdata）经 ownerSource.OpenRead（卷 FS 层透明解密），本地卷经
+	// openUserVisibleRead —— 两者都是「用户可见」语义（缺陷修复 2026-10-21）。
+	f, err := src.OpenRead(r.Context())
 	if err != nil {
 		http.Error(w, "文件读取失败", http.StatusInternalServerError)
 		return
 	}
 	defer f.Close()
 
-	size, err := userVisibleSize(root, link.Rel)
-	if err != nil {
-		http.Error(w, "文件状态读取失败", http.StatusInternalServerError)
-		return
+	size := src.Size
+	if src.Local != nil {
+		// 本地卷以**用户可见长度**为准（加密卷逻辑长度 ≠ 文件系统物理长度）。
+		if s2, serr := userVisibleSize(src.Local, src.Rel); serr == nil {
+			size = s2
+		} else {
+			http.Error(w, "文件状态读取失败", http.StatusInternalServerError)
+			return
+		}
+	}
+	if size < 0 {
+		size = 0
 	}
 
 	h.streamShareFile(w, r, token, link, f, size)
 }
 
-// resolveShareAccess 校验分享链接有效性并消费（Peek → 租户/卷定位 → 文件存在 → Consume）。
-// 返回源 root 与消费后的 link；失败时已回包，ok=false。
-func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, token string) (root *storage.Root, link *ShareLink, ok bool) {
+// resolveShareAccess 校验分享链接有效性并消费（Peek → 源定位 → 文件存在 → Consume）。
+// 返回源定位（卷感知）与消费后的 link；失败时已回包，ok=false。
+func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, token string) (*ownerSource, *ShareLink, bool) {
 	// Peek：先查看链接是否存在且文件有效，不修改状态
-	link = h.shareStore.Peek(token)
+	link := h.shareStore.Peek(token)
 	if link == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
 		return nil, nil, false
 	}
-	// 经 tenantID 找租户根；校验 rel 仍属 user 桶（纵深防御：Rel 是存储字段，
-	// 拒绝越桶引用其他功能桶）。
-	tnt := h.tenantFor(link.TenantID)
-	if tnt == nil || tnt.Root() == nil {
+	// 纵深防御：Rel 是存储字段，拒绝越桶引用其它功能桶。
+	if !strings.HasPrefix(link.Rel, "user/") {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
 		return nil, nil, false
 	}
-	if !strings.HasPrefix(link.Rel, tnt.UserRoot()+"/") {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
-		return nil, nil, false
-	}
-	// 跨卷定位（T6b）：分享源文件在创建者 owner 卷视图内重新定位——文件在非默认卷的分享
-	// 可经视图命中；默认卷被 ACL 收紧排除 owner 后，指向默认卷遗留文件的分享不再可访问
-	// （fail-closed，内容不可经 token 流出）。
-	if h.volSet != nil {
-		loc, found := h.locateOwnerFile(link.TenantID, link.Rel)
-		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
-			return nil, nil, false
-		}
-		root = loc.tenant.Root()
-	} else {
-		root = tnt.Root()
-	}
-	// 检查文件是否存在（root 相对，符号链接不逃逸）
-	if _, err := root.Stat(link.Rel); err != nil {
+	src, found := h.resolveShareAccessSource(r, link)
+	if !found || src == nil {
+		// 源文件已不可见（被删/移走/卷被 ACL 收紧）⇒ 410 fail-closed。
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
 		return nil, nil, false
 	}
@@ -747,7 +758,30 @@ func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, to
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接已被消费"}, http.StatusConflict)
 		return nil, nil, false
 	}
-	return root, link, true
+	return src, link, true
+}
+
+// resolveShareAccessSource 解析分享源的**卷感知**定位：
+//   - `link.Volume` 非空（新记录）⇒ **只在该卷**重新定位（ACL 复核 + 文件存在性）；
+//   - 否则（旧记录/无卷语义）⇒ 旧行为：默认/本地卷优先（locateOwnerFile），未命中再按视图扫描。
+func (h *Handlers) resolveShareAccessSource(r *http.Request, link *ShareLink) (*ownerSource, bool) {
+	if link.Volume != "" {
+		return h.resolveOwnerSource(r.Context(), link.TenantID, link.Rel, link.Volume)
+	}
+	if h.volSet == nil {
+		// 旧装配路径：唯一根。
+		tnt := h.tenantFor(link.TenantID)
+		if tnt == nil || tnt.Root() == nil || !strings.HasPrefix(link.Rel, tnt.UserRoot()+"/") {
+			return nil, false
+		}
+		fi, err := tnt.Root().Stat(link.Rel)
+		if err != nil || fi.IsDir() {
+			return nil, false
+		}
+		return &ownerSource{TenantID: tnt.ID, Rel: link.Rel, Local: tnt.Root(), Size: fi.Size()}, true
+	}
+	// 旧记录兼容：本地卷优先，未命中再扫描外部卷（与创建时的自动定位同口径）。
+	return h.resolveOwnerSource(r.Context(), link.TenantID, link.Rel, "")
 }
 
 // streamShareFile 设置分享响应头并以流式方式传输文件内容（不暴露文件路径）。
@@ -779,6 +813,7 @@ func (h *Handlers) listSharesHandler(w http.ResponseWriter, r *http.Request) {
 	type shareItem struct {
 		Token        string `json:"token"`
 		Filename     string `json:"filename"`
+		Volume       string `json:"volume,omitempty"`
 		CreatedAt    string `json:"created_at"`
 		ExpiresAt    string `json:"expires_at"`
 		MaxDownloads int    `json:"max_downloads"`
@@ -794,6 +829,7 @@ func (h *Handlers) listSharesHandler(w http.ResponseWriter, r *http.Request) {
 		items = append(items, shareItem{
 			Token:        l.Token,
 			Filename:     l.Filename,
+			Volume:       l.Volume,
 			CreatedAt:    l.CreatedAt.Format(time.RFC3339),
 			ExpiresAt:    l.ExpiresAt.Format(time.RFC3339),
 			MaxDownloads: l.MaxDownloads,

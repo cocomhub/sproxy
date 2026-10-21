@@ -121,7 +121,9 @@ func (h *Handlers) collectVersionEntriesForList(w http.ResponseWriter, r *http.R
 // 文件，不泄存在性）。逐条目补 checksum（per-tenant store，key = version/<rel>/<id>，与卷无关）。
 func (h *Handlers) buildVersionList(w http.ResponseWriter, owner, remotePath, rel, verDir string, entries []files.VersionEntry) ([]VersionInfo, bool) {
 	if len(entries) == 0 {
-		_, fileFound := h.locateOwnerFile(owner, rel)
+		// **卷感知**可见性判据（缺陷修复，2026-10-21）：此前只用 `locateOwnerFile`（本地卷）
+		// ⇒ 外部卷（含 secretdata 加密卷）上的文件即使存在也 404（与分享面同一根因）。
+		_, fileFound := h.resolveOwnerSource(context.Background(), owner, rel, "")
 		if !fileFound && !h.defaultVolumeAllows(owner) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 			return nil, false

@@ -1346,10 +1346,11 @@ test('cloud 组映射（create/list/get/cancel/delete/resume/archive）', async 
 // ---- share ----
 test('share create/list/revoke 映射', async () => {
   const core = makeMockCore([
-    okResp({ success: true, token: 'T' }),
-    okResp({ success: true, token: 'T' }),
-    okResp({ shares: [{ token: 'T', filename: 'a.txt' }] }),
-    okResp({ success: true }),
+    okResp({ success: true, token: 'T' }), // create #1
+    okResp({ success: true, token: 'T' }), // create #2
+    okResp({ success: true, token: 'T' }), // create #3（带 volume）
+    okResp({ shares: [{ token: 'T', filename: 'a.txt' }] }), // list
+    okResp({ success: true }), // revoke
   ]);
   const api = makeApi(core);
   await api.share.create({ filename: 'a.txt', ttl: '24h', max_downloads: 3, one_time: false });
@@ -1359,12 +1360,16 @@ test('share create/list/revoke 映射', async () => {
   const noBody = await api.share.create({ filename: 'a.txt' });
   assert.strictEqual(noBody.token, 'T');
   assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes), { filename: 'a.txt', ttl: '24h', max_downloads: 0, one_time: false });
+  // volume 可选透传（外部卷/加密卷分享必须能指定卷；缺省不发送该字段，保持旧行为）。
+  await api.share.create({ filename: 'a.txt', volume: 'vault' });
+  assert.deepStrictEqual(jsonBody(core.calls[2].opts.bodyBytes),
+    { filename: 'a.txt', ttl: '24h', max_downloads: 0, one_time: false, volume: 'vault' });
   const list = await api.share.list();
-  assert.strictEqual(core.calls[2].path, '/api/shares');
+  assert.strictEqual(core.calls[3].path, '/api/shares');
   assert.strictEqual(list.shares.length, 1);
   await api.share.revoke('T');
-  assert.strictEqual(core.calls[3].path, '/api/shares/T');
-  assert.strictEqual(core.calls[3].method, 'DELETE');
+  assert.strictEqual(core.calls[4].path, '/api/shares/T');
+  assert.strictEqual(core.calls[4].method, 'DELETE');
 });
 
 // ---- config ----

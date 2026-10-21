@@ -40,6 +40,7 @@ type shareSpec struct {
 	Filename      string
 	TenantID      string
 	Rel           string
+	Volume        string
 	Owner         string
 	TTL           time.Duration
 	MaxDownloads  int
@@ -178,7 +179,8 @@ func (s *stateBackedShareStore) Create(spec shareSpec) (*ShareLink, error) {
 
 	now := time.Now()
 	link = &ShareLink{
-		Token: token, Filename: spec.Filename, TenantID: spec.TenantID, Rel: spec.Rel, Owner: spec.Owner,
+		Token: token, Filename: spec.Filename, TenantID: spec.TenantID, Rel: spec.Rel,
+		Volume: spec.Volume, Owner: spec.Owner,
 		CreatedAt: now, ExpiresAt: now.Add(spec.TTL), MaxDownloads: spec.MaxDownloads,
 		OneTime: spec.OneTime, ReadOnly: spec.ReadOnly, WatermarkSeed: spec.WatermarkSeed,
 	}

@@ -7,7 +7,8 @@
  * crypto, util }（由 api/index.js 组装传入）。领域方法一律 promise。
  *
  * 端点语义对齐 server 分享 handlers（share.go）：
- *   - create({filename, ttl, max_downloads, one_time}) → POST /api/share
+ *   - create({filename, ttl, max_downloads, one_time, volume?}) → POST /api/share
+ *     （volume 可选：分享源所在卷；外部卷/加密卷建议显式传入，避免多卷同名 rel 歧义）
  *   - list()              → GET  /api/shares
  *   - revoke(token)       → DELETE /api/shares/{token}
  *
@@ -54,6 +55,9 @@
         max_downloads: o.max_downloads !== undefined ? o.max_downloads : 0,
         one_time: o.one_time === true,
       };
+      // 可选卷名（**外部卷/加密卷必须靠它消除歧义**：同一 rel 可能在多卷存在；缺省由服务端
+      // 自动定位——本地卷优先，未命中再扫外部卷）。
+      if (o.volume) data.volume = o.volume;
       return jsonRequest('POST', '/api/share', data);
     }
     function list() {
