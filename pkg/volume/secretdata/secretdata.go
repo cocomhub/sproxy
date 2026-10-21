@@ -272,7 +272,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		return nil, fmt.Errorf("secretdata: 加密算法版本 %d 未注册（fail-fast）", algoVer)
 	}
 	if opts.Block.Min <= 0 || opts.Block.Max <= 0 {
-		opts.Block = shardseal.DefaultBlockPolicy()
+		opts.Block = defaultBlockPolicyFor(inner)
 	}
 	// Erasure 与 Dedup 组合未支持（去重文件走卷级单 blob 池，无可纠的 k 分块）：
 	// 显式互斥 fail-closed，避免组合下用户以为有纠错而实际没有。
@@ -3356,4 +3356,16 @@ type chunkHash struct{ md5, crc32 string }
 func md5HexOf(b []byte) string {
 	h := md5.Sum(b) //nolint:gosec // 见函数头注释
 	return hex.EncodeToString(h[:])
+}
+
+// defaultBlockPolicyFor 返回未显式配置时的**默认分块策略**（按底层本地性分流，2026-10-21
+// 用户裁定）：本地卷用 DefaultBlockPolicy（4MiB blocklet，零网络开销大段优）；外部/网盘卷用
+// ExternalDefaultBlockPolicy（256KiB blocklet——网盘随机读实测 8 倍提速）。判据委托底层
+// LocalVolume 自述（IsLocalVolume()，与 IsLocalVolume 方法同源）；未实现该接口 ⇒ 按外部
+// 处理（外部卷无本地性自述是默认语义）。显式 opts.Block 由调用方覆盖，不进本函数。
+func defaultBlockPolicyFor(inner syncpkg.FS) shardseal.BlockPolicy {
+	if lv, ok := inner.(syncpkg.LocalVolume); ok && lv.IsLocalVolume() {
+		return shardseal.DefaultBlockPolicy()
+	}
+	return shardseal.ExternalDefaultBlockPolicy()
 }
