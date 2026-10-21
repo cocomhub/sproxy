@@ -205,7 +205,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdBatchRename(factory, ios))
 	root.AddCommand(NewCmdPreview(factory, ios, cliState))
 	root.AddCommand(NewCmdTunnel(factory, ios))
-	root.AddCommand(NewCmdShare(factory, ios))
+	root.AddCommand(NewCmdShare(factory, ios, cliState))
 	root.AddCommand(NewCmdRelay(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdP2P(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdMesh(factory, ios, cfgSvc))

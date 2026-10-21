@@ -74,6 +74,8 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`du`](#du) | 查看目录空间占用（递归统计） |
 | [`df`](#df) | 查看卷水位与磁盘空间 |
 | [`quota`](#quota) | 查看本 owner 配额（**跨卷联邦视图** + 逐卷明细） |
+| [`share`](#share) | 分享链接管理（create / list / revoke；**支持外部卷/加密卷**） |
+| [`trash`](#trash) | 回收站管理（list / restore / empty；**多卷**：`--volume` / `--all`） |
 | [`batch`](#batch) | 从文件逐行读取命令批量执行（并发） |
 | [`batch-delete`](#batch-delete) | 批量删除文件 |
 | [`batch-rename`](#batch-rename) | 批量重命名文件 |
@@ -922,6 +924,40 @@ sealfile:
 ```
 
 优先级：CLI flag > 配置 > 默认。
+
+### share
+
+分享链接管理。**分享源可以是外部卷/加密卷**（如 `secretdata` vault）：卷定位走卷 URI、
+`cd` 设定的工作目录卷，或（都不给时）服务端**自动定位**（本地卷优先，未命中再扫外部卷）。
+
+```bash
+sclient share create vault:/docs/report.pdf        # 卷 URI（推荐：多卷同名时语义确定）
+sclient share create docs/report.pdf               # 用 cd 的工作目录卷
+sclient share create report.pdf --ttl 168h --one-time
+sclient share list                                 # 输出含 VOLUME 列（源卷）
+sclient share revoke <token>
+```
+
+- 卷优先级：**位置参数卷 URI** > **`cd` 工作目录卷** > 服务端自动定位（不带 `volume` 字段）。
+- 分享记录**固化源卷**：创建后即使同名文件出现在别的卷，链接仍指向创建时的卷。
+- 外部/加密卷分享访问时由服务端**透明解密**返回明文，`Content-Length` 为明文长度。
+
+### trash
+
+回收站管理。**每卷独立回收站**（软删落文件所在卷）；列表默认**汇总** owner 可见的全部卷，
+每条带 `VOLUME` 列。
+
+```bash
+sclient trash list                     # 汇总（全部卷）
+sclient trash list --volume vault       # 只看某卷
+sclient trash restore <trash_rel>       # 缺省跨卷定位
+sclient trash restore <trash_rel> --volume vault
+sclient trash empty --yes               # **只清默认卷**（安全默认，不静默扩大）
+sclient trash empty --yes --volume vault
+sclient trash empty --yes --all         # 清全部卷（含外部/加密卷）
+```
+
+`--all` 与 `--volume` 互斥；`empty` 必须带 `--yes`。
 
 ## 常见错误排查
 

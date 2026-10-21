@@ -17,6 +17,9 @@ type shareOptions struct {
 	ttl          time.Duration
 	maxDownloads int
 	oneTime      bool
+	// volume 是分享源所在卷（空 = 服务端自动定位：本地卷优先，未命中再扫外部卷）。
+	// **外部卷/加密卷**（如 secretdata vault）建议显式指定——多卷同名 rel 时缺省会取首个命中。
+	volume string
 }
 
 func WithShareTTL(d time.Duration) ShareOption {
@@ -41,6 +44,14 @@ func WithShareOneTime() ShareOption {
 	}
 }
 
+// WithShareVolume 指定分享源所在卷（卷 URI `<卷名>:/<路径>` 或 `cd <卷名>:/` 的当前卷）。
+// 空字符串 = 不发送该字段（服务端自动定位，行为与旧版一致）。
+func WithShareVolume(volume string) ShareOption {
+	return func(o *shareOptions) {
+		o.volume = volume
+	}
+}
+
 // ShareLink 表示服务端返回的分享链接信息。
 type ShareLink struct {
 	Token        string `json:"token"`         // 分享链接的唯一标识符
@@ -51,6 +62,8 @@ type ShareLink struct {
 	Downloads    int    `json:"downloads"`     // 已下载次数
 	OneTime      bool   `json:"one_time"`      // 是否一次性链接
 	Expired      bool   `json:"expired"`       // 是否已过期
+	// Volume 是分享源所在卷（服务端新增字段；空 = 旧服务端/无卷语义）。
+	Volume string `json:"volume,omitempty"`
 }
 
 // CreatedAtTime 返回 CreatedAt 的 time.Time 表示。
@@ -86,6 +99,10 @@ func (c *FileClient) CreateShare(ctx context.Context, filename string, opts ...S
 		"ttl":           fmt.Sprintf("%ds", int64(cfg.ttl.Seconds())),
 		"max_downloads": cfg.maxDownloads,
 		"one_time":      cfg.oneTime,
+	}
+	// 卷可选透传（外部卷/加密卷分享必须能指定卷；缺省不发送 ⇒ 服务端自动定位）。
+	if cfg.volume != "" {
+		reqBody["volume"] = cfg.volume
 	}
 
 	var link ShareLink

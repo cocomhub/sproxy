@@ -531,3 +531,20 @@ test('buildIntegrityBadge：damaged 黄色 / unverified 灰色 / verified 与缺
   // 非云任务类型无标记
   assert.equal(r.buildIntegrityBadge('sync_task', mk('damaged')), '');
 });
+
+// 分享按钮必须带**文件行自身所在卷**（data-volume）：外部卷/加密卷分享依赖它定位源文件
+// （服务端 resolveShareSource 的 volume 参数）；缺了会退化成「服务端自动定位」。
+test('buildFileRowHtml 分享按钮带 data-volume（行卷优先）', () => {
+  const withVol = r.buildFileRowHtml({ name: 'a.txt', size: 10, volume: 'vault' }, 'a.txt');
+  assert.ok(withVol.includes('file-share-btn'), '分享按钮存在');
+  assert.ok(withVol.includes('data-volume="vault"'), 'data-volume 应取行卷');
+  const withoutVol = r.buildFileRowHtml({ name: 'a.txt', size: 10 }, 'a.txt');
+  assert.ok(withoutVol.includes('data-volume=""'), '无行卷时为空串（服务端自动定位）');
+});
+
+test('shareVolumeFor：行卷优先 → 过滤卷 → 空（自动定位）', () => {
+  assert.equal(r.shareVolumeFor('vault', 'default'), 'vault', '行卷优先（多卷同名不漏定位）');
+  assert.equal(r.shareVolumeFor('', 'vault'), 'vault', '无行卷时用过滤卷');
+  assert.equal(r.shareVolumeFor('', ''), '', '皆空 ⇒ 不发送 volume');
+  assert.equal(r.shareVolumeFor(undefined, undefined), '', 'undefined 也归一为空串');
+});

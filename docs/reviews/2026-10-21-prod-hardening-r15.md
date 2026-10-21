@@ -220,3 +220,27 @@
 `pkg/server/share_external_volume_test.go`（真实 `secretdata` 外部卷，含加解密）：
 分享「显式卷 / 自动定位 / 多卷同名以显式卷为准 / 源删除 410」+ AI 抽样 + 归档显式失败；
 前端 `sclient.test.js` 覆盖 `volume` 透传；Web UI「过滤卷」选中时分享请求自动带上卷名。
+
+## 7. 第五批：服务端能力 → **客户端接入**核查（CLI / Web UI）
+
+修复能力若客户端不接入 = 用户仍不可用。逐项核查后补齐：
+
+| 服务端能力 | CLI | Web UI |
+| --- | --- | --- |
+| `POST /api/share` 新增 `volume`（外部/加密卷分享） | ✅ `share create <卷名>:/<路径>`（卷 URI，与 `ls/du/download` 同规约）+ `cd` 工作目录卷；`share list` 增 **VOLUME 列**、`share create` 输出显示「源卷」 | ✅ 文件行「分享」按钮带 `data-volume`（行卷）→ 弹窗显示**源卷**提示 → 创建请求带 `volume`；分享列表行显示卷徽标 |
+| `GET /api/shares` 返回 `volume` | ✅（见上） | ✅ 列表行卷徽标 |
+| `/api/trash?volume=` / `restore?volume=` / `empty?volume=|all=1`（多卷回收站） | ✅ `trash list [--volume]`（含 VOLUME 列）、`trash restore --volume`、`trash empty [--volume|--all]`（**安全默认只清默认卷**，`--all` 与 `--volume` 互斥） | ✅（已在 #830 接入：卷筛选 + 卷列） |
+| `/api/ai/summarize|tag` 新增 `?volume=` | —（CLI 无 AI 命令） | —（Web UI 未接入 AI 面板；后端能力留待 UI 功能化） |
+| `/api/archive` 对**外部卷**文件显式报错 | ✅ 错误直传（文案已说明原因） | ✅ 同上 |
+
+**核查结论（本来就已接入，未改动）**：`/download`、`/download/chunk`、`/api/files?volume=`、
+`/api/du`、DAV/S3、`sync`、云端转存/归档转存（`target_volume`）、`volume move/copy`、
+预签名、`trash`（Web UI）、审计卷维度筛选（Web UI）。
+
+**测试**：
+- CLI：`TestShareCreate_VolumeURI`（卷 URI 剥离 + 请求体 `volume` + 输出源卷）、
+  `TestTrash_MultiVolume`（`--volume`/`--all`/默认不扩大/互斥）+ 既有 share/trash 集成用例；
+- Web UI：`share_version_e2e_test.go` 扩展——行「分享」→ 弹窗**源卷提示** → 捕获 `POST /api/share`
+  断言 `volume=default`（真浏览器，缺接线必红）；
+- 纯函数：`app-render.test.js` 的 `shareVolumeFor`（行卷优先 → 过滤卷 → 空）与分享按钮 `data-volume`；
+- 文档：`docs/cli.md` 补 `share` / `trash` 两节（含卷寻址与安全默认）。

@@ -202,8 +202,19 @@
       '<button class="btn btn-sm btn-secondary file-preview-btn" data-filename="' + escHtml(fullName) + '">预览</button>' +
       '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
       '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
-      '<button class="btn btn-sm btn-share file-share-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">分享</button>' +
+      '<button class="btn btn-sm btn-share file-share-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '" data-checksum="' + escHtml(cs) + '">分享</button>' +
       '</td></tr>';
+  }
+
+  // shareVolumeFor 决定分享请求要带的卷名（纯函数，R10 单测见 app-render.test.js）：
+  //   ① 文件行自身的卷（`fi.volume`，多卷聚合/外部卷列表最准确）；
+  //   ② 否则「过滤卷」当前选中值（用户在卷视图内手动输入文件名时）；
+  //   ③ 皆空 ⇒ ""（不发送 volume，服务端自动定位：本地卷优先，未命中再扫外部卷）。
+  // 为什么行卷优先：过滤卷「全部卷」时行卷仍能定位到真实文件；多卷同名 rel 时避免歧义。
+  function shareVolumeFor(rowVolume, currentVolume) {
+    if (rowVolume) return rowVolume;
+    if (currentVolume) return currentVolume;
+    return '';
   }
 
   // 参数化版（不再读模块状态 _hasMore/_currentOffset——两个量由调用方传入）。
@@ -1092,7 +1103,7 @@
     escHtml, formatSize, parseSizeText, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
     stripCloudId, isVideoName, isTransferTargetVolume,
     uploadProgressText,
-    parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
+    parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml, shareVolumeFor,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
     auditTableHtml, volumesTableHtml, topologyEdgeColor, topologySvg,
     federationNodesHtml, federationServicesHtml,
