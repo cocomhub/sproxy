@@ -163,6 +163,9 @@ function saveAccessKeys() {
     sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, accessKeyID: accessKeyID, mode: undefined, tunnelDefault: undefined });
   } catch (e) { /* ignore */ }
   showToast('AccessKey 已保存', 'success');
+  // 凭据变化后必须重算派生数据（缺陷修复，2026-10-21）：新 AK 可能可见不同的卷/审计范围；
+  // 与登录成功走同一入口（卷下拉 + 事件流 + 断点续传 + 打开着的监控 tab + 列表）。
+  if (typeof refreshAfterAuth === 'function') void refreshAfterAuth();
 }
 
 // applyWebLoginKeys：Web 登录成功（login.js）后统一刷新本页凭据态——
@@ -183,6 +186,8 @@ function applyWebLoginKeys(ak, secret, id) {
   try {
     sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, accessKeyID: accessKeyID, mode: undefined, tunnelDefault: undefined });
   } catch (e) { /* ignore */ }
+  // 统一刷新入口（登录流程可能直接调本函数而不经 login.js 的按钮路径）——幂等。
+  if (typeof refreshAfterAuth === 'function') void refreshAfterAuth();
 }
 
 // --- 卷：上传下拉（工具栏「卷」）---
@@ -244,6 +249,39 @@ async function initVolumeFilter() {
     const data = await sc.files.volumes();
     populateVolumeFilterSelect(data?.volumes);
   } catch (e) { /* 无凭据/未授权/无卷 API：保持「全部卷」，不破坏无认证浏览 */ }
+}
+
+// refreshVolumeSelects 重新拉取 /api/volumes 并刷新**两个**卷下拉（文件页「过滤卷」+ 工具栏
+// 「上传卷」）。两者互不相干：一个决定列表过滤、一个决定上传目标。
+//
+// 为什么需要显式刷新（缺陷修复，2026-10-21）：两个下拉只在 DOMContentLoaded 时初始化一次
+// （见文件末尾 `initVolumeFilter()` / `initUploadVolumeSelect()` 调用点）。登录前那次
+// `/api/volumes` 因无凭据 401 ⇒ 下拉只剩「全部卷」/auto；登录成功后若只 `refreshList()`，
+// 下拉**永不重试** ⇒ 运行时创建的卷（如 secretdata `vault`）在「过滤卷」里看不到（用户实测）。
+async function refreshVolumeSelects() {
+  await Promise.all([
+    initVolumeFilter(),
+    initUploadVolumeSelect(),
+  ]);
+}
+
+// refreshAfterAuth 是「凭据生效后」的唯一刷新入口（登录成功 / 会话密钥变更后调用）：
+// 先刷新卷下拉（新凭据可能多出可见卷），再刷新文件列表（否则列表仍按旧的空卷过滤请求）。
+// 供 login.js 调用；未登录路径不受影响（本函数只在凭据建立后执行）。
+async function refreshAfterAuth() {
+  // ① 卷下拉（本函数服务的核心缺陷点）
+  await refreshVolumeSelects();
+  // ② 事件流：登录前 401 会停止且不再重连 ⇒ 必须显式重启（同类缺陷）。
+  if (typeof eventsRestartAfterAuth === 'function') eventsRestartAfterAuth();
+  // ③ 断点续传探测：登录前因无凭据失败（静默隐藏），登录后重探才能显示可续传会话。
+  if (typeof checkResumableUploads === 'function') void checkResumableUploads();
+  // ④ 监控弹窗若开着：重拉**当前活动 tab**（登录前打开会渲染失败占位且不再重试）。
+  const statsModal = document.getElementById('stats-modal');
+  if (statsModal && statsModal.style.display !== 'none' && typeof statsRefresh === 'function') {
+    statsRefresh();
+  }
+  // ⑤ 文件列表（依赖新凭据；放最后，避免与下拉刷新竞争同一渲染路径）。
+  await refreshList();
 }
 
 // --- UI 工具 ---
@@ -1820,6 +1858,7 @@ function eventsOnEvent(evt) {
 //   - 连接意外关闭/错误 → 指数退避重连（游标回放）；401/403 停止（认证问题无意义重连）
 function eventsStart() {
   if (typeof webEvents === 'undefined' || typeof fetch !== 'function') return;
+  if (_eventsAuthBlocked) return; // 无凭据被拒：等登录成功后 eventsRestartAfterAuth 重启
   const owner = eventsOwner();
   const url = webEvents.buildEventsUrl(owner);
   const cursor = eventsLastEventID();
@@ -1837,14 +1876,19 @@ function eventsStart() {
     return fetch(url, { method: 'GET', headers: finalHeaders });
   }).then(function(resp) {
     if (resp.status === 401 || resp.status === 403) {
-      // 认证失败：事件流不可用，静默停止（不打断既有交互；轮询/手动刷新仍工作）。
+      // 认证失败：事件流不可用，暂停重连（不打断既有交互；轮询/手动刷新仍工作）。
+      // **但必须可恢复**（缺陷修复，2026-10-21）：旧实现直接 return 且不留标记 ⇒ 登录前 401
+      // 之后**永不重连**，用户登录后实时事件仍然死（与「登录后卷下拉不刷新」同属
+      // 「凭据生效后派生状态没重算」）。记录 _eventsAuthBlocked，由 refreshAfterAuth 显式重启。
       _eventsStream = null;
+      _eventsAuthBlocked = true;
       return;
     }
     if (!resp.ok || !resp.body || typeof resp.body.getReader !== 'function') {
       throw new Error('SSE 响应不可用 (HTTP ' + resp.status + ')');
     }
     _eventsReconnectAttempt = 0; // 连接成功复位退避
+    _eventsAuthBlocked = false;
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -1872,6 +1916,23 @@ function eventsStart() {
     _eventsStream = null;
     scheduleReconnect();
   });
+}
+
+// _eventsAuthBlocked 表示上次连接因 401/403 停止（无凭据）。凭据生效后由
+// eventsRestartAfterAuth 显式放行并重连——否则实时更新在登录后仍永久失效。
+let _eventsAuthBlocked = false;
+
+// eventsRestartAfterAuth 在凭据生效后重启事件流（登录成功路径调用；幂等）。
+function eventsRestartAfterAuth() {
+  _eventsAuthBlocked = false;
+  _eventsReconnectAttempt = 0;
+  // 凭据变化后旧连接仍在（登录前匿名/loopback 允许时）⇒ 必须**关闭并重连**：事件流按
+  // 连接时刻的身份做 owner 过滤，沿用旧连接会继续只收到旧身份可见的事件。
+  if (_eventsStream && typeof _eventsStream.close === 'function') {
+    try { _eventsStream.close(); } catch (e) { /* ignore */ }
+  }
+  _eventsStream = null;
+  eventsStart();
 }
 
 // scheduleReconnect：断线后指数退避重连（1s→2s→4s→…→30s 封顶）。
