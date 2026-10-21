@@ -269,18 +269,39 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 	if verr := shardseal.VerifyBlockSalt(head, o.salt); verr != nil {
 		return nil, true, verr
 	}
+	// **段合并请求（coalesce，2026-10-21）**：相邻 blocklet 段在块 blob 内**近似连续**
+	// （段间仅 cryptoRandN(64) = 0-63B 随机间隙，见 shardseal.planBlockletLayout），且每段
+	// 精确位置 EncOffset/EncSize 已在 meta ⇒ **一次** Range 覆盖 [首段.EncOffset, 末段.EncOffset+
+	// 末段.EncSize)，再按已知 EncOffset 切片逐段解密。
+	// 旧实现逐段一次 RangeReadAll ⇒ N 段 = N 次请求（每次一记 RTT）；网盘场景是随机读慢的
+	// 主因之一（实测 242KB 文件 47s）。
+	targets := selectRangeBlocklets(o.ci.Blocklets, offset, end)
+	if len(targets) == 0 {
+		return nil, true, nil
+	}
+	first := targets[0]
+	last := targets[len(targets)-1]
+	spanOff := first.EncOffset
+	spanEnd := last.EncOffset + last.EncSize
+	spanSize := spanEnd - spanOff
+	if spanSize <= 0 {
+		return nil, true, fmt.Errorf("secretdata: blocklet 段区间非法（off=%d end=%d）", spanOff, spanEnd)
+	}
+	span, ok, serr := syncpkg.RangeReadAll(rr, ctx, segPath, spanOff, spanSize)
+	if serr != nil {
+		return nil, true, serr
+	}
+	if !ok {
+		return nil, false, nil
+	}
 	var out []byte
-	for _, bl := range o.ci.Blocklets {
-		if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
-			continue
+	for _, bl := range targets {
+		rel := bl.EncOffset - spanOff
+		if rel < 0 || rel+bl.EncSize > int64(len(span)) {
+			return nil, true, fmt.Errorf("secretdata: blocklet 段 %d 越出合并区间（rel=%d enc=%d span=%d）",
+				bl.Offset, rel, bl.EncSize, len(span))
 		}
-		seg, ok, serr := syncpkg.RangeReadAll(rr, ctx, segPath, bl.EncOffset, bl.EncSize)
-		if serr != nil {
-			return nil, true, serr
-		}
-		if !ok {
-			return nil, false, nil
-		}
+		seg := span[rel : rel+bl.EncSize]
 		plain, derr := shardseal.DecryptBlockletSegmentStandalone(o.keyBytes, seg, bl, o.ci.Offset)
 		if derr != nil {
 			return nil, true, fmt.Errorf("secretdata: 解密 blocklet（offset=%d）失败: %w", bl.Offset, derr)
@@ -294,6 +315,19 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		out = append(out, plain[segStart-bl.Offset:segEnd-bl.Offset]...)
 	}
 	return out, true, nil
+}
+
+// selectRangeBlocklets 返回与 [offset,end) 相交的**已使用** blocklet 段（保持 meta 顺序，
+// 即块内密文顺序）——供合并请求算 [首段.EncOffset, 末段.EncOffset+EncSize) 覆盖区间。
+func selectRangeBlocklets(blocklets []shardseal.BlockletInfo, offset, end int64) []shardseal.BlockletInfo {
+	out := make([]shardseal.BlockletInfo, 0, len(blocklets))
+	for _, bl := range blocklets {
+		if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
+			continue
+		}
+		out = append(out, bl)
+	}
+	return out
 }
 
 // decryptChunkRangeBlob 按 meta blocklet 索引合并解密分块 blob 在 [offset,end)∩块 的明文

@@ -43,10 +43,11 @@ type RangeSeeker struct {
 	rcEnd int64         // 当前区间流的逻辑终点（rc 读到此处即段末）
 }
 
-// rangeWindow 是 RangeSeeker 的单段窗口上界（2026-10-05 评审 C1）：限制单次
+// rangeWindow 是 RangeSeeker 的**本地卷**单段窗口上界（2026-10-05 评审 C1）：限制单次
 // OpenRangeRead 物化的明文量。取 4MiB——播放器 Range 请求通常 ≤1MiB（单段命中），
 // 顺序播放按窗口逐段续读（每段一次 RangeRead 开销可接受）。与 secretdata 块大小
 // （64KiB-4MiB 级）同量级，覆盖窗口的块整块下载边界不变。
+// 本地卷零网络开销 + page cache ⇒ 大窗口减少重开次数。
 const rangeWindow = 4 << 20
 
 // NewRangeSeeker 构造 RangeSeeker。fs 必须实现 RangeReader（否则返回错误——调用方
@@ -71,18 +72,32 @@ func NewRangeSeeker(ctx context.Context, fs FS, rel string, size int64) (*RangeS
 	if size < 0 {
 		return nil, fmt.Errorf("sync: 非法文件大小 %d", size)
 	}
+	// **窗口按底层本地性自适应（2026-10-21 缺陷修复）**：本地卷（page cache + 零网络
+	// 开销）用大窗口（顺序读优、重开次数少）；外部/网盘卷用小窗口（首帧/seek 优、读放大低
+	// ——窗口是惰性流式预取上限，拖进度条时大窗口会多拉无用数据）。
+	// 判据与能力探测同口径：下探最内层原始卷（Innermost）。
+	win := int64(rangeWindow)
+	if inner := Innermost(fs); inner != nil {
+		if lv, ok := inner.(LocalVolume); ok && !lv.IsLocalVolume() {
+			win = int64(externalRangeWindow)
+		}
+	}
 	return &RangeSeeker{
 		openRange: func(off int64) (io.ReadCloser, error) {
 			if off < 0 || off > size {
 				return nil, fmt.Errorf("sync: RangeSeeker 区间偏移 %d 越出 [0,%d]", off, size)
 			}
-			want := min(size-off, rangeWindow)
+			want := min(size-off, win)
 			return rr.OpenRangeRead(ctx, rel, off, want)
 		},
 		size:   size,
-		window: rangeWindow,
+		window: win,
 	}, nil
 }
+
+// externalRangeWindow 是外部/网盘卷的 RangeSeeker 窗口（2026-10-21）：
+// 256KiB——顺序播放的每窗口读放大上限适中，seek 后重开窗口的无效拉取远小于 4MiB。
+const externalRangeWindow = 256 << 10
 
 // Read 从当前 offset 读入 p。窗口流耗尽时重开 [off, off+window) 的 RangeRead 续读。
 func (s *RangeSeeker) Read(p []byte) (int, error) {

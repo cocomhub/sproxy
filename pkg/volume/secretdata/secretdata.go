@@ -545,42 +545,21 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 	if size == 0 {
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
+	// ctx 早检查（2026-10-21）：取消/超时的请求**不得**构造读流——即使惰性流会在首次 Read
+	// 才做 I/O，提前拒绝可让调用方立即拿到可识别的 context.Canceled（且不白建状态）。
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, fmt.Errorf("secretdata: 随机读被取消（不构造读流）: %w", cerr)
+	}
 	// 复用 fileLevelKey（salt 解码 + 一次派生）——**唯一**的文件级密钥派生入口，避免各处重复。
 	keyBytes, salt, kerr := s.fileLevelKey(e)
 	if kerr != nil {
 		return nil, kerr
 	}
-	out, rerr := s.rangeReadBytes(ctx, e, keyBytes, salt, offset, offset+size)
-	if rerr != nil {
-		return nil, rerr
-	}
-	return io.NopCloser(bytes.NewReader(out)), nil
-}
-
-// rangeReadBytes 逐块只下载/解密含 [offset,end) 的 blocklet 段并拼接覆盖区间明文。
-// 审计：Range 读取侧 decrypt 阶段 span（读取/播放侧解密路径——视频关键帧 seek 时每段独立
-// 解密，aggregate 到单次 range 读；Bytes = 返回明文段总长）。无 ctx logger 时 no-op
-// （与写入侧 encrypt span 对称）。
-func (s *SecretdataFS) rangeReadBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, offset, end int64) (out []byte, err error) {
-	decSpan := audit.BeginSpan(ctx, "decrypt")
-	defer func() {
-		if err != nil {
-			decSpan.Fail(err)
-			return
-		}
-		decSpan.End("bytes", int64(len(out)))
-	}()
-	for _, ci := range e.meta.Chunks {
-		if ci.Offset >= end || ci.Offset+ci.OrigSize <= offset {
-			continue // 该块与目标区间不相交 → 不下载
-		}
-		seg, rerr := s.readChunkRangeBytes(ctx, e, keyBytes, salt, ci, offset, end)
-		if rerr != nil {
-			return nil, rerr
-		}
-		out = append(out, seg...)
-	}
-	return out, nil
+	// **惰性流式（2026-10-21 缺陷修复）**：旧实现 `rangeReadBytes` 把窗口内全部分块
+	// 先下载+解密成 []byte 再包流 ⇒ 首帧要等整个 4MiB 窗口物化（网盘场景数秒）。
+	// 现改为 `rangeStream`（逐块「读→解→交」，首字节只需第一块）——crypto 层段级解密
+	// 能力（DecryptBlockletSegmentStandalone/decryptBlockletAt）本就支持，这里只做流式接线。
+	return newRangeStream(ctx, s, e, keyBytes, salt, offset, size), nil
 }
 
 // readChunkBlob 读取底层单个分块 blob（仅含目标区间的块被下载）。去重引用文件的数据

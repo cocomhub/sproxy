@@ -152,6 +152,21 @@ func TestReadChunkRangeBytes_CanceledDoesNotFallBack(t *testing.T) {
 	}
 }
 
+// readAllErr 打开区间读并读尽（流式化后错误可能出现在首次 Read）；返回首个错误（腻尽无错返回 nil）。
+//
+// 为什么需要：流式化（2026-10-21）后 `OpenRangeRead` 只做参数校验与状态构造，真正的段读
+// 发生在 Read ⇒ 「段读错误必须可见」的断言必须覆盖 **open 与读** 两个阶段（与 erasure_test.go
+// 的「open 或读必须失败」同一口径）。
+func readAllErr(fs *SecretdataFS, rel string, offset, size int64) error {
+	rc, oerr := fs.OpenRangeRead(context.Background(), rel, offset, size)
+	if oerr != nil {
+		return oerr
+	}
+	defer rc.Close()
+	_, rerr := io.ReadAll(rc)
+	return rerr
+}
+
 // TestRangeRead_NoErasureSegmentFailureIsVisible：无 parity（Erasure=false）时段读失败
 // **上抛**而非静默整块回落——可见失败优于静默把 Range 放大成整文件下载。
 func TestRangeRead_NoErasureSegmentFailureIsVisible(t *testing.T) {
@@ -163,9 +178,8 @@ func TestRangeRead_NoErasureSegmentFailureIsVisible(t *testing.T) {
 	}
 	fs, _ := newRangeFailingEnv(t, inner, false)
 
-	_, err := fs.OpenRangeRead(context.Background(), "movie.mp4", 100, 64)
-	if err == nil {
-		t.Fatal("无 parity 时段读失败应上抛，却成功返回（静默回落整块）")
+	if err := readAllErr(fs, "movie.mp4", 100, 64); err == nil {
+		t.Fatal("无 parity 时段读失败应上抛（open 或首次读），却完整成功（静默回落整块）")
 	}
 	if inner.wholeReads != 0 {
 		t.Fatalf("无 parity 时整块回落次数=%d，应为 0（静默放大成整文件下载）", inner.wholeReads)
