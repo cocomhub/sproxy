@@ -237,7 +237,7 @@ func (s *SecretdataFS) encryptAndUploadDedupChunk(ctx context.Context, wc writeC
 	if err != nil {
 		return nil, "", err
 	}
-	if werr := s.uploadLocalChunk(ctx, dir, o.ChunkNames[0], chunkLocal, mt, uploaded); werr != nil {
+	if werr := s.uploadLocalChunk(ctx, dir, o.ChunkNames[0], chunkLocal, mt, chunkHash{}, uploaded); werr != nil {
 		return nil, "", fmt.Errorf("secretdata: 上传去重分块失败: %w", werr)
 	}
 	return o, path.Join(dir, o.ChunkNames[0]), nil

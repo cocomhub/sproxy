@@ -275,3 +275,36 @@ func TestStorageFS_WriteFile_SingleLocalStaging(t *testing.T) {
 		t.Fatalf("成功返回后 staging 应清理干净, got %d", n)
 	}
 }
+
+// TestUploadHintsToPutHints（2026-10-21）：通用 UploadHints → baidupcs 特化 PutHints 映射。
+// 断言 RandomContent ⇒ RandomBlob（跳 pre-Stat）+ MD5/CRC32/Size 填充（整块免重扫）；
+// 非 RandomContent / 无提示 ⇒ nil（现状自算零回归）。
+func TestUploadHintsToPutHints(t *testing.T) {
+	t.Parallel()
+	// 无提示 ⇒ nil
+	if got := uploadHintsToPutHints(context.Background()); got != nil {
+		t.Fatalf("无提示应返回 nil，got %+v", got)
+	}
+	// 非 RandomContent（普通内容）⇒ nil（普通路径按 pre-Stat 秒传命中检查）
+	plain := syncpkg.WithUploadHints(context.Background(), &syncpkg.UploadHints{MD5: "m", Size: 9})
+	if got := uploadHintsToPutHints(plain); got != nil {
+		t.Fatalf("非 RandomContent 应返回 nil（保留 pre-Stat），got %+v", got)
+	}
+	// RandomContent 全字段 ⇒ 映射齐
+	ctx := syncpkg.WithUploadHints(context.Background(), &syncpkg.UploadHints{
+		RandomContent: true, Size: 4096, MD5: "deadbeef", CRC32: "12345",
+	})
+	got := uploadHintsToPutHints(ctx)
+	if got == nil || !got.RandomBlob {
+		t.Fatalf("RandomContent 应置 RandomBlob，got %+v", got)
+	}
+	if got.Md5 != "deadbeef" || got.Crc32 != "12345" || got.Size != 4096 {
+		t.Fatalf("MD5/CRC32/Size 应填充（免整块重扫），got %+v", got)
+	}
+	// RandomContent 但无 MD5（外层未算）⇒ 只置 RandomBlob，Size/MD5 留空（内层首次计算补齐）
+	ctx2 := syncpkg.WithUploadHints(context.Background(), &syncpkg.UploadHints{RandomContent: true})
+	got2 := uploadHintsToPutHints(ctx2)
+	if got2 == nil || !got2.RandomBlob || got2.Md5 != "" || got2.Size != 0 {
+		t.Fatalf("无 MD5 时只置 RandomBlob（内层自算），got %+v", got2)
+	}
+}

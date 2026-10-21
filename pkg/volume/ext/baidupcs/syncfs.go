@@ -89,11 +89,30 @@ func (f *StorageFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath
 	if err != nil {
 		return err
 	}
-	if _, perr := f.s.PutFromStagedPath(ctx, clean, stagedPath, size, nil); perr != nil {
+	// 通用上传提示映射（与 WriteFile 同口径）：RandomContent ⇒ RandomBlob；
+	// MD5/CRC32/Size 填充 ⇒ 整块免重扫。
+	if _, perr := f.s.PutFromStagedPath(ctx, clean, stagedPath, size, uploadHintsToPutHints(ctx)); perr != nil {
 		return mapPCSError(perr)
 	}
 	_ = mtime // 百度 API 无直接 Chtimes（与 WriteFile 同口径）
 	return nil
+}
+
+// uploadHintsToPutHints 把通用 UploadHints（写面提示）映射为 baidupcs 特化 PutHints：
+// RandomContent ⇒ RandomBlob（跳 pre-Stat）；MD5/CRC32/Size 填充（整块免重扫）。
+// 无提示/非 RandomContent ⇒ nil（现状自算）。
+func uploadHintsToPutHints(ctx context.Context) *PutHints {
+	uh, ok := syncpkg.UploadHintsFrom(ctx)
+	if !ok || !uh.RandomContent {
+		return nil
+	}
+	hints := &PutHints{RandomBlob: true}
+	if uh.MD5 != "" && uh.Size > 0 {
+		hints.Md5 = uh.MD5
+		hints.Size = uh.Size
+		hints.Crc32 = uh.CRC32
+	}
+	return hints
 }
 
 // ListDir 列出目录单层条目（目录+文件混合，不递归）。
@@ -203,13 +222,8 @@ func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPa
 	// Storage 不再拷第二份（此前 staging-* + stage-*/basename 两份并存 = 峰值 2×size）。
 	// P1（2026-10-21）：ctx 携带 PutHints 时透传（secretdata 交错路径每块密文顺带算
 	// md5 + RandomBlob 标记 ⇒ 跳过整块重读与 pre-Stat，省每次上传 2-3 次 API 往返）。
-	var hints *PutHints
-	// 通用上传提示（跨后端中性）→ baidupcs 特化映射：RandomContent ⇒ RandomBlob（跳
-	// pre-Stat）；Size/MD5/Path 等按后端协议消费（sha256/mtime 等非协议字段忽略）。
-	if uh, ok := syncpkg.UploadHintsFrom(ctx); ok && uh.RandomContent {
-		hints = &PutHints{RandomBlob: true}
-	}
-	meta, err := f.s.PutFromStagedPath(ctx, clean, tmpPath, size, hints)
+	// 通用上传提示映射（RandomContent ⇒ RandomBlob 跳 pre-Stat；MD5/CRC32/Size 免整块重扫）。
+	meta, err := f.s.PutFromStagedPath(ctx, clean, tmpPath, size, uploadHintsToPutHints(ctx))
 	if err != nil {
 		return mapPCSError(err)
 	}

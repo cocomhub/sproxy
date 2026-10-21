@@ -50,7 +50,7 @@ func (s *SecretdataFS) writeErasureParity(ctx context.Context, container, tmp st
 	}
 	// 与数据分块同口径：以**本地分块文件**为源上传，并经 `WithStagedLocalPath` 交内层复用
 	// （内层跨其上传/重试/秒传刷新复用同一路径；源 ∈ 本地文件 ⇒ 零二次拷贝、秒传零重算）。
-	if werr := s.uploadLocalChunk(ctx, container, enc.ChunkNames[0], local, s.blobMTime(mtime), uploaded); werr != nil {
+	if werr := s.uploadLocalChunk(ctx, container, enc.ChunkNames[0], local, s.blobMTime(mtime), chunkHash{}, uploaded); werr != nil {
 		return fmt.Errorf("secretdata: 上传 parity %s 失败: %w", enc.ChunkNames[0], werr)
 	}
 	out.Meta.Parity = &shardseal.ParityInfo{

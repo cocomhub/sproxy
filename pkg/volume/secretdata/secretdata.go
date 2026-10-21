@@ -19,10 +19,12 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // 密文块 md5（baidupcs ETag 复核/秒传基准），非安全用途
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -33,6 +35,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1087,6 +1090,10 @@ type interleavedUpload struct {
 	tmp      string
 	release  func()
 	uploaded []string
+	// chunkMD5/chunkCRC32 是当前待传密文块的整块 md5/crc32（sink 收 blob 时算好，
+	// uploadLocalChunk 交给内层 UploadHints——baidupcs 整块免重扫）。单块维度（每次覆盖）。
+	chunkMD5   string
+	chunkCRC32 string
 }
 
 // close 释放 staging 配额预留并删除本地临时目录（幂等，写路径 defer 调用）。
@@ -1163,13 +1170,17 @@ func (wc writeCtx) sourceReplayable() bool { return wc.sourcePath != "" }
 func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleavedUpload, wc writeCtx) shardseal.ChunkSink {
 	mt := s.blobMTime(wc.mtime)
 	return func(name string, blob []byte) error {
+		// P1（2026-10-21 完整收益）：sink 已持有完整密文块（内存）——顺带算整块 md5/crc32
+		// 一次（baidupcs 需要它们做 ETag 复核基准与秒传参数；此处省去 baidupcs 的整块重扫）。
+		iu.chunkMD5 = md5HexOf(blob)
+		iu.chunkCRC32 = strconv.FormatUint(uint64(crc32.ChecksumIEEE(blob)), 10)
 		if iu.mode == deliverLocalPath {
 			local := filepath.Join(iu.tmp, name)
 			if werr := os.WriteFile(local, blob, 0o600); werr != nil {
 				return fmt.Errorf("secretdata: 落本地分块 %s 失败: %w", name, werr)
 			}
 			defer func() { _ = os.Remove(local) }() // 交错：此刻之后本地不再保留该块
-			return s.uploadLocalChunk(ctx, wc.container, name, local, mt, &iu.uploaded)
+			return s.uploadLocalChunk(ctx, wc.container, name, local, mt, chunkHash{md5: iu.chunkMD5, crc32: iu.chunkCRC32}, &iu.uploaded)
 		}
 		p := path.Join(wc.container, name)
 		// **先登记后上传**（P2 修复，2026-10-19；同 uploadLocalChunk）：内层「写成功但复核
@@ -1379,7 +1390,7 @@ func (s *SecretdataFS) blobMTime(mtime int64) int64 {
 func (s *SecretdataFS) uploadChunks(ctx context.Context, container, tmp string, mtime int64, chunkNames []string, uploaded *[]string) error {
 	mt := s.blobMTime(mtime)
 	for _, cn := range chunkNames {
-		if err := s.uploadLocalChunk(ctx, container, cn, filepath.Join(tmp, cn), mt, uploaded); err != nil {
+		if err := s.uploadLocalChunk(ctx, container, cn, filepath.Join(tmp, cn), mt, chunkHash{}, uploaded); err != nil {
 			return err
 		}
 	}
@@ -1428,7 +1439,7 @@ func (s *SecretdataFS) retainPoolEntry(mm *shardseal.Meta) {
 //     md5 预扫 / 上传 / 重试 / 秒传刷新全部复用同一文件），不再落第二份 staging。
 //     生命周期契约（pkg/sync/stagedpath.go）：stagedPath **只读**——本函数返回前调用方不得删除它
 //     （秒传刷新要重读它），删除一律在返回后进行。
-func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, local string, mt int64, uploaded *[]string) error {
+func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, local string, mt int64, ch chunkHash, uploaded *[]string) error {
 	f, oerr := os.Open(local)
 	if oerr != nil {
 		return fmt.Errorf("secretdata: 打开本地分块 %s 失败: %w", name, oerr)
@@ -1442,13 +1453,16 @@ func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, lo
 		return fmt.Errorf("secretdata: 取本地分块 %s 长度失败: %w", name, serr)
 	}
 	wctx := syncpkg.WithStagedLocalPath(ctx, local)
-	// P1（2026-10-21，残余 3 简单优化）：块密文是**本次新建的随机内容**（含随机 salt/
-	// nonce）——带 RandomBlob 提示经 ctx 交给内层（baidupcs StorageFS）：跳过整块 md5
-	// 重读 + 跳过 pre-Stat + ETag 非权威时不 rapidupload 刷新（命中率理论 0），省每次
-	// 上传 2-3 次 API 往返与 2 遍 O(块) 读。其它内层（本地卷等）忽略该提示零回归。
 	// 通用上传提示（跨后端中性）：RandomContent 标记随机新建内容（baidupcs 识别为
-	// RandomBlob → 跳 pre-Stat；其它后端未知即忽略）。
-	wctx = syncpkg.WithUploadHints(wctx, &syncpkg.UploadHints{RandomContent: true})
+	// RandomBlob → 跳 pre-Stat；其它后端未知即忽略）；MD5 为 sink 算好的整块密文 md5
+	// （baidupcs 免整块重扫——外层已算，内层首次计算即复用，零重复计算）。
+	wctx = syncpkg.WithUploadHints(wctx, &syncpkg.UploadHints{
+		RandomContent: true,
+		Size:          size,
+		MD5:           ch.md5,
+		CRC32:         ch.crc32,
+		Path:          local,
+	})
 	dst := path.Join(container, name)
 	// **先登记后上传**（P2 修复，2026-10-19）：内层可能「写成功但复核失败」返回错误（如
 	// baidupcs 上传后 ETag 复核不匹配）⇒ 远端 blob 已存在；成功后登记会漏掉它 ⇒ 远端孤儿。
@@ -3331,4 +3345,14 @@ func (s *SecretdataFS) unrefPoolEntry(ctx context.Context, e *metaEntry) {
 		}
 		delete(s.dedupPool, key)
 	}
+}
+
+// chunkHash 是密文块的整块校验值（sink 顺带算，交给内层 UploadHints）。
+type chunkHash struct{ md5, crc32 string }
+
+// md5HexOf 计算密文块整块 md5（hex；sink 顺带算，交给内层 UploadHints.MD5——
+// baidupcs 免整块重扫；密文是随机内容，md5 非安全用途，仅供百度 ETag 复核/秒传基准）。
+func md5HexOf(b []byte) string {
+	h := md5.Sum(b) //nolint:gosec // 见函数头注释
+	return hex.EncodeToString(h[:])
 }

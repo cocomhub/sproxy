@@ -39,6 +39,10 @@ type UploadHints struct {
 	Size int64
 	// MD5 是整内容 md5（hex 小写）；空 = 后端按需算一次。
 	MD5 string
+	// CRC32 是整内容 CRC32（IEEE，**无符号十进制字符串**）；0 = 未知。
+	// 注：用字符串表达避免「0 值 = 未知」歧义（crc32 可能恰为 0）；
+	// 空字符串 = 未知（后端按需算一次）。
+	CRC32 string
 	// SHA256 是整内容 sha256（hex 小写）；空 = 后端按需算一次。
 	SHA256 string
 	// Path 是源文件本地路径（空 = 无路径；后端按流/内存处理）。
@@ -72,6 +76,9 @@ func (h *UploadHints) Merge(computed *UploadHints) *UploadHints {
 	}
 	if out.MD5 == "" {
 		out.MD5 = computed.MD5
+	}
+	if out.CRC32 == "" {
+		out.CRC32 = computed.CRC32
 	}
 	if out.SHA256 == "" {
 		out.SHA256 = computed.SHA256

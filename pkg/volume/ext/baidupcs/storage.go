@@ -169,7 +169,7 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 type PutHints struct {
 	// Md5 是整文件 md5（hex）。非空时跳过整块 md5 扫描（校验/秒传基准）。
 	Md5 string
-	// Crc32 是整文件 CRC32 IEEE（字符串形式，rapidupload 秒传参数）。
+	// Crc32 是整文件 CRC32 IEEE（**十进制字符串**，rapidupload 秒传参数；空 = 自算）。
 	Crc32 string
 	// Size 是文件字节数（<=0 = 未知，按 Stat 实测）。
 	Size int64
