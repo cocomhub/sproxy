@@ -85,14 +85,14 @@ test('previewKind 归类', () => {
   assert.strictEqual(r.previewKind(null), 'download');
 });
 
-// ---- 视频播放入口判定（VIDEO_EXT 口径：浏览器原生可播子集） ----
-test('isVideoName 浏览器可播集合（大小写不敏感）', () => {
-  for (const name of ['a.mp4', 'a.MKV', 'a.webm', 'a.AVI', 'a.mov', 'a.ts', 'a.M4V']) {
-    assert.strictEqual(r.isVideoName(name), true, name + ' 应可播');
+// ---- 视频播放入口判定（VIDEO_EXT 口径：主流浏览器可播/可尝试子集） ----
+test('isVideoName 主流浏览器可播/可尝试集合（大小写不敏感）', () => {
+  for (const name of ['a.mp4', 'a.MKV', 'a.webm', 'a.AVI', 'a.mov', 'a.ts', 'a.M4V', 'a.ogv', 'a.3gp', 'a.mpg', 'a.mpeg', 'a.vob', 'a.mod', 'a.dat', 'a.3g2']) {
+    assert.strictEqual(r.isVideoName(name), true, name + ' 应给 ▶（主流可播或可尝试）');
   }
-  // 可校验但浏览器不原生播放 → 不给 ▶ 入口（与 pkg/media.IsVideoName 语义集不同）
-  for (const name of ['a.rmvb', 'a.wmv', 'a.flv', 'a.mpg', 'a.3gp', 'a.ogv']) {
-    assert.strictEqual(r.isVideoName(name), false, name + ' 浏览器不原生播 → 不给 ▶');
+  // 全浏览器不原生播放（无解码器）→ 不给 ▶ 入口（黑屏无意义，只给下载）
+  for (const name of ['a.rmvb', 'a.wmv', 'a.flv', 'a.asf', 'a.f4v']) {
+    assert.strictEqual(r.isVideoName(name), false, name + ' 全浏览器不可播 → 不给 ▶');
   }
   // 非视频 / 无扩展名
   for (const name of ['a.txt', 'a.png', 'noext', '', null]) {
@@ -100,11 +100,13 @@ test('isVideoName 浏览器可播集合（大小写不敏感）', () => {
   }
 });
 
-test('buildFileRowHtml 视频行有 ▶ 播放按钮、非可播视频无（rmvb/wmv 只给下载）', () => {
+test('buildFileRowHtml 视频行有 ▶ 播放按钮、全不可播容器无（rmvb/wmv/flv 只给下载）', () => {
   assert.ok(r.buildFileRowHtml({ name: 'a.mp4', size: 10 }, 'a.mp4').includes('file-video-play-btn'));
   assert.ok(r.buildFileRowHtml({ name: 'MOVIE.MKV', size: 10 }, 'MOVIE.MKV').includes('file-video-play-btn'));
+  assert.ok(r.buildFileRowHtml({ name: 'a.ogv', size: 10 }, 'a.ogv').includes('file-video-play-btn'),
+    'ogv Chrome/Firefox 可播 → 给 ▶');
   assert.ok(!r.buildFileRowHtml({ name: 'a.rmvb', size: 10 }, 'a.rmvb').includes('file-video-play-btn'),
-    'rmvb 浏览器不原生播 → 无 ▶ 入口');
+    'rmvb 全浏览器不可播 → 无 ▶ 入口');
   assert.ok(!r.buildFileRowHtml({ name: 'd.mp4', is_dir: true }, 'd.mp4').includes('file-video-play-btn'),
     '目录不给 ▶ 入口');
 });

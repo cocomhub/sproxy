@@ -139,10 +139,14 @@
   }
 
   // 视频扩展名集合（文件行「▶ 播放」入口判定，标准 <video> Range 播放）——唯一实现点。
-  // 口径：**浏览器原生可播**集，与服务端 integrity 的「是视频文件」集不等价——服务端
-  // `pkg/integrity/ext/video.VideoChecker.Matches` 额外认 .flv/.wmv（可 ffprobe 校验，
-  // 但浏览器不原生播放 ⇒ 此处不给 ▶ 入口）；两侧已对齐 .m4v（同 mp4 容器，可播且可校验）。
-  const VIDEO_EXT = ['mp4', 'mkv', 'webm', 'avi', 'mov', 'ts', 'm4v'];
+  // 口径：**Chrome/Edge/Firefox 主力的原生可播集**（H.264/AAC MP4 系 + WebM 系），给 ▶ 后
+  // 多数主流浏览器直接能播。部分支持/不确定的容器（ogv/3gp/mpg 部分浏览器可播；mkv/ts/avi
+  // 各浏览器能力不一）**同样给 ▶**——播放不保证（不支持的浏览器 <video> 报错但不崩页面），
+  // 宁可多给入口让用户试，不因「某浏览器不支持」藏掉可用文件。**全浏览器不可播**的容器
+  // （rmvb/wmv/flv/asf/f4v，无浏览器原生解码器）不给 ▶（黑屏无意义，只给下载）。
+  // 与服务端 `pkg/media.IsVideoName`（「是视频文件」集，含不可播容器）的关系：本表是
+  // 「尝试可播子集」——rmvb/wmv/flv 可 ffprobe 校验但浏览器播不了 ⇒ 此处不给 ▶ 入口。
+  const VIDEO_EXT = ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'ts', 'avi', 'ogv', '3gp', '3g2', 'mpg', 'mpeg', 'vob', 'mod', 'dat'];
   // isVideoName(name)：文件名是否视频（扩展名 ∈ VIDEO_EXT，大小写不敏感）。
   function isVideoName(name) {
     if (typeof name !== 'string' || !name) return false;
