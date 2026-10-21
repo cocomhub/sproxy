@@ -91,13 +91,20 @@ NewFS → loadIndex
    的 `StageHints` 参数或在 ctx 传递「已算好 md5」的块描述）——省 `stageUploadFromPath`
    的整块重读（1 遍 O(块)）+ `fillStagedLists` 的读回（1 遍 O(块)）。
    接口形状：`PutFromStagedPath` 增加可选 `PutHints{Md5, SliceMD5, Crc32, BlockMD5s, Size}`
-   参数（`md5`/分块列表为空时按现状回退自算——向后兼容，其它调用方零改动）。
-3. **非权威 ETag 收敛**：`checkAfterUploadUnreliableMD5` 已在刷新后按 size 兜底。对
-   secretdata 的**单块密文**（随机内容、无意义 md5）可进一步：ETag 非权威时直接按
-   **size 一致**接受（跳过 rapidupload 刷新）——单块是新生成的随机密文，秒传命中率
-   理论为 0，刷新纯属浪费。需保留「小文件单传 ETag=权威」的既有断言路径（改动限定
-   于「块内容随机、无复用价值」的场景，经 `PutHints.RandomBlob` 标记由 secretdata
-   设置）。
+   （**2026-10-21 修订**：已收敛为通用 `pkg/sync.UploadHints`{Size, MD5, SHA256, Path,
+   RandomContent, MTime} + baidupcs adapter 映射——PutHints 保留为 baidupcs 内部特化
+   映射目标，字段全是百度 API 参数（sliceMD5/crc32/blockMD5s），**不直接对外**；
+   其它后端（s3/webdav/本地）经同一 UploadHints 通道按各自协议 adapter 映射，
+   未知后端安全忽略零回归。`RandomContent` 语义边界（用户裁定）：只跳 pre-Stat，
+   **绝不跳上传后 md5 刷新/复核**——块列表（sliceMD5/blockMD5s）必算，秒传刷新依赖它）
+   ；secretdata 交错路径每块加密后顺带累计。
+   保证「外层未知 ⇒ 内层首次计算一次、之后全程复用」（UploadHints.Merge 只补空字段，
+   调用方源头值优先）——无重复计算浪费。
+3. **非权威 ETag 收敛**：`checkAfterUploadUnreliableMD5` 已在刷新后按 size 兜底。
+   **（2026-10-21 红线修订）**：对 secretdata 的**单块密文**（随机内容）**不得**跳过
+   rapidupload 刷新——分片上传后远端 ETag 非权威，**必须刷新到权威整文件 md5 才成功**
+   （用户裁定：文件一致性硬保证，任何内容形态都不得绕过；块列表必算、刷新恒做，
+   回归用例 TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5 钉住）。
 
 **P2（后续片）**：
 
