@@ -199,7 +199,10 @@ func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPa
 	// 1×size，与配额 1× 预留口径一致）；否则本函数落一份 staging 后同样以「路径复用」入口
 	// 上传（不再由 Storage 内部拷第二份）。
 	if staged, ok := syncpkg.StagedLocalPathFrom(ctx); ok {
-		if _, perr := f.s.PutFromStagedPath(ctx, clean, staged, size, nil); perr != nil {
+		// **上传提示映射同样适用于 staged 分支**（2026-10-21 修正）：调用方已暂存 + 已算
+		// md5/crc32（secretdata 交错路径）→ 经 UploadHints 免整块重扫 + 跳 pre-Stat。
+		// 此前只传 nil ⇒ RandomContent/MD5 提示在此分支被丢弃（绕过了免重扫收益）。
+		if _, perr := f.s.PutFromStagedPath(ctx, clean, staged, size, uploadHintsToPutHints(ctx)); perr != nil {
 			return mapPCSError(perr)
 		}
 		return nil
