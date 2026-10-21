@@ -19,7 +19,10 @@ import (
 // 三个口径（语义不同，须按需选择）：
 //   - `IsVideoName`：**是视频文件**（含可校验但浏览器不原生播的容器，如 rmvb/wmv/flv）——
 //     integrity 校验器 / 转存过滤 / 下载器过滤使用；
-//   - `IsPlayableVideoName`：**浏览器原生可播**（标准 <video> Range 播放）——Web UI ▶ 入口用；
+//   - `IsPlayableVideoName`：**浏览器原生可播子集**（标准 <video> Range 播放）。**当前无生产
+//     调用方**（Web UI `app-render.js` 自带 `VIDEO_EXT` 可播集，跨语言无法直接复用）——本函数与
+//     `playableVideoExt` 是**预留 API**（供未来 Go 侧渲染/SSR 或客户端 SDK 复用）；Web UI 侧
+//     口径以 `web/static/app-render.js` 的 `VIDEO_EXT` 为事实源（有 node 单测锁定）；
 //   - `shardseal.MediaKindOf`：**容器族选型**（关键帧分块）——secretdata 写路径用，扩展名 → 容器族，
 //     由注册表裁决解析器；不直接消费本文件的判定（语义不同：选型需容器族，不只要 bool）。
 //
@@ -41,10 +44,14 @@ var videoExt = map[string]bool{
 	".3gp": true, ".3g2": true, // 3GPP
 }
 
-// playableVideoExt 是「浏览器原生可播」扩展名子集（Web UI ▶ 播放入口判定，标准 <video>
-// Range 播放）。与 videoExt 的关系：**真子集**——服务端可校验（ffprobe）但浏览器不原生
-// 播放的容器（rmvb/wmv/flv/avi/mpeg/ogv/3gp 等）不在此表，只给下载入口不给播放按钮。
-// 语义边界（2026-10-04 B-M4 定稿）：两侧差异只在「可否预览」，不是「是否视频文件」。
+// playableVideoExt 是**保守**的「浏览器原生可播」子集（H.264/VP8 系，各主流浏览器一致可播）。
+// 与 videoExt 的关系：**真子集**——服务端可校验（ffprobe）但浏览器不原生播放的容器
+// （rmvb/wmv/flv/avi/mpeg/ogv/3gp 等）不在此表。
+//
+// **与 Web UI `VIDEO_EXT` 的关系（如实说明，非漂移）**：Web UI 的 `VIDEO_EXT` 是**更宽的
+// 「可尝试子集」**（额外含 avi/ogv/3gp/3g2/mpg/mpeg/vob/mod/dat——部分浏览器可播，不支持的
+// 浏览器 `<video>` 报错但不崩页面）；本表是**保守可播**口径（预留 API，见文件头）。两者语义
+// 不同且**有意不同**：Web UI 宁可多给入口让用户试，Go 侧预留 API 取保守集。
 var playableVideoExt = map[string]bool{
 	".mp4": true, ".m4v": true, ".webm": true, // H.264/VP8 原生
 	".mkv": true, ".mov": true, ".ts": true, // 部分浏览器可播（Chrome/Edge）

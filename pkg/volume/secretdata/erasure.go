@@ -264,7 +264,9 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		return nil, true, err
 	}
 	if !ok {
-		return nil, false, nil // 防御：调用方已断言，此处不应发生。
+		// 防御（调用方已 AssertRangeReader 保证 rr 非 nil，理论不可达）：返回显式哨兵，
+		// 避免下游 `fmt.Errorf("…: %w", nil)` 生成畸形错误（评审 P3 修复，2026-10-21）。
+		return nil, true, syncpkg.ErrUnsupported
 	}
 	if verr := shardseal.VerifyBlockSalt(head, o.salt); verr != nil {
 		return nil, true, verr
@@ -292,7 +294,8 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		return nil, true, serr
 	}
 	if !ok {
-		return nil, false, nil
+		// 防御：同上（ErrUnsupported ⇒ 上游走整块回落，见 readChunkRangeBytes 三分判据）。
+		return nil, true, syncpkg.ErrUnsupported
 	}
 	var out []byte
 	for _, bl := range targets {

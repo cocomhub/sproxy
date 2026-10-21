@@ -574,9 +574,10 @@ func (a *countingStatAdapter) Meta(ctx context.Context, remotePath string) (*Obj
 
 var _ Adapter = (*countingStatAdapter)(nil)
 
-// TestStorage_PutFromStagedPath_RandomBlobSkipsBlockListRead RandomBlob 跳过秒传参数读回
-// （sliceMD5/分块列表不需要）——断言 st.blockMD5s 为空但上传仍成功且 md5 正确。
-func TestStorage_PutFromStagedPath_RandomBlobSkipsBlockListRead(t *testing.T) {
+// TestStorage_PutFromStagedPath_RandomBlobNoHints_ScanAndBlockList（P2 改名，2026-10-21）：
+// RandomBlob **无 Md5/Size**（外层未算）⇒ 内层全自算 + **块列表必算**（红线）——不跳过
+// 任何读回；上传成功且 ETag 权威。旧名/注释「跳过块列表读回」与实现矛盾（误导）。
+func TestStorage_PutFromStagedPath_RandomBlobNoHints_ScanAndBlockList(t *testing.T) {
 	t.Parallel()
 	ad := newFakeStorageAdapter()
 	s := newTestStorage(t, ad)
@@ -1088,5 +1089,33 @@ func TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5(t *testing.T) {
 	}
 	if !ad.rapidHit {
 		t.Fatal("BUG：远端 md5 非权威 + RandomBlob ⇒ 刷新被跳过（红线违反）")
+	}
+}
+
+// TestStorage_PutFromStagedPath_HintsSkipFullScan（P2 修复，2026-10-21）：**免重扫主分支**
+// 测试锁定——全 hints（Md5+Crc32+Size+SliceMD5+BlockMD5s）时走 stageUploadFromHints，
+// **不重算 md5**（st.md5 = 调用方值）。判据：故意传**错误**的 Md5 → ETag 复核必不匹配 →
+// 有界重试耗尽 → ErrTransient（若实现重算了 md5，错误 hint 被忽略 ⇒ 上传成功 ⇒ 本用例红）。
+func TestStorage_PutFromStagedPath_HintsSkipFullScan(t *testing.T) {
+	t.Parallel()
+	ad := newFakeStorageAdapter()
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("hints-skip-full-scan-", 64)
+	staged := filepath.Join(s.temp, "scan.bin")
+	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 故意错的 md5（真值见下）——用于证明实现**采用调用方 hint** 而非重算。
+	wrongMD5 := strings.Repeat("0", 32)
+	_, err := s.PutFromStagedPath(context.Background(), "scan.bin", staged, int64(len(content)),
+		&PutHints{
+			Md5: wrongMD5, Crc32: "1", Size: int64(len(content)),
+			SliceMD5: md5Hex(content[:256]), BlockMD5s: []string{md5Hex(content)},
+		})
+	if err == nil {
+		t.Fatal("hints 携带错误 Md5 时应复核失败（证明采用了调用方 hint 而非重算）✗")
+	}
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("复核不匹配耗尽重试应以 ErrTransient 返回，实测: %v", err)
 	}
 }

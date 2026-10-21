@@ -195,7 +195,7 @@ func (s *Storage) PutFromStagedPath(ctx context.Context, key, stagedPath string,
 		return nil, perr
 	}
 	defer cleanup()
-	st, err := s.stageUploadFromPathHints(ctx, prepared, key, size, hints)
+	st, err := s.stageUploadFromPath(ctx, prepared, key, size, hints)
 	if err != nil {
 		return nil, err
 	}
@@ -380,12 +380,6 @@ func (s *Storage) putStaged(ctx context.Context, key string, st *stagedUpload) (
 		return nil, err
 	}
 	return s.putRetryLoop(ctx, key, remote, st)
-}
-
-// stageUploadFromPathHints 是 stageUploadFromPath 的别名（PutFromStagedPath 入口用，
-// ctx 全程透传——含上传前的 md5 扫描，取消即中断不白扫）。见 stageUploadFromPath。
-func (s *Storage) stageUploadFromPathHints(ctx context.Context, path, key string, size int64, hints *PutHints) (*stagedUpload, error) {
-	return s.stageUploadFromPath(ctx, path, key, size, hints)
 }
 
 // putRetryLoop 有界重试主循环（cocom 对齐）：每轮先 Stat（秒传命中直接返回）→ 未命中
