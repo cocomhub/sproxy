@@ -68,6 +68,28 @@ func (p *interleaveProbeFS) WriteFile(ctx context.Context, key syncpkg.LogicalKe
 	p.mu.Lock()
 	p.records = append(p.records, writeRecord{path: path, localFiles: n, staged: staged, size: size})
 	p.mu.Unlock()
+	// P1（2026-10-21）：断言每块**数据分块**（经暂存复用交付）都带**通用上传提示**
+	// （RandomContent + 已算好的 md5）——baidupcs 整块免重扫的接线前提。
+	// 注：meta 走内存交付（无 stagedPath），不要求提示（内层自算）。
+	if staged {
+		uh, ok := syncpkg.UploadHintsFrom(ctx)
+		var hintErr error
+		switch {
+		case !ok:
+			hintErr = fmt.Errorf("分块应带 UploadHints（含 RandomContent+MD5）")
+		case !uh.RandomContent:
+			hintErr = fmt.Errorf("分块应带 RandomContent 提示")
+		case uh.MD5 == "":
+			hintErr = fmt.Errorf("分块应带已算好的 MD5 提示（免重扫）")
+		}
+		if hintErr != nil {
+			p.mu.Lock()
+			if p.stageReadErr == nil {
+				p.stageReadErr = hintErr
+			}
+			p.mu.Unlock()
+		}
+	}
 	if !staged {
 		p.mu.Lock()
 		p.memoryWrites++
