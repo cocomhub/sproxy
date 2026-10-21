@@ -260,8 +260,14 @@ func TestAuditWebUI_CreateVault_SwitchList_PlayRange(t *testing.T) {
 	if serr != nil {
 		t.Fatalf("读取 <video> src: %v", serr)
 	}
+	// 2026-10-21：<video> src 由前端 withUrlSig 附加 `?spx_sig=`（URL 票，浏览器原生标签
+	// 无法自定义 Authorization 头）⇒ 断言仍应含明文文件名（票参数在文件名之后）。
 	if !strings.Contains(src, "/download?filename=movie.mp4") {
 		t.Fatalf("<video> src = %q, want 含明文文件名 /download?filename=movie.mp4（加密卷视频行入口）", src)
+	}
+	// URL 票存在性：src 应带 ?spx_sig=（否则 <video> 请求 401，本 e2e 正是防回归）。
+	if !strings.Contains(src, "spx_sig=") {
+		t.Fatalf("<video> src 应带 URL 票（spx_sig=），got %q", src)
 	}
 	// 注：filtered 视图条目 volume 为空（listExternalVolume 注释），故 <video> 服务端按
 	// auto 路由定位（main 无同名文件 → 唯一命中 vault）——确定性卷路径由下面显式

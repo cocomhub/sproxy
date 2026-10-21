@@ -3069,10 +3069,19 @@ function hideVersioning() {
 // --- 视频播放器（标准 Range 播放弹窗） ---
 // showVideoPlayer：渲染 videoPlayerModalHtml（含 <video src> + 标题 + data-close 关闭钮）
 // 到 #video-player-modal 容器并显示；关闭时暂停并卸载 video（避免播放续留内存/声音）。
-function showVideoPlayer(filename, volume) {
+async function showVideoPlayer(filename, volume) {
   const body = document.getElementById('video-player-body');
+  // 先渲染弹窗（加载态），再异步准备**带 URL 票**的播放 URL 并注入 <video>。
+  // 为何异步：URL 票由 sclientSig.signHeader（WebCrypto HMAC，Promise）计算，
+  // 签名覆盖业务查询（filename/volume），票参数 `spx_sig` 最后拼接。
   body.innerHTML = videoPlayerModalHtml({ filename: filename, volume: volume || '' });
   document.getElementById('video-player-modal').style.display = 'flex';
+  const video = body.querySelector('video');
+  if (!video) return;
+  const query = await withUrlSig(
+    videoPlayerUrl({ filename: filename, volume: volume || '' }).split('?')[1] || ''
+  );
+  video.src = '/download?' + query;
 }
 
 function hideVideoPlayer() {
@@ -3518,7 +3527,7 @@ function initDynamicEventDelegation() {
       }
       // 视频行「▶ 播放」→ 标准 <video> Range 播放弹窗（data-volume 空 = 服务端 auto 路由）。
       if (btn.hasAttribute('data-video-play')) {
-        showVideoPlayer(btn.dataset.filename, btn.dataset.volume || '');
+        void showVideoPlayer(btn.dataset.filename, btn.dataset.volume || '');
         return;
       }
 
