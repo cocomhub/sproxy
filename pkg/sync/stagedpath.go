@@ -44,38 +44,3 @@ func StagedLocalPathFrom(ctx context.Context) (string, bool) {
 	p, ok := ctx.Value(stagedPathKey{}).(string)
 	return p, ok && p != ""
 }
-
-// putHintsKey 是 ctx 中「上传预计算提示」的私有键类型（PutHintsFrom 读）。
-// 提示的内容（md5/分块列表/大小）由**调用方在写面计算**、经 ctx 透传，卷侧写面
-// （如 baidupcs StorageFS）消费并把值传给后端（跳过整文件重读）。
-// 类型与实现见消费方（pkg/volume/ext/baidupcs.PutHints）——本文件只做**抽象通道**，
-// 避免 pkg/sync 反向依赖 volume 实现包。
-type putHintsKey struct{}
-
-// WithPutHints 把**上传预计算提示**放入 ctx（见文件头「ctx 传递」形态；值可为 nil——
-// 调用方语义为「无提示」，卷侧按现状自算）。hints 可为任意类型（消费方类型断言）。
-func WithPutHints(ctx context.Context, hints any) context.Context {
-	if hints == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, putHintsKey{}, hints)
-}
-
-// PutHintsFrom 取 ctx 中的上传预计算提示（无则 ok=false）。
-func PutHintsFrom(ctx context.Context) (any, bool) {
-	h := ctx.Value(putHintsKey{})
-	return h, h != nil
-}
-
-// RandomBlobHints 是「本次新建随机内容」的上传提示（secretdata 单块密文用；P1 2026-10-21）。
-// 消费方（baidupcs）识别后跳过整块 md5 重读 + pre-Stat + rapidupload 刷新——内容含随机
-// salt/nonce，秒传命中率理论为 0。任何消费方不识别即忽略（零回归）。
-// 定义在 pkg/sync（抽象层）而非 volume 实现包，避免 secretdata 反向依赖 baidupcs 子 module。
-
-type RandomBlobHints struct{}
-
-// RandomBlobHintsFrom 取 ctx 中是否带随机新建内容提示（secretdata 上传单块密文时注入）。
-func RandomBlobHintsFrom(ctx context.Context) bool {
-	_, ok := ctx.Value(putHintsKey{}).(RandomBlobHints)
-	return ok
-}

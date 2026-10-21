@@ -1446,7 +1446,9 @@ func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, lo
 	// nonce）——带 RandomBlob 提示经 ctx 交给内层（baidupcs StorageFS）：跳过整块 md5
 	// 重读 + 跳过 pre-Stat + ETag 非权威时不 rapidupload 刷新（命中率理论 0），省每次
 	// 上传 2-3 次 API 往返与 2 遍 O(块) 读。其它内层（本地卷等）忽略该提示零回归。
-	wctx = syncpkg.WithPutHints(wctx, syncpkg.RandomBlobHints{})
+	// 通用上传提示（跨后端中性）：RandomContent 标记随机新建内容（baidupcs 识别为
+	// RandomBlob → 跳 pre-Stat；其它后端未知即忽略）。
+	wctx = syncpkg.WithUploadHints(wctx, &syncpkg.UploadHints{RandomContent: true})
 	dst := path.Join(container, name)
 	// **先登记后上传**（P2 修复，2026-10-19）：内层可能「写成功但复核失败」返回错误（如
 	// baidupcs 上传后 ETag 复核不匹配）⇒ 远端 blob 已存在；成功后登记会漏掉它 ⇒ 远端孤儿。

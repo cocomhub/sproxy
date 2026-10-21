@@ -158,24 +158,28 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 	return s.putStaged(ctx, key, st)
 }
 
-// PutHints 是 PutFromStagedPath 的**可选上传预计算提示**（2026-10-21，P1 性能）：调用方
-// 已持有该文件的 md5/分块 md5 列表（如 secretdata 交错路径每块加密后顺带累计），
-// 传入后 Storage 跳过 `stageUploadFromPath` 的整文件重读（省 O(块) 两遍）。
-// 字段缺省（空/0）= 未提供，按现状自算（其它调用方零改动）。
+// PutHints 是 baidupcs **后端特化**的上传提示（PutFromStagedPath 可选参数，2026-10-21）。
+// 字段全是百度 API 参数（ETag 复核基准 md5 / rapidupload 秒传 sliceMD5+crc32+blockMD5s）。
+// 通用跨后端提示见 `pkg/sync.UploadHints`（本类型是其后端 adapter 映射目标；
+// baidupcs 不直接消费 UploadHints 的 sha256/mtime 等非协议字段）。
+//
+// **「首次计算一次」契约**（用户 2026-10-21）：调用方可能只给部分字段（如只有 md5 无块列表）
+// 或全空——后端**不得**拒绝或重复整块重算：stageUpload 结构自建时**首次读一遍内容**补齐缺失
+// 字段，此后重试/刷新/复核复用该结构。调用方提供的字段（源头值）优先级最高，只补空。
 type PutHints struct {
-	// Md5 是整文件 md5（hex）。非空时跳过 stageUploadFromPath 的整块 md5 扫描。
+	// Md5 是整文件 md5（hex）。非空时跳过整块 md5 扫描（校验/秒传基准）。
 	Md5 string
 	// Crc32 是整文件 CRC32 IEEE（字符串形式，rapidupload 秒传参数）。
 	Crc32 string
 	// Size 是文件字节数（<=0 = 未知，按 Stat 实测）。
 	Size int64
-	// SliceMD5 是前 256KB md5（rapidupload 分片参数；空 = 由 Storage 读回补齐）。
+	// SliceMD5 是前 256KB md5（rapidupload 分片参数；空 = 后端读回补齐）。
 	SliceMD5 string
 	// BlockMD5s 是按 uploadBlockSize 分块的 md5 列表（rapidupload blockList 参数；
-	// 空 = 由 Storage 读回补齐）。
+	// 空 = 后端读回补齐）。**必补**：远端 md5 非权威时的秒传刷新依赖它（红线，2026-10-21）。
 	BlockMD5s []string
 	// RandomBlob 标记「内容是本次新建、随机且不可重用」（secretdata 单块密文含随机
-	// salt/nonce）——**仅**用于跳过 pre-Stat（首轮存在性检查）与跳过读回秒传分块列表；
+	// salt/nonce）——**仅**用于跳过 pre-Stat（首轮存在性检查）。
 	// **绝不跳过上传后的 md5 刷新/复核**（用户裁定 2026-10-21：必须按 md5 刷新成功保证
 	// 文件一致性，即使内容随机新建也要确保远端 meta 为权威整文件 md5）。
 	RandomBlob bool
@@ -275,11 +279,11 @@ func (s *Storage) stageUploadFromPath(ctx context.Context, path, key string, siz
 	if err != nil {
 		return nil, err
 	}
-	// RandomBlob（随机新建内容）不需要秒传参数（命中率 0）：跳过读回 sliceMD5/分块列表。
-	if !st.randomBlob {
-		if ferr := s.fillStagedLists(st); ferr != nil {
-			return nil, ferr
-		}
+	// **块列表必须算**（用户裁定 2026-10-21）：远端 md5 非权威（MD5Unreliable）时
+	// renewAuthoritativeMD5 依赖 len(st.blockMD5s)>0 才能 rapidupload 刷新；RandomBlob
+	// 若跳过读回 ⇒ 刷新被跳过 ⇒ 文件一致性红线被架空（复现用例抓到）。
+	if ferr := s.fillStagedLists(st); ferr != nil {
+		return nil, ferr
 	}
 	return st, nil
 }
@@ -288,8 +292,9 @@ func (s *Storage) stageUploadFromPath(ctx context.Context, path, key string, siz
 func (s *Storage) stageUploadFromHints(path string, hints *PutHints) (*stagedUpload, error) {
 	st := &stagedUpload{tmpPath: path, md5: hints.Md5, crc32: hints.Crc32, size: hints.Size,
 		sliceMD5: hints.SliceMD5, blockMD5s: hints.BlockMD5s, randomBlob: hints.RandomBlob}
-	// sliceMD5/分块列表缺失时按需读回（rapidupload 需要；RandomBlob 不需要可跳过）。
-	if !hints.RandomBlob && (hints.SliceMD5 == "" || len(hints.BlockMD5s) == 0) {
+	// **块列表必须算**（用户裁定 2026-10-21）：秒传刷新（MD5Unreliable 路径）依赖
+	// blockMD5s>0；调用方未提供时必补读——RandomBlob 也不例外（否则刷新被架空，红线违反）。
+	if hints.SliceMD5 == "" || len(hints.BlockMD5s) == 0 {
 		if ferr := s.fillStagedLists(st); ferr != nil {
 			return nil, ferr
 		}

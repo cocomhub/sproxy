@@ -204,15 +204,10 @@ func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPa
 	// P1（2026-10-21）：ctx 携带 PutHints 时透传（secretdata 交错路径每块密文顺带算
 	// md5 + RandomBlob 标记 ⇒ 跳过整块重读与 pre-Stat，省每次上传 2-3 次 API 往返）。
 	var hints *PutHints
-	if syncpkg.RandomBlobHintsFrom(ctx) {
-		// secretdata 单块密文（随机新建内容）：跳过整块重读 + pre-Stat + rapidupload
-		// 刷新（命中率理论 0）——但 md5/分块列表仍需自算（上传复核 + 重试必需）。
-		// RandomBlob=true 使 stageUploadFromPath 不读回 sliceMD5/分块列表（不需要秒传）。
+	// 通用上传提示（跨后端中性）→ baidupcs 特化映射：RandomContent ⇒ RandomBlob（跳
+	// pre-Stat）；Size/MD5/Path 等按后端协议消费（sha256/mtime 等非协议字段忽略）。
+	if uh, ok := syncpkg.UploadHintsFrom(ctx); ok && uh.RandomContent {
 		hints = &PutHints{RandomBlob: true}
-	} else if h, ok := syncpkg.PutHintsFrom(ctx); ok {
-		if ph, phok := h.(*PutHints); phok {
-			hints = ph
-		}
 	}
 	meta, err := f.s.PutFromStagedPath(ctx, clean, tmpPath, size, hints)
 	if err != nil {

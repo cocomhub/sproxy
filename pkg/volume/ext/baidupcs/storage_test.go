@@ -513,36 +513,6 @@ func TestStorage_Put_MultipartETagRefresh(t *testing.T) {
 	}
 }
 
-// TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5（2026-10-21 用户裁定回归）：
-// RandomBlob 提示（secretdata 单块密文：随机新建内容）**只能**跳过 pre-Stat 与秒传参数
-// 读回，**绝不跳过上传后的 md5 刷新/复核**——分片上传后 ETag 非权威时必须仍走
-// rapidupload 刷新到权威整文件 md5，保证文件一致性。变异：在 checkAfterUploadUnreliableMD5
-// 里用 randomBlob 门跳过刷新 → 本用例红。
-func TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5(t *testing.T) {
-	t.Parallel()
-	ad := &multipartETagAdapter{inner: newFakeStorageAdapter(), multipart: true}
-	s := newTestStorage(t, ad)
-	content := strings.Repeat("random-blob-md5-refresh-", 128)
-	staged := filepath.Join(s.temp, "random.bin")
-	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.PutFromStagedPath(context.Background(), "random.bin", staged, int64(len(content)),
-		&PutHints{RandomBlob: true}); err != nil {
-		t.Fatalf("PutFromStagedPath(RandomBlob): %v", err)
-	}
-	if !ad.rapidHit {
-		t.Fatal("RandomBlob 也必须走 rapidupload 刷新（用户裁定：不得跳过 md5 刷新）")
-	}
-	m, err := s.Stat(context.Background(), "random.bin")
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if want := md5Hex(content); m.ETag != want {
-		t.Fatalf("RandomBlob 上传后 ETag 应为权威整文件 md5 %s, got %s", want, m.ETag)
-	}
-}
-
 // TestStorage_PutFromStagedPath_HintsSkipPreStat RandomBlob 提示跳过首轮 pre-Stat
 // （内容随机新建，秒传命中率 0）——用计数 Stat 断言：RandomBlob 路径的上传前 Stat
 // 次数为 0（普通路径首轮有 pre-Stat）；上传后的复核 Stat 是**必须的**（刷新路径，不计）。
@@ -1098,4 +1068,25 @@ func (a *recordingUploadPathAdapter) List(ctx context.Context, remotePath string
 }
 func (a *recordingUploadPathAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
 	return a.inner.Meta(ctx, remotePath)
+}
+
+// TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5 复现/回归（红线，2026-10-21）：
+// RandomBlob 跳块列表读回 ⇒ blockMD5s 空 ⇒ renewAuthoritativeMD5 bail ⇒ md5 刷新被跳过
+// （分片上传后远端 ETag 必非权威，无刷新则一致性红线被架空）。修复：块列表**必须算**。
+func TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5(t *testing.T) {
+	t.Parallel()
+	ad := &unreliableMD5RapidAdapter{inner: &unreliableMD5Adapter{inner: newFakeStorageAdapter()}}
+	s := newTestStorage(t, ad)
+	content := strings.Repeat("repro-", 100)
+	staged := filepath.Join(s.temp, "repro.bin")
+	if err := os.WriteFile(staged, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutFromStagedPath(context.Background(), "repro.bin", staged, int64(len(content)),
+		&PutHints{RandomBlob: true}); err != nil {
+		t.Fatalf("PutFromStagedPath: %v", err)
+	}
+	if !ad.rapidHit {
+		t.Fatal("BUG：远端 md5 非权威 + RandomBlob ⇒ 刷新被跳过（红线违反）")
+	}
 }
