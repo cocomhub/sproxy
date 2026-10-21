@@ -2004,7 +2004,13 @@ async function createShare() {
   const oneTime = document.getElementById('share-one-time').checked;
 
   try {
-    const data = await sc.share.create({ filename: filename, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime });
+    // 当前「过滤卷」选中时透传卷名：分享源必须定位到该卷（外部卷/加密卷尤其需要——
+    // 多卷同名 rel 时缺省会按「本地卷优先」选中错误文件）。
+    const shareVol = (typeof currentVolume === 'function') ? currentVolume() : '';
+    const data = await sc.share.create({
+      filename: filename, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime,
+      volume: shareVol || undefined,
+    });
     if (!data.token) { showToast('创建分享失败: ' + (data?.message || 'unknown'), 'error'); return; }
     const shareUrl = location.origin + '/s/' + data.token;
     if (navigator.clipboard) {

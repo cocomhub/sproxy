@@ -7,8 +7,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -277,9 +279,19 @@ func (h *Handlers) archiveWriteFiles(tw *tar.Writer, r *http.Request, owner stri
 		// 跨卷定位（T6b）：归档源文件按 owner 卷视图定位（addFileToTar 经 os.Root 相对
 		// 打开——中间目录符号链接不逃逸，TOCTOU 交叉校验保留）。非默认卷文件可打包；
 		// 默认卷被 ACL 排除时默认卷遗留不可见 → 跳过（不读取无权卷内容，fail-closed）。
-		root, userRel := h.archiveFileRootFor(owner, relPath)
+		root, userRel, externalOnly := h.archiveFileRootFor(owner, relPath)
 		if root == nil {
-			logger.Error("归档添加文件失败：文件不在视图", "path", relPath)
+			// **不得静默缺项**（缺陷修复，2026-10-21）：此前只记 Error 后 continue ⇒ 归档
+			// 「成功」返回却少了这些文件（用户实测「归档缺文件」且不知原因）。现在按失败聚合
+			// 上抛；外部卷（加密卷/网盘卷/S3）文件单独给出明确原因。
+			if externalOnly {
+				logger.Error("归档失败：文件位于外部卷（服务端归档暂不支持）", "path", relPath)
+				fileErr = errors.Join(fileErr, fmt.Errorf(
+					"文件 %q 位于外部卷（加密卷/网盘卷/S3），服务端归档暂不支持；请直接下载该文件", relPath))
+				continue
+			}
+			logger.Error("归档添加文件失败：文件不在可归档视图", "path", relPath)
+			fileErr = errors.Join(fileErr, fmt.Errorf("文件 %q 不在可归档视图（无权访问或已被删除）", relPath))
 			continue
 		}
 		if err := addFileToTar(tw, root, userRel, relPath, logger); err != nil {
@@ -344,24 +356,32 @@ func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool
 // archiveFileRootFor 返回归档源文件 relPath 在 owner 卷视图内的 root 与 user 桶 rel。
 // 未命中（视图全无）或默认卷被 ACL 排除（遗留不可见）返回 (nil, "")——调用方跳过，
 // 绝不读取无权卷内容（fail-closed）。volSet nil（旧装配）回落默认租户（唯一根）。
-func (h *Handlers) archiveFileRootFor(owner, relPath string) (*storage.Root, string) {
+// 返回值第三项 external=true 表示「文件只存在于外部卷（加密/网盘/S3）」——服务端归档
+// 基于 `os.Root`（符号链接安全 + TOCTOU 交叉校验），暂不支持外部卷；调用方必须**显式报错**
+// 而不是静默缺项（缺陷修复，2026-10-21）。
+func (h *Handlers) archiveFileRootFor(owner, relPath string) (*storage.Root, string, bool) {
 	tnt := h.tenantFor(owner)
 	if tnt == nil || tnt.Root() == nil {
-		return nil, ""
+		return nil, "", false
 	}
 	userRel, ok := tnt.UserRel(relPath)
 	if !ok {
-		return nil, ""
+		return nil, "", false
 	}
 	if h.volSet != nil {
 		if loc, found := h.locateOwnerFile(owner, userRel); found && loc != nil && loc.tenant != nil && loc.tenant.Root() != nil {
-			return loc.tenant.Root(), userRel
+			return loc.tenant.Root(), userRel, false
+		}
+		// 本地视图未命中：若文件在**外部卷**上，明确告知不支持（而非让它走到本地根后
+		// 报「stat 失败」这种误导性错误）。
+		if src, found := h.resolveOwnerSource(context.Background(), owner, userRel, ""); found && src != nil && src.Local == nil {
+			return nil, "", true
 		}
 		if !h.defaultVolumeAllows(owner) {
-			return nil, ""
+			return nil, "", false
 		}
 	}
-	return tnt.Root(), userRel
+	return tnt.Root(), userRel, false
 }
 
 // addFileToTar 将 root 内 rel 对应的文件（或目录）添加到 tar writer 中（tar 条目名为 tarRel）。
