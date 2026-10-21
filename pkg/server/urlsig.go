@@ -128,8 +128,15 @@ func (a *RingAuthenticator) verifyURLSig(raw string, method string, u *url.URL, 
 // tryURLSig 尝试 **URL 票形态**（`?spx_sig=` / `X-Sproxy-Sig` 头，方案 B'，2026-10-21）：
 // 浏览器原生标签（`<video>`/`<img>`/下载链接）无法自定义请求头 ⇒ 用 URL 承载 SproxySig。
 // 语义差异：不查 nonce 池（video 多 Range 请求复用同一 URL）+ TTL 放宽（默认 1h）。
+//
+// **方法限制（2026-10-21 P2 修复）**：仅 GET/HEAD（浏览器原生标签场景）；其余方法（含
+// 带 body 的 PUT/POST/COPY 等）**不认 URL 票**——URL 形态无 body 完整性校验（bodyValidator
+// 只在请求头形态挂载），放开写操作会让已捕获的 URL 形态请求可被改 body 而不被发现。
 // 未带票或验签失败均返回 nil（**静默回落**到请求头形态/链成员——过期 URL 残留不误伤）。
 func (a *RingAuthenticator) tryURLSig(r *http.Request) *verifiedCredential {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return nil // 仅浏览器原生标签读取（GET/HEAD）；写方法回落请求头形态（保留 body 校验）
+	}
 	urlRaw, ok := urlSigFromRequest(r.URL, r.Header.Get(urlSigHeaderKey))
 	if !ok {
 		return nil

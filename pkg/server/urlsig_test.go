@@ -199,3 +199,29 @@ func TestURLSig_StripQueryKeyPreservesOrder(t *testing.T) {
 		t.Fatalf("票参数未被剥离: %q", query)
 	}
 }
+
+// TestURLSig_MethodRestrictedToGetHead（P2 修复，2026-10-21）：URL 票形态**仅**认 GET/HEAD
+// （浏览器原生标签读取场景）；POST/PUT/DELETE 等带 body 方法**不认票**——URL 形态无 body
+// 完整性校验（bodyValidator 只在请求头形态挂载），放开写方法会让已捕获的 URL 形态请求可
+// 被改 body 而不被发现。此用例锁死该语义（POST 带合法票 + 同 body_sha256 签名仍被拒）。
+func TestURLSig_MethodRestrictedToGetHead(t *testing.T) {
+	t.Parallel()
+	ring, ak, sk, skeyID := newURLSigRing(t)
+	a := NewRingAuthenticator(ring, sproxysig.NewNoncePool(), WithURLSigTTL(time.Hour))
+
+	// POST 带**正确签名**的票（若 tryURLSig 不限制方法则会被放行 ⇒ 本用例红）。
+	postTicket := signURL(t, ak, sk, skeyID, http.MethodPost, "/api/cloud/download", "filename=x", time.Hour)
+	postURL, _ := url.Parse("/api/cloud/download?filename=x&" + urlSigQueryKey + "=" + url.QueryEscape(postTicket))
+	postReq, _ := http.NewRequest(http.MethodPost, postURL.String(), strings.NewReader("body"))
+	if cred := a.tryURLSig(postReq); cred != nil {
+		t.Fatalf("POST 不应认 URL 票（方法限制）：tryURLSig 应返回 nil（回落请求头形态，保留 body 校验）")
+	}
+
+	// 对照：GET 同票应被认（方法限制只挡写方法）。
+	getTicket := signURL(t, ak, sk, skeyID, http.MethodGet, "/download", "filename=x", time.Hour)
+	getURL, _ := url.Parse("/download?filename=x&" + urlSigQueryKey + "=" + url.QueryEscape(getTicket))
+	getReq, _ := http.NewRequest(http.MethodGet, getURL.String(), nil)
+	if cred := a.tryURLSig(getReq); cred == nil {
+		t.Fatalf("GET 同票应被认（方法限制不挡读方法）")
+	}
+}

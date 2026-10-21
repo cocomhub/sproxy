@@ -20,6 +20,8 @@ package secretdata
 //   - 显式 opts.Block（用户 extra.block_policy 或代码构造）→ 尊重，不覆盖。
 
 import (
+	"context"
+	"io"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -64,6 +66,42 @@ func TestDefaultPolicy_ExternalUses256KiB(t *testing.T) {
 	fs := newDefaultPolicyFS(t, &externalMarkerFS{LocalFS: syncpkg.NewLocalFS(t.TempDir(), nil)})
 	if fs.opts.Block.BlockletMax != 256<<10 {
 		t.Fatalf("外部卷默认 blocklet_max=%d，应为 256KiB（256<<10）", fs.opts.Block.BlockletMax)
+	}
+}
+
+// plainFS 是**未实现** LocalVolume 接口的 FS（手写 7 方法转发，不含 IsLocalVolume）。
+// 用于锁「未自述本地性 ⇒ 按外部处理」这一默认分支（审核 P3-4：localMarker/externalMarker
+// 都嵌了 *LocalFS 从而实现了接口，ok=false 分支此前无覆盖）。
+type plainFS struct{ in syncpkg.FS }
+
+func (p plainFS) ListDir(ctx context.Context, s string) ([]syncpkg.Entry, error) {
+	return p.in.ListDir(ctx, s)
+}
+func (p plainFS) Stat(ctx context.Context, s string) (*syncpkg.Entry, error) {
+	return p.in.Stat(ctx, s)
+}
+func (p plainFS) OpenRead(ctx context.Context, s string) (io.ReadCloser, error) {
+	return p.in.OpenRead(ctx, s)
+}
+func (p plainFS) WriteFile(ctx context.Context, k syncpkg.LogicalKey, s string, r io.Reader, size, mt int64) error {
+	return p.in.WriteFile(ctx, k, s, r, size, mt)
+}
+func (p plainFS) Rename(ctx context.Context, a, b string) error { return p.in.Rename(ctx, a, b) }
+func (p plainFS) Delete(ctx context.Context, s string) error    { return p.in.Delete(ctx, s) }
+func (p plainFS) MakeDir(ctx context.Context, s string) error   { return p.in.MakeDir(ctx, s) }
+
+// TestDefaultPolicy_NoLocalVolumeSelfReportTreatedAsExternal：底层**未实现** LocalVolume
+// （无 IsLocalVolume 自述）⇒ 按**外部**处理（256KiB）——安全方向：装饰器链上若有未知包装，
+// 最坏也只是用了外部档位（仅网盘/本地性能档位差异，无正确性后果）。
+func TestDefaultPolicy_NoLocalVolumeSelfReportTreatedAsExternal(t *testing.T) {
+	t.Parallel()
+	inner := plainFS{in: syncpkg.NewLocalFS(t.TempDir(), nil)}
+	if _, ok := any(inner).(syncpkg.LocalVolume); ok {
+		t.Fatal("测试夹具不应实现 LocalVolume（否则本分支测不到）")
+	}
+	fs := newDefaultPolicyFS(t, inner)
+	if fs.opts.Block.BlockletMax != 256<<10 {
+		t.Fatalf("未自述本地性默认 blocklet_max=%d，应为 256KiB（按外部处理）", fs.opts.Block.BlockletMax)
 	}
 }
 
