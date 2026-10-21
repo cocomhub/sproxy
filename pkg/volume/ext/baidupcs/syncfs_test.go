@@ -277,18 +277,23 @@ func TestStorageFS_WriteFile_SingleLocalStaging(t *testing.T) {
 }
 
 // TestUploadHintsToPutHints（2026-10-21）：通用 UploadHints → baidupcs 特化 PutHints 映射。
-// 断言 RandomContent ⇒ RandomBlob（跳 pre-Stat）+ MD5/CRC32/Size 填充（整块免重扫）；
-// 非 RandomContent / 无提示 ⇒ nil（现状自算零回归）。
+// **两个维度独立**（审核修复）：MD5/CRC32/Size（校验值，任何内容都可用 ⇒ 整块免重扫）
+// 与 RandomContent（内容形态 ⇒ RandomBlob 跳 pre-Stat）不耦合——普通内容（外层已算 md5）
+// 同样享受免重扫；无提示 ⇒ nil（现状自算零回归）。
 func TestUploadHintsToPutHints(t *testing.T) {
 	t.Parallel()
 	// 无提示 ⇒ nil
 	if got := uploadHintsToPutHints(context.Background()); got != nil {
 		t.Fatalf("无提示应返回 nil，got %+v", got)
 	}
-	// 非 RandomContent（普通内容）⇒ nil（普通路径按 pre-Stat 秒传命中检查）
+	// 非 RandomContent（普通内容）但带校验值 ⇒ 免重扫收益仍生效（RandomBlob=false 保留 pre-Stat）
 	plain := syncpkg.WithUploadHints(context.Background(), &syncpkg.UploadHints{MD5: "m", Size: 9})
-	if got := uploadHintsToPutHints(plain); got != nil {
-		t.Fatalf("非 RandomContent 应返回 nil（保留 pre-Stat），got %+v", got)
+	plainGot := uploadHintsToPutHints(plain)
+	if plainGot == nil || plainGot.RandomBlob {
+		t.Fatalf("普通内容：应填充 Md5/Size 且 RandomBlob=false（保留 pre-Stat），got %+v", plainGot)
+	}
+	if plainGot.Md5 != "m" || plainGot.Size != 9 {
+		t.Fatalf("普通内容：校验值应映射（免重扫），got %+v", plainGot)
 	}
 	// RandomContent 全字段 ⇒ 映射齐
 	ctx := syncpkg.WithUploadHints(context.Background(), &syncpkg.UploadHints{

@@ -275,7 +275,7 @@ func (s *Storage) stageUploadFromPath(ctx context.Context, path, key string, siz
 	if hints != nil && hints.Md5 != "" && hints.Size > 0 {
 		return s.stageUploadFromHints(path, hints)
 	}
-	st, err := s.stageUploadScan(ctx, path, size, hints != nil && hints.RandomBlob)
+	st, err := s.stageUploadScan(ctx, path, size)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func (s *Storage) stageUploadFromPath(ctx context.Context, path, key string, siz
 // stageUploadFromHints 用调用方预计算 md5/size 构造 stagedUpload（不重读块文件）。
 func (s *Storage) stageUploadFromHints(path string, hints *PutHints) (*stagedUpload, error) {
 	st := &stagedUpload{tmpPath: path, md5: hints.Md5, crc32: hints.Crc32, size: hints.Size,
-		sliceMD5: hints.SliceMD5, blockMD5s: hints.BlockMD5s, randomBlob: hints.RandomBlob}
+		sliceMD5: hints.SliceMD5, blockMD5s: hints.BlockMD5s}
 	// **块列表必须算**（用户裁定 2026-10-21）：秒传刷新（MD5Unreliable 路径）依赖
 	// blockMD5s>0；调用方未提供时必补读——RandomBlob 也不例外（否则刷新被架空，红线违反）。
 	if hints.SliceMD5 == "" || len(hints.BlockMD5s) == 0 {
@@ -302,9 +302,8 @@ func (s *Storage) stageUploadFromHints(path string, hints *PutHints) (*stagedUpl
 	return st, nil
 }
 
-// stageUploadScan 单遍读文件算 md5/crc32（randomBlob 标记供「跳过秒传参数读回」判定）。
-// ctx 全程透传：调用方取消/超时即中断（不白扫整块）。
-func (s *Storage) stageUploadScan(ctx context.Context, path string, size int64, randomBlob bool) (*stagedUpload, error) {
+// stageUploadScan 单遍读文件算 md5/crc32。ctx 全程透传：调用方取消/超时即中断（不白扫整块）。
+func (s *Storage) stageUploadScan(ctx context.Context, path string, size int64) (*stagedUpload, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -321,11 +320,10 @@ func (s *Storage) stageUploadScan(ctx context.Context, path string, size int64, 
 			"declared", size, "actual", actual, "path", path)
 	}
 	return &stagedUpload{
-		tmpPath:    path,
-		md5:        hex.EncodeToString(md5h.Sum(nil)),
-		crc32:      strconv.FormatUint(uint64(crc.Sum32()), 10),
-		size:       actual,
-		randomBlob: randomBlob,
+		tmpPath: path,
+		md5:     hex.EncodeToString(md5h.Sum(nil)),
+		crc32:   strconv.FormatUint(uint64(crc.Sum32()), 10),
+		size:    actual,
 	}, nil
 }
 
@@ -666,10 +664,6 @@ type stagedUpload struct {
 	crc32     string   // 整文件 CRC32 IEEE（rapidupload 秒传参数）
 	size      int64    // 文件大小（rapidupload length 参数）
 	blockMD5s []string // 按 uploadBlockSize 分块的 md5 列表（秒传 blockListMD5 参数，C-C1）
-	// randomBlob 标记「本次新建的随机内容」（PutHints.RandomBlob，secretdata 单块密文）：
-	// **仅**影响「是否跳秒传参数读回」——上传后的 md5 刷新/复核**恒做**（用户裁定 2026-10-21：
-	// 必须按 md5 刷新成功保证文件一致性，即使内容随机新建也要确保远端 meta 为权威整文件 md5）。
-	randomBlob bool
 }
 
 // uploadBlockSize 是分片上传的块大小（与 multiupload.go 的 MultiUploader BlockSize

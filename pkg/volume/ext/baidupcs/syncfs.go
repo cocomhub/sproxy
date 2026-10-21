@@ -98,15 +98,18 @@ func (f *StorageFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath
 	return nil
 }
 
-// uploadHintsToPutHints 把通用 UploadHints（写面提示）映射为 baidupcs 特化 PutHints：
-// RandomContent ⇒ RandomBlob（跳 pre-Stat）；MD5/CRC32/Size 填充（整块免重扫）。
-// 无提示/非 RandomContent ⇒ nil（现状自算）。
+// uploadHintsToPutHints 把通用 UploadHints（写面提示）映射为 baidupcs 特化 PutHints。
+//
+// **两个维度独立**（2026-10-21 审核修复）：MD5/CRC32/Size（**校验值**，任何内容都可用 ⇒
+// 整块免重扫）与 RandomContent（**内容形态**，仅控制是否跳 pre-Stat）互不耦合——此前把
+// 校验值映射也挂在 RandomContent 门下，普通文件（外层已算 md5）的免重扫收益被丢弃。
+// 无提示 ⇒ nil（现状自算）。
 func uploadHintsToPutHints(ctx context.Context) *PutHints {
 	uh, ok := syncpkg.UploadHintsFrom(ctx)
-	if !ok || !uh.RandomContent {
+	if !ok {
 		return nil
 	}
-	hints := &PutHints{RandomBlob: true}
+	hints := &PutHints{RandomBlob: uh.RandomContent}
 	if uh.MD5 != "" && uh.Size > 0 {
 		hints.Md5 = uh.MD5
 		hints.Size = uh.Size
