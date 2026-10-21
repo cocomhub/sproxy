@@ -22,6 +22,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
+	"github.com/cocomhub/sproxy/pkg/media"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -984,15 +985,9 @@ func (d *HybridDownloader) locateRestored(ctx context.Context, fid string) (*Fil
 	return df, nil
 }
 
-// hasVideoExt 判断视频扩展名。
+// hasVideoExt 判断视频扩展名（委托 pkg/media.IsVideoName 单一事实源，2026-10-21 收敛）。
 func hasVideoExt(name string) bool {
-	low := strings.ToLower(name)
-	for _, ext := range []string{".mp4", ".mkv", ".ts", ".m4v", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m2ts"} {
-		if strings.HasSuffix(low, ext) {
-			return true
-		}
-	}
-	return false
+	return media.IsVideoName(name)
 }
 
 // 注：转存副本释放已收归 RestoreLease（restore.go，round-10 用户裁决）——
