@@ -12,11 +12,13 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/recovery"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // startupRecoveryTimeout 是启动恢复的总预算（超时即放弃本轮，**不丢任务**：作用域保持未完成，
@@ -78,6 +80,66 @@ func cloudLegacies(h *Handlers) []recovery.Legacy {
 			return mgr.RecoverAll(ctx)
 		},
 	}}
+}
+
+// ledgerLegacies 返回**容量账本**的 legacy 恢复入口（用户裁定 2026-10-22）。
+//
+// 为什么需要：账本自 2026-10-22 起热数据落**节点本地**（外部卷远端抖动不再打断上传/转存，
+// 见 `pkg/server/volumes.go` 的 `WithLedgerDir`），锁定「启动时把本地分片重扫回内存」
+// 为**显式恢复步骤**（而不是隐含在 `OpenLedger` 的构造中）——恢复报告可见、可告警，
+// 且与「启动恢复只有一个编排点」一致（M3 纪律）。
+//
+// 语义：账本分片是 append-only 日志（已是 WAL 形态），恢复 = 把本地目录内全部分片/基线
+// 重读求和；已从已占用起算，无需额外重放逻辑（`Add` 附录即持久）。故本入口只做
+// **可观测的确认扫描**（读一次 Total 并计入报告），失败则告警（不静默）。
+func ledgerLegacies(h *Handlers) []recovery.Legacy {
+	names := externalVolumeNames(h)
+	if h == nil || len(names) == 0 {
+		return nil
+	}
+	return []recovery.Legacy{{
+		Kind: "quota-ledger",
+		Recover: func(ctx context.Context) (int, error) {
+			return recoverVolumeLedgers(ctx, h, names)
+		},
+	}}
+}
+
+// externalVolumeNames 返回装配卷集合中全部**外部卷**名（容量账本有本地热数据需恢复的）。
+func externalVolumeNames(h *Handlers) []string {
+	if h == nil || h.volSet == nil {
+		return nil
+	}
+	var out []string
+	for _, v := range h.volSet.All() {
+		if v.Type != "" && v.Type != volume.TypeLocal {
+			out = append(out, v.Name)
+		}
+	}
+	return out
+}
+
+// recoverVolumeLedgers 逐外部卷确认本地热账本可重建（Used() 非降级即算恢复）。
+// 降级 ⇒ 该卷拒写并告警（计入失败让运维可见）；ctx 取消即中止。
+func recoverVolumeLedgers(ctx context.Context, h *Handlers, names []string) (int, error) {
+	recovered := 0
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return recovered, err
+		}
+		lc := h.volumeLedgerCounter(name)
+		if lc == nil {
+			continue // 非 LedgerCounter 装配（封印包装等）：不参与
+		}
+		used := lc.Used()
+		if lc.Degraded() {
+			h.logger.Warn("容量账本恢复：降级（该卷将拒写，需运维介入）", "volume", name, "used", used)
+			return recovered, fmt.Errorf("容量账本 %q 降级（used=%d）", name, used)
+		}
+		recovered++
+		h.logger.Info("容量账本恢复完成（本地热账本已重建）", "volume", name, "used", used)
+	}
+	return recovered, nil
 }
 
 // runStartupRecovery 执行一次启动恢复（**同步**：调用方在后台 goroutine 中调用即可）。

@@ -449,6 +449,20 @@ func (s *Service) sessionStagingTenant(owner string, route UploadRoute) *storage
 	return nil
 }
 
+// publishExternalStaging 外部卷目标（route.Sink 非 nil 且无本地租户）时，把分块内容落点
+// 钉在**默认卷**（本地 staging，session.StagingVolume）并标记 ExternalTarget（complete 走
+// staging 转存路径而非本地 rename）。本地卷目标 → no-op（true）。身份门控发布，任一失败即 false。
+func (s *Service) publishExternalStaging(i *chunkedInit, session *ChunkedUploadSession, route UploadRoute) bool {
+	if route.Sink == nil || route.Tenant != nil {
+		return true
+	}
+	ok := true
+	if stagingVol := defaultVolumeNameOf(s.rt.volSet()); stagingVol != "" {
+		ok = i.store.setSessionStagingVolumeIfCurrent(session, stagingVol)
+	}
+	return i.store.setSessionExternalTargetIfCurrent(session) && ok
+}
+
 // initNewSession 对新会话执行路由预留（routeUpload 定卷 + 双 TryReserve / P5 回退预留）
 // 与在途整临时文件创建（O_EXCL + Truncate 预占位）。任一失败清理会话并回 4xx/5xx，
 // 返回 false；发布结果校验失败（会话已被并发删除/接管）→ 整体回滚（abortInitOrphanRollback）。
@@ -477,14 +491,7 @@ func (s *Service) initNewSession(ctx context.Context, i *chunkedInit, session *C
 	// 外部卷目标（route.Sink 非 nil 且无本地租户）：分块内容落点钉在**默认卷**（本地 staging），
 	// 使 temp 解析（tenantRootForStaging）定位到 staging 租户根。本地卷目标 StagingVolume 空
 	// （= 目标卷，零回归）。默认卷名经装配层注入的卷集合取（与其它卷名解析同源）。
-	stagingPublished := true
-	if route.Sink != nil && route.Tenant == nil {
-		if stagingVol := defaultVolumeNameOf(s.rt.volSet()); stagingVol != "" {
-			stagingPublished = i.store.setSessionStagingVolumeIfCurrent(session, stagingVol)
-		}
-		// 外部卷目标标记：complete 走 staging 转存路径（不做本地 rename）。
-		stagingPublished = i.store.setSessionExternalTargetIfCurrent(session) && stagingPublished
-	}
+	stagingPublished := s.publishExternalStaging(i, session, route)
 	// p5Reserved/p5Published 记录 P5 回退预留的字节数与登记结果（供发布失败时回滚；
 	// 未走 P5 分支时 p5Published 恒为 true、p5Reserved 为 0）。
 	var p5Reserved int64
@@ -1271,6 +1278,29 @@ func (s *Service) finishSessionAfterComplete(owner, uploadID string) {
 	store.CleanupSessionAfter(uploadID, 5*time.Second)
 }
 
+// acquireCompleteTargets 取 complete 的 staging 租户、user 桶相对路径，并取 rel 文件级
+// 互斥锁（T6c move 锁架构延伸：complete 原子 rename 与并发 move 共用同 rel 锁，无锁时
+// move 删源后 complete 仍可把文件落回源卷 ⇒ 与目标卷副本并存）。返回 ok=false 表示已回包
+// （rel 被占用 409）。
+func (s *Service) acquireCompleteTargets(w http.ResponseWriter, owner string, session *ChunkedUploadSession) (*storage.Tenant, string, func(), bool) {
+	tnt := s.stagingTenantForSession(session, owner)
+	rel := ""
+	if tnt != nil && tnt.Root() != nil {
+		if r, ok := tnt.UserRel(session.Filename); ok {
+			rel = r
+		}
+	}
+	if rel == "" {
+		return tnt, rel, func() {}, true
+	}
+	release, locked := s.rt.fileLocks().Acquire(owner, rel)
+	if !locked {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
+		return nil, "", nil, false
+	}
+	return tnt, rel, release, true
+}
+
 // UploadComplete 合并所有分块完成上传。
 func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	owner, uploadID, store, session, ok := s.parseCompleteRequest(w, r)
@@ -1298,31 +1328,16 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	// 取会话 **staging 卷**租户（在途临时文件所在：本地卷目标 = 目标卷；外部卷目标 = 默认卷
 	// staging）与 user 桶相对路径：prepareMergedTemp 全文件校验、本地 rename、外部转存读源
-	// 均用它。
+	// 均用它。并取 rel 文件级互斥锁（防与并发 move 竞态，见 helper 注释）。
 	//
-	// 为何不是 completeTargetTenant(session)：外部卷目标没有本地租户（volumeTenant → nil），
-	// 而**分块内容恒在本地 staging**（这正是本修复的核心）——目标卷只影响“写到哪里”，
-	// 不影响“分块内容在哪”（见 session.StagingVolume）。
-	tnt := s.stagingTenantForSession(session, owner)
-	rel := ""
-	if tnt != nil && tnt.Root() != nil {
-		if r, ok := tnt.UserRel(session.Filename); ok {
-			rel = r
-		}
+	// 为何不是目标卷租户：外部卷目标没有本地租户（volumeTenant → nil），而**分块内容恒在
+	// 本地 staging**（这正是本修复的核心）——目标卷只影响「写到哪里」，不影响「分块内容在哪」
+	// （见 session.StagingVolume）。
+	tnt, rel, relUnlock, ok := s.acquireCompleteTargets(w, owner, session)
+	if !ok {
+		return
 	}
-
-	// 文件级互斥（T6c move 锁架构延伸）：complete 会把 temp 原子 rename 为最终文件，与并发
-	// move（复制→删源）共用同 rel 锁——无锁时 move 删源后 complete 仍可把文件落回源卷，与
-	// 目标卷副本并存（AD-4 破坏）；持锁后 move 期间 complete 409（客户端可稍后重试，
-	// session/temp/预留均保留）。
-	if rel != "" {
-		release, locked := s.rt.fileLocks().Acquire(owner, rel)
-		if !locked {
-			s.sendJSON(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
-			return
-		}
-		defer release()
-	}
+	defer relUnlock()
 
 	// 全文件校验临时名内容 == session.FileChecksum：
 	//  校验通过 → rename 为正式名（本地卷）/ 转存到外部卷（外部卷目标，见下方分支）→
@@ -1446,18 +1461,20 @@ func (s *Service) stagingTenantForSession(session *ChunkedUploadSession, owner s
 	return s.rt.volumeTenant(vol, owner)
 }
 
-// completeTargetTenant 取会话目标卷租户与 user 桶相对路径（覆盖写 ReleaseUsage / complete /
-// SaveVersion 用）。多卷（AD-5）：init 定卷，temp + rename + version 全在目标卷
-// （session.Volume 空 = 默认卷）。租户不可用或文件名映射失败 → (tnt, "")。
-func (s *Service) completeTargetTenant(session *ChunkedUploadSession, owner string) (*storage.Tenant, string) {
-	tnt := s.rt.volumeTenant(session.Volume, owner)
-	if tnt == nil || tnt.Root() == nil {
-		return tnt, ""
+// resolveExternalTransferSrc 解析外部卷转存源：返回 staging 临时文件绝对路径。
+// 入参校验与路径解析收敛在此（降 completeExternalTransfer 认知复杂度）。
+// 返回 ok=false 时已回包。
+func (s *Service) resolveExternalTransferSrc(w http.ResponseWriter, session *ChunkedUploadSession, tnt *storage.Tenant) (string, bool) {
+	if session.TempPath == "" {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "上传会话缺少在途临时文件"}, http.StatusInternalServerError)
+		return "", false
 	}
-	if r, ok := tnt.UserRel(session.Filename); ok {
-		return tnt, r
+	abs, aok := tnt.Root().Abs(session.TempPath)
+	if !aok {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "在途临时文件路径越界"}, http.StatusInternalServerError)
+		return "", false
 	}
-	return tnt, ""
+	return abs, true
 }
 
 // completeExternalTransfer 是外部卷目标的分块 complete：staging 整文件校验通过后，
@@ -1472,14 +1489,8 @@ func (s *Service) completeExternalTransfer(ctx context.Context, w http.ResponseW
 		return "", false
 	}
 	// 读取 staging 整临时文件（已在 complete 前全文件校验通过，此处单遍流式转存）。
-	stagingPath := session.TempPath
-	if stagingPath == "" {
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "上传会话缺少在途临时文件"}, http.StatusInternalServerError)
-		return "", false
-	}
-	abs, aok := tnt.Root().Abs(stagingPath)
+	abs, aok := s.resolveExternalTransferSrc(w, session, tnt)
 	if !aok {
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "在途临时文件路径越界"}, http.StatusInternalServerError)
 		return "", false
 	}
 
@@ -1493,51 +1504,21 @@ func (s *Service) completeExternalTransfer(ctx context.Context, w http.ResponseW
 	// 上传外部卷同一 trusted.Guard(Wrap) 链，写侧恒生成 meta；见 docs/config.md「可信卷」）。
 	// rel 带 user/ 前缀（与 writeExternalSettle 同一传入口径：Sink 实现负责 owner 前缀/
 	// 键空间映射，域侧不自行剥离）。
-	if derr := sink.MakeDir(ctx, path.Dir(rel)); derr != nil {
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgCreateDirFailed}, http.StatusInternalServerError)
+	if !s.ensureExternalDir(ctx, w, sink, rel) {
 		return "", false
 	}
 
 	// **有界重试（生产可用性，2026-10-22）**：外部卷转存（网盘慢速/瞬时抖动/账本瞬时降级）
 	// 是**瞬时故障**——数据（staging）完好，重试即可自愈，不应一次失败直接 500 让客户端
-	// 干等/重传。每次重试前**先清理已写入的残骸**（Stat 存在 ⇒ Remove；避免 Overwrite=false
-	// 语义下重试被「目标已存在」永久阻断——与 pkg/transfer.writeUnique 的自愈同理）。
-	// **最大 10 次**（用户 2026-10-22 指定：数据文件正常时应尽量自动重传/恢复，重试预算放宽
-	// 以覆盖网盘侧长时间瞬态，如直链续签/配额账本瞬时降级），退避 1s→2s→…→2^9s 封顶。
-	const maxAttempts = 10
-	const baseDelay = time.Second
-	var lastErr error
-	for attempt := range maxAttempts {
-		if attempt > 0 {
-			// 重试前清残骸（可能上一轮写了一半）。
-			_ = sink.Remove(ctx, rel)
-			select {
-			case <-ctx.Done():
-				s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
-				return "", false
-			default:
-			}
-			// 退避等待经注入的 sleep 函数（生产 = time.Sleep；测试 = 0 等待 ⇒ 用例瞬时完成）。
-			s.rt.retrySleepFn()(baseDelay << attempt)
+	// 干等/重传。每次重试前**先清理已写入的残骸**（避免目标已存在语义下重试被永久阻断）。
+	// **最大 10 次**（用户 2026-10-22 指定），退避 1s→2s→…→2^9s 封顶。
+	for attempt := range externalTransferMaxAttempts {
+		if attempt > 0 && !s.waitBeforeRetry(ctx, w, sink, rel, attempt) {
+			return "", false
 		}
-		f, ferr := os.Open(abs)
-		if ferr != nil {
-			lastErr = ferr
-			continue
-		}
-		if werr := sink.WriteFile(ctx, rel, f, session.TotalSize, session.FileModTime); werr != nil {
-			_ = f.Close()
-			lastErr = werr
-			s.rt.logger().Warn("外部卷保存文件失败（将重试）", "file_name", session.Filename, "attempt", attempt+1, "error", werr)
-			continue
-		}
-		_ = f.Close()
-		// 写后大小复核（可命中的落地判据）：目标卷对象的字节数必须等于本次上传的声明总长。
-		sz, exists, serr := sink.Stat(ctx, rel)
-		if serr != nil || !exists || sz != session.TotalSize {
-			_ = sink.Remove(ctx, rel)
-			lastErr = fmt.Errorf("外部卷写后大小复核失败：want=%d got=%d exists=%v err=%v", session.TotalSize, sz, exists, serr)
-			s.rt.logger().Warn("外部卷写后大小复核失败（将重试）", "file_name", session.Filename, "attempt", attempt+1, "error", lastErr)
+		if err := s.attemptExternalTransfer(ctx, session, rel, abs, sink); err != nil {
+			s.rt.logger().Warn("外部卷转存未成功（将重试）", "file_name", session.Filename,
+				"attempt", attempt+1, "error", err)
 			continue
 		}
 		// 结算（与普通外部上传同口径：卷自报物理足迹优先）。
@@ -1548,9 +1529,58 @@ func (s *Service) completeExternalTransfer(ctx context.Context, w http.ResponseW
 		return session.FileChecksum, true
 	}
 	// 重试耗尽：会话与 staging 保留（可再 complete 重试），回 5xx。
-	s.rt.logger().Error("外部卷保存文件失败（重试耗尽）", "file_name", session.Filename, "error", lastErr)
+	s.rt.logger().Error("外部卷保存文件失败（重试耗尽）", "file_name", session.Filename)
 	s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
 	return "", false
+}
+
+// ensureExternalDir 确保外部卷目标目录存在（外部卷无隐式目录语义）。失败已回包，返回 false。
+func (s *Service) ensureExternalDir(ctx context.Context, w http.ResponseWriter, sink UploadSink, rel string) bool {
+	if derr := sink.MakeDir(ctx, path.Dir(rel)); derr != nil {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgCreateDirFailed}, http.StatusInternalServerError)
+		return false
+	}
+	return true
+}
+
+// externalTransferMaxAttempts / externalTransferBaseDelay 是外部卷转存的有界重试预算。
+// 10 次（用户 2026-10-22 指定）；退避 1s→2s→…→2^9s 封顶。
+const (
+	externalTransferMaxAttempts = 10
+	externalTransferBaseDelay   = time.Second
+)
+
+// waitBeforeRetry 重试前清理残骸并退避等待（ctx 取消即放弃）。返回 false = 已回包（放弃）。
+func (s *Service) waitBeforeRetry(ctx context.Context, w http.ResponseWriter, sink UploadSink, rel string, attempt int) bool {
+	_ = sink.Remove(ctx, rel)
+	select {
+	case <-ctx.Done():
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
+		return false
+	default:
+	}
+	// 退避经注入的 sleep（生产 = time.Sleep；测试 = 0 等待 ⇒ 用例瞬时完成）。
+	s.rt.retrySleepFn()(externalTransferBaseDelay << attempt)
+	return true
+}
+
+// attemptExternalTransfer 执行一次转存尝试：整流写 + 写后大小复核（不符即删产物）。
+// 返回 error = 本次未成功（调用方按重试预算继续）。
+func (s *Service) attemptExternalTransfer(ctx context.Context, session *ChunkedUploadSession, rel, abs string, sink UploadSink) error {
+	f, ferr := os.Open(abs)
+	if ferr != nil {
+		return ferr
+	}
+	defer func() { _ = f.Close() }()
+	if werr := sink.WriteFile(ctx, rel, f, session.TotalSize, session.FileModTime); werr != nil {
+		return werr
+	}
+	sz, exists, serr := sink.Stat(ctx, rel)
+	if serr != nil || !exists || sz != session.TotalSize {
+		_ = sink.Remove(ctx, rel)
+		return fmt.Errorf("写后大小复核失败：want=%d got=%d exists=%v err=%v", session.TotalSize, sz, exists, serr)
+	}
+	return nil
 }
 
 // externalSinkForSession 按会话目标卷解析外部卷写面（UploadSink）。

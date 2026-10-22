@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -119,6 +120,9 @@ func OpenMemLedger(node string) (*Ledger, error) { return newLedger(newMemStore(
 type ledgerStore interface {
 	// readFile 读文件内容（不存在 ⇒ ok=false, err=nil）。
 	readFile(name string) ([]byte, bool, error)
+	// readFileRetry 同 readFile，但**内部对真错误重试若干次**（外部卷远端抖动宽容）。
+	// 实现者可在 readFile 基础上包重试（默认实现即如此）；重试仍失败 ⇒ 返回错误。
+	readFileRetry(name string) ([]byte, bool, error)
 	// appendLine 追加一行（单写者 ⇒ 无需锁）。
 	appendLine(name, line string) error
 	// writeAtomic 原子写（tmp + rename）。
@@ -159,6 +163,11 @@ func (s *osStore) readFile(name string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	return b, true, nil
+}
+
+// readFileRetry 本地盘读取：瞬时 IO 错误重试（本地盘很少抖动，但共享盘/NFS 上会有）。
+func (s *osStore) readFileRetry(name string) ([]byte, bool, error) {
+	return readFileWithRetry(func() ([]byte, bool, error) { return s.readFile(name) })
 }
 
 func (s *osStore) appendLine(name, line string) error {
@@ -237,6 +246,9 @@ func (s *memStore) readFile(name string) ([]byte, bool, error) {
 	b, ok := s.files[name]
 	return b, ok, nil
 }
+
+// readFileRetry 内存读取无 IO，直接委托（接口一致性）。
+func (s *memStore) readFileRetry(name string) ([]byte, bool, error) { return s.readFile(name) }
 
 func (s *memStore) appendLine(name, line string) error {
 	s.mu.Lock()
@@ -423,6 +435,13 @@ func (s *fsStore) readFile(name string) ([]byte, bool, error) {
 	return b, true, nil
 }
 
+// readFileRetry 外部卷读取：**真错误**（远端抖动/限流/连接重置）重试若干次再上抛——
+// 网盘/对象存储读取天然高抖动，一次失败即判 corrupt（整卷拒写）不可接受。
+// 重试仅针对**真错误**；「确定不存在」仍立即返回（首次运行语义不变）。
+func (s *fsStore) readFileRetry(name string) ([]byte, bool, error) {
+	return readFileWithRetry(func() ([]byte, bool, error) { return s.readFile(name) })
+}
+
 func (s *fsStore) appendLine(name, line string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -545,6 +564,33 @@ func (s *fsStore) deleteFile(name string) error {
 func (s *fsStore) close() error { return nil }
 
 // ---- Ledger：分片日志账本 ----
+
+// ledgerReadRetries / ledgerReadRetryDelay 是账本文件读取的重试预算（外部卷远端抖动宽容）。
+// 常量而非配置：账本读失败即拒写（fail-closed）的代价很高，内部重试是纯健壮性提升，
+// 不需运维调优；3 次 × 200ms 覆盖常见瞬时抖动。
+const (
+	ledgerReadRetries    = 3
+	ledgerReadRetryDelay = 200 * time.Millisecond
+)
+
+// readFileWithRetry 对**真错误**重试（不存在/成功立即返回）。
+func readFileWithRetry(fn func() ([]byte, bool, error)) ([]byte, bool, error) {
+	var (
+		b   []byte
+		ok  bool
+		err error
+	)
+	for attempt := range ledgerReadRetries {
+		b, ok, err = fn()
+		if err == nil {
+			return b, ok, nil
+		}
+		if attempt < ledgerReadRetries-1 {
+			time.Sleep(ledgerReadRetryDelay)
+		}
+	}
+	return b, ok, err
+}
 
 // Ledger 是某「配额键」（卷级容量，或某用户/桶级配额）在**共享卷**上的跨进程账本。
 // 零值不可用；用 `OpenLedger`（本地目录）/`OpenLedgerFS`（卷内 FS）构造。**并发安全**。

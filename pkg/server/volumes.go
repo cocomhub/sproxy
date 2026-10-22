@@ -307,10 +307,27 @@ func assembleExternalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, acc 
 	// 同步 push/备份/服务端 Copy·Move）都被同一卷级计数器拦截，保障所有用户占用之和
 	// 不超卷总额度。计数器是**唯一实现**（分片日志账本，跨进程正确 + 重启从已占用起算）；
 	// 节点标识与落点由 capacity 内部决定 ⇒ 装配点不可能漏接。
-	acc.external[vc.Name] = capacity.WrapStorageVolume(vc.Name, be, nil, pool, int64(vc.VolCapacity), 0)
+	//
+	// **账本落点：节点本地**（用户裁定 2026-10-22）。为什么：卷 FS 上的账本在**每次写前
+	// 预留**都要读**全部分片**（含历史进程残留），明文外部卷（baidupcs/webdav/s3）上每次
+	// 读 = 一趟远端 API ⇒ 一次上传/转存几十次写 = 数百次远端读，且**任一次读的真错误**
+	// （远端抖动/限流）都把整卷置为 degraded ⇒ fail-closed 拒写（实测：2.2GB 转存中途
+	// 500 中断）。本地热账本零远端读（写入只追加本地文件，读只扫本地目录）⇒ 远端抖动
+	// 不再打断上传/转存；跨实例可见性由**周期归档到卷 FS**（灾备/对账）补。
+	// 目录与 secretdata 统一（`<storage_root>/meta/quota/<卷名>`），便于运维与归档策略一致。
+	acc.external[vc.Name] = capacity.WrapStorageVolume(vc.Name, be, nil, pool, int64(vc.VolCapacity), 0,
+		capacity.WithLedgerDir(volumeLedgerLocalDir(cfg, vc.Name)))
 	acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, ""))
-	log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity))
+	log.Info("外部卷装配完成", "volume", vc.Name, "type", vc.Type, "capacity", int64(vc.VolCapacity),
+		"ledger", volumeLedgerLocalDir(cfg, vc.Name))
 	return nil
+}
+
+// volumeLedgerLocalDir 返回卷容量账本的**节点本地**落点：`<storage_root>/meta/quota/<卷名>`。
+// 与 secretdata 的账本落点同形（见 cmd/sproxy/secret_register.go 的 WithLedgerDirIfLocal），
+// 使「本地热账本」在全仓只有一个目录约定。
+func volumeLedgerLocalDir(cfg *Config, volName string) string {
+	return filepath.Join(cfg.StorageRoot, "meta", "quota", volName)
 }
 
 // vcExtraBool 读取 vc.Extra 的布尔键（缺省 false）。
