@@ -61,6 +61,7 @@ type runtime struct {
 	externalOps   ExternalVolumeOps
 	phys          VolumePhysFootprinter
 	volTypes      VolumeTypeClassifier
+	retrySleep    func(time.Duration) // 外部卷转存重试退避 sleep（测试注入 0 等待）
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
@@ -175,6 +176,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		externalOps:  cfg.externalOps,
 		phys:         cfg.phys,
 		volTypes:     cfg.volTypes,
+		retrySleep:   cfg.retrySleep,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default
@@ -208,6 +210,15 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 	return rt
 }
 
+// retrySleepFn 返回外部卷转存重试的退避等待函数（默认 time.Sleep；测试经 WithRetrySleep
+// 注入 0 等待/假时钟）。访问器惰性取用（与带宽/日志同模式）。
+func (r *runtime) retrySleepFn() func(time.Duration) {
+	if r.retrySleep != nil {
+		return r.retrySleep
+	}
+	return time.Sleep
+}
+
 func (r *runtime) bandwidthLimiter() BandwidthLimiter { return r.bandwidth }
 
 // ---- nil 安全访问器（领域代码唯一的能力入口） ----
@@ -237,6 +248,22 @@ func (r *runtime) volumeTenant(volName, owner string) *storage.Tenant {
 
 func (r *runtime) locateOwnerFile(owner, rel string) (FileLocation, bool) {
 	return r.volumes.Locate(owner, rel)
+}
+
+// externalSinkFor 按 (owner, 卷名) 解析外部卷写入面（UploadSink）。
+// 装配层经 VolumeSet 的 ExternalSinkSource 可选能力提供（filesVolumeSet.ExternalSink
+// 委托 Handlers.externalSinkFor：trusted.Guard(Wrap) + staging 配额，与普通上传外部卷
+// 同一条写面）。未装配 / 非外部卷 → nil（调用方 fail-closed）。
+// **不做预留**（分块上传预留已在 init 由 Route 完成并挂在会话上）。
+func (r *runtime) externalSinkFor(owner, volName string) UploadSink {
+	vs := r.volumes.Volumes()
+	if vs == nil {
+		return nil
+	}
+	if es, ok := vs.(ExternalSinkSource); ok {
+		return es.ExternalSink(owner, volName)
+	}
+	return nil
 }
 
 func (r *runtime) routeUpload(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {

@@ -266,6 +266,20 @@ type ExternalVolumeDeleter interface {
 	ExternalDeleter(name string) ExternalDeleter
 }
 
+// ExternalSinkSource 是 VolumeSet 的**可选扩展**：按卷名返回外部卷**写入面**（UploadSink）。
+//
+// 为什么需要：分块上传外部卷（2026-10-22 缺陷修复）在 init 时经 `Route` 拿到 Sink，但
+// complete 可能发生在**进程重启之后**（断点续传）⇒ 不能把 Sink 存在会话里（接口不可序列化），
+// 而必须按 `session.Volume` 重新解析。本能力与 `ExternalVolumeDeleter` 同模式：装配层适配器
+// 实现，领域侧按需类型断言（未实现 = 无外部写面，外部卷分块上传 fail-closed）。
+//
+// 与 `RouteTarget` 的区别：本接口**不做预留**（分块上传的预留已在 init 由 Route 完成并挂在
+// 会话上）——重新 RouteTarget 会双计配额。
+// owner 用于键空间映射（共享卷 owner 前缀）；已存在卷/类型不支持 → nil。
+type ExternalSinkSource interface {
+	ExternalSink(owner, volName string) UploadSink
+}
+
 // ExternalFileChecksum 是 ExternalDeleter 的**可选扩展**（评审 CRIT-1，2026-10-07）：
 // 返回卷上 owner 的 rel 文件的实际内容 SHA-256（hex，明文）。deleteExternalFile 用它
 // 做「ExpectedChecksum 非空且与实际不符 → 保留文件 + 400」门禁（对齐本地删除契约——

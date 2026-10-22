@@ -469,7 +469,7 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 			files.WithExternalOps(externalVolumeOps{h: h}),
 			// 卷类型分类（决策 3：去领域侧硬编码 wrapper 名单）——分类事实源在
 			// registry.CategoryOf，经 filesVolumeSet 转发注入。
-			files.WithVolumeTypeClassifier(filesVolumeSet{Set: h.volSet}),
+			files.WithVolumeTypeClassifier(filesVolumeSet{Set: h.volSet, sinkHost: h}),
 			files.WithChunkedUploads(rt),
 			files.WithVersioning(rt),
 			files.WithDedup(rt),

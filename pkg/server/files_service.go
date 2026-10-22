@@ -73,7 +73,7 @@ func (r filesRuntime) Volumes() files.VolumeSet {
 	if r.h.volSet == nil {
 		return nil
 	}
-	return filesVolumeSet{Set: r.h.volSet}
+	return filesVolumeSet{Set: r.h.volSet, sinkHost: r.h}
 }
 
 // filesVolumeSet 把 *registry.Set 适配为 files.VolumeSet + files.ExternalVolumeSource：
@@ -81,6 +81,9 @@ func (r filesRuntime) Volumes() files.VolumeSet {
 // 嵌入 *registry.Set 继承 VolumeSet 方法（Default/All/ByName/Root/Pool），外部能力新增。
 type filesVolumeSet struct {
 	*registry.Set
+	// sinkHost 是装配层（Handlers）引用：ExternalSink 需要 externalSinkFor（同一装配
+	// 形状：trusted.Guard(Wrap) + staging 配额）——适配器自身不复制该逻辑。
+	sinkHost *Handlers
 }
 
 // CategoryOf 实现 files.VolumeTypeClassifier：把卷**类型 → schema category** 分类转发给
@@ -123,6 +126,17 @@ func (a filesVolumeSet) ExternalDeleter(name string) files.ExternalDeleter {
 		return nil
 	}
 	return filesExternalDeleter{fs: fsys, v: v}
+}
+
+// ExternalSink 实现 files.ExternalSinkSource：按卷名返回外部卷写入面（UploadSink）。
+// 分块上传外部卷（2026-10-22 缺陷修复）在 complete（可能跨进程重启）时按 session.Volume
+// 重新解析写面。与 externalSinkFor 同一装配形状（trusted.Guard(Wrap) + staging 配额）。
+// 未知卷/非外部卷（本地卷）→ nil（调用方 fail-closed，零回归）。
+func (a filesVolumeSet) ExternalSink(owner, volName string) files.UploadSink {
+	if h := a.sinkHost; h != nil {
+		return h.externalSinkFor(owner, volName)
+	}
+	return nil
 }
 
 // filesExternalDeleter 把 sync.FS + 卷描述适配为 files.ExternalDeleter。
