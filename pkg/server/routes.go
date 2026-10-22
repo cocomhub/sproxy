@@ -237,7 +237,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// M3：统一恢复协调器 = **启动恢复的唯一编排点**。放在存储/云下载等子系统装配**之后**
 	// （legacy 恢复需要看到已就绪的 manager；此处仍属单线程装配期 ⇒ 无数据竞争）。
 	// 顺序：legacy 先（子系统资源就绪）→ 再 WAL 作用域重放。
-	if coord := setupRecovery(auditSvc, log, nil, cloudLegacies(h)); coord != nil {
+	// legacy 集合 = 云任务 + 容量账本（本地热账本启动重建，2026-10-22）。
+	if coord := setupRecovery(auditSvc, log, nil, append(cloudLegacies(h), ledgerLegacies(h)...)); coord != nil {
 		// **同步**执行：与「云任务构造期恢复」的既有语义一致（恢复完成再对外服务），
 		// 且不留下跨生命周期的后台 goroutine（否则 Close 后仍可能持有存储文件句柄 ✗——
 		// 实测会让测试/运维的目录清理失败）。runStartupRecovery 内以 startupRecoveryTimeout 兜底。

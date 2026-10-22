@@ -68,6 +68,22 @@ type ChunkedUploadSession struct {
 	// 持久化：重启恢复时按 Volume 在对应卷租户根解析 TempPath。
 	Volume string `json:"volume,omitempty"`
 
+	// ExternalTarget 标记会话目标卷是**外部卷**（无本地 *storage.Root，写入经 UploadRoute.Sink）：
+	// complete 时不做本地 rename，而是把已校验的 staging 整文件**转存**到目标外部卷。
+	// 持久化（重启后续传的 complete 必须知道走哪条落位路径）。
+	ExternalTarget bool `json:"external_target,omitempty"`
+
+	// StagingVolume 是分块**内容**（在途临时文件）实际落盘的卷名。
+	//
+	// 为什么与 Volume 分离（2026-10-22 缺陷修复）：**外部卷目标**（baidupcs/secretdata 等
+	// 无本地 *storage.Root）无法承载分块链路（init 建在途文件 / chunk seek 直写 / complete
+	// 原子 rename 全部依赖本地租户根）⇒ 此前 `route.Tenant == nil` 直接 400「无效的文件路径」，
+	// 外部卷 + 大文件（>100MiB 自动分块 / >1GiB 普通上传上限）完全不可用。修复后：分块内容落
+	// **默认卷**（本地 staging 区，逐块 SHA-256 校验 + complete 全文件校验），complete 通过后经
+	// UploadRoute.Sink 转存到 Volume（目标外部卷）。
+	// 空 = 与 Volume 同卷（本地卷目标，零回归；存量 session.json 无该字段亦走此分支）。
+	StagingVolume string `json:"staging_volume,omitempty"`
+
 	// Reservation 是分块上传的租户配额预留句柄（P4）。init 预留、complete Commit、
 	// 会话删除/过期 Release。不持久化（json:"-"），重启后内存预留丢失，由上游对账补齐。
 	Reservation *quota.Reservation `json:"-"`
@@ -219,6 +235,19 @@ func (us *UploadStore) tenantRootFor(volume string) string {
 		}
 	}
 	return filepath.Dir(us.baseDir)
+}
+
+// tenantRootForStaging 返回分块**内容**（在途临时文件）所在卷的租户根：优先
+// session.StagingVolume（外部卷目标时为**默认卷**），否则回落 session.Volume（本地卷目标，
+// 与既有语义完全一致——存量会话无 StagingVolume 字段即走此分支，零回归）。
+func (us *UploadStore) tenantRootForStaging(session *ChunkedUploadSession) string {
+	if session != nil && session.StagingVolume != "" {
+		return us.tenantRootFor(session.StagingVolume)
+	}
+	if session != nil {
+		return us.tenantRootFor(session.Volume)
+	}
+	return us.tenantRootFor("")
 }
 
 // InflightPrefix 是任务 4 分块在途整文件临时名前缀（user 桶目标同目录）：
@@ -1254,7 +1283,7 @@ func (us *UploadStore) tempAbsPath(session *ChunkedUploadSession) (string, bool)
 	if session == nil || !strings.HasPrefix(session.TempPath, "user/") {
 		return "", false
 	}
-	tenantRoot := us.tenantRootFor(session.Volume)
+	tenantRoot := us.tenantRootForStaging(session)
 	abs := filepath.Join(tenantRoot, filepath.FromSlash(session.TempPath))
 	// 纵深防御：clean 后必须仍在该租户根内（防 session.json 篡改逃逸）。
 	clean := filepath.Clean(abs)
@@ -1503,6 +1532,19 @@ func (us *UploadStore) setSessionRouteIfCurrent(expect *ChunkedUploadSession, vo
 		s.Pool = pool
 		s.PoolRes = poolRes
 	})
+}
+
+// setSessionStagingVolumeIfCurrent 发布会话的 staging 落点卷（身份门控，语义同
+// setSessionRouteIfCurrent）。外部卷目标时把分块内容落点钉在**默认卷**——temp 解析
+// （tenantRootForStaging）据此定位本地 staging 租户根。
+func (us *UploadStore) setSessionStagingVolumeIfCurrent(expect *ChunkedUploadSession, stagingVolume string) bool {
+	return us.publishSessionIfCurrent(expect, func(s *ChunkedUploadSession) { s.StagingVolume = stagingVolume })
+}
+
+// setSessionExternalTargetIfCurrent 发布会话的「外部卷目标」标记（身份门控，语义同
+// setSessionRouteIfCurrent）。complete 据此决定走「本地 rename」还是「staging 转存外部卷」。
+func (us *UploadStore) setSessionExternalTargetIfCurrent(expect *ChunkedUploadSession) bool {
+	return us.publishSessionIfCurrent(expect, func(s *ChunkedUploadSession) { s.ExternalTarget = true })
 }
 
 // setSessionStorageMgrReservedIfCurrent 是 SetSessionStorageMgrReserved 的身份门控版本

@@ -262,6 +262,14 @@ type config struct {
 	externalOps   ExternalVolumeOps
 	phys          VolumePhysFootprinter
 	volTypes      VolumeTypeClassifier
+	retrySleep    func(time.Duration) // 外部卷转存重试退避 sleep（测试注入：可 0 化/可推进假时钟）
+}
+
+// WithRetrySleep 注入外部卷转存重试的退避等待函数（默认 time.Sleep）。
+// 测试注入恒 0 等待（或可推进的假时钟）即可**即时**跑完重试循环，避免 10×2^n 真实退避
+// 拖慢用例——比 synctest 气泡轻量（无虚拟时钟独占限制，可保持 t.Parallel）。
+func WithRetrySleep(fn func(time.Duration)) Option {
+	return func(c *config) { c.retrySleep = fn }
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
