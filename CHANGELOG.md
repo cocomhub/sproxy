@@ -12,6 +12,40 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.25.0](https://github.com/cocomhub/sproxy/compare/v0.24.0...v0.25.0) (2026-10-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **audit:** 审计 API 整体替换 —— 旧 `pkg/server` 的 audit store/API 删除，读写统一走 `pkg/audit` （`Service`/`Journal`/`Scope`）；直接依赖旧审计 API 的嵌入方需迁移。HTTP 侧 `/api/audit`、 `/api/audit/export` 语义不变（**admin-only、fail-closed**；非管理员 403，查询参数不能放宽）。 新增配置：`audit.max_total_bytes`（默认 1 GiB）、`audit.archive_dir`、`audit.archive_keep`、 `audit.archive_volume`（卷优先于目录）。旧位置 `<卷根>/audit/` 的段文件启动期一次性迁入 `<卷根>/__audit__/hot/`（best-effort）。
+
+### Added
+
+* **audit:** pkg/audit 唯一提供方 + WAL 恢复 + 冷热归档 + 读面收敛 ([#833](https://github.com/cocomhub/sproxy/issues/833)) ([e81619a](https://github.com/cocomhub/sproxy/commit/e81619a9a471ecc9506f80d9cea07af18c96165b))
+* **audit:** R13 剩余项全部关闭——卷维度 · R35-b/e 门禁 · 冷段尾读与区间读 · 归档卷专用性 ([#837](https://github.com/cocomhub/sproxy/issues/837)) ([49c9910](https://github.com/cocomhub/sproxy/commit/49c9910aea0a26b94ad25f63a606f5da354f056d))
+* **cli,webui:** 分享/回收站客户端接入卷感知（share 卷 URI、trash --volume/--all、行卷透传） ([#845](https://github.com/cocomhub/sproxy/issues/845)) ([010b1cd](https://github.com/cocomhub/sproxy/commit/010b1cd83196cb436472c8a8cdb058d2372c31c3))
+* **downloader:** 通用 URL 解析接口 /api/resolve + 分享内目标文件选择（spx_target）([#849](https://github.com/cocomhub/sproxy/issues/849)) ([82d1a00](https://github.com/cocomhub/sproxy/commit/82d1a00b52c3030431a849619045d42603e54fe8))
+* **files:** 分块上传外部卷——本地 staging 校验后转存目标卷 + 外部卷容量账本热数据落节点本地 ([#848](https://github.com/cocomhub/sproxy/issues/848)) ([510df36](https://github.com/cocomhub/sproxy/commit/510df367f7af6749477fad9f7492cc5a654110ea))
+* **secretdata,media,webui:** 加密卷读写提速 + 视频扩展名关键帧选型 + 播放入口扩展 ([#846](https://github.com/cocomhub/sproxy/issues/846)) ([49044e6](https://github.com/cocomhub/sproxy/commit/49044e603848eea16ee4ca8dbc25000a373c1793))
+
+
+### Fixed
+
+* **audit:** R13 剩余三项——冷段 TTL · R39 可达性判据 · 归档不可用时保留封段 ([#836](https://github.com/cocomhub/sproxy/issues/836)) ([8a2ee48](https://github.com/cocomhub/sproxy/commit/8a2ee4870c59cbf3b971e5f083949387b914b576))
+* **audit:** R13 对抗评审修复——归档内容寻址(P0 证据丢失) + 读面/指标/归档安全/语义 ([#835](https://github.com/cocomhub/sproxy/issues/835)) ([4241c58](https://github.com/cocomhub/sproxy/commit/4241c580a905dc9c70adbcf91c4ea9a1b5701c82))
+* **secretdata,audit,cloud,baidupcs:** 生产稳定性第一批——卷锁死锁/并发丢数据/审计读面/归档校验/网盘重试 ([#841](https://github.com/cocomhub/sproxy/issues/841)) ([f3e2abc](https://github.com/cocomhub/sproxy/commit/f3e2abc3b6fdfc57f84c7fedcf95a55705d97aaf))
+* **secretdata,audit,cloud,baidupcs:** 生产稳定性第二批——目录 meta 仲裁/审计提交语义/隔离段/恢复有界/配额释放 ([#842](https://github.com/cocomhub/sproxy/issues/842)) ([bca7877](https://github.com/cocomhub/sproxy/commit/bca787784bf717284e24331a7189838ae0de5436))
+* **server:** R14 生产可用性加固——重启续传/配额等待/写锁令牌/加密卷 Seek/审计链路 ([#838](https://github.com/cocomhub/sproxy/issues/838)) ([4b420f8](https://github.com/cocomhub/sproxy/commit/4b420f84e7ce45576eb702f5d4f3c7a0a1559502))
+* **share,ai,version,archive:** 加密卷/外部卷按路径寻址场景统一收敛（分享 404 等） ([#844](https://github.com/cocomhub/sproxy/issues/844)) ([74e5fee](https://github.com/cocomhub/sproxy/commit/74e5fee1e80c8b9710204a90bdce0d318c82119e))
+* **webui,cmd:** 凭据生效后刷新派生状态（卷下拉/事件流/续传/监控）+ 外部卷类型注册前移 ([#843](https://github.com/cocomhub/sproxy/issues/843)) ([7b9e00b](https://github.com/cocomhub/sproxy/commit/7b9e00b48a8a41e3339c177711ed10d88bfb5571))
+
+
+### Changed
+
+* **archcheck:** 补齐 R43 状态恢复覆盖 · R44 账本直调点登记 ([#839](https://github.com/cocomhub/sproxy/issues/839)) ([01cd04e](https://github.com/cocomhub/sproxy/commit/01cd04e621a408ed2b43d43b75c97619ed60aa7f))
+* **e2e:** 恢复功能端到端覆盖——状态×阶段矩阵（含分块上传与配额等待） ([#840](https://github.com/cocomhub/sproxy/issues/840)) ([8548e47](https://github.com/cocomhub/sproxy/commit/8548e471b1492e032d5dc15cbf9e5c9e023661f2))
+* **secretdata,download:** 加密卷随机读提速（salt+段合并/本地性分流）+ URL 票免 401 预览 ([#847](https://github.com/cocomhub/sproxy/issues/847)) ([ed08dcf](https://github.com/cocomhub/sproxy/commit/ed08dcfd5a6a0bd202ee9b453522bc74e596a4a0))
+
 ## [0.24.0](https://github.com/cocomhub/sproxy/compare/v0.23.0...v0.24.0) (2026-10-19)
 
 
