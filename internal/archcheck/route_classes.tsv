@@ -237,3 +237,5 @@ localMux	GET /api/hub/nodes	tunnel	pkg/server/routes_setup.go:767
 localMux	DELETE /api/hub/nodes/{id}	tunnel	pkg/server/routes_setup.go:768
 localMux	GET /api/hub/stats	tunnel	pkg/server/routes_setup.go:769
 localMux	GET /api/hub/services	tunnel	pkg/server/routes_setup.go:770
+localMux	GET /api/resolve	tunnel	pkg/server/routes.go:497
+srvMux	GET /api/resolve	auth	pkg/server/routes.go:515

@@ -4,14 +4,13 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
+	"strings"
 )
 
-// maxResolveBodyBytes 是 /api/resolve 请求体上限（URL 文本，1 MiB 足够）。
-const maxResolveBodyBytes = 1 << 20
-
-// resolveURL 处理 POST /api/resolve：通用 URL → 资源信息（大小/类型/文件清单）。
+// resolveURL 处理 GET /api/resolve?url=...：通用 URL → 资源信息（大小/类型/文件清单）。
+// 方法选 GET 的根因：本接口**只读**（不产生任何状态变更），GET 语义正确；同时避免
+// R35-b（变更型路由必须登记业务审计）把只读查询误纳入审计动作。
 //
 // 设计（用户裁定 2026-10-23）：**统一解析入口，扩展按 URL 自动识别**
 // （pikpak 分享等由 downloader.Registry 的 URLResolver 扩展提供），
@@ -22,19 +21,12 @@ func (h *Handlers) resolveURL(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": "URL 解析接口未装配（pikpak 扩展未注册）"}, http.StatusServiceUnavailable)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxResolveBodyBytes)
-	var req struct {
-		URL string `json:"url"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
-		return
-	}
-	if req.URL == "" {
+	target := strings.TrimSpace(r.URL.Query().Get("url"))
+	if target == "" {
 		sendJSONResponse(w, map[string]string{"error": "url 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	info, err := h.urlResolver.ResolveURL(r.Context(), req.URL)
+	info, err := h.urlResolver.ResolveURL(r.Context(), target)
 	if err != nil {
 		// 扩展解析失败（分享不存在/网络错误）→ 502（上游资源问题），保留原因便于排查。
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadGateway)

@@ -494,7 +494,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
 	// 通用 URL 解析 API（localMux：隧道认证）：URL → 资源信息（大小/类型/文件清单）。
 	// 扩展按 URL 自动识别（pikpak 分享等），未识别回落通用结果。
-	localMux.HandleFunc("POST /api/resolve", h.resolveURL)
+	localMux.HandleFunc("GET /api/resolve", h.resolveURL)
 	localMux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
 	localMux.HandleFunc("GET /api/cloud/tasks", h.cloudListTasks)
 	localMux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
@@ -512,7 +512,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
 	// 云端下载 API（主 mux：Bearer auth）
 	srvMux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudCreateDownload))
-	srvMux.HandleFunc("POST /api/resolve", h.authMiddleware(h.resolveURL))
+	srvMux.HandleFunc("GET /api/resolve", h.authMiddleware(h.resolveURL))
 	srvMux.HandleFunc("POST /api/cloud/download/batch", h.authMiddleware(h.cloudCreateBatchDownload))
 	srvMux.HandleFunc("GET /api/cloud/tasks", h.authMiddleware(h.cloudListTasks))
 	srvMux.HandleFunc("GET /api/cloud/tasks/{id}", h.authMiddleware(h.cloudGetTask))

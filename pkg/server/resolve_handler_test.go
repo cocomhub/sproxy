@@ -36,7 +36,7 @@ func TestResolveURLHandler_OK(t *testing.T) {
 	h := &Handlers{urlResolver: &fakeResolverRegistry{info: &downloader.ResolveInfo{
 		Kind: "pikpak_share", Filename: "NHDTA-513A.mp4", Size: 1000,
 	}}}
-	req := httptest.NewRequest(http.MethodPost, "/api/resolve", strings.NewReader(`{"url":"https://mypikpak.com/s/abc"}`))
+	req := httptest.NewRequest(http.MethodGet, "/api/resolve?url="+strings.ReplaceAll("https://mypikpak.com/s/abc", ":", "%3A"), nil)
 	w := httptest.NewRecorder()
 	h.resolveURL(w, req)
 	if w.Code != http.StatusOK {
@@ -55,7 +55,7 @@ func TestResolveURLHandler_OK(t *testing.T) {
 func TestResolveURLHandler_NotAssembled(t *testing.T) {
 	t.Parallel()
 	h := &Handlers{} // urlResolver nil
-	req := httptest.NewRequest(http.MethodPost, "/api/resolve", strings.NewReader(`{"url":"x"}`))
+	req := httptest.NewRequest(http.MethodGet, "/api/resolve?url=x", nil)
 	w := httptest.NewRecorder()
 	h.resolveURL(w, req)
 	if w.Code != http.StatusServiceUnavailable {
@@ -67,7 +67,7 @@ func TestResolveURLHandler_NotAssembled(t *testing.T) {
 func TestResolveURLHandler_ResolverError(t *testing.T) {
 	t.Parallel()
 	h := &Handlers{urlResolver: &fakeResolverRegistry{err: errors.New("share not found")}}
-	req := httptest.NewRequest(http.MethodPost, "/api/resolve", strings.NewReader(`{"url":"https://mypikpak.com/s/dead"}`))
+	req := httptest.NewRequest(http.MethodGet, "/api/resolve?url=https%3A%2F%2Fmypikpak.com%2Fs%2Fdead", nil)
 	w := httptest.NewRecorder()
 	h.resolveURL(w, req)
 	if w.Code != http.StatusBadGateway {
@@ -79,7 +79,7 @@ func TestResolveURLHandler_ResolverError(t *testing.T) {
 func TestResolveURLHandler_BadBody(t *testing.T) {
 	t.Parallel()
 	h := &Handlers{urlResolver: &fakeResolverRegistry{}}
-	req := httptest.NewRequest(http.MethodPost, "/api/resolve", strings.NewReader(`not-json`))
+	req := httptest.NewRequest(http.MethodGet, "/api/resolve", nil)
 	w := httptest.NewRecorder()
 	h.resolveURL(w, req)
 	if w.Code != http.StatusBadRequest {
