@@ -24,6 +24,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/authn"
+	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
@@ -118,6 +119,16 @@ type RegisterRoutesOpts struct {
 	// opt（用户裁定 2026-10-07：禁止测试依赖全局函数/并发修改包级 seam）**：构造时注入
 	// Handlers 实例字段，运行期不可变；测试模拟「并发 delete 已删源」的 IsNotExist 竞态。
 	RemoveMovedSource func(root *storage.Root, rel string) error
+	// URLResolver 是通用 URL 解析注册表（POST /api/resolve 用）。nil = 不装配解析接口
+	// （/api/resolve 返回 503）。cmd/sproxy 在 pikpak 注册后注入
+	// downloader.DefaultRegistry（含 pikpak 分享解析扩展）。
+	URLResolver ResolverRegistry
+}
+
+// ResolverRegistry 是 /api/resolve 依赖的最小接口（避免 pkg/server 直接 import
+// 具体注册表类型；满足 downloader.Registry 即可）。
+type ResolverRegistry interface {
+	ResolveURL(ctx context.Context, rawURL string) (*downloader.ResolveInfo, error)
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -199,6 +210,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		volSet:                vs,
 		xferMetrics:           opts.XferMetrics,
 		writeGuard:            opts.WriteGuard,
+		urlResolver:           opts.URLResolver,
 	}
 	// 装配多租户存储布局 + 告警引擎（磁盘水位轮询 / 配额预警）。详细语义见
 	// initStorageLayout。依赖 Handlers 字面量已注入 volSet/xferMetrics/writeGuard。
@@ -480,6 +492,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 云端下载 API（localMux：隧道认证）
 	localMux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
+	// 通用 URL 解析 API（localMux：隧道认证）：URL → 资源信息（大小/类型/文件清单）。
+	// 扩展按 URL 自动识别（pikpak 分享等），未识别回落通用结果。
+	localMux.HandleFunc("GET /api/resolve", h.resolveURL)
 	localMux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
 	localMux.HandleFunc("GET /api/cloud/tasks", h.cloudListTasks)
 	localMux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
@@ -497,6 +512,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
 	// 云端下载 API（主 mux：Bearer auth）
 	srvMux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudCreateDownload))
+	srvMux.HandleFunc("GET /api/resolve", h.authMiddleware(h.resolveURL))
 	srvMux.HandleFunc("POST /api/cloud/download/batch", h.authMiddleware(h.cloudCreateBatchDownload))
 	srvMux.HandleFunc("GET /api/cloud/tasks", h.authMiddleware(h.cloudListTasks))
 	srvMux.HandleFunc("GET /api/cloud/tasks/{id}", h.authMiddleware(h.cloudGetTask))

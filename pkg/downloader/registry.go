@@ -14,12 +14,18 @@ type Plugin[T any] = plugin.Plugin[T]
 // 使用前通过 NewRegistry() 创建，或使用 DefaultRegistry 全局实例。
 type Registry struct {
 	inner *plugin.Registry[Downloader]
+	// resolvers 是 URL 解析扩展注册表（与下载器独立命名空间）：通用 /api/resolve 接口
+	// 按 Supports 依次查找；未匹配时回落通用结果（见 ResolveURL）。
+	resolvers *plugin.Registry[URLResolver]
 }
 
 // NewRegistry 创建下载器注册表。
 // 内置兜底实现为 HTTPDownloader。
 func NewRegistry() *Registry {
-	return &Registry{inner: plugin.New[Downloader]("downloader", NewHTTPDownloader())}
+	return &Registry{
+		inner:     plugin.New[Downloader]("downloader", NewHTTPDownloader()),
+		resolvers: plugin.New[URLResolver]("urlresolver", nil),
+	}
 }
 
 // DefaultRegistry 是全局默认注册表实例。

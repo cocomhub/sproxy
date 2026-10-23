@@ -128,8 +128,10 @@ type Handlers struct {
 	writeGuard *leader.WriteGuard
 	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
 	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
-	alertEngine    *AlertEngine
-	cloudMgr       *cloud.CloudDownloadManager
+	alertEngine *AlertEngine
+	cloudMgr    *cloud.CloudDownloadManager
+	// urlResolver 是通用 URL 解析注册表（POST /api/resolve）；nil = 未装配（503）。
+	urlResolver    ResolverRegistry
 	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
 	storageMgr     *capacity.StorageManager

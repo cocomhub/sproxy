@@ -27,6 +27,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/files"
 	_ "github.com/cocomhub/sproxy/pkg/integrity/ext/video" // 注册视频语义校验器（ffprobe）
 	"github.com/cocomhub/sproxy/pkg/leader"
@@ -1166,6 +1167,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 		CredentialRing:      rt.credRing,
 		CredentialStore:     rt.credStore,
 		XferMetrics:         xferMetricsProvider{},
+		// 通用 URL 解析接口（/api/resolve）：注入下载器注册表（含 pikpak 分享解析
+		// 扩展——registerPikpakDownloader 在其内注册；未注册 pikpak 时回落通用结果）。
+		URLResolver: downloader.DefaultRegistry,
 	})
 	rt.h = h
 	// secret 加密卷装配（无条件，与 sync 开关解耦——Imp-1）。**四步装配序**（2026-10-15 修复

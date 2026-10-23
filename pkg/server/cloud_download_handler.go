@@ -62,6 +62,10 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL      string `json:"url"`
 		Filename string `json:"filename,omitempty"`
+		// TargetFile 是分享内目标文件名（可选；PikPak 分享时按名选文件，分卷 A/B/C
+		// 各提交一次实现"分卷全套"）。非空时叠加到 URL query（spx_target 参数）
+		// 传给下载器；空 = 下载器默认选最大视频（零回归）。
+		TargetFile string `json:"target_file,omitempty"`
 		// Transfer 是转存目标（可选）：下载完成后把产物转存到指定卷。
 		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
 		// Save 是否保留 cloud 桶副本（服务端化 keep-files；默认 true 零回归）。
@@ -88,6 +92,11 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
+	}
+	// target_file 非空 → 叠加 spx_target 到 URL（下载器按名选分享内文件）。
+	// 同分享不同 target ⇒ URL 不同 ⇒ 云端任务去重（findByURL 语义一致）不会误吸收。
+	if strings.TrimSpace(req.TargetFile) != "" {
+		cleanedURL = withShareTarget(cleanedURL, strings.TrimSpace(req.TargetFile))
 	}
 	// 真空洞校验（不下载本地 + 无 transfer + save=false → 无任何产出）由 CreateTask
 	// fail-closed 兜底；此处无需预检（download_local 消歧后语义完整）。
@@ -1256,4 +1265,18 @@ func relOf(archiveName string) string {
 		rel += ".tar.gz"
 	}
 	return rel
+}
+
+// withShareTarget 把 spx_target 参数叠加到分享 URL（已有则覆盖）。
+// 设计：目标文件以 URL query 表达（而非新增任务结构字段），免改 CloudTask/去重键，
+// 且不同 target 天然产生不同 URL ⇒ 云端任务去重不会把分卷 A/B 误吸收成同一任务。
+func withShareTarget(rawURL, target string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	q.Set("spx_target", target)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
