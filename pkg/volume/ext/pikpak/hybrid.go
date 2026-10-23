@@ -293,8 +293,14 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 		return d.fallbackDownload(ctx, source, destPath, onProgress, sinkFactory,
 			fmt.Errorf("hybrid resolve %s: %w", shareID, err))
 	}
-	target := pickLargestShareFile(meta.Files)
+	// 目标文件：无 spx_target ⇒ 最大视频（既有）；有 ⇒ 按名选中（分卷全套）
+	target := pickShareFileByTarget(meta.Files, parseShareTarget(source))
 	if target == nil || target.DirectLink == "" {
+		if parseShareTarget(source) != "" {
+			d.metricsInc(func(m *HybridMetrics) { m.ShareResolveFailed.Add(1) })
+			return d.fallbackDownload(ctx, source, destPath, onProgress, sinkFactory,
+				fmt.Errorf("hybrid: share %s has no direct link for target %q", shareID, parseShareTarget(source)))
+		}
 		d.metricsInc(func(m *HybridMetrics) { m.ShareResolveFailed.Add(1) })
 		return d.fallbackDownload(ctx, source, destPath, onProgress, sinkFactory,
 			fmt.Errorf("hybrid: no share direct link for %s", shareID))

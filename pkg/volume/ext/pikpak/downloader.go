@@ -227,18 +227,25 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// 1. 解析分享 ID
-	shareID, err := parseShareID(source)
+	// 1. 解析分享 ID（先剔除 spx_target 参数：它只描述目标文件，不参与分享定位）
+	shareID, err := parseShareID(stripShareTarget(source))
 	if err != nil {
 		return nil, err
 	}
-	// 2. 列出分享内容找目标文件（最大 mp4 = 全长主视频）
+	// 2. 列出分享内容找目标文件：
+	//    - 无 spx_target ⇒ 最大 mp4（全长主视频，既有行为）
+	//    - 有 spx_target ⇒ 按文件名选中该文件（分卷 A/B/C 各提交一次，"分卷全套"）
 	files, err := d.api.ListShareRecursive(ctx, shareID)
 	if err != nil {
 		return nil, fmt.Errorf("pikpak list share %s: %w", shareID, err)
 	}
-	target := pickLargestVideo(files)
+	targetFile := parseShareTarget(source)
+	target := pickVideoByTarget(files, targetFile)
 	if target == nil {
+		if targetFile != "" {
+			// 指定了目标但分享内无此文件 ⇒ 显式失败（不静默改选最大文件，避免内容错乱）
+			return nil, fmt.Errorf("%w: share %s has no file named %q", ErrShareNotFound, shareID, targetFile)
+		}
 		return nil, fmt.Errorf("%w: no video in share %s", ErrShareNotFound, shareID)
 	}
 	d.log.Info("pikpak share target", "name", target.Name, "size", target.Size)
