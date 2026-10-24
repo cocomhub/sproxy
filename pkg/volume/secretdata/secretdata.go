@@ -228,11 +228,10 @@ type SecretdataFS struct {
 	// spanCache 是本机**磁盘**块密文跨度缓存（2026-10-22，见 span_disk_cache.go）：staging
 	// 目录 + 字节预算 + 定期清理 + 空间不足自动降级。nil = 未装配（默认关闭零回归）。
 	spanCache *spanDiskCache
-	// stageDL 是**整块 staging 下载器**（2026-10-23，见 stage_downloader.go）：块 blob 首次
-	// 读取时经底层 OpenRead（baidupcs 库 Downloader：Range 并行 4 路 + 断点，实测 2.13MB/s；
-	// 对比逐窗 Range 整流 0.55MB/s 快 4 倍）整块下到本地，之后该块所有窗口读命中磁盘。
+	// stageDL 是**窗口级缓存下载器**（2026-10-25 v2，见 stage_downloader.go）：块 blob 的
+	// blocklet 按密文边界聚合为 ≤4MiB 窗口，每窗独立 Range 下载 + 独立缓存；读只下目标窗。
 	// nil = 未装配（SpanCacheDir 为空/预算 0，默认关闭零回归）。
-	stageDL *stageDownloader
+	stageDL *stageDL
 
 	mu      sync.RWMutex
 	index   map[string]*metaEntry
@@ -295,7 +294,7 @@ func attachStageDownloader(fs *SecretdataFS, opts Options) {
 	if budget == 0 {
 		budget = defaultSpanCacheBytes
 	}
-	fs.stageDL = newStageDownloader(filepath.Join(opts.SpanCacheDir, "stage"), budget, fs)
+	fs.stageDL = newStageDL(filepath.Join(opts.SpanCacheDir, "stage"), budget, fs)
 }
 
 // attachSpanDiskCache 装配本机磁盘缓存（SpanCacheDir 非空时；失败仅告警不阻断读路径）。
@@ -421,7 +420,7 @@ func (b *backend) Close() error {
 		b.fs.gcCancel() // 停止后台 GC goroutine
 	}
 	if b.fs.stageDL != nil {
-		_ = b.fs.stageDL.close() // 整块 staging 下载器（保留缓存文件，由清理纪律管）
+		_ = b.fs.stageDL.close() // 窗口级缓存下载器（保留缓存文件，由清理纪律管）
 	}
 	if b.fs.spanCache != nil {
 		b.fs.spanCache.close() // 停止磁盘缓存 sweeper 并落盘索引
@@ -644,7 +643,7 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 	// 先下载+解密成 []byte 再包流 ⇒ 首帧要等整个 4MiB 窗口物化（网盘场景数秒）。
 	// 现改为 `rangeStream`（逐块「读→解→交」，首字节只需第一块）——crypto 层段级解密
 	// 能力（DecryptBlockletSegmentStandalone/decryptBlockletAt）本就支持，这里只做流式接线。
-	return newRangeStream(ctx, s, e, keyBytes, salt, offset, size), nil
+	return newRangeStream(ctx, s, e, keyBytes, salt, key, offset, size), nil
 }
 
 // readChunkBlob 读取底层单个分块 blob（仅含目标区间的块被下载）。去重引用文件的数据

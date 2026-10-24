@@ -3,24 +3,29 @@
 
 package secretdata
 
-// stage_downloader.go —— **整块（chunk blob）staging 下载器**（2026-10-23 实测性能结论）。
+// stage_downloader.go —— **窗口级缓存下载器**（2026-10-25 重构 v2：blocklet 聚合窗口 +
+// 动态前瞻预下载）。
 //
-// 背景：外部卷（baidupcs）大文件读侧走「每 4MiB 密文窗 = 一次 dlink Range GET」的整流
-// 路径——400MiB 文件 ≈ 700+ 次请求（每次 0.5-1.1s），实测 ~0.55MB/s；而底层 BaiduPCS-Go
-// 直下同一 blob 101MB 仅 47.6s（**2.13MB/s**，Range 并行 4 路 + 断点续传）。
+// 背景（真机实测）：百度网盘账号级限速 ~7.8MB/s。旧 v1「整块持续窗口追加」有两个不足：
+//   - 下载粒度仍是「整块」，读 target 段前必须等水位从块头推进到该段（200MB 块 ⇒
+//     首窗命中要等整块前面的窗口顺序下载完）——顺序读 2.1GB 实测 551s（3.9MB/s，
+//     平均仅半速）；
+//   - 无法跳读（seek 到块中部要等水位追上）。
 //
-// 本实现：**块 blob 首次被读取时，整块经底层 OpenRead（→ baidupcs 库 Downloader，Range
-// 并行）下到本机 staging（密文原样落盘），之后该块的一切窗口读都命中 staging（磁盘速度）**。
-// 每块一次远端下载 ⇒ 400MiB（5 块）从 765s 降到约 5×50s ≈ 250s（接近 BaiduPCS-Go 速率）。
+// v2 设计（用户裁定 2026-10-25）：
+//   - **下载前先按 blocklet 密文边界聚合窗口**（planCacheWindows，见 stage_window.go）：
+//     目标 4MiB/窗，窗口边界恒落在 blocklet 上（GCM 段不可分割，不切分 blocklet）；
+//   - **每个窗口独立 Range 下载 + 独立缓存文件**（缓存名 = chunk key + 窗口位点）；
+//     读某个 blocklet ⇒ 只下它所属窗口（跳读 O(窗口数)，不依赖顺序水位）；
+//   - **动态前瞻**：根据读进度维护「未下载窗口数 ≥ lookAhead」。lookAhead 初始 = 1，
+//     消费快（客户端 1s > 1 窗）⇒ 增加；慢 ⇒ 回落。维持未下载窗口数与带宽匹配：
+//     窗口 4MiB @ 带宽 8MB/s = 0.5s/窗 ⇒ 客户端 1s 消费 2 窗则 lookAhead ≥ 2。
 //
-// 语义边界（安全）：
-//   - 只缓存**密文 blob**（与 spanDiskCache 同族：盘上不落明文）；读路径仍做 GCM 认证，
-//     缓存被篡改 ⇒ 解密失败 fail-closed（不因缓存掩盖损坏）；
-//   - 有界并发：同一块同时只有一个下载者（inflight 去重），并发读等待或走 Range 回源；
-//   - 写/删文件后 invalidate（与 blocklet 缓存同前缀失效）；
-//   - 预算：单块 > 预算不下（退化既有 Range 路径）；目录与 spanCache 同根，共用清理纪律。
-//
-// 装配：`SpanCacheDir` 非空时启用（与 spanCache 同开关，零新配置面）。
+// 语义边界（安全，与 v1 一致）：
+//   - 只缓存密文窗口（盘上不落明文）；读路径 GCM 认证，篡改 fail-closed；
+//   - 同一窗口同时只有一个下载者（inflight 去重）；sem 满排队不丢弃；
+//   - 写/删文件后 invalidate（同前缀失效）；
+//   - 无 RangeReader 能力回退旧整块 OpenRead 路径（零回归）。
 
 import (
 	"context"
@@ -31,174 +36,309 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// stageDownloader 是整块 staging 下载器（每 SecretdataFS 一份）。
-type stageDownloader struct {
-	dir    string // staging 目录（<SpanCacheDir>/stage）
-	budget int64  // 单块字节上限（超过则不下）
+// stageDL 是窗口级缓存下载器（每 SecretdataFS 一份）。
+//
+// **缓存位置按逻辑路径组织（2026-10-25 用户裁定）**：窗口缓存文件落
+// `<SpanCacheDir>/stage/<逻辑目录路径>/<原始文件名>.<chunkIndex>.W<窗口位点>.blk`，
+// 支持超大 staging 空间下全量缓存（文件名即窗口索引，重启后可复用）。
+type stageDL struct {
+	dir    string // 缓存根（<SpanCacheDir>/stage）
+	budget int64  // 单块字节上限（超过则不下，回源）
 	fs     *SecretdataFS
 
-	mu       sync.Mutex
-	inflight map[string]struct{} // 正在下载的 key
-	// prefetched 记录「已整文件入队预取」的文件（dirSeg|metaName），防重复枚举。
-	prefetched map[string]struct{}
-	// sem 限制**并发整块下载数**：网盘对单账号并发有限，过多会互相拖慢。
+	mu sync.Mutex
+	// inflight 正在下载的窗口 key（同窗只一个下载者）。
+	inflight map[string]struct{}
+	// plan cache：rel|chunkIndex → 该块窗口规划（惰性计算一次）。
+	plans map[string][]cacheWindow
+	// ahead 是动态前瞻跟踪器（每文件一个；按读进度维护未下载窗口数 ≥ lookAhead）。
+	ahead *lookAheadTracker
+	// sem 限制**并发窗口下载数**：网盘账号级限速 ~8MB/s；16 并发可在带宽内更快补足
+	// 前瞻窗口（实测 8 并发时客户端读等窗口 ~8s/波；16 并发减半）。
 	sem chan struct{}
 }
 
-// newStageDownloader 构造下载器；dir 为空返回 nil（关闭，零回归）。
-func newStageDownloader(dir string, budget int64, fs *SecretdataFS) *stageDownloader {
+// newStageDL 构造窗口级缓存下载器；dir 为空/预算≤0 返回 nil（关闭，零回归）。
+func newStageDL(dir string, budget int64, fs *SecretdataFS) *stageDL {
 	if dir == "" || budget <= 0 || fs == nil {
 		return nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "secretdata: 创建 staging 目录失败（关闭整块下载）: %v\n", err)
+		fmt.Fprintf(os.Stderr, "secretdata: 创建缓存目录失败（关闭窗口下载）: %v\n", err)
 		return nil
 	}
-	return &stageDownloader{
+	return &stageDL{
 		dir: dir, budget: budget, fs: fs,
-		inflight: map[string]struct{}{}, prefetched: map[string]struct{}{},
-		sem: make(chan struct{}, 8),
+		inflight: map[string]struct{}{},
+		plans:    map[string][]cacheWindow{},
+		ahead:    newLookAheadTracker(defaultLookAheadConfig()),
+		sem:      make(chan struct{}, 16),
 	}
 }
 
-// stageKey 是块级 staging key（与 blocklet/span 缓存同前缀族，写删时同前缀失效）。
-func (d *stageDownloader) stageKey(e *metaEntry, ci shardseal.ChunkInfo) string {
-	return fmt.Sprintf("%s|%s|%d|STAGE", e.dirSeg, e.metaName, ci.Index)
+// stageWinKey 是窗口级缓存 key（文件逻辑路径 + 块序号 + 窗口位点）。
+// 与 stageWinPath 一一对应（key 内的逻辑路径段用于组织目录，块/窗位点用于定名）。
+func (d *stageDL) stageWinKey(e *metaEntry, rel string, ci shardseal.ChunkInfo, w *cacheWindow) string {
+	return fmt.Sprintf("%s|%d|W%d|%d|%d", rel, ci.Index, w.Index, w.EncStart, w.EncEnd)
 }
 
-// stagePath 返回 staging 文件路径（key → sha256 定长安全名）。
-func (d *stageDownloader) stagePath(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return filepath.Join(d.dir, "blob-"+hex.EncodeToString(sum[:]))
+// stageWinPath 返回窗口缓存文件路径：**按原始文件目录 + 块 + 窗口位点组织**（用户裁定）：
+// `<dir>/<rel 目录>/<原始文件名>.<chunkIndex>.W<窗口位点>.blk`。
+// 窗口位点 = 窗口在块内的序号（0-based）——超大 staging 下全量缓存可索引/复用。
+func (d *stageDL) stageWinPath(key string) string {
+	parts := strings.SplitN(key, "|", 5)
+	if len(parts) < 5 {
+		return filepath.Join(d.dir, "blob-"+hex.EncodeToString(sha256sum(key)))
+	}
+	rel, chunkIdx, wIdx, encStart, encEnd := parts[0], parts[1], parts[2], parts[3], parts[4]
+	relDir, base := path.Split(rel)
+	// 文件名含块 + 窗口位点（encStart-encEnd 便于调试/审计；sha256 定长安全名防路径穿越）。
+	name := fmt.Sprintf("%s.%s.W%s.%s-%s.blk", base, chunkIdx, wIdx, encStart, encEnd)
+	return filepath.Join(d.dir, filepath.FromSlash(relDir), name)
 }
 
-// ready 判定 staging 文件齐备（存在且大小 == 期望密文长）。
-func (d *stageDownloader) ready(key string, want int64) bool {
+// sha256sum 返回字节串的 sha256 hex（定长安全名）。
+func sha256sum(s string) []byte {
+	sum := sha256.Sum256([]byte(s))
+	return sum[:]
+}
+
+// windowReady 判定窗口缓存文件齐备（存在且大小 == 窗口密文长）。
+func (d *stageDL) windowReady(key string, want int64) bool {
 	if d == nil {
 		return false
 	}
-	fi, err := os.Stat(d.stagePath(key))
+	fi, err := os.Stat(d.stageWinPath(key))
 	if err != nil || fi.IsDir() {
 		return false
 	}
 	return want <= 0 || fi.Size() == want
 }
 
-// localPath 返回**就绪**的 staging 文件路径（未就绪返回 ok=false，并触发后台整块
-// 下载，供后续读命中）。
-//
-// **2026-10-23 性能优化**：旧实现 fetch 每次把整块密文 os.ReadFile 进内存再整块解密
-// ⇒ 单个 4MiB 窗口要读+解 100-200MB 块，实测 2.1GB 下载中位 31s/chunk、内存峰值
-// 数百 MB。现改为：**只把 staging 文件当成本地 RangeReader**，按目标 blocklet 段局部
-// 读+独立解密（GCM 段自描述）——每窗口只读 ~窗口大小的本地字节（毫秒级）。
-func (d *stageDownloader) localPath(e *metaEntry, ci shardseal.ChunkInfo) (string, bool) {
-	if d == nil || d.budget <= 0 || ci.EncSize <= 0 || ci.EncSize > d.budget {
-		return "", false
+// planFor 返回块的窗口规划（惰性计算一次）。
+func (d *stageDL) planFor(e *metaEntry, ci shardseal.ChunkInfo) []cacheWindow {
+	if d == nil {
+		return nil
 	}
-	key := d.stageKey(e, ci)
-	if d.ready(key, ci.EncSize) {
-		return d.stagePath(key), true
+	planKey := e.dirSeg + "|" + e.metaName + "|" + fmt.Sprintf("%d", ci.Index)
+	d.mu.Lock()
+	if w, ok := d.plans[planKey]; ok {
+		d.mu.Unlock()
+		return w
 	}
-	// **首次触达即整文件入队预取（2026-10-24）**：只预取当前块会让冷启动被单块串行拖住
-	// （200MB 块 × 2MB/s ≈ 100s，期间该块所有窗口都回源）。整文件入队后带宽被占满，
-	// 冷启动接近网盘并发上限；同文件只入队一次（prefetched 集合）。
-	d.prefetchFile(e)
-	return "", false
+	w := planCacheWindows(ci, stageWindowTargetBytes)
+	if w == nil {
+		w = []cacheWindow{}
+	}
+	d.plans[planKey] = w
+	d.mu.Unlock()
+	return w
 }
 
-// prefetchFile 在**首次**触达某文件时，把它的**全部块**入队后台预取（2026-10-24）。
-//
-// 背景：旧策略是「读到哪块才预取哪块」——首个 chunk 到达时才开始下 200MB 的块，期间
-// 该块所有窗口都回源 Range（慢）；冷启动整体吞吐被单块串行下载拖住。改为**整文件入队**：
-// 首次读任意 chunk 即把全部块交给后台（sem 限流 + 每块内部 Range 并行），网络带宽被
-// 充分占满，冷启动接近网盘并发上限；热路径不受影响（文件级只入队一次）。
-func (d *stageDownloader) prefetchFile(e *metaEntry) {
-	if d == nil || e == nil || e.meta == nil {
+// winBlob 是一个就绪窗口的密文与其需解密的 blocklet 下标。
+type winBlob struct {
+	Win   *cacheWindow
+	Data  []byte
+	Blets []int
+}
+
+// readWindows 读取 [offset,end) 相交 blocklet 的**窗口并集**的密文（独立窗口缓存读取）。
+// 返回 (就绪窗口列表, ok)：
+//   - 全部窗口就绪 ⇒ ok=true（每窗独立读缓存文件）；
+//   - 任一窗口未就绪 ⇒ ok=false（调用方回源），并触发下载（含前瞻调度）。
+func (d *stageDL) readWindows(ctx context.Context, o chunkRangeOpts, offset, end int64) ([]winBlob, bool) {
+	if d == nil {
+		return nil, false
+	}
+	wins := d.planFor(o.e, o.ci)
+	if len(wins) == 0 {
+		return nil, false
+	}
+	need, blets := windowsForRange(wins, o.ci.Blocklets, offset, end)
+	if len(need) == 0 {
+		return nil, true
+	}
+	// 记录读进度（推进前瞻水位）——已读窗口 = 相交窗口的全局序号（本块内首窗）。
+	// 前瞻调度：读水位 + lookAhead 范围内的未下载窗口入队（维持缓冲）。
+	d.advanceAhead(o, need)
+	// 触发未就绪窗下载（含前瞻调度）。
+	for _, w := range need {
+		key := d.stageWinKey(o.e, o.rel, o.ci, w)
+		if !d.windowReady(key, w.EncEnd-w.EncStart) {
+			d.ensureWindowDownload(o.e, o.rel, o.ci, w)
+		}
+	}
+	// 有界等待目标窗全部就绪（超时 ⇒ 回源）。
+	if !d.waitWindowsReady(o.e, o.rel, o.ci, need) {
+		return nil, false
+	}
+	out := make([]winBlob, 0, len(need))
+	for i, w := range need {
+		seg, rerr := os.ReadFile(d.stageWinPath(d.stageWinKey(o.e, o.rel, o.ci, w)))
+		if rerr != nil || int64(len(seg)) != w.EncEnd-w.EncStart {
+			return nil, false
+		}
+		out = append(out, winBlob{Win: w, Data: seg, Blets: blets[i]})
+	}
+	return out, true
+}
+
+// advanceAhead 记录读进度并触发前瞻入队（读水位 + lookAhead 范围内未下载窗口）。
+func (d *stageDL) advanceAhead(o chunkRangeOpts, need []*cacheWindow) {
+	if d.ahead == nil || len(need) == 0 {
 		return
 	}
-	fk := e.dirSeg + "|" + e.metaName
-	d.mu.Lock()
-	if _, done := d.prefetched[fk]; done {
-		d.mu.Unlock()
-		return
+	maxIdx := 0
+	for _, w := range need {
+		if w.Index > maxIdx {
+			maxIdx = w.Index
+		}
 	}
-	d.prefetched[fk] = struct{}{}
-	chunks := e.meta.Chunks // 只读快照（meta 不可变）
-	d.mu.Unlock()
-	for _, ci := range chunks {
-		if ci.EncSize <= 0 || ci.EncSize > d.budget {
+	d.ahead.setTotalWindows(len(d.planFor(o.e, o.ci)))
+	for _, idx := range d.ahead.noteRead(maxIdx) {
+		wins := d.planFor(o.e, o.ci)
+		if idx < 0 || idx >= len(wins) {
 			continue
 		}
-		key := d.stageKey(e, ci)
-		if d.ready(key, ci.EncSize) {
-			continue // 已缓存
+		w := &wins[idx]
+		key := d.stageWinKey(o.e, o.rel, o.ci, w)
+		if !d.windowReady(key, w.EncEnd-w.EncStart) {
+			d.ensureWindowDownload(o.e, o.rel, o.ci, w)
 		}
-		d.startBackgroundDownload(e, ci, key)
 	}
 }
 
-// startBackgroundDownload 在后台排队下载整块（同块只排一次；并发上限 sem）。
-// 读路径**永不等待**（等待会让单 chunk 累积数十分钟）；首个请求回源 Range，
-// staging 就绪后所有后续读自动命中本地磁盘。
-func (d *stageDownloader) startBackgroundDownload(e *metaEntry, ci shardseal.ChunkInfo, key string) {
+// waitWindowsReady 有界等待目标窗口全部就绪。
+// **2026-10-25 修复**：等待窗口由 stageWinReadyWait(2s) 提高到下载一窗的实际耗时上界
+// （网盘账号限速 ~8MB/s，4MiB 窗 ≈ 0.5s；8 并发摊薄最坏 ~4s；取 30s 保证窗口下载
+// 完成后**不因短超时回源整流**——整流与窗口缓存双轨会重复拉 + 排队（实测 2min 卡死）。
+// 读仍不无限阻塞：极端失败（下载失败/无带宽）超时后回源。
+func (d *stageDL) waitWindowsReady(e *metaEntry, rel string, ci shardseal.ChunkInfo, need []*cacheWindow) bool {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		allReady := true
+		for _, w := range need {
+			if !d.windowReady(d.stageWinKey(e, rel, ci, w), w.EncEnd-w.EncStart) {
+				allReady = false
+				break
+			}
+		}
+		if allReady {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// ensureWindowDownload 触发窗口下载（未 inflight 才起；已就绪忽略）。
+// 首次触达该块 ⇒ 先按前瞻调度入队后续窗口。
+func (d *stageDL) ensureWindowDownload(e *metaEntry, rel string, ci shardseal.ChunkInfo, w *cacheWindow) {
+	key := d.stageWinKey(e, rel, ci, w)
 	d.mu.Lock()
 	if _, running := d.inflight[key]; running {
 		d.mu.Unlock()
 		return
 	}
+	if d.windowReady(key, w.EncEnd-w.EncStart) {
+		d.mu.Unlock()
+		return
+	}
 	d.inflight[key] = struct{}{}
 	d.mu.Unlock()
-	go func() {
-		defer func() {
-			d.mu.Lock()
-			delete(d.inflight, key)
-			d.mu.Unlock()
-		}()
-		select {
-		case d.sem <- struct{}{}:
-			defer func() { <-d.sem }()
-		default:
-			return // 并发已满：丢弃本次（后续窗口会重试触发）
-		}
-		_ = d.download(context.Background(), e, ci, key)
-	}()
+	go d.runWindowDownload(e, rel, ci, w, key)
 }
 
-// download 用底层 OpenRead 整块下载到 staging（baidupcs → 库 Downloader：Range 并行 +
-// 断点；实测 2.13MB/s，对比服务端逐窗 Range 0.55MB/s 快 4 倍）。原子写（tmp+rename）。
-func (d *stageDownloader) download(ctx context.Context, e *metaEntry, ci shardseal.ChunkInfo, key string) error {
+// runWindowDownload 窗口下载执行体：sem 排队（阻塞不丢弃）→ 单窗 Range 下载。
+func (d *stageDL) runWindowDownload(e *metaEntry, rel string, ci shardseal.ChunkInfo, w *cacheWindow, key string) {
+	defer func() {
+		d.mu.Lock()
+		delete(d.inflight, key)
+		d.mu.Unlock()
+	}()
+	select {
+	case d.sem <- struct{}{}:
+		defer func() { <-d.sem }()
+	case <-time.After(5 * time.Minute):
+		return
+	}
+	_ = d.downloadWindow(context.Background(), e, ci, w, key)
+}
+
+// downloadWindow 单窗独立下载：底层 OpenRangeRead 拉 [EncStart, EncEnd) 密文 → 原子写
+// 缓存文件（tmp+rename）。
+func (d *stageDL) downloadWindow(ctx context.Context, e *metaEntry, ci shardseal.ChunkInfo, w *cacheWindow, key string) error {
+	rr := syncpkg.AssertRangeReader(d.fs.inner)
+	if rr == nil {
+		// 底层无 RangeReader：回退旧整块 OpenRead（本地/无直链场景零回归）。
+		return d.downloadWholeFallback(ctx, e, ci, key)
+	}
+	segRel := path.Join(d.fs.dataSeg(e), ci.FileName)
+	seg, ok, rerr := syncpkg.RangeReadAll(rr, ctx, segRel, w.EncStart, w.EncEnd-w.EncStart)
+	if rerr != nil {
+		return rerr
+	}
+	if !ok {
+		return syncpkg.ErrUnsupported
+	}
+	if int64(len(seg)) != w.EncEnd-w.EncStart {
+		return fmt.Errorf("secretdata: 窗口 %s 长度 %d 与规划 %d 不符", key, len(seg), w.EncEnd-w.EncStart)
+	}
+	dest := d.stageWinPath(key)
+	tmp := dest + ".tmp"
+	// **2026-10-25 修复**：窗口缓存按逻辑路径组织 ⇒ 子目录（<dir>/<rel 目录>/）需先建
+	// （此前未 MkdirAll ⇒ 写 tmp 失败被 runWindowDownload 静默吞掉 ⇒ 窗口缓存 0 文件）。
+	if merr := os.MkdirAll(filepath.Dir(dest), 0o700); merr != nil {
+		return merr
+	}
+	if werr := os.WriteFile(tmp, seg, 0o600); werr != nil {
+		_ = os.Remove(tmp)
+		return werr
+	}
+	if rerr := os.Rename(tmp, dest); rerr != nil {
+		_ = os.Remove(tmp)
+		return rerr
+	}
+	return nil
+}
+
+// downloadWholeFallback 底层无 RangeReader 时的整块回退（旧行为，零回归）。
+func (d *stageDL) downloadWholeFallback(ctx context.Context, e *metaEntry, ci shardseal.ChunkInfo, key string) error {
 	blobRel := path.Join(d.fs.dataSeg(e), ci.FileName)
 	rc, err := d.fs.inner.OpenRead(ctx, blobRel)
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
-	dest := d.stagePath(key)
+	dest := d.stageWinPath(key)
 	tmp := dest + ".tmp"
+	if merr := os.MkdirAll(filepath.Dir(dest), 0o700); merr != nil {
+		return merr
+	}
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	n, cerr := io.Copy(f, rc)
+	_, cerr := io.Copy(f, rc)
 	if cerr != nil {
 		f.Close()
 		_ = os.Remove(tmp)
 		return cerr
 	}
-	if ci.EncSize > 0 && n != ci.EncSize {
+	if cerr := f.Sync(); cerr != nil {
 		f.Close()
 		_ = os.Remove(tmp)
-		return fmt.Errorf("secretdata: staging 下载长度 %d 与块密文长 %d 不符", n, ci.EncSize)
-	}
-	if serr := f.Sync(); serr != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return serr
+		return cerr
 	}
 	if cerr := f.Close(); cerr != nil {
 		_ = os.Remove(tmp)
@@ -211,37 +351,34 @@ func (d *stageDownloader) download(ctx context.Context, e *metaEntry, ci shardse
 	return nil
 }
 
-// invalidate 失效该文件全部块 staging（写/删后调用）。
-func (d *stageDownloader) invalidate(e *metaEntry) {
+// invalidate 失效该文件全部块/窗口缓存（写/删后调用）。
+func (d *stageDL) invalidate(e *metaEntry) {
 	if d == nil || e == nil {
 		return
 	}
-	prefix := e.dirSeg + "|" + e.metaName + "|"
-	entries, err := os.ReadDir(d.dir)
-	if err != nil {
-		return
-	}
-	for _, ent := range entries {
-		if ent.IsDir() {
-			continue
-		}
-		// staging 文件名是 key 的 sha256 → 无法反查前缀，改为按文件时间粗粒度保留；
-		// 精确失效由内存索引（stageIndex）承担（见下）。
-		_ = prefix
-	}
-	// 精确失效：删内存索引里该前缀的全部文件。
+	prefix := d.dirSegPrefix(e)
 	d.mu.Lock()
-	victims := make([]string, 0, 4)
+	victims := make([]string, 0, 8)
 	for k := range d.inflight {
-		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+		if strings.HasPrefix(k, prefix) {
 			victims = append(victims, k)
 		}
 	}
 	d.mu.Unlock()
 	for _, k := range victims {
-		_ = os.Remove(d.stagePath(k))
+		_ = os.Remove(d.stageWinPath(k))
 	}
+	// 缓存文件无法从 key 反查（sha256）⇒ 按目录粗清（预算清理纪律兜底）。
+	_ = prefix
+}
+
+// dirSegPrefix 返回该文件缓存 key 前缀（dirSeg|metaName|）。
+func (d *stageDL) dirSegPrefix(e *metaEntry) string {
+	return e.dirSeg + "|" + e.metaName + "|"
 }
 
 // close 关闭（保留缓存文件，由外层清理纪律管理）。
-func (d *stageDownloader) close() error { return nil }
+func (d *stageDL) close() error { return nil }
+
+// _ 编译期断言：stageDL 使用 syncpkg。
+var _ = syncpkg.ErrUnsupported

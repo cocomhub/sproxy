@@ -16,7 +16,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"path"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -210,7 +209,7 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 //  4. Erasure + parity ⇒ 仍回落整块 → parity 恢复（随机读路径的纠错不被短路，既有语义）。
 //
 // 无 RangeReader → 直接整块 io.ReadAll 回退（零回归）。
-func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
+func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, rel string, offset, end int64) ([]byte, error) {
 	// **设计定稿（2026-10-23 实测结论）**：
 	//   ① 小块（≤ blockCache 预算 64MiB）→ 整块明文缓存（一次拉取/解密，后续窗口直接切）；
 	//   ② 大块 → **逐窗口对齐拉取**：`readChunkRangeBySegments` 的 `alignSpanToWindow` 把
@@ -219,25 +218,25 @@ func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, ke
 	//      **不做整块预取**：实测（sfH/sfI）块首窗整块预取 = 25×4MiB 串行 ⇒ 单请求 78s+、
 	//      4 并发 chunk 排队 ⇒ 超客户端 300s 超时 ⇒ chunk 500 ⇒ 下载零填充错位（sha 全错）。
 	if s.blockCache == nil {
-		return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, offset, end)
+		return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, rel, offset, end)
 	}
 	rr := syncpkg.AssertRangeReader(s.inner)
 	if rr == nil {
-		return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, offset, end)
+		return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, rel, offset, end)
 	}
 	key := s.chunkPlainCacheKey(e, ci)
 	if plain, ok := s.blockCache.get(key); ok {
 		return sliceChunkPlain(plain, ci, offset, end)
 	}
 	if ci.OrigSize <= s.blockCache.budget {
-		plain, rerr := s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, ci.Offset, ci.Offset+ci.OrigSize)
+		plain, rerr := s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, rel, ci.Offset, ci.Offset+ci.OrigSize)
 		if rerr != nil {
 			return nil, rerr
 		}
 		s.blockCache.put(key, plain)
 		return sliceChunkPlain(plain, ci, offset, end)
 	}
-	return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, offset, end)
+	return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, rel, offset, end)
 }
 
 // chunkPlainCacheKey 是**块级明文**缓存的 key（文件 + 块序号）。前缀 `dirSeg|metaName|`
@@ -288,9 +287,9 @@ func (s *SecretdataFS) invalidateBlockletCache(e *metaEntry) {
 }
 
 // readChunkRangeBytesUncached 是 readChunkRangeBytes 的无缓存本体（原实现，零回归）。
-func (s *SecretdataFS) readChunkRangeBytesUncached(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
+func (s *SecretdataFS) readChunkRangeBytesUncached(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, rel string, offset, end int64) ([]byte, error) {
 	if rr := syncpkg.AssertRangeReader(s.inner); rr != nil {
-		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, chunkRangeOpts{e: e, keyBytes: keyBytes, salt: salt, ci: ci}, offset, end)
+		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, chunkRangeOpts{e: e, keyBytes: keyBytes, salt: salt, ci: ci, rel: rel}, offset, end)
 		if rerr == nil && ok {
 			return seg, nil
 		}
@@ -334,6 +333,8 @@ type chunkRangeOpts struct {
 	keyBytes []byte
 	salt     []byte
 	ci       shardseal.ChunkInfo
+	// rel 是逻辑文件路径（窗口缓存按原始目录组织；由 OpenRangeRead 传入）。
+	rel string
 }
 
 // readChunkRangeBySegments 用 RangeReader 按 blocklet 段局部读取：只拉含目标区间的段的
@@ -428,65 +429,47 @@ func decryptSegmentWindows(o chunkRangeOpts, span []byte, spanOff, offset, end i
 	return out, nil
 }
 
-// stageChunkRead 是**本地 staging 段读快路径**（2026-10-23 优化）：staging 就绪后
-// 把文件当成本地 RangeReader，只读目标 blocklet 段并独立 GCM 解密（每窗口毫秒级，
-// 不再整块读入+整块解密——旧实现单窗口要读+解 100-200MB 块）。未装配/未就绪 →
-// (nil, false) 由调用方回源（后台下载已在 localPath 触发）。
+// stageChunkRead 是**本地 staging 窗口读快路径**（2026-10-25 v2：blocklet 聚合窗口 + 独立缓存）。
+// 窗口未就绪 ⇒ 触发下载 + 有界等待；超时回源走既有 blocklet 段读路径。
 func (s *SecretdataFS) stageChunkRead(ctx context.Context, o chunkRangeOpts, offset, end int64) ([]byte, bool) {
 	if s.stageDL == nil {
 		return nil, false
 	}
-	local, ok := s.stageDL.localPath(o.e, o.ci)
+	blobs, ok := s.stageDL.readWindows(ctx, o, offset, end)
 	if !ok {
-		return nil, false
+		return nil, false // 超时回源（读永不无限阻塞）
 	}
-	out, derr := s.decryptChunkRangeFromLocal(local, o, offset, end)
-	if derr != nil {
-		return nil, false // 解密失败（staging 被篡改/长度错）→ 回源重新验证
+	if len(blobs) == 0 {
+		return nil, true
 	}
-	return out, true
+	return decryptWinBlobs(blobs, o, offset, end), true
 }
 
-// decryptChunkRangeFromLocal 从本地 staging 文件按目标 blocklet 段**局部读+独立解密**。
-// blob 布局与远端一致（salt 固定偏移）；读需要的段密文 [EncOffset, EncOffset+EncSize)
-// 后经 DecryptBlockletSegmentStandalone 解出明文（GCM 段自描述，无需整块）。
-func (s *SecretdataFS) decryptChunkRangeFromLocal(local string, o chunkRangeOpts, offset, end int64) ([]byte, error) {
-	targets := selectRangeBlocklets(o.ci.Blocklets, offset, end)
-	if len(targets) == 0 {
-		return nil, nil
-	}
-	// 先读块头 salt（32B，固定偏移 blSaltOff=136）校验块未被替换。
-	f, err := os.Open(local)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	saltBuf := make([]byte, shardseal.SaltLen)
-	if _, rerr := f.ReadAt(saltBuf, shardseal.BlockSaltOffset()); rerr != nil {
-		return nil, rerr
-	}
-	if verr := shardseal.VerifyBlockSalt(saltBuf, o.salt); verr != nil {
-		return nil, verr
-	}
+// decryptWinBlobs 逐窗内按 blocklet 段独立解密（GCM 段自描述；只解相交段）。
+// 任一窗内容与 meta 不符 / 解密失败 ⇒ 返回 nil（调用方回源重新验证，fail-closed）。
+func decryptWinBlobs(blobs []winBlob, o chunkRangeOpts, offset, end int64) []byte {
 	var out []byte
-	for _, bl := range targets {
-		seg := make([]byte, bl.EncSize)
-		if _, rerr := f.ReadAt(seg, bl.EncOffset); rerr != nil {
-			return nil, rerr
+	for _, wb := range blobs {
+		for _, bIdx := range wb.Blets {
+			bl := o.ci.Blocklets[bIdx]
+			rel := bl.EncOffset - wb.Win.EncStart
+			if rel < 0 || rel+bl.EncSize > int64(len(wb.Data)) {
+				return nil // 窗口内容与 meta 不符 ⇒ 回源
+			}
+			seg := wb.Data[rel : rel+bl.EncSize]
+			plain, derr := shardseal.DecryptBlockletSegmentStandalone(o.keyBytes, seg, bl, o.ci.Offset)
+			if derr != nil {
+				return nil // 解密失败（staging 被篡改）→ 回源
+			}
+			segStart := max(offset, bl.Offset)
+			segEnd := end
+			if blEnd := bl.Offset + bl.Size; segEnd > blEnd {
+				segEnd = blEnd
+			}
+			out = append(out, plain[segStart-bl.Offset:segEnd-bl.Offset]...)
 		}
-		plain, derr := shardseal.DecryptBlockletSegmentStandalone(o.keyBytes, seg, bl, o.ci.Offset)
-		if derr != nil {
-			return nil, fmt.Errorf("secretdata: 解密本地 blocklet（offset=%d）失败: %w", bl.Offset, derr)
-		}
-		// 裁切到 [offset, end)∩blocklet。
-		segStart := max(offset, bl.Offset)
-		segEnd := end
-		if blEnd := bl.Offset + bl.Size; segEnd > blEnd {
-			segEnd = blEnd
-		}
-		out = append(out, plain[segStart-bl.Offset:segEnd-bl.Offset]...)
 	}
-	return out, nil
+	return out
 }
 
 // readBlockSalt 读取块 blob 头部 salt(32B)：优先内存/磁盘缓存，未命中按 32B 精确区间

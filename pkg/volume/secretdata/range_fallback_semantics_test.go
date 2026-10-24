@@ -140,7 +140,7 @@ func TestReadChunkRangeBytes_CanceledDoesNotFallBack(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := fs.readChunkRangeBytes(canceledCtx, e, keyBytes, salt, ci, ci.Offset, ci.Offset+64)
+	_, err := fs.readChunkRangeBytes(canceledCtx, e, keyBytes, salt, ci, "big.bin", ci.Offset, ci.Offset+64)
 	if err == nil {
 		t.Fatal("取消时段读应上抛，却成功返回（静默回落整块）")
 	}
