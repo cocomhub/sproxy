@@ -167,6 +167,7 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 		TempDir:    localRoot,
 		BDUSS:      bduss,
 		BinaryPath: binaryPath,
+		Logger:     slog.Default(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("baidupcs backend: 卷 %q Storage 构造失败: %w", v.Name, err)

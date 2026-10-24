@@ -66,8 +66,8 @@ func downloadViaDownloader(ctx context.Context, pcs *Client, remotePath, localPa
 
 	// 4. 构造 Downloader：Range 并行 + 断点文件。
 	cfg := downloader.NewConfig()
-	cfg.MaxParallel = 4
-	cfg.BlockSize = 4 * 1024 * 1024
+	cfg.MaxParallel = 8
+	cfg.BlockSize = 8 * 1024 * 1024
 	cfg.InstanceStateStorageFormat = downloader.InstanceStateStorageFormatJSON
 	cfg.InstanceStatePath = resumePath
 

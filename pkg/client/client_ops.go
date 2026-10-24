@@ -345,7 +345,31 @@ func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind 
 	serverCS := resp.Header.Get(headerFileChecksum)
 	contentLength := resp.ContentLength
 
-	// 创建父目录（如果不存在）
+	// 创建父目录 + 写正文 + 完整性校验（2026-10-23 抽离：单流整流可能断流/错位 ⇒
+	// 无 checksum 时补大小 + 零窗兑底，有 checksum 时逐字节比对）。
+	if err := c.writeBodyToOutput(outputPath, resp.Body, contentLength, serverCS); err != nil {
+		os.Remove(outputPath)
+		return err
+	}
+
+	// 恢复文件修改时间
+	c.restoreFileMTimeAfterDownload(outputPath, resp)
+
+	return nil
+}
+
+// verifySingleStreamOutput 是单流下载的完整性兑底（无服务端 checksum 时）：大小一致 +
+// 无大段零填充（2026-10-23：外部卷整流中途断流/错位会静默产出零填充文件）。
+func verifySingleStreamOutput(outputPath string, size int64) error {
+	if err := verifyOutputSize(outputPath, size); err != nil {
+		return err
+	}
+	return verifyNoHugeZeroRuns(outputPath, size)
+}
+
+// writeBodyToOutput 把响应体写入输出文件并按完整性策略校验（2026-10-23 抽离，降 gocognit）：
+// 有服务端 checksum → SHA-256 比对；无（外部卷整流）→ 大小 + 大段零窗兑底。
+func (c *FileClient) writeBodyToOutput(outputPath string, body io.Reader, size int64, serverCS string) error {
 	if ensureErr := ensureParentDir(outputPath); ensureErr != nil {
 		return fmt.Errorf("创建输出目录失败: %w", ensureErr)
 	}
@@ -354,29 +378,20 @@ func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind 
 		return fmt.Errorf("创建文件失败: %w", err)
 	}
 	defer out.Close()
-
-	var src io.Reader = resp.Body
+	src := io.Reader(body)
 	if c.progressFn != nil {
-		c.progressFn("下载", 0, contentLength)
-		src = NewProgressReader(resp.Body, contentLength, func(read, total int64) {
+		c.progressFn("下载", 0, size)
+		src = NewProgressReader(body, size, func(read, total int64) {
 			c.progressFn("下载", read, total)
 		})
 	}
 	if _, err := io.Copy(out, src); err != nil {
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
-
 	if serverCS != "" {
-		if err := c.verifyChecksumAfterDownload(outputPath, serverCS); err != nil {
-			os.Remove(outputPath)
-			return fmt.Errorf("校验和验证失败: %w", err)
-		}
+		return c.verifyChecksumAfterDownload(outputPath, serverCS)
 	}
-
-	// 恢复文件修改时间
-	c.restoreFileMTimeAfterDownload(outputPath, resp)
-
-	return nil
+	return verifySingleStreamOutput(outputPath, size)
 }
 
 // verifyChecksumAfterDownload 验证下载文件的 SHA-256 与服务端返回的一致。

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
+
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -117,11 +119,17 @@ func (s *Storage) GetRange(ctx context.Context, key string, offset, size int64) 
 }
 
 // rangeGetWithDlink 用给定直链发一次 Range GET 并校验响应。
+// rangeGetWithDlink 用给定直链发一次 Range GET 并校验响应。
+// **必须携带网盘客户端 UA（2026-10-22 实测根因）**：百度 CDN 要求 `Range` 请求的 User-Agent
+// 为 `netdisk;P2SP;...`（网盘客户端），否则直接 403 `sign error (31362)`——sproxy 曾因
+// 未带 UA 导致大文件（块 >4MiB）Range 读全部失败（2.1GB 转存后下载 sha256 全错）。
 func (s *Storage) rangeGetWithDlink(ctx context.Context, key, dlink string, offset, size int64) (io.ReadCloser, error) {
+	s.log.Debug("baidupcs rangeGET", "key", key, "offset", offset, "size", size)
 	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, dlink, nil)
 	if rerr != nil {
 		return nil, fmt.Errorf("baidupcs: 构造 Range 请求失败: %w", rerr)
 	}
+	req.Header.Set("User-Agent", bdlib.NetdiskUA)
 	// 区间 [offset, offset+size-1]（size>0 恒为闭区间——size≡0 已在上层按空区间返回）。
 	req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+size-1, 10))
 	resp, derr := s.httpc.Do(req)

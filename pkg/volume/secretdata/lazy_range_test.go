@@ -91,9 +91,9 @@ func TestOpenRangeRead_LazyFirstReadOnlyFetchesTargetSegment(t *testing.T) {
 	if probe.rangeReads != 0 || probe.wholeReads != 0 {
 		t.Fatalf("OpenRangeRead 后不应触发底层读取（惰性），got range=%d whole=%d", probe.rangeReads, probe.wholeReads)
 	}
-	// 2) 首次 Read 只拉「含 offset=200 的那一块」（salt 起点 + boot + 目标段，
-	//    远小于整个窗口）——而非急切物化整窗口。salt 合并（2026-10-21）后区间
-	//    从 salt 起点开始（BlockSaltOffset），含 salt 32B + gap + boot 40B 开销。
+	// 2) 首次 Read 只拉「含 offset=200 的那一块」（数据段起点起，远小于整个窗口）——
+	//    而非急切物化整窗口。salt 由文件级 meta.Salt 本地构造（2026-10-23），不再并入
+	//    数据 span（区间从首个目标段的密文起点开始）。
 	buf := make([]byte, 100)
 	if _, rerr := io.ReadFull(rc, buf); rerr != nil {
 		t.Fatalf("ReadFull: %v", rerr)
@@ -101,8 +101,8 @@ func TestOpenRangeRead_LazyFirstReadOnlyFetchesTargetSegment(t *testing.T) {
 	if !bytes.Equal(buf, content[200:300]) {
 		t.Fatalf("首段内容错误：got %q", buf)
 	}
-	if probe.firstRange.offset != shardseal.BlockSaltOffset() {
-		t.Fatalf("首次段读应从 salt 起点 %d 开始（salt 合并），got %d",
+	if probe.firstRange.offset < shardseal.BlockSaltOffset() {
+		t.Fatalf("首次段读应从数据段起点（≥ salt 位置 %d）开始，got %d",
 			shardseal.BlockSaltOffset(), probe.firstRange.offset)
 	}
 	if probe.firstRange.size >= int64(len(content)) {
