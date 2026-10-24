@@ -61,6 +61,10 @@ type stageDL struct {
 	plans map[string][]cacheWindow
 	// ahead 是动态前瞻跟踪器（每文件一个；按读进度维护未下载窗口数 ≥ lookAhead）。
 	ahead *lookAheadTracker
+	// blobCache 是窗口密文内存 LRU（2026-10-25 实测：读窗口与写窗口边界不对齐 ⇒ 每
+	// 读窗口重复读 2 个 4MiB 窗口文件 + 2 次 sha256 ⇒ 6083 次/40s ⇒ 每 chunk 2.1s；
+	// 内存缓存命中后零磁盘零 sha256）。nil = 关闭（零回归）。
+	blobCache *windowBlobCache
 	// sem 限制**并发窗口下载数**：网盘账号级限速 ~8MB/s；16 并发可在带宽内更快补足
 	// 前瞻窗口（实测 8 并发时客户端读等窗口 ~8s/波；16 并发减半）。
 	sem chan struct{}
@@ -77,10 +81,11 @@ func newStageDL(dir string, budget int64, fs *SecretdataFS) *stageDL {
 	}
 	return &stageDL{
 		dir: dir, budget: budget, fs: fs,
-		inflight: map[string]struct{}{},
-		plans:    map[string][]cacheWindow{},
-		ahead:    newLookAheadTracker(defaultLookAheadConfig()),
-		sem:      make(chan struct{}, 16),
+		inflight:  map[string]struct{}{},
+		plans:     map[string][]cacheWindow{},
+		ahead:     newLookAheadTracker(defaultLookAheadConfig()),
+		blobCache: newWindowBlobCache(0),
+		sem:       make(chan struct{}, 16),
 	}
 }
 
@@ -123,7 +128,8 @@ func (d *stageDL) windowReady(key string, want int64) bool {
 	return want <= 0 || fi.Size() == want
 }
 
-// planFor 返回块的窗口规划（惰性计算一次）。
+// planFor 返回块的窗口规划：**优先用写侧确定性窗口（ci.Windows）**（2026-10-25 用户设计：
+// 首位相连 + salt 入首窗 + 每窗 checksum）；旧 meta 无 Windows ⇒ 动态规划兜底（零回归）。
 func (d *stageDL) planFor(e *metaEntry, ci shardseal.ChunkInfo) []cacheWindow {
 	if d == nil {
 		return nil
@@ -134,7 +140,12 @@ func (d *stageDL) planFor(e *metaEntry, ci shardseal.ChunkInfo) []cacheWindow {
 		d.mu.Unlock()
 		return w
 	}
-	w := planCacheWindows(ci, stageWindowTargetBytes)
+	var w []cacheWindow
+	if len(ci.Windows) > 0 {
+		w = cacheWindowsFromMeta(ci)
+	} else {
+		w = planCacheWindows(ci, stageWindowTargetBytes)
+	}
 	if w == nil {
 		w = []cacheWindow{}
 	}
@@ -182,8 +193,65 @@ func (d *stageDL) readWindows(ctx context.Context, o chunkRangeOpts, offset, end
 	}
 	out := make([]winBlob, 0, len(need))
 	for i, w := range need {
-		seg, rerr := os.ReadFile(d.stageWinPath(d.stageWinKey(o.e, o.rel, o.ci, w)))
-		if rerr != nil || int64(len(seg)) != w.EncEnd-w.EncStart {
+		key := d.stageWinKey(o.e, o.rel, o.ci, w)
+		seg, ok := d.readWindowData(key, w)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, winBlob{Win: w, Data: seg, Blets: blets[i]})
+	}
+	return out, true
+}
+
+// readWindowData 读取窗口密文：优先内存缓存（命中零磁盘零 sha256），未命中读磁盘文件
+// + checksum 校验后回填内存（2026-10-25 性能修复）。校验失败删除缓存文件回源。
+func (d *stageDL) readWindowData(key string, w *cacheWindow) ([]byte, bool) {
+	if d.blobCache != nil {
+		if seg, ok := d.blobCache.get(key); ok {
+			return seg, true
+		}
+	}
+	seg, rerr := os.ReadFile(d.stageWinPath(key))
+	if rerr != nil || int64(len(seg)) != w.EncEnd-w.EncStart {
+		return nil, false
+	}
+	// 写侧 checksum 存在时校验（fail-closed：缓存被篡改 ⇒ 删除回源重新拉取）。
+	if w.Checksum != "" && shardseal.VerifyWindowChecksum(
+		shardseal.WindowInfo{Index: w.Index, EncOffset: w.EncStart, EncSize: w.EncEnd - w.EncStart, Checksum: w.Checksum},
+		seg) != nil {
+		_ = os.Remove(d.stageWinPath(key))
+		return nil, false
+	}
+	if d.blobCache != nil {
+		d.blobCache.put(key, seg)
+	}
+	return seg, true
+}
+
+// readWindowsReadyOnly 读取 [offset,end) 相交 blocklet 的窗口密文——**只查已就绪缓存**
+// （不触发下载、不等待；供整流路径热命中用）。全部窗口已就绪 ⇒ 返回；否则 false。
+func (d *stageDL) readWindowsReadyOnly(o chunkRangeOpts, offset, end int64) ([]winBlob, bool) {
+	if d == nil {
+		return nil, false
+	}
+	wins := d.planFor(o.e, o.ci)
+	if len(wins) == 0 {
+		return nil, false
+	}
+	need, blets := windowsForRange(wins, o.ci.Blocklets, offset, end)
+	if len(need) == 0 {
+		return nil, true
+	}
+	out := make([]winBlob, 0, len(need))
+	for i, w := range need {
+		key := d.stageWinKey(o.e, o.rel, o.ci, w)
+		if d.blobCache == nil || !d.windowReady(key, w.EncEnd-w.EncStart) {
+			if d.blobCache == nil {
+				return nil, false
+			}
+		}
+		seg, ok := d.readWindowData(key, w)
+		if !ok {
 			return nil, false
 		}
 		out = append(out, winBlob{Win: w, Data: seg, Blets: blets[i]})
@@ -242,8 +310,16 @@ func (d *stageDL) waitWindowsReady(e *metaEntry, rel string, ci shardseal.ChunkI
 }
 
 // ensureWindowDownload 触发窗口下载（未 inflight 才起；已就绪忽略）。
-// 首次触达该块 ⇒ 先按前瞻调度入队后续窗口。
+//
+// **2026-10-25 实测回归修正**：一度试过「首次触达整文件全部窗口入队」，实测更慢
+// （2 分钟只 18 chunk、35s/chunk）：512 个窗口全入队 ⇒ 队尾的「当前读窗口」要等
+// 前面几百窗排完。正确做法是**读驱动滑窗**：当前读窗口立即下 + 前瞻只补 lookAhead 个。
 func (d *stageDL) ensureWindowDownload(e *metaEntry, rel string, ci shardseal.ChunkInfo, w *cacheWindow) {
+	d.startWindowDownload(e, rel, ci, w)
+}
+
+// startWindowDownload 触发单窗口下载（未 inflight 才起；已就绪忽略）。
+func (d *stageDL) startWindowDownload(e *metaEntry, rel string, ci shardseal.ChunkInfo, w *cacheWindow) {
 	key := d.stageWinKey(e, rel, ci, w)
 	d.mu.Lock()
 	if _, running := d.inflight[key]; running {
@@ -368,8 +444,10 @@ func (d *stageDL) invalidate(e *metaEntry) {
 	for _, k := range victims {
 		_ = os.Remove(d.stageWinPath(k))
 	}
-	// 缓存文件无法从 key 反查（sha256）⇒ 按目录粗清（预算清理纪律兜底）。
-	_ = prefix
+	// 内存窗口密文缓存按 key 前缀失效（与磁盘同纪律）。
+	if d.blobCache != nil {
+		d.blobCache.invalidatePrefix(prefix)
+	}
 }
 
 // dirSegPrefix 返回该文件缓存 key 前缀（dirSeg|metaName|）。

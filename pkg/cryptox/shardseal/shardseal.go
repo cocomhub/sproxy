@@ -427,6 +427,21 @@ func (s *sectionReader) Read(p []byte) (int, error) {
 // *sectionReader 交给 PlanBlocklets），经 ReaderAt 扫描关键帧表即可，与逐块加密兼容；
 // 上层**无** ReadAll 回退分支（见 shardseal_stream_test.go:TestEncryptShardsReader_VideoKeyframeParity
 // 与 docs/secret-volume.md §9.1）。
+
+// windowPlanFor 为块密文 enc 规划写侧窗口（首位相连 + salt 入首窗 + 每窗 sha256 checksum）。
+// 规划失败（异常区间）⇒ 返回 nil（读侧动态规划兜底，零回归；不 fail-closed——窗口是
+// 加速/完整性增强，不阻塞正常加密）。
+func windowPlanFor(enc []byte, blocklets []BlockletInfo) ([]WindowInfo, error) {
+	w := PlanChunkWindows(int64(len(enc)), blocklets, 4<<20)
+	if w == nil {
+		return nil, nil
+	}
+	if err := FillWindowChecksums(w, enc); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
 func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, group string, dest blobDest, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo
@@ -453,6 +468,7 @@ func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, gr
 			OrigSHA256: Hash256(chunk), EncSize: int64(len(enc)), EncSHA256: Hash256(enc),
 			Blocklets: blockletInfosOf(blocklets, entries, chunk, b.Offset),
 		}
+		ci.Windows, _ = windowPlanFor(enc, ci.Blocklets)
 		if rep, ok := plan.blp.(failureReporter); ok {
 			ci.Failures = rep.Failures()
 		}
@@ -621,6 +637,7 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group st
 			EncSHA256:  Hash256(enc),
 			Blocklets:  blInfos,
 		}
+		ci.Windows, _ = windowPlanFor(enc, ci.Blocklets)
 		// 解析失败信息是**文件级**共享的（planner 生命周期内失败记录，非单块专属）；因
 		// 任一块的错误段 JSON 都含全部失败，meta 选择在**每个块**冗余记录同一列表——保证
 		// 解密/审计任一块都能看到失败全貌（读取不依赖特定块）。语义注释见 ChunkInfo.Failures。

@@ -57,6 +57,9 @@ type ChunkInfo struct {
 	// Blocklets 是块内 blocklet 索引（随机访问定位/只解目标 blocklet 段）。连续覆盖
 	// [Offset, Offset+OrigSize)，validateMeta 校验。
 	Blocklets []BlockletInfo `json:"blocklets"`
+	// Windows 是块的**缓冲窗口规划**（2026-10-25 写侧确定：首位相连、salt 入首窗、
+	// 每窗 checksum）。旧 meta 无此字段 ⇒ 读侧动态规划兜底（零回归）。
+	Windows []WindowInfo `json:"windows,omitempty"`
 	// Failures 是**文件级共享**的解析失败信息列表（视频关键帧等；planner 生命周期失败
 	// 记录冗余到每个块——任一块都含失败全貌，解密/审计不依赖特定块）。omitempty——
 	// 旧 meta 无此字段。

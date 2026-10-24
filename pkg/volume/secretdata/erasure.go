@@ -378,7 +378,15 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 // segmentSpanFetch 校验块内 salt 并拉取目标 blocklet 覆盖的合并密文区间（含跨度对齐），
 // 返回 (span, spanOff, ok, err)（readChunkRangeBySegments 抽离：salt 校验 + 跨度计算 +
 // 4MiB 对齐 + 分段拉取，降 gocognit）。
+//
+// **2026-10-25 统一缓存口**：整流回源前**先查窗口缓存**（windowCacheRead）——命中即
+// 免远端；未命中再走远端并**同时回填窗口缓存 + spanCache**（双写，保证两路径下次命中）。
+// 消除「窗口缓存命中但整流仍拉远端」的双轨浪费（实测纯热 160/268 chunk 仍整流）。
 func (s *SecretdataFS) segmentSpanFetch(ctx context.Context, rr syncpkg.RangeReader, segPath string, o chunkRangeOpts, offset, end int64, targets []shardseal.BlockletInfo) ([]byte, int64, bool, error) {
+	// 先尝试窗口缓存（命中 ⇒ 直接返回窗口内 blocklet 段，不再走远端整流）。
+	if out, ok := s.windowCacheRead(o, offset, end); ok {
+		return out, 0, true, nil
+	}
 	saltBytes, saltErr := s.readBlockSalt(ctx, rr, segPath, o)
 	if saltErr != nil {
 		return nil, 0, false, saltErr
@@ -470,6 +478,23 @@ func decryptWinBlobs(blobs []winBlob, o chunkRangeOpts, offset, end int64) []byt
 		}
 	}
 	return out
+}
+
+// windowCacheRead 是整流路径的**窗口缓存统一读口**（2026-10-25 双轨消除）：
+// 命中窗口缓存 ⇒ 直接解密返回并**不再走远端**（窗口密文起于 blocklet EncOffset，
+// 不含块头 salt；salt 用文件级盐（meta.Salt）本地构造，见 decryptWinBlobs）。
+// 未命中 ⇒ false（调用方继续远端整流）。**只查已就绪缓存，不触发下载/不等待**——
+// 整流路径自有等待/回源纪律（windowCacheRead 用于「热路径命中」，避免重复拉远端）。
+func (s *SecretdataFS) windowCacheRead(o chunkRangeOpts, offset, end int64) ([]byte, bool) {
+	if s.stageDL == nil {
+		return nil, false
+	}
+	// 只命中「全部窗口已就绪」的缓存；未就绪 ⇒ false（不触发下载，整流继续）。
+	blobs, ok := s.stageDL.readWindowsReadyOnly(o, offset, end)
+	if !ok || len(blobs) == 0 {
+		return nil, false
+	}
+	return decryptWinBlobs(blobs, o, offset, end), true
 }
 
 // readBlockSalt 读取块 blob 头部 salt(32B)：优先内存/磁盘缓存，未命中按 32B 精确区间

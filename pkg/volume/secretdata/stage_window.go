@@ -26,6 +26,10 @@ type cacheWindow struct {
 	EncEnd int64
 	// Blets 是窗口包含的 blocklet 在 ChunkInfo.Blocklets 中的下标（升序）。
 	Blets []int
+	// Checksum 是窗口密文的 sha256（写侧确定；旧 meta 无 ⇒ 空，读侧跳过校验）。
+	Checksum string
+	// EncBlobLen 是块密文全长（窗口读取校验用）。
+	EncBlobLen int64
 }
 
 // stageWindowTargetBytes 是**窗口聚合目标**（= CDN 单次 Range 上限 4MiB）：
@@ -70,8 +74,31 @@ func planCacheWindows(ci shardseal.ChunkInfo, targetBytes int64) []cacheWindow {
 	return out
 }
 
-// windowsForRange 返回含 [offset,end) 相交 blocklet 的**窗口并集**（按 Index 升序、去重）。
-// 返回值同时给出每个窗口内需要解密的 blocklet 下标集合（只解相交段，省 CPU）。
+// cacheWindowsFromMeta 从写侧确定性窗口（ci.Windows）构造缓存窗口列表（含窗口内
+// blocklet 下标）。窗口是首位相连连续区间（salt 入首窗），读侧直接消费。
+func cacheWindowsFromMeta(ci shardseal.ChunkInfo) []cacheWindow {
+	out := make([]cacheWindow, 0, len(ci.Windows))
+	for _, wi := range ci.Windows {
+		cw := cacheWindow{
+			Index:      wi.Index,
+			EncStart:   wi.EncOffset,
+			EncEnd:     wi.EncOffset + wi.EncSize,
+			Checksum:   wi.Checksum,
+			EncBlobLen: ci.EncSize,
+		}
+		for bi, bl := range ci.Blocklets {
+			if !bl.Used || bl.EncSize <= 0 {
+				continue
+			}
+			// 窗口区间 [EncStart, EncEnd) 包含该 blocklet 密文段 ⇒ 归属本窗。
+			if bl.EncOffset >= cw.EncStart && bl.EncOffset+bl.EncSize <= cw.EncEnd {
+				cw.Blets = append(cw.Blets, bi)
+			}
+		}
+		out = append(out, cw)
+	}
+	return out
+}
 func windowsForRange(windows []cacheWindow, blocklets []shardseal.BlockletInfo, offset, end int64) ([]*cacheWindow, [][]int) {
 	var wins []*cacheWindow
 	var blets [][]int
