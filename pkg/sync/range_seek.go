@@ -53,6 +53,19 @@ const rangeWindow = 4 << 20
 // NewRangeSeeker 构造 RangeSeeker。fs 必须实现 RangeReader（否则返回错误——调用方
 // 决定整流 200 或 fail）。ctx 为本次 ServeContent 操作的取消信号（见类型注释）。
 func NewRangeSeeker(ctx context.Context, fs FS, rel string, size int64) (*RangeSeeker, error) {
+	return newRangeSeeker(ctx, fs, rel, size, 0) // 0 = 自适应（本地/外部）
+}
+
+// NewRangeSeekerWithHint 构造 RangeSeeker 并允许调用方覆盖窗口大小（winHint>0 生效）。
+// 服务端 /download 外部卷整流路径用它把窗口提升到 4MiB（= 百度 CDN 单次 Range 上限）：
+// 8MiB 的分块请求只需 2 次窗口重开，而非默认 256KiB 窗口的 32 次（实测 chunk 中位
+// 20s → 目标 <3s）；seek 仍按窗口重开，4MiB 粒度对播放首帧足够。
+func NewRangeSeekerWithHint(ctx context.Context, fs FS, rel string, size, winHint int64) (*RangeSeeker, error) {
+	return newRangeSeeker(ctx, fs, rel, size, winHint)
+}
+
+// newRangeSeeker 是 NewRangeSeeker 的核心；winHint>0 时强制窗口（测试/调优用）。
+func newRangeSeeker(ctx context.Context, fs FS, rel string, size int64, winHint int64) (*RangeSeeker, error) {
 	if fs == nil {
 		return nil, fmt.Errorf("sync: RangeSeeker 底层 FS 为 nil")
 	}
@@ -77,7 +90,9 @@ func NewRangeSeeker(ctx context.Context, fs FS, rel string, size int64) (*RangeS
 	// ——窗口是惰性流式预取上限，拖进度条时大窗口会多拉无用数据）。
 	// 判据与能力探测同口径：下探最内层原始卷（Innermost）。
 	win := int64(rangeWindow)
-	if inner := Innermost(fs); inner != nil {
+	if winHint > 0 {
+		win = winHint
+	} else if inner := Innermost(fs); inner != nil {
 		if lv, ok := inner.(LocalVolume); ok && !lv.IsLocalVolume() {
 			win = int64(externalRangeWindow)
 		}

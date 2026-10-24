@@ -15,12 +15,20 @@ import (
 
 // newRangeTestServer 起 httptest.Server 供文件内容（Range 语义由 net/http ServeContent 承担），
 // 并把 base 注入 fakeStorage.dlinkBase（模拟百度 CDN 直链）。rangeHeader 记录最近请求的
-// Range 头（断言实际下发的 Range 格式——评审 Minor 测试盲区）。
+// Range 头（断言实际下发的 Range 格式——评审 Minor 测试盲区）。uaHeader 非 nil 时记录
+// 最近请求的 User-Agent（断言 Range GET 携带网盘客户端 UA——2026-10-22 实测根因：
+// 缺 UA ⇒ 百度 CDN 403 sign error，大块 Range 读全部失败）。
 func newRangeTestServer(t *testing.T, content string, rangeHeader *string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if rangeHeader != nil {
 			*rangeHeader = r.Header.Get("Range")
+		}
+		if ua := r.Header.Get("User-Agent"); ua != netdiskUATestValue {
+			// UA 不是网盘客户端 UA ⇒ 模拟百度 CDN 的 403（真实 2026-10-22 实测：
+			// 缺/错 UA ⇒ sign error 31362；Go http 默认会填 Go-http-client ⇒ 必须精确比对）。
+			http.Error(w, `{"error_code":31362,"error_msg":"sign error"}`, http.StatusForbidden)
+			return
 		}
 		http.ServeContent(w, r, "f.bin", zeroTime, strings.NewReader(content))
 	}))
@@ -29,6 +37,10 @@ func newRangeTestServer(t *testing.T, content string, rangeHeader *string) *http
 }
 
 var zeroTime = time.Time{}
+
+// netdiskUATestValue 是测试服务端期望的网盘客户端 UA（= bdlib.NetdiskUA 的**字符串值**；
+// 测试不 import fork 库增强，直接比对字面量，防变异时 import 也被改）。
+const netdiskUATestValue = "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;"
 
 // newRangeFS 建带直链会话的 StorageFS（httptest 驱动 GetRange）。
 func newRangeFS(t *testing.T, content string) (*StorageFS, string) {

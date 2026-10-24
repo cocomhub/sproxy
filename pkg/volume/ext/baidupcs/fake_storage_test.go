@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
+
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -213,6 +215,7 @@ func (f *fakeStorage) GetRange(ctx context.Context, key string, offset, size int
 	if rerr != nil {
 		return nil, rerr
 	}
+	req.Header.Set("User-Agent", bdlib.NetdiskUA)
 	req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+size-1, 10))
 	resp, derr := http.DefaultClient.Do(req)
 	if derr != nil {
