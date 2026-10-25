@@ -173,6 +173,14 @@ func verifyRecoveredChunk(ci shardseal.ChunkInfo, plain []byte) error {
 }
 
 // fileLevelKey 返回条目的文件级派生 key 与盐（meta.Salt base64 解码 + DeriveKey）。
+//
+// **2026-10-25 性能修复：派生结果走 keyCache**。此前每次调用都全量 scrypt——
+// `OpenRangeRead` 每个读窗口（4MiB）调一次 ⇒ 8MiB chunk 就付 2×scrypt（standard 档
+// 实测 26.5ms/次，占热路径单 chunk 178ms 的 ~30%）。同一文件 salt 恒定 ⇒ 派生 key
+// 完全可复用（keyCache 已存在，decryptBlob 早已在用，本函数是遗漏点）。
+//
+// 缓存 key 带 `file|<saltHex>|<algoVersion>` 前缀：与 decryptBlob 的纯 saltHex 键
+// 隔离（后者恒用本 FS 的 s.algoVer，而本函数用 meta 自带版本，跨算法卷需区分）。
 func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 	if e == nil || e.meta == nil {
 		return nil, nil, fmt.Errorf("secretdata: 无效条目，无法派生文件密钥")
@@ -181,10 +189,15 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 	if serr != nil || len(sb) != shardseal.SaltLen {
 		return nil, nil, fmt.Errorf("secretdata: 文件 meta salt 解码失败: %v", serr)
 	}
+	cacheKey := fmt.Sprintf("file|%s|%d", hex.EncodeToString(sb), e.meta.AlgoVersion)
+	if key, ok := s.keyCache.get(cacheKey); ok {
+		return key, sb, nil
+	}
 	key, kerr := shardseal.DeriveKey(s.secret, sb, e.meta.AlgoVersion)
 	if kerr != nil {
 		return nil, nil, fmt.Errorf("secretdata: 派生文件密钥失败: %w", kerr)
 	}
+	s.keyCache.put(cacheKey, key)
 	return key, sb, nil
 }
 
