@@ -289,15 +289,47 @@ func (d *stageDL) advanceAhead(o chunkRangeOpts, need []*cacheWindow) {
 // （网盘账号限速 ~8MB/s，4MiB 窗 ≈ 0.5s；8 并发摊薄最坏 ~4s；取 30s 保证窗口下载
 // 完成后**不因短超时回源整流**——整流与窗口缓存双轨会重复拉 + 排队（实测 2min 卡死）。
 // 读仍不无限阻塞：极端失败（下载失败/无带宽）超时后回源。
+// syncFetchMissing 是等待超时后的补救：**同步下载**缺失窗口（不占 sem）。
+//
+// **2026-10-25 实测根因**：冷启动是读驱动的（lookAhead 16 窗），**末尾块**
+// （实测块 24/26/27/28）窗口可能未下载完就结束读取 ⇒ 磁盘缺该块窗口。热路径首次
+// 读到它们时：后台 goroutine 已触发但**在 sem(16) 队尾排队**（冷启动刚结束仍在补下）
+// ⇒ 等满探测预算后回源**整流**（写 spanCache，不回填窗口缓存）⇒ 下次再读仍缺。
+//
+// 因此读路径超时后**直接同步下载**（不抢 sem：读路径优先级高于后台预取，不能排在
+// 同一条队尾）。热路径下 1 窗 2.9MB @7.8MB/s ≈ 0.4s，远优于长等待 + 整流。
+func (d *stageDL) syncFetchMissing(e *metaEntry, rel string, ci shardseal.ChunkInfo, need []*cacheWindow) bool {
+	done := false
+	for _, w := range need {
+		key := d.stageWinKey(e, rel, ci, w)
+		if d.windowReady(key, w.EncEnd-w.EncStart) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		err := d.downloadWindow(ctx, e, ci, w, key)
+		cancel()
+		if err == nil {
+			done = true
+		}
+	}
+	return done
+}
+
 func (d *stageDL) waitWindowsReady(e *metaEntry, rel string, ci shardseal.ChunkInfo, need []*cacheWindow) bool {
-	// **30s → 3s（2026-10-25 性能修复）**：窗口下载 4MiB @7.8MB/s ≈ 0.5s；30s 硬超时
-	// 在下载卡死（inflight 未清）时让读等满 30s 才回源，是热路径 outlier 主因。3s 内
-	// 正常下载必完成；仍失败 ⇒ 快速回源整流（读不无限阻塞）。
-	deadline := time.Now().Add(3 * time.Second)
+	// **分场景等待策略（2026-10-25 实测收敛）**：
+	//   - 窗口已在下载（inflight）⇒ 说明读驱动/预取已触发，只是带宽排队 ⇒ 耐心等
+	//     （单窗 2.9MB @7.8MB/s ≈ 0.4s，8 并发竞争 ≈ 3-6s，取 10s 上界）；
+	//   - 窗口无人下载（无 inflight）⇒ 后台 goroutine 可能停滞/卡死 ⇒ **同步补救**
+	//     直接下载（绕过 sem 队尾，读路径优先），成功即用；
+	//   - 两者兼顾：冷启动（inflight 多）长等，热路径（缺窗口无 inflight）同步救。
+	// 曾有两次次优：固定 3s（冷启动整流+双份下载 ⇒ 662s/2.47x）与固定 8s 下限
+	// （热路径缺失窗口等满 8s ⇒ 14-17s）。本策略两场景均不再浪费。
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		allReady := true
 		for _, w := range need {
-			if !d.windowReady(d.stageWinKey(e, rel, ci, w), w.EncEnd-w.EncStart) {
+			key := d.stageWinKey(e, rel, ci, w)
+			if !d.windowReady(key, w.EncEnd-w.EncStart) {
 				allReady = false
 				break
 			}
@@ -305,11 +337,27 @@ func (d *stageDL) waitWindowsReady(e *metaEntry, rel string, ci shardseal.ChunkI
 		if allReady {
 			return true
 		}
+		// 无 inflight 下载的缺失窗口 ⇒ 同步补救（不等满预算，立即直下）。
+		if !d.hasInflightFor(e, rel, ci, need) {
+			return d.syncFetchMissing(e, rel, ci, need)
+		}
 		if !time.Now().Before(deadline) {
 			return false
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// hasInflightFor 报告 need 窗口是否仍有活跃后台下载（任一在 inflight 即 true）。
+func (d *stageDL) hasInflightFor(e *metaEntry, rel string, ci shardseal.ChunkInfo, need []*cacheWindow) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, w := range need {
+		if _, ok := d.inflight[d.stageWinKey(e, rel, ci, w)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureWindowDownload 触发窗口下载（未 inflight 才起；已就绪忽略）。
