@@ -1,5 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+//
+// state-write-exempt: 本文件仅 flag 名/文案含 "meta-extra"/".meta"（无 os 写 meta/state
+// 路径段——upload 走 client.Upload；meta 由服务端 sidecar 管理）。门禁误报逃生口。
 
 package main
 
