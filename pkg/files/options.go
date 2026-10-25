@@ -570,7 +570,7 @@ type FileMetaPolicy interface {
 	// 计算 FileMeta（从已落盘文件计算总/分块 sha256+md5）与失败兜底（失败＝读侧不校验）。
 	// owner 为文件归属（配额记账按 owner 的 meta 桶 Scope）；root 为文件所在租户根；
 	// rel 为根内相对路径（含 user/ 前缀）。extra 为随上传写入的自定义元数据
-	// （A/B/C 档，见 pkg/files/metaextra；nil = 不写，零回归）。
+	// （A/B/C 档，见 pkg/files/meta 的 Extra 白名单；nil = 不写，零回归）。
 	WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string, extra map[string]any) error
 	// VerifyDownload 返回下载流的**逐分块校验包装**（信任保证演进：下载路径读回比对
 	// meta，异常 fail-closed——跨信任边界静默损坏在下发客户端前被拦截）。无 meta /

@@ -41,7 +41,7 @@ func TestUpdateFileMeta_OK(t *testing.T) {
 	h := &Handlers{metaSvcForTest: svc}
 
 	body, _ := json.Marshal(map[string]any{"extra": map[string]any{
-		"code": "NHDTC-254", "maker": "NATURAL HIGH",
+		"code": "MOVIE-001", "maker": "STUDIO X",
 	}})
 	req := httptest.NewRequest(http.MethodPut, "/api/files/meta?filename=n/v.mp4", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -49,7 +49,7 @@ func TestUpdateFileMeta_OK(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if svc.got.RemotePath != "n/v.mp4" || svc.got.Extra["code"] != "NHDTC-254" {
+	if svc.got.RemotePath != "n/v.mp4" || svc.got.Extra["code"] != "MOVIE-001" {
 		t.Fatalf("UpdateMeta input 错: %+v", svc.got)
 	}
 	// R35-b 场景证据：动作字面量 + 常量引用（门禁扫描 Test* 函数体内的字符串/Ident）。

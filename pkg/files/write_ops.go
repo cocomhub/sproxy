@@ -53,7 +53,7 @@ type WriteFileInput struct {
 	// Mtime 是写入后要设置的文件修改时间（UnixNano；0 = 不设置）。
 	Mtime int64
 	// MetaExtra 是随上传一并写入 .meta sidecar 的自定义元数据（A/B/C 档字段，
-	// 见 pkg/files/metaextra；nil = 不写，零回归）。仅本地卷 sidecar 生效。
+	// 见 pkg/files/meta 的 Extra 白名单；nil = 不写，零回归）。仅本地卷 sidecar 生效。
 	MetaExtra map[string]any
 }
 
@@ -2189,7 +2189,7 @@ type WriteTargetInput struct {
 	ClientSize int64
 	// Mtime 是写入后要设置的文件修改时间（UnixNano；0 = 不设置）。
 	Mtime int64
-	// MetaExtra 是随写入落 .meta sidecar 的自定义元数据（见 pkg/files/metaextra；
+	// MetaExtra 是随写入落 .meta sidecar 的自定义元数据（见 pkg/files/meta；
 	// nil = 不写）。S3 put / 版本恢复等路径同样适用。
 	MetaExtra map[string]any
 }

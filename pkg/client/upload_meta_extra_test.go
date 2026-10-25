@@ -13,9 +13,9 @@ import (
 func TestEncodeMetaExtraHeader(t *testing.T) {
 	t.Parallel()
 	hdr, err := encodeMetaExtraHeader(map[string]any{
-		"code":     "NHDTC-254",
-		"maker":    "NATURAL HIGH",
-		"title_ja": "就寝中の夜行バス",
+		"code":     "MOVIE-001",
+		"maker":    "STUDIO X",
+		"title_ja": "夜行バス",
 	})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -37,7 +37,7 @@ func TestEncodeMetaExtraHeader(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("JSON 解码失败: %v", err)
 	}
-	if got["code"] != "NHDTC-254" || got["title_ja"] != "就寝中の夜行バス" {
+	if got["code"] != "MOVIE-001" || got["title_ja"] != "夜行バス" {
 		t.Fatalf("往返不一致: %v", got)
 	}
 }

@@ -9,7 +9,7 @@ package files
 // 编码传输（raw JSON 含非 ASCII 会被 HTTP 层拒绝）。同时兼容**纯 JSON**（全 ASCII 时
 // 客户端可直接传，便于 curl 调试）。
 //
-// 安全：解码后大小 ≤ 16 KiB（防滥用）、必须是对象、逐字段白名单校验（pkg/files/metaextra）。
+// 安全：解码后大小 ≤ 16 KiB（防滥用）、必须是对象、逐字段白名单校验（pkg/files/meta.Extra 白名单）。
 
 import (
 	"encoding/base64"
@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cocomhub/sproxy/pkg/files/metaextra"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 )
 
 // headerFileMetaExtra 是随上传提交自定义元数据的请求头。
@@ -48,8 +48,8 @@ func parseMetaExtraHeader(raw string) (map[string]any, error) {
 	if obj == nil {
 		return nil, errors.New("必须是 JSON 对象")
 	}
-	obj = metaextra.Trim(obj)
-	if err := metaextra.Validate(obj); err != nil {
+	obj = meta.TrimExtra(obj)
+	if err := meta.ValidateExtra(obj); err != nil {
 		return nil, err
 	}
 	if len(obj) == 0 {

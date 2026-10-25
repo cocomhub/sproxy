@@ -12,7 +12,7 @@ package files
 // 安全（数据安全完整可靠）：
 //   - 文件必须已存在且已有可用 sidecar（无 meta = 无内容基线，拒绝盲写——避免把
 //     「未知内容」标成可信）；
-//   - extra 走 pkg/files/metaextra 白名单校验（fail-closed）；
+//   - extra 走 pkg/files/meta 白名单校验（fail-closed）；
 //   - 底层 trusted_fs.UpdateMetaExtra 做前置读回校验（并发覆盖时拒绝），我们只透传。
 
 import (

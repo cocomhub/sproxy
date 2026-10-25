@@ -7,7 +7,7 @@ package client
 //   - UploadOption.WithMetaExtra(map) → 上传头 X-File-Meta-Extra（base64(JSON)）
 //   - UpdateFileMeta(ctx, filename, extra) → PUT /api/files/meta（方案②）
 //
-// 字段白名单/校验在服务端 pkg/files/metaextra；客户端只编码传输（不重复校验）。
+// 字段白名单/校验在服务端 pkg/files/meta（metaextra 已并入）；客户端只编码传输（不重复校验）。
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 	neturl "net/url"
 	"strings"
 
-	"github.com/cocomhub/sproxy/pkg/files/metaextra"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 )
 
 // uploadOptions 是上传的可选项集合。
@@ -40,7 +40,7 @@ const headerFileMetaExtra = "X-File-Meta-Extra"
 // encodeMetaExtraHeader 序列化 extra → base64(JSON)（HTTP 头仅可见 ASCII）。
 // 空/无字段 → 空串（不设头）。
 func encodeMetaExtraHeader(extra map[string]any) (string, error) {
-	extra = metaextra.Trim(extra)
+	extra = meta.TrimExtra(extra)
 	if len(extra) == 0 {
 		return "", nil
 	}
@@ -54,8 +54,8 @@ func encodeMetaExtraHeader(extra map[string]any) (string, error) {
 // UpdateFileMeta 补录已上传文件的元数据（方案②：PUT /api/files/meta）。
 // extra 字段须过白名单（服务端校验；本地 fail-fast 校验同样执行，减少无效请求）。
 func (c *FileClient) UpdateFileMeta(ctx context.Context, filename string, extra map[string]any) error {
-	extra = metaextra.Trim(extra)
-	if err := metaextra.Validate(extra); err != nil {
+	extra = meta.TrimExtra(extra)
+	if err := meta.ValidateExtra(extra); err != nil {
 		return err
 	}
 	body := fmt.Sprintf(`{"extra":%s}`, mustJSON(extra))

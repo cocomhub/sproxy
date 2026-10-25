@@ -14,9 +14,9 @@ import (
 func TestParseMetaExtraHeader_Base64JSON(t *testing.T) {
 	t.Parallel()
 	obj := map[string]any{
-		"code":   "NHDTC-254",
-		"maker":  "NATURAL HIGH",
-		"genres": []string{"痴女", "巨乳"},
+		"code":   "MOVIE-001",
+		"maker":  "STUDIO X",
+		"genres": []string{"ドラマ"},
 	}
 	b, _ := json.Marshal(obj)
 	hdr := base64.StdEncoding.EncodeToString(b)
@@ -24,7 +24,7 @@ func TestParseMetaExtraHeader_Base64JSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("base64 JSON 应通过: %v", err)
 	}
-	if got["code"] != "NHDTC-254" || got["maker"] != "NATURAL HIGH" {
+	if got["code"] != "MOVIE-001" || got["maker"] != "STUDIO X" {
 		t.Fatalf("解码结果错: %v", got)
 	}
 }
@@ -32,11 +32,11 @@ func TestParseMetaExtraHeader_Base64JSON(t *testing.T) {
 // TestParseMetaExtraHeader_RawJSON 验证全 ASCII raw JSON 也可直接传（curl 调试友好）。
 func TestParseMetaExtraHeader_RawJSON(t *testing.T) {
 	t.Parallel()
-	got, err := parseMetaExtraHeader(`{"code":"NHDTC-254","source":"hls"}`)
+	got, err := parseMetaExtraHeader(`{"code":"MOVIE-001","source":"hls"}`)
 	if err != nil {
 		t.Fatalf("raw JSON 应通过: %v", err)
 	}
-	if got["code"] != "NHDTC-254" {
+	if got["code"] != "MOVIE-001" {
 		t.Fatalf("got: %v", got)
 	}
 }

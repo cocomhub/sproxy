@@ -6,7 +6,7 @@ package server
 // files_meta_handler.go 实现 `PUT /api/files/meta`（方案②：已上传文件的元数据补录）。
 //
 // 请求：PUT /api/files/meta?filename=<rel>
-//      body: {"extra": {"code":"NHDTC-254","maker":"NATURAL HIGH", ...}}
+//      body: {"extra": {"code":"MOVIE-001","maker":"STUDIO X", ...}}
 // 响应：{"success":true,"message":"..."}
 //
 // 语义：经 pkg/files.Service.UpdateMeta → 卷 FS 的 UpdateMetaExtra（旁路读-校验-合并-写
@@ -20,7 +20,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/files"
-	"github.com/cocomhub/sproxy/pkg/files/metaextra"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 )
 
 // ActionFileMetaUpdate 是「元数据补录」的业务审计动作（R35-b 登记）。
@@ -54,8 +54,8 @@ func (h *Handlers) updateFileMeta(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
-	extra := metaextra.Trim(req.Extra)
-	if err := metaextra.Validate(extra); err != nil {
+	extra := meta.TrimExtra(req.Extra)
+	if err := meta.ValidateExtra(extra); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
