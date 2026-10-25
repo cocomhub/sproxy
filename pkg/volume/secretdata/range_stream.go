@@ -129,7 +129,7 @@ func (r *rangeStream) Close() error {
 // newRangeStream 构造惰性流：预筛目标区间相交的分块（升序），其余状态留到 Read 推进。
 //
 // ctx 捕获进 readChunk/beginSpan 闭包（struct 不持 ctx 字段，与 sync.RangeSeeker 同范式）。
-func newRangeStream(ctx context.Context, s *SecretdataFS, e *metaEntry, keyBytes, salt []byte, offset, size int64) *rangeStream {
+func newRangeStream(ctx context.Context, s *SecretdataFS, e *metaEntry, keyBytes, salt []byte, rel string, offset, size int64) *rangeStream {
 	end := offset + size
 	chunks := make([]shardseal.ChunkInfo, 0, len(e.meta.Chunks))
 	for _, ci := range e.meta.Chunks {
@@ -140,7 +140,7 @@ func newRangeStream(ctx context.Context, s *SecretdataFS, e *metaEntry, keyBytes
 	}
 	return &rangeStream{
 		readChunk: func(ci shardseal.ChunkInfo) ([]byte, error) {
-			return s.readChunkRangeBytes(ctx, e, keyBytes, salt, ci, offset, end)
+			return s.readChunkRangeBytes(ctx, e, keyBytes, salt, ci, rel, offset, end)
 		},
 		beginSpan: func() *audit.Step { return audit.BeginSpan(ctx, "decrypt") },
 		offset:    offset,

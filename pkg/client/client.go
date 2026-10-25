@@ -169,6 +169,10 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		// 竞态表现为本实例请求「transport connection broken」。Clone 保留默认代理/
 		// HTTP2/TLS 配置语义。
 		httpClient: &http.Client{
+			// Timeout 是**通用兜底**（防连接彻底挂死）。慢操作不走它：`/upload/complete`
+			// 转存大文件经 WithNoClientTimeout(ctx) 临时去掉客户端级超时
+			// （2026-10-23 实测：2.1GB 上传 complete 需 8-10 分钟，旧 300s 会让客户端先
+			// 超时断开而服务端仍在写）。
 			Timeout:   300 * time.Second,
 			Transport: defaultTransportIsolated(), // per-instance 连接池（防跨实例 CloseIdleConnections 竞态）
 		},

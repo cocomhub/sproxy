@@ -173,6 +173,14 @@ func verifyRecoveredChunk(ci shardseal.ChunkInfo, plain []byte) error {
 }
 
 // fileLevelKey 返回条目的文件级派生 key 与盐（meta.Salt base64 解码 + DeriveKey）。
+//
+// **2026-10-25 性能修复：派生结果走 keyCache**。此前每次调用都全量 scrypt——
+// `OpenRangeRead` 每个读窗口（4MiB）调一次 ⇒ 8MiB chunk 就付 2×scrypt（standard 档
+// 实测 26.5ms/次，占热路径单 chunk 178ms 的 ~30%）。同一文件 salt 恒定 ⇒ 派生 key
+// 完全可复用（keyCache 已存在，decryptBlob 早已在用，本函数是遗漏点）。
+//
+// 缓存 key 带 `file|<saltHex>|<algoVersion>` 前缀：与 decryptBlob 的纯 saltHex 键
+// 隔离（后者恒用本 FS 的 s.algoVer，而本函数用 meta 自带版本，跨算法卷需区分）。
 func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 	if e == nil || e.meta == nil {
 		return nil, nil, fmt.Errorf("secretdata: 无效条目，无法派生文件密钥")
@@ -181,14 +189,24 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 	if serr != nil || len(sb) != shardseal.SaltLen {
 		return nil, nil, fmt.Errorf("secretdata: 文件 meta salt 解码失败: %v", serr)
 	}
+	cacheKey := fmt.Sprintf("file|%s|%d", hex.EncodeToString(sb), e.meta.AlgoVersion)
+	if key, ok := s.keyCache.get(cacheKey); ok {
+		return key, sb, nil
+	}
 	key, kerr := shardseal.DeriveKey(s.secret, sb, e.meta.AlgoVersion)
 	if kerr != nil {
 		return nil, nil, fmt.Errorf("secretdata: 派生文件密钥失败: %w", kerr)
 	}
+	s.keyCache.put(cacheKey, key)
 	return key, sb, nil
 }
 
 // readChunkRangeBytes 读取分块 ci 在 [offset, end) 内的明文（块级 blocklet 合并解密）。
+// **2026-10-22 缺陷修复：blocklet 级明文 LRU 缓存**（见 blocklet_cache.go）——RangeSeeker
+// 外部卷窗口 256KiB 远小于视频 GOP blocklet（可达 10MB），无缓存时每个窗口都重拉整段密文
+// （120 次 Range GET / 10MB，且窗口超时中断导致下载内容错位）；缓存后同一 blocklet 只取
+// 一次密文、只解一次，后续窗口直接切缓存明文。
+//
 // 底层 blob 缺失且纠错启用 → 恢复整块明文后直接裁切 [max(offset,ci.Offset), min(end,
 // ci.Offset+ci.OrigSize))（re-encrypt 的 blob 其 blocklet 布局与 meta 索引不同，故经
 // 明文裁切而非 blob 合并，保证随机读取正确）。
@@ -204,9 +222,87 @@ func (s *SecretdataFS) fileLevelKey(e *metaEntry) ([]byte, []byte, error) {
 //  4. Erasure + parity ⇒ 仍回落整块 → parity 恢复（随机读路径的纠错不被短路，既有语义）。
 //
 // 无 RangeReader → 直接整块 io.ReadAll 回退（零回归）。
-func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
+func (s *SecretdataFS) readChunkRangeBytes(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, rel string, offset, end int64) ([]byte, error) {
+	// **设计定稿（2026-10-23 实测结论）**：
+	//   ① 小块（≤ blockCache 预算 64MiB）→ 整块明文缓存（一次拉取/解密，后续窗口直接切）；
+	//   ② 大块 → **逐窗口对齐拉取**：`readChunkRangeBySegments` 的 `alignSpanToWindow` 把
+	//      每个窗口的密文跨度对齐到 maxRangeSpan(4MiB) 边界 ⇒ 相邻窗口区间互不重叠且与
+	//      客户端分块(4MiB)对齐 ⇒ 每窗 1-2 次 Range GET（~1-2s），且磁盘缓存按窗口区间命中。
+	//      **不做整块预取**：实测（sfH/sfI）块首窗整块预取 = 25×4MiB 串行 ⇒ 单请求 78s+、
+	//      4 并发 chunk 排队 ⇒ 超客户端 300s 超时 ⇒ chunk 500 ⇒ 下载零填充错位（sha 全错）。
+	if s.blockCache == nil {
+		return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, rel, offset, end)
+	}
+	rr := syncpkg.AssertRangeReader(s.inner)
+	if rr == nil {
+		return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, rel, offset, end)
+	}
+	key := s.chunkPlainCacheKey(e, ci)
+	if plain, ok := s.blockCache.get(key); ok {
+		return sliceChunkPlain(plain, ci, offset, end)
+	}
+	if ci.OrigSize <= s.blockCache.budget {
+		plain, rerr := s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, rel, ci.Offset, ci.Offset+ci.OrigSize)
+		if rerr != nil {
+			return nil, rerr
+		}
+		s.blockCache.put(key, plain)
+		return sliceChunkPlain(plain, ci, offset, end)
+	}
+	return s.readChunkRangeBytesUncached(ctx, e, keyBytes, salt, ci, rel, offset, end)
+}
+
+// chunkPlainCacheKey 是**块级明文**缓存的 key（文件 + 块序号）。前缀 `dirSeg|metaName|`
+// 与 invalidateBlockletCache 一致（写/删该文件时整体失效）。
+func (s *SecretdataFS) chunkPlainCacheKey(e *metaEntry, ci shardseal.ChunkInfo) string {
+	return fmt.Sprintf("%s|%s|%d", e.dirSeg, e.metaName, ci.Index)
+}
+
+// sliceChunkPlain 从**整块明文** plain（起点 = ci.Offset）切出 [offset,end)∩各目标 blocklet。
+// 返回空切片 = 区间不落入任何段（与既有语义一致，非错误）。
+func sliceChunkPlain(plain []byte, ci shardseal.ChunkInfo, offset, end int64) ([]byte, error) {
+	var out []byte
+	for _, bl := range ci.Blocklets {
+		if !bl.Used || bl.Offset >= end || bl.Offset+bl.Size <= offset {
+			continue
+		}
+		s := max(offset, bl.Offset) - ci.Offset
+		e2 := end
+		if blEnd := bl.Offset + bl.Size; e2 > blEnd {
+			e2 = blEnd
+		}
+		e2 -= ci.Offset
+		if s < 0 || e2 > int64(len(plain)) || s > e2 {
+			return nil, fmt.Errorf("secretdata: 块明文裁切越界（off=%d ci=%d s=%d e=%d plain=%d）",
+				bl.Offset, ci.Offset, s, e2, len(plain))
+		}
+		out = append(out, plain[s:e2]...)
+	}
+	return out, nil
+}
+
+// invalidateBlockletCache 失效条目 e 的**全部**块明文缓存（写/删后调用；前缀 =
+// "<dirSeg>|<metaName>|"）。条目 nil / 无缓存时 no-op。
+func (s *SecretdataFS) invalidateBlockletCache(e *metaEntry) {
+	if e == nil {
+		return
+	}
+	prefix := e.dirSeg + "|" + e.metaName + "|"
+	if s.blockCache != nil {
+		s.blockCache.invalidatePrefix(prefix)
+	}
+	if s.spanCache != nil {
+		s.spanCache.invalidatePrefix(prefix)
+	}
+	if s.stageDL != nil {
+		s.stageDL.invalidate(e)
+	}
+}
+
+// readChunkRangeBytesUncached 是 readChunkRangeBytes 的无缓存本体（原实现，零回归）。
+func (s *SecretdataFS) readChunkRangeBytesUncached(ctx context.Context, e *metaEntry, keyBytes, salt []byte, ci shardseal.ChunkInfo, rel string, offset, end int64) ([]byte, error) {
 	if rr := syncpkg.AssertRangeReader(s.inner); rr != nil {
-		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, chunkRangeOpts{e: e, keyBytes: keyBytes, salt: salt, ci: ci}, offset, end)
+		seg, ok, rerr := s.readChunkRangeBySegments(ctx, rr, chunkRangeOpts{e: e, keyBytes: keyBytes, salt: salt, ci: ci, rel: rel}, offset, end)
 		if rerr == nil && ok {
 			return seg, nil
 		}
@@ -250,6 +346,8 @@ type chunkRangeOpts struct {
 	keyBytes []byte
 	salt     []byte
 	ci       shardseal.ChunkInfo
+	// rel 是逻辑文件路径（窗口缓存按原始目录组织；由 OpenRangeRead 传入）。
+	rel string
 }
 
 // readChunkRangeBySegments 用 RangeReader 按 blocklet 段局部读取：只拉含目标区间的段的
@@ -258,6 +356,13 @@ type chunkRangeOpts struct {
 // 支持 Range 却失败应暴露）；底层不实现 RangeReader 时调用方已前置断言，此处恒 ok=true。
 func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.RangeReader, o chunkRangeOpts, offset, end int64) ([]byte, bool, error) {
 	segPath := path.Join(s.dataSeg(o.e), o.ci.FileName)
+	// **整块 staging 快路径（2026-10-23）**：stageDL 已把该块 blob 整块下到本地（底层
+	// OpenRead：baidupcs 库 Downloader，Range 并行 + 断点，实测 2.13MB/s）——直接
+	// 从本地密文解密，零远端 Range 请求（对比逐窗 Range 整流 0.55MB/s 快 4 倍）。未装配/
+	// 未就绪/下载失败 → 回源走既有 blocklet 段读路径（fail-open 不阻塞）。
+	if out, ok := s.stageChunkRead(ctx, o, offset, end); ok {
+		return out, true, nil
+	}
 	// **salt + 目标段单次合并请求（2026-10-21）**：块 blob 布局为
 	// `[R 128B][8B 密文流长][salt 32B][boot 段 40B][数据段…]`，boot 后各段间仅 0-63B
 	// 随机间隙 ⇒ salt 末尾到首段起点仅 40-103B。故一次 Range 从 **salt 起点**覆盖到
@@ -267,14 +372,7 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 	if len(targets) == 0 {
 		return nil, true, nil
 	}
-	saltOff := shardseal.BlockSaltOffset()
-	spanOff := saltOff
-	last := targets[len(targets)-1]
-	spanEnd := last.EncOffset + last.EncSize
-	if spanEnd <= spanOff {
-		return nil, true, fmt.Errorf("secretdata: blocklet 段区间非法（off=%d end=%d）", spanOff, spanEnd)
-	}
-	span, ok, err := syncpkg.RangeReadAll(rr, ctx, segPath, spanOff, spanEnd-spanOff)
+	span, spanOff, ok, err := s.segmentSpanFetch(ctx, rr, segPath, o, offset, end, targets)
 	if err != nil {
 		return nil, true, err
 	}
@@ -283,25 +381,63 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		// 避免下游 `fmt.Errorf("…: %w", nil)` 生成畸形错误（评审 P3 修复，2026-10-21）。
 		return nil, true, syncpkg.ErrUnsupported
 	}
-	// salt 从合并区间内切片（偏移相对 spanOff）并校验（防块被替换）。
-	saltRel := saltOff - spanOff
-	if saltRel < 0 || saltRel+shardseal.SaltLen > int64(len(span)) {
-		return nil, true, fmt.Errorf("secretdata: salt 越出合并区间（rel=%d len=%d）", saltRel, len(span))
+	out, derr := decryptSegmentWindows(o, span, spanOff, offset, end, targets)
+	if derr != nil {
+		return nil, true, derr
 	}
-	if verr := shardseal.VerifyBlockSalt(span[saltRel:saltRel+shardseal.SaltLen], o.salt); verr != nil {
-		return nil, true, verr
+	return out, true, nil
+}
+
+// segmentSpanFetch 校验块内 salt 并拉取目标 blocklet 覆盖的合并密文区间（含跨度对齐），
+// 返回 (span, spanOff, ok, err)（readChunkRangeBySegments 抽离：salt 校验 + 跨度计算 +
+// 4MiB 对齐 + 分段拉取，降 gocognit）。
+//
+// **2026-10-25 统一缓存口**：整流回源前**先查窗口缓存**（windowCacheRead）——命中即
+// 免远端；未命中再走远端并**同时回填窗口缓存 + spanCache**（双写，保证两路径下次命中）。
+// 消除「窗口缓存命中但整流仍拉远端」的双轨浪费（实测纯热 160/268 chunk 仍整流）。
+func (s *SecretdataFS) segmentSpanFetch(ctx context.Context, rr syncpkg.RangeReader, segPath string, o chunkRangeOpts, offset, end int64, targets []shardseal.BlockletInfo) ([]byte, int64, bool, error) {
+	// 先尝试窗口缓存（命中 ⇒ 直接返回窗口内 blocklet 段，不再走远端整流）。
+	if out, ok := s.windowCacheRead(o, offset, end); ok {
+		return out, 0, true, nil
 	}
+	saltBytes, saltErr := s.readBlockSalt(ctx, rr, segPath, o)
+	if saltErr != nil {
+		return nil, 0, false, saltErr
+	}
+	if verr := shardseal.VerifyBlockSalt(saltBytes, o.salt); verr != nil {
+		return nil, 0, false, verr
+	}
+	spanOff := targets[0].EncOffset
+	last := targets[len(targets)-1]
+	spanEnd := last.EncOffset + last.EncSize
+	if spanEnd <= spanOff {
+		return nil, 0, false, fmt.Errorf("secretdata: blocklet 段区间非法（off=%d end=%d）", spanOff, spanEnd)
+	}
+	// **跨度对齐（2026-10-23 实测补丁）**：磁盘缓存 key 含 (off,end) 精确区间 ⇒ 相邻窗口
+	// 请求的 span（= blocklet 密文起点 ± 随机间隙）微差 ⇒ 逐窗不命中、重复拉取（实测
+	// 100MiB 块 4MiB 窗重复拉 24/25 次、放大 3.9x）。对齐到 maxRangeSpan 边界后相邻窗口
+	// 区间一致 ⇒ 磁盘缓存整段命中（只多拉间隙字节，不越界）。未配磁盘缓存时不改区间。
+	if s.spanCache != nil {
+		spanOff, spanEnd = alignSpanToWindow(spanOff, spanEnd, o)
+	}
+	span, ok, err := s.readChunkRangeSpan(ctx, rr, segPath, o, offset, end, spanOff, spanEnd)
+	return span, spanOff, ok, err
+}
+
+// decryptSegmentWindows 从合并区间 span 内按 meta blocklet 索引切出各段密文并独立解密，
+// 裁切到 [offset,end)∩blocklet 后拼接（readChunkRangeBySegments 的块内循环抽离，降 gocognit）。
+func decryptSegmentWindows(o chunkRangeOpts, span []byte, spanOff, offset, end int64, targets []shardseal.BlockletInfo) ([]byte, error) {
 	var out []byte
 	for _, bl := range targets {
 		rel := bl.EncOffset - spanOff
 		if rel < 0 || rel+bl.EncSize > int64(len(span)) {
-			return nil, true, fmt.Errorf("secretdata: blocklet 段 %d 越出合并区间（rel=%d enc=%d span=%d）",
+			return nil, fmt.Errorf("secretdata: blocklet 段 %d 越出合并区间（rel=%d enc=%d span=%d）",
 				bl.Offset, rel, bl.EncSize, len(span))
 		}
 		seg := span[rel : rel+bl.EncSize]
 		plain, derr := shardseal.DecryptBlockletSegmentStandalone(o.keyBytes, seg, bl, o.ci.Offset)
 		if derr != nil {
-			return nil, true, fmt.Errorf("secretdata: 解密 blocklet（offset=%d）失败: %w", bl.Offset, derr)
+			return nil, fmt.Errorf("secretdata: 解密 blocklet（offset=%d）失败: %w", bl.Offset, derr)
 		}
 		// 裁切到 [offset, end)∩blocklet。
 		segStart := max(offset, bl.Offset)
@@ -311,7 +447,178 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		}
 		out = append(out, plain[segStart-bl.Offset:segEnd-bl.Offset]...)
 	}
-	return out, true, nil
+	return out, nil
+}
+
+// stageChunkRead 是**本地 staging 窗口读快路径**（2026-10-25 v2：blocklet 聚合窗口 + 独立缓存）。
+// 窗口未就绪 ⇒ 触发下载 + 有界等待；超时回源走既有 blocklet 段读路径。
+func (s *SecretdataFS) stageChunkRead(ctx context.Context, o chunkRangeOpts, offset, end int64) ([]byte, bool) {
+	if s.stageDL == nil {
+		return nil, false
+	}
+	blobs, ok := s.stageDL.readWindows(ctx, o, offset, end)
+	if !ok {
+		return nil, false // 超时回源（读永不无限阻塞）
+	}
+	if len(blobs) == 0 {
+		return nil, true
+	}
+	return decryptWinBlobs(blobs, o, offset, end), true
+}
+
+// decryptWinBlobs 逐窗内按 blocklet 段独立解密（GCM 段自描述；只解相交段）。
+// 任一窗内容与 meta 不符 / 解密失败 ⇒ 返回 nil（调用方回源重新验证，fail-closed）。
+func decryptWinBlobs(blobs []winBlob, o chunkRangeOpts, offset, end int64) []byte {
+	var out []byte
+	for _, wb := range blobs {
+		for _, bIdx := range wb.Blets {
+			bl := o.ci.Blocklets[bIdx]
+			rel := bl.EncOffset - wb.Win.EncStart
+			if rel < 0 || rel+bl.EncSize > int64(len(wb.Data)) {
+				return nil // 窗口内容与 meta 不符 ⇒ 回源
+			}
+			seg := wb.Data[rel : rel+bl.EncSize]
+			plain, derr := shardseal.DecryptBlockletSegmentStandalone(o.keyBytes, seg, bl, o.ci.Offset)
+			if derr != nil {
+				return nil // 解密失败（staging 被篡改）→ 回源
+			}
+			segStart := max(offset, bl.Offset)
+			segEnd := end
+			if blEnd := bl.Offset + bl.Size; segEnd > blEnd {
+				segEnd = blEnd
+			}
+			out = append(out, plain[segStart-bl.Offset:segEnd-bl.Offset]...)
+		}
+	}
+	return out
+}
+
+// windowCacheRead 是整流路径的**窗口缓存统一读口**（2026-10-25 双轨消除）：
+// 命中窗口缓存 ⇒ 直接解密返回并**不再走远端**（窗口密文起于 blocklet EncOffset，
+// 不含块头 salt；salt 用文件级盐（meta.Salt）本地构造，见 decryptWinBlobs）。
+// 未命中 ⇒ false（调用方继续远端整流）。**只查已就绪缓存，不触发下载/不等待**——
+// 整流路径自有等待/回源纪律（windowCacheRead 用于「热路径命中」，避免重复拉远端）。
+func (s *SecretdataFS) windowCacheRead(o chunkRangeOpts, offset, end int64) ([]byte, bool) {
+	if s.stageDL == nil {
+		return nil, false
+	}
+	// 只命中「全部窗口已就绪」的缓存；未就绪 ⇒ false（不触发下载，整流继续）。
+	blobs, ok := s.stageDL.readWindowsReadyOnly(o, offset, end)
+	if !ok || len(blobs) == 0 {
+		return nil, false
+	}
+	return decryptWinBlobs(blobs, o, offset, end), true
+}
+
+// readBlockSalt 读取块 blob 头部 salt(32B)：优先内存/磁盘缓存，未命中按 32B 精确区间
+// 拉取并回填（一次极小请求，替代「把 salt 并入数据 span」的旧做法——后者使读块深处
+// 必拉 [salt→目标段] 整段前缀，是大块随机读超时的根因）。
+//
+// **2026-10-23 实测补丁**：块内 salt 与文件级 meta.Salt 同源（写路径每块复写同一盐），
+// 读路径可直接用文件级盐（fileSalt）本地构造，无需按块发 28B Range GET（顺序读时每
+// blocklet 一次 ⇒ 一次 4MiB 下载发出 118 次 salt 请求）。保留旧路径仅在 fileSalt 缺失
+// （不应发生；fail-closed）时兜底。
+func (s *SecretdataFS) readBlockSalt(ctx context.Context, rr syncpkg.RangeReader, segPath string, o chunkRangeOpts) ([]byte, error) {
+	saltOff := shardseal.BlockSaltOffset()
+	key := s.saltCacheKey(o.e, o.ci)
+	if s.blockCache != nil {
+		if v, ok := s.blockCache.get(key); ok {
+			return v, nil
+		}
+	}
+	if s.spanCache != nil {
+		if v, ok := s.spanCache.get(key); ok {
+			s.putSaltInMemory(key, v)
+			return v, nil
+		}
+	}
+	raw, ok, err := syncpkg.RangeReadAll(rr, ctx, segPath, saltOff, shardseal.SaltLen)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, syncpkg.ErrUnsupported
+	}
+	if len(raw) != shardseal.SaltLen {
+		return nil, fmt.Errorf("secretdata: salt 读取长度 %d 应为 %d", len(raw), shardseal.SaltLen)
+	}
+	s.putSaltInMemory(key, raw)
+	if s.spanCache != nil {
+		s.spanCache.put(key, raw)
+	}
+	return raw, nil
+}
+
+// putSaltInMemory 把 salt 回填内存缓存（nil 安全）。
+func (s *SecretdataFS) putSaltInMemory(key string, salt []byte) {
+	if s.blockCache != nil {
+		s.blockCache.put(key, salt)
+	}
+}
+
+// saltCacheKey 是块 blob 头部 salt 的缓存 key（文件 + 块序号）。
+func (s *SecretdataFS) saltCacheKey(e *metaEntry, ci shardseal.ChunkInfo) string {
+	return fmt.Sprintf("%s|%s|%d|salt", e.dirSeg, e.metaName, ci.Index)
+}
+
+// maxRangeSpan 是单次底层 Range 读取的窗口上限（2026-10-22 实测：百度 CDN 单次
+// Range GET > 4MiB 返回 403 sign error；4MiB 与 256KiB 均正常）。
+const maxRangeSpan = 4 << 20
+
+// alignSpanToWindow 把跨度 [spanOff, spanEnd) 对齐到 maxRangeSpan 边界（磁盘缓存命中关键，
+// 2026-10-23 实测补丁）：起点向下、终点向上取整到 4MiB；对齐后终点钳制回块 blob 实际大小
+// （EncSize，避免 416/长度校验失败）。未配磁盘缓存时不调用（零回归）。
+func alignSpanToWindow(spanOff, spanEnd int64, o chunkRangeOpts) (int64, int64) {
+	if r := spanOff % maxRangeSpan; r != 0 {
+		spanOff -= r
+	}
+	if r := spanEnd % maxRangeSpan; r != 0 {
+		spanEnd += maxRangeSpan - r
+	}
+	if spanEnd > o.ci.EncSize {
+		spanEnd = o.ci.EncSize
+	}
+	return spanOff, spanEnd
+}
+
+// readChunkRangeSpan 拉取 [spanOff, spanEnd) 的密文（含 salt + 目标 blocklet 段），
+// 超 maxRangeSpan 时按窗口分段（每段 ≤ maxRangeSpan）再拼接。每段从各自起点拉取
+// （段间可能有 blocklet 间隙，但都在窗口内）；salt 校验由调用方对拼接后的区间做。
+// **磁盘缓存接线（2026-10-22）**：配置了 `SpanCacheDir` 时区间密文落本机 staging，
+// 重读/顺序读命中即零远端流量（见 span_disk_cache.go）。
+func (s *SecretdataFS) readChunkRangeSpan(ctx context.Context, rr syncpkg.RangeReader, segPath string,
+	o chunkRangeOpts, offset, end, spanOff, spanEnd int64) ([]byte, bool, error) {
+	var raw []byte
+	var err error
+	if s.spanCache != nil {
+		key := s.spanDiskCacheKey(o.e, o.ci, spanOff, spanEnd)
+		raw, err = s.readSpanCached(ctx, rr, segPath, key, spanOff, spanEnd)
+	} else {
+		raw, err = s.rangeReadSpanRaw(ctx, rr, segPath, spanOff, spanEnd)
+	}
+	if err != nil {
+		return nil, true, err
+	}
+	return raw, true, nil
+}
+
+// rangeReadSpanRaw 按 maxRangeSpan 窗口分段拉取 [spanOff, spanEnd)（每段 ≤4MiB；百度 CDN
+// 单次 Range > 4MiB 返回 403 sign error，2026-10-22 实测），逐段拼接返回。
+func (s *SecretdataFS) rangeReadSpanRaw(ctx context.Context, rr syncpkg.RangeReader, segPath string, spanOff, spanEnd int64) ([]byte, error) {
+	var out []byte
+	for cur := spanOff; cur < spanEnd; {
+		win := min(spanEnd-cur, maxRangeSpan)
+		seg, ok, err := syncpkg.RangeReadAll(rr, ctx, segPath, cur, win)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, syncpkg.ErrUnsupported
+		}
+		out = append(out, seg...)
+		cur += win
+	}
+	return out, nil
 }
 
 // selectRangeBlocklets 返回与 [offset,end) 相交的**已使用** blocklet 段（保持 meta 顺序，

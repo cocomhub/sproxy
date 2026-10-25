@@ -68,7 +68,13 @@ func (s *externalDownloadSource) Open(ctx context.Context) (files.SeekReadCloser
 	// 无 RangeReader 的外部卷（如 S3 网关后端）：退**整流 seeker**（P1：此前直接报错 →
 	// /download 恒 500，本函数注释承诺的「调用方退整流 200」并不存在）。
 	var seeker files.SeekReadCloser
-	if rs, err := syncpkg.NewRangeSeeker(ctx, s.fs, s.rel, s.size); err == nil {
+	// **窗口对齐 maxRangeSpan（2026-10-24 实测优化）**：外部卷默认窗口 256KiB ⇒ 8MiB
+	// 的 /download/chunk 要串行重开 32 次窗口（每次 OpenRangeRead + 段定位 + 解密），
+	// 实测 chunk 中位 20s。提升到 4MiB（= 百度 CDN 单次 Range 上限，也是 blocklet
+	// 段跨度的自然上界）：8MiB chunk 只需 2 次窗口，本地 staging 命中时几乎无额外开销。
+	// seek 仍按窗口重开（4MiB 粒度对播放首帧足够）。
+	win := int64(4 << 20)
+	if rs, err := syncpkg.NewRangeSeekerWithHint(ctx, s.fs, s.rel, s.size, win); err == nil {
 		seeker = rs
 	} else {
 		seeker = syncpkg.NewStreamSeeker(ctx, s.fs, s.rel, s.size)
@@ -76,7 +82,12 @@ func (s *externalDownloadSource) Open(ctx context.Context) (files.SeekReadCloser
 	if s.fileMeta != nil {
 		if fm, ferr := s.fileMeta(ctx, s.rel); ferr == nil && fm != nil {
 			// meta 缺失/读取失败 → 直通（不误报）；meta 可用 → 逐分块校验。
-			v := meta.VerifyReadSeeker(seeker, fm)
+			// **SkipChunkAhead（2026-10-25 性能修复）**：外部卷读路径自带逐段校验
+			// （secretdata：窗口密文 sha256 + 逐 blocklet GCM；trusted 装饰器：meta
+			// 逐分块流式校验）—— 的「从分块中间起始回读整块」纯属
+			// 冗余（实测 2.1GB / 4MiB 请求 × 72MB 块 = 18 倍放大）。保留流式 consume
+			// 逐块校验与 EOF 总哈希校验（本包装器仍提供），只跳过回读式先验。
+			v := meta.VerifyReadSeekerWithOpts(seeker, fm, meta.VerifyOpts{SkipChunkAhead: true})
 			if vc, ok := v.(files.SeekReadCloser); ok {
 				return vc, nil
 			}
@@ -163,41 +174,59 @@ func (h *Handlers) resolveExternalDownload(r *http.Request, owner, rel, filename
 	// （共享卷自动加 <owner>/ 前缀隔离，独享卷无前缀——评审 M3 + 用户裁定统一入口）。
 	stripped := strings.TrimPrefix(rel, "user/")
 	for _, v := range candidates {
-		be := h.volSet.External(v.Name)
-		if be == nil {
-			continue
+		fsys, ownerKey, e, ok := h.resolveCandidateVolume(r, v, owner, stripped)
+		if !ok {
+			continue // 该候选不可用（无后端 / 路径无权 / 无此文件）→ 下一候选
 		}
-		raw := be.FS()
-		if raw == nil {
-			// 后端已登记但 FS 视图未就绪（nf 安全：Guard 恒非 nil，必须在 Wrap 前判裸 FS）。
-			continue
-		}
-		fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
-		// 键 = 用户可见路径经**唯一映射入口**（externalVolumeKey：ResolveUserLocation +
-		// FSPath，恒 `<owner>/user/<rel>`）——与上传/删除/列举/转存同口径。
-		ownerKey, kOK := externalVolumeKey(v, owner, stripped)
-		if !kOK {
-			// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
-			continue
-		}
-		// **评审 I2 修复（跨 owner 隔离）**：egress 卷代表凭证授的持有侧 owner——本地
-		// 请求 owner 必须与 holder_owner 一致。否则默认 ACL 开放下任一本地 owner 经
-		// 出口卷剥自己的前缀、按凭证 Owner 读持有侧数据（跨 owner 越权读）。
-		// 装配期已强制 holder_owner 必填（NewBackend fail-closed），此处请求时校验。
-		if !egressOwnerMatch(v, owner) {
-			continue // 非该 owner 请求 egress 卷 → 不命中（404，不泄卷存在性）
-		}
-		e, err := fsys.Stat(r.Context(), ownerKey)
-		if err != nil || e == nil || e.IsDir {
-			continue // 该卷无此文件/目录 → 下一候选
-		}
-		// 命中卷：分 A/B/C 态（volumePrivate 见 volumes.go：secretdata 恒 true）。
-		src := newExternalSource(fsys, ownerKey, e, h.verifySkipped())
-		if resolved := h.externalStateFor(v, forceForward, fsys, r, ownerKey, filename, src); resolved != nil {
+		// 命中卷：分 A/B/C 态 + 直连下载阈值。
+		if resolved := h.resolveHitVolume(v, forceForward, fsys, r, ownerKey, filename, e); resolved != nil {
 			return resolved
 		}
 	}
 	return nil
+}
+
+// resolveCandidateVolume 解析单个候选卷的读视图与命中的 owner 键/条目（gocognit 收敛，
+// 2026-10-23）：后端存在性 → FS 包装（Guard+Wrap）→ owner 键映射（唯一入口）→ egress
+// 跨 owner 校验（评审 I2）→ Stat 命中判定。任一步失败返回 ok=false（调用方继续下一候选）。
+func (h *Handlers) resolveCandidateVolume(r *http.Request, v volume.Volume, owner, stripped string) (syncpkg.FS, string, *syncpkg.Entry, bool) {
+	be := h.volSet.External(v.Name)
+	if be == nil {
+		return nil, "", nil, false
+	}
+	raw := be.FS()
+	if raw == nil {
+		// 后端已登记但 FS 视图未就绪（nf 安全：Guard 恒非 nil，必须在 Wrap 前判裸 FS）。
+		return nil, "", nil, false
+	}
+	fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
+	// 键 = 用户可见路径经**唯一映射入口**（externalVolumeKey：ResolveUserLocation +
+	// FSPath，恒 `<owner>/user/<rel>`）——与上传/删除/列举/转存同口径。
+	ownerKey, kOK := externalVolumeKey(v, owner, stripped)
+	if !kOK {
+		// 路径非法（域侧已校验应不可达）或无权（candidates 已 ACL 过滤）——fail-closed。
+		return nil, "", nil, false
+	}
+	// **评审 I2 修复（跨 owner 隔离）**：egress 卷代表凭证授的持有侧 owner——本地请求
+	// owner 必须与 holder_owner 一致（否则任一本地 owner 可经出口卷跨 owner 越权读）。
+	if !egressOwnerMatch(v, owner) {
+		return nil, "", nil, false // 不命中（404，不泄卷存在性）
+	}
+	e, err := fsys.Stat(r.Context(), ownerKey)
+	if err != nil || e == nil || e.IsDir {
+		return nil, "", nil, false // 该卷无此文件/目录
+	}
+	return fsys, ownerKey, e, true
+}
+
+// resolveHitVolume 解析「命中卷」的下载路径：先按 A/B/C 态（302 直链 / 服务端转发），
+// 再尝试直连下载（direct_download 阈值内）。返回 nil = 该候选不提供路径（调用方继续下一候选）。
+func (h *Handlers) resolveHitVolume(v volume.Volume, forceForward bool, fsys syncpkg.FS, r *http.Request, ownerKey, filename string, e *syncpkg.Entry) *downloadPath {
+	src := newExternalSource(fsys, ownerKey, e, h.verifySkipped())
+	if resolved := h.externalStateFor(v, forceForward, fsys, r, ownerKey, filename, src); resolved != nil {
+		return resolved
+	}
+	return h.externalStateFor(v, forceForward, fsys, r, ownerKey, filename, src)
 }
 
 // egressOwnerMatch 判定本地请求 owner 是否匹配 egress 卷的 holder_owner（评审 I2）：

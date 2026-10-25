@@ -114,6 +114,22 @@ type Options struct {
 	// 注：`size<0`（未知长度）时按声明值的预检不可用，内存路径改按本上限 +1 读取并超限拒绝
 	// （`readAllBounded`，2026-10-19），流式路径对未知长度直接 fail-closed（ErrUnknownSourceSize）。
 	MaxFileBytes sizex.ByteSize
+
+	// BlockletCacheBytes 是 blocklet 级明文 LRU 缓存的**字节预算**（2026-10-22 缺陷
+	// 修复，见 blocklet_cache.go）。0 = 默认 64MiB；**负值 = 关闭缓存**（测试/极小内存
+	// 场景显式关）。
+	//
+	// 为何需要：RangeSeeker 外部卷窗口 256KiB « 视频 GOP blocklet（可达 10MB）⇒ 无缓存
+	// 时每窗口重拉整段密文（实测 10MB 顺序读发 120 次 Range GET，且窗口超时中断使下载
+	// 内容错位）。缓存把「窗口读」与「网络读」解耦（同一 blocklet 只取一次、只解一次）。
+	BlockletCacheBytes sizex.ByteSize
+
+	// SpanCacheDir 是块密文**本机磁盘**缓存目录（2026-10-22，见 span_disk_cache.go）。
+	// 空 = 关闭（**默认关闭零回归**——用户明确启用才落盘）。内层为 staging 目录风格：
+	// 落 `<SpanCacheDir>/<卷桶>` 下，受 `SpanCacheBytes` 预算 + 定期清理 + 空间不足降级管束。
+	SpanCacheDir string
+	// SpanCacheBytes 是磁盘缓存字节预算（0 = 默认 512MiB；仅 `SpanCacheDir` 非空时生效）。
+	SpanCacheBytes sizex.ByteSize
 }
 
 // ErrMaxFileBytes 是单文件超上限哨兵错误（writeFile 在读取前拦截）。
@@ -205,6 +221,18 @@ type SecretdataFS struct {
 	stagingMu    sync.RWMutex
 	stagingQuota syncpkg.StagingQuotaTracker
 
+	// blockCache 是 blocklet 级明文 LRU 缓存（2026-10-22 缺陷修复，见 blocklet_cache.go）。
+	// 无缓存（未装配/预算<=0）时 nil，读路径零回归。写/删后经 invalidatePrefix 失效对应文件
+	// 条目，防陈旧明文被后续读命中。
+	blockCache *blockletCache
+	// spanCache 是本机**磁盘**块密文跨度缓存（2026-10-22，见 span_disk_cache.go）：staging
+	// 目录 + 字节预算 + 定期清理 + 空间不足自动降级。nil = 未装配（默认关闭零回归）。
+	spanCache *spanDiskCache
+	// stageDL 是**窗口级缓存下载器**（2026-10-25 v2，见 stage_downloader.go）：块 blob 的
+	// blocklet 按密文边界聚合为 ≤4MiB 窗口，每窗独立 Range 下载 + 独立缓存；读只下目标窗。
+	// nil = 未装配（SpanCacheDir 为空/预算 0，默认关闭零回归）。
+	stageDL *stageDL
+
 	mu      sync.RWMutex
 	index   map[string]*metaEntry
 	dirs    map[string]struct{} // 已知逻辑目录（子目录发现/进入用）
@@ -252,6 +280,59 @@ type SecretdataFS struct {
 	gcCancel context.CancelFunc
 }
 
+// attachStageDownloader 装配整块 staging 下载器（SpanCacheDir 非空时；失败仅告警）。
+// 目录落 `<SpanCacheDir>/stage`，单块上限复用 SpanCacheBytes（0 = 默认 512MiB）。
+// **只在外部/网盘卷有意义**：本地卷底层 OpenRead 已是本地读，整块 staging 无收益。
+func attachStageDownloader(fs *SecretdataFS, opts Options) {
+	if opts.SpanCacheDir == "" {
+		return
+	}
+	if lv, ok := fs.inner.(syncpkg.LocalVolume); ok && lv.IsLocalVolume() {
+		return // 本地卷无需 staging（避免多一份磁盘占用）
+	}
+	budget := opts.SpanCacheBytes.Bytes()
+	if budget == 0 {
+		budget = defaultSpanCacheBytes
+	}
+	fs.stageDL = newStageDL(filepath.Join(opts.SpanCacheDir, "stage"), budget, fs)
+}
+
+// attachSpanDiskCache 装配本机磁盘缓存（SpanCacheDir 非空时；失败仅告警不阻断读路径）。
+func attachSpanDiskCache(fs *SecretdataFS, opts Options) {
+	if opts.SpanCacheDir == "" {
+		return
+	}
+	budget := opts.SpanCacheBytes.Bytes()
+	if budget == 0 {
+		budget = defaultSpanCacheBytes
+	}
+	cache, cerr := newSpanDiskCache(filepath.Join(opts.SpanCacheDir, "secretdata"), budget)
+	if cerr != nil {
+		fmt.Fprintf(os.Stderr, "secretdata: 磁盘缓存装配失败（继续直连远端）: %v\n", cerr)
+		return
+	}
+	fs.spanCache = cache
+	cache.startSweeper(context.Background(), defaultSpanCacheSweepInterval)
+}
+
+// prepareTempDir 解析并创建临时目录：未配置时用 os.MkdirTemp（随机名 + 0700，避免
+// os.TempDir() 下固定可预测的公开可写路径，Sonar go:S5445）；显式配置的同样收紧为 0700。
+// 返回 owned=true 表示目录由本 FS 自建（Close 时清理）。
+func prepareTempDir(opts *Options) (owned bool, err error) {
+	if opts.TempDir == "" {
+		dir, mkErr := os.MkdirTemp("", "sproxy-secretdata-")
+		if mkErr != nil {
+			return false, fmt.Errorf("secretdata: 创建默认临时目录失败: %w", mkErr)
+		}
+		opts.TempDir = dir
+		owned = true
+	}
+	if mkErr := os.MkdirAll(opts.TempDir, 0o700); mkErr != nil {
+		return false, fmt.Errorf("secretdata: 创建临时目录 %s 失败: %w", opts.TempDir, mkErr)
+	}
+	return owned, nil
+}
+
 // NewFS 构造 secretdata FS。inner：底层卷 FS（secretdata 根视图）；opts：参数。
 func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if opts.Secret == nil {
@@ -279,20 +360,9 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	if opts.Erasure && opts.Dedup {
 		return nil, fmt.Errorf("secretdata: Erasure 与 Dedup 互斥（纠错仅常规写路径，组合未支持）")
 	}
-	ownedTemp := false
-	if opts.TempDir == "" {
-		// 默认临时目录：os.MkdirTemp 生成随机名（不可预测 + 0700），避免
-		// os.TempDir() 下固定可预测的公开可写路径（Sonar go:S5445）。
-		dir, err := os.MkdirTemp("", "sproxy-secretdata-")
-		if err != nil {
-			return nil, fmt.Errorf("secretdata: 创建默认临时目录失败: %w", err)
-		}
-		opts.TempDir = dir
-		ownedTemp = true
-	}
-	// 显式配置的 TempDir 同样收紧为 0700 并在创建时校验归属。
-	if err := os.MkdirAll(opts.TempDir, 0o700); err != nil {
-		return nil, fmt.Errorf("secretdata: 创建临时目录 %s 失败: %w", opts.TempDir, err)
+	ownedTemp, terr := prepareTempDir(&opts)
+	if terr != nil {
+		return nil, terr
 	}
 	// **启动清理陈旧明文残留**（Step 3，2026-10-18）：Step 2 起读路径**按需解密、不落任何临时
 	// 文件** ⇒ temp 目录里任何 `decrypt-*` 都只能是**升级前崩溃**遗留的明文 ⇒ 启动时 best-effort
@@ -303,9 +373,14 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		index: map[string]*metaEntry{}, dirs: map[string]struct{}{}, dirSegs: map[string]string{},
 		dirIDs: map[string]string{}, dirParents: map[string]string{},
 		dirMTime: map[string]int64{}, keyCache: newDeriveCache(64),
-		loadGate:  make(chan struct{}, maxParallelLoads(&alg)),
-		dedupPool: map[string]*dedupBlob{},
+		loadGate:   make(chan struct{}, maxParallelLoads(&alg)),
+		dedupPool:  map[string]*dedupBlob{},
+		blockCache: newBlockletCache(opts.BlockletCacheBytes.Bytes()),
 	}
+	// 本机磁盘缓存（可选；目录非空才装配，失败仅告警不阻断——缓存是尽力而为设施）。
+	attachSpanDiskCache(fs, opts)
+	// 整块 staging 下载器（同开关；SpanCacheDir 非空才启用）。
+	attachStageDownloader(fs, opts)
 	if err := fs.loadIndex(context.Background()); err != nil {
 		return nil, err
 	}
@@ -343,6 +418,12 @@ func (b *backend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, er
 func (b *backend) Close() error {
 	if b.fs.gcCancel != nil {
 		b.fs.gcCancel() // 停止后台 GC goroutine
+	}
+	if b.fs.stageDL != nil {
+		_ = b.fs.stageDL.close() // 窗口级缓存下载器（保留缓存文件，由清理纪律管）
+	}
+	if b.fs.spanCache != nil {
+		b.fs.spanCache.close() // 停止磁盘缓存 sweeper 并落盘索引
 	}
 	// 仅清理 NewFS 自建的随机临时目录；显式配置的 TempDir 归调用方所有，不碰。
 	if b.fs.ownedTemp {
@@ -562,7 +643,7 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 	// 先下载+解密成 []byte 再包流 ⇒ 首帧要等整个 4MiB 窗口物化（网盘场景数秒）。
 	// 现改为 `rangeStream`（逐块「读→解→交」，首字节只需第一块）——crypto 层段级解密
 	// 能力（DecryptBlockletSegmentStandalone/decryptBlockletAt）本就支持，这里只做流式接线。
-	return newRangeStream(ctx, s, e, keyBytes, salt, offset, size), nil
+	return newRangeStream(ctx, s, e, keyBytes, salt, key, offset, size), nil
 }
 
 // readChunkBlob 读取底层单个分块 blob（仅含目标区间的块被下载）。去重引用文件的数据
@@ -731,6 +812,8 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	// 即时物理删（删即释放）：meta + 全部分块 + parity 一次删完（best-effort；去重文件
 	// 释放去重池引用 + 删本容器 meta）。
 	s.removeVersionMeta(ctx, key, e)
+	// 失效该文件全部 blocklet 缓存（防陈旧明文被后续读命中）。
+	s.invalidateBlockletCache(e)
 	// 一次性提交内存态：移出索引、扣 usage、推进版本、回收空目录（原子，无半态）。
 	delete(s.index, key)
 	s.volVersion++
@@ -1364,7 +1447,9 @@ func (s *SecretdataFS) commitLocked(ctx context.Context, wc writeCtx, e *metaEnt
 		if s.usage < 0 {
 			s.usage = 0
 		}
+		// 覆盖写：旧条目物理删，缓存一并失效（防旧明文被后续读命中）。
 		s.removeVersionMeta(ctx, wc.rel, prev)
+		s.invalidateBlockletCache(prev)
 	}
 	s.mu.Unlock()
 	return nil

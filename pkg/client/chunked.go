@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,8 +29,12 @@ import (
 )
 
 const (
+	// defaultConcurrency 是**上传**默认并发（受网盘写配额限制，保守取 4）。
 	defaultConcurrency = 4
-	maxRetries         = 3
+	// defaultDownloadConcurrency 是**下载**默认并发（2026-10-24 实测：热路径 4→16
+	// 并发使 2.1GB 下载 104.9s → 54.7s；取 8 作为默认，兼顾网盘读配额与磁盘吞吐）。
+	defaultDownloadConcurrency = 8
+	maxRetries                 = 3
 
 	// UploadIDAlreadyExists 是服务端返回的特殊 upload_id 值，表示文件已存在（通过 checksum 匹配）。
 	// 此值由服务端协议定义，变更需同步更新。
@@ -116,6 +121,11 @@ type downloadChunkParams struct {
 	Progress  *int64
 	Cancel    context.CancelFunc
 	Done      <-chan struct{}
+	// Failed 是**失败计数共享桶**（2026-10-23）：单个 chunk 重试耗尽后记录到
+	// 桶内（而非直接 p.Cancel 拖垮整个下载）——主流程收尾时对失败 chunk 单独重试，
+	// 仍失败才 fail-closed 删除输出文件。外部卷大文件（4MiB chunk + 网盘慢）下，
+	// 偶发超时不应让一次下载静默产出零填充损坏文件。
+	Failed *sync.Map
 }
 
 // tryResumeResult 是 tryResumeSession 的返回值类型，用于替代三返回值模式。
@@ -347,9 +357,13 @@ func (u *ChunkedUploader) uploadChunkIndices(ctx context.Context, chunkIndices [
 // 才返回携带 body 文本的确定性错误，调用方可判错决策。
 func (u *ChunkedUploader) completeOnce(ctx context.Context) (*ChunkedUploadResult, error) {
 	completeBody, _ := json.Marshal(chunkedCompleteRequest{UploadID: u.getUploadID()})
-	resp, err := u.client.doRequest(ctx, "POST", "/upload/complete", bytes.NewReader(completeBody), http.Header{
-		headerContentType: {"application/json"},
-	})
+	// **complete 跳过客户端级超时（2026-10-23 实测）**：服务端 complete 触发 staging→
+	// 网盘转存（大文件 8-10 分钟），默认 300s 客户端超时会让请求先断而服务端仍在写。
+	// 走正常 doRequest 装配（签名/认证/追踪全保留），仅由 ctx 标记跳过 Client.Timeout。
+	resp, err := u.client.doRequest(WithNoClientTimeout(ctx), "POST", "/upload/complete",
+		bytes.NewReader(completeBody), http.Header{
+			headerContentType: {"application/json"},
+		})
 	if err != nil {
 		return nil, fmt.Errorf("完成上传请求失败: %w", err)
 	}
@@ -1012,7 +1026,7 @@ type downloadParams struct {
 func getDownloadParams(c *FileClient, opts ...ChunkedOption) *downloadParams {
 	opt := &chunkedOpts{
 		chunkSize:   c.chunkSize,
-		concurrency: defaultConcurrency,
+		concurrency: defaultDownloadConcurrency,
 	}
 	for _, o := range opts {
 		o(opt)
@@ -1061,28 +1075,12 @@ func getFileStat(ctx context.Context, c *FileClient, filename, kind string) (fil
 // ChunkedDownload 分块下载文件，支持并行下载和 checksum 校验。
 func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath string, opts ...ChunkedOption) error {
 	params := getDownloadParams(c, opts...)
-
-	if containsPathTraversal(filename) {
-		return fmt.Errorf("文件名不能包含路径穿越符 '..'")
-	}
-	outputPath, err := resolveOutputPath(filename, outputPath)
+	prep, err := c.prepareChunkedDownload(ctx, filename, outputPath, params)
 	if err != nil {
 		return err
 	}
-
-	// 获取文件信息（直接 Stat，kind 归档时服务端解析归档目录）
-	fileSize, expectedChecksum, fileModTime, err := getFileStat(ctx, c, filename, params.kind)
-	if err != nil {
-		return err
-	}
-
-	chunkSize := calcChunkSize(fileSize, params.chunkSize, params.maxChunk)
-	totalChunks := int((fileSize + chunkSize - 1) / chunkSize)
-
-	// 创建父目录（如果不存在）
-	if mkdirErr := os.MkdirAll(filepath.Dir(outputPath), 0755); mkdirErr != nil {
-		return fmt.Errorf("创建父目录失败: %w", mkdirErr)
-	}
+	outputPath, fileSize, chunkSize, totalChunks, expectedChecksum, fileModTime :=
+		prep.outputPath, prep.fileSize, prep.chunkSize, prep.totalChunks, prep.checksum, prep.modTime
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1106,47 +1104,20 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		return fmt.Errorf("预分配空间失败: %w", err)
 	}
 
-	var (
-		mu       sync.Mutex
-		progress int64
-		wg       sync.WaitGroup
-	)
-
-	if params.concurrency <= 0 {
-		params.concurrency = 1
-	}
-	sem := make(chan struct{}, params.concurrency)
-
-	for i := range totalChunks {
-		sem <- struct{}{}
-		wg.Add(1)
-
-		go func(chunkIdx int) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			c.downloadOneChunk(ctx, downloadChunkParams{
-				Filename:  filename,
-				Kind:      params.kind,
-				ChunkIdx:  chunkIdx,
-				ChunkSize: chunkSize,
-				FileSize:  fileSize,
-				OutFile:   outFile,
-				Mu:        &mu,
-				Progress:  &progress,
-				Cancel:    cancel, Done: ctx.Done(),
-			})
-		}(i)
-	}
-
-	wg.Wait()
-
-	if ctx.Err() != nil {
+	// 并行下载 + 失败补拉（2026-10-23 抽离，降 gocognit）。
+	if err := c.runChunkedDownload(ctx, runChunkedArgs{
+		filename: filename, kind: params.kind, chunkSize: chunkSize, fileSize: fileSize,
+		totalChunks: totalChunks, concurrency: params.concurrency,
+		outFile: outFile, cancel: cancel,
+	}); err != nil {
 		os.Remove(outputPath)
-		return fmt.Errorf("分块下载失败: %w", ctx.Err())
+		return err
 	}
 
-	if err := c.verifyDownloadChecksum(outputPath, expectedChecksum); err != nil {
+	// **完整性兑底（2026-10-23）**：外部卷无 X-File-Checksum 时旧行为静默放过损坏文件。
+	if err := c.verifyChunkedOutput(outputPath, fileSize, expectedChecksum); err != nil {
 		cancel()
+		os.Remove(outputPath)
 		return err
 	}
 
@@ -1156,7 +1127,120 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	return nil
 }
 
+// chunkedDownloadPrep 是 ChunkedDownload 的准备结果（S107：返回值收敛）。
+type chunkedDownloadPrep struct {
+	outputPath  string
+	fileSize    int64
+	chunkSize   int64
+	totalChunks int
+	checksum    string
+	modTime     int64
+}
+
+// prepareChunkedDownload 做路径校验/解析、远端 Stat、分块大小计算与父目录创建
+// （2026-10-23 从 ChunkedDownload 抽离，降 gocognit）。
+func (c *FileClient) prepareChunkedDownload(ctx context.Context, filename, outputPath string, params *downloadParams) (*chunkedDownloadPrep, error) {
+	if containsPathTraversal(filename) {
+		return nil, fmt.Errorf("文件名不能包含路径穿越符 '..'")
+	}
+	resolved, err := resolveOutputPath(filename, outputPath)
+	if err != nil {
+		return nil, err
+	}
+	fileSize, checksum, modTime, err := getFileStat(ctx, c, filename, params.kind)
+	if err != nil {
+		return nil, err
+	}
+	chunkSize := calcChunkSize(fileSize, params.chunkSize, params.maxChunk)
+	if mkdirErr := os.MkdirAll(filepath.Dir(resolved), 0o755); mkdirErr != nil {
+		return nil, fmt.Errorf("创建父目录失败: %w", mkdirErr)
+	}
+	return &chunkedDownloadPrep{
+		outputPath:  resolved,
+		fileSize:    fileSize,
+		chunkSize:   chunkSize,
+		totalChunks: int((fileSize + chunkSize - 1) / chunkSize),
+		checksum:    checksum,
+		modTime:     modTime,
+	}, nil
+}
+
+// runChunkedArgs 是 runChunkedDownload 的参数结构体（S107：参数收敛）。
+type runChunkedArgs struct {
+	filename    string
+	kind        string
+	chunkSize   int64
+	fileSize    int64
+	totalChunks int
+	concurrency int
+	outFile     *os.File
+	cancel      context.CancelFunc
+}
+
+// runChunkedDownload 并发下载全部分块，并对首轮失败的块串行补拉（2026-10-23 抽离，
+// 降 gocognit）。单块失败**不取消全局**（旧实现 p.Cancel 会拖垮在途 chunk 并静默产出
+// 零填充文件）；补拉后仍失败 ⇒ 返回错误由调用方 fail-closed 删文件。
+func (c *FileClient) runChunkedDownload(ctx context.Context, a runChunkedArgs) error {
+	var (
+		mu       sync.Mutex
+		progress int64
+		wg       sync.WaitGroup
+		failed   sync.Map // chunkIdx → struct{}（重试耗尽的 chunk）
+	)
+	conc := a.concurrency
+	if conc <= 0 {
+		conc = 1
+	}
+	sem := make(chan struct{}, conc)
+	for i := range a.totalChunks {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(chunkIdx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			c.downloadOneChunk(ctx, downloadChunkParams{
+				Filename:  a.filename,
+				Kind:      a.kind,
+				ChunkIdx:  chunkIdx,
+				ChunkSize: a.chunkSize,
+				FileSize:  a.fileSize,
+				OutFile:   a.outFile,
+				Mu:        &mu,
+				Progress:  &progress,
+				Cancel:    a.cancel, Done: ctx.Done(),
+				Failed: &failed,
+			})
+		}(i)
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return fmt.Errorf("分块下载失败: %w", ctx.Err())
+	}
+	return c.retryFailedChunks(ctx, retryFailedChunksArgs{
+		filename: a.filename, kind: a.kind, chunkSize: a.chunkSize, fileSize: a.fileSize,
+		totalChunks: a.totalChunks, outFile: a.outFile, mu: &mu, progress: &progress,
+		failed: &failed, cancel: a.cancel,
+	})
+}
+
+// verifyChunkedOutput 是分块下载的完整性收尾（2026-10-23 抽离，降 gocognit）：
+// 大小一致 → （无 checksum 时）大段零窗检测 → checksum 比对（有则必验）。
+func (c *FileClient) verifyChunkedOutput(outputPath string, fileSize int64, expectedChecksum string) error {
+	if err := verifyOutputSize(outputPath, fileSize); err != nil {
+		return err
+	}
+	if expectedChecksum == "" {
+		return verifyNoHugeZeroRuns(outputPath, fileSize)
+	}
+	return c.verifyDownloadChecksum(outputPath, expectedChecksum)
+}
+
 // downloadOneChunk 下载单个分块并写入文件指定偏移位置，内部包含重试逻辑。
+//
+// **2026-10-23 修复（静默损坏根因）**：旧实现失败后 `p.Cancel()` 取消整个下载 ctx ⇒
+// 其它在途 chunk 全部 500（服务端 ctx canceled），输出文件（已 Truncate 零填充）残留
+// 洞且 checksum 缺失时不删 ⇒ 静默产出损坏文件。现改为：重试耗尽 → 记录到 Failed 桶，
+// **不取消全局**；主流程收尾对失败 chunk 单独补拉，仍失败才 fail-closed。
 func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams) {
 	urlPath := c.buildChunkURL(p)
 	length := chunkLength(p)
@@ -1164,7 +1248,15 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams
 	if c.downloadChunkWithRetry(ctx, p, urlPath, offset, length) {
 		return
 	}
-	p.Cancel()
+	if p.Failed != nil {
+		p.Failed.Store(p.ChunkIdx, struct{}{})
+		c.logger.WarnContext(ctx, "分块下载失败（待收尾重试）", "chunk", p.ChunkIdx,
+			"offset", offset, "length", length)
+		return
+	}
+	if !chunkDownloadDone(p.Done) {
+		p.Cancel()
+	}
 }
 
 // buildChunkURL 拼装单个分块下载请求路径（含 kind/volume 参数）。
@@ -1249,6 +1341,123 @@ func (c *FileClient) writeDownloadChunk(ctx context.Context, p downloadChunkPara
 	p.Mu.Unlock()
 	if c.progressFn != nil {
 		c.progressFn("下载", progress, p.FileSize)
+	}
+	return true
+}
+
+// retryFailedChunksArgs 是 retryFailedChunks 的参数结构体（S107：参数收敛）。
+type retryFailedChunksArgs struct {
+	filename    string
+	kind        string
+	chunkSize   int64
+	fileSize    int64
+	totalChunks int
+	outFile     *os.File
+	mu          *sync.Mutex
+	progress    *int64
+	failed      *sync.Map
+	cancel      context.CancelFunc
+}
+
+// retryFailedChunks 串行补拉首轮失败的 chunk（2026-10-23，外部卷稳定性）。
+// 每块独立重试 maxRetries 次；仍有失败 ⇒ 返回错误（调用方删输出文件，fail-closed）。
+// 串行而非并发：失败通常是网盘瞬时拥塞，串行减少并发压力且便于定位。
+func (c *FileClient) retryFailedChunks(ctx context.Context, a retryFailedChunksArgs) error {
+	if a.failed == nil {
+		return nil
+	}
+	var pending []int
+	a.failed.Range(func(k, _ any) bool {
+		if idx, ok := k.(int); ok {
+			pending = append(pending, idx)
+		}
+		return true
+	})
+	if len(pending) == 0 {
+		return nil
+	}
+	sort.Ints(pending)
+	c.logger.Warn("分块下载：首轮存在失败分块，开始串行补拉", "failed", len(pending), "total", a.totalChunks)
+	for _, idx := range pending {
+		p := downloadChunkParams{
+			Filename: a.filename, Kind: a.kind, ChunkIdx: idx,
+			ChunkSize: a.chunkSize, FileSize: a.fileSize,
+			OutFile: a.outFile, Mu: a.mu, Progress: a.progress,
+			Cancel: a.cancel, Done: ctx.Done(),
+		}
+		urlPath := c.buildChunkURL(p)
+		offset := int64(idx) * a.chunkSize
+		length := chunkLength(p)
+		if !c.downloadChunkWithRetry(ctx, p, urlPath, offset, length) {
+			return fmt.Errorf("分块下载失败：分块 %d（offset=%d, len=%d）补拉后仍失败（首轮失败 %d 块）",
+				idx, offset, length, len(pending))
+		}
+		a.failed.Delete(idx)
+	}
+	return nil
+}
+
+// verifyOutputSize 校验输出文件大小与远端声明一致（完整性兑底）。
+func verifyOutputSize(outputPath string, want int64) error {
+	if want <= 0 {
+		return nil
+	}
+	fi, err := os.Stat(outputPath)
+	if err != nil {
+		return fmt.Errorf("校验下载文件大小失败: %w", err)
+	}
+	if fi.Size() != want {
+		return fmt.Errorf("下载文件大小不符：期望 %d，实际 %d", want, fi.Size())
+	}
+	return nil
+}
+
+// verifyNoHugeZeroRuns 采样检查输出文件是否存在**大段零填充**（2026-10-23：预分配
+// Truncate 的洞暴露；外部卷无 checksum 时是静默损坏的最后防线）。逐 256KiB 窗口读，
+// 任一窗口全零 ⇒ 判定损坏（正常音视频/二进制几乎不含连续 256KiB 零）。
+// verifyNoHugeZeroRuns 采样检查输出文件是否存在**大段零填充**（2026-10-23：预分配
+// Truncate 的洞暴露；外部卷无 checksum 时是静默损坏的最后防线）。逐 256KiB 窗口读，
+// 任一窗口全零 ⇒ 判定损坏（正常音视频/二进制几乎不含连续 256KiB 零）。
+//
+// **size<=0 时用实际文件大小**（2026-10-23 关键修复）：流式响应（chunked
+// transfer-encoding）无 Content-Length ⇒ size=-1；旧实现直接 return nil ⇒ 截断/零填充
+// 完全不被检测（实测 400MB 文件只有前 248MB 有数据却「下载成功」）。
+func verifyNoHugeZeroRuns(outputPath string, size int64) error {
+	f, err := os.Open(outputPath)
+	if err != nil {
+		return fmt.Errorf("校验下载内容失败: %w", err)
+	}
+	defer f.Close()
+	if size <= 0 {
+		fi, serr := f.Stat()
+		if serr != nil {
+			return fmt.Errorf("校验下载内容失败: %w", serr)
+		}
+		size = fi.Size()
+	}
+	if size <= 0 {
+		return nil
+	}
+	const win = 256 << 10
+	buf := make([]byte, win)
+	for off := int64(0); off < size; off += win {
+		n, rerr := io.ReadFull(f, buf)
+		if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+			return fmt.Errorf("读取下载文件校验（off=%d）: %w", off, rerr)
+		}
+		if n == win && allZero(buf) {
+			return fmt.Errorf("下载文件校验失败：offset %d 起 256KiB 全零（疑似未写入区域/错位）", off)
+		}
+	}
+	return nil
+}
+
+// allZero 判定切片全零。
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
 	}
 	return true
 }

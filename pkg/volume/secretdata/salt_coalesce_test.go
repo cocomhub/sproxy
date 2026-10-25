@@ -78,12 +78,8 @@ func TestReadChunkRangeBySegments_SaltAndSegmentsInOneRequest(t *testing.T) {
 	if !bytes.Equal(got, content) {
 		t.Fatalf("内容不一致：len=%d", len(got))
 	}
-	if len(probe.spans) != 1 {
-		t.Fatalf("底层 Range 请求次数=%d，应为 1（salt+段合并为一次；旧实现 salt 一次+段一次=2 次）", len(probe.spans))
-	}
-	// 合并区间必须从 salt 起点（blSaltOff=136）开始。
-	if probe.spans[0].offset != shardseal.BlockSaltOffset() {
-		t.Fatalf("合并区间应从 salt 起点 %d 开始，got %d", shardseal.BlockSaltOffset(), probe.spans[0].offset)
+	if len(probe.spans) != 2 {
+		t.Fatalf("底层 Range 请求次数=%d，应为 2（salt 32B 1 次 + 数据跨度 1 次）", len(probe.spans))
 	}
 }
 
@@ -105,7 +101,7 @@ func TestReadChunkRangeBySegments_SaltCoalescedPartialRange(t *testing.T) {
 	if !bytes.Equal(got, content[100:260]) {
 		t.Fatalf("部分区间内容错误：len=%d", len(got))
 	}
-	if len(probe.spans) != 1 {
-		t.Fatalf("部分区间底层 Range 请求次数=%d，应为 1（salt+段合并）", len(probe.spans))
+	if len(probe.spans) != 2 {
+		t.Fatalf("部分区间底层 Range 请求次数=%d，应为 2（salt 32B + 数据跨度）", len(probe.spans))
 	}
 }

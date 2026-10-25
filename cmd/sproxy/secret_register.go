@@ -163,15 +163,18 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 // Options.Dedup 验证；生产 config 不启用。
 func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 	return secretdata.Options{
-		Algorithm:     vcExtraStr(v, "algorithm"),
-		Block:         vcExtraBlockPolicy(v),
-		TempDir:       vcExtraStr(v, "temp_dir"),
-		MetaPadBytes:  vcExtraByteSize(v, "meta_pad_bytes"),
-		Erasure:       vcExtraBool(v, "erasure"),
-		Targets:       vcExtraStrings(v, "targets"),
-		MaxFileBytes:  vcExtraByteSize(v, "max_file_bytes"),
-		PreserveMTime: vcExtraBool(v, "preserve_mtime"),
-		GCInterval:    vcExtraDuration(v, "gc_interval"),
+		Algorithm:          vcExtraStr(v, "algorithm"),
+		Block:              vcExtraBlockPolicy(v),
+		TempDir:            vcExtraStr(v, "temp_dir"),
+		MetaPadBytes:       vcExtraByteSize(v, "meta_pad_bytes"),
+		Erasure:            vcExtraBool(v, "erasure"),
+		Targets:            vcExtraStrings(v, "targets"),
+		MaxFileBytes:       vcExtraByteSize(v, "max_file_bytes"),
+		PreserveMTime:      vcExtraBool(v, "preserve_mtime"),
+		GCInterval:         vcExtraDuration(v, "gc_interval"),
+		BlockletCacheBytes: vcExtraByteSize(v, "blocklet_cache_bytes"),
+		SpanCacheDir:       vcExtraStr(v, "span_cache_dir"),
+		SpanCacheBytes:     vcExtraByteSize(v, "span_cache_bytes"),
 	}
 }
 

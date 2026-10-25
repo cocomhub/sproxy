@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
+
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -117,11 +119,17 @@ func (s *Storage) GetRange(ctx context.Context, key string, offset, size int64) 
 }
 
 // rangeGetWithDlink 用给定直链发一次 Range GET 并校验响应。
+// rangeGetWithDlink 用给定直链发一次 Range GET 并校验响应。
+// **必须携带网盘客户端 UA（2026-10-22 实测根因）**：百度 CDN 要求 `Range` 请求的 User-Agent
+// 为 `netdisk;P2SP;...`（网盘客户端），否则直接 403 `sign error (31362)`——sproxy 曾因
+// 未带 UA 导致大文件（块 >4MiB）Range 读全部失败（2.1GB 转存后下载 sha256 全错）。
 func (s *Storage) rangeGetWithDlink(ctx context.Context, key, dlink string, offset, size int64) (io.ReadCloser, error) {
+	s.log.Debug("baidupcs rangeGET", "key", key, "offset", offset, "size", size)
 	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, dlink, nil)
 	if rerr != nil {
 		return nil, fmt.Errorf("baidupcs: 构造 Range 请求失败: %w", rerr)
 	}
+	req.Header.Set("User-Agent", bdlib.NetdiskUA)
 	// 区间 [offset, offset+size-1]（size>0 恒为闭区间——size≡0 已在上层按空区间返回）。
 	req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+size-1, 10))
 	resp, derr := s.httpc.Do(req)
@@ -131,32 +139,34 @@ func (s *Storage) rangeGetWithDlink(ctx context.Context, key, dlink string, offs
 	return validateRangeResponse(resp, key, offset, size, s.log)
 }
 
-// dlinkTTL 是本地直链缓存有效期（百度 dlink 自签有效 8h；本地取 60s——失效先于
-// 签名到期，且远小于「同一文件的段读突发窗口」，能稳定复用）。
-const dlinkTTL = 60 * time.Second
+// dlinkTTL 是本地直链缓存有效期（2026-10-25 调整）：百度 dlink 自签有效 8h，
+// 本地取 **1h**（8h 的 1/8，失效先于签名到期，安全）。
+//
+// 旧值 60s 太短：大块持续下载 / 长时间段读会**使用中过期** ⇒ 已签发直链作废重签
+// （每次 ~0.3s + 重建连接），实测是热路径 30s outlier 的诱因之一。配合 dlink_cache.go
+// 的有界 LRU（容量 4096）避免条目无界增长。
+const dlinkTTL = time.Hour
 
 // cachedDlink 返回 key 的直链（命中未过期缓存即复用；否则签发并写入缓存）。
 // 并发安全：同 key 并发段读只签发一次（持锁串行化签发）。
 func (s *Storage) cachedDlink(ctx context.Context, key string) (string, bool, error) {
 	s.dlinkMu.Lock()
 	defer s.dlinkMu.Unlock()
-	if e, ok := s.dlinkCache[key]; ok && time.Now().Before(e.exp) && e.url != "" {
-		return e.url, true, nil
+	if url, ok := s.dlinkCache.get(key); ok {
+		return url, true, nil
 	}
 	dlink, ok, err := s.DirectURL(ctx, key)
 	if err != nil || !ok || dlink == "" {
 		// 失败/不支持：不缓存（下次重试时重新试签发）。
 		return dlink, ok, err
 	}
-	s.dlinkCache[key] = dlinkEntry{url: dlink, exp: time.Now().Add(dlinkTTL)}
+	s.dlinkCache.put(key, dlink, dlinkTTL)
 	return dlink, true, nil
 }
 
 // invalidateDlink 清除 key 的直链缓存（直链失效时调用，下次取用即重签）。
 func (s *Storage) invalidateDlink(key string) {
-	s.dlinkMu.Lock()
-	delete(s.dlinkCache, key)
-	s.dlinkMu.Unlock()
+	s.dlinkCache.delete(key)
 }
 
 // validateRangeResponse 校验 Range GET 响应并返回**精确长度**区间流（真实 Storage 与测试

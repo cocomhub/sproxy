@@ -57,6 +57,9 @@ type ChunkInfo struct {
 	// Blocklets 是块内 blocklet 索引（随机访问定位/只解目标 blocklet 段）。连续覆盖
 	// [Offset, Offset+OrigSize)，validateMeta 校验。
 	Blocklets []BlockletInfo `json:"blocklets"`
+	// Windows 是块的**缓冲窗口规划**（2026-10-25 写侧确定：首位相连、salt 入首窗、
+	// 每窗 checksum）。旧 meta 无此字段 ⇒ 读侧动态规划兜底（零回归）。
+	Windows []WindowInfo `json:"windows,omitempty"`
 	// Failures 是**文件级共享**的解析失败信息列表（视频关键帧等；planner 生命周期失败
 	// 记录冗余到每个块——任一块都含失败全貌，解密/审计不依赖特定块）。omitempty——
 	// 旧 meta 无此字段。
@@ -76,6 +79,10 @@ type BlockletInfo struct {
 	// OrigSHA256 是 blocklet 原始内容的 SHA-256 前 16 hex（64-bit，审计/校验用；
 	// 块级已用完整 256-bit，blocklet 粒度保持 64-bit 截断，不引入额外熵成本）。
 	OrigSHA256 string `json:"orig_sha256"`
+	// OrigSHA256Full 是 blocklet 原始内容的**完整** SHA-256（64 hex；2026-10-25 新增，
+	// 供服务端 FileMeta 按 blocklet 粒度切分校验分块——verifyChunkAhead 回读代价从
+	// 整加密块降到单 blocklet。旧 meta 无此字段 ⇒ 读侧用 OrigSHA256（64-bit）兜底）。
+	OrigSHA256Full string `json:"orig_sha256_full,omitempty"`
 	// EncOffset 是 blocklet 密文在 blob 内的起始偏移（nonce 起点；随机访问跳读用）。
 	EncOffset int64 `json:"enc_offset"`
 	// Used 标记该 blocklet 段是否已使用（false = padding 空闲段，供打包替换复用）。

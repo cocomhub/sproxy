@@ -75,6 +75,22 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	return c.doRequestPrepared(ctx, req)
 }
 
+// noClientTimeoutKey 是 ctx 中的私有键：标记「本次请求不要客户端级超时」
+// （2026-10-23：/upload/complete 大文件转存可达 8-10 分钟，300s 客户端超时会先断）。
+type noClientTimeoutKey struct{}
+
+// WithNoClientTimeout 让本次请求**跳过 http.Client.Timeout**（仍保留 ctx deadline 与
+// 全部签名/认证/追踪装配）。仅用于已知慢操作（complete 转存）。
+func WithNoClientTimeout(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noClientTimeoutKey{}, true)
+}
+
+// noClientTimeoutFrom 报告本次请求是否要跳过客户端级超时。
+func noClientTimeoutFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(noClientTimeoutKey{}).(bool)
+	return v
+}
+
 // newRequest 构造带请求头的 http.Request（doRequest / sendUnsigned 各签名分支共用）。
 func (c *FileClient) newRequest(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
@@ -157,12 +173,18 @@ func (c *FileClient) doDirect(ctx context.Context, req *http.Request) (*http.Res
 	if c.authToken != "" && c.accessKeySecret == "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
+	// **慢操作跳过客户端级超时（2026-10-23）**：ctx 显式标记（WithNoClientTimeout）时
+	// 用去掉 Timeout 的临时 client（复用同一 Transport 连接池），避免 /upload/complete
+	// 大文件转存（8-10 分钟）被 300s 提前掐断。
 	hc := c.httpClient
 	if hc == nil {
 		// 不落 http.DefaultClient：自建隔离连接池（硬规则——共享连接池被外部
 		// CloseIdleConnections 会打断在途请求）。统一 netutil.IsolatedTransport
 		// （Clone 基座保留默认调校 + TLSClientConfig nil）。
 		hc = &http.Client{Transport: netutil.IsolatedTransport()}
+	}
+	if noClientTimeoutFrom(ctx) && hc.Timeout != 0 {
+		hc = &http.Client{Transport: hc.Transport}
 	}
 	resp, err := hc.Do(req)
 	if err != nil && c.downloadProxy != "" && isReplayable(req) {
