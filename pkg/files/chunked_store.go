@@ -24,18 +24,19 @@ import (
 
 // ChunkedUploadSession 表示一个分块上传会话。
 type ChunkedUploadSession struct {
-	UploadID       string    `json:"upload_id"`
-	Filename       string    `json:"filename"`
-	TotalSize      int64     `json:"total_size"`
-	ChunkSize      int64     `json:"chunk_size"`
-	TotalChunks    int       `json:"total_chunks"`
-	ReceivedChunks []bool    `json:"received_chunks"`
-	ChunkChecksums []string  `json:"chunk_checksums"`
-	FileChecksum   string    `json:"file_checksum"`
-	FileModTime    int64     `json:"file_mod_time"` // UnixNano, 0 = unknown
-	CreatedAt      time.Time `json:"created_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	Completed      bool      `json:"completed"`
+	UploadID       string         `json:"upload_id"`
+	Filename       string         `json:"filename"`
+	TotalSize      int64          `json:"total_size"`
+	ChunkSize      int64          `json:"chunk_size"`
+	TotalChunks    int            `json:"total_chunks"`
+	ReceivedChunks []bool         `json:"received_chunks"`
+	ChunkChecksums []string       `json:"chunk_checksums"`
+	FileChecksum   string         `json:"file_checksum"`
+	FileModTime    int64          `json:"file_mod_time"`        // UnixNano, 0 = unknown
+	MetaExtra      map[string]any `json:"meta_extra,omitempty"` // 首次初始化携带（complete 落 sidecar）
+	CreatedAt      time.Time      `json:"created_at"`
+	ExpiresAt      time.Time      `json:"expires_at"`
+	Completed      bool           `json:"completed"`
 
 	// gen 是**注册世代**（store 内单调递增，注册进 us.sessions 时赋值；此后只读，未导出故不持久化）。
 	// 用途：「发布」时的**身份门控** —— 同 id 被新会话接管后世代不同，持有旧对象（或其副本）的

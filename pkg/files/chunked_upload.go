@@ -24,6 +24,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -194,26 +195,13 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 	if !s.validateInitRequest(w, &req) {
 		return
 	}
+	// 首次初始化即携带的元数据：白名单/类型/长度校验（fail-closed 400，不静默丢弃）。
+	if !s.validateInitMetaExtra(w, &req) {
+		return
+	}
 
-	// 取 owner 的租户与 per-tenant UploadStore（会话目录 <默认卷根>/<owner>/chunk/<id>/；
-	// 会话元数据统一默认卷 chunk 桶，temp 整文件在目标卷 user 桶，见 routeUpload 注释）。
-	owner := s.rt.actorOf(r)
-	store := s.rt.uploadStore(owner)
-	if store == nil {
-		s.rt.logger().Error("获取 per-tenant UploadStore 失败", "owner", owner)
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
-		return
-	}
-	defTnt := s.rt.tenantOf(owner)
-	if defTnt == nil || defTnt.Root() == nil {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
-	}
-	rel, ok := defTnt.UserRel(req.Filename)
-	// tnt 是目标卷租户（temp 文件写盘根）。新会话由 routeUpload 定卷后赋值；续传会话首个
-	// init 已定卷（session.Volume），仅按需派生（见 !reused 块）。
+	owner, store, defTnt, rel, ok := s.initUploadContext(w, r, &req)
 	if !ok {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
@@ -261,6 +249,13 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 	session, reused, ok := s.createChunkedSession(r.Context(), &chunkedInit{w: w, r: r, store: store, owner: owner, rel: rel, explicitVol: explicitVol, forceHomeVol: forceHomeVol}, &req, chunkSize)
 	if !ok {
 		return
+	}
+
+	// 首次初始化携带的元数据存入会话（续传复用时以既有会话为准，不覆盖）：
+	// complete 时随 .meta sidecar 落盘（避免「先传完再补录」窗口）。
+	if !reused && len(req.MetaExtra) > 0 {
+		session.MetaExtra = req.MetaExtra
+		_ = store.PersistNowIfCurrent(session) // best-effort 持久化（失败下次 init/续传重建）
 	}
 
 	msg := s.initSuccessMessage(session, reused)
@@ -1256,7 +1251,7 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 	// 可信卷：分块上传 complete 后同样到达即建 meta（C-CRITICAL-2 修复——与单次上传
 	// writeFileSettle 一致，分块传完也有 .meta sidecar）。
 	if s.rt.fileMetaEnabled() {
-		if mErr := s.rt.writeMetaSidecar(context.Background(), owner, tnt.Root(), rel, nil); mErr != nil {
+		if mErr := s.rt.writeMetaSidecar(context.Background(), owner, tnt.Root(), rel, session.MetaExtra); mErr != nil {
 			s.rt.logger().Warn("可信卷 meta 落盘失败（分块上传，读侧将不校验）", "file_name", session.Filename, "error", mErr)
 		}
 	}
@@ -1778,4 +1773,42 @@ func encryptFinalizeRoot(root *storage.Root, tmpRel, rel string) error {
 		return fmt.Errorf("加密落位收尾: %w", cerr)
 	}
 	return root.Remove(tmpRel)
+}
+
+// validateInitMetaExtra 校验 init 请求携带的 meta_extra（A/B/C 档）。
+// 返回 false 表示已回 400（fail-closed：不合法不落盘）。
+// 客户端收到 400 应「重试时不带 meta_extra」再走 PUT /api/files/meta 二次补录。
+func (s *Service) validateInitMetaExtra(w http.ResponseWriter, req *ChunkedInitRequest) bool {
+	if len(req.MetaExtra) == 0 {
+		return true
+	}
+	req.MetaExtra = meta.TrimExtra(req.MetaExtra)
+	if verr := meta.ValidateExtra(req.MetaExtra); verr != nil {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "meta_extra 无效: " + verr.Error()}, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// initUploadContext 取 init 的 owner/per-tenant UploadStore/目标 rel（fail-closed 500/400）。
+// 返回 ok=false 表示已回包。
+func (s *Service) initUploadContext(w http.ResponseWriter, r *http.Request, req *ChunkedInitRequest) (string, *UploadStore, *storage.Tenant, string, bool) {
+	owner := s.rt.actorOf(r)
+	store := s.rt.uploadStore(owner)
+	if store == nil {
+		s.rt.logger().Error("获取 per-tenant UploadStore 失败", "owner", owner)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
+		return "", nil, nil, "", false
+	}
+	defTnt := s.rt.tenantOf(owner)
+	if defTnt == nil || defTnt.Root() == nil {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return "", nil, nil, "", false
+	}
+	rel, ok := defTnt.UserRel(req.Filename)
+	if !ok {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		return "", nil, nil, "", false
+	}
+	return owner, store, defTnt, rel, true
 }

@@ -365,6 +365,7 @@
         chunk_size: chunkSize, total_chunks: Math.ceil(totalSize / chunkSize),
         file_checksum: checksum, file_mod_time: mtimeNano,
         volume: p.volume || undefined, // 可选显式卷（服务端 init 定卷）
+        meta_extra: p.metaExtra || undefined, // 首次初始化携带自定义元数据（A/B/C 档）
       });
       if (!initRes.success) {
         return { success: false, message: initRes.message || '初始化失败', filename: fileName };
