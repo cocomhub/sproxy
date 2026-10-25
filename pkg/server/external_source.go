@@ -82,7 +82,12 @@ func (s *externalDownloadSource) Open(ctx context.Context) (files.SeekReadCloser
 	if s.fileMeta != nil {
 		if fm, ferr := s.fileMeta(ctx, s.rel); ferr == nil && fm != nil {
 			// meta 缺失/读取失败 → 直通（不误报）；meta 可用 → 逐分块校验。
-			v := meta.VerifyReadSeeker(seeker, fm)
+			// **SkipChunkAhead（2026-10-25 性能修复）**：外部卷读路径自带逐段校验
+			// （secretdata：窗口密文 sha256 + 逐 blocklet GCM；trusted 装饰器：meta
+			// 逐分块流式校验）—— 的「从分块中间起始回读整块」纯属
+			// 冗余（实测 2.1GB / 4MiB 请求 × 72MB 块 = 18 倍放大）。保留流式 consume
+			// 逐块校验与 EOF 总哈希校验（本包装器仍提供），只跳过回读式先验。
+			v := meta.VerifyReadSeekerWithOpts(seeker, fm, meta.VerifyOpts{SkipChunkAhead: true})
 			if vc, ok := v.(files.SeekReadCloser); ok {
 				return vc, nil
 			}

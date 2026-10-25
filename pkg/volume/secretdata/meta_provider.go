@@ -45,7 +45,7 @@ func (s *SecretdataFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta
 	if e.meta == nil {
 		return nil, fmt.Errorf("secretdata: FileMeta 元信息缺失（不可校验）: %s", rel)
 	}
-	return shardsealMetaToFileMeta(e.meta), nil
+	return shardsealMetaToFileMetaBlocklets(e.meta), nil
 }
 
 // shardsealMetaToFileMeta 把 shardseal.Meta 转换为通用 FileMeta（字段对齐互转）。
@@ -85,6 +85,81 @@ func shardsealMetaToFileMeta(m *shardseal.Meta) *meta.FileMeta {
 		})
 	}
 	return fm
+}
+
+// shardsealMetaToFileMetaBlocklets 把 shardseal.Meta 转成**blocklet 粒度**的 FileMeta
+// （2026-10-25 性能修复）：校验分块 = 块内 blocklet（通常 256KiB）而非整个加密块
+// （1-200MB 随机）。
+//
+// 背景：`verifyReadSeeker.verifyChunkAhead` 对「从分块中间起始」的 Range 请求做
+// **整块回读式**先验。secretdata 的加密块平均 72MB（此 2.1GB 文件 29 块），而
+// `/download/chunk` 请求 4MiB ⇒ 每次回读 72MB = **18 倍放大**（实测 20 倍、2.1s/chunk）。
+// 按 blocklet 切分后回读代价降到 blocklet 大小（≤ 4MiB）⇒ 放大 ≤1.06 倍。
+//
+// 兼容：旧 meta 无 `OrigSHA256Full`（blocklet 完整 sha256）→ 回退用 `OrigSHA256`
+// （64-bit 截断，仍可探测损坏）与加密块粒度（保持旧行为）。
+// 仅 Used 段入索引（padding 段不承载用户内容，且 Offsets 不连续）。
+func shardsealMetaToFileMetaBlocklets(m *shardseal.Meta) *meta.FileMeta {
+	fm := shardsealMetaToFileMeta(m)
+	// 仅当**全部**有效 blocklet 都有完整 sha256 时才改用 blocklet 粒度（否则混用粒度
+	// 会让 FileMeta.Chunks 覆盖/顺序校验失败——Validate 要求连续覆盖 [0,Size)）。
+	if !allBlockletsHaveFullHash(m) {
+		return fm
+	}
+	chunks := make([]meta.ChunkMeta, 0, len(m.Chunks)*8)
+	idx := 0
+	for _, c := range m.Chunks {
+		for _, bl := range c.Blocklets {
+			if !bl.Used || bl.Size <= 0 {
+				continue
+			}
+			chunks = append(chunks, meta.ChunkMeta{
+				Index: idx, Offset: bl.Offset, Size: bl.Size, SHA256: bl.OrigSHA256Full,
+			})
+			idx++
+		}
+	}
+	if len(chunks) == 0 {
+		return fm
+	}
+	// 防御：blocklet 必须连续覆盖 [0, Size)（否则 Validate 会拒，回退块粒度）。
+	var next int64
+	for _, c := range chunks {
+		if c.Offset != next {
+			return fm
+		}
+		next = c.Offset + c.Size
+	}
+	if next != fm.Size {
+		return fm
+	}
+	fm.Chunks = chunks
+	// ChunkSize 表达粒度（maxMetaChunks 上限已由写侧分块数保证；blocklet 数 ≤ 349525）。
+	if n := len(chunks); n > 0 && n <= maxMetaChunksBlocklets {
+		fm.ChunkSize = chunks[0].Size
+		return fm
+	}
+	// 超出 FileMeta 分块数上限 ⇒ 回退块粒度（安全降级，仍比不校验强）。
+	fm.Chunks = shardsealMetaToFileMeta(m).Chunks
+	return fm
+}
+
+// maxMetaChunksBlocklets 与 meta.maxMetaChunks 同口径（64MiB / 192B）。
+const maxMetaChunksBlocklets = (64 << 20) / 192
+
+// allBlockletsHaveFullHash 报告全部有效 blocklet 是否都有完整 sha256。
+func allBlockletsHaveFullHash(m *shardseal.Meta) bool {
+	for _, c := range m.Chunks {
+		for _, bl := range c.Blocklets {
+			if !bl.Used || bl.Size <= 0 {
+				continue
+			}
+			if len(bl.OrigSHA256Full) != 64 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // _ 编译期断言：secretdata 仍实现 syncpkg.FS（不因 Provider 改变）。

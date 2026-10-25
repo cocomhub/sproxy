@@ -43,7 +43,23 @@ var ErrStaleMeta = errors.New("meta: sidecar 陈旧（内容长度与 FileMeta.S
 // 时本就不会产生底层 EOF 的那次 Read，仅靠 EOF 判据会漏掉截断）。SeekEnd 失败
 // （极端定制 reader）→ 退化为流式判据（EOF 时判短读/总哈希）。
 func VerifyReadSeeker(r io.ReadSeeker, fm *FileMeta) io.ReadSeeker {
-	v := &verifyReadSeeker{inner: r, fm: fm, curChunk: -1}
+	return VerifyReadSeekerWithOpts(r, fm, VerifyOpts{})
+}
+
+// VerifyOpts 是 VerifyReadSeeker 的可选行为开关。
+type VerifyOpts struct {
+	// SkipChunkAhead 跳过 verifyChunkAhead 的「整块回读式先验」（2026-10-25 性能修复）：
+	// 调用方确认底层数据源**读路径自带逐段校验**（如 secretdata 的窗口密文 sha256 +
+	// 逐 blocklet GCM）时置 true——那些校验已等价覆盖，回读纯属冗余，且对外部卷大分块
+	// 会按「每 Range 请求回读一整分块（32MiB）」放大 N 倍（实测 2.1GB 下载 8-20 倍）。
+	//
+	// 语义边界：只跳过回读式先验；流式 consume 逐块校验与 EOF 总哈希校验仍保留。
+	SkipChunkAhead bool
+}
+
+// VerifyReadSeekerWithOpts 同 VerifyReadSeeker，按 opts 调整行为。
+func VerifyReadSeekerWithOpts(r io.ReadSeeker, fm *FileMeta, opts VerifyOpts) io.ReadSeeker {
+	v := &verifyReadSeeker{inner: r, fm: fm, curChunk: -1, skipChunkAhead: opts.SkipChunkAhead}
 	// 入口 fail-closed：畸形 meta（分块重叠/空洞/负 size/哈希格式错…）不得进入流式
 	// 校验（可能致 slice 越界 panic 或校验被静默弱化）；与 cloud/transfer.go 的 M7a
 	// 同口径（P3 对抗评审）。
@@ -85,6 +101,9 @@ type verifyReadSeeker struct {
 	aheadVerified bool
 	// aheadFailed 标记先验不可行（底层不可 Seek/短读）→ 该块维持跳过（降级，不误报）。
 	aheadFailed bool
+	// skipChunkAhead 标记跳过 verifyChunkAhead 的「整块回读式先验」（2026-10-25 性能修复，
+	// 见 VerifyReadSeekerWithOpts 头注释）。
+	skipChunkAhead bool
 	// expectEnd 是调用方声明的「本次下发的最后字节位置」（独占；0 = 未告知）。用于在
 	// **Range 结束于块中间**时于 Close 补验尾部半块——C3 的 sealPartialChunk 只由 EOF 触发，
 	// 块边界对齐且不读到 EOF 的 Range 会整段零校验（第 10 轮评审 P1）。
@@ -171,7 +190,13 @@ func (v *verifyReadSeeker) chunkPos(pos int64) (int, int64, bool) {
 //
 // 成本：仅在首块（中段起始）多一次整块读（≤32MiB）；后续块从块首起，走常规流式校验。
 // 失败（不可 Seek/短读）→ 维持跳过（降级，不误报也不阻断）；每位置只试一次。
+//
+// **segmentVerified 跳过（2026-10-25 性能修复）**：底层 FS 自带逐段校验（窗口 sha256 +
+// GCM）时，本次回读纯属冗余（且对外部卷大分块 = 每 Range 请求回读 32MiB）→ 直接跳过。
 func (v *verifyReadSeeker) verifyChunkAhead() {
+	if v.skipChunkAhead {
+		return
+	}
 	if !v.skipCur || v.aheadTried || v.aheadFailed || v.verified || v.fatal != nil {
 		return
 	}

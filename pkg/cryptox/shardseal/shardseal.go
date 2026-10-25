@@ -489,7 +489,8 @@ func blockletInfosOf(blocklets []Blocklet, entries []BlobIndexEntry, chunk []byt
 		segment := chunk[bl.Offset-blockOffset : bl.Offset-blockOffset+bl.Size]
 		blInfos = append(blInfos, BlockletInfo{
 			Offset: bl.Offset, Size: bl.Size, EncOffset: int64(e.EncOffset), EncSize: e.EncSize,
-			OrigSHA256: Hash16(segment), Used: !bl.Padding, Type: byte(blockletType(bl)),
+			OrigSHA256: Hash16(segment), OrigSHA256Full: Hash256(segment),
+			Used: !bl.Padding, Type: byte(blockletType(bl)),
 		})
 	}
 	return blInfos
@@ -615,15 +616,14 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group st
 				continue
 			}
 			segment := chunk[bl.Offset-b.Offset : bl.Offset-b.Offset+bl.Size]
-			segHex := Hash16(segment)
 			blInfos = append(blInfos, BlockletInfo{
 				Offset:     bl.Offset,
 				Size:       bl.Size,
 				EncOffset:  int64(e.EncOffset),
 				EncSize:    e.EncSize,
-				OrigSHA256: segHex,
-				Used:       !bl.Padding,
-				Type:       byte(blockletType(bl)),
+				OrigSHA256: Hash16(segment), OrigSHA256Full: Hash256(segment),
+				Used: !bl.Padding,
+				Type: byte(blockletType(bl)),
 			})
 		}
 		names = append(names, name)
