@@ -42,11 +42,14 @@ func TestDlinkLRU_EvictsOldest(t *testing.T) {
 }
 
 // TestDlinkLRU_ExpiredRemoved：过期条目按 TTL 失效并从索引移除。
+// 直接把条目 exp 改到过去（不 Sleep——R14 睡眠棘轮约束，且消除真实时钟 flake）。
 func TestDlinkLRU_ExpiredRemoved(t *testing.T) {
 	t.Parallel()
 	c := newDlinkLRU(4)
-	c.put("k", "u", 10*time.Millisecond)
-	time.Sleep(20 * time.Millisecond)
+	c.put("k", "u", time.Hour)
+	c.mu.Lock()
+	c.idx["k"].Value.(*dlinkEntry).exp = time.Now().Add(-time.Second)
+	c.mu.Unlock()
 	if _, ok := c.get("k"); ok {
 		t.Fatal("过期条目不应命中")
 	}
@@ -59,9 +62,11 @@ func TestDlinkLRU_ExpiredRemoved(t *testing.T) {
 func TestDlinkLRU_UpdateRefreshes(t *testing.T) {
 	t.Parallel()
 	c := newDlinkLRU(4)
-	c.put("k", "u1", 10*time.Millisecond)
-	time.Sleep(5 * time.Millisecond)
-	c.put("k", "u2", time.Hour)
+	c.put("k", "u1", time.Hour)
+	c.mu.Lock()
+	c.idx["k"].Value.(*dlinkEntry).exp = time.Now().Add(-time.Second) // 人为置过期
+	c.mu.Unlock()
+	c.put("k", "u2", time.Hour) // 同 key 更新应刷新 exp
 	if u, ok := c.get("k"); !ok || u != "u2" {
 		t.Fatalf("刷新后应命中 u2，got %q ok=%v", u, ok)
 	}

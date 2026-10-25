@@ -30,6 +30,7 @@ import (
 	"log/slog"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 func main() {
@@ -48,7 +49,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: randread -s <base> -f <encoded> -n <size> [-m samples] [-v]")
 		os.Exit(2)
 	}
-	tr := &http.Transport{}
+	tr := netutil.IsolatedTransport()
 	if *insecure {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 自签调试
 	}

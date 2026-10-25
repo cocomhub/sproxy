@@ -27,19 +27,15 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // waitWindows 轮询等待条件成立（staging 后台下载完成）。
+// 用 testutil.WaitFor（条件轮询 2ms）替代手写 Sleep 循环：满足即返回（快），
+// 且受 R14 睡眠棘轮约束（手写 Sleep 顶高全仓计数会被 archcheck 拦）。
 func waitWindows(t *testing.T, cond func() bool, msg string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("等待超时：%s", msg)
+	testutil.WaitFor(t, 10*time.Second, cond, msg)
 }
 
 // TestStageDL_WindowCachedThenAllLocal：窗口下载后二轮零远端。
