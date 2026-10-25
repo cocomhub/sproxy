@@ -19,6 +19,7 @@ package metaextra
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -170,12 +171,7 @@ func isNumber(v any) bool {
 }
 
 func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 // Trim 对字符串字段做 trim + 去空（避免空白键污染 meta）。
