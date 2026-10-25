@@ -69,7 +69,7 @@ var spec = map[string]FieldSpec{
 	"subtitle_files": {Type: "[]string", MaxLen: 512},
 }
 
-// Validate 校验 Extra 对象：键白名单 + 类型 + 长度 + 总大小。
+// ValidateExtra 校验 Extra 对象：键白名单 + 类型 + 长度 + 总大小。
 // 返回错误即拒绝写入（fail-closed：不合法不落 meta）。
 func ValidateExtra(extra map[string]any) error {
 	if len(extra) == 0 {
