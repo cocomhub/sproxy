@@ -34,9 +34,9 @@ func (f *fakeResolverRegistry) ResolveURL(ctx context.Context, rawURL string) (*
 func TestResolveURLHandler_OK(t *testing.T) {
 	t.Parallel()
 	h := &Handlers{urlResolver: &fakeResolverRegistry{info: &downloader.ResolveInfo{
-		Kind: "pikpak_share", Filename: "NHDTA-513A.mp4", Size: 1000,
+		Kind: "pikpak_share", Filename: "EXAMPLE-001A.mp4", Size: 1000,
 	}}}
-	req := httptest.NewRequest(http.MethodGet, "/api/resolve?url="+strings.ReplaceAll("https://mypikpak.com/s/abc", ":", "%3A"), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/resolve?url="+strings.ReplaceAll("https://example.com/s/EXAMPLE-001", ":", "%3A"), nil)
 	w := httptest.NewRecorder()
 	h.resolveURL(w, req)
 	if w.Code != http.StatusOK {
@@ -46,7 +46,7 @@ func TestResolveURLHandler_OK(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Kind != "pikpak_share" || got.Filename != "NHDTA-513A.mp4" {
+	if got.Kind != "pikpak_share" || got.Filename != "EXAMPLE-001A.mp4" {
 		t.Fatalf("got = %+v", got)
 	}
 }
@@ -67,7 +67,7 @@ func TestResolveURLHandler_NotAssembled(t *testing.T) {
 func TestResolveURLHandler_ResolverError(t *testing.T) {
 	t.Parallel()
 	h := &Handlers{urlResolver: &fakeResolverRegistry{err: errors.New("share not found")}}
-	req := httptest.NewRequest(http.MethodGet, "/api/resolve?url=https%3A%2F%2Fmypikpak.com%2Fs%2Fdead", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/resolve?url=https%3A%2F%2Fexample.com%2Fs%2FDEAD-BEEF", nil)
 	w := httptest.NewRecorder()
 	h.resolveURL(w, req)
 	if w.Code != http.StatusBadGateway {
@@ -91,9 +91,9 @@ func TestResolveURLHandler_BadBody(t *testing.T) {
 func TestWithShareTarget(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ in, target, want string }{
-		{"https://mypikpak.com/s/abc", "NHDTA-513A.mp4", "spx_target=NHDTA-513A.mp4"},
-		{"https://mypikpak.com/s/abc?x=1", "b.mp4", "spx_target=b.mp4"},
-		{"https://keepshare.org/k/magnet:?xt=urn:btih:ab", "m.mp4", "spx_target=m.mp4"},
+		{"https://example.com/s/EXAMPLE-001", "EXAMPLE-001A.mp4", "spx_target=EXAMPLE-001A.mp4"},
+		{"https://example.com/s/EXAMPLE-001?x=1", "b.mp4", "spx_target=b.mp4"},
+		{"https://example.com/magnet:?xt=urn:btih:ab", "m.mp4", "spx_target=m.mp4"},
 	}
 	for _, c := range cases {
 		got := withShareTarget(c.in, c.target)

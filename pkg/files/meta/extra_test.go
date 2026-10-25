@@ -129,3 +129,45 @@ func TestTrim(t *testing.T) {
 		t.Fatalf("非字符串字段应保留")
 	}
 }
+
+// TestValidateExtra_CustomPrefix 验证 `x_` 前缀自定义扩展字段：
+// 白名单外键可携带（任意语义），但类型/键名/总量仍受限。
+func TestValidateExtra_CustomPrefix(t *testing.T) {
+	t.Parallel()
+	// 合法：x_ 自定义字段
+	if err := ValidateExtra(map[string]any{"code": "EXAMPLE-001", "x_my_site_meta": "abc"}); err != nil {
+		t.Fatalf("x_ 字段应通过: %v", err)
+	}
+	// 非法：非 x_ 前缀的白名单外键 → 拒绝
+	if err := ValidateExtra(map[string]any{"random_key": 1}); err == nil {
+		t.Fatal("白名单外非 x_ 键应拒绝")
+	}
+	// 非法：x_ 键名含大写 → 拒绝
+	if err := ValidateExtra(map[string]any{"x_MyKey": 1}); err == nil {
+		t.Fatal("x_ 键名大写应拒绝")
+	}
+	// 非法：x_ 值类型不支持（struct）→ 拒绝
+	if err := ValidateExtra(map[string]any{"x_bad": struct{ A int }{1}}); err == nil {
+		t.Fatal("x_ 值不支持 struct 应拒绝")
+	}
+	// 合法：x_ 布尔/数字/[]string
+	if err := ValidateExtra(map[string]any{"x_enabled": true, "x_count": float64(3), "x_tags": []string{"a"}}); err != nil {
+		t.Fatalf("x_ 标量应通过: %v", err)
+	}
+}
+
+// TestTrimExtra_CustomPreserved 验证 TrimExtra 保留 x_ 字段（不被当空值裁剪）。
+func TestTrimExtra_CustomPreserved(t *testing.T) {
+	t.Parallel()
+	in := map[string]any{"code": "X-1", "x_foo": "", "x_bar": "keep", "site": ""}
+	out := TrimExtra(in)
+	if _, ok := out["x_foo"]; ok {
+		t.Fatal("x_ 空字符串应裁剪（与白名单同语义）")
+	}
+	if out["x_bar"] != "keep" {
+		t.Fatalf("x_bar = %v, want keep", out["x_bar"])
+	}
+	if _, ok := out["site"]; ok {
+		t.Fatal("白名单空值也应裁剪")
+	}
+}

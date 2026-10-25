@@ -385,3 +385,34 @@ func assertMismatchChunksCleared(t *testing.T, us *UploadStore, uploadID string)
 		t.Fatal("越界 ClearChunksReceived 应返回错误")
 	}
 }
+
+// TestUploadStore_MetaExtraSurvivesRestart 验证 MetaExtra 随 session.json 持久化，
+// 服务重启后（NewUploadStore 重新扫描）可恢复——complete 仍能写 sidecar。
+func TestUploadStore_MetaExtraSurvivesRestart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	us, err := NewUploadStore(dir, time.Hour, testLogger())
+	if err != nil {
+		t.Fatalf("NewUploadStore: %v", err)
+	}
+	sess, err := us.CreateSession("u-meta", "a.mp4", 1024, 512, 2, "abc", 0)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sess.MetaExtra = map[string]any{"code": "EXAMPLE-001", "x_custom": "v"}
+	us.PersistNow("u-meta")
+	us.Stop()
+
+	us2, err := NewUploadStore(dir, time.Hour, testLogger())
+	if err != nil {
+		t.Fatalf("NewUploadStore restart: %v", err)
+	}
+	defer us2.Stop()
+	got := us2.GetSession("u-meta")
+	if got == nil {
+		t.Fatal("会话未恢复")
+	}
+	if got.MetaExtra["code"] != "EXAMPLE-001" || got.MetaExtra["x_custom"] != "v" {
+		t.Fatalf("MetaExtra 未恢复: %+v", got.MetaExtra)
+	}
+}

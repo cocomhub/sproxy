@@ -76,11 +76,11 @@ func TestShareResolver_Resolve(t *testing.T) {
 		APIHost:  srv.URL,
 		UserHost: srv.URL,
 	})
-	meta, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123/xyz")
+	meta, err := r.Resolve(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123/xyz")
 	if err != nil {
 		t.Fatalf("Resolve error: %v", err)
 	}
-	if meta.ShareID != "abc123" {
+	if meta.ShareID != "EXAMPLE-001123" {
 		t.Errorf("share id = %q, want abc123", meta.ShareID)
 	}
 	if len(meta.Files) != 1 || meta.Files[0].Name != "movie.mp4" || meta.Files[0].Size != 123456 {
@@ -118,7 +118,7 @@ func TestShareResolver_CaptchaRefreshOnStaleness(t *testing.T) {
 	defer srv.Close()
 	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
 
-	if _, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123"); err != nil {
+	if _, err := r.Resolve(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123"); err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
 	if initCalls.Load() != 1 {
@@ -129,7 +129,7 @@ func TestShareResolver_CaptchaRefreshOnStaleness(t *testing.T) {
 	r.captchaFetchedAt = time.Now().Add(-2 * time.Hour)
 	r.captchaTTL = time.Hour
 	r.mu.Unlock()
-	if _, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123"); err != nil {
+	if _, err := r.Resolve(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123"); err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
 	if initCalls.Load() != 2 {
@@ -167,7 +167,7 @@ func TestShareResolver_RefreshLink(t *testing.T) {
 	defer srv.Close()
 	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
 
-	link, hash, err := r.RefreshLink(context.Background(), "abc123", "share-f1", "")
+	link, hash, err := r.RefreshLink(context.Background(), "EXAMPLE-001123", "share-f1", "")
 	if err != nil {
 		t.Fatalf("RefreshLink: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestShareResolver_RefreshLink(t *testing.T) {
 		t.Errorf("shareDetail=%d fileInfo=%d, want 1/1 (轻量，非全量重列)", shareCalls.Load(), fileInfoCalls.Load())
 	}
 	// 分享被换（fileID 消失）→ 报错
-	if _, _, err := r.RefreshLink(context.Background(), "abc123", "gone-file", ""); err == nil {
+	if _, _, err := r.RefreshLink(context.Background(), "EXAMPLE-001123", "gone-file", ""); err == nil {
 		t.Fatal("gone file should error (share changed)")
 	}
 }
@@ -219,7 +219,7 @@ func TestShareResolver_SubfolderRecursive(t *testing.T) {
 	defer srv.Close()
 	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
 
-	meta, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123")
+	meta, err := r.Resolve(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123")
 	if err != nil {
 		t.Fatalf("Resolve error: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestShareResolver_SubfolderDedup(t *testing.T) {
 	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
 
 	start := time.Now()
-	meta, err := r.Resolve(context.Background(), "https://mypikpak.com/s/abc123")
+	meta, err := r.Resolve(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestShareResolver_RefreshLink_WithToken(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	r := NewShareResolver(ShareResolverConfig{APIHost: srv.URL, UserHost: srv.URL, HTTPClient: srv.Client()})
-	if _, _, err := r.RefreshLink(context.Background(), "abc123", "sub-f1", "TOKEN-X"); err != nil {
+	if _, _, err := r.RefreshLink(context.Background(), "EXAMPLE-001123", "sub-f1", "TOKEN-X"); err != nil {
 		t.Fatalf("RefreshLink with token: %v", err)
 	}
 	if gotToken != "TOKEN-X" {

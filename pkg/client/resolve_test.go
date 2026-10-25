@@ -19,26 +19,26 @@ func TestResolveURL_OK(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ResolveInfo{
 			URL: gotQuery, Kind: "pikpak_share",
-			Files: []ResolvedFile{{ID: "id-1", Name: "NHDTA-513A.mp4", Size: 4370580470, Type: "video/mp4"}},
+			Files: []ResolvedFile{{ID: "id-1", Name: "EXAMPLE-001A.mp4", Size: 4370580470, Type: "video/mp4"}},
 		})
 	}))
 	defer srv.Close()
 
 	c := NewFileClient(srv.URL)
-	info, err := c.ResolveURL(t.Context(), "https://mypikpak.com/s/abc")
+	info, err := c.ResolveURL(t.Context(), "https://example.com/s/EXAMPLE-001")
 	if err != nil {
 		t.Fatalf("ResolveURL: %v", err)
 	}
 	if gotPath != "/api/resolve" {
 		t.Fatalf("path = %q", gotPath)
 	}
-	if gotQuery != "https://mypikpak.com/s/abc" {
+	if gotQuery != "https://example.com/s/EXAMPLE-001" {
 		t.Fatalf("url query = %q（必须原样传递）", gotQuery)
 	}
 	if info.Kind != "pikpak_share" || len(info.Files) != 1 {
 		t.Fatalf("info = %+v", info)
 	}
-	if info.Files[0].Name != "NHDTA-513A.mp4" || info.Files[0].Size != 4370580470 {
+	if info.Files[0].Name != "EXAMPLE-001A.mp4" || info.Files[0].Size != 4370580470 {
 		t.Fatalf("file = %+v", info.Files[0])
 	}
 }
@@ -60,7 +60,7 @@ func TestResolveURL_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewFileClient(srv.URL)
-	if _, err := c.ResolveURL(t.Context(), "https://mypikpak.com/s/dead"); err == nil {
+	if _, err := c.ResolveURL(t.Context(), "https://example.com/s/DEAD-BEEF"); err == nil {
 		t.Fatal("502 应报错")
 	}
 }

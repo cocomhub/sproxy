@@ -211,7 +211,7 @@ func TestChunkedInitRequest_MetaExtraJSON(t *testing.T) {
 	t.Parallel()
 	b, err := json.Marshal(ChunkedInitRequest{
 		UploadID: "u1", Filename: "a.mp4", TotalSize: 10,
-		MetaExtra: map[string]any{"code": "NHDTC-254", "maker": "NATURAL HIGH"},
+		MetaExtra: map[string]any{"code": "EXAMPLE-001", "maker": "STUDIO X"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +220,7 @@ func TestChunkedInitRequest_MetaExtraJSON(t *testing.T) {
 	if err := json.Unmarshal(b, &back); err != nil {
 		t.Fatal(err)
 	}
-	if back.MetaExtra["code"] != "NHDTC-254" || back.MetaExtra["maker"] != "NATURAL HIGH" {
+	if back.MetaExtra["code"] != "EXAMPLE-001" || back.MetaExtra["maker"] != "STUDIO X" {
 		t.Fatalf("MetaExtra 往返丢失: %+v", back.MetaExtra)
 	}
 }

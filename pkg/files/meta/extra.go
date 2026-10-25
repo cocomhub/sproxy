@@ -26,6 +26,18 @@ import (
 // maxExtraBytes 是 Extra 序列化后的大小上限（防滥用：16 KiB 足够承载全部字段）。
 const maxExtraBytes = 16 << 10
 
+// CustomKeyPrefix 是「客户端自定义扩展字段」的键前缀。
+//
+// 设计（用户裁定 2026-10-26）：除固定白名单（A/B/C 档，跨站点通用语义）外，客户端/站点
+// 可能需要携带自身特有字段（新站点元数据、实验字段等）。若每次新增都要改服务端白名单，
+// 会形成「客户端扩展 → 服务端发版」的强耦合。约定：**以 `x_` 前缀的键视为自定义扩展**——
+//   - 不做键白名单校验（任意键名），但仍受类型/长度/总大小约束（防注入与膨胀）；
+//   - 允许类型：string / bool / int64 / []string / float64（JSON 可表达的基本标量）；
+//   - 单键长度与总量受 maxExtraBytes 约束；键名限 `x_` + [a-z0-9_]（≤64 字符）。
+//
+// 与服务端白名单字段并存：白名单字段走严格语义校验，`x_` 字段走通用约束。
+const CustomKeyPrefix = "x_"
+
 // FieldSpec 描述一个字段的类型与约束。
 type FieldSpec struct {
 	Type     string   // string | []string | int64 | bool
@@ -69,7 +81,7 @@ var spec = map[string]FieldSpec{
 	"subtitle_files": {Type: "[]string", MaxLen: 512},
 }
 
-// ValidateExtra 校验 Extra 对象：键白名单 + 类型 + 长度 + 总大小。
+// ValidateExtra 校验 Extra 对象：键白名单（+ `x_` 自定义扩展）+ 类型 + 长度 + 总大小。
 // 返回错误即拒绝写入（fail-closed：不合法不落 meta）。
 func ValidateExtra(extra map[string]any) error {
 	if len(extra) == 0 {
@@ -83,15 +95,62 @@ func ValidateExtra(extra map[string]any) error {
 		return fmt.Errorf("meta: extra 超上限 %d B（实际 %d）", maxExtraBytes, len(b))
 	}
 	for k, v := range extra {
-		fs, ok := spec[k]
-		if !ok {
-			return fmt.Errorf("meta: extra 未知字段 %q（白名单外）", k)
-		}
-		if err := validateField(k, v, fs); err != nil {
+		if err := validateOneKey(k, v); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// validateOneKey 校验单个 extra 键：自定义扩展（x_ 前缀）或白名单字段。
+func validateOneKey(k string, v any) error {
+	if strings.HasPrefix(k, CustomKeyPrefix) {
+		// 客户端自定义扩展：键名限 `x_` + [a-z0-9_]，类型限基本标量，长度受总量约束。
+		if !isCustomKey(k) {
+			return fmt.Errorf("meta: extra 自定义键 %q 非法（须 x_ 前缀 + 小写字母数字下划线，≤64 字符）", k)
+		}
+		return validateCustomValue(k, v)
+	}
+	fs, ok := spec[k]
+	if !ok {
+		return fmt.Errorf("meta: extra 未知字段 %q（白名单外；自定义扩展请用 %s 前缀）", k, CustomKeyPrefix)
+	}
+	return validateField(k, v, fs)
+}
+
+// isCustomKey 校验自定义扩展键名（x_ 前缀 + [a-z0-9_]，≤64）。
+func isCustomKey(k string) bool {
+	if !strings.HasPrefix(k, CustomKeyPrefix) || len(k) > 64 || len(k) == len(CustomKeyPrefix) {
+		return false
+	}
+	for _, r := range k[len(CustomKeyPrefix):] {
+		if !isCustomKeyChar(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isCustomKeyChar 判断字符是否允许出现在自定义扩展键名中（小写字母/数字/下划线）。
+func isCustomKeyChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_'
+}
+
+// validateCustomValue 校验自定义扩展字段值（string/bool/数字/[]string/[]any 标量）。
+func validateCustomValue(k string, v any) error {
+	switch t := v.(type) {
+	case string:
+		if len(t) > maxExtraBytes {
+			return fmt.Errorf("meta: extra 自定义字段 %q 超长", k)
+		}
+		return nil
+	case bool, float64, json.Number, int64:
+		return nil
+	case []string, []any:
+		return nil
+	default:
+		return fmt.Errorf("meta: extra 自定义字段 %q 类型不支持（%T），允许 string/bool/数字/[]string", k, v)
+	}
 }
 
 // validateField 校验单字段类型/长度/枚举。
