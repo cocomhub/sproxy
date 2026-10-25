@@ -34,3 +34,4 @@ pkg/server/files_phys.go	1	卷自报物理足迹能力查询（配额模型 v3�
 pkg/volume/registry/quota_volume.go	1	配额层**纯委托**：`FS()` 透传被包装卷视图（**不加变换**）—— 不新增外部卷直连点，非封印绕过面
 pkg/volume/capacity/ledger.go	1	账本自身的读写（`meta/quota/` 保留区）：按名读写 shard/snap/index 三个小文件（**只读/写，不列目录、不原子 rename** —— 设计 §3.6 原则 1）；不触碰用户内容、不经封印语义 ⇒ 非封印绕过面
 pkg/server/source_volume.go	1	源定位（分享/AI 抽样/版本可见性）：经 volSet.External(卷).FS() 后**立即**套 trusted.Guard(Wrap)（与下载/转存同一装饰链；封印由装配处 SealBackend 保证）
+pkg/server/files_meta_extra_source.go	2	元数据补录（PUT /api/files/meta）：经 volSet.External(卷).FS() 取 FS 后**仅类型断言** MetaExtraUpdater（不裸读写用户内容；UpdateMetaExtra 由 trusted/secretdata 装饰链的旁路更新实现，封印语义由装配处保证）⇒ 非封印绕过面

@@ -35,7 +35,7 @@ func (h *Handlers) filesMetaWriteAfterRestore(dstRoot *storage.Root, owner, targ
 	if !policy.Enabled() {
 		return nil
 	}
-	return policy.WriteMeta(context.Background(), owner, dstRoot, targetRel)
+	return policy.WriteMeta(context.Background(), owner, dstRoot, targetRel, nil)
 }
 
 // VersionInfo 版本信息。

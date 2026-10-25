@@ -20,7 +20,10 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/files":            true,
 	// 可信卷 FileMeta 模型/计算/校验子包（master 新增）：被 pkg/files、pkg/cloud、
 	// pkg/sync 消费；零 pkg/* 内部依赖除 storage/volume（G0）⇒ G0。
-	"github.com/cocomhub/sproxy/pkg/files/meta":           true,
+	"github.com/cocomhub/sproxy/pkg/files/meta": true,
+	// metaextra 是 FileMeta.Extra 的字段 schema/校验（零 pkg/* 依赖 ⇒ G0），
+	// 被 pkg/files 与 pkg/server 消费。
+	"github.com/cocomhub/sproxy/pkg/files/metaextra":      true,
 	"github.com/cocomhub/sproxy/pkg/syncmgr":              true,
 	"github.com/cocomhub/sproxy/pkg/downloader":           true,
 	"github.com/cocomhub/sproxy/pkg/cloud":                true,
@@ -61,9 +64,10 @@ var Levels = map[string]int{
 	// 可信卷 FileMeta 模型/计算/校验（master 新增）：只导入 storage/volume（G0）。
 	// **必须 G0**：pkg/sync（G0，staging gate 引用 meta）导入它——若登 G1 则 R1 报
 	// 「L0 导入 L1」。
-	"github.com/cocomhub/sproxy/pkg/files/meta":    0,
-	"github.com/cocomhub/sproxy/pkg/cli":           0,
-	"github.com/cocomhub/sproxy/pkg/cloudfilename": 0,
+	"github.com/cocomhub/sproxy/pkg/files/meta":      0,
+	"github.com/cocomhub/sproxy/pkg/files/metaextra": 0,
+	"github.com/cocomhub/sproxy/pkg/cli":             0,
+	"github.com/cocomhub/sproxy/pkg/cloudfilename":   0,
 	// 本工作新增（cloud 完整性域）：语义校验器注册表 + 字节级校验器（image/tar）+ GCID
 	// 复算（PikPak 官方 hash）。零 pkg/* 内部依赖（crypto/sha1 标准库）⇒ G0；带外部依赖的
 	// 校验器（ext/video ffprobe）走独立 module，不在本表。

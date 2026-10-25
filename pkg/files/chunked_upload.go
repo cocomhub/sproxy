@@ -1256,7 +1256,7 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 	// 可信卷：分块上传 complete 后同样到达即建 meta（C-CRITICAL-2 修复——与单次上传
 	// writeFileSettle 一致，分块传完也有 .meta sidecar）。
 	if s.rt.fileMetaEnabled() {
-		if mErr := s.rt.writeMetaSidecar(context.Background(), owner, tnt.Root(), rel); mErr != nil {
+		if mErr := s.rt.writeMetaSidecar(context.Background(), owner, tnt.Root(), rel, nil); mErr != nil {
 			s.rt.logger().Warn("可信卷 meta 落盘失败（分块上传，读侧将不校验）", "file_name", session.Filename, "error", mErr)
 		}
 	}

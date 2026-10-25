@@ -131,7 +131,9 @@ type Handlers struct {
 	alertEngine *AlertEngine
 	cloudMgr    *cloud.CloudDownloadManager
 	// urlResolver 是通用 URL 解析注册表（POST /api/resolve）；nil = 未装配（503）。
-	urlResolver    ResolverRegistry
+	urlResolver ResolverRegistry
+	// metaSvcForTest 是元数据补录 handler 的测试替身（构造注入，运行期不可变；生产恒 nil）。
+	metaSvcForTest metaUpdateService
 	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
 	storageMgr     *capacity.StorageManager

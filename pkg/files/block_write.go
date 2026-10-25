@@ -161,7 +161,7 @@ func (s *Service) CloseBlockWrite(ctx context.Context, id string) error {
 	// 读路径按旧分块校验新内容恒失配 → 文件固化不可下载（直到再次成功覆盖写）。
 	// meta 计算失败时删旧 sidecar 退化为 missing（读侧不校验；下次写自愈）。
 	if s.rt.fileMetaEnabled() {
-		if mErr := s.rt.writeMetaSidecar(ctx, sess.owner, sess.root, sess.dstRel); mErr != nil {
+		if mErr := s.rt.writeMetaSidecar(ctx, sess.owner, sess.root, sess.dstRel, nil); mErr != nil {
 			s.rt.logger().Warn("块写 meta 落盘失败（该文件读侧将不校验）", "file_name", sess.dstRel, "error", mErr)
 			_ = sess.root.Remove(meta.MetaPath(sess.dstRel))
 		}

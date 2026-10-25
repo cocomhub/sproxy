@@ -400,7 +400,7 @@ func (h *Handlers) writeCopyMeta(cvc *copyVolumeCtx) {
 	if cvc.toTnt == nil || cvc.toTnt.Root() == nil {
 		return
 	}
-	if mErr := (filesMetaPolicy{h: h}).WriteMeta(cvc.ctx, cvc.owner, cvc.toTnt.Root(), cvc.rel); mErr != nil {
+	if mErr := (filesMetaPolicy{h: h}).WriteMeta(cvc.ctx, cvc.owner, cvc.toTnt.Root(), cvc.rel, nil); mErr != nil {
 		h.logger.Warn("跨卷复制目标 meta 落盘失败（读侧将不校验）",
 			"file_name", cvc.remotePath, "to", cvc.toVol, "error", mErr)
 	}

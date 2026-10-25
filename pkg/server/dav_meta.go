@@ -67,7 +67,7 @@ func (d *davMetaFS) writeMeta(ctx context.Context, p string) {
 	if fi, err := d.Stat(ctx, p); err != nil || fi == nil || fi.IsDir {
 		return
 	}
-	if err := (filesMetaPolicy{h: d.h}).WriteMeta(ctx, d.owner, d.root, rel); err != nil {
+	if err := (filesMetaPolicy{h: d.h}).WriteMeta(ctx, d.owner, d.root, rel, nil); err != nil {
 		d.logger().Warn("dav: 写 meta sidecar 失败（读侧退化为不校验/流式）", "path", rel, "error", err)
 	}
 }

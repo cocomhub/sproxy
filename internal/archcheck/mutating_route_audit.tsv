@@ -77,3 +77,4 @@ POST /upload	pending	handler=upload actions=NONE
 POST /upload/chunk	pending	handler=uploadChunk actions=NONE
 POST /upload/complete	pending	handler=uploadComplete actions=NONE
 POST /upload/init	pending	handler=uploadInit actions=NONE
+PUT /api/files/meta	action=file_meta_update	

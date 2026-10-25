@@ -18,7 +18,7 @@ type spyMetaPolicy struct{ called bool }
 
 func (p *spyMetaPolicy) Enabled() bool { return true }
 
-func (p *spyMetaPolicy) WriteMeta(context.Context, string, *storage.Root, string) error {
+func (p *spyMetaPolicy) WriteMeta(context.Context, string, *storage.Root, string, map[string]any) error {
 	return nil
 }
 
