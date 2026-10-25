@@ -290,7 +290,10 @@ func (d *stageDL) advanceAhead(o chunkRangeOpts, need []*cacheWindow) {
 // 完成后**不因短超时回源整流**——整流与窗口缓存双轨会重复拉 + 排队（实测 2min 卡死）。
 // 读仍不无限阻塞：极端失败（下载失败/无带宽）超时后回源。
 func (d *stageDL) waitWindowsReady(e *metaEntry, rel string, ci shardseal.ChunkInfo, need []*cacheWindow) bool {
-	deadline := time.Now().Add(30 * time.Second)
+	// **30s → 3s（2026-10-25 性能修复）**：窗口下载 4MiB @7.8MB/s ≈ 0.5s；30s 硬超时
+	// 在下载卡死（inflight 未清）时让读等满 30s 才回源，是热路径 outlier 主因。3s 内
+	// 正常下载必完成；仍失败 ⇒ 快速回源整流（读不无限阻塞）。
+	deadline := time.Now().Add(3 * time.Second)
 	for {
 		allReady := true
 		for _, w := range need {
@@ -348,7 +351,13 @@ func (d *stageDL) runWindowDownload(e *metaEntry, rel string, ci shardseal.Chunk
 	case <-time.After(5 * time.Minute):
 		return
 	}
-	_ = d.downloadWindow(context.Background(), e, ci, w, key)
+	// **ctx 超时（2026-10-25 性能修复）**：旧 context.Background() 无超时 ⇒ GetRange
+	// 遇 dlink 失效/网络静默阻塞时永不返回 ⇒ inflight 永不清 ⇒ 后续读到该窗口一直等
+	// waitWindowsReady 30s 硬超时（实测热路径 2 个 31-32s outlier，占总耗时 74%）。
+	// 加 60s 上界：卡死自愈（inflight 释放），配合 waitWindowsReady 3s 快速回源。
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_ = d.downloadWindow(ctx, e, ci, w, key)
 }
 
 // downloadWindow 单窗独立下载：底层 OpenRangeRead 拉 [EncStart, EncEnd) 密文 → 原子写

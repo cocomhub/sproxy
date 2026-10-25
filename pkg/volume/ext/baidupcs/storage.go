@@ -73,20 +73,13 @@ type Storage struct {
 	// 同进程其它外部请求）。per-instance 独立连接池 + ResponseHeaderTimeout 兜底。
 	httpc *http.Client
 
-	// dlinkMu 保护 dlinkCache（并发段读复用同一 key 直链时只签发一次）。
+	// dlinkMu 串行化签发（同 key 并发段读只签一次）。
 	dlinkMu sync.Mutex
-	// dlinkCache 是 key → {url, 过期时间} 的短 TTL 直链缓存（2026-10-21 缺陷修复）：
-	// 同一文件的多次 Range GET（salt + N 个 blocklet 段）复用一次 LocateDownload，
-	// 避免每段重签（真机实测每次签发 ~0.3s，N+1 次签发是网盘随机读慢的主因之一）。
-	// 百度 dlink 自签有效 8h，本地 TTL 60s 远短于它（失效先于签名到期，安全）。
-	// 失效（CDN 非 206）⇒ 清除缓存并重签一次（自愈）。
-	dlinkCache map[string]dlinkEntry
-}
-
-// dlinkEntry 是 dlink 缓存条目（url + 本地过期时间）。
-type dlinkEntry struct {
-	url string
-	exp time.Time
+	// dlinkCache 是有界 LRU 直链缓存（2026-10-25，见 dlink_cache.go）：TTL 1h
+	// （8h 签名的 1/8，失效先于签名到期）+ 容量上限淘汰最久未用。
+	// 同一文件的多次 Range GET（含大块持续下载 >1 分钟）复用同一张直链，避免使用中
+	// 过期重签（每次 ~0.3s）；失效（CDN 非 206）⇒ 清除并重签一次（自愈）。
+	dlinkCache *dlinkLRU
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -128,7 +121,7 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 		})
 	}
 
-	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient(), dlinkCache: make(map[string]dlinkEntry)}, nil
+	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient(), dlinkCache: newDlinkLRU(0)}, nil
 }
 
 // newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4 + R19 门禁：per-instance 独立
