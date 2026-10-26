@@ -14,6 +14,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/pikpak"
@@ -193,11 +194,13 @@ func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool) {
 
 // insecureTransport 返回跳过 TLS 校验的 Transport（仅本地联调；绝不用于生产）。
 func insecureTransport() *http.Transport {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		base = &http.Transport{}
+	// 基座 = DefaultTransport.Clone()（保留 ProxyFromEnvironment/连接池调校）——
+	// 不裸构造 Transport（门禁 R19：丢默认调校）。
+	t, _ := http.DefaultTransport.(*http.Transport)
+	if t == nil {
+		t = netutil.IsolatedTransport()
 	}
-	t := base.Clone()
+	t = t.Clone()
 	t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 本地联调专用
 	return t
 }

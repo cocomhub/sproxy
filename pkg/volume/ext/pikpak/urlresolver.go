@@ -98,6 +98,8 @@ func (r *URLResolver) Resolve(ctx context.Context, rawURL string) (*downloader.R
 			return nil, fmt.Errorf("keepshare follow %s: %w", src, ferr)
 		}
 		shareID = id
+		// 匿名解析需**真实分享 URL**（keepshare URL 会被再次解析成容器 id → NOT_FOUND）。
+		src = "https://mypikpak.com/s/" + id
 	}
 	info := &downloader.ResolveInfo{URL: rawURL, Kind: URLResolverName}
 	// ① 登录态列举优先（含 hash、无分享直链限制）
@@ -121,7 +123,7 @@ func (r *URLResolver) httpClient() *http.Client {
 	if r.client != nil {
 		return r.client
 	}
-	return &http.Client{}
+	return &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
 }
 
 // followKeepshareShareID 跟随 keepshare 镜像重定向链，返回最终 mypikpak 分享 id。
@@ -133,43 +135,60 @@ func (r *URLResolver) httpClient() *http.Client {
 // Location 并逐跳重建请求，直到目标主机是 mypikpak 或无可跳转。
 func followKeepshareShareID(ctx context.Context, client *http.Client, raw string) (string, error) {
 	if client == nil {
-		client = &http.Client{}
+		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
 	}
 	cur := raw
 	for range 5 {
 		if id := shareIDFromFinalURL(cur); id != "" {
 			return id, nil
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cur, nil)
+		next, done, err := followOneHop(ctx, client, cur)
 		if err != nil {
 			return "", err
 		}
-		// 干净 client：本函数手动控制重定向（禁用自动跟随避免 CheckRedirect 陷阱）。
-		c := &http.Client{Timeout: client.Timeout, Transport: client.Transport}
-		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		resp, err := c.Do(req)
-		if err != nil {
-			return "", err
-		}
-		finalURL := ""
-		loc := resp.Header.Get("Location")
-		_ = resp.Body.Close()
-		if loc == "" {
-			// 无重定向：当前 URL 即终点
-			finalURL = cur
-			if id := shareIDFromFinalURL(finalURL); id != "" {
+		if done != "" {
+			if id := shareIDFromFinalURL(done); id != "" {
 				return id, nil
 			}
-			return "", fmt.Errorf("keepshare 终点非 PikPak 分享: %s", finalURL)
+			return "", fmt.Errorf("keepshare 终点非 PikPak 分享: %s", done)
 		}
-		ref, rerr := url.Parse(loc)
-		if rerr != nil {
-			return "", fmt.Errorf("keepshare redirect Location 非法: %q", loc)
-		}
-		base, _ := url.Parse(cur)
-		cur = base.ResolveReference(ref).String()
+		cur = next
 	}
 	return "", fmt.Errorf("keepshare redirect 链超过 5 跳: %s", raw)
+}
+
+// followOneHop 单跳跟随：请求 cur，返回 (下一跳 URL, 终点, error)。
+// 无重定向（Location 空）→ done=当前 URL；失效分享（console/shared/status）→ error 短路。
+func followOneHop(ctx context.Context, client *http.Client, cur string) (next, done string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cur, nil)
+	if err != nil {
+		return "", "", err
+	}
+	// 干净 client：本函数手动控制重定向（禁用自动跟随避免 CheckRedirect 陷阱）。
+	c := &http.Client{Timeout: client.Timeout, Transport: client.Transport}
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	loc := resp.Header.Get("Location")
+	_ = resp.Body.Close()
+	if loc == "" {
+		// 无重定向：当前 URL 即终点
+		return "", cur, nil
+	}
+	ref, rerr := url.Parse(loc)
+	if rerr != nil {
+		return "", "", fmt.Errorf("keepshare redirect Location 非法: %q", loc)
+	}
+	base, _ := url.Parse(cur)
+	nextURL := base.ResolveReference(ref).String()
+	// 失效分享短路：keepshare 重定向到 console/shared/status（分享不存在/已下架），
+	// 立即返回错误（不继续跳，避免每个磁力多 3-5 个请求拖慢全量解析）。
+	if h := hostOf(nextURL); strings.Contains(h, "keepshare") && strings.Contains(nextURL, "console/shared/status") {
+		return "", "", fmt.Errorf("keepshare share invalid（分享不存在/已下架）: %s", nextURL)
+	}
+	return nextURL, "", nil
 }
 
 // hostOf 返回 URL 主机名（小写）。
