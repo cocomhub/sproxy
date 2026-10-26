@@ -292,6 +292,7 @@ func (s *Service) writeFileSettle(f *fileOp, rel string, prev int64, input Write
 		Owner: f.owner, RemotePath: input.RemotePath, Volume: input.ExplicitVol,
 		Verify: true, ExpectedChecksum: input.ExpectedChecksum,
 		ClientSize: input.ClientSize, Mtime: input.Mtime,
+		MetaExtra: input.MetaExtra, // 单次上传的 meta_extra 透传（本地卷 sidecar / 外部卷 ctx）
 	}, route, limitedSrc, f.logger)
 	if werr != nil {
 		return WriteFileResult{}, werr

@@ -1132,6 +1132,103 @@ func inheritOldExtra(ctx context.Context, p filesMetaPolicy, root *storage.Root,
 	fm.Extra = oldFM.Extra
 }
 
+// UpdateMetaExtra 旁路更新本地卷文件 meta 的 Extra（读-校验-合并-写 sidecar）。
+//
+// 为什么需要（2026-10-26 修复 P0）：此前本地卷补录走 files.MetaExtraUpdater 接缝 →
+// Set.External(volName)，而**本地卷不在 external**（assembleLocalVolume 只写 roots）
+// ⇒ 恒 nil ⇒ meta set 对本地卷恒 503「未装配 meta 旁路更新能力」。
+// 本地卷的 sidecar 本就由本 policy 维护，故补录直接在此实现（与 trusted 逻辑同构）。
+//
+// 语义（用户裁定）：模式由 ctx syncpkg.MetaUpdateModeFrom 决定；
+// merge（默认新增，同名更新）/ replace（整表替换）/ delete（删指定键）；
+// **merge/replace 下值 null 的键视为删除**（JSON 直觉）。
+// sidecar 缺失 → ErrMetaUnavailable（无内容基线，拒绝盲写）。
+func (p filesMetaPolicy) UpdateMetaExtra(ctx context.Context, owner string, root *storage.Root, rel string, extra map[string]any) error {
+	if root == nil {
+		return files.ErrMetaUnavailable
+	}
+	mrel := meta.MetaPath(rel)
+	raw, rerr := p.ReadMetaRaw(ctx, root, mrel)
+	if rerr != nil {
+		if errors.Is(rerr, os.ErrNotExist) {
+			return files.ErrMetaUnavailable // 无 sidecar = 无内容基线，拒绝盲写
+		}
+		return rerr
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		return fmt.Errorf("meta: sidecar 损坏，拒绝更新: %w", uerr)
+	}
+	if sz, serr := userVisibleSize(root, rel); serr == nil && sz != fm.Size {
+		return fmt.Errorf("meta: 主文件大小 %d ≠ sidecar %d（疑并发覆盖），已拒绝 Extra 更新", sz, fm.Size)
+	}
+	applyMetaUpdateMode(ctx, fm, extra)
+	return p.writeMetaBlob(ctx, owner, root, mrel, fm)
+}
+
+// applyMetaUpdateMode 按 ctx 模式把 extra 应用到 fm.Extra（单一实现，与 trusted 同语义）：
+// merge（默认新增/同名更新）/ replace（整表替换）/ delete（删指定键）；
+// merge/replace 下**值为 nil 的键视为删除**（JSON 直觉，与 --delete 等价）。
+func applyMetaUpdateMode(ctx context.Context, fm *meta.FileMeta, extra map[string]any) {
+	if fm.Extra == nil {
+		fm.Extra = make(map[string]any, len(extra))
+	}
+	mode := syncpkg.MetaUpdateModeFrom(ctx)
+	if mode == syncpkg.MetaUpdateReplace {
+		fm.Extra = make(map[string]any, len(extra))
+	}
+	if mode == syncpkg.MetaUpdateDelete {
+		for k := range extra {
+			delete(fm.Extra, k)
+		}
+		return
+	}
+	for k, v := range extra {
+		if v == nil {
+			delete(fm.Extra, k) // null = 删除（JSON 直觉）
+			continue
+		}
+		fm.Extra[k] = v
+	}
+}
+
+// writeMetaBlob 把已构造好的 FileMeta 序列化并原子落盘 sidecar（含配额预留/差分结算）。
+// 复用 WriteMeta 的落盘/配额/补偿口径，但不重算内容哈希（补录专用）。
+func (p filesMetaPolicy) writeMetaBlob(ctx context.Context, owner string, root *storage.Root, mrel string, fm *meta.FileMeta) error {
+	data, merr := meta.Marshal(fm)
+	if merr != nil {
+		return fmt.Errorf("meta: 序列化失败: %w", merr)
+	}
+	if dirErr := p.prepareMetaDir(root, mrel); dirErr != nil {
+		return dirErr
+	}
+	prev := int64(0)
+	if fi, serr := root.Stat(mrel); serr == nil && fi != nil {
+		prev = fi.Size()
+	}
+	scope, reservation, rerr := p.reserveMetaQuota(owner, mrel, int64(len(data)))
+	if rerr != nil {
+		return rerr
+	}
+	if reservation != nil {
+		defer reservation.Release() // 幂等：Commit 后为 no-op
+	}
+	if werr := p.atomicWriteMeta(root, mrel, data); werr != nil {
+		_ = root.Remove(mrel)
+		if scope != nil && prev > 0 {
+			scope.ReleaseUsage(prev)
+		}
+		return werr
+	}
+	if reservation != nil {
+		reservation.Commit(int64(len(data)))
+	}
+	if scope != nil && prev > 0 {
+		scope.ReleaseUsage(prev)
+	}
+	return nil
+}
+
 // seekEndSize 探测流的内容长度（SeekEnd 后复原到起点）；不支持 Seek 时返回错误（调用方跳过判据）。
 func seekEndSize(r io.Seeker) (int64, error) {
 	end, err := r.Seek(0, io.SeekEnd)

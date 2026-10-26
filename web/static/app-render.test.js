@@ -574,3 +574,53 @@ test('shareVolumeFor：行卷优先 → 过滤卷 → 空（自动定位）', ()
   assert.equal(r.shareVolumeFor('', ''), '', '皆空 ⇒ 不发送 volume');
   assert.equal(r.shareVolumeFor(undefined, undefined), '', 'undefined 也归一为空串');
 });
+
+// ---- meta extra（2026-10-26 读闭环）：徽标 + 弹窗渲染 ----
+
+// 文件行的 meta 徽标：有 extra 时显示键数，无/空时不显示。
+// 变异：把 metaBadge 条件改成恒显示 → 无 extra 用例红。
+test('buildFileRowHtml meta 徽标：有 extra 显示键数，无则不显示', () => {
+  const withExtra = r.buildFileRowHtml({ name: 'a.txt', size: 10, extra: { code: 'X', maker: 'Y' } }, 'a.txt');
+  assert.ok(withExtra.includes('meta-badge'), '有 extra 应渲染 meta-badge');
+  assert.ok(withExtra.includes('📄 2'), '徽标应显示键数 2');
+  const noExtra = r.buildFileRowHtml({ name: 'b.txt', size: 10 }, 'b.txt');
+  assert.ok(!noExtra.includes('meta-badge'), '无 extra 不应渲染徽标');
+  const emptyExtra = r.buildFileRowHtml({ name: 'c.txt', size: 10, extra: {} }, 'c.txt');
+  assert.ok(!emptyExtra.includes('meta-badge'), '空 extra 不应渲染徽标');
+});
+
+// 每行必须有「元数据」按钮（UI 入口）。
+test('buildFileRowHtml 含元数据按钮', () => {
+  const html = r.buildFileRowHtml({ name: 'a.txt', size: 10 }, 'a.txt');
+  assert.ok(html.includes('file-meta-btn'), '元数据按钮存在');
+  assert.ok(html.includes('data-filename="a.txt"'), '按钮带文件名');
+});
+
+// 空 extra → 「暂无元数据」占位；非空 → 逐键渲染 key 与 value。
+test('buildMetaReadHtml：空占位 + 逐键渲染', () => {
+  assert.match(r.buildMetaReadHtml({}), /暂无元数据/);
+  assert.match(r.buildMetaReadHtml(null), /暂无元数据/);
+  const html = r.buildMetaReadHtml({ code: 'ABC-001', maker: 'STUDIO X' });
+  assert.ok(html.includes('code') && html.includes('ABC-001'));
+  assert.ok(html.includes('maker') && html.includes('STUDIO X'));
+});
+
+// 弹窗 HTML：包含读区、编辑 textarea（预填当前 extra JSON）、三个模式按钮。
+test('buildMetaModalHtml：读区 + 编辑区 + 三模式按钮', () => {
+  const html = r.buildMetaModalHtml('dir/a.mp4', { code: 'X' });
+  assert.ok(html.includes('meta-read-area'), '读区');
+  assert.ok(html.includes('id="meta-edit-json"'), '编辑 textarea');
+  // textarea 预填当前 extra（JSON 经 escHtml 转义为 HTML 实体形态）。
+  assert.ok(html.includes('code'), 'textarea 应含键 code');
+  assert.ok(html.includes('meta-save-btn'), '合并保存按钮');
+  assert.ok(html.includes('meta-replace-btn'), '整表替换按钮');
+  assert.ok(html.includes('meta-delete-key-btn'), '删除键按钮');
+  assert.ok(html.includes('dir/a.mp4'), '显示目标文件名');
+});
+
+// HTML 转义：extra 值含 <script> 必须被转义（防 XSS）。
+test('buildMetaReadHtml 转义恶意值', () => {
+  const html = r.buildMetaReadHtml({ x_tag: '<script>alert(1)</script>' });
+  assert.ok(!html.includes('<script>'), '不得输出未转义的 script 标签');
+  assert.ok(html.includes('&lt;script&gt;'), '应转义为实体');
+});

@@ -371,3 +371,12 @@ func (r *runtime) publishFileEvent(action, owner, rel string, size int64) {
 	rel = strings.TrimPrefix(rel, "user/")
 	r.eventSink.OnFileEvent(action, owner, rel, size)
 }
+
+// updateMetaExtra 委托装配层旁路更新本地卷 sidecar 的 Extra（未装配 → ErrMetaUnavailable）。
+// 模式经 ctx 承载（syncpkg.MetaUpdateModeFrom）。供 updateMetaLocal 调用。
+func (rt runtime) updateMetaExtra(ctx context.Context, owner string, root *storage.Root, rel string, extra map[string]any) error {
+	if rt.fileMeta == nil || !rt.fileMeta.Enabled() {
+		return ErrMetaUnavailable
+	}
+	return rt.fileMeta.UpdateMetaExtra(ctx, owner, root, rel, extra)
+}

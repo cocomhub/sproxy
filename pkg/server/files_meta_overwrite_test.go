@@ -5,13 +5,16 @@ package server
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // TestWriteMeta_OverwriteKeepsOldExtra 钉住用户裁定（2026-10-26：默认**新增而非覆盖**）：
@@ -83,4 +86,83 @@ func writeMetaProbeFile(t *testing.T, root *storage.Root, rel, content string) {
 	if cerr := f.Close(); cerr != nil {
 		t.Fatalf("Close: %v", cerr)
 	}
+}
+
+// TestLocalMetaPolicy_UpdateMetaExtra 钉住本地卷补录三模式 + null=删除语义
+// （2026-10-26 用户裁定：默认新增非覆盖；null 视为删除；显式 replace/delete）。
+// 变异：把 applyMetaUpdateMode 的 null 分支改成写入 nil → 本用例红。
+func TestLocalMetaPolicy_UpdateMetaExtra(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	p := filesMetaPolicy{h: &Handlers{}}
+	ctx := context.Background()
+	const rel = "user/a.txt"
+
+	// 先建文件 + 初始 extra（code=OLD, maker=KEEP）。
+	writeMetaProbeFile(t, root, rel, "v1")
+	if err := p.WriteMeta(ctx, "alice", root, rel, map[string]any{"code": "OLD", "maker": "KEEP"}); err != nil {
+		t.Fatalf("WriteMeta#1: %v", err)
+	}
+
+	// merge（默认）：新增 key=x_tag，更新 code=NEW，保留 maker；null=删除。
+	if err := p.UpdateMetaExtra(ctx, "alice", root, rel, map[string]any{"code": "NEW", "x_tag": "added", "maker": nil}); err != nil {
+		t.Fatalf("UpdateMetaExtra merge: %v", err)
+	}
+	fm := readMetaProbe(t, p, ctx, root, rel)
+	if fm.Extra["code"] != "NEW" || fm.Extra["x_tag"] != "added" {
+		t.Fatalf("merge 后应新增/更新: %v", fm.Extra)
+	}
+	if _, ok := fm.Extra["maker"]; ok {
+		t.Fatalf("null 键应视为删除: %v", fm.Extra)
+	}
+
+	// replace（显式整表替换）：只剩 z=only。
+	if err := p.UpdateMetaExtra(ctx, "alice", root, rel, map[string]any{"z": "only"}); err != nil {
+		t.Fatalf("UpdateMetaExtra replace: %v", err)
+	}
+	_ = syncpkg.WithMetaUpdateMode(ctx, syncpkg.MetaUpdateReplace)
+	// 注意：ctx 不可变 —— 用新 ctx 传模式。
+	rctx := syncpkg.WithMetaUpdateMode(context.Background(), syncpkg.MetaUpdateReplace)
+	if err := p.UpdateMetaExtra(rctx, "alice", root, rel, map[string]any{"z": "only"}); err != nil {
+		t.Fatalf("UpdateMetaExtra replace: %v", err)
+	}
+	fm2 := readMetaProbe(t, p, ctx, root, rel)
+	if len(fm2.Extra) != 1 || fm2.Extra["z"] != "only" {
+		t.Fatalf("replace 应整表替换: %v", fm2.Extra)
+	}
+
+	// delete（显式删键）：删 z。
+	dctx := syncpkg.WithMetaUpdateMode(context.Background(), syncpkg.MetaUpdateDelete)
+	if err := p.UpdateMetaExtra(dctx, "alice", root, rel, map[string]any{"z": nil}); err != nil {
+		t.Fatalf("UpdateMetaExtra delete: %v", err)
+	}
+	fm3 := readMetaProbe(t, p, ctx, root, rel)
+	if len(fm3.Extra) != 0 {
+		t.Fatalf("delete 后应清空: %v", fm3.Extra)
+	}
+
+	// sidecar 缺失 → ErrMetaUnavailable（拒绝盲写）。
+	if err := p.UpdateMetaExtra(ctx, "alice", root, "user/nonexistent.txt", map[string]any{"x": "1"}); !errors.Is(err, files.ErrMetaUnavailable) {
+		t.Fatalf("无 sidecar 应 ErrMetaUnavailable, got %v", err)
+	}
+}
+
+// readMetaProbe 读回 sidecar 的 FileMeta。
+func readMetaProbe(t *testing.T, p filesMetaPolicy, ctx context.Context, root *storage.Root, rel string) *meta.FileMeta {
+	t.Helper()
+	raw, rerr := p.ReadMetaRaw(ctx, root, meta.MetaPath(rel))
+	if rerr != nil {
+		t.Fatalf("ReadMetaRaw: %v", rerr)
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("Unmarshal: %v", uerr)
+	}
+	return fm
 }

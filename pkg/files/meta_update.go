@@ -76,17 +76,21 @@ func (s *Service) UpdateMeta(ctx context.Context, input UpdateMetaInput) error {
 	return s.updateMetaExternal(ctx, owner, input.RemotePath, input.Extra)
 }
 
-// updateMetaLocal 本地卷分支：经 FileMetaPolicy 的读-校验-合并-写（filesMetaPolicy
-// 读 root 相对 sidecar + TrustedVolumeFS.UpdateMetaExtra 合并）。
+// updateMetaLocal 本地卷分支（2026-10-26 修复 P0）：委派装配层 FileMetaPolicy.UpdateMetaExtra
+// ——**不再**走 MetaExtraUpdater 接缝。
+//
+// 为什么：MetaExtraUpdater 接缝按卷名查 Set.External(volName)，而**本地卷不在 external**
+// （assembleLocalVolume 只写 roots）⇒ 恒 nil ⇒ 本地卷 meta set 恒 503「未装配 meta 旁路
+// 更新能力」。本地卷 sidecar 本就由 FileMetaPolicy 维护 ⇒ 直接委派。
 func (s *Service) updateMetaLocal(ctx context.Context, owner, remotePath string, loc FileLocation, extra map[string]any) error {
-	updater := s.metaExtraUpdaterFor(loc)
-	if updater == nil {
-		return ErrMetaUnavailable
+	if loc.Tenant == nil || loc.Tenant.Root() == nil {
+		return &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 	}
-	if err := updater.UpdateMetaExtra(ctx, remotePath, extra); err != nil {
-		return fmt.Errorf("files: 更新 meta extra 失败: %w", err)
+	rel, ok := loc.Tenant.UserRel(remotePath)
+	if !ok {
+		return &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-	return nil
+	return s.rt.updateMetaExtra(ctx, owner, loc.Tenant.Root(), rel, extra)
 }
 
 // updateMetaExternal 外部卷分支：经 ExternalVolumeOps.ExternalMetaUpdate 接缝
@@ -203,30 +207,6 @@ func syncModeOf(m MetaUpdateMode) syncpkg.MetaUpdateMode {
 	default:
 		return syncpkg.MetaUpdateMerge
 	}
-}
-
-// metaExtraUpdaterFor 取目标卷 FS 的旁路 Extra 能力（未装配 → nil）。
-// 走 VolumeSet 的 metaExtraUpdater 能力（装配层注入；与 UpdateMetaExtra 装饰器链一致）。
-func (s *Service) metaExtraUpdaterFor(loc FileLocation) MetaExtraUpdater {
-	vs := s.rt.volSet()
-	if vs == nil {
-		return nil
-	}
-	u, ok := vs.(metaExtraUpdaterSource)
-	if !ok {
-		return nil
-	}
-	return u.MetaExtraUpdater(loc.VolumeName, "")
-}
-
-// MetaExtraUpdater 是旁路 Extra 更新的最小接口（装配层经 metaExtraUpdaterSource 注入）。
-type MetaExtraUpdater interface {
-	UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error
-}
-
-// metaExtraUpdaterSource 由装配层卷集合实现（提供按卷取旁路更新能力）。
-type metaExtraUpdaterSource interface {
-	MetaExtraUpdater(volName, owner string) MetaExtraUpdater
 }
 
 // mustRel 把用户可见路径解析为根内相对路径（owner/… 形态）。失败返回原路径（
