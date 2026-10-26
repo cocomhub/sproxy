@@ -11,6 +11,12 @@
 //
 //	A（内容）：code/maker/maker_slug/label/series/actress/genres/director/release_date/
 //	           title_ja/title_cn/page_url/site
+//
+// 多语言语义约定（用户裁定 2026-10-26）：sproxy **不解释**业务语言字段——白名单中的
+// actress/genres 存放**聚合后**的值（站点侧 ja 顺序优先 + cn 新增追加去重）；
+// 各语言的分离值由客户端经 `x_` 自定义扩展承载（如 x_genres_cn / x_label_cn），
+// 服务端只做通用校验（前缀 + 类型 + 长度 + 总量），新增语种/字段无需发版。
+//
 //	B（溯源）：origin_name/source/share_url/share_id/share_file_name/
 //	           share_file_id/share_hash/downloaded_at/mirror_urls/nfo_ref
 //	C（可选）：duration_sec/resolution/uncensored/has_cn_sub/subtitle_files
@@ -55,9 +61,7 @@ var spec = map[string]FieldSpec{
 	"label":        {Type: "string", MaxLen: 64},
 	"series":       {Type: "string", MaxLen: 128},
 	"actress":      {Type: "[]string", MaxLen: 64},
-	"actress_cn":   {Type: "[]string", MaxLen: 64},
 	"genres":       {Type: "[]string", MaxLen: 64},
-	"genres_cn":    {Type: "[]string", MaxLen: 64},
 	"director":     {Type: "string", MaxLen: 64},
 	"release_date": {Type: "string", MaxLen: 16},
 	"title_ja":     {Type: "string", MaxLen: 400},
@@ -80,8 +84,6 @@ var spec = map[string]FieldSpec{
 	"resolution":     {Type: "string", MaxLen: 16, Allowed: []string{"480p", "720p", "1080p", "4k"}},
 	"uncensored":     {Type: "bool"},
 	"has_cn_sub":     {Type: "bool"},
-	"has_en_sub":     {Type: "bool"},
-	"cover_url":      {Type: "string", MaxLen: 512},
 	"subtitle_files": {Type: "[]string", MaxLen: 512},
 }
 
