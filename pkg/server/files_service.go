@@ -1114,6 +1114,24 @@ func (p filesMetaPolicy) ReadMetaRaw(ctx context.Context, root *storage.Root, mr
 	return raw, nil
 }
 
+// inheritOldExtra 把旧 sidecar 的 extra 继承到新算出的 FileMeta（覆盖写合并语义）。
+//
+// 为什么需要（2026-10-26 用户裁定「默认新增而非覆盖」）：computeMeta 从主文件**重算**
+// FileMeta ⇒ Extra 为空；若直接 applyMetaExtra，覆盖写会把旧 KV 整体丢掉。
+// 旧 sidecar 缺失/不可读/损坏 → 静默跳过（缺失 = 无旧 KV；主文件已写成功，不因 meta
+// 问题阻断上传），并将旧 Extra 赋给 fm（后续 applyMetaExtra 在其上合并本次新增键）。
+func inheritOldExtra(ctx context.Context, p filesMetaPolicy, root *storage.Root, mrel string, fm *meta.FileMeta) {
+	oldRaw, oerr := p.ReadMetaRaw(ctx, root, mrel)
+	if oerr != nil {
+		return
+	}
+	oldFM, uerr := meta.Unmarshal(oldRaw)
+	if uerr != nil || len(oldFM.Extra) == 0 {
+		return
+	}
+	fm.Extra = oldFM.Extra
+}
+
 // seekEndSize 探测流的内容长度（SeekEnd 后复原到起点）；不支持 Seek 时返回错误（调用方跳过判据）。
 func seekEndSize(r io.Seeker) (int64, error) {
 	end, err := r.Seek(0, io.SeekEnd)
@@ -1179,6 +1197,8 @@ func (p filesMetaPolicy) writeMetaCore(ctx context.Context, owner string, root *
 	if err != nil {
 		return err
 	}
+	// 覆盖写场景保留既有 extra（用户裁定 2026-10-26：默认**新增而非覆盖**）。
+	inheritOldExtra(ctx, p, root, mrel, fm)
 	// 随上传写入的自定义元数据（A/B/C 档；nil = 不写，零回归）。字段白名单与类型
 	// 校验由调用方（upload handler）执行；此处直接落盘（不重复校验）。
 	applyMetaExtra(fm, extra)
