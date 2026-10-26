@@ -152,3 +152,46 @@ func TestMetaCmd_FileInfo(t *testing.T) {
 		t.Errorf("expected output to contain 'file.txt', got: %s", buf.String())
 	}
 }
+
+// TestParseMetaSetArgs_ThreeModes 钉住 meta set 的三模式归一（默认合并非覆盖）。
+// 变异：把默认 mode 改成 replace → 本用例红。
+func TestParseMetaSetArgs_ThreeModes(t *testing.T) {
+	t.Parallel()
+	newCmd := func(extra, del string, replace bool) *cobra.Command {
+		c := &cobra.Command{}
+		c.Flags().String("extra", "", "")
+		c.Flags().String("delete", "", "")
+		c.Flags().Bool("replace", false, "")
+		_ = c.Flags().Set("extra", extra)
+		_ = c.Flags().Set("delete", del)
+		_ = c.Flags().Set("replace", "false")
+		if replace {
+			_ = c.Flags().Set("replace", "true")
+		}
+		return c
+	}
+	// 默认 = merge（新增非覆盖）
+	if _, mode, err := parseMetaSetArgs(newCmd(`{"code":"X"}`, "", false)); err != nil || mode != client.MetaUpdateMerge {
+		t.Fatalf("默认应 merge, got %s err=%v", mode, err)
+	}
+	// --replace = 整表替换
+	if _, mode, err := parseMetaSetArgs(newCmd(`{"code":"X"}`, "", true)); err != nil || mode != client.MetaUpdateReplace {
+		t.Fatalf("--replace 应 replace, got %s err=%v", mode, err)
+	}
+	// --delete = 删键
+	extra, mode, err := parseMetaSetArgs(newCmd("", "code,maker", false))
+	if err != nil || mode != client.MetaUpdateDelete {
+		t.Fatalf("--delete 应 delete, got %s err=%v", mode, err)
+	}
+	if _, ok := extra["code"]; !ok {
+		t.Fatalf("--delete 应含 code 键: %v", extra)
+	}
+	// --delete 与 --extra 互斥
+	if _, _, err := parseMetaSetArgs(newCmd(`{"code":"X"}`, "code", false)); err == nil {
+		t.Fatal("--delete 与 --extra 应互斥")
+	}
+	// 空 --extra 无 --delete → 报错
+	if _, _, err := parseMetaSetArgs(newCmd("", "", false)); err == nil {
+		t.Fatal("空 --extra 应报错")
+	}
+}

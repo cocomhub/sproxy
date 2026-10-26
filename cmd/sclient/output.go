@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/i18n"
@@ -39,6 +40,8 @@ type OutputFormatter interface {
 	PrintVersionList(filename string, versions []client.VersionInfo)
 	// PrintStat 输出文件元信息。
 	PrintStat(info *client.FileInfo, filename string)
+	// PrintMetaExtra 输出文件元数据 extra（KV；空 map = 不输出）。
+	PrintMetaExtra(extra map[string]any)
 	// PrintTransferStats 输出传输统计（表格一行 / JSON stats 对象）。
 	PrintTransferStats(stats *TransferStats)
 	// Printf 输出格式化字符串（JSON 模式忽略）。
@@ -193,6 +196,36 @@ func (f *TextFormatter) PrintStat(info *client.FileInfo, filename string) {
 		mt := time.Unix(0, info.ModTime)
 		fmt.Fprintf(f.w, "mtime:    %s\n", mt.Format(time.RFC3339))
 	}
+}
+
+// PrintMetaExtra 输出文件元数据 extra（KV 键值行；空 = 不输出）。
+func (f *TextFormatter) PrintMetaExtra(extra map[string]any) {
+	if len(extra) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := extra[k]
+		if s, ok := v.(string); ok {
+			fmt.Fprintf(f.w, "extra.%s: %s\n", k, s)
+			continue
+		}
+		b, _ := json.Marshal(v)
+		fmt.Fprintf(f.w, "extra.%s: %s\n", k, string(b))
+	}
+}
+
+// PrintMetaExtra 输出 meta extra（JSON 模式：并入一个对象键）。
+func (f *JSONFormatter) PrintMetaExtra(extra map[string]any) {
+	if len(extra) == 0 {
+		return
+	}
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]any{"extra": extra})
 }
 
 // PrintTransferStats 输出传输统计表格行（Text 模式）。
