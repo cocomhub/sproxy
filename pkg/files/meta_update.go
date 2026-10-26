@@ -24,11 +24,24 @@ import (
 	"os"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // ErrMetaUnavailable 表示目标未装配旁路 meta 更新能力（如外部卷 / 未启用可信卷）。
 var ErrMetaUnavailable = errors.New("files: 目标卷未装配 meta 旁路更新能力")
+
+// MetaUpdateMode 是元数据补录的合并模式（用户裁定 2026-10-26：默认**新增而非覆盖**）。
+type MetaUpdateMode string
+
+const (
+	// MetaUpdateMerge 把 extra 合并进现有（同名键更新，其余保留）——**默认**。
+	MetaUpdateMerge MetaUpdateMode = "merge"
+	// MetaUpdateReplace 整表替换（丢弃所有旧键，只保留本次 extra）——显式覆盖。
+	MetaUpdateReplace MetaUpdateMode = "replace"
+	// MetaUpdateDelete 删除指定键（Extra 的 key 集合为待删键，value 忽略）。
+	MetaUpdateDelete MetaUpdateMode = "delete"
+)
 
 // UpdateMetaInput 是元数据补录入参。
 type UpdateMetaInput struct {
@@ -36,8 +49,11 @@ type UpdateMetaInput struct {
 	Owner string
 	// RemotePath 是用户可见相对路径。
 	RemotePath string
-	// Extra 是要合并的自定义元数据（白名单校验由调用方或本方法内执行）。
+	// Extra 是要写入的自定义元数据（白名单校验由调用方或本方法内执行）。
+	// MetaUpdateDelete 时只取 key 集合（value 忽略）。
 	Extra map[string]any
+	// Mode 是合并模式（零值 = MetaUpdateMerge，保持既有语义）。
+	Mode MetaUpdateMode
 }
 
 // UpdateMeta 把 Extra 合并进目标文件的 .meta sidecar（方案②）。
@@ -46,9 +62,11 @@ type UpdateMetaInput struct {
 // 底层校验错误（fail-closed，不盲写）。
 func (s *Service) UpdateMeta(ctx context.Context, input UpdateMetaInput) error {
 	owner := normalizeOwner(input.Owner)
-	if len(input.Extra) == 0 {
+	if len(input.Extra) == 0 && input.Mode != filesMetaDeleteMode() {
 		return nil
 	}
+	// 更新模式经 ctx 承载（同步到 syncpkg.MetaUpdateMode），供底层 UpdateMetaExtra 分支。
+	ctx = syncpkg.WithMetaUpdateMode(ctx, syncModeOf(input.Mode))
 	// 双路定位（2026-10-26）：本地卷经 locateForRead（*storage.Root）；外部卷
 	// （secretdata/baidupcs/s3 无本地 root）经 ExternalMetaUpdate 接缝。
 	loc, ok := s.locateForRead(owner, mustRel(s, owner, input.RemotePath), "")
@@ -170,6 +188,21 @@ func (s *Service) getMetaExternal(ctx context.Context, owner, remotePath string)
 		}
 	}
 	return nil, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+}
+
+// filesMetaDeleteMode 返回删除模式的哨兵（空 extra 但 mode=delete 也应执行删键）。
+func filesMetaDeleteMode() MetaUpdateMode { return MetaUpdateDelete }
+
+// syncModeOf 把 files 域模式映射到 syncpkg.MetaUpdateMode（单一映射，避免漂移）。
+func syncModeOf(m MetaUpdateMode) syncpkg.MetaUpdateMode {
+	switch m {
+	case MetaUpdateReplace:
+		return syncpkg.MetaUpdateReplace
+	case MetaUpdateDelete:
+		return syncpkg.MetaUpdateDelete
+	default:
+		return syncpkg.MetaUpdateMerge
+	}
 }
 
 // metaExtraUpdaterFor 取目标卷 FS 的旁路 Extra 能力（未装配 → nil）。

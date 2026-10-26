@@ -168,10 +168,7 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	} else if merr := t.metaContentMatches(ctx, rel, fm); merr != nil {
 		return fmt.Errorf("trusted: 主文件与 meta 不一致（并发覆盖？），已拒绝 Extra 更新: %w", merr)
 	}
-	if fm.Extra == nil {
-		fm.Extra = make(map[string]any, len(extra))
-	}
-	maps.Copy(fm.Extra, extra)
+	applyMetaUpdateMode(ctx, fm, extra)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		return fmt.Errorf("trusted: meta 序列化失败: %w", merr)
@@ -189,6 +186,25 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 	// missing（下次覆盖写自愈）。
 	t.verifyWriteMeta(ctx, rel, fm)
 	return nil
+}
+
+// applyMetaUpdateMode 按 ctx 携带的更新模式把 extra 应用到 fm.Extra
+// （用户裁定 2026-10-26：默认**新增而非覆盖**——merge 累加同名键更新；
+// replace 整表替换；delete 只删指定键）。抽独立函数降 UpdateMetaExtra 认知复杂度。
+func applyMetaUpdateMode(ctx context.Context, fm *meta.FileMeta, extra map[string]any) {
+	if fm.Extra == nil {
+		fm.Extra = make(map[string]any, len(extra))
+	}
+	switch syncpkg.MetaUpdateModeFrom(ctx) {
+	case syncpkg.MetaUpdateReplace:
+		fm.Extra = cloneExtra(extra)
+	case syncpkg.MetaUpdateDelete:
+		for k := range extra {
+			delete(fm.Extra, k)
+		}
+	default: // merge（默认，含零值）
+		maps.Copy(fm.Extra, extra)
+	}
 }
 
 // ---- 能力接口回显（B-A2 修复）：装饰器必须委托底层能力，否则包装后

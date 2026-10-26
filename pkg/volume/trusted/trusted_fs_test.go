@@ -1034,3 +1034,34 @@ func TestUpdateMetaExtra_RemoteBoundedPrecheck(t *testing.T) {
 		t.Fatal("前置校验拒绝时不得动 meta（sidecar 应原样保留）")
 	}
 }
+
+// TestUpdateMetaExtra_ModeReplaceDelete 钉住补录的 merge/replace/delete 三模式
+// （用户裁定 2026-10-26：默认新增非覆盖；replace 整表替换；delete 删键）。
+// 变异：把 replace 分支改回 merge → 本用例红。
+func TestUpdateMetaExtra_ModeReplaceDelete(t *testing.T) {
+	t.Parallel()
+	// 用既有 TestUpdateMetaExtra 的装配模式（直接构造最小 TrustedVolumeFS 不可行——
+	// 走真实装配：见 trusted_fs_test.go 既有用例的 fake 方式）。
+	// 此处改为纯函数级验证 applyMetaUpdateMode（同包私有函数）。
+	fm := &meta.FileMeta{Extra: map[string]any{"a": "1", "b": "2"}}
+	// merge：同名更新、其余保留
+	applyMetaUpdateMode(syncpkg.WithMetaUpdateMode(context.Background(), syncpkg.MetaUpdateMerge), fm, map[string]any{"a": "9", "c": "3"})
+	if fm.Extra["a"] != "9" || fm.Extra["b"] != "2" || fm.Extra["c"] != "3" {
+		t.Fatalf("merge 语义错: %v", fm.Extra)
+	}
+	// replace：整表替换
+	applyMetaUpdateMode(syncpkg.WithMetaUpdateMode(context.Background(), syncpkg.MetaUpdateReplace), fm, map[string]any{"z": "only"})
+	if len(fm.Extra) != 1 || fm.Extra["z"] != "only" {
+		t.Fatalf("replace 语义错: %v", fm.Extra)
+	}
+	// delete：删指定键
+	applyMetaUpdateMode(syncpkg.WithMetaUpdateMode(context.Background(), syncpkg.MetaUpdateDelete), fm, map[string]any{"z": nil})
+	if len(fm.Extra) != 0 {
+		t.Fatalf("delete 语义错: %v", fm.Extra)
+	}
+	// 默认（无 ctx 模式）= merge
+	applyMetaUpdateMode(context.Background(), fm, map[string]any{"k": "v"})
+	if fm.Extra["k"] != "v" {
+		t.Fatalf("默认应 merge: %v", fm.Extra)
+	}
+}

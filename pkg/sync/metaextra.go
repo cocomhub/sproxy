@@ -30,6 +30,38 @@ func AssertMetaExtraUpdater(fs FS) (MetaExtraUpdater, bool) {
 	return u, ok
 }
 
+// MetaUpdateMode 是 meta extra 更新模式（用户裁定 2026-10-26：默认**新增而非覆盖**）。
+type MetaUpdateMode string
+
+const (
+	// MetaUpdateMerge 合并（同名键更新，其余保留）——**默认**（零值）。
+	MetaUpdateMerge MetaUpdateMode = "merge"
+	// MetaUpdateReplace 整表替换（丢弃所有旧键）。
+	MetaUpdateReplace MetaUpdateMode = "replace"
+	// MetaUpdateDelete 只删指定键（extra 的 key 集合，value 忽略）。
+	MetaUpdateDelete MetaUpdateMode = "delete"
+)
+
+// metaUpdateModeKey 是 ctx 携带更新模式的键（不扩 UpdateMetaExtra 接口签名，避免 11 个
+// 装饰器实现逐一改签名；也未新的可选能力接口——模式是一次调用的参数，不是能力）。
+type metaUpdateModeKey struct{}
+
+// WithMetaUpdateMode 把更新模式放入 ctx（未携带 = MetaUpdateMerge）。
+func WithMetaUpdateMode(ctx context.Context, mode MetaUpdateMode) context.Context {
+	if mode == "" {
+		mode = MetaUpdateMerge
+	}
+	return context.WithValue(ctx, metaUpdateModeKey{}, mode)
+}
+
+// MetaUpdateModeFrom 取 ctx 中的更新模式（未携带 → MetaUpdateMerge）。
+func MetaUpdateModeFrom(ctx context.Context) MetaUpdateMode {
+	if m, ok := ctx.Value(metaUpdateModeKey{}).(MetaUpdateMode); ok && m != "" {
+		return m
+	}
+	return MetaUpdateMerge
+}
+
 // UpdateMetaExtra 把调用方键空间（相对路径）映射到桶键空间后委托底层（见文件头契约）。
 // 底层未实现 → ErrUnsupported（能力探测语义：未实现与「空操作」必须可区分）。
 func (p *PrefixFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {

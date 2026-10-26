@@ -1410,9 +1410,15 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 // 编译期断言：*Metrics 满足领域的计量窄接口（零适配代码，无需包装）。
 var _ files.Metrics = (*Metrics)(nil)
 
-// applyMetaExtra 把随上传写入的 extra 合并到 FileMeta（nil/空 = 不写，零回归）。
+// applyMetaExtra 把随上传写入的 extra **合并**到 FileMeta（用户裁定 2026-10-26：默认新增
+// 而非覆盖——二次上传不丢旧 KV）。nil/空 = 不写（零回归）；既有 Extra 保留、同名键被
+// 新值更新。
 func applyMetaExtra(fm *meta.FileMeta, extra map[string]any) {
-	if len(extra) > 0 {
-		fm.Extra = extra
+	if len(extra) == 0 {
+		return
 	}
+	if fm.Extra == nil {
+		fm.Extra = make(map[string]any, len(extra))
+	}
+	maps.Copy(fm.Extra, extra)
 }

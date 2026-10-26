@@ -49,25 +49,42 @@ func (h *Handlers) updateFileMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var req struct {
-		Extra map[string]any `json:"extra"`
+		Extra map[string]any       `json:"extra"`
+		Mode  files.MetaUpdateMode `json:"mode,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
-	extra := meta.TrimExtra(req.Extra)
-	if err := meta.ValidateExtra(extra); err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+	// 模式归一：空 = merge（默认，用户裁定：新增非覆盖）；replace 整表替换；delete 删键。
+	mode := files.MetaUpdateMerge
+	switch req.Mode {
+	case "", files.MetaUpdateMerge:
+	case files.MetaUpdateReplace, files.MetaUpdateDelete:
+		mode = req.Mode
+	default:
+		sendJSONResponse(w, map[string]string{"error": "mode 非法（merge|replace|delete）"}, http.StatusBadRequest)
 		return
 	}
-	if len(extra) == 0 {
-		sendJSONResponse(w, map[string]string{"error": "extra 不能为空"}, http.StatusBadRequest)
+	extra := meta.TrimExtra(req.Extra)
+	if mode != files.MetaUpdateDelete {
+		if err := meta.ValidateExtra(extra); err != nil {
+			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
+		if len(extra) == 0 {
+			sendJSONResponse(w, map[string]string{"error": "extra 不能为空"}, http.StatusBadRequest)
+			return
+		}
+	} else if len(extra) == 0 {
+		sendJSONResponse(w, map[string]string{"error": "--delete 至少指定一个键"}, http.StatusBadRequest)
 		return
 	}
 	err := h.metaUpdater().UpdateMeta(r.Context(), files.UpdateMetaInput{
 		Owner:      ownerFromRequest(r),
 		RemotePath: filename,
 		Extra:      extra,
+		Mode:       mode,
 	})
 	if err != nil {
 		switch {

@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 )
 
 // fakeMetaService 是 files.Service 的替身（只测 handler 装配/校验，不测底层合并）。
@@ -157,5 +158,66 @@ func TestGetFileMeta_Empty(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"extra":{}`) {
 		t.Fatalf("应返回空对象: %s", w.Body.String())
+	}
+}
+
+// TestUpdateFileMeta_ModeReplace 验证 PUT body 带 mode=replace 时透传给 UpdateMetaInput。
+func TestUpdateFileMeta_ModeReplace(t *testing.T) {
+	t.Parallel()
+	svc := &fakeMetaService{}
+	h := &Handlers{metaSvcForTest: svc}
+	body, _ := json.Marshal(map[string]any{
+		"extra": map[string]any{"code": "NEW-CODE"},
+		"mode":  "replace",
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/files/meta?filename=a.mp4", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.updateFileMeta(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if svc.got.Mode != files.MetaUpdateReplace {
+		t.Fatalf("mode 应透传 replace, got %q", svc.got.Mode)
+	}
+}
+
+// TestUpdateFileMeta_ModeInvalid 非法 mode → 400。
+func TestUpdateFileMeta_ModeInvalid(t *testing.T) {
+	t.Parallel()
+	svc := &fakeMetaService{}
+	h := &Handlers{metaSvcForTest: svc}
+	body, _ := json.Marshal(map[string]any{
+		"extra": map[string]any{"code": "x"},
+		"mode":  "bogus",
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/files/meta?filename=a.mp4", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.updateFileMeta(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("非法 mode 应 400, got %d", w.Code)
+	}
+}
+
+// TestApplyMetaExtra_MergesNotReplaces 钉住用户裁定（2026-10-26）：随上传写 extra 是
+// **合并**语义（默认新增），不得覆盖旧 KV。
+// 变异：把 applyMetaExtra 改回 `fm.Extra = extra` → 本用例红。
+func TestApplyMetaExtra_MergesNotReplaces(t *testing.T) {
+	t.Parallel()
+	fm := &meta.FileMeta{Extra: map[string]any{"code": "OLD", "maker": "KEEP"}}
+	applyMetaExtra(fm, map[string]any{"code": "NEW", "x_tag": "added"})
+	if fm.Extra["maker"] != "KEEP" {
+		t.Fatalf("既有键 maker 应保留（合并语义），got %v", fm.Extra)
+	}
+	if fm.Extra["code"] != "NEW" {
+		t.Fatalf("同名键应被新值更新，got %v", fm.Extra["code"])
+	}
+	if fm.Extra["x_tag"] != "added" {
+		t.Fatalf("新键应新增，got %v", fm.Extra["x_tag"])
+	}
+	// nil/空 → 不写（零回归）。
+	fm2 := &meta.FileMeta{}
+	applyMetaExtra(fm2, nil)
+	if fm2.Extra != nil {
+		t.Fatalf("空 extra 不应创建 map, got %v", fm2.Extra)
 	}
 }

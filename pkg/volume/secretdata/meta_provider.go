@@ -206,7 +206,18 @@ func (s *SecretdataFS) UpdateMetaExtra(ctx context.Context, rel string, extra ma
 	}
 	nm := cloneMeta(e.meta)
 	nm.Extra = cloneExtra(nm.Extra)
-	maps.Copy(nm.Extra, extra)
+	// 合并模式（用户裁定 2026-10-26：默认新增而非覆盖；replace 整表替换；delete 删键）。
+	// 模式经 ctx 承载（syncpkg.MetaUpdateModeFrom）——不扩 UpdateMetaExtra 签名。
+	switch syncpkg.MetaUpdateModeFrom(ctx) {
+	case syncpkg.MetaUpdateReplace:
+		nm.Extra = cloneExtra(extra)
+	case syncpkg.MetaUpdateDelete:
+		for k := range extra {
+			delete(nm.Extra, k)
+		}
+	default: // merge（默认，含零值）：同名键更新、其余保留
+		maps.Copy(nm.Extra, extra)
+	}
 	dirSeg, oldName, mt := e.dirSeg, e.metaName, e.mtime
 	s.mu.RUnlock()
 
