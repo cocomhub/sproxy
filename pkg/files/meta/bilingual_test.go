@@ -45,7 +45,7 @@ func TestValidateExtra_Bilingual(t *testing.T) {
 func TestValidateExtra_Bilingual_MaxLen(t *testing.T) {
 	t.Parallel()
 	long := make([]string, 0, 2)
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		long = append(long, repeat("あ", 200))
 	}
 	if err := ValidateExtra(map[string]any{"actress_cn": long}); err == nil {
@@ -58,7 +58,7 @@ func TestValidateExtra_Bilingual_MaxLen(t *testing.T) {
 
 func repeat(s string, n int) string {
 	out := ""
-	for i := 0; i < n; i++ {
+	for range n {
 		out += s
 	}
 	return out
