@@ -28,6 +28,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path"
@@ -1120,6 +1121,7 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 	}
 	out.Meta.Original.MTime = mtimeString(wc.mtime)
 	out.Meta.BaseVersion = wc.newVer
+	applyUploadMetaExtra(ctx, out.Meta)
 	if s.opts.Erasure {
 		// **流式路径不支持 Erasure**（P2 修复，2026-10-18）：parity 需要**明文分块**做 XOR，而流式
 		// 路径的明文已随加密流丢弃（不驻留内存）⇒ 旧代码传 nil 会让 chunkPlainTexts 对任意非空
@@ -1152,6 +1154,20 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		size: wc.size, mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
 		phys: cipherBytes,
 	}, iu.uploaded)
+}
+
+// applyUploadMetaExtra 把 ctx 携带的随上传 extra 合并进 shardseal.Meta.Extra
+// （片 3：UploadSink.WriteFile 无 extra 参数，经 ctx 透传；未携带 = 零回归）。
+// 合并而非覆盖（用户裁定 2026-10-26），供二次上传保留旧 KV。
+func applyUploadMetaExtra(ctx context.Context, m *shardseal.Meta) {
+	extra := syncpkg.UploadMetaExtraFrom(ctx)
+	if len(extra) == 0 {
+		return
+	}
+	if m.Extra == nil {
+		m.Extra = make(map[string]any, len(extra))
+	}
+	maps.Copy(m.Extra, extra)
 }
 
 // chunkDelivery 是**块级交错上传**的交付形态（回退链见 docs/roadmap.md ①-附 §2）。
@@ -1334,6 +1350,7 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 	// 该字段，故落盘 meta 携带真实版本——重启 loadIndex 后 volVersion = max(磁盘
 	// BaseVersion)，跨进程 CAS 与跨重启预期版本校验真正成立。
 	out.Meta.BaseVersion = wc.newVer
+	applyUploadMetaExtra(ctx, out.Meta)
 	// 纠错（Erasure=true 且 ≥2 分块）：先生成 parity 段并记录 meta.Parity，再加密 meta。
 	uploaded := []string{}
 	if s.opts.Erasure && len(out.Meta.Chunks) > 1 {

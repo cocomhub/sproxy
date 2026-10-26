@@ -62,6 +62,26 @@ func MetaUpdateModeFrom(ctx context.Context) MetaUpdateMode {
 	return MetaUpdateMerge
 }
 
+// uploadMetaExtraKey 是 ctx 携带「随上传写入的 extra」的键（片 3：UploadSink.WriteFile
+// 无 extra 参数 ⇒ 经 ctx 透传到写面 trusted/secretdata 合并进 meta）。
+type uploadMetaExtraKey struct{}
+
+// WithUploadMetaExtra 把随上传的 extra 放入 ctx（未携带 = 无额外 KV，零回归）。
+func WithUploadMetaExtra(ctx context.Context, extra map[string]any) context.Context {
+	if len(extra) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, uploadMetaExtraKey{}, extra)
+}
+
+// UploadMetaExtraFrom 取 ctx 中的随上传 extra（未携带 → nil）。
+func UploadMetaExtraFrom(ctx context.Context) map[string]any {
+	if m, ok := ctx.Value(uploadMetaExtraKey{}).(map[string]any); ok {
+		return m
+	}
+	return nil
+}
+
 // UpdateMetaExtra 把调用方键空间（相对路径）映射到桶键空间后委托底层（见文件头契约）。
 // 底层未实现 → ErrUnsupported（能力探测语义：未实现与「空操作」必须可区分）。
 func (p *PrefixFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {

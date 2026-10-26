@@ -191,6 +191,19 @@ func (t *TrustedVolumeFS) UpdateMetaExtra(ctx context.Context, rel string, extra
 // applyMetaUpdateMode 按 ctx 携带的更新模式把 extra 应用到 fm.Extra
 // （用户裁定 2026-10-26：默认**新增而非覆盖**——merge 累加同名键更新；
 // replace 整表替换；delete 只删指定键）。抽独立函数降 UpdateMetaExtra 认知复杂度。
+// applyUploadCtxExtra 把 ctx 携带的随上传 extra 合并进 FileMeta（片 3：UploadSink
+// WriteFile 无 extra 参数 ⇒ ctx 透传；未携带 = 零回归）。
+func applyUploadCtxExtra(ctx context.Context, fm *meta.FileMeta) {
+	extra := syncpkg.UploadMetaExtraFrom(ctx)
+	if len(extra) == 0 {
+		return
+	}
+	if fm.Extra == nil {
+		fm.Extra = make(map[string]any, len(extra))
+	}
+	maps.Copy(fm.Extra, extra)
+}
+
 func applyMetaUpdateMode(ctx context.Context, fm *meta.FileMeta, extra map[string]any) {
 	if fm.Extra == nil {
 		fm.Extra = make(map[string]any, len(extra))
@@ -285,6 +298,8 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 	// 未来任何就地改 Extra 的调用方会污染全部文件的 meta。**必须深**：maps.Clone 只浅
 	// 拷贝，嵌套 map/slice 仍与配置/调用方共享底层数组（就地修改会跨文件互相污染）。
 	fm.Extra = cloneExtra(t.opts.Extra)
+	// 片 3（2026-10-26）：随上传 ctx 携带的 extra 合并进 meta（UploadSink 链路透传）。
+	applyUploadCtxExtra(ctx, fm)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		t.invalidateMeta(ctx, rel) // 同上：不得留陈旧 sidecar（主文件已是新内容）

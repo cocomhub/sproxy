@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // validateChunkChecksum 校验 chunk_checksum 是否为有效的 64 位 hex 字符串。
@@ -1567,6 +1568,9 @@ func (s *Service) attemptExternalTransfer(ctx context.Context, session *ChunkedU
 		return ferr
 	}
 	defer func() { _ = f.Close() }()
+	// 片 3（2026-10-26）：外部卷转存把 init 携带的 meta_extra 经 ctx 透传给写面
+	// （trusted/secretdata 写 meta 时合并），修「外部卷分块上传丢 extra」。未携带 = 零回归。
+	ctx = syncpkg.WithUploadMetaExtra(ctx, session.MetaExtra)
 	if werr := sink.WriteFile(ctx, rel, f, session.TotalSize, session.FileModTime); werr != nil {
 		return werr
 	}
