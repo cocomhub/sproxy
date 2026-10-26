@@ -69,6 +69,15 @@ func (f *fakeExternalOps) ExternalRename(context.Context, string, string, string
 	return f.renOK, nil
 }
 
+// ExternalMeta / ExternalMetaUpdate：本族用例默认未命中（meta 读写在 files/meta_update 用例覆盖）。
+func (f *fakeExternalOps) ExternalMeta(context.Context, string, string, string) (map[string]any, bool, error) {
+	return nil, false, nil
+}
+
+func (f *fakeExternalOps) ExternalMetaUpdate(context.Context, string, string, string, map[string]any) (bool, error) {
+	return false, nil
+}
+
 // moveEnv 构造带外部卷接缝替身的域环境（单卷默认视图 + 假接缝）。
 func moveEnv(t *testing.T, ops *fakeExternalOps) *dirsEnv {
 	t.Helper()

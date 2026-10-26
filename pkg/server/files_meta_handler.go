@@ -29,6 +29,7 @@ const ActionFileMetaUpdate = "file_meta_update"
 // metaUpdateService 是元数据补录依赖的最小能力面（便于测试注入替身）。
 type metaUpdateService interface {
 	UpdateMeta(ctx context.Context, input files.UpdateMetaInput) error
+	GetMeta(ctx context.Context, input files.GetMetaInput) (map[string]any, error)
 	RecordFileAudit(ctx context.Context, action, object, result, detail string)
 }
 
@@ -81,4 +82,30 @@ func (h *Handlers) updateFileMeta(w http.ResponseWriter, r *http.Request) {
 	// 业务审计（R35-b）：写面变更型路由留痕（动作 + 目标 + 成功）。
 	h.metaUpdater().RecordFileAudit(r.Context(), ActionFileMetaUpdate, filename, "success", "meta extra update")
 	sendJSONResponse(w, map[string]any{"success": true, "message": "meta extra 已更新"}, http.StatusOK)
+}
+
+// getFileMeta 读取文件的自定义元数据 extra（GET /api/files/meta?filename=<rel>）。
+// 响应：{"extra": {...}}（文件存在但无 extra → 空对象；文件不存在 → 404）。
+func (h *Handlers) getFileMeta(w http.ResponseWriter, r *http.Request) {
+	filename := strings.TrimSpace(r.URL.Query().Get("filename"))
+	if filename == "" {
+		sendJSONResponse(w, map[string]string{"error": "filename 不能为空"}, http.StatusBadRequest)
+		return
+	}
+	extra, err := h.metaUpdater().GetMeta(r.Context(), files.GetMetaInput{
+		Owner:      ownerFromRequest(r),
+		RemotePath: filename,
+	})
+	if err != nil {
+		if he, ok := err.(*files.HTTPError); ok {
+			sendJSONResponse(w, map[string]string{"error": he.Message}, he.Status)
+			return
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	if extra == nil {
+		extra = map[string]any{}
+	}
+	sendJSONResponse(w, map[string]any{"extra": extra}, http.StatusOK)
 }

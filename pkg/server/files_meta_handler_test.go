@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -22,11 +23,21 @@ import (
 type fakeMetaService struct {
 	updateErr error
 	got       files.UpdateMetaInput
+	// getExtra / getErr / gotGet 是 GetMeta 替身的配置与调用记录（读面用例）。
+	getExtra map[string]any
+	getErr   error
+	gotGet   files.GetMetaInput
 }
 
 func (f *fakeMetaService) UpdateMeta(_ context.Context, input files.UpdateMetaInput) error {
 	f.got = input
 	return f.updateErr
+}
+
+// GetMeta 替身：返回配置的 extra（nil = 404 语义由 handler 按 HTTPError 处理）。
+func (f *fakeMetaService) GetMeta(_ context.Context, input files.GetMetaInput) (map[string]any, error) {
+	f.gotGet = input
+	return f.getExtra, f.getErr
 }
 
 func (f *fakeMetaService) RecordFileAudit(context.Context, string, string, string, string) {}
@@ -95,5 +106,56 @@ func TestUpdateFileMeta_NoFilename(t *testing.T) {
 	h.updateFileMeta(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("缺 filename 应 400, got %d", w.Code)
+	}
+}
+
+// TestGetFileMeta_OK 验证 GET /api/files/meta 返回 extra（读闭环核心）。
+func TestGetFileMeta_OK(t *testing.T) {
+	t.Parallel()
+	svc := &fakeMetaService{getExtra: map[string]any{"code": "MOVIE-001", "maker": "STUDIO X"}}
+	h := &Handlers{metaSvcForTest: svc}
+	req := httptest.NewRequest(http.MethodGet, "/api/files/meta?filename=n/v.mp4", nil)
+	w := httptest.NewRecorder()
+	h.getFileMeta(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Extra map[string]any `json:"extra"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Extra["code"] != "MOVIE-001" || svc.gotGet.RemotePath != "n/v.mp4" {
+		t.Fatalf("GetMeta input/输出错: got=%+v extra=%v", svc.gotGet, resp.Extra)
+	}
+}
+
+// TestGetFileMeta_NotFound 文件不存在 → 404。
+func TestGetFileMeta_NotFound(t *testing.T) {
+	t.Parallel()
+	svc := &fakeMetaService{getErr: &files.HTTPError{Status: http.StatusNotFound, Message: "文件不存在"}}
+	h := &Handlers{metaSvcForTest: svc}
+	req := httptest.NewRequest(http.MethodGet, "/api/files/meta?filename=gone.mp4", nil)
+	w := httptest.NewRecorder()
+	h.getFileMeta(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("404 期望, got %d", w.Code)
+	}
+}
+
+// TestGetFileMeta_Empty 文件存在但无 extra → 空对象 200。
+func TestGetFileMeta_Empty(t *testing.T) {
+	t.Parallel()
+	svc := &fakeMetaService{getExtra: map[string]any{}}
+	h := &Handlers{metaSvcForTest: svc}
+	req := httptest.NewRequest(http.MethodGet, "/api/files/meta?filename=a.mp4", nil)
+	w := httptest.NewRecorder()
+	h.getFileMeta(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"extra":{}`) {
+		t.Fatalf("应返回空对象: %s", w.Body.String())
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path"
@@ -831,6 +832,83 @@ func (o externalVolumeOps) ExternalRename(ctx context.Context, owner, volName, f
 	return renameExternalChecked(ctx, h, fsys, volName, fromRemote, toRemote, srcKey, dstKey)
 }
 
+// ExternalMeta 实现 files.ExternalVolumeOps：读外部卷对象的 meta.Extra。
+//
+// 语义：文件不存在 → (nil,false,nil)（调用方 404）；文件存在但卷无 meta 载体/无 extra →
+// (空 map,true,nil)（读侧零校验语义）；读取真错误 → 错误（fail-closed）。
+func (o externalVolumeOps) ExternalMeta(ctx context.Context, owner, volName, remotePath string) (map[string]any, bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return nil, false, nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return nil, false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return nil, false, nil
+	}
+	key, kok := externalVolumeKey(v, owner, remotePath)
+	if !kok {
+		return nil, true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	e, serr := fsys.Stat(ctx, key)
+	if serr != nil || e == nil || e.IsDir {
+		return nil, false, nil // 不存在/不可 stat → 未命中
+	}
+	pv, pok := fsys.(meta.Provider)
+	if !pok {
+		return map[string]any{}, true, nil // 无 meta 载体（裸卷无 trusted 装饰）→ 无 extra
+	}
+	fm, ferr := pv.FileMeta(ctx, key)
+	if ferr != nil {
+		if errors.Is(ferr, os.ErrNotExist) {
+			return map[string]any{}, true, nil // sidecar 缺失 = 无 extra
+		}
+		return nil, true, ferr
+	}
+	out := make(map[string]any, len(fm.Extra))
+	maps.Copy(out, fm.Extra)
+	return out, true, nil
+}
+
+// ExternalMetaUpdate 实现 files.ExternalVolumeOps：把 extra 合并进外部卷对象的 meta。
+//
+// 走**同一可信链**（`Guard(Wrap(be.FS()))`）的 `UpdateMetaExtra`（读-校验-合并-写
+// sidecar，不重算内容哈希）。无该能力（裸卷无 trusted 装饰）→ `files.ErrMetaUnavailable`
+// （fail-closed，不假成功）。
+func (o externalVolumeOps) ExternalMetaUpdate(ctx context.Context, owner, volName, remotePath string, extra map[string]any) (bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return false, nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return false, nil
+	}
+	key, kok := externalVolumeKey(v, owner, remotePath)
+	if !kok {
+		return true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	e, serr := fsys.Stat(ctx, key)
+	if serr != nil || e == nil || e.IsDir {
+		return false, nil // 不存在 → 未命中
+	}
+	updater, uok := syncpkg.AssertMetaExtraUpdater(fsys)
+	if !uok {
+		return true, files.ErrMetaUnavailable
+	}
+	if uerr := updater.UpdateMetaExtra(ctx, key, extra); uerr != nil {
+		return true, fmt.Errorf("外部卷 meta 更新失败: %w", uerr)
+	}
+	return true, nil
+}
+
 // renameExternalChecked 执行一次改名：原地改名优先；底层**明确不支持**（契约哨兵
 // `syncpkg.ErrUnsupported`，如 secretdata 文件改 basename）→ 该卷设计口径的等价路径
 // 「读源 → 写目标 → 删源」；封印 → 409；其余 → 500（如实失败，不静默半态）。
@@ -1012,6 +1090,28 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 		return nil, nil // 防御：不可 Close 断言失败直通（正常不可达）
 	}
 	return sr, nil
+}
+
+// ReadMetaRaw 读本地卷 meta sidecar 原始字节（`meta.MetaPath(rel)` 已由调用方算出）。
+// 语义（2026-10-26 读闭环）：缺失 → `os.ErrNotExist`；存在但不可读/超限 → 错误；
+// 上限口径与 VerifyDownload / readMetaSidecarBytes 同源。
+func (p filesMetaPolicy) ReadMetaRaw(ctx context.Context, root *storage.Root, mrel string) ([]byte, error) {
+	if root == nil {
+		return nil, os.ErrNotExist
+	}
+	rc, err := root.Open(mrel)
+	if err != nil {
+		return nil, err // 含 os.ErrNotExist（真缺失）与读取失败（调用方区分）
+	}
+	defer func() { _ = rc.Close() }()
+	raw, rerr := io.ReadAll(io.LimitReader(rc, meta.MaxMetaSidecarBytes()+1))
+	if rerr != nil {
+		return nil, fmt.Errorf("meta: sidecar 读取失败: %w", rerr)
+	}
+	if int64(len(raw)) > meta.MaxMetaSidecarBytes() {
+		return nil, fmt.Errorf("meta: sidecar 超过上限 %d 字节", meta.MaxMetaSidecarBytes())
+	}
+	return raw, nil
 }
 
 // seekEndSize 探测流的内容长度（SeekEnd 后复原到起点）；不支持 Seek 时返回错误（调用方跳过判据）。

@@ -27,6 +27,11 @@ func (p *spyMetaPolicy) VerifyDownload(_ context.Context, _ *storage.Root, _ str
 	return r, nil
 }
 
+// ReadMetaRaw 替身：本用例只测下载校验跳过，meta 读取不参与 → 报不存在。
+func (p *spyMetaPolicy) ReadMetaRaw(context.Context, *storage.Root, string) ([]byte, error) {
+	return nil, os.ErrNotExist
+}
+
 // TestRuntime_VerifyDownload_SkipsEncryptedRoot P0 回归：加密卷的 sidecar 由密文计算，
 // 明文解密流不可能匹配 → runtime.verifyDownload 必须直接跳过（与 chunked_download 同口径）。
 func TestRuntime_VerifyDownload_SkipsEncryptedRoot(t *testing.T) {

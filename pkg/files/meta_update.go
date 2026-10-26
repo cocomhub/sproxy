@@ -19,6 +19,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net/http"
+	"os"
+
+	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // ErrMetaUnavailable 表示目标未装配旁路 meta 更新能力（如外部卷 / 未启用可信卷）。
@@ -43,18 +49,127 @@ func (s *Service) UpdateMeta(ctx context.Context, input UpdateMetaInput) error {
 	if len(input.Extra) == 0 {
 		return nil
 	}
+	// 双路定位（2026-10-26）：本地卷经 locateForRead（*storage.Root）；外部卷
+	// （secretdata/baidupcs/s3 无本地 root）经 ExternalMetaUpdate 接缝。
 	loc, ok := s.locateForRead(owner, mustRel(s, owner, input.RemotePath), "")
-	if !ok || loc.Tenant == nil {
-		return fmt.Errorf("files: 目标文件不存在或不可定位: %s", input.RemotePath)
+	if ok && loc.Tenant != nil {
+		return s.updateMetaLocal(ctx, owner, input.RemotePath, loc, input.Extra)
 	}
+	return s.updateMetaExternal(ctx, owner, input.RemotePath, input.Extra)
+}
+
+// updateMetaLocal 本地卷分支：经 FileMetaPolicy 的读-校验-合并-写（filesMetaPolicy
+// 读 root 相对 sidecar + TrustedVolumeFS.UpdateMetaExtra 合并）。
+func (s *Service) updateMetaLocal(ctx context.Context, owner, remotePath string, loc FileLocation, extra map[string]any) error {
 	updater := s.metaExtraUpdaterFor(loc)
 	if updater == nil {
 		return ErrMetaUnavailable
 	}
-	if err := updater.UpdateMetaExtra(ctx, input.RemotePath, input.Extra); err != nil {
+	if err := updater.UpdateMetaExtra(ctx, remotePath, extra); err != nil {
 		return fmt.Errorf("files: 更新 meta extra 失败: %w", err)
 	}
 	return nil
+}
+
+// updateMetaExternal 外部卷分支：经 ExternalVolumeOps.ExternalMetaUpdate 接缝
+// （装配层经同一可信链 Guard(Wrap(...)) 执行 UpdateMetaExtra）。外部卷未命中
+// （卷不存在/未授权/文件不存在）→ 404 语义（与 locateForRead 未命中一致）。
+func (s *Service) updateMetaExternal(ctx context.Context, owner, remotePath string, extra map[string]any) error {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	vs := s.rt.volSet()
+	if vs == nil {
+		return &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	// 按 owner 可见卷顺序探测：命中第一个「文件存在且可更新」的外部卷（与
+	// copyWithinVolume/moveUniqueConflict 的 AllowedVolumes 双路模型同构）。
+	for _, v := range volume.AllowedVolumes(vs.All(), owner) {
+		if vs.HasLocalRoot(v.Name) {
+			continue // 本地卷已在上方 locateForRead 处理
+		}
+		hit, herr := ops.ExternalMetaUpdate(ctx, owner, v.Name, remotePath, extra)
+		if herr != nil {
+			return herr
+		}
+		if hit {
+			return nil
+		}
+	}
+	return &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+}
+
+// GetMetaInput 是元数据读入参。
+type GetMetaInput struct {
+	// Owner 是操作主体（空 → anonymous）。
+	Owner string
+	// RemotePath 是用户可见相对路径。
+	RemotePath string
+}
+
+// GetMeta 读取目标文件的自定义元数据 extra（双路定位：本地卷读 meta 桶 sidecar /
+// 外部卷经 ExternalMeta 接缝）。返回 nil = 文件不存在或无 extra（读侧零校验语义）。
+func (s *Service) GetMeta(ctx context.Context, input GetMetaInput) (map[string]any, error) {
+	owner := normalizeOwner(input.Owner)
+	loc, ok := s.locateForRead(owner, mustRel(s, owner, input.RemotePath), "")
+	if ok && loc.Tenant != nil {
+		return s.getMetaLocal(ctx, owner, input.RemotePath, loc)
+	}
+	return s.getMetaExternal(ctx, owner, input.RemotePath)
+}
+
+// getMetaLocal 本地卷分支：读 `meta/<rel>.meta` sidecar → FileMeta.Extra（深拷贝）。
+// sidecar 缺失 / 无 extra → 空 map（读侧零校验语义，与 VerifyDownload 的缺失直通一致）。
+func (s *Service) getMetaLocal(ctx context.Context, owner, remotePath string, loc FileLocation) (map[string]any, error) {
+	tnt := loc.Tenant
+	if tnt == nil || tnt.Root() == nil {
+		return nil, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	rel, ok := tnt.UserRel(remotePath)
+	if !ok {
+		return nil, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	mrel := meta.MetaPath(rel)
+	raw, rerr := s.rt.readMetaSidecar(ctx, tnt.Root(), mrel)
+	if errors.Is(rerr, os.ErrNotExist) {
+		return map[string]any{}, nil // sidecar 缺失 = 无 extra（不报错）
+	}
+	if rerr != nil {
+		return nil, rerr // 存在但不可读 → fail-closed
+	}
+	fm, umerr := meta.Unmarshal(raw)
+	if umerr != nil {
+		return nil, fmt.Errorf("files: sidecar 损坏（拒绝返回）: %w", umerr)
+	}
+	out := make(map[string]any, len(fm.Extra))
+	maps.Copy(out, fm.Extra)
+	return out, nil
+}
+
+// getMetaExternal 外部卷分支：经 ExternalVolumeOps.ExternalMeta 接缝。未命中 → 404。
+func (s *Service) getMetaExternal(ctx context.Context, owner, remotePath string) (map[string]any, error) {
+	ops := s.rt.externalVolOps()
+	if ops == nil {
+		return nil, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	vs := s.rt.volSet()
+	if vs == nil {
+		return nil, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	for _, v := range volume.AllowedVolumes(vs.All(), owner) {
+		if vs.HasLocalRoot(v.Name) {
+			continue
+		}
+		extra, ok2, err := ops.ExternalMeta(ctx, owner, v.Name, remotePath)
+		if err != nil {
+			return nil, err
+		}
+		if ok2 {
+			return extra, nil
+		}
+	}
+	return nil, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 }
 
 // metaExtraUpdaterFor 取目标卷 FS 的旁路 Extra 能力（未装配 → nil）。

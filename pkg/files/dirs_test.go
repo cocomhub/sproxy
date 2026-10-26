@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -336,6 +337,16 @@ func (testMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage
 // VerifyDownload 测试替身：不包装（返回 nil = 直通，域测试不测下载校验）。
 func (testMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error) {
 	return nil, nil
+}
+
+// ReadMetaRaw 测试替身：读 meta 桶 sidecar 原始字节（缺失 => os.ErrNotExist）。
+func (testMetaPolicy) ReadMetaRaw(ctx context.Context, root *storage.Root, mrel string) ([]byte, error) {
+	rc, err := root.Open(mrel)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(rc)
 }
 
 // findAudit 返回首条匹配 action/object 的审计行（未命中 ok=false）。
