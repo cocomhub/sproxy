@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"path/filepath"
 	"strings"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -151,9 +152,29 @@ func BuildBackend(ctx context.Context, set *registry.Set, d Decl, v volume.Volum
 	// ⇒ OpenLedgerFS 失败 ⇒ 降级内存 ⇒ 重启配额归零（fail-open，主用形态）。
 	// `UnsealedSource()` 取回 wrapper 面（每封装卷独立实例、区域相对）⇒ 账本可写、
 	// 按区域隔离、持久化。
+	//
+	// **外部底层（网盘/对象存储）恒落节点本地（2026-10-26 缺陷修复）**：外部卷的
+	// `IsLocalVolume()` 恒 false ⇒ `WithLedgerDirIfLocal` 永不生效 ⇒ 账本留在 wrapper 面
+	// （加密 blob / 远端对象），读回时被加密容器或远端对象语义破坏（实测：secretdata
+	// over baidupcs 上传 1GB 时账本 corrupt ⇒ 整卷拒写 degraded）⇒ 与 `pkg/server/volumes.go`
+	// 对 baidupcs 外部卷无条件落本地的处理同构（单账号单实例场景，跨进程配额一致性本就
+	// 不可强制）。本地源底层（LocalFS）才留卷 FS（跨进程正确）。
 	ledgerFS := be.FS()
 	if u, ok := be.(interface{ UnsealedSource() syncpkg.FS }); ok {
 		ledgerFS = u.UnsealedSource()
+	}
+	// 本地性探测必须**调用 ** `IsLocalVolume()`（不能只断言接口存在）：`enclosure.FS` 内嵌
+	// `*PrefixFS` 会**提升**该方法（类型恒实现接口），但转发到底层后返回 false。
+	if lv, ok := ledgerFS.(syncpkg.LocalVolume); !ok || !lv.IsLocalVolume() {
+		// 外部底层：账本落**节点本地**（与纯外部卷同理由：远端抖动不得打断上传/转存，
+		// 且外部卷上写账本 = 加密 blob/远端对象，读回不可解析 ⇒ 恒 degraded 拒写）。
+		// 节点本地目录取默认卷物理根（`<storageRoot>/meta/quota/<卷名>`，与外部卷/secretdata
+		// 装配同构）；无默认根时（纯外部卷集合，理论罕见）降级内存（进程内仍强制）。
+		root := set.DefaultRoot()
+		if root != nil {
+			return capacity.WrapBackend(be, capacity.NewLocalVolumeCounter(
+				filepath.Join(root.AbsPath(), "meta", "quota", d.Vol), pool.MaxBytes(), pool)), nil
+		}
 	}
 	return capacity.WrapBackend(be, capacity.NewVolumeCounter(ledgerFS, pool.MaxBytes(), pool)), nil
 }
