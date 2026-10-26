@@ -55,7 +55,9 @@ var spec = map[string]FieldSpec{
 	"label":        {Type: "string", MaxLen: 64},
 	"series":       {Type: "string", MaxLen: 128},
 	"actress":      {Type: "[]string", MaxLen: 64},
+	"actress_cn":   {Type: "[]string", MaxLen: 64},
 	"genres":       {Type: "[]string", MaxLen: 64},
+	"genres_cn":    {Type: "[]string", MaxLen: 64},
 	"director":     {Type: "string", MaxLen: 64},
 	"release_date": {Type: "string", MaxLen: 16},
 	"title_ja":     {Type: "string", MaxLen: 400},
@@ -78,6 +80,8 @@ var spec = map[string]FieldSpec{
 	"resolution":     {Type: "string", MaxLen: 16, Allowed: []string{"480p", "720p", "1080p", "4k"}},
 	"uncensored":     {Type: "bool"},
 	"has_cn_sub":     {Type: "bool"},
+	"has_en_sub":     {Type: "bool"},
+	"cover_url":      {Type: "string", MaxLen: 512},
 	"subtitle_files": {Type: "[]string", MaxLen: 512},
 }
 
