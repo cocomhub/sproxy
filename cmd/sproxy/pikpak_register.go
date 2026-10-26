@@ -125,6 +125,9 @@ func registerPikpakDownloader(cfg *server.Config, set *registry.Set) {
 		slog.Info("pikpak downloader registered", "priority", 10)
 
 		registerHybridIfEnabled(cfg, api, dl, pool)
+		// URL 解析扩展（/api/resolve）：分享 URL → 文件清单（含 hash，供 GCID 校验）。
+		// 漏注册会使 /api/resolve 对分享 URL 回落 generic（2026-10-26 实测缺陷）。
+		registerPikpakResolver(downloader.DefaultRegistry)
 	})
 }
 
@@ -160,3 +163,20 @@ func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.Pik
 
 // registerPikpakOnce 保证只注册一次。
 var registerPikpakOnce sync.Once
+
+// registerPikpakResolver 注册 PikPak 分享的 URL 解析扩展（通用 /api/resolve 用）。
+//
+// 设计：解析能力唯一实现在 pkg/volume/ext/pikpak（URLResolver：登录态列举优先、
+// 匿名解析回落），装配层只做一次注册；未注册时 /api/resolve 对分享 URL 返回
+// 通用回落结果（kind=generic，无文件清单）。
+func registerPikpakResolver(reg *downloader.Registry) {
+	if reg == nil {
+		return
+	}
+	reg.RegisterResolver(downloader.Plugin[downloader.URLResolver]{
+		Name:     pikpak.URLResolverName,
+		Instance: pikpak.NewURLResolver(nil, pikpak.NewShareResolver(pikpak.ShareResolverConfig{})),
+		Priority: 10,
+	})
+	slog.Info("pikpak url resolver registered", "priority", 10)
+}
