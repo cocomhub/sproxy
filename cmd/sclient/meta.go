@@ -214,7 +214,7 @@ func parseMetaSetArgs(cmd *cobra.Command) (map[string]any, client.MetaUpdateMode
 			return nil, "", fmt.Errorf("--delete 与 --extra 不能同时使用")
 		}
 		del := map[string]any{}
-		for _, k := range strings.Split(delRaw, ",") {
+		for k := range strings.SplitSeq(delRaw, ",") {
 			if key := strings.TrimSpace(k); key != "" {
 				del[key] = nil // value 占位，服务端只取 key 集合
 			}
