@@ -190,6 +190,20 @@
       return coreRequest('HEAD', '/api/files/stat?filename=' + encodeURIComponent(filename), {});
     }
 
+    // ---- 文件元数据 extra（读/写，2026-10-26 读闭环） ----
+    // GET /api/files/meta?filename=<rel>&volume=<vol> → {status, extra:{k:v}}
+    // （文件存在但无 extra → 空对象；文件不存在 → 404）。volume 可选（原子定位）。
+    function getMeta(filename, volume) {
+      return jsonRequest('GET', urlWithParams('/api/files/meta', { filename: filename, volume: volume }));
+    }
+
+    // PUT /api/files/meta?filename=<rel>&volume=<vol> body {extra, mode:merge|replace|delete}
+    // mode 缺省 = merge（默认新增而非覆盖，用户裁定 2026-10-26）。
+    function updateMeta(filename, extra, mode, volume) {
+      return jsonRequest('PUT', urlWithParams('/api/files/meta', { filename: filename, volume: volume }),
+        { extra: extra, mode: mode || 'merge' });
+    }
+
     // volumes 获取当前 owner 可见卷列表（GET /api/volumes；per-owner ACL）。
     // 返回 {status, headers, volumes:[{name,mode,capacity,usage,allowed}]}。
     function volumes() {
@@ -471,6 +485,8 @@
       list,
       search,
       stat,
+      getMeta,
+      updateMeta,
       volumes,
       userVolumes,
       backends,

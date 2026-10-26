@@ -2000,6 +2000,122 @@ function updateShareSourceHint() {
   el.textContent = vol ? ('源卷: ' + vol) : '源卷: 自动定位（本地卷优先，未命中再扫外部卷）';
 }
 
+// ---- 文件元数据（meta extra）弹窗：展示 + 编辑（合并/整表替换/删键）----
+// 用户口径（2026-10-26）：默认**新增而非覆盖**——所以主按钮是「保存（合并）」，
+// 「整表替换」是显式覆盖入口。
+var _metaModalFile = '';
+
+async function showMetaModal(filename, volume) {
+  _metaModalFile = filename;
+  const modal = document.getElementById('meta-modal');
+  const body = document.getElementById('meta-modal-body');
+  if (!modal || !body) return;
+  body.innerHTML = '<div class="empty-msg">加载中...</div>';
+  modal.style.display = 'flex';
+  try {
+    const prevVol = typeof _volumeFilter !== 'undefined' ? _volumeFilter : '';
+    if (volume && sc.files.setVolume) sc.files.setVolume(volume);
+    const res = await sc.files.getMeta(filename);
+    if (volume && sc.files.setVolume) sc.files.setVolume(prevVol || '');
+    const extra = (res && res.extra) || {};
+    body.innerHTML = appRender.buildMetaModalHtml(filename, extra);
+    bindMetaModalButtons();
+  } catch (e) {
+    body.innerHTML = '<div class="empty-msg">加载失败: ' + appRender.escHtml(e.message) + '</div>';
+  }
+}
+
+function closeMetaModal() {
+  const modal = document.getElementById('meta-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+// readMetaEditJSON 解析编辑框 JSON（非法 JSON → 抛错由调用方 showToast）。
+function readMetaEditJSON() {
+  const ta = document.getElementById('meta-edit-json');
+  if (!ta) return {};
+  const raw = (ta.value || '').trim();
+  if (!raw) return {};
+  const obj = JSON.parse(raw);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    throw new Error('必须是 JSON 对象（{"key":"value"}）');
+  }
+  return obj;
+}
+
+async function saveMetaMode(mode) {
+  let extra;
+  try {
+    extra = readMetaEditJSON();
+  } catch (e) {
+    showToast('JSON 解析失败: ' + e.message, 'error');
+    return;
+  }
+  const keys = Object.keys(extra);
+  if (keys.length === 0) {
+    showToast('请至少填写一个键', 'error');
+    return;
+  }
+  try {
+    const res = await sc.files.updateMeta(_metaModalFile, extra, mode);
+    if (res && res.success === false) {
+      showToast('保存失败: ' + (res.message || ''), 'error');
+      return;
+    }
+    showToast(mode === 'replace' ? '已整表替换' : mode === 'delete' ? '已删除指定键' : '已合并保存', 'success');
+    await showMetaModal(_metaModalFile, '');
+  } catch (e) {
+    showToast('保存失败: ' + e.message, 'error');
+  }
+}
+
+// 删键：把编辑框里的键作为待删集合（值忽略）
+async function deleteMetaKeys() {
+  let extra;
+  try {
+    extra = readMetaEditJSON();
+  } catch (e) {
+    showToast('JSON 解析失败: ' + e.message, 'error');
+    return;
+  }
+  const keys = Object.keys(extra);
+  if (keys.length === 0) {
+    showToast('请至少填写一个要删除的键', 'error');
+    return;
+  }
+  const del = {};
+  for (const k of keys) del[k] = null;
+  try {
+    const res = await sc.files.updateMeta(_metaModalFile, del, 'delete');
+    if (res && res.success === false) {
+      showToast('删除失败: ' + (res.message || ''), 'error');
+      return;
+    }
+    showToast('已删除 ' + keys.length + ' 个键', 'success');
+    await showMetaModal(_metaModalFile, '');
+  } catch (e) {
+    showToast('删除失败: ' + e.message, 'error');
+  }
+}
+
+function bindMetaModalButtons() {
+  const save = document.getElementById('meta-save-btn');
+  const replace = document.getElementById('meta-replace-btn');
+  const del = document.getElementById('meta-delete-key-btn');
+  const close = document.getElementById('meta-close-btn');
+  const closeX = document.getElementById('meta-modal-close');
+  if (save) save.addEventListener('click', function () { void saveMetaMode('merge'); });
+  if (replace) replace.addEventListener('click', function () { void saveMetaMode('replace'); });
+  if (del) del.addEventListener('click', function () { void deleteMetaKeys(); });
+  if (close) close.addEventListener('click', closeMetaModal);
+  if (closeX) closeX.addEventListener('click', closeMetaModal);
+  // 点击遮罩（modal 本身）关闭。
+  const modal = document.getElementById('meta-modal');
+  if (modal) modal.addEventListener('click', function (e) {
+    if (e.target === modal) closeMetaModal();
+  });
+}
+
 function hideShareModal() {
   _shareModalVisible = false;
   document.getElementById('share-modal').style.display = 'none';
@@ -3519,6 +3635,10 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('file-share-btn')) {
         showShareModal(btn.dataset.filename, btn.dataset.volume || '');
+        return;
+      }
+      if (btn.classList.contains('file-meta-btn')) {
+        void showMetaModal(btn.dataset.filename, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-preview-btn')) {

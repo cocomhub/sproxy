@@ -349,6 +349,11 @@ func (testMetaPolicy) ReadMetaRaw(ctx context.Context, root *storage.Root, mrel 
 	return io.ReadAll(rc)
 }
 
+// UpdateMetaExtra 测试替身：本族用例不测补录，报不存在（零副作用）。
+func (testMetaPolicy) UpdateMetaExtra(context.Context, string, *storage.Root, string, map[string]any) error {
+	return os.ErrNotExist
+}
+
 // findAudit 返回首条匹配 action/object 的审计行（未命中 ok=false）。
 func (e *dirsEnv) findAudit(action, object string) (auditRow, bool) {
 	for _, row := range e.audits {

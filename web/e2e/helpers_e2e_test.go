@@ -334,3 +334,41 @@ func testServerAdmin(t *testing.T) (string, *server.Config, func()) {
 	})
 	return url, cfg, cleanup
 }
+
+// seedUploadWithMeta 上传带 X-File-Meta-Extra 头的文件（与 seedUploadMultipart 同路径，
+// 仅多一个 meta 头；raw JSON 即可，服务端 parseMetaExtraHeader 两解 base64/raw）。
+func seedUploadWithMeta(t *testing.T, baseURL, filename string, content []byte, metaJSON string) (int, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, werr := fw.Write(content); werr != nil {
+		t.Fatalf("write file body: %v", werr)
+	}
+	if cerr := mw.Close(); cerr != nil {
+		t.Fatalf("close multipart: %v", cerr)
+	}
+	sum := sha256.Sum256(content)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/upload", &buf)
+	if err != nil {
+		t.Fatalf("build upload request: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+	if metaJSON != "" {
+		req.Header.Set("X-File-Meta-Extra", metaJSON)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed upload request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read upload response: %v", err)
+	}
+	return resp.StatusCode, string(body)
+}

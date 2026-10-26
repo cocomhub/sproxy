@@ -32,6 +32,11 @@ func (p *spyMetaPolicy) ReadMetaRaw(context.Context, *storage.Root, string) ([]b
 	return nil, os.ErrNotExist
 }
 
+// UpdateMetaExtra 替身：本用例不参与补录，报不存在（零副作用）。
+func (p *spyMetaPolicy) UpdateMetaExtra(context.Context, string, *storage.Root, string, map[string]any) error {
+	return os.ErrNotExist
+}
+
 // TestRuntime_VerifyDownload_SkipsEncryptedRoot P0 回归：加密卷的 sidecar 由密文计算，
 // 明文解密流不可能匹配 → runtime.verifyDownload 必须直接跳过（与 chunked_download 同口径）。
 func TestRuntime_VerifyDownload_SkipsEncryptedRoot(t *testing.T) {

@@ -185,6 +185,10 @@
     }
     const cs = fi.checksum || '';
     const csDisplay = cs ? '<span class="checksum-cell" data-checksum="' + escHtml(cs) + '" title="' + escHtml(cs) + '">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
+    // meta 徽标：文件行显示 extra 键数（有 KV 时）。
+    const metaBadge = (!fi.is_dir && fi.extra && Object.keys(fi.extra).length > 0)
+      ? ' <span class="meta-badge" title="' + escHtml(JSON.stringify(fi.extra)) + '">📄 ' + Object.keys(fi.extra).length + '</span>'
+      : '';
     // 卷徽标按 category 细化：wrapper（加密/封装卷）加 vol-badge-wrapper 类 + 🔒 图标；
     // 其余卷保持既有 vol-badge 形态（零回归）。wrapper 徽标按 category 渲染而非 volume：
     // 外部卷目录视图条目 volume 可能为空，此时仍输出 vol-badge-wrapper（卷名缺失回退
@@ -197,7 +201,7 @@
     const playBtn = !fi.is_dir && isVideoName(fi.name)
       ? '<button class="btn btn-sm btn-secondary file-video-play-btn" data-video-play data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '">▶ 播放</button>'
       : '';
-    return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + volBadge + '</td>' +
+    return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + volBadge + metaBadge + '</td>' +
       '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
       '<td>' + csDisplay + '</td>' +
       '<td class="file-actions">' +
@@ -207,6 +211,7 @@
       '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
       '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
       '<button class="btn btn-sm btn-share file-share-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '" data-checksum="' + escHtml(cs) + '">分享</button>' +
+      '<button class="btn btn-sm btn-secondary file-meta-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '">元数据</button>' +
       '</td></tr>';
   }
 
@@ -550,6 +555,35 @@
   }
 
   // ---- 版本 ----
+  // meta extra 弹窗：KV 展示区 + JSON 编辑区（纯函数，R10 单测见 app-render.test.js）。
+  // extra 为空 → 显示「暂无元数据」；非空 → 每行 `key: value`。
+  function buildMetaReadHtml(extra) {
+    const keys = Object.keys(extra || {});
+    if (keys.length === 0) return '<div style="padding:12px;color:var(--text-muted);font-size:13px;">暂无元数据（可在下方 JSON 输入添加）</div>';
+    const rows = keys.map(function (k) {
+      const v = extra[k];
+      const vs = (typeof v === 'string') ? v : JSON.stringify(v);
+      return '<div style="display:flex;gap:8px;padding:3px 0;font-size:13px;">' +
+        '<span style="font-weight:600;min-width:120px;font-family:monospace;">' + escHtml(k) + '</span>' +
+        '<span style="word-break:break-all;">' + escHtml(vs) + '</span></div>';
+    }).join('');
+    return '<div style="padding:8px 0;border-bottom:1px solid var(--border-color);margin-bottom:8px;">' + rows + '</div>';
+  }
+
+  // meta extra 弹窗的完整 HTML（读区 + 编辑 textarea + 保存/删除按钮）。
+  function buildMetaModalHtml(filename, extra) {
+    return '<div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary);">文件: <strong>' + escHtml(filename) + '</strong></div>' +
+      '<div id="meta-read-area">' + buildMetaReadHtml(extra) + '</div>' +
+      '<div style="margin:10px 0 4px;font-size:12px;color:var(--text-secondary);">编辑（JSON，保存=合并新增；空=删除键可再点「删除键」）</div>' +
+      '<textarea id="meta-edit-json" rows="6" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:13px;padding:8px;border:1px solid var(--border-input);border-radius:4px;" aria-label="meta JSON 编辑">' +
+      escHtml(JSON.stringify(extra || {}, null, 2)) + '</textarea>' +
+      '<div style="display:flex;gap:8px;margin-top:8px;">' +
+      '<button type="button" id="meta-save-btn" class="btn btn-primary">保存（合并）</button>' +
+      '<button type="button" id="meta-replace-btn" class="btn btn-warning">整表替换</button>' +
+      '<button type="button" id="meta-delete-key-btn" class="btn btn-danger">删除键</button>' +
+      '<button type="button" id="meta-close-btn" class="btn btn-secondary">关闭</button></div>';
+  }
+
   function buildVersionTableHtml(versions, filename) {
     var html = '<div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary);">文件: <strong>' + escHtml(filename) + '</strong>，共 ' + (versions ? versions.length : 0) + ' 个版本</div>';
     html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
@@ -1108,6 +1142,7 @@
     stripCloudId, isVideoName, isTransferTargetVolume,
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml, shareVolumeFor,
+    buildMetaReadHtml, buildMetaModalHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
     auditTableHtml, volumesTableHtml, topologyEdgeColor, topologySvg,
     federationNodesHtml, federationServicesHtml,

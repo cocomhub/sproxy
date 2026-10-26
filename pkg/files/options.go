@@ -600,6 +600,14 @@ type FileMetaPolicy interface {
 	// 语义（2026-10-26 读闭环）：sidecar 缺失 → `os.ErrNotExist`（调用方按「无 extra」
 	// 处理）；存在但不可读/损坏 → fail-closed 错误（不返回半份数据）。
 	ReadMetaRaw(ctx context.Context, root *storage.Root, mrel string) ([]byte, error)
+	// UpdateMetaExtra 旁路更新本地卷文件 meta 的 Extra（读-校验-合并-写 sidecar，
+	// **不重算内容哈希**）。模式由 ctx 的 `syncpkg.MetaUpdateModeFrom` 决定：
+	// merge（默认新增，同名键更新）/ replace（整表替换）/ delete（删指定键）。
+	//
+	// 语义（2026-10-26）：`merge`/`replace` 下值为 **null 的键视为删除**（JSON 直觉，
+	// 与 `--delete` 等价）；sidecar 缺失 → `ErrMetaUnavailable`（无内容基线，拒绝盲写）；
+	// 主文件已变（与 sidecar 不符）→ 拒绝更新（与 trusted 同口径，防污染新 meta）。
+	UpdateMetaExtra(ctx context.Context, owner string, root *storage.Root, rel string, extra map[string]any) error
 }
 
 // WithFileMeta 注入可信卷 meta 能力。默认：不装配（零回归）。
