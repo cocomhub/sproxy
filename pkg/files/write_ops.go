@@ -52,6 +52,9 @@ type WriteFileInput struct {
 	ClientSize int64
 	// Mtime 是写入后要设置的文件修改时间（UnixNano；0 = 不设置）。
 	Mtime int64
+	// MetaExtra 是随上传一并写入 .meta sidecar 的自定义元数据（A/B/C 档字段，
+	// 见 pkg/files/meta 的 Extra 白名单；nil = 不写，零回归）。仅本地卷 sidecar 生效。
+	MetaExtra map[string]any
 }
 
 // WriteFileResult 是上传的领域结果。
@@ -388,7 +391,7 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 		s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
 		// 可信卷：去重回退复制路径也建 meta（C-MAJOR-3 修复——去重 rel 与普通上传一致有 sidecar）。
 		if s.rt.fileMetaEnabled() {
-			if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
+			if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel, input.MetaExtra); mErr != nil {
 				f.logger.Warn("可信卷 meta 落盘失败（去重回退复制）", "file_name", rel, "error", mErr)
 			}
 		}
@@ -401,7 +404,7 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 	// 可信卷：去重硬链接路径同样建 meta（M2 修复——回退复制分支有、硬链接分支此前
 	// 漏建，违反「新文件到达立刻建 meta」不变量；与 srcRel 内容一致，读侧不校验）。
 	if s.rt.fileMetaEnabled() {
-		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel); mErr != nil {
+		if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel, input.MetaExtra); mErr != nil {
 			f.logger.Warn("可信卷 meta 落盘失败（去重硬链接）", "file_name", rel, "error", mErr)
 		}
 	}
@@ -2186,6 +2189,9 @@ type WriteTargetInput struct {
 	ClientSize int64
 	// Mtime 是写入后要设置的文件修改时间（UnixNano；0 = 不设置）。
 	Mtime int64
+	// MetaExtra 是随写入落 .meta sidecar 的自定义元数据（见 pkg/files/meta；
+	// nil = 不写）。S3 put / 版本恢复等路径同样适用。
+	MetaExtra map[string]any
 }
 
 // ContentPresentSpec 描述「内容已在位」的对象（presign 直传完成登记）。
@@ -2300,7 +2306,7 @@ func (s *Service) writeTargetPresentSettle(ctx context.Context, owner, rel, remo
 	if route.Sink == nil {
 		root := route.Tenant.Root()
 		if s.rt.fileMetaEnabled() {
-			if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel); mErr != nil {
+			if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel, input.MetaExtra); mErr != nil {
 				logger.Warn("可信卷 meta 落盘失败（读侧将不校验）", "file_name", remotePath, "error", mErr)
 			}
 		}
@@ -2401,7 +2407,7 @@ func (s *Service) writeTargetSettleCommon(ctx context.Context, owner, rel, remot
 	}
 	// sidecar 内置（!Exclusive）：写成功后生成配套 FileMeta（meta 恒生成；失败只 Warn 兜底）。
 	if s.rt.fileMetaEnabled() {
-		if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel); mErr != nil {
+		if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel, input.MetaExtra); mErr != nil {
 			logger.Warn("可信卷 meta 落盘失败（读侧将不校验）", "file_name", remotePath, "error", mErr)
 		}
 	}

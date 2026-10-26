@@ -317,7 +317,7 @@ var _ FileMetaPolicy = testMetaPolicy{}
 
 func (testMetaPolicy) Enabled() bool { return true }
 
-func (testMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error {
+func (testMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string, _ map[string]any) error {
 	mrel := meta.MetaPath(rel)
 	if dir := filepath.ToSlash(filepath.Dir(mrel)); dir != "." {
 		if err := root.MkdirAll(dir, 0o755); err != nil {

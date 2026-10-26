@@ -135,7 +135,7 @@ func TestHybridDownload_AccountLinkTransientRetry(t *testing.T) {
 	hd := h.newDownloader(t, 0.5)
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("取链瞬断应在分片重试后成功: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -160,7 +160,7 @@ func TestHybridDownload_FailFastCancelsSiblings(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 
 	start := time.Now()
-	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil)
 	if err == nil {
 		t.Fatal("err = nil, want chunk failure")
 	}
@@ -202,7 +202,7 @@ func TestHybridDownload_ManifestKeptOnVerifyFailure(t *testing.T) {
 	hd := h.newDownloader(t, 0.5)
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 
-	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil)
 	if err == nil {
 		t.Fatal("err = nil, want integrity failure")
 	}
@@ -227,11 +227,11 @@ func TestLoadValidManifest_ArchivesWhenWorkingFileMissing(t *testing.T) {
 	target := &ShareFile{ID: "share-f1", Size: 4 << 20, Hash: payloadGCID(recoveryPayload(4 << 20))}
 	writeManifestFile(t, dest, &hybridManifest{
 		Total: 4 << 20, Chunks: map[int64]int64{0: 1 << 20},
-		Source: manifestSource{ShareID: "abc123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
+		Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
 	})
 	hd := &HybridDownloader{log: apiTestLogger()}
 
-	if got := hd.loadValidManifest(dest, "abc123", target); got != nil {
+	if got := hd.loadValidManifest(dest, "EXAMPLE-001123", target); got != nil {
 		t.Fatalf("工作文件缺失时不应信任 manifest: %+v", got)
 	}
 	if _, err := os.Stat(ManifestPath(dest)); !os.IsNotExist(err) {
@@ -251,7 +251,7 @@ func TestLoadValidManifest_KeepsWhenWorkingFileConsistent(t *testing.T) {
 	target := &ShareFile{ID: "share-f1", Size: int64(len(payload)), Hash: payloadGCID(payload)}
 	writeManifestFile(t, dest, &hybridManifest{
 		Total: int64(len(payload)), Chunks: map[int64]int64{0: 1 << 20},
-		Source: manifestSource{ShareID: "abc123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
+		Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
 	})
 	if err := preallocate(WorkingPath(dest), target.Size); err != nil {
 		t.Fatalf("preallocate: %v", err)
@@ -267,7 +267,7 @@ func TestLoadValidManifest_KeepsWhenWorkingFileConsistent(t *testing.T) {
 	_ = f.Close()
 	hd := &HybridDownloader{log: apiTestLogger()}
 
-	got := hd.loadValidManifest(dest, "abc123", target)
+	got := hd.loadValidManifest(dest, "EXAMPLE-001123", target)
 	if got == nil || len(got.Chunks) != 1 {
 		t.Fatalf("一致的工作文件应保留 manifest: %+v", got)
 	}
@@ -292,10 +292,10 @@ func TestHybridDownload_RenamedFinalFileRedownloadsAll(t *testing.T) {
 	target := &ShareFile{ID: "share-f1", Size: int64(len(payload)), Hash: payloadGCID(payload)}
 	writeManifestFile(t, dest, &hybridManifest{
 		Total: int64(len(payload)), Chunks: map[int64]int64{0: 1 << 20, 1: 1 << 20, 2: 1 << 20, 3: 1 << 20},
-		Source: manifestSource{ShareID: "abc123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
+		Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
 	})
 
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -344,10 +344,10 @@ func TestHybridDownload_ResumeDropsZeroTailChunks(t *testing.T) {
 	target := &ShareFile{ID: "share-f1", Size: int64(len(payload)), Hash: payloadGCID(payload)}
 	writeManifestFile(t, dest, &hybridManifest{
 		Total: target.Size, Chunks: map[int64]int64{0: 1 << 20, 1: 1 << 20},
-		Source: manifestSource{ShareID: "abc123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
+		Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
 	})
 
-	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); derr != nil {
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); derr != nil {
 		t.Fatalf("零尾分片应被剔除补下: %v", derr)
 	}
 	got, err := os.ReadFile(dest)

@@ -59,7 +59,18 @@ func calculateChecksum(filePath string) (string, error) {
 // 因此无法在 body 流式写入的同时获取 checksum 并设置 header。io.TeeReader 方案在此不适用。
 // 对于 ≤ 100 MiB 的文件推荐使用本方法。超过 100 MiB 的大文件请使用 ChunkedUpload
 // 分块上传以获得更好的性能与并发控制。Upload 不会自动委派到 ChunkedUpload。
-func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
+func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string, opts ...UploadOption) (*UploadResult, error) {
+	return c.uploadWithOpts(ctx, localPath, remotePath, opts...)
+}
+
+// uploadWithOpts 是 Upload 的可选项实现。
+func (c *FileClient) uploadWithOpts(ctx context.Context, localPath, remotePath string, opts ...UploadOption) (*UploadResult, error) {
+	uo := uploadOptions{}
+	for _, o := range opts {
+		if o != nil {
+			o(&uo)
+		}
+	}
 	if remotePath == "" {
 		return nil, fmt.Errorf("remotePath 不能为空")
 	}
@@ -97,11 +108,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 		streamUploadMultipart(ctx, pw, mw, uploadFileParams{file: file, remoteName: remoteClean, fileSize: fileSize, volume: c.volume, progressFn: c.progressFn})
 	})
 
-	headers := make(http.Header)
-	headers.Set(headerContentType, mw.FormDataContentType())
-	headers.Set(headerFileChecksum, fileChecksum)
-	headers.Set("X-File-Path", remoteClean)
-	headers.Set(headerFileMTime, fmt.Sprintf("%d", stat.ModTime().UnixNano()))
+	headers := buildUploadHeaders(mw, fileChecksum, remoteClean, stat.ModTime().UnixNano(), uo.MetaExtra)
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
 	uploadWg.Wait()
@@ -789,3 +796,18 @@ func (c *FileClient) BatchRename(ctx context.Context, operations []BatchRenameOp
 // TunnelDo 通过加密隧道发送一个 HTTP 请求。
 //
 // 使用方式与标准 http.Client.Do 相同。需要先通过 WithTunnel 配置隧道密钥。
+
+// buildUploadHeaders 组装上传请求头（Content-Type/checksum/path/mtime/meta-extra）。
+func buildUploadHeaders(mw *multipart.Writer, checksum, remoteClean string, mtimeUnix int64, metaExtra map[string]any) http.Header {
+	headers := make(http.Header)
+	headers.Set(headerContentType, mw.FormDataContentType())
+	headers.Set(headerFileChecksum, checksum)
+	headers.Set("X-File-Path", remoteClean)
+	headers.Set(headerFileMTime, fmt.Sprintf("%d", mtimeUnix))
+	if len(metaExtra) > 0 {
+		if hdr, herr := encodeMetaExtraHeader(metaExtra); herr == nil {
+			headers.Set(headerFileMetaExtra, hdr)
+		}
+	}
+	return headers
+}

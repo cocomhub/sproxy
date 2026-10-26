@@ -1060,9 +1060,9 @@ func (p filesMetaPolicy) warnDegradeDebug(reason, rel string, err error) {
 //   - 写前 stat 旧 sidecar 大小 prev——覆盖写（rename 替换旧 inode）时先释放旧 committed，
 //     再 Commit 新字节（net = new - prev，杜绝 owner meta 桶 Scope 随覆盖次数通胀）；
 //   - 删除联动处（deleteQuarantinedFile）按 sidecar 实际大小 ReleaseUsage（见 write_ops.go）。
-func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string) error {
+func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string, extra map[string]any) error {
 	mrel := meta.MetaPath(rel)
-	if err := p.writeMetaCore(ctx, owner, root, rel, mrel); err != nil {
+	if err := p.writeMetaCore(ctx, owner, root, rel, mrel, extra); err != nil {
 		// 统一补偿（对抗评审 P2）：任何失败分支都失效旧 sidecar——主文件已换新内容而
 		// sidecar 仍描述旧内容会使读路径按旧分块校验恒失配（硬失败固化不可读，幂等重传
 		// 不自愈）；删后退化为 missing → 读侧不校验（安全）。
@@ -1073,12 +1073,15 @@ func (p filesMetaPolicy) WriteMeta(ctx context.Context, owner string, root *stor
 }
 
 // writeMetaCore 是 WriteMeta 主体（计算 FileMeta → 配额预留 → 原子落盘）。
-func (p filesMetaPolicy) writeMetaCore(ctx context.Context, owner string, root *storage.Root, rel, mrel string) error {
+func (p filesMetaPolicy) writeMetaCore(ctx context.Context, owner string, root *storage.Root, rel, mrel string, extra map[string]any) error {
 	// 计算 FileMeta：从已落盘文件（root 相对 rel）读取计算总 sha256+md5 + 分块。
 	fm, err := p.computeMeta(ctx, root, rel)
 	if err != nil {
 		return err
 	}
+	// 随上传写入的自定义元数据（A/B/C 档；nil = 不写，零回归）。字段白名单与类型
+	// 校验由调用方（upload handler）执行；此处直接落盘（不重复校验）。
+	applyMetaExtra(fm, extra)
 	data, err := meta.Marshal(fm)
 	if err != nil {
 		return err
@@ -1306,3 +1309,10 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 
 // 编译期断言：*Metrics 满足领域的计量窄接口（零适配代码，无需包装）。
 var _ files.Metrics = (*Metrics)(nil)
+
+// applyMetaExtra 把随上传写入的 extra 合并到 FileMeta（nil/空 = 不写，零回归）。
+func applyMetaExtra(fm *meta.FileMeta, extra map[string]any) {
+	if len(extra) > 0 {
+		fm.Extra = extra
+	}
+}

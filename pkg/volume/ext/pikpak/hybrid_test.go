@@ -157,7 +157,7 @@ func TestHybridDownload_ShareAndAccount(t *testing.T) {
 	}
 
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil)
 	if err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestHybridDownload_ShareChunkFails_DowngradesToAccount(t *testing.T) {
 	})
 
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -397,7 +397,7 @@ func TestHybridDownload_RestoreIdempotent(t *testing.T) {
 		ChunkSize: 4 << 20, ShareRatio: 0.5, Concurrency: 2, AutoDelete: false,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	if restoreCalls != 0 {
@@ -487,7 +487,7 @@ func TestHybridDownload_RestoreHashMismatch(t *testing.T) {
 		ChunkSize: 2 << 20, ShareRatio: 0.5, Concurrency: 2, AutoDelete: false,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	if restoreCalls != 1 {
@@ -579,7 +579,7 @@ func TestHybridManifest_Resume(t *testing.T) {
 
 	// 第一次：完整下载（写 manifest）
 	hd := mkDownloader()
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("first download error: %v", err)
 	}
 	// 第二次：重跑。注意：**成功下载会在 runHybrid 尾部 removeManifest**（manifest 只用于
@@ -587,7 +587,7 @@ func TestHybridManifest_Resume(t *testing.T) {
 	// manifest 跳过语义由失败路径（中途失败留 manifest）的真实崩溃场景验证——
 	// 见 TestHybridDownload_MultiAccount_CrashResume（多账号版）与失败路径测试。
 	hd2 := mkDownloader()
-	if _, err := hd2.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd2.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("resume download error: %v", err)
 	}
 	// 首次下载已请求（读与 /share/dl handler 的 append 同步，见下）。
@@ -688,7 +688,7 @@ func TestHybridDownload_RestoreReturnsFolder(t *testing.T) {
 		ChunkSize: 2 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -768,7 +768,7 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	if gotUA == "" {
@@ -783,15 +783,15 @@ func TestHybridDownload_RangeRequestHeaders(t *testing.T) {
 func TestParseShareID_KeepshareCC(t *testing.T) {
 	t.Parallel()
 	for _, raw := range []string{
-		"https://keepshare.cc/abc123/magnet:?xt=urn:btih:xyz",
-		"https://www.keepshare.cc/abc123",
+		"https://keepshare.cc/EXAMPLE-001123/magnet:?xt=urn:btih:xyz",
+		"https://www.keepshare.cc/EXAMPLE-001123",
 	} {
 		id, err := ParseShareID(raw)
 		if err != nil {
 			t.Fatalf("ParseShareID(%q) error: %v", raw, err)
 		}
-		if id != "abc123" {
-			t.Errorf("ParseShareID(%q) = %q, want abc123", raw, id)
+		if id != "EXAMPLE-001123" {
+			t.Errorf("ParseShareID(%q) = %q, want EXAMPLE-001123", raw, id)
 		}
 	}
 }
@@ -870,7 +870,7 @@ func TestHybridDownload_SinkAccounting(t *testing.T) {
 	sinkFactory := func(w io.Writer, contentLength int64, resume bool) (downloader.QuotaSink, error) {
 		return &countingSink{w: w, n: &accounted}, nil
 	}
-	if _, err := hd.DownloadWithWriter(context.Background(), "https://mypikpak.com/s/abc123", dest, nil, sinkFactory); err != nil {
+	if _, err := hd.DownloadWithWriter(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil, sinkFactory); err != nil {
 		t.Fatalf("DownloadWithWriter error: %v", err)
 	}
 	if accounted.Load() != int64(len(payload)) {
@@ -974,7 +974,7 @@ func TestHybridManifest_SourceMismatch(t *testing.T) {
 	data, _ := json.Marshal(oldManifest)
 	_ = os.WriteFile(ManifestPath(dest), data, 0o644)
 	// 下载：源不匹配 → 忽略 manifest 全量重下 → 内容正确
-	if _, err := mk().Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := mk().Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("download after source mismatch: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -1087,7 +1087,7 @@ func TestHybridDownload_ResolveFail_FallbackDelegates(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil)
 	if err != nil {
 		t.Fatalf("Download should delegate to fallback, got error: %v", err)
 	}
@@ -1120,7 +1120,7 @@ func TestHybridDownload_ResolveFail_NoFallbackErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", filepath.Join(t.TempDir(), "out.mp4"), nil); err == nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", filepath.Join(t.TempDir(), "out.mp4"), nil); err == nil {
 		t.Fatal("no fallback: resolve failure should error")
 	}
 }
@@ -1205,7 +1205,7 @@ func TestHybridDownload_IntegrityHashMismatch(t *testing.T) {
 		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil)
 	if err == nil {
 		t.Fatal("hash mismatch should error (C2)")
 	}
@@ -1297,7 +1297,7 @@ func TestHybridDownload_ReResolveFileChanged(t *testing.T) {
 		ChunkSize: 2 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -1384,7 +1384,7 @@ func TestHybridDownload_ParallelPools(t *testing.T) {
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 	start := time.Now()
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -1464,7 +1464,7 @@ func TestHybridDownload_ProgressTotal(t *testing.T) {
 		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: false,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, func(downloaded, total int64) {
+	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, func(downloaded, total int64) {
 		gotTotal.Store(total)
 	})
 	if err != nil {
@@ -1587,7 +1587,7 @@ func TestHybridDownload_FailPathCleansRestore(t *testing.T) {
 		ChunkSize: 1 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: true,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil)
+	_, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil)
 	if err == nil {
 		t.Fatal("hash mismatch should error (G4 fail path)")
 	}
@@ -1664,7 +1664,7 @@ func TestHybridManifest_SourceMismatch_RemovesFile(t *testing.T) {
 		ChunkSize: 1 << 20, ShareRatio: 1.0, Concurrency: 1, AutoDelete: false,
 	})
 	// 下载：源不匹配 → 旧 manifest 应被删（下载完成后 removeManifest 也删，但中途若失败也删）
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	// 下载成功 → manifest 已删（removeManifest 在完成路径）
@@ -1797,7 +1797,7 @@ func TestHybridDownload_IdempotentHit_UserFileNotDeleted(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -1829,7 +1829,7 @@ func TestHybridDownload_IdempotentHit_RestoreCopyDeleted(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -1861,7 +1861,7 @@ func TestHybridDownload_OwnedRestore_NotDeleted(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -1891,7 +1891,7 @@ func TestHybridDownload_UsesDownloadingSuffix(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); derr != nil {
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); derr != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	// 最终文件存在
@@ -1933,7 +1933,7 @@ func TestHybridManifest_InitAtStart(t *testing.T) {
 
 	// 验证 initManifest 产物（构造 downloadCtx 直接调用）
 	dc := &downloadCtx{
-		currentTotal: int64(len(payload)), shareID: "abc123",
+		currentTotal: int64(len(payload)), shareID: "EXAMPLE-001123",
 		target:   &ShareFile{ID: "share-f1", Hash: payloadSHA1(payload), Size: int64(len(payload))},
 		destPath: dest,
 	}
@@ -1941,7 +1941,7 @@ func TestHybridManifest_InitAtStart(t *testing.T) {
 	if m == nil || len(m.Chunks) != 0 {
 		t.Fatalf("initManifest should create empty chunks, got %+v", m)
 	}
-	if m.Source.ShareID != "abc123" || m.Source.FileID != "share-f1" {
+	if m.Source.ShareID != "EXAMPLE-001123" || m.Source.FileID != "share-f1" {
 		t.Fatalf("manifest source mismatch: %+v", m.Source)
 	}
 	// initManifest 已落盘 → .hybrid 与 .hybrid.downloading 配对（下载开始即有）
@@ -1950,7 +1950,7 @@ func TestHybridManifest_InitAtStart(t *testing.T) {
 	}
 
 	// 完整下载成功 → 两文件都消失（rename + removeManifest 收尾配对）
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	if _, err := os.Stat(dest); err != nil {
@@ -1996,7 +1996,7 @@ func TestHybridChunkProgress_PerChunkEvents(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
 	// 每个 chunk 都有 pending（注册）+ done（完成）

@@ -124,7 +124,7 @@ func TestRebuild_FastPathFinalizes(t *testing.T) {
 		t.Fatalf("seed working: %v", err)
 	}
 
-	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/abc123", dest, RebuildOptions{}, nil)
+	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, RebuildOptions{}, nil)
 	if err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -169,10 +169,10 @@ func TestRebuild_RepairsZeroTailChunk(t *testing.T) {
 	}
 	writeManifestFile(t, dest, &hybridManifest{
 		Total: target.Size, Chunks: chunks,
-		Source: manifestSource{ShareID: "abc123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
+		Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
 	})
 
-	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/abc123", dest, RebuildOptions{ChunkSize: chunk}, nil)
+	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, RebuildOptions{ChunkSize: chunk}, nil)
 	if err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -208,10 +208,10 @@ func TestRebuild_NormalizesRenamedFinalFile(t *testing.T) {
 	target := &ShareFile{ID: "share-f1", Size: int64(len(payload)), Hash: payloadGCID(payload)}
 	writeManifestFile(t, dest, &hybridManifest{
 		Total: target.Size, Chunks: map[int64]int64{0: chunk, 1: chunk},
-		Source: manifestSource{ShareID: "abc123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
+		Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
 	})
 
-	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/abc123", dest, RebuildOptions{ChunkSize: chunk}, nil)
+	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, RebuildOptions{ChunkSize: chunk}, nil)
 	if err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestRebuild_DryRunReportsOnly(t *testing.T) {
 		t.Fatalf("rename: %v", err)
 	}
 
-	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/abc123", dest, RebuildOptions{ChunkSize: chunk, DryRun: true}, nil)
+	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, RebuildOptions{ChunkSize: chunk, DryRun: true}, nil)
 	if err != nil {
 		t.Fatalf("Rebuild dry-run: %v", err)
 	}
@@ -283,10 +283,10 @@ func TestRebuild_NoSuspectButIntegrityFails_Escalates(t *testing.T) {
 	}
 	writeManifestFile(t, dest, &hybridManifest{
 		Total: target.Size, Chunks: chunks,
-		Source: manifestSource{ShareID: "abc123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
+		Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: target.ID, Hash: target.Hash, Size: target.Size},
 	})
 
-	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/abc123", dest, RebuildOptions{ChunkSize: chunk}, nil)
+	rep, err := hd.Rebuild(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, RebuildOptions{ChunkSize: chunk}, nil)
 	if err != nil {
 		t.Fatalf("Rebuild 应在升级全量重建后成功: %v", err)
 	}

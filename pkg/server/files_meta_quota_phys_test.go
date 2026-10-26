@@ -113,20 +113,20 @@ func TestFilesMetaQuota_ChargedEqualsOnDisk(t *testing.T) {
 	}
 
 	writeFile(bytes.Repeat([]byte("x"), 8192))
-	if err := p.WriteMeta(ctx, owner, root, rel); err != nil {
+	if err := p.WriteMeta(ctx, owner, root, rel, nil); err != nil {
 		t.Fatalf("WriteMeta: %v", err)
 	}
 	usageEqOnDisk("首次写")
 
 	// 覆盖写：差分 = 新落盘 − 旧落盘（不得泄漏、不得双记）。
 	writeFile(bytes.Repeat([]byte("y"), 20480))
-	if err := p.WriteMeta(ctx, owner, root, rel); err != nil {
+	if err := p.WriteMeta(ctx, owner, root, rel, nil); err != nil {
 		t.Fatalf("WriteMeta(覆盖): %v", err)
 	}
 	usageEqOnDisk("覆盖写")
 
 	// 幂等重写同一内容：仍与落盘一致（不叠加）。
-	if err := p.WriteMeta(ctx, owner, root, rel); err != nil {
+	if err := p.WriteMeta(ctx, owner, root, rel, nil); err != nil {
 		t.Fatalf("WriteMeta(幂等): %v", err)
 	}
 	usageEqOnDisk("幂等重写")

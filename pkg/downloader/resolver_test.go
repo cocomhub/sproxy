@@ -40,22 +40,22 @@ func TestRegistryResolveURL_FindsSupportingResolver(t *testing.T) {
 	}, Priority: 50})
 	r.RegisterResolver(Plugin[URLResolver]{Name: "pikpak", Instance: &fakeResolver{
 		name:     "pikpak",
-		supports: func(u string) bool { return u == "https://mypikpak.com/s/abc" },
+		supports: func(u string) bool { return u == "https://example.com/s/EXAMPLE-001" },
 		resolve: func(context.Context, string) (*ResolveInfo, error) {
 			return &ResolveInfo{Kind: "pikpak_share", Files: []ResolvedFile{
-				{ID: "f1", Name: "NHDTA-513A.mp4", Size: 4370580470, Type: "video/mp4"},
+				{ID: "f1", Name: "EXAMPLE-001A.mp4", Size: 4370580470, Type: "video/mp4"},
 			}}, nil
 		},
 	}, Priority: 10})
 
-	got, err := r.ResolveURL(t.Context(), "https://mypikpak.com/s/abc")
+	got, err := r.ResolveURL(t.Context(), "https://example.com/s/EXAMPLE-001")
 	if err != nil {
 		t.Fatalf("ResolveURL error: %v", err)
 	}
 	if got == nil || got.Kind != "pikpak_share" {
 		t.Fatalf("Kind = %+v, want pikpak_share", got)
 	}
-	if len(got.Files) != 1 || got.Files[0].Name != "NHDTA-513A.mp4" {
+	if len(got.Files) != 1 || got.Files[0].Name != "EXAMPLE-001A.mp4" {
 		t.Fatalf("Files = %+v", got.Files)
 	}
 }
@@ -96,7 +96,7 @@ func TestRegistryResolveURL_ResolverErrorPropagates(t *testing.T) {
 		resolve:  func(context.Context, string) (*ResolveInfo, error) { return nil, sentinel },
 	}, Priority: 10})
 
-	_, err := r.ResolveURL(t.Context(), "https://mypikpak.com/s/dead")
+	_, err := r.ResolveURL(t.Context(), "https://example.com/s/DEAD-BEEF")
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want %v", err, sentinel)
 	}

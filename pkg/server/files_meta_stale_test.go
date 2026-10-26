@@ -95,7 +95,7 @@ func TestFilesMetaPolicy_StaleSidecarClassifiedAndRepairable(t *testing.T) {
 
 	long := bytes.Repeat([]byte("new-content-after-crash-"), 40)
 	write(long)
-	if werr := p.WriteMeta(ctx, "alice", root, rel); werr != nil {
+	if werr := p.WriteMeta(ctx, "alice", root, rel, nil); werr != nil {
 		t.Fatalf("WriteMeta: %v", werr)
 	}
 	verifyOK(long) // 基线：sidecar 与内容一致 → 校验通过
@@ -112,7 +112,7 @@ func TestFilesMetaPolicy_StaleSidecarClassifiedAndRepairable(t *testing.T) {
 	}
 
 	// 重建 sidecar（等价于重写文件 / 运维调 WriteMeta）→ 恢复可校验读。
-	if werr := p.WriteMeta(ctx, "alice", root, rel); werr != nil {
+	if werr := p.WriteMeta(ctx, "alice", root, rel, nil); werr != nil {
 		t.Fatalf("重建 WriteMeta: %v", werr)
 	}
 	verifyOK(longer)

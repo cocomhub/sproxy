@@ -74,6 +74,8 @@ type chunkedInitRequest struct {
 	FileChecksum string `json:"file_checksum"`
 	FileModTime  int64  `json:"file_mod_time"` // UnixNano
 	Volume       string `json:"volume,omitempty"`
+	// MetaExtra 首次初始化即携带的自定义元数据（body 可装，避免 header 24KiB 截断风险）。
+	MetaExtra map[string]any `json:"meta_extra,omitempty"`
 }
 
 // chunkedCompleteRequest 分块上传完成请求体。
@@ -107,6 +109,7 @@ type resumeSessionParams struct {
 	TotalChunks  int
 	Concurrency  int
 	ModTime      time.Time
+	MetaExtra    map[string]any // 首次 init 携带（续传会话已有则忽略）
 }
 
 // downloadChunkParams 是 downloadOneChunk 的参数结构体，用于减少函数参数数量（S107）。
@@ -804,6 +807,7 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		FileChecksum: p.FileChecksum,
 		FileModTime:  p.ModTime.UnixNano(),
 		Volume:       c.volume,
+		MetaExtra:    p.MetaExtra,
 	}
 	initJSON, _ := json.Marshal(initBody)
 
@@ -922,6 +926,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 			ChunkSize:    chunkSize,
 			TotalChunks:  totalChunks,
 			Concurrency:  opt.concurrency,
+			MetaExtra:    opt.metaExtra,
 		})
 		// 续传命中时 tryResumeSession 内部已用服务端完整 session id 上传缺失分块并 complete，
 		// 返回的 result 就是最终结果（续传路径无需再改 uploadID）。
@@ -939,6 +944,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 		FileChecksum: fileChecksum,
 		FileSize:     fileSize,
 		ChunkSize:    chunkSize,
+		MetaExtra:    opt.metaExtra,
 		TotalChunks:  totalChunks,
 		ModTime:      modTime,
 	})
@@ -1537,6 +1543,7 @@ type chunkedOpts struct {
 	concurrency int
 	resume      bool
 	kind        string
+	metaExtra   map[string]any
 }
 
 // WithChunkedChunkSize 设置分块大小。

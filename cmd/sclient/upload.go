@@ -1,5 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+//
+// state-write-exempt: 本文件仅 flag 名/文案含 "meta-extra"/".meta"（无 os 写 meta/state
+// 路径段——upload 走 client.Upload；meta 由服务端 sidecar 管理）。门禁误报逃生口。
 
 package main
 
@@ -25,6 +28,7 @@ import (
 
 // uploadOptions 汇总 upload 命令的 flag 选项。
 type uploadOptions struct {
+	metaExtra   map[string]any
 	chunked     bool
 	concurrency int
 	chunkSize   int64
@@ -77,6 +81,7 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 	cmd.Flags().Int64("chunk-size", 0, "分块大小 (默认 4MB)")
 	cmd.Flags().Int("concurrency", 0, "上传并发数 (默认 4)")
 	cmd.Flags().Bool("resume", true, "续传模式")
+	cmd.Flags().String("meta-extra", "", "随上传写入 .meta 的自定义元数据（JSON 或 @file.json）")
 
 	return cmd
 }
@@ -95,7 +100,13 @@ func runUpload(cmd *cobra.Command, args []string, factory clientfactory.Factory,
 	resume, _ := cmd.Flags().GetBool("resume")
 	encrypt, _ := cmd.Flags().GetBool("encrypt")
 	e2eeKeyHex, _ := cmd.Flags().GetString("e2ee-key")
-	opts := uploadOptions{chunked: chunkedFlag, concurrency: concurrency, chunkSize: chunkSize, resume: resume, encrypt: encrypt, e2eeKeyHex: e2eeKeyHex}
+	metaExtraRaw, _ := cmd.Flags().GetString("meta-extra")
+	metaExtra, merr := parseMetaExtraFlag(metaExtraRaw)
+	if merr != nil {
+		ios.WriteErrLine("--meta-extra 无效: %v", merr)
+		return merr
+	}
+	opts := uploadOptions{metaExtra: metaExtra, chunked: chunkedFlag, concurrency: concurrency, chunkSize: chunkSize, resume: resume, encrypt: encrypt, e2eeKeyHex: e2eeKeyHex}
 
 	ctx := cmd.Context()
 	// 传输统计收集（--json 输出 stats 字段；表格追加统计行）。
@@ -198,7 +209,7 @@ func uploadPlain(ctx context.Context, svc *client.FileClient, filePath, remotePa
 		}
 		defer os.Remove(upPath)
 	}
-	result, err := svc.Upload(ctx, upPath, remotePath)
+	result, err := svc.Upload(ctx, upPath, remotePath, client.WithMetaExtra(opts.metaExtra))
 	if err != nil {
 		fmt.Fprintf(ios.ErrOut, "上传失败: %s %v\n", filePath, err)
 		if result != nil {

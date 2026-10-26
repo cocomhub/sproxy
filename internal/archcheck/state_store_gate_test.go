@@ -91,8 +91,15 @@ var stateWriteExemptFiles = []string{
 // 或 `meta/` / `state/` 出现在拼接片段中。
 func hasMetaStateSegment(data string) bool {
 	lower := strings.ToLower(data)
-	return strings.Contains(lower, `"meta`) || strings.Contains(lower, `"state`) ||
-		strings.Contains(lower, "meta/") || strings.Contains(lower, "state/")
+	// 状态路径段字面量：引号紧跟 `meta/`、`meta"`（filepath.Join("meta",...)）、`state/`、`state-`、
+	// `state"`。json tag 如 "meta_extra,omitempty" 的逗号/下划线不匹配这些边界，避免误伤。
+	return strings.Contains(lower, `"meta/`) ||
+		strings.Contains(lower, `"meta"`) ||
+		strings.Contains(lower, `"meta,`) ||
+		strings.Contains(lower, `"state/`) ||
+		strings.Contains(lower, `"state-`) ||
+		strings.Contains(lower, `"state"`) ||
+		strings.Contains(lower, `"state,`)
 }
 
 // TestNoDirectStateWrites 扫描非测试源码：禁 `os.WriteFile(` / `os.CreateTemp(`

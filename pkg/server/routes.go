@@ -269,6 +269,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /mkdir", h.mkdir)
 	localMux.HandleFunc("POST /rmdir", h.rmdir)
 	localMux.HandleFunc("GET /api/files/search", h.searchFiles)
+	// 已上传文件的元数据补录（方案②：旁路 Extra 更新，读-校验-合并-写 sidecar）。
+	localMux.HandleFunc("PUT /api/files/meta", h.updateFileMeta)
 	localMux.HandleFunc("GET /api/search/semantic", h.semanticSearchHandler)
 	localMux.HandleFunc("POST /api/tags", h.tagsHandler)
 	localMux.HandleFunc("POST /api/batch/delete", h.batchDelete)
@@ -419,6 +421,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /mkdir", h.fileRoute(h.mkdir))
 	srvMux.HandleFunc("POST /rmdir", h.fileRoute(h.rmdir))
 	srvMux.HandleFunc("GET /api/files/search", h.fileRouteRead(h.searchFiles))
+	// 元数据补录（写面：fileRoute 写子组，与上传同权限门）。
+	srvMux.HandleFunc("PUT /api/files/meta", h.fileRoute(h.updateFileMeta))
 	srvMux.HandleFunc("GET /api/search/semantic", h.fileRouteRead(h.semanticSearchHandler))
 	srvMux.HandleFunc("GET /api/ai/quota", h.handleAIQuota)
 	srvMux.HandleFunc("GET /api/ai/privacy", h.handleAIPrivacy)

@@ -97,7 +97,7 @@ func TestHybridDownload_MultiAccountSharding(t *testing.T) { // NOSONAR: S3776 �
 	}
 
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, dlErr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); dlErr != nil {
+	if _, dlErr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); dlErr != nil {
 		t.Fatalf("Download: %v", dlErr)
 	}
 	got, err := os.ReadFile(dest)
@@ -184,7 +184,7 @@ func TestHybridDownload_MultiAccountSingleAccountFallback(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -334,7 +334,7 @@ func TestHybridDownload_MultiAccountOwned(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download: %v (owned 分支误用文件 ID 当直链 → 本处红)", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -380,7 +380,7 @@ func TestHybridDownload_MultiAccount_AutoDelete_PerAccountRelease(t *testing.T) 
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -457,7 +457,7 @@ func TestHybridDownload_MultiAccount_SelectByChunkQuota(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download: %v (旧实现按整文件 Select(800) 在本处红)", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -531,7 +531,7 @@ func TestHybridDownload_MultiAccount_RuntimeAddedAccount(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download: %v (缺 RefreshAccounts → 池空 no-account 红)", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -602,7 +602,7 @@ func TestHybridDownload_MultiAccount_EmptyPoolFallsBackToSingle(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download: %v (空池应回落单账号，此处红)", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -685,7 +685,7 @@ func TestHybridDownload_MultiAccount_ShareDowngrade(t *testing.T) {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -786,7 +786,7 @@ func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) { // NOSONAR: S37
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 
 	// 第一次：分享区 chunk 完成（manifest 记录），账号区 chunk 恒失败（3 次分片尝试全失败）→ 报错。
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err == nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err == nil {
 		t.Fatalf("first download should fail (account chunk persistent failure)")
 	}
 	restoresAfterFirst := restoreCalls.Load()
@@ -802,7 +802,7 @@ func TestHybridDownload_MultiAccount_CrashResume(t *testing.T) { // NOSONAR: S37
 	if m := loadManifest(dest); m != nil {
 		shareChunkRecorded = m.Has(0)
 	}
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("resume download: %v", err)
 	}
 	wantShare := int64(2)
@@ -905,7 +905,7 @@ func TestHybridDownload_MultiAccount_ConcurrentSharedPool(t *testing.T) { // NOS
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dests[i], nil); derr != nil {
+			if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dests[i], nil); derr != nil {
 				errs <- fmt.Errorf("task %d: %w", i, derr)
 			}
 		}(i)
@@ -1086,10 +1086,10 @@ func TestHybridDownload_Resume_SkipsRecordedShareChunk(t *testing.T) {
 	}
 	writeManifest(dest, &hybridManifest{
 		Total: int64(len(payload)), ShareEnd: chunkLen, Chunks: map[int64]int64{0: chunkLen},
-		Source: manifestSource{ShareID: "abc123", FileID: "share-f1", Size: int64(len(payload)), URL: "https://mypikpak.com/s/abc123"},
+		Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: "share-f1", Size: int64(len(payload)), URL: "https://mypikpak.com/s/EXAMPLE-001123"},
 	})
 
-	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); derr != nil {
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); derr != nil {
 		t.Fatalf("resume download: %v", derr)
 	}
 	// 决定性断言：已记录完成的分片**不得**再拉长 Range（跳过 = 省带宽/配额）。

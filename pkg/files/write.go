@@ -127,6 +127,14 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 		remotePathStr = handler.Filename
 	}
 
+	// 随上传写入 .meta sidecar 的自定义元数据（方案①：X-File-Meta-Extra 头，base64(JSON)）。
+	// 校验失败 → 400（fail-closed：不合法不落盘，宁缺毋滥）。
+	metaExtra, merr := parseMetaExtraHeader(r.Header.Get(headerFileMetaExtra))
+	if merr != nil {
+		s.sendJSON(w, UploadResponse{Success: false, Message: "meta-extra 无效: " + merr.Error()}, http.StatusBadRequest)
+		return
+	}
+
 	res, err := s.WriteFile(r.Context(), WriteFileInput{
 		Owner:            s.rt.actorOf(r),
 		RemotePath:       remotePathStr,
@@ -134,6 +142,7 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 		ExpectedChecksum: expectedChecksum,
 		ClientSize:       handler.Size,
 		Mtime:            parseMTimeHeader(r),
+		MetaExtra:        metaExtra,
 	}, file)
 	if err != nil {
 		if he, ok := errors.AsType[*HTTPError](err); ok {

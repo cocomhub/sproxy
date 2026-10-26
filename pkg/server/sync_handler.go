@@ -450,7 +450,7 @@ func (h *Handlers) relinkConflictMeta(owner, rel string) {
 	}
 	root := tnt.Root()
 	bucketRel := "user/" + rel
-	if err := (filesMetaPolicy{h: h}).WriteMeta(context.Background(), owner, root, bucketRel); err != nil {
+	if err := (filesMetaPolicy{h: h}).WriteMeta(context.Background(), owner, root, bucketRel, nil); err != nil {
 		h.logger.Warn("同步冲突写回：重建 sidecar 失败，已失效旧 sidecar（读侧将不校验）",
 			"path", bucketRel, "error", err)
 		_ = root.Remove(meta.MetaPath(bucketRel))

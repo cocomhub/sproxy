@@ -33,6 +33,10 @@ type ChunkedInitRequest struct {
 	FileChecksum string `json:"file_checksum"`
 	FileModTime  int64  `json:"file_mod_time"`
 	Volume       string `json:"volume,omitempty"` // 显式目标卷（可选；缺省 auto 路由）
+	// MetaExtra 是首次初始化即携带的自定义元数据（A/B/C 档；与单次上传 X-File-Meta-Extra
+	// 头同语义，body 可装 24KiB JSON）。分块上传的产物在 complete 时随 .meta sidecar 落盘
+	// （避免「先传完再补录」的窗口——解析/校验失败在此 fail-closed 报错，客户端可重试）。
+	MetaExtra map[string]any `json:"meta_extra,omitempty"`
 }
 
 // ChunkedCompleteRequest 是分块上传合并完成请求体（POST /upload/complete）。

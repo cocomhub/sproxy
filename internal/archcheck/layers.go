@@ -20,6 +20,7 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/files":            true,
 	// 可信卷 FileMeta 模型/计算/校验子包（master 新增）：被 pkg/files、pkg/cloud、
 	// pkg/sync 消费；零 pkg/* 内部依赖除 storage/volume（G0）⇒ G0。
+	// 同时承载 FileMeta.Extra 的字段 schema/校验（extra.go：白名单+类型+长度）。
 	"github.com/cocomhub/sproxy/pkg/files/meta":           true,
 	"github.com/cocomhub/sproxy/pkg/syncmgr":              true,
 	"github.com/cocomhub/sproxy/pkg/downloader":           true,

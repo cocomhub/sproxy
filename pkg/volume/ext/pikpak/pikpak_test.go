@@ -252,7 +252,7 @@ func TestPikpakDownloader_Download(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !dl.Supports("https://mypikpak.com/s/abc123/xyz") {
+	if !dl.Supports("https://mypikpak.com/s/EXAMPLE-001123/xyz") {
 		t.Fatal("expected Supports true for mypikpak share")
 	}
 	if dl.Supports("https://example.com/file.txt") {
@@ -261,7 +261,7 @@ func TestPikpakDownloader_Download(t *testing.T) {
 
 	// 真实行为：fake CLI download 真写文件 → 下载必须成功且字节落盘。
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
+	res, err := dl.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123/xyz", dest, nil)
 	if err != nil {
 		t.Fatalf("expected successful download via fake cli, got %v", err)
 	}
@@ -390,7 +390,7 @@ func TestPikpakDownloader_DownloadWithWriter_Sink(t *testing.T) {
 	}
 
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	res, err := dl.DownloadWithWriter(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil, sinkFactory)
+	res, err := dl.DownloadWithWriter(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123/xyz", dest, nil, sinkFactory)
 	if err != nil {
 		t.Fatalf("expected successful sink download, got %v", err)
 	}
@@ -626,7 +626,7 @@ func TestPikpakDownloader_Download_AccountPoolSwitchesSessions(t *testing.T) {
 	}
 	for i, want := range wantCreds {
 		dest := filepath.Join(t.TempDir(), fmt.Sprintf("out-%d.mp4", i))
-		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
+		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123/xyz", dest, nil)
 		if err != nil {
 			t.Fatalf("download %d via account pool: %v", i, err)
 		}
@@ -793,7 +793,7 @@ func TestPikpakDownloader_Download_AccountPoolSameSessionForRestore(t *testing.T
 
 	for i := range 2 {
 		dest := filepath.Join(t.TempDir(), fmt.Sprintf("out-%d.mp4", i))
-		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil)
+		res, err := dl.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123/xyz", dest, nil)
 		if err != nil {
 			t.Fatalf("download %d (pool): %v", i, err)
 		}
@@ -847,10 +847,10 @@ func TestFileMeta_SizeForms(t *testing.T) {
 func TestParseShareID_SubPath(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ raw, want string }{
-		{"https://mypikpak.com/s/abc123", "abc123"},
-		{"https://mypikpak.com/s/abc123/AAAAAGtjkiq-YAYmx_GX5qGyo1_VOB", "abc123"}, // 带子路径
-		{"https://mypikpak.com/s/abc123/", "abc123"},
-		{"https://mypikpak.com/s/abc123/xyz", "abc123"},
+		{"https://mypikpak.com/s/EXAMPLE-001123", "EXAMPLE-001123"},
+		{"https://mypikpak.com/s/EXAMPLE-001123/AAAAAGtjkiq-YAYmx_GX5qGyo1_VOB", "EXAMPLE-001123"}, // 带子路径
+		{"https://mypikpak.com/s/EXAMPLE-001123/", "EXAMPLE-001123"},
+		{"https://mypikpak.com/s/EXAMPLE-001123/xyz", "EXAMPLE-001123"},
 	}
 	for _, c := range cases {
 		got, err := parseShareID(c.raw)
@@ -866,7 +866,7 @@ func TestParseShareID_SubPath(t *testing.T) {
 // TestParseShareID_Unsupported 锁定不支持形态（fail-closed）。
 func TestParseShareID_Unsupported(t *testing.T) {
 	t.Parallel()
-	for _, raw := range []string{"https://example.com/s/abc", "https://mypikpak.com/nots/abc", ""} {
+	for _, raw := range []string{"https://mypikpak.com/nots/EXAMPLE-001123", "", "https://example.invalid/s/EXAMPLE-001123"} {
 		if _, err := parseShareID(raw); err == nil {
 			t.Errorf("parseShareID(%q) 应报错", raw)
 		}
@@ -943,7 +943,7 @@ func TestPikpakDownloader_AutoDelete_SkipsOwnedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil); err != nil {
+	if _, err := dl.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123/xyz", dest, nil); err != nil {
 		t.Fatal(err)
 	}
 	// AutoDelete=true 但 owned → 不调 DeletePermanent（源文件不删；释放经 RestoreLease 单一语义）
@@ -992,7 +992,7 @@ func TestPikpakDownloader_AutoDelete_PermanentDeletesRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	if _, err := dl.Download(context.Background(), "https://mypikpak.com/s/abc123/xyz", dest, nil); err != nil {
+	if _, err := dl.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123/xyz", dest, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(fsrv.permDeleted) != 1 {

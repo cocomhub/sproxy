@@ -79,12 +79,12 @@ func TestHybridDownload_ResumeKeepsCompletedChunks(t *testing.T) {
 	_, _ = f.Write(payload[:chunkLen])
 	_ = f.Truncate(int64(len(payload)))
 	f.Close()
-	m := &hybridManifest{Total: int64(len(payload)), ShareEnd: chunkLen, Chunks: map[int64]int64{0: chunkLen}, Source: manifestSource{ShareID: "abc123", FileID: "share-f1", Hash: payloadGCID(payload), Size: int64(len(payload))}}
+	m := &hybridManifest{Total: int64(len(payload)), ShareEnd: chunkLen, Chunks: map[int64]int64{0: chunkLen}, Source: manifestSource{ShareID: "EXAMPLE-001123", FileID: "share-f1", Hash: payloadGCID(payload), Size: int64(len(payload))}}
 	data, _ := json.Marshal(m)
 	_ = os.WriteFile(ManifestPath(dest), data, 0o644)
 
 	// ② 恢复：理想 = 只下 chunk 1（保留 chunk 0）→ 文件完整。
-	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/abc123", dest, nil); err != nil {
+	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("RESUME BROKEN: re-Download errored: %v (shareDL=%d driveDL=%d)", err, shareDLCalls, driveDLCalls)
 	}
 	got, _ := os.ReadFile(dest)
