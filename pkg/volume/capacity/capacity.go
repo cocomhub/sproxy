@@ -217,6 +217,19 @@ func NewVolumeCounter(raw syncpkg.FS, maxBytes int64, pool *quota.Pool) Counter 
 	return newVolumeLedgerCounter(raw, maxBytes, pool, 0)
 }
 
+// NewLocalVolumeCounter 在**节点本地明文目录**上构造卷级计数器（分片日志账本）。
+//
+// 语义与 `newVolumeLedgerCounterLocal` 完全一致（`WrapStorageVolume` 的 `WithLedgerDir` 内部
+// 实现）：节点本地目录建账本失败 = 环境故障（权限/磁盘）⇒ **不得降级内存**（降级 ⇒ 重启后
+// 账本空、used 回到陈旧基线 ⇒ 限额放宽 fail-open）⇒ 按 fail-closed 拒写 + Degraded 告警。
+//
+// 供 `WrapBackend` 装配路径（封装卷）在**底层为外部卷**（网盘/对象存储：`IsLocalVolume()` 恒
+// false、账本写卷 FS = 加密 blob/远端对象不可解析 ⇒ 恒 degraded 拒写）时把账本落**节点本地**
+// （与 `pkg/server/volumes.go` 对 baidupcs 外部卷无条件落本地同构）。
+func NewLocalVolumeCounter(dir string, maxBytes int64, pool *quota.Pool) Counter {
+	return newVolumeLedgerCounterLocal(dir, maxBytes, pool, 0)
+}
+
 // VolumeLimitPath 返回用户卷**上限**的持久化路径（**F6 继承来源**）。
 //
 // 为什么上限**不放在账本里**（设计 §3.6.1）：账本必须落在**共享卷**上（跨进程可见 ✓），
