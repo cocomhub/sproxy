@@ -718,6 +718,7 @@ func isFileGroupedRoute(path string) bool {
 	switch path {
 	case "/upload", "/download", "/delete", "/rename",
 		"/api/files", "/api/files/stat", "/api/files/search", "/api/search/semantic", "/api/tags", "/api/du",
+		"/api/files/meta",
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
