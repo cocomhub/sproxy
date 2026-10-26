@@ -136,7 +136,7 @@ func followKeepshareShareID(ctx context.Context, client *http.Client, raw string
 		client = &http.Client{}
 	}
 	cur := raw
-	for hop := 0; hop < 5; hop++ {
+	for range 5 {
 		if id := shareIDFromFinalURL(cur); id != "" {
 			return id, nil
 		}
