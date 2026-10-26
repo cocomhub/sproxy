@@ -62,6 +62,21 @@ func (r *Registry) RegisterResolver(p Plugin[URLResolver]) {
 	r.resolvers.Register(p)
 }
 
+// ResolverFor 返回第一个 Supports 该 URL 的解析扩展（无则 ok=false）。
+// 用于装配自检/测试（不经网络确认扩展已注册到位）。
+func (r *Registry) ResolverFor(rawURL string) (URLResolver, bool) {
+	if r.resolvers == nil {
+		return nil, false
+	}
+	for _, name := range r.resolvers.Names() {
+		res, _ := r.resolvers.Get(name)
+		if res != nil && res.Supports(rawURL) {
+			return res, true
+		}
+	}
+	return nil, false
+}
+
 // ResolveURL 按注册顺序查找第一个 Supports 的解析扩展并执行解析；
 // 无扩展匹配时返回通用回落结果（文件名由 URL 推导、大小未知）。
 func (r *Registry) ResolveURL(ctx context.Context, rawURL string) (*ResolveInfo, error) {
