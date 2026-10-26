@@ -1157,6 +1157,9 @@ type PikpakConfig struct {
 	// AccountConfigs 是多账号池的账号配置（name → 每日配额）。账号会话凭据由
 	// `sproxy pikpak account add` 写入 secrets 卷；此处仅登记配额（>0 覆盖默认）。
 	AccountConfigs []PikpakAccountConfig `yaml:"accounts" mapstructure:"accounts"`
+	// InsecureTLS 是否跳过自签证书校验（本地联调/测试用；生产必须 false，禁暴露）。
+	// 默认 false（安全默认）：只对 pikpak 解析器的出站 TLS 生效，不影响服务监听。
+	InsecureTLS bool `yaml:"insecure_tls" mapstructure:"insecure_tls"`
 	// Hybrid 是混合下载器配置（分享直链前段 + 账号流量后段，分片并行）。
 	Hybrid PikpakHybridConfig `yaml:"hybrid" mapstructure:"hybrid"`
 }
