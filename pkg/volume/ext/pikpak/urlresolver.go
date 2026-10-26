@@ -6,11 +6,14 @@ package pikpak
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/media"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // URLResolverName 是通用 URL 解析接口下本扩展的名称。
@@ -31,14 +34,24 @@ const URLResolverName = "pikpak_share"
 type URLResolver struct {
 	api      *API
 	resolver *ShareResolver
+	client   *http.Client // 出站 HTTP（重定向跟随/匿名解析）；nil = 默认安全 client
 }
 
 // NewURLResolver 创建解析扩展（api 可为 nil：仅匿名解析）。
 func NewURLResolver(api *API, resolver *ShareResolver) *URLResolver {
+	return NewURLResolverWithClient(api, resolver, nil)
+}
+
+// NewURLResolverWithClient 创建解析扩展并注入出站 HTTPClient（本地自签/代理等场景）。
+// client 为空 = 默认安全 client。
+func NewURLResolverWithClient(api *API, resolver *ShareResolver, client *http.Client) *URLResolver {
 	if resolver == nil {
 		resolver = NewShareResolver(ShareResolverConfig{})
 	}
-	return &URLResolver{api: api, resolver: resolver}
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+	}
+	return &URLResolver{api: api, resolver: resolver, client: client}
 }
 
 // Name 返回扩展名。
@@ -77,6 +90,15 @@ func (r *URLResolver) Resolve(ctx context.Context, rawURL string) (*downloader.R
 	if err != nil {
 		return nil, err
 	}
+	// keepshare 镜像：parts[0] 是 keepshare 容器 id 而非 PikPak 分享 id——
+	// 需 HTTP 跟随重定向链（keepshare.org→.cc→mypikpak.com/s/<真实id>）拿真实分享 id。
+	if strings.Contains(strings.ToLower(hostOf(src)), "keepshare") {
+		id, ferr := followKeepshareShareID(ctx, r.httpClient(), src)
+		if ferr != nil {
+			return nil, fmt.Errorf("keepshare follow %s: %w", src, ferr)
+		}
+		shareID = id
+	}
 	info := &downloader.ResolveInfo{URL: rawURL, Kind: URLResolverName}
 	// ① 登录态列举优先（含 hash、无分享直链限制）
 	if files, ok := r.listOwned(ctx, shareID); ok {
@@ -92,6 +114,88 @@ func (r *URLResolver) Resolve(ctx context.Context, rawURL string) (*downloader.R
 	info.Files = files
 	r.fillSingle(info)
 	return info, nil
+}
+
+// httpClient 返回解析用 HTTP 客户端（注入的或默认安全）。
+func (r *URLResolver) httpClient() *http.Client {
+	if r.client != nil {
+		return r.client
+	}
+	return &http.Client{}
+}
+
+// followKeepshareShareID 跟随 keepshare 镜像重定向链，返回最终 mypikpak 分享 id。
+// keepshare.org/<容器id>/magnet:... → 301 keepshare.cc → 302 mypikpak.com/s/<真实id>。
+// 终点非 mypikpak 分享（如 keepshare 控制台页/分享不存在）→ 错误（fail-closed，不猜 id）。
+//
+// 实现：**手动重定向循环**（最多 5 跳）——Go http.Client 的 CheckRedirect 在拒绝跨域时
+// resp.Request.URL 是前一个请求 URL，无法拿到被拒绝的 mypikpak 目标；手动循环每跳检查
+// Location 并逐跳重建请求，直到目标主机是 mypikpak 或无可跳转。
+func followKeepshareShareID(ctx context.Context, client *http.Client, raw string) (string, error) {
+	if client == nil {
+		client = &http.Client{}
+	}
+	cur := raw
+	for hop := 0; hop < 5; hop++ {
+		if id := shareIDFromFinalURL(cur); id != "" {
+			return id, nil
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cur, nil)
+		if err != nil {
+			return "", err
+		}
+		// 干净 client：本函数手动控制重定向（禁用自动跟随避免 CheckRedirect 陷阱）。
+		c := &http.Client{Timeout: client.Timeout, Transport: client.Transport}
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		resp, err := c.Do(req)
+		if err != nil {
+			return "", err
+		}
+		finalURL := ""
+		loc := resp.Header.Get("Location")
+		_ = resp.Body.Close()
+		if loc == "" {
+			// 无重定向：当前 URL 即终点
+			finalURL = cur
+			if id := shareIDFromFinalURL(finalURL); id != "" {
+				return id, nil
+			}
+			return "", fmt.Errorf("keepshare 终点非 PikPak 分享: %s", finalURL)
+		}
+		ref, rerr := url.Parse(loc)
+		if rerr != nil {
+			return "", fmt.Errorf("keepshare redirect Location 非法: %q", loc)
+		}
+		base, _ := url.Parse(cur)
+		cur = base.ResolveReference(ref).String()
+	}
+	return "", fmt.Errorf("keepshare redirect 链超过 5 跳: %s", raw)
+}
+
+// hostOf 返回 URL 主机名（小写）。
+func hostOf(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// shareIDFromFinalURL 从最终 URL 提取 PikPak 分享 id（mypikpak.com|net/s/<id>[/token]）。
+func shareIDFromFinalURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if !strings.Contains(host, "mypikpak") {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "s" && parts[1] != "" {
+		return parts[1]
+	}
+	return ""
 }
 
 // listOwned 登录态递归列举分享文件；无 API 或失败返回 ok=false（回落匿名）。

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
@@ -176,13 +177,15 @@ func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool) {
 		return
 	}
 	cfg := pikpak.ShareResolverConfig{}
+	var httpClient *http.Client
 	if insecureTLS {
 		// 本地自签证书（WSL 联调等）：注入跳过校验的 HTTPClient（生产必须 false）。
-		cfg.HTTPClient = &http.Client{Transport: insecureTransport()}
+		httpClient = &http.Client{Transport: insecureTransport(), Timeout: 30 * time.Second}
+		cfg.HTTPClient = httpClient
 	}
 	reg.RegisterResolver(downloader.Plugin[downloader.URLResolver]{
 		Name:     pikpak.URLResolverName,
-		Instance: pikpak.NewURLResolver(nil, pikpak.NewShareResolver(cfg)),
+		Instance: pikpak.NewURLResolverWithClient(nil, pikpak.NewShareResolver(cfg), httpClient),
 		Priority: 10,
 	})
 	slog.Info("pikpak url resolver registered", "priority", 10, "insecure_tls", insecureTLS)
