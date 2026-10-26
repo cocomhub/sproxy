@@ -44,14 +44,27 @@ func NewURLResolver(api *API, resolver *ShareResolver) *URLResolver {
 // Name 返回扩展名。
 func (r *URLResolver) Name() string { return URLResolverName }
 
-// Supports 判断是否 PikPak 分享 URL（与 PikpakDownloader.Supports 同判据）。
+// Supports 判断是否 PikPak 分享 URL（与 parseShareIDWithToken 同判据）。
+//
+// 两类来源（用户裁定 2026-10-26）：
+//   - mypikpak.com/s/<id>[/<token>]（原始分享页）；
+//   - keepshare.org|.cc/<id>/magnet:...（磁力镜像，parts[0] 即分享 id，无需 302 跟随）。
+//
+// 判据必须与 parseShareIDWithToken 一致，否则 resolve 对 keepshare 链接恒回落 generic。
 func (r *URLResolver) Supports(rawURL string) bool {
+	id, _ := parseShareIDWithToken(rawURL)
+	if id == "" {
+		return false
+	}
+	// mypikpak 分享要求 /s/<id> 路径形态（parseShareIDWithToken 已校验）；keepshare 镜像
+	// 由该函数内 keepshare 分支返回 id，直接放行。
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return false
 	}
-	if !supportedShareHost(strings.ToLower(u.Hostname())) {
-		return false
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, "keepshare") {
+		return true
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	return len(parts) >= 2 && parts[0] == "s"

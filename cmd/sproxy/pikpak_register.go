@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
@@ -127,7 +129,7 @@ func registerPikpakDownloader(cfg *server.Config, set *registry.Set) {
 		registerHybridIfEnabled(cfg, api, dl, pool)
 		// URL 解析扩展（/api/resolve）：分享 URL → 文件清单（含 hash，供 GCID 校验）。
 		// 漏注册会使 /api/resolve 对分享 URL 回落 generic（2026-10-26 实测缺陷）。
-		registerPikpakResolver(downloader.DefaultRegistry)
+		registerPikpakResolver(downloader.DefaultRegistry, cfg.Pikpak.InsecureTLS)
 	})
 }
 
@@ -169,14 +171,30 @@ var registerPikpakOnce sync.Once
 // 设计：解析能力唯一实现在 pkg/volume/ext/pikpak（URLResolver：登录态列举优先、
 // 匿名解析回落），装配层只做一次注册；未注册时 /api/resolve 对分享 URL 返回
 // 通用回落结果（kind=generic，无文件清单）。
-func registerPikpakResolver(reg *downloader.Registry) {
+func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool) {
 	if reg == nil {
 		return
 	}
+	cfg := pikpak.ShareResolverConfig{}
+	if insecureTLS {
+		// 本地自签证书（WSL 联调等）：注入跳过校验的 HTTPClient（生产必须 false）。
+		cfg.HTTPClient = &http.Client{Transport: insecureTransport()}
+	}
 	reg.RegisterResolver(downloader.Plugin[downloader.URLResolver]{
 		Name:     pikpak.URLResolverName,
-		Instance: pikpak.NewURLResolver(nil, pikpak.NewShareResolver(pikpak.ShareResolverConfig{})),
+		Instance: pikpak.NewURLResolver(nil, pikpak.NewShareResolver(cfg)),
 		Priority: 10,
 	})
-	slog.Info("pikpak url resolver registered", "priority", 10)
+	slog.Info("pikpak url resolver registered", "priority", 10, "insecure_tls", insecureTLS)
+}
+
+// insecureTransport 返回跳过 TLS 校验的 Transport（仅本地联调；绝不用于生产）。
+func insecureTransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	t := base.Clone()
+	t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 本地联调专用
+	return t
 }

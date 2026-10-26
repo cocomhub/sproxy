@@ -20,7 +20,7 @@ import (
 func TestRegisterPikpakURLResolver_ShareURLMatches(t *testing.T) {
 	t.Parallel()
 	reg := downloader.NewRegistry()
-	registerPikpakResolver(reg)
+	registerPikpakResolver(reg, false)
 
 	shareURL := "https://mypikpak.com/s/EXAMPLEID123/token456"
 	res, ok := reg.ResolverFor(shareURL)
@@ -37,7 +37,7 @@ func TestRegisterPikpakURLResolver_ShareURLMatches(t *testing.T) {
 func TestRegisterPikpakURLResolver_NonShareNotMatched(t *testing.T) {
 	t.Parallel()
 	reg := downloader.NewRegistry()
-	registerPikpakResolver(reg)
+	registerPikpakResolver(reg, false)
 
 	for _, u := range []string{
 		"https://example.com/movie.mp4",
