@@ -111,6 +111,24 @@ type ExternalVolumeOps interface {
 	// 不一致 → `*HTTPError{409}`。目标已存在 → `*HTTPError{409}`（不静默覆盖）。
 	// 返回 (false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 源不存在（调用方回落既有语义）。
 	ExternalRename(ctx context.Context, owner, volName, fromRemote, toRemote, expectedChecksum string) (bool, error)
+
+	// ExternalMeta 读外部卷对象的自定义元数据 extra（用户可见相对路径）。
+	//
+	// 返回 (extra, true, nil) = 已裁决（extra 可为空 map——文件存在但无 extra，或卷无
+	// sidecar 载体）；(nil, false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 对象不存在
+	// —— 调用方按「未命中」处理（回落到本地卷路径或报 404）。
+	//
+	// 为什么需要（2026-10-26 读闭环）：extra 读写必须先定位到文件所在的卷，而外部卷
+	// 没有 *storage.Root（`locateForRead` 恒未命中）⇒ 必须经本接缝（与 ExternalStat 同路）。
+	ExternalMeta(ctx context.Context, owner, volName, remotePath string) (extra map[string]any, ok bool, err error)
+
+	// ExternalMetaUpdate 把 extra **合并**进外部卷对象的 meta（读-校验-合并-写 sidecar，
+	// 不重算内容哈希）。语义与本地卷 `FileMetaPolicy` 的补录一致；无 sidecar 载体（裸外部
+	// 卷无 trusted 装饰链）→ `ErrMetaUnavailable`（fail-closed，不假成功）。
+	//
+	// 返回 (true, nil) = 已裁决（含失败）。(false, nil) = 卷未装配 / 非外部卷 / owner
+	// 未授权 / 对象不存在 —— 调用方按「未命中」处理。
+	ExternalMetaUpdate(ctx context.Context, owner, volName, remotePath string, extra map[string]any) (bool, error)
 }
 
 // ExternalCopyResult 是 ExternalCopy 的返回：Supported=false 表示该卷未实现 blob 直拷能力
@@ -577,6 +595,11 @@ type FileMetaPolicy interface {
 	// 跳过校验（skip_verify）→ 返回 nil（直通）。实现方读 meta sidecar（root 相对
 	// meta.MetaPath(rel)）后 meta.VerifyReadSeeker 包装。
 	VerifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error)
+	// ReadMetaRaw 读取本地卷 meta sidecar 原始字节（root 相对 mrel）。
+	//
+	// 语义（2026-10-26 读闭环）：sidecar 缺失 → `os.ErrNotExist`（调用方按「无 extra」
+	// 处理）；存在但不可读/损坏 → fail-closed 错误（不返回半份数据）。
+	ReadMetaRaw(ctx context.Context, root *storage.Root, mrel string) ([]byte, error)
 }
 
 // WithFileMeta 注入可信卷 meta 能力。默认：不装配（零回归）。

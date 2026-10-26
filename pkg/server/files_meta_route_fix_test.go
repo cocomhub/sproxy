@@ -29,3 +29,17 @@ func TestFix_LocalMuxGateCoversMeta(t *testing.T) {
 		t.Fatal("localMuxGate 与 isFileGroupedRoute 同源；漏列会让隧道内层面裸放")
 	}
 }
+
+// TestFix_FileMetaGetRouteGrouped 钉住 GET /api/files/meta 属文件组且为只读子组
+// （#855 教训三处同源：isFileGroupedRoute + isReadOnlyFileRoute + HandleFunc）。
+// 变异：删 isReadOnlyFileRoute 的 "/api/files/meta" → fileRouteRead 判定「非只读」
+// → 接线错 500 → 本用例红。
+func TestFix_FileMetaGetRouteGrouped(t *testing.T) {
+	t.Parallel()
+	if !isFileGroupedRoute("/api/files/meta") {
+		t.Fatal("GET /api/files/meta 必须在 isFileGroupedRoute 清单")
+	}
+	if !isReadOnlyFileRoute("/api/files/meta", http.MethodGet) {
+		t.Fatal("GET /api/files/meta 必须在 isReadOnlyFileRoute 只读子组（否则 fileRouteRead 接线错 500）")
+	}
+}

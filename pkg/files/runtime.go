@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -97,6 +98,18 @@ func (rt runtime) verifyDownload(ctx context.Context, root *storage.Root, rel st
 		return nil, nil
 	}
 	return rt.fileMeta.VerifyDownload(ctx, root, rel, r)
+}
+
+// readMetaSidecar 委托装配层实现读本地卷 meta sidecar（`FileMetaPolicy.ReadMeta`）。
+// 未装配 / 加密卷 / sidecar 缺失 → 空 map（读侧零校验语义）；存在但不可读/损坏 → 错误。
+func (rt runtime) readMetaSidecar(ctx context.Context, root *storage.Root, mrel string) ([]byte, error) {
+	if rt.fileMeta == nil || root == nil {
+		return nil, os.ErrNotExist
+	}
+	if root.IsEncrypted() {
+		return nil, os.ErrNotExist // 加密卷读侧口径不一致，与 VerifyDownload 同源跳过
+	}
+	return rt.fileMeta.ReadMetaRaw(ctx, root, mrel)
 }
 
 // sweepMetaTmp 清理 mrel 同目录的旧 meta tmp 孤儿（崩溃残留）。best-effort：删除失败

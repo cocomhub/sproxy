@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path"
@@ -831,6 +832,83 @@ func (o externalVolumeOps) ExternalRename(ctx context.Context, owner, volName, f
 	return renameExternalChecked(ctx, h, fsys, volName, fromRemote, toRemote, srcKey, dstKey)
 }
 
+// ExternalMeta 实现 files.ExternalVolumeOps：读外部卷对象的 meta.Extra。
+//
+// 语义：文件不存在 → (nil,false,nil)（调用方 404）；文件存在但卷无 meta 载体/无 extra →
+// (空 map,true,nil)（读侧零校验语义）；读取真错误 → 错误（fail-closed）。
+func (o externalVolumeOps) ExternalMeta(ctx context.Context, owner, volName, remotePath string) (map[string]any, bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return nil, false, nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return nil, false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return nil, false, nil
+	}
+	key, kok := externalVolumeKey(v, owner, remotePath)
+	if !kok {
+		return nil, true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	e, serr := fsys.Stat(ctx, key)
+	if serr != nil || e == nil || e.IsDir {
+		return nil, false, nil // 不存在/不可 stat → 未命中
+	}
+	pv, pok := fsys.(meta.Provider)
+	if !pok {
+		return map[string]any{}, true, nil // 无 meta 载体（裸卷无 trusted 装饰）→ 无 extra
+	}
+	fm, ferr := pv.FileMeta(ctx, key)
+	if ferr != nil {
+		if errors.Is(ferr, os.ErrNotExist) {
+			return map[string]any{}, true, nil // sidecar 缺失 = 无 extra
+		}
+		return nil, true, ferr
+	}
+	out := make(map[string]any, len(fm.Extra))
+	maps.Copy(out, fm.Extra)
+	return out, true, nil
+}
+
+// ExternalMetaUpdate 实现 files.ExternalVolumeOps：把 extra 合并进外部卷对象的 meta。
+//
+// 走**同一可信链**（`Guard(Wrap(be.FS()))`）的 `UpdateMetaExtra`（读-校验-合并-写
+// sidecar，不重算内容哈希）。无该能力（裸卷无 trusted 装饰）→ `files.ErrMetaUnavailable`
+// （fail-closed，不假成功）。
+func (o externalVolumeOps) ExternalMetaUpdate(ctx context.Context, owner, volName, remotePath string, extra map[string]any) (bool, error) {
+	h := o.h
+	if h.volSet == nil {
+		return false, nil
+	}
+	fsys, ok := h.externalFSFor(volName)
+	if !ok {
+		return false, nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return false, nil
+	}
+	key, kok := externalVolumeKey(v, owner, remotePath)
+	if !kok {
+		return true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	e, serr := fsys.Stat(ctx, key)
+	if serr != nil || e == nil || e.IsDir {
+		return false, nil // 不存在 → 未命中
+	}
+	updater, uok := syncpkg.AssertMetaExtraUpdater(fsys)
+	if !uok {
+		return true, files.ErrMetaUnavailable
+	}
+	if uerr := updater.UpdateMetaExtra(ctx, key, extra); uerr != nil {
+		return true, fmt.Errorf("外部卷 meta 更新失败: %w", uerr)
+	}
+	return true, nil
+}
+
 // renameExternalChecked 执行一次改名：原地改名优先；底层**明确不支持**（契约哨兵
 // `syncpkg.ErrUnsupported`，如 secretdata 文件改 basename）→ 该卷设计口径的等价路径
 // 「读源 → 写目标 → 删源」；封印 → 409；其余 → 500（如实失败，不静默半态）。
@@ -1014,6 +1092,46 @@ func (p filesMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root,
 	return sr, nil
 }
 
+// ReadMetaRaw 读本地卷 meta sidecar 原始字节（`meta.MetaPath(rel)` 已由调用方算出）。
+// 语义（2026-10-26 读闭环）：缺失 → `os.ErrNotExist`；存在但不可读/超限 → 错误；
+// 上限口径与 VerifyDownload / readMetaSidecarBytes 同源。
+func (p filesMetaPolicy) ReadMetaRaw(ctx context.Context, root *storage.Root, mrel string) ([]byte, error) {
+	if root == nil {
+		return nil, os.ErrNotExist
+	}
+	rc, err := root.Open(mrel)
+	if err != nil {
+		return nil, err // 含 os.ErrNotExist（真缺失）与读取失败（调用方区分）
+	}
+	defer func() { _ = rc.Close() }()
+	raw, rerr := io.ReadAll(io.LimitReader(rc, meta.MaxMetaSidecarBytes()+1))
+	if rerr != nil {
+		return nil, fmt.Errorf("meta: sidecar 读取失败: %w", rerr)
+	}
+	if int64(len(raw)) > meta.MaxMetaSidecarBytes() {
+		return nil, fmt.Errorf("meta: sidecar 超过上限 %d 字节", meta.MaxMetaSidecarBytes())
+	}
+	return raw, nil
+}
+
+// inheritOldExtra 把旧 sidecar 的 extra 继承到新算出的 FileMeta（覆盖写合并语义）。
+//
+// 为什么需要（2026-10-26 用户裁定「默认新增而非覆盖」）：computeMeta 从主文件**重算**
+// FileMeta ⇒ Extra 为空；若直接 applyMetaExtra，覆盖写会把旧 KV 整体丢掉。
+// 旧 sidecar 缺失/不可读/损坏 → 静默跳过（缺失 = 无旧 KV；主文件已写成功，不因 meta
+// 问题阻断上传），并将旧 Extra 赋给 fm（后续 applyMetaExtra 在其上合并本次新增键）。
+func inheritOldExtra(ctx context.Context, p filesMetaPolicy, root *storage.Root, mrel string, fm *meta.FileMeta) {
+	oldRaw, oerr := p.ReadMetaRaw(ctx, root, mrel)
+	if oerr != nil {
+		return
+	}
+	oldFM, uerr := meta.Unmarshal(oldRaw)
+	if uerr != nil || len(oldFM.Extra) == 0 {
+		return
+	}
+	fm.Extra = oldFM.Extra
+}
+
 // seekEndSize 探测流的内容长度（SeekEnd 后复原到起点）；不支持 Seek 时返回错误（调用方跳过判据）。
 func seekEndSize(r io.Seeker) (int64, error) {
 	end, err := r.Seek(0, io.SeekEnd)
@@ -1079,6 +1197,8 @@ func (p filesMetaPolicy) writeMetaCore(ctx context.Context, owner string, root *
 	if err != nil {
 		return err
 	}
+	// 覆盖写场景保留既有 extra（用户裁定 2026-10-26：默认**新增而非覆盖**）。
+	inheritOldExtra(ctx, p, root, mrel, fm)
 	// 随上传写入的自定义元数据（A/B/C 档；nil = 不写，零回归）。字段白名单与类型
 	// 校验由调用方（upload handler）执行；此处直接落盘（不重复校验）。
 	applyMetaExtra(fm, extra)
@@ -1310,9 +1430,15 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 // 编译期断言：*Metrics 满足领域的计量窄接口（零适配代码，无需包装）。
 var _ files.Metrics = (*Metrics)(nil)
 
-// applyMetaExtra 把随上传写入的 extra 合并到 FileMeta（nil/空 = 不写，零回归）。
+// applyMetaExtra 把随上传写入的 extra **合并**到 FileMeta（用户裁定 2026-10-26：默认新增
+// 而非覆盖——二次上传不丢旧 KV）。nil/空 = 不写（零回归）；既有 Extra 保留、同名键被
+// 新值更新。
 func applyMetaExtra(fm *meta.FileMeta, extra map[string]any) {
-	if len(extra) > 0 {
-		fm.Extra = extra
+	if len(extra) == 0 {
+		return
 	}
+	if fm.Extra == nil {
+		fm.Extra = make(map[string]any, len(extra))
+	}
+	maps.Copy(fm.Extra, extra)
 }

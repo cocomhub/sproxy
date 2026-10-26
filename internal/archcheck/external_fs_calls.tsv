@@ -16,7 +16,7 @@ pkg/files/service.go	1	ExternalVolumeSource 目录浏览：装配层注入的 Ex
 pkg/server/backends_api.go	1	后端信息 API：只读探测
 pkg/server/backup_api.go	4	备份面：取远端写面（federated/baidupcs）
 pkg/server/external_source.go	1	外部卷下载源解析（经 externalFSFor/同一装饰链）
-pkg/server/files_service.go	8	externalFSFor（可信链入口）+ ExternalCopy/ExternalStat/下载源/信息探测——均经装配处 trusted.Guard(Wrap()) 封印视图
+pkg/server/files_service.go	10	externalFSFor（可信链入口）+ ExternalCopy/ExternalStat/ExternalMeta/下载源/信息探测——均经装配处 trusted.Guard(Wrap()) 封印视图
 pkg/server/quota_reconcile.go	2	真值对账：物理用量探测
 pkg/server/routes_setup.go	2	DAV/S3 装配：临时视图构造
 pkg/server/volumes.go	3	卷路由/装配套接 + externalVolumeTransferFS（转存目标解析；be.FS() 为装配处 SealBackend 封印后视图，单点复用）

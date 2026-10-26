@@ -240,4 +240,6 @@ localMux	GET /api/hub/services	tunnel	pkg/server/routes_setup.go:770
 localMux	GET /api/resolve	tunnel	pkg/server/routes.go:497
 srvMux	GET /api/resolve	auth	pkg/server/routes.go:515
 localMux	PUT /api/files/meta	tunnel	pkg/server/routes.go:273
+localMux	GET /api/files/meta	tunnel	pkg/server/routes.go:274
 srvMux	PUT /api/files/meta	user	pkg/server/routes.go:425
+srvMux	GET /api/files/meta	reader	pkg/server/routes.go:427

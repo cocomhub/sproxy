@@ -81,6 +81,25 @@ func (o *fakeExternalVolumeOps) ExternalDelete(context.Context, string, string, 
 func (o *fakeExternalVolumeOps) ExternalStat(context.Context, string, string, string) (int64, string, error) {
 	return -1, "", nil
 }
+
+// ExternalMeta / ExternalMetaUpdate：测试替身透传给 fakeExternalVolume（如实现）。
+func (o *fakeExternalVolumeOps) ExternalMeta(ctx context.Context, _, volName, remotePath string) (map[string]any, bool, error) {
+	if m, ok := any(o.ext).(interface {
+		Meta(context.Context, string, string) (map[string]any, bool, error)
+	}); ok {
+		return m.Meta(ctx, volName, remotePath)
+	}
+	return nil, false, nil
+}
+
+func (o *fakeExternalVolumeOps) ExternalMetaUpdate(ctx context.Context, owner, volName, remotePath string, extra map[string]any) (bool, error) {
+	if m, ok := any(o.ext).(interface {
+		MetaUpdate(context.Context, string, string, string, map[string]any) (bool, error)
+	}); ok {
+		return m.MetaUpdate(ctx, owner, volName, remotePath, extra)
+	}
+	return false, nil
+}
 func (o *fakeExternalVolumeOps) ExternalCopy(context.Context, string, string, string, string, string, string, bool) (ExternalCopyResult, error) {
 	return ExternalCopyResult{}, nil
 }

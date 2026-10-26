@@ -13,6 +13,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -41,6 +42,13 @@ func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 			}
 			fm := buildFormatterWithWriter(ios.Out, cmd)
 			fm.PrintStat(info, filename)
+			// 元数据 extra（KV）：读失败不阻断主查询（Stat 已成功），仅提示。
+			extra, xerr := svc.GetFileMeta(cmd.Context(), filename)
+			if xerr == nil {
+				fm.PrintMetaExtra(extra)
+			} else {
+				ios.WriteErrLine("（读取 meta extra 失败: %v）", xerr)
+			}
 			return nil
 		},
 	}
@@ -162,13 +170,9 @@ func newCmdMetaSet(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
   sclient meta set dir/movie.mp4 --extra=@meta.json`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			raw, _ := cmd.Flags().GetString("extra")
-			extra, perr := parseMetaExtraFlag(raw)
+			extra, mode, perr := parseMetaSetArgs(cmd)
 			if perr != nil {
 				return perr
-			}
-			if len(extra) == 0 {
-				return fmt.Errorf("--extra 不能为空")
 			}
 			if err := applyStateVolume(cmd, st); err != nil {
 				return err
@@ -182,15 +186,63 @@ func newCmdMetaSet(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
 			if rerr != nil {
 				return rerr
 			}
-			if uerr := svc.UpdateFileMeta(cmd.Context(), remotePath, extra); uerr != nil {
+			if uerr := svc.UpdateFileMetaWithMode(cmd.Context(), remotePath, extra, client.MetaUpdateOptions{Mode: mode}); uerr != nil {
 				return uerr
 			}
-			ios.WriteOutLine("meta extra 已更新: %s（%d 个字段）", remotePath, len(extra))
+			ios.WriteOutLine("meta extra 已%s: %s（%d 个字段）", modeVerb(mode), remotePath, len(extra))
 			return nil
 		},
 	}
 	cmd.Flags().String("extra", "", "要合并的元数据（JSON 或 @file.json）")
+	cmd.Flags().Bool("replace", false, "整表替换（丢弃所有旧键；默认是合并/新增）")
+	cmd.Flags().String("delete", "", "删除指定键（逗号分隔，如 code,maker）")
 	return cmd
+}
+
+// parseMetaSetArgs 解析 meta set 的 --extra/--replace/--delete 为（extra, mode）。
+// 三模式归一：--delete 优先（删键）；否则 --replace 整表替换；否则默认合并。
+func parseMetaSetArgs(cmd *cobra.Command) (map[string]any, client.MetaUpdateMode, error) {
+	raw, _ := cmd.Flags().GetString("extra")
+	delRaw, _ := cmd.Flags().GetString("delete")
+	replace, _ := cmd.Flags().GetBool("replace")
+	extra, perr := parseMetaExtraFlag(raw)
+	if perr != nil {
+		return nil, "", perr
+	}
+	if strings.TrimSpace(delRaw) != "" {
+		if len(extra) > 0 {
+			return nil, "", fmt.Errorf("--delete 与 --extra 不能同时使用")
+		}
+		del := map[string]any{}
+		for k := range strings.SplitSeq(delRaw, ",") {
+			if key := strings.TrimSpace(k); key != "" {
+				del[key] = nil // value 占位，服务端只取 key 集合
+			}
+		}
+		if len(del) == 0 {
+			return nil, "", fmt.Errorf("--delete 至少指定一个键")
+		}
+		return del, client.MetaUpdateDelete, nil
+	}
+	if len(extra) == 0 {
+		return nil, "", fmt.Errorf("--extra 不能为空（或用 --delete=<keys> 删键）")
+	}
+	if replace {
+		return extra, client.MetaUpdateReplace, nil
+	}
+	return extra, client.MetaUpdateMerge, nil
+}
+
+// modeVerb 返回更新模式的中文动词（CLI 输出文案）。
+func modeVerb(m client.MetaUpdateMode) string {
+	switch m {
+	case client.MetaUpdateReplace:
+		return "替换"
+	case client.MetaUpdateDelete:
+		return "删除"
+	default:
+		return "更新"
+	}
 }
 
 // parseMetaExtraFlag 解析 --extra（JSON 或 @file.json）。
