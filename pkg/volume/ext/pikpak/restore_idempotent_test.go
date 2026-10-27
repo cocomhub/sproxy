@@ -178,3 +178,30 @@ func (s *staleIdemAPI) FindByID(ctx context.Context, id string) (*FileMeta, erro
 func (s *staleIdemAPI) ListRecursive(ctx context.Context, pid string) ([]FileMeta, error) {
 	return s.inner.ListRecursive(ctx, pid)
 }
+
+// TestLocateRestoredFileIn_Folder RestoreShare 返回「Pack From Shared」文件夹 id 时必须
+// 进文件夹找目标文件（实测 2026-10-27：直接拿文件夹 id 做 CLI 下载报 no download URL）。
+func TestLocateRestoredFileIn_Folder(t *testing.T) {
+	t.Parallel()
+	api := newIdemAPI()
+	// pack（id="pack"）内有 NHDTC-183.mp4 与另一个视频
+	api.pack = append(api.pack,
+		FileMeta{ID: "f-other", Name: "other.mp4", Size: 50, Kind: driveKindFile, ParentID: "pack"})
+	got, err := locateRestoredFileIn(context.Background(), api, "pack", "NHDTC-183.mp4")
+	if err != nil {
+		t.Fatalf("locateRestoredFileIn: %v", err)
+	}
+	if got.ID != "f1" {
+		t.Fatalf("应精确命中 NHDTC-183.mp4（f1），got %s", got.ID)
+	}
+}
+
+// TestLocateRestoredFileIn_File 非文件夹 id → 直接返回。
+func TestLocateRestoredFileIn_File(t *testing.T) {
+	t.Parallel()
+	api := newIdemAPI()
+	got, err := locateRestoredFileIn(context.Background(), api, "f1", "")
+	if err != nil || got.ID != "f1" {
+		t.Fatalf("locateRestoredFileIn(file) = %+v, %v", got, err)
+	}
+}

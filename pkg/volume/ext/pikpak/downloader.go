@@ -446,15 +446,21 @@ func resolveFileMeta(t *FileMeta) *downloader.ResolvedFile {
 // 可能被模糊匹配误命中——故未命中精确 ID 才回退「按名字+大小」轮询。
 func (d *PikpakDownloader) locateRestoredFile(ctx context.Context, fileID string, target *FileMeta) (*FileMeta, error) {
 	if fileID != "" {
-		driveFile, err := d.api.FindByID(ctx, fileID)
-		if err != nil && !errors.Is(err, ErrFileNotFound) {
-			return nil, fmt.Errorf("pikpak find restored file %s: %w", fileID, err)
+		// 收敛：与 hybrid 共用 restore_idempotent.go 的 locateRestoredFileIn——
+		// RestoreShare 对单文件返回「Pack From Shared」**文件夹** id（实测 2026-10-27），
+		// 须进文件夹找目标文件；旧实现直接用它做 CLI 下载 → "no download URL available"。
+		df, err := locateRestoredFileIn(ctx, d.api, fileID, target.Name)
+		if err != nil {
+			// not found → 回退按名字+大小轮询
+			if errors.Is(err, ErrFileNotFound) {
+				goto fallback
+			}
+			return nil, err
 		}
-		if driveFile != nil {
-			d.log.Info("pikpak drive file ready (exact id)", "id", driveFile.ID, "name", driveFile.Name)
-			return driveFile, nil
-		}
+		d.log.Info("pikpak drive file ready (exact id)", "id", df.ID, "name", df.Name)
+		return df, nil
 	}
+fallback:
 	// 回退：轮询按名字+大小查找（转存完成前可能短暂不可见）。
 	for range 10 {
 		if ctx.Err() != nil {

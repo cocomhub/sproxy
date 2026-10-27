@@ -993,30 +993,9 @@ func (d *HybridDownloader) restoreAndLink(ctx context.Context, dc *downloadCtx) 
 // locateRestored 定位转存文件：fid 若是文件夹（Pack From Shared），列其内容找
 // 目标 mp4（RestoreShare 对单文件可能包文件夹）；否则直接用 fid。
 func (d *HybridDownloader) locateRestored(ctx context.Context, fid string) (*FileMeta, error) {
-	df, err := d.api.FindByID(ctx, fid)
-	if err != nil {
-		return nil, fmt.Errorf("hybrid locate restored: %w", err)
-	}
-	if df.Kind == driveKindFolder {
-		// 列文件夹内容找视频文件
-		files, lerr := d.api.List(ctx, fid)
-		if lerr != nil {
-			return nil, fmt.Errorf("hybrid list restored folder: %w", lerr)
-		}
-		for i := range files {
-			if files[i].Kind == driveKindFile && hasVideoExt(files[i].Name) {
-				return &files[i], nil
-			}
-		}
-		// 回退：第一个文件
-		for i := range files {
-			if files[i].Kind == driveKindFile {
-				return &files[i], nil
-			}
-		}
-		return nil, fmt.Errorf("hybrid: no file in restored folder %s", fid)
-	}
-	return df, nil
+	// 收敛：与旧下载器共用 restore_idempotent.go 的 locateRestoredFileIn（唯一实现）。
+	// 空 wantName = 按「视频优先 → 第一个文件」挑选（hybrid 原语义）。
+	return locateRestoredFileIn(ctx, d.api, fid, "")
 }
 
 // hasVideoExt 判断视频扩展名（委托 pkg/media.IsVideoName 单一事实源，2026-10-21 收敛）。

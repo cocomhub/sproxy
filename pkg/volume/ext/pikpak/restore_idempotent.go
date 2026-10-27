@@ -21,6 +21,7 @@ package pikpak
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
@@ -167,4 +168,51 @@ func checkRestoreCopy(ctx context.Context, api restoreIdempotentAPI, target *dow
 		return restoreCopyCheck{}
 	}
 	return restoreCopyCheck{File: live, IsRestoreCopy: isRC, OK: true}
+}
+
+// locateRestoredFileIn 定位转存产物（**唯一实现**，旧下载器与 hybrid 共用）。
+//
+// 为什么必须处理文件夹：RestoreShare 对**单文件**转存返回的是「Pack From Shared」
+// 文件夹 id（实测 2026-10-27），不是文件 id——直接拿它做 CLI 下载/取直链会报
+// "no download URL available"。此前 hybrid 有此分支、旧下载器没有（两份实现漂移），
+// 导致 fallback 到旧下载器必失败。
+//
+// 判据：fid 是文件夹 → 列其内容，优先视频文件（wantName 精确优先），否则第一个文件。
+func locateRestoredFileIn(ctx context.Context, api restoreIdempotentAPI, fid, wantName string) (*FileMeta, error) {
+	df, err := api.FindByID(ctx, fid)
+	if err != nil {
+		return nil, fmt.Errorf("locate restored %s: %w", fid, err)
+	}
+	if df.Kind != driveKindFolder {
+		return df, nil
+	}
+	files, err := api.List(ctx, fid)
+	if err != nil {
+		return nil, fmt.Errorf("list restored folder %s: %w", fid, err)
+	}
+	f, ok := pickFileFromFolder(files, wantName)
+	if !ok {
+		return nil, fmt.Errorf("no file in restored folder %s", fid)
+	}
+	return f, nil
+}
+
+// pickFileFromFolder 在转存文件夹内挑文件：目标名精确 → 视频优先 → 第一个。
+func pickFileFromFolder(files []FileMeta, wantName string) (*FileMeta, bool) {
+	for i := range files {
+		if files[i].Kind == driveKindFile && files[i].Name == wantName {
+			return &files[i], true
+		}
+	}
+	for i := range files {
+		if files[i].Kind == driveKindFile && hasVideoExt(files[i].Name) {
+			return &files[i], true
+		}
+	}
+	for i := range files {
+		if files[i].Kind == driveKindFile {
+			return &files[i], true
+		}
+	}
+	return nil, false
 }
