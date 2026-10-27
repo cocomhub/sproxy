@@ -170,6 +170,7 @@ type chainOptions struct {
 	entries        []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
 	transfer       *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
 	save           *bool                 // 保留 cloud 桶副本（nil = 默认 true）
+	metaExtra      map[string]any        // 转存产物的自定义元数据（服务端叠加来源后写目标卷）
 	downloadLocal  bool                  // 客户端是否下载本地（链式拉取）
 	forceIntegrity bool                  // 强制源文件完整性（语义校验失败阻断）
 }
@@ -234,6 +235,21 @@ func WithChainDownloadLocal(local bool) ChainOption {
 func WithChainIntegrityMustPass(v bool) ChainOption {
 	return func(o *chainOptions) {
 		o.forceIntegrity = v
+	}
+}
+
+// WithChainMetaExtra 链式云端下载的转存产物自定义元数据（与来源信息合并写入目标卷）。
+func WithChainMetaExtra(extra map[string]any) ChainOption {
+	return func(o *chainOptions) {
+		if len(extra) == 0 {
+			o.metaExtra = nil
+			return
+		}
+		cp := make(map[string]any, len(extra))
+		for k, v := range extra {
+			cp[k] = v
+		}
+		o.metaExtra = cp
 	}
 }
 

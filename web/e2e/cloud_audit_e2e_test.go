@@ -369,3 +369,37 @@ func assertAuditPanelDOM(t *testing.T, page playwright.Page) {
 		}
 	}
 }
+
+// TestCloudDownload_MetaExtra 预览填 meta-extra（转存产物自定义元数据）→ 确认提交
+// → 请求体 meta_extra 与前端输入一致（端到端：UI 表单 → API body）。
+func TestCloudDownload_MetaExtra(t *testing.T) {
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+	})
+	defer cleanup()
+
+	srcContent := bytes.Repeat([]byte("m"), 1024)
+	srcURL, stopSrc := startFileSource(t, "cloud-meta.bin", srcContent)
+	defer stopSrc()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	openTransferPage(t, page)
+	previewCloudURL(t, page, srcURL, "cloud-meta.bin")
+	// 填 meta-extra（预览行为表单里的自定义元数据输入）
+	if err := page.Locator(".cloud-behavior-form [name=\"meta-extra\"]").Fill("{\"gcid\":\"E2EGCID\",\"note\":\"webui-e2e\"}"); err != nil {
+		t.Fatalf("fill meta-extra: %v", err)
+	}
+	req := confirmCloudDownload(t, page)
+	var cloudReq struct {
+		URL       string         `json:"url"`
+		Filename  string         `json:"filename"`
+		MetaExtra map[string]any `json:"meta_extra"`
+	}
+	requestJSON(t, req, &cloudReq)
+	if cloudReq.MetaExtra["gcid"] != "E2EGCID" || cloudReq.MetaExtra["note"] != "webui-e2e" {
+		t.Fatalf("cloud download meta_extra = %v, want {gcid:E2EGCID note:webui-e2e}", cloudReq.MetaExtra)
+	}
+}

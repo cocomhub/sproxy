@@ -854,3 +854,82 @@ func TestCloudArchive_WithEncryptAndCompression(t *testing.T) {
 		t.Fatalf("空 cipher 不应发送: %+v", body)
 	}
 }
+
+// TestCloudDownload_MetaExtraBody 验证单条/批量创建请求体在 meta_extra 非空时发送该字段，
+// 缺省不发送（零回归）；客户端 WithCloudDownloadMetaExtra 与服务端 source 合并写入。
+func TestCloudDownload_MetaExtraBody(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	metaBodyCount := 0
+	defaultBodyCount := 0
+	gotMeta := map[string]any{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if v, ok := body["meta_extra"]; ok {
+			metaBodyCount++
+			gotMeta, _ = v.(map[string]any)
+		} else {
+			defaultBodyCount++
+		}
+		json.NewEncoder(w).Encode(CloudTask{ID: "t1", Status: TaskStatusPending})
+	})
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if v, ok := body["meta_extra"]; ok {
+			metaBodyCount++
+			gotMeta, _ = v.(map[string]any)
+		} else {
+			defaultBodyCount++
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{{ID: "t2", Status: TaskStatusPending}}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := NewFileClient(srv.URL)
+
+	// 带 meta_extra：单条 + 批量都发
+	meta := map[string]any{"gcid": "GCID123", "share_url": "https://ks/a"}
+	if _, err := c.CloudDownload(t.Context(), "https://x/a", WithCloudDownloadMetaExtra(meta)); err != nil {
+		t.Fatalf("CloudDownload: %v", err)
+	}
+	if _, err := c.CloudDownloadBatch(t.Context(), []string{"https://x/b"}, WithCloudDownloadMetaExtra(meta)); err != nil {
+		t.Fatalf("CloudDownloadBatch: %v", err)
+	}
+	// 断言前先释放锁（handler 也要拿 mu —— 持锁期间发起请求会死锁）。
+	mu.Lock()
+	metaCount, defaultCount := metaBodyCount, defaultBodyCount
+	assertMeta := gotMeta
+	mu.Unlock()
+	if metaCount != 2 {
+		t.Fatalf("meta_extra 发送次数 = %d, want 2", metaCount)
+	}
+	if assertMeta["gcid"] != "GCID123" || assertMeta["share_url"] != "https://ks/a" {
+		t.Fatalf("meta_extra 内容 = %v", assertMeta)
+	}
+	// 缺省不发（零回归）
+	if _, err := c.CloudDownload(t.Context(), "https://x/c"); err != nil {
+		t.Fatalf("CloudDownload default: %v", err)
+	}
+	if _, err := c.CloudDownloadBatch(t.Context(), []string{"https://x/d"}); err != nil {
+		t.Fatalf("CloudDownloadBatch default: %v", err)
+	}
+	mu.Lock()
+	gotDefault := defaultBodyCount - defaultCount
+	mu.Unlock()
+	if gotDefault != 2 {
+		t.Fatalf("缺省（不发 meta_extra）次数 = %d, want 2", gotDefault)
+	}
+}

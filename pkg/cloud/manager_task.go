@@ -107,6 +107,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		DownloadLocal:     params.DownloadLocal,
 		Save:              params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
 		IntegrityMustPass: params.IntegrityMustPass,
+		MetaExtra:         cloneMetaExtra(params.MetaExtra), // 转存产物自定义 meta（深拷贝防任务间共享 map 竞态）
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
 		ExpiresAt:         time.Now().Add(m.config.TaskTTL),
@@ -125,6 +126,18 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	)
 	m.metrics.TasksCreated.Add(1)
 	return task, nil
+}
+
+// cloneMetaExtra 深拷贝 meta_extra（防组内多子任务共享同一请求 map 的写-写竞态）。
+func cloneMetaExtra(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	cp := make(map[string]any, len(src))
+	for k, v := range src {
+		cp[k] = v
+	}
+	return cp
 }
 
 // SubmitAndStart 创建任务并立即启动下载。

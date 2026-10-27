@@ -163,3 +163,27 @@ func (m *metaCapableMemFS) UpdateMetaExtra(_ context.Context, rel string, extra 
 	m.metaExtras[strings.TrimPrefix(rel, "/")] = extra
 	return nil
 }
+
+// TestCreateTask_PersistsMetaExtra CreateTask 应把 params.MetaExtra 填入任务
+// （此前遗漏：只加字段没赋值 → env.task.MetaExtra 恒 nil → 客户端 extra 不落卷）。
+func TestCreateTask_PersistsMetaExtra(t *testing.T) {
+	t.Parallel()
+	sm := capacity.NewStorageManager(t.TempDir(), 0, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, t.TempDir(), sm, &CloudDownloadConfig{MaxConcurrent: 3, TaskTTL: time.Hour})
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) { return newMemFS(), "secretdata" }
+	mgr.volumeFor = func(vol string) (volume.Volume, bool) {
+		return volume.Volume{Name: vol, Type: "secretdata", ACL: volume.ACL{Mode: volume.ModeDeny}}, true
+	}
+	t.Cleanup(mgr.Close)
+	task, err := mgr.CreateTask("url", "https://example.com/u", "u.mp4", 100, "", TaskParams{
+		Transfer:  &TransferSpec{Volume: "v", Path: "u.mp4"},
+		Save:      true,
+		MetaExtra: map[string]any{"gcid": "GCID-X"},
+	})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if task.MetaExtra == nil || task.MetaExtra["gcid"] != "GCID-X" {
+		t.Fatalf("task.MetaExtra = %v, want {gcid:GCID-X}", task.MetaExtra)
+	}
+}

@@ -65,6 +65,12 @@ func buildCloudDownloadChainOpts(cmd *cobra.Command, pollInterval time.Duration,
 		f, _ := cmd.Flags().GetBool(flagIntegrityMustPass)
 		opts = append(opts, client.WithChainIntegrityMustPass(f))
 	}
+	if cmd.Flags().Changed(flagMetaExtra) {
+		raw, _ := cmd.Flags().GetString(flagMetaExtra)
+		if extra, merr := parseMetaExtraFlag(raw); merr == nil && len(extra) > 0 {
+			opts = append(opts, client.WithChainMetaExtra(extra))
+		}
+	}
 	return opts
 }
 
@@ -160,6 +166,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
 	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
 	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
+	cmd.Flags().String(flagMetaExtra, "", "转存产物的自定义元数据（JSON 或 @file.json；仅转存时有意义，与来源信息合并写入目标卷）")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudSubmit(factory, ios, cfgSvc))
@@ -231,6 +238,7 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
 	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
 	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
+	cmd.Flags().String(flagMetaExtra, "", "转存产物的自定义元数据（JSON 或 @file.json；仅转存时有意义，与来源信息合并写入目标卷）")
 	return cmd
 }
 
@@ -455,6 +463,14 @@ func cloudDownloadSubmitOpts(cmd *cobra.Command) []client.CloudDownloadOption {
 		f, _ := cmd.Flags().GetBool(flagIntegrityMustPass)
 		opts = append(opts, client.WithCloudDownloadIntegrityMustPass(f))
 	}
+	// meta-extra：解析失败由 runCloudSubmit 预解析返回 err（此处成功才并入，
+	// 失败不 append 任何选项——runCloudSubmit 已拦截）。
+	if cmd.Flags().Changed(flagMetaExtra) {
+		raw, _ := cmd.Flags().GetString(flagMetaExtra)
+		if extra, merr := parseMetaExtraFlag(raw); merr == nil && len(extra) > 0 {
+			opts = append(opts, client.WithCloudDownloadMetaExtra(extra))
+		}
+	}
 	return opts
 }
 
@@ -473,6 +489,15 @@ func runCloudSubmit(cmd *cobra.Command, args []string, factory clientfactory.Fac
 	}
 	// H3：submit 也透传 transfer/save/download_local（此前旗标注册但调用不带 options 静默丢弃）。
 	dlOpts := cloudDownloadSubmitOpts(cmd)
+	// meta-extra：预解析失败即报错（不静默丢显式 flag）；成功则并入 opts（防重复解析）。
+	if cmd.Flags().Changed(flagMetaExtra) {
+		raw, _ := cmd.Flags().GetString(flagMetaExtra)
+		if extra, merr := parseMetaExtraFlag(raw); merr != nil {
+			return fmt.Errorf("--%s 解析失败: %w", flagMetaExtra, merr)
+		} else if len(extra) > 0 {
+			dlOpts = append(dlOpts, client.WithCloudDownloadMetaExtra(extra))
+		}
+	}
 
 	ios.WriteOutLine("创建云端下载任务...")
 	tasks, err := svc.CloudDownloadBatchEntries(cmd.Context(), entries, dlOpts...)

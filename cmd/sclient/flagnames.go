@@ -22,4 +22,6 @@ const (
 	flagDownloadLocal     = "download-local"
 	flagSave              = "save"
 	flagIntegrityMustPass = "integrity-must-pass"
+	// flagMetaExtra 是转存产物的自定义元数据（JSON 或 @file；上传命令已有同名 flag）。
+	flagMetaExtra = "meta-extra"
 )

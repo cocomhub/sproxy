@@ -1663,3 +1663,26 @@ test('B4#4：非 JSON 平文本 403 也透传（api_keys permission denied 不�
     globalThis.fetch = origFetch;
   }
 });
+
+// cloud meta_extra 透传：metaExtra 对象 → JSON 键 meta_extra；缺省/空不发（零回归）。
+test('cloud 任务 metaExtra 透传（对象发送 / 缺省不发）', async () => {
+  const core = makeMockCore([
+    okResp({ id: 'm1' }),
+    okResp({ id: 'm2' }),
+    okResp({ id: 'm3' }),
+    okResp({ tasks: [] }),
+  ]);
+  const api = makeApi(core);
+  const meta = { gcid: 'GCID123', note: 'e2e', share_url: 'https://ks/a' };
+  await api.cloud.createDownload('http://x/a', 'a.jpg', { metaExtra: meta });
+  assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes).meta_extra, meta);
+  await api.cloud.createBatch([{ url: 'http://x/b', filename: 'b.jpg' }], { metaExtra: meta });
+  assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes).meta_extra, meta);
+  await api.cloud.createGroup('grp', [{ url: 'http://x/c' }], { metaExtra: meta });
+  assert.deepStrictEqual(jsonBody(core.calls[2].opts.bodyBytes).meta_extra, meta);
+  // 缺省 / 空对象 → 不发 meta_extra。
+  await api.cloud.createDownload('http://x/d', 'd.jpg');
+  assert.ok(!('meta_extra' in jsonBody(core.calls[3].opts.bodyBytes)));
+  await api.cloud.createDownload('http://x/e', 'e.jpg', { metaExtra: {} });
+  assert.ok(!('meta_extra' in jsonBody(core.calls[4].opts.bodyBytes)));
+});

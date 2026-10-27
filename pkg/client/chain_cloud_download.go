@@ -53,9 +53,11 @@ type CloudDownloadChain struct {
 	DownloadLocal bool `json:"download_local,omitempty"`
 	// IntegrityMustPass 强制源文件完整性（语义校验失败阻断；透传服务端）。
 	IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
-	Completed         int  `json:"completed"`
-	Failed            int  `json:"failed"`
-	Total             int  `json:"total"`
+	// MetaExtra 转存产物的自定义元数据（透传服务端，与来源信息合并写目标卷）。
+	MetaExtra map[string]any `json:"meta_extra,omitempty"`
+	Completed int            `json:"completed"`
+	Failed    int            `json:"failed"`
+	Total     int            `json:"total"`
 	// Damaged 完整性损坏但放行完成的任务数（R3-I3：损坏副本不应被当可靠成功）。
 	Damaged int `json:"damaged,omitempty"`
 	// seenCompleted 已计数的 completed 任务 ID（R6-I1：防 storage-full 重试轮重复累计；
@@ -115,6 +117,7 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		Save:              opts.save,
 		DownloadLocal:     opts.downloadLocal,
 		IntegrityMustPass: opts.forceIntegrity,
+		MetaExtra:         opts.metaExtra,
 		Total:             len(entries),
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -346,6 +349,9 @@ func cloudDownloadTransferOpts(c *CloudDownloadChain) []CloudDownloadOption {
 	}
 	if c.IntegrityMustPass {
 		opts = append(opts, WithCloudDownloadIntegrityMustPass(true))
+	}
+	if len(c.MetaExtra) > 0 {
+		opts = append(opts, WithCloudDownloadMetaExtra(c.MetaExtra))
 	}
 	return opts
 }

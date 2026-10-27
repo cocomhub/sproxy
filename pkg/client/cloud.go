@@ -70,6 +70,7 @@ type cloudDownloadOptions struct {
 	save           *bool
 	downloadLocal  bool
 	forceIntegrity bool
+	metaExtra      map[string]any // 转存产物的自定义 meta（服务端叠加来源信息后写目标卷）
 }
 
 // WithCloudDownloadFilename 设置云端下载的文件名（覆盖 URL 自动提取的文件名）。
@@ -115,6 +116,22 @@ func WithCloudDownloadLocal(local bool) CloudDownloadOption {
 func WithCloudDownloadIntegrityMustPass(v bool) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		o.forceIntegrity = v
+	}
+}
+
+// WithCloudDownloadMetaExtra 设置转存产物的自定义元数据（仅 Transfer 非空有意义；
+// 服务端与来源信息合并写入目标卷 meta.Extra）。nil/空 = 不发送（零回归）。
+func WithCloudDownloadMetaExtra(extra map[string]any) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		if len(extra) == 0 {
+			o.metaExtra = nil
+			return
+		}
+		cp := make(map[string]any, len(extra))
+		for k, v := range extra {
+			cp[k] = v
+		}
+		o.metaExtra = cp
 	}
 }
 
@@ -171,6 +188,9 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	if cfg.forceIntegrity {
 		body["integrity_must_pass"] = true
 	}
+	if len(cfg.metaExtra) > 0 {
+		body["meta_extra"] = cfg.metaExtra
+	}
 
 	var task CloudTask
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/download", body, &task); err != nil {
@@ -221,6 +241,9 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	}
 	if cfg.forceIntegrity {
 		body["integrity_must_pass"] = true
+	}
+	if len(cfg.metaExtra) > 0 {
+		body["meta_extra"] = cfg.metaExtra
 	}
 
 	var result struct {
