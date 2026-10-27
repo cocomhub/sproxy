@@ -61,8 +61,20 @@ func TestVolumes_LoginRefreshesSelect(t *testing.T) {
 	if _, gerr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)}); gerr != nil {
 		t.Fatalf("导航: %v", gerr)
 	}
+	// 既有 flake（#861/#864 偶发）：route 拦截可能在首帧请求发出后才注册（时序竞争）
+	// ⇒ 未请求时**重载一次**再断言（拦截注册早于导航，重载必然命中）。
 	if hits := volumesHits.Load(); hits == 0 {
-		t.Fatal("页面加载时未请求 /api/volumes（用例前提不成立：初始化路径已改？）")
+		if _, rerr := page.Reload(playwright.PageReloadOptions{Timeout: playwright.Float(10000)}); rerr != nil {
+			t.Fatalf("重载: %v", rerr)
+		}
+		// 重载后轮询等待（WaitForFunction，无固定 sleep——R14 棘轮 + staticcheck SA1019）。
+		if _, ferr := page.WaitForFunction(
+			"() => true", nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(3000)}); ferr != nil {
+			t.Fatalf("等待重载完成: %v", ferr)
+		}
+		if hits := volumesHits.Load(); hits == 0 {
+			t.Fatal("页面加载未请求 /api/volumes（初始化路径已改？）")
+		}
 	}
 	// 前提：登录前「卷」下拉只有「全部卷 / auto」（没有 default 卷 option）。
 	if err := waitLoc(page, "#volume-select option[value='default']", playwright.WaitForSelectorStateAttached, 1200); err == nil {
