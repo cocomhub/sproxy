@@ -155,6 +155,7 @@ type HybridDownloader struct {
 	gcidStats     *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
 	fallback      downloader.Downloader      // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
 	chunkBackoff  time.Duration              // 分片重试退避基数（0 = 默认；见 chunkRetryDelay）
+	normalizer    *ShareSourceNormalizer     // keepshare 镜像归一（nil = 原样用）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
@@ -241,6 +242,7 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 		chunkProgress: cfg.ChunkProgress,
 		gcidStats:     cfg.GCIDStats,
 		chunkBackoff:  cfg.ChunkRetryBackoff,
+		normalizer:    NewShareSourceNormalizer(client),
 		acctSems:      make(map[string]chan struct{}),
 	}, nil
 }
@@ -281,6 +283,8 @@ func (d *HybridDownloader) Download(ctx context.Context, source, destPath string
 // 匿名分享路径**整体失败**（resolve 失败/无直链/未知大小）时委托 Fallback 降级下载器
 // （设计 §1.2：分享直链任何失败不阻断任务）；无 Fallback 则如实上报错误。
 func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
+	// 归一 keepshare 镜像 → 真实分享 URL（否则匿名 resolve 用容器 id 恒 NOT_FOUND）
+	source = d.normalizeSource(ctx, source)
 	shareID, err := parseShareID(source)
 	if err != nil {
 		return nil, err
@@ -335,6 +339,23 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 		}
 	}
 	return d.runHybrid(ctx, dc, sinkFactory)
+}
+
+// normalizeSource 归一分享源（keepshare 镜像 → 真实 mypikpak URL）；失败时原样返回
+// （调用方后续 resolve 报错可见；下载器不能阻断非分享 URL 的通用路径）。
+func (d *HybridDownloader) normalizeSource(ctx context.Context, source string) string {
+	if d.normalizer == nil {
+		return source
+	}
+	out, err := d.normalizer.NormalizeShareSource(ctx, source)
+	if err != nil {
+		d.log.Warn("hybrid keepshare 归一失败（按原样继续，resolve 会报 NOT_FOUND）", "err", err)
+		return source
+	}
+	if out != source {
+		d.log.Info("hybrid share source normalized", "from", source[:min(len(source), 90)], "to", out[:min(len(out), 90)])
+	}
+	return out
 }
 
 // fallbackDownload 匿名路径整体失败时委托降级下载器（设计 §1.2）；无降级则返回原错误。

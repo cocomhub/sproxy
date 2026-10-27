@@ -61,6 +61,7 @@ type PikpakDownloader struct {
 	autoDelete  bool
 	pool        *AccountPool
 	log         *slog.Logger
+	normalizer  *ShareSourceNormalizer // keepshare 镜像归一（nil = 按原样直用）
 }
 
 // 编译期断言：PikPak 下载器声明其 Result.Checksum 为仅本地自洽（② 态）。
@@ -182,7 +183,7 @@ func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 	return &PikpakDownloader{
 		cli: cfg.Cli, api: cfg.API, downloadDir: dir,
 		tempSuffix: suffix, timeout: timeout, autoDelete: cfg.AutoDelete, pool: cfg.AccountPool, log: log,
-		gcidStats: cfg.GCIDStats,
+		gcidStats: cfg.GCIDStats, normalizer: NewShareSourceNormalizer(nil),
 	}, nil
 }
 
@@ -223,12 +224,29 @@ func (d *PikpakDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	return d.download(ctx, source, destPath, onProgress, sinkFactory)
 }
 
+// normalizeSource 归一分享源：keepshare 镜像 → 真实 mypikpak 分享 URL；非镜像原样。
+// 失败（分享失效/终点非 PikPak）→ 错误（fail-closed，不拿容器 id 冒充）。
+func (d *PikpakDownloader) normalizeSource(ctx context.Context, source string) (string, error) {
+	if d.normalizer == nil {
+		return source, nil
+	}
+	return d.normalizer.NormalizeShareSource(ctx, source)
+}
+
 func (d *PikpakDownloader) download(ctx context.Context, source, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// 1. 解析分享 ID（先剔除 spx_target 参数：它只描述目标文件，不参与分享定位）
-	shareID, err := parseShareID(stripShareTarget(source))
+	// 1. 归一分享源（keepshare 镜像 → 真实 mypikpak 分享 id；mypikpak 原样），
+	//    再剔除 spx_target 参数（它只描述目标文件，不参与分享定位）。
+	//    此前直接 parseShareID(stripShareTarget(source)) 会把 keepshare 容器 id 当分享 id
+	//    （p5uj7smo 等）→ ListShareRecursive 恒 NOT_FOUND（"解析通、下载必挂"，#858 只修了
+	//    只读解析路径）。归一能力唯一实现在 ShareSourceNormalizer（share_source.go）。
+	src, err := d.normalizeSource(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	shareID, err := parseShareID(stripShareTarget(src))
 	if err != nil {
 		return nil, err
 	}

@@ -101,7 +101,11 @@ func (r *URLResolver) Resolve(ctx context.Context, rawURL string) (*downloader.R
 		// 匿名解析需**真实分享 URL**（keepshare URL 会被再次解析成容器 id → NOT_FOUND）。
 		src = "https://mypikpak.com/s/" + id
 	}
-	info := &downloader.ResolveInfo{URL: rawURL, Kind: URLResolverName}
+	// 归一后的真实分享 URL 回填（供下游直接提交下载；rawURL 保留供审计）：
+	// keepshare 镜像被归一为 mypikpak 真实 id——sdserver 选好目标文件后，把
+	// info.URL（真实 mypikpak）+ spx_target 传给 /api/cloud/download 转存，
+	// 避免下载路径再次把容器 id 当分享 id（NOT_FOUND）。
+	info := &downloader.ResolveInfo{URL: resolvedShareURL(rawURL, shareID), Kind: URLResolverName}
 	// ① 登录态列举优先（含 hash、无分享直链限制）
 	if files, ok := r.listOwned(ctx, shareID); ok {
 		info.Files = files
@@ -264,6 +268,18 @@ func (r *URLResolver) listAnon(ctx context.Context, shareID, src string) ([]down
 }
 
 // fillSingle 单文件时同时填 Filename/Size（调用方无需判断 Files 长度）。
+// resolvedShareURL 返回解析结果里应回填的**归一分享 URL**：keepshare 镜像 → 真实
+// mypikpak 分享 URL（供下游直接提交下载）；其它形态原样。
+//
+// 契约（sdserver 链路依赖）：`/api/resolve` 返回的 URL 必须是可直接定位分享的形态，
+// 调用方（sdserver）解析后选定目标文件，把该 URL + spx_target 提交 /api/cloud/download。
+func resolvedShareURL(rawURL, shareID string) string {
+	if strings.Contains(strings.ToLower(hostOf(rawURL)), "keepshare") && shareID != "" {
+		return "https://mypikpak.com/s/" + shareID
+	}
+	return rawURL
+}
+
 func (r *URLResolver) fillSingle(info *downloader.ResolveInfo) {
 	if len(info.Files) == 1 {
 		info.Filename = info.Files[0].Name
