@@ -1045,6 +1045,7 @@
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">容量</th>';
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">用量</th>';
     html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">允许</th>';
+    html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">操作</th>';
     html += '</tr></thead><tbody>';
     for (const v of vols || []) {
       const capTxt = v.capacity > 0 ? formatSize(v.capacity) : '不限';
@@ -1057,6 +1058,10 @@
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + capTxt + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);min-width:180px;">' + bar + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">' + (v.allowed ? '✅' : '❌') + '</td>';
+      // 「重建索引」：secretdata 等外部卷内存索引只在挂载时扫描一次，卷被外部改动后
+      // 幽灵条目不收敛——按钮触发 POST /api/volumes/refresh（S5；本地卷幂等成功）。
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">' +
+        '<button type="button" class="btn btn-sm btn-secondary vol-refresh-btn" data-vol="' + escHtml(v.name) + '" title="重建卷内存索引（外部改动收敛；本地卷无索引则幂等）">重建索引</button></td>';
       html += '</tr>';
     }
     html += '</tbody></table>';

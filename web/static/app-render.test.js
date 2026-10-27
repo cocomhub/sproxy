@@ -638,3 +638,16 @@ test('buildMetaReadHtml 转义恶意值', () => {
   assert.ok(!html.includes('<script>'), '不得输出未转义的 script 标签');
   assert.ok(html.includes('&lt;script&gt;'), '应转义为实体');
 });
+
+// 「重建索引」按钮（S5）：卷面板每行应有 vol-refresh-btn（data-vol 转义）。
+test('volumesTableHtml 每卷行含「重建索引」按钮（S5）', () => {
+  const html = r.volumesTableHtml([{ name: 'vault', mode: 'allow', capacity: 0, usage: 10, allowed: true }]);
+  assert.ok(html.includes('vol-refresh-btn'), '应有 vol-refresh-btn');
+  assert.ok(html.includes('data-vol="vault"'), 'data-vol 应取卷名');
+  assert.ok(html.includes('重建索引'), '按钮文案');
+});
+
+test('volumesTableHtml 重建索引按钮 HTML 转义卷名', () => {
+  const html = r.volumesTableHtml([{ name: 'a"b', mode: 'deny', capacity: 0, usage: 0, allowed: false }]);
+  assert.ok(html.includes('data-vol="a&quot;b"'), '卷名应转义（防注入）');
+});

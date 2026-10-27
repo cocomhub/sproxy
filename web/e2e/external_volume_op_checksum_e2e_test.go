@@ -82,6 +82,7 @@ func recordRequests(page playwright.Page) *reqRecorder {
 //
 // ② 若前端确实走了 stat（行 checksum 缺失的防御路径）⇒ 断言它带行卷 volume。
 func TestExternalVolume_RenameUsesStatChecksum(t *testing.T) {
+	// sproxy:serial: auditVaultE2EServer 注册/注销全局 secretdata 后端（registry 进程级），与并行 user_volumes 用例冲突，必须串行。
 	baseURL := setupSecretVolumeWithFile(t, "ren.txt", []byte("rename-on-external"))
 	page, stop := pageFixture(t)
 	defer stop()
@@ -110,6 +111,7 @@ func TestExternalVolume_RenameUsesStatChecksum(t *testing.T) {
 
 // TestExternalVolume_DeleteUsesStatChecksum 外部卷删除：先 HEAD stat 取 checksum → POST /delete。
 func TestExternalVolume_DeleteUsesStatChecksum(t *testing.T) {
+	// sproxy:serial: auditVaultE2EServer 注册/注销全局 secretdata 后端（registry 进程级），与并行 user_volumes 用例冲突，必须串行。
 	baseURL := setupSecretVolumeWithFile(t, "del.txt", []byte("delete-on-external"))
 	page, stop := pageFixture(t)
 	defer stop()
@@ -178,4 +180,80 @@ func openVaultList(t *testing.T, page playwright.Page, baseURL, wantFile string)
 		t.Fatalf("选择加密卷: %v", err)
 	}
 	waitTextVisible(t, page, "#file-list", wantFile, 8000)
+}
+
+// TestExternalVolume_BatchDeleteUsesChecksums 外部卷**批量删除**（fillMissingChecksums 分支）：
+// 勾选两文件 → 批量删除 → 断言两文件都消失。
+func TestExternalVolume_BatchDeleteUsesChecksums(t *testing.T) {
+	// sproxy:serial: auditVaultE2EServer 注册/注销全局 secretdata 后端（registry 进程级），与并行 user_volumes 用例冲突，必须串行。
+	baseURL := setupSecretVolumeWithFiles(t, "bd1.txt", []byte("b1"), "bd2.txt", []byte("b2"))
+	page, stop := pageFixture(t)
+	defer stop()
+
+	openVaultList(t, page, baseURL, "bd1.txt")
+	for _, f := range []string{"bd1.txt", "bd2.txt"} {
+		if err := page.Locator(".file-select[data-filename='" + f + "']").Check(); err != nil {
+			t.Fatalf("勾选 %s: %v", f, err)
+		}
+	}
+	acceptDialog(page, "")
+	if err := page.Locator("#batch-delete-btn").Click(); err != nil {
+		t.Fatalf("点批量删除: %v", err)
+	}
+	waitTextGone(t, page, "#file-list", "bd1.txt", 10000)
+	waitTextGone(t, page, "#file-list", "bd2.txt", 10000)
+}
+
+// TestExternalVolume_BatchRenameUsesChecksums 外部卷**批量重命名**：
+// 勾选两文件 → 批量重命名（prompt 序列）→ 断言新名出现、旧名消失。
+func TestExternalVolume_BatchRenameUsesChecksums(t *testing.T) {
+	// sproxy:serial: auditVaultE2EServer 注册/注销全局 secretdata 后端（registry 进程级），与并行 user_volumes 用例冲突，必须串行。
+	baseURL := setupSecretVolumeWithFiles(t, "br1.txt", []byte("r1"), "br2.txt", []byte("r2"))
+	page, stop := pageFixture(t)
+	defer stop()
+
+	openVaultList(t, page, baseURL, "br1.txt")
+	for _, f := range []string{"br1.txt", "br2.txt"} {
+		if err := page.Locator(".file-select[data-filename='" + f + "']").Check(); err != nil {
+			t.Fatalf("勾选 %s: %v", f, err)
+		}
+	}
+	respondDialogs(page, func(d playwright.Dialog) {
+		switch {
+		case strings.Contains(d.Message(), "br1.txt"):
+			_ = d.Accept("br1-new.txt")
+		case strings.Contains(d.Message(), "br2.txt"):
+			_ = d.Accept("br2-new.txt")
+		default:
+			_ = d.Accept("")
+		}
+	})
+	if err := page.Locator("#batch-rename-btn").Click(); err != nil {
+		t.Fatalf("点批量重命名: %v", err)
+	}
+	waitTextVisible(t, page, "#file-list", "br1-new.txt", 10000)
+	waitTextVisible(t, page, "#file-list", "br2-new.txt", 10000)
+	waitTextGone(t, page, "#file-list", "br1.txt", 10000)
+	waitTextGone(t, page, "#file-list", "br2.txt", 10000)
+}
+
+// setupSecretVolumeWithFiles 建卷并上传多个文件（批量场景）。参数：name1, content1, name2, content2...
+func setupSecretVolumeWithFiles(t *testing.T, files ...interface{}) string {
+	t.Helper()
+	vaultRoot := filepath.Join(t.TempDir(), "vault")
+	if err := os.MkdirAll(vaultRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	baseURL, _ := auditVaultE2EServer(t, vaultRoot)
+	if st, body := createUserVolume(t, baseURL, auditVaultType, auditVaultType, `{"target":"main"}`); st != 200 {
+		t.Fatalf("建卷 status=%d body=%s", st, body)
+	}
+	for i := 0; i+1 < len(files); i += 2 {
+		name := files[i].(string)
+		content := files[i+1].([]byte)
+		if st, body := seedUploadToVolume(t, baseURL, auditVaultType, name, content); st != 200 {
+			t.Fatalf("上传 %s status=%d body=%s", name, st, body)
+		}
+	}
+	return baseURL
 }
