@@ -348,6 +348,26 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
   （`WithVolume`/`SetVolume`，零值=auto）、`Volumes()`/`MoveVolume()`；sclient `volumes` /
   `--volume` / `mv --to-volume`；WebUI 卷 badge + 仪表 + 上传下拉。
 
+### 统一存储卷模型（StorageVolume 唯一身份 + VolumeView 唯一取卷入口）
+
+设计：`docs/designs/2026-10-28-unified-volume-model.md`（U1-U5 已落地）。
+
+本地卷与外部卷统一为 **`registry.StorageVolume`** 契约（`Name/Kind/FS/Close` + 可选能力
+`Footprinter`/`PhysBound`/`StatsProvider`），`registry.Set` 持有 `storageVolumes` 表，
+`Set.StorageVolume(name)` 是唯一取卷入口；`assembleLocalVolume` 改走 `NewLocalBackend`
+（`*storage.Root` 成为本地卷内部细节，仅默认卷 tenant/globalRoot 存量路径保留）。
+
+**按用途统一访问器 `Set.VolumeView(name, use)`**：同一卷按用途返回不同装饰链视图——
+`user`（用户文件：Guard → trusted.Wrap → capacity → staging 消费方套）、`meta`（控制面：
+Guard，不经容量）。装饰链在**装配期**经 `SetVolumeViewDecorator` 注入（registry 内置默认
+trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS（R27 直连点收缩）。
+
+**转存支持本地卷**：`checkTransferVolumePreflight` 只要求目标卷可解析（FS 非 nil），不再
+要求协议非空；本地卷 target 产物落 `<owner>/user/<rel>`（`ResolveUserLocation` 统一键空间，
+可经 `/download` 命中）。转存 URL 形态 `local://<卷>/<rel>`（U4：`RegisterLocalBackend`
+声明 `local` 协议，`Set.ResolveURL` 经 `VolumeView` 读本地卷）。`volume://`（`Location.String()`
+卷内定位序列化）与 `local://`（协议寻址）并存分工。
+
 ## 可信卷（Trusted Volume：完整性 sidecar + 元信息隔离 + 卷级容量）
 
 「可信卷」把「读回内容 == 写入内容」从**约定**升级为**结构性不变量**：服务端为每个文件维护一份
