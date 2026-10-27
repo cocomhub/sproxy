@@ -145,17 +145,26 @@ type restoreCopyCheck struct {
 
 // checkRestoreCopy 幂等检查统一入口（旧下载器 + hybrid 共用）。
 // log 用于 hash 拒绝告警（nil 静默）。
+//
+// 加固（2026-10-27 实测）：命中后**重新 FindByID 确认文件仍存在**——pack 列表可能
+// 返回陈旧条目（用户刚清理），直接复用死 id 会致 CLI 下载失败。确认失败 → 保守
+// 不命中（调用方走 RestoreShare 正确路径）。
 func checkRestoreCopy(ctx context.Context, api restoreIdempotentAPI, target *downloader.ResolvedFile) restoreCopyCheck {
 	if target == nil || target.Name == "" {
 		return restoreCopyCheck{}
 	}
 	f, isRC, ok := findRestoreCopy(ctx, api, target.Name, target.Size, target.Hash)
-	if !ok {
+	if !ok || f == nil {
 		return restoreCopyCheck{}
 	}
 	// hash 双方都有且不等 → 拒绝（不同文件，防内容错配）。
 	if target.Hash != "" && f.Hash != "" && f.Hash != target.Hash {
 		return restoreCopyCheck{}
 	}
-	return restoreCopyCheck{File: f, IsRestoreCopy: isRC, OK: true}
+	// 命中后确认仍存在（FindByID 直查，不依赖列表陈旧快照）。
+	live, err := api.FindByID(ctx, f.ID)
+	if err != nil || live == nil {
+		return restoreCopyCheck{}
+	}
+	return restoreCopyCheck{File: live, IsRestoreCopy: isRC, OK: true}
 }

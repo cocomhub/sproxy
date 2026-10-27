@@ -30,6 +30,9 @@ func (f *fakeIdemAPI) List(_ context.Context, parentID string) ([]FileMeta, erro
 }
 
 func (f *fakeIdemAPI) FindByID(_ context.Context, id string) (*FileMeta, error) {
+	if fm, ok := f.files[id]; ok {
+		return fm, nil
+	}
 	if p, ok := f.parents[id]; ok {
 		return p, nil
 	}
@@ -139,4 +142,39 @@ func (e *errIdemAPI) FindByID(ctx context.Context, id string) (*FileMeta, error)
 }
 func (e *errIdemAPI) ListRecursive(ctx context.Context, _ string) ([]FileMeta, error) {
 	return nil, errors.New("list failed")
+}
+
+// TestCheckRestoreCopy_StaleEntry 列表返回陈旧条目（文件已被清理）→ 保守不命中。
+// 实测缺陷（2026-10-27）：pack 列表仍返回已删除条目，直接复用死 id → CLI 下载失败。
+func TestCheckRestoreCopy_StaleEntry(t *testing.T) {
+	t.Parallel()
+	api := newIdemAPI()
+	// 让 FindByID 对命中 id 报 not found（模拟文件已删）
+	stale := &staleIdemAPI{inner: api, goneID: "f1"}
+	rc := checkRestoreCopy(context.Background(), stale, &downloader.ResolvedFile{
+		Name: "NHDTC-183.mp4", Size: 100, Hash: "H1",
+	})
+	if rc.OK {
+		t.Fatalf("陈旧条目应保守不命中（走 RestoreShare）: %+v", rc)
+	}
+}
+
+type staleIdemAPI struct {
+	inner  restoreIdempotentAPI
+	goneID string
+}
+
+func (s *staleIdemAPI) List(ctx context.Context, pid string) ([]FileMeta, error) {
+	return s.inner.List(ctx, pid)
+}
+
+func (s *staleIdemAPI) FindByID(ctx context.Context, id string) (*FileMeta, error) {
+	if id == s.goneID {
+		return nil, ErrFileNotFound
+	}
+	return s.inner.FindByID(ctx, id)
+}
+
+func (s *staleIdemAPI) ListRecursive(ctx context.Context, pid string) ([]FileMeta, error) {
+	return s.inner.ListRecursive(ctx, pid)
 }
