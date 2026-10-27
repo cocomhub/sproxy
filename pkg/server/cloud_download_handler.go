@@ -77,6 +77,9 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		DownloadLocal bool `json:"download_local,omitempty"`
 		// IntegrityMustPass 强制源文件完整性（语义校验失败阻断任务，不放行标记 damaged）。
 		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
+		// MetaExtra 是转存产物的自定义元数据（客户端传入；仅 Transfer 非空时有意义）。
+		// 转存成功后与来源信息（source=transfer/source_url/etag）合并写入目标卷 meta.Extra。
+		MetaExtra map[string]any `json:"meta_extra,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -111,7 +114,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	// 服务端继续异步下载，不阻塞 handler。
 	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
 	owner := ActorFrom(r.Context())
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass})
+	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass, MetaExtra: req.MetaExtra})
 	if err != nil {
 		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
 		if isStorageFull(err) {
@@ -168,6 +171,8 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		DownloadLocal bool `json:"download_local,omitempty"`
 		// IntegrityMustPass 强制源文件完整性（同单条语义；batch 统一 apply）。
 		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
+		// MetaExtra 批量转存自定义元数据（同单条语义；batch 统一 apply 到每个条目）。
+		MetaExtra map[string]any `json:"meta_extra,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -210,7 +215,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 
 		// 批量始终异步：nil context。transfer/save/download_local 批量统一 apply；
 		// 真空洞（不下载+无 transfer+save=false）由 CreateTask fail-closed 拒绝。
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass})
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass, MetaExtra: req.MetaExtra})
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,
