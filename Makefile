@@ -492,8 +492,17 @@ gofix-all: prepare
 	done
 
 .PHONY: addlicense
+# 默认（无参数）：全量扫描（CI make check-format / fmt-all 用）。
 addlicense:
 	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only -ignore ".claude/**" -ignore ".trae/**" -ignore ".cursor/**" -ignore "web/static/vendor/**" .
+
+# addlicense FILES=<file...>（空格分隔）：**只对指定文件**做 SPDX 头注入（本地增量用）。
+# 本地 pre-commit 只检查本次 commit 涉及文件，因此无需全量扫描仓库（Windows 上全量
+# addlicense 约 4-8s、make check-format 约 1min，多 agent worktree 并行时每次全量纯属浪费）；
+# CI 的 check-format / fmt-all 保留全量以兜底未登记的新文件。
+.PHONY: addlicense-files
+addlicense-files:
+	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only $(FILES)
 
 .PHONY: fmt
 fmt: gofix addlicense

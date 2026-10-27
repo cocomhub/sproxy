@@ -72,7 +72,9 @@ if [ -n "$unformatted" ]; then
 fi
 
 # 2. SPDX 头检查：只查涉及文件（新增/修改均应携带 Apache-2.0 头）
-say "[2/5] SPDX 头（涉及文件）..."
+#    **增量**：addlicense 只对本次 commit 涉及文件跑（`-check` 不修改文件）——全仓扫描
+#    （Windows 上 ~4-8s）交 CI 的 check-format 兼底；本地 hook 只保「本次改动合规」。
+say "[2/5] SPDX 头（涉及文件，增量 addlicense -check）..."
 missing_spdx=""
 for f in $GO_FILES; do
   [ -f "$f" ] || continue
@@ -81,10 +83,22 @@ for f in $GO_FILES; do
 $f"
   fi
 done
+# 对涉及文件跑 addlicense -check（单文件级，避免全仓递归扫描）。
+# 注：addlicense 的 hasLicense 判定是「出现 SPDX-License-Identifier（任意值）即视为已有头」
+# （源码 main.go:432-434：bytes.Contains(… "spdx-license-identifier")）⇒ 值写错不会被抓，
+# 但「完全无头」必被报（rc=1 + 文件名列表）；头值校验已有上方 SPDX 行存在性检查兜底。
+if [ -n "$GO_FILES" ]; then
+  if ! addlicense_out=$(addlicense -check -c "The Cocomhub Authors. All rights reserved." -s=only $GO_FILES 2>&1); then
+    say "addlicense -check 失败（涉及文件）:"
+    say "$addlicense_out"
+    missing_spdx="$missing_spdx
+（addlicense -check 报告见上）"
+  fi
+fi
 if [ -n "$missing_spdx" ]; then
-  say "缺少 SPDX 头的文件:"
+  say "缺少 SPDX 头 / addlicense 检查未通过的文件:"
   say "$missing_spdx"
-  say "请运行: addlicense -c \"The Cocomhub Authors. All rights reserved.\" -s=only <file> 或 make fmt-all"
+  say "请运行: addlicense -c \"The Cocomhub Authors. All rights reserved.\" -s=only <file> 修复后重新 git add"
   exit 1
 fi
 
