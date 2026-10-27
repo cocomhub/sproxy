@@ -490,27 +490,47 @@ func entryOf(rel, seg string, size, mtime int64, isDir bool) syncpkg.Entry {
 	return syncpkg.Entry{Name: seg, Path: p, Size: size, MTime: mtime, IsDir: isDir}
 }
 
+// entryOfChecked 构造**带整文件 SHA-256** 的逻辑文件条目（S2，2026-10-27）：从 index 的加密
+// meta 直接取 `Original.SHA256`（纯内存字段，O(1)、零额外 I/O）——让 secretdata 卷的**列举**
+// 也能直接带 checksum。此前 ExternalList 填充的 FileInfo.Checksum 恒空 ⇒ Web UI 行
+// data-checksum 为空 ⇒ 前端必须每次 HEAD stat 兜底（n 次往返）。
+//
+// checksum 是「内容寻址派生值」（设计文档 A 类）：本进程写/删会同步更新内存 meta ⇒ 与对象
+// 内容强一致；外部侧改动由 loadIndex 语义 + 文档约束覆盖（见 docs/designs/
+// 2026-10-27-remote-derived-state-cache.md §6）。目录条目不携带 checksum（目录无哈希）。
+func entryOfChecked(rel, seg string, e *metaEntry) syncpkg.Entry {
+	ent := entryOf(rel, seg, e.size, e.mtime, false)
+	if e.meta != nil && e.meta.Original.SHA256 != "" {
+		ent.Checksum = e.meta.Original.SHA256
+		ent.ChecksumType = "sha256"
+		ent.Checksums = map[string]string{"sha256": ent.Checksum}
+	}
+	return ent
+}
+
 // ListDir 列出逻辑 rel 目录下的直接子项（透明子目录可发现/进入）。
 // 索引只存完整逻辑路径文件键；这里对每个路径把下一段作为子项聚合，
 // 跨段前缀呈现为目录条目（审查 F-2：ListDir 永不返回子目录）。
-// collectChildSegments 聚合子条目：**目录集合优先**（`dirs` 是真实目录的事实源），再用 index
-// （文件键首段）补齐——**按名字跨源去重**。
+// collectChildSegmentsChecked 聚合子条目：**目录集合优先**（`dirs` 是真实目录的事实源），再用
+// index（文件键首段）补齐——**按名字跨源去重**。文件条目经 entryOfChecked 携带整文件
+// SHA-256（S2，2026-10-27：secretdata 列表直接给 checksum，消除 ExternalList 的 A 类产出
+// 缺口）；目录条目不携带 checksum（目录无哈希）。
 //
 // 为什么必须跨源去重（用户实测 2026-10-14：secretdata 卷 `list 1/` 输出两个 `2/`）：同一个子目录
 // 会**同时**出现在两处——
 //   - `dirs` 含 `1/2`（目录键，来自 dir meta 加载）⇒ `collectDirSegments` 产出目录 `2`；
-//   - `index` 含 `1/2/f.bin`（文件键）⇒ `collectIndexSegments` 由首段推出**目录** `2`。
+//   - `index` 含 `1/2/f.bin`（文件键）⇒ `collectIndexSegmentsChecked` 由首段推出**目录** `2`。
 //
 // 两个函数各自内部去重（`seenDirs`）但**互不知道对方** ⇒ 简单 append 必然重复。这里改为
 // 「先目录集合、后 index 补齐 + 共享 seen」：index 推出的目录仅在 `dirs` 缺失时才作为兜底出现
 // （容器/目录 meta 缺失的部分加载场景仍可见），已由 `dirs` 覆盖的名字不再重复。
-func collectChildSegments(paths map[string]*metaEntry, dirs map[string]struct{}, dirMTime map[string]int64, prefix, rel string, entryInfo func(*metaEntry) (size, mtime int64)) []syncpkg.Entry {
+func collectChildSegmentsChecked(paths map[string]*metaEntry, dirs map[string]struct{}, dirMTime map[string]int64, prefix, rel string, entryInfo func(*metaEntry) (size, mtime int64)) []syncpkg.Entry {
 	out := collectDirSegments(dirs, dirMTime, prefix, rel)
 	seen := make(map[string]bool, len(out))
 	for _, e := range out {
 		seen[e.Name] = true
 	}
-	for _, e := range collectIndexSegments(paths, prefix, rel, entryInfo) {
+	for _, e := range collectIndexSegmentsChecked(paths, prefix, rel, entryInfo) {
 		if seen[e.Name] {
 			continue // 已由目录集合贡献（同名不重复；目录是事实源，优先）
 		}
@@ -520,8 +540,9 @@ func collectChildSegments(paths map[string]*metaEntry, dirs map[string]struct{},
 	return out
 }
 
-// collectIndexSegments 从 index 文件键聚合：首段为目录则目录条目，否则文件条目。
-func collectIndexSegments(paths map[string]*metaEntry, prefix, rel string, entryInfo func(*metaEntry) (size, mtime int64)) []syncpkg.Entry {
+// collectIndexSegmentsChecked 从 index 文件键聚合：首段为目录则目录条目，否则文件条目；
+// 文件条目经 entryOfChecked 携带整文件 SHA-256（S2），meta 缺失（兜底路径）则回落无哈希形态。
+func collectIndexSegmentsChecked(paths map[string]*metaEntry, prefix, rel string, entryInfo func(*metaEntry) (size, mtime int64)) []syncpkg.Entry {
 	var out []syncpkg.Entry
 	seenDirs := map[string]bool{}
 	for p := range paths {
@@ -534,6 +555,10 @@ func collectIndexSegments(paths map[string]*metaEntry, prefix, rel string, entry
 				out = append(out, entryOf(rel, before, 0, 0, true))
 				seenDirs[before] = true
 			}
+			continue
+		}
+		if e := paths[p]; e != nil && e.meta != nil {
+			out = append(out, entryOfChecked(rel, rest, e))
 			continue
 		}
 		size, mtime := entryInfo(paths[p])
@@ -569,8 +594,8 @@ func collectDirSegments(dirs map[string]struct{}, dirMTime map[string]int64, pre
 func (s *SecretdataFS) ListDir(ctx context.Context, rel string) ([]syncpkg.Entry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	prefix := splitDirPrefix(rel)
-	out := collectChildSegments(s.index, s.dirs, s.dirMTime, prefix, rel, func(e *metaEntry) (int64, int64) {
+	oprefix := splitDirPrefix(rel)
+	out := collectChildSegmentsChecked(s.index, s.dirs, s.dirMTime, oprefix, rel, func(e *metaEntry) (int64, int64) {
 		if e == nil {
 			return 0, 0
 		}
@@ -596,7 +621,15 @@ func (s *SecretdataFS) Stat(ctx context.Context, rel string) (*syncpkg.Entry, er
 	if !ok {
 		return nil, nil
 	}
-	return &syncpkg.Entry{Name: path.Base(rel), Path: rel, Size: e.size, MTime: e.mtime, IsDir: false}, nil
+	// Stat 也带整文件 SHA-256（S2，2026-10-27）：与 ListDir 同源（内存 meta 直取），
+	// 但 meta 可能为 nil（旧条目/降级路径）⇒ 防御：nil 时 checksum 留空（调用方 stat 兜底）。
+	ent := &syncpkg.Entry{Name: path.Base(rel), Path: rel, Size: e.size, MTime: e.mtime, IsDir: false}
+	if e.meta != nil && e.meta.Original.SHA256 != "" {
+		ent.Checksum = e.meta.Original.SHA256
+		ent.ChecksumType = "sha256"
+		ent.Checksums = map[string]string{"sha256": ent.Checksum}
+	}
+	return ent, nil
 }
 
 func (s *SecretdataFS) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {

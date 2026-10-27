@@ -544,9 +544,18 @@ func (o externalVolumeOps) ExternalList(ctx context.Context, owner, volName, sub
 	}
 	out := make([]files.FileInfo, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, files.FileInfo{
+		fi := files.FileInfo{
 			Name: e.Name, IsDir: e.IsDir, Size: e.Size, ModTime: e.MTime, Volume: volName, // ModTime = UnixNano
-		})
+		}
+		// **列举带 checksum（S3，2026-10-27）**：底层 FS 的 ListDir 条目若已自报整文件
+		// SHA-256（secretdata 内存 meta 直取，O(1)）→ 透传；否则留空（baidupcs/S3 每文件
+		// 读一次 sidecar = n 次远端往返 ⇒ 保持 unknown，由消费方 stat 兜底）。
+		// 只认 sha256（`ChecksumType` 已自述）——ETag 等非 SHA-256 算法**不得**填入
+		// FileInfo.Checksum（它会直达 Web UI 的 checksum 门禁，必须是整文件 SHA-256）。
+		if e.ChecksumType == "sha256" && e.Checksum != "" {
+			fi.Checksum = e.Checksum
+		}
+		out = append(out, fi)
 	}
 	return out, true, nil
 }
