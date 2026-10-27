@@ -507,6 +507,27 @@ func (d *stageDL) invalidate(e *metaEntry) {
 	}
 }
 
+// invalidateAll 清空全部窗口缓存（RefreshIndex 前调用——索引重建使旧 key 失效/复用，
+// 磁盘上的旧窗口密文与内存 blob 缓存必须同批清空）。
+func (d *stageDL) invalidateAll() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	keys := make([]string, 0, len(d.inflight))
+	for k := range d.inflight {
+		keys = append(keys, k)
+	}
+	d.inflight = map[string]struct{}{}
+	d.mu.Unlock()
+	for _, k := range keys {
+		_ = os.Remove(d.stageWinPath(k))
+	}
+	if d.blobCache != nil {
+		d.blobCache.clear()
+	}
+}
+
 // dirSegPrefix 返回该文件缓存 key 前缀（dirSeg|metaName|）。
 func (d *stageDL) dirSegPrefix(e *metaEntry) string {
 	return e.dirSeg + "|" + e.metaName + "|"

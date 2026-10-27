@@ -399,6 +399,13 @@ type backend struct{ fs *SecretdataFS }
 
 func (b *backend) FS() syncpkg.FS { return b.fs }
 
+// RefreshIndex 实现 registry.IndexRefresher：显式重扫底层并原子重建内存索引（S5，2026-10-27）。
+// 服务端 `sclient volume refresh <卷>` / Web UI 卷面板刷新按钮触发——收敛「卷被本进程外
+// 修改（网盘 App / 另一实例）后的幽灵条目/旧哈希」。
+func (b *backend) RefreshIndex(ctx context.Context) error {
+	return b.fs.RefreshIndex(ctx)
+}
+
 // OpenURL 实现 registry.URLResolver：解析 `secretdata://<卷>/<路径>` → 解密返回内容。
 // 客户端转存后经 ResolveURL(secretdata://<卷>/<rel>) 取用加密卷文件。
 func (b *backend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {

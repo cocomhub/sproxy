@@ -222,6 +222,27 @@ func (c *spanDiskCache) invalidatePrefix(prefix string) {
 	}
 }
 
+// clearAll 清空全部磁盘缓存条目与数据文件（RefreshIndex 前调用——索引重建使旧 key 失效，
+// 磁盘上的旧块必须移除，防「删除后同名重建」读到旧密文。尽力而为：失败仅剩孤儿文件，
+// 由重启扫描清理）。
+func (c *spanDiskCache) clearAll() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	keys := make([]string, 0, len(c.index))
+	for k := range c.index {
+		keys = append(keys, k)
+	}
+	c.index = map[string]spanCacheEntry{}
+	c.bytes = 0
+	c.mu.Unlock()
+	for _, k := range keys {
+		_ = os.Remove(c.filePath(k))
+	}
+	c.persistIndex()
+}
+
 // removeLocked 从索引移除 key（调用方持锁）。
 func (c *spanDiskCache) removeLocked(key string) {
 	if e, ok := c.index[key]; ok {

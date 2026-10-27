@@ -39,7 +39,8 @@ func NewCmdVolume(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 卷间操作（多卷）：
   copy <file> --to-volume <v>  跨卷复制文件（保留源）
   move <file> --to-volume <v>  跨卷移动文件
-  rebalance --from-volume <a> --to-volume <b>  卷再平衡（异步）`,
+  rebalance --from-volume <a> --to-volume <b>  卷再平衡（异步）
+  refresh <卷名>  重建卷内存索引（外部改动收敛，secretdata 等）`,
 		Args: cobra.NoArgs,
 	}
 	cmd.AddCommand(newCmdVolumeCreate(factory, ios))
@@ -48,6 +49,7 @@ func NewCmdVolume(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 	cmd.AddCommand(newCmdVolumeCopy(factory, ios, st))
 	cmd.AddCommand(newCmdVolumeMove(factory, ios, st))
 	cmd.AddCommand(newCmdVolumeRebalance(factory, ios))
+	cmd.AddCommand(newCmdVolumeRefresh(factory, ios))
 	return cmd
 }
 

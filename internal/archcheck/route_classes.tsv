@@ -36,6 +36,7 @@ localMux	GET /api/volumes	tunnel	pkg/server/routes.go:247
 localMux	POST /api/volumes/move	tunnel	pkg/server/routes.go:248
 localMux	POST /api/volumes/rebalance	tunnel	pkg/server/routes.go:249
 localMux	POST /api/volumes/copy	tunnel	pkg/server/routes.go:250
+localMux	POST /api/volumes/refresh	tunnel	pkg/server/routes.go:251
 localMux	GET /api/volumes/export	tunnel	pkg/server/routes.go:253
 localMux	POST /api/volumes/import	tunnel	pkg/server/routes.go:254
 localMux	POST /api/backup	tunnel	pkg/server/routes.go:257
@@ -122,6 +123,7 @@ srvMux	GET /api/volumes	reader	pkg/server/routes.go:400
 srvMux	POST /api/volumes/move	user	pkg/server/routes.go:401
 srvMux	POST /api/volumes/rebalance	user	pkg/server/routes.go:402
 srvMux	POST /api/volumes/copy	user	pkg/server/routes.go:403
+srvMux	POST /api/volumes/refresh	user	pkg/server/routes.go:404
 srvMux	GET /api/volumes/export	reader	pkg/server/routes.go:405
 srvMux	POST /api/volumes/import	user	pkg/server/routes.go:406
 srvMux	POST /api/backup	auth	pkg/server/routes.go:409

@@ -43,7 +43,22 @@ type Presigner interface {
 //
 // 遵循 RFC 3986 语义：URL 为 `scheme://authority/path`。authority（卷名）与 path
 // （secret 名）由实现方按各自 scheme 解析。
+
+// IndexRefresher 是可选能力接口（S5，2026-10-27）：后端支持**显式重建内存索引**。
 //
+// 背景（docs/designs/2026-10-27-remote-derived-state-cache.md §6 裁定 B）：secretdata 的
+// 内存索引只在挂载时扫描一次；卷被**本进程之外**修改（用户用网盘 App 直改 / 另一实例
+// 写入）后幽灵条目/旧哈希永不收敛。本接口让装配/API 层**类型断言**探测——支持则暴露
+// 显式 refresh 入口（`sclient volume refresh <卷>`），不支持的后端调用方明确拒绝。
+//
+// 与 Presigner 同模式：registry 通用层不提及具体后端类型，实现方（secretdata backend）
+// 自证能力。
+type IndexRefresher interface {
+	// RefreshIndex 重扫底层并原子替换内存索引；失败保持旧索引不动（fail-closed，
+	// 绝不让瞬时故障把卷变成空视图）。
+	RefreshIndex(ctx context.Context) error
+}
+
 // 不支持/未知 URL → 实现方必须 fail-closed（返回错误，绝不静默返回 nil）。
 type URLResolver interface {
 	// OpenURL 解析 URL 并返回其内容（io.ReadCloser；调用方负责 Close）。

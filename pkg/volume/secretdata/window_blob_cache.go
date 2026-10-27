@@ -114,7 +114,6 @@ func (c *windowBlobCache) invalidatePrefix(prefix string) {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	var victims []string
 	for el := c.order.Front(); el != nil; el = el.Next() {
 		e, _ := el.Value.(*windowBlobEntry)
@@ -135,4 +134,18 @@ func (c *windowBlobCache) invalidatePrefix(prefix string) {
 			c.bytes -= int64(len(e.data))
 		}
 	}
+	c.mu.Unlock()
+}
+
+// clear 清空全部条目（RefreshIndex 前调用——索引重建使旧 key 失效/复用，窗口密文必须
+// 同批清空）。
+func (c *windowBlobCache) clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.items = map[string]*list.Element{}
+	c.order.Init()
+	c.bytes = 0
+	c.mu.Unlock()
 }

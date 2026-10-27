@@ -72,6 +72,42 @@ func newCmdVolumeRebalance(factory clientfactory.Factory, ios cli.IOStreams) *co
 	return cmd
 }
 
+func newCmdVolumeRefresh(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "refresh <卷名>",
+		Short: "重建卷内存索引（外部改动收敛）",
+		Long: `重建指定卷的内存索引（S5，2026-10-27）。
+
+		背景：secretdata 卷的内存索引只在挂载时扫描一次；卷被**本进程之外**修改（用网盘 App
+		直改 / 另一实例写入）后，幽灵条目/旧哈希会一直存在到重启。本命令显式触发服务端重建：
+		重扫底层（容器树 + 全部文件 meta）并原子换入，失败保持旧索引不动（fail-closed）。
+
+		本地卷没有要重建的内存索引（索引即磁盘真实）⇒ 幂等成功；后端不支持该能力 ⇒ 明确报错。
+
+		示例:
+		  sclient volume refresh vault
+		  sclient volume refresh vault:/    # 卷 URI 寻址（同一命令约定）`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vol, _, ok := splitVolumeURI(args[0])
+			if !ok || vol == "" {
+				return fmt.Errorf("卷名或卷 URI 无效: %q", args[0])
+			}
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+			if err := svc.RefreshVolume(cmd.Context(), vol); err != nil {
+				ios.WriteErrLine("卷索引重建失败: %v", err)
+				return fmt.Errorf("卷索引重建失败: %w", err)
+			}
+			ios.WriteOutLine("卷索引已重建: %s", vol)
+			return nil
+		},
+	}
+	return cmd
+}
+
 // ensureVolumeOpsClient 编译期引用（防误删）。
 
 // runVolumeXfer 是 `volume copy` / `volume move` 的共享实现（NewCmdX 的 RunE 抽出，降 CC）：
