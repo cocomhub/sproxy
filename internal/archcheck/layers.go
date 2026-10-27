@@ -17,6 +17,7 @@ var Managed = map[string]bool{
 	"github.com/cocomhub/sproxy/pkg/checksum":         true,
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": true, // NOSONAR: S1192 — 层规则以 import path 为键，多表天然重复
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  true, // NOSONAR: S1192 — 层规则以 import path 为键，多表天然重复
+	"github.com/cocomhub/sproxy/pkg/volume/trusted":   true, // U2：registry 内置默认卷视图装饰器导入（无环：trusted 不依赖 registry）
 	"github.com/cocomhub/sproxy/pkg/files":            true,
 	// 可信卷 FileMeta 模型/计算/校验子包（master 新增）：被 pkg/files、pkg/cloud、
 	// pkg/sync 消费；零 pkg/* 内部依赖除 storage/volume（G0）⇒ G0。
@@ -127,6 +128,9 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": 2,
 	// volume 域子包：构造形参接收 pkg/volume 域类型、持有 storage/quota 句柄
 	"github.com/cocomhub/sproxy/pkg/volume/registry": 2,
+	// volume 域子包：可信卷装饰器（meta sidecar + 校验）。被 registry（U2 内置默认装饰器）
+	// 与装配层消费；只依赖 storage/volume/meta/sync ⇒ ≤G2。registry 依赖它（子包间合法）。
+	"github.com/cocomhub/sproxy/pkg/volume/trusted": 2,
 	// tunnel 域的**传输原语**子包（由 R3 强制登记：新包 pkg/remote 直接导入 mux/builtin）。
 	// 它们**刻意不进 ParentDomain**——不是「真子领域」，而是跨域复用的传输原语
 	// （mux=虚拟流多路复用、xfer=Conn 抽象、builtin=net.Conn 桥），
