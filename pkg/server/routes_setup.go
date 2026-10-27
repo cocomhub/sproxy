@@ -640,6 +640,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			}
 			return fsys, scheme
 		},
+		// VolumePoolChargeFor（R16 P1 修复②/③）：本地卷转存产物的卷级容量池结算/探测
+		// ——本地卷 rootfs 无 CapacityFS，卷池权威在路由层 Pool。外部卷不经此（已记）。
+		VolumePoolChargeFor: vs.Pool,
 		// VolumeFor：转存键空间经 volume.ResolveLocation 计算（权限门/路径安全/共享前缀
 		// 由 volume 唯一入口承担，用户裁定 2026-10-05）——装配层提供 vs.ByName 解析。
 		VolumeFor: func(volumeName string) (volume.Volume, bool) {

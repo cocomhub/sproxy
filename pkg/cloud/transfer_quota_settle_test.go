@@ -142,3 +142,103 @@ func TestTransferDone_SettleIsDifferentialOnRetry(t *testing.T) {
 		t.Fatalf("覆盖写同尺寸不得增账（差分应为 0），Usage=%d want 80", got)
 	}
 }
+
+// TestTransferDone_SettlesVolumePoolForLocalVolume 锁定 R16 P1 修复（②）：cloud download
+// 转存到**本地卷**（rootfs 无 CapacityFS）时产物字节须计入**卷级容量池**——否则写入漏记 +
+// 删除侧 ReleaseCommitted 幻影释放（扣掉同卷其它文件占用）。
+// 变异（去掉 settleVolumePoolCharge 的 pool.Adjust）⇒ 转存后 pool.Usage 仍 0 ⇒ 红。
+func TestTransferDone_SettlesVolumePoolForLocalVolume(t *testing.T) {
+	t.Parallel()
+	content := []byte(strings.Repeat("z", 100))
+	fs := newMemFS()
+	pool := quota.NewPool(1 << 20)
+	mgr, env := newCloudTestManager(t, t.TempDir(), nil, &CloudDownloadConfig{
+		MaxConcurrent: 1, TaskTTL: time.Hour,
+	})
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
+		if vol == "local1" {
+			return fs, "local"
+		}
+		return nil, ""
+	}
+	mgr.volumeFor = func(name string) (volume.Volume, bool) {
+		if name != "local1" {
+			return volume.Volume{}, false
+		}
+		return volume.Volume{Name: "local1", Type: "local"}, true
+	}
+	mgr.targetScopeFor = func(owner, _ string) *quota.Scope { return env.quotaBucketFor(owner, "user") }
+	mgr.targetPhysChargeFor = nil
+	// 本地卷的卷级容量池（装配层 h.volSet.Pool 同形）。
+	mgr.volumePoolChargeFor = func(vol string) *quota.Pool {
+		if vol == "local1" {
+			return pool
+		}
+		return nil
+	}
+	// 同卷既有占用（用于验证差分不被幻影释放连带扣掉）。
+	pool.Adjust(0, 500)
+
+	dest := filepath.Join(t.TempDir(), "local.bin")
+	if err := os.WriteFile(dest, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := &CloudTask{ID: "task-local", Filename: "local.bin", Owner: "alice",
+		Transfer: &TransferSpec{Volume: "local1", Path: "local.bin"}}
+	if _, _, err := mgr.transferDone(context.Background(), task, dest,
+		&downloader.Result{Size: int64(len(content))}, nil); err != nil {
+		t.Fatalf("transferDone: %v", err)
+	}
+	const want = 500 + 100
+	if got := pool.Usage(); got != want {
+		t.Fatalf("转存到本地卷后卷池应增长到 %d（既有 500 + 产物 100），got %d（漏记 ⇒ 删除即幻影释放）", want, got)
+	}
+
+	// 删除侧对称：ReleaseCommitted(实测 100) ⇒ 回到既有 500（非幻影）。
+	pool.ReleaseCommitted(int64(len(content)))
+	if got := pool.Usage(); got != 500 {
+		t.Fatalf("删除后卷池应回到既有占用 500，got %d（幻影释放会把它扣成 %d）", got, max(500-100, 0))
+	}
+}
+
+// TestTransferQuotaGate_VolumePoolProbeForLocal 锁定 R16 P1 修复③：转存到**本地卷**时
+// 写前**卷级容量池探测**（不足早失败，探测即释放）——rootfs 无 ReserveSpace ⇒ 容量权威
+// 在路由层 Pool。变异（删探测）⇒ 卷池满时仍「成功」转存 ⇒ 红。
+func TestTransferQuotaGate_VolumePoolProbeForLocal(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	pool := quota.NewPool(100) // 卷容量 100B，产物 200B ⇒ 应拒绝
+	mgr, env := newCloudTestManager(t, t.TempDir(), nil, &CloudDownloadConfig{
+		MaxConcurrent: 1, TaskTTL: time.Hour,
+	})
+	mgr.transferFSFor = func(vol string) (syncpkg.FS, string) {
+		if vol == "local1" {
+			return fs, "local"
+		}
+		return nil, ""
+	}
+	mgr.volumeFor = func(name string) (volume.Volume, bool) {
+		if name != "local1" {
+			return volume.Volume{}, false
+		}
+		return volume.Volume{Name: "local1", Type: "local"}, true
+	}
+	mgr.targetScopeFor = func(owner, _ string) *quota.Scope { return env.quotaBucketFor(owner, "user") }
+	mgr.volumePoolChargeFor = func(vol string) *quota.Pool {
+		if vol == "local1" {
+			return pool
+		}
+		return nil
+	}
+	dest := filepath.Join(t.TempDir(), "big.bin")
+	if err := os.WriteFile(dest, make([]byte, 200), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := &CloudTask{ID: "task-big", Filename: "big.bin", Owner: "alice",
+		Transfer: &TransferSpec{Volume: "local1", Path: "big.bin"}}
+	env0 := &transferEnv{task: task, result: &downloader.Result{Size: 200},
+		targetFS: fs, rel: "alice/user/big.bin", ctx: context.Background()}
+	if err := mgr.transferQuotaGate(env0); err == nil {
+		t.Fatal("本地卷卷池满（100B < 200B 产物）应被写前探测拒绝（fail-closed）")
+	}
+}

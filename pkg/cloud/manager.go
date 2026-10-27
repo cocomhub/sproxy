@@ -326,6 +326,10 @@ type CloudDownloadManager struct {
 	volumeFor func(volume string) (volume.Volume, bool)
 	// targetScopeFor 解析转存产物所在的 owner 配额 Scope（见 CloudManagerOptions 同名选项）。
 	targetScopeFor func(owner, userBucketRel string) *quota.Scope
+	// volumePoolChargeFor 解析转存目标**本地卷**的卷级容量池（R16 P1：本地卷 rootfs 无
+	// CapacityFS，卷池权威在路由层 Pool；装配层注入 h.volSet.Pool）。nil = 不结算本地卷
+	// 卷池（零回归）。外部卷不经此（CapacityFS 层已记）。
+	volumePoolChargeFor func(volName string) *quota.Pool
 	// targetPhysChargeFor 测量转存目标对象的记账字节（与删除侧同一测量函数；见同名选项）。
 	targetPhysChargeFor func(volume, owner, remotePath string) (int64, bool)
 	// stagingQuotaFor 返回 owner 的本地 staging 配额钩子（装配层注入；nil = 无独立
@@ -445,6 +449,11 @@ type CloudManagerOptions struct {
 	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
 	// nil = 转存不可用（与 TransferFSFor 同门）。
 	VolumeFor func(volume string) (volume.Volume, bool)
+	// VolumePoolChargeFor 返回转存目标**本地卷**的卷级容量池（R16 P1 修复②/③）：
+	// 本地卷 rootfs 无 ReserveSpace/CapacityFS ⇒ 卷池漏记 + 删除幻影释放。装配层注入
+	// `h.volSet.Pool`；nil = 不结算（零回归）。**只对本地卷**生效（外部卷 CapacityFS 已记，
+	// 双记会重复占用）。
+	VolumePoolChargeFor func(volName string) *quota.Pool
 	// TargetQuotaScopeFor 返回转存**产物所在**的 owner 配额 Scope：键空间为「用户桶相对路径」
 	// （`user/<rel>`，与 HTTP 上传路由的预留/结算、删除侧的释放是**同一个解析器**——装配层
 	// 注入 Handlers.quotaScopeFor / files.Runtime.ScopeFor）。转存写成功后按它结算（见
@@ -524,6 +533,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		targetWriteLock:     opts.TargetWriteLock,
 		maxConcurrent:       cfg.MaxConcurrent,
 		targetScopeFor:      opts.TargetQuotaScopeFor,
+		volumePoolChargeFor: opts.VolumePoolChargeFor,
 		targetPhysChargeFor: opts.TargetPhysChargeFor,
 		integrityLookup:     opts.IntegrityLookup,
 		removeFile:          opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
