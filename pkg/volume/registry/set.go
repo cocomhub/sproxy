@@ -46,6 +46,16 @@ type Set struct {
 	// external 是 name → 外部卷句柄（V3 通用卷模型）：非本地后端（如 baidupcs）的
 	// 运行时句柄，FS() 提供同步视图供 syncexec 工厂消费；Close 时统一关闭。
 	external map[string]ExternalBackend
+	// storageVolumes 是 name → 统一存储卷身份（本地 localBackend / 外部 capacity.Backend）。
+	// **U1 统一存储卷模型**（docs/designs/2026-10-28-unified-volume-model.md）：装配期一次
+	// 构造，`StorageVolume(name)` 是唯一取卷入口——本地卷不再只能经 `Root` 拿裸 root。
+	// 与 roots/external 的关系：本地卷同时进 roots（服务默认卷 tenant/globalRoot 存量语义）
+	// 与 storageVolumes（统一身份）；外部卷进 external 与 storageVolumes（同一实例）。
+	storageVolumes map[string]StorageVolume
+	// viewDecorator 是 VolumeView 的**装配期注入装饰器**（U2）：对裸卷 FS 按 use 套完整
+	// 装饰链（封印 → trusted.Guard/Wrap → capacity → staging 由消费方）。registry 不 import
+	// server（避免成环），由装配层（pkg/server）注入。nil = 返回裸 FS（测试/无装饰装配）。
+	viewDecorator VolumeViewDecorator
 	// pools 是 name → 卷容量池。Capacity<=0 仍建池（上限 0 = 不限量），便于统一入账与
 	// T4 的 used(name) 活用量闭包（OrderCandidates spread）。外部卷同样建池（入账统一）。
 	pools map[string]*quota.Pool
@@ -70,6 +80,9 @@ type Set struct {
 // NewSet 由装配层已解码的卷集合构造运行时卷视图。
 // 参数与顺序刻意与 Set 的字段一一对应（互斥量与懒建缓存由构造处自建，不作为入参），
 // 使调用方（pkg/server 的 assembleVolumes）只需把装配产物交给构造处，其余逻辑不受影响。
+// NewSet 由装配层已解码的卷集合构造运行时卷视图。
+// 外部卷句柄**同步进统一存储卷表**（U1）：`external[name]` 与 `storageVolumes[name]`
+// 指向同一实例（`capacity.Backend` 内嵌 `ExternalBackend` 并实现 `StorageVolume` 四方法）。
 func NewSet(
 	volumes []volume.Volume,
 	roots map[string]*storage.Root,
@@ -79,6 +92,12 @@ func NewSet(
 ) *Set {
 	if external == nil {
 		external = map[string]ExternalBackend{}
+	}
+	storageVolumes := make(map[string]StorageVolume, len(external))
+	for name, be := range external {
+		// 外部卷句柄可能是 capacity.Backend（已实现 StorageVolume）或裸 ExternalBackend
+		// （缺 Kind）——统一用 storageVolumeOf 提升（含卷名）。名称已知（map 键）✓。
+		storageVolumes[name] = storageVolumeOf{name: name, ExternalBackend: be}
 	}
 	// 默认外部卷按**声明序**确定（首个有 external 句柄的卷）——NewSet 生产构造路径
 	// 不能留空 firstExternal，否则 DefaultExternal 回落到 map 随机迭代序，同一进程内
@@ -91,14 +110,45 @@ func NewSet(
 		}
 	}
 	return &Set{
-		volumes:       volumes,
-		roots:         roots,
-		external:      external,
-		pools:         pools,
-		defaultName:   defaultName,
-		firstExternal: firstExternal,
-		caches:        map[string]*storage.TenantCache{},
+		volumes:        volumes,
+		roots:          roots,
+		external:       external,
+		pools:          pools,
+		defaultName:    defaultName,
+		firstExternal:  firstExternal,
+		caches:         map[string]*storage.TenantCache{},
+		storageVolumes: storageVolumes,
 	}
+}
+
+// RegisterStorageVolume 登记统一存储卷身份（U1）。
+//
+// 装配期调用：本地卷由装配层经 `NewLocalBackend` 构造后登记；外部卷在 NewSet /
+// AddExternalVolume / AttachExternal 时同步登记（同一实例进 external 与 storageVolumes）。
+// 重名登记 → 明确错误（卷名唯一，防同卷双持有）。
+func (vs *Set) RegisterStorageVolume(sv StorageVolume) error {
+	if sv == nil {
+		return fmt.Errorf("registry: 登记统一存储卷为 nil")
+	}
+	if sv.Name() == "" {
+		return fmt.Errorf("registry: 统一存储卷名不能为空")
+	}
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if _, dup := vs.storageVolumes[sv.Name()]; dup {
+		return fmt.Errorf("registry: 统一存储卷 %q 重复登记", sv.Name())
+	}
+	vs.storageVolumes[sv.Name()] = sv
+	return nil
+}
+
+// StorageVolume 返回指定卷名的统一存储卷身份（本地/外部同形）。
+// 未知卷名 → (nil, false)（fail-closed，不返回伪成功）。
+func (vs *Set) StorageVolume(name string) (StorageVolume, bool) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	sv, ok := vs.storageVolumes[name]
+	return sv, ok
 }
 
 // Default 返回默认卷描述（volumes[0]）。
@@ -325,6 +375,7 @@ func (vs *Set) RemoveExternalVolume(name string) error {
 		_ = be.Close()
 	}
 	delete(vs.external, name)
+	delete(vs.storageVolumes, name) // U1：移除外部卷同步清理统一存储卷表
 	for i, v := range vs.volumes {
 		if v.Name == name {
 			vs.volumes = append(vs.volumes[:i], vs.volumes[i+1:]...)
