@@ -648,16 +648,28 @@ func (m *CloudDownloadManager) transferTargetCharge(env *transferEnv) int64 {
 // 强行提交被拒会让「文件已落盘但账本未记」再现同类不一致。
 func (m *CloudDownloadManager) settleTransferCharge(env *transferEnv, before int64) {
 	scope := m.transferTargetScope(env)
-	if scope == nil {
-		return
-	}
 	after := m.transferTargetCharge(env)
-	if after == before {
+	if scope != nil && after != before {
+		scope.Adjust(before, after)
+		m.logger.Debug("转存目标配额结算（owner 账本）", "volume", env.task.Transfer.Volume,
+			"owner", env.task.Owner, "path", env.remotePath, "before", before, "after", after)
+	}
+	// **卷级容量池结算**（R16 P1 修复②）：本地卷目标（rootfs 无 CapacityFS，卷池权威在
+	// 路由层 Pool）须把产物字节计入卷池——否则写入漏记 + 删除侧 ReleaseCommitted 幻影释放
+	// （扣掉同卷其它文件占用）。外部卷（CapacityFS 层已记）不双记；装配层注入 poolFor。
+	m.settleVolumePoolCharge(env, before, after)
+}
+
+// settleVolumePoolCharge 把转存产物计入**本地卷**的卷级容量池（差分；与 owner Scope 同源
+// 测量）。外部卷跳过（其卷级记账在 FS 层 CapacityFS）。装配层经 VolumePoolChargeFor 注入
+// 池解析（nil = 不结算本地卷——零回归）。
+func (m *CloudDownloadManager) settleVolumePoolCharge(env *transferEnv, before, after int64) {
+	if after <= before || m.volumePoolChargeFor == nil {
 		return
 	}
-	scope.Adjust(before, after)
-	m.logger.Debug("转存目标配额结算（owner 账本）", "volume", env.task.Transfer.Volume,
-		"owner", env.task.Owner, "path", env.remotePath, "before", before, "after", after)
+	if pool := m.volumePoolChargeFor(env.task.Transfer.Volume); pool != nil {
+		pool.Adjust(before, after)
+	}
 }
 
 // transferTargetScope 解析转存产物的 owner 配额 Scope：键空间 = **用户桶相对路径**
@@ -882,17 +894,45 @@ func (m *CloudDownloadManager) transferQuotaGate(env *transferEnv) error {
 			return fmt.Errorf("%w: 目标卷 %q 容量不足（ReserveSpace 拒绝）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
 		}
 	}
-	// 2. 用户配额：远程网盘卷跳过（用户裁定：容量由卷自身管理）；本地/加密卷走
-	//    cloud 桶 Scope 探测（TryReserve 沿父链校验租户根/全局，探测即释放不落地）。
+	// 2. 用户配额 + 3. 卷级容量池：远程网盘卷跳过（容量由卷自身管理）；本地/加密卷探测。
 	if !env.remote {
-		if scope := m.quotaScope(env.task.Owner); scope != nil {
-			if env.result.Size > 0 {
-				err := scope.ProbeReserve(env.result.Size)
-				if err != nil {
-					return fmt.Errorf("%w: 用户配额不足（转存目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
-				}
+		if perr := m.probeTransferUserQuota(env); perr != nil {
+			return perr
+		}
+		// 3. **卷级容量池探测**（R16 P1 修复③）：本地卷（rootfs 无 ReserveSpace）的容量
+		//    权威在路由层 Pool——写前探测（沿父链，探测即释放不落地），不足早失败。
+		if perr := m.probeTransferVolumePool(env); perr != nil {
+			return perr
+		}
+	}
+	return nil
+}
+
+// probeTransferUserQuota 对非远程卷转存目标做 owner 配额探测（探测即释放不落地）。
+func (m *CloudDownloadManager) probeTransferUserQuota(env *transferEnv) error {
+	if scope := m.quotaScope(env.task.Owner); scope != nil {
+		if env.result.Size > 0 {
+			err := scope.ProbeReserve(env.result.Size)
+			if err != nil {
+				return fmt.Errorf("%w: 用户配额不足（转存目标卷 %q）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
 			}
 		}
+	}
+	return nil
+}
+
+// probeTransferVolumePool 对**本地卷**转存目标做写前卷池探测（不足早失败；外部卷不经此——
+// 其容量权威在 FS 层 CapacityFS/后端配额 API）。抽 helper 控制 transferQuotaGate 复杂度。
+func (m *CloudDownloadManager) probeTransferVolumePool(env *transferEnv) error {
+	if env.result.Size <= 0 || m.volumePoolChargeFor == nil {
+		return nil
+	}
+	pool := m.volumePoolChargeFor(env.task.Transfer.Volume)
+	if pool == nil {
+		return nil
+	}
+	if err := pool.ProbeReserve(env.result.Size); err != nil {
+		return fmt.Errorf("%w: 目标卷 %q 容量不足（卷池探测拒绝）: %v", ErrTransferTarget, env.task.Transfer.Volume, err)
 	}
 	return nil
 }

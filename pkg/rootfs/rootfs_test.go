@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 func newEncryptedRoot(t *testing.T) *storage.Root {
@@ -125,5 +126,26 @@ func TestVisibleIO_EncryptedVolumeCiphertextAtRestPlaintextVisible(t *testing.T)
 	}
 	if RelJoin("", "s.txt") != "s.txt" || RelJoin(".", "s.txt") != "s.txt" || RelJoin("user", "s.txt") != "user/s.txt" {
 		t.Fatalf("RelJoin 语义错误（got %q / %q / %q）", RelJoin("", "s.txt"), RelJoin(".", "s.txt"), RelJoin("user", "s.txt"))
+	}
+}
+
+// TestRootFS_LocalVolumeSelfDescription 锁定 R16 P1 修复①：卷根 FS 必须自述**本地卷**
+// （syncpkg.LocalVolume.IsLocalVolume()=true）——否则经 trusted.Guard/Wrap 透传后
+// pkg/cloud 转存判定为「远程」⇒ 绕过 owner 配额探测 + 卷级容量池 0 记账（漏记 + 删除幻影释放）。
+// 变异（删 IsLocalVolume 实现）⇒ 断言失败 ⇒ 红。
+func TestRootFS_LocalVolumeSelfDescription(t *testing.T) {
+	t.Parallel()
+	root, err := storage.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	fs := New(root)
+	lv, ok := fs.(syncpkg.LocalVolume)
+	if !ok {
+		t.Fatal("卷根 FS 应实现 syncpkg.LocalVolume（本地卷自述）")
+	}
+	if !lv.IsLocalVolume() {
+		t.Fatal("卷根 FS IsLocalVolume() 应为 true（本地卷恒本地）")
 	}
 }

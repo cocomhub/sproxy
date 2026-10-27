@@ -30,6 +30,11 @@ type rootFSCore struct {
 	root *storage.Root
 }
 
+// IsLocalVolume 实现 syncpkg.LocalVolume：卷根 FS 恒**本地**（R16 P1 修复①）。
+// 此前缺此自述 ⇒ 经 trusted.Guard/Wrap 透传后 pkg/cloud 转存判定为「远程」⇒ 绕过
+// owner 配额探测 + 卷级容量池 0 记账（漏记 + 删除幻影释放）。本地根恒本地 ⇒ true。
+func (c *rootFSCore) IsLocalVolume() bool { return true }
+
 // NewRootFS 构造「卷根 → sync.FS」适配器（键空间为卷根相对路径）。
 func New(root *storage.Root) syncpkg.FS { return &rootFSCore{root: root} }
 
