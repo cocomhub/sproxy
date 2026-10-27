@@ -146,13 +146,13 @@ func TestSet_ResolveURL_LocalScheme(t *testing.T) {
 	t.Parallel()
 	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
 	if err := set.RegisterStorageVolume(fakeStorageVolume{
-		name: "v1", fs: &stubFS{content: map[string]string{"user/a.txt": "hello"}},
+		name: "v1", fs: &stubFS{content: map[string]string{"anonymous/user/a.txt": "hello"}},
 	}); err != nil {
 		t.Fatalf("RegisterStorageVolume: %v", err)
 	}
 	// 让 local 协议已声明（测试进程内注册一次；用 Once 防重注册 panic）。
 	registerLocalTestScheme()
-	rc, err := set.ResolveURL(context.Background(), "local://v1/user/a.txt")
+	rc, err := set.ResolveURL(context.Background(), "local://v1/a.txt")
 	if err != nil {
 		t.Fatalf("local:// 解析失败: %v", err)
 	}
