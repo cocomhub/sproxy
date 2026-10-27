@@ -92,6 +92,12 @@ func TestSet_VolumeView_UserViewDecorated(t *testing.T) {
 	if _, ok := set.VolumeView("v1", ViewUse("secrets")); ok {
 		t.Fatal("secrets use 应被拒（不入通用表）")
 	}
+	// R16 P2：未知/拼写错误的 use 也 fail-closed（不得静默等同 user 视图）。
+	for _, bad := range []ViewUse{"User", "user ", "", "bogus"} {
+		if _, ok := set.VolumeView("v1", bad); ok {
+			t.Fatalf("未知 use %q 应被拒（不得静默走 default）", bad)
+		}
+	}
 	if _, ok := set.VolumeView("nope", ViewUser); ok {
 		t.Fatal("未知卷名应 (nil,false)")
 	}

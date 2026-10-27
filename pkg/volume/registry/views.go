@@ -65,8 +65,13 @@ func (vs *Set) volumeViewDecorator() VolumeViewDecorator {
 // - `secrets` use → (nil, false)（密钥视图不入通用表，R26 白名单维持）；
 // - 已装配且 use 合法 → 经装配期装饰器（nil 则原样返回）给出视图。
 func (vs *Set) VolumeView(name string, use ViewUse) (syncpkg.FS, bool) {
-	if use == "secrets" {
-		return nil, false // 密钥视图不入通用表（R26）
+	// R16 P2 修复：use 必须显式 ∈ {ViewUser, ViewMeta}——此前只拒 secrets，拼写错误
+	// （"User"/"user " 等）会静默走 default 分支等同 user 视图（按用途封装的承诺被弱化）。
+	switch use {
+	case ViewUser, ViewMeta:
+		// ok
+	default:
+		return nil, false // 未知 use 与 secrets 一律 fail-closed（密钥视图不入通用表，R26）
 	}
 	sv, ok := vs.StorageVolume(name)
 	if !ok || sv == nil {
