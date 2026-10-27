@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	neturl "net/url"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -121,14 +122,30 @@ func NewSet(
 	}
 }
 
+// isNilStorageVolume 判定 StorageVolume 接口是否为 nil（含 typed-nil：持有 nil 具体指针）。
+func isNilStorageVolume(sv StorageVolume) bool {
+	if sv == nil {
+		return true
+	}
+	v := reflect.ValueOf(sv)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	}
+	return false
+}
+
 // RegisterStorageVolume 登记统一存储卷身份（U1）。
 //
 // 装配期调用：本地卷由装配层经 `NewLocalBackend` 构造后登记；外部卷在 NewSet /
 // AddExternalVolume / AttachExternal 时同步登记（同一实例进 external 与 storageVolumes）。
 // 重名登记 → 明确错误（卷名唯一，防同卷双持有）。
 func (vs *Set) RegisterStorageVolume(sv StorageVolume) error {
-	if sv == nil {
-		return fmt.Errorf("registry: 登记统一存储卷为 nil")
+	// typed-nil 防御（独立复审 Important-2，2026-10-28）：接口持有 nil 具体指针（如
+	// `var lb *localBackend = nil; set.RegisterStorageVolume(lb)`）时 `sv == nil` 判不成立，
+	// 此后 StorageVolume(name) 返回非 nil 接口、sv.FS() 在 nil 接收者上行为未定义。反射探测。
+	if isNilStorageVolume(sv) {
+		return fmt.Errorf("registry: 登记统一存储卷为 nil（含 typed-nil）")
 	}
 	if sv.Name() == "" {
 		return fmt.Errorf("registry: 统一存储卷名不能为空")
@@ -314,17 +331,23 @@ func (vs *Set) openLocalURL(ctx context.Context, volName, path string) (io.ReadC
 	if rel == "" {
 		return nil, fmt.Errorf("registry: local:// 缺少路径（%s://%s/）", "local", volName)
 	}
-	// 路径安全：volume.ResolveUserLocation（拒绝对路径/..//空段）。owner 用空（匿名）——
-	// local:// 的键是卷内 user 桶相对路径；若含 owner 前缀段则按用户路径非法拒绝。
+	// path 是**卷内 user 桶相对路径**（与转存 URL 的桶内形态一致：转存产物键
+	// `<owner>/user/<path>` 的 `<path>` 部分；URL 里**不含** owner/user 前缀段）。
+	// 读键 = FSPath(ResolveUserLocation("", path)) —— 与转存产物键空间对齐
+	// （Ruling，2026-10-28：openLocalURL 首版直接读 rel 导致键空间双向不一致）。
+	// 路径安全由 ResolveUserLocation 唯一入口承担（../ 逃逸/绝对路径/非法段 fail-closed）。
 	v, vok := vs.ByName(volName)
-	if vok {
-		if _, lerr := v.ResolveUserLocation("", volume.Path(rel)); lerr != nil {
-			return nil, fmt.Errorf("registry: local:// 路径非法 %q: %w", rel, lerr)
-		}
+	if !vok {
+		return nil, fmt.Errorf("registry: local:// 卷 %q 元信息不可解析", volName)
 	}
-	rc, err := fs.OpenRead(ctx, rel)
+	loc, lerr := v.ResolveUserLocation("", volume.Path(rel))
+	if lerr != nil {
+		return nil, fmt.Errorf("registry: local:// 路径非法 %q: %w", rel, lerr)
+	}
+	key := loc.FSPath()
+	rc, err := fs.OpenRead(ctx, key)
 	if err != nil {
-		return nil, fmt.Errorf("registry: local:// 读 %s://%s/%s: %w", "local", volName, rel, err)
+		return nil, fmt.Errorf("registry: local:// 读 %s://%s/%s: %w", "local", volName, key, err)
 	}
 	return rc, nil
 }
@@ -359,6 +382,9 @@ func (vs *Set) ReplaceExternal(name string, be ExternalBackend) error {
 		return fmt.Errorf("registry: 外部卷 %q 不存在（无法替换句柄）", name)
 	}
 	vs.external[name] = be
+	// Minor-2（独立复审）：替换句柄须同步统一存储卷表——否则 VolumeView/StorageVolume
+	// 仍取旧实例（「VolumeView 读旧、External 读新」分叉窗口）。
+	vs.storageVolumes[name] = storageVolumeOf{name: name, ExternalBackend: be}
 	return nil
 }
 

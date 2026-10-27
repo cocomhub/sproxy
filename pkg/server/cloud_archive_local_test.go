@@ -10,7 +10,9 @@ package server
 // 产物落 `<owner>/user/<rel>`（与外部卷同键空间）、经 /download 可读回一致。
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -59,6 +61,24 @@ func TestCloudArchive_ToLocalVolume_LandsInUserBucket(t *testing.T) {
 	if _, err := os.Stat(key); err != nil {
 		t.Fatalf("本地卷转存产物 %q 缺失: %v（转存未落到 user 桶）", key, err)
 	}
+	// **读回一致**（Minor-4，独立复审）：经读路径同一装饰链（externalFSFor → VolumeView）
+	// 取回产物，断言内容非空且为 gzip（与 /download 底层同路径，避免「转存成功但下载 404」）。
+	rfs, rok := h.externalFSFor("default")
+	if !rok || rfs == nil {
+		t.Fatal("读路径应能解析默认卷视图（转存产物须可读回）")
+	}
+	rc, rerr := rfs.OpenRead(context.Background(), "anonymous/user/archive/local.tar.gz")
+	if rerr != nil {
+		t.Fatalf("读回转存产物失败（/download 会 404）: %v", rerr)
+	}
+	defer rc.Close()
+	head := make([]byte, 2)
+	if _, rerr := io.ReadFull(rc, head); rerr != nil {
+		t.Fatalf("读回产物内容失败: %v", rerr)
+	}
+	if head[0] != 0x1f || head[1] != 0x8b {
+		t.Fatalf("产物应为 gzip（头 %x %x）", head[0], head[1])
+	}
 }
 
 // setupLocalVolumeArchive 装配默认本地卷 + 云任务管理器（target_volume=本地卷用）。
@@ -83,4 +103,48 @@ func setupLocalVolumeArchive(t *testing.T, dir string) (*Handlers, *serverMemFS,
 	})
 	h.cloudMgr = mgr
 	return h, nil, mgr
+}
+
+// TestCloudArchive_ToLocalVolume_ChargesVolumePool 钉住 reviewer Important-1（2026-10-28）：
+// 归档转存到**本地卷**的产物必须计入该卷的**卷级容量池**（此前只有外部卷经 FS 层
+// CapacityFS 记账，本地卷 rootfs 无 ReserveSpace ⇒ 卷池漏记 ⇒ 长期漂移）。
+func TestCloudArchive_ToLocalVolume_ChargesVolumePool(t *testing.T) {
+	dir, derr := os.MkdirTemp("", "archive-local-pool-*")
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	h, _, mgr := setupLocalVolumeArchive(t, dir)
+
+	pool := h.volSet.Pool("default")
+	if pool == nil {
+		t.Fatal("默认卷池应存在")
+	}
+	before := pool.Usage()
+
+	id := createCompletedTask(t, mgr, "src.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"pooled.tar.gz","target_volume":"default"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.cloudArchiveTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("转存 status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	after := pool.Usage()
+	if after <= before {
+		t.Fatalf("转存到本地卷后卷池 Usage 应增长：before=%d after=%d（卷级记账漏接）", before, after)
+	}
+
+	// 删除产物 → 卷池同步释放（与写侧同源）。
+	var result CloudArchiveResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if err := h.deleteGroupArchive("", result.File); err != nil {
+		t.Fatalf("删除归档: %v", err)
+	}
+	if got := pool.Usage(); got != before {
+		t.Fatalf("删除后卷池 Usage 应回到 %d，got %d（释放漏接）", before, got)
+	}
 }
