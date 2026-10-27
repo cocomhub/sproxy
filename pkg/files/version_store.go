@@ -182,14 +182,14 @@ func (s *Service) reserveVersionQuota(ctx context.Context, owner string, tnt *st
 	pool := volumePoolForTenant(s.rt.volSet(), tnt)
 	var scopeRes, poolRes *quota.Reservation
 	if scope := s.rt.quotaScope(owner, "version"); scope != nil {
-		rr, reserveErr := scope.WaitReserve(ctx, srcSize, quota.DefaultWaitTimeout)
+		rr, reserveErr := scope.WaitReserve(ctx, srcSize, s.rt.waitTimeout())
 		if reserveErr != nil {
 			return nil, nil, nil, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
 		}
 		scopeRes = rr
 	}
 	if pool != nil {
-		rr, reserveErr := pool.WaitReserve(ctx, srcSize, quota.DefaultWaitTimeout)
+		rr, reserveErr := pool.WaitReserve(ctx, srcSize, s.rt.waitTimeout())
 		if reserveErr != nil {
 			if scopeRes != nil {
 				scopeRes.Release()

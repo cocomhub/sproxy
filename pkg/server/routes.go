@@ -87,6 +87,11 @@ type RegisterRoutesOpts struct {
 	// LoginRateLimit 是 login_limiter 的测试专用瞬态覆盖（每分钟请求数；
 	// 0 = 默认 10/min）。同 TotpRateLimit 语义，供登录黑盒测试避免过早限流。
 	LoginRateLimit int
+	// QuotaWaitTimeout 是写路径「配额不足 ⇒ 排队重试」的等待上限覆盖（测试瞬态；
+	// 0 = 默认 quota.DefaultWaitTimeout 30s）。**仅供测试注入短值**：生产恒 0，语义不变；
+	// 否则「配额故意打满断言 507」的用例各白等 30s，批量累计触发包超时。
+	// 同构先例：TotpRateLimit/LoginRateLimit（测试装配瞬态，不写入 cfg）。
+	QuotaWaitTimeout time.Duration
 	// XferMetrics 是传输层扩展指标提供者（装配层注入；nil = 不输出 WS/QUIC
 	// 指标行）。cmd/sproxy 经 go.work import ext/ws、ext/quic 提供——pkg/server
 	// 不直接依赖独立 module（web/e2e 等子 module 经 pkg/server 间接编译不破）。
@@ -207,6 +212,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		// 测试注入空 Ring 时的无认证调试兜底（一次性读取；生产走 cfg.AllowInsecureLoopback）。
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
 		insecureLoopbackRole:  opts.InsecureLoopbackRole,
+		quotaWaitTimeout:      opts.QuotaWaitTimeout,
 		volSet:                vs,
 		xferMetrics:           opts.XferMetrics,
 		writeGuard:            opts.WriteGuard,

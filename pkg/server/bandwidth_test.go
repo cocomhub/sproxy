@@ -135,12 +135,21 @@ func TestBandwidthThrottlesDownload(t *testing.T) {
 	}
 
 	start := time.Now()
-	resp, err := testHTTPClient(t).Get(url + "/download?filename=bw-down.bin")
+	// 本次下载专用 client：独立连接池 + 超时上限（限速下 10KB 约 10s，给 60s 余量）。
+	// 避免并行测试被其它慢用例挤占时无限等待（无超时 client 在 2 核 runner 上曾把该用例
+	// 放大到 250s+），同时不改变「>900ms」的限速断言语义。
+	client := testHTTPClientAt()
+	client.Timeout = 60 * time.Second
+	t.Cleanup(client.CloseIdleConnections)
+	res, err := client.Get(url + "/download?filename=bw-down.bin")
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
-	defer resp.Body.Close()
-	got, _ := io.ReadAll(resp.Body)
+	defer res.Body.Close()
+	got, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("download body: %v", err)
+	}
 	if len(got) != len(body) {
 		t.Fatalf("下载字节数=%d want %d", len(got), len(body))
 	}

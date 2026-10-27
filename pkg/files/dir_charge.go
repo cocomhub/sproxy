@@ -62,7 +62,7 @@ func (s *Service) reserveDirCharge(ctx context.Context, owner, rel, remotePath, 
 	}
 	need := bound * int64(dirChainLen(remotePath))
 	if sc := s.rt.quotaScope(owner, rel); sc != nil {
-		res, err := sc.WaitReserve(ctx, need, quota.DefaultWaitTimeout)
+		res, err := sc.WaitReserve(ctx, need, s.rt.waitTimeout())
 		if err != nil {
 			return c, &HTTPError{Status: http.StatusInsufficientStorage, Message: errMsgStorageQuotaExceeded}
 		}
@@ -70,7 +70,7 @@ func (s *Service) reserveDirCharge(ctx context.Context, owner, rel, remotePath, 
 	}
 	if vs := s.rt.volSet(); vs != nil && volName != "" {
 		if pool := vs.Pool(volName); pool != nil {
-			res, err := pool.WaitReserve(ctx, need, quota.DefaultWaitTimeout)
+			res, err := pool.WaitReserve(ctx, need, s.rt.waitTimeout())
 			if err != nil {
 				c.release()
 				return c, &HTTPError{Status: http.StatusInsufficientStorage, Message: errMsgStorageQuotaExceeded}

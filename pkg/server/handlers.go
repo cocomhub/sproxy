@@ -466,6 +466,7 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 			files.WithActor(rt),
 			files.WithVolumes(rt),
 			files.WithQuota(rt),
+			files.WithQuotaWait(func() time.Duration { return h.quotaWaitTimeout }),
 			files.WithChecksumLedger(rt),
 			files.WithDownloadPaths(rt),
 			files.WithFileLocks(rt),
@@ -626,7 +627,7 @@ func (h *Handlers) uploadStoreFor(owner string) *files.UploadStore {
 	// P5：quota 未装配（globalPool nil）时，分块上传走 storageMgr 回退预留，
 	// 需把 storageMgr 注入 store 供会话删除/过期释放（scope 预留路径无需）。
 	if h.storageMgr != nil {
-		us.SetStorageMgr(filesStorageManager{h.storageMgr})
+		us.SetStorageMgr(filesStorageManager{m: h.storageMgr, waitTimeout: h.quotaWaitTimeout})
 	}
 	h.uploadStores[owner] = us
 	return us

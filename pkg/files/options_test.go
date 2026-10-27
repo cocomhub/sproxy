@@ -25,10 +25,13 @@ import (
 )
 
 // newMinimalService 用租户解析 + 可选 Option 构造服务，并装配测试 actor 解析。
+// newMinimalService 构造最小 files.Service（测试用）：默认单卷 + 可选 Option 注入。
 func newMinimalService(t *testing.T, env *dirsEnv, opts ...Option) *Service {
 	t.Helper()
 	actor := actorResolverFunc(func(r *http.Request) string { return r.Header.Get("X-Test-Actor") })
 	all := append([]Option{WithActor(actor)}, opts...)
+	// 测试瞬态：配额排队等待上限压到最小（配额不足的用例不白等 30s；生产恒 nil = 30s 默认）。
+	all = append(all, WithQuotaWait(func() time.Duration { return 50 * time.Millisecond }))
 	svc, err := New(tenantResolverFunc(env.tenantFor), all...)
 	if err != nil {
 		t.Fatalf("New 失败: %v", err)

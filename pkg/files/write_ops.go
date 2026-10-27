@@ -1294,7 +1294,7 @@ func (s *Service) reserveExternalRenameTarget(ctx context.Context, ops ExternalV
 	if sc == nil {
 		return nil, nil
 	}
-	res, rerr := sc.WaitReserve(ctx, s.rt.phys.PhysBound(volName, logical), quota.DefaultWaitTimeout)
+	res, rerr := sc.WaitReserve(ctx, s.rt.phys.PhysBound(volName, logical), s.rt.waitTimeout())
 	if rerr != nil {
 		return nil, &HTTPError{Status: http.StatusInsufficientStorage, Message: errMsgStorageQuotaExceeded}
 	}
@@ -1541,7 +1541,7 @@ func (s *Service) renameWithQuotaTransfer(ctx context.Context, a renameHomeArgs)
 	size := s.releaseChargeFor(a.volName, a.owner, a.from, srcInfo.Size())
 	// 目标键先 TryReserve（子目录/租户/全局逐级检查，配额不足拒绝移动避免超限），
 	// 成功后再原子 Rename，最后源键 ReleaseUsage。若 Rename 失败则 Release 归还目标预留。
-	toRes, err := toScope.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
+	toRes, err := toScope.WaitReserve(ctx, size, s.rt.waitTimeout())
 	if err != nil {
 		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultDenied, renameAuditDetail("目标目录配额不足", a.to, a.origin))
 		a.logger.WarnContext(ctx, "rename 目标目录配额不足", "from", a.fromRel, "to", a.toRel, "size", size)

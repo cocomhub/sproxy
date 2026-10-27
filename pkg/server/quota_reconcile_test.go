@@ -179,6 +179,8 @@ func TestRegisterRoutes_StartupReconcilesQuotaScopes_WithBucketLimits(t *testing
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux: mux, CfgPtr: &cfgPtr, Version: "t", BuildAt: "t",
 		Logger: testLogger(), AuditLogger: testLogger(),
+		// 测试瞬态：配额排队等待上限压到最小（配额不足的用例不白等 30s；生产恒 0 = 30s 默认）。
+		QuotaWaitTimeout: 50 * time.Millisecond,
 	})
 	t.Cleanup(func() { _ = h.Close() })
 

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/backup"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -341,6 +342,10 @@ type backupQuotaFS struct {
 	sm    *capacity.StorageManager // 持久容量账本（仅本地卷目标；nil = 未装配或外部卷）
 	cat   capacity.StorageCategory // 记账类别（与用户文件写面一致）
 	log   *slog.Logger
+	// waitTimeout 是容量等待上限（0 = capacity.DefaultWaitTimeout 30s）。**测试可注入缩短**：
+	// 「容量故意打满断言拒绝」的用例各白等 30s 会让 pkg/server 全量拖到 5min+（CI 实测）；
+	// 生产恒 0 语义不变。与 h.quotaWaitTimeout 同构（写路径配额排队等待的测试注入先例）。
+	waitTimeout time.Duration
 	// phys 是本卷的**记账口径折算**（nil = 恒等）：加密卷 ⇒ `storage.EncryptedPhysicalSize`。
 	//
 	// 为什么必须有（2026-10-16 高风险区审核发现）：本装饰器的记账口径必须与**上传路径**同源
@@ -433,16 +438,21 @@ func (r *backupReservation) smAdopt(prev int64) {
 }
 
 // reserveMemory 预留 Scope 与卷池（二者可空，任一失败自动回退已成功的一侧）。
-func (r *backupReservation) reserveMemory(ctx context.Context, size int64, scope *quota.Scope, pool *quota.Pool) error {
+// timeout 是排队等待上限（<=0 ⇒ quota.DefaultWaitTimeout 30s）；调用方（backupQuotaFS）
+// 透传测试注入的短值，生产恒 0 语义不变。
+func (r *backupReservation) reserveMemory(ctx context.Context, size int64, scope *quota.Scope, pool *quota.Pool, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = quota.DefaultWaitTimeout
+	}
 	if scope != nil {
-		s, err := scope.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
+		s, err := scope.WaitReserve(ctx, size, timeout)
 		if err != nil {
 			return err
 		}
 		r.scope = s
 	}
 	if pool != nil {
-		p, err := pool.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
+		p, err := pool.WaitReserve(ctx, size, timeout)
 		if err != nil {
 			r.releaseScope()
 			return err
@@ -471,11 +481,18 @@ func (q *backupQuotaFS) reserve(ctx context.Context, size int64) (*backupReserva
 		return nil, nil
 	}
 	res := backupReservation{sm: q.sm, cat: q.cat, log: q.log}
-	if err := res.reserveMemory(ctx, size, q.scope, q.pool); err != nil {
+	if err := res.reserveMemory(ctx, size, q.scope, q.pool, q.waitTimeout); err != nil {
 		return nil, err
 	}
 	if q.sm != nil {
-		if err := q.sm.WaitReserve(ctx, size, q.cat, capacity.DefaultWaitTimeout); err != nil {
+		// waitTimeout 是容量等待上限（测试可注入缩短；0 = capacity.DefaultWaitTimeout 30s）。
+		// 30s 默认在「容量恰好打满断言拒绝」的用例里白等（CI 实测把 pkg/server 拖到 5min+），
+		// 生产语义不变（默认 30s 排队等释放，超时按容量不足拒绝）。
+		timeout := q.waitTimeout
+		if timeout <= 0 {
+			timeout = capacity.DefaultWaitTimeout
+		}
+		if err := q.sm.WaitReserve(ctx, size, q.cat, timeout); err != nil {
 			res.releaseScope()
 			res.releasePool()
 			return nil, err

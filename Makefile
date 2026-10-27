@@ -153,12 +153,23 @@ build-ci: prepare
 	@$(foreach name,$(CMD_NAMES),echo "Building $(name)"; cd ./cmd/$(name) && GOWORK=off $(GO) build $(GOBUILD_EXTRA) $(GO_LDFLAGS) -o ../../$(BIN_DIR)/$(name)$(EXE) . && cd $(CURDIR);)
 
 .PHONY: test
+# NOTE：不加 -parallel 上限（与 test-cover 对齐）——CI runner 2 核下 -parallel 8 只多付
+# 调度开销，且与 test-cover 的 -parallel 默认值不同会**破坏覆盖与测试的编译缓存复用**。
 test: prepare
-	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -parallel 8 $(GOTAGS) ./...
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(GOTAGS) ./...
 
 .PHONY: test-ci test-cover
 test-ci test-cover: prepare
-	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -parallel 8 $(GOTAGS) -coverprofile=$(BUILD_DIR)/cover.out ./...
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(GOTAGS) -coverprofile=$(BUILD_DIR)/cover.out ./...
+
+# cover-test：落入与 test-cover 相同的覆盖文件（build/cover.out），但**可复用 make test
+# 的 -count=1 编译/测试缓存**——CI 的 Test (ubuntu) job 用它在跑完 make test 后不再重跑
+# 全量测试即得到覆盖率（旧流程 cover-check → test-cover 是第二遍全量 ≈ +7min/run）。
+# 阈值校验仍由 cover-check 做（此处只产出覆盖文件）。
+# 注：-parallel 与 make test 保持默认（不显式指定）⇒ 两者命令行一致，缓存可交叉复用。
+.PHONY: cover-test
+cover-test: prepare
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -coverprofile=$(BUILD_DIR)/cover.out ./...
 
 .PHONY: notest
 notest:
@@ -260,7 +271,13 @@ web-test:
 	node --test web/static/sclient/sclient.test.js
 
 .PHONY: cover-check
-cover-check: test-cover
+# COVER_REUSE=1 ⇒ 跳过 test-cover 提交步骤（不重跑测试），只对**已有**的 build/cover.out
+# 做阀值校验。CI 的 Test (ubuntu) job 用 `make cover-test` 做唯一一次 -race 全覆盖测试
+# （既出建/断言信号又出 build/cover.out），随后 `make cover-check COVER_REUSE=1` 只算阀值
+# → 省掉旧流程的**第二遍全量测试**（每一遍 ≈ 7min）。本地 `make cover-check`（无变量）
+# 行为不变（依赖 test-cover 先跑）。cover.out 缺失时 go tool cover 报错→ total 空 → 下方
+# 空值守卫 fail-closed 退出 1（不会静默 PASS）。
+cover-check: $(if $(filter 1,$(COVER_REUSE)),,test-cover)
 	@total=$$(go tool cover -func=$(BUILD_DIR)/cover.out | tail -1 | awk '{print $$NF}' | sed 's/%//'); \
 	if [ -z "$$total" ]; then \
 		echo "FAIL: could not compute coverage"; \

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -233,6 +234,9 @@ func buildVolSetHandlers(t *testing.T, cfg *Config) *Handlers {
 		rebalanceProg:  newRebalanceProgress(),
 	}
 	t.Cleanup(func() { _ = h.Close() })
+	// 测试夹具：把「配额不足 ⇒ 排队重试」的等待上限压到最小（生产恒 0 = 30s 默认，语义不变）——
+	// 否则「配额故意打满断言 507」的用例各白等 30s，批量累计触发包超时（CI 实测：8 个串行 30s）。
+	h.quotaWaitTimeout = 50 * time.Millisecond
 	return h
 }
 

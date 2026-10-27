@@ -43,14 +43,20 @@ import (
 
 // filesStorageManager 把 *capacity.StorageManager 适配为 files.StorageManager。
 // 子包不得见 capacity.StorageCategory，故类别由本适配器固定为 CategoryChunked。
-type filesStorageManager struct{ m *capacity.StorageManager }
+type filesStorageManager struct {
+	m *capacity.StorageManager
+	// waitTimeout 是容量排队等待上限（0 = capacity.DefaultWaitTimeout 30s）。**测试可注入缩短**：
+	// 「容量故意打满断言 507」的用例各白等 30s，批量累计拖长 pkg/server 全量（CI 实测）。
+	// 生产由 h.quotaWaitTimeout（测试瞬态 opt）透传；恒 0 = 生产语义不变。
+	waitTimeout time.Duration
+}
 
 // WaitReserveChunked 预留分块上传的全局容量：**收敛到容量层等待入口**
 // （capacity.StorageManager.WaitReserve）⇒ 容量不足时**排队重试**（释放唤醒 / ctx 取消 /
 // 超时），而不是立即 507 —— 与配额层同款语义（用户裁定「严格上界预占 + 不够时继续队列重试等待」）。
 // 保留本方法（P5 回退路径：quota 未装配时的全局容量回退）——**能力不丢失**。
 func (a filesStorageManager) WaitReserveChunked(ctx context.Context, n int64) error {
-	return a.m.WaitReserve(ctx, n, capacity.CategoryChunked, capacity.DefaultWaitTimeout)
+	return a.m.WaitReserve(ctx, n, capacity.CategoryChunked, a.waitTimeout)
 }
 func (a filesStorageManager) ReleaseChunked(n int64) { a.m.Release(n, capacity.CategoryChunked) }
 func (a filesStorageManager) Usage() int64           { return a.m.Usage() }
@@ -270,7 +276,7 @@ func (r filesRuntime) Capacity() files.StorageManager {
 	if r.h.storageMgr == nil {
 		return nil
 	}
-	return filesStorageManager{r.h.storageMgr}
+	return filesStorageManager{m: r.h.storageMgr, waitTimeout: r.h.quotaWaitTimeout}
 }
 
 func (r filesRuntime) Enabled() bool { return r.h.cfgPtr.Load().Versioning.Enabled }
