@@ -260,22 +260,9 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 	t.Helper()
 
 	tmpDir := t.TempDir()
-	binName := "sproxy"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(tmpDir, binName)
-
-	// Locate module root: test/e2e_test.go -> test/ -> module root
-	_, currentFile, _, _ := runtime.Caller(0)
-	moduleRoot := filepath.Dir(filepath.Dir(currentFile))
-
-	// Build the binary
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sproxy")
-	buildCmd.Dir = moduleRoot
-	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sproxy: %v\n%s", err, buildOut)
-	}
+	// 二进制统一经 e2eBinPath 构造（test/sproxy_test 包共享：sync.Once + os.Stat
+	// 保证整包测试只 build 一次；旧内联 build 每次 startSPROXY 各编译一遍）。
+	binPath := e2eBinPath(t, "cmd/sproxy")
 
 	// Find a free port
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -314,7 +301,7 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 		"--config", configPath,
 	}
 	cmd := exec.Command(binPath, args...)
-	cmd.Dir = moduleRoot
+	cmd.Dir = e2eModuleRoot()
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
