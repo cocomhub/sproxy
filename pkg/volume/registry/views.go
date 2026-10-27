@@ -5,6 +5,7 @@ package registry
 
 import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // views.go —— 按用途统一访问器（U2，docs/designs/2026-10-28-unified-volume-model.md §二）。
@@ -29,12 +30,33 @@ const (
 // （封印 → trusted.Guard/Wrap → capacity）。registry 不 import server（避免成环），
 // 由装配层（pkg/server）经 `Set.SetVolumeViewDecorator` 注入。
 //
-// nil 装饰器 = 返回裸 FS（测试友好 / 无装饰装配）——生产装配**必须**注入。
+// **默认值 = 内置 trusted 装饰链**（Ruling，2026-10-28）：registry 可 import trusted
+// （无环）——测试 fake 卷集不注入装饰器时仍得到 Guard/Wrap 语义（meta sidecar 生成/校验、
+// Delete 联动 sidecar+记账），避免「生产有装饰、测试裸 FS」的行为漂移。装配层覆盖
+// 以注入 Logger/ChunkSize。
 type VolumeViewDecorator func(name string, use ViewUse, raw syncpkg.FS) syncpkg.FS
+
+// defaultVolumeViewDecorator 是内置默认装饰器（trusted.Guard/Wrap；ViewMeta 只 Guard）。
+func defaultVolumeViewDecorator(_ string, use ViewUse, raw syncpkg.FS) syncpkg.FS {
+	switch use {
+	case ViewMeta:
+		return trusted.Guard(raw)
+	default: // ViewUser
+		return trusted.Guard(trusted.Wrap(raw, trusted.Options{}))
+	}
+}
 
 // SetVolumeViewDecorator 注入卷视图装饰器（装配期调用一次；重复注入覆盖——装配层单一）。
 func (vs *Set) SetVolumeViewDecorator(d VolumeViewDecorator) {
 	vs.viewDecorator = d
+}
+
+// volumeViewDecorator 返回当前装饰器（未显式注入 → 内置 trusted 默认）。
+func (vs *Set) volumeViewDecorator() VolumeViewDecorator {
+	if d := vs.viewDecorator; d != nil {
+		return d
+	}
+	return defaultVolumeViewDecorator
 }
 
 // VolumeView 返回指定卷名的按用途 FS 视图（U2 唯一取卷入口）。
@@ -54,8 +76,5 @@ func (vs *Set) VolumeView(name string, use ViewUse) (syncpkg.FS, bool) {
 	if raw == nil {
 		return nil, false
 	}
-	if d := vs.viewDecorator; d != nil {
-		return d(name, use, raw), true
-	}
-	return raw, true
+	return vs.volumeViewDecorator()(name, use, raw), true
 }

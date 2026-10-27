@@ -33,6 +33,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 	"github.com/cocomhub/sproxy/web"
 )
 
@@ -182,6 +183,18 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 卷集合就绪 ⇒ 冷段归档装配（单一入口：解析目的地 + 配置校验 + 启动期归档一次）。
 	coldVolSet = vs
 	wireAuditColdArchive(cfg, vs, auditJournal, log)
+
+	// U2：装配期注入卷视图装饰器（`VolumeView` 的唯一取卷入口）——本地卷也经同一
+	// recipe（trusted.Guard(Wrap) + capacity）成为可信卷；staging 是 per-owner 瞬态，
+	// 由消费方 `ApplyStagingQuota` 在取值时套（registry 不 import server，避免成环）。
+	vs.SetVolumeViewDecorator(func(name string, use registry.ViewUse, raw syncpkg.FS) syncpkg.FS {
+		switch use {
+		case registry.ViewMeta:
+			return trusted.Guard(raw)
+		default: // ViewUser
+			return trusted.Guard(trusted.Wrap(raw, trusted.Options{Logger: log}))
+		}
+	})
 
 	h := &Handlers{
 		cfgPtr:            opts.CfgPtr,

@@ -351,6 +351,7 @@ func (vs *Set) AddExternalVolume(v volume.Volume, be ExternalBackend) error {
 	}
 	vs.volumes = append(vs.volumes, v)
 	vs.external[v.Name] = be
+	vs.storageVolumes[v.Name] = storageVolumeOf{name: v.Name, ExternalBackend: be} // U1：外部卷同实例进统一存储卷表
 	if vs.firstExternal == "" {
 		// 首个登记的外部卷即默认外部卷（装配序决定默认，早期问题 P5）；
 		// 首次记录后不覆盖（后续注册不得改写默认）。
@@ -414,6 +415,7 @@ func (vs *Set) AttachExternal(name string, be ExternalBackend) error {
 		return fmt.Errorf("registry: 外部卷 %q 已装配（重复补装）", name)
 	}
 	vs.external[name] = be
+	vs.storageVolumes[name] = storageVolumeOf{name: name, ExternalBackend: be} // U1：补装外部卷同实例进统一存储卷表
 	if vs.firstExternal == "" {
 		// 首个补装的外部卷即默认外部卷（与 AddExternalVolume 语义一致：装配序决定默认）。
 		vs.firstExternal = name

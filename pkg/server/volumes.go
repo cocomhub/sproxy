@@ -775,21 +775,19 @@ func (h *Handlers) externalVolumeTransferFS(volumeName string) (syncpkg.FS, stri
 	if h.volSet == nil {
 		return nil, "", volume.Volume{}, false
 	}
-	be := h.volSet.External(volumeName)
-	if be == nil {
+	// U2：走统一取卷入口 `VolumeView(name, ViewUser)`（装配期已套 Guard(Wrap) 装饰链）。
+	// 本地卷同样返回可信视图（meta sidecar + 桶隔离）——转存目标不再限于外部卷。
+	fs, ok := h.volSet.VolumeView(volumeName, registry.ViewUser)
+	if !ok || fs == nil {
 		return nil, "", volume.Volume{}, false
 	}
-	raw := be.FS()
-	if raw == nil {
-		return nil, "", volume.Volume{}, false
+	vol, vok := h.volSet.ByName(volumeName)
+	if !vok {
+		// 卷元信息缺失（极罕见装配异常）：仍返回已装饰视图（meta 桶隔离恒生效 + 写面恒
+		// 生成 sidecar）——写面也不能触达凭据桶。scheme 未知（无卷描述）。
+		return fs, "", volume.Volume{}, false
 	}
-	vol, ok := h.volSet.ByName(volumeName)
-	if !ok {
-		// 卷元信息缺失（极罕见装配异常）：仍加 Guard(Wrap(...))（meta 桶隔离恒生效 +
-		// 写面恒生成 sidecar，与其余装配形状一致）——写面也不能触达凭据桶。
-		return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), "", volume.Volume{}, false
-	}
-	return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), registry.SchemeOf(vol.Type), vol, true
+	return fs, registry.SchemeOf(vol.Type), vol, true
 }
 
 // stagingQuotaFS 是外部卷 FS 的**本地 staging 配额统一接线**（用户裁定 2026-10-10：

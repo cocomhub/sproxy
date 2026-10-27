@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -47,6 +48,92 @@ func TestSet_StorageVolume_UnknownReturnsFalse(t *testing.T) {
 	set := NewSet(nil, nil, nil, nil, "default")
 	if sv, ok := set.StorageVolume("nope"); ok || sv != nil {
 		t.Fatalf("未知卷名应 (nil,false)，got %v %v", sv, ok)
+	}
+}
+
+// ---- U2：VolumeView 按用途访问器 ----
+
+// decoratedFS 是装饰后的标记 FS（区分 raw 与装饰产物）。
+type decoratedFS struct {
+	stubFS
+	use ViewUse
+}
+
+// TestSet_VolumeView_UserViewDecorated 钉住：`ViewUser` 经注入 decorator 装饰（返回 ≠ raw）；
+// secrets use 不入通用表（R26 白名单维持）；未知卷名 fail-closed。
+func TestSet_VolumeView_UserViewDecorated(t *testing.T) {
+	t.Parallel()
+	raw := &stubFS{}
+	called := 0
+	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	set.SetVolumeViewDecorator(func(name string, use ViewUse, f syncpkg.FS) syncpkg.FS {
+		called++
+		return &decoratedFS{stubFS: stubFS{}, use: use}
+	})
+	if err := set.RegisterStorageVolume(fakeStorageVolume{name: "v1", fs: raw}); err != nil {
+		t.Fatalf("RegisterStorageVolume: %v", err)
+	}
+	got, ok := set.VolumeView("v1", ViewUser)
+	if !ok || got == nil {
+		t.Fatal("ViewUser 应返回视图")
+	}
+	if called != 1 {
+		t.Fatalf("decorator 调用次数 = %d, want 1", called)
+	}
+	if got == syncpkg.FS(raw) {
+		t.Fatal("ViewUser 应返回装饰后视图（≠ raw）")
+	}
+	if d, ok := got.(*decoratedFS); !ok || d.use != ViewUser {
+		t.Fatal("ViewUser 应经 decorator 且 use 正确传递")
+	}
+	// secrets 不入通用表（R26 白名单维持）。
+	if _, ok := set.VolumeView("v1", ViewUse("secrets")); ok {
+		t.Fatal("secrets use 应被拒（不入通用表）")
+	}
+	if _, ok := set.VolumeView("nope", ViewUser); ok {
+		t.Fatal("未知卷名应 (nil,false)")
+	}
+}
+
+// TestSet_VolumeView_MetaViewUse 钉住 ViewMeta 经同一 decorator（use 区分）。
+func TestSet_VolumeView_MetaViewUse(t *testing.T) {
+	t.Parallel()
+	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	set.SetVolumeViewDecorator(func(name string, use ViewUse, f syncpkg.FS) syncpkg.FS {
+		return &decoratedFS{use: use}
+	})
+	if err := set.RegisterStorageVolume(fakeStorageVolume{name: "v1", fs: &stubFS{}}); err != nil {
+		t.Fatalf("RegisterStorageVolume: %v", err)
+	}
+	got, ok := set.VolumeView("v1", ViewMeta)
+	if !ok {
+		t.Fatal("ViewMeta 应返回视图")
+	}
+	if d, ok := got.(*decoratedFS); !ok || d.use != ViewMeta {
+		t.Fatal("ViewMeta 的 use 应正确传递")
+	}
+}
+
+// TestSet_VolumeView_DefaultDecoratorIsTrusted 钉住：未注入 decorator 时**内置 trusted 装饰链**
+// 生效（Ruling，2026-10-28）——生产与测试同为 Guard(Wrap) 语义（meta sidecar 生成/校验、
+// Delete 联动 sidecar+记账），不依赖装配层记得注入；避免「生产有装饰、测试裸 FS」漂移。
+func TestSet_VolumeView_DefaultDecoratorIsTrusted(t *testing.T) {
+	t.Parallel()
+	raw := &stubFS{}
+	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	if err := set.RegisterStorageVolume(fakeStorageVolume{name: "v1", fs: raw}); err != nil {
+		t.Fatalf("RegisterStorageVolume: %v", err)
+	}
+	got, ok := set.VolumeView("v1", ViewUser)
+	if !ok || got == nil {
+		t.Fatal("应返回视图")
+	}
+	if got == syncpkg.FS(raw) {
+		t.Fatal("默认装饰器应套 trusted.Guard(Wrap)——不得返回裸 FS")
+	}
+	// 视图应实现 meta.Provider（Guard/Wrap 的 FileMeta 读侧）。
+	if _, ok := got.(meta.Provider); !ok {
+		t.Fatal("默认装饰视图应实现 meta.Provider")
 	}
 }
 
