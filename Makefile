@@ -155,8 +155,10 @@ build-ci: prepare
 .PHONY: test
 # NOTE：不加 -parallel 上限（与 test-cover 对齐）——CI runner 2 核下 -parallel 8 只多付
 # 调度开销，且与 test-cover 的 -parallel 默认值不同会**破坏覆盖与测试的编译缓存复用**。
+# TEST_COVER_PROFILE=<path>（CI 用）：把覆盖并入**这一遍**测试（-race 与 -cover 同进程），
+# 免去第二遍全量；本地不设 ⇒ 行为不变（不带 -coverprofile）。
 test: prepare
-	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(GOTAGS) ./...
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(if $(TEST_COVER_PROFILE),-coverprofile=$(TEST_COVER_PROFILE)) $(GOTAGS) ./...
 
 .PHONY: test-ci test-cover
 test-ci test-cover: prepare
@@ -482,14 +484,12 @@ gofix:
 	$(RAW_GO) fix ./...
 
 # go fix + gofmt + addlicense 遍历所有子 module（SUB_MODULE_DIRS 同 lint-all/test-all，web/e2e 除外）
+# 并行化（2026-10-27）：各 module 的 go fix 互相独立，串行在 CI 冷缓存下 ≈120s（Lint job 的
+# check-format 大头）；xargs -P2 并行实测 -25%。保留**全量**语义（CI 兜底未登记新文件），仅执行并行。
 .PHONY: gofix-all
 gofix-all: prepare
 	@$(MAKE) gofix
-	@for dir in $(SUB_MODULE_DIRS); do \
-		echo "=== go fix $$dir =="; \
-		cd $$dir && GOWORK=off $(RAW_GO) fix ./... || exit 1; \
-		cd $(CURDIR); \
-	done
+	@echo $(SUB_MODULE_DIRS) | tr ' ' '\n' | xargs -P2 -I{} sh -c 'cd {} && GOWORK=off $(RAW_GO) fix ./... || exit 1'
 
 .PHONY: addlicense
 # 默认（无参数）：全量扫描（CI make check-format / fmt-all 用）。

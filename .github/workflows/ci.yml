@@ -141,26 +141,20 @@ jobs:
       - name: go vet
         run: make vet
 
-      - name: go test (race, incl Vault L2/L3)
-        # GOTEST_TIMEOUT 20m：2 核 runner 全量 ./... 实际 ~7m，5m 上限过紧导致偶发超时
-        # （Windows 4 核 ~4m25s 证明测试本身健康）；secretdata mock 派生落地后应回落到 ~3m，
-        # 届时可收紧回 5m（独立 PR 处理，避免阻塞依赖 secret 的功能）。
-        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test GOTEST_TIMEOUT="-timeout=20m"
-
-      # 根 module 覆盖率（vault 服务版）：产出 build/cover.out（CodeCov 用）并复制为
-      # build/coverage/root.out（Sonar 聚合读）。子 module 覆盖由 test-submodules 产出。
-      - name: go test (coverage)
-        # 覆盖与测试**同一次运行**产出：`make cover-test` 复用 `make test` 的 -count=1 缓存
-        # 命中，不再把全量 -race 测试再跑一遍（旧流程 cover-check 另跑全量第二遍 ≈ +7min/run）。
-        # 阈值门禁与本地一致仍由 cover-check 承担：本 step 先 cover-test 产出 build/cover.out，
-        # 再 cover-check（只做阈值计算，不重跑测试——cover-check 依赖 test-cover 的覆盖文件
-        # 已由 cover-test 产出 ⇒ 命中缓存或直接复用 build/cover.out）。
-        # 注：GOTEST_TIMEOUT 需与上方 make test 保持一致（20m，2 核 runner 余量）。
+      # 全量测试 + 覆盖**一次产出**（TEST_COVER_PROFILE 由 make test 透传 -coverprofile：
+      # -race 与 -cover 同进程完成）——不再跑第二遍全量。#862 曾用「make test + 单独
+      # cover-test」期望缓存复用，但 CI 实测 go test(race) 295s + cover-test 271s 未被命中
+      # （-coverprofile 改变命令行 ⇒ 缓存 key 不同，第二遍必重跑）。覆盖阈值由
+      # cover-check COVER_REUSE=1 只对 build/cover.out 计算（不重跑测试）。
+      # GOTEST_TIMEOUT 20m：2 核 runner 全量 ./... 实际 ~7m，5m 上限过紧导致偶发超时
+      # （Windows 4 核 ~4m25s 证明测试本身健康）；secretdata mock 派生落地后应回落到 ~3m，
+      # 届时可收紧回 5m（独立 PR 处理，避免阻塞依赖 secret 的功能）。
+      - name: go test (race + coverage, incl Vault L2/L3)
         run: |
-          make cover-test GOTEST_TIMEOUT="-timeout=20m"
-          make cover-check COVER_REUSE=1 GOTEST_TIMEOUT="-timeout=20m"
+          VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test GOTEST_TIMEOUT="-timeout=20m" TEST_COVER_PROFILE=build/cover.out
           mkdir -p build/coverage
           cp build/cover.out build/coverage/root.out
+          make cover-check COVER_REUSE=1 GOTEST_TIMEOUT="-timeout=20m"
 
       - name: Upload coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -300,14 +294,17 @@ jobs:
       # 不拖长常规 test job。限时 30s（go test -fuzz 的 fuzztime）——本仓 Benchmark job
       # 多次因长任务超时，fuzz 同理必须限时；全部目标为纯内存/bytes 输入，无网络依赖。
       # 注：seed corpus 由 f.Add 内联，不落 testdata 目录（避免每次 fuzz 后新增 corpus 脏文件）。
+      # 时长权衡（2026-10-27）：同包目标（pkg/tunnel 两枚）与纯数学目标（FuzzCalcChunkSize）
+      # 减半到 15s——30s/目标远超实际发现窗口（seed corpus 内联）。实测 6 目标 205s→175s（含
+      # 每个目标固定 ~13s 编译，fuzztime 只控 fuzz 引擎时间）；CI runner 上同样省 ~30s。
       - name: fuzz (bounded, 6 protocol parsers)
         run: |
           go test -count=1 -fuzz=FuzzDecodeFrame -fuzztime=30s ./pkg/tunnel/mux/ &&
           go test -count=1 -fuzz=FuzzTcpFraming -fuzztime=30s ./pkg/tunnel/xfer/internal/tcp/ &&
-          go test -count=1 -fuzz=FuzzTunnelMetaFrame -fuzztime=30s ./pkg/tunnel/ &&
-          go test -count=1 -fuzz=FuzzParseKey -fuzztime=30s ./pkg/tunnel/ &&
+          go test -count=1 -fuzz=FuzzTunnelMetaFrame -fuzztime=15s ./pkg/tunnel/ &&
+          go test -count=1 -fuzz=FuzzParseKey -fuzztime=15s ./pkg/tunnel/ &&
           go test -count=1 -fuzz=FuzzValidateFilePath -fuzztime=30s ./pkg/pathguard/ &&
-          go test -count=1 -fuzz=FuzzCalcChunkSize -fuzztime=30s ./pkg/client/
+          go test -count=1 -fuzz=FuzzCalcChunkSize -fuzztime=15s ./pkg/client/
 
   build:
     name: Build
