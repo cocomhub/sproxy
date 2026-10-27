@@ -61,6 +61,8 @@
       notify_test: '测试通知',
       // -- 语言 --
       lang_switch: '语言',
+      // -- 卷 --
+      volume_lbl: '卷',
     },
     en: {
       upload_files: 'Upload Files',
@@ -95,6 +97,7 @@
       notify_title: 'Notifications',
       notify_test: 'Test Notification',
       lang_switch: 'Language',
+      volume_lbl: 'Volume',
     },
   };
 

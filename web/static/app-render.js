@@ -205,11 +205,11 @@
       '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
       '<td>' + csDisplay + '</td>' +
       '<td class="file-actions">' +
-      '<button class="btn btn-primary btn-sm file-download-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">下载</button>' +
+      '<button class="btn btn-primary btn-sm file-download-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '" data-checksum="' + escHtml(cs) + '">下载</button>' +
       playBtn +
-      '<button class="btn btn-sm btn-secondary file-preview-btn" data-filename="' + escHtml(fullName) + '">预览</button>' +
-      '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
-      '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
+      '<button class="btn btn-sm btn-secondary file-preview-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '">预览</button>' +
+      '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
+      '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
       '<button class="btn btn-sm btn-share file-share-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '" data-checksum="' + escHtml(cs) + '">分享</button>' +
       '<button class="btn btn-sm btn-secondary file-meta-btn" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '">元数据</button>' +
       '</td></tr>';

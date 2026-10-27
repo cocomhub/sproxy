@@ -334,7 +334,7 @@ func TestVolumes_SingleVolumeSelect(t *testing.T) {
 		t.Fatalf("GET /api/volumes status = %d, want 200", got)
 	}
 	// 默认卷 default 被填充。
-	if werr := waitLoc(page, "#upload-volume option[value='default']", playwright.WaitForSelectorStateAttached, 8000); werr != nil {
+	if werr := waitLoc(page, "#volume-select option[value='default']", playwright.WaitForSelectorStateAttached, 8000); werr != nil {
 		t.Fatalf("默认卷 option 未填充: %v", werr)
 	}
 
@@ -351,7 +351,7 @@ func TestVolumes_SingleVolumeSelect(t *testing.T) {
 	if cur != "" {
 		t.Fatalf("默认 currentVolume() = %v, want \"\"（auto）", cur)
 	}
-	if _, serr := page.Locator("#upload-volume").SelectOption(
+	if _, serr := page.Locator("#volume-select").SelectOption(
 		playwright.SelectOptionValues{Values: &[]string{"default"}}); serr != nil {
 		t.Fatalf("select default 卷: %v", serr)
 	}

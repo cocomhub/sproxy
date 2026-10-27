@@ -3,19 +3,22 @@
 
 package e2e
 
-// volume_select_refresh_e2e_test.go — 「登录成功后派生数据必须刷新」真浏览器 E2E。
+// volume_select_refresh_e2e_test.go — 「卷」下拉（#volume-select，单一卷上下文）真浏览器 E2E。
 //
-// 缺陷（用户实测，2026-10-21）：文件页「过滤卷」`#volume-filter` 与工具栏「上传卷」`#upload-volume`
-// 只在 DOMContentLoaded 初始化一次。登录前那次 `GET /api/volumes` 因无凭据 401 ⇒ 下拉只剩
-// 「全部卷」/auto；登录成功后旧实现只 `refreshList()`，下拉**永不重试** ⇒ **运行时创建的卷**
-// （如 secretdata `vault`）在「过滤卷」里看不到（服务端数据是齐的，纯前端联动缺陷）。
+// 历史缺陷与本次收敛（用户裁定 2026-10-27）：
+//  1. **登录成功后派生数据必须刷新**（2026-10-21 修复）：下拉只在 DOMContentLoaded 初始化一次，
+//     登录前 `GET /api/volumes` 401 ⇒ 下拉只有「全部卷 / auto」；登录成功后若不重拉，运行时
+//     创建的卷（secretdata `vault` 等）永远看不到。本文件锁住该行为。
+//  2. **两个下拉合并为一个**（本次）：原「过滤卷」`#volume-filter` 与「上传卷」`#upload-volume`
+//     各自独立，导致「选了 baidu 卷进目录 → 刷新后卷上下文丢失、目录还在 ⇒ 显示空列表」。
+//     收敛为单一 `#volume-select`：同时决定 ① 列表过滤 ② 上传目标 ③ 卷内操作回退卷。
+//  3. **选择持久化 + 按卷记忆最新路径**（本次，用户明示）：
+//     - 选卷写 localStorage `sproxy_volume`，刷新/重开页面后保留；
+//     - 每个卷独立记忆最后访问目录（`sproxy_subdir_vol_<卷>`），切卷自动跳到该卷上次目录；
+//       无卷（全部卷 / auto）用全局键 `sproxy_subdir` 兜底。
 //
-// 同类问题一并覆盖：事件流（SSE）在 401/403 时**永久停止**（旧实现不再重连）⇒ 登录后实时更新
-// 仍死。本用例断言登录后事件流重新建立。
-//
-// 断言策略：登录前把 `/api/volumes` 确定性判为 401（`page.Route` 拦截，直连模式生效）；
-// 登录后凭据生效、请求改走**隧道**（外层 `/tunnel`），故**不断言 URL**，只断言 DOM 结果
-// （两个下拉被填充）——这才是用户可见的行为。
+// 断言策略：拦截 `/api/volumes` 保证「登录前 401 / 登录后放行」确定性；其余只断言用户可见
+// 的 DOM 与 localStorage 结果。
 
 import (
 	"net/http"
@@ -26,8 +29,8 @@ import (
 	"github.com/mxschmitt/playwright-go"
 )
 
-// TestVolumes_LoginRefreshesSelects 登录成功后两个卷下拉必须重新拉取并渲染（含运行时卷）。
-func TestVolumes_LoginRefreshesSelects(t *testing.T) {
+// TestVolumes_LoginRefreshesSelect 登录成功后「卷」下拉必须重新拉取并渲染（含运行时卷）。
+func TestVolumes_LoginRefreshesSelect(t *testing.T) {
 	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
 		c.Registration.ForceTOTP = true // 走 TOTP 登录分支（无 sk）
 	})
@@ -60,12 +63,9 @@ func TestVolumes_LoginRefreshesSelects(t *testing.T) {
 	if hits := volumesHits.Load(); hits == 0 {
 		t.Fatal("页面加载时未请求 /api/volumes（用例前提不成立：初始化路径已改？）")
 	}
-	// 前提：登录前两个下拉都只有「全部卷」/auto（没有 default 卷 option）。
-	if err := waitLoc(page, "#upload-volume option[value='default']", playwright.WaitForSelectorStateAttached, 1200); err == nil {
+	// 前提：登录前「卷」下拉只有「全部卷 / auto」（没有 default 卷 option）。
+	if err := waitLoc(page, "#volume-select option[value='default']", playwright.WaitForSelectorStateAttached, 1200); err == nil {
 		t.Fatal("登录前 /api/volumes 401 却已填充 default ⇒ 用例前提不成立（拦截未生效）")
-	}
-	if err := waitLoc(page, "#volume-filter option[value='default']", playwright.WaitForSelectorStateAttached, 1200); err == nil {
-		t.Fatal("登录前 /api/volumes 401 却已填充过滤卷 default ⇒ 用例前提不成立")
 	}
 
 	// 真实注册 + TOTP 登录（凭据生效：后续请求改走隧道，故只断言 DOM 结果）。
@@ -80,20 +80,133 @@ func TestVolumes_LoginRefreshesSelects(t *testing.T) {
 		t.Fatalf("登录后未重新发起事件流连接 ⇒ 实时更新在登录后仍失效: %v", eerr)
 	}
 
-	// 缺陷点：旧实现登录后只 refreshList() ⇒ 两个下拉保持空（运行时卷不可见）。
-	if werr := waitLoc(page, "#upload-volume option[value='default']", playwright.WaitForSelectorStateAttached, 10000); werr != nil {
-		t.Fatalf("登录后上传卷下拉未刷新（缺 default option）⇒ 登录后未重拉 /api/volumes: %v", werr)
-	}
-	if werr := waitLoc(page, "#volume-filter option[value='default']", playwright.WaitForSelectorStateAttached, 10000); werr != nil {
-		t.Fatalf("登录后「过滤卷」下拉未刷新（缺 default option）⇒ 运行时创建的卷不可见: %v", werr)
+	// 缺陷点：旧实现登录后只 refreshList() ⇒ 下拉保持空（运行时卷不可见）。
+	if werr := waitLoc(page, "#volume-select option[value='default']", playwright.WaitForSelectorStateAttached, 10000); werr != nil {
+		t.Fatalf("登录后「卷」下拉未刷新（缺 default option）⇒ 运行时创建的卷不可见: %v", werr)
 	}
 
-	// 下拉与列表接线仍成立：选择过滤卷 → 值生效（列表请求由既有接线负责）。
-	if _, serr := page.Locator("#volume-filter").SelectOption(
+	// 下拉接线成立：选择该卷 → DOM 值与 localStorage 同步（刷新后保留的前提）。
+	if _, serr := page.Locator("#volume-select").SelectOption(
 		playwright.SelectOptionValues{Values: &[]string{"default"}}); serr != nil {
-		t.Fatalf("选择过滤卷: %v", serr)
+		t.Fatalf("选择卷: %v", serr)
 	}
-	if cur, _ := page.Evaluate("document.getElementById('volume-filter').value"); cur != "default" {
-		t.Fatalf("过滤卷选择值 = %v, want default", cur)
+	if cur, _ := page.Evaluate("document.getElementById('volume-select').value"); cur != "default" {
+		t.Fatalf("卷选择值 = %v, want default", cur)
+	}
+	stored, _ := page.Evaluate("localStorage.getItem('sproxy_volume')")
+	if stored != "default" {
+		t.Fatalf("卷选择未持久化到 localStorage（sproxy_volume=%v）⇒ 刷新后会丢失", stored)
+	}
+}
+
+// TestVolumes_SelectPersistsAcrossReload 选卷 → 刷新页面 → 卷仍选中且列表按该卷请求。
+//
+// 缺陷（用户实测 2026-10-27）：「选 baidu 卷进入某目录后刷新页面，卷信息丢失但目录正确 ⇒
+// 列表显示为空」——因为卷上下文只存内存（_volumeFilter 初值恒 ”），刷新归零后列表按
+// 全部卷请求而 currentSubdir 仍是卷内子目录 ⇒ 空列表。本用例锁住修复。
+func TestVolumes_SelectPersistsAcrossReload(t *testing.T) {
+	baseURL, roots, cleanup := multiVolumeTestServer(t)
+	defer cleanup()
+
+	// disk2 卷内放一个文件（选卷后列表应只见该卷内容）。
+	volFile(t, roots, "disk2", "only-on-disk2.txt", "d2")
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	if err := waitLoc(page, "#volume-select option[value='disk2']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+		t.Fatalf("卷下拉未填充 disk2: %v", err)
+	}
+	if _, err := page.Locator("#volume-select").SelectOption(
+		playwright.SelectOptionValues{Values: &[]string{"disk2"}}); err != nil {
+		t.Fatalf("选择 disk2: %v", err)
+	}
+	waitTextVisible(t, page, "#file-list", "only-on-disk2.txt", 8000)
+
+	// 刷新：卷选择必须保留（localStorage 恢复），列表仍只见 disk2 内容。
+	if _, err := page.Reload(playwright.PageReloadOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("刷新页面: %v", err)
+	}
+	if err := waitLoc(page, "#volume-select option[value='disk2']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+		t.Fatalf("刷新后卷下拉未恢复: %v", err)
+	}
+	// WaitForFunction 轮询（无 time.Sleep，符合 R14 棘轮）：下拉值恢复为 disk2。
+	if _, err := page.WaitForFunction(
+		"() => { const el = document.getElementById('volume-select'); return !!el && el.value === 'disk2'; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		cur, _ := page.Evaluate("document.getElementById('volume-select').value")
+		t.Fatalf("刷新后卷选择 = %v, want disk2（选择未持久化/未恢复）: %v", cur, err)
+	}
+	waitTextVisible(t, page, "#file-list", "only-on-disk2.txt", 8000)
+}
+
+// TestVolumes_PerVolumeSubdirMemory 各卷独立记忆最新目录（用户明示 2026-10-27）。
+//
+// 场景：disk2 卷进入 sub/ → 切到 main 卷（应回卷根，而非停留在 sub/）→ main 进 other/ →
+// 切回 disk2（应自动回到 sub/，而非 other/ 或根）。
+func TestVolumes_PerVolumeSubdirMemory(t *testing.T) {
+	baseURL, roots, cleanup := multiVolumeTestServer(t)
+	defer cleanup()
+
+	volFile(t, roots, "disk2", "sub/in-sub.txt", "s")
+	volFile(t, roots, "main", "other/in-other.txt", "o")
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	if err := waitLoc(page, "#volume-select option[value='disk2']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+		t.Fatalf("卷下拉未填充: %v", err)
+	}
+
+	// ① disk2 → 进 sub/。
+	if _, err := page.Locator("#volume-select").SelectOption(
+		playwright.SelectOptionValues{Values: &[]string{"disk2"}}); err != nil {
+		t.Fatalf("选择 disk2: %v", err)
+	}
+	navigateSubdirInUI(t, page, "sub")
+	assertCurrentSubdir(t, page, "sub")
+
+	// ② 切到 main：该卷无目录记录 ⇒ 回落卷根（不能停留在 disk2 的 sub/）。
+	if _, err := page.Locator("#volume-select").SelectOption(
+		playwright.SelectOptionValues{Values: &[]string{"main"}}); err != nil {
+		t.Fatalf("选择 main: %v", err)
+	}
+	assertCurrentSubdir(t, page, "")
+
+	// ③ main → 进 other/。
+	navigateSubdirInUI(t, page, "other")
+	assertCurrentSubdir(t, page, "other")
+
+	// ④ 切回 disk2：必须自动恢复到该卷上次所在 sub/（核心断言）。
+	if _, err := page.Locator("#volume-select").SelectOption(
+		playwright.SelectOptionValues{Values: &[]string{"disk2"}}); err != nil {
+		t.Fatalf("切回 disk2: %v", err)
+	}
+	assertCurrentSubdir(t, page, "sub")
+	waitTextVisible(t, page, "#file-list", "in-sub.txt", 8000)
+}
+
+// navigateSubdirInUI 在 UI 中进入指定子目录：点该目录行的「进入」按钮。
+func navigateSubdirInUI(t *testing.T, page playwright.Page, dir string) {
+	t.Helper()
+	if err := waitLoc(page, ".dir-enter-btn[data-subdir='"+dir+"']", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("目录 %q 的进入按钮未渲染: %v", dir, err)
+	}
+	if err := page.Locator(".dir-enter-btn[data-subdir='" + dir + "']").Click(); err != nil {
+		t.Fatalf("点击进入 %q: %v", dir, err)
+	}
+}
+
+// assertCurrentSubdir 等待 currentSubdir（浏览器全局）等于 want（WaitForFunction，无 sleep）。
+func assertCurrentSubdir(t *testing.T, page playwright.Page, want string) {
+	t.Helper()
+	expr := "() => (typeof currentSubdir !== 'undefined') && currentSubdir === " + jsQuote(want)
+	if _, err := page.WaitForFunction(expr, nil, playwright.PageWaitForFunctionOptions{
+		Timeout: playwright.Float(8000),
+	}); err != nil {
+		got, _ := page.Evaluate("typeof currentSubdir !== 'undefined' ? currentSubdir : '<undefined>'")
+		t.Fatalf("currentSubdir = %v, want %q: %v", got, want, err)
 	}
 }

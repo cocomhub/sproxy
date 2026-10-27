@@ -15,8 +15,9 @@
 // 下列函数均不捕获工厂闭包（仅参数/全局），置于模块级供工厂与导出复用（S7721）。
 
 // download 分块请求路径（encodeURIComponent 完整 filename；offset/length 数值）。
-function chunkUrlFor(filename, offset, length) {
-  return '/download/chunk?filename=' + encodeURIComponent(filename) + '&offset=' + offset + '&length=' + length;
+function chunkUrlFor(filename, offset, length, volume) {
+  const q = 'filename=' + encodeURIComponent(filename) + '&offset=' + offset + '&length=' + length + (volume ? '&volume=' + encodeURIComponent(volume) : '');
+  return '/download/chunk?' + q;
 }
 
 // 块数：totalBytes/chunkSize 向上取整。非法输入 → 0。
@@ -101,6 +102,7 @@ function idFor(filename) {
 function parseHooks(hooks) {
   const h = (hooks && typeof hooks === 'object') ? hooks : {};
   return {
+    volume: typeof h.volume === 'string' ? h.volume : '',
     onProgress: typeof h.onProgress === 'function' ? h.onProgress : null,
     onVerify: typeof h.onVerify === 'function' ? h.onVerify : null,
     onComplete: typeof h.onComplete === 'function' ? h.onComplete : null,
@@ -149,10 +151,12 @@ function sliceToLen(arr, n) {
 }
 
 // statResolve：HEAD /api/files/stat → {size, mtime, checksum}；失败回落空 meta。
-function statResolve(transport, filename) {
+// volume 可选：外部/加密卷上 stat 必须带行卷（?volume= 原子定位，否则多卷同名 rel 歧义）。
+function statResolve(transport, filename, volume) {
   return Promise.resolve().then(function () {
     if (!transport || typeof transport.coreRequest !== 'function') throw new Error('传输层不可用');
-    return transport.coreRequest('HEAD', '/api/files/stat?filename=' + encodeURIComponent(filename), {});
+    const q = 'filename=' + encodeURIComponent(filename) + (volume ? '&volume=' + encodeURIComponent(volume) : '');
+    return transport.coreRequest('HEAD', '/api/files/stat?' + q, {});
   }).then(serverMetaFromStat).catch(function () { return { size: 0, mtime: '', checksum: '' }; });
 }
 
@@ -219,10 +223,11 @@ function statResolve(transport, filename) {
     };
 
     // ---- 拉取泵（新建/恢复/强制共用）----
-    // run(item, filename, chunkSize, missing, hooks, force)：并发 PARALLEL 拉缺失块，
+    // run(item, filename, chunkSize, missing, hooks, force, vol)：并发 PARALLEL 拉缺失块，
     // 每块成功写 IDB + upsertItem 进度；全块就绪 → 合并 Blob → onVerify → onComplete →
     // 清块缓存 → completed。分块失败 → status failed 写回原因（保留已拉块供恢复）。
-    const run = (item, filename, chunkSize, missing, hooks, force) => {
+    // vol：显式卷（行卷优先；空 = auto）——chunk 请求带 ?volume=（外部/加密卷必需）。
+    const run = (item, filename, chunkSize, missing, hooks, force, vol) => {
       const existing = this._running[item.id];
       if (existing?.state === 'running') return Promise.reject(new Error('该下载已在处理中'));
       const aborter = new AbortController();
@@ -285,7 +290,7 @@ function statResolve(transport, filename) {
         return Promise.resolve()
           .then(function () {
             if (!transport || typeof transport.coreRequest !== 'function') throw new Error('传输层不可用');
-            return transport.coreRequest('GET', chunkUrlFor(filename, start, len), { headers: {}, signal: controller.signal });
+            return transport.coreRequest('GET', chunkUrlFor(filename, start, len, vol), { headers: {}, signal: controller.signal });
           })
           .then(function (res) {
             if (stopped()) return; // abort/竞态后仍到达 → 不落块
@@ -406,9 +411,11 @@ function statResolve(transport, filename) {
     // ---- 公开 API ----
 
     // startDownload(filename, stat, hooks)：新建下载 item → 全量分块拉取。stat 需
-    // {size, mtime?, checksum?}（来自 sc.files.stat 或文件行元信息）。
+    // {size, mtime?, checksum?}（来自 sc.files.stat 或文件行元信息）。hooks.volume 可选：
+    // 行卷优先（外部/加密卷必需）——透传到 stat/chunk 请求。
     this.startDownload = (filename, stat, hooks) => {
       const h = parseHooks(hooks);
+      const vol = h.volume || '';
       const total = Math.floor(Number((stat && (Number(stat.size) > 0 ? stat.size : stat.totalSize)) || 0));
       const chunkSize = calcChunkSize(total);
       const totalChunks = chunkCount(total, chunkSize);
@@ -423,7 +430,7 @@ function statResolve(transport, filename) {
         meta: { ...metaFromStat(stat), chunkSize: chunkSize, totalChunks: totalChunks, chunksBitmap: new Array(totalChunks).fill(0) },
       };
       store.upsertItem(item);
-      return run(item, filename, chunkSize, allChunkIndices(totalChunks), h, false);
+      return run(item, filename, chunkSize, allChunkIndices(totalChunks), h, false, vol);
     };
 
     // resumeDownload(idOrItem, hooks)：先 stat HEAD 比对 size/mtime/checksum；匹配只拉
@@ -440,7 +447,7 @@ function statResolve(transport, filename) {
 
       function continueResume(serverMeta) {
         // 更新存档 meta 为最新 stat（恢复后以最新 mtime/checksum 为准，供后续恢复比对）。
-        const meta = { ...copyMeta(item), mtimeNano: serverMeta.mtime ? String(serverMeta.mtime) : '', checksum: serverMeta.checksum ? String(serverMeta.checksum) : '', chunkSize: chunkSize, totalChunks: totalChunks };
+        const meta = { ...copyMeta(item), volume: vol, mtimeNano: serverMeta.mtime ? String(serverMeta.mtime) : '', checksum: serverMeta.checksum ? String(serverMeta.checksum) : '', chunkSize: chunkSize, totalChunks: totalChunks };
         const force = h.force === true;
         const bm = force ? new Array(totalChunks).fill(0) : sliceToLen(item.meta?.chunksBitmap, totalChunks);
         meta.chunksBitmap = bm;
@@ -451,7 +458,7 @@ function statResolve(transport, filename) {
         }
         const upd = persistItem(item, { loaded: l, totalSize: total, total: total, meta: meta });
         const missing = force ? allChunkIndices(totalChunks) : missingChunkList(bm, totalChunks);
-        return run(upd, filename, chunkSize, missing, h, force);
+        return run(upd, filename, chunkSize, missing, h, force, vol);
       }
 
       if (h.force) {
@@ -462,7 +469,9 @@ function statResolve(transport, filename) {
         });
       }
       // stat HEAD 取 size/mtime/checksum；失败回落空 meta（无法比对时不拒绝续传）。
-      return statResolve(transport, filename).then(function (serverMeta) {
+      // volume：hooks.volume 透传（行卷优先；续传会话内同一卷）。
+      const vol = h.volume || item.meta?.volume || '';
+      return statResolve(transport, filename, vol).then(function (serverMeta) {
         const stored = {
           size: Number(item.total) || 0,
           mtime: item.meta?.mtimeNano || '',
