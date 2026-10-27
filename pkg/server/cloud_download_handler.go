@@ -1016,11 +1016,16 @@ func (h *Handlers) cloudArchiveToVolume(
 	if !ok {
 		return
 	}
-	// 目标卷解析（可信卷写视图；未装/元数据不可解析/类型未声明协议 → fail-closed）。
+	// 目标卷解析（可信卷写视图；未装/元数据不可解析 → fail-closed）。
+	// U3：本地卷现也可作转存目标（`externalVolumeTransferFS` 已改走 `VolumeView`，
+	// 本地卷返回 Guard(Wrap(NewRootFS))——trusted 对本地启用）；scheme 空按 local 归一。
 	fs, scheme, vol, ok := h.externalVolumeTransferFS(t.TargetVolume)
-	if !ok || scheme == "" {
+	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "target volume not assembled"}, http.StatusNotFound)
 		return
+	}
+	if scheme == "" {
+		scheme = "local"
 	}
 	// NM6（与 cloud 下载转存 checkTransferVolumePreflight 一致）：secrets 是密钥管理卷
 	// （secret 名禁路径分隔符），非通用转存目标——转存 rel 恒含 /，secrets:// 无法解析

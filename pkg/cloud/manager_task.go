@@ -1639,7 +1639,8 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 }
 
 // checkTransferVolumePreflight 转存目标卷前置校验（创建即拒，避免白下载）：
-// 卷须已装配（transferFS 可解析）且协议已声明（能生成 ResolveURL 可解析的 URL）。
+// 卷须已装配（transferFS 可解析）——**不再要求协议非空**（U3 统一卷模型：本地卷无后端协议
+// scheme，但已是合法转存目标；scheme 空按 "local" 归一生成 `local://<卷>/<rel>`）。
 func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSpec) error {
 	if transfer == nil {
 		return nil
@@ -1647,9 +1648,6 @@ func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSp
 	tfs, scheme := m.transferFS(transfer.Volume)
 	if tfs == nil {
 		return fmt.Errorf("cloud download: 转存目标卷 %q 未装配（创建即拒，避免浪费下载）", transfer.Volume)
-	}
-	if scheme == "" {
-		return fmt.Errorf("cloud download: 转存目标卷 %q 协议未声明（无法生成可解析 URL，创建即拒）", transfer.Volume)
 	}
 	// NM6：secrets 卷是密钥管理卷（secret 名禁路径分隔符），非通用转存目标——
 	// 转存 rel 恒含 /，secrets:// 无法解析且写路径绕过 Secrets Manager 校验 → 拒绝。
