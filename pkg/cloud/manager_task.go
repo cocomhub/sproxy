@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -134,9 +135,7 @@ func cloneMetaExtra(src map[string]any) map[string]any {
 		return nil
 	}
 	cp := make(map[string]any, len(src))
-	for k, v := range src {
-		cp[k] = v
-	}
+	maps.Copy(cp, src)
 	return cp
 }
 

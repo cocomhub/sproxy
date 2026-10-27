@@ -246,9 +246,7 @@ func WithChainMetaExtra(extra map[string]any) ChainOption {
 			return
 		}
 		cp := make(map[string]any, len(extra))
-		for k, v := range extra {
-			cp[k] = v
-		}
+		maps.Copy(cp, extra)
 		o.metaExtra = cp
 	}
 }

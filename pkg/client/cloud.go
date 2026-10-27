@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -128,9 +129,7 @@ func WithCloudDownloadMetaExtra(extra map[string]any) CloudDownloadOption {
 			return
 		}
 		cp := make(map[string]any, len(extra))
-		for k, v := range extra {
-			cp[k] = v
-		}
+		maps.Copy(cp, extra)
 		o.metaExtra = cp
 	}
 }
