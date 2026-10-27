@@ -400,7 +400,7 @@ jobs:
       - name: Cache Playwright browsers
         # 浏览器二进制缓存（~/.cache/ms-playwright）：避免每次冷装 chromium（含 deps）。
         # key 按 playwright-go 版本波纹——依赖锁文件（web/e2e/go.sum）变化时自动失效。
-        uses: actions/cache@d4323d4df104b026aab66161db76e2c5cd05dc57 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: ms-playwright-${{ runner.os }}-${{ hashFiles('web/e2e/go.sum') }}
