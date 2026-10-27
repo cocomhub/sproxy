@@ -2980,6 +2980,7 @@ function collectCloudBehavior() {
   const saveEl = document.querySelector('.cloud-behavior-form [name="save"]');
   const dlEl = document.querySelector('.cloud-behavior-form [name="download-local"]');
   const impEl = document.querySelector('.cloud-behavior-form [name="integrity-must-pass"]');
+  const metaEl = document.querySelector('.cloud-behavior-form [name="meta-extra"]');
   const opts = {};
   if (volEl && volEl.value) {
     opts.transfer = { volume: volEl.value };
@@ -2988,6 +2989,18 @@ function collectCloudBehavior() {
   if (saveEl) opts.save = saveEl.checked;
   if (dlEl) opts.downloadLocal = dlEl.checked;
   if (impEl) opts.integrityMustPass = impEl.checked;
+  if (metaEl && metaEl.value.trim()) {
+    try {
+      const parsed = JSON.parse(metaEl.value.trim());
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        opts.metaExtra = parsed;
+      } else {
+        showToast('自定义元数据需为 JSON 对象', 'warning');
+      }
+    } catch (e) {
+      showToast('自定义元数据 JSON 解析失败: ' + e.message, 'warning');
+    }
+  }
   return opts;
 }
 

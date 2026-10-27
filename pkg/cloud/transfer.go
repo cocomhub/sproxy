@@ -368,6 +368,8 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 		return "", werr
 	}
 	if done {
+		// 幂等命中（目标已持有相同内容）→ 来源 meta 仍记录（供溯源；不重写主文件）。
+		m.recordTransferSourceMeta(env)
 		trSpan.End("bytes", st.Size())
 		return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
 	}
@@ -375,6 +377,8 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 		trSpan.Fail(err)
 		return "", err
 	}
+	// 常规写后：来源 meta 记录（source=transfer / source_url / etag / 客户端 meta_extra）。
+	m.recordTransferSourceMeta(env)
 	trSpan.End("bytes", st.Size())
 	return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
 }

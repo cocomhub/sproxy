@@ -231,3 +231,11 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 | `cmd/sproxy/root_extra_test.go` | 5 | 进程级装配/启动用例（注册全局后端类型、信号停机等），共享包级全局状态，不可并行。 |
 | `cmd/sclient/share_test.go` | 3 | CLI 集成（httptest 捕获 POST body）：需独占测试服务器与 cobra 命令状态，不可并行。 |
 | `cmd/sclient/trash_test.go` | 6 | CLI 集成（httptest 捕获请求 URL）：同上，且断言「请求路径参数」需串行采集。 |
+
+## 2026-10-27 云下载 meta_extra e2e（`web/e2e/cloud_audit_e2e_test.go` 4 → 5）
+
+新增 1 个串行用例 `TestCloudDownload_MetaExtra`（云端下载预览填自定义元数据 JSON → 确认提交 →
+断言请求体 meta_extra 与输入一致）。**不可并行的理由**：与同文件既有 4 例同因 —— Playwright 真浏览器
+夹具（`pageFixture`）每次都要启 chromium 且依赖「先播种 → 后读面板/任务」的进程内共享时序（cloud
+任务服务为进程内共享状态），并发会互相干扰。注册表已同步登记 `internal/archcheck/serial_budgets.tsv`
+（该文件 4 → 5，总数 +1）。

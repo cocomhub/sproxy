@@ -78,6 +78,10 @@ type CloudTask struct {
 	TransferURL string `json:"transfer_url,omitempty"`
 	// TransferErr 是转存失败原因（重试耗尽后记录；后续告警接入）。
 	TransferErr string `json:"transfer_err,omitempty"`
+	// MetaExtra 是客户端随转存提供的自定义元数据（转存成功后合并进目标卷 meta.Extra）。
+	// 服务端另叠加来源信息（source=transfer / source_url / etag / transferred_at），
+	// 供下游区分「转存产物」与「直接上传」并溯源（用户裁定 2026-10-27）。
+	MetaExtra map[string]any `json:"meta_extra,omitempty"`
 	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。false = 服务端可
 	// 转存后即删（不需保留给客户端拉取）。true 时即便无 transfer/save 语义也成立
 	// （客户端会拉取），创建期真空洞校验以此消歧。
@@ -915,4 +919,7 @@ type TaskParams struct {
 	Save          bool
 	// IntegrityMustPass 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
 	IntegrityMustPass bool
+	// MetaExtra 是转存产物的自定义元数据（客户端传入；转存成功后与来源信息合并写入
+	// 目标卷 meta.Extra）。仅 Transfer 非 nil 时有意义（无转存则丢弃）。
+	MetaExtra map[string]any
 }

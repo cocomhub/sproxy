@@ -651,3 +651,11 @@ test('volumesTableHtml 重建索引按钮 HTML 转义卷名', () => {
   const html = r.volumesTableHtml([{ name: 'a"b', mode: 'deny', capacity: 0, usage: 0, allowed: false }]);
   assert.ok(html.includes('data-vol="a&quot;b"'), '卷名应转义（防注入）');
 });
+
+// cloudDownloadFormHtml 含 meta-extra 输入（转存产物自定义元数据），且无内联亮色 hex。
+test('cloudDownloadFormHtml 含 meta-extra 输入框', () => {
+  const html = r.cloudDownloadFormHtml({ volumes: [{ name: 'v1', type: 'secretdata' }] });
+  assert.ok(html.includes('name="meta-extra"'), '应含 name="meta-extra" 输入');
+  assert.ok(html.includes('cloud-behavior-form'), '应含行为表单容器');
+  assert.ok(!/#[0-9a-fA-F]{6}/.test(html), '不应内联亮色 hex（暗色兼容）');
+});

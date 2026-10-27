@@ -9,9 +9,10 @@
  * 端点语义对齐 server handlers（cloud_download_handler.go / cloud_archive_handler.go）：
  *   - createDownload(url, filename, opts)  POST /api/cloud/download
  *   - createBatch(urls, opts)            POST /api/cloud/download/batch  urls=[{url,filename}]
- *   opts 可选，透传四行为（均缺省不发送 = 零回归）：transfer:{volume,path}、
+ *   opts 可选，透传行为（均缺省不发送 = 零回归）：transfer:{volume,path}、
  *   save:bool、downloadLocal:bool（JSON 键 download_local）、integrityMustPass:bool
- *   （JSON 键 integrity_must_pass）。
+ *   （JSON 键 integrity_must_pass）、metaExtra:object（JSON 键 meta_extra，转存产物
+ *   自定义元数据，服务端与来源信息合并写目标卷）。
  *   - listTasks(opts)                 GET  /api/cloud/tasks?status=&offset=&limit=
  *   - getTask(id)                    GET  /api/cloud/tasks/{id}
  *   - cancelTask(id)                 POST /api/cloud/tasks/{id}/cancel
@@ -96,6 +97,9 @@
       if (o.save === false) data.save = false;
       if (o.downloadLocal === true) data.download_local = true;
       if (o.integrityMustPass === true) data.integrity_must_pass = true;
+      if (o.metaExtra && typeof o.metaExtra === 'object' && Object.keys(o.metaExtra).length > 0) {
+        data.meta_extra = o.metaExtra;
+      }
     }
 
     function createDownload(url, filename, opts) {
