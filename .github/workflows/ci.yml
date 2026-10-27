@@ -150,8 +150,11 @@ jobs:
       # （Windows 4 核 ~4m25s 证明测试本身健康）；secretdata mock 派生落地后应回落到 ~3m，
       # 届时可收紧回 5m（独立 PR 处理，避免阻塞依赖 secret 的功能）。
       - name: go test (race + coverage, incl Vault L2/L3)
+        # TEST_EXCLUDE=internal/archcheck：archcheck 门禁已在 Lint job 非 race 跑（13s），
+        # race 全量在 Test job 里是纯耗时（Windows 实测 87s / ubuntu 70s——全仓扫描子进程
+        # 被 race 检测器放大）。从本 job 剔除，门禁不丢。
         run: |
-          VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test GOTEST_TIMEOUT="-timeout=20m" TEST_COVER_PROFILE=build/cover.out
+          VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test GOTEST_TIMEOUT="-timeout=20m" TEST_COVER_PROFILE=build/cover.out TEST_EXCLUDE=internal/archcheck
           mkdir -p build/coverage
           cp build/cover.out build/coverage/root.out
           make cover-check COVER_REUSE=1 GOTEST_TIMEOUT="-timeout=20m"
@@ -193,7 +196,8 @@ jobs:
 
       - name: go test (race)
         # GOTEST_TIMEOUT 20m：2 核 runner 全量超时缓解（同 Test (ubuntu) job 注记）。
-        run: make test GOTEST_TIMEOUT="-timeout=20m"
+        # 同 ubuntu：archcheck 剔除（门禁在 Lint job），-87s。
+        run: make test GOTEST_TIMEOUT="-timeout=20m" TEST_EXCLUDE=internal/archcheck
 
   test-submodules:
     name: Test Sub-Modules (cmd + ext + hub + mesh)
