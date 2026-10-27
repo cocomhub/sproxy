@@ -31,14 +31,9 @@
     <button id="lang-toggle" type="button" title="切换语言 / Switch language" data-i18n="lang_switch">语言</button>
     <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
     <input type="file" id="file-input" multiple style="display:none">
-    <label for="upload-volume" style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-secondary);white-space:nowrap;" title="上传目标卷（默认 auto）">卷
-      <select id="upload-volume" aria-label="上传卷" style="padding:5px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;color:var(--text-primary);background:var(--bg-input);">
-        <option value="">auto</option>
-      </select>
-    </label>
-    <label for="volume-filter" style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-secondary);white-space:nowrap;" title="文件列表卷过滤（默认全部卷；选中后切到该卷明文目录，含加密卷）">过滤卷
-      <select id="volume-filter" aria-label="列表卷过滤" style="padding:5px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;color:var(--text-primary);background:var(--bg-input);">
-        <option value="">全部卷</option>
+    <label for="volume-select" style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-secondary);white-space:nowrap;" title="当前工作卷：影响文件列表过滤、上传目标与卷内操作（空 = 全部卷 / 自动定位；选择持久化，刷新后保留）"><span data-i18n="volume_lbl">卷</span>
+      <select id="volume-select" aria-label="当前卷" style="padding:5px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;color:var(--text-primary);background:var(--bg-input);">
+        <option value="">全部卷 / auto</option>
       </select>
     </label>
     <button type="button" id="refresh-btn" class="btn btn-secondary">刷新列表</button>

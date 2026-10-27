@@ -568,6 +568,20 @@ test('buildFileRowHtml 分享按钮带 data-volume（行卷优先）', () => {
   assert.ok(withoutVol.includes('data-volume=""'), '无行卷时为空串（服务端自动定位）');
 });
 
+// 下载/预览/删除/重命名按钮同样必须带**文件行自身所在卷**（data-volume）：外部/加密卷上
+// 这些操作依赖行卷做 ?volume= 定位（用户裁定 2026-10-27：行卷优先，回落当前过滤卷）。
+test('buildFileRowHtml 下载/预览/删除/重命名按钮带 data-volume（行卷优先）', () => {
+  const withVol = r.buildFileRowHtml({ name: 'a.txt', size: 10, volume: 'disk2' }, 'a.txt');
+  assert.ok(withVol.includes('file-download-btn'), '下载按钮存在');
+  assert.ok(withVol.includes('file-preview-btn'), '预览按钮存在');
+  assert.ok(withVol.includes('file-delete-btn'), '删除按钮存在');
+  assert.ok(withVol.includes('file-rename-btn'), '重命名按钮存在');
+  assert.ok(withVol.includes('data-volume="disk2"'), '行操作 data-volume 应取行卷');
+  // 行卷 + 过滤卷同名时以行卷为准（多卷聚合列表下最准确）。
+  const noVol = r.buildFileRowHtml({ name: 'a.txt', size: 10 }, 'a.txt');
+  assert.ok(noVol.includes('data-volume=""'), '无行卷时为空串（回落过滤卷/auto）');
+});
+
 test('shareVolumeFor：行卷优先 → 过滤卷 → 空（自动定位）', () => {
   assert.equal(r.shareVolumeFor('vault', 'default'), 'vault', '行卷优先（多卷同名不漏定位）');
   assert.equal(r.shareVolumeFor('', 'vault'), 'vault', '无行卷时用过滤卷');

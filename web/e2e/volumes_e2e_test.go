@@ -201,7 +201,7 @@ func TestVolumes_Panel(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 	// 等 initUploadVolumeSelect 的 GET /api/volumes 完成（下拉被填充），避免与点击捕获混淆。
-	if err := waitLoc(page, "#upload-volume option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+	if err := waitLoc(page, "#volume-select option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
 		t.Fatalf("upload volume select not populated: %v", err)
 	}
 
@@ -271,12 +271,12 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 	page.Goto(baseURL + "/ui/")
 
 	// 下拉静态存在（auto 打底）
-	sel := page.Locator("#upload-volume")
+	sel := page.Locator("#volume-select")
 	if cnt, _ := sel.Count(); cnt == 0 {
-		t.Fatal("#upload-volume select not found")
+		t.Fatal("#volume-select select not found")
 	}
 	// 等待 /api/volumes 异步填充可见卷 option（main 先到即可判定 populate 完成）。
-	if err := waitLoc(page, "#upload-volume option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+	if err := waitLoc(page, "#volume-select option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
 		vals, _ := volumeSelectOptions(page)
 		t.Fatalf("visible volume option not populated, current options=%v: %v", vals, err)
 	}
@@ -357,9 +357,9 @@ func seedVolumeFile(t *testing.T, baseURL, vol, filename string, content []byte)
 	}
 }
 
-// volumeSelectOptions 读取 #upload-volume 下拉的全部 option 值（浏览器端求值）。
+// volumeSelectOptions 读取 #volume-select 下拉的全部 option 值（浏览器端求值）。
 func volumeSelectOptions(page playwright.Page) ([]string, error) {
-	raw, err := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
+	raw, err := page.Evaluate(`Array.from(document.querySelectorAll('#volume-select option')).map(o => o.value)`)
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +378,7 @@ func volumeSelectOptions(page playwright.Page) ([]string, error) {
 	return got, nil
 }
 
-// assertUploadVolumeOptions 断言 #upload-volume 下拉 option 集合与 want 完全一致。
+// assertUploadVolumeOptions 断言 #volume-select 下拉 option 集合与 want 完全一致。
 func assertUploadVolumeOptions(t *testing.T, page playwright.Page, want []string) {
 	t.Helper()
 	got, err := volumeSelectOptions(page)

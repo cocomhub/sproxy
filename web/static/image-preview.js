@@ -7,15 +7,17 @@
 
 'use strict';
 
-// previewImageUrl(name, width) → 缩略图下载 URL（?transform=thumb&width=N）。
-function previewImageUrl(name, width = 1600) {
+// previewImageUrl(name, width, volume) → 缩略图下载 URL（?transform=thumb&width=N；volume 可选）。
+function previewImageUrl(name, width = 1600, volume) {
   const w = width;
-  return '/download?filename=' + encodeURIComponent(name) + '&transform=thumb&width=' + w;
+  const q = 'filename=' + encodeURIComponent(name) + '&transform=thumb&width=' + w + (volume ? '&volume=' + encodeURIComponent(volume) : '');
+  return '/download?' + q;
 }
 
-// previewOriginalUrl(name) → 原图 URL（不带 transform）。
-function previewOriginalUrl(name) {
-  return '/download?filename=' + encodeURIComponent(name);
+// previewOriginalUrl(name, volume) → 原图 URL（不带 transform；volume 可选）。
+function previewOriginalUrl(name, volume) {
+  const q = 'filename=' + encodeURIComponent(name) + (volume ? '&volume=' + encodeURIComponent(volume) : '');
+  return '/download?' + q;
 }
 
 // isImageName(name) → 扩展名是否可缩略图片（服务端 transform 注册表支持集合）。
@@ -36,14 +38,14 @@ if (typeof module !== 'undefined' && module.exports) {
 // 导出 async 变体供 app.js 调用（<img> src 动态注入）。
 
 // previewImageUrlAsync(name, width) → Promise<带票缩略图 URL>。
-async function previewImageUrlAsync(name, width) {
-  const base = previewImageUrl(name, width);
+async function previewImageUrlAsync(name, width, volume) {
+  const base = previewImageUrl(name, width, volume);
   return attachSig(base);
 }
 
-// previewOriginalUrlAsync(name) → Promise<带票原图 URL>。
-async function previewOriginalUrlAsync(name) {
-  return attachSig(previewOriginalUrl(name));
+// previewOriginalUrlAsync(name, volume) → Promise<带票原图 URL>。
+async function previewOriginalUrlAsync(name, volume) {
+  return attachSig(previewOriginalUrl(name, volume));
 }
 
 // attachSig 把 /download?query → query 交 withUrlSig 附加 ?spx_sig=（跨文件函数，node 注入）。

@@ -10,7 +10,7 @@ package e2e
 //   - 建卷：POST /api/volumes/user 创建 secretdata 封装卷（type=secretdata，e2e 专用后端，
 //     target 指向本地 main 卷；这正是 UI「卷管理」面板 vol-manage 提交的同一路径——
 //     面板表单由 /api/backends schema 驱动，字段就是 target 底层卷）；
-//   - 切加密卷看明文：文件页「过滤卷」下拉（#volume-filter）选中该加密卷 →
+//   - 切加密卷看明文：文件页「过滤卷」下拉（#volume-select）选中该加密卷 →
 //     GET /api/files?volume=secretdata 返回**明文文件名**（volume_category=wrapper），
 //     DOM 文件行渲染明文视频名；
 //   - 播放：点「▶ 播放」→ <video src="/download?filename=..."> 弹窗（加密卷视频行入口），
@@ -199,11 +199,11 @@ func TestAuditWebUI_CreateVault_SwitchList_PlayRange(t *testing.T) {
 	defer stop()
 	page.Goto(baseURL + "/ui/")
 
-	if err := waitLoc(page, "#volume-filter option[value='"+auditVaultType+"']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+	if err := waitLoc(page, "#volume-select option[value='"+auditVaultType+"']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
 		t.Fatalf("文件页「过滤卷」下拉未含 %s: %v", auditVaultType, err)
 	}
 	volResp, err := page.ExpectResponse("**/api/files?*", func() error {
-		_, serr := page.Locator("#volume-filter").SelectOption(playwright.SelectOptionValues{Values: &[]string{auditVaultType}})
+		_, serr := page.Locator("#volume-select").SelectOption(playwright.SelectOptionValues{Values: &[]string{auditVaultType}})
 		return serr
 	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(8000)})
 	if err != nil {

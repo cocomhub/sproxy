@@ -3,8 +3,8 @@
 
 // 主逻辑：文件列表、CRUD、批量操作、导航、UI 工具。
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
-// global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件三处经 typeof 守卫引用：
-//   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
+// global: setVolumeContext / currentVolume（upload.js，上传「卷」上下文 setter；本文件经 typeof 守卫引用：
+//   populateVolumeSelect 回落、volume-select change、DOMContentLoaded 恢复）
 // global: uploadFiles / checkResumableUploads / resumeUpload（upload.js，上传执行与断点续传入口：
 //   uploadFiles 由 file-input change 调用、checkResumableUploads 在 DOMContentLoaded 初始化与
 //   上传完成后调用、resumeUpload 由 transferResume 经 typeof 守卫调用）
@@ -44,13 +44,34 @@ if (!sessionStorage.getItem('sproxy_access_key') && !!accessKeyID) {
   accessKeyID = '';
   sessionStorage.removeItem('sproxy_access_key_id');
 }
-let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
+// 卷存储键：必须**在最前**声明（const TDZ——VOLUME_STORE_KEY 在 savedSubdirFor 之前被引用
+// 会抛「Cannot access before initialization」，实测整脚本中断 ⇒ 下拉/列表全空）。
+const VOLUME_STORE_KEY = 'sproxy_volume';
+// currentSubdir 初始值：**按当前工作卷恢复**（用户裁定 2026-10-27 各卷独立记忆最新路径）。
+// 各卷**各自**记忆最新路径：有记录 → 用记录；无记录 → 卷根（''）。**不回落**到全局键——
+// 否则「在 A 卷进 sub/，切到从未来过的 B 卷」会错误地停在 B 卷的 sub/ 目录。
+// 无卷（全部卷 / auto）才用全局键。
+const SUBDIR_STORE_KEY = 'sproxy_subdir';
+const SUBDIR_PER_VOL_PREFIX = 'sproxy_subdir_vol_';
+function savedSubdirFor(vol) {
+  if (vol) {
+    const v = localStorage.getItem(SUBDIR_PER_VOL_PREFIX + vol);
+    return v === null ? '' : v;
+  }
+  return localStorage.getItem(SUBDIR_STORE_KEY) || '';
+}
+let currentSubdir = savedSubdirFor(localStorage.getItem(VOLUME_STORE_KEY) || '');
 let _searchActive = false;
 let _currentOffset = 0;
 let _hasMore = false;
-// 文件页「过滤卷」下拉（#volume-filter）当前值：空 = 全部卷（不发送 ?volume=，零回归）。
-// 仅当用户选中某卷才非空；refreshList/loadMore 据此透传 volume 给 sc.files.list。
-let _volumeFilter = '';
+// 当前工作卷（工具栏「卷」下拉 #volume-select）——**单一卷上下文**（用户裁定 2026-10-27）：
+// 同时决定 ① 文件列表过滤（?volume=）② 上传目标卷 ③ 卷内文件操作回退卷。
+// 空 = 全部卷 / auto（不发送 ?volume=，零回归）。选择持久化到 localStorage——修复用户实测
+// 缺陷：「选 baidu 卷进入某目录后刷新页面，卷信息丢失但目录还在 ⇒ 列表显示为空」。
+let _volumeFilter = localStorage.getItem(VOLUME_STORE_KEY) || '';
+// _volumeRestorePending：启动时从 localStorage 恢复的卷需等 /api/volumes 确认「仍可见」后再
+// 决定是否带 ?volume= 请求列表（否则卷已删/无权限时会得到一个空列表且无从解释）。
+let _volumeRestorePending = _volumeFilter !== '';
 const PAGE_LIMIT = 500;
 
 // 传输层由 sclient 领域库统一（隧道/直连协商 + SproxySig 签名），页面级
@@ -190,12 +211,16 @@ function applyWebLoginKeys(ak, secret, id) {
   if (typeof refreshAfterAuth === 'function') void refreshAfterAuth();
 }
 
-// --- 卷：上传下拉（工具栏「卷」）---
-// 选项来源 /api/volumes（owner 可见卷）；加载失败（无凭据/未授权）时下拉保持 auto。
-function populateUploadVolumeSelect(vols) {
-  const sel = document.getElementById('upload-volume');
+// --- 卷：工具栏「卷」下拉（#volume-select）——单一卷上下文（用户裁定 2026-10-27）---
+// 选项来源 /api/volumes（owner 可见卷，含 secretdata/egress 等加密卷）。选中某卷后
+// ① refreshList({volume}) 切到该卷明文目录 ② 上传目标卷同步为同卷（currentVolume）
+// ③ 卷内文件操作回退卷（行卷优先）。首项「全部卷 / auto」（value=""）= 不发送 ?volume=
+// （零回归：未过滤时列表为全部可见卷聚合，上传为 auto 路由）。
+// 选择经 localStorage 持久化（VOLUME_STORE_KEY）——刷新/重开页面后保留（用户裁定）。
+function populateVolumeSelect(vols) {
+  const sel = document.getElementById('volume-select');
   if (!sel) return;
-  const cur = sel.value || '';
+  const cur = sel.value || _volumeFilter;
   while (sel.options.length > 1) sel.remove(1);
   for (const v of vols || []) {
     if (!(v?.name)) continue;
@@ -204,65 +229,39 @@ function populateUploadVolumeSelect(vols) {
     opt.textContent = v.name;
     sel.appendChild(opt);
   }
-  // 恢复原选择；若原选择已不在可见卷内则回落 auto。
+  // 恢复原选择；原选择已不在可见卷内则回落「全部卷 / auto」。
   let found = false;
   for (const opt of sel.options) {
     if (opt.value === cur) { found = true; break; }
   }
   sel.value = found ? cur : '';
+  // 单一卷上下文：列表过滤 + 上传目标同步（幂等；空串 = auto）。
+  // 持久化选择被卷确认不可见（已删/无权限）时，同步清掉 localStorage（避免下次刷新重蹈）。
+  if (!found && cur !== '') {
+    localStorage.removeItem(VOLUME_STORE_KEY);
+    _volumeFilter = '';
+  } else {
+    _volumeFilter = sel.value;
+  }
   if (typeof setVolumeContext === 'function') setVolumeContext(sel.value);
 }
 
-async function initUploadVolumeSelect() {
+async function initVolumeSelect() {
   try {
     const data = await sc.files.volumes();
-    populateUploadVolumeSelect(data?.volumes);
-  } catch (e) { /* 无凭据/未授权/无卷 API：保持 auto，不破坏无认证浏览 */ }
+    populateVolumeSelect(data?.volumes);
+  } catch (e) { /* 无凭据/未授权/无卷 API：保持空（全部卷 / auto），不破坏无认证浏览 */ }
+  _volumeRestorePending = false;
 }
 
-// --- 文件页「过滤卷」下拉（工具栏「过滤卷」；独立于上传卷下拉 #upload-volume）---
-// 选项来源 /api/volumes（owner 可见卷，含 secretdata/egress 等加密卷）。选中某卷后
-// refreshList({volume}) 切到该卷明文目录；首项「全部卷」（value=""）= 不发送 ?volume=
-// （零回归：未过滤时列表为全部可见卷聚合）。
-function populateVolumeFilterSelect(vols) {
-  const sel = document.getElementById('volume-filter');
-  if (!sel) return;
-  const cur = sel.value || '';
-  while (sel.options.length > 1) sel.remove(1);
-  for (const v of vols || []) {
-    if (!(v?.name)) continue;
-    const opt = document.createElement('option');
-    opt.value = v.name;
-    opt.textContent = v.name;
-    sel.appendChild(opt);
-  }
-  // 恢复原选择；原选择已不在可见卷内则回落「全部卷」。
-  let found = false;
-  for (const opt of sel.options) {
-    if (opt.value === cur) { found = true; break; }
-  }
-  sel.value = found ? cur : '';
-}
-
-async function initVolumeFilter() {
-  try {
-    const data = await sc.files.volumes();
-    populateVolumeFilterSelect(data?.volumes);
-  } catch (e) { /* 无凭据/未授权/无卷 API：保持「全部卷」，不破坏无认证浏览 */ }
-}
-
-// refreshVolumeSelects 重新拉取 /api/volumes 并刷新**两个**卷下拉（文件页「过滤卷」+ 工具栏
-// 「上传卷」）。两者互不相干：一个决定列表过滤、一个决定上传目标。
+// refreshVolumeSelect 重新拉取 /api/volumes 并刷新「卷」下拉。
 //
-// 为什么需要显式刷新（缺陷修复，2026-10-21）：两个下拉只在 DOMContentLoaded 时初始化一次
-// （见文件末尾 `initVolumeFilter()` / `initUploadVolumeSelect()` 调用点）。登录前那次
-// `/api/volumes` 因无凭据 401 ⇒ 下拉只剩「全部卷」/auto；登录成功后若只 `refreshList()`，
-// 下拉**永不重试** ⇒ 运行时创建的卷（如 secretdata `vault`）在「过滤卷」里看不到（用户实测）。
+// 为什么需要显式刷新（缺陷修复，2026-10-21）：下拉只在 DOMContentLoaded 时初始化一次
+// （见文件末尾 `initVolumeSelect()` 调用点）。登录前那次 `/api/volumes` 因无凭据 401 ⇒ 下拉
+// 只剩「全部卷 / auto」；登录成功后若只 `refreshList()`，下拉**永不重试** ⇒ 运行时创建的卷
+// （如 secretdata `vault`）在下拉里看不到（用户实测）。
 async function refreshVolumeSelects() {
-  await Promise.all([
-    initVolumeFilter(),
-    initUploadVolumeSelect(),
-  ]);
+  await initVolumeSelect();
 }
 
 // refreshAfterAuth 是「凭据生效后」的唯一刷新入口（登录成功 / 会话密钥变更后调用）：
@@ -312,16 +311,25 @@ function copyChecksum(cs) {
 // --- 文件列表 ---
 async function refreshList(opts) {
   const o = opts || {};
-  // 支持 {volume} 参数：显式传入时同步模块级 _volumeFilter（「过滤卷」change 走此路径，
+  // 支持 {volume} 参数：显式传入时同步模块级 _volumeFilter（「卷」下拉 change 走此路径，
   // 后续 refreshList/loadMore 沿用当前过滤）。volume 为空字符串 = 全部卷（不发送）。
-  if (o.volume !== undefined) _volumeFilter = o.volume || '';
+  if (o.volume !== undefined) {
+    _volumeFilter = o.volume || '';
+    localStorage.setItem(VOLUME_STORE_KEY, _volumeFilter);
+  }
   const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
   updateBreadcrumb();
   _currentOffset = 0;
   _hasMore = false;
   try {
-    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT, volume: _volumeFilter || undefined });
+    // 启动时从 localStorage 恢复的卷（_volumeRestorePending）需先经 /api/volumes 确认仍可见：
+    // 卷已删/无权限时回落全部卷（否则会得到一个空列表且无从解释）。确认流程由
+    // initVolumeSelect 异步完成（populateVolumeSelect 会把不可见卷重置为 ''），
+    // 这里在确认完成前**不发送** ?volume=（避免带已失效卷名请求）。
+    let vol = _volumeFilter;
+    if (_volumeRestorePending) vol = '';
+    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT, volume: vol || undefined });
     let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset = files.length;
     _hasMore = (data.total || 0) > _currentOffset;
@@ -336,7 +344,9 @@ async function refreshList(opts) {
 async function loadMore() {
   const el = document.getElementById('file-list');
   try {
-    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT, volume: _volumeFilter || undefined });
+    let vol = _volumeFilter;
+    if (_volumeRestorePending) vol = '';
+    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT, volume: vol || undefined });
     let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset += files.length;
     _hasMore = (data.total || 0) > _currentOffset;
@@ -390,10 +400,16 @@ function clearSearch() {
   void refreshList();
 }
 
-// --- 目录导航 ---
+// --- 目录导航（按卷分别保存最新路径——用户裁定 2026-10-27）---
+// 每个卷独立记忆最后访问的目录：切卷时自动跳到该卷上次所在目录（
+// 修复用户实测缺陷「选卷后刷新，卷丢失但目录还在 ⇒ 显示空」）；
+// 进入目录时把 currentSubdir 记到该卷名下，下次切回该卷自动恢复。
+// （键常量与 savedSubdirFor 定义在文件顶部——currentSubdir 初值就靠它。）
 function navigateDir(subdir) {
   currentSubdir = subdir;
-  localStorage.setItem('sproxy_subdir', subdir);
+  localStorage.setItem(SUBDIR_STORE_KEY, subdir);
+  const vol = _volumeFilter || '';
+  if (vol) localStorage.setItem(SUBDIR_PER_VOL_PREFIX + vol, subdir);
   void refreshList();
 }
 
@@ -420,7 +436,7 @@ async function mkdirDir() {
   if (!name) { showToast('请输入目录名', 'warning'); return; }
   const dirPath = currentSubdir ? currentSubdir + '/' + name : name;
   try {
-    const data = await sc.files.mkdir(dirPath);
+    const data = await sc.files.mkdir(dirPath, _volumeFilter || undefined);
     if (data?.success) {
       showToast('目录已创建: ' + dirPath, 'success');
       input.value = '';
@@ -432,7 +448,7 @@ async function mkdirDir() {
 async function rmdirDir(dirPath) {
   if (!confirm('确认删除目录 "' + dirPath + '" 及其所有内容?')) return;
   try {
-    const data = await sc.files.rmdir(dirPath);
+    const data = await sc.files.rmdir(dirPath, _volumeFilter || undefined);
     if (data?.success) { showToast('目录已删除: ' + dirPath, 'success'); void refreshList(); }
     else { showToast('删除目录失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('删除目录失败: ' + e.message, 'error'); }
@@ -442,13 +458,16 @@ async function rmdirDir(dirPath) {
 // downloadFile 入口改组：先 stat 取 size/mtime/checksum，再委派 download.js 的分块管线
 //（并发 3 拉取 → IndexedDB 缓存 → 完成后合并 Blob → 本文件 triggerDownload 保存 + toast）。
 // 旧的全量 GET /download（sc.files.download）作为无 download.js 时的保底回落（保留）。
-async function downloadFile(name, expectedChecksum) {
+// volume：行卷优先（data-volume），空则回落当前过滤卷（用户裁定 2026-10-27）。
+async function downloadFile(name, expectedChecksum, vol) {
+  const volume = vol || _volumeFilter || undefined;
   if (typeof downloadMgr !== 'undefined' && downloadMgr?.createDownloadManager) {
     const mgr = getDownloadManager();
     try {
-      const statRes = await sc.files.stat(name);
+      const statRes = await sc.files.stat(name, volume);
       const meta = httpFileMeta(statRes);
       const result = await mgr.startDownload(name, meta, {
+        volume: volume, // 下载管线 stat/chunk 透传（外部/加密卷必需）
         // 完成回调由本文件提供：triggerDownload 保存 + toast（管线自身不含 DOM）。
         onComplete: function (blob, filename) {
           triggerDownload(filename, blob);
@@ -461,10 +480,10 @@ async function downloadFile(name, expectedChecksum) {
     } catch (e) {
       // 传输/建项失败 → 回落旧全量下载（保证下载入口可用），并提示已回退。
       showToast(name + ' 分块下载启动失败，回落全量下载: ' + e.message, 'warning');
-      return legacyDownloadFile(name, expectedChecksum);
+      return legacyDownloadFile(name, expectedChecksum, volume);
     }
   }
-  return legacyDownloadFile(name, expectedChecksum);
+  return legacyDownloadFile(name, expectedChecksum, volume);
 }
 
 // httpFileMeta 从 stat 响应 {headers} 提取下载管线 stat 参数 {size, mtime, checksum}
@@ -495,8 +514,8 @@ function getDownloadManager() {
 }
 
 // legacyDownloadFile：旧全量 GET /download（保底回落）——保留但不再默认走。
-async function legacyDownloadFile(name, expectedChecksum) {  try {
-    const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' } });
+async function legacyDownloadFile(name, expectedChecksum, volume) {  try {
+    const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' }, volume: volume });
     const serverCS = headers?.['X-File-Checksum'] || '';
     if (serverCS) {
       const localCS = await computeFileSHA256(blob);
@@ -567,26 +586,55 @@ function itemParentDir(filename) {
 }
 
 // --- 删除 ---
-async function deleteFile(name, checksum) {
+async function deleteFile(name, checksum, vol) {
+  const volume = vol || _volumeFilter || undefined;
+  // checksum 缺失时先 stat 兜底（外部卷列表不返回 checksum——见 resolveOpChecksum）。
+  // 先于 confirm 做：拿不到就立即报错，不让用户白确认一遍。
+  const cs = await resolveOpChecksum(name, checksum, volume, '删除');
+  if (!cs) return;
   if (!confirm('确认删除 "' + name + '"?')) return;
-  if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
   try {
-    const data = await sc.files.deleteFile(name, checksum);
+    const data = await sc.files.deleteFile(name, cs, volume);
     if (data?.success) { showToast('删除成功: ' + name, 'success'); void refreshList(); }
     else { showToast('删除失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
 // --- 重命名 ---
-async function renameFile(name, checksum) {
-  if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
+async function renameFile(name, checksum, vol) {
   const newName = prompt('新的文件名（路径）:', name);
   if (!newName || newName === name) return;
+  const volume = vol || _volumeFilter || undefined;
   try {
-    const data = await sc.files.rename(name, newName, checksum);
+    const cs = await resolveOpChecksum(name, checksum, volume, '重命名');
+    if (!cs) return;
+    const data = await sc.files.rename(name, newName, cs, volume);
     if (data?.success) { showToast('重命名成功: ' + newName, 'success'); void refreshList(); }
     else { showToast('重命名失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('重命名失败: ' + e.message, 'error'); }
+}
+
+// resolveOpChecksum 为写操作取源文件 checksum：列表已带则直接用；否则 HEAD stat 兜底。
+//
+// 为什么需要（用户实测 2026-10-27）：**外部卷**（baidupcs / secretdata / S3 …）列举不
+// 携带 checksum——它们的整文件哈希在卷内 meta（sidecar / 加密 meta）而逐条读会 n 次远端
+// 往返。Web UI 行 `data-checksum` 因此为空，旧实现在前端直接报「缺少 checksum」→ 外部卷
+// **无法删除/改名**（功能死路）。CLI 侧 FileClient.Delete 一直是「先 Stat 取 checksum 再删」
+// 所以 CLI 无此问题——本函数把同一语义搬到前端（单次 HEAD，按需发生，列表不变慢）。
+// 返回空串 = 确实拿不到（调用方已 toast，调用处 return）。
+async function resolveOpChecksum(name, checksum, volume, actionLabel) {
+  if (checksum) return checksum;
+  let res;
+  try {
+    res = await sc.files.stat(name, volume);
+  } catch (e) {
+    showToast(actionLabel + '失败: 读取文件信息出错（' + e.message + '）', 'error');
+    return '';
+  }
+  const meta = httpFileMeta(res);
+  if (meta.checksum) return meta.checksum;
+  showToast('缺少 checksum，无法校验完整性' + (volume ? '（卷 ' + volume + '）' : ''), 'error');
+  return '';
 }
 
 // --- 批量操作 ---
@@ -615,9 +663,42 @@ function getSelectedFiles() {
   for (const cb of document.querySelectorAll('.file-select:checked')) {
     const filename = cb.dataset.filename;
     const checksum = cb.dataset.checksum;
-    if (filename) results.push({ filename: filename, checksum: checksum });
+    // volume：行卷（外部/加密卷上批量操作需定位——与单条操作同一优先级）。
+    const volume = cb.dataset.volume || '';
+    if (filename) results.push({ filename: filename, checksum: checksum, volume: volume });
   }
   return results;
+}
+
+// fillMissingChecksums 为批量写操作补 checksum（列表未带的逐条 HEAD stat 兜底）。
+// 返回 { items, missing }：missing 为非空时调用方应中止（无法校验的条目不得静默操作）。
+async function fillMissingChecksums(items, actionLabel) {
+  const out = [];
+  const missing = [];
+  for (const it of items) {
+    if (it.checksum) {
+      out.push(it);
+      continue;
+    }
+    let cs = '';
+    try {
+      cs = httpFileMeta(await sc.files.stat(it.filename, it.volume || _volumeFilter || undefined)).checksum;
+    } catch (e) {
+      missing.push(it.filename + '（' + e.message + '）');
+      continue;
+    }
+    if (!cs) {
+      missing.push(it.filename);
+      continue;
+    }
+    out.push({ filename: it.filename, checksum: cs, volume: it.volume });
+  }
+  if (missing.length > 0) {
+    showToast(actionLabel + '中止：以下文件无法取得 checksum —— ' + missing.slice(0, 3).join(', ') +
+      (missing.length > 3 ? ' 等 ' + missing.length + ' 个' : ''), 'error');
+    return { items: out, missing: missing };
+  }
+  return { items: out, missing: missing };
 }
 
 async function batchDelete() {
@@ -625,10 +706,13 @@ async function batchDelete() {
   if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
   if (!confirm('确定要删除选中的 ' + files.length + ' 个文件吗？')) return;
   try {
+    const filled = await fillMissingChecksums(files, '批量删除');
+    if (filled.missing.length > 0) return;
+    const payload = filled.items.map(function(f) { return { filename: f.filename, checksum: f.checksum }; });
     // 服务端 /api/batch/delete 回包为 {results:[{filename,success,message}]}（无顶层
     // success）——成败与文案统一由 appRender.batchOpSummary 归一；逐条处理下部分成功
     // 也会落盘，故无论成败都 refreshList()。
-    const data = await sc.files.batchDelete(files);
+    const data = await sc.files.batchDelete(payload);
     const s = appRender.batchOpSummary(data?.results || [], '删除');
     showToast(s.message, s.ok ? 'success' : 'error');
     // 与 batchRename 对称：先复位选择态（否则删空后 refreshList 走空列表提前返回，
@@ -647,9 +731,17 @@ async function batchRename() {
     if (newName === null) continue;
     if (newName.trim() === '') { showToast('文件名不能为空', 'error'); return; }
     if (newName === f.filename) continue;
-    operations.push({ from: f.filename, to: newName, checksum: f.checksum });
+    operations.push({ from: f.filename, to: newName, checksum: f.checksum, volume: f.volume });
   }
   if (operations.length === 0) { showToast('没有需要重命名的文件', 'info'); return; }
+  // 外部卷列表不带 checksum ⇒ 逐条 HEAD stat 兜底（缺则中止，不静默跳校验）。
+  const filled = await fillMissingChecksums(
+    operations.map(function(o) { return { filename: o.from, checksum: o.checksum, volume: o.volume }; }),
+    '批量重命名');
+  if (filled.missing.length > 0) return;
+  for (let i = 0; i < operations.length; i++) {
+    operations[i].checksum = filled.items[i].checksum;
+  }
   try {
     // prompt 取消/跳过的项不进 operations，故以服务端 results 为准（逐条 {success,message}）；
     // 部分成功也会落盘，因此无论成败都清选择 + refreshList()。
@@ -3384,28 +3476,32 @@ document.addEventListener('DOMContentLoaded', function() {
     transportCb.addEventListener('change', function() { toggleTransport(transportCb); });
   }
 
-  // 文件输入（上传前把「卷」下拉当前值写入 upload.js 卷上下文）
-  const uploadVolumeSel = document.getElementById('upload-volume');
-  if (uploadVolumeSel) {
-    uploadVolumeSel.addEventListener('change', function() {
-      if (typeof setVolumeContext === 'function') setVolumeContext(uploadVolumeSel.value);
+  // 「卷」下拉（工具栏 #volume-select）——单一卷上下文：change → 列表过滤 + 上传目标同步
+  // + **自动跳到该卷上次所在目录**（用户裁定 2026-10-27：各卷独立记忆最新路径）。
+  // 选择持久化到 localStorage（VOLUME_STORE_KEY）——刷新/重开页面后保留（用户裁定）。
+  const volumeSel = document.getElementById('volume-select');
+  if (volumeSel) {
+    volumeSel.addEventListener('change', function() {
+      const v = volumeSel.value;
+      localStorage.setItem(VOLUME_STORE_KEY, v);
+      _volumeFilter = v;
+      if (typeof setVolumeContext === 'function') setVolumeContext(v);
+      // 切卷 → 恢复该卷上次访问的目录（无专用记录 → 卷根 ''）。
+      currentSubdir = savedSubdirFor(v);
+      navigateDir(currentSubdir);
     });
+    // DOMContentLoaded 时恢复持久化选择（下拉 value 由 initVolumeSelect 的 populate 设置）。
+    volumeSel.value = _volumeFilter;
+    if (typeof setVolumeContext === 'function') setVolumeContext(_volumeFilter);
   }
+  void initVolumeSelect();
+
+  // 文件输入（上传前把「卷」上下文同步到 upload.js——单一卷上下文下拉已在上方 change 时
+  // setVolumeContext；此处再兜底一次：文件选择发生在下拉 change 之后也保证一致）。
   document.getElementById('file-input').addEventListener('change', function() {
-    if (uploadVolumeSel && typeof setVolumeContext === 'function') setVolumeContext(uploadVolumeSel.value);
+    if (typeof setVolumeContext === 'function') setVolumeContext(_volumeFilter);
     uploadFiles(this.files);
   });
-  void initUploadVolumeSelect();
-
-  // 文件页「过滤卷」下拉（独立于上传卷下拉 #upload-volume）：选中 → 切到该卷明文目录。
-  // 首项「全部卷」（value=""）→ refreshList({volume:''}) 回落聚合视图（不发送 ?volume=）。
-  const volumeFilterSel = document.getElementById('volume-filter');
-  if (volumeFilterSel) {
-    volumeFilterSel.addEventListener('change', function() {
-      void refreshList({ volume: volumeFilterSel.value });
-    });
-  }
-  void initVolumeFilter();
 
   // 工具栏
   document.getElementById('refresh-btn').addEventListener('click', refreshList);
@@ -3620,17 +3716,17 @@ function initDynamicEventDelegation() {
       const btn = e.target.closest('button');
       if (!btn) return;
 
-      // 文件操作按钮
+      // 文件操作按钮（行卷优先：data-volume；空则回落当前过滤卷）
       if (btn.classList.contains('file-download-btn')) {
-        void downloadFile(btn.dataset.filename, btn.dataset.checksum);
+        void downloadFile(btn.dataset.filename, btn.dataset.checksum, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-delete-btn')) {
-        void deleteFile(btn.dataset.filename, btn.dataset.checksum);
+        void deleteFile(btn.dataset.filename, btn.dataset.checksum, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-rename-btn')) {
-        void renameFile(btn.dataset.filename, btn.dataset.checksum);
+        void renameFile(btn.dataset.filename, btn.dataset.checksum, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-share-btn')) {
@@ -3642,7 +3738,7 @@ function initDynamicEventDelegation() {
         return;
       }
       if (btn.classList.contains('file-preview-btn')) {
-        previewFile(btn.dataset.filename);
+        previewFile(btn.dataset.filename, btn.dataset.volume || '');
         return;
       }
       // 视频行「▶ 播放」→ 标准 <video> Range 播放弹窗（data-volume 空 = 服务端 auto 路由）。
@@ -3857,22 +3953,22 @@ function handleDroppedFiles(files) {
 }
 
 // --- 文件预览 ---
-function previewFile(filename) {
+function previewFile(filename, volume) {
   const ext = filename.split('.').pop().toLowerCase();
 
   if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
-    void previewImage(filename);
+    void previewImage(filename, volume);
   } else if (['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'].includes(ext)) {
-    void previewText(filename);
+    void previewText(filename, volume);
   } else {
-    void downloadFile(filename);
+    void downloadFile(filename, '', volume);
   }
 }
 
 // previewImage 展示图片预览弹窗（登录态下用 URL 票，2026-10-21）：
 // `<img>` 无法自定义 Authorization 头 ⇒ 经 previewImageUrlAsync/previewOriginalUrlAsync
 // 附加 `?spx_sig=`（无凭据时原样回落，无认证部署不受影响）。
-async function previewImage(filename) {
+async function previewImage(filename, volume) {
   const modal = document.createElement('div');
   modal.className = 'modal-overlay-img';
   modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
@@ -3890,10 +3986,10 @@ async function previewImage(filename) {
   img.onerror = function () {
     if (!thumbLoaded) {
       thumbLoaded = true;
-      void previewOriginalUrlAsync(filename).then(function (u) { img.src = u; });
+      void previewOriginalUrlAsync(filename, volume).then(function (u) { img.src = u; });
     }
   };
-  const thumbUrl = await previewImageUrlAsync(filename, 1600);
+  const thumbUrl = await previewImageUrlAsync(filename, 1600, volume);
   img.src = thumbUrl;
   thumbLoaded = true; // 首次即视为加载原图级（onerror 只在初次失败时回退）
   // 点击：缩略图 → 原图 → 关闭（两态轮换后关闭）。
@@ -3901,16 +3997,16 @@ async function previewImage(filename) {
   modal.addEventListener('click', function () {
     if (stage === 0) {
       stage = 1;
-      void previewOriginalUrlAsync(filename).then(function (u) { img.src = u; });
+      void previewOriginalUrlAsync(filename, volume).then(function (u) { img.src = u; });
     } else if (document.body.contains(modal)) {
       modal.remove();
     }
   });
 }
 
-async function previewText(filename) {
+async function previewText(filename, volume) {
   try {
-    const { blob } = await sc.files.download(filename);
+    const { blob } = await sc.files.download(filename, { volume: volume });
     let text = await blob.text();
     const lines = text.split('\n');
     if (lines.length > 100) {

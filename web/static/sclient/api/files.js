@@ -186,8 +186,8 @@
       return jsonRequest('GET', urlWithParams('/api/files/search', { q: q }));
     }
 
-    function stat(filename) {
-      return coreRequest('HEAD', '/api/files/stat?filename=' + encodeURIComponent(filename), {});
+    function stat(filename, volume) {
+      return coreRequest('HEAD', urlWithParams('/api/files/stat', { filename: filename, volume: volume }), {});
     }
 
     // ---- 文件元数据 extra（读/写，2026-10-26 读闭环） ----
@@ -250,6 +250,7 @@
       const dlHeaders = Object.assign({}, p.downloadHeaders || {});
       const params = { filename: filename };
       if (p.kind) params.kind = p.kind;
+      if (p.volume) params.volume = p.volume; // 显式卷定位（行卷优先；空 = auto）
       return coreRequest('GET', urlWithParams('/download', params), {
         headers: headers,
         download: true,
@@ -260,27 +261,29 @@
       });
     }
 
-    // ---- 目录 ----
-    function mkdir(dirname) {
-      return jsonRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirname), undefined);
+    // ---- 目录（volume 可选：显式卷定位——外部/加密卷上建/删目录必需）----
+    function mkdir(dirname, volume) {
+      return jsonRequest('POST', urlWithParams('/mkdir', { dirname: dirname, volume: volume }), undefined);
     }
-    function rmdir(dirname) {
+    function rmdir(dirname, volume) {
       // 服务端对非空目录要求 ?force=true（防误删）；Web 删除目录前已 confirm，
       // 故此处永远带 force=true（手动删目录同样过 confirm）。
-      return jsonRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirname) + '&force=true', undefined);
+      return jsonRequest('POST', urlWithParams('/rmdir', { dirname: dirname, volume: volume, force: 'true' }), undefined);
     }
 
-    // ---- 删除 / 重命名（需要 X-File-Checksum 头）----
-    function deleteFile(filename, checksum) {
-      const path = '/delete?filename=' + encodeURIComponent(filename);
+    // ---- 删除 / 重命名（需要 X-File-Checksum 头；volume 可选：行卷优先）----
+    function deleteFile(filename, checksum, volume) {
+      const path = urlWithParams('/delete', { filename: filename, volume: volume });
       return coreRequest('POST', path, { headers: { 'X-File-Checksum': checksum || '' } }).then(decodeOp);
     }
-    function rename(from, to, checksum) {
-      const path = '/rename?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
+    function rename(from, to, checksum, volume) {
+      const path = urlWithParams('/rename', { from: from, to: to, volume: volume });
       return coreRequest('POST', path, { headers: { 'X-File-Checksum': checksum || '' } }).then(decodeOp);
     }
 
     // ---- 批量 ----
+    // 服务端批量族在 owner 卷视图内**跨卷定位**（不改协议、不读 ?volume=）⇒ 单卷内同名 rel
+    // 歧义由行卷+隔离粒度保证（批量仅对当前列表可见项发起）。
     function batchDelete(files) { return jsonRequest('POST', '/api/batch/delete', { files: files }); }
     function batchRename(operations) { return jsonRequest('POST', '/api/batch/rename', { operations: operations }); }
 
@@ -309,14 +312,14 @@
 
     // ---- 版本 ----
     const versions = {
-      list: function (filename) {
-        return jsonRequest('GET', '/api/versions?filename=' + encodeURIComponent(filename), undefined);
+      list: function (filename, volume) {
+        return jsonRequest('GET', urlWithParams('/api/versions', { filename: filename, volume: volume }), undefined);
       },
-      restore: function (filename, versionId) {
-        return jsonRequest('POST', '/api/versions/restore?filename=' + encodeURIComponent(filename) + '&version_id=' + encodeURIComponent(String(versionId)), {});
+      restore: function (filename, versionId, volume) {
+        return jsonRequest('POST', urlWithParams('/api/versions/restore', { filename: filename, version_id: versionId, volume: volume }), {});
       },
-      delete: function (filename, versionId) {
-        return jsonRequest('DELETE', '/api/versions?filename=' + encodeURIComponent(filename) + '&version_id=' + encodeURIComponent(String(versionId)), {});
+      delete: function (filename, versionId, volume) {
+        return jsonRequest('DELETE', urlWithParams('/api/versions', { filename: filename, version_id: versionId, volume: volume }), {});
       },
     };
 

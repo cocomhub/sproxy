@@ -1034,6 +1034,47 @@ test('files deleteFile/rename 带 X-File-Checksum 头映射', async () => {
   assert.strictEqual(core.calls[1].opts.headers['X-File-Checksum'], 'cafebeef');
 });
 
+// 用户裁定 2026-10-27：下载/删除/改名等文件操作**行卷优先**（data-volume），
+// 回落当前过滤卷——多卷同名 rel 时不歧义；外部/加密卷上必需（服务端 ?volume= 定位）。
+test('files deleteFile/rename/mkdir/rmdir/stat 带可选 volume 参数', async () => {
+  const core = makeMockCore([
+    okResp({ success: true }), // delete
+    okResp({ success: true }), // rename
+    okResp({ success: true }), // mkdir
+    okResp({ success: true }), // rmdir
+    { status: 200, headers: { 'X-File-Size': '3' }, body: new Uint8Array(0) }, // stat
+  ]);
+  const api = makeApi(core);
+  await api.files.deleteFile('a.txt', 'abc123', 'disk2');
+  assert.strictEqual(core.calls[0].path, '/delete?filename=a.txt&volume=disk2', 'delete 应带行卷');
+  await api.files.rename('old.txt', 'new.txt', 'cafebeef', 'disk2');
+  assert.strictEqual(core.calls[1].path, '/rename?from=old.txt&to=new.txt&volume=disk2', 'rename 应带行卷');
+  await api.files.mkdir('d', 'disk2');
+  assert.strictEqual(core.calls[2].path, '/mkdir?dirname=d&volume=disk2', 'mkdir 应带卷');
+  await api.files.rmdir('d', 'disk2');
+  assert.strictEqual(core.calls[3].path, '/rmdir?dirname=d&volume=disk2&force=true', 'rmdir 应带卷');
+  await api.files.stat('x/y.txt', 'disk2');
+  assert.strictEqual(core.calls[4].path, '/api/files/stat?filename=x%2Fy.txt&volume=disk2', 'stat 应带卷');
+  // 不传 volume（全部卷/auto）→ 不发送（零回归）。
+  const core2 = makeMockCore([okResp({ success: true }), okResp({ success: true })]);
+  const api2 = makeApi(core2);
+  await api2.files.deleteFile('a.txt', 'abc123');
+  assert.strictEqual(core2.calls[0].path, '/delete?filename=a.txt', '无卷时不应发送 volume（auto）');
+  await api2.files.rename('o', 'n', 'c');
+  assert.strictEqual(core2.calls[1].path, '/rename?from=o&to=n', '无卷时不应发送 volume');
+});
+
+test('files.download 带可选 volume（行卷优先）', async () => {
+  const core = makeMockCore([{ status: 200, headers: { 'content-type': 'application/octet-stream' }, body: new TextEncoder().encode('d') }]);
+  const api = makeApi(core);
+  await api.files.download('x/y.txt', { volume: 'vault' });
+  assert.strictEqual(core.calls[0].path, '/download?filename=x%2Fy.txt&volume=vault', 'download 应带行卷');
+  const core2 = makeMockCore([{ status: 200, headers: {}, body: new Uint8Array(0) }]);
+  const api2 = makeApi(core2);
+  await api2.files.download('x/y.txt');
+  assert.strictEqual(core2.calls[0].path, '/download?filename=x%2Fy.txt', '无卷时不应发送 volume');
+});
+
 test('files mkdir/rmdir 映射', async () => {
   const core = makeMockCore([okResp({ success: true }), okResp({ success: true })]);
   const api = makeApi(core);
