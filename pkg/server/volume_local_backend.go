@@ -151,8 +151,11 @@ var registerLocalBackendOnce sync.Once
 // 排除本地 ✓（否则可指定任意 `RootDir` ⇒ 路径/权限面 ✗）。
 func RegisterLocalBackend() {
 	registerLocalBackendOnce.Do(func() {
+		// U4：本地卷声明 `local://` 协议（转存 URL 一致化——`local://<卷>/<rel>`）。
+		// 与既有 `volume://`（卷内定位序列化）分工：`local://` 是协议寻址（转存 URL），
+		// `volume://` 是 `Location.String()` 的卷内定位形态。
 		registry.RegisterBackend(volume.TypeLocal, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 			return NewLocalBackend(v, v.RootDir, slog.Default())
-		})
+		}, "local")
 	})
 }

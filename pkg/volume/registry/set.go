@@ -273,6 +273,12 @@ func (vs *Set) ResolveURL(ctx context.Context, url string) (io.ReadCloser, error
 			vol = before
 		}
 	}
+	// U4：`local://<卷>/<rel>` 本地卷协议寻址（统一卷模型）——不经 URLResolver（本地后端
+	// 只实现 FS），直接经统一访问器 `VolumeView(name, ViewUser)` 读。路径安全与 owner
+	// 前缀由 `volume.ResolveUserLocation` 唯一入口承担（与读路径同键空间）。
+	if scheme == "local" {
+		return vs.openLocalURL(ctx, vol, u.Path)
+	}
 	// 空 authority 或 "default" → 默认外部卷（协议默认寻址目标；卷名是装配细节）。
 	be := vs.External(vol)
 	if (vol == "" || vol == "default") && be == nil {
@@ -291,6 +297,34 @@ func (vs *Set) ResolveURL(ctx context.Context, url string) (io.ReadCloser, error
 			return nil, fmt.Errorf("registry: ResolveURL %q 的卷 %q 未实现 URLResolver（地址 %q 不可寻址）", url, vol, scheme)
 		}
 		return nil, fmt.Errorf("registry: ResolveURL %q 失败: %w", url, err)
+	}
+	return rc, nil
+}
+
+// openLocalURL 解析 `local://<卷>/<rel>`（U4）：经 `VolumeView(name, ViewUser)` 读本地卷。
+//
+// 路径语义：rel 是**卷内 user 桶相对路径**（`<rel>`，owner 前缀由卷层统一承担）——与转存
+// 目标键空间一致（`volume.ResolveUserLocation`）。路径穿越/非法段 → fail-closed 明确错误。
+func (vs *Set) openLocalURL(ctx context.Context, volName, path string) (io.ReadCloser, error) {
+	fs, ok := vs.VolumeView(volName, ViewUser)
+	if !ok || fs == nil {
+		return nil, fmt.Errorf("registry: local:// 卷 %q 未装配或不可读", volName)
+	}
+	rel := strings.TrimPrefix(path, "/")
+	if rel == "" {
+		return nil, fmt.Errorf("registry: local:// 缺少路径（%s://%s/）", "local", volName)
+	}
+	// 路径安全：volume.ResolveUserLocation（拒绝对路径/..//空段）。owner 用空（匿名）——
+	// local:// 的键是卷内 user 桶相对路径；若含 owner 前缀段则按用户路径非法拒绝。
+	v, vok := vs.ByName(volName)
+	if vok {
+		if _, lerr := v.ResolveUserLocation("", volume.Path(rel)); lerr != nil {
+			return nil, fmt.Errorf("registry: local:// 路径非法 %q: %w", rel, lerr)
+		}
+	}
+	rc, err := fs.OpenRead(ctx, rel)
+	if err != nil {
+		return nil, fmt.Errorf("registry: local:// 读 %s://%s/%s: %w", "local", volName, rel, err)
 	}
 	return rc, nil
 }

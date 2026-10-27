@@ -14,8 +14,10 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
@@ -135,6 +137,67 @@ func TestSet_VolumeView_DefaultDecoratorIsTrusted(t *testing.T) {
 	if _, ok := got.(meta.Provider); !ok {
 		t.Fatal("默认装饰视图应实现 meta.Provider")
 	}
+}
+
+// ---- U4：local:// scheme 解析 ----
+
+// TestSet_ResolveURL_LocalScheme 钉住 `local://<卷>/<rel>` 经统一访问器读本地卷内容。
+func TestSet_ResolveURL_LocalScheme(t *testing.T) {
+	t.Parallel()
+	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	if err := set.RegisterStorageVolume(fakeStorageVolume{
+		name: "v1", fs: &stubFS{content: map[string]string{"user/a.txt": "hello"}},
+	}); err != nil {
+		t.Fatalf("RegisterStorageVolume: %v", err)
+	}
+	// 让 local 协议已声明（测试进程内注册一次；用 Once 防重注册 panic）。
+	registerLocalTestScheme()
+	rc, err := set.ResolveURL(context.Background(), "local://v1/user/a.txt")
+	if err != nil {
+		t.Fatalf("local:// 解析失败: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("读内容: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("内容 = %q, want %q", got, "hello")
+	}
+}
+
+// TestSet_ResolveURL_LocalScheme_TraversalRejected 钉住路径穿越被拒（fail-closed）。
+func TestSet_ResolveURL_LocalScheme_TraversalRejected(t *testing.T) {
+	t.Parallel()
+	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	if err := set.RegisterStorageVolume(fakeStorageVolume{name: "v1", fs: &stubFS{}}); err != nil {
+		t.Fatalf("RegisterStorageVolume: %v", err)
+	}
+	registerLocalTestScheme()
+	if _, err := set.ResolveURL(context.Background(), "local://v1/../../etc/passwd"); err == nil {
+		t.Fatal("路径穿越应被拒（fail-closed）")
+	}
+}
+
+// TestSet_ResolveURL_LocalScheme_UnknownVolume 钉住未知卷 fail-closed。
+func TestSet_ResolveURL_LocalScheme_UnknownVolume(t *testing.T) {
+	t.Parallel()
+	set := NewSet(nil, nil, nil, nil, "v1")
+	registerLocalTestScheme()
+	if _, err := set.ResolveURL(context.Background(), "local://nope/a.txt"); err == nil {
+		t.Fatal("未知卷应报错（fail-closed）")
+	}
+}
+
+var localTestSchemeOnce sync.Once
+
+// registerLocalTestScheme 在测试进程内声明 `local` 协议（RegisterBackend 重名 panic ⇒ Once）。
+func registerLocalTestScheme() {
+	localTestSchemeOnce.Do(func() {
+		RegisterBackend(volume.TypeLocal, func(context.Context, volume.Volume) (ExternalBackend, error) {
+			return nil, errors.New("test local backend 不用于构造")
+		}, "local")
+	})
 }
 
 // stubFS 是 syncpkg.FS 的最小实现（测试用，仅 OpenRead/Stat 有内容语义）。
