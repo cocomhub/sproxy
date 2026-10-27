@@ -613,8 +613,32 @@ func (h *Handlers) deleteGroupArchive(owner, archiveFile string) error {
 		if scope := h.quotaScopeFor(owner, path.Join("user", userRelFromFSKey(owner, fsKey))); scope != nil {
 			scope.ReleaseUsage(charge)
 		}
+		// **卷级容量释放**（独立复审 Important-1）：本地卷产物写侧已补卷池 Adjust ⇒
+		// 删除侧同源释放（pool.ReleaseCommitted）。外部卷（CapacityFS 层已记）不双扣。
+		if h.isLocalStorageVolume(volName) {
+			if pool := h.volSet.Pool(volName); pool != nil {
+				pool.ReleaseCommitted(charge)
+			}
+		}
 	}
 	return nil
+}
+
+// settleVolumePoolCharge 把归档转存产物计入**本地卷**的卷级容量池（差分；外部卷跳过——
+// 其卷级记账在 FS 层 CapacityFS，双记会重复占用）。
+func (h *Handlers) settleVolumePoolCharge(volName string, before, after int64) {
+	if !h.isLocalStorageVolume(volName) || after <= before {
+		return
+	}
+	if pool := h.volSet.Pool(volName); pool != nil {
+		pool.Adjust(before, after)
+	}
+}
+
+// isLocalStorageVolume 报告卷是否为**本地根形态**（卷级容量权威在路由层 Pool；
+// 外部卷的卷级记账在 FS 层 CapacityFS，不在此处补）。
+func (h *Handlers) isLocalStorageVolume(volName string) bool {
+	return h.volSet != nil && h.volSet.HasLocalRoot(volName)
 }
 
 // userRelFromFSKey 把外部卷内部键 `<owner>/user/<rel>` 还原为用户桶相对路径 `<rel>`
@@ -1016,11 +1040,16 @@ func (h *Handlers) cloudArchiveToVolume(
 	if !ok {
 		return
 	}
-	// 目标卷解析（可信卷写视图；未装/元数据不可解析/类型未声明协议 → fail-closed）。
+	// 目标卷解析（可信卷写视图；未装/元数据不可解析 → fail-closed）。
+	// U3：本地卷现也可作转存目标（`externalVolumeTransferFS` 已改走 `VolumeView`，
+	// 本地卷返回 Guard(Wrap(NewRootFS))——trusted 对本地启用）；scheme 空按 local 归一。
 	fs, scheme, vol, ok := h.externalVolumeTransferFS(t.TargetVolume)
-	if !ok || scheme == "" {
+	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "target volume not assembled"}, http.StatusNotFound)
 		return
+	}
+	if scheme == "" {
+		scheme = "local"
 	}
 	// NM6（与 cloud 下载转存 checkTransferVolumePreflight 一致）：secrets 是密钥管理卷
 	// （secret 名禁路径分隔符），非通用转存目标——转存 rel 恒含 /，secrets:// 无法解析
@@ -1106,7 +1135,12 @@ func (h *Handlers) cloudArchiveToVolume(
 		return
 	}
 	// 写成功 ⇒ 计入 owner 配额（差分：覆盖写用 before/after）。
-	settleArchiveCharge(chargeScope, chargeBefore, h.archiveTargetCharge(t.TargetVolume, t.Owner, rel, chargeUserRel))
+	chargeAfter := h.archiveTargetCharge(t.TargetVolume, t.Owner, rel, chargeUserRel)
+	settleArchiveCharge(chargeScope, chargeBefore, chargeAfter)
+	// **卷级容量记账**（独立复审 Important-1，2026-10-28）：本地卷 rootfs 无 ReserveSpace
+	// ⇒ 转存写不经 CapacityFS ⇒ 卷池漏记 ⇒ 长期漂移。按与 owner Scope **同源**的实测差分
+	// 结算卷池（同一 `archiveTargetCharge` 测量）。外部卷（CapacityFS 层已记）不双记。
+	h.settleVolumePoolCharge(t.TargetVolume, chargeBefore, chargeAfter)
 	if onSuccess != nil {
 		onSuccess(url)
 	}

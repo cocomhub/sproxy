@@ -677,7 +677,13 @@ func (m *CloudDownloadManager) transferFS(volume string) (syncpkg.FS, string) {
 	if m.transferFSFor == nil {
 		return nil, ""
 	}
-	return m.transferFSFor(volume)
+	fs, scheme := m.transferFSFor(volume)
+	if fs != nil && scheme == "" {
+		// U3 统一卷模型：本地卷无后端协议 scheme，但已是合法转存目标 ⇒ 归一为 "local"
+		// （生成 `local://<卷>/<rel>`，与 Set.ResolveURL 的 local 分支同形）。
+		scheme = "local"
+	}
+	return fs, scheme
 }
 
 // isLocalVolumeFS 经 syncpkg.LocalVolume 能力接口判定目标 FS 是否**内部/本地卷**：

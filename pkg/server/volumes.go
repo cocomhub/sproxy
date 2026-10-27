@@ -60,6 +60,7 @@ func resolveDefaultVolumeRoot(cfg *Config) string {
 type volumeAccum struct {
 	roots       map[string]*storage.Root
 	external    map[string]registry.ExternalBackend
+	storageVols map[string]registry.StorageVolume // U1：统一存储卷身份（本地 localBackend / 外部 Backend）
 	pools       map[string]*quota.Pool
 	volumes     []volume.Volume
 	defaultName string
@@ -93,27 +94,14 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 		cfg = &norm
 	}
 	acc := &volumeAccum{
-		roots:    make(map[string]*storage.Root, len(cfg.Volumes)),
-		external: make(map[string]registry.ExternalBackend, len(cfg.Volumes)),
-		pools:    make(map[string]*quota.Pool, len(cfg.Volumes)),
-		volumes:  make([]volume.Volume, 0, len(cfg.Volumes)),
+		roots:       make(map[string]*storage.Root, len(cfg.Volumes)),
+		external:    make(map[string]registry.ExternalBackend, len(cfg.Volumes)),
+		storageVols: make(map[string]registry.StorageVolume, len(cfg.Volumes)),
+		pools:       make(map[string]*quota.Pool, len(cfg.Volumes)),
+		volumes:     make([]volume.Volume, 0, len(cfg.Volumes)),
 	}
 	for i := range cfg.Volumes {
-		vc := cfg.Volumes[i]
-		isExternal := vc.Type != "" && vc.Type != volume.TypeLocal
-		if isExternal && i == 0 {
-			closeOpenedVolumes(acc.roots, acc.external)
-			return nil, fmt.Errorf("默认卷 %q 不能是外部类型 %q（默认卷需要本地 storage.Root）", vc.Name, vc.Type)
-		}
-		if !isExternal {
-			if aerr := assembleLocalVolume(cfg, log, vc, i, acc); aerr != nil {
-				closeOpenedVolumes(acc.roots, acc.external)
-				return nil, aerr
-			}
-			continue
-		}
-		// 外部卷：registry.NewBackend 构造（plugin 分派）；无本地根（roots 不含）。
-		if aerr := assembleExternalVolume(cfg, log, vc, acc); aerr != nil {
+		if aerr := assembleOneVolume(cfg, log, cfg.Volumes[i], i, acc); aerr != nil {
 			closeOpenedVolumes(acc.roots, acc.external)
 			return nil, aerr
 		}
@@ -124,7 +112,37 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*registry.Set, error) {
 		closeOpenedVolumes(acc.roots, acc.external)
 		return nil, serr
 	}
-	return registry.NewSet(acc.volumes, acc.roots, acc.external, acc.pools, acc.defaultName), nil
+	set := registry.NewSet(acc.volumes, acc.roots, acc.external, acc.pools, acc.defaultName)
+	// U1：登记统一存储卷身份（本地卷已入 acc.storageVols；外部卷句柄在 NewSet 时已同实例
+	// 进入 storageVolumes——RegisterStorageVolume 对已登记重名会报错，故此处只补登本地）。
+	if err := registerAccumulatedStorageVolumes(set, acc); err != nil {
+		closeOpenedVolumes(acc.roots, acc.external)
+		return nil, err
+	}
+	return set, nil
+}
+
+// assembleOneVolume 装配单卷（按 Type 分派本地/外部）；首卷不得为外部类型（默认卷需本地根）。
+func assembleOneVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, acc *volumeAccum) error {
+	isExternal := vc.Type != "" && vc.Type != volume.TypeLocal
+	if isExternal && i == 0 {
+		return fmt.Errorf("默认卷 %q 不能是外部类型 %q（默认卷需要本地 storage.Root）", vc.Name, vc.Type)
+	}
+	if !isExternal {
+		return assembleLocalVolume(cfg, log, vc, i, acc)
+	}
+	// 外部卷：registry.NewBackend 构造（plugin 分派）；无本地根（roots 不含）。
+	return assembleExternalVolume(cfg, log, vc, acc)
+}
+
+// registerAccumulatedStorageVolumes 把本地卷统一身份登记进 Set（U1 装配收尾）。
+func registerAccumulatedStorageVolumes(set *registry.Set, acc *volumeAccum) error {
+	for _, sv := range acc.storageVols {
+		if err := set.RegisterStorageVolume(sv); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // hasNestedDecl 报告卷列表中是否存在「可翻译的用户面嵌套封装声明」（决定是否走翻译副本路径；
@@ -258,14 +276,20 @@ func OpenLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.L
 	return rt, nil
 }
 
-// assembleLocalVolume 装配单个本地卷（根打开 + 容量池 + 卷记录 + 首卷默认名），就地写入累积集合。
+// assembleLocalVolume 装配单个本地卷（统一后端 + 容量池 + 卷记录 + 首卷默认名）。
+//
+// **U1 接线**（docs/designs/2026-10-28-unified-volume-model.md）：改走 `NewLocalBackend`
+// 产出统一存储卷身份（`registry.StorageVolume`），不再裸 `OpenLocalVolumeRoot` 只进 roots。
+// roots 仍保留（服务默认卷 tenant/globalRoot 存量语义——`localBackend.Root()` 复用同一根），
+// storageVols 持有统一身份供 `Set.StorageVolume`/`VolumeView` 取用。
 func assembleLocalVolume(cfg *Config, log *slog.Logger, vc VolumeConfig, i int, acc *volumeAccum) error {
 	rootDir := resolveAssembledRootDir(cfg, log, vc, i)
-	rt, oerr := OpenLocalVolumeRoot(vc.Name, rootDir, vc.Extra, log)
+	lb, oerr := NewLocalBackend(buildVolumeFromConfig(cfg, log, vc, rootDir), rootDir, log)
 	if oerr != nil {
 		return oerr
 	}
-	acc.roots[vc.Name] = rt
+	acc.roots[vc.Name] = lb.Root()
+	acc.storageVols[vc.Name] = lb
 	acc.pools[vc.Name] = quota.NewPool(int64(vc.VolCapacity))
 	acc.volumes = append(acc.volumes, buildVolumeFromConfig(cfg, log, vc, rootDir))
 	if i == 0 {
@@ -751,21 +775,19 @@ func (h *Handlers) externalVolumeTransferFS(volumeName string) (syncpkg.FS, stri
 	if h.volSet == nil {
 		return nil, "", volume.Volume{}, false
 	}
-	be := h.volSet.External(volumeName)
-	if be == nil {
+	// U2：走统一取卷入口 `VolumeView(name, ViewUser)`（装配期已套 Guard(Wrap) 装饰链）。
+	// 本地卷同样返回可信视图（meta sidecar + 桶隔离）——转存目标不再限于外部卷。
+	fs, ok := h.volSet.VolumeView(volumeName, registry.ViewUser)
+	if !ok || fs == nil {
 		return nil, "", volume.Volume{}, false
 	}
-	raw := be.FS()
-	if raw == nil {
-		return nil, "", volume.Volume{}, false
+	vol, vok := h.volSet.ByName(volumeName)
+	if !vok {
+		// 卷元信息缺失（极罕见装配异常）：仍返回已装饰视图（meta 桶隔离恒生效 + 写面恒
+		// 生成 sidecar）——写面也不能触达凭据桶。scheme 未知（无卷描述）。
+		return fs, "", volume.Volume{}, false
 	}
-	vol, ok := h.volSet.ByName(volumeName)
-	if !ok {
-		// 卷元信息缺失（极罕见装配异常）：仍加 Guard(Wrap(...))（meta 桶隔离恒生效 +
-		// 写面恒生成 sidecar，与其余装配形状一致）——写面也不能触达凭据桶。
-		return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), "", volume.Volume{}, false
-	}
-	return trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts())), registry.SchemeOf(vol.Type), vol, true
+	return fs, registry.SchemeOf(vol.Type), vol, true
 }
 
 // stagingQuotaFS 是外部卷 FS 的**本地 staging 配额统一接线**（用户裁定 2026-10-10：

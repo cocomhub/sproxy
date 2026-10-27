@@ -127,15 +127,15 @@
   // previewKind(name)：扩展名 → 'image' | 'text' | 'download'（previewFile 的归类逻辑）。
   const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
   const TEXT_EXT = ['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'];
-  // isTransferTargetVolume(v)：转存目标卷候选判定（B-M1）。服务端
-  // `checkTransferVolumePreflight` 要求目标是**已装配的外部卷**且拒绝 secrets 密钥卷：
-  //   - secrets：密钥卷（secret 名禁路径分隔符），非通用转存目标 → 400；
-  //   - local / 空 type：本地卷（含默认卷）无外部后端（volSet.External 为 nil）→ 400。
+  // isTransferTargetVolume(v)：转存目标卷候选判定（U3 统一卷模型）。
+  // 服务端 `checkTransferVolumePreflight` 现要求目标是**已装配的任意存储卷**（本地卷亦可
+  // ——见 docs/designs/2026-10-28-unified-volume-model.md U3），仅拒绝：
+  //   - secrets：密钥管理卷（secret 名禁路径分隔符），非通用转存目标 → 400。
   // 前端据此过滤候选，避免「选中即 400」（文案明确但仍是用户可见故障）。
   function isTransferTargetVolume(v) {
     if (!v || !v.name) return false;
     const t = String(v.type || '').toLowerCase();
-    return t !== '' && t !== 'local' && t !== 'secrets';
+    return t !== 'secrets';
   }
 
   // 视频扩展名集合（文件行「▶ 播放」入口判定，标准 <video> Range 播放）——唯一实现点。

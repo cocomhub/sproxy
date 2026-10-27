@@ -673,7 +673,8 @@ sclient cloud-download --url-file <file>     # 每行 URL 或 URL<TAB>FILENAME
 - 任务状态：`pending | downloading | completed | failed | cancelled`；失败自动重试（`cloud_max_retries`）。
 
 **归档转存（统一转存）**：`cloud-download archive` 与 `cloud-download-group archive` 支持
-`--target <卷 URI 路径>`（cd/mv 同规约，`<卷名>:/<路径>`）——打包后转存到该外部卷，不落服务端
+`--target <卷 URI 路径>`（cd/mv 同规约，`<卷名>:/<路径>`）——打包后转存到该卷（**任意存储卷，含
+本地卷**——统一卷模型 U3；本地卷 target 产物落 `<owner>/user/<rel>`、可经 `/download` 命中），不落服务端
 archive 桶；不带卷名的纯路径回落**当前工作目录**（`cd <卷名>:/<目录>`，与 cp/mv/delete 同语义：
 相对路径拼当前目录，前导 `/` 绕过当前目录，`..` 拒绝）。可选 `--encrypt`（流式加密，密钥来自
 服务端 `archive.key_file`，产物为 `<名>.tar.gz.aes`）、`--cipher`（默认 aes-256-gcm，**须与

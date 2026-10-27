@@ -16,7 +16,7 @@ pkg/files/service.go	1	ExternalVolumeSource 目录浏览：装配层注入的 Ex
 pkg/server/backends_api.go	1	后端信息 API：只读探测
 pkg/server/backup_api.go	4	备份面：取远端写面（federated/baidupcs）
 pkg/server/external_source.go	1	外部卷下载源解析（经 externalFSFor/同一装饰链）
-pkg/server/files_service.go	10	externalFSFor（可信链入口）+ ExternalCopy/ExternalStat/ExternalMeta/下载源/信息探测——均经装配处 trusted.Guard(Wrap()) 封印视图
+pkg/server/files_service.go	6	externalFSFor（可信链入口）+ ExternalCopy/ExternalStat/ExternalMeta/下载源/信息探测——均经装配处 trusted.Guard(Wrap()) 封印视图；ExternalVolume/ExternalDeleter 已迁 VolumeView（U2）；注释含 .FS() 文本 4 处（口径含注释）
 pkg/server/quota_reconcile.go	2	真值对账：物理用量探测
 pkg/server/routes_setup.go	2	DAV/S3 装配：临时视图构造
 pkg/server/volumes.go	3	卷路由/装配套接 + externalVolumeTransferFS（转存目标解析；be.FS() 为装配处 SealBackend 封印后视图，单点复用）
@@ -35,3 +35,4 @@ pkg/volume/registry/quota_volume.go	1	配额层**纯委托**：`FS()` 透传被�
 pkg/volume/capacity/ledger.go	1	账本自身的读写（`meta/quota/` 保留区）：按名读写 shard/snap/index 三个小文件（**只读/写，不列目录、不原子 rename** —— 设计 §3.6 原则 1）；不触碰用户内容、不经封印语义 ⇒ 非封印绕过面
 pkg/server/source_volume.go	1	源定位（分享/AI 抽样/版本可见性）：经 volSet.External(卷).FS() 后**立即**套 trusted.Guard(Wrap)（与下载/转存同一装饰链；封印由装配处 SealBackend 保证）
 pkg/server/files_meta_extra_source.go	2	元数据补录（PUT /api/files/meta）：经 volSet.External(卷).FS() 取 FS 后**仅类型断言** MetaExtraUpdater（不裸读写用户内容；UpdateMetaExtra 由 trusted/secretdata 装饰链的旁路更新实现，封印语义由装配处保证）⇒ 非封印绕过面
+pkg/volume/registry/views.go	1	U2 统一取卷入口 VolumeView：`sv.FS()` 取**装配期已登记**的统一存储卷数据面（本地 localBackend / 外部 capacity.Backend），随后**必套** trusted.Guard/Wrap 装饰链（内置默认或装配层覆盖）⇒ 不新增封印绕过面（消费方拿到的恒为装饰后视图）

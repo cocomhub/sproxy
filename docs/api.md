@@ -495,13 +495,14 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 将任务已下载文件打包为 tar.gz（`cloud_archive_max_bytes` 限制原始大小总和）。
 
-请求体可选字段 `target_volume`：非空 = **统一转存**——打包后经可信卷写视图转存到该外部卷，
-不落租户 archive 桶。可选 `target_path` 指定目标键（目标卷 **user 桶内**相对路径，可含子目录；
-空 = 默认 `archive/<archive_name>`，以 `/` 结尾 = 目录并拼上归档名）。目标键实际为
-`<owner>/user/<target_path>`（经 `volume.ResolveUserLocation` 唯一入口，与读路径同键空间，
-可经 `/download` 命中；外部卷不走本地文件索引，故不出现在 `/api/files` 列表），响应 `file` 为
-可 `ResolveURL` 取用的 URL（非归档名）。空/缺省 = 沿既有行为落租户 archive 桶。同名目标已存在
-→ 409（拒绝静默覆盖）。可选 `encrypt`（true = 打包流式加密，密钥来自服务端 `archive.key_file`，
+请求体可选字段 `target_volume`：非空 = **统一转存**——打包后经可信卷写视图转存到该卷
+（**任意存储卷**：本地卷与外部卷皆可——统一卷模型 U3，见 docs/designs/2026-10-28-unified-volume-model.md；
+本地卷 target 产物同样走 `<owner>/user/<rel>` 键空间、可经 `/download` 命中），不落租户 archive 桶。
+可选 `target_path` 指定目标键（目标卷 **user 桶内**相对路径，可含子目录；空 = 默认 `archive/<archive_name>`，
+以 `/` 结尾 = 目录并拼上归档名）。目标键实际为 `<owner>/user/<target_path>`（经 `volume.ResolveUserLocation`
+唯一入口，与读路径同键空间；外部卷不走本地文件索引，故不出现在 `/api/files` 列表），响应 `file` 为
+可 `ResolveURL` 取用的 URL（非归档名；本地卷 URL 形态 `local://<卷>/<rel>`，见 U4）。空/缺省 = 沿既有
+行为落租户 archive 桶。同名目标已存在 → 409（拒绝静默覆盖）。可选 `encrypt`（true = 打包流式加密，密钥来自服务端 `archive.key_file`，
 产物命名追加 `.aes`，但以 `target_path`/默认名为准）、`cipher`（默认 aes-256-gcm，**须与 `encrypt`
 同用**——单独指定不加密且无效果 → 400，防误信已加密）、`compression`（gzip 默认 / zstd / brotli；
 非法值 400）——均仅与 `target_volume` 同用（未指定 target 时设置 `target_path`/`encrypt`/`cipher`/
@@ -530,7 +531,7 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 ### POST /api/cloud/groups/{id}/cancel / /resume / /archive
 
-取消 / 恢复 / 归档整个组。`/archive` 请求体同样支持 `target_volume`（统一转存到外部卷，
+取消 / 恢复 / 归档整个组。`/archive` 请求体同样支持 `target_volume`（统一转存到任意存储卷——含本地卷，
 可信卷写视图 + owner 前缀键 + 本地 staging 配额 + `per-(owner,rel)` 写锁；语义与单任务/批量
 归档一致）。转存成功后组记录 `archive_file` 为转存 URL，组删除时联动清理该外部产物
 （要求目标卷仍在服务端装配中；卷已移除时删除组会 fail-closed 报错，不静默遗留产物）。

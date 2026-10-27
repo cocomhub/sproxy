@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	neturl "net/url"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -46,6 +47,16 @@ type Set struct {
 	// external 是 name → 外部卷句柄（V3 通用卷模型）：非本地后端（如 baidupcs）的
 	// 运行时句柄，FS() 提供同步视图供 syncexec 工厂消费；Close 时统一关闭。
 	external map[string]ExternalBackend
+	// storageVolumes 是 name → 统一存储卷身份（本地 localBackend / 外部 capacity.Backend）。
+	// **U1 统一存储卷模型**（docs/designs/2026-10-28-unified-volume-model.md）：装配期一次
+	// 构造，`StorageVolume(name)` 是唯一取卷入口——本地卷不再只能经 `Root` 拿裸 root。
+	// 与 roots/external 的关系：本地卷同时进 roots（服务默认卷 tenant/globalRoot 存量语义）
+	// 与 storageVolumes（统一身份）；外部卷进 external 与 storageVolumes（同一实例）。
+	storageVolumes map[string]StorageVolume
+	// viewDecorator 是 VolumeView 的**装配期注入装饰器**（U2）：对裸卷 FS 按 use 套完整
+	// 装饰链（封印 → trusted.Guard/Wrap → capacity → staging 由消费方）。registry 不 import
+	// server（避免成环），由装配层（pkg/server）注入。nil = 返回裸 FS（测试/无装饰装配）。
+	viewDecorator VolumeViewDecorator
 	// pools 是 name → 卷容量池。Capacity<=0 仍建池（上限 0 = 不限量），便于统一入账与
 	// T4 的 used(name) 活用量闭包（OrderCandidates spread）。外部卷同样建池（入账统一）。
 	pools map[string]*quota.Pool
@@ -70,6 +81,9 @@ type Set struct {
 // NewSet 由装配层已解码的卷集合构造运行时卷视图。
 // 参数与顺序刻意与 Set 的字段一一对应（互斥量与懒建缓存由构造处自建，不作为入参），
 // 使调用方（pkg/server 的 assembleVolumes）只需把装配产物交给构造处，其余逻辑不受影响。
+// NewSet 由装配层已解码的卷集合构造运行时卷视图。
+// 外部卷句柄**同步进统一存储卷表**（U1）：`external[name]` 与 `storageVolumes[name]`
+// 指向同一实例（`capacity.Backend` 内嵌 `ExternalBackend` 并实现 `StorageVolume` 四方法）。
 func NewSet(
 	volumes []volume.Volume,
 	roots map[string]*storage.Root,
@@ -79,6 +93,12 @@ func NewSet(
 ) *Set {
 	if external == nil {
 		external = map[string]ExternalBackend{}
+	}
+	storageVolumes := make(map[string]StorageVolume, len(external))
+	for name, be := range external {
+		// 外部卷句柄可能是 capacity.Backend（已实现 StorageVolume）或裸 ExternalBackend
+		// （缺 Kind）——统一用 storageVolumeOf 提升（含卷名）。名称已知（map 键）✓。
+		storageVolumes[name] = storageVolumeOf{name: name, ExternalBackend: be}
 	}
 	// 默认外部卷按**声明序**确定（首个有 external 句柄的卷）——NewSet 生产构造路径
 	// 不能留空 firstExternal，否则 DefaultExternal 回落到 map 随机迭代序，同一进程内
@@ -91,14 +111,61 @@ func NewSet(
 		}
 	}
 	return &Set{
-		volumes:       volumes,
-		roots:         roots,
-		external:      external,
-		pools:         pools,
-		defaultName:   defaultName,
-		firstExternal: firstExternal,
-		caches:        map[string]*storage.TenantCache{},
+		volumes:        volumes,
+		roots:          roots,
+		external:       external,
+		pools:          pools,
+		defaultName:    defaultName,
+		firstExternal:  firstExternal,
+		caches:         map[string]*storage.TenantCache{},
+		storageVolumes: storageVolumes,
 	}
+}
+
+// isNilStorageVolume 判定 StorageVolume 接口是否为 nil（含 typed-nil：持有 nil 具体指针）。
+func isNilStorageVolume(sv StorageVolume) bool {
+	if sv == nil {
+		return true
+	}
+	v := reflect.ValueOf(sv)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	}
+	return false
+}
+
+// RegisterStorageVolume 登记统一存储卷身份（U1）。
+//
+// 装配期调用：本地卷由装配层经 `NewLocalBackend` 构造后登记；外部卷在 NewSet /
+// AddExternalVolume / AttachExternal 时同步登记（同一实例进 external 与 storageVolumes）。
+// 重名登记 → 明确错误（卷名唯一，防同卷双持有）。
+func (vs *Set) RegisterStorageVolume(sv StorageVolume) error {
+	// typed-nil 防御（独立复审 Important-2，2026-10-28）：接口持有 nil 具体指针（如
+	// `var lb *localBackend = nil; set.RegisterStorageVolume(lb)`）时 `sv == nil` 判不成立，
+	// 此后 StorageVolume(name) 返回非 nil 接口、sv.FS() 在 nil 接收者上行为未定义。反射探测。
+	if isNilStorageVolume(sv) {
+		return fmt.Errorf("registry: 登记统一存储卷为 nil（含 typed-nil）")
+	}
+	if sv.Name() == "" {
+		return fmt.Errorf("registry: 统一存储卷名不能为空")
+	}
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if _, dup := vs.storageVolumes[sv.Name()]; dup {
+		return fmt.Errorf("registry: 统一存储卷 %q 重复登记", sv.Name())
+	}
+	vs.storageVolumes[sv.Name()] = sv
+	return nil
+}
+
+// StorageVolume 返回指定卷名的统一存储卷身份（本地/外部同形）。
+// 未知卷名 → (nil, false)（fail-closed，不返回伪成功）。
+func (vs *Set) StorageVolume(name string) (StorageVolume, bool) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	sv, ok := vs.storageVolumes[name]
+	return sv, ok
 }
 
 // Default 返回默认卷描述（volumes[0]）。
@@ -223,6 +290,12 @@ func (vs *Set) ResolveURL(ctx context.Context, url string) (io.ReadCloser, error
 			vol = before
 		}
 	}
+	// U4：`local://<卷>/<rel>` 本地卷协议寻址（统一卷模型）——不经 URLResolver（本地后端
+	// 只实现 FS），直接经统一访问器 `VolumeView(name, ViewUser)` 读。路径安全与 owner
+	// 前缀由 `volume.ResolveUserLocation` 唯一入口承担（与读路径同键空间）。
+	if scheme == "local" {
+		return vs.openLocalURL(ctx, vol, u.Path)
+	}
 	// 空 authority 或 "default" → 默认外部卷（协议默认寻址目标；卷名是装配细节）。
 	be := vs.External(vol)
 	if (vol == "" || vol == "default") && be == nil {
@@ -241,6 +314,40 @@ func (vs *Set) ResolveURL(ctx context.Context, url string) (io.ReadCloser, error
 			return nil, fmt.Errorf("registry: ResolveURL %q 的卷 %q 未实现 URLResolver（地址 %q 不可寻址）", url, vol, scheme)
 		}
 		return nil, fmt.Errorf("registry: ResolveURL %q 失败: %w", url, err)
+	}
+	return rc, nil
+}
+
+// openLocalURL 解析 `local://<卷>/<rel>`（U4）：经 `VolumeView(name, ViewUser)` 读本地卷。
+//
+// 路径语义：rel 是**卷内 user 桶相对路径**（`<rel>`，owner 前缀由卷层统一承担）——与转存
+// 目标键空间一致（`volume.ResolveUserLocation`）。路径穿越/非法段 → fail-closed 明确错误。
+func (vs *Set) openLocalURL(ctx context.Context, volName, path string) (io.ReadCloser, error) {
+	fs, ok := vs.VolumeView(volName, ViewUser)
+	if !ok || fs == nil {
+		return nil, fmt.Errorf("registry: local:// 卷 %q 未装配或不可读", volName)
+	}
+	rel := strings.TrimPrefix(path, "/")
+	if rel == "" {
+		return nil, fmt.Errorf("registry: local:// 缺少路径（%s://%s/）", "local", volName)
+	}
+	// path 是**卷内 user 桶相对路径**（与转存 URL 的桶内形态一致：转存产物键
+	// `<owner>/user/<path>` 的 `<path>` 部分；URL 里**不含** owner/user 前缀段）。
+	// 读键 = FSPath(ResolveUserLocation("", path)) —— 与转存产物键空间对齐
+	// （Ruling，2026-10-28：openLocalURL 首版直接读 rel 导致键空间双向不一致）。
+	// 路径安全由 ResolveUserLocation 唯一入口承担（../ 逃逸/绝对路径/非法段 fail-closed）。
+	v, vok := vs.ByName(volName)
+	if !vok {
+		return nil, fmt.Errorf("registry: local:// 卷 %q 元信息不可解析", volName)
+	}
+	loc, lerr := v.ResolveUserLocation("", volume.Path(rel))
+	if lerr != nil {
+		return nil, fmt.Errorf("registry: local:// 路径非法 %q: %w", rel, lerr)
+	}
+	key := loc.FSPath()
+	rc, err := fs.OpenRead(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("registry: local:// 读 %s://%s/%s: %w", "local", volName, key, err)
 	}
 	return rc, nil
 }
@@ -275,6 +382,9 @@ func (vs *Set) ReplaceExternal(name string, be ExternalBackend) error {
 		return fmt.Errorf("registry: 外部卷 %q 不存在（无法替换句柄）", name)
 	}
 	vs.external[name] = be
+	// Minor-2（独立复审）：替换句柄须同步统一存储卷表——否则 VolumeView/StorageVolume
+	// 仍取旧实例（「VolumeView 读旧、External 读新」分叉窗口）。
+	vs.storageVolumes[name] = storageVolumeOf{name: name, ExternalBackend: be}
 	return nil
 }
 
@@ -301,6 +411,7 @@ func (vs *Set) AddExternalVolume(v volume.Volume, be ExternalBackend) error {
 	}
 	vs.volumes = append(vs.volumes, v)
 	vs.external[v.Name] = be
+	vs.storageVolumes[v.Name] = storageVolumeOf{name: v.Name, ExternalBackend: be} // U1：外部卷同实例进统一存储卷表
 	if vs.firstExternal == "" {
 		// 首个登记的外部卷即默认外部卷（装配序决定默认，早期问题 P5）；
 		// 首次记录后不覆盖（后续注册不得改写默认）。
@@ -325,6 +436,7 @@ func (vs *Set) RemoveExternalVolume(name string) error {
 		_ = be.Close()
 	}
 	delete(vs.external, name)
+	delete(vs.storageVolumes, name) // U1：移除外部卷同步清理统一存储卷表
 	for i, v := range vs.volumes {
 		if v.Name == name {
 			vs.volumes = append(vs.volumes[:i], vs.volumes[i+1:]...)
@@ -363,6 +475,7 @@ func (vs *Set) AttachExternal(name string, be ExternalBackend) error {
 		return fmt.Errorf("registry: 外部卷 %q 已装配（重复补装）", name)
 	}
 	vs.external[name] = be
+	vs.storageVolumes[name] = storageVolumeOf{name: name, ExternalBackend: be} // U1：补装外部卷同实例进统一存储卷表
 	if vs.firstExternal == "" {
 		// 首个补装的外部卷即默认外部卷（与 AddExternalVolume 语义一致：装配序决定默认）。
 		vs.firstExternal = name

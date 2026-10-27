@@ -38,7 +38,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
-	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // filesStorageManager 把 *capacity.StorageManager 适配为 files.StorageManager。
@@ -105,12 +104,9 @@ func (a filesVolumeSet) CategoryOf(typ string) string { return registry.Category
 // ExternalVolume 实现 files.ExternalVolumeSource：按卷名返回外部卷目录浏览能力。
 // 未知/非外部卷（本地卷）→ nil（List 的 `?volume=` 回落既有本地聚合，零回归）。
 func (a filesVolumeSet) ExternalVolume(name string) files.ExternalVolume {
-	be := a.External(name)
-	if be == nil {
-		return nil
-	}
-	fsys := be.FS()
-	if fsys == nil {
+	// U2 统一取卷入口：VolumeView(name, ViewUser)（本地卷同样返回可信视图；外部卷同前）。
+	fsys, ok := a.VolumeView(name, registry.ViewUser)
+	if !ok || fsys == nil {
 		return nil
 	}
 	return filesExternalVolume{fs: fsys}
@@ -120,16 +116,13 @@ func (a filesVolumeSet) ExternalVolume(name string) files.ExternalVolume {
 // 能力。未知/非外部卷（本地卷）/FS 不可用 → nil（delete 走既有本地卷路径，零回归）。
 // key 语义与上传 externalUploadSink 一致：ResolveUserPath 统一计算（owner 前缀/键空间适配）。
 func (a filesVolumeSet) ExternalDeleter(name string) files.ExternalDeleter {
-	be := a.External(name)
-	if be == nil {
+	// U2 统一取卷入口（本地卷同样可删——统一键空间）。
+	fsys, ok := a.VolumeView(name, registry.ViewUser)
+	if !ok || fsys == nil {
 		return nil
 	}
-	fsys := be.FS()
-	if fsys == nil {
-		return nil
-	}
-	v, ok := a.ByName(name)
-	if !ok {
+	v, vok := a.ByName(name)
+	if !vok {
 		return nil
 	}
 	return filesExternalDeleter{fs: fsys, v: v}
@@ -992,14 +985,13 @@ func (h *Handlers) externalFSFor(volName string) (syncpkg.FS, bool) {
 	if h.volSet == nil {
 		return nil, false
 	}
-	be := h.volSet.External(volName)
-	if be == nil {
+	// U2：走统一取卷入口 `VolumeView(name, ViewUser)`（装配期已套 Guard(Wrap) 装饰链）。
+	// 本地卷同样返回可信视图（meta sidecar + 校验）——目录浏览/下载/stat 不再分叉。
+	fs, ok := h.volSet.VolumeView(volName, registry.ViewUser)
+	if !ok || fs == nil {
 		return nil, false
 	}
-	fsys := be.FS()
-	// P0-2 修复：下载路径也必须 Wrap（写侧才能落 sidecar、读侧才能经 meta.Provider
-	// 逐分块校验）；此前只 Guard 导致 fileMetaReaderFor 恒 nil、外部卷下载零校验。
-	return trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts())), fsys != nil
+	return fs, true
 }
 
 // toFilesHTTPError 把带 HTTP 状态码的 pkg/server 错误（下载路径解析错误 / 卷路由错误）
