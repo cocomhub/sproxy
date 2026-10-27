@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -258,20 +257,8 @@ func TestE2E_SclientCLI(t *testing.T) {
 	// Isolate XDG_CACHE_HOME to avoid loadCurrentDir() reading user's local cache,
 	// which would cause `list` to filter by a stale subdirectory path.
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmpDir, "cache"))
-	binName := "sclient"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(tmpDir, binName)
-	_ = binPath // sclient binary built but not directly exercised here (upload done via HTTP)
-	_, currentFile, _, _ := runtime.Caller(0)
-	moduleRoot := filepath.Dir(filepath.Dir(currentFile))
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sclient")
-	buildCmd.Dir = moduleRoot
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sclient: %v\n%s", err, out)
-	}
-
+	// 二进制统一经 e2eBinPath 构造（整包共享，只 build 一次）。
+	binPath := e2eBinPath(t, "cmd/sclient")
 	// sclient upload
 	uploadFile(t, baseURL, "sclient_test.txt", []byte("sclient e2e"), map[string]string{
 		"X-File-Checksum": sha256hex([]byte("sclient e2e")),
@@ -415,17 +402,8 @@ func parseSeedFromAccessKeysYAML(t *testing.T, accessKeysYAML string) (string, s
 func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	binName := "sproxy"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(tmpDir, binName)
-	moduleRoot := e2eModuleRoot()
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sproxy")
-	buildCmd.Dir = moduleRoot
-	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sproxy: %v\n%s", err, buildOut)
-	}
+	// 二进制统一经 e2eBinPath 构造（整包共享，只 build 一次）。
+	binPath := e2eBinPath(t, "cmd/sproxy")
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -448,7 +426,7 @@ func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, fun
 		t.Fatalf("write temp config: %v", err)
 	}
 	cmd := exec.Command(binPath, "--addr", addr, "--storage-root", uploadsDir, "--config", configPath)
-	cmd.Dir = moduleRoot
+	cmd.Dir = e2eModuleRoot()
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf

@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -21,20 +20,7 @@ import (
 // buildSClient 构建 sclient 二进制到临时目录，返回路径。
 func buildSClient(t *testing.T) string {
 	t.Helper()
-	tmpDir := t.TempDir()
-	binName := "sclient"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(tmpDir, binName)
-	_, currentFile, _, _ := runtime.Caller(0)
-	moduleRoot := filepath.Dir(filepath.Dir(currentFile))
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sclient")
-	buildCmd.Dir = moduleRoot
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sclient: %v\n%s", err, out)
-	}
-	return binPath
+	return e2eBinPath(t, "cmd/sclient")
 }
 
 // sclientConfig 生成隔离的临时配置（统一 context config.yaml）：env 段 server_url +

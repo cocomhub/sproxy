@@ -70,19 +70,8 @@ type restartEnv struct {
 func newRestartEnv(t *testing.T, extraConfig string) *restartEnv {
 	t.Helper()
 	tmpDir := t.TempDir()
-	binName := "sproxy"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(tmpDir, binName)
-	_, currentFile, _, _ := runtime.Caller(0)
-	moduleRoot := filepath.Dir(filepath.Dir(currentFile))
-
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sproxy")
-	buildCmd.Dir = moduleRoot
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sproxy: %v\n%s", err, out)
-	}
+	// 二进制统一经 e2eBinPath 构造（整包共享，只 build 一次；旧内联每次 newRestartEnv 各编译一遍）。
+	binPath := e2eBinPath(t, "cmd/sproxy")
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
