@@ -3071,6 +3071,20 @@ func (s *SecretdataFS) copyContentBlobs(ctx context.Context, e *metaEntry, targe
 	if e.dataDir != "" {
 		return nil, nil // 去重文件：分块在池容器（全卷共享）⇒ 不拷贝（副本保留 dataDir 指向池）
 	}
+	// **staging 预留（对齐写路径）**：跨容器复制落本地 tmp 再上传，必须与写面同口径预留
+	// staging 配额（2026-10-27，用户「继续优化 secretdata/baidupcs 场景」）——否则本地磁盘
+	// 打满上限时复制绕过配额直接落盘（口径漂移 + 打满风险）。预测量 = Σ 各 blob 密文峰值
+	// （每 blob 一份 tmp），与写路径 stagingReserve 同型。预留失败 fail-closed（不动数据）。
+	need := int64(0)
+	for _, ci := range e.meta.Chunks {
+		need += cipherPeak(ci.EncSize)
+	}
+	if p := e.meta.Parity; p != nil {
+		need += cipherPeak(p.EncSize)
+	}
+	if _, rerr := s.stagingReserveBytes(ctx, need); rerr != nil {
+		return nil, rerr
+	}
 	var uploaded []string
 	rollback := func() { s.rollbackWrite(ctx, uploaded, nil) } // 有界且不被调用方取消打断（P2 修复 2026-10-19）
 	for _, ci := range e.meta.Chunks {
