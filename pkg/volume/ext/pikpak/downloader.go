@@ -369,14 +369,16 @@ type finalizeRequest struct {
 }
 
 func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeRequest) (*Result, error) {
-	if req.derr != nil {
-		return nil, req.derr
-	}
 	// 释放经 RestoreLease 单一语义（DeletePermanent）；owned=true 不 Track（源文件）。
+	// **失败路径也必须释放**：restore 副本已落到网盘，残留会永久占用免费账号 6GB
+	// 配额（实测失败后残留 3 份同名副本 → 后续全部 file_space_not_enough）。
 	if !req.owned && req.fileID != "" {
 		req.lease.Track(req.fileID)
 	}
 	req.lease.Release(ctx)
+	if req.derr != nil {
+		return nil, req.derr
+	}
 	// GCID 权威复算（spec §6）：文件大小非 0 且官方 hash 非空时，用候选分块复算 GCID，
 	// 命中官方 hash → ModeAuthority（① 态）；否则 ModeLocalOnly（② 态语义校验兜底）。
 	// 复算失败（文件读/destPath 为空）不阻断下载，回落 ModeLocalOnly。
@@ -398,6 +400,21 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeReq
 // CLI 切会话后在该账号网盘里找不到转存文件（C1）。返回字节数、SHA-256 与转存文件 ID
 // （供 AutoDelete 精确删除）。
 func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (int64, string, string, bool, error) {
+	// 3a. 幂等：网盘已有同名同 size（hash 可选一致）转存副本 → 复用（不 RestoreShare、不重复保存）。
+	//     收敛：与 hybrid 共用 restore_idempotent.go 的 checkRestoreCopy（此前旧下载器每次
+	//     RestoreShare，匿名路径失败 fallback 时同一文件多次提交累积同名副本撑爆 6GB——实测 3 份）。
+	//     命中 restore 副本（Pack From Shared）→ owned=true 语义（不 Track，避免 AutoDelete 误删
+	//     既有副本——复用方负责在下载完成/失败时按需清理自己的会话副本，既有副本保留）。
+	if rc := checkRestoreCopy(ctx, d.api, resolveFileMeta(target)); rc.OK {
+		driveFile := rc.File
+		d.log.Info("pikpak reuse existing restored file", "id", driveFile.ID, "name", driveFile.Name)
+		size, checksum, err := d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
+		if err != nil {
+			return 0, "", "", false, err
+		}
+		// 复用既有副本：owned=true（不 Track 不删）——副本非本次新建。
+		return size, checksum, driveFile.ID, true, nil
+	}
 	// 3. 转存到个人网盘根目录（owned=true = 源文件已在网盘，AutoDelete 跳过）
 	fileID, owned, rerr := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if rerr != nil {
@@ -414,6 +431,14 @@ func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID strin
 		return 0, "", "", false, err
 	}
 	return size, checksum, driveFile.ID, owned, nil
+}
+
+// resolveFileMeta 把 FileMeta 转成幂等检查用的 downloader.ResolvedFile。
+func resolveFileMeta(t *FileMeta) *downloader.ResolvedFile {
+	if t == nil {
+		return nil
+	}
+	return &downloader.ResolvedFile{ID: t.ID, Name: t.Name, Size: t.Size, Hash: t.Hash}
 }
 
 // locateRestoredFile 定位转存后的网盘文件：restore 返回的精确 fileID 优先；

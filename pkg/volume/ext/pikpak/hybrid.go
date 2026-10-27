@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -897,6 +896,14 @@ func (d *HybridDownloader) multiAccountLink(ctx context.Context, dc *downloadCtx
 	return link, nil
 }
 
+// resolvedFileFromTarget 把分享目标文件转成幂等检查口径（与旧下载器 resolveFileMeta 对应）。
+func resolvedFileFromTarget(t *ShareFile) *downloader.ResolvedFile {
+	if t == nil {
+		return nil
+	}
+	return &downloader.ResolvedFile{ID: t.ID, Name: t.Name, Size: t.Size, Hash: t.Hash}
+}
+
 // restoreForAccount 在 Use 会话内转存分享 + 定位转存文件，返回转存文件 ID（该账号网盘内）。
 // 复用单账号 restoreAndLink 的幂等逻辑（FindInDrive 命中 + RestoreShare + locateRestored）。
 // 转存副本的 AutoDelete 登记按账号 TrackIn（Release 逐账号会话删除，round-13 Critical）。
@@ -1530,123 +1537,35 @@ func (d *HybridDownloader) archiveManifest(destPath, reason string, args ...any)
 // driveFileID 返回 FileMeta 的 ID（nil 安全，日志用）。
 
 // idempotentRestored 幂等检查：网盘已有同名同大小且 hash 一致的转存 → 复用并记录，返回 (link, true)。
-// 无 hash 可比对（目标/网盘 hash 缺失）时保守返回 false（不信任 size 匹配，走 restore）。
+// 收敛：判据唯一实现在 restore_idempotent.go 的 checkRestoreCopy（与旧下载器共用）。
 // acctName 为账号名（"" = 当前会话/单账号），用于按账号登记 AutoDelete 副本（多账号 Release 逐会话删）。
-
-// findInPackShared 在「Pack From Shared」文件夹内查找同名/同大小转存副本（转存副本固定
-// 落这里）。**不全盘 walk**（FindInDrive 全盘 ListRecursive 慢/超时是去重失效根因）。
-// 命中 → 返回 (FileMeta, ok)。优先 size 精确匹配（强判据），回退 name 匹配（弱判据）。
-
-// findPackFolderID 在网盘根目录找「Pack From Shared」文件夹（转存副本固定落这里）。
-func (d *HybridDownloader) findPackFolderID(ctx context.Context) (string, error) {
-	root, err := d.api.List(ctx, "")
-	if err != nil {
-		return "", err
-	}
-	for i := range root {
-		if root[i].Kind == driveKindFolder && strings.EqualFold(root[i].Name, "Pack From Shared") {
-			return root[i].ID, nil
-		}
-	}
-	return "", nil
-}
-
-func (d *HybridDownloader) findInPackShared(ctx context.Context, wantName string, wantSize int64) (*FileMeta, bool) {
-	// 1. 找 Pack From Shared 文件夹（根目录下列出）；无则直接走 RestoreShare
-	packID, err := d.findPackFolderID(ctx)
-	if err != nil || packID == "" {
-		return nil, false
-	}
-	// 2. 列该文件夹内文件，按 size/name 匹配
-	files, err := d.api.List(ctx, packID)
-	if err != nil {
-		return nil, false
-	}
-	for i := range files {
-		f := &files[i]
-		if f.Kind != driveKindFile {
-			continue
-		}
-		if wantSize > 0 && f.Size == wantSize {
-			return f, true // size 精确（强判据）
-		}
-	}
-	// 回退 name 子串（弱判据，hash 缺失时兜底）
-	for i := range files {
-		f := &files[i]
-		if f.Kind == driveKindFile && strings.Contains(f.Name, wantName) {
-			return f, true
-		}
-	}
-	return nil, false
-}
-
 func (d *HybridDownloader) idempotentRestored(ctx context.Context, dc *downloadCtx, acctName string) (link, id string, ok bool) {
-	// **优先在 Pack From Shared 文件夹内查**（转存副本固定落这里，不全盘 walk——
-	// 全盘 ListRecursive 在网盘大/空间满时慢/超时是去重失效、重复保存的根因）。
-	existing, found := d.findInPackShared(ctx, dc.target.Name, dc.target.Size)
-	// pack 文件夹 miss → 回退 FindInDrive 全盘（兼容旧网盘/无 pack 文件夹场景）。
-	// **强判据**：兜底要求 hash 双方都有且一致才复用（避免把【restore 响应预置的文件】
-	// 误当既有副本——restore 前网盘本无该副本，应走 RestoreShare）。
-	// FindInDrive 慢的问题在 pack 优先后缓解（pack 命中不再全盘 walk）。
-	if !found || existing == nil {
-		existing2, err := d.api.FindInDrive(ctx, dc.target.Name, dc.target.Size)
-		if err != nil || existing2 == nil || existing2.Hash == "" || dc.target.Hash == "" || existing2.Hash != dc.target.Hash {
-			return "", "", false
-		}
-		existing = existing2
+	rc := checkRestoreCopy(ctx, d.api, resolvedFileFromTarget(dc.target))
+	if !rc.OK || rc.File == nil {
+		return "", "", false
 	}
+	existing := rc.File
 	// hash 双方都有且不等 → 拒绝复用（不同文件，防内容错配）。
-	// hash 缺失（分享 file_info 无 hash）→ 降级按「同名+同大小」复用（弱判据，
-	// 避免每次 RestoreShare 新副本撑爆空间——用户明示去重必须生效）。
 	if dc.target.Hash != "" && existing.Hash != "" && existing.Hash != dc.target.Hash {
 		d.log.Warn("hybrid restore skip rejected: hash mismatch",
 			"id", existing.ID, "target_hash", dc.target.Hash, "drive_hash", existing.Hash)
 		return "", "", false
 	}
-	// NH-P1 加固（2026-10-05）：**只登记确认是 restore 副本的文件**供 AutoDelete 删除。
-	// FindInDrive 匹配的是「同名+同大小+同 hash」——无法区分「上次 hybrid 遗留的 restore 副本」
-	// 与「用户自己网盘里同内容的文件」（自分享最典型）。若一律登记，AutoDelete 会永久删除
-	// 用户的自有文件（数据丢失，round-6 对抗评审）。判别：restore 副本位于「Pack From Shared」
-	// 文件夹（实测），用户自有文件在普通位置——parent 不是 Pack From Shared 的只复用、不登记。
-	if d.isRestoreCopy(ctx, existing) {
+	// NH-P1 加固：只登记确认是 restore 副本的文件供 AutoDelete 删除（用户自有文件
+	// 同内容 → 只复用、绝不登记删除——判据在 restore_idempotent.go 唯一实现）。
+	if rc.IsRestoreCopy {
 		dc.lease.TrackIn(acctName, existing.ID) // restore 副本（AutoDelete 时按账号会话 Release 永久删）
 		// 已知限制（2026-10-05 评审记录，非本轮引入）：并发任务共享同一分享时，两任务可能
 		// 都 idempotent 命中同一 restore 副本并各自 Track——先完成方 Release 删除后，
-		// 后完成方在途 chunk 会失败。属跨任务协调问题（需 per-task 租约/删除引用计数），
-		// 待「单一内部类型 + 策略路由」统一架构时一并解决（单账号路径同样存在）。
-		//
-		// 配额**咨询性**语义（2026-10-05 追加）：Select 的每日配额预检是软预留——基于当时
-		// DailyUsed 判断「剩余 ≥ 本 chunk」，但预留不占用，chunk 下载成功后才 RecordUsage 事后
-		// 提交。因此并发任务共享同一账号池时，多个任务可能在同一账号的软预留窗口内都被选中、
-		// 并行拉取，该账号本地记账 DailyUsed 会较估算短暂**超过**当日配额（本 ID 为每次 Select
-		// 的软预检结果，非原子预留）。这是刻意为之——日配额是**真实网盘流量的 advisory 估算**
-		// 而非硬性限流：超额只是本地记账超、不损坏数据，也不改变每账号真实可达的流量上限。故
-		// 不加预留（reserve/decrement 机制）——引入它就需账号级预留计数 + 失败释放，跨 Use 锁上
-		// 有饥饿/死锁风险，且对 advisory 语义无收益。会计精确性（并发 RecordUsage 无丢更新）由
-		// TestAccountPool_Synctest_ConcurrentOps_CrossMidnight 与
-		// TestHybridDownload_MultiAccount_ConcurrentSharedPool 锁定。
+		// 后完成方在途 chunk 会失败。属跨任务协调问题（需 per-task 租约/删除引用计数）。
 	} else {
 		d.log.Info("hybrid restore reuse (non-restore-copy, skip delete registration)",
 			"id", existing.ID, "name", existing.Name)
 	}
+	// 取直链（每次重取新链接防 TTL 过期；复用既有副本不 Track 删除——副本非本次新建）。
 	link, lerr := d.api.DownloadLink(ctx, existing.ID)
 	if lerr != nil {
 		return "", "", false
 	}
 	return link, existing.ID, true
-}
-
-// isRestoreCopy 判断网盘文件是否为 hybrid restore 副本：parent 是「Pack From Shared」文件夹。
-// 查不到 parent 元数据时保守返回 false（只复用不删，绝不误删用户自有文件）。
-func (d *HybridDownloader) isRestoreCopy(ctx context.Context, f *FileMeta) bool {
-	if f == nil || f.ParentID == "" {
-		return false
-	}
-	parent, err := d.api.FindByID(ctx, f.ParentID)
-	if err != nil {
-		d.log.Warn("hybrid restore copy check failed (conservative: not delete)", "parent", f.ParentID, "err", err)
-		return false
-	}
-	return parent.Kind == driveKindFolder && strings.EqualFold(parent.Name, "Pack From Shared")
 }
