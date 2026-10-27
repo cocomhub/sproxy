@@ -157,8 +157,16 @@ build-ci: prepare
 # 调度开销，且与 test-cover 的 -parallel 默认值不同会**破坏覆盖与测试的编译缓存复用**。
 # TEST_COVER_PROFILE=<path>（CI 用）：把覆盖并入**这一遍**测试（-race 与 -cover 同进程），
 # 免去第二遍全量；本地不设 ⇒ 行为不变（不带 -coverprofile）。
+# TEST_EXCLUDE=<包模式>（CI 用）：从 ./... 剔除（go list | grep -v）——如 archcheck（其门禁
+# 已在 Lint job 非 race 跑，race 全量在 Test job 里纯耗时）。本地不设 ⇒ 行为不变。
 test: prepare
-	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(if $(TEST_COVER_PROFILE),-coverprofile=$(TEST_COVER_PROFILE)) $(GOTAGS) ./...
+	@if [ -n "$(TEST_EXCLUDE)" ]; then \
+		echo "=== make test（排除 $(TEST_EXCLUDE)）==="; \
+		pkgs=$$($(RAW_GO) list ./... | grep -vE '^github[.]com/cocomhub/sproxy/$(TEST_EXCLUDE)$$' | tr '\n' ' '); \
+		$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(if $(TEST_COVER_PROFILE),-coverprofile=$(TEST_COVER_PROFILE)) $(GOTAGS) $$pkgs; \
+	else \
+		$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(if $(TEST_COVER_PROFILE),-coverprofile=$(TEST_COVER_PROFILE)) $(GOTAGS) ./...; \
+	fi
 
 .PHONY: test-ci test-cover
 test-ci test-cover: prepare
