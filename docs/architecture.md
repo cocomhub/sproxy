@@ -364,7 +364,10 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 
 **转存支持本地卷**：`checkTransferVolumePreflight` 只要求目标卷可解析（FS 非 nil），不再
 要求协议非空；本地卷 target 产物落 `<owner>/user/<rel>`（`ResolveUserLocation` 统一键空间，
-可经 `/download` 命中）。转存 URL 形态 `local://<卷>/<rel>`（U4：`RegisterLocalBackend`
+可经 `/download` 命中）。**本地卷转存的容量记账（R16 P1）**：`rootfs` 适配器自述
+`syncpkg.LocalVolume`（本地根恒本地）⇒ 转存判定非远程 ⇒ owner 配额探测生效；卷级容量池经
+装配注入 `VolumePoolChargeFor` 做**写前探测 + 写后差分结算**（`pool.ProbeReserve`/`Adjust`），
+删除侧 `ReleaseCommitted` 对称（外部卷容量权威仍在 FS 层 `CapacityFS`，不双记）。转存 URL 形态 `local://<卷>/<rel>`（U4：`RegisterLocalBackend`
 声明 `local` 协议，`Set.ResolveURL` 经 `VolumeView` 读本地卷）。`volume://`（`Location.String()`
 卷内定位序列化）与 `local://`（协议寻址）并存分工。
 

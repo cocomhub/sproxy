@@ -501,7 +501,9 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 可选 `target_path` 指定目标键（目标卷 **user 桶内**相对路径，可含子目录；空 = 默认 `archive/<archive_name>`，
 以 `/` 结尾 = 目录并拼上归档名）。目标键实际为 `<owner>/user/<target_path>`（经 `volume.ResolveUserLocation`
 唯一入口，与读路径同键空间；外部卷不走本地文件索引，故不出现在 `/api/files` 列表），响应 `file` 为
-可 `ResolveURL` 取用的 URL（非归档名；本地卷 URL 形态 `local://<卷>/<rel>`，见 U4）。空/缺省 = 沿既有
+**展示用** URL（非归档名；本地卷形态 `local://<卷>/<rel>`，见 U4/R16——注意：本地卷产物
+请用 `GET /download?filename=<rel>` 取用，`local://` URL 供标识/trace 展示，不承诺经
+`/api/resolve` 解析为可下载资源；外部卷 `scheme://<卷>/<rel>` 语义不变）。空/缺省 = 沿既有
 行为落租户 archive 桶。同名目标已存在 → 409（拒绝静默覆盖）。可选 `encrypt`（true = 打包流式加密，密钥来自服务端 `archive.key_file`，
 产物命名追加 `.aes`，但以 `target_path`/默认名为准）、`cipher`（默认 aes-256-gcm，**须与 `encrypt`
 同用**——单独指定不加密且无效果 → 400，防误信已加密）、`compression`（gzip 默认 / zstd / brotli；
