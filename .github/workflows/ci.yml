@@ -339,6 +339,9 @@ jobs:
     # 纯覆盖消费 + 扫描：不再依赖 lint（解除串行等待），不再自跑 cover-check（此前重复
     # 全量根测试）。覆盖由两个测试 job 产出（test→coverage-root，test-submodules→
     # coverage-submodules），下载后经 build/coverage/*.out 通配喂给 Sonar 聚合。
+    # 2026-10-27 复核：needs 收窄为 [test] **不带来收益**——实测 test 276s > submodules
+    # 244s，Sonar 开始时间恒由 test 决定；且缺 submodules 覆盖会丢子 module 覆盖率
+    # （artifact 下载失败）。故保留双 needs。
     needs: [test, test-submodules]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -394,6 +397,13 @@ jobs:
           version: v2.14.0
           working-directory: web/e2e
           args: --timeout=5m -c ../../.golangci.yml ./...
+      - name: Cache Playwright browsers
+        # 浏览器二进制缓存（~/.cache/ms-playwright）：避免每次冷装 chromium（含 deps）。
+        # key 按 playwright-go 版本波纹——依赖锁文件（web/e2e/go.sum）变化时自动失效。
+        uses: actions/cache@d4323d4df104b026aab66161db76e2c5cd05dc57 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('web/e2e/go.sum') }}
       - name: Install Playwright browsers
         run: |
           cd web/e2e
