@@ -587,11 +587,14 @@ function itemParentDir(filename) {
 
 // --- 删除 ---
 async function deleteFile(name, checksum, vol) {
-  if (!confirm('确认删除 "' + name + '"?')) return;
-  if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
   const volume = vol || _volumeFilter || undefined;
+  // checksum 缺失时先 stat 兜底（外部卷列表不返回 checksum——见 resolveOpChecksum）。
+  // 先于 confirm 做：拿不到就立即报错，不让用户白确认一遍。
+  const cs = await resolveOpChecksum(name, checksum, volume, '删除');
+  if (!cs) return;
+  if (!confirm('确认删除 "' + name + '"?')) return;
   try {
-    const data = await sc.files.deleteFile(name, checksum, volume);
+    const data = await sc.files.deleteFile(name, cs, volume);
     if (data?.success) { showToast('删除成功: ' + name, 'success'); void refreshList(); }
     else { showToast('删除失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
@@ -599,15 +602,39 @@ async function deleteFile(name, checksum, vol) {
 
 // --- 重命名 ---
 async function renameFile(name, checksum, vol) {
-  if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
   const newName = prompt('新的文件名（路径）:', name);
   if (!newName || newName === name) return;
   const volume = vol || _volumeFilter || undefined;
   try {
-    const data = await sc.files.rename(name, newName, checksum, volume);
+    const cs = await resolveOpChecksum(name, checksum, volume, '重命名');
+    if (!cs) return;
+    const data = await sc.files.rename(name, newName, cs, volume);
     if (data?.success) { showToast('重命名成功: ' + newName, 'success'); void refreshList(); }
     else { showToast('重命名失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('重命名失败: ' + e.message, 'error'); }
+}
+
+// resolveOpChecksum 为写操作取源文件 checksum：列表已带则直接用；否则 HEAD stat 兜底。
+//
+// 为什么需要（用户实测 2026-10-27）：**外部卷**（baidupcs / secretdata / S3 …）列举不
+// 携带 checksum——它们的整文件哈希在卷内 meta（sidecar / 加密 meta）而逐条读会 n 次远端
+// 往返。Web UI 行 `data-checksum` 因此为空，旧实现在前端直接报「缺少 checksum」→ 外部卷
+// **无法删除/改名**（功能死路）。CLI 侧 FileClient.Delete 一直是「先 Stat 取 checksum 再删」
+// 所以 CLI 无此问题——本函数把同一语义搬到前端（单次 HEAD，按需发生，列表不变慢）。
+// 返回空串 = 确实拿不到（调用方已 toast，调用处 return）。
+async function resolveOpChecksum(name, checksum, volume, actionLabel) {
+  if (checksum) return checksum;
+  let res;
+  try {
+    res = await sc.files.stat(name, volume);
+  } catch (e) {
+    showToast(actionLabel + '失败: 读取文件信息出错（' + e.message + '）', 'error');
+    return '';
+  }
+  const meta = httpFileMeta(res);
+  if (meta.checksum) return meta.checksum;
+  showToast('缺少 checksum，无法校验完整性' + (volume ? '（卷 ' + volume + '）' : ''), 'error');
+  return '';
 }
 
 // --- 批量操作 ---
@@ -636,9 +663,42 @@ function getSelectedFiles() {
   for (const cb of document.querySelectorAll('.file-select:checked')) {
     const filename = cb.dataset.filename;
     const checksum = cb.dataset.checksum;
-    if (filename) results.push({ filename: filename, checksum: checksum });
+    // volume：行卷（外部/加密卷上批量操作需定位——与单条操作同一优先级）。
+    const volume = cb.dataset.volume || '';
+    if (filename) results.push({ filename: filename, checksum: checksum, volume: volume });
   }
   return results;
+}
+
+// fillMissingChecksums 为批量写操作补 checksum（列表未带的逐条 HEAD stat 兜底）。
+// 返回 { items, missing }：missing 为非空时调用方应中止（无法校验的条目不得静默操作）。
+async function fillMissingChecksums(items, actionLabel) {
+  const out = [];
+  const missing = [];
+  for (const it of items) {
+    if (it.checksum) {
+      out.push(it);
+      continue;
+    }
+    let cs = '';
+    try {
+      cs = httpFileMeta(await sc.files.stat(it.filename, it.volume || _volumeFilter || undefined)).checksum;
+    } catch (e) {
+      missing.push(it.filename + '（' + e.message + '）');
+      continue;
+    }
+    if (!cs) {
+      missing.push(it.filename);
+      continue;
+    }
+    out.push({ filename: it.filename, checksum: cs, volume: it.volume });
+  }
+  if (missing.length > 0) {
+    showToast(actionLabel + '中止：以下文件无法取得 checksum —— ' + missing.slice(0, 3).join(', ') +
+      (missing.length > 3 ? ' 等 ' + missing.length + ' 个' : ''), 'error');
+    return { items: out, missing: missing };
+  }
+  return { items: out, missing: missing };
 }
 
 async function batchDelete() {
@@ -646,10 +706,13 @@ async function batchDelete() {
   if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
   if (!confirm('确定要删除选中的 ' + files.length + ' 个文件吗？')) return;
   try {
+    const filled = await fillMissingChecksums(files, '批量删除');
+    if (filled.missing.length > 0) return;
+    const payload = filled.items.map(function(f) { return { filename: f.filename, checksum: f.checksum }; });
     // 服务端 /api/batch/delete 回包为 {results:[{filename,success,message}]}（无顶层
     // success）——成败与文案统一由 appRender.batchOpSummary 归一；逐条处理下部分成功
     // 也会落盘，故无论成败都 refreshList()。
-    const data = await sc.files.batchDelete(files);
+    const data = await sc.files.batchDelete(payload);
     const s = appRender.batchOpSummary(data?.results || [], '删除');
     showToast(s.message, s.ok ? 'success' : 'error');
     // 与 batchRename 对称：先复位选择态（否则删空后 refreshList 走空列表提前返回，
@@ -668,9 +731,17 @@ async function batchRename() {
     if (newName === null) continue;
     if (newName.trim() === '') { showToast('文件名不能为空', 'error'); return; }
     if (newName === f.filename) continue;
-    operations.push({ from: f.filename, to: newName, checksum: f.checksum });
+    operations.push({ from: f.filename, to: newName, checksum: f.checksum, volume: f.volume });
   }
   if (operations.length === 0) { showToast('没有需要重命名的文件', 'info'); return; }
+  // 外部卷列表不带 checksum ⇒ 逐条 HEAD stat 兜底（缺则中止，不静默跳校验）。
+  const filled = await fillMissingChecksums(
+    operations.map(function(o) { return { filename: o.from, checksum: o.checksum, volume: o.volume }; }),
+    '批量重命名');
+  if (filled.missing.length > 0) return;
+  for (let i = 0; i < operations.length; i++) {
+    operations[i].checksum = filled.items[i].checksum;
+  }
   try {
     // prompt 取消/跳过的项不进 operations，故以服务端 results 为准（逐条 {success,message}）；
     // 部分成功也会落盘，因此无论成败都清选择 + refreshList()。

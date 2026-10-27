@@ -201,7 +201,7 @@
     const playBtn = !fi.is_dir && isVideoName(fi.name)
       ? '<button class="btn btn-sm btn-secondary file-video-play-btn" data-video-play data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '">▶ 播放</button>'
       : '';
-    return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + volBadge + metaBadge + '</td>' +
+    return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-volume="' + escHtml(fi.volume || '') + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + volBadge + metaBadge + '</td>' +
       '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
       '<td>' + csDisplay + '</td>' +
       '<td class="file-actions">' +
