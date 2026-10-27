@@ -213,6 +213,7 @@ func (s *Storage) putStagedSkipPreCheck(ctx context.Context, key string, st *sta
 		return nil, werr
 	}
 	if done {
+		s.invalidateDlink(key) // 覆盖写同名旧对象 ⇒ 失效旧直链（同上）
 		return meta, nil
 	}
 	// 上传后复核不一致/未见 → 走既有有界重试（后续轮仍带 pre-Stat 自愈）。
@@ -247,6 +248,7 @@ func (s *Storage) putRetryLoopFrom(ctx context.Context, key, remote string, st *
 			return nil, err
 		}
 		if meta != nil {
+			s.invalidateDlink(key) // 覆盖写同名旧对象 ⇒ 失效旧直链（同上）
 			return meta, nil
 		}
 		if remoteETag != "" {
@@ -393,6 +395,11 @@ func (s *Storage) putRetryLoop(ctx context.Context, key, remote string, st *stag
 			return nil, err
 		}
 		if meta != nil {
+			// **上传成功即失效目标直链**（2026-10-27，与 S1 的 Delete/Move 同口径）：上传可能
+			// 覆盖同名旧对象（内容已变）⇒ 旧直链 URL 指向旧 fs_id（百度签名绑定 path+fs_id）
+			// ⇒ 缓存命中旧对象。失效后下次取用按新对象重签（正确性优先；秒传命中时内容未变，
+			// 失效仅多一次签发往返，无害）。
+			s.invalidateDlink(key)
 			return meta, nil // 秒传命中 / ETag 复核一致 / readback 内容一致
 		}
 		if remoteETag != "" {
@@ -1036,6 +1043,9 @@ func (s *Storage) Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta,
 	// **移动后失效源直链（S1，2026-10-27）**：源对象已不存在，缓存里的旧 URL 是死链。
 	// 目标新路径首次访问会自行签发（不同 key），旧 key 不再复用 ⇒ 立即清除防幽灵。
 	s.invalidateDlink(srcKey)
+	// **目标 key 同样失效**：Move 到**已存在同名目标**（覆盖语义）时，目标旧直链指向被覆盖的
+	// 旧对象 ⇒ 必须清除（2026-10-27 补；S1 原先只清源）。
+	s.invalidateDlink(dstKey)
 	return s.Stat(ctx, dstKey)
 }
 
@@ -1051,6 +1061,8 @@ func (s *Storage) Copy(ctx context.Context, srcKey, dstKey string) (*ObjectMeta,
 		return nil, err
 	}
 	if err := s.adapter.Copy(ctx, src, dst); err == nil {
+		// 服务端复制成功：目标可能是**已存在同名对象**的覆盖 ⇒ 失效目标旧直链（同上口径）。
+		s.invalidateDlink(dstKey)
 		return s.Stat(ctx, dstKey)
 	} else if !errors.Is(err, ErrUnsupported) {
 		return nil, mapPCSError(err)

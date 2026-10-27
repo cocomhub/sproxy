@@ -44,6 +44,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -3071,6 +3072,20 @@ func (s *SecretdataFS) copyContentBlobs(ctx context.Context, e *metaEntry, targe
 	if e.dataDir != "" {
 		return nil, nil // 去重文件：分块在池容器（全卷共享）⇒ 不拷贝（副本保留 dataDir 指向池）
 	}
+	// **staging 预留（对齐写路径）**：跨容器复制落本地 tmp 再上传，必须与写面同口径预留
+	// staging 配额（2026-10-27，用户「继续优化 secretdata/baidupcs 场景」）——否则本地磁盘
+	// 打满上限时复制绕过配额直接落盘（口径漂移 + 打满风险）。预测量 = Σ 各 blob 密文峰值
+	// （每 blob 一份 tmp），与写路径 stagingReserve 同型。预留失败 fail-closed（不动数据）。
+	need := int64(0)
+	for _, ci := range e.meta.Chunks {
+		need += cipherPeak(ci.EncSize)
+	}
+	if p := e.meta.Parity; p != nil {
+		need += cipherPeak(p.EncSize)
+	}
+	if _, rerr := s.stagingReserveBytes(ctx, need); rerr != nil {
+		return nil, rerr
+	}
 	var uploaded []string
 	rollback := func() { s.rollbackWrite(ctx, uploaded, nil) } // 有界且不被调用方取消打断（P2 修复 2026-10-19）
 	for _, ci := range e.meta.Chunks {
@@ -3115,19 +3130,101 @@ func (s *SecretdataFS) deleteContentBlobs(ctx context.Context, e *metaEntry) {
 
 // copyBlob 物理复制底层 blob 到目标路径（保持源 blob mtime，移动不改物理时间戳；
 // 内容零改动 → 哈希不变）。
+//
+// 2026-10-27 流式化（用户「继续优化 secretdata/baidupcs 场景」）：旧实现 `readBlob` 整
+// blob 读入内存 + `uploadBlob(bytes.Reader)` ⇒ ① 大 blob 复制内存峰值 2×；② 无 staging
+// 路径复用（baidupcs 场景二次落盘 + 整块重扫）。本实现改为：`OpenRead(src)` 流式写本地
+// tmp（内存 O(1)，落盘已由调用方 staging 预留约束）→ 顺带算整块 md5/crc32 → 经
+// `syncpkg.WithStagedLocalPath` + UploadHints 交内层（baidupcs 识别 staged 路径 ⇒
+// `PutFromStagedPath` 零二次落盘、免整块重扫）→ 删除 tmp（生命周期契约：stagedPath
+// 只读，内层返回后才能删）。
 func (s *SecretdataFS) copyBlob(ctx context.Context, src, dst string, mtime int64) error {
-	data, rerr := readBlob(ctx, s.inner, src)
-	if rerr != nil {
-		return fmt.Errorf("secretdata: 读源 blob %s 失败: %w", src, rerr)
+	rc, oerr := s.inner.OpenRead(ctx, src)
+	if oerr != nil {
+		return fmt.Errorf("secretdata: 读源 blob %s 失败: %w", src, oerr)
 	}
+	defer rc.Close()
 	mt := mtime
 	if e, serr := s.inner.Stat(ctx, src); serr == nil && e != nil && e.MTime > 0 {
 		mt = e.MTime
 	}
-	if werr := s.uploadBlob(ctx, dst, data, mt); werr != nil {
+	// 流式写本地 tmp（同时算整块 md5/crc32/size），内存 O(1)。
+	tmpPath, size, hashes, terr := s.stageBlobCopy(ctx, rc, src)
+	if terr != nil {
+		return terr
+	}
+	defer func() { _ = os.Remove(tmpPath) }() // stagedPath 只读：内层返回后才可删
+
+	// 经 staged 路径 + 上传提示交内层（baidupcs 复用该路径零二次落盘、免整块重扫）。
+	// reader 传 tmp 文件句柄：内层支持 staged 复用（baidupcs `StagedPathReuse`）时忽略它、
+	// 直接消费该路径；不支持的内层（LocalFS 等）则从该句柄流式读（内存 O(1)）。
+	src2, oerr2 := os.Open(tmpPath)
+	if oerr2 != nil {
+		return fmt.Errorf("secretdata: 重开本地 blob 临时文件失败: %w", oerr2)
+	}
+	defer src2.Close()
+	wctx := syncpkg.WithStagedLocalPath(ctx, tmpPath)
+	if size > 0 {
+		wctx = syncpkg.WithUploadHints(wctx, &syncpkg.UploadHints{
+			RandomContent: true,
+			Size:          size,
+			MD5:           hashes.md5,
+			CRC32:         hashes.crc32,
+		})
+	}
+	if werr := s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, dst, src2, size, mt); werr != nil {
 		return fmt.Errorf("secretdata: 写入目标 blob %s 失败: %w", dst, werr)
 	}
 	return nil
+}
+
+// blobCopyHashes 是 stageBlobCopy 顺带算出的整块校验和（上传提示用）。
+type blobCopyHashes struct {
+	md5   string
+	crc32 string
+}
+
+// stageBlobCopy 把 rc 流式拷到本地 tmp（同时算 md5/crc32/size），返回 tmp 路径/大小/哈希。
+// 失败时清理 tmp；reader 错误如实上抛（调用方不做部分回滚——tmp 已删）。
+func (s *SecretdataFS) stageBlobCopy(ctx context.Context, rc io.Reader, src string) (string, int64, blobCopyHashes, error) {
+	tmp, terr := os.CreateTemp(s.temp, "cp-blob-*")
+	if terr != nil {
+		return "", 0, blobCopyHashes{}, fmt.Errorf("secretdata: 复制 blob 创建临时文件失败: %w", terr)
+	}
+	tmpPath := tmp.Name()
+	h := md5.New() //nolint:gosec // 密文随机内容，非安全用途（同 uploadBlob）
+	crc := crc32.NewIEEE()
+	size := int64(0)
+	buf := make([]byte, 128*1024)
+	for {
+		n, rerr := rc.Read(buf)
+		if n > 0 {
+			if _, werr := tmp.Write(buf[:n]); werr != nil {
+				tmp.Close()
+				os.Remove(tmpPath)
+				return "", 0, blobCopyHashes{}, fmt.Errorf("secretdata: 写本地 blob 临时文件失败: %w", werr)
+			}
+			_, _ = h.Write(buf[:n])
+			_, _ = crc.Write(buf[:n])
+			size += int64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			tmp.Close()
+			os.Remove(tmpPath)
+			return "", 0, blobCopyHashes{}, fmt.Errorf("secretdata: 读源 blob %s 中断: %w", src, rerr)
+		}
+	}
+	if cerr := tmp.Close(); cerr != nil {
+		os.Remove(tmpPath)
+		return "", 0, blobCopyHashes{}, fmt.Errorf("secretdata: 关闭本地 blob 临时文件失败: %w", cerr)
+	}
+	return tmpPath, size, blobCopyHashes{
+		md5:   hex.EncodeToString(h.Sum(nil)),
+		crc32: strconv.FormatUint(uint64(crc.Sum32()), 10),
+	}, nil
 }
 
 // pruneEmptyDirsLocked 从 from 起向上回收空目录（Imp-1：删干净、重启不复现）：目录无文件
