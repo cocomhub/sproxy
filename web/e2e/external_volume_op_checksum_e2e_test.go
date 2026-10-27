@@ -75,7 +75,12 @@ func recordRequests(page playwright.Page) *reqRecorder {
 	return r
 }
 
-// TestExternalVolume_RenameUsesStatChecksum 外部卷改名：先 HEAD stat 取 checksum → POST /rename。
+// TestExternalVolume_RenameUsesStatChecksum 外部卷改名可用：
+// ① 列表已带 checksum（S2/S3：secretdata 列举直接给 SHA-256）⇒ 无 stat 也能成功——
+//
+//	断言只要求「改名真实生效」（操作结果语义，不绑定实现路径）；
+//
+// ② 若前端确实走了 stat（行 checksum 缺失的防御路径）⇒ 断言它带行卷 volume。
 func TestExternalVolume_RenameUsesStatChecksum(t *testing.T) {
 	baseURL := setupSecretVolumeWithFile(t, "ren.txt", []byte("rename-on-external"))
 	page, stop := pageFixture(t)
@@ -89,22 +94,18 @@ func TestExternalVolume_RenameUsesStatChecksum(t *testing.T) {
 		t.Fatalf("点击重命名: %v", err)
 	}
 	waitTextVisible(t, page, "#file-list", "ren2.txt", 10000)
-
-	statIdx := rec.indexOf("/api/files/stat?")
-	if statIdx < 0 {
-		t.Fatalf("外部卷改名未先 HEAD stat 取 checksum（前端仍直接报「缺少 checksum」？）；请求序列=%v", rec.calls)
-	}
-	if u := rec.first("/api/files/stat?"); !strings.Contains(u, "volume="+auditVaultType) {
-		t.Errorf("stat 请求 = %q，应带行卷 volume=%s（外部卷需显式定位）", u, auditVaultType)
-	}
-	renIdx := rec.indexOf("/rename?")
-	if renIdx < 0 {
-		t.Fatalf("未观察到 POST /rename；请求序列=%v", rec.calls)
-	}
-	if renIdx < statIdx {
-		t.Errorf("/rename 发生在 stat 之前（checksum 未先补齐）；请求序列=%v", rec.calls)
-	}
 	waitTextGone(t, page, "#file-list", "ren.txt", 10000)
+
+	// 改名必须真实发出（且成功）。
+	if renIdx := rec.indexOf("/rename?"); renIdx < 0 {
+		t.Fatalf("未观察到 POST /rename（外部卷改名仍不可用？）；请求序列=%v", rec.calls)
+	}
+	// 防御路径（行 checksum 缺失时）stat 必须带行卷。
+	if statIdx := rec.indexOf("/api/files/stat?"); statIdx >= 0 {
+		if u := rec.first("/api/files/stat?"); !strings.Contains(u, "volume="+auditVaultType) {
+			t.Errorf("stat 请求 = %q，应带行卷 volume=%s（外部卷需显式定位）", u, auditVaultType)
+		}
+	}
 }
 
 // TestExternalVolume_DeleteUsesStatChecksum 外部卷删除：先 HEAD stat 取 checksum → POST /delete。
@@ -124,16 +125,15 @@ func TestExternalVolume_DeleteUsesStatChecksum(t *testing.T) {
 	// 确定性等待：delete 请求出现（而不是固定 30s 轮询 DOM 文本）。
 	waitRecorded(t, rec, "/delete?", 10*time.Second)
 
-	statIdx := rec.indexOf("/api/files/stat?")
-	if statIdx < 0 {
-		t.Fatalf("外部卷删除未先 HEAD stat 取 checksum（前端仍直接报「缺少 checksum」？）；请求序列=%v", rec.calls)
+	// 删除必须真实发出（且成功）。
+	if delIdx := rec.indexOf("/delete?"); delIdx < 0 {
+		t.Fatalf("未观察到 POST /delete（外部卷删除仍不可用？）；请求序列=%v", rec.calls)
 	}
-	if u := rec.first("/api/files/stat?"); !strings.Contains(u, "volume="+auditVaultType) {
-		t.Errorf("stat 请求 = %q，应带行卷 volume=%s", u, auditVaultType)
-	}
-	delIdx := rec.indexOf("/delete?")
-	if delIdx < statIdx {
-		t.Errorf("/delete 发生在 stat 之前（checksum 未先补齐）；请求序列=%v", rec.calls)
+	// 防御路径（行 checksum 缺失时）stat 必须带行卷。
+	if statIdx := rec.indexOf("/api/files/stat?"); statIdx >= 0 {
+		if u := rec.first("/api/files/stat?"); !strings.Contains(u, "volume="+auditVaultType) {
+			t.Errorf("stat 请求 = %q，应带行卷 volume=%s", u, auditVaultType)
+		}
 	}
 	// 服务端已删 → 列表刷新后该行消失。
 	waitTextGone(t, page, "#file-list", "del.txt", 10000)

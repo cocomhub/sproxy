@@ -291,6 +291,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
 	localMux.HandleFunc("POST /api/volumes/rebalance", h.rebalanceVolumeHandler)
 	localMux.HandleFunc("POST /api/volumes/copy", h.copyVolumeHandler)
+	localMux.HandleFunc("POST /api/volumes/refresh", h.refreshVolumeHandler)
 	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读（fileRouteRead / 只读子组）；
 	// 导入 = 写（fileRoute / 写子组）。
 	localMux.HandleFunc("GET /api/volumes/export", h.exportVolumeHandler)
@@ -449,6 +450,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/rebalance", h.fileRoute(h.rebalanceVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/copy", h.fileRoute(h.copyVolumeHandler))
+	srvMux.HandleFunc("POST /api/volumes/refresh", h.fileRoute(h.refreshVolumeHandler))
 	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读子组（reader 可读）；导入 = 写子组。
 	srvMux.HandleFunc("GET /api/volumes/export", h.fileRouteRead(h.exportVolumeHandler))
 	srvMux.HandleFunc("POST /api/volumes/import", h.fileRoute(h.importVolumeHandler))
@@ -724,7 +726,7 @@ func isFileGroupedRoute(path string) bool {
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
-		routeVolumesBase, "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/user",
+		routeVolumesBase, "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/refresh", "/api/volumes/user",
 		"/api/volumes/export", "/api/volumes/import",
 		"/api/backends",
 		"/api/backends/{type}/presign",

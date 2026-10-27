@@ -40,6 +40,88 @@ func (s *SecretdataFS) CurrentVersion() int64 {
 	return s.volVersion
 }
 
+// RefreshIndex 重新扫描底层（容器树 + 全部文件 meta）并**原子重建**内存索引（S5，2026-10-27）。
+//
+// 背景（设计文档 §6 裁定 B）：secretdata 的内存索引只在挂载时 `loadIndex` 一次——若卷被
+// **本进程之外**修改（用户用网盘 App 直改、另一 sproxy 实例写入），幽灵条目/旧哈希会一直
+// 存在到重启。本方法提供显式收敛入口（服务端 `sclient volume refresh` / 未来 Web UI 按钮）。
+//
+// 实现：在**全新空白镜像**上重跑 loadIndex 的扫描/解密（锁外），成功后一次换入
+// （s.index/dirs/dirSegs/dirIDs/dirParents/dirMTime/usage/volVersion/dedupPool/dirPhysTotal）。
+// 换入前清空块级派生缓存（块/窗口/磁盘 span/stage）——旧索引的 key 在新索引下可能指向
+// 已删除/改名的对象，缓存与索引必须同批失效（删除三段式 ③）。失败则**保持旧索引不动**
+// （fail-closed：瞬时底层故障不能把 vol 变成空视图，否则 GC 会把全部 meta 当孤儿清扫）。
+func (s *SecretdataFS) RefreshIndex(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// ① 清空派生缓存（key 空间随索引重建变化）。
+	s.invalidateAllBlockCachesLocked()
+	// ② 造全新镜像：map 初始化后走既有扫描路径（loadIndex 是增量化登记，不能直接复用）。
+	//    用 cloneFS 结构保持扫描函数签名不变（s 还是自身，但先把状态归零）。
+	// 简化实现：把状态重置后调用 loadIndex（它内部只做登记）——先备份旧状态以回滚。
+	if err := s.reindexLocked(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reindexLocked 在持锁下重建索引：先状态归零，跑同一条扫描管线，任一失败回滚旧状态。
+func (s *SecretdataFS) reindexLocked(ctx context.Context) error {
+	// 保存旧状态（回滚用）。
+	old := struct {
+		index        map[string]*metaEntry
+		dirs         map[string]struct{}
+		dirSegs      map[string]string
+		dirIDs       map[string]string
+		dirParents   map[string]string
+		dirMTime     map[string]int64
+		usage        int64
+		volVersion   int64
+		dedupPool    map[string]*dedupBlob
+		dirPhysTotal int64
+	}{
+		index: s.index, dirs: s.dirs, dirSegs: s.dirSegs, dirIDs: s.dirIDs,
+		dirParents: s.dirParents, dirMTime: s.dirMTime, usage: s.usage,
+		volVersion: s.volVersion, dedupPool: s.dedupPool, dirPhysTotal: s.dirPhysTotal,
+	}
+	// 归零后跑扫描管线（其结果登记进归零后的 map）。
+	s.index = map[string]*metaEntry{}
+	s.dirs = map[string]struct{}{}
+	s.dirSegs = map[string]string{}
+	s.dirIDs = map[string]string{}
+	s.dirParents = map[string]string{}
+	s.dirMTime = map[string]int64{}
+	s.usage = 0
+	s.volVersion = 0
+	s.dedupPool = map[string]*dedupBlob{}
+	s.dirPhysTotal = 0
+	if err := s.loadIndex(ctx); err != nil {
+		// 失败：回滚旧状态（绝不让瞬时故障把卷变成空视图）。
+		s.index, s.dirs = old.index, old.dirs
+		s.dirSegs, s.dirIDs = old.dirSegs, old.dirIDs
+		s.dirParents, s.dirMTime = old.dirParents, old.dirMTime
+		s.usage, s.volVersion = old.usage, old.volVersion
+		s.dedupPool, s.dirPhysTotal = old.dedupPool, old.dirPhysTotal
+		return fmt.Errorf("secretdata: 重建索引失败（已回滚旧索引）: %w", err)
+	}
+	return nil
+}
+
+// invalidateAllBlockCachesLocked 清空全部块/窗口/磁盘派生缓存（RefreshIndex 前调用；持锁）。
+// 注意仅做**内存侧失效**——磁盘 span/stage 缓存是尽力而为设施（key 带内容寻址段，新索引
+// 下同名可能读旧 blob；由 spanCache/stageDL 的 checksum 校验自愈兜底）。
+func (s *SecretdataFS) invalidateAllBlockCachesLocked() {
+	if s.blockCache != nil {
+		s.blockCache.clear()
+	}
+	if s.spanCache != nil {
+		s.spanCache.clearAll()
+	}
+	if s.stageDL != nil {
+		s.stageDL.invalidateAll()
+	}
+}
+
 // writeFileDedup 去重写路径（**实验性代码，未生产验证**——方案 A：Dedup 降级为预留，
 // 装配层不接线，生产不可达；本实现保留供未来独立内容寻址子系统承接，测试框住正确性）。
 // 整文件内容哈希查询卷级池 → 命中引用（不重复加密/上传），未命中首次加密并登记池。

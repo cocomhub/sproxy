@@ -123,7 +123,6 @@ func (c *blockletCache) invalidatePrefix(prefix string) {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	kept := c.order[:0]
 	for _, k := range c.order {
 		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
@@ -136,4 +135,18 @@ func (c *blockletCache) invalidatePrefix(prefix string) {
 		kept = append(kept, k)
 	}
 	c.order = kept
+	c.mu.Unlock()
+}
+
+// clear 清空全部条目（RefreshIndex 前调用——索引重建会让旧 key 失效/复用，块缓存必须
+// 同批清空，防「删除后同名重建」读到旧明文）。
+func (c *blockletCache) clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.items = map[string][]byte{}
+	c.order = nil
+	c.bytes = 0
+	c.mu.Unlock()
 }

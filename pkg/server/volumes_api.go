@@ -999,3 +999,59 @@ func crossVolumeCopy(ctx context.Context, srcRoot, dstRoot *storage.Root, srcRel
 }
 
 // slices 导入占位（slices.SortFunc 由 ReadDir 使用——保持本文件与既有实现一致）。
+
+// refreshVolumeResponse 是 POST /api/volumes/refresh 的响应体。
+type refreshVolumeResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// refreshVolumeHandler 处理 POST /api/volumes/refresh?volume=<v>（S5，2026-10-27）。
+//
+// 触发场景：secretdata 卷的内存索引只在挂载时扫描一次；卷被**本进程之外**修改（用户用
+// 网盘 App 直改 / 另一实例写入）后幽灵条目/旧哈希永不收敛。本端点让客户端显式触发重建：
+//   - 卷是**外部卷**且后端实现 `registry.IndexRefresher`（当前 secretdata）→ 重扫 + 原子换入；
+//   - 卷是本地卷（无内存索引要重建，索引即磁盘真实）→ 无操作成功（语义幂等）；
+//   - 卷不存在/未授权 → 404/403（不泄卷存在性，与其它卷端点同判据）；
+//   - 后端不支持该能力 → 405 明确拒绝（不静默 no-op）。
+func (h *Handlers) refreshVolumeHandler(w http.ResponseWriter, r *http.Request) {
+	volName := r.URL.Query().Get("volume")
+	if volName == "" {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "volume 不能为空"}, http.StatusBadRequest)
+		return
+	}
+	if h.volSet == nil {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "卷功能未装配"}, http.StatusBadRequest)
+		return
+	}
+	owner := normalizeOwner(ownerFromRequest(r))
+	if !h.volumeAllowedFor(owner, volName) {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
+		return
+	}
+	// 本地卷：索引即磁盘真实（搜索索引增量更新），无「内存索引要重建」——幂等成功。
+	if h.volSet.HasLocalRoot(volName) {
+		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "本地卷无内存索引需要重建（幂等成功）"}, http.StatusOK)
+		return
+	}
+	be := h.volSet.External(volName)
+	if be == nil {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "卷不存在"}, http.StatusNotFound)
+		return
+	}
+	refresher, ok := be.(registry.IndexRefresher)
+	if !ok {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "该卷后端不支持索引重建（无内存索引）"}, http.StatusMethodNotAllowed)
+		return
+	}
+	if err := refresher.RefreshIndex(r.Context()); err != nil {
+		h.logger.Error("卷索引重建失败", "volume", volName, "error", err.Error())
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "索引重建失败: " + err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "volume_refresh", ObjectType: "volume", Object: volName, Result: AuditResultSuccess,
+		Detail: "索引重建（外部改动收敛）",
+	})
+	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷索引已重建: " + volName}, http.StatusOK)
+}

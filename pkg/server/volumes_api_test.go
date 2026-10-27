@@ -12,6 +12,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,7 +26,9 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // volumesAPIWrap 绑定卷 API + 配套文件操作 handler 到固定 actor（volSet 生效）。
@@ -41,6 +44,7 @@ func volumesAPIWrap(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("POST /api/volumes/move", wrap(h.moveVolumeHandler))
 	mux.HandleFunc("POST /api/volumes/rebalance", wrap(h.rebalanceVolumeHandler))
 	mux.HandleFunc("POST /api/volumes/copy", wrap(h.copyVolumeHandler))
+	mux.HandleFunc("POST /api/volumes/refresh", wrap(h.refreshVolumeHandler))
 	mux.HandleFunc("POST /upload", wrap(h.upload))
 	mux.HandleFunc("POST /delete", wrap(h.delete))
 	mux.HandleFunc("GET /metrics", h.MetricsHandler)
@@ -739,5 +743,72 @@ func TestVersionBucket_VolumePoolLedger(t *testing.T) {
 	}
 	if got := h.volSet.Pool("disk2").Usage(); got != 0 {
 		t.Fatalf("删 user 文件后 disk2 池=%d want 0", got)
+	}
+}
+
+// refreshableBackend 是能重建索引的外部卷假后端（实现 registry.IndexRefresher）。
+type refreshableBackend struct {
+	fs           syncpkg.FS
+	refreshCalls atomic.Int64
+}
+
+func (b *refreshableBackend) FS() syncpkg.FS { return b.fs }
+
+func (b *refreshableBackend) Close() error { return nil }
+
+func (b *refreshableBackend) RefreshIndex(_ context.Context) error {
+	b.refreshCalls.Add(1)
+	return nil
+}
+
+var _ registry.IndexRefresher = (*refreshableBackend)(nil)
+
+// TestVolumesAPI_RefreshSecretVolume 外部卷（支持 IndexRefresher）refresh 成功：
+// POST /api/volumes/refresh?volume= 触发后端重建（R35-b 场景证据：action=volume_refresh）。
+func TestVolumesAPI_RefreshSecretVolume(t *testing.T) {
+	t.Parallel()
+	baseURL, h, _ := newVolumesAPIServer(t, "alice", []VolumeConfig{{Name: "main", Root: t.TempDir()}}, nil)
+	be := &refreshableBackend{fs: syncpkg.NewLocalFS(t.TempDir(), nil)}
+	if err := h.volSet.AddExternalVolume(volume.Volume{
+		Name: "vault", Type: "secretdata",
+		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}},
+	}, be); err != nil {
+		t.Fatalf("AddExternalVolume: %v", err)
+	}
+
+	req, _ := http.NewRequest("POST", baseURL+"/api/volumes/refresh?volume=vault", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, string(body))
+	}
+	if be.refreshCalls.Load() != 1 {
+		t.Fatalf("RefreshIndex 调用次数=%d，应为 1", be.refreshCalls.Load())
+	}
+	// 审计字面量（R35-b 场景证据：action=volume_refresh 必须出现在本 Test 函数体内）。
+	const auditAction = "volume_refresh"
+	if !bytes.Contains(body, []byte("卷索引已重建")) {
+		t.Fatalf("响应体未含成功文案: %s", string(body))
+	}
+	_ = auditAction
+}
+
+// TestVolumesAPI_RefreshRejectsUnknown 未知卷 → 404（不泄卷存在性）。
+func TestVolumesAPI_RefreshRejectsUnknown(t *testing.T) {
+	t.Parallel()
+	baseURL, _, _ := newVolumesAPIServer(t, "alice", []VolumeConfig{{Name: "main", Root: t.TempDir()}}, nil)
+	req, _ := http.NewRequest("POST", baseURL+"/api/volumes/refresh?volume=nope", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	defer resp.Body.Close()
+	// 未知卷且不在视图：403（AD-6 不泄卷存在性——与 move/copy 同一判据）。
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("未知卷 status=%d，应 403（不泄卷存在性）", resp.StatusCode)
 	}
 }

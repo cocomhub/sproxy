@@ -1008,7 +1008,14 @@ func (s *Storage) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	if d, ok := s.adapter.(deleter); ok {
-		return d.Delete(ctx, remote)
+		if derr := d.Delete(ctx, remote); derr != nil {
+			return derr
+		}
+		// **删除后失效本地派生状态（S1，2026-10-27）**：直链缓存描述「远端对象当前可用性」。
+		// 对象已删 ⇒ 缓存里的 URL 即使未过期也是死链——且若用户**同名重建**新文件，命中旧缓存
+		// 会拿到指向旧文件（已删）的 URL ⇒ 404/取到错误内容。删除成功即清除，下次取用重新签发。
+		s.invalidateDlink(key)
+		return nil
 	}
 	return fmt.Errorf("%w: 当前 Adapter 无 Delete 能力", ErrUnsupported)
 }
@@ -1026,6 +1033,9 @@ func (s *Storage) Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta,
 	if err := s.adapter.Move(ctx, src, dst); err != nil {
 		return nil, mapPCSError(err)
 	}
+	// **移动后失效源直链（S1，2026-10-27）**：源对象已不存在，缓存里的旧 URL 是死链。
+	// 目标新路径首次访问会自行签发（不同 key），旧 key 不再复用 ⇒ 立即清除防幽灵。
+	s.invalidateDlink(srcKey)
 	return s.Stat(ctx, dstKey)
 }
 
