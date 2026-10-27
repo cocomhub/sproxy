@@ -1522,8 +1522,16 @@ async function onCreateUserVolume() {
 
 // wireVolumeOps 绑定卷操作按钮（B1）：copy/move 弹 filename 输入（当前目录文件）+ rebalance 直接触发。
 // 目标卷来自行内下拉；成功 toast + 刷新卷面板。
+// 「重建索引」（S5）单独绑定：触发 POST /api/volumes/refresh（幂等，本地卷无索引）。
 function wireVolumeOps(panel) {
-  panel.querySelectorAll('.vol-copy-btn, .vol-move-btn, .vol-rebalance-btn').forEach(function (btn) {
+	panel.querySelectorAll('.vol-refresh-btn').forEach(function (btn) {
+		if (btn.dataset.bound) return;
+		btn.dataset.bound = '1';
+		btn.addEventListener('click', function () {
+			void runVolumeRefresh(btn.dataset.vol, btn);
+		});
+	});
+	panel.querySelectorAll('.vol-copy-btn, .vol-move-btn, .vol-rebalance-btn').forEach(function (btn) {
     if (btn.dataset.bound) return;
     btn.dataset.bound = '1';
     btn.addEventListener('click', function () {
@@ -1547,6 +1555,30 @@ function wireVolumeOps(panel) {
       }
     });
   });
+}
+
+// runVolumeRefresh 触发卷内存索引重建（S5）：POST /api/volumes/refresh?volume=<卷>。
+// 用途：secretdata 等外部卷被外部改动（网盘 App 直改 / 外部工具删 blob）后，幽灵条目/旧哈希
+// 不收敛——本按钮显式重建。本地卷 = 无内存索引（幂等成功）；后端不支持该能力 = 405。
+async function runVolumeRefresh(volName, btn) {
+  if (!volName) return;
+  if (!confirm('重建卷 "' + volName + '" 的内存索引？\n\n用于「外部改动后收敛」（如用网盘 App 直改了卷内容）。\n本地卷无内存索引，操作幂等无害。')) return;
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '重建中…'; }
+  try {
+    const res = await sclientTransport.coreRequest('POST', '/api/volumes/refresh?volume=' + encodeURIComponent(volName), {});
+    const data = sclientUtil.decodeJSON(res.body);
+    if (data && data.success === false) {
+      showToast('索引重建失败: ' + (data.message || '未知错误'), 'error');
+      return;
+    }
+    showToast('卷索引已重建: ' + volName, 'success');
+    void showVolumes(); // 刷新卷面板（用量等可能随重扫变化）
+  } catch (e) {
+    showToast('索引重建失败: ' + e.message, 'error');
+  } finally {
+    if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = prev; }
+  }
 }
 
 // runVolumeOp 执行卷操作 POST（copy/move/rebalance）→ toast 摘要 + 刷新。

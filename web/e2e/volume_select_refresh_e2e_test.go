@@ -22,6 +22,7 @@ package e2e
 
 import (
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -208,5 +209,49 @@ func assertCurrentSubdir(t *testing.T, page playwright.Page, want string) {
 	}); err != nil {
 		got, _ := page.Evaluate("typeof currentSubdir !== 'undefined' ? currentSubdir : '<undefined>'")
 		t.Fatalf("currentSubdir = %v, want %q: %v", got, want, err)
+	}
+}
+
+// TestVolumesPanel_RefreshButtonTriggersAPI 卷面板「重建索引」按钮（S5）：
+// 打开卷面板 → 点某卷行的 vol-refresh-btn → 断言发出 POST /api/volumes/refresh?volume=<卷>
+// 且 toast 成功（幂等：本地卷也成功）。
+func TestVolumesPanel_RefreshButtonTriggersAPI(t *testing.T) {
+	// sproxy:serial: 面板用例共享 #volumes-panel 交互路径，串行更稳（与其它面板用例同一时序域）。
+	baseURL, _, cleanup := testServerAdmin(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	// 打开监控弹窗 → 卷 tab（复用既有面板入口流程）。
+	if _, err := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("导航: %v", err)
+	}
+	if err := page.Locator("#stats-btn").Click(); err != nil {
+		t.Fatalf("打开监控: %v", err)
+	}
+	if err := waitLoc(page, "#stats-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("监控弹窗未显示: %v", err)
+	}
+	if err := page.Locator("#volumes-tab").Click(); err != nil {
+		t.Fatalf("切到卷 tab: %v", err)
+	}
+	if err := waitLoc(page, "#volumes-panel .vol-refresh-btn", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("卷面板未渲染「重建索引」按钮（S5 接线缺失）: %v", err)
+	}
+
+	// 点第一行的重建索引 → 应发出 POST /api/volumes/refresh?volume=<卷>。
+	acceptDialog(page, "") // 有 confirm（防误点）
+	req, err := page.ExpectRequest("**/api/volumes/refresh?*", func() error {
+		return page.Locator("#volumes-panel .vol-refresh-btn").First().Click()
+	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(10000)})
+	if err != nil {
+		t.Fatalf("未观察到 POST /api/volumes/refresh（按钮未接线？）: %v", err)
+	}
+	if !strings.Contains(req.URL(), "volume=") {
+		t.Errorf("refresh URL = %q，应带 volume 参数", req.URL())
+	}
+	if got := req.Method(); got != "POST" {
+		t.Errorf("refresh method = %q，应 POST", got)
 	}
 }

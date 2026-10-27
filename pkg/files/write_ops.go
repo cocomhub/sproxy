@@ -1213,6 +1213,15 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 		origin:           input.Origin,
 		logger:           logger,
 	}); renErr != nil {
+		// **外部卷兜底（2026-10-27 修复）**：无显式卷时 resolveRenameHome 会**回落默认租户**
+		// （err=nil）而不是报 404 ⇒ 外部卷文件走 renameInHome（本地）恒「源文件不存在」，
+		// **永远到不了 renameExternalVolume**（单条带 ?volume= 才能命中，因为 explicitVol≠""
+		// 时 resolveRenameHome 才返回 404 → locErr → 转外部）。批量族（batch/rename，无 volume）
+		// 因此对 secretdata/网盘等外部卷恒失败。此处对齐删除路径的兜底口径：
+		// **本地重命名失败 → 若外部卷候选存在，转外部接缝再试**（幂等：外部仍无则原错误上抛）。
+		if handled, res, extErr := s.renameExternalVolume(ctx, owner, from, to, input); handled || extErr != nil {
+			return res, extErr
+		}
 		return RenameFileResult{}, renErr
 	}
 
