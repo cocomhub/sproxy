@@ -177,7 +177,7 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 	// AD-7 双账本 to 侧先 reserve（owner 全局 → 目标卷池，防中间超限）；失败回滚已预留。
 	size := copySourceSize(fromRoot, rel, srcInfo)
 	scope := h.quotaScopeFor(owner, rel)
-	scopeRes, poolRes, status, msg, ok := reserveCopyQuota(ctx, scope, toPool, size)
+	scopeRes, poolRes, status, msg, ok := reserveCopyQuota(ctx, scope, toPool, size, h.quotaWaitTimeout)
 	if !ok {
 		return errResp(status, msg)
 	}
@@ -304,17 +304,22 @@ func (h *Handlers) checkCopyTarget(cvc *copyVolumeCtx, targetOverwrite bool) (in
 
 // reserveCopyQuota 对 to 侧做双预留（owner 全局 Scope → 目标卷池，防中间超限）；
 // 任一失败回滚已预留并返回 (status, msg, false)。
-func reserveCopyQuota(ctx context.Context, scope *quota.Scope, toPool *quota.Pool, size int64) (*quota.Reservation, *quota.Reservation, int, string, bool) {
+// timeout 是排队等待上限（<=0 ⇒ quota.DefaultWaitTimeout 30s）；调用方透传测试注入的短值，
+// 生产恒 0 语义不变（「配额故意打满断言 507/跳过」的用例不白等 30s）。
+func reserveCopyQuota(ctx context.Context, scope *quota.Scope, toPool *quota.Pool, size int64, timeout time.Duration) (*quota.Reservation, *quota.Reservation, int, string, bool) {
+	if timeout <= 0 {
+		timeout = quota.DefaultWaitTimeout
+	}
 	var scopeRes, poolRes *quota.Reservation
 	if scope != nil {
-		rr, rerr := scope.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
+		rr, rerr := scope.WaitReserve(ctx, size, timeout)
 		if rerr != nil {
 			return nil, nil, http.StatusInsufficientStorage, msgStorageQuotaExceeded, false
 		}
 		scopeRes = rr
 	}
 	if toPool != nil {
-		rr, rerr := toPool.WaitReserve(ctx, size, quota.DefaultWaitTimeout)
+		rr, rerr := toPool.WaitReserve(ctx, size, timeout)
 		if rerr != nil {
 			if scopeRes != nil {
 				scopeRes.Release()

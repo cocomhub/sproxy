@@ -62,7 +62,20 @@ type runtime struct {
 	externalOps   ExternalVolumeOps
 	phys          VolumePhysFootprinter
 	volTypes      VolumeTypeClassifier
-	retrySleep    func(time.Duration) // 外部卷转存重试退避 sleep（测试注入 0 等待）
+	retrySleep    func(time.Duration)  // 外部卷转存重试退避 sleep（测试注入 0 等待）
+	quotaWait     func() time.Duration // 配额排队等待上限（nil = quota.DefaultWaitTimeout 30s）
+}
+
+// waitTimeout 返回配额排队等待上限（注入的 fn 优先；nil = quota.DefaultWaitTimeout 30s）。
+// 生产恒 DefaultWaitTimeout（语义不变）；测试经 WithQuotaWait 注入短值消除「故意打满断言 507」
+// 用例的白等 30s。所有 WaitReserve 调用点必须走本方法（单一入口，防调用点漏改）。
+func (rt runtime) waitTimeout() time.Duration {
+	if rt.quotaWait != nil {
+		if d := rt.quotaWait(); d > 0 {
+			return d
+		}
+	}
+	return quota.DefaultWaitTimeout
 }
 
 // contentIndexEnabled 返回内容索引开关（供索引容器构造时读取）。
@@ -191,6 +204,7 @@ func newRuntime(tenants TenantResolver, cfg config) runtime {
 		phys:         cfg.phys,
 		volTypes:     cfg.volTypes,
 		retrySleep:   cfg.retrySleep,
+		quotaWait:    cfg.quotaWait,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default

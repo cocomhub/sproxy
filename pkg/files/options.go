@@ -280,7 +280,8 @@ type config struct {
 	externalOps   ExternalVolumeOps
 	phys          VolumePhysFootprinter
 	volTypes      VolumeTypeClassifier
-	retrySleep    func(time.Duration) // 外部卷转存重试退避 sleep（测试注入：可 0 化/可推进假时钟）
+	retrySleep    func(time.Duration)  // 外部卷转存重试退避 sleep（测试注入：可 0 化/可推进假时钟）
+	quotaWait     func() time.Duration // 配额排队等待上限（nil = DefaultWaitTimeout 30s）
 }
 
 // WithRetrySleep 注入外部卷转存重试的退避等待函数（默认 time.Sleep）。
@@ -288,6 +289,14 @@ type config struct {
 // 拖慢用例——比 synctest 气泡轻量（无虚拟时钟独占限制，可保持 t.Parallel）。
 func WithRetrySleep(fn func(time.Duration)) Option {
 	return func(c *config) { c.retrySleep = fn }
+}
+
+// WithQuotaWait 注入配额排队等待上限（nil = quota.DefaultWaitTimeout 30s）。
+// 与 WithRetrySleep 同型：测试注入返回短值（如 50ms）即可把「配额故意打满断言 507」的用例
+// 从白等 30s 降为 ~0s（生产恒 nil，语义不变）。所有 `WaitReserve(ctx, n, quota.DefaultWaitTimeout)`
+// 调用点统一走 `runtime.waitTimeout()` 获得该上限。
+func WithQuotaWait(fn func() time.Duration) Option {
+	return func(c *config) { c.quotaWait = fn }
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。

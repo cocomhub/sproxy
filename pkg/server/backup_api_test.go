@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -418,7 +419,7 @@ func TestBackupQuotaFS_DurableCapacityLedger(t *testing.T) {
 	t.Parallel()
 	sm := capacity.NewStorageManager(t.TempDir(), 100, nil, testLogger())
 	inner := &backupSizedMemFS{backupMemFS{files: map[string]string{}}}
-	q := &backupQuotaFS{inner: inner, sm: sm, cat: capacity.CategoryChunked}
+	q := &backupQuotaFS{inner: inner, sm: sm, cat: capacity.CategoryChunked, waitTimeout: 50 * time.Millisecond}
 	ctx := context.Background()
 	usage := func() int64 { return sm.UsageByCategory()[capacity.CategoryChunked] }
 
