@@ -1588,27 +1588,56 @@ func (d *HybridDownloader) attachJournal(ctx context.Context, dc *downloadCtx, m
 		return
 	}
 	dc.journal = j
-	st, lerr := j.Load(ctx)
-	if lerr != nil {
-		d.log.Warn("hybrid journal load failed", "err", lerr)
-	} else if !st.Finished {
-		if d.journalStateMatches(dc, &st) {
-			recovered := mergeJournalChunks(manifest, st.Done)
-			if recovered > 0 {
-				writeManifest(dc.destPath, manifest)
-				d.log.Info("hybrid journal recovered chunks", "count", recovered, "dest", dc.destPath)
-			}
-		} else if len(st.Done) > 0 {
-			d.log.Warn("hybrid journal source mismatch, ignore recovered chunks",
-				"journal_total", st.Total, "target_total", dc.currentTotal)
-		}
-	}
+	d.recoverFromJournal(ctx, dc, manifest, j)
 	// 源身份落盘（含 total/chunk 尺寸，供下次恢复校验）。
 	if rerr := j.RecordSource(ctx, ProgressState{
 		ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash,
 		Total: dc.currentTotal, ChunkSize: d.chunkSize,
 	}); rerr != nil {
 		d.log.Warn("hybrid journal record source failed", "err", rerr)
+	}
+}
+
+// recoverFromJournal 决定是否把 WAL 已完成分片并入 manifest。
+//
+// **安全前提**（覆盖审计 2026-10-28）：只有「数据工作文件存在且大小 == total」时，WAL 的
+// 分片才是可复用的——否则分片字节已不存在，合并会导致跳过分片 ⇒ 预分配零洞 ⇒ 完整性校验
+// 必失败（且每次重试重复该失败，下载永久不可成功）。此时必须 Reset 作废 WAL 并全量重下。
+func (d *HybridDownloader) recoverFromJournal(ctx context.Context, dc *downloadCtx, manifest *hybridManifest, j ProgressJournal) {
+	st, lerr := j.Load(ctx)
+	if lerr != nil {
+		d.log.Warn("hybrid journal load failed", "err", lerr)
+		return
+	}
+	switch {
+	case st.Finished:
+		// 上一轮已交付（提交记录）→ 本次是重新下载：起新代际，避免旧分片干扰。
+		d.resetJournal(ctx, j, "previous run finished")
+	case !d.journalStateMatches(dc, &st):
+		if len(st.Done) > 0 {
+			d.log.Warn("hybrid journal source mismatch, discard recovered chunks",
+				"journal_total", st.Total, "target_total", dc.currentTotal)
+			d.resetJournal(ctx, j, "source mismatch")
+		}
+	case !workingFileMatches(dc.destPath, dc.currentTotal):
+		// 工作文件缺失/尺寸不符 ⇒ WAL 分片不可信（数据已不在）→ 作废并全量重下。
+		if len(st.Done) > 0 {
+			d.log.Warn("hybrid journal working file missing, discard recovered chunks",
+				"done", len(st.Done), "total", dc.currentTotal)
+			d.resetJournal(ctx, j, "working file missing")
+		}
+	default:
+		if recovered := mergeJournalChunks(manifest, st.Done); recovered > 0 {
+			writeManifest(dc.destPath, manifest)
+			d.log.Info("hybrid journal recovered chunks", "count", recovered, "dest", dc.destPath)
+		}
+	}
+}
+
+// resetJournal 作废 WAL 历史进度（失败仅告警：最坏情况是下次仍不复用——不会静默损坏）。
+func (d *HybridDownloader) resetJournal(ctx context.Context, j ProgressJournal, reason string) {
+	if rerr := j.Reset(ctx); rerr != nil {
+		d.log.Warn("hybrid journal reset failed", "reason", reason, "err", rerr)
 	}
 }
 

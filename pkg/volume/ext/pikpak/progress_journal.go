@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 )
@@ -33,7 +34,12 @@ const DefaultJournalPrefix = "pikpak.dl"
 const (
 	journalKeySource    = "source"
 	journalKeyChunkSize = "chunk_size"
-	journalChunkPrefix  = "chunk:"
+	// journalKeyEpoch 是**进度代际**：Reset 时 +1，旧代际的 chunk 记录不再参与恢复。
+	// 为什么需要（2026-10-28 覆盖审计发现）：数据工作文件被清理/改名后，WAL 里的分片
+	// 不可信；仅「本次不合并」不够——下一次尝试（工作文件已重新预分配）会把旧分片再次
+	// 合并进来，导致跳过分片 ⇒ GCID 校验必失败（下载永久不可成功）。
+	journalKeyEpoch    = "epoch"
+	journalChunkPrefix = "chunk:"
 )
 
 // ProgressState 是从 WAL 重放出的下载进度。
@@ -43,7 +49,8 @@ type ProgressState struct {
 	Hash      string
 	Total     int64
 	ChunkSize int64
-	Done      map[int64]int64 // offset → length
+	Done      map[int64]int64 // offset → length（**当前代际**）
+	Epoch     int64           // 进度代际（Reset 递增；旧代际记录忽略）
 	Finished  bool            // 已写提交记录（无需再恢复）
 }
 
@@ -58,6 +65,9 @@ type ProgressJournal interface {
 	RecordSource(ctx context.Context, st ProgressState) error
 	ChunkDone(ctx context.Context, offset, length int64) error
 	MarkDone(ctx context.Context) error
+	// Reset 作废历史进度（代际 +1）：数据文件不可信 / 上一轮已完成 / 源已更换时调用，
+	// 避免旧分片在后续尝试中被误合并（否则会跳过分片 → 完整性校验必失败）。
+	Reset(ctx context.Context) error
 	Close() error
 }
 
@@ -65,6 +75,9 @@ type ProgressJournal interface {
 type auditProgressJournal struct {
 	svc   *audit.Service
 	scope *audit.Scope
+	mu    sync.Mutex
+	epoch int64
+	known bool // epoch 是否已从 WAL 读取
 }
 
 // NewAuditProgressJournal 在给定 audit.Service 上开一个进度作用域。
@@ -97,6 +110,9 @@ func (j *auditProgressJournal) Load(ctx context.Context) (ProgressState, error) 
 		return out, fmt.Errorf("pikpak journal: resume: %w", err)
 	}
 	out.Finished = st.Done
+	if ep := decodeJournalValue[int64](st.KV[journalKeyEpoch]); ep != nil {
+		out.Epoch = *ep
+	}
 	if src := decodeJournalValue[ProgressState](st.KV[journalKeySource]); src != nil {
 		out.ShareID, out.FileID, out.Hash = src.ShareID, src.FileID, src.Hash
 		out.Total = src.Total
@@ -104,8 +120,33 @@ func (j *auditProgressJournal) Load(ctx context.Context) (ProgressState, error) 
 	if cs := decodeJournalValue[int64](st.KV[journalKeyChunkSize]); cs != nil {
 		out.ChunkSize = *cs
 	}
-	collectJournalChunks(st.KV, out.Done)
+	collectJournalChunks(st.KV, out.Epoch, out.Done)
+	j.setEpoch(out.Epoch)
 	return out, nil
+}
+
+// setEpoch 缓存当前代际（ChunkDone 用，避免每个分片重新读 WAL）。
+func (j *auditProgressJournal) setEpoch(v int64) {
+	j.mu.Lock()
+	j.epoch, j.known = v, true
+	j.mu.Unlock()
+}
+
+// currentEpoch 返回当前代际（未读过则先 Load）。
+func (j *auditProgressJournal) currentEpoch(ctx context.Context) (int64, error) {
+	j.mu.Lock()
+	if j.known {
+		v := j.epoch
+		j.mu.Unlock()
+		return v, nil
+	}
+	j.mu.Unlock()
+	if _, err := j.Load(ctx); err != nil {
+		return 0, err
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.epoch, nil
 }
 
 // decodeJournalValue 把 WAL 里的任意值 JSON 往返解码为 T（不可解码 → nil）。
@@ -124,11 +165,23 @@ func decodeJournalValue[T any](v any) *T {
 	return &out
 }
 
-// collectJournalChunks 把 KV 里 `chunk:<offset>` 记录并入 done（offset → length）。
-func collectJournalChunks(kv map[string]any, done map[int64]int64) {
+// collectJournalChunks 把**当前代际**的分片记录并入 done（offset → length）。
+// 键格式：`chunk:<epoch>:<offset>`；兼容旧格式 `chunk:<offset>`（视为 epoch 0）。
+func collectJournalChunks(kv map[string]any, epoch int64, done map[int64]int64) {
 	for k, v := range kv {
-		offStr, ok := strings.CutPrefix(k, journalChunkPrefix)
+		rest, ok := strings.CutPrefix(k, journalChunkPrefix)
 		if !ok {
+			continue
+		}
+		ep, offStr := int64(0), rest
+		if a, b, found := strings.Cut(rest, ":"); found {
+			parsed, perr := parseInt64(a)
+			if perr != nil {
+				continue
+			}
+			ep, offStr = parsed, b
+		}
+		if ep != epoch {
 			continue
 		}
 		off, perr := parseInt64(offStr)
@@ -157,10 +210,28 @@ func (j *auditProgressJournal) RecordSource(ctx context.Context, st ProgressStat
 
 // ChunkDone 记录一个分片完成（幂等）。
 func (j *auditProgressJournal) ChunkDone(ctx context.Context, offset, length int64) error {
-	key := journalChunkPrefix + formatInt64(offset)
+	ep, err := j.currentEpoch(ctx)
+	if err != nil {
+		return fmt.Errorf("pikpak journal: read epoch: %w", err)
+	}
+	key := journalChunkPrefix + formatInt64(ep) + ":" + formatInt64(offset)
 	if err := j.scope.Save(ctx, key, length); err != nil {
 		return fmt.Errorf("pikpak journal: save chunk %d: %w", offset, err)
 	}
+	return nil
+}
+
+// Reset 作废历史进度：代际 +1（旧代际 chunk 记录从此不参与恢复）。
+func (j *auditProgressJournal) Reset(ctx context.Context) error {
+	cur, err := j.currentEpoch(ctx)
+	if err != nil {
+		return err
+	}
+	next := cur + 1
+	if serr := j.scope.Save(ctx, journalKeyEpoch, next); serr != nil {
+		return fmt.Errorf("pikpak journal: save epoch: %w", serr)
+	}
+	j.setEpoch(next)
 	return nil
 }
 

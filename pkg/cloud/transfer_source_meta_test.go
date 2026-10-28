@@ -318,3 +318,64 @@ func TestTransferSourceMeta_AuditSkipsUnknown(t *testing.T) {
 		}
 	}
 }
+
+// TestTransferDone_WritesAuditIntoVolumeMeta 端到端（转存层）：下载结果的审计字段必须
+// **写入目标卷 meta**（不只是单元函数），且 mtime=源修改时间。
+// 覆盖审计 2026-10-28：此前只有 applyDownloadAudit 单测，未验证「transferDone → 卷 meta」链路。
+func TestTransferDone_WritesAuditIntoVolumeMeta(t *testing.T) {
+	t.Parallel()
+	fs := newMetaCapableMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-audit-1", Filename: "a1.mp4", URL: "https://example.com/share?spx_target=x",
+		Transfer:  &TransferSpec{Volume: "vol-audit"},
+		MetaExtra: map[string]any{"code": "EXAMPLE-001"}}
+	payload := []byte("audit payload")
+	dest := filepath.Join(t.TempDir(), "a1.mp4")
+	if err := os.WriteFile(dest, payload, 0o600); err != nil {
+		t.Fatalf("write dest: %v", err)
+	}
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	started := time.Date(2026, 10, 28, 2, 0, 0, 0, time.UTC)
+	finished := started.Add(45 * time.Second)
+	created := time.Date(2026, 10, 20, 1, 2, 3, 0, time.UTC)
+	modified := time.Date(2026, 10, 21, 4, 5, 6, 0, time.UTC)
+	res := &downloader.Result{
+		Size: int64(len(payload)), Checksum: sha256Hex(payload), ChecksumAlgorithm: downloader.IntegrityChecksumSHA256,
+		ModTime: modified, SourceCreatedTime: created,
+		StartedAt: started, FinishedAt: finished,
+		AnonymousBytes: 10, AccountBytes: 8, BytesPerSecond: 1,
+	}
+	if _, _, err := mgr.transferDone(context.Background(), task, dest, res, nil); err != nil {
+		t.Fatalf("transferDone: %v", err)
+	}
+	key := "anonymous/user/task-audit-1/a1.mp4"
+	meta := fs.metaExtras[key]
+	if meta == nil {
+		t.Fatalf("未写卷 meta（key=%s）", key)
+	}
+	want := map[string]any{
+		"source":                     "transfer",
+		"code":                       "EXAMPLE-001",
+		"downloaded_at":              "2026-10-28T02:00:45Z",
+		"x_source_created_at":        "2026-10-20T01:02:03Z",
+		"x_source_modified_at":       "2026-10-21T04:05:06Z",
+		"x_download_started_at":      "2026-10-28T02:00:00Z",
+		"x_download_finished_at":     "2026-10-28T02:00:45Z",
+		"x_download_duration_ms":     int64(45000),
+		"x_download_anonymous_bytes": int64(10),
+		"x_download_account_bytes":   int64(8),
+		"x_download_bytes_per_sec":   int64(1),
+	}
+	for k, v := range want {
+		if got, ok := meta[k]; !ok || got != v {
+			t.Errorf("meta[%s] = %v (present=%v), want %v", k, got, ok, v)
+		}
+	}
+	// mtime 落卷 = 源修改时间（纳秒契约）
+	if got := fs.mtimes[key]; got != modified.UnixNano() {
+		t.Fatalf("mtime = %d, want 源修改时间纳秒 %d", got, modified.UnixNano())
+	}
+}
