@@ -188,8 +188,8 @@ TTL 分档（`volume_state_ttl`，默认按卷类型）：
 
 | 卷类型 | 默认 | 依据 |
 |---|---|---|
-| **外部卷**（baidupcs/S3/webdav/ftp/sftp/federated/cluster） | **30s** | 本期最优先；避免大目录反复远端往返 |
-| 自管卷（secretdata） | 30s + 代际 | 卷内写即时更新自身索引；跨进程由代际发现 |
+| **外部卷**（baidupcs/S3/webdav/ftp/sftp/federated/cluster） | **5 分钟** | 最优先；避免大目录反复远端往返 |
+| 自管卷（secretdata） | 5 分钟 + 代际 | 卷内写即时更新自身索引；跨进程由代际发现 |
 | 本地卷（本期仍走旧实现，见 §五） | 0（不按时间过期） | 写穿 +（未来）目录 mtime 代际 |
 | 禁用 | `-1` | 每次回源（调试/强一致） |
 
@@ -269,13 +269,13 @@ Delete/软删/恢复 → Invalidate(rel)
 | 片 | 内容 | 优先级 | 行为变更 | 验收 |
 |---|---|---|---|---|
 | **V1** | `pkg/volumestate` 骨架：`ObjectRef`/`DirSnapshot`/`TreeEntry`/`Cache`/`MutationBus`/`WrapVolume`；staging 原子读写 + LRU + TTL/代际判定；`storage.Root` 变异观察者（不接线） | 高 | 无 | 单测：命中/miss/TTL/代际/写穿/祖先 stale/degraded/保密卷不落盘 |
-| **V2** | **外部卷接入（本期核心）**：装配期 `WrapVolume` 包所有非本地卷；`files.List/Stat/Delete/Rename(?volume=)` 走装饰器；TTL 30s；secretdata 用 `StateGen`；`ExternalList/ExternalStat` 保留回源 | **最高** | 外部卷 list 首次慢、之后命中；外部改写 ≤30s 收敛 | e2e：二次 list 无远端往返（计数）；TTL 过期回源一次；`Refresh` 立即生效；删除后无幽灵 |
+| **V2** | **外部卷接入（本期核心）**：装配期 `WrapVolume` 包所有存储卷（含本地卷，见 §十六）；`files.List/Stat/Delete/Rename(?volume=)` 走装饰器；TTL 默认 5 分钟；secretdata 用 `StateGen`；`ExternalList/ExternalStat` 保留回源 | **最高** | 首次 list 慢、之后命中；进程外改写 ≤TTL 收敛 | e2e：二次 list 无远端往返（计数）；TTL 过期回源一次；`Refresh` 立即生效；删除后无幽灵 |
 | **V3** | **本地卷迁移**（可延后）：`searchIndex` 收敛为 TreeView 投影；`checksums.json` 一次性 import 后转只读；Root 事件接线 | 中（后续） | list/search 行为不变 | 全量绿；旧路径棘轮计数下降 |
 | **V4** | 清理：删 `searchIndex`/`checksums.json` 独立写路径与 `ExternalList` 薄转发；`RecordBypassWrite`/`IndexMove` 删（由事件总线取代）——**阶段一已完成**（见 §十三），剩余待 `checksums.json` 只读化与 TreeView 投影 | 低 | 无 | #874 回归用例绿；deadcode 门禁过 |
 | **V5** | 门禁 + 文档 + 归档：R40/R41/R42/R44/R45/R46 | 中 | 无 | `make check-ci` 全绿 |
 
-**灰度**：`volume_state_enabled`（默认 **false** = 旧行为）。V2 合入后由运维逐环境开启；
-开关关闭时 `WrapVolume` 原样返回。
+**开关**：`volume_state.disable`（默认 **false** = 缓存开启；AGENTS.md 7c 反转语义）。
+`disable: true` 时 `WrapVolume` 原样返回（强一致/调试路径）。
 
 ---
 
@@ -481,26 +481,26 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
 把本地卷 list 从 `searchIndex` 切到「卷状态视图（`VolumeView` 的 `FS.ListDir`）」前，必须先解决
 **本地卷的缓存与新鲜度**——否则是性能回退或正确性回退：
 
-1. **不套缓存 ⇒ 性能回退**：`volume_state.enabled` 默认 false，且 `wrapVolumeState` 当前
+1. **不套缓存 ⇒ 性能回退**：（历史分析：此前 `volume_state` 默认关闭，且 `wrapVolumeState` 当时
    **显式跳过本地卷**（`scale=0` 时 `volumeStateTTL` 对本地卷返回 0 = 不按时间过期）。若直接切
    list 到 `FS.ListDir`，每次列表都是 O(目录项) 的磁盘扫描 + 逐项 `Stat`，替换掉今天的 O(1)
    索引读取。
 2. **套缓存但 `TTL=0` ⇒ 正确性回退**：本地卷的写入已由 Root 事件写穿（#880/#884），但**进程外**
    改动（运维 rsync/备份恢复直接写盘、同根多实例）不会被事件观察到；`TTL=0` 意味着永不主动回源
-   ⇒ 这些改动永远不可见。外部卷之所以能 `TTL=0` 之外的默认 30s，正是因为「外部改动必须有收敛窗口」。
+   ⇒ 这些改动永远不可见。这正是必须有非零 TTL 的原因（默认 5 分钟）。
 3. **`StateGen` 能不能救**：设计 §3.1 提过 `rootfs` 用「目录 mtime + 子项数」做 O(1) 代际，但
    POSIX 语义下**改子目录里的文件只会更新该子目录 mtime，不更新祖先** ⇒ 祖先目录的代际探测无法
    发现深层变化，仍需 TTL 兜底。
 
 **决策已定（用户 2026-10-28 裁定「按推荐处理」）**：
-- (a) **本地卷参与缓存**，与外部卷同档默认 `TTL=30s`（可按卷显式配置）——已实现（§十六）；
+- (a) **本地卷参与缓存**，与外部卷同档默认 `TTL=5 分钟`（可按卷显式配置）——已实现（§十六）；
 - (b) **接受「进程外改动 ≤TTL 才可见」**，并把它作为明确契约写进文档（此前 `searchIndex` 是同类
   盲区但无承诺）；
 - (c) 步骤 2 落地时 `IndexSync` 只服务搜索（实现时执行）。
 
 **剩下的实现决策点**：
 
-- (a) 本地卷是否参与缓存：若参与，默认 TTL 取值（建议与外部卷同档 30s，或按卷配置）；
+- (a) 本地卷是否参与缓存：若参与，默认 TTL 取值（**已定：与外部卷同档 5 分钟**）；
 - (b) 是否接受「进程外改动 ≤TTL 才可见」这一语义（今天的 `searchIndex` 同样只在进程内增量维护，
   但从不在进程外回扫——即现状也有同类盲区，只是没有明确的收敛承诺）；
 - (c) 集群模式下 `IndexSync`（rev/dirty/StateStore）是否保留：若保留，list 改走 FS 后索引同步
@@ -513,8 +513,9 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
 ## 十六、本地卷纳入卷状态缓存（2026-10-28 落地，§15.3 决策 a+b）
 
 **改动**：
-- `wrapVolumeState` 不再跳过本地卷（`volume_state.enabled=true` 时统一包装）；`volumeStateTTL`
-  统一返回 `DefaultTTL`（30s），显式配置仍全卷覆盖。
+- `wrapVolumeState` 不再跳过本地卷（缓存**默认开启**，`volume_state.disable: true` 才关闭——
+  AGENTS.md 7c 要求「默认开启」时反转语义为 `disable_*`）；`volumeStateTTL` 统一返回
+  `DefaultTTL`（**5 分钟**），显式配置仍全卷覆盖。
 - **写穿补全**：本地卷的写内核经 `storage.Root`，不经过 FS 装饰器 ⇒ 只靠 `CacheFS` 自身失效
   会漏掉内核写。`localVolumeMutationHandler` 把 Root 变异**同时**投递给两个消费方：
   `files.ApplyRootMutation`（索引）与 `volumestate.Cache.Invalidate`（缓存，含 rename 的源/目标）。
@@ -528,4 +529,4 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
 写穿立刻可见）。变异：去掉 `Cache.Invalidate` ⇒ 写穿断言红。
 
 **未做（步骤 2 本体）**：`files.List` 仍走 `searchIndex`（R46/R41 棘轮登记）。切换时建议**同受
-`volume_state.enabled` 门控**——默认关闭时保持索引路径（零回归），开启时走卷视图并享受缓存。
+`volume_state.disable` 门控**——关闭缓存时保持索引路径，开启时走卷视图并享受缓存。

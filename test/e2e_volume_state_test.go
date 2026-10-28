@@ -158,8 +158,8 @@ func findFileUnder(t *testing.T, root, base string) string {
 func TestVolumeStateCache_ExternalVolumeE2E(t *testing.T) {
 	t.Parallel()
 	davURL, davRoot := startWebDAVBackend(t)
-	// TTL 设长：确保断言窗口内不因时间过期而回源（缓存命中/失效必须由机制保证）。
-	env := startCLIEnv(t, "volume_state:\n  enabled: true\n  ttl: 10m\n")
+	// 缓存默认开启（disable=false）；这里只把 TTL 设长，确保断言窗口内不因过期回源。
+	env := startCLIEnv(t, "volume_state:\n  ttl: 10m\n")
 	createWebDAVVolume(t, env.BaseURL, "extdav", davURL)
 	prepareWebDAVRoots(t, davRoot)
 
@@ -209,7 +209,7 @@ func TestVolumeStateCache_ExternalVolumeE2E(t *testing.T) {
 func TestVolumeStateCache_DisabledSeesExternalChangeImmediately(t *testing.T) {
 	t.Parallel()
 	davURL, davRoot := startWebDAVBackend(t)
-	env := startCLIEnv(t, "") // 不启用 volume_state（默认 false）
+	env := startCLIEnv(t, "volume_state:\n  disable: true\n") // 显式关闭缓存（对照组）
 	createWebDAVVolume(t, env.BaseURL, "extdav", davURL)
 	prepareWebDAVRoots(t, davRoot)
 

@@ -8,7 +8,7 @@ package server
 //  1. 唯一装配点 `wrapVolumeState` 只包**非本地卷**的 ViewUser 视图；
 //  2. 包上之后目录列举命中缓存（第二次不回源 = 远端流量下降）；
 //  3. 经装饰器的写入**自动失效**（无需调用方登记 —— #874 缺陷族的结构解）；
-//  4. 未启用（cache=nil）时零行为变更。
+//  4. `disable: true`（cache=nil）时零行为变更。
 
 import (
 	"context"
@@ -88,7 +88,6 @@ func TestWrapVolumeState_CachesExternalVolumeList(t *testing.T) {
 	vs, _ := newStateCacheTestSet(t, cfs)
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.VolumeState.Enabled = true
 	cfg.VolumeState.TTL = time.Minute
 
 	cache := newVolumeStateCache(cfg, vs, testLogger())
@@ -117,7 +116,6 @@ func TestWrapVolumeState_WriteInvalidatesWithoutRegistration(t *testing.T) {
 	vs, _ := newStateCacheTestSet(t, cfs)
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.VolumeState.Enabled = true
 	cfg.VolumeState.TTL = time.Minute
 
 	cache := newVolumeStateCache(cfg, vs, testLogger())
@@ -145,7 +143,6 @@ func TestWrapVolumeState_LocalVolumeCached(t *testing.T) {
 	vs, _ := newStateCacheTestSet(t, cfs)
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.VolumeState.Enabled = true
 	cache := newVolumeStateCache(cfg, vs, testLogger())
 
 	got := wrapVolumeState(cache, "local1", registry.ViewUser, cfs)
@@ -162,7 +159,7 @@ func TestWrapVolumeState_LocalVolumeCached(t *testing.T) {
 	}
 }
 
-// TestWrapVolumeState_DisabledNoop 钉住灰度：cache=nil 时原样返回（零回归）。
+// TestWrapVolumeState_DisabledNoop 钉住关闭语义：cache=nil 时原样返回（零回归）。
 func TestWrapVolumeState_DisabledNoop(t *testing.T) {
 	t.Parallel()
 	cfs := &countingFS{}
@@ -197,7 +194,6 @@ func TestExternalFSFor_UsesStateCache(t *testing.T) {
 	vs, _ := newStateCacheTestSet(t, cfs)
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.VolumeState.Enabled = true
 	cfg.VolumeState.TTL = time.Minute
 
 	cache := newVolumeStateCache(cfg, vs, testLogger())
@@ -217,5 +213,23 @@ func TestExternalFSFor_UsesStateCache(t *testing.T) {
 	}
 	if got := cfs.listCalls(); got != 1 {
 		t.Fatalf("经 externalFSFor 的二次访问应命中缓存（1 次回源），got %d", got)
+	}
+}
+
+// TestNewVolumeStateCache_DefaultEnabledAndDisable 钉住「缓存默认开启」（AGENTS.md 7c：
+// 需要默认开启时把语义反转为 disable_*，bool 默认 false）。
+func TestNewVolumeStateCache_DefaultEnabledAndDisable(t *testing.T) {
+	t.Parallel()
+	cfs := &countingFS{}
+	vs, _ := newStateCacheTestSet(t, cfs)
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+
+	if cache := newVolumeStateCache(cfg, vs, testLogger()); cache == nil {
+		t.Fatal("默认应启用卷状态缓存（disable=false）")
+	}
+	cfg.VolumeState.Disable = true
+	if cache := newVolumeStateCache(cfg, vs, testLogger()); cache != nil {
+		t.Fatal("disable=true 时应关闭缓存（零回归路径）")
 	}
 }

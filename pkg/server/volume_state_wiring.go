@@ -20,7 +20,7 @@ import (
 // 由门禁 R44 保证没有第二个包装点 ⇒ 新增卷型/新增装配路径自动获得该能力（P2）。
 //
 // **范围（2026-10-28 决策，设计 §15.3）**：缓存**覆盖所有存储卷（含本地卷）**，但只在
-// `volume_state.enabled=true` 时生效（默认 false ⇒ 零回归）。
+// 默认生效（`volume_state.disable: true` 才关闭）。
 //   - 外部/封装卷：list 原本直连远端、无缓存 = 最痛点；
 //   - **本地卷**：为 §15.2 步骤 2（list 改走卷状态视图）提供性能前提 —— 否则每次列表都是
 //     O(目录项) 磁盘扫描。本地卷的新鲜度契约 = **写穿（Root 事件，含内容写）+ TTL 兜底**：
@@ -30,7 +30,7 @@ import (
 
 // newVolumeStateCache 按配置构造缓存（未启用 ⇒ nil，零回归）。
 func newVolumeStateCache(cfg *Config, vs *registry.Set, log *slog.Logger) *volumestate.Cache {
-	if cfg == nil || !cfg.VolumeState.Enabled {
+	if cfg == nil || cfg.VolumeState.Disable {
 		return nil
 	}
 	log = slogutil.Default(log)
@@ -49,7 +49,7 @@ func newVolumeStateCache(cfg *Config, vs *registry.Set, log *slog.Logger) *volum
 
 // volumeStateTTL 解析某卷的缓存有效期：
 //   - 配置显式给出（非 0）⇒ 全卷统一；
-//   - 否则一律 DefaultTTL（30s）。
+//   - 否则一律 DefaultTTL（5 分钟：缓存是正常路径；进程外改动属罕见场景）。
 //
 // **为什么本地卷也必须有 TTL**（设计 §15.3）：本地卷的写穿只覆盖**本进程**的 Root 变更；
 // 进程外改动（运维 rsync/备份恢复直接写盘、同根多实例）没有事件可观察，TTL=0 意味着永不回源

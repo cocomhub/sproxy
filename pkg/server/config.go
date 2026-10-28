@@ -1225,13 +1225,17 @@ func transferConcurrencyEffective(c *Config) int {
 // VolumeStateConfig 是卷状态缓存的配置（`volume_state` 段）。
 //
 // 设计：docs/designs/2026-10-28-volume-state-maintenance.md。
-// **默认值纪律**（AGENTS.md 18 条）：所有 bool 默认 false、string 默认空；
-// 字节/时长取「安全且有界」的默认（上限 256 MiB、TTL 由卷类型决定）。
+// **默认值纪律**（AGENTS.md 7c）：bool 默认 false；需要「默认开启」的能力把语义反转为
+// `disable_*`（本段即如此——**缓存默认开启**，`disable: true` 才关闭）。字节/时长取
+// 「安全且有界」的默认（上限 256 MiB、TTL 5 分钟）。
 type VolumeStateConfig struct {
-	// Enabled 是否启用卷状态缓存装饰器（默认 false = 完全旧行为，可灰度回退）。
-	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
-	// TTL 是外部卷缓存有效期（0 = 按卷类型默认：外部卷 30s；本地卷不按时间过期；
-	// 负值 = 该层禁用缓存，每次回源——调试/强一致场景）。
+	// Disable 显式**关闭**卷状态缓存（默认 false = 启用）。
+	//
+	// 语义契约（用户裁定 2026-10-28）：缓存是**正常路径**；本进程写由 Root/FS 事件写穿
+	// （下一次读立即可见），只有**进程外**改动（运维直写盘、同根多实例）需要等 TTL 收敛
+	// ——这类操作属罕见场景，不被鼓励（需要立即生效用 POST /api/volumes/refresh）。
+	Disable bool `yaml:"disable" mapstructure:"disable"`
+	// TTL 是缓存有效期（0 = 默认 5 分钟；负值 = 每次回源，调试/强一致场景）。
 	TTL time.Duration `yaml:"ttl" mapstructure:"ttl"`
 	// SearchRemote 允许对远端卷做递归搜索（默认 false：递归列举 = 全量远端往返，
 	// 只在明确需要时开启）。

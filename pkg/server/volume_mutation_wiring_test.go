@@ -249,7 +249,6 @@ func TestLocalVolumeCache_WriteThroughAndTTLContract(t *testing.T) {
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.Volumes = []VolumeConfig{{Name: "main", Root: cfg.StorageRoot}}
-	cfg.VolumeState.Enabled = true
 	cfg.VolumeState.TTL = time.Minute // 长 TTL：保证"不可见"来自缓存而不是时钟
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("cfg.Validate: %v", err)
