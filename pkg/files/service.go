@@ -600,27 +600,15 @@ func (s *Service) SaveIndexSnapshots() int {
 	return n
 }
 
-// IndexMove 跨卷移动成功后同步搜索索引 + checksum 台账（旁路面 /api/volumes/move、
-// rebalance 物理搬移后调用）：移除源卷条目 + 写入目标卷条目与 checksum（评审 I-②，
-// 2026-10-07 + R16：move 旁路此前只更新索引不写 checksum ⇒ 目标卷 list checksum 空）。
-// rel 为租户根相对路径（user/<name>）；size 为已搬字节；checksum 为源卷台账读出的整文件
-// SHA-256（空 = 源无台账，写空键无意义跳过 store 写入）；toRoot 为目标卷租户根
-// （取 mtime，跨卷复制后非原值也可录真值）。index nil → 零操作。
+// IndexMove 跨卷移动成功后**迁移 checksum 台账**（旁路面 /api/volumes/move、rebalance 物理
+// 搬移后调用）。V4 阶段二：搜索索引不再在此维护——物理搬移经 `storage.Root`（目标卷写 /
+// 源卷删）必然发出结构/内容写事件，索引由 `ApplyRootMutation` 自动跟进（源条目移除 + 目标
+// 条目与卷归属更新）。此处只做事件观察不到的事：**台账键 → 值**的迁移。
+//
+// rel 为租户根相对路径（user/<name>）；size/toVol/toRoot 参数保留以兼容既有调用方（索引不再
+// 使用）；checksum 为源卷台账读出的整文件 SHA-256（空 = 源无台账，回落读源 rel 旧值）。
 func (s *Service) IndexMove(owner, rel string, size int64, checksum, toVol string, toRoot *storage.Root) {
-	if s.index == nil {
-		return
-	}
-	usr := strings.TrimPrefix(rel, "user/")
-	s.index.remove(owner, usr)
-	var modTime int64
-	if toRoot != nil {
-		if fi, err := toRoot.Stat(rel); err == nil {
-			modTime = fi.ModTime().UnixNano()
-		}
-	}
-	s.index.upsert(owner, usr, size, modTime, toVol, toRoot, "user/"+usr)
-	// checksum 台账迁移：调用方可能不传（旧调用）→ 回落读**源 rel 旧值**（跨卷 move
-	// 源/目标同 rel——写目标前旧键仍是源台账）；空仍跳过。
+	_, _, _ = size, toVol, toRoot // 索引改由 Root 事件维护；参数保留兼容（见 doc）
 	if checksum == "" {
 		if cs := s.rt.checksumStore(owner); cs != nil {
 			if v, ok := cs.Get(rel); ok {

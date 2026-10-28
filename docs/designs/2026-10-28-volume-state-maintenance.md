@@ -420,3 +420,51 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
 
 **剩余（V4 其余）**：`ExternalList`/`IndexMove` 的薄转发删除依赖「本地卷 list 也走卷视图」
 （= TreeView 投影）；`checksums.json` 只读化需先把校验和读路径切到对象 meta（见 §十四 计划）。
+
+---
+
+## 十四、V4 阶段二：跨卷搬移只迁移 checksum（2026-10-28 落地）
+
+`IndexMove` 曾是跨卷 move 的「索引 + 台账」双登记入口。物理搬移必然经 `storage.Root`
+（目标卷写 / 源卷删）⇒ 结构/内容写事件已经覆盖索引（源条目移除、目标条目与**卷归属**更新）。
+本片把 `IndexMove` 收敛为**只迁移 checksum 台账**（事件观察不到的只有「键→值」迁移）。
+
+**验收**：`TestIndexMove_MigratesChecksumAndEventDrivesIndex`——① `IndexMove` 写台账；
+② 目标卷事件（`MutationWrite`，Tag=目标卷）后 list 条目带 checksum 且 `volume` 归属正确；
+变异：去掉台账写入 ⇒ 红；去掉事件 ⇒ 条目缺失/卷归属陈旧 ⇒ 红。R46 棘轮同步下调
+（`pkg/files/service.go` 的旧实现使用点 3 → 1）。
+
+## 十五、剩余两项（需要设计决策，未在本期实现）
+
+### 15.1 `checksums.json` → 对象 meta 为准（台账只读化）
+
+现状：台账是 per-tenant 单 JSON（`meta/checksums.json`，整体重写、可丢可损）；对象 meta sidecar
+已带 `TotalSHA256`（`pkg/files/meta`）。目标：**读以对象 meta 为准，台账退化为导入源**。
+
+可行切片（按序）：
+1. **自愈读**：`List`/`Search`/`Stat` 在台账缺条目时就地读 sidecar（`FileMetaPolicy.ReadMetaRaw`
+   + `meta.MetaPath`），只读不写台账（旧台账损坏不再导致「checksum 空」）。
+   代价：首个无台账的列表会有 N 次 sidecar 读 ⇒ 需一次性批量构建 + 缓存，或先跑 2。
+2. **一次性导入**（启动期或 `sclient checksum import`）：逐卷遍历 user 桶，读 sidecar 的
+   `TotalSHA256` 回填台账，写完标记 `imported=true`。
+3. **台账转只读**：此后 `Set/Delete/Rename` 不再写台账（仅内存/事件驱动），删 `checksums.json`
+   写路径与 R46 对应计数。
+
+风险/决策点：台账键是**租户相对 rel（跨卷同名可冲突）**——对象 meta 是**卷内对象级**，两者键空间
+不同，导入时必须按 volume 归属写入（否则跨卷同名文件互相覆盖）。这是本项必须先定的口径。
+
+### 15.2 `searchIndex` → TreeView 投影
+
+现状：本地卷 list/search 走 `searchIndex`（含内容索引、向量索引、集群 `IndexSync` 快照/rev、
+持久化快照）。目标：list 由「卷状态视图（卷 FS ListDir + `volumestate` 缓存）」投影，searchIndex
+只保留搜索语义。
+
+为何未在本期做：`searchIndex` 同时承担 ① list 数据源、② 搜索（子串/内容/向量）、③ 集群索引同步
+（rev/dirty/StateStore）、④ 快照持久化。把它拆成「结构视图（可投影）+ 搜索索引（需保留）」需要先定：
+- 结构视图的来源（本地卷 `FS.ListDir` 是否足以支撑排序/分页/卷聚合）；
+- 集群同步是否改为「结构视图同步 + 搜索索引本地重建」；
+- 内容索引/向量索引的失效边界（新增/删除文件时增量维护），
+  以及 R41 门禁（`files.List/Search` 不得直调 `index.list`/`ExternalList`）的落地时机。
+
+建议按「先加 R41 的**影子台账**（记录调用点与迁移进度）→ 再逐卷切换 list → 最后删 index.list」
+三步推进，每步都可用现有 list/search 全量用例回归。
