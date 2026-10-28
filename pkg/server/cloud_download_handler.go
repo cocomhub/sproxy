@@ -1152,7 +1152,23 @@ func (h *Handlers) cloudArchiveToVolume(
 	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url, TaskCount: len(t.Entries)}, http.StatusOK)
 }
 
+// recordBypassWrite 是云转存/归档转存产物派生状态的**统一入口**（装配层注入 cloud manager）。
+//
+// 分流依据是「该卷是否本地根」：
+//   - 本地卷：结构/内容写事件已维护搜索索引 ⇒ 只补 checksum 台账（`RecordBypassChecksum`）；
+//   - 外部/远端卷：无本地 Root 事件 ⇒ 走 `RecordBypassWrite`（checksum + 索引一次登记）。
+//
+// 这样本地卷不再重复 upsert（省一次整表 COW 克隆），也不会为「卷内并不存在的路径」造幽灵条目。
+func (h *Handlers) recordBypassWrite(owner, rel string, size int64, checksum, volume string, root *storage.Root) {
+	if h.isLocalStorageVolume(volume) {
+		h.fileService().RecordBypassChecksum(owner, rel, checksum)
+		return
+	}
+	h.fileService().RecordBypassWrite(owner, rel, size, checksum, volume, root)
+}
+
 // recordArchiveBypassState 归档转存（本地卷目标）的派生状态登记（R16 缺陷族修复 B）。
+// V4：索引改由 `storage.Root` 事件自动维护 ⇒ 这里只补 checksum 台账。
 func (h *Handlers) recordArchiveBypassState(t archiveVolumeTransfer, fs syncpkg.FS, rel string, size int64) {
 	if !h.isLocalStorageVolume(t.TargetVolume) {
 		return
@@ -1163,7 +1179,8 @@ func (h *Handlers) recordArchiveBypassState(t archiveVolumeTransfer, fs syncpkg.
 			cs = fm.TotalSHA256
 		}
 	}
-	h.fileService().RecordBypassWrite(t.Owner, rel, size, cs, t.TargetVolume, nil)
+	// 本地卷：索引已由 Root 事件（结构 + 内容写）维护 ⇒ 只补 checksum（避免重复 upsert）。
+	h.fileService().RecordBypassChecksum(t.Owner, rel, cs)
 }
 
 // probeArchiveQuota 是归档转存的**写前配额探针**（R14 C6）：探测式（预留后立即释放、不排队）。

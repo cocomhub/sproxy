@@ -173,3 +173,68 @@ func TestWireLocalVolumeMutations_ContentWriteViaFS(t *testing.T) {
 		t.Fatalf("卷 FS 内容写后应自动进索引（未经 RecordBypassWrite）, got total=%d files=%+v", resp.Total, resp.Files)
 	}
 }
+
+// TestRecordBypassWrite_LocalVolumeChecksumOnly 钉住 V4 收敛：本地卷目标的旁路写**只补
+// checksum**，索引交给 Root 事件（因此对不存在的路径不产生幽灵条目）；外部卷仍走全量登记。
+// 变异验证：把 `h.recordBypassWrite` 改回无条件 `RecordBypassWrite` ⇒ 幽灵断言红。
+func TestRecordBypassWrite_LocalVolumeChecksumOnly(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Volumes = []VolumeConfig{{Name: "main", Root: cfg.StorageRoot}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("cfg.Validate: %v", err)
+	}
+	h := buildVolSetHandlers(t, cfg)
+	svc := h.fileService()
+	if rr := serveSearch(t, svc, "seed"); rr.Code != http.StatusOK {
+		t.Fatalf("预热搜索应 200, got %d", rr.Code)
+	}
+
+	// ① 卷里不存在的路径：只登记 checksum ⇒ 不得出现索引条目（无幽灵）。
+	h.recordBypassWrite("anonymous", "user/ghost.txt", 11, "deadbeef", "main", nil)
+	if rr := serveSearch(t, svc, "ghost"); searchTotal(t, rr) != 0 {
+		t.Fatalf("本地卷旁路写不应造幽灵索引条目")
+	}
+
+	// ② 真实落盘（卷 FS 写面 ⇒ 事件）+ 只补 checksum ⇒ 搜索命中且 checksum 来自台账。
+	fsys, ok := h.volSet.VolumeView("main", registry.ViewUser)
+	if !ok || fsys == nil {
+		t.Fatal("默认卷用户视图不可用")
+	}
+	body := "bypass-body"
+	if err := fsys.WriteFile(context.Background(), syncpkg.LogicalKey{}, "anonymous/user/bypass-real.txt",
+		strings.NewReader(body), int64(len(body)), 0); err != nil {
+		t.Fatalf("FS.WriteFile: %v", err)
+	}
+	h.recordBypassWrite("anonymous", "user/bypass-real.txt", int64(len(body)), "cafebabe", "main", nil)
+
+	rr := serveSearch(t, svc, "bypass-real")
+	if searchTotal(t, rr) != 1 {
+		t.Fatalf("真实落盘 + 事件后应命中 1 条，got %s", rr.Body.String())
+	}
+	var resp struct {
+		Files []struct {
+			Name     string `json:"name"`
+			Checksum string `json:"checksum"`
+		} `json:"files"`
+	}
+	if uerr := json.Unmarshal(rr.Body.Bytes(), &resp); uerr != nil {
+		t.Fatalf("解析: %v", uerr)
+	}
+	if len(resp.Files) != 1 || resp.Files[0].Name != "bypass-real.txt" || resp.Files[0].Checksum != "cafebabe" {
+		t.Fatalf("条目 = %+v，期望 bypass-real.txt checksum=cafebabe", resp.Files)
+	}
+}
+
+// searchTotal 解析搜索响应的 total。
+func searchTotal(t *testing.T, rr *httptest.ResponseRecorder) int {
+	t.Helper()
+	var resp struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析搜索响应: %v (%s)", err, rr.Body.String())
+	}
+	return resp.Total
+}

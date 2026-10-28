@@ -271,7 +271,7 @@ Delete/软删/恢复 → Invalidate(rel)
 | **V1** | `pkg/volumestate` 骨架：`ObjectRef`/`DirSnapshot`/`TreeEntry`/`Cache`/`MutationBus`/`WrapVolume`；staging 原子读写 + LRU + TTL/代际判定；`storage.Root` 变异观察者（不接线） | 高 | 无 | 单测：命中/miss/TTL/代际/写穿/祖先 stale/degraded/保密卷不落盘 |
 | **V2** | **外部卷接入（本期核心）**：装配期 `WrapVolume` 包所有非本地卷；`files.List/Stat/Delete/Rename(?volume=)` 走装饰器；TTL 30s；secretdata 用 `StateGen`；`ExternalList/ExternalStat` 保留回源 | **最高** | 外部卷 list 首次慢、之后命中；外部改写 ≤30s 收敛 | e2e：二次 list 无远端往返（计数）；TTL 过期回源一次；`Refresh` 立即生效；删除后无幽灵 |
 | **V3** | **本地卷迁移**（可延后）：`searchIndex` 收敛为 TreeView 投影；`checksums.json` 一次性 import 后转只读；Root 事件接线 | 中（后续） | list/search 行为不变 | 全量绿；旧路径棘轮计数下降 |
-| **V4** | 清理：删 `searchIndex`/`checksums.json` 独立写路径与 `ExternalList` 薄转发；`RecordBypassWrite`/`IndexMove` 删（由事件总线取代） | 低 | 无 | #874 回归用例绿；deadcode 门禁过 |
+| **V4** | 清理：删 `searchIndex`/`checksums.json` 独立写路径与 `ExternalList` 薄转发；`RecordBypassWrite`/`IndexMove` 删（由事件总线取代）——**阶段一已完成**（见 §十三），剩余待 `checksums.json` 只读化与 TreeView 投影 | 低 | 无 | #874 回归用例绿；deadcode 门禁过 |
 | **V5** | 门禁 + 文档 + 归档：R40/R41/R42/R44/R45/R46 | 中 | 无 | `make check-ci` 全绿 |
 
 **灰度**：`volume_state_enabled`（默认 **false** = 旧行为）。V2 合入后由运维逐环境开启；
@@ -397,3 +397,26 @@ V4 把 `RecordBypassWrite` 收敛为「只写 checksum」后回到一次。
 
 **门禁 R42**（同期落地）：带 `ListDir` 的类型必须实现 `StateGen` 或登记理由——保证「有派生状态的
 FS 实现能被缓存层探测到变化」，与 R40（不许再造一套）互补。
+
+---
+
+## 十三、V4 阶段一：旁路写只补 checksum（2026-10-28 落地）
+
+`RecordBypassWrite`（checksum 台账 + 索引）此前是转存/归档的**唯一**派生状态入口。随着
+Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷目标再调全量登记就是**重复 upsert**
+（幂等，但白做一次整表 COW 克隆），并且对「卷内并不存在的路径」会造**幽灵索引条目**（`root=nil`
+⇒ 没有 Stat 兜底）。
+
+**落地**：
+
+- `files.Service.RecordBypassChecksum(owner, rel, checksum)`：只写台账，不碰索引。
+- `Handlers.recordBypassWrite`：装配层**统一入口**，按 `HasLocalRoot(volume)` 分流——
+  本地卷 ⇒ checksum-only（索引交给事件）；外部/远端卷 ⇒ 保留全量 `RecordBypassWrite`
+  （它们没有本地 Root 事件）。cloud manager 的 `RecordBypassWrite` 注入点与归档转存都走它。
+
+**验收**：`TestService_RecordBypassChecksum_LedgerOnly`（台账命中 + 索引无幽灵）、
+`TestRecordBypassWrite_LocalVolumeChecksumOnly`（本地卷幽灵=0；真实落盘后事件索引 + 台账 checksum
+可见）。变异：把分流改回无条件全量 ⇒ 幽灵断言红。
+
+**剩余（V4 其余）**：`ExternalList`/`IndexMove` 的薄转发删除依赖「本地卷 list 也走卷视图」
+（= TreeView 投影）；`checksums.json` 只读化需先把校验和读路径切到对象 meta（见 §十四 计划）。
