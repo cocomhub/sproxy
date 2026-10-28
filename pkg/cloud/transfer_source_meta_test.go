@@ -261,3 +261,60 @@ func TestTransferWrite_PreservesNanoMTime(t *testing.T) {
 		t.Fatalf("mtime 明显是秒单位（%d）而非纳秒——单位 bug 回归", got)
 	}
 }
+
+// TestTransferSourceMeta_DownloadAudit 验证下载审计信息写入目标卷 meta：
+// 源文件时间、起止/耗时、分通道字节、带宽（全部来自 Result 实测/带外字段）。
+// 回归守卫：此前 meta 只有 source/checksum/transferred_at，无法审计下载耗时与分源字节。
+func TestTransferSourceMeta_DownloadAudit(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, 10, 28, 2, 0, 0, 0, time.UTC)
+	finished := started.Add(90 * time.Second)
+	created := time.Date(2026, 10, 20, 1, 2, 3, 0, time.UTC)
+	modified := time.Date(2026, 10, 21, 4, 5, 6, 0, time.UTC)
+	res := &downloader.Result{
+		Size: 300, Checksum: "abc", ChecksumAlgorithm: downloader.IntegrityChecksumSHA256,
+		ModTime: modified, SourceCreatedTime: created,
+		StartedAt: started, FinishedAt: finished,
+		AnonymousBytes: 100, AccountBytes: 200, BytesPerSecond: 3,
+	}
+	task := &CloudTask{URL: "https://example.com/share"}
+	meta := buildTransferSourceMeta(task, "", "abc", "", downloader.IntegrityChecksumSHA256, "")
+	applyDownloadAudit(meta, res)
+
+	checks := map[string]any{
+		"x_source_created_at":        "2026-10-20T01:02:03Z",
+		"x_source_modified_at":       "2026-10-21T04:05:06Z",
+		"x_download_started_at":      "2026-10-28T02:00:00Z",
+		"x_download_finished_at":     "2026-10-28T02:01:30Z",
+		"downloaded_at":              "2026-10-28T02:01:30Z",
+		"x_download_duration_ms":     int64(90000),
+		"x_download_anonymous_bytes": int64(100),
+		"x_download_account_bytes":   int64(200),
+		"x_download_bytes_per_sec":   int64(3),
+	}
+	for k, want := range checks {
+		if got, ok := meta[k]; !ok || got != want {
+			t.Errorf("%s = %v (present=%v), want %v", k, got, ok, want)
+		}
+	}
+	// 关键回归：source=transfer（服务端来源键）+ 审计键并存。
+	if meta["source"] != "transfer" {
+		t.Errorf("source = %v", meta["source"])
+	}
+}
+
+// TestTransferSourceMeta_AuditSkipsUnknown 验证未知时间/带宽不写入（不编造）。
+func TestTransferSourceMeta_AuditSkipsUnknown(t *testing.T) {
+	t.Parallel()
+	meta := map[string]any{"source": "transfer"}
+	applyDownloadAudit(meta, &downloader.Result{Size: 10})
+	for _, k := range []string{
+		"x_source_created_at", "x_source_modified_at", "x_download_started_at",
+		"x_download_finished_at", "downloaded_at", "x_download_duration_ms",
+		"x_download_anonymous_bytes", "x_download_account_bytes", "x_download_bytes_per_sec",
+	} {
+		if _, ok := meta[k]; ok {
+			t.Errorf("未知值不应写入 %s", k)
+		}
+	}
+}

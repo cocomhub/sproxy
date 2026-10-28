@@ -50,6 +50,21 @@ type CloudTask struct {
 	CleanupStatus string `json:"cleanup_status,omitempty"`
 	// CleanupErr 清理失败原因（CleanupStatus=failed 时）。
 	CleanupErr string `json:"cleanup_err,omitempty"`
+	// DownloadStats 是下载实测统计（耗时/起止/分通道字节/带宽/源文件时间；服务端填写，
+	// 零值 = 下载器未统计）。供客户端审计与统计下载情况（用户裁定 2026-10-28）。
+	DownloadStats *DownloadStats `json:"download_stats,omitempty"`
+}
+
+// DownloadStats 是下载实测统计（服务端下载器上报）。
+type DownloadStats struct {
+	StartedAt      time.Time `json:"started_at,omitempty"`
+	FinishedAt     time.Time `json:"finished_at,omitempty"`
+	DurationMs     int64     `json:"duration_ms,omitempty"`
+	AnonymousBytes int64     `json:"anonymous_bytes,omitempty"`
+	AccountBytes   int64     `json:"account_bytes,omitempty"`
+	BytesPerSecond int64     `json:"bytes_per_second,omitempty"`
+	SourceCreated  time.Time `json:"source_created_at,omitempty"`
+	SourceModified time.Time `json:"source_modified_at,omitempty"`
 }
 
 // CloudTask 状态常量。

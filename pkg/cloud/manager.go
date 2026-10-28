@@ -41,6 +41,36 @@ import (
 // 空 owner（全局/旧任务/未认证创建）对所有人可见；非空 owner 只对匹配用户
 // （或空 owner 的管理员/未认证）可见。List/Get/Cancel/Delete/Resume 均按 owner 过滤，
 // 跨 owner 视为不存在（404 防枚举）。
+// DownloadStats 是下载实测统计（用户裁定 2026-10-28）：从 downloader.Result 落库，
+// 同时写入转存产物 meta extra（x_download_* 键），便于后续审计与统计。
+type DownloadStats struct {
+	StartedAt      time.Time `json:"started_at,omitempty"`
+	FinishedAt     time.Time `json:"finished_at,omitempty"`
+	DurationMs     int64     `json:"duration_ms,omitempty"`
+	AnonymousBytes int64     `json:"anonymous_bytes,omitempty"` // 匿名（免账号）通道字节
+	AccountBytes   int64     `json:"account_bytes,omitempty"`   // 账号通道字节
+	BytesPerSecond int64     `json:"bytes_per_second,omitempty"`
+	SourceCreated  time.Time `json:"source_created_at,omitempty"` // 源文件创建时间（带外）
+	SourceModified time.Time `json:"source_modified_at,omitempty"`
+}
+
+// newDownloadStats 从下载结果构造统计（零值字段省略语义由 omitempty 承担）。
+func newDownloadStats(res *downloader.Result) *DownloadStats {
+	if res == nil {
+		return nil
+	}
+	st := &DownloadStats{
+		StartedAt: res.StartedAt, FinishedAt: res.FinishedAt,
+		AnonymousBytes: res.AnonymousBytes, AccountBytes: res.AccountBytes,
+		BytesPerSecond: res.BytesPerSecond,
+		SourceCreated:  res.SourceCreatedTime, SourceModified: res.ModTime,
+	}
+	if !res.StartedAt.IsZero() && !res.FinishedAt.IsZero() && res.FinishedAt.After(res.StartedAt) {
+		st.DurationMs = res.FinishedAt.Sub(res.StartedAt).Milliseconds()
+	}
+	return st
+}
+
 type CloudTask struct {
 	ID           string    `json:"id"`
 	Owner        string    `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
@@ -78,6 +108,9 @@ type CloudTask struct {
 	TransferURL string `json:"transfer_url,omitempty"`
 	// TransferErr 是转存失败原因（重试耗尽后记录；后续告警接入）。
 	TransferErr string `json:"transfer_err,omitempty"`
+	// DownloadStats 是**下载实测统计**（下载器上报；供审计/统计：耗时、起止、分通道字节、
+	// 带宽）。零值 = 下载器未统计（不得编造）。随任务持久化，客户端可经 GET 任务读取。
+	DownloadStats *DownloadStats `json:"download_stats,omitempty"`
 	// MetaExtra 是客户端随转存提供的自定义元数据（转存成功后合并进目标卷 meta.Extra）。
 	// 服务端另叠加来源信息（source=transfer / source_url / etag / transferred_at），
 	// 供下游区分「转存产物」与「直接上传」并溯源（用户裁定 2026-10-27）。

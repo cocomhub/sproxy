@@ -1735,6 +1735,9 @@ func (m *CloudDownloadManager) markDownloadArtifactDone(task *CloudTask, destPat
 	task.DownloadDone = true
 	task.DownloadedSize = st.Size()
 	task.DownloadedChecksum = result.Checksum
+	if st := newDownloadStats(result); st != nil && !st.StartedAt.IsZero() {
+		task.DownloadStats = st // 下载实测统计（审计/统计口径；零值不写）
+	}
 	m.mu.Unlock()
 	if serr := m.saveTask(task); serr != nil {
 		m.logger.Warn("persist download-done marker failed (will re-download on restart)",
