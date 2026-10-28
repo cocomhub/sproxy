@@ -1115,6 +1115,9 @@ type Config struct {
 	//     行为（安全可靠）**；true = 跳过下载数据校验（显式放宽，仅极端性能场景）。
 	//     meta 生成恒在（只关校验，不关 meta——桶隔离/凭据保护不随本字段变化）。
 	TrustedVolume TrustedVolumeConfig `yaml:"trusted_volume" mapstructure:"trusted_volume"`
+	// VolumeState 是**卷状态缓存**配置（卷状态维护设计 2026-10-28-volume-state-maintenance）：
+	// list 目录视图与 checksum 派生值的统一缓存层（外部卷优先）。默认关闭 = 旧行为零回归。
+	VolumeState VolumeStateConfig `yaml:"volume_state" mapstructure:"volume_state"`
 
 	// Pikpak 是 PikPak 网盘中转后端配置（分享转存 + 官方 CLI 完整下载）。
 	Pikpak PikpakConfig `yaml:"pikpak" mapstructure:"pikpak"`
@@ -1211,4 +1214,25 @@ func transferConcurrencyEffective(c *Config) int {
 		return mx
 	}
 	return c.CloudTransferConcurrency
+}
+
+// VolumeStateConfig 是卷状态缓存的配置（`volume_state` 段）。
+//
+// 设计：docs/designs/2026-10-28-volume-state-maintenance.md。
+// **默认值纪律**（AGENTS.md 18 条）：所有 bool 默认 false、string 默认空；
+// 字节/时长取「安全且有界」的默认（上限 256 MiB、TTL 由卷类型决定）。
+type VolumeStateConfig struct {
+	// Enabled 是否启用卷状态缓存装饰器（默认 false = 完全旧行为，可灰度回退）。
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// TTL 是外部卷缓存有效期（0 = 按卷类型默认：外部卷 30s；本地卷不按时间过期；
+	// 负值 = 该层禁用缓存，每次回源——调试/强一致场景）。
+	TTL time.Duration `yaml:"ttl" mapstructure:"ttl"`
+	// SearchRemote 允许对远端卷做递归搜索（默认 false：递归列举 = 全量远端往返，
+	// 只在明确需要时开启）。
+	SearchRemote bool `yaml:"search_remote" mapstructure:"search_remote"`
+	// MaxBytes 是落盘 staging 上限（**0 = 仅内存、不落盘**）。默认 256 MiB（有界安全值）。
+	MaxBytes ByteSize `yaml:"max_bytes" mapstructure:"max_bytes"`
+	// PersistPrivate 允许**保密卷**（加密/私密外部卷）的元数据快照落节点本地磁盘。
+	// 默认 false：只落内存，避免卷内文件名/校验和以明文落在节点磁盘。
+	PersistPrivate bool `yaml:"persist_private" mapstructure:"persist_private"`
 }

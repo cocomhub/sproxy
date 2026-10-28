@@ -32,6 +32,10 @@ var innerCallAllowlist = map[string]string{
 	// 真值探测：掌握物理布局（内容分块 + meta pad + parity）的是**处理器层**，它在装饰器链中间，
 	// 故 TrueUsageOf 必须自外向内逐层下探找第一个实现者（装饰器本身不实现该接口 → 天然跳过）。
 	"pkg/volume/capacity/trueusage.go": "TrueUsageOf 能力探测（真值报告者可能位于链中间，非最内层）",
+	// 卷状态缓存的**代际探测**（volume.StateGeneration）：探测的是「新鲜度提示」，不是内容/
+	// 权限语义，绕过 Guard/Wrap 不产生语义弱化；装饰器未转发该能力时探测返回 nil ⇒ 退化为
+	// 无代际（TTL/写穿兜底），fail-safe。
+	"pkg/volumestate/wrap.go": "StateGeneration 代际探测（只读提示，非语义绕过；未实现即退化）",
 }
 
 // TestInnerEscapeGate 门禁：业务代码不得直接 unwrap 装饰器（见文件头）。

@@ -1029,6 +1029,13 @@ func (h *Handlers) refreshVolumeHandler(w http.ResponseWriter, r *http.Request) 
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
+	// 卷状态缓存（外部卷 list/checksum 视图）：显式清空 ⇒ 下次读回源（外部改动收敛）。
+	if h.stateCache != nil && !h.volSet.HasLocalRoot(volName) {
+		if rerr := h.stateCache.Refresh(r.Context(), volName); rerr != nil {
+			sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "清空卷状态缓存失败: " + rerr.Error()}, http.StatusInternalServerError)
+			return
+		}
+	}
 	// 本地卷：索引即磁盘真实（搜索索引增量更新），无「内存索引要重建」——幂等成功。
 	if h.volSet.HasLocalRoot(volName) {
 		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "本地卷无内存索引需要重建（幂等成功）"}, http.StatusOK)

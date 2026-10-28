@@ -128,10 +128,13 @@ func Default() *Config {
 		// fail-safe**。与 config.go/manager.go/example.yaml 注释统一口径。
 		CloudCheckMemBytes:        ByteSize(512) * (1 << 20),
 		CloudDownloadAllowPrivate: false,
-		CloudDownloadTimeout:      30 * time.Minute,
-		CloudDownloadIdleTimeout:  1 * time.Minute,
-		CloudMaxRetries:           10,
-		CloudRetryDelay:           10 * time.Second,
+		// 卷状态缓存：默认**关闭**（零回归）；显式开启后默认 256 MiB 落盘上限
+		// （有界安全值；用户可设 0 = 仅内存）。
+		VolumeState:              VolumeStateConfig{MaxBytes: ByteSize(256) << 20},
+		CloudDownloadTimeout:     30 * time.Minute,
+		CloudDownloadIdleTimeout: 1 * time.Minute,
+		CloudMaxRetries:          10,
+		CloudRetryDelay:          10 * time.Second,
 		Pikpak: PikpakConfig{
 			// Hybrid.AutoDelete 默认 true（2026-10-05 修正：与 config.go 注释一致）——
 			// 免费账号仅 6GB，下载后必须永久删转存释放空间；idempotent 复用只删

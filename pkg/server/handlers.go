@@ -44,10 +44,15 @@ import (
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volumestate"
 )
 
 // Handlers 持有所有 HTTP handler 的依赖。
 type Handlers struct {
+	// stateCache 是卷状态缓存（未启用 = nil；与卷视图装饰器同处装配）。仅用于显式
+	// refresh 入口：按卷清空快照（外部卷被外部改动后手动收敛）。
+	stateCache *volumestate.Cache
+
 	cfgPtr *atomic.Pointer[Config]
 	// skipFileMetaAssembly 是测试隔离开关（AGENTS.md 7b：测试注入走结构体内部私有
 	// 变量）：存量语义测试用 newAssemblyTestHandlers 置 true 跳过 filesMetaPolicy 装配

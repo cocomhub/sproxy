@@ -111,7 +111,8 @@ RTT ⇒ 显式留空 = unknown）。
 // 实现必须廉价（不得全量遍历）：本地卷=目录 mtime+子项数；secretdata=容器 meta 版本；
 // S3=子树 LastModified 最大值；baidupcs=ctime+条目数。
 type StateGeneration interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
-    StateGen(ctx context.Context, owner, rel string) (uint64, error)
+    // path 是**卷根相对路径**（与 sync.FS 键空间一致，首段即 owner）。
+    StateGen(ctx context.Context, path string) (uint64, error)
 }
 ```
 
@@ -150,7 +151,7 @@ type TreeEntry struct {
 
 ```go
 func (c *Cache) ListDir(ctx, vol, owner, rel string) ([]sync.Entry, error)
-func (c *Cache) StatObject(ctx, vol, owner, rel string) (sync.Entry, bool, error)
+// 说明：Stat **不进缓存**（见下「实现对齐」）——安全判定必须新鲜，且单对象成本远低于目录列举。
 func (c *Cache) Search(ctx, vol, owner, query, tag string) ([]TreeEntry, error)
 func (c *Cache) Invalidate(ref ObjectRef) error          // 事件总线调用（§四）
 func (c *Cache) Refresh(ctx, vol, owner string) error    // 既有 POST /api/volumes/refresh
@@ -247,8 +248,16 @@ Delete/软删/恢复 → Invalidate(rel)
 批量（转存/归档/镜像/同步）→ 逐产出对象各发一次（装饰器天然覆盖）
 ```
 
-**失效失败不阻断业务**（写已成功）：记 Warn + 该 `(vol,owner)` 标 **degraded**（后续读全部
-回源，直到显式 `Refresh` 成功）⇒ 降级为「慢但正确」，不留永久幽灵。
+**失效失败不阻断业务**（写已成功），且**实现上不需要 degraded 标记**：内存 LRU 是失效的
+一等公民——同进程内失效不可能失败；磁盘快照删除是 best-effort，陈旧快照另有 TTL 与代际兜底
+（本地卷则本就只依赖写穿 + 代际）。这与「靠标记降级」相比更简单、无额外状态（实现见
+`pkg/volumestate/cache.go` 的 `Invalidate`）。
+
+**实现对齐（2026-10-28 落地时确认）**：
+- `Stat`/`StatObject` **不进缓存**：A 类安全判定必须新鲜，且单对象成本远低于目录列举；
+  缓存只服务 `ListDir`（C 类结构视图）。
+- 代际探测沿装饰链向内找首个 `StateGeneration` 实现（装饰器当前未转发该能力 ⇒ 未实现即
+  退化为无代际，TTL/写穿兜底，fail-safe）。
 
 ---
 

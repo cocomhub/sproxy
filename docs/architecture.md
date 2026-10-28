@@ -371,6 +371,29 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 声明 `local` 协议，`Set.ResolveURL` 经 `VolumeView` 读本地卷）。`volume://`（`Location.String()`
 卷内定位序列化）与 `local://`（协议寻址）并存分工。
 
+### 卷状态维护（list / checksum / 索引的统一缓存层）
+
+设计：[docs/designs/2026-10-28-volume-state-maintenance.md](./designs/2026-10-28-volume-state-maintenance.md)。
+
+**问题**：list 的目录视图与 checksum 派生值此前有**三套实现**（本地卷 `searchIndex` +
+`checksums.json`、外部卷每次远端 `ListDir`、secretdata 自管索引）⇒ 三个真相源、三条失效路径
+（#874：旁路写漏一处即「list 缺条目 + checksum 空」）。
+
+**机制（四条不变量）**：
+
+1. **卷维度**：缓存键恒为 `(卷名, 卷内相对路径)`；跨卷聚合是「对卷集合的派生遍历」，
+   不是独立全局索引。
+2. **横切关注点 = 装配期装饰器**：唯一入口 `volumestate.Wrap`（与 `capacity.WrapStorageVolume`
+   同形），业务代码零感知；门禁 **R44** 保证没有第二个包装点。
+3. **失效由变更事件驱动**：装饰器在 `WriteFile/Delete/Rename/MakeDir/WriteIfAbsent/Move/Copy/Link`
+   成功后**自动失效**（含祖先目录），调用方不需要登记 —— 这是 #874 缺陷族的结构解。
+4. **卷自管只报告事实**：卷经 `sync.Entry.Checksum*` 与可选 `volume.StateGeneration`
+   （廉价代际：目录 mtime / 容器 meta 版本 / LastModified）如实上报，**不得自建 list 缓存**。
+
+**权威口径**：卷是真相源、缓存只加速 —— `Stat` 恒回源；需要 checksum 的安全操作走
+「调用方给 → 现取 → fail-closed」三段式，缓存值不作删除门禁唯一依据。
+**范围**：本期仅非本地卷（外部/封装）；本地卷沿用既有实现（门禁 R46 登记为只减不增）。
+
 ## 可信卷（Trusted Volume：完整性 sidecar + 元信息隔离 + 卷级容量）
 
 「可信卷」把「读回内容 == 写入内容」从**约定**升级为**结构性不变量**：服务端为每个文件维护一份
