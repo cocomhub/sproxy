@@ -106,6 +106,12 @@ type StateGeneration interface { // NOSONAR: S8196 — 能力接口（非 -er �
 **关键约束**：卷**不得**自己实现 list 缓存（除 L2 外，全仓禁止 list 级缓存实现——见 §六门禁）。
 卷只负责「如实、廉价地报告当前状态」，加速由 L2 统一承担。
 
+**本地卷也能实现 `StateGeneration`（零成本）**：`rootfs` 可用「目录 mtime + 直接子项数」作代际
+（一次 `os.Root.Stat`，O(1)）——这样「另一个进程/用户直接改了卷目录」也能被发现并回源，
+补上「本地卷 TTL=0 则永不收敛」的缺口。secretdata 用容器 meta 版本/条目数；baidupcs 用
+`ctime`/条目数；S3 用 `LastModified` 最大值。**全部为可选能力**：未实现则该卷退化为
+TTL-only（外部卷）或写穿-only（本地卷），零回归。
+
 ### 3.2 L2 —— 统一缓存 `pkg/volumestate`（唯一实现）
 
 #### 3.2.1 数据模型
@@ -195,7 +201,7 @@ func (c *Cache) Refresh(ctx context.Context, vol, owner string) error
 
 | 卷类型 | 默认 TTL | 依据 |
 |---|---|---|
-| 本地卷（含 at-rest 加密） | **0（不按时间过期）** | 写穿覆盖本进程；外部进程改动由代际/显式 refresh 兜底 |
+| 本地卷（含 at-rest 加密） | **0（不按时间过期）** | 写穿覆盖本进程；**外部进程改动由 `rootfs` 的目录 mtime 代际兜底**（§3.1）；未实现代际时退回「写穿-only」（= 现状零回归） |
 | 外部卷（baidupcs/S3/webdav/ftp/sftp/federated/cluster） | **30s** | C 类有界过期；避免大目录反复远端往返 |
 | 自管卷（secretdata） | **30s + 代际** | 卷内写即时更新自身索引；跨进程改动由代际发现 |
 | 禁用 | `volume_state_ttl: -1` | 每次回源（调试/强一致场景） |
@@ -296,6 +302,7 @@ func (c *Cache) Refresh(ctx context.Context, vol, owner string) error
 | 同一目录二次 list，第二次不回源（计数器） | V2 | 去掉 LRU 命中判断 |
 | 外部卷 TTL 过期后回源一次 | V2 | 去掉 TTL 判定 |
 | 卷 `StateGen` 变化 → 强制回源 | V2 | 去掉代际比对 |
+| 本地卷目录被外部进程新增文件 → 代际变化 → list 反映（不重启） | V3 | 去掉 `rootfs.StateGen` |
 | `Invalidate(ref)` 后该 rel 立即不可见 | V2/V3 | 去掉 TreeView 删除 |
 | 写子目录后**父目录** list 反映新条目 | V3 | 去掉祖先 stale 标记 |
 | `Invalidate` 失败 → 该卷后续读全部回源（degraded） | V2 | 去掉 degraded 标记 |
