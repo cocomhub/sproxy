@@ -76,10 +76,7 @@ func workDirSplit(base string) ([]string, string) {
 		return nil, base // 短名：平铺不建子目录
 	}
 	// 文件段预算 = 255 - 工作后缀长（保证工作文件名 ≤255）。
-	budget := maxWorkNameBytes - len(hybridWorkingSuffix)
-	if budget < 1 {
-		budget = 1
-	}
+	budget := max(maxWorkNameBytes-len(hybridWorkingSuffix), 1)
 	// 尾部（含扩展名）整段保留为文件段：扩展名不应被拆进目录（失去落盘语义）。
 	// 注意：扩展名本身超预算（异常长，如 URL 参数被当成 ext）→ **不剥 tail**（置空），
 	// 否则 tail==base 会让 base 被切光后又重复拼回（拼接长度翻倍）。
@@ -92,10 +89,9 @@ func workDirSplit(base string) ([]string, string) {
 	for len(base) > 0 && len(base)+len(tail)+len(hybridWorkingSuffix) > maxWorkNameBytes {
 		// 每段取可承载量的一半（远离 255；UTF-8 安全切）。
 		seg := min(len(base), maxNameSegBytes)
-		seg = utf8SafeCut(base, seg)
-		if seg < 1 {
-			seg = 1 // 极端单字节场景兜底
-		}
+		seg = max(utf8SafeCut(base, seg),
+			// 极端单字节场景兜底
+			1)
 		dirs = append(dirs, base[:seg])
 		base = base[seg:]
 	}

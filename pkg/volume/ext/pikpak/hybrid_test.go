@@ -2192,7 +2192,7 @@ func TestWorkPaths_多段目录承载(t *testing.T) {
 	}
 	// 每个路径段 ≤255
 	for _, p := range []string{w, m} {
-		for _, seg := range strings.Split(p, string(filepath.Separator)) {
+		for seg := range strings.SplitSeq(p, string(filepath.Separator)) {
 			if len(seg) > maxWorkNameBytes {
 				t.Fatalf("路径段超限 %d: %q", len(seg), seg)
 			}

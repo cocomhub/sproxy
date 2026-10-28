@@ -57,14 +57,14 @@ type CloudTask struct {
 
 // DownloadStats 是下载实测统计（服务端下载器上报）。
 type DownloadStats struct {
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	FinishedAt     time.Time `json:"finished_at,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	FinishedAt     time.Time `json:"finished_at"`
 	DurationMs     int64     `json:"duration_ms,omitempty"`
 	AnonymousBytes int64     `json:"anonymous_bytes,omitempty"`
 	AccountBytes   int64     `json:"account_bytes,omitempty"`
 	BytesPerSecond int64     `json:"bytes_per_second,omitempty"`
-	SourceCreated  time.Time `json:"source_created_at,omitempty"`
-	SourceModified time.Time `json:"source_modified_at,omitempty"`
+	SourceCreated  time.Time `json:"source_created_at"`
+	SourceModified time.Time `json:"source_modified_at"`
 }
 
 // CloudTask 状态常量。

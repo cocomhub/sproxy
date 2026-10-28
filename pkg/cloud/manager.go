@@ -44,14 +44,14 @@ import (
 // DownloadStats 是下载实测统计（用户裁定 2026-10-28）：从 downloader.Result 落库，
 // 同时写入转存产物 meta extra（x_download_* 键），便于后续审计与统计。
 type DownloadStats struct {
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	FinishedAt     time.Time `json:"finished_at,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	FinishedAt     time.Time `json:"finished_at"`
 	DurationMs     int64     `json:"duration_ms,omitempty"`
 	AnonymousBytes int64     `json:"anonymous_bytes,omitempty"` // 匿名（免账号）通道字节
 	AccountBytes   int64     `json:"account_bytes,omitempty"`   // 账号通道字节
 	BytesPerSecond int64     `json:"bytes_per_second,omitempty"`
-	SourceCreated  time.Time `json:"source_created_at,omitempty"` // 源文件创建时间（带外）
-	SourceModified time.Time `json:"source_modified_at,omitempty"`
+	SourceCreated  time.Time `json:"source_created_at"` // 源文件创建时间（带外）
+	SourceModified time.Time `json:"source_modified_at"`
 }
 
 // newDownloadStats 从下载结果构造统计（零值字段省略语义由 omitempty 承担）。
