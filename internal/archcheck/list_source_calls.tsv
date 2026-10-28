@@ -1,0 +1,7 @@
+# list/search 数据源直调点登记（R41 影子台账：只减不增）
+# 口径：`.index.list(` / `.index.search(` / `ExternalList(` 的出现次数；
+# 目标形态见设计 §15.2（list 由卷状态视图投影，searchIndex 只保留搜索）。
+# 格式：file<TAB>max<TAB>reason
+pkg/files/options.go	1	现状基线（迁移推进时同步下调）
+pkg/files/read_ops.go	3	现状基线（迁移推进时同步下调）
+pkg/server/files_service.go	1	现状基线（迁移推进时同步下调）
