@@ -24,8 +24,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
-// errChecksumStoreUnavailable 表示台账未装配（未注入 ChecksumLedger）。
-var errChecksumStoreUnavailable = errors.New("checksum 台账不可用")
+// ErrChecksumStoreUnavailable 表示台账未装配（未注入 ChecksumLedger）。装配层据此回 503。
+var ErrChecksumStoreUnavailable = errors.New("checksum 台账不可用")
 
 // RebuildChecksums 从对象 meta sidecar 重建 owner 的 checksum 台账（一次性导入）。
 //
@@ -39,7 +39,7 @@ func (s *Service) RebuildChecksums(ctx context.Context, owner string) (int, erro
 	policy := s.rt.fileMeta
 	cs := s.rt.checksumStore(owner)
 	if cs == nil {
-		return 0, errChecksumStoreUnavailable
+		return 0, ErrChecksumStoreUnavailable
 	}
 	vs := s.rt.volSet()
 	if vs == nil {

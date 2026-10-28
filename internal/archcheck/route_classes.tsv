@@ -84,6 +84,8 @@ localMux	GET /upload/status	tunnel	pkg/server/routes.go:343
 localMux	GET /upload/sessions	tunnel	pkg/server/routes.go:344
 localMux	POST /upload/complete	tunnel	pkg/server/routes.go:345
 localMux	GET /download/chunk	tunnel	pkg/server/routes.go:346
+localMux	POST /api/checksums/rebuild	tunnel	pkg/server/routes.go:435
+srvMux	POST /api/checksums/rebuild	auth	pkg/server/routes.go:436
 localMux	POST /api/verify	tunnel	pkg/server/routes.go:362
 srvMux	POST /api/verify	auth	pkg/server/routes.go:363
 srvMux	POST /upload	user	pkg/server/routes.go:364
