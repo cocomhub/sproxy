@@ -129,20 +129,24 @@ func (h *Handlers) stopRemainingServices() {
 }
 
 // closeStorageRoots 关闭多租户存储根：先关各租户子根（默认卷缓存的租户子根；非默认卷的随
-// volSet.Close），再关卷集合根（含默认卷根 = globalRoot）。置 nil 防重复 Close。
-// 经 closeRootsOnce 单飞：优雅停服 defer 与信号路径可能并发调 Close()，同一次停服只关一次
-// 存储根（并发双重 Close 会让 volSet/globalRoot 的读改写竞态，-race 必捕）。
+// volSet.Close），再关卷集合根（含默认卷根 = globalRoot）。
+//
+// **不置 nil**（2026-10-28 修复 -race 实测的字段竞态）：`volSet`/`globalRoot` 构造后只读，
+// 被 200+ 处请求路径读取（`auditVolumeFallback` 等）。停服时在途 handler goroutine 仍在跑
+// （实测：`Tunnel.Serve` 返回后 handler goroutine 仍处理请求），此处写字段 ⇒ 与读构成 field
+// 级数据竞态（CI `-race` 报 DATA RACE，连带一串无关测试红）。「只关一次」的语义由
+// `closeRootsOnce` 单飞承担，不需要置 nil（同一教训见 `stopRemainingServices` 的 auditJournal）。
+// 副作用：停服后的迟到请求会看到「已关闭但仍非 nil」的卷集合 ⇒ 返回错误而非 nil 解引用，
+// 更安全（不再有 nil 指针面）。
+//
 // volSet == nil（手工构造的旧装配路径）回落直接关 globalRoot（既有行为）。
 func (h *Handlers) closeStorageRoots() {
 	h.closeRootsOnce.Do(func() {
 		_ = h.tenants.Close()
 		if h.volSet != nil {
 			_ = h.volSet.Close()
-			h.volSet = nil
-			h.globalRoot = nil
 		} else if h.globalRoot != nil {
 			_ = h.globalRoot.Close()
-			h.globalRoot = nil
 		}
 	})
 }

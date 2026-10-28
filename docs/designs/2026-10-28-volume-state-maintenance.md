@@ -283,13 +283,13 @@ Delete/软删/恢复 → Invalidate(rel)
 
 | 门禁 | 判据 | 防的是 |
 |---|---|---|
-| **R40** | 非测试源码除 `pkg/volumestate` 外不得出现 list 级缓存类型（`*Cache`/快照/索引 map + list 语义）；`pkg/volume/secretdata` 自管索引登记白名单（理由：内容是密文，只有卷能算） | 再造第四套 |
+| **R40** ✅已实现 | 非测试源码的 `*Cache`/`*Index` 结构体必须登记（`list_cache_types.tsv`，新增须复用 `pkg/volumestate` 或说明理由；secretdata 白名单理由：内容是密文，只有卷能算） | 再造第四套 |
 | **R41** | `files.List/Search` 实现体不得直调 `index.list` / `ExternalList`（V4 后） | 双入口 |
 | **R42** | 新增 `sync.FS` 实现若持有派生状态，必须实现 `StateGeneration` 或自述「无状态」注解 | 忘失效（#853/#874 类） |
 | **R44** | `volumestate.WrapVolume` 只在装配处出现；业务代码不得自造 FS 缓存包装 | 绕过唯一入口 |
 | **R45** ✅已实现 | `storage.Root` 结构性变异方法必须回调 `notifyMutation`（`internal/archcheck/root_mutation_gate_test.go`） | 机制因原语演进失效 |
 | **R46** ✅已实现 | **旧实现棘轮**：`searchIndex`/`checksums.json`/`ExternalList` 的独立使用点数（`legacy_state_usage.tsv` 登记）**只减不增** | 「短期共存」变永久双轨 |
-| **R43** | 新增配置项默认值：bool=false、string=空、int/duration 取安全默认（AGENTS.md 18 条） | 零回归 |
+| **R43** ✅已实现 | 新增配置项默认值：bool=false、string=空（`config_defaults.tsv` 登记既有特化默认值，新增须登记理由） | 零回归 |
 
 ---
 
