@@ -24,16 +24,12 @@ package cloud
 
 import (
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/downloader"
 )
 
 // transferSourceMetaKeys 是服务端写入的来源键（客户端 meta_extra 同名键**不覆盖**
 // 服务端来源语义，除非显式提供——见 buildTransferSourceMeta 的合并次序）。
-// 算法标识常量（通用 hash 字段自描述——用户裁定 2026-10-28：通用字段必须说明算法便于校验维护）。
-const (
-	checksumAlgorithmSHA256    = "sha256"      // checksum 为本地落盘文件 SHA-256 十六进制
-	authorityHashAlgPikpakGCID = "pikpak-gcid" // PikPak 官方 GCID = sha1(concat(sha1(每个分块)))
-)
-
 const (
 	metaKeySource        = "source"
 	metaKeySourceURL     = "source_url"
@@ -48,34 +44,40 @@ const (
 // buildTransferSourceMeta 组装转存来源 meta（服务端来源键 + 客户端 meta_extra）。
 // 次序：先服务端来源，再客户端 extra（客户端同名键覆盖服务端——业务语义优先）；
 // 空值不写入（不产生 etag:"" 噪声）。
-func buildTransferSourceMeta(task *CloudTask, etag, checksum, authorityHash string) map[string]any {
+// resultHashAlgs 从下载结果取算法标识（下载方声明；空则不写标识字段）。
+func resultHashAlgs(result *downloader.Result) (checksumAlg, authorityAlg string) {
+	if result == nil {
+		return "", ""
+	}
+	return result.ChecksumAlgorithm, result.AuthorityHashAlgorithm
+}
+
+func buildTransferSourceMeta(task *CloudTask, etag, checksum, authorityHash, checksumAlg, authorityAlg string) map[string]any {
 	meta := map[string]any{
 		metaKeySource:        "transfer",
 		metaKeyTransferredAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	if task != nil && task.URL != "" {
-		meta[metaKeySourceURL] = task.URL
-	}
-	if etag != "" {
-		meta[metaKeyETag] = etag
-	}
-	if checksum != "" {
-		meta[metaKeyChecksum] = checksum
-		meta[metaKeyChecksumAlg] = checksumAlgorithmSHA256 // 自描述：checksum 为 SHA-256 十六进制
-	}
-	if authorityHash != "" {
-		meta[metaKeyAuthorityHash] = authorityHash
-		meta[metaKeyAuthorityAlg] = authorityHashAlgPikpakGCID // 自描述：PikPak GCID（sha1(concat(sha1(分块)))）
-	}
+	applyIf(meta, task != nil && task.URL != "", metaKeySourceURL, task.URL)
+	applyIf(meta, etag != "", metaKeyETag, etag)
+	applyIf(meta, checksum != "", metaKeyChecksum, checksum)
+	applyIf(meta, checksum != "" && checksumAlg != "", metaKeyChecksumAlg, checksumAlg)
+	applyIf(meta, authorityHash != "", metaKeyAuthorityHash, authorityHash)
+	applyIf(meta, authorityHash != "" && authorityAlg != "", metaKeyAuthorityAlg, authorityAlg)
 	if task != nil {
 		for k, v := range task.MetaExtra {
-			if k == "" || v == nil {
-				continue
+			if k != "" && v != nil {
+				meta[k] = v // 客户端值覆盖同名服务端键（业务语义优先）
 			}
-			meta[k] = v // 客户端值覆盖同名服务端键（业务语义优先）
 		}
 	}
 	return meta
+}
+
+// applyIf cond 为真时写入键值（避免嵌套 if 抬高复杂度）。
+func applyIf(meta map[string]any, cond bool, k string, v any) {
+	if cond {
+		meta[k] = v
+	}
 }
 
 // recordTransferSourceMeta 把来源 meta 写入目标卷（经 UpdateMetaExtra 旁路合并）。
@@ -85,11 +87,12 @@ func (m *CloudDownloadManager) recordTransferSourceMeta(env *transferEnv) {
 	if !ok {
 		return // 目标卷无旁路 meta 更新能力（如裸本地卷/无 meta 桶的外部卷）
 	}
-	var etag, checksum, authority string
+	var etag, checksum, authority, checksumAlg, authorityAlg string
 	if env.result != nil {
 		etag, checksum, authority = env.result.ETag, env.result.Checksum, env.result.AuthorityHash
+		checksumAlg, authorityAlg = resultHashAlgs(env.result)
 	}
-	extra := buildTransferSourceMeta(env.task, etag, checksum, authority)
+	extra := buildTransferSourceMeta(env.task, etag, checksum, authority, checksumAlg, authorityAlg)
 	if len(extra) == 0 {
 		return
 	}

@@ -40,8 +40,11 @@ func TestTransferSourceMeta_RecordsSourceAndExtra(t *testing.T) {
 	mgr.mu.Unlock()
 
 	tr, _, err := mgr.transferDone(context.Background(), task, dest, &downloader.Result{
-		ETag:     `"abc-123"`,
-		Checksum: sha256Hex([]byte("hello source meta")),
+		ETag:                   `"abc-123"`,
+		Checksum:               sha256Hex([]byte("hello source meta")),
+		ChecksumAlgorithm:      downloader.IntegrityChecksumSHA256,
+		AuthorityHash:          "GCID-ABC",
+		AuthorityHashAlgorithm: downloader.IntegrityAlgPikpakGCID,
 	}, nil)
 	if err != nil || tr == nil {
 		t.Fatalf("transferDone: err=%v tr=%v", err, tr)
@@ -59,6 +62,16 @@ func TestTransferSourceMeta_RecordsSourceAndExtra(t *testing.T) {
 	}
 	if got["etag"] != `"abc-123"` {
 		t.Errorf("meta.etag = %v, want %q", got["etag"], `"abc-123"`)
+	}
+	// 算法标识来自下载方声明（不硬编码推断）
+	if got["checksum_algorithm"] != downloader.IntegrityChecksumSHA256 {
+		t.Errorf("meta.checksum_algorithm = %v, want %q（下载方声明）", got["checksum_algorithm"], downloader.IntegrityChecksumSHA256)
+	}
+	if got["authority_hash_algorithm"] != downloader.IntegrityAlgPikpakGCID {
+		t.Errorf("meta.authority_hash_algorithm = %v, want %q", got["authority_hash_algorithm"], downloader.IntegrityAlgPikpakGCID)
+	}
+	if got["authority_hash"] != "GCID-ABC" {
+		t.Errorf("meta.authority_hash = %v", got["authority_hash"])
 	}
 	if got["gcid"] != "GCID123" {
 		t.Errorf("meta.gcid = %v, want GCID123（客户端 meta_extra 合并）", got["gcid"])
@@ -185,5 +198,36 @@ func TestCreateTask_PersistsMetaExtra(t *testing.T) {
 	}
 	if task.MetaExtra == nil || task.MetaExtra["gcid"] != "GCID-X" {
 		t.Fatalf("task.MetaExtra = %v, want {gcid:GCID-X}", task.MetaExtra)
+	}
+}
+
+// TestTransferSourceMeta_NoAlgorithmDeclared 下载方未声明算法 → 不写 algorithm 字段
+// （用户裁定 2026-10-28：算法由下载方提供，转存层不推断/不无脑写 GCID）。
+func TestTransferSourceMeta_NoAlgorithmDeclared(t *testing.T) {
+	t.Parallel()
+	fs := newMetaCapableMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-alg-1", Filename: "alg1.mp4", URL: "https://example.com/u",
+		Transfer: &TransferSpec{Volume: "vol-alg"}}
+	dest := filepath.Join(t.TempDir(), "alg1.mp4")
+	_ = os.WriteFile(dest, []byte("no alg"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+	// Result 无算法声明（模拟旧下载器；Checksum 须与 dest 内容一致避免走重下路径）
+	realSum := sha256Hex([]byte("no alg"))
+	if _, _, err := mgr.transferDone(context.Background(), task, dest,
+		&downloader.Result{Checksum: realSum, AuthorityHash: "GH"}, nil); err != nil {
+		t.Fatalf("transferDone: %v", err)
+	}
+	got := fs.metaExtras["anonymous/user/task-alg-1/alg1.mp4"]
+	if got == nil {
+		t.Fatal("未写 meta extra")
+	}
+	if _, exists := got["checksum_algorithm"]; exists {
+		t.Errorf("未声明算法时不应写 checksum_algorithm（不推断）: %v", got["checksum_algorithm"])
+	}
+	if _, exists := got["authority_hash_algorithm"]; exists {
+		t.Errorf("未声明算法时不应写 authority_hash_algorithm（禁无脑 GCID）: %v", got["authority_hash_algorithm"])
 	}
 }

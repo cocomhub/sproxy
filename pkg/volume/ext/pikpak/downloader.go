@@ -387,7 +387,8 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeReq
 	// GCID 权威复算（spec §6）：文件大小非 0 且官方 hash 非空时，用候选分块复算 GCID，
 	// 命中官方 hash → ModeAuthority（① 态）；否则 ModeLocalOnly（② 态语义校验兜底）。
 	// 复算失败（文件读/destPath 为空）不阻断下载，回落 ModeLocalOnly。
-	res := &Result{Size: req.size, Checksum: req.checksum, ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}
+	res := &Result{Size: req.size, Checksum: req.checksum, ChecksumAlgorithm: downloader.IntegrityChecksumSHA256,
+		ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}
 	if req.size > 0 && req.target != nil && req.target.Hash != "" && req.destPath != "" {
 		// R3-I1：全部整除候选的 GCID 逐一与官方 hash 比对（官方分块粒度未知，
 		// 任一候选命中即权威——提升命中率，非首整除即返）。
@@ -395,6 +396,7 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeReq
 		if err == nil && matched {
 			res.Integrity = downloader.ModeAuthority
 			res.AuthorityHash = req.target.Hash
+			res.AuthorityHashAlgorithm = downloader.IntegrityAlgPikpakGCID // 下载方声明：PikPak GCID
 		}
 	}
 	return res, nil

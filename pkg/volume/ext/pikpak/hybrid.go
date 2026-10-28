@@ -624,7 +624,8 @@ func (d *HybridDownloader) runHybridWithShareEnd(ctx context.Context, dc *downlo
 	// 注意：Checksum 是**本地落盘文件的 SHA-256**（自证文件未被篡改/续传拼错），
 	// 不是源身份哈希（源身份校验用 GCID 与 target.Hash 比对，已在上方 verify 完成）。
 	// 消费方若拿本字段比对源 hash 会误判——仅作本地完整性指纹。
-	res := &Result{Size: dc.currentTotal, Checksum: checksum, ModTime: time.Now()}
+	res := &Result{Size: dc.currentTotal, Checksum: checksum, ChecksumAlgorithm: downloader.IntegrityChecksumSHA256,
+		ModTime: time.Now()}
 	// 完整性三态（与旧 PikpakDownloader finalizeDownload 一致）：
 	//   GCID 权威命中（① 态）→ ModeAuthority + 带外权威 hash——语义校验管道据此
 	//   识别 hybrid 产出为权威可信，不再重复复算；
@@ -633,6 +634,7 @@ func (d *HybridDownloader) runHybridWithShareEnd(ctx context.Context, dc *downlo
 	if dc.target.Hash != "" && integrityVerified {
 		res.Integrity = downloader.ModeAuthority
 		res.AuthorityHash = dc.target.Hash
+		res.AuthorityHashAlgorithm = downloader.IntegrityAlgPikpakGCID // 下载方声明
 	} else {
 		res.Integrity = downloader.ModeLocalOnly
 	}
