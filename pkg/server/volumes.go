@@ -742,19 +742,23 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	if h.volSet == nil {
 		return nil
 	}
-	be := h.volSet.External(volName)
-	if be == nil {
+	// **仅外部卷**：本函数是「外部卷写入源」；本地卷走 Tenant.Root() 的写内核（原子写/
+	// 版本/去重/事件）。`VolumeView` 对本地卷也返回非 nil ⇒ 必须先按 External 判定形态，
+	// 否则本地上传会被误判为外部写（不发事件、丢原子写语义）。
+	if h.volSet.External(volName) == nil {
 		return nil
 	}
-	fsys := be.FS()
-	if fsys == nil {
+	// 经**统一取卷入口**（与读路径/转存路径同一装饰链）：写成功后卷状态缓存装饰器会自动
+	// 失效（P3：写路径无需知道缓存存在）。此前直取 `External().FS()` ⇒ 上传不失效缓存
+	// ⇒ 上传后 list 仍显示旧视图（E2E 捕获）。
+	fsys, ok := h.volSet.VolumeView(volName, registry.ViewUser)
+	if !ok || fsys == nil {
 		return nil
 	}
 	v, ok := h.volSet.ByName(volName)
 	if !ok {
 		return nil
 	}
-	fsys = trusted.Guard(trusted.Wrap(fsys, h.trustedWrapOpts()))
 	// P1-6 修复：直传外部卷也接本地 staging 配额（与 backup/transfer 统一）——
 	// baidupcs StorageFS.WriteFile 先落本地 staging，此前该入口无记账。gate 置于
 	// Guard(Wrap) 之外：meta 写经 Wrap.inner（raw）绕过 gate（小字节），主文件写在 gate 预留。

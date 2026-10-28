@@ -1030,11 +1030,15 @@ func (h *Handlers) refreshVolumeHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// 卷状态缓存（外部卷 list/checksum 视图）：显式清空 ⇒ 下次读回源（外部改动收敛）。
+	// 对这类卷，**状态缓存就是它的「索引」** —— 清空成功即视为重建成功（无需后端实现
+	// IndexRefresher；否则普通外部卷的 refresh 会恒 405）。
+	stateRefreshed := false
 	if h.stateCache != nil && !h.volSet.HasLocalRoot(volName) {
 		if rerr := h.stateCache.Refresh(r.Context(), volName); rerr != nil {
 			sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "清空卷状态缓存失败: " + rerr.Error()}, http.StatusInternalServerError)
 			return
 		}
+		stateRefreshed = true
 	}
 	// 本地卷：索引即磁盘真实（搜索索引增量更新），无「内存索引要重建」——幂等成功。
 	if h.volSet.HasLocalRoot(volName) {
@@ -1048,6 +1052,15 @@ func (h *Handlers) refreshVolumeHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	refresher, ok := be.(registry.IndexRefresher)
 	if !ok {
+		if stateRefreshed {
+			// 后端无自管索引，但卷状态缓存已清空 ⇒ 外部改动下次读即可见（语义达成）。
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "volume_refresh", ObjectType: "volume", Object: volName, Result: AuditResultSuccess,
+				Detail: "状态缓存已清空（外部改动收敛）",
+			})
+			sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷状态缓存已清空: " + volName}, http.StatusOK)
+			return
+		}
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "该卷后端不支持索引重建（无内存索引）"}, http.StatusMethodNotAllowed)
 		return
 	}
