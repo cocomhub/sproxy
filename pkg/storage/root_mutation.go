@@ -8,10 +8,11 @@
 // （#874「旁路写忘记维护派生状态」的根因就此消失）。
 //
 // 边界（诚实记录）：
-//   - 本文件覆盖**结构性变异**（目录创建、删除、重命名、链接、时间戳）。文件**内容**写入不经
-//     这里发事件：`OpenFile` 返回 `*os.File`（签名被 30+ 调用点依赖），包装会破坏类型契约；
-//     内容写的派生状态（size/checksum）由写内核（`pkg/files`）在写完后自行维护，且该路径的
-//     `AtomicRename` 落位仍会发 rename 事件（最常见的新对象出现路径）。
+//   - 结构性变异（目录创建、删除、重命名、链接、时间戳）**自动**发事件；
+//   - 文件**内容**写入无法自动观察：`OpenFile` 返回 `*os.File`（签名被 30+ 调用点依赖），
+//     包装会破坏类型契约。故提供显式入口 `Root.MarkWritten(rel)`，由**写面适配器**在写成功后
+//     调用——目前唯一调用点是 `pkg/rootfs` 的 `WriteFile`（卷的 `sync.FS` 写面，覆盖转存/归档/
+//     镜像/备份等全部旁路写）。模版文件 + `AtomicRename` 落位的路径两条事件都会发（幂等）。
 //   - 事件**不带锁、不阻塞**：回调在底层 os 操作成功返回后同步调用，实现方必须快速返回
 //     （派生状态维护只做内存操作 + 一次 Stat）。
 package storage
@@ -37,6 +38,8 @@ const (
 	MutationLink MutationOp = "link"
 	// MutationChtimes 时间戳修改成功。
 	MutationChtimes MutationOp = "chtimes"
+	// MutationWrite 文件**内容**写入完成（由写入口显式调用 `MarkWritten`，见下方边界说明）。
+	MutationWrite MutationOp = "write"
 )
 
 // Mutation 是一次结构性变异的描述。
@@ -87,6 +90,16 @@ func (rt *Root) inheritMutationObserver(parent *Root, segment string) {
 		prefix = obs.prefix + "/" + segment
 	}
 	rt.mutObs.Store(&mutationObserver{tag: obs.tag, fn: obs.fn, prefix: prefix, base: obs.base})
+}
+
+// MarkWritten 声明「rel 的内容已写入完成」并发一次 `MutationWrite`。
+//
+// 为什么需要显式调用：内容写入走 `OpenFile`/`OpenFileEncrypted` 返回的裸文件句柄，Root 无法在
+// 关闭时观察（见包注释的边界说明）。**写面适配器**（`pkg/rootfs` 的 WriteFile）在写成功后调用
+// 本方法 ⇒ 派生状态（搜索索引）跟随内容写更新，无需每个业务调用点登记。
+// 未装观察者时零开销。
+func (rt *Root) MarkWritten(rel string) {
+	rt.notifyMutation(MutationWrite, rel, "")
 }
 
 // notifyMutation 发放一次变异事件（底层操作**成功后**调用）。

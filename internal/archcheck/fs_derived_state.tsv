@@ -1,0 +1,29 @@
+# FS 实现的派生状态自述登记（R42：无 StateGen 的实现必须说明理由）
+# 格式：file<TAB>Type<TAB>reason
+pkg/gateway/webdav/remote.go	subPathFS	纯透传适配器：无进程内 list 派生状态
+pkg/remote/fs.go	remoteFS	纯透传适配器：无进程内 list 派生状态
+pkg/rootfs/rootfs.go	rootFSCore	本地卷写面：结构事件由 storage.Root 广播、内容写由 MarkWritten 声明，不自管列表缓存
+pkg/server/backup_api.go	backupQuotaFS	装配层适配器：纯透传，派生状态由 pkg/files / pkg/volumestate 唯一提供方负责
+pkg/server/files_service.go	filesExternalVolume	装配层适配器：纯透传，派生状态由 pkg/files / pkg/volumestate 唯一提供方负责
+pkg/server/secrets_fs.go	rootSecretsFS	装配层适配器：纯透传，派生状态由 pkg/files / pkg/volumestate 唯一提供方负责
+pkg/sync/encrypted.go	EncryptedFS	通用装饰器/本地实现：无进程内 list 派生状态（结构视图即底层真值）
+pkg/sync/httptransport/http_transport.go	HTTPTransport	通用装饰器/本地实现：无进程内 list 派生状态（结构视图即底层真值）
+pkg/sync/local_fs.go	LocalFS	通用装饰器/本地实现：无进程内 list 派生状态（结构视图即底层真值）
+pkg/sync/prefixfs.go	PrefixFS	通用装饰器/本地实现：无进程内 list 派生状态（结构视图即底层真值）
+pkg/sync/staging_gate.go	StagingQuotaGateFS	通用装饰器/本地实现：无进程内 list 派生状态（结构视图即底层真值）
+pkg/syncexec/executor.go	quotaLocalFS	纯透传适配器：无进程内 list 派生状态
+pkg/volume/capacity/capacity.go	CapacityFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/enclosure/ownerfs.go	ownerFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/enclosure/sealfs.go	SealFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/ext/baidupcs/syncfs.go	StorageFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/ext/cluster/fs.go	clusterFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/ext/s3/s3_fs.go	S3FS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/federated/federated.go	FS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/ftp/ftp_fs.go	FTPFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/secretdata/replica_fs.go	replicaFS	保密卷：内容是密文，列表由卷自管（内容缓存不参与用户可见列表）
+pkg/volume/secretdata/secretdata.go	SecretdataFS	保密卷：内容是密文，列表由卷自管（内容缓存不参与用户可见列表）
+pkg/volume/sftp/sftp_fs.go	SFTPFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/trusted/guard_fs.go	MetaBucketGuard	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/trusted/trusted_fs.go	TrustedVolumeFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volume/webdav/webdav_fs.go	WebDAVFS	卷包装器/远端后端：列表即底层真值或纯透传，无进程内派生状态
+pkg/volumestate/wrap.go	CacheFS	纯透传适配器：无进程内 list 派生状态

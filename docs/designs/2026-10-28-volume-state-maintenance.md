@@ -285,7 +285,7 @@ Delete/软删/恢复 → Invalidate(rel)
 |---|---|---|
 | **R40** ✅已实现 | 非测试源码的 `*Cache`/`*Index` 结构体必须登记（`list_cache_types.tsv`，新增须复用 `pkg/volumestate` 或说明理由；secretdata 白名单理由：内容是密文，只有卷能算） | 再造第四套 |
 | **R41** | `files.List/Search` 实现体不得直调 `index.list` / `ExternalList`（V4 后） | 双入口 |
-| **R42** | 新增 `sync.FS` 实现若持有派生状态，必须实现 `StateGeneration` 或自述「无状态」注解 | 忘失效（#853/#874 类） |
+| **R42** ✅已实现 | 带 `ListDir` 的类型（`sync.FS` 实现）必须实现 `StateGen`，或登记在 `fs_derived_state.tsv` 说明「为什么不需要自述代际」 | 忘失效（#853/#874 类） |
 | **R44** | `volumestate.WrapVolume` 只在装配处出现；业务代码不得自造 FS 缓存包装 | 绕过唯一入口 |
 | **R45** ✅已实现 | `storage.Root` 结构性变异方法必须回调 `notifyMutation`（`internal/archcheck/root_mutation_gate_test.go`） | 机制因原语演进失效 |
 | **R46** ✅已实现 | **旧实现棘轮**：`searchIndex`/`checksums.json`/`ExternalList` 的独立使用点数（`legacy_state_usage.tsv` 登记）**只减不增** | 「短期共存」变永久双轨 |
@@ -378,3 +378,22 @@ E2E（`test/e2e_volume_state_test.go`，真实 sproxy + 真实 sclient + 真实 
 
 **未做（下一片）**：`checksums.json` 一次性 import 后转只读（校验和不可由结构事件推导，需迁移脚本
 + 读路径回落）；`searchIndex` 彻底替换为 TreeView 投影（`IndexSync`/集群快照/内容索引/向量索引耦合）。
+
+---
+
+## 十二、V3 阶段二：本地卷内容写事件（2026-10-28 落地）
+
+阶段一（#880）覆盖了**结构性**变异（mkdir/remove/rename/link/chtimes），但文件**内容**写不经那里：
+`rootFSCore.WriteFile` 是 `O_CREATE|O_TRUNC` 原地写（不落临时文件 + rename），`OpenFile` 又返回裸
+`*os.File`（30+ 调用点依赖具体类型，包装会破坏类型契约）。
+
+**落地**：`storage.Root.MarkWritten(rel)` + `MutationWrite`，由**卷的 FS 写面**在写成功后调用
+（当前唯一调用点 = `pkg/rootfs.rootFSCore.WriteFile`，即转存/归档/镜像/备份落盘的共同入口）。
+⇒ 本地卷的派生状态现在对「结构 + 内容」两类写都自动跟进，`RecordBypassWrite` 只在
+checksum 台账维度仍是必需的（外部卷目标仍靠它登记索引，因其无本地 Root 事件）。
+
+**代价（如实记录）**：转存到本地卷时索引会更新两次（`RecordBypassWrite` 一次 + 事件一次，幂等）；
+V4 把 `RecordBypassWrite` 收敛为「只写 checksum」后回到一次。
+
+**门禁 R42**（同期落地）：带 `ListDir` 的类型必须实现 `StateGen` 或登记理由——保证「有派生状态的
+FS 实现能被缓存层探测到变化」，与 R40（不许再造一套）互补。

@@ -219,3 +219,42 @@ func TestRootMutationObserver_AtomicRename(t *testing.T) {
 		t.Fatalf("落位文件应存在: %v", serr)
 	}
 }
+
+// TestRootMutationObserver_MarkWritten 锁定「内容写显式声明」入口（V3 内容写事件）：
+// 结构性方法自动发事件，内容写由写面适配器调用 MarkWritten。
+func TestRootMutationObserver_MarkWritten(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rt, err := OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close() })
+	col := &collectMutations{}
+	rt.SetMutationObserver("vol1", col.fn)
+
+	if err := rt.MkdirAll("owner/user/d", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	rt.MarkWritten("owner/user/d/a.txt")
+
+	got := col.list()
+	if len(got) != 2 {
+		t.Fatalf("期望 2 个事件（mkdir + write），got %+v", got)
+	}
+	if last := got[1]; last.Op != MutationWrite || last.Rel != "owner/user/d/a.txt" || last.Tag != "vol1" {
+		t.Fatalf("write 事件 = %+v", last)
+	}
+}
+
+// TestRootMutationObserver_MarkWrittenWithoutObserver 零回归：未装观察者时安全无操作。
+func TestRootMutationObserver_MarkWrittenWithoutObserver(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rt, err := OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close() })
+	rt.MarkWritten("owner/user/a.txt") // 不 panic 即为通过
+}

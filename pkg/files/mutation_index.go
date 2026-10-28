@@ -38,6 +38,9 @@ func (s *Service) ApplyRootMutation(m storage.Mutation) {
 		s.applyMutationPath(m, m.Rel2, mutationUpsert)
 	case storage.MutationLink:
 		s.applyMutationPath(m, m.Rel2, mutationUpsert)
+	case storage.MutationWrite:
+		// 内容写完成（卷 FS 写面显式声明）：按落盘真值刷新条目（size/mtime 会比结构性事件更新）。
+		s.applyMutationPath(m, m.Rel, mutationUpsert)
 	case storage.MutationRemove, storage.MutationRemoveAll:
 		s.applyMutationPath(m, m.Rel, mutationDropOnly)
 	default: // Mkdir / Chtimes：登记或刷新条目

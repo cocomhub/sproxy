@@ -140,6 +140,10 @@ func (c *rootFSCore) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p st
 		mt := time.Unix(0, mtime)
 		_ = c.root.Chtimes(rootRel(p), mt, mt) // best-effort：时间不影响内容正确性
 	}
+	// 内容写事件（V3）：本地卷写内核直接用 storage.Root，Root 无法观察裸文件句柄的关闭，
+	// 故由**卷的 FS 写面**（本方法）在写成功后显式声明。派生状态（搜索索引）据此自动更新，
+	// 转存/归档/镜像/备份等旁路写不再需要逐点登记。
+	c.root.MarkWritten(rootRel(p))
 	return nil
 }
 
