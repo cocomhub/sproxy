@@ -56,6 +56,9 @@ var stateWriteExemptFiles = []string{
 	"pkg/files/dedup.go",
 	// 索引快照（P1）：<meta>/index/<owner>.json。
 	"pkg/files/index_persist.go",
+	// 卷状态缓存（2026-10-28）：<meta>/state/<卷>/<路径>/entries.json——**节点本地受管加速层**
+	// （非集群 KV，语义与 StateStore 不同：可丢弃、可重建、TTL 收敛），故自管落盘。
+	"pkg/volumestate/store.go",
 	// 标签 store（roadmap 11.10-④）：<meta>/tags/<sha256(rel)>.json。
 	"pkg/files/tags.go",
 	// 派生缓存（P1）：<meta>/transform/<key>。

@@ -3,6 +3,8 @@
 
 package volume
 
+import "context"
+
 // storage_volume.go —— **统一存储卷模型**（M0：类型定义，加法式，**零行为变更**）。
 //
 // 背景与完整设计见 `docs/designs/2026-10-16-quota-volume-layer.md` §11。现状取证：
@@ -97,4 +99,23 @@ type CapacityOwner interface {
 // 便于配额层按需探测（`ok=false` = 后端不支持查询，调用方按"未知"处置，禁静默当 0 ✗）。
 type StatsProvider interface {
 	VolumeStats() (used, total int64, ok bool)
+}
+
+// StateGeneration 是**卷状态的廉价新鲜度探针**（可选能力，设计
+// docs/designs/2026-10-28-volume-state-maintenance.md §3.1）。
+//
+// 语义：返回 `(卷根相对路径 path 的子树)` 的代际号——同代际 ⇒ 该子树的结构视图与内容
+// 派生值自上次取用后未变。缓存层据此在**命中前**比对，变化即回源；这是「跨进程/外部
+// 改动」的收敛路径（本进程写穿已由装饰器覆盖）。
+//
+// 实现约束（**必须廉价，不得全量遍历**）：
+//   - 本地卷：目录 mtime + 直接子项数（一次 Stat，O(1)）；
+//   - secretdata：容器 meta 版本/条目数；
+//   - S3：子树 LastModified 最大值；baidupcs：ctime + 条目数。
+//
+// 未实现 ⇒ 缓存退化为 TTL-only（外部卷）或写穿-only（本地卷），零回归。
+//
+// **本接口只报告事实，不得实现 list 缓存**（门禁 R40：加速统一由 pkg/volumestate 提供）。
+type StateGeneration interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	StateGen(ctx context.Context, path string) (uint64, error)
 }

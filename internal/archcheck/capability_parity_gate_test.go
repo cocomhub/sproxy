@@ -287,5 +287,9 @@ func decoratorsForGate() []decoratorSpec {
 		// 同步 pull 本地目标的配额装饰器（评审 P2：此前只实现基础 7 方法，把内层能力全剥掉
 		// ⇒ meta.Provider/WriteIfAbsent/Mover/RangeReader 等断言恒 false 静默降级）。
 		{typeName: "quotaLocalFS", pkgDir: "pkg/syncexec", exempt: blockExempt},
+		// 卷状态缓存装饰器（设计 2026-10-28-volume-state-maintenance）：读 ListDir 走缓存、
+		// 写（WriteFile/Delete/Rename/MakeDir/WriteIfAbsent/Move/Copy/Link）成功后自动失效。
+		// 能力全量转发（转存/校验/容量/staging/直链等断言不得在此层丢失）。
+		{typeName: "CacheFS", pkgDir: "pkg/volumestate", exempt: blockExempt},
 	}
 }
