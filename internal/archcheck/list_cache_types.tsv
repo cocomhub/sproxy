@@ -1,0 +1,16 @@
+# list/index 级缓存类型登记（R40：新增必须复用 pkg/volumestate 或在此说明理由）
+# 格式：file<TAB>Type<TAB>reason
+pkg/audit/index.go	NullIndex	审计索引接口的空实现（非缓存）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/audit/index.go	RingIndex	审计内存热索引（审计子系统自管，R40 白名单候选）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/cryptox/shardseal/crypto.go	blobIndex	分片密封的块索引（密码学原语内部结构）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/files/search_index.go	ownerIndex	searchIndex 的内部投影（随 searchIndex 一并由 V4 删除）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/files/search_index.go	searchIndex	旧本地卷索引（R46 棘轮收敛中，V4 删除）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/server/ai_insight_cache.go	InsightCache	AI 洞见结果缓存（业务缓存，非文件列表）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/storage/tenant_resolve.go	TenantCache	租户句柄缓存（句柄复用，不是列表内容）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/syncmgr/conflict_index.go	ConflictIndex	同步冲突索引（同步域自管，与卷列表无关）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/tunnel/mesh/mdns.go	mdnsPeerCache	mDNS 对端缓存（网络发现，非文件列表）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/volume/secretdata/blocklet_cache.go	blockletCache	内容是密文：分块索引只能由卷自算（设计 §六 R40 白名单）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/volume/secretdata/derive_cache.go	deriveCache	密钥派生缓存（与文件列表无关，卷内自管）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/volume/secretdata/span_disk_cache.go	spanDiskCache	密文 span 布局缓存：只有卷知道分块映射既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/volume/secretdata/window_blob_cache.go	windowBlobCache	密文窗口缓存：读路径局部加速，非列表语义既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/volumestate/cache.go	Cache	唯一提供方（list 级缓存的 MVP，R40 只允许在这里新增）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）

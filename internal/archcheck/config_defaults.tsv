@@ -1,0 +1,16 @@
+# 配置特化默认值登记（R43：新增默认值必须安全或在此登记理由）
+# 判据：pkg/server/config_defaults.go 的 Default() 里字面量 true / 非空字符串的字段。
+# 格式：字段路径<TAB>理由
+Addr	历史默认值（":18083"）；新增字段请改用安全默认或反转语义
+CloudDownloader	历史默认值（"http"）；新增字段请改用安全默认或反转语义
+CredentialStore.Backend	历史默认值（"aesgcm"）；新增字段请改用安全默认或反转语义
+CredentialStore.Vault.Mount	历史默认值（"transit"）；新增字段请改用安全默认或反转语义
+CredentialStore.Vault.TokenEnv	历史默认值（"VAULT_TOKEN"）；新增字段请改用安全默认或反转语义
+Pikpak.Hybrid.AutoDelete	历史默认值（true）；新增字段请改用安全默认或反转语义
+Placement	历史默认值（"prefer-default"）；新增字段请改用安全默认或反转语义
+RemoteRead.Listen	历史默认值（"127.0.0.1:19000"）；新增字段请改用安全默认或反转语义
+RemoteWrite.Listen	历史默认值（"127.0.0.1:19001"）；新增字段请改用安全默认或反转语义
+StateStore.Type	历史默认值（"local"）；新增字段请改用安全默认或反转语义
+TLS.AutoTLS	历史默认值（true）；新增字段请改用安全默认或反转语义
+TLS.Enabled	历史默认值（true）；新增字段请改用安全默认或反转语义
+Web.Tunnel	历史默认值（true）；新增字段请改用安全默认或反转语义

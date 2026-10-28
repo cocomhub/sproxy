@@ -394,6 +394,11 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 「调用方给 → 现取 → fail-closed」三段式，缓存值不作删除门禁唯一依据。
 **写面纪律（E2E 锁定）**：外部卷的读/写入口必须经 `VolumeView`（不得直取 `External().FS()`），
 否则写后不失效缓存（`test/e2e_volume_state_test.go` 有对照组断言）。
+**派生状态唯一提供方（R40）**：list/index 级缓存类型必须登记（`internal/archcheck/list_cache_types.tsv`）——
+新增复用 `pkg/volumestate`，只有「卷自身是唯一能算出真值的地方」（secretdata 的密文分块索引）才允许自管。
+**配置默认值安全（R43）**：`Default()` 里的特化默认值（bool `true` / 非空 string）必须登记
+（`config_defaults.tsv`）——新增字段须用安全默认，需要「默认开启」时把语义反转成 `disable_xxx`。
+
 **本地卷写面纪律（R45）**：`storage.Root` 的结构性变异方法（mkdir/remove/rename/link/chtimes）在
 成功后发 `Mutation` 事件（租户子根自动归一 `<owner>/<rel>` 前缀）；装配层把它接到
 `files.Service.ApplyRootMutation`，搜索索引因此**自动**跟随旁路写（转存/归档/跨卷搬移），
