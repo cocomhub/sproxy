@@ -387,6 +387,14 @@ tls:
 #   auto_delete: false              # 下载完成后是否删除网盘转存文件（节省网盘空间）
 #   secrets_dir: ""               # 多账号凭据**加密卷**本地根（secretdata/shardseal 加密落盘；空 = <storage_root>/pikpak-secrets）
 #   insecure_tls: false             # 跳过 PikPak 解析出站 TLS 证书校验（仅本地自签联调；生产必须 false）
+#   hybrid:
+#     chunk_size: 33554432          # 分片大小（默认 32 MiB；中断恢复粒度）
+#     concurrency: 4                # 并行分片数（默认 4）
+#     auto_delete: true             # 下载完成后永久删除网盘转存副本（默认 true，释放免费账号空间）
+#     share_ratio: 0                # 匿名区比例上限：0=auto（按 416 边界探测结果，探测失败回落 50%）
+#                                   # >0=显式上限（与探测取小，clamp 到 (0,1]）
+#     disable_progress_journal: false  # 关闭下载进度 WAL（默认 false=启用：分片完成即写
+#                                   # <storage_root>/meta/state/pikpak-journal，重启后可恢复已完成分片）
 #   # 多账号（会话文件池）：每账号一份完整 credentials 会话（含 refresh_token，CLI 自动 refresh）。
 #   # 下载后按剩余配额轮换（20GB/日，按日重置）。可用 `sproxy pikpak account add/list/remove` 管理。
 #   accounts:

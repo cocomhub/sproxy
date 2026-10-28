@@ -461,6 +461,17 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 - 响应：任务对象（见下）。提交后服务端**异步下载**（客户端断连不中断），下载落
   `<storage_root>/<tenant>/cloud/<taskID>/<filename>`。
 
+### PikPak 混合下载：匿名区自动探测 + 进度 WAL
+
+- **匿名区上限自动探测**（`pikpak.hybrid.share_ratio: 0`，默认）：下载前用 Range 请求二分
+  探测分享直链的 **416 边界**（`ProbeAnonymousLimit`），`[0, 边界)` 走匿名直链（不耗账号
+  配额），其余走账号转存后 FETCH；探测失败回落 50%。显式 `share_ratio > 0` 表示上限（与探测取小）。
+- **进度 WAL（`disable_progress_journal: false`，默认启用）**：每个分片完成即写 audit WAL
+  （节点本地 `<storage_root>/meta/state/pikpak-journal`，按下载作用域隔离、SyncAlways）；
+  进程重启后重放已完成分片（manifest 丢失/被改名也能续传），下载成功后写**提交记录**
+  （`MarkDone`）供统一恢复协调器跳过。WAL 源身份（share/file/hash/total）与目标不一致时
+  **不合并**旧分片（避免把旧内容当已完成）。
+
 ### 转存产物 meta（transfer）
 
 `POST /api/cloud/download` 带 `transfer: {volume, path}` 时，服务端把下载产物转存进卷，
