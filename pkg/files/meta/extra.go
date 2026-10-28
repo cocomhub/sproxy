@@ -73,6 +73,10 @@ var spec = map[string]FieldSpec{
 	"share_file_id":   {Type: "string", MaxLen: 128},
 	"share_hash":      {Type: "string", MaxLen: 128}, // 分享内文件哈希
 	"downloaded_at":   {Type: "string", MaxLen: 32},
+	// 转存来源链接 + 转存完成时刻（服务端 buildTransferSourceMeta 写入；登记以支持客户端
+	// 按源 1:1 补录/迁移——否则跨租户搬迁/灾后重建会丢这两个字段）。2026-10-28。
+	"source_url":     {Type: "string", MaxLen: 1024},
+	"transferred_at": {Type: "string", MaxLen: 32},
 	// 转存来源/完整性字段（服务端 transfer 路径写入；登记以支持客户端补录/修复与统一校验）。
 	"etag":                     {Type: "string", MaxLen: 256},
 	"checksum":                 {Type: "string", MaxLen: 128},

@@ -223,3 +223,26 @@ func TestValidateExtra_DownloadAuditKeys(t *testing.T) {
 		t.Fatalf("下载审计键校验失败: %v", err)
 	}
 }
+
+// TestValidateExtra_TransferSourceKeys 锁定转存路径写入的「来源」键必须可往返：
+// `source_url`（来源链接）与 `transferred_at`（转存完成时刻）由服务端
+// buildTransferSourceMeta 写入 —— 若不在白名单，客户端就无法按源 1:1 补录/迁移
+// （跨租户搬迁、灾后重建都会丢这两个字段）。覆盖审计 2026-10-28。
+func TestValidateExtra_TransferSourceKeys(t *testing.T) {
+	t.Parallel()
+	extra := map[string]any{
+		"source":         "transfer",
+		"source_url":     "https://example.com/share?spx_target=EXAMPLE-001.mp4",
+		"transferred_at": "2026-10-28T13:27:46Z",
+	}
+	if err := ValidateExtra(extra); err != nil {
+		t.Fatalf("转存来源键应通过校验（否则无法 1:1 补录）: %v", err)
+	}
+	// 类型仍受约束：非字符串拒绝
+	if err := ValidateExtra(map[string]any{"source_url": int64(1)}); err == nil {
+		t.Fatal("source_url 非字符串应拒绝")
+	}
+	if err := ValidateExtra(map[string]any{"transferred_at": true}); err == nil {
+		t.Fatal("transferred_at 非字符串应拒绝")
+	}
+}
