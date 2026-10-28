@@ -10,11 +10,16 @@ package server
 // 变异验证：注释掉 fileService() 里的 h.wireLocalVolumeMutations(svc) ⇒ 本用例红。
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // TestWireLocalVolumeMutations_IndexFollowsBypassWrite 用真实卷根模拟旁路写：
@@ -118,4 +123,53 @@ func serveSearch(t *testing.T, svc interface {
 	rr := httptest.NewRecorder()
 	svc.SearchFiles(rr, req)
 	return rr
+}
+
+// TestWireLocalVolumeMutations_ContentWriteViaFS 钉住「卷 FS 写面（转存/归档落盘形态）自动
+// 进索引」：`rootfs.WriteFile` 是本地卷唯一的 sync.FS 写入口，它在写成功后声明内容写事件。
+// 本用例**不调用** RecordBypassWrite，仍要求搜索可见——即机制而非纪律。
+// 变异验证：删掉 rootfs.WriteFile 末尾的 MarkWritten ⇒ 本用例红。
+func TestWireLocalVolumeMutations_ContentWriteViaFS(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Volumes = []VolumeConfig{{Name: "main", Root: cfg.StorageRoot}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("cfg.Validate: %v", err)
+	}
+	h := buildVolSetHandlers(t, cfg)
+	svc := h.fileService()
+	if rr := serveSearch(t, svc, "seed"); rr.Code != http.StatusOK {
+		t.Fatalf("预热搜索应 200, got %d", rr.Code)
+	}
+
+	fsys, ok := h.volSet.VolumeView("main", registry.ViewUser)
+	if !ok || fsys == nil {
+		t.Fatal("默认卷用户视图不可用")
+	}
+	// 与 pkg/transfer 相同形态：卷根键空间 `<owner>/user/<rel>`。
+	body := "transferred-bytes"
+	if err := fsys.WriteFile(context.Background(), syncpkg.LogicalKey{}, "anonymous/user/transfer/from-fs.txt",
+		strings.NewReader(body), int64(len(body)), 0); err != nil {
+		t.Fatalf("FS.WriteFile: %v", err)
+	}
+
+	rr := serveSearch(t, svc, "from-fs")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("搜索应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Total int `json:"total"`
+		Files []struct {
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+		} `json:"files"`
+	}
+	if uerr := json.Unmarshal(rr.Body.Bytes(), &resp); uerr != nil {
+		t.Fatalf("解析: %v (%s)", uerr, rr.Body.String())
+	}
+	if resp.Total != 1 || len(resp.Files) != 1 || resp.Files[0].Name != "transfer/from-fs.txt" ||
+		resp.Files[0].Size != int64(len(body)) {
+		t.Fatalf("卷 FS 内容写后应自动进索引（未经 RecordBypassWrite）, got total=%d files=%+v", resp.Total, resp.Files)
+	}
 }

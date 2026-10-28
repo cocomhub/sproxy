@@ -175,3 +175,24 @@ func TestSplitUserBucketPath(t *testing.T) {
 		}
 	}
 }
+
+// TestService_ApplyRootMutation_ContentWriteUpserts 钉住「内容写事件」（MutationWrite）同样
+// 落到索引：这是 `pkg/rootfs.WriteFile`（卷的 sync.FS 写面）在写成功后显式声明的路径，
+// 覆盖转存/归档/镜像/备份等不经写内核的写入。
+func TestService_ApplyRootMutation_ContentWriteUpserts(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	root := seedMutationIndex(t, env)
+
+	// 目录先建好（结构性事件），再直接写内容（不经 files.Service 写内核）。
+	writeBypass(t, env, "user/transfer/content.bin", []byte("0123456789"))
+	emit(env, root, storage.MutationWrite, "alice/user/transfer/content.bin", "")
+
+	resp := decodeList(t, env.serve(env.svc.SearchFiles, "alice", "GET", "/api/files/search?q=content"))
+	if resp.Total != 1 || len(resp.Files) != 1 {
+		t.Fatalf("内容写事件后应命中 1 个文件，got total=%d files=%+v", resp.Total, resp.Files)
+	}
+	if got := resp.Files[0]; got.Name != "transfer/content.bin" || got.Size != 10 {
+		t.Fatalf("条目 = %+v，期望 transfer/content.bin size=10", got)
+	}
+}

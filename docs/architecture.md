@@ -403,6 +403,10 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 成功后发 `Mutation` 事件（租户子根自动归一 `<owner>/<rel>` 前缀）；装配层把它接到
 `files.Service.ApplyRootMutation`，搜索索引因此**自动**跟随旁路写（转存/归档/跨卷搬移），
 不需要写路径逐点登记。新增 Root 变异方法必须调用 `notifyMutation`（R45 门禁拦截）。
+**内容写**（`OpenFile` 裸句柄无法观察）由卷的 FS 写面在成功后调用 `Root.MarkWritten(rel)` 声明
+（本地卷唯一调用点 = `pkg/rootfs.WriteFile`）⇒ 转存/归档/镜像/备份落盘同样自动进索引。
+**R42**：带 `ListDir` 的 FS 实现必须实现 `StateGen` 或登记理由（`fs_derived_state.tsv`），
+保证「有派生状态的实现能被缓存层探测到变化」。
 **范围**：本期仅非本地卷（外部/封装）；本地卷沿用既有实现（门禁 R46 登记为只减不增）。
 
 ## 可信卷（Trusted Volume：完整性 sidecar + 元信息隔离 + 卷级容量）
