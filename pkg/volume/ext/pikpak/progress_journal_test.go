@@ -325,3 +325,38 @@ func TestHybridDownload_JournalLoadErrorTolerated(t *testing.T) {
 		t.Fatalf("日志读失败不应阻断下载: %v", err)
 	}
 }
+
+// TestPikpakDownloader_DriveModeUsesJournal 验证 drive 模式（账号网盘文件，云端转存的
+// 实际下载路径）也落进度 WAL——此前 hybridForDrive 未传 JournalFactory，该路径无 WAL。
+func TestPikpakDownloader_DriveModeUsesJournal(t *testing.T) {
+	t.Parallel()
+	j := &fakeJournal{st: ProgressState{Done: map[int64]int64{}}}
+	payload, _, _, api := newHybridFixture(t, 4<<20)
+	cli, err := NewCli(CliConfig{BinaryPath: fakeCLIBin(t, string(payload))})
+	if err != nil {
+		t.Fatalf("NewCli: %v", err)
+	}
+	d, err := NewPikpakDownloader(DownloaderConfig{
+		Cli: cli, API: api, AutoDelete: false,
+		JournalFactory: func(_, _ string) (ProgressJournal, error) { return j, nil },
+	})
+	if err != nil {
+		t.Fatalf("NewPikpakDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "drive.bin")
+	res, err := d.driveDownload(t.Context(), &FileMeta{
+		ID: "restored-1", Name: "movie.mp4", Size: int64(len(payload)), Kind: "drive#file",
+	}, dest, nil, nil)
+	if err != nil {
+		t.Fatalf("driveDownload: %v", err)
+	}
+	if res.Size != int64(len(payload)) {
+		t.Fatalf("size = %d", res.Size)
+	}
+	if !j.done {
+		t.Fatal("drive 模式成功后应写提交记录（MarkDone）")
+	}
+	if !j.closed {
+		t.Fatal("drive 模式结束应关闭日志")
+	}
+}

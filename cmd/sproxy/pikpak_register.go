@@ -103,6 +103,7 @@ func registerPikpakDownloader(cfg *server.Config, set *registry.Set) {
 			slog.Error("pikpak 多账号装配失败（已配置账号但加密卷不可用），跳过 pikpak 下载器注册", "err", fatalErr)
 			return
 		}
+		jfactory := progressJournalFactory(cfg.StorageRoot)
 		dl, err := pikpak.NewPikpakDownloader(pikpak.DownloaderConfig{
 			Cli:         cli2,
 			API:         api,
@@ -114,6 +115,8 @@ func registerPikpakDownloader(cfg *server.Config, set *registry.Set) {
 			AutoDelete:  cfg.Pikpak.AutoDelete || cfg.Pikpak.Hybrid.AutoDelete,
 			AccountPool: pool,
 			GCIDStats:   pikpakGCIDStats,
+			// drive 模式（账号网盘文件）也落进度 WAL（云端转存下载的实际路径）。
+			JournalFactory: jfactory,
 		})
 		if err != nil {
 			slog.Warn("pikpak downloader not registered", "err", err)
