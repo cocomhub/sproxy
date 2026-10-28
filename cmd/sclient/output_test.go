@@ -764,3 +764,27 @@ func TestLocalTimeDisplay(t *testing.T) {
 		t.Fatal("非法时间应原样")
 	}
 }
+
+// TestHumanExtraDisplay 验证 Text 模式 human 可视化：时间转本地时区、URL 解码为可见字符；
+// 其它键原样（原始内容由 --json / --raw 输出）。
+func TestHumanExtraDisplay(t *testing.T) {
+	t.Parallel()
+	// transferred_at（UTC RFC3339）→ 本地时区
+	got, changed := humanExtraDisplay("transferred_at", "2026-10-28T03:00:55Z")
+	if !changed || got == "2026-10-28T03:00:55Z" {
+		t.Fatalf("时间键应转本地时区: %q changed=%v", got, changed)
+	}
+	// source_url 百分号编码 → 可见字符
+	enc := "https://example.com/s/abc?spx_target=%E4%B8%AD%E6%96%87.mp4"
+	got2, changed2 := humanExtraDisplay("source_url", enc)
+	if !changed2 || strings.Contains(got2, "%E4") {
+		t.Fatalf("source_url 应解码为可见字符: %q", got2)
+	}
+	if !strings.Contains(got2, "中文.mp4") {
+		t.Fatalf("解码结果应含中文: %q", got2)
+	}
+	// 普通键原样
+	if v, c := humanExtraDisplay("checksum", "abc123"); c || v != "abc123" {
+		t.Fatalf("普通键应原样: %q %v", v, c)
+	}
+}

@@ -43,15 +43,12 @@ func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 			fm := buildFormatterWithWriter(ios.Out, cmd)
 			fm.PrintStat(info, filename)
 			// 元数据 extra（KV）：读失败不阻断主查询（Stat 已成功），仅提示。
-			extra, xerr := svc.GetFileMeta(cmd.Context(), filename)
-			if xerr == nil {
-				fm.PrintMetaExtra(extra)
-			} else {
-				ios.WriteErrLine("（读取 meta extra 失败: %v）", xerr)
-			}
+			printMetaExtraFor(cmd, ios, fm, svc, filename)
 			return nil
 		},
 	}
+	// --raw：Text 模式下也输出 meta extra 原始 JSON（不做时间/URL 人类化转换；--json 已原始）
+	cmd.Flags().Bool("raw", false, "Text 模式输出 meta extra 原始 JSON 文本（不做时间/URL 人类化；--json 亦原始）")
 	// 文件版本管理子命令
 	versionCmd := &cobra.Command{
 		Use:   "version",
@@ -266,4 +263,26 @@ func parseMetaExtraFlag(raw string) (map[string]any, error) {
 		return nil, fmt.Errorf("JSON 解析失败: %w", err)
 	}
 	return obj, nil
+}
+
+// useJSONOutput 判断命令是否 --json 模式（buildFormatterWithWriter 同源）。
+func useJSONOutput(cmd *cobra.Command) bool {
+	ok, _ := cmd.Flags().GetBool("json")
+	return ok
+}
+
+// printMetaExtraFor 输出 meta extra：--json / --raw 输出**原始 JSON 文本**（时间/URL 原样，
+// 供脚本/修复）；Text 默认 human 可视化（时间转本地、URL 解码可见）。读失败仅提示。
+func printMetaExtraFor(cmd *cobra.Command, ios cli.IOStreams, fm OutputFormatter, svc *client.FileClient, filename string) {
+	extra, xerr := svc.GetFileMeta(cmd.Context(), filename)
+	if xerr != nil {
+		ios.WriteErrLine("（读取 meta extra 失败: %v）", xerr)
+		return
+	}
+	if rawJSON, _ := cmd.Flags().GetBool("raw"); rawJSON && !useJSONOutput(cmd) {
+		b, _ := json.MarshalIndent(map[string]any{"extra": extra}, "", "  ")
+		fmt.Fprintln(ios.Out, string(b))
+		return
+	}
+	fm.PrintMetaExtra(extra) // JSONFormatter 原始 / Text human 可视化
 }

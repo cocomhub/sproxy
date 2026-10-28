@@ -659,3 +659,28 @@ test('cloudDownloadFormHtml 含 meta-extra 输入框', () => {
   assert.ok(html.includes('cloud-behavior-form'), '应含行为表单容器');
   assert.ok(!/#[0-9a-fA-F]{6}/.test(html), '不应内联亮色 hex（暗色兼容）');
 });
+
+// humanizeMetaValue：读区人类可视化（时间键转本地时区、URL 解码可见字符）——
+// 编辑区 textarea 仍是原始 JSON（可修复），此函数只作用读区展示。
+test('humanizeMetaValue 时间转本地 + URL 解码可见', () => {
+  // 时间键（UTC RFC3339）→ 本地时区可读
+  const t = r.humanizeMetaValue('transferred_at', '2026-10-28T03:00:55Z');
+  assert.ok(t.includes('2026'), '应含年份');
+  assert.ok(t.includes(':'), '应含时分秒');
+  assert.ok(!t.includes('Z'), '不应再显示 UTC Z');
+  // URL 键百分号编码 → 可见字符
+  const u = r.humanizeMetaValue('source_url', 'https://example.com/s/abc?spx_target=%E4%B8%AD%E6%96%87.mp4');
+  assert.ok(u.includes('中文.mp4'), '应解码为可见中文');
+  assert.ok(!u.includes('%E4'), '不应残留编码');
+  // 普通键原样
+  assert.strictEqual(r.humanizeMetaValue('checksum', 'abc123'), 'abc123');
+  // 非法时间原样（不崩）
+  assert.strictEqual(r.humanizeMetaValue('transferred_at', 'not-a-time'), 'not-a-time');
+});
+
+// buildMetaReadHtml 读区渲染用 humanize（source_url 显示解码后内容）。
+test('buildMetaReadHtml 读区展示解码 URL', () => {
+  const html = r.buildMetaReadHtml({ source_url: 'https://example.com/s/a?spx_target=%E4%B8%AD%E6%96%87.mp4' });
+  assert.ok(html.includes('中文.mp4'), '读区应显示解码可见字符');
+  assert.ok(!html.includes('%E4%B8%AD'), '读区不应残留编码');
+});
