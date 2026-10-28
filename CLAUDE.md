@@ -96,6 +96,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >   禁止携带真实外部数据（真实分享 URL 含子路径 token、凭据/token、密钥/指纹、日志片段）；
 >   需真实数据验证时用**环境变量或 CLI flag 运行期传入**（默认留空/占位），禁止硬编码入库；
 >   合并前 `git grep` 扫描。详见 `AGENTS.md` 硬规则 21。
+> - **sproxy 全仓禁止真实/敏感数据，测试一律通用假数据（2026-10-28 用户明示，强制）**：
+>   代码/测试/注释/文档**绝对禁止**真实分享 URL/容器 id/分享 id/网盘文件 id、
+>   真实文件名/标题、真实 IP/域名/端口、凭据；一律 `EXAMPLE-*`/`REALSHAREID001`/`p5containerid`/
+>   纯占位中文/`example.com` 等通用假数据；提交前 `git grep` 扫描（`keepshare.org/p<id>`、
+>   `mypikpak.com/s/<id>`、真实标题/IP）。详见 `AGENTS.md` 硬规则 21b。
 
 ## 执行偏好
 
