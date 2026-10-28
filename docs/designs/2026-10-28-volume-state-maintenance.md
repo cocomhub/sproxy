@@ -184,14 +184,15 @@ func (c *Cache) Refresh(ctx, vol, owner string) error    // 既有 POST /api/vol
   返回 snapshot.Entries
 ```
 
-TTL 分档（`volume_state_ttl`，默认按卷类型）：
+TTL 策略（`volume_state.ttl`，**默认 0 = 永不过期**——用户裁定 2026-10-29，取代初版「按卷类型
+5 分钟」分档）：进程外改动**不自动收敛**，只能显式强制刷新（CLI `sclient volume refresh` /
+Web UI「强制刷新」/ `POST /api/volumes/refresh`）。
 
-| 卷类型 | 默认 | 依据 |
+| 配置 | 行为 | 依据 |
 |---|---|---|
-| **外部卷**（baidupcs/S3/webdav/ftp/sftp/federated/cluster） | **5 分钟** | 最优先；避免大目录反复远端往返 |
-| 自管卷（secretdata） | 5 分钟 + 代际 | 卷内写即时更新自身索引；跨进程由代际发现 |
-| 本地卷（本期仍走旧实现，见 §五） | 0（不按时间过期） | 写穿 +（未来）目录 mtime 代际 |
-| 禁用 | `-1` | 每次回源（调试/强一致） |
+| **0（默认）** | 永不过期：仅写穿 + 显式刷新 +（可选）卷自报代际 | 与其用「猜出来的」时间窗口，不如明确契约 |
+| `>0`（如 `5m`） | 时间兜底（过期后回源一次） | 需要自动收敛的部署显式选择 |
+| `-1` | 每次回源 | 调试/强一致 |
 
 **A 类兜底（永不依赖缓存齐全）**：需要 checksum 才安全的写操作走三段式——① 调用方给了用；
 ② 没给 `StatObject` **现取**（本地卷直接回源，不取缓存值）；③ 仍拿不到 **fail-closed 拒绝**。
@@ -269,7 +270,7 @@ Delete/软删/恢复 → Invalidate(rel)
 | 片 | 内容 | 优先级 | 行为变更 | 验收 |
 |---|---|---|---|---|
 | **V1** | `pkg/volumestate` 骨架：`ObjectRef`/`DirSnapshot`/`TreeEntry`/`Cache`/`MutationBus`/`WrapVolume`；staging 原子读写 + LRU + TTL/代际判定；`storage.Root` 变异观察者（不接线） | 高 | 无 | 单测：命中/miss/TTL/代际/写穿/祖先 stale/degraded/保密卷不落盘 |
-| **V2** | **外部卷接入（本期核心）**：装配期 `WrapVolume` 包所有存储卷（含本地卷，见 §十六）；`files.List/Stat/Delete/Rename(?volume=)` 走装饰器；TTL 默认 5 分钟；secretdata 用 `StateGen`；`ExternalList/ExternalStat` 保留回源 | **最高** | 首次 list 慢、之后命中；进程外改写 ≤TTL 收敛 | e2e：二次 list 无远端往返（计数）；TTL 过期回源一次；`Refresh` 立即生效；删除后无幽灵 |
+| **V2** | **外部卷接入（本期核心）**：装配期 `WrapVolume` 包所有存储卷（含本地卷，见 §十六）；`files.List/Stat/Delete/Rename(?volume=)` 走装饰器；TTL 默认 0（永不过期，2026-10-29 改判）；secretdata 用 `StateGen`；`ExternalList/ExternalStat` 保留回源 | **最高** | 首次 list 慢、之后命中；进程外改写 ≤TTL 收敛 | e2e：二次 list 无远端往返（计数）；TTL 过期回源一次；`Refresh` 立即生效；删除后无幽灵 |
 | **V3** | **本地卷迁移**：~~Root 事件接线~~（#880/#884 完成）、~~list 经卷状态视图~~（§15.2 步骤 2 完成）；剩余 `searchIndex` 仅服务搜索、`checksums.json` 只读化 | 中（部分完成） | list 数据源可切换（受 `volume_state.disable` 门控） | 全量绿；旧路径棘轮计数下降 |
 | **V4** | 清理：删 `searchIndex`/`checksums.json` 独立写路径与 `ExternalList` 薄转发；`RecordBypassWrite`/`IndexMove` 删（由事件总线取代）——**阶段一已完成**（见 §十三），剩余待 `checksums.json` 只读化与 TreeView 投影 | 低 | 无 | #874 回归用例绿；deadcode 门禁过 |
 | **V5** | 门禁 + 文档 + 归档：R40/R41/R42/R44/R45/R46 | 中 | 无 | `make check-ci` 全绿 |
@@ -495,20 +496,21 @@ checksum、在途临时文件不对外可见），由 `TestList_ViewSourceEquiva
    索引读取。
 2. **套缓存但 `TTL=0` ⇒ 正确性回退**：本地卷的写入已由 Root 事件写穿（#880/#884），但**进程外**
    改动（运维 rsync/备份恢复直接写盘、同根多实例）不会被事件观察到；`TTL=0` 意味着永不主动回源
-   ⇒ 这些改动永远不可见。这正是必须有非零 TTL 的原因（默认 5 分钟）。
+   ⇒ 这些改动永远不可见。这正是必须有非零 TTL 的原因——**该结论已于 2026-10-29 被用户推翻**：默认改为 0（永不过期），
+  进程外改动只能显式 `volume refresh` 感知（不鼓励用短 TTL 猜收敛窗口）。
 3. **`StateGen` 能不能救**：设计 §3.1 提过 `rootfs` 用「目录 mtime + 子项数」做 O(1) 代际，但
    POSIX 语义下**改子目录里的文件只会更新该子目录 mtime，不更新祖先** ⇒ 祖先目录的代际探测无法
    发现深层变化，仍需 TTL 兜底。
 
 **决策已定（用户 2026-10-28 裁定「按推荐处理」）**：
-- (a) **本地卷参与缓存**，与外部卷同档默认 `TTL=5 分钟`（可按卷显式配置）——已实现（§十六）；
+- (a) **本地卷参与缓存**，与外部卷同档（当时默认 `TTL=5 分钟`，**2026-10-29 改为 0 = 永不过期**）——已实现（§十六）；
 - (b) **接受「进程外改动 ≤TTL 才可见」**，并把它作为明确契约写进文档（此前 `searchIndex` 是同类
   盲区但无承诺）；
 - (c) 步骤 2 落地时 `IndexSync` 只服务搜索（实现时执行）。
 
 **剩下的实现决策点**：
 
-- (a) 本地卷是否参与缓存：若参与，默认 TTL 取值（**已定：与外部卷同档 5 分钟**）；
+- (a) 本地卷是否参与缓存：若参与，默认 TTL 取值（**已定：与外部卷同档；2026-10-29 由 5 分钟改为 0 = 永不过期**）；
 - (b) 是否接受「进程外改动 ≤TTL 才可见」这一语义（今天的 `searchIndex` 同样只在进程内增量维护，
   但从不在进程外回扫——即现状也有同类盲区，只是没有明确的收敛承诺）；
 - (c) 集群模式下 `IndexSync`（rev/dirty/StateStore）是否保留：若保留，list 改走 FS 后索引同步
@@ -523,13 +525,15 @@ checksum、在途临时文件不对外可见），由 `TestList_ViewSourceEquiva
 **改动**：
 - `wrapVolumeState` 不再跳过本地卷（缓存**默认开启**，`volume_state.disable: true` 才关闭——
   AGENTS.md 7c 要求「默认开启」时反转语义为 `disable_*`）；`volumeStateTTL` 统一返回
-  `DefaultTTL`（**5 分钟**），显式配置仍全卷覆盖。
+  `DefaultTTL`（**0 = 永不过期**，2026-10-29 裁定；见 §3.2 TTL 策略表），显式配置仍全卷覆盖。
 - **写穿补全**：本地卷的写内核经 `storage.Root`，不经过 FS 装饰器 ⇒ 只靠 `CacheFS` 自身失效
   会漏掉内核写。`localVolumeMutationHandler` 把 Root 变异**同时**投递给两个消费方：
   `files.ApplyRootMutation`（索引）与 `volumestate.Cache.Invalidate`（缓存，含 rename 的源/目标）。
 - 语义契约（明确写入文档，不再是隐含盲区）：
   - **本进程写** ⇒ 事件写穿，下一次 list 立即可见；
-  - **进程外改动**（运维直写盘/同根多实例） ⇒ **≤TTL** 后可见；任何一次相关失效/回源也会看到它。
+  - **进程外改动**（运维直写盘/同根多实例/备份恢复/网盘 App 直改） ⇒ **不自动收敛**（默认永不过期），
+    必须显式强制刷新：CLI `sclient volume refresh [<卷名>]`、Web UI 工具栏「强制刷新」、
+    `POST /api/volumes/refresh[?volume=<卷>]`（无参 = 全部卷）。
 
 - **观察者必须在租户创建之前装好**（本轮实测的启动顺序缺陷）：`RegisterRoutes` 在
   `initStorageLayout` 里**先建 anonymous 租户**，而 `files.Service` 是懒装配的——观察者若等到

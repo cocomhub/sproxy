@@ -256,26 +256,28 @@ type RebalanceResult struct {
 	Remaining  int64  `json:"remaining"`
 }
 
-// RefreshVolume 触发卷内存索引重建（POST /api/volumes/refresh?volume=<v>，S5，2026-10-27）。
+// RefreshVolume 强制刷新卷缓存/索引（POST /api/volumes/refresh[?volume=<v>]，S5）。
 //
-// 用途：secretdata 卷的内存索引只在挂载时扫描一次；卷被**本进程之外**修改（用户用网盘 App
-// 直改 / 另一 sproxy 实例写入）后幽灵条目/旧哈希永不收敛。本方法让 CLI `volume refresh <卷>`
-// 显式触发服务端重建（本地卷 = 无内存索引，幂等成功；后端不支持能力 → 405 明确拒绝）。
+// 语义（用户裁定 2026-10-29：缓存**默认永不过期**）：服务端卷状态缓存不会按时间自动过期，
+// **进程外**改动（运维直写盘、同根多实例、网盘 App 直改）只能通过本方法感知。
+//   - volName == "" ⇒ 清空**全部卷**缓存；
+//   - 指定卷 ⇒ 清空该卷（本地卷同样适用；secretdata 等外部卷还会重扫内存索引）。
 func (c *FileClient) RefreshVolume(ctx context.Context, volName string) error {
-	if volName == "" {
-		return fmt.Errorf("卷名不能为空")
+	apiPath := "/api/volumes/refresh"
+	if volName != "" {
+		q := url.Values{}
+		q.Set("volume", volName)
+		apiPath += "?" + q.Encode()
 	}
-	q := url.Values{}
-	q.Set("volume", volName)
 	var result struct {
 		Success bool   `json:"success"`
 		Message string `json:"message"`
 	}
-	if err := c.doJSON(ctx, "POST", "/api/volumes/refresh?"+q.Encode(), nil, &result); err != nil {
-		return fmt.Errorf("卷索引重建失败: %w", err)
+	if err := c.doJSON(ctx, "POST", apiPath, nil, &result); err != nil {
+		return fmt.Errorf("卷刷新失败: %w", err)
 	}
 	if !result.Success {
-		return fmt.Errorf("卷索引重建失败: %s", result.Message)
+		return fmt.Errorf("卷刷新失败: %s", result.Message)
 	}
 	return nil
 }

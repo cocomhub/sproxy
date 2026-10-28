@@ -6,7 +6,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { volumeOpsBarHtml, volumeOpQuery, volumeOpLabel, escapeAttr } = require('./volume-ops.js');
+const { volumeOpsBarHtml, volumeOpQuery, volumeOpLabel, volumeRefreshPath, escapeAttr } = require('./volume-ops.js');
 
 test('volumeOpsBarHtml 少于两卷显示提示', () => {
   const html = volumeOpsBarHtml([{ name: 'a' }]);
@@ -57,4 +57,15 @@ test('volumeOpLabel 中文标签', () => {
 
 test('escapeAttr 转义引号与尖括号', () => {
   assert.strictEqual(escapeAttr('a"b<c>d&e'), 'a&quot;b&lt;c&gt;d&amp;e');
+});
+
+test('volumeRefreshPath 空卷名 = 刷新全部卷（不带 query）', () => {
+  assert.strictEqual(volumeRefreshPath(''), '/api/volumes/refresh');
+  assert.strictEqual(volumeRefreshPath(undefined), '/api/volumes/refresh');
+  assert.strictEqual(volumeRefreshPath('   '), '/api/volumes/refresh');
+});
+
+test('volumeRefreshPath 指定卷 = 带 volume 且编码', () => {
+  assert.strictEqual(volumeRefreshPath('vault'), '/api/volumes/refresh?volume=vault');
+  assert.strictEqual(volumeRefreshPath('a b&c'), '/api/volumes/refresh?volume=a%20b%26c');
 });

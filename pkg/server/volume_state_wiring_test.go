@@ -171,6 +171,10 @@ func TestWrapVolumeState_DisabledNoop(t *testing.T) {
 // TestVolumeStateTTL_Unified 钉住 §15.3 决策 (b)：本地卷与外部卷**同档 TTL**
 // （本地卷写穿只覆盖本进程，进程外改动必须有收敛窗口；mtime 代际不能替代——POSIX 只更新直接父目录）。
 func TestVolumeStateTTL_Unified(t *testing.T) {
+	// 用户裁定 2026-10-29：默认**永不过期**（进程外改动只能靠显式 refresh 感知）。
+	if volumestate.DefaultTTL != 0 {
+		t.Fatalf("默认 TTL 必须为 0（永不过期），got %v", volumestate.DefaultTTL)
+	}
 	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()

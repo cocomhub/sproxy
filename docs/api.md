@@ -838,6 +838,24 @@ sproxy_gc_cycles 42
 - **读时回迁**：普通下载（`GET /download`）定位命中 cold 卷文件时，自动迁移回同 owner 视图内第一个 tier=hot 的本地卷（API 无感；成功记审计 `volume_tier_promote`）。无 hot 卷/回迁失败 → 直接从 cold 卷读取（尽力而为，不中断下载）。
 - cloud_archive / cloud_task 功能桶不参与分层（非 user 桶对象）。
 
+## 卷状态缓存刷新（POST /api/volumes/refresh）
+
+强制刷新卷缓存/索引——**默认永不过期**的缓存下，这是感知「进程外改动」的唯一入口
+（用户裁定 2026-10-29）。本进程的写由事件写穿（下一次读立即可见），但本机直写盘 / 同根多实例 /
+备份恢复 / 网盘 App 直改不会自动收敛。
+
+```bash
+POST /api/volumes/refresh                # 清空**全部卷**状态缓存
+POST /api/volumes/refresh?volume=<卷名>   # 只清该卷（本地卷同样适用）
+```
+
+- 本地卷：清空该卷状态缓存（本地卷自 2026-10-28 起也走缓存）；无内存索引可重建
+- 外部卷：清空状态缓存；后端实现 `IndexRefresher`（secretdata）时**额外**重扫内存索引并原子换入
+- 落盘快照同步清除（否则重启会复用旧快照）
+- 响应：`{"success": true, "message": "..."}`；未知/未授权卷 → 403（防枚举）；未装配缓存且无索引 → 405
+- 审计：`action=volume_refresh`（`object` = 卷名，全部卷形态为 `*`）
+- 等价入口：CLI `sclient volume refresh [<卷名>]`、Web UI 工具栏「强制刷新」按钮
+
 ## 用户卷（per-owner 用户自有卷）
 
 用户自有卷是每个 sproxy 用户独立管理的网盘盘（仅外部类型：`baidupcs` 等已注册 backend）。

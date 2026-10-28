@@ -850,8 +850,14 @@ sclient volume delete <name>
 sclient volume copy <file> --from-volume <a> --to-volume <b>
 sclient volume move <file> --from-volume <a> --to-volume <b>
 sclient volume rebalance --from-volume <a> --to-volume <b> [--max-bytes <n>]
+sclient volume refresh [<卷名>]        # 强制刷新卷缓存（无参 = 全部卷）
 ```
 
+- **`volume refresh` 是唯一「强制感知进程外改动」的入口**：服务端卷状态缓存**默认永不过期**
+  （2026-10-29 裁定），本进程的写由事件写穿（下一次读立即可见），但本机直写盘 / 同根多实例 /
+  备份恢复 / 网盘 App 直改**不会**被自动感知。无参 = 清空**全部卷**缓存；带卷名 = 只清该卷
+  （secretdata 等外部卷还会重扫内存索引）。幂等，可随时重复执行。等价入口：`POST /api/volumes/refresh`、
+  Web UI 工具栏「强制刷新」按钮。
 - 管理当前用户的**用户自有卷**（网盘盘，仅外部类型）：create 创建 / list 列出我的 / delete 删除
 - 卷间操作：`copy` 跨卷复制（保留源）、`move` 跨卷移动（源被移除）、`rebalance` 卷再平衡（异步提交）
 - `copy`/`move` 的 `--from-volume` 缺省取当前 `--vol` 卷上下文；`--to-volume` 必填

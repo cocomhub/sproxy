@@ -299,16 +299,20 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 - **读**：目录列举命中缓存（外部卷不再每次全量远端往返）；`Stat` 恒回源（checksum 安全判定
   必须新鲜 —— 卷是真相源，缓存只加速）。
 - **写**：经卷视图的写（上传/删除/改名/跨卷移动/转存）**自动失效**对应目录，无需调用方登记。
-- **收敛**：本进程写由事件**写穿**（下一次读立即可见，含本地卷经 `storage.Root` 的内核写）；
-  **进程外**改动（运维直写盘/同根多实例）≤`TTL`（默认 5 分钟）收敛——这类操作属罕见场景、
-  不被鼓励；需要立即生效用 `POST /api/volumes/refresh?volume=<卷>`。
+- **收敛**：本进程写由事件**写穿**（下一次读立即可见，含本地卷经 `storage.Root` 的内核写）。
+  **进程外**改动（运维直写盘/同根多实例/备份恢复/网盘 App 直改）**不会自动收敛**（默认永不过期，
+  用户裁定 2026-10-29）——需要可见时显式强制刷新：
+  - CLI：`sclient volume refresh [卷名]`（无参 = 全部卷）
+  - Web UI：工具栏「强制刷新」按钮（清缓存 + 重新列举）
+  - API：`POST /api/volumes/refresh[?volume=<卷>]`（无 `volume` = 全部卷）
+  需要时间兜底的部署可显式配 `ttl`（>0 过期）；负值 = 每次回源（调试/强一致）。
 - **落盘**：节点本地受管 staging 目录 `<storage_root>/meta/state/<卷>/…`（与容量账本
   `<root>/meta/quota/<卷>` 同约定）；不进卷、不进网盘。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `volume_state.disable` | bool | `false` | 显式**关闭**卷状态缓存（默认 false = **启用**；强一致/调试时置 true） |
-| `volume_state.ttl` | duration | `0` | 缓存有效期；**`0` = 默认 5 分钟**；**负值 = 每次回源**（调试/强一致）。进程外改动 ≤TTL 收敛，需要立即生效用 `POST /api/volumes/refresh` |
+| `volume_state.ttl` | duration | `0` | 缓存有效期；**`0` = 永不过期（默认）**，进程外改动只能靠 `sclient volume refresh` / Web UI「强制刷新」/ `POST /api/volumes/refresh` 感知；`>0` = 时间兜底；**负值 = 每次回源**（调试/强一致） |
 | `volume_state.search_remote` | bool | `false` | 允许对远端卷做递归搜索（默认关闭：递归列举 = 全量远端往返） |
 | `volume_state.max_bytes` | ByteSize | `256MiB` | 落盘 staging 上限；**`0` = 仅内存不落盘** |
 | `volume_state.persist_private` | bool | `false` | 允许**保密卷**（加密/私密外部卷）的元数据快照落节点磁盘；默认 false = 只内存（避免文件名/校验和明文落盘） |

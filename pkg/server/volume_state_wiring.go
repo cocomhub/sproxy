@@ -49,12 +49,13 @@ func newVolumeStateCache(cfg *Config, vs *registry.Set, log *slog.Logger) *volum
 
 // volumeStateTTL 解析某卷的缓存有效期：
 //   - 配置显式给出（非 0）⇒ 全卷统一；
-//   - 否则一律 DefaultTTL（5 分钟：缓存是正常路径；进程外改动属罕见场景）。
+//   - 否则一律 DefaultTTL（**0 = 永不过期**，用户裁定 2026-10-29）。
 //
-// **为什么本地卷也必须有 TTL**（设计 §15.3）：本地卷的写穿只覆盖**本进程**的 Root 变更；
-// 进程外改动（运维 rsync/备份恢复直接写盘、同根多实例）没有事件可观察，TTL=0 意味着永不回源
-// ⇒ 这些改动永远不可见。`rootfs` 的目录 mtime 代际也不能替代 TTL——POSIX 只更新**直接父目录**
-// 的 mtime，祖先探测发现不了深层变化。
+// **为什么默认永不过期**：缓存是正常路径，本进程的写由事件写穿（下一次读立即可见）。进程外
+// 改动（运维 rsync/备份恢复直接写盘、同根多实例）没有事件可观察——与其用一个「猜出来的」
+// 时间窗口去收敛（既可能过短导致频繁回源，也可能过长导致久久不生效），不如明确契约：
+// **只有显式刷新**（`POST /api/volumes/refresh`）或卷自报代际变化才会看到这些改动。
+// 需要时间兜底的部署可显式配置 `volume_state.ttl`（>0 过期；<0 每次回源）。
 func volumeStateTTL(cfg *Config, volName string) time.Duration {
 	_ = volName // 保留按卷覆盖的扩展点（当前全卷统一）
 	if cfg.VolumeState.TTL != 0 {

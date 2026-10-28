@@ -52,6 +52,15 @@ function volumeOpLabel(op) {
   return op;
 }
 
+// volumeRefreshPath(vol) → POST /api/volumes/refresh 的请求路径。
+// 空卷名 = 清空**全部卷**状态缓存（Web UI「全部卷」上下文）。
+// 语义（用户裁定 2026-10-29）：服务端缓存默认**永不过期**，进程外改动只能靠本端点 + 重新列举感知。
+function volumeRefreshPath(vol) {
+  var name = typeof vol === 'string' ? vol.trim() : '';
+  if (!name) return '/api/volumes/refresh';
+  return '/api/volumes/refresh?volume=' + encodeURIComponent(name);
+}
+
 // escapeAttr HTML 属性转义（防卷名注入）。
 function escapeAttr(s) {
   return String(s == null ? '' : s)
@@ -61,5 +70,5 @@ function escapeAttr(s) {
 
 // 导出（node --test 用）。
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { volumeOpsBarHtml: volumeOpsBarHtml, volumeOpQuery: volumeOpQuery, volumeOpLabel: volumeOpLabel, escapeAttr: escapeAttr };
+  module.exports = { volumeOpsBarHtml: volumeOpsBarHtml, volumeOpQuery: volumeOpQuery, volumeOpLabel: volumeOpLabel, volumeRefreshPath: volumeRefreshPath, escapeAttr: escapeAttr };
 }

@@ -13,20 +13,24 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// DefaultTTL 是卷状态缓存的默认有效期（C 类结构视图：有界过期即可）。
+// DefaultTTL 是卷状态缓存的默认有效期：**0 = 永不过期**（用户裁定 2026-10-29）。
 //
-// 5 分钟的依据（用户裁定 2026-10-28）：缓存是**正常路径**——本进程的写由事件写穿，只有
-// **进程外**改动（运维直写盘、同根多实例）才需要 TTL 收敛，而这类操作属罕见场景、不该被
-// 鼓励（需要立即生效时用 `POST /api/volumes/refresh`）。把 TTL 设长可显著减少远端回源。
-const DefaultTTL = 5 * time.Minute
+// 语义：缓存是**正常路径**——本进程的写由事件写穿（下一次读立即可见）。**进程外**改动
+// （运维直写盘、同根多实例、备份恢复）**不会**被自动感知：既不按时间过期、也不鼓励用短
+// TTL 去「猜」收敛窗口，需要可见时**显式刷新**（`POST /api/volumes/refresh?volume=<卷>`）；
+// 卷若实现 `volume.StateGeneration`，代际变化仍会触发回源（唯一非显式收敛路径）。
+//
+// 需要时间兜底的部署可显式配置 `volume_state.ttl: 5m`；`volume_state.ttl: -1` 表示
+// **每次回源**（调试/强一致）。
+const DefaultTTL = 0
 
 // DefaultMaxEntries 是内存 LRU 的默认容量（目录快照数）。
 const DefaultMaxEntries = 4096
 
 // Options 是 Cache 的构造参数（全部有安全默认：零值可用）。
 type Options struct {
-	// TTL 按卷名返回缓存有效期：>0 按时间过期；**0 = 不按时间过期**（仅写穿保证新鲜，
-	// 进程外改动永不收敛——慎用）；<0 = 该卷禁用缓存（每次回源，调试/强一致场景）。
+	// TTL 按卷名返回缓存有效期：**0 = 永不过期（默认）**，仅写穿/显式 refresh/代际变化
+	// 才会更新；>0 按时间过期（可选的兜底）；<0 = 该卷禁用缓存（每次回源，调试/强一致）。
 	TTL func(volume string) time.Duration
 	// MaxEntries 内存 LRU 容量（<=0 ⇒ DefaultMaxEntries）。
 	MaxEntries int
@@ -320,6 +324,24 @@ func (c *Cache) Refresh(_ context.Context, vol string) error {
 	}
 	if len(dropped) > 0 {
 		c.log.Debug("卷状态缓存已清空", "volume", vol, "dirs", len(dropped))
+	}
+	return nil
+}
+
+// RefreshAll 丢弃**全部卷**的缓存（显式重建入口，对应 `POST /api/volumes/refresh` 无 volume
+// 形态，以及 `sclient volume refresh` 无参调用）。落盘快照同步清空——否则「永不过期」策略下
+// 重启会复用旧快照，刷新等于没刷。
+func (c *Cache) RefreshAll(_ context.Context) error {
+	c.mu.Lock()
+	dropped := c.lru.Len()
+	c.lru.Init()
+	c.items = make(map[string]*list.Element, c.maxItems)
+	c.mu.Unlock()
+	if c.opts.Store != nil {
+		c.opts.Store.RemoveAll()
+	}
+	if dropped > 0 {
+		c.log.Debug("卷状态缓存已全部清空", "dirs", dropped)
 	}
 	return nil
 }
