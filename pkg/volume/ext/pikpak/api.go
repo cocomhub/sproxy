@@ -129,6 +129,36 @@ type FileMeta struct {
 	MimeType string `json:"mime_type"`
 	Phase    string `json:"phase"` // PHASE_TYPE_COMPLETE 等
 	Hash     string `json:"hash"`
+	// 源文件时间（官方 REST 原样字段，RFC3339 带时区偏移——如 "2026-10-28T03:11:17.777+08:00"）。
+	// 用户裁定 2026-10-28：转存产物的 mtime/ctime 必须来自源文件，不得用下载完成时刻顶替。
+	CreatedTime      string `json:"created_time"`
+	ModifiedTime     string `json:"modified_time"`
+	UserModifiedTime string `json:"user_modified_time"`
+}
+
+// SourceTimes 解析源文件时间（created/modified，UTC）。缺失/格式非法 → 零值（未知）。
+// 优先 modified_time（无则 user_modified_time），created 用 created_time。
+func (m FileMeta) SourceTimes() (created, modified time.Time) {
+	created = parseAPITime(m.CreatedTime)
+	modified = parseAPITime(m.ModifiedTime)
+	if modified.IsZero() {
+		modified = parseAPITime(m.UserModifiedTime)
+	}
+	return created, modified
+}
+
+// parseAPITime 解析 PikPak REST 时间（RFC3339 带偏移，可能带毫秒）；失败返回零值。
+func parseAPITime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
 }
 
 // UnmarshalJSON 兼容真实 API 的 size 形态：**string 数字**（"12893054"）或人类可读

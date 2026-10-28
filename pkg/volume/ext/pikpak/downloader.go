@@ -290,9 +290,9 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 		}
 		// 空池（无账号配置）：回落当前 CLI 登录态（与装配期 pool==nil 语义一致）。
 	}
-	size, checksum, fileID, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
+	res, fileID, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
 	return d.finalizeDownload(ctx, finalizeRequest{
-		size: size, checksum: checksum, fileID: fileID, owned: owned,
+		res: res, fileID: fileID, owned: owned,
 		derr: derr, target: target, destPath: destPath, lease: lease,
 	})
 }
@@ -306,15 +306,14 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 	if serr != nil {
 		return nil, fmt.Errorf("pikpak download: %w", serr)
 	}
-	var size int64
-	var checksum string
+	var res *Result
 	useErr := d.pool.Use(ctx, acct.Name, func() error {
 		// C1 关键：Use 已把 CLI 会话切到选中账号，但 API 缓存了此前（ListShare 阶段）
 		// 导出的旧会话 token——必须重置，让 REST（转存/定位/删除）重新经 CLI 导出**当前
 		// 会话**（选中账号）的 token；否则转存/定位走旧账号、CLI 下载走新账号，不一致。
 		d.api.ResetToken()
-		s, c, fid, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
-		size, checksum = s, c
+		r, fid, owned, derr := d.restoreAndDownload(ctx, shareID, target, destPath, onProgress, sinkFactory)
+		res = r
 		if derr != nil {
 			return derr
 		}
@@ -337,12 +336,16 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 		return nil, fmt.Errorf("pikpak download: %w", useErr)
 	}
 	// 成功：按已下载字节记账（Select 下次按真实 size 预检，剩余不足即换账号）。
+	var size int64
+	if res != nil {
+		size = res.Size
+	}
 	if rerr := d.pool.RecordUsage(ctx, acct.Name, size); rerr != nil {
 		d.log.Warn("pikpak record usage", "name", acct.Name, "err", rerr)
 	}
 	// fileID 传空：AutoDelete 已在 fn 内（选中账号会话）执行，finalizeDownload 不再重复删。
 	return d.finalizeDownload(ctx, finalizeRequest{
-		size: size, checksum: checksum, fileID: "", owned: false,
+		res: res, fileID: "", owned: false,
 		derr: nil, target: target, destPath: destPath, lease: lease,
 	})
 }
@@ -363,8 +366,7 @@ func (d *PikpakDownloader) downloadViaPool(ctx context.Context, shareID string, 
 // 参数归组（S107：9 参 > 7 上限收敛）：finalizeRequest 承载下载产物/来源/目标元数据，
 // 调用方（download/pool 分支）构造后传入——ctx 保持首参（containedctx 纪律）。
 type finalizeRequest struct {
-	size     int64
-	checksum string
+	res      *Result // 下载结果（Size/Checksum/统计；nil = 失败路径）
 	fileID   string
 	owned    bool
 	derr     error
@@ -384,29 +386,61 @@ func (d *PikpakDownloader) finalizeDownload(ctx context.Context, req finalizeReq
 	if req.derr != nil {
 		return nil, req.derr
 	}
-	// GCID 权威复算（spec §6）：文件大小非 0 且官方 hash 非空时，用候选分块复算 GCID，
-	// 命中官方 hash → ModeAuthority（① 态）；否则 ModeLocalOnly（② 态语义校验兜底）。
-	// 复算失败（文件读/destPath 为空）不阻断下载，回落 ModeLocalOnly。
-	res := &Result{Size: req.size, Checksum: req.checksum, ChecksumAlgorithm: downloader.IntegrityChecksumSHA256,
-		ModTime: time.Now(), Integrity: downloader.ModeLocalOnly}
-	if req.size > 0 && req.target != nil && req.target.Hash != "" && req.destPath != "" {
-		// R3-I1：全部整除候选的 GCID 逐一与官方 hash 比对（官方分块粒度未知，
-		// 任一候选命中即权威——提升命中率，非首整除即返）。
-		matched, err := integrity.VerifyGCIDStats(req.destPath, integrity.GCIDCandidates, req.target.Hash, d.gcidStats)
-		if err == nil && matched {
-			res.Integrity = downloader.ModeAuthority
-			res.AuthorityHash = req.target.Hash
-			res.AuthorityHashAlgorithm = downloader.IntegrityAlgPikpakGCID // 下载方声明：PikPak GCID
-		}
+	res := req.res
+	if res == nil {
+		res = &Result{}
+	}
+	if res.Checksum != "" && res.ChecksumAlgorithm == "" {
+		res.ChecksumAlgorithm = downloader.IntegrityChecksumSHA256
+	}
+	// 已被上游判定为权威（hybrid GCID 命中）时不降级、不重复整文件复算。
+	alreadyAuthority := res.Integrity == downloader.ModeAuthority && res.AuthorityHash != ""
+	if !alreadyAuthority {
+		res.Integrity = downloader.ModeLocalOnly
+	}
+	d.applySourceTimes(res, req.target)
+	if !alreadyAuthority {
+		d.verifyGCIDAuthority(res, req.target, req.destPath)
 	}
 	return res, nil
+}
+
+// applySourceTimes 填充源文件时间：优先下载器带外时间；未知时才用网盘目标时间
+// （绝不用「下载完成时刻」冒充源时间——用户裁定 2026-10-28）。
+func (d *PikpakDownloader) applySourceTimes(res *Result, target *FileMeta) {
+	if target == nil {
+		return
+	}
+	created, modified := target.SourceTimes()
+	if res.ModTime.IsZero() && !modified.IsZero() {
+		res.ModTime = modified
+	}
+	if res.SourceCreatedTime.IsZero() && !created.IsZero() {
+		res.SourceCreatedTime = created
+	}
+}
+
+// verifyGCIDAuthority 复算 GCID 并比对官方 hash：命中 → ModeAuthority（① 态），
+// 否则保持 ModeLocalOnly（② 态语义校验兜底）。复算失败（文件读/destPath 为空）不阻断。
+func (d *PikpakDownloader) verifyGCIDAuthority(res *Result, target *FileMeta, destPath string) {
+	if res.Size <= 0 || target == nil || target.Hash == "" || destPath == "" {
+		return
+	}
+	// R3-I1：全部整除候选的 GCID 逐一与官方 hash 比对（官方分块粒度未知，
+	// 任一候选命中即权威——提升命中率，非首整除即返）。
+	matched, err := integrity.VerifyGCIDStats(destPath, integrity.GCIDCandidates, target.Hash, d.gcidStats)
+	if err == nil && matched {
+		res.Integrity = downloader.ModeAuthority
+		res.AuthorityHash = target.Hash
+		res.AuthorityHashAlgorithm = downloader.IntegrityAlgPikpakGCID // 下载方声明：PikPak GCID
+	}
 }
 
 // restoreAndDownload 转存分享到个人网盘 → 定位转存文件 → CLI 完整下载。
 // 须在**选中账号（或当前登录态）**的会话下执行：转存与下载必须同一账号，否则
 // CLI 切会话后在该账号网盘里找不到转存文件（C1）。返回字节数、SHA-256 与转存文件 ID
 // （供 AutoDelete 精确删除）。
-func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (int64, string, string, bool, error) {
+func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID string, target *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, string, bool, error) {
 	// 3a. 幂等：网盘已有同名同 size（hash 可选一致）转存副本 → 复用（不 RestoreShare、不重复保存）。
 	//     收敛：与 hybrid 共用 restore_idempotent.go 的 checkRestoreCopy（此前旧下载器每次
 	//     RestoreShare，匿名路径失败 fallback 时同一文件多次提交累积同名副本撑爆 6GB——实测 3 份）。
@@ -418,29 +452,29 @@ func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID strin
 		// 账号区 Range 分片下载（manifest 断点续传）——**唯一实现在 HybridDownloader**
 		// （pikget 生产路径，用户裁定 2026-10-28：不另造实现，避免官方 CLI 无续传）；
 		// 此处按 drive 文件形态复用其 runHybrid 内核（shareEnd=0 ⇒ 全账号区）。
-		size, checksum, err := d.driveDownload(ctx, driveFile, destPath, onProgress, sinkFactory)
+		res, err := d.driveDownload(ctx, driveFile, destPath, onProgress, sinkFactory)
 		if err != nil {
-			return 0, "", "", false, err
+			return nil, "", false, err
 		}
 		// 复用既有副本：owned=true（不 Track 不删）——副本非本次新建。
-		return size, checksum, driveFile.ID, true, nil
+		return res, driveFile.ID, true, nil
 	}
 	// 3. 转存到个人网盘根目录（owned=true = 源文件已在网盘，AutoDelete 跳过）
 	fileID, owned, rerr := d.api.RestoreShare(ctx, shareID, []string{target.ID}, "")
 	if rerr != nil {
-		return 0, "", "", false, fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
+		return nil, "", false, fmt.Errorf("pikpak restore %s: %w", shareID, rerr)
 	}
 	// 4. 网盘里定位转存文件（restore 返回的精确 fileID 优先，异步转存回退轮询）
 	driveFile, err := d.locateRestoredFile(ctx, fileID, target)
 	if err != nil {
-		return 0, "", "", false, err
+		return nil, "", false, err
 	}
 	// 5. 账号区 Range 分片下载（manifest 断点续传）——复用 HybridDownloader 唯一实现。
-	size, checksum, err := d.driveDownload(ctx, driveFile, destPath, onProgress, sinkFactory)
+	res, err := d.driveDownload(ctx, driveFile, destPath, onProgress, sinkFactory)
 	if err != nil {
-		return 0, "", "", false, err
+		return nil, "", false, err
 	}
-	return size, checksum, driveFile.ID, owned, nil
+	return res, driveFile.ID, owned, nil
 }
 
 // driveDownload 用 **HybridDownloader 内核**（账号区 Range 分片 + manifest 续传 +
@@ -448,26 +482,38 @@ func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID strin
 //
 // 收敛（用户裁定 2026-10-28）：不新增下载实现——复用 hybrid 的 runHybrid 内核，
 // 差别只有「分享区边界 = 0」（该文件已在网盘，全部字节都走账号区）。
-func (d *PikpakDownloader) driveDownload(ctx context.Context, driveFile *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (int64, string, error) {
+func (d *PikpakDownloader) driveDownload(ctx context.Context, driveFile *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (*Result, error) {
 	if driveFile == nil || driveFile.ID == "" {
-		return 0, "", fmt.Errorf("pikpak: drive file 缺失（无法下载）")
+		return nil, fmt.Errorf("pikpak: drive file 缺失（无法下载）")
 	}
+	created, modified := driveFile.SourceTimes()
 	if driveFile.Size <= 0 {
-		// 大小未知 → 分片规划不可用，回落官方 CLI（唯一剩余 CLI 路径）。
-		return d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
+		// 大小未知 → 分片规划不可用，回落官方 CLI（唯一剩余 CLI 路径，无断点续传）。
+		started := time.Now()
+		size, checksum, err := d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
+		if err != nil {
+			return nil, err
+		}
+		finished := time.Now()
+		res := &Result{Size: size, Checksum: checksum, ChecksumAlgorithm: downloader.IntegrityChecksumSHA256,
+			ModTime: modified, SourceCreatedTime: created, AccountBytes: size,
+			StartedAt: started, FinishedAt: finished, Integrity: downloader.ModeLocalOnly}
+		res.BytesPerSecond = averageBPS(started, finished, size)
+		return res, nil
 	}
 	hd, err := d.hybridForDrive()
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	res, err := hd.DownloadDriveFile(ctx, DriveFileRequest{
 		FileID: driveFile.ID, FileName: driveFile.Name, Hash: driveFile.Hash,
 		Size: driveFile.Size, DestPath: destPath, OnProgress: onProgress, SinkFactory: sinkFactory,
+		CreatedTime: created, ModifiedTime: modified,
 	})
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
-	return res.Size, res.Checksum, nil
+	return res, nil
 }
 
 // hybridForDrive 惰性构造 drive-only HybridDownloader（复用同一 API/池/日志配置）。

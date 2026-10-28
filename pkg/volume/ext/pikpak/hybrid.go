@@ -283,6 +283,11 @@ type downloadCtx struct {
 	chunkProgress ChunkProgressFunc // per-chunk 回调（pikget 逐行显示每个分片）
 	chunkOffsets  []int64           // 所有 chunk offset（升序，编号映射）
 	shareEnd      int64             // 分享区边界（chunk 来源判定）
+	// 下载审计统计（用户裁定 2026-10-28）：起止时刻 + 分通道字节（并发分片原子累加）。
+	// 统计口径：chunk **成功**时的完整长度（重试/续传跳过的块不计入本次会话字节）。
+	startedAt time.Time
+	anonBytes atomic.Int64
+	acctBytes atomic.Int64
 	// 多账号分片（round-12）：accounted 记录已转存副本的账号（name→转存文件 ID），
 	// 每账号首次选中时 Use 转存一次，后续该账号的 chunk 复用直链（避免 N×重复转存占空间）。
 	accounted map[string]string
@@ -413,6 +418,7 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 		shareID: shareID, sourceURL: source, target: target, destPath: destPath, onProgress: onProgress,
 		chunkProgress: d.chunkProgress,
 		accounted:     make(map[string]string),
+		startedAt:     time.Now(),
 	}
 	// 续传进度基准：读 .hybrid manifest 累计已完成 chunk 字节，预置 prog——
 	// 恢复时已完成 chunk 被 filterChunks 跳过，若 prog 从 0 起进度回调会从头计数
@@ -444,6 +450,9 @@ type DriveFileRequest struct {
 	DestPath    string
 	OnProgress  downloader.ProgressFunc
 	SinkFactory downloader.SinkFactory
+	// 源文件时间（网盘 API 带外；零值 = 未知）。转存产物 mtime 用 ModifiedTime。
+	CreatedTime  time.Time
+	ModifiedTime time.Time
 }
 
 // DownloadDriveFile 用账号区 Range 分片下载账号网盘文件（manifest 断点续传）。
@@ -452,15 +461,17 @@ func (d *HybridDownloader) DownloadDriveFile(ctx context.Context, req DriveFileR
 		return nil, fmt.Errorf("hybrid drive: invalid request (id=%q size=%d dest=%q)", req.FileID, req.Size, req.DestPath)
 	}
 	dc := &downloadCtx{
-		currentTotal:  req.Size,
-		lease:         NewRestoreLease(d.api, d.pool, d.autoDelete, d.log),
-		shareID:       "", // drive 模式无分享身份（manifest 源身份用 FileID）
-		sourceURL:     "",
-		target:        &ShareFile{ID: req.FileID, Name: req.FileName, Hash: req.Hash, Size: req.Size},
+		currentTotal: req.Size,
+		lease:        NewRestoreLease(d.api, d.pool, d.autoDelete, d.log),
+		shareID:      "", // drive 模式无分享身份（manifest 源身份用 FileID）
+		sourceURL:    "",
+		target: &ShareFile{ID: req.FileID, Name: req.FileName, Hash: req.Hash, Size: req.Size,
+			CreatedTime: req.CreatedTime, ModifiedTime: req.ModifiedTime},
 		destPath:      req.DestPath,
 		onProgress:    req.OnProgress,
 		chunkProgress: d.chunkProgress,
 		accounted:     make(map[string]string),
+		startedAt:     time.Now(),
 	}
 	// drive 模式：文件 id 已在网盘 → 直接复用（不转存、不删副本）。
 	dc.reusedID = req.FileID
@@ -625,7 +636,13 @@ func (d *HybridDownloader) runHybridWithShareEnd(ctx context.Context, dc *downlo
 	// 不是源身份哈希（源身份校验用 GCID 与 target.Hash 比对，已在上方 verify 完成）。
 	// 消费方若拿本字段比对源 hash 会误判——仅作本地完整性指纹。
 	res := &Result{Size: dc.currentTotal, Checksum: checksum, ChecksumAlgorithm: downloader.IntegrityChecksumSHA256,
-		ModTime: time.Now()}
+		ModTime:           sourceModTime(dc.target, dc.startedAt),
+		SourceCreatedTime: sourceCreatedTime(dc.target),
+		StartedAt:         dc.startedAt,
+		FinishedAt:        time.Now(),
+		AnonymousBytes:    dc.anonBytes.Load(),
+		AccountBytes:      dc.acctBytes.Load()}
+	res.BytesPerSecond = averageBPS(res.StartedAt, res.FinishedAt, res.AnonymousBytes+res.AccountBytes)
 	// 完整性三态（与旧 PikpakDownloader finalizeDownload 一致）：
 	//   GCID 权威命中（① 态）→ ModeAuthority + 带外权威 hash——语义校验管道据此
 	//   识别 hybrid 产出为权威可信，不再重复复算；
@@ -735,12 +752,20 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx
 	d.chunkPhase(dc, idx, c, "downloading", 0, nil)
 	if c.offset >= shareEnd {
 		cerr = d.downloadAccountChunk(ctx, dc, c)
+		if cerr == nil {
+			dc.acctBytes.Add(c.length)
+		}
 	} else {
 		cerr = d.downloadShareChunk(ctx, dc, c)
-		if cerr != nil {
+		if cerr == nil {
+			dc.anonBytes.Add(c.length) // 匿名（免账号配额）通道
+		} else {
 			d.metricsInc(func(m *HybridMetrics) { m.ShareSegmentFailed.Add(1); m.DowngradeTotal.Add(1) })
 			d.log.Warn("hybrid share chunk failed, downgrade to account", "offset", c.offset, "err", cerr)
 			cerr = d.downloadAccountChunk(ctx, dc, c)
+			if cerr == nil {
+				dc.acctBytes.Add(c.length) // 分享区降级到账号通道
+			}
 		}
 	}
 	switch {
@@ -1522,6 +1547,44 @@ func (d *HybridDownloader) initManifest(dc *downloadCtx, shareEnd int64) *hybrid
 	}
 	writeManifest(dc.destPath, m)
 	return m
+}
+
+// sourceModTime 返回源文件修改时间：优先提供方带外 modified，其次 created；
+// 都未知时回落 fallback（下载开始时刻——**不是**完成时刻，避免时间语义漂移），
+// 仍未设置则取当前时刻。用户裁定 2026-10-28：不得用「下载完成时刻」冒充源时间。
+func sourceModTime(target *ShareFile, fallback time.Time) time.Time {
+	if target != nil {
+		if !target.ModifiedTime.IsZero() {
+			return target.ModifiedTime
+		}
+		if !target.CreatedTime.IsZero() {
+			return target.CreatedTime
+		}
+	}
+	if !fallback.IsZero() {
+		return fallback
+	}
+	return time.Now()
+}
+
+// sourceCreatedTime 返回源文件创建时间（未知 → 零值，消费方不得顶替）。
+func sourceCreatedTime(target *ShareFile) time.Time {
+	if target == nil {
+		return time.Time{}
+	}
+	return target.CreatedTime
+}
+
+// averageBPS 平均带宽（字节/秒）；任一时刻为零或耗时为 0 → 0（不编造）。
+func averageBPS(start, end time.Time, total int64) int64 {
+	if start.IsZero() || end.IsZero() || total <= 0 {
+		return 0
+	}
+	secs := end.Sub(start).Seconds()
+	if secs <= 0 {
+		return 0
+	}
+	return int64(float64(total) / secs)
 }
 
 // markChunkDone 原子记录 chunk 完成（追加到 manifest；首次记录源身份）。

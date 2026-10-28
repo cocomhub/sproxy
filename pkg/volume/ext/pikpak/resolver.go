@@ -145,6 +145,21 @@ func NewShareResolver(cfg ShareResolverConfig) *ShareResolver {
 }
 
 // ShareFile 是分享里的一个文件（匿名解析结果，含直链）。
+// shareFileEntry 是分享 detail 列表条目（含源文件时间——转存产物 mtime 来源）。
+type shareFileEntry struct {
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Kind         string         `json:"kind"`
+	Size         sizex.ByteSize `json:"size"`
+	CreatedTime  string         `json:"created_time"`
+	ModifiedTime string         `json:"modified_time"`
+}
+
+// SourceTimes 解析条目时间（UTC；缺失/非法 → 零值）。
+func (f shareFileEntry) SourceTimes() (created, modified time.Time) {
+	return parseAPITime(f.CreatedTime), parseAPITime(f.ModifiedTime)
+}
+
 type ShareFile struct {
 	ID         string
 	Name       string
@@ -152,6 +167,10 @@ type ShareFile struct {
 	Size       int64
 	Hash       string // 文件内容哈希（幂等校验用：转存命中时比对）
 	DirectLink string // 匿名分享直链（web_content_link 或 medias[0].link.url）
+	// 源文件时间（分享 detail 的 created_time/modified_time，UTC；零值 = 未知）。
+	// 用户裁定 2026-10-28：转存产物 mtime 用源文件修改时间，不用下载完成时刻。
+	CreatedTime  time.Time
+	ModifiedTime time.Time
 }
 
 // ShareMeta 是分享解析结果。
@@ -191,40 +210,27 @@ func (r *ShareResolver) Resolve(ctx context.Context, shareURL string) (*ShareMet
 			r.log.Warn("share file_info failed", "file", f.ID, "err", ferr)
 			continue
 		}
-		out = append(out, ShareFile{ID: f.ID, Name: f.Name, Kind: f.Kind, Size: int64(f.Size), Hash: hash, DirectLink: link})
+		created, modified := f.SourceTimes()
+		out = append(out, ShareFile{ID: f.ID, Name: f.Name, Kind: f.Kind, Size: int64(f.Size), Hash: hash, DirectLink: link,
+			CreatedTime: created, ModifiedTime: modified})
 	}
 	return &ShareMeta{ShareID: shareID, Files: out}, nil
 }
 
 // listShareRecursive 递归列分享文件（根 + 所有子目录；folder 记录但无直链）。
 // 沿 folder 递归，避免 API 忽略 parent_id 时死循环（seen 去重）。
-func (r *ShareResolver) listShareRecursive(ctx context.Context, shareID, parentID, shareToken, captchaTok, dev string) ([]struct {
-	ID   string         `json:"id"`
-	Name string         `json:"name"`
-	Kind string         `json:"kind"`
-	Size sizex.ByteSize `json:"size"`
-}, error) {
+func (r *ShareResolver) listShareRecursive(ctx context.Context, shareID, parentID, shareToken, captchaTok, dev string) ([]shareFileEntry, error) {
 	return r.listShareRecursiveSeen(ctx, shareID, parentID, shareToken, captchaTok, dev, make(map[string]bool))
 }
 
 // listShareRecursiveSeen 递归列分享文件；seen 去重已访问 folder（API 可能忽略 parent_id
 // 返回重复结构 → 无去重会死循环）。
-func (r *ShareResolver) listShareRecursiveSeen(ctx context.Context, shareID, parentID, shareToken, captchaTok, dev string, seen map[string]bool) ([]struct {
-	ID   string         `json:"id"`
-	Name string         `json:"name"`
-	Kind string         `json:"kind"`
-	Size sizex.ByteSize `json:"size"`
-}, error) {
+func (r *ShareResolver) listShareRecursiveSeen(ctx context.Context, shareID, parentID, shareToken, captchaTok, dev string, seen map[string]bool) ([]shareFileEntry, error) {
 	files, err := r.shareDetail(ctx, shareID, parentID, shareToken, captchaTok, dev)
 	if err != nil {
 		return nil, err
 	}
-	var out []struct {
-		ID   string         `json:"id"`
-		Name string         `json:"name"`
-		Kind string         `json:"kind"`
-		Size sizex.ByteSize `json:"size"`
-	}
+	var out []shareFileEntry
 	for _, f := range files {
 		if f.Kind == "drive#folder" && seen[f.ID] {
 			continue // 已遍历过的 folder（API 重复返回）——跳过重复条目（round-11 Minor）
@@ -323,12 +329,7 @@ func (r *ShareResolver) RefreshLink(ctx context.Context, shareID, fileID, shareT
 
 // shareDetail 列分享文件（/drive/v1/share/detail?share_id=...）。
 // parentID 非空时列该文件夹子项（分享子目录遍历，与 pikpak.exe --parent 同端点/同参数）。
-func (r *ShareResolver) shareDetail(ctx context.Context, shareID, parentID, shareToken, captchaTok, dev string) ([]struct {
-	ID   string         `json:"id"`
-	Name string         `json:"name"`
-	Kind string         `json:"kind"`
-	Size sizex.ByteSize `json:"size"`
-}, error) {
+func (r *ShareResolver) shareDetail(ctx context.Context, shareID, parentID, shareToken, captchaTok, dev string) ([]shareFileEntry, error) {
 	q := url.Values{}
 	q.Set("share_id", shareID)
 	q.Set("client_id", webClientID)
@@ -340,13 +341,8 @@ func (r *ShareResolver) shareDetail(ctx context.Context, shareID, parentID, shar
 		q.Set("share_token", shareToken) // 分享子路径 token（/s/<id>/<token>）定位具体内容
 	}
 	var out struct {
-		ShareStatus string `json:"share_status"`
-		Files       []struct {
-			ID   string         `json:"id"`
-			Name string         `json:"name"`
-			Kind string         `json:"kind"`
-			Size sizex.ByteSize `json:"size"`
-		} `json:"files"`
+		ShareStatus string           `json:"share_status"`
+		Files       []shareFileEntry `json:"files"`
 	}
 	if err := r.doJSONGet(ctx, r.apiHost+"/drive/v1/share/detail", q, captchaTok, dev, &out); err != nil {
 		return nil, err
