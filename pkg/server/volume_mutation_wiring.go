@@ -8,9 +8,12 @@
 // 只能从 Root 观察。把 `files.Service.ApplyRootMutation` 挂到**每个本地卷根**上 ⇒ 派生状态
 // （搜索索引）由机制维护，而不是靠每条旁路写「记得登记」（#874 事故族的结构性根治）。
 //
-// 接线时机（两处，覆盖全生命周期）：
-//  1. `fileService()` 装配完成时（启动期，已有卷一次接全）；
-//  2. 运行期新建本地卷成功后（`POST /api/volumes/user`）。
+// 接线时机（**两阶段**，覆盖全生命周期）：
+//  1. **装配早期**（`RegisterRoutes` 里 `assembleVolumes` 之后、任何租户被创建之前）：
+//     `installLocalVolumeObservers` 把**转发器**装到每个本地卷根上——租户子根在创建时继承
+//     观察者，晚装会让已缓存的租户根（如启动期就创建的 anonymous）永不发事件；
+//  2. **文件服务装配完成**（`fileService()` 的 Once 内）：`wireLocalVolumeMutations` 把真正的
+//     处理函数（索引 + 缓存）存入原子指针，转发器随即生效。
 package server
 
 import (
@@ -19,15 +22,34 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volumestate"
 )
 
-// wireLocalVolumeMutations 给全部本地卷根装上变异观察者（幂等：重复调用只是重设同一回调）。
-// svc 为 nil（文件服务未装配）或卷集合未装配时安全跳过。
+// installLocalVolumeObservers 在**装配早期**把转发器装到全部本地卷根上（必须在任何
+// 租户子根创建之前调用——子根只在创建时继承观察者）。
+func (h *Handlers) installLocalVolumeObservers() {
+	if h == nil || h.volSet == nil {
+		return
+	}
+	for name, root := range h.volSet.LocalRoots() {
+		root.SetMutationObserver(name, h.dispatchRootMutation)
+	}
+}
+
+// dispatchRootMutation 把事件转给当前已装配的处理函数（未装配 ⇒ 丢弃：此时索引/缓存都还不存在，
+// 丢弃是安全的——索引按需从磁盘构建，缓存此时为空）。
+func (h *Handlers) dispatchRootMutation(m storage.Mutation) {
+	if fn := h.mutationHandler.Load(); fn != nil {
+		(*fn)(m)
+	}
+}
+
+// wireLocalVolumeMutations 绑定真正的处理函数（文件服务装配完成后调用一次）。同时重装观察者，
+// 覆盖「装配后新增的本地卷根」（幂等）。
 func (h *Handlers) wireLocalVolumeMutations(svc *files.Service) {
 	if h == nil || svc == nil || h.volSet == nil {
 		return
 	}
-	for name, root := range h.volSet.LocalRoots() {
-		root.SetMutationObserver(name, h.localVolumeMutationHandler(svc))
-	}
+	fn := h.localVolumeMutationHandler(svc)
+	h.mutationHandler.Store(&fn)
+	h.installLocalVolumeObservers()
 }
 
 // localVolumeMutationHandler 把一次 Root 变异**同时**投递给两个派生状态消费方：

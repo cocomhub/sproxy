@@ -100,6 +100,9 @@ type dirsEnv struct {
 	// fileMeta 为 true 时注入可信卷 meta 能力（WithFileMeta testMetaPolicy）——软删
 	// 随迁 meta/恢复/清理联动用例需要它；默认 false 零回归（不落 .meta）。
 	fileMeta bool
+	// viewList 非 nil 时把卷集适配为 files.VolumeViewLister（模拟装配层 ListDirView；
+	// nil = 不提供该能力 ⇒ 领域侧走索引路径）。
+	viewList VolumeViewLister
 	// externalOps 是外部卷对象操作接缝替身（非 nil 时注入 Service；MoveFile/外部卷用例用）。
 	externalOps ExternalVolumeOps
 	// volumeClassifier 是卷类型分类能力替身（非 nil 时经 WithVolumeTypeClassifier 注入；
@@ -222,7 +225,11 @@ func (r testRuntime) Volumes() VolumeSet {
 	if r.e.volSet == nil {
 		return nil
 	}
-	return dirsExternalSet{Set: r.e.volSet, ext: r.e.externalVols}
+	base := dirsExternalSet{Set: r.e.volSet, ext: r.e.externalVols}
+	if r.e.viewList != nil {
+		return viewListAdapter{dirsExternalSet: base, lister: r.e.viewList}
+	}
+	return base
 }
 
 func (r testRuntime) Tenant(volName, owner string) *storage.Tenant {

@@ -202,12 +202,28 @@ type VolumeSet interface {
 }
 
 // ExternalEntry 是外部卷（非本地后端）目录条目的领域视图（逻辑目录浏览的明文信息）：
-// 只含 Name/Size/IsDir，不暴露底层分片名与加密 meta。装配层（pkg/server）在适配
+// 只含 Name/Size/MTime/IsDir，不暴露底层分片名与加密 meta。装配层（pkg/server）在适配
 // sync.FS 的 ListDir 结果时转换为本类型。
 type ExternalEntry struct {
 	Name  string
 	IsDir bool
 	Size  int64
+	// MTime 是条目修改时间（UnixNano；0 = 未知）。列表给出 mod_time 需要它。
+	MTime int64
+}
+
+// VolumeViewLister 是**可选能力**：经卷视图（装配层 `VolumeView`，含可信封装/容量/状态缓存
+// 装饰）列出目录直接子项。
+//
+// 为什么需要它（设计 2026-10-28-volume-state-maintenance §15.2 步骤 2）：本地卷的 list 长期由
+// `searchIndex` 提供（进程内派生视图）；切到「卷状态视图」后，list 与 sync/mirror/备份走同一
+// 数据源，并自动享受卷状态缓存（默认 5 分钟、写穿失效）。
+//
+// key 为**卷根命名空间**键（`<owner>/user/<rel>`；`rel` 为空 = 用户桶根）。
+// supported=false 表示「本层不提供该能力」（如缓存被 `volume_state.disable` 关闭）⇒ 调用方
+// 回落索引路径（零回归）。
+type VolumeViewLister interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留
+	ListDirView(ctx context.Context, volName, key string) (entries []ExternalEntry, supported bool, err error)
 }
 
 // ExternalVolume 是外部卷的**目录浏览能力**（非本地后端 ListDir 透传）。

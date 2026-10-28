@@ -270,7 +270,7 @@ Delete/软删/恢复 → Invalidate(rel)
 |---|---|---|---|---|
 | **V1** | `pkg/volumestate` 骨架：`ObjectRef`/`DirSnapshot`/`TreeEntry`/`Cache`/`MutationBus`/`WrapVolume`；staging 原子读写 + LRU + TTL/代际判定；`storage.Root` 变异观察者（不接线） | 高 | 无 | 单测：命中/miss/TTL/代际/写穿/祖先 stale/degraded/保密卷不落盘 |
 | **V2** | **外部卷接入（本期核心）**：装配期 `WrapVolume` 包所有存储卷（含本地卷，见 §十六）；`files.List/Stat/Delete/Rename(?volume=)` 走装饰器；TTL 默认 5 分钟；secretdata 用 `StateGen`；`ExternalList/ExternalStat` 保留回源 | **最高** | 首次 list 慢、之后命中；进程外改写 ≤TTL 收敛 | e2e：二次 list 无远端往返（计数）；TTL 过期回源一次；`Refresh` 立即生效；删除后无幽灵 |
-| **V3** | **本地卷迁移**（可延后）：`searchIndex` 收敛为 TreeView 投影；`checksums.json` 一次性 import 后转只读；Root 事件接线 | 中（后续） | list/search 行为不变 | 全量绿；旧路径棘轮计数下降 |
+| **V3** | **本地卷迁移**：~~Root 事件接线~~（#880/#884 完成）、~~list 经卷状态视图~~（§15.2 步骤 2 完成）；剩余 `searchIndex` 仅服务搜索、`checksums.json` 只读化 | 中（部分完成） | list 数据源可切换（受 `volume_state.disable` 门控） | 全量绿；旧路径棘轮计数下降 |
 | **V4** | 清理：删 `searchIndex`/`checksums.json` 独立写路径与 `ExternalList` 薄转发；`RecordBypassWrite`/`IndexMove` 删（由事件总线取代）——**阶段一已完成**（见 §十三），剩余待 `checksums.json` 只读化与 TreeView 投影 | 低 | 无 | #874 回归用例绿；deadcode 门禁过 |
 | **V5** | 门禁 + 文档 + 归档：R40/R41/R42/R44/R45/R46 | 中 | 无 | `make check-ci` 全绿 |
 
@@ -472,6 +472,14 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
 建议按「先加 R41 的**影子台账**（记录调用点与迁移进度）→ 再逐卷切换 list → 最后删 index.list」
 三步推进，每步都可用现有 list/search 全量用例回归。
 
+**步骤 2 已落地（2026-10-28）**：`files.List` 在装配层提供 `VolumeViewLister` 且缓存未关闭
+（`volume_state.disable=false`）时，经**卷视图**逐卷 `ListDir` 聚合（`read_ops.go` 的
+`listViaVolumeViews`），与 sync/mirror/备份同一数据源并享受缓存；能力不可用（`disable: true`）
+⇒ 回落 `searchIndex`（零回归）。聚合语义与索引路径**逐条等价**（目录跨卷去重、文件带卷名与
+checksum、在途临时文件不对外可见），由 `TestList_ViewSourceEquivalentToIndex` 等用例钉住。
+门控放在**装配层单一事实源**（`filesVolumeSet.ListDirView` 读 `cfg.VolumeState.Disable`），
+领域侧只做「查能力 → 用能力」。
+
 **步骤 1 已落地（R41 影子台账）**：`internal/archcheck/list_source_gate_test.go` + `list_source_calls.tsv`
 （3 文件 / 5 处基线：`pkg/files/read_ops.go` 3、`options.go` 1、`pkg/server/files_service.go` 1）。
 只减不增；迁移完成后计数归零，届时把本门禁改成硬禁（禁止直调）。
@@ -523,6 +531,13 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
   - **本进程写** ⇒ 事件写穿，下一次 list 立即可见；
   - **进程外改动**（运维直写盘/同根多实例） ⇒ **≤TTL** 后可见；任何一次相关失效/回源也会看到它。
 
+- **观察者必须在租户创建之前装好**（本轮实测的启动顺序缺陷）：`RegisterRoutes` 在
+  `initStorageLayout` 里**先建 anonymous 租户**，而 `files.Service` 是懒装配的——观察者若等到
+  那时才装到卷根，已缓存的租户子根**不会继承**（`OpenTenant` 只在创建时继承）⇒ 该租户的所有写
+  都不发事件 ⇒ 缓存永不失效（UI 上 rename/delete 后列表仍是旧内容）。修法：**两阶段接线**——
+  装配早期装「转发器」（`installLocalVolumeObservers`），files.Service 就绪后再把真正的处理函数
+  存入 `Handlers.mutationHandler`（`atomic.Pointer`）。验收
+  `TestVolumeMutationObserver_InstalledBeforeTenants`（变异：移到 fileService 里装 ⇒ 红）。
 - **同卷复制快路径**：`secretdata` 的对象级复制（`CopyFile`，blob 直拷）由装配层经
   `Innermost` 探测、直接打到最内层 ⇒ 会绕过缓存失效。`CacheFS` 现在**转发 `CopyFile`**
   （底层未实现时穿透到 `Innermost`）并在成功后失效目标，调用方改走装饰视图 —— 复制结果对下一次
