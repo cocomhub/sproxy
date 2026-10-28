@@ -196,3 +196,26 @@ func TestService_ApplyRootMutation_ContentWriteUpserts(t *testing.T) {
 		t.Fatalf("条目 = %+v，期望 transfer/content.bin size=10", got)
 	}
 }
+
+// TestService_RecordBypassChecksum_LedgerOnly 钉住 V4 收敛语义：旁路写只需补 checksum，
+// **不得**顺手往索引里塞条目——本地卷的索引由 Root 事件维护；对「卷里并不存在的路径」调用
+// 全量 RecordBypassWrite 会造幽灵条目（root=nil ⇒ 无 Stat 兜底）。
+// 变异验证：把本用例的 RecordBypassChecksum 换成 RecordBypassWrite ⇒ 幽灵断言红。
+func TestService_RecordBypassChecksum_LedgerOnly(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	seedMutationIndex(t, env)
+
+	env.svc.RecordBypassChecksum("alice", "user/ghost.txt", "deadbeefdeadbeef")
+
+	// checksum 台账写入（Get 命中）。
+	if cs := env.svc.rt.checksumStore("alice"); cs == nil {
+		t.Fatal("checksum 台账未装配")
+	} else if got, _ := cs.Get("user/ghost.txt"); got != "deadbeefdeadbeef" {
+		t.Fatalf("checksum 台账 = %q，期望 deadbeefdeadbeef", got)
+	}
+	// 索引不新增幽灵条目。
+	if resp := decodeList(t, env.serve(env.svc.SearchFiles, "alice", "GET", "/api/files/search?q=ghost")); resp.Total != 0 {
+		t.Fatalf("只登记 checksum 不应进索引（幽灵条目），got %+v", resp.Files)
+	}
+}

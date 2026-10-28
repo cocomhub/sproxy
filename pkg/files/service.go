@@ -661,6 +661,21 @@ func (s *Service) RecordBypassWrite(owner, rel string, size int64, checksum, vol
 	s.index.upsert(owner, usr, size, modTime, volume, root, rel)
 }
 
+// RecordBypassChecksum 只登记旁路写的 **checksum 台账**（不碰搜索索引）。
+//
+// 用途（V4 收敛）：本地卷的搜索索引已由 `storage.Root` 事件自动维护（结构 + 内容写），
+// 旁路写只需补 checksum；再调 `RecordBypassWrite` 会重复 upsert（幂等但白做一次整表 COW 克隆），
+// 且对「被写入卷里并不存在的路径」会**造幽灵条目**（root=nil ⇒ 没有 Stat 兜底）。
+// 外部卷仍走 `RecordBypassWrite`（无本地 Root 事件）。
+func (s *Service) RecordBypassChecksum(owner, rel, checksum string) {
+	if checksum == "" {
+		return
+	}
+	if cs := s.rt.checksumStore(owner); cs != nil {
+		cs.Set(rel, checksum)
+	}
+}
+
 // AttachIndexSync 挂载集群索引同步钩子（装配层调用；nil = 不装配零回归）。
 func (s *Service) AttachIndexSync(sync IndexSync) {
 	if s.index != nil {
