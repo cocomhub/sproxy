@@ -556,18 +556,37 @@
 
   // ---- 版本 ----
   // meta extra 弹窗：KV 展示区 + JSON 编辑区（纯函数，R10 单测见 app-render.test.js）。
-  // extra 为空 → 显示「暂无元数据」；非空 → 每行 `key: value`。
+  // 读区 = 人类可视化（时间转本地时区、URL 解码为可见字符）；编辑区 = 原始 JSON 文本
+  // （用户裁定 2026-10-28：meta 存 UTC/原始，读区展示转换，编辑区保留原始可修复）。
   function buildMetaReadHtml(extra) {
     const keys = Object.keys(extra || {});
     if (keys.length === 0) return '<div style="padding:12px;color:var(--text-muted);font-size:13px;">暂无元数据（可在下方 JSON 输入添加）</div>';
     const rows = keys.map(function (k) {
       const v = extra[k];
-      const vs = (typeof v === 'string') ? v : JSON.stringify(v);
+      let vs = (typeof v === 'string') ? v : JSON.stringify(v);
+      vs = humanizeMetaValue(k, vs); // 人类可视化：时间键转本地时区、URL 解码可见
       return '<div style="display:flex;gap:8px;padding:3px 0;font-size:13px;">' +
         '<span style="font-weight:600;min-width:120px;font-family:monospace;">' + escHtml(k) + '</span>' +
         '<span style="word-break:break-all;">' + escHtml(vs) + '</span></div>';
     }).join('');
     return '<div style="padding:8px 0;border-bottom:1px solid var(--border-color);margin-bottom:8px;">' + rows + '</div>';
+  }
+
+  // humanizeMetaValue 人类可视化单值：UTC RFC3339 时间键 → 本地时区；URL 键 → 解码可见字符。
+  // 只影响**读区展示**；编辑区 textarea 仍是原始 JSON（可修复）。
+  function humanizeMetaValue(k, s) {
+    if (k === 'transferred_at' || k === 'created_at' || k === 'updated_at') {
+      const t = new Date(s);
+      if (!isNaN(t.getTime())) {
+        const p = function (n) { return String(n).padStart(2, '0'); };
+        return t.getFullYear() + '-' + p(t.getMonth() + 1) + '-' + p(t.getDate()) + ' ' +
+          p(t.getHours()) + ':' + p(t.getMinutes()) + ':' + p(t.getSeconds()) + ' ' + t.toString().match(/\(([^)]+)\)/)?.[1] || '';
+      }
+    }
+    if (k === 'source_url' || k === 'share_url' || k === 'resolved_url') {
+      try { return decodeURIComponent(s); } catch (e) { /* 非 URL 编码：原样 */ }
+    }
+    return s;
   }
 
   // meta extra 弹窗的完整 HTML（读区 + 编辑 textarea + 保存/删除按钮）。
@@ -1152,7 +1171,7 @@
     stripCloudId, isVideoName, isTransferTargetVolume,
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml, shareVolumeFor,
-    buildMetaReadHtml, buildMetaModalHtml,
+    buildMetaReadHtml, humanizeMetaValue, buildMetaModalHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
     auditTableHtml, volumesTableHtml, topologyEdgeColor, topologySvg,
     federationNodesHtml, federationServicesHtml,

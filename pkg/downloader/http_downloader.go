@@ -499,7 +499,7 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	}
 	// 落定成功：释放未用 reserve + 释放被丢弃的既有 partial 占用（discardedSize，无则为 0）。
 	done(true, discardedSize)
-	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag}, nil
+	return &Result{Size: downloaded, Checksum: checksum, ChecksumAlgorithm: IntegrityChecksumSHA256, ModTime: modTime, ETag: etag}, nil
 }
 
 // wrapSink 用 sinkFactory 包装写盘 writer 并返回 sink 与其终态回调。
@@ -656,7 +656,7 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 		return nil, err
 	}
 	done(true, 0)
-	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ModTime: modTime, ETag: etag}, nil
+	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ChecksumAlgorithm: IntegrityChecksumSHA256, ModTime: modTime, ETag: etag}, nil
 }
 
 // hashExistingPartial 打开既有部分文件并流式计算其 SHA-256，返回可继续写入的哈希
@@ -731,7 +731,7 @@ func (d *HTTPDownloader) finalizePartial(partialPath, destPath string, resp *htt
 	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
 		return nil, err
 	}
-	return &Result{Size: existingSize, Checksum: hex.EncodeToString(h.Sum(nil)), ModTime: modTime, ETag: etag}, nil
+	return &Result{Size: existingSize, Checksum: hex.EncodeToString(h.Sum(nil)), ChecksumAlgorithm: IntegrityChecksumSHA256, ModTime: modTime, ETag: etag}, nil
 }
 
 // parseSuffixRange 解析 416 响应中的 "bytes */<total>" 形式 Content-Range。

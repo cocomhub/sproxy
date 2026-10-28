@@ -196,6 +196,16 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     硬编码真实分享 URL（含子路径 token）；URL 类真实数据按常见规范用 **CLI flag 运行期传入**
     （`-share`，默认留空 + 强制校验），凭据/密钥类用环境变量。
 
+21b. **sproxy 全仓禁止真实/敏感数据，测试一律通用假数据（2026-10-28 用户明示，强制）**：
+    **绝对禁止**在 sproxy 代码/测试/注释/文档中出现任何真实信息——真实分享 URL/容器 id/
+    分享 id/网盘文件 id、真实番号（任何站点实际 code）、真实文件名/标题（含中文/日文真实内容）、
+    真实 IP/域名/端口、凭据/token/密钥。一律使用**通用假数据**：`EXAMPLE-*` 占位番号、
+    `REALSHAREID001`/`p5containerid` 占位分享 id、纯占位中文（无真实语义）、`example.com`/
+    `127.0.0.1` 等通用地址。提交前 `git grep` 扫描：
+    `keepshare.org/p<id>`、`mypikpak.com/s/<id>`、真实文件名/标题、真实 IP（凭据/分享 URL 模式见硬规则 21）；
+    命中即改假数据再提交（教训 2026-10-28：normalize/restore/urlresolver 测试曾留真实番号
+    与真实分享 id，全仓扫描后逐一占位化）。
+
 
 
 ## 常用命令

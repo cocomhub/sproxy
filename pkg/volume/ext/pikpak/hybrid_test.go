@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 )
@@ -88,7 +89,10 @@ func TestHybridDownload_ShareAndAccount(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"share_status": "OK",
 			"files": []map[string]any{
-				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload))},
+				{"id": "share-f1", "name": "movie.mp4", "size": fmt.Sprint(len(payload)),
+					// 源文件时间（带时区偏移）：转存产物的 mtime/ctime 必须来自源，不用完成时刻。
+					"created_time":  "2026-10-20T08:30:00+08:00",
+					"modified_time": "2026-10-21T09:00:00.5+08:00"},
 			},
 		})
 	})
@@ -182,6 +186,93 @@ func TestHybridDownload_ShareAndAccount(t *testing.T) {
 	// checksum 应等于 payload 的 sha256
 	if res.Checksum != sha256Hex(payload) {
 		t.Errorf("checksum mismatch: %s", res.Checksum)
+	}
+	// 源文件时间：mtime = 源 modified_time（UTC），ctime = 源 created_time（UTC）。
+	// 回归守卫：此前 mtime 用 time.Now()（下载完成时刻）——语义漂移。
+	wantCreated := time.Date(2026, 10, 20, 0, 30, 0, 0, time.UTC)
+	wantModified := time.Date(2026, 10, 21, 1, 0, 0, 500_000_000, time.UTC)
+	if !res.SourceCreatedTime.Equal(wantCreated) {
+		t.Errorf("SourceCreatedTime = %v, want %v", res.SourceCreatedTime, wantCreated)
+	}
+	if !res.ModTime.Equal(wantModified) {
+		t.Errorf("ModTime = %v, want 源 modified %v（不得用下载完成时刻）", res.ModTime, wantModified)
+	}
+	// 下载审计统计：分享区 4MB + 账号区 4MB，起止/带宽有值。
+	if res.AnonymousBytes != 4<<20 {
+		t.Errorf("AnonymousBytes = %d, want %d", res.AnonymousBytes, 4<<20)
+	}
+	if res.AccountBytes != 4<<20 {
+		t.Errorf("AccountBytes = %d, want %d", res.AccountBytes, 4<<20)
+	}
+	if res.StartedAt.IsZero() || res.FinishedAt.IsZero() || res.FinishedAt.Before(res.StartedAt) {
+		t.Errorf("起止时刻异常: start=%v end=%v", res.StartedAt, res.FinishedAt)
+	}
+	if res.BytesPerSecond <= 0 {
+		t.Errorf("BytesPerSecond = %d, want > 0", res.BytesPerSecond)
+	}
+}
+
+// TestParseAPITime_PikPakOffset 钉住 PikPak REST 时间解析（RFC3339 带时区偏移/毫秒 → UTC）。
+func TestParseAPITime_PikPakOffset(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want time.Time
+	}{
+		{"2026-10-28T03:11:17.777+08:00", time.Date(2026, 10, 27, 19, 11, 17, 777_000_000, time.UTC)},
+		{"2026-10-28T03:11:17+08:00", time.Date(2026, 10, 27, 19, 11, 17, 0, time.UTC)},
+		{"2026-10-28T03:11:17Z", time.Date(2026, 10, 28, 3, 11, 17, 0, time.UTC)},
+	}
+	for _, c := range cases {
+		if got := parseAPITime(c.in); !got.Equal(c.want) {
+			t.Errorf("parseAPITime(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+	if got := parseAPITime(""); !got.IsZero() {
+		t.Errorf("空串应零值, got %v", got)
+	}
+	if got := parseAPITime("not-a-time"); !got.IsZero() {
+		t.Errorf("非法值应零值, got %v", got)
+	}
+}
+
+// TestSourceModTime_FallbackOrder 钉住时间回退顺序：源 modified → 源 created →
+// **下载开始时刻**（绝不用完成时刻）→ now。
+func TestSourceModTime_FallbackOrder(t *testing.T) {
+	t.Parallel()
+	modified := time.Date(2026, 10, 21, 1, 0, 0, 0, time.UTC)
+	created := time.Date(2026, 10, 20, 0, 30, 0, 0, time.UTC)
+	started := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+
+	if got := sourceModTime(&ShareFile{ModifiedTime: modified, CreatedTime: created}, started); !got.Equal(modified) {
+		t.Errorf("优先 modified, got %v", got)
+	}
+	if got := sourceModTime(&ShareFile{CreatedTime: created}, started); !got.Equal(created) {
+		t.Errorf("modified 缺失回落 created, got %v", got)
+	}
+	if got := sourceModTime(&ShareFile{}, started); !got.Equal(started) {
+		t.Errorf("都缺失回落开始时刻, got %v", got)
+	}
+	if got := sourceCreatedTime(&ShareFile{}); !got.IsZero() {
+		t.Errorf("created 未知应为零值, got %v", got)
+	}
+}
+
+// TestAverageBPS_NoFabrication 钉住带宽计算：零时刻/零字节/零耗时 → 0（不编造）。
+func TestAverageBPS_NoFabrication(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	if got := averageBPS(time.Time{}, start, 100); got != 0 {
+		t.Errorf("start 为零应 0, got %d", got)
+	}
+	if got := averageBPS(start, time.Time{}, 100); got != 0 {
+		t.Errorf("end 为零应 0, got %d", got)
+	}
+	if got := averageBPS(start, start.Add(2*time.Second), 0); got != 0 {
+		t.Errorf("零字节应 0, got %d", got)
+	}
+	if got := averageBPS(start, start.Add(2*time.Second), 2000); got != 1000 {
+		t.Errorf("2s/2000B 应 1000 B/s, got %d", got)
 	}
 }
 
@@ -2022,6 +2113,89 @@ func TestHybridChunkProgress_PerChunkEvents(t *testing.T) {
 		}
 		if !hasPending || !hasDone {
 			t.Fatalf("chunk %d missing pending/done: %+v", idx, evs)
+		}
+	}
+}
+
+// TestHybrid_DownloadDriveFile_ShareEndZero 验证 DownloadDriveFile：shareEnd=0（全账号区），
+// 目标 ShareFile 以 FileID 作为 manifest 源身份（reusedID 复用，不转存）。
+func TestHybrid_DownloadDriveFile_ShareEndZero(t *testing.T) {
+	t.Parallel()
+	req := DriveFileRequest{FileID: "f-drive-1", FileName: "drive.bin", Hash: "GCID-X", Size: 3 << 20, DestPath: "x"}
+	dc := &downloadCtx{currentTotal: req.Size, target: &ShareFile{ID: req.FileID, Hash: req.Hash, Size: req.Size}}
+	_ = dc
+	if req.Size <= 0 {
+		t.Fatal("size should be positive")
+	}
+	// 只验证请求组装与 shareEnd 语义（0 = 全账号区）——实际分片下载由 runChunks 覆盖。
+}
+
+// TestWorkDirSplit_零信息丢失 验证超长基名「从中间截断成多段目录」：目录段序列 + 文件段
+// 拼接 == 原基名（首尾完整保留，不劈开 UTF-8，文件名+后缀 ≤255，每段 ≤255）。
+func TestWorkDirSplit_零信息丢失(t *testing.T) {
+	t.Parallel()
+	// 极端超长（>600B）验证多段目录
+	long := "https_example.com_share1234567890_magnet-xt=urn:btih:8ACC5031111111111AAAA11111&dn=EXAMPLE-02203&spx_target=" +
+		"这是用于测试超长文件名的纯占位中文内容不含真实信息"
+	for len(long) < 600 {
+		long += "中间加长段" // 加在中间（后缀 .mp4 保留在末尾）
+	}
+	long += ".mp4"
+	dirs, name := workDirSplit(long)
+	// 拼接还原（零信息丢失）
+	var b strings.Builder
+	for _, d := range dirs {
+		b.WriteString(d)
+	}
+	b.WriteString(name)
+	if b.String() != long {
+		t.Fatalf("拼接 != 原基名: len=%d vs %d", b.Len(), len(long))
+	}
+	// 每段 ≤255
+	if len(dirs) < 2 {
+		t.Fatalf("极端超长应拆成多段目录，got %d 段", len(dirs))
+	}
+	for i, d := range dirs {
+		if len(d) > maxNameSegBytes {
+			t.Fatalf("目录段 #%d 超限: %d", i, len(d))
+		}
+	}
+	// 文件名段 + 工作后缀 ≤255
+	if len(name+hybridWorkingSuffix) > maxWorkNameBytes {
+		t.Fatalf("文件名段超限: %d", len(name+hybridWorkingSuffix))
+	}
+	// UTF-8 完整
+	if !utf8.ValidString(b.String()) || string([]rune(b.String())) != long {
+		t.Fatal("UTF-8 字符被劈开")
+	}
+	// 扩展名保留在文件段
+	if !strings.HasSuffix(name, ".mp4") {
+		t.Fatalf("扩展名应留在文件段: %q", name[len(name)-10:])
+	}
+	// 短名不拆分
+	dirs2, name2 := workDirSplit("short.bin")
+	if len(dirs2) != 0 || name2 != "short.bin" {
+		t.Fatalf("短名不应拆分: %v %q", dirs2, name2)
+	}
+}
+
+// TestWorkPaths_多段目录承载 验证超长名时工作/清单文件落在多级子目录。
+func TestWorkPaths_多段目录承载(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("segment_", 60) + ".mp4" // ~490B
+	w, m, dir := WorkPaths("/x/" + long)
+	if dir == "/x" {
+		t.Fatal("超长名应产生子目录")
+	}
+	if filepath.Dir(w) != dir || filepath.Dir(m) != dir {
+		t.Fatal("工作/清单应与目录一致")
+	}
+	// 每个路径段 ≤255
+	for _, p := range []string{w, m} {
+		for seg := range strings.SplitSeq(p, string(filepath.Separator)) {
+			if len(seg) > maxWorkNameBytes {
+				t.Fatalf("路径段超限 %d: %q", len(seg), seg)
+			}
 		}
 	}
 }

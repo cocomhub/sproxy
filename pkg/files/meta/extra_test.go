@@ -171,3 +171,55 @@ func TestTrimExtra_CustomPreserved(t *testing.T) {
 		t.Fatal("白名单空值也应裁剪")
 	}
 }
+
+// TestValidateExtra_TransferBusinessKeys 锁定「业务层（sdserver）实际写入的 meta_extra 键集」
+// 全部通过校验（含本轮新增的 resolution/origin_name/share_id/share_file_id/subtitle_files
+// 与 x_ 扩展）。防两仓键集漂移：业务侧写得出、服务端拒写（400/静默丢弃）。
+func TestValidateExtra_TransferBusinessKeys(t *testing.T) {
+	t.Parallel()
+	extra := map[string]any{
+		"code": "EXAMPLE-001", "title_ja": "EXAMPLE-001 タイトル", "title_cn": "示例标题",
+		"release_date": "2026-01-02", "maker": "メーカー", "series": "シリーズ",
+		"label": "レーベル", "director": "監督",
+		"actress": []string{"女優A"}, "genres": []string{"ジャンル"},
+		"duration_sec": int64(3600), "uncensored": true, "has_cn_sub": true,
+		"page_url": "https://example.com/ja/example-001", "site": "example",
+		"share_url": "https://example.com/share/x", "share_hash": "GCID-X",
+		"share_file_name": "EXAMPLE-001.mp4", "share_file_id": "f-1", "share_id": "s-1",
+		"origin_name": "EXAMPLE-001.mp4", "resolution": "1080p",
+		"subtitle_files": []string{"EXAMPLE-001.srt"},
+		// x_ 扩展（双语/角色/封面/来源/内容分组）
+		"x_maker_cn": "厂牌", "x_series_cn": "系列", "x_label_cn": "标签",
+		"x_director_cn": "导演", "x_release_date_cn": "2026年1月2日",
+		"x_actress_cn": []string{"女优A"}, "x_genres_cn": []string{"类型"},
+		"x_cover_url": "https://example.com/cover.jpg", "x_has_en_sub": true,
+		"x_content_group": "EXAMPLE-001", "x_type": "composite", "x_role": "video",
+		"x_share_source_url": "https://example.com/keepshare/x",
+	}
+	if err := ValidateExtra(extra); err != nil {
+		t.Fatalf("业务 meta_extra 键集校验失败（键集漂移）: %v", err)
+	}
+}
+
+// TestValidateExtra_DownloadAuditKeys 锁定云端转存写入的下载审计键（x_download_*/x_source_*）
+// 属于合法自定义扩展（避免审计数据在 upload 校验路径被拒）。
+func TestValidateExtra_DownloadAuditKeys(t *testing.T) {
+	t.Parallel()
+	extra := map[string]any{
+		"source":                     "transfer",
+		"checksum_algorithm":         "sha256",
+		"authority_hash_algorithm":   "pikpak-gcid",
+		"downloaded_at":              "2026-10-28T02:01:30Z",
+		"x_source_created_at":        "2026-10-20T01:02:03Z",
+		"x_source_modified_at":       "2026-10-21T04:05:06Z",
+		"x_download_started_at":      "2026-10-28T02:00:00Z",
+		"x_download_finished_at":     "2026-10-28T02:01:30Z",
+		"x_download_duration_ms":     int64(90000),
+		"x_download_anonymous_bytes": int64(100),
+		"x_download_account_bytes":   int64(200),
+		"x_download_bytes_per_sec":   int64(3),
+	}
+	if err := ValidateExtra(extra); err != nil {
+		t.Fatalf("下载审计键校验失败: %v", err)
+	}
+}

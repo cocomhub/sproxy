@@ -15,9 +15,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
@@ -54,11 +57,96 @@ const hybridChunkAttempts = 3
 // defaultChunkRetryBackoff 是分片重试退避基数（指数 + 抖动）。
 const defaultChunkRetryBackoff = 500 * time.Millisecond
 
-// WorkingPath 返回下载期临时文件路径（分片 WriteAt 目标；全部分片完成且权威校验通过后才 rename 到 destPath）。
-func WorkingPath(destPath string) string { return destPath + hybridWorkingSuffix }
+// maxWorkNameBytes 是单个文件名（含后缀）的字节上限：NTFS/ext4 限制 255 字节。
+// 工作/清单文件要在此上限内，且**不丢失任何信息**——超长基名「从中间截断成目录」：
+// 前半段作为子目录，后半段（含扩展名）作为文件名，两段拼接即完整原名。
+//
+// 实测背景：keepshare 长 URL + 中文 spx_target → cloudfilename 生成 ~250B 文件名，
+// 再加 .hybrid.downloading（19B）超限（file name too long）。
+const maxWorkNameBytes = 255
+
+// workDirSplit 把超长基名拆成（目录段序列, 文件名段）：目录段**逐级递归拆分**（每段
+// ≤ maxNameSegBytes），文件段持有最后一段（含扩展名，加后缀 ≤255）。全部段按序拼接
+// == 原基名（**零信息丢失**，UTF-8 边界安全）。任意长度都可承载——目录天然不受单
+// 文件名 255 限制，多段目录串行叠加。
+//
+// 返回 (dirSegs, fileSeg)：dirSegs 为空表示无需拆分（原名已够短）。
+func workDirSplit(base string) ([]string, string) {
+	if len(base)+len(hybridWorkingSuffix) <= maxWorkNameBytes {
+		return nil, base // 短名：平铺不建子目录
+	}
+	// 文件段预算 = 255 - 工作后缀长（保证工作文件名 ≤255）。
+	budget := max(maxWorkNameBytes-len(hybridWorkingSuffix), 1)
+	// 尾部（含扩展名）整段保留为文件段：扩展名不应被拆进目录（失去落盘语义）。
+	// 注意：扩展名本身超预算（异常长，如 URL 参数被当成 ext）→ **不剥 tail**（置空），
+	// 否则 tail==base 会让 base 被切光后又重复拼回（拼接长度翻倍）。
+	tail := ""
+	if ext := path.Ext(base); len(ext) > 0 && len(ext) < budget {
+		tail = base[len(base)-len(ext):]
+		base = base[:len(base)-len(ext)]
+	}
+	var dirs []string
+	for len(base) > 0 && len(base)+len(tail)+len(hybridWorkingSuffix) > maxWorkNameBytes {
+		// 每段取可承载量的一半（远离 255；UTF-8 安全切）。
+		seg := min(len(base), maxNameSegBytes)
+		seg = max(utf8SafeCut(base, seg),
+			// 极端单字节场景兜底
+			1)
+		dirs = append(dirs, base[:seg])
+		base = base[seg:]
+	}
+	fileSeg := base + tail
+	if fileSeg == "" {
+		fileSeg = "download" // 兜底（理论不可达）
+	}
+	return dirs, fileSeg
+}
+
+// maxNameSegBytes 是目录段单段字节上限（≤255；取 240 留余量，保证段与段之间即使
+// 系统加分隔符也不撞限）。
+const maxNameSegBytes = 240
+
+// utf8SafeCut 返回不超过 n 且不劈开 UTF-8 字符的切点。
+func utf8SafeCut(s string, n int) int {
+	if n >= len(s) {
+		return len(s)
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return n
+}
+
+// WorkPaths 返回（工作文件, 清单文件, 目录）路径。
+// 超长基名「从中间截断成目录」：目录段作为**逐级子目录**（保留原名各段），文件段作为
+// 实际文件名（保留原名尾部 + 扩展名）——全段拼接即完整原名，零信息丢失、不超 255。
+func WorkPaths(destPath string) (working, manifest, dir string) {
+	dir = filepath.Dir(destPath)
+	dirs, name := workDirSplit(filepath.Base(destPath))
+	for _, d := range dirs {
+		dir = filepath.Join(dir, d)
+	}
+	return filepath.Join(dir, name+hybridWorkingSuffix),
+		filepath.Join(dir, name+hybridManifestSuffix), dir
+}
+
+// WorkingPath 返回下载期临时文件路径（分片 WriteAt 目标；全部完成并校验通过后 rename 到 destPath）。
+func WorkingPath(destPath string) string {
+	w, _, _ := WorkPaths(destPath)
+	return w
+}
 
 // StaleManifestPath 返回失效 manifest 的归档路径（保留进度证据，rebuild 修复命令可参考）。
-func StaleManifestPath(destPath string) string { return destPath + hybridStaleSuffix }
+func StaleManifestPath(destPath string) string {
+	w, _, _ := WorkPaths(destPath)
+	return w + hybridStaleSuffix
+}
+
+// ManifestPath 返回进度文件（manifest）路径——与 CLI/rebuild 共用同一命名，不重复硬编码。
+func ManifestPath(destPath string) string {
+	_, m, _ := WorkPaths(destPath)
+	return m
+}
 
 // ChunkError 是分片级失败（带 offset/length）——CLI 据此提示「缺哪一片/可续传」，
 // 不再只给一句网络错误。
@@ -191,6 +279,11 @@ type downloadCtx struct {
 	chunkProgress ChunkProgressFunc // per-chunk 回调（pikget 逐行显示每个分片）
 	chunkOffsets  []int64           // 所有 chunk offset（升序，编号映射）
 	shareEnd      int64             // 分享区边界（chunk 来源判定）
+	// 下载审计统计（用户裁定 2026-10-28）：起止时刻 + 分通道字节（并发分片原子累加）。
+	// 统计口径：chunk **成功**时的完整长度（重试/续传跳过的块不计入本次会话字节）。
+	startedAt time.Time
+	anonBytes atomic.Int64
+	acctBytes atomic.Int64
 	// 多账号分片（round-12）：accounted 记录已转存副本的账号（name→转存文件 ID），
 	// 每账号首次选中时 Use 转存一次，后续该账号的 chunk 复用直链（避免 N×重复转存占空间）。
 	accounted map[string]string
@@ -198,10 +291,9 @@ type downloadCtx struct {
 }
 
 // NewHybridDownloader 创建混合下载器。
+// Resolver 可为 nil（**drive-only 模式**：DownloadDriveFile 下载账号网盘已有文件，
+// 不需要分享解析）；分享下载（Download）必须提供 Resolver——由调用方保证。
 func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
-	if cfg.Resolver == nil {
-		return nil, fmt.Errorf("hybrid: resolver required")
-	}
 	if cfg.API == nil {
 		return nil, fmt.Errorf("hybrid: api required")
 	}
@@ -322,6 +414,7 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 		shareID: shareID, sourceURL: source, target: target, destPath: destPath, onProgress: onProgress,
 		chunkProgress: d.chunkProgress,
 		accounted:     make(map[string]string),
+		startedAt:     time.Now(),
 	}
 	// 续传进度基准：读 .hybrid manifest 累计已完成 chunk 字节，预置 prog——
 	// 恢复时已完成 chunk 被 filterChunks 跳过，若 prog 从 0 起进度回调会从头计数
@@ -338,6 +431,47 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 		}
 	}
 	return d.runHybrid(ctx, dc, sinkFactory)
+}
+
+// DriveFileRequest 是「下载账号网盘里已有文件」的请求（复用 hybrid 账号区分片内核）。
+//
+// 与分享下载的差别只有一处：文件已在网盘，**全部字节走账号区**（shareEnd = 0）——
+// 分片规划/manifest 续传/GCID 权威校验/临时文件原子 rename 完全复用 runHybrid，
+// 不另写下载实现（用户裁定 2026-10-28：pikget 生产路径已验证，禁止重复实现）。
+type DriveFileRequest struct {
+	FileID      string // 账号网盘文件 ID（每 chunk 经 api.DownloadLink 取新 FETCH 直链）
+	FileName    string
+	Hash        string // 官方 hash（GCID）；非空时做权威校验
+	Size        int64
+	DestPath    string
+	OnProgress  downloader.ProgressFunc
+	SinkFactory downloader.SinkFactory
+	// 源文件时间（网盘 API 带外；零值 = 未知）。转存产物 mtime 用 ModifiedTime。
+	CreatedTime  time.Time
+	ModifiedTime time.Time
+}
+
+// DownloadDriveFile 用账号区 Range 分片下载账号网盘文件（manifest 断点续传）。
+func (d *HybridDownloader) DownloadDriveFile(ctx context.Context, req DriveFileRequest) (*Result, error) {
+	if req.FileID == "" || req.Size <= 0 || req.DestPath == "" {
+		return nil, fmt.Errorf("hybrid drive: invalid request (id=%q size=%d dest=%q)", req.FileID, req.Size, req.DestPath)
+	}
+	dc := &downloadCtx{
+		currentTotal: req.Size,
+		lease:        NewRestoreLease(d.api, d.pool, d.autoDelete, d.log),
+		shareID:      "", // drive 模式无分享身份（manifest 源身份用 FileID）
+		sourceURL:    "",
+		target: &ShareFile{ID: req.FileID, Name: req.FileName, Hash: req.Hash, Size: req.Size,
+			CreatedTime: req.CreatedTime, ModifiedTime: req.ModifiedTime},
+		destPath:      req.DestPath,
+		onProgress:    req.OnProgress,
+		chunkProgress: d.chunkProgress,
+		accounted:     make(map[string]string),
+		startedAt:     time.Now(),
+	}
+	// drive 模式：文件 id 已在网盘 → 直接复用（不转存、不删副本）。
+	dc.reusedID = req.FileID
+	return d.runHybridWithShareEnd(ctx, dc, req.SinkFactory, 0)
 }
 
 // normalizeSource 归一分享源（keepshare 镜像 → 真实 mypikpak URL）；失败时原样返回
@@ -427,15 +561,26 @@ func (d *HybridDownloader) verifyHybridGCID(ctx context.Context, dc *downloadCtx
 }
 
 func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory) (*Result, error) {
+	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
+	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
+	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
+	shareEnd := d.computeShareEnd(ctx, dc.target, dc.currentTotal)
+	return d.runHybridWithShareEnd(ctx, dc, sinkFactory, shareEnd)
+}
+
+// runHybridWithShareEnd 是 runHybrid 的主体（shareEnd 由调用方给定）：
+// 分享下载用 computeShareEnd 结果；账号网盘文件下载（DownloadDriveFile）传 0（全账号区）。
+func (d *HybridDownloader) runHybridWithShareEnd(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory, shareEnd int64) (*Result, error) {
 	integrityVerified := false // GCID 权威复算命中标记（Result 三态用）
 	// 写盘目标：临时文件 destPath + ".hybrid.downloading"（分片 WriteAt 全落这里，
 	// 完成并校验通过后才 rename 到最终 destPath）。manifest 随临时文件（destPath+".hybrid"
 	// 不变——源身份/恢复逻辑零改动）。
 	dc.working = WorkingPath(dc.destPath)
-	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
-	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
-	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
-	shareEnd := d.computeShareEnd(ctx, dc.target, dc.currentTotal)
+	// WorkPaths 超长名会把文件名拆成「子目录 + 文件段」→ 子目录可能尚不存在，
+	// 下载开始前先 MkdirAll（preallocate 打开文件前目录必须存在）。
+	if err := ensureWorkDir(dc.working); err != nil {
+		return nil, err
+	}
 	d.log.Info("hybrid plan", "total", dc.currentTotal, "share_end", shareEnd, "chunk", d.chunkSize)
 	chunks := planChunks(0, dc.currentTotal, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
@@ -486,7 +631,14 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	// 注意：Checksum 是**本地落盘文件的 SHA-256**（自证文件未被篡改/续传拼错），
 	// 不是源身份哈希（源身份校验用 GCID 与 target.Hash 比对，已在上方 verify 完成）。
 	// 消费方若拿本字段比对源 hash 会误判——仅作本地完整性指纹。
-	res := &Result{Size: dc.currentTotal, Checksum: checksum, ModTime: time.Now()}
+	res := &Result{Size: dc.currentTotal, Checksum: checksum, ChecksumAlgorithm: downloader.IntegrityChecksumSHA256,
+		ModTime:           sourceModTime(dc.target, dc.startedAt),
+		SourceCreatedTime: sourceCreatedTime(dc.target),
+		StartedAt:         dc.startedAt,
+		FinishedAt:        time.Now(),
+		AnonymousBytes:    dc.anonBytes.Load(),
+		AccountBytes:      dc.acctBytes.Load()}
+	res.BytesPerSecond = averageBPS(res.StartedAt, res.FinishedAt, res.AnonymousBytes+res.AccountBytes)
 	// 完整性三态（与旧 PikpakDownloader finalizeDownload 一致）：
 	//   GCID 权威命中（① 态）→ ModeAuthority + 带外权威 hash——语义校验管道据此
 	//   识别 hybrid 产出为权威可信，不再重复复算；
@@ -495,6 +647,7 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	if dc.target.Hash != "" && integrityVerified {
 		res.Integrity = downloader.ModeAuthority
 		res.AuthorityHash = dc.target.Hash
+		res.AuthorityHashAlgorithm = downloader.IntegrityAlgPikpakGCID // 下载方声明
 	} else {
 		res.Integrity = downloader.ModeLocalOnly
 	}
@@ -595,12 +748,20 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx
 	d.chunkPhase(dc, idx, c, "downloading", 0, nil)
 	if c.offset >= shareEnd {
 		cerr = d.downloadAccountChunk(ctx, dc, c)
+		if cerr == nil {
+			dc.acctBytes.Add(c.length)
+		}
 	} else {
 		cerr = d.downloadShareChunk(ctx, dc, c)
-		if cerr != nil {
+		if cerr == nil {
+			dc.anonBytes.Add(c.length) // 匿名（免账号配额）通道
+		} else {
 			d.metricsInc(func(m *HybridMetrics) { m.ShareSegmentFailed.Add(1); m.DowngradeTotal.Add(1) })
 			d.log.Warn("hybrid share chunk failed, downgrade to account", "offset", c.offset, "err", cerr)
 			cerr = d.downloadAccountChunk(ctx, dc, c)
+			if cerr == nil {
+				dc.acctBytes.Add(c.length) // 分享区降级到账号通道
+			}
 		}
 	}
 	switch {
@@ -617,6 +778,18 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx
 		d.chunkPhase(dc, idx, c, "failed", 0, cerr)
 	}
 	return cerr
+}
+
+// ensureWorkDir 确保工作文件所在目录存在（WorkPaths 超长名拆出的子目录）。
+func ensureWorkDir(working string) error {
+	dir := filepath.Dir(working)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("hybrid workdir: %w", err)
+	}
+	return nil
 }
 
 // chunkIndex 返回 chunk offset 对应的编号（0 起，按 offset 升序）。
@@ -1321,9 +1494,6 @@ type manifestSource struct {
 	URL string `json:"url,omitempty"`
 }
 
-// ManifestPath 返回进度文件（manifest）路径——与 CLI/rebuild 共用同一命名，不重复硬编码。
-func ManifestPath(destPath string) string { return destPath + hybridManifestSuffix }
-
 // loadManifest 读取 manifest（不存在返回 nil）。
 func loadManifest(destPath string) *hybridManifest {
 	data, err := os.ReadFile(ManifestPath(destPath))
@@ -1373,6 +1543,44 @@ func (d *HybridDownloader) initManifest(dc *downloadCtx, shareEnd int64) *hybrid
 	}
 	writeManifest(dc.destPath, m)
 	return m
+}
+
+// sourceModTime 返回源文件修改时间：优先提供方带外 modified，其次 created；
+// 都未知时回落 fallback（下载开始时刻——**不是**完成时刻，避免时间语义漂移），
+// 仍未设置则取当前时刻。用户裁定 2026-10-28：不得用「下载完成时刻」冒充源时间。
+func sourceModTime(target *ShareFile, fallback time.Time) time.Time {
+	if target != nil {
+		if !target.ModifiedTime.IsZero() {
+			return target.ModifiedTime
+		}
+		if !target.CreatedTime.IsZero() {
+			return target.CreatedTime
+		}
+	}
+	if !fallback.IsZero() {
+		return fallback
+	}
+	return time.Now()
+}
+
+// sourceCreatedTime 返回源文件创建时间（未知 → 零值，消费方不得顶替）。
+func sourceCreatedTime(target *ShareFile) time.Time {
+	if target == nil {
+		return time.Time{}
+	}
+	return target.CreatedTime
+}
+
+// averageBPS 平均带宽（字节/秒）；任一时刻为零或耗时为 0 → 0（不编造）。
+func averageBPS(start, end time.Time, total int64) int64 {
+	if start.IsZero() || end.IsZero() || total <= 0 {
+		return 0
+	}
+	secs := end.Sub(start).Seconds()
+	if secs <= 0 {
+		return 0
+	}
+	return int64(float64(total) / secs)
 }
 
 // markChunkDone 原子记录 chunk 完成（追加到 manifest；首次记录源身份）。

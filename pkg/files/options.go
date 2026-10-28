@@ -121,6 +121,9 @@ type ExternalVolumeOps interface {
 	// 为什么需要（2026-10-26 读闭环）：extra 读写必须先定位到文件所在的卷，而外部卷
 	// 没有 *storage.Root（`locateForRead` 恒未命中）⇒ 必须经本接缝（与 ExternalStat 同路）。
 	ExternalMeta(ctx context.Context, owner, volName, remotePath string) (extra map[string]any, ok bool, err error)
+	// ExternalMetaInfo 是可选能力：额外返回原始文件 mtime/ctime（RFC3339Nano UTC；空=未知）。
+	// 未实现时调用方回落 ExternalMeta（无时间信息），保持向后兼容。
+	// ExternalMetaInfoReader 表达该可选能力（类型断言查询，不扩必选接口）。
 
 	// ExternalMetaUpdate 把 extra **合并**进外部卷对象的 meta（读-校验-合并-写 sidecar，
 	// 不重算内容哈希）。语义与本地卷 `FileMetaPolicy` 的补录一致；无 sidecar 载体（裸外部
@@ -622,4 +625,11 @@ type FileMetaPolicy interface {
 // WithFileMeta 注入可信卷 meta 能力。默认：不装配（零回归）。
 func WithFileMeta(p FileMetaPolicy) Option {
 	return func(c *config) { c.fileMeta = p }
+}
+
+// ExternalMetaInfoReader 是 ExternalVolumeOps 的**可选**能力：读外部卷对象的 meta extra
+// 及原始文件时间（mtime/ctime，RFC3339Nano UTC）。实现方（装配层）在卷 FS 支持 meta.Provider
+// 时返回真实时间；否则时间字段为空（调用方回落 ExternalMeta）。
+type ExternalMetaInfoReader interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留
+	ExternalMetaInfo(ctx context.Context, owner, volName, remotePath string) (extra map[string]any, mtime, ctime string, ok bool, err error)
 }

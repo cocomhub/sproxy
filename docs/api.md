@@ -461,6 +461,27 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 - 响应：任务对象（见下）。提交后服务端**异步下载**（客户端断连不中断），下载落
   `<storage_root>/<tenant>/cloud/<taskID>/<filename>`。
 
+### 转存产物 meta（transfer）
+
+`POST /api/cloud/download` 带 `transfer: {volume, path}` 时，服务端把下载产物转存进卷，
+并在目标对象 meta.Extra 写入来源与审计键（客户端 `meta_extra` 同名键覆盖服务端值）：
+
+| 键 | 说明 |
+| --- | --- |
+| `source` | 固定 `transfer`（`ValidateExtra` 白名单枚举含该值） |
+| `source_url` | 源 URL（含 `spx_target` 等定位参数，原始编码） |
+| `etag` / `checksum` / `checksum_algorithm` | 服务端唯一标识与本地 SHA-256（带算法标识） |
+| `authority_hash` / `authority_hash_algorithm` | 提供方带外权威 hash（如 PikPak GCID） |
+| `transferred_at` / `downloaded_at` | 转存时刻 / 下载完成时刻（UTC RFC3339） |
+| `x_source_created_at` / `x_source_modified_at` | 源文件创建/修改时间（未知不写） |
+| `x_download_started_at` / `x_download_finished_at` | 本次下载起止（UTC） |
+| `x_download_duration_ms` | 下载耗时（毫秒） |
+| `x_download_anonymous_bytes` / `x_download_account_bytes` | 匿名 / 账号通道下载字节 |
+| `x_download_bytes_per_sec` | 平均带宽（字节/秒） |
+
+审计键均为 `x_` 自定义扩展（白名单外），客户端读取原始值；`sclient meta` 默认把时间
+转本地时区显示，`--json`/`--raw` 输出原始 UTC。
+
 ### POST /api/cloud/download/batch
 
 批量创建下载任务。请求体：`{urls: [...]}`（或 `{entries: [{url, filename?}]}`）。部分失败不中断，逐项返回结果。
@@ -479,9 +500,22 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
   "status": "pending|downloading|completed|failed|cancelled",
   "total_size": -1, "downloaded": 0, "checksum": "",
   "etag": "...", "file_mtime": 0, "error": "",
-  "created_at": "...", "updated_at": "...", "expires_at": "..."
+  "created_at": "...", "updated_at": "...", "expires_at": "...",
+  "download_stats": {
+    "started_at": "...", "finished_at": "...", "duration_ms": 0,
+    "anonymous_bytes": 0, "account_bytes": 0, "bytes_per_second": 0,
+    "source_created_at": "...", "source_modified_at": "..."
+  }
 }
 ```
+
+`download_stats` 是下载器的**实测统计**（下载器未统计时字段缺省，服务端不编造）：
+分通道字节（匿名直链 / 账号通道）、耗时、起止时刻、平均带宽，以及源文件
+创建/修改时间（来自提供方带外元数据，如 PikPak `created_time`/`modified_time`）。
+
+> 时间语义（2026-10-28 裁定）：转存产物的 `mtime` 取**源文件修改时间**；源时间未知时
+> 回落到下载**开始**时刻，绝不使用「下载完成时刻」冒充源时间；目标卷 `ctime` 是首次
+> 写入时刻，源创建时间见 `download_stats.source_created_at` / meta `x_source_created_at`。
 
 ### POST /api/cloud/tasks/{id}/cancel
 

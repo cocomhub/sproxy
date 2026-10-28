@@ -28,6 +28,8 @@ type fakeMetaService struct {
 	getExtra map[string]any
 	getErr   error
 	gotGet   files.GetMetaInput
+	getMTime string
+	getCTime string
 }
 
 func (f *fakeMetaService) UpdateMeta(_ context.Context, input files.UpdateMetaInput) error {
@@ -39,6 +41,12 @@ func (f *fakeMetaService) UpdateMeta(_ context.Context, input files.UpdateMetaIn
 func (f *fakeMetaService) GetMeta(_ context.Context, input files.GetMetaInput) (map[string]any, error) {
 	f.gotGet = input
 	return f.getExtra, f.getErr
+}
+
+// GetMetaInfo 替身：返回 extra + 可选 mtime/ctime（handler 读面新契约）。
+func (f *fakeMetaService) GetMetaInfo(_ context.Context, input files.GetMetaInput) (files.MetaInfo, error) {
+	f.gotGet = input
+	return files.MetaInfo{Extra: f.getExtra, MTime: f.getMTime, CTime: f.getCTime}, f.getErr
 }
 
 func (f *fakeMetaService) RecordFileAudit(context.Context, string, string, string, string) {}
@@ -219,5 +227,37 @@ func TestApplyMetaExtra_MergesNotReplaces(t *testing.T) {
 	applyMetaExtra(fm2, nil)
 	if fm2.Extra != nil {
 		t.Fatalf("空 extra 不应创建 map, got %v", fm2.Extra)
+	}
+}
+
+// TestGetFileMeta_IncludesTimes 验证响应附带原始 mtime/ctime（additive 字段；
+// 存储为 UTC RFC3339Nano，客户端负责本地时区展示）。
+func TestGetFileMeta_IncludesTimes(t *testing.T) {
+	t.Parallel()
+	svc := &fakeMetaService{
+		getExtra: map[string]any{"code": "MOVIE-002"},
+		getMTime: "2026-10-20T08:30:00Z",
+		getCTime: "2026-10-19T01:02:03Z",
+	}
+	h := &Handlers{metaSvcForTest: svc}
+	req := httptest.NewRequest(http.MethodGet, "/api/files/meta?filename=n/v.mp4", nil)
+	w := httptest.NewRecorder()
+	h.getFileMeta(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Extra map[string]any `json:"extra"`
+		MTime string         `json:"mtime"`
+		CTime string         `json:"ctime"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.MTime != "2026-10-20T08:30:00Z" || resp.CTime != "2026-10-19T01:02:03Z" {
+		t.Fatalf("mtime/ctime 未透出: %+v", resp)
+	}
+	if resp.Extra["code"] != "MOVIE-002" {
+		t.Fatalf("extra 丢失: %+v", resp.Extra)
 	}
 }

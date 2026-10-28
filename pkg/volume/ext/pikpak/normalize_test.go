@@ -44,14 +44,14 @@ func (f *fakeFollowNormalizer) NormalizeShareSource(_ context.Context, raw strin
 func TestNormalizeShareSource_KeepShare(t *testing.T) {
 	t.Parallel()
 	n := newFakeFollowNormalizer(t, map[string]string{
-		"https://keepshare.org/p5uj7smo/magnet:?xt=urn%3Abtih%3Aabc": "https://mypikpak.com/s/VOyUFLrf4RJcADwdFrpb5Cedo2",
+		"https://keepshare.org/p5containerid/magnet:?xt=urn%3Abtih%3Aabc": "https://mypikpak.com/s/REALSHAREID001",
 	})
 	got, err := n.NormalizeShareSource(context.Background(),
-		"https://keepshare.org/p5uj7smo/magnet:?xt=urn:btih:abc&spx_target=foo.mp4")
+		"https://keepshare.org/p5containerid/magnet:?xt=urn:btih:abc&spx_target=foo.mp4")
 	if err != nil {
 		t.Fatalf("NormalizeShareSource: %v", err)
 	}
-	want := "https://mypikpak.com/s/VOyUFLrf4RJcADwdFrpb5Cedo2?spx_target=foo.mp4"
+	want := "https://mypikpak.com/s/REALSHAREID001?spx_target=foo.mp4"
 	if got != want {
 		t.Fatalf("NormalizeShareSource = %q, want %q", got, want)
 	}
@@ -61,7 +61,7 @@ func TestNormalizeShareSource_KeepShare(t *testing.T) {
 func TestNormalizeShareSource_MyPikPak(t *testing.T) {
 	t.Parallel()
 	n := newFakeFollowNormalizer(t, nil)
-	in := "https://mypikpak.com/s/VOyUFLrf4RJcADwdFrpb5Cedo2?spx_target=a.mp4"
+	in := "https://mypikpak.com/s/REALSHAREID001?spx_target=a.mp4"
 	got, err := n.NormalizeShareSource(context.Background(), in)
 	if err != nil {
 		t.Fatalf("NormalizeShareSource: %v", err)
@@ -75,10 +75,10 @@ func TestNormalizeShareSource_MyPikPak(t *testing.T) {
 func TestNormalizeShareSource_Invalid(t *testing.T) {
 	t.Parallel()
 	n := newFakeFollowNormalizer(t, map[string]string{
-		"https://keepshare.org/p5uj7smo/magnet:?xt=urn%3Abtih%3Adead": "",
+		"https://keepshare.org/p5containerid/magnet:?xt=urn%3Abtih%3Adead": "",
 	})
 	if _, err := n.NormalizeShareSource(context.Background(),
-		"https://keepshare.org/p5uj7smo/magnet:?xt=urn%3Abtih%3Adead"); err == nil {
+		"https://keepshare.org/p5containerid/magnet:?xt=urn%3Abtih%3Adead"); err == nil {
 		t.Fatal("NormalizeShareSource 应对失效分享报错")
 	}
 }
@@ -89,11 +89,11 @@ func TestNormalizeShareSource_Invalid(t *testing.T) {
 // 下载路径必须经归一器，避免把容器 id 当分享 id。）
 func TestShareSourceNormalizer_ReduceDuplicateResolution(t *testing.T) {
 	t.Parallel()
-	containerID, _ := parseShareIDWithToken("https://keepshare.org/p5uj7smo/magnet:?xt=urn:btih:abc")
+	containerID, _ := parseShareIDWithToken("https://keepshare.org/p5containerid/magnet:?xt=urn:btih:abc")
 	if containerID == "" {
 		t.Fatal("keepshare 容器 id 应可提取（但它是容器 id，不是分享 id）")
 	}
-	realID, _ := parseShareIDWithToken("https://mypikpak.com/s/VOyUFLrf4RJcADwdFrpb5Cedo2")
+	realID, _ := parseShareIDWithToken("https://mypikpak.com/s/REALSHAREID001")
 	if realID == "" {
 		t.Fatal("mypikpak 分享 id 应可提取")
 	}
@@ -107,12 +107,12 @@ func TestShareSourceNormalizer_ReduceDuplicateResolution(t *testing.T) {
 func TestResolvedShareURL(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ raw, shareID, want string }{
-		{"https://keepshare.org/p5uj7smo/magnet:?xt=urn:btih:abc", "VOyUFLrf4RJcADwdFrpb5Cedo2",
-			"https://mypikpak.com/s/VOyUFLrf4RJcADwdFrpb5Cedo2"},
-		{"https://keepshare.cc/p5uj7smo/magnet:?xt=urn:btih:abc", "REALID",
+		{"https://keepshare.org/p5containerid/magnet:?xt=urn:btih:abc", "REALSHAREID001",
+			"https://mypikpak.com/s/REALSHAREID001"},
+		{"https://keepshare.cc/p5containerid/magnet:?xt=urn:btih:abc", "REALID",
 			"https://mypikpak.com/s/REALID"},
-		{"https://mypikpak.com/s/VOyUFLrf4RJcADwdFrpb5Cedo2", "VOyUFLrf4RJcADwdFrpb5Cedo2",
-			"https://mypikpak.com/s/VOyUFLrf4RJcADwdFrpb5Cedo2"}, // 已归一 → 原样
+		{"https://mypikpak.com/s/REALSHAREID001", "REALSHAREID001",
+			"https://mypikpak.com/s/REALSHAREID001"}, // 已归一 → 原样
 		{"https://example.com/plain.mp4", "x", "https://example.com/plain.mp4"}, // 非分享 → 原样
 	}
 	for _, c := range cases {

@@ -37,14 +37,40 @@ const (
 )
 
 // Result 是下载完成的结果。
+// 算法标识字段（ChecksumAlgorithm/AuthorityHashAlgorithm）由**下载方**填写——转存层
+// 只透传，不推断（用户裁定 2026-10-28：不能无脑写 GCID；各下载器声明自己用什么算法）。
 type Result struct {
-	Size          int64         // 实际下载大小
-	Checksum      string        // SHA-256 十六进制
-	ModTime       time.Time     // 原始文件修改时间（从 HTTP Last-Modified 提取）
-	ETag          string        // 服务器 ETag（用于 If-Range 续传一致性校验）
-	Integrity     IntegrityMode // 结果的完整性可信度（②/① 态）
-	AuthorityHash string        // 服务端带外权威 hash（如 pikpak GCID；可空）
+	Size                   int64         // 实际下载大小
+	Checksum               string        // 校验和值（本地落盘；算法见 ChecksumAlgorithm）
+	ChecksumAlgorithm      string        // Checksum 的算法标识（如 "sha256"；空 = 未知/旧实现）
+	ModTime                time.Time     // **源文件**修改时间（HTTP Last-Modified / 提供方带外时间）
+	ETag                   string        // 服务器 ETag（用于 If-Range 续传一致性校验）
+	Integrity              IntegrityMode // 结果的完整性可信度（②/① 态）
+	AuthorityHash          string        // 服务端带外权威 hash（如 PikPak GCID；算法见 AuthorityHashAlgorithm）
+	AuthorityHashAlgorithm string        // AuthorityHash 的算法标识（如 "pikpak-gcid";空 = 未知）
+
+	// 源文件时间（提供方带外；零值 = 未知——消费方不得用「下载完成时刻」顶替，
+	// 用户裁定 2026-10-28：mtime/ctime 必须来自源，避免伪造时间语义）。
+	SourceCreatedTime time.Time // 源文件**创建**时间（PikPak created_time 等）
+
+	// 下载审计统计（用户裁定 2026-10-28：转存产物 meta 记录耗时/起止/分源字节/带宽）。
+	// 由下载器在完成时填充；0/零值 = 该下载器未统计（消费方不得编造）。
+	StartedAt      time.Time // 下载开始时刻（本次会话，含续传会话起点）
+	FinishedAt     time.Time // 下载结束时刻（成功落定）
+	AnonymousBytes int64     // 匿名（免账号）通道下载字节（分享直链区）
+	AccountBytes   int64     // 账号通道下载字节（转存/网盘区 + 分享区降级）
+	BytesPerSecond int64     // 平均带宽（(AnonymousBytes+AccountBytes)/耗时秒）
 }
+
+// 校验和/权威 hash 的**算法标识常量**（下载方在 Result 里声明，转存层只透传不推断——
+// 用户裁定 2026-10-28：不能无脑写 GCID，各下载器说自己用什么算法）。
+const (
+	// IntegrityChecksumSHA256 表示 Checksum 是本地落盘文件 SHA-256 十六进制（小写）。
+	IntegrityChecksumSHA256 = "sha256"
+	// IntegrityAlgPikpakGCID 表示 AuthorityHash 是 PikPak 官方 GCID
+	// （= sha1(concat(sha1(每个分块)))；见 pkg/integrity/gcid.go）。
+	IntegrityAlgPikpakGCID = "pikpak-gcid"
+)
 
 // IntegrityProvider 供调度侧/校验管道查询下载器声明的完整性归属。
 // 下载器实现后，消费者可用类型断言判断其 checksum 的三态归属（ModeLocalOnly / ModeSelfVerified）。

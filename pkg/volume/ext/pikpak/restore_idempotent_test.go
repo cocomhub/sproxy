@@ -50,7 +50,7 @@ func (f *fakeIdemAPI) ListRecursive(_ context.Context, _ string) ([]FileMeta, er
 func newIdemAPI() *fakeIdemAPI {
 	packID := "pack"
 	parent := &FileMeta{ID: packID, Name: "Pack From Shared", Kind: driveKindFolder}
-	existed := &FileMeta{ID: "f1", Name: "NHDTC-183.mp4", Size: 100, Kind: driveKindFile, Hash: "H1", ParentID: packID}
+	existed := &FileMeta{ID: "f1", Name: "EXAMPLE-183.mp4", Size: 100, Kind: driveKindFile, Hash: "H1", ParentID: packID}
 	return &fakeIdemAPI{
 		root:    []FileMeta{*parent},
 		pack:    []FileMeta{*existed},
@@ -64,7 +64,7 @@ func TestCheckRestoreCopy_Hit(t *testing.T) {
 	t.Parallel()
 	api := newIdemAPI()
 	rc := checkRestoreCopy(context.Background(), api, &downloader.ResolvedFile{
-		Name: "NHDTC-183.mp4", Size: 100, Hash: "H1",
+		Name: "EXAMPLE-183.mp4", Size: 100, Hash: "H1",
 	})
 	if !rc.OK || rc.File == nil || rc.File.ID != "f1" {
 		t.Fatalf("checkRestoreCopy = %+v, want 命中 f1", rc)
@@ -79,7 +79,7 @@ func TestCheckRestoreCopy_HashMismatch(t *testing.T) {
 	t.Parallel()
 	api := newIdemAPI()
 	rc := checkRestoreCopy(context.Background(), api, &downloader.ResolvedFile{
-		Name: "NHDTC-183.mp4", Size: 100, Hash: "DIFFERENT",
+		Name: "EXAMPLE-183.mp4", Size: 100, Hash: "DIFFERENT",
 	})
 	if rc.OK {
 		t.Fatalf("checkRestoreCopy 应拒绝 hash 不等的复用: %+v", rc)
@@ -103,13 +103,13 @@ func TestCheckRestoreCopy_UserFile(t *testing.T) {
 	t.Parallel()
 	api := newIdemAPI()
 	// 用户自有文件在根目录（parent 非 Pack From Shared）
-	own := &FileMeta{ID: "own1", Name: "NHDTC-183.mp4", Size: 100, Kind: driveKindFile, Hash: "H1", ParentID: "rootparent"}
+	own := &FileMeta{ID: "own1", Name: "EXAMPLE-183.mp4", Size: 100, Kind: driveKindFile, Hash: "H1", ParentID: "rootparent"}
 	api.pack = nil          // 清空 pack（走全盘兜底）
 	delete(api.files, "f1") // 清掉既有副本，只剩用户自有文件
 	api.files["own1"] = own
 	api.parents["rootparent"] = &FileMeta{ID: "rootparent", Name: "root", Kind: driveKindFolder}
 	rc := checkRestoreCopy(context.Background(), api, &downloader.ResolvedFile{
-		Name: "NHDTC-183.mp4", Size: 100, Hash: "H1",
+		Name: "EXAMPLE-183.mp4", Size: 100, Hash: "H1",
 	})
 	if !rc.OK || rc.File.ID != "own1" {
 		t.Fatalf("checkRestoreCopy 应命中用户自有文件: %+v", rc)
@@ -152,7 +152,7 @@ func TestCheckRestoreCopy_StaleEntry(t *testing.T) {
 	// 让 FindByID 对命中 id 报 not found（模拟文件已删）
 	stale := &staleIdemAPI{inner: api, goneID: "f1"}
 	rc := checkRestoreCopy(context.Background(), stale, &downloader.ResolvedFile{
-		Name: "NHDTC-183.mp4", Size: 100, Hash: "H1",
+		Name: "EXAMPLE-183.mp4", Size: 100, Hash: "H1",
 	})
 	if rc.OK {
 		t.Fatalf("陈旧条目应保守不命中（走 RestoreShare）: %+v", rc)
@@ -184,15 +184,15 @@ func (s *staleIdemAPI) ListRecursive(ctx context.Context, pid string) ([]FileMet
 func TestLocateRestoredFileIn_Folder(t *testing.T) {
 	t.Parallel()
 	api := newIdemAPI()
-	// pack（id="pack"）内有 NHDTC-183.mp4 与另一个视频
+	// pack（id="pack"）内有 EXAMPLE-183.mp4 与另一个视频
 	api.pack = append(api.pack,
 		FileMeta{ID: "f-other", Name: "other.mp4", Size: 50, Kind: driveKindFile, ParentID: "pack"})
-	got, err := locateRestoredFileIn(context.Background(), api, "pack", "NHDTC-183.mp4")
+	got, err := locateRestoredFileIn(context.Background(), api, "pack", "EXAMPLE-183.mp4")
 	if err != nil {
 		t.Fatalf("locateRestoredFileIn: %v", err)
 	}
 	if got.ID != "f1" {
-		t.Fatalf("应精确命中 NHDTC-183.mp4（f1），got %s", got.ID)
+		t.Fatalf("应精确命中 EXAMPLE-183.mp4（f1），got %s", got.ID)
 	}
 }
 

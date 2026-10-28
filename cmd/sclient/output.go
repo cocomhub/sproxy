@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"time"
 
@@ -211,12 +212,53 @@ func (f *TextFormatter) PrintMetaExtra(extra map[string]any) {
 	for _, k := range keys {
 		v := extra[k]
 		if s, ok := v.(string); ok {
+			// 人类可视化：时间键（UTC RFC3339 存储）转本地时区；source_url 等 URL 解码为可见字符
+			if display, changed := humanExtraDisplay(k, s); changed {
+				fmt.Fprintf(f.w, "extra.%s: %s\n", k, display)
+				continue
+			}
 			fmt.Fprintf(f.w, "extra.%s: %s\n", k, s)
 			continue
 		}
 		b, _ := json.Marshal(v)
 		fmt.Fprintf(f.w, "extra.%s: %s\n", k, string(b))
 	}
+}
+
+// metaTimeKeys 是 meta extra 里承载 RFC3339 时间的键（存储 UTC，展示转本地）。
+var metaTimeKeys = map[string]bool{
+	"transferred_at": true, "created_at": true, "updated_at": true, "mtime": true, "ctime": true,
+	// 下载审计时间（云端转存写入；UTC 存储 → 本地展示）
+	"downloaded_at": true, "x_download_started_at": true, "x_download_finished_at": true,
+	"x_source_created_at": true, "x_source_modified_at": true,
+}
+
+// humanExtraDisplay 人类可视化单值字符串：时间键转本地时区、source_url 解码为可见字符。
+// 返回 (展示值, 是否变更)；未变更原样输出（原始内容仍可用 --json 输出）。
+func humanExtraDisplay(k, s string) (string, bool) {
+	if metaTimeKeys[k] {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			return t.Local().Format("2006-01-02 15:04:05 MST"), true
+		}
+	}
+	if k == "source_url" || k == "share_url" || k == "resolved_url" {
+		if decoded, err := url.QueryUnescape(s); err == nil && decoded != s {
+			return decoded, true
+		}
+	}
+	return s, false
+}
+
+// localTimeDisplay 若 k 是时间键且 v 可解析为 RFC3339 → 返回本地时区表示；否则原样。
+func localTimeDisplay(k, v string) string {
+	if !metaTimeKeys[k] {
+		return v
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return v
+	}
+	return t.Local().Format("2006-01-02 15:04:05 MST")
 }
 
 // PrintMetaExtra 输出 meta extra（JSON 模式：并入一个对象键）。

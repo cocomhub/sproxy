@@ -36,11 +36,12 @@ import (
 type memFS struct {
 	files   map[string][]byte
 	dirs    map[string]bool
+	mtimes  map[string]int64       // rel → 写入时 mtime（FS 契约 UnixNano；单位回归断言用）
 	writeFn func(rel string) error // 可注入写失败模拟
 }
 
 func newMemFS() *memFS {
-	return &memFS{files: map[string][]byte{}, dirs: map[string]bool{}}
+	return &memFS{files: map[string][]byte{}, dirs: map[string]bool{}, mtimes: map[string]int64{}}
 }
 
 func (m *memFS) ListDir(ctx context.Context, path string) ([]syncpkg.Entry, error) { return nil, nil }
@@ -68,6 +69,7 @@ func (m *memFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path stri
 		return err
 	}
 	m.files[path] = b
+	m.mtimes[path] = mtime
 	m.dirs[filepath.Dir(path)] = true
 	return nil
 }

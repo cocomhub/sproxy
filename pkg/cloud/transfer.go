@@ -364,7 +364,7 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	// 路由写内核，此前从不结算 ⇒ 删除该产物即「未曾提交的释放」（幻影释放）。
 	// 失败路径同样按实测差分收敛：本次未写入 → diff=0（不自造占用）；写了一半 → 记实际落盘字节。
 	chargeBefore := m.transferTargetCharge(env)
-	done, werr := writeTransferOnce(env, f, st.Size(), st.ModTime().Unix())
+	done, werr := writeTransferOnce(env, f, st.Size(), transferMTimeNano(env, st))
 	m.settleTransferCharge(env, chargeBefore)
 	if werr != nil {
 		trSpan.Fail(werr)
@@ -786,6 +786,23 @@ func writeTargetUnique(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 		return false, err
 	}
 	return true, nil
+}
+
+// transferMTimeNano 计算写入目标卷的 mtime（**UnixNano** 契约，pkg/sync.Entry.MTime 同口径）。
+// 优先用下载结果里的**源文件 mtime**（HTTP Last-Modified 等原始修改时间）；未提供时回退
+// 本地 staging 文件的 mtime。
+//
+// 回归（2026-10-28）：此前传 st.ModTime().Unix()（**秒**）→ secretdata 按纳秒解读
+// （mtimeString 用 time.Unix(0, mtime)）⇒ 落库 mtime ≈ 1.79s after epoch，`/api/files/stat`
+// 的 mod_time 变成 1970 值（实测 1970-01-01T08:00:01+08:00）。
+func transferMTimeNano(env *transferEnv, st os.FileInfo) int64 {
+	if env != nil && env.result != nil && !env.result.ModTime.IsZero() {
+		return env.result.ModTime.UnixNano()
+	}
+	if st == nil {
+		return 0
+	}
+	return st.ModTime().UnixNano()
 }
 
 // writeTransferOnce 单次转存写：首写（env.writeCount==0）用「目标唯一」语义

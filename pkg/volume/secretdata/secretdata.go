@@ -1161,6 +1161,7 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		return fmt.Errorf("secretdata: 流式分块加密失败: %w", cerr)
 	}
 	out.Meta.Original.MTime = mtimeString(wc.mtime)
+	s.applyOriginalCTime(strings.TrimPrefix(wc.rel, "/"), out.Meta)
 	out.Meta.BaseVersion = wc.newVer
 	applyUploadMetaExtra(ctx, out.Meta)
 	if s.opts.Erasure {
@@ -1386,6 +1387,7 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 	// 逻辑层 mtime 记入 meta.Original.MTime（EncryptShards 用临时文件 ModTime=now，
 	// 非调用方 mtime）；meta 名锚定内容 → 改名后重新加密。
 	out.Meta.Original.MTime = mtimeString(wc.mtime)
+	s.applyOriginalCTime(strings.TrimPrefix(wc.rel, "/"), out.Meta)
 	// 写前指定本条目的乐观锁版本（Imp-1 修复：落盘 meta.BaseVersion = newVer，与
 	// commitEntry 内存 e.baseVersion/卷版本恒等）。encryptMetaBlob 在 marshal 时读
 	// 该字段，故落盘 meta 携带真实版本——重启 loadIndex 后 volVersion = max(磁盘
@@ -3335,6 +3337,28 @@ func (s *SecretdataFS) metaPadTarget() int {
 }
 
 // mtimeString 把 UnixNano 转 RFC3339Nano（目录 meta 的 mtime 字段）。
+// applyOriginalCTime 记录/保留原始文件的 **ctime**（创建时间，UTC RFC3339Nano）：
+//   - 覆盖写（索引已有条目且其 meta 带 CTime）→ 保留首次创建时间（真 ctime 语义）；
+//   - 新写/旧条目无 CTime → 记为当前时刻。
+//
+// 用户裁定 2026-10-28：加密卷产物必须能读到原始 ctime（此前 OriginalInfo.CTime 恒空）。
+func (s *SecretdataFS) applyOriginalCTime(key string, m *shardseal.Meta) {
+	if m == nil {
+		return
+	}
+	if m.Original.CTime != "" {
+		return // 调用方已给（如复制保留）
+	}
+	s.mu.RLock()
+	e, ok := s.index[key]
+	s.mu.RUnlock()
+	if ok && e != nil && e.meta != nil && e.meta.Original.CTime != "" {
+		m.Original.CTime = e.meta.Original.CTime // 覆盖写：保留创建时间
+		return
+	}
+	m.Original.CTime = time.Now().UTC().Format(time.RFC3339Nano)
+}
+
 func mtimeString(mtime int64) string {
 	if mtime <= 0 {
 		return ""
