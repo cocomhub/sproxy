@@ -73,8 +73,14 @@ var spec = map[string]FieldSpec{
 	"share_file_id":   {Type: "string", MaxLen: 128},
 	"share_hash":      {Type: "string", MaxLen: 128}, // 分享内文件哈希
 	"downloaded_at":   {Type: "string", MaxLen: 32},
-	"mirror_urls":     {Type: "[]string", MaxLen: 1024},
-	"nfo_ref":         {Type: "string", MaxLen: 128},
+	// 转存来源/完整性字段（服务端 transfer 路径写入；登记以支持客户端补录/修复与统一校验）。
+	"etag":                     {Type: "string", MaxLen: 256},
+	"checksum":                 {Type: "string", MaxLen: 128},
+	"checksum_algorithm":       {Type: "string", MaxLen: 32},
+	"authority_hash":           {Type: "string", MaxLen: 128},
+	"authority_hash_algorithm": {Type: "string", MaxLen: 32},
+	"mirror_urls":              {Type: "[]string", MaxLen: 1024},
+	"nfo_ref":                  {Type: "string", MaxLen: 128},
 	// C 档：可选
 	"duration_sec":   {Type: "int64"},
 	"resolution":     {Type: "string", MaxLen: 16, Allowed: []string{"480p", "720p", "1080p", "4k"}},
