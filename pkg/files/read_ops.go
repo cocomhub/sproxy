@@ -137,7 +137,7 @@ func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 	if dirRel == rel {
 		dirRel = ""
 	}
-	csMap := s.checksumSnapshot(owner)
+	csMap := s.checksumSnapshot(ctx, owner)
 	var allFiles []FileInfo
 	if s.index != nil {
 		allFiles = s.index.list(owner, dirRel, volFilter, csMap)
@@ -301,7 +301,7 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 	}
 	owner := normalizeOwner(q.Owner)
 	// 一次性快照（见 ListFiles #8 结论注释，勿再分析）：per-tenant store，key 为相对租户根的 rel。
-	csMap := s.checksumSnapshot(owner)
+	csMap := s.checksumSnapshot(context.Background(), owner)
 
 	// 索引化（roadmap P0）：搜索走内存增量索引（首次全量构建 + 写路径增量维护）。
 	// 与旧 WalkDir 实现**逐字一致的语义**由 search_index_test.go 钉住：子串匹配 base name
@@ -496,7 +496,19 @@ func (s *Service) openExternalSource(ctx context.Context, dp DownloadPath) (Open
 //
 // 抽成方法是为了让 List/Search 的"一次性快照"约定只有一处（见既有注释：per-tenant store，
 // key 为相对租户根的 rel）。
-func (s *Service) checksumSnapshot(owner string) map[string]string {
+func (s *Service) checksumSnapshot(ctx context.Context, owner string) map[string]string {
+	if cs := s.rt.checksumStore(owner); cs != nil {
+		if snap := cs.GetAll(); len(snap) > 0 {
+			return snap
+		}
+	}
+	// 台账为空（新建租户 / 丢失 / 损坏）⇒ 从对象 meta **一次性重建**（每 owner 只尝试一次，
+	// 避免列表路径反复全量遍历；失败不阻断列表——checksum 空是降级不是错误）。
+	if s.checksumRebuildAllowed(owner) {
+		if n, err := s.RebuildChecksums(ctx, owner); err == nil && n > 0 {
+			s.rt.logger().Info("checksum 台账已从对象 meta 重建", "owner", owner, "entries", n)
+		}
+	}
 	if cs := s.rt.checksumStore(owner); cs != nil {
 		return cs.GetAll()
 	}

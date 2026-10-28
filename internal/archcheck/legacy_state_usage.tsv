@@ -5,6 +5,7 @@
 pkg/checksum/state_adapter.go	5	checksum_ledger=5
 pkg/checksum/store.go	5	checksum_ledger=5
 pkg/files/options.go	1	external_list=1
+pkg/files/checksum_rebuild.go	1	checksum_ledger=1：§15.1 步骤①+②（自愈读/一次性导入）仍需写台账；台账转只读后随写路径一并删除
 pkg/files/read.go	1	checksum_ledger=1
 pkg/files/read_ops.go	1	external_list=1
 pkg/files/search_index.go	1	index_api=1

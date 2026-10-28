@@ -139,6 +139,24 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 	}
 }
 
+// SetMany 批量写入 checksum 记录并**只持久化一次**（一次性导入/重建用：逐条 Set 会产生 N 次
+// 全量 JSON 重写）。空 map 为空操作。
+func (cs *ChecksumStore) SetMany(entries map[string]string) {
+	if len(entries) == 0 {
+		return
+	}
+	cs.mu.Lock()
+	maps.Copy(cs.checksums, entries)
+	cs.mu.Unlock()
+
+	if err := cs.save(); err != nil {
+		cs.logger.Error(chkStorePersistFailed, "op", "set_many", "count", len(entries), "error", err)
+		if retryErr := cs.save(); retryErr != nil {
+			cs.logger.Error(retryPersistFailed, "op", "set_many", "count", len(entries), "error", retryErr)
+		}
+	}
+}
+
 // Delete 删除指定文件的 checksum 记录并持久化。
 func (cs *ChecksumStore) Delete(filename string) {
 	cs.mu.Lock()
