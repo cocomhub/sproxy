@@ -16,7 +16,10 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/downloader"
@@ -370,6 +373,7 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	if done {
 		// 幂等命中（目标已持有相同内容）→ 来源 meta 仍记录（供溯源；不重写主文件）。
 		m.recordTransferSourceMeta(env)
+		m.recordBypassState(env, st.Size(), env.result.Checksum)
 		trSpan.End("bytes", st.Size())
 		return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
 	}
@@ -379,8 +383,29 @@ func (m *CloudDownloadManager) transferOnce(env *transferEnv) (string, error) {
 	}
 	// 常规写后：来源 meta 记录（source=transfer / source_url / etag / 客户端 meta_extra）。
 	m.recordTransferSourceMeta(env)
+	m.recordBypassState(env, st.Size(), env.result.Checksum)
 	trSpan.End("bytes", st.Size())
 	return transferURL(env.scheme, env.task.Transfer.Volume, env.rel), nil
+}
+
+// recordBypassState 登记转存产物的派生状态（checksum 台账 + 搜索索引）——转存直接写目标卷
+// user 桶（不经 pkg/files 写内核）⇒ 不登记则 list 缺条目 / checksum 空（R16 缺陷族修复）。
+// 装配层经 CloudManagerOptions.RecordBypassWrite 注入；nil = 跳过（零回归）。rel 为租户根
+// 相对（含 user/ 前缀，即 env.rel = loc.FSPath() 的 user 桶段之后的部分——实际 env.rel 是
+// 卷内完整键 `<owner>/user/<rel>`，需剥 owner 前缀取租户根相对）。checksum 空（下载源未提供）
+// ⇒ store 跳过写入（list checksum 保持空可预期）。
+func (m *CloudDownloadManager) recordBypassState(env *transferEnv, size int64, checksum string) {
+	if m.recordBypassWrite == nil {
+		return
+	}
+	rel := env.rel
+	// env.rel = loc.FSPath() = `<owner>/user/<rel>`（owner 前缀 + user 桶段）。
+	// 租户根相对 = `user/<rel>`（剥 owner 前缀）。owner 即 env.task.Owner（归一）。
+	owner := storage.NormalizeOwner(env.task.Owner)
+	if after, ok := strings.CutPrefix(rel, owner+"/"); ok {
+		rel = after
+	}
+	m.recordBypassWrite(owner, rel, size, checksum, env.task.Transfer.Volume, nil)
 }
 
 // readbackVerify 转存写后读回卷内内容校验（与下载 checksum 一致；不一致 = 文件损坏/传输

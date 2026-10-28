@@ -326,6 +326,10 @@ type CloudDownloadManager struct {
 	volumeFor func(volume string) (volume.Volume, bool)
 	// targetScopeFor 解析转存产物所在的 owner 配额 Scope（见 CloudManagerOptions 同名选项）。
 	targetScopeFor func(owner, userBucketRel string) *quota.Scope
+	// recordBypassWrite 登记旁路写产物的**派生状态**（checksum 台账 + 搜索索引）——转存
+	// 产物直接写目标卷 user 桶（不经 pkg/files 写内核）⇒ 不登记则 list 条目缺失 /
+	// checksum 空（R16 缺陷族）。装配层注入 files.Service.RecordBypassWrite；nil = 跳过。
+	recordBypassWrite func(owner, rel string, size int64, checksum, volume string, root *storage.Root)
 	// volumePoolChargeFor 解析转存目标**本地卷**的卷级容量池（R16 P1：本地卷 rootfs 无
 	// CapacityFS，卷池权威在路由层 Pool；装配层注入 h.volSet.Pool）。nil = 不结算本地卷
 	// 卷池（零回归）。外部卷不经此（CapacityFS 层已记）。
@@ -449,6 +453,10 @@ type CloudManagerOptions struct {
 	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
 	// nil = 转存不可用（与 TransferFSFor 同门）。
 	VolumeFor func(volume string) (volume.Volume, bool)
+	// RecordBypassWrite 登记转存产物的派生状态（checksum 台账 + 搜索索引）：转存写目标卷
+	// user 桶不经写内核 ⇒ 不登记则 list 缺条目 / checksum 空（R16）。装配层注入
+	// `h.fileService().RecordBypassWrite`；nil = 跳过（零回归）。
+	RecordBypassWrite func(owner, rel string, size int64, checksum, volume string, root *storage.Root)
 	// VolumePoolChargeFor 返回转存目标**本地卷**的卷级容量池（R16 P1 修复②/③）：
 	// 本地卷 rootfs 无 ReserveSpace/CapacityFS ⇒ 卷池漏记 + 删除幻影释放。装配层注入
 	// `h.volSet.Pool`；nil = 不结算（零回归）。**只对本地卷**生效（外部卷 CapacityFS 已记，
@@ -534,6 +542,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		maxConcurrent:       cfg.MaxConcurrent,
 		targetScopeFor:      opts.TargetQuotaScopeFor,
 		volumePoolChargeFor: opts.VolumePoolChargeFor,
+		recordBypassWrite:   opts.RecordBypassWrite,
 		targetPhysChargeFor: opts.TargetPhysChargeFor,
 		integrityLookup:     opts.IntegrityLookup,
 		removeFile:          opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove

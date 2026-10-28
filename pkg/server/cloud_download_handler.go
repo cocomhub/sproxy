@@ -21,6 +21,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -1141,10 +1142,28 @@ func (h *Handlers) cloudArchiveToVolume(
 	// ⇒ 转存写不经 CapacityFS ⇒ 卷池漏记 ⇒ 长期漂移。按与 owner Scope **同源**的实测差分
 	// 结算卷池（同一 `archiveTargetCharge` 测量）。外部卷（CapacityFS 层已记）不双记。
 	h.settleVolumePoolCharge(t.TargetVolume, chargeBefore, chargeAfter)
+	// **派生状态登记**（R16 缺陷族修复 B）：归档转存产物写目标卷 user 桶不经 pkg/files 写内核
+	// ⇒ 需显式登记 checksum 台账 + 搜索索引（checksum 从可信卷 meta sidecar 读；仅本地卷目标
+	// ——外部卷 list 走 ExternalList 从 meta.Provider 读）。
+	h.recordArchiveBypassState(t, fs, rel, chargeAfter)
 	if onSuccess != nil {
 		onSuccess(url)
 	}
 	sendJSONResponse(w, CloudArchiveResult{Success: true, File: url, TaskCount: len(t.Entries)}, http.StatusOK)
+}
+
+// recordArchiveBypassState 归档转存（本地卷目标）的派生状态登记（R16 缺陷族修复 B）。
+func (h *Handlers) recordArchiveBypassState(t archiveVolumeTransfer, fs syncpkg.FS, rel string, size int64) {
+	if !h.isLocalStorageVolume(t.TargetVolume) {
+		return
+	}
+	cs := ""
+	if pv, ok := fs.(meta.Provider); ok {
+		if fm, ferr := pv.FileMeta(context.Background(), rel); ferr == nil && fm != nil {
+			cs = fm.TotalSHA256
+		}
+	}
+	h.fileService().RecordBypassWrite(t.Owner, rel, size, cs, t.TargetVolume, nil)
 }
 
 // probeArchiveQuota 是归档转存的**写前配额探针**（R14 C6）：探测式（预留后立即释放、不排队）。
