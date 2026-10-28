@@ -16,5 +16,4 @@ pkg/server/files_service.go	1	external_list=1
 pkg/server/handlers.go	7	checksum_ledger=7
 pkg/server/stats.go	4	checksum_ledger=4
 pkg/server/verify.go	1	checksum_ledger=1
-pkg/server/volume_state_wiring.go	1	checksum_ledger=1
 pkg/storage/capacity/manager.go	5	checksum_ledger=5

@@ -21,6 +21,7 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volumestate"
 )
 
 // countingFS 是记录 ListDir 次数的 fake FS（不含任何可选能力）。
@@ -94,7 +95,7 @@ func TestWrapVolumeState_CachesExternalVolumeList(t *testing.T) {
 	if cache == nil {
 		t.Fatal("启用后应构造缓存")
 	}
-	wrapped := wrapVolumeState(vs, cache, "ext1", registry.ViewUser, cfs)
+	wrapped := wrapVolumeState(cache, "ext1", registry.ViewUser, cfs)
 	if wrapped == syncpkg.FS(cfs) {
 		t.Fatal("外部卷 ViewUser 应被状态缓存包装")
 	}
@@ -120,7 +121,7 @@ func TestWrapVolumeState_WriteInvalidatesWithoutRegistration(t *testing.T) {
 	cfg.VolumeState.TTL = time.Minute
 
 	cache := newVolumeStateCache(cfg, vs, testLogger())
-	wrapped := wrapVolumeState(vs, cache, "ext1", registry.ViewUser, cfs)
+	wrapped := wrapVolumeState(cache, "ext1", registry.ViewUser, cfs)
 
 	_, _ = wrapped.ListDir(context.Background(), "alice/user")
 	if got := cfs.listCalls(); got != 1 {
@@ -136,9 +137,9 @@ func TestWrapVolumeState_WriteInvalidatesWithoutRegistration(t *testing.T) {
 	}
 }
 
-// TestWrapVolumeState_LocalNotWrapped 钉住范围（用户裁定）：本地卷本期不套缓存
-// （仍走既有 searchIndex/checksums.json，R46 棘轮登记，后续片迁移）。
-func TestWrapVolumeState_LocalNotWrapped(t *testing.T) {
+// TestWrapVolumeState_LocalVolumeCached 钉住 §15.3 决策 (a)：本地卷同样纳入缓存
+// （§15.2 步骤 2 的性能前提；写穿由 storage.Root 事件提供，TTL 只吸收进程外改动）。
+func TestWrapVolumeState_LocalVolumeCached(t *testing.T) {
 	t.Parallel()
 	cfs := &countingFS{}
 	vs, _ := newStateCacheTestSet(t, cfs)
@@ -147,9 +148,17 @@ func TestWrapVolumeState_LocalNotWrapped(t *testing.T) {
 	cfg.VolumeState.Enabled = true
 	cache := newVolumeStateCache(cfg, vs, testLogger())
 
-	got := wrapVolumeState(vs, cache, "local1", registry.ViewUser, cfs)
-	if got != syncpkg.FS(cfs) {
-		t.Fatal("本地卷本期不应被状态缓存包装（零行为变更）")
+	got := wrapVolumeState(cache, "local1", registry.ViewUser, cfs)
+	if got == syncpkg.FS(cfs) {
+		t.Fatal("本地卷也应被状态缓存包装（决策 a：本地卷参与缓存）")
+	}
+	for range 3 {
+		if _, err := got.ListDir(context.Background(), "local1/user"); err != nil {
+			t.Fatalf("ListDir: %v", err)
+		}
+	}
+	if n := cfs.listCalls(); n != 1 {
+		t.Fatalf("本地卷三次 list 应只回源 1 次，got %d（装饰器未生效）", n)
 	}
 }
 
@@ -157,28 +166,25 @@ func TestWrapVolumeState_LocalNotWrapped(t *testing.T) {
 func TestWrapVolumeState_DisabledNoop(t *testing.T) {
 	t.Parallel()
 	cfs := &countingFS{}
-	vs, _ := newStateCacheTestSet(t, cfs)
-	if got := wrapVolumeState(vs, nil, "ext1", registry.ViewUser, cfs); got != syncpkg.FS(cfs) {
+	if got := wrapVolumeState(nil, "ext1", registry.ViewUser, cfs); got != syncpkg.FS(cfs) {
 		t.Fatal("未启用时应原样返回")
 	}
 }
 
-// TestVolumeStateTTL_ByVolumeKind 钉住 TTL 分档：本地 0（不按时间过期）、外部 DefaultTTL。
-func TestVolumeStateTTL_ByVolumeKind(t *testing.T) {
+// TestVolumeStateTTL_Unified 钉住 §15.3 决策 (b)：本地卷与外部卷**同档 TTL**
+// （本地卷写穿只覆盖本进程，进程外改动必须有收敛窗口；mtime 代际不能替代——POSIX 只更新直接父目录）。
+func TestVolumeStateTTL_Unified(t *testing.T) {
 	t.Parallel()
-	cfs := &countingFS{}
-	vs, _ := newStateCacheTestSet(t, cfs)
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 
-	if got := volumeStateTTL(cfg, vs, "local1"); got != 0 {
-		t.Fatalf("本地卷 TTL 应为 0，got %v", got)
-	}
-	if got := volumeStateTTL(cfg, vs, "ext1"); got <= 0 {
-		t.Fatalf("外部卷 TTL 应为正，got %v", got)
+	for _, vol := range []string{"local1", "ext1", ""} {
+		if got := volumeStateTTL(cfg, vol); got != volumestate.DefaultTTL {
+			t.Fatalf("%q 默认 TTL 应为 DefaultTTL(%v)，got %v", vol, volumestate.DefaultTTL, got)
+		}
 	}
 	cfg.VolumeState.TTL = 5 * time.Second
-	if got := volumeStateTTL(cfg, vs, "local1"); got != 5*time.Second {
+	if got := volumeStateTTL(cfg, "local1"); got != 5*time.Second {
 		t.Fatalf("显式 TTL 应全卷统一，got %v", got)
 	}
 }
@@ -197,7 +203,7 @@ func TestExternalFSFor_UsesStateCache(t *testing.T) {
 	cache := newVolumeStateCache(cfg, vs, testLogger())
 	// 与 RegisterRoutes 相同的注册方式（唯一装配点）。
 	vs.SetVolumeViewDecorator(func(name string, use registry.ViewUse, raw syncpkg.FS) syncpkg.FS {
-		return wrapVolumeState(vs, cache, name, use, raw)
+		return wrapVolumeState(cache, name, use, raw)
 	})
 	h := &Handlers{volSet: vs, logger: testLogger(), stateCache: cache}
 

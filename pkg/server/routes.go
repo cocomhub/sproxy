@@ -195,7 +195,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		case registry.ViewMeta:
 			return trusted.Guard(raw)
 		default: // ViewUser
-			return wrapVolumeState(vs, stateCache,
+			return wrapVolumeState(stateCache,
 				name, use, trusted.Guard(trusted.Wrap(raw, trusted.Options{Logger: log})))
 		}
 	})

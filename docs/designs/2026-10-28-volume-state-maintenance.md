@@ -492,7 +492,13 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
    POSIX 语义下**改子目录里的文件只会更新该子目录 mtime，不更新祖先** ⇒ 祖先目录的代际探测无法
    发现深层变化，仍需 TTL 兜底。
 
-**因此步骤 2 的决策点（需要产品/运维确认，不能由实现方默认）**：
+**决策已定（用户 2026-10-28 裁定「按推荐处理」）**：
+- (a) **本地卷参与缓存**，与外部卷同档默认 `TTL=30s`（可按卷显式配置）——已实现（§十六）；
+- (b) **接受「进程外改动 ≤TTL 才可见」**，并把它作为明确契约写进文档（此前 `searchIndex` 是同类
+  盲区但无承诺）；
+- (c) 步骤 2 落地时 `IndexSync` 只服务搜索（实现时执行）。
+
+**剩下的实现决策点**：
 
 - (a) 本地卷是否参与缓存：若参与，默认 TTL 取值（建议与外部卷同档 30s，或按卷配置）；
 - (b) 是否接受「进程外改动 ≤TTL 才可见」这一语义（今天的 `searchIndex` 同样只在进程内增量维护，
@@ -501,3 +507,25 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
   只服务**搜索**，需要重新定义其一致性契约（否则两套视图会长期并存 = 反 R40）。
 
 在上述三点确认前，步骤 2 不实施；R41 影子台账（已落地）继续约束不得新增耦合。
+
+---
+
+## 十六、本地卷纳入卷状态缓存（2026-10-28 落地，§15.3 决策 a+b）
+
+**改动**：
+- `wrapVolumeState` 不再跳过本地卷（`volume_state.enabled=true` 时统一包装）；`volumeStateTTL`
+  统一返回 `DefaultTTL`（30s），显式配置仍全卷覆盖。
+- **写穿补全**：本地卷的写内核经 `storage.Root`，不经过 FS 装饰器 ⇒ 只靠 `CacheFS` 自身失效
+  会漏掉内核写。`localVolumeMutationHandler` 把 Root 变异**同时**投递给两个消费方：
+  `files.ApplyRootMutation`（索引）与 `volumestate.Cache.Invalidate`（缓存，含 rename 的源/目标）。
+- 语义契约（明确写入文档，不再是隐含盲区）：
+  - **本进程写** ⇒ 事件写穿，下一次 list 立即可见；
+  - **进程外改动**（运维直写盘/同根多实例） ⇒ **≤TTL** 后可见；任何一次相关失效/回源也会看到它。
+
+**验收**：`TestWrapVolumeState_LocalVolumeCached`（三次 list 只回源一次）、
+`TestVolumeStateTTL_Unified`（本地/外部同档 TTL）、
+`TestLocalVolumeCache_WriteThroughAndTTLContract`（进程外改动 TTL 内不可见；经 Root 的写入由事件
+写穿立刻可见）。变异：去掉 `Cache.Invalidate` ⇒ 写穿断言红。
+
+**未做（步骤 2 本体）**：`files.List` 仍走 `searchIndex`（R46/R41 棘轮登记）。切换时建议**同受
+`volume_state.enabled` 门控**——默认关闭时保持索引路径（零回归），开启时走卷视图并享受缓存。
