@@ -15,8 +15,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -237,4 +239,79 @@ func searchTotal(t *testing.T, rr *httptest.ResponseRecorder) int {
 		t.Fatalf("解析搜索响应: %v (%s)", err, rr.Body.String())
 	}
 	return resp.Total
+}
+
+// TestLocalVolumeCache_WriteThroughAndTTLContract 钉住 §15.3 决策 (a)+(b) 的本地卷缓存语义：
+//   - 进程外直写（绕过 Root）= 不失效 ⇒ TTL 内不可见（明确的收敛窗口，不是"永久陈旧"）；
+//   - 写内核经 Root 的写入 = **事件写穿** ⇒ 下一次 list 立刻可见（不需要等 TTL）。
+func TestLocalVolumeCache_WriteThroughAndTTLContract(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Volumes = []VolumeConfig{{Name: "main", Root: cfg.StorageRoot}}
+	cfg.VolumeState.TTL = time.Minute // 长 TTL：保证"不可见"来自缓存而不是时钟
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("cfg.Validate: %v", err)
+	}
+	h := buildVolSetHandlers(t, cfg)
+	cache := newVolumeStateCache(cfg, h.volSet, testLogger())
+	h.stateCache = cache
+	h.volSet.SetVolumeViewDecorator(func(name string, use registry.ViewUse, raw syncpkg.FS) syncpkg.FS {
+		return wrapVolumeState(cache, name, use, raw)
+	})
+	svc := h.fileService() // 接线（含缓存失效）
+
+	fsys, ok := h.volSet.VolumeView("main", registry.ViewUser)
+	if !ok || fsys == nil {
+		t.Fatal("默认卷用户视图不可用")
+	}
+	ctx := context.Background()
+	if err := h.volSet.Root("main").MkdirAll("anonymous/user/docs", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if _, err := fsys.ListDir(ctx, "anonymous/user/docs"); err != nil {
+		t.Fatalf("首次 ListDir: %v", err)
+	}
+
+	// ① 进程外直写（绕过 Root，无事件）⇒ TTL 内不可见。
+	if werr := os.WriteFile(filepath.Join(cfg.StorageRoot, "anonymous", "user", "docs", "oob.txt"), []byte("x"), 0o600); werr != nil {
+		t.Fatalf("进程外写: %v", werr)
+	}
+	entries, err := fsys.ListDir(ctx, "anonymous/user/docs")
+	if err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name == "oob.txt" {
+			t.Fatal("TTL 内进程外改动不应可见（缓存契约：≤TTL 收敛）")
+		}
+	}
+
+	// ② 写内核经 Root（模拟 rootfs.WriteFile：OpenFile + MarkWritten）⇒ 事件写穿，立刻可见。
+	root := h.volSet.Root("main")
+	f, ferr := root.OpenFile("anonymous/user/docs/kernel.txt", os.O_CREATE|os.O_WRONLY, 0o644)
+	if ferr != nil {
+		t.Fatalf("OpenFile: %v", ferr)
+	}
+	if _, werr := f.WriteString("kernel"); werr != nil {
+		t.Fatalf("Write: %v", werr)
+	}
+	_ = f.Close()
+	root.MarkWritten("anonymous/user/docs/kernel.txt")
+
+	entries, err = fsys.ListDir(ctx, "anonymous/user/docs")
+	if err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	// 注意：失效会丢弃整个目录快照 ⇒ 回源时自然也会看到进程外文件（这是预期：回源即真相）。
+	found := false
+	for _, e := range entries {
+		if e.Name == "kernel.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("经 Root 的写入必须由事件写穿（下一次 list 立即可见）")
+	}
+	_ = svc
 }

@@ -13,16 +13,20 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
-// DefaultTTL 是外部卷的默认缓存有效期（C 类结构视图：有界过期即可）。
-const DefaultTTL = 30 * time.Second
+// DefaultTTL 是卷状态缓存的默认有效期（C 类结构视图：有界过期即可）。
+//
+// 5 分钟的依据（用户裁定 2026-10-28）：缓存是**正常路径**——本进程的写由事件写穿，只有
+// **进程外**改动（运维直写盘、同根多实例）才需要 TTL 收敛，而这类操作属罕见场景、不该被
+// 鼓励（需要立即生效时用 `POST /api/volumes/refresh`）。把 TTL 设长可显著减少远端回源。
+const DefaultTTL = 5 * time.Minute
 
 // DefaultMaxEntries 是内存 LRU 的默认容量（目录快照数）。
 const DefaultMaxEntries = 4096
 
 // Options 是 Cache 的构造参数（全部有安全默认：零值可用）。
 type Options struct {
-	// TTL 按卷名返回缓存有效期：>0 按时间过期；**0 = 不按时间过期**（本地卷：写穿即准）；
-	// <0 = 该卷禁用缓存（每次回源，调试/强一致场景）。
+	// TTL 按卷名返回缓存有效期：>0 按时间过期；**0 = 不按时间过期**（仅写穿保证新鲜，
+	// 进程外改动永不收敛——慎用）；<0 = 该卷禁用缓存（每次回源，调试/强一致场景）。
 	TTL func(volume string) time.Duration
 	// MaxEntries 内存 LRU 容量（<=0 ⇒ DefaultMaxEntries）。
 	MaxEntries int

@@ -84,6 +84,14 @@ func (f *fakeFS) Delete(_ context.Context, p string) error {
 
 func (f *fakeFS) MakeDir(_ context.Context, _ string) error { return nil }
 
+// CopyFile 模拟「同卷对象级复制」可选能力（secretdata blob 直拷的形态）。
+func (f *fakeFS) CopyFile(_ context.Context, from, to string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[normalizePath(to)] = f.files[normalizePath(from)]
+	return nil
+}
+
 // StateGen 实现 volume.StateGeneration（同包测试用）。
 func (f *fakeFS) StateGen(_ context.Context, _ string) (uint64, error) {
 	f.mu.Lock()
@@ -303,5 +311,37 @@ func TestCache_NormalizeAndAncestors(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("ancestors = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestWrap_CopyFileInvalidatesTarget 钉住「同卷对象复制」快路径也必须失效目标：
+// 该能力由卷实现、经 `Innermost` 探测；若装饰器不转发（或调用方直连最内层），
+// 复制结果会直到 TTL 才出现在列表里（默认 5 分钟，不可接受）。
+func TestWrap_CopyFileInvalidatesTarget(t *testing.T) {
+	t.Parallel()
+	fs := newFakeFS()
+	c, _ := newTestCache(t, time.Minute)
+	wrapped := Wrap("v1", fs, c)
+
+	if _, err := wrapped.ListDir(context.Background(), "owner/user/d"); err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	if n := fs.calls(); n != 1 {
+		t.Fatalf("首次 list 应回源 1 次，got %d", n)
+	}
+	cp, ok := wrapped.(interface {
+		CopyFile(ctx context.Context, from, to string) error
+	})
+	if !ok {
+		t.Fatal("CacheFS 应转发 CopyFile（否则调用方只能直连最内层，绕过失效）")
+	}
+	if err := cp.CopyFile(context.Background(), "owner/user/d/a.bin", "owner/user/d/b.bin"); err != nil {
+		t.Fatalf("CopyFile: %v", err)
+	}
+	if _, err := wrapped.ListDir(context.Background(), "owner/user/d"); err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	if n := fs.calls(); n != 2 {
+		t.Fatalf("复制后应失效并回源（2 次），got %d（失效未发生）", n)
 	}
 }

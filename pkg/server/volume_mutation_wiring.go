@@ -13,7 +13,11 @@
 //  2. 运行期新建本地卷成功后（`POST /api/volumes/user`）。
 package server
 
-import "github.com/cocomhub/sproxy/pkg/files"
+import (
+	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volumestate"
+)
 
 // wireLocalVolumeMutations 给全部本地卷根装上变异观察者（幂等：重复调用只是重设同一回调）。
 // svc 为 nil（文件服务未装配）或卷集合未装配时安全跳过。
@@ -22,7 +26,25 @@ func (h *Handlers) wireLocalVolumeMutations(svc *files.Service) {
 		return
 	}
 	for name, root := range h.volSet.LocalRoots() {
-		// 观察者只做内存索引更新 + 一次 Stat（见 files.ApplyRootMutation 注释）。
-		root.SetMutationObserver(name, svc.ApplyRootMutation)
+		root.SetMutationObserver(name, h.localVolumeMutationHandler(svc))
+	}
+}
+
+// localVolumeMutationHandler 把一次 Root 变异**同时**投递给两个派生状态消费方：
+//  1. `files.ApplyRootMutation`——搜索索引（结构 + 内容写）；
+//  2. `volumestate.Cache.Invalidate`——卷状态缓存（本地卷启用缓存后，写内核经 Root 的写入
+//     不会经过 FS 装饰器，必须由事件驱动失效；否则列表要等 TTL 才更新）。
+//
+// 两者都只做内存操作（+ 一次 Stat），同步执行、不阻塞写路径。
+func (h *Handlers) localVolumeMutationHandler(svc *files.Service) func(storage.Mutation) {
+	return func(m storage.Mutation) {
+		svc.ApplyRootMutation(m)
+		if h.stateCache == nil {
+			return
+		}
+		h.stateCache.Invalidate(volumestate.ObjectRef{Volume: m.Tag, Path: m.Rel})
+		if m.Rel2 != "" {
+			h.stateCache.Invalidate(volumestate.ObjectRef{Volume: m.Tag, Path: m.Rel2})
+		}
 	}
 }

@@ -605,3 +605,15 @@ tls:
 #       encrypt_key_file: "./secure.key"   # raw 32B 或 base64 32B（openssl rand -base64 32）
 #       cipher: "64KiB"                    # 可选：加密分块大小（非法值 fail-closed）
 #   —— 备份/迁移需导出存储原样密文时用 `?ciphertext=1`（详见 docs/api.md）。
+
+# ---- 卷状态缓存（volume_state；默认开启，disable=true 才关闭）----
+#   disable         显式关闭缓存（默认 false = 启用；强一致/调试场景用）
+#   ttl             缓存有效期（默认 0 = 5 分钟；负值 = 每次回源）
+#   search_remote   允许对远端卷做递归搜索（默认 false：递归列举 = 全量远端往返）
+#   max_bytes       落盘 staging 上限（默认 256MiB；0 = 仅内存）
+#   persist_private 允许保密卷的元数据快照落节点磁盘（默认 false = 只内存）
+# 语义：本进程的写由事件写穿（下一次读立即可见）；**进程外**改动（运维直写盘/同根多实例）
+# ≤TTL 收敛——属罕见场景，需要立即生效用 `POST /api/volumes/refresh?volume=<卷>`。
+# volume_state:
+#   disable: false
+#   ttl: "5m"

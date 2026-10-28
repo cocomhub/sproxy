@@ -668,10 +668,17 @@ func (h *Handlers) prepareExternalCopyDest(ctx context.Context, fsys syncpkg.FS,
 }
 
 // copyWithinVolumeFS 调（最内层）卷的 CopyFile，并把底层错误映射为领域错误。
-func (h *Handlers) copyWithinVolumeFS(ctx context.Context, volName, fromRemote, toRemote string, raw syncpkg.FS, srcKey, dstKey string) error {
-	copier, ok := syncpkg.Innermost(raw).(interface {
+func (h *Handlers) copyWithinVolumeFS(ctx context.Context, volName, fromRemote, toRemote string, fsys syncpkg.FS, srcKey, dstKey string) error {
+	// 优先走**装饰后的**视图（CacheFS 已转发 CopyFile 并在成功后失效）⇒ 复制结果对下一次
+	// list 立即可见；只有装饰器链未转发该能力时才回落到最内层（行为与既有实现一致）。
+	copier, ok := fsys.(interface {
 		CopyFile(ctx context.Context, from, to string) error
 	})
+	if !ok {
+		copier, ok = syncpkg.Innermost(fsys).(interface {
+			CopyFile(ctx context.Context, from, to string) error
+		})
+	}
 	if !ok {
 		return &files.HTTPError{Status: http.StatusNotImplemented, Message: "该卷类型不支持复制"}
 	}

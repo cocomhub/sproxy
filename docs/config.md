@@ -292,22 +292,23 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 
 卷的 **list 目录视图**与 **checksum 派生值** 的统一缓存层（设计
 [2026-10-28-volume-state-maintenance](./designs/2026-10-28-volume-state-maintenance.md)）。
-**默认关闭**（`enabled: false` = 完全旧行为，可灰度回退）。启用后：
+**默认开启**（`disable: true` 才关闭）。语义契约（用户裁定 2026-10-28）：
 
-- **作用范围**：仅**非本地卷**（外部卷 / 封装卷）。本地卷仍走既有搜索索引与 checksum 台账
-  （后续片迁移）。
+- **作用范围**：**所有存储卷**（含本地卷）。本地卷的对外 list 仍走搜索索引（后续片迁移），
+  但同步/镜像/备份等 `FS.ListDir` 消费方已享受缓存。
 - **读**：目录列举命中缓存（外部卷不再每次全量远端往返）；`Stat` 恒回源（checksum 安全判定
   必须新鲜 —— 卷是真相源，缓存只加速）。
 - **写**：经卷视图的写（上传/删除/改名/跨卷移动/转存）**自动失效**对应目录，无需调用方登记。
-- **收敛**：`TTL` 有界过期 + 卷自报**代际**（`StateGeneration`，卷实现时）+ 显式
-  `POST /api/volumes/refresh?volume=<卷>`。
+- **收敛**：本进程写由事件**写穿**（下一次读立即可见，含本地卷经 `storage.Root` 的内核写）；
+  **进程外**改动（运维直写盘/同根多实例）≤`TTL`（默认 5 分钟）收敛——这类操作属罕见场景、
+  不被鼓励；需要立即生效用 `POST /api/volumes/refresh?volume=<卷>`。
 - **落盘**：节点本地受管 staging 目录 `<storage_root>/meta/state/<卷>/…`（与容量账本
   `<root>/meta/quota/<卷>` 同约定）；不进卷、不进网盘。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `volume_state.enabled` | bool | `false` | 是否启用卷状态缓存（关闭 = 旧行为零回归） |
-| `volume_state.ttl` | duration | `0` | 外部卷缓存有效期；**`0` = 按卷类型默认**（外部卷 30s、本地卷不按时间过期）；**负值 = 禁用缓存**（每次回源） |
+| `volume_state.disable` | bool | `false` | 显式**关闭**卷状态缓存（默认 false = **启用**；强一致/调试时置 true） |
+| `volume_state.ttl` | duration | `0` | 缓存有效期；**`0` = 默认 5 分钟**；**负值 = 每次回源**（调试/强一致）。进程外改动 ≤TTL 收敛，需要立即生效用 `POST /api/volumes/refresh` |
 | `volume_state.search_remote` | bool | `false` | 允许对远端卷做递归搜索（默认关闭：递归列举 = 全量远端往返） |
 | `volume_state.max_bytes` | ByteSize | `256MiB` | 落盘 staging 上限；**`0` = 仅内存不落盘** |
 | `volume_state.persist_private` | bool | `false` | 允许**保密卷**（加密/私密外部卷）的元数据快照落节点磁盘；默认 false = 只内存（避免文件名/校验和明文落盘） |

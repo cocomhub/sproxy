@@ -191,6 +191,32 @@ func (f *CacheFS) Copy(ctx context.Context, from, to string) error {
 	return nil
 }
 
+// CopyFile 委托 inner 的**同卷对象级复制**快路径（secretdata 的 blob 直拷）；成功后失效目标。
+//
+// 为什么必须转发：该能力由卷（secretdata）实现、由装配层经 `Innermost` 探测；若装饰器不实现，
+// 上层只能直接调用**最内层**实例 ⇒ 绕过本层失效 ⇒ 列表要等 TTL 才更新（默认 5 分钟，不可接受）。
+// 转发后调用方可以走装饰后的视图，失效与复制在同一个动作里完成（不留"记得失效"的纪律）。
+func (f *CacheFS) CopyFile(ctx context.Context, from, to string) error {
+	cf, ok := f.inner.(interface {
+		CopyFile(ctx context.Context, from, to string) error
+	})
+	if !ok {
+		// 能力可能由**最内层**卷实现（中间装饰器如 trusted/capacity 不转发该匿名能力）⇒
+		// 穿透取实现，保证「经装饰视图复制」也能成立（否则调用方只能直连最内层而绕过失效）。
+		cf, ok = syncpkg.Innermost(f.inner).(interface {
+			CopyFile(ctx context.Context, from, to string) error
+		})
+	}
+	if !ok {
+		return fmt.Errorf("volumestate: 底层未实现 CopyFile: %w", syncpkg.ErrUnsupported)
+	}
+	if err := cf.CopyFile(ctx, from, to); err != nil {
+		return err
+	}
+	f.invalidate(to)
+	return nil
+}
+
 // Link 委托 inner；成功后失效目标（硬链接新建对象）。
 func (f *CacheFS) Link(ctx context.Context, from, to string) error {
 	lk, ok := f.inner.(syncpkg.Linker)
@@ -284,4 +310,8 @@ var (
 	_ syncpkg.StagingQuotaExempt  = (*CacheFS)(nil)
 	_ meta.Provider               = (*CacheFS)(nil)
 	_ syncpkg.MetaExtraUpdater    = (*CacheFS)(nil)
+	// 同卷对象级复制（secretdata blob 直拷）：转发 + 失效目标，见 CopyFile 注释。
+	_ interface {
+		CopyFile(ctx context.Context, from, to string) error
+	} = (*CacheFS)(nil)
 )
