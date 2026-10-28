@@ -163,6 +163,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -585,6 +586,9 @@ type Service struct {
 	index *searchIndex
 	// vector 是语义搜索向量索引（roadmap 11.9-④）：nil = 未装配（端点 404 零回归）。
 	vector *VectorStore
+	// checksumRebuild 记录「已尝试过从 meta 重建台账」的 owner（每 owner 仅一次，防列表路径
+	// 反复全量遍历）。值为 struct{}。
+	checksumRebuild sync.Map
 }
 
 // SaveIndexSnapshots 保存全部已构建 owner 的索引快照（幂等；供装配层周期调用，

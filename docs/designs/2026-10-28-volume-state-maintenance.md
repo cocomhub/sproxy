@@ -442,13 +442,16 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
 已带 `TotalSHA256`（`pkg/files/meta`）。目标：**读以对象 meta 为准，台账退化为导入源**。
 
 可行切片（按序）：
-1. **自愈读**：`List`/`Search`/`Stat` 在台账缺条目时就地读 sidecar（`FileMetaPolicy.ReadMetaRaw`
-   + `meta.MetaPath`），只读不写台账（旧台账损坏不再导致「checksum 空」）。
-   代价：首个无台账的列表会有 N 次 sidecar 读 ⇒ 需一次性批量构建 + 缓存，或先跑 2。
-2. **一次性导入**（启动期或 `sclient checksum import`）：逐卷遍历 user 桶，读 sidecar 的
-   `TotalSHA256` 回填台账，写完标记 `imported=true`。
-3. **台账转只读**：此后 `Set/Delete/Rename` 不再写台账（仅内存/事件驱动），删 `checksums.json`
-   写路径与 R46 对应计数。
+1. ~~自愈读~~ **✅ 已实现（步骤 ①+② 合并）**：`checksumSnapshot` 发现台账为空（丢失/损坏/新租户）
+   即触发 `Service.RebuildChecksums`——逐卷遍历 `<owner>/user/` 从 sidecar `TotalSHA256`
+   **批量回填**（`ChecksumStore.SetMany` 只落盘一次），每 owner 只尝试一次（`checksumRebuild`
+   sync.Map 防列表路径反复全量遍历）。选「批量回填」而非「逐条目兜底」是为了避免大目录列表的
+   N 次 sidecar I/O。验收：`TestService_ChecksumRebuildFromMeta`（删台账 → list checksum 自愈）
+   + `_NoMetaNoCrash`（无 meta 能力零回归）；变异：去掉自动重建 ⇒ 红。
+2. **增量自愈**（未做）：台账**部分**缺失（非全空）时目前不触发重建；需要的话可做
+   `sclient checksum rebuild` 显式命令（走同一 `RebuildChecksums`）。
+3. **台账转只读**（未做）：`Set/Delete/Rename` 不再写台账、读路径全量走 sidecar 或内存视图，
+   删 `checksums.json` 写路径与 R46 对应计数。**前置**：跨卷同名键空间口径（见上）。
 
 风险/决策点：台账键是**租户相对 rel（跨卷同名可冲突）**——对象 meta 是**卷内对象级**，两者键空间
 不同，导入时必须按 volume 归属写入（否则跨卷同名文件互相覆盖）。这是本项必须先定的口径。
