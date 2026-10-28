@@ -698,6 +698,17 @@ sclient genkey
 
 打印新的 64 位 hex AES-256 密钥（不写入配置文件）。
 
+### checksum
+
+```bash
+sclient checksum rebuild                 # 从对象 meta 重建当前主体的 checksum 台账
+sclient checksum rebuild --owner alice   # 指定 owner（**仅 admin**；否则 403）
+```
+
+从对象 meta sidecar 的 `TotalSHA256` 回填 per-tenant checksum 台账（`meta/checksums.json`），
+返回回填条数。**何时需要**：台账「部分缺失/被裁剪」时（台账**全空**时 `list` 会自动自愈，
+无需手动执行）。
+
 ### config
 
 ```bash

@@ -431,6 +431,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （巡检读全卷台账+重算，非 per-file 用户面）。
 	localMux.HandleFunc("POST /api/verify", h.verifyHandler)
 	srvMux.HandleFunc("POST /api/verify", h.authMiddleware(h.verifyHandler))
+	// checksum 台账运维修复面（§15.1 步骤②）：从对象 meta 重建台账（部分缺失时显式触发）。
+	localMux.HandleFunc("POST /api/checksums/rebuild", h.rebuildChecksumsHandler)
+	srvMux.HandleFunc("POST /api/checksums/rebuild", h.authMiddleware(h.rebuildChecksumsHandler))
 	srvMux.HandleFunc("POST /upload", h.fileRoute(h.upload))
 	srvMux.HandleFunc("GET /download", h.fileRouteRead(h.download))
 	srvMux.HandleFunc("POST /delete", h.fileRoute(h.delete))

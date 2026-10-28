@@ -32,6 +32,7 @@ POST /api/secrets	action=secret_create
 POST /api/share	action=share_create	
 POST /api/sync/conflicts/{id}/resolve	action=sync_conflict_resolve	
 POST /api/sync/tasks	action=sync_task_create	
+POST /api/checksums/rebuild	action=checksum_rebuild	
 POST /api/verify	action=verify	
 POST /api/versions/restore	action=version_restore	
 POST /api/volumes/copy	action=volume_copy	
