@@ -284,7 +284,7 @@ Delete/软删/恢复 → Invalidate(rel)
 | 门禁 | 判据 | 防的是 |
 |---|---|---|
 | **R40** ✅已实现 | 非测试源码的 `*Cache`/`*Index` 结构体必须登记（`list_cache_types.tsv`，新增须复用 `pkg/volumestate` 或说明理由；secretdata 白名单理由：内容是密文，只有卷能算） | 再造第四套 |
-| **R41** | `files.List/Search` 实现体不得直调 `index.list` / `ExternalList`（V4 后） | 双入口 |
+| **R41** ✅影子台账 | `index.list`/`index.search`/`ExternalList` 直调点逐文件计数棘轮（`list_source_calls.tsv`，只减不增）；迁移完成后收敛为 0 即转硬禁 | 双入口 |
 | **R42** ✅已实现 | 带 `ListDir` 的类型（`sync.FS` 实现）必须实现 `StateGen`，或登记在 `fs_derived_state.tsv` 说明「为什么不需要自述代际」 | 忘失效（#853/#874 类） |
 | **R44** | `volumestate.WrapVolume` 只在装配处出现；业务代码不得自造 FS 缓存包装 | 绕过唯一入口 |
 | **R45** ✅已实现 | `storage.Root` 结构性变异方法必须回调 `notifyMutation`（`internal/archcheck/root_mutation_gate_test.go`） | 机制因原语演进失效 |
@@ -471,3 +471,7 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
 
 建议按「先加 R41 的**影子台账**（记录调用点与迁移进度）→ 再逐卷切换 list → 最后删 index.list」
 三步推进，每步都可用现有 list/search 全量用例回归。
+
+**步骤 1 已落地（R41 影子台账）**：`internal/archcheck/list_source_gate_test.go` + `list_source_calls.tsv`
+（3 文件 / 5 处基线：`pkg/files/read_ops.go` 3、`options.go` 1、`pkg/server/files_service.go` 1）。
+只减不增；迁移完成后计数归零，届时把本门禁改成硬禁（禁止直调）。
