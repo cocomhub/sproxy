@@ -845,40 +845,47 @@ func (o externalVolumeOps) ExternalRename(ctx context.Context, owner, volName, f
 // 语义：文件不存在 → (nil,false,nil)（调用方 404）；文件存在但卷无 meta 载体/无 extra →
 // (空 map,true,nil)（读侧零校验语义）；读取真错误 → 错误（fail-closed）。
 func (o externalVolumeOps) ExternalMeta(ctx context.Context, owner, volName, remotePath string) (map[string]any, bool, error) {
+	extra, _, _, ok, err := o.ExternalMetaInfo(ctx, owner, volName, remotePath)
+	return extra, ok, err
+}
+
+// ExternalMetaInfo 实现 files.ExternalMetaInfoReader：在 ExternalMeta 语义上**额外返回**
+// 原始文件 mtime/ctime（卷 FS 支持 meta.Provider 时取自 sidecar/加密卷 meta；否则空）。
+func (o externalVolumeOps) ExternalMetaInfo(ctx context.Context, owner, volName, remotePath string) (map[string]any, string, string, bool, error) {
 	h := o.h
 	if h.volSet == nil {
-		return nil, false, nil
+		return nil, "", "", false, nil
 	}
 	fsys, ok := h.externalFSFor(volName)
 	if !ok {
-		return nil, false, nil
+		return nil, "", "", false, nil
 	}
 	v, ok := h.volSet.ByName(volName)
 	if !ok || !v.Authorize(owner) {
-		return nil, false, nil
+		return nil, "", "", false, nil
 	}
 	key, kok := externalVolumeKey(v, owner, remotePath)
 	if !kok {
-		return nil, true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+		return nil, "", "", true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	e, serr := fsys.Stat(ctx, key)
 	if serr != nil || e == nil || e.IsDir {
-		return nil, false, nil // 不存在/不可 stat → 未命中
+		return nil, "", "", false, nil // 不存在/不可 stat → 未命中
 	}
 	pv, pok := fsys.(meta.Provider)
 	if !pok {
-		return map[string]any{}, true, nil // 无 meta 载体（裸卷无 trusted 装饰）→ 无 extra
+		return map[string]any{}, "", "", true, nil // 无 meta 载体（裸卷无 trusted 装饰）→ 无 extra
 	}
 	fm, ferr := pv.FileMeta(ctx, key)
 	if ferr != nil {
 		if errors.Is(ferr, os.ErrNotExist) {
-			return map[string]any{}, true, nil // sidecar 缺失 = 无 extra
+			return map[string]any{}, "", "", true, nil // sidecar 缺失 = 无 extra
 		}
-		return nil, true, ferr
+		return nil, "", "", true, ferr
 	}
 	out := make(map[string]any, len(fm.Extra))
 	maps.Copy(out, fm.Extra)
-	return out, true, nil
+	return out, fm.MTime, fm.CTime, true, nil
 }
 
 // ExternalMetaUpdate 实现 files.ExternalVolumeOps：把 extra 合并进外部卷对象的 meta。

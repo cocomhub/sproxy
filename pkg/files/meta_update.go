@@ -146,11 +146,45 @@ func (s *Service) GetMetaInfo(ctx context.Context, input GetMetaInput) (MetaInfo
 	if ok && loc.Tenant != nil {
 		return s.getMetaInfoLocal(ctx, owner, input.RemotePath, loc)
 	}
-	extra, err := s.getMetaExternal(ctx, owner, input.RemotePath)
+	extra, mtime, ctime, err := s.getMetaExternalInfo(ctx, owner, input.RemotePath)
 	if err != nil {
 		return MetaInfo{}, err
 	}
-	return MetaInfo{Extra: extra}, nil
+	return MetaInfo{Extra: extra, MTime: mtime, CTime: ctime}, nil
+}
+
+// getMetaExternalInfo 外部卷：优先用 ExternalMetaInfoReader（含 mtime/ctime），
+// 未实现则回落 ExternalMeta（无时间信息——向后兼容旧装配）。
+func (s *Service) getMetaExternalInfo(ctx context.Context, owner, remotePath string) (map[string]any, string, string, error) {
+	ops := s.rt.externalVolOps()
+	if ops != nil {
+		if mir, ok := ops.(ExternalMetaInfoReader); ok {
+			return s.getMetaExternalVia(mir, ctx, owner, remotePath)
+		}
+	}
+	extra, err := s.getMetaExternal(ctx, owner, remotePath)
+	return extra, "", "", err
+}
+
+// getMetaExternalVia 遍历允许的外部卷，经 ExternalMetaInfoReader 取 (extra, mtime, ctime)。
+func (s *Service) getMetaExternalVia(mir ExternalMetaInfoReader, ctx context.Context, owner, remotePath string) (map[string]any, string, string, error) {
+	vs := s.rt.volSet()
+	if vs == nil {
+		return nil, "", "", &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	for _, v := range volume.AllowedVolumes(vs.All(), owner) {
+		if vs.HasLocalRoot(v.Name) {
+			continue
+		}
+		extra, mtime, ctime, ok, err := mir.ExternalMetaInfo(ctx, owner, v.Name, remotePath)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if ok {
+			return extra, mtime, ctime, nil
+		}
+	}
+	return nil, "", "", &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 }
 
 // getMetaInfoLocal 本地卷：sidecar → (extra, mtime, ctime)。
