@@ -83,3 +83,40 @@ test('withUrlSig 签名抛错时原样返回（不阻断播放尝试）', async 
   delete globalThis.accessKey; delete globalThis.accessKeySecret; delete globalThis.accessKeyID;
   delete globalThis.sclientSig;
 });
+
+// ---- 浏览器可播判定 + 不可播兜底（用户裁定 2026-10-29）----
+const { isBrowserPlayable, playerProtocolUrls, unsupportedPlayerModalHtml, BROWSER_PLAYABLE_EXTS } = require('./video-player.js');
+
+test('isBrowserPlayable 只认浏览器原生容器', () => {
+  for (const n of ['a.mp4', 'B.M4V', 'c.webm', 'd.ogg', 'e.ogv', 'f.mov']) {
+    assert.equal(isBrowserPlayable(n), true, n);
+  }
+  for (const n of ['a.avi', 'b.rmvb', 'c.wmv', 'd.flv', 'e.mkv', 'f.ts', 'noext']) {
+    assert.equal(isBrowserPlayable(n), false, n);
+  }
+  assert.equal(isBrowserPlayable(''), false);
+  assert.equal(isBrowserPlayable(null), false);
+});
+
+test('playerProtocolUrls 生成 potplayer/vlc/iina 三种拉起 URL', () => {
+  const urls = playerProtocolUrls('/download?filename=a.avi&spx_sig=x');
+  assert.equal(urls.length, 3);
+  assert.match(urls[0], /^potplayer:\/\//);
+  assert.match(urls[1], /^vlc:\/\//);
+  assert.match(urls[2], /^iina:\/\//);
+  assert.ok(urls.every((u) => u.includes('filename=a.avi')));
+});
+
+test('unsupportedPlayerModalHtml 提供三种兜底动作且转义', () => {
+  const html = unsupportedPlayerModalHtml({ filename: 'dir/a<b>.avi', url: '/download?filename=a%3Cb%3E.avi&spx_sig=x' });
+  assert.match(html, /浏览器不支持该视频格式/);
+  assert.match(html, /data-open-local-player="1"/);
+  assert.match(html, /data-copy-stream-url="1"/);
+  assert.match(html, /download>下载原文件/);
+  assert.match(html, /推荐安装 VLC/);
+  assert.ok(!html.includes('<b>'), '文件名必须转义');
+});
+
+test('URL_SIG_TTL_MS 为 3 小时（与服务端 download_token_ttl 对齐）', () => {
+  assert.equal(URL_SIG_TTL_MS, 3 * 60 * 60 * 1000);
+});

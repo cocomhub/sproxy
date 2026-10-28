@@ -23,9 +23,9 @@
 
 'use strict';
 
-// URL 票 TTL（ms）：1h（对齐服务端默认 download_token_ttl；前端固定 1h，服务端上限可配，
-// 超上限的签名在服务端被拒）。
-const URL_SIG_TTL_MS = 60 * 60 * 1000;
+// URL 票 TTL（ms）：3h（用户裁定 2026-10-29；须与服务端 `download_token_ttl` 一致，
+// 超出服务端上限的签名会被拒）。3h 覆盖「复制直链给本地播放器看完整部片」的场景。
+const URL_SIG_TTL_MS = 3 * 60 * 60 * 1000;
 
 // urlSigQueryKey 对齐服务端（pkg/server/urlsig.go）。
 const URL_SIG_QUERY = 'spx_sig';
@@ -80,12 +80,64 @@ function videoPlayerModalHtml(opts) {
     '</div>';
 }
 
+// ---- 浏览器可播判定 + 不可播时的本地播放器兜底（用户裁定 2026-10-29）----
+// 浏览器原生只认 mp4/m4v/webm/ogg（mov 部分），AVI/RMVB/WMV/FLV/MKV 不支持；
+// 对不可播格式不再假装播放（黑屏），改为提示 + 用本地播放器打开/复制直链/下载。
+
+// BROWSER_PLAYABLE_EXTS 是浏览器可直放的扩展名白名单。
+const BROWSER_PLAYABLE_EXTS = ['.mp4', '.m4v', '.webm', '.ogg', '.ogv', '.mov'];
+
+// isBrowserPlayable(name) → 扩展名是否可被浏览器 <video> 播放（不区分大小写）。
+function isBrowserPlayable(name) {
+  const n = String(name == null ? '' : name).toLowerCase();
+  const dot = n.lastIndexOf('.');
+  if (dot < 0) return false;
+  return BROWSER_PLAYABLE_EXTS.indexOf(n.slice(dot)) >= 0;
+}
+
+// PLAYER_PROTOCOLS 是本地播放器协议候选（按平台常见度排序）：
+// potplayer://（Windows）、vlc://（跨平台，Windows 兼容性一般）、iina://（macOS）。
+const PLAYER_PROTOCOLS = ['potplayer://', 'vlc://', 'iina://'];
+
+// playerProtocolUrls(url) → 各协议拉起 URL（纯函数）。
+function playerProtocolUrls(url) {
+  return PLAYER_PROTOCOLS.map(function (p) { return p + url; });
+}
+
+// unsupportedPlayerModalHtml({filename, url}) → 不可播格式弹层：
+// 说明 + 「用本地播放器打开」（协议拉起）/「复制直链」/「下载原文件」。
+function unsupportedPlayerModalHtml(opts) {
+  const o = opts || {};
+  const title = o.filename == null ? '' : String(o.filename);
+  const url = o.url == null ? '' : String(o.url);
+  return '<div class="video-modal video-modal-unsupported">' +
+    '<div class="video-modal-header">' +
+    '<span class="video-modal-title">' + appRender.escHtml(title) + '</span>' +
+    '<button type="button" class="video-modal-close" data-close="1" title="关闭" aria-label="关闭">&times;</button>' +
+    '</div>' +
+    '<div class="video-unsupported-body">' +
+    '<p class="video-unsupported-tip">浏览器不支持该视频格式（AVI/RMVB/WMV/FLV/MKV 等），请用本地播放器打开或下载观看。</p>' +
+    '<div class="video-unsupported-actions">' +
+    '<button type="button" class="btn btn-primary" data-open-local-player="1" data-url="' + appRender.escHtml(url) + '">用本地播放器打开</button>' +
+    '<button type="button" class="btn" data-copy-stream-url="1" data-url="' + appRender.escHtml(url) + '">复制直链</button>' +
+    '<a class="btn" href="' + appRender.escHtml(url) + '" download>下载原文件</a>' +
+    '</div>' +
+    '<p class="video-unsupported-hint" data-player-hint="1">未安装本地播放器？推荐安装 VLC（或 PotPlayer）。</p>' +
+    '</div>' +
+    '</div>';
+}
+
 // 导出（node --test 用）。
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     videoPlayerUrl: videoPlayerUrl,
     videoPlayerModalHtml: videoPlayerModalHtml,
     withUrlSig: withUrlSig,
+    isBrowserPlayable: isBrowserPlayable,
+    playerProtocolUrls: playerProtocolUrls,
+    unsupportedPlayerModalHtml: unsupportedPlayerModalHtml,
+    BROWSER_PLAYABLE_EXTS: BROWSER_PLAYABLE_EXTS,
+    PLAYER_PROTOCOLS: PLAYER_PROTOCOLS,
     URL_SIG_TTL_MS: URL_SIG_TTL_MS,
     URL_SIG_QUERY: URL_SIG_QUERY,
   };
