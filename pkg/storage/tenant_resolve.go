@@ -139,6 +139,9 @@ func openTenant(parent *Root, owner string, cfg tenantConfig) (*Tenant, error) {
 	// 故安装派生实时来源（deriveSealsFromParent：按父根当前规则翻译 + 本根别名展开 + 版本缓存）
 	// ——与父根变更天然同步，既不需要「缓存失效 + 关闭在用租户句柄」生命周期动作，也无每判定分配。
 	tenantRoot.deriveSealsFromParent(parent, owner)
+	// 变异观察者继承：租户子根上的写会以 `<owner>/<rel>`（卷根命名空间）上报，
+	// 消费方无需知道是哪个子根写的（设计 §4.1）。
+	tenantRoot.inheritMutationObserver(parent, owner)
 	t, err := NewTenant(owner, tenantRoot)
 	if err != nil {
 		cfg.warn("创建租户失败（fail-closed）", "owner", owner, "error", err)

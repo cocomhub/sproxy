@@ -509,6 +509,10 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 			panic("files.New 装配失败: " + err.Error())
 		}
 		h.filesSvc = svc
+		// V3：本地卷结构性变异 → 搜索索引自动维护（唯一接线点，见
+		// volume_mutation_wiring.go）。放在 Once 内直接用局部 svc，避免递归调用
+		// fileService()（sync.Once 自锁）。
+		h.wireLocalVolumeMutations(svc)
 	})
 	return h.filesSvc
 }

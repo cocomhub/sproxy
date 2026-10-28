@@ -45,6 +45,9 @@ type Root struct {
 	// 而分块下载/Range 每个请求都会开一次 ⇒ 大文件重复扫描。
 	plainSizeMu sync.Mutex
 	plainSize   map[string]plainSizeEntry
+	// mutObs 是结构性变异观察者（设计 §4.1；nil = 未装 = 零回归）。
+	// 载荷不可变、整体换指针 ⇒ 运行期读无撕裂。
+	mutObs atomic.Pointer[mutationObserver]
 }
 
 // rootEnc 是加密态（key 32B + GCM 复用 + 分块大小——cipher 选型）。
@@ -277,7 +280,11 @@ func (rt *Root) MkdirAll(rel string, perm os.FileMode) error {
 	if err := rt.sealCheck(rel, true); err != nil {
 		return err
 	}
-	return rt.r.MkdirAll(rel, perm)
+	if err := rt.r.MkdirAll(rel, perm); err != nil {
+		return err
+	}
+	rt.notifyMutation(MutationMkdir, rel, "")
+	return nil
 }
 
 // Remove 相对 root 删除单个文件/空目录。
@@ -285,7 +292,11 @@ func (rt *Root) Remove(rel string) error {
 	if err := rt.sealCheck(rel, true); err != nil {
 		return err
 	}
-	return rt.r.Remove(rel)
+	if err := rt.r.Remove(rel); err != nil {
+		return err
+	}
+	rt.notifyMutation(MutationRemove, rel, "")
+	return nil
 }
 
 // RemoveAll 相对 root 递归删除。
@@ -293,7 +304,11 @@ func (rt *Root) RemoveAll(rel string) error {
 	if err := rt.sealCheck(rel, true); err != nil {
 		return err
 	}
-	return rt.r.RemoveAll(rel)
+	if err := rt.r.RemoveAll(rel); err != nil {
+		return err
+	}
+	rt.notifyMutation(MutationRemoveAll, rel, "")
+	return nil
 }
 
 // Link 相对 root 创建硬链接（newname 指向 oldname 的同一 inode）。
@@ -307,7 +322,11 @@ func (rt *Root) Link(oldRel, newRel string) error {
 	if err := rt.sealCheck(oldRel, true); err != nil {
 		return err
 	}
-	return rt.r.Link(oldRel, newRel)
+	if err := rt.r.Link(oldRel, newRel); err != nil {
+		return err
+	}
+	rt.notifyMutation(MutationLink, oldRel, newRel)
+	return nil
 }
 
 // Rename 相对 root 重命名/移动。
@@ -319,7 +338,11 @@ func (rt *Root) Rename(oldRel, newRel string) error {
 	if err := rt.sealCheck(oldRel, true); err != nil {
 		return err
 	}
-	return rt.r.Rename(oldRel, newRel)
+	if err := rt.r.Rename(oldRel, newRel); err != nil {
+		return err
+	}
+	rt.notifyMutation(MutationRename, oldRel, newRel)
+	return nil
 }
 
 // Chtimes 相对 root 修改访问/修改时间。委托 os.Root.Chtimes，随标准库保证 root 内约束。
@@ -327,7 +350,11 @@ func (rt *Root) Chtimes(rel string, atime, mtime time.Time) error {
 	if err := rt.sealCheck(rel, true); err != nil {
 		return err
 	}
-	return rt.r.Chtimes(rel, atime, mtime)
+	if err := rt.r.Chtimes(rel, atime, mtime); err != nil {
+		return err
+	}
+	rt.notifyMutation(MutationChtimes, rel, "")
+	return nil
 }
 
 // Abs 派生 root 内 rel 对应的绝对路径并确认仍在 base 内（字符串级校验，供 os.SameFile 等）。
