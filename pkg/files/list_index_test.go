@@ -386,14 +386,13 @@ func TestService_ListFiles_IndexSortPagination(t *testing.T) {
 // 确保 os 引用（MultiVolume 测试辅助使用）——显式标注避免误删 import。
 var _ = os.Getenv
 
-// TestService_ListFiles_IndexCachesUntilInvalidated 钉住「索引缓存语义」：
-// 预热列表（索引已构建）后，旁路写磁盘（不经写路径、不 Invalidate）→ 列表**看不到**
-// 新文件（缓存语义——与实时 ReadDir 的差异点）；InvalidateIndex 后重建 → 看到。
+// TestService_ListFiles_RealTimeSeesBypassWrite 钉住 §15.2 步骤 3 后的数据源语义：
+// list 不再读 `searchIndex`，视图不可用时**实时扫描**磁盘 ⇒ 旁路写（不经写路径）立即可见。
+// 缓存语义（默认永不过期 + 事件写穿 + 显式 refresh）由装配层 `pkg/volumestate` 承担，
+// 见 `pkg/volumestate` 与 `pkg/server/volume_state_wiring_test.go` 的用例。
 //
-// 本测试是「列表走索引」的**红灯判据**：当前实时 ReadDir 实现下，旁路写后列表立即可见
-// （无缓存），本用例会红；索引化后预热构建 + 缓存直到失效 → 绿。
-// 变异验证：把 List 的索引查询换回实时 ReadDir → 本用例红（缓存语义丢失）。
-func TestService_ListFiles_IndexCachesUntilInvalidated(t *testing.T) {
+// 变异验证：恢复「list 读 searchIndex」→ 本用例红（旁路写不可见）。
+func TestService_ListFiles_RealTimeSeesBypassWrite(t *testing.T) {
 	t.Parallel()
 	env := newDirsEnv(t)
 	env.enableWriteDefaults()
@@ -406,16 +405,9 @@ func TestService_ListFiles_IndexCachesUntilInvalidated(t *testing.T) {
 	// 旁路写：直接落盘（模拟版本恢复等不经领域写路径的写入），不调 InvalidateIndex。
 	writeUserFile(t, env, "alice", "user/bypass.txt", "bypass")
 
-	// 索引缓存语义：不失效则看不到旁路写。
+	// 实时扫描 ⇒ 旁路写立即可见（领域层不做缓存；可见性策略在装配层）。
 	rr := env.serve(env.svc.ListFiles, "alice", "GET", "/api/files")
-	if resp := decodeList(t, rr); resp.Total != 0 {
-		t.Fatalf("缓存未失效不应看到旁路写（索引语义）, got %+v", resp.Files)
-	}
-
-	// Invalidate 后重建 → 看到。
-	env.svc.InvalidateIndex("alice")
-	rr = env.serve(env.svc.ListFiles, "alice", "GET", "/api/files")
 	if resp := decodeList(t, rr); resp.Total != 1 || resp.Files[0].Name != "bypass.txt" {
-		t.Fatalf("失效后应重建并看到旁路写, got %+v", resp.Files)
+		t.Fatalf("实时扫描应立即看到旁路写, got %+v", resp.Files)
 	}
 }

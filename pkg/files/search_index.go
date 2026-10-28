@@ -541,68 +541,6 @@ func (ix *searchIndex) setTags(owner, rel string, tags []string) {
 	ix.markDirtyLocked(owner)
 }
 
-// list 按 owner 索引列出目录的直接子项（roadmap P0 验收另一半：列表走索引）。
-//
-// dirRel 是相对 user 桶的目录路径（"" = 根）；volFilter 非空时只列该卷文件条目
-// （目录条目不绑卷，始终列出——与旧多卷聚合 List 的 seenDirs 语义一致）。
-//
-// 返回条目与旧 List 逐字一致的形状：目录条目 name = basename、IsDir=true、无 size/mtime/
-// checksum/volume；文件条目 name = basename、带 size/mtime/checksum/volume。
-//
-// 索引未构建（owner 租户不可用）时返回 nil（调用方按空结果处理，与旧语义一致）。
-//
-// 语义要点：
-//   - 直接子项 = key 前缀 dirRel/ 且不含更深的 '/'（一层）；
-//   - 目录条目来自索引的 isDir 条目（构建时跨卷去重、不绑卷）——列表天然只列一次；
-//   - 文件条目带 volume（构建时登记）；volFilter 非空时过滤；
-//   - 在途临时文件在构建时已跳过 → 天然排除；
-//   - 排序由调用方 sortFileEntries 处理（本方法不排序）。
-func (ix *searchIndex) list(owner, dirRel, volFilter string, csMap map[string]string) []FileInfo {
-	oi := ix.ensureOwner(owner)
-	if oi == nil {
-		return nil
-	}
-	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
-	for key, e := range oi.entries {
-		if !indexEntryIsDirectChild(key, dirRel) {
-			continue
-		}
-		if e.isDir {
-			out = append(out, FileInfo{Name: e.base, IsDir: true})
-			continue
-		}
-		if volFilter != "" && e.volume != volFilter {
-			continue
-		}
-		fi := FileInfo{Name: e.base, Size: e.size, ModTime: e.modTime, Volume: e.volume}
-		if cs, ok := csMap["user/"+key]; ok {
-			fi.Checksum = cs
-		}
-		out = append(out, fi)
-	}
-	return out
-}
-
-// indexEntryIsDirectChild 判断索引 key 是否为 dirRel 的直接子项（只一层；"" = 根目录）。
-// 根目录只列直接子项（含 "/" 的更深层项排除）。
-func indexEntryIsDirectChild(key, dirRel string) bool {
-	prefix := dirRel
-	if prefix != "" {
-		prefix += "/"
-	}
-	if prefix != "" {
-		if !strings.HasPrefix(key, prefix) {
-			return false
-		}
-		rest := key[len(prefix):]
-		if rest == "" || strings.Contains(rest, "/") {
-			return false // 目录自身或更深层子项 → 非直接子项
-		}
-		return true
-	}
-	return !strings.Contains(key, "/")
-}
-
 // saveAll 保存全部已构建 owner 的快照（幂等：未构建的跳过；供装配层周期调用）。
 // 返回保存的 owner 数（日志/测试断言用）。
 func (ix *searchIndex) saveAll() int {

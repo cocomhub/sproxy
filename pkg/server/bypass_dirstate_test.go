@@ -10,6 +10,7 @@ package server
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -48,9 +49,10 @@ func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	_ = fh.Close()
 
 	const owner, rel, cs = "alice", "user/docs/a.bin", "abc123"
-	// 先触发一次 list（构建 owner 索引——upsert 仅在已构建时生效）。
-	if _, lerr := svc.List(t.Context(), files.ListQuery{Owner: owner, Subdir: "docs"}); lerr != nil {
-		t.Fatalf("预热 list: %v", lerr)
+	// 先触发一次 search（构建 owner 索引——`upsert` 仅在已构建时生效）。
+	// 注：list 自 §15.2 步骤 3 起**不再读索引**（视图/实时扫描），所以预热必须走 search。
+	if _, serr := svc.Search(files.SearchQuery{Owner: owner, Query: "no-such-file"}); serr != nil {
+		t.Fatalf("预热 search: %v", serr)
 	}
 	// ① 台账迁移（IndexMove 唯一职责）。
 	svc.IndexMove(owner, rel, 42, cs, "vol2", nil)
@@ -62,6 +64,7 @@ func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	svc.ApplyRootMutation(storage.Mutation{
 		Op: storage.MutationWrite, Tag: "vol2", Root: h.globalRoot, Rel: owner + "/" + rel,
 	})
+	// list（实时扫描）：条目 checksum 来自迁移后的台账（卷归属由物理位置给出，不再是索引态）。
 	res, lerr := svc.List(t.Context(), files.ListQuery{Owner: owner, Subdir: "docs"})
 	if lerr != nil {
 		t.Fatalf("list: %v", lerr)
@@ -73,12 +76,30 @@ func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 			if f.Checksum != cs {
 				t.Fatalf("list 条目 checksum = %q, want %q", f.Checksum, cs)
 			}
-			if f.Volume != "vol2" {
-				t.Fatalf("条目卷归属 = %q，want vol2（事件应携带目标卷 Tag）", f.Volume)
-			}
 		}
 	}
 	if !found {
 		t.Fatalf("move 后 list 应包含 a.bin（got %d 条）", len(res.Files))
+	}
+
+	// 索引（只服务搜索）由事件驱动更新：条目卷归属 = 事件 Tag（目标卷 vol2）。
+	sres, serr := svc.Search(files.SearchQuery{Owner: owner, Query: "a.bin"})
+	if serr != nil {
+		t.Fatalf("search: %v", serr)
+	}
+	hit := false
+	for _, f := range sres.Files {
+		if strings.HasSuffix(f.Name, "a.bin") {
+			hit = true
+			if f.Volume != "vol2" {
+				t.Fatalf("索引条目卷归属 = %q，want vol2（事件应携带目标卷 Tag）", f.Volume)
+			}
+			if f.Checksum != cs {
+				t.Fatalf("索引条目 checksum = %q, want %q", f.Checksum, cs)
+			}
+		}
+	}
+	if !hit {
+		t.Fatalf("search 应命中 a.bin（got %d 条：%+v）", len(sres.Files), sres.Files)
 	}
 }
