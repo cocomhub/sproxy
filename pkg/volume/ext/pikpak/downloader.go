@@ -48,21 +48,25 @@ type DownloaderConfig struct {
 	AccountPool *AccountPool
 	// Logger 日志。
 	Logger *slog.Logger
+	// JournalFactory 是**进度 WAL** 工厂（用户裁定 2026-10-28）：drive 模式（账号网盘文件）
+	// 与分享 hybrid 共用同一恢复语义——分片完成即落盘，重启后续传。nil = 仅 manifest。
+	JournalFactory func(destPath, sourceKey string) (ProgressJournal, error)
 }
 
 // PikpakDownloader 把 PikPak 分享 URL 转存到个人网盘后用官方 CLI 完整下载。
 // 实现 pkg/downloader.Downloader 接口（供 sproxy cloud download 注册表使用）。
 type PikpakDownloader struct {
-	cli         *Cli
-	api         *API
-	downloadDir string
-	tempSuffix  string
-	gcidStats   *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
-	timeout     time.Duration
-	autoDelete  bool
-	pool        *AccountPool
-	log         *slog.Logger
-	normalizer  *ShareSourceNormalizer // keepshare 镜像归一（nil = 按原样直用）
+	cli            *Cli
+	api            *API
+	downloadDir    string
+	tempSuffix     string
+	gcidStats      *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
+	timeout        time.Duration
+	autoDelete     bool
+	pool           *AccountPool
+	log            *slog.Logger
+	normalizer     *ShareSourceNormalizer                                    // keepshare 镜像归一（nil = 按原样直用）
+	journalFactory func(destPath, sourceKey string) (ProgressJournal, error) // 进度 WAL（nil=仅 manifest）
 	// drive 下载专用 hybrid（惰性构造，复用同一 API/池/日志；drive 模式无 Resolver）
 	driveOnce   sync.Once
 	driveHybrid *HybridDownloader
@@ -189,6 +193,7 @@ func NewPikpakDownloader(cfg DownloaderConfig) (*PikpakDownloader, error) {
 		cli: cfg.Cli, api: cfg.API, downloadDir: dir,
 		tempSuffix: suffix, timeout: timeout, autoDelete: cfg.AutoDelete, pool: cfg.AccountPool, log: log,
 		gcidStats: cfg.GCIDStats, normalizer: NewShareSourceNormalizer(nil),
+		journalFactory: cfg.JournalFactory,
 	}, nil
 }
 
@@ -523,6 +528,8 @@ func (d *PikpakDownloader) hybridForDrive() (*HybridDownloader, error) {
 		hd, err := NewHybridDownloader(HybridConfig{
 			API: d.api, Logger: d.log, AutoDelete: d.autoDelete,
 			AccountPool: d.pool, GCIDStats: d.gcidStats, ChunkSize: 32 << 20,
+			// drive 模式同样落进度 WAL（云端转存下载实际走这条路径）。
+			JournalFactory: d.journalFactory,
 		})
 		if err != nil {
 			d.driveErr = err
