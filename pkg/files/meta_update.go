@@ -130,6 +130,55 @@ type GetMetaInput struct {
 	RemotePath string
 }
 
+// MetaInfo 是 meta 读取的完整结果（extra + 原始文件 mtime/ctime）。
+// MTime/CTime 为 RFC3339Nano（UTC；空 = 未知/该卷不提供时间信息）。
+type MetaInfo struct {
+	Extra map[string]any
+	MTime string
+	CTime string
+}
+
+// GetMetaInfo 读取 meta extra 及原始文件时间（mtime/ctime）。
+// 本地卷从 sidecar 的 FileMeta 取（写入时已记录）；外部卷仅返回 extra（时间字段为空）。
+func (s *Service) GetMetaInfo(ctx context.Context, input GetMetaInput) (MetaInfo, error) {
+	owner := normalizeOwner(input.Owner)
+	loc, ok := s.locateForRead(owner, mustRel(s, owner, input.RemotePath), "")
+	if ok && loc.Tenant != nil {
+		return s.getMetaInfoLocal(ctx, owner, input.RemotePath, loc)
+	}
+	extra, err := s.getMetaExternal(ctx, owner, input.RemotePath)
+	if err != nil {
+		return MetaInfo{}, err
+	}
+	return MetaInfo{Extra: extra}, nil
+}
+
+// getMetaInfoLocal 本地卷：sidecar → (extra, mtime, ctime)。
+func (s *Service) getMetaInfoLocal(ctx context.Context, owner, remotePath string, loc FileLocation) (MetaInfo, error) {
+	tnt := loc.Tenant
+	if tnt == nil || tnt.Root() == nil {
+		return MetaInfo{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+	}
+	rel, ok := tnt.UserRel(remotePath)
+	if !ok {
+		return MetaInfo{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	raw, rerr := s.rt.readMetaSidecar(ctx, tnt.Root(), meta.MetaPath(rel))
+	if errors.Is(rerr, os.ErrNotExist) {
+		return MetaInfo{Extra: map[string]any{}}, nil // sidecar 缺失 = 无 extra（不报错）
+	}
+	if rerr != nil {
+		return MetaInfo{}, rerr
+	}
+	fm, umerr := meta.Unmarshal(raw)
+	if umerr != nil {
+		return MetaInfo{}, fmt.Errorf("files: sidecar 损坏（拒绝返回）: %w", umerr)
+	}
+	out := make(map[string]any, len(fm.Extra))
+	maps.Copy(out, fm.Extra)
+	return MetaInfo{Extra: out, MTime: fm.MTime, CTime: fm.CTime}, nil
+}
+
 // GetMeta 读取目标文件的自定义元数据 extra（双路定位：本地卷读 meta 桶 sidecar /
 // 外部卷经 ExternalMeta 接缝）。返回 nil = 文件不存在或无 extra（读侧零校验语义）。
 func (s *Service) GetMeta(ctx context.Context, input GetMetaInput) (map[string]any, error) {

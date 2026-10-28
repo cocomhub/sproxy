@@ -231,3 +231,33 @@ func TestTransferSourceMeta_NoAlgorithmDeclared(t *testing.T) {
 		t.Errorf("未声明算法时不应写 authority_hash_algorithm（禁无脑 GCID）: %v", got["authority_hash_algorithm"])
 	}
 }
+
+// TestTransferWrite_PreservesNanoMTime 转存写入目标卷的 mtime 必须是 **UnixNano**
+// （FS 契约），且优先取下载结果里的源 mtime——回归：此前传 st.ModTime().Unix()（秒），
+// secretdata 存成 1.79s after epoch → `/api/files/stat` 的 mod_time 变成 1970 值。
+func TestTransferWrite_PreservesNanoMTime(t *testing.T) {
+	t.Parallel()
+	fs := newMemFS()
+	mgr := newTransferTestMgr(t, func(vol string) (syncpkg.FS, string, bool) { return fs, "secretdata", false })
+	task := &CloudTask{ID: "task-mtime-1", Filename: "m1.mp4", URL: "https://example.com/u",
+		Transfer: &TransferSpec{Volume: "vol-mtime"}}
+	dest := filepath.Join(t.TempDir(), "m1.mp4")
+	_ = os.WriteFile(dest, []byte("mtime check"), 0o600)
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	srcTime := time.Date(2026, 10, 20, 8, 30, 0, 0, time.UTC)
+	if _, _, err := mgr.transferDone(context.Background(), task, dest,
+		&downloader.Result{Checksum: sha256Hex([]byte("mtime check")), ModTime: srcTime}, nil); err != nil {
+		t.Fatalf("transferDone: %v", err)
+	}
+	// memFS 记录写入的 mtime（UnixNano 契约）
+	got := fs.mtimes["anonymous/user/task-mtime-1/m1.mp4"]
+	if got != srcTime.UnixNano() {
+		t.Fatalf("写入 mtime = %d (UnixNano)，want %d（源文件 mtime 纳秒）", got, srcTime.UnixNano())
+	}
+	if got < 1_000_000_000_000_000_000 { // 2001 年后的纳秒下界
+		t.Fatalf("mtime 明显是秒单位（%d）而非纳秒——单位 bug 回归", got)
+	}
+}

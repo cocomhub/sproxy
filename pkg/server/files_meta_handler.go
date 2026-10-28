@@ -33,6 +33,22 @@ type metaUpdateService interface {
 	RecordFileAudit(ctx context.Context, action, object, result, detail string)
 }
 
+// metaInfoReader 返回带时间信息的 meta 读取服务（与 metaUpdater 同一实现）。
+func (h *Handlers) metaInfoReader() metaInfoService {
+	if h.metaSvcForTest != nil {
+		if mi, ok := h.metaSvcForTest.(metaInfoService); ok {
+			return mi
+		}
+	}
+	return h.fileService()
+}
+
+// metaInfoService 是 meta 读取（含 mtime/ctime）的最小能力面。
+type metaInfoService interface {
+	metaUpdateService
+	GetMetaInfo(ctx context.Context, input files.GetMetaInput) (files.MetaInfo, error)
+}
+
 // metaUpdater 返回元数据补录服务（测试可经 metaSvcForTest 注入替身）。
 func (h *Handlers) metaUpdater() metaUpdateService {
 	if h.metaSvcForTest != nil {
@@ -109,7 +125,7 @@ func (h *Handlers) getFileMeta(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": "filename 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	extra, err := h.metaUpdater().GetMeta(r.Context(), files.GetMetaInput{
+	info, err := h.metaInfoReader().GetMetaInfo(r.Context(), files.GetMetaInput{
 		Owner:      ownerFromRequest(r),
 		RemotePath: filename,
 	})
@@ -121,8 +137,16 @@ func (h *Handlers) getFileMeta(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	if extra == nil {
-		extra = map[string]any{}
+	if info.Extra == nil {
+		info.Extra = map[string]any{}
 	}
-	sendJSONResponse(w, map[string]any{"extra": extra}, http.StatusOK)
+	// mtime/ctime（原始文件时间，RFC3339Nano UTC；空则省略——additive 字段，旧客户端不受影响）。
+	resp := map[string]any{"extra": info.Extra}
+	if info.MTime != "" {
+		resp["mtime"] = info.MTime
+	}
+	if info.CTime != "" {
+		resp["ctime"] = info.CTime
+	}
+	sendJSONResponse(w, resp, http.StatusOK)
 }

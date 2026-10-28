@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"time"
+
 	"github.com/cocomhub/sproxy/pkg/compressx"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -338,3 +340,51 @@ func TestExecute_Pack_PackFailureRemovesArtifact(t *testing.T) {
 		t.Fatal("失败后不得残留损坏产物")
 	}
 }
+
+// TestWriteUnique_MTimeUnitNano 单位边界回归：SourceEntry.ModTime 是 Unix **秒**，
+// 目标 FS 的 mtime 契约是 **UnixNano**——写入前必须换算（否则 stat 显示 1970 值）。
+func TestWriteUnique_MTimeUnitNano(t *testing.T) {
+	t.Parallel()
+	fs := newMTimeRecorderFS()
+	srcSec := int64(1792485000) // Unix 秒（2026 年）
+	if err := writeUnique(t.Context(), fs, "a.bin", strings.NewReader("x"), 1, srcSec, false); err != nil {
+		t.Fatalf("writeUnique: %v", err)
+	}
+	if got := fs.mtime("a.bin"); got != srcSec*int64(time.Second) {
+		t.Fatalf("写入 mtime = %d，want %d（纳秒）——秒/纳秒单位回归", got, srcSec*int64(time.Second))
+	}
+	// 未知（0）保持 0，不伪造时间
+	if err := writeUnique(t.Context(), fs, "b.bin", strings.NewReader("y"), 1, 0, false); err != nil {
+		t.Fatalf("writeUnique: %v", err)
+	}
+	if got := fs.mtime("b.bin"); got != 0 {
+		t.Fatalf("未知 mtime 应保持 0，got %d", got)
+	}
+}
+
+// newMTimeRecorderFS 最小 FS：只记录写入 mtime（断言单位用）。
+func newMTimeRecorderFS() *mtimeRecorderFS {
+	return &mtimeRecorderFS{mt: map[string]int64{}}
+}
+
+type mtimeRecorderFS struct{ mt map[string]int64 }
+
+func (f *mtimeRecorderFS) mtime(rel string) int64 { return f.mt[rel] }
+func (f *mtimeRecorderFS) ListDir(context.Context, string) ([]syncpkg.Entry, error) {
+	return nil, nil
+}
+func (f *mtimeRecorderFS) Stat(context.Context, string) (*syncpkg.Entry, error) { return nil, nil }
+func (f *mtimeRecorderFS) OpenRead(context.Context, string) (io.ReadCloser, error) {
+	return nil, os.ErrNotExist
+}
+func (f *mtimeRecorderFS) WriteFile(_ context.Context, _ syncpkg.LogicalKey, rel string, r io.Reader, _ int64, mtime int64) error {
+	_, _ = io.Copy(io.Discard, r)
+	f.mt[rel] = mtime
+	return nil
+}
+func (f *mtimeRecorderFS) WriteIfAbsent(_ context.Context, rel string, r io.Reader, size, mtime int64) (bool, error) {
+	return true, f.WriteFile(context.Background(), syncpkg.LogicalKey{}, rel, r, size, mtime)
+}
+func (f *mtimeRecorderFS) Rename(context.Context, string, string) error { return nil }
+func (f *mtimeRecorderFS) Delete(context.Context, string) error         { return nil }
+func (f *mtimeRecorderFS) MakeDir(context.Context, string) error        { return nil }

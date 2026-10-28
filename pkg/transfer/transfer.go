@@ -22,6 +22,8 @@ import (
 	"net/url"
 	"strings"
 
+	"time"
+
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -149,6 +151,14 @@ func executeIndividual(ctx context.Context, req TransferRequest, rel string) (st
 	return targetURL(req.Scheme, req.Volume, rel), nil
 }
 
+// unixSecToNano 把 Unix **秒** 转为 **纳秒**（<=0 视为未知 → 0，不伪造时间）。
+func unixSecToNano(sec int64) int64 {
+	if sec <= 0 {
+		return 0
+	}
+	return sec * int64(time.Second)
+}
+
 // writeUnique 以「目标唯一」语义写目标 rel：
 //   - Overwrite=false：优先 WriteIfAbsent（原子、无 TOCTOU、并发安全防覆盖）；装饰器链
 //     （trusted.Guard/Wrap、capacity、staging）**无条件实现**该可选能力接口，但底层可能
@@ -158,6 +168,11 @@ func executeIndividual(ctx context.Context, req TransferRequest, rel string) (st
 //     也 fail-closed（不得把未确认状态当不存在继续写）。
 //   - Overwrite=true：直接 WriteFile（允许覆盖）。
 func writeUnique(ctx context.Context, dest syncpkg.FS, rel string, r io.Reader, size, mtime int64, overwrite bool) error {
+	// 单位边界（2026-10-28 回归修复）：SourceEntry.ModTime 是 **Unix 秒**（对外契约），
+	// 而 syncpkg.FS.WriteFile/WriteIfAbsent 的 mtime 是 **UnixNano**（Entry.MTime 同口径）。
+	// 此前直接把秒透传 ⇒ 目标卷落库 mtime ≈ 1.79s after epoch（stat 显示 1970）。
+	// 单一转换点：此处换算后下游恒为纳秒。
+	mtime = unixSecToNano(mtime)
 	if !overwrite {
 		if pia, ok := dest.(syncpkg.WriteIfAbsent); ok {
 			written, err := pia.WriteIfAbsent(ctx, rel, r, size, mtime)

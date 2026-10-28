@@ -274,15 +274,31 @@ func useJSONOutput(cmd *cobra.Command) bool {
 // printMetaExtraFor 输出 meta extra：--json / --raw 输出**原始 JSON 文本**（时间/URL 原样，
 // 供脚本/修复）；Text 默认 human 可视化（时间转本地、URL 解码可见）。读失败仅提示。
 func printMetaExtraFor(cmd *cobra.Command, ios cli.IOStreams, fm OutputFormatter, svc *client.FileClient, filename string) {
-	extra, xerr := svc.GetFileMeta(cmd.Context(), filename)
+	info, xerr := svc.GetFileMetaInfo(cmd.Context(), filename)
 	if xerr != nil {
 		ios.WriteErrLine("（读取 meta extra 失败: %v）", xerr)
 		return
 	}
 	if rawJSON, _ := cmd.Flags().GetBool("raw"); rawJSON && !useJSONOutput(cmd) {
-		b, _ := json.MarshalIndent(map[string]any{"extra": extra}, "", "  ")
+		b, _ := json.MarshalIndent(map[string]any{
+			"extra": info.Extra, "mtime": info.MTime, "ctime": info.CTime,
+		}, "", "  ")
 		fmt.Fprintln(ios.Out, string(b))
 		return
 	}
-	fm.PrintMetaExtra(extra) // JSONFormatter 原始 / Text human 可视化
+	// 原始文件时间（sidecar 记录）：Text 模式转本地时区展示（--json 由 formatter 原样输出 extra）。
+	if !useJSONOutput(cmd) {
+		printFileTimes(ios, info.MTime, info.CTime)
+	}
+	fm.PrintMetaExtra(info.Extra) // JSONFormatter 原始 / Text human 可视化
+}
+
+// printFileTimes 打印原始文件 mtime/ctime（UTC RFC3339Nano 存储 → 本地时区展示）。
+func printFileTimes(ios cli.IOStreams, mtime, ctime string) {
+	if d := localTimeDisplay("mtime", mtime); d != "" {
+		fmt.Fprintf(ios.Out, "mtime:    %s\n", d)
+	}
+	if d := localTimeDisplay("ctime", ctime); d != "" {
+		fmt.Fprintf(ios.Out, "ctime:    %s\n", d)
+	}
 }

@@ -226,7 +226,7 @@ func (f *TextFormatter) PrintMetaExtra(extra map[string]any) {
 }
 
 // metaTimeKeys 是 meta extra 里承载 RFC3339 时间的键（存储 UTC，展示转本地）。
-var metaTimeKeys = map[string]bool{"transferred_at": true, "created_at": true, "updated_at": true}
+var metaTimeKeys = map[string]bool{"transferred_at": true, "created_at": true, "updated_at": true, "mtime": true, "ctime": true}
 
 // humanExtraDisplay 人类可视化单值字符串：时间键转本地时区、source_url 解码为可见字符。
 // 返回 (展示值, 是否变更)；未变更原样输出（原始内容仍可用 --json 输出）。

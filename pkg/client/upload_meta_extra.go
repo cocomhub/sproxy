@@ -109,6 +109,42 @@ func (c *FileClient) UpdateFileMetaWithMode(ctx context.Context, filename string
 
 // GetFileMeta 读取已上传文件的元数据 extra（GET /api/files/meta）。
 // 文件存在但无 extra → 空 map（非错误）；文件不存在 → ErrNotFound。
+// FileMetaInfo 是 meta 读取的完整结果（extra + 原始文件 mtime/ctime，RFC3339Nano UTC）。
+type FileMetaInfo struct {
+	Extra map[string]any
+	MTime string
+	CTime string
+}
+
+// GetFileMetaInfo 读取 meta extra 及原始文件时间（mtime/ctime；外部卷可能为空）。
+func (c *FileClient) GetFileMetaInfo(ctx context.Context, filename string) (FileMetaInfo, error) {
+	q := neturl.Values{"filename": {filename}}
+	c.appendVolumeQuery(q)
+	resp, err := c.doRequest(ctx, http.MethodGet, "/api/files/meta?"+q.Encode(), nil, nil)
+	if err != nil {
+		return FileMetaInfo{}, fmt.Errorf("读取 meta 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return FileMetaInfo{}, fmt.Errorf("%w: %s", ErrNotFound, filename)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return FileMetaInfo{}, fmt.Errorf("读取 meta 失败 (HTTP %d)", resp.StatusCode)
+	}
+	var out struct {
+		Extra map[string]any `json:"extra"`
+		MTime string         `json:"mtime"`
+		CTime string         `json:"ctime"`
+	}
+	if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+		return FileMetaInfo{}, fmt.Errorf("解析 meta 响应失败: %w", derr)
+	}
+	if out.Extra == nil {
+		out.Extra = map[string]any{}
+	}
+	return FileMetaInfo{Extra: out.Extra, MTime: out.MTime, CTime: out.CTime}, nil
+}
+
 func (c *FileClient) GetFileMeta(ctx context.Context, filename string) (map[string]any, error) {
 	q := neturl.Values{"filename": {filename}}
 	c.appendVolumeQuery(q)

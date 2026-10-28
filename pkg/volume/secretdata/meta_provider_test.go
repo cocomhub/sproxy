@@ -14,6 +14,9 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"strings"
+	"time"
+
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -144,5 +147,57 @@ func TestUpdateMetaExtra(t *testing.T) {
 	// 并发冲突：他人改写条目后更新应报错（不覆盖）。
 	if uErr := fs.UpdateMetaExtra(ctx, "f.bin", map[string]any{"k": "v1"}); uErr != nil {
 		t.Fatalf("串行更新应成功: %v", uErr)
+	}
+}
+
+// TestSecretdata_OriginalCTime_Recorded 加密卷写入时 meta.Original 必须记录 **ctime**
+// （创建时间，UTC RFC3339）；覆盖写保留首次创建时间（不重置）。
+// 回归（2026-10-28）：此前 OriginalInfo.CTime 从不落值 ⇒ 加密卷产物无创建时间可读。
+func TestSecretdata_OriginalCTime_Recorded(t *testing.T) {
+	t.Parallel()
+	fsBase, err := NewFS(mkLocalFS(t, "ctime-backing"), Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	fs := fsBase
+	ctx := context.Background()
+	mtime := time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", strings.NewReader("hello"), 5, mtime.UnixNano()); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fm, fmErr := fs.FileMeta(ctx, "a.bin")
+	if fmErr != nil {
+		t.Fatalf("FileMeta: %v", fmErr)
+	}
+	if fm.CTime == "" {
+		t.Fatal("CTime 未记录（应为创建时间 UTC RFC3339）")
+	}
+	created, perr := time.Parse(time.RFC3339Nano, fm.CTime)
+	if perr != nil {
+		t.Fatalf("CTime 不是 RFC3339: %q err=%v", fm.CTime, perr)
+	}
+	if time.Since(created) > time.Hour {
+		t.Fatalf("CTime 不是当前时间: %v", created)
+	}
+	// mtime 应为调用方传入值（纳秒正确解读）
+	mt, _ := time.Parse(time.RFC3339Nano, fm.MTime)
+	if !mt.Equal(mtime) {
+		t.Fatalf("MTime = %v, want %v", mt, mtime)
+	}
+	// 覆盖写：CTime 保留首次创建
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "a.bin", strings.NewReader("hello2"), 6, mtime.UnixNano()); err != nil {
+		t.Fatalf("覆盖 WriteFile: %v", err)
+	}
+	fm2, fm2Err := fs.FileMeta(ctx, "a.bin")
+	if fm2Err != nil {
+		t.Fatalf("FileMeta2: %v", fm2Err)
+	}
+	if fm2.CTime != fm.CTime {
+		t.Fatalf("覆盖写应保留 CTime（%q → %q）", fm.CTime, fm2.CTime)
 	}
 }
