@@ -13,11 +13,15 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
-// TestIndexMove_WritesChecksumAndIndex 钉住跨卷 move 后目标卷 list 带 checksum：
-// 源台账值随 move 迁移（此前 IndexMove 只更新索引、不写 checksum ⇒ list checksum 空）。
-func TestIndexMove_WritesChecksumAndIndex(t *testing.T) {
+// TestIndexMove_MigratesChecksumAndEventDrivesIndex 钉住 V4 阶段二口径：
+//   - `IndexMove` 只迁移 **checksum 台账**（物理搬移的索引维护已由 Root 事件承担）；
+//   - 事件（这里用目标卷的 `MutationWrite` 等价模拟）负责把条目落到**目标卷**并带台账 checksum。
+//
+// 变异：① 去掉 IndexMove 的台账写入 ⇒ checksum 断言红；② 去掉事件 ⇒ 条目缺失/卷归属陈旧 ⇒ 红。
+func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	t.Parallel()
 	dir, derr := os.MkdirTemp("", "idxmove-*")
 	if derr != nil {
@@ -29,7 +33,6 @@ func TestIndexMove_WritesChecksumAndIndex(t *testing.T) {
 	if svc == nil {
 		t.Fatal("fileService 不可用")
 	}
-	// 落盘源文件（跨卷 move 的真实前提：源文件存在）。
 	tnt := h.tenantFor("alice")
 	if tnt == nil {
 		t.Fatal("tenant 不可用")
@@ -45,24 +48,20 @@ func TestIndexMove_WritesChecksumAndIndex(t *testing.T) {
 	_ = fh.Close()
 
 	const owner, rel, cs = "alice", "user/docs/a.bin", "abc123"
-	// 源台账**清空**（move 前未上传/未记录场景）⇒ IndexMove 显式传 checksum 写入目标。
-	if s := h.checksumStoreFor(owner); s != nil {
-		if _, ok := s.Get(rel); ok {
-			t.Fatal("前置：源台账应为空")
-		}
-	}
-	// **先触发一次 list**（构建 owner 索引——upsert 仅在已构建时生效；未构建时由下次全量
-	// 扫描兜底，这是设计的正确语义）。本用例锁定的是「索引已构建后旁路写不 upsert」的缺陷。
+	// 先触发一次 list（构建 owner 索引——upsert 仅在已构建时生效）。
 	if _, lerr := svc.List(t.Context(), files.ListQuery{Owner: owner, Subdir: "docs"}); lerr != nil {
 		t.Fatalf("预热 list: %v", lerr)
 	}
-	// move 完成回调（IndexMove 是跨卷 move 的唯一派生状态登记入口）：显式传 checksum。
+	// ① 台账迁移（IndexMove 唯一职责）。
 	svc.IndexMove(owner, rel, 42, cs, "vol2", nil)
-	// checksum 台账：目标 rel 应写入（此前 IndexMove 只更新索引 ⇒ list checksum 空）。
 	if got, ok := h.checksumStoreFor(owner).Get(rel); !ok || got != cs {
 		t.Fatalf("move 后 checksum 台账应写入 %q，got %q ok=%v（未写 ⇒ 目标卷 list checksum 空）", cs, got, ok)
 	}
-	// 索引：条目应可列出（带 checksum）。
+	// ② 物理搬移造成的索引更新由事件承担：目标卷内容写事件（Tag=vol2）刷新条目与卷归属。
+	// 事件口径：Root = **卷根**（这里是 globalRoot），Rel = 卷根命名空间 `<owner>/user/<rel>`。
+	svc.ApplyRootMutation(storage.Mutation{
+		Op: storage.MutationWrite, Tag: "vol2", Root: h.globalRoot, Rel: owner + "/" + rel,
+	})
 	res, lerr := svc.List(t.Context(), files.ListQuery{Owner: owner, Subdir: "docs"})
 	if lerr != nil {
 		t.Fatalf("list: %v", lerr)
@@ -73,6 +72,9 @@ func TestIndexMove_WritesChecksumAndIndex(t *testing.T) {
 			found = true
 			if f.Checksum != cs {
 				t.Fatalf("list 条目 checksum = %q, want %q", f.Checksum, cs)
+			}
+			if f.Volume != "vol2" {
+				t.Fatalf("条目卷归属 = %q，want vol2（事件应携带目标卷 Tag）", f.Volume)
 			}
 		}
 	}
