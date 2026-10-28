@@ -119,7 +119,7 @@ func TestCache_HitSecondCall(t *testing.T) {
 	c, _ := newTestCache(t, time.Minute)
 	wrapped := Wrap("v1", fs, c)
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := wrapped.ListDir(context.Background(), "alice/user/docs"); err != nil {
 			t.Fatalf("ListDir: %v", err)
 		}

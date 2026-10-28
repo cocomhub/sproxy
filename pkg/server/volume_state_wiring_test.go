@@ -98,7 +98,7 @@ func TestWrapVolumeState_CachesExternalVolumeList(t *testing.T) {
 	if wrapped == syncpkg.FS(cfs) {
 		t.Fatal("外部卷 ViewUser 应被状态缓存包装")
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := wrapped.ListDir(context.Background(), "alice/user"); err != nil {
 			t.Fatalf("ListDir: %v", err)
 		}

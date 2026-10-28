@@ -64,7 +64,7 @@ func (s *Store) pathFor(vol, fsPath string) (string, error) {
 	rel := normalizePath(fsPath)
 	parts := []string{s.base, vol}
 	if rel != "" {
-		for _, seg := range strings.Split(rel, "/") {
+		for seg := range strings.SplitSeq(rel, "/") {
 			if seg == "" || seg == "." || seg == ".." {
 				return "", fmt.Errorf("volumestate: 非法路径段 %q", seg)
 			}
