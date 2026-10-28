@@ -394,6 +394,10 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 「调用方给 → 现取 → fail-closed」三段式，缓存值不作删除门禁唯一依据。
 **写面纪律（E2E 锁定）**：外部卷的读/写入口必须经 `VolumeView`（不得直取 `External().FS()`），
 否则写后不失效缓存（`test/e2e_volume_state_test.go` 有对照组断言）。
+**本地卷写面纪律（R45）**：`storage.Root` 的结构性变异方法（mkdir/remove/rename/link/chtimes）在
+成功后发 `Mutation` 事件（租户子根自动归一 `<owner>/<rel>` 前缀）；装配层把它接到
+`files.Service.ApplyRootMutation`，搜索索引因此**自动**跟随旁路写（转存/归档/跨卷搬移），
+不需要写路径逐点登记。新增 Root 变异方法必须调用 `notifyMutation`（R45 门禁拦截）。
 **范围**：本期仅非本地卷（外部/封装）；本地卷沿用既有实现（门禁 R46 登记为只减不增）。
 
 ## 可信卷（Trusted Volume：完整性 sidecar + 元信息隔离 + 卷级容量）

@@ -211,6 +211,23 @@ func (vs *Set) Root(name string) *storage.Root {
 	return vs.roots[name]
 }
 
+// LocalRoots 返回本地卷根的快照（卷名 → 根句柄）。
+//
+// 用途：装配层为本地卷接线**结构性变异观察者**（设计 2026-10-28-volume-state-maintenance
+// §4.1）——观察点只认卷根，故装配层需要一次性遍历全部本地根。返回副本 ⇒ 调用方可自由迭代
+// （运行期新增卷由创建点自行接线）。
+func (vs *Set) LocalRoots() map[string]*storage.Root {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	out := make(map[string]*storage.Root, len(vs.roots))
+	for name, root := range vs.roots {
+		if root != nil {
+			out[name] = root
+		}
+	}
+	return out
+}
+
 // HasLocalRoot 报告该卷是否为**本地根形态**（有 `*storage.Root`；外部/封装卷为 false）。
 //
 // 用途（M3）：取代 `Root(name) != nil` / `== nil` 这类**间接探针**（把「是否本地卷」的语义

@@ -287,8 +287,8 @@ Delete/软删/恢复 → Invalidate(rel)
 | **R41** | `files.List/Search` 实现体不得直调 `index.list` / `ExternalList`（V4 后） | 双入口 |
 | **R42** | 新增 `sync.FS` 实现若持有派生状态，必须实现 `StateGeneration` 或自述「无状态」注解 | 忘失效（#853/#874 类） |
 | **R44** | `volumestate.WrapVolume` 只在装配处出现；业务代码不得自造 FS 缓存包装 | 绕过唯一入口 |
-| **R45** | `storage.Root` 新增变异方法必须回调 `notifyMutation` | 机制因原语演进失效 |
-| **R46** | **旧实现棘轮**：`searchIndex`/`checksums.json`/`ExternalList` 的独立使用点数（`*.tsv` 登记）**只减不增** | 「短期共存」变永久双轨 |
+| **R45** ✅已实现 | `storage.Root` 结构性变异方法必须回调 `notifyMutation`（`internal/archcheck/root_mutation_gate_test.go`） | 机制因原语演进失效 |
+| **R46** ✅已实现 | **旧实现棘轮**：`searchIndex`/`checksums.json`/`ExternalList` 的独立使用点数（`legacy_state_usage.tsv` 登记）**只减不增** | 「短期共存」变永久双轨 |
 | **R43** | 新增配置项默认值：bool=false、string=空、int/duration 取安全默认（AGENTS.md 18 条） | 零回归 |
 
 ---
@@ -349,3 +349,32 @@ E2E（`test/e2e_volume_state_test.go`，真实 sproxy + 真实 sclient + 真实 
 
 ⇒ 新增写面时的稳定性要求（P3 的落地检查）：**任何读写外部卷的入口都不得直取
 `External().FS()`**；已有 R27 门禁按次登记，后续片可把「外部卷写面必须经 VolumeView」并入 R27 判据。
+
+---
+
+## 十一、V3 阶段一：Root 变异事件 + 本地卷索引自动维护（2026-10-28 落地）
+
+**交付**：
+
+1. `storage.Root` 结构性变异事件（`pkg/storage/root_mutation.go`）：`MutationOp`（mkdir/remove/
+   remove_all/rename/link/chtimes）+ `SetMutationObserver(tag, fn)`；事件**仅在底层操作成功后**发出，
+   租户子根**继承并归一前缀**（`<owner>/<rel>`，`Root` 恒指向卷根）⇒ 消费方无需知道是哪个子根写的。
+   未装观察者 = 零开销零回归。
+2. 消费端 `files.Service.ApplyRootMutation`（`pkg/files/mutation_index.go`）：把事件落到搜索索引
+   （path 翻译 / 各操作类型 / **只维护 `user/` 桶** / 索引未构建时零成本）。接线唯一入口
+   `pkg/server/volume_mutation_wiring.go`（`fileService()` Once 内 + 运行期建卷同一函数）。
+3. 门禁 **R45**（Root 变异方法必须 `notifyMutation`）与 **R46**（旧实现棘轮）落地。
+
+**边界（诚实记录）**：`OpenFile`/`OpenFileEncrypted` 的**内容写入**不发结构事件——它们返回
+`*os.File`/`io.WriteCloser`（30+ 调用点依赖具体类型），包装会破坏类型契约；内容写的 size/checksum
+由写内核维护，落位仍经 `AtomicRename`（发 rename 事件）。
+
+**已知代价**：普通上传路径现在会「写内核 upsert + 观察者 upsert」各一次（幂等）。V4 删除写路径的
+逐点维护后回到一次。
+
+**E2E/单测证据**：`pkg/storage/root_mutation_test.go`（6 方法事件/失败不发/租户前缀/AtomicRename）；
+`pkg/files/mutation_index_test.go`（旁路写进索引、删除出索引、rename 搬迁、非 user 桶忽略、路径边界）；
+`pkg/server/volume_mutation_wiring_test.go`（真实卷根旁路写 → 搜索自动命中；变异「不接线」即红）。
+
+**未做（下一片）**：`checksums.json` 一次性 import 后转只读（校验和不可由结构事件推导，需迁移脚本
++ 读路径回落）；`searchIndex` 彻底替换为 TreeView 投影（`IndexSync`/集群快照/内容索引/向量索引耦合）。
