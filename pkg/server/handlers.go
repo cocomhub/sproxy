@@ -230,6 +230,11 @@ type Handlers struct {
 	// 即用户裁定 2026-10-14 的 30s 语义）。**仅供测试夹具注入小值**（生产恒 0，语义不变）——否则
 	// 大量「请求能放下、但当前用量不够」的用例各自白等 30s，CI 实测累计触发 5min 包超时。
 	quotaWaitTimeout time.Duration
+	// mutationHandler 是本地卷 Root 变异事件的处理函数（索引 + 卷状态缓存）。
+	// **为什么用原子指针**：观察者必须在**任何租户子根创建之前**装到卷根上（否则已缓存的
+	// 租户根不会继承——启动期 initStorageLayout 会先建 anonymous 租户），而真正的处理函数要
+	// 等 files.Service 装配完成才能构造 ⇒ 先装「转发器」，装配完成后整体换指针。
+	mutationHandler atomic.Pointer[func(storage.Mutation)]
 	// volSet 是装配后的卷集合（RegisterRoutes 装配；nil = 未装配卷功能的旧装配路径，如
 	// 测试手工构造的 Handlers）。默认卷语义：globalRoot 字段 = 默认卷根、tenantFor 走默认卷。
 	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。

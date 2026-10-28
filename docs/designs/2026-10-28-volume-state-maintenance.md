@@ -531,6 +531,13 @@ checksum、在途临时文件不对外可见），由 `TestList_ViewSourceEquiva
   - **本进程写** ⇒ 事件写穿，下一次 list 立即可见；
   - **进程外改动**（运维直写盘/同根多实例） ⇒ **≤TTL** 后可见；任何一次相关失效/回源也会看到它。
 
+- **观察者必须在租户创建之前装好**（本轮实测的启动顺序缺陷）：`RegisterRoutes` 在
+  `initStorageLayout` 里**先建 anonymous 租户**，而 `files.Service` 是懒装配的——观察者若等到
+  那时才装到卷根，已缓存的租户子根**不会继承**（`OpenTenant` 只在创建时继承）⇒ 该租户的所有写
+  都不发事件 ⇒ 缓存永不失效（UI 上 rename/delete 后列表仍是旧内容）。修法：**两阶段接线**——
+  装配早期装「转发器」（`installLocalVolumeObservers`），files.Service 就绪后再把真正的处理函数
+  存入 `Handlers.mutationHandler`（`atomic.Pointer`）。验收
+  `TestVolumeMutationObserver_InstalledBeforeTenants`（变异：移到 fileService 里装 ⇒ 红）。
 - **同卷复制快路径**：`secretdata` 的对象级复制（`CopyFile`，blob 直拷）由装配层经
   `Innermost` 探测、直接打到最内层 ⇒ 会绕过缓存失效。`CacheFS` 现在**转发 `CopyFile`**
   （底层未实现时穿透到 `Innermost`）并在成功后失效目标，调用方改走装饰视图 —— 复制结果对下一次

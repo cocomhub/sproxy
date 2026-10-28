@@ -236,6 +236,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		writeGuard:            opts.WriteGuard,
 		urlResolver:           opts.URLResolver,
 	}
+	// **早期装 Root 变异观察者**：必须在 initStorageLayout 创建 anonymous 租户**之前**——
+	// 租户子根只在创建时继承观察者，晚装会让已缓存子根永不发事件（见
+	// volume_mutation_wiring.go 的两阶段说明）。真正的处理函数在 files.Service 装配后绑定。
+	h.installLocalVolumeObservers()
+
 	// 装配多租户存储布局 + 告警引擎（磁盘水位轮询 / 配额预警）。详细语义见
 	// initStorageLayout。依赖 Handlers 字面量已注入 volSet/xferMetrics/writeGuard。
 	h.initStorageLayout(vs, cfg, log)
