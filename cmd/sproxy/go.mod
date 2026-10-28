@@ -30,7 +30,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0 // indirect
+	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.24.1-0.20261028083918-2847194fbd8a // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.19.0 // indirect
