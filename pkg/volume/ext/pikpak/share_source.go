@@ -28,7 +28,7 @@ import (
 //   - mypikpak.com|.net/s/<id>[/<token>] → 原样返回（已是权威形态）。
 //
 // 为什么必须归一：keepshare 的 parts[0] 是**容器 id**而非 PikPak 分享 id
-// （实测 p5uj7smo → VOyUFLrf4RJcADwdFrpb5Cedo2），用容器 id 调 share/detail 恒 NOT_FOUND。
+// （实测：keepshare 容器 id → 真实 mypikpak 分享 id），用容器 id 调 share/detail 恒 NOT_FOUND。
 type ShareSourceNormalizer struct {
 	client *http.Client // 出站 HTTP（重定向跟随）；nil = 默认安全 client
 }

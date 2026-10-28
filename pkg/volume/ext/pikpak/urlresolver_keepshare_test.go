@@ -37,7 +37,7 @@ func TestURLResolver_Supports_KeepShare(t *testing.T) {
 // 与直接 parseShareID 一致（keepshare parts[0]，无需 302 跟随）。
 func TestURLResolver_Resolve_KeepShareShareID(t *testing.T) {
 	t.Parallel()
-	raw := "https://keepshare.org/k1/magnet:?xt=urn:btih:abc&dn=NHDTC-254"
+	raw := "https://keepshare.org/k1/magnet:?xt=urn:btih:abc&dn=EXAMPLE-254"
 	id, err := parseShareID(raw)
 	if err != nil {
 		t.Fatalf("parseShareID(keepshare) 失败: %v", err)

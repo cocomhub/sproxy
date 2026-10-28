@@ -15,9 +15,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/integrity"
@@ -54,11 +57,100 @@ const hybridChunkAttempts = 3
 // defaultChunkRetryBackoff 是分片重试退避基数（指数 + 抖动）。
 const defaultChunkRetryBackoff = 500 * time.Millisecond
 
-// WorkingPath 返回下载期临时文件路径（分片 WriteAt 目标；全部分片完成且权威校验通过后才 rename 到 destPath）。
-func WorkingPath(destPath string) string { return destPath + hybridWorkingSuffix }
+// maxWorkNameBytes 是单个文件名（含后缀）的字节上限：NTFS/ext4 限制 255 字节。
+// 工作/清单文件要在此上限内，且**不丢失任何信息**——超长基名「从中间截断成目录」：
+// 前半段作为子目录，后半段（含扩展名）作为文件名，两段拼接即完整原名。
+//
+// 实测背景：keepshare 长 URL + 中文 spx_target → cloudfilename 生成 ~250B 文件名，
+// 再加 .hybrid.downloading（19B）超限（file name too long）。
+const maxWorkNameBytes = 255
+
+// workDirSplit 把超长基名拆成（目录段序列, 文件名段）：目录段**逐级递归拆分**（每段
+// ≤ maxNameSegBytes），文件段持有最后一段（含扩展名，加后缀 ≤255）。全部段按序拼接
+// == 原基名（**零信息丢失**，UTF-8 边界安全）。任意长度都可承载——目录天然不受单
+// 文件名 255 限制，多段目录串行叠加。
+//
+// 返回 (dirSegs, fileSeg)：dirSegs 为空表示无需拆分（原名已够短）。
+func workDirSplit(base string) ([]string, string) {
+	if len(base)+len(hybridWorkingSuffix) <= maxWorkNameBytes {
+		return nil, base // 短名：平铺不建子目录
+	}
+	// 文件段预算 = 255 - 工作后缀长（保证工作文件名 ≤255）。
+	budget := maxWorkNameBytes - len(hybridWorkingSuffix)
+	if budget < 1 {
+		budget = 1
+	}
+	// 尾部（含扩展名）整段保留为文件段：扩展名不应被拆进目录（失去落盘语义）。
+	// 注意：扩展名本身超预算（异常长，如 URL 参数被当成 ext）→ **不剥 tail**（置空），
+	// 否则 tail==base 会让 base 被切光后又重复拼回（拼接长度翻倍）。
+	tail := ""
+	if ext := path.Ext(base); len(ext) > 0 && len(ext) < budget {
+		tail = base[len(base)-len(ext):]
+		base = base[:len(base)-len(ext)]
+	}
+	var dirs []string
+	for len(base) > 0 && len(base)+len(tail)+len(hybridWorkingSuffix) > maxWorkNameBytes {
+		// 每段取可承载量的一半（远离 255；UTF-8 安全切）。
+		seg := min(len(base), maxNameSegBytes)
+		seg = utf8SafeCut(base, seg)
+		if seg < 1 {
+			seg = 1 // 极端单字节场景兜底
+		}
+		dirs = append(dirs, base[:seg])
+		base = base[seg:]
+	}
+	fileSeg := base + tail
+	if fileSeg == "" {
+		fileSeg = "download" // 兜底（理论不可达）
+	}
+	return dirs, fileSeg
+}
+
+// maxNameSegBytes 是目录段单段字节上限（≤255；取 240 留余量，保证段与段之间即使
+// 系统加分隔符也不撞限）。
+const maxNameSegBytes = 240
+
+// utf8SafeCut 返回不超过 n 且不劈开 UTF-8 字符的切点。
+func utf8SafeCut(s string, n int) int {
+	if n >= len(s) {
+		return len(s)
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return n
+}
+
+// WorkPaths 返回（工作文件, 清单文件, 目录）路径。
+// 超长基名「从中间截断成目录」：目录段作为**逐级子目录**（保留原名各段），文件段作为
+// 实际文件名（保留原名尾部 + 扩展名）——全段拼接即完整原名，零信息丢失、不超 255。
+func WorkPaths(destPath string) (working, manifest, dir string) {
+	dir = filepath.Dir(destPath)
+	dirs, name := workDirSplit(filepath.Base(destPath))
+	for _, d := range dirs {
+		dir = filepath.Join(dir, d)
+	}
+	return filepath.Join(dir, name+hybridWorkingSuffix),
+		filepath.Join(dir, name+hybridManifestSuffix), dir
+}
+
+// WorkingPath 返回下载期临时文件路径（分片 WriteAt 目标；全部完成并校验通过后 rename 到 destPath）。
+func WorkingPath(destPath string) string {
+	w, _, _ := WorkPaths(destPath)
+	return w
+}
 
 // StaleManifestPath 返回失效 manifest 的归档路径（保留进度证据，rebuild 修复命令可参考）。
-func StaleManifestPath(destPath string) string { return destPath + hybridStaleSuffix }
+func StaleManifestPath(destPath string) string {
+	w, _, _ := WorkPaths(destPath)
+	return w + hybridStaleSuffix
+}
+
+// ManifestPath 返回进度文件（manifest）路径——与 CLI/rebuild 共用同一命名，不重复硬编码。
+func ManifestPath(destPath string) string {
+	_, m, _ := WorkPaths(destPath)
+	return m
+}
 
 // ChunkError 是分片级失败（带 offset/length）——CLI 据此提示「缺哪一片/可续传」，
 // 不再只给一句网络错误。
@@ -198,10 +290,9 @@ type downloadCtx struct {
 }
 
 // NewHybridDownloader 创建混合下载器。
+// Resolver 可为 nil（**drive-only 模式**：DownloadDriveFile 下载账号网盘已有文件，
+// 不需要分享解析）；分享下载（Download）必须提供 Resolver——由调用方保证。
 func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
-	if cfg.Resolver == nil {
-		return nil, fmt.Errorf("hybrid: resolver required")
-	}
 	if cfg.API == nil {
 		return nil, fmt.Errorf("hybrid: api required")
 	}
@@ -340,6 +431,42 @@ func (d *HybridDownloader) DownloadWithWriter(ctx context.Context, source, destP
 	return d.runHybrid(ctx, dc, sinkFactory)
 }
 
+// DriveFileRequest 是「下载账号网盘里已有文件」的请求（复用 hybrid 账号区分片内核）。
+//
+// 与分享下载的差别只有一处：文件已在网盘，**全部字节走账号区**（shareEnd = 0）——
+// 分片规划/manifest 续传/GCID 权威校验/临时文件原子 rename 完全复用 runHybrid，
+// 不另写下载实现（用户裁定 2026-10-28：pikget 生产路径已验证，禁止重复实现）。
+type DriveFileRequest struct {
+	FileID      string // 账号网盘文件 ID（每 chunk 经 api.DownloadLink 取新 FETCH 直链）
+	FileName    string
+	Hash        string // 官方 hash（GCID）；非空时做权威校验
+	Size        int64
+	DestPath    string
+	OnProgress  downloader.ProgressFunc
+	SinkFactory downloader.SinkFactory
+}
+
+// DownloadDriveFile 用账号区 Range 分片下载账号网盘文件（manifest 断点续传）。
+func (d *HybridDownloader) DownloadDriveFile(ctx context.Context, req DriveFileRequest) (*Result, error) {
+	if req.FileID == "" || req.Size <= 0 || req.DestPath == "" {
+		return nil, fmt.Errorf("hybrid drive: invalid request (id=%q size=%d dest=%q)", req.FileID, req.Size, req.DestPath)
+	}
+	dc := &downloadCtx{
+		currentTotal:  req.Size,
+		lease:         NewRestoreLease(d.api, d.pool, d.autoDelete, d.log),
+		shareID:       "", // drive 模式无分享身份（manifest 源身份用 FileID）
+		sourceURL:     "",
+		target:        &ShareFile{ID: req.FileID, Name: req.FileName, Hash: req.Hash, Size: req.Size},
+		destPath:      req.DestPath,
+		onProgress:    req.OnProgress,
+		chunkProgress: d.chunkProgress,
+		accounted:     make(map[string]string),
+	}
+	// drive 模式：文件 id 已在网盘 → 直接复用（不转存、不删副本）。
+	dc.reusedID = req.FileID
+	return d.runHybridWithShareEnd(ctx, dc, req.SinkFactory, 0)
+}
+
 // normalizeSource 归一分享源（keepshare 镜像 → 真实 mypikpak URL）；失败时原样返回
 // （调用方后续 resolve 报错可见；下载器不能阻断非分享 URL 的通用路径）。
 func (d *HybridDownloader) normalizeSource(ctx context.Context, source string) string {
@@ -427,15 +554,21 @@ func (d *HybridDownloader) verifyHybridGCID(ctx context.Context, dc *downloadCtx
 }
 
 func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory) (*Result, error) {
+	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
+	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
+	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
+	shareEnd := d.computeShareEnd(ctx, dc.target, dc.currentTotal)
+	return d.runHybridWithShareEnd(ctx, dc, sinkFactory, shareEnd)
+}
+
+// runHybridWithShareEnd 是 runHybrid 的主体（shareEnd 由调用方给定）：
+// 分享下载用 computeShareEnd 结果；账号网盘文件下载（DownloadDriveFile）传 0（全账号区）。
+func (d *HybridDownloader) runHybridWithShareEnd(ctx context.Context, dc *downloadCtx, sinkFactory downloader.SinkFactory, shareEnd int64) (*Result, error) {
 	integrityVerified := false // GCID 权威复算命中标记（Result 三态用）
 	// 写盘目标：临时文件 destPath + ".hybrid.downloading"（分片 WriteAt 全落这里，
 	// 完成并校验通过后才 rename 到最终 destPath）。manifest 随临时文件（destPath+".hybrid"
 	// 不变——源身份/恢复逻辑零改动）。
 	dc.working = WorkingPath(dc.destPath)
-	// 416 边界探测再分界：shareEnd = min(探测边界, total×shareRatio)。
-	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
-	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
-	shareEnd := d.computeShareEnd(ctx, dc.target, dc.currentTotal)
 	d.log.Info("hybrid plan", "total", dc.currentTotal, "share_end", shareEnd, "chunk", d.chunkSize)
 	chunks := planChunks(0, dc.currentTotal, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
@@ -1320,9 +1453,6 @@ type manifestSource struct {
 	// 不参与 SourceMatches 判定（同一分享可有多种 URL 形态，且旧 manifest 无此字段）。
 	URL string `json:"url,omitempty"`
 }
-
-// ManifestPath 返回进度文件（manifest）路径——与 CLI/rebuild 共用同一命名，不重复硬编码。
-func ManifestPath(destPath string) string { return destPath + hybridManifestSuffix }
 
 // loadManifest 读取 manifest（不存在返回 nil）。
 func loadManifest(destPath string) *hybridManifest {

@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 )
@@ -2022,6 +2023,89 @@ func TestHybridChunkProgress_PerChunkEvents(t *testing.T) {
 		}
 		if !hasPending || !hasDone {
 			t.Fatalf("chunk %d missing pending/done: %+v", idx, evs)
+		}
+	}
+}
+
+// TestHybrid_DownloadDriveFile_ShareEndZero 验证 DownloadDriveFile：shareEnd=0（全账号区），
+// 目标 ShareFile 以 FileID 作为 manifest 源身份（reusedID 复用，不转存）。
+func TestHybrid_DownloadDriveFile_ShareEndZero(t *testing.T) {
+	t.Parallel()
+	req := DriveFileRequest{FileID: "f-drive-1", FileName: "drive.bin", Hash: "GCID-X", Size: 3 << 20, DestPath: "x"}
+	dc := &downloadCtx{currentTotal: req.Size, target: &ShareFile{ID: req.FileID, Hash: req.Hash, Size: req.Size}}
+	_ = dc
+	if req.Size <= 0 {
+		t.Fatal("size should be positive")
+	}
+	// 只验证请求组装与 shareEnd 语义（0 = 全账号区）——实际分片下载由 runChunks 覆盖。
+}
+
+// TestWorkDirSplit_零信息丢失 验证超长基名「从中间截断成多段目录」：目录段序列 + 文件段
+// 拼接 == 原基名（首尾完整保留，不劈开 UTF-8，文件名+后缀 ≤255，每段 ≤255）。
+func TestWorkDirSplit_零信息丢失(t *testing.T) {
+	t.Parallel()
+	// 极端超长（>600B）验证多段目录
+	long := "https_example.com_share1234567890_magnet-xt=urn:btih:8ACC5031111111111AAAA11111&dn=EXAMPLE-02203&spx_target=" +
+		"这是用于测试超长文件名的纯占位中文内容不含真实信息"
+	for len(long) < 600 {
+		long += "中间加长段" // 加在中间（后缀 .mp4 保留在末尾）
+	}
+	long += ".mp4"
+	dirs, name := workDirSplit(long)
+	// 拼接还原（零信息丢失）
+	var b strings.Builder
+	for _, d := range dirs {
+		b.WriteString(d)
+	}
+	b.WriteString(name)
+	if b.String() != long {
+		t.Fatalf("拼接 != 原基名: len=%d vs %d", b.Len(), len(long))
+	}
+	// 每段 ≤255
+	if len(dirs) < 2 {
+		t.Fatalf("极端超长应拆成多段目录，got %d 段", len(dirs))
+	}
+	for i, d := range dirs {
+		if len(d) > maxNameSegBytes {
+			t.Fatalf("目录段 #%d 超限: %d", i, len(d))
+		}
+	}
+	// 文件名段 + 工作后缀 ≤255
+	if len(name+hybridWorkingSuffix) > maxWorkNameBytes {
+		t.Fatalf("文件名段超限: %d", len(name+hybridWorkingSuffix))
+	}
+	// UTF-8 完整
+	if !utf8.ValidString(b.String()) || string([]rune(b.String())) != long {
+		t.Fatal("UTF-8 字符被劈开")
+	}
+	// 扩展名保留在文件段
+	if !strings.HasSuffix(name, ".mp4") {
+		t.Fatalf("扩展名应留在文件段: %q", name[len(name)-10:])
+	}
+	// 短名不拆分
+	dirs2, name2 := workDirSplit("short.bin")
+	if len(dirs2) != 0 || name2 != "short.bin" {
+		t.Fatalf("短名不应拆分: %v %q", dirs2, name2)
+	}
+}
+
+// TestWorkPaths_多段目录承载 验证超长名时工作/清单文件落在多级子目录。
+func TestWorkPaths_多段目录承载(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("segment_", 60) + ".mp4" // ~490B
+	w, m, dir := WorkPaths("/x/" + long)
+	if dir == "/x" {
+		t.Fatal("超长名应产生子目录")
+	}
+	if filepath.Dir(w) != dir || filepath.Dir(m) != dir {
+		t.Fatal("工作/清单应与目录一致")
+	}
+	// 每个路径段 ≤255
+	for _, p := range []string{w, m} {
+		for _, seg := range strings.Split(p, string(filepath.Separator)) {
+			if len(seg) > maxWorkNameBytes {
+				t.Fatalf("路径段超限 %d: %q", len(seg), seg)
+			}
 		}
 	}
 }

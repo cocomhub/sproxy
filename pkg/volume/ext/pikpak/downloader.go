@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
@@ -62,6 +63,10 @@ type PikpakDownloader struct {
 	pool        *AccountPool
 	log         *slog.Logger
 	normalizer  *ShareSourceNormalizer // keepshare 镜像归一（nil = 按原样直用）
+	// drive 下载专用 hybrid（惰性构造，复用同一 API/池/日志；drive 模式无 Resolver）
+	driveOnce   sync.Once
+	driveHybrid *HybridDownloader
+	driveErr    error
 }
 
 // 编译期断言：PikPak 下载器声明其 Result.Checksum 为仅本地自洽（② 态）。
@@ -240,7 +245,7 @@ func (d *PikpakDownloader) download(ctx context.Context, source, destPath string
 	// 1. 归一分享源（keepshare 镜像 → 真实 mypikpak 分享 id；mypikpak 原样），
 	//    再剔除 spx_target 参数（它只描述目标文件，不参与分享定位）。
 	//    此前直接 parseShareID(stripShareTarget(source)) 会把 keepshare 容器 id 当分享 id
-	//    （p5uj7smo 等）→ ListShareRecursive 恒 NOT_FOUND（"解析通、下载必挂"，#858 只修了
+	//    （keepshare 容器 id 等）→ ListShareRecursive 恒 NOT_FOUND（"解析通、下载必挂"，#858 只修了
 	//    只读解析路径）。归一能力唯一实现在 ShareSourceNormalizer（share_source.go）。
 	src, err := d.normalizeSource(ctx, source)
 	if err != nil {
@@ -408,7 +413,10 @@ func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID strin
 	if rc := checkRestoreCopy(ctx, d.api, resolveFileMeta(target)); rc.OK {
 		driveFile := rc.File
 		d.log.Info("pikpak reuse existing restored file", "id", driveFile.ID, "name", driveFile.Name)
-		size, checksum, err := d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
+		// 账号区 Range 分片下载（manifest 断点续传）——**唯一实现在 HybridDownloader**
+		// （pikget 生产路径，用户裁定 2026-10-28：不另造实现，避免官方 CLI 无续传）；
+		// 此处按 drive 文件形态复用其 runHybrid 内核（shareEnd=0 ⇒ 全账号区）。
+		size, checksum, err := d.driveDownload(ctx, driveFile, destPath, onProgress, sinkFactory)
 		if err != nil {
 			return 0, "", "", false, err
 		}
@@ -425,12 +433,56 @@ func (d *PikpakDownloader) restoreAndDownload(ctx context.Context, shareID strin
 	if err != nil {
 		return 0, "", "", false, err
 	}
-	// 5. 用官方 CLI 下载（完整，无分享 40-50% 限制），字节经 sink 记账（若装配）。
-	size, checksum, err := d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
+	// 5. 账号区 Range 分片下载（manifest 断点续传）——复用 HybridDownloader 唯一实现。
+	size, checksum, err := d.driveDownload(ctx, driveFile, destPath, onProgress, sinkFactory)
 	if err != nil {
 		return 0, "", "", false, err
 	}
 	return size, checksum, driveFile.ID, owned, nil
+}
+
+// driveDownload 用 **HybridDownloader 内核**（账号区 Range 分片 + manifest 续传 +
+// GCID 权威校验）下载账号网盘里已有的文件，替代官方 CLI（CLI 无断点续传）。
+//
+// 收敛（用户裁定 2026-10-28）：不新增下载实现——复用 hybrid 的 runHybrid 内核，
+// 差别只有「分享区边界 = 0」（该文件已在网盘，全部字节都走账号区）。
+func (d *PikpakDownloader) driveDownload(ctx context.Context, driveFile *FileMeta, destPath string, onProgress downloader.ProgressFunc, sinkFactory downloader.SinkFactory) (int64, string, error) {
+	if driveFile == nil || driveFile.ID == "" {
+		return 0, "", fmt.Errorf("pikpak: drive file 缺失（无法下载）")
+	}
+	if driveFile.Size <= 0 {
+		// 大小未知 → 分片规划不可用，回落官方 CLI（唯一剩余 CLI 路径）。
+		return d.runCLI(ctx, driveFile.ID, destPath, onProgress, sinkFactory)
+	}
+	hd, err := d.hybridForDrive()
+	if err != nil {
+		return 0, "", err
+	}
+	res, err := hd.DownloadDriveFile(ctx, DriveFileRequest{
+		FileID: driveFile.ID, FileName: driveFile.Name, Hash: driveFile.Hash,
+		Size: driveFile.Size, DestPath: destPath, OnProgress: onProgress, SinkFactory: sinkFactory,
+	})
+	if err != nil {
+		return 0, "", err
+	}
+	return res.Size, res.Checksum, nil
+}
+
+// hybridForDrive 惰性构造 drive-only HybridDownloader（复用同一 API/池/日志配置）。
+// 无 Resolver——drive 模式不需要分享解析。
+func (d *PikpakDownloader) hybridForDrive() (*HybridDownloader, error) {
+	d.driveOnce.Do(func() {
+		hd, err := NewHybridDownloader(HybridConfig{
+			API: d.api, Logger: d.log, AutoDelete: d.autoDelete,
+			AccountPool: d.pool, GCIDStats: d.gcidStats, ChunkSize: 32 << 20,
+		})
+		if err != nil {
+			d.driveErr = err
+			return
+		}
+		d.driveHybrid = hd
+	})
+	return d.driveHybrid, d.driveErr
 }
 
 // resolveFileMeta 把 FileMeta 转成幂等检查用的 downloader.ResolvedFile。
