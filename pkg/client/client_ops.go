@@ -119,7 +119,7 @@ func (c *FileClient) uploadWithOpts(ctx context.Context, localPath, remotePath s
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.handleUploadError(ctx, resp, localPath, remotePath, pr)
+		return c.handleUploadError(ctx, resp, localPath, remotePath, pr, uo.MetaExtra)
 	}
 
 	var result UploadResult
@@ -190,13 +190,15 @@ func uploadContextAborted(ctx context.Context, pw *io.PipeWriter) bool {
 
 // handleUploadError 处理普通上传的非 2xx 响应：自动转分块/507 映射/普通错误。
 // 自动转分块成功路径返回 UploadResult（含新会话 checksum），其余返回错误。
-func (c *FileClient) handleUploadError(ctx context.Context, resp *http.Response, localPath, remotePath string, pr *io.PipeReader) (*UploadResult, error) {
+func (c *FileClient) handleUploadError(ctx context.Context, resp *http.Response, localPath, remotePath string, pr *io.PipeReader, metaExtra map[string]any) (*UploadResult, error) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	// 服务端标记超限（X-Auto-Chunked: true）→ 自动转分块重试（roadmap 2.3 P0）：
 	// 普通上传超 max_upload_bytes 时无需调用方感知，客户端自动切分块协议。
 	if resp.StatusCode == http.StatusRequestEntityTooLarge && resp.Header.Get(headerAutoChunk) == "true" {
 		pr.Close()
-		cr, cerr := c.ChunkedUpload(ctx, localPath, remotePath)
+		// 元数据必须随分块 init 一起带过去：WithMetaExtra 只在单次上传走 header，
+		// 自动转分块时若不透传，大文件的 meta 会静默丢失。
+		cr, cerr := c.ChunkedUpload(ctx, localPath, remotePath, WithChunkedMetaExtra(metaExtra))
 		if cerr != nil {
 			return nil, cerr
 		}

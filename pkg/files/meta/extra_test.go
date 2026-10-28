@@ -246,3 +246,15 @@ func TestValidateExtra_TransferSourceKeys(t *testing.T) {
 		t.Fatal("transferred_at 非字符串应拒绝")
 	}
 }
+
+// TestValidateExtra_ManualUploadSource 锁定 source 枚举含 manual_upload（人工下载后上传的归档）。
+// 语义：transfer=服务端自动转存；manual_upload=人工下载后上传（内容与分享一致，由人工搬运）。
+func TestValidateExtra_ManualUploadSource(t *testing.T) {
+	t.Parallel()
+	if err := ValidateExtra(map[string]any{"source": "manual_upload"}); err != nil {
+		t.Fatalf("source=manual_upload 应通过: %v", err)
+	}
+	if err := ValidateExtra(map[string]any{"source": "manual"}); err == nil {
+		t.Fatal("枚举外值应拒绝（防拼写漂移）")
+	}
+}

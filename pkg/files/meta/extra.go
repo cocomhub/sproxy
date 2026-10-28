@@ -66,7 +66,9 @@ var spec = map[string]FieldSpec{
 	"origin_name": {Type: "string", MaxLen: 512},
 	// transfer = 云端下载转存产物（服务端自动写入；此前未登记 ⇒ 写入值落在枚举外，
 	// 一旦该路径改为经 ValidateExtra 校验会整批拒写）。用户裁定 2026-10-28。
-	"source":          {Type: "string", MaxLen: 32, Allowed: []string{"cloud_share", "http_direct", "hls", "local_upload", "transfer"}},
+	// manual_upload = 人工下载后上传的归档（内容与分享一致、由人工搬运到这里；与
+	// transfer 区分「服务端自动转存」与「人工上传」，便于审计/来源统计）。2026-10-28。
+	"source":          {Type: "string", MaxLen: 32, Allowed: []string{"cloud_share", "http_direct", "hls", "local_upload", "manual_upload", "transfer"}},
 	"share_url":       {Type: "string", MaxLen: 1024}, // 分享链接（网盘/中转等，不绑定厂商）
 	"share_id":        {Type: "string", MaxLen: 128},
 	"share_file_name": {Type: "string", MaxLen: 512}, // 分享内目标文件名
