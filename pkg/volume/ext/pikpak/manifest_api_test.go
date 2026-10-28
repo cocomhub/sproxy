@@ -218,3 +218,43 @@ func newAutoHybrid(t *testing.T, client *http.Client) *HybridDownloader {
 	}
 	return hd
 }
+
+// TestVerifyLocalFile 本地文件 GCID 比对（下载前「已完成/冲突」判定的领域判据）。
+func TestVerifyLocalFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.bin")
+	payload := make([]byte, 1<<20)
+	for i := range payload {
+		payload[i] = byte(i % 253)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// 计算真实 GCID（与 PikPak 官方算法一致）
+	gcid := payloadGCID(payload)
+	m, err := VerifyLocalFile(path, gcid)
+	if err != nil {
+		t.Fatalf("VerifyLocalFile: %v", err)
+	}
+	if !m.Matched || m.Size != int64(len(payload)) {
+		t.Fatalf("应命中: %+v (gcid=%s)", m, gcid)
+	}
+	// 大小写无关
+	upper := strings.ToUpper(gcid)
+	if m, err = VerifyLocalFile(path, upper); err != nil || !m.Matched {
+		t.Fatalf("大写 GCID 也应命中: %+v err=%v", m, err)
+	}
+	// 不匹配
+	if m, err = VerifyLocalFile(path, "0000000000000000000000000000000000000000"); err != nil || m.Matched {
+		t.Fatalf("不同 GCID 不应命中: %+v err=%v", m, err)
+	}
+	// 无权威 hash：只报告大小
+	if m, err = VerifyLocalFile(path, ""); err != nil || m.Matched || m.Size == 0 {
+		t.Fatalf("无期望 hash 应只报告大小: %+v err=%v", m, err)
+	}
+	// 不存在 → 零值
+	if m, err = VerifyLocalFile(filepath.Join(dir, "nope.bin"), gcid); err != nil || m.Size != 0 {
+		t.Fatalf("不存在应为零值: %+v err=%v", m, err)
+	}
+}
