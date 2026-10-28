@@ -1564,6 +1564,15 @@ func WithChunkedConcurrency(n int) ChunkedOption {
 	}
 }
 
+// WithChunkedMetaExtra 设置随分块 init 携带的自定义元数据（首次会话写入 .meta sidecar）。
+// 与 WithMetaExtra 同语义——Upload 自动转分块时必须把后者透传到这里，否则大文件元数据
+// 静默丢失（小文件单次上传带得上、大文件带不上 = 路径行为不一致）。
+func WithChunkedMetaExtra(extra map[string]any) ChunkedOption {
+	return func(o *chunkedOpts) {
+		o.metaExtra = extra
+	}
+}
+
 // WithChunkedResume 启用续传模式。
 func WithChunkedResume(enabled bool) ChunkedOption {
 	return func(o *chunkedOpts) {
