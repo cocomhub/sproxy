@@ -741,3 +741,26 @@ func TestJSONFormatter_PrintTransferStats(t *testing.T) {
 		t.Fatalf("stats 缺 file_count: %s", buf.String())
 	}
 }
+
+// TestLocalTimeDisplay 验证 transferred_at（UTC RFC3339 存储）展示转本地时区；
+// 非时间键原样。
+func TestLocalTimeDisplay(t *testing.T) {
+	t.Parallel()
+	// UTC 存储值
+	utc := "2026-10-28T03:00:55Z"
+	got := localTimeDisplay("transferred_at", utc)
+	if got == utc {
+		t.Fatalf("transferred_at 应转本地时区，仍原样 %q", got)
+	}
+	if !strings.Contains(got, "2026-10-28") {
+		t.Fatalf("本地时区显示应含日期: %q", got)
+	}
+	// 非时间键原样
+	if localTimeDisplay("checksum", "abc") != "abc" {
+		t.Fatal("checksum 非时间键应原样")
+	}
+	// 非法时间原样（不崩）
+	if localTimeDisplay("transferred_at", "not-a-time") != "not-a-time" {
+		t.Fatal("非法时间应原样")
+	}
+}

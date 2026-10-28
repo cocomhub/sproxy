@@ -10,12 +10,15 @@
 //
 // 写入字段（合并语义，客户端 meta_extra 优先不覆盖服务端来源键）：
 //
-//	source          = "transfer"（固定；与 upload 来源区分）
-//	source_url      = task.URL（源 URL，含 spx_target 等定位参数）
-//	etag            = result.ETag（服务端唯一性标识；空则不写）
-//	checksum        = result.Checksum（SHA-256；空则不写）
-//	authority_hash  = result.AuthorityHash（带外权威 hash 如 pikpak GCID；空则不写）
-//	transferred_at  = RFC3339 转存时刻
+//	source            = "transfer"（固定；与 upload 来源区分）
+//	source_url        = task.URL（源 URL，含 spx_target 等定位参数）
+//	etag              = result.ETag（服务端唯一性标识；空则不写）
+//	checksum          = result.Checksum（本地落盘文件 SHA-256 十六进制，小写；空则不写）
+//	checksum_algorithm = "sha256"（checksum 的算法标识——通用字段自描述，便于校验维护）
+//	authority_hash    = result.AuthorityHash（服务端带外权威 hash；PikPak 场景即 GCID）
+//	authority_hash_algorithm = "pikpak-gcid"（PikPak GCID = sha1(concat(sha1(分块)))；
+//	                         其他下载器/场景按各自权威算法标识，空则不写）
+//	transferred_at    = RFC3339 转存时刻
 //	<客户端 meta_extra 各键>（同名键：客户端值优先——客户端更懂业务语义）
 package cloud
 
@@ -25,12 +28,20 @@ import (
 
 // transferSourceMetaKeys 是服务端写入的来源键（客户端 meta_extra 同名键**不覆盖**
 // 服务端来源语义，除非显式提供——见 buildTransferSourceMeta 的合并次序）。
+// 算法标识常量（通用 hash 字段自描述——用户裁定 2026-10-28：通用字段必须说明算法便于校验维护）。
+const (
+	checksumAlgorithmSHA256    = "sha256"      // checksum 为本地落盘文件 SHA-256 十六进制
+	authorityHashAlgPikpakGCID = "pikpak-gcid" // PikPak 官方 GCID = sha1(concat(sha1(每个分块)))
+)
+
 const (
 	metaKeySource        = "source"
 	metaKeySourceURL     = "source_url"
 	metaKeyETag          = "etag"
 	metaKeyChecksum      = "checksum"
+	metaKeyChecksumAlg   = "checksum_algorithm" // 算法标识（sha256）——通用 checksum 字段自描述
 	metaKeyAuthorityHash = "authority_hash"
+	metaKeyAuthorityAlg  = "authority_hash_algorithm" // 算法标识（pikpak-gcid 等）——通用字段自描述
 	metaKeyTransferredAt = "transferred_at"
 )
 
@@ -50,9 +61,11 @@ func buildTransferSourceMeta(task *CloudTask, etag, checksum, authorityHash stri
 	}
 	if checksum != "" {
 		meta[metaKeyChecksum] = checksum
+		meta[metaKeyChecksumAlg] = checksumAlgorithmSHA256 // 自描述：checksum 为 SHA-256 十六进制
 	}
 	if authorityHash != "" {
 		meta[metaKeyAuthorityHash] = authorityHash
+		meta[metaKeyAuthorityAlg] = authorityHashAlgPikpakGCID // 自描述：PikPak GCID（sha1(concat(sha1(分块)))）
 	}
 	if task != nil {
 		for k, v := range task.MetaExtra {

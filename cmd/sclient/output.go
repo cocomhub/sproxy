@@ -211,12 +211,32 @@ func (f *TextFormatter) PrintMetaExtra(extra map[string]any) {
 	for _, k := range keys {
 		v := extra[k]
 		if s, ok := v.(string); ok {
+			// 时间键（UTC RFC3339 存储）→ 展示转**本地时区**（可读性；存储仍 UTC 规范）
+			if display := localTimeDisplay(k, s); display != s {
+				fmt.Fprintf(f.w, "extra.%s: %s\n", k, display)
+				continue
+			}
 			fmt.Fprintf(f.w, "extra.%s: %s\n", k, s)
 			continue
 		}
 		b, _ := json.Marshal(v)
 		fmt.Fprintf(f.w, "extra.%s: %s\n", k, string(b))
 	}
+}
+
+// metaTimeKeys 是 meta extra 里承载 RFC3339 时间的键（存储 UTC，展示转本地）。
+var metaTimeKeys = map[string]bool{"transferred_at": true, "created_at": true, "updated_at": true}
+
+// localTimeDisplay 若 k 是时间键且 v 可解析为 RFC3339 → 返回本地时区表示；否则原样。
+func localTimeDisplay(k, v string) string {
+	if !metaTimeKeys[k] {
+		return v
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return v
+	}
+	return t.Local().Format("2006-01-02 15:04:05 MST")
 }
 
 // PrintMetaExtra 输出 meta extra（JSON 模式：并入一个对象键）。
