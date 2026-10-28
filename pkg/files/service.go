@@ -600,11 +600,13 @@ func (s *Service) SaveIndexSnapshots() int {
 	return n
 }
 
-// IndexMove 跨卷移动成功后同步搜索索引（旁路面 /api/volumes/move、rebalance 物理搬移后
-// 调用）：移除源卷条目 + 写入目标卷条目（评审 I-②，2026-10-07：move 旁路索引更新，否则
-// 源卷列表 stale 幽灵文件、目标卷缺失/错位）。rel 为租户根相对路径（user/<name>）；size
-// 为已搬字节；toRoot 为目标卷租户根（取 mtime，跨卷复制后非原值也可录真值）。index nil → 零操作。
-func (s *Service) IndexMove(owner, rel string, size int64, toVol string, toRoot *storage.Root) {
+// IndexMove 跨卷移动成功后同步搜索索引 + checksum 台账（旁路面 /api/volumes/move、
+// rebalance 物理搬移后调用）：移除源卷条目 + 写入目标卷条目与 checksum（评审 I-②，
+// 2026-10-07 + R16：move 旁路此前只更新索引不写 checksum ⇒ 目标卷 list checksum 空）。
+// rel 为租户根相对路径（user/<name>）；size 为已搬字节；checksum 为源卷台账读出的整文件
+// SHA-256（空 = 源无台账，写空键无意义跳过 store 写入）；toRoot 为目标卷租户根
+// （取 mtime，跨卷复制后非原值也可录真值）。index nil → 零操作。
+func (s *Service) IndexMove(owner, rel string, size int64, checksum, toVol string, toRoot *storage.Root) {
 	if s.index == nil {
 		return
 	}
@@ -617,6 +619,46 @@ func (s *Service) IndexMove(owner, rel string, size int64, toVol string, toRoot 
 		}
 	}
 	s.index.upsert(owner, usr, size, modTime, toVol, toRoot, "user/"+usr)
+	// checksum 台账迁移：调用方可能不传（旧调用）→ 回落读**源 rel 旧值**（跨卷 move
+	// 源/目标同 rel——写目标前旧键仍是源台账）；空仍跳过。
+	if checksum == "" {
+		if cs := s.rt.checksumStore(owner); cs != nil {
+			if v, ok := cs.Get(rel); ok {
+				checksum = v
+			}
+		}
+	}
+	if checksum != "" {
+		if cs := s.rt.checksumStore(owner); cs != nil {
+			cs.Set(rel, checksum)
+		}
+	}
+}
+
+// RecordBypassWrite 是**旁路写路径**（cloud 下载转存 / 归档转存 / 直接落 user 桶）的派生状态
+// 统一登记入口（R16 缺陷族修复）：写 checksum 台账 + 搜索索引 upsert——否则这些产物的
+// list 条目缺失 / checksum 空（普通上传经写内核自动登记；旁路写不经写内核）。
+//
+// rel 为租户根相对路径（含 user/ 前缀，如 user/transfer/x.bin）；size 为产物字节；
+// checksum 为整文件 SHA-256（空 = 未知，跳过 store 写入——list 的 checksum 保持空可预期）；
+// volume 为产物所在卷名（索引条目归属）；root 为产物所在卷租户根（取 mtime）。
+//
+// 幂等：同 rel 重复调用覆盖（与写内核 upsert 同语义）。
+func (s *Service) RecordBypassWrite(owner, rel string, size int64, checksum, volume string, root *storage.Root) {
+	if cs := s.rt.checksumStore(owner); cs != nil && checksum != "" {
+		cs.Set(rel, checksum)
+	}
+	if s.index == nil {
+		return
+	}
+	var modTime int64
+	if root != nil {
+		if fi, err := root.Stat(rel); err == nil {
+			modTime = fi.ModTime().UnixNano()
+		}
+	}
+	usr := strings.TrimPrefix(rel, "user/")
+	s.index.upsert(owner, usr, size, modTime, volume, root, rel)
 }
 
 // AttachIndexSync 挂载集群索引同步钩子（装配层调用；nil = 不装配零回归）。

@@ -754,7 +754,7 @@ func (h *Handlers) moveCommitConcurrentDeleted(mc *moveFileCtx, written int64, s
 	}
 	// 评审 I-②（2026-10-07）：move 成功同步搜索索引（源条目移除 + 目标卷条目写入），
 	// 否则源卷列表 stale 幽灵文件、目标卷缺失/错位。
-	h.fileService().IndexMove(mc.owner, mc.rel, written, mc.toVol, mc.toRoot)
+	h.fileService().IndexMove(mc.owner, mc.rel, written, "", mc.toVol, mc.toRoot)
 	// B-M3 修复：并发删除分支目标卷已持数据但无 meta sidecar（正常路径的
 	// moveMetaAfterVolumeMove 不在此分支）——补目标卷 meta 重建；源 meta 已由并发
 	// delete 的 removeFileMeta 清理，源清理 stat 不到自然 no-op。
@@ -807,7 +807,7 @@ func (h *Handlers) moveCommitRelease(mc *moveFileCtx, written int64, scope *quot
 	}
 	// 评审 I-②（2026-10-07）：move 成功同步搜索索引（源条目移除 + 目标卷条目写入），
 	// 否则源卷列表 stale 幽灵文件、目标卷缺失/错位。
-	h.fileService().IndexMove(mc.owner, mc.rel, written, mc.toVol, mc.toRoot)
+	h.fileService().IndexMove(mc.owner, mc.rel, written, "", mc.toVol, mc.toRoot)
 	// M3 修复：跨卷 move 成功后在目标卷**重建 meta sidecar**、删除源卷 meta 并释放
 	// 其配额——否则源卷留孤儿 .meta（磁盘+配额双泄漏）、目标卷文件无 sidecar。
 	// 重建复用 filesMetaPolicy.WriteMeta（与上传到达即建同一入口，覆盖差分 + 配额记账）；

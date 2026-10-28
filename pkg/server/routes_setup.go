@@ -640,6 +640,9 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 			}
 			return fsys, scheme
 		},
+		// RecordBypassWrite（R16 缺陷族修复 A/B）：转存/归档产物写目标卷 user 桶不经写内核 ⇒
+		// 派生状态（checksum 台账 + 搜索索引）需由写路径显式登记，否则 list 缺条目 / checksum 空。
+		RecordBypassWrite: h.fileService().RecordBypassWrite,
 		// VolumePoolChargeFor（R16 P1 修复②/③）：本地卷转存产物的卷级容量池结算/探测
 		// ——本地卷 rootfs 无 CapacityFS，卷池权威在路由层 Pool。外部卷不经此（已记）。
 		VolumePoolChargeFor: vs.Pool,
