@@ -1006,45 +1006,71 @@ type refreshVolumeResponse struct {
 	Message string `json:"message"`
 }
 
-// refreshVolumeHandler 处理 POST /api/volumes/refresh?volume=<v>（S5，2026-10-27）。
+// refreshVolumeHandler 处理 POST /api/volumes/refresh[?volume=<v>]（S5 2026-10-27；2026-10-29 扩展）。
 //
-// 触发场景：secretdata 卷的内存索引只在挂载时扫描一次；卷被**本进程之外**修改（用户用
-// 网盘 App 直改 / 另一实例写入）后幽灵条目/旧哈希永不收敛。本端点让客户端显式触发重建：
-//   - 卷是**外部卷**且后端实现 `registry.IndexRefresher`（当前 secretdata）→ 重扫 + 原子换入；
-//   - 卷是本地卷（无内存索引要重建，索引即磁盘真实）→ 无操作成功（语义幂等）；
-//   - 卷不存在/未授权 → 404/403（不泄卷存在性，与其它卷端点同判据）；
-//   - 后端不支持该能力 → 405 明确拒绝（不静默 no-op）。
+// 语义（用户裁定 2026-10-29：缓存**默认永不过期**，进程外改动只能靠本端点感知）：
+//   - **缺省 volume ⇒ 清空全部卷**的状态缓存（Web UI「全部卷」视图 / `sclient volume refresh` 无参）；
+//   - 指定卷 ⇒ 清空该卷状态缓存（**本地卷同样清**——本地卷自 #892 起也走缓存，跳过会让本机直写盘
+//     永远无法通过 refresh 感知）；
+//   - 外部卷后端实现 `registry.IndexRefresher`（secretdata）⇒ 额外重扫内存索引并原子换入；
+//   - 本地卷无内存索引可重建 ⇒ 成功文案只提「状态缓存已清空」；
+//   - 卷不存在/未授权 ⇒ 404/403（不泄卷存在性）；后端无索引且未装配缓存 ⇒ 405（不静默 no-op）。
 func (h *Handlers) refreshVolumeHandler(w http.ResponseWriter, r *http.Request) {
-	volName := r.URL.Query().Get("volume")
-	if volName == "" {
-		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "volume 不能为空"}, http.StatusBadRequest)
-		return
-	}
 	if h.volSet == nil {
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "卷功能未装配"}, http.StatusBadRequest)
 		return
 	}
-	owner := normalizeOwner(ownerFromRequest(r))
-	if !h.volumeAllowedFor(owner, volName) {
+	volName := strings.TrimSpace(r.URL.Query().Get("volume"))
+	if volName == "" {
+		h.refreshAllVolumeCaches(w, r)
+		return
+	}
+	if !h.volumeAllowedFor(normalizeOwner(ownerFromRequest(r)), volName) {
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
 		return
 	}
-	// 卷状态缓存（外部卷 list/checksum 视图）：显式清空 ⇒ 下次读回源（外部改动收敛）。
-	// 对这类卷，**状态缓存就是它的「索引」** —— 清空成功即视为重建成功（无需后端实现
-	// IndexRefresher；否则普通外部卷的 refresh 会恒 405）。
-	stateRefreshed := false
-	if h.stateCache != nil && !h.volSet.HasLocalRoot(volName) {
-		if rerr := h.stateCache.Refresh(r.Context(), volName); rerr != nil {
-			sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "清空卷状态缓存失败: " + rerr.Error()}, http.StatusInternalServerError)
-			return
-		}
-		stateRefreshed = true
+	if !h.clearVolumeStateCache(w, r, volName) {
+		return // 失败响应已写
 	}
-	// 本地卷：索引即磁盘真实（搜索索引增量更新），无「内存索引要重建」——幂等成功。
 	if h.volSet.HasLocalRoot(volName) {
-		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "本地卷无内存索引需要重建（幂等成功）"}, http.StatusOK)
+		h.auditVolumeRefresh(r, volName, "状态缓存已清空（本地卷）")
+		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷状态缓存已清空: " + volName}, http.StatusOK)
 		return
 	}
+	h.refreshExternalVolume(w, r, volName)
+}
+
+// refreshAllVolumeCaches 清空**全部卷**的状态缓存（缺省 volume 形态）。
+func (h *Handlers) refreshAllVolumeCaches(w http.ResponseWriter, r *http.Request) {
+	if h.stateCache == nil {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "卷状态缓存未装配"}, http.StatusMethodNotAllowed)
+		return
+	}
+	if err := h.stateCache.RefreshAll(r.Context()); err != nil {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "清空卷状态缓存失败: " + err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "volume_refresh", ObjectType: "volume", Object: "*", Result: AuditResultSuccess,
+		Detail: "全部卷状态缓存已清空（外部改动收敛）",
+	})
+	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "全部卷状态缓存已清空"}, http.StatusOK)
+}
+
+// clearVolumeStateCache 清空单卷状态缓存；失败时已写 500 并返回 false。
+func (h *Handlers) clearVolumeStateCache(w http.ResponseWriter, r *http.Request, volName string) bool {
+	if h.stateCache == nil {
+		return true
+	}
+	if err := h.stateCache.Refresh(r.Context(), volName); err != nil {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "清空卷状态缓存失败: " + err.Error()}, http.StatusInternalServerError)
+		return false
+	}
+	return true
+}
+
+// refreshExternalVolume 处理外部卷：后端有自管索引则重建，否则以「状态缓存已清空」为成功。
+func (h *Handlers) refreshExternalVolume(w http.ResponseWriter, r *http.Request, volName string) {
 	be := h.volSet.External(volName)
 	if be == nil {
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "卷不存在"}, http.StatusNotFound)
@@ -1052,16 +1078,12 @@ func (h *Handlers) refreshVolumeHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	refresher, ok := be.(registry.IndexRefresher)
 	if !ok {
-		if stateRefreshed {
-			// 后端无自管索引，但卷状态缓存已清空 ⇒ 外部改动下次读即可见（语义达成）。
-			h.RecordAudit(r.Context(), AuditEvent{
-				Action: "volume_refresh", ObjectType: "volume", Object: volName, Result: AuditResultSuccess,
-				Detail: "状态缓存已清空（外部改动收敛）",
-			})
-			sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷状态缓存已清空: " + volName}, http.StatusOK)
+		if h.stateCache == nil {
+			sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "该卷后端不支持索引重建（无内存索引）"}, http.StatusMethodNotAllowed)
 			return
 		}
-		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "该卷后端不支持索引重建（无内存索引）"}, http.StatusMethodNotAllowed)
+		h.auditVolumeRefresh(r, volName, "状态缓存已清空（外部改动收敛）")
+		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷状态缓存已清空: " + volName}, http.StatusOK)
 		return
 	}
 	if err := refresher.RefreshIndex(r.Context()); err != nil {
@@ -1069,9 +1091,13 @@ func (h *Handlers) refreshVolumeHandler(w http.ResponseWriter, r *http.Request) 
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "索引重建失败: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "volume_refresh", ObjectType: "volume", Object: volName, Result: AuditResultSuccess,
-		Detail: "索引重建（外部改动收敛）",
-	})
+	h.auditVolumeRefresh(r, volName, "索引重建（外部改动收敛）")
 	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷索引已重建: " + volName}, http.StatusOK)
+}
+
+// auditVolumeRefresh 记录 refresh 成功审计（R35-b：action=volume_refresh）。
+func (h *Handlers) auditVolumeRefresh(r *http.Request, volName, detail string) {
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "volume_refresh", ObjectType: "volume", Object: volName, Result: AuditResultSuccess, Detail: detail,
+	})
 }

@@ -142,6 +142,14 @@ func (s *Store) Remove(vol, fsPath string) {
 	}
 }
 
+// RemoveAll 清空全部落盘快照（对应 `POST /api/volumes/refresh` 无卷名的「全部卷」形态）。
+func (s *Store) RemoveAll() {
+	if !s.Enabled() {
+		return
+	}
+	_ = os.RemoveAll(s.base)
+}
+
 // RemoveVolume 整卷回收（卷删除/卸载时调用）。
 func (s *Store) RemoveVolume(vol string) {
 	if !s.Enabled() || vol == "" {

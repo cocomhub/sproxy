@@ -74,34 +74,42 @@ func newCmdVolumeRebalance(factory clientfactory.Factory, ios cli.IOStreams) *co
 
 func newCmdVolumeRefresh(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "refresh <卷名>",
-		Short: "重建卷内存索引（外部改动收敛）",
-		Long: `重建指定卷的内存索引（S5，2026-10-27）。
+		Use:   "refresh [卷名]",
+		Short: "强制刷新卷缓存/索引（感知进程外改动；无参 = 全部卷）",
+		Long: `强制刷新服务端的卷缓存/索引（S5，2026-10-27）。
 
-		背景：secretdata 卷的内存索引只在挂载时扫描一次；卷被**本进程之外**修改（用网盘 App
-		直改 / 另一实例写入）后，幽灵条目/旧哈希会一直存在到重启。本命令显式触发服务端重建：
-		重扫底层（容器树 + 全部文件 meta）并原子换入，失败保持旧索引不动（fail-closed）。
+		背景：卷状态缓存**默认永不过期**（2026-10-29 用户裁定）——本进程的写由事件写穿（下一次读
+		立即可见），但**进程外**改动（运维直写盘、同根多实例、用网盘 App 直改、备份恢复）不会被
+		自动感知。本命令是唯一的显式收敛入口：
 
-		本地卷没有要重建的内存索引（索引即磁盘真实）⇒ 幂等成功；后端不支持该能力 ⇒ 明确报错。
+		  sclient volume refresh          # 清空**全部卷**的状态缓存
+		  sclient volume refresh vault    # 只清 vault（secretdata 等外部卷还会重扫内存索引）
+		  sclient volume refresh vault:/  # 卷 URI 寻址（同一命令约定）
 
-		示例:
-		  sclient volume refresh vault
-		  sclient volume refresh vault:/    # 卷 URI 寻址（同一命令约定）`,
-		Args: cobra.ExactArgs(1),
+		本地卷同样适用（自 2026-10-28 起本地卷也走状态缓存）；幂等、随时可重复执行。`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vol, _, ok := splitVolumeURI(args[0])
-			if !ok || vol == "" {
-				return fmt.Errorf("卷名或卷 URI 无效: %q", args[0])
+			vol := ""
+			if len(args) == 1 {
+				name, _, ok := splitVolumeURI(args[0])
+				if !ok {
+					return fmt.Errorf("卷名或卷 URI 无效: %q", args[0])
+				}
+				vol = name
 			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			if err := svc.RefreshVolume(cmd.Context(), vol); err != nil {
-				ios.WriteErrLine("卷索引重建失败: %v", err)
-				return fmt.Errorf("卷索引重建失败: %w", err)
+			if rerr := svc.RefreshVolume(cmd.Context(), vol); rerr != nil {
+				ios.WriteErrLine("卷刷新失败: %v", rerr)
+				return fmt.Errorf("卷刷新失败: %w", rerr)
 			}
-			ios.WriteOutLine("卷索引已重建: %s", vol)
+			if vol == "" {
+				ios.WriteOutLine("全部卷状态缓存已清空（下次读取将回源）")
+				return nil
+			}
+			ios.WriteOutLine("卷缓存已刷新: %s", vol)
 			return nil
 		},
 	}

@@ -152,6 +152,32 @@ func TestCache_TTLExpiry(t *testing.T) {
 	}
 }
 
+// TestCache_DefaultTTLNeverExpires 钉住默认策略：**永不过期**（用户裁定 2026-10-29）。
+//
+// 语义：缓存是正常路径，本进程写由事件写穿；**进程外**改动（运维直写盘/同根多实例）不会
+// 被自动感知——必须显式 `POST /api/volumes/refresh`（或卷自报代际变化）。
+// 变异：把 DefaultTTL 改回非 0（如 5 分钟）⇒ 本用例红（时钟推进后回源）。
+func TestCache_DefaultTTLNeverExpires(t *testing.T) {
+	t.Parallel()
+	if DefaultTTL != 0 {
+		t.Fatalf("默认 TTL 必须为 0（永不过期），got %v", DefaultTTL)
+	}
+	fs := newFakeFS()
+	clk := &testClock{t: time.Unix(1000, 0)}
+	c := New(Options{Now: clk.now}) // 不注入 TTL ⇒ 走默认策略
+	wrapped := Wrap("v1", fs, c)
+
+	for _, step := range []time.Duration{0, time.Hour, 30 * 24 * time.Hour, 10 * 365 * 24 * time.Hour} {
+		clk.t = clk.t.Add(step)
+		if _, err := wrapped.ListDir(context.Background(), "alice/user"); err != nil {
+			t.Fatalf("ListDir: %v", err)
+		}
+	}
+	if got := fs.calls(); got != 1 {
+		t.Fatalf("默认永不过期：十年级时间跨度内应只回源 1 次，got %d", got)
+	}
+}
+
 // TestCache_GenerationChange 钉住代际：卷自报代际变化即回源（跨进程收敛路径）。
 func TestCache_GenerationChange(t *testing.T) {
 	t.Parallel()

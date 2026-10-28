@@ -9,7 +9,7 @@ package sproxy_test
 // 的端到端验证：真实 sproxy 二进制 + 真实 sclient CLI + 真实 WebDAV 外部卷后端。
 //
 // 锁定的契约（缺一即功能不可用）：
-//  1. 启用后外部卷目录列举走缓存（外部直改在 TTL 内**不可见**）；
+//  1. 启用后外部卷目录列举走缓存（默认**永不过期** ⇒ 外部直改不可见，需显式 refresh）；
 //  2. 经 API/CLI 的写入**自动失效**（上传/删除后 list 立即可见变化 —— 无需调用方登记）；
 //  3. 显式 `POST /api/volumes/refresh` 立即收敛（外部改动可见）；
 //  4. 未启用（默认）时无缓存（外部直改立即可见）—— 证明开关语义与「缓存确实生效」。
@@ -158,8 +158,8 @@ func findFileUnder(t *testing.T, root, base string) string {
 func TestVolumeStateCache_ExternalVolumeE2E(t *testing.T) {
 	t.Parallel()
 	davURL, davRoot := startWebDAVBackend(t)
-	// 缓存默认开启（disable=false）；这里只把 TTL 设长，确保断言窗口内不因过期回源。
-	env := startCLIEnv(t, "volume_state:\n  ttl: 10m\n")
+	// 缓存默认开启且**永不过期**（volume_state.ttl 缺省 = 0）——不需要也不应调 TTL。
+	env := startCLIEnv(t, "")
 	createWebDAVVolume(t, env.BaseURL, "extdav", davURL)
 	prepareWebDAVRoots(t, davRoot)
 
@@ -186,7 +186,7 @@ func TestVolumeStateCache_ExternalVolumeE2E(t *testing.T) {
 		t.Fatalf("直写 WebDAV 后端: %v", werr)
 	}
 	if got := listVolumeNames(t, env.BaseURL, "extdav"); got["b.bin"] {
-		t.Fatalf("TTL 内外部直改应**不可见**（缓存未生效，list 已回源），got %v", got)
+		t.Fatalf("默认永不过期下外部直改应**不可见**（缓存未生效，list 已回源），got %v", got)
 	}
 
 	// ---- 4) 显式 refresh ⇒ 立即收敛 ----
@@ -229,5 +229,42 @@ func TestVolumeStateCache_DisabledSeesExternalChangeImmediately(t *testing.T) {
 	// 后端是本地文件系统（无传播延迟），无需轮询等待。
 	if got := listVolumeNames(t, env.BaseURL, "extdav"); !got["b.bin"] {
 		t.Fatalf("未启用缓存时外部直改应立即可见（list 每次回源），got %v", got)
+	}
+}
+
+// TestVolumeStateCache_LocalVolumeRefreshE2E 端到端：**本地卷**默认永不过期 ——
+// 进程外直写（模拟运维/其它实例）在 list 中不可见，必须 `sclient volume refresh`
+// （无参 = 全部卷）才感知。这是「强制刷新入口真正可用」的端到端证明（CLI 路径）。
+func TestVolumeStateCache_LocalVolumeRefreshE2E(t *testing.T) {
+	t.Parallel()
+	env := startCLIEnv(t, "")
+	if werr := os.WriteFile(filepath.Join(env.TmpDir, "a.bin"), []byte("alpha"), 0o600); werr != nil {
+		t.Fatalf("写本地文件: %v", werr)
+	}
+	env.sclient(t, env.TmpDir, "upload", "a.bin", "a.bin")
+	// 首次 list：填充缓存（此后未失效的读都命中）。
+	if got := listVolumeNames(t, env.BaseURL, ""); !got["a.bin"] {
+		t.Fatalf("上传后 list 应含 a.bin，got %v", got)
+	}
+
+	// 进程外直写（不经 sproxy）：本地卷共享布局 = `<storage_root>/<owner>/user/<rel>`。
+	outside := filepath.Join(env.StorageRoot, e2eTestAK, "user")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("建目录: %v", err)
+	}
+	if werr := os.WriteFile(filepath.Join(outside, "b.bin"), []byte("bravo"), 0o600); werr != nil {
+		t.Fatalf("进程外直写: %v", werr)
+	}
+	// 永不过期 ⇒ 连续两次 list 都不应看到（排除「偶然回源」的假绿）。
+	for i := range 2 {
+		if got := listVolumeNames(t, env.BaseURL, ""); got["b.bin"] {
+			t.Fatalf("第 %d 次：永不过期下进程外直写不应自动可见，got %v", i+1, got)
+		}
+	}
+
+	// 强制刷新（CLI，无参 = 全部卷）⇒ 下一次 list 回源 ⇒ 可见。
+	env.sclient(t, env.TmpDir, "volume", "refresh")
+	if got := listVolumeNames(t, env.BaseURL, ""); !got["b.bin"] {
+		t.Fatalf("强制刷新后应看到进程外直写的 b.bin，got %v", got)
 	}
 }

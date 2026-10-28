@@ -1231,11 +1231,11 @@ func transferConcurrencyEffective(c *Config) int {
 type VolumeStateConfig struct {
 	// Disable 显式**关闭**卷状态缓存（默认 false = 启用）。
 	//
-	// 语义契约（用户裁定 2026-10-28）：缓存是**正常路径**；本进程写由 Root/FS 事件写穿
-	// （下一次读立即可见），只有**进程外**改动（运维直写盘、同根多实例）需要等 TTL 收敛
-	// ——这类操作属罕见场景，不被鼓励（需要立即生效用 POST /api/volumes/refresh）。
+	// 语义契约（用户裁定 2026-10-28/2026-10-29）：缓存是**正常路径**；本进程写由 Root/FS
+	// 事件写穿（下一次读立即可见）。**进程外**改动（运维直写盘、同根多实例、备份恢复）
+	// 不自动收敛——需要可见时显式 `POST /api/volumes/refresh?volume=<卷>`。
 	Disable bool `yaml:"disable" mapstructure:"disable"`
-	// TTL 是缓存有效期（0 = 默认 5 分钟；负值 = 每次回源，调试/强一致场景）。
+	// TTL 是缓存有效期（**0 = 永不过期（默认）**；>0 = 时间兜底；负值 = 每次回源，调试/强一致场景）。
 	TTL time.Duration `yaml:"ttl" mapstructure:"ttl"`
 	// SearchRemote 允许对远端卷做递归搜索（默认 false：递归列举 = 全量远端往返，
 	// 只在明确需要时开启）。

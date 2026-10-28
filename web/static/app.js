@@ -341,6 +341,30 @@ async function refreshList(opts) {
   }
 }
 
+// forceRefreshList 是工具栏「强制刷新」入口（用户要求 2026-10-29：Web UI 必须有明确可用的
+// 强制刷新方式）。服务端卷状态缓存**默认永不过期**，普通「重新列举」会命中缓存 ⇒ 看不到
+// 本机直写盘/其它实例/网盘 App 的改动。本函数先 POST /api/volumes/refresh（当前卷；全部卷
+// 上下文则不带 volume = 清空全部），再重新列举 ⇒ 真正感知进程外改动。
+async function forceRefreshList() {
+  const btn = document.getElementById('refresh-btn');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '刷新中…'; }
+  try {
+    const res = await sclientTransport.coreRequest('POST', volumeRefreshPath(_volumeFilter), {});
+    const data = sclientUtil.decodeJSON(res.body);
+    if (data && data.success === false) {
+      showToast('强制刷新失败: ' + (data.message || '未知错误'), 'error');
+      return;
+    }
+    await refreshList();
+    showToast(_volumeFilter ? ('已清空 ' + _volumeFilter + ' 的缓存并重新列举') : '已清空全部卷缓存并重新列举', 'success');
+  } catch (e) {
+    showToast('强制刷新失败: ' + (e && e.message ? e.message : String(e)), 'error');
+  } finally {
+    if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = prev; }
+  }
+}
+
 async function loadMore() {
   const el = document.getElementById('file-list');
   try {
@@ -1562,20 +1586,20 @@ function wireVolumeOps(panel) {
 // 不收敛——本按钮显式重建。本地卷 = 无内存索引（幂等成功）；后端不支持该能力 = 405。
 async function runVolumeRefresh(volName, btn) {
   if (!volName) return;
-  if (!confirm('重建卷 "' + volName + '" 的内存索引？\n\n用于「外部改动后收敛」（如用网盘 App 直改了卷内容）。\n本地卷无内存索引，操作幂等无害。')) return;
+  if (!confirm('强制刷新卷 "' + volName + '"？\n\n清空该卷的服务端状态缓存（默认永不过期）并重新读取底层，\n用于感知进程外改动（本机直写盘 / 其它实例 / 网盘 App 直改）。\n本地卷同样适用；操作幂等。')) return;
   const prev = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = '重建中…'; }
   try {
-    const res = await sclientTransport.coreRequest('POST', '/api/volumes/refresh?volume=' + encodeURIComponent(volName), {});
+    const res = await sclientTransport.coreRequest('POST', volumeRefreshPath(volName), {});
     const data = sclientUtil.decodeJSON(res.body);
     if (data && data.success === false) {
-      showToast('索引重建失败: ' + (data.message || '未知错误'), 'error');
+      showToast('卷刷新失败: ' + (data.message || '未知错误'), 'error');
       return;
     }
-    showToast('卷索引已重建: ' + volName, 'success');
+    showToast('卷缓存已刷新: ' + volName, 'success');
     void showVolumes(); // 刷新卷面板（用量等可能随重扫变化）
   } catch (e) {
-    showToast('索引重建失败: ' + e.message, 'error');
+    showToast('卷刷新失败: ' + e.message, 'error');
   } finally {
     if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = prev; }
   }
@@ -3549,7 +3573,7 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   // 工具栏
-  document.getElementById('refresh-btn').addEventListener('click', refreshList);
+  document.getElementById('refresh-btn').addEventListener('click', function () { void forceRefreshList(); });
   document.getElementById('search-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') void searchFiles();
   });
