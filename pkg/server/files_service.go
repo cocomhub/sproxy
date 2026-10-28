@@ -92,6 +92,36 @@ type filesVolumeSet struct {
 	sinkHost *Handlers
 }
 
+// ListDirView 实现 files.VolumeViewLister：经**卷视图**（VolumeView，含可信封装/容量/状态缓存
+// 装饰）列出目录直接子项——list 与 sync/mirror/备份同一数据源（设计 §15.2 步骤 2）。
+//
+// 门控在**装配层**（单一事实源）：缓存被 `volume_state.disable` 关闭 ⇒ supported=false ⇒
+// 领域侧回落索引路径（零回归）。非本地卷不在此处理（默认聚合从不含外部卷）。
+func (s filesVolumeSet) ListDirView(ctx context.Context, volName, key string) ([]files.ExternalEntry, bool, error) {
+	if s.sinkHost == nil || s.Set == nil {
+		return nil, false, nil
+	}
+	if cfg := s.sinkHost.cfgPtr.Load(); cfg == nil || cfg.VolumeState.Disable {
+		return nil, false, nil
+	}
+	if !s.HasLocalRoot(volName) {
+		return nil, false, nil
+	}
+	fsys, ok := s.VolumeView(volName, registry.ViewUser)
+	if !ok || fsys == nil {
+		return nil, false, nil
+	}
+	entries, err := fsys.ListDir(ctx, key)
+	if err != nil {
+		return nil, true, err
+	}
+	out := make([]files.ExternalEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, files.ExternalEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size, MTime: e.MTime})
+	}
+	return out, true, nil
+}
+
 // CategoryOf 实现 files.VolumeTypeClassifier：把卷**类型 → schema category** 分类转发给
 // registry.CategoryOf——「哪些类型是 wrapper」的唯一事实源（含 wrapper 处理层注册表的动态
 // 投影，见 enclosure.RegisterWrapper → registry.MarkWrapperType）。领域包不得 import

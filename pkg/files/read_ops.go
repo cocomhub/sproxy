@@ -138,6 +138,12 @@ func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 		dirRel = ""
 	}
 	csMap := s.checksumSnapshot(ctx, owner)
+	// **卷状态视图优先**（§15.2 步骤 2）：装配层提供 `VolumeViewLister` 且未被禁用时，list 与
+	// sync/mirror/备份走同一数据源，并享受卷状态缓存（写穿 + TTL）。能力不可用（未装配/缓存
+	// 关闭）⇒ 回落索引路径（零回归）。
+	if res, handled := s.listFromVolumeViews(ctx, q, owner, subdir, volFilter, csMap); handled {
+		return res, nil
+	}
 	var allFiles []FileInfo
 	if s.index != nil {
 		allFiles = s.index.list(owner, dirRel, volFilter, csMap)
@@ -216,6 +222,115 @@ func (s *Service) listExternalVolume(ctx context.Context, q ListQuery, owner, su
 		Files: paginateEntries(entries, q.Offset, q.Limit), Total: len(entries),
 		Offset: q.Offset, Limit: q.Limit,
 	}, true, nil
+}
+
+// listFromVolumeViews 探测「经卷视图列举」能力并委派（能力缺失/门控关闭 ⇒ false，走索引）。
+func (s *Service) listFromVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string,
+	csMap map[string]string) (ListResult, bool) {
+	lister, ok := s.rt.volSet().(VolumeViewLister)
+	if !ok || lister == nil {
+		return ListResult{}, false
+	}
+	return s.listViaVolumeViews(ctx, q, owner, subdir, volFilter, csMap, lister)
+}
+
+// volumeViewTargets 返回本次要列举的卷：owner 可见卷中**有本地根**的那些（外部卷的默认聚合
+// 从不包含它们；显式 ?volume= 已由 listExternalVolume 处理）。
+func (s *Service) volumeViewTargets(owner, volFilter string) []volume.Volume {
+	vs := s.rt.volSet()
+	if vs == nil {
+		return nil
+	}
+	if volFilter != "" {
+		if !vs.HasLocalRoot(volFilter) {
+			return nil
+		}
+		return []volume.Volume{{Name: volFilter}}
+	}
+	all := volume.AllowedVolumes(vs.All(), owner)
+	out := make([]volume.Volume, 0, len(all))
+	for _, v := range all {
+		if vs.HasLocalRoot(v.Name) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// listViaVolumeViews 经卷视图列举本地卷（每卷一次 ListDir，含缓存装饰），聚合语义与
+// `listFallback` 一致：目录条目跨卷去重（Volume 空）、文件条目带卷名与 checksum、在途临时
+// 文件不对外可见。handled=false 表示「本层不提供该能力」⇒ 调用方回落索引路径。
+func (s *Service) listViaVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string,
+	csMap map[string]string, lister VolumeViewLister) (ListResult, bool) {
+	allFiles, ok := s.collectVolumeViewEntries(ctx, lister, s.volumeViewTargets(owner, volFilter),
+		owner+"/"+userBucket+subdirSuffix(subdir), subdir, csMap)
+	if !ok {
+		return ListResult{}, false
+	}
+	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
+	return ListResult{
+		Files: paginateEntries(allFiles, q.Offset, q.Limit), Total: len(allFiles),
+		Offset: q.Offset, Limit: q.Limit,
+	}, true
+}
+
+// subdirSuffix 返回卷根命名空间键的目录后缀（"" 或 "/<rel>"）。
+func subdirSuffix(subdir string) string {
+	if subdir == "" {
+		return ""
+	}
+	return "/" + strings.Trim(subdir, "/")
+}
+
+// collectVolumeViewEntries 逐卷列举并聚合；supported=false ⇒ 整层能力不可用（调用方回落）。
+func (s *Service) collectVolumeViewEntries(ctx context.Context, lister VolumeViewLister,
+	vols []volume.Volume, key, subdir string, csMap map[string]string) ([]FileInfo, bool) {
+	seenDirs := make(map[string]bool)
+	var out []FileInfo
+	for _, v := range vols {
+		entries, supported, err := lister.ListDirView(ctx, v.Name, key)
+		if !supported {
+			return nil, false
+		}
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				s.rt.logger().Warn("卷视图列举失败", "volume", v.Name, "key", key, "error", err.Error())
+			}
+			continue
+		}
+		out = append(out, s.fileInfosFromViewEntries(entries, v.Name, subdir, csMap, seenDirs)...)
+	}
+	return out, true
+}
+
+// fileInfosFromViewEntries 把一个卷的视图条目转成领域列表条目（目录跨卷去重；在途临时文件
+// 不对外可见——与索引/回退路径同一语义）。
+func (s *Service) fileInfosFromViewEntries(entries []ExternalEntry, volName, subdir string,
+	csMap map[string]string, seenDirs map[string]bool) []FileInfo {
+	out := make([]FileInfo, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir {
+			if seenDirs[e.Name] {
+				continue
+			}
+			seenDirs[e.Name] = true
+			out = append(out, FileInfo{Name: e.Name, IsDir: true})
+			continue
+		}
+		if IsInflightTempName(e.Name) {
+			continue
+		}
+		relName := e.Name
+		if subdir != "" {
+			relName = strings.Trim(subdir, "/") + "/" + e.Name
+		}
+		fi := FileInfo{Name: e.Name, Size: e.Size, ModTime: e.MTime, Volume: volName}
+		if cs, ok := csMap["user/"+relName]; ok {
+			fi.Checksum = cs
+		}
+		out = append(out, fi)
+	}
+	return out
 }
 
 // listFallback 是 List 的实时扫描回退（索引不可用时）：逐卷 ReadDir 聚合，语义与索引化前
