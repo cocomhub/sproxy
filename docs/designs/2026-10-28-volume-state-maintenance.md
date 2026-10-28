@@ -523,6 +523,11 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
   - **本进程写** ⇒ 事件写穿，下一次 list 立即可见；
   - **进程外改动**（运维直写盘/同根多实例） ⇒ **≤TTL** 后可见；任何一次相关失效/回源也会看到它。
 
+- **同卷复制快路径**：`secretdata` 的对象级复制（`CopyFile`，blob 直拷）由装配层经
+  `Innermost` 探测、直接打到最内层 ⇒ 会绕过缓存失效。`CacheFS` 现在**转发 `CopyFile`**
+  （底层未实现时穿透到 `Innermost`）并在成功后失效目标，调用方改走装饰视图 —— 复制结果对下一次
+  list 立即可见（验收 `TestWrap_CopyFileInvalidatesTarget` + E2E `TestE2E_CLI_LinuxCommands_VolumeURI`）。
+
 **验收**：`TestWrapVolumeState_LocalVolumeCached`（三次 list 只回源一次）、
 `TestVolumeStateTTL_Unified`（本地/外部同档 TTL）、
 `TestLocalVolumeCache_WriteThroughAndTTLContract`（进程外改动 TTL 内不可见；经 Root 的写入由事件
