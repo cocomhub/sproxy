@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -183,10 +184,12 @@ type fakeJournal struct {
 
 	st        ProgressState
 	chunks    []int64
+	resets    int
 	done      bool
 	closed    bool
 	loadErr   error
 	sourceErr error
+	chunkErr  error
 }
 
 func (f *fakeJournal) Load(context.Context) (ProgressState, error) {
@@ -208,6 +211,9 @@ func (f *fakeJournal) RecordSource(_ context.Context, st ProgressState) error {
 func (f *fakeJournal) ChunkDone(_ context.Context, off, _ int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.chunkErr != nil {
+		return f.chunkErr
+	}
 	if f.st.Done == nil {
 		f.st.Done = map[int64]int64{}
 	}
@@ -215,6 +221,14 @@ func (f *fakeJournal) ChunkDone(_ context.Context, off, _ int64) error {
 	f.st.Done[off] = 1
 	return nil
 }
+func (f *fakeJournal) Reset(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resets++
+	f.st.Done = map[int64]int64{}
+	return nil
+}
+
 func (f *fakeJournal) MarkDone(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -259,8 +273,46 @@ func TestHybridDownload_JournalsChunks(t *testing.T) {
 	}
 }
 
-// TestHybridDownload_JournalResumeSkipsChunks 验证 WAL 已记录的分片在 manifest 缺失时被跳过。
+// TestHybridDownload_JournalResumeSkipsChunks 验证 WAL 已记录的分片在 manifest 缺失时被跳过
+// **且数据工作文件存在且尺寸匹配**（WAL 分片可信的前提）。
 func TestHybridDownload_JournalResumeSkipsChunks(t *testing.T) {
+	t.Parallel()
+	payload, _, resolver, api := newHybridFixture(t, 8<<20)
+	j := &fakeJournal{st: ProgressState{Done: map[int64]int64{0: 4 << 20}}}
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api,
+		ChunkSize: 4 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: true,
+		JournalFactory: func(_, _ string) (ProgressJournal, error) { return j, nil },
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	// 模拟崩溃残留：工作文件已预分配到 total，且第一个分片数据已写入。
+	working := WorkingPath(dest)
+	if werr := os.WriteFile(working, payload, 0o600); werr != nil {
+		t.Fatalf("write working: %v", werr)
+	}
+	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if res.Size != 8<<20 {
+		t.Fatalf("size = %d", res.Size)
+	}
+	// 只有 offset 4MiB 的分片被真正下载（0 已由 WAL 恢复）。
+	if len(j.chunks) != 1 || j.chunks[0] != 4<<20 {
+		t.Fatalf("恢复后应只下载缺失分片, got %v", j.chunks)
+	}
+	if j.resets != 0 {
+		t.Fatalf("可信 WAL 不应被作废, resets=%d", j.resets)
+	}
+}
+
+// TestHybridDownload_JournalIgnoredWhenWorkingFileMissing 覆盖审计发现的关键场景：
+// WAL 有分片记录，但数据工作文件已被清理/改名 ⇒ **必须作废 WAL 并全量重下**。
+// 回归守卫：此前直接合并 WAL ⇒ 跳过分片 ⇒ 预分配零洞 ⇒ GCID 校验必失败（下载永久不可成功）。
+func TestHybridDownload_JournalIgnoredWhenWorkingFileMissing(t *testing.T) {
 	t.Parallel()
 	j := &fakeJournal{st: ProgressState{Done: map[int64]int64{0: 4 << 20}}}
 	_, _, resolver, api := newHybridFixture(t, 8<<20)
@@ -272,17 +324,45 @@ func TestHybridDownload_JournalResumeSkipsChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHybridDownloader: %v", err)
 	}
-	dest := filepath.Join(t.TempDir(), "out.mp4")
-	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil)
+	dest := filepath.Join(t.TempDir(), "out.mp4") // 工作文件不存在
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil); derr != nil {
+		t.Fatalf("工作文件缺失时应全量重下并成功, got %v", derr)
+	}
+	if j.resets == 0 {
+		t.Fatal("数据文件缺失时应作废 WAL（Reset），否则后续尝试会误跳分片")
+	}
+	if len(j.chunks) != 2 {
+		t.Fatalf("应完整重下 2 个分片, got %v", j.chunks)
+	}
+}
+
+// TestHybridDownload_JournalFinishedStartsFreshEpoch 上一轮已完成（WAL 有提交记录）⇒
+// 本次重新下载必须起新代际（旧分片不参与），避免「已完成」记录污染新一轮。
+func TestHybridDownload_JournalFinishedStartsFreshEpoch(t *testing.T) {
+	t.Parallel()
+	payload, _, resolver, api := newHybridFixture(t, 8<<20)
+	j := &fakeJournal{st: ProgressState{Finished: true, Done: map[int64]int64{0: 4 << 20}}}
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api,
+		ChunkSize: 4 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: true,
+		JournalFactory: func(_, _ string) (ProgressJournal, error) { return j, nil },
+	})
 	if err != nil {
-		t.Fatalf("Download: %v", err)
+		t.Fatalf("NewHybridDownloader: %v", err)
 	}
-	if res.Size != 8<<20 {
-		t.Fatalf("size = %d", res.Size)
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	// 工作文件存在（上一轮产物已被清掉、只剩预分配）也不得复用：Finished ⇒ 新一轮。
+	if werr := os.WriteFile(WorkingPath(dest), payload, 0o600); werr != nil {
+		t.Fatalf("write working: %v", werr)
 	}
-	// 只有 offset 4MiB 的分片被真正下载（0 已由 WAL 恢复）。
-	if len(j.chunks) != 1 || j.chunks[0] != 4<<20 {
-		t.Fatalf("恢复后应只下载缺失分片, got %v", j.chunks)
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil); derr != nil {
+		t.Fatalf("Download: %v", derr)
+	}
+	if j.resets == 0 {
+		t.Fatal("已完成 WAL 应起新代际（Reset）")
+	}
+	if len(j.chunks) != 2 {
+		t.Fatalf("新一轮应下载全部 2 个分片, got %v", j.chunks)
 	}
 }
 
@@ -358,5 +438,87 @@ func TestPikpakDownloader_DriveModeUsesJournal(t *testing.T) {
 	}
 	if !j.closed {
 		t.Fatal("drive 模式结束应关闭日志")
+	}
+}
+
+// TestFileProgressJournal_ResetInvalidatesOldEpoch 代际语义：Reset 后旧分片不再计入，
+// 新分片照常记录（覆盖审计修复：作废不可信进度又不能丢失新进度）。
+func TestFileProgressJournal_ResetInvalidatesOldEpoch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	key := "share-EXAMPLE-RESET:dest.mp4"
+	j, err := NewFileProgressJournal(dir, key)
+	if err != nil {
+		t.Fatalf("NewFileProgressJournal: %v", err)
+	}
+	defer j.Close()
+	ctx := context.Background()
+	if rerr := j.RecordSource(ctx, ProgressState{Total: 8 << 20, ChunkSize: 4 << 20, ShareID: "s1"}); rerr != nil {
+		t.Fatalf("RecordSource: %v", rerr)
+	}
+	if cerr := j.ChunkDone(ctx, 0, 4<<20); cerr != nil {
+		t.Fatalf("ChunkDone: %v", cerr)
+	}
+	if st, _ := j.Load(ctx); len(st.Done) != 1 {
+		t.Fatalf("代际 0 应有 1 个分片: %+v", st.Done)
+	}
+	// Reset → 旧分片作废
+	if rerr := j.Reset(ctx); rerr != nil {
+		t.Fatalf("Reset: %v", rerr)
+	}
+	if st, _ := j.Load(ctx); len(st.Done) != 0 {
+		t.Fatalf("Reset 后旧代际分片应被忽略: %+v", st.Done)
+	}
+	// 新代际记录正常
+	if cerr := j.ChunkDone(ctx, 4<<20, 4<<20); cerr != nil {
+		t.Fatalf("ChunkDone(new epoch): %v", cerr)
+	}
+	st, lerr := j.Load(ctx)
+	if lerr != nil {
+		t.Fatalf("Load: %v", lerr)
+	}
+	if len(st.Done) != 1 || st.Done[4<<20] != 4<<20 {
+		t.Fatalf("新代际分片丢失: %+v epoch=%d", st.Done, st.Epoch)
+	}
+	if st.Epoch != 1 {
+		t.Fatalf("epoch = %d, want 1", st.Epoch)
+	}
+}
+
+// TestHybridDownload_JournalChunkErrorTolerated WAL 写失败不阻断下载（增强能力降级为仅 manifest）。
+func TestHybridDownload_JournalChunkErrorTolerated(t *testing.T) {
+	t.Parallel()
+	j := &fakeJournal{
+		st:       ProgressState{Done: map[int64]int64{}},
+		chunkErr: errors.New("wal write failed"),
+	}
+	_, _, resolver, api := newHybridFixture(t, 4<<20)
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, ChunkSize: 4 << 20, ShareRatio: 0.5, Concurrency: 1,
+		JournalFactory: func(_, _ string) (ProgressJournal, error) { return j, nil },
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil); derr != nil {
+		t.Fatalf("WAL 写失败不应阻断下载: %v", derr)
+	}
+}
+
+// TestHybridDownload_JournalFactoryErrorTolerated 工厂失败同样不阻断下载。
+func TestHybridDownload_JournalFactoryErrorTolerated(t *testing.T) {
+	t.Parallel()
+	_, _, resolver, api := newHybridFixture(t, 4<<20)
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api, ChunkSize: 4 << 20, ShareRatio: 0.5, Concurrency: 1,
+		JournalFactory: func(_, _ string) (ProgressJournal, error) { return nil, errors.New("open failed") },
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil); derr != nil {
+		t.Fatalf("WAL 工厂失败不应阻断下载: %v", derr)
 	}
 }

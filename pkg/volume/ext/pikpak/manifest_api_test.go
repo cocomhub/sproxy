@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newLimitedRangeServer 构造「匿名只可读 [0,limit)」的 Range 服务器：
@@ -256,5 +257,90 @@ func TestVerifyLocalFile(t *testing.T) {
 	// 不存在 → 零值
 	if m, err = VerifyLocalFile(filepath.Join(dir, "nope.bin"), gcid); err != nil || m.Size != 0 {
 		t.Fatalf("不存在应为零值: %+v err=%v", m, err)
+	}
+}
+
+// TestProbeAnonymousLimit_EdgeCases 边界场景：整文件匿名不可用（offset 0 即 416）、
+// 服务端异常状态（500 → 显式错误）、小于 1MB 的小文件。
+func TestProbeAnonymousLimit_EdgeCases(t *testing.T) {
+	t.Parallel()
+	t.Run("整文件不可匿名", func(t *testing.T) {
+		t.Parallel()
+		total := int64(4 << 20)
+		srv := newLimitedRangeServer(t, make([]byte, total), 0) // limit=0 → 全部 416
+		got, err := ProbeAnonymousLimit(t.Context(), srv.Client(), srv.URL, total)
+		if err != nil {
+			t.Fatalf("ProbeAnonymousLimit: %v", err)
+		}
+		if got != 0 {
+			t.Fatalf("不可匿名应返回 0, got %d", got)
+		}
+	})
+	t.Run("服务端异常状态显式报错", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+		if _, err := ProbeAnonymousLimit(t.Context(), srv.Client(), srv.URL, 4<<20); err == nil {
+			t.Fatal("非 206/416 状态应返回错误（调用方据此回退比例）")
+		}
+	})
+	t.Run("小文件全量匿名", func(t *testing.T) {
+		t.Parallel()
+		total := int64(512 << 10) // < 1MB 探测步进
+		srv := newLimitedRangeServer(t, make([]byte, total), total)
+		got, err := ProbeAnonymousLimit(t.Context(), srv.Client(), srv.URL, total)
+		if err != nil || got != total {
+			t.Fatalf("小文件全量匿名应返回 total, got %d err=%v", got, err)
+		}
+	})
+	t.Run("小文件不可匿名", func(t *testing.T) {
+		t.Parallel()
+		total := int64(512 << 10)
+		srv := newLimitedRangeServer(t, make([]byte, total), 0)
+		got, err := ProbeAnonymousLimit(t.Context(), srv.Client(), srv.URL, total)
+		if err != nil || got != 0 {
+			t.Fatalf("小文件不可匿名应返回 0, got %d err=%v", got, err)
+		}
+	})
+	t.Run("非法入参", func(t *testing.T) {
+		t.Parallel()
+		if _, err := ProbeAnonymousLimit(t.Context(), nil, "", 4<<20); err == nil {
+			t.Fatal("空直链应报错")
+		}
+		if _, err := ProbeAnonymousLimit(t.Context(), nil, "https://example.com/x", 0); err == nil {
+			t.Fatal("total<=0 应报错")
+		}
+	})
+}
+
+// TestHybridDriveFile_SourceTimes 验证 drive 模式把源文件时间写入 Result
+// （账号网盘文件同样不得用下载完成时刻冒充 mtime）。
+func TestHybridDriveFile_SourceTimes(t *testing.T) {
+	t.Parallel()
+	payload, _, _, api := newHybridFixture(t, 4<<20)
+	hd, err := NewHybridDownloader(HybridConfig{API: api, ChunkSize: 4 << 20, Concurrency: 1})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	created := time.Date(2026, 10, 20, 0, 30, 0, 0, time.UTC)
+	modified := time.Date(2026, 10, 21, 1, 0, 0, 0, time.UTC)
+	dest := filepath.Join(t.TempDir(), "drive.mp4")
+	res, err := hd.DownloadDriveFile(t.Context(), DriveFileRequest{
+		FileID: "restored-1", FileName: "movie.mp4", Size: int64(len(payload)),
+		DestPath: dest, CreatedTime: created, ModifiedTime: modified,
+	})
+	if err != nil {
+		t.Fatalf("DownloadDriveFile: %v", err)
+	}
+	if !res.SourceCreatedTime.Equal(created) {
+		t.Fatalf("SourceCreatedTime = %v, want %v", res.SourceCreatedTime, created)
+	}
+	if !res.ModTime.Equal(modified) {
+		t.Fatalf("ModTime = %v, want 源 modified %v（不得用完成时刻）", res.ModTime, modified)
+	}
+	if res.AccountBytes != int64(len(payload)) {
+		t.Fatalf("drive 模式全部字节应计账号通道, got %d", res.AccountBytes)
 	}
 }
