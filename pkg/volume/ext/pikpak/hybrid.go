@@ -569,6 +569,11 @@ func (d *HybridDownloader) runHybridWithShareEnd(ctx context.Context, dc *downlo
 	// 完成并校验通过后才 rename 到最终 destPath）。manifest 随临时文件（destPath+".hybrid"
 	// 不变——源身份/恢复逻辑零改动）。
 	dc.working = WorkingPath(dc.destPath)
+	// WorkPaths 超长名会把文件名拆成「子目录 + 文件段」→ 子目录可能尚不存在，
+	// 下载开始前先 MkdirAll（preallocate 打开文件前目录必须存在）。
+	if err := ensureWorkDir(dc.working); err != nil {
+		return nil, err
+	}
 	d.log.Info("hybrid plan", "total", dc.currentTotal, "share_end", shareEnd, "chunk", d.chunkSize)
 	chunks := planChunks(0, dc.currentTotal, shareEnd, d.chunkSize)
 	d.log.Info("hybrid chunks", "count", len(chunks))
@@ -750,6 +755,18 @@ func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx
 		d.chunkPhase(dc, idx, c, "failed", 0, cerr)
 	}
 	return cerr
+}
+
+// ensureWorkDir 确保工作文件所在目录存在（WorkPaths 超长名拆出的子目录）。
+func ensureWorkDir(working string) error {
+	dir := filepath.Dir(working)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("hybrid workdir: %w", err)
+	}
+	return nil
 }
 
 // chunkIndex 返回 chunk offset 对应的编号（0 起，按 offset 升序）。
