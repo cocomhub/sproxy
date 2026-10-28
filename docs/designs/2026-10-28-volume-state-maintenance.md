@@ -1,322 +1,326 @@
-# 统一卷状态维护：单一缓存层 + 卷自管能力（设计）
+# 统一卷状态维护：卷维度 + 装饰器机制（设计）
 
 > 状态：**设计（待实施）**。来源：2026-10-28 用户明示 ——
-> 「能否设计完善可靠的所有卷状态维护方案，支持收敛 checksum、list、索引等信息维护，
-> 避免不同卷多套实现（secretdata 等支持自行管理，但默认也有基于本地 staging 的缓存提高性能）」
+> ①「设计完善可靠的所有卷状态维护方案，支持收敛 checksum、list、索引等信息维护，避免不同卷
+> 多套实现（secretdata 等支持自行管理，但默认也有基于本地 staging 的缓存提高性能）」；
+> ②「设计成架构机制，避免需要频繁修改」；
+> ③「后续所有业务操作都必须是卷维度；本地卷旧实现可短期共存、后续迁移；最优先外部卷管理」。
 >
-> 前置：`docs/designs/2026-10-27-remote-derived-state-cache.md`（A/B/C/D 分类与四层机制、
-> S1/S2 已落地）、`docs/designs/2026-10-28-unified-volume-model.md`（StorageVolume +
-> `VolumeView` 唯一取卷入口）。本设计是二者的**收敛续篇**：把「派生状态缓存」从各卷各写
-> 收敛为**唯一实现**。
->
+> 前置：`docs/designs/2026-10-27-remote-derived-state-cache.md`（A/B/C/D 分类）、
+> `docs/designs/2026-10-28-unified-volume-model.md`（StorageVolume + `VolumeView` 唯一取卷入口）。
 > 触发案例：PR #874（旁路写不登记派生状态 ⇒ 转存产物 list 不可见 + checksum 空）。
 
 ---
 
-## 一、现状取证（2026-10-28）
+## 一、裁定：为什么**不**做「专门的缓冲卷」
 
-### 1.1 三套实现、三个真相源、三条失效路径
+被否决的方案：新增卷后端类型（`type: cache` / 缓冲卷），包在源卷前面提供 list/checksum 缓存。
 
-| 面 | 本地卷 | 外部卷（baidupcs/S3/webdav…) | secretdata |
-|---|---|---|---|
-| **list 数据源** | `pkg/files/searchIndex`（内存 map + JSON 快照） | **每请求直连远端 `ListDir`（无任何缓存）** | 自管内存索引（挂载时 `loadIndex`） |
-| **checksum 来源** | per-tenant `checksums.json` 台账 | `Entry.Checksum`（S3/baidupcs 只给 etag） | 内存 meta（O(1) 已填 sha256） |
-| **失效方式** | `RecordBypassWrite` / `IndexMove`（#874 补） | 卷内各自 `invalidateDlink` 等 | 仅显式 `POST /api/volumes/refresh` |
-| **递归搜索** | `searchIndex.search`（全树） | 不支持（返回空） | 不支持 |
-
-### 1.2 由此产生的缺陷族（已发生或必然发生）
-
-| 缺陷 | 结构成因 |
-|---|---|
-| #874 转存产物 list 不可见 + checksum 空 | 旁路写绕过写内核 ⇒ 未登记 searchIndex + checksum 台账 |
-| 外部卷 list 每次全量远端往返（大目录卡顿） | 无缓存层 |
-| secretdata 外部改动后幽灵条目（直到重启/显式 refresh） | 失效路径只有「挂载一次」 |
-| 同名重建命中旧 dlink（#853 前） | 卷内缓存的失效靠各实现自觉 |
-| 同一语义三处实现（list/checksum/失效） | **没有单一收敛点** |
-
-### 1.3 关键既有资产（本设计复用而非新造）
-
-| 资产 | 位置 | 复用方式 |
+| 否决理由 | 具体后果 | 与本设计的对比 |
 |---|---|---|
-| `sync.Entry.Checksum/Checksums/ChecksumType` | `pkg/sync/entry.go` | **卷自报 checksum 的唯一通道**（已存在，S2 已填 secretdata） |
-| `sync.FS`（ListDir/Stat/OpenRead/Write/Delete/Rename） | `pkg/sync` | 卷侧唯一数据面契约 |
-| 可选能力模式（`Footprinter`/`PhysBound`/`ReserveSpace`/`IndexRefresher`/`MetaExtraUpdater`） | `pkg/volume`、`pkg/sync` | 卷自管状态的声明方式 |
-| 节点本地产物约定 `<storage_root>/meta/<域>/<卷>` | `pkg/server/volumes.go:350`（容量账本） | 缓存落点沿用同约定 |
-| `POST /api/volumes/refresh`（`IndexRefresher`） | `pkg/server/volumes_api.go:1017` | 显式失效入口（已存在） |
-| `LogicalKey`（对象身份） | `pkg/sync/logical_key.go` | 失效键的构成基础 |
+| **默认不生效** | 卷型必须被配置声明才存在 ⇒ 所有存量外部卷仍「每次远端 ListDir」⇒ 最痛点不解决；新增卷要逐卷改配置 = **频繁修改** | 装饰器在**装配期自动**包住每个卷 ⇒ 零配置、零声明 |
+| **污染卷命名空间** | `cache` 卷会出现在 `/api/volumes`、ACL、`owner_quotas`、move/copy/rebalance、`/api/resolve`、转存目标下拉、mirror/backup 目标……**每个卷面 API 都要加「排除 cache 卷」守卫** ⇒ 这是**永久的持续修改负担** | 装饰器不是卷 ⇒ 卷命名空间、ACL、配额、路由全部零改动 |
+| **破坏 `Kind` 不变量** | 缓冲卷拥有本地字节 ⇒ `KindStorage` ⇒ 按既有设计必须注册配额层 ⇒ 与「缓存不占用户配额」冲突，需新增 Kind 或写特例 | 装饰器不改变 `Kind`/配额语义；缓存落盘区由单一组件按 `state_cache_max_bytes` 独立管理 |
+| **失效仍需纪律** | 卷型只解决「读加速」；写后失效仍要求每个写路径自觉通知 ⇒ #874 类缺陷（漏一处即漂移）原样存在 | 本设计的失效来自**变更事件总线**（见 §四）⇒ 写路径无需知道缓存存在 |
+
+**成功先例（同形态问题、已解决的解）**：容量层当年也是「5 个装配点各自的义务 ⇒ 漏一处静默
+无限额」，解法**不是新卷型**，而是唯一入口 `capacity.WrapStorageVolume` + **R29 门禁**
+（非测试源码不得直接调 `WrapBackend`）。本设计采用**同一形状**：唯一入口
+`volumestate.WrapVolume(...)`（§3.3）+ **R44 门禁**。
+
+> 「缓冲」在本设计中仍然存在，但它是**受管落盘区**（`<storage_root>/meta/state/<卷>/…`，
+> 与容量账本 `<root>/meta/quota/<卷>` 同约定），由 `pkg/volumestate` **单一组件**负责
+> 上限/GC/保密卷不落盘——**不是卷模型里的实体**。
 
 ---
 
-## 二、目标（用户裁定的四条口径）
+## 二、架构原则（长期稳定的不变量）
 
-| 口径 | 裁定 |
-|---|---|
-| 权威归属 | **卷权威，缓存仅加速** —— A 类 checksum 永不由缓存充当最终依据 |
-| 缓存落点 | **本地 staging 目录 + 进程内 LRU**（节点本地，不进卷/不进网盘） |
-| 失效强度 | **写穿 + TTL + 代际**（A 类强一致；C 类有界过期） |
-| 范围 | **含 searchIndex 迁移**（保留兼容期，逐卷切换，最终删旧实现） |
+> 这四条是「机制不需要频繁修改」的保证：新卷型、新写路径、新业务面都自动满足。
 
-**非目标（明确划界）**：D 类聚合账本（配额/容量）不迁入本层——它已有独立对账体系
-（`pkg/volume/capacity`），且准入语义（fail-closed 预占）与本层的「读视图加速」不同。
+### P1 卷维度（用户裁定 ③）
+
+**所有卷状态以「卷」为第一维**：键恒为 `(volume, owner, rel)`，**不存在 owner 级全局卷状态**。
+
+- 跨卷聚合视图（如「列出 owner 所有文件」）是**对卷集合的派生遍历**，不是一个独立的全局索引。
+- 新业务操作必须显式携带/解析卷（`VolumeView(name, use)` 已是唯一取卷入口）。
+- 推论：缓存天然按卷分区 ⇒ 卷删除/卸载即整分区回收，无需全局失效广播。
+
+### P2 横切关注点 = 装配期装饰器，不是调用点义务
+
+状态缓存与容量记账同类（横切）：在**装配期唯一入口**包一层，消费方无感知。
+**禁止**任何业务代码直接操作缓存（只经 `VolumeView`/`StorageVolume.FS()` 拿到的已是装饰后视图）。
+
+### P3 失效由「变更事件」驱动，不靠调用方登记
+
+写路径**不需要知道缓存存在**。变更事件有两个**原语级**产生点（覆盖全集，见 §四）：
+`sync.FS` 写方法（外部/封装卷）+ `storage.Root` 写方法（本地卷）。任何新写路径必落在其一。
+
+### P4 卷自管 = 只报告事实，不实现缓存
+
+卷可实现可选能力如实报告状态（`ListDir` 填 checksum、`StateGeneration` 报告代际），
+但**不得**自己实现 list 缓存（门禁 R40）。加速统一由 `pkg/volumestate` 提供 ⇒ 自管卷与普通卷
+共享同一条缓存路径，不产生第二套。
 
 ---
 
-## 三、目标架构：四层
+## 三、目标架构
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│ L3 消费入口（唯一）：files.List / Search / Stat                        │
-│     ↳ 只认 voluntate.Cache，不再直连 searchIndex 或 ExternalList       │
-└───────────────────────────┬────────────────────────────────────────────┘
-                            │ ListDir(vol, owner, rel) / Search(vol, owner, q)
-┌───────────────────────────▼────────────────────────────────────────────┐
-│ L2 统一缓存 pkg/volumestate（唯一实现）                                │
-│   DirView  : (vol,owner,rel) → {entries, gen, fetchedAt}   ← list      │
-│   TreeView : (vol,owner)     → 全树投影（由 DirView 增量拼装）← search  │
-│   存储      : 进程内 LRU  →  本地 staging JSON（<root>/meta/state/…）   │
-│   失效      : ① 写穿 Invalidate(ObjectRef) ② TTL ③ 代际校验           │
-└───────────────────────────┬────────────────────────────────────────────┘
-                            │ 回源（miss / 过期 / gen 变化）
-┌───────────────────────────▼────────────────────────────────────────────┐
-│ L1 卷侧契约（唯一）：sync.FS.ListDir/Stat（Entry 带 Checksum*）        │
-│    + 可选 StateGeneration（廉价代际探测；secretdata/baidupcs/S3 可实现）│
-└────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 业务面（卷维度，P1）：files.List/Search/Stat、转存、归档、move/copy、     │
+│ mirror、backup、DAV/S3 —— 全部经 VolumeView/StorageVolume.FS()           │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │ 拿到的是**装饰后** FS（P2，无感知）
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│ 装配期装饰链（唯一入口，R44）：                                          │
+│   capacity.WrapStorageVolume（既有：卷级容量）                            │
+│   volumestate.WrapVolume（新增：状态缓存 + 变更事件）                     │
+│     ├─ 读：ListDir/Stat → Cache（命中/回源/新鲜度校验）                    │
+│     └─ 写：WriteFile/Delete/Rename/MakeDir → 委派 + **发变更事件**        │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │ 回源 / 事件
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│ pkg/volumestate（唯一实现）                                              │
+│   Cache      : (vol,owner,rel) → DirSnapshot{entries,gen,fetchedAt}      │
+│   TreeView   : (vol,owner) → 全树投影（search；由 DirSnapshot 拼装）       │
+│   落盘区     : 受管 staging `<root>/meta/state/<vol>/…`（上限/GC/保密不外落）│
+│   MutationBus: ObjectRef 事件 → 失效（P3）                               │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │ 卷自报事实（P4）
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│ 卷侧契约（既有 sync.FS，不新造）：                                        │
+│   ListDir/Stat → Entry{Checksum, Checksums, ChecksumType}（已有通道）     │
+│   + 可选 StateGeneration（廉价代际：本地卷=目录mtime；secretdata=meta版本；│
+│     S3=LastModified；baidupcs=ctime+条目数）                              │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 L1 —— 卷侧契约（不新造接口）
+### 3.1 卷侧契约（P4：只报告，不缓存）
 
-**必需**（已存在）：`sync.FS`
-- `ListDir(ctx, rel) ([]Entry, error)`：`Entry` 必须尽可能填 `Checksum`/`Checksums`/`ChecksumType`
-  （契约沿用既有设计 §3.1：「零额外成本就必须填」；远端逐文件 RTT ⇒ 显式留空 = unknown）
-- `Stat(ctx, rel) (*Entry, error)`：同上（单对象权威）
+**必需**（已存在，零新增）：`sync.FS.ListDir/Stat`，`Entry` 尽可能填
+`Checksum/Checksums/ChecksumType`（契约沿用既有设计 §3.1：「零额外成本必须填」；远端逐文件
+RTT ⇒ 显式留空 = unknown）。
 
 **可选**（新增，能力接口风格与 `IndexRefresher` 一致）：
 
 ```go
 // pkg/volume（域模型包，不依赖 pkg/sync）
 // StateGeneration 是卷的**廉价新鲜度探针**：返回 (owner, rel) 子树的代际号。
-// 语义：同代际 ⇒ 该子树的「结构视图 + 内容派生值」自上次取用后未变。
-// 实现口径（卷自选，必须廉价，不得全量遍历）：容器 mtime/条目数/自增计数器。
-// 未实现 ⇒ 缓存层退化为 TTL-only（外部卷默认）或写穿-only（本地卷）。
+// 同代际 ⇒ 该子树的结构视图与内容派生值自上次取用后未变。
+// 实现必须廉价（不得全量遍历）：本地卷=目录 mtime+子项数；secretdata=容器 meta 版本；
+// S3=子树 LastModified 最大值；baidupcs=ctime+条目数。
 type StateGeneration interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
     StateGen(ctx context.Context, owner, rel string) (uint64, error)
 }
 ```
 
-**关键约束**：卷**不得**自己实现 list 缓存（除 L2 外，全仓禁止 list 级缓存实现——见 §六门禁）。
-卷只负责「如实、廉价地报告当前状态」，加速由 L2 统一承担。
+未实现 ⇒ 该卷退化：外部卷 TTL-only、本地卷写穿-only（= 现状零回归）。
 
-**本地卷也能实现 `StateGeneration`（零成本）**：`rootfs` 可用「目录 mtime + 直接子项数」作代际
-（一次 `os.Root.Stat`，O(1)）——这样「另一个进程/用户直接改了卷目录」也能被发现并回源，
-补上「本地卷 TTL=0 则永不收敛」的缺口。secretdata 用容器 meta 版本/条目数；baidupcs 用
-`ctime`/条目数；S3 用 `LastModified` 最大值。**全部为可选能力**：未实现则该卷退化为
-TTL-only（外部卷）或写穿-only（本地卷），零回归。
+### 3.2 统一缓存 `pkg/volumestate`（唯一实现）
 
-### 3.2 L2 —— 统一缓存 `pkg/volumestate`（唯一实现）
-
-#### 3.2.1 数据模型
+#### 3.2.1 数据模型（卷维度，P1）
 
 ```go
-// ObjectRef 是失效信号的最小单元（沿用既有设计 §3.3 的 ObjectRef 提法）。
+// ObjectRef 是失效信号的最小单元；Volume 是第一维（P1）。
 type ObjectRef struct {
-    Volume string // 卷名（"" = 默认卷）
+    Volume string // 卷名（必填；"" 仅默认卷兼容期）
     Owner  string
-    Rel    string // 卷内相对路径（正斜杠；**不含** owner 前缀，与 sync.FS 键空间一致）
+    Rel    string // 卷内相对路径（正斜杠，不含 owner 前缀，与 sync.FS 键空间一致）
 }
 
-// DirSnapshot 是一个目录的**直接子项**快照（list 的缓存单元）。
 type DirSnapshot struct {
     Entries   []sync.Entry `json:"entries"`
-    Gen       uint64       `json:"gen"`       // 回源时卷自报的代际（未实现 = 0）
-    FetchedAt int64        `json:"fetched_at"` // UnixNano
-    Volume    string       `json:"volume"`     // 归属校验（防串卷）
+    Gen       uint64       `json:"gen"`
+    FetchedAt int64        `json:"fetched_at"`
+    Volume    string       `json:"volume"` // 归属校验（防串卷）
 }
 
-// ownerTree 是 search 的全树投影（由 DirSnapshot 拼装；条目不重复存 checksum 以外的内容）。
-type ownerTree struct {
-    Entries map[string]TreeEntry `json:"entries"` // key = 相对卷根的 rel
-}
 type TreeEntry struct {
-    Base     string `json:"base"`
-    Size     int64  `json:"size"`
-    ModTime  int64  `json:"mtime"`
-    IsDir    bool   `json:"is_dir"`
-    Checksum string `json:"checksum,omitempty"`
+    Rel, Base    string
+    Size, ModTime int64
+    IsDir        bool
+    Checksum     string `json:"checksum,omitempty"`
     ChecksumType string `json:"checksum_type,omitempty"`
-    Volume   string `json:"volume"`
+    Volume       string `json:"volume"`
 }
 ```
 
-#### 3.2.2 缓存 API（消费方唯一入口）
+#### 3.2.2 API（消费方与装饰器唯一依赖面）
 
 ```go
-// ListDir 返回目录直接子项（缓存命中 → 校验新鲜度 → 回源）。
-func (c *Cache) ListDir(ctx context.Context, vol, owner, rel string) ([]sync.Entry, error)
-
-// StatObject 返回单对象视图（A 类：命中亦校验新鲜度；卷未实现 gen 时对**本地卷**直接回源）。
-func (c *Cache) StatObject(ctx context.Context, vol, owner, rel string) (sync.Entry, bool, error)
-
-// Search 在 owner 视图内递归匹配（由 TreeView 提供；远端卷可按装配开关禁用）。
-func (c *Cache) Search(ctx context.Context, vol, owner, query, tag string) ([]TreeEntry, error)
-
-// Invalidate 是**唯一失效入口**：写/删/改名成功后调用（写穿）。
-// 语义：删该 ref 的树条目 + 标记 ancestors 的 DirView 为 stale（不立即回源）。
-func (c *Cache) Invalidate(ref ObjectRef) error
-
-// Refresh 显式重建（对应既有 POST /api/volumes/refresh）。
-func (c *Cache) Refresh(ctx context.Context, vol, owner string) error
+func (c *Cache) ListDir(ctx, vol, owner, rel string) ([]sync.Entry, error)
+func (c *Cache) StatObject(ctx, vol, owner, rel string) (sync.Entry, bool, error)
+func (c *Cache) Search(ctx, vol, owner, query, tag string) ([]TreeEntry, error)
+func (c *Cache) Invalidate(ref ObjectRef) error          // 事件总线调用（§四）
+func (c *Cache) Refresh(ctx, vol, owner string) error    // 既有 POST /api/volumes/refresh
 ```
 
-#### 3.2.3 落点与形式（用户裁定：本地 staging + 内存 LRU）
+#### 3.2.3 落盘区（受管 staging，非卷实体）
 
 ```
-<storage_root>/meta/state/<卷名>/<owner>/<dirRel>/entries.json   # DirSnapshot（原子写 tmp+rename）
-<storage_root>/meta/state/<卷名>/<owner>/tree.json               # ownerTree（可选，聚合投影）
-<storage_root>/meta/state/<卷名>/<owner>/.gen                    # 最近一次已知代际（可选）
+<storage_root>/meta/state/<卷名>/<owner>/<dirRel>/entries.json   # 原子写 tmp+rename
+<storage_root>/meta/state/<卷名>/<owner>/tree.json               # 全树投影（可选）
 ```
 
-- **节点本地**（与容量账本 `<root>/meta/quota/<卷>` 同约定、同运维习惯）；**不进卷、不进网盘**
-- 进程内 LRU（默认 4096 目录项 / 128MiB 上限，可配）在 staging 之上
-- **容量与 GC**：`state_cache_max_bytes`（默认 256MiB，0 = 不落盘只用内存）；超限按 LRU 淘汰；
-  启动清理 `*.tmp` 残留；卷删除时整目录回收
-- **保密卷**：缓存只存**元数据**（name/size/mtime/checksum），不含内容字节；对
-  `volumePrivate()` 卷默认**只落内存不落盘**（`state_cache_persist_private: false`，反义命名
-  遵循 AGENTS.md 18 条默认 false 纪律）
+- 节点本地（与容量账本 `<root>/meta/quota/<卷>` 同约定）；**不进卷、不进网盘**
+- 进程内 LRU（默认 4096 目录项）在 staging 之上
+- 上限 `state_cache_max_bytes`（默认 256 MiB；**0 = 只内存不落盘**）；超限 LRU 淘汰；
+  启动清理 `*.tmp`；卷删除整分区回收
+- **保密卷**：只存元数据（name/size/mtime/checksum），不含内容；对 `volumePrivate()` 卷
+  默认**不落盘**（`state_cache_persist_private` 默认 false，反义命名遵循 AGENTS.md 18 条）
 
-#### 3.2.4 新鲜度判定（三重）
+#### 3.2.4 新鲜度判定（三重，A 类强一致）
 
 ```
-命中路径：
-  snapshot := lru.Get(key) ?? disk.Load(key)
-  if snapshot == nil                    → 回源（miss）
-  if now - snapshot.FetchedAt > ttl     → 回源（TTL）
-  if 卷实现 StateGeneration:
-        gen, err := vol.StateGen(ctx, owner, rel)
-        if err != nil                 → **回源**（探测失败 fail-open 到真值，不用可能过期的缓存）
-        if gen != snapshot.Gen        → 回源（代际变化）
+命中：snapshot = LRU.Get ?? disk.Load
+  snapshot == nil                    → 回源
+  now - FetchedAt > ttl              → 回源
+  卷实现 StateGeneration:
+     gen, err = vol.StateGen(...)
+     err != nil                      → 回源（探测失败用真值，不用可能过期的缓存）
+     gen != snapshot.Gen             → 回源
   返回 snapshot.Entries
 ```
 
-**TTL 取值**（配置 `volume_state_ttl`，默认按卷类型分档）：
+TTL 分档（`volume_state_ttl`，默认按卷类型）：
 
-| 卷类型 | 默认 TTL | 依据 |
+| 卷类型 | 默认 | 依据 |
 |---|---|---|
-| 本地卷（含 at-rest 加密） | **0（不按时间过期）** | 写穿覆盖本进程；**外部进程改动由 `rootfs` 的目录 mtime 代际兜底**（§3.1）；未实现代际时退回「写穿-only」（= 现状零回归） |
-| 外部卷（baidupcs/S3/webdav/ftp/sftp/federated/cluster） | **30s** | C 类有界过期；避免大目录反复远端往返 |
-| 自管卷（secretdata） | **30s + 代际** | 卷内写即时更新自身索引；跨进程改动由代际发现 |
-| 禁用 | `volume_state_ttl: -1` | 每次回源（调试/强一致场景） |
+| **外部卷**（baidupcs/S3/webdav/ftp/sftp/federated/cluster） | **30s** | 本期最优先；避免大目录反复远端往返 |
+| 自管卷（secretdata） | 30s + 代际 | 卷内写即时更新自身索引；跨进程由代际发现 |
+| 本地卷（本期仍走旧实现，见 §五） | 0（不按时间过期） | 写穿 +（未来）目录 mtime 代际 |
+| 禁用 | `-1` | 每次回源（调试/强一致） |
 
-#### 3.2.5 A 类强一致的兜底（永不依赖缓存齐全）
+**A 类兜底（永不依赖缓存齐全）**：需要 checksum 才安全的写操作走三段式——① 调用方给了用；
+② 没给 `StatObject` **现取**（本地卷直接回源，不取缓存值）；③ 仍拿不到 **fail-closed 拒绝**。
 
-沿用既有设计 §3.2 的三段式，并**提升为门禁要求**：
+### 3.3 唯一装配入口 + 门禁（复制 R29 形状）
 
 ```go
-// 任何「需要 checksum 才安全」的写操作：
-//   ① 调用方给了 → 用；
-//   ② 没给 → StatObject/FileMeta 现取（**StatObject 内部对本地卷直接回源，不用缓存值**）；
-//   ③ 仍拿不到 → 明确拒绝（fail-closed），绝不静默跳过校验。
+// pkg/volumestate
+// WrapVolume 是卷状态缓存的**唯一构造入口**（与 capacity.WrapStorageVolume 并列、同一装配点）。
+// 它把「读缓存 + 写事件」绑定为一个原子动作 ⇒ 不可能只做一半。
+// nil cache（未启用）⇒ 原样返回（零回归）。
+func WrapVolume(sv registry.StorageVolume, c *Cache) registry.StorageVolume
 ```
 
-实现要点：`StatObject` 对「checksum 为空的条目」**不得**返回 (entry, true) 就当作「已校验」——
-调用方必须能区分 `Checksum == ""`（unknown）与「有值且匹配」。
+门禁 **R44**：非测试源码中 `volumestate.WrapVolume` 只能出现在装配处；
+卷的 `FS()` 结果不得被业务代码再包一层「自造缓存」。
 
-### 3.3 L3 —— 消费入口（唯一）
+### 3.4 消费入口（卷维度）
 
-| 消费方 | 迁移后 |
+| 消费方 | 本期 |
 |---|---|
-| `files.Service.List` | `cache.ListDir(vol, owner, rel)`（本地/外部/secretdata 同一条路径） |
-| `files.Service.Search` | `cache.Search(...)`（TreeView；远端卷按 `volume_state_search_remote` 开关，默认 false） |
-| `files.Service.Stat`（读面） | `cache.StatObject(...)` |
-| `ExternalVolumeOps.ExternalList` | **退役**（其语义并入 L2；保留一个兼容期薄转发，迁移完成后删） |
-| `searchIndex.list/search` | **退役**（见 §五 V3/V4） |
-| `RecordBypassWrite` / `IndexMove`（#874） | 收敛为「写成功后 `cache.Invalidate(ref)`」，删除重复的 index+checksum 双写 |
+| `files.List(?volume=<外部卷>)` / `Stat` / `DeleteFile` / `Rename` | 走装饰后 FS ⇒ 自动缓存 + 自动失效 |
+| `ExternalVolumeOps.ExternalList/ExternalStat` | 语义并入装饰器；保留兼容期薄转发 |
+| `files.Search`（外部卷） | 默认不支持（`volume_state_search_remote` 默认 false）；启用则读 TreeView |
+| 本地卷 list/search | **本期保持旧 `searchIndex`**（用户裁定允许共存，§五 V3 迁移） |
 
-**为何 checksum 台账（`checksums.json`）也并入本层**：它今天与 searchIndex 是两份独立派生
-状态、两条失效路径（#874 的根因）。合并后 checksum 只存于 `DirSnapshot.Entries[].Checksum`
-（+ `TreeEntry.Checksum`），失效只有一个入口。兼容期保留 `checksums.json` 只读回退（见 V3）。
+---
 
-### 3.4 L4 —— 门禁（防回归）
+## 四、失效机制：变更事件总线（P3，**不靠纪律**）
 
-| 门禁 | 判据 | 理由 |
+### 4.1 事件产生点（全集且稳定）
+
+| 产生点 | 覆盖 | 观察方式 |
 |---|---|---|
-| **R40** | `pkg/files`、`pkg/server`、`pkg/volume/**` 的非测试源码**不得出现新的 list 级缓存**（类型名含 `Cache`/快照/索引 map 且提供 list 语义）——白名单仅 `pkg/volumestate` 与已有的 `pkg/volume/secretdata`（自管，登记理由） | 防止再造第四套 |
-| **R41** | `files.List`/`Search` 的实现体不得直调 `index.list`/`ExternalList`（迁移完成后） | 保证单一入口 |
-| **R42** | 新增 `sync.FS` 实现的 `Delete`/`Rename`/`WriteFile`，若其类型实现了 `StateGeneration` 或持有派生状态，必须同时提供失效（`Invalidate` 回调或自述「我有自管索引且已失效」注解） | 防 #853/#874 类的「忘失效」 |
-| **R43** | TTL / 容量类新配置项默认值：bool 默认 false、string 默认空、int 默认 0 = 安全路径（沿用 AGENTS.md 18 条） | 零回归 |
+| `sync.FS` 写方法（`WriteFile`/`Delete`/`Rename`/`MakeDir`） | **外部卷、封装卷、secretdata**（全部非本地卷） | `volumestate.WrapVolume` 的 FS 装饰器在委派成功后发事件 |
+| `storage.Root` 写方法（`OpenFile*` 关闭、`Remove`、`RemoveAll`、`Rename`、`AtomicRename`、`MkdirAll`、`Link`、`Chtimes`） | 本地卷（写内核直用 Root） | Root 构造时注入 `MutationObserver`；每次成功后回调 |
 
----
+**为何这两个点是全集**：任何改变卷内容的路径只能落到「卷的 FS」或「本地卷根 Root」
+（`pkg/server` 的 `Set.Root` 访问器已被 R28 棘轮登记，共 12 处且只降不升；其余写路径均经
+`VolumeView`/`FS()`）。**新写路径**不需要任何登记——它必然经过其中之一。
 
-## 四、失效协议（**唯一契约**，写路径必须遵守）
+**稳定性守卫（R45）**：`storage.Root` 的导出方法若新增且属变异类（名在变异集合内），
+门禁要求其调用 `rt.notifyMutation`（漏写即红）⇒ 机制不会因 Root 演进悄悄失效。
+
+### 4.2 失效语义
 
 ```
-任何改变「卷内某路径的存在性/内容」的操作成功后（写内核 / 旁路写 / 卷内自管写）：
-    cache.Invalidate(ObjectRef{Volume, Owner, Rel})
-        └→ 删除 TreeView 该 rel 条目
-        └→ 标记全部 ancestor 目录的 DirView 为 stale（gen 置 dirty，下次读回源）
-        └→ 删除对应 staging JSON（best-effort；失败仅日志，stale 标记已足够）
+Invalidate(ObjectRef) →
+  ① 删除 TreeView 该 rel 条目
+  ② 标记全部 ancestor 目录 DirView 为 stale（下次读回源）
+  ③ best-effort 删除对应 staging JSON（失败仅日志，②已足够）
+Rename → Invalidate(from) + Invalidate(to)
+Delete/软删/恢复 → Invalidate(rel)
+批量（转存/归档/镜像/同步）→ 逐产出对象各发一次（装饰器天然覆盖）
 ```
 
-**Rename**：`Invalidate(from)` + `Invalidate(to)`（两个 ref）。
-**Delete（软删 → 回收站）**：`Invalidate(rel)`；恢复时再 `Invalidate(rel)`。
-**批量写（转存/归档/镜像/同步 push）**：逐产出对象发一次（由统一写内核或旁路登记点保证）。
-
-**写穿失败的处理**：`Invalidate` 返回 error 时**不阻断业务**（写已成功），但要
-① 记 Warn ② 把该 `(vol,owner)` 标记为 **degraded**（后续读全部回源，直到显式 Refresh 成功）。
-这避免「失效失败 ⇒ 永久幽灵」——降级为「慢但正确」。
+**失效失败不阻断业务**（写已成功）：记 Warn + 该 `(vol,owner)` 标 **degraded**（后续读全部
+回源，直到显式 `Refresh` 成功）⇒ 降级为「慢但正确」，不留永久幽灵。
 
 ---
 
-## 五、迁移分期（每片独立可验证、可回退）
+## 五、迁移优先级（用户裁定 ③：外部卷最优先，本地卷可共存）
 
-| 片 | 内容 | 行为变更 | 验收 |
-|---|---|---|---|
-| **V1** | `pkg/volumestate` 骨架：`ObjectRef`/`DirSnapshot`/`TreeEntry`/`Cache`（内存 LRU + staging 读写 + 原子写）、TTL/代际判定、`Invalidate`/`Refresh`；用 `syncmock`/`LocalFS` 做单测 | 无（未接线） | 单测覆盖：命中/miss/TTL 过期/代际变化/写穿失效/祖先 stale/degraded |
-| **V2** | **外部卷接入**：`files.List(?volume=外部卷)` 改走 `cache.ListDir`；`ExternalList` 保留为回源函数；TTL 30s；secretdata 走代际 | 外部卷 list 首次慢、之后命中；外部改写 ≤30s 收敛 | e2e：外部卷 list 两次（第二次命中、断言无远端往返）；`Refresh` 后立即生效 |
-| **V3** | **本地卷接入**：`files.List`/`Search` 读路径改走 `cache`；`searchIndex` 进入「双读兼容期」（读以 cache 为准，写仍双写） | list/search 结果不变 | 全量 `pkg/files` + `pkg/server` 绿；`checksums.json` 只读回退可用 |
-| **V4** | **收敛写侧**：`RecordBypassWrite`/`IndexMove` 改为 `cache.Invalidate` + `cache.Upsert`（同一入口）；删除 `searchIndex` 与 `checksums.json` 的独立写路径；`checksums.json` 迁移为一次性 import（首次启动） | 无（行为等价） | #874 的回归用例仍绿；变异（删 Invalidate）→ 红 |
-| **V5** | **门禁 + 文档 + 归档**：R40-R43；`docs/architecture.md` 增「卷状态维护」章；`docs/archive/volume-state-maintenance.md` 精华；删除 searchIndex/ExternalList 死代码 | 无 | `make check-ci` 全绿；deadcode 门禁通过 |
+> 关键纪律：**共存不等于两套并行**——旧实现被登记为**只减不增的棘轮**（R46），
+> 新代码一律走新机制。这样「短期共存」不会演变成永久双轨。
 
-**回退**：每片一个 commit；V2/V3 用装配开关（`volume_state_enabled`，默认 false = 旧路径）控
-灰度——开关关闭即完全旧行为。
+| 片 | 内容 | 优先级 | 行为变更 | 验收 |
+|---|---|---|---|---|
+| **V1** | `pkg/volumestate` 骨架：`ObjectRef`/`DirSnapshot`/`TreeEntry`/`Cache`/`MutationBus`/`WrapVolume`；staging 原子读写 + LRU + TTL/代际判定；`storage.Root` 变异观察者（不接线） | 高 | 无 | 单测：命中/miss/TTL/代际/写穿/祖先 stale/degraded/保密卷不落盘 |
+| **V2** | **外部卷接入（本期核心）**：装配期 `WrapVolume` 包所有非本地卷；`files.List/Stat/Delete/Rename(?volume=)` 走装饰器；TTL 30s；secretdata 用 `StateGen`；`ExternalList/ExternalStat` 保留回源 | **最高** | 外部卷 list 首次慢、之后命中；外部改写 ≤30s 收敛 | e2e：二次 list 无远端往返（计数）；TTL 过期回源一次；`Refresh` 立即生效；删除后无幽灵 |
+| **V3** | **本地卷迁移**（可延后）：`searchIndex` 收敛为 TreeView 投影；`checksums.json` 一次性 import 后转只读；Root 事件接线 | 中（后续） | list/search 行为不变 | 全量绿；旧路径棘轮计数下降 |
+| **V4** | 清理：删 `searchIndex`/`checksums.json` 独立写路径与 `ExternalList` 薄转发；`RecordBypassWrite`/`IndexMove` 删（由事件总线取代） | 低 | 无 | #874 回归用例绿；deadcode 门禁过 |
+| **V5** | 门禁 + 文档 + 归档：R40/R41/R42/R44/R45/R46 | 中 | 无 | `make check-ci` 全绿 |
+
+**灰度**：`volume_state_enabled`（默认 **false** = 旧行为）。V2 合入后由运维逐环境开启；
+开关关闭时 `WrapVolume` 原样返回。
 
 ---
 
-## 六、安全性与边界审查
+## 六、门禁清单（机制稳定性的保证）
+
+| 门禁 | 判据 | 防的是 |
+|---|---|---|
+| **R40** | 非测试源码除 `pkg/volumestate` 外不得出现 list 级缓存类型（`*Cache`/快照/索引 map + list 语义）；`pkg/volume/secretdata` 自管索引登记白名单（理由：内容是密文，只有卷能算） | 再造第四套 |
+| **R41** | `files.List/Search` 实现体不得直调 `index.list` / `ExternalList`（V4 后） | 双入口 |
+| **R42** | 新增 `sync.FS` 实现若持有派生状态，必须实现 `StateGeneration` 或自述「无状态」注解 | 忘失效（#853/#874 类） |
+| **R44** | `volumestate.WrapVolume` 只在装配处出现；业务代码不得自造 FS 缓存包装 | 绕过唯一入口 |
+| **R45** | `storage.Root` 新增变异方法必须回调 `notifyMutation` | 机制因原语演进失效 |
+| **R46** | **旧实现棘轮**：`searchIndex`/`checksums.json`/`ExternalList` 的独立使用点数（`*.tsv` 登记）**只减不增** | 「短期共存」变永久双轨 |
+| **R43** | 新增配置项默认值：bool=false、string=空、int/duration 取安全默认（AGENTS.md 18 条） | 零回归 |
+
+---
+
+## 七、安全性 / 边界
 
 | 面 | 风险 | 对策 |
 |---|---|---|
-| 保密卷元数据落盘 | 加密卷的 name/checksum 落节点本地明文 | `state_cache_persist_private` 默认 **false**（只内存）；显式开启才落盘并文档标注威胁模型 |
-| checksum 被缓存污染 | A 类安全语义被削弱 | 三段式兜底（§3.2.5）+ 写穿 + 代际；缓存永不作删除门禁的唯一依据 |
-| 失效失败 | 永久幽灵 | degraded 降级为「全部回源」（§四） |
-| staging 目录膨胀 | 磁盘占用 | LRU + `state_cache_max_bytes` 上限 + 启动 tmp 清理 + 卷删除回收 |
-| 多节点 | 各节点缓存不一致 | 节点本地 + TTL 收敛（与容量账本同口径）；写穿只在产生写的节点生效——**文档明确**：跨节点可见性 ≤ TTL |
-| 递归 search 打远端 | 大目录全量拉取 | `volume_state_search_remote` 默认 **false**（远端卷不提供 search，显式开启才启用） |
-| 与配额/容量账本混淆 | 双账本 | 明确 D 类不进入本层（§二非目标） |
-
----
-
-## 七、验收矩阵（关键断言）
-
-| 断言 | 层 | 变异（应红） |
-|---|---|---|
-| 同一目录二次 list，第二次不回源（计数器） | V2 | 去掉 LRU 命中判断 |
-| 外部卷 TTL 过期后回源一次 | V2 | 去掉 TTL 判定 |
-| 卷 `StateGen` 变化 → 强制回源 | V2 | 去掉代际比对 |
-| 本地卷目录被外部进程新增文件 → 代际变化 → list 反映（不重启） | V3 | 去掉 `rootfs.StateGen` |
-| `Invalidate(ref)` 后该 rel 立即不可见 | V2/V3 | 去掉 TreeView 删除 |
-| 写子目录后**父目录** list 反映新条目 | V3 | 去掉祖先 stale 标记 |
-| `Invalidate` 失败 → 该卷后续读全部回源（degraded） | V2 | 去掉 degraded 标记 |
-| 保密卷不落盘（staging 目录无该卷文件） | V2 | 去掉 `volumeHasPrivate` 分支 |
-| 转存产物（#874 场景）list 可见 + checksum 非空 | V3/V4 | 删掉写后 Invalidate/Upsert |
-| 删除后 list 不再返回该条目（无幽灵） | V3 | 去掉 Delete 的 Invalidate |
-| 门禁 R40：新增 list 级缓存 → 红 | V5 | — |
+| 保密卷元数据落盘 | 加密卷 name/checksum 落节点本地明文 | `state_cache_persist_private` 默认 false（只内存） |
+| 缓存削弱 A 类语义 | 「缓存说一致、实际已变」 | 三段式兜底 + 写穿 + 代际；缓存永不作删除门禁唯一依据 |
+| 失效失败 | 永久幽灵 | degraded 降级为全部回源（§4.2） |
+| staging 膨胀 | 磁盘占用 | `state_cache_max_bytes` 上限 + LRU + 启动 tmp 清理 + 卷删除回收 |
+| 多节点 | 各节点不一致 | 节点本地 + TTL 收敛（与容量账本同口径）；**文档明确**跨节点可见性 ≤ TTL |
+| 递归 search 打远端 | 大目录全量拉取 | `volume_state_search_remote` 默认 false |
+| 与配额账本混淆 | 双账本 | D 类不进入本层（§八） |
 
 ---
 
 ## 八、明确不覆盖
 
-1. **D 类聚合账本**（配额用量/卷容量）——已有 `pkg/volume/capacity` 独立对账体系，不并入。
-2. **内容缓存**（secretdata 的 span/blocklet/window 缓存）——那是**内容字节**缓存（性能），
-   与本层的**元数据视图**缓存职责不同；它们继续由卷自管，本层不接管。
-3. **跨节点强一致**——节点本地 + TTL 收敛是明确口径（与容量账本一致）；不引入分布式协调。
-4. **鉴权/审计派生状态**——凭据 store、审计 journal 有独立生命周期，不进入本层。
+1. **D 类聚合账本**（配额/容量）——已有 `pkg/volume/capacity` 独立对账，不并入。
+2. **内容字节缓存**（secretdata 的 span/blocklet/window 缓存）——那是**内容平面**，
+   与本层**元数据平面**职责不同；继续由卷自管。
+3. **跨节点强一致**——节点本地 + TTL 是明确口径，不引入分布式协调。
+4. **鉴权/审计派生状态**——凭据 store、审计 journal 有独立生命周期。
+5. **本地卷旧实现的立即移除**——按用户裁定可延后（V3/V4），由 R46 棘轮保证只减不增。
+
+---
+
+## 九、验收矩阵（关键断言 + 变异）
+
+| 断言 | 片 | 变异（应红） |
+|---|---|---|
+| 同目录二次 list 不回源（计数） | V2 | 去 LRU 命中 |
+| 外部卷 TTL 过期回源一次 | V2 | 去 TTL 判定 |
+| `StateGen` 变化 → 强制回源 | V2 | 去代际比对 |
+| `Invalidate` 后该 rel 立即不可见 | V2 | 去 TreeView 删除 |
+| 写子目录后**父目录** list 反映新条目 | V2 | 去祖先 stale |
+| 经 FS 的写入**无需显式登记**即失效（机制验证） | V2 | 去装饰器事件 |
+| `Invalidate` 失败 → 后续读全部回源 | V2 | 去 degraded |
+| 保密卷 staging 目录无该卷文件 | V2 | 去 private 分支 |
+| 转存产物（#874 场景）list 可见 + checksum 非空 | V2 | 去事件失效 |
+| 新增 `Root` 变异方法未通知 → R45 红 | V5 | — |
+| 旧实现使用点数上升 → R46 红 | V5 | — |
