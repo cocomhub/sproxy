@@ -1174,8 +1174,14 @@ type PikpakHybridConfig struct {
 	Disable bool `yaml:"disable" mapstructure:"disable"`
 	// ChunkSize 是分片大小（字节，默认 64MB）。
 	ChunkSize int64 `yaml:"chunk_size" mapstructure:"chunk_size"`
-	// ShareRatio 是分享区比例（恒 ≤0.5，默认 0.5）。
+	// ShareRatio 是匿名分享区比例上限：0（默认）= **auto**（以 416 边界探测结果为准，
+	// 探测失败回落 50%）；>0 = 显式上限（与探测取小，clamp 到 (0,1]）。
+	// 用户裁定 2026-10-28：匿名区上限由探测决定，不再固定 50% 截断。
 	ShareRatio float64 `yaml:"share_ratio" mapstructure:"share_ratio"`
+	// DisableProgressJournal 关闭**下载进度 WAL**（默认 false = 启用）。
+	// 启用时分片完成即写 audit WAL（节点本地 `<storage_root>/meta/state/pikpak-journal`），
+	// 进程重启后可恢复已完成分片（manifest 丢失/被改名也能续传）；成功后写提交记录。
+	DisableProgressJournal bool `yaml:"disable_progress_journal" mapstructure:"disable_progress_journal"`
 	// Concurrency 是并行 chunk 数（默认 4）。
 	Concurrency int `yaml:"concurrency" mapstructure:"concurrency"`
 	// AutoDelete 下载完成后永久删转存（默认 true，释放 6GB 空间）。

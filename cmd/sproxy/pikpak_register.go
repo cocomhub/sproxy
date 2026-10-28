@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -143,7 +144,7 @@ func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.Pik
 	if cfg.Pikpak.Hybrid.Disable {
 		return
 	}
-	if herr := pikpak.RegisterHybridDownloader(downloader.DefaultRegistry, pikpak.HybridConfig{
+	hcfg := pikpak.HybridConfig{
 		Resolver:    pikpak.NewShareResolver(pikpak.ShareResolverConfig{}),
 		API:         api,
 		ChunkSize:   cfg.Pikpak.Hybrid.ChunkSize,
@@ -158,10 +159,30 @@ func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.Pik
 		// Fallback：匿名分享路径整体失败时降级到旧 PikpakDownloader 完整账号下载
 		// （设计 §1.2——resolve 失败/无直链不阻断任务）。
 		Fallback: dl,
-	}); herr != nil {
+	}
+	if !cfg.Pikpak.Hybrid.DisableProgressJournal {
+		hcfg.JournalFactory = progressJournalFactory(cfg.StorageRoot)
+	}
+	if herr := pikpak.RegisterHybridDownloader(downloader.DefaultRegistry, hcfg); herr != nil {
 		slog.Warn("pikpak hybrid downloader not registered", "err", herr)
 	} else {
-		slog.Info("pikpak hybrid downloader registered", "priority", 11)
+		slog.Info("pikpak hybrid downloader registered", "priority", 11,
+			"progress_journal", hcfg.JournalFactory != nil)
+	}
+}
+
+// progressJournalFactory 返回**节点本地**进度 WAL 工厂（目录 `<storage_root>/meta/state/pikpak-journal`）。
+//
+// 为什么放在节点本地 meta/state：与卷状态缓存同口径——可重建的节点本地恢复层，
+// 不属于用户数据、不随卷迁移；重启后按作用域重放已完成分片（manifest 丢失也能续传）。
+func progressJournalFactory(storageRoot string) func(destPath, key string) (pikpak.ProgressJournal, error) {
+	if storageRoot == "" {
+		return nil
+	}
+	dir := filepath.Join(storageRoot, "meta", "state", "pikpak-journal")
+	return func(destPath, key string) (pikpak.ProgressJournal, error) {
+		// key 含目标路径：同一分享可下载到不同目标（各自独立进度）。
+		return pikpak.NewFileProgressJournal(dir, key+"|"+destPath)
 	}
 }
 
