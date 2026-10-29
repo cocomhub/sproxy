@@ -44,6 +44,7 @@ type VolumeKeyedStore interface {
 	GetInVolume(vol, filename string) (string, bool)
 	SetInVolume(vol, filename, checksum string)
 	DeleteInVolume(vol, filename string)
+	DeletePrefixInVolume(vol, prefix string)
 	RenameInVolume(vol, from, to string)
 	SnapshotInVolume(vol string) map[string]string
 	SnapshotLegacy() map[string]string
@@ -84,6 +85,23 @@ func (cs *ChecksumStore) SetInVolume(vol, filename, checksum string) {
 	cs.checksums[key] = checksum
 	cs.mu.Unlock()
 	cs.persist("set_in_volume", key)
+}
+
+// DeletePrefixInVolume 删除该卷下以 prefix 开头的卷维度键（rmdir 子树清理用）。
+func (cs *ChecksumStore) DeletePrefixInVolume(vol, prefix string) {
+	full := volumeKey(vol, prefix)
+	cs.mu.Lock()
+	removed := 0
+	for k := range cs.checksums {
+		if strings.HasPrefix(k, full) {
+			delete(cs.checksums, k)
+			removed++
+		}
+	}
+	cs.mu.Unlock()
+	if removed > 0 {
+		cs.persist("delete_prefix_in_volume", vol, prefix, removed)
+	}
 }
 
 // SetManyInVolume 批量写卷维度键（一次落盘；rebuild 类全量回填用）。
