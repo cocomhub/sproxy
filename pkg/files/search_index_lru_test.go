@@ -41,7 +41,7 @@ func TestSearchIndex_OwnerLRUEvictsOldest(t *testing.T) {
 	svc.index.setMaxOwners(2)
 
 	for _, owner := range []string{"u1", "u2", "u3"} {
-		if res, err := svc.Search(SearchQuery{Owner: owner, Query: "f.txt"}); err != nil || len(res.Files) != 1 {
+		if res, err := svc.Search(t.Context(), SearchQuery{Owner: owner, Query: "f.txt"}); err != nil || len(res.Files) != 1 {
 			t.Fatalf("search %s: n=%d err=%v", owner, len(res.Files), err)
 		}
 	}
@@ -76,18 +76,18 @@ func TestSearchIndex_OwnerEvictedRebuildsOnAccess(t *testing.T) {
 	env.rebuild()
 	svc := env.newService()
 	svc.index.setMaxOwners(1)
-	if res, err := svc.Search(SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("首次搜索: n=%d err=%v", len(res.Files), err)
 	}
 	// 访问另一个 owner 触发淘汰（bob 需要租户可用）。
 	if tnt := env.tenantFor("bob"); tnt != nil {
 		if bobUser, bok := tnt.Root().Abs("user"); bok {
 			_ = os.MkdirAll(bobUser, 0o755)
-			_, _ = svc.Search(SearchQuery{Owner: "bob", Query: "zzz"})
+			_, _ = svc.Search(t.Context(), SearchQuery{Owner: "bob", Query: "zzz"})
 		}
 	}
 	// alice 被淘汰后重建仍应命中。
-	res, err := svc.Search(SearchQuery{Owner: "alice", Query: "a.txt"})
+	res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "a.txt"})
 	if err != nil || len(res.Files) != 1 {
 		t.Fatalf("淘汰后重建应命中: n=%d err=%v", len(res.Files), err)
 	}

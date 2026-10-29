@@ -94,6 +94,8 @@ var _ ExternalVolumeOps = (*fakeExternalVolumeOps)(nil)
 // subdir（用户可见相对路径），listErr 非 nil 时模拟后端失败。
 type fakeExternalVolume struct {
 	entries []ExternalEntry
+	// tree 按 subdir 返回不同条目（搜索递归用）；nil ⇒ 恒返回 entries（既有用例零回归）。
+	tree    map[string][]ExternalEntry
 	listErr error
 	gotRel  atomic.Value // string：最近一次 ListDir 的 rel（"not-called" 初始）
 }

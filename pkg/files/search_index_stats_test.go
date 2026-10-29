@@ -25,7 +25,7 @@ func TestSearchIndex_StatsReportsOwnersEntriesRebuilds(t *testing.T) {
 	}
 	env.rebuild()
 	svc := env.newService()
-	if res, err := svc.Search(SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("search: n=%d err=%v", len(res.Files), err)
 	}
 	owners, entries, rebuilds := svc.IndexStats()

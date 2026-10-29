@@ -72,7 +72,7 @@ func TestEnsureOwner_SnapshotLoadFallback(t *testing.T) {
 	}
 	// 搜索触发 ensureOwner：损坏快照 → 全量重建（命中 x.txt）。
 	svc := env.newService()
-	if n, err := svc.Search(SearchQuery{Owner: "alice", Query: "x.txt"}); err != nil || len(n.Files) != 1 {
+	if n, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "x.txt"}); err != nil || len(n.Files) != 1 {
 		t.Fatalf("损坏快照应回退重建, hits=%d err=%v", len(n.Files), err)
 	}
 }

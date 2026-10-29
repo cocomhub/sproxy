@@ -272,10 +272,12 @@ basename）、文件条目带 `size/mtime/checksum/volume`、`subdir` 只列直�
 
 响应格式与 `GET /api/files` 相同 — `{"files": [...]}`，但 `name` 为完整相对路径。
 
-**覆盖范围**：搜索基于本地卷的增量索引（`user/` 桶；默认聚合只含**有本地根**的卷）——
-外部卷（S3/WebDAV/baidupcs/secretdata 等）的文件**不在搜索结果中**（与默认 list 聚合语义一致；
-外部卷列表需显式 `?volume=<卷>`，见 `GET /api/files`）。索引失效/重建见
-`POST /api/volumes/refresh`（同步全量失效）与写后 1s debounce 落盘。
+**覆盖范围**（2026-10-30 起为**全卷**）：本地卷走内存增量索引；**外部卷**（S3/WebDAV/baidupcs/
+secretdata 等）经**卷状态缓存**（`volumestate`，TTL=0 + 写穿 + `volume refresh`）递归列举后聚合
+——首次遍历付出远端成本，之后命中缓存。上限：深度 ≤ 16、单请求条目 ≤ 50000、超时 10s（超限截断
+并记录 Warn）；单卷列举失败被隔离（其它卷结果照常返回）。`tag` 是本地卷元数据，`tag` 非空时
+不遍历外部卷（结果只含本地卷）。
+索引失效/重建见 `POST /api/volumes/refresh`（同步全量失效搜索索引 + 卷状态缓存）。
 
 | 状态码 | 含义 |
 |---|---|

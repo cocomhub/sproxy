@@ -51,7 +51,7 @@ func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	const owner, rel, cs = "alice", "user/docs/a.bin", "abc123"
 	// 先触发一次 search（构建 owner 索引——`upsert` 仅在已构建时生效）。
 	// 注：list 自 §15.2 步骤 3 起**不再读索引**（视图/实时扫描），所以预热必须走 search。
-	if _, serr := svc.Search(files.SearchQuery{Owner: owner, Query: "no-such-file"}); serr != nil {
+	if _, serr := svc.Search(t.Context(), files.SearchQuery{Owner: owner, Query: "no-such-file"}); serr != nil {
 		t.Fatalf("预热 search: %v", serr)
 	}
 	// ① 台账迁移（IndexMove 唯一职责）。
@@ -84,7 +84,7 @@ func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	}
 
 	// 索引（只服务搜索）由事件驱动更新：条目卷归属 = 事件 Tag（目标卷 vol2）。
-	sres, serr := svc.Search(files.SearchQuery{Owner: owner, Query: "a.bin"})
+	sres, serr := svc.Search(t.Context(), files.SearchQuery{Owner: owner, Query: "a.bin"})
 	if serr != nil {
 		t.Fatalf("search: %v", serr)
 	}

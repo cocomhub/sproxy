@@ -261,7 +261,7 @@ func (s *Service) SearchFiles(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("offset") != "" || r.URL.Query().Get("limit") != "" {
 		offset, limit = parsePagination(r)
 	}
-	res, err := s.Search(SearchQuery{
+	res, err := s.Search(r.Context(), SearchQuery{
 		Owner:  s.rt.actorOf(r),
 		Query:  r.URL.Query().Get("q"),
 		Tag:    r.URL.Query().Get("tag"),
