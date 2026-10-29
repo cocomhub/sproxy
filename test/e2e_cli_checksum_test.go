@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestCLI_ChecksumRebuild 钉住 `sclient checksum rebuild` 的可用性（含 --owner 缺省=请求主体）。
@@ -47,12 +49,8 @@ func TestCLI_ChecksumRebuild(t *testing.T) {
 // waitFileExists 轮询等待文件出现（debounce 落盘窗口 ≤1s）。
 func waitFileExists(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("等待文件出现超时（%s）: %s", timeout, path)
+	testutil.WaitFor(t, timeout, func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}, "等待文件出现: "+path)
 }
