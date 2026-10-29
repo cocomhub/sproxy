@@ -202,6 +202,14 @@ func (e *dirsEnv) newService() *Service {
 	if err != nil {
 		panic("测试装配 files.New 失败: " + err.Error())
 	}
+	// 测试基建对齐生产装配（审计 2026-10-29 P2-1）：Root 变异事件是**唯一**索引入口
+	// （生产见 volume_mutation_wiring.go；测试此前缺该接线，导致写内核显式 upsert
+	// 掩盖了「事件驱动是否真的生效」）。已建 tenant 在此补装。
+	for _, tnt := range e.tenants {
+		if tnt != nil && tnt.Root() != nil {
+			tnt.Root().SetMutationObserver("main", svc.ApplyRootMutation)
+		}
+	}
 	return svc
 }
 
@@ -431,6 +439,10 @@ func (e *dirsEnv) tenantFor(owner string) *storage.Tenant {
 		return nil
 	}
 	e.tenants[owner] = tnt
+	// 懒建租户同样接线（与生产「子根创建时继承观察者」等价）。
+	if e.svc != nil {
+		rt.SetMutationObserver("main", e.svc.ApplyRootMutation)
+	}
 	return tnt
 }
 
