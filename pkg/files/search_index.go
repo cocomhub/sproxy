@@ -21,6 +21,7 @@ package files
 // 命中文件 name = 完整相对路径（如 sub/keep_me.txt）；在途临时文件不参与。
 
 import (
+	"container/list"
 	"io"
 	"log/slog"
 	"os"
@@ -28,11 +29,16 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
+
+// defaultMaxIndexOwners 是内存索引的 LRU 容量（owner 数上限）。每 owner 一份全量 map +
+// contentTokens，多租户大库必须设上限；被淘汰者下次访问按需重建（磁盘快照仍在）。
+const defaultMaxIndexOwners = 128
 
 // indexEntry 是索引中的单个条目。Key = 相对 user 桶的完整 rel（如 "sub/keep_me.txt"），
 // 不含 "user/" 前缀（与 checksum 台账的 "user/"+rel 键、以及旧搜索结果的 name 字段形态
@@ -94,7 +100,14 @@ type searchIndex struct {
 	// gen 是 per-owner 失效代际（`InvalidateIndex` 递增）：快照载入必须代际匹配，否则重建
 	// ⇒ 删除快照失败（权限/占用/崩溃窗口）时失效仍然生效。全局失效（invalidateAll）
 	// 由「删除全部快照」实现（含内存未知的 owner），跨进程同样有效。
-	gen        map[string]uint64
+	gen map[string]uint64
+	// maxOwners/ownerOrder/ownerElems 是 owner 维度 LRU（审计 2026-10-29 P2-2）：
+	// 只保留最近使用的 N 个 owner 的内存索引，超出淘汰最旧（快照保留 ⇒ 重建不打磁盘全扫）。
+	maxOwners  int
+	ownerOrder *list.List
+	ownerElems map[string]*list.Element
+	// rebuilds 是全量构建次数（可观测：`/metrics`；审计 2026-10-29 P2-5）。
+	rebuilds   atomic.Uint64
 	applied    appliedRev       // 副本已应用 rev（防乱序覆盖）
 	revCounter map[string]int64 // 主节点 per-owner rev（启动置 1）
 	nodeIDFn   func() string    // 发布者标识（装配层注入）
@@ -115,6 +128,9 @@ func newSearchIndex(logger func() *slog.Logger, volSet func() VolumeSet,
 		content:     content,
 		pendingSave: map[string]bool{},
 		gen:         map[string]uint64{},
+		maxOwners:   defaultMaxIndexOwners,
+		ownerOrder:  list.New(),
+		ownerElems:  map[string]*list.Element{},
 		applied:     appliedRev{rev: map[string]int64{}},
 		revCounter:  map[string]int64{},
 	}
@@ -125,21 +141,78 @@ func newSearchIndex(logger func() *slog.Logger, volSet func() VolumeSet,
 // owner 租户不可用（非法/根不可用）时返回 nil（调用方按空结果处理，与旧语义一致）。
 // persist 非 nil（StateStore 装配）时 load/save 走适配器（statestore.md §5.1 P1，见
 // state_index.go）；nil = 本地 JSON 落盘（单节点零回归）。
+// stats 返回索引可观测规模：在内存中的 owner 数与条目总数。
+func (ix *searchIndex) stats() (owners, entries int) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	owners = len(ix.owners)
+	for _, oi := range ix.owners {
+		if oi != nil {
+			entries += len(oi.entries)
+		}
+	}
+	return owners, entries
+}
+
+// setMaxOwners 设置 LRU 容量并立即淘汰（测试/装配用；<=0 忽略）。
+func (ix *searchIndex) setMaxOwners(n int) {
+	if n <= 0 {
+		return
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.maxOwners = n
+	ix.evictOwnersLocked()
+}
+
+// touchOwnerLocked 提升 owner 热度并在超容时淘汰最旧（调用方持 ix.mu）。
+// 淘汰只丢内存索引（快照/gen 保留）⇒ 下次访问按需重建。
+func (ix *searchIndex) touchOwnerLocked(owner string) {
+	if ix.ownerOrder == nil {
+		return
+	}
+	if e, ok := ix.ownerElems[owner]; ok {
+		ix.ownerOrder.MoveToFront(e)
+		return
+	}
+	ix.ownerElems[owner] = ix.ownerOrder.PushFront(owner)
+	ix.evictOwnersLocked()
+}
+
+// evictOwnersLocked 淘汰超出容量的最旧 owner（调用方持 ix.mu）。
+func (ix *searchIndex) evictOwnersLocked() {
+	for ix.ownerOrder.Len() > ix.maxOwners {
+		back := ix.ownerOrder.Back()
+		if back == nil {
+			return
+		}
+		old, _ := back.Value.(string)
+		ix.ownerOrder.Remove(back)
+		delete(ix.ownerElems, old)
+		delete(ix.owners, old)
+		delete(ix.built, old)
+		delete(ix.pendingSave, old)
+	}
+}
+
 func (ix *searchIndex) ensureOwner(owner string) *ownerIndex {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	if ix.built[owner] {
+		ix.touchOwnerLocked(owner)
 		return ix.owners[owner]
 	}
 	if oi, ok := ix.tryLoadSnapshotLocked(owner); ok {
 		ix.owners[owner] = oi
 		ix.built[owner] = true
+		ix.touchOwnerLocked(owner)
 		return oi
 	}
 	// 全量构建：owner 视图逐卷 WalkDir user 桶。
 	oi := ix.buildLocked(owner)
 	ix.owners[owner] = oi
 	ix.built[owner] = true
+	ix.touchOwnerLocked(owner)
 	ix.saveOwnerSnapshotLocked(owner, oi)
 	return oi
 }
@@ -195,6 +268,10 @@ func (ix *searchIndex) invalidate(owner string) {
 	delete(ix.built, owner)
 	delete(ix.owners, owner)
 	delete(ix.pendingSave, owner)
+	if e, ok := ix.ownerElems[owner]; ok {
+		ix.ownerOrder.Remove(e)
+		delete(ix.ownerElems, owner)
+	}
 	ix.gen[owner]++ // 代际失效：即使快照删除失败/被复活也不会被载入
 	ix.mu.Unlock()
 	ix.deleteSnapshot(owner)
@@ -213,6 +290,8 @@ func (ix *searchIndex) invalidateAll() {
 	}
 	ix.owners = map[string]*ownerIndex{}
 	ix.built = map[string]bool{}
+	ix.ownerOrder = list.New()
+	ix.ownerElems = map[string]*list.Element{}
 	ix.pendingSave = map[string]bool{}
 	if ix.dirty != nil {
 		clear(ix.dirty)
@@ -415,9 +494,9 @@ func (ix *searchIndex) remove(owner, rel string) {
 // 并发模型同 upsert：copy-on-write 替换指针。顺带删除子树内全部标签。
 func (ix *searchIndex) removePrefix(owner, rel string) {
 	ix.mu.Lock()
-	defer ix.mu.Unlock()
 	oi := ix.owners[owner]
 	if oi == nil {
+		ix.mu.Unlock()
 		return
 	}
 	newOI := cloneOwnerIndexLocked(oi)
@@ -431,6 +510,9 @@ func (ix *searchIndex) removePrefix(owner, rel string) {
 	}
 	ix.owners[owner] = newOI
 	ix.markDirtyLocked(owner)
+	ix.mu.Unlock()
+	// 标签清理是磁盘 I/O（每条目一次 remove）：**必须锁外**执行（审计 2026-10-29 P2-3）——
+	// 持 ix.mu 做 N 次文件删除会阻塞全部搜索与写索引（rmdir 大目录时尤为严重）。
 	if tnt := ix.tenant0(owner); tnt != nil {
 		for _, k := range removed {
 			deleteTagsFromStore(tnt, k)
@@ -493,6 +575,7 @@ func (ix *searchIndex) rename(owner, from, to string) {
 // 标记，搜索时目录条目只列一次）。owner 租户不可用返回空索引（非 nil，保证 nil 安全）。
 // 构建后从 tagsStore 合并标签（meta/tags 由默认卷权威持有；见 walkUserRoot 的 tagTnt）。
 func (ix *searchIndex) buildLocked(owner string) *ownerIndex {
+	ix.rebuilds.Add(1)
 	oi := &ownerIndex{entries: map[string]*indexEntry{}}
 	if ix.tenant0 == nil {
 		return oi
@@ -776,6 +859,15 @@ func (s *Service) InvalidateAllIndexes() {
 	if s.index != nil {
 		s.index.invalidateAll()
 	}
+}
+
+// IndexStats 返回搜索索引的可观测规模（`/metrics`）：内存 owner 数、条目总数、全量重建次数。
+func (s *Service) IndexStats() (owners, entries int, rebuilds uint64) {
+	if s == nil || s.index == nil {
+		return 0, 0, 0
+	}
+	o, e := s.index.stats()
+	return o, e, s.index.rebuilds.Load()
 }
 
 // SaveDirtyIndexSnapshots 只落盘「写后置脏」的索引快照（debounce 循环调用）。

@@ -937,6 +937,10 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	// sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes 消费；从卷集合注入）。
 	m.renderVolumeWatermarks(&b, h)
 
+	// 派生状态（卷状态缓存 + 搜索索引）的可观测面（审计 2026-10-29 P2-5）：
+	// 命中率判断缓存是否生效/被进程外改动打穿；索引规模与重建次数判断内存与陈旧。
+	m.renderIndexCacheMetrics(&b, h)
+
 	// 配额账本（**唯一实现**）的健康面：分片损坏与「降级 ⇒ 拒写」都必须可告警
 	// （「限额被静默放宽」是本项目认定的最危险形态）。
 	writeMetric(&b, "sproxy_quota_ledger_corrupt_total", "counter",
@@ -1093,6 +1097,32 @@ func writeHistogram(b *strings.Builder, name, help string, thresholds []time.Dur
 	}
 	fmt.Fprintf(b, "%s_sum %s\n", name, formatSeconds(time.Duration(sumNanos)))
 	fmt.Fprintf(b, "%s_count %d\n\n", name, count)
+}
+
+// renderIndexCacheMetrics 输出卷状态缓存与搜索索引的指标（gauge/counter）。
+// 未装配（nil）⇒ 不输出该组（零回归，不伪造 0）。
+func (m *Metrics) renderIndexCacheMetrics(b *strings.Builder, h *Handlers) {
+	if h == nil {
+		return
+	}
+	if c := h.stateCache; c != nil {
+		hits, misses, entries := c.Stats()
+		writeMetric(b, "sproxy_volume_cache_hits_total", "counter",
+			"Volume state cache hits (list served without回源)", hits)
+		writeMetric(b, "sproxy_volume_cache_misses_total", "counter",
+			"Volume state cache misses (list回源 to the volume FS)", misses)
+		writeMetric(b, "sproxy_volume_cache_entries", "gauge",
+			"Volume state cache entries currently held in memory (LRU)", int64(entries))
+	}
+	if svc := h.fileService(); svc != nil {
+		owners, entries, rebuilds := svc.IndexStats()
+		writeMetric(b, "sproxy_search_index_owners", "gauge",
+			"Owners whose search index is resident in memory (LRU bounded)", int64(owners))
+		writeMetric(b, "sproxy_search_index_entries", "gauge",
+			"Search index entries resident in memory", int64(entries))
+		writeMetric(b, "sproxy_search_index_rebuilds_total", "counter",
+			"Search index full rebuilds (cold start / invalidation / LRU eviction)", int64(rebuilds))
+	}
 }
 
 func writeMetric(b *strings.Builder, name, typ, help string, value int64) {

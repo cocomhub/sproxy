@@ -799,6 +799,24 @@ sproxy_volume_io_latency_nanos_total{volume="main",op="upload"} 20000000
 - `op` ∈ `upload` | `download`；`ok`（请求成败）只影响失败计数器，总数与延迟都记（失败也耗时）；
 - 标签值按 Prometheus 文本格式转义；无样本时仍输出 `HELP`/`TYPE`。
 
+### 派生状态指标（`GET /metrics`，2026-10-29）
+
+卷状态缓存（list 数据源）与搜索索引（search 数据源）的可观测面——命中率判断缓存是否生效/
+被进程外改动打穿，索引规模与重建次数判断内存与陈旧：
+
+```
+sproxy_volume_cache_hits_total      # 缓存命中（list 未回源）
+sproxy_volume_cache_misses_total    # 未命中（回源到卷 FS）
+sproxy_volume_cache_entries         # 内存中缓存条目数（LRU）
+sproxy_search_index_owners          # 内存中索引的 owner 数（LRU 上限 128）
+sproxy_search_index_entries         # 内存中索引条目总数
+sproxy_search_index_rebuilds_total  # 全量重建次数（冷启动/失效/LRU 淘汰后重建）
+```
+
+- 未装配缓存/索引时不输出该组（不伪造 0）；
+- `rebuilds_total` 持续快速增长 ⇒ 失效过于频繁（检查 refresh/旁路写）或 LRU 过小；
+- `misses_total` 持续增长而 `hits_total` 不增 ⇒ 缓存未命中（TTL=0 下多因写穿失效/显式刷新）。
+
 ### 内存观测指标 + /debug/pprof（roadmap §6 P2）
 
 `/metrics` 暴露进程级堆分配指标（`runtime.MemStats` 拉取时采样，无标签）：

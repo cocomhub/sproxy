@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -50,7 +51,11 @@ type Options struct {
 // 并发：整体单锁（含 LRU 与落盘路径计算）。命中路径只有一次 map 查找 + 新鲜度判定，
 // 无 I/O ⇒ 锁内耗时可控；回源在锁外执行（避免慢远端阻塞其它卷）。
 type Cache struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// hits/misses 是可观测计数（`/metrics`；审计 2026-10-29 P2-5）：命中率是判断「缓存是否
+	// 真正生效 / 是否被进程外改动打穿」的唯一现场证据。
+	hits     atomic.Int64
+	misses   atomic.Int64
 	lru      *list.List               // 元素为 *cacheEntry；Front = 最近使用
 	items    map[string]*list.Element // key = volume + "\x00" + fsPath
 	maxItems int
@@ -118,8 +123,10 @@ func (c *Cache) Get(
 	}
 	key := cacheKey(vol, fsPath)
 	if snap, ok := c.lookupFresh(ctx, key, vol, fsPath, probe); ok {
+		c.hits.Add(1)
 		return snap.Entries, nil
 	}
+	c.misses.Add(1)
 	entries, err := fetch(ctx)
 	if err != nil {
 		return nil, err
@@ -344,6 +351,17 @@ func (c *Cache) RefreshAll(_ context.Context) error {
 		c.log.Debug("卷状态缓存已全部清空", "dirs", dropped)
 	}
 	return nil
+}
+
+// Stats 返回缓存可观测计数：命中/未命中（回源）与当前内存条目数。
+func (c *Cache) Stats() (hits, misses int64, entries int) {
+	if c == nil {
+		return 0, 0, 0
+	}
+	c.mu.Lock()
+	entries = c.lru.Len()
+	c.mu.Unlock()
+	return c.hits.Load(), c.misses.Load(), entries
 }
 
 // Len 返回当前内存快照数（测试/指标用）。
