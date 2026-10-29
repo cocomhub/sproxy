@@ -40,7 +40,7 @@ func TestVolumesAPI_RefreshClearsSearchIndex(t *testing.T) {
 		t.Fatal("files.Service 未装配（测试无效）")
 	}
 	// 先构建索引（a.txt）。
-	if res, err := svc.Search(files.SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), files.SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("构建索引后应命中 a.txt: n=%d err=%v", len(res.Files), err)
 	}
 	// 进程外新增（不经服务写路径 ⇒ 没有 Root 事件、索引不会自动增量）。
@@ -57,7 +57,7 @@ func TestVolumesAPI_RefreshClearsSearchIndex(t *testing.T) {
 		t.Fatalf("refresh status=%d", resp.StatusCode)
 	}
 
-	res, serr := svc.Search(files.SearchQuery{Owner: "alice", Query: "b.txt"})
+	res, serr := svc.Search(t.Context(), files.SearchQuery{Owner: "alice", Query: "b.txt"})
 	if serr != nil {
 		t.Fatalf("search: %v", serr)
 	}

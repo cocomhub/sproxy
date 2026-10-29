@@ -42,7 +42,7 @@ func TestIndexSaveLoop_DebouncePersistsDirty(t *testing.T) {
 		t.Fatal("files.Service 未装配")
 	}
 	// 先构建索引（触发首次快照落盘）。
-	if res, err := svc.Search(files.SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), files.SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("构建索引: n=%d err=%v", len(res.Files), err)
 	}
 	snapPath := filepath.Join(root, "alice", "meta", "index", "alice.json")

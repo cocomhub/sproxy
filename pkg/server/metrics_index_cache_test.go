@@ -42,7 +42,7 @@ func TestMetrics_IndexCacheStats(t *testing.T) {
 	if svc == nil {
 		t.Fatal("files.Service 未装配")
 	}
-	if res, err := svc.Search(files.SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), files.SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("search: n=%d err=%v", len(res.Files), err)
 	}
 

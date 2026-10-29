@@ -361,7 +361,7 @@ func (s *Service) listVolumeDirEntries(ctx context.Context, v volume.Volume, own
 // 可选按标签精确过滤（SearchQuery.Tag 非空时与 Query AND 组合）。
 //
 // 错误语义：`*HTTPError{400}` = 搜索词与标签都为空 / owner 不可用 / 派生搜索根失败。
-func (s *Service) Search(q SearchQuery) (ListResult, error) {
+func (s *Service) Search(ctx context.Context, q SearchQuery) (ListResult, error) {
 	query := strings.TrimSpace(q.Query)
 	qLower := strings.ToLower(query)
 	tag := strings.TrimSpace(q.Tag)
@@ -383,6 +383,9 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	results := s.index.search(owner, qLower, tag, byVol)
+
+	results = s.appendExternalVolumeHits(ctx, owner, qLower, tag, results)
+
 	// 可选分页（默认 0/0 = 返回全部，兼容既有契约）：Total 恒为全部命中数。
 	total := len(results)
 	page := paginateEntries(results, q.Offset, q.Limit)
@@ -391,6 +394,28 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 		limit = total // 不分页 ⇒ Limit = Total（既有契约 TestReadContract_SearchLimitEqualsTotal）
 	}
 	return ListResult{Files: page, Total: total, Offset: q.Offset, Limit: limit}, nil
+}
+
+// appendExternalVolumeHits 把 owner 可见**外部卷**的命中项并入 results（设计 2026-10-30 D4）：
+// 经 `VolumeViewLister`（装配层视图，含卷状态缓存）递归列举并聚合；缓存命中后为内存遍历。
+// 标签是本地卷元数据（外部卷无标签语义）⇒ tag 非空时不遍历外部卷。
+func (s *Service) appendExternalVolumeHits(ctx context.Context, owner, qLower, tag string, results []FileInfo) []FileInfo {
+	if tag != "" {
+		return results
+	}
+	lister, ok := s.rt.volSet().(VolumeViewLister)
+	if !ok || lister == nil {
+		return results
+	}
+	seenDirs := make(map[string]bool, len(results))
+	for _, f := range results {
+		if f.IsDir {
+			seenDirs[f.Name] = true
+		}
+	}
+	results = append(results, s.searchExternalVolumes(ctx, lister, owner, "", qLower, seenDirs)...)
+	sortSearchResults(results)
+	return results
 }
 
 // StatPath 对**已解析**的下载路径取元信息。

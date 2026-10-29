@@ -205,7 +205,7 @@ func TestTags_IndexSnapshotRoundTripWithTags(t *testing.T) {
 		t.Fatalf("保存快照数 = %d, want 1", n)
 	}
 	s2 := env.newService()
-	if n, err := s2.Search(SearchQuery{Owner: "alice", Query: "s.txt", Tag: "keep"}); err != nil || len(n.Files) != 1 {
+	if n, err := s2.Search(t.Context(), SearchQuery{Owner: "alice", Query: "s.txt", Tag: "keep"}); err != nil || len(n.Files) != 1 {
 		t.Fatalf("重建后 tag 搜索命中数 = %d err=%v, want 1（快照应带 tags）", len(n.Files), err)
 	}
 }

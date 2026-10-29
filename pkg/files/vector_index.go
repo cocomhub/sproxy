@@ -300,7 +300,7 @@ func (s *Service) keywordFallback(r *http.Request, q, owner string) SemanticResu
 	if s.rt.tenants == nil {
 		return SemanticResult{Results: nil, Mode: "keyword"}
 	}
-	res, err := s.Search(SearchQuery{Owner: owner, Query: q})
+	res, err := s.Search(r.Context(), SearchQuery{Owner: owner, Query: q})
 	if err != nil {
 		return SemanticResult{Results: nil, Mode: "keyword"}
 	}

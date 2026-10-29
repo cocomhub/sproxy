@@ -43,7 +43,7 @@ func TestSearchIndex_InvalidateRejectsResurrectedSnapshot(t *testing.T) {
 	}
 	env.rebuild()
 	svc := env.newService()
-	if res, err := svc.Search(SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("构建索引后应命中 a.txt: n=%d err=%v", len(res.Files), err)
 	}
 	if n := svc.SaveIndexSnapshots(); n != 1 {
@@ -66,7 +66,7 @@ func TestSearchIndex_InvalidateRejectsResurrectedSnapshot(t *testing.T) {
 		t.Fatalf("resurrect snapshot: %v", rerr)
 	}
 
-	res, err := svc.Search(SearchQuery{Owner: "alice", Query: "b.txt"})
+	res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "b.txt"})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestSearchIndex_InvalidateAllDeletesAllSnapshots(t *testing.T) {
 	}
 	env.rebuild()
 	svc := env.newService()
-	if res, err := svc.Search(SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("构建索引后应命中 a.txt: n=%d err=%v", len(res.Files), err)
 	}
 	if n := svc.SaveIndexSnapshots(); n != 1 {
@@ -119,7 +119,7 @@ func TestSearchIndex_InvalidateAllDeletesAllSnapshots(t *testing.T) {
 
 	// 新 Service（模拟重启：内存索引为空）。
 	svc2 := env.newService()
-	res, err := svc2.Search(SearchQuery{Owner: "alice", Query: "b.txt"})
+	res, err := svc2.Search(t.Context(), SearchQuery{Owner: "alice", Query: "b.txt"})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}

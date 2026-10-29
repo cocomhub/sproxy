@@ -53,6 +53,9 @@ func (v *viewListSet) ListDirView(_ context.Context, volName, owner, subdir stri
 		if ext.listErr != nil {
 			return nil, true, ext.listErr
 		}
+		if ext.tree != nil {
+			return ext.tree[subdir], true, nil // 未列出的目录 = 空目录
+		}
 		return ext.entries, true, nil
 	}
 	userRel := userBucket

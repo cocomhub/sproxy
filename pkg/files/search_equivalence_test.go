@@ -87,7 +87,7 @@ func TestSearch_IndexMatchesDiskWalk(t *testing.T) {
 	env.rebuild()
 
 	for _, q := range []string{"keep", "keepdir", "other"} {
-		res, err := env.svc.Search(SearchQuery{Owner: "alice", Query: q})
+		res, err := env.svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: q})
 		if err != nil {
 			t.Fatalf("search %q: %v", q, err)
 		}

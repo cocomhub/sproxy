@@ -38,7 +38,7 @@ func TestApplyRootMutation_DirRenameRebuildsTargetSubtree(t *testing.T) {
 	env.rebuild()
 	svc := env.svc
 	// 预热：构建索引（含 a/、a/b/、a/c.txt、a/b/keep.txt）。
-	if res, err := svc.Search(SearchQuery{Owner: "alice", Query: "keep"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "keep"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("预热搜索: n=%d err=%v", len(res.Files), err)
 	}
 
@@ -57,7 +57,7 @@ func TestApplyRootMutation_DirRenameRebuildsTargetSubtree(t *testing.T) {
 		"keep":  "z/b/keep.txt",
 		"c.txt": "z/c.txt",
 	} {
-		res, err := svc.Search(SearchQuery{Owner: "alice", Query: q})
+		res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: q})
 		if err != nil {
 			t.Fatalf("search %q: %v", q, err)
 		}
@@ -66,7 +66,7 @@ func TestApplyRootMutation_DirRenameRebuildsTargetSubtree(t *testing.T) {
 		}
 	}
 	// 源路径不得残留。
-	res, err := svc.Search(SearchQuery{Owner: "alice", Query: "a"})
+	res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "a"})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestApplyRootMutation_EmptyDirRemoveUsesPrefix(t *testing.T) {
 	}
 	env.rebuild()
 	svc := env.svc
-	if res, err := svc.Search(SearchQuery{Owner: "alice", Query: "deep"}); err != nil || len(res.Files) != 1 {
+	if res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "deep"}); err != nil || len(res.Files) != 1 {
 		t.Fatalf("预热: n=%d err=%v", len(res.Files), err)
 	}
 	tnt := env.tenantFor("alice")
@@ -107,7 +107,7 @@ func TestApplyRootMutation_EmptyDirRemoveUsesPrefix(t *testing.T) {
 	svc.ApplyRootMutation(storage.Mutation{
 		Op: storage.MutationRemove, Tag: "main", Root: tnt.Root(), Rel: "alice/user/gone", IsDir: true,
 	})
-	res, err := svc.Search(SearchQuery{Owner: "alice", Query: "gone"})
+	res, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "gone"})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
