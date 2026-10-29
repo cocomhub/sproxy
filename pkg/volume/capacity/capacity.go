@@ -425,12 +425,14 @@ func (f *CapacityFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, err
 }
 
 func (f *CapacityFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
-	prev := f.innerSize(ctx, relPath)
+	// **物理口径**（用户裁定 2026-10-29）：prev/预留/结算一律按卷自报实际占用
+	// （加密卷含 chunk 头/meta pad/parity）；无物理能力的卷回落逻辑字节（零回归）。
+	prev := f.physSize(ctx, relPath)
 	// 声明长度已知（>0）时先预留（超限 fail-closed 拒绝写入）；未知/非法（<=0，如
 	// 分块传输 ContentLength=-1 / copyMeta）不预留，写后按**实测字节**结算。
 	reserved := int64(0)
 	if size > 0 {
-		if d := size - prev; d > 0 {
+		if d := f.physBound(size) - prev; d > 0 {
 			if err := f.counter.TryAdd(d); err != nil {
 				return err
 			}
@@ -445,9 +447,12 @@ func (f *CapacityFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relP
 		f.settleAfterWriteError(ctx, relPath, prev, reserved, size)
 		return err
 	}
-	// 结算：以实际写入（实测）为准，扣掉已预留。effective <= 0 时才回落声明值
-	// （inner 忽略 reader 但仍写 size 字节的极端实现）。
-	effective := cr.n
+	// 结算：以写后**实测物理占用**为准（物理能力可用时），否则用实际被读取的逻辑字节；
+	// effective <= 0 时才回落声明值（inner 忽略 reader 但仍写 size 字节的极端实现）。
+	effective := f.physSize(ctx, relPath)
+	if effective <= 0 {
+		effective = cr.n
+	}
 	if effective <= 0 && size > 0 {
 		effective = size
 	}
@@ -464,7 +469,7 @@ func (f *CapacityFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relP
 //
 // **Stat 无法复核时保留预留不清账**（宁可偏高——限额宁紧勿松，运维可对账；绝不静默少计）。
 func (f *CapacityFS) settleAfterWriteError(ctx context.Context, relPath string, prev, reserved, size int64) {
-	actual, ok := f.innerSizeChecked(ctx, relPath)
+	actual, ok := f.physSizeChecked(ctx, relPath)
 	if !ok {
 		return
 	}
@@ -530,10 +535,10 @@ func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Rea
 	if !ok {
 		return false, fmt.Errorf("capacity: 底层未实现 WriteIfAbsent: %w", syncpkg.ErrUnsupported)
 	}
-	prev := f.innerSize(ctx, relPath)
+	prev := f.physSize(ctx, relPath)
 	reserved := int64(0)
 	if size > 0 {
-		if d := size - prev; d > 0 {
+		if d := f.physBound(size) - prev; d > 0 {
 			if err := f.counter.TryAdd(d); err != nil {
 				return false, err
 			}
@@ -554,7 +559,10 @@ func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Rea
 		}
 		return written, nil
 	}
-	effective := cr.n
+	effective := f.physSize(ctx, relPath)
+	if effective <= 0 {
+		effective = cr.n
+	}
 	if effective <= 0 && size > 0 {
 		effective = size
 	}
@@ -565,7 +573,7 @@ func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Rea
 }
 
 func (f *CapacityFS) Rename(ctx context.Context, from, to string) error {
-	targetOld := f.innerSize(ctx, to) // 覆盖目标旧字节（成功后释放）
+	targetOld := f.physSize(ctx, to) // 覆盖目标旧字节（成功后释放；物理口径）
 	if err := f.inner.Rename(ctx, from, to); err != nil {
 		return err
 	}
@@ -578,7 +586,7 @@ func (f *CapacityFS) MakeDir(ctx context.Context, relPath string) error {
 }
 
 func (f *CapacityFS) Delete(ctx context.Context, relPath string) error {
-	size := f.innerSize(ctx, relPath)
+	size := f.physSize(ctx, relPath)
 	if err := f.inner.Delete(ctx, relPath); err != nil {
 		return err
 	}
@@ -594,7 +602,7 @@ func (f *CapacityFS) Move(ctx context.Context, from, to string) error {
 	if !ok {
 		return fmt.Errorf("capacity: 底层未实现 Move: %w", syncpkg.ErrUnsupported)
 	}
-	targetOld := f.innerSize(ctx, to)
+	targetOld := f.physSize(ctx, to)
 	if err := mv.Move(ctx, from, to); err != nil {
 		return err
 	}
@@ -608,8 +616,8 @@ func (f *CapacityFS) Copy(ctx context.Context, from, to string) error {
 	if !ok {
 		return fmt.Errorf("capacity: 底层未实现 Copy: %w", syncpkg.ErrUnsupported)
 	}
-	targetOld := f.innerSize(ctx, to)
-	added := f.innerSize(ctx, from)
+	targetOld := f.physSize(ctx, to)
+	added := f.physSize(ctx, from)
 	if added > 0 {
 		if err := f.counter.TryAdd(added); err != nil {
 			return err

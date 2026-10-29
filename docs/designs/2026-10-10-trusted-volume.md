@@ -151,13 +151,18 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   跨锁 read-modify-write；同 rel 并发 写/删 可致 used 少计或虚高。计数器内部操作原子安全
   （无内存损坏），逻辑漂移有界、重启/对账自愈；彻底解决需按 rel 串行化（会串行化远端写 I/O，
   权衡后留专题）。
-- **加密卷容量记账低估**（第 4 轮对抗评审 P1）——**仍开（需产品口径）**：`CapacityFS` 包在
-  `SecretdataFS` 外层，只按逻辑 size 计；容器内 chunk/meta 写入与默认 1–2MiB meta pad 不进
-  计数器（1KiB 文件实占 2–4MiB）→ 理论上限可被绕过约 10³。彻底解决需按底层实测字节记账
-  （暴露真实 usage 或底层树求和）。**现状收敛路径**：`pkg/storage/capacity` 的
-  `StorageManager.SetReconciler` 周期对账（按物理足迹修正 used）⇒ 漂移有界自愈；实时精度
-  属产品决策（按实测记账会带来额外 Stat/扫描成本，且与「逻辑容量」的用户预期不一致）。
-  **不盲改**：需先定「卷容量语义 = 逻辑明文 vs 物理占用」。
+- ~~**加密卷容量记账低估**~~（第 4 轮对抗评审 P1）——**已修（2026-10-29，用户裁定「必须按实际
+  占用算容量」）**：`CapacityFS` 记账改为**物理口径**——卷实现可选能力
+  `PhysFootprint(rel) (int64,bool)` / `PhysBound(logical) int64`（`pkg/volume/capacity/phys.go`），
+  写前按物理**上界**预留、写后按**实测物理**结算，删除/重命名/复制按物理释放；无该能力的卷
+  回落逻辑字节（普通本地卷的 `Stat.Size` 本就是物理，零回归）。
+  - secretdata：物理含 chunk 头 + meta pad + parity（1KiB 文件实占 2–4MiB）⇒ 不再按逻辑少记。
+  - 对账同源：周期对账对加密卷用真值报告者（`TrueUsage`）、本地卷用磁盘扫描（均物理）⇒ 与
+    写路径口径一致，不会再把 used 拉回逻辑值。
+  - 验收：`TestCapacityFS_PhysicalAccounting`（新建/覆盖/删除均按 2×逻辑+1024 pad）、
+    `TestCapacityFS_PhysicalBoundRejectsBeforeWrite`（逻辑 100B/上限 1200 ⇒ 物理 1224 故拒绝）、
+    `TestCapacityFS_NoPhysCapabilityKeepsLogical`（无能力零回归）；变异：`physSize` 退回
+    `innerSize` ⇒ 「账本占用 = 100，want 1224」红。
 - ✅ **已修（2026-10-14，P0 收口）**：`presign/complete` 现**强制登记**——客户端声明 `size`+`sha256`，
   域侧经统一写内核「内容已在位」模式完成 存在性/size 校验 + **双账本结算** + sidecar/checksum 台账；
   直传与上传同口径，容量/配额不再旁路。**残余（明示）**：① 服务端不重算 sha256（重算需完整下载对象）
