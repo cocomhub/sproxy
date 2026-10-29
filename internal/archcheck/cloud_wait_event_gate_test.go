@@ -30,11 +30,11 @@ func TestCloudWaitTaskStoppedIsEventDriven(t *testing.T) {
 		t.Fatalf("%s 中找不到 waitTaskStopped", path)
 	}
 	rest := src[i:]
-	end := strings.Index(rest, "\n}\n")
-	if end < 0 {
+	before, _, ok := strings.Cut(rest, "\n}\n")
+	if !ok {
 		t.Fatal("waitTaskStopped 函数体未闭合")
 	}
-	body := rest[:end]
+	body := before
 	// 拼接字面量：本文件不得出现该 token，否则会被 R14 睡眠棘轮误计为真实 sleep。
 	if strings.Contains(body, "time."+"Sleep") {
 		t.Fatalf("waitTaskStopped 不得使用 time.Sleep 轮询（应为 runningDone 事件等待）:\n%s", body)
