@@ -462,7 +462,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		t.Fatalf("OpenRoot: %v", rerr)
 	}
 	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot,
-		Capacity: 100,
+		Capacity: 4 << 20,
 		Extra: map[string]any{
 			"target":     "local",
 			"root":       dataRoot,
@@ -472,7 +472,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, vault},
 		map[string]*storage.Root{"default": rt},
 		map[string]registry.ExternalBackend{},
-		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
+		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(4 << 20)},
 		"default",
 	)
 	t.Cleanup(func() { _ = set.Close() })
@@ -1096,7 +1096,7 @@ func TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail(t *testing.T
 		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, vault},
 		map[string]*storage.Root{"default": rt},
 		map[string]registry.ExternalBackend{},
-		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
+		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(4 << 20)},
 		"default",
 	)
 	t.Cleanup(func() { _ = set.Close() })
@@ -1164,7 +1164,7 @@ func TestEnclosureVolume_RestartReattach(t *testing.T) {
 	}
 	vols := []volume.Volume{
 		{Name: "default", Type: volume.TypeLocal, RootDir: root},
-		{Name: "vault", Type: reattachWrapType, Capacity: 100, Extra: map[string]any{
+		{Name: "vault", Type: reattachWrapType, Capacity: 4 << 20, Extra: map[string]any{
 			"source": "default:videos",
 		}},
 	}
@@ -1173,7 +1173,7 @@ func TestEnclosureVolume_RestartReattach(t *testing.T) {
 			append([]volume.Volume(nil), vols...),
 			map[string]*storage.Root{"default": rt},
 			map[string]registry.ExternalBackend{},
-			map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
+			map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(4 << 20)},
 			"default",
 		)
 	}
@@ -1638,13 +1638,13 @@ func TestSecretdataVolume_QuotaAtFSLayer(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("OpenRoot: %v", rerr)
 	}
-	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot, Capacity: 100,
+	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot, Capacity: 4 << 20,
 		Extra: map[string]any{"target": "local", "root": dataRoot, "secret_url": "secrets://keys/datakey"}}
 	set := registry.NewSet(
 		[]volume.Volume{{Name: "default", Type: volume.TypeLocal, RootDir: root}, vault},
 		map[string]*storage.Root{"default": rt},
 		map[string]registry.ExternalBackend{},
-		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(100)},
+		map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(4 << 20)},
 		"default",
 	)
 	t.Cleanup(func() { _ = set.Close() })
@@ -1666,19 +1666,21 @@ func TestSecretdataVolume_QuotaAtFSLayer(t *testing.T) {
 	}
 	fs := be.FS()
 
-	// 1) 首次写 60 记账成功（secretdata 加密卷 + 本地账本链路）。
+	// 1) 首次写 60 记账成功（secretdata 加密卷 + 本地账本链路）；**物理口径**：用量含
+	//    chunk 头 + meta pad（> 逻辑 60，用户裁定 2026-10-29「必须按实际占用算容量」）。
 	if err := fs.WriteFile(ctx, storage.LogicalKey{}, "a.bin", strings.NewReader(strings.Repeat("x", 60)), 60, 0); err != nil {
 		t.Fatalf("写入 60 应成功: %v", err)
 	}
-	if got := set.Pool("vault").Usage(); got != 60 {
-		t.Fatalf("写入后卷用量 %d, want 60", got)
+	afterFirst := set.Pool("vault").Usage()
+	if afterFirst <= 60 {
+		t.Fatalf("写入后卷用量 %d，应大于逻辑 60（须按物理占用记账）", afterFirst)
 	}
-	// 2) 二次写 60 超限（120>100）必须被拒。
-	if err := fs.WriteFile(ctx, storage.LogicalKey{}, "b.bin", strings.NewReader(strings.Repeat("y", 60)), 60, 0); err == nil {
-		t.Fatal("第二次写 60 超限应被拒绝")
+	// 2) 再写 3MiB（物理上界 ≈ 6MiB）超出剩余额度 ⇒ 必须被拒且不入账。
+	if err := fs.WriteFile(ctx, storage.LogicalKey{}, "b.bin", strings.NewReader(strings.Repeat("y", 3<<20)), 3<<20, 0); err == nil {
+		t.Fatal("超出卷容量的写入应被拒绝")
 	}
-	if got := set.Pool("vault").Usage(); got != 60 {
-		t.Fatalf("超限拒绝后卷用量 %d, want 60（不得入账）", got)
+	if got := set.Pool("vault").Usage(); got != afterFirst {
+		t.Fatalf("超限拒绝后卷用量 %d, want %d（不得入账）", got, afterFirst)
 	}
 	// 3) Delete 释放 → 池归零。
 	if err := fs.Delete(ctx, "a.bin"); err != nil {
