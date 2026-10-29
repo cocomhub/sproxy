@@ -495,6 +495,22 @@ per-volume 映射），验证多卷同名场景；再评估 A 作为「台账只
 **验收**：多卷同名的两个文件 list 各自 checksum 正确（`TestList_MultiVolumeSameNameChecksum`）；
 变异：键不加卷维度 ⇒ 红。
 
+#### 15.1.2 已实施（2026-10-29）
+
+- **存储**：`pkg/checksum` 新增卷维度键 `<vol> <rel>` + `VolumeKeyedStore` 可选接口
+  （`SetInVolume/GetInVolume/DeleteInVolume/RenameInVolume/SetManyInVolume/SnapshotInVolume/
+  SnapshotLegacy`）；旧无卷键**保留为只读兜底**（升级前的台账仍可读，不自动迁移）。
+- **写入全部带卷维度**：`recordUploadSuccess`（单次/去重/`WriteTarget`）、`RecordBypassWrite`/
+  `RecordBypassChecksum`、`IndexMove`（目标卷）、分块上传 complete、版本恢复（目标卷）、
+  跨卷镜像复制（目标卷）、`RebuildChecksums`（按卷收集 + `SetManyInVolume` 一次落盘）。
+- **读取按卷**：`files.List`（视图/实时扫描，`checksumSnapshotFor`）、`Search`/语义搜索
+  （`checksumSnapshotsByVolume`）、`Stat`/分块下载（`checksumGet`）、`/api/verify`（键解析去重）、
+  导出 manifest（按 source 卷名）。
+- **单卷零回归**：卷名为空（单卷装配）时 helper 全部回落旧无卷方法 ⇒ 行为与之前逐字一致。
+- **遗留（不影响正确性）**：`rmdir` 删除子树只清旧键（卷维度键残留但不会被读到）；
+  版本桶（`version/<rel>`）仍用旧键（不参与 user list）；旧键不自动迁移——需要时跑
+  `sclient checksum rebuild`（现按卷写入）重建。
+
 ### 15.2 `searchIndex` → TreeView 投影
 
 现状：本地卷 list/search 走 `searchIndex`（含内容索引、向量索引、集群 `IndexSync` 快照/rev、
