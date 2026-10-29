@@ -450,13 +450,50 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
    sync.Map 防列表路径反复全量遍历）。选「批量回填」而非「逐条目兜底」是为了避免大目录列表的
    N 次 sidecar I/O。验收：`TestService_ChecksumRebuildFromMeta`（删台账 → list checksum 自愈）
    + `_NoMetaNoCrash`（无 meta 能力零回归）；变异：去掉自动重建 ⇒ 红。
-2. **增量自愈**（未做）：台账**部分**缺失（非全空）时目前不触发重建；需要的话可做
-   `sclient checksum rebuild` 显式命令（走同一 `RebuildChecksums`）。
+2. **增量自愈**：台账**部分**缺失（非全空）时目前不自动触发重建——用
+   `sclient checksum rebuild` 显式命令（走同一 `RebuildChecksums`；#889 已落地 CLI/API）。
 3. **台账转只读**（未做）：`Set/Delete/Rename` 不再写台账、读路径全量走 sidecar 或内存视图，
    删 `checksums.json` 写路径与 R46 对应计数。**前置**：跨卷同名键空间口径（见上）。
 
 风险/决策点：台账键是**租户相对 rel（跨卷同名可冲突）**——对象 meta 是**卷内对象级**，两者键空间
 不同，导入时必须按 volume 归属写入（否则跨卷同名文件互相覆盖）。这是本项必须先定的口径。
+
+#### 15.1.1 口径侦察结论（2026-10-29，已确认缺陷）
+
+**事实**（代码级）：
+
+1. 写路径 `recordUploadSuccess` 调 `cs.Set(rel, checksum)`——`rel` 是**租户相对**（`user/<rel>`），
+   **不含卷维度**；`renameChecksumIndex`/`RecordBypassChecksum` 同口径。
+2. `List` 的 checksum 来自 `checksumSnapshot(ctx, owner)`（台账全量 map，键 `user/<rel>`）⇒
+   **多卷聚合时，两卷上的同名文件拿到同一个 checksum**（后写覆盖先写）。
+3. `Stat`/删除门禁有「台账 miss → 现算 `fileChecksumRoot`」回退；**list 没有回退**。
+
+**影响**：同一 owner 把同名文件放在不同卷（`?volume=` 上传/转存）时，list 的 checksum 可能张冠李戴
+（客户端据此做 `mv`/`delete` 门禁会 409 或误判）。属**正确性缺陷**，不是性能问题。
+
+**候选方案**：
+
+| 方案 | 做法 | 优点 | 代价 |
+|---|---|---|---|
+| **A. 卷自报** | 让卷的 `ListDir` 填 `sync.Entry.Checksum`（本地卷读 meta sidecar；`ListDirView` 已透传 sha256） | 单一时相源（与 meta 同源），list 不依赖台账，天然按卷隔离 | 本地卷的 meta sidecar 属 `pkg/files` 派生状态，卷层（`rootfs`）不知道其位置 ⇒ 需把 meta 读取下沉或用 `volumestate` 的 checksum 视图；首次 list 每文件一次 sidecar I/O（缓存可吸收） |
+| **B. 台账加卷维度** | 键改 `<vol>\x00user/<rel>`；`checksumSnapshot` 返回 per-volume 视图；旧键做兼容读 | 改动集中、可增量迁移；立刻修正确性 | 台账职责扩大（与「只读化」方向相反）；单文件写路径需知道卷名（`WriteFile` 已有 `route.VolumeName`，改名/删除需补） |
+| **C. list 直接读 sidecar（无台账）** | list 时逐文件读 meta | 无台账 | 大目录 N 次 I/O，性能不可接受（现方案正是为避开它） |
+
+**推荐**：先做 **B 的最小修**（修正确性缺陷：键加卷维度 + 旧键兼容读 + `checksumSnapshot` 返回
+per-volume 映射），验证多卷同名场景；再评估 A 作为「台账只读化」的最终形态（需要先把 meta 读取
+变成卷层可用的能力，或让 `volumestate` 承载 checksum 视图）。
+
+**分片计划**：
+1. `checksum` 包：`ChecksumStoreIface` 增 `SetWithVolume/GetWithVolume`（或 `Set(vol, rel, cs)` 内部拼键）；
+   旧键（无卷）保留只读回退，首次读命中旧键时按当前卷名回填新键。
+2. `pkg/files`：`recordUploadSuccess` / `renameChecksumIndex` / `RecordBypassChecksum` 传卷名；
+   `checksumSnapshot` 返回 `map[vol]map[rel]cs`（list 按卷取值）。
+3. `Stat`/删除门禁：`checksumStoreForRead` 用卷名键；miss 时现算（已有）。
+4. 一次性迁移：读旧台账 → 按「当前卷已知的唯一归属」写入新键（无法判定的保留旧键并 Warn）。
+5. 门禁：R46 计数随写路径简化下调；台账「只读化」（步骤 3）留待 A 落地。
+
+**验收**：多卷同名的两个文件 list 各自 checksum 正确（`TestList_MultiVolumeSameNameChecksum`）；
+变异：键不加卷维度 ⇒ 红。
 
 ### 15.2 `searchIndex` → TreeView 投影
 
