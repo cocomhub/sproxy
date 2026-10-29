@@ -25,8 +25,9 @@ import (
 //   - **本地卷**：为 §15.2 步骤 2（list 改走卷状态视图）提供性能前提 —— 否则每次列表都是
 //     O(目录项) 磁盘扫描。本地卷的新鲜度契约 = **写穿（Root 事件，含内容写）+ TTL 兜底**：
 //     进程外改动（运维直写盘/同根多实例）≤TTL 后可见（此前 `searchIndex` 同类盲区无收敛承诺）。
-//   - 本地卷的对外 list 目前仍走 `searchIndex`（R46 棘轮收敛中）；本层先让 `FS.ListDir` 消费方
-//     （同步/镜像/备份/校验）享受缓存与事件失效。
+//   - 本地卷的对外 list 自 2026-10-29 起走**卷状态视图**（`VolumeViewLister` → 本层缓存 →
+//     实时扫描兜底），`searchIndex` 只服务搜索（其 list 入口已被门禁硬禁，见 R41）；
+//     本层同时服务 `FS.ListDir` 消费方（同步/镜像/备份/校验）。
 
 // newVolumeStateCache 按配置构造缓存（未启用 ⇒ nil，零回归）。
 func newVolumeStateCache(cfg *Config, vs *registry.Set, log *slog.Logger) *volumestate.Cache {

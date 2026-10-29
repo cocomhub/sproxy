@@ -268,8 +268,14 @@ basename）、文件条目带 `size/mtime/checksum/volume`、`subdir` 只列直�
 |---|---|
 | `q` | 搜索关键字（不区分大小写）；与 `tag` 都为空时 400 |
 | `tag` | 标签精确过滤（可组合）；非法标签（非 `[A-Za-z0-9_\p{L}-]{1,32}`）不命中 |
+| `offset` / `limit` | **可选分页**（2026-10-29）：不传 = 返回全部（兼容既有契约）；显式传则按 List 语义（`limit` 缺省 1000、上限 10000），`total` 恒为全部命中数 |
 
 响应格式与 `GET /api/files` 相同 — `{"files": [...]}`，但 `name` 为完整相对路径。
+
+**覆盖范围**：搜索基于本地卷的增量索引（`user/` 桶；默认聚合只含**有本地根**的卷）——
+外部卷（S3/WebDAV/baidupcs/secretdata 等）的文件**不在搜索结果中**（与默认 list 聚合语义一致；
+外部卷列表需显式 `?volume=<卷>`，见 `GET /api/files`）。索引失效/重建见
+`POST /api/volumes/refresh`（同步全量失效）与写后 1s debounce 落盘。
 
 | 状态码 | 含义 |
 |---|---|

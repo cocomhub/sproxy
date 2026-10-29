@@ -58,6 +58,10 @@ type ListResult struct {
 // SearchQuery 是搜索的领域入参（搜索无常规分页：Offset/Limit 回填为结果总数）。
 type SearchQuery struct {
 	Owner string
+	// Offset / Limit 是**可选分页**（审计 2026-10-29 P3）：默认 0/0 = 不分页（返回全部，
+	// 与既有契约一致）；`Limit > 0` 时按排序后切片，`Total` 恒为**全部命中数**。
+	Offset int
+	Limit  int
 	// Query 是文件名子串（大小写不敏感）。与 Tag 可组合（AND）。
 	// 空（或全空白）且 Tag 也为空 → *HTTPError{400}。
 	Query string
@@ -379,7 +383,14 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	results := s.index.search(owner, qLower, tag, byVol)
-	return ListResult{Files: results, Total: len(results), Offset: 0, Limit: len(results)}, nil
+	// 可选分页（默认 0/0 = 返回全部，兼容既有契约）：Total 恒为全部命中数。
+	total := len(results)
+	page := paginateEntries(results, q.Offset, q.Limit)
+	limit := q.Limit
+	if limit <= 0 {
+		limit = total // 不分页 ⇒ Limit = Total（既有契约 TestReadContract_SearchLimitEqualsTotal）
+	}
+	return ListResult{Files: page, Total: total, Offset: q.Offset, Limit: limit}, nil
 }
 
 // StatPath 对**已解析**的下载路径取元信息。
