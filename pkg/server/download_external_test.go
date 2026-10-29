@@ -131,7 +131,7 @@ func newExternalTestEnv(t *testing.T, v volume.Volume, fs *extFS) *Handlers {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(&Config{})
 	return &Handlers{volSet: vs, logger: testLogger(), tenants: tenants, cfgPtr: &cfgPtr,
-		checksumStores: make(map[string]*checksum.ChecksumStore)}
+		checksumStores: make(map[string]checksum.ChecksumStoreIface)}
 }
 
 // TestResolveExternalDownload_BState302RequiresSkipVerify：明文外部卷 direct_link:true

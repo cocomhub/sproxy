@@ -52,7 +52,7 @@ func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, auditJ *a
 		globalPool:     nil,
 		volSet:         vs,
 		tenants:        storage.NewTenantCache(vs.DefaultRoot(), storage.WithMetaBucket(), storage.WithLogger(testLogger())),
-		checksumStores: make(map[string]*checksum.ChecksumStore),
+		checksumStores: make(map[string]checksum.ChecksumStoreIface),
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),

@@ -47,7 +47,7 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 	h.globalRoot = globalRoot
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenants = storage.NewTenantCache(h.globalRoot, storage.WithMetaBucket(), storage.WithLogger(h.logger))
-	h.checksumStores = make(map[string]*checksum.ChecksumStore)
+	h.checksumStores = make(map[string]checksum.ChecksumStoreIface)
 	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {

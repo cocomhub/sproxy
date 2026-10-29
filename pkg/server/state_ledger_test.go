@@ -34,8 +34,13 @@ func TestHandlers_StateBackedChecksumStore(t *testing.T) {
 	if !ok {
 		t.Fatalf("stateStore 装配后 checksumStoreFor(alice) 应为 *StateBackedChecksumStore, got %T", cs)
 	}
-	_ = sb
+	if err := sb.Flush(); err != nil { // 写经合并窗口
+		t.Fatalf("flush: %v", err)
+	}
 	cs.Set("user/dir/f.txt", "sha256hex")
+	if err := sb.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	if got, ok := cs.Get("user/dir/f.txt"); !ok || got != "sha256hex" {
 		t.Fatalf("checksum 读写失败 got=%q ok=%v", got, ok)
 	}
@@ -136,11 +141,37 @@ func TestHandlers_StateBackedLedger_KeyPerOwner(t *testing.T) {
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
 	h.SetStateStore(st)
 
-	h.checksumStoreFor("alice").Set("user/a.txt", "alice-cs")
+	aliceCS := h.checksumStoreFor("alice")
+	aliceCS.Set("user/a.txt", "alice-cs")
+	if f, ok := aliceCS.(checksum.Flusher); ok {
+		if err := f.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+	}
 	if _, ok := h.checksumStoreFor("bob").Get("user/a.txt"); ok {
 		t.Fatal("bob 不应看到 alice 的 checksum 记录（owner 隔离）")
 	}
-	if got, ok := h.checksumStoreFor("alice").Get("user/a.txt"); !ok || got != "alice-cs" {
+	if got, ok := aliceCS.Get("user/a.txt"); !ok || got != "alice-cs" {
 		t.Fatalf("alice 记录应保留 got=%q ok=%v", got, ok)
+	}
+}
+
+// TestHandlers_StateBackedChecksumStore_CachedPerOwner 钉住集群后端台账的**实例缓存**：
+// 未缓存时每次 checksumStoreFor 都新建 ⇒ 每次首读从 StateStore 全量拉回 + 反序列化
+// （O(全库) KV 读），且写合并器随实例丢弃而失效。
+//
+// 变异：stateStore 分支改为每次 New（不查缓存）⇒ 本用例红。
+func TestHandlers_StateBackedChecksumStore_CachedPerOwner(t *testing.T) {
+	t.Parallel()
+	h := newAssemblyTestHandlers(t, t.TempDir())
+	h.SetStateStore(state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger()))
+
+	a1 := h.checksumStoreFor("alice")
+	a2 := h.checksumStoreFor("alice")
+	if a1 == nil || a1 != a2 {
+		t.Fatal("集群后端 checksum 台账必须按 owner 缓存（否则每请求全量读 StateStore）")
+	}
+	if h.checksumStoreFor("bob") == a1 {
+		t.Fatal("不同 owner 不得共用台账实例")
 	}
 }

@@ -201,14 +201,14 @@ type Handlers struct {
 	// globalRoot 是 OpenRoot 后的全局存储根（含 LAYOUT_VERSION 校验）；
 	// globalPool 是全局配额池（cfg.MaxStorageBytes 兜底）。租户/checksum/配额均懒创建并缓存，
 	// tenantMu 串行化懒创建（无竞态）；P2 各 handler 逐个切换到 tenantOf/checksumStoreFor/quotaFor。
-	globalRoot     *storage.Root                      // 全局存储根（OpenRoot + LAYOUT_VERSION）
-	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
-	tenants        *storage.TenantCache               // 按 owner 缓存租户（含 anonymous；懒创建）
-	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
-	uploadStores   map[string]*files.UploadStore      // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
-	dedupStores    map[string]*files.DedupStore       // 按 owner 缓存 per-tenant 去重台账（懒创建）
-	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
-	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
+	globalRoot     *storage.Root                          // 全局存储根（OpenRoot + LAYOUT_VERSION）
+	globalPool     *quota.Pool                            // 全局配额池（cfg.MaxStorageBytes 兜底）
+	tenants        *storage.TenantCache                   // 按 owner 缓存租户（含 anonymous；懒创建）
+	checksumStores map[string]checksum.ChecksumStoreIface // 按 owner 缓存 checksum 台账（本地/集群后端同缓存）
+	uploadStores   map[string]*files.UploadStore          // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
+	dedupStores    map[string]*files.DedupStore           // 按 owner 缓存 per-tenant 去重台账（懒创建）
+	quotaScopes    map[string]*quota.Scope                // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
+	quotaBuckets   map[string]map[string]*quota.Scope     // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
 	// stagingScopes 按 owner 缓存**独立 staging 配额 Scope**（用户裁定 2026-10-10：
 	// 本地暂存独立记账，不与网盘 owner_quotas 混用——外部卷 WriteFile 先预留本地字节）。
 	// 上限 = trusted_volume.staging_quota_bytes；0 = 不限制但记账。tenantMu 保护。
@@ -387,7 +387,18 @@ func (h *Handlers) Metrics() *Metrics { return h.metrics }
 // checksum/dedup/share/索引保持原本地 JSON 落盘零回归；非 nil = 各 Store 适配器
 // 切 StateStore 后端——读旧 meta 回退 + 首写迁新路径的双读单写，见
 // state_ledger.go / state_share.go / pkg/files/state_index.go）。
-func (h *Handlers) SetStateStore(st state.StateStore) { h.stateStore = st }
+func (h *Handlers) SetStateStore(st state.StateStore) {
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	// 切换后端 ⇒ 关闭并丢弃缓存实例（旧实例的最后写入先落盘，避免跨后端串值）。
+	for _, cs := range h.checksumStores {
+		if c, ok := cs.(checksum.Closer); ok {
+			_ = c.Close()
+		}
+	}
+	clear(h.checksumStores)
+	h.stateStore = st
+}
 
 // EventsBus 返回事件总线（懒建；装配层桥接用）。
 func (h *Handlers) EventsBus() *EventBus { return h.eventBus() }
@@ -584,15 +595,19 @@ func (h *Handlers) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
 		h.logger.Warn("租户卷句柄不可用", "owner", owner)
 		return nil
 	}
-	if h.stateStore != nil {
-		return checksum.NewStateBackedChecksumStore(h.stateStore, "checksum/"+owner+"/all", root, checksumRel, h.logger)
-	}
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
 	if cs, ok := h.checksumStores[owner]; ok {
 		return cs
 	}
-	cs := checksum.NewChecksumStore(root, checksumRel, h.logger)
+	var cs checksum.ChecksumStoreIface
+	if h.stateStore != nil {
+		// **必须缓存**：每次新建 = 每次首读都从 StateStore 全量拉回 + 反序列化（O(全库) KV 读），
+		// 且写合并器随实例丢弃而失效。
+		cs = checksum.NewStateBackedChecksumStore(h.stateStore, "checksum/"+owner+"/all", root, checksumRel, h.logger)
+	} else {
+		cs = checksum.NewChecksumStore(root, checksumRel, h.logger)
+	}
 	h.checksumStores[owner] = cs
 	return cs
 }

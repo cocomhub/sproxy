@@ -393,6 +393,9 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 合并**（`ChecksumStore.Set` 只更新内存 + 累计代际，1s 定时器合并为一次全量落盘，`Flush`/`Close`
 可强制落盘）——此前每条 `Set` 都全量重写 `checksums.json`，批量 N 文件退化为 O(N²) I/O。
 崩溃窗口 ≤ debounce，台账可由对象 meta 侧车重建（`RebuildChecksums`），故窗口内丢失可自愈。
+合并逻辑由**唯一实现** `checksum.saveMerger` 承担，两个后端共用：`ChecksumStore`（卷内文件）与
+`StateBackedChecksumStore`（集群 StateStore，每次 Put 是一次 RTT）。集群后端的台账实例**按 owner
+缓存**（`Handlers.checksumStores`）——未缓存时每次首读都会从 StateStore 全量拉回 + 反序列化。
 
 **机制（四条不变量）**：
 

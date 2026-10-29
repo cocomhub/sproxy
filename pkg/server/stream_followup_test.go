@@ -53,7 +53,7 @@ func newSecretdataExternalEnv(t *testing.T) *Handlers {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(&Config{})
 	return &Handlers{volSet: vs, logger: testLogger(), tenants: tenants, cfgPtr: &cfgPtr,
-		checksumStores: make(map[string]*checksum.ChecksumStore)}
+		checksumStores: make(map[string]checksum.ChecksumStoreIface)}
 }
 
 // TestExternalUpload_SecretdataChecksumOK 上传到真实 secretdata 外部卷，客户端提供正确
