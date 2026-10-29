@@ -548,55 +548,9 @@ func (ix *searchIndex) removePrefix(owner, rel string) {
 	}
 }
 
-// rename 写路径增量：重命名/移动条目（from → to）。
-// 并发模型同 upsert：copy-on-write 替换指针（深拷贝保证 entry 字段不被在途 reader 读改）。
-func (ix *searchIndex) rename(owner, from, to string) {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-	oi := ix.owners[owner]
-	if oi == nil {
-		return
-	}
-	newOI := cloneOwnerIndexLocked(oi)
-	fromName := filepath.ToSlash(from)
-	toName := filepath.ToSlash(to)
-	tnt := ix.tenant0(owner)
-	movedTags := func(oldKey, newKey string) {
-		if tnt == nil {
-			return
-		}
-		if tags := loadTagsFromStore(tnt, oldKey); len(tags) > 0 {
-			_ = saveTagsToStore(tnt, newKey, tags)
-			deleteTagsFromStore(tnt, oldKey)
-		}
-	}
-	if e, ok := newOI.entries[fromName]; ok {
-		delete(newOI.entries, fromName)
-		e.name = toName
-		e.base = filepath.Base(toName)
-		newOI.entries[toName] = e
-		ix.owners[owner] = newOI
-		ix.markDirtyLocked(owner)
-		movedTags(fromName, toName)
-		return
-	}
-	// 目录子树重命名：前缀搬移。
-	var moves []struct{ old, new string }
-	for k := range newOI.entries {
-		if strings.HasPrefix(k, fromName+"/") {
-			moves = append(moves, struct{ old, new string }{k, toName + strings.TrimPrefix(k, fromName)})
-		}
-	}
-	for _, m := range moves {
-		e := newOI.entries[m.old]
-		delete(newOI.entries, m.old)
-		e.name = m.new
-		e.base = filepath.Base(m.new)
-		newOI.entries[m.new] = e
-		movedTags(m.old, m.new)
-	}
-	ix.owners[owner] = newOI
-}
+// 注：旧的 `searchIndex.rename`（内存搬移/子树前缀搬移）已删除（设计 2026-10-30 Phase 2）：
+// 目录 rename 由 Root 事件投影覆盖——`applyDirRename` = 删源前缀 + `rebuildSubtree` 按真实
+// 磁盘重建目标子树；单文件 rename 由事件 upsert 目标。保留它只会成为「第二实现」（无调用方）。
 
 // buildLocked 全量构建 owner 索引（调用方持 ix.mu）。owner 视图逐卷 WalkDir user 桶，
 // 跳过在途临时文件（.inflight-*.part）；目录条目与文件条目分别登记（目录用独立 isDir

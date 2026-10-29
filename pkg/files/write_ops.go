@@ -598,20 +598,8 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 			logger.WarnContext(context.Background(), "设置文件时间戳失败", "file_name", remotePath, "error", err)
 		}
 	}
-	// 搜索索引增量 upsert（roadmap P0）：与 checksum 台账同生命周期（单次上传与分块
-	// complete 共用本函数）。rel 是租户根相对（含 user/ 前缀），索引 key 为相对 user
-	// 桶路径（去 user/ 前缀）；mtime 用磁盘实际（Chtimes 后已生效）。
-	if s.index != nil {
-		if modTime, err := root.Stat(rel); err == nil {
-			// 索引 key 相对 user 桶（去 user/ 前缀）：从 owner 默认租户派生 user 桶名。
-			userRoot := "user"
-			if tnt := s.rt.tenantOf(owner); tnt != nil {
-				userRoot = tnt.UserRoot()
-			}
-			s.index.upsert(owner, strings.TrimPrefix(rel, userRoot+"/"),
-				modTime.Size(), modTime.ModTime().UnixNano(), s.volumeNameForRoot(root), root, rel)
-		}
-	}
+	// 搜索索引**不在此维护**（设计 2026-10-30 Phase 2）：写入经 `storage.Root` 的原子落位
+	// （tmp + rename）发 `MutationRename` ⇒ `ApplyRootMutation` 是唯一索引入口。
 	// 文件变更事件（roadmap §2 P1）：upload 成功（含覆盖写/分块 complete 共用本函数）。
 	s.rt.publishFileEvent(EventUpload, owner, rel, func() int64 {
 		if fi, err := root.Stat(rel); err == nil {
@@ -729,16 +717,7 @@ func (s *Service) MakeDir(ctx context.Context, owner, dirname, volName string) (
 	if mkErr := s.mkdirLocalWithCharge(ctx, owner, rel, remotePath, mkVol, target.Root()); mkErr != nil {
 		return MakeDirResult{}, mkErr
 	}
-	// 索引增量维护：mkdir 后索引补登记目录条目（父目录链由 upsert 顺带补全），
-	// 否则 List 走索引时新目录不出现（#423 修复：TestFiles_Mkdir E2E 红→绿）。
-	// 索引 key 相对 user 桶（去 user/ 前缀），与 upsert/List 索引空间一致。
-	if s.index != nil {
-		userRoot := "user"
-		if tnt := s.rt.tenantOf(owner); tnt != nil {
-			userRoot = tnt.UserRoot()
-		}
-		s.index.upsertDir(owner, strings.TrimPrefix(rel, userRoot+"/"))
-	}
+	// 索引由 Root 事件维护（`MutationMkdir` → `ApplyRootMutation`，唯一入口）。
 	s.rt.logger().Info("目录已创建", "dir", remotePath)
 	// 文件变更事件：mkdir 成功。
 	s.rt.publishFileEvent(EventMkdir, owner, rel, 0)
@@ -977,10 +956,7 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 			checksumDelete(cs, f.volName, rel)
 		}
 	}
-	// 搜索索引同步删除子树（roadmap P0）：rmdir 后子树不可见。
-	if s.index != nil {
-		s.index.removePrefix(owner, strings.TrimPrefix(rel, "user/"))
-	}
+	// 索引由 Root 事件维护（`MutationRemoveAll` → `removePrefix`，唯一入口）。
 }
 
 // cleanupRemovedDirMeta 删除目录内各文件 meta sidecar 并释放其 meta 桶配额
@@ -1583,9 +1559,8 @@ func (s *Service) renameChecksumIndex(a renameHomeArgs) {
 	if cs := s.rt.checksumStore(a.owner); cs != nil {
 		checksumRename(cs, a.volName, a.fromRel, a.toRel)
 	}
-	if s.index != nil {
-		s.index.rename(a.owner, strings.TrimPrefix(a.fromRel, "user/"), strings.TrimPrefix(a.toRel, "user/"))
-	}
+	// 搜索索引由 Root 事件维护（`MutationRename` + `IsDir` → `applyDirRename`：删源前缀 +
+	// 按磁盘重建目标子树，设计 2026-10-30 D2）——此处不再显式搬移。
 	// 可信卷：重命名主文件联动移动配套 .meta（服务端内部文件随主文件一起动）。
 	// M4 修复：搬 meta 前先确保 meta 目标父目录存在（rename 到新目录时 meta/<新dir>
 	// 不存在 → 裸 Rename 失败被吞 → 孤儿 + 目标无 sidecar）；失败记 Warn（非阻断）。
@@ -2064,9 +2039,7 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 		// 卷维度键（§15.1.1）：按文件**实际所在卷**删除，避免残留（旧键由 helper 兜底）。
 		checksumDelete(csStore, homeVol, rel)
 	}
-	if s.index != nil {
-		s.index.remove(f.owner, strings.TrimPrefix(rel, "user/"))
-	}
+	// 索引由 Root 事件维护（`MutationRemove` → `remove`，唯一入口）。
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordDelete()
 	}
