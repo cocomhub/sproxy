@@ -1,6 +1,7 @@
 # 派生状态投影：单一写入口与事件语义（设计）
 
-> 状态：Phase 1 实施中（2026-10-30）。范围：搜索索引（`pkg/files`）、卷状态缓存
+> 状态：**Phase 1 + Phase 2 已实施**（2026-10-30）；Phase 3（外部卷搜索）待产品口径。
+> 范围：搜索索引（`pkg/files`）、卷状态缓存
 > （`pkg/volumestate`）、checksum 台账（`pkg/checksum`）的**写入口收敛**。
 > 前置审计：`docs/archive/index-cache-search-convergence.md`（#905/#906/#907）。
 
@@ -51,15 +52,20 @@
 - rename 目标：`IsDir` ⇒ `upsertDir`；**子树条目**由写内核的 `index.rename`（内存搬移）或下一次
   全量重建补齐——Phase 2 改为「投影器递归重建目标子树」，届时删除显式 `index.rename`。
 
-### D2 单一投影器（Phase 2，下一片）
+### D2 单一写入口（Phase 2，**已实施**）
 
-- 新增 `pkg/files` 内的 `derivedProjector`（或 `pkg/derived`），唯一职责：把一次 `Mutation` 投影到
-  索引 + （经装配层）缓存失效 + 台账变更；
-- 删除 `write_ops.go` 的 5 处显式索引调用与 `recordUploadSuccess` 的 upsert；`tags.go` 的
-  `setTags` 保留（标签不是 Root 事件，属显式写面）；
-- 目录 rename 的子树搬移由投影器完成：`removePrefix(from)` → 递归 `ReadDir` 目标子树 → `upsert*`；
-- **前置**：测试基建（`dirsEnv`）的写路径统一走 `storage.Root`（当前部分用例以 os 直写，
-  掩盖了事件是否真正覆盖）；否则无法用测试证明 I1。
+实施要点（与初稿的差异记录）：
+
+- **投影器不新造包**：`ApplyRootMutation`（`mutation_index.go`）已是唯一投影入口，原地扩展
+  （目录 rename → `applyDirRename`）而非新建 `pkg/derived`——避免为「只有一个消费者」引入中间层；
+- 删除 `write_ops.go` 的**全部** `s.index.<write>`（upload/mkdir/rmdir/delete/rename 共 5 处）；
+  `tags.go` 的 `setTags` 保留（标签不是 Root 事件，属显式写面）；
+  `service.go` 的 `RecordBypassWrite` 保留（**外部卷**无本地 Root，事件不可达）；
+- **测试基建统一形态**：`dirsEnv` 改为「观察者装**卷根** + 租户经 `storage.OpenTenant` 子根创建」
+  （与生产同构：事件 `Rel` 自动带 `<owner>/` 前缀、`m.Root` 恒为卷根）。此前用
+  `OpenRoot(<root>/<owner>)`（无前缀机制）⇒ 事件驱动看似不生效，掩盖了真实覆盖情况；
+- **R47 门禁**：`write_ops.go` 出现 `s.index.<write>` 即红（含扫描面探针）；R46 棘轮同步降
+  `write_ops.go` 4 → 0。
 
 ### D3 快照安全（Phase 1：已核实，**无需代码变更**）
 
@@ -90,7 +96,7 @@
 | 阶段 | 内容 | 验收（变异必须命中） |
 |---|---|---|
 | **Phase 1**（本片） | `Mutation.IsDir`（Root 操作前 Stat 判定）+ 目录 rename 全投影（删源前缀 + 按磁盘重建目标子树）+ 删除写内核显式 `index.rename` + R45 门禁接受 `notifyMutationKind` | 目录 rename 后源前缀条目消失且目标子树路径正确（变异：改回单条 ⇒ 「应命中 z/b/keep.txt，got a/b/keep.txt」红）；`IsDir` 语义（Mkdir/RemoveAll true、文件 write/rename/remove false、目录 rename/remove true） |
-| Phase 2 | 去双写：投影器唯一入口 + 测试基建统一 Root + 目录 rename 目标子树递归重建 + R47 门禁 | 删除显式 `index.upsert` 后上传/删除/rename 契约测试仍绿；R47 源码扫描红 |
+| **Phase 2**（已交付） | 删除写内核 5 处显式索引写 + 测试基建改 `OpenTenant`（观察者装卷根，事件自动带 owner 前缀）+ R47 门禁 + R46 棘轮 4→0 | `TestService_SearchFiles_IndexTracks*`（upload/delete/rename/rmdir）在**无显式 upsert** 下仍绿；R47 变异（加回 `s.index.upsert`）红；删观察者安装 ⇒ 索引测试红 |
 | Phase 3 | 外部卷搜索（按产品口径） | 按选定选项 |
 
 ## 5. 风险与回滚
@@ -98,8 +104,10 @@
 - `IsDir` 的 `Stat` 失败（目标已被并发删除）⇒ 保守 `false`（与现状一致，不引入新错误）；
 - Phase 2 的最大风险是「某写面不发事件」⇒ 以「R47 + 契约测试 + E2E」三重兜底；回滚只需恢复
   显式调用（单文件 diff）；
-- Phase 1 删除 `index.rename` 后，目录 rename 的索引维护完全依赖事件；若某写面不经 `Root`
-  （当前仅测试基建的 os 直写），索引会滞后 ⇒ Phase 2 一并统一测试基建并加 R47 门禁。
+- Phase 2 后写内核与索引彻底解耦：**新增写面若不经 `storage.Root`，索引不会更新**——由 R47 +
+  契约测试兜底；新增本地写路径必须经 Root（这也是「按卷操作」纪律的一部分）。
+- `RecordBypassWrite` 的 upsert 仍是外部卷唯一入口（无 Root 事件）；本地旁路写应改用
+  `RecordBypassChecksum`（只补台账，索引由事件维护）。
 
 ## 6. 测试策略
 

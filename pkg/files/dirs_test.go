@@ -126,12 +126,18 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 		checksum:     map[string]*checksum.ChecksumStore{},
 		buckets:      map[string]*quota.Scope{},
 		externalVols: map[string]*fakeExternalVolume{},
+		volRoots:     map[string]*storage.Root{},
 	}
 	e.rebuild()
 	t.Cleanup(func() {
 		for _, tnt := range e.tenants {
 			if tnt != nil && tnt.Root() != nil {
 				_ = tnt.Root().Close()
+			}
+		}
+		for _, r := range e.volRoots {
+			if r != nil {
+				_ = r.Close()
 			}
 		}
 		if e.volSet != nil {
@@ -203,13 +209,11 @@ func (e *dirsEnv) newService() *Service {
 	if err != nil {
 		panic("测试装配 files.New 失败: " + err.Error())
 	}
-	// 测试基建对齐生产装配（审计 2026-10-29 P2-1）：Root 变异事件是**唯一**索引入口
-	// （生产见 volume_mutation_wiring.go；测试此前缺该接线，导致写内核显式 upsert
-	// 掩盖了「事件驱动是否真的生效」）。已建 tenant 在此补装。
-	for _, tnt := range e.tenants {
-		if tnt != nil && tnt.Root() != nil {
-			tnt.Root().SetMutationObserver("main", svc.ApplyRootMutation)
-		}
+	// 测试基建对齐生产装配（设计 2026-10-30 Phase 2）：Root 变异事件是**唯一**索引入口。
+	// 生产形态 = 观察者装在**卷根**，租户经 `OpenTenant` 子根继承（Rel 自动带 `<owner>/`
+	// 前缀、`m.Root` 恒为卷根）。此处同构：只装卷根，懒建租户自动继承。
+	if root := e.defaultRoot(); root != nil {
+		root.SetMutationObserver("main", svc.ApplyRootMutation)
 	}
 	return svc
 }
@@ -421,30 +425,40 @@ func (e *dirsEnv) tenantFor(owner string) *storage.Tenant {
 	if !storage.ValidSegmentName(owner) {
 		return nil
 	}
-	dir := filepath.Join(e.root, owner)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	parent := e.defaultRoot()
+	if parent == nil {
 		return nil
 	}
-	rt, err := storage.OpenRoot(dir)
+	// 与生产一致：租户子根经 `OpenTenant` 创建 —— 继承卷根观察者（事件 Rel 自动加
+	// `<owner>/` 前缀、`m.Root` 恒为卷根）并预建 meta 桶。
+	tnt, err := storage.OpenTenant(parent, owner, storage.WithMetaBucket())
 	if err != nil {
-		return nil
-	}
-	tnt, err := storage.NewTenant(owner, rt)
-	if err != nil {
-		_ = rt.Close()
-		return nil
-	}
-	// 与生产 tenantFor 一致：预建 meta 桶（供 per-tenant checksum / meta 记录写入）。
-	if err := rt.MkdirAll("meta", 0o755); err != nil {
-		_ = rt.Close()
 		return nil
 	}
 	e.tenants[owner] = tnt
-	// 懒建租户同样接线（与生产「子根创建时继承观察者」等价）。
-	if e.svc != nil {
-		rt.SetMutationObserver("main", e.svc.ApplyRootMutation)
-	}
 	return tnt
+}
+
+// defaultRoot 返回默认卷的**卷根**句柄（懒建并缓存；单卷 env 以 e.root 为卷根）。
+func (e *dirsEnv) defaultRoot() *storage.Root {
+	if e.volRoots == nil {
+		e.volRoots = map[string]*storage.Root{}
+	}
+	if r, ok := e.volRoots["main"]; ok && r != nil {
+		return r
+	}
+	if e.volSet != nil {
+		if r := e.volSet.Root(e.volSet.Default().Name); r != nil {
+			e.volRoots["main"] = r
+			return r
+		}
+	}
+	r, err := storage.OpenRoot(e.root)
+	if err != nil {
+		return nil
+	}
+	e.volRoots["main"] = r
+	return r
 }
 
 // volumeTenant 复刻 pkg/server 语义：默认卷委托 tenantFor，其余卷走卷集合懒建。

@@ -8,7 +8,6 @@ pkg/files/checksum_rebuild.go	1	checksum_ledger=1：§15.1 步骤①+②（自�
 pkg/files/read.go	1	checksum_ledger=1
 pkg/files/search_index.go	1	index_api=1
 pkg/files/service.go	1	index_api=1
-pkg/files/write_ops.go	4	index_api=4
 pkg/server/du.go	5	checksum_ledger=5
 pkg/server/handlers.go	7	checksum_ledger=7
 pkg/server/stats.go	4	checksum_ledger=4
