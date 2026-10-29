@@ -245,7 +245,7 @@ func TestE2E_MeshNode_Discovery(t *testing.T) {
 }
 
 // TestE2E_MeshNode_ServiceAccess 验证 mesh 完全服务互访（双向全覆盖）：
-// hub + node-svc（宣告 echo）+ node-ap（宣告 echo-ap，自动直连 node-svc，网关 18085）
+// hub + node-svc（宣告 echo）+ node-ap（宣告 echo-ap，自动直连 node-svc，网关取空闲端口）
 // + mesh connect --gateway → 同一条已建直连链路**双向**路由（A→B 经 node-ap 网关、
 // B→A 经 node-svc 网关 accept 侧注册链路回拨），数据面端到端就绪（复用已建链路，
 // 零重新打洞）。
@@ -279,15 +279,17 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 	echoApAddr := startEcho()
 
 	// node-ap（低 ID "e2e-ap"，访问方 + 服务宿主 echo-ap）：自动拨号 node-svc；
-	// 网关 18085（默认）。可观测 stderr 等待自动直连建立。
+	// 网关取空闲端口（并行 E2E 下固定端口会冲突）。可观测 stderr 等待自动直连建立。
+	apGateway := freeLoopbackAddr(t)
+	svcGateway := freeLoopbackAddr(t)
 	var stderrAP lockedBuffer
 	cleanupAP := startSClientMeshNodeObservable(t, hubURL, "e2e-ap", "echo-ap:"+echoApAddr, &stderrAP, ak, sk,
-		"--discover-interval", "1s", "--gateway-addr", "127.0.0.1:18085")
+		"--discover-interval", "1s", "--gateway-addr", apGateway)
 	defer cleanupAP()
 
 	// node-svc（服务宿主 echo）：网关换端口避免同机冲突。
 	cleanupSvc := startSClientMeshNode(t, hubURL, "e2e-svc", "echo:"+echoSvcAddr, ak, sk,
-		"--discover-interval", "1s", "--gateway-addr", "127.0.0.1:18086")
+		"--discover-interval", "1s", "--gateway-addr", svcGateway)
 	defer cleanupSvc()
 
 	// 等 node-ap 自动直连 node-svc（进程级 stderr 观测，≤20s）。说明同
@@ -343,8 +345,8 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 		}
 	}
 
-	// 方向 1（A→B）：node-ap 网关（18085）经已建链路路由到 node-svc 的 echo。
-	echoRoundTrip("echo", "127.0.0.1:18085")
-	// 方向 2（B→A）：node-svc 网关（18086，accept 侧注册链路）回拨 node-ap 的 echo-ap。
-	echoRoundTrip("echo-ap", "127.0.0.1:18086")
+	// 方向 1（A→B）：node-ap 网关经已建链路路由到 node-svc 的 echo。
+	echoRoundTrip("echo", apGateway)
+	// 方向 2（B→A）：node-svc 网关（accept 侧注册链路）回拨 node-ap 的 echo-ap。
+	echoRoundTrip("echo-ap", svcGateway)
 }
