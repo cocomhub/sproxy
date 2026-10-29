@@ -16,22 +16,25 @@ import (
 	"context"
 	"os"
 	"sort"
+	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // viewListAdapter 把「卷集 + lister」组合为 VolumeSet + VolumeViewLister（模拟装配层适配器）。
 type viewListAdapter struct {
-	dirsExternalSet
+	VolumeSet
 	lister VolumeViewLister
 }
 
-func (v viewListAdapter) ListDirView(ctx context.Context, volName, key string) ([]ExternalEntry, bool, error) {
-	return v.lister.ListDirView(ctx, volName, key)
+func (v viewListAdapter) ListDirView(ctx context.Context, volName, owner, subdir string) ([]ExternalEntry, bool, error) {
+	return v.lister.ListDirView(ctx, volName, owner, subdir)
 }
 
 // viewListSet 给测试卷集加装 files.VolumeViewLister（模拟装配层 ListDirView）。
 type viewListSet struct {
-	dirsExternalSet
+	*registry.Set
 	env *dirsEnv
 	// calls 记录被调用的次数（证明视图路径真的被走到，而不是静默回落实时扫描）。
 	calls int
@@ -39,14 +42,22 @@ type viewListSet struct {
 	unsupported bool
 }
 
-func (v *viewListSet) ListDirView(_ context.Context, volName, key string) ([]ExternalEntry, bool, error) {
+func (v *viewListSet) ListDirView(_ context.Context, volName, owner, subdir string) ([]ExternalEntry, bool, error) {
 	v.calls++
 	if v.unsupported {
 		return nil, false, nil
 	}
-	owner, userRel, ok := splitOwnerKey(key)
-	if !ok {
-		return nil, true, os.ErrNotExist
+	// 外部卷：返回 fake 条目（模拟装配层经外部卷视图列举）。
+	if ext, ok := v.env.externalVols[volName]; ok && ext != nil {
+		ext.gotRel.Store(subdir)
+		if ext.listErr != nil {
+			return nil, true, ext.listErr
+		}
+		return ext.entries, true, nil
+	}
+	userRel := userBucket
+	if subdir != "" {
+		userRel += "/" + strings.Trim(subdir, "/")
 	}
 	tnt := v.env.volumeTenant(volName, owner)
 	if tnt == nil || tnt.Root() == nil {
@@ -67,24 +78,6 @@ func (v *viewListSet) ListDirView(_ context.Context, volName, key string) ([]Ext
 		})
 	}
 	return out, true, nil
-}
-
-// splitOwnerKey 把 `<owner>/user/<rel>` 拆成 (owner, `user/<rel>`)——测试视角的租户根命名空间。
-func splitOwnerKey(key string) (owner, rel string, ok bool) {
-	owner, rest, found := cutSlash(key)
-	if !found {
-		return "", "", false
-	}
-	return owner, rest, true
-}
-
-func cutSlash(s string) (string, string, bool) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '/' {
-			return s[:i], s[i+1:], true
-		}
-	}
-	return s, "", false
 }
 
 // viewEnv 构造「多卷 + 可选卷视图列举」的测试环境（default 卷落在 e.root）。

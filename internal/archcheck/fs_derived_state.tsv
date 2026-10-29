@@ -4,7 +4,6 @@ pkg/gateway/webdav/remote.go	subPathFS	纯透传适配器：无进程内 list �
 pkg/remote/fs.go	remoteFS	纯透传适配器：无进程内 list 派生状态
 pkg/rootfs/rootfs.go	rootFSCore	本地卷写面：结构事件由 storage.Root 广播、内容写由 MarkWritten 声明，不自管列表缓存
 pkg/server/backup_api.go	backupQuotaFS	装配层适配器：纯透传，派生状态由 pkg/files / pkg/volumestate 唯一提供方负责
-pkg/server/files_service.go	filesExternalVolume	装配层适配器：纯透传，派生状态由 pkg/files / pkg/volumestate 唯一提供方负责
 pkg/server/secrets_fs.go	rootSecretsFS	装配层适配器：纯透传，派生状态由 pkg/files / pkg/volumestate 唯一提供方负责
 pkg/sync/encrypted.go	EncryptedFS	通用装饰器/本地实现：无进程内 list 派生状态（结构视图即底层真值）
 pkg/sync/httptransport/http_transport.go	HTTPTransport	通用装饰器/本地实现：无进程内 list 派生状态（结构视图即底层真值）

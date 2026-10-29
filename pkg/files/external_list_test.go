@@ -24,55 +24,30 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
-// dirsExternalSet 是 dirsEnv 的多卷集包装：嵌入 *registry.Set 继承 VolumeSet 方法，
-// 并实现 ExternalVolumeSource（按卷名取外部卷目录浏览能力，来自 dirsEnv.externalVols）。
-type dirsExternalSet struct {
-	*registry.Set
-	ext map[string]ExternalVolume
-}
-
-func (a dirsExternalSet) ExternalVolume(name string) ExternalVolume {
-	return a.ext[name]
-}
-
 // enableExternalVolume 在卷集上挂载一个外部卷（卷描述 + 目录浏览能力 fake），重建
 // Service。需要先启用至少一个本地默认卷（供 owner 租户解析与本地路径兼容）。外部卷
 // 不建 storage.Root（无 *storage.Tenant，路由经 ExternalVolumeOps 接缝直连 ListDir）。
-func (e *dirsEnv) enableExternalVolume(t *testing.T, extVol volume.Volume, ext ExternalVolume) {
+func (e *dirsEnv) enableExternalVolume(t *testing.T, extVol volume.Volume, ext *fakeExternalVolume) {
 	t.Helper()
 	if e.volSet == nil {
 		e.enableVolumes(t, "default")
 	}
 	if e.externalVols == nil {
-		e.externalVols = map[string]ExternalVolume{}
+		e.externalVols = map[string]*fakeExternalVolume{}
 	}
 	e.externalVols[extVol.Name] = ext
 	e.volSet = registry.NewSet(append(e.volSet.All(), extVol), e.volRoots, nil, e.pools, e.volSet.Default().Name)
-	if fe, ok := ext.(*fakeExternalVolume); ok {
-		e.externalOps = &fakeExternalVolumeOps{ext: fe}
+	if e.viewList == nil {
+		e.viewList = &viewListSet{Set: e.volSet, env: e}
 	}
 	e.rebuild()
 }
 
-// fakeExternalVolumeOps 是 ExternalVolumeOps 的测试 fake：ExternalList 委托
-// fakeExternalVolume.ListDir（subdir 为用户可见相对路径，直传），其余方法 no-op 未命中
-// （列表透传语义只经 ExternalList）。装配层 owner 限定由 pkg/server 侧覆盖。
+// fakeExternalVolumeOps 是 ExternalVolumeOps 的测试 fake：列举已统一到视图路径
+// （`VolumeViewLister`），本 fake 只保留对象操作（Delete/Stat/Meta/...）的 no-op 实现；
+// 列举 fake 由 `viewListSet` + `fakeExternalVolume` 提供。
 type fakeExternalVolumeOps struct {
 	ext *fakeExternalVolume
-}
-
-func (o *fakeExternalVolumeOps) ExternalList(ctx context.Context, _, volName, subdir string) ([]FileInfo, bool, error) {
-	entries, err := o.ext.ListDir(ctx, subdir)
-	if err != nil {
-		return nil, true, err
-	}
-	out := make([]FileInfo, 0, len(entries))
-	for _, e := range entries {
-		// 与装配层 externalVolumeOps.ExternalList 同构：填卷名（卷徽标用）；
-		// 展示分类（VolumeCategory）由领域层 listExternalVolume 按卷类型补。
-		out = append(out, FileInfo{Name: e.Name, IsDir: e.IsDir, Size: e.Size, Volume: volName})
-	}
-	return out, true, nil
 }
 
 func (o *fakeExternalVolumeOps) ExternalDelete(context.Context, string, string, string, string) (bool, error) {
@@ -115,8 +90,8 @@ func (o *fakeExternalVolumeOps) ExternalRename(context.Context, string, string, 
 
 var _ ExternalVolumeOps = (*fakeExternalVolumeOps)(nil)
 
-// fakeExternalVolume 是 ExternalVolume 的测试 fake：固定返回条目，记录 ListDir 收到的
-// rel（断言 owner 限定），listErr 非 nil 时模拟后端失败。
+// fakeExternalVolume 是外部卷列举的测试 fake（经 viewListSet 返回固定条目）：记录收到的
+// subdir（用户可见相对路径），listErr 非 nil 时模拟后端失败。
 type fakeExternalVolume struct {
 	entries []ExternalEntry
 	listErr error

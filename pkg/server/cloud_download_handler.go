@@ -1144,7 +1144,7 @@ func (h *Handlers) cloudArchiveToVolume(
 	h.settleVolumePoolCharge(t.TargetVolume, chargeBefore, chargeAfter)
 	// **派生状态登记**（R16 缺陷族修复 B）：归档转存产物写目标卷 user 桶不经 pkg/files 写内核
 	// ⇒ 需显式登记 checksum 台账 + 搜索索引（checksum 从可信卷 meta sidecar 读；仅本地卷目标
-	// ——外部卷 list 走 ExternalList 从 meta.Provider 读）。
+	// ——外部卷 list 走卷视图，checksum 由卷自报 `sync.Entry.Checksum` 透传）。
 	h.recordArchiveBypassState(t, fs, rel, chargeAfter)
 	if onSuccess != nil {
 		onSuccess(url)

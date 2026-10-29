@@ -107,7 +107,7 @@ func (h *Handlers) duHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // duExternalVolume 统计**外部卷**（无本地 Root）子树：经同一可信链取外部 FS，用 `externalVolumeKey`
-// 把用户可见路径翻译为卷内键（与 ExternalList/ExternalStat 同一解析），再递归列举统计。
+// 把用户可见路径翻译为卷内键（与 ListDirView/ExternalStat 同一解析），再递归列举统计。
 // 语义与本地 `walkDu` 对齐（跳过 .__ 魔法目录与 checksums.json/LAYOUT_VERSION 元数据）。
 func (h *Handlers) duExternalVolume(w http.ResponseWriter, r *http.Request, owner string, v volume.Volume, remotePath string) {
 	fsys, ok := h.externalFSFor(v.Name)

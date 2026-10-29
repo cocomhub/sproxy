@@ -93,31 +93,46 @@ type filesVolumeSet struct {
 }
 
 // ListDirView 实现 files.VolumeViewLister：经**卷视图**（VolumeView，含可信封装/容量/状态缓存
-// 装饰）列出目录直接子项——list 与 sync/mirror/备份同一数据源（设计 §15.2 步骤 2）。
+// 装饰）列出任意可见卷（本地 + 外部）的直接子项——list 与 sync/mirror/备份同一数据源
+// （设计 §15.2 步骤 2/3，2026-10-29 收敛为唯一列举入口）。
 //
-// 门控在**装配层**（单一事实源）：缓存被 `volume_state.disable` 关闭 ⇒ supported=false ⇒
-// 领域侧回落索引路径（零回归）。非本地卷不在此处理（默认聚合从不含外部卷）。
-func (s filesVolumeSet) ListDirView(ctx context.Context, volName, key string) ([]files.ExternalEntry, bool, error) {
+// 键空间差异（共享卷 `<owner>/user/<rel>` / 独立卷 `user/<rel>`）由 `ResolveUserLocation`
+// 统一处理，领域层只传 `(owner, subdir)`。缓存开关（`volume_state.disable`）不改变本能力，
+// 只决定视图是否带缓存（装饰链在装配期决定）。
+//
+// 返回 supported=false = 卷集未装配 / 卷不存在或未授权（调用方按未命中处理，不泄存在性）。
+func (s filesVolumeSet) ListDirView(ctx context.Context, volName, owner, subdir string) ([]files.ExternalEntry, bool, error) {
 	if s.sinkHost == nil || s.Set == nil {
 		return nil, false, nil
 	}
-	if cfg := s.sinkHost.cfgPtr.Load(); cfg == nil || cfg.VolumeState.Disable {
-		return nil, false, nil
-	}
-	if !s.HasLocalRoot(volName) {
+	v, ok := s.ByName(volName)
+	if !ok || !v.Authorize(owner) {
 		return nil, false, nil
 	}
 	fsys, ok := s.VolumeView(volName, registry.ViewUser)
 	if !ok || fsys == nil {
 		return nil, false, nil
 	}
-	entries, err := fsys.ListDir(ctx, key)
+	loc, lerr := v.ResolveUserLocation(owner, subdir)
+	if lerr != nil {
+		return nil, true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
+	}
+	entries, err := fsys.ListDir(ctx, loc.FSPath())
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, true, nil // 目录不存在 = 空列表
+		}
 		return nil, true, err
 	}
 	out := make([]files.ExternalEntry, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, files.ExternalEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size, MTime: e.MTime})
+		fi := files.ExternalEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size, MTime: e.MTime}
+		// 列举带 checksum（S3，2026-10-27）：底层 FS 自报整文件 SHA-256（secretdata 内存 meta
+		// 直取，O(1)）→ 透传；否则留空（远端每文件读 sidecar = n 次往返，由消费方 stat 兜底）。
+		if e.ChecksumType == "sha256" && e.Checksum != "" {
+			fi.Checksum = e.Checksum
+		}
+		out = append(out, fi)
 	}
 	return out, true, nil
 }
@@ -130,17 +145,6 @@ func (s filesVolumeSet) ListDirView(ctx context.Context, volName, key string) ([
 // 无状态转发：不读嵌入的 *registry.Set（nil 也安全），故装配处传 `filesVolumeSet{Set: h.volSet}`
 // 与其它适配器同形。
 func (a filesVolumeSet) CategoryOf(typ string) string { return registry.CategoryOf(typ) }
-
-// ExternalVolume 实现 files.ExternalVolumeSource：按卷名返回外部卷目录浏览能力。
-// 未知/非外部卷（本地卷）→ nil（List 的 `?volume=` 回落既有本地聚合，零回归）。
-func (a filesVolumeSet) ExternalVolume(name string) files.ExternalVolume {
-	// U2 统一取卷入口：VolumeView(name, ViewUser)（本地卷同样返回可信视图；外部卷同前）。
-	fsys, ok := a.VolumeView(name, registry.ViewUser)
-	if !ok || fsys == nil {
-		return nil
-	}
-	return filesExternalVolume{fs: fsys}
-}
 
 // ExternalDeleter 实现 files.ExternalVolumeDeleter（C2，2026-10-06）：按卷名返回外部卷删除
 // 能力。未知/非外部卷（本地卷）/FS 不可用 → nil（delete 走既有本地卷路径，零回归）。
@@ -242,22 +246,6 @@ func (a filesExternalDeleter) Delete(ctx context.Context, _, owner, rel string) 
 		return err
 	}
 	return a.fs.Delete(ctx, key)
-}
-
-// filesExternalVolume 把 sync.FS 的 ListDir 适配为 files.ExternalVolume
-// （[]syncpkg.Entry → []files.ExternalEntry，只保留 Name/IsDir/Size 明文视图）。
-type filesExternalVolume struct{ fs syncpkg.FS }
-
-func (a filesExternalVolume) ListDir(ctx context.Context, rel string) ([]files.ExternalEntry, error) {
-	entries, err := a.fs.ListDir(ctx, rel)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]files.ExternalEntry, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, files.ExternalEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size})
-	}
-	return out, nil
 }
 
 func (r filesRuntime) Tenant(volName, owner string) *storage.Tenant {
@@ -540,53 +528,6 @@ func externalVolumeKey(v volume.Volume, owner, remotePath string) (string, bool)
 		return "", false
 	}
 	return loc.FSPath(), true
-}
-
-// ExternalList 实现 files.ExternalVolumeOps：经**同一可信链**（`Guard(Wrap(be.FS()))`）
-// 列举外部卷目录（用户可见相对路径经 `ResolveUserLocation` 翻译为卷内键——共享卷自动加
-// owner 前缀隔离）。语义：非外部卷/未授权/未装配 → (nil,false,nil)（调用方零回归）；
-// 目录不存在 → 空列表；远端/IO 失败 → 500。
-func (o externalVolumeOps) ExternalList(ctx context.Context, owner, volName, subdir string) ([]files.FileInfo, bool, error) {
-	h := o.h
-	if h.volSet == nil {
-		return nil, false, nil
-	}
-	fsys, ok := h.externalFSFor(volName)
-	if !ok {
-		return nil, false, nil
-	}
-	v, ok := h.volSet.ByName(volName)
-	if !ok || !v.Authorize(owner) {
-		return nil, false, nil // 未授权/未知 → 不命中（404，不泄卷存在性）
-	}
-	key, ok := externalVolumeKey(v, owner, subdir)
-	if !ok {
-		return nil, true, &files.HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
-	}
-	entries, lerr := fsys.ListDir(ctx, key)
-	if lerr != nil {
-		if errors.Is(lerr, os.ErrNotExist) {
-			return nil, true, nil // 目录不存在 = 空列表
-		}
-		h.logger.Warn("外部卷列举失败", "volume", volName, "subdir", subdir, "error", lerr.Error())
-		return nil, true, &files.HTTPError{Status: http.StatusInternalServerError, Message: "列举失败"}
-	}
-	out := make([]files.FileInfo, 0, len(entries))
-	for _, e := range entries {
-		fi := files.FileInfo{
-			Name: e.Name, IsDir: e.IsDir, Size: e.Size, ModTime: e.MTime, Volume: volName, // ModTime = UnixNano
-		}
-		// **列举带 checksum（S3，2026-10-27）**：底层 FS 的 ListDir 条目若已自报整文件
-		// SHA-256（secretdata 内存 meta 直取，O(1)）→ 透传；否则留空（baidupcs/S3 每文件
-		// 读一次 sidecar = n 次远端往返 ⇒ 保持 unknown，由消费方 stat 兜底）。
-		// 只认 sha256（`ChecksumType` 已自述）——ETag 等非 SHA-256 算法**不得**填入
-		// FileInfo.Checksum（它会直达 Web UI 的 checksum 门禁，必须是整文件 SHA-256）。
-		if e.ChecksumType == "sha256" && e.Checksum != "" {
-			fi.Checksum = e.Checksum
-		}
-		out = append(out, fi)
-	}
-	return out, true, nil
 }
 
 // ExternalStat 实现 files.ExternalVolumeOps：外部卷对象元信息（明文 checksum 经 meta.Provider）。

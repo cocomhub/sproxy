@@ -1229,7 +1229,8 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 	// **外部卷目标不写本地副作用**：mtime/sidecar/索引都作用于「本地 root 上的 rel 实体」，
 	// 而外部卷目标的内容不在本地（已由 `completeExternalTransfer` 转存到目标卷）——
 	// 目标卷的 mtime/meta 由**写面装饰链**（trusted.Guard(Wrap)）在 Sink 写时自行生成，
-	// 列举走 `ExternalList`（不依赖本地索引）。此处若照本地卷路径做，会得到两条噪音告警
+	// 列举走卷视图（`VolumeViewLister.ListDirView`，不依赖本地索引）。此处若照本地卷路径做，
+	// 会得到两条噪音告警
 	// （`chtimesat user/...: no such file` / sidecar 写入失败）且无任何真实作用。
 	if session.ExternalTarget {
 		s.finishSessionAfterComplete(owner, uploadID)

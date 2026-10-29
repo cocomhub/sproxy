@@ -13,8 +13,11 @@ package archcheck
 //
 // 本门禁现由两段组成：
 //  1. **硬禁**：`.index.list(` 出现即失败（实现已删除，任何新增都是回归）；
-//  2. **棘轮**：`.index.search(` / `ExternalList(` 逐文件登记，只减不增（`ExternalList` 是
-//     **外部卷列举能力接缝**，显式 `?volume=<外部卷>` 用，不是本地 list 数据源）。
+//  2. **棘轮**：`.index.search(` 逐文件登记，只减不增（搜索是 searchIndex 的唯一职责）。
+//
+// 2026-10-29 追加收敛：外部卷列举接缝 `ExternalList` / `ExternalVolumeSource` 已删除——
+// 本地卷与外部卷共用 `VolumeViewLister.ListDirView`（键空间由 `ResolveUserLocation` 统一）。
+// 因此 `ExternalList(` 也转为**硬禁**。
 
 import (
 	"os"
@@ -32,10 +35,13 @@ const listSourceCallsFile = "list_source_calls.tsv"
 // listIndexListPattern 是**已删除**的 list 索引入口（硬禁：任何出现都是回归）。
 var listIndexListPattern = regexp.MustCompile(`\.index\.list\(`)
 
+// externalListPattern 是**已删除**的外部卷列举接缝（2026-10-29 收敛进 VolumeViewLister；
+// 硬禁：任何出现都是回归）。
+var externalListPattern = regexp.MustCompile(`ExternalList\(`)
+
 // listSourcePatterns 是 list/search 数据源的直调形态。
 var listSourcePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\.index\.search\(`),
-	regexp.MustCompile(`\bExternalList\(`),
 }
 
 // scanListSourceCalls 统计非测试源码里的直调点数（file → count）。
@@ -145,13 +151,18 @@ func TestListSourceCallsRatchet(t *testing.T) {
 	for _, n := range counts {
 		total += n
 	}
-	if len(counts) < 3 || total < 4 {
-		t.Fatalf("扫描面疑似被改窄：文件 %d 处 / 直调点 %d（期望 ≥3 / ≥4）", len(counts), total)
+	if len(counts) < 1 || total < 1 {
+		t.Fatalf("扫描面疑似被改窄：文件 %d 处 / 直调点 %d（期望 ≥1 / ≥1）", len(counts), total)
 	}
 	// 硬禁：`index.list` 已随 §15.2 步骤 3 删除（list 走卷状态视图/实时扫描）。
 	for file, hits := range scanPatternHits(t, listIndexListPattern) {
 		t.Errorf("%s 出现 %d 处 `.index.list(`：该入口已删除（list 走卷状态视图/实时扫描），"+
 			"请改用 VolumeView/FS.ListDir（或 listFallback）", file, hits)
+	}
+	// 硬禁：`ExternalList` 已随「外部卷列举统一进 VolumeViewLister」删除。
+	for file, hits := range scanPatternHits(t, externalListPattern) {
+		t.Errorf("%s 出现 %d 处 `ExternalList(`：该接缝已删除（本地卷与外部卷共用 "+
+			"VolumeViewLister.ListDirView），请改用 VolumeView/FS.ListDir", file, hits)
 	}
 }
 
