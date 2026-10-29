@@ -40,7 +40,7 @@ func TestList_ChecksumAllocsFlatWithLedgerSize(t *testing.T) {
 	checksumSet(st, "", "user/a.txt", "1111111111111111111111111111111111111111111111111111111111111111")
 
 	small := allocBytesPerRun(func() { _ = listFileInfos(t, env, "") })
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		checksumSet(st, "", "user/noise-"+itoa(i)+".txt", "2222222222222222222222222222222222222222222222222222222222222222")
 	}
 	large := allocBytesPerRun(func() { _ = listFileInfos(t, env, "") })
