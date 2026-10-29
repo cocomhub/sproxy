@@ -1032,15 +1032,25 @@ func (h *Handlers) refreshVolumeHandler(w http.ResponseWriter, r *http.Request) 
 	if !h.clearVolumeStateCache(w, r, volName) {
 		return // 失败响应已写
 	}
+	// 搜索索引同步失效（审计 2026-10-29）：索引是 owner 维度、无法按卷精确失效 ⇒ 保守全清；
+	// 否则 refresh 后 list 已更新而 search 仍返回陈旧结果（无任何入口可纠正）。
+	h.invalidateSearchIndexes()
 	if h.volSet.HasLocalRoot(volName) {
-		h.auditVolumeRefresh(r, volName, "状态缓存已清空（本地卷）")
-		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷状态缓存已清空: " + volName}, http.StatusOK)
+		h.auditVolumeRefresh(r, volName, "状态缓存与搜索索引已清空（本地卷）")
+		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷状态缓存与搜索索引已清空: " + volName}, http.StatusOK)
 		return
 	}
 	h.refreshExternalVolume(w, r, volName)
 }
 
 // refreshAllVolumeCaches 清空**全部卷**的状态缓存（缺省 volume 形态）。
+// invalidateSearchIndexes 让全部 owner 的搜索索引失效（refresh 联动；未装配 ⇒ no-op）。
+func (h *Handlers) invalidateSearchIndexes() {
+	if svc := h.fileService(); svc != nil {
+		svc.InvalidateAllIndexes()
+	}
+}
+
 func (h *Handlers) refreshAllVolumeCaches(w http.ResponseWriter, r *http.Request) {
 	if h.stateCache == nil {
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "卷状态缓存未装配"}, http.StatusMethodNotAllowed)
@@ -1052,9 +1062,10 @@ func (h *Handlers) refreshAllVolumeCaches(w http.ResponseWriter, r *http.Request
 	}
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: "volume_refresh", ObjectType: "volume", Object: "*", Result: AuditResultSuccess,
-		Detail: "全部卷状态缓存已清空（外部改动收敛）",
+		Detail: "全部卷状态缓存与搜索索引已清空（外部改动收敛）",
 	})
-	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "全部卷状态缓存已清空"}, http.StatusOK)
+	h.invalidateSearchIndexes()
+	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "全部卷状态缓存与搜索索引已清空"}, http.StatusOK)
 }
 
 // clearVolumeStateCache 清空单卷状态缓存；失败时已写 500 并返回 false。

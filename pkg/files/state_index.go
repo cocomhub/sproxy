@@ -49,36 +49,36 @@ func (s *stateBackedIndexStore) legacyPath(owner string) string {
 
 // load 载入 owner 索引快照：StateStore 优先；未命中回退旧 meta 文件；
 // 都不存在/损坏 → (nil, false)（调用方全量重建）。
-func (s *stateBackedIndexStore) load(owner string) (map[string]*indexEntry, bool) {
+func (s *stateBackedIndexStore) load(owner string) (map[string]*indexEntry, uint64, bool) {
 	ctx := context.Background()
 	data, err := s.st.Get(ctx, indexKey(owner))
 	if err != nil {
 		if !errors.Is(err, state.ErrKeyNotFound) {
-			return nil, false // StateStore 读失败 → 空索引（调用方全量重建，加速层尽力而为）
+			return nil, 0, false // StateStore 读失败 → 空索引（调用方全量重建，加速层尽力而为）
 		}
 		// 回退读旧 meta（迁移前存量）。
 		p := s.legacyPath(owner)
 		if p == "" {
-			return nil, false
+			return nil, 0, false
 		}
 		data, err = os.ReadFile(p)
 		if err != nil {
-			return nil, false
+			return nil, 0, false
 		}
 	}
 	var f indexSnapshotFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, false
+		return nil, 0, false
 	}
 	if f.Entries == nil {
-		return nil, false
+		return nil, 0, false
 	}
-	return fromSnapshotEntries(f.Entries), true
+	return fromSnapshotEntries(f.Entries), f.Gen, true
 }
 
 // save 全量快照写 StateStore（快照覆盖，无需 CAS）。
-func (s *stateBackedIndexStore) save(owner string, entries map[string]*indexEntry) error {
-	data, err := json.Marshal(indexSnapshotFile{Entries: toSnapshotEntries(entries)})
+func (s *stateBackedIndexStore) save(owner string, entries map[string]*indexEntry, gen uint64) error {
+	data, err := json.Marshal(indexSnapshotFile{Entries: toSnapshotEntries(entries), Gen: gen})
 	if err != nil {
 		return err
 	}
@@ -87,6 +87,16 @@ func (s *stateBackedIndexStore) save(owner string, entries map[string]*indexEntr
 		return err
 	}
 	return nil
+}
+
+// list 枚举全部索引快照 key（`index/` 前缀；全量失效用）。
+func (s *stateBackedIndexStore) list() ([]string, error) {
+	return s.st.List(context.Background(), "index/")
+}
+
+// deleteKey 按 key 删除快照（全量失效用；比按 owner 删除更通用）。
+func (s *stateBackedIndexStore) deleteKey(key string) error {
+	return s.st.Delete(context.Background(), key)
 }
 
 // delete 删除 owner 索引快照（失效语义：下次访问全量重建，防载入过期快照）。

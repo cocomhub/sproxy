@@ -23,11 +23,11 @@ func TestIndexSnapshot_RoundTrip(t *testing.T) {
 		"b.png":     {name: "b.png", base: "b.png", size: 20, modTime: 200},
 	}
 	owner := "alice"
-	if err := saveIndexSnapshot(tnt, owner, entries); err != nil {
+	if err := saveIndexSnapshot(tnt, owner, entries, 0); err != nil {
 		t.Fatalf("saveIndexSnapshot: %v", err)
 	}
 
-	got, ok := loadIndexSnapshot(tnt, owner)
+	got, _, ok := loadIndexSnapshot(tnt, owner)
 	if !ok {
 		t.Fatal("loadIndexSnapshot 应命中")
 	}
@@ -83,7 +83,7 @@ func TestIndexSnapshot_MissingCorrupt(t *testing.T) {
 	tnt := newCacheTenant(t)
 
 	// 缺失 → false。
-	if _, ok := loadIndexSnapshot(tnt, "nobody"); ok {
+	if _, _, ok := loadIndexSnapshot(tnt, "nobody"); ok {
 		t.Fatal("缺失快照应返回 false")
 	}
 
@@ -98,7 +98,7 @@ func TestIndexSnapshot_MissingCorrupt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "alice.json"), []byte("not json"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if _, ok := loadIndexSnapshot(tnt, "alice"); ok {
+	if _, _, ok := loadIndexSnapshot(tnt, "alice"); ok {
 		t.Fatal("损坏快照应返回 false（回退全量重建）")
 	}
 }
