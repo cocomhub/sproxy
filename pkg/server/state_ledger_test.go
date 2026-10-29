@@ -175,3 +175,31 @@ func TestHandlers_StateBackedChecksumStore_CachedPerOwner(t *testing.T) {
 		t.Fatal("不同 owner 不得共用台账实例")
 	}
 }
+
+// TestHandlers_DedupStoreFor_CachedInStateMode 钉住集群后端 dedup 台账的实例缓存：
+// 未缓存时每次 dedupStoreFor 都新建 ⇒ 每次首读从 StateStore 全量拉回 + 反序列化，
+// 且写入落在随后被丢弃的实例上。
+//
+// 变异：stateStore 分支改为每次 New（不查缓存）⇒ 本用例红。
+func TestHandlers_DedupStoreFor_CachedInStateMode(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = root
+	cfg.Dedup.Enabled = true
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+
+	h := newAssemblyTestHandlers(t, root)
+	h.cfgPtr = &cfgPtr
+	h.SetStateStore(state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger()))
+
+	d1 := h.dedupStoreFor("alice")
+	d2 := h.dedupStoreFor("alice")
+	if d1 == nil || d1 != d2 {
+		t.Fatal("集群后端 dedup 台账必须按 owner 缓存（否则每请求全量读 StateStore）")
+	}
+	if h.dedupStoreFor("bob") == d1 {
+		t.Fatal("不同 owner 不得共用 dedup 台账实例")
+	}
+}
