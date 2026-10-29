@@ -151,18 +151,22 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   跨锁 read-modify-write；同 rel 并发 写/删 可致 used 少计或虚高。计数器内部操作原子安全
   （无内存损坏），逻辑漂移有界、重启/对账自愈；彻底解决需按 rel 串行化（会串行化远端写 I/O，
   权衡后留专题）。
-- **加密卷容量记账低估**（第 4 轮对抗评审 P1）：`CapacityFS` 包在 `SecretdataFS` 外层，
-  只按逻辑 size 计；容器内 chunk/meta 写入与默认 1–2MiB meta pad 不进计数器（1KiB 文件
-  实占 2–4MiB）→ 理论上限可被绕过约 10³。彻底解决需按底层实测字节记账（暴露真实 usage 或
-  底层树求和）。
+- **加密卷容量记账低估**（第 4 轮对抗评审 P1）——**仍开（需产品口径）**：`CapacityFS` 包在
+  `SecretdataFS` 外层，只按逻辑 size 计；容器内 chunk/meta 写入与默认 1–2MiB meta pad 不进
+  计数器（1KiB 文件实占 2–4MiB）→ 理论上限可被绕过约 10³。彻底解决需按底层实测字节记账
+  （暴露真实 usage 或底层树求和）。**现状收敛路径**：`pkg/storage/capacity` 的
+  `StorageManager.SetReconciler` 周期对账（按物理足迹修正 used）⇒ 漂移有界自愈；实时精度
+  属产品决策（按实测记账会带来额外 Stat/扫描成本，且与「逻辑容量」的用户预期不一致）。
+  **不盲改**：需先定「卷容量语义 = 逻辑明文 vs 物理占用」。
 - ✅ **已修（2026-10-14，P0 收口）**：`presign/complete` 现**强制登记**——客户端声明 `size`+`sha256`，
   域侧经统一写内核「内容已在位」模式完成 存在性/size 校验 + **双账本结算** + sidecar/checksum 台账；
   直传与上传同口径，容量/配额不再旁路。**残余（明示）**：① 服务端不重算 sha256（重算需完整下载对象）
   ② 账本按新对象记账（prev=0）⇒ 若同路径此前已经内核写入并记账会重复计一次（卷池由周期对账收敛、
   owner 配额侧偏高；覆盖既有文件请走上传 API）。
-- **presign 直传绕过 meta + 容量**（第 4 轮对抗评审 P1，历史记录）：预签名 PUT 是客户端直写对象键，
-  不经 `be.FS()`——不写 sidecar、不计卷级容量。彻底解决需 per-volume presign 或将直传对象在
-  complete 阶段经 `Guard(Wrap(fs))` 回读算 meta 并记账（成本与产品决策待定）。
+- ~~**presign 直传绕过 meta + 容量**~~（第 4 轮对抗评审 P1）——**已修（2026-10-14）**：
+  `presign/complete` 强制登记（客户端声明 size+sha256 → 存在性/size 校验 + 双账本结算 +
+  sidecar/checksum 台账）。残余（明示，非本次范围）：① 服务端不重算 sha256（需完整下载）；
+  ② 账本按新对象记账（prev=0，覆盖既有文件请走上传 API）。
 - **第 5 轮对抗评审修复批次一（2026-10-11）**：
   * 外部卷「无 RangeReader → 整流回落」此前是**死代码**（装饰器无条件实现 `OpenRangeRead`，
     `AssertRangeReader` 恒真）→ `NewRangeSeeker` 判据改为下探 `syncpkg.Innermost`；
@@ -181,9 +185,10 @@ be.FS() → trusted.Wrap（写 meta / 读 meta）→ trusted.Guard（meta 桶隔
   * **presign/complet 端点 owner 收敛（预存安全缺口）**：`presignOwnerKey` 把请求路径重绑到
     调用者 `<owner>/user/<rel>`，越权（他人 owner / 非 user 桶）→ 403；此前服务端凭据可对
     任意键签发 PUT/GET（且直传对象落在裸 key、文件 API 根本看不到）。
-- **回收站仅默认卷可见**（第 4 轮对抗评审 P1）：软删写 home 卷 trash，列表/恢复/清空只看默认
-  卷 → 多卷下软删文件不可见不可恢复、EmptyTrash 不释放配额。彻底解决需按 owner 卷视图逐卷
-  定位。
+- ~~**回收站仅默认卷可见**~~（第 4 轮对抗评审 P1）——**已修（#830，2026-10-19）**：软删写
+  home 卷 trash；`GET /api/trash` 缺省汇总全部本地卷（每条带 `volume`）、`?volume=` 过滤；
+  restore 缺省跨卷定位；empty 支持 `volume=` / `all=1`（无参仍只清默认卷，破坏性默认不扩大）。
+  CLI `sclient trash list/restore/empty` 已接入；Web UI 回收站按卷展示。
 
 ### 8.1 第 6 轮（B/C/D 面）修复与残余（2026-10-11）
 
