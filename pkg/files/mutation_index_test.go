@@ -206,12 +206,12 @@ func TestService_RecordBypassChecksum_LedgerOnly(t *testing.T) {
 	env := newDirsEnv(t)
 	seedMutationIndex(t, env)
 
-	env.svc.RecordBypassChecksum("alice", "user/ghost.txt", "deadbeefdeadbeef")
+	env.svc.RecordBypassChecksum("alice", "user/ghost.txt", "deadbeefdeadbeef", "default")
 
 	// checksum 台账写入（Get 命中）。
 	if cs := env.svc.rt.checksumStore("alice"); cs == nil {
 		t.Fatal("checksum 台账未装配")
-	} else if got, _ := cs.Get("user/ghost.txt"); got != "deadbeefdeadbeef" {
+	} else if got, _ := checksumGet(cs, "default", "user/ghost.txt"); got != "deadbeefdeadbeef" {
 		t.Fatalf("checksum 台账 = %q，期望 deadbeefdeadbeef", got)
 	}
 	// 索引不新增幽灵条目。

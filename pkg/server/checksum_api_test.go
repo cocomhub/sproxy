@@ -75,7 +75,7 @@ func TestRebuildChecksumsHandler_FillsFromMeta(t *testing.T) {
 	if auditActionChecksumRebuild != "checksum_rebuild" {
 		t.Fatalf("审计动作 = %q，期望 checksum_rebuild", auditActionChecksumRebuild)
 	}
-	if got, ok := h.checksumStoreFor(owner).Get(rel); !ok || got != sum {
+	if got, ok := ledgerGetVolume(h.checksumStoreFor(owner), "main", rel); !ok || got != sum {
 		t.Fatalf("重建后台账应有 %q，got %q ok=%v（body=%s）", sum, got, ok, rr.Body.String())
 	}
 }

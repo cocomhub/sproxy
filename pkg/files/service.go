@@ -619,7 +619,9 @@ func (s *Service) IndexMove(owner, rel string, size int64, checksum, toVol strin
 	}
 	if checksum != "" {
 		if cs := s.rt.checksumStore(owner); cs != nil {
-			cs.Set(rel, checksum)
+			// 目标卷维度键（§15.1.1）：跨卷 move 只迁 checksum，归属必须写到**目标卷**，
+			// 否则同名文件在源卷条目上会互相张冠李戴。
+			checksumSet(cs, toVol, rel, checksum)
 		}
 	}
 }
@@ -635,7 +637,7 @@ func (s *Service) IndexMove(owner, rel string, size int64, checksum, toVol strin
 // 幂等：同 rel 重复调用覆盖（与写内核 upsert 同语义）。
 func (s *Service) RecordBypassWrite(owner, rel string, size int64, checksum, volume string, root *storage.Root) {
 	if cs := s.rt.checksumStore(owner); cs != nil && checksum != "" {
-		cs.Set(rel, checksum)
+		checksumSet(cs, volume, rel, checksum) // 卷维度（§15.1.1）
 	}
 	if s.index == nil {
 		return
@@ -656,12 +658,12 @@ func (s *Service) RecordBypassWrite(owner, rel string, size int64, checksum, vol
 // 旁路写只需补 checksum；再调 `RecordBypassWrite` 会重复 upsert（幂等但白做一次整表 COW 克隆），
 // 且对「被写入卷里并不存在的路径」会**造幽灵条目**（root=nil ⇒ 没有 Stat 兜底）。
 // 外部卷仍走 `RecordBypassWrite`（无本地 Root 事件）。
-func (s *Service) RecordBypassChecksum(owner, rel, checksum string) {
+func (s *Service) RecordBypassChecksum(owner, rel, checksum, vol string) {
 	if checksum == "" {
 		return
 	}
 	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.Set(rel, checksum)
+		checksumSet(cs, vol, rel, checksum)
 	}
 }
 

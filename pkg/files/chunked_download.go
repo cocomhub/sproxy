@@ -386,7 +386,7 @@ func (s *Service) writeChunkSuccess(c *chunkResp, offset, length, fileSize int64
 	// 且与整文件密文导出面（openCiphertext 刻意不返回 checksum）语义相反。
 	if !c.dp.Ciphertext {
 		if csStore, csKey := s.checksumStoreForRead(c.dp); csStore != nil {
-			if cs, ok := csStore.Get(csKey); ok {
+			if cs, ok := checksumGet(csStore, c.dp.VolumeName, csKey); ok {
 				c.w.Header().Set(headerFileChecksum, cs)
 			}
 		}

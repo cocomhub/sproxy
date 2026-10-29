@@ -76,6 +76,7 @@ type volumeExportSource struct {
 	size    int64
 	mtime   time.Time
 	root    *storage.Root // 实际所在卷租户根
+	volName string        // 卷名（卷维度台账读取用；空 = 未知，回落旧无卷键）
 	rel     string        // 租户根相对路径（user/<relName>）
 }
 
@@ -172,7 +173,7 @@ func (h *Handlers) buildExportManifest(owner string, sources []volumeExportSourc
 			Checksum: cs,
 		}
 		if ledger != nil {
-			if v, ok := ledger.Get(filepath.ToSlash(s.rel)); ok {
+			if v, ok := ledgerGetVolume(ledger, s.volName, filepath.ToSlash(s.rel)); ok {
 				entry.Ledger = v
 			}
 		}
@@ -249,13 +250,14 @@ func (h *Handlers) walkExportVolumes(vols []volume.Volume, owner string) ([]volu
 
 // volumeUserWalker 遍历单个卷租户 user 桶目录（递归），收集 volumeExportSource 列表。
 type volumeUserWalker struct {
-	root *storage.Root
-	out  []volumeExportSource
+	root    *storage.Root
+	volName string
+	out     []volumeExportSource
 }
 
 // walkVolumeUserFiles 递归列出卷租户 user 桶下全部文件。
 func (h *Handlers) walkVolumeUserFiles(volName string, root *storage.Root, owner string) ([]volumeExportSource, error) {
-	w := &volumeUserWalker{root: root}
+	w := &volumeUserWalker{root: root, volName: volName}
 	if err := w.walk("user", 0); err != nil {
 		return nil, err
 	}
@@ -297,7 +299,7 @@ func (w *volumeUserWalker) addFile(childRel string, e os.DirEntry) {
 	if !ok {
 		return
 	}
-	w.out = append(w.out, volumeExportSource{relName: relName, size: info.Size(), mtime: info.ModTime(), root: w.root, rel: childRel})
+	w.out = append(w.out, volumeExportSource{relName: relName, size: info.Size(), mtime: info.ModTime(), root: w.root, volName: w.volName, rel: childRel})
 }
 
 // writeVolumeExportEntry 把单个文件以 user/<relName> 条目写入 tar（流式边读边写）。
@@ -617,4 +619,25 @@ func isQuotaError(err error) bool {
 		return he.Status == http.StatusInsufficientStorage
 	}
 	return false
+}
+
+// ledgerGetVolume 按卷维度读台账（vol 空 ⇒ 旧无卷键；实现不支持卷维度 ⇒ 回落 Get）。
+func ledgerGetVolume(ledger checksum.ChecksumStoreIface, vol, rel string) (string, bool) {
+	if vol != "" {
+		if v, ok := ledger.(checksum.VolumeKeyedStore); ok {
+			return v.GetInVolume(vol, rel)
+		}
+	}
+	return ledger.Get(rel)
+}
+
+// ledgerSetVolume 按卷维度写台账（实现不支持卷维度 / vol 为空 ⇒ 回落旧无卷键）。
+func ledgerSetVolume(ledger checksum.ChecksumStoreIface, vol, rel, sum string) {
+	if vol != "" {
+		if v, ok := ledger.(checksum.VolumeKeyedStore); ok {
+			v.SetInVolume(vol, rel, sum)
+			return
+		}
+	}
+	ledger.Set(rel, sum)
 }
