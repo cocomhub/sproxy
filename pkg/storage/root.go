@@ -292,11 +292,19 @@ func (rt *Root) Remove(rel string) error {
 	if err := rt.sealCheck(rel, true); err != nil {
 		return err
 	}
+	// Stat 在操作前判定 IsDir（删除后无法再判定）；失败 ⇒ 保守 false（与既有行为一致）。
+	isDir := rt.statIsDir(rel)
 	if err := rt.r.Remove(rel); err != nil {
 		return err
 	}
-	rt.notifyMutation(MutationRemove, rel, "")
+	rt.notifyMutationKind(MutationRemove, rel, "", isDir)
 	return nil
+}
+
+// statIsDir 只读判定 rel 是否为目录（失败/不存在 ⇒ false）。
+func (rt *Root) statIsDir(rel string) bool {
+	fi, err := rt.r.Stat(rel)
+	return err == nil && fi.IsDir()
 }
 
 // RemoveAll 相对 root 递归删除。
@@ -338,10 +346,12 @@ func (rt *Root) Rename(oldRel, newRel string) error {
 	if err := rt.sealCheck(oldRel, true); err != nil {
 		return err
 	}
+	// 源在 rename 后已不存在 ⇒ 必须在操作前判定 IsDir（目录 rename 需按子树投影）。
+	isDir := rt.statIsDir(oldRel)
 	if err := rt.r.Rename(oldRel, newRel); err != nil {
 		return err
 	}
-	rt.notifyMutation(MutationRename, oldRel, newRel)
+	rt.notifyMutationKind(MutationRename, oldRel, newRel, isDir)
 	return nil
 }
 

@@ -33,6 +33,10 @@ func (s *Service) ApplyRootMutation(m storage.Mutation) {
 	}
 	switch m.Op {
 	case storage.MutationRename:
+		if m.IsDir {
+			s.applyDirRename(m)
+			break
+		}
 		// 源与目标可能跨桶（如转存临时区 → user 桶）：两侧各自判定。
 		s.applyMutationPath(m, m.Rel, mutationDropOnly)
 		s.applyMutationPath(m, m.Rel2, mutationUpsert)
@@ -55,6 +59,21 @@ const (
 	mutationDropOnly
 )
 
+// applyDirRename 是**目录** rename 的投影：删源前缀 + 按真实磁盘重建目标子树
+// （`storage.MutationRename` 只有单条语义，子条目必须由消费方递归重建）。
+func (s *Service) applyDirRename(m storage.Mutation) {
+	fromOwner, fromRel, ok := splitUserBucketPath(m.Rel)
+	if !ok {
+		return
+	}
+	toOwner, toRel, ok2 := splitUserBucketPath(m.Rel2)
+	if !ok2 || toOwner != fromOwner {
+		return
+	}
+	s.index.removePrefix(fromOwner, fromRel)
+	s.index.rebuildSubtree(toOwner, toRel, m.Tag, m.Root, s.rt.tenantOf(toOwner))
+}
+
 // applyMutationPath 把一个卷根命名空间路径翻译为 (owner, user 相对路径) 后落到索引。
 func (s *Service) applyMutationPath(m storage.Mutation, rel string, act mutationAction) {
 	owner, userRel, ok := splitUserBucketPath(rel)
@@ -62,11 +81,13 @@ func (s *Service) applyMutationPath(m storage.Mutation, rel string, act mutation
 		return
 	}
 	if act == mutationDropOnly {
-		s.index.remove(owner, userRel)
-		if m.Op == storage.MutationRemoveAll {
+		// 目录/子树删除必须按**前缀**清理（设计 2026-10-30 D1）：空目录走 `MutationRemove`
+		// 且 IsDir=true；rename 目录同理。只删单条会残留子树条目（搜到已不存在文件）。
+		if m.Op == storage.MutationRemoveAll || m.IsDir {
 			s.index.removePrefix(owner, userRel)
 			return
 		}
+		s.index.remove(owner, userRel)
 		return
 	}
 	// 目录创建：无需 Stat（目录条目无 size/mtime）。

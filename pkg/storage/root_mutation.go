@@ -56,6 +56,12 @@ type Mutation struct {
 	Rel string
 	// Rel2 仅 rename/link 使用（目标路径）。
 	Rel2 string
+	// IsDir 表示变异对象是目录（rename/remove 在操作**前** Stat 判定；Mkdir/RemoveAll 恒 true）。
+	//
+	// 为什么要它（设计 2026-10-30-derived-state-projection D1）：派生状态（搜索索引）的目录
+	// rename/空目录 remove 必须按**子树**处理；此前无此信息，事件层只能删单条 ⇒ 子树条目残留
+	// （用户能搜到已不存在的文件）。
+	IsDir bool
 }
 
 // mutationObserver 是不可变的观察者载荷（tag + 回调 + 前缀 + 卷根）。
@@ -105,6 +111,11 @@ func (rt *Root) MarkWritten(rel string) {
 // notifyMutation 发放一次变异事件（底层操作**成功后**调用）。
 // 未装观察者时零开销；回调在调用方 goroutine 同步执行。
 func (rt *Root) notifyMutation(op MutationOp, rel, rel2 string) {
+	rt.notifyMutationKind(op, rel, rel2, op == MutationMkdir || op == MutationRemoveAll)
+}
+
+// notifyMutationKind 同 notifyMutation，但显式指定 IsDir（rename/remove 由调用方 Stat 判定）。
+func (rt *Root) notifyMutationKind(op MutationOp, rel, rel2 string, isDir bool) {
 	obs := rt.mutObs.Load()
 	if obs == nil {
 		return
@@ -112,7 +123,7 @@ func (rt *Root) notifyMutation(op MutationOp, rel, rel2 string) {
 	if rel2 != "" {
 		rel2 = obs.join(rel2)
 	}
-	obs.fn(Mutation{Op: op, Tag: obs.tag, Root: obs.base, Rel: obs.join(rel), Rel2: rel2})
+	obs.fn(Mutation{Op: op, Tag: obs.tag, Root: obs.base, Rel: obs.join(rel), Rel2: rel2, IsDir: isDir})
 }
 
 // join 把子根相对路径翻译为卷根命名空间路径。
