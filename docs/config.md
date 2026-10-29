@@ -163,7 +163,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `volumes[].retention.audit_ttl` | duration | `0`（关闭） | 审计日志保留期（**仅默认卷生效**）：> 0 时按龄截断默认卷审计内存 + 落盘窗口（非默认卷配置 → 装配 Warn + 忽略）。`0`/缺省 = 关闭 |
 | `volumes[].retention.gc_interval` | duration | `0`（关闭） | 卷级保留期清理周期：> 0 且至少一个 TTL 非零时启动周期任务（与 `mirror_interval` 同构；取各启用卷最小间隔）。全 TTL 零而仅配 gc_interval → 配置校验拒绝（空转任务）。`0`/缺省 = 关闭周期 GC（可手动触发） |
 | `mirror_interval` | duration | `0`（关闭） | 卷镜像周期任务间隔：`> 0` 且任一卷配了 `mirror_to` 时启用（ticker + 停止通道，与 `versioning.gc_interval` 同构）；`0`/缺省 = 关闭（零回归） |
-| `index_save_interval` | duration | `5m` | 搜索索引快照周期保存间隔（roadmap 2.3 P0 持久化增强）：`> 0` 时周期落盘 `<meta>/index/<owner>.json`（重启载入免全量 WalkDir；关闭时再保存一次）；`0` = 关闭（快照不落盘，零回归） |
+| `index_save_interval` | duration | `5m` | 搜索索引快照**周期全量**保存间隔（roadmap 2.3 P0 持久化增强）：`> 0` 时周期落盘 `<meta>/index/<owner>.json`（重启载入免全量 WalkDir）；`0` = 关闭周期全量保存（零回归）。**注意**：与写后 debounce（固定 1s 只落变更 owner，崩溃窗口 ≤1s）独立——关闭本项不影响 debounce 落盘 |
 | `tier_policy.interval` | duration | `0`（关闭） | 冷热分层自动降级扫描间隔：`> 0` 时启用周期任务（ticker + 停止通道，与 `mirror_interval` 同构），把 hot 卷满足条件的文件迁移到 cold 卷；`0`/缺省 = 关闭（零回归） |
 | `tier_policy.max_age_hot` | duration | `0`（不限龄） | hot 卷文件最大存活时间：mtime 超过此值且 size ≥ `min_size_hot` 才降级。`0` = 不限龄（仅按大小降级） |
 | `tier_policy.min_size_hot` | size | `0`（不限大小） | hot 卷文件最小大小阈值：size 超过此值且 age ≥ `max_age_hot` 才降级。`0` = 不限大小（仅按龄降级）。**至少一个阈值非零**降级才可能发生 |

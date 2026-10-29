@@ -40,8 +40,17 @@ type indexSnapshotEntry struct {
 }
 
 // indexSnapshotFile 是快照 JSON 结构（entries 键为 rel）。
+//
+// Gen / Epoch 是**失效代际**（审计 2026-10-29）：快照只在代际匹配时可信。
+//   - Gen：per-owner 代际，`InvalidateIndex(owner)` 递增（旁路写/单卷 refresh）；
+//   - 全局失效（`InvalidateAllIndexes`）由删除全部快照实现（跨进程有效）。
+//
+// 为什么要代际而不是「删快照」：删除是 best-effort（权限/占用/崩溃窗口都可能失败），
+// 一旦失败旧快照会被重新载入 ⇒ 失效静默失效。带代际后即使快照复活也必然重建。
+// 旧快照缺这两个字段 ⇒ 0；初始代际也是 0 ⇒ 向后兼容（首次部署不强制重建）。
 type indexSnapshotFile struct {
 	Entries map[string]*indexSnapshotEntry `json:"entries"`
+	Gen     uint64                         `json:"gen,omitempty"`
 }
 
 // toSnapshotEntries 内存条目 → 快照 DTO。
@@ -69,7 +78,7 @@ func indexSnapshotRel(owner string) string {
 
 // saveIndexSnapshot 原子写 owner 索引快照（tmp + rename）。失败返回错误（调用方
 // 记日志后继续——快照是加速层，写失败不影响索引功能）。
-func saveIndexSnapshot(t *storage.Tenant, owner string, entries map[string]*indexEntry) error {
+func saveIndexSnapshot(t *storage.Tenant, owner string, entries map[string]*indexEntry, gen uint64) error {
 	if t == nil || t.Root() == nil {
 		return nil
 	}
@@ -80,7 +89,7 @@ func saveIndexSnapshot(t *storage.Tenant, owner string, entries map[string]*inde
 			return err
 		}
 	}
-	data, err := json.Marshal(indexSnapshotFile{Entries: toSnapshotEntries(entries)})
+	data, err := json.Marshal(indexSnapshotFile{Entries: toSnapshotEntries(entries), Gen: gen})
 	if err != nil {
 		return err
 	}
@@ -108,25 +117,25 @@ func saveIndexSnapshot(t *storage.Tenant, owner string, entries map[string]*inde
 }
 
 // loadIndexSnapshot 载入 owner 索引快照。缺失/损坏 → (nil, false)（调用方全量重建）。
-func loadIndexSnapshot(t *storage.Tenant, owner string) (map[string]*indexEntry, bool) {
+func loadIndexSnapshot(t *storage.Tenant, owner string) (map[string]*indexEntry, uint64, bool) {
 	if t == nil || t.Root() == nil {
-		return nil, false
+		return nil, 0, false
 	}
 	rc, err := t.Root().OpenDecrypted(indexSnapshotRel(owner))
 	if err != nil {
-		return nil, false // 缺失/不可读/（加密卷上的）历史明文快照 → 全量重建
+		return nil, 0, false // 缺失/不可读/（加密卷上的）历史明文快照 → 全量重建
 	}
 	data, rerr := io.ReadAll(io.LimitReader(rc, maxIndexSnapshotBytes+1))
 	_ = rc.Close()
 	if rerr != nil || int64(len(data)) > maxIndexSnapshotBytes {
-		return nil, false
+		return nil, 0, false
 	}
 	var f indexSnapshotFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, false
+		return nil, 0, false
 	}
 	if f.Entries == nil {
-		return nil, false
+		return nil, 0, false
 	}
-	return fromSnapshotEntries(f.Entries), true
+	return fromSnapshotEntries(f.Entries), f.Gen, true
 }

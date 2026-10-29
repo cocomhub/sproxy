@@ -259,7 +259,7 @@ func TestIndexSnapshot_EncryptedVolumeCiphertextAndReload(t *testing.T) {
 	entries := map[string]*indexEntry{
 		"user/" + secretName: {name: "user/" + secretName, base: secretName, size: 42, modTime: 1},
 	}
-	if err := saveIndexSnapshot(tnt, "alice", entries); err != nil {
+	if err := saveIndexSnapshot(tnt, "alice", entries, 0); err != nil {
 		t.Fatalf("saveIndexSnapshot: %v", err)
 	}
 	// 磁盘上（递归）不得出现明文文件名。
@@ -285,7 +285,7 @@ func TestIndexSnapshot_EncryptedVolumeCiphertextAndReload(t *testing.T) {
 		t.Fatalf("加密卷上快照不得明文落文件名（命中 %v）", hits)
 	}
 	// 读回：经 Root 解密还原条目。
-	got, ok2 := loadIndexSnapshot(tnt, "alice")
+	got, _, ok2 := loadIndexSnapshot(tnt, "alice")
 	if !ok2 {
 		t.Fatal("加密卷上快照应可载入（经 Root 解密）")
 	}
@@ -309,7 +309,7 @@ func TestIndexSnapshot_SealedPathRejected(t *testing.T) {
 	if serr := tnt.Root().SetSeals([]storage.SealRule{{Path: "meta", Wrapper: "vault"}}); serr != nil {
 		t.Fatalf("SetSeals: %v", serr)
 	}
-	err := saveIndexSnapshot(tnt, "alice", map[string]*indexEntry{"user/a": {name: "user/a", base: "a"}})
+	err := saveIndexSnapshot(tnt, "alice", map[string]*indexEntry{"user/a": {name: "user/a", base: "a"}}, 0)
 	if !errors.Is(err, storage.ErrSealed) {
 		t.Fatalf("封印区间写入应被拒（ErrSealed）, got %v", err)
 	}

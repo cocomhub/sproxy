@@ -49,13 +49,13 @@ func TestStateBackedIndexStore_RoundTrip(t *testing.T) {
 		"dir/a.txt": {name: "dir/a.txt", base: "a.txt", size: 10, modTime: 100},
 		"b.png":     {name: "b.png", base: "b.png", size: 20, modTime: 200},
 	}
-	if err := idx.save("alice", entries); err != nil {
+	if err := idx.save("alice", entries, 0); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	if _, gerr := st.Get(ctx, "index/alice"); gerr != nil {
 		t.Fatalf("save 应落 StateStore 新路径: %v", gerr)
 	}
-	got, ok := idx.load("alice")
+	got, _, ok := idx.load("alice")
 	if !ok {
 		t.Fatal("load 应命中")
 	}
@@ -63,7 +63,7 @@ func TestStateBackedIndexStore_RoundTrip(t *testing.T) {
 		t.Fatalf("载入 entries 不符: %+v", got)
 	}
 	// 未命中 owner → (nil, false)（调用方全量重建）。
-	if _, ok := idx.load("nobody"); ok {
+	if _, _, ok := idx.load("nobody"); ok {
 		t.Fatal("未命中 owner 应返回 false（空索引）")
 	}
 }
@@ -79,7 +79,7 @@ func TestStateBackedIndexStore_LegacyFallback(t *testing.T) {
 
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
 	idx := newStateBackedIndexStore(st, filepath.Join(metaDir, "index"))
-	got, ok := idx.load("alice")
+	got, _, ok := idx.load("alice")
 	if !ok {
 		t.Fatal("回退读旧文件应命中")
 	}
@@ -104,11 +104,11 @@ func TestStateBackedIndexStore_SaveMigratesToState(t *testing.T) {
 
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
 	idx := newStateBackedIndexStore(st, filepath.Join(metaDir, "index"))
-	if _, ok := idx.load("alice"); !ok {
+	if _, _, ok := idx.load("alice"); !ok {
 		t.Fatal("回退载入应命中")
 	}
 	// 首写 → StateStore；旧 meta 文件保持原内容不被改写（单写）。
-	if serr := idx.save("alice", map[string]*indexEntry{"new.txt": {name: "new.txt", base: "new.txt"}}); serr != nil {
+	if serr := idx.save("alice", map[string]*indexEntry{"new.txt": {name: "new.txt", base: "new.txt"}}, 0); serr != nil {
 		t.Fatal(serr)
 	}
 	if _, gerr := st.Get(ctx, "index/alice"); gerr != nil {

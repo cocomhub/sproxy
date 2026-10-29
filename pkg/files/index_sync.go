@@ -113,6 +113,8 @@ func (ix *searchIndex) markDirty(owner string) {
 func (ix *searchIndex) publishDirty(ctx context.Context) int {
 	ix.mu.Lock()
 	if ix.sync == nil {
+		// 未装配集群：dirty 无人消费 ⇒ 清空防无界增长（快照落盘由 pendingSave 独立驱动）。
+		clear(ix.dirty)
 		ix.mu.Unlock()
 		return 0
 	}
@@ -204,4 +206,9 @@ func (ix *searchIndex) markDirtyLocked(owner string) {
 		ix.dirty = map[string]bool{}
 	}
 	ix.dirty[owner] = true
+	// 同时标记「待落盘」：与集群发布解耦（保存成功即清，发布失败保留重试）。
+	if ix.pendingSave == nil {
+		ix.pendingSave = map[string]bool{}
+	}
+	ix.pendingSave[owner] = true
 }
