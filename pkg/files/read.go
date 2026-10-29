@@ -135,7 +135,7 @@ func paginateEntries(entries []FileInfo, offset, limit int) []FileInfo {
 // subdir 为相对 user 桶的子路径，checksum key = "user/" + subdir/entryName。
 // root 为租户根（可为 nil：无卷上下文），**加密卷**下用 `LogicalSize` 报明文长度
 // （Stat 是密文长度，会让列表 size 与下载实际字节不一致——第 5 轮对抗评审）。
-func (s *Service) buildFileListEntries(entries []os.DirEntry, csMap map[string]string, subdir string, root *storage.Root) []FileInfo {
+func (s *Service) buildFileListEntries(entries []os.DirEntry, csAt func(rel string) string, subdir string, root *storage.Root) []FileInfo {
 	allFiles := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
@@ -164,7 +164,7 @@ func (s *Service) buildFileListEntries(entries []os.DirEntry, csMap map[string]s
 			Size:    logicalSizeFor(root, "user/"+relName, info),
 			ModTime: info.ModTime().UnixNano(),
 		}
-		if cs, ok := csMap["user/"+relName]; ok {
+		if cs := csAt(relName); cs != "" {
 			fi.Checksum = cs
 		}
 		allFiles = append(allFiles, fi)

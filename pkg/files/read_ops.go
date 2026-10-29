@@ -26,6 +26,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -259,7 +260,7 @@ func (s *Service) collectVolumeViewEntries(ctx context.Context, lister VolumeVie
 // 不对外可见——与索引/回退路径同一语义）。
 func (s *Service) fileInfosFromViewEntries(ctx context.Context, owner string, entries []ExternalEntry,
 	volName, subdir string, seenDirs map[string]bool) []FileInfo {
-	csMap := s.checksumSnapshotFor(ctx, owner, volName)
+	csAt := checksumGetter(s.checksumStoreReady(ctx, owner), volName)
 	out := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir {
@@ -278,9 +279,7 @@ func (s *Service) fileInfosFromViewEntries(ctx context.Context, owner string, en
 			relName = strings.Trim(subdir, "/") + "/" + e.Name
 		}
 		fi := FileInfo{Name: e.Name, Size: e.Size, ModTime: e.MTime, Volume: volName}
-		if cs, ok := csMap["user/"+relName]; ok {
-			fi.Checksum = cs
-		}
+		fi.Checksum = csAt(relName)
 		out = append(out, fi)
 	}
 	return out
@@ -292,7 +291,8 @@ func (s *Service) fileInfosFromViewEntries(ctx context.Context, owner string, en
 func (s *Service) listFallback(ctx context.Context, owner, subdir, volName, rel string) []FileInfo {
 	if s.rt.volSet() == nil {
 		// 单卷：唯一根 ReadDir（rel 相对租户根）；checksum 走全量台账（无卷维度可区分）。
-		return s.listFallbackSingle(owner, subdir, rel, s.checksumSnapshot(ctx, owner))
+		return s.listFallbackSingle(owner, subdir, rel,
+			checksumGetter(s.checksumStoreReady(ctx, owner), ""))
 	}
 	// 多卷：owner 视图逐卷聚合（?volume= 已在上层校验）。
 	var allFiles []FileInfo
@@ -308,7 +308,7 @@ func (s *Service) listFallback(ctx context.Context, owner, subdir, volName, rel 
 }
 
 // listFallbackSingle 是单卷回退：唯一根 ReadDir（rel 相对租户根）。
-func (s *Service) listFallbackSingle(owner, subdir, rel string, csMap map[string]string) []FileInfo {
+func (s *Service) listFallbackSingle(owner, subdir, rel string, csAt func(rel string) string) []FileInfo {
 	tnt := s.rt.tenantOf(owner)
 	if tnt == nil || tnt.Root() == nil {
 		return nil
@@ -321,14 +321,15 @@ func (s *Service) listFallbackSingle(owner, subdir, rel string, csMap map[string
 		s.rt.logger().Warn("读取卷目录失败", "dir", rel, "error", err)
 		return nil
 	}
-	return s.buildFileListEntries(entries, csMap, subdir, tnt.Root())
+	return s.buildFileListEntries(entries, csAt, subdir, tnt.Root())
 }
 
 // listVolumeDirEntries 聚合多卷回退中单个卷的目录条目：目录条目去重、文件条目带卷名。
 func (s *Service) listVolumeDirEntries(ctx context.Context, v volume.Volume, owner, subdir, rel string,
 	seenDirs map[string]bool) []FileInfo {
-	// 按卷取 checksum（§15.1.1：卷维度键优先，旧键兜底）——同名文件不再张冠李戴。
-	csMap := s.checksumSnapshotFor(ctx, owner, v.Name)
+	// 按卷**逐条**取 checksum（§15.1.1：卷维度键优先，旧键兜底）——同名文件不串值；
+	// 不再为每次目录列举拷贝全量台账（O(全库) → O(本目录条目)）。
+	csAt := checksumGetter(s.checksumStoreReady(ctx, owner), v.Name)
 	var out []FileInfo
 	tnt := s.rt.volumeTenant(v.Name, owner)
 	if tnt == nil || tnt.Root() == nil {
@@ -342,7 +343,7 @@ func (s *Service) listVolumeDirEntries(ctx context.Context, v volume.Volume, own
 		s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
 		return out
 	}
-	for _, e := range s.buildFileListEntries(entries, csMap, subdir, tnt.Root()) {
+	for _, e := range s.buildFileListEntries(entries, csAt, subdir, tnt.Root()) {
 		if e.IsDir {
 			if seenDirs[e.Name] {
 				continue
@@ -596,48 +597,9 @@ func (s *Service) openExternalSource(ctx context.Context, dp DownloadPath) (Open
 	return OpenedFile{File: seeker, Info: info}, nil
 }
 
-// checksumSnapshot 返回 owner 的 checksum 台账快照（未装配 → 空 map）。
-//
-// 抽成方法是为了让 List/Search 的"一次性快照"约定只有一处（见既有注释：per-tenant store，
-// key 为相对租户根的 rel）。
-func (s *Service) checksumSnapshot(ctx context.Context, owner string) map[string]string {
-	if cs := s.rt.checksumStore(owner); cs != nil {
-		if snap := cs.GetAll(); len(snap) > 0 {
-			return snap
-		}
-	}
-	// 台账为空（新建租户 / 丢失 / 损坏）⇒ 从对象 meta **一次性重建**（每 owner 只尝试一次，
-	// 避免列表路径反复全量遍历；失败不阻断列表——checksum 空是降级不是错误）。
-	if s.checksumRebuildAllowed(owner) {
-		if n, err := s.RebuildChecksums(ctx, owner); err == nil && n > 0 {
-			s.rt.logger().Info("checksum 台账已从对象 meta 重建", "owner", owner, "entries", n)
-		}
-	}
-	if cs := s.rt.checksumStore(owner); cs != nil {
-		return cs.GetAll()
-	}
-	return map[string]string{}
-}
-
-// checksumSnapshotFor 返回**指定卷**的 `user/<rel> → checksum` 快照（设计 §15.1.1）：
-// 卷维度键优先，旧无卷键兜底（迁移兼容）。
-func (s *Service) checksumSnapshotFor(ctx context.Context, owner, vol string) map[string]string {
-	cs := s.rt.checksumStore(owner)
-	if cs == nil {
-		// 台账未装配：沿用全量入口的空/重建语义（列表 checksum 保持空，不阻断）。
-		return s.checksumSnapshot(ctx, owner)
-	}
-	if len(cs.GetAll()) == 0 {
-		// 台账丢失/损坏 ⇒ 走全量入口的「自愈重建」（每 owner 只试一次），再取卷视图。
-		_ = s.checksumSnapshot(ctx, owner)
-	}
-	return checksumSnapshotForVolume(cs, vol)
-}
-
-// checksumLookupFor 返回搜索期**逐条惰性**取 checksum 的查找器（O(1)/次，无全量拷贝）：
-// 卷维度键优先、旧无卷键兜底（§15.1.1 迁移兼容）。台账为空时按 owner **一次**自愈重建
-// （与既有全量入口同语义；判空用 O(1) 的 Len，避免 GetAll 拷贝）。
-func (s *Service) checksumLookupFor(ctx context.Context, owner string) checksumLookup {
+// checksumStoreReady 返回可用于**逐条**查询的台账（未装配 ⇒ nil）；台账为空时按 owner
+// 触发**一次**自愈重建。判空用 O(1) 的 Len（不再 GetAll 全量拷贝）。
+func (s *Service) checksumStoreReady(ctx context.Context, owner string) *checksum.ChecksumStore {
 	st := s.rt.checksumStore(owner)
 	if st == nil {
 		return nil
@@ -646,6 +608,17 @@ func (s *Service) checksumLookupFor(ctx context.Context, owner string) checksumL
 		if n, err := s.RebuildChecksums(ctx, owner); err == nil && n > 0 {
 			s.rt.logger().Info("checksum 台账已从对象 meta 重建", "owner", owner, "entries", n)
 		}
+	}
+	return st
+}
+
+// checksumLookupFor 返回搜索期**逐条惰性**取 checksum 的查找器（O(1)/次，无全量拷贝）：
+// 卷维度键优先、旧无卷键兜底（§15.1.1 迁移兼容）。台账为空时按 owner **一次**自愈重建
+// （与既有全量入口同语义；判空用 O(1) 的 Len，避免 GetAll 拷贝）。
+func (s *Service) checksumLookupFor(ctx context.Context, owner string) checksumLookup {
+	st := s.checksumStoreReady(ctx, owner)
+	if st == nil {
+		return nil
 	}
 	return func(vol, rel string) string {
 		if sum, ok := checksumGet(st, vol, "user/"+rel); ok {
