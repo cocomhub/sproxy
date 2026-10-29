@@ -72,8 +72,10 @@ func TestRootStructuralMutationsNotify(t *testing.T) {
 			if reason, ok := rootMutationDelegates[fn.Name.Name]; ok && reason != "" {
 				continue
 			}
-			if !funcBodyContainsCall(fset, fn, "notifyMutation") {
-				t.Errorf("%s:%s 是结构性变异方法但未调用 notifyMutation（R45：机制会静默失效）；"+
+			// notifyMutationKind 是 notifyMutation 的「显式 IsDir」变体（设计 2026-10-30 D1），
+			// 两者都发放事件 ⇒ 任一出现即满足「机制生效」。
+			if !funcBodyContainsCall(fset, fn, "notifyMutation") && !funcBodyContainsCall(fset, fn, "notifyMutationKind") {
+				t.Errorf("%s:%s 是结构性变异方法但未调用 notifyMutation/notifyMutationKind（R45：机制会静默失效）；"+
 					"若委托给已发事件的方法，请在 rootMutationDelegates 登记理由",
 					name, fn.Name.Name)
 			}

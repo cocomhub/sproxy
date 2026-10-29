@@ -32,6 +32,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"path"
+
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -141,6 +143,32 @@ func newSearchIndex(logger func() *slog.Logger, volSet func() VolumeSet,
 // owner 租户不可用（非法/根不可用）时返回 nil（调用方按空结果处理，与旧语义一致）。
 // persist 非 nil（StateStore 装配）时 load/save 走适配器（statestore.md §5.1 P1，见
 // state_index.go）；nil = 本地 JSON 落盘（单节点零回归）。
+// rebuildSubtree 按**真实磁盘**重建 userRel 子树（目录 rename 的目标侧投影，设计 2026-10-30 D2）。
+// 调用方应先 removePrefix 源前缀；本方法只负责把目标子树重新登记进索引（幂等覆盖）。
+//
+// 锁内做磁盘列举（rename 低频；与 removePrefix 的标签清理同类权衡，已在设计文档记档）。
+func (ix *searchIndex) rebuildSubtree(owner, userRel, volume string, root *storage.Root, tnt *storage.Tenant) {
+	if root == nil {
+		return
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	oi := ix.owners[owner]
+	if oi == nil {
+		return // 索引未构建 ⇒ 首次搜索会全量构建
+	}
+	newOI := cloneOwnerIndexLocked(oi)
+	newOI.entries[userRel] = &indexEntry{name: userRel, base: path.Base(userRel), isDir: true}
+	ix.ensureParentsLocked(newOI, userRel)
+	userRoot := "user"
+	if tnt != nil {
+		userRoot = tnt.UserRoot()
+	}
+	ix.walkUserRoot(root, userRoot, volume, userRel, tnt, newOI)
+	ix.owners[owner] = newOI
+	ix.markDirtyLocked(owner)
+}
+
 // stats 返回索引可观测规模：在内存中的 owner 数与条目总数。
 func (ix *searchIndex) stats() (owners, entries int) {
 	ix.mu.Lock()

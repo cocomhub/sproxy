@@ -71,6 +71,7 @@ type dirsEnv struct {
 	phys VolumePhysFootprinter
 	// contentIndex 为 true 时启用内容索引（WithContentIndex）——默认 false 零回归。
 	contentIndex bool
+
 	// metrics 非 nil 时注入为领域计量能力（断言 RecordUpload/RecordDelete 调用）。
 	metrics *fakeMetrics
 	// audits 累积本环境收到的审计行（testRuntime.Record 追加）——批量族与审计归一化
