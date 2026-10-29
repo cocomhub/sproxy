@@ -371,8 +371,8 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (ListResult, error)
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	owner := normalizeOwner(q.Owner)
-	// 按卷 checksum 视图（§15.1.1）：卷维度键优先、旧键兜底，避免跨卷同名串值。
-	byVol := s.checksumSnapshotsByVolume(context.Background(), owner)
+	// checksum 逐条惰性取（§15.1.1：卷维度键优先、旧键兜底）——不再每请求全量拷贝台账。
+	cs := s.checksumLookupFor(ctx, owner)
 
 	// 索引化（roadmap P0）：搜索走内存增量索引（首次全量构建 + 写路径增量维护）。
 	// 与旧 WalkDir 实现**逐字一致的语义**由 search_index_test.go 钉住：子串匹配 base name
@@ -382,7 +382,7 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (ListResult, error)
 	if tnt := s.rt.tenantOf(owner); tnt == nil || tnt.Root() == nil {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-	results := s.index.search(owner, qLower, tag, byVol)
+	results := s.index.search(owner, qLower, tag, cs)
 
 	results = s.appendExternalVolumeHits(ctx, owner, qLower, tag, results)
 
@@ -634,37 +634,25 @@ func (s *Service) checksumSnapshotFor(ctx context.Context, owner, vol string) ma
 	return checksumSnapshotForVolume(cs, vol)
 }
 
-// checksumSnapshotsByVolume 返回「每卷一份」的 `user/<rel> → checksum` 视图（设计 §15.1.1）：
-// 旧无卷键作为每卷兜底，卷维度键覆盖（迁移兼容）。供 Search / 语义搜索这类**跨卷结果集**使用。
-func (s *Service) checksumSnapshotsByVolume(_ context.Context, owner string) map[string]map[string]string {
-	cs := s.rt.checksumStore(owner)
-	if cs == nil {
-		return map[string]map[string]string{}
+// checksumLookupFor 返回搜索期**逐条惰性**取 checksum 的查找器（O(1)/次，无全量拷贝）：
+// 卷维度键优先、旧无卷键兜底（§15.1.1 迁移兼容）。台账为空时按 owner **一次**自愈重建
+// （与既有全量入口同语义；判空用 O(1) 的 Len，避免 GetAll 拷贝）。
+func (s *Service) checksumLookupFor(ctx context.Context, owner string) checksumLookup {
+	st := s.rt.checksumStore(owner)
+	if st == nil {
+		return nil
 	}
-	if len(cs.GetAll()) == 0 {
-		_ = s.checksumSnapshot(context.Background(), owner) // 同上的自愈重建
-	}
-	byVol := checksumSnapshotsAll(cs)
-	if vs := s.rt.volSet(); vs != nil {
-		// 已知卷即使没有卷维度键也要有一份视图（旧键兜底）。
-		for _, v := range vs.All() {
-			if _, ok := byVol[v.Name]; !ok {
-				byVol[v.Name] = checksumSnapshotForVolume(cs, v.Name)
-			}
+	if st.Len() == 0 && s.checksumRebuildAllowed(owner) {
+		if n, err := s.RebuildChecksums(ctx, owner); err == nil && n > 0 {
+			s.rt.logger().Info("checksum 台账已从对象 meta 重建", "owner", owner, "entries", n)
 		}
 	}
-	return byVol
-}
-
-// checksumsForVolume 取某卷的 checksum map（未知卷 → 空 map，零回归）。
-func checksumsForVolume(byVol map[string]map[string]string, vol string) map[string]string {
-	if m, ok := byVol[vol]; ok {
-		return m
+	return func(vol, rel string) string {
+		if sum, ok := checksumGet(st, vol, "user/"+rel); ok {
+			return sum
+		}
+		return ""
 	}
-	if m, ok := byVol[""]; ok {
-		return m
-	}
-	return nil
 }
 
 // asHTTPError 取出 *HTTPError（非该类型返回 nil）。

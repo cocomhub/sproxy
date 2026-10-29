@@ -364,6 +364,13 @@ func (cs *ChecksumStore) DeletePrefix(prefix string) {
 	}
 }
 
+// Len 返回台账条目数（O(1)；用于「是否需要自愈重建」的判空，避免 GetAll 全量拷贝）。
+func (cs *ChecksumStore) Len() int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return len(cs.checksums)
+}
+
 // GetAll 返回全部 checksum 记录的副本（filename -> sha256）。
 func (cs *ChecksumStore) GetAll() map[string]string {
 	cs.mu.RLock()

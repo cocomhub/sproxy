@@ -392,6 +392,13 @@ func (e *dirsEnv) enableDedup() {
 // enableVolumes 装配多卷（首卷为默认卷，物理根 = e.root），并重建 Service。
 func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 	t.Helper()
+	// 重建卷集前关闭旧卷根句柄（Windows 上未关句柄会让 t.TempDir cleanup 报
+	// "being used by another process"；`defaultRoot()` 懒建的句柄也在旧 map 里）。
+	for _, old := range e.volRoots {
+		if old != nil {
+			_ = old.Close()
+		}
+	}
 	vols := make([]volume.Volume, 0, len(names))
 	roots := map[string]*storage.Root{}
 	e.volDirs = map[string]string{}
