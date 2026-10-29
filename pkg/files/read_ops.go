@@ -132,25 +132,16 @@ func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 	// 该区间位于**卷根命名空间**（客户端经 `<owner>/user/...` 寻址不到），故对基础卷的
 	// 用户视图而言它通常就是空目录（200）。写侧由 `storage.Root` 封印恒拒（ErrSealed）。
 
-	// 列表走索引：dirRel = rel 去 user/ 前缀（索引 key 空间；"" = 根目录）。
-	dirRel := strings.TrimPrefix(rel, tnt0.UserRoot()+"/")
-	if dirRel == rel {
-		dirRel = ""
-	}
+	// 数据源（§15.2 步骤 3，2026-10-29）：视图不可用时**实时扫描**（`listFallback`）——
+	// `searchIndex` 不再承担 list（它只服务搜索）。可见性由装配层卷状态缓存负责：默认永不过期 +
+	// 事件写穿 + 显式 `volume refresh`；`volume_state.disable: true` ⇒ 每次回源（强一致）。
 	csMap := s.checksumSnapshot(ctx, owner)
-	// **卷状态视图优先**（§15.2 步骤 2）：装配层提供 `VolumeViewLister` 且未被禁用时，list 与
-	// sync/mirror/备份走同一数据源，并享受卷状态缓存（写穿 + TTL）。能力不可用（未装配/缓存
-	// 关闭）⇒ 回落索引路径（零回归）。
 	if res, handled := s.listFromVolumeViews(ctx, q, owner, subdir, volFilter, csMap); handled {
 		return res, nil
 	}
-	var allFiles []FileInfo
-	if s.index != nil {
-		allFiles = s.index.list(owner, dirRel, volFilter, csMap)
-	}
+	allFiles := s.listFallback(owner, subdir, q.VolName, rel, csMap)
 	if allFiles == nil {
-		// 索引不可用（index nil：零值构造的 Service 不触达列表时）→ 回落实时扫描。
-		allFiles = s.listFallback(owner, subdir, q.VolName, rel, csMap)
+		allFiles = []FileInfo{} // 契约：空结果必须是空数组（JSON `[]`），不能是 null
 	}
 	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
 	return ListResult{

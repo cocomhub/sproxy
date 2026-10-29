@@ -1,7 +1,9 @@
 # list/search 数据源直调点登记（R41 影子台账：只减不增）
-# 口径：`.index.list(` / `.index.search(` / `ExternalList(` 的出现次数；
-# 目标形态见设计 §15.2（list 由卷状态视图投影，searchIndex 只保留搜索）。
+# 口径：`.index.search(` / `ExternalList(` 的出现次数（`.index.list(` 已硬禁，见门禁代码）；
+# 目标形态见设计 §15.2：list 由卷状态视图/实时扫描提供（2026-10-29 步骤 3 已落地），
+# searchIndex 只保留搜索语义；`ExternalList` 是**外部卷列举能力接缝**（显式 ?volume=），
+# 不是本地 list 数据源。
 # 格式：file<TAB>max<TAB>reason
-pkg/files/options.go	1	现状基线（迁移推进时同步下调）
-pkg/files/read_ops.go	3	现状基线（迁移推进时同步下调）
-pkg/server/files_service.go	1	现状基线（迁移推进时同步下调）
+pkg/files/options.go	1	ExternalList 能力接口声明（外部卷列举接缝）
+pkg/files/read_ops.go	2	index.search（搜索，保留）+ ops.ExternalList（外部卷列举接缝）
+pkg/server/files_service.go	1	ExternalList 实现（经 VolumeView 列举外部卷）

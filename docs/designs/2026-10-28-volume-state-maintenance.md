@@ -217,7 +217,8 @@ func WrapVolume(sv registry.StorageVolume, c *Cache) registry.StorageVolume
 | `files.List(?volume=<外部卷>)` / `Stat` / `DeleteFile` / `Rename` | 走装饰后 FS ⇒ 自动缓存 + 自动失效 |
 | `ExternalVolumeOps.ExternalList/ExternalStat` | 语义并入装饰器；保留兼容期薄转发 |
 | `files.Search`（外部卷） | 默认不支持（`volume_state_search_remote` 默认 false）；启用则读 TreeView |
-| 本地卷 list/search | **本期保持旧 `searchIndex`**（用户裁定允许共存，§五 V3 迁移） |
+| 本地卷 list | **卷状态视图**（步骤 2）→ 视图不可用时**实时扫描**（步骤 3）；`searchIndex` 不再参与 |
+| 本地卷 search | 仍由 `searchIndex`（只服务搜索——步骤 3 后的唯一职责） |
 
 ---
 
@@ -271,7 +272,7 @@ Delete/软删/恢复 → Invalidate(rel)
 |---|---|---|---|---|
 | **V1** | `pkg/volumestate` 骨架：`ObjectRef`/`DirSnapshot`/`TreeEntry`/`Cache`/`MutationBus`/`WrapVolume`；staging 原子读写 + LRU + TTL/代际判定；`storage.Root` 变异观察者（不接线） | 高 | 无 | 单测：命中/miss/TTL/代际/写穿/祖先 stale/degraded/保密卷不落盘 |
 | **V2** | **外部卷接入（本期核心）**：装配期 `WrapVolume` 包所有存储卷（含本地卷，见 §十六）；`files.List/Stat/Delete/Rename(?volume=)` 走装饰器；TTL 默认 0（永不过期，2026-10-29 改判）；secretdata 用 `StateGen`；`ExternalList/ExternalStat` 保留回源 | **最高** | 首次 list 慢、之后命中；进程外改写 ≤TTL 收敛 | e2e：二次 list 无远端往返（计数）；TTL 过期回源一次；`Refresh` 立即生效；删除后无幽灵 |
-| **V3** | **本地卷迁移**：~~Root 事件接线~~（#880/#884 完成）、~~list 经卷状态视图~~（§15.2 步骤 2 完成）；剩余 `searchIndex` 仅服务搜索、`checksums.json` 只读化 | 中（部分完成） | list 数据源可切换（受 `volume_state.disable` 门控） | 全量绿；旧路径棘轮计数下降 |
+| **V3** | **本地卷迁移**：~~Root 事件接线~~（#880/#884）、~~list 经卷状态视图~~（步骤 2 #895）、~~删 `index.list`~~（步骤 3，2026-10-29）；剩余 `checksums.json` 只读化 | 低（仅剩台账） | list 数据源唯二：视图 / 实时扫描 | 全量绿；R41 硬禁 `index.list` + 棘轮 4 处 |
 | **V4** | 清理：删 `searchIndex`/`checksums.json` 独立写路径与 `ExternalList` 薄转发；`RecordBypassWrite`/`IndexMove` 删（由事件总线取代）——**阶段一已完成**（见 §十三），剩余待 `checksums.json` 只读化与 TreeView 投影 | 低 | 无 | #874 回归用例绿；deadcode 门禁过 |
 | **V5** | 门禁 + 文档 + 归档：R40/R41/R42/R44/R45/R46 | 中 | 无 | `make check-ci` 全绿 |
 
@@ -285,7 +286,7 @@ Delete/软删/恢复 → Invalidate(rel)
 | 门禁 | 判据 | 防的是 |
 |---|---|---|
 | **R40** ✅已实现 | 非测试源码的 `*Cache`/`*Index` 结构体必须登记（`list_cache_types.tsv`，新增须复用 `pkg/volumestate` 或说明理由；secretdata 白名单理由：内容是密文，只有卷能算） | 再造第四套 |
-| **R41** ✅影子台账 | `index.list`/`index.search`/`ExternalList` 直调点逐文件计数棘轮（`list_source_calls.tsv`，只减不增）；迁移完成后收敛为 0 即转硬禁 | 双入口 |
+| **R41** ✅（步骤 3 后） | `.index.list(` **硬禁**（入口已删）；`.index.search(`/`ExternalList(` 逐文件计数棘轮（`list_source_calls.tsv`，4 处，只减不增） | 双入口 |
 | **R42** ✅已实现 | 带 `ListDir` 的类型（`sync.FS` 实现）必须实现 `StateGen`，或登记在 `fs_derived_state.tsv` 说明「为什么不需要自述代际」 | 忘失效（#853/#874 类） |
 | **R44** | `volumestate.WrapVolume` 只在装配处出现；业务代码不得自造 FS 缓存包装 | 绕过唯一入口 |
 | **R45** ✅已实现 | `storage.Root` 结构性变异方法必须回调 `notifyMutation`（`internal/archcheck/root_mutation_gate_test.go`） | 机制因原语演进失效 |
@@ -481,9 +482,16 @@ checksum、在途临时文件不对外可见），由 `TestList_ViewSourceEquiva
 门控放在**装配层单一事实源**（`filesVolumeSet.ListDirView` 读 `cfg.VolumeState.Disable`），
 领域侧只做「查能力 → 用能力」。
 
+**步骤 3 已落地（2026-10-29）**：删除 `searchIndex.list` 与 `indexEntryIsDirectChild`——
+`files.List` 变为「视图 → 实时扫描（`listFallback`）」两级，`searchIndex` **只服务搜索**
+（`index.search`）。可见性策略全部上移到装配层卷状态缓存（默认永不过期 + 事件写穿 +
+`sclient volume refresh`；`volume_state.disable: true` ⇒ 每次回源 = 强一致）。
+R41 门禁同步升级：`.index.list(` 改为**硬禁**（出现即红），棘轮基线 5 → 4 处
+（`index.search` 1 + `ExternalList` 能力接缝 3）。
+
 **步骤 1 已落地（R41 影子台账）**：`internal/archcheck/list_source_gate_test.go` + `list_source_calls.tsv`
-（3 文件 / 5 处基线：`pkg/files/read_ops.go` 3、`options.go` 1、`pkg/server/files_service.go` 1）。
-只减不增；迁移完成后计数归零，届时把本门禁改成硬禁（禁止直调）。
+（初版 3 文件 / 5 处；步骤 3 后为 3 文件 / 4 处——`index.list` 已硬禁归零）。
+只减不增；`.index.list(` 已转硬禁。
 
 ### 15.3 步骤 2 前置分析（2026-10-28 侦察结论，未实现）
 
@@ -552,5 +560,5 @@ checksum、在途临时文件不对外可见），由 `TestList_ViewSourceEquiva
 `TestLocalVolumeCache_WriteThroughAndTTLContract`（进程外改动 TTL 内不可见；经 Root 的写入由事件
 写穿立刻可见）。变异：去掉 `Cache.Invalidate` ⇒ 写穿断言红。
 
-**未做（步骤 2 本体）**：`files.List` 仍走 `searchIndex`（R46/R41 棘轮登记）。切换时建议**同受
-`volume_state.disable` 门控**——关闭缓存时保持索引路径，开启时走卷视图并享受缓存。
+**步骤 2 已落地（#895）**：`files.List` 经卷视图；`volume_state.disable: true` 时（#895 起）回落
+`searchIndex`，**步骤 3（2026-10-29）已把回落改为实时扫描**——关闭缓存 = 每次回源（强一致）。

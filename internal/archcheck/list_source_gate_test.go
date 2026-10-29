@@ -5,16 +5,16 @@ package archcheck
 
 // list_source_gate_test.go 是「list/search 数据源收口」棘轮（R41，影子台账阶段）。
 //
-// 背景（设计 2026-10-28-volume-state-maintenance §15.2）：本地卷 list 目前由 `searchIndex`
-// 提供（`index.list`），外部卷由 `ExternalList` 提供。目标形态是「结构视图 = 卷状态视图
-// （卷 FS ListDir + volumestate 缓存）投影，searchIndex 只保留搜索语义」。该迁移需先定
-// 结构视图来源与集群 IndexSync 边界，故分三步走；本门禁是**第一步的影子台账**：把现有
-// 直调点逐文件登记，**只减不增**——迁移每推进一步就下调基线，防止新增耦合。
+// 背景（设计 2026-10-28-volume-state-maintenance §15.2）：本地卷 list 曾由 `searchIndex`
+// 提供（`index.list`）。迁移已完成：
+//   - 步骤 2（#895）：list 优先经**卷状态视图**（`VolumeView.ListDir` + volumestate 缓存）；
+//   - 步骤 3（2026-10-29）：**删除 `index.list`**，视图不可用时直接实时扫描（`listFallback`）——
+//     `searchIndex` 只保留搜索语义。
 //
-// 判据：非测试源码中 `.index.list(` / `.index.search(` / `ExternalList(` 的出现次数之和，
-// 逐文件与 `list_source_calls.tsv` 完全一致（新增须说明理由，减少须同步下调）。
-//
-// 迁移完成后本门禁退化为「计数全为 0」（届时可改为硬禁）。
+// 本门禁现由两段组成：
+//  1. **硬禁**：`.index.list(` 出现即失败（实现已删除，任何新增都是回归）；
+//  2. **棘轮**：`.index.search(` / `ExternalList(` 逐文件登记，只减不增（`ExternalList` 是
+//     **外部卷列举能力接缝**，显式 `?volume=<外部卷>` 用，不是本地 list 数据源）。
 
 import (
 	"os"
@@ -29,9 +29,11 @@ import (
 // listSourceCallsFile 是登记表文件名。
 const listSourceCallsFile = "list_source_calls.tsv"
 
+// listIndexListPattern 是**已删除**的 list 索引入口（硬禁：任何出现都是回归）。
+var listIndexListPattern = regexp.MustCompile(`\.index\.list\(`)
+
 // listSourcePatterns 是 list/search 数据源的直调形态。
 var listSourcePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\.index\.list\(`),
 	regexp.MustCompile(`\.index\.search\(`),
 	regexp.MustCompile(`\bExternalList\(`),
 }
@@ -143,9 +145,53 @@ func TestListSourceCallsRatchet(t *testing.T) {
 	for _, n := range counts {
 		total += n
 	}
-	if len(counts) < 3 || total < 5 {
-		t.Fatalf("扫描面疑似被改窄：文件 %d 处 / 直调点 %d（期望 ≥3 / ≥5）", len(counts), total)
+	if len(counts) < 3 || total < 4 {
+		t.Fatalf("扫描面疑似被改窄：文件 %d 处 / 直调点 %d（期望 ≥3 / ≥4）", len(counts), total)
 	}
+	// 硬禁：`index.list` 已随 §15.2 步骤 3 删除（list 走卷状态视图/实时扫描）。
+	for file, hits := range scanPatternHits(t, listIndexListPattern) {
+		t.Errorf("%s 出现 %d 处 `.index.list(`：该入口已删除（list 走卷状态视图/实时扫描），"+
+			"请改用 VolumeView/FS.ListDir（或 listFallback）", file, hits)
+	}
+}
+
+// scanPatternHits 统计非测试源码里某个模式的命中数（file → count），用于硬禁断言。
+func scanPatternHits(t *testing.T, re *regexp.Regexp) map[string]int {
+	t.Helper()
+	root := moduleRoot(t)
+	out := map[string]int{}
+	for _, dir := range []string{"pkg", "internal", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d os.DirEntry, werr error) error {
+			if werr != nil {
+				return nil //nolint:nilerr // 遍历容错
+			}
+			if d.IsDir() {
+				if name := d.Name(); name == "testdata" || name == "node_modules" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+				return nil
+			}
+			rel, rerr := filepath.Rel(root, p)
+			if rerr != nil {
+				return nil //nolint:nilerr
+			}
+			data, rerr := os.ReadFile(p)
+			if rerr != nil {
+				return nil //nolint:nilerr
+			}
+			if n := len(re.FindAll(data, -1)); n > 0 {
+				out[filepath.ToSlash(rel)] += n
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("遍历 %s: %v", dir, err)
+		}
+	}
+	return out
 }
 
 // TestListSourceCallsBaselineHelper 重写登记表（ARCHCHECK_WRITE_BASELINE=1 时）。
