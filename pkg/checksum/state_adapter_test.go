@@ -89,6 +89,9 @@ func TestStateBackedChecksumStore_RoundTrip(t *testing.T) {
 	s.Set("user/dir/f.txt", "sha256hex")
 	s.Set("user/other.txt", "other")
 	s.Set("user/dir/sub/g.txt", "sub")
+	if err := s.Flush(); err != nil { // 落盘经合并窗口（≤1s），断言前显式 flush
+		t.Fatalf("flush: %v", err)
+	}
 	testStateChecksumRoundTrip_AssertSetAndPersisted(t, ctx, st, s)
 
 	// 重载：新适配器从 StateStore 读回（不回退旧文件）。
@@ -99,7 +102,10 @@ func TestStateBackedChecksumStore_RoundTrip(t *testing.T) {
 	testStateChecksumRoundTrip_Rename(t, s2)
 	testStateChecksumRoundTrip_Delete(t, s2)
 
-	// 再次重载（全流程落盘后状态可恢复）。
+	// 再次重载（全流程落盘后状态可恢复）——写经合并窗口，重载前显式 flush。
+	if err := s2.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	s3 := NewStateBackedChecksumStore(st, "checksum/alice/all", nil, "", stateTestLogger())
 	if all := s3.GetAll(); len(all) != 1 || all["user/renamed.txt"] != "sha256hex" {
 		t.Fatalf("二次重载 GetAll=%+v", all)
@@ -203,6 +209,9 @@ func TestStateBackedChecksumStore_SaveMigratesToState(t *testing.T) {
 	}
 	// 首写 → StateStore；旧 meta 文件保持原内容不被改写（单写）。
 	s.Set("user/b.txt", "new-cs")
+	if ferr := s.Flush(); ferr != nil {
+		t.Fatalf("flush: %v", ferr)
+	}
 	if _, gerr := st.Get(ctx, "checksum/alice/all"); gerr != nil {
 		t.Fatalf("首写应写 StateStore 新路径: %v", gerr)
 	}

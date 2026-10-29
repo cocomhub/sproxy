@@ -16,8 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -60,6 +58,11 @@ type Flusher interface{ Flush() error }
 
 var _ Flusher = (*ChecksumStore)(nil)
 
+// Closer 是**可选扩展**：停止落盘合并定时器并做最终落盘（生命周期结束时调用）。
+type Closer interface{ Close() error }
+
+var _ Closer = (*ChecksumStore)(nil)
+
 // ChecksumStore 维护「文件名 → SHA-256」台账并落盘到**租户卷内的 `<meta>/checksums.json`**，
 // 供 upload/download/delete/rename 操作复用。
 //
@@ -75,20 +78,9 @@ type ChecksumStore struct {
 	checksums map[string]string // filename -> sha256 hex
 	logger    *slog.Logger
 
-	// 落盘合并（写放大治理）：`Set` 只更新内存 + 递增 dirtyGen，由 debounce 定时器
-	// **合并为一次**全量落盘。此前每条 `Set` 都全量重写 JSON ⇒ 批量 N 文件 = O(N²) I/O
-	// （10 万条台账 ≈ 6MB/次）。崩溃窗口 ≤ debounce；台账可由对象 meta 重建
-	// （`RebuildChecksums`），故窗口内丢失可自愈。
-	dirtyGen  atomic.Uint64
-	savedGen  atomic.Uint64
-	debounce  time.Duration
-	writeSnap func(data []byte) error // 落盘实现（构造注入；测试可计数）
-
-	qmu      sync.Mutex
-	timer    *time.Timer
-	closed   bool
-	lastOp   string
-	lastArgs []any
+	// writeSnap 是落盘实现（构造注入，测试可计数）；merger 负责写合并（见 save_merger.go）。
+	writeSnap func(data []byte) error
+	merger    *saveMerger
 }
 
 // volumeKeySep 是卷维度复合键的分隔符（NUL：卷名与 rel 都不含，无歧义）。
@@ -218,77 +210,15 @@ func (cs *ChecksumStore) SnapshotInVolume(vol string) map[string]string {
 }
 
 // persist 落盘（失败重试一次并记日志；与 Set/Rename 的既有重试语义一致）。
-// defaultSaveDebounce 是落盘合并窗口：窗口内的多次写只落盘一次（崩溃最多丢窗口内的
-// checksum 记录，可由对象 meta 重建）。
-const defaultSaveDebounce = time.Second
-
 func (cs *ChecksumStore) persist(op string, args ...any) {
-	cs.dirtyGen.Add(1)
-	cs.scheduleSave(op, args...)
-}
-
-// scheduleSave 在首次写时挂一个 debounce 定时器；窗口内的后续写只累加 dirtyGen
-// （不再排新定时器 ⇒ 固定窗口合并，避免持续写导致永不落盘）。
-func (cs *ChecksumStore) scheduleSave(op string, args ...any) {
-	cs.qmu.Lock()
-	defer cs.qmu.Unlock()
-	if cs.closed || cs.timer != nil {
-		return
-	}
-	cs.lastOp, cs.lastArgs = op, args
-	cs.timer = time.AfterFunc(cs.debounce, cs.flushPending)
-}
-
-func (cs *ChecksumStore) flushPending() {
-	cs.qmu.Lock()
-	cs.timer = nil
-	closed := cs.closed
-	op, args := cs.lastOp, cs.lastArgs
-	cs.qmu.Unlock()
-	if closed || cs.dirtyGen.Load() <= cs.savedGen.Load() {
-		return
-	}
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, append([]any{"op", op}, args...)...)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error(retryPersistFailed, append([]any{"op", op}, args...)...)
-		}
-	}
+	cs.merger.mark(op, args...)
 }
 
 // Flush 立即落盘（有待持久化改动时）；供关键路径/测试显式同步。
-func (cs *ChecksumStore) Flush() error {
-	cs.qmu.Lock()
-	if cs.timer != nil {
-		cs.timer.Stop()
-		cs.timer = nil
-	}
-	cs.qmu.Unlock()
-	if cs.dirtyGen.Load() <= cs.savedGen.Load() {
-		return nil
-	}
-	return cs.save()
-}
+func (cs *ChecksumStore) Flush() error { return cs.merger.Flush() }
 
-// Close 停止合并定时器并做最终落盘（幂等）。关闭后的写仍更新内存但不再持久化
-// （调用方应在生命周期结束时 Close，例如 Service/租户卸载）。
-func (cs *ChecksumStore) Close() error {
-	cs.qmu.Lock()
-	if cs.closed {
-		cs.qmu.Unlock()
-		return nil
-	}
-	cs.closed = true
-	if cs.timer != nil {
-		cs.timer.Stop()
-		cs.timer = nil
-	}
-	cs.qmu.Unlock()
-	if cs.dirtyGen.Load() <= cs.savedGen.Load() {
-		return nil
-	}
-	return cs.save()
-}
+// Close 停止合并定时器并做最终落盘（幂等）。关闭后的写仍更新内存但不再持久化。
+func (cs *ChecksumStore) Close() error { return cs.merger.Close() }
 
 // maxChecksumStoreBytes 是台账读取上界（防注入超大 JSON 的 OOM；每条 ~70B ⇒ 64MiB ≈ 90 万文件）。
 // 超限视为损坏/不可用 → 空台账 + Warn（与「不存在/解析失败」同语义：无校验能力 ≠ 文件损坏）。
@@ -303,9 +233,9 @@ func NewChecksumStore(root *storage.Root, rel string, logger *slog.Logger) *Chec
 		rel:       rel,
 		checksums: make(map[string]string),
 		logger:    slogutil.Default(logger),
-		debounce:  defaultSaveDebounce,
 	}
 	cs.writeSnap = cs.writeSnapshotToRoot
+	cs.merger = newSaveMerger(defaultSaveDebounce, cs.logger, func(uint64) error { return cs.save() })
 	if root == nil {
 		cs.logger.Warn("checksum 台账未装配卷句柄，将只读空台账且不可持久化")
 		return cs
@@ -450,7 +380,6 @@ func (cs *ChecksumStore) save() error {
 	cs.saveMu.Lock()
 	defer cs.saveMu.Unlock()
 
-	gen := cs.dirtyGen.Load()
 	cs.mu.RLock()
 	snapshot := make(map[string]string, len(cs.checksums))
 	maps.Copy(snapshot, cs.checksums)
@@ -470,8 +399,6 @@ func (cs *ChecksumStore) save() error {
 	if err := cs.writeSnap(data); err != nil {
 		return err
 	}
-	// 仅当期间没有新写入时才把已持久化代际推进到本次快照的代际（否则保留 dirty 待下次合并）。
-	cs.savedGen.Store(gen)
 	return nil
 }
 

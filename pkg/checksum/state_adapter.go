@@ -43,16 +43,22 @@ type StateBackedChecksumStore struct {
 	mu        sync.RWMutex
 	checksums map[string]string
 	loaded    bool // 是否已从 StateStore 载入（防 Get 未命中时重复回退读旧文件）
+
+	// put 是 StateStore 写入实现（构造注入，默认 st.Put；测试可计数）。
+	put func(ctx context.Context, key string, data []byte) error
+	// merger 把连续写合并为一次全量 Put（集群 KV 每次 Put 是一次 RTT + 全量序列化）。
+	merger *saveMerger
 }
 
 var _ ChecksumStoreIface = (*StateBackedChecksumStore)(nil)
+var _ Flusher = (*StateBackedChecksumStore)(nil)
 
 // NewStateBackedChecksumStore 构造 StateStore 后端 checksum 台账。
 // legacyRoot/legacyRel 定位旧 <meta>/checksums.json（回退读）；legacyRoot 为 nil 或
 // legacyRel 为空 = 不回退读旧 meta（纯 StateStore 形态）。回退读经**卷句柄**：
 // 加密卷上旧文件是密文，裸 os 读会解析失败（迁移期台账静默丢失）。
 func NewStateBackedChecksumStore(st state.StateStore, key string, legacyRoot *storage.Root, legacyRel string, logger *slog.Logger) *StateBackedChecksumStore {
-	return &StateBackedChecksumStore{
+	s := &StateBackedChecksumStore{
 		st:         st,
 		key:        key,
 		legacyRoot: legacyRoot,
@@ -60,6 +66,9 @@ func NewStateBackedChecksumStore(st state.StateStore, key string, legacyRoot *st
 		logger:     slogutil.Default(logger),
 		checksums:  make(map[string]string),
 	}
+	s.put = st.Put
+	s.merger = newSaveMerger(defaultSaveDebounce, s.logger, func(uint64) error { return s.save() })
+	return s
 }
 
 // loadLocked 载入快照（调用方持写锁）：StateStore 优先；未命中回退旧 meta 文件。
@@ -149,7 +158,7 @@ func (s *StateBackedChecksumStore) save() error {
 		return err
 	}
 	ctx := context.Background()
-	if err := s.st.Put(ctx, s.key, data); err != nil {
+	if err := s.put(ctx, s.key, data); err != nil {
 		return fmt.Errorf("checksum store: StateStore 写入失败: %w", err)
 	}
 	return nil
@@ -164,12 +173,7 @@ func (s *StateBackedChecksumStore) Set(filename, checksum string) {
 	s.checksums[filename] = checksum
 	s.mu.Unlock()
 
-	if err := s.save(); err != nil {
-		s.logger.Error(chkStorePersistFailed, "op", "set", "file_name", filename, "error", err)
-		if retryErr := s.save(); retryErr != nil {
-			s.logger.Error(retryPersistFailed, "op", "set", "file_name", filename, "error", retryErr)
-		}
-	}
+	s.merger.mark("set", "file_name", filename)
 }
 
 // Delete 删除指定文件的 checksum 记录并持久化。
@@ -181,12 +185,7 @@ func (s *StateBackedChecksumStore) Delete(filename string) {
 	delete(s.checksums, filename)
 	s.mu.Unlock()
 
-	if err := s.save(); err != nil {
-		s.logger.Error(chkStorePersistFailed, "op", "delete", "file_name", filename, "error", err)
-		if retryErr := s.save(); retryErr != nil {
-			s.logger.Error(retryPersistFailed, "op", "delete", "file_name", filename, "error", retryErr)
-		}
-	}
+	s.merger.mark("delete", "file_name", filename)
 }
 
 // Rename 将一条 checksum 记录从 from 迁移到 to（to 已存在被覆盖，与 os.Rename 对齐）。
@@ -205,12 +204,7 @@ func (s *StateBackedChecksumStore) Rename(from, to string) {
 	s.checksums[to] = v
 	s.mu.Unlock()
 
-	if err := s.save(); err != nil {
-		s.logger.Error(chkStorePersistFailed, "op", "rename", "from", from, "to", to, "error", err)
-		if retryErr := s.save(); retryErr != nil {
-			s.logger.Error(retryPersistFailed, "op", "rename", "from", from, "to", to, "error", retryErr)
-		}
-	}
+	s.merger.mark("rename", "from", from, "to", to)
 }
 
 // DeletePrefix 删除指定前缀的所有 checksum 记录（目录删除）。
@@ -226,10 +220,11 @@ func (s *StateBackedChecksumStore) DeletePrefix(prefix string) {
 	}
 	s.mu.Unlock()
 
-	if err := s.save(); err != nil {
-		s.logger.Error(chkStorePersistFailed, "op", "deletePrefix", "prefix", prefix, "error", err)
-		if retryErr := s.save(); retryErr != nil {
-			s.logger.Error(retryPersistFailed, "op", "deletePrefix", "prefix", prefix, "error", retryErr)
-		}
-	}
+	s.merger.mark("deletePrefix", "prefix", prefix)
 }
+
+// Flush 立即把合并窗口内的改动写入 StateStore（有待持久化改动时）。
+func (s *StateBackedChecksumStore) Flush() error { return s.merger.Flush() }
+
+// Close 停止合并定时器并做最终落盘（幂等）。
+func (s *StateBackedChecksumStore) Close() error { return s.merger.Close() }

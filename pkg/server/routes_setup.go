@@ -184,7 +184,7 @@ func (h *Handlers) initStorageLayout(vs *registry.Set, cfg *Config, log *slog.Lo
 	// pkg/volume/registry 按卷各持一个缓存（不预建 meta，见 Set.Tenant）。
 	h.tenants = storage.NewTenantCache(h.globalRoot,
 		storage.WithMetaBucket(), storage.WithLogger(h.logger))
-	h.checksumStores = make(map[string]*checksum.ChecksumStore)
+	h.checksumStores = make(map[string]checksum.ChecksumStoreIface)
 	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	h.quotaBuckets = make(map[string]map[string]*quota.Scope)
