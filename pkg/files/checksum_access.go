@@ -79,3 +79,21 @@ func checksumRename(cs checksum.ChecksumStoreIface, vol, from, to string) {
 	}
 	cs.Rename(from, to)
 }
+
+// checksumDelete 删除某卷的 rel checksum（不支持卷维度时回落旧方法）。
+func checksumDelete(cs checksum.ChecksumStoreIface, vol, rel string) {
+	if v, ok := volumeKeyed(cs); ok && vol != "" {
+		v.DeleteInVolume(vol, rel)
+		return
+	}
+	cs.Delete(rel)
+}
+
+// checksumDeletePrefix 删除某卷下以 prefix 开头的 checksum（rmdir 子树）。
+func checksumDeletePrefix(cs checksum.ChecksumStoreIface, vol, prefix string) {
+	if v, ok := volumeKeyed(cs); ok && vol != "" {
+		v.DeletePrefixInVolume(vol, prefix)
+		return
+	}
+	cs.DeletePrefix(prefix)
+}

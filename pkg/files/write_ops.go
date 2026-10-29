@@ -966,9 +966,16 @@ func (s *Service) cleanupRemovedDir(owner, rel string, allFiles []rmdirFileStat)
 	// sidecar 是否存在判断，无 meta 时 no-op（一次多余 stat，可接受）。
 	s.cleanupRemovedDirMeta(owner, allFiles)
 	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.DeletePrefix(rel + "/")
-		// 清理目录自身的 checksum 记录（如果存在）
-		cs.Delete(rel)
+		// 按卷清理（§15.1.1）：rmdir 子树的文件可能分布在不同卷——逐卷删前缀 + 目录自身。
+		seen := make(map[string]struct{}, len(allFiles)+1)
+		for _, f := range allFiles {
+			if _, ok := seen[f.volName]; ok {
+				continue
+			}
+			seen[f.volName] = struct{}{}
+			checksumDeletePrefix(cs, f.volName, rel+"/")
+			checksumDelete(cs, f.volName, rel)
+		}
 	}
 	// 搜索索引同步删除子树（roadmap P0）：rmdir 后子树不可见。
 	if s.index != nil {
@@ -2054,7 +2061,8 @@ func (s *Service) deleteQuarantinedFile(f *fileOp, homeVol, rel, quarRel string,
 		}
 	}
 	if csStore := s.rt.checksumStore(f.owner); csStore != nil {
-		csStore.Delete(rel)
+		// 卷维度键（§15.1.1）：按文件**实际所在卷**删除，避免残留（旧键由 helper 兜底）。
+		checksumDelete(csStore, homeVol, rel)
 	}
 	if s.index != nil {
 		s.index.remove(f.owner, strings.TrimPrefix(rel, "user/"))

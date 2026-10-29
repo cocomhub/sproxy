@@ -507,9 +507,18 @@ per-volume 映射），验证多卷同名场景；再评估 A 作为「台账只
   （`checksumSnapshotsByVolume`）、`Stat`/分块下载（`checksumGet`）、`/api/verify`（键解析去重）、
   导出 manifest（按 source 卷名）。
 - **单卷零回归**：卷名为空（单卷装配）时 helper 全部回落旧无卷方法 ⇒ 行为与之前逐字一致。
-- **遗留（不影响正确性）**：`rmdir` 删除子树只清旧键（卷维度键残留但不会被读到）；
-  版本桶（`version/<rel>`）仍用旧键（不参与 user list）；旧键不自动迁移——需要时跑
-  `sclient checksum rebuild`（现按卷写入）重建。
+- **删除路径按卷清理**（2026-10-29 补齐）：`DeleteFile` 与 `rmdir` 子树改为按**文件实际所在
+  卷**删除卷维度键（`checksumDelete` / `checksumDeletePrefix`），不再残留——否则「同名重传」
+  可能读到旧值。验收 `TestDeleteAndRmdir_CleanVolumeKeyedChecksum`（变异：退回旧键删除 ⇒ 红）。
+
+#### 15.1.3 遗留项裁决（2026-10-29，逐项给定结论）
+
+| 遗留项 | 结论 | 理由 |
+|---|---|---|
+| 版本桶（`version/<rel>`）checksum 键 | **不迁移** | 版本桶不参与 user list；其 checksum 仅用于版本完整性展示。迁移需给 `SaveVersion` 增加卷名参数并改 5+ 调用点，收益低于风险。 |
+| 本地卷实现 `StateGeneration`（目录 mtime + 子项数） | **不实现** | 每次缓存命中都要额外一次 `ReadDir` 才能取子项数——与「缓存避免列举」的目标相反；且 POSIX 目录 mtime 不反映**子目录内容**变化（祖先探测无效）。显式 `POST /api/volumes/refresh` 已是明确契约（默认永不过期 + 显式刷新）。 |
+| 台账只读化（§15.1 步骤 3：`Set/Delete/Rename` 不再写台账） | **暂缓** | 读路径要完全脱离台账，只能靠「卷自报 checksum」（`rootfs.ListDir` 读 meta sidecar——需把 meta 读取下沉到卷层，架构倒置）或给 `volumestate` 增加 checksum 维度（缓存关闭时仍要台账兜底）。**当前已无正确性缺陷**（§15.1.2 卷维度隔离），在明确上述口径前保持「写台账 + 按卷读」。 |
+| 旧无卷键不自动迁移 | 保持 | 只读兜底已保证兼容；需要清理时跑 `sclient checksum rebuild`（现按卷写入）。 |
 
 ### 15.2 `searchIndex` → TreeView 投影
 
