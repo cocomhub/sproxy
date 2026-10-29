@@ -35,7 +35,7 @@ func checksumSet(cs checksum.ChecksumStoreIface, vol, rel, sum string) {
 
 // checksumGetter 返回「user 桶内 rel → checksum」的**逐条**取用器（未装配/未命中 ⇒ ""）。
 // 用于目录列举等热路径：只对**本目录条目**做 O(1) 台账查询，不拷贝全量快照。
-func checksumGetter(cs *checksum.ChecksumStore, vol string) func(rel string) string {
+func checksumGetter(cs checksum.ChecksumStoreIface, vol string) func(rel string) string {
 	if cs == nil {
 		return func(string) string { return "" }
 	}

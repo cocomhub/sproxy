@@ -182,7 +182,7 @@ type QuotaScopeProvider interface {
 // ChecksumLedgerProvider 返回 owner 的 per-tenant 校验和台账；nil 实现 = 不落台账（下载/stat 仍
 // 实时计算 checksum 响应头）。
 type ChecksumLedgerProvider interface {
-	ChecksumStoreFor(owner string) *checksum.ChecksumStore
+	ChecksumStoreFor(owner string) checksum.ChecksumStoreIface
 }
 
 // DownloadPathResolver 把下载/stat 请求解析为 (租户, 根内相对路径, 用户可见名)。默认实现只支持
@@ -522,9 +522,11 @@ type quotaScopesFunc func(owner, rel string) *quota.Scope
 func (f quotaScopesFunc) ScopeFor(owner, rel string) *quota.Scope { return f(owner, rel) }
 
 // checksumLedgersFunc 以函数适配 ChecksumLedgerProvider。
-type checksumLedgersFunc func(owner string) *checksum.ChecksumStore
+type checksumLedgersFunc func(owner string) checksum.ChecksumStoreIface
 
-func (f checksumLedgersFunc) ChecksumStoreFor(owner string) *checksum.ChecksumStore { return f(owner) }
+func (f checksumLedgersFunc) ChecksumStoreFor(owner string) checksum.ChecksumStoreIface {
+	return f(owner)
+}
 
 // downloadPathsFunc 以函数适配 DownloadPathResolver。
 type downloadPathsFunc func(*http.Request) (DownloadPath, error)

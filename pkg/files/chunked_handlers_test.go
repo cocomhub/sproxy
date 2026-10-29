@@ -123,7 +123,7 @@ func (e *chunkedTestEnv) RouteTarget(ctx context.Context, owner, rel, volName st
 
 func (e *chunkedTestEnv) ScopeFor(string, string) *quota.Scope { return nil }
 
-func (e *chunkedTestEnv) ChecksumStoreFor(string) *checksum.ChecksumStore { return e.cs }
+func (e *chunkedTestEnv) ChecksumStoreFor(string) checksum.ChecksumStoreIface { return e.cs }
 
 func (e *chunkedTestEnv) UploadStoreFor(string) *UploadStore { return e.us }
 
