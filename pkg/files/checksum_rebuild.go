@@ -20,6 +20,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -60,11 +61,7 @@ func (s *Service) RebuildChecksums(ctx context.Context, owner string) (int, erro
 		if len(found) == 0 {
 			continue
 		}
-		if v.Name != "" {
-			cs.SetManyInVolume(v.Name, found)
-		} else {
-			cs.SetMany(found)
-		}
+		writeCollectedChecksums(cs, v.Name, found)
 		total += len(found)
 	}
 	return total, nil
@@ -115,4 +112,18 @@ func collectOneMetaChecksum(ctx context.Context, policy FileMetaPolicy, root *st
 func (s *Service) checksumRebuildAllowed(owner string) bool {
 	_, loaded := s.checksumRebuild.LoadOrStore(owner, struct{}{})
 	return !loaded
+}
+
+// writeCollectedChecksums 按卷批量写入重建结果（后端按可选扩展接口选择：
+// 卷维度键用 VolumeBatchWriter，单卷用 BatchWriter——集群后端两者均已实现）。
+func writeCollectedChecksums(cs checksum.ChecksumStoreIface, vol string, found map[string]string) {
+	if vol != "" {
+		if w, ok := cs.(checksum.VolumeBatchWriter); ok {
+			w.SetManyInVolume(vol, found)
+		}
+		return
+	}
+	if w, ok := cs.(checksum.BatchWriter); ok {
+		w.SetMany(found)
+	}
 }

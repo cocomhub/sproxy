@@ -52,6 +52,24 @@ type VolumeKeyedStore interface {
 
 var _ VolumeKeyedStore = (*ChecksumStore)(nil)
 
+// LenCounter 是**可选扩展**：台账条目数（O(1) 判空用，避免 GetAll 全量拷贝）。
+type LenCounter interface{ Len() int }
+
+var _ LenCounter = (*ChecksumStore)(nil)
+
+// BatchWriter 是**可选扩展**：批量写（一次落盘/一次 Put）。rebuild 类全量回填用。
+type BatchWriter interface {
+	SetMany(entries map[string]string)
+}
+
+// VolumeBatchWriter 是**可选扩展**：按卷批量写（卷维度键，§15.1.1）。
+type VolumeBatchWriter interface {
+	SetManyInVolume(vol string, entries map[string]string)
+}
+
+var _ BatchWriter = (*ChecksumStore)(nil)
+var _ VolumeBatchWriter = (*ChecksumStore)(nil)
+
 // Flusher 是**可选扩展**：立即把写合并窗口内的改动落盘（未实现 ⇒ 调用方无需处理，
 // 定时器到期/Close 时仍会落盘）。
 type Flusher interface{ Flush() error }

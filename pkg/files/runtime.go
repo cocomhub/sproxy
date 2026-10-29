@@ -310,7 +310,7 @@ func (r *runtime) quotaScope(owner, rel string) *quota.Scope {
 	return r.quota.ScopeFor(owner, rel)
 }
 
-func (r *runtime) checksumStore(owner string) *checksum.ChecksumStore {
+func (r *runtime) checksumStore(owner string) checksum.ChecksumStoreIface {
 	if r.ledger == nil {
 		return nil
 	}

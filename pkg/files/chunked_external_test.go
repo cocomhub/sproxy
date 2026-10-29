@@ -276,7 +276,7 @@ func (e *externalChunkEnv) RouteTarget(ctx context.Context, owner, rel, volName 
 
 func (e *externalChunkEnv) ScopeFor(string, string) *quota.Scope { return nil }
 
-func (e *externalChunkEnv) ChecksumStoreFor(string) *checksum.ChecksumStore { return e.cs }
+func (e *externalChunkEnv) ChecksumStoreFor(string) checksum.ChecksumStoreIface { return e.cs }
 
 func (e *externalChunkEnv) UploadStoreFor(string) *UploadStore { return e.us }
 

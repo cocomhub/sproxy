@@ -52,6 +52,9 @@ type StateBackedChecksumStore struct {
 
 var _ ChecksumStoreIface = (*StateBackedChecksumStore)(nil)
 var _ Flusher = (*StateBackedChecksumStore)(nil)
+var _ LenCounter = (*StateBackedChecksumStore)(nil)
+var _ BatchWriter = (*StateBackedChecksumStore)(nil)
+var _ VolumeBatchWriter = (*StateBackedChecksumStore)(nil)
 
 // NewStateBackedChecksumStore 构造 StateStore 后端 checksum 台账。
 // legacyRoot/legacyRel 定位旧 <meta>/checksums.json（回退读）；legacyRoot 为 nil 或
@@ -221,6 +224,44 @@ func (s *StateBackedChecksumStore) DeletePrefix(prefix string) {
 	s.mu.Unlock()
 
 	s.merger.mark("deletePrefix", "prefix", prefix)
+}
+
+// Len 返回台账条目数（必要时先载入；O(1) 判空用）。
+func (s *StateBackedChecksumStore) Len() int {
+	s.ensureLoaded()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.checksums)
+}
+
+// SetMany 批量写入（一次 Put），供 rebuild 类全量回填。
+func (s *StateBackedChecksumStore) SetMany(entries map[string]string) {
+	if len(entries) == 0 {
+		return
+	}
+	s.mu.Lock()
+	if !s.loaded {
+		s.loadLocked()
+	}
+	maps.Copy(s.checksums, entries)
+	s.mu.Unlock()
+	s.merger.mark("set_many", "count", len(entries))
+}
+
+// SetManyInVolume 按卷维度键批量写入（`<vol>\x00<rel>`，§15.1.1：跨卷同名不串值）。
+func (s *StateBackedChecksumStore) SetManyInVolume(vol string, entries map[string]string) {
+	if len(entries) == 0 {
+		return
+	}
+	s.mu.Lock()
+	if !s.loaded {
+		s.loadLocked()
+	}
+	for rel, sum := range entries {
+		s.checksums[volumeKey(vol, rel)] = sum
+	}
+	s.mu.Unlock()
+	s.merger.mark("set_many_in_volume", "volume", vol, "count", len(entries))
 }
 
 // Flush 立即把合并窗口内的改动写入 StateStore（有待持久化改动时）。

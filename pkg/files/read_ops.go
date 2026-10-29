@@ -599,12 +599,12 @@ func (s *Service) openExternalSource(ctx context.Context, dp DownloadPath) (Open
 
 // checksumStoreReady 返回可用于**逐条**查询的台账（未装配 ⇒ nil）；台账为空时按 owner
 // 触发**一次**自愈重建。判空用 O(1) 的 Len（不再 GetAll 全量拷贝）。
-func (s *Service) checksumStoreReady(ctx context.Context, owner string) *checksum.ChecksumStore {
+func (s *Service) checksumStoreReady(ctx context.Context, owner string) checksum.ChecksumStoreIface {
 	st := s.rt.checksumStore(owner)
 	if st == nil {
 		return nil
 	}
-	if st.Len() == 0 && s.checksumRebuildAllowed(owner) {
+	if lc, ok := st.(checksum.LenCounter); ok && lc.Len() == 0 && s.checksumRebuildAllowed(owner) {
 		if n, err := s.RebuildChecksums(ctx, owner); err == nil && n > 0 {
 			s.rt.logger().Info("checksum 台账已从对象 meta 重建", "owner", owner, "entries", n)
 		}

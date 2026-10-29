@@ -270,13 +270,11 @@ func (r filesRuntime) RouteTarget(ctx context.Context, owner, rel, volName strin
 
 func (r filesRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.h.quotaScopeFor(owner, rel) }
 
-func (r filesRuntime) ChecksumStoreFor(owner string) *checksum.ChecksumStore {
-	if cs := r.h.checksumStoreFor(owner); cs != nil {
-		if sc, ok := cs.(*checksum.ChecksumStore); ok {
-			return sc
-		}
-	}
-	return nil
+// ChecksumStoreFor 直接返回装配层台账（本地/集群后端同接口）。
+// 修复：此前只接受 `*checksum.ChecksumStore` ⇒ 集群后端被断言失败后返回 nil，
+// 导致 list/search 的 checksum **恒空**、`RebuildChecksums` 直接报未装配。
+func (r filesRuntime) ChecksumStoreFor(owner string) checksum.ChecksumStoreIface {
+	return r.h.checksumStoreFor(owner)
 }
 
 func (r filesRuntime) UploadStoreFor(owner string) *files.UploadStore {

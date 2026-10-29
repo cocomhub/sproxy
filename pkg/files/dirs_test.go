@@ -268,7 +268,7 @@ func (r testRuntime) RouteTarget(ctx context.Context, owner, rel, volName string
 
 func (r testRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.e.quotaScopeFor(owner, rel) }
 
-func (r testRuntime) ChecksumStoreFor(owner string) *checksum.ChecksumStore {
+func (r testRuntime) ChecksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	return r.e.checksumStoreFor(owner)
 }
 
@@ -478,7 +478,7 @@ func (e *dirsEnv) volumeTenant(volName, owner string) *storage.Tenant {
 }
 
 // checksumStoreFor 复刻 pkg/server 语义：台账落在租户 meta 桶，按 owner 懒建并缓存。
-func (e *dirsEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
+func (e *dirsEnv) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	owner = normalizeOwner(owner)
 	if cs, ok := e.checksum[owner]; ok {
 		return cs
