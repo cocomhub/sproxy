@@ -28,6 +28,15 @@ func (m *CloudDownloadManager) markRunningLocked(taskID string) {
 // clearRunningLocked 清除 running 并关闭通知通道（幂等；调用方必须持 m.mu 写锁）。
 func (m *CloudDownloadManager) clearRunningLocked(taskID string) {
 	delete(m.running, taskID)
+}
+
+// signalStoppedLocked 通知 waitTaskStopped「任务已完全停止」（关闭 runningDone 通道）。
+//
+// **必须在释放配额/落定状态之后调用**（不变量：waitTaskStopped 返回 ⇒ 配额已归零）。
+// 此前 close 与清理 running 同处 clearRunningLocked，而 cleanupRunning 的释放紧随其后
+// ⇒ 等待方可能在释放完成前被唤醒并读到残留 Usage（CI 偶发
+// `CancelDuringWrite_QuotaZero` 的 `Usage()=400 want 0` 根因）。
+func (m *CloudDownloadManager) signalStoppedLocked(taskID string) {
 	if ch, ok := m.runningDone[taskID]; ok {
 		close(ch)
 		delete(m.runningDone, taskID)
@@ -103,6 +112,7 @@ func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prevStatus,
 	if stored, ok := m.tasks[taskID]; !ok || stored.Status == "cancelled" {
 		m.releaseTaskScope(task)
 	}
+	m.signalStoppedLocked(taskID)
 }
 
 // resumeWindowHook 是**测试 seam**：ResumeTask 在「置 pending/running 并解锁」与「重新取锁做

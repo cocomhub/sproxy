@@ -315,6 +315,7 @@ func (m *CloudDownloadManager) failOrphanPendingTask(task *CloudTask) {
 	task.Error = "interrupted before start or while queued; resume to retry"
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
+	m.signalStoppedLocked(task.ID)
 	m.mu.Unlock()
 
 	if err := m.saveTask(task); err != nil {
