@@ -544,6 +544,8 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		m.clearRunningLocked(task.ID)
 		delete(m.cancelFuncs, task.ID)
 		m.releaseAbandonedTaskScope(task)
+		// **释放之后**才通知停止（waitTaskStopped 返回 ⇒ 配额已归零，见 signalStoppedLocked）。
+		m.signalStoppedLocked(task.ID)
 		m.mu.Unlock()
 	}
 	defer cleanupRunning()
