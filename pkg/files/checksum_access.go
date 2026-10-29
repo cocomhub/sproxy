@@ -7,7 +7,11 @@ package files
 // 台账实现支持 `checksum.VolumeKeyedStore` 时按卷读写，否则回落旧的「无卷」方法
 // （测试替身 / 未升级实现零回归）。
 
-import "github.com/cocomhub/sproxy/pkg/checksum"
+import (
+	"maps"
+
+	"github.com/cocomhub/sproxy/pkg/checksum"
+)
 
 func volumeKeyed(cs checksum.ChecksumStoreIface) (checksum.VolumeKeyedStore, bool) {
 	v, ok := cs.(checksum.VolumeKeyedStore)
@@ -38,9 +42,7 @@ func checksumSnapshotForVolume(cs checksum.ChecksumStoreIface, vol string) map[s
 		return cs.GetAll()
 	}
 	out := v.SnapshotLegacy()
-	for rel, sum := range v.SnapshotInVolume(vol) {
-		out[rel] = sum
-	}
+	maps.Copy(out, v.SnapshotInVolume(vol))
 	return out
 }
 
@@ -59,9 +61,7 @@ func checksumSnapshotsAll(cs checksum.ChecksumStoreIface) map[string]map[string]
 		}
 		if out[vol] == nil {
 			out[vol] = make(map[string]string, len(legacy))
-			for k, val := range legacy {
-				out[vol][k] = val
-			}
+			maps.Copy(out[vol], legacy)
 		}
 		out[vol][rel] = sum
 	}
