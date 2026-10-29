@@ -384,6 +384,10 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 **唯一列举入口**是装配层的 `VolumeViewLister.ListDirView`——本地卷与外部卷共用（键空间由
 `ResolveUserLocation` 统一），`ExternalList`/`ExternalVolumeSource` 已删除并硬禁。
 
+**内存上界（2026-10-30）**：卷状态缓存有**双上限**——目录快照数（`DefaultMaxEntries` 4096）
+与**总条目预算**（`DefaultMaxTotalEntries` 200_000，即所有目录 `entries` 之和）。超预算按 LRU
+淘汰；**单目录快照超过总预算 ⇒ 不缓存**（回源），避免一个十万文件目录挤占全部内存。
+
 **读取与写入口径（2026-10-30）**：目录列举与搜索的 `checksum` 一律**逐条 O(1) 查台账**
 （`checksumGetter` / `checksumLookupFor`），不再每请求拷贝全量快照；台账写入经 **debounce
 合并**（`ChecksumStore.Set` 只更新内存 + 累计代际，1s 定时器合并为一次全量落盘，`Flush`/`Close`
