@@ -40,12 +40,14 @@ func TestList_ChecksumAllocsFlatWithLedgerSize(t *testing.T) {
 	checksumSet(st, "", "user/a.txt", "1111111111111111111111111111111111111111111111111111111111111111")
 
 	small := allocBytesPerRun(func() { _ = listFileInfos(t, env, "") })
-	for i := range 500 {
+	for i := range 2000 {
 		checksumSet(st, "", "user/noise-"+itoa(i)+".txt", "2222222222222222222222222222222222222222222222222222222222222222")
 	}
 	large := allocBytesPerRun(func() { _ = listFileInfos(t, env, "") })
-	// 阈值按「每 500 条台账约 40KB+」量级取 8KB（惰性实现差异应接近 0）。
-	if large > small+8<<10 {
+	// 判定用「相对增长 + 固定噪声余量」而非绝对差值：`TotalAlloc` 含运行时/GC 噪声
+	// （Windows CI 实测基线可到 18KB），绝对阈值会误报；2000 条全量拷贝约 +160KB，
+	// 远高于噪声，故 large 必须与 small 同量级。
+	if large > small*3+(16<<10) {
 		t.Fatalf("List 的分配随台账规模增长（small=%dB large=%dB per run）：checksum 全量快照拷贝回归", small, large)
 	}
 	if got := listFileInfos(t, env, ""); len(got) != 1 || got[0].Checksum == "" {

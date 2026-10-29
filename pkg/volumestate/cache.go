@@ -25,16 +25,23 @@ import (
 // **每次回源**（调试/强一致）。
 const DefaultTTL = 0
 
-// DefaultMaxEntries 是内存 LRU 的默认容量（目录快照数）。
+// DefaultMaxEntries 是内存 LRU 的默认容量（目录快照**数**）。
 const DefaultMaxEntries = 4096
+
+// DefaultMaxTotalEntries 是内存缓存的**总条目预算**（所有目录快照的 entries 之和）。
+// 单看目录数不足以约束内存：一个 10 万文件的目录就占 10 万条。超预算按 LRU 淘汰；
+// 单目录快照本身超过预算 ⇒ **不缓存**（回源，避免单条巨型条目挤占全部预算）。
+const DefaultMaxTotalEntries = 200_000
 
 // Options 是 Cache 的构造参数（全部有安全默认：零值可用）。
 type Options struct {
 	// TTL 按卷名返回缓存有效期：**0 = 永不过期（默认）**，仅写穿/显式 refresh/代际变化
 	// 才会更新；>0 按时间过期（可选的兜底）；<0 = 该卷禁用缓存（每次回源，调试/强一致）。
 	TTL func(volume string) time.Duration
-	// MaxEntries 内存 LRU 容量（<=0 ⇒ DefaultMaxEntries）。
+	// MaxEntries 内存 LRU 容量（目录快照数；<=0 ⇒ DefaultMaxEntries）。
 	MaxEntries int
+	// MaxTotalEntries 总条目预算（所有目录 entries 之和；<=0 ⇒ DefaultMaxTotalEntries）。
+	MaxTotalEntries int
 	// Store 落盘区（nil 或未启用 ⇒ 仅内存）。
 	Store *Store
 	// Persist 按卷名返回**是否允许落盘**（保密卷默认 false：只落内存，避免元数据明文落节点磁盘）。
@@ -59,8 +66,11 @@ type Cache struct {
 	lru      *list.List               // 元素为 *cacheEntry；Front = 最近使用
 	items    map[string]*list.Element // key = volume + "\x00" + fsPath
 	maxItems int
-	opts     Options
-	log      *slog.Logger
+	// totalEntries 是当前所有快照 entries 之和（内存占用上界的计量口径）。
+	totalEntries    int
+	maxTotalEntries int
+	opts            Options
+	log             *slog.Logger
 }
 
 // cacheEntry 是 LRU 元素。
@@ -76,6 +86,9 @@ func New(opts Options) *Cache {
 	if opts.MaxEntries <= 0 {
 		opts.MaxEntries = DefaultMaxEntries
 	}
+	if opts.MaxTotalEntries <= 0 {
+		opts.MaxTotalEntries = DefaultMaxTotalEntries
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -84,11 +97,12 @@ func New(opts Options) *Cache {
 		log = slog.Default()
 	}
 	return &Cache{
-		lru:      list.New(),
-		items:    make(map[string]*list.Element, opts.MaxEntries),
-		maxItems: opts.MaxEntries,
-		opts:     opts,
-		log:      log,
+		lru:             list.New(),
+		items:           make(map[string]*list.Element, opts.MaxEntries),
+		maxItems:        opts.MaxEntries,
+		maxTotalEntries: opts.MaxTotalEntries,
+		opts:            opts,
+		log:             log,
 	}
 }
 
@@ -242,22 +256,30 @@ func (c *Cache) persistAllowed(vol string) bool {
 func (c *Cache) pushFront(key, vol, fsPath string, snap *DirSnapshot) *list.Element {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	size := len(snap.Entries)
+	// 单目录快照超过总预算 ⇒ 不缓存（否则淘汰循环也放不下，且单条巨型条目会挤占全部预算）。
+	if size > c.maxTotalEntries {
+		return nil
+	}
 	if elem, ok := c.items[key]; ok {
 		if ce, _ := elem.Value.(*cacheEntry); ce != nil {
+			c.totalEntries += size - len(ce.snap.Entries)
 			ce.snap = snap
 		}
 		c.lru.MoveToFront(elem)
+		c.evictLocked()
 		return elem
 	}
 	elem := c.lru.PushFront(&cacheEntry{key: key, vol: vol, path: fsPath, snap: snap})
 	c.items[key] = elem
+	c.totalEntries += size
 	c.evictLocked()
 	return elem
 }
 
-// evictLocked 超容淘汰（调用方持锁）。
+// evictLocked 超容淘汰（调用方持锁）：目录数 + **总条目预算** 双上限。
 func (c *Cache) evictLocked() {
-	for c.lru.Len() > c.maxItems {
+	for c.lru.Len() > c.maxItems || c.totalEntries > c.maxTotalEntries {
 		back := c.lru.Back()
 		if back == nil {
 			return
@@ -265,6 +287,7 @@ func (c *Cache) evictLocked() {
 		c.lru.Remove(back)
 		if ce, _ := back.Value.(*cacheEntry); ce != nil {
 			delete(c.items, ce.key)
+			c.totalEntries -= len(ce.snap.Entries)
 		}
 	}
 }
@@ -292,6 +315,9 @@ func (c *Cache) drop(key string, elem *list.Element) {
 		}
 		c.lru.Remove(elem)
 		delete(c.items, key)
+		if ce, _ := elem.Value.(*cacheEntry); ce != nil {
+			c.totalEntries -= len(ce.snap.Entries)
+		}
 	}
 	c.mu.Unlock()
 	if c.opts.Store != nil && vol != "" {
@@ -323,6 +349,7 @@ func (c *Cache) Refresh(_ context.Context, vol string) error {
 			dropped = append(dropped, ce.path)
 			c.lru.Remove(elem)
 			delete(c.items, key)
+			c.totalEntries -= len(ce.snap.Entries)
 		}
 	}
 	c.mu.Unlock()
