@@ -398,7 +398,8 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 批量回填用可选扩展 `BatchWriter`/`VolumeBatchWriter`，判空用 `LenCounter`。
 合并逻辑由**唯一实现** `checksum.saveMerger` 承担，两个后端共用：`ChecksumStore`（卷内文件）与
 `StateBackedChecksumStore`（集群 StateStore，每次 Put 是一次 RTT）。集群后端的台账实例**按 owner
-缓存**（`Handlers.checksumStores`）——未缓存时每次首读都会从 StateStore 全量拉回 + 反序列化。
+缓存**（`Handlers.checksumStores` / `Handlers.dedupStores`，两者同构）——未缓存时每次首读都会从
+StateStore 全量拉回 + 反序列化；`SetStateStore` 切换后端时两者都清空（旧实例先落盘/丢弃）。
 
 **机制（四条不变量）**：
 

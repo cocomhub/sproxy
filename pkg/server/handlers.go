@@ -397,6 +397,8 @@ func (h *Handlers) SetStateStore(st state.StateStore) {
 		}
 	}
 	clear(h.checksumStores)
+	// dedup 台账同样按后端形态缓存，切换后端必须丢弃（否则旧实例仍写旧后端）。
+	clear(h.dedupStores)
 	h.stateStore = st
 }
 
@@ -681,13 +683,6 @@ func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
 		return nil
 	}
-	if h.stateStore != nil {
-		return files.NewDedupStore(filepath.Join(metaAbs, fileNameDedup), h.logger, &files.DedupStateOptions{
-			St:         h.stateStore,
-			Key:        "dedup/" + owner + "/all",
-			LegacyPath: filepath.Join(metaAbs, fileNameDedup),
-		})
-	}
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
 	if h.dedupStores == nil {
@@ -696,7 +691,18 @@ func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 	if ds, ok := h.dedupStores[owner]; ok {
 		return ds
 	}
-	ds := files.NewDedupStore(filepath.Join(metaAbs, fileNameDedup), h.logger)
+	var ds *files.DedupStore
+	if h.stateStore != nil {
+		// **必须缓存**（与 checksumStoreFor 同构）：每次新建 = 每次首读从 StateStore 全量拉回 +
+		// 反序列化（O(全库) KV 读），且后续写入落在随后被丢弃的实例上。
+		ds = files.NewDedupStore(filepath.Join(metaAbs, fileNameDedup), h.logger, &files.DedupStateOptions{
+			St:         h.stateStore,
+			Key:        "dedup/" + owner + "/all",
+			LegacyPath: filepath.Join(metaAbs, fileNameDedup),
+		})
+	} else {
+		ds = files.NewDedupStore(filepath.Join(metaAbs, fileNameDedup), h.logger)
+	}
 	h.dedupStores[owner] = ds
 	return ds
 }
