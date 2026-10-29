@@ -571,7 +571,24 @@ func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checks
 		us.mu.Unlock()
 		return fmt.Errorf("chunk_index %d 超出范围 [0, %d)", chunkIndex, s.TotalChunks)
 	}
+	us.mu.Unlock()
 
+	// **确认即持久化**（2026-10-29，崩溃恢复契约）：`POST /upload/chunk` 返回 200 之前，
+	// 该块的校验值必须已落盘。session.json 仍是异步批量持久化（整份 bitmap 重写成本高），
+	// 若 kill -9 落在窗口内，重启会因 `ChunkChecksums[i]==""` 判该块需重传——客户端白传，
+	// 且 `TestE2E_Restart_ChunkedUploadResumesAfterKill9` 偶发红。每块一个独立 sidecar
+	// （原子 rename，代价 ~百字节）⇒ 恢复时与临时文件内容交叉校验后即可判为已接收。
+	if err := us.persistChunkChecksum(uploadID, chunkIndex, checksum); err != nil {
+		return fmt.Errorf("持久化分块校验值失败（upload_id=%s, chunk=%d）: %w", uploadID, chunkIndex, err)
+	}
+
+	us.mu.Lock()
+	s, ok = us.sessions[uploadID]
+	if !ok {
+		// 校验值已落盘但会话在窗口内被删除：保守报错（客户端重试会得到 404）。
+		us.mu.Unlock()
+		return fmt.Errorf("upload_id 不存在: %s", uploadID)
+	}
 	s.ReceivedChunks[chunkIndex] = true
 	s.ChunkChecksums[chunkIndex] = checksum
 
@@ -908,6 +925,68 @@ func (us *UploadStore) persistLoop() {
 //
 // 并发持久化的顺序保证：会话内嵌锁（s.persistMu）覆盖「RLock 拍快照 → 落盘」两阶段（见
 // persistSnapshot），使快照拍序 == 落盘序，旧快照不会覆盖新快照（RV10-SLICE3 审计的既有缺陷）。
+// chunkChecksumSidecarPath 返回分块校验值 sidecar 的路径（`<baseDir>/<uploadID>/chunk-<i>.sha256`）。
+func (us *UploadStore) chunkChecksumSidecarPath(uploadID string, chunkIndex int) string {
+	return filepath.Join(us.baseDir, uploadID, fmt.Sprintf("chunk-%d.sha256", chunkIndex))
+}
+
+// persistChunkChecksum 原子写入单块校验值（tmp + rename；同进程内 rename 立即可见）。
+// 失败 ⇒ 调用方必须让本次 chunk ACK 失败（客户端重试），不得返回 200 假承诺。
+func (us *UploadStore) persistChunkChecksum(uploadID string, chunkIndex int, checksum string) error {
+	us.writeMu.Lock()
+	defer us.writeMu.Unlock()
+	dir := filepath.Join(us.baseDir, uploadID)
+	f, err := os.CreateTemp(dir, "chunk.sha256.tmp.*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, werr := f.WriteString(checksum)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	if err := os.Rename(tmp, us.chunkChecksumSidecarPath(uploadID, chunkIndex)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// loadChunkChecksumSidecars 用已落盘的每块校验值补齐/覆盖会话的 `ChunkChecksums`。
+// 旧会话（无 sidecar）保持 session.json 原值（向后兼容）。
+func (us *UploadStore) loadChunkChecksumSidecars(s *ChunkedUploadSession) {
+	if s == nil || s.TotalChunks <= 0 {
+		return
+	}
+	if len(s.ChunkChecksums) < s.TotalChunks {
+		grown := make([]string, s.TotalChunks)
+		copy(grown, s.ChunkChecksums)
+		s.ChunkChecksums = grown
+	}
+	if len(s.ReceivedChunks) < s.TotalChunks {
+		grown := make([]bool, s.TotalChunks)
+		copy(grown, s.ReceivedChunks)
+		s.ReceivedChunks = grown
+	}
+	for i := 0; i < s.TotalChunks; i++ {
+		b, err := os.ReadFile(us.chunkChecksumSidecarPath(s.UploadID, i))
+		if err != nil {
+			continue
+		}
+		if sum := strings.TrimSpace(string(b)); sum != "" {
+			s.ChunkChecksums[i] = sum
+			// 有 sidecar = 该块已向客户端 ACK ⇒ 先乐观置为已接收；随后 `verifyTempChunks`
+			// 用临时文件内容**重新校验**，不匹配再降级为需重传（数据丢失仍安全）。
+			s.ReceivedChunks[i] = true
+		}
+	}
+}
+
 func (us *UploadStore) persistSession(uploadID string) {
 	us.mu.RLock()
 	s, ok := us.sessions[uploadID]
@@ -1264,6 +1343,9 @@ func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) 
 	}
 	// 任务 4：按临时名（user 桶在途整文件）逐分片重算校验，校准 bitmap——
 	// 内容与 checksum 表匹配的分片保留，不匹配/缺失的分片需重传（bitmap 置 false）。
+	// 先采信「确认即持久化」的每块校验 sidecar（session.json 可能落后于最近 ACK 的块）。
+	us.loadChunkChecksumSidecars(&session)
+	// 任务 4：按临时名（user 桶在途整文件）逐分片重算校验，校准 bitmap——
 	if session.TempPath != "" {
 		us.verifyTempChunks(&session)
 	}

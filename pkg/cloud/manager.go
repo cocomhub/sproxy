@@ -392,6 +392,10 @@ type CloudDownloadManager struct {
 	registry    *downloader.Registry
 	cancelFuncs map[string]context.CancelFunc // 任务取消函数
 	running     map[string]bool               // 任务是否有执行中的下载 goroutine（含排队）
+	// runningDone 是「running 清除」的事件通知：taskID → 关闭即表示 goroutine 已退出。
+	// waitTaskStopped 用它做**事件等待**（而非 100ms 轮询 + 墙钟上限）——CI 低配 runner 上
+	// 轮询粒度会把「退出耗时」放大成误判（flake）。`running[id]=true` 时创建、清除时 close+删。
+	runningDone map[string]chan struct{}
 	metrics     *CloudMetrics
 
 	// 批量持久化进度更新
@@ -581,6 +585,7 @@ func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
 		removeFile:          opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
 		cancelFuncs:         make(map[string]context.CancelFunc),
 		running:             make(map[string]bool),
+		runningDone:         make(map[string]chan struct{}),
 		metrics:             &CloudMetrics{},
 		recovered:           atomic.Bool{}, // M3：RecoverAll 幂等守卫
 		dirtyTasks:          make(map[string]struct{}),

@@ -269,7 +269,7 @@ func (m *CloudDownloadManager) activateRecoveredTasks(pending []recoveredTask, o
 		if p.restart {
 			m.logger.Info("restarting interrupted download", "task_id", p.task.ID, "url", p.task.URL)
 			m.mu.Lock()
-			m.running[p.task.ID] = true
+			m.markRunningLocked(p.task.ID)
 			m.mu.Unlock()
 			m.wg.Add(1)
 			go m.executeDownload(context.Background(), p.task)
@@ -307,7 +307,7 @@ func (m *CloudDownloadManager) activateRecoveredTasks(pending []recoveredTask, o
 // 「账本向磁盘实际收敛」的既有约定；占用随 FailedTaskTTL 过期清理释放（该路径同时删文件）。
 func (m *CloudDownloadManager) failOrphanPendingTask(task *CloudTask) {
 	m.mu.Lock()
-	delete(m.running, task.ID) // 防御：恢复期不应存在（本进程尚未为它启动 goroutine）
+	m.clearRunningLocked(task.ID) // 防御：恢复期不应存在（本进程尚未为它启动 goroutine）
 	task.Status = "failed"
 	// 文案含「or while queued」：SubmitAndStart/SubmitAndStartGroup 先置 running，磁盘状态要等
 	// executeDownload 拿到信号量之后才写成 downloading，故 URL 数超过 MaxConcurrent（默认 3）时
