@@ -660,14 +660,19 @@ func (ix *searchIndex) walkUserRootFileEntry(w *ownerWalk, key, name, volume str
 	w.oi.entries[key] = e
 }
 
+// checksumLookup 按（卷, user 桶内相对路径）**惰性**取整文件 checksum：每次 O(1) 台账读，
+// 不做全量快照拷贝（此前 `Search` 每请求 `GetAll()` + 按卷拆分 = O(N) 拷贝，见设计审计）。
+// 卷名为空（单卷装配）或未命中 ⇒ ""。
+type checksumLookup func(vol, rel string) string
+
 // search 按 q（已小写）在 owner 索引中匹配，返回与旧 Search 逐字一致的 ListResult：
 // 文件条目 name = 完整相对路径（ToSlash），带 size/mtime/checksum/volume；目录条目
 // IsDir=true、name = 相对 user 桶路径、Volume 空。结果排序：先文件后目录？——**与旧语义
 // 一致**：旧实现按 WalkDir 序遍历（先父后子、按目录深度优先），本实现按 name 字典序
 // 稳定排序（可预测、与 List 的 name asc 排序观感一致；契约测试不锁序）。
-func (ix *searchIndex) search(owner, qLower, tag string, byVol map[string]map[string]string) []FileInfo {
+func (ix *searchIndex) search(owner, qLower, tag string, cs checksumLookup) []FileInfo {
 	// 先目录后文件、按 name 字典序：与 List 的 sortFileEntries(name asc) 对齐。
-	out := ix.searchLocked(owner, qLower, tag, byVol)
+	out := ix.searchLocked(owner, qLower, tag, cs)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].IsDir != out[j].IsDir {
 			return out[i].IsDir // 目录在前
@@ -679,7 +684,7 @@ func (ix *searchIndex) search(owner, qLower, tag string, byVol map[string]map[st
 
 // searchLocked 是 search 的底层实现（不含排序，供 list 复用目录/文件条目构造逻辑）。
 // tag 非空时要求 entry.tags 精确含该标签（与 q 的 base/contentTokens 匹配 AND 组合）。
-func (ix *searchIndex) searchLocked(owner, qLower, tag string, byVol map[string]map[string]string) []FileInfo {
+func (ix *searchIndex) searchLocked(owner, qLower, tag string, cs checksumLookup) []FileInfo {
 	oi := ix.ensureOwner(owner)
 	if oi == nil {
 		return nil
@@ -690,7 +695,7 @@ func (ix *searchIndex) searchLocked(owner, qLower, tag string, byVol map[string]
 			continue
 		}
 		// 按条目所属卷取 checksum（§15.1.1：同名文件跨卷不串）。
-		out = append(out, searchEntryToFileInfo(e, checksumsForVolume(byVol, e.volume)))
+		out = append(out, searchEntryToFileInfo(e, cs))
 	}
 	return out
 }
@@ -710,13 +715,13 @@ func (ix *searchIndex) searchEntryMatch(e *indexEntry, qLower, tag string) bool 
 }
 
 // searchEntryToFileInfo 把索引条目转为搜索结果 FileInfo：目录不绑卷、文件带 checksum。
-func searchEntryToFileInfo(e *indexEntry, csMap map[string]string) FileInfo {
+func searchEntryToFileInfo(e *indexEntry, cs checksumLookup) FileInfo {
 	if e.isDir {
 		return FileInfo{Name: e.name, IsDir: true}
 	}
 	fi := FileInfo{Name: e.name, Size: e.size, ModTime: e.modTime, Volume: e.volume}
-	if cs, ok := csMap["user/"+e.name]; ok {
-		fi.Checksum = cs
+	if cs != nil {
+		fi.Checksum = cs(e.volume, e.name)
 	}
 	return fi
 }

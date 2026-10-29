@@ -46,31 +46,6 @@ func checksumSnapshotForVolume(cs checksum.ChecksumStoreIface, vol string) map[s
 	return out
 }
 
-// checksumSnapshotsAll 返回所有卷的 checksum 视图（跨卷结果集用；不支持卷维度时只有 "" 一个键）。
-func checksumSnapshotsAll(cs checksum.ChecksumStoreIface) map[string]map[string]string {
-	v, ok := volumeKeyed(cs)
-	if !ok {
-		return map[string]map[string]string{"": cs.GetAll()}
-	}
-	legacy := v.SnapshotLegacy()
-	out := map[string]map[string]string{}
-	for key, sum := range cs.GetAll() {
-		vol, rel, cut := checksum.SplitVolumeKey(key)
-		if !cut {
-			continue
-		}
-		if out[vol] == nil {
-			out[vol] = make(map[string]string, len(legacy))
-			maps.Copy(out[vol], legacy)
-		}
-		out[vol][rel] = sum
-	}
-	if len(out) == 0 {
-		out[""] = legacy
-	}
-	return out
-}
-
 // checksumRename 同卷重命名卷维度键（不支持卷维度时回落旧方法）。
 func checksumRename(cs checksum.ChecksumStoreIface, vol, from, to string) {
 	if v, ok := volumeKeyed(cs); ok && vol != "" {
