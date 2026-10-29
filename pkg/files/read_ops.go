@@ -122,12 +122,6 @@ func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 		volFilter = q.VolName
 	}
 
-	// 外部卷列举（显式 ?volume=）优先：搜索索引只覆盖**本地卷**（外部卷没有 *storage.Root）⇒
-	// 显式指定外部/加密卷时此前**静默返回空列表**（CLI 上「加密卷看起来是空的」）。
-	if res, handled, herr := s.listExternalVolume(ctx, q, owner, subdir, volFilter); handled || herr != nil {
-		return res, herr
-	}
-
 	// 注：被封装卷占用的源区间（`source: "<卷>:<子路径>"`）直查**保持读路径不拦**——
 	// 该区间位于**卷根命名空间**（客户端经 `<owner>/user/...` 寻址不到），故对基础卷的
 	// 用户视图而言它通常就是空目录（200）。写侧由 `storage.Root` 封印恒拒（ErrSealed）。
@@ -177,44 +171,6 @@ func (s *Service) volumeCategoryFor(typ string) string {
 	return ""
 }
 
-// listExternalVolume 处理「显式 `?volume=<外部卷>`」的列举（装配层接缝；非外部卷/不支持
-// 列举 → handled=false 落回既有索引语义，零回归）。
-//
-// 为什么不支持时也走索引：本地卷恒走索引（索引是本地卷的权威视图），接缝只负责外部卷。
-//
-// 展示分类（VolumeCategory）：按卷后端类型标注 wrapper 加密/封装卷（经注入的
-// VolumeTypeClassifier 判 category，见 volumeCategoryFor）→ "wrapper"，供 Web UI 卷徽标
-// 细化；其余类型不填。
-func (s *Service) listExternalVolume(ctx context.Context, q ListQuery, owner, subdir, volFilter string) (ListResult, bool, error) {
-	if volFilter == "" {
-		return ListResult{}, false, nil
-	}
-	ops := s.rt.externalVolOps()
-	if ops == nil {
-		return ListResult{}, false, nil
-	}
-	entries, supported, err := ops.ExternalList(ctx, owner, volFilter, subdir)
-	if err != nil {
-		return ListResult{}, true, err
-	}
-	if !supported {
-		return ListResult{}, false, nil
-	}
-	// 按卷后端类型补展示分类（wrapper 加密卷 → "wrapper"，本地卷不填；Web UI 卷徽标用）。
-	cat := ""
-	if v, ok := s.rt.volSet().ByName(volFilter); ok {
-		cat = s.volumeCategoryFor(v.Type)
-	}
-	for i := range entries {
-		entries[i].VolumeCategory = cat
-	}
-	sortFileEntries(entries, q.SortBy, q.SortOrder)
-	return ListResult{
-		Files: paginateEntries(entries, q.Offset, q.Limit), Total: len(entries),
-		Offset: q.Offset, Limit: q.Limit,
-	}, true, nil
-}
-
 // listFromVolumeViews 探测「经卷视图列举」能力并委派（能力缺失/门控关闭 ⇒ false，走索引）。
 func (s *Service) listFromVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string,
 	csMap map[string]string) (ListResult, bool) {
@@ -227,16 +183,18 @@ func (s *Service) listFromVolumeViews(ctx context.Context, q ListQuery, owner, s
 
 // volumeViewTargets 返回本次要列举的卷：owner 可见卷中**有本地根**的那些（外部卷的默认聚合
 // 从不包含它们；显式 ?volume= 已由 listExternalVolume 处理）。
+// volumeViewTargets 返回本次要列举的卷：显式 ?volume=（本地/外部均可，单卷）或 owner 可见卷中
+// **有本地根**的那些（默认聚合从不含外部卷——与历史语义一致）。
 func (s *Service) volumeViewTargets(owner, volFilter string) []volume.Volume {
 	vs := s.rt.volSet()
 	if vs == nil {
 		return nil
 	}
 	if volFilter != "" {
-		if !vs.HasLocalRoot(volFilter) {
-			return nil
+		if v, ok := vs.ByName(volFilter); ok {
+			return []volume.Volume{v}
 		}
-		return []volume.Volume{{Name: volFilter}}
+		return nil
 	}
 	all := volume.AllowedVolumes(vs.All(), owner)
 	out := make([]volume.Volume, 0, len(all))
@@ -254,9 +212,18 @@ func (s *Service) volumeViewTargets(owner, volFilter string) []volume.Volume {
 func (s *Service) listViaVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string,
 	csMap map[string]string, lister VolumeViewLister) (ListResult, bool) {
 	allFiles, ok := s.collectVolumeViewEntries(ctx, lister, s.volumeViewTargets(owner, volFilter),
-		owner+"/"+userBucket+subdirSuffix(subdir), subdir, csMap)
+		owner, subdir, csMap)
 	if !ok {
 		return ListResult{}, false
+	}
+	// 显式单卷（含外部/封装卷）时补展示分类（wrapper → "wrapper"，Web UI 卷徽标用）。
+	if volFilter != "" {
+		if v, ok := s.rt.volSet().ByName(volFilter); ok {
+			cat := s.volumeCategoryFor(v.Type)
+			for i := range allFiles {
+				allFiles[i].VolumeCategory = cat
+			}
+		}
 	}
 	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
 	return ListResult{
@@ -265,27 +232,19 @@ func (s *Service) listViaVolumeViews(ctx context.Context, q ListQuery, owner, su
 	}, true
 }
 
-// subdirSuffix 返回卷根命名空间键的目录后缀（"" 或 "/<rel>"）。
-func subdirSuffix(subdir string) string {
-	if subdir == "" {
-		return ""
-	}
-	return "/" + strings.Trim(subdir, "/")
-}
-
 // collectVolumeViewEntries 逐卷列举并聚合；supported=false ⇒ 整层能力不可用（调用方回落）。
 func (s *Service) collectVolumeViewEntries(ctx context.Context, lister VolumeViewLister,
-	vols []volume.Volume, key, subdir string, csMap map[string]string) ([]FileInfo, bool) {
+	vols []volume.Volume, owner, subdir string, csMap map[string]string) ([]FileInfo, bool) {
 	seenDirs := make(map[string]bool)
 	var out []FileInfo
 	for _, v := range vols {
-		entries, supported, err := lister.ListDirView(ctx, v.Name, key)
+		entries, supported, err := lister.ListDirView(ctx, v.Name, owner, subdir)
 		if !supported {
 			return nil, false
 		}
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				s.rt.logger().Warn("卷视图列举失败", "volume", v.Name, "key", key, "error", err.Error())
+				s.rt.logger().Warn("卷视图列举失败", "volume", v.Name, "subdir", subdir, "error", err.Error())
 			}
 			continue
 		}

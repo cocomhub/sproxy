@@ -1,9 +1,5 @@
-# list/search 数据源直调点登记（R41 影子台账：只减不增）
-# 口径：`.index.search(` / `ExternalList(` 的出现次数（`.index.list(` 已硬禁，见门禁代码）；
-# 目标形态见设计 §15.2：list 由卷状态视图/实时扫描提供（2026-10-29 步骤 3 已落地），
-# searchIndex 只保留搜索语义；`ExternalList` 是**外部卷列举能力接缝**（显式 ?volume=），
-# 不是本地 list 数据源。
+# list/search 数据源直调点登记（R41：`.index.list(` 与 `ExternalList(` 均已硬禁）
+# 口径：`.index.search(` 的出现次数；list 的唯一实现 = 装配层 `VolumeViewLister.ListDirView`
+# （本地卷与外部卷共用，键空间由 ResolveUserLocation 统一处理）；searchIndex 只服务搜索。
 # 格式：file<TAB>max<TAB>reason
-pkg/files/options.go	1	ExternalList 能力接口声明（外部卷列举接缝）
-pkg/files/read_ops.go	2	index.search（搜索，保留）+ ops.ExternalList（外部卷列举接缝）
-pkg/server/files_service.go	1	ExternalList 实现（经 VolumeView 列举外部卷）
+pkg/files/read_ops.go	1	index.search（搜索的唯一数据源）

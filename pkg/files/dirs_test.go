@@ -91,9 +91,8 @@ type dirsEnv struct {
 	// volRoots 是 enableVolumes 为本地卷建好的根句柄（enableExternalVolume 重建卷集时
 	// 复用，registry.NewSet 需要完整 roots 表）。与 volSet.roots 同源。
 	volRoots map[string]*storage.Root
-	// externalVols 是卷名 → 外部卷目录浏览能力（任务 7 fake）：testRuntime.Volumes()
-	// 经 dirsExternalSet 包装成 ExternalVolumeSource，供 List 的 ?volume=<外部卷> 路由。
-	externalVols map[string]ExternalVolume
+	// externalVols 是卷名 → 外部卷条目 fake：viewListSet 优先返回它（模拟外部卷列举）。
+	externalVols map[string]*fakeExternalVolume
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
@@ -125,7 +124,7 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 		tenants:      map[string]*storage.Tenant{},
 		checksum:     map[string]*checksum.ChecksumStore{},
 		buckets:      map[string]*quota.Scope{},
-		externalVols: map[string]ExternalVolume{},
+		externalVols: map[string]*fakeExternalVolume{},
 	}
 	e.rebuild()
 	t.Cleanup(func() {
@@ -225,11 +224,10 @@ func (r testRuntime) Volumes() VolumeSet {
 	if r.e.volSet == nil {
 		return nil
 	}
-	base := dirsExternalSet{Set: r.e.volSet, ext: r.e.externalVols}
 	if r.e.viewList != nil {
-		return viewListAdapter{dirsExternalSet: base, lister: r.e.viewList}
+		return viewListAdapter{VolumeSet: r.e.volSet, lister: r.e.viewList}
 	}
-	return base
+	return r.e.volSet
 }
 
 func (r testRuntime) Tenant(volName, owner string) *storage.Tenant {

@@ -210,42 +210,23 @@ type ExternalEntry struct {
 	Size  int64
 	// MTime 是条目修改时间（UnixNano；0 = 未知）。列表给出 mod_time 需要它。
 	MTime int64
+	// Checksum 是底层 FS 自报的**整文件 SHA-256**（`sync.Entry.ChecksumType == "sha256"` 时
+	// 透传；空 = 未知，由消费方 stat 兜底）。只认 sha256——ETag 等非 SHA-256 算法不得填入
+	// （它会直达 Web UI 的 checksum 门禁）。
+	Checksum string
 }
 
-// VolumeViewLister 是**可选能力**：经卷视图（装配层 `VolumeView`，含可信封装/容量/状态缓存
-// 装饰）列出目录直接子项。
+// VolumeViewLister 是**唯一的目录列举能力**（设计 2026-10-28-volume-state-maintenance §15.2）：
+// 经卷视图（装配层 `VolumeView`，含可信封装/容量/状态缓存装饰）列出任意可见卷的直接子项。
 //
-// 为什么需要它（设计 2026-10-28-volume-state-maintenance §15.2 步骤 2）：本地卷的 list 长期由
-// `searchIndex` 提供（进程内派生视图）；切到「卷状态视图」后，list 与 sync/mirror/备份走同一
-// 数据源，并自动享受卷状态缓存（默认 5 分钟、写穿失效）。
+// **本地卷与外部卷共用这一条路径**（2026-10-29 收敛：`ExternalList` / `ExternalVolumeSource`
+// 已删除）——键空间差异（共享卷 owner 前缀 / 独立卷无前缀）由装配层用
+// `Volume.ResolveUserLocation` 统一处理，领域层只传 `(owner, subdir)`。
 //
-// key 为**卷根命名空间**键（`<owner>/user/<rel>`；`rel` 为空 = 用户桶根）。
-// supported=false 表示「本层不提供该能力」（如缓存被 `volume_state.disable` 关闭）⇒ 调用方
-// 回落索引路径（零回归）。
+// supported=false 表示「本层不提供该能力」（卷集未装配 / 卷不存在或未授权）⇒ 调用方回落实时
+// 扫描（本地卷）或空结果。缓存开关（`volume_state.disable`）不影响本能力——它决定视图是否带缓存。
 type VolumeViewLister interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留
-	ListDirView(ctx context.Context, volName, key string) (entries []ExternalEntry, supported bool, err error)
-}
-
-// ExternalVolume 是外部卷的**目录浏览能力**（非本地后端 ListDir 透传）。
-//
-// 为什么是本接口而不是直接 import `*registry.Set` / `pkg/sync`：门禁 R2（子包可见性）
-// 与既有设计约定（见 DownloadSource / UploadSink 注释）都要求 files 域不 import
-// pkg/volume/registry 与 pkg/sync——装配层把 `registry.Set.External(name).FS()`（sync.FS）
-// 的 ListDir 适配为本接口，文件模型由领域持有。
-type ExternalVolume interface {
-	// ListDir 列出外部卷逻辑目录 rel 的直接子项（明文视图，隐藏底层分片与加密 meta）。
-	// rel 是卷根相对的键空间路径（owner 已由调用方限定；共享卷带 owner 前缀隔离）。
-	ListDir(ctx context.Context, rel string) ([]ExternalEntry, error)
-}
-
-// ExternalVolumeSource 是 VolumeSet 的**可选扩展**：按卷名返回外部卷的目录浏览能力。
-// 未知卷名/非外部卷（本地卷）→ nil。files 域用类型断言探测（`volSet.(ExternalVolumeSource)`）
-// ——断言失败 = 装配层未提供外部卷能力，List 的 `?volume=` 走既有本地卷路径（零回归）。
-//
-// 与 registry.Presigner / URLResolver 等可选能力同模式：装配层适配器（pkg/server 的
-// filesVolumeSet）在注入时实现本接口，领域侧只按需断言消费。
-type ExternalVolumeSource interface {
-	ExternalVolume(name string) ExternalVolume
+	ListDirView(ctx context.Context, volName, owner, subdir string) (entries []ExternalEntry, supported bool, err error)
 }
 
 // ExternalDeleter 是外部卷删除能力（C2，2026-10-06）：files 域用它在不 import pkg/sync

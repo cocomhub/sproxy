@@ -381,6 +381,8 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 
 **现状（2026-10-29）**：list 的数据源已收敛为**卷状态视图**（`VolumeView.ListDir` + 缓存），
 视图不可用时**实时扫描**；`searchIndex` 只服务搜索（`index.list` 已删除并硬禁，R41）。
+**唯一列举入口**是装配层的 `VolumeViewLister.ListDirView`——本地卷与外部卷共用（键空间由
+`ResolveUserLocation` 统一），`ExternalList`/`ExternalVolumeSource` 已删除并硬禁。
 
 **机制（四条不变量）**：
 

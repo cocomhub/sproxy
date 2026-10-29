@@ -65,17 +65,6 @@ type ExternalVolumeOps interface {
 	// 返回 (false, nil) = 卷未装配 / owner 未授权 / 对象不存在（调用方按 404 处理）。
 	ExternalDelete(ctx context.Context, owner, volName, remotePath, expectedChecksum string) (bool, error)
 
-	// ExternalList 列出 owner 在 volName 的 subdir（用户可见相对路径，"" = 卷根）下的**直接子项**。
-	//
-	// 返回 (entries, true, nil) = 该卷是外部卷且已列举（entries 可为空）；
-	// (nil, false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 不支持列举 —— 调用方按
-	// 「该卷无条目」处理（**与既有行为一致，零回归**：本地卷恒走索引）。
-	// 远端/IO 失败 → (nil, true, err)，由调用方决定响应语义。
-	//
-	// 为什么需要：搜索索引只覆盖本地卷（外部卷没有 *storage.Root）⇒ 显式 `?volume=<外部卷>`
-	// 此前**静默返回空列表**（加密卷在 CLI 上「看起来是空的」）。
-	ExternalList(ctx context.Context, owner, volName, subdir string) (entries []FileInfo, supported bool, err error)
-
 	// ExternalStat 取外部卷对象的元信息（用户可见相对路径）。返回 size<0 = 不存在/未命中；
 	// checksum = 该卷记录的**明文**整文件 SHA-256（无记录 → 空串）。
 	ExternalStat(ctx context.Context, owner, volName, remotePath string) (size int64, checksum string, err error)

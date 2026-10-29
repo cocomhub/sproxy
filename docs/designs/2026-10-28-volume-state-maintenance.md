@@ -217,7 +217,7 @@ func WrapVolume(sv registry.StorageVolume, c *Cache) registry.StorageVolume
 | `files.List(?volume=<外部卷>)` / `Stat` / `DeleteFile` / `Rename` | 走装饰后 FS ⇒ 自动缓存 + 自动失效 |
 | `ExternalVolumeOps.ExternalList/ExternalStat` | 语义并入装饰器；保留兼容期薄转发 |
 | `files.Search`（外部卷） | 默认不支持（`volume_state_search_remote` 默认 false）；启用则读 TreeView |
-| 本地卷 list | **卷状态视图**（步骤 2）→ 视图不可用时**实时扫描**（步骤 3）；`searchIndex` 不再参与 |
+| 本地卷 + 外部卷 list | **唯一入口 `VolumeViewLister.ListDirView`**（2026-10-29 收敛）；视图不可用时实时扫描；`searchIndex` 不再参与 |
 | 本地卷 search | 仍由 `searchIndex`（只服务搜索——步骤 3 后的唯一职责） |
 
 ---
@@ -481,6 +481,12 @@ Root 事件覆盖本地卷的「结构 + 内容写」（#880/#884），本地卷
 checksum、在途临时文件不对外可见），由 `TestList_ViewSourceEquivalentToIndex` 等用例钉住。
 门控放在**装配层单一事实源**（`filesVolumeSet.ListDirView` 读 `cfg.VolumeState.Disable`），
 领域侧只做「查能力 → 用能力」。
+
+**追加收敛（2026-10-29）：唯一列举入口**——`ExternalList` / `ExternalVolumeSource` /
+`filesExternalVolume` 全部删除：本地卷与外部卷共用 `VolumeViewLister.ListDirView`，键空间差异
+（共享卷 `<owner>/user/<rel>` / 独立卷 `user/<rel>`）由装配层 `ResolveUserLocation` 统一处理，
+领域层只传 `(owner, subdir)`；checksum 由卷自报 `sync.Entry.Checksum` 透传（只认 sha256）。
+R41 因此降为 **1 处**（`index.search`），`.index.list(` 与 `ExternalList(` 双双硬禁。
 
 **步骤 3 已落地（2026-10-29）**：删除 `searchIndex.list` 与 `indexEntryIsDirectChild`——
 `files.List` 变为「视图 → 实时扫描（`listFallback`）」两级，`searchIndex` **只服务搜索**
