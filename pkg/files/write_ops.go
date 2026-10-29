@@ -389,7 +389,7 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 		}
 		route.Commit(0, s.settleSize(route, f.owner, f.remotePath, size))
 		ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
-		s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
+		s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, route.VolumeName, input.ExpectedChecksum, input.Mtime, f.logger)
 		// 可信卷：去重回退复制路径也建 meta（C-MAJOR-3 修复——去重 rel 与普通上传一致有 sidecar）。
 		if s.rt.fileMetaEnabled() {
 			if mErr := s.rt.writeMetaSidecar(f.ctx, f.owner, f.root, rel, input.MetaExtra); mErr != nil {
@@ -401,7 +401,7 @@ func (s *Service) tryDedupNewFile(f *fileOp, srcRel, rel string, input WriteFile
 	// 硬链接成功：零拷贝不占新配额 → 回滚预留。
 	route.Release()
 	ds.Add(rel, route.VolumeName, input.ExpectedChecksum)
-	s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, input.ExpectedChecksum, input.Mtime, f.logger)
+	s.recordUploadSuccess(f.root, f.owner, f.remotePath, rel, route.VolumeName, input.ExpectedChecksum, input.Mtime, f.logger)
 	// 可信卷：去重硬链接路径同样建 meta（M2 修复——回退复制分支有、硬链接分支此前
 	// 漏建，违反「新文件到达立刻建 meta」不变量；与 srcRel 内容一致，读侧不校验）。
 	if s.rt.fileMetaEnabled() {
@@ -585,9 +585,10 @@ func (s *Service) handleDuplicateFile(ctx context.Context, owner string, homeTnt
 // recordUploadSuccess 记录上传成功后的领域副作用：checksum 台账写入 + mtime 落地。
 //
 // 抽自原 setUploadResponseHeaders（其"写响应头"部分留回处理器，领域只保留台账与落盘副作用）。
-func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel, serverChecksum string, mtime int64, logger *slog.Logger) {
+func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel, vol, serverChecksum string, mtime int64, logger *slog.Logger) {
 	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.Set(rel, serverChecksum)
+		// 卷维度键（设计 §15.1.1）：同一 owner 在多卷上的同名文件各自保留 checksum。
+		checksumSet(cs, vol, rel, serverChecksum)
 	} else {
 		logger.WarnContext(context.Background(), "per-tenant checksum store 不可用，跳过记录", "file_name", remotePath)
 	}
@@ -1573,7 +1574,7 @@ func (s *Service) renameWithQuotaTransfer(ctx context.Context, a renameHomeArgs)
 // renameChecksumIndex 重命名成功后的台账与索引改名（checksum store + 搜索索引）。
 func (s *Service) renameChecksumIndex(a renameHomeArgs) {
 	if cs := s.rt.checksumStore(a.owner); cs != nil {
-		cs.Rename(a.fromRel, a.toRel)
+		checksumRename(cs, a.volName, a.fromRel, a.toRel)
 	}
 	if s.index != nil {
 		s.index.rename(a.owner, strings.TrimPrefix(a.fromRel, "user/"), strings.TrimPrefix(a.toRel, "user/"))
@@ -2321,11 +2322,11 @@ func (s *Service) writeTargetPresentSettle(ctx context.Context, owner, rel, remo
 			}
 		}
 		if !input.NoRecord {
-			s.recordUploadSuccess(root, owner, remotePath, rel, checksum, input.Mtime, logger)
+			s.recordUploadSuccess(root, owner, remotePath, rel, route.VolumeName, checksum, input.Mtime, logger)
 		}
 	} else {
 		if cs := s.rt.checksumStore(owner); cs != nil && checksum != "" {
-			cs.Set(rel, checksum)
+			checksumSet(cs, route.VolumeName, rel, checksum)
 		}
 		if mr := s.rt.metricsRecorder(); mr != nil {
 			mr.RecordUpload(spec.Size)
@@ -2424,7 +2425,7 @@ func (s *Service) writeTargetSettleCommon(ctx context.Context, owner, rel, remot
 	// 台账 + mtime（成功副作用；跳过 Exclusive 的 archive 语义——台账/统计对 user 桶文件）。
 	// NoRecord：调用方自己发布语义事件（版本恢复 version 事件等），不重复 upload 事件/台账。
 	if !input.NoRecord {
-		s.recordUploadSuccess(root, owner, remotePath, rel, serverChecksum, input.Mtime, logger)
+		s.recordUploadSuccess(root, owner, remotePath, rel, route.VolumeName, serverChecksum, input.Mtime, logger)
 	}
 	return WriteTargetResult{
 		VolumeName: route.VolumeName, Checksum: serverChecksum, Size: written,

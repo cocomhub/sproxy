@@ -56,7 +56,7 @@ func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	}
 	// ① 台账迁移（IndexMove 唯一职责）。
 	svc.IndexMove(owner, rel, 42, cs, "vol2", nil)
-	if got, ok := h.checksumStoreFor(owner).Get(rel); !ok || got != cs {
+	if got, ok := ledgerGetVolume(h.checksumStoreFor(owner), "vol2", rel); !ok || got != cs {
 		t.Fatalf("move 后 checksum 台账应写入 %q，got %q ok=%v（未写 ⇒ 目标卷 list checksum 空）", cs, got, ok)
 	}
 	// ② 物理搬移造成的索引更新由事件承担：目标卷内容写事件（Tag=vol2）刷新条目与卷归属。
@@ -64,7 +64,8 @@ func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	svc.ApplyRootMutation(storage.Mutation{
 		Op: storage.MutationWrite, Tag: "vol2", Root: h.globalRoot, Rel: owner + "/" + rel,
 	})
-	// list（实时扫描）：条目 checksum 来自迁移后的台账（卷归属由物理位置给出，不再是索引态）。
+	// list（实时扫描）：仍列出条目；checksum 按**卷维度**读（§15.1.1）——台账已迁到目标卷
+	// vol2，而本测试并未物理搬移文件（仍在默认卷）⇒ 源卷条目读不到 checksum 属预期。
 	res, lerr := svc.List(t.Context(), files.ListQuery{Owner: owner, Subdir: "docs"})
 	if lerr != nil {
 		t.Fatalf("list: %v", lerr)
@@ -73,8 +74,8 @@ func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	for _, f := range res.Files {
 		if f.Name == "a.bin" {
 			found = true
-			if f.Checksum != cs {
-				t.Fatalf("list 条目 checksum = %q, want %q", f.Checksum, cs)
+			if f.Checksum != "" {
+				t.Fatalf("源卷条目不应读到目标卷的 checksum，got %q", f.Checksum)
 			}
 		}
 	}

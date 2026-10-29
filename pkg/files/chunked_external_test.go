@@ -445,9 +445,9 @@ func TestChunkedUpload_ExternalVolume_StagingThenTransfer(t *testing.T) {
 	if env.routeCalls != 1 {
 		t.Fatalf("Route 调用次数=%d want 1", env.routeCalls)
 	}
-	// 4) checksum 台账已登记（与本地卷 complete 一致）——recordCompleteMetadata 走 staging 卷租户
-	// （在途临时文件所在），checksum store 是 owner 逻辑命名空间（默认卷 meta 单一权威）。
-	if cs, ok := env.cs.Get("user/" + filename); !ok || cs != sha256Hex(content) {
+	// 4) checksum 台账已登记（与本地卷 complete 一致）——按**卷维度**记在目标卷（§15.1.1），
+	// 避免与其它卷的同名文件互相覆盖。
+	if cs, ok := env.cs.GetInVolume("v-ext", "user/"+filename); !ok || cs != sha256Hex(content) {
 		t.Fatalf("checksum 台账未登记或值不符: %q ok=%v", cs, ok)
 	}
 }

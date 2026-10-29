@@ -36,6 +36,21 @@ type ChecksumStoreIface interface {
 	GetAll() map[string]string
 }
 
+// VolumeKeyedStore 是**可选扩展**：卷维度键读写（设计 §15.1.1）。
+//
+// 为什么单独成接口而不是塞进 `ChecksumStoreIface`：后者被多处测试替身实现，扩接口会强制
+// 所有替身补方法（噪音）；消费方按需断言本接口，未实现则回落无卷方法（零回归）。
+type VolumeKeyedStore interface {
+	GetInVolume(vol, filename string) (string, bool)
+	SetInVolume(vol, filename, checksum string)
+	DeleteInVolume(vol, filename string)
+	RenameInVolume(vol, from, to string)
+	SnapshotInVolume(vol string) map[string]string
+	SnapshotLegacy() map[string]string
+}
+
+var _ VolumeKeyedStore = (*ChecksumStore)(nil)
+
 // ChecksumStore 维护「文件名 → SHA-256」台账并落盘到**租户卷内的 `<meta>/checksums.json`**，
 // 供 upload/download/delete/rename 操作复用。
 //
@@ -50,6 +65,125 @@ type ChecksumStore struct {
 	rel       string            // 卷内相对路径（生产 = "meta/checksums.json"）
 	checksums map[string]string // filename -> sha256 hex
 	logger    *slog.Logger
+}
+
+// volumeKeySep 是卷维度复合键的分隔符（NUL：卷名与 rel 都不含，无歧义）。
+const volumeKeySep = "\x00"
+
+// volumeKey 拼接卷维度键（`<vol>\x00<rel>`）。
+//
+// 为什么要卷维度（设计 2026-10-28-volume-state-maintenance §15.1.1）：旧台账键是**租户相对
+// rel**（`user/<rel>`），同一 owner 在多卷上的同名文件会互相覆盖 ⇒ list 显示的 checksum
+// 张冠李戴。新写入改用卷维度键；旧键保留为**只读兼容**（升级前的数据仍可读）。
+func volumeKey(vol, filename string) string { return vol + volumeKeySep + filename }
+
+// SetInVolume 以卷维度键记录 checksum（`<vol>\x00<rel>`）。
+func (cs *ChecksumStore) SetInVolume(vol, filename, checksum string) {
+	key := volumeKey(vol, filename)
+	cs.mu.Lock()
+	cs.checksums[key] = checksum
+	cs.mu.Unlock()
+	cs.persist("set_in_volume", key)
+}
+
+// SetManyInVolume 批量写卷维度键（一次落盘；rebuild 类全量回填用）。
+func (cs *ChecksumStore) SetManyInVolume(vol string, entries map[string]string) {
+	if len(entries) == 0 {
+		return
+	}
+	cs.mu.Lock()
+	for rel, sum := range entries {
+		cs.checksums[volumeKey(vol, rel)] = sum
+	}
+	cs.mu.Unlock()
+	cs.persist("set_many_in_volume", vol, len(entries))
+}
+
+// GetInVolume 读卷维度键；miss 时**回退旧无卷键**（迁移兼容：升级前的台账仍可读）。
+func (cs *ChecksumStore) GetInVolume(vol, filename string) (string, bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if v, ok := cs.checksums[volumeKey(vol, filename)]; ok {
+		return v, true
+	}
+	v, ok := cs.checksums[filename]
+	return v, ok
+}
+
+// DeleteInVolume 删除卷维度键（不动旧键——旧键可能被其它卷回退使用）。
+func (cs *ChecksumStore) DeleteInVolume(vol, filename string) {
+	key := volumeKey(vol, filename)
+	cs.mu.Lock()
+	if _, ok := cs.checksums[key]; !ok {
+		cs.mu.Unlock()
+		return
+	}
+	delete(cs.checksums, key)
+	cs.mu.Unlock()
+	cs.persist("delete_in_volume", key)
+}
+
+// RenameInVolume 同卷内重命名卷维度键。
+func (cs *ChecksumStore) RenameInVolume(vol, from, to string) {
+	fromKey, toKey := volumeKey(vol, from), volumeKey(vol, to)
+	cs.mu.Lock()
+	v, ok := cs.checksums[fromKey]
+	if !ok {
+		cs.mu.Unlock()
+		cs.logger.Warn("ChecksumStore.RenameInVolume: from 路径不存在，跳过", "volume", vol, "from", from, "to", to)
+		return
+	}
+	delete(cs.checksums, fromKey)
+	cs.checksums[toKey] = v
+	cs.mu.Unlock()
+	cs.persist("rename_in_volume", vol, from, to)
+}
+
+// SplitVolumeKey 把卷维度复合键拆成 `(vol, rel)`；不是卷维度键 → ok=false。
+func SplitVolumeKey(key string) (vol, rel string, ok bool) {
+	v, r, found := strings.Cut(key, volumeKeySep)
+	if !found {
+		return "", key, false
+	}
+	return v, r, true
+}
+
+// SnapshotLegacy 返回**旧无卷键**的快照（过滤卷维度复合键）——迁移兼容用：
+// 升级前写入的台账没有卷维度，读侧按「卷键优先 + 旧键兜底」合并。
+func (cs *ChecksumStore) SnapshotLegacy() map[string]string {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	out := make(map[string]string, len(cs.checksums))
+	for k, v := range cs.checksums {
+		if !strings.Contains(k, volumeKeySep) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// SnapshotInVolume 返回该卷的 `rel → checksum` 快照（只含卷维度键，键为**裸 rel**）。
+func (cs *ChecksumStore) SnapshotInVolume(vol string) map[string]string {
+	prefix := vol + volumeKeySep
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	out := make(map[string]string, len(cs.checksums))
+	for k, v := range cs.checksums {
+		if rel, ok := strings.CutPrefix(k, prefix); ok {
+			out[rel] = v
+		}
+	}
+	return out
+}
+
+// persist 落盘（失败重试一次并记日志；与 Set/Rename 的既有重试语义一致）。
+func (cs *ChecksumStore) persist(op string, args ...any) {
+	if err := cs.save(); err != nil {
+		cs.logger.Error(chkStorePersistFailed, append([]any{"op", op}, args...)...)
+		if retryErr := cs.save(); retryErr != nil {
+			cs.logger.Error(retryPersistFailed, append([]any{"op", op}, args...)...)
+		}
+	}
 }
 
 // maxChecksumStoreBytes 是台账读取上界（防注入超大 JSON 的 OOM；每条 ~70B ⇒ 64MiB ≈ 90 万文件）。

@@ -1127,12 +1127,14 @@ func (s *Service) checkFileExistsStatus(w http.ResponseWriter, owner, filename s
 		return true
 	}
 	var root *storage.Root
+	vol := "" // 卷文件名（卷维度 checksum 读取；空 = 单卷/未知 → 旧无卷键）
 	if s.rt.volSet() != nil {
 		loc, found := s.rt.locateOwnerFile(owner, rel)
 		if !found || loc.Tenant == nil || loc.Tenant.Root() == nil {
 			return false
 		}
 		root = loc.Tenant.Root()
+		vol = loc.VolumeName
 	} else {
 		root = tnt.Root()
 	}
@@ -1141,7 +1143,7 @@ func (s *Service) checkFileExistsStatus(w http.ResponseWriter, owner, filename s
 		return false
 	}
 	if cs := s.rt.checksumStore(owner); cs != nil {
-		if checksum, ok := cs.Get(rel); ok {
+		if checksum, ok := checksumGet(cs, vol, rel); ok {
 			s.sendJSON(w, ChunkStatusResponse{
 				Success:      true,
 				Completed:    true,
@@ -1216,12 +1218,12 @@ func (s *Service) validateCompleteSession(w http.ResponseWriter, store *UploadSt
 // `internal/archcheck/upload_side_effect_test.go`（设置 mtime 的调用全仓只允许一处）。
 //
 // 文件在会话定卷（session.Volume；空 = 默认卷）的 user 桶——mtime 须经该卷租户；checksum
-// store 是 owner 逻辑命名空间（默认卷 meta 单一权威），与物理卷无关。
+// 台账按**卷维度**记录（§15.1.1：同名文件跨卷不互相覆盖）。
 func (s *Service) recordCompleteMetadata(owner, uploadID string, session *ChunkedUploadSession, finalChecksum string) {
 	// 在途临时文件在 **staging 卷**（本地卷目标 = 目标卷；外部卷目标 = 默认卷）。
-	// checksum 台账恒为 owner 逻辑命名空间（与物理卷无关）⇒ 必记。
+	// checksum 台账按**目标卷**（session.Volume）维度记录 ⇒ 跨卷同名互不覆盖。
 	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.Set("user/"+strings.TrimPrefix(session.Filename, "/"), finalChecksum)
+		checksumSet(cs, session.Volume, "user/"+strings.TrimPrefix(session.Filename, "/"), finalChecksum)
 	} else {
 		s.rt.logger().Warn("per-tenant checksum store 不可用，跳过记录", "file_name", session.Filename)
 	}
@@ -1249,7 +1251,7 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 	}
 
 	// 上传成功的共同副作用内核（mtime + checksum 台账），与单次上传同源。
-	s.recordUploadSuccess(tnt.Root(), owner, session.Filename, rel, finalChecksum, session.FileModTime, s.rt.logger())
+	s.recordUploadSuccess(tnt.Root(), owner, session.Filename, rel, session.Volume, finalChecksum, session.FileModTime, s.rt.logger())
 	// 可信卷：分块上传 complete 后同样到达即建 meta（C-CRITICAL-2 修复——与单次上传
 	// writeFileSettle 一致，分块传完也有 .meta sidecar）。
 	if s.rt.fileMetaEnabled() {

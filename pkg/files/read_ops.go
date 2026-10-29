@@ -129,11 +129,10 @@ func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 	// 数据源（§15.2 步骤 3，2026-10-29）：视图不可用时**实时扫描**（`listFallback`）——
 	// `searchIndex` 不再承担 list（它只服务搜索）。可见性由装配层卷状态缓存负责：默认永不过期 +
 	// 事件写穿 + 显式 `volume refresh`；`volume_state.disable: true` ⇒ 每次回源（强一致）。
-	csMap := s.checksumSnapshot(ctx, owner)
-	if res, handled := s.listFromVolumeViews(ctx, q, owner, subdir, volFilter, csMap); handled {
+	if res, handled := s.listFromVolumeViews(ctx, q, owner, subdir, volFilter); handled {
 		return res, nil
 	}
-	allFiles := s.listFallback(owner, subdir, q.VolName, rel, csMap)
+	allFiles := s.listFallback(ctx, owner, subdir, q.VolName, rel)
 	if allFiles == nil {
 		allFiles = []FileInfo{} // 契约：空结果必须是空数组（JSON `[]`），不能是 null
 	}
@@ -172,13 +171,12 @@ func (s *Service) volumeCategoryFor(typ string) string {
 }
 
 // listFromVolumeViews 探测「经卷视图列举」能力并委派（能力缺失/门控关闭 ⇒ false，走索引）。
-func (s *Service) listFromVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string,
-	csMap map[string]string) (ListResult, bool) {
+func (s *Service) listFromVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string) (ListResult, bool) {
 	lister, ok := s.rt.volSet().(VolumeViewLister)
 	if !ok || lister == nil {
 		return ListResult{}, false
 	}
-	return s.listViaVolumeViews(ctx, q, owner, subdir, volFilter, csMap, lister)
+	return s.listViaVolumeViews(ctx, q, owner, subdir, volFilter, lister)
 }
 
 // volumeViewTargets 返回本次要列举的卷：owner 可见卷中**有本地根**的那些（外部卷的默认聚合
@@ -210,9 +208,9 @@ func (s *Service) volumeViewTargets(owner, volFilter string) []volume.Volume {
 // `listFallback` 一致：目录条目跨卷去重（Volume 空）、文件条目带卷名与 checksum、在途临时
 // 文件不对外可见。handled=false 表示「本层不提供该能力」⇒ 调用方回落索引路径。
 func (s *Service) listViaVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string,
-	csMap map[string]string, lister VolumeViewLister) (ListResult, bool) {
+	lister VolumeViewLister) (ListResult, bool) {
 	allFiles, ok := s.collectVolumeViewEntries(ctx, lister, s.volumeViewTargets(owner, volFilter),
-		owner, subdir, csMap)
+		owner, subdir)
 	if !ok {
 		return ListResult{}, false
 	}
@@ -234,7 +232,7 @@ func (s *Service) listViaVolumeViews(ctx context.Context, q ListQuery, owner, su
 
 // collectVolumeViewEntries 逐卷列举并聚合；supported=false ⇒ 整层能力不可用（调用方回落）。
 func (s *Service) collectVolumeViewEntries(ctx context.Context, lister VolumeViewLister,
-	vols []volume.Volume, owner, subdir string, csMap map[string]string) ([]FileInfo, bool) {
+	vols []volume.Volume, owner, subdir string) ([]FileInfo, bool) {
 	seenDirs := make(map[string]bool)
 	var out []FileInfo
 	for _, v := range vols {
@@ -248,15 +246,16 @@ func (s *Service) collectVolumeViewEntries(ctx context.Context, lister VolumeVie
 			}
 			continue
 		}
-		out = append(out, s.fileInfosFromViewEntries(entries, v.Name, subdir, csMap, seenDirs)...)
+		out = append(out, s.fileInfosFromViewEntries(ctx, owner, entries, v.Name, subdir, seenDirs)...)
 	}
 	return out, true
 }
 
 // fileInfosFromViewEntries 把一个卷的视图条目转成领域列表条目（目录跨卷去重；在途临时文件
 // 不对外可见——与索引/回退路径同一语义）。
-func (s *Service) fileInfosFromViewEntries(entries []ExternalEntry, volName, subdir string,
-	csMap map[string]string, seenDirs map[string]bool) []FileInfo {
+func (s *Service) fileInfosFromViewEntries(ctx context.Context, owner string, entries []ExternalEntry,
+	volName, subdir string, seenDirs map[string]bool) []FileInfo {
+	csMap := s.checksumSnapshotFor(ctx, owner, volName)
 	out := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir {
@@ -286,10 +285,10 @@ func (s *Service) fileInfosFromViewEntries(entries []ExternalEntry, volName, sub
 // listFallback 是 List 的实时扫描回退（索引不可用时）：逐卷 ReadDir 聚合，语义与索引化前
 // 逐字一致（目录条目去重、文件条目带卷名、checksum 按 user/<rel> 键）。仅 index nil 的
 // 零值 Service 走此路径；生产装配（New 构造）恒有索引。
-func (s *Service) listFallback(owner, subdir, volName, rel string, csMap map[string]string) []FileInfo {
+func (s *Service) listFallback(ctx context.Context, owner, subdir, volName, rel string) []FileInfo {
 	if s.rt.volSet() == nil {
-		// 单卷：唯一根 ReadDir（rel 相对租户根）。
-		return s.listFallbackSingle(owner, subdir, rel, csMap)
+		// 单卷：唯一根 ReadDir（rel 相对租户根）；checksum 走全量台账（无卷维度可区分）。
+		return s.listFallbackSingle(owner, subdir, rel, s.checksumSnapshot(ctx, owner))
 	}
 	// 多卷：owner 视图逐卷聚合（?volume= 已在上层校验）。
 	var allFiles []FileInfo
@@ -299,7 +298,7 @@ func (s *Service) listFallback(owner, subdir, volName, rel string, csMap map[str
 		vols = []volume.Volume{{Name: volName}}
 	}
 	for _, v := range vols {
-		allFiles = append(allFiles, s.listVolumeDirEntries(v, owner, subdir, rel, csMap, seenDirs)...)
+		allFiles = append(allFiles, s.listVolumeDirEntries(ctx, v, owner, subdir, rel, seenDirs)...)
 	}
 	return allFiles
 }
@@ -322,7 +321,10 @@ func (s *Service) listFallbackSingle(owner, subdir, rel string, csMap map[string
 }
 
 // listVolumeDirEntries 聚合多卷回退中单个卷的目录条目：目录条目去重、文件条目带卷名。
-func (s *Service) listVolumeDirEntries(v volume.Volume, owner, subdir, rel string, csMap map[string]string, seenDirs map[string]bool) []FileInfo {
+func (s *Service) listVolumeDirEntries(ctx context.Context, v volume.Volume, owner, subdir, rel string,
+	seenDirs map[string]bool) []FileInfo {
+	// 按卷取 checksum（§15.1.1：卷维度键优先，旧键兜底）——同名文件不再张冠李戴。
+	csMap := s.checksumSnapshotFor(ctx, owner, v.Name)
 	var out []FileInfo
 	tnt := s.rt.volumeTenant(v.Name, owner)
 	if tnt == nil || tnt.Root() == nil {
@@ -365,8 +367,8 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	owner := normalizeOwner(q.Owner)
-	// 一次性快照（见 ListFiles #8 结论注释，勿再分析）：per-tenant store，key 为相对租户根的 rel。
-	csMap := s.checksumSnapshot(context.Background(), owner)
+	// 按卷 checksum 视图（§15.1.1）：卷维度键优先、旧键兜底，避免跨卷同名串值。
+	byVol := s.checksumSnapshotsByVolume(context.Background(), owner)
 
 	// 索引化（roadmap P0）：搜索走内存增量索引（首次全量构建 + 写路径增量维护）。
 	// 与旧 WalkDir 实现**逐字一致的语义**由 search_index_test.go 钉住：子串匹配 base name
@@ -376,7 +378,7 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 	if tnt := s.rt.tenantOf(owner); tnt == nil || tnt.Root() == nil {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-	results := s.index.search(owner, qLower, tag, csMap)
+	results := s.index.search(owner, qLower, tag, byVol)
 	return ListResult{Files: results, Total: len(results), Offset: 0, Limit: len(results)}, nil
 }
 
@@ -408,7 +410,8 @@ func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, erro
 		return st, nil
 	}
 	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
-		if cs, ok := csStore.Get(csKey); ok {
+		// 卷维度键优先（§15.1.1），旧键由 GetInVolume 内部兜底。
+		if cs, ok := checksumGet(csStore, dp.VolumeName, csKey); ok {
 			st.Checksum = cs
 		} else if !info.IsDir() {
 			if cs, cerr := fileChecksumRoot(dp.Tenant.Root(), dp.Rel); cerr == nil {
@@ -524,12 +527,12 @@ func (s *Service) attachChecksum(dp DownloadPath, file io.Reader, out *OpenedFil
 	if csStore == nil {
 		return
 	}
-	if cs, ok := csStore.Get(csKey); ok {
+	if cs, ok := checksumGet(csStore, dp.VolumeName, csKey); ok {
 		out.Checksum = cs
 		return
 	}
 	if cs, cerr := checksumReader(file); cerr == nil {
-		csStore.Set(csKey, cs)
+		checksumSet(csStore, dp.VolumeName, csKey, cs)
 		out.Checksum = cs
 	} else {
 		s.rt.logger().Warn("计算文件 checksum 失败", "error", cerr.Error(), "file_name", dp.Filename)
@@ -578,6 +581,54 @@ func (s *Service) checksumSnapshot(ctx context.Context, owner string) map[string
 		return cs.GetAll()
 	}
 	return map[string]string{}
+}
+
+// checksumSnapshotFor 返回**指定卷**的 `user/<rel> → checksum` 快照（设计 §15.1.1）：
+// 卷维度键优先，旧无卷键兜底（迁移兼容）。
+func (s *Service) checksumSnapshotFor(ctx context.Context, owner, vol string) map[string]string {
+	cs := s.rt.checksumStore(owner)
+	if cs == nil {
+		// 台账未装配：沿用全量入口的空/重建语义（列表 checksum 保持空，不阻断）。
+		return s.checksumSnapshot(ctx, owner)
+	}
+	if len(cs.GetAll()) == 0 {
+		// 台账丢失/损坏 ⇒ 走全量入口的「自愈重建」（每 owner 只试一次），再取卷视图。
+		_ = s.checksumSnapshot(ctx, owner)
+	}
+	return checksumSnapshotForVolume(cs, vol)
+}
+
+// checksumSnapshotsByVolume 返回「每卷一份」的 `user/<rel> → checksum` 视图（设计 §15.1.1）：
+// 旧无卷键作为每卷兜底，卷维度键覆盖（迁移兼容）。供 Search / 语义搜索这类**跨卷结果集**使用。
+func (s *Service) checksumSnapshotsByVolume(_ context.Context, owner string) map[string]map[string]string {
+	cs := s.rt.checksumStore(owner)
+	if cs == nil {
+		return map[string]map[string]string{}
+	}
+	if len(cs.GetAll()) == 0 {
+		_ = s.checksumSnapshot(context.Background(), owner) // 同上的自愈重建
+	}
+	byVol := checksumSnapshotsAll(cs)
+	if vs := s.rt.volSet(); vs != nil {
+		// 已知卷即使没有卷维度键也要有一份视图（旧键兜底）。
+		for _, v := range vs.All() {
+			if _, ok := byVol[v.Name]; !ok {
+				byVol[v.Name] = checksumSnapshotForVolume(cs, v.Name)
+			}
+		}
+	}
+	return byVol
+}
+
+// checksumsForVolume 取某卷的 checksum map（未知卷 → 空 map，零回归）。
+func checksumsForVolume(byVol map[string]map[string]string, vol string) map[string]string {
+	if m, ok := byVol[vol]; ok {
+		return m
+	}
+	if m, ok := byVol[""]; ok {
+		return m
+	}
+	return nil
 }
 
 // asHTTPError 取出 *HTTPError（非该类型返回 nil）。

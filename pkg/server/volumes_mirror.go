@@ -385,7 +385,7 @@ func (h *Handlers) commitCopyResult(cvc *copyVolumeCtx, scope *quota.Scope, toPo
 	// （客户端整文件校验降级；P2 对抗评审）。
 	if srcCS != "" {
 		if cs := h.checksumStoreFor(cvc.owner); cs != nil {
-			cs.Set(cvc.rel, srcCS)
+			ledgerSetVolume(cs, cvc.toVol, cvc.rel, srcCS)
 		}
 	}
 	h.RecordAudit(cvc.ctx, AuditEvent{

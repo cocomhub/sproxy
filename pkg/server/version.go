@@ -220,7 +220,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	h.settleRestoreQuota(scope, pool, res, poolRes, prev, written)
 
 	// 更新 checksum（per-tenant store，key = user 桶相对路径）
-	checksum, ok := h.updateRestoredChecksum(w, r, dstRoot, targetRel, remotePath, versionIDStr)
+	checksum, ok := h.updateRestoredChecksum(w, r, dstRoot, dstVol, targetRel, remotePath, versionIDStr)
 	if !ok {
 		return
 	}
@@ -502,7 +502,7 @@ func (h *Handlers) settleRestoreQuota(scope *quota.Scope, pool *quota.Pool, res,
 
 // updateRestoredChecksum 计算恢复后文件的 checksum 并写入 per-tenant store（key = user
 // 桶相对路径）；计算失败记审计 + 500 并返回 ok=false。
-func (h *Handlers) updateRestoredChecksum(w http.ResponseWriter, r *http.Request, dstRoot *storage.Root, targetRel, remotePath, versionIDStr string) (string, bool) {
+func (h *Handlers) updateRestoredChecksum(w http.ResponseWriter, r *http.Request, dstRoot *storage.Root, dstVol, targetRel, remotePath, versionIDStr string) (string, bool) {
 	checksum, err := FileChecksumRoot(dstRoot, targetRel)
 	if err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
@@ -513,7 +513,9 @@ func (h *Handlers) updateRestoredChecksum(w http.ResponseWriter, r *http.Request
 		return "", false
 	}
 	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
-		cs.Set(targetRel, checksum)
+		// 卷维度键（§15.1.1）：恢复写回的是**目标卷**上的文件 ⇒ checksum 必须记在该卷，
+		// 否则 list/stat 按卷读会命中其它卷的同名记录或 miss。
+		ledgerSetVolume(cs, dstVol, targetRel, checksum)
 	}
 	return checksum, true
 }

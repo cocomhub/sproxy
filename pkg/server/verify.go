@@ -85,7 +85,18 @@ func (h *Handlers) verifyOneOwner(owner string, rep *verifyReport) {
 		rep.Skipped++
 		return
 	}
-	for rel, expected := range snapshot {
+	// 台账键可能是**卷维度键**（`<vol>\x00user/<rel>`，§15.1.1）或旧无卷键——校验按 rel
+	// 去重后逐条核对（实际所在卷由 locateOwnerFile 定位）。
+	seen := make(map[string]struct{}, len(snapshot))
+	for key, expected := range snapshot {
+		_, rel, ok := checksum.SplitVolumeKey(key)
+		if !ok {
+			rel = key
+		}
+		if _, dup := seen[rel]; dup {
+			continue
+		}
+		seen[rel] = struct{}{}
 		h.verifyOneEntry(owner, rel, expected, rep)
 	}
 }

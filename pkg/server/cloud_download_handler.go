@@ -1161,7 +1161,7 @@ func (h *Handlers) cloudArchiveToVolume(
 // 这样本地卷不再重复 upsert（省一次整表 COW 克隆），也不会为「卷内并不存在的路径」造幽灵条目。
 func (h *Handlers) recordBypassWrite(owner, rel string, size int64, checksum, volume string, root *storage.Root) {
 	if h.isLocalStorageVolume(volume) {
-		h.fileService().RecordBypassChecksum(owner, rel, checksum)
+		h.fileService().RecordBypassChecksum(owner, rel, checksum, volume)
 		return
 	}
 	h.fileService().RecordBypassWrite(owner, rel, size, checksum, volume, root)
@@ -1180,7 +1180,7 @@ func (h *Handlers) recordArchiveBypassState(t archiveVolumeTransfer, fs syncpkg.
 		}
 	}
 	// 本地卷：索引已由 Root 事件（结构 + 内容写）维护 ⇒ 只补 checksum（避免重复 upsert）。
-	h.fileService().RecordBypassChecksum(t.Owner, rel, cs)
+	h.fileService().RecordBypassChecksum(t.Owner, rel, cs, t.TargetVolume)
 }
 
 // probeArchiveQuota 是归档转存的**写前配额探针**（R14 C6）：探测式（预留后立即释放、不排队）。

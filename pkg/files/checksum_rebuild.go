@@ -45,20 +45,29 @@ func (s *Service) RebuildChecksums(ctx context.Context, owner string) (int, erro
 	if vs == nil {
 		return 0, nil
 	}
-	found := make(map[string]string)
+	total := 0
 	for _, v := range vs.All() {
 		if !vs.HasLocalRoot(v.Name) {
 			continue // 外部/远端卷无本地 sidecar（其 list 直接读卷 meta）
 		}
-		if root := vs.Root(v.Name); root != nil {
-			collectMetaChecksums(ctx, policy, root, owner, found)
+		root := vs.Root(v.Name)
+		if root == nil {
+			continue
 		}
+		// **按卷收集、按卷写入**（§15.1.1）：跨卷收进一个 map 会让同名文件互相覆盖。
+		found := make(map[string]string)
+		collectMetaChecksums(ctx, policy, root, owner, found)
+		if len(found) == 0 {
+			continue
+		}
+		if v.Name != "" {
+			cs.SetManyInVolume(v.Name, found)
+		} else {
+			cs.SetMany(found)
+		}
+		total += len(found)
 	}
-	if len(found) == 0 {
-		return 0, nil
-	}
-	cs.SetMany(found)
-	return len(found), nil
+	return total, nil
 }
 
 // collectMetaChecksums 遍历**卷根命名空间**里的 `<owner>/user/` 子树，把每个文件的 sidecar

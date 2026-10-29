@@ -84,7 +84,7 @@ func TestService_ChecksumRebuildFromMeta(t *testing.T) {
 		t.Fatalf("台账丢失后 checksum 应从对象 meta 自愈为 %q，got %q", sidecarSum, res.Files[0].Checksum)
 	}
 	// 自愈结果已回填台账（后续读取不再遍历）。
-	if got, ok := env.checksum["alice"].Get("user/keep.txt"); !ok || got != sidecarSum {
+	if got, ok := checksumGet(env.checksum["alice"], "default", "user/keep.txt"); !ok || got != sidecarSum {
 		t.Fatalf("自愈应回填台账，got %q ok=%v", got, ok)
 	}
 }
