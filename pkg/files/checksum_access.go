@@ -8,8 +8,6 @@ package files
 // （测试替身 / 未升级实现零回归）。
 
 import (
-	"maps"
-
 	"github.com/cocomhub/sproxy/pkg/checksum"
 )
 
@@ -35,15 +33,18 @@ func checksumSet(cs checksum.ChecksumStoreIface, vol, rel, sum string) {
 	cs.Set(rel, sum)
 }
 
-// checksumSnapshotForVolume 返回该卷的 `rel → checksum` 视图（旧键兜底合并）。
-func checksumSnapshotForVolume(cs checksum.ChecksumStoreIface, vol string) map[string]string {
-	v, ok := volumeKeyed(cs)
-	if !ok || vol == "" {
-		return cs.GetAll()
+// checksumGetter 返回「user 桶内 rel → checksum」的**逐条**取用器（未装配/未命中 ⇒ ""）。
+// 用于目录列举等热路径：只对**本目录条目**做 O(1) 台账查询，不拷贝全量快照。
+func checksumGetter(cs *checksum.ChecksumStore, vol string) func(rel string) string {
+	if cs == nil {
+		return func(string) string { return "" }
 	}
-	out := v.SnapshotLegacy()
-	maps.Copy(out, v.SnapshotInVolume(vol))
-	return out
+	return func(rel string) string {
+		if sum, ok := checksumGet(cs, vol, "user/"+rel); ok {
+			return sum
+		}
+		return ""
+	}
 }
 
 // checksumRename 同卷重命名卷维度键（不支持卷维度时回落旧方法）。

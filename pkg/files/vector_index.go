@@ -207,13 +207,15 @@ func (s *Service) SemanticSearch(q SearchQuery, vec []float32, topk int) (Semant
 		return SemanticResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	owner := normalizeOwner(q.Owner)
-	csMap := s.checksumSnapshot(context.Background(), owner)
+	cs := s.checksumStoreReady(context.Background(), owner)
 	hits := s.vector.Search(owner, vec, topk)
 	results := make([]SemanticHit, 0, len(hits))
 	for _, h := range hits {
 		fi := FileInfo{Name: h.Rel, ModTime: h.Entry.Rev}
-		if cs, ok := csMap["user/"+h.Rel]; ok {
-			fi.Checksum = cs
+		if cs != nil {
+			if sum, ok := checksumGet(cs, "", "user/"+h.Rel); ok {
+				fi.Checksum = sum
+			}
 		}
 		results = append(results, SemanticHit{File: fi, Score: h.Score})
 	}
