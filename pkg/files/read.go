@@ -255,10 +255,18 @@ func (s *Service) listRelForOwner(owner, subdir string) (string, bool) {
 // 目录条目为逻辑目录（可跨卷并存）只列一次、Volume 空。默认卷被 ACL 排除则不搜默认卷
 // （不泄默认卷遗留元数据）。
 func (s *Service) SearchFiles(w http.ResponseWriter, r *http.Request) {
+	// 分页为**可选**（审计 2026-10-29 P3）：仅在显式传 offset/limit 时启用（List 同语义，
+	// 默认 limit 1000 上限）；不传则保持「返回全部」的既有契约。
+	offset, limit := 0, 0
+	if r.URL.Query().Get("offset") != "" || r.URL.Query().Get("limit") != "" {
+		offset, limit = parsePagination(r)
+	}
 	res, err := s.Search(SearchQuery{
-		Owner: s.rt.actorOf(r),
-		Query: r.URL.Query().Get("q"),
-		Tag:   r.URL.Query().Get("tag"),
+		Owner:  s.rt.actorOf(r),
+		Query:  r.URL.Query().Get("q"),
+		Tag:    r.URL.Query().Get("tag"),
+		Offset: offset,
+		Limit:  limit,
 	})
 	if err != nil {
 		// 既有形状：搜索失败一律只回 files:[]（search 路径没有 404 分支）。
