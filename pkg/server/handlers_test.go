@@ -103,6 +103,11 @@ func TestHandlers_ChecksumStoreFor(t *testing.T) {
 		t.Fatal("checksumStoreFor(alice)=nil")
 	}
 	cs.Set("user/dir/f.txt", "sha256hex")
+	if f, ok := cs.(checksum.Flusher); ok {
+		if err := f.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+	}
 	if got, ok := h.checksumStoreFor("alice").Get("user/dir/f.txt"); !ok || got != "sha256hex" {
 		t.Fatalf("checksum 读写失败 got=%q ok=%v", got, ok)
 	}

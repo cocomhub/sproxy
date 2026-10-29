@@ -509,6 +509,9 @@ func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	cs := checksum.NewChecksumStore(openRootForTest(t, tmpDir), "checksums.json", nil)
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
+	if err := cs.Flush(); err != nil { // 写合并窗口内需显式 flush，才代表「已完成落盘」的崩溃语义
+		t.Fatalf("flush: %v", err)
+	}
 
 	// 模拟 crash: 创建一个 .tmp 残留文件（与新 storePath 一致：checksums.json.tmp）
 	tmpFile := filepath.Join(tmpDir, "checksums.json.tmp")

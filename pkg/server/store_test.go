@@ -37,6 +37,9 @@ func TestChecksumStore_DeletePrefix(t *testing.T) {
 	}
 
 	// 重新加载验证持久化
+	if err := cs.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	if _, ok := cs2.Get("dir1/a.txt"); ok {
 		t.Fatal("persisted file still has deleted prefix entry")
@@ -71,6 +74,9 @@ func TestChecksumStore_RecoverFromDisk(t *testing.T) {
 	cs.Set("k2", "v2")
 
 	// 新建实例从磁盘加载
+	if err := cs.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	all := cs2.GetAll()
 	if len(all) != 2 {

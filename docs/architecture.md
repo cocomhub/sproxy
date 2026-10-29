@@ -384,6 +384,12 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 **唯一列举入口**是装配层的 `VolumeViewLister.ListDirView`——本地卷与外部卷共用（键空间由
 `ResolveUserLocation` 统一），`ExternalList`/`ExternalVolumeSource` 已删除并硬禁。
 
+**读取与写入口径（2026-10-30）**：目录列举与搜索的 `checksum` 一律**逐条 O(1) 查台账**
+（`checksumGetter` / `checksumLookupFor`），不再每请求拷贝全量快照；台账写入经 **debounce
+合并**（`ChecksumStore.Set` 只更新内存 + 累计代际，1s 定时器合并为一次全量落盘，`Flush`/`Close`
+可强制落盘）——此前每条 `Set` 都全量重写 `checksums.json`，批量 N 文件退化为 O(N²) I/O。
+崩溃窗口 ≤ debounce，台账可由对象 meta 侧车重建（`RebuildChecksums`），故窗口内丢失可自愈。
+
 **机制（四条不变量）**：
 
 1. **卷维度**：缓存键恒为 `(卷名, 卷内相对路径)`；跨卷聚合是「对卷集合的派生遍历」，
