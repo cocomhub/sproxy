@@ -347,7 +347,7 @@ JSON body 批量形态（body 存在且 `files` 非空时优先）：
 
 | 状态码 | 含义 |
 |---|---|
-| 200 success | 接收成功（或幂等） |
+| 200 success | 接收成功（或幂等）。**持久化契约**：返回 200 时该块的校验值已落盘（每块一个 `chunk-<i>.sha256` sidecar），进程被 kill -9 后重启仍判为已接收（内容校验通过即可续传，无需重传） |
 | 200 should_retry | SHA-256 校验失败，客户端应重传 |
 | 400 | 缺字段 / chunk_checksum 不是 hex |
 | 404 | upload_id 不存在或已过期 |
