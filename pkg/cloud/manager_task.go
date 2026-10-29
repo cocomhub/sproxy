@@ -162,7 +162,7 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 		m.mu.Unlock()
 		return task, nil
 	}
-	m.running[realTask.ID] = true
+	m.markRunningLocked(realTask.ID)
 	// C1：**在启动 goroutine 之前**把「已被接管」落盘。否则排队中（等并发槽）的任务磁盘仍是
 	// 裸 `pending`，重启会被当成「从未启动的孤儿」转 failed（批量任务大面积不继续）。
 	realTask.Submitted = true
@@ -541,7 +541,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		// T3：先清 running 再释放——releaseAbandonedTaskScope 判据以 running 为唯一依据，
 		// 先清使释放时 running 已清（goroutine 已退 ⇒ 配额归零）；若先释放则判据见
 		// running 为真跳过，释放点错过（本次泄漏窗口 CI run 35419872637 根治关键）。
-		delete(m.running, task.ID)
+		m.clearRunningLocked(task.ID)
 		delete(m.cancelFuncs, task.ID)
 		m.releaseAbandonedTaskScope(task)
 		m.mu.Unlock()
@@ -552,7 +552,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 与"已退出"。必须在任何可能的写盘操作前设置。
 	m.mu.Lock()
 	m.cancelFuncs[task.ID] = cancel
-	m.running[task.ID] = true
+	m.markRunningLocked(task.ID)
 	m.mu.Unlock()
 
 	// 任务进入终态后刷新所属组状态，保证持久化的组状态不滞后于子任务实际进展
@@ -1101,7 +1101,7 @@ func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx con
 			"task_id", task.ID, "url", task.URL)
 		//nolint:gosec // G118: 断线后异步继续需要独立 context
 		m.mu.Lock()
-		m.running[task.ID] = true
+		m.markRunningLocked(task.ID)
 		*handedOff = true
 		m.mu.Unlock()
 		m.wg.Add(1)

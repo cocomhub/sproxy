@@ -202,7 +202,7 @@ func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfile
 		m.mu.Lock()
 		task, exists := m.tasks[taskID]
 		if exists && task.Status == "pending" && !m.running[taskID] {
-			m.running[taskID] = true
+			m.markRunningLocked(taskID)
 			task.Submitted = true // C1：排队中也要可恢复（见 CloudTask.Submitted）
 		} else {
 			task = nil

@@ -17,22 +17,44 @@ import (
 	"time"
 )
 
+// markRunningLocked 置 running 标记并创建「已停止」通知通道（调用方必须持 m.mu 写锁）。
+func (m *CloudDownloadManager) markRunningLocked(taskID string) {
+	m.running[taskID] = true
+	if _, ok := m.runningDone[taskID]; !ok {
+		m.runningDone[taskID] = make(chan struct{})
+	}
+}
+
+// clearRunningLocked 清除 running 并关闭通知通道（幂等；调用方必须持 m.mu 写锁）。
+func (m *CloudDownloadManager) clearRunningLocked(taskID string) {
+	delete(m.running, taskID)
+	if ch, ok := m.runningDone[taskID]; ok {
+		close(ch)
+		delete(m.runningDone, taskID)
+	}
+}
+
 // waitTaskStopped 等待任务的下载 goroutine 完全退出（running 标记清除）。
 // 最多等待 timeout。返回 false 表示超时仍未退出。
 // 调用方不得持有 m.mu（本函数内部需取读锁）。
 func (m *CloudDownloadManager) waitTaskStopped(taskID string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		m.mu.RLock()
-		running := m.running[taskID]
-		m.mu.RUnlock()
-		if !running {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(100 * time.Millisecond)
+	m.mu.RLock()
+	done := m.runningDone[taskID]
+	running := m.running[taskID]
+	m.mu.RUnlock()
+	if !running {
+		return true
+	}
+	if done == nil {
+		// 兼容：running 为真但没有通知通道（异常装配）⇒ 退化为一次读判断，
+		// 不引入墙钟轮询（调用方仍有自己的超时语义）。
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -66,7 +88,7 @@ func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prevStatus,
 			stored.UpdatedAt, stored.ExpiresAt = prevUpdatedAt, prevExpiresAt
 		}
 	}
-	delete(m.running, taskID)
+	m.clearRunningLocked(taskID)
 
 	// 补充释放：闭合并发放弃留下的「释放被推迟给不存在的 goroutine」窗口（独立复核发现）。
 	// ResumeTask 在「置 pending/running 并解锁」与「重新取锁回滚」（本函数）之间不持锁；窗口中
@@ -142,7 +164,7 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	// UpdatedAt 在 running 置位后更新（值语义）：waitTaskStopped 以 running 为终态信号，
 	// 先置 running 保证 watcher 一旦观察到即可视为本次 resume 已生效；UpdatedAt 紧随写入。
 	task.Status = "pending"
-	m.running[taskID] = true
+	m.markRunningLocked(taskID)
 	task.Error = ""
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
