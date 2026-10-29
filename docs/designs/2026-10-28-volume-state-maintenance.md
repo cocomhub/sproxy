@@ -497,7 +497,7 @@ per-volume 映射），验证多卷同名场景；再评估 A 作为「台账只
 
 #### 15.1.2 已实施（2026-10-29）
 
-- **存储**：`pkg/checksum` 新增卷维度键 `<vol> <rel>` + `VolumeKeyedStore` 可选接口
+- **存储**：`pkg/checksum` 新增卷维度键 `<vol>\x00<rel>` + `VolumeKeyedStore` 可选接口
   （`SetInVolume/GetInVolume/DeleteInVolume/RenameInVolume/SetManyInVolume/SnapshotInVolume/
   SnapshotLegacy`）；旧无卷键**保留为只读兜底**（升级前的台账仍可读，不自动迁移）。
 - **写入全部带卷维度**：`recordUploadSuccess`（单次/去重/`WriteTarget`）、`RecordBypassWrite`/
