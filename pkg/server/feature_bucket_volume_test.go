@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 )
 
@@ -123,6 +124,11 @@ func helperMetaDefaultVolumeOnlyChecksum(t *testing.T) {
 		t.Fatal("文件不应落 disk2（prefer-default + dirB 容量足）")
 	}
 	// checksum 落默认卷 dirB/alice/meta/checksums.json。
+	if f, ok := h.checksumStoreFor("alice").(checksum.Flusher); ok {
+		if err := f.Flush(); err != nil {
+			t.Fatalf("flush checksum: %v", err)
+		}
+	}
 	csDefault := filepath.Join(dirB, "alice", "meta", "checksums.json")
 	data, err := os.ReadFile(csDefault)
 	if err != nil {

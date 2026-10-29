@@ -66,7 +66,12 @@ func TestService_ChecksumRebuildFromMeta(t *testing.T) {
 	const sidecarSum = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"
 	writeValidMetaSidecar(t, env, "alice", "user/keep.txt", sidecarSum)
 
-	// 模拟台账丢失：删台账文件 + 丢缓存 store（下次访问重新加载 = 空台账）。
+	// 模拟台账丢失：先 flush（写合并后有 debounce 窗口）再删台账文件，并丢缓存 store。
+	if cs := env.checksum["alice"]; cs != nil {
+		if err := cs.Flush(); err != nil {
+			t.Fatalf("flush 台账: %v", err)
+		}
+	}
 	tnt := env.tenants["alice"]
 	if err := tnt.Root().Remove("meta/checksums.json"); err != nil {
 		t.Fatalf("删除台账: %v", err)
@@ -99,6 +104,11 @@ func TestService_ChecksumRebuild_NoMetaNoCrash(t *testing.T) {
 
 	body := []byte("no-meta")
 	env.upload(t, "alice", "x.txt", body, sha256Hex(body), 0)
+	if cs := env.checksum["alice"]; cs != nil {
+		if err := cs.Flush(); err != nil {
+			t.Fatalf("flush 台账: %v", err)
+		}
+	}
 	tnt := env.tenants["alice"]
 	if err := tnt.Root().Remove("meta/checksums.json"); err != nil {
 		t.Fatalf("删除台账: %v", err)

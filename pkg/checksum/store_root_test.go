@@ -37,6 +37,9 @@ func TestChecksumStore_EncryptedVolumeCiphertextAndReload(t *testing.T) {
 	const marker = "user/confidential-name.txt"
 	cs := NewChecksumStore(root, rel, stateTestLogger())
 	cs.Set(marker, "deadbeef")
+	if err := cs.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
 
 	// 落盘必须是密文：内容不得含台账键（用户可见文件名）。
 	raw, err := os.ReadFile(filepath.Join(rootAbsDir(t, root), filepath.ToSlash(rel)))
@@ -57,6 +60,9 @@ func TestChecksumStore_EncryptedVolumeCiphertextAndReload(t *testing.T) {
 	}
 	// 继续维护（Delete）后再次重载一致。
 	cs2.Delete(marker)
+	if err := cs2.Flush(); err != nil {
+		t.Fatalf("Flush after delete: %v", err)
+	}
 	cs3 := NewChecksumStore(root, rel, stateTestLogger())
 	if _, ok := cs3.Get(marker); ok {
 		t.Fatal("Delete 后重载不应命中")

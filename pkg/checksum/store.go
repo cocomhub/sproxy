@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -52,6 +54,12 @@ type VolumeKeyedStore interface {
 
 var _ VolumeKeyedStore = (*ChecksumStore)(nil)
 
+// Flusher 是**可选扩展**：立即把写合并窗口内的改动落盘（未实现 ⇒ 调用方无需处理，
+// 定时器到期/Close 时仍会落盘）。
+type Flusher interface{ Flush() error }
+
+var _ Flusher = (*ChecksumStore)(nil)
+
 // ChecksumStore 维护「文件名 → SHA-256」台账并落盘到**租户卷内的 `<meta>/checksums.json`**，
 // 供 upload/download/delete/rename 操作复用。
 //
@@ -66,6 +74,21 @@ type ChecksumStore struct {
 	rel       string            // 卷内相对路径（生产 = "meta/checksums.json"）
 	checksums map[string]string // filename -> sha256 hex
 	logger    *slog.Logger
+
+	// 落盘合并（写放大治理）：`Set` 只更新内存 + 递增 dirtyGen，由 debounce 定时器
+	// **合并为一次**全量落盘。此前每条 `Set` 都全量重写 JSON ⇒ 批量 N 文件 = O(N²) I/O
+	// （10 万条台账 ≈ 6MB/次）。崩溃窗口 ≤ debounce；台账可由对象 meta 重建
+	// （`RebuildChecksums`），故窗口内丢失可自愈。
+	dirtyGen  atomic.Uint64
+	savedGen  atomic.Uint64
+	debounce  time.Duration
+	writeSnap func(data []byte) error // 落盘实现（构造注入；测试可计数）
+
+	qmu      sync.Mutex
+	timer    *time.Timer
+	closed   bool
+	lastOp   string
+	lastArgs []any
 }
 
 // volumeKeySep 是卷维度复合键的分隔符（NUL：卷名与 rel 都不含，无歧义）。
@@ -195,13 +218,76 @@ func (cs *ChecksumStore) SnapshotInVolume(vol string) map[string]string {
 }
 
 // persist 落盘（失败重试一次并记日志；与 Set/Rename 的既有重试语义一致）。
+// defaultSaveDebounce 是落盘合并窗口：窗口内的多次写只落盘一次（崩溃最多丢窗口内的
+// checksum 记录，可由对象 meta 重建）。
+const defaultSaveDebounce = time.Second
+
 func (cs *ChecksumStore) persist(op string, args ...any) {
+	cs.dirtyGen.Add(1)
+	cs.scheduleSave(op, args...)
+}
+
+// scheduleSave 在首次写时挂一个 debounce 定时器；窗口内的后续写只累加 dirtyGen
+// （不再排新定时器 ⇒ 固定窗口合并，避免持续写导致永不落盘）。
+func (cs *ChecksumStore) scheduleSave(op string, args ...any) {
+	cs.qmu.Lock()
+	defer cs.qmu.Unlock()
+	if cs.closed || cs.timer != nil {
+		return
+	}
+	cs.lastOp, cs.lastArgs = op, args
+	cs.timer = time.AfterFunc(cs.debounce, cs.flushPending)
+}
+
+func (cs *ChecksumStore) flushPending() {
+	cs.qmu.Lock()
+	cs.timer = nil
+	closed := cs.closed
+	op, args := cs.lastOp, cs.lastArgs
+	cs.qmu.Unlock()
+	if closed || cs.dirtyGen.Load() <= cs.savedGen.Load() {
+		return
+	}
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, append([]any{"op", op}, args...)...)
 		if retryErr := cs.save(); retryErr != nil {
 			cs.logger.Error(retryPersistFailed, append([]any{"op", op}, args...)...)
 		}
 	}
+}
+
+// Flush 立即落盘（有待持久化改动时）；供关键路径/测试显式同步。
+func (cs *ChecksumStore) Flush() error {
+	cs.qmu.Lock()
+	if cs.timer != nil {
+		cs.timer.Stop()
+		cs.timer = nil
+	}
+	cs.qmu.Unlock()
+	if cs.dirtyGen.Load() <= cs.savedGen.Load() {
+		return nil
+	}
+	return cs.save()
+}
+
+// Close 停止合并定时器并做最终落盘（幂等）。关闭后的写仍更新内存但不再持久化
+// （调用方应在生命周期结束时 Close，例如 Service/租户卸载）。
+func (cs *ChecksumStore) Close() error {
+	cs.qmu.Lock()
+	if cs.closed {
+		cs.qmu.Unlock()
+		return nil
+	}
+	cs.closed = true
+	if cs.timer != nil {
+		cs.timer.Stop()
+		cs.timer = nil
+	}
+	cs.qmu.Unlock()
+	if cs.dirtyGen.Load() <= cs.savedGen.Load() {
+		return nil
+	}
+	return cs.save()
 }
 
 // maxChecksumStoreBytes 是台账读取上界（防注入超大 JSON 的 OOM；每条 ~70B ⇒ 64MiB ≈ 90 万文件）。
@@ -217,7 +303,9 @@ func NewChecksumStore(root *storage.Root, rel string, logger *slog.Logger) *Chec
 		rel:       rel,
 		checksums: make(map[string]string),
 		logger:    slogutil.Default(logger),
+		debounce:  defaultSaveDebounce,
 	}
+	cs.writeSnap = cs.writeSnapshotToRoot
 	if root == nil {
 		cs.logger.Warn("checksum 台账未装配卷句柄，将只读空台账且不可持久化")
 		return cs
@@ -283,16 +371,11 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 	cs.checksums[filename] = checksum
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "set", "file_name", filename, "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error(retryPersistFailed, "op", "set", "file_name", filename, "error", retryErr)
-		}
-	}
+	cs.persist("set", "file_name", filename)
 }
 
-// SetMany 批量写入 checksum 记录并**只持久化一次**（一次性导入/重建用：逐条 Set 会产生 N 次
-// 全量 JSON 重写）。空 map 为空操作。
+// SetMany 批量写入 checksum 记录（一次性导入/重建用）。落盘与其他写方法一样经 debounce 合并，
+// 连续 Set 不再逐条全量重写 JSON。空 map 为空操作。
 func (cs *ChecksumStore) SetMany(entries map[string]string) {
 	if len(entries) == 0 {
 		return
@@ -301,12 +384,7 @@ func (cs *ChecksumStore) SetMany(entries map[string]string) {
 	maps.Copy(cs.checksums, entries)
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "set_many", "count", len(entries), "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error(retryPersistFailed, "op", "set_many", "count", len(entries), "error", retryErr)
-		}
-	}
+	cs.persist("set_many", "count", len(entries))
 }
 
 // Delete 删除指定文件的 checksum 记录并持久化。
@@ -315,12 +393,7 @@ func (cs *ChecksumStore) Delete(filename string) {
 	delete(cs.checksums, filename)
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "delete", "file_name", filename, "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error(retryPersistFailed, "op", "delete", "file_name", filename, "error", retryErr)
-		}
-	}
+	cs.persist("delete", "file_name", filename)
 }
 
 // Rename 将一条 checksum 记录从 from 路径迁移到 to 路径并持久化。
@@ -338,12 +411,7 @@ func (cs *ChecksumStore) Rename(from, to string) {
 	cs.checksums[to] = v
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "rename", "from", from, "to", to, "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error(retryPersistFailed, "op", "rename", "from", from, "to", to, "error", retryErr)
-		}
-	}
+	cs.persist("rename", "from", from, "to", to)
 }
 
 // DeletePrefix 删除指定前缀的所有 checksum 记录（用于目录删除）。
@@ -356,12 +424,7 @@ func (cs *ChecksumStore) DeletePrefix(prefix string) {
 	}
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "deletePrefix", "prefix", prefix, "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error(retryPersistFailed, "op", "deletePrefix", "prefix", prefix, "error", retryErr)
-		}
-	}
+	cs.persist("delete_prefix", prefix)
 }
 
 // Len 返回台账条目数（O(1)；用于「是否需要自愈重建」的判空，避免 GetAll 全量拷贝）。
@@ -387,6 +450,7 @@ func (cs *ChecksumStore) save() error {
 	cs.saveMu.Lock()
 	defer cs.saveMu.Unlock()
 
+	gen := cs.dirtyGen.Load()
 	cs.mu.RLock()
 	snapshot := make(map[string]string, len(cs.checksums))
 	maps.Copy(snapshot, cs.checksums)
@@ -396,17 +460,27 @@ func (cs *ChecksumStore) save() error {
 	if err != nil {
 		return err
 	}
+	if cs.root != nil {
+		if dir := filepath.ToSlash(filepath.Dir(cs.rel)); dir != "." && dir != "" {
+			if err := cs.root.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
+		}
+	}
+	if err := cs.writeSnap(data); err != nil {
+		return err
+	}
+	// 仅当期间没有新写入时才把已持久化代际推进到本次快照的代际（否则保留 dirty 待下次合并）。
+	cs.savedGen.Store(gen)
+	return nil
+}
+
+// writeSnapshotToRoot 是默认落盘实现：经卷句柄写 tmp（卷决定是否加密）+ 原子替换。
+func (cs *ChecksumStore) writeSnapshotToRoot(data []byte) error {
 	if cs.root == nil {
 		return errors.New("checksum 台账未装配卷句柄（root 为 nil）")
 	}
-	if dir := filepath.ToSlash(filepath.Dir(cs.rel)); dir != "." && dir != "" {
-		if err := cs.root.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-	}
 	tmpRel := cs.rel + ".tmp"
-	// 经卷句柄写（卷决定是否加密）+ tmp→原子替换（AtomicRename 覆盖 Windows 目标已存在语义，
-	// 且自带短退避重试；故不再保留历史上的「重命名失败就直写」回退——失败即真实失败）。
 	w, werr := cs.root.OpenFileEncrypted(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if werr != nil {
 		return werr
