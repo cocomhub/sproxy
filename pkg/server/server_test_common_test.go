@@ -14,6 +14,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"gopkg.in/yaml.v3"
 )
 
 // testKey 返回一个 64 字符 hex 密钥（32 字节）给测试使用。
@@ -137,4 +138,24 @@ func withTunnelKeyCtx(key []byte, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
 	})
+}
+
+// testReaderFP 是跨节点只读面测试用的假指纹（通用占位，非真实凭据）。
+// 与 pkg/server/config 测试内的同名常量各自独立定义：测试常量不跨包共享，
+// 避免为了一个字符串把测试绑到另一个包的内部命名。
+const testReaderFP = "sha256:3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708"
+
+// mapProvider 将 map[string]any 转换为 provider.Provider 用于测试
+// （与 pkg/server/config 测试内的同名类型各自独立：测试替身不跨包共享，
+// 避免为一个 15 行 helper 给所有子 module 增加 yaml 依赖）。
+type mapProvider struct {
+	m map[string]any
+}
+
+func (p mapProvider) Unmarshal(obj any) error {
+	data, err := yaml.Marshal(p.m)
+	if err != nil {
+		return err
+	}
+	return yaml.Unmarshal(data, obj)
 }

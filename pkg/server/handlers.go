@@ -731,7 +731,7 @@ func (h *Handlers) uploadVolumeRootsFor(owner string) map[string]string {
 
 // quotaBucketNames 是参与配额归集的功能桶名（对应租户根下的物理桶；meta 桶的配额
 // 参与归集与否由任务 3 的扫描开启决定，此处先装配其子 Scope 供 reconciliation 使用）。
-var quotaBucketNames = []string{"user", "cloud", "archive", "chunk", "version", "meta"}
+var quotaBucketNames = storage.QuotaBucketNames()
 
 // ensureTenantQuotaLocked 确保 owner 的租户配额 Scope、功能桶子 Scope 与 bucket_limits
 // 路径子 Scope 已创建（调用方须持 tenantMu）。首次访问按 owner 在 globalPool 下挂载

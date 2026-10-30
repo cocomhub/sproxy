@@ -26,21 +26,6 @@ import (
 // 注入，恢复（同 peer 后续拨号成功）自动发恢复通知。
 const SourceNATFailure = "nat_failure"
 
-// AlertRule 是告警规则（source 匹配 + threshold + channels）。
-type AlertRule struct {
-	Source    string   `yaml:"source" mapstructure:"source"`       // disk_watermark / volume_degraded / sync_failed / login_locked / nat_failure / checksum_mismatch
-	Threshold int      `yaml:"threshold" mapstructure:"threshold"` // 百分比（disk_watermark 用）
-	Channels  []string `yaml:"channels" mapstructure:"channels"`
-}
-
-// AlertConfig 是告警引擎配置（config.go 引用）。
-type AlertConfig struct {
-	Enabled bool        `yaml:"enabled" mapstructure:"enabled"`
-	Rules   []AlertRule `yaml:"rules" mapstructure:"rules"`
-	// PollInterval 是磁盘水位轮询间隔（默认 60s；0 = 关闭轮询只走事件驱动）。
-	PollInterval time.Duration `yaml:"poll_interval" mapstructure:"poll_interval"`
-}
-
 // AlertEngine 是告警引擎。
 type AlertEngine struct {
 	mu        sync.Mutex

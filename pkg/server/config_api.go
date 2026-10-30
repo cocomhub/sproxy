@@ -11,6 +11,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
 // configMu 保护 rebuildLogger 和 updateConfigHandler 的并发访问。
@@ -96,7 +98,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		CloudMaxConcurrent: cfg.CloudMaxConcurrent,
 		// B1：可观测须暴露**实际生效值**（manager 侧归一 TransferConcurrency<1→MaxConcurrent），
 		// 否则默认配置下返回 0（配置结构零值）而实际是 3——与文档/注释自相矛盾。
-		CloudTransferConcurrency: transferConcurrencyEffective(cfg),
+		CloudTransferConcurrency: config.TransferConcurrencyEffective(cfg),
 		CloudSyncThreshold:       cfg.CloudSyncThreshold,
 		HubEnabled:               cfg.Hub.Enabled,
 		TLSEnabled:               cfg.TLS.Enabled,

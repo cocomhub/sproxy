@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package config
 
 import (
 	"bytes"
@@ -109,7 +109,7 @@ func TestMeshReadersConfig_SetDefaultsNormalizesFingerprint(t *testing.T) {
 }
 
 func TestMeshReadersConfig_ParseVolumeACL(t *testing.T) {
-	acl := parseVolumeACL(&VolumeACLConfig{
+	acl := ParseVolumeACL(&VolumeACLConfig{
 		Mode:        VolumeACLAllow,
 		Owners:      []string{"alice"},
 		MeshReaders: []VolumeMeshReaderConfig{{Node: "nodeA", Fingerprint: strings.ToUpper(testReaderFP), Owner: "alice"}},
@@ -129,7 +129,7 @@ func TestMeshReadersConfig_ParseVolumeACL(t *testing.T) {
 	}
 }
 
-// TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint 表驱动钉住 parseVolumeACL 的
+// TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint 表驱动钉住 ParseVolumeACL 的
 // 指纹归一：接受纯 hex / 大小写 / 可省前缀 / 首尾空白，输出恒为规范形 "sha256:<64 小写 hex>"。
 //
 // 该归一化是「畸形指纹唯一防线」的下游一环：pkg/volume 的 normalizeFingerprint 只做
@@ -149,7 +149,7 @@ func TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			acl := parseVolumeACL(&VolumeACLConfig{
+			acl := ParseVolumeACL(&VolumeACLConfig{
 				Mode:        VolumeACLAllow,
 				Owners:      []string{"alice"},
 				MeshReaders: []VolumeMeshReaderConfig{{Node: "nodeA", Fingerprint: tc.in, Owner: "alice"}},
@@ -168,7 +168,7 @@ func TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint(t *testing.T) {
 // **丢弃该条目**而非降级保留（降级保留一个语义不明的字符串会在未来改动中被误用），且丢弃
 // **不静默**——每条被丢弃的条目都留 Warn 日志（本项目「禁止静默失败」原则）。
 //
-// 断言对应审查要求：① 畸形条目不在结果里；② 不 panic（直接调 parseVolumeACL，不经
+// 断言对应审查要求：① 畸形条目不在结果里；② 不 panic（直接调 ParseVolumeACL，不经
 // Config.Validate——本函数在生产路径上畸形指纹已被 Validate 响亮拒绝，此处是装配层兜底；
 // 若实现改为 panic/fatal 本用例即失败）；③ 同批合法条目仍在 → 证明是「丢弃单条」而非
 // 「整体清空」；④ 恰好 2 条 Warn（3 条中 2 条畸形）且含 mesh_readers/指纹非法关键词 →
@@ -178,7 +178,7 @@ func TestMeshReadersConfig_ParseVolumeACL_DropsMalformed(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	notHex := "sha256:" + strings.Repeat("z", 64) // 长度合法但非 hex
-	acl := parseVolumeACL(&VolumeACLConfig{
+	acl := ParseVolumeACL(&VolumeACLConfig{
 		Mode:   VolumeACLAllow,
 		Owners: []string{"alice"},
 		MeshReaders: []VolumeMeshReaderConfig{
@@ -320,7 +320,7 @@ func TestMeshReadersConfig_ParseVolumeACL_CarriesScope(t *testing.T) {
 		{volume.MeshScopeRW, volume.MeshScopeRW},
 	}
 	for _, tc := range cases {
-		acl := parseVolumeACL(&VolumeACLConfig{
+		acl := ParseVolumeACL(&VolumeACLConfig{
 			Mode: VolumeACLDeny,
 			MeshReaders: []VolumeMeshReaderConfig{
 				{Node: "nodeA", Fingerprint: testReaderFP, Owner: "alice", Scope: tc.in},
@@ -351,7 +351,7 @@ func TestMeshReadersConfig_ParseVolumeACL_CarriesScope(t *testing.T) {
 // 「降级保留一个语义不明的权限范围」是最危险的选项（未来改动可能把它当有权限使用）。
 func TestMeshReadersConfig_ParseVolumeACLDropsInvalidScope(t *testing.T) {
 	var buf bytes.Buffer
-	acl := parseVolumeACL(&VolumeACLConfig{
+	acl := ParseVolumeACL(&VolumeACLConfig{
 		Mode: VolumeACLDeny,
 		MeshReaders: []VolumeMeshReaderConfig{
 			{Node: "bad", Fingerprint: testReaderFP, Owner: "alice", Scope: "rwx"},

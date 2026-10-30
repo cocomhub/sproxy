@@ -29,9 +29,9 @@ const auditArchivePrefixLiteral = "audit-archive"
 
 // auditArchivePrefixAllowed 是允许出现该前缀的文件（相对 module root，正斜杠）。
 var auditArchivePrefixAllowed = map[string]string{
-	"pkg/audit/archive.go":       "archiver 默认前缀常量的唯一定义处（DefaultArchivePrefix）",
-	"pkg/server/routes_setup.go": "PrefixFS 装配点（复用 pkg/audit 常量）",
-	"pkg/server/config.go":       "配置字段文档注释（说明专用性与 at-rest 口径）",
+	"pkg/audit/archive.go":        "archiver 默认前缀常量的唯一定义处（DefaultArchivePrefix）",
+	"pkg/server/routes_setup.go":  "PrefixFS 装配点（复用 pkg/audit 常量）",
+	"pkg/server/config/config.go": "配置字段文档注释（说明专用性与 at-rest 口径）",
 }
 
 // TestR41_AuditArchivePrefixIsolation 断言该前缀只出现在审计归档装配点。

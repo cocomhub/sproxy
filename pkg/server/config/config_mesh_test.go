@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package config
 
 // config_mesh_test.go 钉住服务端 **A 侧 mesh 客户端配置**（`mesh` 段；Y 二期）的启动期校验与默认值。
 //

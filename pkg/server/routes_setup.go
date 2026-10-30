@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -419,7 +420,7 @@ func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 	if h.scheduler == nil {
 		h.scheduler = NewScheduler(log.With("component", "scheduler"))
 	}
-	h.scheduler.SetMaintenanceWindow(parseMaintenanceWindow(cfg.Scheduler))
+	h.scheduler.SetMaintenanceWindow(config.ParseMaintenanceWindow(cfg.Scheduler))
 	// Register 失败仅可能由编程错误（重名/间隔<=0/缺 Run）触发——注册即 fatal：
 	// 任务配置是静态装配，静默跳过会掩盖装配 bug（设计文档：装配层 Error 日志后跳过）。
 	mustRegister := func(t Task) {

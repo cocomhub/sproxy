@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // RateLimiter implements a sliding-window rate limiter using only the stdlib.
@@ -63,13 +64,6 @@ type RateLimiter struct {
 
 	// clientIPFn 是 per-IP 桶键解析函数（装配层注入；nil = normalizeRemoteIP 默认，零回归）。
 	clientIPFn func(*http.Request) string
-}
-
-// EndpointLimit 是 per-endpoint 限流规则（rate_limit.endpoints 段：path → {limit, window}）。
-// Limit<=0 / Window<=0 沿用 NewRateLimiter 的默认化（归 5 / 1s，与 UpdateConfig 一致）。
-type EndpointLimit struct {
-	Limit  int           `yaml:"limit" mapstructure:"limit"`
-	Window time.Duration `yaml:"window" mapstructure:"window"`
 }
 
 // endpointRule 是单条端点规则的滑动窗口状态（含独立时间戳队列）。
@@ -439,28 +433,6 @@ func (rl *RateLimiter) ReleaseConcurrent() {
 	}
 }
 
-// parseIPNets 把配置的 IP/CIDR 列表解析为 *net.IPNet 列表（供运行时匹配）。
-// 非法条目（Validate 已拒绝）返回 nil。纯 IP 按 /32、/128 归一（与 validateIPList 一致）。
-func parseIPNets(list []string) []*net.IPNet {
-	nets := make([]*net.IPNet, 0, len(list))
-	for _, s := range list {
-		if _, ipnet, err := net.ParseCIDR(s); err == nil {
-			nets = append(nets, ipnet)
-			continue
-		}
-		ip := net.ParseIP(s)
-		if ip == nil {
-			continue
-		}
-		bits := 32
-		if ip.To4() == nil {
-			bits = 128
-		}
-		nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
-	}
-	return nets
-}
-
 // inAnyNet 判定 ip 是否命中任一网段（网段为空 → 恒 false，由调用方先判空短路）。
 func inAnyNet(ip net.IP, nets []*net.IPNet) bool {
 	for _, n := range nets {
@@ -520,22 +492,7 @@ func (h *Handlers) clientIPFromRequest(r *http.Request) string {
 	if cfg == nil {
 		return normalizeRemoteIP(r.RemoteAddr)
 	}
-	return resolveClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), parseIPNets(cfg.Auth.TrustedProxies))
-}
-
-// AllowIPsCoverLoopback 判定 allow_ips 是否同时覆盖 IPv4 与 IPv6 回环（启动告警辅助：
-// 设计文档风险 2——回环也须在白名单，配漏 127.0.0.1/::1 时打印告警防运维自锁）。
-func AllowIPsCoverLoopback(allowIPs []string) bool {
-	hasV4, hasV6 := false, false
-	for _, n := range parseIPNets(allowIPs) {
-		if n.Contains(net.ParseIP("127.0.0.1")) {
-			hasV4 = true
-		}
-		if n.Contains(net.ParseIP("::1")) {
-			hasV6 = true
-		}
-	}
-	return hasV4 && hasV6
+	return resolveClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), netutil.ParseIPNets(cfg.Auth.TrustedProxies))
 }
 
 // ipGate 是认证前 IP 门（auth.allow_ips）：
@@ -553,7 +510,7 @@ func (h *Handlers) ipGate(next http.Handler) http.Handler {
 			return
 		}
 		ip := h.clientIPFromRequest(r)
-		if !inAnyNet(net.ParseIP(ip), parseIPNets(cfg.Auth.AllowIPs)) {
+		if !inAnyNet(net.ParseIP(ip), netutil.ParseIPNets(cfg.Auth.AllowIPs)) {
 			h.log().WarnContext(r.Context(), "auth: ip not allowed",
 				"remote", r.RemoteAddr, "ip", ip, "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "forbidden: ip not allowed", http.StatusForbidden)

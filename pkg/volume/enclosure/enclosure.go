@@ -38,7 +38,7 @@ import (
 )
 
 // TypeEnclosure 是**拒绝判据的单一事实源**（唯一用途），**不是可写卷类型**：`volumes[].type:
-// enclosure` 在三处显式拒收——配置校验（pkg/server/config_validate.go.validateVolumeIdentity）、
+// enclosure` 在三处显式拒收——配置校验（pkg/server/config/validate.go.validateVolumeIdentity）、
 // 建卷 API（pkg/server/user_volume_api.go）、存量记录的恢复路径
 // （cmd/sproxy/user_volume_restore.go，拒绝 + Warn）；无任何其他引用（无日志/诊断/构造用途）。
 // 唯一声明形态是「wrapper 类型 + `extra.source`」（见 IsDeclared）——本常量不经

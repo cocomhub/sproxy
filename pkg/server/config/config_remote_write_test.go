@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package config
 
 // config_remote_write_test.go 钉住写面配置的**启动期校验**（fail-fast）与零值兜底。
 //

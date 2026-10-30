@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/llmgate"
 )
@@ -30,17 +29,6 @@ const maxAdviseRunes = 1000
 type AIAdvisor struct {
 	gate   *llmgate.Client // nil = 未启用（enabled=false 或无 key）
 	logger *slog.Logger
-}
-
-// AIAdvisorConfig 是 notify.ai_advisor 配置段（config.go 引用）。
-type AIAdvisorConfig struct {
-	Enabled   bool          `yaml:"enabled" mapstructure:"enabled"`         // 默认 false 零回归
-	Provider  string        `yaml:"provider" mapstructure:"provider"`       // openai | anthropic（默认 openai）
-	BaseURL   string        `yaml:"base_url" mapstructure:"base_url"`       // 空 = provider 默认（测试/自建网关可配）
-	APIKeyRef string        `yaml:"api_key_ref" mapstructure:"api_key_ref"` // 环境变量名，如 SPROXY_OPENAI_API_KEY
-	APIKey    string        `yaml:"-" mapstructure:"-"`                     // 装配层解析后的 key（不落 yaml/日志）
-	Model     string        `yaml:"model" mapstructure:"model"`             // 空 = provider 默认
-	Timeout   time.Duration `yaml:"timeout" mapstructure:"timeout"`         // 默认 10s
 }
 
 // NewAIAdvisor 构造告警建议器。enabled=false 或 api_key 解析为空 → gate=nil（恒空，零回归）。

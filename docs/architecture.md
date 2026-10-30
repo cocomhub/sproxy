@@ -586,3 +586,64 @@ B 类，TTL 就够。*
 App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不能靠「我删的时候记得清」。* A 类不缓存
 （每次现取）；B 类 TTL+自愈；C 类需重扫（secretdata 索引 `loadIndex` 只在挂载时跑一次；
 多进程/外部改动收敛由设计文档 §6 的裁定覆盖）；D 类靠对账。
+
+## 作用域分层（Global / Server / Assembly）
+
+> 2026-10-30 起生效（server 治理 S1）。解决的是「**命名声称的作用域**与**实际消费者**不一致」：
+> `pkg/` 下曾有约 40% 的代码只有 `cmd/sproxy` 可达，却与真正的通用能力混在同一命名空间。
+
+### 三层定义
+
+| 作用域 | 判据 | 命名空间 | 允许导入 |
+|---|---|---|---|
+| **Global** | 与进程无关的能力；`sproxy` / `sclient` / `sproxy-mcp` / tools 任一可消费 | `pkg/<capability>` | 只能导 Global |
+| **Server** | 只在 sproxy 服务端进程内有意义 | `pkg/server/<capability>` | Global + Server（**不得**导装配根） |
+| **Assembly** | 只做装配、路由注册与生命周期 | `pkg/server`（根包，精确匹配） | 全部 |
+| **Private** | 单个二进制私有 | `cmd/<bin>/internal/...` | 该二进制子树 |
+
+### 命名规则（新增包必须遵守）
+
+1. 被 `cmd/sclient` 或 `cmd/sproxy-mcp` 可达 ⇒ 才可放 `pkg/<capability>`（Global）；
+2. 只被 `cmd/sproxy` 可达 ⇒ 放 `pkg/server/<capability>`；
+3. 两个二进制都可达 ⇒ Global，且**不得**反向依赖任何 Server 包；
+4. 只服务单个二进制的 ⇒ `cmd/<bin>/internal/<capability>`。
+
+反例（曾出现/差点出现）：`pkg/config`（实际是 server 配置 schema）、`pkg/httpapi`
+（HTTP 面只有服务端有）、`pkg/service/*`（`service` 是层名不是能力名）。
+
+### 可执行边界（门禁）
+
+| 门禁 | 断言 |
+|---|---|
+| **R1**（`arch_test.go`） | 已登记包不得导入层级更高的已登记包 |
+| **R2** | 子包只允许父域子树与装配层导入（`pkg/server/config` 登记为 `pkg/server` 子包） |
+| **R4** | `pkg/**` 中不在 `pkg/server/**` 的包不得导入 `pkg/server/**`（Global 不依赖 Server） |
+| **R6**（`server_scope_gate_test.go`） | `pkg/server/**` 子包不得导入装配根 `pkg/server`；且每个子包必须在 `Levels` 登记 |
+
+依赖方向固定为单向：
+
+```
+pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
+```
+
+### 当前落地状态（S1：配置切片）
+
+- `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
+  及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
+  `IsLoopbackHost`、`ValidateIPList`）、`Load*`/`SaveConfig`。
+- `pkg/server/config_alias.go`：**迁移期兼容层**（类型/常量别名 + 4 个转发函数），
+  让 `pkg/server` 存量 100+ 文件与 `cmd/sproxy` 零改动。
+  **移除条件**：后续切片逐个搬入 `pkg/server/<cap>` 后删除本文件，新代码直接 import
+  `pkg/server/config`。
+- 共享 IP 工具下沉 `pkg/netutil`（`ParseIPNets` / `AllowIPsCoverLoopback`）；
+  配额桶名单下沉 `pkg/storage`（`QuotaBucketNames`）——两者都是 Global 能力，
+  不应留在 server 作用域。
+
+### 新增 Server 切片的步骤
+
+1. 建 `pkg/server/<cap>`，包内只依赖 Global 与同层 Server 包；
+2. 在 `internal/archcheck/layers.go` 登记 `Levels`（层级按**实测依赖**取 max+1）与
+   `ParentDomain`（父域 `pkg/server`）；依赖了此前未登记的 Global 包时一并登记；
+3. 装配根通过构造参数注入依赖，**不**让切片反向 import `pkg/server`；
+4. 搬移对应测试；跨域测试改为经 `Register`/构造入口做黑盒；
+5. 更新按路径扫描的门禁清单（R38 路由文件、R25/R26 白名单、R43 目录等）。

@@ -21,25 +21,12 @@ import (
 // ErrQuotaExceeded 是 AI 配额超限的错误（调用方 → 429）。
 var ErrQuotaExceeded = errors.New("ai quota exceeded")
 
-// AILimit 是单 owner 的 AI 配额限制（0 = 不限）。
-type AILimit struct {
-	DailyCalls  int `yaml:"daily_calls" mapstructure:"daily_calls"`
-	DailyTokens int `yaml:"daily_tokens" mapstructure:"daily_tokens"`
-}
-
 // AIUsage 是单 owner 的当前用量。
 type AIUsage struct {
 	Day    string  `json:"day"` // YYYY-MM-DD
 	Calls  int     `json:"calls"`
 	Tokens int     `json:"tokens"`
 	Limit  AILimit `json:"limit"`
-}
-
-// AIQuotaConfig 是 ai.quota 配置段（默认关零回归）。
-type AIQuotaConfig struct {
-	Enabled   bool               `yaml:"enabled" mapstructure:"enabled"`
-	Default   AILimit            `yaml:"default" mapstructure:"default"`
-	Overrides map[string]AILimit `yaml:"overrides" mapstructure:"overrides"`
 }
 
 // AIQuota 是 per-owner AI 调用配额（内存计数器，进程内有效；重启清零文档注明）。
