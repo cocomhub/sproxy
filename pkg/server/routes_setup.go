@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/alerts"
 	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/server/scheduler"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -208,7 +209,7 @@ func (h *Handlers) initStorageLayout(vs *registry.Set, cfg *Config, log *slog.Lo
 		h.alertEngine.AdoptNotifyChannels(h.notifyCenter)
 		// 告警根因建议器（roadmap 11.9-⑥）：notify.ai_advisor.enabled + key 解析成功才装配；
 		// 未启用/无 key → NewAIAdvisor 内部 gate=nil（恒空，fail-closed 回退模板）并在此 Warn 一次。
-		if advisor := newAIAdvisorFromConfig(cfg.Notify.AIAdvisor, log); advisor != nil {
+		if advisor := alerts.NewAIAdvisorFromConfig(cfg.Notify.AIAdvisor, log); advisor != nil {
 			h.alertEngine.SetAdvisor(advisor)
 		}
 		h.alertEngine.SetDiskUsageReader(func() (used, capVal int64) {

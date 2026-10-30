@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package alerts
 
 // alerts_nat_test.go 验证 NAT 穿透失败告警（roadmap 11.1-①）：
 //  1. nat_failure source：失败事件 → 告警（FIRING 去抖）；同 peer 后续拨号成功 → 恢复通知。
@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
 // TestAlertNATFailure_FireAndRecover 失败事件发告警（state=firing），
@@ -20,9 +22,9 @@ import (
 func TestAlertNATFailure_FireAndRecover(t *testing.T) {
 	t.Parallel()
 	ch := newFakeAlertChannel("wecom")
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: SourceNATFailure, Channels: []string{"wecom"},
 		}},
 	}, testLogger())
@@ -63,9 +65,9 @@ func TestAlertNATFailure_FireAndRecover(t *testing.T) {
 func TestAlertNATFailure_KeyPerPeer(t *testing.T) {
 	t.Parallel()
 	ch := newFakeAlertChannel("wecom")
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: SourceNATFailure, Channels: []string{"wecom"},
 		}},
 	}, testLogger())
@@ -113,9 +115,9 @@ func TestAlertNATFailure_NoRuleSilent(t *testing.T) {
 	t.Parallel()
 	ch := newFakeAlertChannel("wecom")
 	// 只有 disk_watermark 规则，没有 nat_failure。
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: "disk_watermark", Threshold: 80, Channels: []string{"wecom"},
 		}},
 	}, testLogger())

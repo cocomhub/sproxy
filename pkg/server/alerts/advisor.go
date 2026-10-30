@@ -1,12 +1,12 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package alerts
 
 // ai_advisor.go 是告警建议器（roadmap 11.9-⑥ 智能运维 LLM）：
 //
-//   - AIAdvisor：告警上下文 → LLM 建议文本；nil 网关 = 恒空（零回归）。
-//   - AlertEngine.dispatch 内同步追加「【AI 建议】」段：失败返回 "" → 追加为空
+//   - ai.AIAdvisor：告警上下文 → LLM 建议文本；nil 网关 = 恒空（零回归）。
+//   - Engine.dispatch 内同步追加「【AI 建议】」段：失败返回 "" → 追加为空
 //     即固定模板原样（fail-closed：AI 是增强层，绝不允许它吞掉告警）。
 //   - prompt 构造是纯函数（可测）：system 固定、user 仅作数据（无拼接注入面）。
 
@@ -14,17 +14,20 @@ import (
 	"context"
 	"log/slog"
 	"os"
+
+	"github.com/cocomhub/sproxy/pkg/server/ai"
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
-func (e *AlertEngine) SetAdvisor(a adviser) {
+func (e *Engine) SetAdvisor(a adviser) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.advisor = a
 }
 
-// newAIAdvisorFromConfig 从 AIAdvisorConfig 装配建议器：未启用 → nil（零回归）；
+// NewAIAdvisorFromConfig 从 config.AIAdvisorConfig 装配建议器：未启用 → nil（零回归）；
 // enabled=true 但 APIKeyRef 解析为空 → Warn（可观测降级）+ 返回 nil（gate=nil 语义）。
-func newAIAdvisorFromConfig(cfg AIAdvisorConfig, logger *slog.Logger) *AIAdvisor {
+func NewAIAdvisorFromConfig(cfg config.AIAdvisorConfig, logger *slog.Logger) *ai.AIAdvisor {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -35,7 +38,7 @@ func newAIAdvisorFromConfig(cfg AIAdvisorConfig, logger *slog.Logger) *AIAdvisor
 		return nil
 	}
 	cfg.APIKey = key
-	return NewAIAdvisor(cfg, logger)
+	return ai.NewAIAdvisor(cfg, logger)
 }
 
 // adviser 是 advisor 的窄接口（测试桩注入用）。
@@ -44,7 +47,7 @@ type adviser interface {
 }
 
 // splitAdvice 无锁读 advisor（dispatch 在 e.mu 之外调用，竞态安全要求原子指针读）。
-func (e *AlertEngine) advisorSnapshot() adviser {
+func (e *Engine) advisorSnapshot() adviser {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.advisor
