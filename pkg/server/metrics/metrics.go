@@ -588,7 +588,10 @@ func (m *Metrics) AuditRotateSamples() []LabeledSample { return m.auditRotate.sa
 
 // RecordAuditRotate 记录一次审计段轮转（按原因分桶；无 metrics 时 no-op）。
 func (m *Metrics) RecordAuditRotate(reason string) {
-	if m == nil || reason == "" {
+	if m == nil {
+		return
+	}
+	if reason == "" {
 		reason = "unknown"
 	}
 	m.auditRotate.add(reason)
