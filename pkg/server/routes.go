@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/leader"
+	"github.com/cocomhub/sproxy/pkg/server/alerts"
 	"github.com/cocomhub/sproxy/pkg/server/notify"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
@@ -222,7 +223,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		auditSvc:          auditSvc,
 		auditJournal:      auditJournal,
 		notifyCenter:      notify.NewFromConfig(cfg.Notify, log),
-		alertEngine:       newAlertEngineFromConfig(cfg.Alerts, log),
+		alertEngine:       alerts.NewFromConfig(cfg.Alerts, log),
 		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见
 		// loginFailTracker 注释）。
 		loginFailTracker: newLoginFailTracker(),

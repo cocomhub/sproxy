@@ -95,6 +95,5 @@ func (s aiEventSource) DrainFileEvents() []ai.FileEvent {
 func insightPrompts(filename, sample string) (string, string) {
 	return ai.InsightPrompts(filename, sample)
 }
-func normalizeTags(raw string) []string       { return ai.NormalizeTags(raw) }
-func truncateRunes(s string, n int) string    { return ai.TruncateRunes(s, n) }
-func appendAdvice(text, advice string) string { return ai.AppendAdvice(text, advice) }
+func normalizeTags(raw string) []string    { return ai.NormalizeTags(raw) }
+func truncateRunes(s string, n int) string { return ai.TruncateRunes(s, n) }

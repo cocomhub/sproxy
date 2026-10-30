@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package alerts
 
 // alerts_quota_test.go 验证配额预警（roadmap P2 配额预警）：
 //  1. quota_watermark source：per-owner 水位超阈值 → 告警（FIRING 去抖）。
@@ -13,15 +13,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
-// TestAlertEngine_QuotaWatermark per-owner 水位 85% 触发 + 恢复。
-func TestAlertEngine_QuotaWatermark(t *testing.T) {
+// TestEngine_QuotaWatermark per-owner 水位 85% 触发 + 恢复。
+func TestEngine_QuotaWatermark(t *testing.T) {
 	t.Parallel()
 	ch := newFakeAlertChannel("wecom")
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: "quota_watermark", Threshold: 80, Channels: []string{"wecom"},
 		}},
 	}, nil)

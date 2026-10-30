@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package alerts
 
 // alerts_reload_test.go 验证告警规则热加载（roadmap 11.1-②，SIGHUP）：
 //  1. ReloadRules 原子替换规则集（slices.Clone 快照，读方无撕裂）。
@@ -12,18 +12,20 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
-// TestAlertEngine_ReloadRules_AtomicSwap 验证 ReloadRules 原子换规则：
+// TestEngine_ReloadRules_AtomicSwap 验证 ReloadRules 原子换规则：
 // 旧规则 A 触发 fire → ReloadRules(B) → 新事件只走 B（A 不再命中）。
 // 变异探针：ReloadRules 若只是引用赋值（不 Clone），外部改新规则切片会穿透引擎 → 红。
-func TestAlertEngine_ReloadRules_AtomicSwap(t *testing.T) {
+func TestEngine_ReloadRules_AtomicSwap(t *testing.T) {
 	t.Parallel()
 	chA := newFakeAlertChannel("chA")
 	chB := newFakeAlertChannel("chB")
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: "volume_degraded", Channels: []string{"chA"},
 		}},
 	}, nil)
@@ -40,7 +42,7 @@ func TestAlertEngine_ReloadRules_AtomicSwap(t *testing.T) {
 	}
 
 	// 外部持有新规则切片——变异（引用赋值不 Clone）后外部修改会穿透引擎。
-	rulesB := []AlertRule{{
+	rulesB := []config.AlertRule{{
 		Source: "volume_degraded", Channels: []string{"chB"},
 	}}
 	eng.ReloadRules(rulesB)
@@ -60,16 +62,16 @@ func TestAlertEngine_ReloadRules_AtomicSwap(t *testing.T) {
 	}
 }
 
-// TestAlertEngine_ReloadRules_PreservesState 验证 ReloadRules 保留既有 firing 状态：
+// TestEngine_ReloadRules_PreservesState 验证 ReloadRules 保留既有 firing 状态：
 // 同 key 不重复告警（不误报）、恢复通知仍正常发出（不误发/不吞恢复）。
 // 变异探针：ReloadRules 清空 state → 同 key 重复 fire / 恢复被吞 → 红。
-func TestAlertEngine_ReloadRules_PreservesState(t *testing.T) {
+func TestEngine_ReloadRules_PreservesState(t *testing.T) {
 	t.Parallel()
 	chA := newFakeAlertChannel("chA")
 	chA2 := newFakeAlertChannel("chA2")
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: "volume_degraded", Channels: []string{"chA"},
 		}},
 	}, nil)
@@ -86,7 +88,7 @@ func TestAlertEngine_ReloadRules_PreservesState(t *testing.T) {
 	}
 
 	// 热加载同 source 新规则（渠道改 chA2）——state 保留：同 key 不再重复 fire。
-	eng.ReloadRules([]AlertRule{{
+	eng.ReloadRules([]config.AlertRule{{
 		Source: "volume_degraded", Channels: []string{"chA2"},
 	}})
 	eng.OnVolumeDegraded(context.Background(), "vol1", "boom again")
@@ -105,16 +107,16 @@ func TestAlertEngine_ReloadRules_PreservesState(t *testing.T) {
 	}
 }
 
-// TestAlertEngine_ReloadRules_ThresholdNextTick 验证阈值类规则热加载后下个
+// TestEngine_ReloadRules_ThresholdNextTick 验证阈值类规则热加载后下个
 // 轮询 tick 生效：磁盘水位阈值 80→90，tick 后 85% 走恢复（新阈值生效）。
 // 变异探针：ReloadRules 只换渠道不换阈值 → 85% ≥ 80% 仍 fire（去抖不发）→ chB 收不到 → 红。
-func TestAlertEngine_ReloadRules_ThresholdNextTick(t *testing.T) {
+func TestEngine_ReloadRules_ThresholdNextTick(t *testing.T) {
 	t.Parallel()
 	chA := newFakeAlertChannel("chA")
 	chB := newFakeAlertChannel("chB")
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: "disk_watermark", Threshold: 80, Channels: []string{"chA"},
 		}},
 	}, nil)
@@ -136,7 +138,7 @@ func TestAlertEngine_ReloadRules_ThresholdNextTick(t *testing.T) {
 	}
 
 	// 热加载新规则：阈值 90 + 渠道 chB。
-	eng.ReloadRules([]AlertRule{{
+	eng.ReloadRules([]config.AlertRule{{
 		Source: "disk_watermark", Threshold: 90, Channels: []string{"chB"},
 	}})
 	// 下个轮询 tick：85% < 90% → 恢复（新阈值生效）。

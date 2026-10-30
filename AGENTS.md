@@ -46,6 +46,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 
 
+
+| 阈值告警引擎（规则/状态机/水位） | `pkg/server/alerts` | `alerts.NewFromConfig` / `Engine.On*` / `AdoptNotifyChannels` | **server 作用域**；分发复用 `pkg/server/notify`；AI 建议挂点经 `pkg/server/ai` |
 | 用量统计（du / 存储分类） | `pkg/server/ops` | `WalkRoot` / `WalkFS` / `WalkUploadStats*` / `CategoriesFromBuckets` | **server 作用域**；纯遍历无装配状态，HTTP 面留在装配层 |
 | checksum 巡检（全仓一致性审计） | `pkg/server/verify` | `verify.New(Deps)` / `VerifyOnce` / `Report` | **server 作用域**；依赖经 `verify.Deps` 注入；摘要统一走 `checksum.File` |
 | 运行时指标注册表/渲染 | `pkg/server/metrics` | `Metrics` / `WriteMetric` / `WriteHistogram` / `RebalanceProgress` | **server 作用域**；`/metrics` HTTP 面与装配态渲染段留在装配层 |

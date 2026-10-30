@@ -1,13 +1,13 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package alerts
 
 // alerts_test.go 验证阈值告警引擎（roadmap P1 阈值告警）：
 //  1. 状态机去抖：FIRING 只在首次触发发通知；恢复（OK）发恢复通知。
 //  2. 磁盘水位：超阈值触发（80%），恢复后（<80%）发恢复。
 //  3. 事件驱动：degraded 卷 / 同步失败 / 登录锁定 → 即时告警。
-//  4. rules 路由：source 匹配 → channels 分发（复用 NotifyCenter）。
+//  4. rules 路由：source 匹配 → channels 分发（复用 notify.NotifyCenter）。
 
 import (
 	"context"
@@ -15,6 +15,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
+	"github.com/cocomhub/sproxy/pkg/server/notify"
 )
 
 // fakeAlertChannel 记录 AlertMessage 的假渠道。
@@ -29,13 +32,13 @@ func newFakeAlertChannel(name string) *fakeAlertChannel {
 
 func (f *fakeAlertChannel) Name() string { return f.name }
 
-func (f *fakeAlertChannel) Send(ctx context.Context, m NotifyMessage) error {
+func (f *fakeAlertChannel) Send(ctx context.Context, m notify.NotifyMessage) error {
 	f.msgs <- m.Title + "|" + m.Text
 	return nil
 }
 
-// TestAlertEngine_DiskWatermark 磁盘水位 80% 触发 + 恢复通知。
-func TestAlertEngine_DiskWatermark(t *testing.T) {
+// TestEngine_DiskWatermark 磁盘水位 80% 触发 + 恢复通知。
+func TestEngine_DiskWatermark(t *testing.T) {
 	t.Parallel()
 	ch := newFakeAlertChannel("wecom")
 	// 注入磁盘水位读取器（可调）。
@@ -44,9 +47,9 @@ func TestAlertEngine_DiskWatermark(t *testing.T) {
 	capacity.Store(1000)
 	usage.Store(850) // 85% > 80% → FIRING
 
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: "disk_watermark", Threshold: 80, Channels: []string{"wecom"},
 		}},
 	}, nil)
@@ -78,13 +81,13 @@ func TestAlertEngine_DiskWatermark(t *testing.T) {
 	}
 }
 
-// TestAlertEngine_EventDrivenDegraded 卷 degraded 事件驱动告警。
-func TestAlertEngine_EventDrivenDegraded(t *testing.T) {
+// TestEngine_EventDrivenDegraded 卷 degraded 事件驱动告警。
+func TestEngine_EventDrivenDegraded(t *testing.T) {
 	t.Parallel()
 	ch := newFakeAlertChannel("wecom")
-	eng := NewAlertEngine(AlertConfig{
+	eng := NewEngine(config.AlertConfig{
 		Enabled: true,
-		Rules: []AlertRule{{
+		Rules: []config.AlertRule{{
 			Source: "volume_degraded", Channels: []string{"wecom"},
 		}},
 	}, nil)
