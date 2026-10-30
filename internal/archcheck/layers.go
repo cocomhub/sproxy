@@ -134,6 +134,8 @@ var Levels = map[string]int{
 	// 服务端配置 schema（server 作用域）：只依赖 G0/G1 与装配层同级能力 ⇒ G2
 	// （与 pkg/server 同层：装配根 import 它，同层合法）。
 	"github.com/cocomhub/sproxy/pkg/server/config": 2,
+	// 通知域（注册表/规则路由/去抖/重试/渠道/feed 渲染）：依赖 config(L2) 与 G0 ⇒ G2。
+	"github.com/cocomhub/sproxy/pkg/server/notify": 2,
 
 	// ---- 子包（L 取父域之上，由依赖实测确定）----
 	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
@@ -192,6 +194,7 @@ var ParentDomain = map[string]string{
 	// 服务端配置是 pkg/server 的子包：只允许 pkg/server 子树与装配层导入
 	// （Global 包反向导入它会被 R2 拦下——这是「server 作用域」的可执行边界）。
 	"github.com/cocomhub/sproxy/pkg/server/config": "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/notify": "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。

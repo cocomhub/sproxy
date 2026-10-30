@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package notify
 
 // webhook_sign_test.go 验证 webhook 渠道出站 HMAC 签名（roadmap 11.10-⑤）：
 //  1. VerifyWebhookSignature 纯函数 table-driven：正确/篡改 body/过期时间戳/
@@ -24,6 +24,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
 // signWebhookHeader 计算合法签名头（测试 helper；与生产同公式：
@@ -100,7 +102,7 @@ func TestWebhookNotifier_Send_SignedSecret(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := NewWebhookNotifier(WebhookConfig{URL: srv.URL, Secret: secret})
+	ch := NewWebhookNotifier(config.WebhookConfig{URL: srv.URL, Secret: secret})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := ch.Send(ctx, NotifyMessage{Title: "通知", Text: "hello", Object: "a.txt", Action: "upload"}); err != nil {
@@ -136,7 +138,7 @@ func TestWebhookNotifier_Send_NoSecretNoHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := NewWebhookNotifier(WebhookConfig{URL: srv.URL}) // 无 secret
+	ch := NewWebhookNotifier(config.WebhookConfig{URL: srv.URL}) // 无 secret
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := ch.Send(ctx, NotifyMessage{Title: "t", Text: "h"}); err != nil {
@@ -177,7 +179,7 @@ func TestWebhookNotifier_Send_CustomHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := NewWebhookNotifier(WebhookConfig{
+	ch := NewWebhookNotifier(config.WebhookConfig{
 		URL:             srv.URL,
 		Secret:          secret,
 		SignHeader:      sigHdr,

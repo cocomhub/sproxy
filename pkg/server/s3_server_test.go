@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cryptox"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -41,11 +42,11 @@ func sigV4SignHost(ak, sk, method, path, host string, body []byte, now time.Time
 	hashCR := hex.EncodeToString(sha256sum([]byte(canonicalRequest)))
 	stringToSign := strings.Join([]string{"AWS4-HMAC-SHA256", amzDate, scope, hashCR}, "\n")
 	// Signature
-	kDate := hmacSHA256([]byte("AWS4"+sk), []byte(dateStamp))
-	kRegion := hmacSHA256(kDate, []byte(region))
-	kService := hmacSHA256(kRegion, []byte(service))
-	kSigning := hmacSHA256(kService, []byte("aws4_request"))
-	signature := hex.EncodeToString(hmacSHA256(kSigning, []byte(stringToSign)))
+	kDate := cryptox.HMACSHA256([]byte("AWS4"+sk), []byte(dateStamp))
+	kRegion := cryptox.HMACSHA256(kDate, []byte(region))
+	kService := cryptox.HMACSHA256(kRegion, []byte(service))
+	kSigning := cryptox.HMACSHA256(kService, []byte("aws4_request"))
+	signature := hex.EncodeToString(cryptox.HMACSHA256(kSigning, []byte(stringToSign)))
 	return fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s/%s/%s/aws4_request, SignedHeaders=%s, Signature=%s",
 		ak, dateStamp, region, service, signedHeaders, signature)
 }

@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package notify
 
 // notify_am_test.go 验证 Alertmanager/Grafana 渠道（roadmap P2 Webhook 通用插件残余）：
 //  1. Alertmanager：payload 为 webhook v2 alerts 数组（labels/annotations）。

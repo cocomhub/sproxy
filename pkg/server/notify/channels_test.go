@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package notify
 
 // channels_test.go 验证邮箱（SMTP）+ Webhook 通用渠道（roadmap P1 邮箱 / P2 Webhook 通用）：
 //  1. email 渠道：消息组装（RFC 822 头 + HTML 摘要体）+ sendFunc 注入（不 dial 真实 SMTP）。
@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
 // TestEmailNotifier_MessageAssembly 邮箱渠道：消息组装 + sendFunc 注入。
@@ -29,7 +31,7 @@ func TestEmailNotifier_MessageAssembly(t *testing.T) {
 		to   []string
 		msg  []byte
 	}
-	ch := NewEmailNotifier(EmailConfig{
+	ch := NewEmailNotifier(config.EmailConfig{
 		SMTPHost: "smtp.example.com",
 		Port:     465,
 		From:     "sproxy@example.com",
@@ -74,7 +76,7 @@ func TestWebhookNotifier_PostJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := NewWebhookNotifier(WebhookConfig{URL: srv.URL})
+	ch := NewWebhookNotifier(config.WebhookConfig{URL: srv.URL})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := ch.Send(ctx, NotifyMessage{Title: "通知", Text: "hello", Object: "a.txt", Action: "upload"}); err != nil {
@@ -90,11 +92,11 @@ func TestWebhookNotifier_PostJSON(t *testing.T) {
 // TestNotifyConfig_EmailWebhookRegister config 装配 email/webhook 渠道。
 func TestNotifyConfig_EmailWebhookRegister(t *testing.T) {
 	t.Parallel()
-	nc := newNotifyCenterFromConfig(NotifyConfig{
+	nc := NewFromConfig(config.NotifyConfig{
 		Enabled: true,
-		Channels: NotifyChannelsConfig{
-			Email:   EmailConfig{SMTPHost: "smtp.example.com", From: "a@b.c", To: []string{"d@e.f"}},
-			Webhook: WebhookConfig{URL: "https://hooks.example.com/x"},
+		Channels: config.NotifyChannelsConfig{
+			Email:   config.EmailConfig{SMTPHost: "smtp.example.com", From: "a@b.c", To: []string{"d@e.f"}},
+			Webhook: config.WebhookConfig{URL: "https://hooks.example.com/x"},
 		},
 	}, nil)
 	defer nc.Close()
