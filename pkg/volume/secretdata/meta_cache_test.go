@@ -67,3 +67,31 @@ func TestMetaCache_DropForcesRedownload(t *testing.T) {
 		}
 	}
 }
+
+// TestMetaCache_PopulatedByUpload 上传写路径必须把 meta blob 写入密文缓存
+// （否则「写后重建索引」仍要下载这些 meta）。变异：uploadBlob 不调 putBlobCache ⇒ 红。
+func TestMetaCache_PopulatedByUpload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "metacache")
+	fs, err := NewFS(syncpkg.NewLocalFS(filepath.Join(dir, "inner"), nil), Options{
+		Secret:       []byte("0123456789abcdef0123456789abcdef"),
+		MetaCacheDir: cacheDir,
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	if werr := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a/b.txt", bytes.NewReader([]byte("hello")), 5, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	n := 0
+	_ = filepath.Walk(cacheDir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && !info.IsDir() {
+			n++
+		}
+		return nil
+	})
+	if n < 2 { // 至少 file-meta + dir-meta 各一份
+		t.Fatalf("写路径应缓存 meta blob（期望 ≥2 个文件），实际 %d", n)
+	}
+}

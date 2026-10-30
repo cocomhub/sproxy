@@ -49,15 +49,28 @@ func (s *SecretdataFS) readBlobCached(ctx context.Context, rel string) ([]byte, 
 	if rerr != nil {
 		return nil, rerr
 	}
-	if mk := os.MkdirAll(filepath.Dir(cp), 0o700); mk == nil {
-		tmp := fmt.Sprintf("%s.part.%d", cp, os.Getpid())
-		if werr := os.WriteFile(tmp, b, 0o600); werr == nil {
-			_ = os.Rename(tmp, cp)
-		} else {
-			_ = os.Remove(tmp)
-		}
-	}
+	s.putBlobCache(rel, b)
 	return b, nil
+}
+
+// putBlobCache 把**密文 blob** 写入本机缓存（.part + rename 原子落盘，失败静默忽略）。
+// 写路径（上传 meta blob 成功）也调用它 ⇒ 上传后重启装配直接读本地，不再重复下载。
+func (s *SecretdataFS) putBlobCache(rel string, b []byte) {
+	if s.opts.MetaCacheDir == "" || len(b) == 0 {
+		return
+	}
+	cp := s.metaCachePath(rel)
+	if mk := os.MkdirAll(filepath.Dir(cp), 0o700); mk != nil {
+		return
+	}
+	tmp := fmt.Sprintf("%s.part.%d", cp, os.Getpid())
+	if werr := os.WriteFile(tmp, b, 0o600); werr != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	if rerr := os.Rename(tmp, cp); rerr != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // dropBlobCache 删除某 blob 的本地缓存（解密失败时调用，实现自愈）。

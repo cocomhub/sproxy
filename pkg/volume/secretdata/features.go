@@ -307,7 +307,15 @@ func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt
 			CRC32:         strconv.FormatUint(uint64(crc32.ChecksumIEEE(data)), 10),
 		})
 	}
-	return s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt)
+	if werr := s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt); werr != nil {
+		return werr
+	}
+	// meta blob 上传成功 ⇒ 同步写入本机密文缓存（装配重启时直接本地读，不再下载；
+	// 这是「上传后立刻重建索引」不打网盘的关键）。分块 blob 不缓存（由 spanCache 负责）。
+	if k := shardseal.ClassifyName(path.Base(p)); k == shardseal.KindFileMeta || k == shardseal.KindDirMeta {
+		s.putBlobCache(p, data)
+	}
+	return nil
 }
 
 // dedupStagingDir 为去重写路径准备本地临时目录（自管 staging 配额记账），返回释放函数
