@@ -175,6 +175,8 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 		BlockletCacheBytes: vcExtraByteSize(v, "blocklet_cache_bytes"),
 		SpanCacheDir:       vcExtraStr(v, "span_cache_dir"),
 		SpanCacheBytes:     vcExtraByteSize(v, "span_cache_bytes"),
+		IndexSnapshotPath:  vcExtraStr(v, "index_snapshot_path"),
+		MetaCacheDir:       vcExtraStr(v, "meta_cache_dir"),
 	}
 }
 

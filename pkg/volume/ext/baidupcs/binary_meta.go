@@ -177,6 +177,17 @@ func isBinaryNotFound(out []byte) bool {
 // List 实现 metadataProvider：`ls` 枚举 + 对文件条目批量 `meta` 取精确 size。
 // 目录条目不查 meta（size=0）。任一环节失败 → 回退库 adapter（有则用），否则返回错误。
 func (a *binaryAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.list(ctx, remotePath, true)
+}
+
+// ListNames 是 List 的轻量版：只 `ls`，**不**逐条 `meta` 补精确 size/etag/mtime。
+// 供装配期只用「名字 + 是否目录」的调用方（1.2 万 blob 的全量 meta 会触发网盘限流 31034，
+// 实测导致卷装配 fail-closed、服务起不来）。生成的 ObjectMeta 的 Size 为 `ls` 近似值。
+func (a *binaryAdapter) ListNames(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	return a.list(ctx, remotePath, false)
+}
+
+func (a *binaryAdapter) list(ctx context.Context, remotePath string, exactSizes bool) ([]ObjectMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -200,7 +211,9 @@ func (a *binaryAdapter) List(ctx context.Context, remotePath string) ([]ObjectMe
 		}
 		return nil, perr
 	}
-	a.fillExactSizes(ctx, remotePath, entries)
+	if exactSizes {
+		a.fillExactSizes(ctx, remotePath, entries)
+	}
 	for i := range entries {
 		entries[i].Key = path.Join(remotePath, entries[i].Key)
 	}

@@ -91,6 +91,20 @@ func (p *PrefixFS) ListDir(ctx context.Context, path string) ([]Entry, error) {
 	return es, err
 }
 
+// ListDirNames 转发轻量列举能力（未实现时回落 ListDir）：装配期只分类名字的场景
+// 可跳过外部卷逐条补齐精确 size 的高成本路径（见 NameLister）。
+func (p *PrefixFS) ListDirNames(ctx context.Context, path string) ([]Entry, error) {
+	nl, ok := AssertNameLister(p.FS)
+	if !ok {
+		return p.ListDir(ctx, path)
+	}
+	es, err := nl.ListDirNames(ctx, p.Key(path))
+	for i := range es {
+		es[i].Path = p.strip(es[i].Path)
+	}
+	return es, err
+}
+
 // Stat 返回条目（剥回前缀）。
 //
 // **视图根**（path==""）恒视为存在的目录：底层 `<prefix>` 可能尚未创建（首次 pull、

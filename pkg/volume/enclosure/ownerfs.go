@@ -175,6 +175,27 @@ func (o *ownerFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error
 	return entries, nil
 }
 
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）：装配期只按名字分类时，
+// 避免外部卷对每个条目批量 `meta` 补精确 size（1.2 万 blob ⇒ 数百次 CLI + 限流）。
+func (o *ownerFS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	nl, ok := syncpkg.AssertNameLister(o.FS)
+	if !ok {
+		return o.ListDir(ctx, p)
+	}
+	src, err := o.key(p)
+	if err != nil {
+		return nil, err
+	}
+	entries, lerr := nl.ListDirNames(ctx, src)
+	if lerr != nil {
+		return nil, lerr
+	}
+	for i := range entries {
+		o.entry(&entries[i])
+	}
+	return entries, nil
+}
+
 func (o *ownerFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
 	src, err := o.key(p)
 	if err != nil {

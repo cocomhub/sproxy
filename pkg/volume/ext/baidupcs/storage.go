@@ -974,6 +974,16 @@ func (s *Storage) DirectURL(ctx context.Context, key string) (string, bool, erro
 // List 列 prefix 下的单层条目（目录+文件混合，不递归子目录）。
 // 优先走库 Meta（metadataProvider），否则回退 Download+本地 stat（二进制无库兜底时）。
 func (s *Storage) List(ctx context.Context, prefix string) ([]ObjectMeta, error) {
+	return s.list(ctx, prefix, true)
+}
+
+// ListNames 轻量列举（不补精确 size）：metadataProvider 支持 ListNames 时走它，
+// 否则回落 List（保持既有语义）。
+func (s *Storage) ListNames(ctx context.Context, prefix string) ([]ObjectMeta, error) {
+	return s.list(ctx, prefix, false)
+}
+
+func (s *Storage) list(ctx context.Context, prefix string, exactSizes bool) ([]ObjectMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, mapPCSError(err)
 	}
@@ -982,7 +992,15 @@ func (s *Storage) List(ctx context.Context, prefix string) ([]ObjectMeta, error)
 		return nil, err
 	}
 	if mp := s.metadata(); mp != nil {
-		metas, lErr := mp.List(ctx, remote)
+		var metas []ObjectMeta
+		var lErr error
+		if nl, ok := mp.(interface {
+			ListNames(context.Context, string) ([]ObjectMeta, error)
+		}); ok && !exactSizes {
+			metas, lErr = nl.ListNames(ctx, remote)
+		} else {
+			metas, lErr = mp.List(ctx, remote)
+		}
 		if lErr != nil {
 			return nil, mapPCSError(lErr)
 		}

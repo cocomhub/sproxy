@@ -122,10 +122,20 @@ func uploadHintsToPutHints(ctx context.Context) *PutHints {
 // 底层 Storage.List 是库真目录列举（FilesDirectoriesList 单层语义）；
 // 同步引擎的 walkDir 自递归完成树遍历，此处不组装子目录。
 func (f *StorageFS) ListDir(ctx context.Context, relPath string) ([]syncpkg.Entry, error) {
+	return f.listDir(ctx, relPath, true)
+}
+
+// ListDirNames 是 ListDir 的轻量版（不逐条补精确 size）——仅供装配期只需要
+// 「名字 + 是否目录」的调用方使用（见 pkg/sync.NameLister）。
+func (f *StorageFS) ListDirNames(ctx context.Context, relPath string) ([]syncpkg.Entry, error) {
+	return f.listDir(ctx, relPath, false)
+}
+
+func (f *StorageFS) listDir(ctx context.Context, relPath string, exactSizes bool) ([]syncpkg.Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	metas, err := f.s.List(ctx, relPath)
+	metas, err := f.listMetas(ctx, relPath, exactSizes)
 	if err != nil {
 		return nil, mapPCSError(err)
 	}
@@ -337,4 +347,17 @@ func isNotFound(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "不存在")
+}
+
+// listMetas 按需选择「精确 size（List）」或「轻量（ListNames）」列举；
+// StorageAPI 实现未提供 ListNames 时回落 List（零回归）。
+func (f *StorageFS) listMetas(ctx context.Context, relPath string, exactSizes bool) ([]ObjectMeta, error) {
+	if !exactSizes {
+		if nl, ok := f.s.(interface {
+			ListNames(context.Context, string) ([]ObjectMeta, error)
+		}); ok {
+			return nl.ListNames(ctx, relPath)
+		}
+	}
+	return f.s.List(ctx, relPath)
 }

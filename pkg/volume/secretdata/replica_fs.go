@@ -134,3 +134,11 @@ func (r *replicaFS) IsLocalVolume() bool {
 	}
 	return true // 全部 target 都本地 → 内部卷
 }
+
+// ListDirNames 转发轻量列举到主 target（未实现时回落 ListDir）。
+func (r *replicaFS) ListDirNames(ctx context.Context, path string) ([]syncpkg.Entry, error) {
+	if nl, ok := syncpkg.AssertNameLister(r.targets[0]); ok {
+		return nl.ListDirNames(ctx, path)
+	}
+	return r.targets[0].ListDir(ctx, path)
+}
