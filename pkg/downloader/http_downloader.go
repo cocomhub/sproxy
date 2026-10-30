@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -281,7 +282,7 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 	if resp.StatusCode != http.StatusOK {
 		// 非 200 时排空响应体，确保连接可复用
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, d.statusError(resp.StatusCode)
+		return nil, d.statusError(resp)
 	}
 
 	// existingSize>0 且走到此处只有一种可能：上面 StatusOK 分支已删掉 .partial ⇒ 丢弃的
@@ -355,7 +356,7 @@ func (d *HTTPDownloader) resumeExistingPartial(ctx context.Context, resp *http.R
 
 	default:
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, true, d.statusError(resp.StatusCode)
+		return nil, true, d.statusError(resp)
 	}
 }
 
@@ -374,7 +375,7 @@ func (d *HTTPDownloader) writeFull(ctx context.Context, wt writeTarget, fromRang
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, d.statusError(resp.StatusCode)
+		return nil, d.statusError(resp)
 	}
 	return d.writeFullBody(ctx, resp, wt.destPath, wt.onProgress, wt.sinkFactory, discardedSize)
 }
@@ -422,12 +423,38 @@ func (d *HTTPDownloader) validateAfterDo(resp *http.Response) error {
 	return nil
 }
 
-// statusError 将非 2xx 状态转为错误；5xx 标记为可重试。
-func (d *HTTPDownloader) statusError(code int) error {
-	if code >= 500 {
-		return retryablef("http status %d", code)
+// statusError 将非 2xx 状态转为错误：5xx / 429（限流）/ 408（请求超时）标记为可重试——
+// 三者都是瞬时条件，此前只重试 5xx，导致 CDN 限流一次即任务失败。
+// 429/503 若带 `Retry-After`，随错误携带建议等待时长（秒数或 HTTP-date）。
+func (d *HTTPDownloader) statusError(resp *http.Response) error {
+	code := resp.StatusCode
+	if code >= 500 || code == http.StatusTooManyRequests || code == http.StatusRequestTimeout {
+		return retryableAfterf(parseRetryAfter(resp.Header), "http status %d", code)
 	}
 	return fmt.Errorf("http status %d", code)
+}
+
+// parseRetryAfter 解析 `Retry-After`（秒数或 HTTP-date）；无法解析/已过期 ⇒ 0。
+func parseRetryAfter(h http.Header) time.Duration {
+	if h == nil {
+		return 0
+	}
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // writeFullBody 将 200 响应体写入 .partial 文件并在成功后原子重命名。

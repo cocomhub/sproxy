@@ -862,6 +862,8 @@ func (m *CloudDownloadManager) runRetryLoop(ctx context.Context, dlCtx context.C
 	var result *downloader.Result
 	var downloadErr error
 	var timedOut bool
+	// retryAfter 是上一次失败携带的服务端建议等待（Retry-After，0 = 未指定）。
+	var retryAfter time.Duration
 	for attempt := range maxRetries {
 		// 外层 ctx（同步下载的请求 ctx）已取消而内层未取消 = 客户端断连：
 		// 立即交还，由 downloadDone 处转入异步继续，避免阻塞 handler 至重试耗尽。
@@ -869,7 +871,7 @@ func (m *CloudDownloadManager) runRetryLoop(ctx context.Context, dlCtx context.C
 			downloadErr = ctx.Err()
 			break
 		}
-		if stopped, waitErr := m.retryAttemptWait(ctx, dlCtx, attempt, task, maxRetries); stopped {
+		if stopped, waitErr := m.retryAttemptWait(ctx, dlCtx, attempt, task, maxRetries, retryAfter); stopped {
 			downloadErr = waitErr
 			break
 		}
@@ -897,6 +899,7 @@ func (m *CloudDownloadManager) runRetryLoop(ctx context.Context, dlCtx context.C
 		// 按磁盘真值回拨（stat destPath）而非 result.Size：动态源重下后尺寸可能不同。
 		// 不回拨会误触同租户其它下载 ErrStorageFull（owner 配额接近上限时）。
 		m.releaseIntegrityRetryBytes(task, result, destPath, downloadErr)
+		retryAfter = downloader.RetryAfterOf(downloadErr)
 	}
 	// R2-P2：完整性校验失败重试耗尽（errIntegrityFail 已不可重试）且任务非 must-pass →
 	// 按规格「默认放行标记 damaged」处理（而非 failTask——动态源每次内容不同时，
@@ -972,11 +975,12 @@ func outerCtxCancelled(ctx, dlCtx context.Context) bool {
 
 // retryAttemptWait 等待重试（仅 attempt>0 时触发）：等待期间用户取消/客户端断线则
 // 立即停止并返回停止原因；等待结束输出重试日志。返回 stopped=true 表示应终止重试。
-func (m *CloudDownloadManager) retryAttemptWait(ctx, dlCtx context.Context, attempt int, task *CloudTask, maxRetries int) (bool, error) {
+func (m *CloudDownloadManager) retryAttemptWait(ctx, dlCtx context.Context, attempt int, task *CloudTask,
+	maxRetries int, retryAfter time.Duration) (bool, error) {
 	if attempt <= 0 {
 		return false, nil
 	}
-	stopped, waitErr := m.retryWait(ctx, dlCtx)
+	stopped, waitErr := m.retryWait(ctx, dlCtx, retryDelay(m.config.RetryDelay, retryAfter))
 	if stopped {
 		return true, waitErr
 	}
@@ -1013,12 +1017,27 @@ func shouldRetryDownload(downloadErr error, timedOut bool, attempt, maxRetries i
 	return attempt < maxRetries-1
 }
 
+// maxRetryAfter 是服务端 Retry-After 的等待上限（防异常超长值把任务挂死）。
+const maxRetryAfter = 5 * time.Minute
+
+// retryDelay 返回本次重试的实际等待时长：优先服务端 Retry-After（封顶 maxRetryAfter），
+// 否则用配置的固定 RetryDelay。
+func retryDelay(base, retryAfter time.Duration) time.Duration {
+	if retryAfter <= 0 {
+		return base
+	}
+	if retryAfter > maxRetryAfter {
+		return maxRetryAfter
+	}
+	return retryAfter
+}
+
 // retryWait 重试等待（等待期间用户取消/客户端断连则立即停止）。返回 stopped=true
 // 表示等待被打断（err 为停止原因）。
-func (m *CloudDownloadManager) retryWait(ctx, dlCtx context.Context) (stopped bool, err error) {
+func (m *CloudDownloadManager) retryWait(ctx, dlCtx context.Context, delay time.Duration) (stopped bool, err error) {
 	m.metrics.TasksRetried.Add(1)
 	select {
-	case <-time.After(m.config.RetryDelay):
+	case <-time.After(delay):
 		return false, nil
 	case <-dlCtx.Done():
 		return true, dlCtx.Err()
