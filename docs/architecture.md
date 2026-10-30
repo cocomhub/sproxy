@@ -707,6 +707,58 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
   分享域常量（\`MaxShareTTL\`/\`MaxShareEntries\`/\`MaxShareBodySize\`）与存储同源。
 - 白盒持久化测试随迁 \`pkg/server/share\`；HTTP/e2e 测试保留装配层。
 
+**S9：运行时指标注册表（`pkg/server/metrics`）**
+
+- 迁入：`Metrics` 注册表（计数器/直方图/标签组）、`XferMetrics`/`XferConnMetrics`、
+  `RebalanceProgress`、渲染辅助（`WriteMetric`/`WriteLabeledCounter`/`WriteHistogram`/
+  `WriteGaugeSamples`/`WriteReadLoopBlock`/`WriteHybridMetrics`/`WriteGCIDMetrics`）、`RenderSLOMetrics`。
+- `/metrics` HTTP 面、中间件与需要装配态的渲染段（卷水位/索引缓存/hub 节点）留在装配层，
+  经 `metrics_alias.go` 调用。
+
+**S10：checksum 巡检（`pkg/server/verify`）**
+
+- 迁入：`VerifyOnce`/`VerifyPass`（全租户/单卷、单飞防重入）、台账分批遍历、坏文件隔离、`Report`/`Mismatch`。
+- **依赖倒置**：`verify.Deps` 注入 `TenantFor`/`ListTenantIDs`/`LocateOwnerFile`/`ChecksumStoreFor`/
+  `Alert`/`Audit`/`Busy`/`Hook`；装配层保留 `POST /api/verify` HTTP 面与调度注册。
+- **单一事实源**：新增 `checksum.File(root, rel)`（用户可见摘要），`pkg/files` 与 `pkg/server` 的
+  `*ChecksumRoot` 包装均委托它；漂移门禁改为「委托契约」断言。
+
+**S11：用量统计（`pkg/server/ops`）**
+
+- 迁入：`du` 递归统计（`WalkRoot`/`WalkFS`）、存储分类遍历（`WalkUploadStats`/
+  `WalkUploadStatsByCategory`）、`CategoriesFromBuckets`/`BucketOf`/`IsStorageBucket`/`QuotaStatusOf`、
+  stats 响应类型。
+- **纯遍历**：logger 经参数注入，不持有装配状态；`GET /api/du`、`GET /api/stats` 的 HTTP 面与
+  `statsRootFor`（租户/卷根解析）留在装配层。
+
+**S12：阈值告警引擎（`pkg/server/alerts`）**
+
+- 迁入：`Engine`（规则匹配 + FIRING/OK 状态机去抖 + 磁盘/配额水位轮询 + 事件驱动
+  `OnVolumeDegraded`/`OnSyncFailed`/`OnLoginLocked`/`OnNATFailure`/`OnChecksumMismatch`）、
+  `NewFromConfig`、`AdoptNotifyChannels`、AI 建议器挂点。
+- **依赖已收敛**：只依赖已下沉的 `pkg/server/config`、`pkg/server/notify`、`pkg/server/ai`，无反向依赖。
+
+**S13：归档打包助手（`pkg/server/archive`）**
+
+- 迁入：`AddFileToTar`（递归打包、符号链接拒绝、Lstat↔open TOCTOU 交叉验证）、`DefaultMaxArchiveSize`。
+- **删除 `pkg/server/user_visible_io.go`**：它只是 `pkg/rootfs` 的 6 个纯委托（收敛原则 #11 禁止薄封装），
+  39 处调用点直接改为 `rootfs.*`。
+
+### 剩余三块为何不再按切片下沉（2026-10-30 实测）
+
+`cloud`（2.2k）、`volume`（6.5k）、`files`（3.9k）与已下沉的 13 片**形态不同**，实测判据：
+
+| 维度 | 已下沉叶子包 | cloud / volume / files |
+|---|---|---|
+| 装配依赖（`h.*`） | 0–8 个 | cloud ≈ 30 个；volume/files 更高 |
+| 依赖性质 | 纯数据/纯遍历/单一策略 | 配额预留与结算、卷路由、写策略、审计编排 |
+| 抽出后 | 依赖经窄接口注入，耦合下降 | 需在 `Deps` 里复刻 `Handlers` 能力面 ⇒ **耦合不降反升** |
+
+结论：这三块**就是装配核心本身**（HTTP 编排 + 跨域结算）。真正要降低其维护成本，前置是先把
+「用户可见写策略（`pkg/files`）」「卷容量/配额记账（`pkg/volume/capacity`）」的边界定清，再谈搬运；
+在那之前按切片外移只会新增一层 `Deps` 翻译层，与收敛原则相悖。**已完成的 13 片（装配包
+42,568 → 32,849 行，−22.8%）到此为自然边界。**
+
 ### 新增 Server 切片的步骤
 
 1. 建 `pkg/server/<cap>`，包内只依赖 Global 与同层 Server 包；
