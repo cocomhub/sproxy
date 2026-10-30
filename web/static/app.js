@@ -3348,17 +3348,40 @@ function hideVersioning() {
 // 到 #video-player-modal 容器并显示；关闭时暂停并卸载 video（避免播放续留内存/声音）。
 async function showVideoPlayer(filename, volume) {
   const body = document.getElementById('video-player-body');
-  // 先渲染弹窗（加载态），再异步准备**带 URL 票**的播放 URL 并注入 <video>。
-  // 为何异步：URL 票由 sclientSig.signHeader（WebCrypto HMAC，Promise）计算，
-  // 签名覆盖业务查询（filename/volume），票参数 `spx_sig` 最后拼接。
-  body.innerHTML = videoPlayerModalHtml({ filename: filename, volume: volume || '' });
-  document.getElementById('video-player-modal').style.display = 'flex';
-  const video = body.querySelector('video');
-  if (!video) return;
   const query = await withUrlSig(
     videoPlayerUrl({ filename: filename, volume: volume || '' }).split('?')[1] || ''
   );
-  video.src = '/download?' + query;
+  const src = '/download?' + query;
+  // 浏览器可播（mp4/m4v/webm/ogg/mov）→ 原生 <video>；其余（AVI/RMVB/WMV/FLV/MKV）
+  // 一律走「本地播放器」兜底：不再假装播放（黑屏无提示），用户裁定 2026-10-29。
+  if (isBrowserPlayable(filename)) {
+    body.innerHTML = videoPlayerModalHtml({ filename: filename, volume: volume || '' });
+    document.getElementById('video-player-modal').style.display = 'flex';
+    const video = body.querySelector('video');
+    if (!video) return;
+    video.src = src;
+    return;
+  }
+  body.innerHTML = unsupportedPlayerModalHtml({ filename: filename, url: src });
+  document.getElementById('video-player-modal').style.display = 'flex';
+}
+
+// openWithLocalPlayer(url)：依次尝试本地播放器协议（potplayer → vlc → iina）。
+// 协议拉起无法可靠检测成功，2s 后仍未离开页面即提示安装 VLC。
+function openWithLocalPlayer(url) {
+  const urls = playerProtocolUrls(url);
+  let i = 0;
+  const tryNext = function () {
+    if (i >= urls.length) {
+      const hint = document.querySelector('[data-player-hint]');
+      if (hint) hint.textContent = '未能唤起本地播放器：请安装 VLC/PotPlayer，或复制直链后手动拖入播放器。';
+      return;
+    }
+    const protocol = urls[i++];
+    try { window.location.href = protocol; } catch (e) { /* 继续下一个协议 */ }
+    setTimeout(tryNext, 600);
+  };
+  tryNext();
 }
 
 function hideVideoPlayer() {
@@ -3874,6 +3897,20 @@ function initDynamicEventDelegation() {
   document.addEventListener('click', function(e) {
     if (e.target.closest('#video-player-modal [data-close]')) {
       hideVideoPlayer();
+    }
+    // 不可播格式：用本地播放器打开（协议拉起）/ 复制直链（由 unsupportedPlayerModalHtml 生成）。
+    const openBtn = e.target.closest('#video-player-modal [data-open-local-player]');
+    if (openBtn) {
+      openWithLocalPlayer(openBtn.dataset.url || '');
+      return;
+    }
+    const copyBtn = e.target.closest('#video-player-modal [data-copy-stream-url]');
+    if (copyBtn) {
+      const url = (copyBtn.dataset.url || '');
+      const abs = url.indexOf('http') === 0 ? url : window.location.origin + url;
+      navigator.clipboard.writeText(abs).then(function() {
+        showToast('直链已复制（有效期 3 小时，可直接拖入 VLC）', 'success');
+      }).catch(function() { showToast('复制失败', 'error'); });
     }
   });
 

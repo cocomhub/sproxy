@@ -621,3 +621,10 @@ tls:
 # volume_state:
 #   disable: false
 #   ttl: "0s"
+
+# 注册 / URL 票（SproxySig 查询参数形态，浏览器 <video> 与外部播放器直链共用）
+registration:
+  # URL 票（?spx_sig=）有效期。默认 1h；长视频/复制直链给本地播放器建议 3h。
+  # 语义：票不查 nonce 池（同一 URL 可被 <video> 的多个 Range 请求复用），
+  # URL 泄露 = 有效期内可访问，按需调短。
+  download_token_ttl: 3h
