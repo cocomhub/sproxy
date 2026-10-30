@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package config
 
 // config_mesh_node_test.go 钉住 **B 侧 mesh node 角色**（`mesh.node` 段；S5）的启动期校验。
 //

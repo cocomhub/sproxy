@@ -27,16 +27,6 @@ import (
 	"time"
 )
 
-// aiEventsConfig 是 ai.events 配置段（config.go 引用；默认关零回归）。
-type aiEventsConfig struct {
-	Enabled     bool          `yaml:"enabled" mapstructure:"enabled"`
-	QueueSize   int           `yaml:"queue_size" mapstructure:"queue_size"`     // 默认 256
-	DedupWindow time.Duration `yaml:"dedup_window" mapstructure:"dedup_window"` // 默认 5m
-}
-
-// AIEventsConfig 是 ai.events 配置段（导出供装配层）。
-type AIEventsConfig = aiEventsConfig
-
 // aiTask 是一条入队任务（owner + rel + op）。
 type aiTask struct {
 	owner string

@@ -136,3 +136,13 @@ func IsReservedBucketName(name string) bool {
 	}
 	return false
 }
+
+// QuotaBucketNames 返回参与**配额归集**的功能桶名（user/cloud/archive/chunk/version/meta）。
+//
+// 与 ReservedBucketNames 的区别：trash/backup 是保留桶但不参与用户配额归集
+// （回收站与备份 manifest 不占用户配额），故单独给出本函数作单一事实源——
+// 配置校验（bucket_limits 键不得与功能桶根重叠）与配额装配（Scope 预创建）共用。
+// 返回副本，调用方可自由修改。
+func QuotaBucketNames() []string {
+	return []string{bucketUser, bucketCloud, bucketArchive, bucketChunk, bucketVersion, bucketMeta}
+}

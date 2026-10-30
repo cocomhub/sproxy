@@ -6,7 +6,7 @@
 //
 // 拆分说明见 config.go 顶部。
 
-package server
+package config
 
 import (
 	"time"
@@ -21,7 +21,7 @@ import (
 func Default() *Config {
 	return &Config{
 		Addr:        ":18083",
-		StorageRoot: defaultStorageRoot,
+		StorageRoot: DefaultStorageRoot,
 		// StateStore：type 空 = local 单节点零回归（dir 装配期回退 <storage_root>/state）。
 		StateStore: StateStoreConfig{Type: "local"},
 		// OwnerQuotas/BucketLimits 默认空 map（非 nil，便于 map 判断/访问复用）。
@@ -31,7 +31,7 @@ func Default() *Config {
 		// Default() 即产出归一后的单卷形态（SetDefaults 对 len==0/占位单卷再次兜底），
 		// 保证直接消费 Default() 的路径总能看到非空 Volumes。
 		Placement: "prefer-default",
-		Volumes:   []VolumeConfig{{Name: "default", Root: defaultStorageRoot}},
+		Volumes:   []VolumeConfig{{Name: "default", Root: DefaultStorageRoot}},
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},
@@ -51,7 +51,7 @@ func Default() *Config {
 			AutoTLS: true,
 		},
 		CORS: CORSConfig{
-			MaxAge: defaultMaxAge,
+			MaxAge: DefaultMaxAge,
 		},
 		Registration: RegistrationConfig{
 			Disable:         false,
@@ -190,7 +190,7 @@ func (c *Config) applyDefaultBasics() {
 		c.ApdexThreshold = 500 * time.Millisecond // SLO Apdex 阈值默认（0 = 未设 → 500ms）
 	}
 	if c.StorageRoot == "" {
-		c.StorageRoot = defaultStorageRoot
+		c.StorageRoot = DefaultStorageRoot
 	}
 	// max_upload_bytes 可配置（roadmap P0）：<=0 回落 1 GiB 默认（零回归）。
 	// 取值上限：普通上传上限受分块单文件上界约束（65536 块 × 最大块），此处不重复设上限

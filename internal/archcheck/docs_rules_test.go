@@ -154,7 +154,7 @@ func TestAgentsHardRulesStructure(t *testing.T) { // NOSONAR: S3776 — 门禁�
 		}
 	}
 	// 已移除的配置项不得再被呈现为「可配置」（`max_upload_bytes` 已于 roadmap P0 恢复可配，
-	// 见 pkg/server/config.go 的 MaxUploadBytes；此段仅保留对「已移除键」的历史防护——
+	// 见 pkg/server/config/config.go 的 MaxUploadBytes；此段仅保留对「已移除键」的历史防护——
 	// 现在该键合法，不再断言它不可配置）。
 	for _, f := range []string{"AGENTS.md", "CLAUDE.md", "docs/config.md", "docs/api.md"} {
 		b, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))

@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/llmgate"
 )
@@ -82,18 +81,6 @@ func truncateRunes(s string, maxLen int) string {
 	return string(r[:maxLen])
 }
 
-// AIInsightConfig 是 ai.insight 配置段（config.go 引用；默认关零回归）。
-type AIInsightConfig struct {
-	Enabled   bool          `yaml:"enabled" mapstructure:"enabled"`
-	Provider  string        `yaml:"provider" mapstructure:"provider"`
-	BaseURL   string        `yaml:"base_url" mapstructure:"base_url"`
-	APIKeyRef string        `yaml:"api_key_ref" mapstructure:"api_key_ref"`
-	APIKey    string        `yaml:"-" mapstructure:"-"`
-	Model     string        `yaml:"model" mapstructure:"model"`
-	Timeout   time.Duration `yaml:"timeout" mapstructure:"timeout"`
-	CacheTTL  time.Duration `yaml:"cache_ttl" mapstructure:"cache_ttl"`
-}
-
 // newAIInsightFromConfig 从 AIInsightConfig 装配洞察器：未启用 → nil（零回归）；
 // enabled=true 但 APIKeyRef 解析为空 → Warn（可观测降级）+ nil。
 // NewAIInsightFromConfig 从配置装配洞察器（导出供装配层；enabled=false → nil 零回归）。
@@ -119,16 +106,4 @@ func NewAIInsightFromConfig(cfg AIInsightConfig, cacheDir string, logger *slog.L
 		cache:  newInsightCache(cacheDir, logger),
 		logger: logger,
 	}
-}
-
-// AISearchConfig 是 ai.search 语义搜索配置（roadmap 11.9-④；默认关零回归）。
-type AISearchConfig struct {
-	Enabled  bool   `yaml:"enabled" mapstructure:"enabled"`
-	CacheDir string `yaml:"-" mapstructure:"-"`
-	TopK     int    `yaml:"topk" mapstructure:"topk"`
-}
-
-// AIPrivacyConfig 是 ai.privacy 配置段（roadmap 11.9-⑧；默认关零回归）。
-type AIPrivacyConfig struct {
-	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
 }

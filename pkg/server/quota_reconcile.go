@@ -4,7 +4,6 @@
 package server
 
 import (
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -12,12 +11,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	volcapacity "github.com/cocomhub/sproxy/pkg/volume/capacity"
 )
-
-// segNameOfBucketPath 取 bucket_limits 路径键最后一段（段名校验用）。
-// 仅校验段名合法性——首段与功能桶根同名已由 Validate 显式拒绝（防覆盖）。
-func segNameOfBucketPath(path string) string {
-	return filepath.Base(path)
-}
 
 // quota_reconcile.go 实现启动/周期扫描后的 per-tenant 配额 Scope 校准：
 // ScanAndRecalculate 把磁盘按租户桶归集的字节数交给 reconcileQuotaScopes，

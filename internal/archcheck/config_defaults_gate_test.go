@@ -10,7 +10,7 @@ package archcheck
 // `disable_xxx`），string 默认空串。默认 true 的 bool 让「显式关闭」与「未配置」不可区分；
 // 非空 string 默认让「用户没配」与「用户配了这个值」不可区分。
 //
-// 判据：`pkg/server/config_defaults.go` 的 `Default()` 内，结构体字面量里**字面量**为
+// 判据：`pkg/server/config/defaults.go` 的 `Default()` 内，结构体字面量里**字面量**为
 // `true` 或**非空字符串**的字段即「特化默认值」，必须登记在 `config_defaults.tsv`
 // （每条写理由）。登记表与实际情况必须**完全一致**（新增须登记、移除须删行）——与 R46 同一
 // 棘轮语义，避免「登记了但没人清理」。
@@ -43,11 +43,11 @@ type flaggedDefault struct {
 // scanConfigDefaults 扫描 Default() 的结构体字面量，返回特化默认值集合（按路径排序）。
 func scanConfigDefaults(t *testing.T) []flaggedDefault {
 	t.Helper()
-	path := filepath.Join(moduleRoot(t), "pkg", "server", "config_defaults.go")
+	path := filepath.Join(moduleRoot(t), "pkg", "server", "config", "defaults.go")
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
-		t.Fatalf("解析 config_defaults.go: %v", err)
+		t.Fatalf("解析 config/defaults.go: %v", err)
 	}
 	var fn *ast.FuncDecl
 	for _, d := range f.Decls {
@@ -57,7 +57,7 @@ func scanConfigDefaults(t *testing.T) []flaggedDefault {
 		}
 	}
 	if fn == nil {
-		t.Fatal("config_defaults.go 中找不到 Default()（门禁判据失效，须更新本门禁）")
+		t.Fatal("config/defaults.go 中找不到 Default()（门禁判据失效，须更新本门禁）")
 	}
 	var out []flaggedDefault
 	var walk func(n ast.Node, prefix []string)
@@ -167,7 +167,7 @@ func TestConfigDefaultsBaselineHelper(t *testing.T) {
 	found := scanConfigDefaults(t)
 	var b strings.Builder
 	b.WriteString("# 配置特化默认值登记（R43：新增默认值必须安全或在此登记理由）\n")
-	b.WriteString("# 判据：pkg/server/config_defaults.go 的 Default() 里字面量 true / 非空字符串的字段。\n")
+	b.WriteString("# 判据：pkg/server/config/defaults.go 的 Default() 里字面量 true / 非空字符串的字段。\n")
 	b.WriteString("# 格式：字段路径<TAB>理由\n")
 	for _, f := range found {
 		b.WriteString(f.Path + "\t历史默认值（" + f.Value + "）；新增字段请改用安全默认或反转语义\n")

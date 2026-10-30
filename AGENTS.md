@@ -37,6 +37,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 | 审计（唯一提供方） | `pkg/audit` | `Service`/`Scope`/`Entry`/`Journal`；`ArchiveSealed`+`SegmentArchiver`；`QueryCold`/`OpenRange`；`OnSeal` | 归档与冷读均经 `pkg/sync.FS`；**不要**另造 sink/store 接口 ✗ |
 | 云下载/转存内核 | `pkg/transfer` + `pkg/cloud` | `Execute` / `writeUnique` / 预处理器选型 | 归档=转存+预处理，复用同一内核 |
 | HTTP 传输隔离 | `pkg/netutil` | `IsolatedTransport()` | 禁裸 `&http.Transport{}`（R19） |
+| 服务端配置 schema / 校验 / 默认值 | `pkg/server/config` | `Config` / `Default` / `SetDefaults` / `Validate` / `LoadFromProvider` | **server 作用域**（仅 sproxy 服务端）；`pkg/server/config_alias.go` 是迁移期兼容层（新代码直接 import 本包） |
 
 ### 收敛原则（必须遵守）
 
@@ -54,6 +55,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 7. **门禁兜底**：新增直连点会被 R19（Transport）/R25（用户内容经 Root）/R26（`NewLocalFS` 白名单）
    /R34/R36（配额/等待）/R37（恢复）/R38（路由）拦住 ⇒ 先想"扩展能力"，而不是加白名单 ✗；
    确需例外时必须写明「为什么可以不经既有能力」。
+8. **命名必须编码作用域**：`pkg/<x>` = 通用能力（server/client/tools 均可消费）；只在服务端有意义的进 `pkg/server/<x>`；只服务单个二进制的进 `cmd/<bin>/internal/<x>`。判据可执行：被 `cmd/sclient`/`cmd/sproxy-mcp` 可达才可留 `pkg/`（详见 `docs/architecture.md` §作用域分层，门禁 R6）。
 
 ## 执行偏好
 
@@ -175,7 +177,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     必须使用 `pkg/units/sizex.ByteSize`（"1GiB" 人类可读或纯数字字节；支持 YAML/viper UnmarshalText、
     JSON 字符串/数字 UnmarshalJSON、CLI flag Set/Type、String()、Bytes()），**禁止在 config/Options 结构
     裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；
-    时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config.go` 的
+    时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config/config.go` 的
     `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循。
 20. **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为
     （第三方 CLI/REST/直链/CDN、网络边界、外部服务语义等）必须**逐项测试锁定**——每项外部契约
@@ -433,7 +435,7 @@ type Conn interface {
 ### 隧道
 - `POST /tunnel` — `tunnel.NewLocalHandler(nil, localMux)`，AES-256-GCM 加密的请求转发
 
-## 配置（`pkg/server/config.go`）
+## 配置（`pkg/server/config/`）
 
 ### 加载方式（viper，来自 `cmd/sproxy/root.go`）
 

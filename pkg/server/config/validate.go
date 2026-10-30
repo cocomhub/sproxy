@@ -3,13 +3,13 @@
 
 // config_validate.go 是**配置校验**：Validate() 逐段检查安全性/自洽性（监听地址、TLS 与 mTLS 组合、
 // 凭据与主密钥、卷 ACL、配额、远程读写与身份 pinning、传输与传输回退等），失败一律以可读错误返回；
-// 以及 isLoopbackHost（回环判定，被远程面校验复用）。
+// 以及 IsLoopbackHost（回环判定，被远程面校验复用）。
 //
 // 这一节是**唯一**能拒绝非法配置的地方——新增配置项时若只加默认值不加校验，非法值会一路走到运行时。
 //
 // 拆分说明见 config.go 顶部。
 
-package server
+package config
 
 import (
 	"encoding/hex"
@@ -31,9 +31,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 )
 
-// validateIPList 校验一条 IP/CIDR 列表并原地归一：CIDR 原样（ParseCIDR 优先），
+// ValidateIPList 校验一条 IP/CIDR 列表并原地归一：CIDR 原样（ParseCIDR 优先），
 // 纯 IP 归一为 /32（IPv4）/ /128（IPv6）。非法条目返回错误（fail-closed，启动拒绝）。
-func validateIPList(list []string, name string) error {
+func ValidateIPList(list []string, name string) error {
 	for i, s := range list {
 		if strings.TrimSpace(s) == "" {
 			return fmt.Errorf("%s[%d] 为空条目，请配置合法 IP/CIDR", name, i)
@@ -257,7 +257,7 @@ func validateVaultCredentialStore(c *Config) error {
 	if u.Host == "" {
 		return fmt.Errorf("credential_store.vault.addr=%q 缺少 host", c.CredentialStore.Vault.Addr)
 	}
-	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+	if u.Scheme == "http" && !IsLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("credential_store.vault.addr=%q 非 loopback 必须使用 https（防 Vault token/凭据明文传输）", c.CredentialStore.Vault.Addr)
 	}
 	if c.CredentialStore.Vault.KeyName == "" {
@@ -437,7 +437,7 @@ func validateSyncRemoteURL(i int, r SyncRemoteConfig) error {
 	if u.Host == "" {
 		return fmt.Errorf("sync_remotes[%d].url 缺少 host: %q", i, r.URL)
 	}
-	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+	if u.Scheme == "http" && !IsLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
 	}
 	return nil
@@ -491,7 +491,7 @@ func validateFederationPeerURL(i int, p FederationPeerConfig) (string, *url.URL,
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", nil, fmt.Errorf("hub.federation.peers[%d].url scheme %q 无效，仅允许 http/https", i, u.Scheme)
 	}
-	if p.URL != "" && !isLoopbackHost(u.Hostname()) && (p.AccessKey == "" || p.AccessKeySecret == "") {
+	if p.URL != "" && !IsLoopbackHost(u.Hostname()) && (p.AccessKey == "" || p.AccessKeySecret == "") {
 		// 远程 peering 必须显式成对配置凭据（AccessKey + AccessKeySecret）——
 		// 缺失任一即无有效签名，未配置时无认证直连远程 hub 属暴露面，fail-closed 拒绝。
 		return "", nil, fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须同时配置 access_key 与 access_key_secret", i, p.URL)
@@ -517,7 +517,7 @@ func validateFederationPeerSecret(i int, p FederationPeerConfig) error {
 // validateFederationPeerTLS 校验联邦 peer 的 TLS 安全边界（S-Medium 闭环）：
 // insecure_skip_verify 仅限 loopback peer；ca_file 与 insecure_skip_verify 互斥且必须可读。
 func validateFederationPeerTLS(i int, p FederationPeerConfig, u *url.URL) error {
-	if p.InsecureSkipVerify && !isLoopbackHost(u.Hostname()) {
+	if p.InsecureSkipVerify && !IsLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("hub.federation.peers[%d].insecure_skip_verify 仅允许用于 loopback peer（本机自签开发）；远程 peering 应配置受信任证书或 ca_file（受信 CA）", i)
 	}
 	// ca_file 与 insecure_skip_verify 互斥（ca_file 是严格校验，跳过校验与其冲突）。
@@ -708,13 +708,13 @@ func (c *Config) validateRemoteRead() error {
 	if err != nil {
 		return fmt.Errorf("remote_read.listen 格式非法: %w", err)
 	}
-	if !isLoopbackHost(host) {
+	if !IsLoopbackHost(host) {
 		return fmt.Errorf("remote_read.listen 必须绑定 loopback（远程访问应经 mesh 而非直连）: %q", c.RemoteRead.Listen)
 	}
 	if c.RemoteRead.HandshakeTimeout <= 0 {
 		return fmt.Errorf("remote_read.handshake_timeout 必须为正，当前 %v", c.RemoteRead.HandshakeTimeout)
 	}
-	if len(readListenerPins(c)) == 0 {
+	if len(ReadListenerPins(c)) == 0 {
 		return fmt.Errorf("remote_read.enabled 但未配置任何 volumes[].acl.mesh_readers —— 无 pin 将接受任意对端，拒绝启动（fail-closed）")
 	}
 	return nil
@@ -738,13 +738,13 @@ func (c *Config) validateRemoteWrite() error {
 	if err != nil {
 		return fmt.Errorf("remote_write.listen 格式非法: %w", err)
 	}
-	if !isLoopbackHost(host) {
+	if !IsLoopbackHost(host) {
 		return fmt.Errorf("remote_write.listen 必须绑定 loopback（远程访问应经 mesh 而非直连）: %q", c.RemoteWrite.Listen)
 	}
 	if c.RemoteWrite.HandshakeTimeout <= 0 {
 		return fmt.Errorf("remote_write.handshake_timeout 必须为正，当前 %v", c.RemoteWrite.HandshakeTimeout)
 	}
-	if len(meshWriterFingerprints(c)) == 0 {
+	if len(MeshWriterFingerprints(c)) == 0 {
 		return fmt.Errorf("remote_write.enabled 但没有任何 volumes[].acl.mesh_readers 条目的 scope 授予写（write|rw）—— 无写条目时写面恒拒且无 pin 可接受，拒绝启动（fail-closed）")
 	}
 	return nil
@@ -810,10 +810,10 @@ func validateBucketLimitKey(path string, limit ByteSize) error {
 	if isBadBucketLimitKey(n) {
 		return fmt.Errorf("bucket_limits 键 %q 非法：必须为相对租户根路径（如 user/videos/hd），不允许空、前导/尾部斜杠或 .. 段", path)
 	}
-	if !storage.ValidSegmentName(segNameOfBucketPath(n)) {
+	if !storage.ValidSegmentName(filepath.Base(n)) {
 		return fmt.Errorf("bucket_limits 键 %q 含非法段（拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名与非法字符）", path)
 	}
-	if slices.Contains(quotaBucketNames, n) {
+	if slices.Contains(storage.QuotaBucketNames(), n) {
 		return fmt.Errorf("bucket_limits 键 %q 与功能桶根重叠：功能桶根上限由租户总 owner_quotas 单一执行，不支持单独 bucket_limits 覆盖", path)
 	}
 	// 键首段必须为 "user"（分层配额仅挂 user 桶 children 下）。cloud/archive/chunk/version
@@ -918,10 +918,10 @@ func (c *Config) validateBasics() error {
 // 逐条 ParseCIDR（纯 IP 归一 /32、/128），非法 → 响亮拒绝启动（fail-closed，
 // 不静默忽略——坏 CIDR 会让白名单永不全命中或恒 403，无从排查）。
 func (c *Config) validateAuthIPs() error {
-	if err := validateIPList(c.Auth.AllowIPs, "auth.allow_ips"); err != nil {
+	if err := ValidateIPList(c.Auth.AllowIPs, "auth.allow_ips"); err != nil {
 		return err
 	}
-	if err := validateIPList(c.Auth.TrustedProxies, "auth.trusted_proxies"); err != nil {
+	if err := ValidateIPList(c.Auth.TrustedProxies, "auth.trusted_proxies"); err != nil {
 		return err
 	}
 	return nil
@@ -1206,10 +1206,10 @@ func validateMirrorTargets(v *VolumeConfig, seen map[string]bool) error {
 	return nil
 }
 
-// parseMaintenanceWindow 把调度器维护窗口配置解析为窗口内判定函数。
+// ParseMaintenanceWindow 把调度器维护窗口配置解析为窗口内判定函数。
 // 未启用或 start/end 非法 → nil（恒执行，零回归）。调用方（装配层）在
 // Validate 之后调用（配置已校验 HH:MM）。End<=Start 视为跨午夜窗口。
-func parseMaintenanceWindow(c SchedulerConfig) func(time.Time) bool {
+func ParseMaintenanceWindow(c SchedulerConfig) func(time.Time) bool {
 	w := c.MaintenanceWindow
 	if !w.Enabled || w.Start == "" || w.End == "" {
 		return nil
@@ -1294,9 +1294,9 @@ func validEnvName(s string) bool {
 	return true
 }
 
-// isLoopbackHost 判断主机名是否为 loopback（IPv4/IPv6 loopback 或 localhost）。
+// IsLoopbackHost 判断主机名是否为 loopback（IPv4/IPv6 loopback 或 localhost）。
 // 用于联邦 peering 的安全边界：默认 loopback 安全面，远程 peering 需显式配置。
-func isLoopbackHost(host string) bool {
+func IsLoopbackHost(host string) bool {
 	if host == "" {
 		return false
 	}

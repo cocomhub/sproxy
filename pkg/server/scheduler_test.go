@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/config"
+
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -192,10 +194,10 @@ func TestScheduler_RegisterValidation(t *testing.T) {
 // 同日窗口正常判定。
 func TestParseMaintenanceWindow(t *testing.T) {
 	t.Parallel()
-	if parseMaintenanceWindow(SchedulerConfig{}) != nil {
+	if config.ParseMaintenanceWindow(SchedulerConfig{}) != nil {
 		t.Fatal("未启用窗口应返回 nil（恒执行，零回归）")
 	}
-	in := parseMaintenanceWindow(SchedulerConfig{MaintenanceWindow: MaintenanceWindowConfig{
+	in := config.ParseMaintenanceWindow(SchedulerConfig{MaintenanceWindow: MaintenanceWindowConfig{
 		Enabled: true, Start: "22:00", End: "06:00",
 	}})
 	if in == nil {
@@ -212,7 +214,7 @@ func TestParseMaintenanceWindow(t *testing.T) {
 			t.Fatalf("跨午夜窗口 22:00-06:00 在 %02d:%02d 判定=%v want %v", tc.h, tc.m, got, tc.want)
 		}
 	}
-	in2 := parseMaintenanceWindow(SchedulerConfig{MaintenanceWindow: MaintenanceWindowConfig{
+	in2 := config.ParseMaintenanceWindow(SchedulerConfig{MaintenanceWindow: MaintenanceWindowConfig{
 		Enabled: true, Start: "02:00", End: "04:00",
 	}})
 	if !in2(time.Date(2026, 9, 24, 3, 0, 0, 0, time.Local)) {

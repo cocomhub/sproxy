@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package config
 
 import (
 	"path/filepath"
@@ -15,6 +15,10 @@ import (
 // 在源码上一眼可分，且不触发 .githooks/pre-commit 的 check-loopback 按行字面量扫描
 // （该扫描 grep `Listen.*<host>`，目的是拦住真的绑非回环地址的测试）。
 const (
+	// 跨节点只读面的测试主体（与 pkg/server 侧同名常量同值，独立定义避免测试跨包依赖）。
+	testReaderNodeA = "nodeA"
+	testReaderOwner = "alice"
+
 	cfgHostWildcard  = "0.0.0.0"
 	cfgHostLocalhost = "localhost"
 )

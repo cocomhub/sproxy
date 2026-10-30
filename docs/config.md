@@ -10,7 +10,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 1. CLI 旗标（`--addr`、`--storage-root`）
 2. 环境变量（前缀 `SPROXY_`，例如 `SPROXY_ADDR=":18083"`）
 3. 配置文件 YAML（`--config sproxy.yaml`，默认 `sproxy.yaml`）
-4. Default()（`pkg/server/config.go`）
+4. Default()（`pkg/server/config/config.go`）
 
 配置文件不存在时不报错，仅使用环境变量与默认值。
 

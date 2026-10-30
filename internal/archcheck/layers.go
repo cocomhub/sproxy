@@ -22,13 +22,17 @@ var Managed = map[string]bool{
 	// 可信卷 FileMeta 模型/计算/校验子包（master 新增）：被 pkg/files、pkg/cloud、
 	// pkg/sync 消费；零 pkg/* 内部依赖除 storage/volume（G0）⇒ G0。
 	// 同时承载 FileMeta.Extra 的字段 schema/校验（extra.go：白名单+类型+长度）。
-	"github.com/cocomhub/sproxy/pkg/files/meta":           true,
-	"github.com/cocomhub/sproxy/pkg/syncmgr":              true,
-	"github.com/cocomhub/sproxy/pkg/downloader":           true,
-	"github.com/cocomhub/sproxy/pkg/cloud":                true,
-	"github.com/cocomhub/sproxy/pkg/compressx":            true, // 转存内核的预处理依赖（历史未登记，随 pkg/transfer 一并纳入）
-	"github.com/cocomhub/sproxy/pkg/transfer":             true, // 统一转存内核（pkg/cloud 转存路径复用其读回校验）
-	"github.com/cocomhub/sproxy/pkg/remote":               true,
+	"github.com/cocomhub/sproxy/pkg/files/meta": true,
+	"github.com/cocomhub/sproxy/pkg/syncmgr":    true,
+	"github.com/cocomhub/sproxy/pkg/downloader": true,
+	"github.com/cocomhub/sproxy/pkg/cloud":      true,
+	"github.com/cocomhub/sproxy/pkg/compressx":  true, // 转存内核的预处理依赖（历史未登记，随 pkg/transfer 一并纳入）
+	"github.com/cocomhub/sproxy/pkg/transfer":   true, // 统一转存内核（pkg/cloud 转存路径复用其读回校验）
+	"github.com/cocomhub/sproxy/pkg/remote":     true,
+	// 本工作新增（server 治理 S1）：服务端配置 schema/校验/默认值/加载。
+	// **server 作用域**（只在 sproxy 服务端进程有意义），故路径在 pkg/server/ 子树下，
+	// 由 R4（pkg/** 非子树不得导入）与 R5（子包不得导入装配根）共同约束。
+	"github.com/cocomhub/sproxy/pkg/server/config":        true,
 	"github.com/cocomhub/sproxy/pkg/sync/httptransport":   true,
 	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil": true,
 }
@@ -97,6 +101,7 @@ var Levels = map[string]int{
 	// sizex 后 R3 才暴露（2026-10-07 登记）。
 	"github.com/cocomhub/sproxy/pkg/units/sizex": 0,
 	"github.com/cocomhub/sproxy/pkg/volume":      0,
+	"github.com/cocomhub/sproxy/pkg/clustercred": 0,
 	// 本工作新增（server 域抽取 S1）：同步任务管理器，从 pkg/server 的子包提升为顶层。
 	// 零 pkg/* 内部依赖（实测），故 G0。
 	"github.com/cocomhub/sproxy/pkg/syncmgr": 0,
@@ -118,10 +123,17 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/transfer": 1,
 	"github.com/cocomhub/sproxy/pkg/socks5":   1,
 	"github.com/cocomhub/sproxy/pkg/tunnel":   1,
+	// 中继 Hub：只依赖 G0/G1（accesskey/netutil/plugin/sproxysig/mux/xfer）⇒ G1。
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub": 1,
+	// 卷级容量记账：依赖 volume/registry(L2)（账本持久化走卷注册表）⇒ G2。
+	"github.com/cocomhub/sproxy/pkg/volume/capacity": 2,
 
 	// ---- G2 装配层 ----
 	"github.com/cocomhub/sproxy/pkg/client": 2,
 	"github.com/cocomhub/sproxy/pkg/server": 2,
+	// 服务端配置 schema（server 作用域）：只依赖 G0/G1 与装配层同级能力 ⇒ G2
+	// （与 pkg/server 同层：装配根 import 它，同层合法）。
+	"github.com/cocomhub/sproxy/pkg/server/config": 2,
 
 	// ---- 子包（L 取父域之上，由依赖实测确定）----
 	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
@@ -131,6 +143,8 @@ var Levels = map[string]int{
 	// volume 域子包：可信卷装饰器（meta sidecar + 校验）。被 registry（U2 内置默认装饰器）
 	// 与装配层消费；只依赖 storage/volume/meta/sync ⇒ ≤G2。registry 依赖它（子包间合法）。
 	"github.com/cocomhub/sproxy/pkg/volume/trusted": 2,
+	// 封装卷装饰器：依赖 volume/registry(L2) 与 volume/capacity(L1) ⇒ G2。
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure": 2,
 	// tunnel 域的**传输原语**子包（由 R3 强制登记：新包 pkg/remote 直接导入 mux/builtin）。
 	// 它们**刻意不进 ParentDomain**——不是「真子领域」，而是跨域复用的传输原语
 	// （mux=虚拟流多路复用、xfer=Conn 抽象、builtin=net.Conn 桥），
@@ -175,6 +189,9 @@ var Levels = map[string]int{
 var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/storage/capacity": "github.com/cocomhub/sproxy/pkg/storage",
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  "github.com/cocomhub/sproxy/pkg/volume",
+	// 服务端配置是 pkg/server 的子包：只允许 pkg/server 子树与装配层导入
+	// （Global 包反向导入它会被 R2 拦下——这是「server 作用域」的可执行边界）。
+	"github.com/cocomhub/sproxy/pkg/server/config": "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。

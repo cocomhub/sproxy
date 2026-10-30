@@ -12,22 +12,8 @@ import (
 	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
-// defaultMaxAge 是 CORS 预检请求的默认缓存时间（秒）。
-const defaultMaxAge = 86400
-
 // defaultAllowedHeaders 是默认允许的请求头列表。
 const defaultAllowedHeaders = "Authorization, Content-Type, X-File-Checksum, X-File-Path, X-File-MTime, Range"
-
-// CORSConfig 定义 CORS 跨域配置。
-type CORSConfig struct {
-	// AllowedOrigins 允许的跨域来源列表，设置 ["*"] 允许任意来源。
-	// 为空时 CORS 中间件直接透传（保持向后兼容）。
-	AllowedOrigins []string `yaml:"allowed_origins" mapstructure:"allowed_origins"`
-	// AllowedHeaders 允许的请求头列表，为空时使用默认值。
-	AllowedHeaders []string `yaml:"allowed_headers" mapstructure:"allowed_headers"`
-	// MaxAge 预检请求缓存时间（秒），默认 86400。
-	MaxAge int `yaml:"max_age" mapstructure:"max_age"`
-}
 
 // CORSMiddleware 返回一个 HTTP 中间件，根据配置添加 CORS 头部并处理 OPTIONS 预检请求。
 // 支持的方法：GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS。
@@ -43,7 +29,7 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 	log := slogutil.Default(logger)
 	maxAge := cfg.MaxAge
 	if maxAge <= 0 {
-		maxAge = defaultMaxAge
+		maxAge = DefaultMaxAge
 	}
 
 	allowedHeaders := cfg.AllowedHeaders

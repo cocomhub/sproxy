@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package config
 
 import (
 	"strings"
@@ -100,7 +100,7 @@ func TestVolumesConfig_Validate(t *testing.T) {
 
 // TestVolumesConfig_Validate_KeepsExplicitRootFromStorageRoot 锁定 M-4 红线（任务 1 复审遗留
 // Minor）：storage_root 与显式 volumes[].root 并存时，归一（SetDefaults）与 Validate **绝不**
-// 以 storage_root 覆写显式非空 root——即便显式 root 恰为缺省占位 defaultStorageRoot（与合成
+// 以 storage_root 覆写显式非空 root——即便显式 root 恰为缺省占位 DefaultStorageRoot（与合成
 // 单卷同值，最易被误判为「未配」而静默改根）。空 root（YAML 未写）作为对照：仅此形态才跟随
 // storage_root。表驱动覆盖三种代表性形态。
 func TestVolumesConfig_Validate_KeepsExplicitRootFromStorageRoot(t *testing.T) {
@@ -109,7 +109,7 @@ func TestVolumesConfig_Validate_KeepsExplicitRootFromStorageRoot(t *testing.T) {
 		volRoot  string // volumes[0].root；"" 表示 YAML 未写 root
 		wantRoot string
 	}{
-		{"显式占位 root=defaultStorageRoot", defaultStorageRoot, defaultStorageRoot},
+		{"显式占位 root=DefaultStorageRoot", DefaultStorageRoot, DefaultStorageRoot},
 		{"显式自定义 root=/mnt/x", "/mnt/x", "/mnt/x"},
 		{"空 root → 跟随 storage_root", "", "/data"},
 	}

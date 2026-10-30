@@ -8,11 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/clustercred"
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -81,7 +80,7 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 	if err != nil {
 		return nil, fmt.Errorf("remote_read 监听失败: %w", err)
 	}
-	if host, _, sErr := net.SplitHostPort(ln.Addr().String()); sErr != nil || !isLoopbackHost(host) {
+	if host, _, sErr := net.SplitHostPort(ln.Addr().String()); sErr != nil || !config.IsLoopbackHost(host) {
 		_ = ln.Close()
 		return nil, fmt.Errorf("remote_read 拒绝启动：实际监听地址非 loopback (%s)", ln.Addr())
 	}
@@ -90,7 +89,7 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 		_ = ln.Close()
 		return nil, fmt.Errorf("remote_read 身份加载失败: %w", err)
 	}
-	pins := readListenerPins(cfg)
+	pins := config.ReadListenerPins(cfg)
 	if len(pins) == 0 {
 		_ = ln.Close()
 		return nil, fmt.Errorf("remote_read 拒绝启动：无任何 mesh_readers 指纹（fail-closed，无 pin 将接受任意对端）")
@@ -201,57 +200,4 @@ func (l *RemoteReadListener) serveReadConn(ctx context.Context, c net.Conn, id *
 			l.logger.Warn("remote_read 连接结束", "remote", c.RemoteAddr().String(), "error", sErr)
 		}
 	}
-}
-
-// meshReaderFingerprints 返回所有卷 mesh_readers 的指纹（归一化后去重）。
-//
-// 归一化走 tunnel.ParseFingerprint（权威规范形）；解析失败的条目退回「去空白 + 小写」
-// 原样保留——非法指纹已由 Config.Validate 响亮拒绝，此处不静默丢弃（丢弃会让
-// 「配置了一条却未生效」变成静默失败）。
-func meshReaderFingerprints(cfg *Config) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 4)
-	for _, v := range cfg.Volumes {
-		if v.ACL == nil {
-			continue
-		}
-		for _, mr := range v.ACL.MeshReaders {
-			fp := strings.ToLower(strings.TrimSpace(mr.Fingerprint))
-			if norm, err := tunnel.ParseFingerprint(mr.Fingerprint); err == nil {
-				fp = norm
-			}
-			if fp == "" {
-				continue
-			}
-			if _, dup := seen[fp]; dup {
-				continue
-			}
-			seen[fp] = struct{}{}
-			out = append(out, fp)
-		}
-	}
-	return out
-}
-
-// readListenerPins 返回 remote_read listener 信任的对端指纹集合 = mesh_readers 指纹 ∪
-// 集群出口凭证 Recipient（评审 M3：纯凭证部署——无 mesh_readers 但配置了凭证池——应
-// 可启动；凭证 Recipient 是签发方授权的出口指纹，与 mesh_readers 同为「接受的对端
-// 白名单」，纳入双向 pin 保持「无 pin 就不接受任意对端」安全论证不变）。
-func readListenerPins(cfg *Config) []string {
-	out := meshReaderFingerprints(cfg)
-	seen := make(map[string]struct{}, len(out))
-	for _, p := range out {
-		seen[p] = struct{}{}
-	}
-	for _, ec := range cfg.Cluster.Credentials {
-		if c, perr := clustercred.ParseCredential(ec.Encoded); perr == nil && c.Recipient != "" {
-			fp := strings.ToLower(strings.TrimSpace(c.Recipient))
-			if _, dup := seen[fp]; dup {
-				continue
-			}
-			seen[fp] = struct{}{}
-			out = append(out, fp)
-		}
-	}
-	return out
 }

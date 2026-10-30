@@ -19,6 +19,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -89,7 +90,7 @@ func (h *Handlers) meshStatus() MeshStatus {
 		st.RemoteRead = &MeshFaceStatus{
 			Enabled: true,
 			Addr:    addr,
-			Pinned:  len(readListenerPins(cfg)),
+			Pinned:  len(config.ReadListenerPins(cfg)),
 		}
 	}
 	if cfg.RemoteWrite.Enabled {
@@ -100,7 +101,7 @@ func (h *Handlers) meshStatus() MeshStatus {
 		st.RemoteWrite = &MeshFaceStatus{
 			Enabled: true,
 			Addr:    addr,
-			Pinned:  len(meshWriterFingerprints(cfg)),
+			Pinned:  len(config.MeshWriterFingerprints(cfg)),
 		}
 	}
 	if cfg.Mesh.Node.Enabled {

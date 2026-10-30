@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package config
 
 import (
 	"os"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"gopkg.in/yaml.v3"
 )
@@ -367,21 +368,6 @@ func TestLoadFromProvider_TCPTransport(t *testing.T) {
 	}
 }
 
-// mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
-type mapProvider struct {
-	m map[string]any
-}
-
-func (p mapProvider) Unmarshal(obj any) error {
-	// 使用 yaml 作为中介：map → yaml bytes → struct
-	// Config 结构体使用 yaml tag，所以 yaml.Unmarshal 能正确匹配字段
-	data, err := yaml.Marshal(p.m)
-	if err != nil {
-		return err
-	}
-	return yaml.Unmarshal(data, obj)
-}
-
 func TestLoadFromProvider_DefaultsOnly(t *testing.T) {
 	t.Parallel()
 	p := mapProvider{m: map[string]any{}}
@@ -443,7 +429,7 @@ func TestSaveConfig_ReadOnlyDir(t *testing.T) {
 	}
 	t.Parallel()
 
-	roDir, cleanup := makeReadOnlyDir(t)
+	roDir, cleanup := testutil.MakeReadOnlyDir(t)
 	defer cleanup()
 
 	cfg := Default()
@@ -1228,4 +1214,19 @@ func TestConfig_ProtocolSaltKey_Parse(t *testing.T) {
 	if cfg.ProtocolSaltKey != strings.Repeat("ab", 32) {
 		t.Fatalf("protocol_salt_key 解析失败: %q", cfg.ProtocolSaltKey)
 	}
+}
+
+// mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
+type mapProvider struct {
+	m map[string]any
+}
+
+func (p mapProvider) Unmarshal(obj any) error {
+	// 使用 yaml 作为中介：map → yaml bytes → struct
+	// Config 结构体使用 yaml tag，所以 yaml.Unmarshal 能正确匹配字段
+	data, err := yaml.Marshal(p.m)
+	if err != nil {
+		return err
+	}
+	return yaml.Unmarshal(data, obj)
 }

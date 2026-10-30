@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
+
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -80,7 +82,7 @@ func TestChecksumStore_SaveError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("只读目录在 Windows 上不阻止文件写入")
 	}
-	roDir, cleanup := makeReadOnlyDir(t)
+	roDir, cleanup := testutil.MakeReadOnlyDir(t)
 	defer cleanup()
 
 	// 卷句柄开在**只读目录的父目录**（OpenRoot 需要可写：它要写卷级 LAYOUT_VERSION），

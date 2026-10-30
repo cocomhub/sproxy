@@ -16,7 +16,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1117,25 +1116,6 @@ func newTestServerWithAllRoutesCredsMany(t *testing.T, modifyCfg func(*Config), 
 		_ = h.Close()
 	})
 	return ts.URL, &cfgPtr
-}
-
-// makeReadOnlyDir 创建一个只读目录（无写权限），用于测试文件写入失败路径。
-func makeReadOnlyDir(t *testing.T) (string, func()) {
-	t.Helper()
-	d := t.TempDir()
-
-	roDir := filepath.Join(d, "readonly")
-	if err := os.Mkdir(roDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(roDir, 0444); err != nil {
-			t.Fatalf("chmod: %v", err)
-		}
-		cleanup := func() { os.Chmod(roDir, 0755) }
-		return roDir, cleanup
-	}
-	return d, func() {}
 }
 
 // ---- healthz / version ----

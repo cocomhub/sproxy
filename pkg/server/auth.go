@@ -20,6 +20,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/authn"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
@@ -194,26 +195,6 @@ func (a *RingAuthenticator) Authenticate(_ context.Context, r *http.Request) (*P
 		}
 	}
 	return p, nil
-}
-
-// APIKey 表示一个 API 密钥及其权限。
-type APIKey struct {
-	Name       string `yaml:"name" mapstructure:"name"`
-	Key        string `yaml:"key" mapstructure:"key"`
-	Permission string `yaml:"permission" mapstructure:"permission"` // "read" 或 "write"；空字符串默认按 "write" 处理
-}
-
-const (
-	// PermissionRead 表示只读权限。
-	PermissionRead = "read"
-	// PermissionWrite 表示读写权限。
-	PermissionWrite = "write"
-)
-
-// APIKeyConfig 多用户 API 密钥配置。
-type APIKeyConfig struct {
-	Enabled bool     `yaml:"enabled" mapstructure:"enabled"`
-	Keys    []APIKey `yaml:"keys" mapstructure:"keys"`
 }
 
 // authResult 表示 API key 匹配结果。
@@ -610,7 +591,7 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func (h *Handlers) ipGateAllowed(w http.ResponseWriter, r *http.Request, cfg *Config) bool {
 	if len(cfg.Auth.AllowIPs) > 0 {
 		ip := h.clientIPFromRequest(r)
-		if !inAnyNet(net.ParseIP(ip), parseIPNets(cfg.Auth.AllowIPs)) {
+		if !inAnyNet(net.ParseIP(ip), netutil.ParseIPNets(cfg.Auth.AllowIPs)) {
 			h.log().WarnContext(r.Context(), "auth: ip not allowed",
 				"remote", r.RemoteAddr, "ip", ip, "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "forbidden: ip not allowed", http.StatusForbidden)

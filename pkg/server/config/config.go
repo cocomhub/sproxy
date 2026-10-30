@@ -12,7 +12,7 @@
 // 读源码的顺序建议：先本文件的 Config 结构体（这决定一份配置能写什么），再看
 // config_defaults.go（没写时是什么）与 config_validate.go（写了什么会被拒绝）。
 
-package server
+package config
 
 import (
 	"fmt"
@@ -636,9 +636,9 @@ type RotationConfig struct {
 // （base64 编码 32B）。master_key_file 非空时优先读文件；仅文件未配置时读本变量。
 const CredentialMasterKeyEnv = "SPROXY_CREDENTIAL_MASTER_KEY"
 
-// defaultStorageRoot 是 storage_root 与合成默认卷的缺省挂载根。Default()/SetDefaults()
+// DefaultStorageRoot 是 storage_root 与合成默认卷的缺省挂载根。Default()/SetDefaults()
 // 共用同一常量（单一事实源），避免魔数在多处漂移。
-const defaultStorageRoot = "./storage"
+const DefaultStorageRoot = "./storage"
 
 // VolumeACLMode 是卷 ACL 模式。allow=默认拒绝+白名单；deny=默认开放+黑名单。
 type VolumeACLMode string
@@ -1208,10 +1208,10 @@ func (c *Config) OwnerQuotaFor(owner string) int64 {
 	return int64(c.OwnerQuotas["*"])
 }
 
-// transferConcurrencyEffective 返回转存并发的**实际生效值**：配置 0/缺省 → 与
+// TransferConcurrencyEffective 返回转存并发的**实际生效值**：配置 0/缺省 → 与
 // cloud_max_concurrent 相同（与 manager applyCloudConfigDefaults 归一一致）。供
 // GET /api/config 可观测暴露实际值（B1——默认配置下原始零值 0 会误导运维）。
-func transferConcurrencyEffective(c *Config) int {
+func TransferConcurrencyEffective(c *Config) int {
 	if c.CloudTransferConcurrency < 1 {
 		mx := c.CloudMaxConcurrent
 		if mx < 1 {
