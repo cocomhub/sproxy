@@ -43,6 +43,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 
 
+
+| 运行时指标注册表/渲染 | `pkg/server/metrics` | `Metrics` / `WriteMetric` / `WriteHistogram` / `RebalanceProgress` | **server 作用域**；`/metrics` HTTP 面与装配态渲染段留在装配层 |
 | 分享存储（进程内/StateStore） | `pkg/server/share` | `Store` / `StateBackedStore` / `StoreIface` | **server 作用域**；HTTP 面在装配层，经别名调用 |
 | AI 洞察/建议/配额/隐私 | `pkg/server/ai` | `AIInsight` / `AIAdvisor` / `AIQuota` / `AIPrivacy` / `AIEventConsumer` | **server 作用域**；事件源经 `ai.EventSource` 注入（不反向依赖装配层） |
 | 服务端 WebDAV 挂载面 | `pkg/server/dav` | `dav.New(Deps)` / `Service.Handler` | **server 作用域**；`MetaPolicy` 窄接口（sidecar 联动），不反向依赖装配层 |

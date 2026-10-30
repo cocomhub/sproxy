@@ -1,0 +1,913 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package metrics
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+)
+
+// Metrics 使用 atomic 计数器收集请求统计数据。
+// 注意：Go 1.22+ 的 atomic.Int64 自动处理对齐，无需手动对齐。
+// XferMetrics 是传输层扩展指标快照（WS/QUIC；TCP 走 builtin 桥）。
+type XferMetrics struct {
+	WS   XferConnMetrics
+	QUIC XferConnMetrics
+}
+
+// XferConnMetrics 是单传输的连接级统计（与 ext 包 Metrics() 同构）。
+type XferConnMetrics struct {
+	ConnsOpened  int64
+	ConnsClosed  int64
+	MessagesSent int64
+	MessagesRecv int64
+	BytesSent    int64
+	BytesRecv    int64
+}
+
+// XferMetricsProvider 是装配层提供的传输扩展指标读取器（cmd/sproxy 注入）。
+type XferMetricsProvider interface {
+	XferMetrics() XferMetrics
+}
+
+type Metrics struct {
+	RequestsTotal     atomic.Int64
+	Requests2XX       atomic.Int64
+	Requests4XX       atomic.Int64
+	Requests5XX       atomic.Int64
+	BytesUploaded     atomic.Int64
+	BytesDownloaded   atomic.Int64
+	ActiveConnections atomic.Int64
+	FilesUploaded     atomic.Int64
+	FilesDownloaded   atomic.Int64
+	FilesDeleted      atomic.Int64
+	// KeyframeFragmented 是检测到 fMP4（fragmented MP4，无全局 stss）的上传计数。
+	// 供「是否切换 mp4ff」的真实场景决策（metric 可聚合监控，优于翻日志）。
+	KeyframeFragmented atomic.Int64
+
+	// ---- 审计可观测（评审 R13 P1）----
+	//
+	// `audit_dropped` 是**真正丢失**（未持久化即被有界丢弃）；`audit_evicted` 是已持久化条目的
+	// 热索引逐出（不是丢失）。两者语义不同，必须分开计（设计 §5.4.1）。
+	AuditDropped     atomic.Int64
+	AuditEvicted     atomic.Int64
+	AuditWriteFailed atomic.Int64
+	AuditHookPanics  atomic.Int64
+	auditRotate      *labeledCounters[string]
+
+	// ---- W4：带标签的跨节点指标 ----
+	//
+	// 用「键 -> 计数」的互斥锁集合而非 sync.Map：这些事件频率很低（每次建链/拒绝一次），
+	// 锁竞争可忽略；而 map 让标签导出与渲染简单直白（不需要类型断言）。
+	// **基数由配置界定**（节点数、服务数、拒绝原因数都是小集合），不存在 unbounded 增长。
+	meshDial          *labeledCounters[meshDialKey]
+	meshDialFallback  *labeledCounters[meshFallbackKey]
+	remoteWriteDenied *labeledCounters[remoteWriteDeniedKey]
+
+	// ---- 卷健康指标（roadmap §3 P1）：每卷读写延迟/失败率 ----
+	// 带 volume+op 标签的请求总数、失败数、累计延迟。基数 = 卷数 × 操作数（小集合）。
+	volumeIO         *labeledCounters[volumeIOKey]
+	volumeIOFailures *labeledCounters[volumeIOKey]
+	volumeIOLatency  *labeledCounters[volumeIOKey]
+
+	// ---- 计量报告（roadmap 11.10-⑩）owner 维度：per-owner 上传/下载字节 ----
+	// 经 labeledCounters[ownerKey] 复用既有模式：基数 = owner 数（受配置界定）。
+	// 只增不改既有全局计数语义（两套并存，全局仍是 Snapshot 契约）。
+	usageUpload   *labeledCounters[ownerKey]
+	usageDownload *labeledCounters[ownerKey]
+	// usageRecorder 是 per-owner 用量记录转发 hook（装配层注入 usageStore.RecordUsage；
+	// nil = 不转发——未启用计量报告时仅 Prometheus 面计数，零回归）。
+	usageRecorder func(owner, kind string, n int64)
+
+	// ---- 卷磁盘水位（roadmap 11.5-⑪）：每卷 usage/capacity gauge ----
+	// 供 Prometheus 告警规则 sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes。
+	// 快照型：读面渲染时经 SetVolumeUsage 注入最新水位（不随 IO 事件自增）。
+	volumeUsage *labeledGauges[VolumeKey]
+	volumeCap   *labeledGauges[VolumeKey]
+
+	// ---- 备份/同步任务计数（roadmap 11.5-⑪）：failed / total ----
+	backupTasks       atomic.Int64
+	backupTasksFailed atomic.Int64
+
+	// ---- 限流拒绝计数（roadmap 12.1-6 片 2）：按 scope+endpoint 打标签 ----------------
+	// 基数 = scope（ip/endpoint/global/concurrent）× 显式配置端点数（小集合）。
+	rateLimitRejected *labeledCounters[rateLimitRejectedKey]
+
+	// ---- SLO 指标（roadmap 11.10-H3）：请求延迟直方图 + Apdex 三档 ----
+	requestDuration *durationHistogram
+	apdexSatisfied  atomic.Int64
+	apdexTolerated  atomic.Int64
+	apdexFrustrated atomic.Int64
+	apdexT          atomic.Int64
+}
+
+// rebalanceProgressKey 是 rebalance 进度状态的键（源卷 → 目标卷）。
+// 进度值 = 已迁移字节 / 总字节 的百分比（0-100）。
+type rebalanceProgressKey struct{ from, to string }
+
+// RebalanceProgress 是卷再平衡迁移进度的运行时状态（互斥保护）。
+// 由 rebalanceVolumeHandler 在循环内更新；任务完成/失败后删除条目（清零可观测）。
+// nil 安全：未装配进度状态时所有方法空操作。
+type RebalanceProgress struct {
+	mu sync.Mutex
+	// prog 记录每个进行中任务的累计进度：值 = 已迁移字节（percent 由 total 派生）。
+	prog  map[rebalanceProgressKey]int64
+	total map[rebalanceProgressKey]int64
+}
+
+// NewRebalanceProgress 构造进度状态。
+func NewRebalanceProgress() *RebalanceProgress {
+	return &RebalanceProgress{
+		prog:  map[rebalanceProgressKey]int64{},
+		total: map[rebalanceProgressKey]int64{},
+	}
+}
+
+// begin 登记一个 rebalance 任务（total 为本次迁移总字节，0 = 未知/无限配额——
+// 无限配额下百分比无法定义，进度用 0 占位并由 total=0 标记「不可算」）。
+func (p *RebalanceProgress) Begin(from, to string, total int64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k := rebalanceProgressKey{from: from, to: to}
+	p.total[k] = total
+	p.prog[k] = 0
+}
+
+// add 累加已迁移字节（percent 由调用方经 Percent 读取）。
+func (p *RebalanceProgress) Add(from, to string, done int64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k := rebalanceProgressKey{from: from, to: to}
+	p.prog[k] += done
+}
+
+// end 清除任务进度（完成/失败后调用；/metrics 不再输出该序列）。
+func (p *RebalanceProgress) End(from, to string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k := rebalanceProgressKey{from: from, to: to}
+	delete(p.prog, k)
+	delete(p.total, k)
+}
+
+// samples 导出全部进行中任务的百分比样本（标签已格式化；渲染侧排序）。
+// total<=0（无限配额/未知总量）的任务输出 percent=0（保守不假报进度）。
+func (p *RebalanceProgress) Samples() []LabeledSample {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]LabeledSample, 0, len(p.prog))
+	for k, done := range p.prog {
+		var percent int64
+		if t := p.total[k]; t > 0 {
+			percent = min(done*100/t, 100)
+		}
+		out = append(out, LabeledSample{
+			Labels: fmt.Sprintf(`from_volume="%s",to_volume="%s"`, escapeLabel(k.from), escapeLabel(k.to)),
+			Value:  percent,
+		})
+	}
+	return out
+}
+
+// 带标签指标的键。用具体结构体而非拼接字符串：避免分隔符与标签值冲突（标签值来自配置/对端）。
+type (
+	meshDialKey struct {
+		carrier, node, service, path string
+		e2e                          bool
+	}
+	meshFallbackKey      struct{ node, service string }
+	remoteWriteDeniedKey struct{ reason, node string }
+	// volumeIOKey 是卷 IO 指标的键：卷名 + 操作（upload/download）。
+	volumeIOKey struct{ volume, op string }
+	// VolumeKey 是卷磁盘水位指标的键：仅卷名。
+	VolumeKey struct{ volume string }
+	// rateLimitRejectedKey 是限流拒绝计数的键：scope（ip/endpoint/global/concurrent）+ 被拒路径。
+	rateLimitRejectedKey struct{ scope, endpoint string }
+	// ownerKey 是计量报告 per-owner 指标的键：仅 owner 名。
+	ownerKey struct{ owner string }
+)
+
+// labeledCounters 是「键 → 计数」的带标签计数器集合（互斥锁保护）。
+//
+// labels 在**构造时**绑定：每个指标族自己知道标签怎么排、怎么转义，渲染侧只拿字符串。
+type labeledCounters[K comparable] struct {
+	mu     sync.Mutex
+	m      map[K]int64
+	labels func(K) string
+}
+
+func newLabeledCounters[K comparable](labels func(K) string) *labeledCounters[K] {
+	return &labeledCounters[K]{m: map[K]int64{}, labels: labels}
+}
+
+// add 自增一个键（nil 接收者安全：未初始化的 Metrics 不 panic）。
+func (c *labeledCounters[K]) add(key K) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = map[K]int64{}
+	}
+	c.m[key]++
+}
+
+// addN 按 n 累加（延迟总量等场景；nil 接收者安全）。
+func (c *labeledCounters[K]) addN(key K, n int64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = map[K]int64{}
+	}
+	c.m[key] += n
+}
+
+// samples 导出全部样本（顺序由渲染侧排序）。
+func (c *labeledCounters[K]) samples() []LabeledSample {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]LabeledSample, 0, len(c.m))
+	for k, v := range c.m {
+		out = append(out, LabeledSample{Labels: c.labels(k), Value: v})
+	}
+	return out
+}
+
+// labeledGauges 是「键 → 值」的带标签 gauge 集合（互斥锁保护）：渲染侧取快照输出
+// 为 gauge（与 labeledCounters 同构，语义为瞬时水位而非累计）。
+type labeledGauges[K comparable] struct {
+	mu     sync.Mutex
+	m      map[K]int64
+	labels func(K) string
+}
+
+func newLabeledGauges[K comparable](labels func(K) string) *labeledGauges[K] {
+	return &labeledGauges[K]{m: map[K]int64{}, labels: labels}
+}
+
+// set 覆盖一个键的值（nil 接收者安全）。
+func (g *labeledGauges[K]) set(key K, v int64) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.m == nil {
+		g.m = map[K]int64{}
+	}
+	g.m[key] = v
+}
+
+// deleteKey 删除一个键（nil 接收者安全；用于无限容量卷清掉残留容量值）。
+func (g *labeledGauges[K]) deleteKey(key K) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.m, key)
+}
+
+// samples 导出全部样本（顺序由渲染侧排序）。
+func (g *labeledGauges[K]) samples() []LabeledSample {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]LabeledSample, 0, len(g.m))
+	for k, v := range g.m {
+		out = append(out, LabeledSample{Labels: g.labels(k), Value: v})
+	}
+	return out
+}
+
+// NewMetrics 创建并初始化 Metrics。
+func NewMetrics() *Metrics {
+	m := &Metrics{
+		auditRotate: newLabeledCounters(func(k string) string {
+			return fmt.Sprintf(`reason="%s"`, escapeLabel(k))
+		}),
+		meshDial: newLabeledCounters(func(k meshDialKey) string {
+			return fmt.Sprintf(`carrier="%s",node="%s",service="%s",path="%s",e2e="%t"`,
+				escapeLabel(k.carrier), escapeLabel(k.node), escapeLabel(k.service), escapeLabel(k.path), k.e2e)
+		}),
+		meshDialFallback: newLabeledCounters(func(k meshFallbackKey) string {
+			return fmt.Sprintf(`node="%s",service="%s"`, escapeLabel(k.node), escapeLabel(k.service))
+		}),
+		remoteWriteDenied: newLabeledCounters(func(k remoteWriteDeniedKey) string {
+			return fmt.Sprintf(`node="%s",reason="%s"`, escapeLabel(k.node), escapeLabel(k.reason))
+		}),
+		volumeIO: newLabeledCounters(func(k volumeIOKey) string {
+			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
+		}),
+		usageUpload: newLabeledCounters(func(k ownerKey) string {
+			return fmt.Sprintf(`owner="%s"`, escapeLabel(k.owner))
+		}),
+		usageDownload: newLabeledCounters(func(k ownerKey) string {
+			return fmt.Sprintf(`owner="%s"`, escapeLabel(k.owner))
+		}),
+		volumeIOFailures: newLabeledCounters(func(k volumeIOKey) string {
+			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
+		}),
+		volumeIOLatency: newLabeledCounters(func(k volumeIOKey) string {
+			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
+		}),
+		volumeUsage: newLabeledGauges(func(k VolumeKey) string {
+			return fmt.Sprintf(`volume="%s"`, escapeLabel(k.volume))
+		}),
+		volumeCap: newLabeledGauges(func(k VolumeKey) string {
+			return fmt.Sprintf(`volume="%s"`, escapeLabel(k.volume))
+		}),
+		rateLimitRejected: newLabeledCounters(func(k rateLimitRejectedKey) string {
+			return fmt.Sprintf(`scope="%s",endpoint="%s"`, escapeLabel(k.scope), escapeLabel(k.endpoint))
+		}),
+		requestDuration: NewDurationHistogram([]time.Duration{
+			5 * time.Millisecond, 10 * time.Millisecond, 25 * time.Millisecond,
+			50 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond,
+			500 * time.Millisecond, time.Second, 2500 * time.Millisecond,
+			5 * time.Second, 10 * time.Second,
+		}),
+		apdexT: atomic.Int64{},
+	}
+	m.apdexT.Store(int64(defaultApdexThreshold))
+	return m
+}
+
+// RecordRequest 根据状态码记录一次请求。
+func (m *Metrics) RecordRequest(statusCode int) {
+	m.RequestsTotal.Add(1)
+	switch {
+	case statusCode >= 200 && statusCode < 300:
+		m.Requests2XX.Add(1)
+	case statusCode >= 400 && statusCode < 500:
+		m.Requests4XX.Add(1)
+	case statusCode >= 500:
+		m.Requests5XX.Add(1)
+	}
+}
+
+// RecordUpload 记录上传字节数和文件数。
+func (m *Metrics) RecordUpload(bytes int64) {
+	m.BytesUploaded.Add(bytes)
+	m.FilesUploaded.Add(1)
+}
+
+// RecordDownload 记录下载字节数和文件数。
+func (m *Metrics) RecordDownload(bytes int64) {
+	m.BytesDownloaded.Add(bytes)
+	m.FilesDownloaded.Add(1)
+}
+
+// RecordUploadForOwner 记录一次**成功上传**的 per-owner 字节（计量报告 owner 维度，
+// roadmap 11.10-⑩）：labeledCounters[ownerKey] 自增 + 经 usageRecorder 转发到
+// usageStore（装配层注入；nil = 仅 Prometheus 面计数）。
+//
+// 语义边界：空 owner（未认证请求）与非正字节跳过（per-owner 用量只记已认证主体）。
+// 与全局 RecordUpload 并存互不影响（全局仍是 Snapshot 契约）。
+func (m *Metrics) RecordUploadForOwner(owner string, bytes int64) {
+	if m == nil {
+		return
+	}
+	m.recordUsageForOwner(owner, bytes, "upload_bytes", m.usageUpload)
+}
+
+// RecordDownloadForOwner 记录一次**成功下载**的 per-owner 字节（同 RecordUploadForOwner）。
+func (m *Metrics) RecordDownloadForOwner(owner string, bytes int64) {
+	if m == nil {
+		return
+	}
+	m.recordUsageForOwner(owner, bytes, "download_bytes", m.usageDownload)
+}
+
+// recordUsageForOwner 是 owner 维度记录的共同执行体（nil 安全；空 owner/非正字节跳过）。
+func (m *Metrics) recordUsageForOwner(owner string, bytes int64, kind string, c *labeledCounters[ownerKey]) {
+	if m == nil || owner == "" || bytes <= 0 {
+		return
+	}
+	c.addN(ownerKey{owner: owner}, bytes)
+	if m.usageRecorder != nil {
+		m.usageRecorder(owner, kind, bytes)
+	}
+}
+
+// SetUsageRecorder 注入 per-owner 用量记录转发 hook（装配层调用；nil = 不转发）。
+func (m *Metrics) SetUsageRecorder(fn func(owner, kind string, n int64)) {
+	if m == nil {
+		return
+	}
+	m.usageRecorder = fn
+}
+
+// RecordDelete 记录删除。
+func (m *Metrics) RecordDelete() {
+	m.FilesDeleted.Add(1)
+}
+
+// RecordKeyframeFragmented 记录一次检测到 fMP4（fragmented MP4，无全局 stss）的上传。
+// 供「是否切换 mp4ff」的真实场景统计（/metrics 渲染 sproxy_keyframe_fmp4_total）。
+// nil 安全（未装配 metrics 时无操作）。
+func (m *Metrics) RecordKeyframeFragmented() {
+	if m == nil {
+		return
+	}
+	m.KeyframeFragmented.Add(1)
+}
+
+// RecordMeshDial 记一次**成功**的 mesh 建链（W4）：按 `carrier`+目标（node/service）+路径（path）打标签；
+// `fellBack` 为真时同时计入「打洞失败后回落中继」计数。
+//
+// path 是 SmartDial 竞速候选路径（T7）："via-relay"（经中间节点 X 中继）/ "via-direct"（打洞直连 X）/
+// 空 = 非多跳（webrtc 直连或 hub 中继单跳）。当前 RemoteDialer 服务同步链路不经 SmartDial（恒空），
+// 多跳路径由 CLI 侧 SmartDial 竞速产生——服务端 metrics 预留该维度供未来同步链路接入。
+//
+// 语义边界：只记**成功**（失败且未回落没有可用链路，记成任何一种载体都是错的）。
+func (m *Metrics) RecordMeshDial(carrier, node, service, path string, fellBack bool) {
+	m.RecordMeshDialE2E(carrier, node, service, path, fellBack, false)
+}
+
+// RecordMeshDialE2E 是 RecordMeshDial 的 E2E 变体：e2e=true 时计入端到端加密
+// 建链（安全开关生效可观测——用户红线：E2E 启用状态必须可观测，禁静默降级）。
+func (m *Metrics) RecordMeshDialE2E(carrier, node, service, path string, fellBack bool, e2e bool) {
+	if m == nil {
+		return
+	}
+	m.meshDial.add(meshDialKey{carrier: carrier, node: node, service: service, path: path, e2e: e2e})
+	if fellBack {
+		m.meshDialFallback.add(meshFallbackKey{node: node, service: service})
+	}
+}
+
+// RecordRemoteWriteDenied 记一次跨节点**写面授权拒绝**（W4），按 reason+node 打标签。
+//
+// 只记授权类拒绝（未认证 / 卷缺失 / 指纹未 pin / scope 不授予写等），**不含**配额超限、校验和不符
+// 这类「已授权但业务失败」——它们各有 HTTP 语义，混在一起会让「授权被拒」这个信号失真。
+func (m *Metrics) RecordRemoteWriteDenied(reason, node string) {
+	if m == nil {
+		return
+	}
+	m.remoteWriteDenied.add(remoteWriteDeniedKey{reason: reason, node: node})
+}
+
+// RecordRateLimitRejected 记一次限流拒绝（roadmap 12.1-6 片 2）：按 scope
+// （ip/endpoint/global/concurrent）+ 被拒路径打标签。endpoint 为空时省略标签值
+// （global 拒绝无明确路径——统一用请求路径，运维可据此定位被限端点）。
+func (m *Metrics) RecordRateLimitRejected(scope, path string) {
+	if m == nil {
+		return
+	}
+	m.rateLimitRejected.add(rateLimitRejectedKey{scope: scope, endpoint: path})
+}
+
+// rateLimitRejectedSamples 导出限流拒绝计数样本。
+func (m *Metrics) RateLimitRejectedSamples() []LabeledSample {
+	if m == nil {
+		return nil
+	}
+	return m.rateLimitRejected.samples()
+}
+
+// RecordVolumeIO 记一次卷 IO（upload/download）指标（roadmap §3 P1）：请求总数 + 失败数 +
+// 累计延迟（纳秒），按 volume+op 打标签。ok=true 记总数不记失败；ok=false 总数+失败都记。
+// latency 是该次 IO 耗时（上传/下载处理时长）。
+func (m *Metrics) RecordVolumeIO(volume, op string, latency time.Duration, ok bool) {
+	if m == nil {
+		return
+	}
+	key := volumeIOKey{volume: volume, op: op}
+	m.volumeIO.add(key)
+	m.volumeIOLatency.addN(key, latency.Nanoseconds())
+	if !ok {
+		m.volumeIOFailures.add(key)
+	}
+}
+
+// volumeIO*Samples 导出卷 IO 指标样本（排序在渲染处做）。
+func (m *Metrics) VolumeIOSamples() []LabeledSample         { return m.volumeIO.samples() }
+func (m *Metrics) VolumeIOFailuresSamples() []LabeledSample { return m.volumeIOFailures.samples() }
+func (m *Metrics) VolumeIOLatencySamples() []LabeledSample  { return m.volumeIOLatency.samples() }
+
+// usage*Samples 导出计量报告 owner 维度样本（排序在渲染处做）。
+func (m *Metrics) UsageUploadSamples() []LabeledSample   { return m.usageUpload.samples() }
+func (m *Metrics) UsageDownloadSamples() []LabeledSample { return m.usageDownload.samples() }
+
+// SetVolumeUsage 记录某卷当前已用字节与容量上限（roadmap 11.5-⑪，磁盘水位 gauge）。
+// capVal<=0 = 无限容量：删除容量样本（不输出 capacity 序列，避免误导告警计算）。
+func (m *Metrics) SetVolumeUsage(volume string, used, capVal int64) {
+	if m == nil {
+		return
+	}
+	m.volumeUsage.set(VolumeKey{volume: volume}, used)
+	if capVal > 0 {
+		m.volumeCap.set(VolumeKey{volume: volume}, capVal)
+	} else {
+		m.volumeCap.deleteKey(VolumeKey{volume: volume})
+	}
+}
+
+// RecordBackupTask 记一次备份/同步任务启动（roadmap 11.5-⑪）。
+func (m *Metrics) RecordBackupTask() {
+	if m == nil {
+		return
+	}
+	m.backupTasks.Add(1)
+}
+
+// RecordBackupTaskFailed 记一次备份/同步任务失败（配合 SproxyBackupSyncFailures 告警）。
+func (m *Metrics) RecordBackupTaskFailed() {
+	if m == nil {
+		return
+	}
+	m.backupTasksFailed.Add(1)
+}
+
+// LabeledSample 是一条渲染好的带标签样本（labels 已转义并格式化）。
+type LabeledSample struct {
+	Labels string
+	Value  int64
+}
+
+// WriteLabeledCounter 写一组带标签计数器：HELP/TYPE 一次 + 每 series 一行。
+//
+// **即使没有样本也输出 HELP/TYPE**：让指标在抓取端可被发现（否则「一直没数据」与「指标不存在」
+// 在面板上无法区分）。样本按标签串排序 ⇒ 输出稳定，便于 diff 与单测。
+func WriteLabeledCounter(b *strings.Builder, name, help string, samples []LabeledSample) {
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	sort.Slice(samples, func(i, j int) bool { return samples[i].Labels < samples[j].Labels })
+	for _, s := range samples {
+		fmt.Fprintf(b, "%s{%s} %d\n", name, s.Labels, s.Value)
+	}
+	b.WriteString("\n")
+}
+
+// escapeLabel 按 Prometheus 文本格式转义标签值（反斜杠、双引号、换行）。
+// 不转义的话，一个含引号的节点名就能产出畸形文本、让整次抓取失败。
+func escapeLabel(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
+}
+
+// meshDialSamples / meshDialFallbackSamples / remoteWriteDeniedSamples 导出带标签样本（排序在渲染处做）。
+func (m *Metrics) MeshDialSamples() []LabeledSample { return m.meshDial.samples() }
+
+func (m *Metrics) MeshDialFallbackSamples() []LabeledSample { return m.meshDialFallback.samples() }
+
+func (m *Metrics) RemoteWriteDeniedSamples() []LabeledSample { return m.remoteWriteDenied.samples() }
+
+// auditRotateSamples 暴露审计轮转分桶样本（/metrics 渲染用）。
+func (m *Metrics) AuditRotateSamples() []LabeledSample { return m.auditRotate.samples() }
+
+// RecordAuditRotate 记录一次审计段轮转（按原因分桶；无 metrics 时 no-op）。
+func (m *Metrics) RecordAuditRotate(reason string) {
+	if m == nil || reason == "" {
+		reason = "unknown"
+	}
+	m.auditRotate.add(reason)
+}
+
+// Snapshot 返回当前所有指标的快照（用于调试和日志输出）。
+func (m *Metrics) Snapshot() map[string]int64 {
+	if m == nil {
+		return nil
+	}
+	return map[string]int64{
+		"requests_total":     m.RequestsTotal.Load(),
+		"requests_2xx":       m.Requests2XX.Load(),
+		"requests_4xx":       m.Requests4XX.Load(),
+		"requests_5xx":       m.Requests5XX.Load(),
+		"bytes_uploaded":     m.BytesUploaded.Load(),
+		"bytes_downloaded":   m.BytesDownloaded.Load(),
+		"active_connections": m.ActiveConnections.Load(),
+		"files_uploaded":     m.FilesUploaded.Load(),
+		"files_downloaded":   m.FilesDownloaded.Load(),
+		"files_deleted":      m.FilesDeleted.Load(),
+	}
+}
+
+// WriteHubNodeLinkGauge 输出节点 mux 链路计数与 RTT/连接时长 gauge。
+func WriteHubNodeLinkGauge(b *strings.Builder, n hub.NodeInfo, node string) {
+	var retrans, errors, rttMs int64
+	var connectedSec float64
+	if n.Mux != nil {
+		retrans, errors, rttMs = muxLinkCounters(n.Mux)
+	}
+	if !n.Connected.IsZero() {
+		connectedSec = time.Since(n.Connected).Seconds()
+	}
+	WriteLabeledGauge(b, "sproxy_hub_node_retransmits", "Per-node mux retransmits", map[string]string{"node": node}, retrans)
+	WriteLabeledGauge(b, "sproxy_hub_node_errors", "Per-node mux errors", map[string]string{"node": node}, errors)
+	WriteLabeledGauge(b, "sproxy_hub_node_connected_seconds", "Per-node connection age in seconds", map[string]string{"node": node}, int64(connectedSec))
+	// RTT gauge：毫秒（-1 = 未知，未见采集；见下方 mux.Metrics.LastRTTNanos）。
+	WriteLabeledGauge(b, "sproxy_hub_node_rtt_ms", "Per-node round-trip time in milliseconds (-1 = no sample yet)", map[string]string{"node": node}, rttMs)
+}
+
+// muxLinkCounters 提取节点 mux 的重传/错误计数与 RTT（LastRTTNanos==0 未采样 → -1）。
+func muxLinkCounters(m *mux.Mux) (retrans, errors, rttMs int64) {
+	mm := m.Metrics()
+	retrans = mm.Retransmits.Load()
+	errors = mm.Errors.Load()
+	rttMs = mm.LastRTTNanos.Load() / 1e6
+	if mm.LastRTTNanos.Load() == 0 {
+		rttMs = -1
+	}
+	return
+}
+
+// WriteLabeledGauge 输出带标签的 Prometheus gauge。
+func WriteLabeledGauge(b *strings.Builder, name, help string, labels map[string]string, value int64) {
+	fmt.Fprintf(b, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(b, "# TYPE %s gauge\n", name)
+	var parts []string
+	for k, v := range labels {
+		parts = append(parts, fmt.Sprintf("%s=%q", k, v))
+	}
+	sort.Strings(parts)
+	fmt.Fprintf(b, "%s{%s} %d\n", name, strings.Join(parts, ","), value)
+}
+
+// AccumulateNodeMuxMetrics 把单个节点的 mux 级指标合并进 total：sum 类计数累加，
+// Active 当前值求和，峰值类（MaxActive/LongestIdle/DataChMaxFrames/MaxBufferedBytes）取最大。
+func AccumulateNodeMuxMetrics(total *mux.Metrics, n hub.NodeInfo) {
+	mm := n.Mux.Metrics()
+	total.Streams.Opened.Add(mm.Streams.Opened.Load())
+	total.Streams.BytesRead.Add(mm.Streams.BytesRead.Load())
+	total.Streams.BytesWritten.Add(mm.Streams.BytesWritten.Load())
+	// Active 是**当前值**（求和）：跨 mux 的活跃流总数 = 各 mux 之和。
+	total.Streams.Active.Add(mm.Streams.Active.Load())
+	// MaxActive 是**峰值**类（取最大而非求和）：跨 mux 反映任意时刻同时活跃的最大流数。
+	if v := mm.Streams.MaxActive.Load(); v > total.Streams.MaxActive.Load() {
+		total.Streams.MaxActive.Store(v)
+	}
+	// LongestIdle 是**峰值**类（取最大）：最久空闲流跨 mux 取最大。
+	if v := n.Mux.LongestIdle(); v.Nanoseconds() > total.LongestIdleNanos.Load() {
+		total.LongestIdleNanos.Store(v.Nanoseconds())
+	}
+	total.FramesSent.Add(mm.FramesSent.Load())
+	total.FramesReceived.Add(mm.FramesReceived.Load())
+	total.PingsSent.Add(mm.PingsSent.Load())
+	total.PongsReceived.Add(mm.PongsReceived.Load())
+	total.PongsSent.Add(mm.PongsSent.Load())
+	total.PongsCoalesced.Add(mm.PongsCoalesced.Load())
+	total.PongsDropped.Add(mm.PongsDropped.Load())
+	total.DatagramHandlerDrops.Add(mm.DatagramHandlerDrops.Load())
+	total.StreamOverflowSpills.Add(mm.StreamOverflowSpills.Load())
+	total.StreamWindowViolations.Add(mm.StreamWindowViolations.Load())
+	total.Retransmits.Add(mm.Retransmits.Load())
+	total.RetransmitQueueFull.Add(mm.RetransmitQueueFull.Load())
+	total.RetransmitExhausted.Add(mm.RetransmitExhausted.Load())
+	// readLoop 阻塞观测：次数/耗时求和，单次峰值取最大（与单 mux 语义一致）。
+	total.ReadLoopPush.MergeFrom(&mm.ReadLoopPush)
+	total.ReadLoopDatagram.MergeFrom(&mm.ReadLoopDatagram)
+	total.ReadLoopPong.MergeFrom(&mm.ReadLoopPong)
+	// dataCh 水位与「已收未消费字节峰值」都是「峰值」类 gauge：跨 mux 取最大而非求和。
+	if v := mm.DataChMaxFrames.Load(); v > total.DataChMaxFrames.Load() {
+		total.DataChMaxFrames.Store(v)
+	}
+	if v := mm.MaxBufferedBytes.Load(); v > total.MaxBufferedBytes.Load() {
+		total.MaxBufferedBytes.Store(v)
+	}
+	total.Errors.Add(mm.Errors.Load())
+	total.Streams.Errors.Add(mm.Streams.Errors.Load())
+}
+
+// WriteMetric 写入一个 Prometheus 格式的指标到 strings.Builder。
+// durationHistogram 是手写无锁桶直方图（roadmap 11.10-H3 SLO）。
+type durationHistogram struct {
+	thresholds []time.Duration
+	buckets    []atomic.Int64
+	sum        atomic.Int64
+	count      atomic.Int64
+}
+
+func NewDurationHistogram(thresholds []time.Duration) *durationHistogram {
+	return &durationHistogram{thresholds: thresholds, buckets: make([]atomic.Int64, len(thresholds)+1)}
+}
+
+func (h *durationHistogram) observe(d time.Duration) {
+	if h == nil {
+		return
+	}
+	i := sort.Search(len(h.thresholds), func(i int) bool { return d <= h.thresholds[i] })
+	// Prometheus 直方图语义：le 桶为**累计**计数（<=le 的全部样本）。
+	for j := i; j < len(h.buckets); j++ {
+		h.buckets[j].Add(1)
+	}
+	h.sum.Add(int64(d))
+	h.count.Add(1)
+}
+
+func (h *durationHistogram) snapshot() (buckets []int64, sumNanos, count int64) {
+	if h == nil {
+		return nil, 0, 0
+	}
+	out := make([]int64, len(h.buckets))
+	for i := range h.buckets {
+		out[i] = h.buckets[i].Load()
+	}
+	return out, h.sum.Load(), h.count.Load()
+}
+
+// defaultApdexThreshold 是 Apdex 满意阈值 T 的默认值（500ms）。
+const defaultApdexThreshold = 500 * time.Millisecond
+
+// SetApdexThreshold 设置 Apdex 满意阈值 T。<=0 忽略（禁静默降级）。
+func (m *Metrics) SetApdexThreshold(d time.Duration) {
+	if m == nil || d <= 0 {
+		return
+	}
+	m.apdexT.Store(int64(d))
+}
+
+// RecordRequestLatency 记录一次请求处理时长：直方图 observe + Apdex 三档分档。
+func (m *Metrics) RecordRequestLatency(d time.Duration) {
+	if m == nil || m.requestDuration == nil {
+		return
+	}
+	m.requestDuration.observe(d)
+	t := m.apdexT.Load()
+	if t <= 0 {
+		t = int64(defaultApdexThreshold)
+	}
+	switch {
+	case d <= time.Duration(t):
+		m.apdexSatisfied.Add(1)
+	case d <= 4*time.Duration(t):
+		m.apdexTolerated.Add(1)
+	default:
+		m.apdexFrustrated.Add(1)
+	}
+}
+
+// apdexScore 计算 Apdex 评分（0-1）；total=0 → 0（不 NaN）。
+func (m *Metrics) apdexScore() float64 {
+	if m == nil {
+		return 0
+	}
+	sat := m.apdexSatisfied.Load()
+	tol := m.apdexTolerated.Load()
+	fru := m.apdexFrustrated.Load()
+	total := sat + tol + fru
+	if total == 0 {
+		return 0
+	}
+	return float64(sat+tol/2) / float64(total)
+}
+
+// formatSeconds 把 duration 渲染为 Prometheus 秒字符串。
+func formatSeconds(d time.Duration) string {
+	if d%time.Second == 0 {
+		return strconv.FormatInt(int64(d/time.Second), 10)
+	}
+	return strconv.FormatFloat(d.Seconds(), 'g', 4, 64)
+}
+
+// WriteHistogram 渲染 Prometheus 直方图文本。
+func WriteHistogram(b *strings.Builder, name, help string, thresholds []time.Duration, buckets []int64, sumNanos, count int64) {
+	fmt.Fprintf(b, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(b, "# TYPE %s histogram\n", name)
+	for i, v := range buckets {
+		le := "+Inf"
+		if i < len(thresholds) {
+			le = formatSeconds(thresholds[i])
+		}
+		fmt.Fprintf(b, "%s_bucket{le=%q} %d\n", name, le, v)
+	}
+	fmt.Fprintf(b, "%s_sum %s\n", name, formatSeconds(time.Duration(sumNanos)))
+	fmt.Fprintf(b, "%s_count %d\n\n", name, count)
+}
+
+func WriteMetric(b *strings.Builder, name, typ, help string, value int64) {
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n%s %d\n\n", name, help, name, typ, name, value)
+}
+
+// RenderSLOMetrics 输出请求延迟直方图与 Apdex 指标（/metrics 渲染用）。
+func (m *Metrics) RenderSLOMetrics(b *strings.Builder) {
+	if m == nil || m.requestDuration == nil {
+		return
+	}
+	buckets, sumNanos, count := m.requestDuration.snapshot()
+	WriteHistogram(b, "sproxy_request_duration_seconds", "HTTP request duration histogram",
+		m.requestDuration.thresholds, buckets, sumNanos, count)
+	fmt.Fprintf(b, "# TYPE sproxy_apdex gauge\n")
+	fmt.Fprintf(b, "sproxy_apdex %g\n", m.apdexScore())
+	fmt.Fprintf(b, "sproxy_apdex_satisfied_total %d\n", m.apdexSatisfied.Load())
+	fmt.Fprintf(b, "sproxy_apdex_tolerated_total %d\n", m.apdexTolerated.Load())
+	fmt.Fprintf(b, "sproxy_apdex_frustrated_total %d\n", m.apdexFrustrated.Load())
+}
+
+// WriteGaugeSamples 写一组带标签 gauge 样本：HELP/TYPE 一次 + 每 series 一行。
+// 与 WriteLabeledCounter 不同：gauge 是瞬时值（如 rebalance 进度），无样本时**不输出
+// HELP/TYPE**（指标不存在 = 无进行中任务，面板隐藏该区；counter 则恒输出 HELP/TYPE
+// 让累计指标可发现）。
+func WriteGaugeSamples(b *strings.Builder, name, help string, samples []LabeledSample) {
+	if len(samples) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
+	sort.Slice(samples, func(i, j int) bool { return samples[i].Labels < samples[j].Labels })
+	for _, s := range samples {
+		fmt.Fprintf(b, "%s{%s} %d\n", name, s.Labels, s.Value)
+	}
+	b.WriteString("\n")
+}
+
+// WriteReadLoopBlock 渲染 readLoop 内单条「可能阻塞路径」的观测（次数/累计耗时/单次峰值）。
+// 三个指标同族：waits 是进入次数，nanos_total 是累计耗时，nanos_max 是单次峰值——
+// 后者用于回答「这条路径到底会不会真的停摆连接」（时间均值会被大量 0 耗时冲淡）。
+func WriteReadLoopBlock(b *strings.Builder, site, desc string, s *mux.BlockStat) {
+	WriteMetric(b, "sproxy_mux_readloop_"+site+"_waits", "counter", "Times readLoop entered "+desc, s.Waits.Load())
+	WriteMetric(b, "sproxy_mux_readloop_"+site+"_nanos_total", "counter", "Total nanoseconds readLoop spent in "+desc, s.Nanos.Load())
+	WriteMetric(b, "sproxy_mux_readloop_"+site+"_nanos_max", "gauge", "Max nanoseconds readLoop spent in a single "+desc, s.MaxNanos.Load())
+}
+
+// WriteHybridMetrics 写 PikPak hybrid 指标（从默认注册表 Active() 断言透出）。
+// 独立 helper 控制 MetricsHandler 认知复杂度（gocognit）。
+// WriteGCIDMetrics 写 PikPak GCID 校验命中统计（大小引导候选 + 大→小计算 + 首次/二次/未命中率，
+// 供决策官方分块粒度）。从默认注册表 Active() 断言 GCIDStatsProvider 透出。
+func WriteGCIDMetrics(b *strings.Builder) {
+	d := downloader.DefaultRegistry.Active()
+	if d == nil {
+		return
+	}
+	if p, ok := d.(interface {
+		GCIDStats() *integrity.GCIDVerifyStats
+	}); ok && p.GCIDStats() != nil {
+		for name, val := range p.GCIDStats().GCIDStatsSnapshot() {
+			WriteMetric(b, "sproxy_gcid_"+name, "counter", "PikPak GCID verify "+name, val)
+		}
+	}
+}
+
+func WriteHybridMetrics(b *strings.Builder) {
+	d := downloader.DefaultRegistry.Active()
+	if d == nil {
+		return
+	}
+	hm, ok := d.(interface {
+		HybridCounters() map[string]int64
+	})
+	if !ok {
+		return
+	}
+	for name, val := range hm.HybridCounters() {
+		WriteMetric(b, "sproxy_"+name, "counter", "PikPak hybrid download "+name, val)
+	}
+}
+
+// VolumeUsageSamples 返回每卷已用字节样本。
+func (m *Metrics) VolumeUsageSamples() []LabeledSample { return m.volumeUsage.samples() }
+
+// VolumeCapSamples 返回每卷容量样本。
+func (m *Metrics) VolumeCapSamples() []LabeledSample { return m.volumeCap.samples() }
+
+// BackupTasks 返回备份/同步任务启动总数。
+func (m *Metrics) BackupTasks() int64 { return m.backupTasks.Load() }
+
+// BackupTasksFailed 返回备份/同步任务失败总数。
+func (m *Metrics) BackupTasksFailed() int64 { return m.backupTasksFailed.Load() }
+
+// RequestDurationCount 返回已记录请求时长样本数（测试/观测用）。
+func (m *Metrics) RequestDurationCount() int64 {
+	if m == nil || m.requestDuration == nil {
+		return 0
+	}
+	_, _, cnt := m.requestDuration.snapshot()
+	return cnt
+}
+
+// ApdexCounts 返回 Apdex 三档计数（satisfied, tolerated, frustrated）。
+func (m *Metrics) ApdexCounts() (sat, tol, fru int64) {
+	if m == nil {
+		return 0, 0, 0
+	}
+	return m.apdexSatisfied.Load(), m.apdexTolerated.Load(), m.apdexFrustrated.Load()
+}
