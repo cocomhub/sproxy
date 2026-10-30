@@ -18,9 +18,11 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // indexSnapshotVersion 是索引快照格式版本（不兼容即作废并回退全量扫描）。
@@ -281,4 +283,61 @@ func (s *SecretdataFS) invalidateIndexSnapshot() {
 	if err := os.Remove(s.opts.IndexSnapshotPath); err == nil {
 		slog.Debug("secretdata: 索引快照已失效（写操作后需重建）")
 	}
+}
+
+// snapshotRootMatches 校验快照容器树的**顶层目录集合**与本次卷根列举一致。
+// 「跳过容器树列举」时用它做健全性检查（成本 1 次 ListDir）：顶层增删可发现；
+// 深层变化由抽样 Stat + 「本进程写即删快照」覆盖。
+func snapshotRootMatches(snap *indexSnapshot, root []syncpkg.Entry) bool {
+	want := topSegments(snap.Containers)
+	have := make(map[string]struct{}, len(root))
+	for _, e := range root {
+		if e.IsDir {
+			have[e.Name] = struct{}{}
+		}
+	}
+	if len(want) != len(have) {
+		return false
+	}
+	for k := range want {
+		if _, ok := have[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// topSegments 返回容器路径的第一段集合（去重）。
+func topSegments(containers []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(containers))
+	for _, c := range containers {
+		if i := strings.IndexByte(c, '/'); i > 0 {
+			out[c[:i]] = struct{}{}
+		} else if c != "" {
+			out[c] = struct{}{}
+		}
+	}
+	return out
+}
+
+// tryLoadIndexSnapshotFast 在**不列举整棵容器树**的前提下尝试恢复索引：
+// 快照可解密 + 卷根顶层目录集合一致 + 抽样 Stat 通过 ⇒ 直接应用。
+// 这把外部卷启动从「292 次 ls（~3 分钟）」降到「1 次 ls + 16 次 Stat（秒级）」。
+func (s *SecretdataFS) tryLoadIndexSnapshotFast(ctx context.Context, root []syncpkg.Entry) bool {
+	snap, ok := s.loadIndexSnapshot()
+	if !ok {
+		return false
+	}
+	if !snapshotRootMatches(snap, root) {
+		slog.Info("secretdata: 快照顶层目录集合已变化（回退全量扫描）")
+		return false
+	}
+	if verr := s.verifySnapshotSample(ctx, snap); verr != nil {
+		slog.Warn("secretdata: 索引快照抽样校验失败（回退全量扫描）", "error", verr)
+		return false
+	}
+	s.applyIndexSnapshot(snap)
+	slog.Info("secretdata: 索引快照命中（跳过全量 meta 扫描与容器列举）",
+		"entries", len(snap.Entries), "containers", len(snap.Containers))
+	return true
 }

@@ -1859,6 +1859,12 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 		}
 		return fmt.Errorf("secretdata: 扫描卷根失败（非首次使用故障，拒绝空视图挂载）: %w", err)
 	}
+	// **快照优先**：命中时跳过容器树列举（292 个容器 = 292 次外部 `ls`，实测占启动
+	// 192s 中的 181s）。健全性由「卷根顶层目录集合 + 抽样 Stat」保障；本进程任何写操作
+	// 都会删除快照（见 invalidateIndexSnapshot），因此只在「外部直改盘」时才可能陈旧。
+	if s.tryLoadIndexSnapshotFast(ctx, root) {
+		return nil
+	}
 	containers, cerr := s.dirContainers(ctx, root)
 	if cerr != nil {
 		return fmt.Errorf("secretdata: 扫描容器树失败（拒绝空视图挂载）: %w", cerr)
