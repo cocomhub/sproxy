@@ -310,10 +310,14 @@ func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt
 	if werr := s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt); werr != nil {
 		return werr
 	}
-	// meta blob 上传成功 ⇒ 同步写入本机密文缓存（装配重启时直接本地读，不再下载；
-	// 这是「上传后立刻重建索引」不打网盘的关键）。分块 blob 不缓存（由 spanCache 负责）。
-	if k := shardseal.ClassifyName(path.Base(p)); k == shardseal.KindFileMeta || k == shardseal.KindDirMeta {
-		s.putBlobCache(p, data)
+	// meta blob 上传成功后写**精简缓存**（解密出明文 JSON 再加密，无 padding）。
+	// 放在这里是因为 uploadBlob 是全部写路径（流式/内存/dedup/copy/meta_provider）的
+	// 唯一落盘点 —— 一处覆盖，避免每条路径各加钩子而漏掉。
+	switch shardseal.ClassifyName(path.Base(p)) {
+	case shardseal.KindFileMeta, shardseal.KindDirMeta:
+		if plain, derr := s.decryptBlob(data); derr == nil {
+			s.putCompactMeta(p, plain, int64(len(data)))
+		}
 	}
 	return nil
 }

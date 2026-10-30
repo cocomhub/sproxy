@@ -2407,11 +2407,12 @@ func collectDirMetaCands(ctx context.Context, s *SecretdataFS, container string,
 			continue
 		}
 		blobKey := path.Join(container, f.Name)
-		blob, oerr := s.readBlobCached(ctx, blobKey)
-		if oerr != nil {
+		// 优先精简缓存；未命中读权威 blob 并回填。
+		dm, blobLen, derr := s.readDirMetaFast(ctx, blobKey)
+		if derr != nil {
+			// 与旧行为一致：损坏候选跳过（继续尝试容器内其余 dir meta）。
 			continue
 		}
-		dm, derr := s.decryptDirMeta(blob)
 		if derr != nil {
 			if errors.Is(derr, errOldFormatDirMeta) {
 				if hasFiles {
@@ -2422,7 +2423,7 @@ func collectDirMetaCands(ctx context.Context, s *SecretdataFS, container string,
 			}
 			continue // 其它解密失败（损坏）继续尝试容器内其余 dir meta
 		}
-		cands = append(cands, dirMetaCand{dm: dm, name: f.Name, size: int64(len(blob)), mtime: f.MTime})
+		cands = append(cands, dirMetaCand{dm: dm, name: f.Name, size: blobLen, mtime: f.MTime})
 	}
 	return cands, true
 }
@@ -2511,15 +2512,8 @@ func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, di
 // （mm.Original.MTime），不受 blob mtime 打散影响。持 s.mu 只做登记，解密在锁外（可并行）。
 func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dirPath string, f syncpkg.Entry) {
 	blobKey := path.Join(container, f.Name)
-	blob, oerr := s.readBlobCached(ctx, blobKey)
-	if oerr != nil {
-		// 读失败可能是瞬时底层故障：本文件不进内存索引（数据不可见），但**不删磁盘 blob**
-		// ——GC 的 gcReconfirmContainer 会重读确认死活（Imp-3 复审：防瞬时故障被 GC 误删）。
-		slog.Warn("secretdata: 挂载读文件 meta 失败（本文件暂不可见，磁盘 blob 保留，GC 将重确认）",
-			"container", container, "meta", f.Name, "error", oerr)
-		return
-	}
-	mm, merr := s.decryptFileMeta(blob)
+	// 优先精简缓存（无 padding，体积 ~1/300）；未命中读权威 blob 并回填。
+	mm, metaBlobLen, merr := s.readFileMetaFast(ctx, blobKey)
 	if merr != nil {
 		// 缓存可能陈旧/损坏 ⇒ 删掉，下次启动重下（自愈；GCM 已保证不会误用错误内容）。
 		s.dropBlobCache(blobKey)
@@ -2557,7 +2551,7 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 		s.mu.Unlock()
 		return
 	}
-	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, int64(len(blob)), prev)
+	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, metaBlobLen, prev)
 	s.mu.Unlock()
 }
 
