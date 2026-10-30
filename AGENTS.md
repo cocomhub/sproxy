@@ -60,6 +60,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
    /R34/R36（配额/等待）/R37（恢复）/R38（路由）拦住 ⇒ 先想"扩展能力"，而不是加白名单 ✗；
    确需例外时必须写明「为什么可以不经既有能力」。
 8. **命名必须编码作用域**：`pkg/<x>` = 通用能力（server/client/tools 均可消费）；只在服务端有意义的进 `pkg/server/<x>`；只服务单个二进制的进 `cmd/<bin>/internal/<x>`。判据可执行：被 `cmd/sclient`/`cmd/sproxy-mcp` 可达才可留 `pkg/`（详见 `docs/architecture.md` §作用域分层，门禁 R6）。
+9. **装配层依赖必须分域**：`Handlers` 只允许嵌入 `deps.go` 里的 `*Deps` 分组（R7 门禁，直接字段 ≤ 12）；新增依赖加到对应分组，禁止再往 `Handlers` 本体加扁平字段。
 
 ## 执行偏好
 
