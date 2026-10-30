@@ -12,6 +12,112 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.25.0](https://github.com/cocomhub/sproxy/compare/v0.24.0...v0.25.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **volume:** 卷用量/上限判定改按物理占用——加密卷同一批文件的 `usage` 会显著变大，原本「看起来没满」的卷可能立即触达 `capacity` 上限（507）。这是本次裁决的目标行为。
+* **volume:** 卷状态缓存默认永不过期 + 强制刷新入口（CLI/WebUI/API）（#896）
+* **audit:** 审计 API 整体替换 —— 旧 `pkg/server` 的 audit store/API 删除，读写统一走 `pkg/audit` （`Service`/`Journal`/`Scope`）；直接依赖旧审计 API 的嵌入方需迁移。HTTP 侧 `/api/audit`、 `/api/audit/export` 语义不变（**admin-only、fail-closed**；非管理员 403，查询参数不能放宽）。 新增配置：`audit.max_total_bytes`（默认 1 GiB）、`audit.archive_dir`、`audit.archive_keep`、 `audit.archive_volume`（卷优先于目录）。旧位置 `<卷根>/audit/` 的段文件启动期一次性迁入 `<卷根>/__audit__/hot/`（best-effort）。
+
+### Added
+
+* **archcheck:** R40/R43 门禁 + 修复停服 volSet 置 nil 的 -race 竞态（[#881](https://github.com/cocomhub/sproxy/issues/881)） ([f761de8](https://github.com/cocomhub/sproxy/commit/f761de897cb2bcd525b1face5ebf202d6b364c7a))
+* **archcheck:** R41 影子台账——list/search 数据源直调点棘轮（[#888](https://github.com/cocomhub/sproxy/issues/888)） ([8877474](https://github.com/cocomhub/sproxy/commit/8877474f9a1422606b751bd06b73668f08b65f24))
+* **audit:** pkg/audit 唯一提供方 + WAL 恢复 + 冷热归档 + 读面收敛 ([#833](https://github.com/cocomhub/sproxy/issues/833)) ([e81619a](https://github.com/cocomhub/sproxy/commit/e81619a9a471ecc9506f80d9cea07af18c96165b))
+* **audit:** R13 剩余项全部关闭——卷维度 · R35-b/e 门禁 · 冷段尾读与区间读 · 归档卷专用性 ([#837](https://github.com/cocomhub/sproxy/issues/837)) ([49c9910](https://github.com/cocomhub/sproxy/commit/49c9910aea0a26b94ad25f63a606f5da354f056d))
+* **checksum:** checksum 台账显式重建命令（sclient checksum rebuild）（[#889](https://github.com/cocomhub/sproxy/issues/889)） ([00619ce](https://github.com/cocomhub/sproxy/commit/00619ce45f68e9282c00dea410ab3accdfab5e97))
+* **checksum:** 台账丢失时从对象 meta 一次性重建（§15.1 步骤①+②）（[#887](https://github.com/cocomhub/sproxy/issues/887)） ([756e3c4](https://github.com/cocomhub/sproxy/commit/756e3c4749eb34421ddb63efa099762827776ac2))
+* **cli,webui:** 分享/回收站客户端接入卷感知（share 卷 URI、trash --volume/--all、行卷透传） ([#845](https://github.com/cocomhub/sproxy/issues/845)) ([010b1cd](https://github.com/cocomhub/sproxy/commit/010b1cd83196cb436472c8a8cdb058d2372c31c3))
+* **downloader:** 通用 URL 解析接口 /api/resolve + 分享内目标文件选择（spx_target）([#849](https://github.com/cocomhub/sproxy/issues/849)) ([82d1a00](https://github.com/cocomhub/sproxy/commit/82d1a00b52c3030431a849619045d42603e54fe8))
+* **files,client,cli,server:** meta extra 读写闭环（读端点 + 默认合并 + replace/delete + 外部卷不丢）（[#857](https://github.com/cocomhub/sproxy/issues/857)） ([038ef68](https://github.com/cocomhub/sproxy/commit/038ef6844041444fe4593c6499c0599d5321d50b))
+* **files,client,meta:** 文件元数据 extra 上传/补录 + 分块 init 携带 + x_ 自定义扩展（[#851](https://github.com/cocomhub/sproxy/issues/851)） ([5536519](https://github.com/cocomhub/sproxy/commit/553651963263ec115ff1697430451db690fcd72d))
+* **files:** list 经卷状态视图列举（§15.2 步骤 2）+ 观察者两阶段接线修复（[#895](https://github.com/cocomhub/sproxy/issues/895)） ([fd1ce97](https://github.com/cocomhub/sproxy/commit/fd1ce973843fa49ed811bc0b3098bad27ae2ccd4))
+* **files:** 全卷搜索（外部卷经缓存递归聚合，深度/条目/超时上限）（[#910](https://github.com/cocomhub/sproxy/issues/910)） ([4a98ef0](https://github.com/cocomhub/sproxy/commit/4a98ef0e5489f0eaa8d4b887ba47fa4dff355576))
+* **files:** 分块上传外部卷——本地 staging 校验后转存目标卷 + 外部卷容量账本热数据落节点本地 ([#848](https://github.com/cocomhub/sproxy/issues/848)) ([510df36](https://github.com/cocomhub/sproxy/commit/510df367f7af6749477fad9f7492cc5a654110ea))
+* **files:** 搜索可选分页 + 索引/磁盘等价性测试 + 审计归档（[#907](https://github.com/cocomhub/sproxy/issues/907)） ([a1a17d3](https://github.com/cocomhub/sproxy/commit/a1a17d36fb5aa0122323c595833288905ba74cfa))
+* **pikpak,cloud,client,sclient,webui:** 分享源归一与转存幂等收敛 + 转存来源 meta（含客户端 meta_extra）([#870](https://github.com/cocomhub/sproxy/issues/870)) ([89d8e5b](https://github.com/cocomhub/sproxy/commit/89d8e5bbe0e952824f9bedfabeddaab82372accc))
+* **pikpak,cloud:** 源文件时间与下载审计元数据 + 下载收敛 hybrid（[#876](https://github.com/cocomhub/sproxy/issues/876)） ([842a048](https://github.com/cocomhub/sproxy/commit/842a048f1e99d80c9f290bc95bdeb081477ad266))
+* **pikpak:** 匿名区上限自动探测 + 进度 WAL 重启恢复 + 能力收敛到领域包（[#877](https://github.com/cocomhub/sproxy/issues/877)） ([2847194](https://github.com/cocomhub/sproxy/commit/2847194fbd8a9f55e2638606ea20bc7d4db876e4))
+* **secretdata,baidupcs:** 跨容器复制对齐写路径 + 写面失效目标直链（[#866](https://github.com/cocomhub/sproxy/issues/866)） ([d69d198](https://github.com/cocomhub/sproxy/commit/d69d1987c73ff9c959968b1738bfc99b8686c6d7))
+* **secretdata,media,webui:** 加密卷读写提速 + 视频扩展名关键帧选型 + 播放入口扩展 ([#846](https://github.com/cocomhub/sproxy/issues/846)) ([49044e6](https://github.com/cocomhub/sproxy/commit/49044e603848eea16ee4ca8dbc25000a373c1793))
+* **storage,files:** 目录变异事件语义（IsDir）+ 目录 rename 全投影（去显式索引搬移）（[#908](https://github.com/cocomhub/sproxy/issues/908)） ([afad10b](https://github.com/cocomhub/sproxy/commit/afad10bd7fc03e5ef377dbbd1b66443cf5895a3a))
+* **volume,cli,server:** 删除即失效派生缓存 + 列表带 checksum + 索引重建（S1-S5）（[#861](https://github.com/cocomhub/sproxy/issues/861)） ([1815d1d](https://github.com/cocomhub/sproxy/commit/1815d1d9a25a36a25bd49baa2f953242d1a1d20d))
+* **volume:** 卷容量按实际占用记账（加密卷不再按逻辑字节低估）（[#903](https://github.com/cocomhub/sproxy/issues/903)） ([28036eb](https://github.com/cocomhub/sproxy/commit/28036eb5580b247d61da2c67bf39169ee792afb6))
+* **volume:** 卷状态缓存 V1+V2——装饰器机制 + 外部卷接入（list/checksum 收敛）（[#875](https://github.com/cocomhub/sproxy/issues/875)） ([d8f9309](https://github.com/cocomhub/sproxy/commit/d8f930980efbe908a45fca0f2481a4ab41a0d915))
+* **volume:** 卷状态缓存默认开启 + TTL 5 分钟 + 本地卷纳入（含 CopyFile 失效）（[#892](https://github.com/cocomhub/sproxy/issues/892)） ([2389b28](https://github.com/cocomhub/sproxy/commit/2389b2802000a98aa1824f87ee880810821fbaf1))
+* **volume:** 卷状态缓存默认永不过期 + 强制刷新入口（CLI/WebUI/API）（[#896](https://github.com/cocomhub/sproxy/issues/896)） ([fded5d4](https://github.com/cocomhub/sproxy/commit/fded5d4769c634a4244e55e8ebbce44c1b1be98b))
+* **volume:** 本地卷内容写事件（MarkWritten）+ R42 门禁（FS 实现自述代际）（[#884](https://github.com/cocomhub/sproxy/issues/884)） ([9a0ec82](https://github.com/cocomhub/sproxy/commit/9a0ec8257987733af9b58d50ba1c889e7ebcde71))
+* **volume:** 本地卷派生状态由 Root 变异事件自动维护（V3 阶段一）（[#880](https://github.com/cocomhub/sproxy/issues/880)） ([b2c5353](https://github.com/cocomhub/sproxy/commit/b2c535395f119775b69b5728940820194767ef91))
+* **volume:** 统一存储卷模型——本地卷装配 StorageVolume + 按用途 VolumeView + 转存支持本地卷 + local://（[#872](https://github.com/cocomhub/sproxy/issues/872)） ([2322207](https://github.com/cocomhub/sproxy/commit/2322207b5db9edbb4f7b9bf58ebcc0898dbeb3e3))
+* **webui,files,server:** meta extra Web UI 展示编辑 + 修本地卷补录 503 / 单次上传丢 extra（[#859](https://github.com/cocomhub/sproxy/issues/859)） ([947aa2f](https://github.com/cocomhub/sproxy/commit/947aa2f5be6f95fad9e4548be30f567e0189d9c7))
+* **webui,files:** 卷操作收敛为单一卷上下文 + 外部卷删除改名 checksum 兜底（[#860](https://github.com/cocomhub/sproxy/issues/860)） ([e1c6917](https://github.com/cocomhub/sproxy/commit/e1c691706001d484358ca49dbae420724b716833))
+* **webui,secretdata,files:** RefreshIndex 收敛测试 + 批量兜底 e2e + 卷面板重建索引 + 修批量 rename 外部卷 404（[#864](https://github.com/cocomhub/sproxy/issues/864)） ([bbac741](https://github.com/cocomhub/sproxy/commit/bbac741792e9192f5ea1da204011e152f6b8bd52))
+* **web:** 不可播格式改用本地播放器兜底（不再黑屏）+ URL 票 TTL 3h（[#923](https://github.com/cocomhub/sproxy/issues/923)） ([edae27d](https://github.com/cocomhub/sproxy/commit/edae27dd8d49c0641a77242d907db668b39bcd82))
+
+
+### Fixed
+
+* **audit:** R13 剩余三项——冷段 TTL · R39 可达性判据 · 归档不可用时保留封段 ([#836](https://github.com/cocomhub/sproxy/issues/836)) ([8a2ee48](https://github.com/cocomhub/sproxy/commit/8a2ee4870c59cbf3b971e5f083949387b914b576))
+* **audit:** R13 对抗评审修复——归档内容寻址(P0 证据丢失) + 读面/指标/归档安全/语义 ([#835](https://github.com/cocomhub/sproxy/issues/835)) ([4241c58](https://github.com/cocomhub/sproxy/commit/4241c580a905dc9c70adbcf91c4ea9a1b5701c82))
+* **checksum:** 集群后端实现卷维度键（多卷同名文件 checksum 不再串值）（[#920](https://github.com/cocomhub/sproxy/issues/920)） ([3b24c66](https://github.com/cocomhub/sproxy/commit/3b24c66b95309813128f0816ccafbe35b5161fe8))
+* **ci:** 消除三类偶发红根因（chunk ACK 持久化 / 事件等待 / 动态端口）（[#904](https://github.com/cocomhub/sproxy/issues/904)） ([b3d5e7a](https://github.com/cocomhub/sproxy/commit/b3d5e7a3704fc729d5047ab07513aa0edbf04bdc))
+* **cloud:** 「任务已停止」通知移到配额释放之后（消除 CI 偶发 Usage 残留）（[#912](https://github.com/cocomhub/sproxy/issues/912)） ([b5bca0d](https://github.com/cocomhub/sproxy/commit/b5bca0dca0ef805e57d8ff77cf636057f36b79a1))
+* **cloud:** 429/408 视为瞬时并可重试，尊重 Retry-After 退避（[#922](https://github.com/cocomhub/sproxy/issues/922)） ([dcb49e4](https://github.com/cocomhub/sproxy/commit/dcb49e4ecd515e8ebffaf66afdec9fe233072128))
+* **files:** 搜索索引失效代际化 + refresh 联动 + 写后 debounce 落盘（[#905](https://github.com/cocomhub/sproxy/issues/905)） ([d22cd42](https://github.com/cocomhub/sproxy/commit/d22cd42cfd6e384f10e9984607db6e6a99b795eb))
+* **files:** 集群后端 checksum 台账经领域层可见（不再被具体类型断言丢弃）（[#917](https://github.com/cocomhub/sproxy/issues/917)） ([b1d609b](https://github.com/cocomhub/sproxy/commit/b1d609b938dd805a4b48ec6b0d6ac30db21b0fc4))
+* **meta:** 转存来源键 source_url/transferred_at 纳入白名单（元数据可 1:1 补录）（[#890](https://github.com/cocomhub/sproxy/issues/890)） ([7906a25](https://github.com/cocomhub/sproxy/commit/7906a253af605d958b6037e2e3d6c56b1671511b))
+* **pikpak:** drive 模式（账号网盘文件）也落进度 WAL（[#882](https://github.com/cocomhub/sproxy/issues/882)） ([2f026d9](https://github.com/cocomhub/sproxy/commit/2f026d9f0311bea5e5a5803afc4966d28e6fdb80))
+* **pikpak:** URL 解析支持 keepshare 镜像 + pikpak.insecure_tls 配置生效（[#858](https://github.com/cocomhub/sproxy/issues/858)） ([384295f](https://github.com/cocomhub/sproxy/commit/384295ffe3a87084b1ee0a2d6393ddf955e6eda2))
+* **pikpak:** WAL 进度代际作废（数据缺失/已完成/换源）+ 补齐场景覆盖（[#883](https://github.com/cocomhub/sproxy/issues/883)） ([cc1aa1c](https://github.com/cocomhub/sproxy/commit/cc1aa1c28467a08cdfaa8615d33374aa315182ef))
+* **pikpak:** 独立 module 的 sibling 依赖改用真实伪版本（外部消费者可解析）（[#879](https://github.com/cocomhub/sproxy/issues/879)） ([9700137](https://github.com/cocomhub/sproxy/commit/97001375f3fcb6c9d51b5156699a3d6cce0f49a0))
+* **secretdata,audit,cloud,baidupcs:** 生产稳定性第一批——卷锁死锁/并发丢数据/审计读面/归档校验/网盘重试 ([#841](https://github.com/cocomhub/sproxy/issues/841)) ([f3e2abc](https://github.com/cocomhub/sproxy/commit/f3e2abc3b6fdfc57f84c7fedcf95a55705d97aaf))
+* **secretdata,audit,cloud,baidupcs:** 生产稳定性第二批——目录 meta 仲裁/审计提交语义/隔离段/恢复有界/配额释放 ([#842](https://github.com/cocomhub/sproxy/issues/842)) ([bca7877](https://github.com/cocomhub/sproxy/commit/bca787784bf717284e24331a7189838ae0de5436))
+* **server:** PUT /api/files/meta 补入文件操作组清单（修 meta set 恒 500）（[#855](https://github.com/cocomhub/sproxy/issues/855)） ([29b5774](https://github.com/cocomhub/sproxy/commit/29b5774484d060f7d94976fd858c9b42f96a2e72))
+* **server:** R14 生产可用性加固——重启续传/配额等待/写锁令牌/加密卷 Seek/审计链路 ([#838](https://github.com/cocomhub/sproxy/issues/838)) ([4b420f8](https://github.com/cocomhub/sproxy/commit/4b420f84e7ce45576eb702f5d4f3c7a0a1559502))
+* **server:** 装配注册 pikpak URL 解析扩展（修 /api/resolve 分享回落 generic）([#856](https://github.com/cocomhub/sproxy/issues/856)) ([938269a](https://github.com/cocomhub/sproxy/commit/938269ab051001a1b464ef6b725b84c410b9638b))
+* **server:** 集群后端 dedup 台账按 owner 缓存（消除每请求全量读 StateStore）（[#918](https://github.com/cocomhub/sproxy/issues/918)） ([e07cf01](https://github.com/cocomhub/sproxy/commit/e07cf01fccceb9037791120a4712b1ea8cb802ea))
+* **share,ai,version,archive:** 加密卷/外部卷按路径寻址场景统一收敛（分享 404 等） ([#844](https://github.com/cocomhub/sproxy/issues/844)) ([74e5fee](https://github.com/cocomhub/sproxy/commit/74e5fee1e80c8b9710204a90bdce0d318c82119e))
+* **volume:** checksum 台账按卷维度隔离，修跨卷同名文件串值（§15.1.1）（[#900](https://github.com/cocomhub/sproxy/issues/900)） ([33c5974](https://github.com/cocomhub/sproxy/commit/33c59749c5275eb817609dd9b407ba20780c0d66))
+* **volume:** R16 对抗评审——cloud 转存到本地卷补容量记账/探测 + VolumeView use 校验（[#873](https://github.com/cocomhub/sproxy/issues/873)） ([6bb9c02](https://github.com/cocomhub/sproxy/commit/6bb9c0290235c4593bfaa47e448418c0f2458fc7))
+* **volume:** R16 缺陷族——旁路写登记派生状态（list checksum 空/条目缺失）（[#874](https://github.com/cocomhub/sproxy/issues/874)） ([eb46a98](https://github.com/cocomhub/sproxy/commit/eb46a98b7977012bd93bcefc64b3ee5f6fcc0406))
+* **volume:** 删除路径按卷清理 checksum 台账 + §15.1.3 遗留项裁决记档（[#901](https://github.com/cocomhub/sproxy/issues/901)） ([c2e2c4c](https://github.com/cocomhub/sproxy/commit/c2e2c4ced67d2457b5cca6bb1f926d3a82926314))
+* **volume:** 外部源封装卷容量账本落节点本地（修 secretdata over 网盘上传必失败）（[#852](https://github.com/cocomhub/sproxy/issues/852)） ([904f114](https://github.com/cocomhub/sproxy/commit/904f114f906cf4ea26320d911fe8d5e2ce6b9fa4))
+* **webui,cmd:** 凭据生效后刷新派生状态（卷下拉/事件流/续传/监控）+ 外部卷类型注册前移 ([#843](https://github.com/cocomhub/sproxy/issues/843)) ([7b9e00b](https://github.com/cocomhub/sproxy/commit/7b9e00b48a8a41e3339c177711ed10d88bfb5571))
+
+
+### Changed
+
+* **archcheck:** 补齐 R43 状态恢复覆盖 · R44 账本直调点登记 ([#839](https://github.com/cocomhub/sproxy/issues/839)) ([01cd04e](https://github.com/cocomhub/sproxy/commit/01cd04e621a408ed2b43d43b75c97619ed60aa7f))
+* **archive:** CI 耗时优化五批全集归档（[#871](https://github.com/cocomhub/sproxy/issues/871)） ([408df2d](https://github.com/cocomhub/sproxy/commit/408df2db29cf484831d0e2b6ac78383a43e4b6af))
+* **checksum:** 台账落盘改为 debounce 合并（消除批量写 O(N²) I/O）（[#914](https://github.com/cocomhub/sproxy/issues/914)） ([1ebdfb4](https://github.com/cocomhub/sproxy/commit/1ebdfb406562789f0274e74284f99b691a611805))
+* **checksum:** 抽取唯一落盘合并器，集群后端也合并写 + 实例按 owner 缓存（[#916](https://github.com/cocomhub/sproxy/issues/916)） ([8e41584](https://github.com/cocomhub/sproxy/commit/8e415841d7475f993c72dfc3677450fe548c2cb8))
+* **ci:** Playwright 浏览器二进制缓存（UI E2E -25s）（[#868](https://github.com/cocomhub/sproxy/issues/868)） ([1532b4d](https://github.com/cocomhub/sproxy/commit/1532b4d35c8a42de8b92aa116a9966e469496fe1))
+* **ci:** Test job 剔除 archcheck 的 race 全量（-87s windows / -70s ubuntu）（[#869](https://github.com/cocomhub/sproxy/issues/869)） ([9eb33c7](https://github.com/cocomhub/sproxy/commit/9eb33c7494b65e3054fd6bb511b1787a0f3470e7))
+* **ci:** 测试等待上限注入 + 覆盖率单遍采集，测试时长 -74%（[#862](https://github.com/cocomhub/sproxy/issues/862)） ([7e8d4b3](https://github.com/cocomhub/sproxy/commit/7e8d4b314a6fa73967a6bbe92b2210bc75abfdc2))
+* **ci:** 覆盖率并入第一遍测试 + fuzz 减半 + gofix-all 并行（[#867](https://github.com/cocomhub/sproxy/issues/867)） ([9d9cdb7](https://github.com/cocomhub/sproxy/commit/9d9cdb78768cafc14182973c21a363f98013591a))
+* **dedup:** 台账落盘复用通用合并器（消除批量写 O(N²) I/O）+ 合并器上移（[#919](https://github.com/cocomhub/sproxy/issues/919)） ([dce1096](https://github.com/cocomhub/sproxy/commit/dce10967bd29a61213d5438c341c11e524296d8f))
+* **e2e:** sproxy/sclient 二进制统一构建，整包只 build 一次（[#865](https://github.com/cocomhub/sproxy/issues/865)） ([e841b1a](https://github.com/cocomhub/sproxy/commit/e841b1adcec94c7bcf237eb1331ec60eb853f863))
+* **e2e:** 恢复功能端到端覆盖——状态×阶段矩阵（含分块上传与配额等待） ([#840](https://github.com/cocomhub/sproxy/issues/840)) ([8548e47](https://github.com/cocomhub/sproxy/commit/8548e471b1492e032d5dc15cbf9e5c9e023661f2))
+* **files:** list 不再依赖 searchIndex（§15.2 步骤 3），R41 硬禁 index.list（[#897](https://github.com/cocomhub/sproxy/issues/897)） ([c8fb4b9](https://github.com/cocomhub/sproxy/commit/c8fb4b934c61c51475bcfe25e90740d2873f2fca))
+* **files:** 搜索 checksum 改逐条惰性查找（消除每请求 O(N) 台账拷贝）（[#911](https://github.com/cocomhub/sproxy/issues/911)） ([14f74c7](https://github.com/cocomhub/sproxy/commit/14f74c7e257f4ed7ed55e8e0b934442175496e51))
+* **files:** 搜索索引 LRU 上限 + 锁外标签清理 + 派生状态指标（[#906](https://github.com/cocomhub/sproxy/issues/906)） ([c0edc95](https://github.com/cocomhub/sproxy/commit/c0edc951108b1b3de5f93ac203f5c54380d942ab))
+* **files:** 派生状态单一写入口（去写内核双写）+ R47 门禁（[#909](https://github.com/cocomhub/sproxy/issues/909)） ([450070b](https://github.com/cocomhub/sproxy/commit/450070b905091a158211cdcb08780dd4b347e843))
+* **files:** 目录列举 checksum 改逐条惰性（消除每卷全量台账拷贝）（[#913](https://github.com/cocomhub/sproxy/issues/913)） ([8c2078f](https://github.com/cocomhub/sproxy/commit/8c2078ff7d3400eee4cb90ad0a779e19a0e188be))
+* **hooks:** pre-commit SPDX 检查增量化为 addlicense -check（[#863](https://github.com/cocomhub/sproxy/issues/863)） ([2e8aee8](https://github.com/cocomhub/sproxy/commit/2e8aee823f900855383e9bb4631334a4f39c335f))
+* **secretdata,baidupcs,client:** 外部卷大文件读侧多级窗口缓存 + 完整性加固（[#850](https://github.com/cocomhub/sproxy/issues/850)） ([0dc48fd](https://github.com/cocomhub/sproxy/commit/0dc48fdc46e086fdbd55d2247c5a2e4acc6e2638))
+* **secretdata,download:** 加密卷随机读提速（salt+段合并/本地性分流）+ URL 票免 401 预览 ([#847](https://github.com/cocomhub/sproxy/issues/847)) ([ed08dcf](https://github.com/cocomhub/sproxy/commit/ed08dcfd5a6a0bd202ee9b453522bc74e596a4a0))
+* **trusted:** §8 残余状态校正（回收站多卷/presign 已修，仅剩容量语义待口径）（[#902](https://github.com/cocomhub/sproxy/issues/902)） ([ca34953](https://github.com/cocomhub/sproxy/commit/ca349538e5898c579af1bb4956656c970e59c34e))
+* **verify:** 巡检改为分批遍历台账（消除 GetAll 全量拷贝）（[#921](https://github.com/cocomhub/sproxy/issues/921)） ([e686b4a](https://github.com/cocomhub/sproxy/commit/e686b4aaa5b687fc23f3814877936e1d2d3e095c))
+* **volume:** §15.1 台账只读化口径侦察（跨卷同名 checksum 覆盖缺陷）（[#899](https://github.com/cocomhub/sproxy/issues/899)） ([881bb7f](https://github.com/cocomhub/sproxy/commit/881bb7f7cfa5be41b9f5f85fb0423abd5d71554c))
+* **volume:** §15.3 记录 searchIndex→TreeView 步骤 2 的前置分析（缓存语义与决策点）（[#891](https://github.com/cocomhub/sproxy/issues/891)） ([ee8685f](https://github.com/cocomhub/sproxy/commit/ee8685fda20f49672860bad4df8b784184ae1988))
+* **volumestate:** 缓存增加总条目预算（约束单目录大快照占用的内存）（[#915](https://github.com/cocomhub/sproxy/issues/915)） ([6408999](https://github.com/cocomhub/sproxy/commit/64089999204279fd0d5d956dbac24e3a3cd07e6d))
+* **volume:** 卷状态缓存端到端验证 + 修复外部卷写面绕过 VolumeView（[#878](https://github.com/cocomhub/sproxy/issues/878)） ([bbf7290](https://github.com/cocomhub/sproxy/commit/bbf729039c7f6a0838de02b54a77dbe07ea063d2))
+* **volume:** 本地卷旁路写只补 checksum（V4 阶段一）（[#885](https://github.com/cocomhub/sproxy/issues/885)） ([2eca7cc](https://github.com/cocomhub/sproxy/commit/2eca7ccd0dbbf670fbdfab71d1778cc7f08cfb0d))
+* **volume:** 目录列举统一为唯一入口 VolumeViewLister（本地卷 + 外部卷）（[#898](https://github.com/cocomhub/sproxy/issues/898)） ([f4f513c](https://github.com/cocomhub/sproxy/commit/f4f513cc2f7acc93e5697286559431ff02bd6282))
+* **volume:** 跨卷搬移只迁移 checksum，索引交由 Root 事件（V4 阶段二）（[#886](https://github.com/cocomhub/sproxy/issues/886)） ([9386d30](https://github.com/cocomhub/sproxy/commit/9386d300693ac9e2d08a59491b7239465a1f2830))
+
 ## [0.24.0](https://github.com/cocomhub/sproxy/compare/v0.23.0...v0.24.0) (2026-10-19)
 
 
