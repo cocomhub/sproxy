@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package ai
 
 // ai_insight.go 是 AI 文件洞察（roadmap 11.9-⑤）：
 //
@@ -11,17 +11,21 @@ package server
 //   - 失败语义：网关失败 → 明确错误（非静默降级）；不缓存失败。
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/server/config"
+
 	"github.com/cocomhub/sproxy/pkg/llmgate"
 )
 
-// maxSummaryRunes / maxTags / maxTagRunes 是输出约束（防超长响应）。
+// MaxSummaryRunes / maxTags / maxTagRunes 是输出约束（防超长响应）。
 const (
-	maxSummaryRunes = 2000
+	MaxSummaryRunes = 2000
 	maxTags         = 10
 	maxTagRunes     = 20
 )
@@ -44,15 +48,15 @@ const (
 // ErrNotTextFile 是抽样为空（非文本）的错误。
 var ErrNotTextFile = fmt.Errorf("not a text file")
 
-// insightPrompts 构造 system/user 提示（纯函数可测；user 仅作数据，无拼接注入面）。
-func insightPrompts(filename, sample string) (system, user string) {
+// InsightPrompts 构造 system/user 提示（纯函数可测；user 仅作数据，无拼接注入面）。
+func InsightPrompts(filename, sample string) (system, user string) {
 	system = "你是一名文件内容助手。根据给出的文件名与文本抽样，输出简洁的中文摘要或标签列表。"
 	user = fmt.Sprintf("文件名：%s\n\n文本抽样：\n%s", filename, sample)
 	return system, user
 }
 
-// normalizeTags 规范化 LLM 标签输出（≤10 个、每 ≤20 字符、去空/去重）。
-func normalizeTags(raw string) []string {
+// NormalizeTags 规范化 LLM 标签输出（≤10 个、每 ≤20 字符、去空/去重）。
+func NormalizeTags(raw string) []string {
 	parts := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == '，' || r == '\n' || r == ';' || r == '；'
 	})
@@ -72,8 +76,8 @@ func normalizeTags(raw string) []string {
 	return tags
 }
 
-// truncateRunes 截断到 maxLen 个字符（防超长响应）。
-func truncateRunes(s string, maxLen int) string {
+// TruncateRunes 截断到 maxLen 个字符（防超长响应）。
+func TruncateRunes(s string, maxLen int) string {
 	r := []rune(s)
 	if len(r) <= maxLen {
 		return s
@@ -81,10 +85,10 @@ func truncateRunes(s string, maxLen int) string {
 	return string(r[:maxLen])
 }
 
-// newAIInsightFromConfig 从 AIInsightConfig 装配洞察器：未启用 → nil（零回归）；
+// newAIInsightFromConfig 从 config.AIInsightConfig 装配洞察器：未启用 → nil（零回归）；
 // enabled=true 但 APIKeyRef 解析为空 → Warn（可观测降级）+ nil。
 // NewAIInsightFromConfig 从配置装配洞察器（导出供装配层；enabled=false → nil 零回归）。
-func NewAIInsightFromConfig(cfg AIInsightConfig, cacheDir string, logger *slog.Logger) *AIInsight {
+func NewAIInsightFromConfig(cfg config.AIInsightConfig, cacheDir string, logger *slog.Logger) *AIInsight {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -103,7 +107,29 @@ func NewAIInsightFromConfig(cfg AIInsightConfig, cacheDir string, logger *slog.L
 	})
 	return &AIInsight{
 		gate:   gate,
-		cache:  newInsightCache(cacheDir, logger),
+		cache:  NewInsightCache(cacheDir, logger),
 		logger: logger,
 	}
+}
+
+// Enabled 报告洞察是否已装配（LLM 网关非 nil）。
+func (a *AIInsight) Enabled() bool { return a != nil && a.gate != nil }
+
+// Cache 返回洞察结果缓存。
+func (a *AIInsight) Cache() *InsightCache { return a.cache }
+
+// Quota 返回配额句柄（nil = 未启用）。
+func (a *AIInsight) Quota() *AIQuota { return a.quota }
+
+// Advise 调用底层 LLM（system/user 提示）；未装配返回错误（调用方按 fail-closed 处理）。
+func (a *AIInsight) Advise(ctx context.Context, system, user string) (string, error) {
+	if a == nil || a.gate == nil {
+		return "", errors.New("ai insight disabled")
+	}
+	return a.gate.Advise(ctx, system, user)
+}
+
+// NewAIInsightWithGate 构造带指定 LLM 网关的洞察器（装配/测试用；nil = 未启用）。
+func NewAIInsightWithGate(gate *llmgate.Client) *AIInsight {
+	return &AIInsight{gate: gate, logger: slog.Default()}
 }

@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package ai
 
 // ai_insight_cache.go 是 AI 文件洞察的落盘缓存（roadmap 11.9-⑤）：
 //
@@ -37,8 +37,8 @@ type InsightCache struct {
 	logger  *slog.Logger
 }
 
-// newInsightCache 构造缓存（dir = <tenant meta> 根；落盘在 dir/insight/）。
-func newInsightCache(dir string, logger *slog.Logger) *InsightCache {
+// NewInsightCache 构造缓存（dir = <tenant meta> 根；落盘在 dir/insight/）。
+func NewInsightCache(dir string, logger *slog.Logger) *InsightCache {
 	if logger == nil {
 		logger = slog.Default()
 	}

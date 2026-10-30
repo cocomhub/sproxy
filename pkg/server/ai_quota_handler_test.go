@@ -22,8 +22,9 @@ func TestAIQuotaEndpoint(t *testing.T) {
 		t.Fatalf("未启用 code = %d, want 400", rec.Code)
 	}
 	// 启用 → 200 + usage
-	h.aiInsight = &AIInsight{quota: NewAIQuota(AIQuotaConfig{Enabled: true, Default: AILimit{DailyCalls: 5}}, slog.Default())}
-	_ = h.aiInsight.quota.CheckAndCharge("ownerA", 10)
+	h.aiInsight = NewAIInsightWithGate(nil)
+	h.aiInsight.SetQuota(NewAIQuota(AIQuotaConfig{Enabled: true, Default: AILimit{DailyCalls: 5}}, slog.Default()))
+	_ = h.aiInsight.Quota().CheckAndCharge("ownerA", 10)
 	req2 := httptest.NewRequest(http.MethodGet, "/api/ai/quota", nil)
 	req2 = req2.WithContext(withActor(req2.Context(), "ownerA"))
 	rec2 := httptest.NewRecorder()

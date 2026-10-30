@@ -41,6 +41,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 
 
+
+| AI 洞察/建议/配额/隐私 | `pkg/server/ai` | `AIInsight` / `AIAdvisor` / `AIQuota` / `AIPrivacy` / `AIEventConsumer` | **server 作用域**；事件源经 `ai.EventSource` 注入（不反向依赖装配层） |
 | 服务端 WebDAV 挂载面 | `pkg/server/dav` | `dav.New(Deps)` / `Service.Handler` | **server 作用域**；`MetaPolicy` 窄接口（sidecar 联动），不反向依赖装配层 |
 | S3 兼容网关（SigV4/对象/multipart） | `pkg/server/s3` | `s3.New(Deps)` / `Service.Handler` | **server 作用域**；依赖经 `s3.Deps` 注入（`MetaPolicy` 窄接口），不反向依赖装配层 |
 | 周期任务调度 | `pkg/server/scheduler` | `Scheduler.Register/Start/Stop`、`Task` | **server 作用域**（零 pkg/* 依赖，L0）；任务注册内容留在装配层 |

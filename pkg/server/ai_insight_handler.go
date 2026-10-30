@@ -60,7 +60,7 @@ func (h *Handlers) aiSample(ctx context.Context, owner, rel, volumeHint string) 
 
 // handleSummarize 处理 /api/ai/summarize（owner 隔离：handler 由认证层注入 owner）。
 func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, owner string, ai *AIInsight) {
-	if ai == nil || ai.gate == nil {
+	if !ai.Enabled() {
 		writeAIError(w, http.StatusBadRequest, "AI 洞察未启用")
 		return
 	}
@@ -88,15 +88,15 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 		return
 	}
 	// 缓存命中（mtime 未变）
-	if got, _, ok, _ := ai.cache.Get(r.Context(), owner, cacheKey, "sum", mtime); ok {
+	if got, _, ok, _ := ai.Cache().Get(r.Context(), owner, cacheKey, "sum", mtime); ok {
 		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write(got)
 		return
 	}
 	// 配额前置门（roadmap 11.9-⑦）：超限 429 不调网关 + quota_exceeded 审计。
-	if ai.quota != nil {
+	if ai.Quota() != nil {
 		est := len(text) / 4
-		if qerr := ai.quota.CheckAndCharge(owner, est); qerr != nil {
+		if qerr := ai.Quota().CheckAndCharge(owner, est); qerr != nil {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: ActionAISummarize, ObjectType: "file", Object: filename,
 				Result: "quota_exceeded", Detail: qerr.Error(),
@@ -106,7 +106,7 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 		}
 	}
 	system, user := insightPrompts(filename, text)
-	resp, err := ai.gate.Advise(r.Context(), system, user)
+	resp, err := ai.Advise(r.Context(), system, user)
 	if err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: ActionAISummarize, ObjectType: "file", Object: filename,
@@ -121,14 +121,14 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 		Result: AuditResultSuccess, Detail: fmt.Sprintf("tokens≈%d", len(text)/4),
 	})
 	body, _ := json.Marshal(map[string]string{"summary": summary})
-	_ = ai.cache.Put(r.Context(), owner, cacheKey, "sum", mtime, body)
+	_ = ai.Cache().Put(r.Context(), owner, cacheKey, "sum", mtime, body)
 	w.Header().Set(headerContentType, contentTypeJSON)
 	_, _ = w.Write(body)
 }
 
 // handleAITag 处理 /api/ai/tag。
 func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner string, ai *AIInsight) {
-	if ai == nil || ai.gate == nil {
+	if !ai.Enabled() {
 		writeAIError(w, http.StatusBadRequest, "AI 洞察未启用")
 		return
 	}
@@ -155,14 +155,14 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		writeAIError(w, http.StatusNotFound, "文件不存在")
 		return
 	}
-	if got, _, ok, _ := ai.cache.Get(r.Context(), owner, cacheKey, "tag", mtime); ok {
+	if got, _, ok, _ := ai.Cache().Get(r.Context(), owner, cacheKey, "tag", mtime); ok {
 		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write(got)
 		return
 	}
-	if ai.quota != nil {
+	if ai.Quota() != nil {
 		est := len(text) / 4
-		if qerr := ai.quota.CheckAndCharge(owner, est); qerr != nil {
+		if qerr := ai.Quota().CheckAndCharge(owner, est); qerr != nil {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: ActionAITag, ObjectType: "file", Object: filename,
 				Result: "quota_exceeded", Detail: qerr.Error(),
@@ -172,7 +172,7 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		}
 	}
 	system, user := insightPrompts(filename, text)
-	resp, err := ai.gate.Advise(r.Context(), system, user)
+	resp, err := ai.Advise(r.Context(), system, user)
 	if err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: ActionAITag, ObjectType: "file", Object: filename,
@@ -187,7 +187,7 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		Result: AuditResultSuccess, Detail: fmt.Sprintf("tags=%d", len(tags)),
 	})
 	body, _ := json.Marshal(map[string]any{"tags": tags})
-	_ = ai.cache.Put(r.Context(), owner, filename, "tag", mtime, body)
+	_ = ai.Cache().Put(r.Context(), owner, filename, "tag", mtime, body)
 	w.Header().Set(headerContentType, contentTypeJSON)
 	_, _ = w.Write(body)
 }

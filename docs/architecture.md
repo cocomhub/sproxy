@@ -626,7 +626,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 网关 / S6 WebDAV）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -688,6 +688,16 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
   `SweepMetaTmp`）由装配层 `filesMetaPolicy` 适配，装饰器不反向依赖装配层（R6）。
 - 装配：`pkg/server/dav_wiring.go` 的 `h.davService()`；路由 `authMiddleware(davService().Handler)`。
 - 白盒装饰器测试随迁 `pkg/server/dav`（`MetaPolicy` 用测试替身）；HTTP e2e 保留装配层。
+
+**S7：AI 域（`pkg/server/ai`）**
+
+- 迁入：文件洞察（`AIInsight` + 缓存）、告警建议器（`AIAdvisor`）、AI 配额（`AIQuota`）、
+  AI 派生数据隐私（`AIPrivacy`）、事件消费端（`AIEventConsumer`）。
+- **依赖倒置**：事件源用 `ai.EventSource`（装配层把 `EventBus` 快照转成 `ai.FileEvent`），
+  AI 域不反向依赖装配层（R6）。
+- HTTP 面（summarize/tag/privacy/quota）保留装配层，经 `ai_alias.go` 别名与
+  `AIInsight` 的 `Enabled/Cache/Quota/Advise` 访问器调用。
+- 白盒缓存测试随迁 `pkg/server/ai`；handler/事件测试保留装配层（迁移期别名）。
 
 ### 新增 Server 切片的步骤
 

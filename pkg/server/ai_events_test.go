@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/ai"
+
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -30,7 +32,7 @@ func (f *fakeAIEnqueue) enqueue(owner, rel, op string) {
 	f.entered.Store(true)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, aiTask{owner: owner, rel: rel, op: op})
+	f.calls = append(f.calls, aiTask{Owner: owner, Rel: rel, Op: op})
 }
 
 func (f *fakeAIEnqueue) count() int {
@@ -61,7 +63,7 @@ func TestAIEventConsumer_SubscribesAndEnqueues(t *testing.T) {
 		t.Fatalf("enqueue 应恰好一次, got %d", f.count())
 	}
 	calls := f.snapshot()
-	if calls[0].owner != "alice" || calls[0].rel != "a.txt" || calls[0].op != "upload" {
+	if calls[0].Owner != "alice" || calls[0].Rel != "a.txt" || calls[0].Op != "upload" {
 		t.Fatalf("enqueue 载荷不符: %+v", calls[0])
 	}
 }
@@ -102,7 +104,7 @@ func TestAIEventConsumer_RevIdempotent(t *testing.T) {
 		t.Fatalf("首事件应入队, got %d", f.count())
 	}
 	// 直接经 handleEvent 注入旧游标（事件序 rev 倒退）→ 跳过。
-	c.handleEvent(fileEventSnapshot{Cursor: 0, Action: "upload", Owner: "alice", Rel: "a.txt"})
+	c.HandleEvent(ai.FileEvent{Cursor: 0, Action: "upload", Owner: "alice", Rel: "a.txt"})
 	if !testutil.WaitForBool(3*time.Second, func() bool { return f.count() == 1 }) {
 		t.Fatalf("旧 rev 事件应跳过, got %d", f.count())
 	}
@@ -126,10 +128,10 @@ func TestAIEventConsumer_DeleteRenameRouted(t *testing.T) {
 		t.Fatalf("rename 事件应入队, got %d", f.count())
 	}
 	calls := f.snapshot()
-	if calls[0].op != "delete" || calls[0].rel != "a.txt" {
+	if calls[0].Op != "delete" || calls[0].Rel != "a.txt" {
 		t.Fatalf("delete 路由不符: %+v", calls[0])
 	}
-	if calls[1].op != "rename" || calls[1].rel != "b.txt" {
+	if calls[1].Op != "rename" || calls[1].Rel != "b.txt" {
 		t.Fatalf("rename 路由不符: %+v", calls[1])
 	}
 }

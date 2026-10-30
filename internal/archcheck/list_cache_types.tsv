@@ -5,7 +5,7 @@ pkg/audit/index.go	RingIndex	审计内存热索引（审计子系统自管，R40
 pkg/cryptox/shardseal/crypto.go	blobIndex	分片密封的块索引（密码学原语内部结构）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
 pkg/files/search_index.go	ownerIndex	searchIndex 的内部投影（随 searchIndex 一并由 V4 删除）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
 pkg/files/search_index.go	searchIndex	旧本地卷索引（R46 棘轮收敛中，V4 删除）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
-pkg/server/ai_insight_cache.go	InsightCache	AI 洞见结果缓存（业务缓存，非文件列表）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
+pkg/server/ai/insight_cache.go	InsightCache	AI 洞见结果缓存（业务缓存，非文件列表）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
 pkg/storage/tenant_resolve.go	TenantCache	租户句柄缓存（句柄复用，不是列表内容）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
 pkg/syncmgr/conflict_index.go	ConflictIndex	同步冲突索引（同步域自管，与卷列表无关）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
 pkg/tunnel/mesh/mdns.go	mdnsPeerCache	mDNS 对端缓存（网络发现，非文件列表）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
