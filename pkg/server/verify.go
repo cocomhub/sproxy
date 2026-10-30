@@ -79,25 +79,36 @@ func (h *Handlers) verifyOneOwner(owner string, rep *verifyReport) {
 		rep.Skipped++
 		return
 	}
-	snapshot := cs.GetAll()
-	if len(snapshot) == 0 {
-		// 台账为空（未上传过 / 损坏被 store 降级为空）→ 该租户无可核对项，跳过。
+	// 空台账跳过：优先 O(1) 的 Len（不拷贝）；未实现判空能力时由遍历结果判定。
+	if lc, ok := cs.(checksum.LenCounter); ok && lc.Len() == 0 {
 		rep.Skipped++
 		return
 	}
 	// 台账键可能是**卷维度键**（`<vol>\x00user/<rel>`，§15.1.1）或旧无卷键——校验按 rel
 	// 去重后逐条核对（实际所在卷由 locateOwnerFile 定位）。
-	seen := make(map[string]struct{}, len(snapshot))
-	for key, expected := range snapshot {
+	seen := make(map[string]struct{})
+	visit := func(key, expected string) bool {
 		_, rel, ok := checksum.SplitVolumeKey(key)
 		if !ok {
 			rel = key
 		}
-		if _, dup := seen[rel]; dup {
-			continue
+		if _, dup := seen[rel]; !dup {
+			seen[rel] = struct{}{}
+			h.verifyOneEntry(owner, rel, expected, rep)
 		}
-		seen[rel] = struct{}{}
-		h.verifyOneEntry(owner, rel, expected, rep)
+		return true
+	}
+	// 分批遍历（锁外回调）避免全量快照拷贝；store 未实现 Iterator 时回落 GetAll（零回归）。
+	if it, ok := cs.(checksum.Iterator); ok {
+		it.Iterate(0, visit)
+	} else {
+		for k, v := range cs.GetAll() {
+			visit(k, v)
+		}
+	}
+	if len(seen) == 0 {
+		// 台账为空（未上传过 / 损坏被 store 降级为空）→ 该租户无可核对项，跳过。
+		rep.Skipped++
 	}
 }
 

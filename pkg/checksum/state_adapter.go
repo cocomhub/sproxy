@@ -55,6 +55,7 @@ var _ ChecksumStoreIface = (*StateBackedChecksumStore)(nil)
 var _ VolumeKeyedStore = (*StateBackedChecksumStore)(nil)
 var _ Flusher = (*StateBackedChecksumStore)(nil)
 var _ LenCounter = (*StateBackedChecksumStore)(nil)
+var _ Iterator = (*StateBackedChecksumStore)(nil)
 var _ BatchWriter = (*StateBackedChecksumStore)(nil)
 var _ VolumeBatchWriter = (*StateBackedChecksumStore)(nil)
 
@@ -329,6 +330,39 @@ func (s *StateBackedChecksumStore) SnapshotInVolume(vol string) map[string]strin
 		}
 	}
 	return out
+}
+
+// Iterate 分批遍历台账（锁外回调；语义同 ChecksumStore.Iterate）。
+func (s *StateBackedChecksumStore) Iterate(batch int, fn func(key, checksum string) bool) {
+	if batch <= 0 {
+		batch = 256
+	}
+	s.ensureLoaded()
+	s.mu.RLock()
+	keys := make([]string, 0, len(s.checksums))
+	for k := range s.checksums {
+		keys = append(keys, k)
+	}
+	s.mu.RUnlock()
+
+	type kv struct{ k, v string }
+	page := make([]kv, 0, batch)
+	for i := 0; i < len(keys); i += batch {
+		end := min(i+batch, len(keys))
+		s.mu.RLock()
+		page = page[:0]
+		for _, k := range keys[i:end] {
+			if v, ok := s.checksums[k]; ok {
+				page = append(page, kv{k: k, v: v})
+			}
+		}
+		s.mu.RUnlock()
+		for _, p := range page {
+			if !fn(p.k, p.v) {
+				return
+			}
+		}
+	}
 }
 
 // Len 返回台账条目数（必要时先载入；O(1) 判空用）。

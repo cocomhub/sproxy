@@ -388,6 +388,10 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 与**总条目预算**（`DefaultMaxTotalEntries` 200_000，即所有目录 `entries` 之和）。超预算按 LRU
 淘汰；**单目录快照超过总预算 ⇒ 不缓存**（回源），避免一个十万文件目录挤占全部内存。
 
+**校验巡检的台账读取（2026-10-30）**：`/api/verify` 用可选扩展 `checksum.Iterator` **分批遍历**
+（锁外回调，峰值内存 O(键列表 + 单批)），不再 `GetAll()` 全量拷贝；判空用 `LenCounter`（O(1)）。
+store 未实现这些能力时回落 `GetAll`（零回归）。
+
 **读取与写入口径（2026-10-30）**：目录列举与搜索的 `checksum` 一律**逐条 O(1) 查台账**
 （`checksumGetter` / `checksumLookupFor`），不再每请求拷贝全量快照；台账写入经 **debounce
 合并**（`ChecksumStore.Set` 只更新内存 + 累计代际，1s 定时器合并为一次全量落盘，`Flush`/`Close`
