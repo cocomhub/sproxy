@@ -94,9 +94,13 @@ func (m *Merger) flushOnce() error {
 	return nil
 }
 
-// Flush 立即落盘（有待持久化改动时）。
+// Flush 立即落盘（有待持久化改动时）。已 Close 的实例为空操作（关闭后不再持久化）。
 func (m *Merger) Flush() error {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
 	if m.timer != nil {
 		m.timer.Stop()
 		m.timer = nil
