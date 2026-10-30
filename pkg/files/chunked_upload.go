@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -1535,8 +1536,17 @@ func (s *Service) completeExternalTransfer(ctx context.Context, w http.ResponseW
 
 // ensureExternalDir 确保外部卷目标目录存在（外部卷无隐式目录语义）。失败已回包，返回 false。
 func (s *Service) ensureExternalDir(ctx context.Context, w http.ResponseWriter, sink UploadSink, rel string) bool {
-	if derr := sink.MakeDir(ctx, path.Dir(rel)); derr != nil {
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgCreateDirFailed}, http.StatusInternalServerError)
+	dir := path.Dir(rel)
+	if derr := sink.MakeDir(ctx, dir); derr != nil {
+		// 目录已存在 = 目标状态已达成（外部卷 MakeDir 在部分后端/并发下会回 ErrExist）。
+		if errors.Is(derr, fs.ErrExist) || errors.Is(derr, os.ErrExist) {
+			return true
+		}
+		// **必须带出详情**：此前只回「创建目录失败」⇒ 生产故障无法定位（实测多条上传因此
+		// 只看到无信息量的 500）。
+		s.rt.logger().Warn("外部卷创建目标目录失败", "dir", dir, "error", derr)
+		s.sendJSON(w, ChunkCompleteResponse{Success: false,
+			Message: errMsgCreateDirFailed + ": " + derr.Error()}, http.StatusInternalServerError)
 		return false
 	}
 	return true
