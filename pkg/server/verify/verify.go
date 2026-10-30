@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package verify
 
 // verify.go 是全仓 checksum 巡检（roadmap 11.3-⑩，设计文档
 // docs/designs/2026-09-24-checksum-verify.md）：
@@ -24,9 +24,7 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -38,43 +36,43 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
-// verifyHook 是测试注入的巡检执行钩子（生产恒 nil）：在 verifyOnce 持 busy 标记后、
+// verifyHook 是测试注入的巡检执行钩子（生产恒 nil）：在 VerifyOnce 持 busy 标记后、
 // verifyPass 前调用，供并发用例阻塞制造重入窗口。零值 nil = 零回归。
 var _ = context.Background
 
-// verifyOnce 执行一次巡检（带单飞防重入）。busy 时返回 Concurrent=true 的空报告。
+// VerifyOnce 执行一次巡检（带单飞防重入）。busy 时返回 Concurrent=true 的空报告。
 // verifyHook（测试注入）在 verifyPass 入口调用：阻塞在 gate 制造重入窗口（并发用例用）。
-func (h *Handlers) verifyOnce(ctx context.Context, volName, owner string) verifyReport {
-	if !h.verifyBusy.CompareAndSwap(false, true) {
-		return verifyReport{Concurrent: true}
+func (s *Service) VerifyOnce(ctx context.Context, volName, owner string) Report {
+	if !s.d.Busy.CompareAndSwap(false, true) {
+		return Report{Concurrent: true}
 	}
-	defer h.verifyBusy.Store(false)
-	if h.verifyHook != nil {
-		h.verifyHook()
+	defer s.d.Busy.Store(false)
+	if s.d.Hook != nil {
+		s.d.Hook()
 	}
-	return h.verifyPass(ctx, volName, owner)
+	return s.verifyPass(ctx, volName, owner)
 }
 
 // verifyPass 执行一轮全卷一致性审计并返回报告。
 //
 // owner 非空 = 只核该租户（手动端点按请求者 owner）；空 = 全租户（磁盘扫描 + anonymous 兜底）。
 // volName 非空 = 只核该卷视图；空 = 全部视图（locateOwnerFile 定位实际文件所在卷）。
-func (h *Handlers) verifyPass(ctx context.Context, volName, owner string) verifyReport {
-	var rep verifyReport
-	for _, own := range verifyOwners(h, owner) {
-		h.verifyOneOwner(own, &rep)
+func (s *Service) verifyPass(ctx context.Context, volName, owner string) Report {
+	var rep Report
+	for _, own := range verifyOwners(s, owner) {
+		s.VerifyOneOwner(own, &rep)
 	}
 	return rep
 }
 
 // verifyOneOwner 校验单个租户的所有台账条目（租户不可用 / 台账为空 / store 缺失则跳过）。
-func (h *Handlers) verifyOneOwner(owner string, rep *verifyReport) {
-	tnt := h.tenantFor(owner)
+func (s *Service) VerifyOneOwner(owner string, rep *Report) {
+	tnt := s.d.TenantFor(owner)
 	if tnt == nil || tnt.Root() == nil {
 		rep.Errors = append(rep.Errors, fmt.Sprintf("租户 %s 不可用", owner))
 		return
 	}
-	cs := h.checksumStoreFor(owner)
+	cs := s.d.ChecksumStoreFor(owner)
 	if cs == nil {
 		rep.Skipped++
 		return
@@ -94,7 +92,7 @@ func (h *Handlers) verifyOneOwner(owner string, rep *verifyReport) {
 		}
 		if _, dup := seen[rel]; !dup {
 			seen[rel] = struct{}{}
-			h.verifyOneEntry(owner, rel, expected, rep)
+			s.verifyOneEntry(owner, rel, expected, rep)
 		}
 		return true
 	}
@@ -115,14 +113,14 @@ func (h *Handlers) verifyOneOwner(owner string, rep *verifyReport) {
 // verifyOneEntry 核对单个台账条目与实际磁盘校验和：缺失/无效/不符/一致分别归账。
 // 台账 key 含功能桶前缀（user/…、cloud/<taskID>/<file>…），文件可能因多卷路由落在
 // 非默认卷——locateOwnerFile 定位实际所在卷的租户 root（读定位，ACL 收口）。
-func (h *Handlers) verifyOneEntry(owner, rel, expected string, rep *verifyReport) {
+func (s *Service) verifyOneEntry(owner, rel, expected string, rep *Report) {
 	rep.Total++
-	loc, found := h.locateOwnerFile(owner, rel)
-	if !found || loc.tenant == nil || loc.tenant.Root() == nil {
+	loc, found := s.d.LocateOwnerFile(owner, rel)
+	if !found || loc == nil || loc.Root() == nil {
 		rep.Missing = append(rep.Missing, rel)
 		return
 	}
-	actual, err := FileChecksumRoot(loc.tenant.Root(), rel)
+	actual, err := checksum.File(loc.Root(), rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			rep.Missing = append(rep.Missing, rel)
@@ -132,12 +130,12 @@ func (h *Handlers) verifyOneEntry(owner, rel, expected string, rep *verifyReport
 		return
 	}
 	if !checksum.Equal(actual, expected) {
-		rep.Mismatched = append(rep.Mismatched, verifyMismatch{
+		rep.Mismatched = append(rep.Mismatched, Mismatch{
 			Path:     filepath.ToSlash(rel),
 			Expected: expected,
 			Actual:   actual,
 		})
-		if qErr := quarantineBadFile(loc.tenant.Root(), rel); qErr != nil {
+		if qErr := quarantineBadFile(loc.Root(), rel); qErr != nil {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("隔离 %s 失败: %v", rel, qErr))
 		}
 		return
@@ -147,16 +145,16 @@ func (h *Handlers) verifyOneEntry(owner, rel, expected string, rep *verifyReport
 
 // verifyOwners 返回本次巡检的租户集合：显式 owner 优先；空 = 磁盘扫描 + anonymous 兜底
 // （与 mirror/trash GC 同源；anonymous 可能未出现在磁盘扫描——未认证默认租户）。
-func verifyOwners(h *Handlers, owner string) []string {
+func verifyOwners(s *Service, owner string) []string {
 	if owner != "" {
-		return []string{normalizeOwner(owner)}
+		return []string{storage.NormalizeOwner(owner)}
 	}
-	owners := h.listTenantIDs()
+	owners := s.d.ListTenantIDs()
 	if len(owners) == 0 {
-		owners = []string{anonymousOwner}
+		owners = []string{storage.AnonymousOwner}
 	}
-	if !slices.Contains(owners, anonymousOwner) {
-		owners = append(owners, anonymousOwner)
+	if !slices.Contains(owners, storage.AnonymousOwner) {
+		owners = append(owners, storage.AnonymousOwner)
 	}
 	return owners
 }
@@ -176,64 +174,20 @@ func quarantineBadFile(root *storage.Root, rel string) error {
 	return nil
 }
 
-// verifyReport 是 POST /api/verify 的响应体。
-type verifyReport struct {
-	Total      int              `json:"total"`                // 台账文件总数（核对项）
-	Ok         int              `json:"ok"`                   // 与台账一致的坏文件数
-	Mismatched []verifyMismatch `json:"mismatched"`           // checksum 不符（已隔离）
-	Missing    []string         `json:"missing"`              // 台账有但文件缺失
-	Errors     []string         `json:"errors"`               // 读/隔离失败（区分不符，不混淆）
-	Skipped    int              `json:"skipped"`              // 台账为空/损坏而被跳过的租户数
-	Concurrent bool             `json:"concurrent,omitempty"` // 与上一次巡检重叠被跳过（提示重跑）
+// Report 是 POST /api/verify 的响应体。
+type Report struct {
+	Total      int        `json:"total"`                // 台账文件总数（核对项）
+	Ok         int        `json:"ok"`                   // 与台账一致的坏文件数
+	Mismatched []Mismatch `json:"mismatched"`           // checksum 不符（已隔离）
+	Missing    []string   `json:"missing"`              // 台账有但文件缺失
+	Errors     []string   `json:"errors"`               // 读/隔离失败（区分不符，不混淆）
+	Skipped    int        `json:"skipped"`              // 台账为空/损坏而被跳过的租户数
+	Concurrent bool       `json:"concurrent,omitempty"` // 与上一次巡检重叠被跳过（提示重跑）
 }
 
-// verifyMismatch 是单个坏文件条目（expected/actual 均为小写 hex）。
-type verifyMismatch struct {
+// Mismatch 是单个坏文件条目（expected/actual 均为小写 hex）。
+type Mismatch struct {
 	Path     string `json:"path"`
 	Expected string `json:"expected"`
 	Actual   string `json:"actual"`
-}
-
-// verifyHandler 处理 POST /api/verify。
-// 请求体 JSON：{"volume":"","force":true}（volume 空 = 全部卷视图；force 保留给
-// 客户端语义扩展，当前 busy 恒返回 Concurrent 报告不堆叠）。
-// owner 从认证上下文派生（未认证 → anonymous）；空 owner（admin）→ 全租户。
-func (h *Handlers) verifyHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 4096)
-	var req struct {
-		Volume string `json:"volume"`
-		Force  bool   `json:"force"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
-	}
-
-	owner := ownerFromRequest(r)
-	rep := h.verifyOnce(r.Context(), req.Volume, owner)
-
-	// 结果写审计（定时巡检同款；detail 汇总计数）。
-	detail := fmt.Sprintf("volume=%s ok=%d mismatched=%d missing=%d errors=%d skipped=%d",
-		req.Volume, rep.Ok, len(rep.Mismatched), len(rep.Missing), len(rep.Errors), rep.Skipped)
-	result := AuditResultSuccess
-	if len(rep.Mismatched) > 0 || len(rep.Missing) > 0 || len(rep.Errors) > 0 {
-		result = AuditResultError
-	}
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "verify", ObjectType: "volume", Object: req.Volume,
-		Result: result, Detail: detail,
-	})
-
-	// 告警联动：不一致（mismatched+missing）> 0 → alertEngine 挂点（source=checksum_mismatch）。
-	if len(rep.Mismatched)+len(rep.Missing) > 0 && h.alertEngine != nil {
-		h.alertEngine.OnChecksumMismatch(r.Context(), normalizeOwner(owner),
-			len(rep.Mismatched)+len(rep.Missing), detail)
-	}
-
-	sendJSONResponse(w, rep, http.StatusOK)
 }

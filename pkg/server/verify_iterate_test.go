@@ -52,7 +52,7 @@ func TestVerifyOneOwner_UsesIterator(t *testing.T) {
 	h.checksumStores = map[string]checksum.ChecksumStoreIface{"alice": spy}
 
 	var rep verifyReport
-	h.verifyOneOwner("alice", &rep)
+	h.verifyService().VerifyOneOwner("alice", &rep)
 
 	if got := spy.iterCalls.Load(); got != 1 {
 		t.Fatalf("应走分批遍历 Iterate，calls=%d", got)

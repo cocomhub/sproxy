@@ -44,6 +44,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 
 
+
+| checksum 巡检（全仓一致性审计） | `pkg/server/verify` | `verify.New(Deps)` / `VerifyOnce` / `Report` | **server 作用域**；依赖经 `verify.Deps` 注入；摘要统一走 `checksum.File` |
 | 运行时指标注册表/渲染 | `pkg/server/metrics` | `Metrics` / `WriteMetric` / `WriteHistogram` / `RebalanceProgress` | **server 作用域**；`/metrics` HTTP 面与装配态渲染段留在装配层 |
 | 分享存储（进程内/StateStore） | `pkg/server/share` | `Store` / `StateBackedStore` / `StoreIface` | **server 作用域**；HTTP 面在装配层，经别名调用 |
 | AI 洞察/建议/配额/隐私 | `pkg/server/ai` | `AIInsight` / `AIAdvisor` / `AIQuota` / `AIPrivacy` / `AIEventConsumer` | **server 作用域**；事件源经 `ai.EventSource` 注入（不反向依赖装配层） |

@@ -333,16 +333,18 @@ func funcBodyOnly(t *testing.T, src, name string, norm func(string) string) stri
 }
 
 // TestFileChecksumRoot_ImplParity 断言两份 `*ChecksumRoot` 包装（领域侧 fileChecksumRoot /
-// 装配侧 FileChecksumRoot）的归一化函数体逐字一致：都必须「root.Open → defer Close →
-// 委托哈希函数」。分叉会让两侧对同一 storage.Root 相对路径给出不同摘要或不同错误语义。
+// 装配侧 FileChecksumRoot）都**委托** G0 基础包 `checksum.File`（单一事实源）：
+// 任一侧重新内联 OpenDecrypted + 哈希循环即破坏单一事实源，本断言判红。
 func TestFileChecksumRoot_ImplParity(t *testing.T) {
 	domain := funcBodyOnly(t, readRepoFile(t, "pkg/files/service.go"), "fileChecksumRoot", normChecksumImpl)
 	assembly := funcBodyOnly(t, readRepoFile(t, "pkg/server/checksum.go"), "FileChecksumRoot", normChecksumImpl)
-	if domain != assembly {
-		t.Fatalf("FileChecksumRoot 函数体漂移：\n pkg/files =\n%s\n pkg/server=\n%s", domain, assembly)
-	}
-	if len(domain) < 80 || !strings.Contains(domain, "HASH(") || !strings.Contains(domain, "OpenDecrypted(") {
-		t.Fatalf("抽取结果过弱，守卫可能失效（len=%d）：%q", len(domain), domain)
+	for name, body := range map[string]string{"pkg/files": domain, "pkg/server": assembly} {
+		if !strings.Contains(body, "checksum.File(") {
+			t.Fatalf("%s 的 *ChecksumRoot 包装必须委托 checksum.File（单一事实源）：%q", name, body)
+		}
+		if strings.Contains(body, "OpenDecrypted(") || strings.Contains(body, "sha256.") {
+			t.Fatalf("%s 重新内联了解密/哈希逻辑（破坏单一事实源）：%q", name, body)
+		}
 	}
 }
 

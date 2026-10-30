@@ -483,3 +483,16 @@ func (cs *ChecksumStore) writeSnapshotToRoot(data []byte) error {
 	}
 	return nil
 }
+
+// File 计算 root 上 rel 的**用户可见**（解密后）SHA-256 摘要。
+//
+// 语义：加密卷算明文摘要（raw Open 会算密文摘要——校验/冲突检测对明文内容失去意义）；
+// 非加密卷与明文一致。是 pkg/server.FileChecksumRoot 与巡检/分享等消费方的单一实现。
+func File(root *storage.Root, rel string) (string, error) {
+	f, err := root.OpenDecrypted(rel)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	return Reader(f)
+}
