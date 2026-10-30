@@ -42,8 +42,7 @@ func retryableAfterf(after time.Duration, format string, args ...any) error {
 
 // RetryAfterOf 返回可重试错误携带的 Retry-After 建议等待时长（0 = 未指定/非可重试错误）。
 func RetryAfterOf(err error) time.Duration {
-	var re *RetryableError
-	if errors.As(err, &re) {
+	if re, ok := errors.AsType[*RetryableError](err); ok {
 		return re.RetryAfter
 	}
 	return 0

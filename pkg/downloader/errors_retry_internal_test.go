@@ -34,8 +34,7 @@ func TestStatusError_RetryClassification(t *testing.T) {
 	}
 	for _, code := range retryable {
 		err := d.statusError(respWith(code, ""))
-		var re *RetryableError
-		if !errors.As(err, &re) {
+		if _, ok := errors.AsType[*RetryableError](err); !ok {
 			t.Fatalf("status %d 应可重试, got %v", code, err)
 		}
 	}
@@ -45,8 +44,7 @@ func TestStatusError_RetryClassification(t *testing.T) {
 	}
 	for _, code := range permanent {
 		err := d.statusError(respWith(code, ""))
-		var re *RetryableError
-		if errors.As(err, &re) {
+		if _, ok := errors.AsType[*RetryableError](err); ok {
 			t.Fatalf("status %d 不应可重试, got %v", code, err)
 		}
 	}
