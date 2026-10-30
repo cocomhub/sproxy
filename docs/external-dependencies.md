@@ -130,3 +130,14 @@
 - **依赖变化处置**：外部行为变化 → 更新本文档 + 适配实现；实现回归 → 修实现，文档不动
 - **静默变更拦截**：外部行为一旦无锁即会静默漂移（例：416 边界 / expire 签名 / keepshare 301
   / file_restore_own）——任何实现改动了上述任一行为，必须先改本文档对应行再动代码。
+
+## 8. HTTP 直链下载的状态码与限流语义（2026-10-30）
+
+| 行为 | 依据 | 锁定测试 |
+| --- | --- | --- |
+| 5xx / 429（限流）/ 408（请求超时）视为**瞬时**：下载器以 `RetryableError` 上报，管理器按 `max_retries` 重试 | RFC 9110 §15.5/§15.6（503/429/408 均为可重试的瞬时条件） | `TestStatusError_RetryClassification` |
+| `Retry-After`（秒数或 HTTP-date）作为重试等待建议：优先于固定 `RetryDelay`，上限 5 分钟（防异常超长值挂死任务） | RFC 9110 §10.2.3 | `TestStatusError_RetryAfterHeader`、`TestRetryDelay_PrefersRetryAfter` |
+| 其余 4xx（400/401/403/404/410）为**确定性失败**（不重试） | RFC 9110 §15.5（客户端错误不可通过重试消除） | `TestStatusError_RetryClassification` |
+
+为何锁定：CDN 限流（429）与网关超时（408）在真实直链下载中常见；此前只重试 5xx，
+一次限流即让任务直接 failed，且固定退避会持续冲击已限流的源。
