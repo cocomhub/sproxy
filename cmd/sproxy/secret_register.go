@@ -200,6 +200,12 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 		}
 		opts := secretdataOptionsFromVolume(v)
 		opts.Secret = secret
+		// 本地 target（LocalFS）→ 关闭快照/meta 缓存：本地列举与读取是微秒级，缓存无收益，
+		// 只会多占磁盘（快照曾达 401MB）并引入失效管理成本。外部卷才需要。
+		if _, isLocal := targetFS.(*syncpkg.LocalFS); isLocal {
+			opts.IndexSnapshotPath = ""
+			opts.MetaCacheDir = ""
+		}
 		if len(replicas) == 0 {
 			return secretdata.NewBackend(ctx, v, targetFS, opts)
 		}
