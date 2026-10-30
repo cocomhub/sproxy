@@ -1535,8 +1535,20 @@ func (s *Service) completeExternalTransfer(ctx context.Context, w http.ResponseW
 
 // ensureExternalDir 确保外部卷目标目录存在（外部卷无隐式目录语义）。失败已回包，返回 false。
 func (s *Service) ensureExternalDir(ctx context.Context, w http.ResponseWriter, sink UploadSink, rel string) bool {
-	if derr := sink.MakeDir(ctx, path.Dir(rel)); derr != nil {
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgCreateDirFailed}, http.StatusInternalServerError)
+	dir := path.Dir(rel)
+	if derr := sink.MakeDir(ctx, dir); derr != nil {
+		// **必须区分「已存在且完整」与「已存在但残缺」**：不能只看 ErrExist 就放行
+		// （半途残留的目录/缺目录 meta 会让后续写入落在不完整结构上）。只有 Stat 确认该
+		// 路径**确实可读存在**才视为目标达成；否则带详情失败，由上层清理后重试。
+		if _, exists, serr := sink.Stat(ctx, dir); serr == nil && exists {
+			s.rt.logger().Info("外部卷目标目录已存在（Stat 确认可读，视为达成）", "dir", dir)
+			return true
+		}
+		// **必须带出详情**：此前只回「创建目录失败」⇒ 生产故障无法定位（实测多条上传因此
+		// 只看到无信息量的 500）。
+		s.rt.logger().Warn("外部卷创建目标目录失败", "dir", dir, "error", derr)
+		s.sendJSON(w, ChunkCompleteResponse{Success: false,
+			Message: errMsgCreateDirFailed + ": " + derr.Error()}, http.StatusInternalServerError)
 		return false
 	}
 	return true
