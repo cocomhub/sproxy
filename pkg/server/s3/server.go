@@ -404,8 +404,10 @@ func (s *Service) s3ReadBody(w http.ResponseWriter, r *http.Request) ([]byte, bo
 			http.Error(w, "s3: 对象超过单请求上限", http.StatusRequestEntityTooLarge)
 			return nil, false
 		}
-		// 读失败：返回 nil 继续验签（会因签名不匹配拒绝）；不信任截断内容。
-		return nil, true
+		// 读失败：直接 400，**不得**回落客户端声明的 x-amz-content-sha256 继续验签——
+		// 声明值可能与空 body 哈希一致，导致 PUT 以空 body 通过并落 0 字节对象（静默数据损坏）。
+		http.Error(w, "s3: 读取请求体失败", http.StatusBadRequest)
+		return nil, false
 	}
 	return body, true
 }
