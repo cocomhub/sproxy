@@ -396,8 +396,9 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 领域侧一律经 `checksum.ChecksumStoreIface` 使用台账（**不得**断言具体类型 `*ChecksumStore`：
 那会让集群后端被判为「未装配」，导致 list/search 的 checksum 恒空、`RebuildChecksums` 失败）；
 批量回填用可选扩展 `BatchWriter`/`VolumeBatchWriter`，判空用 `LenCounter`。
-合并逻辑由**唯一实现** `checksum.saveMerger` 承担，两个后端共用：`ChecksumStore`（卷内文件）与
-`StateBackedChecksumStore`（集群 StateStore，每次 Put 是一次 RTT）。集群后端的台账实例**按 owner
+合并逻辑由**唯一实现** `internal/savemerger` 承担（通用「全量落盘合并器」）：checksum 的两个后端
+（`ChecksumStore` 卷内文件 / `StateBackedChecksumStore` 集群 StateStore）与 dedup 台账
+（`files.DedupStore`，本地 JSON / 集群 StateStore）共用同一语义。集群后端的台账实例**按 owner
 缓存**（`Handlers.checksumStores` / `Handlers.dedupStores`，两者同构）——未缓存时每次首读都会从
 StateStore 全量拉回 + 反序列化；`SetStateStore` 切换后端时两者都清空（旧实例先落盘/丢弃）。
 
