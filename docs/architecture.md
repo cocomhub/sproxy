@@ -626,7 +626,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -698,6 +698,14 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 - HTTP 面（summarize/tag/privacy/quota）保留装配层，经 `ai_alias.go` 别名与
   `AIInsight` 的 `Enabled/Cache/Quota/Advise` 访问器调用。
 - 白盒缓存测试随迁 `pkg/server/ai`；handler/事件测试保留装配层（迁移期别名）。
+
+**S8：分享存储（`pkg/server/share`）**
+
+- 迁入：\`Store\`（进程内 + 落盘）、\`StateBackedStore\`（集群 StateStore 后端）、\`Link\`/\`Spec\`/
+  \`StoreIface\`、持久化格式与过期/容量淘汰。
+- 装配层保留 **HTTP 面**（create/access/list/revoke），经 \`share_alias.go\` 别名调用；
+  分享域常量（\`MaxShareTTL\`/\`MaxShareEntries\`/\`MaxShareBodySize\`）与存储同源。
+- 白盒持久化测试随迁 \`pkg/server/share\`；HTTP/e2e 测试保留装配层。
 
 ### 新增 Server 切片的步骤
 

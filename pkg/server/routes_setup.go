@@ -441,7 +441,7 @@ func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 		Interval:       5 * time.Minute,
 		FinalRunOnStop: true,
 		Run: func(context.Context) {
-			h.shareStore.cleanupExpired()
+			h.shareStore.CleanupExpired()
 		},
 	})
 	// 回收站周期 GC goroutine（trash.gc_interval > 0 时启动；0 = 关闭，零回归）。

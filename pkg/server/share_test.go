@@ -243,9 +243,7 @@ func TestShare_CreateEviction(t *testing.T) {
 	if link.Token == "" {
 		t.Fatal("expected non-empty token")
 	}
-	ss.mu.Lock()
-	count := len(ss.links)
-	ss.mu.Unlock()
+	count := ss.Len()
 	if count > maxShareEntries {
 		t.Errorf("expected at most %d entries after eviction, got %d", maxShareEntries, count)
 	}
@@ -269,9 +267,7 @@ func TestShare_CreateEvictionNoExpired(t *testing.T) {
 	if link.Token == "" {
 		t.Fatal("expected non-empty token")
 	}
-	ss.mu.Lock()
-	count := len(ss.links)
-	ss.mu.Unlock()
+	count := ss.Len()
 	if count > maxShareEntries {
 		t.Errorf("expected at most %d entries after eviction, got %d", maxShareEntries, count)
 	}
