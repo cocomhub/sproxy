@@ -626,7 +626,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知域 / S3 调度器）
+### 当前落地状态（S1 配置 / S2 通知域 / S3 调度器 / S4 Handlers 分域）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -655,6 +655,18 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
   优雅停止 + `FinalRunOnStop`），零 `pkg/*` 依赖（L0）。
 - 装配层保留周期任务的**注册内容**（uploading 清理 / version-gc / trash-gc / share-cleanup /
   usage-flush），经 `scheduler_alias.go` 类型别名零改动。
+
+**S4：`Handlers` 分域依赖（`pkg/server/deps.go`）**
+
+- 100+ 扁平字段收敛为 **12 个值嵌入分组**：`coreDeps` / `httpDeps` / `authDeps` /
+  `filesDeps` / `volumeDeps` / `cloudDeps` / `shareDeps` / `hubDeps` / `clusterDeps` /
+  `auditDeps` / `aiDeps` / `opsDeps`。
+- **值嵌入 + Go 字段提升**：`h.volSet` 等 580 个方法调用点与全部 `Handlers{...}`
+  字面量零改动（Go 1.27 支持在复合字面量中初始化提升字段）。
+- 每个分组就是**未来切片的 Deps**：搬 `volume` 切片时把 `volumeDeps` 变成
+  `volume.Deps`，字段名即注入点，无需再拆结构体。
+- 门禁 **R7**（`handlers_deps_gate_test.go`）：Handlers 直接字段数 ≤ 12、每个字段必须是
+  嵌入的 `*Deps` 类型——新依赖必须加到 `deps.go` 的分组，禁止 god object 回归。
 
 ### 新增 Server 切片的步骤
 

@@ -94,6 +94,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `repo_hygiene_test.go` | R16 | repo_hygiene_test.go 是「开源仓库卫生文档」门禁（R16）。 |
 | `repo_walk_test.go` | R11 · R14 · R18 | repo_walk_test.go 是「全仓源码遍历类门禁」**共用的目录排除口径**（单一事实源）。 |
 | `route_classification_gate_test.go` | R38 | route_classification_gate_test.go 是门禁 **R38**：**路由分类表 + deny-by-default**。 |
+| `handlers_deps_gate_test.go` | R7 | R7：**Handlers 必须是分域依赖的组合**（直接字段数 ≤ 12、每个字段为嵌入的 `*Deps`；新依赖加到 deps.go 分组，禁止 god object 回归）。 |
 | `server_scope_gate_test.go` | R6 | R6：**server 作用域子包不得导入装配根**（`pkg/server/**` → `pkg/server` 禁止；且每个子包必须在 Levels 登记，否则对 R1 隐形）。 |
 | `set_root_accessor_gate_test.go` | R26 · R27 · R28 | set_root_accessor_gate_test.go 是「`Set.Root(...)` 卷根访问器」棘轮门禁（R28）。 |
 | `state_store_gate_test.go` | R19 · R21 | state_store_gate_test.go 是「状态落盘必须走 StateStore 抽象」的门禁（R21）。 |
