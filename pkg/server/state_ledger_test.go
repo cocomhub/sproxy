@@ -95,6 +95,9 @@ func TestHandlers_StateBackedDedupStore(t *testing.T) {
 	if ds.Add("user/a.txt", "vol0", "abc123") != true {
 		t.Fatal("首个引用 Add 应返回 true")
 	}
+	if err := ds.Flush(); err != nil { // 写经合并窗口
+		t.Fatalf("flush: %v", err)
+	}
 	if _, gerr := st.Get(context.Background(), "dedup/alice/all"); gerr != nil {
 		t.Fatalf("写应落 StateStore 新路径: %v", gerr)
 	}

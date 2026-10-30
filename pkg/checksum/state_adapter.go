@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/internal/savemerger"
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -47,7 +48,7 @@ type StateBackedChecksumStore struct {
 	// put 是 StateStore 写入实现（构造注入，默认 st.Put；测试可计数）。
 	put func(ctx context.Context, key string, data []byte) error
 	// merger 把连续写合并为一次全量 Put（集群 KV 每次 Put 是一次 RTT + 全量序列化）。
-	merger *saveMerger
+	merger *savemerger.Merger
 }
 
 var _ ChecksumStoreIface = (*StateBackedChecksumStore)(nil)
@@ -70,7 +71,7 @@ func NewStateBackedChecksumStore(st state.StateStore, key string, legacyRoot *st
 		checksums:  make(map[string]string),
 	}
 	s.put = st.Put
-	s.merger = newSaveMerger(defaultSaveDebounce, s.logger, func(uint64) error { return s.save() })
+	s.merger = savemerger.New(savemerger.DefaultDebounce, s.logger, func(uint64) error { return s.save() })
 	return s
 }
 
@@ -176,7 +177,7 @@ func (s *StateBackedChecksumStore) Set(filename, checksum string) {
 	s.checksums[filename] = checksum
 	s.mu.Unlock()
 
-	s.merger.mark("set", "file_name", filename)
+	s.merger.Mark("set", "file_name", filename)
 }
 
 // Delete 删除指定文件的 checksum 记录并持久化。
@@ -188,7 +189,7 @@ func (s *StateBackedChecksumStore) Delete(filename string) {
 	delete(s.checksums, filename)
 	s.mu.Unlock()
 
-	s.merger.mark("delete", "file_name", filename)
+	s.merger.Mark("delete", "file_name", filename)
 }
 
 // Rename 将一条 checksum 记录从 from 迁移到 to（to 已存在被覆盖，与 os.Rename 对齐）。
@@ -207,7 +208,7 @@ func (s *StateBackedChecksumStore) Rename(from, to string) {
 	s.checksums[to] = v
 	s.mu.Unlock()
 
-	s.merger.mark("rename", "from", from, "to", to)
+	s.merger.Mark("rename", "from", from, "to", to)
 }
 
 // DeletePrefix 删除指定前缀的所有 checksum 记录（目录删除）。
@@ -223,7 +224,7 @@ func (s *StateBackedChecksumStore) DeletePrefix(prefix string) {
 	}
 	s.mu.Unlock()
 
-	s.merger.mark("deletePrefix", "prefix", prefix)
+	s.merger.Mark("deletePrefix", "prefix", prefix)
 }
 
 // Len 返回台账条目数（必要时先载入；O(1) 判空用）。
@@ -245,7 +246,7 @@ func (s *StateBackedChecksumStore) SetMany(entries map[string]string) {
 	}
 	maps.Copy(s.checksums, entries)
 	s.mu.Unlock()
-	s.merger.mark("set_many", "count", len(entries))
+	s.merger.Mark("set_many", "count", len(entries))
 }
 
 // SetManyInVolume 按卷维度键批量写入（`<vol>\x00<rel>`，§15.1.1：跨卷同名不串值）。
@@ -261,7 +262,7 @@ func (s *StateBackedChecksumStore) SetManyInVolume(vol string, entries map[strin
 		s.checksums[volumeKey(vol, rel)] = sum
 	}
 	s.mu.Unlock()
-	s.merger.mark("set_many_in_volume", "volume", vol, "count", len(entries))
+	s.merger.Mark("set_many_in_volume", "volume", vol, "count", len(entries))
 }
 
 // Flush 立即把合并窗口内的改动写入 StateStore（有待持久化改动时）。

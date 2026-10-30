@@ -17,14 +17,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/internal/savemerger"
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
-
-const chkStorePersistFailed = "checksum 存储持久化失败"
-
-// retryPersistFailed 是校验和台账重试持久化失败告警文案（state_adapter/store 共用）。
-const retryPersistFailed = "重试持久化失败"
 
 // ChecksumStoreIface 定义 ChecksumStore 的业务接口，方便测试替身。
 type ChecksumStoreIface interface {
@@ -98,7 +94,7 @@ type ChecksumStore struct {
 
 	// writeSnap 是落盘实现（构造注入，测试可计数）；merger 负责写合并（见 save_merger.go）。
 	writeSnap func(data []byte) error
-	merger    *saveMerger
+	merger    *savemerger.Merger
 }
 
 // volumeKeySep 是卷维度复合键的分隔符（NUL：卷名与 rel 都不含，无歧义）。
@@ -229,7 +225,7 @@ func (cs *ChecksumStore) SnapshotInVolume(vol string) map[string]string {
 
 // persist 落盘（失败重试一次并记日志；与 Set/Rename 的既有重试语义一致）。
 func (cs *ChecksumStore) persist(op string, args ...any) {
-	cs.merger.mark(op, args...)
+	cs.merger.Mark(op, args...)
 }
 
 // Flush 立即落盘（有待持久化改动时）；供关键路径/测试显式同步。
@@ -253,7 +249,7 @@ func NewChecksumStore(root *storage.Root, rel string, logger *slog.Logger) *Chec
 		logger:    slogutil.Default(logger),
 	}
 	cs.writeSnap = cs.writeSnapshotToRoot
-	cs.merger = newSaveMerger(defaultSaveDebounce, cs.logger, func(uint64) error { return cs.save() })
+	cs.merger = savemerger.New(savemerger.DefaultDebounce, cs.logger, func(uint64) error { return cs.save() })
 	if root == nil {
 		cs.logger.Warn("checksum 台账未装配卷句柄，将只读空台账且不可持久化")
 		return cs

@@ -39,7 +39,10 @@ func TestDedupStore_PersistAndLoad(t *testing.T) {
 		t.Fatalf("RefCount(abc123)=%d want 2", ds.RefCount("abc123"))
 	}
 
-	// 落盘重载。
+	// 落盘重载（写经合并窗口 ≤1s ⇒ 先显式 flush）。
+	if err := ds.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	ds2 := newDedupStore(path, testLogger())
 	if ds2.RefCount("abc123") != 2 {
 		t.Fatalf("重载后 RefCount(abc123)=%d want 2", ds2.RefCount("abc123"))

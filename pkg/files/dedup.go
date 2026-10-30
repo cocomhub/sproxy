@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/internal/savemerger"
 	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
@@ -57,6 +58,9 @@ type DedupStore struct {
 	entries   map[string]*dedupEntry // checksum -> refs
 	logger    *slog.Logger
 	state     *stateDedupStore // StateStore 后端（nil = 本地 JSON 零回归）
+	// merger 把连续写合并为一次全量落盘（本地 JSON 与 StateStore 同语义）：
+	// 每次写都全量重写 = 批量 N 文件 O(N²) I/O。
+	merger *savemerger.Merger
 }
 
 // NewDedupStore 构造去重台账（装配层用）。加载已有记录并清理崩溃残留 .tmp。
@@ -70,6 +74,8 @@ func NewDedupStore(storePath string, logger *slog.Logger, opts ...*DedupStateOpt
 	if len(opts) > 0 {
 		withState(ds, opts[0])
 	}
+
+	ds.merger = savemerger.New(savemerger.DefaultDebounce, ds.logger, func(uint64) error { return ds.save() })
 
 	tmpResidue := storePath + ".tmp"
 	if _, err := os.Stat(tmpResidue); err == nil {
@@ -115,12 +121,7 @@ func (ds *DedupStore) Add(rel, vol, checksum string) bool {
 	first := !ok
 	ds.mu.Unlock()
 
-	if err := ds.save(); err != nil {
-		ds.logger.Error(errMsgDedupPersist, "op", "add", "checksum", checksum, "error", err)
-		if retryErr := ds.save(); retryErr != nil {
-			ds.logger.Error(errMsgRetryPersist, "op", "add", "checksum", checksum, "error", retryErr)
-		}
-	}
+	ds.merger.Mark("add", "checksum", checksum)
 	return first
 }
 
@@ -146,12 +147,7 @@ func (ds *DedupStore) RemoveRef(rel, vol, checksum string) int {
 	}
 	ds.mu.Unlock()
 
-	if err := ds.save(); err != nil {
-		ds.logger.Error(errMsgDedupPersist, "op", "remove", "checksum", checksum, "error", err)
-		if retryErr := ds.save(); retryErr != nil {
-			ds.logger.Error(errMsgRetryPersist, "op", "remove", "checksum", checksum, "error", retryErr)
-		}
-	}
+	ds.merger.Mark("remove", "checksum", checksum)
 	return remaining
 }
 
@@ -230,12 +226,7 @@ func (ds *DedupStore) Rename(fromRel, toRel string) {
 	if !moved {
 		return
 	}
-	if err := ds.save(); err != nil {
-		ds.logger.Error(errMsgDedupPersist, "op", "rename", "from", fromRel, "to", toRel, "error", err)
-		if retryErr := ds.save(); retryErr != nil {
-			ds.logger.Error(errMsgRetryPersist, "op", "rename", "from", fromRel, "to", toRel, "error", retryErr)
-		}
-	}
+	ds.merger.Mark("rename", "from", fromRel, "to", toRel)
 }
 
 // DeletePrefix 删除指定前缀的全部引用（目录删除用，与 checksum 台账 DeletePrefix 对齐）。
@@ -261,12 +252,7 @@ func (ds *DedupStore) DeletePrefix(prefix string) {
 	if !changed {
 		return
 	}
-	if err := ds.save(); err != nil {
-		ds.logger.Error(errMsgDedupPersist, "op", "deletePrefix", "prefix", prefix, "error", err)
-		if retryErr := ds.save(); retryErr != nil {
-			ds.logger.Error(errMsgRetryPersist, "op", "deletePrefix", "prefix", prefix, "error", retryErr)
-		}
-	}
+	ds.merger.Mark("delete_prefix", "prefix", prefix)
 }
 
 // save 把 dedup 台账持久化到磁盘（原子写：tmp + Rename）。
@@ -324,3 +310,9 @@ func (ds *DedupStore) exportSnapshot() map[string][]DupRef {
 func newDedupStore(storePath string, logger *slog.Logger) *DedupStore {
 	return NewDedupStore(storePath, logger)
 }
+
+// Flush 立即落盘（写合并窗口内的改动）；供关键路径/测试显式同步。
+func (ds *DedupStore) Flush() error { return ds.merger.Flush() }
+
+// Close 停止合并定时器并做最终落盘（幂等）。
+func (ds *DedupStore) Close() error { return ds.merger.Close() }

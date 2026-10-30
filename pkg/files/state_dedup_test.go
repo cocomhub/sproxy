@@ -69,7 +69,10 @@ func TestDedupStore_StateAdapter_PersistAndLoad(t *testing.T) {
 		t.Fatalf("RefCount(abc123)=%d want 2", ds.RefCount("abc123"))
 	}
 
-	// 落盘重载（新实例从 StateStore 读回）。
+	// 落盘重载（新实例从 StateStore 读回）——写经合并窗口，先显式 flush。
+	if err := ds.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	ds2 := NewDedupStore(filepath.Join(t.TempDir(), "dedup.json"), testLogger(), &DedupStateOptions{
 		St:         ds.state.st,
 		Key:        "dedup/alice/all",
@@ -153,6 +156,9 @@ func TestDedupStore_StateAdapter_SaveMigratesToState(t *testing.T) {
 	}
 	// 首写 → StateStore；旧 meta 文件保持原内容不被改写（单写）。
 	ds.Add("user/b.txt", "vol0", "abc123")
+	if ferr := ds.Flush(); ferr != nil {
+		t.Fatalf("flush: %v", ferr)
+	}
 	if _, gerr := st.Get(ctx, "dedup/alice/all"); gerr != nil {
 		t.Fatalf("首写应写 StateStore 新路径: %v", gerr)
 	}

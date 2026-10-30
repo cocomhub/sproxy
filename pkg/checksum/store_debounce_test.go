@@ -54,7 +54,7 @@ func TestStore_ManyWritesCoalesceToOneSave(t *testing.T) {
 func TestStore_DebounceFlushesAutomatically(t *testing.T) {
 	t.Parallel()
 	cs := newTestStore(t)
-	cs.merger.setDebounce(10 * time.Millisecond)
+	cs.merger.SetDebounce(10 * time.Millisecond)
 	saves, write := countingWriter()
 	cs.writeSnap = write
 
