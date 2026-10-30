@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package ai
 
 // ai_events.go 是 AI 事件流水线（roadmap 12.2-4，设计文档
 // docs/designs/2026-09-24-ai-event-pipeline.md）：AIEventConsumer 订阅 EventBus
@@ -25,23 +25,25 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
-// aiTask 是一条入队任务（owner + rel + op）。
-type aiTask struct {
-	owner string
-	rel   string
-	op    string
+// Task 是一条入队任务（owner + rel + op）。
+type Task struct {
+	Owner string
+	Rel   string
+	Op    string
 }
 
 // AIEventConsumer 订阅 EventBus 文件事件并路由到 AI 流水线任务队列。
 type AIEventConsumer struct {
-	bus     *EventBus // nil = 未装配（Start 不启动，零回归）
+	bus     EventSource // nil = 未装配（Start 不启动，零回归）
 	enqueue func(owner, rel, op string)
 	logger  *slog.Logger
 
 	// queue 是有界任务队列（满则丢弃 + Warn；正确性靠周期扫描兜底）。
-	queue chan aiTask
+	queue chan Task
 
 	// dedup 是 (owner,rel) → 上次入队时间（窗口内去重，防事件风暴）。
 	dedup map[string]time.Time
@@ -57,7 +59,7 @@ type AIEventConsumer struct {
 }
 
 // NewAIEventConsumer 构造消费端（装配层导出；bus nil = 未装配零回归）。
-func NewAIEventConsumer(bus *EventBus, enqueue func(owner, rel, op string), cfg AIEventsConfig, logger *slog.Logger) *AIEventConsumer {
+func NewAIEventConsumer(bus EventSource, enqueue func(owner, rel, op string), cfg config.AIEventsConfig, logger *slog.Logger) *AIEventConsumer {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -73,7 +75,7 @@ func NewAIEventConsumer(bus *EventBus, enqueue func(owner, rel, op string), cfg 
 		bus:         bus,
 		enqueue:     enqueue,
 		logger:      logger,
-		queue:       make(chan aiTask, queueSize),
+		queue:       make(chan Task, queueSize),
 		dedup:       map[string]time.Time{},
 		lastRev:     map[string]uint64{},
 		dedupWindow: window,
@@ -123,7 +125,7 @@ func (c *AIEventConsumer) run() {
 			return
 		case <-ticker.C:
 			for _, ev := range c.bus.DrainFileEvents() {
-				c.handleEvent(ev)
+				c.HandleEvent(ev)
 			}
 		}
 	}
@@ -143,19 +145,19 @@ func (c *AIEventConsumer) worker() {
 }
 
 // safeEnqueue 调 enqueue 回调并 recover（消费端 panic 不扩散，设计 §4）。
-func (c *AIEventConsumer) safeEnqueue(t aiTask) {
+func (c *AIEventConsumer) safeEnqueue(t Task) {
 	defer func() {
 		if r := recover(); r != nil {
-			c.logger.Warn("AI 流水线 enqueue 回调 panic 已恢复", "owner", t.owner, "rel", t.rel, "op", t.op, "panic", r)
+			c.logger.Warn("AI 流水线 enqueue 回调 panic 已恢复", "owner", t.Owner, "rel", t.Rel, "op", t.Op, "panic", r)
 		}
 	}()
-	c.enqueue(t.owner, t.rel, t.op)
+	c.enqueue(t.Owner, t.Rel, t.Op)
 }
 
 // handleEvent 处理一条文件事件：去重 + rev 幂等 + 路由。
 // 供测试直调（白盒）；生产由 run 经 DrainFileEvents 拉取后调用。
-func (c *AIEventConsumer) handleEvent(ev fileEventSnapshot) {
-	if !isFileAction(ev.Action) {
+func (c *AIEventConsumer) HandleEvent(ev FileEvent) {
+	if !IsFileAction(ev.Action) {
 		return
 	}
 	key := ev.Owner + "\x00" + ev.Rel
@@ -178,14 +180,14 @@ func (c *AIEventConsumer) handleEvent(ev fileEventSnapshot) {
 
 	// 路由：delete/rmdir/rename 原样透传 op（消费侧据此删条目/迁移 key）；
 	// upload/version/restore → op=原动作（重新生成向量/摘要）。
-	c.enqueueTask(aiTask{owner: ev.Owner, rel: ev.Rel, op: ev.Action})
+	c.enqueueTask(Task{Owner: ev.Owner, Rel: ev.Rel, Op: ev.Action})
 }
 
 // enqueueTask 入有界队列（满则丢弃 + Warn——事件只是及时触发，正确性靠周期扫描）。
-func (c *AIEventConsumer) enqueueTask(t aiTask) {
+func (c *AIEventConsumer) enqueueTask(t Task) {
 	select {
 	case c.queue <- t:
 	default:
-		c.logger.Warn("AI 流水线任务队列已满，丢弃事件（周期扫描兜底）", "owner", t.owner, "rel", t.rel, "op", t.op)
+		c.logger.Warn("AI 流水线任务队列已满，丢弃事件（周期扫描兜底）", "owner", t.Owner, "rel", t.Rel, "op", t.Op)
 	}
 }

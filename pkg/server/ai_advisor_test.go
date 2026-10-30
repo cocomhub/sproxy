@@ -148,7 +148,7 @@ func TestAIAdvisor_NoKeyFallsBackTemplate(t *testing.T) {
 	// newAIAdvisorFromConfig 装配路径：APIKeyRef 指向未设环境变量 → Warn + nil（可观测降级）。
 	// t.Setenv 禁并行，用直接构造等价断言 gate=nil 路径。
 	advisor := NewAIAdvisor(AIAdvisorConfig{Enabled: true, APIKey: ""}, testLogger())
-	if advisor.gate != nil {
+	if advisor.Enabled() {
 		t.Fatal("无 key 时 gate 应为 nil（fail-closed 回退模板）")
 	}
 	if got := advisor.Advise(context.Background(), "k", "t", "磁盘水位 85% ≥ 阈值 80%"); got != "" {

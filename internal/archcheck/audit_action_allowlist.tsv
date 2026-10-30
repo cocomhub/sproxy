@@ -5,4 +5,3 @@
 #   2. 一旦该常量有了使用点，**必须删除登记**（门禁会报「allowlist 已失效」，防免检名单腐化）；
 #   3. 当前为空 —— 全部 21 个动作常量都有非测试使用点（`ActionAIEmbed` 已于 2026-10-20 接入）。
 name|reason
-ActionAIEmbed|埋点位于导出包装 (*Handlers).NewEmbedClient —— 生产尚无调用方（pkg/aiembed 尚未接入语义检索），R39 一层可达判据会命中「假绿」。接入 embedding 消费方后**必须删除本登记**（门禁会报「allowlist 已失效」）。
