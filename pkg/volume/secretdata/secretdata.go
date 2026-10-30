@@ -2194,10 +2194,14 @@ func (s *SecretdataFS) listInner(ctx context.Context, container string) ([]syncp
 		if nl, ok := syncpkg.AssertNameLister(s.inner); ok {
 			return nl.ListDirNames(c, container)
 		}
-		nameListerUnsupported.Do(func() {
-			slog.Warn("装配期轻量列举不可用（回调 ListDir：外部卷将逐条补 size，启动变慢）",
-				"inner", fmt.Sprintf("%T", s.inner))
-		})
+		// 本地卷（LocalFS）本来就不需要轻量列举（列举不补 size）⇒ 静默；
+		// 只有外部卷才告警（那意味着会逐条触发批量 meta，启动显著变慢）。
+		if _, isLocal := s.inner.(*syncpkg.LocalFS); !isLocal {
+			nameListerUnsupported.Do(func() {
+				slog.Warn("装配期轻量列举不可用（回调 ListDir：外部卷将逐条补 size，启动变慢）",
+					"inner", fmt.Sprintf("%T", s.inner))
+			})
+		}
 		return s.inner.ListDir(c, container)
 	}
 	var lastErr error
