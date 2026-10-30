@@ -22,6 +22,7 @@ import (
 
 // TestPlayerFallback_UnsupportedFormat 浏览器不可播格式走本地播放器兜底（不再黑屏）。
 func TestPlayerFallback_UnsupportedFormat(t *testing.T) {
+	t.Parallel()
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
 	page, stop := pageFixture(t)
