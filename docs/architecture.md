@@ -626,7 +626,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 网关）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 网关 / S6 WebDAV）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -678,6 +678,16 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
   （原 `pkg/server` 薄包装不再需要）；HMAC 走 `pkg/cryptox`。
 - 装配：`pkg/server/s3_wiring.go` 的 `h.s3Service()` 构造 Deps；路由注册 `s3Service().Handler`。
 - 白盒单测（part 账本）随迁 `pkg/server/s3`；HTTP 集成测试保留在装配层（经公开入口）。
+
+**S6：服务端 WebDAV 挂载面（`pkg/server/dav`）**
+
+- 迁入：`/dav/` 挂载（多卷 `?volume=` + 默认卷 ACL 同口径）、`davMetaFS` 装饰器
+  （写/删/改名后 sidecar 联动、目录 MOVE 整棵 meta 子树迁移）。
+- **依赖倒置**：`dav.Deps` 注入 `Volumes/TenantFor/DefaultVolumeAllows/FileService/
+  Meta/QuotaScopeFor/WithAuditVolume/OwnerFromRequest`；`MetaPolicy`（`WriteMeta` +
+  `SweepMetaTmp`）由装配层 `filesMetaPolicy` 适配，装饰器不反向依赖装配层（R6）。
+- 装配：`pkg/server/dav_wiring.go` 的 `h.davService()`；路由 `authMiddleware(davService().Handler)`。
+- 白盒装饰器测试随迁 `pkg/server/dav`（`MetaPolicy` 用测试替身）；HTTP e2e 保留装配层。
 
 ### 新增 Server 切片的步骤
 

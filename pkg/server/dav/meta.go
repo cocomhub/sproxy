@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package dav
 
 import (
 	"context"
@@ -26,7 +26,7 @@ import (
 // filesMetaPolicy 的 sidecar（正确落在 <owner>/meta/ 桶，与上传/转存同一位置）。
 type davMetaFS struct {
 	syncpkg.FS
-	h       *Handlers
+	deps    Deps
 	owner   string
 	root    *storage.Root
 	volName string
@@ -42,8 +42,8 @@ func (d *davMetaFS) bucketRel(p string) string {
 }
 
 func (d *davMetaFS) logger() *slog.Logger {
-	if d.h != nil && d.h.logger != nil {
-		return d.h.logger
+	if d.deps.Logger != nil {
+		return d.deps.Logger
 	}
 	return slog.Default()
 }
@@ -67,7 +67,10 @@ func (d *davMetaFS) writeMeta(ctx context.Context, p string) {
 	if fi, err := d.Stat(ctx, p); err != nil || fi == nil || fi.IsDir {
 		return
 	}
-	if err := (filesMetaPolicy{h: d.h}).WriteMeta(ctx, d.owner, d.root, rel, nil); err != nil {
+	if d.deps.Meta == nil {
+		return
+	}
+	if err := d.deps.Meta.WriteMeta(ctx, d.owner, d.root, rel, nil); err != nil {
 		d.logger().Warn("dav: 写 meta sidecar 失败（读侧退化为不校验/流式）", "path", rel, "error", err)
 	}
 }
@@ -86,11 +89,13 @@ func (d *davMetaFS) removeMeta(p string) {
 		if e, serr := d.root.Stat(mrel); serr == nil && e != nil {
 			metaSize = e.Size()
 		}
-		(filesMetaPolicy{h: d.h}).sweepMetaTmp(d.root, mrel)
+		if d.deps.Meta != nil {
+			d.deps.Meta.SweepMetaTmp(d.root, mrel)
+		}
 		_ = d.root.Remove(mrel)
 	}
-	if metaSize > 0 && d.h != nil {
-		if scope := d.h.quotaScopeFor(d.owner, mrel); scope != nil {
+	if metaSize > 0 && d.deps.QuotaScopeFor != nil {
+		if scope := d.deps.QuotaScopeFor(d.owner, mrel); scope != nil {
 			scope.ReleaseUsage(metaSize)
 		}
 	}
@@ -103,15 +108,17 @@ func (d *davMetaFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p str
 	// 显式卷（DAV 的 ?volume= 已解析为 d.volName）；空 = 自动路由（默认卷/单卷形态）。
 	// 统一写内核（WriteTarget）为主路径；测试/未装配（h.tenants nil，fileService 不可用）
 	// 回落内层直写 + sidecar 联动（行为兼容旧 davMetaFS 测试环境）。
-	if svc := d.h.fileServiceIfReady(); svc != nil {
-		_, werr := svc.WriteTarget(ctx, files.WriteTargetInput{
-			Owner: d.owner, RemotePath: strings.TrimPrefix(d.bucketRel(p), "user/"),
-			Volume: d.volName, Verify: false, ClientSize: size, Mtime: mtime,
-		}, r)
-		if werr != nil {
-			return werr
+	if d.deps.FileService != nil {
+		if svc := d.deps.FileService(); svc != nil {
+			_, werr := svc.WriteTarget(ctx, files.WriteTargetInput{
+				Owner: d.owner, RemotePath: strings.TrimPrefix(d.bucketRel(p), "user/"),
+				Volume: d.volName, Verify: false, ClientSize: size, Mtime: mtime,
+			}, r)
+			if werr != nil {
+				return werr
+			}
+			return nil
 		}
-		return nil
 	}
 	if err := d.FS.WriteFile(ctx, key, p, r, size, mtime); err != nil {
 		return err

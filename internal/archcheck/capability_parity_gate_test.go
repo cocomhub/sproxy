@@ -277,7 +277,7 @@ func decoratorsForGate() []decoratorSpec {
 		{typeName: "CapacityFS", pkgDir: "pkg/volume/capacity", exempt: blockExempt},
 		{typeName: "StagingQuotaGateFS", pkgDir: "pkg/sync", exempt: blockExempt},
 		{typeName: "PrefixFS", pkgDir: "pkg/sync", exempt: blockExempt},
-		{typeName: "davMetaFS", pkgDir: "pkg/server", exempt: blockExempt},
+		{typeName: "davMetaFS", pkgDir: "pkg/server/dav", exempt: blockExempt},
 		{typeName: "FS", pkgDir: "pkg/volume/enclosure", exempt: blockExempt},
 		// FS 级封印装饰器（外部卷/远端卷视图的封印）：本地卷封印在 storage.Root 层，外部卷
 		// 无 Root ⇒ 在装配处（acc.external）套本装饰器；能力全量转发 + Inner() 特权解包。
