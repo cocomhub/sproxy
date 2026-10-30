@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package s3
 
 // s3_multipart.go 是 S3 分块上传（roadmap P2 S3 服务端扩展）：
 //
@@ -33,30 +33,31 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
-// multipartPartPrefix 是 part 文件前缀（chunk 桶内）。
-const multipartPartPrefix = "s3mp-"
+// MultipartPartPrefix 是 part 文件前缀（chunk 桶内）。
+const MultipartPartPrefix = "s3mp-"
 
-// s3MaxParts 是单个分块会话允许的最大 part 数（对齐分块上传 maxTotalChunks 语义，
+// MaxParts 是单个分块会话允许的最大 part 数（对齐分块上传 maxTotalChunks 语义，
 // 防 partNum 无上限 DoS：partNum 任意大 → 无数量上限，磁盘/内存耗尽）。
-const s3MaxParts = 10000
+const MaxParts = 10000
 
-// s3CompletePart 是 CompleteMultipartUpload 请求体单个 <Part> 的解析结果
+// CompletePart 是 CompleteMultipartUpload 请求体单个 <Part> 的解析结果
 // （PartNumber + 客户端回传 ETag）。
-type s3CompletePart struct {
+type CompletePart struct {
 	PartNumber int    `xml:"PartNumber"`
 	ETag       string `xml:"ETag"`
 }
 
 // s3InitiateMultipart 创建分块上传会话（POST ?uploads）。
-func (h *Handlers) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, key string) {
-	owner := h.s3AuthOwner(w, r, nil)
+func (s *Service) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, key string) {
+	owner := s.s3AuthOwner(w, r, nil)
 	if owner == "" {
 		return
 	}
-	tnt := h.s3TenantFor(owner, r)
+	tnt := s.TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
@@ -68,23 +69,23 @@ func (h *Handlers) s3InitiateMultipart(w http.ResponseWriter, r *http.Request, k
 	}
 	// M9a（第 7 轮 MAJOR）：清扫**过期孤儿会话**（客户端崩溃/断连未发 abort → parts + meta
 	// 永久残留占 chunk 桶与配额）。懒触发（每次 init 顺带一次，零后台 goroutine）：
-	// meta 超过 s3MultipartOrphanTTL 未更新的会话，其 parts 与 meta 一并删除（best-effort）。
-	h.sweepStaleMultipart(tnt.Root())
+	// meta 超过 MultipartOrphanTTL 未更新的会话，其 parts 与 meta 一并删除（best-effort）。
+	s.SweepStaleMultipart(tnt.Root())
 	uploadID := hex.EncodeToString(b)
 	// meta 内容 = `owner\nkey`（两行）：owner 供 sweepStaleMultipart 释放**在途 part 记账**
 	// （chunk 桶 Scope 是 per-owner 的，仅凭 uploadID 无法定位账本）；key 供 complete 校验
-	// 会话归属。旧格式（单行 key）仍可解析（owner 未知 → 清扫时不释放，见 readMultipartMeta）。
-	mpMetaRel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
-	if err := rootWriteFile(tnt.Root(), mpMetaRel, []byte(owner+"\n"+key)); err != nil {
+	// 会话归属。旧格式（单行 key）仍可解析（owner 未知 → 清扫时不释放，见 ReadMultipartMeta）。
+	mpMetaRel := storage.ChunkPrefix + MultipartPartPrefix + uploadID + ".meta"
+	if err := RootWriteFile(tnt.Root(), mpMetaRel, []byte(owner+"\n"+key)); err != nil {
 		http.Error(w, "s3: 会话创建失败", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set(headerContentType, "application/xml")
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><Bucket>default</Bucket><Key>%s</Key><UploadId>%s</UploadId></InitiateMultipartUploadResult>`, xmlEscapeText(key), uploadID)
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><Bucket>default</Bucket><Key>%s</Key><UploadId>%s</UploadId></InitiateMultipartUploadResult>`, XMLEscapeText(key), uploadID)
 }
 
 // s3UploadPart 上传一个 part（PUT ?partNumber&uploadId）。
-func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key string) {
+func (s *Service) s3UploadPart(w http.ResponseWriter, r *http.Request, key string) {
 	// 请求体限流（审查批次10 P1 修复）：io.ReadAll 无上限 = OOM DoS。对齐分块上传
 	// DefaultChunkBodyLimit（64 MiB）。
 	r.Body = http.MaxBytesReader(w, r.Body, size.DefaultChunkBodyLimit)
@@ -98,11 +99,11 @@ func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key stri
 		}
 		return
 	}
-	owner := h.s3AuthOwner(w, r, body)
+	owner := s.s3AuthOwner(w, r, body)
 	if owner == "" {
 		return
 	}
-	tnt := h.s3TenantFor(owner, r)
+	tnt := s.TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
@@ -113,35 +114,35 @@ func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key stri
 		http.Error(w, "s3: 缺 uploadId/partNumber", http.StatusBadRequest)
 		return
 	}
-	// partNum 校验（审查批次10 P1 修复）：必须是合法正整数且 ≤ s3MaxParts——
+	// partNum 校验（审查批次10 P1 修复）：必须是合法正整数且 ≤ MaxParts——
 	// 直接拼路径 <key>.part.<partNum>，非法值（含 / 或 .. 或非数字）会路径注入
 	// （os.Root 防逃逸但 DoS）或超数量上限磁盘耗尽。
 	pn, perr := strconv.Atoi(partNum)
-	if perr != nil || pn <= 0 || pn > s3MaxParts {
+	if perr != nil || pn <= 0 || pn > MaxParts {
 		http.Error(w, "s3: 非法 partNumber", http.StatusBadRequest)
 		return
 	}
-	partRel := chunkPrefix + multipartPartPrefix + uploadID + partSuffix + partNum
+	partRel := storage.ChunkPrefix + MultipartPartPrefix + uploadID + storage.PartSuffix + partNum
 	// **在途 part 记账**（设计 §12.1 第 1 项）：part 落盘即占磁盘与配额，必须当场入双账本
 	// （chunk 桶 Scope + 卷容量池），否则 24h 孤儿窗口内可反复超配额写盘。无状态方案：
 	// 先 TryReserve 强制额度 → 写成功 → Commit；失败回滚。同 partNumber 重传时旧 part 已计入
 	// （prev），写成功后按差分释放（净账 = 新 part 大小）。
-	led := h.newS3PartLedger(owner, tnt)
+	led := s.newS3PartLedger(owner, tnt)
 	prev := int64(0)
 	if st, serr := tnt.Root().Stat(partRel); serr == nil && st != nil {
 		prev = st.Size()
 	}
-	resv := led.reserve(int64(len(body)))
+	resv := led.Reserve(int64(len(body)))
 	if resv == nil {
 		http.Error(w, "s3: 配额不足", http.StatusInsufficientStorage)
 		return
 	}
-	if err := rootWriteFile(tnt.Root(), partRel, body); err != nil {
+	if err := RootWriteFile(tnt.Root(), partRel, body); err != nil {
 		http.Error(w, "s3: part 写入失败", http.StatusInternalServerError)
 		return
 	}
-	resv.commit(led, int64(len(body)))
-	led.releaseCommitted(prev)
+	resv.Commit(led, int64(len(body)))
+	led.ReleaseCommitted(prev)
 	etag := md5Hex(body)
 	w.Header().Set("ETag", `"`+etag+`"`)
 	w.WriteHeader(http.StatusOK)
@@ -154,8 +155,8 @@ func (h *Handlers) s3UploadPart(w http.ResponseWriter, r *http.Request, key stri
 //  2. 验签 s3AuthOwner → 401/403；
 //  3. s3TenantFor → 卷不可用 400；uploadId 空 → 400；
 //  4. xml.Unmarshal 失败 → 400；Parts 空 → 400；
-//  5. validateCompleteParts（范围+重复，排序前）→ 400；
-//  6. readMultipartMeta：meta 缺失或内容 != 当前 key → 409（会话归属校验）；
+//  5. ValidateCompleteParts（范围+重复，排序前）→ 400；
+//  6. ReadMultipartMeta：meta 缺失或内容 != 当前 key → 409（会话归属校验）；
 //  7. sort 升序；UserRel/MkdirAll；
 //  7. sort 升序；UserRel/MkdirAll；
 //  8. s3PartTotalSize（Stat 合计）+ 目标 prev 预读（覆盖写差分）→ 结算句柄（**不再预留**：
@@ -174,18 +175,18 @@ type s3CompletePlan struct {
 	tnt      *storage.Tenant
 	root     *storage.Root
 	uploadID string
-	parts    []s3CompletePart
+	parts    []CompletePart
 	rel      string
 	// led 是 part 所在（chunk 桶）的双账本句柄：complete 逐 part 删除时逐个释放记账。
-	led *s3PartLedger
+	led *PartLedger
 }
 
-// s3CompleteSettlement 是 complete 的配额**转移**结算句柄：把在途 part 已记的账转移到目标
+// CompleteSettlement 是 complete 的配额**转移**结算句柄：把在途 part 已记的账转移到目标
 // 文件（净账 = 目标大小，不双计；不变量见 s3_part_ledger.go）。
-type s3CompleteSettlement struct {
-	scope *quota.Scope
-	pool  *quota.Pool
-	prev  int64
+type CompleteSettlement struct {
+	Scope *quota.Scope
+	Pool  *quota.Pool
+	Prev  int64
 }
 
 // s3TargetPhysSize 返回目标文件的**落盘**字节数（加密卷 = 密文长度）——结算口径的唯一事实源。
@@ -210,16 +211,16 @@ func s3TargetPhysSize(root *storage.Root, rel string, fallback int64) int64 {
 // `writeUserVisible` **透明加密** ⇒ 用 total 会把已落盘字节**少记** `(物理 − 逻辑)`；且 `prev`
 // 本就取自 `root.Stat`（**物理**）⇒ 用 total 会是**混口径 Adjust**（覆盖写双向出错）。
 // 与归档路径（`cloudArchiveSettleQuota` 的 `actual = root.Stat(rel).Size()`）同源。
-func (s *s3CompleteSettlement) commitTarget(root *storage.Root, rel string, total int64) {
+func (s *CompleteSettlement) CommitTarget(root *storage.Root, rel string, total int64) {
 	if s == nil || total < 0 {
 		return
 	}
 	total = s3TargetPhysSize(root, rel, total)
-	if s.scope != nil {
-		s.scope.Adjust(s.prev, total)
+	if s.Scope != nil {
+		s.Scope.Adjust(s.Prev, total)
 	}
-	if s.pool != nil {
-		s.pool.Adjust(s.prev, total)
+	if s.Pool != nil {
+		s.Pool.Adjust(s.Prev, total)
 	}
 }
 
@@ -242,14 +243,14 @@ func s3CompleteReadBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 
 // s3CompletePrepare 完成验签/卷校验/body 解析/part 校验/会话归属/排序与目标路径；
 // 任一失败已回包，返回 ok=false。
-func (h *Handlers) s3CompletePrepare(w http.ResponseWriter, r *http.Request, key string, body []byte) (*s3CompletePlan, bool) {
+func (s *Service) s3CompletePrepare(w http.ResponseWriter, r *http.Request, key string, body []byte) (*s3CompletePlan, bool) {
 	// 2. 验签（body 参与 SigV4）。
-	owner := h.s3AuthOwner(w, r, body)
+	owner := s.s3AuthOwner(w, r, body)
 	if owner == "" {
 		return nil, false
 	}
 	// 3. 卷/uploadId。
-	tnt := h.s3TenantFor(owner, r)
+	tnt := s.TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return nil, false
@@ -262,7 +263,7 @@ func (h *Handlers) s3CompletePrepare(w http.ResponseWriter, r *http.Request, key
 	}
 	// 4. 解析 body。
 	var req struct {
-		Parts []s3CompletePart `xml:"Part"`
+		Parts []CompletePart `xml:"Part"`
 	}
 	if xml.Unmarshal(body, &req) != nil {
 		http.Error(w, "s3: CompleteMultipartUpload body 解析失败", http.StatusBadRequest)
@@ -273,12 +274,12 @@ func (h *Handlers) s3CompletePrepare(w http.ResponseWriter, r *http.Request, key
 		return nil, false
 	}
 	// 5. PartNumber 范围/重复（排序前）。
-	if verr := validateCompleteParts(req.Parts); verr != nil {
+	if verr := ValidateCompleteParts(req.Parts); verr != nil {
 		http.Error(w, "s3: "+verr.Error(), http.StatusBadRequest)
 		return nil, false
 	}
 	// 6. 会话归属校验：meta 缺失或内容 != 当前 key → 409。
-	_, metaKey, merr := readMultipartMeta(root, uploadID)
+	_, metaKey, merr := ReadMultipartMeta(root, uploadID)
 	if merr != nil || metaKey != key {
 		http.Error(w, "s3: 会话无效或 key 不匹配", http.StatusConflict)
 		return nil, false
@@ -300,13 +301,13 @@ func (h *Handlers) s3CompletePrepare(w http.ResponseWriter, r *http.Request, key
 		uploadID: uploadID,
 		parts:    req.Parts,
 		rel:      rel,
-		led:      h.newS3PartLedger(owner, tnt),
+		led:      s.newS3PartLedger(owner, tnt),
 	}, true
 }
 
 // s3CompleteMeasure 合计 parts 大小（= 在途 part 已记的字节）并预读目标 prev，返回结算句柄；
 // 任一 part 缺失 → 400（同 ETag 片语义），返回 ok=false。
-func (h *Handlers) s3CompleteMeasure(w http.ResponseWriter, plan *s3CompletePlan) (int64, *s3CompleteSettlement, bool) {
+func (s *Service) s3CompleteMeasure(w http.ResponseWriter, plan *s3CompletePlan) (int64, *CompleteSettlement, bool) {
 	// 8. 合计 parts（缺失即 400，同 ETag 片语义）。
 	total, terr := s3PartTotalSize(plan.root, plan.uploadID, plan.parts)
 	if terr != nil {
@@ -318,10 +319,10 @@ func (h *Handlers) s3CompleteMeasure(w http.ResponseWriter, plan *s3CompletePlan
 	if st, statErr := plan.root.Stat(plan.rel); statErr == nil && st != nil {
 		prev = st.Size()
 	}
-	return total, &s3CompleteSettlement{
-		scope: h.quotaScopeFor(plan.owner, plan.rel),
-		pool:  h.volumePoolForTenant(plan.tnt),
-		prev:  prev,
+	return total, &CompleteSettlement{
+		Scope: s.d.QuotaScopeFor(plan.owner, plan.rel),
+		Pool:  s.d.VolumePoolForTenant(plan.tnt),
+		Prev:  prev,
 	}, true
 }
 
@@ -339,7 +340,7 @@ func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan) ([]byte, 
 	// 目标写走**用户可见**入口：加密卷 transparent 加密落盘（raw OpenFile 会写明文 =
 	// at-rest 加密被绕过，评审 P0 的 multipart 面）。in-flight part 仍是明文暂存（分片
 	// 可续传，且 GCM 流不可拼接）——finalize 单遍加密。
-	f, err := writeUserVisible(plan.root, plan.rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := rootfs.WriteUserVisible(plan.root, plan.rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		http.Error(w, "s3: 目标创建失败", http.StatusInternalServerError)
 		return nil, false
@@ -347,7 +348,7 @@ func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan) ([]byte, 
 	// 各 part 原始 md5 字节（复合 ETag 用：hex(md5(concat(md5(p1)...)))-N）。
 	var partMd5s []byte
 	for _, p := range plan.parts {
-		partRel := chunkPrefix + multipartPartPrefix + plan.uploadID + partSuffix + strconv.Itoa(p.PartNumber)
+		partRel := storage.ChunkPrefix + MultipartPartPrefix + plan.uploadID + storage.PartSuffix + strconv.Itoa(p.PartNumber)
 		pf, perr := plan.root.Open(partRel)
 		if perr != nil {
 			f.Close()
@@ -365,10 +366,10 @@ func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan) ([]byte, 
 			return nil, false
 		}
 		actual := hex.EncodeToString(hasher.Sum(nil))
-		if normalizeETag(p.ETag) != actual {
+		if NormalizeETag(p.ETag) != actual {
 			f.Close()
 			removePartialS3(plan.root, plan.rel)
-			http.Error(w, fmt.Sprintf("s3: part %d ETag 不匹配（期望 %s 实际 %s）", p.PartNumber, normalizeETag(p.ETag), actual), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("s3: part %d ETag 不匹配（期望 %s 实际 %s）", p.PartNumber, NormalizeETag(p.ETag), actual), http.StatusBadRequest)
 			return nil, false
 		}
 		partMd5s = append(partMd5s, hasher.Sum(nil)...)
@@ -382,19 +383,19 @@ func s3CompleteWriteParts(w http.ResponseWriter, plan *s3CompletePlan) ([]byte, 
 	}
 	return partMd5s, true
 }
-func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, key string) {
+func (s *Service) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, key string) {
 	// 1. body 有界（审查批次10 P1 姊妹面，OOM DoS）。
 	body, ok := s3CompleteReadBody(w, r)
 	if !ok {
 		return
 	}
 	// 2-7. 验签/卷校验/body 解析/part 校验/会话归属/排序与目标路径。
-	plan, ok := h.s3CompletePrepare(w, r, key, body)
+	plan, ok := s.s3CompletePrepare(w, r, key, body)
 	if !ok {
 		return
 	}
 	// 8. 配额**转移**测量（设计文档 2026-09-24-s3-complete-quota.md + 2026-10-11 §12.1）。
-	total, settle, ok := h.s3CompleteMeasure(w, plan)
+	total, settle, ok := s.s3CompleteMeasure(w, plan)
 	if !ok {
 		return
 	}
@@ -404,29 +405,29 @@ func (h *Handlers) s3CompleteMultipart(w http.ResponseWriter, r *http.Request, k
 		return
 	}
 	// 10. 目标计入（parts → 目标，净账 = 目标大小；口径折算在 commitTarget 内，见其注释）。
-	settle.commitTarget(plan.root, plan.rel, total)
+	settle.CommitTarget(plan.root, plan.rel, total)
 
-	_ = plan.root.Remove(chunkPrefix + multipartPartPrefix + plan.uploadID + ".meta")
+	_ = plan.root.Remove(storage.ChunkPrefix + MultipartPartPrefix + plan.uploadID + ".meta")
 	// M1 修复：multipart complete 是本地旁路写（root 直写不经 files.Service）——补
 	// 「到达即建」meta（与单次 s3 PUT/上传一致）；失败 Warn 兜底不阻断成功响应。
-	if mErr := (filesMetaPolicy{h: h}).WriteMeta(r.Context(), plan.owner, plan.root, plan.rel, nil); mErr != nil {
-		h.logger.Warn("s3 multipart 写后 meta 落盘失败（读侧将不校验）", "key", key, "error", mErr)
+	if mErr := s.d.Meta.WriteMeta(r.Context(), plan.owner, plan.root, plan.rel, nil); mErr != nil {
+		s.d.Logger.Warn("s3 multipart 写后 meta 落盘失败（读侧将不校验）", "key", key, "error", mErr)
 	}
 	// 响应：Key（XML 转义防注入）+ 复合 ETag（S3 分块标准形态，可选增强；哈希已在循环内）。
 	w.Header().Set(headerContentType, "application/xml")
 	comp := md5.Sum(partMd5s) //nolint:gosec // G401: S3 复合 ETag 协议要求 MD5（非安全用途）
 	compositeETag := hex.EncodeToString(comp[:]) + "-" + strconv.Itoa(len(plan.parts))
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Key>%s</Key><ETag>%s</ETag></CompleteMultipartUploadResult>`, xmlEscapeText(key), compositeETag)
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Key>%s</Key><ETag>%s</ETag></CompleteMultipartUploadResult>`, XMLEscapeText(key), compositeETag)
 }
 
-// s3MultipartOrphanTTL 是孤儿分块会话的存活上限（秒）：超过则视为客户端已放弃——
+// MultipartOrphanTTL 是孤儿分块会话的存活上限（秒）：超过则视为客户端已放弃——
 // Initiate→Complete 的正常窗口是分钟级（大文件 ≤ 小时级），24h 足够宽裕且防无限残留。
-const s3MultipartOrphanTTL = 24 * time.Hour
+const MultipartOrphanTTL = 24 * time.Hour
 
 // sweepStaleMultipart 清扫过期孤儿分块会话（M9a）：遍历 chunk 桶内 `s3mp-<id>.meta`，
 // meta mtime 早于 TTL 的会话，删除其全部 `s3mp-<id>-<part>` 与 meta 本身（best-effort；
 // 删除失败只记 Warn，不阻断新会话创建）。返回清扫的会话数（供测试/可观测）。
-func (h *Handlers) sweepStaleMultipart(root *storage.Root) int {
+func (s *Service) SweepStaleMultipart(root *storage.Root) int {
 	entries, err := root.ReadDir("chunk")
 	if err != nil {
 		return 0
@@ -437,11 +438,11 @@ func (h *Handlers) sweepStaleMultipart(root *storage.Root) int {
 		if !stale {
 			continue
 		}
-		h.removeMultipartSession(root, entries, uploadID)
+		s.removeMultipartSession(root, entries, uploadID)
 		swept++
 	}
 	if swept > 0 {
-		h.logger.Info("s3: 清扫过期孤儿分块会话", "sessions", swept)
+		s.d.Logger.Info("s3: 清扫过期孤儿分块会话", "sessions", swept)
 	}
 	return swept
 }
@@ -450,44 +451,44 @@ func (h *Handlers) sweepStaleMultipart(root *storage.Root) int {
 // 早于 TTL）；返回上传 ID 与是否过期。
 func staleMultipartSession(e os.DirEntry, now time.Time) (string, bool) {
 	name := e.Name()
-	if !strings.HasPrefix(name, multipartPartPrefix) || !strings.HasSuffix(name, ".meta") {
+	if !strings.HasPrefix(name, MultipartPartPrefix) || !strings.HasSuffix(name, ".meta") {
 		return "", false
 	}
 	info, err := e.Info()
-	if err != nil || now.Sub(info.ModTime()) < s3MultipartOrphanTTL {
+	if err != nil || now.Sub(info.ModTime()) < MultipartOrphanTTL {
 		return "", false
 	}
-	uploadID := strings.TrimSuffix(strings.TrimPrefix(name, multipartPartPrefix), ".meta")
+	uploadID := strings.TrimSuffix(strings.TrimPrefix(name, MultipartPartPrefix), ".meta")
 	return uploadID, uploadID != ""
 }
 
 // removeMultipartSession 删除某会话的全部 parts 与 meta（best-effort，失败只记 Warn），
 // 并对**删除成功**的 part 逐个释放双账本记账（owner 从会话 meta 解析：chunk 桶 Scope 是
 // per-owner 的；旧格式 meta 无 owner 行 ⇒ 账本为 no-op，只清文件不误扣他人账）。
-func (h *Handlers) removeMultipartSession(root *storage.Root, entries []os.DirEntry, uploadID string) {
-	owner, _, _ := readMultipartMeta(root, uploadID)
-	var led *s3PartLedger
+func (s *Service) removeMultipartSession(root *storage.Root, entries []os.DirEntry, uploadID string) {
+	owner, _, _ := ReadMultipartMeta(root, uploadID)
+	var led *PartLedger
 	if owner != "" {
-		led = h.newS3PartLedger(owner, h.tenantFor(owner))
+		led = s.newS3PartLedger(owner, s.d.TenantFor(owner))
 	} else {
-		led = &s3PartLedger{}
+		led = &PartLedger{}
 	}
 	if n, bytes := led.removeSessionParts(root, entries, uploadID); n > 0 {
-		h.logger.Info("s3: 释放孤儿 part 记账", "session", uploadID, "parts", n, "bytes", bytes)
+		s.d.Logger.Info("s3: 释放孤儿 part 记账", "session", uploadID, "parts", n, "bytes", bytes)
 	}
-	metaRel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
+	metaRel := storage.ChunkPrefix + MultipartPartPrefix + uploadID + ".meta"
 	if rerr := root.Remove(metaRel); rerr != nil {
-		h.logger.Warn("s3: 清理孤儿分块会话 meta 失败", "meta", metaRel, "error", rerr)
+		s.d.Logger.Warn("s3: 清理孤儿分块会话 meta 失败", "meta", metaRel, "error", rerr)
 	}
 }
 
 // s3AbortMultipart 中止分块上传（DELETE ?uploadId → 清 parts + meta）。
-func (h *Handlers) s3AbortMultipart(w http.ResponseWriter, r *http.Request, key string) {
-	owner := h.s3AuthOwner(w, r, nil)
+func (s *Service) s3AbortMultipart(w http.ResponseWriter, r *http.Request, key string) {
+	owner := s.s3AuthOwner(w, r, nil)
 	if owner == "" {
 		return
 	}
-	tnt := h.s3TenantFor(owner, r)
+	tnt := s.TenantFor(owner, r)
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, msgS3VolumeUnavailable, http.StatusBadRequest)
 		return
@@ -501,18 +502,18 @@ func (h *Handlers) s3AbortMultipart(w http.ResponseWriter, r *http.Request, key 
 	// 「客户端主动放弃」路径，字节已消失，账本必须同步回收（设计 §12.1 第 1 项）。
 	root := tnt.Root()
 	if entries, rerr := root.ReadDir("chunk"); rerr == nil {
-		led := h.newS3PartLedger(owner, tnt)
+		led := s.newS3PartLedger(owner, tnt)
 		if n, bytes := led.removeSessionParts(root, entries, uploadID); n > 0 {
-			h.logger.Info("s3: abort 释放 part 记账", "session", uploadID, "parts", n, "bytes", bytes)
+			s.d.Logger.Info("s3: abort 释放 part 记账", "session", uploadID, "parts", n, "bytes", bytes)
 		}
 	}
-	_ = root.Remove(chunkPrefix + multipartPartPrefix + uploadID + ".meta")
+	_ = root.Remove(storage.ChunkPrefix + MultipartPartPrefix + uploadID + ".meta")
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // s3AuthOwner 验签 + 返回 owner（失败写响应并返回空串）。
-func (h *Handlers) s3AuthOwner(w http.ResponseWriter, r *http.Request, body []byte) string {
-	ak, err := h.sigV4Verify(r, body)
+func (s *Service) s3AuthOwner(w http.ResponseWriter, r *http.Request, body []byte) string {
+	ak, err := s.sigV4Verify(r, body)
 	if err != nil {
 		if r.Header.Get("Authorization") == "" {
 			http.Error(w, msgS3Unauth, http.StatusUnauthorized)
@@ -532,8 +533,8 @@ func pathDir(rel string) string {
 	return rel[:idx]
 }
 
-// rootWriteFile 用 OpenFile 写（Root 无 WriteFile——OpenFile + 全量写）。
-func rootWriteFile(root *storage.Root, rel string, data []byte) error {
+// RootWriteFile 用 OpenFile 写（Root 无 WriteFile——OpenFile + 全量写）。
+func RootWriteFile(root *storage.Root, rel string, data []byte) error {
 	if dir := pathDir(rel); dir != "." {
 		_ = root.MkdirAll(dir, 0o755)
 	}
@@ -554,14 +555,14 @@ func md5Hex(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// readMultipartMeta 读取 init 写入的会话 meta（chunk/s3mp-<uploadID>.meta，内容 = `owner\nkey`），
+// ReadMultipartMeta 读取 init 写入的会话 meta（chunk/s3mp-<uploadID>.meta，内容 = `owner\nkey`），
 // 返回 owner 与 key。不存在/读失败返回错误（调用方按 409「会话无效」处理）。
-// 是 rootWriteFile 的反向（设计文档 2026-09-24-s3-complete-etag.md §组件）。
+// 是 RootWriteFile 的反向（设计文档 2026-09-24-s3-complete-etag.md §组件）。
 //
 // 兼容旧格式（单行 = key）：owner 返回空串——sweepStaleMultipart 对 owner 未知的会话只清
 // 文件、不释放记账（宁可少释放，也不误扣其他 owner 的账本）。
-func readMultipartMeta(root *storage.Root, uploadID string) (owner, key string, err error) {
-	metaRel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
+func ReadMultipartMeta(root *storage.Root, uploadID string) (owner, key string, err error) {
+	metaRel := storage.ChunkPrefix + MultipartPartPrefix + uploadID + ".meta"
 	f, err := root.Open(metaRel)
 	if err != nil {
 		return "", "", err
@@ -578,18 +579,18 @@ func readMultipartMeta(root *storage.Root, uploadID string) (owner, key string, 
 	return "", content, nil
 }
 
-// normalizeETag 归一客户端回传的 part ETag：去引号——兼容带引号（upload-part 返回
+// NormalizeETag 归一客户端回传的 part ETag：去引号——兼容带引号（upload-part 返回
 // `"md5"`，AWS SDK/rclone 原样回传）与不带引号两种形态（设计文档 §组件）。
-func normalizeETag(s string) string {
+func NormalizeETag(s string) string {
 	return strings.Trim(s, `"`)
 }
 
-// validateCompleteParts 在排序前校验每个 PartNumber ∈ [1, s3MaxParts] 且无重复
+// ValidateCompleteParts 在排序前校验每个 PartNumber ∈ [1, MaxParts] 且无重复
 // （设计文档 §组件：范围/重复 → 400）。
-func validateCompleteParts(parts []s3CompletePart) error {
+func ValidateCompleteParts(parts []CompletePart) error {
 	seen := make(map[int]struct{}, len(parts))
 	for _, p := range parts {
-		if p.PartNumber < 1 || p.PartNumber > s3MaxParts {
+		if p.PartNumber < 1 || p.PartNumber > MaxParts {
 			return fmt.Errorf("非法 PartNumber %d", p.PartNumber)
 		}
 		if _, dup := seen[p.PartNumber]; dup {
@@ -604,10 +605,10 @@ func validateCompleteParts(parts []s3CompletePart) error {
 // Stat 而非读内容——part 已上传并校验过，避免二次 IO；与 s3UploadPart 的
 // size.DefaultChunkBodyLimit 上限配合，总量有界（设计文档 2026-09-24-s3-complete-quota.md）。
 // 任一 part Open/Stat 失败返回错误（调用方按 400 part 缺失）。
-func s3PartTotalSize(root *storage.Root, uploadID string, parts []s3CompletePart) (int64, error) {
+func s3PartTotalSize(root *storage.Root, uploadID string, parts []CompletePart) (int64, error) {
 	var total int64
 	for _, p := range parts {
-		partRel := chunkPrefix + multipartPartPrefix + uploadID + partSuffix + strconv.Itoa(p.PartNumber)
+		partRel := storage.ChunkPrefix + MultipartPartPrefix + uploadID + storage.PartSuffix + strconv.Itoa(p.PartNumber)
 		pf, err := root.Open(partRel)
 		if err != nil {
 			return 0, fmt.Errorf("part %d 缺失", p.PartNumber)

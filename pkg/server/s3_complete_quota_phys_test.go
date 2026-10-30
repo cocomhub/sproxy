@@ -71,10 +71,10 @@ func TestS3CompleteSettlement_ChargedTargetPhysicalBytes(t *testing.T) {
 	ownerPool := quota.NewPool(1 << 20)
 	scope := ownerPool.Scope("/tenant/alice/user", 1<<20)
 	volPool := quota.NewPool(1 << 20)
-	settle := &s3CompleteSettlement{scope: scope, pool: volPool}
+	settle := &s3CompleteSettlement{Scope: scope, Pool: volPool}
 
 	// 新建：净账 = 目标**落盘**字节。
-	settle.commitTarget(root, rel, logicalTotal)
+	settle.CommitTarget(root, rel, logicalTotal)
 	if got := scope.Usage(); got != onDisk {
 		t.Fatalf("S3 complete 结算必须 == 目标落盘字节（与 prev 同源）: usage=%d onDisk=%d（parts 明文合计=%d）",
 			got, onDisk, logicalTotal)
@@ -86,8 +86,8 @@ func TestS3CompleteSettlement_ChargedTargetPhysicalBytes(t *testing.T) {
 	// 覆盖写：prev（落盘物理）→ 新落盘物理 ⇒ 不泄漏、不双计。
 	const logicalTotal2 = 20480
 	onDisk2 := write(logicalTotal2, 'q')
-	settle.prev = onDisk
-	settle.commitTarget(root, rel, logicalTotal2)
+	settle.Prev = onDisk
+	settle.CommitTarget(root, rel, logicalTotal2)
 	if got := scope.Usage(); got != onDisk2 {
 		t.Fatalf("覆盖写后 usage 必须 == 新落盘字节: usage=%d onDisk=%d", got, onDisk2)
 	}

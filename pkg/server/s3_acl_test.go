@@ -4,10 +4,11 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/server/s3"
 )
 
 // TestS3TenantFor_NamedBucketACLDeniedFailsClosed 评审 P2：命名桶此前只按名解析卷（无 ACL）⇒
@@ -30,20 +31,20 @@ func TestS3TenantFor_NamedBucketACLDeniedFailsClosed(t *testing.T) {
 
 	namedBucketReq := func() *http.Request {
 		r := httptest.NewRequest(http.MethodGet, "/s3/locked/x.bin", nil)
-		return r.WithContext(context.WithValue(r.Context(), s3BucketCtxKey{}, "locked"))
+		return r.WithContext(s3.WithBucket(r.Context(), "locked"))
 	}
 
 	// 未授权 owner：fail-closed（nil，且不是「回落到默认卷」的租户）。
-	if tnt := h.s3TenantFor("bob", namedBucketReq()); tnt != nil {
+	if tnt := h.s3Service().TenantFor("bob", namedBucketReq()); tnt != nil {
 		t.Fatalf("ACL 拒绝时 s3TenantFor 必须返回 nil（不得回落默认卷），got %v", tnt)
 	}
 	// 授权 owner：解析到该命名桶租户。
-	tnt := h.s3TenantFor("alice", namedBucketReq())
+	tnt := h.s3Service().TenantFor("alice", namedBucketReq())
 	if tnt == nil || tnt.Root() == nil {
 		t.Fatal("授权 owner 应解析出该命名桶租户")
 	}
 	// 未注入 bucket ctx（默认卷路径）：不受影响（零回归）。
-	if tnt := h.s3TenantFor("bob", httptest.NewRequest(http.MethodGet, "/s3/?list-type=2", nil)); tnt == nil {
+	if tnt := h.s3Service().TenantFor("bob", httptest.NewRequest(http.MethodGet, "/s3/?list-type=2", nil)); tnt == nil {
 		t.Fatal("默认卷路径不应受命名桶 ACL 影响")
 	}
 }

@@ -127,7 +127,7 @@ func TestS3Multipart_SweepStaleOrphans(t *testing.T) {
 	writePart("live-session", 1)
 	age("live-session", time.Hour)
 
-	if n := h.sweepStaleMultipart(root); n != 1 {
+	if n := h.s3Service().SweepStaleMultipart(root); n != 1 {
 		t.Fatalf("应清扫 1 个过期会话，实际 %d", n)
 	}
 	for _, rel := range []string{
