@@ -48,6 +48,15 @@ type VolumeKeyedStore interface {
 
 var _ VolumeKeyedStore = (*ChecksumStore)(nil)
 
+// Iterator 是**可选扩展**：分批遍历台账（**锁外回调**），用于校验类运维入口，
+// 避免 `GetAll()` 的全量 map 拷贝。实现先取键列表（O(N) 个键头），再逐批在锁内取值、
+// 锁外回调；并发删除的键自动跳过。
+type Iterator interface {
+	Iterate(batch int, fn func(key, checksum string) bool)
+}
+
+var _ Iterator = (*ChecksumStore)(nil)
+
 // LenCounter 是**可选扩展**：台账条目数（O(1) 判空用，避免 GetAll 全量拷贝）。
 type LenCounter interface{ Len() int }
 
@@ -221,6 +230,39 @@ func (cs *ChecksumStore) SnapshotInVolume(vol string) map[string]string {
 		}
 	}
 	return out
+}
+
+// Iterate 分批遍历台账：先在锁内取键列表，再逐批锁内取值、**锁外**回调。
+// 回调返回 false 提前终止。并发删除的键跳过（一致性：遍历弱一致快照）。
+func (cs *ChecksumStore) Iterate(batch int, fn func(key, checksum string) bool) {
+	if batch <= 0 {
+		batch = 256
+	}
+	cs.mu.RLock()
+	keys := make([]string, 0, len(cs.checksums))
+	for k := range cs.checksums {
+		keys = append(keys, k)
+	}
+	cs.mu.RUnlock()
+
+	type kv struct{ k, v string }
+	page := make([]kv, 0, batch)
+	for i := 0; i < len(keys); i += batch {
+		end := min(i+batch, len(keys))
+		cs.mu.RLock()
+		page = page[:0]
+		for _, k := range keys[i:end] {
+			if v, ok := cs.checksums[k]; ok {
+				page = append(page, kv{k: k, v: v})
+			}
+		}
+		cs.mu.RUnlock()
+		for _, p := range page {
+			if !fn(p.k, p.v) {
+				return
+			}
+		}
+	}
 }
 
 // persist 落盘（失败重试一次并记日志；与 Set/Rename 的既有重试语义一致）。
