@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -1538,8 +1537,11 @@ func (s *Service) completeExternalTransfer(ctx context.Context, w http.ResponseW
 func (s *Service) ensureExternalDir(ctx context.Context, w http.ResponseWriter, sink UploadSink, rel string) bool {
 	dir := path.Dir(rel)
 	if derr := sink.MakeDir(ctx, dir); derr != nil {
-		// 目录已存在 = 目标状态已达成（外部卷 MakeDir 在部分后端/并发下会回 ErrExist）。
-		if errors.Is(derr, fs.ErrExist) || errors.Is(derr, os.ErrExist) {
+		// **必须区分「已存在且完整」与「已存在但残缺」**：不能只看 ErrExist 就放行
+		// （半途残留的目录/缺目录 meta 会让后续写入落在不完整结构上）。只有 Stat 确认该
+		// 路径**确实可读存在**才视为目标达成；否则带详情失败，由上层清理后重试。
+		if _, exists, serr := sink.Stat(ctx, dir); serr == nil && exists {
+			s.rt.logger().Info("外部卷目标目录已存在（Stat 确认可读，视为达成）", "dir", dir)
 			return true
 		}
 		// **必须带出详情**：此前只回「创建目录失败」⇒ 生产故障无法定位（实测多条上传因此
