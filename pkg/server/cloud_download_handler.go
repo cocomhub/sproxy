@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -1270,7 +1271,7 @@ func archiveEntries(files []fileWithRelPath) ([]transfer.SourceEntry, error) {
 	out := make([]transfer.SourceEntry, 0, len(files))
 	for _, f := range files {
 		// R25：用户可见读入口（加密卷透明解密）——不得直调 root.Open。
-		rc, err := openUserVisibleRead(f.root, f.rel)
+		rc, err := rootfs.OpenUserVisibleRead(f.root, f.rel)
 		if err != nil {
 			closeEntries(out)
 			return nil, err
@@ -1278,7 +1279,7 @@ func archiveEntries(files []fileWithRelPath) ([]transfer.SourceEntry, error) {
 		st, serr := f.root.Stat(f.rel)
 		var size, mtime int64
 		// 用户可见（逻辑）长度：加密卷取明文长度，否则等同 Stat。
-		if sv, vErr := userVisibleSize(f.root, f.rel); vErr == nil {
+		if sv, vErr := rootfs.UserVisibleSize(f.root, f.rel); vErr == nil {
 			size = sv
 		} else if serr == nil && st != nil {
 			size = st.Size()
@@ -1306,7 +1307,7 @@ func closeEntries(entries []transfer.SourceEntry) {
 func archiveTotalSize(files []fileWithRelPath) int64 {
 	var total int64
 	for _, f := range files {
-		if sv, err := userVisibleSize(f.root, f.rel); err == nil {
+		if sv, err := rootfs.UserVisibleSize(f.root, f.rel); err == nil {
 			total += sv
 		}
 	}

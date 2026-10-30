@@ -23,6 +23,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/compressx"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
+	"github.com/cocomhub/sproxy/pkg/server/archive"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/transfer"
@@ -110,7 +112,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 打包前：单文件总量限制（cloud_archive_max_bytes）。单文件仍受 addFileToTar 内
-	// defaultMaxArchiveSize=100MB 约束；此处限制的是原始文件大小，与 addFileToTar 并存不冲突。
+	// archive.DefaultMaxArchiveSize=100MB 约束；此处限制的是原始文件大小，与 addFileToTar 并存不冲突。
 	// 审查 #10 结论（勿再分析）：此 os.Stat 是**必须的**大小校验，并非与 O_EXCL 重复的
 	// 存在性预检——同名冲突由 openArchiveOutput 的 O_EXCL 单一负责（createTarGz 返回
 	// errArchiveExists → 409）；此处 stat 失败即源文件不存在（400），职责不同，无冗余。
@@ -404,7 +406,7 @@ func (h *Handlers) cloudArchiveTaskToVolume(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// R25：用户可见读入口（加密卷透明解密）——不得直调 root.Open。
-	f, oerr := openUserVisibleRead(srcTnt.Root(), srcRel)
+	f, oerr := rootfs.OpenUserVisibleRead(srcTnt.Root(), srcRel)
 	if oerr != nil {
 		h.logger.Error("统一转存打开源文件失败", "task_id", taskID, "error", oerr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + oerr.Error()}, http.StatusInternalServerError)
@@ -412,7 +414,7 @@ func (h *Handlers) cloudArchiveTaskToVolume(w http.ResponseWriter, r *http.Reque
 	}
 	// 用户可见（逻辑）长度：加密卷取明文长度，否则等同 Stat。
 	size := info.Size()
-	if sv, vErr := userVisibleSize(srcTnt.Root(), srcRel); vErr == nil {
+	if sv, vErr := rootfs.UserVisibleSize(srcTnt.Root(), srcRel); vErr == nil {
 		size = sv
 	}
 	entries := []transfer.SourceEntry{{
@@ -605,7 +607,7 @@ func createTarGz(srcRoot *storage.Root, srcRel, srcTarName string, outRoot *stor
 	// ⇒ 响应里的 checksum 100% 不等于落盘文件（客户端按它校验必然判「归档损坏」）；
 	// ② Close 的错误被丢弃且 succeeded 已置 true ⇒ 收尾失败的**截断归档**被当成功返回
 	// 且不清理。与 pkg/server/archive.go、pkg/transfer/registry.go 的既有口径统一。
-	if err := addFileToTar(tw, srcRoot, srcRel, srcTarName, logger); err != nil {
+	if err := archive.AddFileToTar(tw, srcRoot, srcRel, srcTarName, logger); err != nil {
 		_ = tw.Close()
 		_ = gw.Close()
 		return "", fmt.Errorf("add file to tar: %w", err)
@@ -657,7 +659,7 @@ func createMultiFileTarGz(files []fileWithRelPath, outRoot *storage.Root, outRel
 
 	// 与 createTarGz 同口径（P1 修复，2026-10-21）：显式收尾 + 收尾后再算 checksum。
 	for _, f := range files {
-		if err := addFileToTar(tw, f.root, f.rel, f.tarRel, logger); err != nil {
+		if err := archive.AddFileToTar(tw, f.root, f.rel, f.tarRel, logger); err != nil {
 			_ = tw.Close()
 			_ = gw.Close()
 			return "", fmt.Errorf("add file %q to tar: %w", f.tarRel, err)
@@ -687,7 +689,7 @@ var errArchiveExists = errors.New("archive file already exists")
 func openArchiveOutput(root *storage.Root, rel string) (io.WriteCloser, bool, error) {
 	// 归档输出是**用户内容**写面：加密卷须透明加密落盘（raw OpenFile 写明文，
 	// 归档产物读回时按密文形态不完整；评审「用户可见入口」收敛面）。
-	f, err := writeUserVisible(root, rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	f, err := rootfs.WriteUserVisible(root, rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, false, nil

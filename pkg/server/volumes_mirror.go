@@ -45,6 +45,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
@@ -242,7 +243,7 @@ func srcInfoCapacity(srcInfo os.FileInfo) int64 { return srcInfo.Size() }
 // 流复制、返回明文字节数 ⇒ 以**用户可见长度**为准（无 root 或读取失败时回落 Stat 尺寸）。
 func copySourceSize(fromRoot *storage.Root, rel string, srcInfo os.FileInfo) int64 {
 	if fromRoot != nil {
-		if ls, lerr := userVisibleSize(fromRoot, rel); lerr == nil {
+		if ls, lerr := rootfs.UserVisibleSize(fromRoot, rel); lerr == nil {
 			return ls
 		}
 	}

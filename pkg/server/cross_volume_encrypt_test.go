@@ -14,6 +14,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -57,7 +58,7 @@ func TestCrossVolumeCopy_EncryptedCoordinates(t *testing.T) {
 	if cerr != nil {
 		t.Fatalf("crossVolumeCopy: %v", cerr)
 	}
-	vis, verr := userVisibleSize(src, "user/a.bin")
+	vis, verr := rootfs.UserVisibleSize(src, "user/a.bin")
 	if verr != nil {
 		t.Fatal(verr)
 	}

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -83,7 +84,7 @@ func seedRetentionShare(t *testing.T, h *Handlers, filename string, createdAgo t
 		if rel := ss.LegacyRelPath(link.Token); rel != "" {
 			if data, merr := json.Marshal(link.ToPersist()); merr == nil {
 				if werr := ss.LegacyRoot().MkdirAll(ss.LegacyRel(), 0o755); werr == nil {
-					if w, werr := writeUserVisible(ss.LegacyRoot(), rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); werr == nil {
+					if w, werr := rootfs.WriteUserVisible(ss.LegacyRoot(), rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); werr == nil {
 						_, _ = w.Write(data)
 						_ = w.Close()
 					}

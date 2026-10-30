@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -36,7 +37,7 @@ func TestUserVisibleIO_EncryptedRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	plain := []byte("hello-plaintext-content")
-	wc, err := writeUserVisible(rt, "user/a.bin", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	wc, err := rootfs.WriteUserVisible(rt, "user/a.bin", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		t.Fatalf("writeUserVisible: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestUserVisibleIO_EncryptedRoundTrip(t *testing.T) {
 	}
 
 	// 用户可见读：明文 + 明文长度。
-	rc, oerr := openUserVisibleRead(rt, "user/a.bin")
+	rc, oerr := rootfs.OpenUserVisibleRead(rt, "user/a.bin")
 	if oerr != nil {
 		t.Fatalf("openUserVisibleRead: %v", oerr)
 	}
@@ -66,7 +67,7 @@ func TestUserVisibleIO_EncryptedRoundTrip(t *testing.T) {
 	if !bytes.Equal(got, plain) {
 		t.Fatalf("应读到明文, got %q", got)
 	}
-	size, serr := userVisibleSize(rt, "user/a.bin")
+	size, serr := rootfs.UserVisibleSize(rt, "user/a.bin")
 	if serr != nil {
 		t.Fatalf("userVisibleSize: %v", serr)
 	}
@@ -87,7 +88,7 @@ func TestUserVisibleIO_PlainZeroRegression(t *testing.T) {
 		t.Fatal(merr)
 	}
 	data := []byte("plain-bytes")
-	wc, werr := writeUserVisible(rt, "user/p.bin", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	wc, werr := rootfs.WriteUserVisible(rt, "user/p.bin", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if werr != nil {
 		t.Fatalf("writeUserVisible: %v", werr)
 	}
@@ -101,10 +102,10 @@ func TestUserVisibleIO_PlainZeroRegression(t *testing.T) {
 	if !bytes.Equal(raw, data) {
 		t.Fatalf("非加密卷应原样落盘, got %q", raw)
 	}
-	if size, serr := userVisibleSize(rt, "user/p.bin"); serr != nil || size != int64(len(data)) {
+	if size, serr := rootfs.UserVisibleSize(rt, "user/p.bin"); serr != nil || size != int64(len(data)) {
 		t.Fatalf("长度应为 %d, got %d err=%v", len(data), size, serr)
 	}
-	if _, oerr := openUserVisibleRead(rt, "user/missing.bin"); oerr == nil {
+	if _, oerr := rootfs.OpenUserVisibleRead(rt, "user/missing.bin"); oerr == nil {
 		t.Fatal("不存在的路径应报错")
 	}
 }

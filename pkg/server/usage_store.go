@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -48,7 +49,7 @@ type usageMonthFile struct {
 type usageStore struct {
 	mu sync.RWMutex
 	// root 是**默认卷的卷句柄**（nil = 纯内存形态：测试/未装配，不落盘）。
-	// 落盘位置 = relJoin(rel, owner)/<YYYY-MM>.json，由卷自己决定是否加密——使用方
+	// 落盘位置 = rootfs.RelJoin(rel, owner)/<YYYY-MM>.json，由卷自己决定是否加密——使用方
 	// 不理解「是否加密卷」（非加密卷 = 普通读写；加密卷 = 卷内透明加解密），
 	// 同时经 Root 天然继承封印判定（封装卷占用区间写入恒拒）。
 	root *storage.Root
@@ -78,14 +79,14 @@ const usageRingRetention = 92
 const maxUsageSnapshotBytes = 4 << 20
 
 // newUsageStore 创建 usageStore。root 为 nil = 纯内存形态（不落盘不载入）；
-// 非 nil 时扫描 relJoin(rel, *) 下的 <YYYY-MM>.json 恢复各 owner 各月日桶（缺失 = 空历史）。
+// 非 nil 时扫描 rootfs.RelJoin(rel, *) 下的 <YYYY-MM>.json 恢复各 owner 各月日桶（缺失 = 空历史）。
 func newUsageStore(root *storage.Root, rel string, logger *slog.Logger) *usageStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &usageStore{
 		root:     root,
-		rel:      relDir(rel),
+		rel:      rootfs.RelDir(rel),
 		logger:   logger,
 		days:     make(map[string][]usageDayEntry),
 		dayIndex: make(map[string][]string),
@@ -116,7 +117,7 @@ func (s *usageStore) load() {
 
 // loadOwner 恢复单个 owner 目录下的月快照文件（目录读取失败视为空历史）。
 func (s *usageStore) loadOwner(owner string) {
-	monthFiles, ferr := s.root.ReadDir(relJoin(s.rel, owner))
+	monthFiles, ferr := s.root.ReadDir(rootfs.RelJoin(s.rel, owner))
 	if ferr != nil {
 		return
 	}
@@ -131,7 +132,7 @@ func (s *usageStore) loadOwner(owner string) {
 // loadMonthFile 载入单个 owner 月快照（读取/解析失败跳过并告警；成功把该月各日桶入环）。
 func (s *usageStore) loadMonthFile(owner, fileName string) {
 	var file usageMonthFile
-	rc, rerr := openUserVisibleRead(s.root, relJoin(s.rel, owner)+"/"+fileName)
+	rc, rerr := rootfs.OpenUserVisibleRead(s.root, rootfs.RelJoin(s.rel, owner)+"/"+fileName)
 	if rerr != nil {
 		s.logger.Warn("用量月快照读取失败，跳过", "owner", owner, "file", fileName, "error", rerr.Error())
 		return
@@ -297,14 +298,14 @@ func (s *usageStore) writeMonthSnapshot(owner, month string, days map[string]usa
 	if err != nil {
 		return err
 	}
-	dirRel := relJoin(s.rel, owner)
-	if err := ensureDir(s.root, dirRel, 0o755); err != nil {
+	dirRel := rootfs.RelJoin(s.rel, owner)
+	if err := rootfs.EnsureDir(s.root, dirRel, 0o755); err != nil {
 		return err
 	}
 	rel := dirRel + "/" + month + ".json"
 	tmpRel := rel + ".tmp"
 	// 经卷句柄写（卷决定是否加密）+ tmp→rename 原子替换。
-	w, werr := writeUserVisible(s.root, tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	w, werr := rootfs.WriteUserVisible(s.root, tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if werr != nil {
 		return werr
 	}
