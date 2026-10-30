@@ -526,11 +526,21 @@ func (s *Storage) putCheckExisting(ctx context.Context, key, localMD5 string, at
 func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stagedUpload, attempt int) (*ObjectMeta, bool, error) {
 	localMD5 := st.md5
 	meta, statErr := s.Stat(ctx, key)
-	if statErr != nil {
-		if errors.Is(statErr, ErrNotFound) {
-			s.log.Warn("上传后 Stat 未立即可见，重试", "key", key, "attempt", attempt)
+	if statErr != nil && errors.Is(statErr, ErrNotFound) {
+		// 百度对刚上传的**大对象**有元数据可见性延迟（实测 4.6GB 文件可达数十秒）。此前
+		// 仅 3 轮 attempt（退避 300ms/1.2s，总窗口 ~1.5s）必然超时 ⇒ 整文件重传仍失败。
+		// 这里改为**在本次 attempt 内轮询等待**（指数退避，上限 statVisibleMaxWait），
+		// 不消耗 attempt 的重传预算。
+		var visible bool
+		meta, visible = s.waitPutVisible(ctx, key)
+		if !visible {
+			s.log.Warn("上传后 Stat 等待超时仍不可见（交由上层重传）",
+				"key", key, "attempt", attempt, "max_wait", statVisibleMaxWait.String())
 			return nil, false, nil
 		}
+		statErr = nil
+	}
+	if statErr != nil {
 		return nil, false, mapPCSError(statErr)
 	}
 	if meta.MD5Unreliable {
@@ -1125,4 +1135,34 @@ func (r *tempReadCloser) Close() error {
 		return removeErr
 	}
 	return nil
+}
+
+// statVisibleMaxWait 是「上传后等待目标可见」的总窗口（大文件元数据最终一致性）。
+// 4.6GB 单文件实测可达 30s+；取 90s 上限，配合指数退避（0.5s → 8s 封顶）。
+const statVisibleMaxWait = 90 * time.Second
+
+// waitPutVisible 轮询 Stat 直到目标可见（指数退避），或超时/ctx 取消。
+// 返回 (meta, true) 表示可见；(nil,false) 表示超时或非 NotFound 错误（调用方决定重传/失败）。
+func (s *Storage) waitPutVisible(ctx context.Context, key string) (*ObjectMeta, bool) {
+	deadline := time.Now().Add(statVisibleMaxWait)
+	delay := 500 * time.Millisecond
+	for {
+		if meta, err := s.Stat(ctx, key); err == nil && meta != nil {
+			return meta, true
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
+			s.log.Warn("上传后 Stat 返回非 NotFound 错误（放弃等待）", "key", key, "error", err)
+			return nil, false
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(delay):
+		}
+		if delay < 8*time.Second {
+			delay *= 2
+		}
+	}
 }
