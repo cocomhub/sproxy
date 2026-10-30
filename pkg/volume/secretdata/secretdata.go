@@ -672,7 +672,10 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 		return nil, fmt.Errorf("secretdata: 文件 %q 不存在: %w", rel, os.ErrNotExist)
 	}
 	if e.meta == nil {
-		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+		// meta 缺失（旧条目/快照降级）⇒ 从权威 blob 回源自愈（并回填缓存）；失败才按目录语义报错。
+		if merr := s.ensureEntryMeta(ctx, e); merr != nil {
+			return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+		}
 	}
 	// **本函数是既有「按需随机读」原语**（blocklet 级定位 + 最小下载 + erasure 感知），
 	// 由 `sync.RangeSeeker`（通用 RangeReader→io.ReadSeeker 适配器，4MiB 窗口）与 DAV/Range
@@ -1808,7 +1811,10 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 		return nil, fmt.Errorf("secretdata: 文件 %q 不存在: %w", rel, os.ErrNotExist)
 	}
 	if e.meta == nil {
-		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+		// 同上：读路径自愈（访问即回源读 meta 并回填缓存）。
+		if merr := s.ensureEntryMeta(ctx, e); merr != nil {
+			return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+		}
 	}
 	// **复用既有原语，不重复实现随机访问**（2026-10-18 重新整合）：
 	// 随机读的唯一原语是 `OpenRangeRead`（blocklet 级定位 + 最小下载 + erasure 感知），

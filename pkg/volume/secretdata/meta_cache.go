@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -212,4 +213,24 @@ func (s *SecretdataFS) readDirMetaFast(ctx context.Context, rel string) (*dirMet
 		s.putCompactMeta(rel, b, int64(len(blob)))
 	}
 	return dm, int64(len(blob)), nil
+}
+
+// ensureEntryMeta 确保索引条目带 meta：缺失（旧条目/快照降级）时从权威 blob 回源自愈，
+// 并回填精简缓存 —— 保证「启动后访问文件」在 meta 缺失时仍能正确读出内容，且下次启动
+// 直接命中缓存。任一失败返回错误（调用方按既有语义处理）。
+func (s *SecretdataFS) ensureEntryMeta(ctx context.Context, e *metaEntry) error {
+	s.mu.RLock()
+	loaded := e.meta != nil
+	s.mu.RUnlock()
+	if loaded {
+		return nil
+	}
+	m, _, merr := s.readFileMetaFast(ctx, path.Join(e.dirSeg, e.metaName))
+	if merr != nil {
+		return merr
+	}
+	s.mu.Lock()
+	e.meta = m
+	s.mu.Unlock()
+	return nil
 }
