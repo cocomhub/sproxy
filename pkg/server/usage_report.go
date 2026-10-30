@@ -26,6 +26,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/scheduler"
 )
 
 // usageKindsUpload 是上传成功路径的用量 kind（usageStore 日桶 key）。
@@ -212,7 +214,7 @@ func (h *Handlers) setupUsageReport(cfg *Config, log *slog.Logger) {
 	}
 	if cfg.Usage.Interval > 0 {
 		if h.scheduler == nil {
-			h.scheduler = NewScheduler(log.With("component", "scheduler"))
+			h.scheduler = scheduler.NewScheduler(log.With("component", "scheduler"))
 		}
 		if regErr := h.scheduler.Register(Task{
 			Name:     "usage-flush",
