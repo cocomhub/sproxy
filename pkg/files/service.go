@@ -781,14 +781,8 @@ func checksumReader(src io.Reader) (string, error) {
 // 全程 root 内打开，防符号链接逃逸。对应 pkg/server.FileChecksumRoot（语义等价：
 // 同经 root.Open 打开后哈希整文件）。
 func fileChecksumRoot(root *storage.Root, rel string) (string, error) {
-	// 用户可见语义（两实现同一口径）：加密卷算**明文**摘要
-	// （raw Open 会算密文摘要——校验/冲突检测对明文内容失去意义）。
-	f, err := root.OpenDecrypted(rel)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	return checksumReader(f)
+	// 用户可见语义（加密卷算明文摘要）由 checksum.File 单一实现承担。
+	return checksum.File(root, rel)
 }
 
 // verifyFileWithChecksumRoot 验证 storage.Root 内相对路径文件的 SHA-256 checksum。

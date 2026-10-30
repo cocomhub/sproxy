@@ -351,7 +351,7 @@ func (h *Handlers) verifyPeriodicTask(cfg *Config) Task {
 		Interval:        cfg.VerifyInterval,
 		MaintenanceOnly: true,
 		Run: func(ctx context.Context) {
-			rep := h.verifyOnce(ctx, "", "")
+			rep := h.verifyService().VerifyOnce(ctx, "", "")
 			detail := fmt.Sprintf("periodic ok=%d mismatched=%d missing=%d errors=%d skipped=%d",
 				rep.Ok, len(rep.Mismatched), len(rep.Missing), len(rep.Errors), rep.Skipped)
 			result := AuditResultSuccess
