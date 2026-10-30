@@ -56,6 +56,10 @@ var stateWriteExemptFiles = []string{
 	"pkg/files/dedup.go",
 	// 索引快照（P1）：<meta>/index/<owner>.json。
 	"pkg/files/index_persist.go",
+	// secretdata 索引快照/精简 meta 缓存（2026-10-30）：节点本地受管加速层（与 volumestate
+	// 同类），落盘路径由装配层经 extra 注入（非代码直写 meta/state）；内容整体 AES-GCM 加密。
+	"pkg/volume/secretdata/index_snapshot.go",
+	"pkg/volume/secretdata/meta_cache.go",
 	// 卷状态缓存（2026-10-28）：<meta>/state/<卷>/<路径>/entries.json——**节点本地受管加速层**
 	// （非集群 KV，语义与 StateStore 不同：可丢弃、可重建、TTL 收敛），故自管落盘。
 	"pkg/volumestate/store.go",

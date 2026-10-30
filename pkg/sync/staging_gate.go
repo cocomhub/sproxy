@@ -312,3 +312,16 @@ var (
 	_ StagingQuotaCapable = (*StagingQuotaGateFS)(nil)
 	_ StagingQuotaExempt  = (*StagingQuotaGateFS)(nil)
 )
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）。
+func (g *StagingQuotaGateFS) ListDirNames(ctx context.Context, path string) ([]Entry, error) {
+	if nl, ok := AssertNameLister(g.inner); ok {
+		return nl.ListDirNames(ctx, path)
+	}
+	return g.inner.ListDir(ctx, path)
+}
+
+// _ 能力断言：StagingQuotaGateFS 必须转发 NameLister。
+var (
+	_ NameLister = (*StagingQuotaGateFS)(nil)
+)

@@ -370,3 +370,17 @@ var (
 	_ meta.Provider               = (*davMetaFS)(nil)
 	// BlockAccessor 有意豁免（与其余装饰器同口径：需 Capability 探测语义）。
 )
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）：装配期只按名字分类时避免外部卷
+// 逐条补精确 size（见 sync.NameLister）。
+func (d *davMetaFS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	if nl, ok := syncpkg.AssertNameLister(d.FS); ok {
+		return nl.ListDirNames(ctx, p)
+	}
+	return d.ListDir(ctx, p)
+}
+
+// _ 能力断言：漏转发会让上层静默降级。
+var (
+	_ syncpkg.NameLister = (*davMetaFS)(nil)
+)

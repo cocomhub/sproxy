@@ -132,6 +132,18 @@ type Options struct {
 	SpanCacheDir string
 	// SpanCacheBytes 是磁盘缓存字节预算（0 = 默认 512MiB；仅 `SpanCacheDir` 非空时生效）。
 	SpanCacheBytes sizex.ByteSize
+
+	// IndexSnapshotPath 是装配期索引快照的加密落盘路径（空 = 禁用，默认零回归）。
+	// 装配层按 `<storage_root>/meta/secretdata-index/<volume>.idx` 设置：快照命中时
+	// 跳过全部文件 meta blob 的下载+解密（外部卷实测 20-30 分钟 → 秒级），仅在容器
+	// 集合/抽样校验/密钥指纹/算法档位任一不符时回退全量扫描。
+	IndexSnapshotPath string
+
+	// MetaCacheDir 是装配期 meta blob 的**本机磁盘密文缓存**目录（空 = 禁用，默认零回归）。
+	// 外部卷每读一个 meta 都要起一次下载 CLI 并落随机临时目录（Close 即删）⇒ 每次重启
+	// 重下 452 个 meta（20-30 分钟）。缓存密文后重启直接本地读；解密失败（GCM 认证）即删
+	// 缓存重下（自愈）。装配层按 `<storage_root>/state/<卷>/metacache` 设置。
+	MetaCacheDir string
 }
 
 // ErrMaxFileBytes 是单文件超上限哨兵错误（writeFile 在读取前拦截）。
@@ -660,7 +672,10 @@ func (s *SecretdataFS) OpenRangeRead(ctx context.Context, rel string, offset, si
 		return nil, fmt.Errorf("secretdata: 文件 %q 不存在: %w", rel, os.ErrNotExist)
 	}
 	if e.meta == nil {
-		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+		// meta 缺失（旧条目/快照降级）⇒ 从权威 blob 回源自愈（并回填缓存）；失败才按目录语义报错。
+		if merr := s.ensureEntryMeta(ctx, e); merr != nil {
+			return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+		}
 	}
 	// **本函数是既有「按需随机读」原语**（blocklet 级定位 + 最小下载 + erasure 感知），
 	// 由 `sync.RangeSeeker`（通用 RangeReader→io.ReadSeeker 适配器，4MiB 窗口）与 DAV/Range
@@ -799,6 +814,8 @@ func (s *SecretdataFS) Rename(ctx context.Context, from, to string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 改名会改变索引/目录映射 ⇒ 索引快照失效（失败路径多删一次，无副作用）。
+	defer s.invalidateIndexSnapshot()
 	// 先校验 to 不存在（fail-closed，不落半态），并禁止移入自身子树（成环）。
 	if _, ok := s.index[t]; ok {
 		return fmt.Errorf("secretdata: 目标 %q 已是文件", t)
@@ -859,6 +876,8 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	// 一次性提交内存态：移出索引、扣 usage、推进版本、回收空目录（原子，无半态）。
 	delete(s.index, key)
 	s.volVersion++
+	// 删除改变了卷内容 ⇒ 索引快照必须失效（否则重启后该文件"复活"）。
+	s.invalidateIndexSnapshot()
 	s.usage -= e.size
 	if s.usage < 0 {
 		s.usage = 0
@@ -890,6 +909,7 @@ func (s *SecretdataFS) RemoveDir(ctx context.Context, rel string) error {
 	s.removeEmptyContainerLocked(ctx, container, key)
 	s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
 	s.volVersion++
+	s.invalidateIndexSnapshot()
 	return nil
 }
 
@@ -1501,6 +1521,8 @@ func (s *SecretdataFS) commitLocked(ctx context.Context, wc writeCtx, e *metaEnt
 	e.baseVersion = wc.newVer
 	addDirKeysLocked(s.dirs, wc.rel)
 	s.volVersion = wc.newVer
+	// 写入/覆盖/改名提交成功 ⇒ 索引快照失效（下次启动重建，避免陈旧索引）。
+	s.invalidateIndexSnapshot()
 	s.usage += usageBytes
 	if prev != nil {
 		s.usage -= prev.size
@@ -1789,7 +1811,10 @@ func (s *SecretdataFS) openRead(ctx context.Context, rel string) (io.ReadCloser,
 		return nil, fmt.Errorf("secretdata: 文件 %q 不存在: %w", rel, os.ErrNotExist)
 	}
 	if e.meta == nil {
-		return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+		// 同上：读路径自愈（访问即回源读 meta 并回填缓存）。
+		if merr := s.ensureEntryMeta(ctx, e); merr != nil {
+			return nil, fmt.Errorf("secretdata: %q 是目录", rel)
+		}
 	}
 	// **复用既有原语，不重复实现随机访问**（2026-10-18 重新整合）：
 	// 随机读的唯一原语是 `OpenRangeRead`（blocklet 级定位 + 最小下载 + erasure 感知），
@@ -1834,10 +1859,20 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 		}
 		return fmt.Errorf("secretdata: 扫描卷根失败（非首次使用故障，拒绝空视图挂载）: %w", err)
 	}
+	// **快照优先**：命中时跳过容器树列举（292 个容器 = 292 次外部 `ls`，实测占启动
+	// 192s 中的 181s）。健全性由「卷根顶层目录集合 + 抽样 Stat」保障；本进程任何写操作
+	// 都会删除快照（见 invalidateIndexSnapshot），因此只在「外部直改盘」时才可能陈旧。
+	if s.tryLoadIndexSnapshotFast(ctx, root) {
+		return nil
+	}
 	containers, cerr := s.dirContainers(ctx, root)
 	if cerr != nil {
 		return fmt.Errorf("secretdata: 扫描容器树失败（拒绝空视图挂载）: %w", cerr)
 	}
+	if s.tryLoadIndexSnapshot(ctx, containers) {
+		return nil
+	}
+	s.resetIndex()
 	scans, serr := scanAllContainerDirMetas(ctx, s, containers)
 	if serr != nil {
 		return serr
@@ -1864,7 +1899,11 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	if verr := s.validateNestedContainers(res, decryptedDirs); verr != nil {
 		return verr
 	}
-	return loadAllFileMetas(ctx, s, res)
+	if lerr := loadAllFileMetas(ctx, s, res); lerr != nil {
+		return lerr
+	}
+	s.writeIndexSnapshot(s.buildIndexSnapshot(containers))
+	return nil
 }
 
 // maxContainerDepth 是容器树递归深度上限（防御异常/恶意深树导致栈/IO 爆炸；正常逻辑树远小于此）。
@@ -1875,46 +1914,61 @@ const maxContainerDepth = 64
 // 容器是**物理嵌套**的（子容器落在父容器内，2026-10-14 用户口径：底层目录树与逻辑目录树同形）
 // ⇒ 只列卷根会漏掉全部嵌套层级（表现为「多级目录只剩一层」）。收集后由 `validateNestedContainers`
 // 校验布局——**旧扁平布局不支持、无兼容**（fail-closed 拒绝挂载）。
+// maxContainerWalkParallel 限制容器树列举的外部调用并发（外部卷限流保护：并发过高会
+// 触发网盘限流 31034）。容器数随文件数增长（272 部视频 ≈ 272 个容器），串行列举在外部卷
+// 上是启动成本主项之一（每容器一次 `ls` CLI，1-2s）。
+const maxContainerWalkParallel = 8
+
 func (s *SecretdataFS) dirContainers(ctx context.Context, root []syncpkg.Entry) ([]string, error) {
-	var out []string
-	if err := s.walkContainers(ctx, "", root, 0, &out); err != nil {
-		return nil, err
+	var (
+		mu      sync.Mutex
+		out     []string
+		errMu   sync.Mutex
+		firstEr error
+		sem     = make(chan struct{}, maxContainerWalkParallel)
+		wg      sync.WaitGroup
+	)
+	setErr := func(e error) {
+		errMu.Lock()
+		if firstEr == nil {
+			firstEr = e
+		}
+		errMu.Unlock()
+	}
+	var walk func(prefix string, entries []syncpkg.Entry, depth int)
+	walk = func(prefix string, entries []syncpkg.Entry, depth int) {
+		if depth > maxContainerDepth {
+			setErr(fmt.Errorf("secretdata: 容器树深度超过上限 %d（目录 %q）", maxContainerDepth, prefix))
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir {
+				continue
+			}
+			p := path.Join(prefix, e.Name)
+			mu.Lock()
+			out = append(out, p)
+			mu.Unlock()
+			wg.Add(1)
+			go s.walkContainerChild(ctx, p, depth, sem, &wg, walk, setErr, &mu, &out)
+		}
+	}
+	walk("", root, 0)
+	wg.Wait()
+	errMu.Lock()
+	defer errMu.Unlock()
+	if firstEr != nil {
+		return nil, firstEr
 	}
 	return out, nil
-}
-
-// walkContainers 递归收集容器目录（depth 防异常/恶意深树导致栈/IO 爆炸）。
-// 独立复审 P2 修复：对 ErrNotExist 容忍（并发删除/GC 是良性的），与
-// scanContainerDirMeta/loadContainerFileMetas 一致（见 listSubContainer）。
-func (s *SecretdataFS) walkContainers(ctx context.Context, prefix string, entries []syncpkg.Entry, depth int, out *[]string) error {
-	if depth > maxContainerDepth {
-		return fmt.Errorf("secretdata: 容器树深度超过上限 %d（目录 %q）", maxContainerDepth, prefix)
-	}
-	for _, e := range entries {
-		if !e.IsDir {
-			continue
-		}
-		p := path.Join(prefix, e.Name)
-		*out = append(*out, p)
-		sub, skip, err := s.listSubContainer(ctx, p)
-		if err != nil {
-			return err
-		}
-		if skip {
-			continue
-		}
-		if werr := s.walkContainers(ctx, p, sub, depth+1, out); werr != nil {
-			return werr
-		}
-	}
-	return nil
 }
 
 // listSubContainer 列子容器：ErrNotExist（并发删除/GC）⇒ skip=true（不算故障）；其它错误上抛。
 // 与 scanContainerDirMeta/loadContainerFileMetas 的处置**保持一致**（独立复审 P2，2026-10-18：
 // 此前这里对 ErrNotExist 也直接拒绝挂载 ⇒ 与那两处不一致）。
 func (s *SecretdataFS) listSubContainer(ctx context.Context, p string) ([]syncpkg.Entry, bool, error) {
-	sub, err := s.inner.ListDir(ctx, p)
+	// 走轻量列举（listInner：不补精确 size + 退避重试）：装配期只判断子目录集合。
+	sub, err := s.listInner(ctx, p)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
 			return nil, true, nil
@@ -2132,16 +2186,65 @@ func maxParallelLoads(alg *shardseal.Algorithm) int {
 	return n
 }
 
+// maxContainerScanParallel 限制装配期「容器列目录」的并发数。外部卷（网盘）对短时间
+// 大量 ListDir 会限流（实测 baidupcs 返回 31034「未知错误」）；此前按 loadGate（=min(16,
+// NumCPU)）全并行，1.2 万 blob 规模的卷挂载时必被限流 ⇒ 卷装配 fail-closed ⇒ 服务起不来。
+const maxContainerScanParallel = 4
+
+// listInner 列容器，并对**非 NotExist** 的失败做退避重试（外部卷限流/网络抖动属瞬时，
+// fail-closed 只在重试耗尽后才生效——保留「拒绝不完整视图挂载」的安全语义）。
+func (s *SecretdataFS) listInner(ctx context.Context, container string) ([]syncpkg.Entry, error) {
+	// 装配期只做名称分类（hasFileMeta / ClassifyName），**不需要**精确 size；外部卷补齐
+	// size 是逐批 `meta` CLI 调用（1.2 万 blob ⇒ 数百次 + 限流 31034）⇒ 优先轻量列举。
+	list := func(c context.Context) ([]syncpkg.Entry, error) {
+		if nl, ok := syncpkg.AssertNameLister(s.inner); ok {
+			return nl.ListDirNames(c, container)
+		}
+		// 本地卷（LocalFS）本来就不需要轻量列举（列举不补 size）⇒ 静默；
+		// 只有外部卷才告警（那意味着会逐条触发批量 meta，启动显著变慢）。
+		if _, isLocal := s.inner.(*syncpkg.LocalFS); !isLocal {
+			nameListerUnsupported.Do(func() {
+				slog.Warn("装配期轻量列举不可用（回调 ListDir：外部卷将逐条补 size，启动变慢）",
+					"inner", fmt.Sprintf("%T", s.inner))
+			})
+		}
+		return s.inner.ListDir(c, container)
+	}
+	var lastErr error
+	for attempt := range 3 {
+		if attempt > 0 {
+			d := time.Duration(attempt*attempt) * 5 * time.Second // 5s, 20s
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(d):
+			}
+		}
+		entries, err := list(ctx)
+		if err == nil {
+			return entries, nil
+		}
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
 // scanAllContainerDirMetas Phase 1：按容器并行扫描目录 meta（解密 + 旧格式 fail-closed）。
 // 经 s.loadGate 限并发（Imp-C：单次 scrypt 派生内存随 KDF 档位，无界并行会内存爆炸）。
 func scanAllContainerDirMetas(ctx context.Context, s *SecretdataFS, containers []string) ([]dirScan, error) {
 	scans := make([]dirScan, len(containers))
 	errs := make([]error, len(containers))
 	var wg sync.WaitGroup
+	listGate := make(chan struct{}, maxContainerScanParallel)
 	for i, c := range containers {
 		wg.Add(1)
 		go func(i int, c string) {
 			defer wg.Done()
+			listGate <- struct{}{} // 外部卷 ListDir 并发上限（限流保护）
+			defer func() { <-listGate }()
 			s.loadGate <- struct{}{} // 派生并发上界（scrypt 内存）
 			defer func() { <-s.loadGate }()
 			scans[i] = dirScan{container: c}
@@ -2235,7 +2338,7 @@ func loadAllFileMetas(ctx context.Context, s *SecretdataFS, res []dirRes) error 
 // (dirMeta, 容器是否含文件 meta, 是否找到可解析目录 meta)。目录 meta 缺失/损坏/旧格式
 // → dm=nil；含文件 meta 时记日志（fail-closed：不压平到根，避免跨容器同名遮蔽，F-1）。
 func (s *SecretdataFS) scanContainerDirMeta(ctx context.Context, container string) (*dirMeta, int64, bool, bool, error) {
-	inner, err := s.inner.ListDir(ctx, container)
+	inner, err := s.listInner(ctx, container)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
 			// 容器在扫描与列目录之间消失（并发删除/GC）⇒ 视为不存在，不算"不完整视图"。
@@ -2319,11 +2422,13 @@ func collectDirMetaCands(ctx context.Context, s *SecretdataFS, container string,
 		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindDirMeta {
 			continue
 		}
-		blob, oerr := readBlob(ctx, s.inner, path.Join(container, f.Name))
-		if oerr != nil {
+		blobKey := path.Join(container, f.Name)
+		// 优先精简缓存；未命中读权威 blob 并回填。
+		dm, blobLen, derr := s.readDirMetaFast(ctx, blobKey)
+		if derr != nil {
+			// 与旧行为一致：损坏候选跳过（继续尝试容器内其余 dir meta）。
 			continue
 		}
-		dm, derr := s.decryptDirMeta(blob)
 		if derr != nil {
 			if errors.Is(derr, errOldFormatDirMeta) {
 				if hasFiles {
@@ -2334,7 +2439,7 @@ func collectDirMetaCands(ctx context.Context, s *SecretdataFS, container string,
 			}
 			continue // 其它解密失败（损坏）继续尝试容器内其余 dir meta
 		}
-		cands = append(cands, dirMetaCand{dm: dm, name: f.Name, size: int64(len(blob)), mtime: f.MTime})
+		cands = append(cands, dirMetaCand{dm: dm, name: f.Name, size: blobLen, mtime: f.MTime})
 	}
 	return cands, true
 }
@@ -2391,7 +2496,7 @@ func logicalDirName(dirPath string) string {
 // loadContainerFileMetas 并行解密容器内全部文件 meta 并登记索引（Imp-2：容器内文件并行）。
 // 经 s.loadGate 限并发（Imp-C：单次 scrypt 派生内存随 KDF 档位，无界并行会内存爆炸）。
 func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, dirPath string) error {
-	inner, err := s.inner.ListDir(ctx, container)
+	inner, err := s.listInner(ctx, container)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
 			return nil // 容器已消失（并发删除）⇒ 非"不完整视图"
@@ -2422,16 +2527,12 @@ func (s *SecretdataFS) loadContainerFileMetas(ctx context.Context, container, di
 // usage 累计、volVersion 取 max、去重引用重新登记池。逻辑层 mtime 恒取 meta 内原始值
 // （mm.Original.MTime），不受 blob mtime 打散影响。持 s.mu 只做登记，解密在锁外（可并行）。
 func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dirPath string, f syncpkg.Entry) {
-	blob, oerr := readBlob(ctx, s.inner, path.Join(container, f.Name))
-	if oerr != nil {
-		// 读失败可能是瞬时底层故障：本文件不进内存索引（数据不可见），但**不删磁盘 blob**
-		// ——GC 的 gcReconfirmContainer 会重读确认死活（Imp-3 复审：防瞬时故障被 GC 误删）。
-		slog.Warn("secretdata: 挂载读文件 meta 失败（本文件暂不可见，磁盘 blob 保留，GC 将重确认）",
-			"container", container, "meta", f.Name, "error", oerr)
-		return
-	}
-	mm, merr := s.decryptFileMeta(blob)
+	blobKey := path.Join(container, f.Name)
+	// 优先精简缓存（无 padding，体积 ~1/300）；未命中读权威 blob 并回填。
+	mm, metaBlobLen, merr := s.readFileMetaFast(ctx, blobKey)
 	if merr != nil {
+		// 缓存可能陈旧/损坏 ⇒ 删掉，下次启动重下（自愈；GCM 已保证不会误用错误内容）。
+		s.dropBlobCache(blobKey)
 		slog.Warn("secretdata: 挂载解密文件 meta 失败（本文件暂不可见，磁盘 blob 保留，GC 将重确认）",
 			"container", container, "meta", f.Name, "error", merr)
 		return
@@ -2466,7 +2567,7 @@ func (s *SecretdataFS) loadContainerFileMeta(ctx context.Context, container, dir
 		s.mu.Unlock()
 		return
 	}
-	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, int64(len(blob)), prev)
+	s.registerLoadedEntryLocked(rel, container, f.Name, mm, dataDir, mt, metaBlobLen, prev)
 	s.mu.Unlock()
 }
 
@@ -3631,4 +3732,50 @@ func defaultBlockPolicyFor(inner syncpkg.FS) shardseal.BlockPolicy {
 		return shardseal.DefaultBlockPolicy()
 	}
 	return shardseal.ExternalDefaultBlockPolicy()
+}
+
+// nameListerUnsupported 只告警一次（避免每容器刷屏）：用于确认装配期是否走了
+// 轻量列举（外部卷逐条补 size 会显著拖慢启动并可能触发网盘限流）。
+var nameListerUnsupported sync.Once
+
+// tryLoadIndexSnapshot 尝试用加密索引快照恢复内存索引（外部卷启动成本主项：
+// 452 次 meta blob 下载）。命中条件：快照可解密 + 容器集合一致 + 抽样 Stat 通过。
+// 任一不满足 ⇒ false（调用方回退全量扫描，安全语义不变）。
+func (s *SecretdataFS) tryLoadIndexSnapshot(ctx context.Context, containers []string) bool {
+	snap, ok := s.loadIndexSnapshot()
+	if !ok {
+		return false
+	}
+	if !snapshotContainersMatch(snap, containers) {
+		slog.Info("secretdata: 索引快照容器集合已变化（回退全量扫描）",
+			"snapshot", len(snap.Containers), "current", len(containers))
+		return false
+	}
+	if verr := s.verifySnapshotSample(ctx, snap); verr != nil {
+		slog.Warn("secretdata: 索引快照抽样校验失败（回退全量扫描）", "error", verr)
+		return false
+	}
+	s.applyIndexSnapshot(snap)
+	slog.Info("secretdata: 索引快照命中（跳过全量 meta 扫描）",
+		"entries", len(snap.Entries), "containers", len(snap.Containers))
+	return true
+}
+
+// walkContainerChild 列举单个子容器并递归（独立方法以控制 dirContainers 的认知复杂度）。
+// 信号量只覆盖**外部调用**（不持锁递归）⇒ 不会因父等子而死锁。
+func (s *SecretdataFS) walkContainerChild(ctx context.Context, p string, depth int,
+	sem chan struct{}, wg *sync.WaitGroup, walk func(string, []syncpkg.Entry, int),
+	setErr func(error), mu *sync.Mutex, out *[]string) {
+	defer wg.Done()
+	sem <- struct{}{}
+	sub, skip, err := s.listSubContainer(ctx, p)
+	<-sem
+	if err != nil {
+		setErr(err)
+		return
+	}
+	if skip || len(sub) == 0 {
+		return
+	}
+	walk(p, sub, depth+1)
 }

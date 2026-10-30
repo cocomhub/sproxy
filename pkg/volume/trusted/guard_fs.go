@@ -331,3 +331,16 @@ var (
 	_ syncpkg.DirectURLProvider   = (*MetaBucketGuard)(nil)
 	_ syncpkg.LocalVolume         = (*MetaBucketGuard)(nil)
 )
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）。
+func (g *MetaBucketGuard) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	if nl, ok := syncpkg.AssertNameLister(g.inner); ok {
+		return nl.ListDirNames(ctx, p)
+	}
+	return g.inner.ListDir(ctx, p)
+}
+
+// _ 能力断言：漏转发会让上层静默降级。
+var (
+	_ syncpkg.NameLister = (*MetaBucketGuard)(nil)
+)

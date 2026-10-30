@@ -307,7 +307,19 @@ func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt
 			CRC32:         strconv.FormatUint(uint64(crc32.ChecksumIEEE(data)), 10),
 		})
 	}
-	return s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt)
+	if werr := s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt); werr != nil {
+		return werr
+	}
+	// meta blob 上传成功后写**精简缓存**（解密出明文 JSON 再加密，无 padding）。
+	// 放在这里是因为 uploadBlob 是全部写路径（流式/内存/dedup/copy/meta_provider）的
+	// 唯一落盘点 —— 一处覆盖，避免每条路径各加钩子而漏掉。
+	switch shardseal.ClassifyName(path.Base(p)) {
+	case shardseal.KindFileMeta, shardseal.KindDirMeta:
+		if plain, derr := s.decryptBlob(data); derr == nil {
+			s.putCompactMeta(p, plain, int64(len(data)))
+		}
+	}
+	return nil
 }
 
 // dedupStagingDir 为去重写路径准备本地临时目录（自管 staging 配额记账），返回释放函数
@@ -554,7 +566,8 @@ func (s *SecretdataFS) gcMarkIndex(ctx context.Context, referenced map[string]st
 // referenced）；墓碑 → 其 meta 列入删除；读/解密失败 → 返回 false（调用方本轮全局停扫
 // 分块，防未决 meta 引用的分块被误删）。目录 meta 恒保留。调用方持 s.mu.Lock。
 func (s *SecretdataFS) gcReconfirmContainer(ctx context.Context, c string, referenced map[string]struct{}, kills *[]gcKill) bool {
-	entries, err := s.inner.ListDir(ctx, c)
+	// 只按名字分类（ClassifyName）⇒ 走轻量列举，避免外部卷逐条补精确 size（批量 meta）。
+	entries, err := s.listInner(ctx, c)
 	if err != nil {
 		// 容器列表失败：容器内可能存在未确认存活的 meta（其分块可能被误扫为孤儿），
 		// fail-closed → 全局停扫分块。
@@ -620,7 +633,8 @@ func (s *SecretdataFS) gcProtectLiveMeta(referenced map[string]struct{}, contain
 // 调用方保证本容器无未决 meta（gcReconfirmContainer 全 true）——否则其分块可能被未决
 // meta 引用，不得当孤儿清。目录 meta 恒保留。调用方持 s.mu.Lock。
 func (s *SecretdataFS) gcSweepOrphanChunks(ctx context.Context, c string, referenced, poolRefs map[string]struct{}, kills *[]gcKill) {
-	entries, err := s.inner.ListDir(ctx, c)
+	// 只按名字分类 ⇒ 轻量列举（不补精确 size，外部卷不触发批量 meta）。
+	entries, err := s.listInner(ctx, c)
 	if err != nil {
 		return
 	}

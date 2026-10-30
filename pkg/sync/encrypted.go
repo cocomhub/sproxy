@@ -261,3 +261,12 @@ func (e *encReadCloser) Read(p []byte) (int, error) { return e.r.Read(p) }
 func (e *encReadCloser) Close() error               { return e.c.Close() }
 
 var _ = sync.Mutex{}
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）：装配期只需名字时避免外部卷
+// 逐条补精确 size 的高成本路径（见 NameLister）。
+func (e *EncryptedFS) ListDirNames(ctx context.Context, path string) ([]Entry, error) {
+	if nl, ok := AssertNameLister(e.inner); ok {
+		return nl.ListDirNames(ctx, path)
+	}
+	return e.inner.ListDir(ctx, path)
+}

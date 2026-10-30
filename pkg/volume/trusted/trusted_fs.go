@@ -885,3 +885,17 @@ func feedMetaRewindable(r io.Reader, w io.Writer) (io.Reader, error) {
 	}
 	return io.TeeReader(r, w), nil
 }
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）：装配期只按名字分类时避免外部卷
+// 逐条补精确 size（见 sync.NameLister）。
+func (t *TrustedVolumeFS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	if nl, ok := syncpkg.AssertNameLister(t.inner); ok {
+		return nl.ListDirNames(ctx, p)
+	}
+	return t.inner.ListDir(ctx, p)
+}
+
+// _ 能力断言：漏转发会让上层静默降级（装配期退回高成本列举）。
+var (
+	_ syncpkg.NameLister = (*TrustedVolumeFS)(nil)
+)

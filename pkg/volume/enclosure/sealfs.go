@@ -407,3 +407,24 @@ func ApplyBackendSeals(be registry.ExternalBackend, rules []storage.SealRule) re
 	}
 	return SealBackend(be, rules)
 }
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）：装配期只按名字分类时避免
+// 外部卷逐条补精确 size（1.2 万 blob ⇒ 数百次 meta CLI + 网盘限流）。
+func (s *SealFS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	if err := s.readErr(p); err != nil {
+		return nil, err
+	}
+	nl, ok := syncpkg.AssertNameLister(s.FS)
+	if !ok {
+		return s.ListDir(ctx, p)
+	}
+	entries, lerr := nl.ListDirNames(ctx, p)
+	if lerr != nil {
+		return nil, lerr
+	}
+	return s.sealFilter(p, entries), nil
+}
+
+var (
+	_ syncpkg.NameLister = (*SealFS)(nil)
+)

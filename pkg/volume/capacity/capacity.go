@@ -844,3 +844,16 @@ var (
 	_ syncpkg.StagedPathReuse     = (*CapacityFS)(nil)
 	_ syncpkg.StagingQuotaExempt  = (*CapacityFS)(nil)
 )
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）。
+func (c *CapacityFS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	if nl, ok := syncpkg.AssertNameLister(c.inner); ok {
+		return nl.ListDirNames(ctx, p)
+	}
+	return c.inner.ListDir(ctx, p)
+}
+
+// _ 能力断言：漏转发会让上层静默降级。
+var (
+	_ syncpkg.NameLister = (*CapacityFS)(nil)
+)
