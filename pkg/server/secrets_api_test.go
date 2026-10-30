@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/server/ops"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/secrets"
@@ -461,7 +462,7 @@ func TestSecretsBucket_NotCountedAsUserUsage(t *testing.T) {
 	if _, err := os.Stat(secretsOnDisk(tmpDir, "alice", "k")); err != nil {
 		t.Fatalf("secret 未落盘（后续统计断言无意义）: %v", err)
 	}
-	files, size := h.walkUploadStats(tmpDir)
+	files, size := ops.WalkUploadStats(tmpDir, h.logger)
 	if files != 0 || size != 0 {
 		t.Errorf("secret 属服务端内部账本（meta 桶），不得计入用户用量：files=%d size=%d", files, size)
 	}

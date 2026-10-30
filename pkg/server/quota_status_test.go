@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/server/ops"
 )
 
 // TestQuotaStatusOf_NoLimit 不限配额 → watermark 0。
 func TestQuotaStatusOf_NoLimit(t *testing.T) {
 	t.Parallel()
-	zero := quotaStatusOf(nil)
+	zero := ops.QuotaStatusOf(nil)
 	if zero.Watermark != 0 || zero.MaxBytes != 0 {
 		t.Fatalf("nil scope = %+v, want all zero", zero)
 	}
