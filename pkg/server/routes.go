@@ -687,7 +687,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// webdav.enabled=false（缺省）不装配（零回归）；true 时装配。
 	if cfg.WebDAV.Enabled {
 		log.Info("WEBDAV-REGISTER", "enabled", cfg.WebDAV.Enabled)
-		srvMux.Handle("/dav/", h.authMiddleware(http.HandlerFunc(h.davHandler)))
+		srvMux.Handle("/dav/", h.authMiddleware(http.HandlerFunc(h.davService().Handler)))
 	} else {
 		log.Info("WEBDAV-SKIP", "enabled", cfg.WebDAV.Enabled)
 	}

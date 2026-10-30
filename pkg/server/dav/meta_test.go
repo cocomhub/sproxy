@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package dav
 
 // dav_meta_test.go 覆盖 WebDAV 挂载面 sidecar 联动的**目录级**语义（davMetaFS）：
 // MOVE 目录时必须整棵迁移子 sidecar 子树（`meta/<from>/**` → `meta/<to>/**`）——
@@ -9,7 +9,9 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -52,7 +54,7 @@ func TestDavMetaFS_RenameDirMigratesMetaSubtree(t *testing.T) {
 	userRoot := filepath.Join(dir, "user")
 	d := &davMetaFS{
 		FS:    syncpkg.NewLocalFS(filepath.ToSlash(userRoot), testLogger()),
-		h:     &Handlers{logger: testLogger()},
+		deps:  Deps{Logger: testLogger()},
 		owner: "",
 		root:  root,
 	}
@@ -96,7 +98,7 @@ func TestDavMetaFS_CapabilityForwardingAndMetaLink(t *testing.T) {
 	provider := &capProviderFS{LocalFS: base, fm: &meta.FileMeta{
 		Version: 1, Size: 1, TotalSHA256: strings.Repeat("a", 64), ChunkSize: 1,
 	}}
-	d := &davMetaFS{FS: provider, h: &Handlers{logger: testLogger()}, owner: "", root: root}
+	d := &davMetaFS{FS: provider, deps: Deps{Logger: testLogger(), Meta: testMetaPolicy{}}, owner: "", root: root}
 	ctx := context.Background()
 
 	// 能力断言（编译期已断言；运行期再核一层，防「实现了但语义落空」）。
@@ -146,3 +148,26 @@ type capProviderFS struct {
 func (c *capProviderFS) FileMeta(context.Context, string) (*meta.FileMeta, error) { return c.fm, nil }
 
 func (c *capProviderFS) IsLocalVolume() bool { return true }
+
+// testLogger 返回丢弃输出的 slog.Logger（本包测试用）。
+func testLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// testMetaPolicy 是 MetaPolicy 的测试替身：只把 sidecar 落到 meta/<rel>.meta，
+// 用于验证 davMetaFS 的「写/移动后联动策略」接线（真实策略由 pkg/server 覆盖）。
+type testMetaPolicy struct{}
+
+func (testMetaPolicy) WriteMeta(_ context.Context, _ string, root *storage.Root, rel string, _ map[string]any) error {
+	p := meta.MetaPath(rel)
+	if err := root.MkdirAll(path.Dir(p), 0o755); err != nil {
+		return err
+	}
+	w, err := root.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = w.Close() }()
+	_, err = w.Write([]byte("{}"))
+	return err
+}
+
+func (testMetaPolicy) SweepMetaTmp(*storage.Root, string) {}

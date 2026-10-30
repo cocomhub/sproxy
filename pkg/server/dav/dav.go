@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package dav
 
 // dav.go 是本地卷 WebDAV 服务端挂载面（roadmap P1 服务端 WebDAV）：
 //
@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	webdavcore "github.com/cocomhub/sproxy/pkg/gateway/webdav/webdavcore"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -24,42 +25,42 @@ import (
 // bindVolumeForAudit 把「本次 DAV 请求作用到的卷」绑定进 ctx（审计第 6 维，评审 R13）：
 // 显式 `?volume=` 优先；缺省取默认卷（DAV 无参时按构造走默认卷）。空名不写（withAuditVolume 语义）。
 // 抽成函数是为了不给 davHandler 增加 gocognit（门禁阈值 15）。
-func (h *Handlers) bindVolumeForAudit(r *http.Request, name string) *http.Request {
-	if name == "" && h.volSet != nil {
-		name = h.volSet.Default().Name
+func (s *Service) bindVolumeForAudit(r *http.Request, name string) *http.Request {
+	if name == "" && s.deps.Volumes != nil {
+		name = s.deps.Volumes.Default().Name
 	}
-	return r.WithContext(withAuditVolume(r.Context(), name))
+	return r.WithContext(s.deps.WithAuditVolume(r.Context(), name))
 }
 
 // davHandler 按请求者 owner 提供 WebDAV 挂载（user 桶根）。
 // 未认证 owner（空）→ anonymous 租户（allowInsecureLoopback 已由 authMiddleware 门）。
-func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
-	owner := ownerFromRequest(r)
+func (s *Service) Handler(w http.ResponseWriter, r *http.Request) {
+	owner := s.deps.OwnerFromRequest(r)
 	// 多卷支持（roadmap P1 残余）：?volume=<name> 显式选卷（ACL 校验）；
 	// 缺省走默认卷（tenantFor 零回归）。
 	volName := r.URL.Query().Get("volume")
 	// 审计第 6 维（评审 R13）：显式卷或默认卷都绑定 ⇒ DAV 写操作可归属到卷。
-	r = h.bindVolumeForAudit(r, volName)
+	r = s.bindVolumeForAudit(r, volName)
 	var tnt *storage.Tenant
 	if vol := volName; vol != "" {
-		if h.volSet == nil {
+		if s.deps.Volumes == nil {
 			http.Error(w, "卷集合未装配", http.StatusBadRequest)
 			return
 		}
-		v, ok := h.volSet.ByName(vol)
+		v, ok := s.deps.Volumes.ByName(vol)
 		if !ok || !v.Authorize(owner) {
 			http.Error(w, "卷不可用", http.StatusForbidden)
 			return
 		}
-		tnt = h.volSet.Tenant(vol, owner, h.logger)
+		tnt = s.deps.Volumes.Tenant(vol, owner, s.deps.Logger)
 	} else {
 		// 默认卷 ACL 与文件 API 面同口径（评审 P2：此前 `/download`、`/api/files` 等经
 		// defaultVolumeAllows 收敛，而 DAV 仍可读写同一 user 桶 ⇒ 收紧默认卷视图后仍能绕过）。
-		if !h.defaultVolumeAllows(owner) {
+		if !s.deps.DefaultVolumeAllows(owner) {
 			http.Error(w, "卷不可用", http.StatusForbidden)
 			return
 		}
-		tnt = h.tenantFor(owner)
+		tnt = s.deps.TenantFor(owner)
 	}
 	if tnt == nil || tnt.Root() == nil {
 		http.Error(w, "卷不存在", http.StatusBadRequest)
@@ -80,8 +81,8 @@ func (h *Handlers) davHandler(w http.ResponseWriter, r *http.Request) {
 	// PrefixFS 把 DAV 相对路径映射到 user 桶（同时负责可选能力转发，R21）。
 	// davMetaFS 再包一层：写/删/改名联动 sidecar（防裸覆盖写留陈旧 meta 固化失败）。
 	fs := &davMetaFS{
-		FS:    sync.NewPrefixFS(NewRootFS(tnt.Root()), tnt.UserRoot()+"/"),
-		h:     h,
+		FS:    sync.NewPrefixFS(rootfs.New(tnt.Root()), tnt.UserRoot()+"/"),
+		deps:  s.deps,
 		owner: owner,
 		root:  tnt.Root(),
 	}
