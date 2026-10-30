@@ -150,6 +150,8 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/server/metrics": 2,
 	// checksum 巡检（server 作用域）：依赖 checksum/storage ⇒ G2。
 	"github.com/cocomhub/sproxy/pkg/server/verify": 2,
+	// 用量统计（server 作用域）：依赖 quota/storage/capacity ⇒ G2。
+	"github.com/cocomhub/sproxy/pkg/server/ops": 2,
 
 	// ---- 子包（L 取父域之上，由依赖实测确定）----
 	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
@@ -216,6 +218,7 @@ var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/server/share":     "github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/server/metrics":   "github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/server/verify":    "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/ops":       "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。

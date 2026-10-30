@@ -18,6 +18,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/ops"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
@@ -165,7 +166,7 @@ func TestStats_SkipsInternalDirsAtAnyDepth(t *testing.T) {
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
 
 	// 复用 statsHandler 的 WalkDir 逻辑：以空 owner 全局视角统计，验证内部目录被跳过
-	totalFiles, totalSize := h.walkUploadStats(dir)
+	totalFiles, totalSize := ops.WalkUploadStats(dir, h.logger)
 	if totalFiles != 2 { // user.txt + sub/foo.__bar.txt
 		t.Fatalf("全局统计文件数 = %d, want 2（用户文件 + 深层 .__ 普通文件）", totalFiles)
 	}
@@ -214,7 +215,7 @@ func TestStats_OwnerScopedCategories(t *testing.T) {
 	cfg.Store(&Config{StorageRoot: dir})
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
 
-	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(ownerRoot)
+	userFiles, chunked, versions, cloud := ops.WalkUploadStatsByCategory(ownerRoot, h.logger)
 	// user=4, versions=3, chunked=5, cloud=3（archive 并入 cloud）
 	if userFiles != 4 {
 		t.Fatalf("userFiles = %d, want 4", userFiles)
@@ -335,7 +336,7 @@ func TestStats_CategoryWalker_SkipsTaskStateDirs(t *testing.T) {
 	var cfg atomic.Pointer[Config]
 	cfg.Store(&Config{StorageRoot: dir})
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
-	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(root)
+	userFiles, chunked, versions, cloud := ops.WalkUploadStatsByCategory(root, h.logger)
 	if userFiles != 5 {
 		t.Fatalf("userFiles = %d, want 5（任务状态目录跳过）", userFiles)
 	}

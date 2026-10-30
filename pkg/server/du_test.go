@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/server/ops"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -151,7 +152,7 @@ func TestDUBucketExcluded(t *testing.T) {
 		write(f.rel, f.content)
 	}
 
-	d, err := walkDu(rt, "user")
+	d, err := ops.WalkRoot(rt, "user")
 	if err != nil {
 		t.Fatalf("walkDu: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestDUBucketSkipMutation(t *testing.T) {
 	}
 	// user 桶 + cloud/chunk 桶干扰——walkDu 只看 user 桶内
 	// （与 TestDUBucketExcluded 同构；此处再以黑盒断言一次 user/ 根统计）。
-	d, err := walkDu(rt, "user")
+	d, err := ops.WalkRoot(rt, "user")
 	if err != nil {
 		t.Fatalf("walkDu: %v", err)
 	}

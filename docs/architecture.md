@@ -626,7 +626,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、

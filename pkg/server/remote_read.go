@@ -14,6 +14,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
+	"github.com/cocomhub/sproxy/pkg/server/ops"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -77,7 +78,7 @@ func (rh *remoteReadHandler) handleStats(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	qs := quotaStatusOf(rh.h.quotaFor(tgt.owner))
+	qs := ops.QuotaStatusOf(rh.h.quotaFor(tgt.owner))
 	writeRemoteJSON(w, qs)
 }
 
