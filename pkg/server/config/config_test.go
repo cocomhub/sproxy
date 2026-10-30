@@ -1233,3 +1233,30 @@ func (p mapProvider) Unmarshal(obj any) error {
 
 // TestConfigValidate_MaintenanceWindow 配置校验：启用时 HH:MM 格式 fail-closed；
 // 未启用时非法值被忽略（零回归）。
+
+func TestConfigValidate_MaintenanceWindow(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Scheduler.MaintenanceWindow.Enabled = true
+	cfg.Scheduler.MaintenanceWindow.Start = "22:00"
+	cfg.Scheduler.MaintenanceWindow.End = "06:00"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("合法维护窗口应通过校验: %v", err)
+	}
+	cfg.Scheduler.MaintenanceWindow.Start = "25:00"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("start=25:00 非法小时应拒绝")
+	}
+	cfg.Scheduler.MaintenanceWindow.Start = "22:00"
+	cfg.Scheduler.MaintenanceWindow.End = "6:0"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("end=6:0 非 HH:MM 应拒绝")
+	}
+	cfg2 := Default()
+	cfg2.StorageRoot = t.TempDir()
+	cfg2.Scheduler.MaintenanceWindow.Start = "not-a-time"
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("未启用维护窗口时非法值应被忽略（零回归）: %v", err)
+	}
+}
