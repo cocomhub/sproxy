@@ -78,12 +78,12 @@ func seedRetentionShare(t *testing.T, h *Handlers, filename string, createdAgo t
 	// 测试侧直接落盘旧 meta 文件（persistWrite 是 *ShareStore 内部方法；此处用新实例
 	// 构造等价落盘——测试只依赖「旧文件存在」）。
 	if ps, ok := h.shareStore.(*ShareStore); ok {
-		ps.persistWrite(link)
-	} else if ss, ok := h.shareStore.(*stateBackedShareStore); ok && ss.legacyRoot != nil {
-		if rel := ss.legacyRelPath(link.Token); rel != "" {
-			if data, merr := json.Marshal(link.toPersist()); merr == nil {
-				if werr := ss.legacyRoot.MkdirAll(ss.legacyRel, 0o755); werr == nil {
-					if w, werr := writeUserVisible(ss.legacyRoot, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); werr == nil {
+		ps.PersistWrite(link)
+	} else if ss, ok := h.shareStore.(*stateBackedShareStore); ok && ss.LegacyRoot() != nil {
+		if rel := ss.LegacyRelPath(link.Token); rel != "" {
+			if data, merr := json.Marshal(link.ToPersist()); merr == nil {
+				if werr := ss.LegacyRoot().MkdirAll(ss.LegacyRel(), 0o755); werr == nil {
+					if w, werr := writeUserVisible(ss.LegacyRoot(), rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); werr == nil {
 						_, _ = w.Write(data)
 						_ = w.Close()
 					}

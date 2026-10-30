@@ -1,10 +1,10 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package share
 
 // state_share.go 是分享链接的 StateStore 适配（statestore.md §5.1 P1）：
-//   - stateBackedShareStore 实现 ShareStoreIface：逐 token key `share/<token>` 委托
+//   - StateBackedStore 实现 StoreIface：逐 token key `share/<token>` 委托
 //     StateStore.Get/Put/Delete；
 //   - **Consume 计数走 CAS**（Get → 改 Downloads → CAS 冲突重试，有界）：一次性/限量
 //     分享并发消费不超发（设计决策：副本节点 503 防超发，见 cluster-state-migration.md §3.4）；
@@ -12,7 +12,7 @@ package server
 //     <meta>/share/<token>.json（legacyDir，迁移前存量零丢失）；首写恒写 StateStore
 //     新路径（旧文件仅删除清理）。
 //
-// 序列化格式与既有 shareLinkPersist JSON 逐字一致（读旧格式兼容）。
+// 序列化格式与既有 LinkPersist JSON 逐字一致（读旧格式兼容）。
 
 import (
 	"context"
@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -35,8 +36,8 @@ import (
 // maxConsumeRetries 是 Consume CAS 冲突重试上限（有界循环，对齐 statestore.md §4）。
 const maxConsumeRetries = 8
 
-// shareSpec 是创建分享链接的入参（逐字段映射到 ShareLink 元数据；TTL 经 now.Add 落盘）。
-type shareSpec struct {
+// Spec 是创建分享链接的入参（逐字段映射到 Link 元数据；TTL 经 now.Add 落盘）。
+type Spec struct {
 	Filename      string
 	TenantID      string
 	Rel           string
@@ -49,59 +50,59 @@ type shareSpec struct {
 	WatermarkSeed string
 }
 
-// ShareStoreIface 是分享存储的业务接口（*ShareStore 本地形态与 *stateBackedShareStore
+// StoreIface 是分享存储的业务接口（*Store 本地形态与 *StateBackedStore
 // StateStore 形态共用；handlers 装配层持接口，测试可直接构造具体类型）。
-type ShareStoreIface interface {
-	Create(spec shareSpec) (*ShareLink, error)
-	Peek(token string) *ShareLink
-	Consume(token string) *ShareLink
-	List(owner string) []*ShareLink
+type StoreIface interface {
+	Create(spec Spec) (*Link, error)
+	Peek(token string) *Link
+	Consume(token string) *Link
+	List(owner string) []*Link
 	Revoke(token, owner string) error
 	EnablePersist(root *storage.Root, rel string)
-	cleanupExpired()
+	CleanupExpired()
 	Stop()
 }
 
-var _ ShareStoreIface = (*ShareStore)(nil)
+var _ StoreIface = (*Store)(nil)
 
-// stateBackedShareStore 是 ShareStoreIface 的 StateStore 适配（装配层用）。
+// StateBackedStore 是 StoreIface 的 StateStore 适配（装配层用）。
 // legacyRoot/legacyRel 定位旧 <meta>/share（回退读；root 为 nil = 不回退）。
 // 回退读同样经**卷句柄**（加密卷上旧记录是密文，裸 os 读会解析失败）。
-type stateBackedShareStore struct {
+type StateBackedStore struct {
 	st         state.StateStore
 	legacyRoot *storage.Root // 旧 <meta>/share 所在卷句柄；nil = 不回退
 	legacyRel  string        // 旧 <meta>/share 卷内相对目录
 	logger     *slog.Logger
 }
 
-// newStateBackedShareStore 构造 StateStore 后端分享存储（legacyRoot 为空 = 不回退读旧 meta）。
-func newStateBackedShareStore(st state.StateStore, legacyRoot *storage.Root, legacyRel string, logger *slog.Logger) *stateBackedShareStore {
-	return &stateBackedShareStore{st: st, legacyRoot: legacyRoot, legacyRel: relDir(legacyRel), logger: logger}
+// NewStateBackedStore 构造 StateStore 后端分享存储（legacyRoot 为空 = 不回退读旧 meta）。
+func NewStateBackedStore(st state.StateStore, legacyRoot *storage.Root, legacyRel string, logger *slog.Logger) *StateBackedStore {
+	return &StateBackedStore{st: st, legacyRoot: legacyRoot, legacyRel: rootfs.RelDir(legacyRel), logger: logger}
 }
 
 // shareKey 返回 token 对应的 StateStore key（statestore.md §2.3：share/<token> 两段式）。
 func shareKey(token string) string { return sharePrefix + token }
 
 // EnablePersist 装配层调用：把 legacyRoot/legacyRel 置为旧 <meta>/share（回退读路径；
-// 惰性，无扫描）。语义对齐 *ShareStore.EnablePersist 的装配时机（首次请求前，幂等）。
-func (s *stateBackedShareStore) EnablePersist(root *storage.Root, rel string) {
+// 惰性，无扫描）。语义对齐 *Store.EnablePersist 的装配时机（首次请求前，幂等）。
+func (s *StateBackedStore) EnablePersist(root *storage.Root, rel string) {
 	if root == nil || rel == "" {
 		return
 	}
 	s.legacyRoot = root
-	s.legacyRel = relDir(rel)
+	s.legacyRel = rootfs.RelDir(rel)
 }
 
-// legacyRelPath 返回 token 对应的旧落盘文件卷内相对路径（未启用回退时为空串）。
-func (s *stateBackedShareStore) legacyRelPath(token string) string {
+// LegacyRelPath 返回 token 对应的旧落盘文件卷内相对路径（未启用回退时为空串）。
+func (s *StateBackedStore) LegacyRelPath(token string) string {
 	if s.legacyRoot == nil {
 		return ""
 	}
-	return relJoin(s.legacyRel, token+".json")
+	return rootfs.RelJoin(s.legacyRel, token+".json")
 }
 
 // loadFromState 从 StateStore 读单条（未命中 → nil，不报错）。
-func (s *stateBackedShareStore) loadFromState(ctx context.Context, token string) (*ShareLink, error) {
+func (s *StateBackedStore) loadFromState(ctx context.Context, token string) (*Link, error) {
 	data, err := s.st.Get(ctx, shareKey(token))
 	if err != nil {
 		if errors.Is(err, state.ErrKeyNotFound) {
@@ -109,7 +110,7 @@ func (s *stateBackedShareStore) loadFromState(ctx context.Context, token string)
 		}
 		return nil, fmt.Errorf("分享 StateStore 读取失败: %w", err)
 	}
-	var pl shareLinkPersist
+	var pl LinkPersist
 	if err := json.Unmarshal(data, &pl); err != nil {
 		return nil, fmt.Errorf("分享 StateStore 值解析失败: %w", err)
 	}
@@ -118,12 +119,12 @@ func (s *stateBackedShareStore) loadFromState(ctx context.Context, token string)
 
 // loadLegacy 读旧 <meta>/share/<token>.json（未命中/损坏 → nil）。经**卷句柄**读
 // （加密卷上旧记录是密文，裸 os 读会解析失败）。
-func (s *stateBackedShareStore) loadLegacy(token string) *ShareLink {
-	rel := s.legacyRelPath(token)
+func (s *StateBackedStore) loadLegacy(token string) *Link {
+	rel := s.LegacyRelPath(token)
 	if rel == "" {
 		return nil
 	}
-	rc, err := openUserVisibleRead(s.legacyRoot, rel)
+	rc, err := rootfs.OpenUserVisibleRead(s.legacyRoot, rel)
 	if err != nil {
 		return nil
 	}
@@ -132,7 +133,7 @@ func (s *stateBackedShareStore) loadLegacy(token string) *ShareLink {
 	if rdErr != nil || len(data) > maxShareLinkBytes {
 		return nil
 	}
-	var pl shareLinkPersist
+	var pl LinkPersist
 	if err := json.Unmarshal(data, &pl); err != nil {
 		s.logger.Warn("旧分享文件解析失败，跳过", "file", rel, "error", err)
 		return nil
@@ -141,8 +142,8 @@ func (s *stateBackedShareStore) loadLegacy(token string) *ShareLink {
 }
 
 // removeLegacy 删除旧落盘文件（未启用 legacyDir 时 no-op；文件不存在静默）。
-func (s *stateBackedShareStore) removeLegacy(token string) {
-	rel := s.legacyRelPath(token)
+func (s *StateBackedStore) removeLegacy(token string) {
+	rel := s.LegacyRelPath(token)
 	if rel == "" {
 		return
 	}
@@ -152,14 +153,14 @@ func (s *stateBackedShareStore) removeLegacy(token string) {
 }
 
 // Create 生成新的分享链接并写入 StateStore（逐 token key）。
-func (s *stateBackedShareStore) Create(spec shareSpec) (*ShareLink, error) {
+func (s *StateBackedStore) Create(spec Spec) (*Link, error) {
 	ctx := context.Background()
-	// 容量上限：先清理过期条目再计数（与 *ShareStore.Create 同语义）。
-	s.cleanupExpired()
+	// 容量上限：先清理过期条目再计数（与 *Store.Create 同语义）。
+	s.CleanupExpired()
 
 	const maxTokenRetries = 10
 	var token string
-	var link *ShareLink
+	var link *Link
 	for range maxTokenRetries {
 		b := make([]byte, 16)
 		if _, err := rand.Read(b); err != nil {
@@ -171,27 +172,27 @@ func (s *stateBackedShareStore) Create(spec shareSpec) (*ShareLink, error) {
 		}
 	}
 	if link == nil {
-		// token 冲突重试耗尽（或全部被占用）→ 报错（对齐 *ShareStore 语义）。
+		// token 冲突重试耗尽（或全部被占用）→ 报错（对齐 *Store 语义）。
 		if _, err := s.st.Get(ctx, shareKey(token)); err == nil {
 			return nil, fmt.Errorf("无法生成唯一的分享 token（重试 %d 次后仍冲突）", maxTokenRetries)
 		}
 	}
 
 	now := time.Now()
-	link = &ShareLink{
+	link = &Link{
 		Token: token, Filename: spec.Filename, TenantID: spec.TenantID, Rel: spec.Rel,
 		Volume: spec.Volume, Owner: spec.Owner,
 		CreatedAt: now, ExpiresAt: now.Add(spec.TTL), MaxDownloads: spec.MaxDownloads,
 		OneTime: spec.OneTime, ReadOnly: spec.ReadOnly, WatermarkSeed: spec.WatermarkSeed,
 	}
-	// 容量淘汰（与 *ShareStore 同语义：仍满按创建时间淘汰最旧 10%）。
+	// 容量淘汰（与 *Store 同语义：仍满按创建时间淘汰最旧 10%）。
 	keys, err := s.st.List(ctx, sharePrefix)
-	if err == nil && len(keys) >= maxShareEntries {
+	if err == nil && len(keys) >= MaxShareEntries {
 		if evictErr := s.evictLocked(ctx, keys); evictErr != nil {
 			s.logger.Warn("分享容量淘汰失败", "error", evictErr)
 		}
 	}
-	data, err := json.Marshal(link.toPersist())
+	data, err := json.Marshal(link.ToPersist())
 	if err != nil {
 		return nil, fmt.Errorf("分享序列化失败: %w", err)
 	}
@@ -202,10 +203,10 @@ func (s *stateBackedShareStore) Create(spec shareSpec) (*ShareLink, error) {
 	return link, nil
 }
 
-// evictLocked 容量淘汰：清理过期条目；仍满按创建时间淘汰最旧 10%（对齐 *ShareStore.Create）。
-func (s *stateBackedShareStore) evictLocked(ctx context.Context, keys []string) error {
+// evictLocked 容量淘汰：清理过期条目；仍满按创建时间淘汰最旧 10%（对齐 *Store.Create）。
+func (s *StateBackedStore) evictLocked(ctx context.Context, keys []string) error {
 	now := time.Now()
-	var active []*ShareLink
+	var active []*Link
 	for _, k := range keys {
 		link, err := s.loadFromState(ctx, strings.TrimPrefix(k, sharePrefix))
 		if err != nil || link == nil {
@@ -219,11 +220,11 @@ func (s *stateBackedShareStore) evictLocked(ctx context.Context, keys []string) 
 		}
 		active = append(active, link)
 	}
-	if len(active) < maxShareEntries {
+	if len(active) < MaxShareEntries {
 		return nil
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].CreatedAt.Before(active[j].CreatedAt) })
-	evictCount := maxShareEntries / 10
+	evictCount := MaxShareEntries / 10
 	for i := 0; i < evictCount && i < len(active); i++ {
 		_ = s.st.Delete(ctx, shareKey(active[i].Token))
 		s.removeLegacy(active[i].Token)
@@ -234,7 +235,7 @@ func (s *stateBackedShareStore) evictLocked(ctx context.Context, keys []string) 
 }
 
 // Peek 返回指定 token 的分享链接副本，不修改状态。
-func (s *stateBackedShareStore) Peek(token string) *ShareLink {
+func (s *StateBackedStore) Peek(token string) *Link {
 	ctx := context.Background()
 	link, err := s.loadFromState(ctx, token)
 	if err != nil {
@@ -255,7 +256,7 @@ func (s *stateBackedShareStore) Peek(token string) *ShareLink {
 // Consume 原子性地检查并消费一个分享链接（Downloads 计数走 CAS，冲突重试有界）。
 // 一次性分享：CAS(old=cur, new=nil) 删除；限量分享：CAS 递增 Downloads。
 // 返回链接信息供后续使用，如果链接无效则返回 nil。
-func (s *stateBackedShareStore) Consume(token string) *ShareLink {
+func (s *StateBackedStore) Consume(token string) *Link {
 	ctx := context.Background()
 	key := shareKey(token)
 	for range maxConsumeRetries {
@@ -269,7 +270,7 @@ func (s *stateBackedShareStore) Consume(token string) *ShareLink {
 
 // consumeOnce 单次消费尝试：返回最终结果与是否需重试（retry=true 表示 CAS 冲突，
 // 调用方按有界次数重试；retry=false 时 result 即最终消费结果）。
-func (s *stateBackedShareStore) consumeOnce(ctx context.Context, key, token string) (res *ShareLink, retry bool) {
+func (s *StateBackedStore) consumeOnce(ctx context.Context, key, token string) (res *Link, retry bool) {
 	cur, err := s.st.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, state.ErrKeyNotFound) {
@@ -279,13 +280,13 @@ func (s *stateBackedShareStore) consumeOnce(ctx context.Context, key, token stri
 		s.logger.Warn("分享 Consume 读取失败", "token", token, "error", err)
 		return nil, false
 	}
-	var pl shareLinkPersist
+	var pl LinkPersist
 	if err := json.Unmarshal(cur, &pl); err != nil {
 		s.logger.Warn("分享 StateStore 值解析失败，视为已消费", "token", token, "error", err)
 		return nil, false
 	}
 	link := pl.toLink()
-	// 「过期」比较用 !Before（对齐 *ShareStore.Consume 的 Windows 单调时钟语义）。
+	// 「过期」比较用 !Before（对齐 *Store.Consume 的 Windows 单调时钟语义）。
 	if now := time.Now(); !now.Before(link.ExpiresAt) {
 		_ = s.st.Delete(ctx, key) // 过期即删除（CAS 不必要：过期由时间推进保证）
 		s.removeLegacy(token)
@@ -312,7 +313,7 @@ func (s *stateBackedShareStore) consumeOnce(ctx context.Context, key, token stri
 
 // consumeOneTimeCAS 一次性分享消费：CAS(old=cur, new=nil) 删除，防并发双消费。
 // done=false 表示 CAS 冲突（他人已消费/已改），由调用方继续重试。
-func (s *stateBackedShareStore) consumeOneTimeCAS(ctx context.Context, key, token string, cur []byte, link *ShareLink) (result *ShareLink, done bool) {
+func (s *StateBackedStore) consumeOneTimeCAS(ctx context.Context, key, token string, cur []byte, link *Link) (result *Link, done bool) {
 	if cerr := s.st.CAS(ctx, key, cur, nil); cerr == nil {
 		s.removeLegacy(token)
 		return link, true
@@ -326,7 +327,7 @@ func (s *stateBackedShareStore) consumeOneTimeCAS(ctx context.Context, key, toke
 
 // consumeBumpCountCAS 限量分享消费：CAS 递增 Downloads 计数（old=cur, new=bumped）。
 // done=false 表示 CAS 冲突（并发消费，读取最新再改），由调用方继续重试。
-func (s *stateBackedShareStore) consumeBumpCountCAS(ctx context.Context, key, token string, cur []byte, pl shareLinkPersist, link *ShareLink) (result *ShareLink, done bool) {
+func (s *StateBackedStore) consumeBumpCountCAS(ctx context.Context, key, token string, cur []byte, pl LinkPersist, link *Link) (result *Link, done bool) {
 	newPL := pl
 	newPL.Downloads++
 	data, merr := json.Marshal(newPL)
@@ -347,7 +348,7 @@ func (s *stateBackedShareStore) consumeBumpCountCAS(ctx context.Context, key, to
 
 // consumeLegacy 回退消费旧 <meta>/share/<token>.json（迁移前存量；尽力而为）。
 // 一次性：删除旧文件；计数型：更新旧文件计数。StateStore 迁移后该路径不再被写。
-func (s *stateBackedShareStore) consumeLegacy(token string) *ShareLink {
+func (s *StateBackedStore) consumeLegacy(token string) *Link {
 	link := s.loadLegacy(token)
 	if link == nil {
 		return nil
@@ -365,10 +366,10 @@ func (s *stateBackedShareStore) consumeLegacy(token string) *ShareLink {
 		return link
 	}
 	link.Downloads++
-	if rel := s.legacyRelPath(token); rel != "" {
-		if data, err := json.Marshal(link.toPersist()); err == nil {
+	if rel := s.LegacyRelPath(token); rel != "" {
+		if data, err := json.Marshal(link.ToPersist()); err == nil {
 			// 经卷句柄写（卷决定是否加密）。
-			if w, werr := writeUserVisible(s.legacyRoot, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); werr == nil {
+			if w, werr := rootfs.WriteUserVisible(s.legacyRoot, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); werr == nil {
 				_, _ = w.Write(data)
 				_ = w.Close()
 			}
@@ -378,17 +379,17 @@ func (s *stateBackedShareStore) consumeLegacy(token string) *ShareLink {
 }
 
 // List 返回所有分享链接的副本（StateStore 全量 + 旧 meta 补列）。
-func (s *stateBackedShareStore) List(owner string) []*ShareLink {
+func (s *StateBackedStore) List(owner string) []*Link {
 	ctx := context.Background()
 	seen := map[string]bool{}
-	result := make([]*ShareLink, 0)
+	result := make([]*Link, 0)
 	result = s.listFromState(ctx, owner, seen, result)
 	result = s.listFromLegacy(owner, seen, result)
 	return result
 }
 
 // listFromState 从 StateStore 列出 owner 可见的分享链接（追加到 result，seen 表去重）。
-func (s *stateBackedShareStore) listFromState(ctx context.Context, owner string, seen map[string]bool, result []*ShareLink) []*ShareLink {
+func (s *StateBackedStore) listFromState(ctx context.Context, owner string, seen map[string]bool, result []*Link) []*Link {
 	keys, err := s.st.List(ctx, sharePrefix)
 	if err == nil {
 		for _, k := range keys {
@@ -409,7 +410,7 @@ func (s *stateBackedShareStore) listFromState(ctx context.Context, owner string,
 }
 
 // listFromLegacy 从旧 meta 目录补列迁移前存量分享（StateStore 未命中且未在 seen 表中的）。
-func (s *stateBackedShareStore) listFromLegacy(owner string, seen map[string]bool, result []*ShareLink) []*ShareLink {
+func (s *StateBackedStore) listFromLegacy(owner string, seen map[string]bool, result []*Link) []*Link {
 	// 旧 meta 补列（迁移前存量在 StateStore 尚未写入时的可见性）。
 	if s.legacyRoot != nil {
 		entries, rerr := s.legacyRoot.ReadDir(s.legacyRel)
@@ -427,7 +428,7 @@ func (s *stateBackedShareStore) listFromLegacy(owner string, seen map[string]boo
 }
 
 // listLegacyEntry 处理单个旧 meta 分享文件：有效且 owner 匹配的追加到 result（seen 表去重）。
-func (s *stateBackedShareStore) listLegacyEntry(owner, token string, seen map[string]bool, result []*ShareLink) []*ShareLink {
+func (s *StateBackedStore) listLegacyEntry(owner, token string, seen map[string]bool, result []*Link) []*Link {
 	if seen[token] {
 		return result
 	}
@@ -446,7 +447,7 @@ func (s *stateBackedShareStore) listLegacyEntry(owner, token string, seen map[st
 
 // Revoke 删除指定 token 的分享链接（StateStore + 旧 meta 双删）。
 // 多租户：owner 非空时必须与链接创建者一致，否则拒绝。
-func (s *stateBackedShareStore) Revoke(token, owner string) error {
+func (s *StateBackedStore) Revoke(token, owner string) error {
 	ctx := context.Background()
 	link, err := s.loadFromState(ctx, token)
 	if err != nil {
@@ -468,8 +469,8 @@ func (s *stateBackedShareStore) Revoke(token, owner string) error {
 	return nil
 }
 
-// cleanupExpired 清理所有已过期的分享链接（StateStore 全量 + 旧 meta 目录扫描）。
-func (s *stateBackedShareStore) cleanupExpired() {
+// CleanupExpired 清理所有已过期的分享链接（StateStore 全量 + 旧 meta 目录扫描）。
+func (s *StateBackedStore) CleanupExpired() {
 	ctx := context.Background()
 	now := time.Now()
 	s.cleanupExpiredFromState(ctx, now)
@@ -477,7 +478,7 @@ func (s *stateBackedShareStore) cleanupExpired() {
 }
 
 // cleanupExpiredFromState 清理 StateStore 中已过期/消费完的分享条目。
-func (s *stateBackedShareStore) cleanupExpiredFromState(ctx context.Context, now time.Time) {
+func (s *StateBackedStore) cleanupExpiredFromState(ctx context.Context, now time.Time) {
 	keys, err := s.st.List(ctx, sharePrefix)
 	if err == nil {
 		for _, k := range keys {
@@ -495,7 +496,7 @@ func (s *stateBackedShareStore) cleanupExpiredFromState(ctx context.Context, now
 }
 
 // cleanupExpiredFromLegacy 清理旧 meta 目录中已过期/消费完的分享文件。
-func (s *stateBackedShareStore) cleanupExpiredFromLegacy(now time.Time) {
+func (s *StateBackedStore) cleanupExpiredFromLegacy(now time.Time) {
 	if s.legacyRoot == nil {
 		return
 	}
@@ -517,5 +518,11 @@ func (s *stateBackedShareStore) cleanupExpiredFromLegacy(now time.Time) {
 	}
 }
 
-// Stop 无后台 goroutine（与 *ShareStore 兼容签名）。
-func (s *stateBackedShareStore) Stop() { /* 无后台 goroutine：状态后端无需清理 */ }
+// Stop 无后台 goroutine（与 *Store 兼容签名）。
+func (s *StateBackedStore) Stop() { /* 无后台 goroutine：状态后端无需清理 */ }
+
+// LegacyRoot 返回旧 meta 目录绑定的存储根（未装配 = nil）。
+func (s *StateBackedStore) LegacyRoot() *storage.Root { return s.legacyRoot }
+
+// LegacyRel 返回旧 meta 目录的相对路径。
+func (s *StateBackedStore) LegacyRel() string { return s.legacyRel }

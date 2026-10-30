@@ -42,6 +42,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 
 
+
+| 分享存储（进程内/StateStore） | `pkg/server/share` | `Store` / `StateBackedStore` / `StoreIface` | **server 作用域**；HTTP 面在装配层，经别名调用 |
 | AI 洞察/建议/配额/隐私 | `pkg/server/ai` | `AIInsight` / `AIAdvisor` / `AIQuota` / `AIPrivacy` / `AIEventConsumer` | **server 作用域**；事件源经 `ai.EventSource` 注入（不反向依赖装配层） |
 | 服务端 WebDAV 挂载面 | `pkg/server/dav` | `dav.New(Deps)` / `Service.Handler` | **server 作用域**；`MetaPolicy` 窄接口（sidecar 联动），不反向依赖装配层 |
 | S3 兼容网关（SigV4/对象/multipart） | `pkg/server/s3` | `s3.New(Deps)` / `Service.Handler` | **server 作用域**；依赖经 `s3.Deps` 注入（`MetaPolicy` 窄接口），不反向依赖装配层 |

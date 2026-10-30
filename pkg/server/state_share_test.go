@@ -35,7 +35,7 @@ func writeLegacyShareFile(t *testing.T, legacyDir, token string, link *ShareLink
 	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := json.Marshal(link.toPersist())
+	raw, err := json.Marshal(link.ToPersist())
 	if err != nil {
 		t.Fatal(err)
 	}
