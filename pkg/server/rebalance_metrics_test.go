@@ -40,23 +40,23 @@ func fetchMetricsText(t *testing.T, baseURL string) string {
 func TestRebalanceProgress_BeginAddEnd(t *testing.T) {
 	t.Parallel()
 	p := newRebalanceProgress()
-	p.begin("main", "disk2", 100) // 总字节 100
-	p.add("main", "disk2", 40)
-	p.add("main", "disk2", 20) // 累计 60
+	p.Begin("main", "disk2", 100) // 总字节 100
+	p.Add("main", "disk2", 40)
+	p.Add("main", "disk2", 20) // 累计 60
 
-	s := p.samples()
+	s := p.Samples()
 	if len(s) != 1 {
 		t.Fatalf("进度样本应 1 条, got %d: %+v", len(s), s)
 	}
-	if !strings.Contains(s[0].labels, `from_volume="main"`) || !strings.Contains(s[0].labels, `to_volume="disk2"`) {
-		t.Fatalf("标签应含 from/to: %s", s[0].labels)
+	if !strings.Contains(s[0].Labels, `from_volume="main"`) || !strings.Contains(s[0].Labels, `to_volume="disk2"`) {
+		t.Fatalf("标签应含 from/to: %s", s[0].Labels)
 	}
-	if s[0].value != 60 {
-		t.Fatalf("percent=%d want 60（60/100）", s[0].value)
+	if s[0].Value != 60 {
+		t.Fatalf("percent=%d want 60（60/100）", s[0].Value)
 	}
 
-	p.end("main", "disk2")
-	if got := p.samples(); len(got) != 0 {
+	p.End("main", "disk2")
+	if got := p.Samples(); len(got) != 0 {
 		t.Fatalf("end 后应无进度样本, got %+v", got)
 	}
 }
@@ -65,14 +65,14 @@ func TestRebalanceProgress_BeginAddEnd(t *testing.T) {
 func TestRebalanceProgress_TotalUnknown(t *testing.T) {
 	t.Parallel()
 	p := newRebalanceProgress()
-	p.begin("main", "disk2", 0)
-	p.add("main", "disk2", 50)
-	s := p.samples()
+	p.Begin("main", "disk2", 0)
+	p.Add("main", "disk2", 50)
+	s := p.Samples()
 	if len(s) != 1 {
 		t.Fatalf("进度样本应 1 条, got %d", len(s))
 	}
-	if s[0].value != 0 {
-		t.Fatalf("total=0 时 percent 应 0（不可算保守）, got %d", s[0].value)
+	if s[0].Value != 0 {
+		t.Fatalf("total=0 时 percent 应 0（不可算保守）, got %d", s[0].Value)
 	}
 }
 
@@ -80,21 +80,21 @@ func TestRebalanceProgress_TotalUnknown(t *testing.T) {
 func TestRebalanceProgress_MultiPair(t *testing.T) {
 	t.Parallel()
 	p := newRebalanceProgress()
-	p.begin("main", "disk2", 100)
-	p.begin("a", "b", 10)
-	p.add("main", "disk2", 50)
-	p.add("a", "b", 10)
-	s := p.samples()
+	p.Begin("main", "disk2", 100)
+	p.Begin("a", "b", 10)
+	p.Add("main", "disk2", 50)
+	p.Add("a", "b", 10)
+	s := p.Samples()
 	if len(s) != 2 {
 		t.Fatalf("两个任务应 2 条样本, got %d: %+v", len(s), s)
 	}
 	m := map[string]int64{}
 	for _, x := range s {
-		if strings.Contains(x.labels, `from_volume="main"`) {
-			m["main"] = x.value
+		if strings.Contains(x.Labels, `from_volume="main"`) {
+			m["main"] = x.Value
 		}
-		if strings.Contains(x.labels, `from_volume="a"`) {
-			m["a"] = x.value
+		if strings.Contains(x.Labels, `from_volume="a"`) {
+			m["a"] = x.Value
 		}
 	}
 	if m["main"] != 50 || m["a"] != 100 {
@@ -138,8 +138,8 @@ func TestRebalanceMetrics_ManualGauge(t *testing.T) {
 	t.Parallel()
 	ts, h := newTestServerWithMetrics(t)
 	h.rebalanceProg = newRebalanceProgress()
-	h.rebalanceProg.begin("main", "disk2", 200)
-	h.rebalanceProg.add("main", "disk2", 80)
+	h.rebalanceProg.Begin("main", "disk2", 200)
+	h.rebalanceProg.Add("main", "disk2", 80)
 
 	body := metricsBody(t, ts)
 	want := `sproxy_rebalance_progress{from_volume="main",to_volume="disk2"} 40`

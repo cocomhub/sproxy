@@ -303,7 +303,7 @@ func TestUsageMetrics_OwnerNilSafe(t *testing.T) {
 	m.RecordUploadForOwner("", 10)   // 空 owner 跳过
 	m.RecordDownloadForOwner("o", 0) // 零字节跳过
 	m.RecordUploadForOwner("o", -1)  // 负字节跳过
-	if len(m.usageUpload.samples()) != 0 || len(m.usageDownload.samples()) != 0 {
-		t.Fatalf("空 owner/非正字节不应计数: %+v %+v", m.usageUpload.samples(), m.usageDownload.samples())
+	if len(m.UsageUploadSamples()) != 0 || len(m.UsageDownloadSamples()) != 0 {
+		t.Fatalf("空 owner/非正字节不应计数: %+v %+v", m.UsageUploadSamples(), m.UsageDownloadSamples())
 	}
 }

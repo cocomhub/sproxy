@@ -21,7 +21,7 @@ import (
 // renderRemoteWriteDenied 渲染拒绝指标族（与 MetricsHandler 用同一实现）。
 func renderRemoteWriteDenied(h *Handlers) string {
 	var b strings.Builder
-	writeLabeledCounter(&b, "sproxy_remote_write_denied_total", "test", h.metrics.remoteWriteDeniedSamples())
+	writeLabeledCounter(&b, "sproxy_remote_write_denied_total", "test", h.metrics.RemoteWriteDeniedSamples())
 	return b.String()
 }
 

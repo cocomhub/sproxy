@@ -359,9 +359,9 @@ func (h *Handlers) rebalanceVolumeHandler(w http.ResponseWriter, r *http.Request
 	for _, f := range files {
 		totalBytes += f.size
 	}
-	h.rebalanceProg.begin(fromVol, toVol, totalBytes)
+	h.rebalanceProg.Begin(fromVol, toVol, totalBytes)
 	// 完成/失败路径统一清除进度（/metrics 不再输出该序列）。
-	defer h.rebalanceProg.end(fromVol, toVol)
+	defer h.rebalanceProg.End(fromVol, toVol)
 
 	moved, bytesMoved := h.rebalanceMigrateFiles(r, owner, fromVol, toVol, files, maxBytes)
 
@@ -415,7 +415,7 @@ func (h *Handlers) rebalanceMigrateFiles(r *http.Request, owner, fromVol, toVol 
 		moved++
 		bytesMoved += f.size
 		// 进度：已迁移字节累加（百分比由 /metrics 拉取时派生）。
-		h.rebalanceProg.add(fromVol, toVol, f.size)
+		h.rebalanceProg.Add(fromVol, toVol, f.size)
 		if maxBytes > 0 && bytesMoved >= maxBytes {
 			break
 		}

@@ -47,14 +47,14 @@ func TestMetrics_IndexCacheStats(t *testing.T) {
 	}
 
 	var b strings.Builder
-	h.metrics.renderIndexCacheMetrics(&b, h)
+	h.renderIndexCacheMetrics(&b, h.metrics)
 	out := b.String()
 	// 接线门禁：/metrics 渲染**必须**调用该函数（只加函数不加调用 = 指标永远不输出）。
-	src, err := os.ReadFile("metrics.go")
+	src, err := os.ReadFile("metrics_handlers.go")
 	if err != nil {
-		t.Fatalf("read metrics.go: %v", err)
+		t.Fatalf("read metrics_handlers.go: %v", err)
 	}
-	if !strings.Contains(string(src), "m.renderIndexCacheMetrics(&b, h)") {
+	if !strings.Contains(string(src), "h.renderIndexCacheMetrics(&b, m)") {
 		t.Fatal("/metrics 渲染未调用 renderIndexCacheMetrics（指标不会输出）")
 	}
 	for _, want := range []string{
