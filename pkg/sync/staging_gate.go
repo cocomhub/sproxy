@@ -320,3 +320,8 @@ func (g *StagingQuotaGateFS) ListDirNames(ctx context.Context, path string) ([]E
 	}
 	return g.inner.ListDir(ctx, path)
 }
+
+// _ 能力断言：StagingQuotaGateFS 必须转发 NameLister。
+var (
+	_ NameLister = (*StagingQuotaGateFS)(nil)
+)

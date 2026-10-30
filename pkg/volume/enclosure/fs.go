@@ -84,3 +84,14 @@ var (
 	_ syncpkg.MetaExtraUpdater    = (*FS)(nil)
 	_ meta.Provider               = (*FS)(nil)
 )
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）。
+func (f *FS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	// 直接委托内嵌 PrefixFS（其 ListDirNames 已实现「转发或用回落 ListDir」，
+	// 符合 R22「业务代码不得下探内层 FS」）。
+	return f.PrefixFS.ListDirNames(ctx, p)
+}
+
+var (
+	_ syncpkg.NameLister = (*FS)(nil)
+)

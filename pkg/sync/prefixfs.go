@@ -292,3 +292,8 @@ var (
 	_ StagedPathReuse     = (*PrefixFS)(nil)
 	// BlockAccessor 有意豁免（见文件头注释）。
 )
+
+// _ 能力断言：PrefixFS 必须转发 NameLister（装配期装配在带前缀的卷上）。
+var (
+	_ NameLister = (*PrefixFS)(nil)
+)

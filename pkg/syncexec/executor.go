@@ -698,3 +698,16 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 	}
 	return result, syncErr
 }
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）：装配期只按名字分类时避免外部卷
+// 逐条补精确 size（见 sync.NameLister）。
+func (q *quotaLocalFS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	if nl, ok := syncpkg.AssertNameLister(q.inner); ok {
+		return nl.ListDirNames(ctx, p)
+	}
+	return q.inner.ListDir(ctx, p)
+}
+
+var (
+	_ syncpkg.NameLister = (*quotaLocalFS)(nil)
+)

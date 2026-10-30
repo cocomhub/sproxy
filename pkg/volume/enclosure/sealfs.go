@@ -424,3 +424,7 @@ func (s *SealFS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, e
 	}
 	return s.sealFilter(p, entries), nil
 }
+
+var (
+	_ syncpkg.NameLister = (*SealFS)(nil)
+)

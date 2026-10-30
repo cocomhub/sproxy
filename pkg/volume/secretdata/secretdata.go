@@ -142,7 +142,7 @@ type Options struct {
 	// MetaCacheDir 是装配期 meta blob 的**本机磁盘密文缓存**目录（空 = 禁用，默认零回归）。
 	// 外部卷每读一个 meta 都要起一次下载 CLI 并落随机临时目录（Close 即删）⇒ 每次重启
 	// 重下 452 个 meta（20-30 分钟）。缓存密文后重启直接本地读；解密失败（GCM 认证）即删
-	// 缓存重下（自愈）。装配层按 `<storage_root>/meta/state/<卷>/metacache` 设置。
+	// 缓存重下（自愈）。装配层按 `<storage_root>/state/<卷>/metacache` 设置。
 	MetaCacheDir string
 }
 

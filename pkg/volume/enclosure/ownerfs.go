@@ -467,3 +467,7 @@ var (
 	_ meta.Provider               = (*ownerFS)(nil)
 	_ capacity.TrueUsageReporter  = (*ownerFS)(nil)
 )
+
+var (
+	_ syncpkg.NameLister = (*ownerFS)(nil)
+)

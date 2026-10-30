@@ -39,7 +39,7 @@ const snapshotGzipMagic = "SDIS2"
 // 文件 meta blob（外部卷上 272 个文件 ≈ 544 次 `BaiduPCS-Go download`，实测 20-30 分钟）。
 //
 // **与既有外部卷 cache 的对齐口径**（不新造缓存体系）：
-//   - 落盘根与 volumestate 相同（`<storage_root>/meta/state/<卷>/`），路径由装配层经
+//   - 落盘根与 volumestate 相同（`<storage_root>/state/<卷>/`），路径由装配层经
 //     extra.index_snapshot_path 注入（`volume_state.disable` 时不注入 ⇒ 零回归）；
 //   - 生命周期与 `volumestate` 一致：进程内写由事件/写路径驱动，重启后仍可复用（本快照）
 //     —— 唯一新增的是**加密**：保密卷也被允许持久化索引，因为落盘内容由卷密钥加密，
