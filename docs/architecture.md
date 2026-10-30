@@ -393,6 +393,8 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 合并**（`ChecksumStore.Set` 只更新内存 + 累计代际，1s 定时器合并为一次全量落盘，`Flush`/`Close`
 可强制落盘）——此前每条 `Set` 都全量重写 `checksums.json`，批量 N 文件退化为 O(N²) I/O。
 崩溃窗口 ≤ debounce，台账可由对象 meta 侧车重建（`RebuildChecksums`），故窗口内丢失可自愈。
+两个后端都实现**卷维度键**（`VolumeKeyedStore`，§15.1.1：卷键优先 + 旧键兜底）——
+集群后端缺失该能力时 `checksumSet/Get` 会静默退化为无卷键，导致多卷同名文件 checksum 串值。
 领域侧一律经 `checksum.ChecksumStoreIface` 使用台账（**不得**断言具体类型 `*ChecksumStore`：
 那会让集群后端被判为「未装配」，导致 list/search 的 checksum 恒空、`RebuildChecksums` 失败）；
 批量回填用可选扩展 `BatchWriter`/`VolumeBatchWriter`，判空用 `LenCounter`。

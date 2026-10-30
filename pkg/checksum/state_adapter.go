@@ -52,6 +52,7 @@ type StateBackedChecksumStore struct {
 }
 
 var _ ChecksumStoreIface = (*StateBackedChecksumStore)(nil)
+var _ VolumeKeyedStore = (*StateBackedChecksumStore)(nil)
 var _ Flusher = (*StateBackedChecksumStore)(nil)
 var _ LenCounter = (*StateBackedChecksumStore)(nil)
 var _ BatchWriter = (*StateBackedChecksumStore)(nil)
@@ -225,6 +226,109 @@ func (s *StateBackedChecksumStore) DeletePrefix(prefix string) {
 	s.mu.Unlock()
 
 	s.merger.Mark("deletePrefix", "prefix", prefix)
+}
+
+// SetInVolume 以卷维度键记录 checksum（`<vol>\x00<rel>`，§15.1.1）。
+//
+// 为什么集群后端也必须有：`checksumSet/Get` 按 `VolumeKeyedStore` 类型断言选择卷维度路径，
+// 未实现时会静默退化为无卷键 ⇒ 同一 owner 多卷上的同名文件互相覆盖（checksum 张冠李戴）。
+func (s *StateBackedChecksumStore) SetInVolume(vol, filename, checksum string) {
+	s.ensureLoaded()
+	key := volumeKey(vol, filename)
+	s.mu.Lock()
+	s.checksums[key] = checksum
+	s.mu.Unlock()
+	s.merger.Mark("set_in_volume", "key", key)
+}
+
+// GetInVolume 读卷维度键；miss 时回退旧无卷键（迁移兼容）。
+func (s *StateBackedChecksumStore) GetInVolume(vol, filename string) (string, bool) {
+	s.ensureLoaded()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if v, ok := s.checksums[volumeKey(vol, filename)]; ok {
+		return v, true
+	}
+	v, ok := s.checksums[filename]
+	return v, ok
+}
+
+// DeleteInVolume 删除卷维度键（不动旧键——旧键可能被其它卷回退使用）。
+func (s *StateBackedChecksumStore) DeleteInVolume(vol, filename string) {
+	s.ensureLoaded()
+	key := volumeKey(vol, filename)
+	s.mu.Lock()
+	if _, ok := s.checksums[key]; !ok {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.checksums, key)
+	s.mu.Unlock()
+	s.merger.Mark("delete_in_volume", "key", key)
+}
+
+// DeletePrefixInVolume 删除该卷下以 prefix 开头的卷维度键（rmdir 子树清理用）。
+func (s *StateBackedChecksumStore) DeletePrefixInVolume(vol, prefix string) {
+	s.ensureLoaded()
+	full := volumeKey(vol, prefix)
+	s.mu.Lock()
+	removed := 0
+	for k := range s.checksums {
+		if strings.HasPrefix(k, full) {
+			delete(s.checksums, k)
+			removed++
+		}
+	}
+	s.mu.Unlock()
+	if removed > 0 {
+		s.merger.Mark("delete_prefix_in_volume", "volume", vol, "prefix", prefix, "removed", removed)
+	}
+}
+
+// RenameInVolume 同卷内重命名卷维度键。
+func (s *StateBackedChecksumStore) RenameInVolume(vol, from, to string) {
+	s.ensureLoaded()
+	fromKey, toKey := volumeKey(vol, from), volumeKey(vol, to)
+	s.mu.Lock()
+	v, ok := s.checksums[fromKey]
+	if !ok {
+		s.mu.Unlock()
+		s.logger.Warn("ChecksumStore.RenameInVolume: from 路径不存在，跳过", "volume", vol, "from", from, "to", to)
+		return
+	}
+	delete(s.checksums, fromKey)
+	s.checksums[toKey] = v
+	s.mu.Unlock()
+	s.merger.Mark("rename_in_volume", "volume", vol, "from", from, "to", to)
+}
+
+// SnapshotLegacy 返回旧无卷键快照（迁移兼容）。
+func (s *StateBackedChecksumStore) SnapshotLegacy() map[string]string {
+	s.ensureLoaded()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.checksums))
+	for k, v := range s.checksums {
+		if !strings.Contains(k, volumeKeySep) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// SnapshotInVolume 返回该卷的 `rel → checksum` 快照（键为裸 rel）。
+func (s *StateBackedChecksumStore) SnapshotInVolume(vol string) map[string]string {
+	s.ensureLoaded()
+	prefix := vol + volumeKeySep
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.checksums))
+	for k, v := range s.checksums {
+		if rel, ok := strings.CutPrefix(k, prefix); ok {
+			out[rel] = v
+		}
+	}
+	return out
 }
 
 // Len 返回台账条目数（必要时先载入；O(1) 判空用）。
