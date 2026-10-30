@@ -18,11 +18,6 @@ func (h *Handlers) verifyService() *verify.Service {
 		ListTenantIDs:    h.listTenantIDs,
 		LocateOwnerFile:  h.locateOwnerFileForVerify,
 		ChecksumStoreFor: h.checksumStoreFor,
-		Alert: func(ctx context.Context, owner, detail string) {
-			if h.alertEngine != nil {
-				h.alertEngine.OnChecksumMismatch(ctx, owner, 0, detail)
-			}
-		},
 		Audit: func(ctx context.Context, action, objectType, object, result, detail string) {
 			h.RecordAudit(ctx, AuditEvent{Action: action, ObjectType: objectType, Object: object, Result: result, Detail: detail})
 		},

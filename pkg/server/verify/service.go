@@ -26,8 +26,6 @@ type Deps struct {
 	LocateOwnerFile func(owner, rel string) (*storage.Tenant, bool)
 	// ChecksumStoreFor 返回 owner 的 checksum 台账。
 	ChecksumStoreFor func(owner string) checksum.ChecksumStoreIface
-	// Alert 上报校验和不一致（mismatched+missing > 0）。
-	Alert func(ctx context.Context, owner, detail string)
 	// Audit 记录巡检动作。
 	Audit func(ctx context.Context, action, objectType, object, result, detail string)
 	// Busy 是单飞标记（并发巡检时跳过）。
