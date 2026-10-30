@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -519,7 +520,7 @@ func TestBackupAPI_EncryptedSourceBacksUpPlaintext(t *testing.T) {
 	if err := srcTnt.Root().MkdirAll("user/sub", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	w, werr := writeUserVisible(srcTnt.Root(), "user/sub/secret.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	w, werr := rootfs.WriteUserVisible(srcTnt.Root(), "user/sub/secret.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if werr != nil {
 		t.Fatalf("writeUserVisible: %v", werr)
 	}

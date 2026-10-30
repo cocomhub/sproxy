@@ -40,6 +40,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -305,7 +306,7 @@ func (w *volumeUserWalker) addFile(childRel string, e os.DirEntry) {
 // writeVolumeExportEntry 把单个文件以 user/<relName> 条目写入 tar（流式边读边写）。
 // 源在写前被并发删除/修改导致 Open 失败 → 返回错误（调用方按宽松/严格处置）。
 func (h *Handlers) writeVolumeExportEntry(ctx context.Context, tw *tar.Writer, s volumeExportSource) error {
-	f, err := openUserVisibleRead(s.root, s.rel)
+	f, err := rootfs.OpenUserVisibleRead(s.root, s.rel)
 	if err != nil {
 		return err
 	}

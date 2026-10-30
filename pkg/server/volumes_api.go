@@ -36,6 +36,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -495,7 +496,7 @@ func (h *Handlers) moveFileBetweenVolumes(r *http.Request, owner, remotePath, fr
 	// 而 `Stat().Size()` 在加密卷上是**密文**长度 ⇒ 直接比较会让加密源卷的 move 恒失败。
 	// 以用户可见长度为准（非加密卷等价 Stat；TOCTOU 语义不变）。
 	size := srcInfo.Size()
-	if ls, lerr := userVisibleSize(fromRoot, rel); lerr == nil {
+	if ls, lerr := rootfs.UserVisibleSize(fromRoot, rel); lerr == nil {
 		size = ls
 	}
 	scopeRes, poolRes, scope, status, resp, rOk := h.moveReserveTarget(r.Context(), owner, rel, toVol, mc.toRoot, size)
@@ -957,7 +958,7 @@ func crossVolumeCopy(ctx context.Context, srcRoot, dstRoot *storage.Root, srcRel
 	// **加密感知**（评审 P0）：跨卷复制（move / 版本恢复 / 镜像 / 冷热迁移共用）必须按两侧卷的
 	// at-rest 状态分叉——裸 Open/OpenFile 会在「加密→明文」时把密文原样搬到明文卷（不可逆损坏）、
 	// 在「明文→加密」时把明文落到加密卷（at-rest 失效，随后 OpenDecrypted 魔数失配 ⇒ 不可读）。
-	src, err := openUserVisibleRead(srcRoot, srcRel)
+	src, err := rootfs.OpenUserVisibleRead(srcRoot, srcRel)
 	if err != nil {
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
@@ -968,7 +969,7 @@ func crossVolumeCopy(ctx context.Context, srcRoot, dstRoot *storage.Root, srcRel
 		return 0, fmt.Errorf("创建目标目录失败: %w", err)
 	}
 	tmpRel := filepath.Join(dir, filepath.Base(dstRel)+fmt.Sprintf(".tmp.%d", time.Now().UnixNano()))
-	tmpDst, err := writeUserVisible(dstRoot, tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	tmpDst, err := rootfs.WriteUserVisible(dstRoot, tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("创建目标临时文件失败: %w", err)
 	}

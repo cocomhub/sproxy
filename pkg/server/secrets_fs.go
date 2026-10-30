@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -62,7 +63,7 @@ func (f *rootSecretsFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return openUserVisibleRead(f.root, f.rel(p))
+	return rootfs.OpenUserVisibleRead(f.root, f.rel(p))
 }
 
 // WriteFile 经 Root 写入（加密卷透明加密落盘；封印路径恒拒）。
@@ -78,7 +79,7 @@ func (f *rootSecretsFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p
 	}
 	// 落盘 0644 → 由 `secrets.Manager` 的本地加固回调收紧为 0600（与既有「LocalFS 写 + chmod」
 	// 两步语义一致：加固是显式步骤，经 Root 后由 `ChmodSecret` 回调承接，见 secrets.WithLocalChmod）。
-	w, err := writeUserVisible(f.root, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	w, err := rootfs.WriteUserVisible(f.root, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}

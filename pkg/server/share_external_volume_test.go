@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -137,7 +138,7 @@ func TestShare_ExternalVolume_HintWinsOverLocal(t *testing.T) {
 	if mkErr := tnt.Root().MkdirAll(tnt.UserRoot(), 0o755); mkErr != nil {
 		t.Fatalf("建用户桶: %v", mkErr)
 	}
-	w, werr := writeUserVisible(tnt.Root(), tnt.UserRoot()+"/dup.txt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	w, werr := rootfs.WriteUserVisible(tnt.Root(), tnt.UserRoot()+"/dup.txt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if werr != nil {
 		t.Fatalf("写本地同名文件: %v", werr)
 	}

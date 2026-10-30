@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/volume"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -1149,7 +1150,7 @@ func (p filesMetaPolicy) UpdateMetaExtra(ctx context.Context, owner string, root
 	if uerr != nil {
 		return fmt.Errorf("meta: sidecar 损坏，拒绝更新: %w", uerr)
 	}
-	if sz, serr := userVisibleSize(root, rel); serr == nil && sz != fm.Size {
+	if sz, serr := rootfs.UserVisibleSize(root, rel); serr == nil && sz != fm.Size {
 		return fmt.Errorf("meta: 主文件大小 %d ≠ sidecar %d（疑并发覆盖），已拒绝 Extra 更新", sz, fm.Size)
 	}
 	applyMetaUpdateMode(ctx, fm, extra)
@@ -1455,7 +1456,7 @@ func hasAnyPrefix(name string, prefixes []string) bool {
 func (p filesMetaPolicy) computeMeta(ctx context.Context, root *storage.Root, rel string) (*meta.FileMeta, error) {
 	// 用户可见语义：加密卷算**明文**分块/哈希（与读面同口径；否则 sidecar 存密文哈希
 	// 在加密卷上无意义——读面按明文流无法用它校验，且跨面语义不一致）。
-	rc, err := openUserVisibleRead(root, rel)
+	rc, err := rootfs.OpenUserVisibleRead(root, rel)
 	if err != nil {
 		return nil, fmt.Errorf("可信卷 meta 打开文件 %s: %w", rel, err)
 	}

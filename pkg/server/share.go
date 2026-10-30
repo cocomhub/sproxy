@@ -19,6 +19,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 )
 
 func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +214,7 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	size := src.Size
 	if src.Local != nil {
 		// 本地卷以**用户可见长度**为准（加密卷逻辑长度 ≠ 文件系统物理长度）。
-		if s2, serr := userVisibleSize(src.Local, src.Rel); serr == nil {
+		if s2, serr := rootfs.UserVisibleSize(src.Local, src.Rel); serr == nil {
 			size = s2
 		} else {
 			http.Error(w, "文件状态读取失败", http.StatusInternalServerError)

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
@@ -128,7 +129,7 @@ func TestFileChecksumRoot_EncryptedVolumePlaintext(t *testing.T) {
 	}
 	const rel = "user/plain.bin"
 	payload := []byte("checksum-me-plaintext")
-	w, werr := writeUserVisible(rt, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	w, werr := rootfs.WriteUserVisible(rt, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if werr != nil {
 		t.Fatalf("写: %v", werr)
 	}

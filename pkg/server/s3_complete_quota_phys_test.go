@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -43,7 +44,7 @@ func TestS3CompleteSettlement_ChargedTargetPhysicalBytes(t *testing.T) {
 	write := func(n int, b byte) int64 {
 		t.Helper()
 		// 目标经**用户可见入口**写入（加密卷 ⇒ 密文落盘）。
-		w, werr := writeUserVisible(root, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		w, werr := rootfs.WriteUserVisible(root, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if werr != nil {
 			t.Fatalf("writeUserVisible: %v", werr)
 		}

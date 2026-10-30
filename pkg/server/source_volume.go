@@ -22,6 +22,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -50,7 +51,7 @@ func (s *ownerSource) OpenRead(ctx context.Context) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("server: nil owner source")
 	}
 	if s.Local != nil {
-		return openUserVisibleRead(s.Local, s.Rel)
+		return rootfs.OpenUserVisibleRead(s.Local, s.Rel)
 	}
 	if s.FS == nil {
 		return nil, fmt.Errorf("server: 源定位缺少 FS（卷 %q）", s.Volume)
