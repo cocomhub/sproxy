@@ -57,3 +57,20 @@ func TestIndexSnapshot_ContainersMatch(t *testing.T) {
 		t.Fatal("成员不同应不匹配")
 	}
 }
+
+// TestIndexSnapshot_InvalidatedByWrite 写操作后快照必须被删除（否则重启载入陈旧索引：
+// 删除的文件"复活"、新文件"不可见"）。变异：invalidateIndexSnapshot 不删文件 ⇒ 红。
+func TestIndexSnapshot_InvalidatedByWrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vol.idx")
+	// 直接构造（跳过装配）验证失效行为
+	sd := &SecretdataFS{opts: Options{IndexSnapshotPath: path}, secret: []byte("k")}
+	if werr := os.WriteFile(path, []byte("snapshot"), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	sd.invalidateIndexSnapshot()
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Fatalf("写后快照应被删除，stat err=%v", serr)
+	}
+}

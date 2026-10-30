@@ -811,6 +811,8 @@ func (s *SecretdataFS) Rename(ctx context.Context, from, to string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 改名会改变索引/目录映射 ⇒ 索引快照失效（失败路径多删一次，无副作用）。
+	defer s.invalidateIndexSnapshot()
 	// 先校验 to 不存在（fail-closed，不落半态），并禁止移入自身子树（成环）。
 	if _, ok := s.index[t]; ok {
 		return fmt.Errorf("secretdata: 目标 %q 已是文件", t)
@@ -871,6 +873,8 @@ func (s *SecretdataFS) deleteFile(ctx context.Context, key string, expected int6
 	// 一次性提交内存态：移出索引、扣 usage、推进版本、回收空目录（原子，无半态）。
 	delete(s.index, key)
 	s.volVersion++
+	// 删除改变了卷内容 ⇒ 索引快照必须失效（否则重启后该文件"复活"）。
+	s.invalidateIndexSnapshot()
 	s.usage -= e.size
 	if s.usage < 0 {
 		s.usage = 0
@@ -902,6 +906,7 @@ func (s *SecretdataFS) RemoveDir(ctx context.Context, rel string) error {
 	s.removeEmptyContainerLocked(ctx, container, key)
 	s.pruneEmptyDirsLocked(ctx, parentDirOf(key))
 	s.volVersion++
+	s.invalidateIndexSnapshot()
 	return nil
 }
 
@@ -1513,6 +1518,8 @@ func (s *SecretdataFS) commitLocked(ctx context.Context, wc writeCtx, e *metaEnt
 	e.baseVersion = wc.newVer
 	addDirKeysLocked(s.dirs, wc.rel)
 	s.volVersion = wc.newVer
+	// 写入/覆盖/改名提交成功 ⇒ 索引快照失效（下次启动重建，避免陈旧索引）。
+	s.invalidateIndexSnapshot()
 	s.usage += usageBytes
 	if prev != nil {
 		s.usage -= prev.size

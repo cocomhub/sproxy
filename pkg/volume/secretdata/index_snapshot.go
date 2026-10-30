@@ -267,3 +267,18 @@ func (s *SecretdataFS) writeIndexSnapshot(snap *indexSnapshot) {
 	}
 	slog.Info("secretdata: 索引快照已更新", "path", p, "entries", len(snap.Entries), "containers", len(snap.Containers))
 }
+
+// invalidateIndexSnapshot 使索引快照失效（**写路径必须调用**）。
+//
+// 为什么必须：快照只反映「装配时刻」的索引。任何写操作（写入/覆盖/删除/改名/建删目录）
+// 之后若保留快照，下次启动会载入陈旧索引 ⇒ 已删文件「复活」、新文件「不可见」。
+// 成本 O(1)（删一个文件）；下次启动全量重建，但因 meta blob 已在本机密文缓存
+// （Options.MetaCacheDir），重建只需本地读 + 解密 + 容器列举，不再触发网盘全量下载。
+func (s *SecretdataFS) invalidateIndexSnapshot() {
+	if s.opts.IndexSnapshotPath == "" {
+		return
+	}
+	if err := os.Remove(s.opts.IndexSnapshotPath); err == nil {
+		slog.Debug("secretdata: 索引快照已失效（写操作后需重建）")
+	}
+}
