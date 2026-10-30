@@ -101,11 +101,6 @@ func (h *Handlers) renderVolumeWatermarks(b *strings.Builder, m *Metrics) {
 	metrics.WriteGaugeSamples(b, "sproxy_storage_capacity_bytes", "Per-volume capacity bytes (0/absent = unlimited)", m.VolumeCapSamples())
 }
 
-// renderVolumeWatermark 输出单卷的用量/容量水位；容量 <=0 = 无限则清掉旧值防误导告警。
-
-// volumeUsageOf 计算卷当前已用字节（**薄委托** `Handlers.volumeUsage` 的单一实现，
-// 见 volume_usage.go；此处保留函数名以免改动多处调用点，但**不得**再放独立逻辑 ✗）。
-
 // MetricsHandler 返回 GET /metrics 的 HTTP handler。
 // 使用 Prometheus 文本格式（仅标准库，无依赖）。
 func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
