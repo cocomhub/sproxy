@@ -392,9 +392,7 @@ func (e *AlertEngine) AdoptNotifyChannels(nc *NotifyCenter) {
 	if nc == nil {
 		return
 	}
-	nc.mu.Lock()
-	defer nc.mu.Unlock()
-	for _, ch := range nc.channels {
+	for _, ch := range nc.Channels() {
 		e.Register(ch)
 	}
 }

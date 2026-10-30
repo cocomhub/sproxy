@@ -50,7 +50,7 @@ var testSleepBudgets = map[string]int{
 	"pkg/cloud/quota_writer_test.go":           3,
 	"pkg/downloader/http_downloader_test.go":   1,
 	"pkg/server/relay_stream_test.go":          1,
-	"pkg/server/notify_test.go":                4,
+	"pkg/server/notify/center_test.go":         4,
 	"pkg/tunnel/hub/ext/kad/kad_test.go":       1,
 	"test/e2e_restart_cloud_test.go":           1, // 慢速源站节流（模拟弱网以制造「下载中断」窗口；无可条件化替代）
 	"web/e2e/notify_panel_test.go":             1,

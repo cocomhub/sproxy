@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/notify"
+
 	"github.com/cocomhub/sproxy/pkg/audit"
 )
 
@@ -146,7 +148,11 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 	}
 	// 通知中心 dispatch：按规则路由到渠道（异步，绝不阻塞审计/业务）；nil = 未启用零回归。
 	if h.notifyCenter != nil {
-		h.notifyCenter.Dispatch(ctx, evt)
+		// 通知域只依赖自己的 Event（不反向依赖装配层，R6）：这里做一次字段映射。
+		h.notifyCenter.Dispatch(ctx, notify.Event{
+			Action: evt.Action, Object: evt.Object, Result: evt.Result,
+			Detail: evt.Detail, TS: evt.TS,
+		})
 	}
 	logger := h.auditLogger
 	if logger == nil {

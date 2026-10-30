@@ -15,7 +15,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -28,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cryptox"
 
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -197,21 +198,15 @@ func (h *Handlers) sigV4Verify(r *http.Request, body []byte) (string, error) {
 	scope := strings.Join([]string{dateStamp, region, s3ServiceName, "aws4_request"}, "/")
 	hashCR := hex.EncodeToString(sha256sum([]byte(canonicalRequest)))
 	stringToSign := strings.Join([]string{"AWS4-HMAC-SHA256", amzDate, scope, hashCR}, "\n")
-	kDate := hmacSHA256([]byte("AWS4"+sk), []byte(dateStamp))
-	kRegion := hmacSHA256(kDate, []byte(region))
-	kService := hmacSHA256(kRegion, []byte(s3ServiceName))
-	kSigning := hmacSHA256(kService, []byte("aws4_request"))
-	expect := hex.EncodeToString(hmacSHA256(kSigning, []byte(stringToSign)))
+	kDate := cryptox.HMACSHA256([]byte("AWS4"+sk), []byte(dateStamp))
+	kRegion := cryptox.HMACSHA256(kDate, []byte(region))
+	kService := cryptox.HMACSHA256(kRegion, []byte(s3ServiceName))
+	kSigning := cryptox.HMACSHA256(kService, []byte("aws4_request"))
+	expect := hex.EncodeToString(cryptox.HMACSHA256(kSigning, []byte(stringToSign)))
 	if subtle.ConstantTimeCompare([]byte(expect), []byte(signature)) != 1 {
 		return "", fmt.Errorf("s3: 签名不匹配")
 	}
 	return ak, nil
-}
-
-func hmacSHA256(key, data []byte) []byte {
-	m := hmac.New(sha256.New, key)
-	m.Write(data)
-	return m.Sum(nil)
 }
 
 func sha256sum(b []byte) []byte {

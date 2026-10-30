@@ -626,7 +626,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1：配置切片）
+### 当前落地状态（S1：配置切片 / S2：通知域切片）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -638,6 +638,16 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 - 共享 IP 工具下沉 `pkg/netutil`（`ParseIPNets` / `AllowIPsCoverLoopback`）；
   配额桶名单下沉 `pkg/storage`（`QuotaBucketNames`）——两者都是 Global 能力，
   不应留在 server 作用域。
+
+**S2：通知域（`pkg/server/notify`）**
+
+- 迁入：`NotifyCenter`（注册表/规则路由/去抖/重试/有界历史）、全部渠道实现
+  （wecom/serverchan/email/webhook/alertmanager/grafana）、webhook 签名、RSS/Atom feed 渲染。
+- **依赖倒置**：通知域只接受自己的 `notify.Event`（Action/Object/Result/Detail/TS），
+  装配层在 `RecordAudit` 里做一次字段映射——通知域不反向依赖 `AuditEvent`/装配层（R6）。
+- 装配层保留 HTTP 面：`notify_handlers.go`（history/test/feed 三个端点 + feed token 门禁）。
+- `pkg/server/notify_alias.go` 为迁移期兼容层（`NotifyCenter`/`Notifier`/`NotifyMessage`/`Event`）。
+- HMAC-SHA256 下沉 `pkg/cryptox.HMACSHA256`（S3 SigV4 与 webhook 签名共用单一实现）。
 
 ### 新增 Server 切片的步骤
 

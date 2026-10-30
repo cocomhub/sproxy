@@ -1,11 +1,11 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package notify
 
 // notify.go 是通知中心框架（roadmap P0 通知中心）：
 //
-//   - NotifyCenter：注册表（RegisterNotifier/Register）+ 规则路由（NotifyRule
+//   - NotifyCenter：注册表（RegisterNotifier/Register）+ 规则路由（config.NotifyRule
 //     action glob → channels）+ 去抖（同 action+object 窗口内只发一次，恢复后
 //     再触发再发）+ 指数退避重试 + 有界历史（内存 ring 200）。
 //   - 渠道：wecom（企业微信机器人 webhook，markdown JSON）+ serverchan
@@ -26,15 +26,18 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/smtp"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/config"
+
+	"github.com/cocomhub/sproxy/pkg/cryptox"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -65,8 +68,8 @@ type Notifier interface {
 	Send(ctx context.Context, m NotifyMessage) error
 }
 
-// historyEntry 是通知历史条目。
-type historyEntry struct {
+// HistoryEntry 是通知历史条目。
+type HistoryEntry struct {
 	TS      time.Time
 	Action  string
 	Object  string
@@ -79,11 +82,11 @@ type historyEntry struct {
 type NotifyCenter struct {
 	mu          sync.Mutex
 	channels    map[string]Notifier
-	rules       []NotifyRule
+	rules       []config.NotifyRule
 	debounce    time.Duration
 	retry       int
 	retryBase   time.Duration
-	history     []historyEntry       // 有界 ring（最旧丢弃）
+	history     []HistoryEntry       // 有界 ring（最旧丢弃）
 	debounced   map[string]time.Time // key=action+object → 上次发送时间
 	attemptsMu  sync.Mutex
 	attemptsMap map[string]int // channel → 总尝试次数（测试观测）
@@ -96,7 +99,7 @@ type NotifyCenter struct {
 const historyCap = 200
 
 // NewNotifyCenter 构造通知中心（cfg + logger；logger nil → slog.Default）。
-func NewNotifyCenter(cfg NotifyConfig, logger *slog.Logger) *NotifyCenter {
+func NewNotifyCenter(cfg config.NotifyConfig, logger *slog.Logger) *NotifyCenter {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -150,7 +153,7 @@ func (nc *NotifyCenter) Close() {
 
 // Dispatch 分发一条审计事件到匹配渠道（异步；绝不阻塞调用方）。
 // rules 空 → 不匹配任何渠道（零回归）；action 无匹配 → 静默跳过。
-func (nc *NotifyCenter) Dispatch(ctx context.Context, evt AuditEvent) {
+func (nc *NotifyCenter) Dispatch(ctx context.Context, evt Event) {
 	nc.mu.Lock()
 	targets := nc.matchRules(evt)
 	if len(targets) == 0 {
@@ -164,7 +167,7 @@ func (nc *NotifyCenter) Dispatch(ctx context.Context, evt AuditEvent) {
 }
 
 // matchRules 返回匹配 evt 的渠道集合（按 rules 顺序去重；须持锁）。
-func (nc *NotifyCenter) matchRules(evt AuditEvent) []string {
+func (nc *NotifyCenter) matchRules(evt Event) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, r := range nc.rules {
@@ -182,7 +185,7 @@ func (nc *NotifyCenter) matchRules(evt AuditEvent) []string {
 }
 
 // ruleMatch 判断规则是否匹配事件（action 精确或 "*"；object 空=全部或精确）。
-func ruleMatch(r NotifyRule, evt AuditEvent) bool {
+func ruleMatch(r config.NotifyRule, evt Event) bool {
 	if r.Action != "*" && r.Action != evt.Action {
 		return false
 	}
@@ -193,7 +196,7 @@ func ruleMatch(r NotifyRule, evt AuditEvent) bool {
 }
 
 // dispatchTo 逐渠道发送（去抖 + 重试 + 历史）。
-func (nc *NotifyCenter) dispatchTo(ctx context.Context, evt AuditEvent, targets []string) {
+func (nc *NotifyCenter) dispatchTo(ctx context.Context, evt Event, targets []string) {
 	for _, chName := range targets {
 		nc.mu.Lock()
 		ch, ok := nc.channels[chName]
@@ -259,8 +262,8 @@ func (nc *NotifyCenter) sendWithRetry(ctx context.Context, ch Notifier, msg Noti
 }
 
 // addHistory 追加历史（有界 ring；须持锁）。
-func (nc *NotifyCenter) addHistory(evt AuditEvent, channel, status, detail string) {
-	nc.history = append(nc.history, historyEntry{
+func (nc *NotifyCenter) addHistory(evt Event, channel, status, detail string) {
+	nc.history = append(nc.history, HistoryEntry{
 		TS: evt.TS, Action: evt.Action, Object: evt.Object,
 		Channel: channel, Status: status, Detail: detail,
 	})
@@ -270,10 +273,10 @@ func (nc *NotifyCenter) addHistory(evt AuditEvent, channel, status, detail strin
 }
 
 // History 返回历史快照（最近在前）。
-func (nc *NotifyCenter) History() []historyEntry {
+func (nc *NotifyCenter) History() []HistoryEntry {
 	nc.mu.Lock()
 	defer nc.mu.Unlock()
-	out := make([]historyEntry, len(nc.history))
+	out := make([]HistoryEntry, len(nc.history))
 	copy(out, nc.history)
 	// 倒序（最近在前）。
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
@@ -496,8 +499,8 @@ func jsonMarshal(v any) string {
 	return string(b)
 }
 
-// newNotifyCenterFromConfig 从 NotifyConfig 装配渠道（wecom/serverchan）。
-func newNotifyCenterFromConfig(cfg NotifyConfig, logger *slog.Logger) *NotifyCenter {
+// NewFromConfig 从配置装配通知中心与渠道（wecom/serverchan/email/webhook/alertmanager/grafana）。
+func NewFromConfig(cfg config.NotifyConfig, logger *slog.Logger) *NotifyCenter {
 	nc := NewNotifyCenter(cfg, logger)
 	if cfg.Channels.Wecom.Webhook != "" {
 		nc.Register(NewWecomNotifier(cfg.Channels.Wecom.Webhook))
@@ -515,6 +518,18 @@ func newNotifyCenterFromConfig(cfg NotifyConfig, logger *slog.Logger) *NotifyCen
 	}
 	return nc
 }
+
+// Channels 返回已注册渠道的快照（name → Notifier；调用方可自由遍历）。
+func (nc *NotifyCenter) Channels() map[string]Notifier {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+	out := make(map[string]Notifier, len(nc.channels))
+	maps.Copy(out, nc.channels)
+	return out
+}
+
+// HasChannel 返回渠道是否已注册。
+func (nc *NotifyCenter) HasChannel(name string) bool { return nc.hasChannel(name) }
 
 // hasChannel 返回渠道是否已注册。
 func (nc *NotifyCenter) hasChannel(name string) bool {
@@ -535,80 +550,11 @@ func (nc *NotifyCenter) channelNames() []string {
 	return out
 }
 
-// notifyRoutePath 归一化路由路径（避免 path 未用告警）。
-var _ = path.Clean
-
-// ---- 运维端点 ----
-
-// notifyHistoryHandler 返回通知历史（GET /api/notify/history?limit=N）。
-func (h *Handlers) notifyHistoryHandler(w http.ResponseWriter, r *http.Request) {
-	if h.notifyCenter == nil {
-		http.Error(w, "notify 未启用", http.StatusBadRequest)
-		return
-	}
-	limit := 100
-	if s := r.URL.Query().Get("limit"); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			limit = n
-		}
-	}
-	hist := h.notifyCenter.History()
-	if len(hist) > limit {
-		hist = hist[:limit]
-	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{"entries": hist})
-}
-
-// notifyTestHandler 触发渠道自检（POST /api/notify/test?channel=wecom）。
-// 无 channel 参数 → 全部已注册渠道。返回各渠道测试结果。
-func (h *Handlers) notifyTestHandler(w http.ResponseWriter, r *http.Request) {
-	if h.notifyCenter == nil {
-		http.Error(w, "notify 未启用", http.StatusBadRequest)
-		return
-	}
-	channel := r.URL.Query().Get("channel")
-	var names []string
-	nc := h.notifyCenter
-	nc.mu.Lock()
-	if channel != "" {
-		if _, ok := nc.channels[channel]; ok {
-			names = []string{channel}
-		} else {
-			nc.mu.Unlock()
-			http.Error(w, "channel 不存在", http.StatusNotFound)
-			return
-		}
-	} else {
-		for name := range nc.channels {
-			names = append(names, name)
-		}
-	}
-	nc.mu.Unlock()
-
-	results := map[string]string{}
-	for _, name := range names {
-		ch := nc.channels[name]
-		msg := NotifyMessage{Title: "[sproxy] 通知渠道自检", Text: "channel test", Object: "test", Action: "test"}
-		if err := ch.Send(r.Context(), msg); err != nil {
-			results[name] = "failed: " + err.Error()
-		} else {
-			results[name] = "ok"
-		}
-	}
-	// 审计：通知渠道自检（可能外发真实消息 ⇒ 可追溯）。
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "notify_test", ObjectType: "notify", Object: strings.Join(names, ","), Result: AuditResultSuccess,
-	})
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
-}
-
 // ---- 邮箱（SMTP）渠道 ----
 
 // EmailNotifier 邮箱渠道（net/smtp + TLS）。
 type EmailNotifier struct {
-	cfg      EmailConfig
+	cfg      config.EmailConfig
 	sendFunc func(addr string, a smtpAuth, from string, to []string, msg []byte) error
 }
 
@@ -619,7 +565,7 @@ type smtpAuth interface {
 }
 
 // NewEmailNotifier 构造邮箱渠道。
-func NewEmailNotifier(cfg EmailConfig) *EmailNotifier {
+func NewEmailNotifier(cfg config.EmailConfig) *EmailNotifier {
 	n := &EmailNotifier{cfg: cfg}
 	if n.cfg.Port == 0 {
 		n.cfg.Port = 465
@@ -668,7 +614,7 @@ func (e *EmailNotifier) Send(ctx context.Context, m NotifyMessage) error {
 // signatureVersion 是签名格式版本前缀（演进平滑：换算法改前缀，接收侧逐版本兼容）。
 const signatureVersion = "sha256"
 
-// signatureHeaderName / timestampHeaderName 是默认签名头名（可经 WebhookConfig 覆盖）。
+// signatureHeaderName / timestampHeaderName 是默认签名头名（可经 config.WebhookConfig 覆盖）。
 const (
 	signatureHeaderName = "X-Sproxy-Signature"
 	timestampHeaderName = "X-Sproxy-Timestamp"
@@ -718,7 +664,7 @@ func VerifyWebhookSignature(secret, headerVal string, body []byte, now time.Time
 	if d := time.Since(time.Unix(ts, 0)); d > skew || d < -skew {
 		return fmt.Errorf("签名时间戳超出时钟偏移允许范围 (%d, skew=%s)", ts, skew)
 	}
-	expect := hex.EncodeToString(hmacSHA256([]byte(secret), []byte(fmt.Sprintf("%d.%s", ts, body))))
+	expect := hex.EncodeToString(cryptox.HMACSHA256([]byte(secret), []byte(fmt.Sprintf("%d.%s", ts, body))))
 	// 常量时间比较：对 hex 字符串直接比对（hex 畸形 → 长度/字符不匹配即失败，
 	// 不解析、不短路）。已知局限：`==` 与常量比较在该路径下无法用单测区分
 	// （可观测性注释；非生产风险面，防时序侧信道是纵深防御）。
@@ -741,7 +687,7 @@ type WebhookNotifier struct {
 }
 
 // NewWebhookNotifier 构造通用 Webhook 渠道（cfg.URL 空 = 未启用）。
-func NewWebhookNotifier(cfg WebhookConfig) *WebhookNotifier {
+func NewWebhookNotifier(cfg config.WebhookConfig) *WebhookNotifier {
 	n := &WebhookNotifier{
 		url:    cfg.URL,
 		secret: cfg.Secret,
@@ -807,3 +753,9 @@ func mimeEncode(s string) string {
 
 // htmlEscape HTML 转义（正文安全）。
 func htmlEscape(s string) string { return html.EscapeString(s) }
+
+// HTTP 契约常量（协议字面量；pkg/client、pkg/remote 亦各自持有同名常量）。
+const (
+	headerContentType = "Content-Type"
+	contentTypeJSON   = "application/json"
+)
