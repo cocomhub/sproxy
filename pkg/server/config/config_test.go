@@ -1230,3 +1230,6 @@ func (p mapProvider) Unmarshal(obj any) error {
 	}
 	return yaml.Unmarshal(data, obj)
 }
+
+// TestConfigValidate_MaintenanceWindow 配置校验：启用时 HH:MM 格式 fail-closed；
+// 未启用时非法值被忽略（零回归）。

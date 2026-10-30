@@ -626,7 +626,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1：配置切片 / S2：通知域切片）
+### 当前落地状态（S1 配置 / S2 通知域 / S3 调度器）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -648,6 +648,13 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 - 装配层保留 HTTP 面：`notify_handlers.go`（history/test/feed 三个端点 + feed token 门禁）。
 - `pkg/server/notify_alias.go` 为迁移期兼容层（`NotifyCenter`/`Notifier`/`NotifyMessage`/`Event`）。
 - HMAC-SHA256 下沉 `pkg/cryptox.HMACSHA256`（S3 SigV4 与 webhook 签名共用单一实现）。
+
+**S3：统一周期任务调度器（`pkg/server/scheduler`）**
+
+- 迁入：`Scheduler`/`Task`/`TaskFunc`（周期任务注册、单飞防重入、panic 恢复、维护窗口、
+  优雅停止 + `FinalRunOnStop`），零 `pkg/*` 依赖（L0）。
+- 装配层保留周期任务的**注册内容**（uploading 清理 / version-gc / trash-gc / share-cleanup /
+  usage-flush），经 `scheduler_alias.go` 类型别名零改动。
 
 ### 新增 Server 切片的步骤
 

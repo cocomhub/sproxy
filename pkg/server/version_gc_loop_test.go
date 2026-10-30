@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/scheduler"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -151,7 +152,7 @@ func TestVersionGCLoop_Stop(t *testing.T) {
 	h := gcTestHandlers(t, cfg)
 
 	// 模拟 RegisterRoutes 挂载路径：装配 scheduler 并注册 version-gc（间隔 1m）。
-	h.scheduler = NewScheduler(testLogger())
+	h.scheduler = scheduler.NewScheduler(testLogger())
 	if err := h.scheduler.Register(Task{
 		Name:            "version-gc",
 		Interval:        cfg.Versioning.GCInterval,

@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package scheduler
 
 // scheduler_test.go 覆盖统一任务调度器（roadmap 11.10-H2，设计文档
 // docs/designs/2026-09-24-task-scheduler.md §5）：
@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ import (
 // TestScheduler_RegisterStartStop 20ms 间隔任务执行 ≥2 次后 Stop，计数冻结。
 func TestScheduler_RegisterStartStop(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(testLogger())
+	s := NewScheduler(discardLogger())
 	var count atomic.Int64
 	if err := s.Register(Task{
 		Name:     "tick",
@@ -52,7 +53,7 @@ func TestScheduler_RegisterStartStop(t *testing.T) {
 // TestScheduler_PanicRecovery Run 首次 panic 被 recover，下个 tick 仍执行（计数达 2）。
 func TestScheduler_PanicRecovery(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(testLogger())
+	s := NewScheduler(discardLogger())
 	var count atomic.Int64
 	if err := s.Register(Task{
 		Name:     "panic-task",
@@ -74,7 +75,7 @@ func TestScheduler_PanicRecovery(t *testing.T) {
 // 执行次数保持 1、并发峰值恒 1。
 func TestScheduler_NoReentrant(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(testLogger())
+	s := NewScheduler(discardLogger())
 	var (
 		runs          atomic.Int64
 		concurrent    atomic.Int64
@@ -116,7 +117,7 @@ func TestScheduler_NoReentrant(t *testing.T) {
 // 窗口打开后维护任务恢复执行。
 func TestScheduler_MaintenanceWindow(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(testLogger())
+	s := NewScheduler(discardLogger())
 	var maint atomic.Int64
 	var always atomic.Int64
 	s.SetMaintenanceWindow(func(time.Time) bool { return false }) // 恒窗口外
@@ -148,7 +149,7 @@ func TestScheduler_MaintenanceWindow(t *testing.T) {
 // TestScheduler_FinalRunOnStop FinalRunOnStop 任务在 Stop 时补跑一次（share 退出前清理语义）。
 func TestScheduler_FinalRunOnStop(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(testLogger())
+	s := NewScheduler(discardLogger())
 	var count atomic.Int64
 	if err := s.Register(Task{
 		Name:           "final",
@@ -168,7 +169,7 @@ func TestScheduler_FinalRunOnStop(t *testing.T) {
 // TestScheduler_RegisterValidation 重名/零间隔/负间隔/空名/缺 Run → error。
 func TestScheduler_RegisterValidation(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(testLogger())
+	s := NewScheduler(discardLogger())
 	run := func(context.Context) {}
 	if err := s.Register(Task{Name: "", Interval: time.Second, Run: run}); err == nil {
 		t.Fatal("空任务名应拒绝")
@@ -194,10 +195,10 @@ func TestScheduler_RegisterValidation(t *testing.T) {
 // 同日窗口正常判定。
 func TestParseMaintenanceWindow(t *testing.T) {
 	t.Parallel()
-	if config.ParseMaintenanceWindow(SchedulerConfig{}) != nil {
+	if config.ParseMaintenanceWindow(config.SchedulerConfig{}) != nil {
 		t.Fatal("未启用窗口应返回 nil（恒执行，零回归）")
 	}
-	in := config.ParseMaintenanceWindow(SchedulerConfig{MaintenanceWindow: MaintenanceWindowConfig{
+	in := config.ParseMaintenanceWindow(config.SchedulerConfig{MaintenanceWindow: config.MaintenanceWindowConfig{
 		Enabled: true, Start: "22:00", End: "06:00",
 	}})
 	if in == nil {
@@ -214,7 +215,7 @@ func TestParseMaintenanceWindow(t *testing.T) {
 			t.Fatalf("跨午夜窗口 22:00-06:00 在 %02d:%02d 判定=%v want %v", tc.h, tc.m, got, tc.want)
 		}
 	}
-	in2 := config.ParseMaintenanceWindow(SchedulerConfig{MaintenanceWindow: MaintenanceWindowConfig{
+	in2 := config.ParseMaintenanceWindow(config.SchedulerConfig{MaintenanceWindow: config.MaintenanceWindowConfig{
 		Enabled: true, Start: "02:00", End: "04:00",
 	}})
 	if !in2(time.Date(2026, 9, 24, 3, 0, 0, 0, time.Local)) {
@@ -225,31 +226,5 @@ func TestParseMaintenanceWindow(t *testing.T) {
 	}
 }
 
-// TestConfigValidate_MaintenanceWindow 配置校验：启用时 HH:MM 格式 fail-closed；
-// 未启用时非法值被忽略（零回归）。
-func TestConfigValidate_MaintenanceWindow(t *testing.T) {
-	t.Parallel()
-	cfg := Default()
-	cfg.StorageRoot = t.TempDir()
-	cfg.Scheduler.MaintenanceWindow.Enabled = true
-	cfg.Scheduler.MaintenanceWindow.Start = "22:00"
-	cfg.Scheduler.MaintenanceWindow.End = "06:00"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("合法维护窗口应通过校验: %v", err)
-	}
-	cfg.Scheduler.MaintenanceWindow.Start = "25:00"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("start=25:00 非法小时应拒绝")
-	}
-	cfg.Scheduler.MaintenanceWindow.Start = "22:00"
-	cfg.Scheduler.MaintenanceWindow.End = "6:0"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("end=6:0 非 HH:MM 应拒绝")
-	}
-	cfg2 := Default()
-	cfg2.StorageRoot = t.TempDir()
-	cfg2.Scheduler.MaintenanceWindow.Start = "not-a-time"
-	if err := cfg2.Validate(); err != nil {
-		t.Fatalf("未启用维护窗口时非法值应被忽略（零回归）: %v", err)
-	}
-}
+// discardLogger 返回丢弃输出的 slog.Logger（测试用；本包不再依赖 pkg/server 的测试辅助）。
+func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }

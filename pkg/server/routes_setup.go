@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/config"
+	"github.com/cocomhub/sproxy/pkg/server/scheduler"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -418,7 +419,7 @@ func (h *Handlers) initSchedulerTasks(cfg *Config, log *slog.Logger) {
 // （退出前补清一次，保留 ShareStore 旧语义）；维护窗口默认关闭（inWindow=nil 恒执行，零回归）。
 func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 	if h.scheduler == nil {
-		h.scheduler = NewScheduler(log.With("component", "scheduler"))
+		h.scheduler = scheduler.NewScheduler(log.With("component", "scheduler"))
 	}
 	h.scheduler.SetMaintenanceWindow(config.ParseMaintenanceWindow(cfg.Scheduler))
 	// Register 失败仅可能由编程错误（重名/间隔<=0/缺 Run）触发——注册即 fatal：

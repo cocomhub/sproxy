@@ -14,7 +14,7 @@
 // 迁移对象：cleanupUploadingFilesLoop / versionGCLoop / trashGCLoop / ShareStore.cleanupLoop。
 // 间隔/行为默认值 1:1 保留（见 routes.go 装配），零回归。
 
-package server
+package scheduler
 
 import (
 	"context"

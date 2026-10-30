@@ -136,6 +136,8 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/server/config": 2,
 	// 通知域（注册表/规则路由/去抖/重试/渠道/feed 渲染）：依赖 config(L2) 与 G0 ⇒ G2。
 	"github.com/cocomhub/sproxy/pkg/server/notify": 2,
+	// 通用周期任务调度器（零 pkg/* 依赖）⇒ G0。
+	"github.com/cocomhub/sproxy/pkg/server/scheduler": 0,
 
 	// ---- 子包（L 取父域之上，由依赖实测确定）----
 	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
@@ -193,8 +195,9 @@ var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  "github.com/cocomhub/sproxy/pkg/volume",
 	// 服务端配置是 pkg/server 的子包：只允许 pkg/server 子树与装配层导入
 	// （Global 包反向导入它会被 R2 拦下——这是「server 作用域」的可执行边界）。
-	"github.com/cocomhub/sproxy/pkg/server/config": "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/notify": "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/config":    "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/notify":    "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/scheduler": "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。
