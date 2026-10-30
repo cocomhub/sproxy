@@ -146,3 +146,9 @@ func IsReservedBucketName(name string) bool {
 func QuotaBucketNames() []string {
 	return []string{bucketUser, bucketCloud, bucketArchive, bucketChunk, bucketVersion, bucketMeta}
 }
+
+// ChunkPrefix 是租户 **chunk 桶**路径前缀（multipart 在途 part / 分块暂存的落盘位置）。
+const ChunkPrefix = "chunk/"
+
+// PartSuffix 是 S3 multipart 分块文件后缀（`<key>.part.<N>`）。
+const PartSuffix = ".part."

@@ -694,7 +694,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// S3 兼容服务端（roadmap P2）：/s3/<key> 经 SigV4 验签（Authorization
 	// AWS4-HMAC-SHA256，AK = sproxy 凭据 → ring 查 SK 验签）→ owner 卷。
-	srvMux.Handle("/s3/", http.HandlerFunc(h.s3Handler))
+	srvMux.Handle("/s3/", http.HandlerFunc(h.s3Service().Handler))
 
 	// Web UI
 	subFS, err := fs.Sub(web.StaticFS, "static")

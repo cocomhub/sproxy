@@ -456,7 +456,7 @@ func newS3QuotaServer(t *testing.T, modifyCfg func(*Config)) (string, *Handlers)
 	h := buildVolSetHandlers(t, cfg)
 	h.credentialRing = ringForTestCreds()
 	mux := http.NewServeMux()
-	mux.Handle("/s3/", http.HandlerFunc(h.s3Handler))
+	mux.Handle("/s3/", http.HandlerFunc(h.s3Service().Handler))
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return ts.URL, h

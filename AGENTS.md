@@ -39,6 +39,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 | HTTP 传输隔离 | `pkg/netutil` | `IsolatedTransport()` | 禁裸 `&http.Transport{}`（R19） |
 
 
+
+| S3 兼容网关（SigV4/对象/multipart） | `pkg/server/s3` | `s3.New(Deps)` / `Service.Handler` | **server 作用域**；依赖经 `s3.Deps` 注入（`MetaPolicy` 窄接口），不反向依赖装配层 |
 | 周期任务调度 | `pkg/server/scheduler` | `Scheduler.Register/Start/Stop`、`Task` | **server 作用域**（零 pkg/* 依赖，L0）；任务注册内容留在装配层 |
 | 通知中心（规则路由/去抖/重试/渠道/feed 渲染） | `pkg/server/notify` | `NotifyCenter.Dispatch` / `NewFromConfig` / `History` | **server 作用域**；只接受 `notify.Event`（装配层在 RecordAudit 做字段映射）；`pkg/server/notify_alias.go` 为迁移期兼容层 |
 | 服务端配置 schema / 校验 / 默认值 | `pkg/server/config` | `Config` / `Default` / `SetDefaults` / `Validate` / `LoadFromProvider` | **server 作用域**（仅 sproxy 服务端）；`pkg/server/config_alias.go` 是迁移期兼容层（新代码直接 import 本包） |

@@ -12,7 +12,7 @@
 # 格式：<文件>	<调用点数>	<whitelist>	<class>
 pkg/cloud/manager_task.go	3	no	probe
 pkg/quota/wait.go	2	yes	adapter
-pkg/server/s3_part_ledger.go	2	no	probe
+pkg/server/s3/part_ledger.go	2	no	probe
 pkg/server/sync_handler.go	2	yes	adapter
 pkg/server/version.go	2	no	probe
 pkg/syncmgr/manager.go	2	no	probe

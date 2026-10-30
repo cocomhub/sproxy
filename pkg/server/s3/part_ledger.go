@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package s3
 
 import (
 	"os"
@@ -15,8 +15,8 @@ import (
 //
 // 背景（设计文档 2026-10-11-enclosure-volume.md §12.1 第 1 项）：此前只在
 // CompleteMultipartUpload 时按合计大小预留/结算，**在途 part**（已落 chunk 桶磁盘、
-// 但尚未 complete）完全不计账——单个会话最多 s3MaxParts × 64MiB，在
-// s3MultipartOrphanTTL（24h）孤儿清理窗口内可反复超配额写盘，且 owner 的 chunk 桶
+// 但尚未 complete）完全不计账——单个会话最多 MaxParts × 64MiB，在
+// MultipartOrphanTTL（24h）孤儿清理窗口内可反复超配额写盘，且 owner 的 chunk 桶
 // Scope 与卷容量池都看不到这部分占用。
 //
 // 方案是**无状态**的（不引入跨请求预留句柄，重启即由磁盘实况兜底）：part 上传成功即
@@ -31,99 +31,99 @@ import (
 //
 // 与 complete 时结算的关系：complete 成功路径先把**目标文件**按合计大小结算
 // （`s3CompleteSettle`），同时逐 part 删除即逐 part 释放 ⇒ 净账 = 目标文件，不双计。
-type s3PartLedger struct {
-	scope *quota.Scope
-	pool  *quota.Pool
+type PartLedger struct {
+	Scope *quota.Scope
+	Pool  *quota.Pool
 }
 
 // active 报告是否有任一侧账本可用；两侧都未装配（配额/卷集未启用）时所有方法退化为
 // no-op，保持零回归。
-func (l *s3PartLedger) active() bool {
-	return l != nil && (l.scope != nil || l.pool != nil)
+func (l *PartLedger) Active() bool {
+	return l != nil && (l.Scope != nil || l.Pool != nil)
 }
 
 // newS3PartLedger 解析某会话 part 所在（**chunk 桶**）的双账本：owner 的 chunk 桶 Scope
 // （键与 files 包写路径同构：首段桶名）+ part 物理所在卷的容量池。owner 为空或未装配
 // 配额时返回 no-op 句柄（调用方无需分支）。
-func (h *Handlers) newS3PartLedger(owner string, tnt *storage.Tenant) *s3PartLedger {
-	l := &s3PartLedger{}
+func (s *Service) newS3PartLedger(owner string, tnt *storage.Tenant) *PartLedger {
+	l := &PartLedger{}
 	if owner == "" {
 		return l // owner 未知（旧格式 meta 等）→ 不猜账本，退化为 no-op
 	}
-	l.scope = h.quotaScopeFor(owner, chunkPrefix)
-	l.pool = h.volumePoolForTenant(tnt)
+	l.Scope = s.d.QuotaScopeFor(owner, storage.ChunkPrefix)
+	l.Pool = s.d.VolumePoolForTenant(tnt)
 	return l
 }
 
-// s3PartReservation 是 part 上传的双账本预留句柄（两侧各自至多一次 Commit/Release，
+// PartReservation 是 part 上传的双账本预留句柄（两侧各自至多一次 Commit/Release，
 // 由 quota.Reservation 内部 CAS 保证幂等）。
-type s3PartReservation struct {
-	scopeRes *quota.Reservation
-	poolRes  *quota.Reservation
+type PartReservation struct {
+	ScopeRes *quota.Reservation
+	PoolRes  *quota.Reservation
 }
 
 // release 放弃预留（回滚未提交的额度）；nil 安全。
-func (r *s3PartReservation) release() {
+func (r *PartReservation) Release() {
 	if r == nil {
 		return
 	}
-	if r.scopeRes != nil {
-		r.scopeRes.Release()
+	if r.ScopeRes != nil {
+		r.ScopeRes.Release()
 	}
-	if r.poolRes != nil {
-		r.poolRes.Release()
+	if r.PoolRes != nil {
+		r.PoolRes.Release()
 	}
 }
 
 // reserve 为 size 字节预留双账本额度；任一侧拒绝（配额/卷容量不足）时回滚已取得的
 // 另一侧并返回 nil——调用方按 507 InsufficientStorage 处理。
-func (l *s3PartLedger) reserve(size int64) *s3PartReservation {
-	if !l.active() || size <= 0 {
-		return &s3PartReservation{}
+func (l *PartLedger) Reserve(size int64) *PartReservation {
+	if !l.Active() || size <= 0 {
+		return &PartReservation{}
 	}
-	r := &s3PartReservation{}
-	if l.scope != nil {
-		rr, err := l.scope.TryReserve(size)
+	r := &PartReservation{}
+	if l.Scope != nil {
+		rr, err := l.Scope.TryReserve(size)
 		if err != nil {
 			return nil
 		}
-		r.scopeRes = rr
+		r.ScopeRes = rr
 	}
-	if l.pool != nil {
-		rr, err := l.pool.TryReserve(size)
+	if l.Pool != nil {
+		rr, err := l.Pool.TryReserve(size)
 		if err != nil {
-			r.release()
+			r.Release()
 			return nil
 		}
-		r.poolRes = rr
+		r.PoolRes = rr
 	}
 	return r
 }
 
 // commit 把预留转为该 part 的已确认占用（part 已成功落盘）。
-func (r *s3PartReservation) commit(l *s3PartLedger, size int64) {
-	if r == nil || !l.active() || size <= 0 {
+func (r *PartReservation) Commit(l *PartLedger, size int64) {
+	if r == nil || !l.Active() || size <= 0 {
 		return
 	}
-	if r.scopeRes != nil {
-		r.scopeRes.Commit(size)
+	if r.ScopeRes != nil {
+		r.ScopeRes.Commit(size)
 	}
-	if r.poolRes != nil {
-		r.poolRes.Commit(size)
+	if r.PoolRes != nil {
+		r.PoolRes.Commit(size)
 	}
 }
 
 // releaseCommitted 释放 n 字节已确认占用（**仅在 part 删除成功后调用**）。两侧各自钳 0，
 // 重复调用安全（不会把账本压成负数）。
-func (l *s3PartLedger) releaseCommitted(n int64) {
-	if !l.active() || n <= 0 {
+func (l *PartLedger) ReleaseCommitted(n int64) {
+	if !l.Active() || n <= 0 {
 		return
 	}
-	if l.scope != nil {
-		l.scope.ReleaseUsage(n)
+	if l.Scope != nil {
+		l.Scope.ReleaseUsage(n)
 	}
-	if l.pool != nil {
-		l.pool.ReleaseCommitted(n)
+	if l.Pool != nil {
+		l.Pool.ReleaseCommitted(n)
 	}
 }
 
@@ -131,7 +131,7 @@ func (l *s3PartLedger) releaseCommitted(n int64) {
 // （root.Stat），只有 Remove 成功才释放。返回是否删除成功。
 //
 // 失败不释放是刻意的：删除失败意味着字节仍在盘上，释放会造成少计。
-func (l *s3PartLedger) removePartReleasing(root *storage.Root, partRel string) bool {
+func (l *PartLedger) removePartReleasing(root *storage.Root, partRel string) bool {
 	size := int64(0)
 	if st, err := root.Stat(partRel); err == nil && st != nil {
 		size = st.Size()
@@ -139,7 +139,7 @@ func (l *s3PartLedger) removePartReleasing(root *storage.Root, partRel string) b
 	if err := root.Remove(partRel); err != nil {
 		return false
 	}
-	l.releaseCommitted(size)
+	l.ReleaseCommitted(size)
 	return true
 }
 
@@ -148,8 +148,8 @@ func (l *s3PartLedger) removePartReleasing(root *storage.Root, partRel string) b
 //
 // 用量取自目录项（e.Info().Size()）——与上传时提交的大小同源（均为 part 文件字节数）。
 // 任一 Remove 失败只跳过（best-effort，与清理语义一致）：不释放该 part 的记账。
-func (l *s3PartLedger) removeSessionParts(root *storage.Root, entries []os.DirEntry, uploadID string) (int, int64) {
-	prefix := multipartPartPrefix + uploadID + partSuffix
+func (l *PartLedger) removeSessionParts(root *storage.Root, entries []os.DirEntry, uploadID string) (int, int64) {
+	prefix := MultipartPartPrefix + uploadID + storage.PartSuffix
 	deleted, bytes := 0, int64(0)
 	for _, e := range entries {
 		name := e.Name()
@@ -160,10 +160,10 @@ func (l *s3PartLedger) removeSessionParts(root *storage.Root, entries []os.DirEn
 		if info, err := e.Info(); err == nil && info != nil {
 			size = info.Size()
 		}
-		if err := root.Remove(chunkPrefix + name); err != nil {
+		if err := root.Remove(storage.ChunkPrefix + name); err != nil {
 			continue
 		}
-		l.releaseCommitted(size)
+		l.ReleaseCommitted(size)
 		deleted++
 		bytes += size
 	}

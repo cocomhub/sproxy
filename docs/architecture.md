@@ -626,7 +626,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知域 / S3 调度器 / S4 Handlers 分域）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 网关）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -667,6 +667,17 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
   `volume.Deps`，字段名即注入点，无需再拆结构体。
 - 门禁 **R7**（`handlers_deps_gate_test.go`）：Handlers 直接字段数 ≤ 12、每个字段必须是
   嵌入的 `*Deps` 类型——新依赖必须加到 `deps.go` 的分组，禁止 god object 回归。
+
+**S5：S3 兼容网关（`pkg/server/s3`）**
+
+- 迁入：SigV4 验签、对象/桶读写、multipart（在途 part 双账本 + complete 结算）、列表与 Abort。
+- **依赖倒置**：`s3.Deps` 注入 `Volumes/Credentials/TenantFor/VolumePoolForTenant/QuotaScopeFor/
+  FileService/Meta/WithAuditVolume`；`MetaPolicy` 是 sidecar 策略的窄接口（装配层用
+  `filesMetaPolicy` 适配），网关不反向依赖 `pkg/server`（R6）。
+- 共享词汇上移：`ChunkPrefix`/`PartSuffix` → `pkg/storage`；用户可见读写直接调 `pkg/rootfs`
+  （原 `pkg/server` 薄包装不再需要）；HMAC 走 `pkg/cryptox`。
+- 装配：`pkg/server/s3_wiring.go` 的 `h.s3Service()` 构造 Deps；路由注册 `s3Service().Handler`。
+- 白盒单测（part 账本）随迁 `pkg/server/s3`；HTTP 集成测试保留在装配层（经公开入口）。
 
 ### 新增 Server 切片的步骤
 
