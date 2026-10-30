@@ -104,6 +104,8 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `test_parallel_gate_test.go` | R18 | 门禁 R18「测试并发注册」——用户明示 2026-09-16： |
 | `test_sleep_ratchet_test.go` | R14 | test_sleep_ratchet_test.go 是「测试内固定等待只减不增」的**棘轮门禁**（R14）。 |
 | `upload_side_effect_test.go` | R8 | upload_side_effect_test.go 是「**上传成功的副作用必须单一实现**」的门禁（R8，P2-d 配套）。 |
+| `test_count_ratchet_test.go` | R50 | 测试函数总数棘轮（2026-10-30）：全仓 `func Test*` 总数不得低于 `test_count_baseline.tsv` 基线（只增不减）。背景：#927 搬运时一个测试被静默删除（−1），无门禁发现；有意删除测试须同步下调基线并说明理由。 |
+| `test_doc_comment_gate_test.go` | R49 | 测试文档注释悬空门禁（2026-10-30）：`pkg/server` 下 `// TestXxx` 文档注释若指向全仓不存在的测试函数即红。与 R50 互补（R49 抓「注释残留」，R50 抓「连注释一起删」）。 |
 | `usage_provider_gate_test.go` | R30 | usage_provider_gate_test.go 是「卷用量查询**单一查询面**」门禁（R30，2026-10-17）。 |
 | `user_io_gate_test.go` | R25 | user_io_gate_test.go 是「用户内容读写必须经用户可见入口」的门禁（R25，第 5 轮对抗评审 |
 | `volume_backend_registration_order_gate_test.go` | R45 | 门禁 **R45**：外部卷后端**类型注册**必须早于 `assembleVolumes`（`setupServerCore` 内 `registerVolumeBackendTypes()` 先于 `server.RegisterRoutes(`），且 `setupSyncVolumeBackends` 不得再回退注册类型。背景（用户实测 2026-10-21）：baidupcs/webdav/sftp/ftp/s3 的类型此前在 RegisterRoutes **之后**注册 ⇒ config 静态声明 `type: baidupcs` 等外部卷在装配期报「未注册后端」并启动失败（只能运行期建卷绕过）。 |
