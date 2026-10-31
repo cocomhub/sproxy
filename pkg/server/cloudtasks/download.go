@@ -100,8 +100,8 @@ type BatchTaskResult struct {
 
 // SaveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
 //
-// 导出是因为组创建仍在装配层（S2a 只迁任务面），组路径必须与单条/批量共用同一
-// 默认语义——两处各写一遍会让「save 缺省保留」出现第二份事实源。
+// 导出是因为组创建（group.go）与单条/批量必须共用同一默认语义——两处各写一遍会让
+// 「save 缺省保留」出现第二份事实源。
 func SaveOrDefault(s *bool) bool {
 	if s == nil {
 		return true
@@ -111,7 +111,7 @@ func SaveOrDefault(s *bool) bool {
 
 // IsStorageFull 判断错误是否为存储配额超限（全局账本或租户 quota.Scope）。
 //
-// 导出理由同 SaveOrDefault：组创建的 groupErrorStatus 仍在装配层，且 507 映射必须与
+// 导出理由同 SaveOrDefault：组创建的 groupErrorStatus 在 group.go，507 映射必须与
 // 单条/批量同源（两个哨兵错误都认）。
 func IsStorageFull(err error) bool {
 	return errors.Is(err, capacity.ErrStorageFull) || errors.Is(err, quota.ErrStorageFull)
@@ -120,7 +120,7 @@ func IsStorageFull(err error) bool {
 // ParseOffsetLimit 解析 ?offset=&limit= 查询参数。
 // 解析失败（缺失或非整数）返回默认值：offset=-1（不偏移）、limit=0（返回全部）。
 //
-// 导出理由：组列表（cloudListGroups）仍在装配层，分页语义必须与任务列表一致。
+// 导出理由：组列表（group.go）与任务列表共用同一分页语义。
 func ParseOffsetLimit(r *http.Request) (offset, limit int) {
 	offset = -1
 	limit = 0
@@ -141,8 +141,8 @@ func ParseOffsetLimit(r *http.Request) (offset, limit int) {
 // 执行 scheme 检查、可选 SSRF 防护、文件名提取和路径穿越防护。
 // 返回 (cleanedURL, cleanedFilename, error)。
 //
-// 导出理由：组创建（cloudCreateGroup → normalizeGroupURLs）仍在装配层，单条/批量/组
-// 三条入口必须共用同一清洗规则，否则同一内容的不同拼写会在某条路径上失去去重。
+// 导出理由：组创建（group.go → normalizeGroupURLs）与单条/批量三条入口必须共用同一
+// 清洗规则，否则同一内容的不同拼写会在某条路径上失去去重。
 func ValidateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (string, string, error) {
 	entry := cloudfilename.Entry{URL: rawURL, Filename: rawFilename}
 	if err := cloudfilename.ValidateEntry(entry); err != nil {
@@ -165,7 +165,7 @@ func ValidateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (st
 // TransferACLRejection 校验转存目标卷对 owner 的 ACL（H2/R1：防跨租户覆写）。
 // transfer 为 nil 或卷放行 → 返回 ""；卷未装配/ACL 拒绝 → 返回错误文案（调用方 403）。
 //
-// 导出理由：组创建路径仍在装配层，单条/批量/组三条入口的 ACL 判定与文案必须同源。
+// 导出理由：组创建（group.go）与单条/批量三条入口的 ACL 判定与文案必须同源。
 func TransferACLRejection(vols Volumes, owner string, transfer *cloud.TransferSpec) string {
 	if transfer == nil {
 		return ""
@@ -419,7 +419,7 @@ func (s *Service) DeleteTask(w http.ResponseWriter, r *http.Request, owner strin
 	}
 	s.deps.Audit.Record(r.Context(), "cloud_delete", "task", id, auditResultSuccess, "")
 	// （历史坑）此处曾额外记一条 `cloud_group_delete`，object 是**任务 ID** ✗：
-	// 既误导取证（任务删除被当成组删除），又让真正的组删除无痕。已移入 cloudDeleteGroup。
+	// 既误导取证（任务删除被当成组删除），又让真正的组删除无痕。已移入组删除入口。
 	s.writeJSON(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
 

@@ -16,7 +16,11 @@ import (
 const depsFieldTarget = 8
 
 // interfaceMethodTotal 是 7 个接口的方法数合计（设计文档 §5.1–§5.7：9+8+1+5+6+7+1）。
-const interfaceMethodTotal = 37
+//
+// S2b 的临时增量：Groups 多 1 个 DeleteGroupArchive（组删除时清理归档产物；归档自身的
+// 读写在 S3 才迁入本包，S2b 期间委托装配层的 deleteGroupArchive）⇒ 8→9、合计 37→38。
+// S3 迁入归档面后删除该委托，两处计数应回落（本断言随之收紧，不得只改数字留漂移）。
+const interfaceMethodTotal = 38
 
 // TestDepsFieldCap 锁 Deps 的入边宽度 ≤8，并锁字段名（防止改名后门禁仍数得清）。
 func TestDepsFieldCap(t *testing.T) {
@@ -46,7 +50,7 @@ func TestInterfaceMethodCounts(t *testing.T) {
 		want  int
 	}{
 		{"Tasks", reflect.TypeFor[cloudtasks.Tasks](), 9},
-		{"Groups", reflect.TypeFor[cloudtasks.Groups](), 8},
+		{"Groups", reflect.TypeFor[cloudtasks.Groups](), 9}, // S2b：+DeleteGroupArchive（S3 移除）
 		{"Tenants", reflect.TypeFor[cloudtasks.Tenants](), 1},
 		{"Volumes", reflect.TypeFor[cloudtasks.Volumes](), 5},
 		{"Quota", reflect.TypeFor[cloudtasks.Quota](), 6},

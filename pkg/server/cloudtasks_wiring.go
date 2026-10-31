@@ -112,6 +112,12 @@ func (a *cloudTasksAdapter) UpdateGroupStatus(groupID string) {
 	a.h.cloudMgr.UpdateGroupStatus(groupID)
 }
 
+// DeleteGroupArchive 委托装配层的归档清理（归档读写在 S3 才迁入 cloudtasks，S2b 期间
+// 只经此一行取用 `deleteGroupArchive`；行为与迁移前逐字一致）。
+func (a *cloudTasksAdapter) DeleteGroupArchive(owner, archiveFile string) error {
+	return a.h.deleteGroupArchive(owner, archiveFile)
+}
+
 // ---- Tenants ----
 
 func (a *cloudTasksAdapter) TenantFor(owner string) *storage.Tenant {
