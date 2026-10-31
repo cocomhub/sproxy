@@ -697,6 +697,12 @@ func (h *Handlers) authenticated(w http.ResponseWriter, r *http.Request, princip
 		if _, derr := io.Copy(io.Discard, r.Body); derr != nil {
 			h.log().WarnContext(r.Context(), "auth: body 哈希校验失败", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "error", derr)
 		}
+		// multipart 落盘的临时文件必须显式清理：ParseMultipartForm 超过内存阈值时会把
+		// 文件写到 <Temp>/multipart-*，Go 标准库**不会**自动删除（此前全仓无 RemoveAll
+		// 调用 ⇒ 实测 Temp 残留大量 multipart-*）。
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
 	}()
 	// /tunnel：用 Principal.Secret + Principal.Mesh 派生隧道密钥放入 ctx（R5-I1），
 	// 隧道 handler 用 ctx 密钥解密 metadata 与 body；普通 API 请求走下面分支。

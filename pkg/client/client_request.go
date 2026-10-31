@@ -21,7 +21,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
@@ -353,7 +355,13 @@ func prehashBody(body io.Reader) (io.Reader, string, func(), error) {
 		}
 		return body, hex.EncodeToString(h.Sum(nil)), nil, nil
 	}
-	f, err := os.CreateTemp("", "sproxy-sig-body-*")
+	// 收敛到固定父目录（不再散落在 Temp 根）：进程被强杀时残留可控、可按父目录批量清理。
+	// 正常路径仍由 cleanup() 立即删除（调用方 defer）。
+	dir := clientTempDir()
+	if merr := os.MkdirAll(dir, 0o700); merr != nil {
+		return nil, "", nil, merr
+	}
+	f, err := os.CreateTemp(dir, "sproxy-sig-body-*")
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -526,3 +534,28 @@ func doJSONDecodeBody(r io.Reader, respBody any) error {
 	}
 	return nil
 }
+
+// clientTempRoot 是客户端签名临时文件的固定父目录名（收敛散落残留）。
+const clientTempRoot = "sproxy-client"
+
+// staleClientTempMaxAge 是孤儿判定阈值：超过该时长未更新的临时文件视为强杀残留。
+const staleClientTempMaxAge = 6 * time.Hour
+
+// clientTempDir 返回客户端临时目录，并在首次调用时 best-effort 清理孤儿文件
+// （进程被强杀时 defer cleanup 不会执行，残留会累积）。
+func clientTempDir() string {
+	dir := filepath.Join(os.TempDir(), clientTempRoot)
+	clientTempCleanupOnce.Do(func() {
+		cutoff := time.Now().Add(-staleClientTempMaxAge)
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if fi, ierr := e.Info(); ierr == nil && fi.ModTime().Before(cutoff) {
+					_ = os.Remove(filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+	})
+	return dir
+}
+
+var clientTempCleanupOnce sync.Once
