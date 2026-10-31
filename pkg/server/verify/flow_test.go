@@ -5,64 +5,20 @@ package verify
 
 import (
 	"context"
-	"log/slog"
 	"os"
-	"path/filepath"
-	"strings"
-	"sync/atomic"
 	"testing"
-
-	"github.com/cocomhub/sproxy/pkg/checksum"
-	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // newFlowService 构造一个最小可用的巡检器：单租户、默认卷 = 临时目录。
 func newFlowService(t *testing.T, files map[string]string) (*Service, *[]string) {
 	t.Helper()
-	dir := t.TempDir()
-	root, err := storage.OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
-	t.Cleanup(func() { _ = root.Close() })
-
-	tnt, terr := storage.OpenTenant(root, "alice")
-	if terr != nil {
-		t.Fatalf("OpenTenant: %v", terr)
-	}
-	t.Cleanup(func() { _ = tnt.Root().Close() })
-	for rel, body := range files {
-		full := filepath.Join(dir, "alice", filepath.FromSlash(rel))
-		if mkErr := os.MkdirAll(filepath.Dir(full), 0o755); mkErr != nil {
-			t.Fatalf("mkdir: %v", mkErr)
-		}
-		if wErr := os.WriteFile(full, []byte(body), 0o644); wErr != nil {
-			t.Fatalf("write: %v", wErr)
-		}
-	}
-	cs := checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", slog.New(slog.DiscardHandler))
-	for rel, body := range files {
-		sum, herr := checksum.Reader(strings.NewReader(body))
-		if herr != nil {
-			t.Fatalf("checksum: %v", herr)
-		}
-		cs.Set(rel, sum)
-	}
+	f := newTenantFixture(t, "alice", files)
+	d := f.deps()
 	var audits []string
-	svc := New(Deps{
-		Logger:        slog.New(slog.DiscardHandler),
-		TenantFor:     func(string) *storage.Tenant { return tnt },
-		ListTenantIDs: func() []string { return []string{"alice"} },
-		LocateOwnerFile: func(owner, rel string) (*storage.Tenant, bool) {
-			return tnt, true
-		},
-		ChecksumStoreFor: func(string) checksum.ChecksumStoreIface { return cs },
-		Audit: func(_ context.Context, action, _, _, result, _ string) {
-			audits = append(audits, action+":"+result)
-		},
-		Busy: new(atomic.Bool),
-	})
-	return svc, &audits
+	d.Audit = func(_ context.Context, action, _, _, result, _ string) {
+		audits = append(audits, action+":"+result)
+	}
+	return New(d), &audits
 }
 
 // TestVerifyOnce_AllMatch 全部一致：Ok=N、无 mismatched/missing。
