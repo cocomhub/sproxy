@@ -4,8 +4,10 @@
 package quota
 
 import (
+	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 // settlement.go 实现**配额结算状态机** `Settlement`（设计 docs/designs/2026-10-31-policy-object-extraction.md §2.2）。
@@ -105,6 +107,62 @@ func (s *Settlement) Reserve(n int64) error {
 		return err
 	}
 	s.reserved += amt
+	return nil
+}
+
+// ReserveWait 在账本上预留 n；容量**临时**不足时排队等待（释放唤醒 / ctx 取消 / 超时）。
+//
+// 为何需要它：`Reserve` 只做一次严格上界预留，不足即返回 ErrStorageFull；而云归档等调用点
+// 此前用 `Scope.WaitReserve`，语义是「临时不足就排队等释放，超时才 507」。把这类调用点迁移到
+// Settlement 协议（预留 → 对账 → 提交/回滚）时若用 `Reserve` 代替，会把「排队等释放」降级成
+// 「立即失败」——本入口消除这一能力损失。
+//
+// 等待机制**完全复用** `Pool.WaitReserve`（pkg/waitq：根等待锁协作的「快速尝试 + 入队」、
+// 释放广播、超时与取消）；本类型不另写排队实现（仓库规则 R36-b：禁止 sync.Cond）。
+//
+// 失败语义（账本与状态**均不变**，同一句柄可继续使用）：
+//   - 超时 ⇒ `ErrWaitTimeout` 包装 `ErrStorageFull`（调用方仍按容量不足映射 507）；
+//   - 请求量超过任一层可用上限（全部释放也放不下）⇒ 包装 `ErrStorageFull`，**不入队**；
+//   - ctx 取消 ⇒ ctx.Err()；
+//   - 句柄已终态 ⇒ ErrSettlementCommitted / ErrSettlementReleased（不排队）；未绑定账本 ⇒ ErrSettlementNoTarget。
+//
+// timeout<=0 ⇒ DefaultWaitTimeout；n<=0 与 Reserve 一致地钳零并立即成功（空文件/mkdir 无需排队）。
+func (s *Settlement) ReserveWait(ctx context.Context, n int64, timeout time.Duration) error {
+	// 先判状态：终态句柄不得入队（排队也不会有结果）。
+	s.mu.Lock()
+	err := s.requireOpenLocked()
+	pool := s.pool
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	amt := nonNeg(n)
+	if amt == 0 {
+		return nil
+	}
+	if pool == nil {
+		return ErrSettlementNoTarget
+	}
+	res, err := pool.WaitReserve(ctx, amt, timeout)
+	if err != nil {
+		return err
+	}
+	// 等待期间不持 s.mu（否则并发 Commit/Release 会被整个排队窗口阻塞）⇒ 取回额度后必须
+	// **原子地**复核状态再入账；句柄已终态则归还刚取到的额度（否则额度会永久滞留 reserved）。
+	//
+	// 接管语义：成功后账本上已有 amt 处于 reserved —— 与 Reserve 的账本形态完全一致，
+	// 因此这里**不** Commit/Release 该 Reservation，由 Settlement 自己的增量记账
+	// （reserveUp / releaseReserve / commitReservation）继续负责。
+	s.mu.Lock()
+	serr := s.requireOpenLocked()
+	if serr == nil {
+		s.reserved += amt
+	}
+	s.mu.Unlock()
+	if serr != nil {
+		res.Release()
+		return serr
+	}
 	return nil
 }
 
