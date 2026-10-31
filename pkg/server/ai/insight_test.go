@@ -74,12 +74,11 @@ func TestNormalizeTags(t *testing.T) {
 
 // TestNormalizeTags_EnforcesMaxTagRunes 锁定「每个标签 ≤ maxTagRunes 字符」的文档契约。
 //
-// 已知缺陷（2026-10-31 补测侦察）：insight.go 声明了 maxTagRunes=20 且 NormalizeTags
-// 注释承诺「每 ≤20 字符」，但实现从未使用该常量 ⇒ 超长标签原样返回。本用例先以
-// Skip 保留红灯契约（修复生产代码后删掉 Skip 即生效），不在补测 PR 顺手改实现。
+// 历史缺陷（2026-10-31 补测侦察并修复）：insight.go 声明了 maxTagRunes=20 且 NormalizeTags
+// 注释承诺「每 ≤20 字符」，但实现从未使用该常量 ⇒ 超长标签原样返回；现已按常量截断。
 func TestNormalizeTags_EnforcesMaxTagRunes(t *testing.T) {
 	t.Parallel()
-	t.Skip("已知缺陷：NormalizeTags 未应用 maxTagRunes（insight.go:30 声明未使用），待独立修复 PR 启用")
+	// 缺陷已修（2026-10-31）：NormalizeTags 现按 maxTagRunes 截断每个标签。
 	got := NormalizeTags(strings.Repeat("标", maxTagRunes+5))
 	if len(got) != 1 || len([]rune(got[0])) > maxTagRunes {
 		t.Fatalf("超长标签应截断到 %d 字符: %q", maxTagRunes, got)
