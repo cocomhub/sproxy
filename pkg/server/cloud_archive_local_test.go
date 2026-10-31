@@ -44,7 +44,7 @@ func TestCloudArchive_ToLocalVolume_LandsInUserBucket(t *testing.T) {
 		strings.NewReader(`{"archive_name":"local.tar.gz","target_volume":"default"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("转存到本地卷 status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -127,7 +127,7 @@ func TestCloudArchive_ToLocalVolume_ChargesVolumePool(t *testing.T) {
 		strings.NewReader(`{"archive_name":"pooled.tar.gz","target_volume":"default"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("转存 status=%d body=%s", rec.Code, rec.Body.String())
 	}

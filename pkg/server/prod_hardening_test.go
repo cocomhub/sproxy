@@ -110,7 +110,7 @@ func TestDeleteGroupArchive_ReleasesOwnerQuota(t *testing.T) {
 		strings.NewReader(`{"archive_name":"g.tar.gz","target_volume":"vault"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("归档 status=%d body=%s", rec.Code, rec.Body.String())
 	}

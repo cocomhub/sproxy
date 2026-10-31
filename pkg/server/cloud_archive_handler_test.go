@@ -58,8 +58,8 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
-	mux.HandleFunc("POST /api/cloud/archive", h.cloudArchiveBatch)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.archiveTaskHandler())
+	mux.HandleFunc("POST /api/cloud/archive", h.archiveBatchHandler())
 	return httptest.NewServer(mux), mgr, dir
 }
 
@@ -484,7 +484,7 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"quota.tar.gz"}`))
 	req.Header.Set(headerContentType, contentTypeJSON)
@@ -542,7 +542,7 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"gone.tar.gz"}`))
 	req.Header.Set(headerContentType, contentTypeJSON)
@@ -631,7 +631,7 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	post := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -702,7 +702,7 @@ func TestCloudArchive_SingleTask_ToVolume(t *testing.T) {
 		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -724,7 +724,7 @@ func TestCloudArchive_Batch_ToVolume(t *testing.T) {
 	body := fmt.Sprintf(`{"task_ids":[%q,%q],"archive_name":"batch.tar.gz","target_volume":"vault"}`, id1, id2)
 	req := httptest.NewRequest(http.MethodPost, "/api/cloud/archive", strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	h.cloudArchiveBatch(rec, req)
+	h.archiveBatchHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -745,7 +745,7 @@ func TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite(t *testing.T) {
 			strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
 		req.SetPathValue("id", id)
 		rec := httptest.NewRecorder()
-		h.cloudArchiveTask(rec, req)
+		h.archiveTaskHandler()(rec, req)
 		return rec.Code
 	}
 	if code := post(); code != http.StatusOK {
@@ -771,7 +771,7 @@ func TestCloudArchive_SingleTask_ToVolume_LockKey(t *testing.T) {
 		strings.NewReader(`{"archive_name":"lock.tar.gz","target_volume":"vault"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("锁被占时应 409，got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -788,7 +788,7 @@ func TestCloudArchive_SingleTask_ToVolume_SecretsRejected(t *testing.T) {
 		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"secrets"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("secrets 卷应 400，got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -804,7 +804,7 @@ func TestCloudArchive_SingleTask_ToVolume_TargetPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -838,7 +838,7 @@ func TestCloudArchive_SingleTask_ToVolume_Encrypt(t *testing.T) {
 		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault","encrypt":true}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -876,7 +876,7 @@ func TestCloudArchive_SingleTask_ToVolume_Compression(t *testing.T) {
 		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault","compression":"zstd"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -909,7 +909,7 @@ func TestCloudArchive_ExtrasRequireTarget(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
 		req.SetPathValue("id", id)
 		rec := httptest.NewRecorder()
-		h.cloudArchiveTask(rec, req)
+		h.archiveTaskHandler()(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("选项缺前置条件应 400，body=%s got %d", body, rec.Code)
 		}

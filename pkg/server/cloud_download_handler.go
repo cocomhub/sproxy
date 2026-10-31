@@ -22,7 +22,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/storage"
-	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/transfer"
 )
@@ -350,7 +349,7 @@ func (h *Handlers) cloudArchivePrepTarget(w http.ResponseWriter, owner string, r
 // cloudArchiveMaxBytesOK 校验云归档总量上限（cloud_archive_max_bytes；0=不限）。失败已回响应。
 // 单任务/批量/组归档与统一转存（不占 archive 桶）共用同一上限校验。
 func (h *Handlers) cloudArchiveMaxBytesOK(w http.ResponseWriter, totalSize int64) bool {
-	maxBytes := h.cloudArchiveMaxBytes()
+	maxBytes := (&cloudTasksAdapter{h: h}).MaxArchiveBytes()
 	if maxBytes > 0 && totalSize > maxBytes {
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("archive exceeds cloud_archive_max_bytes: %d > %d", totalSize, maxBytes),
@@ -360,42 +359,15 @@ func (h *Handlers) cloudArchiveMaxBytesOK(w http.ResponseWriter, totalSize int64
 	return true
 }
 
-// cloudArchiveReserveQuota 打包前做总量限制（cloud_archive_max_bytes）+ 配额预留
-// （scope 优先；storageMgr 仅作回退）。返回的结算句柄非 nil = scope 路径已预留 pre 字节
-// （nil = 回退路径或未装配账本，无预留需定案），调用方必须以 cloudArchiveSettleQuota（成功）
-// 或 releaseArchiveReservation（失败）定案，否则预留泄漏。返回 false 表示已回错误响应包。
+// cloudArchiveReserveQuota 是 archiveReserveQuota 的响应壳（组归档路径 S3b 前直接调用；
+// 单任务/批量经 Quota.ReserveArchive 取用同一核心）。返回 false 表示已回错误响应包。
 func (h *Handlers) cloudArchiveReserveQuota(ctx context.Context, w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Settlement, int64, bool) {
-	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
-	if !h.cloudArchiveMaxBytesOK(w, totalSourceSize) {
+	res, pre, status, message := h.archiveReserveQuota(ctx, owner, totalSourceSize)
+	if status != 0 {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: message}, status)
 		return nil, 0, false
 	}
-	pre := totalSourceSize + cloudArchiveReservePlaceholder
-	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
-	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
-	// P1-b：scope 路径的「预留 → 对账 → 提交/回滚」改走 quota.Settlement（协议唯一实现）；
-	// ReserveWait 保留「容量临时不足 ⇒ 排队等释放」的能力（#963 锁定的语义，不得退化为立即 507）。
-	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
-		st := quota.NewSettlement(scope.Pool())
-		// h.quotaWaitTimeout = 0（生产恒 0）⇒ ReserveWait 内部按 quota.DefaultWaitTimeout（30s），
-		// 语义不变。此前此处恒传 quota.DefaultWaitTimeout，测试注入的等待上限被忽略（#963 记录）。
-		if reserveErr := st.ReserveWait(ctx, pre, h.quotaWaitTimeout); reserveErr != nil {
-			// 失败时账本与句柄状态均不变（ReserveWait 契约）⇒ 直接丢弃句柄，无预留泄漏。
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-			}, http.StatusInsufficientStorage)
-			return nil, 0, false
-		}
-		return st, pre, true
-	} else if h.storageMgr != nil {
-		if reserveErr := h.storageMgr.WaitReserve(ctx, pre, capacity.CategoryCloud, capacity.DefaultWaitTimeout); reserveErr != nil {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-			}, http.StatusInsufficientStorage)
-			return nil, 0, false
-		}
-	}
-	// 回退路径（storageMgr）或未装配账本：无结算句柄需定案（回退预留按 pre 释放）。
-	return nil, pre, true
+	return res, pre, true
 }
 
 // cloudArchiveCreateTar 执行多文件打包（流式 checksum；O_EXCL 同名冲突与失败路径释放
@@ -443,19 +415,6 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
 		Entries: entries, TotalSize: archiveTotalSize(groupFiles),
 	}, h.logger.With("archive", "group", "group_id", groupID), onSuccess)
-}
-
-// archiveVolumeTransfer 是统一转存的入参（S107 收敛：字段替代长参数列表）。
-type archiveVolumeTransfer struct {
-	Owner        string
-	TargetVolume string
-	TargetPath   string
-	ArchiveName  string
-	Encrypt      bool
-	Cipher       string
-	Compression  string
-	Entries      []transfer.SourceEntry
-	TotalSize    int64
 }
 
 // cloudArchiveToVolume 是统一转存的**共享执行核心**（单任务 / 批量 / 组归档共用）：

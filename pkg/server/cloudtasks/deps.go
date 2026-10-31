@@ -15,6 +15,7 @@ package cloudtasks
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
@@ -22,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/transfer"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -94,6 +96,10 @@ type Volumes interface {
 //
 // 三个 Fallback 方法在装配层绑定 capacity.CategoryCloud；回退账本未装配时
 // 是空操作（与既有 scope==nil && storageMgr==nil 分支等价）。
+//
+// 归档配额四方法（P1-c S3a）是「预留 → 写 → 对账 → 提交/回滚」的唯一取用面：装配层
+// 保留既有实现（组归档与转存路径 S3b 前仍直接调用），本包只消费结果。失败以
+// (status, message) 表达，响应由调用方写出，避免把 http.ResponseWriter 传进配额面。
 type Quota interface {
 	BucketScope(owner, bucket string) *quota.Scope
 	ScopeFor(owner, rel string) *quota.Scope
@@ -102,6 +108,16 @@ type Quota interface {
 	ReserveFallback(ctx context.Context, n int64, timeout time.Duration) error
 	ReleaseFallback(n int64)
 	TryReserveFallback(n int64) error
+
+	// ReserveArchive 预留归档输出配额（含 cloud_archive_max_bytes 上限校验）。
+	// 成功返回结算句柄（nil = storageMgr 回退或未装配账本）与预留量；失败返回 status+message。
+	ReserveArchive(ctx context.Context, owner string, totalSourceSize int64) (reservation *quota.Settlement, pre int64, status int, message string)
+	// SettleArchive 按落盘实际对账预留（scope: Reconcile+Commit；回退: Release+TryReserve）。
+	SettleArchive(root *storage.Root, rel string, reservation *quota.Settlement, pre int64, logger *slog.Logger) (actual int64, status int, message string)
+	// ReleaseArchive 释放未定案的预留（O_EXCL 冲突 / 打包失败路径，幂等）。
+	ReleaseArchive(reservation *quota.Settlement, pre int64)
+	// RecordArchiveUsage 登记归档文件在 archive 桶 Scope 的已确认占用（actual<=0 跳过）。
+	RecordArchiveUsage(owner, archiveName string, actual int64)
 }
 
 // Targets 是转存目标写面：staging gate、写锁、派生状态登记与归档策略
@@ -117,6 +133,23 @@ type Targets interface {
 	SkipVerify() bool
 	MaxArchiveBytes() int64
 	ArchiveKey() []byte
+
+	// 归档打包/转存五方法（P1-c S3a 临时接缝）：实现仍在装配层（tar 助手与
+	// cloudArchiveToVolume 属 S3b 迁移面），本包消费结果；ArchiveToVolume 因执行核心
+	// 尚未迁入暂保留 HTTP 参数，S3b 迁入后删除该方法。
+	//
+	// ValidateArchiveExtras 校验「仅转存外部卷支持」的选项，成功返回 status=0。
+	ValidateArchiveExtras(extras ArchiveExtras) (status int, message string)
+	// CreateArchiveTar 打包单个文件（O_EXCL）；exists=true 表示同名归档已存在（409）。
+	CreateArchiveTar(srcRoot *storage.Root, srcRel, tarName string, outRoot *storage.Root, outRel string,
+		logger *slog.Logger) (checksum string, exists bool, err error)
+	// CreateMultiArchiveTar 打包多个文件（O_EXCL）；exists 语义同上。
+	CreateMultiArchiveTar(sources []ArchiveSource, outRoot *storage.Root, outRel string,
+		logger *slog.Logger) (checksum string, exists bool, err error)
+	// ArchiveEntries 把源文件转成 transfer.SourceEntry（打开 Reader；失败时已关闭已打开项）。
+	ArchiveEntries(sources []ArchiveSource) ([]transfer.SourceEntry, error)
+	// ArchiveToVolume 执行统一转存（可信卷写视图 + owner 前缀 + staging/写锁 + 配额结算）。
+	ArchiveToVolume(w http.ResponseWriter, r *http.Request, t ArchiveVolumeTransfer, logger *slog.Logger, onSuccess func(url string))
 }
 
 // Audit 是业务审计唯一入口（覆设计文档 §5.7）。
