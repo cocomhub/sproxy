@@ -4,9 +4,12 @@
 package quota
 
 import (
+	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
 
 // settlementNew 建「根池 → 子作用域」两级账本并返回绑定该作用域的 Settlement：
@@ -522,5 +525,328 @@ func TestSettlement_ConcurrentCommitAndReleaseIsCoherent(t *testing.T) {
 		}
 	default:
 		t.Fatalf("终态 State()=%v 必须为 committed 或 released", st.State())
+	}
+}
+
+// settlementOccupy 用另一个结算句柄把 scope 占满（Reserve → Commit）。
+// 用于制造「配额临时不足」的前置：ReserveWait 必须排队等释放，而不是立即失败。
+func settlementOccupy(t *testing.T, scope *Scope, n int64) {
+	t.Helper()
+	occ := NewSettlement(scope.Pool())
+	if err := occ.Reserve(n); err != nil {
+		t.Fatalf("预置占满 Reserve(%d): %v", n, err)
+	}
+	if err := occ.Commit(); err != nil {
+		t.Fatalf("预置占满 Commit: %v", err)
+	}
+}
+
+// settlementWaitForWaiting 轮询根池等待队列，直到出现等待者（或等待者已提前返回 ⇒ 直接报错）。
+// 确定性同步基于 WaitStats().Waiting，不用固定 time.Sleep。
+func settlementWaitForWaiting(t *testing.T, root *Pool, done <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if root.WaitStats().Waiting > 0 {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("等待者提前返回（应排队等待）: %v", err)
+		default:
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("等待者未进入排队（Waiting=%d want >0）", root.WaitStats().Waiting)
+}
+
+// TestSettlement_ReserveWait_WakesOnRelease：「临时不足」必须排队等释放后成功，并把额度计入
+// 本句柄预留（随后 Reconcile/Commit 与 Reserve 完全同语义）。
+//
+// 变异 ①（去掉排队、直接返回 ErrStorageFull）⇒ 本用例红（等待者提前返回）。
+func TestSettlement_ReserveWait_WakesOnRelease(t *testing.T) {
+	t.Parallel()
+	root, scope, st := settlementNew(t, 100)
+	settlementOccupy(t, scope, 100)
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- st.ReserveWait(ctx, 50, 5*time.Second)
+	}()
+	settlementWaitForWaiting(t, root, done)
+	// 等待期间不得提前记账（预留只在成功返回后计入句柄）。
+	if got := st.Reserved(); got != 0 {
+		t.Fatalf("等待中 Reserved()=%d want 0", got)
+	}
+	if got := root.Reserved(); got != 0 {
+		t.Fatalf("等待中 root.Reserved()=%d want 0", got)
+	}
+
+	scope.ReleaseUsage(100) // 释放 ⇒ 广播唤醒排队者
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("释放后应预留成功: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("释放后未被唤醒（丢唤醒）")
+	}
+	// 成功：额度计入句柄预留，且排队已出队。
+	if got := st.Reserved(); got != 50 {
+		t.Fatalf("Reserved()=%d want 50", got)
+	}
+	if got := scope.Reserved(); got != 50 {
+		t.Fatalf("scope.Reserved()=%d want 50", got)
+	}
+	if got := root.Reserved(); got != 50 {
+		t.Fatalf("root.Reserved()=%d want 50（父链聚合）", got)
+	}
+	if got := root.WaitStats().Waiting; got != 0 {
+		t.Fatalf("成功后等待者应出队, Waiting=%d", got)
+	}
+	// 排队取到的额度归 Settlement 所有：可继续收敛并提交。
+	if err := st.Reconcile(30); err != nil {
+		t.Fatalf("Reconcile(30): %v", err)
+	}
+	if got := root.Reserved(); got != 30 {
+		t.Fatalf("Reconcile 后 root.Reserved()=%d want 30", got)
+	}
+	if err := st.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if got := scope.Usage(); got != 30 {
+		t.Fatalf("scope.Usage()=%d want 30", got)
+	}
+	if got := root.Usage(); got != 30 {
+		t.Fatalf("root.Usage()=%d want 30", got)
+	}
+}
+
+// TestSettlement_ReserveWait_TimeoutLeavesNothingBehind：超时失败必须「账本/状态/队列」全无残留，
+// 且错误仍可归因为容量不足（调用方映射 507）。
+//
+// 变异 ②（超时后仍继续占用排队/账本）⇒ 末尾 Waiting/Reserved 断言红。
+func TestSettlement_ReserveWait_TimeoutLeavesNothingBehind(t *testing.T) {
+	t.Parallel()
+	root, scope, st := settlementNew(t, 100)
+	settlementOccupy(t, scope, 100)
+
+	const timeout = 50 * time.Millisecond
+	// ctx 带有限期：即使实现退化为「超时后重新排队」，用例也会在 3s 内结束并红，不会挂死。
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := st.ReserveWait(ctx, 50, timeout)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("无人释放时超时应失败")
+	}
+	if !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("错误应包装 ErrStorageFull（容量不足语义）: %v", err)
+	}
+	if !errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("错误应可归因「等待超时」: %v", err)
+	}
+	if elapsed < timeout {
+		t.Fatalf("应在超时窗口后才失败，实际 %s（未真正排队）", elapsed)
+	}
+	// 失败不改变账本与状态。
+	if got := st.Reserved(); got != 0 {
+		t.Fatalf("超时后 Reserved()=%d want 0", got)
+	}
+	if got := scope.Reserved(); got != 0 {
+		t.Fatalf("超时后 scope.Reserved()=%d want 0", got)
+	}
+	if got := root.Reserved(); got != 0 {
+		t.Fatalf("超时后 root.Reserved()=%d want 0", got)
+	}
+	if got := st.State(); got != StateOpen {
+		t.Fatalf("超时后 State()=%v want open（句柄可继续使用）", got)
+	}
+	// 排队无残留：等待者必须已出队。
+	if got := root.WaitStats().Waiting; got != 0 {
+		t.Fatalf("超时后等待者未出队, Waiting=%d", got)
+	}
+	// 句柄未被失败污染：释放后同一句柄可再次排队并成功。
+	scope.ReleaseUsage(100)
+	if err := st.ReserveWait(context.Background(), 50, timeout); err != nil {
+		t.Fatalf("释放后同一句柄重新排队应成功: %v", err)
+	}
+	if got := st.Reserved(); got != 50 {
+		t.Fatalf("重试成功后 Reserved()=%d want 50", got)
+	}
+}
+
+// TestSettlement_ReserveWait_CancelLeavesNothingBehind：ctx 取消立即打断等待，同样无账本/队列残留。
+func TestSettlement_ReserveWait_CancelLeavesNothingBehind(t *testing.T) {
+	t.Parallel()
+	root, scope, st := settlementNew(t, 100)
+	settlementOccupy(t, scope, 100)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- st.ReserveWait(ctx, 50, 10*time.Second) }()
+	settlementWaitForWaiting(t, root, done)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("应返回 ctx 取消错误, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ctx 取消未打断等待")
+	}
+	if got := st.Reserved(); got != 0 {
+		t.Fatalf("取消后 Reserved()=%d want 0", got)
+	}
+	if got := root.Reserved(); got != 0 {
+		t.Fatalf("取消后 root.Reserved()=%d want 0", got)
+	}
+	if got := root.WaitStats().Waiting; got != 0 {
+		t.Fatalf("取消后等待者未出队, Waiting=%d", got)
+	}
+}
+
+// TestSettlement_ReserveWait_EnoughRoomSkipsQueue：有空间时不入队（与 WaitReserve 的「快速尝试」一致），
+// 也就不可能被排队超时打扰。
+func TestSettlement_ReserveWait_EnoughRoomSkipsQueue(t *testing.T) {
+	t.Parallel()
+	root, scope, st := settlementNew(t, 1000)
+	if err := st.ReserveWait(context.Background(), 100, time.Millisecond); err != nil {
+		t.Fatalf("有空间应直接预留成功: %v", err)
+	}
+	if got := st.Reserved(); got != 100 {
+		t.Fatalf("Reserved()=%d want 100", got)
+	}
+	if got := root.WaitStats().Waiting; got != 0 {
+		t.Fatalf("有空间时不得入队, Waiting=%d", got)
+	}
+	if got := root.WaitRounds(); got != 0 {
+		t.Fatalf("有空间时不得入队（waitRounds=%d want 0）", got)
+	}
+	if err := st.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if got := scope.Usage(); got != 100 {
+		t.Fatalf("scope.Usage()=%d want 100", got)
+	}
+}
+
+// TestSettlement_ReserveWait_TooLargeFailsFast：即使全部释放也放不下 ⇒ 立即失败、不入队
+// （排队等一个永远不会来的额度没有意义）。
+func TestSettlement_ReserveWait_TooLargeFailsFast(t *testing.T) {
+	t.Parallel()
+	root, scope, st := settlementNew(t, 100)
+	start := time.Now()
+	err := st.ReserveWait(context.Background(), 150, 5*time.Second)
+	if !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("err=%v want ErrStorageFull", err)
+	}
+	if errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("不可能容纳的请求不应以「等待超时」收场: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("不可能容纳应立即失败, 实际耗时 %s", elapsed)
+	}
+	if got := root.WaitStats().Waiting; got != 0 {
+		t.Fatalf("不得占用等待队列, Waiting=%d", got)
+	}
+	if got := st.Reserved(); got != 0 {
+		t.Fatalf("失败后 Reserved()=%d want 0", got)
+	}
+	if got := scope.Reserved(); got != 0 {
+		t.Fatalf("失败后 scope.Reserved()=%d want 0", got)
+	}
+}
+
+// TestSettlement_ReserveWait_TerminalOrNoTargetFailsWithoutQueueing：终态句柄与未绑定账本的
+// 句柄必须立即返回哨兵错误（不排队、不改账本），零/负字节与 Reserve 一致地钳零直通。
+func TestSettlement_ReserveWait_TerminalOrNoTargetFailsWithoutQueueing(t *testing.T) {
+	t.Parallel()
+	t.Run("committed", func(t *testing.T) {
+		t.Parallel()
+		root, _, st := settlementNew(t, 1000)
+		if err := st.Reserve(10); err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		if err := st.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if err := st.ReserveWait(context.Background(), 10, time.Millisecond); !errors.Is(err, ErrSettlementCommitted) {
+			t.Fatalf("err=%v want ErrSettlementCommitted", err)
+		}
+		if got := root.WaitRounds(); got != 0 {
+			t.Fatalf("终态句柄不得入队, waitRounds=%d", got)
+		}
+		if got := st.Reserved(); got != 0 {
+			t.Fatalf("Reserved()=%d want 0", got)
+		}
+	})
+	t.Run("released", func(t *testing.T) {
+		t.Parallel()
+		root, _, st := settlementNew(t, 1000)
+		st.Release()
+		if err := st.ReserveWait(context.Background(), 10, time.Millisecond); !errors.Is(err, ErrSettlementReleased) {
+			t.Fatalf("err=%v want ErrSettlementReleased", err)
+		}
+		if got := root.WaitRounds(); got != 0 {
+			t.Fatalf("终态句柄不得入队, waitRounds=%d", got)
+		}
+	})
+	t.Run("no target", func(t *testing.T) {
+		t.Parallel()
+		st := NewSettlement(nil)
+		if err := st.ReserveWait(context.Background(), 10, time.Millisecond); !errors.Is(err, ErrSettlementNoTarget) {
+			t.Fatalf("err=%v want ErrSettlementNoTarget", err)
+		}
+		// 与 Reserve 一致：零/负字节钳零后立即成功，无需账本。
+		if err := st.ReserveWait(context.Background(), 0, time.Millisecond); err != nil {
+			t.Fatalf("零字节应直通成功: %v", err)
+		}
+		if err := st.ReserveWait(context.Background(), -5, time.Millisecond); err != nil {
+			t.Fatalf("负字节钳零应直通成功: %v", err)
+		}
+	})
+}
+
+// TestSettlement_ReserveWait_StateChangeDuringWaitLeavesNoLeak：等待期间句柄被并发 Release
+// （终态）⇒ 排队取到的额度必须归还，不得滞留 reserved。
+//
+// 变异 ③（终态冲突路径不归还刚取到的额度）⇒ 末尾 root.Reserved() 断言红。
+func TestSettlement_ReserveWait_StateChangeDuringWaitLeavesNoLeak(t *testing.T) {
+	t.Parallel()
+	root, scope, st := settlementNew(t, 100)
+	settlementOccupy(t, scope, 100)
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- st.ReserveWait(ctx, 50, 5*time.Second)
+	}()
+	settlementWaitForWaiting(t, root, done)
+	st.Release() // 等待期间句柄进入终态
+	scope.ReleaseUsage(100)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSettlementReleased) {
+			t.Fatalf("终态冲突应返回 ErrSettlementReleased, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("释放后未被唤醒")
+	}
+	if got := scope.Reserved(); got != 0 {
+		t.Fatalf("终态冲突后 scope.Reserved()=%d want 0（不得泄漏）", got)
+	}
+	if got := root.Reserved(); got != 0 {
+		t.Fatalf("终态冲突后 root.Reserved()=%d want 0（不得泄漏）", got)
+	}
+	if got := root.WaitStats().Waiting; got != 0 {
+		t.Fatalf("等待者应出队, Waiting=%d", got)
+	}
+	if got := st.State(); got != StateReleased {
+		t.Fatalf("State()=%v want released", got)
 	}
 }
