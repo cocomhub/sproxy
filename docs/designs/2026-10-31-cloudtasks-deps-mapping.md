@@ -520,6 +520,31 @@ type AuditSink interface {
   `cloud_download_handler_test.go 26`）：若 S2/S3 把测试也搬进新包，必须同步 TSV 并保持
   全仓总数只减不增。
 
+## 10.1 交付结果（2026-10-31，S1–S4 全部合并）
+
+| 阶段 | PR | 结果 |
+|---|---|---|
+| S1 接口契约 | #968 | 7 接口 / 37 方法 / `Deps` 8 字段（`Volumes.PhysFootprint` 收口隐藏入边） |
+| S2a 任务 CRUD | #970 | `cloud_download_handler.go` 1357 → 1027 |
+| S2b 组 | #971 | 1027 → 787（新增 `Groups.DeleteGroupArchive` 过渡方法） |
+| S3a 归档 task/batch | #972 | `cloud_archive_handler.go` 839 → 411 |
+| S3b 组归档 | #973 | `pkg/server` 31,959 |
+| S3c 转存核心 | #974 | `cloud_download_handler.go` 470 → 68；接口 48 → 42；删除 6 个过渡 seam |
+| S4 tar 助手收尾 | #975 | `cloud_archive_handler.go` 240 → 106；接口 42 → **40**；`Targets` 9 → 7 |
+
+**最终形态**：`Deps` 恒为 **8 字段**（7 窄接口 + Logger），接口方法合计 **40**；
+`pkg/server` 非测试行数 **42,568 → 31,221（−26.6%）**，新增 `pkg/server/cloudtasks` 约 2,100 行。
+
+**保留在装配层的部分（有意为之）**：
+- `archiveReserveQuota` / `archiveSettleQuota`：失败面是 HTTP 状态码 + 中文文案，属装配语义；
+- `cloudTaskDeps` / `cloudTaskService` / `cloudTaskHandler`：依赖装配与 `ActorFrom` 适配（owner 显式传入核心）。
+
+**已删除的过渡 seam**（不再存在于 `Deps` 接口）：`Targets.ArchiveToVolume`、`Targets.ValidateArchiveExtras`、
+`Targets.ArchiveEntries`、`Targets.ArchiveTotalSize`、`Targets.CreateArchiveTar`、`Targets.CreateMultiArchiveTar`、
+`Quota.RecordArchiveUsage`、`Groups.DeleteGroupArchive`。
+
+**教训**：`Deps` 字段数是装配耦合的度量（守卫 ≤8）；能力增长应体现为**接口方法**增加，而不是字段增加。
+
 ## 11. 关键引用（file:line）
 
 - `pkg/server/cloud_download_handler.go:50/589/631/642/661/759/846/892/1001/1131/1183/1207/1224`
