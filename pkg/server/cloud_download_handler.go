@@ -729,20 +729,15 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
-	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
-	if !h.cloudArchiveReconcileReservation(w, root, rel, res, pre, groupID) {
+	// 按磁盘实际大小对账预留配额（与单任务/批量归档同一实现：Reconcile(actual) + Commit()，
+	// 多预留部分自动归还；storageMgr 回退保留 3 步 Release(pre)+TryReserve(actual)）。
+	actual, ok := h.cloudArchiveSettleQuota(w, root, rel, res, pre, h.logger.With("group_id", groupID))
+	if !ok {
 		return
 	}
 
-	info, _ := root.Stat(rel)
-	size := int64(0)
-	if info != nil {
-		size = info.Size()
-	}
-
 	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
-	h.recordArchiveUsage(owner, archiveName, size)
+	h.recordArchiveUsage(owner, archiveName, actual)
 
 	// 更新组归档路径（落库到真实组对象；仅存归档名，客户端不接触 .__ 内部路径）
 	archiveFile := archiveName
@@ -751,7 +746,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, CloudArchiveResult{
 		Success:      true,
 		File:         archiveFile,
-		Size:         size,
+		Size:         actual,
 		Checksum:     checksum,
 		TaskCount:    len(groupFiles),
 		SkippedCount: len(skippedTasks),
@@ -891,8 +886,10 @@ func (h *Handlers) cloudArchiveMaxBytesOK(w http.ResponseWriter, totalSize int64
 }
 
 // cloudArchiveReserveQuota 打包前做总量限制（cloud_archive_max_bytes）+ 配额预留
-// （scope 优先单步；storageMgr 仅作回退）。返回 false 表示已回错误响应包。
-func (h *Handlers) cloudArchiveReserveQuota(ctx context.Context, w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Reservation, int64, bool) {
+// （scope 优先；storageMgr 仅作回退）。返回的结算句柄非 nil = scope 路径已预留 pre 字节
+// （nil = 回退路径或未装配账本，无预留需定案），调用方必须以 cloudArchiveSettleQuota（成功）
+// 或 releaseArchiveReservation（失败）定案，否则预留泄漏。返回 false 表示已回错误响应包。
+func (h *Handlers) cloudArchiveReserveQuota(ctx context.Context, w http.ResponseWriter, owner string, totalSourceSize int64) (*quota.Settlement, int64, bool) {
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
 	if !h.cloudArchiveMaxBytesOK(w, totalSourceSize) {
 		return nil, 0, false
@@ -900,16 +897,20 @@ func (h *Handlers) cloudArchiveReserveQuota(ctx context.Context, w http.Response
 	pre := totalSourceSize + cloudArchiveReservePlaceholder
 	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
 	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
-	var res *quota.Reservation
+	// P1-b：scope 路径的「预留 → 对账 → 提交/回滚」改走 quota.Settlement（协议唯一实现）；
+	// ReserveWait 保留「容量临时不足 ⇒ 排队等释放」的能力（#963 锁定的语义，不得退化为立即 507）。
 	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
-		rr, reserveErr := scope.WaitReserve(ctx, pre, quota.DefaultWaitTimeout)
-		if reserveErr != nil {
+		st := quota.NewSettlement(scope.Pool())
+		// h.quotaWaitTimeout = 0（生产恒 0）⇒ ReserveWait 内部按 quota.DefaultWaitTimeout（30s），
+		// 语义不变。此前此处恒传 quota.DefaultWaitTimeout，测试注入的等待上限被忽略（#963 记录）。
+		if reserveErr := st.ReserveWait(ctx, pre, h.quotaWaitTimeout); reserveErr != nil {
+			// 失败时账本与句柄状态均不变（ReserveWait 契约）⇒ 直接丢弃句柄，无预留泄漏。
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
 			return nil, 0, false
 		}
-		res = rr
+		return st, pre, true
 	} else if h.storageMgr != nil {
 		if reserveErr := h.storageMgr.WaitReserve(ctx, pre, capacity.CategoryCloud, capacity.DefaultWaitTimeout); reserveErr != nil {
 			sendJSONResponse(w, CloudArchiveResult{
@@ -918,12 +919,13 @@ func (h *Handlers) cloudArchiveReserveQuota(ctx context.Context, w http.Response
 			return nil, 0, false
 		}
 	}
-	return res, pre, true
+	// 回退路径（storageMgr）或未装配账本：无结算句柄需定案（回退预留按 pre 释放）。
+	return nil, pre, true
 }
 
 // cloudArchiveCreateTar 执行多文件打包（流式 checksum；O_EXCL 同名冲突与失败路径释放
 // 预留并清理半成品）。返回 false 表示已回错误响应包。
-func (h *Handlers) cloudArchiveCreateTar(w http.ResponseWriter, groupFiles []fileWithRelPath, root *storage.Root, rel string, res *quota.Reservation, pre int64, groupID string) (string, bool) {
+func (h *Handlers) cloudArchiveCreateTar(w http.ResponseWriter, groupFiles []fileWithRelPath, root *storage.Root, rel string, res *quota.Settlement, pre int64, groupID string) (string, bool) {
 	// 多文件打包
 	created := false
 	logger := h.logger.With("archive", "group", "group_id", groupID)
@@ -944,40 +946,6 @@ func (h *Handlers) cloudArchiveCreateTar(w http.ResponseWriter, groupFiles []fil
 		return "", false
 	}
 	return checksum, true
-}
-
-// cloudArchiveReconcileReservation 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)
-// （多预留部分自动归还）；storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本
-// /stats 兼容）。返回 false 表示已回错误响应包。
-func (h *Handlers) cloudArchiveReconcileReservation(w http.ResponseWriter, root *storage.Root, rel string, res *quota.Reservation, pre int64, groupID string) bool {
-	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
-	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
-	actual := int64(0)
-	if res != nil {
-		if info, statErr := root.Stat(rel); statErr == nil {
-			actual = info.Size()
-			res.Commit(actual)
-			res = nil
-		} else {
-			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
-			res.Release()
-			res = nil
-		}
-	} else if h.storageMgr != nil {
-		h.storageMgr.Release(pre, capacity.CategoryCloud)
-		if info, statErr := root.Stat(rel); statErr == nil {
-			actual = info.Size()
-			if rErr := h.storageMgr.TryReserve(actual, capacity.CategoryCloud); rErr != nil {
-				h.logger.Error("storage full, removing archive to keep ledger consistent", "group_id", groupID, "error", rErr)
-				_ = root.Remove(rel)
-				sendJSONResponse(w, CloudArchiveResult{
-					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-				}, http.StatusInsufficientStorage)
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // cloudArchiveGroupToVolume 统一转存：组归档打包后转存到外部卷（target_volume）。
