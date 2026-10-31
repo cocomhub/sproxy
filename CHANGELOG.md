@@ -12,6 +12,69 @@ SPDX-License-Identifier: Apache-2.0
 > `Fixed` 修复 / `Security` 安全。0.1.0–0.11.0 的版本 tag 按提交时间线回溯建立，
 > 每个版本对应的提交范围见文末链接。
 
+## [0.26.0](https://github.com/cocomhub/sproxy/compare/v0.25.0...v0.26.0) (2026-10-31)
+
+
+### Added
+
+* **archcheck:** 新增 R51 别名棘轮与 R52 Deps 字段上限（[#944](https://github.com/cocomhub/sproxy/issues/944)） ([5762983](https://github.com/cocomhub/sproxy/commit/57629831e60fe468bc3bf7c2e5d3cabe06ac9d3f))
+* **quota:** Settlement 增加排队预留 ReserveWait（[#964](https://github.com/cocomhub/sproxy/issues/964)） ([5a721bb](https://github.com/cocomhub/sproxy/commit/5a721bb1d9a5ba9cd47f2dc6748d89ef841acd69))
+* **quota:** 新增配额结算状态机 Settlement（[#961](https://github.com/cocomhub/sproxy/issues/961)） ([2c2f790](https://github.com/cocomhub/sproxy/commit/2c2f790dcb1af7f93042e5cc5596f870b664e9a8))
+* **server:** cloudtasks 窄接口与装配适配器（P1-c S1）（[#968](https://github.com/cocomhub/sproxy/issues/968)） ([d06359f](https://github.com/cocomhub/sproxy/commit/d06359fc3dddd2f1e56c3c1bce8cfd5952cf83ba))
+
+
+### Fixed
+
+* **ai:** NormalizeTags 按 maxTagRunes 截断每个标签（[#954](https://github.com/cocomhub/sproxy/issues/954)） ([8df4218](https://github.com/cocomhub/sproxy/commit/8df4218cc58f8f9e6215d8a2f41713f5684865ec))
+* **archcheck:** 修复 R35-a 审计棘轮扫描面（此前只扫 internal/）（[#967](https://github.com/cocomhub/sproxy/issues/967)） ([8bb3ffc](https://github.com/cocomhub/sproxy/commit/8bb3ffcfdc67f57fa443b0fb331c5dc3a0e36998))
+* **baidupcs:** 大文件上传后可见性轮询等待 + 外部卷目录已存在区分完整/残缺（[#950](https://github.com/cocomhub/sproxy/issues/950)） ([8813288](https://github.com/cocomhub/sproxy/commit/88132888424871e4b5a7b48f043901fde24d5aa6))
+* **metrics:** RecordAuditRotate 的 nil 接收者不再 panic（[#947](https://github.com/cocomhub/sproxy/issues/947)） ([119c078](https://github.com/cocomhub/sproxy/commit/119c0783bf9b966c5695fee60916499ef3ad9d72))
+* **s3:** 请求体读取失败必须 400，禁止回落客户端声明哈希（[#948](https://github.com/cocomhub/sproxy/issues/948)） ([e7f1a0d](https://github.com/cocomhub/sproxy/commit/e7f1a0d8aa43ec3278e2ee3c0ef69525a4d83687))
+* **server:** 恢复 [#927](https://github.com/cocomhub/sproxy/issues/927) 遗失的 TestConfigValidate_MaintenanceWindow 并加测试完整性门禁（[#940](https://github.com/cocomhub/sproxy/issues/940)） ([8d3e28f](https://github.com/cocomhub/sproxy/commit/8d3e28f3c0b9130b9b3538c5b8f4872401f8b1d4))
+* **verify:** 按卷巡检真正生效（volName 过滤 + 不误隔离其它卷）（[#956](https://github.com/cocomhub/sproxy/issues/956)） ([5e69808](https://github.com/cocomhub/sproxy/commit/5e69808d060aa479e3a3bde2f59cc1be918f005f))
+
+
+### Changed
+
+* **architecture:** 补齐 S9–S13 切片记录并写明剩余三块的收敛判据（[#938](https://github.com/cocomhub/sproxy/issues/938)） ([f6a85ac](https://github.com/cocomhub/sproxy/commit/f6a85acd8d3e4e6a8e586285dec015853fd6aec7))
+* **design:** cloudtasks 依赖映射（30→≤8 接口）（[#966](https://github.com/cocomhub/sproxy/issues/966)） ([2299d0e](https://github.com/cocomhub/sproxy/commit/2299d0e89aa29a30ff8cb2ae9ed6e638f4560988))
+* **design:** 装配层策略对象抽取（volume.Router / quota.Settlement / cloudtasks）（[#957](https://github.com/cocomhub/sproxy/issues/957)） ([74a884c](https://github.com/cocomhub/sproxy/commit/74a884cf9baf81bfd1f06ebf2f0513ce69f080d7))
+* **gates:** 登记 R49 测试注释悬空与 R50 测试数量棘轮（[#942](https://github.com/cocomhub/sproxy/issues/942)） ([2d821bf](https://github.com/cocomhub/sproxy/commit/2d821bf9c264df933db0e61df7fa2980dfa2c26a))
+* **memory:** 记录 server 治理切片系列终态与剩余三块判据（[#939](https://github.com/cocomhub/sproxy/issues/939)） ([f0331ae](https://github.com/cocomhub/sproxy/commit/f0331aed9bdf3b478f994b0e9e88bfbb6e53793d))
+* **memory:** 记录切片覆盖率基线与补测纪律、R49-R52 门禁（[#949](https://github.com/cocomhub/sproxy/issues/949)） ([91a2995](https://github.com/cocomhub/sproxy/commit/91a299566f2f742bf9ae5c62dd751cfb43d834b0))
+* **secretdata:** 外部卷启动从 20-30 分钟降到 14 秒（轻量列举 + 索引快照 + meta 缓存）（[#943](https://github.com/cocomhub/sproxy/issues/943)） ([93d69b0](https://github.com/cocomhub/sproxy/commit/93d69b0c93d9b0d9e37d8d988ac4352c6f0728e7))
+* **server:** ai 包内单测（覆盖率 15.3%→98.4%）（[#952](https://github.com/cocomhub/sproxy/issues/952)） ([cd01bc6](https://github.com/cocomhub/sproxy/commit/cd01bc6a1ab9f284e14288f5c606b6a8c91d71b4))
+* **server:** AI 域下沉 pkg/server/ai（EventSource 依赖倒置）（[#931](https://github.com/cocomhub/sproxy/issues/931)） ([ac98762](https://github.com/cocomhub/sproxy/commit/ac987626f751182f8123fba49672fbce74a1ce14))
+* **server:** alerts 包内单测（覆盖率 69.0%→100%）（[#958](https://github.com/cocomhub/sproxy/issues/958)） ([f02ac22](https://github.com/cocomhub/sproxy/commit/f02ac22cdb7e0bb9e55a58445a02020149dcdc41))
+* **server:** archive 包内单测（覆盖率 69.1%→96.4%）（[#959](https://github.com/cocomhub/sproxy/issues/959)） ([1716744](https://github.com/cocomhub/sproxy/commit/1716744df7692b5a1af1df85e1ea554f22476e6e))
+* **server:** checksum 巡检下沉 pkg/server/verify（摘要统一 checksum.File）（[#934](https://github.com/cocomhub/sproxy/issues/934)） ([2c2c851](https://github.com/cocomhub/sproxy/commit/2c2c85175e781daf3f5ee796a688a138cc473a32))
+* **server:** dav 包内单测（覆盖率 33.2%→98.1%）（[#953](https://github.com/cocomhub/sproxy/issues/953)） ([6778ea5](https://github.com/cocomhub/sproxy/commit/6778ea5099a062ac187ba112b1e4619982b9517f))
+* **server:** Handlers 收敛为 12 个分域 Deps，新增 R7 防回退门禁（[#928](https://github.com/cocomhub/sproxy/issues/928)） ([a8b4f48](https://github.com/cocomhub/sproxy/commit/a8b4f48327b03adb1a6b9dd8753fabb1531e8c96))
+* **server:** metrics 包内单测（覆盖率 12.6%→96.3%）（[#945](https://github.com/cocomhub/sproxy/issues/945)） ([0001092](https://github.com/cocomhub/sproxy/commit/0001092b5d9c78830b08a109c6a2036946448f5d))
+* **server:** S3 兼容网关下沉 pkg/server/s3（依赖倒置 Deps）（[#929](https://github.com/cocomhub/sproxy/issues/929)） ([f4c1d7d](https://github.com/cocomhub/sproxy/commit/f4c1d7dd9a26b65fa3b846d993a7d972b71dce21))
+* **server:** s3 包内单测（覆盖率 3.6%→92.5%）（[#946](https://github.com/cocomhub/sproxy/issues/946)） ([d0e8af2](https://github.com/cocomhub/sproxy/commit/d0e8af26163d106f180632c7f52d1cf1b549f23b))
+* **server:** share 包内单测（覆盖率 25.2%→95.9%）（[#951](https://github.com/cocomhub/sproxy/issues/951)） ([04a392f](https://github.com/cocomhub/sproxy/commit/04a392fcac69cb45804a32a93c10935d8f218bc8))
+* **server:** verify 包补真实单测（覆盖率 5.9%→67.6%）并移除未用的 Deps.Alert（[#941](https://github.com/cocomhub/sproxy/issues/941)） ([aa51347](https://github.com/cocomhub/sproxy/commit/aa51347e1a1739975c2df2763d5d683a68787e89))
+* **server:** verify 包覆盖率提升（67.6%→100%）（[#955](https://github.com/cocomhub/sproxy/issues/955)） ([26a6722](https://github.com/cocomhub/sproxy/commit/26a67228714f93f6829c0cb03edde9697ddb6dcc))
+* **server:** WebDAV 挂载面下沉 pkg/server/dav（MetaPolicy 依赖倒置）（[#930](https://github.com/cocomhub/sproxy/issues/930)） ([f21d3a3](https://github.com/cocomhub/sproxy/commit/f21d3a35cff5525e25217276fe9a74ca54702901))
+* **server:** 云任务 CRUD 迁入 cloudtasks（P1-c S2a）（[#970](https://github.com/cocomhub/sproxy/issues/970)） ([6a351cc](https://github.com/cocomhub/sproxy/commit/6a351cc495a9f1207027999a4497500294396540))
+* **server:** 云任务组迁入 cloudtasks（P1-c S2b）（[#971](https://github.com/cocomhub/sproxy/issues/971)） ([439c192](https://github.com/cocomhub/sproxy/commit/439c1928772a96a1303f8bfe90b0c90ce29e60fc))
+* **server:** 云归档 task/batch 迁入 cloudtasks（P1-c S3a）（[#972](https://github.com/cocomhub/sproxy/issues/972)） ([5b1e334](https://github.com/cocomhub/sproxy/commit/5b1e33437e43348dbdb7424edbfeb4b9b8207d88))
+* **server:** 云归档转存核心迁入 cloudtasks（P1-c S3c）（[#974](https://github.com/cocomhub/sproxy/issues/974)） ([63663a2](https://github.com/cocomhub/sproxy/commit/63663a2d5790fe3c09e5558663439d67c67d34a6))
+* **server:** 云归档配额结算迁移到 quota.Settlement（[#965](https://github.com/cocomhub/sproxy/issues/965)） ([62b8862](https://github.com/cocomhub/sproxy/commit/62b886208dcade41a587e885933151b5b5c1ae53))
+* **server:** 云组归档迁入 cloudtasks（P1-c S3b）（[#973](https://github.com/cocomhub/sproxy/issues/973)） ([6ad4ac6](https://github.com/cocomhub/sproxy/commit/6ad4ac6ad5224ff22a5459f276edf41c0f024852))
+* **server:** 分享存储下沉 pkg/server/share（[#932](https://github.com/cocomhub/sproxy/issues/932)） ([0e5d5eb](https://github.com/cocomhub/sproxy/commit/0e5d5eb71c0efd510d43ac98ea2ed5de31b148ed))
+* **server:** 卷定位委托 volume.Router（P1-a 接线）（[#962](https://github.com/cocomhub/sproxy/issues/962)） ([072dec8](https://github.com/cocomhub/sproxy/commit/072dec869dc028568502a6241ecfbc534e6c6a8a))
+* **server:** 归档 tar 助手下沉 pkg/server/archive，删除 user_visible_io 薄封装（[#937](https://github.com/cocomhub/sproxy/issues/937)） ([04b21aa](https://github.com/cocomhub/sproxy/commit/04b21aae5d7abc29b5305622f8fe1f9989230fc4))
+* **server:** 服务端配置下沉 pkg/server/config 并建立作用域门禁（[#924](https://github.com/cocomhub/sproxy/issues/924)） ([0e5377f](https://github.com/cocomhub/sproxy/commit/0e5377fd42e68749e16deff03d04e5d932474592))
+* **server:** 用量统计下沉 pkg/server/ops（du + stats 纯遍历）（[#935](https://github.com/cocomhub/sproxy/issues/935)） ([d897d6f](https://github.com/cocomhub/sproxy/commit/d897d6f06276c78e589116a6b7c441cb665d71ac))
+* **server:** 统一周期任务调度器下沉 pkg/server/scheduler（[#927](https://github.com/cocomhub/sproxy/issues/927)） ([1716633](https://github.com/cocomhub/sproxy/commit/171663312f82baa98ae4c0ffd5fbf9b04ac7cd89))
+* **server:** 运行时指标注册表下沉 pkg/server/metrics（[#933](https://github.com/cocomhub/sproxy/issues/933)） ([fd1d99e](https://github.com/cocomhub/sproxy/commit/fd1d99eb406b1bb667716f6eabbaf9a51d52ec46))
+* **server:** 通知域下沉 pkg/server/notify 并倒置事件依赖（[#926](https://github.com/cocomhub/sproxy/issues/926)） ([4eb21dc](https://github.com/cocomhub/sproxy/commit/4eb21dc501c8fa6d6a5e29ba93f5933ed3e4502e))
+* **server:** 锁定云归档配额预留的排队语义（P1-b 试点结论）（[#963](https://github.com/cocomhub/sproxy/issues/963)） ([2ee06b7](https://github.com/cocomhub/sproxy/commit/2ee06b75959678537e5a8b2b4ed9a944dc7f0450))
+* **server:** 阈值告警引擎下沉 pkg/server/alerts（[#936](https://github.com/cocomhub/sproxy/issues/936)） ([9ccd973](https://github.com/cocomhub/sproxy/commit/9ccd973e9d2f705afe2493e9998deb800a577045))
+* **volume:** 新增卷路由与 ACL 单一实现 volume.Router（[#960](https://github.com/cocomhub/sproxy/issues/960)） ([c59eb5e](https://github.com/cocomhub/sproxy/commit/c59eb5e3e74fc4d09699a8987411cba64769683f))
+
 ## [0.25.0](https://github.com/cocomhub/sproxy/compare/v0.24.0...v0.25.0) (2026-10-30)
 
 
