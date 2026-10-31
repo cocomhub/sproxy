@@ -32,7 +32,10 @@ var Managed = map[string]bool{
 	// 本工作新增（server 治理 S1）：服务端配置 schema/校验/默认值/加载。
 	// **server 作用域**（只在 sproxy 服务端进程有意义），故路径在 pkg/server/ 子树下，
 	// 由 R4（pkg/** 非子树不得导入）与 R5（子包不得导入装配根）共同约束。
-	"github.com/cocomhub/sproxy/pkg/server/config":        true,
+	"github.com/cocomhub/sproxy/pkg/server/config": true,
+	// P1-c S1：云下载/云归档编排核心的 Deps 与 7 个窄接口（无编排逻辑、不依赖装配根）。
+	// 依赖 pkg/cloud(L1)/quota(0)/storage(0)/sync(0)/volume(0) ⇒ G2，与 pkg/server 同层。
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks":    true,
 	"github.com/cocomhub/sproxy/pkg/sync/httptransport":   true,
 	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil": true,
 }
@@ -134,6 +137,9 @@ var Levels = map[string]int{
 	// 服务端配置 schema（server 作用域）：只依赖 G0/G1 与装配层同级能力 ⇒ G2
 	// （与 pkg/server 同层：装配根 import 它，同层合法）。
 	"github.com/cocomhub/sproxy/pkg/server/config": 2,
+	// 云下载/云归档编排核心的依赖契约（server 作用域）：依赖 pkg/cloud(L1) 等 ⇒ G2；
+	// 装配根 import 它，同层合法。S1 只声明接口/适配器断言，未接调用点。
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks": 2,
 	// 通知域（注册表/规则路由/去抖/重试/渠道/feed 渲染）：依赖 config(L2) 与 G0 ⇒ G2。
 	"github.com/cocomhub/sproxy/pkg/server/notify": 2,
 	// 通用周期任务调度器（零 pkg/* 依赖）⇒ G0。
@@ -213,18 +219,19 @@ var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  "github.com/cocomhub/sproxy/pkg/volume",
 	// 服务端配置是 pkg/server 的子包：只允许 pkg/server 子树与装配层导入
 	// （Global 包反向导入它会被 R2 拦下——这是「server 作用域」的可执行边界）。
-	"github.com/cocomhub/sproxy/pkg/server/config":    "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/notify":    "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/scheduler": "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/s3":        "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/dav":       "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/ai":        "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/share":     "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/metrics":   "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/verify":    "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/ops":       "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/alerts":    "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/archive":   "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/config":     "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks": "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/notify":     "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/scheduler":  "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/s3":         "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/dav":        "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/ai":         "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/share":      "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/metrics":    "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/verify":     "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/ops":        "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/alerts":     "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/archive":    "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。

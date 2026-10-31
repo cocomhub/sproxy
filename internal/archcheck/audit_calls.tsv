@@ -14,6 +14,7 @@ pkg/server/backends_api.go	4
 pkg/server/backup_api.go	1	
 pkg/server/checksum_api.go	1	
 pkg/server/cloud_download_handler.go	8	
+pkg/server/cloudtasks_wiring.go	1	
 pkg/server/config_api.go	2	
 pkg/server/credentials_handler.go	17	
 pkg/server/download_handler.go	1	
