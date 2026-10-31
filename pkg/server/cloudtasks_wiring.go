@@ -11,7 +11,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
@@ -240,39 +239,6 @@ func (a *cloudTasksAdapter) ArchiveKey() []byte {
 		return nil
 	}
 	return a.h.archiveKey()
-}
-
-// ---- Targets（归档，P1-c S3a：tar 打包助手） ----
-
-// CreateArchiveTar 委托装配层的单文件 tar.gz 打包（O_EXCL）。
-func (a *cloudTasksAdapter) CreateArchiveTar(srcRoot *storage.Root, srcRel, tarName string, outRoot *storage.Root, outRel string, logger *slog.Logger) (string, bool, error) {
-	checksum, err := createTarGz(srcRoot, srcRel, tarName, outRoot, outRel, logger)
-	if errors.Is(err, errArchiveExists) {
-		return "", true, nil
-	}
-	return checksum, false, err
-}
-
-// CreateMultiArchiveTar 委托装配层的多文件 tar.gz 打包（O_EXCL）。
-func (a *cloudTasksAdapter) CreateMultiArchiveTar(sources []cloudtasks.ArchiveSource, outRoot *storage.Root, outRel string, logger *slog.Logger) (string, bool, error) {
-	created := false
-	checksum, err := createMultiFileTarGz(archiveFilesFrom(sources), outRoot, outRel, logger, &created)
-	if errors.Is(err, errArchiveExists) {
-		return "", true, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return checksum, false, nil
-}
-
-// archiveFilesFrom 把编排核心的源文件描述适配为装配层的 fileWithRelPath（tar 助手入参）。
-func archiveFilesFrom(sources []cloudtasks.ArchiveSource) []fileWithRelPath {
-	out := make([]fileWithRelPath, 0, len(sources))
-	for _, src := range sources {
-		out = append(out, fileWithRelPath{root: src.Root, rel: src.Rel, tarRel: src.TarRel})
-	}
-	return out
 }
 
 // ---- Audit ----

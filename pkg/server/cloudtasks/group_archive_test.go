@@ -5,6 +5,9 @@ package cloudtasks
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +25,8 @@ import (
 
 // 本文件锁组归档入口（P1-c S3b）的**包内契约**：跳过未完成子任务后的响应字段、
 // 配额预留/结算/登记与组归档名落库的调用顺序，以及 ACL 必须早于源文件打开。
-// tar 落盘与转存执行核心（仍在装配层，S3c 迁移面）由 pkg/server 的既有 HTTP 测试驱动。
+// tar.gz 打包在 S4 后由本包执行，故此处直接校验真实产物（条目名/内容/checksum）；
+// 转存执行核心（transfer.go）仍由 pkg/server 的既有 HTTP 测试驱动。
 
 // stubTenants 返回固定租户（nil 模拟租户不可用）。
 type stubTenants struct {
@@ -31,16 +35,23 @@ type stubTenants struct {
 
 func (s stubTenants) TenantFor(string) *storage.Tenant { return s.tenant }
 
-// stubArchiveTargets 记录归档打包/转存面的调用（本片只需判定「谁被调用/入参」）。
-type stubArchiveTargets struct {
-	multiChecksum string
-	multiExists   bool
-	multiErr      error
-
-	// 入参取证
-	multiSources []ArchiveSource
-	multiOutRel  string
+// readRootFile 读取 root 内 rel 文件的全部字节（验证真实落盘产物）。
+func readRootFile(t *testing.T, root *storage.Root, rel string) []byte {
+	t.Helper()
+	f, err := root.OpenFile(rel, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("open %q: %v", rel, err)
+	}
+	defer f.Close()
+	raw, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("read %q: %v", rel, readErr)
+	}
+	return raw
 }
+
+// stubArchiveTargets 实现 Targets 中不涉及打包的部分（S4 后 tar 打包已在本包，不再经接口）。
+type stubArchiveTargets struct{}
 
 func (s *stubArchiveTargets) StagingFS(_ string, fs syncpkg.FS) syncpkg.FS { return fs }
 
@@ -56,18 +67,6 @@ func (s *stubArchiveTargets) SkipVerify() bool { return true }
 func (s *stubArchiveTargets) MaxArchiveBytes() int64 { return 0 }
 
 func (s *stubArchiveTargets) ArchiveKey() []byte { return nil }
-
-func (s *stubArchiveTargets) CreateArchiveTar(*storage.Root, string, string, *storage.Root, string, *slog.Logger) (string, bool, error) {
-	return "", false, nil
-}
-
-func (s *stubArchiveTargets) CreateMultiArchiveTar(sources []ArchiveSource, _ *storage.Root, outRel string, _ *slog.Logger) (string, bool, error) {
-	s.multiSources, s.multiOutRel = sources, outRel
-	if s.multiErr != nil || s.multiExists {
-		return "", s.multiExists, s.multiErr
-	}
-	return s.multiChecksum, false, nil
-}
 
 // stubArchiveQuota 记录归档配额四方法的调用顺序（预留 → 结算 → 登记）。
 type stubArchiveQuota struct {
@@ -115,8 +114,8 @@ func (s *stubArchiveQuota) ReleaseArchive(*quota.Settlement, int64) {
 }
 
 // newGroupArchiveEnv 装配组归档用例：真实租户（含 cloud/t1/a.bin）+ 组含 1 个已完成与
-// 1 个进行中的子任务。
-func newGroupArchiveEnv(t *testing.T) (*Service, *stubGroups, *stubArchiveTargets, *stubArchiveQuota) {
+// 1 个进行中的子任务。返回租户根，供用例直接验证真实 tar.gz 产物。
+func newGroupArchiveEnv(t *testing.T) (*Service, *stubGroups, *storage.Root, *stubArchiveQuota) {
 	t.Helper()
 	root, err := storage.OpenRoot(t.TempDir())
 	if err != nil {
@@ -151,13 +150,13 @@ func newGroupArchiveEnv(t *testing.T) (*Service, *stubGroups, *stubArchiveTarget
 		"t1": {ID: "t1", Owner: "alice", Filename: "a.bin", Status: "completed"},
 		"t2": {ID: "t2", Owner: "alice", Filename: "b.bin", Status: "downloading"},
 	}}
-	targets := &stubArchiveTargets{multiChecksum: "sum-1"}
+	targets := &stubArchiveTargets{}
 	quotaStub := &stubArchiveQuota{reservePre: 100, settleActual: 1234}
 	svc := New(Deps{
 		Groups: groups, Tasks: tasks, Tenants: stubTenants{tenant: tenant},
 		Volumes: stubVolumes{}, Quota: quotaStub, Targets: targets,
 	})
-	return svc, groups, targets, quotaStub
+	return svc, groups, tenantRoot, quotaStub
 }
 
 // TestArchiveGroup_SkipsIncompleteTasks 锁组归档（落 archive 桶）的响应字段与调用顺序：
@@ -165,7 +164,7 @@ func newGroupArchiveEnv(t *testing.T) (*Service, *stubGroups, *stubArchiveTarget
 // 组归档名落库，checksum/大小/计数逐字回包。
 func TestArchiveGroup_SkipsIncompleteTasks(t *testing.T) {
 	t.Parallel()
-	svc, groups, targets, quotaStub := newGroupArchiveEnv(t)
+	svc, groups, tenantRoot, quotaStub := newGroupArchiveEnv(t)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/cloud/groups/g1/archive",
@@ -179,19 +178,23 @@ func TestArchiveGroup_SkipsIncompleteTasks(t *testing.T) {
 	}
 	var got CloudArchiveResult
 	decodeBody(t, rec, &got)
-	if !got.Success || got.File != "g1-archive.tar.gz" || got.Checksum != "sum-1" ||
+	if !got.Success || got.File != "g1-archive.tar.gz" ||
 		got.Size != 1234 || got.TaskCount != 1 || got.SkippedCount != 1 {
 		t.Fatalf("响应 = %+v，期望 1 个文件 + 1 个跳过 + 实际大小 1234", got)
 	}
 	if len(got.SkippedTasks) != 1 || got.SkippedTasks[0] != "t2" {
 		t.Fatalf("skipped_tasks = %v, want [t2]", got.SkippedTasks)
 	}
-	// 打包入参：只含已完成任务的源，tar 条目名保留任务目录。
-	if len(targets.multiSources) != 1 || targets.multiSources[0].TarRel != "t1/a.bin" {
-		t.Fatalf("打包源 = %+v，期望仅 t1/a.bin", targets.multiSources)
+	// 真实 tar.gz 产物（S4 后打包在本包执行）：条目名保留任务目录、内容为源文件，
+	// 响应 checksum 必须等于落盘产物的 SHA-256。
+	raw := readRootFile(t, tenantRoot, "archive/g1-archive.tar.gz")
+	wantSum := sha256.Sum256(raw)
+	if got.Checksum != hex.EncodeToString(wantSum[:]) {
+		t.Fatalf("checksum = %q，期望落盘产物的 SHA-256 %s", got.Checksum, hex.EncodeToString(wantSum[:]))
 	}
-	if targets.multiOutRel != "archive/g1-archive.tar.gz" {
-		t.Fatalf("输出 rel = %q，期望 archive/g1-archive.tar.gz", targets.multiOutRel)
+	entries := tarEntries(t, raw)
+	if len(entries) != 1 || entries["t1/a.bin"] != "aaaaa" {
+		t.Fatalf("归档条目 = %v，期望仅 t1/a.bin=aaaaa（未完成任务不得入包）", entries)
 	}
 	// 配额：按源物理大小（5 字节）预留 → 按实际结算 → 按实际登记；顺序即语义。
 	if quotaStub.reserveOwner != "alice" || quotaStub.reserveTotal != 5 {
