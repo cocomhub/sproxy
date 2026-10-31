@@ -63,9 +63,9 @@ type Tasks interface {
 // GetGroup → UpdateGroupStatus → GetGroup（owner 可见性先判），
 // ListGroups("", -1, 0) → 逐个 UpdateGroupStatus → ListGroups(status, offset, limit)。
 //
-// DeleteGroupArchive 是组删除时的归档产物清理：归档自身的读写在 S3 才迁入本包，
-// 故 S2b 期间由装配层实现（原 cloud_download_handler.go 的 deleteGroupArchive 原地
-// 保留）；S3 迁入归档面后替换该委托。
+// DeleteGroupArchive 是组删除时的归档产物清理：归档产物的**删除**（桶归档名 / 外部卷
+// 转存 URL + 配额释放）仍属 S3c 迁移面，故由装配层实现（cloud_download_handler.go 的
+// deleteGroupArchive 原地保留）；S3c 迁入转存/删除面后替换该委托。
 type Groups interface {
 	SubmitAndStartGroup(name string, urls []cloudfilename.Entry, owner string, params cloud.TaskParams) (*cloud.CloudTaskGroup, error)
 	GetGroup(id, owner string) (*cloud.CloudTaskGroup, bool)
@@ -98,7 +98,8 @@ type Volumes interface {
 // 是空操作（与既有 scope==nil && storageMgr==nil 分支等价）。
 //
 // 归档配额四方法（P1-c S3a）是「预留 → 写 → 对账 → 提交/回滚」的唯一取用面：装配层
-// 保留既有实现（组归档与转存路径 S3b 前仍直接调用），本包只消费结果。失败以
+// 保留既有实现（S3b 起单任务/批量/组归档全部经本接口取用；仅转存核心的写前探针与
+// 差分结算仍属 S3c），本包只消费结果。失败以
 // (status, message) 表达，响应由调用方写出，避免把 http.ResponseWriter 传进配额面。
 type Quota interface {
 	BucketScope(owner, bucket string) *quota.Scope

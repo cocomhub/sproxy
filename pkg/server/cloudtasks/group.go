@@ -8,8 +8,8 @@
 // §4/§9.5）：owner 由装配层解析后显式传入；响应写出用包内 writeJSON；行为与迁移前
 // 逐行等价（状态码、错误文案、审计动作一律不变，由 pkg/server 的既有 HTTP 测试锁定）。
 //
-// 组归档产物的清理（deleteGroupArchive）**仍在装配层**：归档自身的读写在 S3 才迁入，
-// 本片只经 Groups.DeleteGroupArchive 需要它的删除能力（S3 迁入归档面后移除该委托）。
+// 组归档产物的清理（deleteGroupArchive）**仍在装配层**：归档产物的删除属 S3c 迁移面，
+// 本片只经 Groups.DeleteGroupArchive 需要它的删除能力（S3c 迁入后移除该委托）。
 package cloudtasks
 
 import (
