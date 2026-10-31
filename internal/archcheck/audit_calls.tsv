@@ -1,36 +1,36 @@
-# 门禁 R35-a：审计调用点**棘轮基线**（只减不增）。
-# 设计 docs/designs/2026-10-19-audit-service.md §8.2：审计能力唯一由 pkg/audit 提供，
-# 调用点必须登记；新增业务审计经统一 API（pkg/audit.Service.Emit / files 域 recordFileAudit），
-# 不得新增散点实现（本表只减不增）。
-# 格式：<文件>	<调用点数>	<备注>
+# R35-a 审计调用点棘轮（只减不增）。2026-10-31 修正：门禁此前用 WalkDir("..") 以包目录为 cwd，只扫到 internal/，pkg/** 从未被检查（基线因此陈旧）。修复扫描根为 moduleRoot 后按实际值重定基线。
 cmd/sproxy/root.go	1	
 pkg/files/chunked_upload.go	1	
 pkg/files/copy_ops.go	3	
+pkg/files/meta_update.go	1	
 pkg/files/tags.go	1	
 pkg/files/trash.go	6	
 pkg/files/write_ops.go	32	
+pkg/server/ai_embed_wiring.go	1	
 pkg/server/ai_insight_handler.go	6	
 pkg/server/ai_privacy.go	1	
 pkg/server/archive.go	1	
-pkg/server/backends_api.go	3	
+pkg/server/backends_api.go	4	
 pkg/server/backup_api.go	1	
-pkg/server/cloud_download_handler.go	7	
+pkg/server/checksum_api.go	1	
+pkg/server/cloud_download_handler.go	8	
 pkg/server/config_api.go	2	
 pkg/server/credentials_handler.go	17	
 pkg/server/download_handler.go	1	
 pkg/server/files_service.go	1	
-pkg/server/notify.go	1	
+pkg/server/notify_handlers.go	1	
 pkg/server/register_handler.go	30	
 pkg/server/remote_read.go	2	
 pkg/server/remote_write.go	2	
 pkg/server/routes_setup.go	1	
-pkg/server/secrets_api.go	4	
+pkg/server/secrets_api.go	5	
 pkg/server/share.go	2	
 pkg/server/sync_handler.go	2	
 pkg/server/tier_manager.go	1	
-pkg/server/user_volume_api.go	2	
-pkg/server/verify.go	1	
+pkg/server/user_volume_api.go	3	
+pkg/server/verify_handler.go	1	
+pkg/server/verify_wiring.go	1	
 pkg/server/version.go	15	
 pkg/server/volume_export.go	2	
-pkg/server/volumes_api.go	11	
+pkg/server/volumes_api.go	14	
 pkg/server/volumes_mirror.go	8	
