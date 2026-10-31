@@ -8,9 +8,8 @@
 // §4/§9.5）：owner 由装配层解析后显式传入，响应写出用包内 writeJSON，行为与迁移前逐行
 // 等价（状态码、错误文案、配额预留/结算顺序、archiveUsage 记账、组归档名落库一律不变）。
 //
-// 边界（S3b 只做组归档，转存核心留给 S3c）：tar 打包、转存执行核心（cloudArchiveToVolume）
-// 与 tar 助手仍在装配层，本包经 Targets 接口取用；配额四方法（预留/结算/释放/登记）同样
-// 经 Quota 接口取用（实现仍在装配层）。
+// S3c 后 tar 打包助手仍在装配层（Targets.CreateMultiArchiveTar），配额预留/对账/释放经
+// Quota 接口取用；转存执行核心、entries/size 助手与 archiveUsage 登记已在本包（transfer.go）。
 package cloudtasks
 
 import (
@@ -101,7 +100,7 @@ func (s *Service) ArchiveGroup(w http.ResponseWriter, r *http.Request, owner str
 	}
 
 	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
-	s.deps.Quota.RecordArchiveUsage(owner, archiveName, actual)
+	s.recordArchiveUsage(owner, archiveName, actual)
 
 	// 更新组归档路径（落库到真实组对象；仅存归档名，客户端不接触 .__ 内部路径）
 	s.deps.Groups.SetGroupArchiveFile(groupID, archiveName)
@@ -258,14 +257,14 @@ func (s *Service) archiveGroupCreateTar(w http.ResponseWriter, sources []Archive
 }
 
 // ArchiveGroupToVolume 统一转存：组归档打包后转存到目标卷（target_volume）。
-// 收集组文件 Reader 后交共享核心（Targets.ArchiveToVolume，装配层的 cloudArchiveToVolume）。
+// 收集组文件 Reader 后交共享核心（archiveToVolume）。
 //
-// 导出理由：转存执行核心与 tar 助手仍在装配层（S3c 迁移面），装配层的既有直调测试经此
-// 驱动同一实现；S3c 迁入核心后随核心一并转为包内函数。
+// 导出理由：装配层既有直调测试（cloud_download_handler_test.go 的组归档转存用例）经此
+// 驱动同一实现（含目标卷/可信卷接线断言），与 TransferACLRejection 的导出理由同构。
 func (s *Service) ArchiveGroupToVolume(w http.ResponseWriter, r *http.Request, groupID, owner string,
 	sources []ArchiveSource, req CloudArchiveRequest, archiveName string,
 ) {
-	entries, err := s.deps.Targets.ArchiveEntries(sources)
+	entries, err := archiveEntries(sources)
 	if err != nil {
 		s.writeJSON(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
 		return
@@ -274,9 +273,9 @@ func (s *Service) ArchiveGroupToVolume(w http.ResponseWriter, r *http.Request, g
 	onSuccess := func(url string) {
 		s.deps.Groups.SetGroupArchiveFile(groupID, url)
 	}
-	s.deps.Targets.ArchiveToVolume(w, r, ArchiveVolumeTransfer{
+	s.archiveToVolume(w, r, ArchiveVolumeTransfer{
 		Owner: owner, TargetVolume: req.TargetVolume, TargetPath: req.TargetPath, ArchiveName: archiveName,
 		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
-		Entries: entries, TotalSize: s.deps.Targets.ArchiveTotalSize(sources),
+		Entries: entries, TotalSize: archiveTotalSize(sources),
 	}, s.deps.Logger.With("archive", "group", "group_id", groupID), onSuccess)
 }

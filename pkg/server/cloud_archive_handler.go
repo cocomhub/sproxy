@@ -16,15 +16,12 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/cocomhub/sproxy/pkg/compressx"
-	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/server/archive"
 	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
-	"github.com/cocomhub/sproxy/pkg/transfer"
 )
 
 // 归档 DTO 的唯一实现已迁入 cloudtasks（P1-c S3a）；装配层与既有测试经类型别名继续引用，
@@ -34,9 +31,6 @@ type (
 	CloudArchiveBatchRequest = cloudtasks.CloudArchiveBatchRequest
 	CloudArchiveResult       = cloudtasks.CloudArchiveResult
 )
-
-// archiveVolumeTransfer 是统一转存入参的类型别名（唯一实现在 cloudtasks，S3b 迁入后别名删除）。
-type archiveVolumeTransfer = cloudtasks.ArchiveVolumeTransfer
 
 // cloudArchiveReservePlaceholder 云归档打包预留占位（100MB）。
 // tar 头（≤512B/文件）+ gzip 可能在极少数情况下产生少量膨胀，预留后按实际大小对账。
@@ -243,132 +237,4 @@ func openArchiveOutput(root *storage.Root, rel string) (io.WriteCloser, bool, er
 		return nil, false, fmt.Errorf("create archive output: %w", err)
 	}
 	return f, true, nil
-}
-
-// recordArchiveUsage 登记归档文件在租户 archive 桶 Scope 中的已确认占用
-// （P5 审查重要 2：删除归档时按登记释放，不再依赖周期扫描自愈）。
-// actual<=0 时不登记（文件未落盘，无占用可释放）。
-func (h *Handlers) recordArchiveUsage(owner, archiveName string, actual int64) {
-	if actual <= 0 {
-		return
-	}
-	owner = normalizeOwner(owner)
-	h.tenantMu.Lock()
-	defer h.tenantMu.Unlock()
-	if h.archiveUsage == nil {
-		h.archiveUsage = make(map[string]map[string]int64)
-	}
-	m := h.archiveUsage[owner]
-	if m == nil {
-		m = make(map[string]int64)
-		h.archiveUsage[owner] = m
-	}
-	m[archiveName] = actual
-}
-
-// deleteCloudArchive 删除租户 archive 桶下指定归档文件并释放其 Scope 占用。
-// 供归档删除路径（DeleteGroup 联动 / 未来归档删除 API）调用；文件不存在视为幂等成功。
-// 释放量以磁盘 stat 为准（与登记一致；登记缺失时按 stat 释放，防止 Scope 虚高）。
-func (h *Handlers) deleteCloudArchive(owner, archiveName string) error {
-	owner = normalizeOwner(owner)
-	tnt := h.tenantFor(owner)
-	if tnt == nil {
-		return errors.New("租户不可用，无法删除归档")
-	}
-	rel, ok := tnt.FeatureRel("archive", archiveName)
-	if !ok {
-		return fmt.Errorf("非法归档名: %s", archiveName)
-	}
-	root := tnt.Root()
-	size := int64(0)
-	if info, err := root.Stat(rel); err == nil {
-		size = info.Size()
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat 归档失败: %w", err)
-	}
-	if err := root.Remove(rel); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("删除归档失败: %w", err)
-	}
-	// 释放 archive 桶 Scope 占用（按磁盘 stat 大小；文件已不存在时按登记释放）。
-	if size <= 0 {
-		h.tenantMu.Lock()
-		if m := h.archiveUsage[owner]; m != nil {
-			size = m[archiveName]
-		}
-		h.tenantMu.Unlock()
-	}
-	if scope := h.quotaBucketFor(owner, "archive"); scope != nil && size > 0 {
-		scope.ReleaseUsage(size)
-	}
-	h.tenantMu.Lock()
-	if m := h.archiveUsage[owner]; m != nil {
-		delete(m, archiveName)
-	}
-	h.tenantMu.Unlock()
-	h.logger.Info("云归档已删除并释放配额", "owner", owner, "archive", archiveName, "size", size)
-	return nil
-}
-
-// archiveExtras 是「仅转存外部卷支持」的选项集合（校验入参收拢为结构体，避免长参数列表）。
-type archiveExtras struct {
-	TargetVolume string
-	TargetPath   string
-	Encrypt      bool
-	Cipher       string
-	Compression  string
-}
-
-// archiveExtrasError 是「仅转存外部卷支持」选项校验的**非响应核心**（规则唯一实现：
-// cloudtasks 经 Targets.ValidateArchiveExtras 取用，响应写出在编排核心里）：
-//   - 未指定 target_volume 时不得设置 target_path/encrypt/cipher/compression
-//     （archive 桶路径走既有 createTarGz，不加密也不认目标路径）；
-//   - cipher 必须与 encrypt 同用（单独指定无任何加密效果，静默忽略会让用户误信已加密）。
-//
-// 返回 (0, "") 表示通过；否则为应回应的状态码与文案。
-func archiveExtrasError(ex archiveExtras) (int, string) {
-	if ex.TargetVolume == "" {
-		if ex.Encrypt || ex.Cipher != "" || ex.Compression != "" || ex.TargetPath != "" {
-			return http.StatusBadRequest, "target_path/encrypt/cipher/compression 仅支持与 target_volume（转存外部卷）同用"
-		}
-		return 0, ""
-	}
-	if ex.Cipher != "" && !ex.Encrypt {
-		return http.StatusBadRequest, "cipher 仅与 encrypt 同用（单独指定不加密，已拒绝以避免误信已加密）"
-	}
-	return 0, ""
-}
-
-// archivePreprocessor 按请求构造打包预处理器（压缩 + 可选加密，经 transfer registry 选型）。
-// 加密密钥来自 archive.key_file（与 /api/archive 同一约定）。失败已回响应。
-func (h *Handlers) archivePreprocessor(w http.ResponseWriter, encrypt bool, cipher, compression string) (transfer.Preprocessor, bool) {
-	algo := compressx.Gzip
-	if compression != "" {
-		parsed, err := compressx.Parse(compression)
-		if err != nil {
-			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: err.Error()}, http.StatusBadRequest)
-			return nil, false
-		}
-		algo = parsed
-	}
-	cfg := transfer.PreprocessorConfig{Compression: algo, Cipher: cipher}
-	if encrypt {
-		if cipher != "" {
-			if _, ok := files.LookupCipher(cipher); !ok {
-				sendJSONResponse(w, CloudArchiveResult{Success: false, Message: fmt.Sprintf("未知加密算法 %q", cipher)}, http.StatusBadRequest)
-				return nil, false
-			}
-		}
-		key := h.archiveKey()
-		if len(key) != 32 {
-			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "归档加密密钥不可用（需配置 archive.key_file）"}, http.StatusBadRequest)
-			return nil, false
-		}
-		cfg.EncryptKey = key
-	}
-	pre, err := transfer.New("tar", cfg)
-	if err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: err.Error()}, http.StatusInternalServerError)
-		return nil, false
-	}
-	return pre, true
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -242,10 +243,7 @@ type volumeDeps struct {
 	// ReleaseUsage 广播无法唤醒等待者（只能干等满 deadline，甚至误报「空间不足」；
 	// P2 对抗评审）。tenantMu 保护。
 	stagingTrackers map[string]*quota.StagingTracker
-	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
-	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
-	archiveUsage map[string]map[string]int64
-	tenantMu     sync.Mutex // 串行化 checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
+	tenantMu        sync.Mutex // 串行化 checksumStores/uploadStores/quotaScopes/quotaBuckets 懒创建
 	// quotaWaitTimeout 是写路径「配额不足 ⇒ 排队重试」的等待上限（**0 = quota.DefaultWaitTimeout**，
 	// 即用户裁定 2026-10-14 的 30s 语义）。**仅供测试夹具注入小值**（生产恒 0，语义不变）——否则
 	// 大量「请求能放下、但当前用量不够」的用例各自白等 30s，CI 实测累计触发 5min 包超时。
@@ -265,6 +263,11 @@ type cloudDeps struct {
 	cloudMgr *cloud.CloudDownloadManager
 	// urlResolver 是通用 URL 解析注册表（POST /api/resolve）；nil = 未装配（503）。
 	urlResolver ResolverRegistry
+	// cloudService 是云任务编排核心的**单实例**（cloudTaskService 懒构造一次后并发复用）。
+	// 单实例是 P1-c S3c 的语义要求：归档桶占用登记（archiveUsage）已迁入 cloudtasks.Service，
+	// 记录（单任务/批量/组归档）与删除（组删除联动）必须同实例才能按登记释放。
+	cloudService     *cloudtasks.Service
+	cloudServiceOnce sync.Once
 }
 
 // shareDeps 是分享域域依赖。

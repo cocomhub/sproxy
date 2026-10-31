@@ -15,7 +15,6 @@ package cloudtasks
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
@@ -23,7 +22,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/sync"
-	"github.com/cocomhub/sproxy/pkg/transfer"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -62,10 +60,6 @@ type Tasks interface {
 // UpdateGroupStatus 有刷新副作用，调用顺序是语义的一部分：
 // GetGroup → UpdateGroupStatus → GetGroup（owner 可见性先判），
 // ListGroups("", -1, 0) → 逐个 UpdateGroupStatus → ListGroups(status, offset, limit)。
-//
-// DeleteGroupArchive 是组删除时的归档产物清理：归档产物的**删除**（桶归档名 / 外部卷
-// 转存 URL + 配额释放）仍属 S3c 迁移面，故由装配层实现（cloud_download_handler.go 的
-// deleteGroupArchive 原地保留）；S3c 迁入转存/删除面后替换该委托。
 type Groups interface {
 	SubmitAndStartGroup(name string, urls []cloudfilename.Entry, owner string, params cloud.TaskParams) (*cloud.CloudTaskGroup, error)
 	GetGroup(id, owner string) (*cloud.CloudTaskGroup, bool)
@@ -75,7 +69,6 @@ type Groups interface {
 	ResumeGroup(groupID string, force bool, owner string) error
 	SetGroupArchiveFile(groupID, archiveFile string)
 	UpdateGroupStatus(groupID string)
-	DeleteGroupArchive(owner, archiveFile string) error
 }
 
 // Tenants 解析 owner 的租户（覆设计文档 §5.3）。空 owner → anonymous；失败 nil。
@@ -97,9 +90,9 @@ type Volumes interface {
 // 三个 Fallback 方法在装配层绑定 capacity.CategoryCloud；回退账本未装配时
 // 是空操作（与既有 scope==nil && storageMgr==nil 分支等价）。
 //
-// 归档配额四方法（P1-c S3a）是「预留 → 写 → 对账 → 提交/回滚」的唯一取用面：装配层
-// 保留既有实现（S3b 起单任务/批量/组归档全部经本接口取用；仅转存核心的写前探针与
-// 差分结算仍属 S3c），本包只消费结果。失败以
+// 归档配额三方法（P1-c S3a）是「预留 → 写 → 对账 → 提交/回滚」的唯一取用面：装配层
+// 保留既有实现（S3b 起单任务/批量/组归档全部经本接口取用；归档桶占用登记 archiveUsage 与
+// 转存核心的写前探针/差分结算已随 S3c 迁入本包），本包只消费结果。失败以
 // (status, message) 表达，响应由调用方写出，避免把 http.ResponseWriter 传进配额面。
 type Quota interface {
 	BucketScope(owner, bucket string) *quota.Scope
@@ -117,8 +110,6 @@ type Quota interface {
 	SettleArchive(root *storage.Root, rel string, reservation *quota.Settlement, pre int64, logger *slog.Logger) (actual int64, status int, message string)
 	// ReleaseArchive 释放未定案的预留（O_EXCL 冲突 / 打包失败路径，幂等）。
 	ReleaseArchive(reservation *quota.Settlement, pre int64)
-	// RecordArchiveUsage 登记归档文件在 archive 桶 Scope 的已确认占用（actual<=0 跳过）。
-	RecordArchiveUsage(owner, archiveName string, actual int64)
 }
 
 // Targets 是转存目标写面：staging gate、写锁、派生状态登记与归档策略
@@ -135,25 +126,16 @@ type Targets interface {
 	MaxArchiveBytes() int64
 	ArchiveKey() []byte
 
-	// 归档打包/转存六方法（P1-c S3a 临时接缝，S3b 增 ArchiveTotalSize）：实现仍在装配层
-	// （tar 助手与 cloudArchiveToVolume 属 S3c 迁移面），本包消费结果；ArchiveToVolume 因
-	// 执行核心尚未迁入暂保留 HTTP 参数，S3c 迁入后删除该方法。
+	// 归档打包两方法（P1-c S3a）：tar 打包仍属服务端作用域（pkg/server/archive 助手 +
+	// storage.Root 用户可见写入口），本包消费结果。转存取锁/派生状态登记经上方能力取用；
+	// 归档转存执行核心（原 ArchiveToVolume）与 entries/size/total 助手已随 S3c 迁入本包。
 	//
-	// ValidateArchiveExtras 校验「仅转存外部卷支持」的选项，成功返回 status=0。
-	ValidateArchiveExtras(extras ArchiveExtras) (status int, message string)
 	// CreateArchiveTar 打包单个文件（O_EXCL）；exists=true 表示同名归档已存在（409）。
 	CreateArchiveTar(srcRoot *storage.Root, srcRel, tarName string, outRoot *storage.Root, outRel string,
 		logger *slog.Logger) (checksum string, exists bool, err error)
 	// CreateMultiArchiveTar 打包多个文件（O_EXCL）；exists 语义同上。
 	CreateMultiArchiveTar(sources []ArchiveSource, outRoot *storage.Root, outRel string,
 		logger *slog.Logger) (checksum string, exists bool, err error)
-	// ArchiveEntries 把源文件转成 transfer.SourceEntry（打开 Reader；失败时已关闭已打开项）。
-	ArchiveEntries(sources []ArchiveSource) ([]transfer.SourceEntry, error)
-	// ArchiveTotalSize 汇总源文件的**用户可见（逻辑）大小**（加密卷取明文长度）。
-	// 转存路径的 TotalSize 用该口径（与 tar 条目 Size 同源），不用 Stat 物理大小。
-	ArchiveTotalSize(sources []ArchiveSource) int64
-	// ArchiveToVolume 执行统一转存（可信卷写视图 + owner 前缀 + staging/写锁 + 配额结算）。
-	ArchiveToVolume(w http.ResponseWriter, r *http.Request, t ArchiveVolumeTransfer, logger *slog.Logger, onSuccess func(url string))
 }
 
 // Audit 是业务审计唯一入口（覆设计文档 §5.7）。

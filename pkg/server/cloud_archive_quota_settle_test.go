@@ -6,7 +6,7 @@ package server
 // cloud_archive_quota_settle_test.go 钉住「归档转存必须结算 owner 配额，且与删除侧释放对称」
 // （独立审核 P1，2026-10-18）。
 //
-// 缺陷：归档转存（cloudArchiveToVolume）写侧**不做 owner 配额结算**，而删除侧
+// 缺陷：归档转存（cloudtasks.archiveToVolume，原 cloudArchiveToVolume）写侧**不做 owner 配额结算**，而删除侧
 // `releaseExternalDeleteQuota` 会从**同一 Scope** 释放 `physChargeFor` 实测字节 ⇒ 那次释放是
 // 「**未曾提交的释放**」（幻影释放）⇒ 扣掉同账本其它对象的占用 ⇒ 少计 ⇒ 后续写入沿父链检查
 // 放行 ⇒ **可超出 owner 配额**（可重复放大）。
@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 )
 
 // TestSettleArchiveCharge 结算语义：新对象计入、覆盖写按差分、无变化/nil scope 无操作。
@@ -30,18 +31,18 @@ func TestSettleArchiveCharge(t *testing.T) {
 	scope := pool.Scope("/tenant/alice/user", 1<<20)
 
 	// 新对象：before=0, after=1000 ⇒ 计入 1000。
-	settleArchiveCharge(scope, 0, 1000)
+	cloudtasks.SettleArchiveCharge(scope, 0, 1000)
 	if got := scope.Usage(); got != 1000 {
 		t.Fatalf("新对象结算后 Usage=%d, want 1000", got)
 	}
 	// 覆盖写：before=1000, after=1500 ⇒ 差分 +500（不得双计成 2500）。
-	settleArchiveCharge(scope, 1000, 1500)
+	cloudtasks.SettleArchiveCharge(scope, 1000, 1500)
 	if got := scope.Usage(); got != 1500 {
 		t.Fatalf("覆盖写结算后 Usage=%d, want 1500（差分，不得双计）", got)
 	}
 	// 无变化 ⇒ 无操作；nil scope（未装配配额）⇒ 无操作（零回归）。
-	settleArchiveCharge(scope, 1500, 1500)
-	settleArchiveCharge(nil, 0, 999)
+	cloudtasks.SettleArchiveCharge(scope, 1500, 1500)
+	cloudtasks.SettleArchiveCharge(nil, 0, 999)
 	if got := scope.Usage(); got != 1500 {
 		t.Fatalf("无变化/nil scope 后 Usage=%d, want 1500", got)
 	}
@@ -66,7 +67,7 @@ func TestSettleArchiveCharge_SymmetricWithDelete(t *testing.T) {
 	}
 
 	// 归档转存写入 1500（写侧结算）。
-	settleArchiveCharge(scope, 0, 1500)
+	cloudtasks.SettleArchiveCharge(scope, 0, 1500)
 	if got := scope.Usage(); got != 2000 {
 		t.Fatalf("写入后 Usage=%d, want 2000（其它 500 + 本次 1500）", got)
 	}

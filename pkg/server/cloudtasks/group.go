@@ -8,8 +8,8 @@
 // §4/§9.5）：owner 由装配层解析后显式传入；响应写出用包内 writeJSON；行为与迁移前
 // 逐行等价（状态码、错误文案、审计动作一律不变，由 pkg/server 的既有 HTTP 测试锁定）。
 //
-// 组归档产物的清理（deleteGroupArchive）**仍在装配层**：归档产物的删除属 S3c 迁移面，
-// 本片只经 Groups.DeleteGroupArchive 需要它的删除能力（S3c 迁入后移除该委托）。
+// 组归档产物的清理（DeleteGroupArchive）随 S3c 迁入本包（transfer.go）：归档名落 archive 桶
+// 的走 DeleteCloudArchive（按登记释放），外部卷转存 URL 的按卷可信 FS 删除并同源释放配额。
 package cloudtasks
 
 import (
@@ -215,7 +215,7 @@ func (s *Service) DeleteGroup(w http.ResponseWriter, r *http.Request, owner stri
 	// 组归档文件联动删除（桶归档名或外部卷转存 URL）。失败仅记日志
 	// （组删除已完成，归档残留由周期扫描校准兜底；不把归档清理失败当作组删除失败）。
 	if archiveFile != "" {
-		if aErr := s.deps.Groups.DeleteGroupArchive(owner, archiveFile); aErr != nil {
+		if aErr := s.DeleteGroupArchive(owner, archiveFile); aErr != nil {
 			s.deps.Logger.Warn("删除组归档失败（残留由周期扫描校准）", "group_id", id, "archive", archiveFile, "error", aErr)
 		}
 	}

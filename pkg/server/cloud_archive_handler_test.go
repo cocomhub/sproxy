@@ -577,12 +577,9 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	if got := archiveScope.Usage(); got != 0 {
 		t.Fatalf("文件已不在后删除归档，archive 桶 Usage()=%d want 0（按登记释放，不虚高）", got)
 	}
-	// 登记已清除。
-	env.h.tenantMu.Lock()
-	_, stillReg := env.h.archiveUsage["alice"]["gone.tar.gz"]
-	env.h.tenantMu.Unlock()
-	if stillReg {
-		t.Fatal("删除后登记应已清除")
+	// 登记已清除（登记事实源随 S3c 迁入 cloudtasks.Service）。
+	if got := env.h.cloudTaskService().ArchiveUsage("alice", "gone.tar.gz"); got != 0 {
+		t.Fatalf("删除后登记应已清除，got %d", got)
 	}
 	// 幂等：再次删除（登记也不存在）仍成功且桶不虚高。
 	if err := env.h.deleteCloudArchive("alice", "gone.tar.gz"); err != nil {

@@ -8,10 +8,9 @@
 // §4/§9.5）：owner 由装配层解析后显式传入，响应写出用包内 writeJSON，行为与迁移前逐行
 // 等价（状态码、错误文案、配额预留/结算顺序、archiveUsage 记账一律不变）。
 //
-// S3a 的临时接缝（S3b 随组归档/转存核心一并迁入后删除）：
-//   - 配额预留/结算/释放与 archiveUsage 登记仍由装配层实现（Quota 接口方法委托）；
-//   - tar 打包、转存执行核心（cloudArchiveToVolume）仍在装配层（Targets 接口方法委托），
-//     其中 ArchiveToVolume 因核心尚未迁入只保留 HTTP 参数。
+// S3c 后仅剩 tar 打包助手（CreateArchiveTar/CreateMultiArchiveTar）与配额预留/对账/
+// 释放（Quota 接口）在装配层：转存执行核心、entries/size/total 助手、选项校验与
+// archiveUsage 登记已迁入本包（transfer.go）。
 package cloudtasks
 
 import (
@@ -87,7 +86,7 @@ type CloudArchiveResult struct {
 }
 
 // ArchiveExtras 是「仅转存外部卷支持」的选项集合（校验入参收拢为结构体，避免长参数列表）。
-// 装配层存档同名结构（archiveExtras）由 Targets.ValidateArchiveExtras 适配，校验规则只有一份。
+// 校验规则唯一实现在本包（transfer.go 的 archiveExtrasError）。
 type ArchiveExtras struct {
 	TargetVolume string
 	TargetPath   string
@@ -201,7 +200,7 @@ func (s *Service) ArchiveTask(w http.ResponseWriter, r *http.Request, owner stri
 	}
 
 	// P5 归档占用登记（登记后释放 Scope 不再依赖周期扫描自愈）。
-	s.deps.Quota.RecordArchiveUsage(owner, archiveName, actual)
+	s.recordArchiveUsage(owner, archiveName, actual)
 
 	archiveInfo, err := root.Stat(rel)
 	if err != nil {
@@ -291,7 +290,7 @@ func (s *Service) ArchiveBatch(w http.ResponseWriter, r *http.Request, owner str
 	}
 
 	// P5 归档占用登记（删除组时按登记 Release Scope）。
-	s.deps.Quota.RecordArchiveUsage(owner, archiveName, actual)
+	s.recordArchiveUsage(owner, archiveName, actual)
 
 	info, err := root.Stat(rel)
 	if err != nil {
@@ -446,7 +445,7 @@ func (s *Service) archiveTaskToVolume(w http.ResponseWriter, r *http.Request, ow
 	entries := []transfer.SourceEntry{{
 		Rel: task.Filename, Size: size, ModTime: info.ModTime().Unix(), Reader: f,
 	}}
-	s.deps.Targets.ArchiveToVolume(w, r, ArchiveVolumeTransfer{
+	s.archiveToVolume(w, r, ArchiveVolumeTransfer{
 		Owner: owner, TargetVolume: req.TargetVolume, TargetPath: req.TargetPath, ArchiveName: name,
 		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
 		Entries: entries, TotalSize: size,
@@ -466,12 +465,12 @@ func (s *Service) archiveBatchToVolume(w http.ResponseWriter, r *http.Request, o
 		s.writeJSON(w, CloudArchiveResult{Success: false, Message: msg}, http.StatusBadRequest)
 		return
 	}
-	entries, err := s.deps.Targets.ArchiveEntries(sources)
+	entries, err := archiveEntries(sources)
 	if err != nil {
 		s.writeJSON(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	s.deps.Targets.ArchiveToVolume(w, r, ArchiveVolumeTransfer{
+	s.archiveToVolume(w, r, ArchiveVolumeTransfer{
 		Owner: owner, TargetVolume: req.TargetVolume, TargetPath: req.TargetPath, ArchiveName: name,
 		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
 		Entries: entries, TotalSize: totalSize,
@@ -567,16 +566,6 @@ func (s *Service) archiveTaskSource(owner, taskID string) (ArchiveSource, int64,
 
 	relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
 	return ArchiveSource{Root: srcTnt.Root(), Rel: srcRel, TarRel: relPath}, info.Size(), false
-}
-
-// validateArchiveExtras 校验「仅转存外部卷支持」的选项；失败已写 400 响应。
-func (s *Service) validateArchiveExtras(w http.ResponseWriter, extras ArchiveExtras) bool {
-	status, msg := s.deps.Targets.ValidateArchiveExtras(extras)
-	if status != 0 {
-		s.writeJSON(w, CloudArchiveResult{Success: false, Message: msg}, status)
-		return false
-	}
-	return true
 }
 
 // archiveExtrasOf 把归档请求的转存选项收拢为校验入参。
