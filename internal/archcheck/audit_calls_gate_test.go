@@ -64,7 +64,10 @@ func readAuditCallsBaseline(t *testing.T) map[string]int {
 
 func countAuditCalls(t *testing.T) map[string]int {
 	t.Helper()
-	callRe := regexp.MustCompile(`\.RecordAudit\(|recordFileAudit\(`)
+	// 计入三种形态：装配层的 `.RecordAudit(` / `recordFileAudit(`，以及领域编排核心经注入的
+	// 审计接口调用（`Audit.Record(`，P1-c S2a 起 cloudtasks 的调用点形态）——迁移不得让
+	// 审计调用点从棘轮视野里消失（否则等于用依赖注入绕过门禁）。
+	callRe := regexp.MustCompile(`\.RecordAudit\(|recordFileAudit\(|Audit\.Record\(`)
 	out := make(map[string]int)
 	root := moduleRoot(t)
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
