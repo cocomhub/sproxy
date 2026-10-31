@@ -20,11 +20,13 @@ const depsFieldTarget = 8
 // S3c 收口：归档转存核心/entries/size 助手/选项校验/archiveUsage 登记随实现迁入本包后，
 // S2b/S3a/S3b 的临时接缝全部删除——Groups 去掉 DeleteGroupArchive、Quota 去掉
 // RecordArchiveUsage、Targets 去掉 ValidateArchiveExtras/ArchiveEntries/ArchiveTotalSize/
-// ArchiveToVolume。当前只剩归档打包两方法（CreateArchiveTar/CreateMultiArchiveTar，
-// pkg/server/archive 助手属服务端作用域）与归档配额三方法（预留/对账/释放实现仍在装配层）。
+// ArchiveToVolume。当前只剩归档配额三方法（预留/对账/释放实现仍在装配层）。
 //
-// 计数：Tasks 9 + Groups 8 + Tenants 1 + Volumes 5 + Quota 9 + Targets 9 + Audit 1 = 42。
-const interfaceMethodTotal = 42
+// S4 收口：tar.gz 打包助手随实现迁入本包（archive_tar.go）⇒ Targets 去掉
+// CreateArchiveTar/CreateMultiArchiveTar 两个接缝。
+//
+// 计数：Tasks 9 + Groups 8 + Tenants 1 + Volumes 5 + Quota 9 + Targets 7 + Audit 1 = 40。
+const interfaceMethodTotal = 40
 
 // TestDepsFieldCap 锁 Deps 的入边宽度 ≤8，并锁字段名（防止改名后门禁仍数得清）。
 func TestDepsFieldCap(t *testing.T) {
@@ -58,7 +60,7 @@ func TestInterfaceMethodCounts(t *testing.T) {
 		{"Tenants", reflect.TypeFor[cloudtasks.Tenants](), 1},
 		{"Volumes", reflect.TypeFor[cloudtasks.Volumes](), 5},
 		{"Quota", reflect.TypeFor[cloudtasks.Quota](), 9},     // 归档预留/对账/释放实现仍在装配层
-		{"Targets", reflect.TypeFor[cloudtasks.Targets](), 9}, // 归档 tar 打包助手仍在装配层（pkg/server/archive）
+		{"Targets", reflect.TypeFor[cloudtasks.Targets](), 7}, // S4 后 tar 打包实现在本包，无打包接缝
 		{"Audit", reflect.TypeFor[cloudtasks.Audit](), 1},
 	}
 	if len(cases) != 7 {

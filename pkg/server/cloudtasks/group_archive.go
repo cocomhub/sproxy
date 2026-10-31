@@ -8,12 +8,13 @@
 // §4/§9.5）：owner 由装配层解析后显式传入，响应写出用包内 writeJSON，行为与迁移前逐行
 // 等价（状态码、错误文案、配额预留/结算顺序、archiveUsage 记账、组归档名落库一律不变）。
 //
-// S3c 后 tar 打包助手仍在装配层（Targets.CreateMultiArchiveTar），配额预留/对账/释放经
-// Quota 接口取用；转存执行核心、entries/size 助手与 archiveUsage 登记已在本包（transfer.go）。
+// S3c 后转存执行核心、entries/size 助手与 archiveUsage 登记已在本包（transfer.go）；S4 起
+// tar.gz 打包助手（archive_tar.go）也在本包，仅配额预留/对账/释放经 Quota 接口取用。
 package cloudtasks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -237,9 +238,9 @@ func (s *Service) archiveGroupCreateTar(w http.ResponseWriter, sources []Archive
 	res *quota.Settlement, pre int64, groupID string,
 ) (string, bool) {
 	logger := s.deps.Logger.With("archive", "group", "group_id", groupID)
-	checksum, exists, err := s.deps.Targets.CreateMultiArchiveTar(sources, root, rel, logger)
-	if err != nil || exists {
-		if exists {
+	checksum, err := createMultiFileTarGz(sources, root, rel, logger)
+	if err != nil {
+		if errors.Is(err, errArchiveExists) {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
 			s.deps.Quota.ReleaseArchive(res, pre)
 			s.writeJSON(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)

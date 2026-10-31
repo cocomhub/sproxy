@@ -4,21 +4,12 @@
 package server
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"os"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
-	"github.com/cocomhub/sproxy/pkg/rootfs"
-	"github.com/cocomhub/sproxy/pkg/server/archive"
 	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -26,6 +17,10 @@ import (
 
 // 归档 DTO 的唯一实现已迁入 cloudtasks（P1-c S3a）；装配层与既有测试经类型别名继续引用，
 // 响应结构体因此仍只有一份定义（JSON 字段顺序/标签零变化）。
+//
+// S4 起 tar.gz 打包助手（createTarGz/createMultiFileTarGz/openArchiveOutput/errArchiveExists）
+// 也已迁入 cloudtasks/archive_tar.go，本文件只保留**配额预留/对账**两个非响应核心——它们把
+// 失败映射为 HTTP 状态码 + 中文文案，属装配层语义（错误面由 HTTP 层定义，核心只消费结果）。
 type (
 	CloudArchiveRequest      = cloudtasks.CloudArchiveRequest
 	CloudArchiveBatchRequest = cloudtasks.CloudArchiveBatchRequest
@@ -108,133 +103,4 @@ func (h *Handlers) archiveReserveQuota(ctx context.Context, owner string, totalS
 	}
 	// 回退路径（storageMgr）或未装配账本：无结算句柄需定案（回退预留按 pre 释放）。
 	return nil, pre, 0, ""
-}
-
-type fileWithRelPath struct {
-	root   *storage.Root
-	rel    string // 根内相对源路径（cloud/<taskID>/<file>）
-	tarRel string // tar 内条目名
-}
-
-// createTarGz 将单个文件打包为 tar.gz 并返回流式计算的 SHA-256 checksum。
-// 使用 succeeded 标记模式确保出错时清理输出文件。O_EXCL 创建，已存在返回 false 到 created。
-// 源文件经 srcRoot 相对 srcRel 读取、输出经 outRoot 相对 outRel 打开（os.Root 防符号链接逃逸；O_EXCL 语义保留）。
-func createTarGz(srcRoot *storage.Root, srcRel, srcTarName string, outRoot *storage.Root, outRel string, logger *slog.Logger) (checksum string, err error) {
-	outputFile, created, err := openArchiveOutput(outRoot, outRel)
-	if err != nil {
-		return "", err
-	}
-	if !created {
-		return "", errArchiveExists
-	}
-	defer outputFile.Close()
-
-	// 出错时清理输出文件
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = outRoot.Remove(outRel)
-		}
-	}()
-
-	hasher := sha256.New()
-	multiWriter := io.MultiWriter(outputFile, hasher)
-	gw := gzip.NewWriter(multiWriter)
-	tw := tar.NewWriter(gw)
-
-	// **收尾顺序必须显式**（P1 修复，2026-10-21）：此前 tw/gw 都是 `defer Close()`，而
-	// checksum 在 defer 之前就计算 ⇒ ① 哈希漏掉 tar 的 EOF 两块 + gzip 尾（CRC32/ISIZE）
-	// ⇒ 响应里的 checksum 100% 不等于落盘文件（客户端按它校验必然判「归档损坏」）；
-	// ② Close 的错误被丢弃且 succeeded 已置 true ⇒ 收尾失败的**截断归档**被当成功返回
-	// 且不清理。与 pkg/server/archive.go、pkg/transfer/registry.go 的既有口径统一。
-	if err := archive.AddFileToTar(tw, srcRoot, srcRel, srcTarName, logger); err != nil {
-		_ = tw.Close()
-		_ = gw.Close()
-		return "", fmt.Errorf("add file to tar: %w", err)
-	}
-	if err := tw.Close(); err != nil {
-		_ = gw.Close()
-		return "", fmt.Errorf("关闭 tar: %w", err)
-	}
-	if err := gw.Close(); err != nil {
-		return "", fmt.Errorf("关闭 gzip: %w", err)
-	}
-	if err := outputFile.Close(); err != nil {
-		return "", fmt.Errorf("关闭归档文件: %w", err)
-	}
-
-	succeeded = true
-	checksum = hex.EncodeToString(hasher.Sum(nil))
-	return checksum, nil
-}
-
-// createMultiFileTarGz 将多个文件打包为单个 tar.gz 并返回流式计算的 SHA-256 checksum。
-// 使用 succeeded 标记模式确保出错时清理输出文件。O_EXCL 创建，已存在时置 created=false 并返回 errArchiveExists。
-// 源文件按各自租户根（files[].root）相对读取、输出经 outRoot 相对 outRel 打开
-// （os.Root 防符号链接逃逸；O_EXCL 语义保留）。
-func createMultiFileTarGz(files []fileWithRelPath, outRoot *storage.Root, outRel string, logger *slog.Logger, created *bool) (checksum string, err error) {
-	*created = true
-	outputFile, createdOK, err := openArchiveOutput(outRoot, outRel)
-	if err != nil {
-		return "", err
-	}
-	if !createdOK {
-		*created = false
-		return "", errArchiveExists
-	}
-	defer outputFile.Close()
-
-	// 出错时清理输出文件
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = outRoot.Remove(outRel)
-		}
-	}()
-
-	hasher := sha256.New()
-	multiWriter := io.MultiWriter(outputFile, hasher)
-	gw := gzip.NewWriter(multiWriter)
-	tw := tar.NewWriter(gw)
-
-	// 与 createTarGz 同口径（P1 修复，2026-10-21）：显式收尾 + 收尾后再算 checksum。
-	for _, f := range files {
-		if err := archive.AddFileToTar(tw, f.root, f.rel, f.tarRel, logger); err != nil {
-			_ = tw.Close()
-			_ = gw.Close()
-			return "", fmt.Errorf("add file %q to tar: %w", f.tarRel, err)
-		}
-	}
-	if err := tw.Close(); err != nil {
-		_ = gw.Close()
-		return "", fmt.Errorf("关闭 tar: %w", err)
-	}
-	if err := gw.Close(); err != nil {
-		return "", fmt.Errorf("关闭 gzip: %w", err)
-	}
-	if err := outputFile.Close(); err != nil {
-		return "", fmt.Errorf("关闭归档文件: %w", err)
-	}
-
-	succeeded = true
-	checksum = hex.EncodeToString(hasher.Sum(nil))
-	return checksum, nil
-}
-
-// errArchiveExists 归档输出文件已存在（O_EXCL 创建失败）。
-var errArchiveExists = errors.New("archive file already exists")
-
-// openArchiveOutput 以 O_EXCL 语义打开归档输出文件（相对租户 root 的 rel 路径）。
-// 跨平台统一用 errors.Is(err, os.ErrExist) 判已存在（Windows 上 O_EXCL 对已存在文件同样报错）。
-func openArchiveOutput(root *storage.Root, rel string) (io.WriteCloser, bool, error) {
-	// 归档输出是**用户内容**写面：加密卷须透明加密落盘（raw OpenFile 写明文，
-	// 归档产物读回时按密文形态不完整；评审「用户可见入口」收敛面）。
-	f, err := rootfs.WriteUserVisible(root, rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("create archive output: %w", err)
-	}
-	return f, true, nil
 }
