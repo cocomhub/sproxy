@@ -18,7 +18,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
-	"github.com/cocomhub/sproxy/pkg/transfer"
 )
 
 // 本文件锁组归档入口（P1-c S3b）的**包内契约**：跳过未完成子任务后的响应字段、
@@ -37,15 +36,10 @@ type stubArchiveTargets struct {
 	multiChecksum string
 	multiExists   bool
 	multiErr      error
-	entriesErr    error
-	totalSize     int64
 
 	// 入参取证
 	multiSources []ArchiveSource
 	multiOutRel  string
-	entriesCalls int
-	toVolumeCall int
-	lastTransfer ArchiveVolumeTransfer
 }
 
 func (s *stubArchiveTargets) StagingFS(_ string, fs syncpkg.FS) syncpkg.FS { return fs }
@@ -63,8 +57,6 @@ func (s *stubArchiveTargets) MaxArchiveBytes() int64 { return 0 }
 
 func (s *stubArchiveTargets) ArchiveKey() []byte { return nil }
 
-func (s *stubArchiveTargets) ValidateArchiveExtras(ArchiveExtras) (int, string) { return 0, "" }
-
 func (s *stubArchiveTargets) CreateArchiveTar(*storage.Root, string, string, *storage.Root, string, *slog.Logger) (string, bool, error) {
 	return "", false, nil
 }
@@ -77,23 +69,6 @@ func (s *stubArchiveTargets) CreateMultiArchiveTar(sources []ArchiveSource, _ *s
 	return s.multiChecksum, false, nil
 }
 
-func (s *stubArchiveTargets) ArchiveEntries([]ArchiveSource) ([]transfer.SourceEntry, error) {
-	s.entriesCalls++
-	return nil, s.entriesErr
-}
-
-func (s *stubArchiveTargets) ArchiveTotalSize([]ArchiveSource) int64 { return s.totalSize }
-
-func (s *stubArchiveTargets) ArchiveToVolume(_ http.ResponseWriter, _ *http.Request, t ArchiveVolumeTransfer,
-	_ *slog.Logger, onSuccess func(url string),
-) {
-	s.toVolumeCall++
-	s.lastTransfer = t
-	if onSuccess != nil {
-		onSuccess("vault://vault/alice/user/archive/x.tar.gz")
-	}
-}
-
 // stubArchiveQuota 记录归档配额四方法的调用顺序（预留 → 结算 → 登记）。
 type stubArchiveQuota struct {
 	reservePre    int64
@@ -104,9 +79,6 @@ type stubArchiveQuota struct {
 	settleActual  int64
 	settleStatus  int
 	released      bool
-	usageOwner    string
-	usageName     string
-	usageActual   int64
 
 	calls []string
 }
@@ -140,11 +112,6 @@ func (s *stubArchiveQuota) SettleArchive(*storage.Root, string, *quota.Settlemen
 func (s *stubArchiveQuota) ReleaseArchive(*quota.Settlement, int64) {
 	s.calls = append(s.calls, "release")
 	s.released = true
-}
-
-func (s *stubArchiveQuota) RecordArchiveUsage(owner, archiveName string, actual int64) {
-	s.calls = append(s.calls, "usage")
-	s.usageOwner, s.usageName, s.usageActual = owner, archiveName, actual
 }
 
 // newGroupArchiveEnv 装配组归档用例：真实租户（含 cloud/t1/a.bin）+ 组含 1 个已完成与
@@ -230,16 +197,16 @@ func TestArchiveGroup_SkipsIncompleteTasks(t *testing.T) {
 	if quotaStub.reserveOwner != "alice" || quotaStub.reserveTotal != 5 {
 		t.Fatalf("预留入参 = (owner=%q, total=%d)，期望 (alice, 5)", quotaStub.reserveOwner, quotaStub.reserveTotal)
 	}
-	wantCalls := []string{"reserve", "settle", "usage"}
+	wantCalls := []string{"reserve", "settle"}
 	if strings.Join(quotaStub.calls, ",") != strings.Join(wantCalls, ",") {
 		t.Fatalf("配额调用顺序 = %v，期望 %v", quotaStub.calls, wantCalls)
 	}
 	if quotaStub.released {
 		t.Fatal("成功路径不得释放预留（必须 Commit 结算）")
 	}
-	if quotaStub.usageOwner != "alice" || quotaStub.usageName != "g1-archive.tar.gz" || quotaStub.usageActual != 1234 {
-		t.Fatalf("占用登记 = (%q,%q,%d)，期望 (alice,g1-archive.tar.gz,1234)",
-			quotaStub.usageOwner, quotaStub.usageName, quotaStub.usageActual)
+	// 占用登记（删除时按登记释放的事实源）随 S3c 迁入 Service：直接查登记值。
+	if got := svc.ArchiveUsage("alice", "g1-archive.tar.gz"); got != 1234 {
+		t.Fatalf("占用登记 = %d，期望 1234", got)
 	}
 	// 组归档名落库（供组删除联动清理）。
 	if groups.setArchiveID != "g1" || groups.setArchiveFile != "g1-archive.tar.gz" {
@@ -251,7 +218,7 @@ func TestArchiveGroup_SkipsIncompleteTasks(t *testing.T) {
 // 打开：ACL 拒绝回 403，且不打开 Reader、不进入转存核心（否则会泄漏 403 之外的错误面）。
 func TestArchiveGroup_ACLRejectedBeforeOpeningSources(t *testing.T) {
 	t.Parallel()
-	svc, groups, targets, _ := newGroupArchiveEnv(t)
+	svc, groups, _, _ := newGroupArchiveEnv(t)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/cloud/groups/g1/archive",
@@ -267,9 +234,6 @@ func TestArchiveGroup_ACLRejectedBeforeOpeningSources(t *testing.T) {
 	decodeBody(t, rec, &got)
 	if got.Success || got.Message != "目标卷对当前用户不可用（ACL 拒绝）" {
 		t.Fatalf("响应 = %+v，期望 ACL 拒绝文案", got)
-	}
-	if targets.entriesCalls != 0 || targets.toVolumeCall != 0 {
-		t.Fatalf("ACL 拒绝后不得打开源/转存（entries=%d, toVolume=%d）", targets.entriesCalls, targets.toVolumeCall)
 	}
 	if groups.setArchiveFile != "" {
 		t.Fatalf("ACL 拒绝不得登记组归档名，got %q", groups.setArchiveFile)

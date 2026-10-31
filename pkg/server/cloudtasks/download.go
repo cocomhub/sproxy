@@ -32,10 +32,12 @@ import (
 
 // Service 是云任务 CRUD 的编排入口。
 //
-// 无状态：全部依赖经 Deps 注入，适配器逐调用读取装配层当前状态（运行期替换卷集/配置
-// 即刻生效），因此可在路由注册期构造一次后并发复用。
+// 除 archiveUsage（归档桶占用登记，删除时按登记释放）外无状态：全部依赖经 Deps 注入，
+// 适配器逐调用读取装配层当前状态（运行期替换卷集/配置即刻生效），因此可在路由注册期
+// 构造一次后并发复用。
 type Service struct {
-	deps Deps
+	deps  Deps
+	usage *archiveUsage
 }
 
 // New 构造编排入口。Logger 为 nil 时回落 slog.Default()（与装配层响应日志的缺省一致），
@@ -44,7 +46,7 @@ func New(deps Deps) *Service {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
-	return &Service{deps: deps}
+	return &Service{deps: deps, usage: &archiveUsage{}}
 }
 
 // 响应头/文案/审计结果常量。

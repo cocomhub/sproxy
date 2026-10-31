@@ -13,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
@@ -23,7 +22,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
-	"github.com/cocomhub/sproxy/pkg/transfer"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -121,12 +119,6 @@ func (a *cloudTasksAdapter) UpdateGroupStatus(groupID string) {
 	a.h.cloudMgr.UpdateGroupStatus(groupID)
 }
 
-// DeleteGroupArchive 委托装配层的归档清理（归档产物的删除仍属 S3c 迁移面，只经此一行
-// 取用 `deleteGroupArchive`；行为与迁移前逐字一致）。
-func (a *cloudTasksAdapter) DeleteGroupArchive(owner, archiveFile string) error {
-	return a.h.deleteGroupArchive(owner, archiveFile)
-}
-
 // ---- Tenants ----
 
 func (a *cloudTasksAdapter) TenantFor(owner string) *storage.Tenant {
@@ -193,7 +185,7 @@ func (a *cloudTasksAdapter) TryReserveFallback(n int64) error {
 	return a.h.storageMgr.TryReserve(n, capacity.CategoryCloud)
 }
 
-// ---- Quota（归档，P1-c S3a 临时接缝） ----
+// ---- Quota（归档，P1-c S3a） ----
 
 // ReserveArchive 委托装配层的归档预留（含 cloud_archive_max_bytes 上限校验）。
 func (a *cloudTasksAdapter) ReserveArchive(ctx context.Context, owner string, totalSourceSize int64) (*quota.Settlement, int64, int, string) {
@@ -208,11 +200,6 @@ func (a *cloudTasksAdapter) SettleArchive(root *storage.Root, rel string, reserv
 // ReleaseArchive 委托装配层的预留释放（幂等）。
 func (a *cloudTasksAdapter) ReleaseArchive(reservation *quota.Settlement, pre int64) {
 	releaseArchiveReservation(reservation, a.h.storageMgr, pre)
-}
-
-// RecordArchiveUsage 委托装配层的 archive 桶占用登记（状态仍在装配层，S3b 随组归档迁入）。
-func (a *cloudTasksAdapter) RecordArchiveUsage(owner, archiveName string, actual int64) {
-	a.h.recordArchiveUsage(owner, archiveName, actual)
 }
 
 // ---- Targets ----
@@ -255,15 +242,7 @@ func (a *cloudTasksAdapter) ArchiveKey() []byte {
 	return a.h.archiveKey()
 }
 
-// ---- Targets（归档，P1-c S3a 临时接缝） ----
-
-// ValidateArchiveExtras 委托装配层的「仅转存外部卷支持」选项校验（规则只有一份）。
-func (a *cloudTasksAdapter) ValidateArchiveExtras(extras cloudtasks.ArchiveExtras) (int, string) {
-	return archiveExtrasError(archiveExtras{
-		TargetVolume: extras.TargetVolume, TargetPath: extras.TargetPath,
-		Encrypt: extras.Encrypt, Cipher: extras.Cipher, Compression: extras.Compression,
-	})
-}
+// ---- Targets（归档，P1-c S3a：tar 打包助手） ----
 
 // CreateArchiveTar 委托装配层的单文件 tar.gz 打包（O_EXCL）。
 func (a *cloudTasksAdapter) CreateArchiveTar(srcRoot *storage.Root, srcRel, tarName string, outRoot *storage.Root, outRel string, logger *slog.Logger) (string, bool, error) {
@@ -285,21 +264,6 @@ func (a *cloudTasksAdapter) CreateMultiArchiveTar(sources []cloudtasks.ArchiveSo
 		return "", false, err
 	}
 	return checksum, false, nil
-}
-
-// ArchiveEntries 委托装配层打开源文件 Reader（用户可见读入口，R25）。
-func (a *cloudTasksAdapter) ArchiveEntries(sources []cloudtasks.ArchiveSource) ([]transfer.SourceEntry, error) {
-	return archiveEntries(archiveFilesFrom(sources))
-}
-
-// ArchiveTotalSize 委托装配层的用户可见总量汇总（与 tar 条目 Size 同口径）。
-func (a *cloudTasksAdapter) ArchiveTotalSize(sources []cloudtasks.ArchiveSource) int64 {
-	return archiveTotalSize(archiveFilesFrom(sources))
-}
-
-// ArchiveToVolume 委托装配层的统一转存执行核心（S3b 迁入后删除本方法）。
-func (a *cloudTasksAdapter) ArchiveToVolume(w http.ResponseWriter, r *http.Request, t cloudtasks.ArchiveVolumeTransfer, logger *slog.Logger, onSuccess func(url string)) {
-	a.h.cloudArchiveToVolume(w, r, t, logger, onSuccess)
 }
 
 // archiveFilesFrom 把编排核心的源文件描述适配为装配层的 fileWithRelPath（tar 助手入参）。

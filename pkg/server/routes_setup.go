@@ -191,7 +191,6 @@ func (h *Handlers) initStorageLayout(vs *registry.Set, cfg *Config, log *slog.Lo
 	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	h.quotaBuckets = make(map[string]map[string]*quota.Scope)
-	h.archiveUsage = make(map[string]map[string]int64)
 	if h.tenantFor(anonymousOwner) == nil {
 		// anonymous 是未认证请求的默认兜底租户，创建失败意味着存储根不可用，拒绝启动。
 		log.Error("预创建 anonymous 租户失败，存储根不可用")

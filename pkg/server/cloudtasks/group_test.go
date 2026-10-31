@@ -12,6 +12,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // 本文件锁云任务组入口（P1-c S2b）的**包内契约**：owner 透传、刷新顺序、错误映射、
@@ -29,7 +30,6 @@ type stubGroups struct {
 	cancelErr    error
 	deleteErr    error
 	resumeErr    error
-	archiveErr   error
 
 	// 入参取证
 	submittedName   string
@@ -37,8 +37,6 @@ type stubGroups struct {
 	submittedOwner  string
 	submittedParams cloud.TaskParams
 	updatedIDs      []string
-	archiveOwner    string
-	archiveFile     string
 	setArchiveID    string
 	setArchiveFile  string
 	deletedID       string
@@ -83,9 +81,15 @@ func (s *stubGroups) SetGroupArchiveFile(groupID, archiveFile string) {
 
 func (s *stubGroups) UpdateGroupStatus(id string) { s.updatedIDs = append(s.updatedIDs, id) }
 
-func (s *stubGroups) DeleteGroupArchive(owner, archiveFile string) error {
-	s.archiveOwner, s.archiveFile = owner, archiveFile
-	return s.archiveErr
+// recordingTenants 记录组删除联动清理时解析的 owner（S3c 后清理在本包内执行）；返回 nil
+// 租户 ⇒ 清理按失败处理（组删除结果不受影响）。
+type recordingTenants struct {
+	owner string
+}
+
+func (r *recordingTenants) TenantFor(owner string) *storage.Tenant {
+	r.owner = owner
+	return nil
 }
 
 // recordingGroupTasks 记录 SnapshotTasks 的子任务 ID 入参（组详情必须按组携带的子任务
@@ -175,7 +179,8 @@ func TestDeleteGroup_AuditsAndCleansArchive(t *testing.T) {
 		t.Parallel()
 		groups := &stubGroups{deleteErr: errors.New("group not found")}
 		audit := &stubAudit{}
-		svc := New(Deps{Groups: groups, Audit: audit})
+		tenants := &recordingTenants{}
+		svc := New(Deps{Groups: groups, Audit: audit, Tenants: tenants})
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodDelete, "/api/cloud/groups/g1", nil)
 		req.SetPathValue("id", "g1")
@@ -188,8 +193,8 @@ func TestDeleteGroup_AuditsAndCleansArchive(t *testing.T) {
 		if len(audit.calls) != 1 || audit.calls[0].action != "cloud_group_delete" || audit.calls[0].result != auditResultError {
 			t.Fatalf("审计 = %+v，want 1 条 cloud_group_delete/error", audit.calls)
 		}
-		if groups.archiveFile != "" {
-			t.Fatalf("删除失败不得清理归档，got %q", groups.archiveFile)
+		if tenants.owner != "" {
+			t.Fatalf("删除失败不得清理归档（不应解析租户），got owner %q", tenants.owner)
 		}
 	})
 
@@ -199,7 +204,8 @@ func TestDeleteGroup_AuditsAndCleansArchive(t *testing.T) {
 			"g1": {ID: "g1", Owner: "alice", ArchiveFile: "g1-1.tar.gz"},
 		}}
 		audit := &stubAudit{}
-		svc := New(Deps{Groups: groups, Audit: audit})
+		tenants := &recordingTenants{}
+		svc := New(Deps{Groups: groups, Audit: audit, Tenants: tenants})
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodDelete, "/api/cloud/groups/g1", nil)
 		req.SetPathValue("id", "g1")
@@ -212,8 +218,8 @@ func TestDeleteGroup_AuditsAndCleansArchive(t *testing.T) {
 		if groups.deletedID != "g1" || groups.deletedOwner != "alice" {
 			t.Fatalf("DeleteGroup 入参 = (%q,%q)，owner 必须透传", groups.deletedID, groups.deletedOwner)
 		}
-		if groups.archiveOwner != "alice" || groups.archiveFile != "g1-1.tar.gz" {
-			t.Fatalf("归档清理入参 = (%q,%q)，want (alice,g1-1.tar.gz)", groups.archiveOwner, groups.archiveFile)
+		if tenants.owner != "alice" {
+			t.Fatalf("归档清理 owner = %q，want alice（清理已迁入 cloudtasks，经 Tenants 解析）", tenants.owner)
 		}
 		if len(audit.calls) != 1 || audit.calls[0].result != auditResultSuccess {
 			t.Fatalf("审计 = %+v，want 1 条 success", audit.calls)
@@ -228,10 +234,10 @@ func TestDeleteGroup_AuditsAndCleansArchive(t *testing.T) {
 	t.Run("archive cleanup failure keeps group delete result", func(t *testing.T) {
 		t.Parallel()
 		groups := &stubGroups{
-			groups:     map[string]*cloud.CloudTaskGroup{"g1": {ID: "g1", Owner: "alice", ArchiveFile: "g1-1.tar.gz"}},
-			archiveErr: errors.New("卷未装配"),
+			groups: map[string]*cloud.CloudTaskGroup{"g1": {ID: "g1", Owner: "alice", ArchiveFile: "g1-1.tar.gz"}},
 		}
-		svc := New(Deps{Groups: groups, Audit: &stubAudit{}})
+		// 租户不可用 ⇒ 归档清理失败（清理失败不得改变组删除结果）。
+		svc := New(Deps{Groups: groups, Audit: &stubAudit{}, Tenants: absentTenants{}})
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodDelete, "/api/cloud/groups/g1", nil)
 		req.SetPathValue("id", "g1")
