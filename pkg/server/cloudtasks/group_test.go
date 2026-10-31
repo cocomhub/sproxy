@@ -39,6 +39,8 @@ type stubGroups struct {
 	updatedIDs      []string
 	archiveOwner    string
 	archiveFile     string
+	setArchiveID    string
+	setArchiveFile  string
 	deletedID       string
 	deletedOwner    string
 	listOwner       string
@@ -75,7 +77,9 @@ func (s *stubGroups) DeleteGroup(id, owner string) error {
 
 func (s *stubGroups) ResumeGroup(_ string, _ bool, _ string) error { return s.resumeErr }
 
-func (s *stubGroups) SetGroupArchiveFile(string, string) {}
+func (s *stubGroups) SetGroupArchiveFile(groupID, archiveFile string) {
+	s.setArchiveID, s.setArchiveFile = groupID, archiveFile
+}
 
 func (s *stubGroups) UpdateGroupStatus(id string) { s.updatedIDs = append(s.updatedIDs, id) }
 

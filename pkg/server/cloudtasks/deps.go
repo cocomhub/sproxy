@@ -63,9 +63,9 @@ type Tasks interface {
 // GetGroup → UpdateGroupStatus → GetGroup（owner 可见性先判），
 // ListGroups("", -1, 0) → 逐个 UpdateGroupStatus → ListGroups(status, offset, limit)。
 //
-// DeleteGroupArchive 是组删除时的归档产物清理：归档自身的读写在 S3 才迁入本包，
-// 故 S2b 期间由装配层实现（原 cloud_download_handler.go 的 deleteGroupArchive 原地
-// 保留）；S3 迁入归档面后替换该委托。
+// DeleteGroupArchive 是组删除时的归档产物清理：归档产物的**删除**（桶归档名 / 外部卷
+// 转存 URL + 配额释放）仍属 S3c 迁移面，故由装配层实现（cloud_download_handler.go 的
+// deleteGroupArchive 原地保留）；S3c 迁入转存/删除面后替换该委托。
 type Groups interface {
 	SubmitAndStartGroup(name string, urls []cloudfilename.Entry, owner string, params cloud.TaskParams) (*cloud.CloudTaskGroup, error)
 	GetGroup(id, owner string) (*cloud.CloudTaskGroup, bool)
@@ -98,7 +98,8 @@ type Volumes interface {
 // 是空操作（与既有 scope==nil && storageMgr==nil 分支等价）。
 //
 // 归档配额四方法（P1-c S3a）是「预留 → 写 → 对账 → 提交/回滚」的唯一取用面：装配层
-// 保留既有实现（组归档与转存路径 S3b 前仍直接调用），本包只消费结果。失败以
+// 保留既有实现（S3b 起单任务/批量/组归档全部经本接口取用；仅转存核心的写前探针与
+// 差分结算仍属 S3c），本包只消费结果。失败以
 // (status, message) 表达，响应由调用方写出，避免把 http.ResponseWriter 传进配额面。
 type Quota interface {
 	BucketScope(owner, bucket string) *quota.Scope
@@ -134,9 +135,9 @@ type Targets interface {
 	MaxArchiveBytes() int64
 	ArchiveKey() []byte
 
-	// 归档打包/转存五方法（P1-c S3a 临时接缝）：实现仍在装配层（tar 助手与
-	// cloudArchiveToVolume 属 S3b 迁移面），本包消费结果；ArchiveToVolume 因执行核心
-	// 尚未迁入暂保留 HTTP 参数，S3b 迁入后删除该方法。
+	// 归档打包/转存六方法（P1-c S3a 临时接缝，S3b 增 ArchiveTotalSize）：实现仍在装配层
+	// （tar 助手与 cloudArchiveToVolume 属 S3c 迁移面），本包消费结果；ArchiveToVolume 因
+	// 执行核心尚未迁入暂保留 HTTP 参数，S3c 迁入后删除该方法。
 	//
 	// ValidateArchiveExtras 校验「仅转存外部卷支持」的选项，成功返回 status=0。
 	ValidateArchiveExtras(extras ArchiveExtras) (status int, message string)
@@ -148,6 +149,9 @@ type Targets interface {
 		logger *slog.Logger) (checksum string, exists bool, err error)
 	// ArchiveEntries 把源文件转成 transfer.SourceEntry（打开 Reader；失败时已关闭已打开项）。
 	ArchiveEntries(sources []ArchiveSource) ([]transfer.SourceEntry, error)
+	// ArchiveTotalSize 汇总源文件的**用户可见（逻辑）大小**（加密卷取明文长度）。
+	// 转存路径的 TotalSize 用该口径（与 tar 条目 Size 同源），不用 Stat 物理大小。
+	ArchiveTotalSize(sources []ArchiveSource) int64
 	// ArchiveToVolume 执行统一转存（可信卷写视图 + owner 前缀 + staging/写锁 + 配额结算）。
 	ArchiveToVolume(w http.ResponseWriter, r *http.Request, t ArchiveVolumeTransfer, logger *slog.Logger, onSuccess func(url string))
 }

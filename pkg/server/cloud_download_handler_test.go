@@ -68,7 +68,7 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudTaskHandler(h.cloudTaskService().CancelGroup))
 	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudTaskHandler(h.cloudTaskService().DeleteGroup))
 	mux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudTaskHandler(h.cloudTaskService().ResumeGroup))
-	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudTaskHandler(h.cloudTaskService().ArchiveGroup))
 	return httptest.NewServer(mux), mgr
 }
 
@@ -1195,14 +1195,14 @@ func TestCloudArchiveGroupToVolume_UnifiedTransfer(t *testing.T) {
 	}
 	writeRootFile(t, tenantRoot, "cloud/g1/a.txt", "aaaaa")
 	writeRootFile(t, tenantRoot, "cloud/g1/b.txt", "bbbbb")
-	groupFiles := []fileWithRelPath{
-		{root: tenantRoot, rel: "cloud/g1/a.txt", tarRel: "a.txt"},
-		{root: tenantRoot, rel: "cloud/g1/b.txt", tarRel: "b.txt"},
+	sources := []cloudtasks.ArchiveSource{
+		{Root: tenantRoot, Rel: "cloud/g1/a.txt", TarRel: "a.txt"},
+		{Root: tenantRoot, Rel: "cloud/g1/b.txt", TarRel: "b.txt"},
 	}
-	req := &CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
+	req := CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/cloud/groups/g1/archive", nil)
-	h.cloudArchiveGroupToVolume(rec, r, "g1", "", groupFiles, req, "g1-archive")
+	h.cloudTaskService().ArchiveGroupToVolume(rec, r, "g1", "", sources, req, "g1-archive")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unified transfer status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -1267,14 +1267,14 @@ func TestCloudArchiveGroupToVolume_TrustedVolumeWiring(t *testing.T) {
 	}
 	writeRootFile(t, tenantRoot, "cloud/g1/a.txt", "aaaaa")
 	writeRootFile(t, tenantRoot, "cloud/g1/b.txt", "bbbbb")
-	groupFiles := []fileWithRelPath{
-		{root: tenantRoot, rel: "cloud/g1/a.txt", tarRel: "a.txt"},
-		{root: tenantRoot, rel: "cloud/g1/b.txt", tarRel: "b.txt"},
+	sources := []cloudtasks.ArchiveSource{
+		{Root: tenantRoot, Rel: "cloud/g1/a.txt", TarRel: "a.txt"},
+		{Root: tenantRoot, Rel: "cloud/g1/b.txt", TarRel: "b.txt"},
 	}
-	req := &CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
+	req := CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/cloud/groups/g1/archive", nil)
-	h.cloudArchiveGroupToVolume(rec, r, "g1", "alice", groupFiles, req, "g1-archive")
+	h.cloudTaskService().ArchiveGroupToVolume(rec, r, "g1", "alice", sources, req, "g1-archive")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}

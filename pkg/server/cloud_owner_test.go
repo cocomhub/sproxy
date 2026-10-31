@@ -52,7 +52,7 @@ func actorCloudMux(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("GET /api/cloud/groups/{id}", wrap(h.cloudTaskHandler(h.cloudTaskService().GetGroup)))
 	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", wrap(h.cloudTaskHandler(h.cloudTaskService().CancelGroup)))
 	mux.HandleFunc("DELETE /api/cloud/groups/{id}", wrap(h.cloudTaskHandler(h.cloudTaskService().DeleteGroup)))
-	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", wrap(h.cloudArchiveGroup))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", wrap(h.cloudTaskHandler(h.cloudTaskService().ArchiveGroup)))
 	mux.HandleFunc("HEAD /api/files/stat", wrap(h.stat))
 	return mux
 }
