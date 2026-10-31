@@ -46,6 +46,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/tempclean"
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -334,7 +335,7 @@ func attachSpanDiskCache(fs *SecretdataFS, opts Options) {
 // 返回 owned=true 表示目录由本 FS 自建（Close 时清理）。
 func prepareTempDir(opts *Options) (owned bool, err error) {
 	if opts.TempDir == "" {
-		dir, mkErr := os.MkdirTemp("", "sproxy-secretdata-")
+		dir, mkErr := newDefaultTempDir()
 		if mkErr != nil {
 			return false, fmt.Errorf("secretdata: 创建默认临时目录失败: %w", mkErr)
 		}
@@ -3778,4 +3779,32 @@ func (s *SecretdataFS) walkContainerChild(ctx context.Context, p string, depth i
 		return
 	}
 	walk(p, sub, depth+1)
+}
+
+// tempRootName 是默认临时目录的**固定父目录**名（旧实现直接在 os.TempDir() 下散落
+// `sproxy-secretdata-<rand>`，进程被杀/WSL 崩溃/装配失败时 Close 未执行 ⇒ 实测残留 208 个）。
+const tempRootName = "sproxy-secretdata"
+
+// staleTempMaxAge 是孤儿临时目录的判定阈值：超过该时长未更新即视为遗留（进程被杀残留）。
+// 取 6h 以避开「长时间运行的实例但恰好空闲」的误删风险（其目录内文件仍会更新 mtime）。
+const staleTempMaxAge = 6 * time.Hour
+
+// newDefaultTempDir 创建本进程的临时目录：<TempDir>/sproxy-secretdata/<pid>-<rand>，
+// 并在创建前清理**孤儿**（旧散落前缀 + 本父目录下超龄子目录）。
+//
+// 为什么需要清理：默认临时目录由 Close 负责删除，但进程被强杀（WSL 崩溃、taskkill）时
+// 不会执行 ⇒ 每次启动每卷各留一个空目录，长期累积（实测 208 个）。
+func newDefaultTempDir() (string, error) {
+	parent := filepath.Join(os.TempDir(), tempRootName)
+	cleanupStaleTempDirs(parent)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(parent, fmt.Sprintf("%d-", os.Getpid()))
+}
+
+// cleanupStaleTempDirs 清理孤儿临时目录（best-effort）：复用 pkg/tempclean 的**唯一实现**
+// （覆盖旧散落前缀、固定父目录与客户端/multipart 残留），按 mtime 超龄判定。
+func cleanupStaleTempDirs(_ string) {
+	tempclean.CleanupStale(staleTempMaxAge)
 }
