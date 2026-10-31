@@ -744,6 +744,16 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 - **删除 `pkg/server/user_visible_io.go`**：它只是 `pkg/rootfs` 的 6 个纯委托（收敛原则 #11 禁止薄封装），
   39 处调用点直接改为 `rootfs.*`。
 
+**P1：装配层策略对象（2026-10-31）**
+
+- `volume.Router`（#960 内核 + #962 接线）：卷路由与 ACL 单一实现，删除 `locateOwnerFileLegacy`/
+  `locateDefaultVolumeFile`/`locateOwnerFileScan` 三份重复；不变量 4/4 变异命中。
+- `quota.Settlement`（#961 内核 + #964 `ReserveWait` + #965 云归档迁移）：`Reserve→Reconcile→Commit/Release`
+  状态机，幂等、未提交自动回滚、排队等待复用既有 `waitq`；云归档硬编码 30s 超时缺陷一并修正。
+- `cloudtasks.Orchestrator`（#968/#970/#971/#972/#973/#974/#975）：云下载/归档迁入
+  `pkg/server/cloudtasks`，`Deps` 恒 8 字段（7 窄接口 + Logger）、接口方法 40 个；
+  `pkg/server` 42,568 → **31,221 行（−26.6%）**。设计见 `docs/designs/2026-10-31-cloudtasks-deps-mapping.md`。
+
 ### 剩余三块为何不再按切片下沉（2026-10-30 实测）
 
 `cloud`（2.2k）、`volume`（6.5k）、`files`（3.9k）与已下沉的 13 片**形态不同**，实测判据：
