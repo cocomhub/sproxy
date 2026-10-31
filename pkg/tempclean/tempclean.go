@@ -192,3 +192,35 @@ func Start(ctx context.Context, log *slog.Logger, interval, maxAge time.Duration
 		}
 	}
 }
+
+// ResidualBytes 统计当前 sproxy 临时残留的**磁盘字节数与项数**（只读，不删除）。
+//
+// 用途：配额/容量对账。残留不在任何卷根下，因此不进卷账本——一旦它与「卷账本 + 扫描值」
+// 出现明显差异，正是「账实不符」的直接证据。对账/巡检调用它把该维度显式暴露出来，
+// 避免只能靠人工 du 才发现磁盘被吃掉。
+func ResidualBytes() (bytes int64, items int) {
+	root := os.TempDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, 0
+	}
+	for _, e := range entries {
+		name := e.Name()
+		path := filepath.Join(root, name)
+		switch {
+		case name == RootSecretdata || name == RootClient:
+			children, cerr := os.ReadDir(path)
+			if cerr != nil {
+				continue
+			}
+			for _, c := range children {
+				bytes += dirSize(filepath.Join(path, c.Name()))
+				items++
+			}
+		case matchesLegacy(name):
+			bytes += dirSize(path)
+			items++
+		}
+	}
+	return bytes, items
+}

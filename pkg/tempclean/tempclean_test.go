@@ -92,3 +92,37 @@ func TestCleanupStale_LegacyAndMultipart(t *testing.T) {
 		t.Fatalf("removed=%d want=%d", rep.Removed, len(targets))
 	}
 }
+
+// TestResidualBytes 只读统计：不清删，返回残留字节数与项数（供配额对账维度）。
+func TestResidualBytes(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("TMPDIR", base)
+	t.Setenv("TMP", base)
+	t.Setenv("TEMP", base)
+
+	parent := filepath.Join(base, RootSecretdata)
+	dir := filepath.Join(parent, "p1")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 2048)
+	if err := os.WriteFile(filepath.Join(dir, "chunk"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(base, "multipart-1")
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "f"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bytes, items := ResidualBytes()
+	if items != 2 || bytes < 4096 {
+		t.Fatalf("统计不正确: bytes=%d items=%d", bytes, items)
+	}
+	// 只读：不得删除
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("ResidualBytes 不应删除任何内容: %v", err)
+	}
+}
