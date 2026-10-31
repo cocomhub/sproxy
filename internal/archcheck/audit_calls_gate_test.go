@@ -66,27 +66,37 @@ func countAuditCalls(t *testing.T) map[string]int {
 	t.Helper()
 	callRe := regexp.MustCompile(`\.RecordAudit\(|recordFileAudit\(`)
 	out := make(map[string]int)
-	for _, root := range []string{".."} {
-		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+	root := moduleRoot(t)
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		// 跳过非源码目录（worktree 副本 / 构建产物 / 依赖缓存），否则他人分支的文件会被算进来。
+		slash := "/" + filepath.ToSlash(path)
+		for _, skip := range []string{"/.worktrees/", "/build/", "/node_modules/", "/.git/"} {
+			if strings.Contains(slash, skip) {
 				return nil
 			}
-			b, rerr := os.ReadFile(path)
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil
+		}
+		n := 0
+		for line := range strings.SplitSeq(string(b), "\n") {
+			if strings.Contains(line, "func ") {
+				continue
+			}
+			n += len(callRe.FindAllString(line, -1))
+		}
+		if n > 0 {
+			rel, rerr := filepath.Rel(root, path)
 			if rerr != nil {
 				return nil
 			}
-			n := 0
-			for line := range strings.SplitSeq(string(b), "\n") {
-				if strings.Contains(line, "func ") {
-					continue
-				}
-				n += len(callRe.FindAllString(line, -1))
-			}
-			if n > 0 {
-				out[filepath.ToSlash(strings.TrimPrefix(path, "../"))] = n
-			}
-			return nil
-		})
-	}
+			out[filepath.ToSlash(rel)] = n
+		}
+		return nil
+	})
 	return out
 }
