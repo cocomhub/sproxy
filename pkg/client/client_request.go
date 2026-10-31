@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
+	"github.com/cocomhub/sproxy/pkg/tempclean"
 )
 
 // 直连模式下拼接 serverURL + urlPath 构造完整 URL。
@@ -546,14 +547,8 @@ const staleClientTempMaxAge = 6 * time.Hour
 func clientTempDir() string {
 	dir := filepath.Join(os.TempDir(), clientTempRoot)
 	clientTempCleanupOnce.Do(func() {
-		cutoff := time.Now().Add(-staleClientTempMaxAge)
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, e := range entries {
-				if fi, ierr := e.Info(); ierr == nil && fi.ModTime().Before(cutoff) {
-					_ = os.Remove(filepath.Join(dir, e.Name()))
-				}
-			}
-		}
+		// 复用 pkg/tempclean 的唯一清理实现（同时覆盖 secretdata / multipart 残留）。
+		tempclean.CleanupStale(staleClientTempMaxAge)
 	})
 	return dir
 }

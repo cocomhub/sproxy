@@ -35,6 +35,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/tempclean"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -435,6 +436,25 @@ func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 		Interval: 10 * time.Minute,
 		Run: func(context.Context) {
 			h.cleanupUploadingFilesPass()
+		},
+	})
+	// 孤儿临时文件周期清理（**长期运行也会有泄露**：进程被强杀 / 装配失败时
+	// Close 与 defer 都不执行；multipart 落盘文件 Go 标准库从不自动删）。
+	// 这些文件占盘但不计入任何卷账本 ⇒ 账实不符、配额不可信，必须周期回收。
+	// 启动时先同步清一次（装配阶段），之后按小时周期执行。
+	if rep := tempclean.CleanupStale(tempclean.DefaultMaxAge); rep.Removed > 0 {
+		log.Info("tempclean: 启动清理孤儿临时项",
+			"removed", rep.Removed, "freed_bytes", rep.FreedBytes)
+	}
+	mustRegister(Task{
+		Name:     "temp-cleanup",
+		Interval: tempclean.DefaultInterval,
+		Run: func(context.Context) {
+			rep := tempclean.CleanupStale(tempclean.DefaultMaxAge)
+			if rep.Removed > 0 {
+				log.Info("tempclean: 周期清理孤儿临时项",
+					"removed", rep.Removed, "freed_bytes", rep.FreedBytes)
+			}
 		},
 	})
 	mustRegister(Task{

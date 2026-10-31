@@ -46,6 +46,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/tempclean"
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -3802,33 +3803,8 @@ func newDefaultTempDir() (string, error) {
 	return os.MkdirTemp(parent, fmt.Sprintf("%d-", os.Getpid()))
 }
 
-// cleanupStaleTempDirs 清理孤儿临时目录（best-effort，失败忽略——绝不影响装配）：
-//   - 旧实现散落在 os.TempDir() 下的 `sproxy-secretdata-*` 目录；
-//   - 新父目录下的子目录。
-//
-// 判据：mtime 超过 staleTempMaxAge（活跃实例会持续更新目录内文件 mtime）。
-func cleanupStaleTempDirs(parent string) {
-	cutoff := time.Now().Add(-staleTempMaxAge)
-	cleanDir := func(p string, info os.DirEntry) {
-		if !info.IsDir() {
-			return
-		}
-		fi, ierr := info.Info()
-		if ierr != nil || fi.ModTime().After(cutoff) {
-			return
-		}
-		_ = os.RemoveAll(p)
-	}
-	if entries, err := os.ReadDir(os.TempDir()); err == nil {
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), "sproxy-secretdata-") {
-				cleanDir(filepath.Join(os.TempDir(), e.Name()), e)
-			}
-		}
-	}
-	if entries, err := os.ReadDir(parent); err == nil {
-		for _, e := range entries {
-			cleanDir(filepath.Join(parent, e.Name()), e)
-		}
-	}
+// cleanupStaleTempDirs 清理孤儿临时目录（best-effort）：复用 pkg/tempclean 的**唯一实现**
+// （覆盖旧散落前缀、固定父目录与客户端/multipart 残留），按 mtime 超龄判定。
+func cleanupStaleTempDirs(_ string) {
+	tempclean.CleanupStale(staleTempMaxAge)
 }
