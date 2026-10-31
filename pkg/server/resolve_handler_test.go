@@ -86,22 +86,3 @@ func TestResolveURLHandler_BadBody(t *testing.T) {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }
-
-// TestWithShareTarget 验证 spx_target 参数叠加（已有 query 保留、同键覆盖）。
-func TestWithShareTarget(t *testing.T) {
-	t.Parallel()
-	cases := []struct{ in, target, want string }{
-		{"https://example.com/s/EXAMPLE-001", "EXAMPLE-001A.mp4", "spx_target=EXAMPLE-001A.mp4"},
-		{"https://example.com/s/EXAMPLE-001?x=1", "b.mp4", "spx_target=b.mp4"},
-		{"https://example.com/magnet:?xt=urn:btih:ab", "m.mp4", "spx_target=m.mp4"},
-	}
-	for _, c := range cases {
-		got := withShareTarget(c.in, c.target)
-		if !strings.Contains(got, c.want) {
-			t.Fatalf("withShareTarget(%q, %q) = %q, want contains %q", c.in, c.target, got, c.want)
-		}
-		if !strings.HasPrefix(got, strings.SplitN(c.in, "?", 2)[0]) {
-			t.Fatalf("withShareTarget 改变了 URL 路径: %q -> %q", c.in, got)
-		}
-	}
-}

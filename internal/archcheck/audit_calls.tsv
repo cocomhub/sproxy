@@ -13,7 +13,8 @@ pkg/server/archive.go	1
 pkg/server/backends_api.go	4	
 pkg/server/backup_api.go	1	
 pkg/server/checksum_api.go	1	
-pkg/server/cloud_download_handler.go	8	
+pkg/server/cloud_download_handler.go	4	# P1-c S2a：任务 CRUD（含 2 处取消/删除审计）迁入 cloudtasks，本文件剩组/归档路径
+pkg/server/cloudtasks/download.go	4	# 云任务 CRUD 的取消/删除审计（经注入的 cloudtasks.Audit → h.RecordAudit）
 pkg/server/cloudtasks_wiring.go	1	
 pkg/server/config_api.go	2	
 pkg/server/credentials_handler.go	17	
