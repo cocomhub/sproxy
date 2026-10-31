@@ -45,8 +45,8 @@ func TestAuditScenario_CloudGroup(t *testing.T) {
 	attachTestAudit(t, h)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
-	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudDeleteGroup)
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().CreateGroup))
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudTaskHandler(h.cloudTaskService().DeleteGroup))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 

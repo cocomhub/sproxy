@@ -17,8 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/cloud"
-	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/rootfs"
@@ -59,244 +57,6 @@ func (h *Handlers) cloudTaskHandler(fn func(http.ResponseWriter, *http.Request, 
 	return func(w http.ResponseWriter, r *http.Request) {
 		fn(w, r, ActorFrom(r.Context()))
 	}
-}
-
-// checkTransferACL 校验转存目标卷对 owner 的 ACL（H2/R1：防跨租户覆写）。
-// transfer 为 nil 或卷放行 → 返回 ""；卷未装配/ACL 拒绝 → 返回错误文案（调用方 403）。
-//
-// 实现随云任务 CRUD 迁入 cloudtasks（单条/批量/组三条入口共用同一判定与文案），组创建
-// 仍在装配层，故保留本方法把当前装配态适配成核心的 Volumes 依赖。
-func (h *Handlers) checkTransferACL(owner string, transfer *cloud.TransferSpec) string {
-	return cloudtasks.TransferACLRejection(h.cloudTaskDeps().Volumes, owner, transfer)
-}
-
-// cloudCreateGroup 处理 POST /api/cloud/groups。
-func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
-
-	var req struct {
-		Name string                `json:"name"`
-		URLs []cloudfilename.Entry `json:"urls"`
-		// C1：组级三参（transfer/save/download_local）——与服务端单条/批量入口对齐。
-		// 组内每个子任务均按此参数创建（曾硬编码 Save:true + 无 transfer，组链三参
-		// 最后一跳被丢弃：--transfer-volume 对组无效果且静默做错）。
-		Transfer      *cloud.TransferSpec `json:"transfer,omitempty"`
-		Save          *bool               `json:"save,omitempty"`
-		DownloadLocal bool                `json:"download_local,omitempty"`
-		// IntegrityMustPass 强制源文件完整性（同单条语义；组内每个子任务）。
-		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
-	}
-	if len(req.URLs) == 0 {
-		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
-		return
-	}
-	if maxBatch := h.cloudMgr.MaxBatchURLs(); len(req.URLs) > maxBatch {
-		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per group", maxBatch)}, http.StatusBadRequest)
-		return
-	}
-	// 转存目标卷 ACL 校验（H2/R1：防跨租户覆写）：owner 必须被目标卷 ACL 放行。
-	// 与单条/批量路径一致（组内每个子任务转存同目标卷）。
-	if errMsg := h.checkTransferACL(ActorFrom(r.Context()), req.Transfer); errMsg != "" {
-		sendJSONResponse(w, map[string]string{"error": errMsg}, http.StatusForbidden)
-		return
-	}
-
-	// 校验并规范化 URL：必须把规范化后的 URL/Filename 传给 CreateGroup，与单条/
-	// 批量路径保持一致——否则同一内容的不同拼写（如 http://host/a 与 http://host/a/）
-	// 在单条路径会被去重、在组路径会生成两个下载，组内文件名冲突判定也基于未
-	// 规范化的值，导致与 UI/CLI 本地预检偶发不一致。
-	normalized, nerr := normalizeGroupURLs(req.URLs, h.cloudMgr.AllowPrivate())
-	if nerr != nil {
-		sendJSONResponse(w, map[string]string{"error": nerr.Error()}, http.StatusBadRequest)
-		return
-	}
-
-	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()), cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: cloudtasks.SaveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass})
-	if err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, groupErrorStatus(err))
-		return
-	}
-	// 返回快照副本：SubmitAndStartGroup 返回的指针与 m.groups 共享，下载 goroutine
-	// 可能在 json.Marshal 期间并发写组状态字段（UpdateGroupStatus），需副本隔离防 data race。
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "cloud_group_create", ObjectType: "task", Object: group.ID, Result: AuditResultSuccess,
-		Detail: "urls=" + fmt.Sprintf("%d", len(normalized)),
-	})
-	snapshot, ok := h.cloudMgr.GetGroup(group.ID, ActorFrom(r.Context()))
-	if !ok {
-		sendJSONResponse(w, map[string]string{"error": "group created but not found"}, http.StatusInternalServerError)
-		return
-	}
-	sendJSONResponse(w, snapshot, http.StatusOK)
-}
-
-// normalizeGroupURLs 校验并规范化组内每个 URL（单条/批量同款规则），返回规范化条目或错误。
-// 抽离 cloudCreateGroup 控制 gocognit（gocognit=15 门禁）。
-func normalizeGroupURLs(urls []cloudfilename.Entry, allowPrivate bool) ([]cloudfilename.Entry, error) {
-	normalized := make([]cloudfilename.Entry, len(urls))
-	for i, entry := range urls {
-		cleanedURL, cleanedFilename, err := cloudtasks.ValidateCloudDownloadURL(entry.URL, entry.Filename, allowPrivate)
-		if err != nil {
-			return nil, err
-		}
-		normalized[i] = cloudfilename.Entry{URL: cleanedURL, Filename: cleanedFilename}
-	}
-	return normalized, nil
-}
-
-// groupErrorStatus 把组创建错误映射为 HTTP 状态码（与单条/批量路径一致；未知错误 → 500）。
-func groupErrorStatus(err error) int {
-	// 文件名冲突与重复 URL 均属客户端输入错误，映射 409 而非 500
-	if strings.Contains(err.Error(), "filename conflict") ||
-		strings.Contains(err.Error(), "duplicate URL") {
-		return http.StatusConflict
-	}
-	// 存储不足映射 507（与单条/批量路径一致）
-	if cloudtasks.IsStorageFull(err) {
-		return http.StatusInsufficientStorage
-	}
-	// 语义空洞（save=false + download_local=false + 无 transfer = 无任何产出）是客户端
-	// 输入错误 → 400（与单条路径一致：单条 CreateTask 语义空洞 fail-closed 也映射 400）。
-	if strings.Contains(err.Error(), "语义空洞") {
-		return http.StatusBadRequest
-	}
-	// 转存目标卷未装配/协议未声明/secrets 卷拒绝是配置/输入错误 → 400。
-	if strings.Contains(err.Error(), "未装配") ||
-		strings.Contains(err.Error(), "协议未声明") ||
-		strings.Contains(err.Error(), "是 secrets 密钥卷") {
-		return http.StatusBadRequest
-	}
-	return http.StatusInternalServerError
-}
-
-// cloudGetGroup 处理 GET /api/cloud/groups/{id}。
-func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	owner := ActorFrom(r.Context())
-
-	// 审查 Minor 2：先 GetGroup 校验 owner 可见性（跨 owner 立即 404，不对不可见资源
-	// 执行 UpdateGroupStatus 写操作，消除计时侧信道），通过后再刷新状态并二次 GetGroup
-	// 取最新快照。
-	if _, ok := h.cloudMgr.GetGroup(id, owner); !ok {
-		sendJSONResponse(w, map[string]string{"error": msgGroupNotFound}, http.StatusNotFound)
-		return
-	}
-	h.cloudMgr.UpdateGroupStatus(id)
-	group, ok := h.cloudMgr.GetGroup(id, owner)
-	if !ok {
-		sendJSONResponse(w, map[string]string{"error": msgGroupNotFound}, http.StatusNotFound)
-		return
-	}
-
-	// 获取组详情时一并返回子任务（仅对请求者可见的子任务，IDOR 防护）。
-	// 批量快照走领域 API（domain 侧一次持锁 + 同一 ownerVisible 规则），装配层不触碰
-	// 领域内部状态。
-	tasks := h.cloudMgr.SnapshotTasks(group.TaskIDs, owner)
-
-	resp := map[string]any{
-		"group": group,
-		"tasks": tasks,
-	}
-	sendJSONResponse(w, resp, http.StatusOK)
-}
-
-// cloudListGroups 处理 GET /api/cloud/groups。
-// 返回 {groups, total} 容器；total 为按 status 过滤后的组总数（不受分页影响）。
-func (h *Handlers) cloudListGroups(w http.ResponseWriter, r *http.Request) {
-	status := r.URL.Query().Get("status")
-	offset, limit := cloudtasks.ParseOffsetLimit(r)
-	owner := ActorFrom(r.Context())
-	// 先刷新所有可见组的最新状态，再按 status 过滤返回。否则只刷新"当前已处于该状态"
-	// 的组，刚转换到目标状态的组会被过滤查询漏掉，客户端看到的状态滞后。
-	allGroups, _ := h.cloudMgr.ListGroups("", -1, 0, owner)
-	for _, g := range allGroups {
-		h.cloudMgr.UpdateGroupStatus(g.ID)
-	}
-	// total 需按同 status 过滤后的总数计算（ListGroups 内部过滤后统计）
-	groups, total := h.cloudMgr.ListGroups(status, offset, limit, owner)
-	sendJSONResponse(w, map[string]any{"groups": groups, "total": total}, http.StatusOK)
-}
-
-// cloudCancelGroup 处理 POST /api/cloud/groups/{id}/cancel。
-func (h *Handlers) cloudCancelGroup(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := h.cloudMgr.CancelGroup(id, ActorFrom(r.Context())); err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), msgNotFound) {
-			status = http.StatusNotFound
-		}
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
-		return
-	}
-	sendJSONResponse(w, map[string]string{"status": "cancelled"}, http.StatusOK)
-}
-
-// cloudDeleteGroup 处理 DELETE /api/cloud/groups/{id}。
-// P5：组删除时联动清理组归档文件并释放 archive 桶 Scope（防孤儿归档虚高占用）。
-func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	owner := ActorFrom(r.Context())
-	// 先取组快照（含 ArchiveFile），DeleteGroup 后组对象已从 map 移除无法再查。
-	var archiveFile string
-	if g, ok := h.cloudMgr.GetGroup(id, owner); ok {
-		archiveFile = g.ArchiveFile
-	}
-	if err := h.cloudMgr.DeleteGroup(id, owner); err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), msgNotFound) {
-			status = http.StatusNotFound
-		}
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "cloud_group_delete", ObjectType: "task", Object: id,
-			Result: AuditResultError, Detail: err.Error(),
-		})
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
-		return
-	}
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "cloud_group_delete", ObjectType: "task", Object: id, Result: AuditResultSuccess,
-	})
-	// 组归档文件联动删除（桶归档名或外部卷转存 URL）。失败仅记日志
-	// （组删除已完成，归档残留由周期扫描校准兜底；不把归档清理失败当作组删除失败）。
-	if archiveFile != "" {
-		if aErr := h.deleteGroupArchive(owner, archiveFile); aErr != nil {
-			h.logger.Warn("删除组归档失败（残留由周期扫描校准）", "group_id", id, "archive", archiveFile, "error", aErr)
-		}
-	}
-	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
-}
-
-// cloudResumeGroup 处理 POST /api/cloud/groups/{id}/resume。
-func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KiB
-	var req struct {
-		Force bool `json:"force"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
-	}
-
-	if err := h.cloudMgr.ResumeGroup(id, req.Force, ActorFrom(r.Context())); err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), msgNotFound) {
-			status = http.StatusNotFound
-		}
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
-		return
-	}
-	sendJSONResponse(w, map[string]string{"status": "resumed"}, http.StatusOK)
 }
 
 // deleteGroupArchive 删除组归档产物：外部卷转存 URL（含 "://"）→ 按卷可信 FS 删除
@@ -410,7 +170,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	// 统一转存：target_volume 非空 → 打包后转存到外部卷（复用 pkg/transfer 抽象），
 	// 不落租户 archive 桶。否则落桶（既有行为零回归）。
 	// V4：转存目标卷须经 ACL 校验（volumeAllowedFor 防跨租户写私有卷）——与 cloud
-	// download transfer 的 checkTransferACL 同语义，此处直接复用。
+	// cloudtasks.TransferACLRejection 同语义（单条/批量/组三入口共用），此处直接复用。
 	// target_path/encrypt/cipher/compression 仅与 target_volume 同用（防静默忽略）。
 	if !h.validateArchiveExtras(w, archiveExtras{
 		TargetVolume: req.TargetVolume, TargetPath: req.TargetPath,
@@ -672,7 +432,7 @@ func (h *Handlers) cloudArchiveGroupToVolume(w http.ResponseWriter, r *http.Requ
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	// 成功时登记组归档引用（供 cloudDeleteGroup 联动清理外部产物；转存 URL 含卷信息）。
+	// 成功时登记组归档引用（供组删除联动清理外部产物；转存 URL 含卷信息）。
 	onSuccess := func(url string) {
 		if h.cloudMgr != nil {
 			h.cloudMgr.SetGroupArchiveFile(groupID, url)

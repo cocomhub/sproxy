@@ -27,6 +27,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -61,12 +62,12 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudTaskHandler(h.cloudTaskService().DeleteTask))
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudTaskHandler(h.cloudTaskService().ResumeTask))
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
-	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
-	mux.HandleFunc("GET /api/cloud/groups", h.cloudListGroups)
-	mux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudGetGroup)
-	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudCancelGroup)
-	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudDeleteGroup)
-	mux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudResumeGroup)
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().CreateGroup))
+	mux.HandleFunc("GET /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().ListGroups))
+	mux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudTaskHandler(h.cloudTaskService().GetGroup))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudTaskHandler(h.cloudTaskService().CancelGroup))
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudTaskHandler(h.cloudTaskService().DeleteGroup))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudTaskHandler(h.cloudTaskService().ResumeGroup))
 	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
 	return httptest.NewServer(mux), mgr
 }
@@ -842,7 +843,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudTaskHandler(h.cloudTaskService().CreateBatchDownload))
-	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().CreateGroup))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
@@ -1003,21 +1004,27 @@ func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 // 目标卷 ACL 校验（CLI 链式主路径走 batch——此前漏检可跨租户转存写入）。
 // checkTransferACL 是单条/batch 共用校验（单条 handler 与 batch handler 均调用）；
 // 此处验证 helper 对 ACL 拒绝卷 fail-closed + 放行卷放行。
+// transferACLRejection 取用编排核心的 ACL 判定（checkTransferACL 随组创建迁入
+// cloudtasks 后，装配层不再保留同形薄封装；R1 回归仍在此断言文案/放行语义）。
+func transferACLRejection(h *Handlers, owner string, transfer *cloud.TransferSpec) string {
+	return cloudtasks.TransferACLRejection(h.cloudTaskDeps().Volumes, owner, transfer)
+}
+
 func TestCloudHandler_BatchCreateDownload_TransferACLDenied(t *testing.T) {
 	t.Parallel()
 	h := &Handlers{volSet: newTransferACLSet(t)}
 	// ACL 拒绝卷（无授权）→ fail-closed
-	msg := h.checkTransferACL("ownerX", &cloud.TransferSpec{Volume: "private-vault"})
+	msg := transferACLRejection(h, "ownerX", &cloud.TransferSpec{Volume: "private-vault"})
 	if msg == "" {
 		t.Fatal("ACL 拒绝卷应返回错误")
 	}
 	// 未装配卷 → fail-closed
-	msg = h.checkTransferACL("ownerX", &cloud.TransferSpec{Volume: "missing"})
+	msg = transferACLRejection(h, "ownerX", &cloud.TransferSpec{Volume: "missing"})
 	if msg == "" {
 		t.Fatal("未装配卷应返回错误")
 	}
 	// 无 transfer → 放行
-	if msg := h.checkTransferACL("ownerX", nil); msg != "" {
+	if msg := transferACLRejection(h, "ownerX", nil); msg != "" {
 		t.Fatalf("无 transfer 应放行，got %q", msg)
 	}
 }
@@ -1131,7 +1138,7 @@ func TestCloudHandler_CreateGroup_TransferParam(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/cloud/groups", strings.NewReader(string(body)))
 	rec := httptest.NewRecorder()
-	h.cloudCreateGroup(rec, req)
+	h.cloudTaskHandler(h.cloudTaskService().CreateGroup)(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 with transfer, got %d: %s", rec.Code, rec.Body.String())
 	}

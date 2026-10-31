@@ -60,6 +60,10 @@ type Tasks interface {
 // UpdateGroupStatus 有刷新副作用，调用顺序是语义的一部分：
 // GetGroup → UpdateGroupStatus → GetGroup（owner 可见性先判），
 // ListGroups("", -1, 0) → 逐个 UpdateGroupStatus → ListGroups(status, offset, limit)。
+//
+// DeleteGroupArchive 是组删除时的归档产物清理：归档自身的读写在 S3 才迁入本包，
+// 故 S2b 期间由装配层实现（原 cloud_download_handler.go 的 deleteGroupArchive 原地
+// 保留）；S3 迁入归档面后替换该委托。
 type Groups interface {
 	SubmitAndStartGroup(name string, urls []cloudfilename.Entry, owner string, params cloud.TaskParams) (*cloud.CloudTaskGroup, error)
 	GetGroup(id, owner string) (*cloud.CloudTaskGroup, bool)
@@ -69,6 +73,7 @@ type Groups interface {
 	ResumeGroup(groupID string, force bool, owner string) error
 	SetGroupArchiveFile(groupID, archiveFile string)
 	UpdateGroupStatus(groupID string)
+	DeleteGroupArchive(owner, archiveFile string) error
 }
 
 // Tenants 解析 owner 的租户（覆设计文档 §5.3）。空 owner → anonymous；失败 nil。
