@@ -27,10 +27,10 @@ func (h *Handlers) verifyService() *verify.Service {
 }
 
 // locateOwnerFileForVerify 适配 locateOwnerFile 为 verify.Deps 的窄签名。
-func (h *Handlers) locateOwnerFileForVerify(owner, rel string) (*storage.Tenant, bool) {
+func (h *Handlers) locateOwnerFileForVerify(owner, rel string) (*storage.Tenant, string, bool) {
 	loc, ok := h.locateOwnerFile(owner, rel)
 	if !ok || loc == nil {
-		return nil, false
+		return nil, "", false
 	}
-	return loc.tenant, true
+	return loc.tenant, loc.volumeName, true
 }

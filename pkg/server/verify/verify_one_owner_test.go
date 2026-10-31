@@ -23,7 +23,7 @@ func TestVerifyOneOwner_TenantNil(t *testing.T) {
 	d.TenantFor = func(string) *storage.Tenant { return nil }
 
 	var rep Report
-	New(d).VerifyOneOwner("bob", &rep)
+	New(d).VerifyOneOwner("bob", &rep, "")
 	if rep.Total != 0 || rep.Skipped != 0 {
 		t.Fatalf("rep=%+v，want 未核对任何条目", rep)
 	}
@@ -41,7 +41,7 @@ func TestVerifyOneOwner_TenantRootNil(t *testing.T) {
 	d.TenantFor = func(string) *storage.Tenant { return &storage.Tenant{} }
 
 	var rep Report
-	New(d).VerifyOneOwner("alice", &rep)
+	New(d).VerifyOneOwner("alice", &rep, "")
 	if len(rep.Errors) != 1 || !strings.Contains(rep.Errors[0], "alice") {
 		t.Fatalf("rep=%+v，want 1 条租户不可用", rep)
 	}
@@ -55,7 +55,7 @@ func TestVerifyOneOwner_StoreMissing(t *testing.T) {
 	d.ChecksumStoreFor = func(string) checksum.ChecksumStoreIface { return nil }
 
 	var rep Report
-	New(d).VerifyOneOwner("alice", &rep)
+	New(d).VerifyOneOwner("alice", &rep, "")
 	if rep.Skipped != 1 || rep.Total != 0 || len(rep.Errors) != 0 {
 		t.Fatalf("rep=%+v，want skipped=1 且无 errors", rep)
 	}
@@ -149,9 +149,9 @@ func TestVerifyPass_AllTenantsAndAnonymousFallback(t *testing.T) {
 		Logger:        testLogger(),
 		TenantFor:     func(owner string) *storage.Tenant { return tenants[owner] },
 		ListTenantIDs: func() []string { return []string{"alice", "bob"} },
-		LocateOwnerFile: func(owner, rel string) (*storage.Tenant, bool) {
+		LocateOwnerFile: func(owner, rel string) (*storage.Tenant, string, bool) {
 			tnt, ok := tenants[owner]
-			return tnt, ok
+			return tnt, "vol-a", ok
 		},
 		ChecksumStoreFor: func(owner string) checksum.ChecksumStoreIface { return stores[owner] },
 		Busy:             new(atomic.Bool),
@@ -166,16 +166,11 @@ func TestVerifyPass_AllTenantsAndAnonymousFallback(t *testing.T) {
 	}
 }
 
-// TestVerifyPass_VolumeFilterIgnored 记录已知缺陷（本 PR 不修复）：
-// verifyPass 的 volName 形参完全未被使用 —— 文档与 HTTP 面（verify_handler 把
-// req.Volume 传入，审计 detail 也打印 volume=）都约定「非空 = 只核该卷视图」，
-// 实际行为是忽略该参数、核对全部卷视图（并对其它卷的坏文件执行隔离）。
-// 修复涉及「按卷过滤台账/定位」的产品语义，单独排期；此用例先按文档语义写好，
-// 修复时去掉 Skip 即为验收测试。
+// TestVerifyPass_VolumeFilterIgnored 验收用例（缺陷已修复）：
+// verifyPass 的 volName 此前完全未被使用——文档与 HTTP 面约定「非空 = 只核该卷视图」，
+// 实际会核对全部卷并隔离其它卷坏文件。现按 LocateOwnerFile 返回的卷名过滤。
 func TestVerifyPass_VolumeFilterIgnored(t *testing.T) {
 	t.Parallel()
-	t.Skip("已知缺陷：verifyPass 忽略 volName（文档约定「非空 = 只核该卷视图」），待单独修复（见 PR 说明）")
-
 	f := newTenantFixture(t, "alice", map[string]string{"user/a.txt": "aaa"})
 	rep := New(f.deps()).VerifyOnce(context.Background(), "vol-does-not-exist", "alice")
 	if rep.Total != 0 {

@@ -60,13 +60,13 @@ func (s *Service) VerifyOnce(ctx context.Context, volName, owner string) Report 
 func (s *Service) verifyPass(ctx context.Context, volName, owner string) Report {
 	var rep Report
 	for _, own := range verifyOwners(s, owner) {
-		s.VerifyOneOwner(own, &rep)
+		s.VerifyOneOwner(own, &rep, volName)
 	}
 	return rep
 }
 
 // verifyOneOwner 校验单个租户的所有台账条目（租户不可用 / 台账为空 / store 缺失则跳过）。
-func (s *Service) VerifyOneOwner(owner string, rep *Report) {
+func (s *Service) VerifyOneOwner(owner string, rep *Report, volName string) {
 	tnt := s.d.TenantFor(owner)
 	if tnt == nil || tnt.Root() == nil {
 		rep.Errors = append(rep.Errors, fmt.Sprintf("租户 %s 不可用", owner))
@@ -92,7 +92,7 @@ func (s *Service) VerifyOneOwner(owner string, rep *Report) {
 		}
 		if _, dup := seen[rel]; !dup {
 			seen[rel] = struct{}{}
-			s.verifyOneEntry(owner, rel, expected, rep)
+			s.verifyOneEntry(owner, rel, expected, rep, volName)
 		}
 		return true
 	}
@@ -113,9 +113,13 @@ func (s *Service) VerifyOneOwner(owner string, rep *Report) {
 // verifyOneEntry 核对单个台账条目与实际磁盘校验和：缺失/无效/不符/一致分别归账。
 // 台账 key 含功能桶前缀（user/…、cloud/<taskID>/<file>…），文件可能因多卷路由落在
 // 非默认卷——locateOwnerFile 定位实际所在卷的租户 root（读定位，ACL 收口）。
-func (s *Service) verifyOneEntry(owner, rel, expected string, rep *Report) {
+func (s *Service) verifyOneEntry(owner, rel, expected string, rep *Report, volName string) {
+	loc, locVol, found := s.d.LocateOwnerFile(owner, rel)
+	// 按卷过滤：显式指定卷时，其它卷的条目既不计入也不隔离（否则会误动别的卷）。
+	if volName != "" && found && locVol != volName {
+		return
+	}
 	rep.Total++
-	loc, found := s.d.LocateOwnerFile(owner, rel)
 	if !found || loc == nil || loc.Root() == nil {
 		rep.Missing = append(rep.Missing, rel)
 		return
