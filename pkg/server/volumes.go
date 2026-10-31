@@ -876,77 +876,29 @@ type fileLocation struct {
 	tenant     *storage.Tenant
 }
 
-// locateOwnerFile 返回 owner 卷视图内 rel（user/ 前缀完整桶路径）所在卷的租户（读定位）。
-// 顺序：默认卷快路径（tenantFor 命中即用，覆盖绝大多数既有行为，单卷零回归）；
-// 未命中才遍历视图其余卷（volumeFileExists 探测，不创建租户目录——只读无副作用）。
+// locateOwnerFile 返回 owner 卷视图内 rel（user/ 前缀完整桶路径）所在卷的租户（读定位）：
+// 委托**单一实现** pkg/volume.Router.Locate（默认卷快路径 ACL 放行 + stat 命中优先，未命中
+// 再按声明序扫描视图其余卷；旧装配路径 volSet nil 视为「唯一默认卷」）。
 // 全部未命中返回 (nil, false)。
 //
-// 唯一性保证（AD-4）下同 rel 不会多卷命中；防御性若真出现多卷命中，默认卷优先 + 注释
-// 注明「首卷胜出」——调用方只应依赖「至多一卷命中」的不变式。
+// 唯一性保证（AD-4）下同 rel 不会多卷命中；防御性若真出现多卷命中，Router 取默认卷优先、
+// 其余首卷胜出——调用方只应依赖「至多一卷命中」的不变式。
 //
 // 返回不携带错误：探测失败的卷视同「未命中」（调用方通常回落默认卷根，由 Open/Stat 产出
 // 404/500，与单卷既有错误语义一致）。显式指定卷的过滤定位见 locateForRead。
 func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
-	if h.volSet == nil {
-		// 旧装配路径：唯一根。stat 命中即定位成功（volumeName 空）。
-		return h.locateOwnerFileLegacy(owner, rel)
-	}
-
-	owner = normalizeOwner(owner)
-	// 默认卷快路径：仅当默认卷在 owner 视图（ACL Authorize）内才可命中——tenantFor +
-	// stat 命中即返回会跳过 AllowedVolumes 循环，默认卷被显式 allow 白名单收紧时未列入 owner
-	// 经快路径仍能读到默认卷文件（ACL bypass，AD-6「所有定位/读取点先过 ACL」）。
-	// 单卷缺省形态（deny + 空名单）Authorize 恒 true → 快路径行为不变（零回归）。
-	if loc, ok := h.locateDefaultVolumeFile(owner, rel); ok {
-		return loc, true
-	}
-	// 遍历视图其余卷（只探测，不创建租户目录）；默认卷不在视图则不会出现于 AllowedVolumes。
-	return h.locateOwnerFileScan(owner, rel)
-}
-
-// locateOwnerFileLegacy 旧装配路径（volSet nil）定位：唯一根 stat 命中即定位成功（volumeName 空）。
-func (h *Handlers) locateOwnerFileLegacy(owner, rel string) (*fileLocation, bool) {
-	tnt := h.tenantFor(owner)
-	if tnt == nil || tnt.Root() == nil {
+	loc, ok := h.volumeRouter().Locate(owner, rel)
+	if !ok {
 		return nil, false
 	}
-	if _, err := tnt.Root().Stat(rel); err != nil {
-		return nil, false
+	// RouterLocation.Volume 空串 = 默认卷（Router 不携带默认卷名，由装配方补回）：
+	// fileLocation.volumeName 的既有语义是「默认卷命中时携带默认卷名」。旧装配路径
+	// （volSet nil，无卷名）保持空串。
+	volName := loc.Volume
+	if volName == "" && h.volSet != nil {
+		volName = h.volSet.Default().Name
 	}
-	return &fileLocation{volumeName: "", tenant: tnt}, true
-}
-
-// locateDefaultVolumeFile 默认卷快路径定位：默认卷在 owner 视图（ACL Authorize）内且 stat
-// 命中 → 命中（volumeName 为默认卷名）。未命中返回 nil,false（由调用方继续扫描其它卷）。
-func (h *Handlers) locateDefaultVolumeFile(owner, rel string) (*fileLocation, bool) {
-	if defVol, ok := h.volSet.ByName(h.volSet.Default().Name); ok && defVol.Authorize(owner) {
-		if defTnt := h.tenantFor(owner); defTnt != nil && defTnt.Root() != nil {
-			if _, err := defTnt.Root().Stat(rel); err == nil {
-				return &fileLocation{volumeName: h.volSet.Default().Name, tenant: defTnt}, true
-			}
-		}
-	}
-	return nil, false
-}
-
-// locateOwnerFileScan 遍历 owner 视图非默认卷探测 rel（只读，不创建租户目录）；全部未命中
-// 返回 (nil, false)。
-func (h *Handlers) locateOwnerFileScan(owner, rel string) (*fileLocation, bool) {
-	for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
-		if v.Name == h.volSet.Default().Name {
-			continue
-		}
-		exists, err := h.volumeFileExists(v.Name, owner, rel)
-		if err != nil || !exists {
-			continue
-		}
-		tnt := h.volumeTenant(v.Name, owner)
-		if tnt == nil {
-			continue
-		}
-		return &fileLocation{volumeName: v.Name, tenant: tnt}, true
-	}
-	return nil, false
+	return &fileLocation{volumeName: volName, tenant: loc.Tenant}, true
 }
 
 // volumePoolForTenant 返回 tnt 租户所在卷的容量池（版本桶/恢复等以 tenant 定位写盘但缺卷名
