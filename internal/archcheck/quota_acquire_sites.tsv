@@ -24,6 +24,7 @@ pkg/server/backup_api.go	1	no	probe
 pkg/server/cloud_archive_handler.go	1	no	probe
 pkg/server/cloud_download_handler.go	1	no	probe
 pkg/server/cloud_service.go	1	yes	adapter
+pkg/server/cloudtasks_wiring.go	1	yes	adapter
 pkg/server/files_service.go	1	yes	adapter
 pkg/server/volumes.go	1	no	probe
 pkg/storage/capacity/wait.go	1	yes	adapter
