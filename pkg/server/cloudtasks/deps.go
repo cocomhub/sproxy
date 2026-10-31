@@ -125,17 +125,6 @@ type Targets interface {
 	SkipVerify() bool
 	MaxArchiveBytes() int64
 	ArchiveKey() []byte
-
-	// 归档打包两方法（P1-c S3a）：tar 打包仍属服务端作用域（pkg/server/archive 助手 +
-	// storage.Root 用户可见写入口），本包消费结果。转存取锁/派生状态登记经上方能力取用；
-	// 归档转存执行核心（原 ArchiveToVolume）与 entries/size/total 助手已随 S3c 迁入本包。
-	//
-	// CreateArchiveTar 打包单个文件（O_EXCL）；exists=true 表示同名归档已存在（409）。
-	CreateArchiveTar(srcRoot *storage.Root, srcRel, tarName string, outRoot *storage.Root, outRel string,
-		logger *slog.Logger) (checksum string, exists bool, err error)
-	// CreateMultiArchiveTar 打包多个文件（O_EXCL）；exists 语义同上。
-	CreateMultiArchiveTar(sources []ArchiveSource, outRoot *storage.Root, outRel string,
-		logger *slog.Logger) (checksum string, exists bool, err error)
 }
 
 // Audit 是业务审计唯一入口（覆设计文档 §5.7）。

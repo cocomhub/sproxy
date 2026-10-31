@@ -8,14 +8,15 @@
 // §4/§9.5）：owner 由装配层解析后显式传入，响应写出用包内 writeJSON，行为与迁移前逐行
 // 等价（状态码、错误文案、配额预留/结算顺序、archiveUsage 记账一律不变）。
 //
-// S3c 后仅剩 tar 打包助手（CreateArchiveTar/CreateMultiArchiveTar）与配额预留/对账/
-// 释放（Quota 接口）在装配层：转存执行核心、entries/size/total 助手、选项校验与
-// archiveUsage 登记已迁入本包（transfer.go）。
+// S3c 后转存执行核心、entries/size/total 助手、选项校验与 archiveUsage 登记已迁入本包
+// （transfer.go）；S4 起 tar.gz 打包助手（archive_tar.go）也在本包，仅配额预留/对账/释放
+// 实现留在装配层（Quota 接口，错误面映射为 HTTP 状态码属装配层语义）。
 package cloudtasks
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -96,8 +97,7 @@ type ArchiveExtras struct {
 }
 
 // ArchiveSource 是一个待打包的源文件：租户根 + 根内相对路径 + tar 内条目名。
-//
-// 装配层把本类型适配为内部的 fileWithRelPath（tar 助手仍在装配层），字段一一对应。
+// createMultiFileTarGz（archive_tar.go）直接消费本类型（S4 起 tar 助手在本包）。
 type ArchiveSource struct {
 	Root   *storage.Root
 	Rel    string // 根内相对源路径（cloud/<taskID>/<file>）
@@ -176,9 +176,9 @@ func (s *Service) ArchiveTask(w http.ResponseWriter, r *http.Request, owner stri
 
 	// 打包（流式 checksum）
 	logger := s.deps.Logger.With("archive", "cloud_task", "task_id", taskID)
-	checksum, exists, err := s.deps.Targets.CreateArchiveTar(srcTnt.Root(), srcRel, task.Filename, root, rel, logger)
-	if err != nil || exists {
-		if exists {
+	checksum, err := createTarGz(srcTnt.Root(), srcRel, task.Filename, root, rel, logger)
+	if err != nil {
+		if errors.Is(err, errArchiveExists) {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
 			s.deps.Quota.ReleaseArchive(res, pre)
 			s.writeJSON(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
@@ -266,9 +266,9 @@ func (s *Service) ArchiveBatch(w http.ResponseWriter, r *http.Request, owner str
 
 	// 多文件打包（流式 checksum）
 	logger := s.deps.Logger.With("archive", "cloud_batch")
-	checksum, exists, err := s.deps.Targets.CreateMultiArchiveTar(sources, root, rel, logger)
-	if err != nil || exists {
-		if exists {
+	checksum, err := createMultiFileTarGz(sources, root, rel, logger)
+	if err != nil {
+		if errors.Is(err, errArchiveExists) {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
 			s.deps.Quota.ReleaseArchive(res, pre)
 			s.writeJSON(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
