@@ -17,10 +17,10 @@ func TestVerifyOneEntry_LocateNotFound(t *testing.T) {
 	t.Parallel()
 	f := newTenantFixture(t, "alice", nil)
 	d := f.deps()
-	d.LocateOwnerFile = func(string, string) (*storage.Tenant, bool) { return nil, false }
+	d.LocateOwnerFile = func(string, string) (*storage.Tenant, string, bool) { return nil, "", false }
 
 	var rep Report
-	New(d).verifyOneEntry("alice", "user/a.txt", "deadbeef", &rep)
+	New(d).verifyOneEntry("alice", "user/a.txt", "deadbeef", &rep, "")
 	if rep.Total != 1 || len(rep.Missing) != 1 || rep.Missing[0] != "user/a.txt" {
 		t.Fatalf("rep=%+v，want total=1 missing=[user/a.txt]", rep)
 	}
@@ -31,10 +31,10 @@ func TestVerifyOneEntry_LocateNilTenant(t *testing.T) {
 	t.Parallel()
 	f := newTenantFixture(t, "alice", nil)
 	d := f.deps()
-	d.LocateOwnerFile = func(string, string) (*storage.Tenant, bool) { return nil, true }
+	d.LocateOwnerFile = func(string, string) (*storage.Tenant, string, bool) { return nil, "vol-a", true }
 
 	var rep Report
-	New(d).verifyOneEntry("alice", "user/a.txt", "deadbeef", &rep)
+	New(d).verifyOneEntry("alice", "user/a.txt", "deadbeef", &rep, "")
 	if rep.Total != 1 || len(rep.Missing) != 1 || len(rep.Errors) != 0 {
 		t.Fatalf("rep=%+v，want total=1 missing=1 无 errors", rep)
 	}
@@ -45,10 +45,10 @@ func TestVerifyOneEntry_LocateNilRoot(t *testing.T) {
 	t.Parallel()
 	f := newTenantFixture(t, "alice", nil)
 	d := f.deps()
-	d.LocateOwnerFile = func(string, string) (*storage.Tenant, bool) { return &storage.Tenant{}, true }
+	d.LocateOwnerFile = func(string, string) (*storage.Tenant, string, bool) { return &storage.Tenant{}, "vol-a", true }
 
 	var rep Report
-	New(d).verifyOneEntry("alice", "user/a.txt", "deadbeef", &rep)
+	New(d).verifyOneEntry("alice", "user/a.txt", "deadbeef", &rep, "")
 	if rep.Total != 1 || len(rep.Missing) != 1 || len(rep.Errors) != 0 {
 		t.Fatalf("rep=%+v，want total=1 missing=1 无 errors", rep)
 	}
@@ -64,7 +64,7 @@ func TestVerifyOneEntry_ReadError(t *testing.T) {
 	}
 
 	var rep Report
-	New(f.deps()).verifyOneEntry("alice", "user/as-dir", "deadbeef", &rep)
+	New(f.deps()).verifyOneEntry("alice", "user/as-dir", "deadbeef", &rep, "")
 	if rep.Total != 1 || len(rep.Missing) != 0 {
 		t.Fatalf("rep=%+v，want total=1 且不计 missing", rep)
 	}
@@ -88,7 +88,7 @@ func TestVerifyOneEntry_QuarantineMkdirFailure(t *testing.T) {
 	}
 
 	var rep Report
-	New(f.deps()).verifyOneEntry("alice", "user/a.txt", shaOf(t, "original"), &rep)
+	New(f.deps()).verifyOneEntry("alice", "user/a.txt", shaOf(t, "original"), &rep, "")
 	if len(rep.Mismatched) != 1 || rep.Mismatched[0].Path != "user/a.txt" {
 		t.Fatalf("rep=%+v，want 1 条 mismatched", rep)
 	}
@@ -110,7 +110,7 @@ func TestVerifyOneEntry_QuarantineRenameFailure(t *testing.T) {
 	f.write(t, longRel, "tampered")
 
 	var rep Report
-	New(f.deps()).verifyOneEntry("alice", longRel, shaOf(t, "original"), &rep)
+	New(f.deps()).verifyOneEntry("alice", longRel, shaOf(t, "original"), &rep, "")
 	if len(rep.Mismatched) != 1 {
 		t.Fatalf("rep=%+v，want 1 条 mismatched", rep)
 	}

@@ -60,7 +60,7 @@ func (f *tenantFixture) deps() Deps {
 		Logger:           testLogger(),
 		TenantFor:        func(string) *storage.Tenant { return f.tnt },
 		ListTenantIDs:    func() []string { return []string{f.owner} },
-		LocateOwnerFile:  func(string, string) (*storage.Tenant, bool) { return f.tnt, true },
+		LocateOwnerFile:  func(string, string) (*storage.Tenant, string, bool) { return f.tnt, "vol-a", true },
 		ChecksumStoreFor: func(string) checksum.ChecksumStoreIface { return f.cs },
 		Busy:             new(atomic.Bool),
 	}

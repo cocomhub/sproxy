@@ -22,8 +22,8 @@ type Deps struct {
 	TenantFor func(owner string) *storage.Tenant
 	// ListTenantIDs 返回全部租户 ID（空 = 磁盘扫描兜底）。
 	ListTenantIDs func() []string
-	// LocateOwnerFile 定位 rel 实际所在卷的租户（多卷路由）。
-	LocateOwnerFile func(owner, rel string) (*storage.Tenant, bool)
+	// LocateOwnerFile 定位 rel 实际所在卷的租户与卷名（多卷路由；卷名用于按卷过滤巡检）。
+	LocateOwnerFile func(owner, rel string) (*storage.Tenant, string, bool)
 	// ChecksumStoreFor 返回 owner 的 checksum 台账。
 	ChecksumStoreFor func(owner string) checksum.ChecksumStoreIface
 	// Audit 记录巡检动作。
