@@ -13,7 +13,6 @@ package server
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -46,12 +45,12 @@ func TestCloudArchiveReserveQuota_WaitsForReleasedCapacity(t *testing.T) {
 		ok       bool
 		pre      int64
 		reserved int64
+		message  string
 	}
 	done := make(chan reserveOutcome, 1)
-	rec := httptest.NewRecorder()
 	go func() {
-		res, pre, ok := env.h.cloudArchiveReserveQuota(context.Background(), rec, "alice", 10)
-		out := reserveOutcome{ok: ok, pre: pre, reserved: scope.Reserved()}
+		res, pre, status, message := env.h.cloudTaskDeps().Quota.ReserveArchive(context.Background(), "alice", 10)
+		out := reserveOutcome{ok: status == 0, pre: pre, reserved: scope.Reserved(), message: message}
 		if res != nil {
 			res.Release() // 本用例只锁预留（排队）语义，不进入打包/结算
 		}
@@ -66,7 +65,7 @@ func TestCloudArchiveReserveQuota_WaitsForReleasedCapacity(t *testing.T) {
 	select {
 	case got := <-done:
 		if !got.ok {
-			t.Fatalf("释放容量后应预留成功（排队语义），实际 ok=false: %s", rec.Body.String())
+			t.Fatalf("释放容量后应预留成功（排队语义），实际 status!=0: %s", got.message)
 		}
 		want := int64(10) + cloudArchiveReservePlaceholder
 		if got.pre != want {
@@ -106,18 +105,17 @@ func TestCloudArchiveReserveQuota_HonorsInjectedWaitTimeout(t *testing.T) {
 		t.Fatalf("夹具前提：quotaWaitTimeout=%v 应为小值（测试夹具注入异常）", got)
 	}
 
-	rec := httptest.NewRecorder()
 	start := time.Now()
-	res, pre, ok := env.h.cloudArchiveReserveQuota(context.Background(), rec, "alice", 10)
+	res, pre, status, message := env.h.cloudTaskDeps().Quota.ReserveArchive(context.Background(), "alice", 10)
 	elapsed := time.Since(start)
-	if ok {
+	if status == 0 {
 		if res != nil {
 			res.Release()
 		}
-		t.Fatalf("容量被占住且无人释放，预留必须超时失败（ok=true pre=%d）", pre)
+		t.Fatalf("容量被占住且无人释放，预留必须超时失败（status=0 pre=%d）", pre)
 	}
-	if rec.Code != http.StatusInsufficientStorage {
-		t.Fatalf("排队超时必须回 507，got %d body=%s", rec.Code, rec.Body.String())
+	if status != http.StatusInsufficientStorage {
+		t.Fatalf("排队超时必须回 507，got %d msg=%s", status, message)
 	}
 	if elapsed >= 5*time.Second {
 		t.Fatalf("排队耗时 %v ⇒ 注入的 h.quotaWaitTimeout 未生效（硬编码 quota.DefaultWaitTimeout 回归）", elapsed)

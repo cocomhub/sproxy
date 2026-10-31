@@ -52,17 +52,6 @@ func (h *Handlers) archiveBatchHandler() http.HandlerFunc {
 	return h.cloudTaskHandler(h.cloudTaskService().ArchiveBatch)
 }
 
-// normalizeArchiveName 是组归档路径（S3b 前仍在装配层）对编排核心归一逻辑的取用壳：
-// 规则唯一实现是 cloudtasks.NormalizeArchiveName（Base/后缀/255 字节），本函数只做响应写出。
-func (h *Handlers) normalizeArchiveName(w http.ResponseWriter, archiveName string) (string, bool) {
-	name, msg := cloudtasks.NormalizeArchiveName(archiveName)
-	if msg != "" {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msg}, http.StatusBadRequest)
-		return "", false
-	}
-	return name, true
-}
-
 // archiveSettleQuota 按磁盘实际大小对账预留配额的**非响应核心**（单任务 / 批量 / 组归档
 // 共用）：scope 路径 = Reconcile(actual) + Commit()（多预留部分自动归还）；storageMgr 回退
 // 保留 3 步（Release(pre)+TryReserve(actual)）。失败返回 status+message（响应由调用方写出，
@@ -94,17 +83,6 @@ func (h *Handlers) archiveSettleQuota(root *storage.Root, rel string, res *quota
 		return 0, http.StatusInsufficientStorage, fmt.Sprintf("insufficient storage for archive: %v", rErr)
 	}
 	return actual, 0, ""
-}
-
-// cloudArchiveSettleQuota 是 archiveSettleQuota 的响应壳（组归档路径 S3b 前直接调用；
-// 单任务/批量经 Quota.SettleArchive 取用同一核心）。TryReserve 拒绝时已删文件并回 507。
-func (h *Handlers) cloudArchiveSettleQuota(w http.ResponseWriter, root *storage.Root, rel string, res *quota.Settlement, pre int64, logger *slog.Logger) (actual int64, ok bool) {
-	actual, status, message := h.archiveSettleQuota(root, rel, res, pre, logger)
-	if status != 0 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: message}, status)
-		return 0, false
-	}
-	return actual, true
 }
 
 // archiveReserveQuota 是归档预留的**非响应核心**（单任务 / 批量 / 组归档共用）：先校验
@@ -340,21 +318,12 @@ type archiveExtras struct {
 	Compression  string
 }
 
-// validateArchiveExtras 校验「仅转存外部卷支持」的选项：
+// archiveExtrasError 是「仅转存外部卷支持」选项校验的**非响应核心**（规则唯一实现：
+// cloudtasks 经 Targets.ValidateArchiveExtras 取用，响应写出在编排核心里）：
 //   - 未指定 target_volume 时不得设置 target_path/encrypt/cipher/compression
 //     （archive 桶路径走既有 createTarGz，不加密也不认目标路径）；
 //   - cipher 必须与 encrypt 同用（单独指定无任何加密效果，静默忽略会让用户误信已加密）。
 //
-// 失败时已写响应并返回 false。
-func (h *Handlers) validateArchiveExtras(w http.ResponseWriter, ex archiveExtras) bool {
-	if status, msg := archiveExtrasError(ex); status != 0 {
-		return h.archiveBadRequest(w, msg)
-	}
-	return true
-}
-
-// archiveExtrasError 是「仅转存外部卷支持」选项校验的**非响应核心**（规则唯一实现：
-// 装配层的组归档壳与 cloudtasks 经 Targets.ValidateArchiveExtras 共用）。
 // 返回 (0, "") 表示通过；否则为应回应的状态码与文案。
 func archiveExtrasError(ex archiveExtras) (int, string) {
 	if ex.TargetVolume == "" {
@@ -367,12 +336,6 @@ func archiveExtrasError(ex archiveExtras) (int, string) {
 		return http.StatusBadRequest, "cipher 仅与 encrypt 同用（单独指定不加密，已拒绝以避免误信已加密）"
 	}
 	return 0, ""
-}
-
-// archiveBadRequest 回 400 并返回 false（统一归档端点的参数错误应答）。
-func (h *Handlers) archiveBadRequest(w http.ResponseWriter, msg string) bool {
-	sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msg}, http.StatusBadRequest)
-	return false
 }
 
 // archivePreprocessor 按请求构造打包预处理器（压缩 + 可选加密，经 transfer registry 选型）。

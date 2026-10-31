@@ -134,9 +134,9 @@ type Targets interface {
 	MaxArchiveBytes() int64
 	ArchiveKey() []byte
 
-	// 归档打包/转存五方法（P1-c S3a 临时接缝）：实现仍在装配层（tar 助手与
-	// cloudArchiveToVolume 属 S3b 迁移面），本包消费结果；ArchiveToVolume 因执行核心
-	// 尚未迁入暂保留 HTTP 参数，S3b 迁入后删除该方法。
+	// 归档打包/转存六方法（P1-c S3a 临时接缝，S3b 增 ArchiveTotalSize）：实现仍在装配层
+	// （tar 助手与 cloudArchiveToVolume 属 S3c 迁移面），本包消费结果；ArchiveToVolume 因
+	// 执行核心尚未迁入暂保留 HTTP 参数，S3c 迁入后删除该方法。
 	//
 	// ValidateArchiveExtras 校验「仅转存外部卷支持」的选项，成功返回 status=0。
 	ValidateArchiveExtras(extras ArchiveExtras) (status int, message string)
@@ -148,6 +148,9 @@ type Targets interface {
 		logger *slog.Logger) (checksum string, exists bool, err error)
 	// ArchiveEntries 把源文件转成 transfer.SourceEntry（打开 Reader；失败时已关闭已打开项）。
 	ArchiveEntries(sources []ArchiveSource) ([]transfer.SourceEntry, error)
+	// ArchiveTotalSize 汇总源文件的**用户可见（逻辑）大小**（加密卷取明文长度）。
+	// 转存路径的 TotalSize 用该口径（与 tar 条目 Size 同源），不用 Stat 物理大小。
+	ArchiveTotalSize(sources []ArchiveSource) int64
 	// ArchiveToVolume 执行统一转存（可信卷写视图 + owner 前缀 + staging/写锁 + 配额结算）。
 	ArchiveToVolume(w http.ResponseWriter, r *http.Request, t ArchiveVolumeTransfer, logger *slog.Logger, onSuccess func(url string))
 }

@@ -555,7 +555,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudTaskHandler(cloudTasks.CancelGroup))
 	localMux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudTaskHandler(cloudTasks.DeleteGroup))
 	localMux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudTaskHandler(cloudTasks.ResumeGroup))
-	localMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
+	localMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudTaskHandler(cloudTasks.ArchiveGroup))
 	// 云端下载 API（主 mux：Bearer auth）
 	srvMux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudTaskHandler(cloudTasks.CreateDownload)))
 	srvMux.HandleFunc("GET /api/resolve", h.authMiddleware(h.resolveURL))
@@ -573,7 +573,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.authMiddleware(h.cloudTaskHandler(cloudTasks.CancelGroup)))
 	srvMux.HandleFunc("DELETE /api/cloud/groups/{id}", h.authMiddleware(h.cloudTaskHandler(cloudTasks.DeleteGroup)))
 	srvMux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.authMiddleware(h.cloudTaskHandler(cloudTasks.ResumeGroup)))
-	srvMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.authMiddleware(h.cloudArchiveGroup))
+	srvMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.authMiddleware(h.cloudTaskHandler(cloudTasks.ArchiveGroup)))
 
 	// 文件同步 API（localMux：隧道认证；handler 在 syncMgr 未装配时返回 400）
 	localMux.HandleFunc("POST /api/sync/tasks", h.syncCreateTask)

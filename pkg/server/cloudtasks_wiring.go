@@ -108,7 +108,12 @@ func (a *cloudTasksAdapter) ResumeGroup(groupID string, force bool, owner string
 	return a.h.cloudMgr.ResumeGroup(groupID, force, owner)
 }
 
+// SetGroupArchiveFile 记录组归档引用。cloudMgr 未装配（装配层直调转存路径的测试夹具）时
+// 空操作——与迁移前 `if h.cloudMgr != nil` 判等（HTTP 路径必经 GetGroup，恒已装配）。
 func (a *cloudTasksAdapter) SetGroupArchiveFile(groupID, archiveFile string) {
+	if a.h.cloudMgr == nil {
+		return
+	}
 	a.h.cloudMgr.SetGroupArchiveFile(groupID, archiveFile)
 }
 
@@ -285,6 +290,11 @@ func (a *cloudTasksAdapter) CreateMultiArchiveTar(sources []cloudtasks.ArchiveSo
 // ArchiveEntries 委托装配层打开源文件 Reader（用户可见读入口，R25）。
 func (a *cloudTasksAdapter) ArchiveEntries(sources []cloudtasks.ArchiveSource) ([]transfer.SourceEntry, error) {
 	return archiveEntries(archiveFilesFrom(sources))
+}
+
+// ArchiveTotalSize 委托装配层的用户可见总量汇总（与 tar 条目 Size 同口径）。
+func (a *cloudTasksAdapter) ArchiveTotalSize(sources []cloudtasks.ArchiveSource) int64 {
+	return archiveTotalSize(archiveFilesFrom(sources))
 }
 
 // ArchiveToVolume 委托装配层的统一转存执行核心（S3b 迁入后删除本方法）。
