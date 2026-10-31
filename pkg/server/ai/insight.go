@@ -63,7 +63,8 @@ func NormalizeTags(raw string) []string {
 	seen := make(map[string]bool)
 	var tags []string
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
+		// 每个标签截断到 maxTagRunes 字符（文档契约；先截断再去重，避免仅超长部分不同的重复标签）。
+		p = TruncateRunes(strings.TrimSpace(p), maxTagRunes)
 		if p == "" || seen[p] {
 			continue
 		}
