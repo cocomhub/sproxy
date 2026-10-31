@@ -8,8 +8,9 @@
 // 与 files_service.go 的分工相同：领域包不直接依赖子包 `pkg/storage/capacity`
 // （门禁 R2 禁止跨域直连子包），类别常量在这里固定，领域侧只表达「云下载桶的预留/归还」。
 //
-// 注：`isStorageFull`（容量满仓判定）已在 cloud_download_handler.go——它需要同时认
-// capacity 与 quota 两个哨兵，仍属装配层语义，不随领域搬迁。
+// 注：`IsStorageFull`（容量满仓判定）随云任务 CRUD 迁入 pkg/server/cloudtasks
+// （P1-c S2a）——它需要同时认 capacity 与 quota 两个哨兵；装配层（组创建错误映射）
+// 与编排核心共用同一导出实现。
 package server
 
 import (

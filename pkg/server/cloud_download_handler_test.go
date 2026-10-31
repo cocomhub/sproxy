@@ -53,13 +53,13 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	h.cloudMgr = mgr
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
-	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
-	mux.HandleFunc("GET /api/cloud/tasks", h.cloudListTasks)
-	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudCancelTask)
-	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudDeleteTask)
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudResumeTask)
+	mux.HandleFunc("POST /api/cloud/download", h.cloudTaskHandler(h.cloudTaskService().CreateDownload))
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudTaskHandler(h.cloudTaskService().CreateBatchDownload))
+	mux.HandleFunc("GET /api/cloud/tasks", h.cloudTaskHandler(h.cloudTaskService().ListTasks))
+	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudTaskHandler(h.cloudTaskService().GetTask))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudTaskHandler(h.cloudTaskService().CancelTask))
+	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudTaskHandler(h.cloudTaskService().DeleteTask))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudTaskHandler(h.cloudTaskService().ResumeTask))
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
 	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
 	mux.HandleFunc("GET /api/cloud/groups", h.cloudListGroups)
@@ -556,7 +556,7 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 
 	h := &Handlers{cloudMgr: mgr}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudTaskHandler(h.cloudTaskService().CreateBatchDownload))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
@@ -841,7 +841,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudTaskHandler(h.cloudTaskService().CreateBatchDownload))
 	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -960,7 +960,7 @@ func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		h.cloudCreateDownload(w, r)
+		h.cloudTaskHandler(h.cloudTaskService().CreateDownload)(w, r)
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()

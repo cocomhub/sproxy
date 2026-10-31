@@ -14,345 +14,60 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
-	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/rootfs"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/transfer"
 )
 
-// saveOrDefault 解析客户端 save 参数（nil = 默认 true 保留，零回归）。
-func saveOrDefault(s *bool) bool {
-	if s == nil {
-		return true
+// cloudTaskDeps 组装 cloudtasks 的窄依赖。适配器是**无状态薄委托**（逐调用读取
+// *Handlers 的当前装配态），因此逐次构造的开销可忽略，也不必在 *Handlers 上加字段
+// （R7 的分域 deps 预算只有 12 个嵌入分组）。
+func (h *Handlers) cloudTaskDeps() cloudtasks.Deps {
+	a := &cloudTasksAdapter{h: h}
+	return cloudtasks.Deps{
+		Tasks:   a,
+		Groups:  a,
+		Tenants: a,
+		Volumes: a,
+		Quota:   a,
+		Targets: a,
+		Audit:   a,
+		Logger:  h.logger,
 	}
-	return *s
 }
 
-// isStorageFull 判断错误是否为存储配额超限（全局 storageMgr 账本或租户 quota.Scope）。
-func isStorageFull(err error) bool {
-	return errors.Is(err, capacity.ErrStorageFull) || errors.Is(err, quota.ErrStorageFull)
+// cloudTaskService 构造云任务编排核心（路由注册期构造一次，之后并发复用）。
+func (h *Handlers) cloudTaskService() *cloudtasks.Service {
+	return cloudtasks.New(h.cloudTaskDeps())
+}
+
+// cloudTaskHandler 把编排核心的 HTTP 入口适配成 http.HandlerFunc：owner（任务归属与
+// 可见性）在此从认证上下文解析——`ActorFrom` 的 ctx key 是装配层私有，核心按设计
+// §4/§9.5 **显式接收 owner**（docs/designs/2026-10-31-cloudtasks-deps-mapping.md：
+// 「不要把 ctx→actor 塞进领域包」）。
+func (h *Handlers) cloudTaskHandler(fn func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fn(w, r, ActorFrom(r.Context()))
+	}
 }
 
 // checkTransferACL 校验转存目标卷对 owner 的 ACL（H2/R1：防跨租户覆写）。
 // transfer 为 nil 或卷放行 → 返回 ""；卷未装配/ACL 拒绝 → 返回错误文案（调用方 403）。
-// checkTransferACL 校验转存目标的卷 ACL（阶段 2 迁移后「占用子目录只读」由底座封印收口：
-// 目标卷属外部/封装卷时，写入经其后端 FS 的封印装饰器恒拒 —— 不再在此重复判定）。
+//
+// 实现随云任务 CRUD 迁入 cloudtasks（单条/批量/组三条入口共用同一判定与文案），组创建
+// 仍在装配层，故保留本方法把当前装配态适配成核心的 Volumes 依赖。
 func (h *Handlers) checkTransferACL(owner string, transfer *cloud.TransferSpec) string {
-	if transfer == nil {
-		return ""
-	}
-	if !h.volumeAllowedFor(owner, transfer.Volume) {
-		return fmt.Sprintf("转存目标卷 %q 对当前用户不可用（ACL 拒绝）", transfer.Volume)
-	}
-	return ""
-}
-
-// cloudCreateDownload 处理 POST /api/cloud/download。
-func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 限 1 MiB
-
-	var req struct {
-		URL      string `json:"url"`
-		Filename string `json:"filename,omitempty"`
-		// TargetFile 是分享内目标文件名（可选；PikPak 分享时按名选文件，分卷 A/B/C
-		// 各提交一次实现"分卷全套"）。非空时叠加到 URL query（spx_target 参数）
-		// 传给下载器；空 = 下载器默认选最大视频（零回归）。
-		TargetFile string `json:"target_file,omitempty"`
-		// Transfer 是转存目标（可选）：下载完成后把产物转存到指定卷。
-		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
-		// Save 是否保留 cloud 桶副本（服务端化 keep-files；默认 true 零回归）。
-		// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常
-		// 也不残留，清理状态记入 CleanupStatus 供审计。
-		Save *bool `json:"save,omitempty"`
-		// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。false = 服务端
-		// 可转存后即删。创建期真空洞校验（不下载+不转存+不保留）以此消歧。
-		DownloadLocal bool `json:"download_local,omitempty"`
-		// IntegrityMustPass 强制源文件完整性（语义校验失败阻断任务，不放行标记 damaged）。
-		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
-		// MetaExtra 是转存产物的自定义元数据（客户端传入；仅 Transfer 非空时有意义）。
-		// 转存成功后与来源信息（source=transfer/source_url/etag）合并写入目标卷 meta.Extra。
-		MetaExtra map[string]any `json:"meta_extra,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
-	}
-
-	cleanedURL, cleanedFilename, err := validateCloudDownloadURL(req.URL, req.Filename, h.cloudMgr.AllowPrivate())
-	if err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
-		return
-	}
-	// target_file 非空 → 叠加 spx_target 到 URL（下载器按名选分享内文件）。
-	// 同分享不同 target ⇒ URL 不同 ⇒ 云端任务去重（findByURL 语义一致）不会误吸收。
-	if strings.TrimSpace(req.TargetFile) != "" {
-		cleanedURL = withShareTarget(cleanedURL, strings.TrimSpace(req.TargetFile))
-	}
-	// 真空洞校验（不下载本地 + 无 transfer + save=false → 无任何产出）由 CreateTask
-	// fail-closed 兜底；此处无需预检（download_local 消歧后语义完整）。
-	// 转存目标卷 ACL 校验（H2/R1：防跨租户覆写）：owner 必须被目标卷 ACL 放行。
-	if errMsg := h.checkTransferACL(ActorFrom(r.Context()), req.Transfer); errMsg != "" {
-		sendJSONResponse(w, map[string]string{"error": errMsg}, http.StatusForbidden)
-		return
-	}
-
-	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
-	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
-	// 服务端继续异步下载，不阻塞 handler。
-	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
-	owner := ActorFrom(r.Context())
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass, MetaExtra: req.MetaExtra})
-	if err != nil {
-		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
-		if isStorageFull(err) {
-			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
-			return
-		}
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
-		return
-	}
-
-	// 返回任务快照（避免并发修改 data race）
-	snapshot, ok := h.cloudMgr.SnapshotTask(task.ID, owner)
-	if !ok {
-		sendJSONResponse(w, map[string]string{"error": "task created but not found"}, http.StatusInternalServerError)
-		return
-	}
-	sendJSONResponse(w, snapshot, http.StatusOK)
-}
-
-// validateCloudDownloadURL 校验下载 URL 和可选的文件名。
-// 执行 scheme 检查、可选 SSRF 防护、文件名提取和路径穿越防护。
-// 返回 (cleanedURL, cleanedFilename, error)。
-func validateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (string, string, error) {
-	entry := cloudfilename.Entry{URL: rawURL, Filename: rawFilename}
-	if err := cloudfilename.ValidateEntry(entry); err != nil {
-		return "", "", err
-	}
-	// SSRF 深层防护：检查 host 不解析到内部 IP（除非 allowPrivate）
-	if !allowPrivate {
-		if hostErr := downloader.ValidateURLHost(rawURL); hostErr != nil {
-			return "", "", fmt.Errorf("unsafe URL: %w", hostErr)
-		}
-	}
-	fn, err := cloudfilename.ResolveFilename(entry)
-	if err != nil {
-		return "", "", err
-	}
-	parsed, _ := url.Parse(rawURL)
-	return parsed.String(), fn, nil
-}
-
-// cloudCreateBatchDownload 处理 POST /api/cloud/download/batch。
-// 批量创建下载任务，始终异步执行。部分失败不中断，每项返回独立结果。
-func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 限 1 MiB
-
-	var req struct {
-		URLs []cloudfilename.Entry `json:"urls"`
-		// Transfer 批量转存目标（apply 到每个条目；逐条目可经 Entry 扩展覆盖）。
-		Transfer *cloud.TransferSpec `json:"transfer,omitempty"`
-		// Save 批量保存 cloud 桶副本（同单条语义；nil = 默认 true）。
-		Save *bool `json:"save,omitempty"`
-		// DownloadLocal 批量：客户端是否下载本地（同单条语义）。
-		DownloadLocal bool `json:"download_local,omitempty"`
-		// IntegrityMustPass 强制源文件完整性（同单条语义；batch 统一 apply）。
-		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
-		// MetaExtra 批量转存自定义元数据（同单条语义；batch 统一 apply 到每个条目）。
-		MetaExtra map[string]any `json:"meta_extra,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
-	}
-	if len(req.URLs) == 0 {
-		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
-		return
-	}
-	if maxBatch := h.cloudMgr.MaxBatchURLs(); len(req.URLs) > maxBatch {
-		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per batch", maxBatch)}, http.StatusBadRequest)
-		return
-	}
-
-	// 批量转存目标卷 ACL 统一校验（R1：此前 batch 路径漏检，CLI 链式主路径可跨租户转存）。
-	if errMsg := h.checkTransferACL(ActorFrom(r.Context()), req.Transfer); errMsg != "" {
-		sendJSONResponse(w, map[string]string{"error": errMsg}, http.StatusForbidden)
-		return
-	}
-
-	results := make([]CloudBatchTaskResult, 0, len(req.URLs))
-	owner := ActorFrom(r.Context())
-	for _, entry := range req.URLs {
-		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.AllowPrivate())
-		if err != nil {
-			// 校验失败阶段：返回用户原始 URL/Filename（此时尚无规范化值）
-			results = append(results, CloudBatchTaskResult{
-				URL:      entry.URL,
-				Filename: entry.Filename,
-				Status:   "failed",
-				Error:    err.Error(),
-			})
-			continue
-		}
-
-		// 批量始终异步：nil context。transfer/save/download_local 批量统一 apply；
-		// 真空洞（不下载+无 transfer+save=false）由 CreateTask fail-closed 拒绝。
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass, MetaExtra: req.MetaExtra})
-		if taskErr != nil {
-			results = append(results, CloudBatchTaskResult{
-				URL:      cleanedURL,
-				Filename: cleanedFilename,
-				Status:   "failed",
-				Error:    taskErr.Error(),
-			})
-			continue
-		}
-		// 使用快照避免并发读写 data race
-		snapshot, ok := h.cloudMgr.SnapshotTask(task.ID, owner)
-		if !ok {
-			results = append(results, CloudBatchTaskResult{
-				URL:      cleanedURL,
-				Filename: cleanedFilename,
-				Status:   "failed",
-				Error:    "task created but not found",
-			})
-			continue
-		}
-		// 成功项 URL 使用规范化值，与 GET /api/cloud/tasks/{id} 的详情一致
-		results = append(results, CloudBatchTaskResult{
-			ID:       snapshot.ID,
-			Owner:    snapshot.Owner,
-			URL:      cleanedURL,
-			Filename: cleanedFilename,
-			Status:   snapshot.Status,
-		})
-	}
-
-	sendJSONResponse(w, map[string][]CloudBatchTaskResult{"tasks": results}, http.StatusOK)
-}
-
-// parseOffsetLimit 解析 ?offset=&limit= 查询参数。
-// 解析失败（缺失或非整数）返回默认值：offset=-1（不偏移）、limit=0（返回全部）。
-func parseOffsetLimit(r *http.Request) (offset, limit int) {
-	offset = -1
-	limit = 0
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			offset = n
-		}
-	}
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			limit = n
-		}
-	}
-	return offset, limit
-}
-
-// cloudListTasks 处理 GET /api/cloud/tasks。
-// 返回 {tasks, total} 容器；total 为按 status 过滤后的任务总数（不受分页影响）。
-func (h *Handlers) cloudListTasks(w http.ResponseWriter, r *http.Request) {
-	status := r.URL.Query().Get("status")
-	offset, limit := parseOffsetLimit(r)
-	tasks, total := h.cloudMgr.ListTasks(status, offset, limit, ActorFrom(r.Context()))
-	sendJSONResponse(w, map[string]any{"tasks": tasks, "total": total}, http.StatusOK)
-}
-
-// cloudGetTask 处理 GET /api/cloud/tasks/{id}。
-func (h *Handlers) cloudGetTask(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	task, ok := h.cloudMgr.SnapshotTask(id, ActorFrom(r.Context()))
-	if !ok {
-		sendJSONResponse(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
-		return
-	}
-	sendJSONResponse(w, task, http.StatusOK)
-}
-
-// cloudCancelTask 处理 POST /api/cloud/tasks/{id}/cancel。
-func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := h.cloudMgr.CancelTask(id, ActorFrom(r.Context())); err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), msgNotFound) {
-			status = http.StatusNotFound
-		}
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "cloud_cancel", ObjectType: "task", Object: id,
-			Result: AuditResultError, Detail: err.Error(),
-		})
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
-		return
-	}
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "cloud_cancel", ObjectType: "task", Object: id,
-		Result: AuditResultSuccess,
-	})
-	sendJSONResponse(w, map[string]string{"status": "cancelled"}, http.StatusOK)
-}
-
-// cloudDeleteTask 处理 DELETE /api/cloud/tasks/{id}。
-func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := h.cloudMgr.DeleteTask(id, ActorFrom(r.Context())); err != nil {
-		h.RecordAudit(r.Context(), AuditEvent{
-			Action: "cloud_delete", ObjectType: "task", Object: id,
-			Result: AuditResultError, Detail: err.Error(),
-		})
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusNotFound)
-		return
-	}
-	h.RecordAudit(r.Context(), AuditEvent{
-		Action: "cloud_delete", ObjectType: "task", Object: id,
-		Result: AuditResultSuccess,
-	})
-	// （历史坑）此处曾额外记一条 `cloud_group_delete`，object 是**任务 ID** ✗：
-	// 既误导取证（任务删除被当成组删除），又让真正的组删除无痕。已移入 cloudDeleteGroup。
-	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
-}
-
-// cloudResumeTask 处理 POST /api/cloud/tasks/{id}/resume。
-func (h *Handlers) cloudResumeTask(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KiB
-	var req struct {
-		Force bool `json:"force"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req) // 解析失败使用默认 false
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return
-	}
-
-	if err := h.cloudMgr.ResumeTask(id, req.Force, ActorFrom(r.Context())); err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), msgNotFound) {
-			status = http.StatusNotFound
-		}
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
-		return
-	}
-	sendJSONResponse(w, map[string]string{"status": "resumed"}, http.StatusOK)
+	return cloudtasks.TransferACLRejection(h.cloudTaskDeps().Volumes, owner, transfer)
 }
 
 // cloudCreateGroup 处理 POST /api/cloud/groups。
@@ -405,7 +120,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()), cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: saveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass})
+	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()), cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: cloudtasks.SaveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass})
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, groupErrorStatus(err))
 		return
@@ -429,7 +144,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 func normalizeGroupURLs(urls []cloudfilename.Entry, allowPrivate bool) ([]cloudfilename.Entry, error) {
 	normalized := make([]cloudfilename.Entry, len(urls))
 	for i, entry := range urls {
-		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, allowPrivate)
+		cleanedURL, cleanedFilename, err := cloudtasks.ValidateCloudDownloadURL(entry.URL, entry.Filename, allowPrivate)
 		if err != nil {
 			return nil, err
 		}
@@ -446,7 +161,7 @@ func groupErrorStatus(err error) int {
 		return http.StatusConflict
 	}
 	// 存储不足映射 507（与单条/批量路径一致）
-	if isStorageFull(err) {
+	if cloudtasks.IsStorageFull(err) {
 		return http.StatusInsufficientStorage
 	}
 	// 语义空洞（save=false + download_local=false + 无 transfer = 无任何产出）是客户端
@@ -498,7 +213,7 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 // 返回 {groups, total} 容器；total 为按 status 过滤后的组总数（不受分页影响）。
 func (h *Handlers) cloudListGroups(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
-	offset, limit := parseOffsetLimit(r)
+	offset, limit := cloudtasks.ParseOffsetLimit(r)
 	owner := ActorFrom(r.Context())
 	// 先刷新所有可见组的最新状态，再按 status 过滤返回。否则只刷新"当前已处于该状态"
 	// 的组，刚转换到目标状态的组会被过滤查询漏掉，客户端看到的状态滞后。
@@ -1309,18 +1024,4 @@ func relOf(archiveName string) string {
 		rel += ".tar.gz"
 	}
 	return rel
-}
-
-// withShareTarget 把 spx_target 参数叠加到分享 URL（已有则覆盖）。
-// 设计：目标文件以 URL query 表达（而非新增任务结构字段），免改 CloudTask/去重键，
-// 且不同 target 天然产生不同 URL ⇒ 云端任务去重不会把分卷 A/B 误吸收成同一任务。
-func withShareTarget(rawURL, target string) string {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("spx_target", target)
-	u.RawQuery = q.Encode()
-	return u.String()
 }

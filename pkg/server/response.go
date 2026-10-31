@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"sync/atomic"
+
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 )
 
 // responseLogger 是 sendJSONResponse 使用的日志记录器，默认使用 slog.Default()。
@@ -69,11 +71,7 @@ func formatContentDisposition(filename string) string {
 // 本包测试直接引用 `files.*`。
 
 // CloudBatchTaskResult 批量下载单个任务结果。
-type CloudBatchTaskResult struct {
-	ID       string `json:"id"`
-	Owner    string `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
-	URL      string `json:"url"`
-	Filename string `json:"filename"`
-	Status   string `json:"status"`
-	Error    string `json:"error,omitempty"`
-}
+//
+// DTO 随写出它的处理器走（P1-c S2a 迁入 pkg/server/cloudtasks）；此处保留同名
+// **类型别名**，让既有装配层测试与调用点零改动引到同一类型（同一语义只留一份定义）。
+type CloudBatchTaskResult = cloudtasks.BatchTaskResult

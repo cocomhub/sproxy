@@ -25,6 +25,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
@@ -262,7 +263,7 @@ func TestQuota_CloudTenantLimitRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("超租户上限应返回错误")
 	}
-	if !isStorageFull(err) {
+	if !cloudtasks.IsStorageFull(err) {
 		t.Fatalf("应返回 storage full 错误（可映射 507）, got %v", err)
 	}
 	// 回滚：全局账本不应残留预留（CreateTask 失败时已回滚）。
