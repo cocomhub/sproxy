@@ -6,574 +6,136 @@ package server
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
-	"time"
 
-	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/compressx"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/server/archive"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/transfer"
 )
 
-// CloudArchiveRequest 是 POST /api/cloud/tasks/{id}/archive 的请求体。
-type CloudArchiveRequest struct {
-	ArchiveName string `json:"archive_name,omitempty"`
-	// TargetVolume 非空 = 归档打包后**转存到外部卷**（统一转存：归档=转存+可选预处理）。
-	// 空 = 落租户 archive 桶（既有行为零回归）。
-	TargetVolume string `json:"target_volume,omitempty"`
-	// TargetPath 是转存目标在**目标卷 user 桶内**的相对路径（含文件名；可含子目录）。
-	// 空 = 默认 `archive/<archive_name>`；以 "/" 结尾 = 目录（拼上 archive_name）。
-	// 由客户端从卷 URI（`<卷名>:/<路径>`，cd/mv 同规约）归一后传入；路径安全由
-	// volume.ResolveUserLocation 唯一入口校验（协议层只收 volume+path，不解析 URI）。
-	TargetPath string `json:"target_path,omitempty"`
-	// Encrypt = true 时打包输出流式加密（tar.<ext>.aes；密钥来自 archive.key_file）。
-	// 仅与 TargetVolume 同用（未指定 target 时设此项 → 400，防静默忽略）。
-	Encrypt bool `json:"encrypt,omitempty"`
-	// Cipher 是加密算法选型（空 = aes-256-gcm）；与 Encrypt 同用。
-	Cipher string `json:"cipher,omitempty"`
-	// Compression 是压缩算法选型（空 = gzip）；gzip/zstd/brotli，非法值 400（不静默回退）。
-	Compression string `json:"compression,omitempty"`
-}
+// 归档 DTO 的唯一实现已迁入 cloudtasks（P1-c S3a）；装配层与既有测试经类型别名继续引用，
+// 响应结构体因此仍只有一份定义（JSON 字段顺序/标签零变化）。
+type (
+	CloudArchiveRequest      = cloudtasks.CloudArchiveRequest
+	CloudArchiveBatchRequest = cloudtasks.CloudArchiveBatchRequest
+	CloudArchiveResult       = cloudtasks.CloudArchiveResult
+)
 
-// CloudArchiveBatchRequest 是 POST /api/cloud/archive 的请求体。
-type CloudArchiveBatchRequest struct {
-	TaskIDs     []string `json:"task_ids"`
-	ArchiveName string   `json:"archive_name,omitempty"`
-	// TargetVolume 非空 = 批量归档打包后**转存到外部卷**（统一转存）；
-	// 空 = 落租户 archive 桶（既有行为零回归）。
-	TargetVolume string `json:"target_volume,omitempty"`
-	// TargetPath 同 CloudArchiveRequest.TargetPath（目标卷 user 桶内相对路径）。
-	TargetPath string `json:"target_path,omitempty"`
-	// Encrypt / Cipher / Compression 同 CloudArchiveRequest（仅与 TargetVolume 同用）。
-	Encrypt     bool   `json:"encrypt,omitempty"`
-	Cipher      string `json:"cipher,omitempty"`
-	Compression string `json:"compression,omitempty"`
-}
-
-// CloudArchiveResult 是归档操作响应结构体。
-type CloudArchiveResult struct {
-	Success      bool     `json:"success"`
-	Message      string   `json:"message,omitempty"`
-	File         string   `json:"file,omitempty"`
-	Size         int64    `json:"size,omitempty"`
-	Checksum     string   `json:"checksum,omitempty"`
-	TaskCount    int      `json:"task_count,omitempty"`
-	SkippedCount int      `json:"skipped_count,omitempty"`
-	SkippedTasks []string `json:"skipped_tasks,omitempty"`
-}
+// archiveVolumeTransfer 是统一转存入参的类型别名（唯一实现在 cloudtasks，S3b 迁入后别名删除）。
+type archiveVolumeTransfer = cloudtasks.ArchiveVolumeTransfer
 
 // cloudArchiveReservePlaceholder 云归档打包预留占位（100MB）。
 // tar 头（≤512B/文件）+ gzip 可能在极少数情况下产生少量膨胀，预留后按实际大小对账。
 const cloudArchiveReservePlaceholder = int64(100 * 1024 * 1024)
 
-// cloudArchiveMaxBytes 返回云归档总量上限（0 = 不限制，仍受 max_storage_bytes 兜底）。
-func (h *Handlers) cloudArchiveMaxBytes() int64 {
-	if cfg := h.cfgPtr.Load(); cfg != nil {
-		return cfg.CloudArchiveMaxBytes
-	}
-	return 0
+// 云归档编排入口（P1-c S3a 已迁入 pkg/server/cloudtasks）。装配层只保留 owner 解析
+// 适配器（`ActorFrom` 的 ctx key 是装配层私有，核心显式接收 owner）。
+func (h *Handlers) archiveTaskHandler() http.HandlerFunc {
+	return h.cloudTaskHandler(h.cloudTaskService().ArchiveTask)
 }
 
-// cloudArchiveTask 处理 POST /api/cloud/tasks/{id}/archive。
-// 将已完成云下载任务的文件打包为 tar.gz 归档文件。
-//
-// 排除面边界（F5 review 成文）：cloud 源（cloud 桶）与 archive 输出（archive 桶）均落**默认卷**
-// （tenantFor），属 §11「cloud/archive 产物落默认卷」设计内例外——默认卷被 ACL 排除的 owner 仍可
-// 经自建归档回读默认卷上自己生成的 cloud 内容。见 volumes.go defaultVolumeAllows 边界注释。
-// 不改行为，仅记录避免未来误判为漏洞。
-func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
-	taskID := r.PathValue("id")
-
-	// 校验任务存在且状态为 completed、解析请求体、推导任务源路径（失败已回响应）。
-	task, req, srcTnt, srcRel, ok := h.cloudArchivePrepare(w, r, taskID)
-	if !ok {
-		return
-	}
-
-	// 确定归档文件名（路径穿越防护 + 合法性检查）
-	archiveName := req.ArchiveName
-	if archiveName == "" {
-		archiveName = fmt.Sprintf("cloud-task-%s-%d.tar.gz", taskID, time.Now().Unix())
-	}
-
-	// 打包前：单文件总量限制（cloud_archive_max_bytes）。单文件仍受 addFileToTar 内
-	// archive.DefaultMaxArchiveSize=100MB 约束；此处限制的是原始文件大小，与 addFileToTar 并存不冲突。
-	// 审查 #10 结论（勿再分析）：此 os.Stat 是**必须的**大小校验，并非与 O_EXCL 重复的
-	// 存在性预检——同名冲突由 openArchiveOutput 的 O_EXCL 单一负责（createTarGz 返回
-	// errArchiveExists → 409）；此处 stat 失败即源文件不存在（400），职责不同，无冗余。
-	info, err := srcTnt.Root().Stat(srcRel)
-	if err != nil {
-		h.logger.Error("failed to stat source file in cloud archive", "task_id", taskID, "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
-		return
-	}
-
-	// 统一转存：target_volume → 打包转存外部卷（统一「归档 = 转存 + 预处理」管道），
-	// 不落租户 archive 桶。target_path/encrypt/cipher/compression 仅与 target_volume 同用。
-	if !h.validateArchiveExtras(w, archiveExtras{
-		TargetVolume: req.TargetVolume, TargetPath: req.TargetPath,
-		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
-	}) {
-		return
-	}
-	if req.TargetVolume != "" {
-		h.cloudArchiveTaskToVolume(w, r, taskID, task, req, srcTnt, srcRel, info, archiveName)
-		return
-	}
-
-	// 确保输出目录存在 + 推导输出 rel（失败已回响应）。
-	owner, root, rel, archiveName, ok := h.cloudArchiveOutput(w, r, archiveName)
-	if !ok {
-		return
-	}
-
-	// 总量限制 + 预留配额（scope 优先，storageMgr 回退；与批量/组归档同款逻辑）。
-	res, pre, ok := h.cloudArchiveReserveQuota(r.Context(), w, owner, info.Size())
-	if !ok {
-		return
-	}
-
-	// 打包（流式 checksum）
-	logger := h.logger.With("archive", "cloud_task", "task_id", taskID)
-	checksum, err := createTarGz(srcTnt.Root(), srcRel, task.Filename, root, rel, logger)
-	if err != nil {
-		if errors.Is(err, errArchiveExists) {
-			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
-			releaseArchiveReservation(res, h.storageMgr, pre)
-			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
-			return
-		}
-		h.logger.Error("failed to create archive", "task_id", taskID, "error", err)
-		_ = root.Remove(rel)
-		releaseArchiveReservation(res, h.storageMgr, pre)
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
-		}, http.StatusInternalServerError)
-		return
-	}
-
-	// 按磁盘实际对账预留配额（scope 优先 Commit(actual)，storageMgr 回退 3 步；失败已回 507）。
-	actual, settleOK := h.cloudArchiveSettleQuota(w, root, rel, res, pre, h.logger.With("task_id", taskID))
-	if !settleOK {
-		return
-	}
-
-	// P5 归档占用登记（登记后释放 Scope 不再依赖周期扫描自愈）。
-	h.recordArchiveUsage(owner, archiveName, actual)
-
-	archiveInfo, err := root.Stat(rel)
-	if err != nil {
-		h.logger.Error("failed to stat archive", "task_id", taskID, "error", err)
-	}
-
-	archiveSize := int64(0)
-	if archiveInfo != nil {
-		archiveSize = archiveInfo.Size()
-	}
-
-	sendJSONResponse(w, CloudArchiveResult{
-		Success:   true,
-		File:      archiveName,
-		Size:      archiveSize,
-		Checksum:  checksum,
-		TaskCount: 1,
-	}, http.StatusOK)
+func (h *Handlers) archiveBatchHandler() http.HandlerFunc {
+	return h.cloudTaskHandler(h.cloudTaskService().ArchiveBatch)
 }
 
-// cloudArchiveBatch 处理 POST /api/cloud/archive。
-// 批量将多个已完成云下载任务的文件打包为单个 tar.gz 归档文件。
-func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
-	// 解析请求体 + 校验 task_ids 数量（失败已回响应）。
-	req, ok := h.cloudArchiveBatchParse(w, r)
-	if !ok {
-		return
-	}
-
-	// 收集所有已完成任务的文件信息，跳过无效任务（全部跳过已回响应）。
-	files, skippedTasks, totalSourceSize, ok := h.cloudArchiveCollectTasks(w, r, req.TaskIDs)
-	if !ok {
-		return
-	}
-
-	// 确定归档文件名（路径穿越防护 + 合法性检查）
-	archiveName := req.ArchiveName
-	if archiveName == "" {
-		archiveName = fmt.Sprintf("cloud-batch-%d.tar.gz", time.Now().Unix())
-	}
-
-	// 统一转存：target_volume → 打包转存外部卷（统一「归档 = 转存 + 预处理」管道），
-	// 不落租户 archive 桶。target_path/encrypt/cipher/compression 仅与 target_volume 同用。
-	if !h.validateArchiveExtras(w, archiveExtras{
-		TargetVolume: req.TargetVolume, TargetPath: req.TargetPath,
-		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
-	}) {
-		return
-	}
-	if req.TargetVolume != "" {
-		h.cloudArchiveBatchToVolume(w, r, req, files, totalSourceSize, archiveName)
-		return
-	}
-
-	// 确保输出目录存在 + 推导输出 rel（失败已回响应）。
-	owner, root, rel, archiveName, ok := h.cloudArchiveOutput(w, r, archiveName)
-	if !ok {
-		return
-	}
-
-	// 打包前：总量限制 + 预留配额（scope 优先，storageMgr 回退；与单任务/组归档一致）。
-	res, pre, ok := h.cloudArchiveReserveQuota(r.Context(), w, owner, totalSourceSize)
-	if !ok {
-		return
-	}
-
-	// 多文件打包（流式 checksum）
-	created := false
-	logger := h.logger.With("archive", "cloud_batch")
-	checksum, err := createMultiFileTarGz(files, root, rel, logger, &created)
-	if err != nil {
-		if !created {
-			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
-			releaseArchiveReservation(res, h.storageMgr, pre)
-			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
-			return
-		}
-		h.logger.Error("failed to create batch archive", "error", err)
-		_ = root.Remove(rel)
-		releaseArchiveReservation(res, h.storageMgr, pre)
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
-		}, http.StatusInternalServerError)
-		return
-	}
-
-	// 按磁盘实际对账预留配额（TryReserve 拒绝已回 507）。
-	actual, settleOK := h.cloudArchiveSettleQuota(w, root, rel, res, pre, h.logger)
-	if !settleOK {
-		return
-	}
-
-	// P5 归档占用登记（删除组时按登记 Release Scope）。
-	h.recordArchiveUsage(owner, archiveName, actual)
-
-	info, err := root.Stat(rel)
-	if err != nil {
-		h.logger.Error("failed to stat archive", "error", err)
-	}
-
-	size := int64(0)
-	if info != nil {
-		size = info.Size()
-	}
-
-	sendJSONResponse(w, CloudArchiveResult{
-		Success:      true,
-		File:         archiveName,
-		Size:         size,
-		Checksum:     checksum,
-		TaskCount:    len(files),
-		SkippedCount: len(skippedTasks),
-		SkippedTasks: skippedTasks,
-	}, http.StatusOK)
-}
-
-// cloudArchivePrepare 校验云任务（存在 + completed + 归属请求者）、解析请求体、
-// 推导任务源文件路径（任务 owner 租户 cloud 桶）。任一失败已写响应并返回 ok=false。
-func (h *Handlers) cloudArchivePrepare(w http.ResponseWriter, r *http.Request, taskID string) (task *cloud.CloudTask, req CloudArchiveRequest, srcTnt *storage.Tenant, srcRel string, ok bool) {
-	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）。
-	// 按请求者 owner 过滤：跨 owner 任务视为不存在（404 防枚举）。
-	var found bool
-	task, found = h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
-	if !found {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task not found"}, http.StatusNotFound)
-		return task, req, nil, "", false
-	}
-	if task.Status != "completed" {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false,
-			Message: fmt.Sprintf("task status is %q, expected \"completed\"", task.Status),
-		}, http.StatusBadRequest)
-		return task, req, nil, "", false
-	}
-
-	// 解析请求体
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
-		return task, req, nil, "", false
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return task, req, nil, "", false
-	}
-
-	// 构造源文件路径（任务文件按任务 owner 落租户 cloud/ 桶）：根内 rel = cloud/<taskID>/<file>
-	// 经 FeatureRel 校验段名（fail-closed，防 task.Filename 穿越任务目录）。
-	srcTnt = h.tenantFor(task.Owner)
-	if srcTnt == nil {
-		h.logger.Error("云任务源租户不可用（fail-closed）", "task_id", taskID, "owner", task.Owner)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
-		return task, req, nil, "", false
-	}
-	var srcOK bool
-	srcRel, srcOK = srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
-	if !srcOK {
-		h.logger.Error("云任务源路径非法（fail-closed）", "task_id", taskID, "file", task.Filename)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveStatFail}, http.StatusBadRequest)
-		return task, req, nil, "", false
-	}
-	return task, req, srcTnt, srcRel, true
-}
-
-// cloudArchiveOutput 解析归档输出路径：防穿越校验归档名（加 .tar.gz 后缀、限长）、
-// 确保租户 archive 桶目录存在并推导输出 rel。失败时已写响应并返回 ok=false。
-func (h *Handlers) cloudArchiveOutput(w http.ResponseWriter, r *http.Request, archiveName string) (owner string, root *storage.Root, rel, name string, ok bool) {
-	// 路径穿越防护 + 后缀/长度校验（与统一转存共用同一校验）。
-	archiveName, ok = h.normalizeArchiveName(w, archiveName)
-	if !ok {
-		return "", nil, "", "", false
-	}
-
-	// 确保输出目录存在（租户 archive 桶：<root>/<owner>/archive/）
-	owner = ActorFrom(r.Context())
-	tnt := h.tenantFor(owner)
-	if tnt == nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
-		return "", nil, "", "", false
-	}
-	root = tnt.Root()
-	if err := root.MkdirAll("archive", 0755); err != nil {
-		h.logger.Error(msgArchiveDirFail, "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgArchiveDirFail}, http.StatusInternalServerError)
-		return "", nil, "", "", false
-	}
-	var relOK bool
-	rel, relOK = tnt.FeatureRel("archive", archiveName)
-	if !relOK {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
-		return "", nil, "", "", false
-	}
-	return owner, root, rel, archiveName, true
-}
-
-// normalizeArchiveName 校验并归一归档名：仅文件名（Base，防 ../ 与 /）、补 .tar.gz
-// 后缀、长度 ≤255。失败时已写响应并返回 ok=false。bucket 落盘与统一转存共用，防
-// 两套校验漂移。
+// normalizeArchiveName 是组归档路径（S3b 前仍在装配层）对编排核心归一逻辑的取用壳：
+// 规则唯一实现是 cloudtasks.NormalizeArchiveName（Base/后缀/255 字节），本函数只做响应写出。
 func (h *Handlers) normalizeArchiveName(w http.ResponseWriter, archiveName string) (string, bool) {
-	// 路径穿越防护：仅允许文件名，拒绝 ../ 和 /
-	archiveName = filepath.Base(archiveName)
-	if archiveName == "" || archiveName == "." || archiveName == ".." {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
+	name, msg := cloudtasks.NormalizeArchiveName(archiveName)
+	if msg != "" {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msg}, http.StatusBadRequest)
 		return "", false
 	}
-	// 确保以 .tar.gz 结尾
-	if !strings.HasSuffix(archiveName, tarGZExt) {
-		archiveName += tarGZExt
-	}
-	// 长度限制
-	if len(archiveName) > 255 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
-		return "", false
-	}
-	return archiveName, true
+	return name, true
 }
 
-// cloudArchiveTaskToVolume 单任务归档统一转存：单文件（tar.gz 打包）→ 外部卷。
-// ACL 与组/批量归档同语义（volumeAllowedFor 防跨租户写私有卷）。
-func (h *Handlers) cloudArchiveTaskToVolume(w http.ResponseWriter, r *http.Request, taskID string, task *cloud.CloudTask, req CloudArchiveRequest, srcTnt *storage.Tenant, srcRel string, info os.FileInfo, archiveName string) {
-	owner := ActorFrom(r.Context())
-	if !h.volumeAllowedFor(owner, req.TargetVolume) {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标卷对当前用户不可用（ACL 拒绝）"}, http.StatusForbidden)
-		return
-	}
-	name, ok := h.normalizeArchiveName(w, archiveName)
-	if !ok {
-		return
-	}
-	// R25：用户可见读入口（加密卷透明解密）——不得直调 root.Open。
-	f, oerr := rootfs.OpenUserVisibleRead(srcTnt.Root(), srcRel)
-	if oerr != nil {
-		h.logger.Error("统一转存打开源文件失败", "task_id", taskID, "error", oerr)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + oerr.Error()}, http.StatusInternalServerError)
-		return
-	}
-	// 用户可见（逻辑）长度：加密卷取明文长度，否则等同 Stat。
-	size := info.Size()
-	if sv, vErr := rootfs.UserVisibleSize(srcTnt.Root(), srcRel); vErr == nil {
-		size = sv
-	}
-	entries := []transfer.SourceEntry{{
-		Rel: task.Filename, Size: size, ModTime: info.ModTime().Unix(), Reader: f,
-	}}
-	h.cloudArchiveToVolume(w, r, archiveVolumeTransfer{
-		Owner: owner, TargetVolume: req.TargetVolume, TargetPath: req.TargetPath, ArchiveName: name,
-		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
-		Entries: entries, TotalSize: size,
-	}, h.logger.With("archive", "cloud_task", "task_id", taskID), nil)
-}
-
-// cloudArchiveBatchToVolume 批量归档统一转存：多文件（tar.gz 打包）→ 外部卷。
-func (h *Handlers) cloudArchiveBatchToVolume(w http.ResponseWriter, r *http.Request, req CloudArchiveBatchRequest, files []fileWithRelPath, totalSize int64, archiveName string) {
-	owner := ActorFrom(r.Context())
-	if !h.volumeAllowedFor(owner, req.TargetVolume) {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "目标卷对当前用户不可用（ACL 拒绝）"}, http.StatusForbidden)
-		return
-	}
-	name, ok := h.normalizeArchiveName(w, archiveName)
-	if !ok {
-		return
-	}
-	entries, err := archiveEntries(files)
-	if err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "open source failed: " + err.Error()}, http.StatusInternalServerError)
-		return
-	}
-	h.cloudArchiveToVolume(w, r, archiveVolumeTransfer{
-		Owner: owner, TargetVolume: req.TargetVolume, TargetPath: req.TargetPath, ArchiveName: name,
-		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
-		Entries: entries, TotalSize: totalSize,
-	}, h.logger.With("archive", "cloud_batch"), nil)
-}
-
-// cloudArchiveSettleQuota 按磁盘实际大小对账预留配额（单任务 / 批量 / 组归档共用）：scope 路径
-// = Reconcile(actual) + Commit()（多预留部分自动归还）；storageMgr 回退保留 3 步
-// （Release(pre)+TryReserve(actual)）。TryReserve 拒绝时已删文件并回 507，返回 ok=false。
-func (h *Handlers) cloudArchiveSettleQuota(w http.ResponseWriter, root *storage.Root, rel string, res *quota.Settlement, pre int64, logger *slog.Logger) (actual int64, ok bool) {
+// archiveSettleQuota 按磁盘实际大小对账预留配额的**非响应核心**（单任务 / 批量 / 组归档
+// 共用）：scope 路径 = Reconcile(actual) + Commit()（多预留部分自动归还）；storageMgr 回退
+// 保留 3 步（Release(pre)+TryReserve(actual)）。失败返回 status+message（响应由调用方写出，
+// 文案与迁移前逐字一致）。
+func (h *Handlers) archiveSettleQuota(root *storage.Root, rel string, res *quota.Settlement, pre int64, logger *slog.Logger) (actual int64, status int, message string) {
 	if res != nil {
 		info, statErr := root.Stat(rel)
 		if statErr != nil {
 			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
 			res.Release()
-			return 0, true
+			return 0, 0, ""
 		}
 		actual = info.Size()
 		commitArchiveSettlement(res, pre, actual, logger)
-		return actual, true
+		return actual, 0, ""
 	}
 	if h.storageMgr == nil {
-		return 0, true
+		return 0, 0, ""
 	}
 	h.storageMgr.Release(pre, capacity.CategoryCloud)
 	info, statErr := root.Stat(rel)
 	if statErr != nil {
-		return 0, true
+		return 0, 0, ""
 	}
 	actual = info.Size()
 	if rErr := h.storageMgr.TryReserve(actual, capacity.CategoryCloud); rErr != nil {
 		logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
 		_ = root.Remove(rel)
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-		}, http.StatusInsufficientStorage)
+		return 0, http.StatusInsufficientStorage, fmt.Sprintf("insufficient storage for archive: %v", rErr)
+	}
+	return actual, 0, ""
+}
+
+// cloudArchiveSettleQuota 是 archiveSettleQuota 的响应壳（组归档路径 S3b 前直接调用；
+// 单任务/批量经 Quota.SettleArchive 取用同一核心）。TryReserve 拒绝时已删文件并回 507。
+func (h *Handlers) cloudArchiveSettleQuota(w http.ResponseWriter, root *storage.Root, rel string, res *quota.Settlement, pre int64, logger *slog.Logger) (actual int64, ok bool) {
+	actual, status, message := h.archiveSettleQuota(root, rel, res, pre, logger)
+	if status != 0 {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: message}, status)
 		return 0, false
 	}
 	return actual, true
 }
 
-// cloudArchiveBatchParse 解析批量归档请求体并校验 task_ids 数量（1..100）。
-// 失败已写响应并返回 ok=false。
-func (h *Handlers) cloudArchiveBatchParse(w http.ResponseWriter, r *http.Request) (req CloudArchiveBatchRequest, ok bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: msgInvalidRequestBody}, http.StatusBadRequest)
-		return req, false
+// archiveReserveQuota 是归档预留的**非响应核心**（单任务 / 批量 / 组归档共用）：先校验
+// cloud_archive_max_bytes 上限，再按「scope 优先（ReserveWait 排队）、storageMgr 回退」预留。
+// 失败返回 status+message（文案与迁移前逐字一致）；成功返回结算句柄（nil = 回退/未装配）
+// 与预留量 pre。
+func (h *Handlers) archiveReserveQuota(ctx context.Context, owner string, totalSourceSize int64) (*quota.Settlement, int64, int, string) {
+	if maxBytes := (&cloudTasksAdapter{h: h}).MaxArchiveBytes(); maxBytes > 0 && totalSourceSize > maxBytes {
+		return nil, 0, http.StatusBadRequest, fmt.Sprintf("archive exceeds cloud_archive_max_bytes: %d > %d", totalSourceSize, maxBytes)
 	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
-		return req, false
-	}
-
-	if len(req.TaskIDs) == 0 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task_ids is required"}, http.StatusBadRequest)
-		return req, false
-	}
-	if len(req.TaskIDs) > 100 {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "maximum 100 task IDs per request"}, http.StatusBadRequest)
-		return req, false
-	}
-	return req, true
-}
-
-// cloudArchiveCollectTasks 逐任务收集已完成任务的文件信息（无效任务跳过并记 skipped）。
-// 所有任务都被跳过时已写响应并返回 ok=false。
-func (h *Handlers) cloudArchiveCollectTasks(w http.ResponseWriter, r *http.Request, taskIDs []string) (files []fileWithRelPath, skippedTasks []string, totalSourceSize int64, ok bool) {
-	for _, taskID := range taskIDs {
-		f, size, skip := h.cloudArchiveTaskSource(r, taskID)
-		if skip {
-			skippedTasks = append(skippedTasks, taskID)
-			continue
+	pre := totalSourceSize + cloudArchiveReservePlaceholder
+	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
+	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
+	// P1-b：scope 路径的「预留 → 对账 → 提交/回滚」改走 quota.Settlement（协议唯一实现）；
+	// ReserveWait 保留「容量临时不足 ⇒ 排队等释放」的能力（#963 锁定的语义，不得退化为立即 507）。
+	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
+		st := quota.NewSettlement(scope.Pool())
+		// h.quotaWaitTimeout = 0（生产恒 0）⇒ ReserveWait 内部按 quota.DefaultWaitTimeout（30s），
+		// 语义不变。此前此处恒传 quota.DefaultWaitTimeout，测试注入的等待上限被忽略（#963 记录）。
+		if reserveErr := st.ReserveWait(ctx, pre, h.quotaWaitTimeout); reserveErr != nil {
+			// 失败时账本与句柄状态均不变（ReserveWait 契约）⇒ 直接丢弃句柄，无预留泄漏。
+			return nil, 0, http.StatusInsufficientStorage, fmt.Sprintf("insufficient storage: %v", reserveErr)
 		}
-		totalSourceSize += size
-		files = append(files, f)
+		return st, pre, 0, ""
+	} else if h.storageMgr != nil {
+		if reserveErr := h.storageMgr.WaitReserve(ctx, pre, capacity.CategoryCloud, capacity.DefaultWaitTimeout); reserveErr != nil {
+			return nil, 0, http.StatusInsufficientStorage, fmt.Sprintf("insufficient storage: %v", reserveErr)
+		}
 	}
-
-	// 所有任务都被跳过则返回错误
-	if len(files) == 0 {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: "no valid tasks to archive",
-			SkippedCount: len(skippedTasks), SkippedTasks: skippedTasks,
-		}, http.StatusBadRequest)
-		return nil, skippedTasks, totalSourceSize, false
-	}
-	return files, skippedTasks, totalSourceSize, true
-}
-
-// cloudArchiveTaskSource 解析批量归档单个任务的文件信息（快照 + completed + 租户/路径/
-// 存在性校验）。解析失败记 Warn 日志并返回 skip=true（调用方累积 skipped 列表）。
-func (h *Handlers) cloudArchiveTaskSource(r *http.Request, taskID string) (fileWithRelPath, int64, bool) {
-	// 使用 SnapshotTask 避免 data race；按请求者 owner 过滤（跨 owner 任务跳过，防内容外泄）。
-	task, found := h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
-	if !found {
-		h.logger.Warn("cloud batch archive: skipping task not found", "task_id", taskID)
-		return fileWithRelPath{}, 0, true
-	}
-	if task.Status != "completed" {
-		h.logger.Warn("cloud batch archive: skipping task with non-completed status",
-			"task_id", taskID, "status", task.Status)
-		return fileWithRelPath{}, 0, true
-	}
-
-	// 源文件按任务 owner 租户 cloud/ 桶解析（根内 rel = cloud/<taskID>/<file>）
-	srcTnt := h.tenantFor(task.Owner)
-	if srcTnt == nil {
-		h.logger.Warn("cloud batch archive: skipping task with unavailable tenant",
-			"task_id", taskID, "owner", task.Owner)
-		return fileWithRelPath{}, 0, true
-	}
-	srcRel, relOK := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
-	if !relOK {
-		h.logger.Warn("cloud batch archive: skipping task with invalid source path",
-			"task_id", taskID, "file", task.Filename)
-		return fileWithRelPath{}, 0, true
-	}
-
-	// 顺带 stat 校验文件存在并累计原始大小（用于总量限制与配额预估）
-	info, statErr := srcTnt.Root().Stat(srcRel)
-	if statErr != nil {
-		h.logger.Warn("cloud batch archive: skipping missing file",
-			"task_id", taskID, "rel", srcRel, "error", statErr)
-		return fileWithRelPath{}, 0, true
-	}
-
-	relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
-	return fileWithRelPath{root: srcTnt.Root(), rel: srcRel, tarRel: relPath}, info.Size(), false
+	// 回退路径（storageMgr）或未装配账本：无结算句柄需定案（回退预留按 pre 释放）。
+	return nil, pre, 0, ""
 }
 
 type fileWithRelPath struct {
@@ -785,16 +347,26 @@ type archiveExtras struct {
 //
 // 失败时已写响应并返回 false。
 func (h *Handlers) validateArchiveExtras(w http.ResponseWriter, ex archiveExtras) bool {
-	if ex.TargetVolume == "" {
-		if ex.Encrypt || ex.Cipher != "" || ex.Compression != "" || ex.TargetPath != "" {
-			return h.archiveBadRequest(w, "target_path/encrypt/cipher/compression 仅支持与 target_volume（转存外部卷）同用")
-		}
-		return true
-	}
-	if ex.Cipher != "" && !ex.Encrypt {
-		return h.archiveBadRequest(w, "cipher 仅与 encrypt 同用（单独指定不加密，已拒绝以避免误信已加密）")
+	if status, msg := archiveExtrasError(ex); status != 0 {
+		return h.archiveBadRequest(w, msg)
 	}
 	return true
+}
+
+// archiveExtrasError 是「仅转存外部卷支持」选项校验的**非响应核心**（规则唯一实现：
+// 装配层的组归档壳与 cloudtasks 经 Targets.ValidateArchiveExtras 共用）。
+// 返回 (0, "") 表示通过；否则为应回应的状态码与文案。
+func archiveExtrasError(ex archiveExtras) (int, string) {
+	if ex.TargetVolume == "" {
+		if ex.Encrypt || ex.Cipher != "" || ex.Compression != "" || ex.TargetPath != "" {
+			return http.StatusBadRequest, "target_path/encrypt/cipher/compression 仅支持与 target_volume（转存外部卷）同用"
+		}
+		return 0, ""
+	}
+	if ex.Cipher != "" && !ex.Encrypt {
+		return http.StatusBadRequest, "cipher 仅与 encrypt 同用（单独指定不加密，已拒绝以避免误信已加密）"
+	}
+	return 0, ""
 }
 
 // archiveBadRequest 回 400 并返回 false（统一归档端点的参数错误应答）。

@@ -94,9 +94,11 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/sproxysig":  0,
 	"github.com/cocomhub/sproxy/pkg/state":      0,
 	"github.com/cocomhub/sproxy/pkg/storage":    0,
-	"github.com/cocomhub/sproxy/pkg/store":      0,
-	"github.com/cocomhub/sproxy/pkg/telemetry":  0,
-	"github.com/cocomhub/sproxy/pkg/testutil":   0,
+	// 用户可见文件读写（加密卷透明加解密；R25 唯一读入口）：只依赖 storage/sync ⇒ G0。
+	"github.com/cocomhub/sproxy/pkg/rootfs":    0,
+	"github.com/cocomhub/sproxy/pkg/store":     0,
+	"github.com/cocomhub/sproxy/pkg/telemetry": 0,
+	"github.com/cocomhub/sproxy/pkg/testutil":  0,
 	// 字节大小单位抽象（用户裁决 2026-10-03）：配置中人类可读字节大小统一走
 	// pkg/units/sizex.ByteSize（"512MiB"）；零 pkg/* 内部依赖 ⇒ G0。
 	// 注：sizex 曾被 server 直接引用却未登记——R3 只在**依赖**未登记时报红，Managed 包

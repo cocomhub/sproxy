@@ -312,7 +312,7 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	post := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -382,7 +382,7 @@ func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"del.tar.gz"}`))
 	req.Header.Set(headerContentType, contentTypeJSON)

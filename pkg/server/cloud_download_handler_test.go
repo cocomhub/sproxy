@@ -61,7 +61,7 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudTaskHandler(h.cloudTaskService().CancelTask))
 	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudTaskHandler(h.cloudTaskService().DeleteTask))
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudTaskHandler(h.cloudTaskService().ResumeTask))
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.archiveTaskHandler())
 	mux.HandleFunc("POST /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().CreateGroup))
 	mux.HandleFunc("GET /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().ListGroups))
 	mux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudTaskHandler(h.cloudTaskService().GetGroup))

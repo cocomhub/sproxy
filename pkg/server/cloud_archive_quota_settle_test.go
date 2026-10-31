@@ -95,7 +95,7 @@ func TestCloudArchive_ToVolume_SettlesOwnerQuota(t *testing.T) {
 		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -122,7 +122,7 @@ func TestCloudArchive_ToVolume_QuotaFullRejectsBeforeWrite(t *testing.T) {
 		strings.NewReader(`{"archive_name":"q.tar.gz","target_volume":"vault"}`))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
-	h.cloudArchiveTask(rec, req)
+	h.archiveTaskHandler()(rec, req)
 
 	if rec.Code != http.StatusInsufficientStorage {
 		t.Fatalf("配额不足必须 507（写前探针），got status=%d body=%s", rec.Code, rec.Body.String())

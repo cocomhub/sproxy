@@ -19,8 +19,13 @@ const depsFieldTarget = 8
 //
 // S2b 的临时增量：Groups 多 1 个 DeleteGroupArchive（组删除时清理归档产物；归档自身的
 // 读写在 S3 才迁入本包，S2b 期间委托装配层的 deleteGroupArchive）⇒ 8→9、合计 37→38。
-// S3 迁入归档面后删除该委托，两处计数应回落（本断言随之收紧，不得只改数字留漂移）。
-const interfaceMethodTotal = 38
+//
+// S3a 的临时增量：Quota 多 4 个归档方法（ReserveArchive/SettleArchive/ReleaseArchive/
+// RecordArchiveUsage）、Targets 多 5 个归档打包/转存方法（ValidateArchiveExtras/
+// CreateArchiveTar/CreateMultiArchiveTar/ArchiveEntries/ArchiveToVolume）⇒ 合计 38→47。
+// 两者都是 S3a 的临时接缝（实现仍在装配层），S3b 迁入归档核心后随实现一起删除，
+// 两处计数应回落（本断言随之收紧，不得只改数字留漂移）。
+const interfaceMethodTotal = 47
 
 // TestDepsFieldCap 锁 Deps 的入边宽度 ≤8，并锁字段名（防止改名后门禁仍数得清）。
 func TestDepsFieldCap(t *testing.T) {
@@ -53,8 +58,8 @@ func TestInterfaceMethodCounts(t *testing.T) {
 		{"Groups", reflect.TypeFor[cloudtasks.Groups](), 9}, // S2b：+DeleteGroupArchive（S3 移除）
 		{"Tenants", reflect.TypeFor[cloudtasks.Tenants](), 1},
 		{"Volumes", reflect.TypeFor[cloudtasks.Volumes](), 5},
-		{"Quota", reflect.TypeFor[cloudtasks.Quota](), 6},
-		{"Targets", reflect.TypeFor[cloudtasks.Targets](), 7},
+		{"Quota", reflect.TypeFor[cloudtasks.Quota](), 10},     // S3a：+4 归档（预留/结算/释放/登记）
+		{"Targets", reflect.TypeFor[cloudtasks.Targets](), 12}, // S3a：+5 归档（校验/打包/entries/转存）
 		{"Audit", reflect.TypeFor[cloudtasks.Audit](), 1},
 	}
 	if len(cases) != 7 {
