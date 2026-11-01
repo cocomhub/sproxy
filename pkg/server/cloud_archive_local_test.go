@@ -22,6 +22,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestCloudArchive_ToLocalVolume_LandsInUserBucket 单任务归档 target_volume=本地卷：
@@ -30,11 +31,7 @@ func TestCloudArchive_ToLocalVolume_LandsInUserBucket(t *testing.T) {
 	t.Parallel()
 	// 用 os.MkdirTemp（非常 t.TempDir）：Windows 上 TempDir 的 RemoveAll 校验会因为
 	// 卷根/账本句柄晚释放而报 "used by another process"（测试逻辑本身已通过）。
-	dir, derr := os.MkdirTemp("", "archive-local-*")
-	if derr != nil {
-		t.Fatal(derr)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := testutil.MkdirTemp(t, "archive-local-")
 	h, _, mgr := setupLocalVolumeArchive(t, dir)
 
 	// 归档前先落一个源文件（createCompletedTask 写任务目录）。
@@ -109,11 +106,7 @@ func setupLocalVolumeArchive(t *testing.T, dir string) (*Handlers, *serverMemFS,
 // 归档转存到**本地卷**的产物必须计入该卷的**卷级容量池**（此前只有外部卷经 FS 层
 // CapacityFS 记账，本地卷 rootfs 无 ReserveSpace ⇒ 卷池漏记 ⇒ 长期漂移）。
 func TestCloudArchive_ToLocalVolume_ChargesVolumePool(t *testing.T) {
-	dir, derr := os.MkdirTemp("", "archive-local-pool-*")
-	if derr != nil {
-		t.Fatal(derr)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := testutil.MkdirTemp(t, "archive-local-pool-")
 	h, _, mgr := setupLocalVolumeArchive(t, dir)
 
 	pool := h.volSet.Pool("default")

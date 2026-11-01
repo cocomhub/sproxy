@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -970,11 +971,7 @@ func TestAuthMiddleware(t *testing.T) {
 // ---- ChecksumStore 并发安全 ----
 
 func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "csstore-test-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := testutil.MkdirTemp(t, "csstore-test-")
 
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 
@@ -1008,11 +1005,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 // ---- ChecksumStore 原子写：确保 .tmp 不残留 ----
 
 func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "csstore-atomic-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := testutil.MkdirTemp(t, "csstore-atomic-")
 
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	cs.Set("k", "v")

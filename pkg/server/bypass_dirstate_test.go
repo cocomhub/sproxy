@@ -15,6 +15,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestIndexMove_MigratesChecksumAndEventDrivesIndex 钉住 V4 阶段二口径：
@@ -24,11 +25,7 @@ import (
 // 变异：① 去掉 IndexMove 的台账写入 ⇒ checksum 断言红；② 去掉事件 ⇒ 条目缺失/卷归属陈旧 ⇒ 红。
 func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
 	t.Parallel()
-	dir, derr := os.MkdirTemp("", "idxmove-*")
-	if derr != nil {
-		t.Fatal(derr)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := testutil.MkdirTemp(t, "idxmove-")
 	h := newAssemblyTestHandlers(t, dir)
 	svc := h.fileService()
 	if svc == nil {

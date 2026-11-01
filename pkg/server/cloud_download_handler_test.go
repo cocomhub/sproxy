@@ -31,6 +31,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
@@ -1169,11 +1170,7 @@ func TestCloudArchiveGroupToVolume_UnifiedTransfer(t *testing.T) {
 	t.Parallel()
 	// 用独立临时目录（非 t.TempDir——newAssemblyTestHandlers 的 globalRoot 持有
 	// 目录句柄不关，Windows 下 TempDir 清理失败）。
-	dir, err := os.MkdirTemp("", "unified-transfer-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := testutil.MkdirTemp(t, "unified-transfer-test-")
 	h := newAssemblyTestHandlers(t, dir)
 	// 装配 fake 外部卷（memFS 作目标）。
 	fs := &serverMemFS{files: map[string][]byte{}}
@@ -1245,11 +1242,7 @@ func TestCloudArchiveGroupToVolume_UnifiedTransfer(t *testing.T) {
 // 可信卷）、又不在读路径键空间（／download 与列表均不可命中）。
 func TestCloudArchiveGroupToVolume_TrustedVolumeWiring(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("", "unified-transfer-trusted-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := testutil.MkdirTemp(t, "unified-transfer-trusted-")
 	h := newAssemblyTestHandlers(t, dir)
 	fs := &serverMemFS{files: map[string][]byte{}}
 	h.volSet = newFakeVolSetForTransfer("vault", fs)
@@ -1434,11 +1427,7 @@ func writeRootFile(t *testing.T, root *storage.Root, rel, content string) {
 // 删除（主文件 + sidecar 一并删净），非 URL 走既有 archive 桶删除。
 func TestDeleteGroupArchive_ExternalURL(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("", "del-group-archive-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := testutil.MkdirTemp(t, "del-group-archive-")
 	h := newAssemblyTestHandlers(t, dir)
 	fs := &serverMemFS{files: map[string][]byte{
 		"alice/user/archive/x.tar.gz":      []byte("data"),

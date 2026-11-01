@@ -24,6 +24,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
@@ -1125,10 +1126,12 @@ type reattachWrapper struct{}
 func (reattachWrapper) Name() string { return reattachWrapType }
 
 func (reattachWrapper) Build(ctx context.Context, v volume.Volume, src syncpkg.FS, _ map[string]any) (registry.ExternalBackend, error) {
-	tmp, terr := os.MkdirTemp("", "reattach-tmp")
+	tmp, terr := os.MkdirTemp("", "reattach-tmp-*")
 	if terr != nil {
 		return nil, terr
 	}
+	// 显式 TempDir 由调用方所有（secretdata 不清理）⇒ 登记给 TestMain 统一清理。
+	testutil.TrackTempDir(tmp)
 	return secretdata.NewBackend(ctx, v, src, secretdata.Options{
 		Secret: []byte("reattach-fixed-key-material-01"), MetaPadBytes: 4096, TempDir: tmp,
 	})
