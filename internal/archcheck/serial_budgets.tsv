@@ -102,7 +102,7 @@ pkg/server/delete_owner_test.go	3
 pkg/server/dirs_owner_test.go	2
 pkg/server/download_owner_test.go	1
 pkg/server/feature_bucket_volume_test.go	4
-pkg/server/federation_forward_test.go	17
+pkg/server/federation/forward_test.go	2
 pkg/server/files_meta_tmp_test.go	1
 pkg/server/gzip_flush_test.go	2
 pkg/server/handlers_localmux_test.go	1
@@ -125,6 +125,7 @@ pkg/server/quota_write_path_test.go	17
 pkg/server/ratelimit_test.go	1
 pkg/server/reconcile_scan_test.go	2
 pkg/server/register_handler_test.go	38
+pkg/server/relay_stream_forward_test.go	15
 pkg/server/relay_stream_largebody_test.go	2
 pkg/server/relay_stream_test.go	13
 pkg/server/remote_read_listener_shutdown_test.go	1

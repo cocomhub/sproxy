@@ -1,12 +1,16 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// 跨 hub 中继转发（hub 联邦 B）：本 hub 路由表未命中目标节点时，把 relay 拨号
-// 请求转发到「上报该节点的联邦对端 hub」，实现 A→hub1→hub2→B 链式中继。
+// Package federation 承载跨 hub 中继转发（hub 联邦数据面 B）：本 hub 路由表未命中
+// 目标节点时，把 relay 拨号请求转发到「上报该节点的联邦对端 hub」，实现
+// A→hub1→hub2→B 链式中继。
 //
 // 复用对端 /api/relay/stream（SproxySig 认证 + CONNECT 风格 + mux 拨号帧），
 // 不发明新协议；转发链每个环节都走既有认证（不能因跨 hub 跳过准入）。
-package server
+//
+// 装配面（HTTP 请求解析、故障转移、把结果写回客户端）留在 pkg/server 的
+// RelayStreamHandler：本包只负责「向一个对端转发一条拨号」与防环元数据。
+package federation
 
 import (
 	"bufio"
@@ -34,14 +38,15 @@ import (
 
 // 跨 hub 转发防环元数据头（hop-by-hop，转发时附加；SproxySig 只签名
 // method/path/query/body，头不参与签名——此处是转发链内部控制面）。
+// 导出供装配层读取入站请求头（relayHopFrom / relayPathFrom）。
 const (
-	relayForwardHopHeader  = "X-Relay-Hop"
-	relayForwardPathHeader = "X-Relay-Path"
+	RelayForwardHopHeader  = "X-Relay-Hop"
+	RelayForwardPathHeader = "X-Relay-Path"
 
-	// defaultRelayMaxHops 是跨 hub 转发链的最大跳数（防环硬上限）。
+	// DefaultRelayMaxHops 是跨 hub 转发链的最大跳数（防环硬上限）。
 	// 链式路径 A→hub1→hub2→B 是 1 跳转发；上限 4 允许 5 级 hub 链，同时任何
 	// 环路在 4 跳后被截断（不无限循环）。合理链式深度远小于此值。
-	defaultRelayMaxHops = 4
+	DefaultRelayMaxHops = 4
 
 	// relayForwardHandshakeTimeout 是跨 hub 转发 CONNECT 握手的读写超时。
 	// 必须大于对端 hub 的 relayStreamDialResultTimeout（12s）+ 处理余量，避免
@@ -50,14 +55,15 @@ const (
 	relayForwardHandshakeTimeout = 30 * time.Second
 )
 
-// forwardStatusError 携带应回给客户端的 HTTP 状态码（跨 hub 转发错误映射）。
-type forwardStatusError struct {
-	status  int
-	message string
+// StatusError 携带应回给客户端的 HTTP 状态码（跨 hub 转发错误映射）。
+// 装配层（RelayStreamHandler 的故障转移）按 Status 决定回给客户端的状态码。
+type StatusError struct {
+	Status  int
+	Message string
 }
 
-func (e *forwardStatusError) Error() string {
-	return fmt.Sprintf("跨 hub 转发失败: HTTP %d: %s", e.status, e.message)
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("跨 hub 转发失败: HTTP %d: %s", e.Status, e.Message)
 }
 
 // FederationForwarder 跨 hub 中继转发器：把 relay 拨号请求转发到联邦对端 hub。
@@ -78,7 +84,7 @@ type FederationForwarder struct {
 // fc 为 nil 时 PeerForNode 恒返回 false（转发不可用，等价未配置联邦）。
 func NewFederationForwarder(fc *hub.FederationClient, hubID string, maxHops int, logger *slog.Logger) *FederationForwarder {
 	if maxHops <= 0 {
-		maxHops = defaultRelayMaxHops
+		maxHops = DefaultRelayMaxHops
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -111,8 +117,8 @@ func (f *FederationForwarder) MaxHops() int {
 // Forward 把 relay 拨号请求转发到对端 hub，返回对端已升级的双向字节流。
 //
 // 防环（DoD 2，自洽不依赖对端配置）：
-//   - 跳数超限（incomingHop >= maxHops）→ *forwardStatusError{508}
-//   - 目标对端已在路径中（回源/环路）→ *forwardStatusError{508}
+//   - 跳数超限（incomingHop >= maxHops）→ *StatusError{508}
+//   - 目标对端已在路径中（回源/环路）→ *StatusError{508}
 //
 // 路径（X-Relay-Path）追加两层标识，供下游 hub 做同样的防环检查：
 //   - **下一跳 peer.ID（总是追加）**：与对端解析目标时的 peer.ID 同一命名空间，
@@ -120,13 +126,13 @@ func (f *FederationForwarder) MaxHops() int {
 //   - **本 hub 身份 hubID（配置了 node_id 时追加）**：对端把「请求来自哪个 hub」
 //     与本端解析结果比对，配置一致时在回源前一跳即拒绝（更严格）。
 //
-// 上游非 200 状态映射为 *forwardStatusError{状态码}；网络/握手错误映射 502。
+// 上游非 200 状态映射为 *StatusError{状态码}；网络/握手错误映射 502。
 func (f *FederationForwarder) Forward(ctx context.Context, peer hub.FederationPeer, target, addr string, incomingHop int, path []string) (net.Conn, error) {
 	if incomingHop >= f.maxHops {
-		return nil, &forwardStatusError{http.StatusLoopDetected, fmt.Sprintf("跨 hub 转发跳数超限（max=%d）", f.maxHops)}
+		return nil, &StatusError{http.StatusLoopDetected, fmt.Sprintf("跨 hub 转发跳数超限（max=%d）", f.maxHops)}
 	}
 	if slices.Contains(path, peer.ID) {
-		return nil, &forwardStatusError{http.StatusLoopDetected, "检测到转发环路：目标 hub 已在路径中，拒绝回源"}
+		return nil, &StatusError{http.StatusLoopDetected, "检测到转发环路：目标 hub 已在路径中，拒绝回源"}
 	}
 	nextHop := incomingHop + 1
 	nextPath := append([]string{}, path...)
@@ -135,8 +141,8 @@ func (f *FederationForwarder) Forward(ctx context.Context, peer hub.FederationPe
 	}
 	nextPath = append(nextPath, peer.ID) // 下一跳 peer ID（自洽防环）
 	headers := map[string]string{
-		relayForwardHopHeader:  strconv.Itoa(nextHop),
-		relayForwardPathHeader: strings.Join(nextPath, ","),
+		RelayForwardHopHeader:  strconv.Itoa(nextHop),
+		RelayForwardPathHeader: strings.Join(nextPath, ","),
 	}
 	d := f.dialerFor(peer)
 	conn, err := d.Dial(ctx, peer, target, addr, headers)
@@ -158,19 +164,19 @@ func (f *FederationForwarder) dialerFor(peer hub.FederationPeer) *relayForwardDi
 	return d
 }
 
-// mapUpstreamError 把对端 /api/relay/stream 的错误映射为 *forwardStatusError。
+// mapUpstreamError 把对端 /api/relay/stream 的错误映射为 *StatusError。
 // 非 200 状态透传（508 防环、404 目标不存在、502/504 上游失败等）；
 // 401/403 映射 502——对端拒绝的是本 hub 的 peer 凭据（网关侧配置错误），
 // 不应把「上游未授权」误报成「客户端未授权」。网络/握手错误回落 502。
 func (f *FederationForwarder) mapUpstreamError(peer hub.FederationPeer, err error) error {
-	if fse, ok := errors.AsType[*forwardStatusError](err); ok {
-		status := fse.status
+	if fse, ok := errors.AsType[*StatusError](err); ok {
+		status := fse.Status
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
 			status = http.StatusBadGateway
 		}
-		return &forwardStatusError{status, fmt.Sprintf("上游 hub %s: %s", peer.ID, fse.message)}
+		return &StatusError{status, fmt.Sprintf("上游 hub %s: %s", peer.ID, fse.Message)}
 	}
-	return &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接上游 hub %s 失败: %v", peer.ID, err)}
+	return &StatusError{http.StatusBadGateway, fmt.Sprintf("连接上游 hub %s 失败: %v", peer.ID, err)}
 }
 
 // Close 释放对端直连 dialer 引用。不中断在途转发——活跃转发连接由各自
@@ -186,26 +192,36 @@ func (f *FederationForwarder) Close() {
 
 // relayForwardDialer 向对端 hub 发起 /api/relay/stream CONNECT 拨号。
 // 与 pkg/client.RelayStream 同协议（raw HTTP CONNECT + SproxySig + 握手 deadline +
-// ctx watchdog + 缓冲读），但独立实现以保持 pkg/server 不依赖 pkg/client
+// ctx watchdog + 缓冲读），但独立实现以保持服务端不依赖 pkg/client
 // （避免 import cycle：pkg/client 的 e2e 测试反向依赖 pkg/server）。
 type relayForwardDialer struct {
 	logger *slog.Logger
 }
 
+// forwardRequestBody 是 /api/relay/stream 的转发请求体：只含普通 TCP 转发的三字段
+// （字段名与对端 handler 解析的 pkg/server.RelayStreamRequest 一致）。E2E/Path 两个
+// 可选字段不属于跨 hub 转发（转发只在 hub 之间建明文中继流，端到端加密由拨号方在内层
+// 自行建立），故这里不携带。
+type forwardRequestBody struct {
+	Target string `json:"target"`
+	Type   string `json:"type"`
+	Addr   string `json:"addr"`
+}
+
 // Dial 建立到对端 hub 的 /api/relay/stream 双向字节流。
 func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, target, addr string, headers map[string]string) (net.Conn, error) {
-	body, err := json.Marshal(RelayStreamRequest{Target: target, Type: "tcp", Addr: addr})
+	body, err := json.Marshal(forwardRequestBody{Target: target, Type: "tcp", Addr: addr})
 	if err != nil {
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("序列化转发请求失败: %v", err)}
+		return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("序列化转发请求失败: %v", err)}
 	}
 
 	u, err := url.Parse(peer.URL)
 	if err != nil {
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("解析对端 URL %q 失败: %v", peer.URL, err)}
+		return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("解析对端 URL %q 失败: %v", peer.URL, err)}
 	}
 	scheme, host := u.Scheme, u.Host
 	if host == "" {
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("对端 URL %q 无效", peer.URL)}
+		return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("对端 URL %q 无效", peer.URL)}
 	}
 
 	// 握手阶段有界（对齐 pkg/client I33）：deadline 取 min(ctx deadline, 30s)；
@@ -225,7 +241,7 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 	handshakeDeadline = relayForwardMinDeadline(ctx, time.Now().Add(relayForwardHandshakeTimeout))
 	if derr := raw.SetDeadline(handshakeDeadline); derr != nil {
 		_ = raw.Close()
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
+		return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
 	}
 
 	cleanup := relayForwardWatchdog(ctx, raw)
@@ -263,7 +279,7 @@ func relayForwardMinDeadline(ctx context.Context, base time.Time) time.Time {
 }
 
 // relayForwardDialTLS 拨号到对端并完成握手（TCP + TLS），握手 deadline 已设置。
-// 失败返回 *forwardStatusError（502 类）。TLS 握手在设 socket deadline 之后执行，
+// 失败返回 *StatusError（502 类）。TLS 握手在设 socket deadline 之后执行，
 // 防对端 TLS 黑洞无限阻塞（ctx-watchdog 兜底取消）。
 func relayForwardDialTLS(ctx context.Context, peer hub.FederationPeer, host, scheme string, handshakeDeadline time.Time) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 15 * time.Second}
@@ -271,35 +287,35 @@ func relayForwardDialTLS(ctx context.Context, peer hub.FederationPeer, host, sch
 	case "https", "wss":
 		raw, err := dialer.DialContext(ctx, "tcp", host) // TCP 连接（15s 内）
 		if err != nil {
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
+			return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
 		}
 		if derr := raw.SetDeadline(handshakeDeadline); derr != nil {
 			_ = raw.Close()
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
+			return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
 		}
 		tlsCfg, cerr := relayForwardTLSConfig(peer, host)
 		if cerr != nil {
 			_ = raw.Close()
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("构造对端 TLS 配置失败: %v", cerr)}
+			return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("构造对端 TLS 配置失败: %v", cerr)}
 		}
 		tlsConn := tls.Client(raw, tlsCfg)
 		if herr := tlsConn.HandshakeContext(ctx); herr != nil {
 			_ = raw.Close()
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("对端 %s TLS 握手失败: %v", host, herr)}
+			return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("对端 %s TLS 握手失败: %v", host, herr)}
 		}
 		return tlsConn, nil
 	case "http", "ws":
 		raw, err := dialer.DialContext(ctx, "tcp", host)
 		if err != nil {
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
+			return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
 		}
 		if derr := raw.SetDeadline(handshakeDeadline); derr != nil {
 			_ = raw.Close()
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
+			return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
 		}
 		return raw, nil
 	default:
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("不支持的对端 URL scheme %q", scheme)}
+		return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("不支持的对端 URL scheme %q", scheme)}
 	}
 }
 
@@ -347,30 +363,30 @@ func relayForwardWriteRequest(raw net.Conn, peer hub.FederationPeer, host string
 		// 与其它的控制字符（防对端解析歧义）。本端构造，防未来调用方传入脏值。
 		if !validHeaderField(k, v) {
 			_ = raw.Close()
-			return &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("非法转发头 %q（含控制字符）", k)}
+			return &StatusError{http.StatusBadGateway, fmt.Sprintf("非法转发头 %q（含控制字符）", k)}
 		}
 		fmt.Fprintf(&b, "%s: %s\r\n", k, v)
 	}
 	b.WriteString("Connection: close\r\n\r\n")
 	if _, werr := io.WriteString(raw, b.String()); werr != nil {
 		_ = raw.Close()
-		return &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("写请求头失败: %v", werr)}
+		return &StatusError{http.StatusBadGateway, fmt.Sprintf("写请求头失败: %v", werr)}
 	}
 	if _, werr := raw.Write(body); werr != nil {
 		_ = raw.Close()
-		return &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("写请求体失败: %v", werr)}
+		return &StatusError{http.StatusBadGateway, fmt.Sprintf("写请求体失败: %v", werr)}
 	}
 	return nil
 }
 
 // relayForwardReadResponse 读对端响应状态行与头（CONNECT 风格，不用 http.ReadResponse）。
-// 非 200 归一为 *forwardStatusError（状态码/非法状态行 → 502）；200 则读完头到空行。
+// 非 200 归一为 *StatusError（状态码/非法状态行 → 502）；200 则读完头到空行。
 // 返回第一个返回值为非 200 时的状态错误，第二个为读写错误；两者同时非 nil 不会发生。
-func relayForwardReadResponse(br *bufio.Reader, raw net.Conn) (*forwardStatusError, error) {
+func relayForwardReadResponse(br *bufio.Reader, raw net.Conn) (*StatusError, error) {
 	statusLine, rerr := br.ReadString('\n')
 	if rerr != nil {
 		_ = raw.Close()
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("读响应状态失败: %v", rerr)}
+		return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("读响应状态失败: %v", rerr)}
 	}
 	parts := strings.SplitN(strings.TrimSpace(statusLine), " ", 3)
 	status := 0
@@ -387,7 +403,7 @@ func relayForwardReadResponse(br *bufio.Reader, raw net.Conn) (*forwardStatusErr
 		line, hdrErr := br.ReadString('\n')
 		if hdrErr != nil {
 			_ = raw.Close()
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("读响应头失败: %v", hdrErr)}
+			return nil, &StatusError{http.StatusBadGateway, fmt.Sprintf("读响应头失败: %v", hdrErr)}
 		}
 		if line == "\r\n" || line == "\n" {
 			break
@@ -396,8 +412,8 @@ func relayForwardReadResponse(br *bufio.Reader, raw net.Conn) (*forwardStatusErr
 	return nil, nil
 }
 
-// relayForwardReadErrorStatus 解析非 200 状态行构造 *forwardStatusError（非法状态行归一 502）。
-func relayForwardReadErrorStatus(br *bufio.Reader, raw net.Conn, statusLine string, parts []string, status int) *forwardStatusError {
+// relayForwardReadErrorStatus 解析非 200 状态行构造 *StatusError（非法状态行归一 502）。
+func relayForwardReadErrorStatus(br *bufio.Reader, raw net.Conn, statusLine string, parts []string, status int) *StatusError {
 	rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
 	_ = raw.Close()
 	reason := strings.TrimSpace(string(rest))
@@ -408,7 +424,7 @@ func relayForwardReadErrorStatus(br *bufio.Reader, raw net.Conn, statusLine stri
 		status = http.StatusBadGateway
 		reason = fmt.Sprintf("对端返回非法状态行 %q", strings.TrimSpace(statusLine))
 	}
-	return &forwardStatusError{status, reason}
+	return &StatusError{status, reason}
 }
 
 // relayForwardConn 包装 bufio.Reader（握手时可能已预读数据面字节）为 net.Conn。
