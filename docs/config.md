@@ -26,7 +26,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `max_upload_bytes` | ByteSize | `1 GiB` | 普通（非分块）上传请求体上限（roadmap P0 恢复可配；`0`/缺省 = 1 GiB 默认，超过 413） |
 | `registration` | {disable: bool} | `disable: false` | 注册开关：`false`=允许注册（默认）；`true`=禁止注册（仅存量用户，无法新增） |
 | `registration.force_totp` | bool | `false` | `true` 时 register 走 TOTP 分支——注册不生成 SK 条目，用户须经 `sclient trust login` 录入 GA 密钥后登录拿短命 session SK（DEC-B） |
-| `registration.session_ttl` | duration | `24h` | TOTP 登录（`login_type=web`，缺省）签发的 session SK 有效期（D3 服务端控） |
+| `registration.session_ttl` | duration | `7d` | TOTP 登录（`login_type=web`，缺省）签发的 session SK 有效期（D3 服务端控） |
 | `registration.cli_ttl` | duration | `7d` | TOTP 登录（`login_type=cli`，`sclient trust login` 回填场景）的 session SK 有效期（D3） |
 | `registration.login_fail_limit` | int | `5` | per-AK TOTP 登录失败锁定阈值（U4）：连续失败达此数即进入锁定窗口 |
 | `registration.login_fail_window` | duration | `15m` | per-AK 登录失败锁定期（U4）：达阈值后锁定该时长，到期自动解锁 |
@@ -730,7 +730,7 @@ owner 的配额（scopeFor 返回 nil）→ 不装配 staging 配额（兼容旧
 registration:
   disable: false        # false=允许注册（默认）；true=禁止注册（仅存量用户）
   force_totp: false     # true=TOTP 注册分支（sclient trust login 登录回填）；默认简单 AK/SK
-  session_ttl: 24h      # TOTP 登录（web）session SK 有效期（默认 24h，D3）
+  session_ttl: 7d       # TOTP 登录（web）session SK 有效期（默认 7 天）
   cli_ttl: 168h         # TOTP 登录（cli 回填）session SK 有效期（默认 7d，D3）
   login_fail_limit: 5   # per-AK 登录失败锁定阈值（U4，默认 5）
   login_fail_window: 15m # per-AK 锁定窗口（U4，默认 15m）

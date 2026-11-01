@@ -56,7 +56,7 @@ func Default() *Config {
 		Registration: RegistrationConfig{
 			Disable:         false,
 			ForceTOTP:       false,
-			SessionTTL:      24 * time.Hour,     // TOTP 登录 web session 默认 24h（D3）
+			SessionTTL:      7 * 24 * time.Hour, // TOTP 登录 web session 默认 7 天（用户裁定 2026-11-01：此前 24h 每天过期，体验差）
 			CliTTL:          7 * 24 * time.Hour, // CLI 回填 session 默认 7d（D3）
 			LoginFailLimit:  5,                  // per-AK 失败锁定阈值（U4）
 			LoginFailWindow: 15 * time.Minute,   // 锁定窗口 15m（U4）
@@ -369,7 +369,7 @@ func (c *Config) applyDefaultCredentials() {
 	}
 	// Registration 子配置默认（Web/CLI session TTL、per-AK 失败锁定阈值/窗口）。
 	if c.Registration.SessionTTL <= 0 {
-		c.Registration.SessionTTL = 24 * time.Hour
+		c.Registration.SessionTTL = 7 * 24 * time.Hour
 	}
 	if c.Registration.CliTTL <= 0 {
 		c.Registration.CliTTL = 7 * 24 * time.Hour
