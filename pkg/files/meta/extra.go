@@ -49,50 +49,50 @@ type FieldSpec struct {
 // spec 是字段白名单（键 → 规格）。新增字段须在此登记（唯一事实源）。
 var spec = map[string]FieldSpec{
 	// A 档：内容元数据
-	"code":         {Type: "string", MaxLen: 32},
-	"maker":        {Type: "string", MaxLen: 64},
-	"maker_slug":   {Type: "string", MaxLen: 64},
-	"label":        {Type: "string", MaxLen: 64},
-	"series":       {Type: "string", MaxLen: 128},
-	"actress":      {Type: "[]string", MaxLen: 64},
-	"genres":       {Type: "[]string", MaxLen: 64},
-	"director":     {Type: "string", MaxLen: 64},
-	"release_date": {Type: "string", MaxLen: 16},
-	"title_ja":     {Type: "string", MaxLen: 400},
-	"title_cn":     {Type: "string", MaxLen: 400},
-	"page_url":     {Type: "string", MaxLen: 512},
-	"site":         {Type: "string", MaxLen: 32}, // 站点名（如视频站/网盘站），自由字符串
+	"code":         {Type: "string", MaxLen: 1024},
+	"maker":        {Type: "string", MaxLen: 1024},
+	"maker_slug":   {Type: "string", MaxLen: 1024},
+	"label":        {Type: "string", MaxLen: 1024},
+	"series":       {Type: "string", MaxLen: 1024},
+	"actress":      {Type: "[]string", MaxLen: 1024},
+	"genres":       {Type: "[]string", MaxLen: 1024},
+	"director":     {Type: "string", MaxLen: 1024},
+	"release_date": {Type: "string", MaxLen: 1024},
+	"title_ja":     {Type: "string", MaxLen: 1024},
+	"title_cn":     {Type: "string", MaxLen: 1024},
+	"page_url":     {Type: "string", MaxLen: 1024},
+	"site":         {Type: "string", MaxLen: 1024}, // 站点名（如视频站/网盘站），自由字符串
 	// B 档：溯源
-	"origin_name": {Type: "string", MaxLen: 512},
+	"origin_name": {Type: "string", MaxLen: 1024},
 	// transfer = 云端下载转存产物（服务端自动写入；此前未登记 ⇒ 写入值落在枚举外，
 	// 一旦该路径改为经 ValidateExtra 校验会整批拒写）。用户裁定 2026-10-28。
 	// manual_upload = 人工下载后上传的归档（内容与分享一致、由人工搬运到这里；与
 	// transfer 区分「服务端自动转存」与「人工上传」，便于审计/来源统计）。2026-10-28。
-	"source":          {Type: "string", MaxLen: 32, Allowed: []string{"cloud_share", "http_direct", "hls", "local_upload", "manual_upload", "transfer"}},
+	"source":          {Type: "string", MaxLen: 1024, Allowed: []string{"cloud_share", "http_direct", "hls", "local_upload", "manual_upload", "transfer"}},
 	"share_url":       {Type: "string", MaxLen: 1024}, // 分享链接（网盘/中转等，不绑定厂商）
-	"share_id":        {Type: "string", MaxLen: 128},
-	"share_file_name": {Type: "string", MaxLen: 512}, // 分享内目标文件名
-	"share_file_id":   {Type: "string", MaxLen: 128},
-	"share_hash":      {Type: "string", MaxLen: 128}, // 分享内文件哈希
-	"downloaded_at":   {Type: "string", MaxLen: 32},
+	"share_id":        {Type: "string", MaxLen: 1024},
+	"share_file_name": {Type: "string", MaxLen: 1024}, // 分享内目标文件名
+	"share_file_id":   {Type: "string", MaxLen: 1024},
+	"share_hash":      {Type: "string", MaxLen: 1024}, // 分享内文件哈希
+	"downloaded_at":   {Type: "string", MaxLen: 1024},
 	// 转存来源链接 + 转存完成时刻（服务端 buildTransferSourceMeta 写入；登记以支持客户端
 	// 按源 1:1 补录/迁移——否则跨租户搬迁/灾后重建会丢这两个字段）。2026-10-28。
 	"source_url":     {Type: "string", MaxLen: 1024},
-	"transferred_at": {Type: "string", MaxLen: 32},
+	"transferred_at": {Type: "string", MaxLen: 1024},
 	// 转存来源/完整性字段（服务端 transfer 路径写入；登记以支持客户端补录/修复与统一校验）。
-	"etag":                     {Type: "string", MaxLen: 256},
-	"checksum":                 {Type: "string", MaxLen: 128},
-	"checksum_algorithm":       {Type: "string", MaxLen: 32},
-	"authority_hash":           {Type: "string", MaxLen: 128},
-	"authority_hash_algorithm": {Type: "string", MaxLen: 32},
+	"etag":                     {Type: "string", MaxLen: 1024},
+	"checksum":                 {Type: "string", MaxLen: 1024},
+	"checksum_algorithm":       {Type: "string", MaxLen: 1024},
+	"authority_hash":           {Type: "string", MaxLen: 1024},
+	"authority_hash_algorithm": {Type: "string", MaxLen: 1024},
 	"mirror_urls":              {Type: "[]string", MaxLen: 1024},
-	"nfo_ref":                  {Type: "string", MaxLen: 128},
+	"nfo_ref":                  {Type: "string", MaxLen: 1024},
 	// C 档：可选
 	"duration_sec":   {Type: "int64"},
-	"resolution":     {Type: "string", MaxLen: 16, Allowed: []string{"480p", "720p", "1080p", "4k"}},
+	"resolution":     {Type: "string", MaxLen: 1024, Allowed: []string{"480p", "720p", "1080p", "4k"}},
 	"uncensored":     {Type: "bool"},
 	"has_cn_sub":     {Type: "bool"},
-	"subtitle_files": {Type: "[]string", MaxLen: 512},
+	"subtitle_files": {Type: "[]string", MaxLen: 1024},
 }
 
 // ValidateExtra 校验 Extra 对象：键白名单（+ `x_` 自定义扩展）+ 类型 + 长度 + 总大小。

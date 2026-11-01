@@ -50,7 +50,9 @@ func TestValidate_UnknownField(t *testing.T) {
 // TestValidate_TooLong 验证超长字符串被拒（单字段上限）。
 func TestValidate_TooLong(t *testing.T) {
 	t.Parallel()
-	err := ValidateExtra(map[string]any{"code": strings.Repeat("x", 100)})
+	// code 上限已按用户裁定统一提升到 1024（此前 32：日文名/长标识会被整条拒写），
+	// 超限用例相应取 1025。
+	err := ValidateExtra(map[string]any{"code": strings.Repeat("x", 1025)})
 	if err == nil || !strings.Contains(err.Error(), "超长") {
 		t.Fatalf("超长应拒绝, err=%v", err)
 	}

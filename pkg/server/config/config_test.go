@@ -563,8 +563,8 @@ func helperConfigRegistrationDefaults_defaults(t *testing.T, c *Config) {
 	if c.Registration.ForceTOTP {
 		t.Error("registration.force_totp 默认应为 false（简单 AK/SK 注册）")
 	}
-	if c.Registration.SessionTTL != 24*time.Hour {
-		t.Errorf("registration.session_ttl 默认应为 24h，实际 %v", c.Registration.SessionTTL)
+	if c.Registration.SessionTTL != 7*24*time.Hour {
+		t.Errorf("registration.session_ttl 默认应为 7 天，实际 %v", c.Registration.SessionTTL)
 	}
 	if c.Registration.CliTTL != 7*24*time.Hour {
 		t.Errorf("registration.cli_ttl 默认应为 7d(168h)，实际 %v", c.Registration.CliTTL)
@@ -584,8 +584,8 @@ func helperConfigRegistrationDefaults_afterSetDefaults(t *testing.T, zero *Confi
 	if zero.CredentialTTL != 30*24*time.Hour {
 		t.Errorf("SetDefaults 后 credential_ttl 应为 30d，实际 %v", zero.CredentialTTL)
 	}
-	if zero.Registration.SessionTTL != 24*time.Hour {
-		t.Errorf("SetDefaults 后 session_ttl 应为 24h，实际 %v", zero.Registration.SessionTTL)
+	if zero.Registration.SessionTTL != 7*24*time.Hour {
+		t.Errorf("SetDefaults 后 session_ttl 应为 7d，实际 %v", zero.Registration.SessionTTL)
 	}
 	if zero.Registration.CliTTL != 7*24*time.Hour {
 		t.Errorf("SetDefaults 后 cli_ttl 应为 7d(168h)，实际 %v", zero.Registration.CliTTL)
