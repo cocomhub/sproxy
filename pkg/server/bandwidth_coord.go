@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
+	"github.com/cocomhub/sproxy/pkg/server/filelock"
 )
 
 // byteFileCoordinator 是按 owner 字节预算的跨进程协调后端。
@@ -86,11 +87,11 @@ func (c *byteFileCoordinator) Consume(key string, n int64) bool {
 	}
 	defer f.Close()
 
-	if err := lockFile(f); err != nil {
+	if err := filelock.Lock(f); err != nil {
 		c.logger.Warn("bandwidth coord file lock failed, allowing", "key", key, "error", err)
 		return true
 	}
-	defer func() { _ = unlockFile(f) }()
+	defer func() { _ = filelock.Unlock(f) }()
 
 	// 读窗口起点与累计字节（文件两行：首行起点，次行累计）。
 	var windowStart int64

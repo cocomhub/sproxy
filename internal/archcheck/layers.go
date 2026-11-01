@@ -41,6 +41,9 @@ var Managed = map[string]bool{
 	// S14：跨 hub 中继转发（向联邦对端逐条拨号 + 防环）。装配面（HTTP 解析/故障转移）
 	// 留在 pkg/server，本包只依赖 hub/sproxysig ⇒ 零反向依赖。
 	"github.com/cocomhub/sproxy/pkg/server/federation": true,
+	// S15 前置：跨进程文件锁原语（Lock/Unlock，非选主语义）。只依赖标准库（os/syscall）⇒ 零 pkg/*
+	// 内部依赖；消费方是装配根的文件协调后端（限流计数 / 带宽字节预算）。
+	"github.com/cocomhub/sproxy/pkg/server/filelock": true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -170,6 +173,9 @@ var Levels = map[string]int{
 	// 跨 hub 中继转发（server 作用域）：依赖 tunnel/hub(L1)/sproxysig(0) ⇒ G2；
 	// 装配根（RelayStreamHandler）持有 *FederationForwarder，同层 import 合法。
 	"github.com/cocomhub/sproxy/pkg/server/federation": 2,
+	// 跨进程文件锁原语（server 作用域）：只导入标准库 ⇒ 零 pkg/* 内部依赖 ⇒ G0。
+	// 与 scheduler 同形：装配根（L2）与同子树切片（≥G0）均可导入。
+	"github.com/cocomhub/sproxy/pkg/server/filelock": 0,
 
 	// ---- 子包（L 取父域之上，由依赖实测确定）----
 	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
@@ -241,6 +247,7 @@ var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/server/alerts":     "github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/server/archive":    "github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/server/federation": "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/filelock":   "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。
