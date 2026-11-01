@@ -102,7 +102,7 @@ jobs:
         # 无条件上传：`Run benchmark` 被取消/失败时也要拿到 build/bench/（含 output.txt 部分日志），
         # 否则卡死现场只剩 runner 的 `Terminate orphan process`、无任何可诊断内容（2026-09-16 实证）。
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: benchmark-results
           path: build/bench/
