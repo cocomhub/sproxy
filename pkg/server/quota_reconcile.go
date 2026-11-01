@@ -9,6 +9,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/tempclean"
 	volcapacity "github.com/cocomhub/sproxy/pkg/volume/capacity"
 )
 
@@ -192,8 +193,13 @@ func (h *Handlers) truthPreferredVolumeUsage(name string, total int64) int64 {
 		return total
 	}
 	if diff := truth - total; diff != 0 && absInt64(diff) > volumeTruthTolerance(total) {
+		// 附带**临时残留**维度：残留不在卷根下、不进卷账本，是「账实不符」的常见来源
+		// （进程被强杀/装配失败留下的 staging、multipart 落盘文件）。清理由 pkg/tempclean
+		// 启动 + 周期执行；此处把该维度显式暴露给运维，避免只能靠人工 du 发现。
+		residual, items := tempclean.ResidualBytes()
 		h.logger.Warn("卷真值与磁盘扫描不一致，以真值为准（差异可能来自目录 meta/孤儿 blob/扫描口径）",
-			"volume", name, "truth", truth, "scanned", total, "diff", diff)
+			"volume", name, "truth", truth, "scanned", total, "diff", diff,
+			"temp_residual_bytes", residual, "temp_residual_items", items)
 	}
 	return truth
 }
