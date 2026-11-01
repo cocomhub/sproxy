@@ -31,21 +31,43 @@ type stubTasks struct {
 	listTotal    int
 	submitResult *cloud.CloudTask
 	submitErr    error
-	cancelErr    error
-	deleteErr    error
-	resumeErr    error
+	// submitHook 按 URL 决定逐条结果（批量「部分失败」场景）；非 nil 时优先于 submitErr。
+	submitHook func(url string) (*cloud.CloudTask, error)
+	cancelErr  error
+	deleteErr  error
+	resumeErr  error
 
 	// 入参取证
-	listOwner  string
-	listStatus string
-	snapshotID string
+	listOwner       string
+	listStatus      string
+	snapshotID      string
+	submittedURLs   []string
+	submittedParams []cloud.TaskParams
+	submittedOwners []string
+	submittedSizes  []int64
+	submittedCtx    []context.Context
+	cancelID        string
+	cancelOwner     string
+	deleteID        string
+	deleteOwner     string
+	resumeID        string
+	resumeForce     bool
+	resumeOwner     string
 }
 
 func (s *stubTasks) AllowPrivate() bool { return s.allowPrivate }
 
 func (s *stubTasks) MaxBatchURLs() int { return s.maxBatch }
 
-func (s *stubTasks) SubmitAndStart(_, _, _ string, _ int64, _ context.Context, _ string, _ cloud.TaskParams) (*cloud.CloudTask, error) {
+func (s *stubTasks) SubmitAndStart(_, url, _ string, totalSize int64, syncCtx context.Context, owner string, params cloud.TaskParams) (*cloud.CloudTask, error) {
+	s.submittedURLs = append(s.submittedURLs, url)
+	s.submittedParams = append(s.submittedParams, params)
+	s.submittedOwners = append(s.submittedOwners, owner)
+	s.submittedSizes = append(s.submittedSizes, totalSize)
+	s.submittedCtx = append(s.submittedCtx, syncCtx)
+	if s.submitHook != nil {
+		return s.submitHook(url)
+	}
 	if s.submitErr != nil {
 		return nil, s.submitErr
 	}
@@ -66,11 +88,20 @@ func (s *stubTasks) ListTasks(status string, _, _ int, owner string) ([]*cloud.C
 	return s.listResult, s.listTotal
 }
 
-func (s *stubTasks) CancelTask(_, _ string) error { return s.cancelErr }
+func (s *stubTasks) CancelTask(id, owner string) error {
+	s.cancelID, s.cancelOwner = id, owner
+	return s.cancelErr
+}
 
-func (s *stubTasks) DeleteTask(_, _ string) error { return s.deleteErr }
+func (s *stubTasks) DeleteTask(id, owner string) error {
+	s.deleteID, s.deleteOwner = id, owner
+	return s.deleteErr
+}
 
-func (s *stubTasks) ResumeTask(_ string, _ bool, _ string) error { return s.resumeErr }
+func (s *stubTasks) ResumeTask(id string, force bool, owner string) error {
+	s.resumeID, s.resumeForce, s.resumeOwner = id, force, owner
+	return s.resumeErr
+}
 
 // auditCall 是一次审计调用取证。
 type auditCall struct {
@@ -86,9 +117,22 @@ func (a *stubAudit) Record(_ context.Context, action, objectType, object, result
 	a.calls = append(a.calls, auditCall{action: action, objectType: objectType, object: object, result: result, detail: detail})
 }
 
-// stubVolumes 只实现 ACL 判定（本片唯一用到的卷能力）。
+// stubVolumes 是 Volumes 的可控替身：ACL 判定 + 转存目标 FS/卷/本地池/物理足迹。
+// 零值即「无任何卷装配、ACL 全拒、非本地卷」，与既有用例的最小形态一致。
 type stubVolumes struct {
 	allowed map[string]bool // key = owner + "\x00" + volume
+
+	// 转存目标（nil ⇒ TransferFS 报未装配）。
+	fs     syncpkg.FS
+	scheme string
+	vol    volume.Volume
+	local  bool
+	pool   *quota.Pool
+
+	// footprint 是卷自报物理足迹（key = volume+"\x00"+owner+"\x00"+userRel）。
+	footprint map[string]int64
+	// footprintHook 覆盖 footprint 查表（写前/写后需不同值时由用例按调用序号返回）。
+	footprintHook func() (int64, bool)
 }
 
 func (v stubVolumes) Allowed(owner, volume string) bool {
@@ -96,14 +140,23 @@ func (v stubVolumes) Allowed(owner, volume string) bool {
 }
 
 func (v stubVolumes) TransferFS(string) (syncpkg.FS, string, volume.Volume, bool) {
-	return nil, "", volume.Volume{}, false
+	if v.fs == nil {
+		return nil, "", volume.Volume{}, false
+	}
+	return v.fs, v.scheme, v.vol, true
 }
 
-func (v stubVolumes) IsLocal(string) bool { return false }
+func (v stubVolumes) IsLocal(string) bool { return v.local }
 
-func (v stubVolumes) LocalPool(string) *quota.Pool { return nil }
+func (v stubVolumes) LocalPool(string) *quota.Pool { return v.pool }
 
-func (v stubVolumes) PhysFootprint(_, _, _ string) (int64, bool) { return 0, false }
+func (v stubVolumes) PhysFootprint(volume, owner, userRel string) (int64, bool) {
+	if v.footprintHook != nil {
+		return v.footprintHook()
+	}
+	n, ok := v.footprint[volume+"\x00"+owner+"\x00"+userRel]
+	return n, ok
+}
 
 // decodeBody 解析响应 JSON（失败即 t.Fatalf，避免各用例重复样板）。
 func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, dst any) {

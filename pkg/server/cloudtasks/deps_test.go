@@ -5,6 +5,7 @@ package cloudtasks_test
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
@@ -75,5 +76,68 @@ func TestInterfaceMethodCounts(t *testing.T) {
 	}
 	if total != interfaceMethodTotal {
 		t.Errorf("7 个接口方法数合计 = %d，期望 %d", total, interfaceMethodTotal)
+	}
+}
+
+// TestInterfaceMethodSets 锁 7 个接口的**方法名集合**（不只是数量）：数量相同但方法漂移
+// （如把 ResumeTask 换成同签名的另一个名字）会让装配层适配器在不报错的情况下改变语义，
+// 只有名字级断言能挡住。比较前两侧排序（reflect 按字典序返回，与声明序无关）。
+func TestInterfaceMethodSets(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		iface reflect.Type
+		want  []string
+	}{
+		{
+			name: "Tasks", iface: reflect.TypeFor[cloudtasks.Tasks](),
+			want: []string{
+				"AllowPrivate", "MaxBatchURLs", "SubmitAndStart", "SnapshotTask", "SnapshotTasks",
+				"ListTasks", "CancelTask", "DeleteTask", "ResumeTask",
+			},
+		},
+		{
+			name: "Groups", iface: reflect.TypeFor[cloudtasks.Groups](),
+			want: []string{
+				"SubmitAndStartGroup", "GetGroup", "ListGroups", "CancelGroup",
+				"DeleteGroup", "ResumeGroup", "SetGroupArchiveFile", "UpdateGroupStatus",
+			},
+		},
+		{name: "Tenants", iface: reflect.TypeFor[cloudtasks.Tenants](), want: []string{"TenantFor"}},
+		{
+			name: "Volumes", iface: reflect.TypeFor[cloudtasks.Volumes](),
+			want: []string{"Allowed", "TransferFS", "IsLocal", "LocalPool", "PhysFootprint"},
+		},
+		{
+			name: "Quota", iface: reflect.TypeFor[cloudtasks.Quota](),
+			want: []string{
+				"BucketScope", "ScopeFor", "WaitTimeout",
+				"ReserveFallback", "ReleaseFallback", "TryReserveFallback",
+				"ReserveArchive", "SettleArchive", "ReleaseArchive",
+			},
+		},
+		{
+			name: "Targets", iface: reflect.TypeFor[cloudtasks.Targets](),
+			want: []string{
+				"StagingFS", "Lock", "RecordBypassChecksum", "RecordBypassWrite",
+				"SkipVerify", "MaxArchiveBytes", "ArchiveKey",
+			},
+		},
+		{name: "Audit", iface: reflect.TypeFor[cloudtasks.Audit](), want: []string{"Record"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for method := range c.iface.Methods() {
+				got = append(got, method.Name)
+			}
+			want := append([]string(nil), c.want...)
+			slices.Sort(got)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("%s 方法名集合 = %v，期望 %v", c.name, got, want)
+			}
+		})
 	}
 }

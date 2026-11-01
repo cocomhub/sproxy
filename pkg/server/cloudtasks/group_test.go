@@ -31,6 +31,9 @@ type stubGroups struct {
 	deleteErr    error
 	resumeErr    error
 
+	// getGroupHook 按调用序决定 GetGroup 结果（覆盖「刷新后二次 GetGroup 丢失」）。
+	getGroupHook func(id string) (*cloud.CloudTaskGroup, bool)
+
 	// 入参取证
 	submittedName   string
 	submittedURLs   []cloudfilename.Entry
@@ -54,6 +57,9 @@ func (s *stubGroups) SubmitAndStartGroup(name string, urls []cloudfilename.Entry
 }
 
 func (s *stubGroups) GetGroup(id, _ string) (*cloud.CloudTaskGroup, bool) {
+	if s.getGroupHook != nil {
+		return s.getGroupHook(id)
+	}
 	g, ok := s.groups[id]
 	return g, ok
 }

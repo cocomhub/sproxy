@@ -51,22 +51,59 @@ func readRootFile(t *testing.T, root *storage.Root, rel string) []byte {
 }
 
 // stubArchiveTargets 实现 Targets 中不涉及打包的部分（S4 后 tar 打包已在本包，不再经接口）。
-type stubArchiveTargets struct{}
+// 零值 = 不跳过校验、无总量上限、无归档密钥、取锁恒成功、staging 直通。
+type stubArchiveTargets struct {
+	lockFail        bool
+	skipVerify      bool
+	maxArchiveBytes int64
+	archiveKey      []byte
+	stagingFS       syncpkg.FS
 
-func (s *stubArchiveTargets) StagingFS(_ string, fs syncpkg.FS) syncpkg.FS { return fs }
-
-func (s *stubArchiveTargets) Lock(string, string) (func(), bool) { return func() {}, true }
-
-func (s *stubArchiveTargets) RecordBypassChecksum(string, string, string, string) {}
-
-func (s *stubArchiveTargets) RecordBypassWrite(string, string, int64, string, string, *storage.Root) {
+	checksumCalls []bypassChecksumCall
+	writeCalls    []bypassWriteCall
 }
 
-func (s *stubArchiveTargets) SkipVerify() bool { return true }
+// bypassChecksumCall / bypassWriteCall 记录派生状态登记入参（本地卷只补 checksum，
+// 外部卷走完整 Write 登记——分流依据必须可取证）。
+type bypassChecksumCall struct {
+	owner, rel, checksum, volume string
+}
 
-func (s *stubArchiveTargets) MaxArchiveBytes() int64 { return 0 }
+type bypassWriteCall struct {
+	owner, rel string
+	size       int64
+	checksum   string
+	volume     string
+	rootNil    bool
+}
 
-func (s *stubArchiveTargets) ArchiveKey() []byte { return nil }
+func (s *stubArchiveTargets) StagingFS(_ string, fs syncpkg.FS) syncpkg.FS {
+	if s.stagingFS != nil {
+		return s.stagingFS
+	}
+	return fs
+}
+
+func (s *stubArchiveTargets) Lock(string, string) (func(), bool) {
+	if s.lockFail {
+		return func() {}, false
+	}
+	return func() {}, true
+}
+
+func (s *stubArchiveTargets) RecordBypassChecksum(owner, rel, checksum, volume string) {
+	s.checksumCalls = append(s.checksumCalls, bypassChecksumCall{owner: owner, rel: rel, checksum: checksum, volume: volume})
+}
+
+func (s *stubArchiveTargets) RecordBypassWrite(owner, rel string, size int64, checksum, volume string, root *storage.Root) {
+	s.writeCalls = append(s.writeCalls, bypassWriteCall{owner: owner, rel: rel, size: size, checksum: checksum, volume: volume, rootNil: root == nil})
+}
+
+func (s *stubArchiveTargets) SkipVerify() bool { return s.skipVerify }
+
+func (s *stubArchiveTargets) MaxArchiveBytes() int64 { return s.maxArchiveBytes }
+
+func (s *stubArchiveTargets) ArchiveKey() []byte { return s.archiveKey }
 
 // stubArchiveQuota 记录归档配额四方法的调用顺序（预留 → 结算 → 登记）。
 type stubArchiveQuota struct {
@@ -77,14 +114,19 @@ type stubArchiveQuota struct {
 	reserveTotal  int64
 	settleActual  int64
 	settleStatus  int
+	settleMsg     string
 	released      bool
+
+	// bucketScope/scope 是 BucketScope/ScopeFor 的返回（nil = 未装配配额）。
+	bucketScope *quota.Scope
+	scope       *quota.Scope
 
 	calls []string
 }
 
-func (s *stubArchiveQuota) BucketScope(string, string) *quota.Scope { return nil }
+func (s *stubArchiveQuota) BucketScope(string, string) *quota.Scope { return s.bucketScope }
 
-func (s *stubArchiveQuota) ScopeFor(string, string) *quota.Scope { return nil }
+func (s *stubArchiveQuota) ScopeFor(string, string) *quota.Scope { return s.scope }
 
 func (s *stubArchiveQuota) WaitTimeout() time.Duration { return 0 }
 
@@ -105,7 +147,7 @@ func (s *stubArchiveQuota) ReserveArchive(_ context.Context, owner string, total
 
 func (s *stubArchiveQuota) SettleArchive(*storage.Root, string, *quota.Settlement, int64, *slog.Logger) (int64, int, string) {
 	s.calls = append(s.calls, "settle")
-	return s.settleActual, s.settleStatus, ""
+	return s.settleActual, s.settleStatus, s.settleMsg
 }
 
 func (s *stubArchiveQuota) ReleaseArchive(*quota.Settlement, int64) {
