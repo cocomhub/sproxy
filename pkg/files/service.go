@@ -158,7 +158,6 @@ package files
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"io/fs"
 	"net/http"
@@ -166,6 +165,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -743,20 +743,12 @@ const (
 	auditResultError   = "error"
 )
 
-// sendJSON 写出 JSON 响应：Content-Type、状态码与「序列化失败」兜底（500 +
-// {"error":"internal server error"} + Warn 日志）与 pkg/server.sendJSONResponse 一致，
-// 只是日志器改从接缝取当前生效实例。
+// sendJSON 写出 JSON 响应：委托 internal/httpjson（全仓唯一实现）。
+//
+// 告警日志仍用本服务实例的日志器（SendLogged），保持日志路由不变；此前本包持有一份
+// 与 pkg/server.sendJSONResponse 等价的副本，现已收敛。
 func (s *Service) sendJSON(w http.ResponseWriter, response any, statusCode int) {
-	w.Header().Set(headerContentType, "application/json")
-	buf, err := json.Marshal(response)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		s.rt.logger().Warn("Encode JSON response failed", "error", err)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
-		return
-	}
-	w.WriteHeader(statusCode)
-	_, _ = w.Write(buf)
+	httpjson.SendLogged(w, statusCode, response, s.rt.logger())
 }
 
 // 本文件末尾是**跨族共享纯函数**在本包内的等价实现（checksumReader / fileChecksumRoot /
