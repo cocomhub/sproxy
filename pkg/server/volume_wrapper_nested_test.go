@@ -36,11 +36,37 @@ type nestedSecretWrapper struct{}
 
 func (nestedSecretWrapper) Name() string { return nestedSecretType }
 
+// nestedTempDirs 记录本测试进程为 nested 封装创建的所有显式 TempDir。
+//
+// secretdata 对**显式配置的 TempDir 不清理（调用方所有）**，而 Build 没有 *testing.T，
+// 故由测试侧登记 + 在 cleanupNestedTempDirs 里统一清理（否则每次运行残留一个目录，
+// 实测 %TEMP% 累积 648 个 nested-secret-tmp*）。
+var nestedTempDirs struct {
+	mu   sync.Mutex
+	dirs []string
+}
+
+// cleanupAllNestedTempDirs 删除本测试进程创建的所有 nested 临时目录。
+// 由 pkg/server 的 TestMain 在全部测试结束后调用（不能在单个测试的 t.Cleanup 里做：
+// 其它并行测试可能仍在使用这些目录）。
+func cleanupAllNestedTempDirs() {
+	nestedTempDirs.mu.Lock()
+	dirs := nestedTempDirs.dirs
+	nestedTempDirs.dirs = nil
+	nestedTempDirs.mu.Unlock()
+	for _, d := range dirs {
+		_ = os.RemoveAll(d)
+	}
+}
+
 func (nestedSecretWrapper) Build(ctx context.Context, v volume.Volume, src syncpkg.FS, _ map[string]any) (registry.ExternalBackend, error) {
-	tmp, terr := os.MkdirTemp("", "nested-secret-tmp")
+	tmp, terr := os.MkdirTemp("", "nested-secret-tmp-*")
 	if terr != nil {
 		return nil, terr
 	}
+	nestedTempDirs.mu.Lock()
+	nestedTempDirs.dirs = append(nestedTempDirs.dirs, tmp)
+	nestedTempDirs.mu.Unlock()
 	return secretdata.NewBackend(ctx, v, src, secretdata.Options{
 		Secret: []byte("nested-delete-quota-key-01"), MetaPadBytes: 4096, TempDir: tmp,
 	})

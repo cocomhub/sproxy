@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // newTestCfgPtr 返回指向默认配置（uploadsDir=dir）的 atomic.Pointer[Config]，供 handler 测试写入 cfgPtr。
@@ -670,11 +671,7 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 // 供单任务/批量归档 target_volume 的统一转存测试直接调用 handler（不经 HTTP mux）。
 func setupCloudArchiveVolumeHandlers(t *testing.T) (*Handlers, *serverMemFS, *cloud.CloudDownloadManager) {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "archive-volume-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := testutil.MkdirTemp(t, "archive-volume-")
 	h := newAssemblyTestHandlers(t, dir)
 	fs := &serverMemFS{files: map[string][]byte{}}
 	h.volSet = newFakeVolSetForTransfer("vault", fs)
