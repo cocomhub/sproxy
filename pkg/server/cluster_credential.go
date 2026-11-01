@@ -25,18 +25,18 @@ import (
 type clusterCredentialSet struct {
 	// signKey 是签发方 SK（验签本节点签发的全部凭证；32B）。
 	signKey []byte
-	// creds 是凭证池：**按对端 xfer 指纹索引**（与 credentialFor 的查询键一致——
+	// creds 是凭证池：**按对端 xfer 指纹索引**（与 CredentialFor 的查询键一致——
 	// 评审 C1 修复：此前按 c.Node 写入导致查恒 miss，凭证授权恒死代码）。
 	creds map[string]clustercred.Credential // 对端指纹（凭证.Recipient）→ 凭证
 	log   *slog.Logger
 }
 
-// credentialFor 按对端指纹返回有效凭证（验签 + 时效 + scope + 卷范围）。
+// CredentialFor 按对端指纹返回有效凭证（验签 + 时效 + scope + 卷范围）。
 // 返回 (凭证, true) 表示该对端已被持有节点授权（替代静态 mesh_readers）。
 //
 // **volName 早拒（评审 C2 纵深）**：凭证限定的 Volume 与请求卷不符时直接返回
 // (zero, false)——授权分支的 Authorizes 还会再校验（volume/path_prefix 双保险）。
-func (s *clusterCredentialSet) credentialFor(volName, fingerprint string) (clustercred.Credential, bool) {
+func (s *clusterCredentialSet) CredentialFor(volName, fingerprint string) (clustercred.Credential, bool) {
 	if s == nil {
 		return clustercred.Credential{}, false
 	}
@@ -84,14 +84,14 @@ func newClusterCredentialSet(cfg *Config, log *slog.Logger) (*clusterCredentialS
 		}
 		// 验签（装配期 fail-fast 防伪造/篡改；**只验格式+签名**——评审 I1：此前 Verify
 		// 含时效检查，短效凭证过期即击穿服务启动（自 DoS）；时效/scope 是运行期下发
-		// 控制点，推迟到请求时 credentialFor 逐请求 Verify）。
+		// 控制点，推迟到请求时 CredentialFor 逐请求 Verify）。
 		if verr := c.VerifyStatic(sk); verr != nil {
 			return nil, verr
 		}
 		if c.Node == "" || c.Owner == "" || c.Recipient == "" {
 			return nil, errClusterCredentialMalformed
 		}
-		// 按 Recipient（对端 xfer 指纹）索引——与 credentialFor 查询键一致
+		// 按 Recipient（对端 xfer 指纹）索引——与 CredentialFor 查询键一致
 		// （评审 C1 修复：此前按 c.Node 索引，查恒 miss，凭证授权恒死代码）。
 		// **双侧 Trim（评审 I3 修复）**：写侧与查询侧（strings.TrimSpace(fingerprint)）
 		// 统一 Trim——此前写侧用原始 Recipient，配置带首尾空白即查询恒 miss（凭证恒

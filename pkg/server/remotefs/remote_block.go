@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 import (
 	"io"
@@ -20,7 +20,7 @@ func (wh *remoteWriteHandler) serveBlock(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	svc := wh.h.fileService()
+	svc := wh.d.Files()
 	switch op {
 	case "block_open":
 		size, _ := strconv.ParseInt(r.URL.Query().Get("size"), 10, 64)
@@ -30,7 +30,7 @@ func (wh *remoteWriteHandler) serveBlock(w http.ResponseWriter, r *http.Request,
 			writeRemoteFilesError(w, err)
 			return
 		}
-		sendJSONResponse(w, map[string]string{"block_id": id}, http.StatusOK)
+		writeJSONResponse(w, map[string]string{"block_id": id}, http.StatusOK)
 	case "block_write":
 		id := strings.TrimSpace(r.URL.Query().Get("id"))
 		offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
@@ -43,14 +43,14 @@ func (wh *remoteWriteHandler) serveBlock(w http.ResponseWriter, r *http.Request,
 			writeRemoteFilesError(w, err)
 			return
 		}
-		sendJSONResponse(w, map[string]string{"ok": "written"}, http.StatusOK)
+		writeJSONResponse(w, map[string]string{"ok": "written"}, http.StatusOK)
 	case "block_close":
 		id := strings.TrimSpace(r.URL.Query().Get("id"))
 		if err := svc.CloseBlockWrite(r.Context(), id); err != nil {
 			writeRemoteFilesError(w, err)
 			return
 		}
-		sendJSONResponse(w, map[string]string{"ok": "closed"}, http.StatusOK)
+		writeJSONResponse(w, map[string]string{"ok": "closed"}, http.StatusOK)
 	}
 }
 

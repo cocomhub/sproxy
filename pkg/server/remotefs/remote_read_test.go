@@ -1,14 +1,13 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,93 +15,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
-
-const (
-	testReaderNodeA = "nodeA"
-	testReaderOwner = "alice"
-	testReaderRel   = "docs/hello.txt"
-	testReaderBody  = "hello-remote-read\n"
-)
-
-// fakePeerFingerprint 是 peerFingerprintProvider 的测试实现（伪造已认证对端指纹）。
-type fakePeerFingerprint struct{ fp string }
-
-func (f fakePeerFingerprint) PeerFingerprint() string { return f.fp }
-
-// remoteReadTestConfigACL 构造「单卷 main + 给定 ACL」的已校验 cfg（不写入任何文件）。
-// 供需要自定义 ACL 的用例（如让请求方 owner 也能过 ACL，见 F1 用例）复用装配逻辑。
-func remoteReadTestConfigACL(t *testing.T, acl *VolumeACLConfig) *Config {
-	t.Helper()
-	cfg := Default()
-	cfg.StorageRoot = filepath.Join(t.TempDir(), "vol-main")
-	cfg.LogLevel = "error"
-	cfg.Audit.BufferSize = 100
-	cfg.Volumes = []VolumeConfig{{Name: "main", Root: cfg.StorageRoot, ACL: acl}}
-	cfg.SetDefaults()
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("fixture config 非法: %v", err)
-	}
-	return cfg
-}
-
-// writeRemoteUserFile 在卷根上写入 <owner>/user/<rel>（自动建中间目录）。
-func writeRemoteUserFile(t *testing.T, cfg *Config, owner, rel, body string) {
-	t.Helper()
-	abs := filepath.Join(cfg.StorageRoot, owner, "user", filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// remoteReadTestConfig 构造「单卷 + 一条 mesh_readers + 磁盘上 docs/hello.txt」的已校验 cfg。
-func remoteReadTestConfig(t *testing.T) *Config {
-	t.Helper()
-	cfg := remoteReadTestConfigACL(t, &VolumeACLConfig{
-		Mode:   VolumeACLAllow,
-		Owners: []string{testReaderOwner},
-		MeshReaders: []VolumeMeshReaderConfig{{
-			Node: testReaderNodeA, Fingerprint: testReaderFP, Owner: testReaderOwner,
-		}},
-	})
-	writeRemoteUserFile(t, cfg, testReaderOwner, testReaderRel, testReaderBody)
-	return cfg
-}
-
-// newRemoteReadHandlers 用给定 cfg 装配 *Handlers（审计 JSON 写入 auditBuf）。
-// T5 的 in-process 中测复用本函数（同包），避免重复装配逻辑。
-func newRemoteReadHandlers(t *testing.T, cfg *Config, auditBuf *bytes.Buffer) *Handlers {
-	t.Helper()
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(cfg)
-	opts := defaultNoAuthRegOpts() // 既有测试辅助（server_test_common_test.go:34）
-	opts.Mux = http.NewServeMux()
-	opts.CfgPtr = cfgPtr
-	opts.Version = "test"
-	opts.BuildAt = "test"
-	opts.Logger = testLogger()
-	opts.AuditLogger = slog.New(slog.NewJSONHandler(auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	h := RegisterRoutes(t.Context(), opts)
-	t.Cleanup(func() { _ = h.Close() }) // (*Handlers).Close 返回 error，t.Cleanup 需 func()
-	return h
-}
-
-// newRemoteReadFixture 返回 (只读面 handler, cfg, 审计缓冲)。
-func newRemoteReadFixture(t *testing.T, peerFP string) (http.Handler, *Config, *bytes.Buffer) {
-	t.Helper()
-	cfg := remoteReadTestConfig(t)
-	auditBuf := &bytes.Buffer{}
-	h := newRemoteReadHandlers(t, cfg, auditBuf)
-	return h.newRemoteReadHandler(fakePeerFingerprint{fp: peerFP}, nil), cfg, auditBuf
-}
 
 func doRemote(t *testing.T, h http.Handler, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -206,18 +124,15 @@ func TestRemoteRead_AuthorizationMatrix(t *testing.T) {
 // 审计仍记 result=error。RegisterRoutes 装配失败会 panic，故此处手工构造零值 Handlers
 // （该分支生产不可达，是防御性拒绝）。
 func TestRemoteRead_UnassembledVolSetIs500(t *testing.T) {
-	auditBuf := &bytes.Buffer{}
-	h := &Handlers{auditLogger: slog.New(slog.NewJSONHandler(auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))}
-	if h.volSet != nil {
-		t.Fatal("前提不成立：零值 Handlers 的 volSet 应为 nil")
-	}
-	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP}, nil)
+	// 卷集合未装配：Deps.Volumes 为 nil（装配失败会 panic，此为防御性拒绝）。
+	audit := newAuditRecorder()
+	rh := NewReadHandler(Deps{Audit: audit}, fakePeerFingerprint{fp: testReaderFP}, nil)
 	rec := doRemote(t, rh, http.MethodGet, "/remote/list?volume=main&path=/docs")
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("卷集合未装配应 500（服务端错误，非 404）, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(auditBuf.String(), `"result":"error"`) {
-		t.Fatalf("该路径审计应记 result=error: %s", auditBuf.String())
+	if !strings.Contains(audit.String(), `"result":"error"`) {
+		t.Fatalf("该路径审计应记 result=error: %s", audit.String())
 	}
 }
 
@@ -227,17 +142,17 @@ func TestRemoteRead_UnassembledVolSetIs500(t *testing.T) {
 //
 // 本用例先确立前提（MeshReaderFor 确实命中该非法绑定），再断言双重约束拦下它。
 func TestRemoteRead_MeshReaderForAloneIsInsufficient(t *testing.T) {
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(t.TempDir(), "vol-main")
 	cfg.LogLevel = "error"
 	cfg.Audit.BufferSize = 100
 	// mode=allow 白名单只列 alice；mesh_readers 却把 mallory 绑给同一指纹。
-	cfg.Volumes = []VolumeConfig{{
+	cfg.Volumes = []config.VolumeConfig{{
 		Name: "main", Root: cfg.StorageRoot,
-		ACL: &VolumeACLConfig{
-			Mode:   VolumeACLAllow,
+		ACL: &config.VolumeACLConfig{
+			Mode:   config.VolumeACLAllow,
 			Owners: []string{testReaderOwner},
-			MeshReaders: []VolumeMeshReaderConfig{{
+			MeshReaders: []config.VolumeMeshReaderConfig{{
 				Node: testReaderNodeA, Fingerprint: testReaderFP, Owner: "mallory",
 			}},
 		},
@@ -247,9 +162,8 @@ func TestRemoteRead_MeshReaderForAloneIsInsufficient(t *testing.T) {
 		t.Fatalf("fixture config 非法: %v", err)
 	}
 
-	auditBuf := &bytes.Buffer{}
-	h := newRemoteReadHandlers(t, cfg, auditBuf)
-	vol, ok := h.volSet.ByName("main")
+	f := newFixture(t, cfg)
+	vol, ok := f.set.ByName("main")
 	if !ok {
 		t.Fatal("卷 main 未装配")
 	}
@@ -264,7 +178,7 @@ func TestRemoteRead_MeshReaderForAloneIsInsufficient(t *testing.T) {
 		t.Fatal("AuthorizeMeshRead 不应放行 ACL 白名单外的 owner")
 	}
 
-	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP}, nil)
+	rh := NewReadHandler(f.deps, fakePeerFingerprint{fp: testReaderFP}, nil)
 	rec := doRemote(t, rh, http.MethodGet, "/remote/list?volume=main&path=/docs")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("ACL 外 owner 的绑定应 404（不泄命名空间）, got %d body=%s", rec.Code, rec.Body.String())
@@ -272,7 +186,7 @@ func TestRemoteRead_MeshReaderForAloneIsInsufficient(t *testing.T) {
 	// 状态码本身不足以钉住本约束（实测：把 AuthorizeMeshRead 短路掉，请求会被委派给
 	// 既有 listFiles，其自身的卷 ACL 检查同样产出 404）。故断言审计的**结果与原因**：
 	// 授权层拒绝落 "denied"，而委派后的不存在落 "error"。
-	lines := auditBuf.String()
+	lines := f.audit.String()
 	if !strings.Contains(lines, `"result":"denied"`) {
 		t.Fatalf("应由授权层拒绝（result=denied），而非委派后失败: %s", lines)
 	}
@@ -321,19 +235,18 @@ const testBobBody = "bob-secret"
 // 「读不到 bob-secret」在任何实现下都成立，断言恒真。故此处显式把 bob 列入白名单，
 // 使「owner 只能来自配置」成为**唯一**的阻止条件，并断言 404 + body 不含密文。
 func TestRemoteRead_OwnerFromConfigNotRequest(t *testing.T) {
-	cfg := remoteReadTestConfigACL(t, &VolumeACLConfig{
-		Mode:   VolumeACLAllow,
+	cfg := remoteReadTestConfigACL(t, &config.VolumeACLConfig{
+		Mode:   config.VolumeACLAllow,
 		Owners: []string{testReaderOwner, testBobOwner},
-		MeshReaders: []VolumeMeshReaderConfig{{
+		MeshReaders: []config.VolumeMeshReaderConfig{{
 			Node: testReaderNodeA, Fingerprint: testReaderFP, Owner: testReaderOwner,
 		}},
 	})
 	writeRemoteUserFile(t, cfg, testBobOwner, "secret.txt", testBobBody)
 
-	auditBuf := &bytes.Buffer{}
-	h := newRemoteReadHandlers(t, cfg, auditBuf)
+	f := newFixture(t, cfg)
 	// 前提自检：bob 确实能过本卷 ACL——「读不到」不可能被 ACL 兜底掩盖。
-	vol, ok := h.volSet.ByName("main")
+	vol, ok := f.set.ByName("main")
 	if !ok || !vol.Authorize(testBobOwner) {
 		t.Fatal("前提不成立：bob 应能过卷 main 的 ACL（否则本用例恒真无牙）")
 	}
@@ -342,7 +255,7 @@ func TestRemoteRead_OwnerFromConfigNotRequest(t *testing.T) {
 		t.Fatalf("前提不成立：bob 的文件应存在且为 %q, err=%v", testBobBody, err)
 	}
 
-	rh := h.newRemoteReadHandler(fakePeerFingerprint{fp: testReaderFP}, nil)
+	rh := NewReadHandler(f.deps, fakePeerFingerprint{fp: testReaderFP}, nil)
 	rec := doRemote(t, rh, http.MethodGet,
 		"/remote/download?volume=main&path=/secret.txt&owner="+testBobOwner+"&actor="+testBobOwner)
 	if rec.Code != http.StatusNotFound {

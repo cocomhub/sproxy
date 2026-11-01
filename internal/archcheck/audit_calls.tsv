@@ -23,8 +23,9 @@ pkg/server/download_handler.go	1
 pkg/server/files_service.go	1	
 pkg/server/notify_handlers.go	1	
 pkg/server/register_handler.go	30	
-pkg/server/remote_read.go	2	
-pkg/server/remote_write.go	2	
+pkg/server/remotefs/remote_read.go	2	# 跨节点只读面审计（T1 迁入 remotefs；经注入的 Audit → h.RecordAudit）
+pkg/server/remotefs/remote_write.go	2	# 跨节点写面审计（T1 迁入 remotefs；经注入的 Audit → h.RecordAudit）
+pkg/server/remotefs_wiring.go	1	# 跨节点面 Deps 适配（Audit.Record → h.RecordAudit，唯一映射点）
 pkg/server/routes_setup.go	1	
 pkg/server/secrets_api.go	5	
 pkg/server/share.go	2	

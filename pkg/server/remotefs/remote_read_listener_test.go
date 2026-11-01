@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 import (
 	"bytes"
@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -31,16 +32,11 @@ import (
 // remote_read_test.go 覆盖），故本文件额外钉住：握手产出的对端指纹确实流入授权判定、
 // 错 pin 时握手 fail-closed 且不返回任何数据。
 
-const (
-	testDualOwner = "alice"
-	testDualVol   = "main"
-)
-
 // startRemoteReadDualEnd 装配 B 侧真 listener 与 A 侧身份，返回 (cfg, A 身份, B 指纹, listener)。
 //
 // B 的身份（Ed25519）写入临时目录并配 Hub.XferIdentityFile；B 的静态密钥由该身份指纹
 // 派生（DeriveRemoteStaticKey），A 侧用同一 bFP 派生 ⇒ 两端一致。
-func startRemoteReadDualEnd(t *testing.T) (*Config, *tunnel.Identity, string, *RemoteReadListener) {
+func startRemoteReadDualEnd(t *testing.T) (*config.Config, *tunnel.Identity, string, *ReadListener) {
 	t.Helper()
 	bID, bErr := tunnel.GenerateIdentity()
 	if bErr != nil {
@@ -53,7 +49,7 @@ func startRemoteReadDualEnd(t *testing.T) (*Config, *tunnel.Identity, string, *R
 	dir := t.TempDir()
 	aFP, bFP := aID.Fingerprint(), bID.Fingerprint()
 
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "vol-main")
 	cfg.LogLevel = "error"
 	cfg.Audit.BufferSize = 100
@@ -61,10 +57,10 @@ func startRemoteReadDualEnd(t *testing.T) (*Config, *tunnel.Identity, string, *R
 	if err := tunnel.SaveIdentity(bID, cfg.Hub.XferIdentityFile); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Volumes = []VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot, ACL: &VolumeACLConfig{
-		Mode:   VolumeACLAllow,
+	cfg.Volumes = []config.VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot, ACL: &config.VolumeACLConfig{
+		Mode:   config.VolumeACLAllow,
 		Owners: []string{testDualOwner},
-		MeshReaders: []VolumeMeshReaderConfig{{
+		MeshReaders: []config.VolumeMeshReaderConfig{{
 			Node: testReaderNodeA, Fingerprint: aFP, Owner: testDualOwner,
 		}},
 	}}}
@@ -76,13 +72,12 @@ func startRemoteReadDualEnd(t *testing.T) (*Config, *tunnel.Identity, string, *R
 		t.Fatalf("cfg: %v", err)
 	}
 
-	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
 	// 可取消 ctx：teardown 时用它让 B 侧 Serve 的 accept 循环立即收敛（不必等 TCP
 	// 读错误重试退避），从而 ln.Close() 的 wg.Wait() 快速返回。
-	rctx, rcancel := context.WithCancel(t.Context()) // NOSONAR: S8188 — rcancel 由 teardown 显式调用（88 行）
-	ln, err := StartRemoteReadListener(rctx, cfg, h, testutil.DiscardLogger())
+	rctx, rcancel := context.WithCancel(t.Context()) // NOSONAR: S8188 — rcancel 由 teardown 显式调用
+	ln, err := StartReadListener(rctx, newFixture(t, cfg).deps)
 	if err != nil {
-		t.Fatalf("StartRemoteReadListener: %v", err)
+		t.Fatalf("StartReadListener: %v", err)
 	}
 	t.Cleanup(func() {
 		rcancel()
@@ -93,7 +88,7 @@ func startRemoteReadDualEnd(t *testing.T) (*Config, *tunnel.Identity, string, *R
 
 // dialRemoteRead 建 A 侧真链路：loopback TCP → xfer 桥 → mux(RoleDialer) → Tunnel。
 // pins 为 A 侧对本端所信任的对端指纹列表（双向 pin 的 A 侧一半）。
-func dialRemoteRead(t *testing.T, ln *RemoteReadListener, aID *tunnel.Identity, bFP string, pins []string) *tunnel.Tunnel {
+func dialRemoteRead(t *testing.T, ln *ReadListener, aID *tunnel.Identity, bFP string, pins []string) *tunnel.Tunnel {
 	t.Helper()
 	conn, err := net.Dial("tcp", ln.Addr())
 	if err != nil {
@@ -217,7 +212,7 @@ func TestRemoteRead_DualEnd_ListStatDownload(t *testing.T) {
 }
 
 // assertRemoteReadDownload 经隧道下载文件并断言与 B 磁盘原件及期望载荷 SHA-256 全等。
-func assertRemoteReadDownload(t *testing.T, tun *tunnel.Tunnel, cfg *Config, rel string, want []byte) {
+func assertRemoteReadDownload(t *testing.T, tun *tunnel.Tunnel, cfg *config.Config, rel string, want []byte) {
 	t.Helper()
 	subResp := tunDoRemoteRead(t, tun, http.MethodGet,
 		"/remote/download?volume="+testDualVol+"&path=/"+rel)
@@ -305,11 +300,11 @@ func TestRemoteRead_DualEnd_UnpinnedPeerRejectedAtHandshake(t *testing.T) {
 	}
 }
 
-// TestStartRemoteReadListener_DisabledIsNil 钉住零回归：未启用时不起监听、返回 (nil, nil)。
-func TestStartRemoteReadListener_DisabledIsNil(t *testing.T) {
-	cfg := Default()
+// TestStartReadListener_DisabledIsNil 钉住零回归：未启用时不起监听、返回 (nil, nil)。
+func TestStartReadListener_DisabledIsNil(t *testing.T) {
+	cfg := config.Default()
 	cfg.RemoteRead.Enabled = false
-	ln, err := StartRemoteReadListener(t.Context(), cfg, nil, nil)
+	ln, err := StartReadListener(t.Context(), Deps{Config: cfg})
 	if err != nil {
 		t.Fatalf("未启用不应报错: %v", err)
 	}
@@ -319,20 +314,20 @@ func TestStartRemoteReadListener_DisabledIsNil(t *testing.T) {
 	}
 }
 
-// TestStartRemoteReadListener_NoPinsRefused 钉住 listener 自身的第二道 fail-closed 门禁
+// TestStartReadListener_NoPinsRefused 钉住 listener 自身的第二道 fail-closed 门禁
 // （纵深防御，绕过 Validate 直接构造 cfg 也拦得住）：无任何 mesh_readers 指纹即拒绝启动。
 //
 // **不得删除本校验**：tunnel.DeriveRemoteStaticKey 由公开的 listener 身份指纹派生，
 // 且该值在 Tunnel 中兼作 dialer 侧握手失败时的回退加密密钥；B 侧「无 pin 不接受任何
 // 对端」是「静态密钥回退不可达」这一安全论证的必要条件。删掉它就会留下「无 pin 也能跑」
 // 的路径。
-func TestStartRemoteReadListener_NoPinsRefused(t *testing.T) {
+func TestStartReadListener_NoPinsRefused(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "vol-main")
 	cfg.LogLevel = "error"
 	cfg.Hub.XferIdentityFile = filepath.Join(dir, "b-identity.json")
-	cfg.Volumes = []VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot}}
+	cfg.Volumes = []config.VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot}}
 	cfg.RemoteRead.Enabled = true
 	cfg.RemoteRead.Listen = "127.0.0.1:0"
 	cfg.SetDefaults()
@@ -342,8 +337,7 @@ func TestStartRemoteReadListener_NoPinsRefused(t *testing.T) {
 		t.Fatal("前提不成立：Validate 应已拒绝无 mesh_readers 的配置")
 	}
 
-	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
-	ln, err := StartRemoteReadListener(t.Context(), cfg, h, testutil.DiscardLogger())
+	ln, err := StartReadListener(t.Context(), newFixture(t, cfg).deps)
 	if err == nil {
 		_ = ln.Close()
 		t.Fatal("无 mesh_readers 指纹时 listener 必须拒绝启动（fail-closed，不留无 pin 路径）")

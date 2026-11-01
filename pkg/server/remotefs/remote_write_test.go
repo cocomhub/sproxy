@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 // remote_write_test.go 是 B 侧**写面**（Y 二期 P3-b）的域级测试：路由白名单、授权矩阵、
 // 委派到 pkg/files 域方法的落盘效果、checksum 门禁、owner 不可由请求指定、审计留痕。
@@ -19,30 +19,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// remoteWriteTestConfig 构造「单卷 + 一条 scope 可配的 mesh_readers」已校验 cfg。
-// mode=allow 且 owners=[alice]：让 owner 本身过卷 ACL（第二重约束的第一半）。
-func remoteWriteTestConfig(t *testing.T, scope string) *Config {
-	t.Helper()
-	cfg := remoteReadTestConfigACL(t, &VolumeACLConfig{
-		Mode:   VolumeACLAllow,
-		Owners: []string{testReaderOwner},
-		MeshReaders: []VolumeMeshReaderConfig{{
-			Node: testReaderNodeA, Fingerprint: testReaderFP, Owner: testReaderOwner, Scope: scope,
-		}},
-	})
-	return cfg
-}
-
 // newRemoteWriteFixture 返回 (写面 handler, cfg, 审计缓冲)。scope 缺省 rw（写测试的常见前提）。
-func newRemoteWriteFixture(t *testing.T, peerFP, scope string) (http.Handler, *Config, *bytes.Buffer) {
+func newRemoteWriteFixture(t *testing.T, peerFP, scope string) (http.Handler, *config.Config, *auditRecorder) {
 	t.Helper()
 	cfg := remoteWriteTestConfig(t, scope)
-	auditBuf := &bytes.Buffer{}
-	h := newRemoteReadHandlers(t, cfg, auditBuf)
-	return h.newRemoteWriteHandler(fakePeerFingerprint{fp: peerFP}), cfg, auditBuf
+	f := newFixture(t, cfg)
+	return NewWriteHandler(f.deps, fakePeerFingerprint{fp: peerFP}), cfg, f.audit
 }
 
 // doRemoteWrite 发一个写请求（body 非 nil 时带上；checksum 非空时带 X-File-Checksum）。
@@ -64,7 +50,7 @@ func doRemoteWrite(t *testing.T, h http.Handler, method, target string, body []b
 }
 
 // diskUserFile 读 <volRoot>/<owner>/user/<rel> 的内容（不存在返回 ok=false）。
-func diskUserFile(t *testing.T, cfg *Config, owner, rel string) (string, bool) {
+func diskUserFile(t *testing.T, cfg *config.Config, owner, rel string) (string, bool) {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(cfg.StorageRoot, owner, "user", filepath.FromSlash(rel)))
 	if err != nil {

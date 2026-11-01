@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 // remote_write.go 是 B 侧跨节点**写面**（Y 二期 P3-b；规格 §5.7/5.8/5.9）。
 //
@@ -39,16 +39,16 @@ type remoteWriteResponse struct {
 
 // remoteWriteHandler 是跨节点写面的路由表与授权器（每连接一个：指纹是连接级属性）。
 type remoteWriteHandler struct {
-	h    *Handlers
-	peer peerFingerprintProvider
+	d    Deps
+	peer Peer
 }
 
 // newRemoteWriteHandler 构造写路由表——**独立白名单**：只有这 4 条 POST。
 //
 // 读路径（/remote/list|stat|download）与本地路径（/upload…）都不注册 ⇒ 访问它们得到 404
 // 而不是 405/403：写面不是「读面 + 黑名单」，而是另一张白名单，两者物理隔离。
-func (h *Handlers) newRemoteWriteHandler(peer peerFingerprintProvider) http.Handler {
-	wh := &remoteWriteHandler{h: h, peer: peer}
+func NewWriteHandler(d Deps, peer Peer) http.Handler {
+	wh := &remoteWriteHandler{d: d, peer: peer}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /remote/write", wh.handleWrite)
 	mux.HandleFunc("POST /remote/rename", wh.handleRename)
@@ -99,7 +99,7 @@ func (wh *remoteWriteHandler) serve(w http.ResponseWriter, r *http.Request, op s
 	}
 	sw := &remoteStatusWriter{ResponseWriter: w}
 	wh.delegate(sw, r, tgt, to, op)
-	wh.h.RecordAudit(r.Context(), AuditEvent{
+	wh.d.Audit.Record(r.Context(), Event{
 		Action: "mesh_write", Owner: tgt.owner, Mesh: tgt.node,
 		ObjectType: "file", Object: tgt.path,
 		Result: remoteAuditResult(sw.status),
@@ -149,11 +149,11 @@ func (wh *remoteWriteHandler) authorize(w http.ResponseWriter, r *http.Request, 
 	// reason 是**机器可读**原因码（W4，用于 `sproxy_remote_write_denied_total{reason}` 分派），
 	// node 是反查到的对端节点名（未反查到为空）——两者都不进响应体，只进日志/指标。
 	deny := func(status int, result, reason, node, detail string) (*remoteTarget, string, bool) {
-		wh.h.RecordAudit(r.Context(), AuditEvent{
+		wh.d.Audit.Record(r.Context(), Event{
 			Action: "mesh_write", ObjectType: "file", Object: relPath,
 			Result: result, Detail: "volume=" + volName + " path=" + relPath + " op=" + op + ": " + detail,
 		})
-		wh.h.RecordRemoteWriteDenied(reason, node)
+		wh.d.Audit.RecordWriteDenied(reason, node)
 		writeRemoteError(w, status, remoteErrorMessage(status))
 		return nil, "", false
 	}
@@ -168,10 +168,10 @@ func (wh *remoteWriteHandler) authorize(w http.ResponseWriter, r *http.Request, 
 	if volName == "" {
 		return deny(http.StatusNotFound, AuditResultDenied, reasonVolumeMissing, "", "缺少 volume 参数")
 	}
-	if wh.h.volSet == nil {
+	if wh.d.Volumes == nil {
 		return deny(http.StatusInternalServerError, AuditResultError, reasonNotAssembled, "", "卷集合未装配")
 	}
-	vol, ok := wh.h.volSet.ByName(volName)
+	vol, ok := wh.d.Volumes.ByName(volName)
 	if !ok {
 		return deny(http.StatusNotFound, AuditResultDenied, reasonVolumeUnknown, "", "卷不存在")
 	}
@@ -192,7 +192,7 @@ func (wh *remoteWriteHandler) authorize(w http.ResponseWriter, r *http.Request, 
 // `ExplicitVol` 恒为已授权卷：域侧的卷路由/ACL 复核与唯一性检查（AD-4）对远程写同样生效，
 // 使远程写与本地写在**同一份约束**下收敛。
 func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, tgt *remoteTarget, to, op string) {
-	svc := wh.h.fileService()
+	svc := wh.d.Files()
 	checksum := strings.TrimSpace(r.Header.Get(headerFileChecksum))
 
 	switch op {
@@ -212,7 +212,7 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 			writeRemoteFilesError(w, err)
 			return
 		}
-		sendJSONResponse(w, remoteWriteResponse{
+		writeJSONResponse(w, remoteWriteResponse{
 			Success: true, Message: res.Message, Checksum: res.Checksum,
 			Size: res.Size, Volume: res.VolumeName,
 		}, http.StatusOK)
@@ -229,7 +229,7 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 			writeRemoteFilesError(w, err)
 			return
 		}
-		sendJSONResponse(w, remoteWriteResponse{
+		writeJSONResponse(w, remoteWriteResponse{
 			Success: true, Message: res.Message, Checksum: res.Checksum, Volume: tgt.vol.Name,
 		}, http.StatusOK)
 
@@ -244,7 +244,7 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 			writeRemoteFilesError(w, err)
 			return
 		}
-		sendJSONResponse(w, remoteWriteResponse{
+		writeJSONResponse(w, remoteWriteResponse{
 			Success: true, Message: res.Message, Volume: tgt.vol.Name,
 		}, http.StatusOK)
 
@@ -254,7 +254,7 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 			writeRemoteFilesError(w, err)
 			return
 		}
-		sendJSONResponse(w, remoteWriteResponse{
+		writeJSONResponse(w, remoteWriteResponse{
 			Success: true, Message: "目录已创建: " + res.RemotePath, Volume: tgt.vol.Name,
 		}, http.StatusOK)
 

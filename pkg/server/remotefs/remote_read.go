@@ -1,12 +1,13 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,19 +15,20 @@ import (
 	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/ops"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
-// peerFingerprintProvider 抽象「已认证对端指纹」的来源。
+// Peer 抽象「已认证对端指纹」的来源。
 //
-// 生产接线（T5）已在 pkg/server/remote_read_listener.go 完成：只读 listener 对每条
+// 生产接线在 remote_read_listener.go / remote_write_listener.go 完成：listener 对每条
 // 连接建 mux + *tunnel.Tunnel（真握手，双向 pin），把该 Tunnel 注入本接口。
 // *tunnel.Tunnel.PeerFingerprint() 的契约（pkg/tunnel/tunnel_mux.go）即为本接口的
 // 语义：返回**握手后已认证**的对端指纹（签名校验过，可作授权输入）；**空串 = 未认证**
 // （未握手 / 握手失败 / 对端无身份），调用方必须先判空、不得据此授权——authorize 即
 // 按此实现。单元测试仍可用 fake（fakePeerFingerprint）注入任意指纹，无需起真隧道。
-type peerFingerprintProvider interface {
+type Peer interface {
 	PeerFingerprint() string
 }
 
@@ -38,11 +40,11 @@ type peerFingerprintProvider interface {
 // 授权：owner 恒由配置（mesh_readers 条目）决定，绝不接受请求方指定；卷名必须命中
 // 本节点已配置的卷，且该卷 mesh_readers 中存在指纹命中的条目。
 type remoteReadHandler struct {
-	h    *Handlers
-	peer peerFingerprintProvider
+	d    Deps
+	peer Peer
 	// creds 是集群出口凭证池（2026-10-05 用户裁定凭证下发）：持有节点签发、装配注入；
 	// authorize 在静态 mesh_readers 未命中时按对端指纹验签授权（时效/scope 下发端控制）。
-	creds *clusterCredentialSet
+	creds CredentialSource
 }
 
 // remoteTarget 是一次已授权远程读的目标上下文。
@@ -53,10 +55,10 @@ type remoteTarget struct {
 	path  string // owner user 桶内相对路径
 }
 
-// newRemoteReadHandler 构造只读路由表（每连接一个：指纹是连接级属性）。
+// NewReadHandler 构造只读路由表（每连接一个：指纹是连接级属性）。
 // creds 是集群出口凭证池（可 nil = 未装配凭证，仅静态 mesh_readers 授权，零回归）。
-func (h *Handlers) newRemoteReadHandler(peer peerFingerprintProvider, creds *clusterCredentialSet) http.Handler {
-	rh := &remoteReadHandler{h: h, peer: peer, creds: creds}
+func NewReadHandler(d Deps, peer Peer, creds CredentialSource) http.Handler {
+	rh := &remoteReadHandler{d: d, peer: peer, creds: creds}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /remote/list", rh.handleList)
 	mux.HandleFunc("HEAD /remote/stat", rh.handleStat)
@@ -78,7 +80,11 @@ func (rh *remoteReadHandler) handleStats(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	qs := ops.QuotaStatusOf(rh.h.quotaFor(tgt.owner))
+	var scope *quota.Scope
+	if rh.d.Quota != nil {
+		scope = rh.d.Quota(tgt.owner)
+	}
+	qs := ops.QuotaStatusOf(scope)
 	writeRemoteJSON(w, qs)
 }
 
@@ -107,7 +113,7 @@ func (rh *remoteReadHandler) serve(w http.ResponseWriter, r *http.Request, op st
 	}
 	sw := &remoteStatusWriter{ResponseWriter: w}
 	rh.delegate(sw, r, tgt, op)
-	rh.h.RecordAudit(r.Context(), AuditEvent{
+	rh.d.Audit.Record(r.Context(), Event{
 		Action: "mesh_read", Owner: tgt.owner, Mesh: tgt.node,
 		ObjectType: "file", Object: tgt.path,
 		Result: remoteAuditResult(sw.status),
@@ -135,7 +141,7 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 	// deny 记审计 + 写错误响应。status 区分「授权类拒绝」（404/401，一律不泄露卷与
 	// 文件存在性）与服务端自身错误（500）——后者若冒充 404 会误导排障。
 	deny := func(status int, result, detail string) (*remoteTarget, bool) {
-		rh.h.RecordAudit(r.Context(), AuditEvent{
+		rh.d.Audit.Record(r.Context(), Event{
 			Action: "mesh_read", ObjectType: "file", Object: relPath,
 			Result: result, Detail: "volume=" + volName + " path=" + relPath + ": " + detail,
 		})
@@ -166,12 +172,12 @@ func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (
 	if volName == "" {
 		return deny(http.StatusNotFound, AuditResultDenied, "缺少 volume 参数")
 	}
-	if rh.h.volSet == nil {
+	if rh.d.Volumes == nil {
 		// 服务端装配错误（RegisterRoutes 装配失败会 panic，正常不可达），非「对象不存在」：
 		// 回 500 而非 404。此处不存在任何卷，故回 500 不泄露对象存在性。
 		return deny(http.StatusInternalServerError, AuditResultError, "卷集合未装配")
 	}
-	vol, ok := rh.h.volSet.ByName(volName)
+	vol, ok := rh.d.Volumes.ByName(volName)
 	if !ok {
 		return deny(http.StatusNotFound, AuditResultDenied, "卷不存在")
 	}
@@ -232,7 +238,7 @@ func (rh *remoteReadHandler) credentialFor(volName, fingerprint string) (cluster
 	if rh.creds == nil {
 		return clustercred.Credential{}, false
 	}
-	return rh.creds.credentialFor(volName, fingerprint)
+	return rh.creds.CredentialFor(volName, fingerprint)
 }
 
 // delegate 在**已完成授权**的前提下执行读操作：**直调 pkg/files 的域操作**，自行写响应。
@@ -245,7 +251,7 @@ func (rh *remoteReadHandler) credentialFor(volName, fingerprint string) (cluster
 // 远程面的响应契约是**它自己的**（消费者是 pkg/remote 客户端）：list 复用 files.ListResponse
 // JSON；stat 用 X-File-* 头；download 走 http.ServeContent（Range/206 由它承担）。
 func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tgt *remoteTarget, op string) {
-	svc := rh.h.fileService()
+	svc := rh.d.Files()
 	switch op {
 	case "list":
 		rh.delegateList(w, r, svc, tgt)
@@ -271,12 +277,12 @@ func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, r *http.Request
 		writeRemoteFilesError(w, err)
 		return
 	}
-	sendJSONResponse(w, files.ListResponse(res), http.StatusOK)
+	writeJSONResponse(w, files.ListResponse(res), http.StatusOK)
 }
 
 // delegateStat 执行远端 stat：元信息用 X-File-* 头回传。
 func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
-	dp, err := rh.h.downloadPathForRemote(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
+	dp, err := rh.d.Meta.RemoteDownloadPath(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
@@ -299,7 +305,7 @@ func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, r *http.Request
 
 // delegateDownload 执行远端下载：走 http.ServeContent（Range/206 由它承担）。
 func (rh *remoteReadHandler) delegateDownload(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
-	dp, err := rh.h.downloadPathForRemote(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
+	dp, err := rh.d.Meta.RemoteDownloadPath(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
@@ -333,7 +339,7 @@ func (rh *remoteReadHandler) delegateDownload(w http.ResponseWriter, r *http.Req
 // 用户相对路径，而非 meta 键）。无 sidecar/不可用 → 404（出口侧据此降级为不校验，
 // 与既有外部卷口径一致）。
 func (rh *remoteReadHandler) delegateMeta(w http.ResponseWriter, r *http.Request, tgt *remoteTarget) {
-	raw, err := rh.h.readMetaForRemote(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
+	raw, err := rh.d.Meta.ReadRemoteMeta(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
 	if err != nil {
 		writeRemoteFilesError(w, err)
 		return
@@ -395,6 +401,21 @@ func remoteAuditResult(status int) string {
 func writeRemoteJSON(w http.ResponseWriter, v any) {
 	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeJSONResponse 写 JSON 响应并指定状态码（与装配层 sendJSONResponse 同行为：
+// 先 Marshal 再一次性 Write，避免半截响应）。
+func writeJSONResponse(w http.ResponseWriter, v any, status int) {
+	w.Header().Set(headerContentType, contentTypeJSON)
+	buf, err := json.Marshal(v)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		slog.Default().Warn("Encode JSON response failed", "error", err)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
+		return
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(buf)
 }
 
 func writeRemoteError(w http.ResponseWriter, code int, msg string) {

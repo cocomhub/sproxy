@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -116,8 +117,8 @@ func TestNextAcceptBackoff(t *testing.T) {
 // 不得让 accept 循环永久退出（否则 listener 仍绑定、backlog 继续完成握手，服务静默死亡）。
 func TestAcceptLoop_RetriesTransientAcceptError(t *testing.T) {
 	fl := newScriptedListener(&net.OpError{Op: "accept", Err: syscall.EMFILE})
-	l := &RemoteReadListener{
-		ln: fl, logger: testutil.DiscardLogger(), cfg: Default(), acceptDone: make(chan struct{}),
+	l := &ReadListener{
+		ln: fl, logger: testutil.DiscardLogger(), cfg: config.Default(), acceptDone: make(chan struct{}),
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -151,8 +152,8 @@ func TestAcceptLoop_RetriesTransientAcceptError(t *testing.T) {
 // 循环退出前必须关闭 listener——否则端口仍可连但无人服务（本次 CI flake 的根因形态）。
 func TestAcceptLoop_ClosesListenerOnFatalAcceptError(t *testing.T) {
 	fl := newScriptedListener(errors.New("fatal accept failure"))
-	l := &RemoteReadListener{
-		ln: fl, logger: testutil.DiscardLogger(), cfg: Default(), acceptDone: make(chan struct{}),
+	l := &ReadListener{
+		ln: fl, logger: testutil.DiscardLogger(), cfg: config.Default(), acceptDone: make(chan struct{}),
 	}
 
 	l.acceptLoop(t.Context(), nil, nil, nil) // 同步调用：致命错误应立即返回
@@ -170,8 +171,8 @@ func TestAcceptLoop_ClosesListenerOnFatalAcceptError(t *testing.T) {
 // TestRemoteWriteAcceptLoop_ClosesListenerOnFatalAcceptError 与只读面同构的写面同等约束。
 func TestRemoteWriteAcceptLoop_ClosesListenerOnFatalAcceptError(t *testing.T) {
 	fl := newScriptedListener(fmt.Errorf("fatal accept failure"))
-	l := &RemoteWriteListener{
-		ln: fl, logger: testutil.DiscardLogger(), cfg: Default(), acceptDone: make(chan struct{}),
+	l := &WriteListener{
+		ln: fl, logger: testutil.DiscardLogger(), cfg: config.Default(), acceptDone: make(chan struct{}),
 	}
 
 	l.acceptLoop(t.Context(), nil, nil, nil)

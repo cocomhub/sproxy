@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 import (
 	"context"
@@ -17,19 +17,19 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 )
 
-// RemoteReadListener 是 B 侧跨节点只读面的 loopback listener（Y 一期 AD-6）。
+// ReadListener 是 B 侧跨节点只读面的 loopback listener（Y 一期 AD-6）。
 //
 // 它把「本节点被授权读的 owner 命名空间」经一条**真握手、真加密、双向 pin** 的隧道
 // 暴露给被授权的对端节点（A 侧见 T6 的 pkg/remote）。只读强制由 remoteReadHandler
 // 的手写 GET/HEAD 白名单提供，本文件只负责传输与身份。
-type RemoteReadListener struct {
+type ReadListener struct {
 	ln     net.Listener
 	logger *slog.Logger
-	cfg    *Config
-	h      *Handlers
+	cfg    *config.Config
+	d      Deps
 	// creds 是集群出口凭证池（2026-10-05 用户裁定凭证下发；nil = 未装配，仅静态
 	// mesh_readers 授权，零回归）。
-	creds *clusterCredentialSet
+	creds CredentialSource
 
 	// acceptDone 在 acceptLoop 退出时关闭（确定性信号：accept 已停止）。
 	acceptDone chan struct{}
@@ -39,20 +39,20 @@ type RemoteReadListener struct {
 }
 
 // Addr 返回实际监听地址（listen 端口为 0 时供测试读取真实端口）。
-func (l *RemoteReadListener) Addr() string { return l.ln.Addr().String() }
+func (l *ReadListener) Addr() string { return l.ln.Addr().String() }
 
 // Close 停止接受新连接并等待已派生的连接 goroutine 收敛。
 //
 // 已建立连接的收敛依赖建立它的 ctx 取消（调用方传入的 ctx）：ctx 取消后隧道 Serve
 // 的 accept 循环立即返回，故 wg.Wait 不会等 TCP 读错误重试退避。
-func (l *RemoteReadListener) Close() error {
+func (l *ReadListener) Close() error {
 	var err error
 	l.closeOnce.Do(func() { err = l.ln.Close() })
 	l.wg.Wait()
 	return err
 }
 
-// StartRemoteReadListener 按 cfg.RemoteRead 起只读面监听；未启用时返回 (nil, nil)。
+// StartReadListener 按 cfg.RemoteRead 起只读面监听；未启用时返回 (nil, nil)。
 //
 // 装配要点：
 //   - 监听强制 loopback（Validate 已保证；此处再以实际 Addr 断言，纵深防御）；
@@ -69,10 +69,12 @@ func (l *RemoteReadListener) Close() error {
 //     每连接建 Tunnel 时也恒传 WithPeerFingerprints(pins)（未配 pin 就接受任意对端会
 //     让「静态密钥回退不可达」的安全论证失效）。**不得删除这两处**；
 //   - 对端 pin 列表 = 全部卷 mesh_readers 指纹去重（任一被授权节点均可连入）。
-func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log *slog.Logger) (*RemoteReadListener, error) {
+func StartReadListener(ctx context.Context, d Deps) (*ReadListener, error) {
+	cfg := d.Config
 	if cfg == nil || !cfg.RemoteRead.Enabled {
 		return nil, nil
 	}
+	log := d.Logger
 	if log == nil {
 		log = slog.Default()
 	}
@@ -84,7 +86,7 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 		_ = ln.Close()
 		return nil, fmt.Errorf("remote_read 拒绝启动：实际监听地址非 loopback (%s)", ln.Addr())
 	}
-	id, err := LoadXferIdentity(cfg)
+	id, err := d.Runtime.Identity()
 	if err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("remote_read 身份加载失败: %w", err)
@@ -97,19 +99,19 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 
 	// 集群出口凭证池（2026-10-05 用户裁定）：持有节点签发凭证，目标节点验签授权
 	// 出口节点（静态 mesh_readers 之外的白名单）。解析失败 → 装配 fail-closed。
-	creds, cerr := newClusterCredentialSet(cfg, log)
+	creds, cerr := d.Runtime.CredentialSource()
 	if cerr != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("remote_read 拒绝启动：集群出口凭证配置非法（fail-closed）: %w", cerr)
 	}
 
-	l := &RemoteReadListener{ln: ln, logger: log, cfg: cfg, h: h, creds: creds, acceptDone: make(chan struct{})}
+	l := &ReadListener{ln: ln, logger: log, cfg: cfg, d: d, creds: creds, acceptDone: make(chan struct{})}
 	staticKey := tunnel.DeriveRemoteStaticKey(id.Fingerprint())
 	log.Info("remote_read 只读面已启动",
 		"listen", ln.Addr().String(), "fingerprint", id.Fingerprint(), "pinned_readers", len(pins),
 		// M4：身份文件路径随启动日志输出——首次启用会在该路径落盘生成身份文件
 		// （LoadOrCreateIdentity 的启动副作用），此处显式暴露供运维核对。
-		"identity_file", XferIdentityPath(cfg))
+		"identity_file", d.Runtime.IdentityPath())
 
 	l.wg.Go(func() {
 		l.acceptLoop(ctx, id, staticKey, pins)
@@ -124,7 +126,7 @@ func StartRemoteReadListener(ctx context.Context, cfg *Config, h *Handlers, log 
 // handleSignalShutdown（cmd/sproxy/root.go），它先 cancel(ctx) 再 h.Close()（关卷根、清
 // volSet/globalRoot），中间**不经过** RunE 的 defer 链。若 accept 只在 defer 里停，
 // cancel 之后仍会收新连接，新请求将落在 volSet==nil 的卷根上（authorize 退化为 500）。
-func (l *RemoteReadListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
+func (l *ReadListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
 	defer close(l.acceptDone)
 	// ctx 取消 → 关闭 listener（解除 accept 阻塞）。acceptLoop 因其它原因退出时由
 	// defer 关闭 stop 通道回收本 goroutine，不泄漏。
@@ -164,7 +166,7 @@ func watchAcceptCtx(ctx context.Context, ln net.Listener, stop chan struct{}) {
 
 // handleAcceptError 处理 accept 错误：按「预期停机 / 瞬时可退避 / 致命」分类。
 // 返回 (backoff, stop)：stop=true 表示本次 accept 循环应退出（错误已处理）。
-func (l *RemoteReadListener) handleAcceptError(ctx context.Context, err error, backoff time.Duration) (time.Duration, bool) {
+func (l *ReadListener) handleAcceptError(ctx context.Context, err error, backoff time.Duration) (time.Duration, bool) {
 	if ctx.Err() != nil {
 		return backoff, true // 预期停机：ctx 已/将关闭 listener
 	}
@@ -184,17 +186,17 @@ func (l *RemoteReadListener) handleAcceptError(ctx context.Context, err error, b
 }
 
 // serveReadConn 为单条已接受连接建 mux + Tunnel（只读路由表）并 serve。
-func (l *RemoteReadListener) serveReadConn(ctx context.Context, c net.Conn, id *tunnel.Identity, staticKey []byte, pins []string) {
+func (l *ReadListener) serveReadConn(ctx context.Context, c net.Conn, id *tunnel.Identity, staticKey []byte, pins []string) {
 	defer l.wg.Done()
 	defer func() { _ = c.Close() }()
-	m := mux.NewWithOpts(builtin.FromNetConn(c), mux.RoleListener, MuxIdlePaddingOptions(l.cfg)...)
+	m := mux.NewWithOpts(builtin.FromNetConn(c), mux.RoleListener, l.d.Runtime.MuxOptions()...)
 	defer func() { _ = m.Close() }()
 	tun := tunnel.NewTunnel(m, staticKey,
 		tunnel.WithIdentity(id),
 		tunnel.WithPeerFingerprints(pins),
 		tunnel.WithHandshakeTimeout(l.cfg.RemoteRead.HandshakeTimeout),
 	)
-	handler := l.h.newRemoteReadHandler(tun, l.creds)
+	handler := NewReadHandler(l.d, tun, l.creds)
 	if sErr := tun.Serve(ctx, handler); sErr != nil {
 		if ctx.Err() == nil {
 			l.logger.Warn("remote_read 连接结束", "remote", c.RemoteAddr().String(), "error", sErr)
