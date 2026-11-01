@@ -155,7 +155,8 @@ func init() {
 - **流中继转发：** `POST /api/relay/stream` 升级为到目标叶子的双向字节流（RelayStreamHandler）
 - **跨 hub 联邦（多跳链式中继）：** 本 hub 路由表未命中目标节点时，把 relay 拨号请求
   转发到「上报该节点的联邦对端 hub」，实现 `A→hub1→hub2→B` 链式中继（见
-  `pkg/server/federation_forward.go`）。
+  `pkg/server/federation/forward.go`；HTTP 装配面与故障转移在
+  `pkg/server/relay_stream.go`）。
 
 #### 多路径自动选路（SmartDial，2026-09-19，`pkg/tunnel/mesh`）
 
@@ -626,7 +627,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -744,6 +745,17 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 - **删除 `pkg/server/user_visible_io.go`**：它只是 `pkg/rootfs` 的 6 个纯委托（收敛原则 #11 禁止薄封装），
   39 处调用点直接改为 `rootfs.*`。
 
+**S14：跨 hub 中继转发（`pkg/server/federation`）**
+
+- 迁入：`FederationForwarder`（`Forward`/`PeersForNode`/`MaxHops`/`Close`）、`NewFederationForwarder`、
+  与对端 hub 的 CONNECT 拨号实现（`relayForwardDialer`，含握手 deadline/ctx watchdog/TLS 配置）、
+  防环元数据（`RelayForwardHopHeader`/`RelayForwardPathHeader`/`DefaultRelayMaxHops`）、
+  错误映射类型 `StatusError`（`Status`/`Message`）。
+- **装配面留在 `pkg/server`**：`RelayStreamHandler`（HTTP 解析、mesh 隔离、故障转移、
+  `forwardWithFailover`、把头写回客户端）与 `federation_services.go` 的服务发现端点。
+- 切片自包依赖：只 import `pkg/tunnel/hub` 与 `pkg/sproxysig`（L2），`h.*` 引用 0 个；
+  转发请求体在本包内以三字段结构体序列化（不反向依赖装配根，R6）。
+
 **P1：装配层策略对象（2026-10-31）**
 
 - `volume.Router`（#960 内核 + #962 接线）：卷路由与 ACL 单一实现，删除 `locateOwnerFileLegacy`/
@@ -756,7 +768,7 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 
 ### 剩余三块为何不再按切片下沉（2026-10-30 实测）
 
-`cloud`（2.2k）、`volume`（6.5k）、`files`（3.9k）与已下沉的 13 片**形态不同**，实测判据：
+`cloud`（2.2k）、`volume`（6.5k）、`files`（3.9k）与已下沉的 14 片**形态不同**，实测判据：
 
 | 维度 | 已下沉叶子包 | cloud / volume / files |
 |---|---|---|
@@ -766,8 +778,8 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 
 结论：这三块**就是装配核心本身**（HTTP 编排 + 跨域结算）。真正要降低其维护成本，前置是先把
 「用户可见写策略（`pkg/files`）」「卷容量/配额记账（`pkg/volume/capacity`）」的边界定清，再谈搬运；
-在那之前按切片外移只会新增一层 `Deps` 翻译层，与收敛原则相悖。**已完成的 13 片（装配包
-42,568 → 32,849 行，−22.8%）到此为自然边界。**
+在那之前按切片外移只会新增一层 `Deps` 翻译层，与收敛原则相悖。**已完成的 14 片（装配包
+42,568 → 30,776 行，−27.7%）到此为自然边界。**
 
 ### 新增 Server 切片的步骤
 

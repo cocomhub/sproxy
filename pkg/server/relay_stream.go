@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/server/federation"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
@@ -66,7 +67,7 @@ type RelayStreamRequest struct {
 //
 // 跨 hub 联邦（B）：目标节点在本 hub 路由表未命中时，若配置了联邦转发器
 // （SetFederation），把请求转发到上报该节点的对端 hub（A→hub1→hub2→B 链式中继）。
-// 转发链有防环机制（跳数上限 + 路径回源拒绝，见 FederationForwarder.Forward）。
+// 转发链有防环机制（跳数上限 + 路径回源拒绝，见 federation.FederationForwarder.Forward）。
 type RelayStreamHandler struct {
 	routeTable *hub.MeshRouteTable
 	logger     *slog.Logger
@@ -75,7 +76,7 @@ type RelayStreamHandler struct {
 	idleTimeout time.Duration
 	// forwarder 是跨 hub 中继转发器（nil = 不启用联邦转发，目标未本地命中即 404）。
 	// 由 SetFederation 装配（Handlers.SetFederationClient 注入联邦客户端时联动）。
-	forwarder *FederationForwarder
+	forwarder *federation.FederationForwarder
 }
 
 // NewRelayStreamHandler 创建流中继处理器。
@@ -98,7 +99,7 @@ func (h *RelayStreamHandler) SetFederation(fc *hub.FederationClient, hubID strin
 		h.forwarder = nil
 		return
 	}
-	h.forwarder = NewFederationForwarder(fc, hubID, defaultRelayMaxHops, h.logger)
+	h.forwarder = federation.NewFederationForwarder(fc, hubID, federation.DefaultRelayMaxHops, h.logger)
 }
 
 // validateRelayAddr 对中继目标地址做语法级校验（I26）：必须是 host:port 格式，
@@ -402,13 +403,13 @@ func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Reque
 	upstream, firstLoopFSE, lastFSE, lastPeerID, lastErr := h.forwardWithFailover(r.Context(), peers, req, hop, path)
 	if upstream == nil {
 		if lastFSE != nil {
-			h.logger.Warn("跨 hub 中继转发失败", "target", req.Target, "peer", lastPeerID, "status", lastFSE.status, "message", lastFSE.message)
-			http.Error(w, lastFSE.message, lastFSE.status)
+			h.logger.Warn("跨 hub 中继转发失败", "target", req.Target, "peer", lastPeerID, "status", lastFSE.Status, "message", lastFSE.Message)
+			http.Error(w, lastFSE.Message, lastFSE.Status)
 			return
 		}
 		if firstLoopFSE != nil {
-			h.logger.Warn("跨 hub 中继转发全部回源（防环）", "target", req.Target, "status", firstLoopFSE.status, "message", firstLoopFSE.message)
-			http.Error(w, firstLoopFSE.message, firstLoopFSE.status)
+			h.logger.Warn("跨 hub 中继转发全部回源（防环）", "target", req.Target, "status", firstLoopFSE.Status, "message", firstLoopFSE.Message)
+			http.Error(w, firstLoopFSE.Message, firstLoopFSE.Status)
 			return
 		}
 		h.logger.Error("跨 hub 中继转发内部错误", "target", req.Target, "peer", lastPeerID, "error", lastErr)
@@ -441,7 +442,7 @@ func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Reque
 // 对端上独立执行（Forward 内部对每个 peer 校验 hop/path）——508 也继续尝试剩余对端：
 // 请求经对端 X 来（路径含 X），X 命中防环 508 不代表其它上报同节点的对端 Y 也会回源；
 // 每个 Forward 独立防环、尝试次数 ≤ peer 数、每次握手 30s 有界，不削弱防环。
-func (h *RelayStreamHandler) forwardWithFailover(ctx context.Context, peers []hub.FederationPeer, req RelayStreamRequest, hop int, path []string) (upstream net.Conn, firstLoopFSE, lastFSE *forwardStatusError, lastPeerID string, lastErr error) {
+func (h *RelayStreamHandler) forwardWithFailover(ctx context.Context, peers []hub.FederationPeer, req RelayStreamRequest, hop int, path []string) (upstream net.Conn, firstLoopFSE, lastFSE *federation.StatusError, lastPeerID string, lastErr error) {
 	for _, peer := range peers {
 		conn, ferr := h.forwarder.Forward(ctx, peer, req.Target, req.Addr, hop, path)
 		if ferr == nil {
@@ -449,9 +450,9 @@ func (h *RelayStreamHandler) forwardWithFailover(ctx context.Context, peers []hu
 		}
 		lastErr = ferr
 		lastPeerID = peer.ID
-		if fse, ok := errors.AsType[*forwardStatusError](ferr); ok {
+		if fse, ok := errors.AsType[*federation.StatusError](ferr); ok {
 			lastFSE = fse
-			if fse.status == http.StatusLoopDetected && firstLoopFSE == nil {
+			if fse.Status == http.StatusLoopDetected && firstLoopFSE == nil {
 				firstLoopFSE = fse
 			}
 		}
@@ -464,7 +465,7 @@ func (h *RelayStreamHandler) forwardWithFailover(ctx context.Context, peers []hu
 // 缺省/非法值按 0 处理（fail-safe：非法值不会放大跳数——各 hub 基于收到的值
 // 递增并在转发前检查上限，链条长度仍受 maxHops 约束）。
 func relayHopFrom(r *http.Request) int {
-	v := strings.TrimSpace(r.Header.Get(relayForwardHopHeader))
+	v := strings.TrimSpace(r.Header.Get(federation.RelayForwardHopHeader))
 	if v == "" {
 		return 0
 	}
@@ -479,7 +480,7 @@ func relayHopFrom(r *http.Request) int {
 // 返回 (path, ok)：ok=false 表示路径头超限（拒绝，防头部放大——恶意客户端可发
 // MB 级路径头让本 hub 原样写回对端，触发对端 max_header_bytes 兜底）。
 func relayPathFrom(r *http.Request) ([]string, bool) {
-	v := strings.TrimSpace(r.Header.Get(relayForwardPathHeader))
+	v := strings.TrimSpace(r.Header.Get(federation.RelayForwardPathHeader))
 	if v == "" {
 		return nil, true
 	}
