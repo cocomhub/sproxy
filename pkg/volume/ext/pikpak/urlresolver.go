@@ -130,11 +130,16 @@ func (r *URLResolver) httpClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
 }
 
+// maxKeepshareRedirects 是 keepshare 镜像重定向链的最大跳数。原为 5；2026-11-01 实测上游
+// 链路变长（同一批分享全部报「超过 5 跳」），提到 10 并加**循环检测**（重复 URL 立即失败，
+// 避免无意义重试）。
+const maxKeepshareRedirects = 10
+
 // followKeepshareShareID 跟随 keepshare 镜像重定向链，返回最终 mypikpak 分享 id。
 // keepshare.org/<容器id>/magnet:... → 301 keepshare.cc → 302 mypikpak.com/s/<真实id>。
 // 终点非 mypikpak 分享（如 keepshare 控制台页/分享不存在）→ 错误（fail-closed，不猜 id）。
 //
-// 实现：**手动重定向循环**（最多 5 跳）——Go http.Client 的 CheckRedirect 在拒绝跨域时
+// 实现：**手动重定向循环**（最多 maxKeepshareRedirects 跳 + 循环检测）——Go http.Client 的 CheckRedirect 在拒绝跨域时
 // resp.Request.URL 是前一个请求 URL，无法拿到被拒绝的 mypikpak 目标；手动循环每跳检查
 // Location 并逐跳重建请求，直到目标主机是 mypikpak 或无可跳转。
 func followKeepshareShareID(ctx context.Context, client *http.Client, raw string) (string, error) {
@@ -142,7 +147,13 @@ func followKeepshareShareID(ctx context.Context, client *http.Client, raw string
 		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
 	}
 	cur := raw
-	for range 5 {
+	seen := map[string]struct{}{}
+	for i := range maxKeepshareRedirects {
+		// 循环重定向检测：命中已访问 URL ⇒ 立即 fail-closed（不消耗剩余跳数）。
+		if _, dup := seen[cur]; dup {
+			return "", fmt.Errorf("keepshare redirect 链出现循环（第 %d 跳）: %s", i+1, raw)
+		}
+		seen[cur] = struct{}{}
 		if id := shareIDFromFinalURL(cur); id != "" {
 			return id, nil
 		}
@@ -158,7 +169,7 @@ func followKeepshareShareID(ctx context.Context, client *http.Client, raw string
 		}
 		cur = next
 	}
-	return "", fmt.Errorf("keepshare redirect 链超过 5 跳: %s", raw)
+	return "", fmt.Errorf("keepshare redirect 链超过 %d 跳: %s", maxKeepshareRedirects, raw)
 }
 
 // followOneHop 单跳跟随：请求 cur，返回 (下一跳 URL, 终点, error)。
