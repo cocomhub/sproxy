@@ -1359,10 +1359,10 @@ func TestLogin_Success(t *testing.T) {
 	nonce := obtainNonce(t, h, loopRemoteV4)
 
 	lr := loginSuccessf(t, h, hh.cfgPtr, loginSpec{ak: ak, base32Secret: b32, nonce: nonce, loginType: "", remoteAddr: ""})
-	// session_expires_at ≈ now + cfg.Registration.SessionTTL（web 缺省 24h，容差 ±3s）。
-	want := time.Now().Add(24 * time.Hour)
+	// session_expires_at ≈ now + cfg.Registration.SessionTTL（web 缺省 7 天，容差 ±3s）。
+	want := time.Now().Add(7 * 24 * time.Hour)
 	if d := lr.resp.SessionExpiresAt.Sub(want); d > 3*time.Second || d < -3*time.Second {
-		t.Errorf("session_expires_at = %v, want ≈ %v（web 24h）", lr.resp.SessionExpiresAt, want)
+		t.Errorf("session_expires_at = %v, want ≈ %v（web 7d）", lr.resp.SessionExpiresAt, want)
 	}
 
 	// ring 新增 session 条目：Kind 标记、WrapKeyID 置空（M13）、Meta.Type/IP。
