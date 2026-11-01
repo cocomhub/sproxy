@@ -1,0 +1,14 @@
+# R54 基线：非测试源码中的「裸 JSON 响应写」语句数（只减不增）。
+# 收敛目标：全部改用 internal/httpjson 的 Send/SendLogged/SendError。
+# 每行：相对路径<TAB>语句数<TAB>备注（可选）。
+pkg/authn/ext/oidcldap/jsonutil.go	2	# encoder 流式写出 + http.Error 兜底，契约与 httpjson 不同（二期）
+pkg/server/ai_insight_handler.go	6	# 装配层历史流式写出（二期改用 httpjson）
+pkg/server/ai_privacy.go	4	# 装配层历史流式写出（二期改用 httpjson）
+pkg/server/ai_quota.go	2	# 装配层历史流式写出（二期改用 httpjson）
+pkg/server/cluster_scaling.go	4	# 装配层历史流式写出（二期改用 httpjson）
+pkg/server/federation_services.go	2	# 装配层历史流式写出（二期改用 httpjson）
+pkg/server/hub_handler.go	10	# 装配层历史流式写出（二期改用 httpjson）
+pkg/server/notify_handlers.go	4	# 装配层历史流式写出（二期改用 httpjson）
+pkg/server/remotefs/remote_read.go	5	# 只读面历史流式写出（二期改用 httpjson）
+pkg/server/signaling_handlers.go	2	# 装配层历史流式写出（二期改用 httpjson）
+pkg/server/trash.go	2	# 装配层历史流式写出（二期改用 httpjson）

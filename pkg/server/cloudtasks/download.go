@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/downloader"
@@ -66,19 +67,10 @@ const (
 	auditResultError   = "error"
 )
 
-// writeJSON 写出 JSON 响应（与装配层 sendJSONResponse 同语义：先设 Content-Type，
-// 序列化失败时 500 + 通用错误包，否则按状态码写出已序列化字节）。
+// writeJSON 写出 JSON 响应：委托 internal/httpjson（全仓唯一实现），告警日志仍用本服务
+// 的实例日志器。此前本包持有一份与装配层 sendJSONResponse 等价的副本，现已收敛。
 func (s *Service) writeJSON(w http.ResponseWriter, response any, statusCode int) {
-	w.Header().Set(headerContentType, contentTypeJSON)
-	buf, err := json.Marshal(response)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		s.deps.Logger.Warn("Encode JSON response failed", "error", err)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
-		return
-	}
-	w.WriteHeader(statusCode)
-	_, _ = w.Write(buf)
+	httpjson.SendLogged(w, statusCode, response, s.deps.Logger)
 }
 
 // uploadResponse 是请求体校验失败时的响应包。字段/JSON 名与装配层 UploadResponse

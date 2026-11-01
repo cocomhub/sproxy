@@ -627,6 +627,26 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
+### 横切能力：`internal/httpjson`（JSON 响应写出唯一实现）
+
+JSON 响应写出曾是**四份等价实现**：装配根 `sendJSONResponse`（328 处调用）、
+`pkg/files.Service.sendJSON`（146 处）、`pkg/server/ratelimit` 的 429 回包（因无法反向
+import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJSON`。
+
+现收敛到 `internal/httpjson`（L0，零 `pkg/*` 依赖）：
+
+| API | 用途 |
+|---|---|
+| `Send(w, status, v)` | 写 JSON 响应，告警日志用包级实例（装配根经 `SetLogger` 注入） |
+| `SendLogged(w, status, v, log)` | 同上，但用调用方实例日志器（领域包保持日志路由不变） |
+| `SendError(w, status, msg)` | 写 `{"error": msg}`（429/错误回包） |
+
+契约（按字节断言，不得改）：成功路径无尾随换行；序列化失败 → 500 + 固定错误体
+（**带**尾随换行，沿用 `json.Encoder` 形态）+ Warn 日志。
+
+存量裸写（`json.NewEncoder(w)` / 手写 `Content-Type: application/json`）由门禁 **R54**
+（`json_response_sites.tsv` 棘轮）锁住，只减不增。
+
 ### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流 / T1 跨节点读写面）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`

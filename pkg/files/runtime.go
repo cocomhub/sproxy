@@ -251,7 +251,17 @@ func (r *runtime) bandwidthLimiter() BandwidthLimiter { return r.bandwidth }
 
 // ---- nil 安全访问器（领域代码唯一的能力入口） ----
 
-func (r *runtime) logger() *slog.Logger { return r.loggerFn() }
+// logger 返回当前生效的实例日志器；loggerFn 未装配（nil）时回退 slog.Default()。
+//
+// 本函数位于「nil 安全访问器」区（领域代码唯一的能力入口）——此前直接调用
+// r.loggerFn() 在未装配时 panic，与本节契约不符；sendJSON 改为每次响应都取日志器后
+// 该缺陷变成常态触发（TestSemanticSearchHTTP_KeywordFallback 实测 panic）。
+func (r *runtime) logger() *slog.Logger {
+	if r.loggerFn == nil {
+		return slog.Default()
+	}
+	return r.loggerFn()
+}
 
 func (r *runtime) actorOf(req *http.Request) string { return r.actor.Actor(req) }
 

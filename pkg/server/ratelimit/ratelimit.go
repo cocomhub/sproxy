@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/server/metrics"
@@ -273,12 +274,12 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// writeTooManyRequests 回 429 JSON（`{"error":"rate limit exceeded"}`，Content-Type 与
-// 装配层 sendJSONResponse 同形——响应字节与头部保持既有契约）。
+// writeTooManyRequests 回 429 JSON（`{"error":"rate limit exceeded"}`）。
+//
+// 实现在 internal/httpjson（全仓唯一 JSON 响应实现）：此前本包持有一份字节级副本，
+// 与装配层 sendJSONResponse 重复（#988 遗留），现已收敛。
 func writeTooManyRequests(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusTooManyRequests)
-	_, _ = w.Write([]byte(`{"error":"` + msgRateLimitExceeded + `"}`))
+	httpjson.SendError(w, http.StatusTooManyRequests, msgRateLimitExceeded)
 }
 
 // middlewareFinish 依据放行结果收尾：拒绝时（enabled 态）回包 429，否则/放行时透传 next。

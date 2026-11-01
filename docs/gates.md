@@ -105,6 +105,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `test_sleep_ratchet_test.go` | R14 | test_sleep_ratchet_test.go 是「测试内固定等待只减不增」的**棘轮门禁**（R14）。 |
 | `upload_side_effect_test.go` | R8 | upload_side_effect_test.go 是「**上传成功的副作用必须单一实现**」的门禁（R8，P2-d 配套）。 |
 | `tempdir_gate_test.go` | R53 | 测试临时目录门禁（2026-10-31）：`*_test.go` 不得裸调 `os.MkdirTemp`/`ioutil.TempDir`，必须用 `testutil.MkdirTemp`（测试内重试 + 进程级兜底）或 `t.TempDir()`。背景：%TEMP% 累积 1,910 个本仓测试目录（Windows 上 `RemoveAll` 因句柄未释放静默失败 + 显式 TempDir 无人清理）。 |
+| `json_response_gate_test.go` | R54 | JSON 响应写出**单一实现**棘轮（2026-11-01）：非测试源码中的「裸 JSON 响应写」（`json.NewEncoder(w)`；同行 `w.Header().Set(` + `"application/json"`/`contentTypeJSON`）按文件登记于 `json_response_sites.tsv`，未登记即红、已登记只减不增。背景：JSON 响应写出曾有 4 份等价实现（装配根 `sendJSONResponse` 328 处、`pkg/files.Service.sendJSON` 146 处、`pkg/server/ratelimit` 429 回包、`cloudtasks.writeJSON`），其中 ratelimit 副本因无法反向 import 装配根而字节级复制（#988）。收敛到 `internal/httpjson`（`Send`/`SendLogged`/`SendError`）；豁免 `internal/httpjson/`（实现本体）、`pkg/testutil/`（外部服务替身）、`cmd/`（CLI stdout，`w` 是 io.Writer）。 |
 | `test_count_ratchet_test.go` | R50 | 测试函数总数棘轮（2026-10-30）：全仓 `func Test*` 总数不得低于 `test_count_baseline.tsv` 基线（只增不减）。背景：#927 搬运时一个测试被静默删除（−1），无门禁发现；有意删除测试须同步下调基线并说明理由。 |
 | `test_doc_comment_gate_test.go` | R49 | 测试文档注释悬空门禁（2026-10-30）：`pkg/server` 下 `// TestXxx` 文档注释若指向全仓不存在的测试函数即红。与 R50 互补（R49 抓「注释残留」，R50 抓「连注释一起删」）。 |
 | `usage_provider_gate_test.go` | R30 | usage_provider_gate_test.go 是「卷用量查询**单一查询面**」门禁（R30，2026-10-17）。 |
