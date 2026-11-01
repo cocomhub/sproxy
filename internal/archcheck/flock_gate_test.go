@@ -16,7 +16,7 @@ package archcheck
 // `golang.org/x/sys/unix.Flock`（排除 _test.go——测试可对锁原语做平台级
 // 断言；豁免 pkg/leader 自身实现与门禁自身文件）。
 //
-// 存量豁免：pkg/server/flock_unix.go（lockFile/unlockFile 内部文件锁原语，
+// 存量豁免：pkg/server/filelock/lock_unix.go（Lock/Unlock 跨进程文件锁原语，
 // 供 acquireFileLock 文件级互斥/带宽协调用——非选主语义，key 是 owner+rel
 // 而非全局写面；2026-09-24 盘库实证非测试源码中仅此两处调用点）。
 //
@@ -61,9 +61,9 @@ func scanFlockCalls(root string) ([]string, error) { // NOSONAR: S3776 — 门�
 		}
 		rel = filepath.ToSlash(rel)
 		// 豁免 pkg/leader 自身实现（LockFileEx/flock 的正当使用点）、门禁自身、
-		// 与存量 pkg/server/flock_unix.go（内部文件锁原语，非选主语义）。
+		// 与存量 pkg/server/filelock/lock_unix.go（跨进程文件锁原语，非选主语义）。
 		if strings.HasPrefix(rel, "pkg/leader/") || rel == "internal/archcheck/flock_gate_test.go" ||
-			rel == "pkg/server/flock_unix.go" {
+			rel == "pkg/server/filelock/lock_unix.go" {
 			return nil
 		}
 		data, readErr := os.ReadFile(path)

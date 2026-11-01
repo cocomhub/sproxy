@@ -627,7 +627,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -755,6 +755,18 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
   `forwardWithFailover`、把头写回客户端）与 `federation_services.go` 的服务发现端点。
 - 切片自包依赖：只 import `pkg/tunnel/hub` 与 `pkg/sproxysig`（L2），`h.*` 引用 0 个；
   转发请求体在本包内以三字段结构体序列化（不反向依赖装配根，R6）。
+
+**S15 前置：跨进程文件锁原语（`pkg/server/filelock`）**
+
+- 迁入：`Lock`/`Unlock`（Unix `flock` 独占锁，阻塞直到获得；Windows 无 flock 等价实现，
+  退化为空操作）。两个文件按 `//go:build` 拆分（`lock_unix.go` / `lock_windows.go`）。
+- **不是选主语义**：多节点写面唯一化仍走 `pkg/leader` 的 `LeaderElector`（含租约/续租/
+  `ErrLeaseLost`/`WriteGuard`）；本包只服务「多进程对同一共享文件 read-modify-write」的两处
+  协调后端（限流计数 `ratelimit_coord_file.go`、带宽字节预算 `bandwidth_coord.go`），
+  为后续 `pkg/server/ratelimit` 切片解除耦合。
+- **进程内互斥不在此包**：Unix flock 对同进程内同一文件可重入（不互斥），由调用方的
+  `sync.Mutex` 串行化。零 `pkg/*` 依赖 ⇒ L0。
+- 门禁 R23 的存量豁免路径同步为 `pkg/server/filelock/lock_unix.go`。
 
 **P1：装配层策略对象（2026-10-31）**
 

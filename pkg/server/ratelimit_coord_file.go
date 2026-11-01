@@ -8,8 +8,8 @@
 //     时钟偏差问题；
 //   - 文件内容：首行窗口起点，后续每请求一行时间戳（可读、可调试）。
 //
-// Windows 注意：syscall.Flock 无等价（见 flock_windows.go），跨进程互斥在
-// Windows 上降级为进程内互斥 + 文件系统原子性（尽力而为，不保证精确）；
+// Windows 注意：syscall.Flock 无等价（见 pkg/server/filelock/lock_windows.go），
+// 跨进程互斥在 Windows 上降级为进程内互斥 + 文件系统原子性（尽力而为，不保证精确）；
 // 跨进程协调语义在 Linux 上验证（测试 TestFileCoordinator_CrossProcess）。
 package server
 
@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/filelock"
 )
 
 // fileCoordinator 是文件锁共享计数协调后端。
@@ -63,11 +65,11 @@ func (c *fileCoordinator) Allow(key string, count int64) bool {
 	}
 	defer f.Close()
 
-	if err := lockFile(f); err != nil {
+	if err := filelock.Lock(f); err != nil {
 		c.logger.Warn("rate limit file lock failed, allowing", "key", key, "error", err)
 		return true
 	}
-	defer func() { _ = unlockFile(f) }()
+	defer func() { _ = filelock.Unlock(f) }()
 
 	// 读窗口起点与计数。
 	now := time.Now()
