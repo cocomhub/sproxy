@@ -54,7 +54,9 @@ var (
 func e2eBinPath(t *testing.T, cmdPath string) string {
 	t.Helper()
 	e2eBinDirInit.Do(func() {
-		e2eBinDir, e2eBinDirErr = os.MkdirTemp("", "sproxy-e2e-bin")
+		e2eBinDir, e2eBinDirErr = os.MkdirTemp("", "sproxy-e2e-bin-*")
+		// 包级共享目录：登记给 TestMain 统一清理（单个测试的 t.Cleanup 会删掉别人在用的二进制）。
+		testutil.TrackTempDir(e2eBinDir)
 	})
 	if e2eBinDirErr != nil {
 		t.Fatalf("create e2e bin dir: %v", e2eBinDirErr)
