@@ -351,7 +351,13 @@ func (m *Manager) taskQuota(owner string) QuotaStore {
 // persistDirFor 返回任务 owner 租户 meta/sync 持久化目录绝对路径。租户不可用返回 ""。
 func (m *Manager) persistDirFor(owner string) string {
 	_, p, ok := m.tenantRoot(owner)
-	if !ok {
+	if !ok || p == "" {
+		return ""
+	}
+	// 相对路径会让落盘位置依赖进程 cwd（曾导致测试把 sync-*.json 写进 pkg/server/alice/）。
+	// 持久化目录必须是绝对路径；否则 fail-closed 不落盘（内存任务不受影响）。
+	if !filepath.IsAbs(p) {
+		m.logger.Warn("sync: 租户持久化目录不是绝对路径，跳过落盘", "owner", owner, "dir", p)
 		return ""
 	}
 	return p
