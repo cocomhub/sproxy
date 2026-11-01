@@ -46,7 +46,6 @@ ms-playwright/
 
 # git worktree 目录（并行任务隔离工作区，不入库）
 .worktrees/
-pkg/server/alice/
 deploy/sproxy.yaml
 
 # pi-memory 项目记忆（仅 MEMORY.md 入库；SCRATCHPAD/daily/archive 本地保留）

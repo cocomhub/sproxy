@@ -87,7 +87,11 @@ func newUserVolTestManager(t *testing.T, storageRoot string) *syncmgr.Manager {
 	remotes := []syncmgr.RemoteConfig{
 		{Name: "userdisk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "userdisk1"},
 	}
-	tenantRoot := func(owner string) (string, string, bool) { return storageRoot, owner, true }
+	// persistDir 必须是**绝对路径**：返回 owner（相对名）会把 sync 任务 JSON 落到进程 cwd。
+	persistRoot := t.TempDir()
+	tenantRoot := func(owner string) (string, string, bool) {
+		return storageRoot, filepath.Join(persistRoot, owner), true
+	}
 	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: nil, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
 	t.Cleanup(mgr.Stop)
 	return mgr

@@ -282,7 +282,11 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	remotes := []syncmgr.RemoteConfig{
 		{Name: "alice-disk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "alice-disk1"},
 	}
-	tenantRoot := func(owner string) (string, string, bool) { return cfg.StorageRoot, owner, true }
+	// persistDir 必须是绝对路径（返回 owner 相对名会把任务 JSON 落到进程 cwd）。
+	persistRoot := t.TempDir()
+	tenantRoot := func(owner string) (string, string, bool) {
+		return cfg.StorageRoot, filepath.Join(persistRoot, owner), true
+	}
 	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: exec, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
 	t.Cleanup(mgr.Stop)
 	mgr.SetUserVolumeOwner(newUserVolE2EOwnerClosure(store, volSet))
@@ -406,7 +410,11 @@ func TestUserVolumeE2E_CrossOwnerDenied(t *testing.T) {
 	remotes := []syncmgr.RemoteConfig{
 		{Name: "bob-disk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "bob-disk1"},
 	}
-	tenantRoot := func(owner string) (string, string, bool) { return cfg.StorageRoot, owner, true }
+	// persistDir 必须是绝对路径（返回 owner 相对名会把任务 JSON 落到进程 cwd）。
+	persistRoot := t.TempDir()
+	tenantRoot := func(owner string) (string, string, bool) {
+		return cfg.StorageRoot, filepath.Join(persistRoot, owner), true
+	}
 	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: nil, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
 	t.Cleanup(mgr.Stop)
 	mgr.SetUserVolumeOwner(newUserVolE2EOwnerClosure(store, volSet))
