@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
+	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -82,10 +83,10 @@ type httpDeps struct {
 	// cfg.RateLimit.Enabled 时创建并挂到 apiHandler）。PUT /api/config 经 configMu
 	// 保护调用 UpdateConfig 热更新（含 enabled/limit/window），无需重建 handler 链
 	// （xfer LocalHandler 已持有构造期引用）。nil = 启动未启用限流。
-	rateLimiter *RateLimiter
+	rateLimiter *ratelimit.RateLimiter
 	// signalPostRL 是信令 POST 专用限流器（独立实例，与文件传输隔离配额）。
 	// 热更新时与 rateLimiter 一起更新；nil = 启动未启用或未装配 RouteTable。
-	signalPostRL *RateLimiter
+	signalPostRL *ratelimit.RateLimiter
 }
 
 // authDeps 是认证与凭据（Ring/TOTP/登录限制）域依赖。
@@ -118,11 +119,11 @@ type authDeps struct {
 	// allowInsecureLoopback 是无认证兜底开关（读取优先级：opts 注入 > cfg 配置）。
 	// 仅调试语义：ring 为空时放行 loopback 来源（见 handleNoCredentials）。
 	allowInsecureLoopback bool
-	// registerLimiter 是公开注册端点的独立限频器（复用 pkg/server.RateLimiter，
+	// registerLimiter 是公开注册端点的独立限频器（复用 pkg/server/ratelimit.RateLimiter，
 	// per-IP 令牌桶 + 全局滑动窗口，5/min 封顶，D6/M1）。注册是唯一用户入口（U3）
 	// 且不经 authMiddleware——蓄意攻击者可任意 IP 洪泛，故逐 IP 限频 + 全局窗口
 	// 兜底。与文件传输/信令限流（rateLimiter/signalPostRL）隔离配额。nil = 启动未装配。
-	registerLimiter *RateLimiter
+	registerLimiter *ratelimit.RateLimiter
 	// totpNoncePool 是 TOTP 登录 nonce 池（POST /api/credentials/nonce 签发，
 	// 任务⑨ login 消费）：map[nonce]→{expiresAt, ip}，TTL 60s、单次使用（任何消费
 	// 即删）、绑定来源 IP、池上限 maxTotpNoncePool、插入/消费时惰性清理过期项（D5）。
@@ -133,7 +134,7 @@ type authDeps struct {
 	totpNoncePool *totpNoncePool
 	// totpLimiter 是 TOTP 登录 + nonce 端点共用的独立限频器（10/min，D6/M1）。
 	// 公开端点的暴力破解防线，与 registerLimiter 隔离配额。
-	totpLimiter *RateLimiter
+	totpLimiter *ratelimit.RateLimiter
 	// loginFailTracker 是 per-AK TOTP 登录失败锁定表（U4）：map[ak]→
 	// {failCount, lockedUntil} + mutex。连续失败达 cfg.Registration.LoginFailLimit
 	// → 锁定 LoginFailWindow（锁定期内该 AK 登录一律 401，含正确动态码，不随 IP
@@ -145,7 +146,7 @@ type authDeps struct {
 	// loginLimiter 是 POST /api/credentials/login 的独立限频器（10/min；与
 	// totpLimiter 语义同级，独立实例避免 nonce 签发与登录消费互相挤压配额，
 	// D6/M1）。公开端点，无 authMiddleware。
-	loginLimiter *RateLimiter
+	loginLimiter *ratelimit.RateLimiter
 	// totpPending 是 TOTP 注册 pending 表（两段式提交）：register 只生成 pending
 	// （AK + TOTP secret + owner + 过期时间），**不写 ring / 不落盘**；客户端用正确
 	// TOTP 动态码登录成功才提交（AddRegistration + persist）。

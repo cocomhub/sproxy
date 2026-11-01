@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server/config"
+	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
 )
 
 // configMu 保护 rebuildLogger 和 updateConfigHandler 的并发访问。
@@ -304,7 +305,7 @@ func (h *Handlers) commitConfigUpdate(cfg *Config, req *updateConfigRequest) {
 		// 协调后端随热更新重建（coordinated 开关 / backend 变更即时生效）；
 		// 失败回退 local + 警告。
 		if cfg.RateLimit.Coordinated {
-			if coord, cerr := newCoordinator(cfg.RateLimit.Backend, int64(cfg.RateLimit.Requests), cfg.RateLimit.Window, h.globalRoot.AbsPath(), h.logger); cerr != nil {
+			if coord, cerr := ratelimit.NewCoordinator(cfg.RateLimit.Backend, int64(cfg.RateLimit.Requests), cfg.RateLimit.Window, h.globalRoot.AbsPath(), h.logger); cerr != nil {
 				h.logger.Warn("rate limit coordinator rebuild failed, fallback to local", "error", cerr)
 				h.rateLimiter.SetCoordinator(nil)
 			} else {

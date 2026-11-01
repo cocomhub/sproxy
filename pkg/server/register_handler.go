@@ -38,7 +38,7 @@ const totpNonceTTL = 60 * time.Second
 // totpNonceEntry 是 nonce 池的单条记录（expiresAt 决定过期剪枝，ip 绑定消费来源）。
 type totpNonceEntry struct {
 	expiresAt time.Time
-	// ip 是签发时的来源 IP（normalizeRemoteIP 归一后的纯 IP）。消费时要求来源匹配，
+	// ip 是签发时的来源 IP（ratelimit.NormalizeRemoteIP 归一后的纯 IP）。消费时要求来源匹配，
 	// 防止攻击者把 nonce 转发给他人用于爆破（D5/IP 绑定）。
 	ip string
 }

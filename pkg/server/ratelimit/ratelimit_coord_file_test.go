@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package ratelimit
 
 import (
 	"path/filepath"
@@ -83,25 +83,10 @@ func TestFileCoordinator_WindowExpiry(t *testing.T) {
 	}
 }
 
-func TestFileCoordinator_SanitizeKey(t *testing.T) {
-	t.Parallel()
-	// 路径穿越形状必须被归一（不产生越界路径）。
-	if got := sanitizeKey("../etc/passwd"); got != "_._etc_passwd" {
-		t.Fatalf("sanitize ../etc/passwd = %q, want _._etc_passwd", got)
-	}
-	if got := sanitizeKey("192.168.1.1"); got != "192.168.1.1" {
-		t.Fatalf("sanitize ip = %q, want 192.168.1.1", got)
-	}
-	// 空 key 落安全名。
-	if got := sanitizeKey(""); got != "_" {
-		t.Fatalf("sanitize empty = %q, want _", got)
-	}
-}
-
 func TestFileCoordinator_InvalidBackend(t *testing.T) {
 	t.Parallel()
 	// 未知后端 → 装配错误（由调用方决定回退 local）。
-	c, err := newCoordinator("unknown", 5, time.Second, t.TempDir(), testutil.DiscardLogger())
+	c, err := NewCoordinator("unknown", 5, time.Second, t.TempDir(), testutil.DiscardLogger())
 	if err == nil {
 		t.Fatal("unknown backend should error")
 	}
@@ -109,11 +94,11 @@ func TestFileCoordinator_InvalidBackend(t *testing.T) {
 		t.Fatalf("unknown backend should return nil coordinator, got %T", c)
 	}
 	// file 后端缺 dir → 错误。
-	if _, err := newCoordinator("file", 5, time.Second, "", testutil.DiscardLogger()); err == nil {
+	if _, err := NewCoordinator("file", 5, time.Second, "", testutil.DiscardLogger()); err == nil {
 		t.Fatal("file backend with empty dir should error")
 	}
 	// local 默认（空 backend）→ 成功。
-	if _, err := newCoordinator("", 5, time.Second, "", testutil.DiscardLogger()); err != nil {
+	if _, err := NewCoordinator("", 5, time.Second, "", testutil.DiscardLogger()); err != nil {
 		t.Fatalf("empty backend should default to local: %v", err)
 	}
 }

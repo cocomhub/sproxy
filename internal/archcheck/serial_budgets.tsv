@@ -122,7 +122,7 @@ pkg/server/metrics_test.go	9
 pkg/server/prod_hardening_test.go	2
 pkg/server/quota_reconcile_test.go	7
 pkg/server/quota_write_path_test.go	17
-pkg/server/ratelimit_test.go	1
+pkg/server/ratelimit/ratelimit_test.go	1
 pkg/server/reconcile_scan_test.go	2
 pkg/server/register_handler_test.go	38
 pkg/server/relay_stream_forward_test.go	15

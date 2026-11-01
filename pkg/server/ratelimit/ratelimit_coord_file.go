@@ -11,7 +11,7 @@
 // Windows 注意：syscall.Flock 无等价（见 pkg/server/filelock/lock_windows.go），
 // 跨进程互斥在 Windows 上降级为进程内互斥 + 文件系统原子性（尽力而为，不保证精确）；
 // 跨进程协调语义在 Linux 上验证（测试 TestFileCoordinator_CrossProcess）。
-package server
+package ratelimit
 
 import (
 	"fmt"
@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/coordkey"
 	"github.com/cocomhub/sproxy/pkg/server/filelock"
 )
 
@@ -98,7 +99,7 @@ func (c *fileCoordinator) openRateLimitFile(key string) (*os.File, bool) {
 		c.logger.Warn("rate limit dir create failed, allowing", "key", key, "error", err)
 		return nil, false
 	}
-	f, err := os.OpenFile(filepath.Join(sub, sanitizeKey(key)), os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(filepath.Join(sub, coordkey.Sanitize(key)), os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		c.logger.Warn("rate limit file open failed, allowing", "key", key, "error", err)
 		return nil, false
@@ -165,28 +166,4 @@ func (c *fileCoordinator) writeRateLimitFile(key string, f *os.File, ts int64, c
 		return false
 	}
 	return true
-}
-
-// sanitizeKey 把限流 key 归一到安全文件名字段：只保留字母数字与 -_.，
-// 其余替换为下划线，防路径穿越（key 可能来自 RemoteAddr/IP/路径）。
-func sanitizeKey(key string) string {
-	out := make([]byte, 0, len(key))
-	for i, b := range []byte(key) {
-		// 前导点（'.'/'..' 起始）在部分文件系统有隐藏/穿越语义，替换为下划线。
-		if i == 0 && b == '.' {
-			out = append(out, '_')
-			continue
-		}
-		switch {
-		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9',
-			b == '-', b == '_', b == '.':
-			out = append(out, b)
-		default:
-			out = append(out, '_')
-		}
-	}
-	if len(out) == 0 {
-		return "_"
-	}
-	return string(out)
 }

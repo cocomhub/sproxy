@@ -1,21 +1,21 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package ratelimit
 
 import (
 	"log/slog"
 	"math"
 	"net"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
-	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/server/config"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 )
 
 // RateLimiter implements a sliding-window rate limiter using only the stdlib.
@@ -59,10 +59,10 @@ type RateLimiter struct {
 
 	coordinator Coordinator // 多实例协调后端；nil = 不协调（默认）
 
-	// metrics 是拒绝计数指标（装配层注入；nil = 不记录，零回归）。
-	metrics *Metrics
+	// metrics 是拒绝计数指标（装配层经 SetMetrics 注入；nil = 不记录，零回归）。
+	metrics *metrics.Metrics
 
-	// clientIPFn 是 per-IP 桶键解析函数（装配层注入；nil = normalizeRemoteIP 默认，零回归）。
+	// clientIPFn 是 per-IP 桶键解析函数（装配层注入；nil = NormalizeRemoteIP 默认，零回归）。
 	clientIPFn func(*http.Request) string
 }
 
@@ -107,6 +107,9 @@ type ipBucket struct {
 
 // maxTimestampsCap 是时间戳队列的最大容量，防止内存泄漏。
 const maxTimestampsCap = 100000
+
+// msgRateLimitExceeded 是 429 响应的统一错误文案（对客户端可见，改动即破坏契约）。
+const msgRateLimitExceeded = "rate limit exceeded"
 
 // NewRateLimiter creates a RateLimiter allowing up to `limit` requests
 // per sliding `window` duration.
@@ -164,6 +167,12 @@ func (rl *RateLimiter) SetCoordinator(c Coordinator) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	rl.coordinator = c
+}
+
+// SetMetrics 装配拒绝计数指标（/metrics 的 sproxy_rate_limit_rejected_total）。
+// nil 清除（= 不记录）。调用点：RegisterRoutes 装配期（Middleware 尚未挂载，无并发）。
+func (rl *RateLimiter) SetMetrics(m *metrics.Metrics) {
+	rl.metrics = m
 }
 
 // Allow reports whether the current request is within the global rate limit.
@@ -264,13 +273,21 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// writeTooManyRequests 回 429 JSON（`{"error":"rate limit exceeded"}`，Content-Type 与
+// 装配层 sendJSONResponse 同形——响应字节与头部保持既有契约）。
+func writeTooManyRequests(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write([]byte(`{"error":"` + msgRateLimitExceeded + `"}`))
+}
+
 // middlewareFinish 依据放行结果收尾：拒绝时（enabled 态）回包 429，否则/放行时透传 next。
 func (rl *RateLimiter) middlewareFinish(w http.ResponseWriter, r *http.Request, next http.Handler, ip, rejectScope string, enabled, allowed bool) {
 	if !allowed {
 		if enabled {
 			rl.logger.Warn(msgRateLimitExceeded, "remote_addr", ip, "path", r.URL.Path, "scope", rejectScope)
 			rl.recordRejected(rejectScope, r.URL.Path)
-			sendJSONResponse(w, map[string]string{"error": msgRateLimitExceeded}, http.StatusTooManyRequests)
+			writeTooManyRequests(w)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -291,7 +308,7 @@ func (rl *RateLimiter) middlewareAcquireLocked(w http.ResponseWriter, r *http.Re
 				rl.mu.Unlock()
 				rl.logger.Warn(msgRateLimitExceeded, "remote_addr", ip, "path", r.URL.Path, "scope", "concurrent")
 				rl.recordRejected("concurrent", r.URL.Path)
-				sendJSONResponse(w, map[string]string{"error": msgRateLimitExceeded}, http.StatusTooManyRequests)
+				writeTooManyRequests(w)
 				return false, "", nil, nil, true
 			}
 			releaseSem = sem.release
@@ -322,7 +339,7 @@ func (rl *RateLimiter) middlewareAcquireLocked(w http.ResponseWriter, r *http.Re
 // sem 热更新：重建为容量 max_concurrent 的新 channel。在途持有者归还的是**获取时**
 // 的旧 sem（Middleware 绑定 + defer），新请求用新 sem——旧请求不会污染新配额
 // （设计文档「热更新仅生效于新请求，旧请求继续归还旧 sem，靠 defer 保证不泄漏」）。
-func (rl *RateLimiter) UpdateDimensions(endpoints map[string]EndpointLimit, def EndpointLimit, maxConcurrent int) {
+func (rl *RateLimiter) UpdateDimensions(endpoints map[string]config.EndpointLimit, def config.EndpointLimit, maxConcurrent int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
@@ -433,114 +450,27 @@ func (rl *RateLimiter) ReleaseConcurrent() {
 	}
 }
 
-// inAnyNet 判定 ip 是否命中任一网段（网段为空 → 恒 false，由调用方先判空短路）。
-func inAnyNet(ip net.IP, nets []*net.IPNet) bool {
-	for _, n := range nets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// maxXFFEntries 是 X-Forwarded-For 链解析的最大段数（超出即视为畸形，忽略整条回退
-// RemoteAddr——fail-closed，防超长链 DoS；标准语义只取首个非信任项，天然 O(1)）。
-const maxXFFEntries = 64
-
-// resolveClientIP 解析请求的真实客户端 IP（信任代理语义）：
-//   - remoteHost（RemoteAddr 去端口后的纯 IP）命中 trusted（信任代理列表）时，
-//     从 X-Forwarded-For 链**右向左**取第一个非信任项（标准语义）；
-//   - 链为空 / 全信任 / 畸形（非 IP、超长 >64 段）→ 回退 RemoteAddr；
-//   - trusted 为空（未配置 trust_proxies）→ **一律忽略 XFF**（防伪造）。
-func resolveClientIP(remoteAddr, xff string, trusted []*net.IPNet) string {
-	remoteHost := normalizeRemoteIP(remoteAddr)
-	if len(trusted) == 0 {
-		return remoteHost
-	}
-	rip := net.ParseIP(remoteHost)
-	if rip == nil || !inAnyNet(rip, trusted) {
-		return remoteHost
-	}
-	if xff == "" {
-		return remoteHost
-	}
-	entries := strings.Split(xff, ",")
-	if len(entries) > maxXFFEntries {
-		return remoteHost
-	}
-	// 右向左：最近一跳在最右。跳过信任项，取第一个非信任条目作为真实客户端。
-	for _, entrie := range slices.Backward(entries) {
-		token := strings.TrimSpace(entrie)
-		if token == "" {
-			continue
-		}
-		ip := net.ParseIP(token)
-		if ip == nil {
-			// 畸形条目：忽略整条 XFF（fail-closed），回退 RemoteAddr。
-			return remoteHost
-		}
-		if !inAnyNet(ip, trusted) {
-			return token
-		}
-	}
-	return remoteHost
-}
-
-// clientIPFromRequest 是 resolveClientIP 的请求面封装（读取 RemoteAddr 与 XFF 头）。
-func (h *Handlers) clientIPFromRequest(r *http.Request) string {
-	cfg := h.cfgPtr.Load()
-	if cfg == nil {
-		return normalizeRemoteIP(r.RemoteAddr)
-	}
-	return resolveClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), netutil.ParseIPNets(cfg.Auth.TrustedProxies))
-}
-
-// ipGate 是认证前 IP 门（auth.allow_ips）：
-//   - AllowIPs 空 → 直通（零回归）；
-//   - 非空 → 按 resolveClientIP 解析真实 IP，不在任何网段 → Warn + 403
-//     （统一文案 "forbidden: ip not allowed"；不落审计——非业务事件防日志洪泛）。
-//
-// 挂在 authMiddleware 最前与公开凭据端点（register/nonce/login）——未授权来源在
-// 认证前直接拒绝，不泄露认证面。
-func (h *Handlers) ipGate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg := h.cfgPtr.Load()
-		if cfg == nil || len(cfg.Auth.AllowIPs) == 0 {
-			next.ServeHTTP(w, r)
-			return
-		}
-		ip := h.clientIPFromRequest(r)
-		if !inAnyNet(net.ParseIP(ip), netutil.ParseIPNets(cfg.Auth.AllowIPs)) {
-			h.log().WarnContext(r.Context(), "auth: ip not allowed",
-				"remote", r.RemoteAddr, "ip", ip, "method", r.Method, "path", r.URL.Path)
-			http.Error(w, "forbidden: ip not allowed", http.StatusForbidden)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // clientIP 返回 per-IP 桶键：装配了 trusted_proxies 时按真实客户端 IP 计量（代理后
-// 限流不合并到代理 IP）；未配置时与 normalizeRemoteIP 等价（零回归）。
+// 限流不合并到代理 IP）；未配置时与 NormalizeRemoteIP 等价（零回归）。
 func (rl *RateLimiter) clientIP(r *http.Request) string {
 	if rl.clientIPFn != nil {
 		return rl.clientIPFn(r)
 	}
-	return normalizeRemoteIP(r.RemoteAddr)
+	return NormalizeRemoteIP(r.RemoteAddr)
 }
 
 // SetClientIPFn 注入 per-IP 桶键解析函数（装配层在 cfg.Auth.TrustedProxies 非空时
-// 设置；nil = normalizeRemoteIP 默认，零回归）。
+// 设置；nil = NormalizeRemoteIP 默认，零回归）。
 func (rl *RateLimiter) SetClientIPFn(fn func(*http.Request) string) {
 	rl.clientIPFn = fn
 }
 
-// normalizeRemoteIP 把 http.Request.RemoteAddr（"IP:port" 或裸 IP，可能是 IPv6
-// "[::1]:1234"）归一到纯 IP，作为 per-IP 令牌桶的键。
+// NormalizeRemoteIP 把 http.Request.RemoteAddr（"IP:port" 或裸 IP，可能是 IPv6
+// "[::1]:1234"）归一到纯 IP，作为 per-IP 令牌桶的键（装配根的客户端 IP 解析同用此实现）。
 // 去除端口是必须的：若按 "IP:port" 作键，每请求新 TCP 连接会有新端口，
 // 触达全新桶（tokens=1）→ 永远放行，全局限流永不生效（限流被静默绕过）。
 // 解析失败（罕见畸形输入）时回退原值——per-IP 桶"陌生键"仍受全局窗口兜底。
-func normalizeRemoteIP(remoteAddr string) string {
+func NormalizeRemoteIP(remoteAddr string) string {
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		return host
 	}
