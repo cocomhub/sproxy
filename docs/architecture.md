@@ -627,7 +627,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流 / T1 跨节点读写面）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -782,6 +782,26 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
   与带宽字节预算两个 file 后端共用，避免两份归一规则分叉。
 - 切片自包依赖：`pkg/server/config`(L2)、`pkg/server/metrics`(L2)、`pkg/netutil`(G0)、
   `pkg/server/filelock`(G0) ⇒ L2；白盒测试随迁，装配/配置接线用例保留装配层。
+
+**T1：跨节点读写面（`pkg/server/remotefs`，2026-11-01）**
+
+- 迁入：只读面（`/remote/list|stat|download|meta|stats` 的 GET/HEAD 白名单 + 授权 + 委派）、
+  写面（`/remote/write|rename|delete|mkdir` + 块级 `block/open|write|close`）、两个 loopback
+  listener（身份/双向 pin/凭证池/accept 退避）、以及仅被 listener 消费的 accept 退避原语。
+- **两面同址**：读写面刻意**反向同构**（同一套授权三重约束、同一套错误映射 401/403/404/409/500、
+  同一套审计落点），放在一起才能守住这个不变量——分开即允许各自漂移。
+- **依赖倒置**：`remotefs.Deps` 恒 8 字段（`Files`/`Volumes`/`Quota`/`Audit`/`Meta`/`Config`/
+  `Logger`/`Runtime`）。`Meta`（持有侧 sidecar 键空间）、`Runtime`（身份/静态密钥/mux 选项/
+  凭证池）都是装配层知识，以窄接口注入，切片不反向依赖 `pkg/server`（R6）。
+- **域语义不复制**：写面只做授权 + 调 `pkg/files` 域方法；checksum 门禁、原子改名、版本、
+  配额、文件锁、卷路由全部留在领域层（远程写与本地写共享同一锁池）。
+- 装配：`pkg/server/remotefs_wiring.go`（`remoteDeps` + 四个适配器）构造 Deps；
+  `StartRemoteReadListener`/`StartRemoteWriteListener` 保留在装配层（`cmd/sproxy` 是独立
+  module），listener 类型以别名暴露（`RemoteReadListener`/`RemoteWriteListener`）。
+- 测试：协议面白盒用例随迁 `pkg/server/remotefs`（真实 `files.Service` + `registry.Set` 夹具）；
+  **凭证池验签、写面拒绝指标渲染、与本地写共享锁池** 三类用例依赖装配态，保留在装配层
+  （`remote_read_credential_test.go`/`remote_write_metrics_test.go`/`remote_write_lock_test.go`）。
+- 度量：`pkg/server` 非测试行 29,960 → **28,889**；子包 16 → 17。
 
 **P1：装配层策略对象（2026-10-31）**
 

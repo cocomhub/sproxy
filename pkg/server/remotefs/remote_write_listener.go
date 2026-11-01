@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 // remote_write_listener.go 是 B 侧跨节点**写面**的 loopback listener（Y 二期 P3-b2）。
 //
@@ -25,12 +25,12 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 )
 
-// RemoteWriteListener 是 B 侧写面的 loopback listener。
-type RemoteWriteListener struct {
+// WriteListener 是 B 侧写面的 loopback listener。
+type WriteListener struct {
 	ln     net.Listener
 	logger *slog.Logger
-	cfg    *Config
-	h      *Handlers
+	cfg    *config.Config
+	d      Deps
 
 	// acceptDone 在 acceptLoop 退出时关闭（确定性信号：accept 已停止）。
 	acceptDone chan struct{}
@@ -40,17 +40,17 @@ type RemoteWriteListener struct {
 }
 
 // Addr 返回实际监听地址（listen 端口为 0 时供测试读取真实端口）。
-func (l *RemoteWriteListener) Addr() string { return l.ln.Addr().String() }
+func (l *WriteListener) Addr() string { return l.ln.Addr().String() }
 
 // Close 停止接受新连接并等待已派生的连接 goroutine 收敛（语义同 RemoteReadListener）。
-func (l *RemoteWriteListener) Close() error {
+func (l *WriteListener) Close() error {
 	var err error
 	l.closeOnce.Do(func() { err = l.ln.Close() })
 	l.wg.Wait()
 	return err
 }
 
-// StartRemoteWriteListener 按 cfg.RemoteWrite 起写面监听；未启用时返回 (nil, nil)。
+// StartWriteListener 按 cfg.RemoteWrite 起写面监听；未启用时返回 (nil, nil)。
 //
 // 装配要点（与只读面逐条对应）：
 //   - 监听强制 loopback（Validate 已保证；此处再以实际 Addr 断言，纵深防御）；
@@ -61,10 +61,12 @@ func (l *RemoteWriteListener) Close() error {
 //     论证失效）。**不得删除这两处**；
 //   - pin 列表 = **scope 授予写**（write/rw）的条目指纹去重。只读条目**不进**写面 pin：
 //     只读对端因此连握手都建立不了（写通路物理上不存在）。
-func StartRemoteWriteListener(ctx context.Context, cfg *Config, h *Handlers, log *slog.Logger) (*RemoteWriteListener, error) {
+func StartWriteListener(ctx context.Context, d Deps) (*WriteListener, error) {
+	cfg := d.Config
 	if cfg == nil || !cfg.RemoteWrite.Enabled {
 		return nil, nil
 	}
+	log := d.Logger
 	if log == nil {
 		log = slog.Default()
 	}
@@ -76,7 +78,7 @@ func StartRemoteWriteListener(ctx context.Context, cfg *Config, h *Handlers, log
 		_ = ln.Close()
 		return nil, fmt.Errorf("remote_write 拒绝启动：实际监听地址非 loopback (%s)", ln.Addr())
 	}
-	id, err := LoadXferIdentity(cfg)
+	id, err := d.Runtime.Identity()
 	if err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("remote_write 身份加载失败: %w", err)
@@ -87,11 +89,11 @@ func StartRemoteWriteListener(ctx context.Context, cfg *Config, h *Handlers, log
 		return nil, fmt.Errorf("remote_write 拒绝启动：没有任何 mesh_readers 条目的 scope 授予写（fail-closed，无 pin 将接受任意对端）")
 	}
 
-	l := &RemoteWriteListener{ln: ln, logger: log, cfg: cfg, h: h, acceptDone: make(chan struct{})}
+	l := &WriteListener{ln: ln, logger: log, cfg: cfg, d: d, acceptDone: make(chan struct{})}
 	staticKey := tunnel.DeriveRemoteStaticKey(id.Fingerprint())
 	log.Info("remote_write 写面已启动",
 		"listen", ln.Addr().String(), "fingerprint", id.Fingerprint(), "pinned_writers", len(pins),
-		"identity_file", XferIdentityPath(cfg))
+		"identity_file", d.Runtime.IdentityPath())
 
 	l.wg.Go(func() {
 		l.acceptLoop(ctx, id, staticKey, pins)
@@ -100,7 +102,7 @@ func StartRemoteWriteListener(ctx context.Context, cfg *Config, h *Handlers, log
 }
 
 // acceptLoop 接受连接并为每连接建 mux + Tunnel（与只读面同构；路由表换写 handler）。
-func (l *RemoteWriteListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
+func (l *WriteListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
 	defer close(l.acceptDone)
 	// ctx 取消 → 关闭 listener（解除 Accept 阻塞）。acceptLoop 因其它原因退出时由
 	// defer 关闭 stop 通道回收本 goroutine，不泄漏。
@@ -131,7 +133,7 @@ func (l *RemoteWriteListener) acceptLoop(ctx context.Context, id *tunnel.Identit
 
 // handleAcceptError 处理 accept 错误：按「预期停机 / 瞬时可退避 / 致命」分类。
 // 返回 (backoff, stop)：stop=true 表示本次 accept 循环应退出（错误已处理）。
-func (l *RemoteWriteListener) handleAcceptError(ctx context.Context, err error, backoff time.Duration) (time.Duration, bool) {
+func (l *WriteListener) handleAcceptError(ctx context.Context, err error, backoff time.Duration) (time.Duration, bool) {
 	if ctx.Err() != nil {
 		return backoff, true // 预期停机：ctx 已/将关闭 listener
 	}
@@ -150,17 +152,17 @@ func (l *RemoteWriteListener) handleAcceptError(ctx context.Context, err error, 
 }
 
 // serveWriteConn 为单条已接受连接建 mux + Tunnel（写路由表）并 serve。
-func (l *RemoteWriteListener) serveWriteConn(ctx context.Context, c net.Conn, id *tunnel.Identity, staticKey []byte, pins []string) {
+func (l *WriteListener) serveWriteConn(ctx context.Context, c net.Conn, id *tunnel.Identity, staticKey []byte, pins []string) {
 	defer l.wg.Done()
 	defer func() { _ = c.Close() }()
-	m := mux.NewWithOpts(builtin.FromNetConn(c), mux.RoleListener, MuxIdlePaddingOptions(l.cfg)...)
+	m := mux.NewWithOpts(builtin.FromNetConn(c), mux.RoleListener, l.d.Runtime.MuxOptions()...)
 	defer func() { _ = m.Close() }()
 	tun := tunnel.NewTunnel(m, staticKey,
 		tunnel.WithIdentity(id),
 		tunnel.WithPeerFingerprints(pins),
 		tunnel.WithHandshakeTimeout(l.cfg.RemoteWrite.HandshakeTimeout),
 	)
-	handler := l.h.newRemoteWriteHandler(tun)
+	handler := NewWriteHandler(l.d, tun)
 	if sErr := tun.Serve(ctx, handler); sErr != nil {
 		if ctx.Err() == nil {
 			l.logger.Warn("remote_write 连接结束", "remote", c.RemoteAddr().String(), "error", sErr)

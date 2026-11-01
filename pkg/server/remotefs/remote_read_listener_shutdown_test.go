@@ -1,10 +1,9 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -12,13 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
 // startRemoteReadForShutdownTest 装配一个**保留 cancel** 的只读面 listener
 // （与 startRemoteReadDualEnd 同构，但把 rcancel 交给调用方，用于验证停机顺序）。
-func startRemoteReadForShutdownTest(t *testing.T) (*RemoteReadListener, context.CancelFunc) {
+func startRemoteReadForShutdownTest(t *testing.T) (*ReadListener, context.CancelFunc) {
 	t.Helper()
 	bID, bErr := tunnel.GenerateIdentity()
 	if bErr != nil {
@@ -30,7 +30,7 @@ func startRemoteReadForShutdownTest(t *testing.T) (*RemoteReadListener, context.
 	}
 	dir := t.TempDir()
 
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "vol-main")
 	cfg.LogLevel = "error"
 	cfg.Audit.BufferSize = 100
@@ -38,10 +38,10 @@ func startRemoteReadForShutdownTest(t *testing.T) (*RemoteReadListener, context.
 	if err := tunnel.SaveIdentity(bID, cfg.Hub.XferIdentityFile); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Volumes = []VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot, ACL: &VolumeACLConfig{
-		Mode:   VolumeACLAllow,
+	cfg.Volumes = []config.VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot, ACL: &config.VolumeACLConfig{
+		Mode:   config.VolumeACLAllow,
 		Owners: []string{testDualOwner},
-		MeshReaders: []VolumeMeshReaderConfig{{
+		MeshReaders: []config.VolumeMeshReaderConfig{{
 			Node: testReaderNodeA, Fingerprint: aID.Fingerprint(), Owner: testDualOwner,
 		}},
 	}}}
@@ -53,11 +53,10 @@ func startRemoteReadForShutdownTest(t *testing.T) (*RemoteReadListener, context.
 		t.Fatalf("cfg: %v", err)
 	}
 
-	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
 	rctx, rcancel := context.WithCancel(t.Context())
-	ln, err := StartRemoteReadListener(rctx, cfg, h, testutil.DiscardLogger())
+	ln, err := StartReadListener(rctx, newFixture(t, cfg).deps)
 	if err != nil {
-		t.Fatalf("StartRemoteReadListener: %v", err)
+		t.Fatalf("StartReadListener: %v", err)
 	}
 	t.Cleanup(func() {
 		rcancel()

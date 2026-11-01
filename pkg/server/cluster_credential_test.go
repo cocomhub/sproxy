@@ -113,20 +113,20 @@ func TestClusterCredentialSet_ByRecipient(t *testing.T) {
 		t.Fatalf("newClusterCredentialSet: %v", err)
 	}
 	// 对端指纹命中（凭证.Recipient）——核心 C1 断言。
-	cred, ok := s.credentialFor("main", "eg-fp-1")
+	cred, ok := s.CredentialFor("main", "eg-fp-1")
 	if !ok || cred.Recipient != "eg-fp-1" || cred.Volume != "main" {
 		t.Fatalf("credentialFor(eg-fp-1) 应命中 main 凭证，ok=%v cred=%+v", ok, cred)
 	}
 	// 第二条独立指纹命中（多凭证互不干扰）。
-	if _, ok := s.credentialFor("arch", "eg-fp-2"); !ok {
+	if _, ok := s.CredentialFor("arch", "eg-fp-2"); !ok {
 		t.Fatal("credentialFor(eg-fp-2) 应命中 arch 凭证")
 	}
 	// 未列入白名单的指纹 → 不命中。
-	if _, ok := s.credentialFor("main", "unlisted-fp"); ok {
+	if _, ok := s.CredentialFor("main", "unlisted-fp"); ok {
 		t.Fatal("未列入白名单指纹应不命中")
 	}
 	// 卷不匹配（C2 纵深）→ 不命中。
-	if _, ok := s.credentialFor("other-vol", "eg-fp-1"); ok {
+	if _, ok := s.CredentialFor("other-vol", "eg-fp-1"); ok {
 		t.Fatal("凭证授卷 != 请求卷应不命中（越权面 fail-closed）")
 	}
 }
@@ -175,7 +175,7 @@ func TestClusterCredentialSet_Expired(t *testing.T) {
 		t.Fatalf("过期凭证应可装配（装配期只验签名/格式，防篡改）: %v", err)
 	}
 	// 请求时过期 → 拒绝（时效是运行期控制点）。
-	if _, ok := s.credentialFor("main", "eg-fp-e"); ok {
+	if _, ok := s.CredentialFor("main", "eg-fp-e"); ok {
 		t.Fatal("过期凭证请求时 credentialFor 应拒绝（时效运行期失效）")
 	}
 }
@@ -195,7 +195,7 @@ func TestClusterCredentialSet_RecipientTrimmed(t *testing.T) {
 		t.Fatalf("装配: %v", err)
 	}
 	// 查询指纹无空白 → 命中（写侧 Trim 键 == 查询 Trim 键）。
-	if _, ok := s.credentialFor("main", "eg-fp-t"); !ok {
+	if _, ok := s.CredentialFor("main", "eg-fp-t"); !ok {
 		t.Fatal("写侧 Trim 后按无空白指纹应命中（双侧 Trim 归一）")
 	}
 }

@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package remotefs
 
 // remote_write_listener_test.go 是 Y 二期写面（P3-b2）的**端到端中测**：在 loopback 上起
 // **真** RemoteWriteListener，A 侧经 net.Conn → xfer 桥 → mux → tunnel.NewTunnel 建**真握手、
@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -29,11 +29,11 @@ import (
 // remoteWriteDualEnd 是写面中测的双端上下文：B 侧真 listener + 两个对端身份
 // （aID=scope rw 应能写；cID=scope read 应连不上写面）。
 type remoteWriteDualEnd struct {
-	cfg *Config
+	cfg *config.Config
 	aID *tunnel.Identity
 	cID *tunnel.Identity
 	bFP string // B 侧身份指纹（A 侧用 pin 它 + 派生静态密钥）
-	ln  *RemoteWriteListener
+	ln  *WriteListener
 }
 
 // startRemoteWriteDualEnd 装配 B 侧真写 listener 与两个对端身份。
@@ -54,7 +54,7 @@ func startRemoteWriteDualEnd(t *testing.T) remoteWriteDualEnd {
 	dir := t.TempDir()
 	aFP, cFP, bFP := aID.Fingerprint(), cID.Fingerprint(), bID.Fingerprint()
 
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "vol-main")
 	cfg.LogLevel = "error"
 	cfg.Audit.BufferSize = 100
@@ -62,10 +62,10 @@ func startRemoteWriteDualEnd(t *testing.T) remoteWriteDualEnd {
 	if sErr := tunnel.SaveIdentity(bID, cfg.Hub.XferIdentityFile); sErr != nil {
 		t.Fatal(sErr)
 	}
-	cfg.Volumes = []VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot, ACL: &VolumeACLConfig{
-		Mode:   VolumeACLAllow,
+	cfg.Volumes = []config.VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot, ACL: &config.VolumeACLConfig{
+		Mode:   config.VolumeACLAllow,
 		Owners: []string{testDualOwner},
-		MeshReaders: []VolumeMeshReaderConfig{
+		MeshReaders: []config.VolumeMeshReaderConfig{
 			{Node: testReaderNodeA, Fingerprint: aFP, Owner: testDualOwner, Scope: volume.MeshScopeRW},
 			{Node: "nodeC", Fingerprint: cFP, Owner: testDualOwner, Scope: volume.MeshScopeRead},
 		},
@@ -78,11 +78,10 @@ func startRemoteWriteDualEnd(t *testing.T) remoteWriteDualEnd {
 		t.Fatalf("cfg: %v", err)
 	}
 
-	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
-	rctx, rcancel := context.WithCancel(t.Context()) // NOSONAR: S8188 — rcancel 由 teardown 显式调用（88 行）
-	ln, err := StartRemoteWriteListener(rctx, cfg, h, testutil.DiscardLogger())
+	rctx, rcancel := context.WithCancel(t.Context()) // NOSONAR: S8188 — rcancel 由 teardown 显式调用
+	ln, err := StartWriteListener(rctx, newFixture(t, cfg).deps)
 	if err != nil {
-		t.Fatalf("StartRemoteWriteListener: %v", err)
+		t.Fatalf("StartWriteListener: %v", err)
 	}
 	t.Cleanup(func() {
 		rcancel()
@@ -92,7 +91,7 @@ func startRemoteWriteDualEnd(t *testing.T) remoteWriteDualEnd {
 }
 
 // dialRemoteWrite 建 A 侧真链路（语义同只读面的 dialRemoteRead）。
-func dialRemoteWrite(t *testing.T, ln *RemoteWriteListener, aID *tunnel.Identity, bFP string, pins []string) (*tunnel.Tunnel, net.Conn) {
+func dialRemoteWrite(t *testing.T, ln *WriteListener, aID *tunnel.Identity, bFP string, pins []string) (*tunnel.Tunnel, net.Conn) {
 	t.Helper()
 	conn, err := net.Dial("tcp", ln.Addr())
 	if err != nil {
@@ -202,15 +201,15 @@ func TestRemoteWrite_ListenerReadOnlyPeerCannotConnect(t *testing.T) {
 	}
 }
 
-// TestStartRemoteWriteListener_RefusesWithoutWriteScope 钉住 listener 自身的 fail-closed 守卫
+// TestStartWriteListener_RefusesWithoutWriteScope 钉住 listener 自身的 fail-closed 守卫
 // （纵深防御：即使绕过 Config.Validate 直接调用，无「授写」条目也拒绝启动）。
-func TestStartRemoteWriteListener_RefusesWithoutWriteScope(t *testing.T) {
+func TestStartWriteListener_RefusesWithoutWriteScope(t *testing.T) {
 	bID, bErr := tunnel.GenerateIdentity()
 	if bErr != nil {
 		t.Fatal(bErr)
 	}
 	dir := t.TempDir()
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "vol-main")
 	cfg.LogLevel = "error"
 	cfg.Hub.XferIdentityFile = filepath.Join(dir, "b-identity.json")
@@ -218,10 +217,10 @@ func TestStartRemoteWriteListener_RefusesWithoutWriteScope(t *testing.T) {
 		t.Fatal(sErr)
 	}
 	// 只有 scope=read 的条目（故意绕过 Validate 直接调 Start）。
-	cfg.Volumes = []VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot, ACL: &VolumeACLConfig{
-		Mode:   VolumeACLAllow,
+	cfg.Volumes = []config.VolumeConfig{{Name: testDualVol, Root: cfg.StorageRoot, ACL: &config.VolumeACLConfig{
+		Mode:   config.VolumeACLAllow,
 		Owners: []string{testDualOwner},
-		MeshReaders: []VolumeMeshReaderConfig{{
+		MeshReaders: []config.VolumeMeshReaderConfig{{
 			Node: testReaderNodeA, Fingerprint: bID.Fingerprint(), Owner: testDualOwner, Scope: volume.MeshScopeRead,
 		}},
 	}}}
@@ -229,8 +228,7 @@ func TestStartRemoteWriteListener_RefusesWithoutWriteScope(t *testing.T) {
 	cfg.RemoteWrite.Listen = "127.0.0.1:0"
 	cfg.SetDefaults()
 
-	h := newRemoteReadHandlers(t, cfg, &bytes.Buffer{})
-	ln, err := StartRemoteWriteListener(t.Context(), cfg, h, testutil.DiscardLogger())
+	ln, err := StartWriteListener(t.Context(), newFixture(t, cfg).deps)
 	if err == nil {
 		if ln != nil {
 			_ = ln.Close()
@@ -242,7 +240,7 @@ func TestStartRemoteWriteListener_RefusesWithoutWriteScope(t *testing.T) {
 	}
 	// 未启用时返回 (nil, nil)。
 	cfg.RemoteWrite.Enabled = false
-	if ln2, err2 := StartRemoteWriteListener(t.Context(), cfg, h, testutil.DiscardLogger()); err2 != nil || ln2 != nil {
+	if ln2, err2 := StartWriteListener(t.Context(), newFixture(t, cfg).deps); err2 != nil || ln2 != nil {
 		t.Fatalf("未启用应返回 (nil, nil), got ln=%v err=%v", ln2, err2)
 	}
 }
