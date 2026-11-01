@@ -7,21 +7,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestUploadStore_CreateAndGet(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	tmpDir, err := os.MkdirTemp("", "us-test-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := testutil.MkdirTemp(t, "us-test-")
 
 	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
@@ -48,11 +44,7 @@ func TestUploadStore_CreateAndGet(t *testing.T) {
 func TestUploadStore_MarkAndCheck(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	tmpDir, err := os.MkdirTemp("", "us-mark-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := testutil.MkdirTemp(t, "us-mark-")
 
 	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
@@ -77,11 +69,7 @@ func TestUploadStore_MarkAndCheck(t *testing.T) {
 func TestUploadStore_Complete(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	tmpDir, err := os.MkdirTemp("", "us-complete-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := testutil.MkdirTemp(t, "us-complete-")
 
 	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
@@ -96,7 +84,7 @@ func TestUploadStore_Complete(t *testing.T) {
 	}
 
 	// 重复 complete 应返回错误
-	err = us.CompleteSession(session.UploadID)
+	err := us.CompleteSession(session.UploadID)
 	if err == nil {
 		t.Fatal("expected error on double complete")
 	}
@@ -105,11 +93,7 @@ func TestUploadStore_Complete(t *testing.T) {
 func TestUploadStore_MissingChunks(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	tmpDir, err := os.MkdirTemp("", "us-missing-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := testutil.MkdirTemp(t, "us-missing-")
 
 	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
