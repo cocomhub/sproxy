@@ -22,6 +22,17 @@ import (
 	"time"
 )
 
+// sendAllowReq 构造一个带远端地址的请求并交给 handler 处理（限流装配/热更新用例共用；
+// 纯限流用例的同类助手随切片搬入 pkg/server/ratelimit）。
+func sendAllowReq(t *testing.T, h http.Handler, remote, path string) int {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, path, nil)
+	r.RemoteAddr = remote
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w.Code
+}
+
 // TestRateLimitConfig_NewDimensionsYAMLRoundtrip endpoints/endpoint_default/max_concurrent
 // 经 SaveConfig → LoadConfig 的 yaml 往返后保持（window 以纳秒数字序列化，与现有
 // RateLimitConfig.Window 行为一致）。

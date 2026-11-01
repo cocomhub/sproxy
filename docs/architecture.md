@@ -627,7 +627,7 @@ App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不�
 pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 ```
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -762,11 +762,26 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
   退化为空操作）。两个文件按 `//go:build` 拆分（`lock_unix.go` / `lock_windows.go`）。
 - **不是选主语义**：多节点写面唯一化仍走 `pkg/leader` 的 `LeaderElector`（含租约/续租/
   `ErrLeaseLost`/`WriteGuard`）；本包只服务「多进程对同一共享文件 read-modify-write」的两处
-  协调后端（限流计数 `ratelimit_coord_file.go`、带宽字节预算 `bandwidth_coord.go`），
-  为后续 `pkg/server/ratelimit` 切片解除耦合。
+  协调后端（限流计数 `pkg/server/ratelimit` 的 file 后端、带宽字节预算 `bandwidth_coord.go`），
+  为 S15 限流切片解除耦合（已随 S15 落地）。
 - **进程内互斥不在此包**：Unix flock 对同进程内同一文件可重入（不互斥），由调用方的
   `sync.Mutex` 串行化。零 `pkg/*` 依赖 ⇒ L0。
 - 门禁 R23 的存量豁免路径同步为 `pkg/server/filelock/lock_unix.go`。
+
+**S15：限流能力（`pkg/server/ratelimit`）**
+
+- 迁入：`RateLimiter`（滑动窗口 + per-IP 令牌桶 + per-endpoint 规则 + 全局并发信号量 +
+  `Middleware` 放行链 + `UpdateConfig`/`UpdateDimensions` 热更新）、`Coordinator` 抽象与
+  `NewCoordinator` 装配入口、`localCoordinator`（内存）、`fileCoordinator`（文件锁共享计数）、
+  `NormalizeRemoteIP`（per-IP 桶键归一）。
+- **装配面留在 `pkg/server`**：`clientIP.go`（`resolveClientIP` 信任代理语义 + `ipGate` +
+  `clientIPFromRequest`，依赖 `Handlers` 配置快照/logger）、HTTP 面 429 响应契约由装配层用例
+  （`ratelimit_config_test.go`）锁定；切片经 `SetMetrics`/`SetClientIPFn`/`SetCoordinator`
+  接收装配注入，`h.*` 引用 0 个（R6）。
+- 共享辅助上移 `internal/coordkey`：`Sanitize`（协调计数文件 key → 安全文件名）由限流计数
+  与带宽字节预算两个 file 后端共用，避免两份归一规则分叉。
+- 切片自包依赖：`pkg/server/config`(L2)、`pkg/server/metrics`(L2)、`pkg/netutil`(G0)、
+  `pkg/server/filelock`(G0) ⇒ L2；白盒测试随迁，装配/配置接线用例保留装配层。
 
 **P1：装配层策略对象（2026-10-31）**
 
@@ -780,7 +795,7 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 
 ### 剩余三块为何不再按切片下沉（2026-10-30 实测）
 
-`cloud`（2.2k）、`volume`（6.5k）、`files`（3.9k）与已下沉的 14 片**形态不同**，实测判据：
+`cloud`（2.2k）、`volume`（6.5k）、`files`（3.9k）与已下沉的 15 片**形态不同**，实测判据：
 
 | 维度 | 已下沉叶子包 | cloud / volume / files |
 |---|---|---|
@@ -790,8 +805,8 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 
 结论：这三块**就是装配核心本身**（HTTP 编排 + 跨域结算）。真正要降低其维护成本，前置是先把
 「用户可见写策略（`pkg/files`）」「卷容量/配额记账（`pkg/volume/capacity`）」的边界定清，再谈搬运；
-在那之前按切片外移只会新增一层 `Deps` 翻译层，与收敛原则相悖。**已完成的 14 片（装配包
-42,568 → 30,776 行，−27.7%）到此为自然边界。**
+在那之前按切片外移只会新增一层 `Deps` 翻译层，与收敛原则相悖。**已完成的 15 片（装配包
+42,568 → 29,960 行，−29.6%）到此为自然边界。**
 
 ### 新增 Server 切片的步骤
 

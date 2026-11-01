@@ -1127,7 +1127,7 @@ func TestNoncePool_ConsumeRejectsAllIPExceptIssuer(t *testing.T) {
 	}
 }
 
-// normalizedTestIP 与 normalizeRemoteIP 对齐（Strip host:port），测试用归一化辅助。
+// normalizedTestIP 与 ratelimit.NormalizeRemoteIP 对齐（Strip host:port），测试用归一化辅助。
 func normalizedTestIP(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {

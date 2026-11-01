@@ -55,7 +55,6 @@ const (
 	msgArchiveStatFail      = "failed to stat source file"
 	msgGroupNotFound        = "group not found"
 	msgJSONEncode           = "JSON encode error"
-	msgRateLimitExceeded    = "rate limit exceeded"
 	msgShareInvalid         = "分享链接无效或已过期"
 	msgCredGenFailed        = "生成凭据失败"
 	msgNonceMissing         = "nonce 池未装配"

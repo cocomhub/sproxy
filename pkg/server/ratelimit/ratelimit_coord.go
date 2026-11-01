@@ -10,7 +10,7 @@
 //
 // 默认 local 实现（内存计数）保持既有单实例语义，零回归；coordinated 配置
 // 默认关闭，行为与未装配 Coordinator 完全一致。
-package server
+package ratelimit
 
 import (
 	"fmt"
@@ -54,10 +54,10 @@ func newLocalCoordinator(limit int64, window time.Duration) *localCoordinator {
 	}
 }
 
-// newCoordinator 按后端名装配 Coordinator（config 接线入口）。
+// NewCoordinator 按后端名装配 Coordinator（config 接线入口）。
 // backend "local"（默认）→ localCoordinator；"file" → fileCoordinator（需 dir 非空）；
 // 其它值 → 错误（由调用方决定回退 local 或报错）。
-func newCoordinator(backend string, limit int64, window time.Duration, dir string, logger *slog.Logger) (Coordinator, error) {
+func NewCoordinator(backend string, limit int64, window time.Duration, dir string, logger *slog.Logger) (Coordinator, error) {
 	log := slogutil.Default(logger)
 	switch backend {
 	case "", "local":

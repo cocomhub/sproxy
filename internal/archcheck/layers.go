@@ -44,6 +44,10 @@ var Managed = map[string]bool{
 	// S15 前置：跨进程文件锁原语（Lock/Unlock，非选主语义）。只依赖标准库（os/syscall）⇒ 零 pkg/*
 	// 内部依赖；消费方是装配根的文件协调后端（限流计数 / 带宽字节预算）。
 	"github.com/cocomhub/sproxy/pkg/server/filelock": true,
+	// S15：限流能力（滑动窗口 + per-IP 令牌桶 + 端点维度 + 并发信号量 + 协调后端）。
+	// 只依赖 config/metrics（同为 server 作用域）、netutil 与 internal/coordkey/slogutil ⇒
+	// 零反向依赖；装配根持有 *RateLimiter 并注入 metrics/clientIPFn/coordinator。
+	"github.com/cocomhub/sproxy/pkg/server/ratelimit": true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -176,6 +180,9 @@ var Levels = map[string]int{
 	// 跨进程文件锁原语（server 作用域）：只导入标准库 ⇒ 零 pkg/* 内部依赖 ⇒ G0。
 	// 与 scheduler 同形：装配根（L2）与同子树切片（≥G0）均可导入。
 	"github.com/cocomhub/sproxy/pkg/server/filelock": 0,
+	// 限流能力（server 作用域）：依赖 config(L2)/metrics(L2)/netutil(G0)/filelock(G0) ⇒ 取
+	// max+0 = G2（同层 import 合法）；装配根 import 它，同层合法。
+	"github.com/cocomhub/sproxy/pkg/server/ratelimit": 2,
 
 	// ---- 子包（L 取父域之上，由依赖实测确定）----
 	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
@@ -248,6 +255,7 @@ var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/server/archive":    "github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/server/federation": "github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/server/filelock":   "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/ratelimit":  "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。

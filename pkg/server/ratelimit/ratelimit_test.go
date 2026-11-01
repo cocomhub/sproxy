@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package ratelimit
 
 import (
 	"net/http"
@@ -256,7 +256,7 @@ func TestRateLimiter_IPPortNormalizedInBucketKey(t *testing.T) {
 	}
 }
 
-// TestNormalizeRemoteIP 覆盖 normalizeRemoteIP 的归一化矩阵。
+// TestNormalizeRemoteIP 覆盖 NormalizeRemoteIP 的归一化矩阵。
 func TestNormalizeRemoteIP(t *testing.T) {
 	tests := []struct {
 		in, want string
@@ -268,13 +268,13 @@ func TestNormalizeRemoteIP(t *testing.T) {
 		{"", ""}, // 空：原样
 	}
 	for _, tt := range tests {
-		if got := normalizeRemoteIP(tt.in); got != tt.want {
-			t.Errorf("normalizeRemoteIP(%q) = %q, want %q", tt.in, got, tt.want)
+		if got := NormalizeRemoteIP(tt.in); got != tt.want {
+			t.Errorf("NormalizeRemoteIP(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 	// SplitHostPort 失败路径（畸形输入如 "no-colon-here"）：无端口可拆，
 	// 解析失败 → 回退原值（per-IP 桶用陌生键，仍受全局窗口兜底）。
-	if got := normalizeRemoteIP("no-colon-here"); got != "no-colon-here" {
-		t.Errorf("normalizeRemoteIP(畸形) = %q, want 原值", got)
+	if got := NormalizeRemoteIP("no-colon-here"); got != "no-colon-here" {
+		t.Errorf("NormalizeRemoteIP(畸形) = %q, want 原值", got)
 	}
 }

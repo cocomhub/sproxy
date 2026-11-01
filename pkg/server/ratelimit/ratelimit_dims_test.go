@@ -1,13 +1,15 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package ratelimit
 
 import (
 	"net/http"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server/config"
 )
 
 // TestRateLimiter_AllowEndpoint_NoRulePasses 无端点规则（默认零配置）→ 任意路径透传 true。
@@ -26,10 +28,10 @@ func TestRateLimiter_AllowEndpoint_NoRulePasses(t *testing.T) {
 func TestRateLimiter_AllowEndpoint_ExactPrefixBoundary(t *testing.T) {
 	t.Parallel()
 	rl := NewRateLimiter(1000, time.Second, nil)
-	rl.UpdateDimensions(map[string]EndpointLimit{
+	rl.UpdateDimensions(map[string]config.EndpointLimit{
 		"/download":     {Limit: 2, Window: time.Hour},
 		"/download/sub": {Limit: 5, Window: time.Hour},
-	}, EndpointLimit{Limit: 1, Window: time.Hour}, 0)
+	}, config.EndpointLimit{Limit: 1, Window: time.Hour}, 0)
 
 	// 精确匹配 /download（limit=2）
 	for i := range 2 {
@@ -80,7 +82,7 @@ func TestRateLimiter_AllowEndpoint_ExactPrefixBoundary(t *testing.T) {
 func TestRateLimiter_ConcurrentLimit_Basic(t *testing.T) {
 	t.Parallel()
 	rl := NewRateLimiter(1000, time.Second, nil)
-	rl.UpdateDimensions(nil, EndpointLimit{}, 3)
+	rl.UpdateDimensions(nil, config.EndpointLimit{}, 3)
 	for i := range 3 {
 		if !rl.AcquireConcurrent() {
 			t.Fatalf("acquire %d: want true", i)
@@ -104,7 +106,7 @@ func TestRateLimiter_ConcurrentLimit_Basic(t *testing.T) {
 func TestRateLimiter_Middleware_ConcurrentLimit429(t *testing.T) {
 	t.Parallel()
 	rl := NewRateLimiter(1000, time.Second, nil)
-	rl.UpdateDimensions(nil, EndpointLimit{}, 2)
+	rl.UpdateDimensions(nil, config.EndpointLimit{}, 2)
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	codes := make(chan int, 2)
@@ -146,9 +148,9 @@ func TestRateLimiter_Middleware_ConcurrentLimit429(t *testing.T) {
 func TestRateLimiter_Middleware_Endpoint429AndPassThrough(t *testing.T) {
 	t.Parallel()
 	rl := NewRateLimiter(1000, time.Hour, nil)
-	rl.UpdateDimensions(map[string]EndpointLimit{
+	rl.UpdateDimensions(map[string]config.EndpointLimit{
 		"/download": {Limit: 1, Window: time.Hour},
-	}, EndpointLimit{}, 0)
+	}, config.EndpointLimit{}, 0)
 	h := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -204,9 +206,9 @@ func TestRateLimiter_UpdateDimensions_HotReload(t *testing.T) {
 			t.Fatalf("初始 req %d: want 200, got %d", i, code)
 		}
 	}
-	rl.UpdateDimensions(map[string]EndpointLimit{
+	rl.UpdateDimensions(map[string]config.EndpointLimit{
 		"/download": {Limit: 1, Window: time.Hour},
-	}, EndpointLimit{}, 0)
+	}, config.EndpointLimit{}, 0)
 	if code := sendAllowReq(t, h, "192.0.2.1:1", "/download"); code != http.StatusOK {
 		t.Fatalf("规则后第 1 次: want 200, got %d", code)
 	}
@@ -214,7 +216,7 @@ func TestRateLimiter_UpdateDimensions_HotReload(t *testing.T) {
 		t.Fatalf("规则后第 2 次: want 429 (热更新规则生效), got %d", code)
 	}
 	// 清除规则 → 恢复放行
-	rl.UpdateDimensions(nil, EndpointLimit{}, 0)
+	rl.UpdateDimensions(nil, config.EndpointLimit{}, 0)
 	if code := sendAllowReq(t, h, "192.0.2.1:1", "/download"); code != http.StatusOK {
 		t.Fatalf("清除规则后: want 200, got %d", code)
 	}
@@ -225,7 +227,7 @@ func TestRateLimiter_UpdateDimensions_HotReload(t *testing.T) {
 func TestRateLimiter_ConcurrentAcquireRelease_Race(t *testing.T) {
 	t.Parallel()
 	rl := NewRateLimiter(1000, time.Second, nil)
-	rl.UpdateDimensions(nil, EndpointLimit{}, 8)
+	rl.UpdateDimensions(nil, config.EndpointLimit{}, 8)
 	var wg sync.WaitGroup
 	for range 16 {
 		wg.Go(func() {

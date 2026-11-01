@@ -31,6 +31,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/alerts"
 	"github.com/cocomhub/sproxy/pkg/server/config"
+	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
 	"github.com/cocomhub/sproxy/pkg/server/scheduler"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
@@ -719,9 +720,9 @@ func (h *Handlers) buildTunnelHandlers(localMux *http.ServeMux, cfg *Config, log
 	var apiHandler http.Handler = localMux
 	apiHandler = GzipMiddleware(log.With("component", "gzip"))(apiHandler)
 	if cfg.RateLimit.Enabled {
-		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
+		rl := ratelimit.NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
 		// per-IP 桶键升级（设计文档 ip-whitelist §5）：装配了 trusted_proxies 时按真实
-		// 客户端 IP 计量（resolveClientIP）；未配置时 SetClientIPFn 不设 → normalizeRemoteIP
+		// 客户端 IP 计量（resolveClientIP）；未配置时 SetClientIPFn 不设 → ratelimit.NormalizeRemoteIP
 		// 等价（零回归）。
 		if len(cfg.Auth.TrustedProxies) > 0 {
 			rl.SetClientIPFn(func(r *http.Request) string {
@@ -731,7 +732,7 @@ func (h *Handlers) buildTunnelHandlers(localMux *http.ServeMux, cfg *Config, log
 		// 多实例协调后端：coordinated 开启时按 backend 装配（file = 共享 storage 计数）；
 		// 装配失败（未知 backend / file 缺 dir）回退 local + 警告（fail-open 不阻断启动）。
 		if cfg.RateLimit.Coordinated {
-			if coord, cerr := newCoordinator(cfg.RateLimit.Backend, int64(cfg.RateLimit.Requests), cfg.RateLimit.Window, h.globalRoot.AbsPath(), log); cerr != nil {
+			if coord, cerr := ratelimit.NewCoordinator(cfg.RateLimit.Backend, int64(cfg.RateLimit.Requests), cfg.RateLimit.Window, h.globalRoot.AbsPath(), log); cerr != nil {
 				log.Warn("rate limit coordinator setup failed, fallback to local", "error", cerr)
 			} else {
 				rl.SetCoordinator(coord)
@@ -742,7 +743,7 @@ func (h *Handlers) buildTunnelHandlers(localMux *http.ServeMux, cfg *Config, log
 		// = 新维度关闭（零回归，放行链与现状逐字一致）。
 		rl.UpdateDimensions(cfg.RateLimit.Endpoints, cfg.RateLimit.EndpointDefault, cfg.RateLimit.MaxConcurrent)
 		// 拒绝计数指标装配（/metrics 输出 sproxy_rate_limit_rejected_total）。
-		rl.metrics = h.metrics
+		rl.SetMetrics(h.metrics)
 		h.rateLimiter = rl
 		apiHandler = rl.Middleware(apiHandler)
 	}
@@ -794,9 +795,9 @@ func registerHubRoutes(h *Handlers, srvMux, localMux *http.ServeMux, opts Regist
 		broker := h.signalBroker
 		// S44：信令 POST 单独挂限流（独立实例，与文件传输隔离配额），防被攻破
 		// 的已准入节点洪泛注入信令；GET poll 长轮询不挂（客户端高频轮询会误触发限流）。
-		var signalPostRL *RateLimiter
+		var signalPostRL *ratelimit.RateLimiter
 		if cfg.RateLimit.Enabled {
-			signalPostRL = NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "signal_rate_limiter"))
+			signalPostRL = ratelimit.NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "signal_rate_limiter"))
 			h.signalPostRL = signalPostRL
 		}
 		signalPost := func(kind hub.SignalKind) http.HandlerFunc {

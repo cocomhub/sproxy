@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/coordkey"
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/server/filelock"
 )
@@ -63,7 +64,7 @@ func newByteFileCoordinator(quota int64, window time.Duration, dir string, logge
 }
 
 // Consume 尝试在协调后端消耗 n 字节配额：窗口内累计 + n ≤ quota 则累加并返回 true；
-// 超限返回 false（调用方等待重试）。key 为 owner（经 sanitizeKey 归一为安全文件名）。
+// 超限返回 false（调用方等待重试）。key 为 owner（经 coordkey.Sanitize 归一为安全文件名）。
 func (c *byteFileCoordinator) Consume(key string, n int64) bool {
 	if n <= 0 {
 		return true
@@ -76,7 +77,7 @@ func (c *byteFileCoordinator) Consume(key string, n int64) bool {
 		c.logger.Warn("bandwidth coord dir create failed, allowing", "key", key, "error", err)
 		return true
 	}
-	path := filepath.Join(sub, sanitizeKey(key))
+	path := filepath.Join(sub, coordkey.Sanitize(key))
 	now := time.Now()
 	start := now.UnixNano()
 

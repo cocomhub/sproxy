@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package ratelimit
 
 import (
 	"fmt"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestCoordinatedRateLimit_E2E 验证 coordinated=file 时，同一 storage 目录下两个
@@ -29,10 +31,10 @@ func TestCoordinatedRateLimit_E2E(t *testing.T) {
 	dir := t.TempDir()
 
 	buildRL := func() *RateLimiter {
-		rl := NewRateLimiter(3, 60*time.Second, testLogger())
-		coord, err := newCoordinator("file", 3, 60*time.Second, dir, testLogger())
+		rl := NewRateLimiter(3, 60*time.Second, testutil.DiscardLogger())
+		coord, err := NewCoordinator("file", 3, 60*time.Second, dir, testutil.DiscardLogger())
 		if err != nil {
-			t.Fatalf("newCoordinator(file): %v", err)
+			t.Fatalf("NewCoordinator(file): %v", err)
 		}
 		rl.SetCoordinator(coord)
 		return rl
@@ -64,7 +66,7 @@ func TestCoordinatedRateLimit_E2E(t *testing.T) {
 // 不装配协调后端（SetCoordinator(nil)），限流行为与既有单实例一致。
 func TestCoordinatedRateLimit_DisabledNoCoord(t *testing.T) {
 	t.Parallel()
-	rl := NewRateLimiter(2, 60*time.Second, testLogger())
+	rl := NewRateLimiter(2, 60*time.Second, testutil.DiscardLogger())
 	// 未装配 coordinator → Middleware 不调用协调后端。
 	call := func(wantStatus int, label string) {
 		t.Helper()
@@ -84,10 +86,10 @@ func TestCoordinatedRateLimit_DisabledNoCoord(t *testing.T) {
 }
 
 // TestCoordinatedRateLimit_RoutesFallbackLocal 验证未知 backend 时装配回退
-// local（fail-open 不阻断启动）——newCoordinator 返回错误，装配点回退。
+// local（fail-open 不阻断启动）——NewCoordinator 返回错误，装配点回退。
 func TestCoordinatedRateLimit_RoutesFallbackLocal(t *testing.T) {
 	t.Parallel()
-	_, err := newCoordinator("bogus", 5, time.Second, t.TempDir(), testLogger())
+	_, err := NewCoordinator("bogus", 5, time.Second, t.TempDir(), testutil.DiscardLogger())
 	if err == nil {
 		t.Fatal("bogus backend should error")
 	}

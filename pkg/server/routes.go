@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/server/alerts"
 	"github.com/cocomhub/sproxy/pkg/server/notify"
+	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -625,7 +626,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 门禁拒绝，见 registerCredentialHandler）。
 	//
 	// registerLimiter 必须在 localMux 装配之前、localMux 侧复用同一限频器实例创建。
-	h.registerLimiter = NewRateLimiter(5, time.Minute, log.With("component", "register_limiter"))
+	h.registerLimiter = ratelimit.NewRateLimiter(5, time.Minute, log.With("component", "register_limiter"))
 	registerPublic := h.registerLimiter.Middleware(http.HandlerFunc(h.registerCredentialHandler))
 	// 公开凭据端点（register/nonce/login）同挂 IP 门（设计文档 ip-whitelist §4）：
 	// 白名单部署要求所有入口一致——公开端点不经 authMiddleware，单独包 ipGate。
@@ -641,7 +642,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	if opts.TotpRateLimit > 0 {
 		totpPerMin = opts.TotpRateLimit
 	}
-	h.totpLimiter = NewRateLimiter(totpPerMin, time.Minute, log.With("component", "totp_limiter"))
+	h.totpLimiter = ratelimit.NewRateLimiter(totpPerMin, time.Minute, log.With("component", "totp_limiter"))
 	srvMux.Handle("POST /api/credentials/nonce", h.ipGate(h.totpLimiter.Middleware(http.HandlerFunc(h.nonceHandler))))
 
 	// TOTP 登录端点（task 9）：公开端点 + 独立限频 loginLimiter（与 totpLimiter
@@ -653,7 +654,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	if opts.LoginRateLimit > 0 {
 		loginPerMin = opts.LoginRateLimit
 	}
-	h.loginLimiter = NewRateLimiter(loginPerMin, time.Minute, log.With("component", "login_limiter"))
+	h.loginLimiter = ratelimit.NewRateLimiter(loginPerMin, time.Minute, log.With("component", "login_limiter"))
 	srvMux.Handle("POST /api/credentials/login", h.ipGate(h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler))))
 
 	// 外部认证（OIDC/LDAP，roadmap 11.7-⑥）登录面：主 mux 公开注册（不挂
