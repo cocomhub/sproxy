@@ -185,7 +185,7 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		Result: AuditResultSuccess, Detail: fmt.Sprintf("tags=%d", len(tags)),
 	})
 	body, _ := json.Marshal(map[string]any{"tags": tags})
-	_ = ai.Cache().Put(r.Context(), owner, filename, "tag", mtime, body)
+	_ = ai.Cache().Put(r.Context(), owner, cacheKey, "tag", mtime, body)
 	httpjson.WriteBody(w, http.StatusOK, body)
 }
 
