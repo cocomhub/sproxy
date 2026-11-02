@@ -124,6 +124,10 @@ func classifiedRoutes(t *testing.T) map[string]string {
 // 否则 R38 会把「已迁入子包的路由」当成已删除（假红）或漏检（假绿）。
 var routeTableFiles = []string{
 	"pkg/server/cloudtasks/routes.go",
+	"pkg/server/share/routes.go",
+	"pkg/server/notify/routes.go",
+	"pkg/server/ai/routes.go",
+	"pkg/server/verify/routes.go",
 }
 
 // routeTablePrefixRe 匹配路由表文件里的组前缀常量字面量。

@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/leader"
+	"github.com/cocomhub/sproxy/pkg/server/ai"
 	"github.com/cocomhub/sproxy/pkg/server/alerts"
 	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/server/metrics"
@@ -33,6 +34,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
 	"github.com/cocomhub/sproxy/pkg/server/router"
 	"github.com/cocomhub/sproxy/pkg/server/share"
+	"github.com/cocomhub/sproxy/pkg/server/verify"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -372,23 +374,31 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/audit/export", h.auditExportHandler)
 	// 冷段区间读（取证式随机读；管理员门在 handler 内，白名单来自 ListCold）。
 	localMux.HandleFunc("GET /api/audit/cold/seg", h.auditColdSegHandler)
-	// 通知中心运维（roadmap P0）：历史查看 + 渠道自检（隧道内层裸注册同 audit 模式）。
-	// RSS/Atom 订阅端点（roadmap 11.7-⑦）：feed 是订阅源——localMux 裸注册
-	// （隧道加密即认证）；主 mux 侧另注册公开面（feed_token 门禁在 handler 内，
-	// 无 authMiddleware，仿 /metrics 语义）。
-	localMux.HandleFunc("GET /api/notify/history", h.notifyHistoryHandler)
-	localMux.HandleFunc("POST /api/notify/test", h.notifyTestHandler)
-	localMux.HandleFunc("GET /api/notify/feed", h.notifyFeedHandler)
-	// AI 文件洞察端点（roadmap 11.9-⑤；未装配（ai.insight.enabled=false）→ 400 零回归）。
-	localMux.HandleFunc("POST /api/ai/summarize", func(w http.ResponseWriter, r *http.Request) {
-		h.handleAISummarize(w, r, ownerFromRequest(r), h.aiInsight)
-	})
-	localMux.HandleFunc("POST /api/ai/tag", func(w http.ResponseWriter, r *http.Request) {
-		h.handleAITag(w, r, ownerFromRequest(r), h.aiInsight)
-	})
-	localMux.HandleFunc("GET /api/ai/quota", h.handleAIQuota)
-	localMux.HandleFunc("GET /api/ai/privacy", h.handleAIPrivacy)
-	localMux.HandleFunc("POST /api/ai/privacy/purge", h.handleAIPrivacyPurge)
+	// 通知中心 HTTP 面（roadmap P0 / 11.7-⑦）：路由表由 pkg/server/notify 声明
+	// （前缀 + 相对路径 + 两端分类）。历史/渠道自检外部面 auth（SproxySig 验签），
+	// feed 是订阅源 ⇒ 公开裸注册（feed_token 门禁在 handler 内，仿 /metrics 语义）；
+	// 隧道内层三条均 tunnel（隧道加密即认证）。
+	router.Register(srvMux, localMux, notify.RoutePrefix, notify.Routes(notify.Endpoints{
+		History: h.notifyHistoryHandler,
+		Test:    h.notifyTestHandler,
+		Feed:    h.notifyFeedHandler,
+	}), bindHandler, h.routeWrapper)
+
+	// AI 文件洞察端点（roadmap 11.9-⑤；未装配（ai.insight.enabled=false）→ 400 零回归）：
+	// 路由表由 pkg/server/ai 声明。summarize/tag 需要 ctx→owner 派生与 aiInsight
+	// 装配态，闭包构造留在装配层，经 Endpoints 绑定；外部面 quota/privacy 为 public、
+	// summarize/tag 不注册（ClassNone），隧道内层全部 tunnel。
+	router.Register(srvMux, localMux, ai.RoutePrefix, ai.Routes(ai.Endpoints{
+		Summarize: func(w http.ResponseWriter, r *http.Request) {
+			h.handleAISummarize(w, r, ownerFromRequest(r), h.aiInsight)
+		},
+		Tag: func(w http.ResponseWriter, r *http.Request) {
+			h.handleAITag(w, r, ownerFromRequest(r), h.aiInsight)
+		},
+		Quota:        h.handleAIQuota,
+		Privacy:      h.handleAIPrivacy,
+		PrivacyPurge: h.handleAIPrivacyPurge,
+	}), bindHandler, h.routeWrapper)
 	localMux.HandleFunc("GET /api/cluster/nodes", h.handleClusterNodes)
 	localMux.HandleFunc("GET /api/cluster/self", h.handleClusterSelf)
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
@@ -440,9 +450,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （Role∈{user,admin}，一字不改零回归）。
 	// 全仓 checksum 巡检（roadmap 11.3-⑩）：POST /api/verify 是运维审计面，走
 	// authMiddleware（SproxySig 验签）即可——与 /api/stats 同模式，不做文件组门禁
-	// （巡检读全卷台账+重算，非 per-file 用户面）。
-	localMux.HandleFunc("POST /api/verify", h.verifyHandler)
-	srvMux.HandleFunc("POST /api/verify", h.authMiddleware(h.verifyHandler))
+	// （巡检读全卷台账+重算，非 per-file 用户面）。路由表由 pkg/server/verify 声明。
+	router.Register(srvMux, localMux, verify.RoutePrefix, verify.Routes(h.verifyHandler),
+		bindHandler, h.routeWrapper)
 	// checksum 台账运维修复面（§15.1 步骤②）：从对象 meta 重建台账（部分缺失时显式触发）。
 	localMux.HandleFunc("POST /api/checksums/rebuild", h.rebuildChecksumsHandler)
 	srvMux.HandleFunc("POST /api/checksums/rebuild", h.authMiddleware(h.rebuildChecksumsHandler))
@@ -466,9 +476,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("PUT /api/files/meta", h.fileRoute(h.updateFileMeta))
 	srvMux.HandleFunc("GET /api/files/meta", h.fileRouteRead(h.getFileMeta))
 	srvMux.HandleFunc("GET /api/search/semantic", h.fileRouteRead(h.semanticSearchHandler))
-	srvMux.HandleFunc("GET /api/ai/quota", h.handleAIQuota)
-	srvMux.HandleFunc("GET /api/ai/privacy", h.handleAIPrivacy)
-	srvMux.HandleFunc("POST /api/ai/privacy/purge", h.handleAIPrivacyPurge)
 	srvMux.HandleFunc("GET /api/cluster/nodes", h.handleClusterNodes)
 	srvMux.HandleFunc("GET /api/cluster/self", h.handleClusterSelf)
 	srvMux.HandleFunc("POST /api/tags", h.fileRoute(h.tagsHandler))
@@ -523,19 +530,18 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// fileRoute 的角色门禁（与 /api/mesh/status 同款；挂 fileRoute 反而会因不在文件组而 500）。
 	srvMux.HandleFunc("GET /api/mesh/acl", h.authMiddleware(h.meshACLHandler))
 	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
-	srvMux.HandleFunc("POST /api/share", h.fileRoute(h.createShareHandler))
+	// 公网分发端点：独立前缀（/s）、仅主 mux、public 裸注册，**不属分享管理组**
+	// （share.RoutePrefix 为 /api），故留在装配层注册。
 	srvMux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
-	// 分享管理 API（localMux：隧道内部使用）
-	localMux.HandleFunc("POST /api/share", h.createShareHandler)
-	localMux.HandleFunc("GET /api/shares", h.listSharesHandler)
-	localMux.HandleFunc("DELETE /api/shares/{token}", h.revokeShareHandler)
-
-	// 分享管理 API（主 mux：Bearer auth + requireRole 门禁）。只读子组：
-	// GET /api/shares（列表，reader 可读）；写子组：DELETE /api/shares/{token}
-	// （撤销，至少 user）。
-	srvMux.HandleFunc("GET /api/shares", h.fileRouteRead(h.listSharesHandler))
-	srvMux.HandleFunc("DELETE /api/shares/{token}", h.fileRoute(h.revokeShareHandler))
+	// 分享管理 API：路由表由 pkg/server/share 声明（前缀 + 相对路径 + 两端分类）。
+	// 主 mux 走文件组角色门（创建/撤销 = 写子组 user，列表 = 只读子组 reader）；
+	// 隧道内层三条均 tunnel（隧道加密即认证，裸注册）。
+	router.Register(srvMux, localMux, share.RoutePrefix, share.Routes(share.Endpoints{
+		Create: h.createShareHandler,
+		List:   h.listSharesHandler,
+		Revoke: h.revokeShareHandler,
+	}), bindHandler, h.routeWrapper)
 
 	// 云任务 CRUD（P1-c S2a）已迁入 pkg/server/cloudtasks：HTTP 面在包内自洽，owner
 	// （任务归属与可见性）由 cloudTaskHandler 在装配层从认证上下文解析后显式传入
@@ -595,12 +601,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/audit/export", h.authMiddleware(h.auditExportHandler))
 	// 冷段区间读（同上；主面经 authMiddleware，管理员门在 handler 内）。
 	srvMux.HandleFunc("GET /api/audit/cold/seg", h.authMiddleware(h.auditColdSegHandler))
-	srvMux.HandleFunc("GET /api/notify/history", h.authMiddleware(h.notifyHistoryHandler))
-	srvMux.HandleFunc("POST /api/notify/test", h.authMiddleware(h.notifyTestHandler))
-	// 通知订阅端点（roadmap 11.7-⑦）：公开面（feed 是订阅源，阅读器抓取不带业务
-	// 凭据）——feed_token 门禁在 handler 内（空=公开；非空=?token/Bearer，常量时间
-	// 比较），不挂 authMiddleware（仿 /metrics 语义；独立于 SproxySig/APIKey）。
-	srvMux.HandleFunc("GET /api/notify/feed", h.notifyFeedHandler)
 
 	// 公开注册端点（4B DEC-F）：唯一用户入口，不挂 authMiddleware（主 mux +
 	// localMux 双注册，仿 /healthz 层）——仅经独立限频 registerLimiter 收口。
@@ -985,6 +985,11 @@ func (h *Handlers) fileRouteRead(handler http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
+// bindHandler 是「H 已是装配层 http.HandlerFunc」的路由组的 bind 参数（恒等映射）。
+// 与 cloudtasks 的方法表达式不同，这些包的 handler 全在装配层（含 ctx→actor 闭包），
+// 故经 Endpoints 绑定后无需再转换。
+func bindHandler(fn http.HandlerFunc) http.HandlerFunc { return fn }
+
 // routeWrapper 把路由分类映射为装配层的包装器（供 router.Register 使用）。
 //
 // **分类 → 包装策略的唯一定义处**：子包只声明分类，不能自带包装器，因此「是否鉴权、
@@ -994,6 +999,12 @@ func (h *Handlers) routeWrapper(c router.Class) func(http.HandlerFunc) http.Hand
 	switch c {
 	case router.ClassAuth:
 		return h.authMiddleware
+	case router.ClassUser:
+		return h.fileRoute
+	case router.ClassReader:
+		return h.fileRouteRead
+	case router.ClassPublic:
+		return nil // 公开端裸注册（handler 内自带门禁，如 feed_token / 公开订阅源）
 	case router.ClassTunnel:
 		return nil // 隧道内层裸注册（隧道加密即认证，与既有 localMux 语义一致）
 	}

@@ -891,6 +891,17 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   `pkg/server/cloudtasks`，`Deps` 恒 8 字段（7 窄接口 + Logger）、接口方法 40 个；
   `pkg/server` 42,568 → **31,221 行（−26.6%）**。设计见 `docs/designs/2026-10-31-cloudtasks-deps-mapping.md`。
 
+**路由表数据化与下放（`pkg/server/router`，2026-11-02）**
+
+- `router.Route[H]` + `router.Register`：子包用 `RoutePrefix` 常量 + `Routes()` 字面量表声明自己的
+  URL 子路径与**两端分类**，装配层一次注册到 srvMux/localMux（双 mux 不再各写一遍）；
+  「分类 → 包装器」映射留在 `h.routeWrapper`（装配层唯一决定处，未登记分类 panic）。
+- 已下放：`cloudtasks`（16 条，试点 #1002）、`share`（3 条）、`notify`（3 条）、`ai`（5 条）、
+  `verify`（1 条）。`GET /s/{token}` 是独立前缀的公网分发面，不属分享管理组，留在装配层注册。
+- 门禁 **R38** 扩展解析 `pkg/server/*/routes.go` 的 `RoutePrefix` + 字面量表（`routeTableFiles`），
+  迁移后仍与 `route_classes.tsv` 双向比对，deny-by-default 不变。
+- 设计见 `docs/designs/2026-11-02-route-group-registration.md`。
+
 ### 剩余三块为何不再按切片下沉（2026-10-30 实测）
 
 `cloud`（2.2k）、`volume`（6.5k）、`files`（3.9k）与已下沉的 15 片**形态不同**，实测判据：
