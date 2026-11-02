@@ -55,6 +55,10 @@ var Managed = map[string]bool{
 	// 配额/后端构造）。依赖 volume/enclosure、volume/registry、storage、sync、quota（下层/同层）
 	// ⇒ 零反向依赖；装配态（卷集）经显式参数传入，不持有 *Handlers。
 	"github.com/cocomhub/sproxy/pkg/server/enclosure": true,
+	// T3-a：凭据的存储后端与主密钥解析（StateStore 快照 store / 加密包装 / master key 与
+	// Vault token 来源解析 / Ring 凭据选取）。依赖 accesskey(G0)/state(G0)/storage(G0)/
+	// config(L2) ⇒ 零反向依赖；启动编排与凭据轮换仍留装配层。
+	"github.com/cocomhub/sproxy/pkg/server/credentials": true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -196,6 +200,9 @@ var Levels = map[string]int{
 	// 封装卷翻译与装配（server 作用域 T3-b）：依赖 volume/enclosure(L2)/volume/registry(L2)/
 	// storage(0)/sync(0)/quota(0) ⇒ 取 max+0 = G2（与装配根同层，装配根 import 它合法）。
 	"github.com/cocomhub/sproxy/pkg/server/enclosure": 2,
+	// 凭据存储与主密钥解析（server 作用域 T3-a）：依赖 config(L2)/accesskey(0)/state(0)/
+	// storage(0) ⇒ 取 max+0 = G2（与装配根同层，装配根与 cmd/sproxy 均可 import）。
+	"github.com/cocomhub/sproxy/pkg/server/credentials": 2,
 
 	// ---- 子包（L 取父域之上，由依赖实测确定）----
 	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
@@ -253,24 +260,25 @@ var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/volume/registry":  "github.com/cocomhub/sproxy/pkg/volume",
 	// 服务端配置是 pkg/server 的子包：只允许 pkg/server 子树与装配层导入
 	// （Global 包反向导入它会被 R2 拦下——这是「server 作用域」的可执行边界）。
-	"github.com/cocomhub/sproxy/pkg/server/config":     "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/cloudtasks": "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/notify":     "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/scheduler":  "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/s3":         "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/dav":        "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/ai":         "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/share":      "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/metrics":    "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/verify":     "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/ops":        "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/alerts":     "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/archive":    "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/federation": "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/filelock":   "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/ratelimit":  "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/remotefs":   "github.com/cocomhub/sproxy/pkg/server",
-	"github.com/cocomhub/sproxy/pkg/server/enclosure":  "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/config":      "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks":  "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/notify":      "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/scheduler":   "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/s3":          "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/dav":         "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/ai":          "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/share":       "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/metrics":     "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/verify":      "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/ops":         "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/alerts":      "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/archive":     "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/federation":  "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/filelock":    "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/ratelimit":   "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/remotefs":    "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/enclosure":   "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/credentials": "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。

@@ -66,6 +66,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 | 周期任务调度 | `pkg/server/scheduler` | `Scheduler.Register/Start/Stop`、`Task` | **server 作用域**（零 pkg/* 依赖，L0）；任务注册内容留在装配层 |
 | 通知中心（规则路由/去抖/重试/渠道/feed 渲染） | `pkg/server/notify` | `NotifyCenter.Dispatch` / `NewFromConfig` / `History` | **server 作用域**；只接受 `notify.Event`（装配层在 RecordAudit 做字段映射）；`pkg/server/notify_alias.go` 为迁移期兼容层 |
 | 服务端配置 schema / 校验 / 默认值 | `pkg/server/config` | `Config` / `Default` / `SetDefaults` / `Validate` / `LoadFromProvider` | **server 作用域**（仅 sproxy 服务端）；`pkg/server/config_alias.go` 是迁移期兼容层（新代码直接 import 本包） |
+| 凭据存储与主密钥解析 | `pkg/server/credentials` | `BootstrapServerCredentials` / `ResolveCredentialMasterKey` / `BestCredential` / `BestFirstCredential` | **server 作用域**；边界＝**快照 store（StateStore 后端/双读单写/静态加密包装）+ 主密钥与 Vault token 来源解析 + Ring 凭据选取**。启动编排（`bootstrapCredentials`/`SelfCredential`/凭据轮换循环）仍留装配层；不反向依赖 `pkg/server`（R6） |
 
 ### 收敛原则（必须遵守）
 

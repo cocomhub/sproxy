@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package credentials
 
 import (
 	"bytes"
@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/server/config"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/testutil/vaultmock"
 )
 
@@ -37,7 +39,7 @@ func writeMasterKeyFile(t *testing.T, dir string) ([]byte, string) {
 func TestBootstrapServerCredentials_EncryptEnabled(t *testing.T) {
 	dir := t.TempDir()
 	_, mkPath := writeMasterKeyFile(t, dir)
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
 	cfg.CredentialStore.Encrypt = true
 	cfg.CredentialStore.MasterKeyFile = mkPath
@@ -58,8 +60,8 @@ func TestBootstrapServerCredentials_EncryptEnabled(t *testing.T) {
 	if serr := enc.Save(orig); serr != nil {
 		t.Fatalf("Save: %v", serr)
 	}
-	metaDir := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta")
-	disk, err := os.ReadFile(filepath.Join(metaDir, fileNameCredStore))
+	metaDir := filepath.Join(cfg.StorageRoot, storage.AnonymousOwner, "meta")
+	disk, err := os.ReadFile(filepath.Join(metaDir, credentialsFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +88,7 @@ func TestBootstrapServerCredentials_EncryptEnabled(t *testing.T) {
 func TestBootstrapServerCredentials_EncryptWrongKey(t *testing.T) {
 	dir := t.TempDir()
 	_, mkPath := writeMasterKeyFile(t, dir)
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
 	cfg.CredentialStore.Encrypt = true
 	cfg.CredentialStore.MasterKeyFile = mkPath
@@ -113,8 +115,8 @@ func TestBootstrapServerCredentials_EncryptWrongKey(t *testing.T) {
 // TestBootstrapServerCredentials_EncryptMissingKey 验证 encrypt=true 但 master_key_file
 // 与环境变量均缺省时 Bootstrap 报错（fail-fast）。
 func TestBootstrapServerCredentials_EncryptMissingKey(t *testing.T) {
-	t.Setenv(CredentialMasterKeyEnv, "")
-	cfg := Default()
+	t.Setenv(config.CredentialMasterKeyEnv, "")
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(t.TempDir(), "storage")
 	cfg.CredentialStore.Encrypt = true
 	if _, _, err := BootstrapServerCredentials(cfg, nil); err == nil {
@@ -125,15 +127,15 @@ func TestBootstrapServerCredentials_EncryptMissingKey(t *testing.T) {
 }
 
 // TestResolveCredentialMasterKey_EnvFallback 验证 master key 解析来源顺序：master_key_file
-// 优先；为空时回落环境变量 CredentialMasterKeyEnv（base64 32B）；环境变量非法报错。
+// 优先；为空时回落环境变量 config.CredentialMasterKeyEnv（base64 32B）；环境变量非法报错。
 func TestResolveCredentialMasterKey_EnvFallback(t *testing.T) {
 	dir := t.TempDir()
 	key, mkPath := writeMasterKeyFile(t, dir)
-	cfg := Default()
+	cfg := config.Default()
 
 	// 仅文件：返回文件内容。
 	cfg.CredentialStore.MasterKeyFile = mkPath
-	got, err := resolveCredentialMasterKey(cfg)
+	got, err := ResolveCredentialMasterKey(cfg)
 	if err != nil {
 		t.Fatalf("resolve(file): %v", err)
 	}
@@ -141,11 +143,11 @@ func TestResolveCredentialMasterKey_EnvFallback(t *testing.T) {
 		t.Fatalf("文件 key 解析不一致")
 	}
 
-	// S-3：file 与 env 同时设置 → file 优先（resolveCredentialMasterKey 的 if 顺序钉死）。
+	// S-3：file 与 env 同时设置 → file 优先（ResolveCredentialMasterKey 的 if 顺序钉死）。
 	envKey := bytes.Repeat([]byte{0x9e}, 32)
-	t.Setenv(CredentialMasterKeyEnv, base64.StdEncoding.EncodeToString(envKey))
+	t.Setenv(config.CredentialMasterKeyEnv, base64.StdEncoding.EncodeToString(envKey))
 	cfg.CredentialStore.MasterKeyFile = mkPath
-	gotFileWins, err := resolveCredentialMasterKey(cfg)
+	gotFileWins, err := ResolveCredentialMasterKey(cfg)
 	if err != nil {
 		t.Fatalf("resolve(file+env): %v", err)
 	}
@@ -158,7 +160,7 @@ func TestResolveCredentialMasterKey_EnvFallback(t *testing.T) {
 
 	// 文件为空 + 环境变量：回落 env。
 	cfg.CredentialStore.MasterKeyFile = ""
-	got2, err := resolveCredentialMasterKey(cfg)
+	got2, err := ResolveCredentialMasterKey(cfg)
 	if err != nil {
 		t.Fatalf("resolve(env): %v", err)
 	}
@@ -167,8 +169,8 @@ func TestResolveCredentialMasterKey_EnvFallback(t *testing.T) {
 	}
 
 	// 环境变量非法 base64 → 报错。
-	t.Setenv(CredentialMasterKeyEnv, "!!not-base64!!")
-	if _, serr := resolveCredentialMasterKey(cfg); serr == nil {
+	t.Setenv(config.CredentialMasterKeyEnv, "!!not-base64!!")
+	if _, serr := ResolveCredentialMasterKey(cfg); serr == nil {
 		t.Fatal("非法 env master key 应报错")
 	}
 }
@@ -181,15 +183,15 @@ func TestConfigValidate_CredentialStoreEncrypt(t *testing.T) {
 	_, mkPath := writeMasterKeyFile(t, dir)
 
 	t.Run("缺省来源报错", func(t *testing.T) {
-		t.Setenv(CredentialMasterKeyEnv, "")
-		cfg := Default()
+		t.Setenv(config.CredentialMasterKeyEnv, "")
+		cfg := config.Default()
 		cfg.CredentialStore.Encrypt = true
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("encrypt=true 且无任何 master key 来源时 Validate 应报错")
 		}
 	})
 	t.Run("master_key_file 通过", func(t *testing.T) {
-		cfg := Default()
+		cfg := config.Default()
 		cfg.CredentialStore.Encrypt = true
 		cfg.CredentialStore.MasterKeyFile = mkPath
 		if err := cfg.Validate(); err != nil {
@@ -197,15 +199,15 @@ func TestConfigValidate_CredentialStoreEncrypt(t *testing.T) {
 		}
 	})
 	t.Run("环境变量通过", func(t *testing.T) {
-		t.Setenv(CredentialMasterKeyEnv, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x6f}, 32)))
-		cfg := Default()
+		t.Setenv(config.CredentialMasterKeyEnv, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x6f}, 32)))
+		cfg := config.Default()
 		cfg.CredentialStore.Encrypt = true
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("配置了 env master key 应通过 Validate: %v", err)
 		}
 	})
 	t.Run("默认关闭通过", func(t *testing.T) {
-		cfg := Default()
+		cfg := config.Default()
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("encrypt 默认关应通过 Validate: %v", err)
 		}
@@ -225,9 +227,9 @@ func writeVaultTokenFile(t *testing.T, dir, content string) string {
 // vaultAADContext 返回装配侧预期的 AAD context 值：base64(owner 唯一相对 storage_root 路径)
 // = base64("anonymous/meta/credentials.json")（I-2：绑 owner 相对路径，防跨节点/租户搬移）。
 //
-// 注意：该字面量必须与 handlers.go BootstrapServerCredentials 的 AADPath 推导保持同步
-// （filepath.ToSlash(filepath.Join(anonymousOwner,"meta",fileNameCredStore))）——若装配
-// 回退常量 fileNameCredStore，本测试断言 mock 收到 context 会立即失败（I-2 防回归）。
+// 注意：该字面量必须与 bootstrap.go BootstrapServerCredentials 的 AADPath 推导保持同步
+// （filepath.ToSlash(filepath.Join(storage.AnonymousOwner,"meta",credentialsFileName))）——若装配
+// 回退该路径推导，本测试断言 mock 收到 context 会立即失败（I-2 防回归）。
 func vaultAADContext() string {
 	return base64.StdEncoding.EncodeToString([]byte("anonymous/meta/credentials.json"))
 }
@@ -236,7 +238,7 @@ func vaultAADContext() string {
 func vaultTestKeys() []accesskey.Key {
 	return []accesskey.Key{{
 		AK:         "ak-vault-0123456789abcdef",
-		Owner:      anonymousOwner,
+		Owner:      storage.AnonymousOwner,
 		Role:       accesskey.RoleAdmin,
 		TOTPSecret: []byte{0xde, 0xad, 0xbe, 0xef, 0x01},
 	}}
@@ -257,7 +259,7 @@ func TestBootstrap_VaultBackend(t *testing.T) {
 func bootstrapVaultSaveLoad(t *testing.T) {
 	mock := vaultmock.NewServer(t, vaultmock.Options{Token: "vault-tok"})
 	dir := t.TempDir()
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
 	cfg.CredentialStore.Encrypt = true
 	cfg.CredentialStore.Backend = "vault"
@@ -291,7 +293,7 @@ func bootstrapVaultSaveLoad(t *testing.T) {
 		t.Fatalf("mock 收到的 context 应为 base64(owner 相对路径) %q, got %q", wantCtx, got)
 	}
 
-	disk := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta", fileNameCredStore)
+	disk := filepath.Join(cfg.StorageRoot, storage.AnonymousOwner, "meta", credentialsFileName)
 	raw, err := os.ReadFile(disk)
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +310,7 @@ func bootstrapVaultSaveLoad(t *testing.T) {
 		t.Fatalf("Load 应还原 1 个 key, got %d", len(gotKeys))
 	}
 	k := gotKeys[0]
-	if k.AK != "ak-vault-0123456789abcdef" || k.Owner != anonymousOwner || k.Role != accesskey.RoleAdmin {
+	if k.AK != "ak-vault-0123456789abcdef" || k.Owner != storage.AnonymousOwner || k.Role != accesskey.RoleAdmin {
 		t.Fatalf("还原 key 字段不一致: %+v", k)
 	}
 	if !bytes.Equal(k.TOTPSecret, []byte{0xde, 0xad, 0xbe, 0xef, 0x01}) {
@@ -320,7 +322,7 @@ func bootstrapVaultTokenFileOverEnv(t *testing.T) {
 	mock := vaultmock.NewServer(t, vaultmock.Options{Token: "tokenA"}) // mock 期望 tokenA
 	dir := t.TempDir()
 	t.Setenv("VAULT_TOKEN", "tokenB") // env 若被误用即与 mock 期望不符
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
 	cfg.CredentialStore.Encrypt = true
 	cfg.CredentialStore.Backend = "vault"
@@ -343,7 +345,7 @@ func bootstrapVaultTokenFileOverEnv(t *testing.T) {
 func bootstrapVaultNoTokenFailFast(t *testing.T) {
 	t.Setenv("VAULT_TOKEN", "")
 	mock := vaultmock.NewServer(t, vaultmock.Options{})
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(t.TempDir(), "storage")
 	cfg.CredentialStore.Encrypt = true
 	cfg.CredentialStore.Backend = "vault"
@@ -360,7 +362,7 @@ func bootstrapVaultNoTokenFailFast(t *testing.T) {
 func bootstrapVaultEmptyBackendAesgcm(t *testing.T) {
 	dir := t.TempDir()
 	_, mkPath := writeMasterKeyFile(t, dir)
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
 	cfg.CredentialStore.Encrypt = true
 	cfg.CredentialStore.Backend = "" // 空 = aesgcm（向后兼容）
@@ -380,7 +382,7 @@ func bootstrapVaultEmptyBackendAesgcm(t *testing.T) {
 	if err = enc.Save(seedTestRing(t, "ak-vault-empty-012345678", testAccessSecret, false)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	disk := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta", fileNameCredStore)
+	disk := filepath.Join(cfg.StorageRoot, storage.AnonymousOwner, "meta", credentialsFileName)
 	raw, err := os.ReadFile(disk)
 	if err != nil {
 		t.Fatal(err)
@@ -398,7 +400,7 @@ func TestBootstrap_VaultBackend_ProbeFailFast(t *testing.T) {
 		mock := vaultmock.NewServer(t, vaultmock.Options{})
 		mock.SetLookupSelfError(http.StatusForbidden, "permission denied")
 		dir := t.TempDir()
-		cfg := Default()
+		cfg := config.Default()
 		cfg.StorageRoot = filepath.Join(dir, "storage")
 		cfg.CredentialStore.Encrypt = true
 		cfg.CredentialStore.Backend = "vault"
@@ -414,7 +416,7 @@ func TestBootstrap_VaultBackend_ProbeFailFast(t *testing.T) {
 		dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 		dead.Close() // 关闭后端口不可达
 		dir := t.TempDir()
-		cfg := Default()
+		cfg := config.Default()
 		cfg.StorageRoot = filepath.Join(dir, "storage")
 		cfg.CredentialStore.Encrypt = true
 		cfg.CredentialStore.Backend = "vault"
@@ -436,7 +438,7 @@ func TestResolveVaultToken_BOM(t *testing.T) {
 	if err := os.WriteFile(p, []byte("\xef\xbb\xbfbom-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tok, err := resolveVaultToken(VaultConfig{TokenFile: p})
+	tok, err := resolveVaultToken(config.VaultConfig{TokenFile: p})
 	if err != nil {
 		t.Fatalf("resolveVaultToken: %v", err)
 	}

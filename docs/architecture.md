@@ -647,7 +647,7 @@ import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJ
 存量裸写（`json.NewEncoder(w)` / 手写 `Content-Type: application/json`）由门禁 **R54**
 （`json_response_sites.tsv` 棘轮）锁住，只减不增。
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流 / T1 跨节点读写面 / T3-b 封装卷翻译与装配）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流 / T1 跨节点读写面 / T3-a 凭据存储与主密钥解析 / T3-b 封装卷翻译与装配）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -835,6 +835,34 @@ import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJ
   `h.enclosureSealedAt` 薄适配传入，不反向 import `pkg/server`（R6）。
 - 测试：纯翻译用例随迁 `pkg/server/enclosure/nested_test.go`；装配级用例（config/API/重启/
   封印联动）依赖装配态，保留在 `pkg/server`（`nested_enclosure_type_test.go` 等）。
+
+**T3-a：凭据存储与主密钥解析（`pkg/server/credentials`，2026-11-02）**
+
+- 迁入：StateStore 后端凭据 store（StateStore 优先 + 旧 `<meta>/credentials.json` 回退的
+  双读单写、可选静态加密内嵌）、生产装配入口 `BootstrapServerCredentials`（store 选型 /
+  加密包装 / 载入 Ring）、主密钥与 Vault token 来源解析
+  （`ResolveCredentialMasterKey` / `resolveVaultToken`）、Ring 首个存活凭据选取
+  （`BestCredential` / `BestFirstCredential`）。
+- **边界**：本包只做「存储 + 主密钥解析」。启动编排（`(h *Handlers) bootstrapCredentials`
+  的 fail-closed panic 与零凭据启动日志语义）、自用凭据自省（`SelfCredential`）、凭据轮换
+  循环（renew/prune/持久化接线）依赖装配态或装配 opts，保留在装配层
+  （`credentials.go` / `credential_rotation.go`）。
+- **零行为变化**：master key 来源顺序（`master_key_file` → 环境变量
+  `SPROXY_CREDENTIAL_MASTER_KEY`）、Vault token 来源顺序（`token_file` → `TokenEnv`）、
+  AAD 推导（owner 唯一相对 `storage_root` 路径的 `ToSlash` 形态）、加密开关语义与错误文案
+  逐字不变。原有 `resolveCredentialMasterKey` + 导出薄封装收敛为单一导出实现
+  `ResolveCredentialMasterKey`（AGENTS 硬规则 11）。
+- **依赖方向**：依赖 `pkg/accesskey`/`pkg/state`/`pkg/storage`（L0）与 `pkg/server/config`（L2）
+  ⇒ L2；不反向依赖 `pkg/server`（R6）。`cmd/sproxy` 是独立 module，直接 import 本包，
+  装配层不留同名薄封装。
+- **F1 默认卷根**：本包内 `defaultVolumeRoot` 复刻装配层 `resolveDefaultVolumeRoot` 的裁决
+  （首卷 root 占位 ⇒ `storage_root`）；两处取值一致由行为测试锁定——
+  `pkg/server/feature_bucket_volume_test.go` 的分叉配置用例断言凭据落默认卷根而非
+  `cfg.StorageRoot`。
+- 测试：纯存储/主密钥/装配入口用例随迁 `pkg/server/credentials`（断言零改动）；
+  装配级用例（`bootstrapCredentials` / `SelfCredential`）与 `state_store` 配置面用例保留在
+  `pkg/server`（`self_credential_test.go` / `state_store_config_test.go`）。
+- 度量：`pkg/server` 非测试行 28,489 → **28,125**；子包 18 → 19。
 
 **P1：装配层策略对象（2026-10-31）**
 

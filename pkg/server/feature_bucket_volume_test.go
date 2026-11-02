@@ -24,6 +24,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/server/credentials"
 )
 
 // divergentVolumeConfig 构造「默认卷根 ≠ cfg.StorageRoot」的分叉配置：
@@ -71,7 +72,7 @@ func TestMeta_DefaultVolumeOnly(t *testing.T) {
 func helperMetaDefaultVolumeOnlyCredentials(t *testing.T) {
 	t.Helper()
 	dirA, dirB, _, cfg := divergentVolumeConfig(t)
-	ring, store, err := BootstrapServerCredentials(cfg, nil)
+	ring, store, err := credentials.BootstrapServerCredentials(cfg, nil)
 	if err != nil {
 		t.Fatalf("BootstrapServerCredentials: %v", err)
 	}
@@ -92,7 +93,7 @@ func helperMetaDefaultVolumeOnlyCredentials(t *testing.T) {
 		t.Fatalf("凭据不应落 cfg.StorageRoot（分叉配置）：%s", filepath.Join(dirA, anonymousOwner, "meta"))
 	}
 	// 重启载入还原同一 Ring。
-	ring2, _, err := BootstrapServerCredentials(cfg, nil)
+	ring2, _, err := credentials.BootstrapServerCredentials(cfg, nil)
 	if err != nil {
 		t.Fatalf("second Bootstrap: %v", err)
 	}
