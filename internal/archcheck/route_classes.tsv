@@ -247,3 +247,15 @@ localMux	PUT /api/files/meta	tunnel	pkg/server/routes.go:273
 localMux	GET /api/files/meta	tunnel	pkg/server/routes.go:274
 srvMux	PUT /api/files/meta	user	pkg/server/routes.go:425
 srvMux	GET /api/files/meta	reader	pkg/server/routes.go:427
+localMux	POST /api/credentials/register	tunnel	# 隧道内层凭据注册（隧道加密即认证；外层另有 ipGate）
+localMux	POST /api/credentials/nonce	tunnel	# 隧道内层 TOTP nonce（同上）
+localMux	POST /api/credentials/login	tunnel	# 隧道内层凭据登录（同上）
+srvMux	POST /api/credentials/register	public	# 公开注册面：ipGate 白名单 + registerLimiter 限频，无 SproxySig
+srvMux	POST /api/credentials/nonce	public	# 公开 nonce 面：ipGate + totpLimiter（登录握手前无法签名）
+srvMux	POST /api/credentials/login	public	# 公开登录面：ipGate + loginLimiter（同上）
+srvMux	POST /tunnel	auth	# 隧道入口（SproxySig 验签后进入内部路由）
+srvMux	GET /metrics	auth	# 指标面：MetricsAuth（bearer/api-key）
+srvMux	GET /debug/pprof/	auth	# pprof：authMiddleware（仅 debug.pprof_enabled 时注册）
+srvMux	/dav/	auth	# WebDAV 子树挂载：authMiddleware（仅 webdav.enabled 时注册）
+srvMux	/s3/	public	# S3 兼容面：mux 层公开，SigV4 验签在 handler 内（AK→ring 查 SK）
+srvMux	GET /ui/	public	# 内嵌 Web UI 静态资源（CSP 头在 handler 内设置）

@@ -13,7 +13,10 @@
 # 故这类行的登记需要人工核对场景矩阵（docs/testing/audit-scenarios.md）。
 #
 # 格式：<pattern>	<action=值 | pending>	<备注（pending 必填）>
-# pending_budget=38
+# pending_budget=41
+# 2026-11-02 上调 38→41：R38/R35-b 扫描面扩展到 `.Handle(` 形态后，3 条此前**不可见**的
+# 路由（POST /api/credentials/register|nonce、POST /tunnel）首次进入 backlog —— 属暴露
+# 既有债而非新增债；后续补齐审计/场景断言时只减不增。
 #
 DELETE /api/cloud/groups/{id}	action=cloud_group_delete	
 DELETE /api/cloud/tasks/{id}	action=cloud_delete	
@@ -80,3 +83,7 @@ POST /upload/complete	pending	handler=uploadComplete actions=NONE
 POST /upload/init	pending	handler=uploadInit actions=NONE
 PUT /api/files/meta	action=file_meta_update	
 POST /api/volumes/refresh	action=volume_refresh	
+POST /api/credentials/login	action=credential_login	
+POST /api/credentials/register	pending	handler=registerCredentialHandler note=成功路径已记 credential_register，但缺少 Test* 场景断言（补断言后转 action）
+POST /api/credentials/nonce	pending	handler=nonceHandler note=TOTP 挑战签发，非业务变更
+POST /tunnel	pending	note=隧道传输入口（内部路由各自审计），非业务变更

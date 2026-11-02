@@ -34,6 +34,7 @@ var routeRegistrationFiles = []string{
 	"pkg/server/routes_extra.go",
 	"pkg/server/routes_hub.go",
 	"pkg/server/routes_hub_extra.go",
+	"pkg/server/pprof_handlers.go",
 }
 
 // routeClasses 是允许的分类值（与 route_classes.tsv 表头注释同源）。
@@ -42,8 +43,17 @@ var routeClasses = map[string]bool{
 	"node": true, "admin": true, "tunnel": true,
 }
 
-// routeRegRe 匹配 `<mux>.HandleFunc("METHOD /path", ...)`（允许跨行注册）。
-var routeRegRe = regexp.MustCompile(`(\w+Mux)\.HandleFunc\(\s*"([A-Z]+ [^"]+)"`)
+// routeRegRe 匹配 `<mux>.HandleFunc("METHOD /path", ...)` 与 `<mux>.Handle("METHOD /path", ...)`
+// （允许跨行注册）。
+//
+// 两种形态都必须扫：只用 HandleFunc 时，`Handle("POST /api/credentials/register", ...)` 这类
+// 带中间件包装的注册对 R38 隐形（实测 12 处，含 /metrics、pprof、DAV）——与 R35-a
+// （审计调用点只扫 internal/）同类：**扫描面错了比没有门禁更危险**。
+var routeRegRe = regexp.MustCompile(`(\w+Mux)\.(?:HandleFunc|Handle)\(\s*"([A-Z]+ [^"]+)"`)
+
+// routeMountRe 匹配仅路径的挂载 `<mux>.Handle("/prefix/", ...)`（协议挂载：DAV / S3）。
+// 这类路由不带 method（子树全方法），TSV 键形如 `srvMux\t/dav/`。
+var routeMountRe = regexp.MustCompile(`(\w+Mux)\.Handle\(\s*"(/[^"]*/)"\s*,`)
 
 // parenBalanced 报告 s 中左右圆括号数量是否相等（跨行注册拼接的终止条件）。
 func parenBalanced(s string) bool {
@@ -67,7 +77,8 @@ func registeredRoutes(t *testing.T) map[string]string {
 		for sc.Scan() {
 			line++
 			text := sc.Text()
-			if !strings.Contains(text, ".HandleFunc(") {
+			// 两种注册形态都要进入解析：只认 HandleFunc 会让 Handle(...) 静默绕过分类表。
+			if !strings.Contains(text, ".HandleFunc(") && !strings.Contains(text, ".Handle(") {
 				continue
 			}
 			// 跨行注册：拼接到括号平衡（最多 5 行，足够覆盖现有形态）。
@@ -80,6 +91,9 @@ func registeredRoutes(t *testing.T) map[string]string {
 			}
 			m := routeRegRe.FindStringSubmatch(text)
 			if m == nil {
+				if mm := routeMountRe.FindStringSubmatch(text); mm != nil {
+					out[mm[1]+"\t"+mm[2]] = rel + ":" + strconv.Itoa(line)
+				}
 				continue
 			}
 			out[m[1]+"\t"+m[2]] = rel + ":" + strconv.Itoa(line)
