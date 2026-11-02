@@ -177,7 +177,7 @@ func (h *Handlers) retentionCleanVersionsRel(v volume.Volume, owner, rel string,
 // 持久化文件原子删。与 share-cleanup（expire_at 语义）并存：卷级兜底覆盖「expire_at
 // 很长但创建已久」的链接。
 func (h *Handlers) retentionCleanShares(ttl time.Duration, now time.Time, log *slog.Logger) {
-	// 复用 ShareStore 的锁与持久化删除路径：先取副本判定，再在锁内删除。
+	// 复用 share.Store 的锁与持久化删除路径：先取副本判定，再在锁内删除。
 	for _, link := range h.shareStore.List("") {
 		if volumeRetentionExpired(link.CreatedAt, now, ttl) {
 			if err := h.shareStore.Revoke(link.Token, ""); err != nil {
@@ -258,7 +258,7 @@ func (h *Handlers) removeVersionFile(tnt *storage.Tenant, owner, rel string, ent
 }
 
 // retentionShareDir 返回分享持久化目录（默认卷 anonymous/meta/share）。
-// 供保留期清理按创建时间扫描持久化文件（当前实现直接经 ShareStore.List + Revoke
+// 供保留期清理按创建时间扫描持久化文件（当前实现直接经 share.Store.List + Revoke
 // 复用同一删除路径，本 helper 保留供未来按磁盘扫描形态扩展）。
 //
 //lint:file-ignore U1000 保留：磁盘扫描形态的演进钩子。

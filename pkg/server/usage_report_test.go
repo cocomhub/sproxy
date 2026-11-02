@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 )
 
 // newUsageReportServer 启动启用计量报告的完整路由服务器（admin+user+reader 三角色 Ring）。
@@ -299,7 +301,7 @@ func TestUsageMetrics_OwnerNilSafe(t *testing.T) {
 	h.metrics.RecordUploadForOwner("owner-a", 10)
 	h.metrics.RecordDownloadForOwner("owner-b", 20)
 
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	m.RecordUploadForOwner("", 10)   // 空 owner 跳过
 	m.RecordDownloadForOwner("o", 0) // 零字节跳过
 	m.RecordUploadForOwner("o", -1)  // 负字节跳过

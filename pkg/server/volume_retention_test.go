@@ -26,6 +26,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/rootfs"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -57,7 +58,7 @@ func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, auditJ *a
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),
-		shareStore:     NewShareStore(testLogger()),
+		shareStore:     share.NewStore(testLogger()),
 	}
 	if shareDir != "" {
 		h.shareStore.EnablePersist(testRootAt(t, shareDir), "")
@@ -71,16 +72,16 @@ func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, auditJ *a
 // 起算——直接改内存对象 + 落盘，模拟「创建于过去但 ExpiresAt 未到」的兜底场景）。
 func seedRetentionShare(t *testing.T, h *Handlers, filename string, createdAgo time.Duration, ttl time.Duration) string {
 	t.Helper()
-	link, err := h.shareStore.Create(shareSpec{Filename: filename, TenantID: "alice", Rel: "user/" + filename, Owner: "ak-1", TTL: ttl, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
+	link, err := h.shareStore.Create(share.Spec{Filename: filename, TenantID: "alice", Rel: "user/" + filename, Owner: "ak-1", TTL: ttl, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatalf("Create share: %v", err)
 	}
 	link.CreatedAt = time.Now().Add(-createdAgo)
-	// 测试侧直接落盘旧 meta 文件（persistWrite 是 *ShareStore 内部方法；此处用新实例
+	// 测试侧直接落盘旧 meta 文件（persistWrite 是 *share.Store 内部方法；此处用新实例
 	// 构造等价落盘——测试只依赖「旧文件存在」）。
-	if ps, ok := h.shareStore.(*ShareStore); ok {
+	if ps, ok := h.shareStore.(*share.Store); ok {
 		ps.PersistWrite(link)
-	} else if ss, ok := h.shareStore.(*stateBackedShareStore); ok && ss.LegacyRoot() != nil {
+	} else if ss, ok := h.shareStore.(*share.StateBackedStore); ok && ss.LegacyRoot() != nil {
 		if rel := ss.LegacyRelPath(link.Token); rel != "" {
 			if data, merr := json.Marshal(link.ToPersist()); merr == nil {
 				if werr := ss.LegacyRoot().MkdirAll(ss.LegacyRel(), 0o755); werr == nil {

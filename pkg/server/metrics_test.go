@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 )
 
 // newTestServerWithMetrics 创建带 Metrics 的测试服务器，并挂载 /metrics 路由。
@@ -25,7 +26,7 @@ func newTestServerWithMetrics(t *testing.T) (*httptest.Server, *Handlers) {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	h := &Handlers{
 		cfgPtr:  &cfgPtr,
 		version: "test",
@@ -68,7 +69,7 @@ func TestMetricsHandler_Empty(t *testing.T) {
 }
 
 func TestMetrics_RecordRequest(t *testing.T) {
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	m.RecordRequest(200)
 	m.RecordRequest(201)
 	m.RecordRequest(404)
@@ -89,7 +90,7 @@ func TestMetrics_RecordRequest(t *testing.T) {
 }
 
 func TestMetrics_RecordUploadDownloadDelete(t *testing.T) {
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	m.RecordUpload(1024)
 	m.RecordUpload(2048)
 	m.RecordDownload(512)
@@ -190,7 +191,7 @@ func TestMetricsHandler_PrometheusFormat(t *testing.T) {
 func TestMetricsSnapshot(t *testing.T) {
 	t.Parallel()
 
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	m.RecordRequest(200)
 	m.RecordRequest(404)
 	m.RecordDownload(1024)
@@ -221,7 +222,7 @@ func TestMetricsSnapshot(t *testing.T) {
 func TestMetricsSnapshot_Empty(t *testing.T) {
 	t.Parallel()
 
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	s := m.Snapshot()
 	if s["requests_total"] != 0 {
 		t.Errorf("empty metrics: requests_total = %d, want 0", s["requests_total"])
@@ -234,7 +235,7 @@ func TestMetricsSnapshot_Empty(t *testing.T) {
 func TestMetricsSnapshot_Nil(t *testing.T) {
 	t.Parallel()
 
-	var m *Metrics
+	var m *metrics.Metrics
 	s := m.Snapshot()
 	if s != nil {
 		t.Errorf("nil metrics: expected nil snapshot, got %v", s)

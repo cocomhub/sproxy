@@ -28,8 +28,13 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/alerts"
 	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
+	"github.com/cocomhub/sproxy/pkg/server/notify"
 	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
+	"github.com/cocomhub/sproxy/pkg/server/scheduler"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -56,7 +61,7 @@ type coreDeps struct {
 	// 构造时经 opts.RemoveMovedSource 注入实例字段，运行期不可变（无包级 seam 并发替换）。
 	removeMovedSource func(root *storage.Root, rel string) error
 	logger            *slog.Logger
-	metrics           *Metrics
+	metrics           *metrics.Metrics
 	closeOnce         sync.Once // 防止 Close() 重复关闭 channel
 	closeRootsOnce    sync.Once // 防止并发 Close（优雅停服 defer + 信号路径）重复关存储根（volSet/globalRoot 置 nil 竞态）
 	// tracer 是服务端请求路径的可选 telemetry.Tracer（RegisterRoutesOpts.Tracer
@@ -195,7 +200,7 @@ type volumeDeps struct {
 	// rebalanceProg 是卷再平衡迁移进度状态（roadmap 3.3 P1 残余：#440 后补）。
 	// 互斥保护；rebalanceVolumeHandler 循环内更新，/metrics 输出 sproxy_rebalance_progress
 	// gauge（按 from/to 维度，0-100 百分比）。nil = 未装配（进度不可观测，零回归）。
-	rebalanceProg *rebalanceProgress
+	rebalanceProg *metrics.RebalanceProgress
 	// externalHealth 是外部卷健康探测缓存（roadmap 3.3 P1 后端健康探针）：
 	// map[卷名]{state, at}，30s TTL 内复用上次探测结果（惰性：列表触发，无后台 goroutine）。
 	// healthMu 串行化读写（列表并发安全）。nil = 未装配探针（零回归）。
@@ -273,13 +278,13 @@ type cloudDeps struct {
 
 // shareDeps 是分享域域依赖。
 type shareDeps struct {
-	shareStore ShareStoreIface
+	shareStore share.StoreIface
 }
 
 // hubDeps 是Hub/Mesh 域（路由表/DHT/联邦/信令/写门）域依赖。
 type hubDeps struct {
 	// xferMetrics 是传输层扩展指标提供者（RegisterRoutesOpts.XferMetrics；nil = 不输出）。
-	xferMetrics XferMetricsProvider
+	xferMetrics metrics.XferMetricsProvider
 	routeTable  *hub.MeshRouteTable
 	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。/api/hub/nodes 把 DHT
 	// 候选节点合并进发现列表（路由表权威 + DHT 候选，去重）。由 cmd/sproxy 装配
@@ -332,7 +337,7 @@ type aiDeps struct {
 	// notifyCenter 是通知中心（roadmap P0；cfg.Notify.Enabled 时由 RegisterRoutes
 	// 装配）。RecordAudit 末尾 dispatch（异步 goroutine，绝不阻塞审计/业务）。
 	// nil = 未启用（零回归）。
-	notifyCenter *NotifyCenter
+	notifyCenter *notify.NotifyCenter
 	// aiInsight 是 AI 文件洞察（roadmap 11.9-⑤；cfg 装配，nil = 未启用零回归）。
 	aiInsight *AIInsight
 	// aiPrivacy 是 AI 派生数据隐私（roadmap 11.9-⑧；cfg 装配，nil = 未启用零回归）。
@@ -341,7 +346,7 @@ type aiDeps struct {
 	aiEventConsumer *AIEventConsumer
 	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
 	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
-	alertEngine *AlertEngine
+	alertEngine *alerts.Engine
 }
 
 // opsDeps 是运维域（调度器/巡检/用量账本）域依赖。
@@ -349,7 +354,7 @@ type opsDeps struct {
 	// scheduler 是统一任务调度器（roadmap 11.10-H2）：uploading 清理 / version-gc /
 	// trash-gc / share-cleanup 四个周期任务统一注册（RegisterRoutes 装配；
 	// nil = 未装配的旧构造路径，Close 跳过）。
-	scheduler *Scheduler
+	scheduler *scheduler.Scheduler
 	// verifyBusy 是全仓 checksum 巡检的单飞防重入标记（roadmap 11.3-⑩）：
 	// 上一次巡检未结束时，新的触发直接跳过（Concurrent=true，不堆叠执行）。
 	// 与统一调度器（#574）的 CAS 语义同构；定时任务与手动端点共用同一入口。

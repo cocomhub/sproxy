@@ -33,6 +33,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
 	"github.com/cocomhub/sproxy/pkg/server/scheduler"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -254,7 +255,7 @@ func (h *Handlers) initSharePersist(opts RegisterRoutesOpts, cfg *Config, log *s
 		// 经 anonymous 租户**卷句柄** + "meta/share" 相对目录落盘：卷自己决定是否加密
 		// （使用方不理解加密态），并天然继承封印判定。
 		if opts.StateStore != nil {
-			h.SetShareStore(newStateBackedShareStore(opts.StateStore, tnt.Root(), shareRel, log))
+			h.SetShareStore(share.NewStateBackedStore(opts.StateStore, tnt.Root(), shareRel, log))
 		} else {
 			h.shareStore.EnablePersist(tnt.Root(), shareRel)
 		}
@@ -325,8 +326,8 @@ func (h *Handlers) appendExternalAuthRoutes(opts RegisterRoutesOpts) {
 
 // trashGCTask 构造回收站周期 GC 任务（trash.gc_interval > 0 时注册）：TTL 每 tick
 // 现读（热更新可见）；间隔保留现逻辑（>0 用配置值，否则默认 1h）。
-func (h *Handlers) trashGCTask(cfg *Config) Task {
-	return Task{
+func (h *Handlers) trashGCTask(cfg *Config) scheduler.Task {
+	return scheduler.Task{
 		Name:            "trash-gc",
 		Interval:        cfg.Trash.GCInterval,
 		MaintenanceOnly: true,
@@ -347,8 +348,8 @@ func (h *Handlers) trashGCTask(cfg *Config) Task {
 // verifyPeriodicTask 构造全仓 checksum 巡检周期任务（verify_interval > 0 时注册）：
 // 单飞防重入（busy 时跳过本 tick，不堆叠）；结果写审计 + 告警联动（verifyPass 内
 // RecordAudit，与手动端点同款）。
-func (h *Handlers) verifyPeriodicTask(cfg *Config) Task {
-	return Task{
+func (h *Handlers) verifyPeriodicTask(cfg *Config) scheduler.Task {
+	return scheduler.Task{
 		Name:            "checksum-verify",
 		Interval:        cfg.VerifyInterval,
 		MaintenanceOnly: true,
@@ -426,12 +427,12 @@ func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 	h.scheduler.SetMaintenanceWindow(config.ParseMaintenanceWindow(cfg.Scheduler))
 	// Register 失败仅可能由编程错误（重名/间隔<=0/缺 Run）触发——注册即 fatal：
 	// 任务配置是静态装配，静默跳过会掩盖装配 bug（设计文档：装配层 Error 日志后跳过）。
-	mustRegister := func(t Task) {
+	mustRegister := func(t scheduler.Task) {
 		if regErr := h.scheduler.Register(t); regErr != nil {
 			log.Error("scheduler 任务注册失败，跳过", "task", t.Name, "error", regErr.Error())
 		}
 	}
-	mustRegister(Task{
+	mustRegister(scheduler.Task{
 		Name:     "uploading-cleanup",
 		Interval: 10 * time.Minute,
 		Run: func(context.Context) {
@@ -446,7 +447,7 @@ func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 		log.Info("tempclean: 启动清理孤儿临时项",
 			"removed", rep.Removed, "freed_bytes", rep.FreedBytes)
 	}
-	mustRegister(Task{
+	mustRegister(scheduler.Task{
 		Name:     "temp-cleanup",
 		Interval: tempclean.DefaultInterval,
 		Run: func(context.Context) {
@@ -457,7 +458,7 @@ func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 			}
 		},
 	})
-	mustRegister(Task{
+	mustRegister(scheduler.Task{
 		Name:           "share-cleanup",
 		Interval:       5 * time.Minute,
 		FinalRunOnStop: true,
@@ -472,7 +473,7 @@ func (h *Handlers) registerPeriodicTasks(cfg *Config, log *slog.Logger) {
 	}
 	// 版本 GC 周期 goroutine（versioning.gc_interval > 0 时启动；0 = 关闭，零回归）。
 	if cfg.Versioning.GCInterval > 0 {
-		mustRegister(Task{
+		mustRegister(scheduler.Task{
 			Name:            "version-gc",
 			Interval:        cfg.Versioning.GCInterval,
 			MaintenanceOnly: true,

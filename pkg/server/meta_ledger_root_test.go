@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/share"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -48,10 +49,10 @@ func TestSharePersist_EncryptedVolumeCiphertextAndRestore(t *testing.T) {
 	if err := root.SetEncryption(bytes.Repeat([]byte{11}, 32)); err != nil {
 		t.Fatalf("SetEncryption: %v", err)
 	}
-	ss := NewShareStore(testLogger())
+	ss := share.NewStore(testLogger())
 	ss.EnablePersist(root, "meta/share")
 	const marker = "confidential-name.txt"
-	link, err := ss.Create(shareSpec{
+	link, err := ss.Create(share.Spec{
 		Filename: marker, TenantID: "alice", Rel: "user/" + marker, Owner: "ak-1",
 		TTL: time.Hour,
 	})
@@ -70,7 +71,7 @@ func TestSharePersist_EncryptedVolumeCiphertextAndRestore(t *testing.T) {
 		t.Fatal("加密卷上分享台账内容必须是密文")
 	}
 	// 重启（新实例）→ 经卷句柄解密读回。
-	ss2 := NewShareStore(testLogger())
+	ss2 := share.NewStore(testLogger())
 	ss2.EnablePersist(root, "meta/share")
 	got := ss2.Peek(link.Token)
 	if got == nil || got.Rel != "user/"+marker {
@@ -110,9 +111,9 @@ func TestMetaLedger_SealedPathsRejected(t *testing.T) {
 	if err := root.SetSeals([]storage.SealRule{{Path: "meta", Wrapper: "vault"}}); err != nil {
 		t.Fatalf("SetSeals: %v", err)
 	}
-	ss := NewShareStore(testLogger())
+	ss := share.NewStore(testLogger())
 	ss.EnablePersist(root, "meta/share")
-	if _, err := ss.Create(shareSpec{Filename: "a.txt", TenantID: "alice", Rel: "user/a.txt", Owner: "ak-1", TTL: time.Hour}); err != nil {
+	if _, err := ss.Create(share.Spec{Filename: "a.txt", TenantID: "alice", Rel: "user/a.txt", Owner: "ak-1", TTL: time.Hour}); err != nil {
 		t.Fatalf("Create 不应因持久化失败而报错（分享是易失资源）: %v", err)
 	}
 	if hits := scanLedgerPlaintext(t, dir, "a.txt"); len(hits) > 0 {

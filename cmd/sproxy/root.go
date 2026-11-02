@@ -35,6 +35,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/server/credentials"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
@@ -657,16 +658,16 @@ func formatString(s string) string {
 type xferMetricsProvider struct{}
 
 // XferMetrics 返回 WS/QUIC 连接级统计快照（/metrics 聚合）。
-func (xferMetricsProvider) XferMetrics() server.XferMetrics {
-	return server.XferMetrics{
+func (xferMetricsProvider) XferMetrics() metrics.XferMetrics {
+	return metrics.XferMetrics{
 		WS:   wsMetricsOf(wsxfer.Metrics()),
 		QUIC: quicMetricsOf(quic.Metrics()),
 	}
 }
 
-// wsMetricsOf 把 ws.WSMetrics 映射为 server.XferConnMetrics（同构字段）。
-func wsMetricsOf(m wsxfer.WSMetrics) server.XferConnMetrics {
-	return server.XferConnMetrics{
+// wsMetricsOf 把 ws.WSMetrics 映射为 metrics.XferConnMetrics（同构字段）。
+func wsMetricsOf(m wsxfer.WSMetrics) metrics.XferConnMetrics {
+	return metrics.XferConnMetrics{
 		ConnsOpened:  m.ConnsOpened,
 		ConnsClosed:  m.ConnsClosed,
 		MessagesSent: m.MessagesSent,
@@ -676,9 +677,9 @@ func wsMetricsOf(m wsxfer.WSMetrics) server.XferConnMetrics {
 	}
 }
 
-// quicMetricsOf 把 quic.QUICMetrics 映射为 server.XferConnMetrics（同构字段）。
-func quicMetricsOf(m quic.QUICMetrics) server.XferConnMetrics {
-	return server.XferConnMetrics{
+// quicMetricsOf 把 quic.QUICMetrics 映射为 metrics.XferConnMetrics（同构字段）。
+func quicMetricsOf(m quic.QUICMetrics) metrics.XferConnMetrics {
+	return metrics.XferConnMetrics{
 		ConnsOpened:  m.ConnsOpened,
 		ConnsClosed:  m.ConnsClosed,
 		MessagesSent: m.MessagesSent,

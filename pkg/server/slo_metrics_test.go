@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/testutil"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // slo_metrics_test.go 是 SLO 指标（roadmap 11.10-H3）的测试：手写无锁桶直方图
@@ -42,7 +44,7 @@ func TestMetricsMiddleware_RecordsLatency(t *testing.T) {
 func TestMetricsHandler_AppendsSLOSection(t *testing.T) {
 	t.Parallel()
 
-	h := &Handlers{metrics: NewMetrics(), logger: testutil.DiscardLogger()}
+	h := &Handlers{metrics: metrics.NewMetrics(), logger: testutil.DiscardLogger()}
 	w := httptest.NewRecorder()
 	h.MetricsHandler(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if w.Code != http.StatusOK {

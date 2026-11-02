@@ -27,6 +27,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/alerts"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -81,7 +84,7 @@ func (h *Handlers) SetConflictIndex(idx *syncmgr.ConflictIndex) {
 // 直接使用会 401 unauthorized）。两者互补：`POST /tunnel` 路由用 `h.tunnelHandler`
 // 字段做外层帧解密，xfer 隧道用本方法拿明文入站 handler。
 // AlertEngine 返回阈值告警引擎（nil = 未启用；装配层只读）。
-func (h *Handlers) AlertEngine() *AlertEngine { return h.alertEngine }
+func (h *Handlers) AlertEngine() *alerts.Engine { return h.alertEngine }
 
 // AIInsight 返回 AI 文件洞察器（nil = 未启用；装配层只读）。
 func (h *Handlers) AIInsight() *AIInsight { return h.aiInsight }
@@ -96,12 +99,12 @@ func (h *Handlers) SetAIPrivacy(p *AIPrivacy) { h.aiPrivacy = p }
 func (h *Handlers) SetNodeRegistry(r *NodeRegistry) { h.nodeRegistry = r }
 
 // SetShareStore 注入分享存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
-// RegisterRoutes 已装配 *ShareStore 本地形态；非 nil = 分享切 StateStore 后端
-// （stateBackedShareStore，逐 token key + Consume CAS，见 state_share.go））。
-func (h *Handlers) SetShareStore(s ShareStoreIface) { h.shareStore = s }
+// RegisterRoutes 已装配 *share.Store 本地形态；非 nil = 分享切 StateStore 后端
+// （share.StateBackedStore，逐 token key + Consume CAS，见 state_share.go））。
+func (h *Handlers) SetShareStore(s share.StoreIface) { h.shareStore = s }
 
 // Metrics 返回服务的运行时指标（/metrics 渲染 + 装配层统计 hook 注入；nil = 未装配）。
-func (h *Handlers) Metrics() *Metrics { return h.metrics }
+func (h *Handlers) Metrics() *metrics.Metrics { return h.metrics }
 
 // SetStateStore 注入状态存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
 // checksum/dedup/share/索引保持原本地 JSON 落盘零回归；非 nil = 各 Store 适配器

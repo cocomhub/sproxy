@@ -15,13 +15,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // renderRemoteWriteDenied 渲染拒绝指标族（与 MetricsHandler 用同一实现）。
 func renderRemoteWriteDenied(h *Handlers) string {
 	var b strings.Builder
-	writeLabeledCounter(&b, "sproxy_remote_write_denied_total", "test", h.metrics.RemoteWriteDeniedSamples())
+	metrics.WriteLabeledCounter(&b, "sproxy_remote_write_denied_total", "test", h.metrics.RemoteWriteDeniedSamples())
 	return b.String()
 }
 

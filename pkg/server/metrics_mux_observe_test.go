@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -62,7 +63,7 @@ func TestMetricsHandler_ReadLoopObservability(t *testing.T) {
 	m2.Metrics().StreamWindowViolations.Add(2)
 	m2.Metrics().MaxBufferedBytes.Store(131_070)
 
-	h := &Handlers{metrics: NewMetrics(), routeTable: rt, logger: testutil.DiscardLogger()}
+	h := &Handlers{metrics: metrics.NewMetrics(), routeTable: rt, logger: testutil.DiscardLogger()}
 	w := httptest.NewRecorder()
 	h.MetricsHandler(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if w.Code != http.StatusOK {
@@ -103,7 +104,7 @@ func TestMetricsHandler_ReadLoopObservability(t *testing.T) {
 // TestMetricsHandler_NoMuxMetricsSection：无 mux 实例时不得渲染该段（保持既有行为）。
 func TestMetricsHandler_NoMuxMetricsSection(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{metrics: NewMetrics(), logger: testutil.DiscardLogger()}
+	h := &Handlers{metrics: metrics.NewMetrics(), logger: testutil.DiscardLogger()}
 	w := httptest.NewRecorder()
 	h.MetricsHandler(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if strings.Contains(w.Body.String(), "sproxy_mux_") {
@@ -136,7 +137,7 @@ func TestMetricsHandler_MuxStreamActivityObservability(t *testing.T) {
 		t.Fatalf("m1 LongestIdle 异常: %v", st.LongestIdle)
 	}
 
-	h := &Handlers{metrics: NewMetrics(), routeTable: rt, logger: testutil.DiscardLogger()}
+	h := &Handlers{metrics: metrics.NewMetrics(), routeTable: rt, logger: testutil.DiscardLogger()}
 	w := httptest.NewRecorder()
 	h.MetricsHandler(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := w.Body.String()

@@ -65,7 +65,7 @@ func (h *Handlers) notifyTestHandler(w http.ResponseWriter, r *http.Request) {
 	results := map[string]string{}
 	for _, name := range names {
 		ch := channels[name]
-		msg := NotifyMessage{Title: "[sproxy] 通知渠道自检", Text: "channel test", Object: "test", Action: "test"}
+		msg := notify.NotifyMessage{Title: "[sproxy] 通知渠道自检", Text: "channel test", Object: "test", Action: "test"}
 		if err := ch.Send(r.Context(), msg); err != nil {
 			results[name] = "failed: " + err.Error()
 		} else {
