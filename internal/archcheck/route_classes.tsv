@@ -259,3 +259,9 @@ srvMux	GET /debug/pprof/	auth	# pprof：authMiddleware（仅 debug.pprof_enabled
 srvMux	/dav/	auth	# WebDAV 子树挂载：authMiddleware（仅 webdav.enabled 时注册）
 srvMux	/s3/	public	# S3 兼容面：mux 层公开，SigV4 验签在 handler 内（AK→ring 查 SK）
 srvMux	GET /ui/	public	# 内嵌 Web UI 静态资源（CSP 头在 handler 内设置）
+srvMux	GET /auth/oidc/login	public	# 插件登录面：ipGate 白名单（登录前无法签名）；由 externalAuthRoutes 动态注册
+srvMux	GET /auth/oidc/callback	public	# 插件回调面：同上（OIDC 重定向回跳，无 SproxySig）
+srvMux	POST /auth/ldap/login	public	# 插件登录面：同上（LDAP）
+localMux	GET /auth/oidc/login	tunnel	# 插件登录面（隧道内层裸注册：隧道加密即认证）
+localMux	GET /auth/oidc/callback	tunnel	# 插件回调面（同上）
+localMux	POST /auth/ldap/login	tunnel	# 插件登录面（同上）
