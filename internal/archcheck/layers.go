@@ -44,6 +44,8 @@ var Managed = map[string]bool{
 	// S15 前置：跨进程文件锁原语（Lock/Unlock，非选主语义）。只依赖标准库（os/syscall）⇒ 零 pkg/*
 	// 内部依赖；消费方是装配根的文件协调后端（限流计数 / 带宽字节预算）。
 	"github.com/cocomhub/sproxy/pkg/server/filelock": true,
+	// T4：路由表数据化 + 双 mux 注册内核（仅依赖标准库）⇒ L0；子包声明路径、装配层提供分类包装器。
+	"github.com/cocomhub/sproxy/pkg/server/router": true,
 	// S15：限流能力（滑动窗口 + per-IP 令牌桶 + 端点维度 + 并发信号量 + 协调后端）。
 	// 只依赖 config/metrics（同为 server 作用域）、netutil 与 internal/coordkey/slogutil ⇒
 	// 零反向依赖；装配根持有 *RateLimiter 并注入 metrics/clientIPFn/coordinator。
@@ -191,6 +193,7 @@ var Levels = map[string]int{
 	// 跨进程文件锁原语（server 作用域）：只导入标准库 ⇒ 零 pkg/* 内部依赖 ⇒ G0。
 	// 与 scheduler 同形：装配根（L2）与同子树切片（≥G0）均可导入。
 	"github.com/cocomhub/sproxy/pkg/server/filelock": 0,
+	"github.com/cocomhub/sproxy/pkg/server/router":   0,
 	// 限流能力（server 作用域）：依赖 config(L2)/metrics(L2)/netutil(G0)/filelock(G0) ⇒ 取
 	// max+0 = G2（同层 import 合法）；装配根 import 它，同层合法。
 	"github.com/cocomhub/sproxy/pkg/server/ratelimit": 2,

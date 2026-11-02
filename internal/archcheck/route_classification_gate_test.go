@@ -18,6 +18,7 @@ package archcheck
 
 import (
 	"bufio"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -118,10 +119,55 @@ func classifiedRoutes(t *testing.T) map[string]string {
 	return out
 }
 
+// routeTableFiles 是**数据化路由表**所在文件（`router.Route` 字面量表 + RoutePrefix 常量）。
+// 子包把 URL 子路径声明成数据后，注册不再出现在 mux 调用上，因此必须从表里解析，
+// 否则 R38 会把「已迁入子包的路由」当成已删除（假红）或漏检（假绿）。
+var routeTableFiles = []string{
+	"pkg/server/cloudtasks/routes.go",
+}
+
+// routeTablePrefixRe 匹配路由表文件里的组前缀常量字面量。
+var routeTablePrefixRe = regexp.MustCompile(`RoutePrefix\s*=\s*"([^"]+)"`)
+
+// routeTableEntryRe 匹配 `{Method: "GET", Path: "/x", Server: router.ClassAuth, Local: router.ClassTunnel, ...}`。
+var routeTableEntryRe = regexp.MustCompile(`\{Method:\s*"([A-Z]+)",\s*Path:\s*"([^"]+)",\s*Server:\s*router\.(\w+),\s*Local:\s*router\.(\w+)`)
+
+// tableRoutes 解析数据化路由表，返回 (mux, pattern) 集合（两端分类非 ClassNone 时各记一条）。
+func tableRoutes(t *testing.T) map[string]string {
+	t.Helper()
+	root := moduleRoot(t)
+	out := map[string]string{}
+	for _, rel := range routeTableFiles {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		data, err := os.ReadFile(full)
+		if err != nil {
+			continue // 文件不存在 = 该表未启用（允许列表冗余）
+		}
+		text := string(data)
+		pm := routeTablePrefixRe.FindStringSubmatch(text)
+		if pm == nil {
+			t.Fatalf("R38：%s 缺少 RoutePrefix 常量字面量（解析器无法推导完整路径）", rel)
+		}
+		prefix := pm[1]
+		for _, m := range routeTableEntryRe.FindAllStringSubmatch(text, -1) {
+			method, path, srvClass, localClass := m[1], m[2], m[3], m[4]
+			pattern := method + " " + prefix + path
+			if srvClass != "ClassNone" {
+				out["srvMux\t"+pattern] = rel
+			}
+			if localClass != "ClassNone" {
+				out["localMux\t"+pattern] = rel
+			}
+		}
+	}
+	return out
+}
+
 // TestR38_RouteClassificationIsExhaustive 断言注册路由与分类表**严格一一对应**。
 func TestR38_RouteClassificationIsExhaustive(t *testing.T) {
 	t.Parallel()
 	registered := registeredRoutes(t)
+	maps.Copy(registered, tableRoutes(t))
 	classified := classifiedRoutes(t)
 
 	if len(registered) == 0 {
