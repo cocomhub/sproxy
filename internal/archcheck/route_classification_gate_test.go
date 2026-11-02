@@ -186,6 +186,7 @@ func TestR38_RouteClassificationIsExhaustive(t *testing.T) {
 	t.Parallel()
 	registered := registeredRoutes(t)
 	maps.Copy(registered, tableRoutes(t))
+	maps.Copy(registered, externalAuthRoutes(t))
 	classified := classifiedRoutes(t)
 
 	if len(registered) == 0 {
@@ -233,4 +234,74 @@ func TestR38_RouteClassificationIsExhaustive(t *testing.T) {
 		t.Fatalf("R38：两个 mux 都应解析到路由（srvMux=%d localMux=%d）——解析器退化即门禁假绿",
 			byMux["srvMux"], byMux["localMux"])
 	}
+}
+
+// ---- 插件登录面路由（R38 动态注册盲区）----
+//
+// 这组路由由装配层的 `for _, extRoute := range h.externalAuthRoutes` 循环动态注册
+// （pattern 是变量，`mux.Handle` 正则看不到）——若不单独解析，插件路由会绕开 R38
+// 分类表（deny-by-default 失效）。路径/Method 常量与字面量都在同一文件里，两步解析。
+
+var (
+	// externalAuthRouteRe 匹配 `{Method: X, Pattern: Y, Handler: ...}`（注意不要匹配到
+	// 切片类型名 `[]authn.ExternalAuthRoute{`——否则只能看到首条）。
+	externalAuthRouteRe = regexp.MustCompile(`\{Method:\s*([^,\s]+),\s*Pattern:\s*([\w"]+),`)
+	// goStringConstRe 匹配字符串常量（含 `const x = "..."` 与常量块内的 `x = "..."`）。
+	goStringConstRe = regexp.MustCompile(`(?m)^\s*(?:const\s+)?(\w+)\s*=\s*"([^"]+)"`)
+)
+
+// externalAuthRouteFiles 是声明插件登录面路由的文件（新增认证插件需加入本表）。
+var externalAuthRouteFiles = []string{
+	"pkg/authn/ext/oidcldap/ldap.go",
+	"pkg/authn/ext/oidcldap/oidc.go",
+}
+
+// externalAuthRoutes 解析插件登录面路由：装配层对每条双注册——
+// localMux 裸注册（tunnel）、srvMux 经 ipGate（public）。
+func externalAuthRoutes(t *testing.T) map[string]string {
+	t.Helper()
+	root := moduleRoot(t)
+	out := map[string]string{}
+	for _, rel := range externalAuthRouteFiles {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		consts := map[string]string{}
+		for _, cm := range goStringConstRe.FindAllStringSubmatch(text, -1) {
+			consts[cm[1]] = cm[2]
+		}
+		for _, m := range externalAuthRouteRe.FindAllStringSubmatch(text, -1) {
+			method := resolveHTTPMethodConst(m[1])
+			pattern := strings.Trim(m[2], `"`)
+			if v, ok := consts[pattern]; ok {
+				pattern = v
+			}
+			if method == "" || pattern == "" {
+				t.Fatalf("R38：%s 的 ExternalAuthRoute 无法解析（method=%q pattern=%q）", rel, m[1], m[2])
+			}
+			key := method + " " + pattern
+			out["srvMux\t"+key] = rel
+			out["localMux\t"+key] = rel
+		}
+	}
+	return out
+}
+
+// resolveHTTPMethodConst 把 http.MethodXxx 常量或字面量解析为方法名。
+func resolveHTTPMethodConst(s string) string {
+	switch s {
+	case "http.MethodGet":
+		return "GET"
+	case "http.MethodPost":
+		return "POST"
+	case "http.MethodPut":
+		return "PUT"
+	case "http.MethodDelete":
+		return "DELETE"
+	case "http.MethodHead":
+		return "HEAD"
+	}
+	return strings.Trim(s, `"`)
 }
