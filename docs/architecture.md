@@ -864,6 +864,12 @@ import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJ
   `pkg/server`（`self_credential_test.go` / `state_store_config_test.go`）。
 - 度量：`pkg/server` 非测试行 28,489 → **28,125**；子包 18 → 19。
 
+**P2 总体度量（2026-11-01，设计见 `docs/designs/2026-11-01-residual-assembly-optimization.md`）**
+
+- `pkg/server` 非测试行 **42,568 → 28,125（−33.9%）**；服务端子包 **1 → 19**；
+- 本系列四片：T1 `remotefs`（#994，1,074 行）、T2 一期 `internal/httpjson`（#995，收敛 4 份 JSON 响应实现 + R54 棘轮）、T3-b `enclosure`（#996，419 行）、T3-a `credentials`（#997，458 行进包、装配层 433 → 68）；
+- 剩余 28,125 行按切片判据（去重 `h.` 字段 ≤8 且密度 ≤80/千行）已到自然边界；未做的 T2 二期（41 处裸 JSON 写迁移）由 R54 棘轮锁住只减不增。
+
 **P1：装配层策略对象（2026-10-31）**
 
 - `volume.Router`（#960 内核 + #962 接线）：卷路由与 ACL 单一实现，删除 `locateOwnerFileLegacy`/

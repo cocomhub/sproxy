@@ -113,3 +113,27 @@ type Deps struct {
 - T1 完成后：装配根非测试 ≤ 28,900 行，`pkg/server` 子包 17 个；
 - T2 完成后：`sendJSONResponse` 只剩 1 份实现，R54 棘轮基线落盘；
 - 每个 PR：`go test ./pkg/server/... ./internal/archcheck/`、`make lint`、`make build-all` 全绿，门禁扫描面同步，文档（`architecture.md`/`gates.md`/`AGENTS.md`）同步。
+
+## 7. 交付结果（2026-11-01）
+
+| 轨道 | PR | 结果 |
+|---|---|---|
+| T1 `pkg/server/remotefs` | #994 | 1,074 行生产 + 1,813 行测试移出；`Deps` 恒 8 字段（有 `NumField()==8` 断言）；包内 32 例 + 装配层 9 例 |
+| T2 一期 `internal/httpjson` | #995 | 收敛 **4 份** JSON 响应实现（装配根 `sendJSONResponse` 328 处、`pkg/files.sendJSON` 146 处、`ratelimit` 429、`cloudtasks.writeJSON`）；门禁 **R54** 基线 11 文件 41 处；顺带修 `pkg/files/runtime.logger()` 未装配时 panic |
+| T3-b `pkg/server/enclosure` | #996 | 419 行移出；`h.enclosureSealedAt` → 包级 `SealedAt(set, ...)`；装配级 15 例留装配层、包内 4 例纯函数 |
+| T3-a `pkg/server/credentials` | #997 | 458 行进包（store/masterkey/best_credential/bootstrap），装配层 `credentials.go` 433 → 68；启动编排与轮换驱动留装配层；顶层用例数 24 → 24 |
+
+**规模**：`pkg/server` 非测试 **42,568 → 28,125（−33.9%）**；子包 **1 → 19**。
+
+**与原设计的偏差（均为实施中发现，已记录理由）**：
+
+1. T2 一期发现第 **4** 份 JSON 响应实现（`cloudtasks.writeJSON`），设计时只识别出 3 份；
+2. T1 的 `federation` 相邻块 `federation_services.go` 是 `h.` 绑定的 HTTP handler，留装配层（设计已预判）；
+3. T3-b 的 `volumeFromUserVolume` 移到 `pkg/server/user_volume_store.go` 而非新包——它转换 store 模型 `UserVolume`（装配类型）→ `volume.Volume`，进包即反向依赖；
+4. T3-a 按风险收窄为「只切无 `h.` 依赖的纯子集」，启动编排（`bootstrapCredentials(opts)` / `SelfCredential` / 轮换驱动）留装配层。
+
+**仍未做（后续，非阻塞）**：
+
+- **T2 二期**：11 文件 41 处裸 JSON 写迁移到 `httpjson`（R54 棘轮已锁住只减不增）。迁移陷阱：① `json.Encoder` 带尾随换行，`Send` 不带（JSON 解码器无感，字节断言测试会红）；② 序列化失败日志由 per-handler `msgJSONEncode` 变为统一 Warn（丢 handler 名）；
+- **剩余装配根 28,125 行**按 §2 判据已到自然边界：`routes*`/`handlers.go`/`files_service.go`/`volumes_api.go` 均为装配本体或能力面转发。
+
