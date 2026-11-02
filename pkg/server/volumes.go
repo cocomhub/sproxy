@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/config"
+	serverenclosure "github.com/cocomhub/sproxy/pkg/server/enclosure"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -149,7 +150,7 @@ func registerAccumulatedStorageVolumes(set *registry.Set, acc *volumeAccum) erro
 // 无则完全零开销、零行为变化）。
 func hasNestedDecl(vols []VolumeConfig) bool {
 	for _, vc := range vols {
-		if _, _, ok := TranslateNestedDecl(vc.Type, vc.Extra, int64(vc.VolCapacity)); ok {
+		if _, _, ok := serverenclosure.TranslateNestedDecl(vc.Type, vc.Extra, int64(vc.VolCapacity)); ok {
 			return true
 		}
 	}
@@ -161,7 +162,7 @@ func normalizeNestedVolumes(vols []VolumeConfig) []VolumeConfig {
 	out := make([]VolumeConfig, len(vols))
 	copy(out, vols)
 	for i := range out {
-		typ, extra, ok := TranslateNestedDecl(out[i].Type, out[i].Extra, int64(out[i].VolCapacity))
+		typ, extra, ok := serverenclosure.TranslateNestedDecl(out[i].Type, out[i].Extra, int64(out[i].VolCapacity))
 		if !ok {
 			continue
 		}

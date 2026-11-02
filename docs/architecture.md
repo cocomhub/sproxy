@@ -647,7 +647,7 @@ import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJ
 存量裸写（`json.NewEncoder(w)` / 手写 `Content-Type: application/json`）由门禁 **R54**
 （`json_response_sites.tsv` 棘轮）锁住，只减不增。
 
-### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流 / T1 跨节点读写面）
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流 / T1 跨节点读写面 / T3-b 封装卷翻译与装配）
 
 - `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
   及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
@@ -822,6 +822,19 @@ import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJ
   **凭证池验签、写面拒绝指标渲染、与本地写共享锁池** 三类用例依赖装配态，保留在装配层
   （`remote_read_credential_test.go`/`remote_write_metrics_test.go`/`remote_write_lock_test.go`）。
 - 度量：`pkg/server` 非测试行 29,960 → **28,889**；子包 16 → 17。
+
+**T3-b：封装卷翻译与运行期装配（`pkg/server/enclosure`，2026-11-02）**
+
+- 迁入：用户面 `target` 语法翻译（`TranslateNestedVolume`/`TranslateNestedDecl`/`ParseNestedTarget`）、
+  运行期装配/拆除（`AttachEnclosureVolume`/`DetachEnclosureVolume`）、声明校验、封印注入、
+  容量池继承、占用区间擦除、封印区间判定（`SealedAt`）。
+- **翻译语义是兼容面，切片不改**：`type: <wrapper>` + `extra.target: "<卷>/<子路径>"` →
+  `extra.source`（装配词汇）；持久化/回显仍是用户面原形态（store 字节零变化，翻译只在内存）。
+- **依赖倒置**：切片只接收显式参数（`*registry.Set` / `*slog.Logger` / storage root），不持有
+  `*Handlers`；唯一装配态依赖（卷集）经 `pkg/server/enclosure_wiring.go` 的
+  `h.enclosureSealedAt` 薄适配传入，不反向 import `pkg/server`（R6）。
+- 测试：纯翻译用例随迁 `pkg/server/enclosure/nested_test.go`；装配级用例（config/API/重启/
+  封印联动）依赖装配态，保留在 `pkg/server`（`nested_enclosure_type_test.go` 等）。
 
 **P1：装配层策略对象（2026-10-31）**
 

@@ -9,7 +9,7 @@ package server
 // owner 限定声明（`target: main/<owner>/user/<目录>`，足迹 = 该 owner 的真实数据区）。
 //
 // 三条装配入口全钉：config 装配（AttachAll = 启动路径）、建卷 API（validateNewEnclosure）、
-// 运行期/恢复装配（AttachEnclosureVolume）。
+// 运行期/恢复装配（serverenclosure.AttachEnclosureVolume）。
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	serverenclosure "github.com/cocomhub/sproxy/pkg/server/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
 )
@@ -152,7 +153,7 @@ func TestEnclosureRegion_CreateAllowsEmptyRegion(t *testing.T) {
 }
 
 // TestEnclosureRegion_AttachEnclosureVolumeRejectsPopulatedRegion 运行期/恢复装配入口
-// （AttachEnclosureVolume，建卷 API 预检之外的**兜底**）：直接调用同样 fail-closed。
+// （serverenclosure.AttachEnclosureVolume，建卷 API 预检之外的**兜底**）：直接调用同样 fail-closed。
 //
 // 为什么需要兜底：重启恢复路径（cmd/sproxy/user_volume_restore.go）与 config 装配都不经
 // validateNewEnclosure——它们是**收养已持久化声明**的入口，恰恰是最需要防误删的路径。
@@ -162,14 +163,14 @@ func TestEnclosureRegion_AttachEnclosureVolumeRejectsPopulatedRegion(t *testing.
 	mainDir := h.volSet.Root("main").AbsPath()
 	dir := populateOrdinaryDir(t, mainDir, "alice/user/docs")
 
-	tv, nested := TranslateNestedVolume(volume.Volume{
+	tv, nested := serverenclosure.TranslateNestedVolume(volume.Volume{
 		Name: "vault-restore", Type: wrapperFSType,
 		Extra: map[string]any{"target": "main/alice/user/docs"},
 	})
 	if !nested {
 		t.Fatal("应为嵌套封装声明")
 	}
-	err := AttachEnclosureVolume(context.Background(), h.volSet, testLogger(), mainDir, tv)
+	err := serverenclosure.AttachEnclosureVolume(context.Background(), h.volSet, testLogger(), mainDir, tv)
 	if !errors.Is(err, enclosure.ErrRegionOccupied) {
 		t.Fatalf("恢复装配应拒绝既有数据区间（ErrRegionOccupied），got %v", err)
 	}
@@ -202,7 +203,7 @@ func TestEnclosureAttach_ConcurrentOverlappingDeclarationsSerialized(t *testing.
 		go func(i int) {
 			defer wg.Done()
 			name := fmt.Sprintf("vault-conc-%d", i)
-			tv, nested := TranslateNestedVolume(volume.Volume{
+			tv, nested := serverenclosure.TranslateNestedVolume(volume.Volume{
 				Name: name, Type: wrapperFSType,
 				Extra: map[string]any{"target": "main/alice/user/conc"},
 			})
@@ -210,7 +211,7 @@ func TestEnclosureAttach_ConcurrentOverlappingDeclarationsSerialized(t *testing.
 			if !nested {
 				err = errors.New("应为嵌套封装声明")
 			} else {
-				err = AttachEnclosureVolume(context.Background(), h.volSet, testLogger(), mainDir, tv)
+				err = serverenclosure.AttachEnclosureVolume(context.Background(), h.volSet, testLogger(), mainDir, tv)
 			}
 			mu.Lock()
 			errs[i], names[i] = err, name

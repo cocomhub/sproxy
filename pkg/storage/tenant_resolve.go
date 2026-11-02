@@ -133,7 +133,7 @@ func openTenant(parent *Root, owner string, cfg tenantConfig) (*Tenant, error) {
 	// 只读透视/写恒拒语义不变（封装卷持特权视图，不受影响）。
 	//
 	// **实时求值（不在创建时快照）**：源卷封印可在**运行期**变更（新增/删除封装卷 →
-	// server.AttachEnclosureVolume/DetachEnclosureVolume 重设该卷根封印），而租户子根句柄被
+	// pkg/server/enclosure.AttachEnclosureVolume/DetachEnclosureVolume 重设该卷根封印），而租户子根句柄被
 	// TenantCache 缓存、此后不再经 OpenTenant ⇒ 快照会让已缓存租户**绕过新封印**
 	// （客户端经租户根写 `<user>/<sub>/…` 直入封装区间：写保护失效窗口）。
 	// 故安装派生实时来源（deriveSealsFromParent：按父根当前规则翻译 + 本根别名展开 + 版本缓存）

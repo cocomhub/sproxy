@@ -5,7 +5,7 @@ package server
 
 // volume_wrapper_wire_test.go 验证 **config 声明嵌套封装卷的装配接线**（方案甲：enclosure
 // 内部化）：用户面 `type: <wrapper 名>` + `extra.target: "<卷>/<子目录>"` 在装配期被翻译出装配侧
-// 声明词汇（`nested_enclosure.go: TranslateNestedVolume`，**Type 保持 wrapper 类型**），随之而来
+// 声明词汇（`pkg/server/enclosure/nested.go: TranslateNestedVolume`，**Type 保持 wrapper 类型**），随之而来
 // 的是 enclosure 装配的三项能力：
 //
 //   - **封印注入**：源卷（main）在该子区间上封印——客户端直连读写被拒（写恒拒 ErrSealed、
@@ -22,7 +22,6 @@ package server
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 
@@ -130,78 +129,5 @@ func TestConfigDeclaredNested_ConflictFailClosed(t *testing.T) {
 	cfg.Volumes[2].Extra = map[string]any{"target": "main/videos/sub"}
 	if _, ferr := assembleVolumes(cfg, testLogger()); ferr == nil || !errors.Is(ferr, enclosure.ErrFootprintOverlap) {
 		t.Fatalf("父子区间应判足迹重叠: %v", ferr)
-	}
-}
-
-// TestTranslateNestedVolume 用户面 → 装配侧声明词汇的翻译语义（纯函数，钉住兼容面）：
-//   - 嵌套 target + 已注册 wrapper 类型 → 翻译（补 source/wrapper，**Type 不变**，原 target 保留）；
-//   - 非嵌套（无分隔符 / `local` / 卷名或子路径空）→ 不翻译；
-//   - 非封装处理层类型 → 不翻译（普通外部卷零回归）；
-//   - `type: enclosure`（拒绝判据 token，非可写卷类型 / 非 wrapper 注册名）→ 恒定不翻译。
-func TestTranslateNestedVolume(t *testing.T) {
-	t.Parallel()
-	registerFixtureWrapper("translate-test-wrap")
-	cases := []struct {
-		name    string
-		vol     volume.Volume
-		want    bool
-		wantSrc string
-	}{
-		{"嵌套翻译", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "main/videos"}}, true, "main:videos"},
-		{"多级子路径", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "main/a/b"}}, true, "main:a/b"},
-		{"无分隔符不翻译", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "main"}}, false, ""},
-		{"local 不翻译", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "local"}}, false, ""},
-		{"尾斜杠不翻译", volume.Volume{Name: "v", Type: "translate-test-wrap", Extra: map[string]any{"target": "main/"}}, false, ""},
-		{"未注册类型不翻译", volume.Volume{Name: "v", Type: "ghost-type", Extra: map[string]any{"target": "main/videos"}}, false, ""},
-		{"type:enclosure（非可写类型）不翻译", volume.Volume{Name: "v", Type: enclosure.TypeEnclosure, Extra: map[string]any{"target": "main/videos", "source": "main:videos"}}, false, ""},
-		{"本地卷不翻译", volume.Volume{Name: "v", Type: volume.TypeLocal, Extra: map[string]any{"target": "main/videos"}}, false, ""},
-	}
-	for _, tc := range cases {
-		got, translated := TranslateNestedVolume(tc.vol)
-		if translated != tc.want {
-			t.Errorf("%s: translated=%v want %v", tc.name, translated, tc.want)
-			continue
-		}
-		if !translated {
-			if got.Type != tc.vol.Type {
-				t.Errorf("%s: 未翻译时不应改写 type", tc.name)
-			}
-			continue
-		}
-		if got.Type != tc.vol.Type {
-			t.Errorf("%s: 翻译不得改写 Type（对外身份 = wrapper 类型），got %q want %q", tc.name, got.Type, tc.vol.Type)
-		}
-		if got.Extra["source"] != tc.wantSrc {
-			t.Errorf("%s: 翻译产物错误 type=%q extra=%+v", tc.name, got.Type, got.Extra)
-		}
-		// wrapper 键**不再写出**（用户裁定 2026-10-15：wrapper 恒等于卷类型 ⇒ 冗余键，
-		// 装配侧读取时缺省回落 v.Type；显式写出且不一致则 fail-closed）。
-		if _, has := got.Extra["wrapper"]; has {
-			t.Errorf("%s: 翻译不得再写冗余 wrapper 键, got %v", tc.name, got.Extra["wrapper"])
-		}
-		if got.Extra["target"] != tc.vol.Extra["target"] {
-			t.Errorf("%s: 原 target 应保留（回显/审计）", tc.name)
-		}
-	}
-}
-
-// TestTranslateNestedVolume_CapacityToMaxBytes 卷级容量翻译为声明自身上限（语义等价）：
-// 显式 max_bytes 优先，不被 capacity 覆盖。
-func TestTranslateNestedVolume_CapacityToMaxBytes(t *testing.T) {
-	t.Parallel()
-	registerFixtureWrapper("translate-cap-wrap")
-	v := volume.Volume{Name: "v", Type: "translate-cap-wrap", Capacity: 4096, Extra: map[string]any{"target": "main/videos"}}
-	got, ok := TranslateNestedVolume(v)
-	if !ok || got.Extra["max_bytes"] != int64(4096) {
-		t.Fatalf("capacity 应翻译为 max_bytes: ok=%v extra=%+v", ok, got.Extra)
-	}
-	v2 := volume.Volume{Name: "v", Type: "translate-cap-wrap", Capacity: 4096,
-		Extra: map[string]any{"target": "main/videos", "max_bytes": float64(512)}}
-	got2, _ := TranslateNestedVolume(v2)
-	if got2.Extra["max_bytes"] != float64(512) {
-		t.Fatalf("显式 max_bytes 应优先, got %v", got2.Extra["max_bytes"])
-	}
-	if !strings.Contains(got2.Extra["source"].(string), ":") {
-		t.Fatalf("翻译应产出 source, got %v", got2.Extra)
 	}
 }

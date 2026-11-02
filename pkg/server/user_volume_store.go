@@ -47,6 +47,18 @@ type UserVolume struct {
 	ACL volume.ACL `json:"acl"`
 }
 
+// volumeFromUserVolume 把 store 持久化模型转换为 pkg/volume.Volume（装配/拆除共用）。
+// Owner 不落入 volume.Volume（卷集无 owner 字段）；owner 归属校验由装配层闭包查 store 完成。
+func volumeFromUserVolume(uv UserVolume) volume.Volume {
+	return volume.Volume{
+		Name:     uv.Name,
+		Type:     uv.Type,
+		Capacity: uv.Capacity,
+		Extra:    uv.Extra,
+		ACL:      uv.ACL, // 保留持久化 ACL（新卷 owner-only；已存卷零值 = 开放，兼容不收紧）
+	}
+}
+
 // UserVolumeStore 把每 owner 的卷元数据持久化到
 // `<root>/<owner>/meta/volume/<name>.json`。
 //

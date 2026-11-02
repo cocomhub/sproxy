@@ -7,7 +7,7 @@ package server
 // `extra.target=<卷>/<子目录>`）」的测试装配夹具，与生产装配顺序/形态一致。
 //
 // 方案甲：用户面 target 语法在**装配层翻译**出封装声明词汇（`extra.source` +
-// `extra.wrapper`，见 nested_enclosure.go；**Type 不变**），底层由 enclosure 机制装配——故夹具需注册一个
+// `extra.wrapper`，见 pkg/server/enclosure/nested.go；**Type 不变**），底层由 enclosure 机制装配——故夹具需注册一个
 // **同名封装处理层**（`enclosure.RegisterWrapper`）让翻译生效，后端即「区域视图上的
 // secretdata」（与过渡期的 SubFS 装配物理落点等价）。
 //

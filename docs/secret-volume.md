@@ -171,7 +171,7 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 
 - **target 语法（用户面，保留兼容）**：`<卷名>/<子目录>`（如 `main/videos`，子目录可多级
   `a/b`）；必须含子目录。装配层把该语法**翻译**为装配侧声明词汇（`extra.source: "<卷>:<子目录>"`，
-  见 `pkg/server/nested_enclosure.go`；`extra.wrapper` 是冗余键**不再书写**——处理层恒等于卷
+  见 `pkg/server/enclosure/nested.go`；`extra.wrapper` 是冗余键**不再书写**——处理层恒等于卷
   类型本身，装配侧缺省回落 v.Type，显式写出且不一致则 fail-closed）——**卷描述 Type 保持
   wrapper 类型**（enclosure 只是内部装配机制，不是对外卷类型；见 §3.9），持久化形态与用户面
   语法零变化（Web UI/sclient/config 输入不破），物理落点亦不变（`<基卷根>/<子目录>/…`）。
