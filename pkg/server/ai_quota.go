@@ -4,8 +4,9 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
+
+	"github.com/cocomhub/sproxy/internal/httpjson"
 )
 
 func (h *Handlers) handleAIQuota(w http.ResponseWriter, r *http.Request) {
@@ -23,8 +24,7 @@ func (h *Handlers) handleAIQuota(w http.ResponseWriter, r *http.Request) {
 		}
 		owner = o
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	httpjson.Send(w, http.StatusOK, map[string]any{
 		"owner": owner,
 		"usage": ai.Quota().Usage(owner),
 	})

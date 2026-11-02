@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/state"
 )
 
@@ -128,8 +129,7 @@ func (h *Handlers) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 		writeAIError(w, http.StatusBadRequest, "集群未启用")
 		return
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	httpjson.Send(w, http.StatusOK, map[string]any{
 		"nodes": h.nodeRegistry.List(r.Context()),
 	})
 }
@@ -145,8 +145,7 @@ func (h *Handlers) handleClusterSelf(w http.ResponseWriter, r *http.Request) {
 		writeAIError(w, http.StatusBadRequest, "集群未启用")
 		return
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	httpjson.Send(w, http.StatusOK, map[string]any{
 		"node_id": cfg.Cluster.NodeID,
 		"role":    cfg.Cluster.Role,
 	})

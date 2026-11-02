@@ -745,10 +745,10 @@ const (
 
 // sendJSON 写出 JSON 响应：委托 internal/httpjson（全仓唯一实现）。
 //
-// 告警日志仍用本服务实例的日志器（SendLogged），保持日志路由不变；此前本包持有一份
+// 告警日志仍用本服务实例的日志器（SendOpt），保持日志路由不变；此前本包持有一份
 // 与 pkg/server.sendJSONResponse 等价的副本，现已收敛。
 func (s *Service) sendJSON(w http.ResponseWriter, response any, statusCode int) {
-	httpjson.SendLogged(w, statusCode, response, s.rt.logger())
+	httpjson.SendOpt(w, statusCode, response, httpjson.Opt{Logger: s.rt.logger()})
 }
 
 // 本文件末尾是**跨族共享纯函数**在本包内的等价实现（checksumReader / fileChecksumRoot /

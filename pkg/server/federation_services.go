@@ -8,8 +8,9 @@ package server
 //   - /api/hub/services 聚合联邦候选服务（mergeFederationServices）。
 
 import (
-	"encoding/json"
 	"net/http"
+
+	"github.com/cocomhub/sproxy/internal/httpjson"
 )
 
 // federationServicesHandler 返回本 hub 节点宣告的服务（联邦对端拉取）。
@@ -31,8 +32,5 @@ func (h *Handlers) federationServicesHandler(w http.ResponseWriter, r *http.Requ
 			Node: string(ns.Node), Mesh: mesh, Name: ns.Service.Name, Addr: ns.Service.Addr,
 		})
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Warn(msgJSONEncode, "handler", "federationServicesHandler", "error", err)
-	}
+	httpjson.SendOpt(w, http.StatusOK, resp, httpjson.Opt{Logger: h.logger, Handler: "federationServicesHandler", Msg: msgJSONEncode})
 }

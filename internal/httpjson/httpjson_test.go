@@ -6,6 +6,7 @@ package httpjson
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -66,26 +67,97 @@ func TestSendError_WritesErrorObject(t *testing.T) {
 	}
 }
 
-func TestSendLogged_UsesCallerLogger(t *testing.T) {
+func TestSendOpt_UsesCallerLogger(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	SendLogged(httptest.NewRecorder(), http.StatusOK, unmarshalable{Ch: make(chan int)}, log)
+	SendOpt(httptest.NewRecorder(), http.StatusOK, unmarshalable{Ch: make(chan int)}, Opt{Logger: log})
 
 	if !strings.Contains(buf.String(), msgEncodeJSONFailed) {
 		t.Fatalf("caller logger 未收到告警，buf = %q", buf.String())
 	}
 }
 
-func TestSendLogged_NilLoggerFallsBackToPackageLogger(t *testing.T) {
+func TestSendOpt_HandlerAttrInWarn(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	SendOpt(httptest.NewRecorder(), http.StatusOK, unmarshalable{Ch: make(chan int)}, Opt{Logger: log, Handler: "hubNodesHandler"})
+
+	if got := buf.String(); !strings.Contains(got, msgEncodeJSONFailed) || !strings.Contains(got, "hubNodesHandler") {
+		t.Fatalf("告警应带 handler 属性，buf = %q", got)
+	}
+}
+
+func TestWriteBody_WritesPreSerializedBytes(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+
+	WriteBody(rec, http.StatusOK, []byte(`{"cached":true}`))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := rec.Header().Get(headerContentType); got != contentTypeJSON {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := rec.Body.String(); got != `{"cached":true}` {
+		t.Fatalf("body = %q（不得二次序列化/追加换行）", got)
+	}
+}
+
+func TestSendErr_ReportsMarshalFailure(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+
+	err := SendErr(rec, http.StatusOK, unmarshalable{Ch: make(chan int)}, Opt{})
+
+	if err == nil {
+		t.Fatal("SendErr 应返回序列化错误")
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500（仍要回固定错误体，不能半截响应）", rec.Code)
+	}
+}
+
+func TestSendErr_ReportsWriteFailure(t *testing.T) {
+	t.Parallel()
+	err := SendErr(failingWriter{}, http.StatusOK, map[string]string{"k": "v"}, Opt{})
+
+	if err == nil {
+		t.Fatal("SendErr 应返回写出错误")
+	}
+}
+
+func TestSendOpt_CustomMsg(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	SendOpt(httptest.NewRecorder(), http.StatusOK, unmarshalable{Ch: make(chan int)}, Opt{Logger: log, Msg: "custom encode msg"})
+
+	if got := buf.String(); !strings.Contains(got, "custom encode msg") {
+		t.Fatalf("日志文案应可覆盖，buf = %q", got)
+	}
+}
+
+// failingWriter 让所有写入失败，用于验证写出错误被上报。
+type failingWriter struct{}
+
+func (failingWriter) Header() http.Header       { return http.Header{} }
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+func (failingWriter) WriteHeader(int)           {}
+
+func TestSendOpt_NilLoggerFallsBackToPackageLogger(t *testing.T) {
 	// sproxy:serial: 替换包级告警日志器，与其它改全局日志器的用例互斥
 	var buf bytes.Buffer
 	prev := currentLogger()
 	SetLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { SetLogger(prev) })
 
-	SendLogged(httptest.NewRecorder(), http.StatusOK, unmarshalable{Ch: make(chan int)}, nil)
+	SendOpt(httptest.NewRecorder(), http.StatusOK, unmarshalable{Ch: make(chan int)}, Opt{})
 
 	if !strings.Contains(buf.String(), msgEncodeJSONFailed) {
 		t.Fatalf("包级 logger 未收到告警，buf = %q", buf.String())

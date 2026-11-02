@@ -5,12 +5,12 @@ package server
 
 import (
 	"crypto/subtle"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/server/notify"
 )
 
@@ -36,8 +36,7 @@ func (h *Handlers) notifyHistoryHandler(w http.ResponseWriter, r *http.Request) 
 	if len(hist) > limit {
 		hist = hist[:limit]
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{"entries": hist})
+	httpjson.Send(w, http.StatusOK, map[string]any{"entries": hist})
 }
 
 // notifyTestHandler 触发渠道自检（POST /api/notify/test?channel=wecom）。
@@ -77,8 +76,7 @@ func (h *Handlers) notifyTestHandler(w http.ResponseWriter, r *http.Request) {
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: "notify_test", ObjectType: "notify", Object: strings.Join(names, ","), Result: AuditResultSuccess,
 	})
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+	httpjson.Send(w, http.StatusOK, map[string]any{"results": results})
 }
 
 // feedBaseURL 构造请求的绝对 base URL（https 判定 + X-Forwarded-Proto 覆盖）。

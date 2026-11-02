@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/cocomhub/sproxy/internal/httpjson"
 )
 
 // remote_block.go 实现写面块级会话端点（roadmap 4.3 P2 跨 FS 块级 v2）：
@@ -30,7 +32,7 @@ func (wh *remoteWriteHandler) serveBlock(w http.ResponseWriter, r *http.Request,
 			writeRemoteFilesError(w, err)
 			return
 		}
-		writeJSONResponse(w, map[string]string{"block_id": id}, http.StatusOK)
+		httpjson.Send(w, http.StatusOK, map[string]string{"block_id": id})
 	case "block_write":
 		id := strings.TrimSpace(r.URL.Query().Get("id"))
 		offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
@@ -43,14 +45,14 @@ func (wh *remoteWriteHandler) serveBlock(w http.ResponseWriter, r *http.Request,
 			writeRemoteFilesError(w, err)
 			return
 		}
-		writeJSONResponse(w, map[string]string{"ok": "written"}, http.StatusOK)
+		httpjson.Send(w, http.StatusOK, map[string]string{"ok": "written"})
 	case "block_close":
 		id := strings.TrimSpace(r.URL.Query().Get("id"))
 		if err := svc.CloseBlockWrite(r.Context(), id); err != nil {
 			writeRemoteFilesError(w, err)
 			return
 		}
-		writeJSONResponse(w, map[string]string{"ok": "closed"}, http.StatusOK)
+		httpjson.Send(w, http.StatusOK, map[string]string{"ok": "closed"})
 	}
 }
 

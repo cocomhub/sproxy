@@ -18,13 +18,13 @@ package server
 // 域实现见 pkg/files/trash.go（softDeleteToTrash/RestoreTrash/EmptyTrash/CleanupTrash）。
 
 import (
-	"encoding/json"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/files"
 )
 
@@ -60,8 +60,7 @@ func (h *Handlers) listTrashHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = filepath.WalkDir(trashAbs, h.listTrashWalk(trashAbs, vr.Volume, &out))
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{"entries": out})
+	httpjson.Send(w, http.StatusOK, map[string]any{"entries": out})
 }
 
 // listTrashWalk 是 listTrashHandler 的 WalkDir 回调（S107 拆分降 gocognit）：收集

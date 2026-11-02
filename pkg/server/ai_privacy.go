@@ -4,9 +4,10 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/cocomhub/sproxy/internal/httpjson"
 )
 
 func (h *Handlers) handleAIPrivacy(w http.ResponseWriter, r *http.Request) {
@@ -20,8 +21,7 @@ func (h *Handlers) handleAIPrivacy(w http.ResponseWriter, r *http.Request) {
 		writeAIError(w, http.StatusInternalServerError, "存储不可用")
 		return
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	httpjson.Send(w, http.StatusOK, map[string]any{
 		"enabled":    true,
 		"key_source": "volume-master-key",
 		"artifacts":  p.List(p.Root(), owner),
@@ -50,6 +50,5 @@ func (h *Handlers) handleAIPrivacyPurge(w http.ResponseWriter, r *http.Request) 
 		Action: "ai.privacy_purge", ObjectType: "privacy", Object: owner,
 		Result: AuditResultSuccess, Detail: fmt.Sprintf("deleted=%d", n),
 	})
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{"deleted": n})
+	httpjson.Send(w, http.StatusOK, map[string]any{"deleted": n})
 }
