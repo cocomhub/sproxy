@@ -115,3 +115,26 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `volume_root_bypass_gate_test.go` | R26 | volume_root_bypass_gate_test.go 是「**卷根直连适配器**」门禁（R26；仓库的 R 号按设计文档 |
 | `waitq_gates_test.go` | R36 | waitq_gates_test.go 汇总 W1 收敛的两条门禁（设计 docs/designs/2026-10-19-waitq.md §8.3）： |
 | `web_assets_test.go` | R10 | web_assets_test.go 是「**Web 前端每个 JS 文件都必须被自动化测试覆盖**」的门禁（R10）。 |
+| `alias_ratchet_test.go` | R51 | 迁移期别名文件 `pkg/server/*_alias.go` **只减不增**（文件数 + 行数双层棘轮）；清理别名后必须同步下调基线，锁定收益。 |
+| `arch_test.go` | R1 · R2 · R3 · R4 | 分层与作用域的基础门禁：R1 已登记包不得导入更高层级的包；R2 子包只允许父域子树与装配层导入；R3 全仓遍历三条规则的空断言防护（实测包数 > 0）；R4 `pkg/**` 非 `pkg/server/**` 不得导入装配层。 |
+| `build_flags_alignment_test.go` | — | GoReleaser 发布产物与 `make build` 的构建标志一致（仅允许 `-w -s` strip 差异），防「本地能跑、发布二进制行为不同」。 |
+| `chunked_persist_serialization_test.go` | — | 分块会话的**持久化入口必须全部经会话内嵌串行锁**（并发乱序缺陷的测试是概率性的，故用源码门禁兜底）。 |
+| `cloud_stop_signal_order_gate_test.go` | R48 | 云任务「停止信号必须在配额释放之后」：`waitTaskStopped` 返回 ⇒ 配额已归零（变异：把 signal 提前即红）。 |
+| `cloud_wait_event_gate_test.go` | R14 配套 | 云任务等待必须**事件化**（禁「循环 + sleep 轮询」）；与 R14 测试睡眠棘轮互补。 |
+| `config_defaults_gate_test.go` | R43 | 配置默认值安全：bool 默认必须 false、string 默认必须空（AGENTS.md 7c），防「默认开启」语义混淆。 |
+| `delete_invalidation_gate_test.go` | R39 | 持有派生缓存的卷实现，其**删除/移动路径必须失效该缓存**。 |
+| `deps_field_cap_test.go` | R52 | `pkg/server/<cap>` 切片的 `Deps` 字段数上限（默认 12）：字段数即切片的入边宽度，增长必须收敛为既有接口方法。 |
+| `fs_derived_state_gate_test.go` | R42 | FS 实现必须自述派生状态（供卷状态缓存判定是否可复用），防新增 FS 静默绕过缓存语义。 |
+| `index_single_write_gate_test.go` | R47 | 派生状态**单一写入口**：业务写路径不得直接写索引（只允许写内核/事件驱动），附允许清单。 |
+| `legacy_state_usage_gate_test.go` | R46 | 「旧派生状态实现」使用点棘轮（只减不增），锁定向 Root 事件收敛的收益。 |
+| `list_cache_gate_test.go` | R40 | list 级缓存**唯一提供方**（`pkg/volumestate`），禁止各卷各自造缓存。 |
+| `list_source_gate_test.go` | R41 | list/search 数据源收口（影子台账阶段）：两段式断言，确保数据源不回流到旧的逐卷扫描。 |
+| `makefile_bench_deps_test.go` | — | 任何会编译/类型检查根 module 的 Makefile 入口必须依赖 `prepare`（否则 benchmark 在缺前置时表面超时、真实根因是缺目标）。 |
+| `makefile_bench_timeout_test.go` | — | benchmark 入口必须设置**包级** `-timeout`（单个 op 卡死不返回时的兜底）。 |
+| `makefile_bench_watchdog_test.go` | — | `make bench` 必须经**进程外**停滞看门狗（`tools/benchwatch`），超时给出诊断而非静默挂起。 |
+| `makefile_target_dup_test.go` | — | Makefile 同一目标不得定义两次（只带先决条件的重复规则会被 make 静默合并）。 |
+| `openread_notexist_gate_test.go` | — | 每个 `OpenRead` 实现都必须**显式声明 not-exist 语义**（返回 `fs.ErrNotExist` 还是包装错误），防新增后端静默改变调用方分支。 |
+| `release_title_pattern_test.go` | — | 发布相关标题/标签格式断言（与 release-please 配置一致性配套）。 |
+| `root_mutation_gate_test.go` | R45 | `storage.Root` 结构性变异必须发事件（机制完整性在编译期之外的第二道保险）。 |
+| `volume_state_gate_test.go` | R44 | 卷状态缓存**唯一装配点**（R29 同形教训：横切关注点不能变成 N 个调用点各自的义务）。 |
+| `xfer_send_atomicity_test.go` | — | 传输层 `Send` 必须经 `iostream.WriteFull` 写足（防半帧），新增传输实现绕过即红。 |
