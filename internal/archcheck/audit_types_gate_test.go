@@ -28,11 +28,26 @@ func TestAuditTypes_OnlyInAuditPackage(t *testing.T) {
 		"pkg/server/audit.go":  true, // AuditEvent：**对外 JSON 视图**（读面投影，非第二实现）
 	}
 	var violations []string
-	_ = filepath.WalkDir("..", func(path string, d os.DirEntry, werr error) error {
+	// 扫描根必须用 moduleRoot：`go test` 以**包目录**为 cwd，`WalkDir("..")` 只会扫到
+	// internal/ —— 而本门禁管的是 pkg/ 的审计类型（实测：在 pkg/server 里新增一个
+	// AuditEvent 系类型，旧实现在门禁下**依旧绿**）。
+	root := moduleRoot(t)
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, werr error) error {
 		if werr != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		rel := filepath.ToSlash(strings.TrimPrefix(path, "../"))
+		// 跳过 worktree 副本 / 构建产物 / 依赖缓存（与其它全仓门禁同口径）。
+		slash := "/" + filepath.ToSlash(path)
+		for _, skip := range []string{"/.worktrees/", "/build/", "/node_modules/", "/.git/"} {
+			if strings.Contains(slash, skip) {
+				return nil
+			}
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
 		if strings.HasPrefix(rel, "pkg/audit/") || allow[rel] {
 			return nil
 		}
