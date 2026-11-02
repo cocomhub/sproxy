@@ -19,6 +19,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/llmgate"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 )
@@ -89,8 +90,7 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 	}
 	// 缓存命中（mtime 未变）
 	if got, _, ok, _ := ai.Cache().Get(r.Context(), owner, cacheKey, "sum", mtime); ok {
-		w.Header().Set(headerContentType, contentTypeJSON)
-		_, _ = w.Write(got)
+		httpjson.WriteBody(w, http.StatusOK, got)
 		return
 	}
 	// 配额前置门（roadmap 11.9-⑦）：超限 429 不调网关 + quota_exceeded 审计。
@@ -122,8 +122,7 @@ func (h *Handlers) handleAISummarize(w http.ResponseWriter, r *http.Request, own
 	})
 	body, _ := json.Marshal(map[string]string{"summary": summary})
 	_ = ai.Cache().Put(r.Context(), owner, cacheKey, "sum", mtime, body)
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_, _ = w.Write(body)
+	httpjson.WriteBody(w, http.StatusOK, body)
 }
 
 // handleAITag 处理 /api/ai/tag。
@@ -156,8 +155,7 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 		return
 	}
 	if got, _, ok, _ := ai.Cache().Get(r.Context(), owner, cacheKey, "tag", mtime); ok {
-		w.Header().Set(headerContentType, contentTypeJSON)
-		_, _ = w.Write(got)
+		httpjson.WriteBody(w, http.StatusOK, got)
 		return
 	}
 	if ai.Quota() != nil {
@@ -188,15 +186,12 @@ func (h *Handlers) handleAITag(w http.ResponseWriter, r *http.Request, owner str
 	})
 	body, _ := json.Marshal(map[string]any{"tags": tags})
 	_ = ai.Cache().Put(r.Context(), owner, filename, "tag", mtime, body)
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_, _ = w.Write(body)
+	httpjson.WriteBody(w, http.StatusOK, body)
 }
 
 // writeAIError 写 JSON 错误。
 func writeAIError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set(headerContentType, contentTypeJSON)
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	httpjson.SendError(w, code, msg)
 }
 
 var _ = llmgate.Client{}

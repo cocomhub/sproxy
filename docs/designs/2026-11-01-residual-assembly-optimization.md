@@ -132,8 +132,13 @@ type Deps struct {
 3. T3-b 的 `volumeFromUserVolume` 移到 `pkg/server/user_volume_store.go` 而非新包——它转换 store 模型 `UserVolume`（装配类型）→ `volume.Volume`，进包即反向依赖；
 4. T3-a 按风险收窄为「只切无 `h.` 依赖的纯子集」，启动编排（`bootstrapCredentials(opts)` / `SelfCredential` / 轮换驱动）留装配层。
 
-**仍未做（后续，非阻塞）**：
+**T2 二期（已完成，2026-11-02）**：11 文件 41 处裸 JSON 写已全部迁移到 `httpjson`，R54 从棘轮升级为**硬禁止**（基线表删除）。实施中为「无功能丢失」补了三项能力：
 
-- **T2 二期**：11 文件 41 处裸 JSON 写迁移到 `httpjson`（R54 棘轮已锁住只减不增）。迁移陷阱：① `json.Encoder` 带尾随换行，`Send` 不带（JSON 解码器无感，字节断言测试会红）；② 序列化失败日志由 per-handler `msgJSONEncode` 变为统一 Warn（丢 handler 名）；
-- **剩余装配根 28,125 行**按 §2 判据已到自然边界：`routes*`/`handlers.go`/`files_service.go`/`volumes_api.go` 均为装配本体或能力面转发。
+- `SendOpt{Logger, Handler, Msg, Attrs}`：保留各 handler 的日志器路由、`handler` 属性、日志文案与额外属性（如信令的 `count`）；
+- `SendErr` 返回序列化/写出错误：信令 `writeSignalMessages` 的「写失败不消费消息」语义（I5）必须保留；
+- `WriteBody` 写出已序列化字节：AI 摘要/标签缓存命中路径避免二次序列化；`remotefs` 的 meta 路径先设 `Content-Length` 再调 `WriteBody`，保留定长契约。
+
+两处行为微调（错误路径，非正常路径）：① 裸写用 `json.Encoder`（带尾随换行），`Send` 不带（JSON 解码器无感）；② 序列化失败从「200 + 空体」变为「500 + 固定错误体」。
+
+**剩余装配根 28,125 行**按 §2 判据已到自然边界：`routes*`/`handlers.go`/`files_service.go`/`volumes_api.go` 均为装配本体或能力面转发。
 

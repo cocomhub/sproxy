@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
 
@@ -347,10 +348,6 @@ func (b *SignalBroker) waitSignalSlot(ctx context.Context, peer string, kind hub
 // writeSignalMessages 以 JSON 数组写回信令消息。
 // 返回是否写入成功（false = 客户端断开/写失败，调用方不应消费该消息，I5）。
 func (b *SignalBroker) writeSignalMessages(w http.ResponseWriter, msgs []hub.SignalMsg) bool {
-	w.Header().Set(headerContentType, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(msgs); err != nil {
-		b.logger.Warn("写回信令消息失败", "count", len(msgs), "error", err)
-		return false
-	}
-	return true
+	opt := httpjson.Opt{Logger: b.logger, Msg: "写回信令消息失败", Attrs: []any{"count", len(msgs)}}
+	return httpjson.SendErr(w, http.StatusOK, msgs, opt) == nil
 }

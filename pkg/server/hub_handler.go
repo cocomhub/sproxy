@@ -5,12 +5,12 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
 
@@ -71,10 +71,7 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 			RTTMs:        nodeRTTMs(n),
 		})
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Warn(msgJSONEncode, "handler", "hubNodesHandler", "error", err)
-	}
+	httpjson.SendOpt(w, http.StatusOK, resp, httpjson.Opt{Logger: h.logger, Handler: "hubNodesHandler", Msg: msgJSONEncode})
 }
 
 // nodeRTTMs 返回节点 RTT 毫秒（-1 = 无采样，显式未知；禁静默当 0 假报健康）。
@@ -158,10 +155,7 @@ func (h *Handlers) federationNodesHandler(w http.ResponseWriter, r *http.Request
 			Connected: n.Connected,
 		})
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Warn(msgJSONEncode, "handler", "federationNodesHandler", "error", err)
-	}
+	httpjson.SendOpt(w, http.StatusOK, resp, httpjson.Opt{Logger: h.logger, Handler: "federationNodesHandler", Msg: msgJSONEncode})
 }
 
 // mergeFederationNodes 把联邦候选节点合并进发现列表：按调用方 mesh 严格过滤
@@ -220,10 +214,8 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 			h.logger.Debug("DHT 节点移除失败（忽略）", "node", id, "error", rerr)
 		}
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)}); err != nil {
-		h.logger.Warn(msgJSONEncode, "handler", "hubRemoveNodeHandler", "error", err)
-	}
+	body := map[string]string{"status": "removed", "node": string(id)}
+	httpjson.SendOpt(w, http.StatusOK, body, httpjson.Opt{Logger: h.logger, Handler: "hubRemoveNodeHandler", Msg: msgJSONEncode})
 }
 
 // hubStatsHandler 返回中继统计（按调用方 mesh 统计节点数，M-9）。
@@ -233,12 +225,8 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	count := h.routeTable.NodeCount(meshFromRequest(r))
-	w.Header().Set(headerContentType, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(map[string]any{
-		"nodes_connected": count,
-	}); err != nil {
-		h.logger.Warn(msgJSONEncode, "handler", "hubStatsHandler", "error", err)
-	}
+	body := map[string]any{"nodes_connected": count}
+	httpjson.SendOpt(w, http.StatusOK, body, httpjson.Opt{Logger: h.logger, Handler: "hubStatsHandler", Msg: msgJSONEncode})
 }
 
 // hubServicesHandler 返回调用方 mesh 内节点宣告的服务（mesh 选路用）。
@@ -283,10 +271,7 @@ func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return resp[i].Node < resp[j].Node
 	})
-	w.Header().Set(headerContentType, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Warn(msgJSONEncode, "handler", "hubServicesHandler", "error", err)
-	}
+	httpjson.SendOpt(w, http.StatusOK, resp, httpjson.Opt{Logger: h.logger, Handler: "hubServicesHandler", Msg: msgJSONEncode})
 }
 
 // nodeQuality 返回节点链路质量分档（基于 mux Metrics + 连接时间）。

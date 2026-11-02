@@ -4,14 +4,13 @@
 package remotefs
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/clustercred"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
@@ -85,7 +84,7 @@ func (rh *remoteReadHandler) handleStats(w http.ResponseWriter, r *http.Request)
 		scope = rh.d.Quota(tgt.owner)
 	}
 	qs := ops.QuotaStatusOf(scope)
-	writeRemoteJSON(w, qs)
+	httpjson.Send(w, http.StatusOK, qs)
 }
 
 func (rh *remoteReadHandler) handleList(w http.ResponseWriter, r *http.Request) {
@@ -277,7 +276,7 @@ func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, r *http.Request
 		writeRemoteFilesError(w, err)
 		return
 	}
-	writeJSONResponse(w, files.ListResponse(res), http.StatusOK)
+	httpjson.Send(w, http.StatusOK, files.ListResponse(res))
 }
 
 // delegateStat 执行远端 stat：元信息用 X-File-* 头回传。
@@ -344,10 +343,10 @@ func (rh *remoteReadHandler) delegateMeta(w http.ResponseWriter, r *http.Request
 		writeRemoteFilesError(w, err)
 		return
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
+	// Content-Length 必须显式设置（meta 原始字节，出口侧据此读定长）；
+	// httpjson.WriteBody 只补 Content-Type + 状态码，不覆盖已设头。
 	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	httpjson.WriteBody(w, http.StatusOK, raw)
 }
 
 // writeRemoteFilesError 把域操作的失败映射为远程面的状态码。
@@ -394,28 +393,6 @@ func remoteAuditResult(status int) string {
 	default:
 		return AuditResultError
 	}
-}
-
-// writeRemoteError 写纯文本错误响应（不泄露卷/文件存在性）。
-// writeRemoteJSON 写 JSON 响应（remote 只读面辅助，与 writeRemoteError 并列）。
-func writeRemoteJSON(w http.ResponseWriter, v any) {
-	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeJSONResponse 写 JSON 响应并指定状态码（与装配层 sendJSONResponse 同行为：
-// 先 Marshal 再一次性 Write，避免半截响应）。
-func writeJSONResponse(w http.ResponseWriter, v any, status int) {
-	w.Header().Set(headerContentType, contentTypeJSON)
-	buf, err := json.Marshal(v)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		slog.Default().Warn("Encode JSON response failed", "error", err)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
-		return
-	}
-	w.WriteHeader(status)
-	_, _ = w.Write(buf)
 }
 
 func writeRemoteError(w http.ResponseWriter, code int, msg string) {

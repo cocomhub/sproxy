@@ -629,23 +629,28 @@ pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
 
 ### 横切能力：`internal/httpjson`（JSON 响应写出唯一实现）
 
-JSON 响应写出曾是**四份等价实现**：装配根 `sendJSONResponse`（328 处调用）、
+JSON 响应写出曾有 **5 份**等价实现：装配根 `sendJSONResponse`（328 处调用）、
 `pkg/files.Service.sendJSON`（146 处）、`pkg/server/ratelimit` 的 429 回包（因无法反向
-import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJSON`。
+import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJSON`、
+`pkg/server/remotefs` 的两个本地 helper；另有 41 处「先设 Content-Type 再
+`json.NewEncoder(w).Encode`」的裸写（无 500 兜底、各自复制日志/状态码逻辑）。
 
-现收敛到 `internal/httpjson`（L0，零 `pkg/*` 依赖）：
+现全部收敛到 `internal/httpjson`（L0，零 `pkg/*` 依赖）：
 
 | API | 用途 |
 |---|---|
 | `Send(w, status, v)` | 写 JSON 响应，告警日志用包级实例（装配根经 `SetLogger` 注入） |
-| `SendLogged(w, status, v, log)` | 同上，但用调用方实例日志器（领域包保持日志路由不变） |
+| `SendOpt(w, status, v, Opt)` | 同上，可指定 `Logger` / `Handler`（失败日志属性）/ `Msg`（日志文案）/ `Attrs` |
+| `SendErr(w, status, v, Opt) error` | 同上，但返回序列化/写出错误（「写失败必须被调用方感知」场景，如信令不得消费未送达消息） |
 | `SendError(w, status, msg)` | 写 `{"error": msg}`（429/错误回包） |
+| `WriteBody(w, status, body)` | 写出**已序列化**字节（缓存命中的预序列化体，避免二次序列化） |
 
 契约（按字节断言，不得改）：成功路径无尾随换行；序列化失败 → 500 + 固定错误体
-（**带**尾随换行，沿用 `json.Encoder` 形态）+ Warn 日志。
+（**带**尾随换行，沿用 `json.Encoder` 形态）+ Warn 日志（文案/handler 属性可经 `Opt` 保留）。
 
-存量裸写（`json.NewEncoder(w)` / 手写 `Content-Type: application/json`）由门禁 **R54**
-（`json_response_sites.tsv` 棘轮）锁住，只减不增。
+门禁 **R54**（`json_response_gate_test.go`）从棘轮升级为**硬禁止**：非测试源码出现裸
+JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实现本体）、`pkg/testutil/`
+（外部服务替身）、`cmd/`（CLI stdout，`w` 是 `io.Writer`）。
 
 ### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流 / T1 跨节点读写面 / T3-a 凭据存储与主密钥解析 / T3-b 封装卷翻译与装配）
 
@@ -867,7 +872,7 @@ import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJ
 **P2 总体度量（2026-11-01，设计见 `docs/designs/2026-11-01-residual-assembly-optimization.md`）**
 
 - `pkg/server` 非测试行 **42,568 → 28,125（−33.9%）**；服务端子包 **1 → 19**；
-- 本系列四片：T1 `remotefs`（#994，1,074 行）、T2 一期 `internal/httpjson`（#995，收敛 4 份 JSON 响应实现 + R54 棘轮）、T3-b `enclosure`（#996，419 行）、T3-a `credentials`（#997，458 行进包、装配层 433 → 68）；
+- 本系列四片：T1 `remotefs`（#994，1,074 行）、T2 `internal/httpjson`（#995 一期 + 二期，收敛 5 份实现 + 41 处裸写，R54 升级为硬禁止）、T3-b `enclosure`（#996，419 行）、T3-a `credentials`（#997，458 行进包、装配层 433 → 68）；
 - 剩余 28,125 行按切片判据（去重 `h.` 字段 ≤8 且密度 ≤80/千行）已到自然边界；未做的 T2 二期（41 处裸 JSON 写迁移）由 R54 棘轮锁住只减不增。
 
 **P1：装配层策略对象（2026-10-31）**

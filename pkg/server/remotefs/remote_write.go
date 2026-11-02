@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/files"
 )
@@ -212,10 +213,10 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 			writeRemoteFilesError(w, err)
 			return
 		}
-		writeJSONResponse(w, remoteWriteResponse{
+		httpjson.Send(w, http.StatusOK, remoteWriteResponse{
 			Success: true, Message: res.Message, Checksum: res.Checksum,
 			Size: res.Size, Volume: res.VolumeName,
-		}, http.StatusOK)
+		})
 
 	case "rename":
 		res, err := svc.RenameFile(r.Context(), files.RenameFileInput{
@@ -229,9 +230,9 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 			writeRemoteFilesError(w, err)
 			return
 		}
-		writeJSONResponse(w, remoteWriteResponse{
+		httpjson.Send(w, http.StatusOK, remoteWriteResponse{
 			Success: true, Message: res.Message, Checksum: res.Checksum, Volume: tgt.vol.Name,
-		}, http.StatusOK)
+		})
 
 	case "delete":
 		res, err := svc.DeleteFile(r.Context(), files.DeleteFileInput{
@@ -244,9 +245,9 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 			writeRemoteFilesError(w, err)
 			return
 		}
-		writeJSONResponse(w, remoteWriteResponse{
+		httpjson.Send(w, http.StatusOK, remoteWriteResponse{
 			Success: true, Message: res.Message, Volume: tgt.vol.Name,
-		}, http.StatusOK)
+		})
 
 	case "mkdir":
 		res, err := svc.MakeDir(r.Context(), tgt.owner, tgt.path, tgt.vol.Name)
@@ -254,9 +255,9 @@ func (wh *remoteWriteHandler) delegate(w http.ResponseWriter, r *http.Request, t
 			writeRemoteFilesError(w, err)
 			return
 		}
-		writeJSONResponse(w, remoteWriteResponse{
+		httpjson.Send(w, http.StatusOK, remoteWriteResponse{
 			Success: true, Message: "目录已创建: " + res.RemotePath, Volume: tgt.vol.Name,
-		}, http.StatusOK)
+		})
 
 	default:
 		writeRemoteError(w, http.StatusNotFound, remoteErrorMessage(http.StatusNotFound))
