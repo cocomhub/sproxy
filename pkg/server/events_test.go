@@ -297,7 +297,7 @@ func TestShareCreate_PublishesEvent(t *testing.T) {
 
 	// 创建分享。
 	reqBody := `{"filename":"shared.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("create share: %v", err)
 	}

@@ -45,7 +45,7 @@
 |---|---|
 | `POST /upload`、`/upload/init|chunk|complete` | 分块族全设 |
 | `POST /delete`、`/rename`、`/mkdir`、`/rmdir` | 文件/目录写 |
-| `POST /api/share` | 创建/撤销分享（写 meta） |
+| `POST /api/shares` | 创建/撤销分享（写 meta） |
 | `POST /api/versions/restore` | 版本恢复（旁路写 → 还须 InvalidateIndex） |
 | `PUT /api/config` | 运行时配置 |
 | `POST /api/credentials/*`（register/renew/rotate） | 凭据写 |
@@ -78,7 +78,7 @@ federated.FS 原语义是「远端 hub 卷只读挂载」（网络 Reader 注入
 客户端 POST /upload → WriteGuard.Authorize() → isLeader=false → 503 {"success":false,
   "message":"当前节点非主节点"} + Retry-After: 1
   （若门被绕过 → storage 后端 federated.FS.WriteFile → ErrReadOnly → 仍 503，双层兜底）
-客户端 POST /api/share → 503；GET /s/{token}（普通）→ 200 读共享卷；GET /s/{token}（一次性）→ 503
+客户端 POST /api/shares → 503；GET /s/{token}（普通）→ 200 读共享卷；GET /s/{token}（一次性）→ 503
 ```
 
 ## 4. 错误处理

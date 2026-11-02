@@ -531,7 +531,7 @@ func TestShareAPI(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	result, err := page.Evaluate(`fetch('/api/share', {
+	result, err := page.Evaluate(`fetch('/api/shares', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ filename: 'api-share-test.txt', ttl: '24h', max_downloads: 0, one_time: false })

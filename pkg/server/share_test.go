@@ -36,7 +36,7 @@ func TestShare_CreateAndAccess(t *testing.T) {
 
 	// 创建分享链接
 	reqBody := `{"filename":"shared.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestShare_Expired(t *testing.T) {
 	t.Cleanup(client.CloseIdleConnections)
 
 	reqBody := `{"filename":"x.txt","ttl":"1ns"}`
-	resp, err := client.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
+	resp, err := client.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestShare_MissingFilename(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(`{}`))
+	resp, err := http.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestShare_NonExistentFile(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	reqBody := `{"filename":"nonexistent.txt"}`
-	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestShare_OneTime(t *testing.T) {
 
 	// 创建一次性分享
 	reqBody := `{"filename":"onetime.txt","one_time":true}`
-	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestShare_List(t *testing.T) {
 
 	// 创建分享链接
 	reqBody := `{"filename":"list_test.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func TestShare_Revoke(t *testing.T) {
 
 	// 创建分享
 	reqBody := `{"filename":"revoke_test.txt","ttl":"1h"}`
-	resp, err := http.Post(url+"/api/share", contentTypeJSON, strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +506,7 @@ func TestShare_MultiTenantOwnerScoped(t *testing.T) {
 	// A（testAccessKey）创建两个分享：指向 share_a.txt（自己的）与 share_b.txt（B 的，设想）
 	// 注意：这里的 auth 只有单一 AK，为模拟两个租户，直接用 store 层面构造第二个 owner 的链接。
 	// 步骤：A 创建 share_a 分享；再直接向 shareStore 注入 owner="ak-B" 的分享（绕过 HTTP）。
-	resp, err := postSigned("/api/share", `{"filename":"share_a.txt","ttl":"1h"}`)
+	resp, err := postSigned("/api/shares", `{"filename":"share_a.txt","ttl":"1h"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,14 +606,14 @@ func TestShare_NewLayoutResolvesUserRel(t *testing.T) {
 
 	// share mux：注入 alice actor（模拟 authMiddleware 后 createShareHandler 的 ctx）。
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/share", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/shares", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
 		env.h.createShareHandler(w, r)
 	})
 	mux.HandleFunc("GET /s/{token}", env.h.accessShareHandler)
 
 	// 创建分享 user/dir/f.txt → token
-	req := httptest.NewRequest("POST", "/api/share", strings.NewReader(`{"filename":"dir/f.txt","ttl":"1h"}`))
+	req := httptest.NewRequest("POST", "/api/shares", strings.NewReader(`{"filename":"dir/f.txt","ttl":"1h"}`))
 	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)

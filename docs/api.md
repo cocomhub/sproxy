@@ -423,7 +423,7 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 ## 文件分享（share）
 
-### POST /api/share
+### POST /api/shares
 
 创建分享链接。请求体：`{filename, password?, expire_in?}`。
 

@@ -266,7 +266,7 @@ func TestHandlers_StateBackedShareStore(t *testing.T) {
 
 	body := []byte("state share content")
 	uploadFile(t, ts.URL, "s.txt", body, map[string]string{"X-File-Checksum": sha256hex(body)})
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/share", strings.NewReader(`{"filename":"s.txt","ttl":"1h"}`))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/shares", strings.NewReader(`{"filename":"s.txt","ttl":"1h"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestHandlers_StateBackedShareStore(t *testing.T) {
 	// 经 StateStore 后端重新创建分享：验证逐 token key 落 StateStore。
 	body2 := []byte("state share content 2")
 	uploadFile(t, ts.URL, "s2.txt", body2, map[string]string{"X-File-Checksum": sha256hex(body2)})
-	reqB, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/share", strings.NewReader(`{"filename":"s2.txt","ttl":"1h"}`))
+	reqB, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/shares", strings.NewReader(`{"filename":"s2.txt","ttl":"1h"}`))
 	reqB.Header.Set(headerContentType, contentTypeJSON)
 	respB, err := testHTTPClient(t).Do(reqB)
 	if err != nil {

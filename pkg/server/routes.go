@@ -752,7 +752,7 @@ func isFileGroupedRoute(path string) bool {
 		"/api/backends",
 		"/api/backends/{type}/presign",
 		"/api/backends/{type}/presign/complete",
-		"/api/share", "/api/shares",
+		"/api/shares",
 		// secret 卷管理（/api/secrets 专用端点：创建随机/import、列表、导出、删除）。
 		// 主 mux 面挂 fileRoute/fileRouteRead——须与 isReadOnlyFileRoute 同源补成员
 		// （漏列 → fileRoute 判定「不在文件组」500，防接线错误静默放行）。

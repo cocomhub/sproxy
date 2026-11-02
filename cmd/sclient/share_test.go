@@ -64,12 +64,13 @@ func TestShareCmd_Integration(t *testing.T) {
 	// 不使用 t.Parallel() — 与 cmd_test.go 中其他集成测试保持一致
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/share":
+		// POST 与 GET 共用 /api/shares（集合语义），按方法分派。
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/shares":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"token":"test123","filename":"file.txt","created_at":"2026-07-24T12:00:00Z","expires_at":"2026-07-25T12:00:00Z","max_downloads":0,"downloads":0,"one_time":false}`))
-		case "/api/shares":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/shares":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"shares":[{"token":"test123","filename":"file.txt","created_at":"2026-07-24T12:00:00Z","expires_at":"2026-07-25T12:00:00Z","max_downloads":0,"downloads":0,"one_time":false,"expired":false}]}`))
@@ -134,7 +135,7 @@ func TestShareCmd_Revoke(t *testing.T) {
 
 func TestShareCreateCmd_ServerError(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/share" && r.Method == http.MethodPost {
+		if r.URL.Path == "/api/shares" && r.Method == http.MethodPost {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
 			return
@@ -161,7 +162,7 @@ func TestShareCreateCmd_ServerError(t *testing.T) {
 func TestShareCreate_VolumeURI(t *testing.T) {
 	var gotBody map[string]any
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/share" || r.Method != http.MethodPost {
+		if r.URL.Path != "/api/shares" || r.Method != http.MethodPost {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}

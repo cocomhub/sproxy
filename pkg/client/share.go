@@ -106,7 +106,7 @@ func (c *FileClient) CreateShare(ctx context.Context, filename string, opts ...S
 	}
 
 	var link ShareLink
-	if err := c.doJSON(ctx, "POST", "/api/share", reqBody, &link); err != nil {
+	if err := c.doJSON(ctx, "POST", "/api/shares", reqBody, &link); err != nil {
 		return nil, fmt.Errorf("创建分享链接失败: %w", err)
 	}
 	return &link, nil

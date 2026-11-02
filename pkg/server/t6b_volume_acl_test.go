@@ -70,7 +70,7 @@ func t6bMux(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("GET /api/files/search", wrap(h.searchFiles))
 	mux.HandleFunc("POST /api/archive", wrap(h.archiveHandler))
 	mux.HandleFunc("GET /api/archive-dir", wrap(h.archiveDirHandler))
-	mux.HandleFunc("POST /api/share", wrap(h.createShareHandler))
+	mux.HandleFunc("POST /api/shares", wrap(h.createShareHandler))
 	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 	mux.HandleFunc("GET /api/versions", wrap(h.listVersionsHandler))
 	mux.HandleFunc("POST /api/versions/restore", wrap(h.restoreVersionHandler))
@@ -432,7 +432,7 @@ func TestT6b_Share_ACLExcludedDefaultCreate404(t *testing.T) {
 func t6bCreateShare(t *testing.T, baseURL, filename string, wantStatus int) share.CreateResponse {
 	t.Helper()
 	body := fmt.Sprintf(`{"filename":%q,"ttl":"1h"}`, filename)
-	resp, err := http.Post(baseURL+"/api/share", contentTypeJSON, strings.NewReader(body))
+	resp, err := http.Post(baseURL+"/api/shares", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("create share: %v", err)
 	}
