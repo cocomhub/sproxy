@@ -45,7 +45,7 @@ func TestReserveVolumePool_WaitsForInFlightReservation(t *testing.T) {
 	}()
 
 	// 确认等待者已入队（避免「先释放后入队」走快路导致假绿）。
-	waitSpin(t, 20000, func() bool { return vs.Pool("v1").WaitStats().Waiting > 0 })
+	waitSpin(t, 10*time.Second, func() bool { return vs.Pool("v1").WaitStats().Waiting > 0 })
 
 	held.Release() // 在途写结束 ⇒ 释放容量
 
@@ -83,13 +83,22 @@ func TestReserveVolumePool_CommittedFullFailsFast(t *testing.T) {
 }
 
 // waitSpin 自旋等待条件成立（runtime.Gosched 让出，避免 time.Sleep 棘轮）。
-func waitSpin(t *testing.T, maxIter int, cond func() bool) {
+// waitSpin 按**墙钟超时**等待条件成立（而非固定迭代次数）。
+//
+// 原实现用 20000 次迭代 + runtime.Gosched()：在快机器/空载下 40ms 内就跑完，而 -race
+// 且并行测试占满核心时，目标 goroutine 可能还没被调度 ⇒ 假红（实测 windows CI：
+// 「自旋等待超时（等待者未入队，用例无效）」）。改用截止时间 + Gosched（不用 sleep，
+// 不触及 R14 睡眠棘轮）。
+func waitSpin(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
-	for range maxIter {
+	deadline := time.Now().Add(timeout)
+	for {
 		if cond() {
 			return
 		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("等待超时（%s）：条件未成立（等待者未入队，用例无效）", timeout)
+		}
 		runtime.Gosched()
 	}
-	t.Fatal("自旋等待超时（等待者未入队，用例无效）")
 }

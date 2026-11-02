@@ -59,7 +59,7 @@ func TestCloudArchiveReserveQuota_WaitsForReleasedCapacity(t *testing.T) {
 
 	// 确定性同步：等预留**进入根池等待队列**后再释放容量。先释放会让后到者走快路，
 	// 用例就变成「未排队也绿」的假绿（无法证明排队发生）。
-	waitSpin(t, 20000, func() bool { return env.h.globalPool.WaitStats().Waiting > 0 })
+	waitSpin(t, 10*time.Second, func() bool { return env.h.globalPool.WaitStats().Waiting > 0 })
 	scope.ReleaseUsage(wiringHeldBytes)
 
 	select {
@@ -121,7 +121,7 @@ func TestCloudArchiveReserveQuota_HonorsInjectedWaitTimeout(t *testing.T) {
 		t.Fatalf("排队耗时 %v ⇒ 注入的 h.quotaWaitTimeout 未生效（硬编码 quota.DefaultWaitTimeout 回归）", elapsed)
 	}
 	// 超时失败必须全额回滚：账本无残留预留，且等待者已出队。
-	waitSpin(t, 20000, func() bool { return env.h.globalPool.WaitStats().Waiting == 0 })
+	waitSpin(t, 10*time.Second, func() bool { return env.h.globalPool.WaitStats().Waiting == 0 })
 	if got := scope.Reserved(); got != 0 {
 		t.Fatalf("超时后 archive 桶 Reserved()=%d want 0（预留泄漏）", got)
 	}
