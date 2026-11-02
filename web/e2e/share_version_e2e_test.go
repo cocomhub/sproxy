@@ -5,7 +5,7 @@ package e2e
 
 // share_version_e2e_test.go — 分享 / 公链 / 版本管理 Web UI 真交互 E2E（PR-F2 任务 3）。
 //
-// 分享链路：UI 创建（POST /api/share，断言 body 四字段）→ 列表行取 token → Go 侧直取
+// 分享链路：UI 创建（POST /api/shares，断言 body 四字段）→ 列表行取 token → Go 侧直取
 // /s/{token} 断言字节与 Content-Disposition → UI 撤销（DELETE /api/shares/{token}）。
 // 版本链路：同文件名两次真上传产版本 → UI 加载（GET /api/versions）→ 表格行（非
 // .empty-msg 假绿）→ 恢复（POST /api/versions/restore）。
@@ -34,7 +34,7 @@ func TestShare_CreateAndPublicAccess(t *testing.T) {
 	page.Goto(baseURL + "/ui/")
 	// 打开分享弹窗：文件名被预填（showShareModal 接线）。
 	openShareModal(t, page)
-	// 创建：POST /api/share，body 四字段逐项断言。
+	// 创建：POST /api/shares，body 四字段逐项断言。
 	createShareFromModal(t, page)
 	// 列表行出现 → 取 token（复制按钮 data-token）。
 	token := readShareToken(t, page)
@@ -75,14 +75,14 @@ func openShareModal(t *testing.T, page playwright.Page) {
 	}
 }
 
-// createShareFromModal 点创建按钮 → 捕获 POST /api/share，断言 body 四字段。
+// createShareFromModal 点创建按钮 → 捕获 POST /api/shares，断言 body 四字段。
 func createShareFromModal(t *testing.T, page playwright.Page) {
 	t.Helper()
-	req, err := page.ExpectRequest("**/api/share", func() error {
+	req, err := page.ExpectRequest("**/api/shares", func() error {
 		return page.Locator("#share-create-btn").Click()
 	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(8000)})
 	if err != nil {
-		t.Fatalf("未观察到 POST /api/share（分享创建未接线？）: %v", err)
+		t.Fatalf("未观察到 POST /api/shares（分享创建未接线？）: %v", err)
 	}
 	if got := req.Method(); got != "POST" {
 		t.Errorf("share method = %q, want POST", got)

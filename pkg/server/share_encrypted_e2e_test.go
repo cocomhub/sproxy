@@ -42,9 +42,9 @@ func TestShare_EncryptedVolumeReturnsPlaintext(t *testing.T) {
 	}
 
 	// 创建分享链接。
-	createResp, cerr := cl.Post(url+"/api/share", contentTypeJSON, strings.NewReader(`{"filename":"shared-enc.txt","ttl":"1h"}`))
+	createResp, cerr := cl.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(`{"filename":"shared-enc.txt","ttl":"1h"}`))
 	if cerr != nil {
-		t.Fatalf("POST /api/share: %v", cerr)
+		t.Fatalf("POST /api/shares: %v", cerr)
 	}
 	raw, _ := io.ReadAll(createResp.Body)
 	_ = createResp.Body.Close()

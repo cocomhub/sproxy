@@ -72,7 +72,7 @@ func putVaultFile(t *testing.T, be registry.ExternalBackend, owner, rel string, 
 // createShareReq 调 createShareHandler（owner 经 ctx 注入，与生产认证层同法）。
 func createShareReq(t *testing.T, h *Handlers, owner, body string) (int, map[string]any) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/share", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/shares", strings.NewReader(body))
 	req = req.WithContext(withActor(req.Context(), owner))
 	rec := httptest.NewRecorder()
 	h.createShareHandler(rec, req)

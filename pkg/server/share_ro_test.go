@@ -31,7 +31,7 @@ func TestShare_ReadOnlyFlag(t *testing.T) {
 	}
 
 	// 创建 readonly 分享。
-	req2, _ := http.NewRequest(http.MethodPost, url+"/api/share", strings.NewReader(`{"filename":"ro.txt","readonly":true}`))
+	req2, _ := http.NewRequest(http.MethodPost, url+"/api/shares", strings.NewReader(`{"filename":"ro.txt","readonly":true}`))
 	signBodyRequestEntry(req2, testAccessKey, testEntryID(testAccessKey), testAccessSecret, []byte(`{"filename":"ro.txt","readonly":true}`))
 	resp2, serr := cl.Do(req2)
 	if serr != nil {

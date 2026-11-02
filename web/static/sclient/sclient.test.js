@@ -1395,7 +1395,7 @@ test('share create/list/revoke 映射', async () => {
   ]);
   const api = makeApi(core);
   await api.share.create({ filename: 'a.txt', ttl: '24h', max_downloads: 3, one_time: false });
-  assert.strictEqual(core.calls[0].path, '/api/share');
+  assert.strictEqual(core.calls[0].path, '/api/shares');
   assert.strictEqual(core.calls[0].method, 'POST');
   assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), { filename: 'a.txt', ttl: '24h', max_downloads: 3, one_time: false });
   const noBody = await api.share.create({ filename: 'a.txt' });

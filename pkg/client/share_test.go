@@ -14,7 +14,7 @@ func TestCreateShare(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/api/share" {
+		if r.Method != "POST" || r.URL.Path != "/api/shares" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -250,7 +250,7 @@ func TestCreateShare_WithOptions(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/api/share" {
+		if r.Method != "POST" || r.URL.Path != "/api/shares" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}

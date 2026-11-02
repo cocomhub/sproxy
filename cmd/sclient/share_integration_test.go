@@ -19,7 +19,7 @@ import (
 
 func TestShareCreateCmd_Integration(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/share" && r.Method == http.MethodPost {
+		if r.URL.Path == "/api/shares" && r.Method == http.MethodPost {
 			json.NewEncoder(w).Encode(&client.ShareLink{
 				Token:        "share-token-123",
 				Filename:     "test.txt",

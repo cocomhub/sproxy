@@ -28,7 +28,7 @@ const RoutePrefix = "/api"
 // H 用**命名结构体字段 + 函数类型**而非字符串键：字段名写错在编译期即失败，且
 // 子包不持有装配态的 handler（P1-c 裁决：ctx→actor 等装配语义留在装配层）。
 type Endpoints struct {
-	Create http.HandlerFunc // POST /api/share
+	Create http.HandlerFunc // POST /api/shares
 	List   http.HandlerFunc // GET /api/shares
 	Revoke http.HandlerFunc // DELETE /api/shares/{token}
 }
@@ -40,7 +40,7 @@ type Endpoints struct {
 //   - 隧道内层（localMux）：tunnel（隧道加密即认证，裸注册）。
 func Routes(eps Endpoints) []router.Route[http.HandlerFunc] {
 	return []router.Route[http.HandlerFunc]{
-		{Method: "POST", Path: "/share", Server: router.ClassUser, Local: router.ClassTunnel, H: eps.Create},
+		{Method: "POST", Path: "/shares", Server: router.ClassUser, Local: router.ClassTunnel, H: eps.Create},
 		{Method: "GET", Path: "/shares", Server: router.ClassReader, Local: router.ClassTunnel, H: eps.List},
 		{Method: "DELETE", Path: "/shares/{token}", Server: router.ClassUser, Local: router.ClassTunnel, H: eps.Revoke},
 	}

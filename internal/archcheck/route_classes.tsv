@@ -146,9 +146,9 @@ srvMux	GET /api/usage/report	auth	pkg/server/routes.go:431
 srvMux	GET /api/mesh/status	auth	pkg/server/routes.go:432
 srvMux	GET /api/mesh/acl	auth	pkg/server/routes.go:435
 srvMux	PUT /api/config	auth	pkg/server/routes.go:436
-srvMux	POST /api/share	user	pkg/server/routes.go:437
+srvMux	POST /api/shares	user	pkg/server/routes.go:437
 srvMux	GET /s/{token}	public	pkg/server/routes.go:438
-localMux	POST /api/share	tunnel	pkg/server/routes.go:441
+localMux	POST /api/shares	tunnel	pkg/server/routes.go:441
 localMux	GET /api/shares	tunnel	pkg/server/routes.go:442
 localMux	DELETE /api/shares/{token}	tunnel	pkg/server/routes.go:443
 srvMux	GET /api/shares	reader	pkg/server/routes.go:448

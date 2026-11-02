@@ -507,9 +507,9 @@ type CreateResponse struct {
 	Message      string `json:"message,omitempty"`
 }
 
-// shareCreateRequest 是 POST /api/share 的请求体解析结构。
+// shareCreateRequest 是 POST /api/shares 的请求体解析结构。
 
-// createShareHandler 处理 POST /api/share。
+// createShareHandler 处理 POST /api/shares。
 // 请求体 JSON: {"filename":"…","ttl":"24h","max_downloads":0,"one_time":false}
 
 // sharePrefix 是 StateStore 中分享记录的键前缀。

@@ -32,7 +32,7 @@ func TestAuditScenario_Share(t *testing.T) {
 		t.Fatalf("上传失败 status=%d body=%s", st, resp)
 	}
 
-	resp, err := client.Post(url+"/api/share", contentTypeJSON, strings.NewReader(`{"filename":"shared.txt","ttl":"1h"}`))
+	resp, err := client.Post(url+"/api/shares", contentTypeJSON, strings.NewReader(`{"filename":"shared.txt","ttl":"1h"}`))
 	if err != nil {
 		t.Fatalf("create share: %v", err)
 	}
