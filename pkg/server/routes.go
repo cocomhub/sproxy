@@ -27,9 +27,11 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/server/alerts"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/server/notify"
 	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
+	"github.com/cocomhub/sproxy/pkg/server/router"
 	"github.com/cocomhub/sproxy/pkg/server/share"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
@@ -539,44 +541,22 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （任务归属与可见性）由 cloudTaskHandler 在装配层从认证上下文解析后显式传入
 	// （ActorFrom 的 ctx key 是装配层私有，core 不得持有 ctx→actor 键）。
 	cloudTasks := h.cloudTaskService()
-	// 云端下载 API（localMux：隧道认证）
-	localMux.HandleFunc("POST /api/cloud/download", h.cloudTaskHandler(cloudTasks.CreateDownload))
-	// 通用 URL 解析 API（localMux：隧道认证）：URL → 资源信息（大小/类型/文件清单）。
+	// 通用 URL 解析 API（隧道认证）：URL → 资源信息（大小/类型/文件清单）。
 	// 扩展按 URL 自动识别（pikpak 分享等），未识别回落通用结果。
 	localMux.HandleFunc("GET /api/resolve", h.resolveURL)
-	localMux.HandleFunc("POST /api/cloud/download/batch", h.cloudTaskHandler(cloudTasks.CreateBatchDownload))
-	localMux.HandleFunc("GET /api/cloud/tasks", h.cloudTaskHandler(cloudTasks.ListTasks))
-	localMux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudTaskHandler(cloudTasks.GetTask))
-	localMux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudTaskHandler(cloudTasks.CancelTask))
-	localMux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudTaskHandler(cloudTasks.DeleteTask))
-	localMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.archiveTaskHandler())
-	localMux.HandleFunc("POST /api/cloud/archive", h.archiveBatchHandler())
-	localMux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudTaskHandler(cloudTasks.ResumeTask))
-	localMux.HandleFunc("POST /api/cloud/groups", h.cloudTaskHandler(cloudTasks.CreateGroup))
-	localMux.HandleFunc("GET /api/cloud/groups", h.cloudTaskHandler(cloudTasks.ListGroups))
-	localMux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudTaskHandler(cloudTasks.GetGroup))
-	localMux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudTaskHandler(cloudTasks.CancelGroup))
-	localMux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudTaskHandler(cloudTasks.DeleteGroup))
-	localMux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudTaskHandler(cloudTasks.ResumeGroup))
-	localMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudTaskHandler(cloudTasks.ArchiveGroup))
-	// 云端下载 API（主 mux：Bearer auth）
-	srvMux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudTaskHandler(cloudTasks.CreateDownload)))
 	srvMux.HandleFunc("GET /api/resolve", h.authMiddleware(h.resolveURL))
-	srvMux.HandleFunc("POST /api/cloud/download/batch", h.authMiddleware(h.cloudTaskHandler(cloudTasks.CreateBatchDownload)))
-	srvMux.HandleFunc("GET /api/cloud/tasks", h.authMiddleware(h.cloudTaskHandler(cloudTasks.ListTasks)))
-	srvMux.HandleFunc("GET /api/cloud/tasks/{id}", h.authMiddleware(h.cloudTaskHandler(cloudTasks.GetTask)))
-	srvMux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.authMiddleware(h.cloudTaskHandler(cloudTasks.CancelTask)))
-	srvMux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.authMiddleware(h.cloudTaskHandler(cloudTasks.DeleteTask)))
-	srvMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.authMiddleware(h.archiveTaskHandler()))
-	srvMux.HandleFunc("POST /api/cloud/archive", h.authMiddleware(h.archiveBatchHandler()))
-	srvMux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.authMiddleware(h.cloudTaskHandler(cloudTasks.ResumeTask)))
-	srvMux.HandleFunc("POST /api/cloud/groups", h.authMiddleware(h.cloudTaskHandler(cloudTasks.CreateGroup)))
-	srvMux.HandleFunc("GET /api/cloud/groups", h.authMiddleware(h.cloudTaskHandler(cloudTasks.ListGroups)))
-	srvMux.HandleFunc("GET /api/cloud/groups/{id}", h.authMiddleware(h.cloudTaskHandler(cloudTasks.GetGroup)))
-	srvMux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.authMiddleware(h.cloudTaskHandler(cloudTasks.CancelGroup)))
-	srvMux.HandleFunc("DELETE /api/cloud/groups/{id}", h.authMiddleware(h.cloudTaskHandler(cloudTasks.DeleteGroup)))
-	srvMux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.authMiddleware(h.cloudTaskHandler(cloudTasks.ResumeGroup)))
-	srvMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.authMiddleware(h.cloudTaskHandler(cloudTasks.ArchiveGroup)))
+
+	// 云端下载/归档 API：路由表由 pkg/server/cloudtasks 声明（前缀 + 相对路径 + 两端分类），
+	// 这里只提供 handler 绑定与「分类 → 包装器」映射；双 mux 一次注册，不会漏掉另一半。
+	router.Register(srvMux, localMux, cloudtasks.RoutePrefix, cloudtasks.Routes(),
+		func(fn cloudtasks.Handler) http.HandlerFunc {
+			// 方法表达式适配：Service 实例在装配期已固定（单实例语义见 cloudTaskService）。
+			return h.cloudTaskHandler(func(w http.ResponseWriter, r *http.Request, owner string) {
+				fn(cloudTasks, w, r, owner)
+			})
+		},
+		h.routeWrapper,
+	)
 
 	// 文件同步 API（localMux：隧道认证；handler 在 syncMgr 未装配时返回 400）
 	localMux.HandleFunc("POST /api/sync/tasks", h.syncCreateTask)
@@ -1003,4 +983,19 @@ func (h *Handlers) fileRouteRead(handler http.HandlerFunc) http.HandlerFunc {
 		}
 		handler(w, r)
 	})
+}
+
+// routeWrapper 把路由分类映射为装配层的包装器（供 router.Register 使用）。
+//
+// **分类 → 包装策略的唯一定义处**：子包只声明分类，不能自带包装器，因此「是否鉴权、
+// 走哪条角色门」的安全决定始终留在装配层。未列出的分类直接 panic（fail-closed）——
+// 新增分类必须显式决定其包装策略，不允许静默裸注册。
+func (h *Handlers) routeWrapper(c router.Class) func(http.HandlerFunc) http.HandlerFunc {
+	switch c {
+	case router.ClassAuth:
+		return h.authMiddleware
+	case router.ClassTunnel:
+		return nil // 隧道内层裸注册（隧道加密即认证，与既有 localMux 语义一致）
+	}
+	panic("router: 分类 " + string(c) + " 未在装配层定义包装策略")
 }
