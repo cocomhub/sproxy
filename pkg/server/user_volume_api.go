@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 
+	serverenclosure "github.com/cocomhub/sproxy/pkg/server/enclosure"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
@@ -103,7 +104,7 @@ func validateWrapperTarget(name string, f registry.FieldSchema, extra map[string
 	}
 	// 嵌套形态：校验对象为卷名段（子目录不是卷）。
 	base := target
-	if b, _, ok := ParseNestedTarget(target); ok {
+	if b, _, ok := serverenclosure.ParseNestedTarget(target); ok {
 		base = b
 	}
 	if !volumeInSet(allowed, base) {
@@ -140,7 +141,7 @@ func wrapperTargetOfSet(vols []volume.Volume, name string) (string, bool) {
 		if !ok || strings.TrimSpace(t) == "" {
 			return "", false
 		}
-		if base, _, nested := ParseNestedTarget(t); nested {
+		if base, _, nested := serverenclosure.ParseNestedTarget(t); nested {
 			return base, true
 		}
 		return t, true
@@ -220,13 +221,13 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	v := volume.Volume{Name: req.Name, Type: req.Type, Capacity: req.Capacity, Extra: req.Extra, ACL: acl}
 	// 嵌套封装（`target: <卷>/<子目录>`）翻译出封装声明词汇后走 enclosure 装配路径
 	// （方案甲：卷 Type 保持 wrapper 类型，内部机制不出现在卷描述里）：声明校验
-	// （含**足迹重叠互斥**）+ 封印注入 + 配额继承 + 后端构造全部由 AttachEnclosureVolume
+	// （含**足迹重叠互斥**）+ 封印注入 + 配额继承 + 后端构造全部由 serverenclosure.AttachEnclosureVolume
 	// 完成；持久化仍存**原形态**（store 字节零变化）。
 	// **owner 贯穿**（2026-10-15）：后端构造在请求内发生 ⇒ 把请求 owner 注入 ctx，使
 	// `extra.secret_url: secrets://default-secrets/<name>` 能解析到**本 owner 的**默认桶
 	// （per-owner 默认 secrets 卷的「谁创建 = 谁的桶」语义闭环）。
 	volCtx := secrets.WithOwner(r.Context(), owner)
-	if tv, nested := TranslateNestedVolume(v); nested {
+	if tv, nested := serverenclosure.TranslateNestedVolume(v); nested {
 		if err := validateNewEnclosure(volCtx, h.volSet, tv, req.Capacity); err != nil {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, enclosureErrStatus(err))
 			return
@@ -236,7 +237,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 			return
 		}
-		if aerr := AttachEnclosureVolume(volCtx, h.volSet, h.logger, h.userVolumes.Root(), tv); aerr != nil {
+		if aerr := serverenclosure.AttachEnclosureVolume(volCtx, h.volSet, h.logger, h.userVolumes.Root(), tv); aerr != nil {
 			_ = h.userVolumes.Delete(owner, req.Name)
 			sendJSONResponse(w, map[string]string{"error": "装配失败: " + aerr.Error()}, http.StatusBadRequest)
 			return
@@ -322,7 +323,7 @@ func (h *Handlers) createUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 // ③ capacity 不超有效源卷池余量（过度承诺的运行期快速失败——即便不校验，父链聚合也会在写入时
 // 507，但此处能给出可读的 400）。
 func validateNewEnclosure(ctx context.Context, set *registry.Set, tv volume.Volume, capacity int64) error {
-	d, decls, err := validateEnclosureDecl(set, tv)
+	d, decls, err := serverenclosure.ValidateEnclosureDecl(set, tv)
 	if err != nil {
 		return err
 	}
@@ -492,8 +493,8 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	// 删除成功：若本卷是嵌套封装卷（用户面 target 语法），拆除底座侧的落地物——回收源卷封印
 	// （否则源区间永久只读）、归还并摘除继承容量池、擦除独占区间内容（阶段 2 迁移：取代过渡层
 	// 的 clearWrapperLinks/clearWrapperQuota/cleanupWrapperBaseDir）。
-	if tv, nested := TranslateNestedVolume(volumeFromUserVolume(*v)); nested {
-		DetachEnclosureVolume(h.volSet, h.logger, tv)
+	if tv, nested := serverenclosure.TranslateNestedVolume(volumeFromUserVolume(*v)); nested {
+		serverenclosure.DetachEnclosureVolume(h.volSet, h.logger, tv)
 	}
 	// 审计：用户卷删除成功（破坏性操作必须可追溯）。
 	h.RecordAudit(r.Context(), AuditEvent{

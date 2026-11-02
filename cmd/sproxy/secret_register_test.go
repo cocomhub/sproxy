@@ -22,6 +22,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server"
+	serverenclosure "github.com/cocomhub/sproxy/pkg/server/enclosure"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -700,11 +701,11 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 		deepVol := volume.Volume{Name: "deep", Type: "secretdata", Extra: map[string]any{
 			"target": "main/deep-area", "secret_url": "secrets://deepkeys/master",
 		}}
-		tv, nested := server.TranslateNestedVolume(deepVol)
+		tv, nested := serverenclosure.TranslateNestedVolume(deepVol)
 		if !nested {
 			t.Fatal("嵌套 target 语法应被翻译为封装声明")
 		}
-		if aerr := server.AttachEnclosureVolume(ctx, vols, discardLoggerMain(), cfg.StorageRoot, tv); aerr != nil {
+		if aerr := serverenclosure.AttachEnclosureVolume(ctx, vols, discardLoggerMain(), cfg.StorageRoot, tv); aerr != nil {
 			t.Fatalf("引用嵌套 secrets 卷的 secretdata 装配失败（多层链断链）: %v", aerr)
 		}
 		dbe := vols.External("deep")

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	serverenclosure "github.com/cocomhub/sproxy/pkg/server/enclosure"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -49,14 +50,14 @@ func TestEnclosureRuntimeAttach_SealsCachedTenantRoot(t *testing.T) {
 	}
 
 	// 2) 运行期新建 owner 限定封装卷：target=main/alice/user/docs（足迹 = alice 的可寻址区域）。
-	tv, nested := TranslateNestedVolume(volume.Volume{
+	tv, nested := serverenclosure.TranslateNestedVolume(volume.Volume{
 		Name: "vault-docs", Type: nestedSecretType,
 		Extra: map[string]any{"target": "main/alice/user/docs"},
 	})
 	if !nested {
 		t.Fatal("应为嵌套封装声明")
 	}
-	if aerr := AttachEnclosureVolume(context.Background(), h.volSet, testLogger(), mainDir, tv); aerr != nil {
+	if aerr := serverenclosure.AttachEnclosureVolume(context.Background(), h.volSet, testLogger(), mainDir, tv); aerr != nil {
 		t.Fatalf("运行期装配失败: %v", aerr)
 	}
 
@@ -74,7 +75,7 @@ func TestEnclosureRuntimeAttach_SealsCachedTenantRoot(t *testing.T) {
 	if rerr := h.volSet.RemoveExternalVolume("vault-docs"); rerr != nil {
 		t.Fatalf("RemoveExternalVolume: %v", rerr)
 	}
-	DetachEnclosureVolume(h.volSet, testLogger(), tv)
+	serverenclosure.DetachEnclosureVolume(h.volSet, testLogger(), tv)
 	if werr := writeThrough("user/docs/after.bin"); werr != nil {
 		t.Fatalf("封装卷删除后租户根写应恢复放行: %v", werr)
 	}

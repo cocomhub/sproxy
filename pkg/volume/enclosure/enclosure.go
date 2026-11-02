@@ -15,7 +15,7 @@
 //
 // **enclosure 是纯内部装配机制，不是一种对外卷类型**：唯一声明形态是「**wrapper 类型**
 // （如 secretdata/secrets）+ `extra.source`」——由装配层翻译用户面 `extra.target:
-// "<卷>/<子路径>"` 语法产出（pkg/server/nested_enclosure.go），`wrapper` 即卷类型本身。
+// "<卷>/<子路径>"` 语法产出（pkg/server/enclosure/nested.go），`wrapper` 即卷类型本身。
 // 卷描述 `Type` 与装配方式**正交**：嵌套封装卷的对外 Type / 协议（SchemeOf）/ 分类
 // （CategoryOf）/ API 回显全部按 wrapper 类型语义，内部机制不外泄。
 //
@@ -51,7 +51,7 @@ const (
 	SourceKey = "source"
 	// WrapperKey 是处理层注册名字段。**冗余键**：唯一声明形态是「wrapper 类型 + extra.source」，
 	// 故处理层恒等于卷类型本身（`extra.wrapper` 缺省即卷类型；显式写出时须与之一致，否则
-	// `ErrWrapperMismatch` fail-closed）。装配层翻译（pkg/server.TranslateNestedDecl）**不再写**
+	// `ErrWrapperMismatch` fail-closed）。装配层翻译（pkg/server/enclosure.TranslateNestedDecl）**不再写**
 	// 该键；读取保留仅为兼容手写配置。
 	WrapperKey = "wrapper"
 )

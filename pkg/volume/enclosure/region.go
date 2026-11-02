@@ -5,7 +5,7 @@ package enclosure
 
 // region.go 实现封装卷的**足迹区间防误删前置校验**（新建/收养之前，纯读无副作用）。
 //
-// 为什么必须存在（阶段 2 迁移补回的能力）：`server.DetachEnclosureVolume` 删除封装卷时会
+// 为什么必须存在（阶段 2 迁移补回的能力）：`pkg/server/enclosure.DetachEnclosureVolume` 删除封装卷时会
 // **擦除整条封印足迹区间的全部内容**（`eraseEnclosureRegion`）——这是回收密文/容器残留的
 // 正确动作，但它同时意味着「收养一个已含他人数据的区间」= 「删卷即数据损失」。旧过渡层用
 // `adoptableNestedDir` 的**内容形态**判据挡住了这个形态（拒绝对「文件+目录混合」的既有普通

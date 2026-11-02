@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	serverenclosure "github.com/cocomhub/sproxy/pkg/server/enclosure"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/capacity"
 	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
@@ -126,10 +127,10 @@ func setVolumeReady(set *registry.Set, base string) bool {
 }
 
 // restoreOneUserVolume 恢复单卷：**嵌套封装卷**（用户面 target 语法）经装配层翻译出封装声明
-// 词汇后走 `server.AttachEnclosureVolume`（声明校验 + 封印注入 + 容量池继承 + 后端构造一体；
+// 词汇后走 `serverenclosure.AttachEnclosureVolume`（声明校验 + 封印注入 + 容量池继承 + 后端构造一体；
 // 卷描述 Type 保持 wrapper 类型），其余类型维持 `registry.NewBackend` + CapacityFS 计数器包装。
 //
-// 翻译与建卷路径共用 `server.TranslateNestedVolume`（单一实现）；持久化仍是原形态
+// 翻译与建卷路径共用 `serverenclosure.TranslateNestedVolume`（单一实现）；持久化仍是原形态
 // （store 字节零变化：同一份 store 在迁移前后都能恢复）。返回是否恢复成功（false = 单卷跳过，
 // 不阻塞其余卷）。
 func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log *slog.Logger, uv server.UserVolume) bool {
@@ -144,11 +145,11 @@ func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log 
 	}
 	v := volumeFromUserVolume(uv)
 	ctx := context.Background()
-	tv, nested := server.TranslateNestedVolume(v)
+	tv, nested := serverenclosure.TranslateNestedVolume(v)
 	if nested {
 		// 封装卷的容量计量经**继承池**（父链聚合到源卷池）+ 持久化计数器（AttachEnclosureVolume
 		// 内包 CapacityFS），与本进程内建卷路径同源 ⇒ 重启前后额度口径一致。
-		if err := server.AttachEnclosureVolume(ctx, set, log, store.Root(), tv); err != nil {
+		if err := serverenclosure.AttachEnclosureVolume(ctx, set, log, store.Root(), tv); err != nil {
 			log.Warn("用户卷恢复跳过（封装卷装配失败）", "volume", uv.Name, "owner", uv.Owner, "error", err)
 			return false
 		}
@@ -190,5 +191,5 @@ func restoreOneUserVolume(set *registry.Set, store *server.UserVolumeStore, log 
 // （依赖排序只需源卷名）。非嵌套 / 无 target → ok=false。
 func splitNestedUVTarget(uv server.UserVolume) (base, subdir string, ok bool) {
 	target, _ := uv.Extra["target"].(string)
-	return server.ParseNestedTarget(target)
+	return serverenclosure.ParseNestedTarget(target)
 }

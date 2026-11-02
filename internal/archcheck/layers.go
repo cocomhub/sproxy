@@ -51,6 +51,10 @@ var Managed = map[string]bool{
 	// T1：跨节点读写面（只读面 + 写面 + 各自 loopback listener）。依赖 files/config/tunnel
 	// 与 clustercred（均为下层/同层能力），装配态经 Narrow Deps（≤8）注入 ⇒ 零反向依赖。
 	"github.com/cocomhub/sproxy/pkg/server/remotefs": true,
+	// T3-b：封装卷（nested enclosure）的用户面 target 语法翻译 + 运行期装配（校验/封印/
+	// 配额/后端构造）。依赖 volume/enclosure、volume/registry、storage、sync、quota（下层/同层）
+	// ⇒ 零反向依赖；装配态（卷集）经显式参数传入，不持有 *Handlers。
+	"github.com/cocomhub/sproxy/pkg/server/enclosure": true,
 }
 
 // Levels 是包 → 层级（数字越小越底层）。L(n) 不得导入 L(>n)。
@@ -189,6 +193,9 @@ var Levels = map[string]int{
 	// 跨节点读写面（server 作用域 T1）：依赖 files(L1)/config(L2)/tunnel(L1)/clustercred(G0) ⇒ 取
 	// max+0 = G2（与装配根同层，装配根 import 它合法）。
 	"github.com/cocomhub/sproxy/pkg/server/remotefs": 2,
+	// 封装卷翻译与装配（server 作用域 T3-b）：依赖 volume/enclosure(L2)/volume/registry(L2)/
+	// storage(0)/sync(0)/quota(0) ⇒ 取 max+0 = G2（与装配根同层，装配根 import 它合法）。
+	"github.com/cocomhub/sproxy/pkg/server/enclosure": 2,
 
 	// ---- 子包（L 取父域之上，由依赖实测确定）----
 	// storage 域子包：构造形参接收 checksum.ChecksumStoreIface ⇒ 在 checksum 之上
@@ -263,6 +270,7 @@ var ParentDomain = map[string]string{
 	"github.com/cocomhub/sproxy/pkg/server/filelock":   "github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/server/ratelimit":  "github.com/cocomhub/sproxy/pkg/server",
 	"github.com/cocomhub/sproxy/pkg/server/remotefs":   "github.com/cocomhub/sproxy/pkg/server",
+	"github.com/cocomhub/sproxy/pkg/server/enclosure":  "github.com/cocomhub/sproxy/pkg/server",
 }
 
 // AssemblyPackages 是允许导入任意子包的装配层（前缀匹配）。

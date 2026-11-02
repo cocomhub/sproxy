@@ -128,7 +128,7 @@ func registerSecretsBackend() {
 // 显式解析注入）。
 //
 // **嵌套不再在此处理**（方案甲）：`target: "<卷>/<子目录>"` 由装配层翻译出封装声明词汇
-// （`extra.source`/`extra.wrapper`，见 pkg/server/nested_enclosure.go）后经
+// （`extra.source`/`extra.wrapper`，见 pkg/server/enclosure/nested.go）后经
 // `enclosure.Parse` + `AttachAll` 装配（wrapper = secrets），后端不经本解析器构造。
 func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) {
 	t, _ := v.Extra["target"].(string)

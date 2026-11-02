@@ -24,7 +24,7 @@ pkg/files/read.go	1	读路径解析卷根后走 Root 的 OpenDecrypted/Stat（�
 pkg/files/version_store.go	2	版本桶操作需 Root 的 OpenDecrypted/AtomicRename（版本原子替换）；另 1 处为 volumeNameForTenant 的租户根→卷名解析（版本记账需按卷名查询卷自报物理足迹能力——FS/StorageVolume 均不提供「卷名→足迹」，且不复用 volumePoolForTenant 因该函数受 helper_impl_drift_test 源码体等价断言守卫）
 pkg/files/write_ops.go	2	统一写内核：写/删路径需 Root 的 OpenFileEncrypted/Remove/Stat（内核本身就是用户可见语义层）；另 1 处为注释
 pkg/server/handlers.go	1	owner→卷根绝对路径映射：需 Root.Abs（绝对路径互操作，FS 无此语义）
-pkg/server/nested_enclosure.go	2	封印判定：需 Root.SealAt（封印控制面，FS 不暴露）
+pkg/server/enclosure/nested.go	2	封印判定：需 Root.SealAt（封印控制面，FS 不暴露）
 pkg/server/volumes.go	2	卷内文件存在性探测（Root.Stat）与租户绝对路径映射（Root.Abs）
 pkg/server/volume_export.go	1	注释（说明 `volSet.Root("")` 为 nil 的语义）
 pkg/server/volume_retention.go	1	卷级版本清理：需 storage.ListOwners(root) 扫描卷根磁盘

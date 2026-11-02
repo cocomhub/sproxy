@@ -16,6 +16,12 @@ package server
 //
 // 变异：把 `TranslateNestedDecl` 的返回改回 `enclosure.TypeEnclosure` ⇒ 本文件断言全红
 // （type 泄漏 + 协议丢失）。
+//
+// **测试归属**：本文件锁定的是**装配行为**（config 装配 / `/api/volumes` 回显 / 运行期建卷与
+// 删除 / 声明识别）；翻译语义（`TranslateNestedVolume` / `TranslateNestedDecl` /
+// `ParseNestedTarget`）的纯函数单测已随切片迁到 `pkg/server/enclosure/nested_test.go`
+// （`TestTranslateNestedVolume`、`TestTranslateNestedVolume_CapacityToMaxBytes`、
+// `TestParseNestedTarget`、`TestTranslateNestedDecl_NilExtraAndEmptyType`）。
 
 import (
 	"context"
@@ -136,9 +142,16 @@ func TestNestedDecl_ConfigKeepsWrapperType(t *testing.T) {
 	if derr != nil {
 		t.Fatalf("Parse: %v", derr)
 	}
-	d, ok := declByName(decls, "vault")
-	if !ok || d.Wrapper != nestedTypeTestType || d.Source != "main" || d.Path != "videos" {
-		t.Fatalf("嵌套封装卷应仍是可解析声明: ok=%v decl=%+v", ok, d)
+	var d enclosure.Decl
+	found := false
+	for _, decl := range decls {
+		if decl.Vol == "vault" {
+			d, found = decl, true
+			break
+		}
+	}
+	if !found || d.Wrapper != nestedTypeTestType || d.Source != "main" || d.Path != "videos" {
+		t.Fatalf("嵌套封装卷应仍是可解析声明: found=%v decl=%+v", found, d)
 	}
 }
 
