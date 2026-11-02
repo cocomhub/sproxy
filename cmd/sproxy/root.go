@@ -34,6 +34,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/media"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/server/credentials"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
@@ -787,7 +788,7 @@ func (rt *runServerRuntime) setupProtocolSalt() error {
 // setupCredentials 装配 SproxySig 凭据 Ring（store 化）。U3 零凭据启动——
 // store 为空不生成 anonymous 凭据，系统以零凭据等 register 公开端点接入首个 admin。
 func (rt *runServerRuntime) setupCredentials() error {
-	credRing, credStore, err := server.BootstrapServerCredentials(rt.cfg, slog.Default())
+	credRing, credStore, err := credentials.BootstrapServerCredentials(rt.cfg, slog.Default())
 	if err != nil {
 		return fmt.Errorf("装配凭据 Ring 失败: %w", err)
 	}
@@ -1469,7 +1470,7 @@ func (rt *runServerRuntime) setupSyncUserStore(h *server.Handlers, logger *slog.
 	cfg := rt.cfg
 	var uvMasterKey []byte
 	if cfg.CredentialStore.Encrypt {
-		if mk, mkErr := server.ResolveCredentialMasterKey(cfg); mkErr == nil {
+		if mk, mkErr := credentials.ResolveCredentialMasterKey(cfg); mkErr == nil {
 			uvMasterKey = mk
 		} else {
 			logger.Warn("credential_store.encrypt=true 但解析 master key 失败，用户卷 Extra 保持明文（建议修复配置后重启）", "error", mkErr)

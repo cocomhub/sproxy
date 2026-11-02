@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package server
+package credentials
 
 // state_credential_test.go 验证凭据状态上移（roadmap 12.1-1 / statestore.md §5.1 P0）：
 //   - stateBackedCredentialStore：Load/Save 委托 StateStore.Get/Put（key=credential/anonymous/ring），
@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/state"
 )
 
@@ -42,7 +43,7 @@ func writeLegacyCredentialFile(t *testing.T, metaDir string, keys []accesskey.Ke
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(metaDir, fileNameCredStore)
+	p := filepath.Join(metaDir, credentialsFileName)
 	if err := os.WriteFile(p, legacyCredentialFile(t, keys), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestStateBackedCredentialStore_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
-	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), fileNameCredStore), nil)
+	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), credentialsFileName), nil)
 
 	keys := seedTestRing(t, "ak-state-0123456789abcdef", testAccessSecret, false)
 	if err := s.Save(keys); err != nil {
@@ -92,7 +93,7 @@ func TestStateBackedCredentialStore_RoundTrip(t *testing.T) {
 func TestStateBackedCredentialStore_EmptyStore(t *testing.T) {
 	t.Parallel()
 	st := state.NewLocalStateStore(filepath.Join(t.TempDir(), "state"), testLogger())
-	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), "missing", fileNameCredStore), nil)
+	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), "missing", credentialsFileName), nil)
 	got, err := s.Load()
 	if err != nil {
 		t.Fatalf("空 store Load 应 (nil, nil): %v", err)
@@ -159,7 +160,7 @@ func TestStateBackedCredentialStore_CorruptValue(t *testing.T) {
 	if err := st.Put(ctx, credentialRingKey, []byte("not-json")); err != nil {
 		t.Fatal(err)
 	}
-	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), fileNameCredStore), nil)
+	s := newStateBackedCredentialStore(st, credentialRingKey, filepath.Join(t.TempDir(), credentialsFileName), nil)
 	if _, err := s.Load(); err == nil {
 		t.Fatal("损坏值 Load 应返回 error（fail-closed）")
 	}
@@ -170,9 +171,9 @@ func TestStateBackedCredentialStore_CorruptValue(t *testing.T) {
 func TestBootstrapServerCredentials_StateBacked(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
-	cfg.Cluster = ClusterConfig{Enabled: true, NodeID: "n1", Role: "master"}
+	cfg.Cluster = config.ClusterConfig{Enabled: true, NodeID: "n1", Role: "master"}
 
 	_, store, err := BootstrapServerCredentials(cfg, nil)
 	if err != nil {
@@ -189,9 +190,9 @@ func TestBootstrapServerCredentials_StateBacked_Encrypted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	_, mkPath := writeMasterKeyFile(t, dir)
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
-	cfg.Cluster = ClusterConfig{Enabled: true, NodeID: "n1", Role: "master"}
+	cfg.Cluster = config.ClusterConfig{Enabled: true, NodeID: "n1", Role: "master"}
 	cfg.CredentialStore.Encrypt = true
 	cfg.CredentialStore.MasterKeyFile = mkPath
 
@@ -236,7 +237,7 @@ func TestBootstrapServerCredentials_StateBacked_Encrypted(t *testing.T) {
 func TestBootstrapServerCredentials_StateStoreType(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
 	cfg.StateStore.Type = "local" // 显式 local + cluster 关 = 单节点零回归（不变更后端）
 	_, store, err := BootstrapServerCredentials(cfg, nil)
@@ -248,95 +249,12 @@ func TestBootstrapServerCredentials_StateStoreType(t *testing.T) {
 	}
 }
 
-// TestLoadFromProvider_StateStore 验证 state_store 段解析（viper/mapstructure 路径）。
-func TestLoadFromProvider_StateStore(t *testing.T) {
-	t.Parallel()
-	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
-		"state_store": map[string]any{
-			"type": "local",
-			"dir":  "/tmp/sproxy-state",
-			"mongo": map[string]any{
-				"uri":        "mongodb://127.0.0.1:27017",
-				"database":   "sproxy",
-				"collection": "sproxy_state",
-			},
-		},
-	}})
-	if err != nil {
-		t.Fatalf("LoadFromProvider: %v", err)
-	}
-	if cfg.StateStore.Type != "local" || cfg.StateStore.Dir != "/tmp/sproxy-state" {
-		t.Fatalf("state_store 解析不符: %+v", cfg.StateStore)
-	}
-	if cfg.StateStore.Mongo.URI != "mongodb://127.0.0.1:27017" || cfg.StateStore.Mongo.Database != "sproxy" || cfg.StateStore.Mongo.Collection != "sproxy_state" {
-		t.Fatalf("state_store.mongo 解析不符: %+v", cfg.StateStore.Mongo)
-	}
-}
-
-// TestConfig_StateStoreDefault 验证 type 空 = local（SetDefaults 归一，零回归）。
-func TestConfig_StateStoreDefault(t *testing.T) {
-	t.Parallel()
-	cfg := Default()
-	if cfg.StateStore.Type != "local" {
-		t.Fatalf("Default() 的 StateStore.Type 应为 local（零回归）, got %q", cfg.StateStore.Type)
-	}
-	cfg2 := &Config{}
-	cfg2.SetDefaults()
-	if cfg2.StateStore.Type != "local" {
-		t.Fatalf("SetDefaults 后 StateStore.Type 应为 local, got %q", cfg2.StateStore.Type)
-	}
-}
-
-// TestStateStoreConfig_Validate 验证 state_store 段校验：local/空合法；raft 响亮拒绝；
-// mongo 必填 uri；未知类型拒绝（fail-closed，不静默回落 local）。
-func TestStateStoreConfig_Validate(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		cfg     StateStoreConfig
-		wantErr bool
-	}{
-		{"空 type = local 零回归", StateStoreConfig{}, false},
-		{"显式 local", StateStoreConfig{Type: "local"}, false},
-		{"mongo 带 uri", StateStoreConfig{Type: "mongo", Mongo: MongoConfig{URI: "mongodb://127.0.0.1:27017"}}, false},
-		{"mongo 缺 uri 拒绝", StateStoreConfig{Type: "mongo"}, true},
-		{"raft 未实现拒绝", StateStoreConfig{Type: "raft"}, true},
-		{"未知类型拒绝", StateStoreConfig{Type: "bogus"}, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := tc.cfg.Validate()
-			if tc.wantErr && err == nil {
-				t.Fatalf("%s: 应报错, got nil", tc.name)
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("%s: 不应报错: %v", tc.name, err)
-			}
-		})
-	}
-}
-
-// TestLoadFromProvider_StateStoreInvalid 验证 viper 路径下非法 state_store 配置被拒绝。
-func TestLoadFromProvider_StateStoreInvalid(t *testing.T) {
-	t.Parallel()
-	if _, err := LoadFromProvider(mapProvider{m: map[string]any{
-		"state_store": map[string]any{"type": "raft"},
-	}}); err == nil {
-		t.Fatal("state_store.type=raft 应被 Validate 拒绝（未实现）")
-	}
-	if _, err := LoadFromProvider(mapProvider{m: map[string]any{
-		"state_store": map[string]any{"type": "mongo"},
-	}}); err == nil {
-		t.Fatal("state_store.type=mongo 缺 uri 应被拒绝")
-	}
-}
-
 // TestBootstrapServerCredentials_StateStoreMongoFailClosed 验证集群模式 + mongo 未实现
 // （F3 片）→ 装配报错（fail-closed，不回落 local——防「以为多节点一致、实际各写各的」）。
 func TestBootstrapServerCredentials_StateStoreMongoFailClosed(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cfg := Default()
+	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(dir, "storage")
 	cfg.StateStore.Type = "mongo"
 	cfg.StateStore.Mongo.URI = "mongodb://127.0.0.1:27017"
