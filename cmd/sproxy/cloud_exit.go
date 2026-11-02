@@ -9,6 +9,7 @@ import (
 	"net"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/server/alerts"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 )
 
@@ -17,7 +18,7 @@ import (
 //     已判非 firing 即 no-op，故每次成功都可安全调用）；
 //   - 返回原 conn/err（告警是旁路副作用，绝不吞错、绝不改拨号语义——出口失败仍 fail-closed 向上传播）；
 //   - e 为 nil（告警引擎未启用）时直接返回原 dial（零开销，拨号行为零变化）。
-func withNATAlert(dial func(context.Context, string) (net.Conn, error), e *server.AlertEngine, peer string) func(context.Context, string) (net.Conn, error) {
+func withNATAlert(dial func(context.Context, string) (net.Conn, error), e *alerts.Engine, peer string) func(context.Context, string) (net.Conn, error) {
 	if e == nil || dial == nil {
 		return dial
 	}

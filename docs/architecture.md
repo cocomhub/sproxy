@@ -672,7 +672,8 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
 - **依赖倒置**：通知域只接受自己的 `notify.Event`（Action/Object/Result/Detail/TS），
   装配层在 `RecordAudit` 里做一次字段映射——通知域不反向依赖 `AuditEvent`/装配层（R6）。
 - 装配层保留 HTTP 面：`notify_handlers.go`（history/test/feed 三个端点 + feed token 门禁）。
-- `pkg/server/notify_alias.go` 为迁移期兼容层（`NotifyCenter`/`Notifier`/`NotifyMessage`/`Event`）。
+- 装配层直接 import `pkg/server/notify`（`NotifyCenter`/`Notifier`/`NotifyMessage`/`Event`）；
+  迁移期别名 `notify_alias.go` 已删除。
 - HMAC-SHA256 下沉 `pkg/cryptox.HMACSHA256`（S3 SigV4 与 webhook 签名共用单一实现）。
 
 **S3：统一周期任务调度器（`pkg/server/scheduler`）**
@@ -680,7 +681,7 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
 - 迁入：`Scheduler`/`Task`/`TaskFunc`（周期任务注册、单飞防重入、panic 恢复、维护窗口、
   优雅停止 + `FinalRunOnStop`），零 `pkg/*` 依赖（L0）。
 - 装配层保留周期任务的**注册内容**（uploading 清理 / version-gc / trash-gc / share-cleanup /
-  usage-flush），经 `scheduler_alias.go` 类型别名零改动。
+  usage-flush），任务描述直接使用 `scheduler.Task`；迁移期别名 `scheduler_alias.go` 已删除。
 
 **S4：`Handlers` 分域依赖（`pkg/server/deps.go`）**
 
@@ -729,8 +730,10 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
 
 - 迁入：\`Store\`（进程内 + 落盘）、\`StateBackedStore\`（集群 StateStore 后端）、\`Link\`/\`Spec\`/
   \`StoreIface\`、持久化格式与过期/容量淘汰。
-- 装配层保留 **HTTP 面**（create/access/list/revoke），经 \`share_alias.go\` 别名调用；
-  分享域常量（\`MaxShareTTL\`/\`MaxShareEntries\`/\`MaxShareBodySize\`）与存储同源。
+- 装配层保留 **HTTP 面**（create/access/list/revoke），直接使用 `share.Store`/`share.StoreIface`/
+  `share.StateBackedStore`（含 `NewStateBackedStore`）；分享域常量
+  （`share.MaxShareTTL`/`share.MaxShareEntries`/`share.MaxShareBodySize`）与存储同源。
+  迁移期别名 `share_alias.go` 已删除。
 - 白盒持久化测试随迁 \`pkg/server/share\`；HTTP/e2e 测试保留装配层。
 
 **S9：运行时指标注册表（`pkg/server/metrics`）**
@@ -739,7 +742,8 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   `RebalanceProgress`、渲染辅助（`WriteMetric`/`WriteLabeledCounter`/`WriteHistogram`/
   `WriteGaugeSamples`/`WriteReadLoopBlock`/`WriteHybridMetrics`/`WriteGCIDMetrics`）、`RenderSLOMetrics`。
 - `/metrics` HTTP 面、中间件与需要装配态的渲染段（卷水位/索引缓存/hub 节点）留在装配层，
-  经 `metrics_alias.go` 调用。
+  直接使用 `metrics.Metrics` 与导出的渲染辅助（`metrics.WriteMetric` 等）；迁移期别名
+  `metrics_alias.go` 已删除。
 
 **S10：checksum 巡检（`pkg/server/verify`）**
 
@@ -763,6 +767,8 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   `OnVolumeDegraded`/`OnSyncFailed`/`OnLoginLocked`/`OnNATFailure`/`OnChecksumMismatch`）、
   `NewFromConfig`、`AdoptNotifyChannels`、AI 建议器挂点。
 - **依赖已收敛**：只依赖已下沉的 `pkg/server/config`、`pkg/server/notify`、`pkg/server/ai`，无反向依赖。
+- 装配层与 `cmd/sproxy` 直接使用 `alerts.Engine`/`alerts.NewEngine`/`alerts.SourceNATFailure`；
+  迁移期别名 `alerts_alias.go` 已删除。
 
 **S13：归档打包助手（`pkg/server/archive`）**
 

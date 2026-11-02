@@ -153,7 +153,7 @@ func TestVersionGCLoop_Stop(t *testing.T) {
 
 	// 模拟 RegisterRoutes 挂载路径：装配 scheduler 并注册 version-gc（间隔 1m）。
 	h.scheduler = scheduler.NewScheduler(testLogger())
-	if err := h.scheduler.Register(Task{
+	if err := h.scheduler.Register(scheduler.Task{
 		Name:            "version-gc",
 		Interval:        cfg.Versioning.GCInterval,
 		MaintenanceOnly: true,

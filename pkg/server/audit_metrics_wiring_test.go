@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -27,7 +28,7 @@ func TestAuditMetrics_DroppedObservable(t *testing.T) {
 	cfg.StorageRoot = t.TempDir()
 	cfg.Audit.MaxTotalBytes = 1 // 1 字节 ⇒ 任何条目都放不下 ⇒ 必然「有界丢弃」
 
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	svc, j := setupAuditServices(cfg, func() syncpkg.FS { return nil }, newAuditMetrics(m), testLogger())
 	if svc == nil || j == nil {
 		t.Fatalf("审计装配失败：svc=%v journal=%v", svc != nil, j != nil)

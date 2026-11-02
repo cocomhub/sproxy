@@ -27,8 +27,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/leader"
 	"github.com/cocomhub/sproxy/pkg/server/alerts"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/server/notify"
 	"github.com/cocomhub/sproxy/pkg/server/ratelimit"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -99,7 +101,7 @@ type RegisterRoutesOpts struct {
 	// XferMetrics 是传输层扩展指标提供者（装配层注入；nil = 不输出 WS/QUIC
 	// 指标行）。cmd/sproxy 经 go.work import ext/ws、ext/quic 提供——pkg/server
 	// 不直接依赖独立 module（web/e2e 等子 module 经 pkg/server 间接编译不破）。
-	XferMetrics XferMetricsProvider
+	XferMetrics metrics.XferMetricsProvider
 	// CloudExitDial 是云端下载的经 mesh 出口拨号函数（装配层注入；nil = 服务端本地直连）。
 	// 非 nil 时覆写 cloud 下载器的 Transport.DialContext（本地直连优先 → 失败回退经出口节点）。
 	// cmd/sproxy 在 cloud_download_exit_node 配置启用时用 newMeshHubClient + mesh 路由构造。
@@ -166,10 +168,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	var coldVolSet *registry.Set
 	// 指标实例提前创建：审计装配（journal/service）与 Handlers 共用同一实例 ⇒ `audit_dropped`
 	// 等审计计数能经 `/metrics` 暴露（评审 R13 P1：此前无人注入 ⇒ 恒 NullMetrics）。
-	metrics := NewMetrics()
+	mx := metrics.NewMetrics()
 	auditSvc, auditJournal := setupAuditServices(cfg, func() syncpkg.FS {
 		return newColdArchiveFS(cfg, coldVolSet, log)
-	}, newAuditMetrics(metrics), log)
+	}, newAuditMetrics(mx), log)
 
 	// 卷集合装配（多卷，任务 3）：按 cfg.Volumes 逐卷 MkdirAll + storage.OpenRoot
 	// （LAYOUT_VERSION 写入/校验）+ 卷容量 Pool + ACL 解析。缺省形态（YAML 只配
@@ -209,9 +211,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		buildAt:           opts.BuildAt,
 		logger:            log,
 		auditLogger:       auditLogger,
-		metrics:           metrics,
-		rebalanceProg:     newRebalanceProgress(),
-		shareStore:        NewShareStore(log.With("component", "share")),
+		metrics:           mx,
+		rebalanceProg:     metrics.NewRebalanceProgress(),
+		shareStore:        share.NewStore(log.With("component", "share")),
 		routeTable:        opts.RouteTable,
 		signalBroker:      NewSignalBroker(opts.RouteTable),
 		hubPersist:        opts.HubPersist,

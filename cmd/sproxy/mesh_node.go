@@ -21,6 +21,7 @@ import (
 	"net"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/server/alerts"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 )
@@ -133,7 +134,7 @@ func meshNodeCredential(cfg *server.Config, injected *meshHubCreds) (ak, sk, ske
 //
 // alertEng 是 NAT 穿透失败告警引擎（roadmap 11.1-①）：非 nil 时接入节点生命周期拨号失败
 // 事件（RunNode 断线退避重连的每次会话失败 → OnNATFailure；后续成功会话 → OnNATRecovered）。
-func startMeshNodeRoleWithCreds(ctx context.Context, cfg *server.Config, readAddr, writeAddr string, creds *meshHubCreds, alertEng *server.AlertEngine, log *slog.Logger) bool {
+func startMeshNodeRoleWithCreds(ctx context.Context, cfg *server.Config, readAddr, writeAddr string, creds *meshHubCreds, alertEng *alerts.Engine, log *slog.Logger) bool {
 	if cfg == nil || !cfg.Mesh.Node.Enabled {
 		return false
 	}

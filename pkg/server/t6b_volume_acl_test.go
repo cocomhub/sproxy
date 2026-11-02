@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 )
 
 // t6bVolCfg 构造 T6b 多卷配置。mainACLExcludeOwner 为 true 时 main 卷用 allow 白名单排除 owner
@@ -356,7 +357,7 @@ func TestT6b_Share_Disk2CreateAndAccess(t *testing.T) {
 	cfg, dirs := t6bVolCfg(t, false, "alice")
 	cfg.Volumes[0].VolCapacity = 8
 	h := buildVolSetHandlers(t, cfg)
-	h.shareStore = NewShareStore(testLogger())
+	h.shareStore = share.NewStore(testLogger())
 	t.Cleanup(h.shareStore.Stop)
 	ts := httptest.NewServer(t6bMux(h, "alice"))
 	t.Cleanup(ts.Close)
@@ -391,7 +392,7 @@ func TestT6b_Share_Disk2CreateAndAccess(t *testing.T) {
 func TestT6b_Share_DefaultOpenNormal(t *testing.T) {
 	cfg, _ := t6bVolCfg(t, false, "alice")
 	h := buildVolSetHandlers(t, cfg)
-	h.shareStore = NewShareStore(testLogger())
+	h.shareStore = share.NewStore(testLogger())
 	t.Cleanup(h.shareStore.Stop)
 	ts := httptest.NewServer(t6bMux(h, "alice"))
 	t.Cleanup(ts.Close)
@@ -418,7 +419,7 @@ func TestT6b_Share_DefaultOpenNormal(t *testing.T) {
 func TestT6b_Share_ACLExcludedDefaultCreate404(t *testing.T) {
 	cfg, dirs := t6bVolCfg(t, true, "bob") // main 排除 bob
 	h := buildVolSetHandlers(t, cfg)
-	h.shareStore = NewShareStore(testLogger())
+	h.shareStore = share.NewStore(testLogger())
 	t.Cleanup(h.shareStore.Stop)
 	seedVolumeFile(t, dirs[0], "bob", "user/legacy.txt", []byte("MAIN-SECRET"))
 	ts := httptest.NewServer(t6bMux(h, "bob"))
@@ -428,7 +429,7 @@ func TestT6b_Share_ACLExcludedDefaultCreate404(t *testing.T) {
 }
 
 // t6bCreateShare 创建分享并断言期望状态，返回响应。
-func t6bCreateShare(t *testing.T, baseURL, filename string, wantStatus int) ShareCreateResponse {
+func t6bCreateShare(t *testing.T, baseURL, filename string, wantStatus int) share.CreateResponse {
 	t.Helper()
 	body := fmt.Sprintf(`{"filename":%q,"ttl":"1h"}`, filename)
 	resp, err := http.Post(baseURL+"/api/share", contentTypeJSON, strings.NewReader(body))
@@ -437,7 +438,7 @@ func t6bCreateShare(t *testing.T, baseURL, filename string, wantStatus int) Shar
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	var out ShareCreateResponse
+	var out share.CreateResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("decode share resp %q: %v", string(raw), err)
 	}

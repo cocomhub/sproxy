@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/rootfs"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -38,7 +39,7 @@ func newShareExternalVolumeHandlers(t *testing.T) (*Handlers, registry.ExternalB
 	t.Helper()
 	root := t.TempDir()
 	h := newAssemblyTestHandlers(t, root)
-	h.shareStore = NewShareStore(testLogger())
+	h.shareStore = share.NewStore(testLogger())
 
 	inner := syncpkg.NewLocalFS(t.TempDir(), nil)
 	be, err := secretdata.NewBackend(context.Background(),

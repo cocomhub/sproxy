@@ -35,6 +35,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -1515,8 +1516,8 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	h.fileService().DownloadChunk(w, r)
 }
 
-// 编译期断言：*Metrics 满足领域的计量窄接口（零适配代码，无需包装）。
-var _ files.Metrics = (*Metrics)(nil)
+// 编译期断言：*metrics.Metrics 满足领域的计量窄接口（零适配代码，无需包装）。
+var _ files.Metrics = (*metrics.Metrics)(nil)
 
 // applyMetaExtra 把随上传写入的 extra **合并**到 FileMeta（用户裁定 2026-10-26：默认新增
 // 而非覆盖——二次上传不丢旧 KV）。nil/空 = 不写（零回归）；既有 Extra 保留、同名键被

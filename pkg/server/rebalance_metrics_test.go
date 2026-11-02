@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 )
 
 // fetchMetricsText 拉取指定 URL 的 /metrics 文本（twoVolumeServer 返回 string URL，
@@ -39,7 +41,7 @@ func fetchMetricsText(t *testing.T, baseURL string) string {
 // TestRebalanceProgress_BeginAddEnd 状态结构语义：begin 登记 → add 累加 → Percent 正确 → end 清除。
 func TestRebalanceProgress_BeginAddEnd(t *testing.T) {
 	t.Parallel()
-	p := newRebalanceProgress()
+	p := metrics.NewRebalanceProgress()
 	p.Begin("main", "disk2", 100) // 总字节 100
 	p.Add("main", "disk2", 40)
 	p.Add("main", "disk2", 20) // 累计 60
@@ -64,7 +66,7 @@ func TestRebalanceProgress_BeginAddEnd(t *testing.T) {
 // TestRebalanceProgress_TotalUnknown 总字节 0（无限配额/未知）→ percent 保守 0。
 func TestRebalanceProgress_TotalUnknown(t *testing.T) {
 	t.Parallel()
-	p := newRebalanceProgress()
+	p := metrics.NewRebalanceProgress()
 	p.Begin("main", "disk2", 0)
 	p.Add("main", "disk2", 50)
 	s := p.Samples()
@@ -79,7 +81,7 @@ func TestRebalanceProgress_TotalUnknown(t *testing.T) {
 // TestRebalanceProgress_MultiPair 多任务按 (from,to) 独立分组。
 func TestRebalanceProgress_MultiPair(t *testing.T) {
 	t.Parallel()
-	p := newRebalanceProgress()
+	p := metrics.NewRebalanceProgress()
 	p.Begin("main", "disk2", 100)
 	p.Begin("a", "b", 10)
 	p.Add("main", "disk2", 50)
@@ -137,7 +139,7 @@ func TestRebalanceMetrics_HandlerClearsAfterDone(t *testing.T) {
 func TestRebalanceMetrics_ManualGauge(t *testing.T) {
 	t.Parallel()
 	ts, h := newTestServerWithMetrics(t)
-	h.rebalanceProg = newRebalanceProgress()
+	h.rebalanceProg = metrics.NewRebalanceProgress()
 	h.rebalanceProg.Begin("main", "disk2", 200)
 	h.rebalanceProg.Add("main", "disk2", 80)
 

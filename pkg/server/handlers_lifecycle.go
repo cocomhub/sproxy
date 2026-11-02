@@ -17,7 +17,7 @@ import (
 // 在进程退出前应调用一次（通常通过 defer h.Close()）。多次调用是安全的。
 // 关闭顺序：先关 uploadingFiles 清理 goroutine，再关 UploadStore（后者可能还有 uploading 操作引用其 session）。
 // 返回值当前恒为 nil：各子组件的 Stop/Close（UploadStore.Stop / StorageManager.Stop /
-// CloudDownloadManager.Close / ShareStore.Stop / tenants.Close / volSet.Close）签名均不返回
+// CloudDownloadManager.Close / share.Store.Stop / tenants.Close / volSet.Close）签名均不返回
 // error，唯一可失败的 hubPersist.FlushFn 已在本方法内就地记 Error 日志。若要聚合关闭错误，
 // 需先扩这些组件的签名，属独立改造——故不在此预留半成品（审计结论（原待办）——已定，2026-09-14）。
 func (h *Handlers) Close() error {

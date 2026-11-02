@@ -9,13 +9,16 @@ package server
 // `audit_dropped`（**真正丢失**的条目）/ `write_failed` / `hook_panics` / `rotate` 全部不可观测，
 // 而文档/设计把 `audit_dropped` 当作可观测契约 —— 「有界丢弃」成了静默失效。
 
-import "github.com/cocomhub/sproxy/pkg/audit"
+import (
+	"github.com/cocomhub/sproxy/pkg/audit"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
+)
 
-// auditMetrics 是 `audit.Metrics` 到 `server.Metrics` 的适配器（nil 安全）。
-type auditMetrics struct{ m *Metrics }
+// auditMetrics 是 `audit.Metrics` 到 `metrics.Metrics` 的适配器（nil 安全）。
+type auditMetrics struct{ m *metrics.Metrics }
 
 // newAuditMetrics 构造适配器（m 为 nil 时为 no-op）。
-func newAuditMetrics(m *Metrics) auditMetrics { return auditMetrics{m: m} }
+func newAuditMetrics(m *metrics.Metrics) auditMetrics { return auditMetrics{m: m} }
 
 // IncrDrop 累计**未持久化即被逐出**的条目数（真正的审计丢失）。
 func (a auditMetrics) IncrDrop(n int) {

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/server/notify"
 )
 
 // sighupFakeChannel 记录告警消息的假渠道（cmd 包内独立实现，server 包的不导出）。
@@ -35,7 +36,7 @@ type sighupFakeChannel struct {
 
 func (f *sighupFakeChannel) Name() string { return f.name }
 
-func (f *sighupFakeChannel) Send(ctx context.Context, m server.NotifyMessage) error {
+func (f *sighupFakeChannel) Send(ctx context.Context, m notify.NotifyMessage) error {
 	f.msgs <- m.Title + "|" + m.Text
 	return nil
 }

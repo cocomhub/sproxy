@@ -32,7 +32,7 @@ import (
 //
 // 只经公开 API（NewNotifyCenter + Register + Dispatch）生成历史，不触碰
 // notify 包内部字段——这样测试不会因实现细节变化而失效。
-func feedStub(t *testing.T, now time.Time, n int) *NotifyCenter {
+func feedStub(t *testing.T, now time.Time, n int) *notify.NotifyCenter {
 	t.Helper()
 	cfg := NotifyConfig{
 		Enabled: true,

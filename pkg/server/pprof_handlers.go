@@ -22,6 +22,8 @@ import (
 	"net/http/pprof"
 	"runtime"
 	"strings"
+
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 )
 
 // pprofMux 是 /debug/pprof 子 mux：注册标准库 pprof 处理器（Index 覆盖全部
@@ -53,7 +55,7 @@ func (h *Handlers) registerPprofRoutes(srvMux *http.ServeMux) {
 func writeHeapMetrics(b *strings.Builder) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	writeMetric(b, "sproxy_heap_alloc_bytes", "gauge", "Current heap bytes allocated (runtime.MemStats.HeapAlloc)", int64(ms.HeapAlloc))
-	writeMetric(b, "sproxy_heap_objects", "gauge", "Current heap object count (runtime.MemStats.HeapObjects)", int64(ms.HeapObjects))
-	writeMetric(b, "sproxy_gc_cycles", "counter", "Total number of completed GC cycles (runtime.MemStats.NumGC)", int64(ms.NumGC))
+	metrics.WriteMetric(b, "sproxy_heap_alloc_bytes", "gauge", "Current heap bytes allocated (runtime.MemStats.HeapAlloc)", int64(ms.HeapAlloc))
+	metrics.WriteMetric(b, "sproxy_heap_objects", "gauge", "Current heap object count (runtime.MemStats.HeapObjects)", int64(ms.HeapObjects))
+	metrics.WriteMetric(b, "sproxy_gc_cycles", "counter", "Total number of completed GC cycles (runtime.MemStats.NumGC)", int64(ms.NumGC))
 }

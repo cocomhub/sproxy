@@ -21,6 +21,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -222,7 +223,7 @@ func buildVolSetHandlers(t *testing.T, cfg *Config) *Handlers {
 		logger:         testLogger(),
 		auditLogger:    testLogger(),
 		uploadingStop:  make(chan struct{}),
-		metrics:        NewMetrics(),
+		metrics:        metrics.NewMetrics(),
 		globalRoot:     vs.DefaultRoot(),
 		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
 		volSet:         vs,
@@ -231,7 +232,7 @@ func buildVolSetHandlers(t *testing.T, cfg *Config) *Handlers {
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),
-		rebalanceProg:  newRebalanceProgress(),
+		rebalanceProg:  metrics.NewRebalanceProgress(),
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	// 测试夹具：把「配额不足 ⇒ 排队重试」的等待上限压到最小（生产恒 0 = 30s 默认，语义不变）——

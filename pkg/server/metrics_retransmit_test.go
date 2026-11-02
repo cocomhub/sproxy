@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/testutil/mockxfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -40,7 +41,7 @@ func TestMetrics_MuxRetransmitExposed(t *testing.T) {
 	rt := hub.NewMeshRouteTable()
 	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-a"), Addr: "127.0.0.1:1", Mux: m}, nil)
 
-	h := &Handlers{routeTable: rt, logger: testutil.DiscardLogger(), metrics: NewMetrics()}
+	h := &Handlers{routeTable: rt, logger: testutil.DiscardLogger(), metrics: metrics.NewMetrics()}
 	w := httptest.NewRecorder()
 	h.MetricsHandler(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 

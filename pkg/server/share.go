@@ -20,22 +20,23 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/rootfs"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 )
 
 func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxShareBodySize)
+	r.Body = http.MaxBytesReader(w, r.Body, share.MaxShareBodySize)
 
 	req, ok := h.parseShareCreateRequest(w, r)
 	if !ok {
 		return
 	}
 	if req.Filename == "" {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "filename 不能为空"}, http.StatusBadRequest)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "filename 不能为空"}, http.StatusBadRequest)
 		return
 	}
 	remotePath, err := pathguard.ValidateFilePath(req.Filename)
 	if err != nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
@@ -51,14 +52,14 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link, err := h.shareStore.Create(shareSpec{
+	link, err := h.shareStore.Create(share.Spec{
 		Filename: req.Filename, TenantID: src.TenantID, Rel: src.Rel, Volume: src.Volume,
 		Owner: ActorFrom(r.Context()),
 		TTL:   ttl, MaxDownloads: req.MaxDownloads, OneTime: req.OneTime, ReadOnly: req.ReadOnly,
 		WatermarkSeed: req.Watermark,
 	})
 	if err != nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return
 	}
 
@@ -73,7 +74,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		Detail: "file=" + link.Filename,
 	})
 
-	sendJSONResponse(w, ShareCreateResponse{
+	sendJSONResponse(w, share.CreateResponse{
 		Success:      true,
 		Token:        link.Token,
 		Filename:     link.Filename,
@@ -89,7 +90,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) parseShareCreateRequest(w http.ResponseWriter, r *http.Request) (*shareCreateRequest, bool) {
 	var req shareCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
 		return nil, false
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
@@ -110,12 +111,12 @@ func (h *Handlers) resolveShareSource(w http.ResponseWriter, r *http.Request, re
 	owner = normalizeOwner(ownerFromRequest(r))
 	tnt0 := h.tenantFor(owner)
 	if tnt0 == nil || tnt0.Root() == nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", nil, false
 	}
 	rel, relOK := tnt0.UserRel(remotePath)
 	if !relOK {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", nil, false
 	}
 	if hint == "" {
@@ -124,7 +125,7 @@ func (h *Handlers) resolveShareSource(w http.ResponseWriter, r *http.Request, re
 	resolved, found := h.resolveOwnerSource(r.Context(), owner, rel, hint)
 	if !found || resolved == nil {
 		// 文件不在 owner 卷视图内（ACL 收紧/卷未装配）⇒ 404 fail-closed（内容不可经 token 流出）。
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return "", nil, false
 	}
 	return owner, resolved, true
@@ -134,7 +135,7 @@ func (h *Handlers) resolveShareSource(w http.ResponseWriter, r *http.Request, re
 // 已 Stat 命中且非目录）。
 func (h *Handlers) validateShareSourceFile(w http.ResponseWriter, src *ownerSource) bool {
 	if src == nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return false
 	}
 	if src.Local != nil {
@@ -142,18 +143,18 @@ func (h *Handlers) validateShareSourceFile(w http.ResponseWriter, src *ownerSour
 		fi, lstatErr := src.Local.Lstat(src.Rel)
 		if lstatErr != nil {
 			if os.IsNotExist(lstatErr) {
-				sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+				sendJSONResponse(w, share.CreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 			} else {
-				sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
+				sendJSONResponse(w, share.CreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
 			}
 			return false
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享符号链接"}, http.StatusBadRequest)
+			sendJSONResponse(w, share.CreateResponse{Success: false, Message: "不支持分享符号链接"}, http.StatusBadRequest)
 			return false
 		}
 		if fi.IsDir() {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享目录"}, http.StatusBadRequest)
+			sendJSONResponse(w, share.CreateResponse{Success: false, Message: "不支持分享目录"}, http.StatusBadRequest)
 			return false
 		}
 		src.Size = fi.Size()
@@ -161,27 +162,27 @@ func (h *Handlers) validateShareSourceFile(w http.ResponseWriter, src *ownerSour
 	// 校验可读：立即打开并关闭（分享只存定位，不保留句柄——访问时重新解析，TOCTOU 收敛）。
 	f, openErr := src.OpenRead(context.Background())
 	if openErr != nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
 		return false
 	}
 	_ = f.Close()
 	return true
 }
 
-// resolveShareTTL 解析并限制分享 TTL：缺省 24h，超过 maxShareTTL 取上限，非法返回错误回包。
+// resolveShareTTL 解析并限制分享 TTL：缺省 24h，超过 share.MaxShareTTL 取上限，非法返回错误回包。
 func resolveShareTTL(w http.ResponseWriter, ttlStr string) (time.Duration, bool) {
 	ttl := 24 * time.Hour
 	if ttlStr != "" {
 		d, ttlErr := time.ParseDuration(ttlStr)
 		if ttlErr != nil {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无效的 TTL 格式"}, http.StatusBadRequest)
+			sendJSONResponse(w, share.CreateResponse{Success: false, Message: "无效的 TTL 格式"}, http.StatusBadRequest)
 			return 0, false
 		}
 		if d <= 0 {
-			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "TTL 必须大于 0"}, http.StatusBadRequest)
+			sendJSONResponse(w, share.CreateResponse{Success: false, Message: "TTL 必须大于 0"}, http.StatusBadRequest)
 			return 0, false
 		}
-		ttl = min(d, maxShareTTL)
+		ttl = min(d, share.MaxShareTTL)
 	}
 	return ttl, true
 }
@@ -230,7 +231,7 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 
 // resolveShareAccess 校验分享链接有效性并消费（Peek → 源定位 → 文件存在 → Consume）。
 // 返回源定位（卷感知）与消费后的 link；失败时已回包，ok=false。
-func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, token string) (*ownerSource, *ShareLink, bool) {
+func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, token string) (*ownerSource, *share.Link, bool) {
 	// Peek：先查看链接是否存在且文件有效，不修改状态
 	link := h.shareStore.Peek(token)
 	if link == nil {
@@ -260,7 +261,7 @@ func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, to
 // resolveShareAccessSource 解析分享源的**卷感知**定位：
 //   - `link.Volume` 非空（新记录）⇒ **只在该卷**重新定位（ACL 复核 + 文件存在性）；
 //   - 否则（旧记录/无卷语义）⇒ 旧行为：默认/本地卷优先（locateOwnerFile），未命中再按视图扫描。
-func (h *Handlers) resolveShareAccessSource(r *http.Request, link *ShareLink) (*ownerSource, bool) {
+func (h *Handlers) resolveShareAccessSource(r *http.Request, link *share.Link) (*ownerSource, bool) {
 	if link.Volume != "" {
 		return h.resolveOwnerSource(r.Context(), link.TenantID, link.Rel, link.Volume)
 	}
@@ -281,7 +282,7 @@ func (h *Handlers) resolveShareAccessSource(r *http.Request, link *ShareLink) (*
 }
 
 // streamShareFile 设置分享响应头并以流式方式传输文件内容（不暴露文件路径）。
-func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token string, link *ShareLink, f io.Reader, size int64) {
+func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token string, link *share.Link, f io.Reader, size int64) {
 	w.Header().Set(headerContentType, contentTypeOctetStream)
 	// 分享只读语义可见（roadmap P2）：仅下载的分享响应带 X-Share-ReadOnly 头。
 	if link.ReadOnly {
@@ -342,19 +343,19 @@ func (h *Handlers) listSharesHandler(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) revokeShareHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	if token == "" {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "token 不能为空"}, http.StatusBadRequest)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "token 不能为空"}, http.StatusBadRequest)
 		return
 	}
 
 	if err := h.shareStore.Revoke(token, ActorFrom(r.Context())); err != nil {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: err.Error()}, http.StatusNotFound)
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: err.Error()}, http.StatusNotFound)
 		return
 	}
 
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: "share_revoke", ObjectType: "share", Object: token, Result: AuditResultSuccess,
 	})
-	sendJSONResponse(w, ShareCreateResponse{Success: true, Message: "分享链接已撤销"}, http.StatusOK)
+	sendJSONResponse(w, share.CreateResponse{Success: true, Message: "分享链接已撤销"}, http.StatusOK)
 }
 
 type shareCreateRequest struct {

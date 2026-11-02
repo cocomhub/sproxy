@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
@@ -110,7 +111,7 @@ func TestShare_Expired(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("创建分享失败：status=%d body=%s", resp.StatusCode, rawCreate)
 	}
-	var shareResp ShareCreateResponse
+	var shareResp share.CreateResponse
 	if err := json.Unmarshal(rawCreate, &shareResp); err != nil {
 		t.Fatalf("解析创建分享响应失败: %v body=%s", err, rawCreate)
 	}
@@ -172,7 +173,7 @@ func TestShare_EmptyTokenNotServed(t *testing.T) {
 
 	// ② handler 契约：空 token 直呼 accessShareHandler 必须 400，不得因缺守卫而漏到 404/200。
 	env := newOwnerEnv(t)
-	env.h.shareStore = NewShareStore(testLogger())
+	env.h.shareStore = share.NewStore(testLogger())
 	t.Cleanup(env.h.shareStore.Stop)
 	req := httptest.NewRequest(http.MethodGet, "/s/", nil) // 未设置 {token} PathValue ⇒ PathValue("token") == ""
 	rr := httptest.NewRecorder()
@@ -227,16 +228,16 @@ func TestShare_NonExistentFile(t *testing.T) {
 
 func TestShare_CreateEviction(t *testing.T) {
 	t.Parallel()
-	ss := NewShareStore(slog.Default())
+	ss := share.NewStore(slog.Default())
 	// 填满上限，所有条目立即过期（TTL=0 => ExpiresAt ≈ now，eviction 时已过期）
-	for i := range maxShareEntries {
-		_, err := ss.Create(shareSpec{Filename: fmt.Sprintf("file%d.txt", i), TenantID: "anonymous", Rel: fmt.Sprintf("user/file%d.txt", i), Owner: "", TTL: 0, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
+	for i := range share.MaxShareEntries {
+		_, err := ss.Create(share.Spec{Filename: fmt.Sprintf("file%d.txt", i), TenantID: "anonymous", Rel: fmt.Sprintf("user/file%d.txt", i), Owner: "", TTL: 0, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 	// 触发 eviction：应该成功删除过期条目再新增
-	link, err := ss.Create(shareSpec{Filename: "newfile.txt", TenantID: "anonymous", Rel: "user/newfile.txt", Owner: "", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
+	link, err := ss.Create(share.Spec{Filename: "newfile.txt", TenantID: "anonymous", Rel: "user/newfile.txt", Owner: "", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatalf("expected eviction to succeed, got: %v", err)
 	}
@@ -244,23 +245,23 @@ func TestShare_CreateEviction(t *testing.T) {
 		t.Fatal("expected non-empty token")
 	}
 	count := ss.Len()
-	if count > maxShareEntries {
-		t.Errorf("expected at most %d entries after eviction, got %d", maxShareEntries, count)
+	if count > share.MaxShareEntries {
+		t.Errorf("expected at most %d entries after eviction, got %d", share.MaxShareEntries, count)
 	}
 }
 
 func TestShare_CreateEvictionNoExpired(t *testing.T) {
 	t.Parallel()
-	ss := NewShareStore(slog.Default())
+	ss := share.NewStore(slog.Default())
 	// 填满上限，所有条目 1 小时后才过期（eviction 时无过期条目）
-	for i := range maxShareEntries {
-		_, err := ss.Create(shareSpec{Filename: fmt.Sprintf("file%d.txt", i), TenantID: "anonymous", Rel: fmt.Sprintf("user/file%d.txt", i), Owner: "", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
+	for i := range share.MaxShareEntries {
+		_, err := ss.Create(share.Spec{Filename: fmt.Sprintf("file%d.txt", i), TenantID: "anonymous", Rel: fmt.Sprintf("user/file%d.txt", i), Owner: "", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 	// 无过期条目时，eviction 按创建时间淘汰最旧的 10%，应成功
-	link, err := ss.Create(shareSpec{Filename: "overflow.txt", TenantID: "anonymous", Rel: "user/overflow.txt", Owner: "", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
+	link, err := ss.Create(share.Spec{Filename: "overflow.txt", TenantID: "anonymous", Rel: "user/overflow.txt", Owner: "", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatalf("expected eviction to succeed via oldest-10%% strategy, got: %v", err)
 	}
@@ -268,8 +269,8 @@ func TestShare_CreateEvictionNoExpired(t *testing.T) {
 		t.Fatal("expected non-empty token")
 	}
 	count := ss.Len()
-	if count > maxShareEntries {
-		t.Errorf("expected at most %d entries after eviction, got %d", maxShareEntries, count)
+	if count > share.MaxShareEntries {
+		t.Errorf("expected at most %d entries after eviction, got %d", share.MaxShareEntries, count)
 	}
 }
 
@@ -524,7 +525,7 @@ func TestShare_MultiTenantOwnerScoped(t *testing.T) {
 	_ = url2
 	// 简化：直接在当前 server 的 store 上创建 —— 但无 store 引用，改用第二个 servern 实例的 store
 	// 这里仅验证 List 过滤逻辑：用同一 store，把 B 的 link 塞进去比较麻烦。
-	// 改用 ShareStore 纯单测覆盖 owner 过滤 + Revoke 越权（在下面 TestShareStore_OwnerScoped）。
+	// 改用 share.Store 纯单测覆盖 owner 过滤 + Revoke 越权（在下面 TestShareStore_OwnerScoped）。
 	_ = aShare
 
 	// A 列出自己的分享：应只有 1 条（share_a.txt）
@@ -555,16 +556,16 @@ func TestShare_MultiTenantOwnerScoped(t *testing.T) {
 	}
 }
 
-// TestShareStore_OwnerScoped 验证 ShareStore 的 owner 过滤与撤销越权防护（纯单测）。
+// TestShareStore_OwnerScoped 验证 share.Store 的 owner 过滤与撤销越权防护（纯单测）。
 func TestShareStore_OwnerScoped(t *testing.T) {
-	s := NewShareStore(testLogger())
+	s := share.NewStore(testLogger())
 	defer s.Stop()
 
-	l1, err := s.Create(shareSpec{Filename: "a.txt", TenantID: "ak-A", Rel: "user/a.txt", Owner: "ak-A", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
+	l1, err := s.Create(share.Spec{Filename: "a.txt", TenantID: "ak-A", Rel: "user/a.txt", Owner: "ak-A", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatal(err)
 	}
-	l2, err := s.Create(shareSpec{Filename: "b.txt", TenantID: "ak-B", Rel: "user/b.txt", Owner: "ak-B", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
+	l2, err := s.Create(share.Spec{Filename: "b.txt", TenantID: "ak-B", Rel: "user/b.txt", Owner: "ak-B", TTL: time.Hour, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +592,7 @@ func TestShareStore_OwnerScoped(t *testing.T) {
 // tenantFor(tenantID).Root().Open(rel) 解析并返回文件内容（不再依赖绝对路径）。
 func TestShare_NewLayoutResolvesUserRel(t *testing.T) {
 	env := newOwnerEnv(t)
-	env.h.shareStore = NewShareStore(testLogger())
+	env.h.shareStore = share.NewStore(testLogger())
 	t.Cleanup(env.h.shareStore.Stop)
 
 	// 在 alice 租户 user 桶写文件 dir/f.txt（新布局 <root>/alice/user/dir/f.txt）。
@@ -619,7 +620,7 @@ func TestShare_NewLayoutResolvesUserRel(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 creating share, got %d: %s", rr.Code, rr.Body.String())
 	}
-	var shareResp ShareCreateResponse
+	var shareResp share.CreateResponse
 	if err := json.NewDecoder(rr.Body).Decode(&shareResp); err != nil {
 		t.Fatal(err)
 	}

@@ -216,7 +216,7 @@ func (h *Handlers) setupUsageReport(cfg *Config, log *slog.Logger) {
 		if h.scheduler == nil {
 			h.scheduler = scheduler.NewScheduler(log.With("component", "scheduler"))
 		}
-		if regErr := h.scheduler.Register(Task{
+		if regErr := h.scheduler.Register(scheduler.Task{
 			Name:     "usage-flush",
 			Interval: cfg.Usage.Interval,
 			Run: func(context.Context) {
