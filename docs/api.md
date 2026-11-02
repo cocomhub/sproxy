@@ -403,6 +403,24 @@ JSON body 批量形态（body 存在且 `files` 非空时优先）：
 删除目录。`force=true` 时递归删除内容；否则仅允许空目录。
 同时清理 checksum store 中相同前缀的所有记录。
 
+### GET /api/du?path=&volume=
+
+按目录递归统计（目录数/文件数/字节）。
+
+- 认证：主 mux `reader`（SproxySig）/ 隧道内层 `tunnel`
+- query 参数：
+  - `path`：目录相对路径（缺省 = 当前卷 user 桶根；前导 `/` 被忽略，`/` 等同缺省）
+  - `volume`：卷名（可选；指定后只在该卷定位，未命中/无权限 → 404，不泄卷存在性）
+- 响应：
+  ```json
+  {"success": true, "data": {"path": "user/dir", "dirs": 2, "files": 7, "size": 1048576}}
+  ```
+- 错误：`400` 路径非法（含非法 filename）/ 租户不可用；`404` 路径或卷不存在（不泄卷存在性）；
+  `500` 遍历失败（错误体 `{"success": false, "message": "遍历目录失败"}`——**fail-closed**，
+  不把部分结果当完整结果）
+- 外部卷（无本地 Root）走同一可信链的外部 FS 递归统计，跳过 `.__` 元数据与
+  `checksums.json`/`LAYOUT_VERSION`；响应 `data.path` 归一为 `/` 开头的用户可见路径。
+
 ## 文件变更事件流（events，SSE）
 
 ### GET /api/events?owner=<owner>
@@ -584,12 +602,46 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 查询组详情（含子任务状态聚合）。
 
-### POST /api/cloud/groups/{id}/cancel / /resume / /archive
+### POST /api/cloud/groups/{id}/cancel
 
-取消 / 恢复 / 归档整个组。`/archive` 请求体同样支持 `target_volume`（统一转存到任意存储卷——含本地卷，
-可信卷写视图 + owner 前缀键 + 本地 staging 配额 + `per-(owner,rel)` 写锁；语义与单任务/批量
-归档一致）。转存成功后组记录 `archive_file` 为转存 URL，组删除时联动清理该外部产物
-（要求目标卷仍在服务端装配中；卷已移除时删除组会 fail-closed 报错，不静默遗留产物）。
+取消整个组（组内未终态子任务一并取消）。
+
+- 认证：主 mux `auth`（SproxySig）/ 隧道内层 `tunnel`；组按 owner 过滤，跨 owner 视为不存在
+- 响应：`{"status": "cancelled"}`
+- 错误：`404` 组不存在（跨 owner 同此，不区分）；其余失败 `400`（错误体 `{"error": "..."}`）
+
+### POST /api/cloud/groups/{id}/resume
+
+恢复/重新启动整个组：对组内每个子任务调用单任务恢复（续传语义），组内已被单独删除的子任务
+跳过（不因此报错），最后刷新组状态。
+
+- 认证：同 `/cancel`
+- 请求体（可选，≤1 KiB）：`{"force": true}`——`force` 透传给子任务恢复：`true` = 丢弃已有产物
+  （结果文件 + `.partial` + `.partial.etag`）重新下载；`false`/缺省 = 保留 `.partial` 由下载器续传
+- 响应：`{"status": "resumed"}`
+- 错误：`404` 组不存在；`400` 子任务恢复失败（多个错误合并返回）
+
+### POST /api/cloud/groups/{id}/archive
+
+把组内**已完成**子任务的产物打包为单个 tar.gz（未完成/已删除的子任务跳过并计入
+`skipped_tasks`）。
+
+- 认证：同 `/cancel`
+- 请求体（≤1 MiB，可选）：`{archive_name?, target_volume?, target_path?, encrypt?, cipher?, compression?}`
+  - `archive_name`：归档名（默认 `<groupID>-<unix秒>.tar.gz`；取 basename，缺 `.tar.gz` 自动补齐；
+    空/`.`/`..`/超 255 字节 → 400）
+  - `target_volume`：非空 = 打包后**统一转存**到该卷（任意存储卷，含本地卷；写视图 + owner 前缀键 +
+    本地 staging 配额 + `per-(owner,rel)` 写锁）；空 = 落租户 archive 桶
+  - `target_path`：目标卷 **user 桶内**相对路径（空 = `archive/<archive_name>`；以 `/` 结尾 = 目录）
+  - `encrypt` / `cipher`（默认 `aes-256-gcm`）/ `compression`（`gzip` 默认 / `zstd` / `brotli`）
+    仅与 `target_volume` 同用，单独指定 → 400（防静默忽略）
+- 响应：`{"success": true, "file": "<归档名或转存 URL>", "size": N, "checksum": "...",
+  "task_count": N, "skipped_count": N, "skipped_tasks": ["<taskID>"]}`
+- 错误：`404` 组不存在；`400` 无可归档文件 / 请求体或归档名非法 / 选项误用 /
+  超过 `cloud_archive_max_bytes`；`403` 目标卷 ACL 拒绝；`409` 同名归档已存在；`507` 配额/容量不足；
+  `500` 打包/写盘失败
+- 转存成功后组记录 `archive_file`；组删除时联动清理该产物（要求目标卷仍在服务端装配中；卷已移除时
+  删除组会 fail-closed 报错，不静默遗留产物）。
 
 ### DELETE /api/cloud/groups/{id}
 
@@ -892,7 +944,7 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 存储位置：`<storage_root>/<owner>/meta/volume/<name>.json`（原子写，重启扫描恢复）。
 寻址：同步任务 `remote.volume` 填用户卷名，任务 owner 必须匹配卷 owner（跨用户 404 防枚举）。
 
-### `POST /api/volumes/user`
+### POST /api/volumes/user
 
 创建用户卷。请求体（JSON）：
 
@@ -917,7 +969,7 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 认证：SproxySig / api_keys（owner 从请求派生）；重名 → 错误
 - 响应：`{"success": true}`
 
-### `GET /api/volumes/user`
+### GET /api/volumes/user
 
 列出当前 owner 的用户自有卷（按认证过滤，只返回自己的）。
 
@@ -925,7 +977,7 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 {"volumes": [{"name": "my-disk-1", "type": "baidupcs", "capacity": 0, "extra": {...}}]}
 ```
 
-### `DELETE /api/volumes/user?name=<name>`
+### DELETE /api/volumes/user?name=<name>
 
 删除用户卷。
 
@@ -1102,6 +1154,202 @@ query 参数：
 
 响应：`200` + `application/x-ndjson` 原始字节，带 `X-Audit-Segment-Size` 与
 `Content-Range: bytes <off>-<end>-1/<size>`（便于客户端续读）。归档未启用 ⇒ `404`。
+
+## AI 洞察与配额（ai）
+
+AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` /
+`notify.ai_privacy.enabled`），未启用时返回 400 并给出明确文案，不静默降级。
+
+**认证差异（重要）**：
+
+- `POST /api/ai/summarize` / `POST /api/ai/tag`：**仅隧道内层**（localMux `tunnel`），主 mux
+  **未注册**——必须经 `POST /tunnel` 访问（owner 由隧道身份注入）。
+- `GET /api/ai/quota` / `GET /api/ai/privacy` / `POST /api/ai/privacy/purge`：主 mux `public`
+  裸注册（无 SproxySig；handler 内按请求身份**自查询/自删除**，看不到他人数据）+ 隧道内层 `tunnel`。
+
+### POST /api/ai/summarize?filename=&volume=
+
+读取文件首 4KiB 抽样后调用 LLM 生成摘要；结果按 `(owner, 卷:路径, mtime)` 缓存（mtime 未变即命中）。
+
+- query 参数：`filename`（必填，经 `ValidateFilePath`）；`volume`（可选，外部/加密卷定位）
+- 响应：`{"summary": "..."}`（最多 2000 个 rune，超出截断）
+- 错误：`400` AI 洞察未启用 / filename 必填 / 路径非法 / **非文本文件**（抽样为空）；
+  `404` 文件不存在；`429` AI 配额超限（`notify.ai_quota.enabled`，审计 `result=quota_exceeded`）；
+  `502` AI 网关失败
+
+### POST /api/ai/tag?filename=&volume=
+
+同上（同一抽样/缓存/配额门），响应：`{"tags": ["..."]}`——按逗号/分号/换行切分并去重，
+每个标签截断到 20 个 rune，最多 10 个。
+
+### GET /api/ai/quota?owner=
+
+返回 AI 调用配额用量（per-owner **进程内内存**计数：重启清零；按本地日跨天惰性重置）。
+
+- query 参数：`owner`（可选）——仅在请求身份非空时生效；与身份不同且身份不是 `admin` → `403`
+- 响应：
+  ```json
+  {"owner": "alice", "usage": {"day": "2026-11-03", "calls": 3, "tokens": 1200,
+    "limit": {"DailyCalls": 100, "DailyTokens": 100000}}}
+  ```
+  （`limit` 内部字段无 JSON tag ⇒ 键名为 `DailyCalls` / `DailyTokens`；0 = 不限）
+- 错误：`400` AI 配额未启用；`403` 无权查看他人配额
+
+### GET /api/ai/privacy
+
+列出当前 owner 的 AI 派生数据（向量/摘要/标签）可见性清单。owner 取请求身份（未认证归一为
+`anonymous`）；AI 派生数据**只允许落 at-rest 加密卷**（fail-closed）。
+
+- 响应：
+  ```json
+  {"enabled": true, "key_source": "volume-master-key",
+   "artifacts": [{"kind": "vectors", "rel": "dir/a.txt", "bytes": 128, "ts": "2026-11-03T12:00:00Z"}]}
+  ```
+  `kind` ∈ `vectors` / `insight` / `tags`；`bytes` 为密文大小
+- 错误：`400` AI 隐私未启用；`500` 存储不可用
+
+### POST /api/ai/privacy/purge
+
+删除当前 owner 的**全部** AI 派生数据（用户行使删除权），记审计 `ai.privacy_purge`。
+
+- 响应：`{"deleted": N}`
+- 错误：`400` AI 隐私未启用；`500` 存储不可用 / 清除失败
+
+## 通知中心（notify）
+
+需配置 `notify` 段（未启用时下列端点返回 400，纯文本 `notify 未启用`）。
+
+### GET /api/notify/history?limit=N
+
+返回通知历史（最近在前；中心内部为有界 ring，最多保留 200 条）。
+
+- 认证：主 mux `auth`（SproxySig）/ 隧道内层 `tunnel`
+- query 参数：`limit`（默认 100；仅接受正整数，非法/非正回落默认）
+- 响应：`{"entries": [...]}`；条目字段**无 JSON tag**，键为 Go 字段名：
+  `TS`（RFC3339）、`Action`、`Object`、`Channel`、`Status`（`sent`/`debounced`/`failed`/`skipped`）、`Detail`
+
+### POST /api/notify/test?channel=
+
+触发通知渠道自检（会真实外发一条 `[sproxy] 通知渠道自检` 消息），记审计 `notify_test`。
+
+- 认证：同 `/history`
+- query 参数：`channel`（可选；缺省 = 全部已注册渠道；不存在的渠道 → `404`）
+- 响应：`{"results": {"<channel>": "ok"}}`；发送失败为 `"failed: <error>"`（逐渠道独立，不整体失败）
+
+### GET /api/notify/feed?format=rss|atom&token=
+
+通知历史 RSS/Atom 订阅源。
+
+- 认证：主 mux `public` 裸注册（阅读器抓取不带业务凭据）/ 隧道内层 `tunnel`
+- query 参数：`format`（默认 `rss`；仅 `rss`/`atom`，非法 → `400`）；`token`（见下）
+- **token 门禁**：`notify.feed_token` 非空时必须携带 `?token=<t>` 或
+  `Authorization: Bearer <t>`（常量时间比较），否则 `401` 空 body（不区分未提供/错误，防枚举）；
+  空 = 公开（默认零回归）
+- 条目上限：`notify.feed_max`（默认 20，上限 50）
+- 响应：`200` + `Content-Type: application/rss+xml; charset=utf-8`（或
+  `application/atom+xml; charset=utf-8`）；渲染失败 `500`
+
+## 运行时配置（config）
+
+### GET /api/config
+
+返回当前**脱敏**运行时配置（认证：主 mux `auth` / 隧道内层 `tunnel`）。
+
+```json
+{
+  "log_level": "info", "log_format": "text", "access_keys_set": true,
+  "rate_limit_requests": 100, "rate_limit_window": "1m0s",
+  "bandwidth_enabled": false, "bandwidth_per_owner_bps": 0,
+  "max_storage_bytes": 0, "max_upload_bytes": 1073741824,
+  "chunk_size": 4194304, "upload_session_ttl": "24h0m0s",
+  "versioning_enabled": false, "versioning_max_versions": 0,
+  "cloud_max_concurrent": 3, "cloud_transfer_concurrency": 3,
+  "cloud_sync_threshold": 104857600, "hub_enabled": false,
+  "tls_enabled": true, "addr": ":18083", "storage_root": "/var/lib/sproxy",
+  "web_tunnel": true
+}
+```
+
+`access_keys_set` = 凭据 Ring 是否非空；`cloud_transfer_concurrency` 是**实际生效值**
+（配置 <1 时按并发上限归一）。不返回任何凭据/密钥。
+
+### PUT /api/config
+
+热更新运行时配置（认证：主 mux `auth` / 隧道内层 `tunnel`；请求体 ≤1 KiB）。只更新请求体中出现的
+字段，未指定字段保持不变。
+
+```json
+{"log_level": "debug", "log_format": "json", "rate_limit_requests": 200,
+ "rate_limit_window": "30s", "max_storage_bytes": 10737418240,
+ "max_upload_bytes": 209715200, "web_tunnel": true}
+```
+
+- 校验：`log_level` ∈ debug/info/warn/error；`log_format` ∈ text/json；`rate_limit_requests`
+  > 0；`rate_limit_window` 为合法 duration 且 > 0；`max_storage_bytes`/`max_upload_bytes` ≥ 0
+- 空请求体 `{}`（无任何字段）→ `400`；任一字段非法 → `400`（`{"success": false, "message": "..."}`）
+- 响应：`{"success": true, "changed": true}`
+- 生效范围：日志级别/格式立即重建 logger；限流参数与 `max_storage_bytes` 热更新到现有实例；
+  **限流中间件在启动时未挂载则 PUT 不能开启**（无 handler 链可挂，只更新配置值）
+- 审计：`config_update`（成功 success；校验失败/空请求记 `denied` 并带原因）
+
+## 集群节点（cluster）
+
+需配置 `cluster.enabled`（未启用 → `400` `{"error": "集群未启用"}`）。
+
+### GET /api/cluster/nodes
+
+列出集群节点注册表。
+
+- 认证：主 mux `public` 裸注册（无 SproxySig）/ 隧道内层 `tunnel`
+- 响应：
+  ```json
+  {"nodes": {"node-1": {"role": "master", "status": "active",
+    "joined_at": 1767225600000000000, "last_seen": 1767225600000000000}}}
+  ```
+  `status` ∈ `joining`/`active`/`draining`/`leaving`；`joined_at`/`last_seen` 为 Unix 纳秒
+- 错误：`400` 集群未启用（注册表未装配）
+
+### GET /api/cluster/self
+
+返回本节点身份（来自 `cluster.node_id` / `cluster.role` 配置）。
+
+- 认证：主 mux `public` / 隧道内层 `tunnel`
+- 响应：`{"node_id": "node-1", "role": "master"}`
+- 错误：`400` 集群未启用
+
+## 一致性巡检与台账（verify / checksums）
+
+### POST /api/verify
+
+按 checksum 台账巡检文件一致性（读文件重算并与台账比对；不一致的文件被隔离）。
+
+- 认证：主 mux `auth`（SproxySig）/ 隧道内层 `tunnel`
+- 请求体（≤4096 字节，JSON）：`{"volume": "", "force": true}`
+  - `volume` 非空 = 只核该卷视图；空 = 全部视图
+  - `force` 保留给客户端语义扩展（当前实现不改变行为：巡检重叠时直接返回 `concurrent`）
+  - owner 由请求身份派生；**owner 为空（管理员/未认证）⇒ 全租户巡检**
+- 响应：`200` + `Report`
+  ```json
+  {"total": 10, "ok": 8, "mismatched": [{"path": "user/a.txt", "expected": "...", "actual": "..."}],
+   "missing": ["user/b.txt"], "errors": ["..."], "skipped": 1, "concurrent": false}
+  ```
+  `ok` = 与台账一致的**已核对文件数**；`mismatched` = checksum 不符（已隔离）；`missing` = 台账有但文件缺失；
+  `errors` = 读/隔离失败（与不符区分）；`skipped` = 台账为空/损坏被跳过的租户数；
+  `concurrent=true` = 与上一次巡检重叠被跳过（提示重跑，不堆叠）
+- 错误：`400` 请求体解析失败 / 请求体哈希校验失败
+- 副作用：审计 `verify`（detail 汇总计数）；`mismatched+missing > 0` 时联动告警引擎
+  （`source=checksum_mismatch`）
+
+### POST /api/checksums/rebuild?owner=
+
+从对象 meta sidecar 回填 checksum 台账（运维修复面：台账「存在但部分缺失」不会触发读自愈，需显式重建）。
+
+- 认证：主 mux `auth` / 隧道内层 `tunnel`
+- query 参数：`owner`（可选；缺省 = 请求身份，未认证归一为 `anonymous`）；指定**他人** owner 需
+  `admin` 角色，否则 `403`
+- 响应：`{"success": true, "owner": "alice", "entries": 42}`（`entries` = 回填条数）
+- 错误：`403` 非 admin 指定他人 owner；`503` 台账存储不可用；`500` 其它重建失败
+- 审计：`checksum_rebuild`（detail `entries=N`）
 
 ## 错误码附录
 
