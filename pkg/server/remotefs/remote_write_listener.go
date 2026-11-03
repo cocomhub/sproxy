@@ -17,7 +17,6 @@ import (
 	"log/slog"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -103,53 +102,14 @@ func StartWriteListener(ctx context.Context, d Deps) (*WriteListener, error) {
 
 // acceptLoop 接受连接并为每连接建 mux + Tunnel（与只读面同构；路由表换写 handler）。
 func (l *WriteListener) acceptLoop(ctx context.Context, id *tunnel.Identity, staticKey []byte, pins []string) {
-	defer close(l.acceptDone)
-	// ctx 取消 → 关闭 listener（解除 Accept 阻塞）。acceptLoop 因其它原因退出时由
-	// defer 关闭 stop 通道回收本 goroutine，不泄漏。
-	stopCtxWatch := make(chan struct{})
-	defer close(stopCtxWatch)
-	go watchAcceptCtx(ctx, l.ln, stopCtxWatch)
-
-	backoff := time.Duration(0)
-	for {
-		conn, err := l.ln.Accept()
-		if err != nil {
-			var stop bool
-			if backoff, stop = l.handleAcceptError(ctx, err, backoff); stop {
-				return
-			}
-			continue
-		}
-		backoff = 0
-		if ctx.Err() != nil {
-			// 竞态窗口：ctx 已取消但 watcher 尚未 Close 时 accept 到的连接——丢弃并退出。
-			_ = conn.Close()
-			return
-		}
-		l.wg.Add(1)
-		go l.serveWriteConn(ctx, conn, id, staticKey, pins)
-	}
+	// 循环骨架在 accept_loop.go（与只读面共用一份；仅 site/serve 不同）。
+	r := &acceptRunner{ln: l.ln, logger: l.logger, site: "remote_write", wg: &l.wg, serve: l.serveWriteConn, done: l.acceptDone}
+	r.run(ctx, id, staticKey, pins)
 }
 
 // handleAcceptError 处理 accept 错误：按「预期停机 / 瞬时可退避 / 致命」分类。
 // 返回 (backoff, stop)：stop=true 表示本次 accept 循环应退出（错误已处理）。
-func (l *WriteListener) handleAcceptError(ctx context.Context, err error, backoff time.Duration) (time.Duration, bool) {
-	if ctx.Err() != nil {
-		return backoff, true // 预期停机：ctx 已/将关闭 listener
-	}
-	if retryableAcceptError(err) {
-		backoff = nextAcceptBackoff(backoff)
-		l.logger.Warn("remote_write accept 瞬时错误，退避重试", "error", err, "backoff", backoff)
-		if !sleepCtx(ctx, backoff) {
-			return backoff, true
-		}
-		return backoff, false
-	}
-	// 致命错误：先关闭 listener 再退出，避免「仍绑定但无人 accept」。
-	l.logger.Warn("remote_write accept 退出", "error", err)
-	_ = l.ln.Close()
-	return backoff, true
-}
+// handleAcceptError 已上提到 accept_loop.go 的 acceptRunner.handleError（两面共用）。
 
 // serveWriteConn 为单条已接受连接建 mux + Tunnel（写路由表）并 serve。
 func (l *WriteListener) serveWriteConn(ctx context.Context, c net.Conn, id *tunnel.Identity, staticKey []byte, pins []string) {
