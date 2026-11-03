@@ -670,8 +670,8 @@ func isFileGroupedRoute(path string) bool {
 		routeVolumesBase, "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/refresh", "/api/volumes/user",
 		"/api/volumes/export", "/api/volumes/import",
 		"/api/backends",
-		"/api/backends/{type}/presign",
-		"/api/backends/{type}/presign/complete",
+		// 注：`/api/backends/{type}/presign*` 是**模式串**，运行时 path 是具体值
+		// （/api/backends/local/presign），故由下方前缀规则判定，此处不列字面量。
 		"/api/shares",
 		// secret 卷管理（/api/secrets 专用端点：创建随机/import、列表、导出、删除）。
 		// 主 mux 面挂 fileRoute/fileRouteRead——须与 isReadOnlyFileRoute 同源补成员
@@ -689,6 +689,14 @@ func isFileGroupedRoute(path string) bool {
 	// 需按前缀判定）：/api/shares/{token}（撤销也属文件组）、/api/secrets/{name}
 	// （导出/删除）。精确列表 /api/secrets 已在上方案例命中；此处补带 name 子路径。
 	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {
+		return true
+	}
+	// 带 `{type}` 通配的 presign 路由：**表里写的是模式串，运行时看到的是具体路径**
+	// （如 /api/backends/local/presign）。此前的字面量 case 永远匹配不上 ⇒ fileRoute
+	// 的接线自检对每次真实请求返回 500（后端直传完全不可用）。由装配面回归测试
+	// routes_file_face_test.go 抓到。
+	if strings.HasPrefix(path, "/api/backends/") &&
+		(strings.HasSuffix(path, "/presign") || strings.HasSuffix(path, "/presign/complete")) {
 		return true
 	}
 	return false

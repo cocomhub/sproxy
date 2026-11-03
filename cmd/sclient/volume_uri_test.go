@@ -42,7 +42,8 @@ func TestSplitVolumeURI(t *testing.T) {
 		{"vault:", "vault", "/", true, "卷根（不带斜杠）"},
 		{"vault:dir/f.txt", "", "vault:dir/f.txt", false, "缺 `:/`（不得误判）"},
 		{"https://example.com/a", "", "https://example.com/a", false, "URL 不得误判"},
-		{"C:\\Users\\x", "", "C:\\Users\\x", false, "Windows 盘符不得误判"},
+		{"C:\\Users\\x", "", "C:\\Users\\x", false, "Windows 盘符不得误判（反斜杠）"},
+		{"C:/Users/x", "", "C:/Users/x", false, "Windows 盘符不得误判（正斜杠——实测 upload 用 H 盘路径报『上传参数不足』）"},
 		{"plain.txt", "", "plain.txt", false, "无前缀"},
 		{":/a", "", ":/a", false, "空卷名"},
 		{"bad name:/a", "", "bad name:/a", false, "卷名含空格"},
@@ -179,5 +180,42 @@ func TestApplyMvVolumeContext_StateVolumeAppliesToBothSides(t *testing.T) {
 	}
 	if tv, _ := volumectx.Target(cmd2.Context()); tv != "other" {
 		t.Fatalf("--to-volume=%q want other", tv)
+	}
+}
+
+// TestResolveUploadRemotePath_AbsoluteLocalPath 锁「绝对本地路径不得把本地根写进远端」。
+//
+// 实测（Windows 真实 CLI）：`upload D:/work/a.txt` 无目标 URI 时远端路径变成
+// `<cwd>/D:/work/a.txt` —— 服务端以「文件名包含非法字符 ':'」400 拒绝，
+// 等于 Windows 上按绝对路径上传完全不可用。
+// 语义对齐同函数的目标 URI 分支（该分支已写明「绝对本地路径：只保留末段」）。
+func TestResolveUploadRemotePath_AbsoluteLocalPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		cwd     string
+		file    string
+		windows bool
+		target  string
+		want    string
+		comment string
+	}{
+		{"windows-drive-no-target", "subdir", "D:/work/a.txt", true, "", "subdir/a.txt", "盘符路径只保留末段并拼 cwd"},
+		{"windows-drive-target", "subdir", "D:/work/a.txt", true, "/up", "up/a.txt", "目标 URI 目录 + 末段"},
+		{"posix-abs-no-target", "subdir", "/work/a.txt", false, "", "subdir/a.txt", "POSIX 绝对路径同理"},
+		{"relative-no-target", "subdir", "x/a.txt", true, "", "subdir/x/a.txt", "相对路径保留目录结构"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			st := &state.State{CurrentDir: c.cwd}
+			got, err := resolveUploadRemotePathWith(st, c.file, c.target, c.windows)
+			if err != nil {
+				t.Fatalf("resolveUploadRemotePath(%q,%q): %v", c.file, c.target, err)
+			}
+			if got != c.want {
+				t.Fatalf("远端路径 = %q, want %q — %s", got, c.want, c.comment)
+			}
+		})
 	}
 }

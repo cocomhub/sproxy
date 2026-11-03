@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
@@ -29,6 +30,9 @@ import (
 // 2026-10-13），交给既有 ResolveRemotePath 时**绕过当前工作目录**；否则 `list vault:/`
 // 会被当成「当前目录相对」而不是卷根（实测踩过）。
 func splitVolumeURI(arg string) (vol, path string, ok bool) {
+	if isWindowsDrivePath(arg, runtime.GOOS == "windows") {
+		return "", arg, false
+	}
 	idx := strings.Index(arg, ":")
 	if idx <= 0 {
 		return "", arg, false
@@ -46,6 +50,26 @@ func splitVolumeURI(arg string) (vol, path string, ok bool) {
 		return "", arg, false // 必须是 `:/`（避免误判 `a:b` / `C:\x`）
 	}
 	return vol, rest, true
+}
+
+// isWindowsDrivePath 判定 arg 是否形如 Windows 盘符路径（`C:/…` 或 `C:\…`）。
+//
+// 为什么必须排除：盘符是「单字母 + 冒号」，与卷 URI 的 `<卷名>:/<路径>` **同形**。
+// 实测（Windows）：`sclient upload D:/work/a.txt` 被解析成「卷 D 的 /work/a.txt」
+// ⇒ 参数被吃光 ⇒ 报「上传参数不足」，等于 Windows 上绝对路径上传完全不可用。
+// 反斜杠形式（`C:\x`）本来就因「必须 `:/`」被排除；正斜杠形式（`C:/x`，
+// git-bash / Go 工具链 / 本文档示例常用）此前漏掉。
+//
+// 只在 Windows 上排除盘符：Linux/macOS 上 `D:/x` 不是绝对路径，短卷名合法。
+func isWindowsDrivePath(arg string, windows bool) bool {
+	if !windows || len(arg) < 3 {
+		return false
+	}
+	c := arg[0]
+	if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
+		return false
+	}
+	return arg[1] == ':' && (arg[2] == '/' || arg[2] == '\\')
 }
 
 // validVolumeName 校验卷名（与存储层命名约束一致的保守子集：非空、无空白/分隔符/冒号/通配符）。
