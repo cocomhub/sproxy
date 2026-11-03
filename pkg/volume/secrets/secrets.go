@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"sort"
 	"strings"
@@ -183,6 +184,11 @@ func (m *Manager) Read(ctx context.Context, name string) ([]byte, error) {
 	}
 	rc, err := m.fs.OpenRead(ctx, name)
 	if err != nil {
+		// 缺失必须回哨兵错误：HTTP 层据 errors.Is(ErrNotFound) 分 404/500，
+		// 包一层 FS 错误会让 errors.Is 永不成立 ⇒ 读不存在的 secret 报 500（实测）。
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %q", ErrNotFound, name)
+		}
 		return nil, fmt.Errorf("secrets: 打开 %q 失败: %w", name, err)
 	}
 	defer rc.Close()
@@ -234,6 +240,10 @@ func (m *Manager) Remove(ctx context.Context, name string) error {
 		return fmt.Errorf("%w %q", ErrInvalidSecretName, name)
 	}
 	if err := m.fs.Delete(ctx, name); err != nil {
+		// 与 Read 同源：缺失 → ErrNotFound（HTTP 层 404），其余 → 500。
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %q", ErrNotFound, name)
+		}
 		return fmt.Errorf("secrets: 删除 %q 失败: %w", name, err)
 	}
 	return nil
