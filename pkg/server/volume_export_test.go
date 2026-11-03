@@ -211,6 +211,24 @@ func listDiskFiles(t *testing.T, root string) map[string]bool {
 
 // TestVolumeExport_StreamsTar 导出流可解析为合法 tar 且文件内容与源一致（含子目录）。
 // 变异：非流式/漏文件 → 红。
+// TestVolumeExport_UnknownVolumeIsForbidden 锁「客户端错误不得映射为 500」。
+//
+// 背景（E2E 实测）：`GET /api/volumes/export?volume=<不存在的卷>` 曾返回
+// 500「读取卷文件失败」——枚举错误一律被当成服务端故障。同仓其它入口
+// （backup_api / files_service 路由解析）对同一语义返回 **403**，此处对齐。
+//
+// 变异：把 403 改回 500 ⇒ 红。
+func TestVolumeExport_UnknownVolumeIsForbidden(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	status, _ := fetchVolumeExport(t, url, "no-such-volume")
+	if status != http.StatusForbidden {
+		t.Fatalf("export 未知卷 status = %d, want 403（客户端错误不得 500）", status)
+	}
+}
+
 func TestVolumeExport_StreamsTar(t *testing.T) {
 	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
