@@ -146,6 +146,7 @@ var routeTableFiles = []string{
 	"pkg/server/routes_sync.go",
 	"pkg/server/routes_trash.go",
 	"pkg/server/routes_ops.go",
+	"pkg/server/routes_credentials.go",
 	"pkg/server/cloudtasks/routes.go",
 	"pkg/server/share/routes.go",
 	"pkg/server/notify/routes.go",
@@ -157,7 +158,7 @@ var routeTableFiles = []string{
 var routeTablePrefixRe = regexp.MustCompile(`RoutePrefix\s*(?::=|=)\s*"([^"]*)"`)
 
 // routeTableEntryRe 匹配 `{Method: "GET", Path: "/x", Server: router.ClassAuth, Local: router.ClassTunnel, ...}`。
-var routeTableEntryRe = regexp.MustCompile(`\{Method:\s*"([A-Z]+)",\s*Path:\s*"([^"]*)",\s*Server:\s*router\.(\w+),\s*Local:\s*router\.(\w+)`)
+var routeTableEntryRe = regexp.MustCompile(`\{Method:\s*"([A-Z]+)",\s*Path:\s*"([^"]*)",\s*Server:\s*router\.(\w+),\s*Local:\s*router\.(\w+)(?:,\s*Guard:\s*\w+)?`)
 
 // tableRoute 是数据表里的一条路由：来源文件 + 声明分类（class 已归一化为 TSV 口径）。
 type tableRoute struct {

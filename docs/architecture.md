@@ -896,8 +896,10 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
 - `router.Route[H]` + `router.Register`：子包用 `RoutePrefix` 常量 + `Routes()` 字面量表声明自己的
   URL 子路径与**两端分类**，装配层一次注册到 srvMux/localMux（双 mux 不再各写一遍）；
   「分类 → 包装器」映射留在 `h.routeWrapper`（装配层唯一决定处，未登记分类 panic）。
-- 已下放：`cloudtasks`（16 条，试点 #1002）、`share`（3 条）、`notify`（3 条）、`ai`（5 条）、
-  `verify`（1 条）。`GET /s/{token}` 是独立前缀的公网分发面，不属分享管理组，留在装配层注册。
+- 已下放：`cloudtasks`（16 条）、`share`（3 条）、`notify`（3 条）、`ai`（5 条）、`verify`（1 条）；
+  装配层自持表：文件域（45）、同步（9）、回收站（3）、运维管理面（15）、凭据（10）。
+- `Guard` 维度（2026-11-03）：分类表达基础鉴权，Guard 表达同一分类内的额外入口控制
+  （公开凭据入口各自的限流器 + 主 mux IP 门）；未知 Guard / 未初始化限流器在注册期 panic。`GET /s/{token}` 是独立前缀的公网分发面，不属分享管理组，留在装配层注册。
 - 门禁 **R38** 扩展解析 `pkg/server/*/routes.go` 与装配层 `pkg/server/routes_{files,sync,trash,ops}.go`
   的 `RoutePrefix` + 字面量表（`routeTableFiles`），迁移后仍与 `route_classes.tsv` 双向比对，
   deny-by-default 不变；**表声明分类与 TSV 分类逐条相等**（改分类必须同时改两处）。

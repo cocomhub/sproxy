@@ -32,7 +32,7 @@ func TestRegister_BothMuxesWithDistinctWrappers(t *testing.T) {
 	}
 
 	var srvWrapped, localWrapped int
-	wrap := func(c Class) func(http.HandlerFunc) http.HandlerFunc {
+	wrap := func(c Class, _ string) func(http.HandlerFunc) http.HandlerFunc {
 		return func(h http.HandlerFunc) http.HandlerFunc {
 			switch c {
 			case ClassAuth:

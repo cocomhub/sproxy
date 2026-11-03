@@ -75,7 +75,7 @@ func TestFileDomainRoutes_ClassMatchesWrapper(t *testing.T) {
 	}
 	// routeWrapper 对两类都必须给出非 nil 包装（nil = 裸注册 = 无鉴权，对文件面是事故）。
 	for _, class := range []router.Class{router.ClassUser, router.ClassReader} {
-		if fn := h.routeWrapper(class); fn == nil {
+		if fn := h.routeWrapper(class, ""); fn == nil {
 			t.Fatalf("分类 %s 未定义包装策略（文件面不允许裸注册）", class)
 		}
 	}

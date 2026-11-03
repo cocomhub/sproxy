@@ -362,34 +362,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		Privacy:      h.handleAIPrivacy,
 		PrivacyPurge: h.handleAIPrivacyPurge,
 	}), bindHandler, h.routeWrapper)
-	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
-	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
-	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
-	// 处理，管理可见性面仍以主 mux（authMiddleware 保护）为准。
-	// 公开注册端点 localMux 侧：浏览器隧道模式下凭据优先页需隧道可达（M1）。
-	// 与主 mux 共用 registerPublic handler（同一 registerLimiter 实例，独立于
-	// 文件传输限流）。
-	localMux.Handle("POST /api/credentials/register", h.registerLimiter.Middleware(http.HandlerFunc(h.registerCredentialHandler)))
-	// nonce 端点 localMux 侧：登录前置步骤须在隧道模式下可达（M1）；与主 mux 共用
-	// 同一 totpLimiter 实例（login+nonce 共配额，任务⑨ login 挂同实例）。
-	localMux.Handle("POST /api/credentials/nonce", h.totpLimiter.Middleware(http.HandlerFunc(h.nonceHandler)))
-	// 登录端点 localMux 侧：TOTP 登录须在浏览器隧道模式下可达（M1）；与主 mux
-	// 共用同一 loginLimiter 实例。
-	localMux.Handle("POST /api/credentials/login", h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler)))
-	// 外部认证（OIDC/LDAP，roadmap 11.7-⑥）登录面：localMux 侧裸注册（浏览器隧道
-	// 模式下登录页可达，与凭据登录端点同模式）。未配置（externalAuthRoutes 空）→
-	// 零回归（无外部端点）。
-	for _, extRoute := range h.externalAuthRoutes {
-		localMux.Handle(extRoute.Method+" "+extRoute.Pattern, extRoute.Handler)
-	}
-	localMux.HandleFunc("GET /api/credentials", h.akListHandler)
-	localMux.HandleFunc("POST /api/credentials", h.akAddHandler)
-	localMux.HandleFunc("DELETE /api/credentials/{ak}", h.akDeleteHandler)
-	localMux.HandleFunc("POST /api/credentials/{ak}/renew", h.renewCredentialHandler)
-	localMux.HandleFunc("GET /api/credentials/{ak}/sk", h.skListHandler)
-	localMux.HandleFunc("DELETE /api/credentials/{ak}/sk/{skID}", h.skDeleteHandler)
-	localMux.HandleFunc("POST /api/credentials/{ak}/sk/{skID}/expire", h.skExpireHandler)
-
 	// 分块上传/下载路由（本地）
 
 	// 隧道内层中间件链（gzip + 速率限制 + CORS + localMuxGate 角色门禁 +
@@ -488,59 +460,35 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 面，直连必须验签；localMux 面裸注册见上方注释）。
 	// 冷段区间读（同上；主面经 authMiddleware，管理员门在 handler 内）。
 
-	// 公开注册端点（4B DEC-F）：唯一用户入口，不挂 authMiddleware（主 mux +
-	// localMux 双注册，仿 /healthz 层）——仅经独立限频 registerLimiter 收口。
-	// register 激活前系统处于零凭据态，无凭据请求必须可直达（远程首注册仅经回环
-	// 门禁拒绝，见 registerCredentialHandler）。
+	// 凭据 API：单一声明点见 routes_credentials.go（10 条 × 2 个 mux → 一份表）。
 	//
-	// registerLimiter 必须在 localMux 装配之前、localMux 侧复用同一限频器实例创建。
+	// 三条公开入口（register/nonce/login）各自独立限流器（login 与 nonce 隔离配额：
+	// nonce 是预注册前的低频步骤，登录是高频爆破面）。**限流器必须在注册之前创建**——
+	// 此前 localMux 侧先注册、后初始化，方法值捕获 nil 指针 ⇒ 隧道模式下请求 panic
+	// 断连（客户端只见 EOF）。guardWrapper 对未初始化限流器 fail-closed panic，把顺序
+	// 错误暴露在启动期而不是运行期。
 	h.registerLimiter = ratelimit.NewRateLimiter(5, time.Minute, log.With("component", "register_limiter"))
-	registerPublic := h.registerLimiter.Middleware(http.HandlerFunc(h.registerCredentialHandler))
-	// 公开凭据端点（register/nonce/login）同挂 IP 门（设计文档 ip-whitelist §4）：
-	// 白名单部署要求所有入口一致——公开端点不经 authMiddleware，单独包 ipGate。
-	srvMux.Handle("POST /api/credentials/register", h.ipGate(registerPublic))
-
-	// nonce 端点（task 8）：公开端点 + 独立限频 totpLimiter（login+nonce 共用，
-	// D6/M1），不包 authMiddleware。totpLimiter 须在任何 localMux 装配之前创建（与
-	// registerLimiter 同法，localMux 侧复用同一实例）。
-	// 语义：服务器生成 16B 随机 nonce（sproxysig.NewNonce()，现有唯一实现）入
-	// totpNoncePool（TTL 60s、单次使用、绑定来源 IP、池上限 4096、惰性清理，D5），
-	// 供任务⑨ TOTP 登录作为 wrap-key context 的一次性子密钥来源。
 	totpPerMin := 10
 	if opts.TotpRateLimit > 0 {
 		totpPerMin = opts.TotpRateLimit
 	}
 	h.totpLimiter = ratelimit.NewRateLimiter(totpPerMin, time.Minute, log.With("component", "totp_limiter"))
-	srvMux.Handle("POST /api/credentials/nonce", h.ipGate(h.totpLimiter.Middleware(http.HandlerFunc(h.nonceHandler))))
-
-	// TOTP 登录端点（task 9）：公开端点 + 独立限频 loginLimiter（与 totpLimiter
-	// 隔离配额——nonce 签发是预注册前的低频步骤，登录是高频爆破面，共用一个配额
-	// 会让 nonce 签发挤掉登录防御预算），不包 authMiddleware。loginLimiter 须在
-	// localMux 装配之前创建（与 registerLimiter/totpLimiter 同法，localMux 侧复用
-	// 同一实例）。
 	loginPerMin := 10
 	if opts.LoginRateLimit > 0 {
 		loginPerMin = opts.LoginRateLimit
 	}
 	h.loginLimiter = ratelimit.NewRateLimiter(loginPerMin, time.Minute, log.With("component", "login_limiter"))
-	srvMux.Handle("POST /api/credentials/login", h.ipGate(h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler))))
-
-	// 外部认证（OIDC/LDAP，roadmap 11.7-⑥）登录面：主 mux 公开注册（不挂
-	// authMiddleware——登录是免认证入口；经 ipGate 一致收口公开端点）。
-	// 未配置（externalAuthRoutes 空）→ 零回归（无外部端点）。
+	router.Register(srvMux, localMux, credentialRoutePrefix, credentialRoutes(),
+		func(fn func(*Handlers, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) { fn(h, w, r) }
+		},
+		h.routeWrapper)
+	// 外部认证（OIDC/LDAP，roadmap 11.7-⑥）登录面是**动态**路由（随配置生成），
+	// 无法进静态表：主 mux 公开注册 + ipGate，隧道内层裸注册（与凭据登录同模式）。
 	for _, extRoute := range h.externalAuthRoutes {
 		srvMux.Handle(extRoute.Method+" "+extRoute.Pattern, h.ipGate(extRoute.Handler))
+		localMux.Handle(extRoute.Method+" "+extRoute.Pattern, extRoute.Handler)
 	}
-
-	// 凭据管理 API（主 mux：SproxySig auth）。全部走 authMiddleware 保护，
-	// 与 audit/cloud/sync 同模式（本人 set 端点用 ActorFrom(ctx) 判定）。
-	srvMux.HandleFunc("GET /api/credentials", h.authMiddleware(h.akListHandler))
-	srvMux.HandleFunc("POST /api/credentials", h.authMiddleware(h.akAddHandler))
-	srvMux.HandleFunc("DELETE /api/credentials/{ak}", h.authMiddleware(h.akDeleteHandler))
-	srvMux.HandleFunc("POST /api/credentials/{ak}/renew", h.authMiddleware(h.renewCredentialHandler))
-	srvMux.HandleFunc("GET /api/credentials/{ak}/sk", h.authMiddleware(h.skListHandler))
-	srvMux.HandleFunc("DELETE /api/credentials/{ak}/sk/{skID}", h.authMiddleware(h.skDeleteHandler))
-	srvMux.HandleFunc("POST /api/credentials/{ak}/sk/{skID}/expire", h.authMiddleware(h.skExpireHandler))
 
 	srvMux.HandleFunc("GET /livez", h.livez)
 	srvMux.HandleFunc("GET /readyz", h.readyz)
@@ -798,12 +746,47 @@ func (h *Handlers) fileRouteRead(handler http.HandlerFunc) http.HandlerFunc {
 // 故经 Endpoints 绑定后无需再转换。
 func bindHandler(fn http.HandlerFunc) http.HandlerFunc { return fn }
 
+// guardWrapper 把 Guard 记号映射为**附加入口控制**（限流器 [+ 主 mux 的 IP 门]）。
+//
+// Guard 与 Class 的分工：Class 决定基础鉴权（auth/user/reader/public/tunnel），
+// Guard 决定同一分类内的额外策略（如三个公开凭据入口各自的限流器）。
+// 未知记号或未初始化的限流器**一律 panic**（fail-closed：不允许静默裸放公开入口）。
+func (h *Handlers) guardWrapper(c router.Class, guard string) func(http.HandlerFunc) http.HandlerFunc {
+	var limiter *ratelimit.RateLimiter
+	switch guard {
+	case guardCredentialRegister:
+		limiter = h.registerLimiter
+	case guardCredentialNonce:
+		limiter = h.totpLimiter
+	case guardCredentialLogin:
+		limiter = h.loginLimiter
+	default:
+		panic("router: 未知 Guard " + guard + "（未在装配层定义）")
+	}
+	if limiter == nil {
+		// 装配顺序错误（先注册后初始化）会让方法值捕获 nil 指针，请求期 panic 断连
+		// ——隧道模式的三条公开凭据入口曾因此完全不可用。
+		panic("router: Guard " + guard + " 的限流器未初始化（注册必须在限流器创建之后）")
+	}
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		mw := limiter.Middleware(next)
+		if c == router.ClassPublic {
+			// 白名单部署要求所有公开入口一致：主 mux 面额外挂 IP 门。
+			mw = h.ipGate(mw)
+		}
+		return mw.ServeHTTP
+	}
+}
+
 // routeWrapper 把路由分类映射为装配层的包装器（供 router.Register 使用）。
 //
 // **分类 → 包装策略的唯一定义处**：子包只声明分类，不能自带包装器，因此「是否鉴权、
 // 走哪条角色门」的安全决定始终留在装配层。未列出的分类直接 panic（fail-closed）——
 // 新增分类必须显式决定其包装策略，不允许静默裸注册。
-func (h *Handlers) routeWrapper(c router.Class) func(http.HandlerFunc) http.HandlerFunc {
+func (h *Handlers) routeWrapper(c router.Class, guard string) func(http.HandlerFunc) http.HandlerFunc {
+	if guard != "" {
+		return h.guardWrapper(c, guard)
+	}
 	switch c {
 	case router.ClassAuth:
 		return h.authMiddleware
