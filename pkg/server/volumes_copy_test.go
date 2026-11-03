@@ -462,3 +462,60 @@ func readDiskFile(t *testing.T, volRoot, owner, name string) []byte {
 	}
 	return data
 }
+
+// copyVolumeAuto 发起**不带卷参数**的复制请求（CLI `cp a.txt b.txt` 的线上形态）。
+func copyVolumeAuto(t *testing.T, baseURL, filename, to string) (int, []byte) {
+	t.Helper()
+	u := baseURL + "/api/volumes/copy?filename=" + url.QueryEscape(filename) + "&to=" + url.QueryEscape(to)
+	req, err := http.NewRequest("POST", u, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	client := &http.Client{Transport: netutil.IsolatedTransport()}
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("copy auto %s→%s: %v", filename, to, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, body
+}
+
+// TestVolumesCopy_AutoSourceVolume 锁「不指定卷时的同卷复制」——CLI 帮助文档明示
+// `sclient cp a.txt b.txt` 可用，但 `/api/volumes/copy` 曾强制要求 from_volume+to_volume，
+// 导致该命令在默认上下文（未 cd 到卷）下**必然失败**「源卷与源路径不能为空」。
+//
+// 语义：源卷 = 文件实际所在卷（volume.Router.Locate 单一实现解析）；目标卷默认同源卷。
+func TestVolumesCopy_AutoSourceVolume(t *testing.T) {
+	t.Parallel()
+	url, _, dirs := twoVolumeServer(t)
+
+	body := []byte("auto-copy-content")
+	if status, _, respBody := volumeUpload(t, url, "auto-a.txt", body, ""); status != http.StatusOK {
+		t.Fatalf("上传应 200, got %d %s", status, respBody)
+	}
+	status, respBody := copyVolumeAuto(t, url, "auto-a.txt", "auto-b.txt")
+	if status != http.StatusOK {
+		t.Fatalf("不带卷参数的复制 status=%d want 200, body=%s", status, respBody)
+	}
+	if !diskFileExists(t, dirs[0], "alice", "auto-a.txt") {
+		t.Fatal("复制后源 auto-a.txt 应保留")
+	}
+	if !diskFileExists(t, dirs[0], "alice", "auto-b.txt") {
+		t.Fatal("复制后目标 auto-b.txt 应落在源卷")
+	}
+	if string(readDiskFile(t, dirs[0], "alice", "auto-b.txt")) != string(body) {
+		t.Fatal("副本内容与源不一致")
+	}
+}
+
+// TestVolumesCopy_AutoSourceMissingIs404 锁「源不存在」是 404 而不是 500/400。
+func TestVolumesCopy_AutoSourceMissingIs404(t *testing.T) {
+	t.Parallel()
+	url, _, _ := twoVolumeServer(t)
+	status, respBody := copyVolumeAuto(t, url, "nope.txt", "dest.txt")
+	if status != http.StatusNotFound {
+		t.Fatalf("复制不存在的源 status=%d want 404, body=%s", status, respBody)
+	}
+}
