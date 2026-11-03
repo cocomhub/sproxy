@@ -145,6 +145,7 @@ var routeTableFiles = []string{
 	"pkg/server/routes_files.go",
 	"pkg/server/routes_sync.go",
 	"pkg/server/routes_trash.go",
+	"pkg/server/routes_ops.go",
 	"pkg/server/cloudtasks/routes.go",
 	"pkg/server/share/routes.go",
 	"pkg/server/notify/routes.go",
