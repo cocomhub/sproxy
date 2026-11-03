@@ -94,7 +94,7 @@ func TestRegister_PanicsOnRelativePath(t *testing.T) {
 
 func TestRegister_PanicsOnBadPrefix(t *testing.T) {
 	t.Parallel()
-	for _, prefix := range []string{"api/x", "/api/x/", ""} {
+	for _, prefix := range []string{"api/x", "/api/x/"} {
 		func() {
 			defer func() {
 				if recover() == nil {
@@ -103,6 +103,34 @@ func TestRegister_PanicsOnBadPrefix(t *testing.T) {
 			}()
 			Register[string](http.NewServeMux(), http.NewServeMux(), prefix, nil, nil, nil)
 		}()
+	}
+}
+
+// TestRegister_RootGroupPrefixIsAllowed 锁「空前缀 = 根组」：Path 自带全部路径。
+// 文件域横跨 /upload、/download、/api/files… 等多个顶层路径，无法共用一个非空前缀。
+func TestRegister_RootGroupPrefixIsAllowed(t *testing.T) {
+	t.Parallel()
+	srv, local := http.NewServeMux(), http.NewServeMux()
+	hit := make(chan string, 2)
+	n := Register(srv, local, "",
+		[]Route[string]{{Method: "POST", Path: "/upload", Server: ClassAuth, Local: ClassAuth, H: "x"}},
+		func(string) http.HandlerFunc {
+			return func(http.ResponseWriter, *http.Request) { hit <- "called" }
+		}, nil)
+	if n != 2 {
+		t.Fatalf("注册条数 = %d, want 2", n)
+	}
+	for name, mux := range map[string]*http.ServeMux{"srv": srv, "local": local} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/upload", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s 面 POST /upload 状态 = %d, want 200（空前缀应直接使用绝对 Path）", name, w.Code)
+		}
+		select {
+		case <-hit:
+		default:
+			t.Fatalf("%s 面 handler 未被调用", name)
+		}
 	}
 }
 
