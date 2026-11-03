@@ -14,6 +14,7 @@ package main
 // 去掉冲突报错 → 冲突用例红；mv 目标卷不写 --to-volume → 跨卷用例红。
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/volumectx"
@@ -42,7 +43,7 @@ func TestSplitVolumeURI(t *testing.T) {
 		{"vault:", "vault", "/", true, "卷根（不带斜杠）"},
 		{"vault:dir/f.txt", "", "vault:dir/f.txt", false, "缺 `:/`（不得误判）"},
 		{"https://example.com/a", "", "https://example.com/a", false, "URL 不得误判"},
-		{"C:\\Users\\x", "", "C:\\Users\\x", false, "Windows 盘符不得误判"},
+		{"C:\\Users\\x", "", "C:\\Users\\x", false, "Windows 盘符不得误判（反斜杠）"},
 		{"plain.txt", "", "plain.txt", false, "无前缀"},
 		{":/a", "", ":/a", false, "空卷名"},
 		{"bad name:/a", "", "bad name:/a", false, "卷名含空格"},
@@ -179,5 +180,78 @@ func TestApplyMvVolumeContext_StateVolumeAppliesToBothSides(t *testing.T) {
 	}
 	if tv, _ := volumectx.Target(cmd2.Context()); tv != "other" {
 		t.Fatalf("--to-volume=%q want other", tv)
+	}
+}
+
+// TestResolveUploadRemotePath_AbsoluteLocalPath 锁「绝对本地路径不得把本地根写进远端」。
+//
+// 实测（Windows 真实 CLI）：`upload D:/work/a.txt` 无目标 URI 时远端路径变成
+// `<cwd>/D:/work/a.txt` —— 服务端以「文件名包含非法字符 ':'」400 拒绝，
+// 等于 Windows 上按绝对路径上传完全不可用。
+// 语义对齐同函数的目标 URI 分支（该分支已写明「绝对本地路径：只保留末段」）。
+func TestResolveUploadRemotePath_AbsoluteLocalPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		cwd     string
+		file    string
+		windows bool
+		target  string
+		want    string
+		comment string
+	}{
+		{"windows-drive-no-target", "subdir", "D:/work/a.txt", true, "", "subdir/a.txt", "盘符路径只保留末段并拼 cwd"},
+		{"windows-drive-target", "subdir", "D:/work/a.txt", true, "/up", "up/a.txt", "目标 URI 目录 + 末段"},
+		{"posix-abs-no-target", "subdir", "/work/a.txt", false, "", "subdir/a.txt", "POSIX 绝对路径同理"},
+		{"relative-no-target", "subdir", "x/a.txt", true, "", "subdir/x/a.txt", "相对路径保留目录结构"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			st := &state.State{CurrentDir: c.cwd}
+			got, err := resolveUploadRemotePathWith(st, c.file, c.target, c.windows)
+			if err != nil {
+				t.Fatalf("resolveUploadRemotePath(%q,%q): %v", c.file, c.target, err)
+			}
+			if got != c.want {
+				t.Fatalf("远端路径 = %q, want %q — %s", got, c.want, c.comment)
+			}
+		})
+	}
+}
+
+// TestIsWindowsDrivePath 锁盘符判定（纯函数，windows 显式传入 ⇒ 两个平台都能断言）。
+//
+// 实测（Windows 真实 CLI）：`sclient upload D:/work/a.txt` 被当成「卷 D 的
+// /work/a.txt」⇒ 参数被吃光 ⇒ 报「上传参数不足」。
+func TestIsWindowsDrivePath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		arg     string
+		windows bool
+		want    bool
+	}{
+		{"D:/work/a.txt", true, true},
+		{`D:\work\a.txt`, true, true},
+		{"c:/x", true, true},
+		{"D:/work/a.txt", false, false}, // 非 Windows：D:/x 不是绝对路径（短卷名合法）
+		{"vault:/a", true, false},       // 多字母卷名不是盘符
+		{"D:", true, false},             // 无后续分隔符
+		{"1:/x", true, false},           // 非字母
+	}
+	for _, c := range cases {
+		if got := isWindowsDrivePath(c.arg, c.windows); got != c.want {
+			t.Errorf("isWindowsDrivePath(%q, %v) = %v, want %v", c.arg, c.windows, got, c.want)
+		}
+	}
+}
+
+// TestSplitVolumeURI_DrivePathPerPlatform 记录平台差异：盘符路径只在 Windows 上不被当卷 URI。
+func TestSplitVolumeURI_DrivePathPerPlatform(t *testing.T) {
+	t.Parallel()
+	_, _, ok := splitVolumeURI("C:/Users/x")
+	windows := runtime.GOOS == "windows"
+	if ok == windows {
+		t.Fatalf("splitVolumeURI(%q) ok=%v, 期望 Windows 上必须为 false（其它平台按普通短卷名解析）", "C:/Users/x", ok)
 	}
 }

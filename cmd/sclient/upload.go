@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -149,12 +150,24 @@ func uploadOneFile(ctx context.Context, svc *client.FileClient, filePath string,
 //     （保留目录结构；目标目录已由调用方解析为**卷根起算**的绝对路径）；
 //   - 未给 ⇒ 回落既有语义（相对路径拼当前工作目录，`/` 开头绕过 cwd）。
 func resolveUploadRemotePath(st *state.State, filePath, targetDir string) (string, error) {
+	return resolveUploadRemotePathWith(st, filePath, targetDir, runtime.GOOS == "windows")
+}
+
+// resolveUploadRemotePathWith 是 resolveUploadRemotePath 的可测实现（windows 显式传入，
+// 使盘符判定在两个平台上都能被断言）。
+func resolveUploadRemotePathWith(st *state.State, filePath, targetDir string, windows bool) (string, error) {
 	local := filepath.ToSlash(filepath.Clean(filePath))
+	absolute := localPathIsAbsolute(local, windows)
 	if targetDir == "" {
+		// 绝对本地路径只保留末段：否则远端会变成 `<cwd>/D:/work/a.txt`（实测被服务端
+		// 以「文件名包含非法字符 ':'」400 拒绝）。与下方目标 URI 分支语义一致。
+		if absolute {
+			return st.ResolveRemotePathOrErr(path.Base(local))
+		}
 		return st.ResolveRemotePathOrErr(local)
 	}
 	base := strings.TrimLeft(local, "/")
-	if strings.HasPrefix(local, "/") {
+	if absolute {
 		// 绝对本地路径：只保留末段（避免把本地根写进远端）。
 		base = path.Base(local)
 	}
@@ -162,6 +175,12 @@ func resolveUploadRemotePath(st *state.State, filePath, targetDir string) (strin
 	// 相对结构拼接后去掉前导 `/`（`vault:/` ⇒ `d.bin`；`vault:/sub` ⇒ `sub/a/d.bin`）。
 	joined := path.Join(strings.TrimPrefix(targetDir, "/"), base)
 	return strings.TrimPrefix(joined, "/"), nil
+}
+
+// localPathIsAbsolute 判定本地路径是否绝对（POSIX `/…` 或 Windows 盘符 `C:/…`）。
+// windows 显式传入，便于两个平台都断言盘符分支。
+func localPathIsAbsolute(p string, windows bool) bool {
+	return strings.HasPrefix(p, "/") || isWindowsDrivePath(p, windows)
 }
 
 // uploadChunked 以分块模式上传单个文件并把结果写入传输统计。
