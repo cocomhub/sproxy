@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -282,8 +283,14 @@ func TestManager_ReadAndRemoveMissingReturnErrNotFound(t *testing.T) {
 	mgr, _ := newLocalManager(t)
 	ctx := context.Background()
 
-	if _, err := mgr.Read(ctx, "absent"); !errors.Is(err, ErrNotFound) {
+	_, err := mgr.Read(ctx, "absent")
+	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Read(不存在) err = %v, want ErrNotFound", err)
+	}
+	// 兼容锁：哨兵必须**包住 fs.ErrNotExist**——历史调用方（pikpak secret store 的
+	// read-or-create）用标准库判定，只回自定义哨兵会让它们全部失败（CI 实测）。
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Read(不存在) err = %v, 应同时满足 errors.Is(err, fs.ErrNotExist)", err)
 	}
 	if err := mgr.Remove(ctx, "absent"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Remove(不存在) err = %v, want ErrNotFound", err)
