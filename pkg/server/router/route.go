@@ -65,12 +65,16 @@ type Route[H any] struct {
 	Path   string
 	Server Class // srvMux 分类；ClassNone = 不注册到 srvMux
 	Local  Class // localMux 分类；ClassNone = 不注册到 localMux
-	H      H
+	// Guard 是**附加入口控制**的记号（如 "credential_login"）：分类决定基础鉴权，
+	// Guard 决定额外策略（限流器 / IP 门）。空串 = 无附加策略。
+	// 具体映射由装配层唯一提供（未知记号在注册期 panic，fail-closed）。
+	Guard string
+	H     H
 }
 
-// Wrapper 是分类 → 包装器映射（装配层提供）。
-// 返回 nil 表示该分类不包装（裸注册）。
-type Wrapper func(Class) func(http.HandlerFunc) http.HandlerFunc
+// Wrapper 是 (分类, Guard) → 包装器映射（装配层提供）。
+// 返回 nil 表示不包装（裸注册）。
+type Wrapper func(Class, string) func(http.HandlerFunc) http.HandlerFunc
 
 // Register 把 routes 注册到 srvMux / localMux，返回注册条数。
 //
@@ -99,26 +103,27 @@ func Register[H any](
 		}
 		pattern := r.Method + " " + prefix + r.Path
 		if r.Server != ClassNone {
-			srvMux.HandleFunc(pattern, wrapHandler(wrap, r.Server, handler))
+			srvMux.HandleFunc(pattern, wrapHandler(wrap, r.Server, r.Guard, handler))
 			n++
 		}
 		if r.Local != ClassNone {
-			localMux.HandleFunc(pattern, wrapHandler(wrap, r.Local, handler))
+			localMux.HandleFunc(pattern, wrapHandler(wrap, r.Local, r.Guard, handler))
 			n++
 		}
 	}
 	return n
 }
 
-// wrapHandler 按分类取包装器；未登记的分类直接 panic（fail-closed：漏登记分类不允许静默裸注册）。
-func wrapHandler(wrap Wrapper, class Class, h http.HandlerFunc) http.HandlerFunc {
+// wrapHandler 按 (分类, Guard) 取包装器；未登记的分类直接 panic
+// （fail-closed：漏登记分类不允许静默裸注册）。
+func wrapHandler(wrap Wrapper, class Class, guard string, h http.HandlerFunc) http.HandlerFunc {
 	if !class.Valid() {
 		panic(fmt.Sprintf("router: 未知分类 %q（未在 Class 枚举内）", class))
 	}
 	if wrap == nil {
 		return h
 	}
-	fn := wrap(class)
+	fn := wrap(class, guard)
 	if fn == nil {
 		return h
 	}
