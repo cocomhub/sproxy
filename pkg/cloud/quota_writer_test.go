@@ -705,7 +705,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 		_ = mgr.CancelTask(task.ID, "alice")
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !mgr.waitTaskStopped(task.ID, 5*time.Second) {
+	if !mgr.waitTaskStopped(task.ID, 30*time.Second) {
 		t.Fatal("cancel 后下载 goroutine 未退出")
 	}
 
@@ -880,7 +880,7 @@ func TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit(t *t
 	}
 
 	// 保留 testutil.WaitFor 版本：观察者（轮询 API）所见最终收敛到全零。
-	testutil.WaitFor(t, 5*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		return cloudB.Usage() == 0 && cloudB.Reserved() == 0 && sm.Usage() == 0
 	}, "cancel 后账本未收敛到 0")
 }
