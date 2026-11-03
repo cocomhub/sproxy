@@ -289,7 +289,7 @@ func TestVolumesAPI_RefreshExternalIndexError(t *testing.T) {
 	if err := h.volSet.AddExternalVolume(volume.Volume{
 		Name: "vault", Type: "secretdata",
 		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}},
-	}, &failingRefreshBackend{refreshableBackend: refreshableBackend{fs: newOpsFS()}}); err != nil {
+	}, &failingRefreshBackend{fs: newOpsFS()}); err != nil {
 		t.Fatalf("AddExternalVolume: %v", err)
 	}
 	status, body := postRefresh(t, baseURL, "vault")
