@@ -5,7 +5,9 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -268,5 +270,33 @@ func TestVolumeFromURL_And_IsDefaultVolumeRef(t *testing.T) {
 	}
 	if IsDefaultVolumeRef("secrets://%zz/bad") {
 		t.Error("非法 URL 不得判为 per-owner 默认桶引用")
+	}
+}
+
+// TestManager_ReadAndRemoveMissingReturnErrNotFound 锁「缺失必须是哨兵错误」。
+//
+// 真实缺陷（路由冒烟门禁抓到）：Read 从不返回 ErrNotFound —— 文件不存在时只是把 FS 错误
+// 包一层，于是 HTTP 层 errors.Is(err, ErrNotFound) 永不成立 ⇒ 读不存在的 secret 返回
+// **500**（本应 404）。Remove 同理。
+func TestManager_ReadAndRemoveMissingReturnErrNotFound(t *testing.T) {
+	t.Parallel()
+	mgr, _ := newLocalManager(t)
+	ctx := context.Background()
+
+	_, err := mgr.Read(ctx, "absent")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read(不存在) err = %v, want ErrNotFound", err)
+	}
+	// 兼容锁：哨兵必须**包住 fs.ErrNotExist**——历史调用方（pikpak secret store 的
+	// read-or-create）用标准库判定，只回自定义哨兵会让它们全部失败（CI 实测）。
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Read(不存在) err = %v, 应同时满足 errors.Is(err, fs.ErrNotExist)", err)
+	}
+	if err := mgr.Remove(ctx, "absent"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Remove(不存在) err = %v, want ErrNotFound", err)
+	}
+	// 非法名仍必须是 ErrInvalidSecretName（分类不能被「不存在」吞掉）。
+	if _, err := mgr.Read(ctx, "../escape"); !errors.Is(err, ErrInvalidSecretName) {
+		t.Fatalf("Read(非法名) err = %v, want ErrInvalidSecretName", err)
 	}
 }

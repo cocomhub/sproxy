@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"sort"
 	"strings"
@@ -44,7 +45,13 @@ import (
 const DefaultVolumeName = "default-secrets"
 
 // ErrNotFound 是读取/删除不存在的 secret 的哨兵错误。
-var ErrNotFound = errors.New("secrets: secret 不存在")
+//
+// 它**包装 fs.ErrNotExist**：调用方既可用本哨兵（`errors.Is(err, ErrNotFound)`），
+// 也可用标准库惯用判定（`errors.Is(err, fs.ErrNotExist)`）——两者必须同源。
+// 历史教训：Read 曾只把 FS 错误包一层（哨兵永不生效 ⇒ HTTP 层 404 分支成死代码，
+// 读缺失报 500）；改成只回本哨兵又打破了用 fs.ErrNotExist 判定的调用方
+// （pikpak secret store 的 read-or-create）。包装两者是唯一向后兼容的契约。
+var ErrNotFound = fmt.Errorf("secrets: secret 不存在: %w", fs.ErrNotExist)
 
 // ErrInvalidSecretName 是非法 secret 名（空/含路径分隔符/`.`/`..`）的哨兵错误。
 // HTTP 层据此分类 400（客户端输入错误）vs 500（服务端 IO 故障）——避免脆弱文案匹配。
@@ -183,6 +190,11 @@ func (m *Manager) Read(ctx context.Context, name string) ([]byte, error) {
 	}
 	rc, err := m.fs.OpenRead(ctx, name)
 	if err != nil {
+		// 缺失必须回哨兵错误：HTTP 层据 errors.Is(ErrNotFound) 分 404/500，
+		// 包一层 FS 错误会让 errors.Is 永不成立 ⇒ 读不存在的 secret 报 500（实测）。
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %q", ErrNotFound, name)
+		}
 		return nil, fmt.Errorf("secrets: 打开 %q 失败: %w", name, err)
 	}
 	defer rc.Close()
@@ -234,6 +246,10 @@ func (m *Manager) Remove(ctx context.Context, name string) error {
 		return fmt.Errorf("%w %q", ErrInvalidSecretName, name)
 	}
 	if err := m.fs.Delete(ctx, name); err != nil {
+		// 与 Read 同源：缺失 → ErrNotFound（HTTP 层 404），其余 → 500。
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %q", ErrNotFound, name)
+		}
 		return fmt.Errorf("secrets: 删除 %q 失败: %w", name, err)
 	}
 	return nil
