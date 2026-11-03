@@ -7,8 +7,8 @@ package server
 // 两个面由 `router.Register` 分别按 `Server` / `Local` 分类派生包装器——
 // 不再在 routes.go 里手工配对两遍（此前 45 条路由 × 2 个 mux = 90 处注册）。
 //
-// 分类语义（与 package 级 isFileGroupedRoute / isReadOnlyFileRoute 同源，最终收敛为
-// 单一事实源，见 docs/designs/2026-11-03-route-class-single-source.md）：
+// 分类语义（本表即**单一事实源**，运行期经 route_class_index.go 按 r.Pattern 查表；
+// 见 docs/designs/2026-11-03-route-class-single-source.md）：
 //   - `Server: ClassUser`   ⇒ fileRoute（写子组，requireRole(user)）
 //   - `Server: ClassReader` ⇒ fileRouteRead（只读子组，requireRole(reader)）
 //   - `Local:  ClassTunnel` ⇒ 隧道内层裸注册（隧道加密即认证；角色门由 localMuxGate 收口）

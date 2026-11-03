@@ -4,42 +4,35 @@
 package server
 
 import (
-	"net/http"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/server/router"
 )
 
-// TestFix_FileMetaRouteGrouped 钉住 PUT /api/files/meta 属文件组（漏列 ⇒ fileRoute
-// fail-closed 500「route not in file group」，实测 sclient meta set 恒 500）。
-// 变异：删 isFileGroupedRoute 的 "/api/files/meta" → 本用例红。
+// TestFix_FileMetaRouteGrouped 钉住 PUT /api/files/meta 声明为文件写子组（错 ⇒ fileRoute
+// 接线自检 fail-closed 500，实测 sclient meta set 恒 500）。
+// 变异：表里把它改成 ClassReader 或删掉 → 本用例红。
 func TestFix_FileMetaRouteGrouped(t *testing.T) {
 	t.Parallel()
-	if !isFileGroupedRoute("/api/files/meta") {
-		t.Fatal("PUT /api/files/meta 必须在 isFileGroupedRoute 清单（否则 fileRoute 包装 fail-closed 500）")
-	}
-	// 写面：不得被判为只读（否则 fileRoute 包装会 500「写包装包了只读子组」）。
-	if isReadOnlyFileRoute("/api/files/meta", http.MethodPut) {
-		t.Fatal("PUT /api/files/meta 是写面，不得判为只读子组")
+	if c, ok := fileDomainClass("PUT /api/files/meta"); !ok || c != router.ClassUser {
+		t.Fatalf("PUT /api/files/meta 分类 = %v(ok=%v), want ClassUser（否则 fileRoute 自检 500）", c, ok)
 	}
 }
 
-// TestFix_LocalMuxGateCoversMeta 钉住隧道内层面同源：localMuxGate 对 meta 路由同样收口。
+// TestFix_LocalMuxGateCoversMeta 钉住隧道内层面同源：localMuxGate 查同一张表。
 func TestFix_LocalMuxGateCoversMeta(t *testing.T) {
 	t.Parallel()
-	if !isFileGroupedRoute("/api/files/meta") {
-		t.Fatal("localMuxGate 与 isFileGroupedRoute 同源；漏列会让隧道内层面裸放")
+	if _, ok := fileDomainClass("PUT /api/files/meta"); !ok {
+		t.Fatal("localMuxGate 与 fileRoute 同源查表；缺声明会让隧道内层裸放")
 	}
 }
 
-// TestFix_FileMetaGetRouteGrouped 钉住 GET /api/files/meta 属文件组且为只读子组
-// （#855 教训三处同源：isFileGroupedRoute + isReadOnlyFileRoute + HandleFunc）。
-// 变异：删 isReadOnlyFileRoute 的 "/api/files/meta" → fileRouteRead 判定「非只读」
-// → 接线错 500 → 本用例红。
+// TestFix_FileMetaGetRouteGrouped 钉住 GET /api/files/meta 声明为只读子组（错 ⇒
+// fileRouteRead 接线自检 500）。
+// 变异：表里改成 ClassUser → 本用例红。
 func TestFix_FileMetaGetRouteGrouped(t *testing.T) {
 	t.Parallel()
-	if !isFileGroupedRoute("/api/files/meta") {
-		t.Fatal("GET /api/files/meta 必须在 isFileGroupedRoute 清单")
-	}
-	if !isReadOnlyFileRoute("/api/files/meta", http.MethodGet) {
-		t.Fatal("GET /api/files/meta 必须在 isReadOnlyFileRoute 只读子组（否则 fileRouteRead 接线错 500）")
+	if c, ok := fileDomainClass("GET /api/files/meta"); !ok || c != router.ClassReader {
+		t.Fatalf("GET /api/files/meta 分类 = %v(ok=%v), want ClassReader（否则 fileRouteRead 自检 500）", c, ok)
 	}
 }
