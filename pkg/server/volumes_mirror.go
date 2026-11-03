@@ -76,7 +76,7 @@ func (h *Handlers) copyVolumeHandler(w http.ResponseWriter, r *http.Request) {
 		to = filename
 	}
 	force := r.URL.Query().Get("force") == "true"
-	if filename == "" || fromVol == "" || toVol == "" {
+	if filename == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "from_volume、to_volume、filename 均不能为空"}, http.StatusBadRequest)
 		return
 	}
@@ -90,6 +90,26 @@ func (h *Handlers) copyVolumeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := normalizeOwner(ownerFromRequest(r))
+
+	// 卷可省略（CLI `cp a.txt b.txt` 的契约）：源卷 = 文件实际所在卷，由**单一实现**
+	// volume.Router.Locate 解析；目标卷默认同源卷。此前强制两端必填 ⇒ 默认上下文
+	// （未 cd 到卷）下同卷复制必然失败「源卷与源路径不能为空」。
+	if fromVol == "" {
+		loc, ok := h.locateOwnerFile(owner, "user/"+remotePath)
+		if !ok {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
+			return
+		}
+		fromVol = loc.volumeName
+	}
+	if toVol == "" {
+		toVol = fromVol
+	}
+	if fromVol == "" || toVol == "" {
+		// 无卷语义的旧装配（locateOwnerFile 不携带卷名）：保持原有 400，不静默猜。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "from_volume、to_volume、filename 均不能为空"}, http.StatusBadRequest)
+		return
+	}
 
 	// ACL 视图（AD-6/§8）：from/to 都必须在 owner 视图内，否则 403（不泄卷存在性）。
 	if !h.volumeAllowedFor(owner, fromVol) || !h.volumeAllowedFor(owner, toVol) {

@@ -201,15 +201,18 @@ func (c *FileClient) CopyVolume(ctx context.Context, fromVol, toVol, filename st
 // to 为空 = 同 rel（经典跨卷复制语义）；toVol 为空 = 与源同卷（**同卷复制**：卷支持时走
 // 底层 blob 直拷，不重新加解密）。force=true 时允许覆盖已存在目标（默认拒绝，绝不静默覆盖）。
 func (c *FileClient) CopyFile(ctx context.Context, fromVol, from, toVol, to string, force bool) error {
-	if fromVol == "" || from == "" {
-		return fmt.Errorf("源卷与源路径不能为空")
+	if from == "" {
+		return fmt.Errorf("源路径不能为空")
 	}
-	if toVol == "" {
-		toVol = fromVol
-	}
+	// 卷可省略：服务端按文件实际所在卷解析（volume.Router.Locate），目标卷默认同源卷。
+	// 空值**不发送**该参数——发送空串会被服务端当作「未提供」以外的语义。
 	q := url.Values{}
-	q.Set("from_volume", fromVol)
-	q.Set("to_volume", toVol)
+	if fromVol != "" {
+		q.Set("from_volume", fromVol)
+	}
+	if toVol != "" {
+		q.Set("to_volume", toVol)
+	}
 	q.Set("filename", from)
 	if to != "" {
 		q.Set("to", to)
