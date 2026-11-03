@@ -93,6 +93,12 @@ func (h *Handlers) exportVolumeHandler(w http.ResponseWriter, r *http.Request) {
 
 	sources, err := h.listVolumeExportSources(owner, explicitVol)
 	if err != nil {
+		// 客户端错误与服务器故障必须分开：卷不存在/无权访问是同仓其它入口的 403
+		// （backup_api / files_service 路由解析），不该报成 500（E2E 实测曾 500）。
+		if errors.Is(err, errVolumeNotAllowed) {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
+			return
+		}
 		h.logger.Error("导出卷：枚举失败", "volume", explicitVol, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "读取卷文件失败"}, http.StatusInternalServerError)
 		return
@@ -205,15 +211,19 @@ func safeManifestName(name string) string {
 
 // listVolumeExportSources 枚举 owner 卷视图内（或指定卷）user 桶全部文件（递归）。
 // 返回按 relName 排序的源列表。仅本地卷（storage.Root 非 nil）可导出；外部卷无本地根 → 错误。
+// errVolumeNotAllowed 是「指定卷不存在或无权限」的哨兵错误：调用方据此返回 403
+// （客户端错误），而不是 500（服务端故障）。
+var errVolumeNotAllowed = errors.New(msgVolumeNotAllowed)
+
 func (h *Handlers) listVolumeExportSources(owner, explicitVol string) ([]volumeExportSource, error) {
 	switch {
 	case explicitVol != "":
 		if h.volSet == nil {
-			return nil, fmt.Errorf("卷功能未装配")
+			return nil, errVolumeNotAllowed
 		}
 		v, ok := h.volSet.ByName(explicitVol)
 		if !ok || !v.Authorize(owner) {
-			return nil, errors.New(msgVolumeNotAllowed)
+			return nil, errVolumeNotAllowed
 		}
 		return h.walkExportVolumes([]volume.Volume{v}, owner)
 	case h.volSet != nil:
