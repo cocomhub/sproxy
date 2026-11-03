@@ -742,8 +742,10 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	if err := mgr.CancelTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	// 验证下载 goroutine 真正退出（running 标记清除），而非仅 CancelTask API 返回成功
-	if !mgr.waitTaskStopped(task.ID, 2*time.Second) {
+	// 验证下载 goroutine 真正退出（running 标记清除），而非仅 CancelTask API 返回成功。
+	// 超时取 30s：waitTaskStopped 是**事件驱动**（runningDone channel），成功路径零等待；
+	// 但满载 CI 上 goroutine 观察到取消并把退出路径跑完可能超过旧的 2s 预算（实测 flake）。
+	if !mgr.waitTaskStopped(task.ID, 30*time.Second) {
 		t.Fatal("download goroutine did not stop after cancel")
 	}
 }
@@ -798,7 +800,7 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 	if cancelErr := mgr.CancelTask(task.ID, ""); cancelErr != nil {
 		t.Fatal(cancelErr)
 	}
-	if !mgr.waitTaskStopped(task.ID, 2*time.Second) {
+	if !mgr.waitTaskStopped(task.ID, 30*time.Second) {
 		t.Fatal("download goroutine did not stop after cancel")
 	}
 

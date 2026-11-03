@@ -286,7 +286,7 @@ func TestDownloadIntegrity_ResumeResetsState(t *testing.T) {
 	// 避免与 failTask 并发写字段的 race（-parallel 下 CI 实测触发）。
 	var sames int
 	var last, istatus string
-	testutil.WaitFor(t, 5*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		mgr.mu.RLock()
 		got := mgr.tasks[task.ID]
 		status := got.Status
