@@ -8,6 +8,11 @@ SPDX-License-Identifier: Apache-2.0
 本文档列出 sproxy 服务端的全部 HTTP 路由，包括请求/响应格式、必填头、错误码。
 适用于通过 `pkg/client` 之外的方式调用 sproxy（如 curl、其他语言客户端、运维脚本）。
 
+> **新增/修改路由必须同步本节文档**：每条路由需有 `### METHOD /path` 标题（查询串可附在路径后，
+> 不参与校验），实现依据为 `pkg/server` 等处的实际 handler。门禁 **R55**
+> （`internal/archcheck/docs_api_gate_test.go`）会比对本文档路径集合与 `route_classes.tsv`：
+> 未文档化必须登记驱动清单，文档里出现过期路径即红。
+
 ## 通用约定
 
 - **响应格式**：除 `/healthz` `/version`、下载流、stat 之外，所有响应都是 JSON：
@@ -285,6 +290,51 @@ secretdata 等）经**卷状态缓存**（`volumestate`，TTL=0 + 写穿 + `volu
 | 401 | 未授权 |
 | 500 | 服务端 WalkDir 失败 |
 
+### GET /api/search/semantic?q=&topk=
+
+语义检索端点（向量索引未装配 → `404`，零回归）。
+
+- 认证：主 mux `reader`（SproxySig）/ 隧道内层 `tunnel`
+- query 参数：
+  - `q`（必填）：查询文本（trim 后为空 → `400`）
+  - `topk`：返回条数（默认 10，上限 50；非法值回落默认）
+- 响应：`{"results": [{"file": {…FileInfo…}, "score": 0.83}], "mode": "semantic"}`
+  - `mode=semantic`：向量相似度命中；比对范围限于请求者 owner 的向量索引
+  - `mode=keyword`：**回退**（装配层未把 `q` 向量化，或检索失败）——按文件名关键词搜索返回，
+    `score` 恒 0；不返回 5xx（fail-safe）
+- 错误：`400` `q` 为空 / 检索失败；`404` 语义搜索未配置（`vector` 未装配）
+
+### PUT /api/files/meta?filename=
+
+元数据补录（已上传文件的 `extra` 旁路更新：读–校验–合并–写 sidecar，不重算内容哈希）。
+
+- 认证：主 mux `user`（写子组）/ 隧道内层 `tunnel`
+- query 参数：`filename`（必填，经 `ValidateFilePath`）
+- 请求体（≤ 64 KiB）：
+  ```json
+  {"extra": {"code": "EXAMPLE-001", "maker": "STUDIO X"}, "mode": "merge"}
+  ```
+  - `mode`：`merge`（缺省，新增/覆盖同名键，不删旧键）/ `replace`（整表替换）/ `delete`（删指定键）
+  - `extra` 的键值经 `meta.TrimExtra` 清洗 + `meta.ValidateExtra` 校验；`merge`/`replace` 时不得为空，
+    `delete` 至少一个键
+- 响应：`{"success": true, "message": "meta extra 已更新"}`
+- 错误：`400` filename 为空 / 请求体非法 / `mode` 非法 / `extra` 为空或校验失败；
+  `503` 元数据能力不可用（`ErrMetaUnavailable`）；`409` 其余域层失败（无 sidecar / 并发覆盖 / 卷不支持 /
+  文件不存在或路径非法——handler 把域错误统一映射为状态冲突，按 message 区分原因，可重试）
+- 副作用：审计 `file_meta_update`（成功）
+
+### GET /api/files/meta?filename=
+
+读取文件的自定义元数据 `extra` 与原始文件时间。
+
+- 认证：主 mux `reader`（只读子组）/ 隧道内层 `tunnel`
+- query 参数：`filename`（必填）
+- 响应：`{"extra": {"code": "EXAMPLE-001"}, "mtime": "2026-11-03T12:00:00.000000000Z",
+  "ctime": "…"}`
+  - 文件存在但无 extra → `extra` 为空对象 `{}`；`mtime`/`ctime`（RFC3339Nano UTC）为附加字段，
+    无时间信息时省略
+- 错误：`400` filename 为空；`404` 文件不存在（`files.HTTPError` 状态直传）；`500` 读取失败
+
 ### POST /api/tags
 
 为文件打标签（roadmap 11.10-④）。标签规则：`[A-Za-z0-9_\p{L}-]{1,32}`（1-32
@@ -368,6 +418,20 @@ JSON body 批量形态（body 存在且 `files` 非空时优先）：
 查询上传状态。优先按 upload_id 查；如果 upload_id 找不到，可用 filename 查
 （用于跨进程恢复客户端 ID 丢失场景）。
 
+### GET /upload/sessions
+
+列出**当前 owner 未完成**的上传会话（`complete` 成功后的已完会话不列出）。
+
+- 认证：主 mux `user`（SproxySig）/ 隧道内层 `tunnel`
+- 响应：
+  ```json
+  {"success": true, "sessions": [{"upload_id": "…", "filename": "dir/a.bin", "total_size": 12345678,
+    "received_count": 2, "total_chunks": 3, "file_checksum": "…", "file_mod_time": 1750000000000000000,
+    "status": "uploading"}]}
+  ```
+  - `status` 恒为 `uploading`（已完会话被过滤）；无会话或上传存储未装配 → `{"success": true, "sessions": []}`
+  - 会话按租户隔离（per-tenant store 天然只含本 owner 会话）
+
 ### POST /upload/complete
 
 合并所有分块。请求体 JSON：`{"upload_id": "..."}`。
@@ -420,6 +484,47 @@ JSON body 批量形态（body 存在且 `files` 非空时优先）：
   不把部分结果当完整结果）
 - 外部卷（无本地 Root）走同一可信链的外部 FS 递归统计，跳过 `.__` 元数据与
   `checksums.json`/`LAYOUT_VERSION`；响应 `data.path` 归一为 `/` 开头的用户可见路径。
+
+## 回收站（trash）
+
+软删（`POST /delete?filename=…&soft=true`）把文件移入**文件所在卷**的 `trash` 桶，可在 TTL 内恢复。
+多卷语义：各卷独立管理 + 列表汇总展示（`volume` 字段标识来源）。
+
+- 认证：主 mux `auth`（SproxySig）/ 隧道内层 `tunnel`
+- 外部卷软删 **fail-closed**（无回收站实现 → 拒绝）；硬删（不带 `soft`）不受影响
+
+### GET /api/trash?volume=
+
+列出回收站条目。`volume` 缺省 = 汇总 owner 可见的**全部本地卷**；指定则只列该卷。
+
+```json
+{"entries": [{"trash_rel": "trash/user/dir/a.txt.__deleted__", "name": "dir/a.txt", "volume": "main"}]}
+```
+
+- `trash_rel`：回收站内路径（恢复时作为 `file` 参数）；`name`：解码后的原相对路径；
+  `volume`：条目所在卷
+- 只列主文件条目（目录与服务端 meta sidecar 条目不列）；无条目时 `entries` 为 `null`
+- 错误：卷不存在/无权限 → 该状态码（错误体 `{"entries": [], "message": "…"}`）；其它失败 `500`
+
+### POST /api/trash/restore?file=&volume=
+
+恢复条目回 `user/` 原路径。
+
+- `file`（必填）：`GET /api/trash` 返回的 `trash_rel`
+- `volume`（可选）：缺省 = **跨卷定位**（条目只存在于软删时所在卷）
+- 响应：`{"success": true, "message": "已恢复"}`
+- 错误：`400` file 为空；条目不存在/目标已存在等 → `files.HTTPError` 状态直传；其它 `500`
+  `{"success": false, "message": "恢复失败"}`（并记服务端 error 日志）
+
+### POST /api/trash/empty?volume=&all=1
+
+清空回收站。
+
+- `volume=<卷>`：只清该卷；`all=1`：清全部卷；**二者皆无 = 只清默认卷**（破坏性范围不静默扩大）
+- 响应：`{"success": true, "message": "回收站已清空"}`（按形态文案分别为「全部卷回收站已清空」/
+  「该卷回收站已清空」）
+- 错误：卷无权限/不存在 → 状态直传；其它 `500` `{"success": false, "message": "清空失败"}`
+- 周期 GC：`trash.gc_interval > 0` 时按 `trash.ttl`（默认 7 天）过期清理**各卷**（`all=true`）
 
 ## 文件变更事件流（events，SSE）
 
@@ -475,6 +580,26 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 ### DELETE /api/versions?filename=&version=...
 
 删除指定版本。
+
+## URL 解析（resolve）
+
+### GET /api/resolve?url=
+
+通用 URL → 资源信息（大小/类型/文件清单）。扩展按 URL **自动识别**（pikpak 分享等由
+`downloader.Registry` 的 `URLResolver` 提供）；未识别 URL 回落通用结果（文件名由路径推导、大小未知）。
+
+- 认证：主 mux `auth`（SproxySig）/ 隧道内层 `tunnel`
+- query 参数：`url`（必填；trim 后为空 → `400`）
+- 响应（`downloader.ResolveInfo`）：
+  ```json
+  {"url": "https://example.com/s/EXAMPLE-001", "kind": "pikpak_share", "files": [
+    {"id": "file-1", "name": "EXAMPLE-001.mp4", "size": 1048576, "type": "video/mp4",
+     "hash": "…", "direct_link": "…"}]}
+  ```
+  - `kind`：解析扩展名，或 `generic`（回落）；单文件时用 `filename` + `size`，多文件（分享）用 `files`
+  - `files[].direct_link` / `hash` 可能缺失（提供方不提供或受限）
+- 错误：`400` url 为空；`502` 扩展解析失败（分享不存在/上游网络错误，body 含原因）；
+  `503` URL 解析接口未装配
 
 ## 云端下载（cloud）
 
@@ -679,6 +804,17 @@ Hub 统计。
 
 联邦节点表：本 hub 路由表 + 联邦候选（跨 hub 2 级发现）。
 
+### GET /api/hub/federation/services
+
+本 hub 节点宣告的服务（供**联邦对端拉取**，按 mesh 隔离）。
+
+- 认证：主 mux `auth`（SproxySig）；仅当 hub 路由表已装配**且** `hub.federation.enabled: true`
+  时注册（否则路由不存在 → `404`）；不注册 localMux（联邦是 hub 间直连 HTTP 同步，不经隧道）
+- mesh：取自请求 ctx（认证层注入）；无 mesh 时返回空 mesh 的服务集
+- 响应：`[{"node": "node-a", "mesh": "m1", "name": "volread", "addr": "127.0.0.1:19000"}]`
+  （`mesh` 为空时省略；无服务时为空数组 `[]`）
+- 错误：`404` `hub 未启用`（路由表未装配）；JSON 序列化失败 → `500`
+
 ### DELETE /api/hub/nodes/{id}
 
 移除节点（幂等）。
@@ -732,6 +868,46 @@ Hub 统计。
 
 使 SK 条目过期。
 
+## 外部认证登录面（OIDC / LDAP）
+
+外部身份登录（roadmap 11.7-⑥）。仅在 `external_auth.oidc.enabled` / `external_auth.ldap.enabled`
+为 `true` 时注册（未启用 = 路由不存在 → `404`，零回归）。
+
+- 认证分类：`public`（主 mux，`ipGate` 白名单——登录前无法做 SproxySig）/ 隧道内层 `tunnel`
+- 登录成功后发会话 cookie `sproxy_session`（HttpOnly + SameSite=Lax + `Secure` 由 TLS 开关决定；
+  HMAC-SHA256 签名）；后续请求凭 cookie（或 OIDC `Authorization: Bearer <id_token>`）经认证链识别。
+  会话密钥 `external_auth.session_secret` 未配置时回落进程内随机密钥——**重启即全员下线**
+
+### GET /auth/oidc/login
+
+发起 OIDC Authorization Code + PKCE 登录。
+
+- 服务端生成 PKCE `code_verifier` + 一次性 `state`（有效期 10 分钟，内存表上限 4096 条），
+  然后 `302 Found` 重定向到 issuer 的 `authorization_endpoint`（带 `response_type=code`、
+  `client_id`、`redirect_uri`、`scope`、`state`、`code_challenge`+`code_challenge_method=S256`）
+- 错误：`503` discovery 不可用（无法获取授权端点）；`500` 随机数/重定向 URL 构造失败
+
+### GET /auth/oidc/callback?code=&state=
+
+OIDC 授权码回调。
+
+- 校验 `state`（**单次使用**，用完即删）→ 用 `code` + `code_verifier` 向 `token_endpoint` 换取
+  `id_token` → 验签与 claims（iss/aud/exp）→ 按 `claim_owner`（缺省 `email`，回退 `sub`）映射 owner
+  → 发会话 cookie → `302 Found` 到 `/ui/`
+- AK 由 `sub` 稳定派生（`oidc-<sha256(sub)[:16hex]>`）
+- 错误：`400` 缺 `code`/`state`；`401` state 无效或过期 / token 交换失败 / id_token 校验失败；
+  `503` discovery 不可用；`500` 会话签发失败
+
+### POST /auth/ldap/login
+
+LDAP 绑定登录。请求体 JSON：`{"username": "alice", "password": "…"}`。
+
+- 流程：服务账号 bind（`bind_dn` 可空 = 匿名 search）→ 按 `user_filter`（`{{username}}` 占位符，
+  LDAP filter 转义）搜用户 DN → 用户 DN bind 验证口令 → 映射 owner（`username_attr` 属性值，回退用户名）
+- 成功：`200` + `{"ok": true}`，并下发会话 cookie（AK = `ldap-<sha256(username)[:16hex]>`）
+- 错误：`400` 请求体非法 / 缺用户名或口令；`401` bind/search/口令失败（**统一文案**「登录失败」，
+  不泄露账号存在性）；`500` 会话签发失败。`ldaps://` 严格校验证书（不支持 InsecureSkipVerify）
+
 ## 隧道
 
 ### POST /tunnel
@@ -770,9 +946,9 @@ AES-256-GCM 加密的转发请求。请求体为帧协议：
 - **Web UI**：Hub 面板（Hub tab）以状态卡形式展示本视图，且与 Hub 节点表**各自独立容错**
   （隧道模式下 `/api/hub/*` 404 不影响本卡显示）。
 
-### `GET /api/mesh/acl`（跨节点授权只读视图，W3）
+### GET /api/mesh/acl
 
-返回**调用者自己 owner** 的跨节点授权（服务端卷 ACL 的 `mesh_readers` 条目）。
+**跨节点授权只读视图（W3）**：返回**调用者自己 owner** 的跨节点授权（服务端卷 ACL 的 `mesh_readers` 条目）。
 
 ```json
 {
@@ -794,6 +970,14 @@ AES-256-GCM 加密的转发请求。请求体为帧协议：
 - 挂载面：主 mux 走 `authMiddleware`（**不挂** `fileRoute` 的角色门禁——owner 过滤本身就是边界，
   且该端点不触碰文件系统）。
 - **CLI**：`sclient mesh acl`（见 `docs/cli.md`）。
+
+### GET /metrics
+
+Prometheus 文本格式运行时指标（`text/plain; version=0.0.4`）。认证由 `MetricsAuth` 把关
+（`Authorization: Bearer <api_key>` 或 SproxySig 凭据 AK；未认证 `401`）。
+
+指标族见下文各小节（跨节点 / mux 传输质量 / 卷健康 / 派生状态 / 内存观测）；
+无样本时仍输出 `HELP`/`TYPE` 头（让「一直没数据」与「指标不存在」在面板上可区分）。
 
 ### 跨节点指标（`GET /metrics`，W4）
 
@@ -877,7 +1061,7 @@ sproxy_search_index_rebuilds_total  # 全量重建次数（冷启动/失效/LRU 
 - `rebuilds_total` 持续快速增长 ⇒ 失效过于频繁（检查 refresh/旁路写）或 LRU 过小；
 - `misses_total` 持续增长而 `hits_total` 不增 ⇒ 缓存未命中（TTL=0 下多因写穿失效/显式刷新）。
 
-### 内存观测指标 + /debug/pprof（roadmap §6 P2）
+### 内存观测指标（roadmap §6 P2）
 
 `/metrics` 暴露进程级堆分配指标（`runtime.MemStats` 拉取时采样，无标签）：
 
@@ -896,7 +1080,59 @@ sproxy_gc_cycles 42
 `debug_pprof_enabled: true` 显式开启（默认关 = 404），且必须经 SproxySig/APIKey 认证（未认证 401）。
 启用状态启动日志可观测（安全开关铁律）。
 
+### GET /debug/pprof/
+
+Go 标准库 pprof 子树：`heap` / `goroutine` / `allocs` / `block` / `mutex` / `cmdline` /
+`symbol` / `trace`。仅在 `debug_pprof_enabled: true` 时挂载（默认关 = `404`，零回归），
+且经 `authMiddleware` 认证（SproxySig / APIKey；未认证 `401`）。启用状态在启动日志中可观测
+（安全开关铁律）。
+
+## 信令（signal，hub 中转 WebRTC）
+
+Hub 中转 WebRTC 的信令投递面。仅 `hub.enabled` 且路由表装配时注册（否则 `404` `hub 未启用`）。
+主 mux `auth` / 隧道内层 `tunnel` 双注册。
+
+**身份绑定（所有信令端点）**：请求头 `X-Node-ID`（声明自身节点）与 `X-Node-Secret`
+（B1 下发的 per-node secret，恒定时间比对）必须与路由表登记一致；节点必须与请求 ctx 的 mesh 一致。
+
+- 缺少 `X-Node-ID` → `400`；节点未注册 → `400`；per-node secret 为空或不匹配 → `403`；
+  跨 mesh → `403`
+- `SignalMsg` 字段：`id`（服务端去重 ID）、`kind`、`from`（服务端从 `X-Node-ID` 派生，**忽略 body 伪造值**）、
+  `to`、`sdp`、`cand`（trickle ICE 预留，当前恒空）、`at`（毫秒时间戳，服务端设置）
+- 队列容量受限：全局满 / per-sender 配额超 → `429`（调用方需回落重试）；
+  `hub.persist_file` 配置时收件箱快照同步落盘
+
+### POST /api/signal/offer
+
+投递一条 `kind=offer` 信令到 `to` 节点收件箱。
+
+- 请求体（≤ 8 KiB）：`{"to": "peer-b", "sdp": "…"}`（`from` 由服务端填充）
+- 响应：`202 Accepted`（空体）
+- 错误：`400` 解析失败 / 缺少 `to` / 给自己发 / `to` 节点未注册 / `from` 与 `to` 跨 mesh；
+  `413` 消息体超 8 KiB；`429` 队列满
+
+### POST /api/signal/answer
+
+同上，投递 `kind=answer`（请求体与错误码同 `offer`）。
+
+### POST /api/signal/candidate
+
+同上，投递 `kind=candidate`（trickle ICE 预留注入点；当前 ICE 全内联 SDP，保留兼容旧对端）。
+
+### GET /api/signal/poll/{peer}?kind=
+
+长轮询取走**自己**收件箱的一条信令（取走即从队列删除；请求者 `X-Node-ID` 必须等于 `peer`，
+否则 `403`）。
+
+- query 参数：`kind`（可选，`offer` / `answer` / `candidate`；非空时只取该 kind，其余 kind 保留在队列）；
+  空 = 任意 kind
+- 响应：`200` + `[{…SignalMsg…}]`（0 或 1 条）；最长等待 `hub.PollTimeout`（25s），超时返回空数组
+- 错误：`400` 缺少 `X-Node-ID` / 节点未注册；`403` `peer` 与调用方身份不一致 / secret 不匹配 / 跨 mesh；
+  `404` hub 未启用
+
 ## 卷列表（GET /api/volumes）
+
+### GET /api/volumes
 
 列出当前 owner 可见卷（系统盘 + 用户卷，ACL 过滤后视图）。每卷含健康状态 `state`（roadmap 3.3 P1
 后端健康探针）：
@@ -918,6 +1154,8 @@ sproxy_gc_cycles 42
 
 ## 卷状态缓存刷新（POST /api/volumes/refresh）
 
+### POST /api/volumes/refresh
+
 强制刷新卷缓存/索引——**默认永不过期**的缓存下，这是感知「进程外改动」的唯一入口
 （用户裁定 2026-10-29）。本进程的写由事件写穿（下一次读立即可见），但本机直写盘 / 同根多实例 /
 备份恢复 / 网盘 App 直改不会自动收敛。
@@ -937,6 +1175,112 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 响应：`{"success": true, "message": "..."}`；未知/未授权卷 → 403（防枚举）；未装配缓存且无索引 → 405
 - 审计：`action=volume_refresh`（`object` = 卷名，全部卷形态为 `*`）
 - 等价入口：CLI `sclient volume refresh [<卷名>]`、Web UI 工具栏「强制刷新」按钮
+
+## 卷运维（move / rebalance / copy / export / import / backup）
+
+以下端点均为写/读卷操作，owner 恒取自请求认证；`from_volume` / `to_volume` 必须在 owner 卷视图内
+（否则 `403`，不泄卷存在性）。响应统一形如 `{"success": bool, "message": "…"}`（rebalance/copy
+另有结构化字段）。
+
+### POST /api/volumes/move?from_volume=&to_volume=&filename=
+
+跨卷移动同 owner 同 rel 文件（`move` 保留目标、删除源）。
+
+- 认证：主 mux `user`（写子组）/ 隧道内层 `tunnel`
+- query 参数：`from_volume`、`to_volume`、`filename`（均必填；缺参 → `400`；`filename` 经
+  `ValidateFilePath`）
+- 语义：`from==to` = 同卷 no-op 成功（幂等）；跨卷 = 目标侧双账本预留（owner 配额 + 目标卷容量）
+  → 流式复制到临时文件 + fsync + 原子 rename → 删源 → 结算；单文件锁与上传共用（同 rel 并发恰一成功）
+  - 本地卷→本地卷走路径式原子核心；**含外部/加密/封装卷**时交域侧统一写内核（封装卷不能作 move 目标）
+- 错误：`400` 缺参/路径非法/卷未装配/目标卷不支持；`403` 卷不在 owner 视图；`404` 源不存在；
+  `409` 目标卷（或视图内其它卷）已存在同 rel / 同文件并发；`507` 配额或容量不足（含目标 meta 配额探测失败）；
+  `500` 复制/结算失败
+- 审计：`volume_move`（成功含字节数；失败/拒绝也留痕）
+
+### POST /api/volumes/rebalance?from_volume=&to_volume=&max_bytes=
+
+卷再平衡：把 `from` 卷 user 桶文件按大小降序逐文件迁到 `to` 卷，直到 `max_bytes` 用尽或无可迁文件。
+
+- 认证：主 mux `user` / 隧道内层 `tunnel`
+- query 参数：`from_volume`、`to_volume`（必填）；`max_bytes`（可选，0/空 = 不限；非整数/负数 → `400`）
+- 语义：逐文件复用 move 的原子单文件核心；**单文件失败跳过继续**（尽力而为）；`from==to` = no-op 成功
+- 响应：
+  ```json
+  {"success": true, "message": "卷再平衡完成: 3 个文件、1048576 字节已迁移",
+   "moved": 3, "bytes_moved": 1048576, "remaining": 2097152}
+  ```
+  （`remaining` = 迁移后 `from` 卷容量池 `Usage`；在途进度由 `/metrics` 的
+  `sproxy_rebalance_progress{from_volume,to_volume}` 暴露，任务结束后序列消失）
+- 错误：`400` 缺参/`max_bytes` 非法/卷未装配；`403` 卷不在 owner 视图；`500` 列举源卷失败
+- 审计：`volume_rebalance`（`object` 为 `from→to`）
+
+### POST /api/volumes/copy?from_volume=&to_volume=&filename=
+
+跨卷复制（保留源）。
+
+- 认证：主 mux `user` / 隧道内层 `tunnel`
+- query 参数：`from_volume`、`to_volume`、`filename`（必填）；`to`（可选目标路径，缺省 = `filename`）；
+  `force=true`（可选，允许覆盖已存在目标）
+- 两种形态：
+  - **经典跨卷同 rel**（无 `to`/`force`，两侧均本地卷）：双预留 + 流式 + 原子 rename；目标卷已有同 rel
+    且 checksum 一致 → `200` 幂等成功（不重复计费），不一致 → `409`（不静默覆盖）
+  - **通用复制**（目标路径不同 / `force` / 任一侧外部卷）：交 `files.Service.CopyFile` 统一写内核
+    （外部卷→本地卷重新加密；同卷 + 卷支持 blob 直拷时不重新加解密）
+- 响应：`{"success": true, "message": "…", "checksum": "…", "size": 1048576}`（幂等命中另带
+  `"idempotent": true`）
+- 错误：`400` 缺参/路径非法/卷未装配；`403` 卷不在 owner 视图；`404` 源不存在；`409` 目标已存在；
+  `507` 配额/容量不足；`500` 读写失败
+
+### GET /api/volumes/export?volume=&strict=true
+
+卷备份导出：流式 `application/x-tar` 响应，逐文件写 `user/<rel>` 条目，末尾附 `manifest.json`。
+
+- 认证：主 mux `reader`（只读子组）/ 隧道内层 `tunnel`
+- query 参数：`volume`（可选；**缺省 = owner 可访问的全部卷合并导出**，显式指定则只导该卷）；
+  `strict=true`（可选，导出中源文件被并发修改/删除时中止流，缺省宽松：该条目记 warning 继续）
+- 响应头：`Content-Type: application/x-tar`、`Content-Disposition: attachment; filename="volume-<卷>-<unix>.tar"`
+- `manifest.json`：`{"volume": "main", "files": [{"path": "user/dir/a.txt", "size": 123,
+  "mtime": 1750000000000000000, "checksum": "…", "ledger": "…"}], "warnings": ["…"]}`
+  （`checksum` = 导出时实时重算；`ledger` = 台账登记值，供交叉校验）
+- 错误：枚举失败 → `500` `{"success": false, "message": "读取卷文件失败"}`（JSON，在写 tar 头之前）；
+  非 strict 下单条目失败仅记入 `warnings`
+
+### POST /api/volumes/import?volume=&overwrite=true
+
+卷备份导入：请求体 = `application/x-tar` 流（与 export 产物同构）。
+
+- 认证：主 mux `user` / 隧道内层 `tunnel`
+- query 参数：`volume`（可选；缺省 = 默认卷）；`overwrite=true`（可选，允许覆盖同名文件；缺省跳过）
+- 语义：先扫描收集 `manifest.json` 与文件条目 → 逐条 `ValidateFilePath`（拒绝穿越）→ 配额 Reserve →
+  同名存在且未 `overwrite` → 跳过 → 经统一写路径落盘并登记 checksum 台账 → 有 manifest 时校验 checksum（不符 → 该条失败跳过）
+- 响应：
+  ```json
+  {"success": true, "message": "导入完成", "imported": 2, "skipped": 1, "failed": 0,
+   "errors": ["dir/b.txt: checksum 不符"]}
+  ```
+  （`skipped` = 已存在未覆盖 / 配额不足 / 路径非法 / checksum 不符；单 tar 条目上限 1 GiB）
+- 错误：tar 损坏在扫描阶段记入 `errors` 并继续处理已收集条目；响应恒 `200`（部分失败显式化）
+
+### POST /api/backup
+
+卷备份到配置卷（源=本地卷 user 桶，目标=本地卷或外部卷的写面；增量语义由 manifest 比对 size+mtime）。
+
+- 认证：主 mux `auth`（SproxySig / APIKey）/ 隧道内层 `tunnel`
+- 请求体（≤ 1 MiB）：
+  ```json
+  {"target": "backup-vol", "source": "main", "verify": true, "concurrent": 4, "exclude": ["*.tmp"]}
+  ```
+  - `target`（必填）：目标卷名（ACL 校验；外部卷走其写面）；`source`（可选，空 = 默认卷）
+  - `verify`：传输后对目标 `Stat` 校验 size；`concurrent`：并发文件数（≤0 = 引擎默认 4）；
+    `exclude`：`path.Match` glob 排除
+- 响应（部分失败也 `200`）：
+  ```json
+  {"files": 10, "bytes": 10485760, "skipped": 2, "failed": 0, "errors": ["dir/a.txt: …"],
+   "truncated": false}
+  ```
+- 错误：`400` 请求体解析失败 / `target` 为空 / 源与目标同卷（自备份） / 源卷根不可用；
+  `403` 源或目标卷不在 owner 视图；`502` 远端写面不可达；`500` 备份执行失败
+- 审计：`backup`（`failed>0` 或 `truncated` ⇒ `result=error`）
 
 ## 用户卷（per-owner 用户自有卷）
 
@@ -1051,20 +1395,107 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 
 删除任务（终态清理）。跨 owner 404。
 
-## 卷后端类型（GET /api/backends）
+## 同步冲突（sync conflicts）
 
-返回服务端已注册的卷后端类型（动态，随 `RegisterBackend` 注册变化）。
+三方合并（merge3）产生的冲突索引（未装配冲突索引 → 响应 `400` `sync conflicts not configured`）。
+所有端点：主 mux `auth` / 隧道内层 `tunnel`；`ActorFrom(ctx)` 作为 owner 边界。
+
+### GET /api/sync/conflicts
+
+列出当前 owner 的**未解决**冲突（时间升序）。
+
+- 响应：`{"success": true, "conflicts": [ConflictItem…]}`
+- `ConflictItem` 字段：`id`、`path`（同步相对路径）、`hunk_count`、`base_sha` / `ours_sha` / `theirs_sha`、
+  `ours` / `theirs`（行快照）、`ts`（毫秒时间戳）；已解决条目不在列表出现
+
+### GET /api/sync/conflicts/{id}
+
+单条冲突详情（包含已 `resolved` 的历史条目）。
+
+- 响应：`ConflictItem`（另带 `resolved` / `resolve_at`）
+- 错误：`404` `{"error": "conflict not found"}`；未装配 `400`
+
+### POST /api/sync/conflicts/{id}/resolve
+
+解决冲突并把结果写回冲突文件路径（替换带冲突标记的文件）。
+
+- 请求体：`{"choice": "ours|theirs|manual", "content": "…"}`
+  - `ours` / `theirs`：取对应侧快照写回；`manual`：必须显式提供 `content`
+- 响应：`{"success": true, "path": "dir/a.txt"}`
+- 错误：`400` 请求体非法 / `choice` 不支持 / `manual` 缺 content / 取快照失败；`404` id 不存在；
+  `500` 写回文件失败（文案含原因）
+- 副作用：条目标记 `resolved`（不再出现在列表）；重建目标文件 sidecar；审计 `sync_conflict_resolve`
+  （detail `choice=<choice> id=<id>`）
+
+## secrets 卷管理（/api/secrets）
+
+per-owner 默认 secrets 卷的管理面（存储：`<storage_root>/<owner>/meta/secrets/<name>`，租户首次使用自动派生）。
+服务端只做「校验 + 落盘」，**不参与口令/密钥派生**，原始口令永不传输到本层。
+
+- 认证：主 mux 写面 `user` / 读面 `reader`（SproxySig）；隧道内层 `tunnel`
+- 失败形态：请求者租户不可用 → 纯文本 `503` `secrets 卷不可用（请求者租户未装配存储根）`
+  （非 JSON）；内部 IO 失败 → `500`。审计动作：`secret_create` / `secret_export` / `secret_delete`
+
+### POST /api/secrets
+
+创建（追加/覆盖）一个 secret。请求体（≤ 1 MiB）：
 
 ```json
-{"backends": ["baidupcs", "webdav", "s3", "sftp"]}
+{"name": "main-key", "mode": "random", "value": "", "origin": "random"}
 ```
 
+- `name`：secret 名（trim 后使用；非法名/路径穿越 → `400`）
+- `mode`：`random`（缺省；服务端 `crypto/rand` 生成 32B→hex）| `import` / `passphrase`
+  （客户端传 `value`，服务端校验 64 位 hex 后落盘）
+- `origin`：来源标注（信息性，不影响落盘内容）
+- 响应：`{"name": "main-key", "value": "…", "origin": "random", "message": "ok"}`
+  （`value` **仅 random 模式返回**，供创建后立即备份；import/passphrase 不回显）
+- 错误：`400` 请求体解析失败 / 未知 mode / 非法名或非法 value；`500` 落盘失败
+
+### GET /api/secrets
+
+列出 owner 默认 secrets 卷内全部 secret 名（排序）。
+
+- 响应：`{"secrets": ["main-key", "other"]}`
+- 错误：`500` 列举失败
+
+### GET /api/secrets/{name}
+
+导出 secret 内容（**明文 hex 文本**，供备份/迁移；安全敏感，恒记审计）。
+
+- 响应：`{"name": "main-key", "value": "<hex>", "origin": "export"}`
+- 错误：`400` 非法名；`404` 不存在（fail-closed）；`500` 读取失败
+
+### DELETE /api/secrets/{name}
+
+删除 secret（不存在 → `404`，不静默 no-op）。
+
+- 响应：`{"name": "main-key", "deleted": "true"}`
+- 错误：`400` 非法名；`404` 不存在；`500` 删除失败
+
+## 卷后端类型（GET /api/backends）
+
+### GET /api/backends
+
+返回服务端已注册的卷后端类型 + 每类型的建卷表单 schema（动态，随 `RegisterBackend` 注册变化）。
+
+```json
+{"backends": [{"type": "s3", "category": "linked", "label": "",
+  "fields": [{"key": "endpoint", "label": "Endpoint", "type": "text", "required": true}]}]}
+```
+
+- `category` ∈ `linked`（外部后端）/ `wrapper`（封装/密钥类，如 `secrets`/`secretdata`/`egress`）/
+  `mt-local`（本地）；`fields[].type` ∈ `text` / `volume-select` / `enum` / `bool` / `number`；
+  `options` 仅 `enum` 有值；`required=true` 的键必填。未实现 `SchemaProvider` 的后端 `fields` 为空数组
+  （前端只填卷名）
 - 供 Web UI 类型下拉 / sclient 提示已注册类型
 - 新增外部后端 = 新 backend 包 `RegisterBackend(type, factory)` 注册，前端自动感知
   - `s3`：`endpoint`/`bucket`/`access_key`/`secret_key`（必填），`region`/`use_ssl`/`local_root`（可选）；大文件分片上传（roadmap 3.3 P1）：`multipart_threshold`（分片阈值，默认 64MiB）、`multipart_part_size`（分片大小，默认 16MiB，minio 5MiB 下限钳制）、`upload_retries`（失败重试次数，默认 3）
   - `sftp`：`url`（`sftp://user@host[:port][/root-path]`，必填）+ `private_key` 或 `password`（二选一），`root`（远端根，可选）
 
-### 预签名直传（`POST /api/backends/{type}/presign`）
+### POST /api/backends/{type}/presign
+
+预签名直传 URL 签发（服务端持凭据代签）。
 
 > **卷上默认禁（2026-10-18，#44① (b)）**：`method=PUT` 且目标命中**已配置卷**时，服务端
 > **默认拒绝（403）** —— PUT 由客户端直传对象存储，服务端**看不到那次写**；`presign/complete`
@@ -1082,7 +1513,9 @@ query 参数：`path`（卷内相对路径，必填）、`method`（`PUT`/`GET`�
   `meta` 功能桶）→ 403**。这样对象落点与文件 API 一致（此前落裸 key、文件 API 不可见）。
 - 响应 `{"url": "…"}`；未注册类型 → 404；后端不支持预签名 → 405；`method`/`expires` 非法 → 400。
 
-### 预签名登记（`POST /api/backends/{type}/presign/complete`）
+### POST /api/backends/{type}/presign/complete
+
+预签名直传完成后的登记（服务端校验对象存在 + 记账）。
 
 > **登记是义务，不是可选**：complete 经**统一写内核**（`ContentPresent` 模式）完成存在性/size
 > 校验（fail-closed）+ **双账本结算**（owner 配额 + 卷容量池）+ 元数据/台账 —— 与普通上传同一套
@@ -1115,7 +1548,7 @@ query 参数：`path`（必填）、**`size`**（直传对象字节数，非负�
 > 条目已含 `owner`（归属租户）与 `volume`（卷维度）字段；将来开放「用户维度自视图」时必须在
 > 同一裁决函数内改为「该 owner 的过滤视图 + 脱敏」。
 
-### `GET /api/audit`
+### GET /api/audit
 
 返回最近审计事件（按时间倒序，最新在前）：
 
@@ -1133,7 +1566,7 @@ query 参数：
 `volume` 语义：审计条目的**卷维度**——显式值 > 请求 `?volume=` 绑定 > 单卷部署补默认卷名；
 多卷部署中自动放置且未绑定时为**空**（不猜默认卷，避免记错归属）。
 
-### `GET /api/audit/export`
+### GET /api/audit/export
 
 导出审计事件为 JSON 数组（按 `ts` 升序，时间正序；供日志 collector 顺序回放）。
 
@@ -1143,7 +1576,7 @@ query 参数：`action` / `actor` / `volume`（同上）、`after_ts`（RFC3339�
 - 审计默认落盘（`<默认卷根>/audit/audit.log`）：导出全量历史（含重启前事件）；冷段（归档）合并进结果
 - 读面方向：`newest-first + limit` 走**冷段尾读**（只读最新段尾部），升序导出走按时间扫描
 
-### `GET /api/audit/cold/seg`
+### GET /api/audit/cold/seg
 
 按区间读取**已归档冷段**（取证式随机读：管理员按需取任意区间，不必整段下载）。
 
@@ -1154,6 +1587,31 @@ query 参数：
 
 响应：`200` + `application/x-ndjson` 原始字节，带 `X-Audit-Segment-Size` 与
 `Content-Range: bytes <off>-<end>-1/<size>`（便于客户端续读）。归档未启用 ⇒ `404`。
+
+## 计量报告（usage）
+
+### GET /api/usage/report?owner=&from=&to=&format=
+
+per-owner 周期用量（upload/download 字节）导出。数据源为日桶累计的 `usageStore`；
+`usage.enabled=false`（未装配 store）→ `400` `usage 未启用`。
+
+- 认证：主 mux `auth` / 隧道内层 `tunnel`；权限矩阵：
+  - `owner` 非空：管理员可查任意 owner，普通主体只能查自己（否则 `403`）
+  - `owner` 空（全部）：**仅管理员**可查（否则 `403`）
+- query 参数：
+  - `owner`（可选；空 = 全部，仅 admin）
+  - `from` / `to`（可选，`YYYY-MM-DD`；缺省 `from=2000-01-01`、`to=今天`；非法或 `from>to` → `400`）
+  - `format`：`json`（缺省）/ `csv`（其它值 → `400`）
+- 响应（JSON）：
+  ```json
+  {"from": "2026-11-01", "to": "2026-11-03",
+   "reports": [{"owner": "alice", "from": "2026-11-01", "to": "2026-11-03", "days": 3,
+                "kinds": {"upload_bytes": 1048576, "download_bytes": 2048}}]}
+  ```
+  - `owner` 不存在/无数据 → `200` + `reports: []`（报告语义不 404）
+- CSV 响应：`text/csv; charset=utf-8` + `Content-Disposition: attachment; filename="usage-report.csv"`
+  （RFC 4180 转义；表头 `owner,from,to,days,kind,value`，每 kind 一行）
+- 错误：`400` `usage 未启用` / from-to 非法 / format 非法；`403` 越权查询
 
 ## AI 洞察与配额（ai）
 
@@ -1351,6 +1809,43 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
 - 错误：`403` 非 admin 指定他人 owner；`503` 台账存储不可用；`500` 其它重建失败
 - 审计：`checksum_rebuild`（detail `entries=N`）
 
+## 协议挂载面（WebDAV / S3）
+
+以下两个前缀不是 JSON API，而是**协议端点**（供标准客户端直接读写）：
+
+### GET /dav/
+
+WebDAV 子树挂载（RFC 4918）：把请求者 owner 的 `user` 桶暴露为 WebDAV 端点，任意 WebDAV
+客户端（curl / 文件管理器 / rsync / 编辑器）可直接读写。
+
+- 启用：仅 `webdav.enabled: true` 时注册（默认关 = `404`，零回归）
+- 认证：`authMiddleware`（SproxySig / APIKey；未认证 `401`）——**不是**无认证裸挂
+- 选卷：`?volume=<卷名>`（经 ACL 校验，不可用 → `403`）；缺省走默认卷（同样校验默认卷 ACL）
+- 方法：`OPTIONS` / `PROPFIND` / `GET` / `HEAD` / `PUT` / `DELETE` / `COPY` / `MOVE` / `MKCOL` /
+  `LOCK` / `UNLOCK`（经 `golang.org/x/net/webdav`；不支持的方法 `405`）
+- 路径语义：`/dav/<rel>` 即 owner `user/<rel>`；经 `storage.Root` 适配 ⇒ 加密卷透明解密/加密、
+  封装卷封印生效（被封源目录直连读写恒拒 409 / 读视为 404）
+- 错误：`400` 卷集未装配 / 卷不存在；`403` 卷不可用（ACL）；`500` user 桶预建失败；其它状态码由
+  WebDAV handler 按 RFC 4918 返回
+
+### GET /s3/
+
+S3 兼容网关（SigV4 验签）：bucket = 已装配卷名（映射该卷 user 桶），未命中的首段视为普通 key
+（默认卷）。mux 层 `public`（`/s3/` 无限 SproxySig），验签在 handler 内完成。
+
+- 认证：`Authorization: AWS4-HMAC-SHA256 …`，AccessKey = sproxy 凭据 AK → 凭据 Ring 查 SK
+  → HMAC 重算签名恒定时间比对；缺失 `Authorization` → `401`；验签失败 → `403`
+- 支持的操作：
+  - `GET /s3/`：ListBuckets（`ListAllMyBucketsResult` XML，枚举请求者 ACL 可见本地卷）
+  - `HEAD /s3/`：桶存在性（`200`）
+  - `GET /s3/?list-type=2[&prefix=]`：ListObjectsV2（`ListBucketResult` XML）
+  - `GET` / `HEAD` / `PUT` / `DELETE /s3/<bucket>/<key>`：对象读/元信息/写/删
+  - 分块上传：`POST ?uploads`（init）/ `PUT ?partNumber=&uploadId=`（part）/ `POST ?uploadId=`（complete）/
+    `DELETE ?uploadId=`（abort）
+- 语义：写路径经统一写内核（配额双账本 + 元数据/台账）；加密卷透明加解密，`HEAD`/`GET` 的 size 为
+  **用户可见（明文）长度**；不支持 CreateBucket / DeleteBucket
+- 错误：`400` key 为空 / 卷不可用；`403` 验签失败；`500` 列目录/读写失败
+
 ## 错误码附录
 
 | HTTP | 业务原因（示例） |
@@ -1365,6 +1860,8 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
 | 500 | 服务端写文件、目录失败 |
 
 ## 配额与等待（`GET /api/quota`）
+
+### GET /api/quota
 
 返回**认证用户自己**的跨卷配额视图（owner 恒取自请求认证，不接受请求参数指定 owner）。
 
