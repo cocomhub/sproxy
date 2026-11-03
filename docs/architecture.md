@@ -898,9 +898,16 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   「分类 → 包装器」映射留在 `h.routeWrapper`（装配层唯一决定处，未登记分类 panic）。
 - 已下放：`cloudtasks`（16 条，试点 #1002）、`share`（3 条）、`notify`（3 条）、`ai`（5 条）、
   `verify`（1 条）。`GET /s/{token}` 是独立前缀的公网分发面，不属分享管理组，留在装配层注册。
-- 门禁 **R38** 扩展解析 `pkg/server/*/routes.go` 的 `RoutePrefix` + 字面量表（`routeTableFiles`），
-  迁移后仍与 `route_classes.tsv` 双向比对，deny-by-default 不变。
-- 设计见 `docs/designs/2026-11-02-route-group-registration.md`。
+- 门禁 **R38** 扩展解析 `pkg/server/*/routes.go` 与装配层 `pkg/server/routes_{files,sync,trash,ops}.go`
+  的 `RoutePrefix` + 字面量表（`routeTableFiles`），迁移后仍与 `route_classes.tsv` 双向比对，
+  deny-by-default 不变；**表声明分类与 TSV 分类逐条相等**（改分类必须同时改两处）。
+- **分类查表（2026-11-03，本轮）**：文件域分类不再在请求时用字符串白名单推导，改为
+  `route_class_index.go` 的 `模式串 → Class` 索引；键来自 `mux.Handler(r)`（中间件层
+  `r.Pattern` 尚为空）。`isFileGroupedRoute` / `isReadOnlyFileRoute` 已删除——这两个白名单
+  曾把「模式串 vs 具体路径」的歧义变成 **每次 500**（semantic search、backend presign）与
+  **隧道内层静默越权**。`isWriteFaceRoute` 的非文件写面清单保留（待剩余域进表后收敛）。
+- 设计见 `docs/designs/2026-11-02-route-group-registration.md` 与
+  `docs/designs/2026-11-03-route-class-single-source.md`。
 
 ### 剩余三块为何不再按切片下沉（2026-10-30 实测）
 

@@ -197,13 +197,13 @@ func TestWriteGuard_IsWriteFaceRoute(t *testing.T) {
 		{"/s3/k.txt", http.MethodHead},
 	}
 	for _, tc := range write {
-		if !isWriteFaceRoute(tc.path, tc.method) {
-			t.Errorf("isWriteFaceRoute(%q, %q) = false, want true（写面）", tc.path, tc.method)
+		if !isWriteFaceRoute(tc.method, tc.path) {
+			t.Errorf("isWriteFaceRoute(%q, %q) = false, want true（写面）", tc.method, tc.path)
 		}
 	}
 	for _, tc := range read {
-		if isWriteFaceRoute(tc.path, tc.method) {
-			t.Errorf("isWriteFaceRoute(%q, %q) = true, want false（读面）", tc.path, tc.method)
+		if isWriteFaceRoute(tc.method, tc.path) {
+			t.Errorf("isWriteFaceRoute(%q, %q) = true, want false（读面）", tc.method, tc.path)
 		}
 	}
 }

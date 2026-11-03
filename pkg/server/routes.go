@@ -3,7 +3,7 @@
 
 // routes.go 是**路由注册面**：RegisterRoutesOpts 选项结构体、RegisterRoutes（全部 HTTP 端点
 // 的装配与挂载，含主 mux 的 SproxySig 认证中间件与 localMux 隧道内层路由），以及路由级辅助
-// （isFileGroupedRoute / localMuxGate / fileRoute）。
+// （localMuxGate / fileRoute；分类查表见 route_class_index.go）。
 //
 // 拆分说明见 handlers.go 顶部。
 
@@ -399,8 +399,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 文件操作路由组（DEC-C）：authMiddleware + requireRole 门禁
 	// （upload/download/delete/rename/list/stat/mkdir/rmdir/search/batch/chunk/
-	// archive/versions/share…）。RBAC 细分（11.5-①）：只读子组
-	// （isReadOnlyFileRoute）走 fileRouteRead = requireRole(reader)
+	// archive/versions/share…）。RBAC 细分（11.5-①）：只读子组（声明分类
+	// ClassReader）走 fileRouteRead = requireRole(reader)
 	// （Role∈{reader,user,admin}）；写子组保持 fileRoute = requireRole(user)
 	// （Role∈{user,admin}，一字不改零回归）。
 	// 全仓 checksum 巡检（roadmap 11.3-⑩）：POST /api/verify 是运维审计面，走
@@ -597,153 +597,73 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 链序（由外到内）：metrics → requestLog → gzip → **auditVolume**（先把卷维度绑进 ctx，
 	// 保证内层审计中间件与业务 handler 都能读到）→ audit（传输兜底）→ writeGuard → 路由。
 	h.handler = h.metricsMiddleware(h.requestLogMiddleware(GzipMiddleware(log.With("component", "gzip"))(
-		h.auditVolumeMiddleware(h.auditMiddleware(h.writeGuardMiddleware(srvMux))))))
+		h.auditVolumeMiddleware(h.auditMiddleware(h.writeGuardMiddleware(srvMux, srvMux))))))
 
 	return h
 }
 
-// isFileGroupedRoute 判定给定路由是否属于「文件操作组」（单一事实源，拒绝双份清单
-// 漂移，F1/F2 收口）。文件操作组的成员 = 主 mux 面经 fileRoute[Read] 包装的路由
-// 全集：
-//   - 精确匹配：upload/download/delete/rename、api/files*/mkdir/rmdir/batch*、
-//     archive/versions/share/shares（share 列表 /api/shares 与撤销已含）；
-//   - 前缀分支：/upload/{init,chunk,status,sessions,complete} 与 /download/chunk
-//     （分块上传/下载，与 fileRoute 包裹的 chunk 组严格对齐）。
+// matchedPattern 返回请求在 next mux 上的**已匹配模式**（形如 "POST /upload"）。
 //
-// 用途：
-//   - fileRoute / fileRouteRead（主 mux 面）：path 命中组 → 按只读/写子组分别过
-//     requireRole(reader/user)；未命中 → 返回 errNotFileGrouped，调用方写 500 +
-//     Error 日志（fail-closed 防接线错误把文件类新路由漏挂门禁——宁可显式故障，
-//     不为未列出的新文件路由静默放行）；
-//   - localMuxGate（隧道内层面）：path 命中组 → principal 非 nil（传统 POST
-//     /tunnel 路径）时按只读/写子组 requireRole(reader/user) 收口、node → 403；
-//     principal nil（xfer 直连路径）跳过（会话由握手密钥/pinning 闭合）；未命中 →
-//     保持既有裸注册（隧道加密即认证 / cloud/credentials/audit/stats/config/hub
-//     等非文件面）。
-//
-// 新增文件类路由必须同步：既挂主 mux fileRoute[Read]，又在本函数与
-// isReadOnlyFileRoute 补成员——三处同源，漏其一即测试
-// （TestRegister_TunnelInnerGate* / TestLocalMuxCoversAllTunnelRoutes /
-// TestRBAC_ReadOnlyRouteClassification）暴露。
-func isFileGroupedRoute(path string) bool {
-	switch path {
-	case "/upload", "/download", "/delete", "/rename",
-		"/api/files", "/api/files/stat", "/api/files/search", "/api/search/semantic", "/api/tags", "/api/du",
-		"/api/files/meta",
-		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
-		"/api/archive", "/api/archive-dir",
-		"/api/versions", "/api/versions/restore",
-		routeVolumesBase, "/api/volumes/move", "/api/volumes/rebalance", "/api/volumes/copy", "/api/volumes/refresh", "/api/volumes/user",
-		"/api/volumes/export", "/api/volumes/import",
-		"/api/backends",
-		// 注：`/api/backends/{type}/presign*` 是**模式串**，运行时 path 是具体值
-		// （/api/backends/local/presign），故由下方前缀规则判定，此处不列字面量。
-		"/api/shares",
-		// secret 卷管理（/api/secrets 专用端点：创建随机/import、列表、导出、删除）。
-		// 主 mux 面挂 fileRoute/fileRouteRead——须与 isReadOnlyFileRoute 同源补成员
-		// （漏列 → fileRoute 判定「不在文件组」500，防接线错误静默放行）。
-		"/api/secrets",
-		// 联邦配额视图（GET /api/quota，只读；fileRouteRead 包装须与两组清单同源补成员）。
-		"/api/quota",
-		// 分块上传/下载（主 mux 面均挂 fileRoute[Read]——见 RegisterRoutes 装配处清单）；
-		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。
-		"/upload/init", "/upload/chunk", "/upload/status", "/upload/sessions", "/upload/complete",
-		"/download/chunk":
-		return true
+// 为什么不能直接用 r.Pattern：包住 mux 的中间件在 mux 匹配**之前**执行，此时
+// r.Pattern 仍为空（它由 ServeMux 在调用 handler 时写入）。`mux.Handler(r)` 只做
+// 匹配、不执行 handler，因此能在中间件层拿到同一个模式串——查表的键与注册键同构。
+// 非 mux（测试替身/自定义 handler）回落 r.Pattern（可能为空 = 视为未声明）。
+func matchedPattern(mux *http.ServeMux, r *http.Request) string {
+	if mux != nil {
+		if _, pattern := mux.Handler(r); pattern != "" {
+			return pattern
+		}
 	}
-	// 动态参数路径组（Go 1.22 ServeMux {token} 通配——调用方传入的是实际 path，
-	// 需按前缀判定）：/api/shares/{token}（撤销也属文件组）、/api/secrets/{name}
-	// （导出/删除）。精确列表 /api/secrets 已在上方案例命中；此处补带 name 子路径。
-	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {
-		return true
-	}
-	// 带 `{type}` 通配的 presign 路由：**表里写的是模式串，运行时看到的是具体路径**
-	// （如 /api/backends/local/presign）。此前的字面量 case 永远匹配不上 ⇒ fileRoute
-	// 的接线自检对每次真实请求返回 500（后端直传完全不可用）。由装配面回归测试
-	// routes_file_face_test.go 抓到。
-	if strings.HasPrefix(path, "/api/backends/") &&
-		(strings.HasSuffix(path, "/presign") || strings.HasSuffix(path, "/presign/complete")) {
-		return true
-	}
-	return false
+	return r.Pattern
 }
 
-// isReadOnlyFileRoute 判定文件组内路由是否属于「只读子组」（RBAC 细分 11.5-①
-// 单一事实源，与 isFileGroupedRoute 同文件同风格）。只读子组 = reader 账号可访问
-// 的文件组路由（GET/list/search/stat/download/share 列表/卷列表等）；其余文件组
-// 成员即写子组（requireRole(user) 一字不改，零回归）。
+// authorizeTunnelFileClass 按声明分类对隧道内层文件域请求收口角色门禁。
+// 返回 false 表示已写回错误响应（调用方直接返回）。
 //
-// 成员（对齐设计文档 docs/designs/2026-09-24-rbac-roles.md §3）：
-//   - GET /download、GET /api/files、HEAD /api/files/stat、GET /api/files/search
-//     （主读面）；
-//   - GET /download/chunk（分块下载，读面）；
-//   - GET /api/versions（版本历史只读；versions-restore 是写子组）；
-//   - GET /api/archive-dir（可存档目录列表）；
-//   - GET /api/backends（后端列表）；
-//   - GET /api/volumes、GET /api/volumes/user（卷清单只读）；
-//   - GET /api/volumes/export（卷备份导出，只读）；
-//   - GET /api/shares 与 /api/shares/{token} 前缀组（分享列表；DELETE 撤销是写子组）。
-//
-// 用途：fileRouteRead（主 mux 面）与 localMuxGate（隧道内层面）同源：命中只读
-// 子组 → requireRole(reader)；命中写子组 → requireRole(user)。漏列/误列由
-// TestRBAC_ReadOnlyRouteClassification 与隧道读写双测兜住（设计文档风险 1）。
-// isReadOnlyFileRoute 判定文件组内路由是否只读子组（RBAC 细分 11.5-①）：
-// method 区分（GET/HEAD = 只读；其余 = 写）。单一事实源，与 isFileGroupedRoute
-// 同文件同风格。命中只读子组 → requireRole(reader)；写子组 → requireRole(user)。
-func isReadOnlyFileRoute(path, method string) bool {
-	if method != http.MethodGet && method != http.MethodHead {
-		return false // DELETE /api/versions（删版本）等写面一律走 user 门禁
-	}
-	switch path {
-	case "/download", "/api/files", "/api/files/stat", "/api/files/search", "/api/files/meta", "/api/du",
-		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
-		routeVolumesBase, "/api/volumes/user", "/api/volumes/export", "/api/shares",
-		"/api/secrets", "/api/quota",
-		// 语义搜索是只读 GET（向量索引检索，索引维护在调度器侧）。此前漏列 ⇒ 同一条
-		// 路由两个面策略不一致：主 mux 用 fileRouteRead（reader 可访问），而隧道内层
-		// localMuxGate 判为写子组（reader 403），且被 writeGuard 当成写面（只读副本上
-		// 拒绝一个读操作）。由差分测试 routes_files_equiv_test.go 抓到。
-		"/api/search/semantic":
+// principal 为 nil（xfer 直连，无外层身份）时放行——xfer 会话由握手密钥 /
+// Ed25519 pinning 闭合身份（见 localMuxGate 的说明）。
+func authorizeTunnelFileClass(w http.ResponseWriter, r *http.Request, class router.Class) bool {
+	p := PrincipalFrom(r.Context())
+	if p == nil {
 		return true
 	}
-	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {
-		return true
+	minRole := string(accesskey.RoleUser)
+	if class == router.ClassReader {
+		minRole = string(accesskey.RoleReader)
 	}
-	return false
+	if err := requireRole(p, minRole); err != nil {
+		status := http.StatusForbidden
+		if errors.Is(err, errUnauthorized) {
+			status = http.StatusUnauthorized
+		}
+		http.Error(w, err.Error(), status)
+		return false
+	}
+	return true
 }
 
 // localMuxGate 包装隧道内层 localMux（含传统 POST /tunnel 与 xfer 直连两路径共用的
-// apiHandler 链）：对「文件操作路由组」过 requireRole(PrincipalFrom(ctx)) 门禁
-// （任务② MUST-FIX 收口 + RBAC 细分：只读子组 requireRole(reader)、写子组
-// requireRole(user)）。组成员与子组判定 = isFileGroupedRoute /
-// isReadOnlyFileRoute（与主 mux fileRoute[Read] 同源）。判定语义见 isFileGroupedRoute
-// / RegisterRoutes 装配处大段注释。
-func (h *Handlers) localMuxGate(next http.Handler) http.Handler {
+// apiHandler 链）：对「文件域路由」按**声明分类**收口角色门禁。
+//
+// 分类来源是 `route_class_index.go` 的查表（键 = ServeMux 已匹配模式 `r.Pattern`），
+// 不再用请求路径重新推导字符串白名单——那套写法曾把「模式串 vs 具体路径」的歧义变成
+// **静默越权**（漏列 ⇒ 判为非文件组 ⇒ 完全不做角色检查）。
+func (h *Handlers) localMuxGate(mux *http.ServeMux, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isFileGroupedRoute(r.URL.Path) {
-			// 非文件组（cloud/credentials/register/audit/stats/config/hub/信令…）：
+		class, declared := fileDomainClass(matchedPattern(mux, r))
+		if !declared || (class != router.ClassUser && class != router.ClassReader) {
+			// 非文件域（cloud/credentials/audit/stats/config/hub/信令…）：
 			// 保持既有裸注册（隧道加密即认证 / 免身份语义）。
 			next.ServeHTTP(w, r)
 			return
 		}
-		// 文件组：principal 非 nil（传统隧道路径外层已认证）才收口；nil（xfer
+		// 文件域：principal 非 nil（传统隧道路径外层已认证）才收口；nil（xfer
 		// 直连，无外层身份）跳过——xfer 会话由握手密钥 / Ed25519 pinning 闭合身份。
 		// 前提：HubXferKey 候选必须是 user/admin 凭据（node AK 不应进入 xfer 握手
 		// 密钥候选集——若 node 凭据排序在前，xfer 面会对该 node 开放文件面），见
 		// task-3-report.md「隧道内层门禁收口说明」。
-		if p := PrincipalFrom(r.Context()); p != nil {
-			minRole := string(accesskey.RoleUser)
-			if isReadOnlyFileRoute(r.URL.Path, r.Method) {
-				minRole = string(accesskey.RoleReader)
-			}
-			if err := requireRole(p, minRole); err != nil {
-				status := http.StatusForbidden
-				if errors.Is(err, errUnauthorized) {
-					status = http.StatusUnauthorized
-				}
-				http.Error(w, err.Error(), status)
-				return
-			}
+		if !authorizeTunnelFileClass(w, r, class) {
+			return
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -754,21 +674,16 @@ func (h *Handlers) localMuxGate(next http.Handler) http.Handler {
 // 单节点零回归（写面全放行）。判定口诀（设计 cluster-readonly-replica.md §2.2）：路由
 // 语义「改状态（文件/meta/配置）」→ 设门；「只读状态」→ 不设门。
 //
-// 写面路径集合（与设计 §2.2 写面清单对齐）：
-//   - 文件写子组（isFileGroupedRoute && !isReadOnlyFileRoute：upload/delete/rename/
-//     mkdir/rmdir/batch/archive/versions-restore/trash-restore-empty/tags）；
-//   - 非文件组写面：/api/config（PUT）、/api/credentials（写族）、/api/cloud/*
-//     （任务创建/取消/删除）、/api/sync/tasks（写族）、/api/volumes（写族）、
-//     /api/notify/test、/api/ai/privacy/purge、/api/verify。
-//
-// 读面（下载/列表/搜索/统计/健康）不设门。
-func (h *Handlers) writeGuardMiddleware(next http.Handler) http.Handler {
+// 文件写子组按**声明分类**判定（表驱动，与 fileRoute 同源）；非文件组写面见
+// isWriteFaceRoute 的清单（PUT /api/config、凭据/cloud/sync/volumes 写族、notify test、
+// ai purge、verify、S3 写）。
+func (h *Handlers) writeGuardMiddleware(mux *http.ServeMux, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.writeGuard == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !isWriteFaceRoute(r.URL.Path, r.Method) {
+		if !isWriteFaceRoute(r.Method, matchedPattern(mux, r)) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -784,10 +699,18 @@ func (h *Handlers) writeGuardMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// isWriteFaceRoute 判定路径是否属于写面（设计 §2.2 写面清单 + 文件写子组）。
-func isWriteFaceRoute(path, method string) bool {
-	// 文件写子组：文件组 && 非只读子组（与 fileRoute 判定同源）。
-	if isFileGroupedRoute(path) && !isReadOnlyFileRoute(path, method) {
+// isWriteFaceRoute 判定路由是否属于写面（设计 §2.2 写面清单 + 文件写子组）。
+//
+// pattern 传 **ServeMux 已匹配模式**（`r.Pattern`），不是具体路径：文件域分类查表
+// 需要模式串（模式与具体路径的歧义曾造成 500/越权，见 route_class_index.go）。
+func isWriteFaceRoute(method, pattern string) bool {
+	// pattern 允许带方法前缀（r.Pattern / mux.Handler 的原样输出）或纯路径（测试）。
+	full := pattern
+	if !strings.HasPrefix(full, method+" ") {
+		full = method + " " + pattern
+	}
+	path := strings.TrimPrefix(full, method+" ")
+	if c, ok := fileDomainClass(full); ok && c == router.ClassUser {
 		return true
 	}
 	// 非文件组写面：PUT /api/config、凭据写族、cloud 任务写族、sync 任务写族、
@@ -824,24 +747,16 @@ func isWriteFaceRoute(path, method string) bool {
 // 文件操作路由组要求 Role∈{user,admin}（minRole=user；R3-M4：空 Role 归一 user
 // 放行）。未认证且非回环直通（principal==nil）→ 401；角色不足 → 403。
 //
-// 组判定 = isFileGroupedRoute（单一事实源，与 localMuxGate 同源）：**未列出的路径
-// 一律 500 + Error 日志**（fail-closed）——防止未来给文件类新路由只挂本包装却忘挂
-// gate，或反之，静默绕过 requireRole。注意：fileRoute 只应包装文件组路由（主 mux
-// 装配处全部如此）；非文件组路由继续用 authMiddleware（如 /api/cloud、/api/stats）。
+// 分类判定 = `route_class_index.go` 的查表（键为 `r.Pattern`）：未声明或分类不是
+// ClassUser 一律 500 + Error 日志（fail-closed）——防止包装器被误用于非文件写子组，
+// 或分类声明被改错却静默降低鉴权。非文件组路由继续用 authMiddleware。
 func (h *Handlers) fileRoute(handler http.HandlerFunc) http.HandlerFunc {
 	return h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		if !isFileGroupedRoute(r.URL.Path) {
-			// fail-closed：本包装被错误用于非文件组路径（如未来把 cloud 路由误挂
+		if class, ok := fileDomainClass(r.Pattern); !ok || class != router.ClassUser {
+			// fail-closed：本包装被错误用于非文件写子组路径（如未来把 cloud 路由误挂
 			// fileRoute），显式拒绝并留痕，避免「看似受门禁实则裸放」的静默态。
 			h.logger.Error("fileRoute 用于未列入文件组的路径（接线错误）", "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "internal: route not in file group", http.StatusInternalServerError)
-			return
-		}
-		if isReadOnlyFileRoute(r.URL.Path, r.Method) {
-			// 接线错误：写包装包了只读子组（应走 fileRouteRead）——fail-closed 500，
-			// 防「reader 读被误按写面拦截」静默出现（设计文档错误处理最后一条）。
-			h.logger.Error("fileRoute 用于只读子组路径（接线错误，应走 fileRouteRead）", "method", r.Method, "path", r.URL.Path)
-			http.Error(w, "internal: route in read-only subgroup", http.StatusInternalServerError)
 			return
 		}
 		if err := requireRole(PrincipalFrom(r.Context()), string(accesskey.RoleUser)); err != nil {
@@ -861,15 +776,9 @@ func (h *Handlers) fileRoute(handler http.HandlerFunc) http.HandlerFunc {
 // 与「非只读路径 fail-closed」；写路由保持 fileRoute（user/admin，零回归）。
 func (h *Handlers) fileRouteRead(handler http.HandlerFunc) http.HandlerFunc {
 	return h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		if !isFileGroupedRoute(r.URL.Path) {
-			h.logger.Error("fileRouteRead 用于未列入文件组的路径（接线错误）", "method", r.Method, "path", r.URL.Path)
+		if class, ok := fileDomainClass(r.Pattern); !ok || class != router.ClassReader {
+			h.logger.Error("fileRouteRead 用于非文件只读子组的路径（接线错误）", "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "internal: route not in file group", http.StatusInternalServerError)
-			return
-		}
-		if !isReadOnlyFileRoute(r.URL.Path, r.Method) {
-			// 接线错误：只读包装包了写子组（应走 fileRoute）——fail-closed 500。
-			h.logger.Error("fileRouteRead 用于写子组路径（接线错误，应走 fileRoute）", "method", r.Method, "path", r.URL.Path)
-			http.Error(w, "internal: route not in read-only subgroup", http.StatusInternalServerError)
 			return
 		}
 		if err := requireRole(PrincipalFrom(r.Context()), string(accesskey.RoleReader)); err != nil {

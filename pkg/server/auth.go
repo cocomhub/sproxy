@@ -363,7 +363,7 @@ var (
 // errUnauthorized（401）；角色不属于该组 → errForbidden（403）；属于 → nil。
 //
 // 接线语义：文件操作路由组要求 Role∈{user,admin}（minRole=user）；只读子组
-// （isReadOnlyFileRoute，RBAC 细分 11.5-①）要求 Role∈{reader,user,admin}
+// （声明分类 ClassReader，RBAC 细分 11.5-①）要求 Role∈{reader,user,admin}
 // （minRole=reader）；mesh/hub 组接线点列后续。回环直通路径已由 handleNoCredentials
 // 合成最小 Principal（R4-I2），放行。
 func requireRole(principal *Principal, minRole string) error {

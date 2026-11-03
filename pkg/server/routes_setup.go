@@ -750,11 +750,11 @@ func (h *Handlers) buildTunnelHandlers(localMux *http.ServeMux, cfg *Config, log
 	}
 	apiHandler = CORSMiddleware(cfg.CORS, log.With("component", "cors"))(apiHandler)
 	// 隧道内层 requireRole 门禁（任务② MUST-FIX 收口）——语义见函数上方大段注释。
-	apiHandler = h.localMuxGate(apiHandler)
+	apiHandler = h.localMuxGate(localMux, apiHandler)
 	// 集群写面门（roadmap 12.1-2 只读副本接入）：writeGuard 非 nil 时写面路由
 	// 前置 Authorize()（非主 503）；nil = 单节点零回归。挂 localMuxGate 之后
 	// （认证收口后）——门只在身份有效后生效，且对隧道内层/外层统一。
-	apiHandler = h.writeGuardMiddleware(apiHandler)
+	apiHandler = h.writeGuardMiddleware(localMux, apiHandler)
 	// 审计中间件（R14 C13）：此前**只**包了主 mux ⇒ 经隧道/CLI 的变更型请求既无传输层兜底审计，
 	// 也没有卷维度绑定（多卷部署下 Volume 恒空）。这里与主 mux 用**同一组**中间件（顺序也一致：
 	// 卷维度在外、传输兜底在内），避免两条链路语义漂移（新增门禁 R42 钉住同源）。

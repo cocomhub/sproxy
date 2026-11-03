@@ -71,11 +71,24 @@ R38 已有四个扫描面（其中一个是子包数据表）。本方案**新�
 | 批次 | 内容 | 行为变化 |
 |---|---|---|
 | B1 | 文件域 45 条进表（`pkg/server/routes_files.go`），两侧由 `Register` 派生；新增 class map + 差分等价测试（新表 vs 旧谓词逐条断言）。**已交付**：`router.Register` 支持空前缀（根组）；R38 新增分类双向锁；差分测试抓到 `GET /api/search/semantic` 两面策略不一致的真实缺陷 | 无（谓词仍在）+ 附修鉴权缺陷 |
-| B2 | 卷运维 / secrets / backends / 上传会话归入同一文件域表（同批可拆） | 无 |
-| B3 | 其余域（cloud/hub/audit/admin/sync/…）进表 | 无 |
-| B4 | `localMuxGate` / `writeGuardMiddleware` 改查 class map；删除三个谓词；R38 增加「TSV ↔ 声明」双向锁 | 有（fail-open → fail-closed，仅对未声明路由） |
+| B2 | 同步 / 回收站 / 运维管理面进表。**已交付**（#1023、#1024） | 无 |
+| B3 | 其余域（cloud/hub/audit/admin/credentials…）进表 | 无 |
+| B4 | **文件域**翻转：`localMuxGate` / `writeGuardMiddleware` / `fileRoute[Read]` 改查 index（键 = `mux.Handler(r)` 的匹配模式）；删除 `isFileGroupedRoute` / `isReadOnlyFileRoute`；R38 保持「TSV ↔ 声明」双向锁。**已交付** | 有（对未声明模式 fail-closed） |
 
-B1–B3 是纯增量（不改变运行时行为），B4 才是翻转点，且翻转前已有差分测试证明等价。
+剩余：`isWriteFaceRoute` 的**非文件**写面清单（PUT /api/config、凭据/cloud/sync/volumes 写族、
+notify test、ai purge、verify、S3 写）仍是显式列表——它只影响集群只读副本的写门，未随本次
+翻转删除；待剩余域（含 credentials）全部进表后一并收敛。
+
+## 4.1 实施要点（B4 实测）
+
+1. **`r.Pattern` 在包住 mux 的中间件里是空的**：模式由 ServeMux 在调用 handler 时才写入。
+   中间件层必须用 `mux.Handler(r)`（只匹配、不执行）拿同一个模式串——否则查表永远 miss，
+   表现为「文件域全部放行」（首次实现即踩到，被 `TestRBAC_TunnelInnerReaderWriteForbidden` 抓住）。
+2. **索引必须包含子包声明的文件域路由**（`share.Routes()`：创建/撤销 ClassUser、列表
+   ClassReader），否则 `fileRoute` 自检把 `/api/shares` 判成「不在文件组」⇒ 500
+   （被路由冒烟门禁 #1021 抓住）。
+3. 表驱动比旧前缀匹配**更精确**：旧 `isReadOnlyFileRoute` 用 `HasPrefix("/api/shares/")`
+   把不存在的 `GET /api/shares/{token}` 也判为只读；新索引用模式串，不存在即不命中。
 
 ## 5. 风险与缓解
 

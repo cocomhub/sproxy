@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/server/router"
 )
 
 // 本文件是 RBAC 角色细分（roadmap 11.5-① / docs/designs/2026-09-24-rbac-roles.md）
@@ -398,48 +399,43 @@ func TestRBAC_RequireRoleReaderMatrix(t *testing.T) {
 
 // ---- 7. 只读子组清单回归（isReadOnlyFileRoute 单一事实源）----
 
-// TestRBAC_ReadOnlyRouteClassification 钉住 isReadOnlyFileRoute / isFileGroupedRoute
-// 的成员判定：只读子组与写子组的分类（设计文档风险 1：清单漂移 → 误归写组 →
-// reader 被拒）。只读成员改动须同步本测试。
+// TestRBAC_ReadOnlyRouteClassification 钉住**声明分类**：只读子组（ClassReader）与
+// 写子组（ClassUser）的成员判定（设计文档风险 1：分类漂移 → 误归写组 → reader 被拒）。
+//
+// 分类的单一事实源是 routes_files.go 的声明表；本测试按 **ServeMux 模式串**断言
+// （运行期用 r.Pattern 查表，模式与具体路径的歧义已从表示法上消除）。
 func TestRBAC_ReadOnlyRouteClassification(t *testing.T) {
 	t.Parallel()
 	readOnly := []string{
-		"/download", "/api/files", "/api/files/stat", "/api/files/search",
-		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
-		"/api/volumes", "/api/volumes/user", "/api/shares", "/api/shares/tok123",
+		"GET /download", "GET /api/files", "HEAD /api/files/stat", "GET /api/files/search",
+		"GET /download/chunk", "GET /api/versions", "GET /api/archive-dir", "GET /api/backends",
+		"GET /api/volumes", "GET /api/volumes/user", "GET /api/shares",
 		// 以下 5 条曾漏列（清单漂移）：语义搜索是只读 GET，卷导出/用户配额/secrets 列表/文件 meta 读同理。
-		"/api/search/semantic", "/api/volumes/export", "/api/quota", "/api/secrets", "/api/files/meta",
+		"GET /api/search/semantic", "GET /api/volumes/export", "GET /api/quota",
+		"GET /api/secrets", "GET /api/secrets/{name}", "GET /api/files/meta",
 	}
 	write := []string{
-		"/upload", "/delete", "/rename", "/mkdir", "/rmdir",
-		"/api/batch/delete", "/api/batch/rename", "/api/archive",
-		"/api/versions/restore", "/upload/init", "/upload/chunk", "/upload/complete",
-		"/api/backends/{type}/presign",
-		"/api/tags", // 写子组：打标是写操作（roadmap 11.10-④）
+		"POST /upload", "POST /delete", "POST /rename", "POST /mkdir", "POST /rmdir",
+		"POST /api/batch/delete", "POST /api/batch/rename", "POST /api/archive",
+		"POST /api/versions/restore", "DELETE /api/versions",
+		"POST /upload/init", "POST /upload/chunk", "POST /upload/complete",
+		"POST /api/backends/{type}/presign", "POST /api/backends/{type}/presign/complete",
+		"POST /api/tags", // 写子组：打标是写操作（roadmap 11.10-④）
 	}
-	for _, p := range readOnly {
-		if !isFileGroupedRoute(p) {
-			t.Errorf("只读路径 %s 应属文件组（fileRoute 覆盖）", p)
-		}
-		if !isReadOnlyFileRoute(p, http.MethodGet) {
-			t.Errorf("只读路径 %s 应归只读子组（否则误归写组 → reader 被拒）", p)
+	for _, key := range readOnly {
+		if c, ok := fileDomainClass(key); !ok || c != router.ClassReader {
+			t.Errorf("%s 分类 = %v(ok=%v), want ClassReader（否则误归写组 → reader 被拒）", key, c, ok)
 		}
 	}
-	for _, p := range write {
-		if !isFileGroupedRoute(p) {
-			t.Errorf("写路径 %s 应属文件组（fileRoute 覆盖）", p)
-		}
-		if isReadOnlyFileRoute(p, http.MethodPost) {
-			t.Errorf("写路径 %s 不应归只读子组", p)
+	for _, key := range write {
+		if c, ok := fileDomainClass(key); !ok || c != router.ClassUser {
+			t.Errorf("%s 分类 = %v(ok=%v), want ClassUser", key, c, ok)
 		}
 	}
-	// 非文件组路径：两判定都为 false（gate fail-closed 语义）。
-	for _, p := range []string{"/api/cloud/tasks", "/api/stats", "/api/credentials"} {
-		if isFileGroupedRoute(p) {
-			t.Errorf("非文件组路径 %s 不应属文件组", p)
-		}
-		if isReadOnlyFileRoute(p, http.MethodGet) {
-			t.Errorf("非文件组路径 %s 不应归只读子组", p)
+	// 非文件域模式不得出现在文件域表内（gate fail-closed 语义：未声明 = 非文件组）。
+	for _, key := range []string{"GET /api/cloud/tasks", "GET /api/stats", "GET /api/credentials", "GET /api/files/nope"} {
+		if c, ok := fileDomainClass(key); ok {
+			t.Errorf("%s 不应出现在文件域表内（得到 %v）", key, c)
 		}
 	}
 }

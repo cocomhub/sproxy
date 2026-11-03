@@ -85,13 +85,10 @@ func TestFileDomainRoutes_ClassMatchesWrapper(t *testing.T) {
 // 必须归只读子组——否则主 mux 上 fileRouteRead 的 fail-closed 自检会直接 500。
 func TestSemanticSearchRouteIsReaderAccessible(t *testing.T) {
 	t.Parallel()
-	if !isFileGroupedRoute("/api/search/semantic") {
-		t.Fatal("语义搜索应在文件组内")
+	if c, ok := fileDomainClass("GET /api/search/semantic"); !ok || c != router.ClassReader {
+		t.Fatalf("语义搜索分类 = %v(ok=%v), want ClassReader（否则 fileRouteRead 自检 500，reader 也会被拒）", c, ok)
 	}
-	if !isReadOnlyFileRoute("/api/search/semantic", http.MethodGet) {
-		t.Fatal("语义搜索是只读 GET，必须归只读子组（否则 fileRouteRead 自检 500，reader 也会被拒）")
-	}
-	if isWriteFaceRoute("/api/search/semantic", http.MethodGet) {
+	if isWriteFaceRoute(http.MethodGet, "GET /api/search/semantic") {
 		t.Fatal("语义搜索不是写面（只读副本上应可执行）")
 	}
 	// 装配面实证：reader 不得因分类错误拿到 500/403。
