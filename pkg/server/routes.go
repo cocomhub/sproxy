@@ -311,33 +311,22 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 导入 = 写（fileRoute / 写子组）。
 	// 备份（roadmap 12.2-3 P2）：源=本地卷 → 目标=配置卷（federated 写面）；
 	// 隧道内层裸注册（隧道加密即认证，与卷 API 同模式）。
-	localMux.HandleFunc("POST /api/backup", h.backupHandler)
 	// 用户卷 API（隧道内层裸注册：与系统卷同模式；CLI --access-key 走此路径）
 	// 配额查询**联邦化**（片 5）：用户视图 = 对「该用户可访问的卷」求和（设计 §1.5）。
-	localMux.HandleFunc("GET /api/stats", h.statsHandler)
-	localMux.HandleFunc("GET /api/config", h.configHandler)
 	// secret 卷管理 API（roadmap/secret 接线）：隧道内层裸注册（隧道加密即认证，同
 	// /api/volumes 模式）。secrets 是 ExternalBackend，通用文件 API 的 ?volume= 只解析
 	// 本地卷不命中它，故用专用端点管 secret（创建/列表/导出/删除；服务端只校验+落盘，
 	// 不参与口令派生）。创建 random 由服务端生成。
 	// backend 列表 API（隧道内层裸注册：CLI --access-key 走此路径；供 Web/CLI 动态感知后端）
 	// 跨节点面只读运维视图（隧道内层：加密即认证，与 /api/config 同模式）。
-	localMux.HandleFunc("GET /api/mesh/status", h.meshStatusHandler)
-	localMux.HandleFunc("GET /api/mesh/acl", h.meshACLHandler)
-	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
 	// 审计查看：隧道内层注册（无 authMiddleware——隧道加密即认证，与 /api/shares、
 	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
 	// 签名校验。浏览器隧道模式下用户面操作必须隧道可达（仅注册主 mux 会 404）。
-	localMux.HandleFunc("GET /api/audit", h.auditHandler)
 	// 计量报告导出（roadmap 11.10-⑩ 片 2）：隧道内层裸注册（隧道加密即认证，与
 	// /api/stats 同模式）；handler 内做 owner 自查询/管理员全量权限裁决。
-	localMux.HandleFunc("GET /api/usage/report", h.usageReportHandler)
 	// 文件变更事件流（roadmap §2 P1）：SSE 订阅 upload/delete/rename/mkdir/rmdir/version。
 	// 隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）；外层经 authMiddleware 保护。
-	localMux.HandleFunc("GET /api/events", h.eventsHandler)
-	localMux.HandleFunc("GET /api/audit/export", h.auditExportHandler)
 	// 冷段区间读（取证式随机读；管理员门在 handler 内，白名单来自 ListCold）。
-	localMux.HandleFunc("GET /api/audit/cold/seg", h.auditColdSegHandler)
 	// 通知中心 HTTP 面（roadmap P0 / 11.7-⑦）：路由表由 pkg/server/notify 声明
 	// （前缀 + 相对路径 + 两端分类）。历史/渠道自检外部面 auth（SproxySig 验签），
 	// feed 是订阅源 ⇒ 公开裸注册（feed_token 门禁在 handler 内，仿 /metrics 语义）；
@@ -373,8 +362,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		Privacy:      h.handleAIPrivacy,
 		PrivacyPurge: h.handleAIPrivacyPurge,
 	}), bindHandler, h.routeWrapper)
-	localMux.HandleFunc("GET /api/cluster/nodes", h.handleClusterNodes)
-	localMux.HandleFunc("GET /api/cluster/self", h.handleClusterSelf)
 	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
 	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
@@ -422,34 +409,23 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	router.Register(srvMux, localMux, verify.RoutePrefix, verify.Routes(h.verifyHandler),
 		bindHandler, h.routeWrapper)
 	// checksum 台账运维修复面（§15.1 步骤②）：从对象 meta 重建台账（部分缺失时显式触发）。
-	localMux.HandleFunc("POST /api/checksums/rebuild", h.rebuildChecksumsHandler)
-	srvMux.HandleFunc("POST /api/checksums/rebuild", h.authMiddleware(h.rebuildChecksumsHandler))
 	// 元数据补录（写面：fileRoute 写子组；读面：fileRouteRead 只读子组）。
-	srvMux.HandleFunc("GET /api/cluster/nodes", h.handleClusterNodes)
-	srvMux.HandleFunc("GET /api/cluster/self", h.handleClusterSelf)
 	// 卷 API（主 mux：fileRoute[Read] = authMiddleware + requireRole，per-owner 文件面）。
 	// 只读子组：GET /api/volumes、GET /api/volumes/user（列卷清单）；写子组：
 	// move/rebalance/copy、create/delete 用户卷、backends-presign。
 	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读子组（reader 可读）；导入 = 写子组。
 	// 备份（roadmap 12.2-3 P2）：主 mux 经 authMiddleware（SproxySig/Bearer）——
 	// 写面（目标写+配额记账），与 cloud/sync 同模式。
-	srvMux.HandleFunc("POST /api/backup", h.authMiddleware(h.backupHandler))
 	// 用户卷 API（U3：per-owner 用户自有卷，仅外部类型；fileRoute 认证 + owner 派生）
 	// 配额查询**联邦化**（片 5）：只读子组（owner 恒取自认证 ⇒ 不得指定他人 ✗）。
 	// backend 列表 API（V4：动态感知已注册后端类型；fileRoute[Read] 认证）
 	// secret 卷管理 API（主 mux 面：authMiddleware；写/删走 fileRoute 写子组，导出/列表
 	// 走只读子组——与卷 API 同模式。secrets 是 ExternalBackend 不受通用文件 API 覆盖，
 	// 专用端点负责创建/列表/导出/删除；服务端只校验+落盘，不参与口令派生）。
-	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
-	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	// 计量报告导出（roadmap 11.10-⑩ 片 2）：主 mux 经 authMiddleware（SproxySig/
 	// APIKey 认证）——handler 内按 owner 自查询或管理员全量裁决（越权 403）。
-	srvMux.HandleFunc("GET /api/usage/report", h.authMiddleware(h.usageReportHandler))
-	srvMux.HandleFunc("GET /api/mesh/status", h.authMiddleware(h.meshStatusHandler))
 	// /api/mesh/acl：owner 过滤**本身就是**边界（actor → owner），且不触碰文件系统，故不挂
 	// fileRoute 的角色门禁（与 /api/mesh/status 同款；挂 fileRoute 反而会因不在文件组而 500）。
-	srvMux.HandleFunc("GET /api/mesh/acl", h.authMiddleware(h.meshACLHandler))
-	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
 	// 公网分发端点：独立前缀（/s）、仅主 mux、public 裸注册，**不属分享管理组**
 	// （share.RoutePrefix 为 /api），故留在装配层注册。
 	srvMux.HandleFunc("GET /s/{token}", h.accessShareHandler)
@@ -469,8 +445,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	cloudTasks := h.cloudTaskService()
 	// 通用 URL 解析 API（隧道认证）：URL → 资源信息（大小/类型/文件清单）。
 	// 扩展按 URL 自动识别（pikpak 分享等），未识别回落通用结果。
-	localMux.HandleFunc("GET /api/resolve", h.resolveURL)
-	srvMux.HandleFunc("GET /api/resolve", h.authMiddleware(h.resolveURL))
 
 	// 云端下载/归档 API：路由表由 pkg/server/cloudtasks 声明（前缀 + 相对路径 + 两端分类），
 	// 这里只提供 handler 绑定与「分类 → 包装器」映射；双 mux 一次注册，不会漏掉另一半。
@@ -493,6 +467,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		},
 		h.routeWrapper)
 
+	// 运维/管理面（审计/集群/配置/统计/用量/mesh/备份/checksum/解析/事件流）：
+	// 单一声明点见 routes_ops.go（27 处手工注册 → 一份表 + 一次注册）。
+	router.Register(srvMux, localMux, opsRoutePrefix, opsRoutes(),
+		func(fn func(*Handlers, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) { fn(h, w, r) }
+		},
+		h.routeWrapper)
+
 	// Hub 中继管理 API（需鉴权）：中继流 / WebRTC 信令 / 节点与统计 / 联邦端点，
 	// 以及隧道内层用户面裸注册。详细语义见 registerHubRoutes。
 	registerHubRoutes(h, srvMux, localMux, opts, cfg, log)
@@ -501,14 +483,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 认证）与 localMux（隧道内层，隧道加密即认证——与 /api/shares、/api/stats 同
 	// 模式）。审计是浏览器隧道模式下的用户面操作，隧道内层必须可达（用户在隧道
 	// 模式下打开审计 tab 应能直接查看；仅注册主 mux 会让隧道模式 404）。
-	srvMux.HandleFunc("GET /api/audit", h.authMiddleware(h.auditHandler))
 	// 文件变更事件流（主 mux 面）：authMiddleware 保护（直连必须验签）。
-	srvMux.HandleFunc("GET /api/events", h.authMiddleware(h.eventsHandler))
 	// 审计导出（主 mux 面）：authMiddleware 保护，与 /api/audit 同款（导出是敏感运维
 	// 面，直连必须验签；localMux 面裸注册见上方注释）。
-	srvMux.HandleFunc("GET /api/audit/export", h.authMiddleware(h.auditExportHandler))
 	// 冷段区间读（同上；主面经 authMiddleware，管理员门在 handler 内）。
-	srvMux.HandleFunc("GET /api/audit/cold/seg", h.authMiddleware(h.auditColdSegHandler))
 
 	// 公开注册端点（4B DEC-F）：唯一用户入口，不挂 authMiddleware（主 mux +
 	// localMux 双注册，仿 /healthz 层）——仅经独立限频 registerLimiter 收口。
