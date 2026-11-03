@@ -161,3 +161,31 @@ func TestRegister_PanicsOnUnknownClass(t *testing.T) {
 		[]Route[string]{{Method: "GET", Path: "/a", Server: Class("bogus"), Local: ClassNone, H: "h"}},
 		func(string) http.HandlerFunc { return func(http.ResponseWriter, *http.Request) {} }, nil)
 }
+
+// TestRegister_EmptyPathIsGroupRoot 锁「空 Path = 组根本身」。
+//
+// 需求来源：`/api/trash` 这类「前缀即完整路径」的路由，写成 Path:"/" 会变成
+// `/api/trash/`（ServeMux 的子树语义，多匹配一层）；空 Path 才能表达「就是这一条」。
+func TestRegister_EmptyPathIsGroupRoot(t *testing.T) {
+	t.Parallel()
+	srv := http.NewServeMux()
+	n := Register(srv, nil, "/api/trash",
+		[]Route[string]{{Method: "GET", Path: "", Server: ClassAuth, Local: ClassNone, H: "h"}},
+		func(string) http.HandlerFunc {
+			return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }
+		}, nil)
+	if n != 1 {
+		t.Fatalf("注册条数 = %d, want 1", n)
+	}
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/trash", nil))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("GET /api/trash = %d, want 204（空 Path 应注册为组根本身）", w.Code)
+	}
+	// 子树路径不应命中（证明不是 `/api/trash/` 子树注册）。
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/api/trash/x", nil))
+	if w2.Code != http.StatusNotFound {
+		t.Fatalf("GET /api/trash/x = %d, want 404（空 Path 不得退化为子树）", w2.Code)
+	}
+}

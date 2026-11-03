@@ -300,9 +300,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 已上传文件的元数据补录（方案②：旁路 Extra 更新，读-校验-合并-写 sidecar）。
 
 	// 回收站（roadmap P2）：列表/恢复/清空（隧道内层裸注册同版本管理）。
-	localMux.HandleFunc("GET /api/trash", h.listTrashHandler)
-	localMux.HandleFunc("POST /api/trash/restore", h.restoreTrashHandler)
-	localMux.HandleFunc("POST /api/trash/empty", h.emptyTrashHandler)
+	// 回收站 API：单一声明点见 routes_trash.go（3 条 × 2 个 mux → 一份表）。
+	router.Register(srvMux, localMux, trashRoutePrefix, trashRoutes(),
+		func(fn func(*Handlers, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) { fn(h, w, r) }
+		},
+		h.routeWrapper)
 	// 卷 API（隧道内层裸注册：隧道加密即认证，与版本/share 同模式）
 	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读（fileRouteRead / 只读子组）；
 	// 导入 = 写（fileRoute / 写子组）。
@@ -424,9 +427,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 元数据补录（写面：fileRoute 写子组；读面：fileRouteRead 只读子组）。
 	srvMux.HandleFunc("GET /api/cluster/nodes", h.handleClusterNodes)
 	srvMux.HandleFunc("GET /api/cluster/self", h.handleClusterSelf)
-	srvMux.HandleFunc("GET /api/trash", h.authMiddleware(h.listTrashHandler))
-	srvMux.HandleFunc("POST /api/trash/restore", h.authMiddleware(h.restoreTrashHandler))
-	srvMux.HandleFunc("POST /api/trash/empty", h.authMiddleware(h.emptyTrashHandler))
 	// 卷 API（主 mux：fileRoute[Read] = authMiddleware + requireRole，per-owner 文件面）。
 	// 只读子组：GET /api/volumes、GET /api/volumes/user（列卷清单）；写子组：
 	// move/rebalance/copy、create/delete 用户卷、backends-presign。
@@ -484,26 +484,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		h.routeWrapper,
 	)
 
-	// 文件同步 API（localMux：隧道认证；handler 在 syncMgr 未装配时返回 400）
-	localMux.HandleFunc("POST /api/sync/tasks", h.syncCreateTask)
-	localMux.HandleFunc("GET /api/sync/tasks", h.syncListTasks)
-	localMux.HandleFunc("GET /api/sync/tasks/{id}", h.syncGetTask)
-	localMux.HandleFunc("POST /api/sync/tasks/{id}/cancel", h.syncCancelTask)
-	localMux.HandleFunc("POST /api/sync/tasks/{id}/retry", h.syncRetryTask)
-	localMux.HandleFunc("DELETE /api/sync/tasks/{id}", h.syncDeleteTask)
-	localMux.HandleFunc("GET /api/sync/conflicts", h.syncListConflicts)
-	localMux.HandleFunc("GET /api/sync/conflicts/{id}", h.syncGetConflict)
-	localMux.HandleFunc("POST /api/sync/conflicts/{id}/resolve", h.syncResolveConflict)
-	// 文件同步 API（主 mux：SproxySig auth）
-	srvMux.HandleFunc("POST /api/sync/tasks", h.authMiddleware(h.syncCreateTask))
-	srvMux.HandleFunc("GET /api/sync/tasks", h.authMiddleware(h.syncListTasks))
-	srvMux.HandleFunc("GET /api/sync/tasks/{id}", h.authMiddleware(h.syncGetTask))
-	srvMux.HandleFunc("POST /api/sync/tasks/{id}/cancel", h.authMiddleware(h.syncCancelTask))
-	srvMux.HandleFunc("POST /api/sync/tasks/{id}/retry", h.authMiddleware(h.syncRetryTask))
-	srvMux.HandleFunc("DELETE /api/sync/tasks/{id}", h.authMiddleware(h.syncDeleteTask))
-	srvMux.HandleFunc("GET /api/sync/conflicts", h.authMiddleware(h.syncListConflicts))
-	srvMux.HandleFunc("GET /api/sync/conflicts/{id}", h.authMiddleware(h.syncGetConflict))
-	srvMux.HandleFunc("POST /api/sync/conflicts/{id}/resolve", h.authMiddleware(h.syncResolveConflict))
+	// 文件同步 API：单一声明点见 routes_sync.go（9 条路由 × 2 个 mux → 一份表）。
+	// Server=auth（SproxySig 验签）/ Local=tunnel（隧道加密即认证）；syncMgr 未装配时
+	// handler 返回 400。
+	router.Register(srvMux, localMux, syncRoutePrefix, syncRoutes(),
+		func(fn func(*Handlers, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) { fn(h, w, r) }
+		},
+		h.routeWrapper)
 
 	// Hub 中继管理 API（需鉴权）：中继流 / WebRTC 信令 / 节点与统计 / 联邦端点，
 	// 以及隧道内层用户面裸注册。详细语义见 registerHubRoutes。

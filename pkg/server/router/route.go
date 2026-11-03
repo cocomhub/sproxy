@@ -75,7 +75,7 @@ type Wrapper func(Class) func(http.HandlerFunc) http.HandlerFunc
 // Register 把 routes 注册到 srvMux / localMux，返回注册条数。
 //
 // prefix 是路由组前缀（如 "/api/cloud"）；空串表示**根组**（Path 已是绝对路径）。
-// 每条 Route.Path 必须是以 "/" 开头的相对路径。
+// 每条 Route.Path 须为空（= 组根本身，如 `/api/trash`）或以 "/" 开头的相对路径。
 // bind 把 Route.H 映射为 handler；返回 nil 表示该路由无 handler（视为装配错误）。
 func Register[H any](
 	srvMux, localMux *http.ServeMux,
@@ -90,8 +90,8 @@ func Register[H any](
 	}
 	n := 0
 	for _, r := range routes {
-		if !strings.HasPrefix(r.Path, "/") {
-			panic(fmt.Sprintf("router: 非法相对路径 %q（须以 / 开头；前缀由组提供）", r.Path))
+		if r.Path != "" && !strings.HasPrefix(r.Path, "/") {
+			panic(fmt.Sprintf("router: 非法相对路径 %q（须为空（组根）或以 / 开头）", r.Path))
 		}
 		handler := bind(r.H)
 		if handler == nil {
