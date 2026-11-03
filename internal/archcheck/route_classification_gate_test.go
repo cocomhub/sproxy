@@ -18,10 +18,12 @@ package archcheck
 
 import (
 	"bufio"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -136,7 +138,11 @@ func classifiedRoutes(t *testing.T) map[string]string {
 // routeTableFiles 是**数据化路由表**所在文件（`router.Route` 字面量表 + RoutePrefix 常量）。
 // 子包把 URL 子路径声明成数据后，注册不再出现在 mux 调用上，因此必须从表里解析，
 // 否则 R38 会把「已迁入子包的路由」当成已删除（假红）或漏检（假绿）。
+//
+// 装配层自己的表（如文件域 routes_files.go）同样在此登记：它横跨多个顶层路径，
+// 用**空前缀 + 绝对 Path** 声明（见 routeTablePrefixRe 允许空串）。
 var routeTableFiles = []string{
+	"pkg/server/routes_files.go",
 	"pkg/server/cloudtasks/routes.go",
 	"pkg/server/share/routes.go",
 	"pkg/server/notify/routes.go",
@@ -144,17 +150,23 @@ var routeTableFiles = []string{
 	"pkg/server/verify/routes.go",
 }
 
-// routeTablePrefixRe 匹配路由表文件里的组前缀常量字面量。
-var routeTablePrefixRe = regexp.MustCompile(`RoutePrefix\s*=\s*"([^"]+)"`)
+// routeTablePrefixRe 匹配路由表文件里的组前缀常量字面量（允许空串 = 根组）。
+var routeTablePrefixRe = regexp.MustCompile(`RoutePrefix\s*(?::=|=)\s*"([^"]*)"`)
 
 // routeTableEntryRe 匹配 `{Method: "GET", Path: "/x", Server: router.ClassAuth, Local: router.ClassTunnel, ...}`。
 var routeTableEntryRe = regexp.MustCompile(`\{Method:\s*"([A-Z]+)",\s*Path:\s*"([^"]+)",\s*Server:\s*router\.(\w+),\s*Local:\s*router\.(\w+)`)
 
-// tableRoutes 解析数据化路由表，返回 (mux, pattern) 集合（两端分类非 ClassNone 时各记一条）。
-func tableRoutes(t *testing.T) map[string]string {
+// tableRoute 是数据表里的一条路由：来源文件 + 声明分类（class 已归一化为 TSV 口径）。
+type tableRoute struct {
+	file  string
+	class string
+}
+
+// tableRoutes 解析数据化路由表，返回 (mux, pattern) → 声明分类。两端分类非 ClassNone 时各记一条。
+func tableRoutes(t *testing.T) map[string]tableRoute {
 	t.Helper()
 	root := moduleRoot(t)
-	out := map[string]string{}
+	out := map[string]tableRoute{}
 	for _, rel := range routeTableFiles {
 		full := filepath.Join(root, filepath.FromSlash(rel))
 		data, err := os.ReadFile(full)
@@ -171,21 +183,29 @@ func tableRoutes(t *testing.T) map[string]string {
 			method, path, srvClass, localClass := m[1], m[2], m[3], m[4]
 			pattern := method + " " + prefix + path
 			if srvClass != "ClassNone" {
-				out["srvMux\t"+pattern] = rel
+				out["srvMux\t"+pattern] = tableRoute{file: rel, class: classToTSV(srvClass)}
 			}
 			if localClass != "ClassNone" {
-				out["localMux\t"+pattern] = rel
+				out["localMux\t"+pattern] = tableRoute{file: rel, class: classToTSV(localClass)}
 			}
 		}
 	}
 	return out
 }
 
+// classToTSV 把 Go 常量名（ClassUser）归一化为 TSV 口径（user）。
+func classToTSV(c string) string {
+	return strings.ToLower(strings.TrimPrefix(c, "Class"))
+}
+
 // TestR38_RouteClassificationIsExhaustive 断言注册路由与分类表**严格一一对应**。
 func TestR38_RouteClassificationIsExhaustive(t *testing.T) {
 	t.Parallel()
 	registered := registeredRoutes(t)
-	maps.Copy(registered, tableRoutes(t))
+	tables := tableRoutes(t)
+	for key, tr := range tables {
+		registered[key] = tr.file
+	}
 	maps.Copy(registered, externalAuthRoutes(t))
 	classified := classifiedRoutes(t)
 
@@ -223,6 +243,24 @@ func TestR38_RouteClassificationIsExhaustive(t *testing.T) {
 		if !routeClasses[class] {
 			t.Fatalf("R38：路由 %q 的分类 %q 非法（允许：public/auth/reader/user/node/admin/tunnel）", key, class)
 		}
+	}
+
+	// 5) 数据表声明的分类必须与 route_classes.tsv 逐条一致（双向锁）。
+	//
+	// 没有这一步时，把表里的 ClassUser 改成 ClassReader（= 放宽/收紧鉴权）门禁**不会红**
+	// —— 审计表只校验「有没有登记」，不校验「登记的是什么」。本仓已有实测：变异表内分类
+	// 后 R38 仍绿。要求改分类必须同时改两处（diff 可见，无法静默漂移）。
+	var classDrift []string
+	for key, tr := range tables {
+		if want, ok := classified[key]; ok && want != tr.class {
+			classDrift = append(classDrift, fmt.Sprintf("%s: 表声明 %s ≠ route_classes.tsv %s  (%s)",
+				key, tr.class, want, tr.file))
+		}
+	}
+	if len(classDrift) > 0 {
+		sort.Strings(classDrift)
+		t.Fatalf("R38：路由分类在「实现表」与「审计表」之间不一致（改分类须同时改两处）：\n  %s",
+			strings.Join(classDrift, "\n  "))
 	}
 
 	// 4) 两个 mux 的规模护栏（防止解析器退化到只读到一个 mux 而假绿）。

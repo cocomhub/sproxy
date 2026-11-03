@@ -297,66 +297,27 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
 	localMux := http.NewServeMux()
-	localMux.HandleFunc("POST /upload", h.upload)
-	localMux.HandleFunc("GET /download", h.download)
-	localMux.HandleFunc("POST /delete", h.delete)
-	localMux.HandleFunc("POST /rename", h.rename)
-	localMux.HandleFunc("GET /api/files", h.listFiles)
-	localMux.HandleFunc("HEAD /api/files/stat", h.stat)
-	localMux.HandleFunc("GET /api/du", h.duHandler)
-	localMux.HandleFunc("POST /mkdir", h.mkdir)
-	localMux.HandleFunc("POST /rmdir", h.rmdir)
-	localMux.HandleFunc("GET /api/files/search", h.searchFiles)
 	// 已上传文件的元数据补录（方案②：旁路 Extra 更新，读-校验-合并-写 sidecar）。
-	localMux.HandleFunc("PUT /api/files/meta", h.updateFileMeta)
-	localMux.HandleFunc("GET /api/files/meta", h.getFileMeta)
-	localMux.HandleFunc("GET /api/search/semantic", h.semanticSearchHandler)
-	localMux.HandleFunc("POST /api/tags", h.tagsHandler)
-	localMux.HandleFunc("POST /api/batch/delete", h.batchDelete)
-	localMux.HandleFunc("POST /api/batch/rename", h.batchRename)
 
-	localMux.HandleFunc("POST /api/archive", h.archiveHandler)
-	localMux.HandleFunc("GET /api/archive-dir", h.archiveDirHandler)
-	localMux.HandleFunc("GET /api/versions", h.listVersionsHandler)
-	localMux.HandleFunc("POST /api/versions/restore", h.restoreVersionHandler)
-	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
 	// 回收站（roadmap P2）：列表/恢复/清空（隧道内层裸注册同版本管理）。
 	localMux.HandleFunc("GET /api/trash", h.listTrashHandler)
 	localMux.HandleFunc("POST /api/trash/restore", h.restoreTrashHandler)
 	localMux.HandleFunc("POST /api/trash/empty", h.emptyTrashHandler)
 	// 卷 API（隧道内层裸注册：隧道加密即认证，与版本/share 同模式）
-	localMux.HandleFunc("GET /api/volumes", h.listVolumesHandler)
-	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
-	localMux.HandleFunc("POST /api/volumes/rebalance", h.rebalanceVolumeHandler)
-	localMux.HandleFunc("POST /api/volumes/copy", h.copyVolumeHandler)
-	localMux.HandleFunc("POST /api/volumes/refresh", h.refreshVolumeHandler)
 	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读（fileRouteRead / 只读子组）；
 	// 导入 = 写（fileRoute / 写子组）。
-	localMux.HandleFunc("GET /api/volumes/export", h.exportVolumeHandler)
-	localMux.HandleFunc("POST /api/volumes/import", h.importVolumeHandler)
 	// 备份（roadmap 12.2-3 P2）：源=本地卷 → 目标=配置卷（federated 写面）；
 	// 隧道内层裸注册（隧道加密即认证，与卷 API 同模式）。
 	localMux.HandleFunc("POST /api/backup", h.backupHandler)
 	// 用户卷 API（隧道内层裸注册：与系统卷同模式；CLI --access-key 走此路径）
-	localMux.HandleFunc("POST /api/volumes/user", h.createUserVolumeHandler)
-	localMux.HandleFunc("GET /api/volumes/user", h.listUserVolumesHandler)
-	localMux.HandleFunc("DELETE /api/volumes/user", h.deleteUserVolumeHandler)
 	// 配额查询**联邦化**（片 5）：用户视图 = 对「该用户可访问的卷」求和（设计 §1.5）。
-	localMux.HandleFunc("GET /api/quota", h.userQuotaHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	// secret 卷管理 API（roadmap/secret 接线）：隧道内层裸注册（隧道加密即认证，同
 	// /api/volumes 模式）。secrets 是 ExternalBackend，通用文件 API 的 ?volume= 只解析
 	// 本地卷不命中它，故用专用端点管 secret（创建/列表/导出/删除；服务端只校验+落盘，
 	// 不参与口令派生）。创建 random 由服务端生成。
-	localMux.HandleFunc("POST /api/secrets", h.createSecretHandler)
-	localMux.HandleFunc("GET /api/secrets", h.listSecretsHandler)
-	localMux.HandleFunc("GET /api/secrets/{name}", h.exportSecretHandler)
-	localMux.HandleFunc("DELETE /api/secrets/{name}", h.deleteSecretHandler)
 	// backend 列表 API（隧道内层裸注册：CLI --access-key 走此路径；供 Web/CLI 动态感知后端）
-	localMux.HandleFunc("GET /api/backends", h.backendsHandler)
-	localMux.HandleFunc("POST /api/backends/{type}/presign", h.backendPresignHandler)
-	localMux.HandleFunc("POST /api/backends/{type}/presign/complete", h.backendPresignCompleteHandler)
 	// 跨节点面只读运维视图（隧道内层：加密即认证，与 /api/config 同模式）。
 	localMux.HandleFunc("GET /api/mesh/status", h.meshStatusHandler)
 	localMux.HandleFunc("GET /api/mesh/acl", h.meshACLHandler)
@@ -378,6 +339,16 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （前缀 + 相对路径 + 两端分类）。历史/渠道自检外部面 auth（SproxySig 验签），
 	// feed 是订阅源 ⇒ 公开裸注册（feed_token 门禁在 handler 内，仿 /metrics 语义）；
 	// 隧道内层三条均 tunnel（隧道加密即认证）。
+	// 文件域路由（upload/download/files/volumes/secrets/backends/versions/tags/batch/
+	// archive/search/du/quota）：**单一声明点**见 routes_files.go；此处一次注册到两个
+	// mux——Server 侧按分类取 fileRoute/fileRouteRead，Local 侧为 ClassTunnel（裸注册，
+	// 角色门由 localMuxGate 收口）。此前 45 条路由 × 2 个 mux = 90 处手工配对。
+	router.Register(srvMux, localMux, filesRoutePrefix, fileDomainRoutes(),
+		func(fn func(*Handlers, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) { fn(h, w, r) }
+		},
+		h.routeWrapper)
+
 	router.Register(srvMux, localMux, notify.RoutePrefix, notify.Routes(notify.Endpoints{
 		History: h.notifyHistoryHandler,
 		Test:    h.notifyTestHandler,
@@ -430,12 +401,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/credentials/{ak}/sk/{skID}/expire", h.skExpireHandler)
 
 	// 分块上传/下载路由（本地）
-	localMux.HandleFunc("POST /upload/init", h.uploadInit)
-	localMux.HandleFunc("POST /upload/chunk", h.uploadChunk)
-	localMux.HandleFunc("GET /upload/status", h.uploadStatus)
-	localMux.HandleFunc("GET /upload/sessions", h.uploadSessions)
-	localMux.HandleFunc("POST /upload/complete", h.uploadComplete)
-	localMux.HandleFunc("GET /download/chunk", h.downloadChunk)
 
 	// 隧道内层中间件链（gzip + 速率限制 + CORS + localMuxGate 角色门禁 +
 	// writeGuard 写面门 + requestLog 追踪）与 tunnelHandler/localHandler 装配。
@@ -456,70 +421,25 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// checksum 台账运维修复面（§15.1 步骤②）：从对象 meta 重建台账（部分缺失时显式触发）。
 	localMux.HandleFunc("POST /api/checksums/rebuild", h.rebuildChecksumsHandler)
 	srvMux.HandleFunc("POST /api/checksums/rebuild", h.authMiddleware(h.rebuildChecksumsHandler))
-	srvMux.HandleFunc("POST /upload", h.fileRoute(h.upload))
-	srvMux.HandleFunc("GET /download", h.fileRouteRead(h.download))
-	srvMux.HandleFunc("POST /delete", h.fileRoute(h.delete))
-	srvMux.HandleFunc("POST /rename", h.fileRoute(h.rename))
-	srvMux.HandleFunc("GET /api/files", h.fileRouteRead(h.listFiles))
-	srvMux.HandleFunc("HEAD /api/files/stat", h.fileRouteRead(h.stat))
-	srvMux.HandleFunc("GET /api/du", h.fileRouteRead(h.duHandler))
-	srvMux.HandleFunc("POST /upload/init", h.fileRoute(h.uploadInit))
-	srvMux.HandleFunc("POST /upload/chunk", h.fileRoute(h.uploadChunk))
-	srvMux.HandleFunc("GET /upload/status", h.fileRoute(h.uploadStatus))
-	srvMux.HandleFunc("GET /upload/sessions", h.fileRoute(h.uploadSessions))
-	srvMux.HandleFunc("POST /upload/complete", h.fileRoute(h.uploadComplete))
-	srvMux.HandleFunc("GET /download/chunk", h.fileRouteRead(h.downloadChunk))
-	srvMux.HandleFunc("POST /mkdir", h.fileRoute(h.mkdir))
-	srvMux.HandleFunc("POST /rmdir", h.fileRoute(h.rmdir))
-	srvMux.HandleFunc("GET /api/files/search", h.fileRouteRead(h.searchFiles))
 	// 元数据补录（写面：fileRoute 写子组；读面：fileRouteRead 只读子组）。
-	srvMux.HandleFunc("PUT /api/files/meta", h.fileRoute(h.updateFileMeta))
-	srvMux.HandleFunc("GET /api/files/meta", h.fileRouteRead(h.getFileMeta))
-	srvMux.HandleFunc("GET /api/search/semantic", h.fileRouteRead(h.semanticSearchHandler))
 	srvMux.HandleFunc("GET /api/cluster/nodes", h.handleClusterNodes)
 	srvMux.HandleFunc("GET /api/cluster/self", h.handleClusterSelf)
-	srvMux.HandleFunc("POST /api/tags", h.fileRoute(h.tagsHandler))
-	srvMux.HandleFunc("POST /api/batch/delete", h.fileRoute(h.batchDelete))
-	srvMux.HandleFunc("POST /api/batch/rename", h.fileRoute(h.batchRename))
-	srvMux.HandleFunc("POST /api/archive", h.fileRoute(h.archiveHandler))
-	srvMux.HandleFunc("GET /api/archive-dir", h.fileRouteRead(h.archiveDirHandler))
-	srvMux.HandleFunc("GET /api/versions", h.fileRouteRead(h.listVersionsHandler))
-	srvMux.HandleFunc("POST /api/versions/restore", h.fileRoute(h.restoreVersionHandler))
-	srvMux.HandleFunc("DELETE /api/versions", h.fileRoute(h.deleteVersionHandler))
 	srvMux.HandleFunc("GET /api/trash", h.authMiddleware(h.listTrashHandler))
 	srvMux.HandleFunc("POST /api/trash/restore", h.authMiddleware(h.restoreTrashHandler))
 	srvMux.HandleFunc("POST /api/trash/empty", h.authMiddleware(h.emptyTrashHandler))
 	// 卷 API（主 mux：fileRoute[Read] = authMiddleware + requireRole，per-owner 文件面）。
 	// 只读子组：GET /api/volumes、GET /api/volumes/user（列卷清单）；写子组：
 	// move/rebalance/copy、create/delete 用户卷、backends-presign。
-	srvMux.HandleFunc("GET /api/volumes", h.fileRouteRead(h.listVolumesHandler))
-	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))
-	srvMux.HandleFunc("POST /api/volumes/rebalance", h.fileRoute(h.rebalanceVolumeHandler))
-	srvMux.HandleFunc("POST /api/volumes/copy", h.fileRoute(h.copyVolumeHandler))
-	srvMux.HandleFunc("POST /api/volumes/refresh", h.fileRoute(h.refreshVolumeHandler))
 	// 卷备份/导出（roadmap 11.3-②）：导出 = 只读子组（reader 可读）；导入 = 写子组。
-	srvMux.HandleFunc("GET /api/volumes/export", h.fileRouteRead(h.exportVolumeHandler))
-	srvMux.HandleFunc("POST /api/volumes/import", h.fileRoute(h.importVolumeHandler))
 	// 备份（roadmap 12.2-3 P2）：主 mux 经 authMiddleware（SproxySig/Bearer）——
 	// 写面（目标写+配额记账），与 cloud/sync 同模式。
 	srvMux.HandleFunc("POST /api/backup", h.authMiddleware(h.backupHandler))
 	// 用户卷 API（U3：per-owner 用户自有卷，仅外部类型；fileRoute 认证 + owner 派生）
-	srvMux.HandleFunc("POST /api/volumes/user", h.fileRoute(h.createUserVolumeHandler))
-	srvMux.HandleFunc("GET /api/volumes/user", h.fileRouteRead(h.listUserVolumesHandler))
 	// 配额查询**联邦化**（片 5）：只读子组（owner 恒取自认证 ⇒ 不得指定他人 ✗）。
-	srvMux.HandleFunc("GET /api/quota", h.fileRouteRead(h.userQuotaHandler))
-	srvMux.HandleFunc("DELETE /api/volumes/user", h.fileRoute(h.deleteUserVolumeHandler))
 	// backend 列表 API（V4：动态感知已注册后端类型；fileRoute[Read] 认证）
-	srvMux.HandleFunc("GET /api/backends", h.fileRouteRead(h.backendsHandler))
-	srvMux.HandleFunc("POST /api/backends/{type}/presign", h.fileRoute(h.backendPresignHandler))
-	srvMux.HandleFunc("POST /api/backends/{type}/presign/complete", h.fileRoute(h.backendPresignCompleteHandler))
 	// secret 卷管理 API（主 mux 面：authMiddleware；写/删走 fileRoute 写子组，导出/列表
 	// 走只读子组——与卷 API 同模式。secrets 是 ExternalBackend 不受通用文件 API 覆盖，
 	// 专用端点负责创建/列表/导出/删除；服务端只校验+落盘，不参与口令派生）。
-	srvMux.HandleFunc("POST /api/secrets", h.fileRoute(h.createSecretHandler))
-	srvMux.HandleFunc("GET /api/secrets", h.fileRouteRead(h.listSecretsHandler))
-	srvMux.HandleFunc("GET /api/secrets/{name}", h.fileRouteRead(h.exportSecretHandler))
-	srvMux.HandleFunc("DELETE /api/secrets/{name}", h.fileRoute(h.deleteSecretHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	// 计量报告导出（roadmap 11.10-⑩ 片 2）：主 mux 经 authMiddleware（SproxySig/
@@ -804,7 +724,12 @@ func isReadOnlyFileRoute(path, method string) bool {
 	case "/download", "/api/files", "/api/files/stat", "/api/files/search", "/api/files/meta", "/api/du",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
 		routeVolumesBase, "/api/volumes/user", "/api/volumes/export", "/api/shares",
-		"/api/secrets", "/api/quota":
+		"/api/secrets", "/api/quota",
+		// 语义搜索是只读 GET（向量索引检索，索引维护在调度器侧）。此前漏列 ⇒ 同一条
+		// 路由两个面策略不一致：主 mux 用 fileRouteRead（reader 可访问），而隧道内层
+		// localMuxGate 判为写子组（reader 403），且被 writeGuard 当成写面（只读副本上
+		// 拒绝一个读操作）。由差分测试 routes_files_equiv_test.go 抓到。
+		"/api/search/semantic":
 		return true
 	}
 	if strings.HasPrefix(path, "/api/shares/") || strings.HasPrefix(path, "/api/secrets/") {

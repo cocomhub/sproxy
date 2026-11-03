@@ -407,6 +407,8 @@ func TestRBAC_ReadOnlyRouteClassification(t *testing.T) {
 		"/download", "/api/files", "/api/files/stat", "/api/files/search",
 		"/download/chunk", "/api/versions", "/api/archive-dir", "/api/backends",
 		"/api/volumes", "/api/volumes/user", "/api/shares", "/api/shares/tok123",
+		// 以下 5 条曾漏列（清单漂移）：语义搜索是只读 GET，卷导出/用户配额/secrets 列表/文件 meta 读同理。
+		"/api/search/semantic", "/api/volumes/export", "/api/quota", "/api/secrets", "/api/files/meta",
 	}
 	write := []string{
 		"/upload", "/delete", "/rename", "/mkdir", "/rmdir",
