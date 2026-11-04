@@ -42,6 +42,12 @@ func (h *Handlers) Close() error {
 	h.stopTenantUploadStores()
 	h.stopRemainingServices()
 
+	// 关闭 per-owner 校验台账：落盘走 debounce 合并器（默认 1s 窗口），不关闭的话
+	// Close 返回后仍会有迟到写落进租户 meta 目录——测试侧表现为 TempDir 清理报
+	// "directory is not empty"，生产侧表现为优雅停服丢掉最后一次台账写。
+	// 必须在 closeStorageRoots 之前（台账经租户卷句柄写）。
+	h.closeChecksumStores()
+
 	// hub 状态持久化器最终 flush：优雅停服前把最后一次注册/信令变更落盘。
 	// 快照生成在 Persister 锁内执行（FlushFn 持有 p.mu 再调 snapshotCurrent），
 	// 避免停服时节点下线与快照生成之间的竞态导致旧快照覆盖新状态（I1）。

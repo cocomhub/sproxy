@@ -125,6 +125,28 @@ func (h *Handlers) SetStateStore(st state.StateStore) {
 	h.stateStore = st
 }
 
+// closeChecksumStores 关闭并清空缓存的 per-owner 校验台账实例（幂等；与 SetStateStore
+// 切换后端时的处置同源）。台账落盘由 debounce 合并器驱动，Close 会先做最终落盘再停定时器。
+func (h *Handlers) closeChecksumStores() {
+	h.tenantMu.Lock()
+	stores := make([]checksum.ChecksumStoreIface, 0, len(h.checksumStores))
+	for _, cs := range h.checksumStores {
+		stores = append(stores, cs)
+	}
+	clear(h.checksumStores)
+	h.tenantMu.Unlock()
+
+	for _, cs := range stores {
+		cl, ok := cs.(checksum.Closer)
+		if !ok {
+			continue
+		}
+		if err := cl.Close(); err != nil {
+			h.logger.Warn("关闭校验台账失败（最终落盘可能未完成）", "err", err)
+		}
+	}
+}
+
 // EventsBus 返回事件总线（懒建；装配层桥接用）。
 func (h *Handlers) EventsBus() *EventBus { return h.eventBus() }
 
