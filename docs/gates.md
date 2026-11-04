@@ -139,3 +139,4 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `volume_state_gate_test.go` | R44 | 卷状态缓存**唯一装配点**（R29 同形教训：横切关注点不能变成 N 个调用点各自的义务）。 |
 | `xfer_send_atomicity_test.go` | — | 传输层 `Send` 必须经 `iostream.WriteFull` 写足（防半帧），新增传输实现绕过即红。 |
 | `gate_index_gate_test.go` | R56 | `docs/gates.md` 索引必须覆盖全部门禁文件（`internal/archcheck/*_test.go`，除公共辅助 `arch_test.go`）；扫描面下限 60 防假绿。手工回填过的索引没有机制约束必然腐化（与 R55 同模式），本门禁把「加门禁必须登记索引」变成判据。 |
+| `e2ee_format_parity_test.go` | R57 | 分块加密**帧格式**跨 module 必须逐字一致（`pkg/sync/encrypted.go` ↔ `cmd/sclient/internal/e2ee`）：`[4B BE len][nonce][ct+tag]` 是**持久化契约**，一端改布局会让另一端写出的数据解不出。跨 module + `internal` 边界导致无法共享实现，故用源码级逐字比对锁定。变异：客户端把长度前缀 `uint32`→`uint64` ⇒ 红。 |
