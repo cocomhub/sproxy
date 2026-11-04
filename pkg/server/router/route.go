@@ -65,6 +65,9 @@ type Route[H any] struct {
 	Path   string
 	Server Class // srvMux 分类；ClassNone = 不注册到 srvMux
 	Local  Class // localMux 分类；ClassNone = 不注册到 localMux
+	// Mutating 声明该路由是否**改变状态**（集群只读副本的写面门据此拒绝）。
+	// 与 Class 正交：Class 回答「谁能访问」，Mutating 回答「是否写」。
+	Mutating bool
 	// Guard 是**附加入口控制**的记号（如 "credential_login"）：分类决定基础鉴权，
 	// Guard 决定额外策略（限流器 / IP 门）。空串 = 无附加策略。
 	// 具体映射由装配层唯一提供（未知记号在注册期 panic，fail-closed）。

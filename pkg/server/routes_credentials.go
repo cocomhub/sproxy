@@ -43,11 +43,11 @@ func credentialRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *htt
 		{Method: "POST", Path: "/login", Server: router.ClassPublic, Local: router.ClassTunnel, Guard: guardCredentialLogin, H: (*Handlers).loginCredentialHandler},
 		// 管理面（SproxySig 验签）。
 		{Method: "GET", Path: "", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).akListHandler},
-		{Method: "POST", Path: "", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).akAddHandler},
-		{Method: "DELETE", Path: "/{ak}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).akDeleteHandler},
-		{Method: "POST", Path: "/{ak}/renew", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).renewCredentialHandler},
+		{Method: "POST", Path: "", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).akAddHandler, Mutating: true},
+		{Method: "DELETE", Path: "/{ak}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).akDeleteHandler, Mutating: true},
+		{Method: "POST", Path: "/{ak}/renew", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).renewCredentialHandler, Mutating: true},
 		{Method: "GET", Path: "/{ak}/sk", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).skListHandler},
-		{Method: "DELETE", Path: "/{ak}/sk/{skID}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).skDeleteHandler},
-		{Method: "POST", Path: "/{ak}/sk/{skID}/expire", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).skExpireHandler},
+		{Method: "DELETE", Path: "/{ak}/sk/{skID}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).skDeleteHandler, Mutating: true},
+		{Method: "POST", Path: "/{ak}/sk/{skID}/expire", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).skExpireHandler, Mutating: true},
 	}
 }

@@ -647,44 +647,26 @@ func (h *Handlers) writeGuardMiddleware(mux *http.ServeMux, next http.Handler) h
 	})
 }
 
-// isWriteFaceRoute 判定路由是否属于写面（设计 §2.2 写面清单 + 文件写子组）。
+// isWriteFaceRoute 判定路由是否属于写面（集群只读副本的写门）。
 //
-// pattern 传 **ServeMux 已匹配模式**（`r.Pattern`），不是具体路径：文件域分类查表
-// 需要模式串（模式与具体路径的歧义曾造成 500/越权，见 route_class_index.go）。
+// 判据来自**声明表**（`mutatingPatterns`，见 route_class_index.go）：文件域/分享由
+// ClassUser 派生，其余域在表里显式 `Mutating: true`。不再维护第二份路径清单——
+// 那套清单漏改的后果是只读副本上仍可写入（副本与主分叉）。
+//
+// 特例：S3 兼容网关是 `/s3/` 子树挂载（不是一条 Route 声明），其写方法在此显式判定。
+//
+// pattern 传 ServeMux 已匹配模式（`mux.Handler(r)`）；兼容测试传入的纯路径（自动补方法前缀）。
 func isWriteFaceRoute(method, pattern string) bool {
-	// pattern 允许带方法前缀（r.Pattern / mux.Handler 的原样输出）或纯路径（测试）。
 	full := pattern
 	if !strings.HasPrefix(full, method+" ") {
 		full = method + " " + pattern
 	}
-	path := strings.TrimPrefix(full, method+" ")
-	if c, ok := fileDomainClass(full); ok && c == router.ClassUser {
-		return true
+	if mut, ok := declaredMutating(full); ok {
+		return mut
 	}
-	// 非文件组写面：PUT /api/config、凭据写族、cloud 任务写族、sync 任务写族、
-	// volumes 写族、notify test、ai purge、verify。
-	switch {
-	case path == "/api/config" && method == http.MethodPut:
-		return true
-	case path == "/api/verify":
-		return true
-	case path == "/api/backup":
-		return true
-	case strings.HasPrefix(path, "/api/credentials") && method != http.MethodGet:
-		return true
-	case strings.HasPrefix(path, "/api/cloud/") && method != http.MethodGet:
-		return true
-	case strings.HasPrefix(path, "/api/sync/tasks") && method != http.MethodGet:
-		return true
-	case strings.HasPrefix(path, routeVolumesBase) && method != http.MethodGet:
-		return true
-	case path == "/api/notify/test":
-		return true
-	case path == "/api/ai/privacy/purge":
-		return true
-	// S3 兼容网关写面（P1：原先不在写面集合，集群只读副本仍可经 /s3/ 写入
-	// user/meta 桶——同节点 /upload 会 503 而 S3 PUT 200，副本状态与主分叉）。
-	case strings.HasPrefix(path, "/s3/") && method != http.MethodGet && method != http.MethodHead:
+	// S3 子树挂载：非 GET/HEAD 即写（P1：原先不在写面集合，副本可经 /s3/ 写入）。
+	path := strings.TrimPrefix(full, method+" ")
+	if strings.HasPrefix(path, "/s3/") && method != http.MethodGet && method != http.MethodHead {
 		return true
 	}
 	return false

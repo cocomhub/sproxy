@@ -27,6 +27,6 @@ const RoutePrefix = "/api"
 //   - 隧道内层（localMux）：tunnel（隧道加密即认证，裸注册）。
 func Routes(h http.HandlerFunc) []router.Route[http.HandlerFunc] {
 	return []router.Route[http.HandlerFunc]{
-		{Method: "POST", Path: "/verify", Server: router.ClassAuth, Local: router.ClassTunnel, H: h},
+		{Method: "POST", Path: "/verify", Server: router.ClassAuth, Local: router.ClassTunnel, H: h, Mutating: true},
 	}
 }

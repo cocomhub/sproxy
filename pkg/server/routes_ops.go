@@ -38,15 +38,15 @@ func opsRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *http.Reque
 		{Method: "GET", Path: "/api/cluster/self", Server: router.ClassPublic, Local: router.ClassTunnel, H: (*Handlers).handleClusterSelf},
 		// 运行时配置（GET 读 / PUT 改；SIGHUP 只覆盖软配置）。
 		{Method: "GET", Path: "/api/config", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).configHandler},
-		{Method: "PUT", Path: "/api/config", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).updateConfigHandler},
+		{Method: "PUT", Path: "/api/config", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).updateConfigHandler, Mutating: true},
 		// mesh 只读视图（owner 过滤即边界，不挂 fileRoute 角色门禁）。
 		{Method: "GET", Path: "/api/mesh/status", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).meshStatusHandler},
 		{Method: "GET", Path: "/api/mesh/acl", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).meshACLHandler},
 		// 统计 / 用量 / 备份 / checksum 台账 / URL 解析 / 事件流。
 		{Method: "GET", Path: "/api/stats", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).statsHandler},
 		{Method: "GET", Path: "/api/usage/report", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).usageReportHandler},
-		{Method: "POST", Path: "/api/backup", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).backupHandler},
-		{Method: "POST", Path: "/api/checksums/rebuild", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).rebuildChecksumsHandler},
+		{Method: "POST", Path: "/api/backup", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).backupHandler, Mutating: true},
+		{Method: "POST", Path: "/api/checksums/rebuild", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).rebuildChecksumsHandler, Mutating: true},
 		{Method: "GET", Path: "/api/resolve", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).resolveURL},
 		{Method: "GET", Path: "/api/events", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).eventsHandler},
 	}

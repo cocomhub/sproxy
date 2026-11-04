@@ -64,7 +64,4 @@ const (
 	msgMoveFileFailed       = "移动文件失败"
 	msgVersionFileMissing   = "版本文件不存在"
 	msgVersionFileMissingPF = "版本文件不存在: "
-
-	// routeVolumesBase 是卷管理路由前缀（注册列表与 HasPrefix 校验共享）。
-	routeVolumesBase = "/api/volumes"
 )

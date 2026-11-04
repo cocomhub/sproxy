@@ -22,7 +22,7 @@ const trashRoutePrefix = "/api/trash"
 func trashRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *http.Request)] {
 	return []router.Route[func(*Handlers, http.ResponseWriter, *http.Request)]{
 		{Method: "GET", Path: "", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).listTrashHandler},
-		{Method: "POST", Path: "/restore", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).restoreTrashHandler},
-		{Method: "POST", Path: "/empty", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).emptyTrashHandler},
+		{Method: "POST", Path: "/restore", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).restoreTrashHandler, Mutating: true},
+		{Method: "POST", Path: "/empty", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).emptyTrashHandler, Mutating: true},
 	}
 }

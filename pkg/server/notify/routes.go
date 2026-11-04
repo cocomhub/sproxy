@@ -39,7 +39,7 @@ type Endpoints struct {
 func Routes(eps Endpoints) []router.Route[http.HandlerFunc] {
 	return []router.Route[http.HandlerFunc]{
 		{Method: "GET", Path: "/history", Server: router.ClassAuth, Local: router.ClassTunnel, H: eps.History},
-		{Method: "POST", Path: "/test", Server: router.ClassAuth, Local: router.ClassTunnel, H: eps.Test},
+		{Method: "POST", Path: "/test", Server: router.ClassAuth, Local: router.ClassTunnel, H: eps.Test, Mutating: true},
 		{Method: "GET", Path: "/feed", Server: router.ClassPublic, Local: router.ClassTunnel, H: eps.Feed},
 	}
 }
