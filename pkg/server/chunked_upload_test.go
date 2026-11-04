@@ -884,9 +884,16 @@ func TestChunkedDigestConsistency(t *testing.T) {
 	uploadID := initSessionEx(t, url, "consistency-files.bin", int64(len(data)), chunkSize, totalChunks, cs)
 	uploadChunk(t, url, uploadID, 0, cs, data)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	z6, _ := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
-	if z6 != nil {
-		z6.Body.Close()
+	z6, cerr := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
+	if cerr != nil {
+		t.Fatalf("complete 请求失败: %v", cerr)
+	}
+	completeResp, _ := io.ReadAll(z6.Body)
+	z6.Body.Close()
+	// 必须断言 complete 的结果：此前忽略状态码，失败会推迟到下面的 download 才暴露，
+	// 报错信息指向「内容不一致」而不是真正的失败点（CI 上表现为难以定位的 flake）。
+	if z6.StatusCode != http.StatusOK {
+		t.Fatalf("complete status = %d, want 200: %s", z6.StatusCode, completeResp)
 	}
 
 	c := client.NewFileClient(url)

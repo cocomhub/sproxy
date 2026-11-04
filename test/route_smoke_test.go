@@ -30,6 +30,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // routeSmokeStreaming 是**流式端点**：请求-响应语义不适用（SSE 长连接），
@@ -47,11 +49,13 @@ var wiringErrorMarkers = []string{
 	"internal: route not in read-only subgroup",
 }
 
-// smokeRoute 是路由分类表的一行（去重后）。
+// smokeRoute 是路由分类表的一行（按 (method, path) 合并两侧 mux 的分类）。
 type smokeRoute struct {
 	method string
 	path   string
-	class  string
+	// serverClass / localClass 分别是主 mux（外部面）与隧道内层的声明分类。
+	serverClass string
+	localClass  string
 }
 
 // loadSmokeRoutes 读取 internal/archcheck/route_classes.tsv（R38 已双向锁定其完整性与
@@ -64,7 +68,7 @@ func loadSmokeRoutes(t *testing.T) []smokeRoute {
 	}
 	defer f.Close()
 
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	var out []smokeRoute
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
@@ -87,11 +91,18 @@ func loadSmokeRoutes(t *testing.T) []smokeRoute {
 			}
 		}
 		key := method + " " + path
-		if seen[key] {
-			continue
+		idx, ok := seen[key]
+		if !ok {
+			idx = len(out)
+			seen[key] = idx
+			out = append(out, smokeRoute{method: method, path: path})
 		}
-		seen[key] = true
-		out = append(out, smokeRoute{method: method, path: path, class: parts[2]})
+		switch parts[0] {
+		case "srvMux":
+			out[idx].serverClass = parts[2]
+		case "localMux":
+			out[idx].localClass = parts[2]
+		}
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatalf("扫描 route_classes.tsv: %v", err)
@@ -198,4 +209,113 @@ func snippetOf(s string) string {
 		return s[:200] + "…"
 	}
 	return s
+}
+
+// routeAuthExceptions 记录「未认证请求不返回 401」的**公开面**端点例外（每行必须写理由）。
+// 分类表声明这些路由是 public，但它们在 handler 内有别的门禁或返回其它状态。
+var routeAuthExceptions = map[string]string{
+	"/s/{token}": "分享短链：token 本身即凭据，非法 token 返回 404",
+	"/s3/":       "S3 网关：凭据在 SigV4 头内，未带签名返回 403（不是 401）",
+}
+
+// TestRouteSmoke_AuthClassificationEnforced 验证**分类表的声明与实际行为一致**：
+//   - 声明 auth / user / reader 的路由，未认证请求必须 401；
+//   - 声明 public 的路由，未认证请求必须**不是** 401（可达）。
+//
+// 为什么需要：R38 只校验「路由有登记」，不校验「登记的分类是否真的生效」。若某条 auth 路由
+// 被误注册成裸注册（忘了 authMiddleware），R38 仍绿、冒烟仍绿（路由能工作），但**鉴权被
+// 静默移除**——这正是历史上 `/api/audit` 漏角色门那类事故的形态。
+func TestRouteSmoke_AuthClassificationEnforced(t *testing.T) {
+	t.Parallel()
+	// 启用 WebDAV：它是**内联注册**（不在路由表里），R38 抓不到「被改成裸注册」这类
+	// 接线错误——只有本测试能验证「声明 auth ⇒ 未认证 401」。其余可选特性（hub/cloud/
+	// sync）未在本 harness 装配，双探针会按「未注册」跳过并记录。
+	baseURL, _, cleanup := startSPROXYImpl(t, "webdav:\n  enabled: true\n")
+	defer cleanup()
+
+	routes := loadSmokeRoutes(t)
+	// 未认证客户端：独立 Transport（不共享连接池），不带任何签名头。
+	anon := &http.Client{Transport: netutil.IsolatedTransport(), Timeout: 15 * time.Second}
+
+	checked := 0
+	for _, r := range routes {
+		if r.serverClass == "" {
+			continue // 仅在隧道内层注册的路由，外部面不可达，不属本测试
+		}
+		path := smokeConcretePath(r.path)
+		if _, skip := routeSmokeStreaming[path]; skip {
+			continue
+		}
+		if _, skip := routeAuthExceptions[path]; skip {
+			checked++
+			continue
+		}
+		checked++
+		t.Run(r.method+" "+path, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, r.method, baseURL+path, strings.NewReader(""))
+			if err != nil {
+				t.Fatalf("构造请求: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := anon.Do(req)
+			if err != nil {
+				t.Fatalf("未认证请求失败（%s %s）: %v", r.method, path, err)
+			}
+			defer resp.Body.Close()
+
+			switch r.serverClass {
+			case "auth", "user", "reader":
+				if resp.StatusCode == http.StatusUnauthorized {
+					return
+				}
+				// 非 401：先区分「鉴权被移除」与「该可选特性未装配」。
+				// 用**签名**请求复探：签名也 404 ⇒ 路由未注册（hub/signal/cloud 等按配置
+				// 条件注册），跳过；签名非 404 ⇒ 路由在，未认证却放行/报其它错 ⇒ 鉴权缺失。
+				signed := authedHTTPClient
+				req2, err2 := http.NewRequestWithContext(ctx, r.method, baseURL+path, strings.NewReader(""))
+				if err2 != nil {
+					t.Fatalf("构造签名请求: %v", err2)
+				}
+				req2.Header.Set("Content-Type", "application/json")
+				resp2, err2 := signed.Do(req2)
+				if err2 != nil {
+					t.Fatalf("签名请求失败（%s %s）: %v", r.method, path, err2)
+				}
+				_, _ = io.Copy(io.Discard, resp2.Body)
+				resp2.Body.Close()
+				if resp2.StatusCode == http.StatusNotFound {
+					return // 可选特性未装配（该路由未注册），不属鉴权缺失
+				}
+				t.Fatalf("%s %s 声明为 %s，未认证请求应 401，实际 %d（签名请求 %d）—— 鉴权可能被静默移除",
+					r.method, path, r.serverClass, resp.StatusCode, resp2.StatusCode)
+			case "public":
+				if resp.StatusCode != http.StatusUnauthorized {
+					return
+				}
+				// public 端点也可能因**业务原因**返回 401（如登录失败）。用签名请求复探：
+				// 签名后仍是 401/400 ⇒ 业务拒绝，不是鉴权门；否则才是分类与实现不一致。
+				req2, err2 := http.NewRequestWithContext(ctx, r.method, baseURL+path, strings.NewReader(""))
+				if err2 != nil {
+					t.Fatalf("构造签名请求: %v", err2)
+				}
+				req2.Header.Set("Content-Type", "application/json")
+				resp2, err2 := authedHTTPClient.Do(req2)
+				if err2 != nil {
+					t.Fatalf("签名请求失败（%s %s）: %v", r.method, path, err2)
+				}
+				_, _ = io.Copy(io.Discard, resp2.Body)
+				resp2.Body.Close()
+				if resp2.StatusCode == http.StatusUnauthorized || resp2.StatusCode == http.StatusBadRequest {
+					return // 业务 401（凭据/参数错误），非鉴权门
+				}
+				t.Fatalf("%s %s 声明为 public，未认证请求 401 且签名请求 %d —— 分类表与实现不一致",
+					r.method, path, resp2.StatusCode)
+			}
+		})
+	}
+	if checked < 60 {
+		t.Fatalf("只检查了 %d 条路由，少于下限 60 —— 解析或过滤失效（判据假绿）", checked)
+	}
 }
