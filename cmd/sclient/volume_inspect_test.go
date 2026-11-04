@@ -88,6 +88,33 @@ func TestWriteTraceText_Uploading(t *testing.T) {
 	t.Logf("uploading view:\n%s", out)
 }
 
+// TestWriteTraceText_RendersChildren 子树行需带名称/大小/类型/meta/分块数。
+func TestWriteTraceText_RendersChildren(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	writeTraceText(&buf, &volume.PathTrace{
+		SchemaVersion: volume.SchemaVersion, Mode: "index", Rel: "photos", Kind: "dir", Size: 0,
+		Containers: []volume.ContainerRef{{RealPath: "k3f9a", LogicalDir: ""}},
+		Meta:       &volume.BlobRef{RealPath: "k3f9a/dm", Bytes: 1024},
+		Children: []volume.PathTrace{
+			{Rel: "photos/a.jpg", Kind: "file", Size: 2048,
+				Meta:   &volume.BlobRef{RealPath: "k3f9a/c1/m1", Bytes: 100},
+				Chunks: []volume.ChunkRef{{Index: 0, Blob: volume.BlobRef{RealPath: "k3f9a/c1/k1", Bytes: 2048}}}},
+			{Rel: "photos/up.bin", Kind: "file", Size: 4096, Mode: "uploading",
+				Upload: &volume.UploadProgress{Rel: "photos/up.bin", Total: 4096, Committed: 1024, Chunks: 1}},
+		},
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"├─ a.jpg   2.0 KiB  [file]", "meta=m1", "chunks=1",
+		"└─ up.bin", "上传中 1.0 KiB / 4.0 KiB",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("输出缺少 %q: %s", want, out)
+		}
+	}
+}
+
 func TestWriteExplainText_RendersOwnerParityAndEntries(t *testing.T) {
 	t.Parallel()
 	chunk := 2

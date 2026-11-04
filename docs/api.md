@@ -1254,7 +1254,9 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 `volume.StorageInspector` 的卷（当前为 secretdata）；其它卷返回 `501`。
 
 - 认证：主 mux `reader`（只读子组）/ 隧道内层 `tunnel`
-- query 参数：`path`（**用户视角路径**，服务端按卷键空间映射为 `<owner>/user/<path>`；空 = 卷根，不映射；
+- query 参数：`depth`（可选，默认 1 = 单节点；最大 `3`（`MaxTreeDepth`），超出按上限处理；`depth≥2`
+  时返回 `children` 子树，节点总数上限 `200`（`MaxTreeNodes`），超出截断并附 `truncated` 异常；
+  **子项按索引展开，不做逐节点磁盘探测**——`disk=1` 的核验语义只作用于根节点）；`path`（**用户视角路径**，服务端按卷键空间映射为 `<owner>/user/<path>`；空 = 卷根，不映射；
   封装/加密卷的内部索引键含 owner/bucket 前缀，调用方无需也不应自行拼接）；`disk=1`（可选，默认 0 = 只读索引）
 - `mode` 三态：`index`（默认）/ `disk`（`disk=1`）/ **`uploading`**（该路径正在本进程上传：meta 未提交，
   `upload` 字段给出进度；**不是 404**）
@@ -1274,6 +1276,9 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
   ```
 - `containers` 是容器链（卷根 → 叶）：每层 `real_path` 是**真实随机容器名**，`logical_dir` 是它对应的
   逻辑目录（审计时把「盘上的随机目录」与「用户认识的目录」对上）
+- `children`（仅 `depth≥2`）：与根同构的子树节点（含 `mode=uploading` 的在途子项）。
+  **子项是纯索引视图**（零后端调用）：子目录不含 `meta` blob 名（定位它需要额外一次 ListDir），
+  以 `containers[].dir_id` 标识归属
 - 上传中响应示例：`{"trace":{"mode":"uploading","rel":"photos/a.mp4","size":981635072,
   "upload":{"rel":"photos/a.mp4","container":"k3f9a/8xQ","total":981635072,"committed":412000000,
   "chunks":6,"started_at":1730000000000000000}}}`

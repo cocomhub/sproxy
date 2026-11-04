@@ -540,6 +540,225 @@ func TestInspect_ContainersCarryLogicalNames(t *testing.T) {
 	}
 }
 
+// countingIOFS 统计 ListDir/OpenRead（锁「树子项不做后端 IO」）。
+type countingIOFS struct {
+	*syncpkg.LocalFS
+	lists atomic.Int64
+	reads atomic.Int64
+}
+
+func (c *countingIOFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	c.lists.Add(1)
+	return c.LocalFS.ListDir(ctx, p)
+}
+
+func (c *countingIOFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	c.reads.Add(1)
+	return c.LocalFS.OpenRead(ctx, p)
+}
+
+// TestInspect_TraceTree_ChildrenNoBackendIO 深度树对**子项**必须是纯索引（零后端调用）。
+//
+// 真实缺陷（2026-11-05 实测）：子目录若走完整 Trace，需要为定位 dir-meta 各做一次
+// ListDir；远端卷上某宽目录（数百子目录）的 `--depth 2` 实测耗时 **3m36s**。
+// 修复后子项走 index-only（无 IO），只保留根节点的一次 ListDir。
+func TestInspect_TraceTree_ChildrenNoBackendIO(t *testing.T) {
+	t.Parallel()
+	cfs := &countingIOFS{LocalFS: syncpkg.NewLocalFS(t.TempDir(), nil)}
+	fsys, err := NewFS(cfs, Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	for _, d := range []string{"root/a", "root/b", "root/c"} {
+		if merr := fsys.MakeDir(ctx, d); merr != nil {
+			t.Fatalf("MakeDir(%s): %v", d, merr)
+		}
+	}
+	writeFileT(t, fsys, "root/a/f.bin", data(32))
+	writeFileT(t, fsys, "root/top.bin", data(16))
+
+	cfs.lists.Store(0)
+	cfs.reads.Store(0)
+	tree, err := fsys.TraceTree(ctx, "root", 2, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("TraceTree: %v", err)
+	}
+	if len(tree.Children) != 4 { // a,b,c,top.bin
+		t.Fatalf("子项 = %d, want 4: %+v", len(tree.Children), namesOf(tree.Children))
+	}
+	if lists := cfs.lists.Load(); lists > 1 {
+		t.Fatalf("子树开展了 %d 次后端 ListDir（应 ≤1：仅根节点）", lists)
+	}
+	if reads := cfs.reads.Load(); reads != 0 {
+		t.Fatalf("树渲染读取了 %d 次内容（应为 0）", reads)
+	}
+	for _, c := range tree.Children {
+		if c.Kind == "dir" && c.DirID() == "" {
+			t.Fatalf("子目录应带 dir_id（meta 名按索引展示可省略）: %+v", c)
+		}
+	}
+}
+
+// TestInspect_TraceTree_Depth 树按 depth 展开且子项字段完整。
+func TestInspect_TraceTree_Depth(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	if err := fsys.MakeDir(ctx, "d/sub"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	writeFileT(t, fsys, "d/a.bin", data(80))
+	writeFileT(t, fsys, "d/b.bin", data(120))
+	writeFileT(t, fsys, "d/sub/c.bin", data(40))
+
+	tree, err := fsys.TraceTree(ctx, "d", 1, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("TraceTree(1): %v", err)
+	}
+	if len(tree.Children) != 0 {
+		t.Fatalf("depth=1 不应展开子项, got %d", len(tree.Children))
+	}
+
+	tree2, err := fsys.TraceTree(ctx, "d", 2, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("TraceTree(2): %v", err)
+	}
+	if len(tree2.Children) != 3 {
+		t.Fatalf("depth=2 子项 = %d, want 3（a,b,sub）: %+v", len(tree2.Children), namesOf(tree2.Children))
+	}
+	for _, c := range tree2.Children {
+		if c.Rel == "" || c.Kind == "" {
+			t.Fatalf("子项字段缺失: %+v", c)
+		}
+	}
+	var sub *volume.PathTrace
+	for i := range tree2.Children {
+		if tree2.Children[i].Kind == "dir" {
+			sub = &tree2.Children[i]
+		}
+	}
+	if sub == nil {
+		t.Fatal("缺少子目录节点")
+	}
+	if len(sub.Children) != 0 {
+		t.Fatalf("depth=2 不应展开孙节点, got %d", len(sub.Children))
+	}
+
+	tree3, err := fsys.TraceTree(ctx, "d", 3, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("TraceTree(3): %v", err)
+	}
+	if len(tree3.Children) != 3 {
+		t.Fatalf("depth=3 顶层子项 = %d, want 3", len(tree3.Children))
+	}
+	var grand int
+	for _, c := range tree3.Children {
+		grand += len(c.Children)
+	}
+	if grand != 1 {
+		t.Fatalf("depth=3 孙节点总数 = %d, want 1（sub/c.bin）", grand)
+	}
+}
+
+func namesOf(nodes []volume.PathTrace) []string {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, n.Rel)
+	}
+	return out
+}
+
+// TestInspect_TraceTree_DepthClamped 超上限按 MaxTreeDepth 处理（不报错、不失控）。
+func TestInspect_TraceTree_DepthClamped(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	if err := fsys.MakeDir(ctx, "x/y/z/w"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	writeFileT(t, fsys, "x/y/z/w/f.bin", data(20))
+	tree, err := fsys.TraceTree(ctx, "x", 99, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("TraceTree(99): %v", err)
+	}
+	// MaxTreeDepth=3 ⇒ 最多到 z 层（x→y→z），不会展开 w/f。
+	seen := 0
+	var walk func(ns []volume.PathTrace, level int)
+	walk = func(ns []volume.PathTrace, level int) {
+		for _, n := range ns {
+			seen++
+			if level >= volume.MaxTreeDepth {
+				if len(n.Children) != 0 {
+					t.Fatalf("超过 MaxTreeDepth 仍展开: level=%d rel=%s", level, n.Rel)
+				}
+			}
+			walk(n.Children, level+1)
+		}
+	}
+	walk(tree.Children, 2)
+	if seen == 0 {
+		t.Fatal("树为空")
+	}
+}
+
+// TestInspect_TraceTree_NodeBudget 节点数超上限必须截断并留 anomaly（不静默丢）。
+func TestInspect_TraceTree_NodeBudget(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	// 造 volume.MaxTreeNodes+5 个小文件（预算以根之外的节点计）。
+	for i := range volume.MaxTreeNodes + 5 {
+		writeFileT(t, fsys, "big/f"+strconv.Itoa(i)+".bin", data(8))
+	}
+	tree, err := fsys.TraceTree(ctx, "big", 2, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("TraceTree: %v", err)
+	}
+	if len(tree.Children) > volume.MaxTreeNodes {
+		t.Fatalf("子节点数 %d 超过上限 %d", len(tree.Children), volume.MaxTreeNodes)
+	}
+	if !hasAnomaly(tree.Anomalies, volume.AnomalyTruncated) {
+		t.Fatalf("截断必须留 truncated anomaly, got %+v", tree.Anomalies)
+	}
+}
+
+// TestInspect_TraceTree_ShowsUploadingChild 树里要能看到正在上传的直接子项。
+func TestInspect_TraceTree_ShowsUploadingChild(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	if err := fsys.MakeDir(ctx, "up"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	writeFileT(t, fsys, "up/done.bin", data(16))
+	tok := fsys.beginUpload("up/pending.bin", "", 4096)
+	defer fsys.endUpload(tok)
+	fsys.advanceUpload(tok, 1024)
+
+	tree, err := fsys.TraceTree(ctx, "up", 2, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("TraceTree: %v", err)
+	}
+	var found *volume.PathTrace
+	for i := range tree.Children {
+		if strings.HasSuffix(tree.Children[i].Rel, "pending.bin") {
+			found = &tree.Children[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("树中缺少在途上传子项: %+v", namesOf(tree.Children))
+	}
+	if found.Mode != "uploading" || found.Upload == nil || found.Upload.Committed != 1024 {
+		t.Fatalf("在途子项异常: %+v", found)
+	}
+}
+
 // TestInspect_TraceUploading 上传中的目标路径必须可见（而不是 404）。
 func TestInspect_TraceUploading(t *testing.T) {
 	t.Parallel()

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/cocomhub/sproxy/internal/httpjson"
@@ -34,7 +35,17 @@ func (h *Handlers) volumeTraceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mode := inspectModeFrom(r)
-	tr, err := insp.Trace(r.Context(), pathArg, mode)
+	depth := inspectDepthFrom(r)
+	tree, hasTree := volume.AssertTreeInspector(insp)
+	var tr *volume.PathTrace
+	var err error
+	if depth > 1 && hasTree {
+		// 子树：子项按**索引**展示（不逐节点做 disk 探测，避免一次请求打爆后端）；
+		// disk 的磁盘核验语义只作用于根节点（见 docs/api.md）。
+		tr, err = tree.TraceTree(r.Context(), pathArg, depth, mode)
+	} else {
+		tr, err = insp.Trace(r.Context(), pathArg, mode)
+	}
 	if err != nil {
 		h.writeInspectError(w, r, "volume_trace", pathArg, err)
 		return
@@ -127,6 +138,22 @@ func (h *Handlers) inspectorFor(w http.ResponseWriter, r *http.Request) (volume.
 		return nil, false
 	}
 	return insp, true
+}
+
+// inspectDepthFrom 解析 depth（默认 1；超过 MaxTreeDepth 按上限处理）。
+func inspectDepthFrom(r *http.Request) int {
+	raw := strings.TrimSpace(r.URL.Query().Get("depth"))
+	if raw == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 1
+	}
+	if n > volume.MaxTreeDepth {
+		return volume.MaxTreeDepth
+	}
+	return n
 }
 
 // inspectModeFrom 解析 disk=1/true（默认索引模式）。

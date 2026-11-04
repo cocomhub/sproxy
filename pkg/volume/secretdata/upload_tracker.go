@@ -117,6 +117,26 @@ func (t *uploadTracker) snapshot(rel string) (uploadProgress, bool) {
 	return p.snapshot(), true
 }
 
+// snapshotAll 返回全部在途上传快照（树遍历用）。
+func (t *uploadTracker) snapshotAll() []uploadProgress {
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	ps := make([]*uploadRecord, 0, len(t.m))
+	for _, p := range t.m {
+		if p != nil {
+			ps = append(ps, p)
+		}
+	}
+	t.mu.RUnlock()
+	out := make([]uploadProgress, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.snapshot())
+	}
+	return out
+}
+
 // forContainer 返回写目标容器等于 container（或位于其子树）的在途上传快照。
 func (t *uploadTracker) forContainer(container string) []uploadProgress {
 	if t == nil || container == "" {

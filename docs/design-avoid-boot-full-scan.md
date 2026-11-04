@@ -53,7 +53,7 @@ secretdata: 列容器 "OypEIkI8i9Y5/..." 失败（拒绝不完整视图挂载）
   "gen": 42,               // 卷代际（每次写操作 +1，随写路径持久化）
   "algo": "...",           // KDF/分块算法档位（不匹配即作废）
   "containers": [          // 容器 → 逻辑路径 + 目录 meta 摘要
-    {"c":"<container>","rel":"jav/makers/...","dir_id":"...","blob_len":123}
+    {"c":"<container>","rel":"series/dir/...","dir_id":"...","blob_len":123}
   ],
   "files": [               // 文件 meta 摘要（不含明文内容）
     {"c":"<container>","rel":"...","size":123,"hash":"...","mtime":"...","charged":123}
