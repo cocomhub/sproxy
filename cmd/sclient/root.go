@@ -230,14 +230,14 @@ func Execute() error {
 // 执行 context 解析注入（统一 config.yaml 单一事实源）与协议盐设置。不再装配
 // viper 平铺 provider（统一 context 后无平铺回落）。
 func rootPreRunE(cmd *cobra.Command, currentDir *string, cliState *state.State) error {
+	// **先解析 context，再加载漫游目录**：cd 状态按 context 隔离（`current_dir.<ctx>`），
+	// 加载时需要知道当前 context。此前顺序相反 ⇒ 只能读全局文件，导致「在 A 环境 cd subdir
+	// 后切到 B 环境，上传静默落到 B 的 subdir」这类跨环境串目录。
+	resolveAndMigrateContext(cmd, cmd.ErrOrStderr())
+
 	*currentDir = loadCurrentDir()
 	cliState.CurrentDir = *currentDir
 	cliState.CurrentVolume = loadCurrentVolume()
-
-	// context 解析注入：--context/--env/--user flag 优先，环境变量为默认值；
-	// config.yaml 首次缺失且存在旧平铺 → 一次性自动迁移。失败（损坏/引用缺失）
-	// 记录解析状态（resolvedContext 置 nil），命令级门禁据此 fail-closed。
-	resolveAndMigrateContext(cmd, cmd.ErrOrStderr())
 
 	// 协议盐自定义（防协议指纹识别）：CLI flag 优先，回落配置（Resolved.Env）。
 	// ⚠️ 必须与握手对端（stealth 二进制/远端节点）使用相同 key，否则握手失败。

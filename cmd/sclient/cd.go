@@ -218,9 +218,45 @@ const cacheDirName = "sproxy"
 const cacheFile = "current_dir"
 const cacheFileVolume = "current_volume"
 
-// saveCurrentDirValue 将指定目录持久化到 XDG 缓存目录。
+// stateScope 返回漫游状态的**作用域**（当前 context 名，已清洗为文件名安全形态）。
+// 空串 = 未解析 context（旧配置/测试）⇒ 回落历史全局文件，零回归。
+func stateScope() string {
+	if resolvedContext == nil {
+		return ""
+	}
+	return sanitizeScope(resolvedContext.ContextName)
+}
+
+// sanitizeScope 把 context 名清洗成文件名安全段（只保留 [A-Za-z0-9._-]；
+// 其余字符一律用下划线替代，避免路径穿越/分隔符污染缓存目录）。
+func sanitizeScope(name string) string {
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+// stateFileName 返回按作用域隔离的缓存文件名：`current_dir.<scope>`；
+// scope 为空时返回历史全局名。
+func stateFileName(base string) string {
+	if s := stateScope(); s != "" {
+		return base + "." + s
+	}
+	return base
+}
+
+// saveCurrentDirValue 将指定目录持久化到 XDG 缓存目录（按 context 隔离）。
 func saveCurrentDirValue(dir string) {
-	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFile))
+	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, stateFileName(cacheFile)))
 	if err != nil {
 		return
 	}
@@ -230,7 +266,7 @@ func saveCurrentDirValue(dir string) {
 
 // saveCurrentVolumeValue 持久化当前工作目录所在卷（空串也写：显式回到本地卷要覆盖旧值）。
 func saveCurrentVolumeValue(vol string) {
-	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFileVolume))
+	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, stateFileName(cacheFileVolume)))
 	if err != nil {
 		return
 	}
@@ -240,28 +276,43 @@ func saveCurrentVolumeValue(vol string) {
 
 // loadCurrentVolume 从 XDG 缓存目录加载当前工作目录所在卷（无缓存 = 本地卷）。
 func loadCurrentVolume() string {
-	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFileVolume))
-	if err != nil {
-		return ""
-	}
-	data, err := os.ReadFile(cachePath)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
+	return strings.TrimSpace(readScopedState(cacheFileVolume))
 }
 
-// loadCurrentDir 从 XDG 缓存目录加载当前目录。
+// loadCurrentDir 从 XDG 缓存目录加载当前目录（按 context 隔离）。
 func loadCurrentDir() string {
-	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFile))
+	return strings.TrimSpace(readScopedState(cacheFile))
+}
+
+// readScopedState 读取按作用域隔离的状态文件；作用域文件不存在时，从**历史全局文件**
+// 迁移一次（读取 + 写入作用域文件 + 删除全局文件，删除是原子的 ⇒ 多 context 并发迁移
+// 时只有一个能拿到旧值，其余回落到空，不会串环境）。
+func readScopedState(base string) string {
+	scoped, err := xdg.CacheFile(filepath.Join(cacheDirName, stateFileName(base)))
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(cachePath)
-	if err != nil {
+	if data, rerr := os.ReadFile(scoped); rerr == nil {
+		return string(data)
+	}
+	// 仅当作用域非空才迁移（空作用域本身就是全局文件）。
+	if stateScope() == "" {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	legacy, lerr := xdg.CacheFile(filepath.Join(cacheDirName, base))
+	if lerr != nil {
+		return ""
+	}
+	data, rerr := os.ReadFile(legacy)
+	if rerr != nil {
+		return ""
+	}
+	_ = os.MkdirAll(filepath.Dir(scoped), 0o755)
+	if werr := os.WriteFile(scoped, data, 0o644); werr != nil {
+		return string(data) // 写失败也按旧值生效（不阻断命令）
+	}
+	_ = os.Remove(legacy) // 迁移完成：旧全局文件删除，避免其它 context 再继承
+	return string(data)
 }
 
 // confirmRmdir 决定「本次删除是否已获用户确认」（= 发给服务端的 force=true）：
