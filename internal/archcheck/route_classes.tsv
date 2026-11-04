@@ -10,6 +10,8 @@
 #   tunnel  = localMux 裸注册（隧道内层；隧道加密即认证，身份经 ctx 透传）
 #   public  = 主 mux 裸注册（显式公开面：healthz/metrics/注册/feed 等）
 # 格式：<mux>	<pattern>	<class>	<file>:<line>
+localMux	GET /api/volumes/{name}/explain	tunnel	pkg/server/routes_files.go
+localMux	GET /api/volumes/{name}/trace	tunnel	pkg/server/routes_files.go
 localMux	POST /upload	tunnel	pkg/server/routes.go:222
 localMux	GET /download	tunnel	pkg/server/routes.go:223
 localMux	POST /delete	tunnel	pkg/server/routes.go:224
@@ -85,6 +87,8 @@ localMux	GET /upload/sessions	tunnel	pkg/server/routes.go:344
 localMux	POST /upload/complete	tunnel	pkg/server/routes.go:345
 localMux	GET /download/chunk	tunnel	pkg/server/routes.go:346
 localMux	POST /api/checksums/rebuild	tunnel	pkg/server/routes.go:435
+srvMux	GET /api/volumes/{name}/explain	reader	pkg/server/routes_files.go
+srvMux	GET /api/volumes/{name}/trace	reader	pkg/server/routes_files.go
 srvMux	POST /api/checksums/rebuild	auth	pkg/server/routes.go:436
 localMux	POST /api/verify	tunnel	pkg/server/routes.go:362
 srvMux	POST /api/verify	auth	pkg/server/routes.go:363

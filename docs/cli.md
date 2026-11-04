@@ -851,6 +851,8 @@ sclient volume copy <file> --from-volume <a> --to-volume <b>
 sclient volume move <file> --from-volume <a> --to-volume <b>
 sclient volume rebalance --from-volume <a> --to-volume <b> [--max-bytes <n>]
 sclient volume refresh [<卷名>]        # 强制刷新卷缓存（无参 = 全部卷）
+sclient volume trace   <逻辑路径> [--volume <v>] [--disk] [--json]
+sclient volume explain <真实路径> [--volume <v>] [--disk] [--json]
 ```
 
 - **`volume refresh` 是唯一「强制感知进程外改动」的入口**：服务端卷状态缓存**默认永不过期**
@@ -870,6 +872,26 @@ sclient volume refresh [<卷名>]        # 强制刷新卷缓存（无参 = 全�
 - `volume list` 输出 name/type/capacity 表格，`--json` 输出机器可读
 - `volume delete` 删除用户卷：被**活跃同步任务引用**时服务端返回 409（需先取消任务）
 - 用户卷寻址：同步任务 `remote.volume` 填用户卷名，任务 owner 必须匹配卷 owner（跨用户 404 防枚举）
+
+#### 真实存储审查（`volume trace` / `volume explain`）
+
+secretdata 卷的物理布局刻意不可读（随机容器名、`q`/`z` 标记、meta pad、嵌套容器），
+这两个命令用于**只读审查**「逻辑对象落在哪些真实文件」与「真实文件是干什么的」：
+
+```bash
+# 正向：逻辑路径 → 容器链 + meta blob + 各分块 + parity（+ 去重池引用）
+sclient volume trace data:/photos/2026/a.jpg
+# 反向：真实路径（容器目录或单个 blob）→ 用途 + 逻辑归属
+sclient volume explain data:k3f9a/8xQ.../7xQ...z...
+```
+
+- 卷名可用 `--volume`、`<卷>:<路径>` 前缀或当前卷上下文指定（三者优先级同上传）
+- 默认只读服务端索引（快）；`--disk` 同时对比磁盘，输出差异码（`blob_missing` / `blob_orphan` /
+  `size_mismatch` / `meta_unreadable` / `container_not_indexed` / `parent_unresolved` / …）
+- 退出码：`0` 一致；`3` 发现差异（便于脚本门禁）；`1` 参数/服务端错误
+- 仅对实现 `StorageInspector` 的卷可用（当前 = secretdata）；其它卷明确报「不支持审查」，**不返回空结果**
+- **只读审计，不构成删除建议**：`blob_orphan` 仅表示索引无引用，回收请走 GC（有 re-confirm 流程）
+- 只解 meta（名称/尺寸/分块索引等），不读取内容、不落地明文
 
 ### backup
 

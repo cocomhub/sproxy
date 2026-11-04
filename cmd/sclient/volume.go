@@ -40,7 +40,11 @@ func NewCmdVolume(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
   copy <file> --to-volume <v>  跨卷复制文件（保留源）
   move <file> --to-volume <v>  跨卷移动文件
   rebalance --from-volume <a> --to-volume <b>  卷再平衡（异步）
-  refresh <卷名>  重建卷内存索引（外部改动收敛，secretdata 等）`,
+  refresh <卷名>  重建卷内存索引（外部改动收敛，secretdata 等）
+
+真实存储审查（只读；仅 secretdata 等实现该能力的卷）：
+  trace <逻辑路径>    逻辑对象落在哪些真实文件（容器/meta/分块/parity）
+  explain <真实路径>  真实文件是干什么的（用途 + 逻辑归属）`,
 		Args: cobra.NoArgs,
 	}
 	cmd.AddCommand(newCmdVolumeCreate(factory, ios))
@@ -50,6 +54,8 @@ func NewCmdVolume(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 	cmd.AddCommand(newCmdVolumeMove(factory, ios, st))
 	cmd.AddCommand(newCmdVolumeRebalance(factory, ios))
 	cmd.AddCommand(newCmdVolumeRefresh(factory, ios))
+	cmd.AddCommand(newCmdVolumeTrace(factory, ios, st))
+	cmd.AddCommand(newCmdVolumeExplain(factory, ios, st))
 	return cmd
 }
 

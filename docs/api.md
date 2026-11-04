@@ -1248,6 +1248,46 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 错误：枚举失败 → `500` `{"success": false, "message": "读取卷文件失败"}`（JSON，在写 tar 头之前）；
   非 strict 下单条目失败仅记入 `warnings`
 
+### GET /api/volumes/{name}/trace?path=&disk=
+
+**真实存储审查（正向）**：返回逻辑路径在真实存储上的完整落点。仅支持实现了
+`volume.StorageInspector` 的卷（当前为 secretdata）；其它卷返回 `501`。
+
+- 认证：主 mux `reader`（只读子组）/ 隧道内层 `tunnel`
+- query 参数：`path`（**用户视角路径**，服务端按卷键空间映射为 `<owner>/user/<path>`；空 = 卷根，不映射；
+  封装/加密卷的内部索引键含 owner/bucket 前缀，调用方无需也不应自行拼接）；`disk=1`（可选，默认 0 = 只读索引）
+- 响应 `{"trace": {...}}`（`schema_version=1`）：
+  ```json
+  {"trace": {
+    "schema_version": 1, "mode": "index", "rel": "photos/a.jpg", "kind": "file",
+    "size": 12900000, "mtime": 1730000000000000000,
+    "meta": {"real_path": "k3f9a/8xQ.../7xQ...z...", "bytes": 1572864},
+    "chunks": [{"index": 0, "blob": {"real_path": "k3f9a/8xQ.../9ab...", "bytes": 4194304, "plain": 4194304}, "blocklets": 1}],
+    "parity": {"real_path": "k3f9a/8xQ.../f5d...", "bytes": 4194304},
+    "dedup": {"container": "pool", "refs": 3},
+    "anomalies": []
+  }}
+  ```
+- `disk=1` 时每个 `blob` 追加 `on_disk`/`disk_bytes`，并输出差异码（见下）
+- 错误：`404` 卷不存在 / 逻辑路径不存在；`501` 该卷不支持审查；`403` **路径越出卷根**
+
+### GET /api/volumes/{name}/explain?real=&disk=
+
+**真实存储审查（反向）**：解释卷根相对真实路径（容器目录或单个 blob）的用途与逻辑归属。
+
+- 认证：主 mux `reader`（只读子组）/ 隧道内层 `tunnel`
+- query 参数：`real`（必填，卷根相对；绝对路径/`..` 一律 `403`）；`disk=1`（可选）
+- 响应 `{"explain": {...}}`：`kind` ∈ `container|dir_meta|file_meta|chunk|parity|unknown`；
+  `owner`（逻辑归属，分块带 `chunk_index`、parity 带 `parity:true`）、`container`（逻辑目录/dir_id，
+  为**卷键空间**路径，如 `<owner>/user/jav/...`）、`evidence`（判定依据）、
+  `entries`（容器内逐条用途；`kind=container` 表示**子容器目录**并带 `container` 归属）、`anomalies`
+- `real` 是**封装卷区域相对的真实路径**（容器链），不是用户逻辑路径；两种路径空间不可混用
+- 路径不存在 ⇒ `200` + `kind:"unknown"` + `not_found` 异常（审查工具需解释「为什么这里空」，不是 404）
+- 差异码（稳定契约）：`blob_missing` / `blob_orphan` / `size_mismatch` / `meta_unreadable` /
+  `container_not_indexed` / `parent_unresolved` / `dir_meta_ambiguous` / `not_found` / `truncated` / `dedup_shared`
+- **注意**：差异码是**只读审计结论**，不是删除建议。`blob_orphan` 仅表示「索引无引用」，
+  实际回收由 GC 的 re-confirm 流程决定（crash 窗口内可能仍被使用）。
+
 ### POST /api/volumes/import?volume=&overwrite=true
 
 卷备份导入：请求体 = `application/x-tar` 流（与 export 产物同构）。

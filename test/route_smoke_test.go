@@ -16,8 +16,9 @@ package sproxy_test
 //
 // 三者的共同点：**函数级测试全绿，装配后必错**。此前仓库里没有任何测试遍历过路由表。
 //
-// 判据刻意宽松：只要不是 5xx、且不含接线错误标记，就算通过（400/401/403/404/501 都是
-// 合法业务态）。破坏性端点跑在 E2E 的临时 storage 上，不影响任何真实数据。
+// 判据刻意宽松：只要不是服务端故障 5xx、且不含接线错误标记，就算通过
+// （400/401/403/404/501 都是合法业务态；**501 = 能力未实现**，如卷不支持审查，
+// 是显式契约而非故障）。破坏性端点跑在 E2E 的临时 storage 上，不影响任何真实数据。
 
 import (
 	"bufio"
@@ -186,8 +187,10 @@ func TestRouteSmoke_NoWiringFailure(t *testing.T) {
 
 // assertSmokeStatus 断言响应不是装配故障：非 5xx，且不含接线错误文案。
 //
-// 5xx 一律算失败：服务端故障不该由「客户端用了空 body」触发——空 body 的合法结果是
-// 400/401/403/404/405/409/501（未启用）。确属 5xx 的实现缺陷应当修实现，不得在此豁免。
+// 除 501 外的 5xx 一律算失败：服务端故障不该由「客户端用了空 body」触发——空 body 的
+// 合法结果是 400/401/403/404/405/409/501（未启用）。501 是显式的「能力未实现」契约态
+// （如 GET /api/volumes/{name}/trace 用在不支持审查的卷上），不属装配故障；
+// 确属其它 5xx 的实现缺陷应当修实现，不得在此豁免。
 func assertSmokeStatus(t *testing.T, name string, resp *http.Response, body []byte) {
 	t.Helper()
 	text := string(body)
@@ -197,7 +200,7 @@ func assertSmokeStatus(t *testing.T, name string, resp *http.Response, body []by
 				name, resp.StatusCode, marker)
 		}
 	}
-	if resp.StatusCode >= http.StatusInternalServerError {
+	if resp.StatusCode >= http.StatusInternalServerError && resp.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("%s 返回 %d（装配面冒烟不允许 5xx）：%s",
 			name, resp.StatusCode, snippetOf(text))
 	}
