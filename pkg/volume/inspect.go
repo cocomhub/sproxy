@@ -81,10 +81,17 @@ type PathTrace struct {
 	Size          int64  `json:"size"` // 逻辑明文大小
 	MTime         int64  `json:"mtime"`
 
+	// Containers 是容器链（卷根 → 叶），每层带**真实容器名**与其逻辑目录名。
+	Containers []ContainerRef `json:"containers,omitempty"`
+
 	Meta   *BlobRef   `json:"meta,omitempty"` // 文件 meta / 目录 meta blob
 	Chunks []ChunkRef `json:"chunks,omitempty"`
 	Parity *BlobRef   `json:"parity,omitempty"`
 	Dedup  *DedupRef  `json:"dedup,omitempty"`
+
+	// Upload 非空 = 该路径**正在上传**（meta 尚未提交，索引里还没有）。
+	// mode 同为 "uploading"；此时 Chunks/Meta 为空。
+	Upload *UploadProgress `json:"upload,omitempty"`
 
 	Anomalies []Anomaly `json:"anomalies,omitempty"`
 }
@@ -146,6 +153,20 @@ type RealEntry struct {
 	Note      string        `json:"note,omitempty"`
 }
 
+// UploadProgress 是在途上传的进度快照（仅**本进程**可见的上传可上报）。
+type UploadProgress struct {
+	Rel       string `json:"rel"`
+	Container string `json:"container"`
+	// Total 是逻辑大小（调用方声明；0 = 未知）。
+	Total int64 `json:"total"`
+	// Committed 是**已上传密文字节**（含每块头/nonce/tag 开销，略大于对应明文）。
+	Committed int64 `json:"committed"`
+	// Chunks 是已完成的块数。
+	Chunks int64 `json:"chunks"`
+	// StartedAt 是 UnixNano 起始时刻（仅展示用，不参与判定）。
+	StartedAt int64 `json:"started_at,omitempty"`
+}
+
 // RealExplanation 是反向解释：一个真实路径是干什么的。
 type RealExplanation struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -184,4 +205,7 @@ const (
 	AnomalyNotFound            = "not_found"             // 真实路径在磁盘不存在
 	AnomalyTruncated           = "truncated"             // 条目过多被截断
 	AnomalyDedupShared         = "dedup_shared"          // 分块位于去重池（提示，非异常）
+	// AnomalyUploadInProgress 不是差异：该 blob 属于**本进程在途上传**（meta 尚未提交），
+	// 不得当作孤儿处置（GC 写进行时本就不会运行）。
+	AnomalyUploadInProgress = "upload_in_progress"
 )

@@ -40,6 +40,54 @@ func TestWriteTraceText_RendersChainAndAnomalies(t *testing.T) {
 	_ = onDisk
 }
 
+// TestWriteTraceText_ShowsContainerLogicalNames 树必须同时给真实容器名与逻辑目录名。
+func TestWriteTraceText_ShowsContainerLogicalNames(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	writeTraceText(&buf, &volume.PathTrace{
+		SchemaVersion: volume.SchemaVersion, Mode: "index", Rel: "photos/a.jpg", Kind: "file",
+		Size: 2048,
+		Containers: []volume.ContainerRef{
+			{RealPath: "OypEIk", LogicalDir: ""},
+			{RealPath: "OypEIk/TmKKk", LogicalDir: "ak-6c/user"},
+			{RealPath: "OypEIk/TmKKk/y78eK", LogicalDir: "ak-6c/user/photos"},
+		},
+		Meta:   &volume.BlobRef{RealPath: "OypEIk/TmKKk/y78eK/7xQz", Bytes: 1024},
+		Chunks: []volume.ChunkRef{{Index: 0, Blob: volume.BlobRef{RealPath: "OypEIk/TmKKk/y78eK/9ab", Bytes: 2048, Plain: 2000}, Blocklets: 1}},
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"卷根容器 OypEIk", "容器 TmKKk   → ak-6c/user", "容器 y78eK   → ak-6c/user/photos",
+		"文件meta 7xQz",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("输出缺少 %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestWriteTraceText_Uploading 上传中视图：进度 + 明确说明 meta 未提交。
+func TestWriteTraceText_Uploading(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	writeTraceText(&buf, &volume.PathTrace{
+		SchemaVersion: volume.SchemaVersion, Mode: "uploading", Rel: "photos/a.mp4", Kind: "file",
+		Size:       1000,
+		Containers: []volume.ContainerRef{{RealPath: "k3f9a", LogicalDir: ""}},
+		Upload:     &volume.UploadProgress{Rel: "photos/a.mp4", Container: "k3f9a", Total: 1000, Committed: 400, Chunks: 3},
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"上传中（meta 尚未提交）", "已上传 400 B / 1000 B (40%)", "已完成 3 块",
+		"索引中暂无该文件",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("输出缺少 %q:\n%s", want, out)
+		}
+	}
+	t.Logf("uploading view:\n%s", out)
+}
+
 func TestWriteExplainText_RendersOwnerParityAndEntries(t *testing.T) {
 	t.Parallel()
 	chunk := 2

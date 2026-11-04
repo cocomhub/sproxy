@@ -348,6 +348,21 @@ photos/2026/a.jpg   12.3 MiB  mtime=2026-11-01 12:00
    ⇒ HTTP 层用 `Volume.ResolveUserLocation(owner, path).FSPath()` 映射；空 path（卷根）不映射。
    `explain` 的 `real` 仍按**区域相对真实路径**解释（两种键空间不可混用，已在 api.md 写明）。
 
+## 10.2 上传中可见性（2026-11-04 追加）
+
+原实现只有「索引有/没有」两态 ⇒ 上传窗口内给出误导结论（trace 404；explain 报孤儿）。
+现补进程内在途上传注册表（`upload_tracker.go`）：
+
+| 场景 | 现在 |
+|---|---|
+| `trace <目标路径>` | `mode=uploading` + `upload{total, committed, chunks, started_at}`（退出码 0） |
+| `explain <在途分块>` | `kind=upload_in_progress` + `owner=目标 rel`；异常码 `upload_in_progress`（**不是** `blob_orphan`） |
+| `explain <容器>` | 在途分块逐条标 `upload_in_progress` |
+| 树形输出 | 每层容器显示**真实名 → 逻辑目录名**（`containers[]`） |
+
+边界：注册表是**本进程**内存态；跨实例的上传仍表现为未引用 blob（blob mtime 被刻意打散，
+不做时间猜测）。GC 不受影响——`writesInFlight` 已使 GC 在有在途写时放弃整轮。
+
 ## 11. 风险与未决
 
 | 风险 | 缓解 |
