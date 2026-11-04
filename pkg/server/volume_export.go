@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/iocopy"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
@@ -337,7 +338,7 @@ func (h *Handlers) writeVolumeExportEntry(ctx context.Context, tw *tar.Writer, s
 	}); err != nil {
 		return err
 	}
-	if _, err := copyWithContext(tw, f, ctx); err != nil {
+	if _, err := iocopy.CopyWithContext(ctx, tw, f); err != nil {
 		return err
 	}
 	return nil

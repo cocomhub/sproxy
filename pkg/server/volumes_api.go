@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/iocopy"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
@@ -979,7 +980,7 @@ func crossVolumeCopy(ctx context.Context, srcRoot, dstRoot *storage.Root, srcRel
 	}
 	defer func() { _ = dstRoot.Remove(tmpRel) }()
 
-	written, err := copyWithContext(tmpDst, src, ctx)
+	written, err := iocopy.CopyWithContext(ctx, tmpDst, src)
 	if err != nil {
 		_ = tmpDst.Close()
 		return 0, fmt.Errorf("复制文件失败: %w", err)

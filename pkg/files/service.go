@@ -133,7 +133,7 @@
 // `defaultVolumeAllows`、`locateForRead`（五个都在本文件末尾，按此顺序）
 // 与 `formatContentDisposition`
 // （在 `chunked_response.go`）、`volumePoolForTenant`（在 `version_store.go`）、
-// `volumeFileExists`（在 `read.go`）、`copyWithContext`（在 `write.go`）
+// `volumeFileExists`（在 `read.go`）、`copyWithContext`（已收敛到 `internal/iocopy`）
 // 在 `pkg/server` 侧另有消费者，
 // 既不能随本族从那边删走、本包也无法 import `pkg/server`（规则③）。故本包持**语义等价的
 // 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫

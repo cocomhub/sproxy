@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/iocopy"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/rootfs"
@@ -298,7 +299,7 @@ func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)
-	if _, err := copyWithContext(w, f, r.Context()); err != nil {
+	if _, err := iocopy.CopyWithContext(r.Context(), w, f); err != nil {
 		h.logger.Warn("分享文件流式传输中断", "token", token, "error", err)
 	}
 }
