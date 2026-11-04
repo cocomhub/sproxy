@@ -60,12 +60,10 @@ func newCmdVolumeTrace(factory clientfactory.Factory, ios cli.IOStreams, st *sta
 			if err != nil {
 				return err
 			}
-			jsonOut, _ := cmd.Flags().GetBool(flagInspectJSON)
-			if jsonOut {
-				return writeInspectJSON(ios.Out, tr)
+			if err := emitTraceResult(cmd, ios, tr); err != nil {
+				return err
 			}
-			writeTraceText(ios.Out, tr)
-			if disk && len(tr.Anomalies) > 0 {
+			if inspectHasDiff(tr.Anomalies) {
 				return errInspectDiff
 			}
 			return nil
@@ -101,12 +99,10 @@ container / dir_meta / file_meta / chunk / parity / unknown，并给出逻辑归
 			if err != nil {
 				return err
 			}
-			jsonOut, _ := cmd.Flags().GetBool(flagInspectJSON)
-			if jsonOut {
-				return writeInspectJSON(ios.Out, ex)
+			if err := emitExplainResult(cmd, ios, ex); err != nil {
+				return err
 			}
-			writeExplainText(ios.Out, ex)
-			if len(ex.Anomalies) > 0 {
+			if inspectHasDiff(ex.Anomalies) {
 				return errInspectDiff
 			}
 			return nil
@@ -150,6 +146,47 @@ func resolveInspectTarget(cmd *cobra.Command, arg string, st *state.State, logic
 	}
 	// 真实路径是「卷根相对」：卷 URI 的前导斜杠只是绝对语义标记，服务端要求相对形态。
 	return volName, strings.TrimPrefix(target, "/"), nil
+}
+
+// emitTraceResult 输出正向结果（--json 或文本）。**两种模式共用同一退出码判定**：
+// 此前 JSON 分支提前 return，导致同一份数据文本模式退 3、JSON 模式退 0（不一致）。
+func emitTraceResult(cmd *cobra.Command, ios cli.IOStreams, tr *volume.PathTrace) error {
+	if jsonOut, _ := cmd.Flags().GetBool(flagInspectJSON); jsonOut {
+		return writeInspectJSON(ios.Out, tr)
+	}
+	writeTraceText(ios.Out, tr)
+	return nil
+}
+
+// emitExplainResult 输出反向结果（--json 或文本）。
+func emitExplainResult(cmd *cobra.Command, ios cli.IOStreams, ex *volume.RealExplanation) error {
+	if jsonOut, _ := cmd.Flags().GetBool(flagInspectJSON); jsonOut {
+		return writeInspectJSON(ios.Out, ex)
+	}
+	writeExplainText(ios.Out, ex)
+	return nil
+}
+
+// inspectInformationalAnomalies 是**信息性**标记：不构成「存储差异」，不影响退出码。
+//   - upload_in_progress：本进程在途上传（meta 未提交），是正常中间态；
+//   - dedup_shared：内容位于去重池，是设计内的共享布局。
+var inspectInformationalAnomalies = map[string]struct{}{
+	volume.AnomalyUploadInProgress: {},
+	volume.AnomalyDedupShared:      {},
+}
+
+// inspectHasDiff 报告是否存在**真实差异**（详见 volume.Anomaly 码表）。
+//
+// 语义：退出码 3 = 索引声明与磁盘事实不一致（或缺/多/大小不符/meta 不可读）。
+// 上传中/去重共享不算差异——否则「上传中看一眼」就退 3，脚本无法区分。
+func inspectHasDiff(anomalies []volume.Anomaly) bool {
+	for _, a := range anomalies {
+		if _, ok := inspectInformationalAnomalies[a.Code]; ok {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // writeInspectJSON 输出稳定 JSON（缩进便于人读，字段序按结构体声明）。
