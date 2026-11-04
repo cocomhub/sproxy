@@ -79,7 +79,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `docs_cli_flags_test.go` | R15 | docs_cli_flags_test.go 是「sclient 全局选项文档不漂移」的门禁（R15）。 |
 | `docs_rules_test.go` | R9 | docs_rules_test.go 是「**协作与实施规则文档不得腐烂**」的门禁（R9）。 |
 | `duplication_test.go` | R1 · R5 | duplication_test.go 是**重复实现门禁**：把「共享辅助必须走单一事实源」从文档约定变成 |
-| `external_fs_gate_test.go` | R27 | external_fs_gate_test.go 是「外部卷后端 FS 直连点」门禁（R27）。 |
+| `external_fs_gate_test.go` | R27 | external_fs_gate_test.go 是「外部卷后端 FS 直连点」门禁（R27）。 （**2026-11-03 变异验证**：在未登记文件加一行对应调用 ⇒ 门禁红，扫描面可信） |
 | `flock_gate_test.go` | R19 · R23 | flock_gate_test.go 是「直接 flock 调用不得用于代码」的门禁（R23）。 |
 | `gate_wiring_test.go` | R13 | gate_wiring_test.go 是「**门禁自身可用性**」的守卫（R13）。 |
 | `http_transport_gate_test.go` | R19 · R20 | http_transport_gate_test.go 是「裸 http.Transport 构造不得用于代码」的门禁（R19） |
@@ -110,9 +110,9 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `test_count_ratchet_test.go` | R50 | 测试函数总数棘轮（2026-10-30）：全仓 `func Test*` 总数不得低于 `test_count_baseline.tsv` 基线（只增不减）。背景：#927 搬运时一个测试被静默删除（−1），无门禁发现；有意删除测试须同步下调基线并说明理由。 |
 | `test_doc_comment_gate_test.go` | R49 | 测试文档注释悬空门禁（2026-10-30）：`pkg/server` 下 `// TestXxx` 文档注释若指向全仓不存在的测试函数即红。与 R50 互补（R49 抓「注释残留」，R50 抓「连注释一起删」）。 |
 | `usage_provider_gate_test.go` | R30 | usage_provider_gate_test.go 是「卷用量查询**单一查询面**」门禁（R30，2026-10-17）。 |
-| `user_io_gate_test.go` | R25 | user_io_gate_test.go 是「用户内容读写必须经用户可见入口」的门禁（R25，第 5 轮对抗评审 |
+| `user_io_gate_test.go` | R25 | user_io_gate_test.go 是「用户内容读写必须经用户可见入口」的门禁（R25，第 5 轮对抗评审 （**2026-11-03 变异验证**：在未登记文件加一行对应调用 ⇒ 门禁红，扫描面可信） |
 | `volume_backend_registration_order_gate_test.go` | R45 | 门禁 **R45**：外部卷后端**类型注册**必须早于 `assembleVolumes`（`setupServerCore` 内 `registerVolumeBackendTypes()` 先于 `server.RegisterRoutes(`），且 `setupSyncVolumeBackends` 不得再回退注册类型。背景（用户实测 2026-10-21）：baidupcs/webdav/sftp/ftp/s3 的类型此前在 RegisterRoutes **之后**注册 ⇒ config 静态声明 `type: baidupcs` 等外部卷在装配期报「未注册后端」并启动失败（只能运行期建卷绕过）。 |
-| `volume_root_bypass_gate_test.go` | R26 | volume_root_bypass_gate_test.go 是「**卷根直连适配器**」门禁（R26；仓库的 R 号按设计文档 |
+| `volume_root_bypass_gate_test.go` | R26 | volume_root_bypass_gate_test.go 是「**卷根直连适配器**」门禁（R26；仓库的 R 号按设计文档 （**2026-11-03 变异验证**：在未登记文件加一行对应调用 ⇒ 门禁红，扫描面可信） |
 | `waitq_gates_test.go` | R36 | waitq_gates_test.go 汇总 W1 收敛的两条门禁（设计 docs/designs/2026-10-19-waitq.md §8.3）： |
 | `web_assets_test.go` | R10 | web_assets_test.go 是「**Web 前端每个 JS 文件都必须被自动化测试覆盖**」的门禁（R10）。 |
 | `alias_ratchet_test.go` | R51 | 迁移期别名文件 `pkg/server/*_alias.go` **只减不增**（文件数 + 行数双层棘轮）；清理别名后必须同步下调基线，锁定收益。 |
@@ -138,3 +138,4 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `root_mutation_gate_test.go` | R45 | `storage.Root` 结构性变异必须发事件（机制完整性在编译期之外的第二道保险）。 |
 | `volume_state_gate_test.go` | R44 | 卷状态缓存**唯一装配点**（R29 同形教训：横切关注点不能变成 N 个调用点各自的义务）。 |
 | `xfer_send_atomicity_test.go` | — | 传输层 `Send` 必须经 `iostream.WriteFull` 写足（防半帧），新增传输实现绕过即红。 |
+| `gate_index_gate_test.go` | R56 | `docs/gates.md` 索引必须覆盖全部门禁文件（`internal/archcheck/*_test.go`，除公共辅助 `arch_test.go`）；扫描面下限 60 防假绿。手工回填过的索引没有机制约束必然腐化（与 R55 同模式），本门禁把「加门禁必须登记索引」变成判据。 |
