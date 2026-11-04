@@ -555,12 +555,16 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stage
 	// 「无校验能力 ≠ 接受任意内容」，且 secretdata 的块名含内容哈希 + AES-GCM tag 在读取时
 	// 仍会 fail-closed，上传后复核是额外防线而非唯一防线。ETag 一旦可用仍走严格相等。
 	if meta.ETag == "" {
-		if st.size > 0 && meta.Size == st.size {
-			s.log.Warn("上传后远端 ETag 暂不可用（新目录一致性延迟），按 size 校验通过",
-				"key", key, "size", st.size, "attempt", attempt)
+		// 列举（`ls`）返回的 size 对大文件是**近似值**（实测 87.3MiB 文件差 312B：want=91593425
+		// got=91593113）⇒ 不能要求精确相等，改用**相对容差**（max(4KiB, 0.1%)）判定「同一个
+		// 对象且大小量级一致」。内容完整性仍由 secretdata 的块名（内容哈希）+ AES-GCM tag 在
+		// 读取时保证；上传后复核是额外防线。
+		if st.size > 0 && sizeNear(st.size, meta.Size) {
+			s.log.Warn("上传后远端 ETag 暂不可用（新目录一致性延迟），按列举 size 容差通过",
+				"key", key, "want_size", st.size, "got_size", meta.Size, "attempt", attempt)
 			return meta, true, nil
 		}
-		s.log.Warn("上传后远端 ETag 不可用且 size 不一致（重传）",
+		s.log.Warn("上传后远端 ETag 不可用且 size 超出容差（重传）",
 			"key", key, "want_size", st.size, "got_size", meta.Size, "attempt", attempt)
 		return meta, false, nil
 	}
@@ -1159,13 +1163,30 @@ func (r *tempReadCloser) Close() error {
 // 4.6GB 单文件实测可达 30s+；取 90s 上限，配合指数退避（0.5s → 8s 封顶）。
 const DefaultStatVisibleMaxWait = 90 * time.Second
 
+// sizeNear 判断两个大小是否「同一对象的近似表示」：容差 = max(4KiB, 0.1%)。
+// 用于列举（`ls`）给出的近似 size（大文件以 MB/KB 显示）与本地精确字节数比对。
+func sizeNear(want, got int64) bool {
+	if want == got {
+		return true
+	}
+	diff := want - got
+	if diff < 0 {
+		diff = -diff
+	}
+	tol := max(want/1000, 4096)
+	return diff <= tol
+}
+
 // visibleViaList 用**父目录列举**判断对象是否可见（Stat 一致性延迟窗口的可靠回落）。
 // 只在 Stat 报 NotFound 时被调用 ⇒ 已有对象的快路径（Stat 命中）零额外开销。
 func (s *Storage) visibleViaList(ctx context.Context, dir, base string) (*ObjectMeta, bool) {
 	if base == "" {
 		return nil, false
 	}
-	entries, err := s.List(ctx, dir)
+	// **轻量列举**（`ls`，不逐条 meta）：新目录树里 meta 本身不可见，逐条补精确 size 会
+	// 拿不到 ETag 且把 size 退化成近似值 ⇒ 后续 size 兜底判据失效。`ls` 输出的字节数是
+	// 精确值（实测 `21B`），足以支撑 size 校验。
+	entries, err := s.list(ctx, dir, false)
 	if err != nil {
 		return nil, false
 	}
