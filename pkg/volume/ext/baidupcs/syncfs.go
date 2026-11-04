@@ -409,3 +409,18 @@ func (f *StorageFS) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) 
 }
 
 var _ syncpkg.BatchVerifier = (*StorageFS)(nil)
+
+// RapidRefresh 实现 syncpkg.RapidRefresher（委托 Storage；底层无秒传能力则返回未命中）。
+func (f *StorageFS) RapidRefresh(ctx context.Context, item syncpkg.VerifyItem) (bool, error) {
+	if rr, ok := f.s.(rapidRefresher); ok {
+		return rr.RapidRefresh(ctx, item)
+	}
+	return false, nil
+}
+
+// rapidRefresher 是可选能力（Storage 实现；测试替身可不实现）。
+type rapidRefresher interface {
+	RapidRefresh(ctx context.Context, item syncpkg.VerifyItem) (bool, error)
+}
+
+var _ syncpkg.RapidRefresher = (*StorageFS)(nil)

@@ -29,6 +29,8 @@ type VerifyItem struct {
 	MD5 string
 	// Size 是期望的字节数（<=0 = 不校验大小）。
 	Size int64
+	// CRC32 是内容的 CRC32 IEEE（无符号十进制字符串；秒传类后端的刷新参数，可空）。
+	CRC32 string
 }
 
 // VerifyState 是单项校验结果。
@@ -53,6 +55,9 @@ type VerifyResult struct {
 	RemoteSize int64
 	// Reason 是人类可读原因（日志用）。
 	Reason string
+	// Refreshed 表示后端已用「秒传刷新」自愈（零传输刷新远端 md5）并复验通过。
+	// 使用方无需理解刷新细节：看到 State==OK 即可。
+	Refreshed bool
 }
 
 // BatchVerifier 是**可选**能力：批量延迟校验。
@@ -61,7 +66,10 @@ type VerifyResult struct {
 //   - 对每个 item 返回恰好一条结果（顺序与输入一致）；
 //   - 允许后端内部并发（实现方自行限流）；
 //   - **不得**因为单项不可见而返回整体错误（逐项表达）；
-//   - **不修改**远端内容（纯读）。
+//   - **允许后端自愈**：发现摘要不一致时，后端**应当**先尝试「秒传刷新」（零传输刷新远端
+//     md5，见 docs/external-dependencies.md §7.6）并复验；自愈成功则返回 State=OK +
+//     Refreshed=true。这样**使用方无需理解/编排刷新逻辑**（避免每个消费方各写一遍）。
+//   - 不得因单项不可见而返回整体错误（逐项表达）。
 type BatchVerifier interface {
 	VerifyMany(ctx context.Context, items []VerifyItem) []VerifyResult
 }
@@ -69,5 +77,23 @@ type BatchVerifier interface {
 // AssertBatchVerifier 查询后端是否支持批量校验（未实现 ⇒ ok=false，调用方回落逐次校验）。
 func AssertBatchVerifier(fs FS) (BatchVerifier, bool) {
 	v, ok := fs.(BatchVerifier)
+	return v, ok
+}
+
+// RapidRefresher 是**可选**能力：用「秒传（rapidupload）」**零传输刷新**远端 meta。
+//
+// 场景（实测 2026-11-04，详 docs/external-dependencies.md）：百度网盘分片上传后记录的
+// md5 **可能不可靠**，而内容其实已在盘 ⇒ 用内容 md5/size/crc32 调 rapidupload 命中后，
+// 远端 md5 会被刷新为权威整文件 md5。**这是修复「ETag 不一致」的首选手段**——
+// 比整块/整文件重传快几个数量级（零传输）。
+//
+// 契约：命中返回 (true, nil)；未命中返回 (false, nil)（调用方回落重传）；错误仅表示调用失败。
+type RapidRefresher interface {
+	RapidRefresh(ctx context.Context, item VerifyItem) (bool, error)
+}
+
+// AssertRapidRefresher 查询后端是否支持秒传刷新（未实现 ⇒ ok=false，调用方回落重传）。
+func AssertRapidRefresher(fs FS) (RapidRefresher, bool) {
+	v, ok := fs.(RapidRefresher)
 	return v, ok
 }

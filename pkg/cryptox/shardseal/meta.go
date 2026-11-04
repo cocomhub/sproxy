@@ -52,6 +52,13 @@ type ChunkInfo struct {
 	EncSize int64 `json:"enc_size"`
 	// EncSHA256 是块密文的完整 SHA-256（64 hex，256-bit；可校验密文完整）。
 	EncSHA256 string `json:"enc_sha256"`
+	// EncMD5 是块密文的 md5（hex 小写）——**秒传刷新（rapidupload）必需**：
+	// 分片上传后百度记录的 md5 可能不可靠（详 `docs/external-dependencies.md`），
+	// 而内容其实已在盘 ⇒ 用 md5+size+crc32 调 rapidupload 可**零传输刷新**远端 meta，
+	// 避免整块/整文件重传。omitempty：旧 meta 无此字段（退化为重传，零回归）。
+	EncMD5 string `json:"enc_md5,omitempty"`
+	// EncCRC32 是块密文的 CRC32 IEEE（**无符号十进制字符串**）——rapidupload 必需参数。
+	EncCRC32 string `json:"enc_crc32,omitempty"`
 	// Nonce 是块 nonce（base64；当前块内联 nonce，字段为向后兼容/审计）。
 	Nonce string `json:"nonce,omitempty"`
 	// Blocklets 是块内 blocklet 索引（随机访问定位/只解目标 blocklet 段）。连续覆盖
