@@ -216,8 +216,11 @@ func TestWriteFile_InterleavedChunkUploadLocalPeakO1Block(t *testing.T) {
 	if stageReadErr != nil {
 		t.Fatalf("内层读 stagedPath 失败（生命周期契约被破坏）: %v", stageReadErr)
 	}
-	if maxEntries > 1 {
-		t.Fatalf("本地 temp 同时存在 %d 份分块副本 ⇒ 未交错（峰值应为 O(1 块)）✗ 逐次采样 %v", maxEntries, entries)
+	// 块级**并发**上传（2026-11-04）后本地峰值 = O(并发度)：并发 worker 各自持有当前块。
+	// 串行（UploadConcurrency=1）时仍恒为 1 块；默认并发下 ≤ DefaultUploadConcurrency。
+	if maxEntries > DefaultUploadConcurrency+1 {
+		t.Fatalf("本地 temp 峰值为 %d，超过并发上限 %d ⇒ 未交错 ✗ 逐次采样 %v",
+			maxEntries, DefaultUploadConcurrency, entries)
 	}
 	sfs.mu.RLock()
 	e := sfs.index["d/f.bin"]

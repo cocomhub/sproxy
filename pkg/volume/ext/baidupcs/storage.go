@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -80,6 +81,9 @@ type Storage struct {
 	// 同一文件的多次 Range GET（含大块持续下载 >1 分钟）复用同一张直链，避免使用中
 	// 过期重签（每次 ~0.3s）；失效（CDN 非 206）⇒ 清除并重签一次（自愈）。
 	dlinkCache *dlinkLRU
+	// statVisibleWait 是「上传后等待目标可见」的总窗口（0 = DefaultStatVisibleMaxWait）。
+	// 结构体内部字段（只经 NewStorage 注入），便于测试用短窗口覆盖 90s 常量。
+	statVisibleWait time.Duration
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -535,7 +539,7 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stage
 		meta, visible = s.waitPutVisible(ctx, key)
 		if !visible {
 			s.log.Warn("上传后 Stat 等待超时仍不可见（交由上层重传）",
-				"key", key, "attempt", attempt, "max_wait", statVisibleMaxWait.String())
+				"key", key, "attempt", attempt, "max_wait", s.statVisibleWaitOrDefault().String())
 			return nil, false, nil
 		}
 		statErr = nil
@@ -545,6 +549,20 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stage
 	}
 	if meta.MD5Unreliable {
 		return s.checkAfterUploadUnreliableMD5(ctx, key, st, meta, attempt)
+	}
+	// **ETag 未提供**（百度新目录树的一致性延迟，实测 2026-11-04：`ls` 立即可见但 `meta`
+	// 报 31066 达 5-10 分钟 ⇒ ETag 拿不到）：退化为 **size 校验**，理由与 MD5Unreliable 同源——
+	// 「无校验能力 ≠ 接受任意内容」，且 secretdata 的块名含内容哈希 + AES-GCM tag 在读取时
+	// 仍会 fail-closed，上传后复核是额外防线而非唯一防线。ETag 一旦可用仍走严格相等。
+	if meta.ETag == "" {
+		if st.size > 0 && meta.Size == st.size {
+			s.log.Warn("上传后远端 ETag 暂不可用（新目录一致性延迟），按 size 校验通过",
+				"key", key, "size", st.size, "attempt", attempt)
+			return meta, true, nil
+		}
+		s.log.Warn("上传后远端 ETag 不可用且 size 不一致（重传）",
+			"key", key, "want_size", st.size, "got_size", meta.Size, "attempt", attempt)
+		return meta, false, nil
 	}
 	if meta.ETag == localMD5 {
 		return meta, true, nil
@@ -1139,19 +1157,58 @@ func (r *tempReadCloser) Close() error {
 
 // statVisibleMaxWait 是「上传后等待目标可见」的总窗口（大文件元数据最终一致性）。
 // 4.6GB 单文件实测可达 30s+；取 90s 上限，配合指数退避（0.5s → 8s 封顶）。
-const statVisibleMaxWait = 90 * time.Second
+const DefaultStatVisibleMaxWait = 90 * time.Second
+
+// visibleViaList 用**父目录列举**判断对象是否可见（Stat 一致性延迟窗口的可靠回落）。
+// 只在 Stat 报 NotFound 时被调用 ⇒ 已有对象的快路径（Stat 命中）零额外开销。
+func (s *Storage) visibleViaList(ctx context.Context, dir, base string) (*ObjectMeta, bool) {
+	if base == "" {
+		return nil, false
+	}
+	entries, err := s.List(ctx, dir)
+	if err != nil {
+		return nil, false
+	}
+	for i := range entries {
+		if path.Base(strings.TrimSuffix(entries[i].Key, "/")) == base {
+			m := entries[i]
+			return &m, true
+		}
+	}
+	return nil, false
+}
+
+// statVisibleWaitOrDefault 返回可见性等待窗口（未注入时用默认 90s）。
+func (s *Storage) statVisibleWaitOrDefault() time.Duration {
+	if s.statVisibleWait > 0 {
+		return s.statVisibleWait
+	}
+	return DefaultStatVisibleMaxWait
+}
 
 // waitPutVisible 轮询 Stat 直到目标可见（指数退避），或超时/ctx 取消。
 // 返回 (meta, true) 表示可见；(nil,false) 表示超时或非 NotFound 错误（调用方决定重传/失败）。
 func (s *Storage) waitPutVisible(ctx context.Context, key string) (*ObjectMeta, bool) {
-	deadline := time.Now().Add(statVisibleMaxWait)
+	deadline := time.Now().Add(s.statVisibleWaitOrDefault())
 	delay := 500 * time.Millisecond
+	dir, base := path.Split(strings.TrimSuffix(key, "/"))
+	dir = strings.TrimSuffix(dir, "/")
 	for {
 		if meta, err := s.Stat(ctx, key); err == nil && meta != nil {
 			return meta, true
 		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			s.log.Warn("上传后 Stat 返回非 NotFound 错误（放弃等待）", "key", key, "error", err)
 			return nil, false
+		}
+		// **Stat 对新建目录树的一致性延迟远大于列举**（实测 2026-11-04：文件上传成功后
+		// `ls` 父目录立即可见，`meta` 却报 31066「文件或目录不存在」并持续 >90s）⇒ 仅靠
+		// Stat 轮询会让**任何新目录/新容器的首次写入**必失败（实测 sp/s/_perftest、
+		// sp/s/<新容器> 全部 4.5 分钟后报 ErrTransient）。这里回落为「父目录列举」判据：
+		// 列举能看到同名条目即视为可见，并用列举的 size/etag 合成 meta（供后续复核）。
+		if meta, ok := s.visibleViaList(ctx, dir, base); ok {
+			s.log.Info("上传后 Stat 不可见但父目录列举可见（新目录一致性延迟），按列举结果视为成功",
+				"key", key, "size", meta.Size)
+			return meta, true
 		}
 		if time.Now().After(deadline) {
 			return nil, false

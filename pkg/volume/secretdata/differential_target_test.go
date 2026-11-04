@@ -623,8 +623,10 @@ func TestDifferential_RapidUploadConvergence(t *testing.T) {
 		t.Fatalf("真实传输次数 %d != 分块数 %d ⇒ 有分块未上传/重复传输 ✗",
 			uploads, len(rapidFS.index["d/f.bin"].meta.Chunks))
 	}
-	if maxLocalFiles > 1 {
-		t.Fatalf("本地分块副本峰值 %d ⇒ 未交错（应 O(1 块)）✗ 逐次 %v", maxLocalFiles, entries)
+	// 块级并发上传后本地峰值 = O(并发度)（串行时为 1）。
+	if maxLocalFiles > DefaultUploadConcurrency+1 {
+		t.Fatalf("本地分块副本峰值 %d 超过并发上限 %d ⇒ 未交错 ✗ 逐次 %v",
+			maxLocalFiles, DefaultUploadConcurrency+1, entries)
 	}
 }
 

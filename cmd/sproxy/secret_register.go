@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,6 +178,9 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 		SpanCacheBytes:     vcExtraByteSize(v, "span_cache_bytes"),
 		IndexSnapshotPath:  vcExtraStr(v, "index_snapshot_path"),
 		MetaCacheDir:       vcExtraStr(v, "meta_cache_dir"),
+		// 块级上传并发（0/缺省 = 默认 4）：外部卷 blocklet 仅 256KiB，逐块串行时
+		// 上游调用开销（含 baidupcs 每块 exec 一次二进制）远大于传输本身。
+		UploadConcurrency: vcExtraInt(v, "upload_concurrency"),
 	}
 }
 
@@ -754,4 +758,28 @@ func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Vol
 	}
 	log.Info("secretdata 卷补装完成（config 声明，推迟装配）", "volume", v.Name)
 	return nil
+}
+
+// vcExtraInt 读取整型 extra（缺省/非法返回 0，调用方以 0 传默认）。
+func vcExtraInt(v volume.Volume, key string) int {
+	raw, ok := v.Extra[key]
+	if !ok {
+		return 0
+	}
+	switch n := raw.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(n))
+		if err != nil {
+			return 0
+		}
+		return parsed
+	default:
+		return 0
+	}
 }
