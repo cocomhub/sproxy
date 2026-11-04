@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/iocopy"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
@@ -2421,7 +2422,7 @@ func writeTargetExclusive(ctx context.Context, root *storage.Root, rel string, s
 		return "", 0, err
 	}
 	h := sha256.New()
-	written, werr := copyWithContext(io.MultiWriter(f, h), src, ctx)
+	written, werr := iocopy.CopyWithContext(ctx, io.MultiWriter(f, h), src)
 	cerr := f.Close()
 	if werr != nil {
 		return "", written, werr
