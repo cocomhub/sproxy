@@ -23,8 +23,12 @@ package server
 import (
 	"net/http"
 
+	"github.com/cocomhub/sproxy/pkg/server/ai"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
+	"github.com/cocomhub/sproxy/pkg/server/notify"
 	"github.com/cocomhub/sproxy/pkg/server/router"
 	"github.com/cocomhub/sproxy/pkg/server/share"
+	"github.com/cocomhub/sproxy/pkg/server/verify"
 )
 
 // fileDomainClassIndex 是文件域「模式串 → 分类」索引（键为 "METHOD /path"）。
@@ -57,4 +61,56 @@ func buildRouteClassIndex(routes []router.Route[func(*Handlers, http.ResponseWri
 func fileDomainClass(pattern string) (router.Class, bool) {
 	c, ok := fileDomainClassIndex[pattern]
 	return c, ok
+}
+
+// 写面（mutating）索引：声明式取代 `isWriteFaceRoute` 的路径清单。
+//
+// 为什么：写面清单曾是**第二份**需要人工维护的分类（10 条规则 + 前缀判断），漏改的后果是
+// 集群只读副本上仍可写入（副本与主分叉）。与分类查表同源化后，每条路由的「是否写」由
+// 其声明表回答，中间件只做一次查表。
+//
+// 文件域与分享域由 Class 派生（ClassUser = 写子组）；其余域的写路由显式声明 Mutating。
+var mutatingPatterns = buildMutatingIndex()
+
+func buildMutatingIndex() map[string]bool {
+	idx := map[string]bool{}
+	add := func(method, pattern string, mut bool) { idx[method+" "+pattern] = mut }
+
+	for _, rt := range fileDomainRoutes() {
+		add(rt.Method, rt.Path, rt.Server == router.ClassUser)
+	}
+	for _, rt := range share.Routes(share.Endpoints{}) {
+		add(rt.Method, share.RoutePrefix+rt.Path, rt.Server == router.ClassUser)
+	}
+	for _, rt := range cloudtasks.Routes() {
+		add(rt.Method, cloudtasks.RoutePrefix+rt.Path, rt.Mutating)
+	}
+	for _, rt := range notify.Routes(notify.Endpoints{}) {
+		add(rt.Method, notify.RoutePrefix+rt.Path, rt.Mutating)
+	}
+	for _, rt := range ai.Routes(ai.Endpoints{}) {
+		add(rt.Method, ai.RoutePrefix+rt.Path, rt.Mutating)
+	}
+	for _, rt := range verify.Routes(nil) {
+		add(rt.Method, verify.RoutePrefix+rt.Path, rt.Mutating)
+	}
+	for _, rt := range syncRoutes() {
+		add(rt.Method, syncRoutePrefix+rt.Path, rt.Mutating)
+	}
+	for _, rt := range trashRoutes() {
+		add(rt.Method, trashRoutePrefix+rt.Path, rt.Mutating)
+	}
+	for _, rt := range opsRoutes() {
+		add(rt.Method, rt.Path, rt.Mutating)
+	}
+	for _, rt := range credentialRoutes() {
+		add(rt.Method, credentialRoutePrefix+rt.Path, rt.Mutating)
+	}
+	return idx
+}
+
+// declaredMutating 返回该**已匹配模式**是否声明为写面；ok=false 表示不在任何声明表内。
+func declaredMutating(pattern string) (mut bool, ok bool) {
+	mut, ok = mutatingPatterns[pattern]
+	return mut, ok
 }

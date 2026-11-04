@@ -75,9 +75,12 @@ R38 已有四个扫描面（其中一个是子包数据表）。本方案**新�
 | B3 | 其余域进表。**已交付**：同步/回收站/运维（#1023、#1024）、**credentials（含 Guard 机制，本轮）** | 无（同时修掉一个 P1：隧道内层凭据端点因限流器注册顺序 panic） |
 | B4 | **文件域**翻转：`localMuxGate` / `writeGuardMiddleware` / `fileRoute[Read]` 改查 index（键 = `mux.Handler(r)` 的匹配模式）；删除 `isFileGroupedRoute` / `isReadOnlyFileRoute`；R38 保持「TSV ↔ 声明」双向锁。**已交付** | 有（对未声明模式 fail-closed） |
 
-剩余：`isWriteFaceRoute` 的**非文件**写面清单（PUT /api/config、凭据/cloud/sync/volumes 写族、
-notify test、ai purge、verify、S3 写）仍是显式列表——它只影响集群只读副本的写门，未随本次
-翻转删除；待剩余域（含 credentials）全部进表后一并收敛。
+**写面声明化（2026-11-03 收尾）**：`isWriteFaceRoute` 的第二份路径清单已删除，改为查
+`mutatingPatterns` 索引——文件域/分享由 `ClassUser` 派生，其余域在表里显式
+`Mutating: true`（cloudtasks 12、sync 5、ops 3、credentials 5、trash 2、notify test、
+ai purge、verify）。S3 是 `/s3/` 子树挂载，其写方法在函数内特判。
+新增 `TestWriteFace_EveryRegisteredRouteIsDeclared`：分类表里的每条路由都必须能查到声明
+（挂载点/hub 信令面显式豁免并写明理由），新增路由漏声明即红。
 
 ## 4.1 实施要点（B4 实测）
 

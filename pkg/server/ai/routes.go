@@ -47,6 +47,6 @@ func Routes(eps Endpoints) []router.Route[http.HandlerFunc] {
 		{Method: "POST", Path: "/tag", Server: router.ClassNone, Local: router.ClassTunnel, H: eps.Tag},
 		{Method: "GET", Path: "/quota", Server: router.ClassPublic, Local: router.ClassTunnel, H: eps.Quota},
 		{Method: "GET", Path: "/privacy", Server: router.ClassPublic, Local: router.ClassTunnel, H: eps.Privacy},
-		{Method: "POST", Path: "/privacy/purge", Server: router.ClassPublic, Local: router.ClassTunnel, H: eps.PrivacyPurge},
+		{Method: "POST", Path: "/privacy/purge", Server: router.ClassPublic, Local: router.ClassTunnel, H: eps.PrivacyPurge, Mutating: true},
 	}
 }

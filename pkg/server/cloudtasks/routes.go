@@ -34,21 +34,21 @@ type Handler func(*Service, http.ResponseWriter, *http.Request, string)
 //   - 隧道内层（localMux）：tunnel（隧道加密即认证，裸注册）。
 func Routes() []router.Route[Handler] {
 	return []router.Route[Handler]{
-		{Method: "POST", Path: "/download", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CreateDownload},
-		{Method: "POST", Path: "/download/batch", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CreateBatchDownload},
+		{Method: "POST", Path: "/download", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CreateDownload, Mutating: true},
+		{Method: "POST", Path: "/download/batch", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CreateBatchDownload, Mutating: true},
 		{Method: "GET", Path: "/tasks", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ListTasks},
 		{Method: "GET", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).GetTask},
-		{Method: "POST", Path: "/tasks/{id}/cancel", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CancelTask},
-		{Method: "DELETE", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).DeleteTask},
-		{Method: "POST", Path: "/tasks/{id}/resume", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ResumeTask},
-		{Method: "POST", Path: "/tasks/{id}/archive", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ArchiveTask},
-		{Method: "POST", Path: "/archive", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ArchiveBatch},
-		{Method: "POST", Path: "/groups", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CreateGroup},
+		{Method: "POST", Path: "/tasks/{id}/cancel", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CancelTask, Mutating: true},
+		{Method: "DELETE", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).DeleteTask, Mutating: true},
+		{Method: "POST", Path: "/tasks/{id}/resume", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ResumeTask, Mutating: true},
+		{Method: "POST", Path: "/tasks/{id}/archive", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ArchiveTask, Mutating: true},
+		{Method: "POST", Path: "/archive", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ArchiveBatch, Mutating: true},
+		{Method: "POST", Path: "/groups", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CreateGroup, Mutating: true},
 		{Method: "GET", Path: "/groups", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ListGroups},
 		{Method: "GET", Path: "/groups/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).GetGroup},
-		{Method: "POST", Path: "/groups/{id}/cancel", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CancelGroup},
-		{Method: "DELETE", Path: "/groups/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).DeleteGroup},
-		{Method: "POST", Path: "/groups/{id}/resume", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ResumeGroup},
-		{Method: "POST", Path: "/groups/{id}/archive", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ArchiveGroup},
+		{Method: "POST", Path: "/groups/{id}/cancel", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CancelGroup, Mutating: true},
+		{Method: "DELETE", Path: "/groups/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).DeleteGroup, Mutating: true},
+		{Method: "POST", Path: "/groups/{id}/resume", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ResumeGroup, Mutating: true},
+		{Method: "POST", Path: "/groups/{id}/archive", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ArchiveGroup, Mutating: true},
 	}
 }

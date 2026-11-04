@@ -27,14 +27,14 @@ const syncRoutePrefix = "/api/sync"
 // syncRoutes 返回文件同步域的全部路由（相对路径 + 两端分类 + 方法表达式绑定）。
 func syncRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *http.Request)] {
 	return []router.Route[func(*Handlers, http.ResponseWriter, *http.Request)]{
-		{Method: "POST", Path: "/tasks", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncCreateTask},
+		{Method: "POST", Path: "/tasks", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncCreateTask, Mutating: true},
 		{Method: "GET", Path: "/tasks", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncListTasks},
 		{Method: "GET", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncGetTask},
-		{Method: "POST", Path: "/tasks/{id}/cancel", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncCancelTask},
-		{Method: "POST", Path: "/tasks/{id}/retry", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncRetryTask},
-		{Method: "DELETE", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncDeleteTask},
+		{Method: "POST", Path: "/tasks/{id}/cancel", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncCancelTask, Mutating: true},
+		{Method: "POST", Path: "/tasks/{id}/retry", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncRetryTask, Mutating: true},
+		{Method: "DELETE", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncDeleteTask, Mutating: true},
 		{Method: "GET", Path: "/conflicts", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncListConflicts},
 		{Method: "GET", Path: "/conflicts/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncGetConflict},
-		{Method: "POST", Path: "/conflicts/{id}/resolve", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncResolveConflict},
+		{Method: "POST", Path: "/conflicts/{id}/resolve", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).syncResolveConflict, Mutating: true},
 	}
 }

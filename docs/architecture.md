@@ -907,7 +907,9 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   `route_class_index.go` 的 `模式串 → Class` 索引；键来自 `mux.Handler(r)`（中间件层
   `r.Pattern` 尚为空）。`isFileGroupedRoute` / `isReadOnlyFileRoute` 已删除——这两个白名单
   曾把「模式串 vs 具体路径」的歧义变成 **每次 500**（semantic search、backend presign）与
-  **隧道内层静默越权**。`isWriteFaceRoute` 的非文件写面清单保留（待剩余域进表后收敛）。
+  **隧道内层静默越权**。写面（`isWriteFaceRoute`）同样声明化：`Route.Mutating` +
+  文件域/分享由 `ClassUser` 派生，S3 子树挂载特判；新增路由漏声明由
+  `TestWriteFace_EveryRegisteredRouteIsDeclared` 拦住。
 - 设计见 `docs/designs/2026-11-02-route-group-registration.md` 与
   `docs/designs/2026-11-03-route-class-single-source.md`。
 
