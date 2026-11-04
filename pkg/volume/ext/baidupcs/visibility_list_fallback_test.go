@@ -91,3 +91,23 @@ func (a *disabledListAdapter) List(ctx context.Context, remotePath string) ([]Ob
 func (a *disabledListAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
 	return nil, errNotFound
 }
+
+// TestSizeNear 列举 size 是近似值（大文件以 MB 显示）⇒ 用相对容差而非精确相等。
+func TestSizeNear(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		want, got int64
+		ok        bool
+	}{
+		{91593425, 91593113, true},   // 实测差值 312B（0.0003%）
+		{262144, 262144, true},       // 精确
+		{262144, 258048, true},       // 差 4KiB（边界内）
+		{262144, 200000, false},      // 差 62KiB > 4KiB 容差
+		{100 << 20, 99 << 20, false}, // 差 1MiB > 0.1%(105KB)
+	}
+	for _, c := range cases {
+		if got := sizeNear(c.want, c.got); got != c.ok {
+			t.Fatalf("sizeNear(%d,%d)=%v，want %v", c.want, c.got, got, c.ok)
+		}
+	}
+}
