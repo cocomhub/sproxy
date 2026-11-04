@@ -1,6 +1,6 @@
 # secretdata 真实存储审查能力（`volume trace` / `volume explain`）设计
 
-- 状态：**待评审**（用户要求「设计方案评审通过后再实施」）
+- 状态：**已实施（P1）**；P2（Web UI）待排期
 - 日期：2026-11-04
 - 关联：`pkg/volume/secretdata`（布局事实源）、`pkg/volume`（可选能力）、`pkg/server/ops`、`cmd/sclient`、`pkg/client`
 - 评审已确认的三项口径：

@@ -508,6 +508,29 @@ StateStore 全量拉回 + 反序列化；`SetStateStore` 切换后端时两者�
 per-request/per-owner 门卫包装）、否则强制 `StagingQuotaGateFS`（fail-safe 宁多勿漏）。
 staging 独立 Scope 但**挂在全局池之下**（受 `max_storage_bytes` 约束）。
 
+## 真实存储审查（逻辑 ↔ 物理落点，2026-11-04）
+
+secretdata 卷的物理布局刻意不可读（随机容器名、`q`/`z` 标记、meta pad、嵌套容器），
+运维/审计无法直接回答「这块盘上的文件是干什么的」。新增**可选能力**统一表达该问题：
+
+```go
+// pkg/volume/inspect.go
+type StorageInspector interface {
+    Trace(ctx, rel string, mode InspectMode) (*PathTrace, error)      // 逻辑 → 容器/meta/分块/parity
+    Explain(ctx, realRel string, mode InspectMode) (*RealExplanation, error) // 真实路径 → 用途 + 归属
+}
+```
+
+- **落位**：`pkg/volume` 定义契约，`pkg/volume/secretdata` 是唯一布局实现；
+  `pkg/server`（两条只读路由）+ `pkg/client` + `cmd/sclient volume trace|explain` 只做薄编排。
+  布局知识**不得**在装配层/CLI 复制（否则必然与写路径漂移）。
+- **模式**：默认 `InspectIndex`（只读索引）；`InspectDisk` 对比磁盘并输出差异码
+  （`blob_missing` / `blob_orphan` / `size_mismatch` / `meta_unreadable` / …）。
+- **安全**：只解 meta 不读内容；真实路径越界显式拒绝（`ErrOutsideVolume` → 403）；
+  只读（无删除/修复）；差异码不是删除建议（回收走 GC）。
+- **未实现能力的卷** ⇒ `501 not_inspectable`，绝不返回空结果（空结果会被误读为「没有落点」）。
+- 设计：`docs/designs/2026-11-04-secretdata-storage-inspection.md`。
+
 ## 统一转存（归档 = 转存 + 预处理）
 
 **单一管道**：`源(source) → [可选预处理] → 目标卷(destination)`。无预处理 = 纯转存（individual）；
