@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
@@ -180,6 +182,11 @@ type PutHints struct {
 	// **绝不跳过上传后的 md5 刷新/复核**（用户裁定 2026-10-21：必须按 md5 刷新成功保证
 	// 文件一致性，即使内容随机新建也要确保远端 meta 为权威整文件 md5）。
 	RandomBlob bool
+	// DeferVerify 表示**跳过上传后的即时 ETag/Stat 复核**（批量延迟校验路径，
+	// 2026-11-04 用户设计）：新目录树的 Stat 延迟 5–10 分钟，逐块复核必然超时；
+	// 调用方承诺在全部写完后用 VerifyMany 统一校验（此时索引已建立）。
+	// **不改变**内容一致性红线：调用方必须真的校验（VerifyMany），否则等于放弃校验。
+	DeferVerify bool
 }
 
 // PutFromStagedPath 把**调用方已暂存**的本地文件上传为 key（本地 staging 路径复用：
@@ -1163,6 +1170,9 @@ func (r *tempReadCloser) Close() error {
 // 4.6GB 单文件实测可达 30s+；取 90s 上限，配合指数退避（0.5s → 8s 封顶）。
 const DefaultStatVisibleMaxWait = 90 * time.Second
 
+// DefaultVerifyConcurrency 是批量校验（VerifyMany）的并发度。
+const DefaultVerifyConcurrency = 4
+
 // sizeNear 判断两个大小是否「同一对象的近似表示」：容差 = max(4KiB, 0.1%)。
 // 用于列举（`ls`）给出的近似 size（大文件以 MB/KB 显示）与本地精确字节数比对。
 func sizeNear(want, got int64) bool {
@@ -1197,6 +1207,105 @@ func (s *Storage) visibleViaList(ctx context.Context, dir, base string) (*Object
 		}
 	}
 	return nil, false
+}
+
+// PutDeferred 只上传、**不做上传后校验**（批量延迟校验路径，2026-11-04 用户设计）。
+//
+// 契约：上传请求成功即返回 nil；调用方**必须**随后用 VerifyMany 校验（新目录树的 Stat
+// 延迟 5–10 分钟，逐块即时校验必然超时）。校验不一致时调用方应重传（本地副本仍在）或
+// 记入待恢复清单——绝不静默放行不一致内容。
+func (s *Storage) PutDeferred(ctx context.Context, key, stagedPath string, size int64, hints *PutHints) error {
+	if err := ctx.Err(); err != nil {
+		return mapPCSError(err)
+	}
+	prepared, cleanup, perr := s.prepareStagedForAdapter(stagedPath, key)
+	if perr != nil {
+		return perr
+	}
+	defer cleanup()
+	st, err := s.stageUploadFromPath(ctx, prepared, key, size, hints)
+	if err != nil {
+		return err
+	}
+	remote, err := s.remotePath(key)
+	if err != nil {
+		return err
+	}
+	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
+		return mapPCSError(upErr)
+	}
+	s.invalidateDlink(key) // 覆盖写同名旧对象 ⇒ 失效旧直链
+	return nil
+}
+
+// VerifyMany 并发批量校验（实现 syncpkg.BatchVerifier）。
+//
+// 判据（按可用信息从严到宽）：
+//   - 期望 md5 与远端 ETag 都有 ⇒ **必须相等**（大小写不敏感）；
+//   - 远端 ETag 缺失（新目录一致性延迟）⇒ 用 sizeNear 判「同一对象且量级一致」；
+//   - 都无 ⇒ 存在即视为可见（调用方无法给出更强判据）。
+//
+// Stat 不可见时回落「父目录列举」，仍不可见 ⇒ VerifyInvisible（调用方据此入待恢复）。
+func (s *Storage) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
+	out := make([]syncpkg.VerifyResult, len(items))
+	conc := min(len(items), DefaultVerifyConcurrency)
+	if conc < 1 {
+		return out
+	}
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	for i := range items {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				out[i] = syncpkg.VerifyResult{Item: items[i], State: syncpkg.VerifyInvisible, Reason: "ctx 取消"}
+				return
+			}
+			out[i] = s.verifyOne(ctx, items[i])
+		}(i)
+	}
+	wg.Wait()
+	return out
+}
+
+// verifyOne 校验单个对象（VerifyMany 的工作单元）。
+func (s *Storage) verifyOne(ctx context.Context, it syncpkg.VerifyItem) syncpkg.VerifyResult {
+	res := syncpkg.VerifyResult{Item: it}
+	meta, err := s.Stat(ctx, it.Key)
+	if err != nil || meta == nil {
+		var ok bool
+		meta, ok = s.waitPutVisible(ctx, it.Key)
+		if !ok {
+			res.State = syncpkg.VerifyInvisible
+			res.Reason = "stat 与父目录列举均不可见"
+			return res
+		}
+	}
+	res.RemoteETag, res.RemoteSize = meta.ETag, meta.Size
+	switch {
+	case it.MD5 != "" && meta.ETag != "":
+		if strings.EqualFold(meta.ETag, it.MD5) {
+			res.State = syncpkg.VerifyOK
+			return res
+		}
+		res.State = syncpkg.VerifyMismatch
+		res.Reason = "远端 ETag 与期望 md5 不一致"
+	case it.Size > 0 && meta.Size > 0:
+		if sizeNear(it.Size, meta.Size) {
+			res.State = syncpkg.VerifyOK
+			return res
+		}
+		res.State = syncpkg.VerifyMismatch
+		res.Reason = "远端 size 超出容差"
+	default:
+		res.State = syncpkg.VerifyOK
+		res.Reason = "无可判定摘要/大小信息，存在即视为可见"
+	}
+	return res
 }
 
 // statVisibleWaitOrDefault 返回可见性等待窗口（未注入时用默认 90s）。

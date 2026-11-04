@@ -992,7 +992,7 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 				"请提供确定长度，或让源不可 seek 以走内存路径", ErrUnknownSourceSize, size)
 		}
 		warnStreamSizeMismatch(rel, r, size)
-		return s.writeFileStreamEntry(ctx, rel, r, size, mtime, expected, ifAbsent)
+		return s.writeFileStreamEntryWithRetry(ctx, rel, r, size, mtime, expected, ifAbsent)
 	}
 	// 上限兜底（P2 修复，2026-10-19）：上面的预检按**声明 size** 判定，`size<0`（chunked / 未知
 	// 长度）时它**无法生效** ⇒ 内存路径的 ReadAll 会随流无界增长（大文件整读 ⇒ OOM）。
@@ -1198,6 +1198,13 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
 		return fmt.Errorf("secretdata: 分块上传失败: %w", uerr)
 	}
+	// **批量延迟校验**（ctx 标记，2026-11-04 用户设计）：全部块写完后统一 Stat+md5 校验
+	// （此时远端索引已建立）；不一致／不可见 ⇒ 用保留的本地副本**自动重传**（多轮），
+	// 重传耗尽才失败（可重跑恢复）。
+	if verr := s.verifyBatchAndRepair(ctx, iu, out.Meta, wc); verr != nil {
+		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
+		return verr
+	}
 	out.Meta.Original.MTime = mtimeString(wc.mtime)
 	s.applyOriginalCTime(strings.TrimPrefix(wc.rel, "/"), out.Meta)
 	out.Meta.BaseVersion = wc.newVer
@@ -1281,8 +1288,14 @@ type interleavedUpload struct {
 	cancel func()
 	// cancelled 在首次失败时关闭：唤醒阻塞中的 submit（worker 已退出时不得永久阻塞）。
 	cancelled chan struct{}
-	errOnce   sync.Once
-	firstErr  error
+	// verifyMu/verifyItems/locals 支撑**批量延迟校验**（2026-11-04 用户设计）：
+	// 上传阶段只投递（DeferVerify），全部写完后统一校验；不一致时用 locals 里的
+	// 本地副本**自动重传**（重传耗尽才失败，并可重跑恢复）。
+	verifyMu    sync.Mutex
+	verifyItems []syncpkg.VerifyItem
+	locals      map[string]string
+	errOnce     sync.Once
+	firstErr    error
 	// finishOnce 保证 close(jobs)+Wait 只执行一次（幂等）。
 	finishOnce sync.Once
 }
@@ -1376,6 +1389,42 @@ func (iu *interleavedUpload) submit(ctx context.Context, job uploadJob) error {
 	}
 }
 
+// markVerify 登记一个待校验块（key + 期望 md5/size + 本地副本路径）。
+func (iu *interleavedUpload) markVerify(it syncpkg.VerifyItem, local string) {
+	iu.verifyMu.Lock()
+	iu.verifyItems = append(iu.verifyItems, it)
+	if local != "" {
+		if iu.locals == nil {
+			iu.locals = map[string]string{}
+		}
+		iu.locals[it.Key] = local
+	}
+	iu.verifyMu.Unlock()
+}
+
+// snapshotVerify 返回待校验项拷贝。
+func (iu *interleavedUpload) snapshotVerify() []syncpkg.VerifyItem {
+	iu.verifyMu.Lock()
+	defer iu.verifyMu.Unlock()
+	out := make([]syncpkg.VerifyItem, len(iu.verifyItems))
+	copy(out, iu.verifyItems)
+	return out
+}
+
+// cleanupLocals 删除全部本地副本（校验通过或回滚后调用）。
+func (iu *interleavedUpload) cleanupLocals() {
+	iu.verifyMu.Lock()
+	paths := make([]string, 0, len(iu.locals))
+	for _, p := range iu.locals {
+		paths = append(paths, p)
+	}
+	iu.locals = nil
+	iu.verifyMu.Unlock()
+	for _, p := range paths {
+		_ = os.Remove(p)
+	}
+}
+
 // finish 关闭队列并等待全部上传完成，返回首个错误（幂等；调用方据此决定回滚）。
 func (iu *interleavedUpload) finish() error {
 	iu.finishOnce.Do(func() {
@@ -1392,7 +1441,8 @@ func (iu *interleavedUpload) finish() error {
 
 // close 释放 staging 配额预留并删除本地临时目录（幂等，写路径 defer 调用）。
 func (iu *interleavedUpload) close() {
-	_ = iu.finish() // 幂等；错误已由 writeFileStream 在收尾处检查
+	_ = iu.finish()    // 幂等；错误已由 writeFileStream 在收尾处检查
+	iu.cleanupLocals() // 批量模式下保留的本地副本（成功后/失败回滚后统一清理）
 	if iu.tmp != "" {
 		_ = os.RemoveAll(iu.tmp)
 	}
@@ -1519,7 +1569,11 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 		}
 		// **先登记后上传**（P2 修复，2026-10-19）：内层「写成功但复核失败」时仍需从回滚集合
 		// 找到该 blob（块名含随机 salt/nonce ⇒ 未真正上传时删除是 no-op）。
-		iu.markUploaded(path.Join(wc.container, name))
+		key := path.Join(wc.container, name)
+		iu.markUploaded(key)
+		// 登记待校验项（**不保留本地副本**：峰值保持 O(并发度)；校验失败时由上层
+		// 整文件重试——源文件可重读，见 writeFileOpt 的重试）。
+		iu.markVerify(syncpkg.VerifyItem{Key: key, MD5: h.md5, Size: int64(len(blob))}, "")
 		if serr := iu.submit(ctx, job); serr != nil {
 			return serr
 		}
@@ -1773,6 +1827,123 @@ func (s *SecretdataFS) retainPoolEntry(mm *shardseal.Meta) {
 // uploadLocalChunk 上传**一个已落本地的密文分块**（分块/blob 通用）到 container，并把已上传
 // 路径追加到 uploaded。
 //
+// verifyBatchAndRepair 批量校验 + **自动重传**（2026-11-04 用户设计：不一致重传而非直接失败）。
+//
+// 语义：
+//   - 后端不支持 BatchVerifier ⇒ 跳过（Put 内部已逐块即时复核，零回归）；
+//   - 全部 VerifyOK ⇒ 清理本地副本，成功；
+//   - 不一致/不可见 ⇒ 用保留的本地副本**重传该块**（走即时复核路径）→ 再校验；
+//   - 轮次耗尽 ⇒ 返回错误（调用方回滚；**同命令重跑即可恢复**，源文件仍在）。
+func (s *SecretdataFS) verifyBatchAndRepair(ctx context.Context, iu *interleavedUpload, meta *shardseal.Meta, wc writeCtx) error {
+	items := iu.snapshotVerify()
+	if len(items) == 0 {
+		return nil
+	}
+	bv, ok := syncpkg.AssertBatchVerifier(s.inner)
+	if !ok {
+		iu.cleanupLocals()
+		return nil
+	}
+	const rounds = 3
+	for round := 1; round <= rounds; round++ {
+		results := bv.VerifyMany(ctx, items)
+		if len(results) != len(items) {
+			// 后端返回长度不符（不支持逐项校验）⇒ 无法判定，跳过批量校验（上传阶段已带
+			// DeferVerify 的前提是 putDeferredIfRequested 的双断言，这里只是防御）。
+			iu.cleanupLocals()
+			return nil
+		}
+		bad := collectVerifyFailures(results)
+		if len(bad) == 0 {
+			iu.cleanupLocals()
+			if round > 1 {
+				slog.Info("secretdata: 批量校验在重传后通过", "chunks", len(items), "round", round)
+			}
+			return nil
+		}
+		if round == rounds {
+			return fmt.Errorf("%w: %d/%d 块（重传 %d 轮仍不一致）: %s",
+				ErrBatchVerifyFailed, len(bad), len(items), rounds, summarizeVerifyFailures(bad))
+		}
+		slog.Warn("secretdata: 批量校验发现不一致（无本地副本 ⇒ 记录并等待整文件重试）", "round", round, "bad", len(bad), "of", len(items))
+		retried := s.repairFailedChunks(ctx, iu, wc, meta, bad)
+		items = retried
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(round) * 2 * time.Second):
+		}
+	}
+	return nil
+}
+
+// collectVerifyFailures 过滤出非 OK 的校验结果（拆出以控 gocognit）。
+func collectVerifyFailures(results []syncpkg.VerifyResult) []syncpkg.VerifyResult {
+	bad := make([]syncpkg.VerifyResult, 0, len(results))
+	for _, r := range results {
+		if r.State != syncpkg.VerifyOK {
+			bad = append(bad, r)
+		}
+	}
+	return bad
+}
+
+// repairFailedChunks 处理校验失败的块（当前仅原样返回，等待整文件重试）。
+//
+// **不做单块重建**（2026-11-04 实测结论）：`ChunkInfo` 已记录 Offset/OrigSize，
+// `EncryptChunkStandalone` 也能按源区间重加密，但重建的 blob 与写侧格式**不同构**
+// （写侧含 Windows 缓冲窗口布局）⇒ 按 meta 读取会解密失败（实测读回 0 字节）。
+// 单块重建需要 shardseal 提供「与写侧同构的重建 API」（后续工作）；
+// 在此之前统一走**整文件重试**（源可重读，见 writeFileStreamEntryWithRetry），
+// 保证正确性优先——绝不让不可读的 blob 落盘。
+func (s *SecretdataFS) repairFailedChunks(_ context.Context, _ *interleavedUpload, _ writeCtx, _ *shardseal.Meta, bad []syncpkg.VerifyResult) []syncpkg.VerifyItem {
+	out := make([]syncpkg.VerifyItem, 0, len(bad))
+	for _, r := range bad {
+		out = append(out, r.Item)
+	}
+	return out
+}
+
+// summarizeVerifyFailures 生成校验失败摘要（日志/错误用，限 3 条）。
+func summarizeVerifyFailures(bad []syncpkg.VerifyResult) string {
+	parts := make([]string, 0, 3)
+	for i, r := range bad {
+		if i >= 3 {
+			parts = append(parts, fmt.Sprintf("…共 %d 块", len(bad)))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s(%s:etag=%s,size=%d)", path.Base(r.Item.Key), r.Reason, r.RemoteETag, r.RemoteSize))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// ErrBatchVerifyFailed 表示批量校验后仍有块不一致（已重传；源文件保留 ⇒ 重跑可恢复）。
+var ErrBatchVerifyFailed = errors.New("secretdata: 批量校验失败")
+
+// writeFileStreamEntryWithRetry 在**批量校验失败**时自动整文件重试一次（用户要求：不一致
+// 自动重试而非直接失败）。前提：源可重读（本地文件/已暂存路径）——校验失败通常是远端索引
+// 延迟/瞬时不一致，重写一次即成功；重试仍失败 ⇒ ErrBatchVerifyFailed（源保留，重跑可恢复）。
+func (s *SecretdataFS) writeFileStreamEntryWithRetry(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64, ifAbsent bool) error {
+	err := s.writeFileStreamEntry(ctx, rel, r, size, mtime, expected, ifAbsent)
+	if err == nil || !errors.Is(err, ErrBatchVerifyFailed) {
+		return err
+	}
+	src := replayableSourcePath(r)
+	if src == "" {
+		return err // 源不可重读 ⇒ 无法自动重试（调用方重跑）
+	}
+	f, oerr := os.Open(src)
+	if oerr != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	slog.Warn("secretdata: 批量校验失败 ⇒ 自动整文件重试一次（源可重读）", "rel", rel, "source", src, "error", err)
+	if rerr := s.writeFileStreamEntry(ctx, rel, f, size, mtime, expected, ifAbsent); rerr != nil {
+		return fmt.Errorf("%w（已自动重试一次仍失败；源保留，重跑可恢复）: %w", ErrBatchVerifyFailed, rerr)
+	}
+	return nil
+}
+
 // 两条既有保证（不得削弱）：
 //   - **流式上传**（2026-10-18 性能修复）：以本地文件为源直接交给内层（内存 O(1)，不整块驻留）；
 //   - **复用调用方暂存路径**（既有 staging 架构，`syncpkg.StagedPathReuse` 的 ctx 传递形态）：
@@ -1803,6 +1974,9 @@ func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, lo
 		MD5:           ch.md5,
 		CRC32:         ch.crc32,
 		Path:          local,
+		// **总是**延迟校验：全部块写完后统一批量校验（新目录树的 Stat 延迟 5–10 分钟，
+		// 逐块即时校验必然超时；单块文件与即时校验等价，见 verifyBatchAndRepair）。
+		DeferVerify: true,
 	})
 	dst := path.Join(container, name)
 	// **先登记后上传**（P2 修复，2026-10-19）：内层可能「写成功但复核失败」返回错误（如
