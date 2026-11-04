@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package webdav_test
+package webdavcore_test
 
 import (
 	"bytes"
@@ -14,20 +14,9 @@ import (
 	"sync"
 	"testing"
 
-	webdavgw "github.com/cocomhub/sproxy/pkg/gateway/webdav"
+	"github.com/cocomhub/sproxy/pkg/gateway/webdav/webdavcore"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
-
-// memFS 是 syncpkg.FS 的内存实现（测试夹具）。
-type memFS struct {
-	mu      sync.Mutex
-	entries map[string][]byte
-	dirs    map[string]bool
-}
-
-func newMemFS() *memFS {
-	return &memFS{entries: map[string][]byte{}, dirs: map[string]bool{"": true}}
-}
 
 func (m *memFS) ensureParents(p string) {
 	for i := len(p) - 1; i >= 0; i-- {
@@ -225,6 +214,18 @@ type notExistError struct{}
 func (notExistError) Error() string        { return "file does not exist" }
 func (notExistError) Is(target error) bool { return target.Error() == "file does not exist" }
 
+// TestWebDAVHandler_PropfindGetPut 验证 WebDAV 全链路：PUT→GET→PROPFIND→MKCOL→DELETE→MOVE。
+// memFS 是 syncpkg.FS 的内存实现（测试夹具）。
+type memFS struct {
+	mu      sync.Mutex
+	entries map[string][]byte
+	dirs    map[string]bool
+}
+
+func newMemFS() *memFS {
+	return &memFS{entries: map[string][]byte{}, dirs: map[string]bool{"": true}}
+}
+
 // doRequest 发一个 WebDAV 请求并返回响应。
 func doRequest(t *testing.T, h http.Handler, method, urlPath string, body []byte, headers map[string]string) *http.Response {
 	t.Helper()
@@ -237,11 +238,10 @@ func doRequest(t *testing.T, h http.Handler, method, urlPath string, body []byte
 	return rr.Result()
 }
 
-// TestWebDAVHandler_PropfindGetPut 验证 WebDAV 全链路：PUT→GET→PROPFIND→MKCOL→DELETE→MOVE。
 func TestWebDAVHandler_PropfindGetPut(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	handler := webdavgw.NewHandler(fs)
+	handler := webdavcore.NewHandler(fs)
 	if handler == nil {
 		t.Fatal("NewHandler 不应返回 nil")
 	}
@@ -344,7 +344,7 @@ func webdavDeleteFile(t *testing.T, handler http.Handler) {
 func TestWebDAVHandler_StatMissing(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	handler := webdavgw.NewHandler(fs)
+	handler := webdavcore.NewHandler(fs)
 
 	resp := doRequest(t, handler, "GET", "/nope.txt", nil, nil)
 	if resp.StatusCode != http.StatusNotFound {
@@ -364,7 +364,7 @@ func TestWebDAVHandler_StatMissing(t *testing.T) {
 func TestWebDAVHandler_PutCreatesParentDirs(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	handler := webdavgw.NewHandler(fs)
+	handler := webdavcore.NewHandler(fs)
 
 	resp := doRequest(t, handler, "PUT", "/a/b/c.txt", []byte("deep"), nil)
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
@@ -386,7 +386,7 @@ func TestWebDAVHandler_PutCreatesParentDirs(t *testing.T) {
 func TestWebDAVHandler_OverwriteExisting(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	handler := webdavgw.NewHandler(fs)
+	handler := webdavcore.NewHandler(fs)
 
 	doRequest(t, handler, "PUT", "/f.txt", []byte("v1"), nil)
 	resp := doRequest(t, handler, "PUT", "/f.txt", []byte("v2-longer"), nil)
@@ -406,7 +406,7 @@ func TestWebDAVHandler_OverwriteExisting(t *testing.T) {
 func TestWebDAVHandler_Copy(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	handler := webdavgw.NewHandler(fs)
+	handler := webdavcore.NewHandler(fs)
 
 	doRequest(t, handler, "PUT", "/src.txt", []byte("copy-me"), nil)
 	resp := doRequest(t, handler, "COPY", "/src.txt", nil, map[string]string{"Destination": "/dst.txt"})
@@ -432,7 +432,7 @@ func TestWebDAVHandler_Copy(t *testing.T) {
 func TestWebDAVHandler_MkcolExists(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	handler := webdavgw.NewHandler(fs)
+	handler := webdavcore.NewHandler(fs)
 
 	resp := doRequest(t, handler, "MKCOL", "/existing", nil, nil)
 	if resp.StatusCode != http.StatusCreated {
@@ -453,7 +453,7 @@ var _ = xml.Name{} // 保留 xml import（断言 207 响应是合法 XML）
 func TestWebDAVHandler_PropfindXMLValid(t *testing.T) {
 	t.Parallel()
 	fs := newMemFS()
-	handler := webdavgw.NewHandler(fs)
+	handler := webdavcore.NewHandler(fs)
 	doRequest(t, handler, "PUT", "/x.txt", []byte("x"), nil)
 
 	resp := doRequest(t, handler, "PROPFIND", "/", nil, map[string]string{"Depth": "1"})
