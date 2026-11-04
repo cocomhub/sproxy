@@ -50,7 +50,12 @@ type UploadHints struct {
 	// RandomContent 标记内容本次新建、随机且不可重用（见文件头语义边界）。
 	RandomContent bool
 	// MTime 是内容修改时间（UnixNano；0 = 未知）。
-	MTime int64
+	// DeferVerify 表示**跳过上传后的即时校验**（批量延迟校验路径，2026-11-04 用户设计）：
+	// 调用方承诺在**全部内容写完**后自行用 BatchVerifier 统一校验（此时远端索引已建立）。
+	// 语义边界：仅影响「上传后 Stat/ETag 复核」这一步；上传失败、内容一致性红线不变——
+	// 调用方必须真的执行批量校验，否则等价于放弃校验（由调用方负责，后端无法兜底）。
+	DeferVerify bool
+	MTime       int64
 }
 
 // Merge 把后端**首次计算**得到的权威值回填到提示副本（只补空字段，不覆盖调用方已提供的

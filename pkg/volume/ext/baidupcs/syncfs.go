@@ -65,6 +65,18 @@ type StorageAPI interface {
 	PutFromStagedPath(ctx context.Context, key, stagedPath string, size int64, hints *PutHints) (*ObjectMeta, error)
 }
 
+// deferredPutter 是**可选**能力：只上传、不做事后校验（批量延迟校验路径）。
+// 按 AGENTS.md 纪律，能力扩展一律做成可选接口 + 类型断言，不扩 StorageAPI
+// （否则所有既有实现/测试替身都要补方法）。
+type deferredPutter interface {
+	PutDeferred(ctx context.Context, key, stagedPath string, size int64, hints *PutHints) error
+}
+
+// batchVerifier 是**可选**能力：批量校验。
+type batchVerifier interface {
+	VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult
+}
+
 // NewStorageFS 构造 StorageFS 适配层。temp 为本地中间态目录（默认 os.TempDir()）。
 func NewStorageFS(s StorageAPI, temp string) (*StorageFS, error) {
 	if s == nil {
@@ -109,7 +121,7 @@ func uploadHintsToPutHints(ctx context.Context) *PutHints {
 	if !ok {
 		return nil
 	}
-	hints := &PutHints{RandomBlob: uh.RandomContent}
+	hints := &PutHints{RandomBlob: uh.RandomContent, DeferVerify: uh.DeferVerify}
 	if uh.MD5 != "" && uh.Size > 0 {
 		hints.Md5 = uh.MD5
 		hints.Size = uh.Size
@@ -197,6 +209,28 @@ func (f *StorageFS) validatePath(relPath string) (string, error) {
 	return clean, nil
 }
 
+// putDeferredIfRequested 在调用方要求延迟校验（UploadHints.DeferVerify + 已暂存路径）时
+// 只上传不校验；返回 (是否已处理, error)。
+func (f *StorageFS) putDeferredIfRequested(ctx context.Context, clean string, size int64) (bool, error) {
+	uh, ok := syncpkg.UploadHintsFrom(ctx)
+	if !ok || !uh.DeferVerify {
+		return false, nil
+	}
+	staged, sok := syncpkg.StagedLocalPathFrom(ctx)
+	if !sok {
+		return false, nil
+	}
+	// **双断言**：底层必须同时支持「延迟上传」与「批量校验」，否则延迟等于放弃校验。
+	dp, ok1 := f.s.(deferredPutter)
+	if _, ok2 := f.s.(batchVerifier); !ok1 || !ok2 {
+		return false, nil
+	}
+	if derr := dp.PutDeferred(ctx, clean, staged, size, uploadHintsToPutHints(ctx)); derr != nil {
+		return true, mapPCSError(derr)
+	}
+	return true, nil
+}
+
 func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -211,6 +245,10 @@ func (f *StorageFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPa
 	// （`syncpkg.WithStagedLocalPath`）→ 直接交给 Storage 复用（**零额外落盘**，本地峰值
 	// 1×size，与配额 1× 预留口径一致）；否则本函数落一份 staging 后同样以「路径复用」入口
 	// 上传（不再由 Storage 内部拷第二份）。
+	// **延迟校验路径**（2026-11-04 用户设计）：批量上传时先全部写、后统一校验。
+	if done, derr := f.putDeferredIfRequested(ctx, clean, size); done {
+		return derr
+	}
 	if staged, ok := syncpkg.StagedLocalPathFrom(ctx); ok {
 		// **上传提示映射同样适用于 staged 分支**（2026-10-21 修正）：调用方已暂存 + 已算
 		// md5/crc32（secretdata 交错路径）→ 经 UploadHints 免整块重扫 + 跳 pre-Stat。
@@ -361,3 +399,13 @@ func (f *StorageFS) listMetas(ctx context.Context, relPath string, exactSizes bo
 	}
 	return f.s.List(ctx, relPath)
 }
+
+// VerifyMany 实现 syncpkg.BatchVerifier（批量延迟校验，见 pkg/sync/verify.go）。
+func (f *StorageFS) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
+	if bv, ok := f.s.(batchVerifier); ok {
+		return bv.VerifyMany(ctx, items)
+	}
+	return nil // 底层不支持 ⇒ 调用方据长度不匹配跳过（不回落到「不校验」）
+}
+
+var _ syncpkg.BatchVerifier = (*StorageFS)(nil)

@@ -5,6 +5,8 @@ package baidupcs
 
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // 测试夹具
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,6 +61,39 @@ func (f *fakeStorage) Put(ctx context.Context, key string, r io.Reader) (*Object
 
 // PutFromStagedPath 复用已暂存文件（fake：读该文件入内存，**不删/不改**调用方文件）。
 // hints 忽略（fake 无性能语义；签名对齐 StorageAPI）。
+// PutDeferred 只上传不校验（批量延迟校验路径；fake 里与 PutFromStagedPath 等价）。
+func (f *fakeStorage) PutDeferred(_ context.Context, key, stagedPath string, size int64, hints *PutHints) error {
+	_, err := f.PutFromStagedPath(context.Background(), key, stagedPath, size, hints)
+	return err
+}
+
+// VerifyMany 批量校验（fake：按内存内容重算 md5 比对）。
+func (f *fakeStorage) VerifyMany(_ context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
+	out := make([]syncpkg.VerifyResult, len(items))
+	for i, it := range items {
+		res := syncpkg.VerifyResult{Item: it}
+		ff, ok := f.files[it.Key]
+		if !ok {
+			res.State = syncpkg.VerifyInvisible
+			res.Reason = "not found"
+			out[i] = res
+			continue
+		}
+		sum := md5.Sum(ff.data) //nolint:gosec // 测试夹具
+		res.RemoteETag = hex.EncodeToString(sum[:])
+		res.RemoteSize = int64(len(ff.data))
+		if it.MD5 != "" && !strings.EqualFold(res.RemoteETag, it.MD5) {
+			res.State = syncpkg.VerifyMismatch
+			res.Reason = "md5 mismatch"
+			out[i] = res
+			continue
+		}
+		res.State = syncpkg.VerifyOK
+		out[i] = res
+	}
+	return out
+}
+
 func (f *fakeStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64, hints *PutHints) (*ObjectMeta, error) {
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
