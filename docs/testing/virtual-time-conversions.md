@@ -239,3 +239,9 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 夹具（`pageFixture`）每次都要启 chromium 且依赖「先播种 → 后读面板/任务」的进程内共享时序（cloud
 任务服务为进程内共享状态），并发会互相干扰。注册表已同步登记 `internal/archcheck/serial_budgets.tsv`
 （该文件 4 → 5，总数 +1）。
+
+## cmd/sclient/cd_scope_test.go（+3 串行，2026-11-04）
+
+漫游目录按 context 隔离的用例。**必须串行**：用例通过包级 `resolvedContext` 指定「当前
+context」并改写 `XDG_CACHE_HOME`（`setCacheDirForTest` 用 `t.Setenv`），两者都是进程级
+可变状态，并行会互相污染。已按 R18 登记 `serial_budgets.tsv`（3 条）。

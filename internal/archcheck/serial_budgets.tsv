@@ -287,3 +287,4 @@ web/e2e/ui_e2e_test.go	23
 web/e2e/volume_ops_preview_e2e_test.go	2
 web/e2e/volumes_e2e_test.go	4
 web/embed_test.go	2
+cmd/sclient/cd_scope_test.go	3
