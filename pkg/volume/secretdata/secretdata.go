@@ -293,6 +293,8 @@ type SecretdataFS struct {
 	writesInFlight int64
 	// gcCancel 取消后台 GC goroutine（backend.Close / loadIndex 失败路径调用停止）。
 	gcCancel context.CancelFunc
+	// uploads 是在途上传注册表（审查能力据此展示「上传中」；GC 另由 writesInFlight 守卫）。
+	uploads uploadTracker
 }
 
 // attachStageDownloader 装配整块 staging 下载器（SpanCacheDir 非空时；失败仅告警）。
@@ -1021,6 +1023,10 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 	if err != nil {
 		return err
 	}
+	// 在途上传登记（仅内存态可观测性）：让审查能力在上传窗口内给出准确状态，
+	// 而不是 404 / 「疑似孤儿」。
+	s.beginUpload(rel, container, size)
+	defer s.endUpload(rel)
 	// 注（2026-10-18 审核）：两条写路径对「调用方声明 size」的口径**有意不同**——流式路径按 size
 	// 读（多余内容丢弃），内存路径**读全**（`TestWriteFile_NonSeekableReadsAll` 显式锁定：非 seek
 	// 源回退 io.ReadAll ⇒ 忽略声明 size）。曾尝试统一为「按 size 截断」⇒ 该用例红 ⇒ 按「不回归既有
@@ -1111,6 +1117,10 @@ func (s *SecretdataFS) writeFileStreamEntry(ctx context.Context, rel string, r i
 	if err != nil {
 		return err
 	}
+	// 在途上传登记（仅内存态可观测性）：让审查能力在上传窗口内给出准确状态，
+	// 而不是 404 / 「疑似孤儿」。
+	s.beginUpload(rel, container, size)
+	defer s.endUpload(rel)
 	wc := writeCtx{
 		rel: rel, size: size, reader: r, container: container, created: created,
 		mtime: mtime, sv: sv, newVer: newVer, expected: expected, ifAbsent: ifAbsent,
@@ -1342,7 +1352,11 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 				return fmt.Errorf("secretdata: 落本地分块 %s 失败: %w", name, werr)
 			}
 			defer func() { _ = os.Remove(local) }() // 交错：此刻之后本地不再保留该块
-			return s.uploadLocalChunk(ctx, wc.container, name, local, mt, chunkHash{md5: iu.chunkMD5, crc32: iu.chunkCRC32}, &iu.uploaded)
+			uerr := s.uploadLocalChunk(ctx, wc.container, name, local, mt, chunkHash{md5: iu.chunkMD5, crc32: iu.chunkCRC32}, &iu.uploaded)
+			if uerr == nil {
+				s.advanceUpload(wc.rel, int64(len(blob)))
+			}
+			return uerr
 		}
 		p := path.Join(wc.container, name)
 		// **先登记后上传**（P2 修复，2026-10-19；同 uploadLocalChunk）：内层「写成功但复核
@@ -1351,6 +1365,7 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 		if werr := s.uploadBlob(ctx, p, blob, mt); werr != nil {
 			return fmt.Errorf("secretdata: 上传分块 %s 失败: %w", name, werr)
 		}
+		s.advanceUpload(wc.rel, int64(len(blob)))
 		return nil
 	}
 }

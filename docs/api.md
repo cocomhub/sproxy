@@ -1256,18 +1256,27 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 认证：主 mux `reader`（只读子组）/ 隧道内层 `tunnel`
 - query 参数：`path`（**用户视角路径**，服务端按卷键空间映射为 `<owner>/user/<path>`；空 = 卷根，不映射；
   封装/加密卷的内部索引键含 owner/bucket 前缀，调用方无需也不应自行拼接）；`disk=1`（可选，默认 0 = 只读索引）
+- `mode` 三态：`index`（默认）/ `disk`（`disk=1`）/ **`uploading`**（该路径正在本进程上传：meta 未提交，
+  `upload` 字段给出进度；**不是 404**）
 - 响应 `{"trace": {...}}`（`schema_version=1`）：
   ```json
   {"trace": {
     "schema_version": 1, "mode": "index", "rel": "photos/a.jpg", "kind": "file",
     "size": 12900000, "mtime": 1730000000000000000,
-    "meta": {"real_path": "k3f9a/8xQ.../7xQ...z...", "bytes": 1572864},
+    "containers": [{"real_path": "k3f9a", "logical_dir": ""},
+                   {"real_path": "k3f9a/8xQ", "logical_dir": "alice/user/photos"}],
+    "meta": {"real_path": "k3f9a/8xQ/7xQ...z...", "bytes": 1572864},
     "chunks": [{"index": 0, "blob": {"real_path": "k3f9a/8xQ.../9ab...", "bytes": 4194304, "plain": 4194304}, "blocklets": 1}],
     "parity": {"real_path": "k3f9a/8xQ.../f5d...", "bytes": 4194304},
     "dedup": {"container": "pool", "refs": 3},
     "anomalies": []
   }}
   ```
+- `containers` 是容器链（卷根 → 叶）：每层 `real_path` 是**真实随机容器名**，`logical_dir` 是它对应的
+  逻辑目录（审计时把「盘上的随机目录」与「用户认识的目录」对上）
+- 上传中响应示例：`{"trace":{"mode":"uploading","rel":"photos/a.mp4","size":981635072,
+  "upload":{"rel":"photos/a.mp4","container":"k3f9a/8xQ","total":981635072,"committed":412000000,
+  "chunks":6,"started_at":1730000000000000000}}}`
 - `disk=1` 时每个 `blob` 追加 `on_disk`/`disk_bytes`，并输出差异码（见下）
 - 错误：`404` 卷不存在 / 逻辑路径不存在；`501` 该卷不支持审查；`403` **路径越出卷根**
 
@@ -1285,6 +1294,8 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 路径不存在 ⇒ `200` + `kind:"unknown"` + `not_found` 异常（审查工具需解释「为什么这里空」，不是 404）
 - 差异码（稳定契约）：`blob_missing` / `blob_orphan` / `size_mismatch` / `meta_unreadable` /
   `container_not_indexed` / `parent_unresolved` / `dir_meta_ambiguous` / `not_found` / `truncated` / `dedup_shared`
+- `upload_in_progress`：该 blob 属于**本进程在途上传**（meta 尚未提交）⇒ `kind=upload_in_progress`，
+  `owner` 指向上传目标 rel；**不是孤儿**（GC 在有在途写时本就不运行）。跨进程/跨实例不可见。
 - **注意**：差异码是**只读审计结论**，不是删除建议。`blob_orphan` 仅表示「索引无引用」，
   实际回收由 GC 的 re-confirm 流程决定（crash 窗口内可能仍被使用）。
 

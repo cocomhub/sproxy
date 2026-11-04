@@ -160,15 +160,30 @@ func writeInspectJSON(w io.Writer, v any) error {
 }
 
 // writeTraceText 渲染正向树（设计 §5.4）。
+//
+// 每层显示**真实容器名**与其**逻辑目录名**（例如 `容器 kv… → kv`），
+// 这样才能把「盘上的随机目录」和「用户认识的目录」对上。
 func writeTraceText(w io.Writer, tr *volume.PathTrace) {
 	head := displayRel(tr.Rel) + "   " + humanSize(tr.Size)
 	if tr.MTime > 0 {
 		head += "  mtime=" + time.Unix(0, tr.MTime).Format("2006-01-02 15:04")
 	}
+	if tr.Mode == "uploading" {
+		fmt.Fprintln(w, head+"   上传中（meta 尚未提交）")
+		depth := writeContainerRefs(w, tr.Containers)
+		writeUploadProgress(w, tr.Upload)
+		_ = depth
+		writeAnomalies(w, tr.Anomalies)
+		return
+	}
 	fmt.Fprintln(w, head)
 	depth := 0
-	if tr.Meta != nil {
+	if len(tr.Containers) > 0 {
+		depth = writeContainerRefs(w, tr.Containers)
+	} else if tr.Meta != nil {
 		depth = writeContainerChain(w, tr.Meta.RealPath)
+	}
+	if tr.Meta != nil {
 		fmt.Fprintln(w, indent(depth)+"├─ "+metaLabel(tr.Kind)+" "+path.Base(tr.Meta.RealPath)+"  "+humanSize(tr.Meta.Bytes))
 	}
 	for _, c := range tr.Chunks {
@@ -186,7 +201,47 @@ func writeTraceText(w io.Writer, tr *volume.PathTrace) {
 	writeAnomalies(w, tr.Anomalies)
 }
 
-// writeContainerChain 逐层输出容器链，返回最深层层号。
+// writeUploadProgress 渲染在途上传进度（已上传密文字节 ≈ 明文 + 每块开销）。
+func writeUploadProgress(w io.Writer, up *volume.UploadProgress) {
+	if up == nil {
+		return
+	}
+	pct := ""
+	if up.Total > 0 {
+		v := min(up.Committed*100/up.Total, 100)
+		pct = fmt.Sprintf(" (%.0f%%)", float64(v))
+	}
+	line := fmt.Sprintf("  已上传 %s / %s%s   已完成 %d 块",
+		humanSize(up.Committed), humanSize(up.Total), pct, up.Chunks)
+	if up.StartedAt > 0 {
+		line += "   开始于 " + time.Unix(0, up.StartedAt).Format("15:04:05")
+	}
+	fmt.Fprintln(w, line)
+	fmt.Fprintln(w, "  说明：目标 meta 未提交，索引中暂无该文件；提交后自动转为正常落点。")
+}
+
+// writeContainerRefs 输出带逻辑名的容器链，返回最深层层号。
+func writeContainerRefs(w io.Writer, refs []volume.ContainerRef) int {
+	depth := 0
+	for i, c := range refs {
+		label := "容器 " + path.Base(c.RealPath)
+		if i == 0 {
+			label = "卷根容器 " + path.Base(c.RealPath)
+		}
+		name := c.LogicalDir
+		switch {
+		case i == 0 && name == "":
+			name = "(卷根)"
+		case name == "":
+			name = "(未索引)"
+		}
+		fmt.Fprintln(w, indent(depth)+"└─ "+label+"   → "+name)
+		depth++
+	}
+	return depth
+}
+
+// writeContainerChain 在没有 Containers 数据时按真实路径兜底渲染链。
 func writeContainerChain(w io.Writer, realPath string) int {
 	chain := strings.Split(realPath, "/")
 	depth := 0

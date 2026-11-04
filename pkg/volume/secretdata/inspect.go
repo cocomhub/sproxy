@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -42,6 +43,14 @@ func (s *SecretdataFS) Trace(ctx context.Context, rel string, mode volume.Inspec
 	if err != nil {
 		return nil, err
 	}
+	if up, ok := s.uploadSnapshot(key); ok {
+		return s.traceUploading(up), nil
+	}
+	// 在途上传优先：meta 尚未提交 ⇒ 索引里还没有该 rel，但用户需要看到「正在上传」，
+	// 而不是「路径不存在」。
+	if up, ok := s.uploadSnapshot(key); ok {
+		return s.traceUploading(up), nil
+	}
 	snap := s.snapshotTrace(key)
 	switch {
 	case snap.isFile:
@@ -52,6 +61,70 @@ func (s *SecretdataFS) Trace(ctx context.Context, rel string, mode volume.Inspec
 		s.logIndexMiss(key)
 		return nil, fmt.Errorf("secretdata: 逻辑路径不存在: %w", fs.ErrNotExist)
 	}
+}
+
+// traceUploading 组装「正在上传」的落点视图。
+func (s *SecretdataFS) traceUploading(up uploadProgress) *volume.PathTrace {
+	return &volume.PathTrace{
+		SchemaVersion: volume.SchemaVersion, Mode: "uploading", Rel: up.rel, Kind: "file",
+		Size:       up.total,
+		Containers: s.containerChainByPath(up.container),
+		Upload: &volume.UploadProgress{
+			Rel: up.rel, Container: up.container, Total: up.total,
+			Committed: up.committed, Chunks: up.chunks, StartedAt: up.startedAt,
+		},
+	}
+}
+
+// containersForDir 返回逻辑目录 dirRel 的容器链（卷根 → 叶），零磁盘 IO（纯索引）。
+func (s *SecretdataFS) containersForDir(dirRel string) []volume.ContainerRef {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rels := []string{""}
+	if dirRel != "" {
+		var stack []string
+		for cur := dirRel; cur != ""; cur = s.dirParents[cur] {
+			stack = append(stack, cur)
+		}
+		for _, rel := range slices.Backward(stack) {
+			rels = append(rels, rel)
+		}
+	}
+	out := make([]volume.ContainerRef, 0, len(rels))
+	for _, rel := range rels {
+		seg, ok := s.dirSegs[rel]
+		if !ok {
+			continue
+		}
+		out = append(out, volume.ContainerRef{RealPath: seg, LogicalDir: rel, DirID: s.dirIDs[rel]})
+	}
+	return out
+}
+
+// containerChainByPath 按**容器路径**逐层反查逻辑目录（索引未命中的层留空 LogicalDir）。
+func (s *SecretdataFS) containerChainByPath(container string) []volume.ContainerRef {
+	if container == "" {
+		return nil
+	}
+	segs := strings.Split(container, "/")
+	out := make([]volume.ContainerRef, 0, len(segs))
+	prefix := ""
+	for _, seg := range segs {
+		if prefix == "" {
+			prefix = seg
+		} else {
+			prefix = prefix + "/" + seg
+		}
+		ref := volume.ContainerRef{RealPath: prefix}
+		if rel, ok := s.dirOfContainer(prefix); ok {
+			ref.LogicalDir = rel
+			s.mu.RLock()
+			ref.DirID = s.dirIDs[rel]
+			s.mu.RUnlock()
+		}
+		out = append(out, ref)
+	}
+	return out
 }
 
 // traceSnapshot 是一次索引快照（不持锁使用，避免 IO 落进临界区）。
@@ -114,6 +187,7 @@ func (s *SecretdataFS) traceFile(ctx context.Context, rel string, e metaEntry, d
 	tr := &volume.PathTrace{
 		SchemaVersion: volume.SchemaVersion, Mode: mode.String(), Rel: rel, Kind: "file",
 		Size: e.size, MTime: e.mtime,
+		Containers: s.containersForDir(parentDirOf(rel)),
 	}
 	if e.meta == nil {
 		tr.Anomalies = append(tr.Anomalies, volume.Anomaly{
@@ -156,6 +230,7 @@ func (s *SecretdataFS) traceFile(ctx context.Context, rel string, e metaEntry, d
 func (s *SecretdataFS) traceDir(ctx context.Context, rel, container string, mtime int64, _ int, mode volume.InspectMode) (*volume.PathTrace, error) {
 	tr := &volume.PathTrace{
 		SchemaVersion: volume.SchemaVersion, Mode: mode.String(), Rel: rel, Kind: "dir", MTime: mtime,
+		Containers: s.containersForDir(rel),
 	}
 	entries, err := s.inner.ListDir(ctx, container)
 	if err != nil {
@@ -301,58 +376,97 @@ func recordContainerDirMetaState(ex *volume.RealExplanation, realPath, dirMetaNa
 
 // classifyRealEntry 判定容器内单个条目的用途与归属。
 func (s *SecretdataFS) classifyRealEntry(ctx context.Context, container string, en syncpkg.Entry, dirMetaName string, ex *volume.RealExplanation) volume.RealEntry {
-	re := volume.RealEntry{Name: en.Name, Kind: "unknown", Bytes: en.Size}
 	// 目录条目 = **子容器**（逻辑目录），不是 blob：必须单独判定，否则会被误报为孤儿分块。
 	if en.IsDir {
-		re.Kind = "container"
-		child := path.Join(container, en.Name)
-		if ref, ok := s.resolveChildContainer(ctx, child); ok {
-			re.Container = ref
-			re.Note = "子容器（逻辑目录 " + displayDirName(ref.LogicalDir) + "）"
-		} else {
-			re.Note = "子容器（dir-meta 未解出）"
-		}
-		return re
+		return s.classifySubContainer(ctx, container, en)
 	}
 	switch shardseal.ClassifyName(en.Name) {
 	case shardseal.KindDirMeta:
-		re.Kind = "dir_meta"
-		re.Note = "本目录的加密 meta"
-		if ex.Container != nil && en.Name == dirMetaName {
-			re.Note = "本目录的加密 meta（dir_id=" + ex.Container.DirID + "）"
-		}
+		return dirMetaEntry(en, dirMetaName, ex)
 	case shardseal.KindFileMeta:
-		re.Kind = "file_meta"
-		if owner := s.lookupFileByMetaName(container, en.Name); owner != nil {
-			re.Owner = owner
-			re.Note = "文件 meta（逻辑路径见 owner）"
-		} else {
-			re.Note = "文件 meta 但索引无对应条目（索引未加载/外部写入）"
-			ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
-				Code: volume.AnomalyBlobOrphan, RealPath: path.Join(container, en.Name),
-				Detail: "file-meta 无法反查到逻辑文件；疑似孤儿（删除请走 GC）",
-			})
-		}
+		return s.classifyFileMetaEntry(container, en, ex)
 	default:
-		re.Kind = "chunk"
-		owner := s.lookupChunkOwner(container, en.Name)
-		switch {
-		case owner == nil:
-			re.Note = "内容分块/parity 但索引无引用；疑似孤儿（删除请走 GC）"
-			ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
-				Code: volume.AnomalyBlobOrphan, RealPath: path.Join(container, en.Name),
-				Detail: "分块无索引引用；疑似孤儿（删除请走 GC）",
-			})
-		case owner.Parity:
-			re.Kind = "parity"
-			re.Note = "XOR 奇偶校验段"
-			re.Owner = owner
-		default:
-			re.Note = "内容分块"
-			re.Owner = owner
-		}
+		return s.classifyChunkEntry(container, en, ex)
+	}
+}
+
+// dirMetaEntry 判定 dir-meta 条目（本目录自身的加密 meta）。
+func dirMetaEntry(en syncpkg.Entry, dirMetaName string, ex *volume.RealExplanation) volume.RealEntry {
+	re := volume.RealEntry{Name: en.Name, Kind: "dir_meta", Bytes: en.Size, Note: "本目录的加密 meta"}
+	if ex.Container != nil && en.Name == dirMetaName {
+		re.Note = "本目录的加密 meta（dir_id=" + ex.Container.DirID + "）"
 	}
 	return re
+}
+
+func (s *SecretdataFS) classifyFileMetaEntry(container string, en syncpkg.Entry, ex *volume.RealExplanation) volume.RealEntry {
+	re := volume.RealEntry{Name: en.Name, Kind: "file_meta", Bytes: en.Size}
+	if owner := s.lookupFileByMetaName(container, en.Name); owner != nil {
+		re.Owner = owner
+		re.Note = "文件 meta（逻辑路径见 owner）"
+		return re
+	}
+	re.Note = "文件 meta 但索引无对应条目（索引未加载/外部写入）"
+	ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
+		Code: volume.AnomalyBlobOrphan, RealPath: path.Join(container, en.Name),
+		Detail: "file-meta 无法反查到逻辑文件；疑似孤儿（删除请走 GC）",
+	})
+	return re
+}
+
+// classifyChunkEntry 判定内容分块/parity：索引命中 → 正常归属；
+// 否则若属于**本进程在途上传** → upload_in_progress（不是孤儿）；再否则 → blob_orphan。
+func (s *SecretdataFS) classifyChunkEntry(container string, en syncpkg.Entry, ex *volume.RealExplanation) volume.RealEntry {
+	re := volume.RealEntry{Name: en.Name, Kind: "chunk", Bytes: en.Size}
+	owner := s.lookupChunkOwner(container, en.Name)
+	if owner != nil {
+		if owner.Parity {
+			re.Kind = "parity"
+			re.Note = "XOR 奇偶校验段"
+		} else {
+			re.Note = "内容分块"
+		}
+		re.Owner = owner
+		return re
+	}
+	if up, ok := s.uploadForContainer(container); ok {
+		re.Kind = "upload_in_progress"
+		re.Owner = &volume.LogicalRef{Rel: up.rel, Role: "file"}
+		re.Note = "上传进行中（meta 尚未提交；提交后成为正式分块）"
+		ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
+			Code: volume.AnomalyUploadInProgress, RealPath: path.Join(container, en.Name),
+			Detail: "属于本进程在途上传（rel=" + up.rel + "）；不是孤儿，请勿清理",
+		})
+		return re
+	}
+	re.Note = "内容分块/parity 但索引无引用；疑似孤儿（删除请走 GC）"
+	ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
+		Code: volume.AnomalyBlobOrphan, RealPath: path.Join(container, en.Name),
+		Detail: "分块无索引引用；疑似孤儿（删除请走 GC）",
+	})
+	return re
+}
+
+// classifySubContainer 判定子容器目录条目。
+func (s *SecretdataFS) classifySubContainer(ctx context.Context, container string, en syncpkg.Entry) volume.RealEntry {
+	re := volume.RealEntry{Name: en.Name, Kind: "container", Bytes: en.Size}
+	child := path.Join(container, en.Name)
+	if ref, ok := s.resolveChildContainer(ctx, child); ok {
+		re.Container = ref
+		re.Note = "子容器（逻辑目录 " + displayDirName(ref.LogicalDir) + "）"
+	} else {
+		re.Note = "子容器（dir-meta 未解出）"
+	}
+	return re
+}
+
+// uploadForContainer 返回写目标容器为 container 的在途上传（同容器多并发取首个）。
+func (s *SecretdataFS) uploadForContainer(container string) (uploadProgress, bool) {
+	ups := s.uploadsForContainer(container)
+	if len(ups) == 0 {
+		return uploadProgress{}, false
+	}
+	return ups[0], true
 }
 
 // resolveChildContainer 解子容器的 dir-meta，返回其逻辑目录归属。
@@ -476,6 +590,19 @@ func (s *SecretdataFS) explainChunkBlob(ex *volume.RealExplanation, container, b
 	owner := s.lookupChunkOwner(container, base)
 	switch {
 	case owner == nil:
+		if up, ok := s.uploadForContainer(container); ok {
+			ex.Kind = "upload_in_progress"
+			ex.Owner = &volume.LogicalRef{Rel: up.rel, Role: "file"}
+			ex.Evidence = append(ex.Evidence, "命中本进程在途上传注册表（meta 尚未提交）")
+			ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
+				Code: volume.AnomalyUploadInProgress, RealPath: realPath,
+				Detail: "属于本进程在途上传（rel=" + up.rel + "）；不是孤儿，请勿清理",
+			})
+			if c, ok := s.containerOfDir(container); ok {
+				ex.Container = c
+			}
+			return
+		}
 		ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
 			Code: volume.AnomalyBlobOrphan, RealPath: realPath,
 			Detail: "分块无索引引用；疑似孤儿（删除请走 GC）",

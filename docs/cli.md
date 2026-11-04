@@ -886,6 +886,10 @@ sclient volume explain data:k3f9a/8xQ.../7xQ...z...
 ```
 
 - 卷名可用 `--volume`、`<卷>:<路径>` 前缀或当前卷上下文指定（三者优先级同上传）
+- 树形输出同时显示**真实容器名与其逻辑目录名**（如 `容器 XqZdBO… → alice/user/kv`），
+  把盘上的随机目录与用户认识的路径对上
+- 对**正在上传**的目标路径，`trace` 不再 404：显示 `上传中（meta 尚未提交）` + 已上传/总量/块数；
+  此时 `explain` 对在途分块给出 `upload_in_progress`（不是孤儿）
 - 默认只读服务端索引（快）；`--disk` 同时对比磁盘，输出差异码（`blob_missing` / `blob_orphan` /
   `size_mismatch` / `meta_unreadable` / `container_not_indexed` / `parent_unresolved` / …）
 - 退出码：`0` 一致；`3` 发现差异（便于脚本门禁）；`1` 参数/服务端错误

@@ -160,6 +160,139 @@ func TestInspect_ExplainContainer(t *testing.T) {
 	}
 }
 
+// TestInspect_ContainersCarryLogicalNames 树里每层容器都要带**真实容器名 + 逻辑目录名**。
+func TestInspect_ContainersCarryLogicalNames(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	if err := fsys.MakeDir(ctx, "a"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	if err := fsys.MakeDir(ctx, "a/b"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	writeFileT(t, fsys, "a/b/c.txt", data(200))
+
+	tr, err := fsys.Trace(ctx, "a/b/c.txt", volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	if len(tr.Containers) < 2 {
+		t.Fatalf("容器链过短: %+v", tr.Containers)
+	}
+	for i, c := range tr.Containers {
+		if c.RealPath == "" {
+			t.Fatalf("第 %d 层容器名为空", i)
+		}
+		if i > 0 && !strings.HasPrefix(c.RealPath, tr.Containers[i-1].RealPath+"/") {
+			t.Fatalf("容器链不连续: %q 不是 %q 的子路径", c.RealPath, tr.Containers[i-1].RealPath)
+		}
+	}
+	last := tr.Containers[len(tr.Containers)-1]
+	if last.LogicalDir != "a/b" {
+		t.Fatalf("叶容器逻辑目录 = %q, want a/b（真实容器名 %q）", last.LogicalDir, last.RealPath)
+	}
+	if tr.Containers[0].LogicalDir != "" {
+		t.Fatalf("根容器逻辑目录应为空, got %q", tr.Containers[0].LogicalDir)
+	}
+}
+
+// TestInspect_TraceUploading 上传中的目标路径必须可见（而不是 404）。
+func TestInspect_TraceUploading(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	if err := fsys.MakeDir(ctx, "up"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	// 索引里还没有该文件：模拟「分块已在上传、meta 未提交」窗口。
+	fsys.beginUpload("up/big.bin", "", 1000)
+	fsys.advanceUpload("up/big.bin", 400)
+	fsys.advanceUpload("up/big.bin", 200)
+
+	tr, err := fsys.Trace(ctx, "up/big.bin", volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("上传中 Trace 不应 404: %v", err)
+	}
+	if tr.Mode != "uploading" || tr.Upload == nil {
+		t.Fatalf("mode/upload = %q/%+v, want uploading", tr.Mode, tr.Upload)
+	}
+	if tr.Upload.Total != 1000 || tr.Upload.Committed != 600 || tr.Upload.Chunks != 2 {
+		t.Fatalf("进度异常: %+v", tr.Upload)
+	}
+	if tr.Upload.Rel != "up/big.bin" || tr.Upload.StartedAt == 0 {
+		t.Fatalf("进度字段缺失: %+v", tr.Upload)
+	}
+
+	// 上传结束后回到「不存在」（本用例未真正提交 meta）。
+	fsys.endUpload("up/big.bin")
+	if _, err := fsys.Trace(ctx, "up/big.bin", volume.InspectIndex); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("上传结束后应恢复 404 语义, got %v", err)
+	}
+}
+
+// TestInspect_ExplainUploadInProgress 在途分块必须标 upload_in_progress，**不得**报孤儿。
+func TestInspect_ExplainUploadInProgress(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	writeFileT(t, fsys, "d/keep.txt", data(80))
+	tr, err := fsys.Trace(ctx, "d/keep.txt", volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	container := path.Dir(tr.Meta.RealPath)
+
+	// 造一个「在途分块」（索引无引用），并登记同容器在途上传。
+	inflight := strings.Repeat("c3d4e5f6", 4)[:30]
+	if werr := fsys.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(container, inflight), bytes.NewReader(data(64)), 64, 0); werr != nil {
+		t.Fatalf("写在途 blob: %v", werr)
+	}
+	fsys.beginUpload("d/new.bin", container, 4096)
+	defer fsys.endUpload("d/new.bin")
+
+	// ① 单 blob 解释。
+	ex, err := fsys.Explain(ctx, path.Join(container, inflight), volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	if ex.Kind != "upload_in_progress" {
+		t.Fatalf("kind = %s, want upload_in_progress（不得报孤儿）", ex.Kind)
+	}
+	if ex.Owner == nil || ex.Owner.Rel != "d/new.bin" {
+		t.Fatalf("归属 = %+v, want d/new.bin", ex.Owner)
+	}
+	if hasAnomaly(ex.Anomalies, volume.AnomalyBlobOrphan) {
+		t.Fatal("在途分块不得出现 blob_orphan")
+	}
+	if !hasAnomaly(ex.Anomalies, volume.AnomalyUploadInProgress) {
+		t.Fatalf("缺少 upload_in_progress 标记: %+v", ex.Anomalies)
+	}
+
+	// ② 容器逐条解释同样标注。
+	exC, err := fsys.Explain(ctx, container, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Explain(container): %v", err)
+	}
+	var inflightEntries int
+	for _, e := range exC.Entries {
+		if e.Name == inflight {
+			inflightEntries++
+			if e.Kind != "upload_in_progress" || e.Owner == nil {
+				t.Fatalf("容器内条目 = %+v, want upload_in_progress + owner", e)
+			}
+		}
+	}
+	if inflightEntries != 1 {
+		t.Fatalf("在途条目数 = %d, want 1", inflightEntries)
+	}
+	for _, a := range exC.Anomalies {
+		if a.Code == volume.AnomalyBlobOrphan && strings.HasSuffix(a.RealPath, inflight) {
+			t.Fatal("容器解释不得把在途分块报成孤儿")
+		}
+	}
+}
+
 // TestInspect_ExplainContainerSubdirIsContainer 锁「子目录 = 容器，不得误报为孤儿分块」。
 //
 // 真实数据实测发现：容器内既有 meta/分块，也有**子容器目录**；若把目录当 blob 判定，
