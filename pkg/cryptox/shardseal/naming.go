@@ -5,11 +5,14 @@ package shardseal
 
 import (
 	"crypto/hmac"
+	"crypto/md5" //nolint:gosec // 百度网盘协议需要 md5（非安全用途）
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
+	"strconv"
 	"strings"
 )
 
@@ -398,3 +401,18 @@ func alnumFromBytes(b []byte, n int) string {
 
 // toBase64 编码字节段（供 meta 存 salt 等）。
 func toBase64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+
+// HashMD5 返回 blob 的 md5 小写 hex（32 字符）。
+//
+// 用途：块密文的 md5/crc32 是**秒传刷新（rapidupload）**的必要参数——分片上传后百度
+// 记录的 md5 可能不可靠，而内容已在盘 ⇒ 用这些值零传输刷新远端 meta（见
+// docs/external-dependencies.md「百度网盘 ETag/md5 不可靠」）。
+func HashMD5(blob []byte) string {
+	sum := md5.Sum(blob) //nolint:gosec // 百度网盘协议需要 md5（非安全用途）
+	return hex.EncodeToString(sum[:])
+}
+
+// HashCRC32IEEE 返回 blob 的 CRC32 IEEE（无符号十进制字符串；rapidupload 参数）。
+func HashCRC32IEEE(blob []byte) string {
+	return strconv.FormatUint(uint64(crc32.ChecksumIEEE(blob)), 10)
+}

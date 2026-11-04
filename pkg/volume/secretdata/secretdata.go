@@ -1850,7 +1850,7 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 		iu.markUploaded(key)
 		// 登记待校验项（**不保留本地副本**：峰值保持 O(并发度)；校验失败时由上层
 		// 整文件重试——源文件可重读，见 writeFileOpt 的重试）。
-		iu.markVerify(syncpkg.VerifyItem{Key: key, MD5: h.md5, Size: int64(len(blob))}, "")
+		iu.markVerify(syncpkg.VerifyItem{Key: key, MD5: h.md5, Size: int64(len(blob)), CRC32: h.crc32}, "")
 		if serr := iu.submit(ctx, job); serr != nil {
 			return serr
 		}
@@ -2143,6 +2143,9 @@ func (s *SecretdataFS) verifyBatchAndRepair(ctx context.Context, iu *interleaved
 			return fmt.Errorf("%w: %d/%d 块（重传 %d 轮仍不一致）: %s",
 				ErrBatchVerifyFailed, len(bad), len(items), rounds, summarizeVerifyFailures(bad))
 		}
+		// 注意：**秒传刷新自愈已内置在后端**（BatchVerifier 契约，见 docs/external-dependencies.md
+		// §7.6）——此处拿到的 bad 都是「刷不回来」的真不一致，才需要重传兜底。
+		// 使用方不编排刷新逻辑，避免每个消费方各写一遍。
 		slog.Warn("secretdata: 批量校验发现不一致（无本地副本 ⇒ 记录并等待整文件重试）", "round", round, "bad", len(bad), "of", len(items))
 		retried := s.repairFailedChunks(ctx, iu, wc, meta, bad)
 		items = retried

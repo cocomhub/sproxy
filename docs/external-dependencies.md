@@ -122,6 +122,35 @@
 | 二进制失败回退库 adpater / 无兜底 fail-closed（不落回全量下载） | 与既有 binary→library 回退同构 | `TestBinaryAdapter_Meta_Fallback` / `_NoFallback` / `_List_Fallback` |
 | 子 module e2e 测试不被 CI 编译（`//go:build e2e`）→ `make vet-e2e-submodules` 编译门 | 防外部依赖/接口变更后静默腐化 | CI `Test Sub-Modules` job 内 `make vet-e2e-submodules` |
 
+### 7.6 百度网盘「上传后 md5/ETag 不可靠」与**秒传刷新**（实测 2026-11-04）
+
+> **必读结论（不要重复探索）**：百度**分片上传**后远端记录的 md5/ETag **可能不可靠**
+> （官方 help 原文：「分片上传之后, 服务器可能会记录到错误的文件md5, 可使用 fixmd5 命令
+> 尝试修复」）。此时**内容其实已在盘**——修复手段**必须优先用 rapidupload（秒传）刷新**，
+> 而**不是**重传内容：刷新零传输、毫秒级；重传要重新传整个块/文件（慢几个数量级）。
+>
+> **实测时间线**：把一个 130 字节文件写入**已存在的目录** `jav/_probe`，
+> 逐块即时 `Stat+md5` 复核反复超时，最终 **4 分 41 秒**才完成（≈ 90s×3 重试窗口）。
+> 同一时刻用 BaiduPCS-Go 直接传 1KB 到新目录，`meta` **立即可见** ——
+> ⇒ 延迟**不是**「新目录/新文件的索引延迟」（此前误判），而是 **ETag 不可靠 + 刷新重试**。
+
+| 行为 | 说明 | 锁定测试 / 实现 |
+|---|---|---|
+| 分片上传后 ETag 可能 ≠ 整文件 md5 | 远端 md5 由片组合而成或服务端标记「可能不正确」 | `TestDifferential_RapidUploadConvergence`（刷新命中 16/16、零重复传输） |
+| **rapidupload 命中即刷新权威 md5** | 参数：`path/size/md5/sliceMD5(前256KB)/crc32/blockMD5s(4MB 切分)` | `Storage.refreshByRapidUpload` |
+| 上传后复核：ETag 可用则**必须相等**；ETag 缺失（新目录窗口）则按 `sizeNear` 容差（max(4KiB,0.1%)） | 列举（`ls`）的 size 对大文件是**近似值**（实测 87.3MiB 差 312B） | `TestSizeNear` / `TestPut_StatDelayedButListVisible` |
+| **秒传刷新自愈「内置」在后端**（使用方无需理解） | `BatchVerifier` 契约要求：`VerifyMany` 发现摘要不一致时**后端自己**先做 rapidupload 刷新并复验，成功即返回 `State=OK + Refreshed=true`。消费方（secretdata/上层）只看结果，**不编排**刷新逻辑 | `TestVerifyMany_SelfHealsByRapidRefresh`（变异：去掉自愈调用 ⇒ 红） |
+| 批量延迟校验（上传阶段不逐块复核） | 全部写完统一校验（索引/一致性窗口后命中）；仍不一致才回落重传/整文件重试 | `TestWriteFile_BatchVerifyWholeFileRetry`（变异：去掉整文件重试 ⇒ 红） |
+| 秒传刷新的**块大小边界** | `sliceMD5`/`blockMD5s` 需按 4MB 切分；块 ≤256KiB 时二者都等于整块 md5 ⇒ 可直接刷新；更大块需在 meta 存摘要列表（当前不做，回落重传） | `Storage.RapidRefresh`（`rapidRefreshMaxSize = 256KiB`） |
+| 块密文摘要落 meta | `ChunkInfo.EncMD5` / `EncCRC32`（写侧由 `HashMD5`/`HashCRC32IEEE` 计算）供上述刷新使用 | `shardseal` 写侧两处构造 |
+
+**分层判据（改造后，使用方无感）**：
+1. **后端层（baidupcs）**：`VerifyMany` 内建自愈 —— 摘要不一致 ⇒ 先 rapidupload 刷新（零传输）⇒ 复验；
+   成功返回 `OK + Refreshed`。这是**唯一应该实现刷新的地方**，不要在上层重复编排。
+2. **卷层（secretdata）**：只看 `State`；`mismatch` 才重传（无本地副本 ⇒ 整文件重试一次）。
+3. **绝不**把「ETag 不可靠」当成「内容损坏」直接判失败 —— 那正是 128 条历史任务
+   16.5 分钟/条的来源（实测 130 字节文件曾耗时 4m41s）。
+
 ## 维护指引
 
 - **新增外部依赖**：先在本文档对应分类补条目 + 测试锁定（TDD 红灯 → 实现 → 绿）

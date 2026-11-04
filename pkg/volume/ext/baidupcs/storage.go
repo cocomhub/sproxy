@@ -1238,6 +1238,42 @@ func (s *Storage) PutDeferred(ctx context.Context, key, stagedPath string, size 
 	return nil
 }
 
+// rapidRefreshMaxSize 是「秒传刷新」支持的最大单块大小：rapidupload 需要
+// sliceMD5（前 256KB）与 blockMD5s（按 4MB 切分），仅在块 ≤ 256KB 时两者都等于整块 md5，
+// 无需额外记录即可刷新。更大的块跳过（回落重传），避免 meta 里存冗余摘要列表。
+const rapidRefreshMaxSize = 256 << 10
+
+// RapidRefresh 用**秒传刷新**远端 meta（零传输，实现 syncpkg.RapidRefresher）。
+//
+// **实测依据（2026-11-04）**：百度分片上传后远端 ETag 可能不可靠，但内容已在盘；
+// rapidupload 命中会把 md5 刷成权威值 ⇒ 这是「ETag 不一致」的首选修复，比重传快几个数量级。
+// 边界：仅支持 ≤ rapidRefreshMaxSize 的块（大块缺 sliceMD5/blockMD5s，回落重传）。
+func (s *Storage) RapidRefresh(ctx context.Context, it syncpkg.VerifyItem) (bool, error) {
+	ru, ok := s.rapidUploaderOf()
+	if !ok || it.MD5 == "" || it.Size <= 0 || it.Size > rapidRefreshMaxSize {
+		return false, nil
+	}
+	remote, err := s.remotePath(it.Key)
+	if err != nil {
+		return false, err
+	}
+	st := &stagedUpload{
+		md5:       it.MD5,
+		size:      it.Size,
+		sliceMD5:  it.MD5, // 块 ≤ 256KB ⇒ 整块即首片
+		crc32:     it.CRC32,
+		blockMD5s: []string{it.MD5},
+	}
+	hit, rerr := ru.RapidUpload(ctx, remote, st)
+	if rerr != nil {
+		return false, mapPCSError(rerr)
+	}
+	if hit {
+		s.log.Info("rapidupload 秒传刷新命中（零传输刷新远端 md5）", "key", it.Key, "size", it.Size)
+	}
+	return hit, nil
+}
+
 // VerifyMany 并发批量校验（实现 syncpkg.BatchVerifier）。
 //
 // 判据（按可用信息从严到宽）：
@@ -1272,6 +1308,25 @@ func (s *Storage) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []
 	return out
 }
 
+// healByRapidRefresh 对「摘要不一致」的对象尝试**秒传刷新自愈**（零传输）：
+// rapidupload 命中 ⇒ 远端 md5 被刷成权威值 ⇒ 重新 Stat 校验；一致则返回 OK+Refreshed。
+// 未命中/不支持 ⇒ (zero,false)，调用方继续按 mismatch 处理。
+func (s *Storage) healByRapidRefresh(ctx context.Context, it syncpkg.VerifyItem) (syncpkg.VerifyResult, bool) {
+	hit, err := s.RapidRefresh(ctx, it)
+	if err != nil || !hit {
+		return syncpkg.VerifyResult{}, false
+	}
+	meta, serr := s.Stat(ctx, it.Key)
+	if serr != nil || meta == nil || meta.ETag == "" || !strings.EqualFold(meta.ETag, it.MD5) {
+		return syncpkg.VerifyResult{}, false
+	}
+	s.log.Info("校验不一致已用秒传刷新自愈（零传输）", "key", it.Key, "size", it.Size)
+	return syncpkg.VerifyResult{
+		Item: it, State: syncpkg.VerifyOK, Refreshed: true,
+		RemoteETag: meta.ETag, RemoteSize: meta.Size, Reason: "秒传刷新自愈",
+	}, true
+}
+
 // verifyOne 校验单个对象（VerifyMany 的工作单元）。
 func (s *Storage) verifyOne(ctx context.Context, it syncpkg.VerifyItem) syncpkg.VerifyResult {
 	res := syncpkg.VerifyResult{Item: it}
@@ -1286,6 +1341,14 @@ func (s *Storage) verifyOne(ctx context.Context, it syncpkg.VerifyItem) syncpkg.
 		}
 	}
 	res.RemoteETag, res.RemoteSize = meta.ETag, meta.Size
+	// **后端自愈（不再让使用方编排）**：摘要不一致时先试「秒传刷新」（零传输）并复验；
+	// 命中即视为 OK（Refreshed=true）。这是百度「分片上传后 md5 不可靠」的标准修复
+	// （docs/external-dependencies.md §7.6），必须内置在上传/校验能力里。
+	if it.MD5 != "" && meta.ETag != "" && !strings.EqualFold(meta.ETag, it.MD5) {
+		if healed, ok := s.healByRapidRefresh(ctx, it); ok {
+			return healed
+		}
+	}
 	switch {
 	case it.MD5 != "" && meta.ETag != "":
 		if strings.EqualFold(meta.ETag, it.MD5) {
