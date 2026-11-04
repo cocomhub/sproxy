@@ -136,11 +136,14 @@ type ContainerRef struct {
 
 // RealEntry 是容器内单个真实条目的用途（反向解释用）。
 type RealEntry struct {
-	Name  string      `json:"name"`
-	Kind  string      `json:"kind"` // dir_meta | file_meta | chunk | parity | unknown
-	Bytes int64       `json:"bytes"`
+	Name  string `json:"name"`
+	Kind  string `json:"kind"` // container | dir_meta | file_meta | chunk | parity | unknown
+	Bytes int64  `json:"bytes"`
+	// Owner 非空 = 该条目属于某逻辑文件（file_meta/分块/parity）。
 	Owner *LogicalRef `json:"owner,omitempty"`
-	Note  string      `json:"note,omitempty"`
+	// Container 非空 = 该条目是**子容器目录**（逻辑目录归属）。
+	Container *ContainerRef `json:"container,omitempty"`
+	Note      string        `json:"note,omitempty"`
 }
 
 // RealExplanation 是反向解释：一个真实路径是干什么的。

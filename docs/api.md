@@ -1254,7 +1254,8 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 `volume.StorageInspector` 的卷（当前为 secretdata）；其它卷返回 `501`。
 
 - 认证：主 mux `reader`（只读子组）/ 隧道内层 `tunnel`
-- query 参数：`path`（逻辑路径，空 = 卷根）；`disk=1`（可选，默认 0 = 只读索引）
+- query 参数：`path`（**用户视角路径**，服务端按卷键空间映射为 `<owner>/user/<path>`；空 = 卷根，不映射；
+  封装/加密卷的内部索引键含 owner/bucket 前缀，调用方无需也不应自行拼接）；`disk=1`（可选，默认 0 = 只读索引）
 - 响应 `{"trace": {...}}`（`schema_version=1`）：
   ```json
   {"trace": {
@@ -1277,8 +1278,10 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 认证：主 mux `reader`（只读子组）/ 隧道内层 `tunnel`
 - query 参数：`real`（必填，卷根相对；绝对路径/`..` 一律 `403`）；`disk=1`（可选）
 - 响应 `{"explain": {...}}`：`kind` ∈ `container|dir_meta|file_meta|chunk|parity|unknown`；
-  `owner`（逻辑归属，分块带 `chunk_index`、parity 带 `parity:true`）、`container`（逻辑目录/dir_id）、
-  `evidence`（判定依据）、`entries`（容器内逐条用途）、`anomalies`
+  `owner`（逻辑归属，分块带 `chunk_index`、parity 带 `parity:true`）、`container`（逻辑目录/dir_id，
+  为**卷键空间**路径，如 `<owner>/user/jav/...`）、`evidence`（判定依据）、
+  `entries`（容器内逐条用途；`kind=container` 表示**子容器目录**并带 `container` 归属）、`anomalies`
+- `real` 是**封装卷区域相对的真实路径**（容器链），不是用户逻辑路径；两种路径空间不可混用
 - 路径不存在 ⇒ `200` + `kind:"unknown"` + `not_found` 异常（审查工具需解释「为什么这里空」，不是 404）
 - 差异码（稳定契约）：`blob_missing` / `blob_orphan` / `size_mismatch` / `meta_unreadable` /
   `container_not_indexed` / `parent_unresolved` / `dir_meta_ambiguous` / `not_found` / `truncated` / `dedup_shared`

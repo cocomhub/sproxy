@@ -336,6 +336,18 @@ photos/2026/a.jpg   12.3 MiB  mtime=2026-11-01 12:00
 4. 非 secretdata 卷返回 501 且提示明确（不允许空结果）；
 5. `pkg/volume/secretdata` 该能力单测覆盖 ≥90%，`make lint` 0，archcheck 全绿。
 
+## 10.1 真实卷联调发现（2026-11-04，已修）
+
+用真实 secretdata-over-baidupcs 卷联调时暴露两处**设计未覆盖**的事实，均已修并补测试：
+
+1. **容器内的目录条目 = 子容器**。根容器里除 dir-meta/分块外还有子容器目录；此前把目录当 blob
+   判定 ⇒ 每个子目录都被报成 `blob_orphan`（0 B），审查结论严重失真。
+   ⇒ `RealEntry.Kind` 增加 `container` 并带 `Container` 归属（解子容器 dir-meta 得逻辑目录）。
+2. **索引键空间是 `<owner>/<bucket>/<rel>`**（如 `ak-xxx/user/kv/a.bin`），而调用方只见
+   `kv/a.bin`。此前直接把用户路径当键查 ⇒ **全部 404**。
+   ⇒ HTTP 层用 `Volume.ResolveUserLocation(owner, path).FSPath()` 映射；空 path（卷根）不映射。
+   `explain` 的 `real` 仍按**区域相对真实路径**解释（两种键空间不可混用，已在 api.md 写明）。
+
 ## 11. 风险与未决
 
 | 风险 | 缓解 |

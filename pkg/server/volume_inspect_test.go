@@ -84,8 +84,17 @@ func TestVolumeInspect_TraceAndExplain(t *testing.T) {
 	h, fsys := newInspectTestHandler(t)
 	mux := newInspectMux(h)
 
+	// 写入必须走**卷键空间**（`<owner>/user/<rel>`）——与 handler 的 traceKeyFor 同源。
+	v, ok := h.volSet.ByName("vault")
+	if !ok {
+		t.Fatal("vault 不存在")
+	}
+	loc, lerr := v.ResolveUserLocation("anonymous", "docs/a.txt")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
 	content := []byte(strings.Repeat("inspect-data-", 40))
-	if err := fsys.WriteFile(t.Context(), syncpkg.LogicalKey{}, "docs/a.txt", strings.NewReader(string(content)), int64(len(content)), 0); err != nil {
+	if err := fsys.WriteFile(t.Context(), syncpkg.LogicalKey{}, loc.FSPath(), strings.NewReader(string(content)), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -119,7 +128,8 @@ func TestVolumeInspect_TraceAndExplain(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &exResp); err != nil || exResp.Explain == nil {
 		t.Fatalf("explain 响应解析失败: %v (%s)", err, rec.Body.String())
 	}
-	if exResp.Explain.Kind != "container" || exResp.Explain.Container == nil || exResp.Explain.Container.LogicalDir != "docs" {
+	if exResp.Explain.Kind != "container" || exResp.Explain.Container == nil ||
+		!strings.HasSuffix(exResp.Explain.Container.LogicalDir, "user/docs") {
 		t.Fatalf("explain 内容异常: %+v", exResp.Explain)
 	}
 	if len(exResp.Explain.Entries) == 0 {

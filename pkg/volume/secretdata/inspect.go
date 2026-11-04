@@ -24,6 +24,8 @@ import (
 	"sort"
 	"strings"
 
+	"log/slog"
+
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -40,35 +42,71 @@ func (s *SecretdataFS) Trace(ctx context.Context, rel string, mode volume.Inspec
 	if err != nil {
 		return nil, err
 	}
-	s.mu.RLock()
-	e, isFile := s.index[key]
-	var entry metaEntry
-	if isFile && e != nil {
-		entry = *e
-	}
-	container, isDir := s.dirSegs[key]
-	isDir = isDir || key == ""
-	dirMTime := s.dirMTime[key]
-	dedupRefs := 0
-	if isFile && entry.dataDir != "" && entry.meta != nil && len(entry.meta.Chunks) > 0 {
-		want := entry.meta.Chunks[0].FileName
-		for _, other := range s.index {
-			if other != nil && other.dataDir == entry.dataDir && other.meta != nil &&
-				len(other.meta.Chunks) > 0 && other.meta.Chunks[0].FileName == want {
-				dedupRefs++
-			}
-		}
-	}
-	s.mu.RUnlock()
-
+	snap := s.snapshotTrace(key)
 	switch {
-	case isFile:
-		return s.traceFile(ctx, key, entry, dedupRefs, mode), nil
-	case isDir:
-		return s.traceDir(ctx, key, container, dirMTime, dedupRefs, mode)
+	case snap.isFile:
+		return s.traceFile(ctx, key, snap.entry, snap.dedupRefs, mode), nil
+	case snap.isDir:
+		return s.traceDir(ctx, key, snap.container, snap.mtime, 0, mode)
 	default:
+		s.logIndexMiss(key)
 		return nil, fmt.Errorf("secretdata: 逻辑路径不存在: %w", fs.ErrNotExist)
 	}
+}
+
+// traceSnapshot 是一次索引快照（不持锁使用，避免 IO 落进临界区）。
+type traceSnapshot struct {
+	entry     metaEntry
+	isFile    bool
+	isDir     bool
+	container string
+	mtime     int64
+	dedupRefs int
+}
+
+// snapshotTrace 在锁内取条目快照与去重引用计数。
+func (s *SecretdataFS) snapshotTrace(key string) traceSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var snap traceSnapshot
+	if e, ok := s.index[key]; ok && e != nil {
+		snap.entry = *e
+		snap.isFile = true
+	}
+	if c, ok := s.dirSegs[key]; ok {
+		snap.container = c
+		snap.isDir = true
+	}
+	if key == "" {
+		snap.isDir = true
+	}
+	snap.mtime = s.dirMTime[key]
+	snap.dedupRefs = s.dedupRefCountLocked(&snap.entry)
+	return snap
+}
+
+// dedupRefCountLocked 统计共享同一去重 blob 的索引条目数（调用方持 s.mu）。
+func (s *SecretdataFS) dedupRefCountLocked(e *metaEntry) int {
+	if e == nil || e.dataDir == "" || e.meta == nil || len(e.meta.Chunks) == 0 {
+		return 0
+	}
+	want := e.meta.Chunks[0].FileName
+	n := 0
+	for _, other := range s.index {
+		if other != nil && other.dataDir == e.dataDir && other.meta != nil &&
+			len(other.meta.Chunks) > 0 && other.meta.Chunks[0].FileName == want {
+			n++
+		}
+	}
+	return n
+}
+
+// logIndexMiss 记录索引未命中的规模（Debug；不含路径名，避免日志泄露用户内容名）。
+func (s *SecretdataFS) logIndexMiss(key string) {
+	s.mu.RLock()
+	n, nd := len(s.index), len(s.dirSegs)
+	s.mu.RUnlock()
+	slog.Debug("secretdata: 审查索引未命中", "key_len", len(key), "index", n, "dir_segs", nd)
 }
 
 // traceFile 组装文件落点。
@@ -209,7 +247,7 @@ func (s *SecretdataFS) explainContainer(ctx context.Context, ex *volume.RealExpl
 	seen := make(map[string]struct{}, len(entries))
 	for _, en := range entries {
 		seen[en.Name] = struct{}{}
-		ex.Entries = append(ex.Entries, s.classifyRealEntry(realPath, en, dirMetaName, ex))
+		ex.Entries = append(ex.Entries, s.classifyRealEntry(ctx, realPath, en, dirMetaName, ex))
 	}
 	if mode == volume.InspectDisk {
 		appendMissingBlobs(ex, realPath, s.containerExpectations(realPath), seen)
@@ -262,8 +300,20 @@ func recordContainerDirMetaState(ex *volume.RealExplanation, realPath, dirMetaNa
 }
 
 // classifyRealEntry 判定容器内单个条目的用途与归属。
-func (s *SecretdataFS) classifyRealEntry(container string, en syncpkg.Entry, dirMetaName string, ex *volume.RealExplanation) volume.RealEntry {
+func (s *SecretdataFS) classifyRealEntry(ctx context.Context, container string, en syncpkg.Entry, dirMetaName string, ex *volume.RealExplanation) volume.RealEntry {
 	re := volume.RealEntry{Name: en.Name, Kind: "unknown", Bytes: en.Size}
+	// 目录条目 = **子容器**（逻辑目录），不是 blob：必须单独判定，否则会被误报为孤儿分块。
+	if en.IsDir {
+		re.Kind = "container"
+		child := path.Join(container, en.Name)
+		if ref, ok := s.resolveChildContainer(ctx, child); ok {
+			re.Container = ref
+			re.Note = "子容器（逻辑目录 " + displayDirName(ref.LogicalDir) + "）"
+		} else {
+			re.Note = "子容器（dir-meta 未解出）"
+		}
+		return re
+	}
 	switch shardseal.ClassifyName(en.Name) {
 	case shardseal.KindDirMeta:
 		re.Kind = "dir_meta"
@@ -303,6 +353,41 @@ func (s *SecretdataFS) classifyRealEntry(container string, en syncpkg.Entry, dir
 		}
 	}
 	return re
+}
+
+// resolveChildContainer 解子容器的 dir-meta，返回其逻辑目录归属。
+func (s *SecretdataFS) resolveChildContainer(ctx context.Context, container string) (*volume.ContainerRef, bool) {
+	entries, err := s.inner.ListDir(ctx, container)
+	if err != nil {
+		return nil, false
+	}
+	for _, en := range entries {
+		if shardseal.ClassifyName(en.Name) != shardseal.KindDirMeta {
+			continue
+		}
+		blob, rerr := readBlob(ctx, s.inner, path.Join(container, en.Name))
+		if rerr != nil {
+			return nil, false
+		}
+		dm, derr := s.decryptDirMeta(blob)
+		if derr != nil {
+			return nil, false
+		}
+		ref := &volume.ContainerRef{RealPath: container, DirID: dm.DirID, ParentID: dm.ParentDirID}
+		if rel, ok := s.resolveDirByID(dm.DirID); ok {
+			ref.LogicalDir = rel
+		}
+		return ref, true
+	}
+	return nil, false
+}
+
+// displayDirName 渲染逻辑目录名（根 = "(卷根)"）。
+func displayDirName(rel string) string {
+	if rel == "" {
+		return "(卷根)"
+	}
+	return rel
 }
 
 // appendMissingBlobs 在 disk 模式补充「索引声明但磁盘缺失」的差异码。

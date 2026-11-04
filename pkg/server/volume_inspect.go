@@ -29,7 +29,10 @@ func (h *Handlers) volumeTraceHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pathArg := r.URL.Query().Get("path")
+	pathArg, ok := h.traceKeyFor(w, r)
+	if !ok {
+		return
+	}
 	mode := inspectModeFrom(r)
 	tr, err := insp.Trace(r.Context(), pathArg, mode)
 	if err != nil {
@@ -61,6 +64,33 @@ func (h *Handlers) volumeExplainHandler(w http.ResponseWriter, r *http.Request) 
 	httpjson.Send(w, http.StatusOK, struct {
 		Explain *volume.RealExplanation `json:"explain"`
 	}{Explain: ex})
+}
+
+// traceKeyFor 把「用户视角路径」映射为卷内键空间（`<owner>/<bucket>/<rel>`）。
+//
+// 为什么必须映射：封装/加密卷的内部索引键含 owner/bucket 前缀（如
+// `ak-xxx/user/kv/a.bin`），而调用方只认 `kv/a.bin`；直接拼会把「用户路径」当键查 ⇒ 全部 404
+// （真实 baidu 卷实测）。空 path = **卷根**（不映射：卷根不属于任何用户桶）。
+func (h *Handlers) traceKeyFor(w http.ResponseWriter, r *http.Request) (string, bool) {
+	pathArg := strings.TrimSpace(r.URL.Query().Get("path"))
+	if pathArg == "" {
+		return "", true
+	}
+	if h.volSet == nil {
+		httpjson.SendError(w, http.StatusNotFound, "卷不存在")
+		return "", false
+	}
+	v, ok := h.volSet.ByName(strings.TrimSpace(r.PathValue("name")))
+	if !ok {
+		httpjson.SendError(w, http.StatusNotFound, "卷不存在")
+		return "", false
+	}
+	loc, lerr := v.ResolveUserLocation(normalizeOwner(ownerFromRequest(r)), pathArg)
+	if lerr != nil {
+		httpjson.SendError(w, http.StatusBadRequest, "路径非法")
+		return "", false
+	}
+	return loc.FSPath(), true
 }
 
 // inspectorFor 解析卷名 + ACL + 能力断言；失败时已写出响应。

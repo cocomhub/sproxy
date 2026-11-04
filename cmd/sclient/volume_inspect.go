@@ -161,36 +161,48 @@ func writeInspectJSON(w io.Writer, v any) error {
 
 // writeTraceText 渲染正向树（设计 §5.4）。
 func writeTraceText(w io.Writer, tr *volume.PathTrace) {
-	fmt.Fprintf(w, "%s   %s", displayRel(tr.Rel), humanSize(tr.Size))
+	head := displayRel(tr.Rel) + "   " + humanSize(tr.Size)
 	if tr.MTime > 0 {
-		fmt.Fprintf(w, "  mtime=%s", time.Unix(0, tr.MTime).Format("2006-01-02 15:04"))
+		head += "  mtime=" + time.Unix(0, tr.MTime).Format("2006-01-02 15:04")
 	}
-	fmt.Fprintln(w)
+	fmt.Fprintln(w, head)
+	depth := 0
 	if tr.Meta != nil {
-		chain := strings.Split(tr.Meta.RealPath, "/")
-		depth := 0
-		for i := 0; i < len(chain)-1; i++ {
-			label := "容器 " + chain[i]
-			if i == 0 {
-				label = "卷根容器 " + chain[i]
-			}
-			fmt.Fprintf(w, "%s└─ %s\n", strings.Repeat("   ", depth), label)
-			depth++
-		}
-		fmt.Fprintf(w, "%s├─ %s %s  %s\n", strings.Repeat("   ", depth), metaLabel(tr.Kind), chain[len(chain)-1], humanSize(tr.Meta.Bytes))
+		depth = writeContainerChain(w, tr.Meta.RealPath)
+		fmt.Fprintln(w, indent(depth)+"├─ "+metaLabel(tr.Kind)+" "+path.Base(tr.Meta.RealPath)+"  "+humanSize(tr.Meta.Bytes))
 	}
 	for _, c := range tr.Chunks {
-		fmt.Fprintf(w, "   ├─ 分块#%d %s  %s  明文 %s  (blocklets=%d)\n",
+		line := fmt.Sprintf("├─ 分块#%d %s  %s  明文 %s  (blocklets=%d)",
 			c.Index, path.Base(c.Blob.RealPath), humanSize(c.Blob.Bytes), humanSize(c.Blob.Plain), c.Blocklets)
+		fmt.Fprintln(w, indent(depth)+line)
 	}
 	if tr.Parity != nil {
-		fmt.Fprintf(w, "   └─ parity  %s  %s\n", path.Base(tr.Parity.RealPath), humanSize(tr.Parity.Bytes))
+		fmt.Fprintln(w, indent(depth)+"└─ parity  "+path.Base(tr.Parity.RealPath)+"  "+humanSize(tr.Parity.Bytes))
 	}
 	if tr.Dedup != nil {
-		fmt.Fprintf(w, "   去重池: %s（引用 %d 个文件；分块共享，非本文件容器）\n", tr.Dedup.Container, tr.Dedup.Refs)
+		fmt.Fprintf(w, "   去重池: %s（引用 %d 个文件；分块共享，非本文件容器）", tr.Dedup.Container, tr.Dedup.Refs)
+		fmt.Fprintln(w)
 	}
 	writeAnomalies(w, tr.Anomalies)
 }
+
+// writeContainerChain 逐层输出容器链，返回最深层层号。
+func writeContainerChain(w io.Writer, realPath string) int {
+	chain := strings.Split(realPath, "/")
+	depth := 0
+	for i := 0; i < len(chain)-1; i++ {
+		label := "容器 " + chain[i]
+		if i == 0 {
+			label = "卷根容器 " + chain[i]
+		}
+		fmt.Fprintln(w, indent(depth)+"└─ "+label)
+		depth++
+	}
+	return depth
+}
+
+// indent 返回 depth 层的缩进（每层 3 空格，便于与 └─ 对齐）。
+func indent(depth int) string { return strings.Repeat("   ", depth) }
 
 func metaLabel(kind string) string {
 	if kind == "dir" {
@@ -259,6 +271,9 @@ func renderRealEntry(e volume.RealEntry) string {
 	owner := ""
 	if e.Owner != nil {
 		owner = "→ " + e.Owner.Rel + ownerSuffix(e.Owner)
+	}
+	if e.Container != nil {
+		owner = "→ 目录 " + displayDir(e.Container.LogicalDir)
 	}
 	note := ""
 	if e.Note != "" {

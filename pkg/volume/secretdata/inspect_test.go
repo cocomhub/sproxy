@@ -160,6 +160,56 @@ func TestInspect_ExplainContainer(t *testing.T) {
 	}
 }
 
+// TestInspect_ExplainContainerSubdirIsContainer 锁「子目录 = 容器，不得误报为孤儿分块」。
+//
+// 真实数据实测发现：容器内既有 meta/分块，也有**子容器目录**；若把目录当 blob 判定，
+// 根容器里的每个子目录都会被报成 blob_orphan（且大小 0 B），审查结论完全失真。
+func TestInspect_ExplainContainerSubdirIsContainer(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	if err := fsys.MakeDir(ctx, "parent"); err != nil {
+		t.Fatalf("MakeDir parent: %v", err)
+	}
+	if err := fsys.MakeDir(ctx, "parent/child"); err != nil {
+		t.Fatalf("MakeDir child: %v", err)
+	}
+	writeFileT(t, fsys, "parent/child/f.txt", data(40))
+
+	root, err := fsys.Trace(ctx, "", volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Trace(root): %v", err)
+	}
+	rootContainer := path.Dir(root.Meta.RealPath)
+	ex, err := fsys.Explain(ctx, rootContainer, volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Explain(root container): %v", err)
+	}
+	var containers, orphans int
+	for _, e := range ex.Entries {
+		if e.Kind == "container" {
+			containers++
+			if e.Container == nil || e.Container.LogicalDir != "parent" {
+				t.Fatalf("子容器归属 = %+v, want parent", e.Container)
+			}
+			if e.Note == "" || strings.Contains(e.Note, "孤儿") {
+				t.Fatalf("子容器文案不应含孤儿: %q", e.Note)
+			}
+		}
+	}
+	for _, a := range ex.Anomalies {
+		if a.Code == volume.AnomalyBlobOrphan {
+			orphans++
+		}
+	}
+	if containers != 1 {
+		t.Fatalf("子容器数 = %d, want 1（entries=%+v）", containers, ex.Entries)
+	}
+	if orphans != 0 {
+		t.Fatalf("子目录被误报为孤儿 %d 次: %+v", orphans, ex.Anomalies)
+	}
+}
+
 // TestInspect_ExplainChunkVsParity 是**关键**用例：parity 与普通分块命名同形，
 // 只能靠 meta 判定（变异：按名字/最后一个分块猜 ⇒ 本测红）。
 func TestInspect_ExplainChunkVsParity(t *testing.T) {
