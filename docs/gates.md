@@ -68,7 +68,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `audit_action_gate_test.go` | R39 | R39：**审计动作常量必须有可达的非测试使用点**（两层判据：符号被引用 + 引用它的函数本身可达）。 |
 | `audit_calls_gate_test.go` | R30 · R31 · R34 · R35 | audit_calls_gate_test.go 是门禁 R35-a：审计调用点**棘轮**（只减不增）。 |
 | `audit_types_gate_test.go` | R35 | audit_types_gate_test.go 是门禁 R35-c：**审计类型/常量/接口的唯一实现处 = pkg/audit**。 |
-| `mutating_route_audit_gate_test.go` | R35-b | R35-b：**变更型路由必须有业务语义审计**（登记表 `mutating_route_audit.tsv` 三条 join：路由↔pattern、动作名真实存在、动作有场景证据；`pending` 受预算棘轮）。 |
+| `mutating_route_audit_gate_test.go` | R35-b | R35-b：**变更型路由必须有业务语义审计**（登记表 `mutating_route_audit.tsv` 三条 join：路由↔pattern、动作名真实存在、动作有场景证据；`pending` 受预算棘轮）。 （**2026-11-03 变异验证**：新增一条变更型路由不登记审计 ⇒ 门禁红） |
 | `task_lifecycle_gate_test.go` | R43 | R43：**云任务状态机 × 重启恢复覆盖**（写入的状态必须登记；非终态不得 `keep`；`restart` 状态必须出现在 `restart :=` 判定式里）。 |
 | `quota_direct_release_gate_test.go` | R44 | R44：**账本原语直调点登记**（`commitUp`/`releaseUp`/`releaseCommittedUp` 不加锁；新增直调点必须写明为何不丢唤醒）。 |
 | `audit_mux_parity_gate_test.go` | R42 | R42：**两个 mux（主 / 隧道内层）必须挂同一组审计中间件**（`auditMiddleware` + `auditVolumeMiddleware`），防「隧道/CLI 路径无兜底审计、卷维度恒空」。 |
@@ -104,8 +104,8 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `test_parallel_gate_test.go` | R18 | 门禁 R18「测试并发注册」——用户明示 2026-09-16： |
 | `test_sleep_ratchet_test.go` | R14 | test_sleep_ratchet_test.go 是「测试内固定等待只减不增」的**棘轮门禁**（R14）。 |
 | `upload_side_effect_test.go` | R8 | upload_side_effect_test.go 是「**上传成功的副作用必须单一实现**」的门禁（R8，P2-d 配套）。 |
-| `tempdir_gate_test.go` | R53 | 测试临时目录门禁（2026-10-31）：`*_test.go` 不得裸调 `os.MkdirTemp`/`ioutil.TempDir`，必须用 `testutil.MkdirTemp`（测试内重试 + 进程级兜底）或 `t.TempDir()`。背景：%TEMP% 累积 1,910 个本仓测试目录（Windows 上 `RemoveAll` 因句柄未释放静默失败 + 显式 TempDir 无人清理）。 |
-| `json_response_gate_test.go` | R54 | JSON 响应写出**单一实现**（2026-11-01 棘轮 → 2026-11-02 **硬禁止**）：非测试源码中出现「裸 JSON 响应写」（`json.NewEncoder(w)`；同行 `w.Header().Set(` + `"application/json"`/`contentTypeJSON`）即红。背景：曾有 **5 份**等价实现（装配根 `sendJSONResponse` 328 处、`pkg/files.Service.sendJSON` 146 处、`ratelimit` 429 回包、`cloudtasks.writeJSON`、`remotefs` 两个 helper）+ 41 处裸写；现全部收敛到 `internal/httpjson`（`Send`/`SendOpt`/`SendErr`/`SendError`/`WriteBody`），基线表已删除。豁免 `internal/httpjson/`（实现本体）、`pkg/testutil/`（外部服务替身）、`cmd/`（CLI stdout，`w` 是 io.Writer）。 |
+| `tempdir_gate_test.go` | R53 | 测试临时目录门禁（2026-10-31）：`*_test.go` 不得裸调 `os.MkdirTemp`/`ioutil.TempDir`，必须用 `testutil.MkdirTemp`（测试内重试 + 进程级兜底）或 `t.TempDir()`。背景：%TEMP% 累积 1,910 个本仓测试目录（Windows 上 `RemoveAll` 因句柄未释放静默失败 + 显式 TempDir 无人清理）。 （**2026-11-03 变异验证**：测试里用裸 `os.MkdirTemp` ⇒ 门禁红） |
+| `json_response_gate_test.go` | R54 | JSON 响应写出**单一实现**（2026-11-01 棘轮 → 2026-11-02 **硬禁止**）：非测试源码中出现「裸 JSON 响应写」（`json.NewEncoder(w)`；同行 `w.Header().Set(` + `"application/json"`/`contentTypeJSON`）即红。背景：曾有 **5 份**等价实现（装配根 `sendJSONResponse` 328 处、`pkg/files.Service.sendJSON` 146 处、`ratelimit` 429 回包、`cloudtasks.writeJSON`、`remotefs` 两个 helper）+ 41 处裸写；现全部收敛到 `internal/httpjson`（`Send`/`SendOpt`/`SendErr`/`SendError`/`WriteBody`），基线表已删除。豁免 `internal/httpjson/`（实现本体）、`pkg/testutil/`（外部服务替身）、`cmd/`（CLI stdout，`w` 是 io.Writer）。 （**2026-11-03 变异验证**：非测试源码里 `json.NewEncoder(w)` 裸写 ⇒ 门禁红） |
 | `docs_api_gate_test.go` | R55 | API 文档与路由表一致（2026-11-02，终态适配 2026-11-03）：`docs/api.md` 的 `### METHOD /path` 标题集合必须与 `route_classes.tsv` 的路径集合对齐；未文档化的必须逐条登记在 `docs_api_undocumented.tsv`（**驱动清单**，格式 `<路径>TAB# <理由/分组>`，集合精确相等——补文档后必须删行，新增未文档化必须登记并写理由）；**全部文档化后该文件可删除**（缺失 = 空清单，合法终态）；文档里出现过期路径即红。**防假绿护栏**：两侧解析结果各需 ≥ 100 条（解析器或输入文件失效 ⇒ 两侧都空 ⇒ 判据恒真，必须显式拦住）。背景：文档漂移不会让任何测试变红，实测 122 条路由只覆盖 64 条。 |
 | `test_count_ratchet_test.go` | R50 | 测试函数总数棘轮（2026-10-30）：全仓 `func Test*` 总数不得低于 `test_count_baseline.tsv` 基线（只增不减）。背景：#927 搬运时一个测试被静默删除（−1），无门禁发现；有意删除测试须同步下调基线并说明理由。 |
 | `test_doc_comment_gate_test.go` | R49 | 测试文档注释悬空门禁（2026-10-30）：`pkg/server` 下 `// TestXxx` 文档注释若指向全仓不存在的测试函数即红。与 R50 互补（R49 抓「注释残留」，R50 抓「连注释一起删」）。 |
@@ -125,7 +125,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `delete_invalidation_gate_test.go` | R39 | 持有派生缓存的卷实现，其**删除/移动路径必须失效该缓存**。 |
 | `deps_field_cap_test.go` | R52 | `pkg/server/<cap>` 切片的 `Deps` 字段数上限（默认 12）：字段数即切片的入边宽度，增长必须收敛为既有接口方法。 |
 | `fs_derived_state_gate_test.go` | R42 | FS 实现必须自述派生状态（供卷状态缓存判定是否可复用），防新增 FS 静默绕过缓存语义。 |
-| `index_single_write_gate_test.go` | R47 | 派生状态**单一写入口**：业务写路径不得直接写索引（只允许写内核/事件驱动），附允许清单。 |
+| `index_single_write_gate_test.go` | R47 | 派生状态**单一写入口**：业务写路径不得直接写索引（只允许写内核/事件驱动），附允许清单。 （**2026-11-03 变异验证**：`write_ops.go` 里直写索引 ⇒ 门禁红） |
 | `legacy_state_usage_gate_test.go` | R46 | 「旧派生状态实现」使用点棘轮（只减不增），锁定向 Root 事件收敛的收益。 |
 | `list_cache_gate_test.go` | R40 | list 级缓存**唯一提供方**（`pkg/volumestate`），禁止各卷各自造缓存。 |
 | `list_source_gate_test.go` | R41 | list/search 数据源收口（影子台账阶段）：两段式断言，确保数据源不回流到旧的逐卷扫描。 |
