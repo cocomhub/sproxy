@@ -380,6 +380,24 @@ photos/2026/a.jpg   12.3 MiB  mtime=2026-11-01 12:00
 `container_not_indexed`（与 explain 同码）；新增 JSON 契约测试（字段名/结构稳定性）与
 `inspectHasDiff` 纯函数测试。全部修复均有**变异验证**（去掉修复 ⇒ 对应用例红）。
 
+## 10.4 递归树（2026-11-05 追加）
+
+`trace` 原为单节点视图。补 `TreeInspector` 可选能力（不改 `StorageInspector` 签名）：
+
+| 项 | 语义 |
+|---|---|
+| `volume trace <dir> --depth N` / `GET ...?depth=N` | N 层子树；默认 1（零额外开销） |
+| 上限 | `MaxTreeDepth=3`、`MaxTreeNodes=200`；超出截断 + `truncated` |
+| 子项来源 | 索引 `ListDir`（+ 在途上传的直接子项，`mode=uploading`） |
+| disk | 只核验**根节点**（子项不逐节点探测，防一次请求打爆后端） |
+
+实现：`TraceTree` 复用 `Trace`（根节点），`expandTree` 深度优先 + 预算；`treeChildren` 单次
+`ListDir` 后逐项 `traceChildIndexOnly`（**纯索引，零后端调用**）。
+
+性能注记（真实卷实测）：子项若走完整 `Trace`，每个子目录都要为其 dir-meta 做一次 ListDir ⇒
+远端卷上数百子目录的 `--depth 2` 实测 **3m36s**；改为 index-only 后只保留根节点 1 次 ListDir
+（用例 `TestInspect_TraceTree_ChildrenNoBackendIO` 以计数 FS 锁死「≤1 次」）。
+
 ## 11. 风险与未决
 
 | 风险 | 缓解 |

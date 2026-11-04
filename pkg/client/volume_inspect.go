@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
@@ -32,6 +33,34 @@ func (c *FileClient) VolumeTrace(ctx context.Context, volName, rel string, disk 
 	endpoint := "/api/volumes/" + url.PathEscape(volName) + "/trace?" + q.Encode()
 	if err := c.doJSON(ctx, "GET", endpoint, nil, &out); err != nil {
 		return nil, fmt.Errorf("真实存储落点查询失败: %w", err)
+	}
+	if out.Trace == nil {
+		return nil, fmt.Errorf("服务端返回空结果（该卷可能不支持审查）")
+	}
+	return out.Trace, nil
+}
+
+// VolumeTraceTree 返回逻辑路径的**递归落点树**（depth 层；depth≤1 等价 VolumeTrace）。
+//
+// 子项由服务端按索引展开（不逐节点 disk 探测）；超出上限会被截断并带 truncated 异常。
+func (c *FileClient) VolumeTraceTree(ctx context.Context, volName, rel string, depth int, disk bool) (*volume.PathTrace, error) {
+	if volName == "" {
+		return nil, fmt.Errorf("卷名不能为空")
+	}
+	q := url.Values{}
+	q.Set("path", rel)
+	if depth > 1 {
+		q.Set("depth", strconv.Itoa(depth))
+	}
+	if disk {
+		q.Set("disk", "1")
+	}
+	var out struct {
+		Trace *volume.PathTrace `json:"trace"`
+	}
+	endpoint := "/api/volumes/" + url.PathEscape(volName) + "/trace?" + q.Encode()
+	if err := c.doJSON(ctx, "GET", endpoint, nil, &out); err != nil {
+		return nil, fmt.Errorf("真实存储落点树查询失败: %w", err)
 	}
 	if out.Trace == nil {
 		return nil, fmt.Errorf("服务端返回空结果（该卷可能不支持审查）")

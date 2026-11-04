@@ -184,6 +184,136 @@ func (s *SecretdataFS) logIndexMiss(key string) {
 	slog.Debug("secretdata: 审查索引未命中", "key_len", len(key), "index", n, "dir_segs", nd)
 }
 
+// TraceTree 实现 volume.TreeInspector：递归展开 depth 层子树（有界）。
+//
+// 语义：
+//   - depth ≤ 1 等价于 Trace（零额外开销）；
+//   - 目录的子项来自**逻辑索引**（ListDir），并额外并入**本进程在途上传**的直接子项
+//     （索引里还没有，但用户应看到「正在上传」）；
+//   - 超过 MaxTreeNodes 时截断，根节点附 anomaly:truncated（不静默丢）。
+func (s *SecretdataFS) TraceTree(ctx context.Context, rel string, depth int, mode volume.InspectMode) (*volume.PathTrace, error) {
+	if depth > volume.MaxTreeDepth {
+		depth = volume.MaxTreeDepth
+	}
+	root, err := s.Trace(ctx, rel, mode)
+	if err != nil {
+		return nil, err
+	}
+	if depth <= 1 {
+		return root, nil
+	}
+	budget := volume.MaxTreeNodes - 1
+	s.expandTree(ctx, root, rel, depth-1, mode, &budget)
+	return root, nil
+}
+
+// expandTree 递归填充 Children（预算用尽即停并标 truncated）。
+func (s *SecretdataFS) expandTree(ctx context.Context, node *volume.PathTrace, rel string, depth int, mode volume.InspectMode, budget *int) {
+	if depth <= 0 || *budget <= 0 || node.Kind != "dir" {
+		return
+	}
+	for _, child := range s.treeChildren(ctx, rel, mode, budget) {
+		node.Children = append(node.Children, *child)
+		*budget--
+		if *budget <= 0 {
+			markTruncated(node, rel)
+			return
+		}
+		s.expandTree(ctx, &node.Children[len(node.Children)-1], child.Rel, depth-1, mode, budget)
+	}
+}
+
+// treeChildren 返回 rel 的直接子项（索引 + 在途上传），受预算约束。
+func (s *SecretdataFS) treeChildren(ctx context.Context, rel string, _ volume.InspectMode, budget *int) []*volume.PathTrace {
+	entries, err := s.ListDir(ctx, rel)
+	if err != nil {
+		// 目录暂时不可列举（并发删除等）：不中断整棵树，返回空。
+		return nil
+	}
+	out := make([]*volume.PathTrace, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, en := range entries {
+		if *budget <= 0 {
+			break
+		}
+		childRel := path.Join(rel, en.Name)
+		if rel == "" {
+			childRel = en.Name
+		}
+		seen[childRel] = struct{}{}
+		child := s.traceChildIndexOnly(ctx, childRel)
+		if child == nil {
+			continue // 单条失败不拖垮整棵树
+		}
+		out = append(out, child)
+	}
+	// 在途上传（索引里还没有的直接子项）。
+	for _, up := range s.uploadsUnder(rel) {
+		if *budget <= 0 {
+			break
+		}
+		if _, ok := seen[up.rel]; ok {
+			continue
+		}
+		out = append(out, s.traceUploading(up))
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Rel < out[j].Rel })
+	return out
+}
+
+// traceChildIndexOnly 是**纯索引**的子项视图（不做任何后端 IO）。
+//
+// 为什么不能复用 Trace：目录的 Trace 需要 ListDir 容器来定位 dir-meta 名（1 次后端调用）；
+// 深度树对每个子目录都做一次 ⇒ 宽目录（数百子目录）在远端卷上退化为分钟级（实测 3m36s）。
+// 子项只需要「名称/大小/类型/归属」，dir-meta 名属于细节 ⇒ 省略，保留 dir_id（来自索引）。
+func (s *SecretdataFS) traceChildIndexOnly(ctx context.Context, rel string) *volume.PathTrace {
+	s.mu.RLock()
+	e, isFile := s.index[rel]
+	_, isDir := s.dirSegs[rel]
+	var entry metaEntry
+	if isFile && e != nil {
+		entry = *e
+	}
+	mtime := s.dirMTime[rel]
+	s.mu.RUnlock()
+	switch {
+	case isFile:
+		return s.traceFile(ctx, rel, entry, 0, volume.InspectIndex) // index 模式 = 纯索引
+	case isDir:
+		return &volume.PathTrace{
+			SchemaVersion: volume.SchemaVersion, Mode: volume.InspectIndex.String(),
+			Rel: rel, Kind: "dir", MTime: mtime, Containers: s.containersForDir(rel),
+		}
+	default:
+		return nil
+	}
+}
+
+// uploadsUnder 返回逻辑父目录为 rel 的在途上传（直接子项）。
+func (s *SecretdataFS) uploadsUnder(rel string) []uploadProgress {
+	all := s.uploads.snapshotAll()
+	out := make([]uploadProgress, 0, len(all))
+	for _, up := range all {
+		if parentDirOf(up.rel) == rel {
+			out = append(out, up)
+		}
+	}
+	return out
+}
+
+// markTruncated 标记子树截断（幂等：已有则不重复加）。
+func markTruncated(node *volume.PathTrace, rel string) {
+	for _, a := range node.Anomalies {
+		if a.Code == volume.AnomalyTruncated {
+			return
+		}
+	}
+	node.Anomalies = append(node.Anomalies, volume.Anomaly{
+		Code: volume.AnomalyTruncated, RealPath: rel,
+		Detail: "子树节点数超过上限，已截断（用更小 depth 或指定子目录）",
+	})
+}
+
 // traceFile 组装文件落点。
 func (s *SecretdataFS) traceFile(ctx context.Context, rel string, e metaEntry, dedupRefs int, mode volume.InspectMode) *volume.PathTrace {
 	tr := &volume.PathTrace{

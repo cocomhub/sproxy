@@ -68,6 +68,41 @@ func TestVolumeExplain_DecodesOwnerAndAnomalies(t *testing.T) {
 	}
 }
 
+// TestVolumeTraceTree_SendsDepthAndDecodesChildren 树查询必须带 depth 且能解出 children。
+func TestVolumeTraceTree_SendsDepthAndDecodesChildren(t *testing.T) {
+	t.Parallel()
+	var gotDepth, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotDepth = r.URL.Query().Get("depth")
+		gotPath = r.URL.Query().Get("path")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"trace":{"schema_version":1,"mode":"index","rel":"d","kind":"dir",` +
+			`"children":[{"schema_version":1,"mode":"index","rel":"d/a.bin","kind":"file","size":5}]}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	svc := NewFileClient(srv.URL, WithHTTPClient(srv.Client()))
+	tr, err := svc.VolumeTraceTree(context.Background(), "vault", "d", 2, false)
+	if err != nil {
+		t.Fatalf("VolumeTraceTree: %v", err)
+	}
+	if gotDepth != "2" || gotPath != "d" {
+		t.Fatalf("query = depth=%q path=%q", gotDepth, gotPath)
+	}
+	if len(tr.Children) != 1 || tr.Children[0].Rel != "d/a.bin" {
+		t.Fatalf("children 解码异常: %+v", tr.Children)
+	}
+
+	// depth=1 不发送 depth 参数（与单节点语义一致，避免无谓参数）。
+	gotDepth = "unset"
+	if _, err := svc.VolumeTraceTree(context.Background(), "vault", "d", 1, false); err != nil {
+		t.Fatalf("VolumeTraceTree(1): %v", err)
+	}
+	if gotDepth != "" {
+		t.Fatalf("depth=1 不应发送 depth 参数, got %q", gotDepth)
+	}
+}
+
 func TestVolumeInspect_EmptyVolumeRejected(t *testing.T) {
 	t.Parallel()
 	svc := NewFileClient("http://127.0.0.1:1")

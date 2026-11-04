@@ -851,7 +851,7 @@ sclient volume copy <file> --from-volume <a> --to-volume <b>
 sclient volume move <file> --from-volume <a> --to-volume <b>
 sclient volume rebalance --from-volume <a> --to-volume <b> [--max-bytes <n>]
 sclient volume refresh [<卷名>]        # 强制刷新卷缓存（无参 = 全部卷）
-sclient volume trace   <逻辑路径> [--volume <v>] [--disk] [--json]
+sclient volume trace   <逻辑路径> [--volume <v>] [--depth N] [--disk] [--json]
 sclient volume explain <真实路径> [--volume <v>] [--disk] [--json]
 ```
 
@@ -886,6 +886,9 @@ sclient volume explain data:k3f9a/8xQ.../7xQ...z...
 ```
 
 - 卷名可用 `--volume`、`<卷>:<路径>` 前缀或当前卷上下文指定（三者优先级同上传）
+- `--depth N`（默认 1，最大 3）展开子树：子项按索引展示（名称/大小/类型/meta/分块数；子目录显示
+  `dir_id`，不为其做后端 ListDir），
+  在途上传也作为子项出现；`--disk` 的磁盘核验**只作用于根节点**
 - 树形输出同时显示**真实容器名与其逻辑目录名**（如 `容器 XqZdBO… → alice/user/kv`），
   把盘上的随机目录与用户认识的路径对上
 - 对**正在上传**的目标路径，`trace` 不再 404：显示 `上传中（meta 尚未提交）` + 已上传/总量/块数；

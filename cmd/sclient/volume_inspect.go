@@ -34,6 +34,7 @@ const (
 	flagInspectVolume = "volume"
 	flagInspectDisk   = "disk"
 	flagInspectJSON   = "json"
+	flagInspectDepth  = "depth"
 )
 
 func newCmdVolumeTrace(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
@@ -52,11 +53,12 @@ func newCmdVolumeTrace(factory clientfactory.Factory, ios cli.IOStreams, st *sta
 				return err
 			}
 			disk, _ := cmd.Flags().GetBool(flagInspectDisk)
+			depth, _ := cmd.Flags().GetInt(flagInspectDepth)
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			tr, err := svc.VolumeTrace(cmd.Context(), volName, rel, disk)
+			tr, err := svc.VolumeTraceTree(cmd.Context(), volName, rel, depth, disk)
 			if err != nil {
 				return err
 			}
@@ -71,6 +73,7 @@ func newCmdVolumeTrace(factory clientfactory.Factory, ios cli.IOStreams, st *sta
 	}
 	cmd.Flags().String(flagInspectVolume, "", "卷名（缺省 = 路径内的 <卷>: 前缀或当前卷上下文）")
 	cmd.Flags().Bool(flagInspectDisk, false, "对比真实磁盘（慢；输出差异码）")
+	cmd.Flags().Int(flagInspectDepth, 1, "子树深度（1=单节点；最大 3；子项按索引展示）")
 	cmd.Flags().Bool(flagInspectJSON, false, "输出 JSON")
 	return cmd
 }
@@ -235,7 +238,77 @@ func writeTraceText(w io.Writer, tr *volume.PathTrace) {
 		fmt.Fprintf(w, "   去重池: %s（引用 %d 个文件；分块共享，非本文件容器）", tr.Dedup.Container, tr.Dedup.Refs)
 		fmt.Fprintln(w)
 	}
+	writeChildren(w, tr.Children, 0)
 	writeAnomalies(w, tr.Anomalies)
+}
+
+// writeChildren 递归渲染子树节点（紧凑行：名称/大小/类型/meta/分块数）。
+func writeChildren(w io.Writer, children []volume.PathTrace, depth int) {
+	for i := range children {
+		c := &children[i]
+		fmt.Fprintln(w, indent(depth+1)+childBranch(i, len(children))+" "+childLine(c))
+		writeChildren(w, c.Children, depth+1)
+	}
+}
+
+// childBranch 返回树形连接符（最后一个用 └─）。
+func childBranch(i, n int) string {
+	if i == n-1 {
+		return "└─"
+	}
+	return "├─"
+}
+
+// childLine 渲染单个子项的一行摘要。
+func childLine(c *volume.PathTrace) string {
+	line := baseName(c.Rel) + "   " + humanSize(c.Size) + "  [" + c.Kind + "]"
+	switch c.Mode {
+	case "uploading":
+		line += "  上传中 " + humanSize(uploadCommitted(c.Upload)) + " / " + humanSize(c.Size)
+	default:
+		line += childBlobSummary(c)
+	}
+	if len(c.Anomalies) > 0 && inspectHasDiff(c.Anomalies) {
+		line += "  ⚠差异"
+	}
+	return line
+}
+
+// childBlobSummary 渲染 meta/分块/parity/dir_id 摘要。
+func childBlobSummary(c *volume.PathTrace) string {
+	out := ""
+	if c.Meta != nil {
+		out += "  meta=" + path.Base(c.Meta.RealPath)
+	} else if c.Kind == "dir" && c.DirID() != "" {
+		// 子目录按索引展开（不为其做后端 ListDir）⇒ 无 meta 名，显示 dir_id 便于核对。
+		out += "  dir_id=" + c.DirID()
+	}
+	if n := len(c.Chunks); n > 0 {
+		out += fmt.Sprintf("  chunks=%d", n)
+	}
+	if c.Parity != nil {
+		out += "  +parity"
+	}
+	return out
+}
+
+// baseName 取逻辑路径最后一段（根 = "/"）。
+func baseName(rel string) string {
+	if rel == "" {
+		return "/"
+	}
+	if i := strings.LastIndex(rel, "/"); i >= 0 {
+		return rel[i+1:]
+	}
+	return rel
+}
+
+// uploadCommitted 取上传进度（nil 安全）。
+func uploadCommitted(up *volume.UploadProgress) int64 {
+	if up == nil {
+		return 0
+	}
+	return up.Committed
 }
 
 // writeUploadProgress 渲染在途上传进度（已上传密文字节 ≈ 明文 + 每块开销）。

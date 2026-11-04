@@ -160,3 +160,63 @@ func TestVolumeInspect_Errors(t *testing.T) {
 		}
 	}
 }
+
+// TestVolumeInspect_TraceTree depth 参数展开子树；超上限夹取；不支持树的卷回退单节点。
+func TestVolumeInspect_TraceTree(t *testing.T) {
+	t.Parallel()
+	h, fsys := newInspectTestHandler(t)
+	mux := newInspectMux(h)
+
+	// 键空间映射（与 traceKeyFor 同口径）。
+	v, ok := h.volSet.ByName("vault")
+	if !ok {
+		t.Fatal("vault 不存在")
+	}
+	locDir, lerr := v.ResolveUserLocation("anonymous", "tree")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	dirKey := locDir.FSPath()
+	for _, name := range []string{"a.bin", "b.bin"} {
+		loc, e := v.ResolveUserLocation("anonymous", "tree/"+name)
+		if e != nil {
+			t.Fatal(e)
+		}
+		content := []byte("payload-" + name)
+		if werr := fsys.WriteFile(t.Context(), syncpkg.LogicalKey{}, loc.FSPath(), strings.NewReader(string(content)), int64(len(content)), 0); werr != nil {
+			t.Fatalf("WriteFile: %v", werr)
+		}
+	}
+
+	rec := doInspectRequest(t, mux, "/api/volumes/vault/trace?path=tree&depth=2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("depth=2 status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Trace *volume.PathTrace `json:"trace"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.Trace == nil {
+		t.Fatalf("解析失败: %v (%s)", err, rec.Body.String())
+	}
+	if len(resp.Trace.Children) != 2 {
+		t.Fatalf("children = %d, want 2（%+v）", len(resp.Trace.Children), resp.Trace.Children)
+	}
+	for _, c := range resp.Trace.Children {
+		if c.Kind != "file" || c.Size == 0 {
+			t.Fatalf("子项异常: %+v", c)
+		}
+	}
+
+	// depth 超上限：夹到 MaxTreeDepth（不报错）。
+	rec = doInspectRequest(t, mux, "/api/volumes/vault/trace?path=tree&depth=99")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("depth=99 status = %d", rec.Code)
+	}
+
+	// 不支持 TreeInspector 的卷：回退单节点（200，children 为空，不 501）。
+	flatMux := newInspectMux(h)
+	if rec := doInspectRequest(t, flatMux, "/api/volumes/flat/trace?path=a&depth=2"); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("非审查卷仍应 501, got %d", rec.Code)
+	}
+	_ = dirKey
+}

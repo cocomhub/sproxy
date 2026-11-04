@@ -57,6 +57,34 @@ type StorageInspector interface { // NOSONAR: S8196 — 能力接口（非 -er �
 	Explain(ctx context.Context, realRel string, mode InspectMode) (*RealExplanation, error)
 }
 
+// TreeInspector 是「递归落点树」可选能力：把 Trace 从单节点扩展为 depth 层子树。
+//
+// 为什么做成**可选扩展接口**而不是改 StorageInspector 签名：单节点 Trace 已足够（默认路径），
+// 递归是显式 opt-in（`--depth`）；扩展接口不破坏既有实现/测试替身。
+//
+// 实现约束（fail-safe）：
+//   - depth ≤ MaxTreeDepth（超出按上限处理，并附 truncated 异常）；
+//   - 返回节点总数 ≤ MaxTreeNodes（防误用 `--depth` 打爆大目录/后端）；
+//   - depth ≤ 1 等价于 Trace。
+type TreeInspector interface { // NOSONAR: S8196 — 能力接口，表达能力语义，设计保留
+	TraceTree(ctx context.Context, rel string, depth int, mode InspectMode) (*PathTrace, error)
+}
+
+// AssertTreeInspector 探测卷是否实现递归树能力。
+func AssertTreeInspector(v any) (TreeInspector, bool) {
+	if v == nil {
+		return nil, false
+	}
+	ti, ok := v.(TreeInspector) //nolint:forcetypeassert // 类型断言探测
+	return ti, ok
+}
+
+// 树的硬上限（服务端与 CLI 共用；超出即截断并记 anomaly:truncated）。
+const (
+	MaxTreeDepth = 3
+	MaxTreeNodes = 200
+)
+
 // AssertStorageInspector 探测卷 FS 是否实现审查能力（仓内既有「可选能力 + Assert*」模式）。
 func AssertStorageInspector(v any) (StorageInspector, bool) {
 	if v == nil {
@@ -88,6 +116,9 @@ type PathTrace struct {
 	Chunks []ChunkRef `json:"chunks,omitempty"`
 	Parity *BlobRef   `json:"parity,omitempty"`
 	Dedup  *DedupRef  `json:"dedup,omitempty"`
+
+	// Children 非空 = 子树节点（仅 TraceTree，depth≥2）。
+	Children []PathTrace `json:"children,omitempty"`
 
 	// Upload 非空 = 该路径**正在上传**（meta 尚未提交，索引里还没有）。
 	// mode 同为 "uploading"；此时 Chunks/Meta 为空。
@@ -131,6 +162,14 @@ type LogicalRef struct {
 	ChunkIndex *int `json:"chunk_index,omitempty"`
 	// Parity 标记该 blob 是 parity 段（与普通分块**命名同形**，只能由 meta 判定）。
 	Parity bool `json:"parity,omitempty"`
+}
+
+// DirID 返回叶容器的 dir_id（无则空），供 CLI/UI 在「无 meta 名」时展示归属标识。
+func (t *PathTrace) DirID() string {
+	if len(t.Containers) == 0 {
+		return ""
+	}
+	return t.Containers[len(t.Containers)-1].DirID
 }
 
 // ContainerRef 描述一个容器目录。
