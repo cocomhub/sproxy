@@ -13,10 +13,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"path"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -160,6 +165,344 @@ func TestInspect_ExplainContainer(t *testing.T) {
 	}
 }
 
+// BenchmarkInspect_BuildContainerIndex100k 锁「容器解释 = 单次索引遍历」的规模表现。
+// 旧实现对容器内每条 blob 各扫一遍全索引 ⇒ O(条目数 × 卷条目数)；本基准直接给出单遍成本。
+func BenchmarkInspect_BuildContainerIndex100k(b *testing.B) {
+	fsys, _ := newPerfFS(b)
+	fsys.mu.Lock()
+	for i := range 100000 {
+		rel := "u/f" + strconv.Itoa(i)
+		seg := "c" + strconv.Itoa(i%1000)
+		fsys.index[rel] = &metaEntry{
+			dirSeg: seg, metaName: "m" + strconv.Itoa(i),
+			meta: &shardseal.Meta{Chunks: []shardseal.ChunkInfo{{Index: 0, FileName: "k" + strconv.Itoa(i), EncSize: 1}}},
+		}
+	}
+	fsys.mu.Unlock()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		idx := fsys.buildContainerIndex("c1")
+		if len(idx.fileOwners) == 0 {
+			b.Fatal("空结果")
+		}
+	}
+}
+
+// gateStatFS 用**屏障**证明 disk 探测是并发的（不依赖墙钟阈值）：
+// 每个 Stat 在飞计数达到 2 时打开闸门；串行实现会等待超时并留下 maxInFlight=1。
+type gateStatFS struct {
+	*syncpkg.LocalFS
+	inFlight    atomic.Int32
+	maxInFlight atomic.Int32
+	gate        chan struct{}
+	gateOnce    sync.Once
+}
+
+func (g *gateStatFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	n := g.inFlight.Add(1)
+	defer g.inFlight.Add(-1)
+	for {
+		cur := g.maxInFlight.Load()
+		if n <= cur || g.maxInFlight.CompareAndSwap(cur, n) {
+			break
+		}
+	}
+	if n >= 2 {
+		g.gateOnce.Do(func() { close(g.gate) })
+	}
+	select {
+	case <-g.gate:
+	case <-time.After(2 * time.Second):
+	}
+	return g.LocalFS.Stat(ctx, p)
+}
+
+// TestInspect_DiskProbeIsConcurrent disk 模式必须**并发**探测（设计承诺并发上限 8）。
+func TestInspect_DiskProbeIsConcurrent(t *testing.T) {
+	t.Parallel()
+	gfs := &gateStatFS{LocalFS: syncpkg.NewLocalFS(t.TempDir(), nil), gate: make(chan struct{})}
+	fsys, err := NewFS(gfs, Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	writeFileT(t, fsys, "p/f.bin", data(600)) // ≥2 块
+
+	if _, err := fsys.Trace(context.Background(), "p/f.bin", volume.InspectDisk); err != nil {
+		t.Fatalf("Trace(disk): %v", err)
+	}
+	if got := gfs.maxInFlight.Load(); got < 2 {
+		t.Fatalf("disk 探测最大并发 = %d（应 ≥2；串行实现会退化为 1）", got)
+	}
+}
+
+// BenchmarkInspect_TraceFile 锁 trace 的复杂度（O(分块数)，不随卷规模增长）。
+func BenchmarkInspect_TraceFile(b *testing.B) {
+	fsys, _ := newPerfFS(b)
+	writeFilePerf(b, fsys, "bench/f.bin", 1<<20)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := fsys.Trace(ctx, "bench/f.bin", volume.InspectIndex); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkInspect_ExplainContainer 锁 explain 的复杂度（单次索引遍历，不随条目数×卷规模爆）。
+func BenchmarkInspect_ExplainContainer(b *testing.B) {
+	fsys, _ := newPerfFS(b)
+	for i := range 100 {
+		writeFilePerf(b, fsys, "bench/f"+strconv.Itoa(i)+".bin", 64)
+	}
+	tr, err := fsys.Trace(context.Background(), "bench/f0.bin", volume.InspectIndex)
+	if err != nil {
+		b.Fatal(err)
+	}
+	container := path.Dir(tr.Meta.RealPath)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := fsys.Explain(ctx, container, volume.InspectIndex); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// memoFS 把 ListDir/Stat 结果记忆化（**仅基准用**）：把「后端 IO 成本」从被测逻辑里剥离，
+// 让 Benchmark 反映我们自己的开销（真实远端卷一次 ListDir 是一次 RPC，本地 Windows FS 则是
+// 每条目一次 syscall —— 后者会淹没被测逻辑）。
+type memoFS struct {
+	*syncpkg.LocalFS
+	mu    sync.Mutex
+	lists map[string][]syncpkg.Entry
+	stats map[string]*syncpkg.Entry
+}
+
+func (m *memoFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	m.mu.Lock()
+	if v, ok := m.lists[p]; ok {
+		m.mu.Unlock()
+		return append([]syncpkg.Entry(nil), v...), nil
+	}
+	m.mu.Unlock()
+	v, err := m.LocalFS.ListDir(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.lists[p] = append([]syncpkg.Entry(nil), v...)
+	m.mu.Unlock()
+	return v, nil
+}
+
+func (m *memoFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	m.mu.Lock()
+	if v, ok := m.stats[p]; ok {
+		m.mu.Unlock()
+		cp := *v
+		return &cp, nil
+	}
+	m.mu.Unlock()
+	v, err := m.LocalFS.Stat(ctx, p)
+	if err != nil || v == nil {
+		return v, err
+	}
+	m.mu.Lock()
+	m.stats[p] = v
+	m.mu.Unlock()
+	return v, nil
+}
+
+func newPerfFS(tb testing.TB) (*SecretdataFS, *syncpkg.LocalFS) {
+	tb.Helper()
+	inner := &memoFS{
+		LocalFS: syncpkg.NewLocalFS(tb.TempDir(), nil),
+		lists:   map[string][]syncpkg.Entry{},
+		stats:   map[string]*syncpkg.Entry{},
+	}
+	fsys, err := NewFS(inner, Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 4 << 10, Max: 16 << 10},
+		TempDir:   tb.TempDir(),
+	})
+	if err != nil {
+		tb.Fatalf("NewFS: %v", err)
+	}
+	return fsys, inner.LocalFS
+}
+
+func writeFilePerf(tb testing.TB, fsys *SecretdataFS, rel string, size int) {
+	tb.Helper()
+	if err := fsys.WriteFile(context.Background(), syncpkg.LogicalKey{}, rel, bytes.NewReader(data(size)), int64(size), 0); err != nil {
+		tb.Fatalf("WriteFile(%s): %v", rel, err)
+	}
+}
+
+// countingReadFS 统计 OpenRead 次数（锁 F1：分块解释不得读取内容）。
+type countingReadFS struct {
+	*syncpkg.LocalFS
+	reads atomic.Int64
+}
+
+func (c *countingReadFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	c.reads.Add(1)
+	return c.LocalFS.OpenRead(ctx, p)
+}
+
+// TestInspect_ExplainChunkDoesNotReadContent 分块解释**只靠名字 + 索引**，绝不读内容。
+//
+// 真实缺陷（2026-11-05 审查）：旧实现对任何 blob 先 readBlob 再判型 ⇒ `explain <分块>`
+// 会把整块（实测单块 118 MiB，远端卷还要下载）读进内存，纯属浪费且可被打爆。
+func TestInspect_ExplainChunkDoesNotReadContent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfs := &countingReadFS{LocalFS: syncpkg.NewLocalFS(root, nil)}
+	fsys, err := NewFS(cfs, Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: "random", Min: 64, Max: 128},
+		TempDir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	writeFileT(t, fsys, "m/f.bin", data(400))
+	tr, err := fsys.Trace(ctx, "m/f.bin", volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+
+	cfs.reads.Store(0)
+	if _, err := fsys.Explain(ctx, tr.Chunks[0].Blob.RealPath, volume.InspectIndex); err != nil {
+		t.Fatalf("Explain(chunk): %v", err)
+	}
+	if n := cfs.reads.Load(); n != 0 {
+		t.Fatalf("解释分块读取了 %d 次内容（应为 0，分块判型只用名字）", n)
+	}
+
+	cfs.reads.Store(0)
+	if _, err := fsys.Explain(ctx, tr.Meta.RealPath, volume.InspectIndex); err != nil {
+		t.Fatalf("Explain(meta): %v", err)
+	}
+	if n := cfs.reads.Load(); n == 0 {
+		t.Fatal("解释 meta 必须读取（解密），不能为 0")
+	}
+}
+
+// TestInspect_ExplainFileMetaInFlight 在途上传的 file-meta（已上传、索引未提交）不得报孤儿。
+func TestInspect_ExplainFileMetaInFlight(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	writeFileT(t, fsys, "p/real.txt", data(120))
+	tr, err := fsys.Trace(ctx, "p/real.txt", volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	container := path.Dir(tr.Meta.RealPath)
+
+	// 造一个**新的** z 标记 meta 名（形状合法但索引无此条目）。
+	name, nerr := shardseal.MetaName("abcdefghi", "jklmnopqr", "stuvwxyz1")
+	if nerr != nil {
+		t.Fatalf("MetaName: %v", nerr)
+	}
+	blob, rerr := readBlob(ctx, fsys.inner, tr.Meta.RealPath)
+	if rerr != nil {
+		t.Fatalf("read meta: %v", rerr)
+	}
+	if werr := fsys.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(container, name), bytes.NewReader(blob), int64(len(blob)), 0); werr != nil {
+		t.Fatalf("write meta: %v", werr)
+	}
+
+	tok := fsys.beginUpload("p/new.txt", container, 1024)
+	defer fsys.endUpload(tok)
+
+	ex, err := fsys.Explain(ctx, path.Join(container, name), volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	if ex.Kind != "upload_in_progress" {
+		t.Fatalf("kind = %s, want upload_in_progress（不得报孤儿）", ex.Kind)
+	}
+	if hasAnomaly(ex.Anomalies, volume.AnomalyBlobOrphan) {
+		t.Fatal("在途 file-meta 不得出现 blob_orphan")
+	}
+}
+
+// TestInspect_ContainerIndexMapsAllBlobs 一次遍历索引必须覆盖容器内全部 meta/分块。
+func TestInspect_ContainerIndexMapsAllBlobs(t *testing.T) {
+	t.Parallel()
+	fsys := newFS(t)
+	ctx := context.Background()
+	writeFileT(t, fsys, "ci/a.bin", data(300))
+	writeFileT(t, fsys, "ci/b.bin", data(200))
+	tr, err := fsys.Trace(ctx, "ci/a.bin", volume.InspectIndex)
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	container := path.Dir(tr.Meta.RealPath)
+
+	idx := fsys.buildContainerIndex(container)
+	if len(idx.fileOwners) != 2 {
+		t.Fatalf("fileOwners = %d, want 2（两个文件）", len(idx.fileOwners))
+	}
+	var wantChunks int
+	for _, rel := range []string{"ci/a.bin", "ci/b.bin"} {
+		t2, terr := fsys.Trace(ctx, rel, volume.InspectIndex)
+		if terr != nil {
+			t.Fatalf("Trace(%s): %v", rel, terr)
+		}
+		wantChunks += len(t2.Chunks)
+	}
+	if len(idx.expected) != 2+wantChunks {
+		t.Fatalf("expected = %d, want %d（2 meta + %d chunks）", len(idx.expected), 2+wantChunks, wantChunks)
+	}
+	for name, owner := range idx.fileOwners {
+		if owner.Rel != "ci/a.bin" && owner.Rel != "ci/b.bin" {
+			t.Fatalf("meta %s 归属异常: %+v", name, owner)
+		}
+	}
+	for name, owner := range idx.chunkOwners {
+		if owner.Rel != "ci/a.bin" && owner.Rel != "ci/b.bin" {
+			t.Fatalf("chunk %s 归属异常: %+v", name, owner)
+		}
+	}
+}
+
+// TestUploadTracker_ConcurrentSameRel 同一 rel 的并发上传互不误删（token 语义）。
+func TestUploadTracker_ConcurrentSameRel(t *testing.T) {
+	t.Parallel()
+	var tr uploadTracker
+	first := tr.begin("same.bin", "c1", 100)
+	second := tr.begin("same.bin", "c2", 200)
+	tr.advance(first, 10)
+	tr.advance(second, 20)
+
+	// 第一路结束：不得删掉第二路。
+	tr.end(first)
+	snap, ok := tr.snapshot("same.bin")
+	if !ok {
+		t.Fatal("第一路结束后第二路仍在途，快照不应消失")
+	}
+	if snap.container != "c2" || snap.committed != 20 {
+		t.Fatalf("快照 = %+v, want c2/20", snap)
+	}
+	tr.end(second)
+	if _, ok := tr.snapshot("same.bin"); ok {
+		t.Fatal("两路都结束后应无在途记录")
+	}
+}
+
 // TestInspect_ContainersCarryLogicalNames 树里每层容器都要带**真实容器名 + 逻辑目录名**。
 func TestInspect_ContainersCarryLogicalNames(t *testing.T) {
 	t.Parallel()
@@ -206,9 +549,9 @@ func TestInspect_TraceUploading(t *testing.T) {
 		t.Fatalf("MakeDir: %v", err)
 	}
 	// 索引里还没有该文件：模拟「分块已在上传、meta 未提交」窗口。
-	fsys.beginUpload("up/big.bin", "", 1000)
-	fsys.advanceUpload("up/big.bin", 400)
-	fsys.advanceUpload("up/big.bin", 200)
+	tok := fsys.beginUpload("up/big.bin", "", 1000)
+	fsys.advanceUpload(tok, 400)
+	fsys.advanceUpload(tok, 200)
 
 	tr, err := fsys.Trace(ctx, "up/big.bin", volume.InspectIndex)
 	if err != nil {
@@ -225,7 +568,7 @@ func TestInspect_TraceUploading(t *testing.T) {
 	}
 
 	// 上传结束后回到「不存在」（本用例未真正提交 meta）。
-	fsys.endUpload("up/big.bin")
+	fsys.endUpload(tok)
 	if _, err := fsys.Trace(ctx, "up/big.bin", volume.InspectIndex); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("上传结束后应恢复 404 语义, got %v", err)
 	}
@@ -248,8 +591,8 @@ func TestInspect_ExplainUploadInProgress(t *testing.T) {
 	if werr := fsys.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(container, inflight), bytes.NewReader(data(64)), 64, 0); werr != nil {
 		t.Fatalf("写在途 blob: %v", werr)
 	}
-	fsys.beginUpload("d/new.bin", container, 4096)
-	defer fsys.endUpload("d/new.bin")
+	tok := fsys.beginUpload("d/new.bin", container, 4096)
+	defer fsys.endUpload(tok)
 
 	// ① 单 blob 解释。
 	ex, err := fsys.Explain(ctx, path.Join(container, inflight), volume.InspectIndex)

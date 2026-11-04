@@ -1296,6 +1296,13 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
   `container_not_indexed` / `parent_unresolved` / `dir_meta_ambiguous` / `not_found` / `truncated` / `dedup_shared`
 - `upload_in_progress`：该 blob 属于**本进程在途上传**（meta 尚未提交）⇒ `kind=upload_in_progress`，
   `owner` 指向上传目标 rel；**不是孤儿**（GC 在有在途写时本就不运行）。跨进程/跨实例不可见。
+- `probe_failed`（仅 `disk=1`）：探测 blob 时 IO 失败 ⇒ **存在性/大小未知**，与 `blob_missing`
+  （明确不存在）区分，避免误判为数据丢失。
+- `kind` 完整取值：`container` / `dir_meta` / `file_meta` / `chunk` / `parity` / **`upload_in_progress`** / `unknown`。
+- **权限边界**：接口只要求「对该卷有访问权」（路由类 `reader`）。`explain` 暴露的是**存储键空间**
+  的目录名与 blob 归属（容器名为随机 5–30 字符，无法通过文件 API 枚举）；多 owner 共享卷的运维
+  方本就能读全部数据，故不额外做 per-owner 过滤——若将来出现「共享卷 + 互不可见」需求，需在
+  装配层注入 owner 范围后再开放本接口。
 - **注意**：差异码是**只读审计结论**，不是删除建议。`blob_orphan` 仅表示「索引无引用」，
   实际回收由 GC 的 re-confirm 流程决定（crash 窗口内可能仍被使用）。
 

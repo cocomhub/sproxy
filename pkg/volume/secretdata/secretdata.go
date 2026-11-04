@@ -948,6 +948,8 @@ type writeCtx struct {
 	newVer    int64         // 本次写路径分配的乐观锁版本 == sv+1
 	expected  int64         // 乐观锁期望版本（<0 不校验）
 	ifAbsent  bool          // WriteIfAbsent 语义：仅目标不存在才提交（commit 持锁时判定）
+	// upToken 是本次写入的在途上传令牌（可观测性；nil = 未登记）。块级 sink 用它累加进度。
+	upToken *uploadRecord
 	// sourcePath 是**本地可重读源路径**（本地文件 / 调用方已暂存路径；"" = 不可重读，如管道 /
 	// 内存 reader）。块级交错丢弃本地产物后仍需能从源重算 ⇒ 回退链（docs/roadmap.md ①-附 §2）
 	// 以它判定能否降级为内存交付。
@@ -1025,8 +1027,8 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 	}
 	// 在途上传登记（仅内存态可观测性）：让审查能力在上传窗口内给出准确状态，
 	// 而不是 404 / 「疑似孤儿」。
-	s.beginUpload(rel, container, size)
-	defer s.endUpload(rel)
+	upToken := s.beginUpload(rel, container, size)
+	defer s.endUpload(upToken)
 	// 注（2026-10-18 审核）：两条写路径对「调用方声明 size」的口径**有意不同**——流式路径按 size
 	// 读（多余内容丢弃），内存路径**读全**（`TestWriteFile_NonSeekableReadsAll` 显式锁定：非 seek
 	// 源回退 io.ReadAll ⇒ 忽略声明 size）。曾尝试统一为「按 size 截断」⇒ 该用例红 ⇒ 按「不回归既有
@@ -1039,6 +1041,7 @@ func (s *SecretdataFS) writeFileOpt(ctx context.Context, rel string, r io.Reader
 		size:      int64(len(data)),
 		container: container, created: created,
 		mtime: mtime, sv: sv, newVer: newVer, expected: expected, ifAbsent: ifAbsent,
+		upToken: upToken,
 	}
 	if s.opts.Dedup && len(data) > 0 {
 		return s.writeFileDedup(ctx, wc)
@@ -1119,11 +1122,12 @@ func (s *SecretdataFS) writeFileStreamEntry(ctx context.Context, rel string, r i
 	}
 	// 在途上传登记（仅内存态可观测性）：让审查能力在上传窗口内给出准确状态，
 	// 而不是 404 / 「疑似孤儿」。
-	s.beginUpload(rel, container, size)
-	defer s.endUpload(rel)
+	upToken := s.beginUpload(rel, container, size)
+	defer s.endUpload(upToken)
 	wc := writeCtx{
 		rel: rel, size: size, reader: r, container: container, created: created,
 		mtime: mtime, sv: sv, newVer: newVer, expected: expected, ifAbsent: ifAbsent,
+		upToken:    upToken,
 		sourcePath: replayableSourcePath(r),
 	}
 	return s.writeFileStream(ctx, wc)
@@ -1354,7 +1358,7 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 			defer func() { _ = os.Remove(local) }() // 交错：此刻之后本地不再保留该块
 			uerr := s.uploadLocalChunk(ctx, wc.container, name, local, mt, chunkHash{md5: iu.chunkMD5, crc32: iu.chunkCRC32}, &iu.uploaded)
 			if uerr == nil {
-				s.advanceUpload(wc.rel, int64(len(blob)))
+				s.advanceUpload(wc.upToken, int64(len(blob)))
 			}
 			return uerr
 		}
@@ -1365,7 +1369,7 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 		if werr := s.uploadBlob(ctx, p, blob, mt); werr != nil {
 			return fmt.Errorf("secretdata: 上传分块 %s 失败: %w", name, werr)
 		}
-		s.advanceUpload(wc.rel, int64(len(blob)))
+		s.advanceUpload(wc.upToken, int64(len(blob)))
 		return nil
 	}
 }

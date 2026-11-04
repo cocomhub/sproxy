@@ -892,7 +892,8 @@ sclient volume explain data:k3f9a/8xQ.../7xQ...z...
   此时 `explain` 对在途分块给出 `upload_in_progress`（不是孤儿）
 - 默认只读服务端索引（快）；`--disk` 同时对比磁盘，输出差异码（`blob_missing` / `blob_orphan` /
   `size_mismatch` / `meta_unreadable` / `container_not_indexed` / `parent_unresolved` / …）
-- 退出码：`0` 一致；`3` 发现差异（便于脚本门禁）；`1` 参数/服务端错误
+- 退出码：`0` 一致（含**上传中**、去重共享等信息态）；`3` 发现**真实差异**（缺失/孤儿/大小不符/
+  meta 不可读等，便于脚本门禁）；`1` 参数/服务端错误。`--json` 与文本模式**退出码一致**
 - 仅对实现 `StorageInspector` 的卷可用（当前 = secretdata）；其它卷明确报「不支持审查」，**不返回空结果**
 - **只读审计，不构成删除建议**：`blob_orphan` 仅表示索引无引用，回收请走 GC（有 re-confirm 流程）
 - 只解 meta（名称/尺寸/分块索引等），不读取内容、不落地明文

@@ -24,12 +24,14 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"log/slog"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"golang.org/x/sync/errgroup"
 )
 
 // inspectMaxEntries 是单次反向解释的条目上限（防超大容器打爆响应/内存）。
@@ -203,9 +205,7 @@ func (s *SecretdataFS) traceFile(ctx context.Context, rel string, e metaEntry, d
 			Detail: "内容分块位于卷级去重容器（共享 blob）",
 		})
 	}
-	metaBytes := metaBlobBytes(&e)
-	meta := volume.BlobRef{RealPath: path.Join(e.dirSeg, e.metaName), Bytes: metaBytes}
-	probeBlob(ctx, s, &meta, tr, mode)
+	meta := volume.BlobRef{RealPath: path.Join(e.dirSeg, e.metaName), Bytes: metaBlobBytes(&e)}
 	tr.Meta = &meta
 
 	dataSeg := e.dataDir
@@ -214,16 +214,81 @@ func (s *SecretdataFS) traceFile(ctx context.Context, rel string, e metaEntry, d
 	}
 	for i := range e.meta.Chunks {
 		c := e.meta.Chunks[i]
-		blob := volume.BlobRef{RealPath: path.Join(dataSeg, c.FileName), Bytes: c.EncSize, Plain: c.OrigSize}
-		probeBlob(ctx, s, &blob, tr, mode)
-		tr.Chunks = append(tr.Chunks, volume.ChunkRef{Index: c.Index, Blob: blob, Blocklets: len(c.Blocklets)})
+		tr.Chunks = append(tr.Chunks, volume.ChunkRef{
+			Index:     c.Index,
+			Blob:      volume.BlobRef{RealPath: path.Join(dataSeg, c.FileName), Bytes: c.EncSize, Plain: c.OrigSize},
+			Blocklets: len(c.Blocklets),
+		})
 	}
 	if p := e.meta.Parity; p != nil {
-		blob := volume.BlobRef{RealPath: path.Join(dataSeg, p.FileName), Bytes: p.EncSize, Plain: p.PlainLen}
-		probeBlob(ctx, s, &blob, tr, mode)
-		tr.Parity = &blob
+		tr.Parity = &volume.BlobRef{RealPath: path.Join(dataSeg, p.FileName), Bytes: p.EncSize, Plain: p.PlainLen}
 	}
+	s.probeTraceBlobs(ctx, tr, mode)
+	sortAnomalies(tr.Anomalies)
 	return tr
+}
+
+// inspectProbeConcurrency 是 disk 模式探测的并发上限。
+//
+// 为什么需要并发：远端卷每个 blob 一次 Stat 往返（网盘后端甚至起一次 CLI 进程）；大文件
+// 上千个分块时串行探测是分钟级。并发 8 让 RTT 重叠（与仓库既有上传并发策略同量级）。
+const inspectProbeConcurrency = 8
+
+// probeTraceBlobs 在 disk 模式下**有界并发**探测全部 blob（保持结果顺序：只回填各自 ref）。
+func (s *SecretdataFS) probeTraceBlobs(ctx context.Context, tr *volume.PathTrace, mode volume.InspectMode) {
+	if mode != volume.InspectDisk {
+		return
+	}
+	refs := make([]*volume.BlobRef, 0, len(tr.Chunks)+2)
+	if tr.Meta != nil {
+		refs = append(refs, tr.Meta)
+	}
+	for i := range tr.Chunks {
+		refs = append(refs, &tr.Chunks[i].Blob)
+	}
+	if tr.Parity != nil {
+		refs = append(refs, tr.Parity)
+	}
+	if len(refs) > inspectMaxEntries {
+		// 超大文件：截断探测（其余 blob 标为未探测），避免一次请求打爆后端/内存。
+		tr.Anomalies = append(tr.Anomalies, volume.Anomaly{
+			Code: volume.AnomalyTruncated, RealPath: tr.Rel,
+			Detail: fmt.Sprintf("分块数 %d 超过 %d，disk 探测已截断（其余标为未知）", len(refs), inspectMaxEntries),
+		})
+		refs = refs[:inspectMaxEntries]
+	}
+	probeRefs(ctx, s, refs, tr, mode)
+}
+
+// probeRefs 有界并发探测 refs（每 goroutine 只写自己的 ref，异常经互斥收集）。
+func probeRefs(ctx context.Context, s *SecretdataFS, refs []*volume.BlobRef, tr *volume.PathTrace, mode volume.InspectMode) {
+	if len(refs) == 0 {
+		return
+	}
+	var mu sync.Mutex
+	eg, gctx := errgroup.WithContext(ctx)
+	eg.SetLimit(inspectProbeConcurrency)
+	for _, ref := range refs {
+		eg.Go(func() error {
+			if a := probeBlob(gctx, s, ref, mode); a != nil {
+				mu.Lock()
+				tr.Anomalies = append(tr.Anomalies, *a)
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+	_ = eg.Wait()
+}
+
+// sortAnomalies 稳定排序（Code, RealPath），保证并发探测下输出可复现。
+func sortAnomalies(list []volume.Anomaly) {
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].Code != list[j].Code {
+			return list[i].Code < list[j].Code
+		}
+		return list[i].RealPath < list[j].RealPath
+	})
 }
 
 // traceDir 组装目录落点（容器 + dir-meta blob）。
@@ -236,42 +301,55 @@ func (s *SecretdataFS) traceDir(ctx context.Context, rel, container string, mtim
 	if err != nil {
 		return nil, fmt.Errorf("secretdata: 读取容器 %q 失败: %w", container, err)
 	}
-	var dirMetas []string
+	dirMetas := collectDirMetas(entries)
+	recordDirMetasState(tr, container, dirMetas)
+	if len(dirMetas) > 0 {
+		tr.Meta = s.probeDirMeta(ctx, container, dirMetas[0], entries, tr, mode)
+	}
+	return tr, nil
+}
+
+// collectDirMetas 收集容器内全部 dir-meta 名（正常恰好 1 个）。
+func collectDirMetas(entries []syncpkg.Entry) []string {
+	var out []string
 	for _, en := range entries {
 		if shardseal.ClassifyName(en.Name) == shardseal.KindDirMeta {
-			dirMetas = append(dirMetas, en.Name)
+			out = append(out, en.Name)
 		}
 	}
-	switch len(dirMetas) {
-	case 0:
+	return out
+}
+
+// recordDirMetasState 记录「无 dir-meta / 多个 dir-meta」异常。
+func recordDirMetasState(tr *volume.PathTrace, container string, dirMetas []string) {
+	switch {
+	case len(dirMetas) == 0:
 		tr.Anomalies = append(tr.Anomalies, volume.Anomaly{
-			Code: volume.AnomalyMetaUnreadable, RealPath: container,
-			Detail: "容器内未找到 dir-meta blob",
+			Code: volume.AnomalyContainerNotIndexed, RealPath: container,
+			Detail: "容器内未找到 dir-meta blob（无法确定逻辑目录）",
 		})
-	case 1:
-		for _, en := range entries {
-			if en.Name != dirMetas[0] {
-				continue
-			}
-			blob := volume.BlobRef{RealPath: path.Join(container, en.Name), Bytes: en.Size}
-			probeBlob(ctx, s, &blob, tr, mode)
-			tr.Meta = &blob
-		}
-	default:
+	case len(dirMetas) > 1:
 		tr.Anomalies = append(tr.Anomalies, volume.Anomaly{
 			Code: volume.AnomalyDirMetaAmbiguous, RealPath: container,
 			Detail: fmt.Sprintf("容器内有 %d 个 dir-meta blob（异常布局）", len(dirMetas)),
 		})
-		for _, en := range entries {
-			if en.Name != dirMetas[0] {
-				continue
-			}
-			blob := volume.BlobRef{RealPath: path.Join(container, en.Name), Bytes: en.Size}
-			probeBlob(ctx, s, &blob, tr, mode)
-			tr.Meta = &blob
+	}
+}
+
+// probeDirMeta 构造 dir-meta 的 BlobRef（disk 模式探测一次），返回该引用。
+func (s *SecretdataFS) probeDirMeta(ctx context.Context, container, name string, entries []syncpkg.Entry, tr *volume.PathTrace, mode volume.InspectMode) *volume.BlobRef {
+	size := int64(0)
+	for _, en := range entries {
+		if en.Name == name {
+			size = en.Size
+			break
 		}
 	}
-	return tr, nil
+	blob := volume.BlobRef{RealPath: path.Join(container, name), Bytes: size}
+	if a := probeBlob(ctx, s, &blob, mode); a != nil {
+		tr.Anomalies = append(tr.Anomalies, *a)
+	}
+	return &blob
 }
 
 // Explain 解释真实路径的用途与逻辑归属。
@@ -319,13 +397,24 @@ func (s *SecretdataFS) explainContainer(ctx context.Context, ex *volume.RealExpl
 	if dirMetaName != "" {
 		ex.Container, ex.Evidence = s.resolveContainer(ctx, realPath, dirMetaName, ex)
 	}
+	idx := s.buildContainerIndex(realPath)
 	seen := make(map[string]struct{}, len(entries))
-	for _, en := range entries {
+	out := make([]volume.RealEntry, len(entries))
+	// 子容器解析要读其 dir-meta（每子容器 1 次 ListDir + 1 次读），串行会在宽目录下退化为
+	// N 次往返 ⇒ 有界并发；非目录条目就地判定（顺序写各自下标，异常仍写 ex，先于并发段完成）。
+	dirs := make([]int, 0, len(entries))
+	for i, en := range entries {
 		seen[en.Name] = struct{}{}
-		ex.Entries = append(ex.Entries, s.classifyRealEntry(ctx, realPath, en, dirMetaName, ex))
+		if en.IsDir {
+			dirs = append(dirs, i)
+			continue
+		}
+		out[i] = s.classifyRealEntry(ctx, realPath, en, dirMetaName, ex, idx)
 	}
+	s.resolveSubContainers(ctx, realPath, entries, dirs, out)
+	ex.Entries = append(ex.Entries, out...)
 	if mode == volume.InspectDisk {
-		appendMissingBlobs(ex, realPath, s.containerExpectations(realPath), seen)
+		appendMissingBlobs(ex, realPath, idx.expected, seen)
 	}
 	return ex, nil
 }
@@ -341,6 +430,22 @@ func sortAndTruncateEntries(entries []syncpkg.Entry, ex *volume.RealExplanation,
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	return entries
+}
+
+// resolveSubContainers 有界并发解析子容器条目（结果按下标回填，顺序稳定）。
+func (s *SecretdataFS) resolveSubContainers(ctx context.Context, container string, entries []syncpkg.Entry, dirs []int, out []volume.RealEntry) {
+	if len(dirs) == 0 {
+		return
+	}
+	eg, gctx := errgroup.WithContext(ctx)
+	eg.SetLimit(inspectProbeConcurrency)
+	for _, i := range dirs {
+		eg.Go(func() error {
+			out[i] = s.classifySubContainer(gctx, container, entries[i])
+			return nil
+		})
+	}
+	_ = eg.Wait()
 }
 
 // findDirMeta 返回容器内首个 dir-meta 名与总数（正常恰好 1 个）。
@@ -375,7 +480,7 @@ func recordContainerDirMetaState(ex *volume.RealExplanation, realPath, dirMetaNa
 }
 
 // classifyRealEntry 判定容器内单个条目的用途与归属。
-func (s *SecretdataFS) classifyRealEntry(ctx context.Context, container string, en syncpkg.Entry, dirMetaName string, ex *volume.RealExplanation) volume.RealEntry {
+func (s *SecretdataFS) classifyRealEntry(ctx context.Context, container string, en syncpkg.Entry, dirMetaName string, ex *volume.RealExplanation, idx containerIndex) volume.RealEntry {
 	// 目录条目 = **子容器**（逻辑目录），不是 blob：必须单独判定，否则会被误报为孤儿分块。
 	if en.IsDir {
 		return s.classifySubContainer(ctx, container, en)
@@ -384,9 +489,9 @@ func (s *SecretdataFS) classifyRealEntry(ctx context.Context, container string, 
 	case shardseal.KindDirMeta:
 		return dirMetaEntry(en, dirMetaName, ex)
 	case shardseal.KindFileMeta:
-		return s.classifyFileMetaEntry(container, en, ex)
+		return s.classifyFileMetaEntry(container, en, ex, idx)
 	default:
-		return s.classifyChunkEntry(container, en, ex)
+		return s.classifyChunkEntry(container, en, ex, idx)
 	}
 }
 
@@ -399,9 +504,9 @@ func dirMetaEntry(en syncpkg.Entry, dirMetaName string, ex *volume.RealExplanati
 	return re
 }
 
-func (s *SecretdataFS) classifyFileMetaEntry(container string, en syncpkg.Entry, ex *volume.RealExplanation) volume.RealEntry {
+func (s *SecretdataFS) classifyFileMetaEntry(container string, en syncpkg.Entry, ex *volume.RealExplanation, idx containerIndex) volume.RealEntry {
 	re := volume.RealEntry{Name: en.Name, Kind: "file_meta", Bytes: en.Size}
-	if owner := s.lookupFileByMetaName(container, en.Name); owner != nil {
+	if owner := idx.fileOwners[en.Name]; owner != nil {
 		re.Owner = owner
 		re.Note = "文件 meta（逻辑路径见 owner）"
 		return re
@@ -416,9 +521,9 @@ func (s *SecretdataFS) classifyFileMetaEntry(container string, en syncpkg.Entry,
 
 // classifyChunkEntry 判定内容分块/parity：索引命中 → 正常归属；
 // 否则若属于**本进程在途上传** → upload_in_progress（不是孤儿）；再否则 → blob_orphan。
-func (s *SecretdataFS) classifyChunkEntry(container string, en syncpkg.Entry, ex *volume.RealExplanation) volume.RealEntry {
+func (s *SecretdataFS) classifyChunkEntry(container string, en syncpkg.Entry, ex *volume.RealExplanation, idx containerIndex) volume.RealEntry {
 	re := volume.RealEntry{Name: en.Name, Kind: "chunk", Bytes: en.Size}
-	owner := s.lookupChunkOwner(container, en.Name)
+	owner := idx.chunkOwners[en.Name]
 	if owner != nil {
 		if owner.Parity {
 			re.Kind = "parity"
@@ -458,6 +563,11 @@ func (s *SecretdataFS) classifySubContainer(ctx context.Context, container strin
 		re.Note = "子容器（dir-meta 未解出）"
 	}
 	return re
+}
+
+// uploadInContainer 报告该容器是否有本进程在途上传。
+func (s *SecretdataFS) uploadInContainer(container string) bool {
+	return len(s.uploadsForContainer(container)) > 0
 }
 
 // uploadForContainer 返回写目标容器为 container 的在途上传（同容器多并发取首个）。
@@ -529,15 +639,19 @@ func (s *SecretdataFS) explainBlob(ctx context.Context, ex *volume.RealExplanati
 	if container == "." {
 		container = ""
 	}
-	blob, err := readBlob(ctx, s.inner, realPath)
-	if err != nil {
-		return nil, fmt.Errorf("secretdata: 读取 blob %q 失败: %w", realPath, err)
-	}
 	switch shardseal.ClassifyName(base) {
-	case shardseal.KindDirMeta:
-		s.explainDirMetaBlob(ex, container, base, blob)
-	case shardseal.KindFileMeta:
-		s.explainFileMetaBlob(ex, container, base, realPath, blob)
+	case shardseal.KindDirMeta, shardseal.KindFileMeta:
+		// 只有 meta 需要内容（解密）；**分块绝不读内容**——单块可达 100+ MiB，
+		// 远端卷上一次 explain 就会拉整块（旧实现缺陷）。分块判型/归属纯靠名字 + 索引。
+		blob, err := readBlob(ctx, s.inner, realPath)
+		if err != nil {
+			return nil, fmt.Errorf("secretdata: 读取 blob %q 失败: %w", realPath, err)
+		}
+		if shardseal.ClassifyName(base) == shardseal.KindDirMeta {
+			s.explainDirMetaBlob(ctx, ex, container, base, blob)
+		} else {
+			s.explainFileMetaBlob(ex, container, base, realPath, blob)
+		}
 	default:
 		s.explainChunkBlob(ex, container, base, realPath)
 	}
@@ -545,7 +659,7 @@ func (s *SecretdataFS) explainBlob(ctx context.Context, ex *volume.RealExplanati
 }
 
 // explainDirMetaBlob 解释 dir-meta blob（容器逻辑归属）。
-func (s *SecretdataFS) explainDirMetaBlob(ex *volume.RealExplanation, container, base string, blob []byte) {
+func (s *SecretdataFS) explainDirMetaBlob(ctx context.Context, ex *volume.RealExplanation, container, base string, blob []byte) {
 	ex.Kind = "dir_meta"
 	dm, derr := s.decryptDirMeta(blob)
 	if derr != nil {
@@ -555,7 +669,7 @@ func (s *SecretdataFS) explainDirMetaBlob(ex *volume.RealExplanation, container,
 		})
 		return
 	}
-	ex.Container, ex.Evidence = s.resolveContainer(context.Background(), container, base, ex)
+	ex.Container, ex.Evidence = s.resolveContainer(ctx, container, base, ex)
 }
 
 // explainFileMetaBlob 解释 file-meta blob（解 meta + 索引反查归属）。
@@ -570,10 +684,20 @@ func (s *SecretdataFS) explainFileMetaBlob(ex *volume.RealExplanation, container
 	}
 	ex.Evidence = append(ex.Evidence,
 		fmt.Sprintf("meta Original.Name=%s size=%d chunks=%d", mm.Original.Name, mm.Original.Size, len(mm.Chunks)))
-	if owner := s.lookupFileByMetaName(container, base); owner != nil {
+	switch owner := s.lookupFileByMetaName(container, base); {
+	case owner != nil:
 		ex.Owner = owner
 		ex.Evidence = append(ex.Evidence, "索引反查命中（容器 + meta 名）")
-	} else {
+	case s.uploadInContainer(container):
+		up, _ := s.uploadForContainer(container)
+		ex.Kind = "upload_in_progress"
+		ex.Owner = &volume.LogicalRef{Rel: up.rel, Role: "file"}
+		ex.Evidence = append(ex.Evidence, "命中本进程在途上传注册表（meta 已上传、索引未提交）")
+		ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
+			Code: volume.AnomalyUploadInProgress, RealPath: realPath,
+			Detail: "属于本进程在途上传（rel=" + up.rel + "）；不是孤儿，请勿清理",
+		})
+	default:
 		ex.Anomalies = append(ex.Anomalies, volume.Anomaly{
 			Code: volume.AnomalyBlobOrphan, RealPath: realPath,
 			Detail: "meta 可解密但索引无对应逻辑文件（索引未加载/外部写入）；疑似孤儿（删除请走 GC）",
@@ -658,36 +782,81 @@ func (s *SecretdataFS) resolveContainer(ctx context.Context, container, dirMetaN
 	return ref, evidence
 }
 
-// containerExpectations 返回索引声明应位于该容器的 blob 名集合（disk 模式差异用）。
-func (s *SecretdataFS) containerExpectations(container string) map[string]struct{} {
-	out := make(map[string]struct{})
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, e := range s.index {
-		if e == nil || e.meta == nil {
-			continue
-		}
-		if e.dirSeg == container {
-			out[e.metaName] = struct{}{}
-		}
-		dataSeg := e.dataDir
-		if dataSeg == "" {
-			dataSeg = e.dirSeg
-		}
-		if dataSeg != container {
-			continue
-		}
-		for _, c := range e.meta.Chunks {
-			out[c.FileName] = struct{}{}
-		}
-		if p := e.meta.Parity; p != nil {
-			out[p.FileName] = struct{}{}
-		}
-	}
-	return out
+// containerIndex 是**一次遍历**构建的容器视图：归属映射 + 期望 blob 集合。
+//
+// 为什么需要：旧实现对容器内**每条** blob 各做一次全索引扫描（lookupChunkOwner /
+// containerIndex 是**一次遍历**构建的容器视图：归属映射 + 期望 blob 集合。
+//
+// 为什么需要：旧实现对容器内**每条** blob 各做一次全索引扫描（lookupChunkOwner /
+// lookupFileByMetaName）⇒ O(容器条目数 × 全卷条目数)，大容器/大卷上是分钟级且持锁
+// 反复加解锁。现在整次 Explain 只扫一遍索引。
+type containerIndex struct {
+	fileOwners  map[string]*volume.LogicalRef // file-meta 名 → 逻辑文件
+	chunkOwners map[string]*volume.LogicalRef // 分块/parity 名 → 逻辑文件
+	expected    map[string]struct{}           // 索引声明应出现在该容器的 blob 名（disk 差异）
 }
 
-// lookupFileByMetaName 反查「容器 + meta 名 → 逻辑文件」。
+// buildContainerIndex 遍历一次索引，收集与 container 相关的全部映射。
+func (s *SecretdataFS) buildContainerIndex(container string) containerIndex {
+	idx := containerIndex{
+		fileOwners:  make(map[string]*volume.LogicalRef),
+		chunkOwners: make(map[string]*volume.LogicalRef),
+		expected:    make(map[string]struct{}),
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for rel, e := range s.index {
+		idx.addEntry(rel, e, container)
+	}
+	return idx
+}
+
+// addEntry 把单个索引条目并入容器视图（仅当它属于 container）。
+func (idx *containerIndex) addEntry(rel string, e *metaEntry, container string) {
+	if e == nil || e.meta == nil {
+		return
+	}
+	if e.dirSeg == container {
+		idx.fileOwners[e.metaName] = &volume.LogicalRef{Rel: rel, Role: "file"}
+		idx.expected[e.metaName] = struct{}{}
+	}
+	if e.dataSegPath() != container {
+		return
+	}
+	idx.addParity(rel, e.meta.Parity)
+	for i := range e.meta.Chunks {
+		idx.addChunk(rel, i, e.meta.Chunks[i])
+	}
+}
+
+// addParity 记录 parity 分块归属。
+func (idx *containerIndex) addParity(rel string, p *shardseal.ParityInfo) {
+	if p == nil {
+		return
+	}
+	idx.chunkOwners[p.FileName] = &volume.LogicalRef{Rel: rel, Role: "file", Parity: true}
+	idx.expected[p.FileName] = struct{}{}
+}
+
+// addChunk 记录内容分块归属（Index<0 时用位置兜底，与读路径同口径）。
+func (idx *containerIndex) addChunk(rel string, pos int, c shardseal.ChunkInfo) {
+	ci := c.Index
+	if ci < 0 {
+		ci = pos
+	}
+	idx.chunkOwners[c.FileName] = &volume.LogicalRef{Rel: rel, Role: "file", ChunkIndex: &ci}
+	idx.expected[c.FileName] = struct{}{}
+}
+
+// dataSegPath 返回条目内容所在容器（去重条目指向卷级池容器）。
+func (e *metaEntry) dataSegPath() string {
+	if e.dataDir != "" {
+		return e.dataDir
+	}
+	return e.dirSeg
+}
+
+// lookupFileByMetaName 反查「容器 + meta 名 → 逻辑文件」（单次请求用；整容器解释走 containerIndex）。
 func (s *SecretdataFS) lookupFileByMetaName(container, metaName string) *volume.LogicalRef {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -700,46 +869,39 @@ func (s *SecretdataFS) lookupFileByMetaName(container, metaName string) *volume.
 	return nil
 }
 
-// lookupChunkOwner 反查「容器 + 分块名 → 逻辑文件 + 分块序号/parity」。
+// lookupChunkOwner 反查「容器 + 分块名 → 逻辑文件」（单次请求用；整容器解释走 containerIndex）。
 //
 // parity 与普通分块**命名同形**：只能靠 meta.Parity.FileName 判定（不能按名字猜）。
 func (s *SecretdataFS) lookupChunkOwner(container, name string) *volume.LogicalRef {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for rel, e := range s.index {
-		if owner, ok := chunkOwnerOfEntry(rel, e, container, name); ok {
+		if owner := chunkOwnerOfEntry(rel, e, container, name); owner != nil {
 			return owner
 		}
 	}
 	return nil
 }
 
-// chunkOwnerOfEntry 判定单条目是否拥有该分块名（返回归属）。
-func chunkOwnerOfEntry(rel string, e *metaEntry, container, name string) (*volume.LogicalRef, bool) {
-	if e == nil || e.meta == nil {
-		return nil, false
-	}
-	dataSeg := e.dataDir
-	if dataSeg == "" {
-		dataSeg = e.dirSeg
-	}
-	if dataSeg != container {
-		return nil, false
+// chunkOwnerOfEntry 判定单条目是否拥有该分块名。
+func chunkOwnerOfEntry(rel string, e *metaEntry, container, name string) *volume.LogicalRef {
+	if e == nil || e.meta == nil || e.dataSegPath() != container {
+		return nil
 	}
 	if p := e.meta.Parity; p != nil && p.FileName == name {
-		return &volume.LogicalRef{Rel: rel, Role: "file", Parity: true}, true
+		return &volume.LogicalRef{Rel: rel, Role: "file", Parity: true}
 	}
 	for i := range e.meta.Chunks {
 		if e.meta.Chunks[i].FileName != name {
 			continue
 		}
-		idx := e.meta.Chunks[i].Index
-		if idx < 0 {
-			idx = i
+		ci := e.meta.Chunks[i].Index
+		if ci < 0 {
+			ci = i
 		}
-		return &volume.LogicalRef{Rel: rel, Role: "file", ChunkIndex: &idx}, true
+		return &volume.LogicalRef{Rel: rel, Role: "file", ChunkIndex: &ci}
 	}
-	return nil, false
+	return nil
 }
 
 // containerOfDir 反查「容器 → 逻辑目录」。
@@ -793,10 +955,12 @@ func metaBlobBytes(e *metaEntry) int64 {
 	return e.phys
 }
 
-// probeBlob 在 disk 模式下探测 blob 存在性与大小，并写入差异码。
-func probeBlob(ctx context.Context, s *SecretdataFS, ref *volume.BlobRef, tr *volume.PathTrace, mode volume.InspectMode) {
+// probeBlob 在 disk 模式下探测单个 blob 的存在性与大小，返回差异（nil = 正常/非 disk）。
+//
+// 返回而非直接 append：调用方可能并发探测（各自 ref 独立写，异常由调用方汇总）。
+func probeBlob(ctx context.Context, s *SecretdataFS, ref *volume.BlobRef, mode volume.InspectMode) *volume.Anomaly {
 	if mode != volume.InspectDisk {
-		return
+		return nil
 	}
 	ent, err := s.inner.Stat(ctx, ref.RealPath)
 	if err == nil && ent == nil {
@@ -806,28 +970,27 @@ func probeBlob(ctx context.Context, s *SecretdataFS, ref *volume.BlobRef, tr *vo
 		if errors.Is(err, fs.ErrNotExist) {
 			present := false
 			ref.OnDisk = &present
-			tr.Anomalies = append(tr.Anomalies, volume.Anomaly{
+			return &volume.Anomaly{
 				Code: volume.AnomalyBlobMissing, RealPath: ref.RealPath,
 				Detail: "索引/meta 声明该 blob，但磁盘上缺失",
-			})
-			return
+			}
 		}
-		tr.Anomalies = append(tr.Anomalies, volume.Anomaly{
-			Code: volume.AnomalyMetaUnreadable, RealPath: ref.RealPath,
-			Detail: "探测失败: " + err.Error(),
-		})
-		return
+		return &volume.Anomaly{
+			Code: volume.AnomalyProbeFailed, RealPath: ref.RealPath,
+			Detail: "探测失败（存在性/大小未知）: " + err.Error(),
+		}
 	}
 	present := true
 	ref.OnDisk = &present
 	size := ent.Size
 	ref.DiskBytes = &size
 	if ref.Bytes > 0 && size != ref.Bytes {
-		tr.Anomalies = append(tr.Anomalies, volume.Anomaly{
+		return &volume.Anomaly{
 			Code: volume.AnomalySizeMismatch, RealPath: ref.RealPath,
 			Detail: fmt.Sprintf("磁盘 %d 字节 ≠ 声明 %d 字节", size, ref.Bytes),
-		})
+		}
 	}
+	return nil
 }
 
 // cleanLogicalRel 规范化逻辑路径；含父级引用 ⇒ ErrOutsideVolume。

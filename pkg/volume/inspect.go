@@ -208,4 +208,7 @@ const (
 	// AnomalyUploadInProgress 不是差异：该 blob 属于**本进程在途上传**（meta 尚未提交），
 	// 不得当作孤儿处置（GC 写进行时本就不会运行）。
 	AnomalyUploadInProgress = "upload_in_progress"
+	// AnomalyProbeFailed 是 disk 模式探测 blob 时的 IO 失败（**不是**大小不符/缺失：
+	// 无法判定存在性与大小，必须与「明确缺失」区分，否则会误判为数据丢失）。
+	AnomalyProbeFailed = "probe_failed"
 )
