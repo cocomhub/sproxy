@@ -94,6 +94,14 @@ type Options struct {
 	// >0 时 NewFS 启动后台 goroutine 周期清理）。
 	GCInterval time.Duration
 
+	// UploadConcurrency 是**块级上传并发度**（≤0 = DefaultUploadConcurrency）。
+	// 背景（2026-11-04 实测）：外部卷 blocklet=256KiB，交错上传原本**逐块串行**，
+	// 且每块底层都会单独调用一次（baidupcs 甚至每块 exec 一次 BaiduPCS-Go 进程）⇒
+	// 1.4GiB 文件 = ~5600 次串行调用，实测仅 1.41 MiB/s。块级并发可让网络/进程启动
+	// 开销重叠（并发 4-8 实测提升 3-6 倍），与「单文件内块顺序无关」的 meta 语义一致。
+	// 上限 MaxUploadConcurrency（防下游限流/本地磁盘压力）。
+	UploadConcurrency int
+
 	// Erasure 是否启用 XOR 奇偶纠错（k-of-k+1，纯 XOR、纯 stdlib）。**实验性**：k-of-k+1
 	// XOR parity，**单块**损坏/丢失恢复，未生产验证（§13.3 标注）。写入时对 ≥2 个数据分块
 	// 按 max 长度补零对齐后逐字节 XOR 生成奇偶校验段（独立加密分块文件，同 blob 格式），
@@ -1455,8 +1463,17 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 	out, cerr := shardseal.EncryptShardsReaderToChunks(wc.reader, wc.size, sanitizeName(wc.rel), s.secret,
 		policy, s.algoVer, s.interleavedChunkSink(ctx, iu, wc))
 	if cerr != nil {
-		s.rollbackWrite(ctx, iu.uploaded, wc.created)
+		// **必须先收口再回滚**（2026-11-04）：并发 worker 可能正在上传——不等它们结束就回滚，
+		// 之后完成的 worker 仍会写入远端 ⇒ 孤儿 blob（测试 TestDifferential_RapidUploadMiss_
+		// FailClosed 实测残留 2 个）。finish 幂等，囊括全部已/将上传的块。
+		_ = iu.finish()
+		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
 		return fmt.Errorf("secretdata: 流式分块加密失败: %w", cerr)
+	}
+	// 块级并发：加密输出完毕不代表块已全部上传 ⇒ 收口并等待 worker（首个错误即失败）。
+	if uerr := iu.finish(); uerr != nil {
+		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
+		return fmt.Errorf("secretdata: 分块上传失败: %w", uerr)
 	}
 	out.Meta.Original.MTime = mtimeString(wc.mtime)
 	s.applyOriginalCTime(strings.TrimPrefix(wc.rel, "/"), out.Meta)
@@ -1468,13 +1485,13 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		// 分块报「区间越出明文 0」（错误信息误导）。当前 `writeFileOpt` 以 `!s.opts.Erasure` 为分流
 		// 条件 ⇒ 本分支**不可达**；此处显式 fail-closed 是为了「将来放宽分流条件」时给出**准确**
 		// 错误，而不是静默写出坏 parity。
-		s.rollbackWrite(ctx, iu.uploaded, wc.created)
+		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
 		return fmt.Errorf("secretdata: 流式写路径不支持 Erasure（parity 需明文分块）；" +
 			"装配层须保证 Erasure 卷走内存写路径")
 	}
 	metaName, metaBlob, merr := s.encryptMetaBlob(out.Meta)
 	if merr != nil {
-		s.rollbackWrite(ctx, iu.uploaded, wc.created)
+		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
 		return merr
 	}
 	// meta 为**内存态**（无本地路径，设计如此）：以内存 blob 直接上传（无需本地临时物）。
@@ -1484,16 +1501,16 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 	// （如 baidupcs 上传后 ETag 复核不匹配 ⇒ ErrTransient）⇒ 远端 blob 已存在；若成功后
 	// 才登记，回滚集合漏掉它 ⇒ 远端孤儿。块名含随机 salt/nonce ⇒ 提前登记即使上传未真正
 	// 发生，回滚删除也只是 no-op（不会误删他人内容）。
-	iu.uploaded = append(iu.uploaded, metaPath)
+	iu.markUploaded(metaPath)
 	if werr := s.uploadBlob(ctx, metaPath, metaBlob, mt); werr != nil {
-		s.rollbackWrite(ctx, iu.uploaded, wc.created)
+		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
 	cipherBytes = physBytesOf(out.Meta, int64(len(metaBlob)), false)
 	return s.commitEntry(ctx, wc, &metaEntry{
 		size: wc.size, mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
 		phys: cipherBytes,
-	}, iu.uploaded)
+	}, iu.snapshotUploaded())
 }
 
 // applyUploadMetaExtra 把 ctx 携带的随上传 extra 合并进 shardseal.Meta.Extra
@@ -1523,26 +1540,170 @@ const (
 )
 
 // interleavedUpload 是一次块级交错上传的执行句柄：交付形态 + 临时目录 + staging 配额释放 +
-// 已上传路径表（失败回滚删新留旧）。
+// 已上传路径表（失败回滚删新留旧）+ **块级并发上传池**。
+//
+// 并发模型（2026-11-04）：sink 只做「落本地/拷内存 + 登记 + 投递」，实际上传由 N 个 worker
+// 并行执行。块间无序仅影响物理写入顺序（meta 按块名/哈希引用，与顺序无关）；任一 worker
+// 失败 ⇒ 取消剩余投递并返回首个错误，由 writeFileStream 统一回滚。
 type interleavedUpload struct {
 	mode     chunkDelivery
 	tmp      string
 	release  func()
+	mu       sync.Mutex
 	uploaded []string
-	// chunkMD5/chunkCRC32 是当前待传密文块的整块 md5/crc32（sink 收 blob 时算好，
-	// uploadLocalChunk 交给内层 UploadHints——baidupcs 整块免重扫）。单块维度（每次覆盖）。
-	chunkMD5   string
-	chunkCRC32 string
+	// jobs 是有界队列（容量 = 并发数×2，背压限制内存/本地临时文件峰值）。
+	jobs chan uploadJob
+	wg   sync.WaitGroup
+	// cancel 取消剩余投递（**不持有 ctx**：结构体只存取消函数，避免 containedctx）。
+	cancel func()
+	// cancelled 在首次失败时关闭：唤醒阻塞中的 submit（worker 已退出时不得永久阻塞）。
+	cancelled chan struct{}
+	errOnce   sync.Once
+	firstErr  error
+	// finishOnce 保证 close(jobs)+Wait 只执行一次（幂等）。
+	finishOnce sync.Once
+}
+
+// uploadJob 是一个待上传的密文块。data 恒为**已拷贝**的密文（不引用加密器缓冲）。
+// local=true 时由 worker 落本地临时文件后经 WithStagedLocalPath 上传（内层跨 md5 预扫/
+// 重试/秒传刷新复用同一路径），上传完即删 —— 落盘在 worker 内完成，本地峰值 = O(并发度)。
+type uploadJob struct {
+	container string
+	name      string
+	tmpDir    string
+	local     bool
+	data      []byte
+	mt        int64
+	hash      chunkHash
+}
+
+// DefaultUploadConcurrency / MaxUploadConcurrency 是块级并发默认值与上限。
+// 外部卷 blocklet 较小（256KiB）：并发过高会放大下游限流与本地临时文件数；4-8 是实测甜点。
+const (
+	DefaultUploadConcurrency = 4
+	MaxUploadConcurrency     = 16
+)
+
+// uploadConcurrencyFor 把配置值收敛到 [1, MaxUploadConcurrency]。
+func uploadConcurrencyFor(v int) int {
+	if v <= 0 {
+		return DefaultUploadConcurrency
+	}
+	if v > MaxUploadConcurrency {
+		return MaxUploadConcurrency
+	}
+	return v
+}
+
+// markUploaded 并发安全地登记「已发起上传的 blob」（回滚集合；先登记后上传）。
+func (iu *interleavedUpload) markUploaded(p string) {
+	if p == "" {
+		return
+	}
+	iu.mu.Lock()
+	iu.uploaded = append(iu.uploaded, p)
+	iu.mu.Unlock()
+}
+
+// snapshotUploaded 返回回滚集合的拷贝（调用方随后可能继续追加，不能共享底层数组）。
+func (iu *interleavedUpload) snapshotUploaded() []string {
+	iu.mu.Lock()
+	defer iu.mu.Unlock()
+	out := make([]string, len(iu.uploaded))
+	copy(out, iu.uploaded)
+	return out
+}
+
+// fail 记录首个错误并取消剩余投递（worker 之间不互等，写路径统一回滚）。
+func (iu *interleavedUpload) fail(err error) {
+	if err == nil {
+		return
+	}
+	iu.errOnce.Do(func() {
+		iu.mu.Lock()
+		iu.firstErr = err
+		iu.mu.Unlock()
+		if iu.cancelled != nil {
+			close(iu.cancelled)
+		}
+		if iu.cancel != nil {
+			iu.cancel()
+		}
+	})
+}
+
+// submit 投递一个上传任务（ctx 取消/已有错误时快速失败）。ctx 由调用方传入。
+func (iu *interleavedUpload) submit(ctx context.Context, job uploadJob) error {
+	if iu.jobs == nil {
+		return nil // 未启用并发池（兜底路径）
+	}
+	iu.mu.Lock()
+	err := iu.firstErr
+	iu.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	select {
+	case iu.jobs <- job:
+		return nil
+	case <-iu.cancelled:
+		return fmt.Errorf("secretdata: 分块上传已中止（其它块失败）")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// finish 关闭队列并等待全部上传完成，返回首个错误（幂等；调用方据此决定回滚）。
+func (iu *interleavedUpload) finish() error {
+	iu.finishOnce.Do(func() {
+		if iu.jobs != nil {
+			close(iu.jobs)
+		}
+		iu.wg.Wait()
+	})
+	iu.mu.Lock()
+	err := iu.firstErr
+	iu.mu.Unlock()
+	return err
 }
 
 // close 释放 staging 配额预留并删除本地临时目录（幂等，写路径 defer 调用）。
 func (iu *interleavedUpload) close() {
+	_ = iu.finish() // 幂等；错误已由 writeFileStream 在收尾处检查
 	if iu.tmp != "" {
 		_ = os.RemoveAll(iu.tmp)
 	}
 	if iu.release != nil {
 		iu.release()
 	}
+}
+
+// startUploadWorkers 启动 N 个上传 worker（写入结束后由 finish 收口）。
+// ctx 由调用方传入并仅在 worker 生命周期内使用（不存入 iu）。
+func (s *SecretdataFS) startUploadWorkers(ctx context.Context, iu *interleavedUpload, n int) {
+	for range n {
+		iu.wg.Go(func() {
+			for job := range iu.jobs {
+				if err := s.runUploadJob(ctx, job); err != nil {
+					iu.fail(err)
+					return
+				}
+			}
+		})
+	}
+}
+
+// runUploadJob 执行单块上传（local 形态先落临时文件，上传后即删）。
+func (s *SecretdataFS) runUploadJob(ctx context.Context, job uploadJob) error {
+	if job.local {
+		local := filepath.Join(job.tmpDir, job.name)
+		if werr := os.WriteFile(local, job.data, 0o600); werr != nil {
+			return fmt.Errorf("secretdata: 落本地分块 %s 失败: %w", job.name, werr)
+		}
+		defer func() { _ = os.Remove(local) }()
+		return s.uploadLocalChunk(ctx, job.container, job.name, local, job.mt, job.hash, nil)
+	}
+	return s.uploadBlob(ctx, path.Join(job.container, job.name), job.data, job.mt)
 }
 
 // beginInterleavedUpload 准备块级交错上传（含**回退链**，docs/roadmap.md ①-附 §2）：
@@ -1568,7 +1729,7 @@ func (s *SecretdataFS) beginInterleavedUpload(ctx context.Context, wc writeCtx, 
 		}
 	}
 	if tmp != "" {
-		return &interleavedUpload{mode: deliverLocalPath, tmp: tmp, release: release}, nil
+		return s.newInterleavedUpload(ctx, deliverLocalPath, tmp, release), nil
 	}
 	if !wc.sourceReplayable() {
 		return nil, fmt.Errorf("secretdata: 本地临时物不可用（%s）且源不可重读（无法从源重算产物；"+
@@ -1578,7 +1739,20 @@ func (s *SecretdataFS) beginInterleavedUpload(ctx context.Context, wc writeCtx, 
 	// ctx 取消/配额拒绝被笼统描述成「配额不足」。此处显式 Warn + 区分原因。
 	slog.Warn("secretdata: 本地 staging 不可用，按回退链降级为内存交付（源可重读 ⇒ 写仍成功）",
 		"rel", wc.rel, "reason", stagingDegradeReason(rerr), "error", rerr)
-	return &interleavedUpload{mode: deliverInMemory, release: func() {}}, nil
+	return s.newInterleavedUpload(ctx, deliverInMemory, "", func() {}), nil
+}
+
+// newInterleavedUpload 创建交错上传句柄并启动块级并发 worker。
+func (s *SecretdataFS) newInterleavedUpload(ctx context.Context, mode chunkDelivery, tmp string, release func()) *interleavedUpload {
+	wctx, cancel := context.WithCancel(ctx)
+	n := uploadConcurrencyFor(s.opts.UploadConcurrency)
+	iu := &interleavedUpload{
+		mode: mode, tmp: tmp, release: release,
+		jobs: make(chan uploadJob, n), cancel: cancel,
+		cancelled: make(chan struct{}),
+	}
+	s.startUploadWorkers(wctx, iu, n)
+	return iu
 }
 
 // stagingDegradeReason 把 staging 预留/临时目录失败归类为**准确**的原因文案（供日志/错误
@@ -1609,28 +1783,22 @@ func (wc writeCtx) sourceReplayable() bool { return wc.sourcePath != "" }
 func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleavedUpload, wc writeCtx) shardseal.ChunkSink {
 	mt := s.blobMTime(wc.mtime)
 	return func(name string, blob []byte) error {
-		// P1（2026-10-21 完整收益）：sink 已持有完整密文块（内存）——顺带算整块 md5/crc32
-		// 一次（baidupcs 需要它们做 ETag 复核基准与秒传参数；此处省去 baidupcs 的整块重扫）。
-		iu.chunkMD5 = md5HexOf(blob)
-		iu.chunkCRC32 = strconv.FormatUint(uint64(crc32.ChecksumIEEE(blob)), 10)
-		if iu.mode == deliverLocalPath {
-			local := filepath.Join(iu.tmp, name)
-			if werr := os.WriteFile(local, blob, 0o600); werr != nil {
-				return fmt.Errorf("secretdata: 落本地分块 %s 失败: %w", name, werr)
-			}
-			defer func() { _ = os.Remove(local) }() // 交错：此刻之后本地不再保留该块
-			uerr := s.uploadLocalChunk(ctx, wc.container, name, local, mt, chunkHash{md5: iu.chunkMD5, crc32: iu.chunkCRC32}, &iu.uploaded)
-			if uerr == nil {
-				s.advanceUpload(wc.upToken, int64(len(blob)))
-			}
-			return uerr
+		// **块级并发**：sink 只做「落本地/拷内存 + 登记 + 投递」，上传由 worker 并行执行。
+		// 块级字段必须用**局部变量**（此前是 iu.chunkMD5 共享字段，并发下会串值）。
+		h := chunkHash{md5: md5HexOf(blob), crc32: strconv.FormatUint(uint64(crc32.ChecksumIEEE(blob)), 10)}
+		// 密文拷一份交 worker（blob 由加密器复用缓冲区）；落盘在 worker 内，保证
+		// 本地临时副本峰值 = O(并发度) 而不是 O(队列深度)。
+		job := uploadJob{
+			container: wc.container, name: name, mt: mt, hash: h,
+			data:   append([]byte(nil), blob...),
+			local:  iu.mode == deliverLocalPath,
+			tmpDir: iu.tmp,
 		}
-		p := path.Join(wc.container, name)
-		// **先登记后上传**（P2 修复，2026-10-19；同 uploadLocalChunk）：内层「写成功但复核
-		// 失败」时必须能从回滚集合里找到该 blob。
-		iu.uploaded = append(iu.uploaded, p)
-		if werr := s.uploadBlob(ctx, p, blob, mt); werr != nil {
-			return fmt.Errorf("secretdata: 上传分块 %s 失败: %w", name, werr)
+		// **先登记后上传**（P2 修复，2026-10-19）：内层「写成功但复核失败」时仍需从回滚集合
+		// 找到该 blob（块名含随机 salt/nonce ⇒ 未真正上传时删除是 no-op）。
+		iu.markUploaded(path.Join(wc.container, name))
+		if serr := iu.submit(ctx, job); serr != nil {
+			return serr
 		}
 		s.advanceUpload(wc.upToken, int64(len(blob)))
 		return nil
@@ -1918,7 +2086,9 @@ func (s *SecretdataFS) uploadLocalChunk(ctx context.Context, container, name, lo
 	// **先登记后上传**（P2 修复，2026-10-19）：内层可能「写成功但复核失败」返回错误（如
 	// baidupcs 上传后 ETag 复核不匹配）⇒ 远端 blob 已存在；成功后登记会漏掉它 ⇒ 远端孤儿。
 	// 块名含随机 salt/nonce ⇒ 上传未真正发生时回滚删除只是 no-op（不误删他人内容）。
-	*uploaded = append(*uploaded, dst)
+	if uploaded != nil { // 并发 worker 不传回滚集合（sink 已先登记）⇒ 允许 nil
+		*uploaded = append(*uploaded, dst)
+	}
 	werr := s.inner.WriteFile(wctx, syncpkg.LogicalKey{}, dst, f, size, mt)
 	f.Close()
 	if werr != nil {
