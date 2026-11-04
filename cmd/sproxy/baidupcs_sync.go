@@ -162,12 +162,23 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 			return baidupcs.DefaultFactory().New(cfg)
 		}
 	}
+	// **list_long**（默认 false）：启用 `ls -l` 一次性列举（带 MD5）与按目录分组校验。
+	// 2026-11-05 在污染环境实测退化，需干净环境 A/B 验证后才考虑默认开启
+	// （判据见 docs/external-dependencies.md §7.7）。字符串/布尔都接受，仅 "true"/"1" 生效。
+	listLong := false
+	switch raw := v.Extra["list_long"].(type) {
+	case bool:
+		listLong = raw
+	case string:
+		listLong = raw == "true" || raw == "1"
+	}
 	storage, err := factory(baidupcs.StorageConfig{
 		Root:       baiduRoot,
 		TempDir:    localRoot,
 		BDUSS:      bduss,
 		BinaryPath: binaryPath,
 		Logger:     slog.Default(),
+		ListLong:   listLong,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("baidupcs backend: 卷 %q Storage 构造失败: %w", v.Name, err)

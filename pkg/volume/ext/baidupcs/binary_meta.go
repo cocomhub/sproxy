@@ -17,6 +17,7 @@ package baidupcs
 // 绝不静默落回全量下载）。
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -212,7 +213,7 @@ func (a *binaryAdapter) list(ctx context.Context, remotePath string, exactSizes 
 		return nil, perr
 	}
 	if exactSizes {
-		a.fillExactSizes(ctx, remotePath, entries)
+		return a.resolveExactEntries(ctx, remotePath, entries), nil
 	}
 	for i := range entries {
 		entries[i].Key = path.Join(remotePath, entries[i].Key)
@@ -222,6 +223,38 @@ func (a *binaryAdapter) list(ctx context.Context, remotePath string, exactSizes 
 
 // fillExactSizes 对文件条目批量 `meta` 覆盖精确 size/etag/mtime（best-effort：单批失败
 // 保留 `ls` 的近似值，不阻断枚举）。目录条目跳过（size=0）。
+// listLong 执行 `ls -l` 并解析（**一次调用拿全部 MD5**）；失败返回 ok=false 供调用方回落。
+// 返回的 Key 已拼上 remotePath。
+// resolveExactEntries 返回带精确 size/etag 的条目：`ListLong` 开启时优先 `ls -l`
+// （一次调用带 MD5）；否则/失败回落「ls + 逐条 meta」（既有行为）。
+func (a *binaryAdapter) resolveExactEntries(ctx context.Context, remotePath string, entries []ObjectMeta) []ObjectMeta {
+	if a.cfg.ListLong {
+		if longEntries, ok := a.listLong(ctx, remotePath); ok {
+			return longEntries
+		}
+	}
+	a.fillExactSizes(ctx, remotePath, entries)
+	return entries
+}
+
+func (a *binaryAdapter) listLong(ctx context.Context, remotePath string) ([]ObjectMeta, bool) {
+	if err := ctx.Err(); err != nil {
+		return nil, false
+	}
+	out, err := a.runBinaryOutput(ctx, "ls", "-l", remotePath)
+	if err != nil {
+		return nil, false
+	}
+	entries, perr := parseBinaryListLong(out)
+	if perr != nil {
+		return nil, false
+	}
+	for i := range entries {
+		entries[i].Key = path.Join(remotePath, entries[i].Key)
+	}
+	return entries, true
+}
+
 func (a *binaryAdapter) fillExactSizes(ctx context.Context, remotePath string, entries []ObjectMeta) {
 	paths, idx := binaryExactSizeTargets(remotePath, entries)
 	for start := 0; start < len(paths); start += binaryMetaBatch {
@@ -360,6 +393,94 @@ func applyBinaryMetaLine(m *ObjectMeta, line string) bool {
 // 表头/分隔线/“总:”汇总行跳过；数据行形如 `<idx> <size> <date> <time> <name...>`。
 // **没有目录头也没有条目 → 视为 CLI 失败（返回 error）**：BaituPCS-Go 失败时错误进
 // stdout、退出码恒 0（P0-2），若静默返回空列表会把「未登录/权限/多通配符」当成空目录。
+// binaryListLongRE 匹配 `ls -l` 数据行（详细格式，**带 MD5**）：
+//
+//	<idx> <FSID> <APPID> <size> <创建日期> <创建时间> <修改日期> <修改时间> <MD5> <name...>
+//
+// 目录行的 MD5 列为空（size 为 `-`）⇒ 由下方第二个正则处理。
+// 文件名可能含空格 ⇒ 用贪婪尾组 + TrimSpace 保留内部空格（与 parseBinaryListLine 同策略）。
+var binaryListLongRE = regexp.MustCompile(
+	`^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+([0-9a-fA-F]{32})\s+(.*)$`)
+
+// binaryListLongNoMD5RE 匹配目录行 / MD5 列为空的行。
+var binaryListLongNoMD5RE = regexp.MustCompile(
+	`^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$`)
+
+// parseBinaryListLong 解析 `BaiduPCS-Go ls -l` 输出：**一次调用即拿到每条目的 MD5 + size**，
+// 用于替代「ls + 逐条 meta 补精确 size/etag」的 N 次 API 往返（实测 2026-11-05：
+// 单次 `ls -l` 0.3s；而 63 个块逐条 meta ≈ 19s）。
+//
+// 语义约定：
+//   - ETag = 该行 MD5（小写归一）；目录行为空；
+//   - Size = 由人类可读列换算（**近似值**；需要精确字节的调用方仍走元信息路径）；
+//   - ModTime = 修改日期时间（本地时区，与 `ls` 同口径）；
+//   - Key 为该行文件名（调用方拼上级目录）。
+func parseBinaryListLong(out []byte) ([]ObjectMeta, error) {
+	var res []ObjectMeta
+	headerSeen := false
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if isLongListSkippable(line) {
+			headerSeen = headerSeen || isLongListHeader(line)
+			continue
+		}
+		if e, ok := parseBinaryListLongLine(line); ok {
+			res = append(res, e)
+		}
+	}
+	if len(res) == 0 && !headerSeen {
+		return nil, fmt.Errorf("baidupcs: ls -l 输出无目录头也无条目（疑似 CLI 失败）")
+	}
+	return res, nil
+}
+
+// isLongListHeader 判断是否为表头/目录提示行。
+func isLongListHeader(line string) bool {
+	t := strings.TrimSpace(line)
+	return strings.Contains(t, "当前目录") || strings.HasPrefix(t, "#")
+}
+
+// isLongListSkippable 判断该行是否应跳过（空行/表头/汇总行）。
+func isLongListSkippable(line string) bool {
+	t := strings.TrimSpace(line)
+	if t == "" || isLongListHeader(line) {
+		return true
+	}
+	return strings.HasPrefix(t, "总:") || strings.Contains(t, "文件总数")
+}
+
+// parseBinaryListLongLine 解析 `ls -l` 单个数据行（文件带 MD5 / 目录 MD5 为空）。
+func parseBinaryListLongLine(line string) (ObjectMeta, bool) {
+	m := binaryListLongRE.FindStringSubmatch(line)
+	md5hex := ""
+	var name string
+	if m != nil {
+		md5hex = strings.ToLower(m[9])
+		name = strings.TrimSpace(m[10])
+	}
+	if name == "" {
+		// 极端：文件名本身是 32 位 hex ⇒ 被首个正则吞进 MD5 组 ⇒ 以无 MD5 正则重解。
+		m2 := binaryListLongNoMD5RE.FindStringSubmatch(line)
+		if m2 == nil {
+			return ObjectMeta{}, false
+		}
+		m, md5hex, name = m2, "", strings.TrimSpace(m2[9])
+	}
+	if name == "" {
+		return ObjectMeta{}, false
+	}
+	e := ObjectMeta{Key: name, Size: parseHumanSize(m[4]), IsDir: strings.HasSuffix(name, "/"), ETag: md5hex}
+	if e.IsDir {
+		e.Size = 0
+	}
+	if ts, terr := time.ParseInLocation("2006-01-02 15:04:05", m[7]+" "+m[8], time.Local); terr == nil {
+		e.ModTime = ts
+	}
+	return e, true
+}
+
 func parseBinaryList(out []byte) ([]ObjectMeta, error) {
 	var res []ObjectMeta
 	headerSeen := false

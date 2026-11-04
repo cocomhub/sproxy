@@ -46,6 +46,9 @@ type StorageConfig struct {
 	Adapter Adapter
 	// Logger 是日志。
 	Logger *slog.Logger
+	// ListLong 启用 `ls -l` 一次性列举（带 MD5）与「按目录分组校验」。
+	// **默认 false**；开启前须按 docs/external-dependencies.md §7.7 的条件 A/B 验证。
+	ListLong bool
 }
 
 // _ 编译期断言：Storage 满足 StorageAPI（sync.FS 适配层消费的最小接口）。
@@ -83,6 +86,8 @@ type Storage struct {
 	// 同一文件的多次 Range GET（含大块持续下载 >1 分钟）复用同一张直链，避免使用中
 	// 过期重签（每次 ~0.3s）；失效（CDN 非 206）⇒ 清除并重签一次（自愈）。
 	dlinkCache *dlinkLRU
+	// listLong 启用 `ls -l` 列举 + 按目录分组校验（默认 false，见 StorageConfig.ListLong）。
+	listLong bool
 	// statVisibleWait 是「上传后等待目标可见」的总窗口（0 = DefaultStatVisibleMaxWait）。
 	// 结构体内部字段（只经 NewStorage 注入），便于测试用短窗口覆盖 90s 常量。
 	statVisibleWait time.Duration
@@ -121,13 +126,19 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 			fb = newLibraryAdapter(pcs, logger)
 		}
 		cfg.Adapter = newBinaryAdapter(AdapterConfig{
+			ListLong:   cfg.ListLong,
 			BinaryPath: cfg.BinaryPath,
 			Logger:     logger,
 			Fallback:   fb,
 		})
 	}
 
-	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient(), dlinkCache: newDlinkLRU(0)}, nil
+	s := &Storage{
+		root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger,
+		httpc: newRangeHTTPClient(), dlinkCache: newDlinkLRU(0),
+		listLong: cfg.ListLong,
+	}
+	return s, nil
 }
 
 // newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4 + R19 门禁：per-instance 独立
@@ -1284,9 +1295,22 @@ func (s *Storage) RapidRefresh(ctx context.Context, it syncpkg.VerifyItem) (bool
 // Stat 不可见时回落「父目录列举」，仍不可见 ⇒ VerifyInvisible（调用方据此入待恢复）。
 func (s *Storage) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
 	out := make([]syncpkg.VerifyResult, len(items))
+	if len(items) == 0 {
+		return out
+	}
+	if s.listLong {
+		s.verifyManyGrouped(ctx, items, out) // 可选：按目录分组（ListLong，默认关闭）
+	} else {
+		s.verifyManyPerItem(ctx, items, out) // 既有：逐项 Stat
+	}
+	return out
+}
+
+// verifyManyPerItem 逐项校验（既有语义，默认路径）。
+func (s *Storage) verifyManyPerItem(ctx context.Context, items []syncpkg.VerifyItem, out []syncpkg.VerifyResult) {
 	conc := min(len(items), DefaultVerifyConcurrency)
 	if conc < 1 {
-		return out
+		return
 	}
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
@@ -1305,7 +1329,38 @@ func (s *Storage) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []
 		}(i)
 	}
 	wg.Wait()
-	return out
+}
+
+// verifyManyGrouped 按父目录分组校验（`ListLong` 开启时；同目录一次 List 覆盖全部条目）。
+func (s *Storage) verifyManyGrouped(ctx context.Context, items []syncpkg.VerifyItem, out []syncpkg.VerifyResult) {
+	groups := make(map[string][]int, 4)
+	for i, it := range items {
+		dir := path.Dir(it.Key)
+		groups[dir] = append(groups[dir], i)
+	}
+	conc := min(len(groups), DefaultVerifyConcurrency)
+	if conc < 1 {
+		return
+	}
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	for dir, idxs := range groups {
+		wg.Add(1)
+		go func(dir string, idxs []int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				for _, idx := range idxs {
+					out[idx] = syncpkg.VerifyResult{Item: items[idx], State: syncpkg.VerifyInvisible, Reason: "ctx 取消"}
+				}
+				return
+			}
+			s.verifyGroup(ctx, dir, idxs, items, out)
+		}(dir, idxs)
+	}
+	wg.Wait()
 }
 
 // healByRapidRefresh 对「摘要不一致」的对象尝试**秒传刷新自愈**（零传输）：
@@ -1325,6 +1380,62 @@ func (s *Storage) healByRapidRefresh(ctx context.Context, it syncpkg.VerifyItem)
 		Item: it, State: syncpkg.VerifyOK, Refreshed: true,
 		RemoteETag: meta.ETag, RemoteSize: meta.Size, Reason: "秒传刷新自愈",
 	}, true
+}
+
+// verifyGroup 处理**同一目录**下的一批条目：一次 `List`（走 `ls -l`）拿全部 MD5，
+// 再逐项判定；List 失败/未命中 ⇒ 回落逐项 Stat（`verifyOne`）。
+//
+// 收益（2026-11-05）：secretdata 的块**按目录分容器** ⇒ 一个文件的所有块在同一目录，
+// 63 块从「63 次 meta 往返」降到「1 次 ls -l」。
+func (s *Storage) verifyGroup(ctx context.Context, dir string, idxs []int, items []syncpkg.VerifyItem, out []syncpkg.VerifyResult) {
+	metas, err := s.List(ctx, dir)
+	if err != nil {
+		for _, idx := range idxs {
+			out[idx] = s.verifyOne(ctx, items[idx])
+		}
+		return
+	}
+	byName := make(map[string]ObjectMeta, len(metas))
+	for i := range metas {
+		byName[path.Base(metas[i].Key)] = metas[i]
+	}
+	for _, idx := range idxs {
+		if m, ok := byName[path.Base(items[idx].Key)]; ok {
+			out[idx] = s.judgeVerify(ctx, items[idx], &m)
+			continue
+		}
+		out[idx] = s.verifyOne(ctx, items[idx]) // 未在列举中出现 ⇒ 逐项确认（含可见性等待）
+	}
+}
+
+// judgeVerify 用**已取得的元信息**判定单项（含秒传刷新自愈），不产生额外 API 往返。
+func (s *Storage) judgeVerify(ctx context.Context, it syncpkg.VerifyItem, meta *ObjectMeta) syncpkg.VerifyResult {
+	res := syncpkg.VerifyResult{Item: it, RemoteETag: meta.ETag, RemoteSize: meta.Size}
+	if it.MD5 != "" && meta.ETag != "" && !strings.EqualFold(meta.ETag, it.MD5) {
+		if healed, ok := s.healByRapidRefresh(ctx, it); ok {
+			return healed
+		}
+	}
+	switch {
+	case it.MD5 != "" && meta.ETag != "":
+		if strings.EqualFold(meta.ETag, it.MD5) {
+			res.State = syncpkg.VerifyOK
+			return res
+		}
+		res.State = syncpkg.VerifyMismatch
+		res.Reason = "远端 ETag 与期望 md5 不一致"
+	case it.Size > 0 && meta.Size > 0:
+		if sizeNear(it.Size, meta.Size) {
+			res.State = syncpkg.VerifyOK
+			return res
+		}
+		res.State = syncpkg.VerifyMismatch
+		res.Reason = "远端 size 超出容差"
+	default:
+		res.State = syncpkg.VerifyOK
+		res.Reason = "无可判定摘要/大小信息，存在即视为可见"
+	}
+	return res
 }
 
 // verifyOne 校验单个对象（VerifyMany 的工作单元）。

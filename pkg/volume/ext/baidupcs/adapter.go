@@ -75,6 +75,10 @@ type AdapterConfig struct {
 	Logger *slog.Logger
 	// Fallback 是库兜底实现（nil = 无兜底，二进制失败直接报错）。
 	Fallback libraryFallback
+	// ListLong 启用 `ls -l` 详细列举（一次调用即带 MD5，替代「ls + 逐条 meta」的 N 次往返）。
+	// **默认 false**（保守）：实测 2026-11-05 在被污染环境下退化，需在干净环境 A/B 验证
+	// （判据见 docs/external-dependencies.md §7.7）。
+	ListLong bool
 }
 
 // defaultBinaryTimeout 是子进程默认超时（10 分钟，覆盖大文件传输）。
