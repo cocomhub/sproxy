@@ -973,8 +973,11 @@ AES-256-GCM 加密的转发请求。请求体为帧协议：
 
 ### GET /metrics
 
-Prometheus 文本格式运行时指标（`text/plain; version=0.0.4`）。认证由 `MetricsAuth` 把关
-（`Authorization: Bearer <api_key>` 或 SproxySig 凭据 AK；未认证 `401`）。
+Prometheus 文本格式运行时指标（`text/plain; version=0.0.4`）。
+
+- **默认公开**（便于 Prometheus 直接抓取）；配置 `metrics_token` 后由 `MetricsAuth` 把关：
+  `?token=<t>` 或 `Authorization: Bearer <t>`，缺失/不匹配 → `401`（常量时间比较）。
+- 分类口径：`route_classes.tsv` 记为 `public`（与实现一致——空 token = 可达）。
 
 指标族见下文各小节（跨节点 / mux 传输质量 / 卷健康 / 派生状态 / 内存观测）；
 无样本时仍输出 `HELP`/`TYPE` 头（让「一直没数据」与「指标不存在」在面板上可区分）。
