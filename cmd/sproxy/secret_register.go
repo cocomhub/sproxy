@@ -177,6 +177,8 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 		SpanCacheBytes:     vcExtraByteSize(v, "span_cache_bytes"),
 		IndexSnapshotPath:  vcExtraStr(v, "index_snapshot_path"),
 		MetaCacheDir:       vcExtraStr(v, "meta_cache_dir"),
+		// normalize_names：""/"audit"/"apply"（默认空 = 不动；见 Options 注释）
+		NormalizeNames: vcExtraStr(v, "normalize_names"),
 	}
 }
 
