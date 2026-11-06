@@ -475,6 +475,19 @@ func (s *SecretdataFS) sampleVerifySnapshot(ctx context.Context) {
 	}
 }
 
+// trySnapshotFastPath 尝试「快照快路径」（不列举容器树）；命中则做**采样校验**并返回 true。
+// 全量扫描只用于一次性审计/迁移（`normalize_names` 非空 ⇒ allow=false）——
+// 快照不含重复容器组信息，命中会让审计/导出恒为 0。
+func (s *SecretdataFS) trySnapshotFastPath(ctx context.Context, root []syncpkg.Entry, allow bool) bool {
+	if !allow || !s.tryLoadIndexSnapshotFast(ctx, root) {
+		return false
+	}
+	// 快照命中后的**随机采样校验**（用户裁定 2026-11-07）：常态装配保持秒级启动，同时用
+	// 少量采样探测「外部直改盘 / 未迁移容器」造成的命名漂移并告警。
+	s.sampleVerifySnapshot(ctx)
+	return true
+}
+
 // runNormalizeNamesAction 按配置执行容器名规范化动作（装配末尾；"" = 不动）。
 // 失败**不阻断装配**（只告警）：审计/迁移是运维动作，卷可用性优先。
 func (s *SecretdataFS) runNormalizeNamesAction(action string) {
@@ -2010,19 +2023,19 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	// **例外**（2026-11-07）：配置了 `normalize_names`（audit/apply）时**必须全量扫描**——
 	// 快照不含「重复容器组」信息（dupGroups 由扫描阶段填充）⇒ 命中快照会让审计恒报 0 组
 	// （实测：groups=0 但待迁移 625 个容器，掩盖了真实重复）。
-	if s.opts.NormalizeNames == "" && s.tryLoadIndexSnapshotFast(ctx, root) {
-		// **快照命中后的异步随机采样校验**（2026-11-07 用户裁定）：全量扫描只用于
-		// 一次性审计/迁移（配置 `normalize_names`）；常态装配走快照 + **随机采样**若干
-		// 容器校验「物理位置与命名是否仍符合机制」——既保持秒级启动，又能在外部直改盘
-		// （或未迁移的历史容器）时发现漂移并告警。
-		s.sampleVerifySnapshot(ctx)
+	// **两条快照路径都必须让路**（2026-11-07 实测踩坑）：`tryLoadIndexSnapshotFast`（不列举
+	// 容器树）与 `tryLoadIndexSnapshot`（先列举再套快照）**都**会跳过扫描 ⇒ 必须一并短路，
+	// 否则审计/导出仍拿到空 dupGroups（实测：导出 files=0）。
+	allowSnapshot := s.opts.NormalizeNames == ""
+	if s.trySnapshotFastPath(ctx, root, allowSnapshot) {
 		return nil
 	}
 	containers, cerr := s.dirContainers(ctx, root)
 	if cerr != nil {
 		return fmt.Errorf("secretdata: 扫描容器树失败（拒绝空视图挂载）: %w", cerr)
 	}
-	if s.tryLoadIndexSnapshot(ctx, containers) {
+	if allowSnapshot && s.tryLoadIndexSnapshot(ctx, containers) {
+		s.sampleVerifySnapshot(ctx)
 		return nil
 	}
 	s.resetIndex()

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -244,4 +245,27 @@ func TestSampleVerifySnapshot_DetectsDrift(t *testing.T) {
 	}
 	// 采样函数不应 panic 且能跑（告警路径由日志断言，避免耦合计数）
 	sfs.sampleVerifySnapshot(ctx)
+}
+
+// TestNormalizeNames_GatesBothSnapshotPaths 钉住**两条快照路径都要让路**：
+// `tryLoadIndexSnapshotFast`（不列举容器树）与 `tryLoadIndexSnapshot`（先列举再套快照）
+// **都**会跳过扫描 ⇒ 若只短路其一，配置 normalize_names 时仍可能命中快照 ⇒ dupGroups 为空
+// ⇒ 审计/导出恒为 0（实测 2026-11-07：导出 files=0）。
+func TestNormalizeNames_GatesBothSnapshotPaths(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("secretdata.go")
+	if err != nil {
+		t.Fatalf("读源码: %v", err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "allowSnapshot := s.opts.NormalizeNames == \"\"") {
+		t.Fatal("缺少 allowSnapshot 定义（normalize_names 非空时必须让路快照）")
+	}
+	// 快路径经 trySnapshotFastPath(allow) 门控；容器树路径经 allowSnapshot 直接门控。
+	if !strings.Contains(body, "s.trySnapshotFastPath(ctx, root, allowSnapshot)") {
+		t.Fatal("快路径（tryLoadIndexSnapshotFast）必须受 allowSnapshot 门控")
+	}
+	if !strings.Contains(body, "if allowSnapshot && s.tryLoadIndexSnapshot(ctx, containers)") {
+		t.Fatal("容器树路径（tryLoadIndexSnapshot）也必须受 allowSnapshot 门控（否则仍会命中快照）")
+	}
 }
