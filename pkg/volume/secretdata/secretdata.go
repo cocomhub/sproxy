@@ -497,6 +497,8 @@ func (s *SecretdataFS) runNormalizeNamesAction(action string) {
 		s.runAuditAction(ctx)
 	case "export":
 		s.runExportAction(ctx)
+	case "cleanup-empty":
+		s.runCleanupEmptyAction(ctx)
 	case "apply":
 		moved, skipped, err := s.NormalizeContainerNames(ctx, false)
 		if err != nil {
@@ -530,6 +532,19 @@ func (s *SecretdataFS) runAuditAction(ctx context.Context) {
 		slog.Warn("secretdata: 重复容器组", "rel", c.Rel, "canonical", c.Canonical,
 			"others", c.Others, "conflicted", c.Conflicted, "details", c.Details)
 	}
+}
+
+// runCleanupEmptyAction 清理**空**落选容器（安全约束见 CleanupEmptyDuplicateContainers）。
+// 证据（目录 meta 解密 JSON）写 `NormalizeExportDir`（同 export 的隔离结构）。
+func (s *SecretdataFS) runCleanupEmptyAction(ctx context.Context) {
+	evidence := strings.TrimSpace(s.opts.NormalizeExportDir)
+	removed, skipped, err := s.CleanupEmptyDuplicateContainers(ctx, evidence, false)
+	if err != nil {
+		slog.Error("secretdata: 空落选容器清理失败", "error", err)
+		return
+	}
+	slog.Warn("secretdata: 空落选容器清理完成",
+		"removed", removed, "skipped_has_files", skipped, "evidence_dir", evidence)
 }
 
 // runExportAction 把重复容器组的落选容器解码导出到本地（供人工核对争议内容）。
@@ -2825,15 +2840,23 @@ func pickCanonicalContainer(scans []dirScan, idxs []int) int {
 
 // containerScore 是权威性排序键（逐项比较，越大越权威）。
 type containerScore struct {
-	subs  int   // 物理子容器数（数据完整性代理指标）
-	mtime int64 // 目录 meta mtime（纳秒）
-	dirID string
+	subs     int   // 物理子容器数（数据完整性代理指标）
+	hasFiles bool  // **含文件 meta**（2026-11-07 新增：空容器 vs 有数据容器，必须后者胜）
+	mtime    int64 // 目录 meta mtime（纳秒）
+	dirID    string
 }
 
-// betterThan 报告 a 是否比 b 更权威（子容器数 → mtime → DirID）。
+// betterThan 报告 a 是否比 b 更权威（子容器数 → **有文件** → mtime → DirID）。
+//
+// **`hasFiles` 必须在 mtime 之前**（2026-11-07 实测缺陷）：重复容器常由「复制目录 meta」形成，
+// 两者的 mtime 与 DirID **完全相同**（同一个 meta），仅靠它们会按扫描顺序任选 ⇒ 可能选中
+// **空容器**为权威、把**有数据的容器**当落选（数据虽保留不删，但**不加载** ⇒ 用户看不到文件）。
 func (a containerScore) betterThan(b containerScore) bool {
 	if a.subs != b.subs {
 		return a.subs > b.subs
+	}
+	if a.hasFiles != b.hasFiles {
+		return a.hasFiles
 	}
 	if a.mtime != b.mtime {
 		return a.mtime > b.mtime
@@ -2844,9 +2867,10 @@ func (a containerScore) betterThan(b containerScore) bool {
 // containerScoreOf 计算单个候选的排序键。
 func containerScoreOf(scans []dirScan, subs map[string]int, i int) containerScore {
 	return containerScore{
-		subs:  subs[scans[i].container],
-		mtime: dirMetaMTime(scans[i].dm.MTime),
-		dirID: scans[i].dm.DirID,
+		subs:     subs[scans[i].container],
+		hasFiles: scans[i].hasFiles,
+		mtime:    dirMetaMTime(scans[i].dm.MTime),
+		dirID:    scans[i].dm.DirID,
 	}
 }
 

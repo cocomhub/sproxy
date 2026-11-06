@@ -116,9 +116,13 @@ func copyContainerMetaOnly(t *testing.T, root, srcContainer, dstContainer string
 	if err != nil {
 		return err
 	}
+	// **必须是目录 meta**（按分类筛选；容器里还有文件 meta / 数据 blob，取第一个非目录项会取错）
 	var metaName string
 	for _, e := range ents {
-		if !e.IsDir() {
+		if e.IsDir() {
+			continue
+		}
+		if shardseal.ClassifyName(e.Name()) == shardseal.KindDirMeta {
 			metaName = e.Name()
 			break
 		}
