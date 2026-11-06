@@ -147,7 +147,11 @@ type Options struct {
 	//   - "audit"：扫描并打印重复容器组（含争议内容检测），**不修改任何数据**；
 	//   - "apply"：逐个把容器移动到确定性名下；**有争议的组自动跳过**（等人工确认）。
 	// 默认空（不动，零回归）；幂等（可重复执行/中断续跑）。
+	// 另支持 "export"：把重复容器组的**落选容器**递归解码导出到 `NormalizeExportDir`
+	// （供人工核对争议内容；每个容器独立子目录 ⇒ 同名文件不覆盖）。
 	NormalizeNames string
+	// NormalizeExportDir 是 normalize_names="export" 的输出根目录（空 = "./dup-export"）。
+	NormalizeExportDir string
 
 	// MetaCacheDir 是装配期 meta blob 的**本机磁盘密文缓存**目录（空 = 禁用，默认零回归）。
 	// 外部卷每读一个 meta 都要起一次下载 CLI 并落随机临时目录（Close 即删）⇒ 每次重启
@@ -477,28 +481,9 @@ func (s *SecretdataFS) runNormalizeNamesAction(action string) {
 	ctx := context.Background()
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "audit":
-		conflicts, err := s.AuditDuplicateContainers(ctx)
-		if err != nil {
-			slog.Error("secretdata: 重复容器审计失败", "error", err)
-			return
-		}
-		conflicted := 0
-		for _, c := range conflicts {
-			if c.Conflicted {
-				conflicted++
-			}
-		}
-		slog.Warn("secretdata: 重复容器审计完成", "groups", len(conflicts), "conflicted", conflicted)
-		// 顺带报告**待迁移规模**（dry-run；不移动）
-		if pending, already, derr := s.NormalizeContainerNames(ctx, true); derr != nil {
-			slog.Error("secretdata: 容器名 dry-run 失败", "error", derr)
-		} else {
-			slog.Warn("secretdata: 容器名规范化 dry-run（audit）", "pending_migrate", pending, "already_deterministic", already)
-		}
-		for _, c := range conflicts {
-			slog.Warn("secretdata: 重复容器组", "rel", c.Rel, "canonical", c.Canonical,
-				"others", c.Others, "conflicted", c.Conflicted, "details", c.Details)
-		}
+		s.runAuditAction(ctx)
+	case "export":
+		s.runExportAction(ctx)
 	case "apply":
 		moved, skipped, err := s.NormalizeContainerNames(ctx, false)
 		if err != nil {
@@ -507,6 +492,46 @@ func (s *SecretdataFS) runNormalizeNamesAction(action string) {
 		}
 		slog.Warn("secretdata: 容器名规范化完成", "moved", moved, "skipped", skipped)
 	}
+}
+
+// runAuditAction 执行重复容器审计 + 待迁移规模 dry-run（只读）。
+func (s *SecretdataFS) runAuditAction(ctx context.Context) {
+	conflicts, err := s.AuditDuplicateContainers(ctx)
+	if err != nil {
+		slog.Error("secretdata: 重复容器审计失败", "error", err)
+		return
+	}
+	conflicted := 0
+	for _, c := range conflicts {
+		if c.Conflicted {
+			conflicted++
+		}
+	}
+	slog.Warn("secretdata: 重复容器审计完成", "groups", len(conflicts), "conflicted", conflicted)
+	if pending, already, derr := s.NormalizeContainerNames(ctx, true); derr != nil {
+		slog.Error("secretdata: 容器名 dry-run 失败", "error", derr)
+	} else {
+		slog.Warn("secretdata: 容器名规范化 dry-run（audit）", "pending_migrate", pending, "already_deterministic", already)
+	}
+	for _, c := range conflicts {
+		slog.Warn("secretdata: 重复容器组", "rel", c.Rel, "canonical", c.Canonical,
+			"others", c.Others, "conflicted", c.Conflicted, "details", c.Details)
+	}
+}
+
+// runExportAction 把重复容器组的落选容器解码导出到本地（供人工核对争议内容）。
+func (s *SecretdataFS) runExportAction(ctx context.Context) {
+	dst := strings.TrimSpace(s.opts.NormalizeExportDir)
+	if dst == "" {
+		dst = "dup-export"
+	}
+	files, bytesOut, err := s.ExportDuplicateContainers(ctx, dst)
+	if err != nil {
+		slog.Error("secretdata: 重复容器导出失败", "dst", dst, "error", err)
+		return
+	}
+	slog.Warn("secretdata: 重复容器导出完成（落选容器数据已解码到本地，供人工核对）",
+		"dst", dst, "files", files, "bytes", bytesOut)
 }
 
 // backend 是 ExternalBackend 实现。
