@@ -29,6 +29,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math/rand"
 	"net/url"
 	"os"
 	"path"
@@ -420,6 +421,54 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	}
 	fs.runNormalizeNamesAction(opts.NormalizeNames)
 	return fs, nil
+}
+
+// sampleVolumeSampleN 是快照命中后随机采样的容器数量（成本 ≈ N 次 Stat，秒级）。
+const sampleVolumeSampleN = 8
+
+// sampleVerifySnapshot 快照命中后**随机采样**若干容器，校验：
+//  1. 物理位置与逻辑父一致（容器确实在 `dirSegs[父]` 下）；
+//  2. 命名符合确定性机制（`DirNameFor(secret, 父容器, rel)`）。
+//
+// 不一致 ⇒ 告警（提示需配置 `normalize_names: "audit"` 做全量审计），**不阻断挂载**
+// （采样是尽力而为的漂移探测，不是正确性依赖——读取路径本身按 dirSegs 工作）。
+func (s *SecretdataFS) sampleVerifySnapshot(ctx context.Context) {
+	if len(s.secret) == 0 {
+		return
+	}
+	s.mu.RLock()
+	rels := make([]string, 0, len(s.dirSegs))
+	segs := make(map[string]string, len(s.dirSegs))
+	for rel, c := range s.dirSegs {
+		if rel != "" {
+			rels = append(rels, rel)
+		}
+		segs[rel] = c
+	}
+	s.mu.RUnlock()
+	if len(rels) == 0 {
+		return
+	}
+	// 随机采样（map 遍历本身随机；再 shuffle 保证均匀）
+	rand.Shuffle(len(rels), func(i, j int) { rels[i], rels[j] = rels[j], rels[i] })
+	n := min(sampleVolumeSampleN, len(rels))
+	drift := 0
+	for _, rel := range rels[:n] {
+		pc := segs[parentDirOf(rel)]
+		want, err := s.targetContainerPath(pc, rel)
+		if err != nil {
+			continue
+		}
+		if cur := segs[rel]; cur != want {
+			drift++
+			slog.Warn("secretdata: 采样发现容器名不符合确定性机制（可能未迁移或外部直改盘）",
+				"rel", rel, "current", cur, "expected", want)
+		}
+	}
+	if drift > 0 {
+		slog.Warn("secretdata: 采样校验发现容器名漂移（建议配置 normalize_names=\"audit\" 做全量审计）",
+			"sampled", n, "drift", drift)
+	}
 }
 
 // runNormalizeNamesAction 按配置执行容器名规范化动作（装配末尾；"" = 不动）。
@@ -1932,7 +1981,16 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	// **快照优先**：命中时跳过容器树列举（292 个容器 = 292 次外部 `ls`，实测占启动
 	// 192s 中的 181s）。健全性由「卷根顶层目录集合 + 抽样 Stat」保障；本进程任何写操作
 	// 都会删除快照（见 invalidateIndexSnapshot），因此只在「外部直改盘」时才可能陈旧。
-	if s.tryLoadIndexSnapshotFast(ctx, root) {
+	//
+	// **例外**（2026-11-07）：配置了 `normalize_names`（audit/apply）时**必须全量扫描**——
+	// 快照不含「重复容器组」信息（dupGroups 由扫描阶段填充）⇒ 命中快照会让审计恒报 0 组
+	// （实测：groups=0 但待迁移 625 个容器，掩盖了真实重复）。
+	if s.opts.NormalizeNames == "" && s.tryLoadIndexSnapshotFast(ctx, root) {
+		// **快照命中后的异步随机采样校验**（2026-11-07 用户裁定）：全量扫描只用于
+		// 一次性审计/迁移（配置 `normalize_names`）；常态装配走快照 + **随机采样**若干
+		// 容器校验「物理位置与命名是否仍符合机制」——既保持秒级启动，又能在外部直改盘
+		// （或未迁移的历史容器）时发现漂移并告警。
+		s.sampleVerifySnapshot(ctx)
 		return nil
 	}
 	containers, cerr := s.dirContainers(ctx, root)
@@ -2459,50 +2517,75 @@ func (s *SecretdataFS) NormalizeContainerNames(ctx context.Context, dryRun bool)
 	}
 	s.mu.RLock()
 	segs := make(map[string]string, len(s.dirSegs))
-	for rel, c := range s.dirSegs {
-		segs[rel] = c
-	}
+	maps.Copy(segs, s.dirSegs)
 	s.mu.RUnlock()
 
 	rels := sortedRelsByDepth(segs)
 	newSegs := make(map[string]string, len(rels))
 	for _, rel := range rels {
-		if blocked[rel] {
-			skipped++
-			continue
+		m, sk, rerr := s.normalizeOneRel(ctx, rel, segs, newSegs, blocked, dryRun)
+		moved += m
+		skipped += sk
+		if rerr != nil {
+			return moved, skipped, rerr
 		}
-		pc := segmentOf(segs, newSegs, parentDirOf(rel))
-		want, derr := s.targetContainerPath(pc, rel)
-		if derr != nil {
-			return moved, skipped, derr
-		}
-		cur := segmentOf(segs, newSegs, rel)
-		switch {
-		case cur == "":
-			continue // 该逻辑路径无容器（异常态）⇒ 跳过
-		case cur == want:
-			skipped++
-		case dryRun:
-			slog.Info("[dry-run] 规范化容器名", "rel", rel, "from", cur, "to", want)
-			moved++
-		default:
-			if rerr := s.inner.Rename(ctx, cur, want); rerr != nil {
-				return moved, skipped, fmt.Errorf("secretdata: 规范化容器名失败（%s → %s）: %w", cur, want, rerr)
-			}
-			moved++
-		}
-		newSegs[rel] = want
 	}
 	if dryRun {
 		return moved, skipped, nil
 	}
 	s.mu.Lock()
-	for rel, c := range newSegs {
-		s.dirSegs[rel] = c
-	}
+	maps.Copy(s.dirSegs, newSegs)
 	s.mu.Unlock()
 	s.invalidateIndexSnapshot() // 物理路径已变 ⇒ 快照失效
 	return moved, skipped, nil
+}
+
+// normalizeOneRel 处理单个逻辑目录的容器名规范化（拆出以控认知复杂度）。
+// 返回 (本次移动数, 本次跳过数, error)；同时更新 newSegs[rel]。
+func (s *SecretdataFS) normalizeOneRel(ctx context.Context, rel string, segs, newSegs map[string]string,
+	blocked map[string]bool, dryRun bool) (int, int, error) {
+	if blocked[rel] {
+		return 0, 1, nil
+	}
+	pc := segmentOf(segs, newSegs, parentDirOf(rel))
+	want, derr := s.targetContainerPath(pc, rel)
+	if derr != nil {
+		return 0, 0, derr
+	}
+	cur := segmentOf(segs, newSegs, rel)
+	switch {
+	case cur == "":
+		return 0, 0, nil // 该逻辑路径无容器（异常态）⇒ 跳过
+	case cur == want:
+		newSegs[rel] = want
+		return 0, 1, nil
+	case dryRun:
+		slog.Info("[dry-run] 规范化容器名", "rel", rel, "from", cur, "to", want)
+		newSegs[rel] = want
+		return 1, 0, nil
+	}
+	didMove, rerr := s.moveContainerIdempotent(ctx, rel, cur, want)
+	if rerr != nil {
+		return 0, 0, rerr
+	}
+	newSegs[rel] = want
+	if didMove {
+		return 1, 0, nil
+	}
+	return 0, 1, nil
+}
+
+// moveContainerIdempotent 把容器从 cur 移到 want；**目标已存在视为已完成**（幂等续跑）。
+// 返回 (是否真的移动, error)。
+func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, want string) (bool, error) {
+	if rerr := s.inner.Rename(ctx, cur, want); rerr != nil {
+		if _, serr := s.inner.Stat(ctx, want); serr == nil {
+			slog.Info("secretdata: 容器名已是目标（幂等跳过，可能由另一卷实例完成）", "rel", rel, "target", want)
+			return false, nil
+		}
+		return false, fmt.Errorf("secretdata: 规范化容器名失败（%s → %s）: %w", cur, want, rerr)
+	}
+	return true, nil
 }
 
 // normalizeBlockedRels 返回因「重复容器争议内容」需跳过规范化的逻辑路径集合。
