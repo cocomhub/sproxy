@@ -2304,6 +2304,8 @@ func dirMetaTable(scans []dirScan) map[string]*dirMeta {
 // 父引用断裂（parent 缺失/未解析）→ fail-closed 跳过该容器（含文件 meta 时记日志）。
 func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[string]*dirMeta, scans []dirScan) []dirRes {
 	res := make([]dirRes, len(scans))
+	// byRel：逻辑路径 → 声明它的容器索引（>1 即重复容器）；rels：每个 scan 的逻辑路径。
+	byRel := make(map[string][]int, len(scans))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, sc := range scans {
@@ -2318,7 +2320,23 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 			}
 			continue
 		}
-		res[i] = dirRes{container: sc.container, rel: rel, ok: true}
+		byRel[rel] = append(byRel[rel], i)
+	}
+	// **重复容器处理**（2026-11-06 实测线上缺陷）：同一逻辑路径被多个容器声明时，原实现
+	// `s.dirSegs[rel] = sc.container` **静默覆盖** ⇒ 映射与物理不一致（实测 jav 卷：
+	// `qG881kZTeIr` 与 `4rQQof5H592J` 都声明同一目录，覆盖后嵌套校验拿旧容器校验新容器 ⇒
+	// 卷拒绝挂载）。此处**确定性选权威容器**，其余标记忽略（**数据保留不删**）并显著告警。
+	s.registerCanonicalContainers(scans, byRel, res)
+	return res
+}
+
+// registerCanonicalContainers 为每个逻辑路径登记**唯一权威容器**（重复容器：选权威 + 告警，
+// 其余容器数据保留但不加载）。拆出以控认知复杂度。
+func (s *SecretdataFS) registerCanonicalContainers(scans []dirScan, byRel map[string][]int, res []dirRes) {
+	for rel, idxs := range byRel {
+		keep := pickCanonicalContainer(scans, idxs)
+		sc := scans[keep]
+		res[keep] = dirRes{container: sc.container, rel: rel, ok: true}
 		s.dirPhysTotal += sc.dirPhys // 挂载时重建目录 meta 真值累计（Phase 1 已读 blob）
 		s.dirSegs[rel] = sc.container
 		s.dirIDs[rel] = sc.dm.DirID
@@ -2327,8 +2345,76 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 			s.dirs[rel] = struct{}{}
 			s.dirParents[rel] = parentDirOf(rel)
 		}
+		warnIgnoredContainers(rel, scans, idxs, keep)
 	}
-	return res
+}
+
+// warnIgnoredContainers 对同一逻辑路径的**落选容器**逐条告警（数据保留、暂不挂载）。
+func warnIgnoredContainers(rel string, scans []dirScan, idxs []int, keep int) {
+	for _, i := range idxs {
+		if i == keep {
+			continue
+		}
+		slog.Warn("secretdata: 同一逻辑目录存在**多个容器**（重复容器）——保留权威容器，"+
+			"其余容器数据保留但暂不挂载（请核对后清理）",
+			"rel", rel, "keep", scans[keep].container, "ignored", scans[i].container,
+			"keep_mtime", scans[keep].dm.MTime, "ignored_mtime", scans[i].dm.MTime)
+	}
+}
+
+// pickCanonicalContainer 在同一逻辑路径的多个容器中确定**权威者**（确定性，可复现）。
+//
+// 判据优先级（2026-11-06 实测校准）：
+//  1. **子容器数量多**——数据更全，这是最强判据：实测「写子目录**不会**更新父容器 meta」
+//     ⇒ 父 meta 的 mtime 在重复容器场景下**常常相同**（复制/并发创建），仅靠 mtime 会
+//     选错 ⇒ 选到子容器不在其下的那个 ⇒ 子容器校验失败 ⇒ 卷仍然起不来；
+//  2. 目录 meta mtime 新者优先（同子容器数时）；
+//  3. DirID 字典序（稳定，避免扫描顺序影响结果）。
+func pickCanonicalContainer(scans []dirScan, idxs []int) int {
+	subs := subContainerCounts(scans)
+	best := idxs[0]
+	for _, i := range idxs[1:] {
+		if containerScoreOf(scans, subs, i).betterThan(containerScoreOf(scans, subs, best)) {
+			best = i
+		}
+	}
+	return best
+}
+
+// containerScore 是权威性排序键（逐项比较，越大越权威）。
+type containerScore struct {
+	subs  int   // 物理子容器数（数据完整性代理指标）
+	mtime int64 // 目录 meta mtime（纳秒）
+	dirID string
+}
+
+// betterThan 报告 a 是否比 b 更权威（子容器数 → mtime → DirID）。
+func (a containerScore) betterThan(b containerScore) bool {
+	if a.subs != b.subs {
+		return a.subs > b.subs
+	}
+	if a.mtime != b.mtime {
+		return a.mtime > b.mtime
+	}
+	return a.dirID < b.dirID
+}
+
+// containerScoreOf 计算单个候选的排序键。
+func containerScoreOf(scans []dirScan, subs map[string]int, i int) containerScore {
+	return containerScore{
+		subs:  subs[scans[i].container],
+		mtime: dirMetaMTime(scans[i].dm.MTime),
+		dirID: scans[i].dm.DirID,
+	}
+}
+
+// subContainerCounts 统计每个容器物理直接子项（容器）数量。
+func subContainerCounts(scans []dirScan) map[string]int {
+	counts := make(map[string]int, len(scans))
+	for i := range scans {
+		counts[parentDirOf(scans[i].container)]++
+	}
+	return counts
 }
 
 // loadAllFileMetas Phase 3：各容器文件 meta 并行解密登记索引。
@@ -2778,7 +2864,11 @@ func (s *SecretdataFS) ensureContainer(ctx context.Context, dirPath string, mtim
 // 仍在卷根（顶层）——逻辑树根无父容器。**旧扁平布局不支持、无兼容**：加载侧校验卷根容器唯一
 // （`validateNestedContainers`），违反即 fail-closed 拒绝挂载。
 func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, parentContainer, parentID string, mtime int64) (string, string, string, int64, error) {
-	c, cerr := shardseal.RandDirName()
+	// **确定性容器名**（2026-11-06 修复「重复容器」）：原为 RandDirName（随机）⇒ 同一逻辑目录
+	// 被创建两次（中断重试/并发/缓存丢失）会得到两个容器、同时声明同一逻辑路径 ⇒ 装配期
+	// dirSegs 静默覆盖 ⇒ 卷拒绝挂载。确定性派生使重复创建天然幂等（同名复用）。
+	// 详见 shardseal.DirNameFor 注释。
+	c, cerr := shardseal.DirNameFor(s.secret, parentContainer, dirPath)
 	if cerr != nil {
 		return "", "", "", 0, cerr
 	}
