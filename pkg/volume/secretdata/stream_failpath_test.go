@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -24,6 +25,7 @@ import (
 type failAfterWriteFS struct {
 	syncpkg.FS
 	pred  func(p string) bool
+	mu    sync.Mutex // 块级并发上传后可能多 goroutine 同时写：fired 必须加锁
 	fired bool
 }
 
@@ -32,10 +34,19 @@ func (f *failAfterWriteFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey
 		return err
 	}
 	if f.pred(p) {
+		f.mu.Lock()
 		f.fired = true
+		f.mu.Unlock()
 		return errors.New("fail-after-write: 内层写成功但复核失败")
 	}
 	return nil
+}
+
+// firedAt 是 fired 的并发安全读取。
+func (f *failAfterWriteFS) firedAt() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fired
 }
 
 var _ syncpkg.FS = (*failAfterWriteFS)(nil)
@@ -104,7 +115,7 @@ func TestWriteFileStream_MetaUploadFail_NoMetaOrphan(t *testing.T) {
 	if !strings.Contains(werr.Error(), "上传 meta 失败") {
 		t.Fatalf("夹具未命中流式 meta 上传失败分支: %v", werr)
 	}
-	if !inner.fired {
+	if !inner.firedAt() {
 		t.Fatal("夹具失效：未观测到 file meta 的内层写")
 	}
 	sfs.mu.RLock()
@@ -147,10 +158,11 @@ func TestWriteFileStream_MemoryDeliveryUploadFail_NoChunkOrphan(t *testing.T) {
 	if werr == nil {
 		t.Fatal("内存交付下分块上传 write-then-fail ⇒ WriteFile 必须失败 ✗")
 	}
-	if !strings.Contains(werr.Error(), "上传分块") {
+	// 块级并发后错误由 iu.finish() 统一汇总（文案「分块上传失败」），仍须是分块上传失败。
+	if !strings.Contains(werr.Error(), "分块上传") {
 		t.Fatalf("夹具未命中内存交付分块上传失败分支: %v", werr)
 	}
-	if !inner.fired {
+	if !inner.firedAt() {
 		t.Fatal("夹具失效：未观测到数据分块的内层写")
 	}
 	if _, _, calls := q.snapshot(); calls == 0 {

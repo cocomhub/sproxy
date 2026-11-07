@@ -325,3 +325,32 @@ func (g *StagingQuotaGateFS) ListDirNames(ctx context.Context, path string) ([]E
 var (
 	_ NameLister = (*StagingQuotaGateFS)(nil)
 )
+
+// 编译期能力断言（门禁 R21）：透明装饰器必须声明全部 `pkg/sync` 可选能力，否则上层
+// `fs.(能力)` 断言恒 false ⇒ **静默降级**（批量校验 / 秒传刷新被悄悄跳过）。
+var (
+	_ BatchVerifier  = (*StagingQuotaGateFS)(nil)
+	_ RapidRefresher = (*StagingQuotaGateFS)(nil)
+)
+
+// VerifyMany 转发批量校验（透明装饰器必须转发，否则上层 `AssertBatchVerifier` 恒 false）。
+//
+// 底层未实现该能力 ⇒ 返回 **nil**：调用方（secretdata.verifyBatchAndRepair）已有「结果长度
+// 与请求不符 ⇒ 无法判定 ⇒ 跳过批量校验」的防御分支，且 Put 内部本就逐块即时复核 ⇒ 零回归。
+// **不得**返回「全部 mismatch」——那会被读成需要重传而触发无谓重传。
+func (g *StagingQuotaGateFS) VerifyMany(ctx context.Context, items []VerifyItem) []VerifyResult {
+	bv, ok := g.inner.(BatchVerifier)
+	if !ok {
+		return nil
+	}
+	return bv.VerifyMany(ctx, items)
+}
+
+// RapidRefresh 转发秒传刷新（零传输刷新远端 meta）；底层未实现 ⇒ ErrUnsupported（调用方回落重传）。
+func (g *StagingQuotaGateFS) RapidRefresh(ctx context.Context, item VerifyItem) (bool, error) {
+	rr, ok := g.inner.(RapidRefresher)
+	if !ok {
+		return false, fmt.Errorf("StagingQuotaGateFS: 底层未实现 RapidRefresh: %w", ErrUnsupported)
+	}
+	return rr.RapidRefresh(ctx, item)
+}

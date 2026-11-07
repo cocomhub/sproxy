@@ -122,6 +122,64 @@
 | 二进制失败回退库 adpater / 无兜底 fail-closed（不落回全量下载） | 与既有 binary→library 回退同构 | `TestBinaryAdapter_Meta_Fallback` / `_NoFallback` / `_List_Fallback` |
 | 子 module e2e 测试不被 CI 编译（`//go:build e2e`）→ `make vet-e2e-submodules` 编译门 | 防外部依赖/接口变更后静默腐化 | CI `Test Sub-Modules` job 内 `make vet-e2e-submodules` |
 
+### 7.6 百度网盘「上传后 md5/ETag 不可靠」与**秒传刷新**（实测 2026-11-04）
+
+> **必读结论（不要重复探索）**：百度**分片上传**后远端记录的 md5/ETag **可能不可靠**
+> （官方 help 原文：「分片上传之后, 服务器可能会记录到错误的文件md5, 可使用 fixmd5 命令
+> 尝试修复」）。此时**内容其实已在盘**——修复手段**必须优先用 rapidupload（秒传）刷新**，
+> 而**不是**重传内容：刷新零传输、毫秒级；重传要重新传整个块/文件（慢几个数量级）。
+>
+> **实测时间线**：把一个 130 字节文件写入**已存在的目录** `jav/_probe`，
+> 逐块即时 `Stat+md5` 复核反复超时，最终 **4 分 41 秒**才完成（≈ 90s×3 重试窗口）。
+> 同一时刻用 BaiduPCS-Go 直接传 1KB 到新目录，`meta` **立即可见** ——
+> ⇒ 延迟**不是**「新目录/新文件的索引延迟」（此前误判），而是 **ETag 不可靠 + 刷新重试**。
+
+| 行为 | 说明 | 锁定测试 / 实现 |
+|---|---|---|
+| 分片上传后 ETag 可能 ≠ 整文件 md5 | 远端 md5 由片组合而成或服务端标记「可能不正确」 | `TestDifferential_RapidUploadConvergence`（刷新命中 16/16、零重复传输） |
+| **rapidupload 命中即刷新权威 md5** | 参数：`path/size/md5/sliceMD5(前256KB)/crc32/blockMD5s(4MB 切分)` | `Storage.refreshByRapidUpload` |
+| 上传后复核：ETag 可用则**必须相等**；ETag 缺失（新目录窗口）则按 `sizeNear` 容差（max(4KiB,0.1%)） | 列举（`ls`）的 size 对大文件是**近似值**（实测 87.3MiB 差 312B） | `TestSizeNear` / `TestPut_StatDelayedButListVisible` |
+| **秒传刷新自愈「内置」在后端**（使用方无需理解） | `BatchVerifier` 契约要求：`VerifyMany` 发现摘要不一致时**后端自己**先做 rapidupload 刷新并复验，成功即返回 `State=OK + Refreshed=true`。消费方（secretdata/上层）只看结果，**不编排**刷新逻辑 | `TestVerifyMany_SelfHealsByRapidRefresh`（变异：去掉自愈调用 ⇒ 红） |
+| 批量延迟校验（上传阶段不逐块复核） | 全部写完统一校验（索引/一致性窗口后命中）；仍不一致才回落重传/整文件重试 | `TestWriteFile_BatchVerifyWholeFileRetry`（变异：去掉整文件重试 ⇒ 红） |
+| 秒传刷新的**块大小边界** | `sliceMD5`/`blockMD5s` 需按 4MB 切分；块 ≤256KiB 时二者都等于整块 md5 ⇒ 可直接刷新；更大块需在 meta 存摘要列表（当前不做，回落重传） | `Storage.RapidRefresh`（`rapidRefreshMaxSize = 256KiB`） |
+| 块密文摘要落 meta | `ChunkInfo.EncMD5` / `EncCRC32`（写侧由 `HashMD5`/`HashCRC32IEEE` 计算）供上述刷新使用 | `shardseal` 写侧两处构造 |
+
+**分层判据（改造后，使用方无感）**：
+1. **后端层（baidupcs）**：`VerifyMany` 内建自愈 —— 摘要不一致 ⇒ 先 rapidupload 刷新（零传输）⇒ 复验；
+   成功返回 `OK + Refreshed`。这是**唯一应该实现刷新的地方**，不要在上层重复编排。
+2. **卷层（secretdata）**：只看 `State`；`mismatch` 才重传（无本地副本 ⇒ 整文件重试一次）。
+3. **绝不**把「ETag 不可靠」当成「内容损坏」直接判失败 —— 那正是 128 条历史任务
+   16.5 分钟/条的来源（实测 130 字节文件曾耗时 4m41s）。
+
+### 7.7 `ls -l` 可拿 MD5，但**不可用于上传关键路径**（实测 2026-11-05，结论：已回退）
+
+**能力确认（真）**：`BaiduPCS-Go ls -l <dir>` 输出含 `MD5` 列，且对**小文件/单传**与本地
+md5 一致（实测 `local = ls -l = 6156c3f7…`）；单次调用在**普通目录**约 0.3s。
+
+**为什么最终没有采用**：按「1 次 `ls -l` 替代 N 次逐条 `meta`」改造 `Storage.list(exactSizes)`
+与 `VerifyMany`（按目录分组）后，上传耗时**严重退化**：
+
+| 文件 | 改造前 | 改造后 |
+| --- | --- | --- |
+| 1 MiB | 13.7s | **276s** |
+| 50 MiB | 26.2s | **305s** |
+| 250 MiB | 65.8s | **329s** |
+
+回滚后同环境复测 1 MiB 仍为 **171s**，日志显示：
+`WARN 上传后 Stat 等待超时仍不可见（交由上层重传）` ⇒ 说明**环境已被当晚海量测试污染**
+（反复创建/删除测试目录 + 数十 GB 写入），百度侧一致性窗口变长；因此**无法把退化归因于
+`ls -l` 本身**，但也**无法证明其收益**。
+
+**处置（已落地）**：代码**回退**（`binary_meta.go` / `VerifyMany` 分组 / 解析器与测试全部移除），
+保持「逐项 `Stat` + `rapidupload` 自愈」的既有路径。
+
+**下次若要重试该优化，必须满足**：
+1. **干净环境**（至少 24h 无大批量上传/删除，或换账号/新卷）；
+2. **A/B 交替**（同一进程内可开关），而不是先后两次运行（环境漂移无法区分）；
+3. 先只对 **`ListDir`（目录列举）** 启用（与上传路径解耦），确认 `ls -l` 在 secretdata
+   **深容器目录**上不触发限流/长延迟，再考虑接入校验路径；
+4. 关注 limit：历史曾因「1.2 万 blob 全量 meta」触发网盘限流 31034。
+
 ## 维护指引
 
 - **新增外部依赖**：先在本文档对应分类补条目 + 测试锁定（TDD 红灯 → 实现 → 绿）

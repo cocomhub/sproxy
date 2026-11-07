@@ -14,11 +14,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 
@@ -80,6 +83,9 @@ type Storage struct {
 	// 同一文件的多次 Range GET（含大块持续下载 >1 分钟）复用同一张直链，避免使用中
 	// 过期重签（每次 ~0.3s）；失效（CDN 非 206）⇒ 清除并重签一次（自愈）。
 	dlinkCache *dlinkLRU
+	// statVisibleWait 是「上传后等待目标可见」的总窗口（0 = DefaultStatVisibleMaxWait）。
+	// 结构体内部字段（只经 NewStorage 注入），便于测试用短窗口覆盖 90s 常量。
+	statVisibleWait time.Duration
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -176,6 +182,11 @@ type PutHints struct {
 	// **绝不跳过上传后的 md5 刷新/复核**（用户裁定 2026-10-21：必须按 md5 刷新成功保证
 	// 文件一致性，即使内容随机新建也要确保远端 meta 为权威整文件 md5）。
 	RandomBlob bool
+	// DeferVerify 表示**跳过上传后的即时 ETag/Stat 复核**（批量延迟校验路径，
+	// 2026-11-04 用户设计）：新目录树的 Stat 延迟 5–10 分钟，逐块复核必然超时；
+	// 调用方承诺在全部写完后用 VerifyMany 统一校验（此时索引已建立）。
+	// **不改变**内容一致性红线：调用方必须真的校验（VerifyMany），否则等于放弃校验。
+	DeferVerify bool
 }
 
 // PutFromStagedPath 把**调用方已暂存**的本地文件上传为 key（本地 staging 路径复用：
@@ -535,7 +546,7 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stage
 		meta, visible = s.waitPutVisible(ctx, key)
 		if !visible {
 			s.log.Warn("上传后 Stat 等待超时仍不可见（交由上层重传）",
-				"key", key, "attempt", attempt, "max_wait", statVisibleMaxWait.String())
+				"key", key, "attempt", attempt, "max_wait", s.statVisibleWaitOrDefault().String())
 			return nil, false, nil
 		}
 		statErr = nil
@@ -545,6 +556,24 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stage
 	}
 	if meta.MD5Unreliable {
 		return s.checkAfterUploadUnreliableMD5(ctx, key, st, meta, attempt)
+	}
+	// **ETag 未提供**（百度新目录树的一致性延迟，实测 2026-11-04：`ls` 立即可见但 `meta`
+	// 报 31066 达 5-10 分钟 ⇒ ETag 拿不到）：退化为 **size 校验**，理由与 MD5Unreliable 同源——
+	// 「无校验能力 ≠ 接受任意内容」，且 secretdata 的块名含内容哈希 + AES-GCM tag 在读取时
+	// 仍会 fail-closed，上传后复核是额外防线而非唯一防线。ETag 一旦可用仍走严格相等。
+	if meta.ETag == "" {
+		// 列举（`ls`）返回的 size 对大文件是**近似值**（实测 87.3MiB 文件差 312B：want=91593425
+		// got=91593113）⇒ 不能要求精确相等，改用**相对容差**（max(4KiB, 0.1%)）判定「同一个
+		// 对象且大小量级一致」。内容完整性仍由 secretdata 的块名（内容哈希）+ AES-GCM tag 在
+		// 读取时保证；上传后复核是额外防线。
+		if st.size > 0 && sizeNear(st.size, meta.Size) {
+			s.log.Warn("上传后远端 ETag 暂不可用（新目录一致性延迟），按列举 size 容差通过",
+				"key", key, "want_size", st.size, "got_size", meta.Size, "attempt", attempt)
+			return meta, true, nil
+		}
+		s.log.Warn("上传后远端 ETag 不可用且 size 超出容差（重传）",
+			"key", key, "want_size", st.size, "got_size", meta.Size, "attempt", attempt)
+		return meta, false, nil
 	}
 	if meta.ETag == localMD5 {
 		return meta, true, nil
@@ -1139,19 +1168,240 @@ func (r *tempReadCloser) Close() error {
 
 // statVisibleMaxWait 是「上传后等待目标可见」的总窗口（大文件元数据最终一致性）。
 // 4.6GB 单文件实测可达 30s+；取 90s 上限，配合指数退避（0.5s → 8s 封顶）。
-const statVisibleMaxWait = 90 * time.Second
+const DefaultStatVisibleMaxWait = 90 * time.Second
+
+// DefaultVerifyConcurrency 是批量校验（VerifyMany）的并发度。
+const DefaultVerifyConcurrency = 4
+
+// sizeNear 判断两个大小是否「同一对象的近似表示」：容差 = max(4KiB, 0.1%)。
+// 用于列举（`ls`）给出的近似 size（大文件以 MB/KB 显示）与本地精确字节数比对。
+func sizeNear(want, got int64) bool {
+	if want == got {
+		return true
+	}
+	diff := want - got
+	if diff < 0 {
+		diff = -diff
+	}
+	tol := max(want/1000, 4096)
+	return diff <= tol
+}
+
+// visibleViaList 用**父目录列举**判断对象是否可见（Stat 一致性延迟窗口的可靠回落）。
+// 只在 Stat 报 NotFound 时被调用 ⇒ 已有对象的快路径（Stat 命中）零额外开销。
+func (s *Storage) visibleViaList(ctx context.Context, dir, base string) (*ObjectMeta, bool) {
+	if base == "" {
+		return nil, false
+	}
+	// **轻量列举**（`ls`，不逐条 meta）：新目录树里 meta 本身不可见，逐条补精确 size 会
+	// 拿不到 ETag 且把 size 退化成近似值 ⇒ 后续 size 兜底判据失效。`ls` 输出的字节数是
+	// 精确值（实测 `21B`），足以支撑 size 校验。
+	entries, err := s.list(ctx, dir, false)
+	if err != nil {
+		return nil, false
+	}
+	for i := range entries {
+		if path.Base(strings.TrimSuffix(entries[i].Key, "/")) == base {
+			m := entries[i]
+			return &m, true
+		}
+	}
+	return nil, false
+}
+
+// PutDeferred 只上传、**不做上传后校验**（批量延迟校验路径，2026-11-04 用户设计）。
+//
+// 契约：上传请求成功即返回 nil；调用方**必须**随后用 VerifyMany 校验（新目录树的 Stat
+// 延迟 5–10 分钟，逐块即时校验必然超时）。校验不一致时调用方应重传（本地副本仍在）或
+// 记入待恢复清单——绝不静默放行不一致内容。
+func (s *Storage) PutDeferred(ctx context.Context, key, stagedPath string, size int64, hints *PutHints) error {
+	if err := ctx.Err(); err != nil {
+		return mapPCSError(err)
+	}
+	prepared, cleanup, perr := s.prepareStagedForAdapter(stagedPath, key)
+	if perr != nil {
+		return perr
+	}
+	defer cleanup()
+	st, err := s.stageUploadFromPath(ctx, prepared, key, size, hints)
+	if err != nil {
+		return err
+	}
+	remote, err := s.remotePath(key)
+	if err != nil {
+		return err
+	}
+	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
+		return mapPCSError(upErr)
+	}
+	s.invalidateDlink(key) // 覆盖写同名旧对象 ⇒ 失效旧直链
+	return nil
+}
+
+// rapidRefreshMaxSize 是「秒传刷新」支持的最大单块大小：rapidupload 需要
+// sliceMD5（前 256KB）与 blockMD5s（按 4MB 切分），仅在块 ≤ 256KB 时两者都等于整块 md5，
+// 无需额外记录即可刷新。更大的块跳过（回落重传），避免 meta 里存冗余摘要列表。
+const rapidRefreshMaxSize = 256 << 10
+
+// RapidRefresh 用**秒传刷新**远端 meta（零传输，实现 syncpkg.RapidRefresher）。
+//
+// **实测依据（2026-11-04）**：百度分片上传后远端 ETag 可能不可靠，但内容已在盘；
+// rapidupload 命中会把 md5 刷成权威值 ⇒ 这是「ETag 不一致」的首选修复，比重传快几个数量级。
+// 边界：仅支持 ≤ rapidRefreshMaxSize 的块（大块缺 sliceMD5/blockMD5s，回落重传）。
+func (s *Storage) RapidRefresh(ctx context.Context, it syncpkg.VerifyItem) (bool, error) {
+	ru, ok := s.rapidUploaderOf()
+	if !ok || it.MD5 == "" || it.Size <= 0 || it.Size > rapidRefreshMaxSize {
+		return false, nil
+	}
+	remote, err := s.remotePath(it.Key)
+	if err != nil {
+		return false, err
+	}
+	st := &stagedUpload{
+		md5:       it.MD5,
+		size:      it.Size,
+		sliceMD5:  it.MD5, // 块 ≤ 256KB ⇒ 整块即首片
+		crc32:     it.CRC32,
+		blockMD5s: []string{it.MD5},
+	}
+	hit, rerr := ru.RapidUpload(ctx, remote, st)
+	if rerr != nil {
+		return false, mapPCSError(rerr)
+	}
+	if hit {
+		s.log.Info("rapidupload 秒传刷新命中（零传输刷新远端 md5）", "key", it.Key, "size", it.Size)
+	}
+	return hit, nil
+}
+
+// VerifyMany 并发批量校验（实现 syncpkg.BatchVerifier）。
+//
+// 判据（按可用信息从严到宽）：
+//   - 期望 md5 与远端 ETag 都有 ⇒ **必须相等**（大小写不敏感）；
+//   - 远端 ETag 缺失（新目录一致性延迟）⇒ 用 sizeNear 判「同一对象且量级一致」；
+//   - 都无 ⇒ 存在即视为可见（调用方无法给出更强判据）。
+//
+// Stat 不可见时回落「父目录列举」，仍不可见 ⇒ VerifyInvisible（调用方据此入待恢复）。
+func (s *Storage) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
+	out := make([]syncpkg.VerifyResult, len(items))
+	conc := min(len(items), DefaultVerifyConcurrency)
+	if conc < 1 {
+		return out
+	}
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	for i := range items {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				out[i] = syncpkg.VerifyResult{Item: items[i], State: syncpkg.VerifyInvisible, Reason: "ctx 取消"}
+				return
+			}
+			out[i] = s.verifyOne(ctx, items[i])
+		}(i)
+	}
+	wg.Wait()
+	return out
+}
+
+// healByRapidRefresh 对「摘要不一致」的对象尝试**秒传刷新自愈**（零传输）：
+// rapidupload 命中 ⇒ 远端 md5 被刷成权威值 ⇒ 重新 Stat 校验；一致则返回 OK+Refreshed。
+// 未命中/不支持 ⇒ (zero,false)，调用方继续按 mismatch 处理。
+func (s *Storage) healByRapidRefresh(ctx context.Context, it syncpkg.VerifyItem) (syncpkg.VerifyResult, bool) {
+	hit, err := s.RapidRefresh(ctx, it)
+	if err != nil || !hit {
+		return syncpkg.VerifyResult{}, false
+	}
+	meta, serr := s.Stat(ctx, it.Key)
+	if serr != nil || meta == nil || meta.ETag == "" || !strings.EqualFold(meta.ETag, it.MD5) {
+		return syncpkg.VerifyResult{}, false
+	}
+	s.log.Info("校验不一致已用秒传刷新自愈（零传输）", "key", it.Key, "size", it.Size)
+	return syncpkg.VerifyResult{
+		Item: it, State: syncpkg.VerifyOK, Refreshed: true,
+		RemoteETag: meta.ETag, RemoteSize: meta.Size, Reason: "秒传刷新自愈",
+	}, true
+}
+
+// verifyOne 校验单个对象（VerifyMany 的工作单元）。
+func (s *Storage) verifyOne(ctx context.Context, it syncpkg.VerifyItem) syncpkg.VerifyResult {
+	res := syncpkg.VerifyResult{Item: it}
+	meta, err := s.Stat(ctx, it.Key)
+	if err != nil || meta == nil {
+		var ok bool
+		meta, ok = s.waitPutVisible(ctx, it.Key)
+		if !ok {
+			res.State = syncpkg.VerifyInvisible
+			res.Reason = "stat 与父目录列举均不可见"
+			return res
+		}
+	}
+	res.RemoteETag, res.RemoteSize = meta.ETag, meta.Size
+	// **后端自愈（不再让使用方编排）**：摘要不一致时先试「秒传刷新」（零传输）并复验；
+	// 命中即视为 OK（Refreshed=true）。这是百度「分片上传后 md5 不可靠」的标准修复
+	// （docs/external-dependencies.md §7.6），必须内置在上传/校验能力里。
+	if it.MD5 != "" && meta.ETag != "" && !strings.EqualFold(meta.ETag, it.MD5) {
+		if healed, ok := s.healByRapidRefresh(ctx, it); ok {
+			return healed
+		}
+	}
+	switch {
+	case it.MD5 != "" && meta.ETag != "":
+		if strings.EqualFold(meta.ETag, it.MD5) {
+			res.State = syncpkg.VerifyOK
+			return res
+		}
+		res.State = syncpkg.VerifyMismatch
+		res.Reason = "远端 ETag 与期望 md5 不一致"
+	case it.Size > 0 && meta.Size > 0:
+		if sizeNear(it.Size, meta.Size) {
+			res.State = syncpkg.VerifyOK
+			return res
+		}
+		res.State = syncpkg.VerifyMismatch
+		res.Reason = "远端 size 超出容差"
+	default:
+		res.State = syncpkg.VerifyOK
+		res.Reason = "无可判定摘要/大小信息，存在即视为可见"
+	}
+	return res
+}
+
+// statVisibleWaitOrDefault 返回可见性等待窗口（未注入时用默认 90s）。
+func (s *Storage) statVisibleWaitOrDefault() time.Duration {
+	if s.statVisibleWait > 0 {
+		return s.statVisibleWait
+	}
+	return DefaultStatVisibleMaxWait
+}
 
 // waitPutVisible 轮询 Stat 直到目标可见（指数退避），或超时/ctx 取消。
 // 返回 (meta, true) 表示可见；(nil,false) 表示超时或非 NotFound 错误（调用方决定重传/失败）。
 func (s *Storage) waitPutVisible(ctx context.Context, key string) (*ObjectMeta, bool) {
-	deadline := time.Now().Add(statVisibleMaxWait)
+	deadline := time.Now().Add(s.statVisibleWaitOrDefault())
 	delay := 500 * time.Millisecond
+	dir, base := path.Split(strings.TrimSuffix(key, "/"))
+	dir = strings.TrimSuffix(dir, "/")
 	for {
 		if meta, err := s.Stat(ctx, key); err == nil && meta != nil {
 			return meta, true
 		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			s.log.Warn("上传后 Stat 返回非 NotFound 错误（放弃等待）", "key", key, "error", err)
 			return nil, false
+		}
+		// **Stat 对新建目录树的一致性延迟远大于列举**（实测 2026-11-04：文件上传成功后
+		// `ls` 父目录立即可见，`meta` 却报 31066「文件或目录不存在」并持续 >90s）⇒ 仅靠
+		// Stat 轮询会让**任何新目录/新容器的首次写入**必失败（实测 sp/s/_perftest、
+		// sp/s/<新容器> 全部 4.5 分钟后报 ErrTransient）。这里回落为「父目录列举」判据：
+		// 列举能看到同名条目即视为可见，并用列举的 size/etag 合成 meta（供后续复核）。
+		if meta, ok := s.visibleViaList(ctx, dir, base); ok {
+			s.log.Info("上传后 Stat 不可见但父目录列举可见（新目录一致性延迟），按列举结果视为成功",
+				"key", key, "size", meta.Size)
+			return meta, true
 		}
 		if time.Now().After(deadline) {
 			return nil, false

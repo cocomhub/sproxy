@@ -466,6 +466,7 @@ func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, gr
 		ci := ChunkInfo{
 			Index: len(chunks), FileName: name, Offset: b.Offset, OrigSize: int64(len(chunk)),
 			OrigSHA256: Hash256(chunk), EncSize: int64(len(enc)), EncSHA256: Hash256(enc),
+			EncMD5: HashMD5(enc), EncCRC32: HashCRC32IEEE(enc),
 			Blocklets: blockletInfosOf(blocklets, entries, chunk, b.Offset),
 		}
 		ci.Windows, _ = windowPlanFor(enc, ci.Blocklets)
@@ -635,6 +636,8 @@ func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group st
 			OrigSHA256: Hash256(chunk), // 完整 64 hex（256-bit，审计/校验强度），不复用 48bit 截断
 			EncSize:    int64(len(enc)),
 			EncSHA256:  Hash256(enc),
+			EncMD5:     HashMD5(enc),
+			EncCRC32:   HashCRC32IEEE(enc),
 			Blocklets:  blInfos,
 		}
 		ci.Windows, _ = windowPlanFor(enc, ci.Blocklets)

@@ -95,3 +95,25 @@ func (f *FS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error
 var (
 	_ syncpkg.NameLister = (*FS)(nil)
 )
+
+// 编译期能力断言（门禁 R21）：透明装饰器必须声明全部 `pkg/sync` 可选能力，否则上层
+// `fs.(能力)` 断言恒 false ⇒ **静默降级**（批量校验 / 秒传刷新被悄悄跳过）。
+var (
+	_ syncpkg.BatchVerifier  = (*FS)(nil)
+	_ syncpkg.RapidRefresher = (*FS)(nil)
+)
+
+// VerifyMany 转发批量校验（透明装饰器必须转发，否则上层 `AssertBatchVerifier` 恒 false）。
+//
+// 底层未实现该能力 ⇒ 返回 **nil**：调用方（secretdata.verifyBatchAndRepair）已有「结果长度
+// 与请求不符 ⇒ 无法判定 ⇒ 跳过批量校验」的防御分支，且 Put 内部本就逐块即时复核 ⇒ 零回归。
+// **不得**返回「全部 mismatch」——那会被读成需要重传而触发无谓重传。
+func (f *FS) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
+	// 内层是**具体类型** *syncpkg.PrefixFS（其自身转发该能力）⇒ 直接调用，无需断言。
+	return f.PrefixFS.VerifyMany(ctx, items)
+}
+
+// RapidRefresh 转发秒传刷新（零传输刷新远端 meta）；底层未实现 ⇒ ErrUnsupported（调用方回落重传）。
+func (f *FS) RapidRefresh(ctx context.Context, item syncpkg.VerifyItem) (bool, error) {
+	return f.PrefixFS.RapidRefresh(ctx, item)
+}

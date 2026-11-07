@@ -184,6 +184,9 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 		NormalizeMaxMoves:     vcExtraInt(v, "normalize_max_moves"),
 		NormalizeMoveInterval: vcExtraDuration(v, "normalize_move_interval"),
 		NormalizeTimeout:      vcExtraDuration(v, "normalize_timeout"),
+		// 块级上传并发（0/缺省 = 默认 4）：外部卷 blocklet 仅 256KiB，逐块串行时
+		// 上游调用开销（含 baidupcs 每块 exec 一次二进制）远大于传输本身。
+		UploadConcurrency: vcExtraInt(v, "upload_concurrency"),
 	}
 }
 
