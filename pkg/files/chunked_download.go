@@ -388,6 +388,9 @@ func (s *Service) writeChunkSuccess(c *chunkResp, offset, length, fileSize int64
 		if csStore, csKey := s.checksumStoreForRead(c.dp); csStore != nil {
 			if cs, ok := checksumGet(csStore, c.dp.VolumeName, csKey); ok {
 				c.w.Header().Set(headerFileChecksum, cs)
+				// 与 /download 一致：强校验器 ETag ⇒ 客户端可校验「同一文件」（分块面
+				// 每次响应都带，变化可被及早发现，不必等到整文件收尾校验）。
+				c.w.Header().Set("ETag", `"`+cs+`"`)
 			}
 		}
 	}

@@ -102,8 +102,8 @@ BuildAt: 2026-06-01T12:00:00Z
 | 项 | 内容 |
 |---|---|
 | 查询参数 | `filename`；可选 `ciphertext=1` |
-| 响应头 | `X-File-Checksum`、`X-File-MTime`、`Accept-Ranges: bytes`、`Content-Disposition` |
-| Range 支持 | 是（返回 206 + `Content-Range`） |
+| 响应头 | `X-File-Checksum`、`X-File-MTime`、`Accept-Ranges: bytes`、`Content-Disposition`；有 checksum 时另带 `ETag: "<sha256>"` |
+| Range 支持 | 是（返回 206 + `Content-Range`）；带 `If-Range` 时校验器不匹配 ⇒ 回 **200 全量**（客户端据此判定「文件已换」并从零重下） |
 
 **`ciphertext=1`**：at-rest 加密卷（`volumes[].extra.encrypt`）默认返回**明文**（加密只在
 存储层，用户访问恒见明文）；带此参数时返回**存储原样密文**（不解密），`Range`/`Content-Length`
