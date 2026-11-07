@@ -7,7 +7,7 @@
 ```
 level=WARN msg=下载中断，准备续传重试 attempt=1 offset=3342336 error="写入文件失败: decrypt stream: read chunk: unexpected EOF"
 ...
-sclient: 下载失败: 下载失败（已保留断点，--resume 默认开启；再次执行同一命令会自动续传）: 写入文件失败: decrypt stream: read chunk: unexpected EOF
+sclient: 下载失败: 下载失败（已保留断点；再次执行同一命令会自动续传）: 写入文件失败: decrypt stream: read chunk: unexpected EOF
 ```
 
 关键观察（定位用的三点）：
@@ -30,7 +30,7 @@ sclient: 下载失败: 下载失败（已保留断点，--resume 默认开启；
 客户端自己的 `http.Client.Timeout`，**管不到服务端**。所以服务端掐断后，隧道客户端解密流
 只读到半个帧 → `decrypt stream: read chunk: unexpected EOF`（即原报错）。
 
-`--resume` 本身是默认开启且有效的（偏移确实在推进），但每 30s 被服务端切断一次、
+续传本身是默认开启且有效的（偏移确实在推进），但每 30s 被服务端切断一次、
 每次只推进「带宽 × 30s」，弱网/并发下永远下不完。
 
 ## 修复
@@ -72,9 +72,8 @@ srvMux 上的全部流式路由。
 
 ## 仍有效判断 / 后续
 
-- 客户端 `--resume`（默认开启）+ sidecar 的设计不变；本次只修服务端切断源，并把失败文案
-  从「可用 `--resume` 续传」（误导用户手动加 flag）改为「`--resume` 默认开启；再次执行同一
-  命令会自动续传」。
+- 客户端续传（恒开启，无 `--resume` flag）+ sidecar 的设计不变；本次只修服务端切断源，
+  并把失败文案从「可用 `--resume` 续传」（误导用户手动加 flag）改为「再次执行同一命令会自动续传」。
 - `net/http` 在 `Hijack()` 时会 `rwc.SetDeadline(time.Time{})`（已核对 Go 1.27 源码），
   故中继流（`POST /api/relay/stream`，hijack 后自行泵送）**不受** WriteTimeout 影响，本次
   无需改动。

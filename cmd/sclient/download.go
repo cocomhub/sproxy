@@ -65,7 +65,6 @@ func NewCmdDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.
 	cmd.Flags().String("e2ee-key", "", "客户端 E2EE 密钥（64 hex 字符 = 32B）")
 	cmd.Flags().Int64("chunk-size", 0, "分块大小 (默认 4MB)")
 	cmd.Flags().Int("concurrency", 0, "下载并发数 (默认 4)")
-	cmd.Flags().Bool("resume", true, "续传模式")
 	return cmd
 }
 
@@ -91,12 +90,14 @@ func resolveChunkedMode(cmd *cobra.Command, svc *client.FileClient, filename str
 }
 
 // runChunkedDownload 执行分块下载并输出传输统计（成功即校验通过，大小取本地落盘）。
+// 续传**恒开启**（用户 2026-11-07 明示：移除 `--resume`，无需传入）：失败保留已收分块与
+// sidecar，重入自动跳过已完成块；sidecar 的远端身份（checksum/size/mtime/chunk_size）与
+// 当前远端不一致 ⇒ 丢弃断点从零下载（绝不拼接不同文件的字节）。
 func runChunkedDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, filename, outputPath string) error {
-	resume, _ := cmd.Flags().GetBool("resume")
 	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	chunkOpts := []client.ChunkedOption{
-		client.WithChunkedResume(resume),
+		client.WithChunkedResume(true),
 	}
 	if chunkSize > 0 {
 		chunkOpts = append(chunkOpts, client.WithChunkedChunkSize(chunkSize))
@@ -117,17 +118,12 @@ func runChunkedDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 }
 
 // runPlainDownload 执行普通下载；--decrypt 时下载后 E2EE 解密回写。
-// --resume（默认启用）时走 DownloadResumable：失败保留断点与 sidecar，重入/重试可续传。
+// 续传**恒开启**：走 DownloadResumable —— 失败保留断点与 sidecar，重入/重试自动续传；
+// 远端身份（etag/sha256、大小、mtime）不一致或校验失败 ⇒ 丢弃断点从零重下。
 func runPlainDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, filename, outputPath string) error {
 	stats := NewTransferStats()
 	fileStart := time.Now()
-	resume, _ := cmd.Flags().GetBool("resume")
-	var dlErr error
-	if resume {
-		dlErr = svc.DownloadResumable(cmd.Context(), filename, outputPath)
-	} else {
-		dlErr = svc.Download(cmd.Context(), filename, outputPath)
-	}
+	dlErr := svc.DownloadResumable(cmd.Context(), filename, outputPath)
 	if dlErr != nil {
 		return fmt.Errorf("下载失败: %w", dlErr)
 	}

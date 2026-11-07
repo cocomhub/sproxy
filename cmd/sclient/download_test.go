@@ -38,9 +38,13 @@ func TestDownloadCmd_Args(t *testing.T) {
 func TestDownloadCmd_Flags(t *testing.T) {
 	t.Parallel()
 	cmd := NewCmdDownload(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, &state.State{})
-	for _, name := range []string{"chunked", "chunk-size", "concurrency", "resume"} {
+	for _, name := range []string{"chunked", "chunk-size", "concurrency"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing flag: %s", name)
 		}
+	}
+	// --resume 已移除（2026-11-07 用户明示：续传恒开启，无需传入）
+	if cmd.Flags().Lookup("resume") != nil {
+		t.Error("download 不应再有 --resume flag（续传恒开启）")
 	}
 }
