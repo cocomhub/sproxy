@@ -276,7 +276,7 @@ func useJSONOutput(cmd *cobra.Command) bool {
 func printMetaExtraFor(cmd *cobra.Command, ios cli.IOStreams, fm OutputFormatter, svc *client.FileClient, filename string) {
 	info, xerr := svc.GetFileMetaInfo(cmd.Context(), filename)
 	if xerr != nil {
-		ios.WriteErrLine("（读取 meta extra 失败: %v）", xerr)
+		ios.WriteWarnLine("（读取 meta extra 失败: %v）", xerr)
 		return
 	}
 	if rawJSON, _ := cmd.Flags().GetBool("raw"); rawJSON && !useJSONOutput(cmd) {

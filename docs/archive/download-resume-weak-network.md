@@ -39,15 +39,19 @@ SPDX-License-Identifier: Apache-2.0
   - 分块：`chunk_size` + base64 完成位图；重入跳过已完成块；每完成 N 块/1s 节流落盘。
   - 身份校验：`filename/kind/size/checksum/mtime/chunk_size` 任一不匹配 ⇒ 判陈旧、删断点、
     从头下载（**绝不**把不同文件的字节拼到一个输出里）。下载尾部仍走原有 checksum / 零窗兑底。
-- **CLI 错误单点打印**：根命令 `SilenceUsage + SilenceErrors`，由 `main` 统一输出
-  `sclient: <err>`；被点名命令移除重复 `WriteErrLine`。
+- **CLI 错误输出（后续演进）**：根命令 `SilenceUsage + SilenceErrors` 后，又发现「命令内
+  `WriteErrLine` 是脚本可依赖的稳定 stderr 文案」与「`main` 再打一遍」冲突。最终口径：**保留
+  命令 stderr 文案**（`--json` 不影响它），`IOStreams` 加 reporter，`WriteErrLine` 置位、
+  `WriteWarnLine` 不置位（警告后命令仍可能返回真错误）；`main` 仅在未置位时补一行，并在 `--json`
+  时向 stdout 输出 `{"success":false,"error":...,"exit_code":N}`。子命令构造时即设
+  `SilenceUsage/SilenceErrors`（独立执行/单测无需手动补）。
 - **单次调用内自愈**：单流续传带退避重试（1s/2s/…封顶 30s，共 5 次），4xx 视为致命不重试。
 
 ## 仍有效的判断 / 残余
 
-- `--chunked` 的 `tryDownloadChunk` 每次把整块读入内存（`io.ReadAll`）；大文件自适应
-  `chunk_size` 可增长到 64 MiB，×并发（默认 8）⇒ 峰值内存可较高。**未改**（既有行为，
-  非本次缺陷面）。
+- `--chunked` 的分块下载**已改流式写入**（32KiB 边读边 `WriteAt` 边算 `X-Chunk-Checksum`），
+  峰值内存与 chunk 大小无关（旧实现 `io.ReadAll` 峰值 = chunkSize × 并发，自适应 chunk 可到
+  64 MiB × 默认并发 8 ≈ 512 MiB）。
 - 续传 sidecar 与输出文件同目录；若用户在下载中断后自行移动/篡改部分文件，则判陈旧重下
   （fail-safe，不会静默产出损坏文件，但会丢已下进度）。
 - `/download` 的 Range 由服务端 `http.ServeContent` 支持；外部卷/加密卷的 Range 语义已在
@@ -83,6 +87,7 @@ SPDX-License-Identifier: Apache-2.0
 **E2E 性能结论**：sidecar 开销在限速代理下不可辨（全量 26.8s vs 28.5s，±5% 抖动）；
 约 50% 断点续传耗时约为全量的 59%（15.8s vs 26.8s；差值 = 代理限速 + 强杀时在途分块重传）。
 
-**仍未修的相邻发现（另片，不阻塞续传）**：本地卷**分块下载路径未应用带宽限速**
-（`writeChunkSuccess` 直写 `c.w`，未包 `limitResponseWriter`；外部卷 `serveExternalChunk`
-已包）⇒ 开启 `rate_limit.bandwidth` 时整文件下载受限、分块下载不受限（公平性缺口）。
+**已修的相邻发现**：本地卷**分块下载路径未应用带宽限速**（`writeChunkSuccess` 直写 `c.w`，
+未包 `limitResponseWriter`；外部卷 `serveExternalChunk` 已包）⇒ 开启 `rate_limit.bandwidth`
+时整文件下载受限、分块下载不受限（公平性缺口）。现已让本地分块路径同样经
+`limitResponseWriter`（TDD：注入 spy limiter 断言被咨询），与整文件 /download 一致。

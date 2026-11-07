@@ -46,7 +46,7 @@ func meshGatewayDial(gatewayAddr, gatewayToken string, ios cli.IOStreams) meshDi
 		} else if errors.Is(gerr, mesh.ErrNoPeerLink) {
 			slog.Debug("本地网关无到目标节点的已建链路，回落常规拨号", "peer", target.Node, "addr", target.Addr)
 		} else {
-			ios.WriteErrLine("本地网关路由失败: %v（回落常规拨号）", gerr)
+			ios.WriteWarnLine("本地网关路由失败: %v（回落常规拨号）", gerr)
 		}
 		return mesh.Dial(ctx, svc, signaler, target, localNode)
 	}
@@ -172,7 +172,7 @@ func meshConnectSignaler(ctx context.Context, cmd *cobra.Command, cfgSvc ConfigP
 		if regErr != nil {
 			// 注册失败不静默：warn + 回落中继（relay 路径只认 SproxySig 凭据
 			// --access-key*，与本机临时注册无关，独立可用）。
-			ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
+			ios.WriteWarnLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
 		} else {
 			signaler = r.Signaler
 			closer := r.Closer
@@ -202,7 +202,7 @@ func meshWrapDialE2E(conn *meshconn.Conn, base meshDialFunc, ios cli.IOStreams) 
 		if len(e2e.PeerFingerprints) == 0 {
 			mode = "纯 ECDH（防窃听，无 MITM 防护——建议配置 --e2e-peer-fp）"
 		}
-		ios.WriteErrLine("端到端加密已启用（%s）", mode)
+		ios.WriteWarnLine("端到端加密已启用（%s）", mode)
 	}
 	dial := meshDialFunc(func(ctx context.Context, svc *client.FileClient, signaler webrtc.Signaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
 		res, derr := base(ctx, svc, signaler, target, localNode)
@@ -425,7 +425,7 @@ func meshForwardConn(ctx context.Context, c net.Conn, p meshForwardParams) {
 	// 不再等 webrtc 30s ICE 超时（静默卡死）。
 	target, rerr := p.ref.Resolve(ctx)
 	if rerr != nil {
-		p.ios.WriteErrLine("建立 mesh 流失败: %v", rerr)
+		p.ios.WriteWarnLine("建立 mesh 流失败: %v", rerr)
 		return
 	}
 	res, cerr := p.dial(ctx, p.svc, p.signaler, target, p.localNode)
@@ -433,7 +433,7 @@ func meshForwardConn(ctx context.Context, c net.Conn, p meshForwardParams) {
 		// dial 失败（relay 404 / webrtc 失败）→ 强制缓存过期 + 记录失败节点，
 		// 下个连接立即重取并优先跳过该节点（P1-13 候选 failover）。
 		p.ref.Invalidate(target.Node)
-		p.ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
+		p.ios.WriteWarnLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
 		return
 	}
 	conn := res.Conn

@@ -646,7 +646,7 @@ func TestCdCommand_PrintCurrent(t *testing.T) {
 	cmd := NewCmdCd(st, cli.IOStreams{Out: &buf})
 
 	cmd.SetArgs(nil)
-	cmd.Run(cmd, nil)
+	_ = cmd.RunE(cmd, nil)
 
 	if !strings.Contains(buf.String(), "/") {
 		t.Errorf("expected cd output '/', got: %s", buf.String())
@@ -659,7 +659,7 @@ func TestCdCommand_WithCurrentDir(t *testing.T) {
 	cmd := NewCmdCd(st, cli.IOStreams{Out: &buf})
 
 	cmd.SetArgs(nil)
-	cmd.Run(cmd, nil)
+	_ = cmd.RunE(cmd, nil)
 
 	if !strings.Contains(buf.String(), "subdir") {
 		t.Errorf("expected cd output '/subdir', got: %s", buf.String())
@@ -731,11 +731,13 @@ func TestCdCommand_InvalidPath(t *testing.T) {
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: &errBuf})
 	cmd.SetArgs([]string{"../outside"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("cd command failed: %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("越界路径应返回错误（非零退出码）")
 	}
+	// 保留稳定 stderr 文案（脚本可依赖）；同时返回错误。
 	if !strings.Contains(errBuf.String(), "无效的路径") {
-		t.Errorf("expected error message '无效的路径', got %q", errBuf.String())
+		t.Errorf("expected error message '无效的路径' on stderr, got %q", errBuf.String())
 	}
 	if st.CurrentDir != "" {
 		t.Fatalf("expected currentDir to remain unchanged '', got %q", st.CurrentDir)

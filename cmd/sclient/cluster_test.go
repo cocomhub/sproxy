@@ -92,14 +92,15 @@ func TestClusterCredentialIssue_FailClosed(t *testing.T) {
 			cmd.SetArgs(append([]string{"issue"}, tc.args...))
 			cmd.SetOut(&out)
 			cmd.SetErr(&errOut)
-			if err := cmd.Execute(); err != nil {
-				t.Fatalf("执行失败: %v", err)
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("非法输入应返回错误（fail-closed，非零退出码）")
 			}
 			if out.String() != "" {
 				t.Fatalf("非法输入不应输出凭证: %q", out.String())
 			}
 			if errOut.String() == "" {
-				t.Fatal("非法输入应在 stderr 报错（fail-closed）")
+				t.Fatal("非法输入应在 stderr 报错（fail-closed，脚本可依赖）")
 			}
 		})
 	}

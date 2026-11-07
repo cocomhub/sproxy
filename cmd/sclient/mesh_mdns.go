@@ -247,7 +247,7 @@ func mdnsForwardListen(ctx context.Context, dial func(context.Context) (net.Conn
 			defer c.Close()
 			conn, derr := dial(ctx)
 			if derr != nil {
-				ios.WriteErrLine("建立 mesh 流失败: %v", derr)
+				ios.WriteWarnLine("建立 mesh 流失败: %v", derr)
 				return
 			}
 			defer conn.Close()

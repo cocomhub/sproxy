@@ -197,7 +197,7 @@ func socksAssembleSignaler(ctx context.Context, cmd *cobra.Command, conn *meshco
 	if sigErr != nil {
 		// 注册失败回落中继（signaler=nil → mesh.Dial 回落 relay-only），
 		// 对齐 pre-diff socks 语义：打印诊断后继续，不终止命令。
-		ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", sigErr)
+		ios.WriteWarnLine("webrtc 信令注册失败: %v（回落 hub 中继）", sigErr)
 	}
 	return signaler, closeSig, mdnsSrv, closeMDNS, nil
 }

@@ -393,7 +393,11 @@ func (s *Service) writeChunkSuccess(c *chunkResp, offset, length, fileSize int64
 	}
 	c.w.Header().Set("X-Chunk-Checksum", serverChecksum)
 	c.w.WriteHeader(http.StatusOK)
-	n, writeErr := c.w.Write(data)
+	// **带宽限速**（与整文件 /download、外部卷 serveExternalChunk 一致）：本地分块路径
+	// 此前直写 c.w ⇒ 开启 rate_limit.bandwidth 时 /download/chunk 完全绕过限速（公平性缺口）。
+	cw := &countingWriter{ResponseWriter: c.w}
+	limited := limitResponseWriter(s.rt.bandwidthLimiter(), normalizeOwner(s.rt.actorOf(c.r)), cw)
+	n, writeErr := limited.Write(data)
 	if writeErr != nil {
 		s.rt.logger().Warn("写入分块响应失败", "error", writeErr)
 	}

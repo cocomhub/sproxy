@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -1350,23 +1351,22 @@ func chunkLength(p downloadChunkParams) int64 {
 }
 
 // downloadChunkWithRetry 带退避重试下载一个分块；成功写入返回 true，失败返回 false。
+// 每次尝试**流式写入目标偏移**（见 streamOneChunk），不再把整块读入内存。
 func (c *FileClient) downloadChunkWithRetry(ctx context.Context, p downloadChunkParams, urlPath string, offset, length int64) bool {
 	baseDelay := 500 * time.Millisecond
 	for attempt := range maxRetries {
 		if chunkDownloadDone(p.Done) {
 			return false
 		}
-		data, ok := c.tryDownloadChunk(ctx, urlPath, length)
-		if !ok {
-			if attempt >= maxRetries-1 {
-				break
-			}
-			if !chunkDownloadSleep(ctx, baseDelay*(1<<attempt)) {
-				return false
-			}
-			continue
+		if c.streamOneChunk(ctx, p, urlPath, offset, length) {
+			return true
 		}
-		return c.writeDownloadChunk(ctx, p, data, offset)
+		if attempt >= maxRetries-1 {
+			break
+		}
+		if !chunkDownloadSleep(ctx, baseDelay*(1<<attempt)) {
+			return false
+		}
 	}
 	return false
 }
@@ -1391,27 +1391,95 @@ func chunkDownloadSleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// writeDownloadChunk 把分块数据写入目标文件（Mu 保护），并推进进度回调。
-func (c *FileClient) writeDownloadChunk(ctx context.Context, p downloadChunkParams, data []byte, offset int64) bool {
+// streamOneChunk 执行一次分块下载尝试并**流式**写入目标文件偏移，返回是否成功。
+//
+// 内存：旧实现 tryDownloadChunk+writeDownloadChunk 用 io.ReadAll 把整块读进内存再 WriteAt
+// ⇒ 峰值 = chunkSize × 并发（自适应 chunk 最大 64MiB × 默认并发 8 ≈ 512MiB）。本实现以
+// 32KiB 缓冲边读边 WriteAt 边算 SHA-256，峰值与 chunk 大小无关。
+//
+// 正确性：本 chunk 独占 [offset, offset+length) 区间（各 chunk 偏移互不重叠），`os.File.WriteAt`
+// 并发安全 ⇒ 无需全局锁；流式无法预读全块再校验，改为**写完再校验**，失配返回 false 由重试
+// **覆盖重写**同一区间（最终整文件 checksum + 零窗兑底兜底）。
+func (c *FileClient) streamOneChunk(ctx context.Context, p downloadChunkParams, urlPath string, offset, length int64) bool {
+	if length <= 0 {
+		return false
+	}
+	resp, err := c.doRequest(WithNoClientTimeout(ctx), "GET", urlPath, nil, nil)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
 	if chunkDownloadDone(p.Done) {
 		return false
 	}
-	p.Mu.Lock()
-	if _, writeErr := p.OutFile.WriteAt(data, offset); writeErr != nil {
-		p.Mu.Unlock()
-		p.Cancel()
+
+	hasher := sha256.New()
+	total, cerr := copyChunkStream(p, resp.Body, offset, length, hasher)
+	if cerr != nil {
 		return false
 	}
+	if total != length {
+		// 服务端返回长度与请求不符（截断、错位），强制重试以避免写入错块。
+		return false
+	}
+	if serverCS := resp.Header.Get("X-Chunk-Checksum"); serverCS != "" {
+		if hex.EncodeToString(hasher.Sum(nil)) != serverCS {
+			return false
+		}
+	}
+	c.commitChunkProgress(p, total)
+	return true
+}
+
+// errChunkAborted 是分块下载被取消（Done 关闭）的哨兵（仅用于提前退出复制循环）。
+var errChunkAborted = errors.New("分块下载已取消")
+
+// copyChunkStream 逐 32KiB 把 body 写入 outFile 的 [offset, offset+length) 区间并哈希，
+// 返回已写字节数。本 chunk 独占该区间（各 chunk 偏移不重叠），`os.File.WriteAt` 并发安全
+// ⇒ 无需全局锁；WriteAt 失败 → Cancel 并返回错误；被取消 → errChunkAborted。
+func copyChunkStream(p downloadChunkParams, body io.Reader, offset, length int64, hasher io.Writer) (int64, error) {
+	buf := make([]byte, 32<<10)
+	off := offset
+	var total int64
+	limited := io.LimitReader(body, length+1) // 多读 1B 以检出超长
+	for {
+		n, rerr := limited.Read(buf)
+		if n > 0 {
+			if _, werr := p.OutFile.WriteAt(buf[:n], off); werr != nil {
+				p.Cancel()
+				return total, werr
+			}
+			_, _ = hasher.Write(buf[:n])
+			off += int64(n)
+			total += int64(n)
+			if chunkDownloadDone(p.Done) {
+				return total, errChunkAborted
+			}
+		}
+		if rerr == io.EOF {
+			return total, nil
+		}
+		if rerr != nil {
+			return total, rerr
+		}
+	}
+}
+
+// commitChunkProgress 在锁内标记续传进度并推进进度回调（文件写入本身无需全局锁）。
+func (c *FileClient) commitChunkProgress(p downloadChunkParams, n int64) {
+	p.Mu.Lock()
 	if p.Resume != nil {
 		p.Resume.markChunkDone(p.ChunkIdx)
 	}
-	*p.Progress += int64(len(data))
+	*p.Progress += n
 	progress := *p.Progress
 	p.Mu.Unlock()
 	if c.progressFn != nil {
 		c.progressFn("下载", progress, p.FileSize)
 	}
-	return true
 }
 
 // retryFailedChunksArgs 是 retryFailedChunks 的参数结构体（S107：参数收敛）。
@@ -1557,48 +1625,6 @@ func (c *FileClient) restoreDownloadModTime(outputPath string, fileModTime int64
 	if err := os.Chtimes(outputPath, modTime, modTime); err != nil {
 		c.logger.Warn("设置文件时间戳失败", "file_name", outputPath, "error", err)
 	}
-}
-
-// tryDownloadChunk 执行一次分块下载尝试：发请求、按需校验 X-Chunk-Checksum，返回 (data, true) 表示成功。
-// 失败一律返回 (nil, false)，由调用方决定是否重试。
-//
-// 通过把 defer resp.Body.Close() 放到本函数边界，避免在 ChunkedDownload 的重试循环中累积 defer / 重复 Close。
-func (c *FileClient) tryDownloadChunk(ctx context.Context, urlPath string, expectLength int64) ([]byte, bool) {
-	// 单块也是长时流式读（外层可能已跳过整请求 Timeout）；此处同样标记，避免
-	// 弱网下单块读取被客户端级 300s Timeout 掐断。
-	resp, err := c.doRequest(WithNoClientTimeout(ctx), "GET", urlPath, nil, nil)
-	if err != nil {
-		return nil, false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-
-	maxRead := expectLength
-	if maxRead <= 0 {
-		maxRead = 1
-	}
-	limitReader := io.LimitReader(resp.Body, maxRead+1<<20) // expectLength + 1 MiB
-	data, err := io.ReadAll(limitReader)
-	if err != nil {
-		return nil, false
-	}
-	if expectLength > 0 && int64(len(data)) != expectLength {
-		// 服务端返回长度与请求不符（截断、错位），强制重试以避免写入错块。
-		return nil, false
-	}
-
-	serverChunkCS := resp.Header.Get("X-Chunk-Checksum")
-	if serverChunkCS != "" {
-		chunkHash := sha256.Sum256(data)
-		localCS := hex.EncodeToString(chunkHash[:])
-		if localCS != serverChunkCS {
-			return nil, false
-		}
-	}
-	return data, true
 }
 
 // ChunkedOption 分块上传/下载的可选参数。

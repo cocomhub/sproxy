@@ -42,7 +42,7 @@ func newCmdQuota(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comman
 				if legacy == nil {
 					return fedErr // 两侧都不可用 ⇒ 上报联邦错误（含状态码，便于诊断）
 				}
-				ios.WriteErrLine("告警：服务端不支持联邦配额视图（%v）—— 回落到集中树配额", fedErr)
+				ios.WriteWarnLine("告警：服务端不支持联邦配额视图（%v）—— 回落到集中树配额", fedErr)
 			}
 
 			jsonOut, _ := cmd.Flags().GetBool("json")

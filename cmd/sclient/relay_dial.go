@@ -136,7 +136,7 @@ func relayDialListenOn(ctx context.Context, svc relayDialer, node, tcpAddr strin
 			defer c.Close()
 			remote, rerr := svc.RelayStream(ctx, node, tcpAddr)
 			if rerr != nil {
-				ios.WriteErrLine("中继拨号失败: %v", rerr)
+				ios.WriteWarnLine("中继拨号失败: %v", rerr)
 				return
 			}
 			defer remote.Close()

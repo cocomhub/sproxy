@@ -255,7 +255,7 @@ func meshUpSignaler(ctx context.Context, cmd *cobra.Command, conn *meshconn.Conn
 	}
 	signaler, closeSig, sigErr := conn.Signalers(ctx, svc, caFile)
 	if sigErr != nil {
-		ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", sigErr)
+		ios.WriteWarnLine("webrtc 信令注册失败: %v（回落 hub 中继）", sigErr)
 	}
 	return signaler, closeSig
 }
@@ -287,14 +287,14 @@ func meshUpOpenDevice(vip netip.Addr, ios cli.IOStreams) (io.ReadWriteCloser, fu
 	rc, openErr := dev.Open("sproxy0")
 	if openErr != nil {
 		// P1 边界明示（不吞错、不静默回落）：探测已通过 → 真设备打开留 P2。
-		ios.WriteErrLine("tun/tap 真设备打开留 P2（当前为接口 + 平台探测装配）: %v", openErr)
+		ios.WriteWarnLine("tun/tap 真设备打开留 P2（当前为接口 + 平台探测装配）: %v", openErr)
 	}
 	if rc == nil {
 		rc = vpn.NewMemoryTUN() // P1 内存设备兜底（Router 装配形态可验证）
 	}
 	if err := dev.SetMTU(vpn.DefaultMTU); err != nil && !errors.Is(err, vpn.ErrPlatformNotSupported) {
 		// MTU 与隧道不符 → 启动日志 warn + 建议值（设计「错误处理」，不强制）。
-		ios.WriteErrLine("tun/tap SetMTU 失败: %v（建议 MTU %d）", err, vpn.DefaultMTU)
+		ios.WriteWarnLine("tun/tap SetMTU 失败: %v（建议 MTU %d）", err, vpn.DefaultMTU)
 	}
 	return rc, func() { _ = rc.Close() }
 }

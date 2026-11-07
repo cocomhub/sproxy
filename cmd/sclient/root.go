@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
@@ -24,6 +25,13 @@ import (
 )
 
 var cfgFile string
+
+// cliErrReported 记录本次进程是否已由命令打印过错误（main 据此避免重复打印，
+// 同时保留命令的稳定 stderr 文案供脚本消费）。
+var cliErrReported atomic.Bool
+
+// cliJSONMode 记录本次进程是否启用 --json（main 据此输出结构化错误对象）。
+var cliJSONMode atomic.Bool
 
 // contextFlags 保存 --context/--env/--user 三个全局 flag 的解析结果（供
 // factory/cfgSvc 后续消费；T3a 只负责解析注入，消费在 T3b）。
@@ -164,7 +172,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().Bool("allow-transport-fallback", false, "允许隧道/xfer 初始化失败时回退到直连模式（默认严格模式）")
 
 	// 注册子命令
-	ios := cli.SystemIOStreams()
+	ios := cli.SystemIOStreams().WithErrReporter(&cliErrReported)
 	factory := clientfactory.NewWithContext(cfgFile, nil, func() *contextcfg.Resolved { return resolvedContext })
 	cfgSvc := &cliConfigProvider{cfgFile: cfgFile}
 
@@ -236,6 +244,8 @@ func Execute() error {
 // 执行 context 解析注入（统一 config.yaml 单一事实源）与协议盐设置。不再装配
 // viper 平铺 provider（统一 context 后无平铺回落）。
 func rootPreRunE(cmd *cobra.Command, currentDir *string, cliState *state.State) error {
+	// `--json` 状态供 main 输出结构化错误（入口在 PersistentPreRunE 之前无法拿到 flag）。
+	cliJSONMode.Store(useJSONOutput(cmd))
 	// **先解析 context，再加载漫游目录**：cd 状态按 context 隔离（`current_dir.<ctx>`），
 	// 加载时需要知道当前 context。此前顺序相反 ⇒ 只能读全局文件，导致「在 A 环境 cd subdir
 	// 后切到 B 环境，上传静默落到 B 的 subdir」这类跨环境串目录。

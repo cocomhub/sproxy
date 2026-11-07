@@ -153,7 +153,7 @@ func (w *syncWatcher) run(ctx context.Context) error {
 	if err != nil {
 		// 事件流不可用（认证失败/协议错误）→ 退化轮询。
 		if !w.degradedLogged {
-			w.ios.WriteErrLine("watch: 事件流不可用（%v），退化 %s 间隔轮询——变更传播有延迟", err, w.poll)
+			w.ios.WriteWarnLine("watch: 事件流不可用（%v），退化 %s 间隔轮询——变更传播有延迟", err, w.poll)
 			w.degradedLogged = true
 		}
 		return w.watchPoll(ctx)
@@ -201,7 +201,7 @@ func (w *syncWatcher) handleEvent(ctx context.Context, ev client.FileEvent) {
 		w.ios.WriteOutLine("watch: 事件 %s %s（owner=%s）→ 触发 %s 增量同步", ev.Action, ev.Rel, ev.Owner, w.direction)
 	}
 	if err := w.triggerSync(ctx); err != nil {
-		w.ios.WriteErrLine(errFmtWatchSyncFail, err)
+		w.ios.WriteWarnLine(errFmtWatchSyncFail, err)
 	}
 }
 
@@ -212,7 +212,7 @@ func (w *syncWatcher) watchPoll(ctx context.Context) error {
 
 	// 进入即触发一次（回退初期先同步一次，避免等待首个周期）。
 	if err := w.triggerSync(ctx); err != nil && ctx.Err() == nil {
-		w.ios.WriteErrLine(errFmtWatchSyncFail, err)
+		w.ios.WriteWarnLine(errFmtWatchSyncFail, err)
 	}
 	for {
 		select {
@@ -220,7 +220,7 @@ func (w *syncWatcher) watchPoll(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			if err := w.triggerSync(ctx); err != nil && ctx.Err() == nil {
-				w.ios.WriteErrLine(errFmtWatchSyncFail, err)
+				w.ios.WriteWarnLine(errFmtWatchSyncFail, err)
 			}
 		}
 	}

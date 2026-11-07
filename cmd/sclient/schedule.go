@@ -190,7 +190,7 @@ func scheduleRunDue(ctx context.Context, expr *cronExpr, runner *syncWatcher, qu
 		return next, nil
 	}
 	if err := runner.triggerSync(ctx); err != nil && ctx.Err() == nil {
-		ios.WriteErrLine("schedule: 同步任务失败: %v", err)
+		ios.WriteWarnLine("schedule: 同步任务失败: %v", err)
 	}
 	next, nerr := expr.nextAfter(now)
 	if nerr != nil {
