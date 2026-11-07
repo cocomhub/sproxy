@@ -2637,15 +2637,40 @@ func (s *SecretdataFS) normalizeOneRel(ctx context.Context, rel string, segs, ne
 
 // moveContainerIdempotent 把容器从 cur 移到 want；**目标已存在视为已完成**（幂等续跑）。
 // 返回 (是否真的移动, error)。
+// containerMoveRetryInterval 是容器改名失败后的**基础退避**（逐轮线性放大）。
+// 迁移会连续做数百次 rename，易触发外部限流（百度 31034）⇒ 必须退避重试而非直接放弃。
+const containerMoveRetryInterval = 2 * time.Second
+
+// moveContainerIdempotent 把容器从 cur 移到 want；**目标已存在视为已完成**（幂等续跑）；
+// 失败时**退避重试**（限流是暂时的）。
+// 返回 (是否真的移动, error)。
 func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, want string) (bool, error) {
-	if rerr := s.inner.Rename(ctx, cur, want); rerr != nil {
-		if s.containerMovedByPeer(ctx, cur, want) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if rerr := s.inner.Rename(ctx, cur, want); rerr == nil {
+			return true, nil
+		} else {
+			lastErr = rerr
+		}
+		moved, decided := s.containerMovedByPeer(ctx, cur, want)
+		if decided && moved {
 			slog.Info("secretdata: 容器名已是目标（幂等跳过，可能由另一卷实例完成）", "rel", rel, "target", want)
 			return false, nil
 		}
-		return false, fmt.Errorf("secretdata: 规范化容器名失败（%s → %s）: %w", cur, want, rerr)
+		if attempt == maxAttempts {
+			break
+		}
+		delay := time.Duration(attempt) * containerMoveRetryInterval
+		slog.Warn("secretdata: 容器改名失败，退避后重试（可能外部限流）",
+			"rel", rel, "attempt", attempt, "max_attempts", maxAttempts, "delay", delay, "error", lastErr)
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
-	return true, nil
+	return false, fmt.Errorf("secretdata: 规范化容器名失败（%s → %s）: %w", cur, want, lastErr)
 }
 
 // containerMovedByPeer 判定「本次 rename 失败」是否属于**已由他人完成**的幂等情形：
@@ -2654,14 +2679,16 @@ func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, wa
 // **不能用 `Stat(want)==nil` 单独判定**（2026-11-07 实测踩坑）：底层 `Stat` 对目录的语义
 // 宽松（父存在即可能返回成功）⇒ 会把**从未执行的改名**误判为「目标已存在」⇒ 迁移静默
 // 不生效（实测：`moved=0 skipped=628` 但容器名仍是随机的，采样校验 8/8 漂移）。
-func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want string) bool {
+// 返回 (是否已由他人完成, 是否得出确定结论)。**listInner 失败（如限流）⇒ decided=false**
+// —— 调用方据此退避重试，而不是误报「改名失败」（实测 2026-11-07：迁移末尾报假错误）。
+func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want string) (moved, decided bool) {
 	parent := parentDirOf(cur)
 	if parentDirOf(want) != parent {
-		return false // 父不同 ⇒ 不是「同一名字的幂等」情形
+		return false, true // 父不同 ⇒ 明确不是「同一名字的幂等」情形
 	}
 	ents, err := s.listInner(ctx, parent)
 	if err != nil {
-		return false
+		return false, false // 无法判定 ⇒ 交调用方重试
 	}
 	var hasCur, hasWant bool
 	curBase, wantBase := path.Base(cur), path.Base(want)
@@ -2676,7 +2703,7 @@ func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want strin
 			hasWant = true
 		}
 	}
-	return !hasCur && hasWant
+	return !hasCur && hasWant, true
 }
 
 // normalizeBlockedRels 返回因「重复容器争议内容」需跳过规范化的逻辑路径集合。

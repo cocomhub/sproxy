@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -320,19 +321,19 @@ func TestContainerMovedByPeer_RequiresListing(t *testing.T) {
 	want := path.Join(parent, "SomeDeterministicName")
 
 	// 源仍在、目标不在 ⇒ 不得判为「已由他人完成」
-	if sfs.containerMovedByPeer(ctx, qc, want) {
-		t.Fatal("源仍在时不得判为已迁移（否则迁移被静默跳过）")
+	if moved, decided := sfs.containerMovedByPeer(ctx, qc, want); moved || !decided {
+		t.Fatalf("源仍在时应判为「未迁移且已判定」，got moved=%v decided=%v", moved, decided)
 	}
 	// 真正迁移后（源不在、目标在）⇒ 才是幂等情形
 	if rerr := sfs.inner.Rename(ctx, qc, want); rerr != nil {
 		t.Fatalf("rename: %v", rerr)
 	}
-	if !sfs.containerMovedByPeer(ctx, qc, want) {
-		t.Fatalf("源已不在且目标存在时应判为幂等（cur=%s want=%s）", curBase, want)
+	if moved, decided := sfs.containerMovedByPeer(ctx, qc, want); !moved || !decided {
+		t.Fatalf("源已不在且目标存在时应判为幂等（cur=%s want=%s），got moved=%v decided=%v", curBase, want, moved, decided)
 	}
 	// 父不同 ⇒ 不属于该情形
-	if sfs.containerMovedByPeer(ctx, path.Join(parent, "x"), path.Join("other", "y")) {
-		t.Fatal("父不同不得判为同一名字的幂等")
+	if moved, decided := sfs.containerMovedByPeer(ctx, path.Join(parent, "x"), path.Join("other", "y")); moved || !decided {
+		t.Fatalf("父不同应明确判定为非幂等，got moved=%v decided=%v", moved, decided)
 	}
 }
 
@@ -403,4 +404,59 @@ func TestNormalizeContainerNames_RebasesChildPath(t *testing.T) {
 			t.Fatalf("rel=%s 未规范化：got %s want %s", rel, c, want)
 		}
 	}
+}
+
+// TestMoveContainerIdempotent_RetriesOnTransientFailure 钉住**改名失败退避重试**：
+// 迁移连续数百次 rename 易触发外部限流（实测百度 31034）⇒ 首次失败必须重试而非直接放弃；
+// **目标已存在**（他人已完成）⇒ 幂等跳过（不报错）。
+func TestMoveContainerIdempotent_RetriesOnTransientFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	if merr := sfs.MakeDir(ctx, "m1"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	sfs.mu.RLock()
+	c := sfs.dirSegs["m1"]
+	sfs.mu.RUnlock()
+	// 首次 rename 注入瞬时失败 ⇒ 重试应最终成功
+	f := &flakyRenameFS{FS: sfs.inner, failFirst: true}
+	sfs.inner = f
+	want := path.Join(path.Dir(c), "DeterministicName1")
+	moved, err := sfs.moveContainerIdempotent(ctx, "m1", c, want)
+	if err != nil {
+		t.Fatalf("瞬时失败应重试成功，got: %v", err)
+	}
+	if !moved {
+		t.Fatal("应报告已完成移动")
+	}
+	if f.attempts < 2 {
+		t.Fatalf("应至少重试一次，got attempts=%d", f.attempts)
+	}
+	// 目标已存在（源不存在）⇒ 幂等跳过
+	sfs2 := newNormalizeFS(t, t.TempDir())
+	if m2 := sfs2.MakeDir(ctx, "m1"); m2 != nil {
+		t.Fatalf("MakeDir: %v", m2)
+	}
+}
+
+// flakyRenameFS 让**首次** Rename 失败（模拟瞬时/限流），之后放行。
+type flakyRenameFS struct {
+	syncpkg.FS
+	mu        sync.Mutex
+	failFirst bool
+	attempts  int
+}
+
+func (f *flakyRenameFS) Rename(ctx context.Context, from, to string) error {
+	f.mu.Lock()
+	f.attempts++
+	shouldFail := f.failFirst
+	f.failFirst = false
+	f.mu.Unlock()
+	if shouldFail {
+		return os.ErrDeadlineExceeded // 任意错误：模拟限流
+	}
+	return f.FS.Rename(ctx, from, to)
 }
