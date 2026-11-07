@@ -275,3 +275,17 @@ phase=postcheck elapsed_ms=0      err="context deadline exceeded"
    需要约束时改用**已实测稳定可用的操作**（如父目录列举 `ls`，0.33–0.38s）或可取消的执行方式；
 3. 读路径（`Meta`/`List`）已改为**精确列举优先**（`metaByExactList`），仍取 `fd.MD5` 做
    `ETag==本地整文件 md5` 断言 ⇒ **数据校验强度不变**。
+
+### 7.8.2 百度 v2 上传协议实测事实（2026-11-08，自研上传内核）
+
+| 事实 | 依据 |
+|---|---|
+| **建会话（`uploadid`）必须先于任何上传**：rapidupload 未命中时 `return_type=1` 的响应**会带 `uploadid`**（实测 `upload_id=N1-MTgz…`）；若上游漏用/漏建会话，`superfile2/upload?uploadid=` 为空 ⇒ **HTTP 400** | 实测日志 `上传分片参数 upload_id=""` 连续 4 次 ⇒ 400；修复后同一日志非空 ⇒ 上传成功 |
+| **`superfile2/upload`（`UploadTmpFile`）只写"会话临时区"，必须再 `createsuperfile` 才成为正式文件** | 实测：只上传一片不合并 ⇒ 内核报成功但远端**从未出现该文件**，既有复核 3 轮均空 ETag（284s ⇒ ErrTransient）；补 merge 后 2.87s 成功且 md5 一致 |
+| **新对象列举/元信息可见性有延迟**（§7.8 同族）⇒ 上传后**立即**严格校验会假失败；权威校验应在带等待窗口的链路（`putCheckAfterUpload`，`statVisibleWait`） | 实测：上传成功后立即列举未见 ⇒ 内核 verify 假失败；改为"能看到时要求一致"后通过 |
+| **小文件不省 merge**：任意大小都是「1 片 + 合并」（与库 `MultiUploader` 一致） | 同上第 2 条 |
+| **内核路径耗时 2.87s（1MiB）**，同环境库 `MultiUploader` 路径实测 ~90s | `TestE2E_UploadCoreNucleus` vs 早前 P7 打点 |
+
+> 锁定方式：`TestE2E_UploadCoreNucleus`（真实网盘，nucleus 不降级 ⇒ 成功即证明内核可用；
+> `BAIDUPCS_E2E_ROOT` 环境变量门控、自行清理产物）+ L1 用例
+> （`TestUpload_SmallFile_OnePartPlusMerge` 断言"必须合并"；会话前置断言 `rapid==1` 且复用 `UploadID`）。
