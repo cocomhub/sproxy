@@ -2765,10 +2765,7 @@ func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, wa
 		if attempt == maxAttempts {
 			break
 		}
-		delay := time.Duration(1<<(attempt-1)) * containerMoveRetryInterval
-		if delay > maxContainerMoveBackoff {
-			delay = maxContainerMoveBackoff
-		}
+		delay := min(time.Duration(1<<(attempt-1))*containerMoveRetryInterval, maxContainerMoveBackoff)
 		slog.Warn("secretdata: 容器改名失败，退避后重试（可能外部限流）",
 			"rel", rel, "attempt", attempt, "max_attempts", maxAttempts, "delay", delay, "error", lastErr)
 		select {
