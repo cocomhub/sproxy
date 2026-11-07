@@ -66,3 +66,5 @@
 - [x] R16.4 快照失效与采样校验 → **P1×2**（写回窗口未关；清理后未失效快照）+ P2×2
 - [x] R16.5 争议审计 / 解码导出 / 空容器清理 → **P1×2**（导出临时注册泄漏；争议判据过粗）+ P2×3 + P3×3
 - 报告：`16-batch16-review.md`（P0 0 / P1 5 / P2 7 / P3 3）
+- [x] **修复轮**（`fix/dup-container` `78bfc4e9a`）：P1×5 / P2×7 / P3×3 **全部修复**，每项红灯复现 +
+  变异命中（10/10）；`pkg/volume/secretdata`/`shardseal`/`cmd/sproxy`/`pkg/sync`/`pkg/cloud` 全绿、lint 0

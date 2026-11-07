@@ -10,8 +10,9 @@
 
 ## 结论
 
-**总评**：**有条件通过** —— 交付的四条主链路（确定性命名 / 权威选择 / 迁移 / 清理）方向正确、
-安全约束到位，但存在 **1 项直接导致功能不可用** 的缺陷与 **3 项状态泄漏/竞态**。
+**总评**：**已修复通过**（2026-11-08 复审）—— 交付的四条主链路（确定性命名 / 权威选择 / 迁移 /
+清理）方向正确、安全约束到位；本批次列出的 **P1×5 / P2×7 / P3×3 已全部修复**（每项先红灯复现 →
+修复 → 变异命中，见文末「修复记录」）。
 
 **发现数**：P0 0 / **P1 5** / P2 7 / P3 3
 
@@ -215,3 +216,33 @@
 3. **P1-4**（导出泄漏；改动中等）→ 同批或紧随
 4. **P1-5**（判据粒度；需产品口径确认"争议"定义）→ 设计确认后修
 5. P2/P3 → 记录排期
+
+## 修复记录（2026-11-08，`fix/dup-container` `78bfc4e9a`）
+
+**方法**：每项缺陷先写**红灯复现**用例（`pkg/volume/secretdata/review_fixes_test.go`），确认失败原因与
+分析一致，再修实现，最后**变异验证**（改动点回退 ⇒ 测试必须变红）。
+
+| 发现 | 修复要点 | 复现/回归测试 | 变异 |
+| --- | --- | --- | --- |
+| **P1-1** 迁移未同步 `metaEntry.dirSeg` | 迁移成功后 `rebaseAfterContainerMove`（复用既有 `rebaseContainerPathsLocked`） | `TestP1_1_ReadAfterMigration_SameProcess`（同进程读+删+GC 引用全部指向真实路径） | 去掉 rebase ⇒ **红** |
+| **P1-2** 快照写回窗口未关 | 新增 `snapshotGen` 代际号 + `finalizeSnapshotFile` 在 `os.Rename` **前**比对 | `TestP1_2_SnapshotFinalizeAbortsWhenInvalidated` / `...CommitsWhenUnchanged` | 去掉比对 ⇒ **红** |
+| **P1-3** 清理后未失效快照 | `removed > 0 && !dryRun` ⇒ `invalidateIndexSnapshot()` | `TestP1_3_CleanupInvalidatesSnapshot` | 去掉失效 ⇒ **红** |
+| **P1-4** 导出临时注册泄漏 | `exportTempReg` 快照-还原式**全量回滚**（usage / `dirs` 差集 / 去重池 refs / volVersion / 索引键） | `TestP1_4_ExportDoesNotLeakState`（导出前后 usage/version/目录集合一致 + 无 `__dup_export__` 幻影目录） | 不回滚 usage ⇒ **红** |
+| **P1-5** 争议判据按物理条目名 | 改为按**逻辑文件名**（解密 meta 取 `Original.Name`）比对；物理条目仅在 `Details` 作排查参考 | `TestP1_5_ConflictCriterionIgnoresSubContainerPhysicalNames`；既有 `TestAuditDuplicateContainers_DetectsConflict` 同步改为「落选含额外**逻辑文件**」夹具 | 让子容器物理名参与判据 ⇒ **红** |
+| **P2-1** 装配期动作无超时 | 新增 `NormalizeTimeout`（配置 `normalize_timeout`，默认 10m） | 随 P2-5 用例覆盖 | — |
+| **P2-2** `snapshotSuppressed` 语义不清 | 更名 `snapshotWriteDisabled` + 写明**进程级**闩锁语义与竞态分工 | 随 P1-2 用例覆盖 | — |
+| **P2-3** 采样告警刷屏 | 新增 `classifySampleDrift`：父未迁移 ⇒ Debug（预期态）；父规范而自身不合规 ⇒ Warn（异常） | `TestP2_3_SampleDriftClassifiesUnmigratedVsAnomalous` | 一律判异常 ⇒ **红** |
+| **P2-4** 退避偏弱 | 5 次指数退避（2s→4s→8s→16s，封顶 30s） | `TestP2_4_RetriesUseBoundedExponentialBackoff` | `maxAttempts=3` ⇒ **红** |
+| **P2-5** 需人工多次重启收敛 | `runApplyAction` 循环分批到 `moved==0`（受总超时与轮次护栏约束） | `TestP2_5_ApplyConvergesInOneRun` | 只跑一轮 ⇒ **红** |
+| **P2-6** `exportOneFile` 双返回值/注释重复/索引二次扫描 | 返回值收敛为单值；索引键一次收集复用（遍历 + 回滚） | 随 P1-4 用例覆盖 | — |
+| **P2-7** `dupGroupsSnapshot` 浅拷贝 | 深拷贝 `others` | `TestP2_7_DupGroupsSnapshotDeepCopies` | 浅拷贝 ⇒ **红** |
+| **P3-1** `alnumFromBytes` 取模偏置/空切片 | 长度守卫 + **拒绝采样**（无偏） | `TestP3_1_AlnumFromBytesGuardAndDistribution`（极差 ≤1） | 回退取模 ⇒ **红** |
+| **P3-2** `string(rune(0))` 表意 | 改为显式 NUL 常量拼接（无歧义论证写进注释） | `TestDirNameFor_Deterministic`（回归） | — |
+| **P3-3** 审计无法区分条目类型 | `Details` 增物理条目计数（标注「子容器名随机属正常，仅供排查」） | 随 P1-5 用例覆盖 | — |
+
+**验证**：`pkg/volume/secretdata` + `pkg/cryptox/shardseal` + `cmd/sproxy` + `pkg/sync` + `pkg/cloud`
+全绿；`golangci-lint` **0 issues**；**10/10 变异全部命中**。
+
+**流程记录**：`docs/feature-review` 分支长期落后 master（394 提交），其**陈旧 Makefile**在
+pre-commit 下 `gofmt -w $(ALL_SRC)` 因 `ALL_SRC` 为空而报 `cannot use -w with standard input`。
+按硬规则「不得绕过检查」处置：`git merge origin/master`（加法、不改历史）把分支追平修掉陈旧脚本。
