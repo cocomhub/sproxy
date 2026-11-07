@@ -20,7 +20,7 @@ import (
 // st 用于**卷 URI 寻址**（`share create vault:/docs/x.txt`）与「当前工作目录所在卷」默认上下文
 // ——与 ls/du/download 等命令同一套卷寻址（用户口径：卷 URI 是唯一寻址方式，无 --volume flag）。
 func NewCmdShare(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "share",
 		Short: "文件分享管理",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -35,7 +35,7 @@ func NewCmdShare(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 
 // NewCmdShareCreate 创建 share create 命令的工厂函数。
 func NewCmdShareCreate(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "create <filename>",
 		Short: "创建文件分享链接",
 		Long: "创建文件分享链接。" +
@@ -108,7 +108,7 @@ func shareCreateOptions(cmd *cobra.Command) ([]client.ShareOption, error) {
 
 // NewCmdShareList 创建 share list 命令的工厂函数。
 func NewCmdShareList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出所有分享链接",
 		Args:  cobra.NoArgs,
@@ -133,7 +133,7 @@ func NewCmdShareList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 
 // NewCmdShareRevoke 创建 share revoke 命令的工厂函数。
 func NewCmdShareRevoke(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "revoke <token>",
 		Short: "撤销分享链接",
 		Args:  cobra.ExactArgs(1),

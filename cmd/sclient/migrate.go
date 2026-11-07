@@ -29,7 +29,7 @@ import (
 // 交互与纯脚本双模式：交互提示走 stdin 扫描（--yes 跳过）；纯逻辑在 pkg/migrate
 // （Exporter/Importer/MirrorConfig），本命令只做 CLI 装配与摘要打印。
 func NewCmdMigrate(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "migrate <export|import|mirror-config>",
 		Short: "迁移向导：单机到多卷/联邦自动化迁移",
 		Long: `迁移向导（roadmap 11.7-⑩）：单机 → 多卷 → 联邦的自动化迁移。
@@ -66,7 +66,7 @@ func NewCmdMigrate(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comm
 
 // newCmdMigrateExport 创建 migrate export 子命令。
 func newCmdMigrateExport(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "export <out>",
 		Short: "导出源机文件到本地目录",
 		Long: `递归列出源机全部文件（含子目录）→ 下载到 <out>/files/（相对路径保持）
@@ -112,7 +112,7 @@ func newCmdMigrateExport(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 
 // newCmdMigrateImport 创建 migrate import 子命令。
 func newCmdMigrateImport(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "import <in>",
 		Short: "从本地目录导入目标机",
 		Long: `读 <in>/manifest.json（schema/checksum 自检，损坏/不符拒绝）→ 逐文件上传
@@ -162,7 +162,7 @@ func newCmdMigrateImport(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 
 // newCmdMigrateMirrorConfig 创建 migrate mirror-config 子命令。
 func newCmdMigrateMirrorConfig(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "mirror-config <in>",
 		Short: "生成镜像/同步/联邦 YAML 片段",
 		Long: `读 <in>/manifest.json + 目标机卷列表（GET /api/volumes）→ 生成

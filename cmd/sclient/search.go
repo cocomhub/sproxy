@@ -14,7 +14,7 @@ import (
 // NewCmdSearch 创建 search 命令的工厂函数。
 // search 命令不依赖当前目录，因此不需要 state.State 参数。
 func NewCmdSearch(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "search <keyword>",
 		Short: "搜索文件",
 		Long: `搜索 sproxy 服务端上名称匹配的文件。

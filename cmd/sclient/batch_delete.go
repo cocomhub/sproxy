@@ -16,7 +16,7 @@ import (
 
 // NewCmdBatchDelete 创建独立的 batch-delete 命令工厂函数，使用 state.State 替代全局 currentDir。
 func NewCmdBatchDelete(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "batch-delete <file1> [file2...]",
 		Short: "批量删除文件",
 		Long: `批量删除 sproxy 服务端上的多个文件。

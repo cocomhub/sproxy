@@ -19,7 +19,7 @@ import (
 //   - 跨卷：`cp a.txt b.txt --to-volume disk2` 或**卷 URI** `cp main:/a.txt disk2:/a.txt`；
 //   - URI 寻址与工作目录规则同其它文件命令（见 docs/cli.md）。
 func NewCmdCp(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "cp <src> <dst> [flags]",
 		Short: "复制文件（支持同卷 / 跨卷 / 卷 URI）",
 		Long: `复制文件，**源保留**（与 mv 相对）。

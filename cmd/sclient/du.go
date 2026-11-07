@@ -16,7 +16,7 @@ import (
 // NewCmdDu 创建 du 命令：按目录递归统计（文件数/字节/子目录数）。
 // path 缺省 = 当前目录；受 cd 与 --vol 影响。
 func NewCmdDu(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "du [path]",
 		Short: "查看目录空间占用（递归统计文件数/大小）",
 		Args:  cobra.MaximumNArgs(1),
@@ -71,7 +71,7 @@ func duRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams
 
 // NewCmdDF 创建 df 命令：卷水位 + 磁盘水位（复用 /api/stats）。
 func NewCmdDF(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "df",
 		Short: "查看卷水位与磁盘空间",
 		Args:  cobra.NoArgs,

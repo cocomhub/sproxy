@@ -249,3 +249,47 @@ func TestStagingReserve_ErasureAccountsParity(t *testing.T) {
 		t.Fatalf("纠错卷 staging 预留峰值 = %d，应含 parity 上界 %d", peak, want)
 	}
 }
+
+// TestWriteFileStream_MemoryDeliveryUploadFail_FastFailLabelStable 是 CI flake 回归：块级并发下
+// 「分块上传先于加密完成而失败」会走 sink 的 fast-fail 分支（submit 返回 firstErr / 队列已中止），
+// 修复前该分支被归类为「流式分块加密失败」，与「分块上传失败」路径同一根因两种文案 ⇒ 同一用例
+// 因时序不同而偶发失败（CI #1052/#1053 各命中一次）。
+//
+// 用 UploadConcurrency=1 + 多块，使首块失败后 sink 必然继续 submit 后续块 ⇒ 确定性命中
+// fast-fail 分支；断言归类恒为「分块上传失败」。
+func TestWriteFileStream_MemoryDeliveryUploadFail_FastFailLabelStable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	inner := &failAfterWriteFS{FS: syncpkg.NewLocalFS(root, nil), pred: func(p string) bool {
+		return shardseal.ClassifyName(path.Base(p)) == shardseal.KindChunk
+	}}
+	sfs, err := NewFS(inner, Options{
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, TempDir: t.TempDir(),
+		Block:             shardseal.BlockPolicy{Min: 32 << 10, Max: 32 << 10},
+		UploadConcurrency: 1, // 串行 worker ⇒ 首块失败后 sink 仍会 submit 后续块（fast-fail 分支）
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	if merr := sfs.MakeDir(ctx, "d"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	q := &fakeStagingQuota{limit: 1} // 任何预留给失败 ⇒ 回退链②内存交付（源可重读）
+	sfs.WithStagingQuota(q)
+	payload := bytes.Repeat([]byte("fast-fail-label-"), 64*1024) // 16B × 64Ki = 1MiB / 32KiB = 32 块
+	src := seekableSource(t, payload)
+	werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "d/ff.bin", src, int64(len(payload)), 0)
+	if werr == nil {
+		t.Fatal("内存交付下分块上传 write-then-fail ⇒ WriteFile 必须失败 ✗")
+	}
+	if !strings.Contains(werr.Error(), "分块上传失败") {
+		t.Fatalf("fast-fail 分支也必须归类为「分块上传失败」（不得因时序报「流式分块加密失败」）: %v", werr)
+	}
+	if !inner.firedAt() {
+		t.Fatal("夹具失效：未观测到数据分块的内层写")
+	}
+	if orphans := residualDataBlobs(t, root); len(orphans) != 0 {
+		t.Fatalf("fast-fail 失败回滚后底层残留 %d 个非目录 blob（远端孤儿）✗: %v", len(orphans), orphans)
+	}
+}

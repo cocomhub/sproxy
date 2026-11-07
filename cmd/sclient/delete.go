@@ -14,7 +14,7 @@ import (
 
 // NewCmdDelete 创建独立的 delete 命令工厂函数，使用 state.State 替代全局 currentDir。
 func NewCmdDelete(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:     "delete <filename>",
 		Aliases: []string{"rm"},
 		Short:   "删除文件（Linux 习惯别名 rm）",

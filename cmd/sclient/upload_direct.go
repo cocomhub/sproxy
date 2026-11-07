@@ -28,7 +28,7 @@ import (
 // 大文件绕过服务端带宽（roadmap 3.3 签名 v4 直传闭环）。
 func NewCmdUploadDirect(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	var remotePath string
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "upload-direct <backend> <file1> [file2...]",
 		Short: "直传文件到外部后端（S3 预签名，绕过服务端）",
 		Long: `经服务端签发 PUT 预签名 URL，客户端直传对象存储（当前 s3），完成后服务端登记。

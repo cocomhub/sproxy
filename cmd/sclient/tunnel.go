@@ -80,7 +80,7 @@ func resolveOutputPath(targetURL, outputFile, baseDir string) (string, error) {
 
 // NewCmdTunnel 创建隧道命令的工厂函数。
 func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "tunnel [flags] <url>",
 		Short: "通过加密隧道转发请求",
 		Long: `通过加密隧道发送 HTTP 请求。

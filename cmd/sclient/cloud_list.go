@@ -22,7 +22,7 @@ type cloudTaskInfo = client.CloudTask
 
 // NewCmdCloudList 创建 cloud list 命令的工厂函数。
 func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出所有云端下载任务",
 		Args:  cobra.NoArgs,

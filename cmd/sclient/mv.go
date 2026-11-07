@@ -32,7 +32,7 @@ type mvCtx struct {
 //   - 源写 `卷:/路径` ⇒ 源限定到该卷（同卷 rename）；
 //   - 目标写**不同**卷 ⇒ 跨卷迁移（move API；跨卷写前查重）；同卷 ⇒ 退化为同卷 rename。
 func NewCmdMv(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "mv <from> <to>",
 		Short: "重命名 / 移动远端文件",
 		Long: `重命名或移动 sproxy 服务端上的文件。

@@ -38,7 +38,7 @@ var errSecretAborted = errors.New("操作已中止：未收到有效输入")
 
 // NewCmdSecret 创建 secret 命令族。
 func NewCmdSecret(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "secret",
 		Short: "secret 卷管理（创建随机/双口令派生 / 列表 / 导出 / 删除 / 导入）",
 	}
@@ -57,7 +57,7 @@ func NewCmdSecret(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 // 输入解密口令后上传。文件 = 普通文件直觉；服务端只校验格式后落盘。
 func newCmdSecretImport(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var nameFlag string
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "import <file>",
 		Short: "导入 secret（明文 hex 文件或口令加密信封）",
 		Args:  cobra.ExactArgs(1),
@@ -168,7 +168,7 @@ func newSecretDirectClient(cmd *cobra.Command, factory clientfactory.Factory, cf
 func newCmdSecretCreate(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var passphrase bool
 	var outFile string
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "create <name>",
 		Short: "创建 secret（默认服务端随机生成；--passphrase 本地双口令派生）",
 		Args:  cobra.ExactArgs(1),
@@ -293,7 +293,7 @@ func secretReadPassphrase(ios cli.IOStreams, prompt string) (string, error) {
 
 // newCmdSecretList 列出卷内全部 secret 名。
 func newCmdSecretList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出 secret 卷内全部 secret 名",
 		Args:  cobra.NoArgs,
@@ -327,7 +327,7 @@ func newCmdSecretList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 func newCmdSecretExport(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var outPath string
 	var plain bool
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "export <name>",
 		Short: "导出 secret（默认口令加密写文件；--plain 明文）",
 		Args:  cobra.ExactArgs(1),
@@ -436,7 +436,7 @@ func secretDecryptExport(pass string, data []byte) ([]byte, error) {
 
 // newCmdSecretDelete 删除 secret。
 func newCmdSecretDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "delete <name>",
 		Short: "删除 secret（不存在报错）",
 		Args:  cobra.ExactArgs(1),

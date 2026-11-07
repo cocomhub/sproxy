@@ -24,7 +24,7 @@ const (
 // 服务端冲突索引（ConflictIndex，/api/sync/conflicts）登记 merge3 未自动合并的冲突；
 // list 列出未解决冲突，resolve 按策略（ours/theirs/manual）提交解决并写回文件。
 func newCmdSyncConflicts(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "conflicts",
 		Short: "同步冲突列表与解决（list/resolve）",
 		Long: `查看与解决同步冲突（服务端 ConflictIndex 登记的未合并冲突）。
@@ -45,7 +45,7 @@ resolve 提交解决策略并写回冲突文件：ours/theirs 取对应侧快照
 
 // newCmdSyncConflictsList 创建 `sync conflicts list`：列出未解决冲突。
 func newCmdSyncConflictsList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出未解决冲突",
 		Args:  cobra.NoArgs,
@@ -101,7 +101,7 @@ type syncConflictsResolveOptions struct {
 // strategy 非法 / manual 缺 content 本地报错，不出网。
 func newCmdSyncConflictsResolve(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	var o syncConflictsResolveOptions
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "resolve <id>",
 		Short: "解决同步冲突（ours|theirs|manual）",
 		Args:  cobra.ExactArgs(1),

@@ -138,7 +138,7 @@ func cdApplyNormalPath(st *state.State, ios cli.IOStreams, path string) error {
 
 // NewCmdPwd 创建独立的 pwd 命令工厂函数。
 func NewCmdPwd(st *state.State, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "pwd",
 		Short: "打印当前目录（含所在卷：`<卷名>:/<目录>`）",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -149,7 +149,7 @@ func NewCmdPwd(st *state.State, ios cli.IOStreams) *cobra.Command {
 
 // NewCmdMkdir 创建独立的 mkdir 命令工厂函数。
 func NewCmdMkdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "mkdir <dirname>",
 		Short: "在服务端创建目录",
 		Long:  "在服务端上传目录下创建指定子目录。路径相对当前目录 (cd)，支持绝对路径 (/开头)。",
@@ -182,7 +182,7 @@ func NewCmdMkdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 
 // NewCmdRmdir 创建独立的 rmdir 命令工厂函数。
 func NewCmdRmdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "rmdir <dirname>",
 		Short: "删除服务端目录",
 		Long:  "删除服务端上传目录下的指定目录（含所有内容）。路径相对当前目录。\n使用 --force 跳过确认提示。",

@@ -26,7 +26,7 @@ import (
 //	volume list
 //	volume delete <name>
 func NewCmdVolume(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "volume",
 		Short: "管理用户自有卷与卷间操作",
 		Long: `管理当前用户的网盘盘（用户自有卷，仅外部类型）与卷间操作（copy/move/rebalance）。
@@ -65,7 +65,7 @@ func newCmdVolumeCreate(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 		extraRaw string
 		capacity string
 	)
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "create <name>",
 		Short: "创建用户自有卷",
 		Long: `创建当前用户的网盘盘（仅外部类型）。
@@ -146,7 +146,7 @@ func volumeCapacity(capacity string) (int64, error) {
 }
 
 func newCmdVolumeList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出我的用户卷",
 		Long:  "列出当前用户的全部用户自有卷（name/type/capacity）。",
@@ -171,7 +171,7 @@ func newCmdVolumeList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 }
 
 func newCmdVolumeDelete(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "delete <name>",
 		Short: "删除用户自有卷",
 		Long:  "删除当前用户的网盘盘。被活跃同步任务引用时服务端返回 409（需先取消任务）。",

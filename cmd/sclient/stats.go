@@ -14,7 +14,7 @@ import (
 // NewCmdStats 创建 stats 命令的工厂函数。
 // 使用依赖注入的 Factory 创建客户端，支持 IOStreams 输出。
 func NewCmdStats(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "stats",
 		Short: "显示服务器统计信息",
 		Args:  cobra.NoArgs,

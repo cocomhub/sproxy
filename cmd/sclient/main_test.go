@@ -9,6 +9,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // TestReportError_SinglePrintWhenNotReported 验证：命令未打印错误时，main 补一行
@@ -69,4 +71,26 @@ func TestReportError_InspectDiff(t *testing.T) {
 	if exitCodeFor(errInspectDiff) != 3 {
 		t.Fatalf("errInspectDiff 退出码应为 3")
 	}
+}
+
+// TestAllCommandsSilenceUsage 是门禁：根命令树下**每个**命令都必须声明
+// SilenceUsage/SilenceErrors（错误不转储 Usage、错误交由入口单点打印）。新增命令若漏声明即红，
+// 避免「独立执行/单测时刷 Usage」的负担再次出现。
+func TestAllCommandsSilenceUsage(t *testing.T) {
+	t.Setenv("SCLIENT_ENV", "")
+	setXDGConfigHome(t)
+	root := NewRootCmd()
+	var check func(c *cobra.Command)
+	check = func(c *cobra.Command) {
+		if !c.SilenceUsage {
+			t.Errorf("命令 %q 未声明 SilenceUsage", c.CommandPath())
+		}
+		if !c.SilenceErrors {
+			t.Errorf("命令 %q 未声明 SilenceErrors", c.CommandPath())
+		}
+		for _, sub := range c.Commands() {
+			check(sub)
+		}
+	}
+	check(root)
 }

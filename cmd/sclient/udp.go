@@ -28,7 +28,7 @@ import (
 
 // newCmdUDP 创建 sclient udp 父命令（当前含 map 子命令）。
 func newCmdUDP(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "udp",
 		Short: "UDP 隧道（端口映射）",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -220,7 +220,7 @@ func udpReadLoop(udpLn *net.UDPConn, m *mux.Mux, logger *slog.Logger, mu *sync.M
 // 地址——本地 UDP 数据报经 mesh（FrameDatagram）到出口，出口转发到 --remote 目标；
 // 响应原路回传（双向 UDP 转发）。
 func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "map -l :udp --exit <node> --remote <host:port>",
 		Short: "UDP 端口映射（经 mesh 到出口节点，出口转发到远程 UDP 地址）",
 		Long: `把本地 UDP 端口映射到出口节点的远程 UDP 地址：本地 UDP 数据报经 mesh

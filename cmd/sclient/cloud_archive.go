@@ -21,7 +21,7 @@ import (
 // volume flag：URI 里的卷名由客户端归一为请求体的 target_volume/target_path，协议零改动。
 // 未带卷名的纯路径回落当前工作目录所在卷（`cd <卷名>:/…` 设定）。
 func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "archive <task-id> [task-id...]",
 		Short: "打包云端下载已完成的任务文件",
 		Long: `将指定已完成云端下载任务的文件打包为 tar.gz。

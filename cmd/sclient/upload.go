@@ -40,7 +40,7 @@ type uploadOptions struct {
 
 // NewCmdUpload 创建独立的 upload 命令工厂函数，使用 clientfactory.Factory 替代 buildFileClient。
 func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "upload <file1> [file2...]",
 		Short: "上传一个或多个文件",
 		Long: `上传一个或多个文件到 sproxy 服务端。

@@ -144,7 +144,7 @@ func previewImage(ctx context.Context, ios cli.IOStreams, svc *client.FileClient
 // 文件内容经 `FileClient` 获取（`OpenDownload`）：服务端地址、SproxySig 凭据、隧道/直连
 // 选路与 TLS 全部由工厂构造的客户端承担，命令本身只做扩展名分派与展示。
 func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "preview <filename>",
 		Short: "预览服务端文件",
 		Long: `预览服务端上的文件内容。

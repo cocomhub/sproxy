@@ -26,7 +26,7 @@ import (
 //   - --proxy-user/--proxy-pass 任一配置即要求 Proxy-Authorization Basic（防只配密码被静默禁用）；
 //   - 出口路径目标由出口节点 dial 策略把关（NewServiceDialPolicy，防 SSRF）。
 func newCmdHTTPProxy(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "http-proxy [-l :port] [--exit <node>|--exit-auto] [--proxy-user u] [--proxy-pass p]",
 		Short: "正向 HTTP 代理（绝对 URI + CONNECT，本地直连优先/经出口出站）",
 		Long: `启动本地正向 HTTP 代理：客户端（curl/wget/浏览器/Git/Go·Python·Node 应用）配

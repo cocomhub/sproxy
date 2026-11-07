@@ -21,7 +21,7 @@ import (
 
 // NewCmdDownload 创建独立的 download 命令工厂函数，使用 state.State 替代全局 currentDir。
 func NewCmdDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "download <filename> [output]",
 		Short: "下载文件",
 		Long: `从 sproxy 服务端下载文件。

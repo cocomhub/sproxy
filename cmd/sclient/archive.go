@@ -13,7 +13,7 @@ import (
 
 // NewCmdArchive 创建独立的 archive 命令工厂函数。
 func NewCmdArchive(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "archive [flags] <file...>",
 		Short: "将服务端文件打包下载为 tar.gz",
 		Long: `将服务端上指定文件打包为 tar.gz 下载到本地。
@@ -48,7 +48,7 @@ func NewCmdArchive(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comm
 
 // NewCmdArchiveDir 创建独立的 archive-dir 命令工厂函数。
 func NewCmdArchiveDir(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "archive-dir [flags] <dirname>",
 		Short: "将服务端整个目录打包下载为 tar.gz",
 		Long:  `将服务端上整个目录打包为 tar.gz 下载到本地。`,

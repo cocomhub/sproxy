@@ -29,7 +29,7 @@ import (
 // 定时备份（roadmap 12.2-3 P2）：加 --schedule <cron> 后按 cron 表达式周期触发
 // （参考 #561 sync schedule 模式；到点执行一次导出，串行不堆叠，SIGINT/SIGTERM 优雅退出）。
 func NewCmdBackup(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "backup <vol> <dest>",
 		Short: "导出卷为 tar 备份到本地",
 		Long: `把卷导出为 tar 备份到本地文件（服务端 GET /api/volumes/export 流式导出）。

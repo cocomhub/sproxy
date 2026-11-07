@@ -30,7 +30,7 @@ import (
 
 // newCmdContext 创建 context 命令族（读写 config.yaml，无需 network/凭据）。
 func newCmdContext(cfgPath *string) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "context",
 		Short: "上下文管理（多环境多用户切换；对标 kubectl context）",
 		Long:  "查看或切换 sclient 上下文（environments/users/contexts 三件套 + current-context）。\n子命令: list / use / get / set / delete / rename",
@@ -51,7 +51,7 @@ func newCmdContext(cfgPath *string) *cobra.Command {
 
 // newEnvCommand 创建 env 命令族（环境列表 / 切换当前 context 的环境）。
 func newEnvCommand(cfgPath *string) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "env",
 		Short: "环境管理（environments 列表 / 切换当前 context 的环境）",
 		Args:  cobra.NoArgs,
@@ -67,7 +67,7 @@ func newEnvCommand(cfgPath *string) *cobra.Command {
 
 // newUserCommand 创建 user 命令族（用户列表 / 切换当前 context 的用户）。
 func newUserCommand(cfgPath *string) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "user",
 		Short: "用户管理（users 列表 / 切换当前 context 的用户）",
 		Args:  cobra.NoArgs,
@@ -85,7 +85,7 @@ func newUserCommand(cfgPath *string) *cobra.Command {
 
 // newCmdContextList 列出全部 context，当前项标 *。
 func newCmdContextList(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出全部 context（标 * 当前）",
 		Args:  cobra.NoArgs,
@@ -113,7 +113,7 @@ func newCmdContextList(cfgPath *string) *cobra.Command {
 
 // newCmdContextUse 切换 current-context（写 config.yaml；空名拒绝）。
 func newCmdContextUse(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "use <name>", // NOSONAR: S1192 — 命令 Use 字符串（定义/帮助共用），抽常量无收益
 		Short: "切换 current-context",
 		Args:  cobra.ExactArgs(1),
@@ -155,7 +155,7 @@ func contextGetPrintUser(cmd *cobra.Command, user *contextcfg.User) {
 
 // newCmdContextGet 显示 context 的解析合并视图（env+user+volume 扁平展示）。
 func newCmdContextGet(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "get [name]",
 		Short: "显示 context 解析后的合并视图（缺省=当前）",
 		Args:  cobra.MaximumNArgs(1),
@@ -255,7 +255,7 @@ func contextUpdateEntry(cmd *cobra.Command, cfg *contextcfg.Config, existing *co
 // 改名 --env-name/--user-name/--volume-name 根除。
 func newCmdContextSet(cfgPath *string) *cobra.Command {
 	var envName, userName, volume string
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "set <name> --env-name <e> --user-name <u> [--volume-name <v>]",
 		Short: "创建或更新 context（env+user 组合）",
 		Args:  cobra.ExactArgs(1),
@@ -291,7 +291,7 @@ func newCmdContextSet(cfgPath *string) *cobra.Command {
 
 // newCmdContextDelete 删除 context（current-context 拒绝删除）。
 func newCmdContextDelete(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "delete <name>",
 		Short: "删除 context（current-context 不可删除，先 use 其它）",
 		Args:  cobra.ExactArgs(1),
@@ -325,7 +325,7 @@ func newCmdContextDelete(cfgPath *string) *cobra.Command {
 
 // newCmdContextRename 重命名 context（current-context 同步更新指针）。
 func newCmdContextRename(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "rename <old> <new>",
 		Short: "重命名 context（current-context 指针同步更新）",
 		Args:  cobra.ExactArgs(2),
@@ -362,7 +362,7 @@ func newCmdContextRename(cfgPath *string) *cobra.Command {
 
 // newEnvList 列出全部 environment。
 func newEnvList(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出全部 environment",
 		Args:  cobra.NoArgs,
@@ -381,7 +381,7 @@ func newEnvList(cfgPath *string) *cobra.Command {
 
 // newEnvUse 更新当前 context 的 environment（写 config.yaml）。
 func newEnvUse(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "use <name>", // NOSONAR: S1192 — 命令 Use 字符串（定义/帮助共用），抽常量无收益
 		Short: "切换当前 context 的 environment",
 		Args:  cobra.ExactArgs(1),
@@ -415,7 +415,7 @@ func newEnvUse(cfgPath *string) *cobra.Command {
 
 // newUserList 列出全部 user（凭据脱敏展示）。
 func newUserList(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出全部 user（凭据脱敏）",
 		Args:  cobra.NoArgs,
@@ -434,7 +434,7 @@ func newUserList(cfgPath *string) *cobra.Command {
 
 // newUserUse 更新当前 context 的 user（写 config.yaml）。
 func newUserUse(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "use <name>", // NOSONAR: S1192 — 命令 Use 字符串（定义/帮助共用），抽常量无收益
 		Short: "切换当前 context 的 user",
 		Args:  cobra.ExactArgs(1),

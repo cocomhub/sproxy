@@ -95,7 +95,7 @@ func relayHubClient(cmd *cobra.Command, factory clientfactory.Factory, cfgSvc Co
 
 // NewCmdRelayRemoveNode 创建 relay remove-node 命令的工厂函数。
 func NewCmdRelayRemoveNode(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "remove-node <node-id>",
 		Short: "从 Hub 移除指定节点",
 		Args:  cobra.ExactArgs(1),
@@ -126,7 +126,7 @@ func NewCmdRelayRemoveNode(factory clientfactory.Factory, ios cli.IOStreams, cfg
 
 // NewCmdRelayStats 创建 relay stats 命令的工厂函数。
 func NewCmdRelayStats(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "stats",
 		Short: "查看 Hub 统计信息",
 		RunE: func(cmd *cobra.Command, args []string) error {

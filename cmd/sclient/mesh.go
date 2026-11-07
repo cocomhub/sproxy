@@ -55,7 +55,7 @@ func meshGatewayDial(gatewayAddr, gatewayToken string, ios cli.IOStreams) meshDi
 // NewCmdMesh 创建 mesh 父命令：基于 hub 服务注册表的服务发现与连接。
 // cfgSvc 为可选配置提供者（mesh node 常驻节点用；hub/token/node-id 配置回落）。
 func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "mesh",
 		Short: "mesh 服务发现与连接（webrtc 直连优先，hub 中继回落）",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -72,7 +72,7 @@ func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigP
 
 // newCmdMeshConnect 创建 mesh connect：按服务名连接（webrtc 优先，中继回落）。
 func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "connect <service> [-l :port]",
 		Short: "连接到 mesh 服务（webrtc 直连优先，hub 中继回落）",
 		Args:  cobra.ExactArgs(1),
@@ -279,7 +279,7 @@ func meshACLLines(acl *client.MeshACL) []string {
 // 可见性由服务端按已认证身份判定（仅 owner 自身，见 pkg/server/mesh_acl.go），故本命令没有
 // owner 参数——不是遗漏，而是**故意**不给客户端指定他人的能力。
 func newCmdMeshACL(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "acl",
 		Short: "列出本 owner 的跨节点授权（卷 × 节点 × scope）",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -352,7 +352,7 @@ func dashIfEmpty(s string) string {
 // newCmdMeshStatus 创建 mesh status：列出 hub 上的 mesh 服务；
 // 指定 --gateway 时改查本地 mesh node 网关拓扑（node-id + 服务宣告 + 已建直连链路）。
 func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "status",
 		Short: "列出 hub 上的 mesh 服务（或 --gateway 查本地节点直连拓扑）",
 		RunE: func(cmd *cobra.Command, args []string) error {

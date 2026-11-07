@@ -16,7 +16,7 @@ import (
 
 // NewCmdIdentity 创建 identity 父命令（节点长时身份密钥与指纹管理，P1 身份 pinning）。
 func NewCmdIdentity(ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "identity",
 		Short: "节点身份密钥与指纹管理（Ed25519 长时身份，供对端指纹 pinning）",
 	}
@@ -34,7 +34,7 @@ func NewCmdIdentityGenerate(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "generate",
 		Short:        "生成并持久化节点身份密钥（Ed25519）",
-		SilenceUsage: true,
+		SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			path, err := resolveIdentityPath(file)
 			if err != nil {
@@ -68,7 +68,7 @@ func NewCmdIdentityShow(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "show",
 		Short:        "展示本节点身份指纹与公钥",
-		SilenceUsage: true,
+		SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			id, err := loadIdentityForCLI(file)
 			if err != nil {
@@ -89,7 +89,7 @@ func NewCmdIdentityFingerprint(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "fingerprint",
 		Short:        "仅打印本节点身份指纹（供脚本/复制）",
-		SilenceUsage: true,
+		SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			id, err := loadIdentityForCLI(file)
 			if err != nil {

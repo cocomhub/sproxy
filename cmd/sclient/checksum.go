@@ -13,7 +13,7 @@ import (
 
 // NewCmdChecksum 创建 checksum 命令族（台账运维面）。
 func NewCmdChecksum(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "checksum",
 		Short: "checksum 台账运维（从对象 meta 重建）",
 	}
@@ -25,7 +25,7 @@ func NewCmdChecksum(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Com
 // 重建 checksum 台账（台账部分缺失/被裁剪时用；台账全空时 list 会自动重建，无需手动执行）。
 func NewCmdChecksumRebuild(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	var owner string
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "rebuild",
 		Short: "从对象 meta 重建 checksum 台账（可指定 --owner）",
 		Args:  cobra.NoArgs,

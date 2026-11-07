@@ -205,7 +205,7 @@ func scheduleRunDue(ctx context.Context, expr *cronExpr, runner *syncWatcher, qu
 // newCmdSyncSchedule 创建 `sync schedule <cron>` 子命令：cron 表达式到点触发同步。
 func newCmdSyncSchedule(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	var o syncWatchOptions
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "schedule <cron>",
 		Short: "定时调度同步：cron 表达式到点触发 pull/push/both",
 		Long: `按 cron 表达式（分 时 日 月 周，同系统 crontab）周期触发一次服务端同步任务。

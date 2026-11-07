@@ -22,7 +22,7 @@ import (
 // NewCmdDiag 创建 diag 命令的工厂函数。
 // 使用 ioStreams 替代 fmt.Printf / os.Stderr 进行输出。
 func NewCmdDiag(ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "diag",
 		Short: "中继诊断工具",
 		Long: `检测 Hub 连通性和查看中继节点状态。

@@ -37,7 +37,7 @@ const socksUserFlag = "socks-user"
 //   - 目标由出口节点 dial 策略（NewServiceDialPolicy：--dial-allow/--dial-allow-cidr/
 //     宣告服务地址）把关，本地代理不直接拨任意地址。
 func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "socks [-l :port] --exit <node>",
 		Short: "启动 SOCKS5 代理（CONNECT 经 mesh 到指定出口节点，出口出站拨号）",
 		Long: `启动本地 SOCKS5 代理：客户端（如 curl --socks5-hostname）经本代理 CONNECT 任意

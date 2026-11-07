@@ -13,7 +13,7 @@ import (
 )
 
 func newCmdVolumeCopy(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "copy <file> [--to-volume <v>]",
 		Short: "跨卷复制文件（保留源）",
 		Args:  cobra.ExactArgs(1),
@@ -27,7 +27,7 @@ func newCmdVolumeCopy(factory clientfactory.Factory, ios cli.IOStreams, st *stat
 }
 
 func newCmdVolumeMove(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "move <file> [--to-volume <v>]",
 		Short: "跨卷移动文件（源删除）",
 		Args:  cobra.ExactArgs(1),
@@ -41,7 +41,7 @@ func newCmdVolumeMove(factory clientfactory.Factory, ios cli.IOStreams, st *stat
 }
 
 func newCmdVolumeRebalance(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "rebalance",
 		Short: "触发卷再平衡（from 卷文件迁往 to 卷）",
 		Args:  cobra.NoArgs,
@@ -73,7 +73,7 @@ func newCmdVolumeRebalance(factory clientfactory.Factory, ios cli.IOStreams) *co
 }
 
 func newCmdVolumeRefresh(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "refresh [卷名]",
 		Short: "强制刷新卷缓存/索引（感知进程外改动；无参 = 全部卷）",
 		Long: `强制刷新服务端的卷缓存/索引（S5，2026-10-27）。

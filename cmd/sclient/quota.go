@@ -22,7 +22,7 @@ import (
 
 // newCmdQuota 创建 quota 命令。
 func newCmdQuota(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "quota",
 		Short: "查看本 owner 配额（跨卷联邦视图 + 逐卷明细）",
 		Args:  cobra.NoArgs,

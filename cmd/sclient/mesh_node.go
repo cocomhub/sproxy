@@ -129,7 +129,7 @@ func meshNodeStartCredRotation(ctx context.Context, cmd *cobra.Command, factory 
 }
 
 func newCmdMeshNode(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "node",
 		Short: "运行常驻 mesh 节点（注册+中继+webrtc 直连+自动重连）",
 		Long: `作为常驻 mesh 节点连接 Hub：单进程单注册（稳定 node-id + 服务宣告 +

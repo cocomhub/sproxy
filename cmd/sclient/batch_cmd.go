@@ -22,7 +22,7 @@ import (
 // （--workers 控制并发峰值，默认 4）；结果按文件行序输出，与逐行执行
 // 输出逐字节一致（脚本兼容零回归）。任一行 FAIL 时命令以非 0 退出码结束。
 func NewCmdBatch(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "batch <file>",
 		Short: "从文件逐行读取命令批量执行",
 		Long: `从文件逐行读取命令并批量执行（--workers 并发，默认 4）。

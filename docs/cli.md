@@ -61,6 +61,8 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 
 - **退出码**：`0` 成功；`1` 执行错误；`3` 审查发现差异（`volume inspect --disk`，便于脚本门禁）。
   `--json` 与文本模式退出码一致。
+- **所有子命令构造时统一声明 `SilenceUsage/SilenceErrors`**（避免错误转储 Usage；独立执行/单测
+  与经根命令执行行为一致），由 `TestAllCommandsSilenceUsage` 门禁锁定（新增命令漏声明即红）。
 
 ### TLS 与传输回退
 

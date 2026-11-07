@@ -68,7 +68,7 @@ type sealfileCfg struct {
 
 // NewCmdSealfile 创建 sealfile 命令族（本地加解密，不连服务端）。
 func NewCmdSealfile(ios cli.IOStreams, cfgSvc SealfileConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "sealfile",
 		Short: "本地文件加解密（与 sproxy secretdata 卷同内核；加密产物可作卷加载）",
 		Long: `sealfile 使用与 sproxy secretdata 卷完全相同的加解密能力在本地加密文件。
@@ -331,7 +331,7 @@ func newSealfileFS(outDir string, secret []byte, algo string, bp shardseal.Block
 // 写路径）。video-keyframe 自动选型由 SecretdataFS.blockletPolicyFor 内部完成。
 func newCmdSealfileEncrypt(ios cli.IOStreams, cfgSvc SealfileConfigProvider) *cobra.Command {
 	var f sealfileFlags
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "encrypt <file>",
 		Short: "加密文件到输出目录（secretdata 卷布局；视频自动关键帧分块）",
 		Args:  cobra.ExactArgs(1),
@@ -410,7 +410,7 @@ func newCmdSealfileDecrypt(ios cli.IOStreams, cfgSvc SealfileConfigProvider) *co
 	// decrypt 输入是卷目录（位置参数），不复用 encrypt 的 --output-dir：仅注册
 	// key/algorithm/block-policy/video-keyframe/fixed（addSealfileFlags 含 output-dir，
 	// 故这里手动注册除 output-dir 外的子集，避免 --out 与 --output-dir 双 flag 混淆）。
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "decrypt <输出目录> [卷内文件名] --key <同上> [-o 还原文件]",
 		Short: "整文件解密还原（含 SHA-256 完整性校验）",
 		Args:  cobra.RangeArgs(1, 2),
@@ -502,7 +502,7 @@ func runSealfileDecrypt(ios cli.IOStreams, cmd *cobra.Command, f *sealfileFlags,
 // blocklet 模式（断言关键帧分块生效）。
 func newCmdSealfileInfo(ios cli.IOStreams, cfgSvc SealfileConfigProvider) *cobra.Command {
 	var f sealfileFlags
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "info <输出目录> [文件名] --key <同上>",
 		Short: "查看加密卷信息（blocklet 模式/分块/sha256）",
 		Args:  cobra.RangeArgs(1, 2),

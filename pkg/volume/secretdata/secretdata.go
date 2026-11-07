@@ -1472,8 +1472,18 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		// **必须先收口再回滚**（2026-11-04）：并发 worker 可能正在上传——不等它们结束就回滚，
 		// 之后完成的 worker 仍会写入远端 ⇒ 孤儿 blob（测试 TestDifferential_RapidUploadMiss_
 		// FailClosed 实测残留 2 个）。finish 幂等，囊括全部已/将上传的块。
-		_ = iu.finish()
+		uerr := iu.finish()
 		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
+		// sink 的 fast-fail：块上传先于加密完成而失败时，submit 会把「其它块已失败」/「队列
+		// 已中止」作为 cerr 返回（submit 返回 firstErr）——根因是**分块上传失败**，必须与
+		// `iu.finish()` 路径同一归类；否则同一根因会因并发时序不同而报「流式分块加密失败」
+		// （CI flake：同一用例两种文案）。uerr 与 cerr 不同则一并携带，不丢加密侧错误。
+		if uerr != nil {
+			if !errors.Is(cerr, uerr) {
+				return fmt.Errorf("secretdata: 分块上传失败: %w", errors.Join(uerr, cerr))
+			}
+			return fmt.Errorf("secretdata: 分块上传失败: %w", cerr)
+		}
 		return fmt.Errorf("secretdata: 流式分块加密失败: %w", cerr)
 	}
 	// 块级并发：加密输出完毕不代表块已全部上传 ⇒ 收口并等待 worker（首个错误即失败）。
