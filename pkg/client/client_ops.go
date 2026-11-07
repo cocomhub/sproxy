@@ -394,7 +394,7 @@ func (c *FileClient) singleStreamDownload(ctx context.Context, filename, outputP
 func (c *FileClient) resumableStreamDownload(ctx context.Context, filename, outputPath, kind string, rm remoteFileMeta) error {
 	rs := c.loadStreamResume(filename, kind, outputPath, rm)
 	var lastErr error
-	for attempt := 0; attempt < downloadStreamMaxAttempts; attempt++ {
+	for attempt := range downloadStreamMaxAttempts {
 		if attempt > 0 && !chunkDownloadSleep(ctx, streamRetryDelay(attempt)) {
 			break
 		}
@@ -535,8 +535,7 @@ func (e *downloadStatusError) Error() string {
 
 // isFatalDownloadError 报告是否不应重试（4xx 客户端错误）。
 func isFatalDownloadError(err error) bool {
-	var se *downloadStatusError
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*downloadStatusError](err); ok {
 		return se.code >= 400 && se.code < 500
 	}
 	return false
@@ -558,10 +557,7 @@ func contentRangeStartsAt(header string, want int64) bool {
 
 // streamRetryDelay 返回单流续传第 attempt 次重试前的退避（1s/2s/4s…封顶 30s）。
 func streamRetryDelay(attempt int) time.Duration {
-	d := time.Second << uint(attempt-1)
-	if d > 30*time.Second {
-		d = 30 * time.Second
-	}
+	d := min(time.Second<<uint(attempt-1), 30*time.Second)
 	return d
 }
 
