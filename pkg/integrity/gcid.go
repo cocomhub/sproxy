@@ -339,6 +339,67 @@ func RecomputeGCIDOrdered(path string, targetHash string, stats *GCIDVerifyStats
 	return 0, 0, "", nil
 }
 
+// GCIDOrderFor 返回文件大小对应的**候选分块计算顺序**（推荐降序在前 + 其余降序在后）。
+//
+// **导出的唯一目的**：让「反查一组目标 hash」的调用方（如人工上传时用本地文件的 GCID 去
+// 分享文件池里溯源）复用**下载校验同一套**候选枚举与顺序，而不是各自写死块大小
+// （2026-11-07 用户明示：「pikget 下载时是确认过 GCID 一致的，用一样的逻辑进行匹配确认」+
+// 「不要直接固定块大小」）。同一实现 ⇒ 下载校验与反查的行为永远一致。
+func GCIDOrderFor(size int64) []int64 { return gcidOrderFor(size) }
+
+// GCIDOrderFile 打开文件并按大小推导候选顺序（便捷入口；空文件返回 nil）。
+func GCIDOrderFile(path string) ([]int64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Size() <= 0 {
+		return nil, nil
+	}
+	return gcidOrderFor(fi.Size()), nil
+}
+
+// MatchAnyGCID 按**下载校验同一候选顺序**复算本地 GCID，返回首个命中 `targets` 的
+// (命中 GCID, 实际分块字节)；全候选未命中返回 ("", 0)。`tried` 是**实际尝试过的分块大小**
+// （按尝试序），供调用方诊断与错误信息。
+//
+// 语义与 `VerifyGCID`/`RecomputeGCIDOrdered`（所有下载器共用入口）**完全同源**：
+// 候选集合由本包唯一维护（GCIDCandidates + 按文件大小的推荐区间），**不写死任何块大小**；
+// 命中即返（避免无谓的整文件重读）。targets 按大小写不敏感比对（GCID 是十六进制）。
+func MatchAnyGCID(path string, targets map[string]struct{}) (hitGCID string, hitBlock int64, tried []int64, err error) {
+	if len(targets) == 0 || path == "" {
+		return "", 0, nil, nil
+	}
+	f, ferr := os.Open(path)
+	if ferr != nil {
+		return "", 0, nil, ferr
+	}
+	defer func() { _ = f.Close() }()
+	fi, serr := f.Stat()
+	if serr != nil {
+		return "", 0, nil, serr
+	}
+	size := fi.Size()
+	if size == 0 {
+		return "", 0, nil, nil
+	}
+	lower := make(map[string]struct{}, len(targets))
+	for k := range targets {
+		lower[strings.ToLower(k)] = struct{}{}
+	}
+	for _, bs := range gcidOrderFor(size) {
+		tried = append(tried, bs)
+		gcid, gerr := computeGCIDFile(path, f, bs, size)
+		if gerr != nil {
+			return "", 0, tried, gerr
+		}
+		if _, ok := lower[strings.ToLower(gcid)]; ok {
+			return gcid, bs, tried, nil
+		}
+	}
+	return "", 0, tried, nil
+}
+
 // gcidOrderFor 返回文件大小对应的候选计算顺序（推荐降序 + rest 降序，命中即返优先）。
 func gcidOrderFor(size int64) []int64 {
 	recommended := gcidRangeFor(size)
