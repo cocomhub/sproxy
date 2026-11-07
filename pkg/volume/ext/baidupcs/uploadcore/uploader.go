@@ -104,9 +104,15 @@ type Merger interface {
 	Merge(ctx context.Context, uploadID string, req Request, parts []Part) error
 }
 
-// Verifier 上传后校验（数据操作必须 md5 确认；失败由上层走秒传刷新自愈）。
+// Verifier 上传后校验（数据操作必须 md5 确认）。
 type Verifier interface {
 	Verify(ctx context.Context, req Request) error
+}
+
+// Repairer 是**可选**能力：校验失败时尝试自愈（如 baidupcs 的 rapidupload 秒传刷新，零传输），
+// 成功后内核会**再复验一次**。nil ⇒ 无自愈能力（校验失败即报错，不静默放过）。
+type Repairer interface {
+	Repair(ctx context.Context, req Request) error
 }
 
 // Recorder 是 WAL 记录的**窄接口**（S2 由 pkg/audit scope 适配实现）。
@@ -124,6 +130,8 @@ type Options struct {
 	Parts  PartUploader
 	Merge  Merger
 	Verify Verifier
+	// Repair 为可选自愈能力（nil ⇒ 校验失败直接报错）。
+	Repair Repairer
 	WAL    Recorder
 	Resume *ScopeState // 有序恢复态（nil = 全新上传）
 	Logger *slog.Logger
@@ -258,16 +266,16 @@ func (u *Uploader) uploadSingle(ctx context.Context, req Request, start time.Tim
 	if err := u.partWithRetry(ctx, "", Part{Seq: 0, Offset: 0, Size: req.Size}); err != nil {
 		return err
 	}
-	if err := u.o.Verify.Verify(ctx, req); err != nil {
-		return fmt.Errorf("uploadcore verify(single): %w", err)
+	if err := u.verifyWithRepair(ctx, req, "single"); err != nil {
+		return err
 	}
 	return u.o.WAL.MarkDone(ctx)
 }
 
 // finishRapid 秒传命中的校验与收口。
 func (u *Uploader) finishRapid(ctx context.Context, req Request, res *Result) error {
-	if err := u.o.Verify.Verify(ctx, req); err != nil {
-		return fmt.Errorf("uploadcore verify(rapid): %w", err)
+	if err := u.verifyWithRepair(ctx, req, "rapid"); err != nil {
+		return err
 	}
 	u.o.Logger.Info("uploadcore 秒传命中", "target", req.TargetPath, "upload_id", res.UploadID)
 	return u.finish(ctx, res, ViaRapid)
@@ -298,8 +306,8 @@ func (u *Uploader) uploadSlices(ctx context.Context, req Request, res Result, up
 	if err := u.o.Merge.Merge(ctx, uploadID, req, plan); err != nil {
 		return res, fmt.Errorf("uploadcore merge: %w", err)
 	}
-	if err := u.o.Verify.Verify(ctx, req); err != nil {
-		return res, fmt.Errorf("uploadcore verify(slices): %w", err)
+	if err := u.verifyWithRepair(ctx, req, "slices"); err != nil {
+		return res, err
 	}
 	if err := u.finish(ctx, &res, ViaSlices); err != nil {
 		return res, err
@@ -365,6 +373,26 @@ func (u *Uploader) attemptPart(ctx context.Context, uploadID string, p Part) err
 	actx, stop := context.WithTimeout(ctx, u.o.PartTimeout)
 	defer stop()
 	return u.o.Parts.UploadPart(actx, uploadID, p)
+}
+
+// verifyWithRepair 校验；失败时若有自愈能力则自愈并**再复验一次**（复用后端既有秒传刷新）。
+// 语义：自愈失败 / 无自愈能力 / 复验仍失败 ⇒ **一律报错**（绝不静默放过数据正确性问题）。
+func (u *Uploader) verifyWithRepair(ctx context.Context, req Request, stage string) error {
+	vErr := u.o.Verify.Verify(ctx, req)
+	if vErr == nil {
+		return nil
+	}
+	if u.o.Repair == nil {
+		return fmt.Errorf("uploadcore verify(%s): %w", stage, vErr)
+	}
+	if rErr := u.o.Repair.Repair(ctx, req); rErr != nil {
+		return fmt.Errorf("uploadcore verify(%s) 失败且自愈失败: %w（原始校验错误: %v）", stage, rErr, vErr)
+	}
+	if again := u.o.Verify.Verify(ctx, req); again != nil {
+		return fmt.Errorf("uploadcore verify(%s) 自愈后复验仍失败: %w（原始: %v）", stage, again, vErr)
+	}
+	u.o.Logger.Warn("uploadcore 校验失败后自愈成功", "target", req.TargetPath, "stage", stage)
+	return nil
 }
 
 // stage 记录阶段开始（WAL + 结构化日志，供"卡在哪"定位）。

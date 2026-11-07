@@ -9,6 +9,7 @@ package uploadcore
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
@@ -188,5 +189,108 @@ func TestAuditRecorder_SatisfiesRecorder(t *testing.T) {
 	var err error
 	if errors.Is(err, context.Canceled) {
 		t.Fatal("unreachable")
+	}
+}
+
+// ---- S4：校验失败的自愈（复用后端秒传刷新）----
+
+// fakeRepair 记录自愈调用次数（并可配置失败）。
+type fakeRepair struct {
+	err   error
+	calls int
+}
+
+func (f *fakeRepair) Repair(context.Context, Request) error { f.calls++; return f.err }
+
+// flakyVerify 前 failTimes 次失败，之后成功。
+type flakyVerify struct {
+	failTimes int
+	calls     int
+}
+
+func (f *flakyVerify) Verify(context.Context, Request) error {
+	f.calls++
+	if f.calls <= f.failTimes {
+		return errors.New("checksum mismatch")
+	}
+	return nil
+}
+
+// TestUpload_VerifyFailThenRepairSucceeds 校验失败 ⇒ 自愈 ⇒ 复验成功 ⇒ 上传成功且 WAL 收口。
+func TestUpload_VerifyFailThenRepairSucceeds(t *testing.T) {
+	t.Parallel()
+	p := &fakeParts{plan: []Part{{Seq: 0, Offset: 0, Size: 4 << 20}}}
+	o := baseOpts(p)
+	vv := &flakyVerify{failTimes: 1}
+	o.Verify = vv
+	rp := &fakeRepair{}
+	o.Repair = rp
+	rec := &fakeRecorder{}
+	o.WAL = rec
+	u, err := New(o)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := u.Upload(context.Background(), bigReq())
+	if err != nil {
+		t.Fatalf("自愈后应成功，got %v", err)
+	}
+	if rp.calls != 1 {
+		t.Fatalf("应调用自愈恰好 1 次，got %d", rp.calls)
+	}
+	if vv.calls != 2 {
+		t.Fatalf("应校验 2 次（原始 + 复验），got %d", vv.calls)
+	}
+	_, _, done := rec.snapshot()
+	if done != 1 || !res.Done {
+		t.Fatalf("完成后应 MarkDone 且 Done=true，got done=%d res=%+v", done, res)
+	}
+}
+
+// TestUpload_VerifyFailWithoutRepairer 无自愈能力 ⇒ **必须报错**（不得静默成功）。
+func TestUpload_VerifyFailWithoutRepairer(t *testing.T) {
+	t.Parallel()
+	o := baseOpts(&fakeParts{plan: []Part{{Seq: 0, Offset: 0, Size: 4 << 20}}})
+	o.Verify = &fakeVerify{err: errors.New("md5 mismatch")}
+	u, err := New(o)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := u.Upload(context.Background(), bigReq()); err == nil {
+		t.Fatal("无自愈能力时校验失败必须报错（不得静默放过）")
+	}
+}
+
+// TestUpload_RepairFailsThenError 自愈失败 ⇒ 报错，且**保留原始校验错误**（可定位）。
+func TestUpload_RepairFailsThenError(t *testing.T) {
+	t.Parallel()
+	o := baseOpts(&fakeParts{plan: []Part{{Seq: 0, Offset: 0, Size: 4 << 20}}})
+	o.Verify = &fakeVerify{err: errors.New("md5 mismatch")}
+	o.Repair = &fakeRepair{err: errors.New("rapidupload rejected")}
+	u, err := New(o)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = u.Upload(context.Background(), bigReq())
+	if err == nil {
+		t.Fatal("自愈失败必须报错")
+	}
+	if !strings.Contains(err.Error(), "rapidupload rejected") || !strings.Contains(err.Error(), "md5 mismatch") {
+		t.Fatalf("错误应同时含自愈失败与原始校验错误，got %v", err)
+	}
+}
+
+// TestUpload_RepairSucceedsButReverifyFails 自愈成功但复验仍失败 ⇒ 报错。
+func TestUpload_RepairSucceedsButReverifyFails(t *testing.T) {
+	t.Parallel()
+	o := baseOpts(&fakeParts{plan: []Part{{Seq: 0, Offset: 0, Size: 4 << 20}}})
+	o.Verify = &fakeVerify{err: errors.New("still bad")}
+	o.Repair = &fakeRepair{}
+	u, err := New(o)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := u.Upload(context.Background(), bigReq()); err == nil {
+		t.Fatal("复验仍失败必须报错")
 	}
 }
