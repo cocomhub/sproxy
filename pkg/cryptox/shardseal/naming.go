@@ -354,6 +354,9 @@ const dirNameLen = 16
 // "容器未嵌套在逻辑父目录容器内" 而无法启动）。确定性派生让「重复创建」天然幂等
 // （同名 ⇒ 复用/覆盖），从机制上杜绝重复容器。
 //
+// **派生结果已冻结**（2026-11-07）：名字是存储格式的一部分，改名映射需走「版本前缀 + 全量
+// 重命名迁移」，见 alnumFromBytes 的告警与 TestDirNameFor_DerivationFrozen 金值用例。
+//
 // 匿名性：以**卷密钥**作 HMAC key ⇒ 无密钥者无法枚举或关联容器名（与随机名等价）；
 // 不同卷（不同密钥）派生不同名 ⇒ 跨卷不可关联；同卷同路径恒同名（这正是幂等所需）。
 func DirNameFor(secret []byte, parentContainer, dirPath string) (string, error) {
@@ -372,26 +375,22 @@ func DirNameFor(secret []byte, parentContainer, dirPath string) (string, error) 
 
 // alnumFromBytes 把字节流映射为 n 字符名（字符域与 randomLowerAlnum 一致）。
 //
-// **拒绝采样**消除取模偏置（256 % 36 ≠ 0 ⇒ 直接取模会让前 4 个字符略偏高）；空输入返回空串
-// （不 panic，调用方以长度校验兜底）。
+// ⚠️ **派生结果是"存储格式"的一部分，必须保持稳定**（2026-11-07 实测教训）：容器目录名由
+// `DirNameFor` 派生、且**已部署到生产卷**；任何改变映射（含「消除取模偏置」这类看起来正向的
+// 改动）都会让**已迁移的容器全部变成非规范名** ⇒ 需要再次全量重命名（外部存储限流下代价极高）。
+// 因此这里**刻意保留** `字节 % len(charset)` 映射：
+//   - 字符集 62 字符 ⇒ `256 % 62 = 8`，存在极轻偏置（每字符 ≈ 4.1 bit 名义熵 vs 4.09 实际），
+//     对「16 字符 ≈ 95 bit 的名字空间」影响可忽略（用于唯一性而非密码学）；
+//   - 空输入/非正长度返回空串（不 panic，调用方以长度校验兜底）。
+//
+// **若确需更换映射**：必须走「新版本前缀 + 全量重命名迁移」，不得就地改。
 func alnumFromBytes(b []byte, n int) string {
 	if n <= 0 || len(b) == 0 {
 		return ""
 	}
-	limit := 256 - 256%len(dirAlnumCharset)
-	out := make([]byte, 0, n)
-	// **尝试上限**（修复轮 F6）：若输入字节全落在被拒区间（退化/恶意输入），纯拒绝采样会**永不
-	// 收敛**（死循环）。故设上限，超出后用带（极轻）偏置的取模补齐——宁可轻微偏置，绝不挂起。
-	maxDraws := 8*n + 64
-	for i := 0; len(out) < n && i < maxDraws; i++ {
-		v := int(b[i%len(b)])
-		if v >= limit {
-			continue // 拒绝采样
-		}
-		out = append(out, dirAlnumCharset[v%len(dirAlnumCharset)])
-	}
-	for i := 0; len(out) < n; i++ {
-		out = append(out, dirAlnumCharset[int(b[i%len(b)])%len(dirAlnumCharset)])
+	out := make([]byte, n)
+	for i := range n {
+		out[i] = dirAlnumCharset[int(b[i%len(b)])%len(dirAlnumCharset)]
 	}
 	return string(out)
 }
