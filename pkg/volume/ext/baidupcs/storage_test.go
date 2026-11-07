@@ -137,7 +137,10 @@ func (f *fakeStorageAdapter) listFilesLocked(prefix string, seen map[string]bool
 			continue
 		}
 		seen[rel] = true
-		out = append(out, ObjectMeta{Key: k, Size: int64(len(f.files[k]))})
+		// **与 Meta 同源**：真实 `FilesDirectoriesList` 同样返回 `fd.MD5`（adapter.go:488-490；
+		// 即 `ls -l` 的 md5 列，见 docs/external-dependencies.md §7.5）⇒ 列举必须带 ETag，
+		// 否则"列举复核"会误落到 size 容差、削弱 md5 校验（数据正确性红线）。
+		out = append(out, ObjectMeta{Key: k, Size: int64(len(f.files[k])), ETag: md5Hex(f.files[k])})
 	}
 	return out
 }
@@ -529,25 +532,31 @@ func TestStorage_PutFromStagedPath_HintsSkipPreStat(t *testing.T) {
 	if _, err := s.PutFromStagedPath(context.Background(), "n.bin", staged, int64(len(content)), nil); err != nil {
 		t.Fatalf("PutFromStagedPath: %v", err)
 	}
-	if ad.statCalls < 2 {
-		t.Fatalf("普通路径应有 pre-Stat + 上传后复核 Stat（>=2），got %d", ad.statCalls)
+	if n := ad.verifyCalls(); n < 2 {
+		t.Fatalf("普通路径应有 预检 + 上传后复核 两次查证（Stat/List 合计 >=2），got %d", n)
 	}
-	ad.statCalls = 0
+	ad.statCalls, ad.listCalls = 0, 0
 	// RandomBlob 路径：跳过上传前 pre-Stat，但上传后复核 Stat 仍在（>=1）。
 	if _, err := s.PutFromStagedPath(context.Background(), "h.bin", staged, int64(len(content)),
 		&PutHints{RandomBlob: true}); err != nil {
 		t.Fatalf("PutFromStagedPath: %v", err)
 	}
-	if ad.statCalls != 1 {
-		t.Fatalf("RandomBlob 应跳过上传前 pre-Stat、仅留上传后复核 Stat（=1），got %d", ad.statCalls)
+	if n := ad.verifyCalls(); n != 1 {
+		t.Fatalf("RandomBlob 应跳过上传前预检、仅留上传后复核（查证=1），got %d", n)
 	}
 }
 
-// countingStatAdapter 统计 Meta（= Stat）调用次数。
+// countingStatAdapter 统计**查证调用**次数（`Meta` + `List`）。
+// 口径说明（2026-11-08）：查证操作已由 `Meta` 改为**精确列举**（库 `Meta` 会挂起且不响应 ctx），
+// 故计数改为两类之和——语义断言不变（"普通路径有预检 + 复核；RandomBlob 跳过预检"）。
 type countingStatAdapter struct {
 	inner     *fakeStorageAdapter
 	statCalls int
+	listCalls int
 }
+
+// verifyCalls 返回查证调用总数（Meta + List）。
+func (a *countingStatAdapter) verifyCalls() int { return a.statCalls + a.listCalls }
 
 func (a *countingStatAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
 	return a.inner.Upload(ctx, localPath, targetPath, overwrite)
@@ -565,6 +574,7 @@ func (a *countingStatAdapter) Delete(ctx context.Context, remotePath string) err
 	return a.inner.Delete(ctx, remotePath)
 }
 func (a *countingStatAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	a.listCalls++
 	return a.inner.List(ctx, remotePath)
 }
 func (a *countingStatAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
@@ -623,8 +633,20 @@ func (e *multipartETagAdapter) Copy(ctx context.Context, from, to string) error 
 func (e *multipartETagAdapter) Delete(ctx context.Context, remotePath string) error {
 	return e.inner.Delete(ctx, remotePath)
 }
+
+// List 与 Meta **同源**（同上）：分片上传后服务端记录的 md5 是片组合 ⇒ 列举也应如此，
+// 直到 rapidupload 秒传刷新命中（`e.multipart=false`）才返回权威整文件 md5。
 func (e *multipartETagAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
-	return e.inner.List(ctx, remotePath)
+	metas, err := e.inner.List(ctx, remotePath)
+	if err != nil {
+		return nil, err
+	}
+	if e.multipart && !e.rapidHit {
+		for i := range metas {
+			metas[i].ETag = "slicemd5-combo-not-whole"
+		}
+	}
+	return metas, nil
 }
 func (e *multipartETagAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
 	m, err := e.inner.Meta(ctx, remotePath)
@@ -717,7 +739,8 @@ func TestBlockMD5ListOf(t *testing.T) {
 func TestRefreshByRapidUpload_FallbackBinary(t *testing.T) {
 	t.Parallel()
 	inner := &multipartETagAdapter{inner: newFakeStorageAdapter(), multipart: true}
-	ba := newBinaryAdapter(AdapterConfig{Logger: testLogger(), Fallback: inner})
+	ba := newBinaryAdapter(AdapterConfig{Logger: testLogger(), AllowLibraryUpload: true, // 显式开启（默认 fail-closed）
+		Fallback: inner})
 	s := newTestStorage(t, ba)
 	content := strings.Repeat("fallback-rapid-", 100)
 	if _, err := s.Put(context.Background(), "big.bin", strings.NewReader(content)); err != nil {
@@ -736,7 +759,10 @@ func TestBinaryAdapter_Upload_CLIDirSemantics(t *testing.T) {
 	t.Parallel()
 	recorded := &recordBinaryAdapter{}
 	// 用记录 args 的 fake fallback 路径验证：binary 失败（无二进制）→ 回退前 args 应为目录。
-	ba := newBinaryAdapter(AdapterConfig{BinaryPath: "/nonexistent/BaiduPCS-Go", Logger: testLogger(), Fallback: recorded})
+	// AllowLibraryUpload: 显式开启（默认已改 fail-closed，见 adapter_upload_fallback_test.go）；
+	// 本用例验证的是 **CLI 目录语义**（--policy/dir 参数），需要走到库兜底才能观察到 CLI 调用参数。
+	ba := newBinaryAdapter(AdapterConfig{BinaryPath: "/nonexistent/BaiduPCS-Go", Logger: testLogger(),
+		AllowLibraryUpload: true, Fallback: recorded})
 	if err := ba.Upload(context.Background(), "/tmp/local.bin", "/baidu/dir/file.bin", true); err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
@@ -788,8 +814,21 @@ func (a *unreliableMD5Adapter) Copy(ctx context.Context, from, to string) error 
 func (a *unreliableMD5Adapter) Delete(ctx context.Context, remotePath string) error {
 	return a.inner.Delete(ctx, remotePath)
 }
+
+// List 必须与 Meta **同源**（现实依据：`ls -l` 的 md5 列与 `Meta` 都取自**同一份文件记录**
+// ⇒ 服务端 md5 不可靠时列举同样不可靠）。此前 List 直连 inner ⇒ 表达"列举权威、Meta 不可靠"
+// 的不真实组合，会让"列举优先"的新路径误判。
 func (a *unreliableMD5Adapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
-	return a.inner.List(ctx, remotePath)
+	metas, err := a.inner.List(ctx, remotePath)
+	if err != nil {
+		return nil, err
+	}
+	for i := range metas {
+		metas[i].ETag = "00000000000000000000000000000000" // 与 Meta 一致：非整文件 md5
+		metas[i].MD5Unreliable = true
+		metas[i].Size += a.sizeSkew
+	}
+	return metas, nil
 }
 func (a *unreliableMD5Adapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
 	m, err := a.inner.Meta(ctx, remotePath)
@@ -878,7 +917,8 @@ func TestRapidUploaderOf_FallbackTransparent(t *testing.T) {
 	}
 	// ② binaryAdapter + 库 Fallback 实现 rapidUploader → 必须透传命中。
 	fb := &multipartETagAdapter{inner: newFakeStorageAdapter()}
-	ba := newBinaryAdapter(AdapterConfig{Logger: testLogger(), Fallback: fb})
+	ba := newBinaryAdapter(AdapterConfig{Logger: testLogger(), AllowLibraryUpload: true, // 显式开启（默认 fail-closed）
+		Fallback: fb})
 	bs := newTestStorage(t, ba)
 	got, ok := bs.rapidUploaderOf()
 	if !ok {
@@ -888,7 +928,8 @@ func TestRapidUploaderOf_FallbackTransparent(t *testing.T) {
 		t.Fatalf("应返回 Fallback 的 rapidUploader，实测 %T", got)
 	}
 	// ③ binaryAdapter + 无 rapidUploader 能力的 Fallback → 不命中。
-	bs2 := newTestStorage(t, newBinaryAdapter(AdapterConfig{Logger: testLogger(), Fallback: &recordBinaryAdapter{}}))
+	bs2 := newTestStorage(t, newBinaryAdapter(AdapterConfig{Logger: testLogger(), AllowLibraryUpload: true, // 显式开启（默认 fail-closed）
+		Fallback: &recordBinaryAdapter{}}))
 	if _, ok2 := bs2.rapidUploaderOf(); ok2 {
 		t.Error("Fallback 无 rapidUploader 能力时不应命中")
 	}

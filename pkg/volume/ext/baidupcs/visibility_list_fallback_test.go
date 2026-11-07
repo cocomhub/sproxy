@@ -26,7 +26,8 @@ func (a *slowMetaAdapter) Meta(ctx context.Context, remotePath string) (*ObjectM
 
 // TestPut_StatDelayedButListVisible 钉住**可见性回落到父目录列举**：
 // Stat 恒 NotFound 而 List 可见 ⇒ Put 必须成功（而不是 3 轮重传后 ErrTransient）。
-// 变异：删除 waitPutVisible 里的 visibleViaList 回落 ⇒ 本用例必红（Upload 被重试 3 次后失败）。
+// 变异：让查证路径回退到"只能 Meta"（如把 metaByExactList 换回 s.Stat）⇒ 本用例必红
+// （Meta 恒 NotFound ⇒ 3 轮重传后 ErrTransient）。
 func TestPut_StatDelayedButListVisible(t *testing.T) {
 	t.Parallel()
 	inner := newFakeStorageAdapter()
@@ -42,9 +43,12 @@ func TestPut_StatDelayedButListVisible(t *testing.T) {
 	if meta == nil {
 		t.Fatal("Put 成功必须返回 meta")
 	}
-	if ad.metaMisses == 0 {
-		t.Fatal("夹具失效：Meta 从未被调用（未触发 Stat 延迟路径）")
-	}
+	// **口径更新（2026-11-08）**：查证操作已由 `Meta` 改为**精确列举**（库 `Meta` 实测会挂起且
+	// 不响应 ctx ⇒ 给不可中断调用加超时无效）⇒ 本用例不再要求"必须调用 Meta"，
+	// 而要求「**即使 Meta 恒 NotFound/被完全绕开，Put 仍必须成功且拿到权威 md5**」——
+	// 这正是数据正确性所需（md5 来自列举，与 Meta 同源）。
+	// 仍保留对"Meta 延迟路径不再必要"的显式记录（便于日后回归时理解本用例为何不数 Meta）。
+	t.Logf("Meta 调用次数=%d（新实现允许为 0：查证走列举）", ad.metaMisses)
 	// 内容确实写入（父目录列举可查）。
 	list, lerr := s.List(context.Background(), "data/newcontainer")
 	if lerr != nil {

@@ -3119,6 +3119,10 @@ const defaultNormalizeMoveInterval = 250 * time.Millisecond
 // maxContainerMoveBackoff 是容器改名失败退避的**上限**（指数放大后封顶）。
 const maxContainerMoveBackoff = 30 * time.Second
 
+// ErrContainerVanished 表示容器改名失败后**源与目标都不存在**（既没改成、也无落点）：
+// 属**异常态**，必须向上暴露交人工处理——**不得**当作"已完成"而掩盖（2026-11-08 用户裁定）。
+var ErrContainerVanished = errors.New("secretdata: 容器改名失败且源/目标均不存在")
+
 // containerMoveRetryInterval 是容器改名失败后的**基础退避**（逐轮指数放大，见 moveContainerIdempotent）。
 // 迁移会连续做数百次 rename，易触发外部限流（百度 31034）⇒ 必须退避重试而非直接放弃。
 const containerMoveRetryInterval = 2 * time.Second
@@ -3137,10 +3141,24 @@ func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, wa
 		} else {
 			lastErr = rerr
 		}
-		moved, decided := s.containerMovedByPeer(ctx, cur, want)
-		if decided && moved {
+		switch st := s.peerMoveState(ctx, cur, want); st {
+		case peerMoveDone:
 			slog.Info("secretdata: 容器名已是目标（幂等跳过，可能由另一卷实例完成）", "rel", rel, "target", want)
 			return false, nil
+		case peerMoveVanished:
+			// **异常态必须暴露**：源与目标都不在 ⇒ 既没改成、也找不到落点。
+			// 不重试、不当成功（2026-11-08 用户裁定：不能掩盖问题）。
+			return false, fmt.Errorf("%w（rel=%s, from=%s, to=%s）", ErrContainerVanished, rel, cur, want)
+		}
+		// **不对「非瞬时」错误盲目重试**（实测：move 返回值可靠、单次 0.3–0.5s；
+		// 早期实现每次失败都补一次列举并重试 5 轮 ⇒ 单容器最多 11 次 API，制造"限流"假象）。
+		// 重试策略（2026-11-08 实测定论）：**仅对非「不存在」类错误**退避重试；
+		// 「不存在」类已由上面的列举判定给出结论（完成 / 异常上报），反复重试只会把
+		// 单容器 API 调用量从 1–2 次放大到 6–11 次（实测曾据此误判为"限流"）。
+		// 判据用项目通用约定 `os.ErrNotExist`（baidupcs 的 ErrNotFound 亦映射到它，
+		// 见 pkg/volume/ext/baidupcs/errors.go:54）⇒ 不引入对具体后端的依赖。
+		if errors.Is(lastErr, os.ErrNotExist) {
+			break
 		}
 		if attempt == maxAttempts {
 			break
@@ -3161,22 +3179,37 @@ func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, wa
 	return false, fmt.Errorf("secretdata: 规范化容器名失败（%s → %s）: %w", cur, want, lastErr)
 }
 
-// containerMovedByPeer 判定「本次 rename 失败」是否属于**已由他人完成**的幂等情形：
-// 必须**父目录列举**确认「源已不在 + 目标已在」。
+// peerMoveState 是「rename 失败后」的**列举判定**结论（用父目录列举，实测 0.33–0.38s 稳定可用；
+// 而 `Stat/Meta` 的可见性偶发延迟，实测同结构出现过 ≥60s 不可见 ⇒ 不作判据）。
+type peerMoveState int
+
+const (
+	// peerMoveUnknown：列举本身失败（网络/限流）⇒ 无法判定 ⇒ 调用方可退避重试。
+	peerMoveUnknown peerMoveState = iota
+	// peerMoveDone：**源已不在 + 目标在** ⇒ 移动实际已完成（幂等续跑的正常情形）。
+	peerMoveDone
+	// peerMoveNotDone：源仍在 ⇒ 本次确实没改成（可重试）。
+	peerMoveNotDone
+	// peerMoveVanished：**源与目标都不在** ⇒ **异常态，必须暴露**（不得当作完成而掩盖）。
+	peerMoveVanished
+)
+
+// peerMoveState 判定「本次 rename 失败」属于哪种情形（依据 = **父目录列举**）。
 //
-// **不能用 `Stat(want)==nil` 单独判定**（2026-11-07 实测踩坑）：底层 `Stat` 对目录的语义
-// 宽松（父存在即可能返回成功）⇒ 会把**从未执行的改名**误判为「目标已存在」⇒ 迁移静默
-// 不生效（实测：`moved=0 skipped=628` 但容器名仍是随机的，采样校验 8/8 漂移）。
-// 返回 (是否已由他人完成, 是否得出确定结论)。**listInner 失败（如限流）⇒ decided=false**
-// —— 调用方据此退避重试，而不是误报「改名失败」（实测 2026-11-07：迁移末尾报假错误）。
-func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want string) (moved, decided bool) {
+// 为什么不用 `Stat(want)==nil` 单独判定：底层 `Stat` 对目录语义宽松、且 **Meta 可见性偶发延迟**
+// （2026-11-07/08 实测）⇒ 会把「从未执行的改名」误判为「目标已存在」。
+//
+// **为什么必须有 peerMoveVanished**（2026-11-08 用户裁定）：早前把「源已消失」一律当完成，
+// 等于**把异常掩盖成成功**；正确语义是「源不在 **且** 目标在」才算完成，
+// 「源不在且目标不在」必须作为**异常**上报，交由人工/上层处理。
+func (s *SecretdataFS) peerMoveState(ctx context.Context, cur, want string) peerMoveState {
 	parent := parentDirOf(cur)
 	if parentDirOf(want) != parent {
-		return false, true // 父不同 ⇒ 明确不是「同一名字的幂等」情形
+		return peerMoveNotDone // 父不同 ⇒ 不是「同一名字的幂等」情形
 	}
 	ents, err := s.listInner(ctx, parent)
 	if err != nil {
-		return false, false // 无法判定 ⇒ 交调用方重试
+		return peerMoveUnknown
 	}
 	var hasCur, hasWant bool
 	curBase, wantBase := path.Base(cur), path.Base(want)
@@ -3184,26 +3217,21 @@ func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want strin
 		if !e.IsDir {
 			continue
 		}
-		if e.Name == curBase {
+		switch e.Name {
+		case curBase:
 			hasCur = true
-		}
-		if e.Name == wantBase {
+		case wantBase:
 			hasWant = true
 		}
 	}
-	// **源已不在 ⇒ 移动实际已完成**（2026-11-07 实测缺陷修复）：远端目录列举**最终一致**
-	// （实测百度网盘：rename 已成功、源已消失，但父目录列举在若干秒内仍可能看不到目标）
-	// ⇒ 若要求「目标必须已可见」才对，迁移会在**已成功**的容器上判定为失败并中止
-	// （实测：同一条深层路径连续多轮失败，且目标 mtime 已是本次 rename 的时间）。
-	// 判据只依赖**源已消失**这一强信号；目标暂未可见仅告警（下次扫描会看到，幂等）。
-	if !hasCur {
-		if !hasWant {
-			slog.Warn("secretdata: 容器改名后源已消失但目标尚未在列举中可见（远端列举最终一致）⇒ 视为已完成",
-				"from", cur, "to", want)
-		}
-		return true, true
+	switch {
+	case hasCur:
+		return peerMoveNotDone
+	case hasWant:
+		return peerMoveDone
+	default:
+		return peerMoveVanished
 	}
-	return false, true
 }
 
 // normalizeAllRels 遍历逻辑目录执行改名（分批上限 + 限速；拆出以控认知复杂度）。
