@@ -299,3 +299,38 @@ func TestSnapshotWrite_SuppressedAfterInvalidate(t *testing.T) {
 		t.Fatalf("抑制态下不得写快照文件，stat err=%v", serr)
 	}
 }
+
+// TestContainerMovedByPeer_RequiresListing 钉住**幂等判定必须用父目录列举**：
+// 底层 Stat 对目录语义宽松（父存在即可能成功）⇒ 单靠 Stat(want) 会把「从未执行的改名」
+// 误判为已完成 ⇒ 迁移静默不生效（实测 moved=0 但名字仍是随机名、采样 8/8 漂移）。
+func TestContainerMovedByPeer_RequiresListing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	if merr := sfs.MakeDir(ctx, "p/q"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	sfs.mu.RLock()
+	qc := sfs.dirSegs["p/q"]
+	sfs.mu.RUnlock()
+	parent := path.Dir(qc)
+	curBase := path.Base(qc)
+	want := path.Join(parent, "SomeDeterministicName")
+
+	// 源仍在、目标不在 ⇒ 不得判为「已由他人完成」
+	if sfs.containerMovedByPeer(ctx, qc, want) {
+		t.Fatal("源仍在时不得判为已迁移（否则迁移被静默跳过）")
+	}
+	// 真正迁移后（源不在、目标在）⇒ 才是幂等情形
+	if rerr := sfs.inner.Rename(ctx, qc, want); rerr != nil {
+		t.Fatalf("rename: %v", rerr)
+	}
+	if !sfs.containerMovedByPeer(ctx, qc, want) {
+		t.Fatalf("源已不在且目标存在时应判为幂等（cur=%s want=%s）", curBase, want)
+	}
+	// 父不同 ⇒ 不属于该情形
+	if sfs.containerMovedByPeer(ctx, path.Join(parent, "x"), path.Join("other", "y")) {
+		t.Fatal("父不同不得判为同一名字的幂等")
+	}
+}

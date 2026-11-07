@@ -2636,13 +2636,44 @@ func (s *SecretdataFS) normalizeOneRel(ctx context.Context, rel string, segs, ne
 // 返回 (是否真的移动, error)。
 func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, want string) (bool, error) {
 	if rerr := s.inner.Rename(ctx, cur, want); rerr != nil {
-		if _, serr := s.inner.Stat(ctx, want); serr == nil {
+		if s.containerMovedByPeer(ctx, cur, want) {
 			slog.Info("secretdata: 容器名已是目标（幂等跳过，可能由另一卷实例完成）", "rel", rel, "target", want)
 			return false, nil
 		}
 		return false, fmt.Errorf("secretdata: 规范化容器名失败（%s → %s）: %w", cur, want, rerr)
 	}
 	return true, nil
+}
+
+// containerMovedByPeer 判定「本次 rename 失败」是否属于**已由他人完成**的幂等情形：
+// 必须**父目录列举**确认「源已不在 + 目标已在」。
+//
+// **不能用 `Stat(want)==nil` 单独判定**（2026-11-07 实测踩坑）：底层 `Stat` 对目录的语义
+// 宽松（父存在即可能返回成功）⇒ 会把**从未执行的改名**误判为「目标已存在」⇒ 迁移静默
+// 不生效（实测：`moved=0 skipped=628` 但容器名仍是随机的，采样校验 8/8 漂移）。
+func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want string) bool {
+	parent := parentDirOf(cur)
+	if parentDirOf(want) != parent {
+		return false // 父不同 ⇒ 不是「同一名字的幂等」情形
+	}
+	ents, err := s.listInner(ctx, parent)
+	if err != nil {
+		return false
+	}
+	var hasCur, hasWant bool
+	curBase, wantBase := path.Base(cur), path.Base(want)
+	for _, e := range ents {
+		if !e.IsDir {
+			continue
+		}
+		if e.Name == curBase {
+			hasCur = true
+		}
+		if e.Name == wantBase {
+			hasWant = true
+		}
+	}
+	return !hasCur && hasWant
 }
 
 // normalizeBlockedRels 返回因「重复容器争议内容」需跳过规范化的逻辑路径集合。
