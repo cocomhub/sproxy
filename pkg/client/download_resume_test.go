@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,7 +99,10 @@ func newStreamResumeServer(t *testing.T, content []byte, recordRanges *[]string,
 			*recordRanges = append(*recordRanges, r.Header.Get("Range"))
 			mu.Unlock()
 		}
-		if truncateFirst != nil && gets.Add(1) == 1 && truncateFirst.Load() {
+		if gets != nil {
+			gets.Add(1)
+		}
+		if truncateFirst != nil && gets != nil && gets.Load() == 1 && truncateFirst.Load() {
 			// 声明全长却只写一半 ⇒ 客户端读到 unexpected EOF（弱网断流）。
 			w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 			w.WriteHeader(http.StatusOK)
@@ -493,5 +497,138 @@ func TestDownloadResumable_FatalStatusKeepsExistingFile(t *testing.T) {
 	}
 	if string(got) != existing {
 		t.Fatalf("致命失败不应破坏既有文件：got %q, want %q", string(got), existing)
+	}
+}
+
+// midStreamProbeReader 在读到指定剩余量时触发一次探测（模拟「流进行中」观察磁盘状态）。
+type midStreamProbeReader struct {
+	remaining int64
+	probeAt   int64
+	probed    bool
+	probe     func()
+}
+
+func (r *midStreamProbeReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := min(int64(len(p)), r.remaining)
+	for i := range n {
+		p[i] = 1
+	}
+	r.remaining -= n
+	if !r.probed && r.remaining <= r.probeAt {
+		r.probed = true
+		r.probe()
+	}
+	return int(n), nil
+}
+
+// TestCopyStreamToFile_PersistsOffsetMidStream 是「强杀续传」回归：单流进度必须在流
+// 进行中持续落盘。旧实现用 io.Copy ⇒ 只有整体返回（成功/出错）才 addOffset，进程被
+// kill/断电时 offset 恒为 0，重入只能从 0 重下（E2E 实测：中断后 offset=0）。
+func TestCopyStreamToFile_PersistsOffsetMidStream(t *testing.T) {
+	t.Parallel()
+	out := filepath.Join(t.TempDir(), "f.bin")
+	const total = 40 << 20 // 40 MiB
+	var observed atomic.Int64
+	reader := &midStreamProbeReader{
+		remaining: total,
+		probeAt:   8 << 20, // 读到 32MiB 时探测
+		probe: func() {
+			if st, ok := loadDownloadResumeState(out); ok {
+				observed.Store(st.Offset)
+			}
+		},
+	}
+	c := NewFileClient("http://127.0.0.1:1")
+	c.logger = testLogger()
+	rs := newDownloadResume(out, downloadResumeState{Filename: "f", Size: total})
+	if err := c.copyStreamToFile(out, reader, 0, total, rs); err != nil {
+		t.Fatalf("copyStreamToFile: %v", err)
+	}
+	if got := observed.Load(); got <= 0 {
+		t.Fatalf("流进行中 sidecar offset 应已落盘 >0（实际 %d）——强杀场景会从头重下", got)
+	}
+	if fi, err := os.Stat(out); err != nil || fi.Size() != total {
+		t.Fatalf("输出大小不符: err=%v", err)
+	}
+}
+
+// TestDownloadResumable_CheckpointLagResumesFromCheckpoint 回归 E2E 发现：强杀时
+// 已写文件常大于最后一次落盘的 checkpoint（checkpoint 落后）。此时必须从 checkpoint
+// 续传，而不是因“大小不等”判陈旧从头重下。
+func TestDownloadResumable_CheckpointLagResumesFromCheckpoint(t *testing.T) {
+	t.Parallel()
+	content := resumeTestContent(3000)
+	sum := sha256hex(content)
+	var ranges []string
+	var mu sync.Mutex
+	ts := newStreamResumeServer(t, content, &ranges, &mu, nil, nil)
+
+	out := filepath.Join(t.TempDir(), "f.bin")
+	// 文件已写 1500B，但 sidecar 只记到 1000B（模拟 checkpoint 落后 500B）。
+	if err := os.WriteFile(out, content[:1500], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := downloadResumeState{
+		Version: downloadResumeVersion, Filename: "f.bin", Size: int64(len(content)),
+		Checksum: sum, MTime: testResumeMTime, Offset: 1000,
+	}
+	if err := writeDownloadResumeState(out, &st); err != nil {
+		t.Fatal(err)
+	}
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+	if err := c.DownloadResumable(t.Context(), "f.bin", out); err != nil {
+		t.Fatalf("DownloadResumable: %v", err)
+	}
+	got, _ := os.ReadFile(out)
+	if !bytes.Equal(got, content) {
+		t.Fatalf("checkpoint 落后场景内容不符")
+	}
+	mu.Lock()
+	first := ""
+	if len(ranges) > 0 {
+		first = ranges[0]
+	}
+	mu.Unlock()
+	if first != "bytes=1000-" {
+		t.Fatalf("应从 checkpoint(1000) 续传，实际 %q（all=%v）", first, ranges)
+	}
+}
+
+// TestDownloadResumable_CompleteButNotFinalized 回归：强杀在收尾前（文件已收满但
+// sidecar 未更新/未删除）时，直接校验通过即可完成，不再发任何 GET。
+func TestDownloadResumable_CompleteButNotFinalized(t *testing.T) {
+	t.Parallel()
+	content := resumeTestContent(2000)
+	sum := sha256hex(content)
+	var gets atomic.Int32
+	var mu sync.Mutex
+	var ranges []string
+	ts := newStreamResumeServer(t, content, &ranges, &mu, nil, &gets)
+
+	out := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(out, content, 0o644); err != nil { // 已是完整内容
+		t.Fatal(err)
+	}
+	st := downloadResumeState{
+		Version: downloadResumeVersion, Filename: "f.bin", Size: int64(len(content)),
+		Checksum: sum, MTime: testResumeMTime, Offset: 1000, // checkpoint 落后但文件已满
+	}
+	if err := writeDownloadResumeState(out, &st); err != nil {
+		t.Fatal(err)
+	}
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+	if err := c.DownloadResumable(t.Context(), "f.bin", out); err != nil {
+		t.Fatalf("DownloadResumable: %v", err)
+	}
+	if n := gets.Load(); n != 0 {
+		t.Fatalf("已收满且校验通过时不应再发 GET，实际 %d 次", n)
+	}
+	if _, serr := os.Stat(downloadResumePath(out)); !os.IsNotExist(serr) {
+		t.Fatalf("成功收尾应删除 sidecar")
 	}
 }

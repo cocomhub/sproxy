@@ -5,7 +5,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -48,5 +50,33 @@ func TestRootCmd_SilencesUsageAndErrors(t *testing.T) {
 	}
 	if !root.SilenceErrors {
 		t.Error("root.SilenceErrors 应为 true（错误由 main 单点打印）")
+	}
+}
+
+// TestRenameReplaceWith_RetriesTransientSharingViolation 锁定 Windows 上「覆盖被占用
+// 目标瞬时失败」的重试逻辑（E2E 实测 --decrypt 最终替换约 2/5 概率 "Access is denied"）。
+func TestRenameReplaceWith_RetriesTransientSharingViolation(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	rename := func(_, _ string) error {
+		if calls.Add(1) < 3 {
+			return errors.New("Access is denied")
+		}
+		return nil
+	}
+	if err := renameReplaceWith(rename, "tmp", "dst"); err != nil {
+		t.Fatalf("瞬时失败应在重试后成功: %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("应重试至第 3 次成功，实际调用 %d 次", got)
+	}
+}
+
+// TestRenameReplaceWith_PropagatesPersistentError 持续失败时返回错误（不吞掉）。
+func TestRenameReplaceWith_PropagatesPersistentError(t *testing.T) {
+	t.Parallel()
+	rename := func(_, _ string) error { return errors.New("persistent denied") }
+	if err := renameReplaceWith(rename, "tmp", "dst"); err == nil {
+		t.Fatal("持续失败应返回错误")
 	}
 }
