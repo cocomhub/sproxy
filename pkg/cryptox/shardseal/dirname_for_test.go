@@ -80,40 +80,47 @@ func containsRune(s string, r rune) bool {
 	return false
 }
 
-// TestP3_1_AlnumFromBytesGuardAndDistribution 钉住 **P3-1**：空输入/非正长度不 panic；
-// 拒绝采样后各字符出现次数差不超过 1（无取模偏置）。
-func TestP3_1_AlnumFromBytesGuardAndDistribution(t *testing.T) {
+// TestDirNameFor_DerivationFrozen 钉住**派生结果冻结**（2026-11-07 实测事故）：
+// 容器目录名是**存储格式**——已部署在生产卷上；改变映射（哪怕是「消除取模偏置」）会让已迁移的
+// 容器全部变成非规范名 ⇒ 需再次全量重命名（外部存储限流下代价极高）。
+// 本用例用**金值**钉死 (密钥, 父容器, 路径) → 名字的映射：任何未配套迁移的改动都会红。
+const (
+	// 金值（2026-11-07 记录）：改动派生映射会让这两个值变化 ⇒ 必须配套迁移。
+	dirNameGoldenRoot  = "mUXAaghZRQMM9Xyt"
+	dirNameGoldenChild = "JlF9piLLVMPOqibl"
+)
+
+func TestDirNameFor_DerivationFrozen(t *testing.T) {
+	t.Parallel()
+	secret := []byte("test-secret-key-000")
+	// 金值由首版实现记录；**若失败说明映射被改动**，必须走迁移而不是改这里。
+	got, err := DirNameFor(secret, "", "")
+	if err != nil {
+		t.Fatalf("DirNameFor: %v", err)
+	}
+	if got != dirNameGoldenRoot {
+		t.Fatalf("DirNameFor 派生映射已变更（got %q want %q）——名字是**存储格式**，必须走「新版本前缀 + 全量重命名迁移」，不得就地改（详见 alnumFromBytes 告警）", got, dirNameGoldenRoot)
+	}
+	got2, err := DirNameFor(secret, "ParentX", "jav/makers/EXAMPLE-A")
+	if err != nil {
+		t.Fatalf("DirNameFor: %v", err)
+	}
+	if got2 != dirNameGoldenChild {
+		t.Fatalf("DirNameFor 派生映射已变更（got %q want %q）", got2, dirNameGoldenChild)
+	}
+}
+
+// TestAlnumFromBytes_Guards 空输入/非正长度不得 panic（长度守卫）。
+func TestAlnumFromBytes_Guards(t *testing.T) {
 	t.Parallel()
 	if got := alnumFromBytes(nil, 8); got != "" {
 		t.Fatalf("空输入应返回空串，got %q", got)
 	}
-	if got := alnumFromBytes([]byte{1, 2, 3}, 0); got != "" {
+	if got := alnumFromBytes([]byte{1, 2}, 0); got != "" {
 		t.Fatalf("n=0 应返回空串，got %q", got)
 	}
-	if got := alnumFromBytes([]byte{1, 2, 3}, 16); len(got) != 16 {
+	if got := alnumFromBytes([]byte{1, 2}, 16); len(got) != 16 {
 		t.Fatalf("应返回 16 字符，got %d", len(got))
-	}
-	// 分布：把全部 256 字节重复喂入 ⇒ 字符计数极差应 ≤ 1（拒绝采样消除取模偏置）
-	pool := make([]byte, 256)
-	for i := range pool {
-		pool[i] = byte(i)
-	}
-	counts := map[byte]int{}
-	for _, c := range []byte(alnumFromBytes(pool, 1000)) {
-		counts[c]++
-	}
-	mn, mx := 1<<30, 0
-	for _, c := range []byte(dirAlnumCharset) {
-		n := counts[c]
-		if n < mn {
-			mn = n
-		}
-		if n > mx {
-			mx = n
-		}
-	}
-	if mx-mn > 1 {
-		t.Fatalf("拒绝采样后应近似均匀（极差 ≤1），got min=%d max=%d", mn, mx)
 	}
 }
 
