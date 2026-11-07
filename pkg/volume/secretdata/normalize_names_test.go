@@ -131,7 +131,10 @@ func TestNormalizeContainerNames_MigratesAndIdempotent(t *testing.T) {
 }
 
 // TestAuditDuplicateContainers_DetectsConflict 钉住**迁移前置审计**：
-// 落选容器含权威容器没有的条目 ⇒ Conflicted=true（禁止自动迁移，等人工确认）。
+// 落选容器含权威容器没有的**逻辑文件** ⇒ Conflicted=true（禁止自动迁移，等人工确认）。
+//
+// 判据自批次 16 P1-5 起按**逻辑文件名**（解密 meta 取 Original.Name）比对，而非物理条目名
+// —— 历史子容器名是随机的，按物理名比对会让含子容器的重复组必然判争议。
 func TestAuditDuplicateContainers_DetectsConflict(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -140,9 +143,20 @@ func TestAuditDuplicateContainers_DetectsConflict(t *testing.T) {
 	if merr := sfs.MakeDir(ctx, "a"); merr != nil {
 		t.Fatalf("MakeDir: %v", merr)
 	}
+	// 权威容器含 a/f1.bin；另备 z/f2.bin（其文件 meta 稍后拷进落选容器 ⇒ 制造真实内容差异）
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "a/f1.bin", bytes.NewReader([]byte("one")), 3, 0); werr != nil {
+		t.Fatalf("WriteFile a/f1.bin: %v", werr)
+	}
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "z/f2.bin", bytes.NewReader([]byte("two")), 3, 0); werr != nil {
+		t.Fatalf("WriteFile z/f2.bin: %v", werr)
+	}
 	sfs.mu.RLock()
 	c1 := sfs.dirSegs["a"]
+	f2 := sfs.index["z/f2.bin"]
 	sfs.mu.RUnlock()
+	if f2 == nil {
+		t.Fatal("z/f2.bin 索引条目缺失")
+	}
 	// 复制 C1 的 meta ⇒ 第二个容器声明同一逻辑目录（无子容器）
 	dup := path.Join(path.Dir(c1), "DUPcontainerX")
 	if cerr := copyContainerMetaOnly(t, root, c1, dup); cerr != nil {
@@ -155,9 +169,10 @@ func TestAuditDuplicateContainers_DetectsConflict(t *testing.T) {
 		t.Fatalf("应登记重复容器组，got %+v", groups)
 	}
 	victim := groups[0].others[0]
-	// 在**落选容器**里放一个权威容器没有的条目 ⇒ 制造争议（可能丢数据的形态）
-	if werr := os.WriteFile(filepath.Join(root, filepath.FromSlash(victim), "EXTRA_entry"), []byte("x"), 0o600); werr != nil {
-		t.Fatalf("写争议条目: %v", werr)
+	// 把 z/f2.bin 的**文件 meta**（逻辑名 f2.bin）拷进落选容器 ⇒ 落选含权威没有的逻辑文件
+	if cerr := copyFile(filepath.Join(root, filepath.FromSlash(f2.dirSeg), f2.metaName),
+		filepath.Join(root, filepath.FromSlash(victim), f2.metaName)); cerr != nil {
+		t.Fatalf("拷入争议文件 meta: %v", cerr)
 	}
 
 	sfs2 := newNormalizeFS(t, root)
@@ -187,11 +202,23 @@ func TestAuditDuplicateContainers_DetectsConflict(t *testing.T) {
 		t.Fatalf("NormalizeContainerNames: %v", merr)
 	}
 	_ = moved
+	// 以 sfs2 自身扫描得到的权威容器为基线（权威选择依赖 hasFiles/mtime/DirID；拷入争议 meta 后
+	// 两侧 hasFiles 可能相同 ⇒ 用 probe 的旧值比较不可靠）
+	sfs2.mu.RLock()
+	beforeSeg := sfs2.dirSegs["a"]
+	sfs2.mu.RUnlock()
+	if beforeSeg == "" {
+		t.Fatal("sfs2 未解析出 a 的容器")
+	}
+	_, _, merr2 := sfs2.NormalizeContainerNames(ctx, false)
+	if merr2 != nil {
+		t.Fatalf("NormalizeContainerNames: %v", merr2)
+	}
 	sfs2.mu.RLock()
 	after := sfs2.dirSegs["a"]
 	sfs2.mu.RUnlock()
-	if after != groups[0].canonical {
-		t.Fatalf("争议组不得被迁移（等人工确认），got %s（原 %s）", after, groups[0].canonical)
+	if after != beforeSeg {
+		t.Fatalf("争议组不得被迁移（等人工确认），got %s（原 %s）", after, beforeSeg)
 	}
 }
 
@@ -288,11 +315,11 @@ func TestSnapshotWrite_SuppressedAfterInvalidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
 	}
-	if sfs.snapshotSuppressed.Load() {
+	if sfs.snapshotWriteDisabled.Load() {
 		t.Fatal("初始不应处于抑制态")
 	}
 	sfs.invalidateIndexSnapshot()
-	if !sfs.snapshotSuppressed.Load() {
+	if !sfs.snapshotWriteDisabled.Load() {
 		t.Fatal("invalidateIndexSnapshot 必须置位抑制标记（否则异步写入会用陈旧 dirSegs 覆盖）")
 	}
 	// 抑制后写入不得落盘

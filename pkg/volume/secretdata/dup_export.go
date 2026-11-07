@@ -107,37 +107,17 @@ func (s *SecretdataFS) collectContainerTree(ctx context.Context, root string) ([
 	return out, nil
 }
 
-// exportOneContainer 导出单个容器内的全部文件（临时注册 + 解密 + 写本地 + 清理）。
-// exportOneContainer 导出单个容器内的全部文件。
+// exportOneContainer 导出单个容器内的全部文件（临时注册 + 解密 + 写本地 + 全量回滚）。
 // **同名隔离**：路径含「逻辑目录 + **落选容器标识** + 容器内相对路径 + 文件名」——
 // 不同落选容器常有同名文件（如都叫 `X.mp4`），必须靠容器标识区分（用户明确要求）。
 func (s *SecretdataFS) exportOneContainer(ctx context.Context, groupRel, containerRoot, container, suffix, dstRoot string) (int, int64, error) {
-	tmpRel := dupExportTempPrefix + sanitizeExportSegment(container)
-	// 临时注册（供 OpenRead 拼 blob 物理路径）；导出后清理（见 defer）
-	s.mu.Lock()
-	prevSeg, hadSeg := s.dirSegs[tmpRel]
-	s.dirSegs[tmpRel] = container
-	s.dirs[tmpRel] = struct{}{}
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		for k := range s.index {
-			if strings.HasPrefix(k, tmpRel+"/") {
-				delete(s.index, k)
-			}
-		}
-		if hadSeg {
-			s.dirSegs[tmpRel] = prevSeg
-		} else {
-			delete(s.dirSegs, tmpRel)
-		}
-		delete(s.dirs, tmpRel)
-		s.mu.Unlock()
-	}()
-	if err := s.loadContainerFileMetas(ctx, container, tmpRel); err != nil {
+	reg := s.beginExportTempRegistration(container)
+	defer reg.rollback()
+
+	if err := s.loadContainerFileMetas(ctx, container, reg.tmpRel); err != nil {
 		return 0, 0, err
 	}
-	keys := s.indexKeysUnder(tmpRel)
+	reg.keysAdded = s.indexKeysUnder(reg.tmpRel) // 一次性收集：遍历 + 回滚共用（避免二次全索引扫描）
 
 	// **同名隔离**：<dstRoot>/<逻辑目录>/<落选容器标识>/<容器内相对路径>/<文件名>
 	outDir := filepath.Join(dstRoot,
@@ -148,16 +128,92 @@ func (s *SecretdataFS) exportOneContainer(ctx context.Context, groupRel, contain
 		return 0, 0, err
 	}
 	files, bytes := 0, int64(0)
-	for _, k := range keys {
-		name := strings.TrimPrefix(k, tmpRel+"/")
-		_, b, werr := s.exportOneFile(ctx, k, filepath.Join(outDir, sanitizeExportSegment(name)))
+	for _, k := range reg.keysAdded {
+		name := strings.TrimPrefix(k, reg.tmpRel+"/")
+		n, werr := s.exportOneFile(ctx, k, filepath.Join(outDir, sanitizeExportSegment(name)))
 		if werr != nil {
 			return files, bytes, werr
 		}
 		files++
-		bytes += b
+		bytes += n
 	}
 	return files, bytes, nil
+}
+
+// exportTempReg 是导出期间的**临时索引注册**及其**全量回滚**（批次 16 P1-4）。
+//
+// **为什么必须全量回滚**：`registerLoadedEntryLocked` 的副作用不止索引键——它还累加
+// `s.usage`、经 `addDirKeysLocked` 写入**全部祖先目录键**、抬升 `s.volVersion`、并可能
+// `dedupPool` 引用 +1。若只删索引前缀键与 `s.dirs[tmpRel]`，就会留下用量虚增、幻影目录
+// （顶层 `__dup_export__` 会出现在 ListDir("/")）与永不回收的池引用。
+// 导出是装配期/运维动作（无并发写者），故此处按**快照-还原**方式整体回滚。
+type exportTempReg struct {
+	s         *SecretdataFS
+	tmpRel    string
+	keysAdded []string
+
+	prevSeg    string
+	hadSeg     bool
+	usage      int64
+	version    int64
+	dirsBefore map[string]struct{}
+	poolBefore map[string]int64
+}
+
+// beginExportTempRegistration 建立临时注册并返回回滚句柄（调用方 defer rollback）。
+func (s *SecretdataFS) beginExportTempRegistration(container string) *exportTempReg {
+	r := &exportTempReg{s: s, tmpRel: dupExportTempPrefix + sanitizeExportSegment(container)}
+	s.mu.Lock()
+	r.prevSeg, r.hadSeg = s.dirSegs[r.tmpRel]
+	s.dirSegs[r.tmpRel] = container
+	s.dirs[r.tmpRel] = struct{}{}
+	r.usage, r.version = s.usage, s.volVersion
+	r.dirsBefore = make(map[string]struct{}, len(s.dirs))
+	for k := range s.dirs {
+		r.dirsBefore[k] = struct{}{}
+	}
+	r.poolBefore = make(map[string]int64, len(s.dedupPool))
+	for k, v := range s.dedupPool {
+		r.poolBefore[k] = v.refs
+	}
+	s.mu.Unlock()
+	return r
+}
+
+// rollback 撤销临时注册的全部副作用（幂等：可安全重复调用）。
+func (r *exportTempReg) rollback() {
+	if r == nil {
+		return
+	}
+	s := r.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range r.keysAdded {
+		delete(s.index, k)
+	}
+	if r.hadSeg {
+		s.dirSegs[r.tmpRel] = r.prevSeg
+	} else {
+		delete(s.dirSegs, r.tmpRel)
+	}
+	for k := range s.dirs {
+		if _, ok := r.dirsBefore[k]; !ok {
+			delete(s.dirs, k)
+		}
+	}
+	delete(s.dirs, r.tmpRel) // tmpRel 在快照前已加入 ⇒ 差集不含它，需显式删除
+	s.usage = r.usage
+	s.volVersion = r.version
+	for k := range s.dedupPool {
+		if _, ok := r.poolBefore[k]; !ok {
+			delete(s.dedupPool, k)
+		}
+	}
+	for k, refs := range r.poolBefore {
+		if blk, ok := s.dedupPool[k]; ok {
+			blk.refs = refs
+		}
+	}
 }
 
 // indexKeysUnder 返回索引里以 prefix+"/" 开头的键（排序，稳定输出顺序）。
@@ -174,25 +230,25 @@ func (s *SecretdataFS) indexKeysUnder(prefix string) []string {
 	return keys
 }
 
-// exportOneFile 解密单个文件并写到 dst（返回字节数）。
-func (s *SecretdataFS) exportOneFile(ctx context.Context, key, dst string) (int64, int64, error) {
+// exportOneFile 解密单个文件并写到 dst（返回写入字节数）。
+func (s *SecretdataFS) exportOneFile(ctx context.Context, key, dst string) (int64, error) {
 	rc, err := s.OpenRead(ctx, key)
 	if err != nil {
-		return 0, 0, fmt.Errorf("secretdata: 读取 %q 失败: %w", key, err)
+		return 0, fmt.Errorf("secretdata: 读取 %q 失败: %w", key, err)
 	}
 	defer func() { _ = rc.Close() }()
 	f, ferr := os.Create(dst)
 	if ferr != nil {
-		return 0, 0, ferr
+		return 0, ferr
 	}
 	n, cerr := io.Copy(f, rc)
 	if closeErr := f.Close(); cerr == nil {
 		cerr = closeErr
 	}
 	if cerr != nil {
-		return n, 0, fmt.Errorf("secretdata: 写 %q 失败: %w", dst, cerr)
+		return n, fmt.Errorf("secretdata: 写 %q 失败: %w", dst, cerr)
 	}
-	return int64(n), int64(n), nil
+	return n, nil
 }
 
 // sanitizeExportSegment 把路径片段安全化为单个目录/文件名（保持可读、避免穿越与同名覆盖）。

@@ -361,18 +361,31 @@ func DirNameFor(secret []byte, parentContainer, dirPath string) (string, error) 
 		return "", fmt.Errorf("shardseal: DirNameFor 需要非空密钥")
 	}
 	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte("sproxy/dir-name/v1" + string(rune(0))))
+	// 域分隔：前缀 + NUL + 父容器 + NUL + 逻辑路径。父容器名与逻辑路径都**不含 NUL**
+	// （容器名是 alnum；路径被 ValidateFilePath 拒绝空字节）⇒ 拼接无歧义。
+	_, _ = mac.Write([]byte("sproxy/dir-name/v1" + string([]byte{0})))
 	_, _ = mac.Write([]byte(parentContainer))
-	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(string([]byte{0})))
 	_, _ = mac.Write([]byte(dirPath))
 	return alnumFromBytes(mac.Sum(nil), dirNameLen), nil
 }
 
 // alnumFromBytes 把字节流映射为 n 字符名（字符域与 randomLowerAlnum 一致）。
+//
+// **拒绝采样**消除取模偏置（256 % 36 ≠ 0 ⇒ 直接取模会让前 4 个字符略偏高）；空输入返回空串
+// （不 panic，调用方以长度校验兜底）。
 func alnumFromBytes(b []byte, n int) string {
-	out := make([]byte, n)
-	for i := range n {
-		out[i] = dirAlnumCharset[int(b[i%len(b)])%len(dirAlnumCharset)]
+	if n <= 0 || len(b) == 0 {
+		return ""
+	}
+	limit := 256 - 256%len(dirAlnumCharset)
+	out := make([]byte, 0, n)
+	for i := 0; len(out) < n; i++ {
+		v := int(b[i%len(b)])
+		if v >= limit {
+			continue // 拒绝采样
+		}
+		out = append(out, dirAlnumCharset[v%len(dirAlnumCharset)])
 	}
 	return string(out)
 }

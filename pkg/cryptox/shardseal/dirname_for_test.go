@@ -79,3 +79,40 @@ func containsRune(s string, r rune) bool {
 	}
 	return false
 }
+
+// TestP3_1_AlnumFromBytesGuardAndDistribution 钉住 **P3-1**：空输入/非正长度不 panic；
+// 拒绝采样后各字符出现次数差不超过 1（无取模偏置）。
+func TestP3_1_AlnumFromBytesGuardAndDistribution(t *testing.T) {
+	t.Parallel()
+	if got := alnumFromBytes(nil, 8); got != "" {
+		t.Fatalf("空输入应返回空串，got %q", got)
+	}
+	if got := alnumFromBytes([]byte{1, 2, 3}, 0); got != "" {
+		t.Fatalf("n=0 应返回空串，got %q", got)
+	}
+	if got := alnumFromBytes([]byte{1, 2, 3}, 16); len(got) != 16 {
+		t.Fatalf("应返回 16 字符，got %d", len(got))
+	}
+	// 分布：把全部 256 字节重复喂入 ⇒ 字符计数极差应 ≤ 1（拒绝采样消除取模偏置）
+	pool := make([]byte, 256)
+	for i := range pool {
+		pool[i] = byte(i)
+	}
+	counts := map[byte]int{}
+	for _, c := range []byte(alnumFromBytes(pool, 1000)) {
+		counts[c]++
+	}
+	mn, mx := 1<<30, 0
+	for _, c := range []byte(dirAlnumCharset) {
+		n := counts[c]
+		if n < mn {
+			mn = n
+		}
+		if n > mx {
+			mx = n
+		}
+	}
+	if mx-mn > 1 {
+		t.Fatalf("拒绝采样后应近似均匀（极差 ≤1），got min=%d max=%d", mn, mx)
+	}
+}

@@ -49,6 +49,11 @@ func (s *SecretdataFS) CleanupEmptyDuplicateContainers(ctx context.Context, evid
 			}
 		}
 	}
+	// **删除物理容器后必须失效索引快照**（批次 16 P1-3）：`snapshotRootMatches` 只比对卷根
+	// **顶层**目录集合，深层容器被删时顶层不变 ⇒ 陈旧快照仍可命中并指向已删容器（读报 not found）。
+	if removed > 0 && !dryRun {
+		s.invalidateIndexSnapshot()
+	}
 	return removed, skipped, nil
 }
 

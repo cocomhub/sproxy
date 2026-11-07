@@ -183,6 +183,7 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 		NormalizeExportDir:    vcExtraStr(v, "normalize_export_dir"),
 		NormalizeMaxMoves:     vcExtraInt(v, "normalize_max_moves"),
 		NormalizeMoveInterval: vcExtraDuration(v, "normalize_move_interval"),
+		NormalizeTimeout:      vcExtraDuration(v, "normalize_timeout"),
 	}
 }
 
