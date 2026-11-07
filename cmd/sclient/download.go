@@ -190,9 +190,36 @@ func decryptFileInPlace(path string, key []byte) error {
 	}
 	f.Close()
 	tf.Close()
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameReplace(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("e2ee: 替换文件: %w", err)
 	}
 	return nil
+}
+
+// renameReplace 把 tmp 原子替换为 dst（覆盖语义）。
+//
+// Windows 上覆盖被占用的目标会瞬时失败（“Access is denied”/sharing violation：句柄
+// 释放、杀毒/索引器扫描存在滞后），POSIX 上恒成功 ⇒ 有界退避重试。与
+// pkg/storage.AtomicRename / pkg/tunnel/hub.renameWithRetry 同策略：**只重试 rename，
+// 绝不先删目标**（先删会在快路径因任何原因失败时销毁目标 ⇒ 数据丢失）。
+// E2E 实测：`--decrypt` 的最终替换在 Windows 上约 2/5 概率瞬时失败，退避重试后稳定。
+func renameReplace(tmp, dst string) error {
+	return renameReplaceWith(os.Rename, tmp, dst)
+}
+
+// renameReplaceWith 是 renameReplace 的可注入实现（rename 传入便于单测重试逻辑）。
+func renameReplaceWith(rename func(string, string) error, tmp, dst string) error {
+	const maxAttempts = 8
+	const baseDelay = 20 * time.Millisecond
+	var lastErr error
+	for i := range maxAttempts {
+		if lastErr = rename(tmp, dst); lastErr == nil {
+			return nil
+		}
+		if i < maxAttempts-1 {
+			time.Sleep(baseDelay << i)
+		}
+	}
+	return lastErr
 }
