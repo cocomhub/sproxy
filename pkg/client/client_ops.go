@@ -422,8 +422,10 @@ func (c *FileClient) resumableStreamDownload(ctx context.Context, filename, outp
 			"attempt", attempt+1, "offset", rs.offset(), "error", err.Error())
 	}
 	// 保留已收内容 + sidecar，便于下一次调用（或用户重跑）继续。
+	// `--resume` 默认开启（`sclient download --resume` 默认 true）⇒ 再次执行同一命令即自动从断点续传，
+	// 文案不再误导用户去手动加 flag。
 	rs.save()
-	return fmt.Errorf("下载失败（已保留断点，可用 --resume 续传）: %w", lastErr)
+	return fmt.Errorf("下载失败（已保留断点，--resume 默认开启；再次执行同一命令会自动续传）: %w", lastErr)
 }
 
 // verifyOrResetIfComplete 处理「文件已收满」快路径（强杀在收尾/落盘前）：直接按大小+
