@@ -246,3 +246,29 @@
 **流程记录**：`docs/feature-review` 分支长期落后 master（394 提交），其**陈旧 Makefile**在
 pre-commit 下 `gofmt -w $(ALL_SRC)` 因 `ALL_SRC` 为空而报 `cannot use -w with standard input`。
 按硬规则「不得绕过检查」处置：`git merge origin/master`（加法、不改历史）把分支追平修掉陈旧脚本。
+
+## 第二轮复审：对**修复本身**的对抗审查（2026-11-08，`fix/dup-container` `1f41af9cf`）
+
+第一轮修复（`14b76117a`）自身同样按六维度复审，**发现 7 项新缺陷**（P2×4 / P3×3）——全部为
+「修复引入或未覆盖」的问题，均已修复并变异命中。
+
+| 编号 | 级别 | 发现（对修复本身） | 修复 | 变异 |
+| --- | --- | --- | --- | --- |
+| **F1** | P2 | `parentContainerCanonical` 对**顶层**恒返回 true ⇒ 未迁移卷里每个顶层容器都被误报「疑似外部直改盘」，**误导排查方向**（且正是 P2-3 想消除的噪声） | 顶层改为校验**卷根容器**自身是否由 (`""`,`""`) 派生；根不合规 ⇒ 判「未迁移」（Debug） | `TestF1_TopLevelDriftDependsOnRootContainer` ⇒ **红** |
+| **F2** | P2 | 导出回滚用**绝对值还原**（usage/volVersion/dirs 差集）⇒ `ExportDuplicateContainers` 是**导出 API**，在活跃卷上调用会**覆盖并发写者**的用量/版本更新（lost update）；且只按 `__dup_export__/` 前缀清理会**漏掉顶层键** `__dup_export__` ⇒ 幻影目录残留 | 新增 `seal()` 采集 after 基线，回滚改**增量/CAS**（usage 扣增量、version 仅无他人变更时回滚、去重池按 after 比对、目录清本模块命名空间含根键） | `TestF2_ExportRollbackPreservesConcurrentAccounting` / `TestP1_4_...` ⇒ **红** |
+| **F3** | P2 | `runApplyAction` 每轮重跑 `normalizeBlockedRels`（完整审计 + 逐文件解密）⇒ 分批迁移退化为 **O(轮数 × 审计)**，且放大远端读 | 抽出 `normalizeContainerNamesWithBlocked`，审计**只做一次**（重复容器组在迁移期间不变） | `TestF3_ApplyAuditsOnceAcrossRounds`（ListDir 计数）⇒ **红** |
+| **F4** | P2 | `TestP2_4` 走真实退避 ⇒ **单测耗时 30s**（CI 成本；`-race` 更甚） | 新增可注入 `ContainerMoveRetryBase`（默认 0 ⇒ 生产常量），用例注入 1ms ⇒ **0.06s** | `maxAttempts=3` ⇒ **红** |
+| **F5** | P3 | 逻辑文件键只用 **basename** ⇒ 「不同子目录下的同名文件」互相掩盖 ⇒ **漏报争议** | 键改为**逻辑路径**（目录段取自子容器 dir meta 的 `Name`；同时引入深度上限护栏） | `TestF5_LogicalFilesUsePathQualifiedKeys` ⇒ **红** |
+| **F6** | P3 | `alnumFromBytes` 拒绝采样**无尝试上限** ⇒ 退化输入（字节全落被拒区间）**死循环** | 设尝试上限 + 兜底补齐（宁可轻微偏置，绝不挂起） | `TestF6_...TerminatesOnDegenerateInput`（`-timeout 30s`）⇒ **超时红** |
+| **F7** | P3 | `finalizeSnapshotFile` 日志里二次 `Load()` 与判据值可能不一致 | 复用 `cur` | 日志修正（无独立用例） |
+
+**经核查不成立的疑点**（避免后续重复怀疑）：
+「导出部分登记泄漏」——`loadContainerFileMetas` 的错误只来自**起始** `listInner`（在任何登记之前），
+故不存在"失败留下部分索引条目"的路径。
+
+**验证**：`pkg/volume/secretdata` + `pkg/cryptox/shardseal` + `cmd/sproxy` + `internal/archcheck` 全绿；
+`golangci-lint` **0 issues**（含 `rollback` / `collectLogicalFiles` 复杂度拆分）；
+**本轮 6/6 变异命中**，第一轮 11 项变异在锚点更新后**仍全部命中**。
+
+**行为变更（需知）**：F5 后判据按**逻辑路径**比对，因此「落选容器内存在**无法解密的子容器目录 meta**」
+（如裸目录、残缺写入）会被判为**争议**（保守，需人工确认）——这是刻意的收紧。

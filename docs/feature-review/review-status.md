@@ -68,3 +68,6 @@
 - 报告：`16-batch16-review.md`（P0 0 / P1 5 / P2 7 / P3 3）
 - [x] **修复轮**（`fix/dup-container` `78bfc4e9a`）：P1×5 / P2×7 / P3×3 **全部修复**，每项红灯复现 +
   变异命中（10/10）；`pkg/volume/secretdata`/`shardseal`/`cmd/sproxy`/`pkg/sync`/`pkg/cloud` 全绿、lint 0
+- [x] **修复轮二（对修复本身的复审）**（`fix/dup-container` `1f41af9cf`）：新发现 **F1–F7（P2×4 / P3×3）**
+  全部修复（顶层降噪误报 / 回滚增量-CAS + 幻影根键 / 审计只做一次 / 30s 单测降到 0.06s /
+  逻辑路径键 / 拒绝采样上限 / 代际日志），**本轮 6/6 + 首轮 11 项变异全部命中**，lint 0
