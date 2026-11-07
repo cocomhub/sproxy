@@ -27,6 +27,7 @@ import (
 
 // TestE2E_ParentChildMoveProbe 逐轮执行「改父 → 立刻改子」，记录每一步的真实结果。
 func TestE2E_ParentChildMoveProbe(t *testing.T) {
+	// sproxy:serial: 真实网盘 e2e 探针（共享远端资源 + 限流），必须串行执行
 	env := newProbeEnv(t)
 	ctx := context.Background()
 	const rounds = 5

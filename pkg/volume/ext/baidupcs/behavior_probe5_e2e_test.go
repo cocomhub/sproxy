@@ -61,6 +61,7 @@ func (l *logCapture) dump(t *testing.T, tag string) {
 
 // TestE2E_PutPhaseProbe 见文件头。
 func TestE2E_PutPhaseProbe(t *testing.T) {
+	// sproxy:serial: 真实网盘 e2e 探针（共享远端资源 + 限流），必须串行执行
 	bduss := e2eBDUSSFromConfig(t)
 	if bduss == "" {
 		t.Skip("BDUSS 为空")
@@ -131,6 +132,7 @@ func TestE2E_PutPhaseProbe(t *testing.T) {
 // TestE2E_PutProdPathProbe 对照探针：用**生产装配**（binary CLI 优先 + 库兜底）写小文件，
 // 与 P7（纯库 adapter）对比 —— 判断"库上传 ~90s 且不响应 ctx"是否影响真实生产路径。
 func TestE2E_PutProdPathProbe(t *testing.T) {
+	// sproxy:serial: 真实网盘 e2e 探针（共享远端资源 + 限流），必须串行执行
 	env := newProbeEnv(t) // env.prod = NewStorage{BinaryPath: ...}（生产装配）
 	ctx := context.Background()
 	env.mkdirRemote(ctx, env.remoteFor("p8"))

@@ -43,6 +43,7 @@ func burstCount() int {
 
 // TestE2E_BurstMoveProbe 连续 N 次裸 move，逐条记录真实结果。
 func TestE2E_BurstMoveProbe(t *testing.T) {
+	// sproxy:serial: 真实网盘 e2e 探针（共享远端资源 + 限流），必须串行执行
 	env := newProbeEnv(t)
 	ctx := context.Background()
 	n := burstCount()

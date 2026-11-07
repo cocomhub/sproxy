@@ -250,6 +250,7 @@ func (e *probeEnv) pollCLI(ctx context.Context, remoteDir, base string, interval
 
 // TestE2E_BehaviorProbe 依次执行全部测量并打印汇总。
 func TestE2E_BehaviorProbe(t *testing.T) {
+	// sproxy:serial: 真实网盘 e2e 探针（共享远端资源 + 限流），必须串行执行
 	env := newProbeEnv(t)
 	ctx := context.Background()
 
