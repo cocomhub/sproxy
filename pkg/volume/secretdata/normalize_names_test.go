@@ -269,3 +269,33 @@ func TestNormalizeNames_GatesBothSnapshotPaths(t *testing.T) {
 		t.Fatal("容器树路径（tryLoadIndexSnapshot）也必须受 allowSnapshot 门控（否则仍会命中快照）")
 	}
 }
+
+// TestSnapshotWrite_SuppressedAfterInvalidate 钉住**异步快照落盘的抑制**（2026-11-07 实测竞态）：
+// 装配期快照写入是 **goroutine**，而容器名规范化等写动作在其后**同步**执行并删快照 ⇒
+// 异步写入随后把**迁移前**的 dirSegs 写回 ⇒ 下次启动载入陈旧名字（实测采样校验 8/8 全漂移）。
+// 修复：invalidateIndexSnapshot 置位抑制标记，writeIndexSnapshot 见标记即放弃落盘。
+func TestSnapshotWrite_SuppressedAfterInvalidate(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	snapPath := filepath.Join(t.TempDir(), "snap.enc")
+	sfs, err := NewFS(syncpkg.NewLocalFS(root, nil), Options{
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, TempDir: t.TempDir(),
+		Block:             shardseal.BlockPolicy{Min: 32 << 10, Max: 32 << 10},
+		IndexSnapshotPath: snapPath,
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	if sfs.snapshotSuppressed.Load() {
+		t.Fatal("初始不应处于抑制态")
+	}
+	sfs.invalidateIndexSnapshot()
+	if !sfs.snapshotSuppressed.Load() {
+		t.Fatal("invalidateIndexSnapshot 必须置位抑制标记（否则异步写入会用陈旧 dirSegs 覆盖）")
+	}
+	// 抑制后写入不得落盘
+	sfs.writeIndexSnapshot(sfs.buildIndexSnapshot(nil))
+	if _, serr := os.Stat(snapPath); !os.IsNotExist(serr) {
+		t.Fatalf("抑制态下不得写快照文件，stat err=%v", serr)
+	}
+}

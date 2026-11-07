@@ -273,6 +273,13 @@ func (s *SecretdataFS) writeIndexSnapshot(snap *indexSnapshot) {
 	if p == "" {
 		return
 	}
+	// **本进程已发生写/迁移 ⇒ 放弃落盘**（2026-11-07 实测竞态）：装配期快照写入是**异步**
+	// goroutine，而「容器名规范化」等写动作在其后**同步**执行并删快照 ⇒ 异步写入随后又把
+	// **迁移前**的 dirSegs 写回 ⇒ 下次启动载入陈旧名字（实测：采样校验 8/8 全漂移）。
+	if s.snapshotSuppressed.Load() {
+		slog.Debug("secretdata: 索引快照落盘已抑制（本进程发生过写操作）")
+		return
+	}
 	raw, jerr := json.Marshal(snap)
 	if jerr != nil {
 		slog.Warn("secretdata: 索引快照序列化失败（忽略）", "error", jerr)
@@ -332,6 +339,7 @@ func (s *SecretdataFS) invalidateIndexSnapshot() {
 	if s.opts.IndexSnapshotPath == "" {
 		return
 	}
+	s.snapshotSuppressed.Store(true) // 抑制本次装配的**异步**落盘（见 writeIndexSnapshot）
 	if err := os.Remove(s.opts.IndexSnapshotPath); err == nil {
 		slog.Debug("secretdata: 索引快照已失效（写操作后需重建）")
 	}
@@ -394,7 +402,12 @@ func (s *SecretdataFS) tryLoadIndexSnapshotFast(ctx context.Context, root []sync
 	// 旧格式（未压缩）命中后后台重写为 gzip 格式：下次启动解密量降一个数量级。
 	if !snap.isGzip {
 		containers := append([]string(nil), snap.Containers...)
-		go func() { s.writeIndexSnapshot(s.buildIndexSnapshot(containers)) }()
+		go func() {
+			if s.snapshotSuppressed.Load() {
+				return
+			}
+			s.writeIndexSnapshot(s.buildIndexSnapshot(containers))
+		}()
 	}
 	return true
 }

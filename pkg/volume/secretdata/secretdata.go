@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -274,6 +275,9 @@ type SecretdataFS struct {
 	// （账本与磁盘漂移）。三处维护：目录 meta 写入 +、容器回收 −（列目录时顺带求和，零额外 I/O）、
 	// 挂载扫描 +（Phase 1 已读每个 dir meta blob）。
 	dirPhysTotal int64
+	// snapshotSuppressed 在**本进程发生任何写操作**（含容器名规范化）后置位 ⇒
+	// 抑制装配期**异步**快照落盘（否则异步写入会用陈旧 dirSegs 覆盖刚失效的快照）。
+	snapshotSuppressed atomic.Bool
 	// dirIDs 是逻辑目录 → 该容器目录 meta 的 dir_id（写新容器 meta 的 parent_dir_id、
 	// 目录移动改写父引用用）。
 	dirIDs map[string]string
