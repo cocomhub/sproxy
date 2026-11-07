@@ -11,11 +11,11 @@ import "testing"
 func TestDirNameFor_Deterministic(t *testing.T) {
 	t.Parallel()
 	secret := []byte("test-secret-key-000")
-	a, err := DirNameFor(secret, "P1", "jav/makers/NHDTB")
+	a, err := DirNameFor(secret, "P1", "jav/makers/EXAMPLE-A")
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}
-	b, err := DirNameFor(secret, "P1", "jav/makers/NHDTB")
+	b, err := DirNameFor(secret, "P1", "jav/makers/EXAMPLE-A")
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}
@@ -33,9 +33,9 @@ func TestDirNameFor_Deterministic(t *testing.T) {
 	}
 	// 不同父 / 不同路径 / 不同密钥 ⇒ 必须不同名
 	diff := []string{}
-	d2, _ := DirNameFor(secret, "P2", "jav/makers/NHDTB")
-	d3, _ := DirNameFor(secret, "P1", "jav/makers/NHDTA")
-	d4, _ := DirNameFor([]byte("other-secret-key-01"), "P1", "jav/makers/NHDTB")
+	d2, _ := DirNameFor(secret, "P2", "jav/makers/EXAMPLE-A")
+	d3, _ := DirNameFor(secret, "P1", "jav/makers/EXAMPLE-B")
+	d4, _ := DirNameFor([]byte("other-secret-key-01"), "P1", "jav/makers/EXAMPLE-A")
 	for _, d := range []string{d2, d3, d4} {
 		if d == a {
 			diff = append(diff, d)

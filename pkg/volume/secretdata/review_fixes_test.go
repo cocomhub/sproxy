@@ -112,7 +112,7 @@ func TestP1_1_ReadAfterMigration_SameProcess(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	sfs := newNormalizeFS(t, root)
-	const rel = "jav/makers/NHDTB-888/P1-1.bin"
+	const rel = "jav/makers/EXAMPLE-0002/P1-1.bin"
 	payload := bytes.Repeat([]byte("dirseg-sync-needed-"), 4*1024)
 	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)

@@ -46,7 +46,7 @@ func TestPickCanonicalContainer(t *testing.T) {
 
 // TestDuplicateContainer_MountsWithCanonical 钉住**重复容器可挂载**（2026-11-06 线上缺陷）。
 //
-// 线上形态（jav 卷）：同一逻辑目录 `X` 有两个容器（旧 `qG881kZTeIr` / 新 `4rQQof5H592J`），
+// 线上形态（jav 卷）：同一逻辑目录 `X` 有两个容器（旧 `ContainerAAAAAA` / 新 `ContainerBBBBBB`），
 // `X` 的**子容器**物理挂在旧容器下，而 `dirSegs[X]` 被**静默覆盖**成新容器 ⇒
 // `validateContainerPlacement` 报「子容器未嵌套在逻辑父目录容器内」⇒ **卷拒绝挂载**。
 //

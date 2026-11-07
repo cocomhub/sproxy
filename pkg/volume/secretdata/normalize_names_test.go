@@ -41,7 +41,7 @@ func TestNormalizeContainerNames_MigratesAndIdempotent(t *testing.T) {
 	root := t.TempDir()
 	sfs := newNormalizeFS(t, root)
 	payload := bytes.Repeat([]byte("normalize-container-names-"), 8*1024)
-	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "jav/makers/NHDTB-999/f.bin",
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "jav/makers/EXAMPLE-0001/f.bin",
 		bytes.NewReader(payload), int64(len(payload)), 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
@@ -119,7 +119,7 @@ func TestNormalizeContainerNames_MigratesAndIdempotent(t *testing.T) {
 
 	// 重启后仍可读（逻辑解析靠 DirID/扫描，不靠段名）
 	sfs2 := newNormalizeFS(t, root)
-	rc, rerr := sfs2.OpenRead(ctx, "jav/makers/NHDTB-999/f.bin")
+	rc, rerr := sfs2.OpenRead(ctx, "jav/makers/EXAMPLE-0001/f.bin")
 	if rerr != nil {
 		t.Fatalf("迁移后重启读取失败: %v", rerr)
 	}

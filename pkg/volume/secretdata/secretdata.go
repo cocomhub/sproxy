@@ -2596,7 +2596,7 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 	}
 	// **重复容器处理**（2026-11-06 实测线上缺陷）：同一逻辑路径被多个容器声明时，原实现
 	// `s.dirSegs[rel] = sc.container` **静默覆盖** ⇒ 映射与物理不一致（实测 jav 卷：
-	// `qG881kZTeIr` 与 `4rQQof5H592J` 都声明同一目录，覆盖后嵌套校验拿旧容器校验新容器 ⇒
+	// `ContainerAAAAAA` 与 `ContainerBBBBBB` 都声明同一目录，覆盖后嵌套校验拿旧容器校验新容器 ⇒
 	// 卷拒绝挂载）。此处**确定性选权威容器**，其余标记忽略（**数据保留不删**）并显著告警。
 	s.registerCanonicalContainers(scans, byRel, res)
 	return res
