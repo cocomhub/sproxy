@@ -55,6 +55,8 @@ type chunkedTestEnv struct {
 	uploading sync.Map
 	// capacity 是容量回退预留（P5）的替身接缝；默认 nil = 不启用 P5 预留（既有用例零变化）。
 	capacity StorageManager
+	// bandwidth 是带宽限速器替身接缝（默认 nil = 不限速，既有用例零变化）。
+	bandwidth BandwidthLimiter
 	// routeReleases 记录 Route 返回的 Release 的调用次数（init「会话已被并发删除」回滚路径断言用）。
 	routeReleases int
 	// routeHook 若非 nil，在 Route 返回前调用：用例借此确定性注入「routeUpload 期间会话被并发
@@ -172,6 +174,7 @@ func (e *chunkedTestEnv) handlers(chunkSize int64) *Service {
 		WithVersioning(e),
 		WithAudit(e),
 		WithChunkSize(func() int64 { return chunkSize }),
+		WithBandwidthLimiter(e.bandwidth),
 	)
 	if err != nil {
 		panic("测试装配 files.New 失败: " + err.Error())
@@ -545,5 +548,64 @@ func TestService_ChunkedComplete_Errors(t *testing.T) {
 	rec = env.doJSON(t, h, http.MethodPost, "/upload/complete", h.UploadComplete, map[string]any{"upload_id": "partial"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("分片未齐应 400，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// spyBandwidthLimiter 记录被咨询的 owner（返回 nil 桶 = 只验证「是否咨询限速器」）。
+type spyBandwidthLimiter struct {
+	mu     sync.Mutex
+	owners []string
+}
+
+func (s *spyBandwidthLimiter) BucketFor(owner string) *TokenBucket {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.owners = append(s.owners, owner)
+	return nil
+}
+
+func (s *spyBandwidthLimiter) consulted() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.owners...)
+}
+
+// TestService_DownloadChunk_ConsultsBandwidthLimiter 回归：本地卷 /download/chunk 此前
+// 直写 c.w，未包 limitResponseWriter ⇒ 开启 rate_limit.bandwidth 时整文件下载受限、分块
+// 下载完全绕过（公平性缺口，E2E 实测 8MiB/s 代理下 plain 15.6MB/s、chunked 431MB/s）。
+func TestService_DownloadChunk_ConsultsBandwidthLimiter(t *testing.T) {
+	t.Parallel()
+	env := newChunkedTestEnv(t)
+	spy := &spyBandwidthLimiter{}
+	env.bandwidth = spy
+	h := env.handlers(4)
+
+	content := []byte("abcdefghij")
+	rel, _ := env.tnt.UserRel("bw.bin")
+	if err := env.tnt.Root().MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs, ok := env.tnt.Root().Abs(rel)
+	if !ok {
+		t.Fatal("目标路径派生失败")
+	}
+	if err := os.WriteFile(abs, content, 0o600); err != nil {
+		t.Fatalf("写目标文件: %v", err)
+	}
+	env.cs.Set(rel, sha256Hex(content))
+
+	rec := env.doJSON(t, h, http.MethodGet, "/download/chunk?filename=bw.bin&offset=0&length=10", h.DownloadChunk, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("分块下载应 200，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != string(content) {
+		t.Fatalf("分块内容=%q want %q", got, content)
+	}
+	owners := spy.consulted()
+	if len(owners) == 0 {
+		t.Fatal("本地 /download/chunk 必须经带宽限速器（此前直写 c.w 绕过限速）")
+	}
+	if owners[0] != "alice" {
+		t.Fatalf("限速 owner=%q want alice", owners[0])
 	}
 }
