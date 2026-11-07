@@ -210,3 +210,68 @@ md5 一致（实测 `local = ls -l = 6156c3f7…`）；单次调用在**普通�
   （重复 URL 立即 `循环` 失败，不再空转跳数）。锁定测试：
   `TestFollowKeepshareShareID_LongChain`（7 跳可达）、`TestFollowKeepshareShareID_LoopDetected`。
 - **判定**：属**上游行为变化/故障**，非实现回归。恢复后无需改代码（10 跳仍覆盖正常链路）。
+
+## §7.8 BaiduPCS：移动/上传后「可见性」实测事实（2026-11-08，行为锁定）
+
+**实测方式**：`pkg/volume/ext/baidupcs/behavior_probe{,2,3,4,5}_e2e_test.go`（`//go:build e2e`），
+在**独立测试目录** `/_probe/<uniq>/` 上用真实网盘测量，收尾用 CLI `rm` 递归删除。
+运行（WSL）：
+
+```bash
+cd pkg/volume/ext/baidupcs && GOTOOLCHAIN=local GOWORK=off   ~/sdk/go1.27.2/bin/go test -tags=e2e -run 'TestE2E_BehaviorProbe|TestE2E_BurstMoveProbe|TestE2E_ParentChildMoveProbe|TestE2E_ConfirmOperatorProbe|TestE2E_PutPhaseProbe' -count=1 -v -timeout 40m
+```
+
+**实测数字（同一账号/同一网盘）**：
+
+| 操作 | 实测 |
+| --- | --- |
+| 单次 `move`（库 / CLI / 生产装配） | 成功，0.44s / 0.86s / 1.01s |
+| **链式改名**（父→子→孙，零等待） | **8/8 成功**（0.37 / 0.40 / 0.69s） |
+| **突发 50 次 move** | **50/50 成功**，0.51s/次 ⇒ **与"限流"无关** |
+| 改名后确认手段 | `ls`（父列举/目标列举）**0.33–0.38s 稳定**；旧名即时消失 |
+| `Meta`（库）可见性 | **偶发**：同结构一次 **≥60s 不可见**、另一次 **0.14s** ⇒ **不可作确认判据** |
+| `Storage.Move` 调用数（计数 adapter） | 修复前 `Move+Meta`=2 次；**修复后 1 次** |
+| `Storage.Put`（父目录已存在，库 adapter） | **90s/150s 全部 `context deadline exceeded`**；**无 Upload 入口日志** ⇒ 卡在**预检 `Stat`**（P7 归因） |
+
+**据此确立的实现约束（已落地）**：
+1. **非数据操作（move/rename）**：以 **API 返回值 + `ls` 列举**确认有效，**不得**用 `Meta` 复核
+   （`Storage.Move` 已去掉 post-Stat；依据：`Meta` 偶发延迟会把成功报成 `31066`）。
+2. **数据操作（上传/下载）仍必须用 `Meta`/`Stat` 取 md5 校验**（用户明确要求）：
+   `Put` 的**预检**改为**有界**（`statPreCheckTimeout`，超时即放行上传），
+   正确性由**上传后的 ETag/md5 复核（+ rapidupload 刷新 + size 兜底）**保证——**校验强度不变**。
+3. **不得用 sleep/层间等待**规避可见性（链式零等待实测 8/8 成功）。
+
+**错误码事实**：库错误码表 `baidupcs/pcserror/pcserrorinfo.go` 仅登记
+`31045`（user not exists）/`31061`（file already exists）/`31066`（**file does not exist**）/`31079`（md5 not found）；
+**未登记 `31034`**；本机日志中检索到的 `31034` 均为随机串假匹配 ⇒ 不做基于 `31034` 的限流模式匹配，
+未知码**原样透传**（便于事后取证）。
+
+### §7.8.1 上传链路阶段实测（2026-11-08，阶段打点）
+
+`Storage` 内置 `logPhase`（Debug 级，`phase=stage|precheck|list|upload|postcheck`，
+含 `elapsed_ms`/`err`/`ctx_err`，**可注入 logger**）⇒ 部署侧可直接定位"慢在哪一阶段"。
+
+**实测 A：纯库 adapter（`libraryAdapter`，无 CLI）——小文件仍极慢且不响应 ctx**
+
+```
+phase=list      elapsed_ms=289    err=<nil>
+phase=precheck  elapsed_ms=289    err=<nil>
+phase=upload    elapsed_ms=89710  err=<nil>   ctx_err=context deadline exceeded   ← 卡点
+phase=list      elapsed_ms=0      err="context deadline exceeded"
+phase=postcheck elapsed_ms=0      err="context deadline exceeded"
+```
+1KB 文件上传耗时 **~89.7s**；`ctx` 超时**不能中断**该库调用（返回时 ctx 已耗尽）。
+
+**实测 B：生产装配（binary CLI 优先 + 库兜底）——正常**
+
+```
+生产装配 Put a.bin err=<nil> 耗时=3.62s
+生产装配 Put b.bin err=<nil> 耗时=3.02s
+```
+
+**结论（必须遵守）**：
+1. **库上传（`libraryAdapter.Upload`）不得作为生产主路径依赖**（现状已是 binary 优先 + 库兜底）；
+2. **不要给不可中断的库调用套 `context.WithTimeout`**（无效，已两次实测）；
+   需要约束时改用**已实测稳定可用的操作**（如父目录列举 `ls`，0.33–0.38s）或可取消的执行方式；
+3. 读路径（`Meta`/`List`）已改为**精确列举优先**（`metaByExactList`），仍取 `fd.MD5` 做
+   `ETag==本地整文件 md5` 断言 ⇒ **数据校验强度不变**。
