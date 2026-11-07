@@ -153,6 +153,11 @@ type Options struct {
 	NormalizeNames string
 	// NormalizeExportDir 是 normalize_names="export" 的输出根目录（空 = "./dup-export"）。
 	NormalizeExportDir string
+	// NormalizeMaxMoves 是**单次装配最多迁移的容器数**（0 = 不限）。
+	// 迁移需数百次 rename，易触发外部限流 ⇒ 建议分批（如 100/次），多次重启收敛（幂等）。
+	NormalizeMaxMoves int
+	// NormalizeMoveInterval 是相邻 rename 的**最小间隔**（0 = 250ms，限速防限流）。
+	NormalizeMoveInterval time.Duration
 
 	// MetaCacheDir 是装配期 meta blob 的**本机磁盘密文缓存**目录（空 = 禁用，默认零回归）。
 	// 外部卷每读一个 meta 都要起一次下载 CLI 并落随机临时目录（Close 即删）⇒ 每次重启
@@ -2579,21 +2584,14 @@ func (s *SecretdataFS) NormalizeContainerNames(ctx context.Context, dryRun bool)
 
 	rels := sortedRelsByDepth(segs)
 	newSegs := make(map[string]string, len(rels))
-	for _, rel := range rels {
-		m, sk, rerr := s.normalizeOneRel(ctx, rel, segs, newSegs, blocked, dryRun)
-		moved += m
-		skipped += sk
-		if rerr != nil {
-			// **失败也要失效快照**（已改名部分 ⇒ 物理已变）：否则下次启动命中陈旧快照
-			// （记录迁移前的 dirSegs）⇒ 采样校验恒报漂移。
-			if moved > 0 && !dryRun {
-				s.mu.Lock()
-				maps.Copy(s.dirSegs, newSegs)
-				s.mu.Unlock()
-				s.invalidateSnapshotAfterPartialMove()
-			}
-			return moved, skipped, rerr
+	moved, skipped, merr := s.normalizeAllRels(ctx, rels, segs, newSegs, blocked, dryRun)
+	if merr != nil {
+		// **失败也要失效快照**（已改名部分 ⇒ 物理已变）：否则下次启动命中陈旧快照
+		// （记录迁移前的 dirSegs）⇒ 采样校验恒报漂移。
+		if moved > 0 && !dryRun {
+			s.commitPartialMoves(newSegs)
 		}
+		return moved, skipped, merr
 	}
 	if dryRun {
 		return moved, skipped, nil
@@ -2645,6 +2643,9 @@ func (s *SecretdataFS) normalizeOneRel(ctx context.Context, rel string, segs, ne
 
 // moveContainerIdempotent 把容器从 cur 移到 want；**目标已存在视为已完成**（幂等续跑）。
 // 返回 (是否真的移动, error)。
+// defaultNormalizeMoveInterval 是相邻容器 rename 的默认最小间隔（限速，防外部限流）。
+const defaultNormalizeMoveInterval = 250 * time.Millisecond
+
 // containerMoveRetryInterval 是容器改名失败后的**基础退避**（逐轮线性放大）。
 // 迁移会连续做数百次 rename，易触发外部限流（百度 31034）⇒ 必须退避重试而非直接放弃。
 const containerMoveRetryInterval = 2 * time.Second
@@ -2712,6 +2713,51 @@ func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want strin
 		}
 	}
 	return !hasCur && hasWant, true
+}
+
+// normalizeAllRels 遍历逻辑目录执行改名（分批上限 + 限速；拆出以控认知复杂度）。
+func (s *SecretdataFS) normalizeAllRels(ctx context.Context, rels []string, segs, newSegs map[string]string,
+	blocked map[string]bool, dryRun bool) (moved, skipped int, err error) {
+	limit := s.opts.NormalizeMaxMoves
+	interval := s.opts.NormalizeMoveInterval
+	if interval <= 0 {
+		interval = defaultNormalizeMoveInterval
+	}
+	for _, rel := range rels {
+		// **分批上限**（2026-11-07）：迁移需数百次 rename，易触发外部限流 ⇒ 单次装配只迁 N 个，
+		// 多次重启收敛（幂等）。达到上限即收口（已改名部分仍会失效快照）。
+		if limit > 0 && moved >= limit {
+			slog.Info("secretdata: 达到单次迁移上限，剩余容器留待下次启动续跑",
+				"moved", moved, "limit", limit)
+			return moved, skipped, nil
+		}
+		m, sk, rerr := s.normalizeOneRel(ctx, rel, segs, newSegs, blocked, dryRun)
+		moved += m
+		skipped += sk
+		if m > 0 && !dryRun {
+			// **限速**：相邻 rename 之间留间隔，降低触发外部限流的概率。
+			select {
+			case <-ctx.Done():
+				return moved, skipped, ctx.Err()
+			case <-time.After(interval):
+			}
+		}
+		if rerr != nil {
+			return moved, skipped, rerr
+		}
+	}
+	return moved, skipped, nil
+}
+
+// commitPartialMoves 写回**已完成的**部分迁移并失效快照（失败/中断/达上限路径统一收口）。
+func (s *SecretdataFS) commitPartialMoves(newSegs map[string]string) {
+	if len(newSegs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	maps.Copy(s.dirSegs, newSegs)
+	s.mu.Unlock()
+	s.invalidateSnapshotAfterPartialMove()
 }
 
 // invalidateSnapshotAfterPartialMove 在**迁移中途失败**时也须使快照失效（2026-11-07 实测

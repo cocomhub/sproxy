@@ -534,3 +534,74 @@ func (f *failOnSecondRenameFS) Rename(ctx context.Context, from, to string) erro
 	}
 	return f.FS.Rename(ctx, from, to)
 }
+
+// TestNormalizeContainerNames_BatchedLimit 钉住**分批迁移**（用户裁定 2026-11-07）：
+// 迁移需数百次 rename，易触发外部限流 ⇒ 单次装配只迁 N 个（`NormalizeMaxMoves`），
+// **多次重启幂等收敛**；达上限即收口且**已改名部分仍失效快照**（否则下次读到陈旧索引）。
+func TestNormalizeContainerNames_BatchedLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	snapPath := filepath.Join(t.TempDir(), "snap.enc")
+	newFS := func() *SecretdataFS {
+		s, err := NewFS(syncpkg.NewLocalFS(root, nil), Options{
+			Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, TempDir: t.TempDir(),
+			Block:             shardseal.BlockPolicy{Min: 32 << 10, Max: 32 << 10},
+			IndexSnapshotPath: snapPath, NormalizeMaxMoves: 2,
+		})
+		if err != nil {
+			t.Fatalf("NewFS: %v", err)
+		}
+		return s
+	}
+	sfs := newFS()
+	for _, d := range []string{"b1", "b2", "b3", "b4"} {
+		if merr := sfs.MakeDir(ctx, d); merr != nil {
+			t.Fatalf("MakeDir(%s): %v", d, merr)
+		}
+	}
+	// 人为改成随机名（自底向上保父子一致；这里都是顶层）
+	sfs.mu.Lock()
+	for _, d := range []string{"b1", "b2", "b3", "b4"} {
+		c := sfs.dirSegs[d]
+		if rerr := os.Rename(filepath.Join(root, filepath.FromSlash(c)), filepath.Join(root, filepath.FromSlash(c+"X"))); rerr != nil {
+			sfs.mu.Unlock()
+			t.Fatalf("夹具改名: %v", rerr)
+		}
+		sfs.dirSegs[d] = c + "X"
+	}
+	sfs.mu.Unlock()
+
+	// 第一轮：最多迁 2 个
+	moved1, _, err := sfs.NormalizeContainerNames(ctx, false)
+	if err != nil {
+		t.Fatalf("第一轮: %v", err)
+	}
+	if moved1 != 2 {
+		t.Fatalf("分批上限应为 2，got moved=%d", moved1)
+	}
+	// 达上限时快照也必须失效（已改名部分）
+	if _, serr := os.Stat(snapPath); !os.IsNotExist(serr) {
+		t.Fatalf("达上限时快照必须失效，stat err=%v", serr)
+	}
+
+	// 第二轮：再迁 2 个（幂等续跑收敛到全部完成）
+	sfs2 := newFS()
+	moved2, _, err2 := sfs2.NormalizeContainerNames(ctx, false)
+	if err2 != nil {
+		t.Fatalf("第二轮: %v", err2)
+	}
+	// 已是确定性名的不再计入 moved；剩余 2 个应被迁移
+	if moved2 == 0 {
+		t.Fatalf("第二轮应继续迁移剩余容器，got moved=0")
+	}
+	// 第三轮：全部完成后应 moved=0（幂等）
+	sfs3 := newFS()
+	moved3, _, err3 := sfs3.NormalizeContainerNames(ctx, false)
+	if err3 != nil {
+		t.Fatalf("第三轮: %v", err3)
+	}
+	if moved3 != 0 {
+		t.Fatalf("全部完成后应幂等（moved=0），got %d", moved3)
+	}
+}
