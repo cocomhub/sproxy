@@ -393,6 +393,10 @@ func (c *FileClient) singleStreamDownload(ctx context.Context, filename, outputP
 // 开始；中断时保留已收内容 + sidecar（下次调用可继续），并在本次调用内按退避自动重试。
 func (c *FileClient) resumableStreamDownload(ctx context.Context, filename, outputPath, kind string, rm remoteFileMeta) error {
 	rs := c.loadStreamResume(filename, kind, outputPath, rm)
+	rs, done := c.verifyOrResetIfComplete(ctx, filename, kind, outputPath, rm, rs)
+	if done {
+		return nil
+	}
 	var lastErr error
 	for attempt := range downloadStreamMaxAttempts {
 		if attempt > 0 && !chunkDownloadSleep(ctx, streamRetryDelay(attempt)) {
@@ -420,6 +424,27 @@ func (c *FileClient) resumableStreamDownload(ctx context.Context, filename, outp
 	// 保留已收内容 + sidecar，便于下一次调用（或用户重跑）继续。
 	rs.save()
 	return fmt.Errorf("下载失败（已保留断点，可用 --resume 续传）: %w", lastErr)
+}
+
+// verifyOrResetIfComplete 处理「文件已收满」快路径（强杀在收尾/落盘前）：直接按大小+
+// checksum 校验；成功即完成（省去重下尾部），失败说明尾部未落盘/损坏 ⇒ 删文件+sidecar
+// 并返回新跟踪器（调用方从头重下，fail-closed）。返回 (跟踪器, 是否已完成)。
+func (c *FileClient) verifyOrResetIfComplete(ctx context.Context, filename, kind, outputPath string, rm remoteFileMeta, rs *downloadResume) (*downloadResume, bool) {
+	fi, serr := os.Stat(outputPath)
+	if serr != nil || fi.Size() != rm.Size {
+		return rs, false
+	}
+	if verr := c.verifyStreamedDownload(outputPath, rm); verr == nil {
+		c.restoreResumeMTime(outputPath, rm)
+		rs.finish()
+		return rs, true
+	}
+	c.logger.WarnContext(ctx, "已收满但校验失败，改为从头重下", "file_name", outputPath)
+	os.Remove(outputPath)
+	removeDownloadResumeState(outputPath)
+	return newDownloadResume(outputPath, downloadResumeState{
+		Filename: filename, Kind: kind, Size: rm.Size, Checksum: rm.Checksum, MTime: rm.MTime,
+	}), false
 }
 
 // streamOnce 执行一次单流下载（可从 rs 的断点起）。返回 nil 表示本次读完响应体。
@@ -472,28 +497,51 @@ func (c *FileClient) copyStreamToFile(outputPath string, body io.Reader, offset,
 	if _, err := out.Seek(offset, io.SeekStart); err != nil {
 		return fmt.Errorf("定位续传偏移失败: %w", err)
 	}
-	src := io.Reader(body)
-	if c.progressFn != nil {
-		src = NewProgressReader(body, total, func(read, tot int64) {
-			c.progressFn("下载", offset+read, tot)
-		})
+	return c.copyStreamWithCheckpoint(out, body, offset, total, rs)
+}
+
+// copyStreamWithCheckpoint 逐块读写并推进续传进度（Gocognit：从 copyStreamToFile 抽出）。
+//
+// **逐块而非 io.Copy**：io.Copy 只有整体返回（成功或出错）才能拿到已写字节数 ⇒ 进程被
+// 强杀/断电时 offset 恒为上次盘点值，重入只能从 0 重下，强行中断彻底失去续传意义。每次
+// 写入后调 addOffset（内部按 1s/N 次节流落盘）。
+func (c *FileClient) copyStreamWithCheckpoint(out *os.File, body io.Reader, offset, total int64, rs *downloadResume) error {
+	buf := make([]byte, 64<<10)
+	var written int64
+	for {
+		n, rerr := body.Read(buf)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				return fmt.Errorf("写入文件失败: %w", werr)
+			}
+			written += int64(n)
+			rs.addOffset(int64(n))
+			if c.progressFn != nil {
+				c.progressFn("下载", offset+written, total)
+			}
+		}
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("写入文件失败: %w", rerr)
+		}
 	}
-	n, cerr := io.Copy(out, src)
-	rs.addOffset(n)
-	if cerr != nil {
-		return fmt.Errorf("写入文件失败: %w", cerr)
-	}
-	return nil
 }
 
 // loadStreamResume 读取并校验既有续传 sidecar；不匹配/缺失则删除陈旧 sidecar 并新建。
 // **不删除输出文件**：无有效断点时由 copyStreamToFile（offset=0 的 O_TRUNC）在首次
 // 写入时截断覆盖，避免「请求尚未发出就删掉既有完整文件」（如 404 时不应丢旧文件）。
+//
+// 断点有效性：`0 <= checkpoint <= 文件大小 <= 远端大小`。**允许 checkpoint 小于文件
+// 大小**（进程被强杀时，已写入字节往往多于最后一次盘点值）——否则每次都因「侧车落后」
+// 而被判陈旧重下（E2E 实测：offset=13.6MB / 文件=14.2MB ⇒ 从头重下）。续传从 checkpoint
+// 开始，checkpoint 之后的尾部字节被重新覆盖（≤1s 数据）。
 func (c *FileClient) loadStreamResume(filename, kind, outputPath string, rm remoteFileMeta) *downloadResume {
 	if st, ok := loadDownloadResumeState(outputPath); ok &&
 		st.downloadResumeMatches(filename, kind, rm.Size, rm.Checksum, rm.MTime, 0) {
-		if fi, serr := os.Stat(outputPath); serr == nil && fi.Size() == st.Offset && st.Offset >= 0 && st.Offset <= rm.Size {
-			c.logger.Info("下载续传：从断点继续", "file_name", outputPath, "offset", st.Offset)
+		if fi, serr := os.Stat(outputPath); serr == nil && st.Offset >= 0 && st.Offset <= fi.Size() && fi.Size() <= rm.Size {
+			c.logger.Info("下载续传：从断点继续", "file_name", outputPath, "offset", st.Offset, "local_size", fi.Size())
 			return newDownloadResume(outputPath, *st)
 		}
 	}
