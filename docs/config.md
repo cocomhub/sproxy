@@ -52,7 +52,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | **server_timeouts** | object |  | http.Server 各阶段超时 |
 | `server_timeouts.read_header` | duration | `0` | ReadHeader 超时（`"5s"` 风格） |
 | `server_timeouts.read` | duration | `0` | 整个请求读取超时 |
-| `server_timeouts.write` | duration | `0` | 响应写出超时 |
+| `server_timeouts.write` | duration | `0` | 响应写出超时。**长时流式响应（下载、`/tunnel`、SSE、S3/WebDAV GET）按「单次写入的停滞窗口」生效**：只要持续有写出进展，响应总时长可超过该值；该值内无任何写进展才切断（保留停滞保护）。不要把它当成下载总时长上限——那样会掐断大文件下载，客户端表现为 `decrypt stream: read chunk: unexpected EOF`）。内部实现：`pkg/server.WithSlidingWriteDeadline` |
 | `server_timeouts.idle` | duration | `0` | keep-alive 空闲超时 |
 | `server_timeouts.shutdown` | duration | `30s` | graceful shutdown 等待活跃请求结束的最长时间 |
 | **state_store** | object |  | 状态存储后端（statestore.md §5.3；默认 local 单节点零回归） |

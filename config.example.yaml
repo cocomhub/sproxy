@@ -164,6 +164,9 @@ storage_root: "./storage"
 server_timeouts:
   read_header: "5s"
   read: "30s"
+  # write 是「单次写入的停滞窗口」，**不是**响应总时长上限：长时流式响应（大文件下载、
+  # /tunnel 会话、SSE、S3/WebDAV GET）只要持续有写出进展就可超过该值；该值内无任何
+  # 写进展才切断。不要为「限制下载时长」而调小它（会掐断大文件下载）。
   write: "30s"
   idle: "60s"
   # graceful shutdown 超时：收到 SIGINT/SIGTERM 后等待活跃请求结束的最长时间。

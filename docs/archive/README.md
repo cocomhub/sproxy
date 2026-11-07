@@ -32,3 +32,4 @@ SPDX-License-Identifier: Apache-2.0
 ## 下载续传与弱网（2026-11）
 
 - [download-resume-weak-network.md](./download-resume-weak-network.md) — 弱网大文件下载失败三根因（整请求 Timeout / `--resume` 空操作 / CLI 刷 Usage）与 sidecar 续传口径
+- [stream-write-deadline.md](./stream-write-deadline.md) — **服务端** `server_timeouts.write` 掐断长时流式响应（下载/隧道/SSE）的根因与滑动写截止修复（含真实 A/B E2E）

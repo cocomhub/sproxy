@@ -36,7 +36,10 @@ import (
 // （10s 有界；子进程启动/调度不可条件化，已登记文件预算）。
 // 2026-09-25 +1：test/e2e_cli_upgrade_test.go ETXTBSY 重试间隔（10×100ms 有界；
 // 原子替换后等待文件句柄释放，无事件可轮询，已登记文件预算）。
-const testSleepTotalBudget = 61
+// 2026-11-07 +1：pkg/server/write_deadline_test.go 流式写截止回归（有意计时：制造
+// 「响应总时长 > WriteTimeout 但每步有进展」的真实时序，WriteTimeout 语义本身即墙钟，
+// 无可条件化替代）。
+const testSleepTotalBudget = 62
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -50,11 +53,13 @@ var testSleepBudgets = map[string]int{
 	"pkg/cloud/quota_writer_test.go":           3,
 	"pkg/downloader/http_downloader_test.go":   1,
 	"pkg/server/relay_stream_test.go":          1,
-	"pkg/server/notify/center_test.go":         4,
-	"pkg/tunnel/hub/ext/kad/kad_test.go":       1,
-	"test/e2e_restart_cloud_test.go":           1, // 慢速源站节流（模拟弱网以制造「下载中断」窗口；无可条件化替代）
-	"web/e2e/notify_panel_test.go":             1,
-	"pkg/server/metrics_test.go":               2,
+	// 有意计时：WriteTimeout（整响应挂钟 vs 滑动停滞窗口）语义回归，见 testSleepTotalBudget 注释。
+	"pkg/server/write_deadline_test.go":  1,
+	"pkg/server/notify/center_test.go":   4,
+	"pkg/tunnel/hub/ext/kad/kad_test.go": 1,
+	"test/e2e_restart_cloud_test.go":     1, // 慢速源站节流（模拟弱网以制造「下载中断」窗口；无可条件化替代）
+	"web/e2e/notify_panel_test.go":       1,
+	"pkg/server/metrics_test.go":         2,
 	// staging 配额排队/超时/ctx 取消用例需定时释放或取消（无事件可轮询）；边界时序语义。
 	"pkg/quota/staging_tracker_test.go":                   2,
 	"web/e2e/trash_view_e2e_test.go":                      1,

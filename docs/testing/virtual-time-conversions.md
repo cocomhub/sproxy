@@ -245,3 +245,13 @@ CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧
 漫游目录按 context 隔离的用例。**必须串行**：用例通过包级 `resolvedContext` 指定「当前
 context」并改写 `XDG_CACHE_HOME`（`setCacheDirForTest` 用 `t.Setenv`），两者都是进程级
 可变状态，并行会互相污染。已按 R18 登记 `serial_budgets.tsv`（3 条）。
+
+## pkg/server/write_deadline_test.go（R14 sleep +1，2026-11-07）
+
+流式写截止回归 `TestWithSlidingWriteDeadline_StreamOutlivesServerWriteTimeout` 的 handler
+需制造「响应**总时长** > `http.Server.WriteTimeout`，但**每一步都有写进展**」的真实时序——
+被测语义本身即墙钟（整响应挂钟 vs 单次写入停滞窗口），任何 TestClock/synctest 都无法替代
+net/http 内部 deadline 的真实触发。故登记 `testSleepBudgets["pkg/server/write_deadline_test.go"] = 1`
+（`testSleepTotalBudget` 61 → 62）。参数取 10 轮 × 50ms、grace 250ms：控制组必被截断（总时长 2×grace），
+修复组每步间隔 50ms 仅为 grace 的 1/5（CI 负载下仍有 5× 余量）。
+
