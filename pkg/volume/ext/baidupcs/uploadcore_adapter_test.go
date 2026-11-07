@@ -78,7 +78,7 @@ func TestUCAdapter_Plan_SplitsByUploadBlock(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			a := newUCAdapter(nil, nil, "", "d/x.bin", nil, false, nil)
+			a := newUCAdapter(nil, nil, "d/x.bin", "", "d/x.bin", nil, false, nil)
 			parts, err := a.Plan(context.Background(), uploadcore.Request{Size: tc.size})
 			if err != nil {
 				t.Fatalf("Plan: %v", err)
@@ -106,12 +106,12 @@ func TestUCAdapter_Plan_SplitsByUploadBlock(t *testing.T) {
 // TestUCAdapter_Plan_RequiresSize 无法确定大小时必须显式报错（不得发出错误分片）。
 func TestUCAdapter_Plan_RequiresSize(t *testing.T) {
 	t.Parallel()
-	a := newUCAdapter(nil, nil, "", "d/x.bin", nil, false, nil)
+	a := newUCAdapter(nil, nil, "d/x.bin", "", "d/x.bin", nil, false, nil)
 	if _, err := a.Plan(context.Background(), uploadcore.Request{}); err == nil {
 		t.Fatal("size<=0 应报错")
 	}
 	// 有 staged 大小时可用 req.Size=0 回退。
-	a2 := newUCAdapter(nil, nil, "", "d/x.bin", &stagedUpload{size: 10}, false, nil)
+	a2 := newUCAdapter(nil, nil, "d/x.bin", "", "d/x.bin", &stagedUpload{size: 10}, false, nil)
 	parts, err := a2.Plan(context.Background(), uploadcore.Request{})
 	if err != nil || len(parts) != 1 || parts[0].Size != 10 {
 		t.Fatalf("应回退用 staged 大小，got %+v err=%v", parts, err)
@@ -122,7 +122,7 @@ func TestUCAdapter_Plan_RequiresSize(t *testing.T) {
 func TestUCAdapter_BlockList_PrefersPlan(t *testing.T) {
 	t.Parallel()
 	plan := &rapidPlan{BlocksList: []string{"a", "b"}}
-	a := newUCAdapter(nil, nil, "", "d/x.bin", &stagedUpload{blockMD5s: []string{"x"}}, false, nil)
+	a := newUCAdapter(nil, nil, "d/x.bin", "", "d/x.bin", &stagedUpload{blockMD5s: []string{"x"}}, false, nil)
 	if got := a.blockList(plan); len(got) != 2 || got[0] != "a" {
 		t.Fatalf("应优先用 plan 的块列表，got %v", got)
 	}

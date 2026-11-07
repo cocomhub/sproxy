@@ -39,6 +39,14 @@ func bcPolicy(overwrite bool) string {
 	return "skip"
 }
 
+// logDebug 输出上传诊断（默认 discard；需排查内核问题时注入 Debug logger）。
+func (a *ucAdapter) logDebug(msg string, kv ...any) {
+	if a.st == nil || a.st.log == nil {
+		return
+	}
+	a.st.log.Debug("uploadcore adapter: "+msg, kv...)
+}
+
 // ucSectionReader 把文件区间包装成 fork 库要求的 `rio.ReaderLen64`。
 // `Len()` 语义与库 `fileReadedlen64.Len()` 一致：**剩余未读长度**（rio/file.go:65-72）。
 type ucSectionReader struct {
@@ -64,8 +72,11 @@ func (r *ucSectionReader) Close() error { return r.f.Close() }
 
 // ucAdapter 实现内核所需的全部依赖接口（一次上传会话一个实例）。
 type ucAdapter struct {
-	st        *Storage
-	pcs       *Client
+	st  *Storage
+	pcs *Client
+	// key 是**相对 root 的 key**（列举类操作必须用它：metaByExactList 内部会拼 s.root）；
+	// remote 是**完整远端路径**（库 API 需要完整路径）。混用会导致路径双重拼接（实测踩坑）。
+	key       string
 	stg       *stagedUpload
 	localPath string
 	remote    string
@@ -76,16 +87,16 @@ type ucAdapter struct {
 
 // newUCAdapter 构造适配器（staged 参数复用既有 stagedUpload，不重复算 checksum）。
 // pcs 为库客户端（发 rapidupload/分片/合并请求）；repair 为可选自愈（秒传刷新）。
-func newUCAdapter(st *Storage, pcs *Client, localPath, remote string,
+func newUCAdapter(st *Storage, pcs *Client, key, localPath, remote string,
 	stg *stagedUpload, overwrite bool,
 	repair func(ctx context.Context, remote string, st *stagedUpload) (bool, error)) *ucAdapter {
-	return &ucAdapter{st: st, pcs: pcs, stg: stg, localPath: localPath,
+	return &ucAdapter{st: st, pcs: pcs, key: key, stg: stg, localPath: localPath,
 		remote: remote, overwrite: overwrite, repair: repair}
 }
 
 // ExistingMD5 目标当前内容 md5（"" = 不存在）；用精确列举（Meta 可见性偶发延迟，不可作判据）。
 func (a *ucAdapter) ExistingMD5(ctx context.Context, targetPath string) (string, error) {
-	meta, ok := a.st.metaByExactList(ctx, targetPath)
+	meta, ok := a.st.metaByExactList(ctx, a.listKey())
 	if !ok || meta == nil {
 		return "", nil
 	}
@@ -115,10 +126,28 @@ func (a *ucAdapter) Rapid(ctx context.Context, req uploadcore.Request) (string, 
 	if pcsError != nil {
 		return "", false, fmt.Errorf("baidupcs: rapidupload 失败: %w", pcsError)
 	}
+	a.logDebug("rapidupload 响应", "return_type", jsonData.ReturnType,
+		"upload_id", jsonData.UploadID, "size", plan.Size, "block_size", plan.BlockSize,
+		"blocks", len(a.blockList(plan)), "offset", plan.Offset, "data_len", plan.DataLength)
 	if jsonData.ReturnType == 2 {
 		return jsonData.UploadID, true, nil // 秒传命中（零传输完成）
 	}
-	return jsonData.UploadID, false, nil
+	// **uploadid 的真正来源**（2026-11-08 实测修正）：rapidupload 未命中时**不返回 uploadid**
+	// （实测响应无 uploadid 字段 ⇒ 直接拿它做分片上传会 `uploadid=` 为空 ⇒ 百度 400）。
+	// 与库 CLI 的 `NoRapidUpload` 分支一致：先调 `FakeRapidUpload`（xpan create，rtype=1）
+	// 建立上传会话并取回 uploadid（库 upload_task_unit.go 的 prepare 分支同构）。
+	if jsonData.UploadID != "" {
+		return jsonData.UploadID, false, nil
+	}
+	fakeErr, fakeJSON := a.pcs.PCS().FakeRapidUpload(a.remote, policy, plan.Size)
+	if fakeErr != nil {
+		return "", false, fmt.Errorf("baidupcs: 建立上传会话失败（fake rapid）: %w", fakeErr)
+	}
+	a.logDebug("fake rapidupload 响应", "return_type", fakeJSON.ReturnType, "upload_id", fakeJSON.UploadID)
+	if fakeJSON.UploadID == "" {
+		return "", false, fmt.Errorf("baidupcs: 上传会话未返回 uploadid（size=%d）", plan.Size)
+	}
+	return fakeJSON.UploadID, false, nil
 }
 
 // blockList 返回 rapidupload 的 block_list 参数：**必须与上传分块一致**
@@ -162,6 +191,7 @@ func (a *ucAdapter) UploadPart(ctx context.Context, uploadID string, p uploadcor
 	}
 	rd := newUCSectionReader(f, p.Offset, p.Size)
 	defer func() { _ = rd.Close() }()
+	a.logDebug("上传分片参数", "upload_id", uploadID, "seq", p.Seq, "offset", p.Offset, "size", p.Size)
 	mu := newBaiduMultiUpload(a.pcs, a.remote)
 	if _, err := mu.TmpFile(ctx, uploadID, a.remote, p.Seq, p.Offset, rd); err != nil {
 		return fmt.Errorf("baidupcs: 上传分片 %d: %w", p.Seq, err)
@@ -189,11 +219,31 @@ func (a *ucAdapter) Merge(_ context.Context, uploadID string, req uploadcore.Req
 	return nil
 }
 
-// Verify 上传后以 md5 确认内容（数据操作红线：必须按 md5 核对，不得只看存在性）。
+// listKey 返回列举类操作使用的 key（优先相对 key；未提供时退回完整路径的 basename 推导）。
+func (a *ucAdapter) listKey() string {
+	if a.key != "" {
+		return a.key
+	}
+	return a.remote
+}
+
+// Verify 内核阶段的**轻量**一致性检查。
+//
+// **职责边界（重要，2026-11-08 真实网盘实测后修正）**：
+// 权威校验由 `putAttempt` 的既有 `putCheckAfterUpload` 承担 —— 它有**可见性等待窗口**
+// （`statVisibleWait`）+ md5 比对 + 秒传刷新，正是为"新对象列举/元信息可见性有延迟"
+// （`docs/external-dependencies.md §7.8`：Meta 偶发 ≥60s 不可见）设计的。
+//
+// 内核若在此处做**严格**校验（列举未见即失败），会在上传刚完成时**假失败**
+// （实测：上传成功但立即列举未见 ⇒ verify 失败；路径正确、upload_id 正确）。
+// 因此这里只做"**能看到时**必须一致"的检查：
+//   - 列举命中且 md5 不符 ⇒ 报错（真问题，交给内核自愈/上层）；
+//   - 列举**未见** ⇒ 返回 nil（延迟可见，交由既有等待逻辑判定，不重复造等待循环）。
 func (a *ucAdapter) Verify(ctx context.Context, req uploadcore.Request) error {
-	meta, ok := a.st.metaByExactList(ctx, a.remote)
+	meta, ok := a.st.metaByExactList(ctx, a.listKey())
 	if !ok || meta == nil {
-		return fmt.Errorf("baidupcs: 复核失败：列举中未见 %s", a.remote)
+		a.logDebug("内核校验：目标暂不可见（延迟可见，交由上层等待复核）", "key", a.listKey())
+		return nil
 	}
 	want := req.MD5
 	if want == "" && a.stg != nil {

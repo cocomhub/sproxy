@@ -14,27 +14,27 @@ import (
 	"testing"
 )
 
-// countingAdapter 记录 Upload 调用（其余方法不参与上传一步）。
-type countingAdapter struct {
+// wiringFakeAdapter 记录 Upload 调用（其余方法不参与上传一步）。
+type wiringFakeAdapter struct {
 	uploads int
 	err     error
 }
 
-func (c *countingAdapter) Upload(context.Context, string, string, bool) error {
+func (c *wiringFakeAdapter) Upload(context.Context, string, string, bool) error {
 	c.uploads++
 	return c.err
 }
-func (c *countingAdapter) Download(context.Context, string, string) error { return ErrUnsupported }
-func (c *countingAdapter) Move(context.Context, string, string) error     { return ErrUnsupported }
-func (c *countingAdapter) Copy(context.Context, string, string) error     { return ErrUnsupported }
+func (c *wiringFakeAdapter) Download(context.Context, string, string) error { return ErrUnsupported }
+func (c *wiringFakeAdapter) Move(context.Context, string, string) error     { return ErrUnsupported }
+func (c *wiringFakeAdapter) Copy(context.Context, string, string) error     { return ErrUnsupported }
 
 // coreClient/coreRepair 实现 coreClientProvider（让内核"可用"，从而能验证降级路径）。
-func (c *countingAdapter) coreClient() *Client {
+func (c *wiringFakeAdapter) coreClient() *Client {
 	cl, _ := NewClient("fake-bduss-for-wiring-test", "")
 	return cl
 }
 
-func (c *countingAdapter) coreRepair() func(context.Context, string, *stagedUpload) (bool, error) {
+func (c *wiringFakeAdapter) coreRepair() func(context.Context, string, *stagedUpload) (bool, error) {
 	return func(context.Context, string, *stagedUpload) (bool, error) { return true, nil }
 }
 
@@ -64,7 +64,7 @@ func TestNormalizeUploadCoreMode(t *testing.T) {
 // TestUploadStaged_LegacyModeUsesAdapter legacy 模式必须直接走既有 adapter（不碰内核）。
 func TestUploadStaged_LegacyModeUsesAdapter(t *testing.T) {
 	t.Parallel()
-	ad := &countingAdapter{}
+	ad := &wiringFakeAdapter{}
 	st := newWiringStorage(t, "legacy", ad)
 	if err := st.uploadStaged(context.Background(), "k", "/r/k", &stagedUpload{tmpPath: "/tmp/x", size: 1}); err != nil {
 		t.Fatalf("legacy 应走 adapter 成功: %v", err)
@@ -78,7 +78,7 @@ func TestUploadStaged_LegacyModeUsesAdapter(t *testing.T) {
 // （不得静默降级 —— nucleus 语义是"行为最可预测"）。
 func TestUploadStaged_NucleusWithoutLibraryFails(t *testing.T) {
 	t.Parallel()
-	ad := &countingAdapter{}
+	ad := &wiringFakeAdapter{}
 	st := newWiringStorage(t, "nucleus", ad)
 	err := st.uploadStaged(context.Background(), "k", "/r/k", &stagedUpload{tmpPath: "/tmp/x", size: 1})
 	if err == nil {
@@ -93,7 +93,7 @@ func TestUploadStaged_NucleusWithoutLibraryFails(t *testing.T) {
 // 用「不存在的暂存文件」让内核在 planRapid 阶段失败（**不发任何请求**）。
 func TestUploadStaged_AutoFallsBackAndDisables(t *testing.T) {
 	t.Parallel()
-	ad := &countingAdapter{}
+	ad := &wiringFakeAdapter{}
 	st := newWiringStorage(t, "auto", ad)
 	missing := filepath.Join(t.TempDir(), "missing.bin")
 	if err := st.uploadStaged(context.Background(), "k", "/r/k",
@@ -136,7 +136,7 @@ func TestCoreDepsOf_BinaryAdapterTransparent(t *testing.T) {
 func TestUploadStaged_AdapterErrorPropagates(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
-	ad := &countingAdapter{err: boom}
+	ad := &wiringFakeAdapter{err: boom}
 	st := newWiringStorage(t, "legacy", ad)
 	if err := st.uploadStaged(context.Background(), "k", "/r/k", &stagedUpload{tmpPath: "/tmp/x", size: 1}); !errors.Is(err, boom) {
 		t.Fatalf("应传播 adapter 错误，got %v", err)
@@ -146,7 +146,7 @@ func TestUploadStaged_AdapterErrorPropagates(t *testing.T) {
 // TestUploadCoreWAL_NoAuditUsesNop 未装配 audit ⇒ 用空 WAL（流程一致、无跨进程续传）。
 func TestUploadCoreWAL_NoAuditUsesNop(t *testing.T) {
 	t.Parallel()
-	st := newWiringStorage(t, "auto", &countingAdapter{})
+	st := newWiringStorage(t, "auto", &wiringFakeAdapter{})
 	rec, resume, err := st.uploadCoreWAL(context.Background(), "k")
 	if err != nil {
 		t.Fatalf("uploadCoreWAL: %v", err)

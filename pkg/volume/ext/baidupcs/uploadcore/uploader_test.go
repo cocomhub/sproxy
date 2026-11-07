@@ -283,25 +283,44 @@ func TestUpload_RetryThenSuccess(t *testing.T) {
 	}
 }
 
-// TestUpload_SmallFile_SingleRequest 小文件走单请求（不经 rapid/分片/merge）。
-func TestUpload_SmallFile_SingleRequest(t *testing.T) {
+// TestUpload_SmallFile_OnePartPlusMerge 小文件也必须走「1 片 + 合并」：
+// `UploadTmpFile` 只写会话临时区，**不合并则远端永远不会出现该文件**（真实网盘实测踩坑）。
+func TestUpload_SmallFile_OnePartPlusMerge(t *testing.T) {
 	t.Parallel()
-	p := &fakeParts{}
+	p := &fakeParts{plan: []Part{{Seq: 0, Offset: 0, Size: 1024}}}
 	o := baseOpts(p)
-	rapid := &fakeRapid{}
+	rapid := &fakeRapid{uploadID: "up-1"}
 	o.Rapid = rapid
-	o.BlockSize = 4 << 20
-	u, _ := New(o)
+	mv := &fakeMerge{}
+	o.Merge = mv
+	vv := &fakeVerify{}
+	o.Verify = vv
+	u, err := New(o)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := Request{LocalPath: "/tmp/s.bin", TargetPath: "d/s.bin", Size: 1024, MD5: testMD5}
 	res, err := u.Upload(context.Background(), req)
 	if err != nil {
 		t.Fatalf("小文件应成功: %v", err)
 	}
-	if res.Via != ViaSingle {
-		t.Fatalf("小文件应走 single，got %q", res.Via)
+	if res.Via != ViaSlices {
+		t.Fatalf("小文件也必须走分片+合并路径，got %q", res.Via)
 	}
-	if rapid.n != 0 || p.callCount() != 1 {
-		t.Fatalf("小文件不得走 rapid、且只发 1 次请求，got rapid=%d parts=%d", rapid.n, p.callCount())
+	if rapid.n != 1 {
+		t.Fatalf("必须先建会话（rapid 1 次），got %d", rapid.n)
+	}
+	if p.callCount() != 1 {
+		t.Fatalf("应只上传 1 片，got %d", p.callCount())
+	}
+	if mv.n != 1 {
+		t.Fatalf("**必须合并 1 次**（否则远端不会出现文件），got %d", mv.n)
+	}
+	if vv.n != 1 || res.PartsTotal != 1 || res.PartsDone != 1 {
+		t.Fatalf("应校验一次且计数 1/1，got verify=%d %d/%d", vv.n, res.PartsDone, res.PartsTotal)
+	}
+	if res.UploadID != "up-1" {
+		t.Fatalf("应复用会话 uploadid，got %q", res.UploadID)
 	}
 }
 

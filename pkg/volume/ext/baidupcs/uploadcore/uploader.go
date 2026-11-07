@@ -40,7 +40,6 @@ type Via string
 const (
 	ViaProbe  Via = "probe"  // 目标已存在且 md5 相同：幂等短路，零请求
 	ViaRapid  Via = "rapid"  // 秒传命中：零传输
-	ViaSingle Via = "single" // 小文件单请求（< BlockSize）
 	ViaSlices Via = "slices" // 分片上传 + 合并
 )
 
@@ -221,12 +220,10 @@ func (u *Uploader) Upload(ctx context.Context, req Request) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return res, err
 	}
-	// ② 小文件：单请求（省掉 rapid/merge + 逐片 WAL 开销）。
-	if req.Size < u.o.BlockSize {
-		res.Via, res.PartsTotal, res.PartsDone = ViaSingle, 1, 1
-		return res, u.uploadSingle(ctx, req, start)
-	}
-	// ③ rapid：拿 uploadid（或直接秒传命中）。
+	// ② **建会话必须先于大小分流**（2026-11-08 真实网盘实测修正）：
+	// 百度 v2 的**单请求上传同样需要 uploadid**（`superfile2/upload?uploadid=`）——
+	// 早期实现把小文件分流放在建会话之前 ⇒ uploadid 为空 ⇒ HTTP 400。
+	// 因此统一先走 rapid：命中即完成；未命中则（由实现）建立会话并返回 uploadid。
 	uploadID, done, err := u.o.Rapid.Rapid(ctx, req)
 	if err != nil {
 		return res, fmt.Errorf("uploadcore rapid: %w", err)
@@ -238,7 +235,14 @@ func (u *Uploader) Upload(ctx context.Context, req Request) (Result, error) {
 	if done {
 		return res, u.finishRapid(ctx, req, &res)
 	}
-	// ④ 分片（含续传态覆盖 uploadid）。
+	// ③ 分片（含续传态覆盖 uploadid）。
+	//
+	// **为什么没有"小文件单请求"捷径**（2026-11-08 真实网盘实测修正）：百度 v2 的
+	// `superfile2/upload`（`pcs.UploadTmpFile`）只是把**分片**写入会话临时区，
+	// **必须再调 `createsuperfile` 才会成为正式文件** —— 早期实现给小文件走了
+	// "只上传一片、不合并"的捷径 ⇒ 内核报成功但远端**从未出现该文件**
+	// （实测：`putCheckAfterUpload` 复核 3 轮均为空 ETag ⇒ ErrTransient）。
+	// 因此小文件与分片走**同一条**流程（1 片 + 合并），与库 CLI（`MultiUploader`）一致。
 	return u.uploadSlices(ctx, req, res, uploadID, start)
 }
 
@@ -256,20 +260,6 @@ func (u *Uploader) tryProbe(ctx context.Context, req Request, start time.Time) (
 	}
 	u.o.Logger.Debug("uploadcore 幂等短路", "target", req.TargetPath, "via", ViaProbe)
 	return true, u.o.WAL.MarkDone(ctx)
-}
-
-// uploadSingle 小文件单请求 + 校验 + 收口。
-func (u *Uploader) uploadSingle(ctx context.Context, req Request, start time.Time) error {
-	if err := u.stage(ctx, "single", start, nil); err != nil {
-		return err
-	}
-	if err := u.partWithRetry(ctx, "", Part{Seq: 0, Offset: 0, Size: req.Size}); err != nil {
-		return err
-	}
-	if err := u.verifyWithRepair(ctx, req, "single"); err != nil {
-		return err
-	}
-	return u.o.WAL.MarkDone(ctx)
 }
 
 // finishRapid 秒传命中的校验与收口。
