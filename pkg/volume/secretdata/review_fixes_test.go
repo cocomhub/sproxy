@@ -9,6 +9,7 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path"
@@ -671,59 +672,58 @@ func TestF5_LogicalFilesUsePathQualifiedKeys(t *testing.T) {
 	}
 }
 
-// TestD1_PeerMoveCountsAsDoneWhenSourceGone 钉住**「源已消失 ⇒ 移动已完成」**（2026-11-07 实测缺陷）：
-// 远端目录列举**最终一致** ⇒ rename 已成功、源已消失，但父目录列举在若干秒内仍可能看不到目标。
-// 若要求「目标必须已可见」才对，迁移会在**已成功**的容器上判定失败并中止
-// （实测：同一条深层路径连续多轮失败，且目标 mtime 已是本次 rename 的时间）。
-func TestD1_PeerMoveCountsAsDoneWhenSourceGone(t *testing.T) {
+// TestD1_PeerMoveState_ExplicitSemantics 钉住**改名失败后的列举判定四态**（2026-11-08 用户裁定）：
+//   - 源不在 + 目标在 ⇒ **完成**（幂等续跑的正常情形）；
+//   - 源不在 + 目标不在 ⇒ **异常态 peerMoveVanished**（必须暴露，**不得**当作完成而掩盖）；
+//   - 源仍在 ⇒ 未完成；列举失败 ⇒ 无法判定。
+func TestD1_PeerMoveState_ExplicitSemantics(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
-	sfs := newNormalizeFS(t, root)
-	// 情形 1（**关键**）：列举里**既无源也无目标**（目标尚未可见 —— 远端列举最终一致）
-	// ⇒ 源已消失这一强信号必须判「已完成」，否则迁移会在已成功的容器上中止。
-	parent := "P"
-	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "Unrelated")); merr != nil {
-		t.Fatalf("MakeDir: %v", merr)
+	sfs := newNormalizeFS(t, t.TempDir())
+	const parent = "P"
+	if err := sfs.inner.MakeDir(ctx, path.Join(parent, "Unrelated")); err != nil {
+		t.Fatalf("MakeDir: %v", err)
 	}
-	moved, decided := sfs.containerMovedByPeer(ctx, path.Join(parent, "GoneName"), path.Join(parent, "WantName"))
-	if !decided || !moved {
-		t.Fatalf("源已消失（目标暂未可见）应判「已完成」（decided=%v moved=%v）", decided, moved)
+	// ① 源与目标都不在 ⇒ vanished（异常，必须暴露）
+	if got := sfs.peerMoveState(ctx, path.Join(parent, "Gone"), path.Join(parent, "Want")); got != peerMoveVanished {
+		t.Fatalf("源与目标都不在应判 peerMoveVanished，got %v", got)
 	}
-	// 情形 2：源已消失且目标已可见 ⇒ 同样「已完成」
-	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "WantName")); merr != nil {
-		t.Fatalf("MakeDir: %v", merr)
+	// ② 目标在、源不在 ⇒ 完成
+	if err := sfs.inner.MakeDir(ctx, path.Join(parent, "Want")); err != nil {
+		t.Fatalf("MakeDir: %v", err)
 	}
-	if m2, d2 := sfs.containerMovedByPeer(ctx, path.Join(parent, "GoneName"), path.Join(parent, "WantName")); !d2 || !m2 {
-		t.Fatalf("源已消失且目标可见应判「已完成」（decided=%v moved=%v）", d2, m2)
+	if got := sfs.peerMoveState(ctx, path.Join(parent, "Gone"), path.Join(parent, "Want")); got != peerMoveDone {
+		t.Fatalf("源不在且目标在应判 peerMoveDone，got %v", got)
 	}
-	// 反向：源仍在 ⇒ 未完成
-	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "StillThere")); merr != nil {
-		t.Fatalf("MakeDir: %v", merr)
+	// ③ 源仍在 ⇒ 未完成
+	if err := sfs.inner.MakeDir(ctx, path.Join(parent, "Still")); err != nil {
+		t.Fatalf("MakeDir: %v", err)
 	}
-	moved2, decided2 := sfs.containerMovedByPeer(ctx, path.Join(parent, "StillThere"), path.Join(parent, "WantName"))
-	if !decided2 || moved2 {
-		t.Fatalf("源仍在应判「未完成」（decided=%v moved=%v）", decided2, moved2)
+	if got := sfs.peerMoveState(ctx, path.Join(parent, "Still"), path.Join(parent, "Want")); got != peerMoveNotDone {
+		t.Fatalf("源仍在应判 peerMoveNotDone，got %v", got)
 	}
 }
 
-// failingRenameFS 让指定前缀的 Rename 恒失败（模拟外部限流/最终一致导致的单容器卡住）。
-type failingRenameFS struct {
-	syncpkg.FS
-	mu    sync.Mutex
-	bad   string
-	calls int
-}
-
-func (f *failingRenameFS) Rename(ctx context.Context, from, to string) error {
-	f.mu.Lock()
-	if strings.Contains(from, f.bad) || strings.Contains(to, f.bad) {
-		f.calls++
-		f.mu.Unlock()
-		return os.ErrDeadlineExceeded
+// TestD1b_MoveVanishedIsSurfaced 钉住**异常必须暴露**：改名失败且源/目标都不在时，
+// `moveContainerIdempotent` 必须返回 `ErrContainerVanished`（且**不做 5 轮盲目重试**）。
+func TestD1b_MoveVanishedIsSurfaced(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sfs := newNormalizeFS(t, t.TempDir())
+	// 先建**空**父目录 P：使「列举判定」可用（否则列举失败 ⇒ 无法判定 ⇒ 走重试路径）
+	if err := sfs.inner.MakeDir(ctx, "P"); err != nil {
+		t.Fatalf("MakeDir: %v", err)
 	}
-	f.mu.Unlock()
-	return f.FS.Rename(ctx, from, to)
+	calls := &countingFailRenameFS{FS: sfs.inner}
+	sfs.inner = calls
+	sfs.opts.ContainerMoveRetryBase = time.Millisecond
+	_, err := sfs.moveContainerIdempotent(ctx, "rel", "P/Gone", "P/Want")
+	if !errors.Is(err, ErrContainerVanished) {
+		t.Fatalf("应返回 ErrContainerVanished，got %v", err)
+	}
+	if calls.attempts != 1 {
+		t.Fatalf("「不存在」类错误不得盲目重试，应只尝试 1 次，got %d", calls.attempts)
+	}
 }
 
 // TestD2_OneBadContainerDoesNotBlockTheRest 钉住**单容器失败不中止整轮**（2026-11-07 实测）：
@@ -776,4 +776,23 @@ func TestD2_OneBadContainerDoesNotBlockTheRest(t *testing.T) {
 	if moved != len(rels)-1 {
 		t.Fatalf("moved 应为除卡住者外的全部：got %d want %d", moved, len(rels)-1)
 	}
+}
+
+// failingRenameFS 让指定前缀的 Rename 恒失败（模拟外部限流/最终一致导致的单容器卡住）。
+type failingRenameFS struct {
+	syncpkg.FS
+	mu    sync.Mutex
+	bad   string
+	calls int
+}
+
+func (f *failingRenameFS) Rename(ctx context.Context, from, to string) error {
+	f.mu.Lock()
+	if strings.Contains(from, f.bad) || strings.Contains(to, f.bad) {
+		f.calls++
+		f.mu.Unlock()
+		return os.ErrDeadlineExceeded
+	}
+	f.mu.Unlock()
+	return f.FS.Rename(ctx, from, to)
 }

@@ -332,7 +332,7 @@ func TestSnapshotWrite_SuppressedAfterInvalidate(t *testing.T) {
 // TestContainerMovedByPeer_RequiresListing 钉住**幂等判定必须用父目录列举**：
 // 底层 Stat 对目录语义宽松（父存在即可能成功）⇒ 单靠 Stat(want) 会把「从未执行的改名」
 // 误判为已完成 ⇒ 迁移静默不生效（实测 moved=0 但名字仍是随机名、采样 8/8 漂移）。
-func TestContainerMovedByPeer_RequiresListing(t *testing.T) {
+func TestPeerMoveState_RequiresListing(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
@@ -344,23 +344,22 @@ func TestContainerMovedByPeer_RequiresListing(t *testing.T) {
 	qc := sfs.dirSegs["p/q"]
 	sfs.mu.RUnlock()
 	parent := path.Dir(qc)
-	curBase := path.Base(qc)
 	want := path.Join(parent, "SomeDeterministicName")
 
-	// 源仍在、目标不在 ⇒ 不得判为「已由他人完成」
-	if moved, decided := sfs.containerMovedByPeer(ctx, qc, want); moved || !decided {
-		t.Fatalf("源仍在时应判为「未迁移且已判定」，got moved=%v decided=%v", moved, decided)
+	// 源仍在、目标不在 ⇒ 未完成（不得判为「已由他人完成」）
+	if st := sfs.peerMoveState(ctx, qc, want); st != peerMoveNotDone {
+		t.Fatalf("源仍在时应判 peerMoveNotDone，got %v", st)
 	}
-	// 真正迁移后（源不在、目标在）⇒ 才是幂等情形
+	// 真正迁移后（源不在、目标在）⇒ 幂等完成
 	if rerr := sfs.inner.Rename(ctx, qc, want); rerr != nil {
 		t.Fatalf("rename: %v", rerr)
 	}
-	if moved, decided := sfs.containerMovedByPeer(ctx, qc, want); !moved || !decided {
-		t.Fatalf("源已不在且目标存在时应判为幂等（cur=%s want=%s），got moved=%v decided=%v", curBase, want, moved, decided)
+	if st := sfs.peerMoveState(ctx, qc, want); st != peerMoveDone {
+		t.Fatalf("源不在且目标在应判 peerMoveDone，got %v", st)
 	}
-	// 父不同 ⇒ 不属于该情形
-	if moved, decided := sfs.containerMovedByPeer(ctx, path.Join(parent, "x"), path.Join("other", "y")); moved || !decided {
-		t.Fatalf("父不同应明确判定为非幂等，got moved=%v decided=%v", moved, decided)
+	// 父不同 ⇒ 不属于该幂等情形
+	if st := sfs.peerMoveState(ctx, path.Join(parent, "x"), path.Join("other", "y")); st != peerMoveNotDone {
+		t.Fatalf("父不同应判 peerMoveNotDone，got %v", st)
 	}
 }
 

@@ -46,6 +46,9 @@ type StorageConfig struct {
 	Adapter Adapter
 	// Logger 是日志。
 	Logger *slog.Logger
+	// AllowLibraryUpload 允许**上传**在二进制失败时回退到库实现（默认 false = 禁止）。
+	// 见 `AdapterConfig.AllowLibraryUpload`：库上传实测小文件 ~90s 且不响应 ctx ⇒ 默认 fail-closed。
+	AllowLibraryUpload bool
 }
 
 // _ 编译期断言：Storage 满足 StorageAPI（sync.FS 适配层消费的最小接口）。
@@ -121,9 +124,10 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 			fb = newLibraryAdapter(pcs, logger)
 		}
 		cfg.Adapter = newBinaryAdapter(AdapterConfig{
-			BinaryPath: cfg.BinaryPath,
-			Logger:     logger,
-			Fallback:   fb,
+			BinaryPath:         cfg.BinaryPath,
+			Logger:             logger,
+			Fallback:           fb,
+			AllowLibraryUpload: cfg.AllowLibraryUpload,
 		})
 	}
 
@@ -148,7 +152,9 @@ func newRangeHTTPClient() *http.Client {
 // 对齐 cocom 循环结构：**每轮先 Stat**——远端已存在且 ETag 与本地 md5 一致（内容未
 // 变/秒传命中）直接返回（零额外上传）；否则上传 → 再 Stat 复核。
 func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta, error) {
+	stageStart := time.Now()
 	st, err := s.stageUpload(ctx, r, key)
+	s.logPhase(ctx, "stage", key, stageStart, err)
 	if err != nil {
 		return nil, err
 	}
@@ -451,17 +457,24 @@ func (s *Storage) putAttempt(ctx context.Context, key, remote string, st *staged
 	if err := ctx.Err(); err != nil {
 		return nil, "", mapPCSError(err)
 	}
+	preStart := time.Now()
 	meta, proceed, perr := s.putCheckExisting(ctx, key, st.md5, attempt)
+	s.logPhase(ctx, "precheck", key, preStart, perr)
 	if perr != nil {
 		return nil, "", perr
 	}
 	if !proceed {
 		return meta, "", nil // 秒传命中：目标已存在且 ETag == 本地 md5
 	}
+	upStart := time.Now()
 	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
+		s.logPhase(ctx, "upload", key, upStart, upErr)
 		return nil, "", mapPCSError(upErr)
 	}
+	s.logPhase(ctx, "upload", key, upStart, nil)
+	postStart := time.Now()
 	meta, done, werr := s.putCheckAfterUpload(ctx, key, st, attempt)
+	s.logPhase(ctx, "postcheck", key, postStart, werr)
 	if werr != nil {
 		return nil, "", werr
 	}
@@ -516,19 +529,61 @@ func (s *Storage) refreshByRapidUpload(ctx context.Context, key, remote string, 
 // putCheckExisting 每轮上传前的存在性检查：目标已存在且 ETag 与本地 md5 一致 →
 // 返回 (meta, proceed=false)（秒传命中直接返回）；不存在 → (nil, proceed=true) 直接上传；
 // 已存在但 ETag 不一致 → proceed=true 重传刷新。stat 错误 fail-closed 返回 err。
-func (s *Storage) putCheckExisting(ctx context.Context, key, localMD5 string, attempt int) (*ObjectMeta, bool, error) {
-	meta, statErr := s.Stat(ctx, key)
-	switch {
-	case statErr == nil && meta != nil && meta.ETag == localMD5:
-		s.log.Info("put: 目标已存在且 ETag 与本地 md5 一致，直接返回", "key", key, "attempt", attempt)
-		return meta, false, nil
-	case statErr == nil && meta != nil:
-		return meta, true, nil // 已存在但 ETag 不一致（内容变/分片组合）：重传刷新 meta
-	case errors.Is(statErr, ErrNotFound):
-		return nil, true, nil // 不存在：直接上传
-	default:
-		return nil, true, mapPCSError(statErr)
+// logPhase 记录上传各**阶段**的耗时（Debug 级）。
+//
+// **为什么需要**（2026-11-08 实测 P7）：`Put` 在真实网盘上出现 **90s 整段挂起**，且
+// `libraryAdapter.Upload` 入口日志从未出现 ⇒ 需要**一次运行**就能定位"卡在哪个阶段"，
+// 而不是靠推理（此前两次"加超时"的修复都因卡点判断错误而无效）。
+// 阶段名：stage / precheck / upload / postcheck。
+func (s *Storage) logPhase(ctx context.Context, phase, key string, start time.Time, err error) {
+	s.log.Debug("put 阶段耗时",
+		"phase", phase, "key", key,
+		"elapsed_ms", time.Since(start).Milliseconds(),
+		"err", err, "ctx_err", ctx.Err())
+}
+
+// metaByExactList 用**精确列举**（父目录 `ls -l` 语义，含 md5/精确 size）定位 `key` 的 meta。
+//
+// **为什么不用 `Meta`**（2026-11-08 实测 P7）：fork 库 `Meta` 在"目标刚写入/尚不存在"等场景会
+// **阻塞在 socket 读且不响应 ctx**（库 HTTP 栈无 body 超时）⇒ 给它加 `context.WithTimeout` **无效**
+// （实测：加 3s 上限后三项仍 90s 超时）。而**父目录列举**实测 0.33–0.38s 稳定可用。
+// **数据校验强度不变**：列举返回 `fd.MD5`（adapter.go:488-490 → `ObjectMeta.ETag`）⇒ 仍可做
+// `ETag == 本地整文件 md5` 断言（用户要求：上传/下载必须用 md5 保证数据正确）。
+//
+// 返回 (meta, ok)：ok=false = 列举中未见该条目（或列举失败），由调用方按其语义处置。
+func (s *Storage) metaByExactList(ctx context.Context, key string) (*ObjectMeta, bool) {
+	dir, base := path.Split(strings.TrimSuffix(key, "/"))
+	lStart := time.Now()
+	listed, lErr := s.list(ctx, strings.TrimSuffix(dir, "/"), true)
+	s.logPhase(ctx, "list", key, lStart, lErr)
+	if err := lErr; err == nil {
+		metas := listed
+		for i := range metas {
+			if path.Base(strings.TrimSuffix(metas[i].Key, "/")) == base {
+				m := metas[i]
+				return &m, true
+			}
+		}
 	}
+	return nil, false
+}
+
+func (s *Storage) putCheckExisting(ctx context.Context, key, localMD5 string, attempt int) (*ObjectMeta, bool, error) {
+	// **用精确列举做预检**（2026-11-08 实测 P7）：不调用可能**阻塞且不响应 ctx** 的库 `Meta`
+	// （给不可中断的调用加 `context.WithTimeout` 实测无效：仍 90s 超时）；列举实测 0.33–0.38s 稳定。
+	// 预检只是"省一次上传"的优化，**不是正确性依赖**；正确性由上传后 md5 复核保证（不放宽校验）。
+	if err := ctx.Err(); err != nil {
+		return nil, true, mapPCSError(err) // 调用方已取消 ⇒ 如实上报
+	}
+	if meta, ok := s.metaByExactList(ctx, key); ok && meta != nil {
+		if meta.ETag == localMD5 {
+			s.log.Info("put: 目标已存在且 ETag 与本地 md5 一致（列举判据），直接返回",
+				"key", key, "attempt", attempt)
+			return meta, false, nil // 秒传命中：内容一致，无需上传
+		}
+		return meta, true, nil // 已存在但 ETag 不一致（内容变/分片组合）：重传刷新 meta
+	}
+	return nil, true, nil // 列举未见（或列举失败）⇒ 直接上传
 }
 
 // putCheckAfterUpload 上传后的 ETag 复核（md5 刷新）：远端 ETag 与本地 md5 一致 →
@@ -536,6 +591,11 @@ func (s *Storage) putCheckExisting(ctx context.Context, key, localMD5 string, at
 // fail-closed。返回 done=false 且 meta 非 nil = 复核不匹配（调用方重传）。
 func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stagedUpload, attempt int) (*ObjectMeta, bool, error) {
 	localMD5 := st.md5
+	// **列举优先**（2026-11-08 实测 P7）：`Meta` 可能阻塞且不响应 ctx ⇒ 不得放在阻塞路径首位。
+	// 列举含 md5（adapter.go:488-490）⇒ 仍可做 ETag==本地 md5 断言，**校验强度不变**。
+	if m, ok := s.metaByExactList(ctx, key); ok && m != nil {
+		return s.verifyAfterUpload(ctx, key, localMD5, m, st, attempt)
+	}
 	meta, statErr := s.Stat(ctx, key)
 	if statErr != nil && errors.Is(statErr, ErrNotFound) {
 		// 百度对刚上传的**大对象**有元数据可见性延迟（实测 4.6GB 文件可达数十秒）。此前
@@ -554,6 +614,13 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stage
 	if statErr != nil {
 		return nil, false, mapPCSError(statErr)
 	}
+	return s.verifyAfterUpload(ctx, key, localMD5, meta, st, attempt)
+}
+
+// verifyAfterUpload 是上传后的 **md5/ETag 复核**（语义与原 putCheckAfterUpload 完全一致；
+// 抽出以便"列举命中"与"可见性等待命中"两条入口共用——**校验强度保持不变**）。
+func (s *Storage) verifyAfterUpload(ctx context.Context, key, localMD5 string,
+	meta *ObjectMeta, st *stagedUpload, attempt int) (*ObjectMeta, bool, error) {
 	if meta.MD5Unreliable {
 		return s.checkAfterUploadUnreliableMD5(ctx, key, st, meta, attempt)
 	}
@@ -1103,7 +1170,16 @@ func (s *Storage) Move(ctx context.Context, srcKey, dstKey string) (*ObjectMeta,
 	// **目标 key 同样失效**：Move 到**已存在同名目标**（覆盖语义）时，目标旧直链指向被覆盖的
 	// 旧对象 ⇒ 必须清除（2026-10-27 补；S1 原先只清源）。
 	s.invalidateDlink(dstKey)
-	return s.Stat(ctx, dstKey)
+	// **不再在成功后用 `Stat` 复核**（2026-11-08 实测定论，详见
+	// `storage_move_nostat_test.go:TestStorage_Move_DoesNotRequirePostStat`）：
+	//   ① 移动 API 的返回值是**可靠的成功信号**（实测：链式改名 8/8、突发 50 次 50/50 全成功）；
+	//   ② 而**移动后 `Meta` 的可见性是偶发延迟**（同一结构实测：一次 ≥60s 看不到、另一次 0.14s 可见）
+	//      ⇒ 在此复核必然**偶发假失败**（线上表现为迁移报 `31066 file does not exist`，其实已改名成功）；
+	//   ③ 移动**不是数据操作**（内容不变、无 md5 语义）⇒ 此处不需要摘要。
+	//      **上传/下载等数据校验仍必须用 `Meta`/`Stat` 取 md5**（本改动不涉及那些路径）。
+	// 需要 meta 的调用方请显式 `Stat`（并可先用父目录列举确认可见性——实测 `ls` 侧 0.33–0.38s
+	// 稳定可用，而 `Meta` 偶发延迟）。
+	return nil, nil
 }
 
 // Copy 复制对象（srcKey → dstKey）。服务端优先（Adapter.Copy 零流量）；
