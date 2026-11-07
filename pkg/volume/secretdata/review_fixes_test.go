@@ -706,3 +706,74 @@ func TestD1_PeerMoveCountsAsDoneWhenSourceGone(t *testing.T) {
 		t.Fatalf("源仍在应判「未完成」（decided=%v moved=%v）", decided2, moved2)
 	}
 }
+
+// failingRenameFS 让指定前缀的 Rename 恒失败（模拟外部限流/最终一致导致的单容器卡住）。
+type failingRenameFS struct {
+	syncpkg.FS
+	mu    sync.Mutex
+	bad   string
+	calls int
+}
+
+func (f *failingRenameFS) Rename(ctx context.Context, from, to string) error {
+	f.mu.Lock()
+	if strings.Contains(from, f.bad) || strings.Contains(to, f.bad) {
+		f.calls++
+		f.mu.Unlock()
+		return os.ErrDeadlineExceeded
+	}
+	f.mu.Unlock()
+	return f.FS.Rename(ctx, from, to)
+}
+
+// TestD2_OneBadContainerDoesNotBlockTheRest 钉住**单容器失败不中止整轮**（2026-11-07 实测）：
+// 迁移幂等可续跑；在受限流/最终一致的外部存储上，一个容器卡住若中止整轮，其后成百个容器
+// **永远排不上**（实测每轮只迁成 1 个就中止）。这里要求：卡的跳过、其余照迁、可重跑续跑。
+func TestD2_OneBadContainerDoesNotBlockTheRest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	rels := []string{"b1", "b2", "b3", "b4", "b5"}
+	for _, rel := range rels {
+		if merr := sfs.MakeDir(ctx, rel); merr != nil {
+			t.Fatalf("MakeDir: %v", merr)
+		}
+		legacyRenameContainer(t, sfs, root, rel)
+	}
+	// 让 **b3 这一个**容器的改名恒失败（模拟该容器受限流/最终一致卡住）；
+	// 用它的**唯一容器名**作匹配串（不能用公共后缀，否则会拦下全部容器）。
+	sfs.mu.RLock()
+	badBase := path.Base(sfs.dirSegs["b3"])
+	sfs.mu.RUnlock()
+	flaky := &failingRenameFS{FS: sfs.inner, bad: badBase}
+	sfs.inner = flaky
+	sfs.opts.ContainerMoveRetryBase = time.Millisecond
+	sfs.opts.NormalizeMoveInterval = time.Millisecond
+	moved, _, err := sfs.NormalizeContainerNames(ctx, false)
+	if err == nil {
+		t.Fatal("有容器无法迁移时应上报（但不中止其余）")
+	}
+	// **关键断言**：其余容器必须都已迁成（不是被卡住的那个带停）
+	done := 0
+	for _, rel := range rels {
+		sfs.mu.RLock()
+		got := sfs.dirSegs[rel]
+		pc := sfs.dirSegs[parentDirOf(rel)]
+		sfs.mu.RUnlock()
+		want, werr := sfs.targetContainerPath(pc, rel)
+		if werr != nil {
+			t.Fatalf("targetContainerPath: %v", werr)
+		}
+		if got == want {
+			done++
+		}
+	}
+	// 期望：**除卡住的那一个外全部迁成**（这正是"一个失败不阻塞其余"的判据）
+	if done != len(rels)-1 {
+		t.Fatalf("单容器失败不得阻塞其余：仅 %d/%d 迁成（moved=%d）", done, len(rels), moved)
+	}
+	if moved != len(rels)-1 {
+		t.Fatalf("moved 应为除卡住者外的全部：got %d want %d", moved, len(rels)-1)
+	}
+}

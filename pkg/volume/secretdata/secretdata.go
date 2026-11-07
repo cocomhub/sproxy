@@ -609,10 +609,16 @@ func (s *SecretdataFS) runApplyAction(ctx context.Context) {
 		moved, skipped, err := s.normalizeContainerNamesWithBlocked(ctx, false, blocked)
 		totalMoved += moved
 		rounds++
-		if err != nil {
-			slog.Error("secretdata: 容器名规范化失败（已迁移部分保持确定性名，可重跑续跑）",
+		if err != nil && moved == 0 {
+			// **零进展**才收口：单容器失败已被降级为「跳过 + 累计」，但若整轮一个都没迁成，
+			// 说明本阶段确实推不动（限流/外部故障）⇒ 停止并保留已完成部分（可重跑续跑）。
+			slog.Error("secretdata: 容器名规范化本轮无进展（已迁移部分保持确定性名，可重跑续跑）",
 				"error", err, "moved_total", totalMoved, "rounds", rounds)
 			return
+		}
+		if err != nil {
+			slog.Warn("secretdata: 容器名规范化本轮部分失败（已跳过若干目录，继续下一轮）",
+				"error", err, "moved", moved, "moved_total", totalMoved, "rounds", rounds)
 		}
 		if moved == 0 {
 			slog.Warn("secretdata: 容器名规范化完成", "moved", totalMoved, "skipped", skipped, "rounds", rounds)
@@ -3208,6 +3214,7 @@ func (s *SecretdataFS) normalizeAllRels(ctx context.Context, rels []string, segs
 	if interval <= 0 {
 		interval = defaultNormalizeMoveInterval
 	}
+	var failed []string
 	for _, rel := range rels {
 		// **分批上限**（2026-11-07）：迁移需数百次 rename，易触发外部限流 ⇒ 单次装配只迁 N 个，
 		// 多次重启收敛（幂等）。达到上限即收口（已改名部分仍会失效快照）。
@@ -3219,6 +3226,14 @@ func (s *SecretdataFS) normalizeAllRels(ctx context.Context, rels []string, segs
 		m, sk, rerr := s.normalizeOneRel(ctx, rel, segs, newSegs, blocked, dryRun)
 		moved += m
 		skipped += sk
+		if rerr != nil {
+			// **单容器失败不中止整轮**（2026-11-07 实测）：迁移是幂等的、可续跑；在受限流/最终一致的
+			// 外部存储上，**一个**容器失败若中止整轮，会让其后成百个容器永远排不上（实测：每轮只
+			// 迁成 1 个就中止）。这里降级为「跳过 + 累计失败」，整轮跑完后再上报（已完成部分照常提交）。
+			failed = append(failed, rel)
+			slog.Warn("secretdata: 容器名规范化：该目录本轮跳过（可重跑续跑）",
+				"rel", rel, "error", rerr)
+		}
 		if m > 0 && !dryRun {
 			// **限速**：相邻 rename 之间留间隔，降低触发外部限流的概率。
 			select {
@@ -3227,9 +3242,10 @@ func (s *SecretdataFS) normalizeAllRels(ctx context.Context, rels []string, segs
 			case <-time.After(interval):
 			}
 		}
-		if rerr != nil {
-			return moved, skipped, rerr
-		}
+	}
+	if len(failed) > 0 {
+		return moved, skipped, fmt.Errorf("secretdata: %d 个目录本轮未能迁移（已跳过，可重跑续跑；例：%s）",
+			len(failed), strings.Join(failed[:min(3, len(failed))], ", "))
 	}
 	return moved, skipped, nil
 }
