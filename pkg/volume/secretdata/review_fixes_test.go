@@ -670,3 +670,110 @@ func TestF5_LogicalFilesUsePathQualifiedKeys(t *testing.T) {
 		t.Fatalf("键应为带目录段的逻辑路径 sub/f.bin，got %v", files)
 	}
 }
+
+// TestD1_PeerMoveCountsAsDoneWhenSourceGone 钉住**「源已消失 ⇒ 移动已完成」**（2026-11-07 实测缺陷）：
+// 远端目录列举**最终一致** ⇒ rename 已成功、源已消失，但父目录列举在若干秒内仍可能看不到目标。
+// 若要求「目标必须已可见」才对，迁移会在**已成功**的容器上判定失败并中止
+// （实测：同一条深层路径连续多轮失败，且目标 mtime 已是本次 rename 的时间）。
+func TestD1_PeerMoveCountsAsDoneWhenSourceGone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	// 情形 1（**关键**）：列举里**既无源也无目标**（目标尚未可见 —— 远端列举最终一致）
+	// ⇒ 源已消失这一强信号必须判「已完成」，否则迁移会在已成功的容器上中止。
+	parent := "P"
+	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "Unrelated")); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	moved, decided := sfs.containerMovedByPeer(ctx, path.Join(parent, "GoneName"), path.Join(parent, "WantName"))
+	if !decided || !moved {
+		t.Fatalf("源已消失（目标暂未可见）应判「已完成」（decided=%v moved=%v）", decided, moved)
+	}
+	// 情形 2：源已消失且目标已可见 ⇒ 同样「已完成」
+	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "WantName")); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	if m2, d2 := sfs.containerMovedByPeer(ctx, path.Join(parent, "GoneName"), path.Join(parent, "WantName")); !d2 || !m2 {
+		t.Fatalf("源已消失且目标可见应判「已完成」（decided=%v moved=%v）", d2, m2)
+	}
+	// 反向：源仍在 ⇒ 未完成
+	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "StillThere")); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	moved2, decided2 := sfs.containerMovedByPeer(ctx, path.Join(parent, "StillThere"), path.Join(parent, "WantName"))
+	if !decided2 || moved2 {
+		t.Fatalf("源仍在应判「未完成」（decided=%v moved=%v）", decided2, moved2)
+	}
+}
+
+// failingRenameFS 让指定前缀的 Rename 恒失败（模拟外部限流/最终一致导致的单容器卡住）。
+type failingRenameFS struct {
+	syncpkg.FS
+	mu    sync.Mutex
+	bad   string
+	calls int
+}
+
+func (f *failingRenameFS) Rename(ctx context.Context, from, to string) error {
+	f.mu.Lock()
+	if strings.Contains(from, f.bad) || strings.Contains(to, f.bad) {
+		f.calls++
+		f.mu.Unlock()
+		return os.ErrDeadlineExceeded
+	}
+	f.mu.Unlock()
+	return f.FS.Rename(ctx, from, to)
+}
+
+// TestD2_OneBadContainerDoesNotBlockTheRest 钉住**单容器失败不中止整轮**（2026-11-07 实测）：
+// 迁移幂等可续跑；在受限流/最终一致的外部存储上，一个容器卡住若中止整轮，其后成百个容器
+// **永远排不上**（实测每轮只迁成 1 个就中止）。这里要求：卡的跳过、其余照迁、可重跑续跑。
+func TestD2_OneBadContainerDoesNotBlockTheRest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	rels := []string{"b1", "b2", "b3", "b4", "b5"}
+	for _, rel := range rels {
+		if merr := sfs.MakeDir(ctx, rel); merr != nil {
+			t.Fatalf("MakeDir: %v", merr)
+		}
+		legacyRenameContainer(t, sfs, root, rel)
+	}
+	// 让 **b3 这一个**容器的改名恒失败（模拟该容器受限流/最终一致卡住）；
+	// 用它的**唯一容器名**作匹配串（不能用公共后缀，否则会拦下全部容器）。
+	sfs.mu.RLock()
+	badBase := path.Base(sfs.dirSegs["b3"])
+	sfs.mu.RUnlock()
+	flaky := &failingRenameFS{FS: sfs.inner, bad: badBase}
+	sfs.inner = flaky
+	sfs.opts.ContainerMoveRetryBase = time.Millisecond
+	sfs.opts.NormalizeMoveInterval = time.Millisecond
+	moved, _, err := sfs.NormalizeContainerNames(ctx, false)
+	if err == nil {
+		t.Fatal("有容器无法迁移时应上报（但不中止其余）")
+	}
+	// **关键断言**：其余容器必须都已迁成（不是被卡住的那个带停）
+	done := 0
+	for _, rel := range rels {
+		sfs.mu.RLock()
+		got := sfs.dirSegs[rel]
+		pc := sfs.dirSegs[parentDirOf(rel)]
+		sfs.mu.RUnlock()
+		want, werr := sfs.targetContainerPath(pc, rel)
+		if werr != nil {
+			t.Fatalf("targetContainerPath: %v", werr)
+		}
+		if got == want {
+			done++
+		}
+	}
+	// 期望：**除卡住的那一个外全部迁成**（这正是"一个失败不阻塞其余"的判据）
+	if done != len(rels)-1 {
+		t.Fatalf("单容器失败不得阻塞其余：仅 %d/%d 迁成（moved=%d）", done, len(rels), moved)
+	}
+	if moved != len(rels)-1 {
+		t.Fatalf("moved 应为除卡住者外的全部：got %d want %d", moved, len(rels)-1)
+	}
+}
