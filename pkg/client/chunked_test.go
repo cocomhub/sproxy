@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -341,51 +342,64 @@ func TestGenerateUploadID_DifferentInputs(t *testing.T) {
 	}
 }
 
-func TestTryDownloadChunk_LengthMismatch(t *testing.T) {
+// chunkStreamFixture 构造 streamOneChunk 用的输出文件与参数（预分配到 fileSize）。
+func chunkStreamFixture(t *testing.T, fileSize int64) (downloadChunkParams, *os.File) {
+	t.Helper()
+	f, err := os.Create(filepath.Join(t.TempDir(), "out.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	if err := f.Truncate(fileSize); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var progress int64
+	return downloadChunkParams{
+		ChunkIdx: 0, ChunkSize: fileSize, FileSize: fileSize,
+		OutFile: f, Mu: &mu, Progress: &progress, Cancel: func() {}, Done: make(chan struct{}),
+	}, f
+}
+
+func TestStreamOneChunk_LengthMismatch(t *testing.T) {
 	t.Parallel()
-	// Server returns body shorter than X-Chunk-Length (expectLength)
+	// Server returns body shorter than requested length (expectLength=100)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Chunk-Length", "100")
-		w.Write([]byte("short")) // only 5 bytes
+		_, _ = w.Write([]byte("short")) // only 5 bytes
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	data, ok := c.tryDownloadChunk(t.Context(), "/api/download/chunk?filename=f.txt&offset=0&length=100", 100)
-	if ok {
-		t.Fatal("expected tryDownloadChunk to return false on length mismatch")
-	}
-	if data != nil {
-		t.Fatal("expected nil data on length mismatch")
+	c.logger = testLogger()
+	p, _ := chunkStreamFixture(t, 100)
+	if c.streamOneChunk(t.Context(), p, "/api/download/chunk?filename=f.txt&offset=0&length=100", 0, 100) {
+		t.Fatal("expected false on length mismatch")
 	}
 }
 
-func TestTryDownloadChunk_ChecksumMismatch(t *testing.T) {
+func TestStreamOneChunk_ChecksumMismatch(t *testing.T) {
 	t.Parallel()
 	// Server returns body with wrong X-Chunk-Checksum header
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Chunk-Checksum", "0000000000000000000000000000000000000000000000000000000000000000")
-		w.Write([]byte("hello world"))
+		_, _ = w.Write([]byte("hello world"))
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	data, ok := c.tryDownloadChunk(t.Context(), "/api/download/chunk?filename=f.txt&offset=0&length=11", 11)
-	if ok {
-		t.Fatal("expected tryDownloadChunk to return false on checksum mismatch")
-	}
-	if data != nil {
-		t.Fatal("expected nil data on checksum mismatch")
+	c.logger = testLogger()
+	p, _ := chunkStreamFixture(t, 11)
+	if c.streamOneChunk(t.Context(), p, "/api/download/chunk?filename=f.txt&offset=0&length=11", 0, 11) {
+		t.Fatal("expected false on checksum mismatch")
 	}
 }
 
-func TestTryDownloadChunk_Non200(t *testing.T) {
+func TestStreamOneChunk_Non200(t *testing.T) {
 	t.Parallel()
-	// Server returns 500
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -394,12 +408,44 @@ func TestTryDownloadChunk_Non200(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	data, ok := c.tryDownloadChunk(t.Context(), "/api/download/chunk?filename=f.txt&offset=0&length=100", 100)
-	if ok {
-		t.Fatal("expected tryDownloadChunk to return false on 500 status")
+	c.logger = testLogger()
+	p, _ := chunkStreamFixture(t, 100)
+	if c.streamOneChunk(t.Context(), p, "/api/download/chunk?filename=f.txt&offset=0&length=100", 0, 100) {
+		t.Fatal("expected false on 500 status")
 	}
-	if data != nil {
-		t.Fatal("expected nil data on 500 status")
+}
+
+// TestStreamOneChunk_SuccessStreamsToOffset 验证分块**流式写入指定偏移**、推进进度、
+// 且不再需要整块入内存（内容按 offset 落位）。
+func TestStreamOneChunk_SuccessStreamsToOffset(t *testing.T) {
+	t.Parallel()
+	body := []byte("hello world")
+	sum := sha256hex(body)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Chunk-Checksum", sum)
+		_, _ = w.Write(body)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+	const fileSize = 32
+	const off = 7
+	p, f := chunkStreamFixture(t, fileSize)
+	if !c.streamOneChunk(t.Context(), p, "/api/download/chunk?filename=f.txt&offset=7&length=11", off, int64(len(body))) {
+		t.Fatal("expected true on success")
+	}
+	got := make([]byte, len(body))
+	if _, err := f.ReadAt(got, off); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("offset 写入内容不符: %q", got)
+	}
+	if *p.Progress != int64(len(body)) {
+		t.Fatalf("进度应 += %d，实际 %d", len(body), *p.Progress)
 	}
 }
 
@@ -828,5 +874,56 @@ func TestCalcFileChecksum_FileChanged(t *testing.T) {
 	}
 	if cs1 == cs2 {
 		t.Fatal("expected different checksum for changed file")
+	}
+}
+
+// incrementalProbeBody 在读到第 probeAfter 次时回调（用于探测“流式落盘”）。
+type incrementalProbeBody struct {
+	remaining  int64
+	reads      int
+	probeAfter int
+	onProbe    func()
+}
+
+func (r *incrementalProbeBody) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := min(int64(len(p)), r.remaining)
+	for i := range n {
+		p[i] = 0xAB
+	}
+	r.remaining -= n
+	r.reads++
+	if r.reads == r.probeAfter {
+		r.onProbe()
+	}
+	return int(n), nil
+}
+
+// TestCopyChunkStream_WritesIncrementally 锁定「分块流式写入」（本次内存优化的核心）：
+// 读取过程中目标偏移应已落盘。若退回「整块读入内存再写」（旧 tryDownloadChunk+writeDownloadChunk），
+// 探测点在整块读完前会看到空文件 → 失败。
+func TestCopyChunkStream_WritesIncrementally(t *testing.T) {
+	t.Parallel()
+	const length = 1 << 20 // 1 MiB
+	p, f := chunkStreamFixture(t, length)
+	probed := false
+	body := &incrementalProbeBody{
+		remaining:  length,
+		probeAfter: 2, // 第 2 次 32KiB 读后（≈64KiB）探测
+		onProbe: func() {
+			buf := make([]byte, 1)
+			if _, err := f.ReadAt(buf, 0); err == nil && buf[0] == 0xAB {
+				probed = true
+			}
+		},
+	}
+	total, err := copyChunkStream(p, body, 0, length, io.Discard)
+	if err != nil || total != length {
+		t.Fatalf("copyChunkStream = (%d,%v), want (%d,nil)", total, err, length)
+	}
+	if !probed {
+		t.Fatal("分块应在读取过程中流式落盘（整块缓冲实现在此探测为空）")
 	}
 }
