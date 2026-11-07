@@ -5,6 +5,7 @@ package tunnel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -294,6 +295,40 @@ func NewClient(hexKey, tunnelURL string, timeout time.Duration, logger *slog.Log
 	}, nil
 }
 
+// noTimeoutKey 是 ctx 私有键：标记「本次隧道请求跳过 Client.HTTPClient.Timeout」。
+type noTimeoutKey struct{}
+
+// WithNoTimeout 标记 ctx 使 tunnel.Client.Do 跳过 http.Client.Timeout。
+//
+// 用途：隧道请求的 Timeout 是**整请求挂钟**上限（含流式响应体的读取），对下载这类
+// 长时流式响应是错误的——弱网下大文件下载必然超过 300s ⇒ Client 提前掐断连接，
+// 表现为解密中途 `decrypt stream: read chunk: unexpected EOF`。与 pkg/client 的
+// WithNoClientTimeout 同语义（后者覆盖直连面，本标记覆盖隧道面）。
+//
+// 仍保留 ctx deadline/取消与 Transport 的连接级调校（TCP keepalive 等）。
+func WithNoTimeout(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noTimeoutKey{}, true)
+}
+
+// noTimeoutFrom 报告本次隧道请求是否要跳过客户端级超时。
+func noTimeoutFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(noTimeoutKey{}).(bool)
+	return v
+}
+
+// tunnelHTTPClient 选择本次请求使用的 HTTP 客户端：标记了 WithNoTimeout 时
+// 返回去掉 Timeout 的临时客户端（复用同一 Transport/连接池），否则返回原实例。
+func (c *Client) tunnelHTTPClient(ctx context.Context) *http.Client {
+	hc := c.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Transport: netutil.IsolatedTransport()}
+	}
+	if noTimeoutFrom(ctx) && hc.Timeout != 0 {
+		return &http.Client{Transport: hc.Transport, CheckRedirect: hc.CheckRedirect, Jar: hc.Jar}
+	}
+	return hc
+}
+
 // Do 接受标准 *http.Request，通过加密隧道转发并返回标准 *http.Response。
 //
 // 使用标准库类型，调用方零学习成本。
@@ -346,7 +381,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	if tp := req.Header.Get("Traceparent"); tp != "" {
 		tunnelReq.Header.Set("Traceparent", tp)
 	}
-	httpResp, err := c.HTTPClient.Do(tunnelReq)
+	httpResp, err := c.tunnelHTTPClient(req.Context()).Do(tunnelReq)
 	if err != nil {
 		// 兜底关闭上行 pipe：请求体加密 goroutine 仍在阻塞写 pw（io.Copy 下游断流时
 		// 永不返回），必须 Close 使 EncryptStream 的写立即失败, 否则 uploadWg.Wait() 死锁。

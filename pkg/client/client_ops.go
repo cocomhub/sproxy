@@ -24,6 +24,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -304,20 +306,33 @@ func validateOutputPath(path string) error {
 
 // Download 从 sproxy 服务端下载文件并保存到本地。
 func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
-	return c.downloadTo(ctx, filename, outputPath, "")
+	return c.downloadTo(ctx, filename, outputPath, "", false)
+}
+
+// DownloadResumable 与 Download 相同，但启用断点续传：失败保留已收内容与 sidecar，
+// 重入时用 `Range` 从断点继续；单次调用内也会自动退避重试（弱网自愈）。
+func (c *FileClient) DownloadResumable(ctx context.Context, filename, outputPath string) error {
+	return c.downloadTo(ctx, filename, outputPath, "", true)
 }
 
 // DownloadCloudArchive 下载云任务归档文件（kind=cloud_archive）。
 // name 为归档名（单文件名，如 "x.tar.gz"），服务端按 owner 在租户 archive 桶内拼接。
 func (c *FileClient) DownloadCloudArchive(ctx context.Context, name, outputPath string) error {
-	return c.downloadTo(ctx, name, outputPath, DownloadKindCloudArchive)
+	return c.downloadTo(ctx, name, outputPath, DownloadKindCloudArchive, false)
 }
 
-// downloadTo 是 Download / DownloadCloudArchive 的公共实现。
+// remoteFileMeta 是下载前的远端文件身份（Stat 结果；Ok=false 表示 Stat 失败）。
+type remoteFileMeta struct {
+	Size     int64
+	Checksum string
+	MTime    int64
+	Ok       bool
+}
+
+// downloadTo 是 Download / DownloadResumable / DownloadCloudArchive 的公共实现。
 // 大文件（超过自动分块阈值）优先走分块下载（断点续传/并发/逐块校验语义），
-// 普通小文件走全量 /download（审查 #11：先前恒走全量，cloud_task/cloud_archive
-// 大文件无分块与进度）。
-func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind string) error {
+// 普通小文件走全量 /download（resume=true 时走 Range 单流续传）。
+func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind string, resume bool) error {
 	if containsPathTraversal(filename) {
 		return fmt.Errorf("filename 不能包含路径穿越符 '..'")
 	}
@@ -325,46 +340,229 @@ func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind 
 	if err != nil {
 		return err
 	}
-	// 预取文件大小，超出自动分块阈值走 ChunkedDownload（kind 同步透传）
-	fileSize, _, _, statErr := getFileStat(ctx, c, filename, kind)
+	// 预取文件大小，超出自动分块阈值走 ChunkedDownload（kind/resume 同步透传）。
+	fileSize, checksum, mtime, statErr := getFileStat(ctx, c, filename, kind)
+	rm := remoteFileMeta{Size: fileSize, Checksum: checksum, MTime: mtime, Ok: statErr == nil}
 	if statErr == nil && ShouldAutoChunk(fileSize) {
-		return c.ChunkedDownload(ctx, filename, outputPath, WithChunkedKind(kind))
+		opts := []ChunkedOption{WithChunkedKind(kind)}
+		if resume {
+			opts = append(opts, WithChunkedResume(true))
+		}
+		return c.ChunkedDownload(ctx, filename, outputPath, opts...)
 	}
+	if resume && rm.Ok {
+		return c.resumableStreamDownload(ctx, filename, outputPath, kind, rm)
+	}
+	return c.singleStreamDownload(ctx, filename, outputPath, kind)
+}
+
+// downloadURLPath 拼装单流下载请求路径（含 kind/volume 参数）。
+func (c *FileClient) downloadURLPath(filename, kind string) string {
 	query := url.Values{"filename": {filename}}
 	if kind != "" {
 		query.Set("kind", kind)
 	} else {
 		c.appendVolumeQuery(query)
 	}
-	urlPath := "/download?" + query.Encode()
-	headers := make(http.Header)
+	return "/download?" + query.Encode()
+}
 
-	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
+// singleStreamDownload 执行单次全量下载（无续传），失败即删不完整文件。
+func (c *FileClient) singleStreamDownload(ctx context.Context, filename, outputPath, kind string) error {
+	// **长下载跳过客户端级超时**（WithNoClientTimeout）：弱网大文件整请求可能远超
+	// 默认 300s，否则 io.Copy 中途收到超时错误（隧道面 decrypt stream: unexpected EOF）。
+	resp, err := c.doRequest(WithNoClientTimeout(ctx), "GET", c.downloadURLPath(filename, kind), nil, make(http.Header))
+	if err != nil {
+		return fmt.Errorf(errFmtRequestFailed, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("下载失败 (状态码: %d): %s", resp.StatusCode, string(body))
+	}
+	serverCS := resp.Header.Get(headerFileChecksum)
+	if err := c.writeBodyToOutput(outputPath, resp.Body, resp.ContentLength, serverCS); err != nil {
+		os.Remove(outputPath)
+		return err
+	}
+	c.restoreFileMTimeAfterDownload(outputPath, resp)
+	return nil
+}
+
+// resumableStreamDownload 是单流断点续传下载：优先从既有 sidecar 断点续传，否则从头
+// 开始；中断时保留已收内容 + sidecar（下次调用可继续），并在本次调用内按退避自动重试。
+func (c *FileClient) resumableStreamDownload(ctx context.Context, filename, outputPath, kind string, rm remoteFileMeta) error {
+	rs := c.loadStreamResume(filename, kind, outputPath, rm)
+	var lastErr error
+	for attempt := 0; attempt < downloadStreamMaxAttempts; attempt++ {
+		if attempt > 0 && !chunkDownloadSleep(ctx, streamRetryDelay(attempt)) {
+			break
+		}
+		err := c.streamOnce(ctx, filename, outputPath, kind, rm, rs)
+		if err == nil {
+			if verr := c.verifyStreamedDownload(outputPath, rm); verr != nil {
+				os.Remove(outputPath)
+				removeDownloadResumeState(outputPath)
+				return verr
+			}
+			c.restoreResumeMTime(outputPath, rm)
+			rs.finish()
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || isFatalDownloadError(err) {
+			break
+		}
+		rs.save()
+		c.logger.WarnContext(ctx, "下载中断，准备续传重试", "file_name", outputPath,
+			"attempt", attempt+1, "offset", rs.offset(), "error", err.Error())
+	}
+	// 保留已收内容 + sidecar，便于下一次调用（或用户重跑）继续。
+	rs.save()
+	return fmt.Errorf("下载失败（已保留断点，可用 --resume 续传）: %w", lastErr)
+}
+
+// streamOnce 执行一次单流下载（可从 rs 的断点起）。返回 nil 表示本次读完响应体。
+func (c *FileClient) streamOnce(ctx context.Context, filename, outputPath, kind string, rm remoteFileMeta, rs *downloadResume) error {
+	offset := rs.offset()
+	headers := make(http.Header)
+	if h := downloadRangeHeader(offset); h != "" {
+		headers.Set("Range", h)
+	}
+	resp, err := c.doRequest(WithNoClientTimeout(ctx), "GET", c.downloadURLPath(filename, kind), nil, headers)
 	if err != nil {
 		return fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if offset > 0 {
+			// 服务端未处理 Range（或不支持）⇒ 返回全量：重置进度，由
+			// copyStreamToFile（offset=0 时 O_TRUNC）截断重写，避免拼接错位。
+			rs.resetOffset()
+			offset = 0
+		}
+	case http.StatusPartialContent:
+		if !contentRangeStartsAt(resp.Header.Get("Content-Range"), offset) {
+			return fmt.Errorf("服务端 Range 响应异常: %q（期望从 %d 起）", resp.Header.Get("Content-Range"), offset)
+		}
+	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("下载失败 (状态码: %d): %s", resp.StatusCode, string(body))
+		return &downloadStatusError{code: resp.StatusCode, msg: string(body)}
 	}
+	return c.copyStreamToFile(outputPath, resp.Body, offset, rm.Size, rs)
+}
 
-	// 从响应解析收到的 checksum（服务端在 X-File-Checksum 返回）
-	serverCS := resp.Header.Get(headerFileChecksum)
-	contentLength := resp.ContentLength
-
-	// 创建父目录 + 写正文 + 完整性校验（2026-10-23 抽离：单流整流可能断流/错位 ⇒
-	// 无 checksum 时补大小 + 零窗兑底，有 checksum 时逐字节比对）。
-	if err := c.writeBodyToOutput(outputPath, resp.Body, contentLength, serverCS); err != nil {
-		os.Remove(outputPath)
-		return err
+// copyStreamToFile 把响应体写入输出文件（offset 处续写），并按已写字节推进续传进度。
+func (c *FileClient) copyStreamToFile(outputPath string, body io.Reader, offset, total int64, rs *downloadResume) error {
+	if ensureErr := ensureParentDir(outputPath); ensureErr != nil {
+		return fmt.Errorf("创建输出目录失败: %w", ensureErr)
 	}
-
-	// 恢复文件修改时间
-	c.restoreFileMTimeAfterDownload(outputPath, resp)
-
+	// offset=0（首次/全量重来）时 O_TRUNC：确保不残留旧文件尾部字节。
+	flags := os.O_WRONLY | os.O_CREATE
+	if offset == 0 {
+		flags |= os.O_TRUNC
+	}
+	out, err := os.OpenFile(outputPath, flags, 0o644)
+	if err != nil {
+		return fmt.Errorf("创建文件失败: %w", err)
+	}
+	defer out.Close()
+	if _, err := out.Seek(offset, io.SeekStart); err != nil {
+		return fmt.Errorf("定位续传偏移失败: %w", err)
+	}
+	src := io.Reader(body)
+	if c.progressFn != nil {
+		src = NewProgressReader(body, total, func(read, tot int64) {
+			c.progressFn("下载", offset+read, tot)
+		})
+	}
+	n, cerr := io.Copy(out, src)
+	rs.addOffset(n)
+	if cerr != nil {
+		return fmt.Errorf("写入文件失败: %w", cerr)
+	}
 	return nil
+}
+
+// loadStreamResume 读取并校验既有续传 sidecar；不匹配/缺失则删除陈旧 sidecar 并新建。
+// **不删除输出文件**：无有效断点时由 copyStreamToFile（offset=0 的 O_TRUNC）在首次
+// 写入时截断覆盖，避免「请求尚未发出就删掉既有完整文件」（如 404 时不应丢旧文件）。
+func (c *FileClient) loadStreamResume(filename, kind, outputPath string, rm remoteFileMeta) *downloadResume {
+	if st, ok := loadDownloadResumeState(outputPath); ok &&
+		st.downloadResumeMatches(filename, kind, rm.Size, rm.Checksum, rm.MTime, 0) {
+		if fi, serr := os.Stat(outputPath); serr == nil && fi.Size() == st.Offset && st.Offset >= 0 && st.Offset <= rm.Size {
+			c.logger.Info("下载续传：从断点继续", "file_name", outputPath, "offset", st.Offset)
+			return newDownloadResume(outputPath, *st)
+		}
+	}
+	// 陈旧 sidecar：清掉，重新建立（输出文件在首次写入时截断覆盖）。
+	removeDownloadResumeState(outputPath)
+	return newDownloadResume(outputPath, downloadResumeState{
+		Filename: filename, Kind: kind, Size: rm.Size, Checksum: rm.Checksum, MTime: rm.MTime,
+	})
+}
+
+// verifyStreamedDownload 校验单流（续传）下载结果：有远端 checksum 则比对，否则大小 + 零窗兑底。
+func (c *FileClient) verifyStreamedDownload(outputPath string, rm remoteFileMeta) error {
+	if rm.Checksum != "" {
+		return c.verifyChecksumAfterDownload(outputPath, rm.Checksum)
+	}
+	return verifySingleStreamOutput(outputPath, rm.Size)
+}
+
+// restoreResumeMTime 用 Stat 得到的远端修改时间恢复本地时间戳（单流续传路径）。
+func (c *FileClient) restoreResumeMTime(outputPath string, rm remoteFileMeta) {
+	if rm.MTime <= 0 {
+		return
+	}
+	modTime := time.Unix(0, rm.MTime)
+	if err := os.Chtimes(outputPath, modTime, modTime); err != nil {
+		c.logger.Warn("设置文件时间戳失败", "file_name", outputPath, "error", err)
+	}
+}
+
+// downloadStatusError 是下载响应的非 2xx 状态错误（区分可重试与致命：4xx 致命）。
+type downloadStatusError struct {
+	code int
+	msg  string
+}
+
+func (e *downloadStatusError) Error() string {
+	return fmt.Sprintf("下载失败 (状态码: %d): %s", e.code, e.msg)
+}
+
+// isFatalDownloadError 报告是否不应重试（4xx 客户端错误）。
+func isFatalDownloadError(err error) bool {
+	var se *downloadStatusError
+	if errors.As(err, &se) {
+		return se.code >= 400 && se.code < 500
+	}
+	return false
+}
+
+// contentRangeStartsAt 解析 `Content-Range: bytes start-end/total` 并判断 start 是否为 want。
+func contentRangeStartsAt(header string, want int64) bool {
+	raw, ok := strings.CutPrefix(strings.TrimSpace(header), "bytes ")
+	if !ok {
+		return false
+	}
+	startS, _, ok := strings.Cut(raw, "-")
+	if !ok {
+		return false
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(startS), 10, 64)
+	return err == nil && start == want
+}
+
+// streamRetryDelay 返回单流续传第 attempt 次重试前的退避（1s/2s/4s…封顶 30s）。
+func streamRetryDelay(attempt int) time.Duration {
+	d := time.Second << uint(attempt-1)
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	return d
 }
 
 // verifySingleStreamOutput 是单流下载的完整性兑底（无服务端 checksum 时）：大小一致 +
