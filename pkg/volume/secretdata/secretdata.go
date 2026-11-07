@@ -29,6 +29,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math/rand"
 	"net/url"
 	"os"
 	"path"
@@ -39,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -139,6 +141,30 @@ type Options struct {
 	// 跳过全部文件 meta blob 的下载+解密（外部卷实测 20-30 分钟 → 秒级），仅在容器
 	// 集合/抽样校验/密钥指纹/算法档位任一不符时回退全量扫描。
 	IndexSnapshotPath string
+
+	// NormalizeNames 是容器名规范化动作（""=不动 / "audit"=只审计 / "apply"=执行迁移）。
+	// 背景：容器名原为随机 ⇒ 同一逻辑目录可能产生多个容器（重复容器，装配期映射冲突）。
+	// 现已改用确定性命名（shardseal.DirNameFor）杜绝新增；本开关处理**历史遗留**：
+	//   - "audit"：扫描并打印重复容器组（含争议内容检测），**不修改任何数据**；
+	//   - "apply"：逐个把容器移动到确定性名下；**有争议的组自动跳过**（等人工确认）。
+	// 默认空（不动，零回归）；幂等（可重复执行/中断续跑）。
+	// 另支持 "export"：把重复容器组的**落选容器**递归解码导出到 `NormalizeExportDir`
+	// （供人工核对争议内容；每个容器独立子目录 ⇒ 同名文件不覆盖）。
+	NormalizeNames string
+	// NormalizeExportDir 是 normalize_names="export" 的输出根目录（空 = "./dup-export"）。
+	NormalizeExportDir string
+	// NormalizeMaxMoves 是**单次装配最多迁移的容器数**（0 = 不限）。
+	// 迁移需数百次 rename，易触发外部限流 ⇒ 建议分批（如 100/次），多次重启收敛（幂等）。
+	NormalizeMaxMoves int
+	// NormalizeMoveInterval 是相邻 rename 的**最小间隔**（0 = 250ms，限速防限流）。
+	NormalizeMoveInterval time.Duration
+	// NormalizeTimeout 是装配期运维动作（审计/导出/清理/迁移）的**总超时上限**
+	// （0 = defaultNormalizeTimeout）。超时即收口为「部分完成 + 可续跑」（迁移幂等），
+	// 避免外部限流/超大卷把挂载阻塞到不可控时长（批次 16 P2-1）。
+	NormalizeTimeout time.Duration
+	// ContainerMoveRetryBase 是容器改名失败**指数退避的基数**（0 ⇒ containerMoveRetryInterval）。
+	// 仅为测试缩短等待而暴露（生产不设，走默认）。
+	ContainerMoveRetryBase time.Duration
 
 	// MetaCacheDir 是装配期 meta blob 的**本机磁盘密文缓存**目录（空 = 禁用，默认零回归）。
 	// 外部卷每读一个 meta 都要起一次下载 CLI 并落随机临时目录（Close 即删）⇒ 每次重启
@@ -251,13 +277,25 @@ type SecretdataFS struct {
 	mu      sync.RWMutex
 	index   map[string]*metaEntry
 	dirs    map[string]struct{} // 已知逻辑目录（子目录发现/进入用）
-	dirSegs map[string]string   // 逻辑目录 → 随机容器目录名
+	dirSegs map[string]string   // 逻辑目录 → 容器目录名
+	// dupGroups 是装配期发现的**重复容器组**（同一逻辑路径多容器；落选者数据保留、未加载）。
+	// 供审计（有无争议内容）与容器名规范化（有争议则跳过，等人工确认）使用。
+	dupGroups []dupContainerGroup
 	// dirPhysTotal 是**全部目录 meta blob 的落盘字节之和**（真值报告用；见 trueusage.go）。
 	// 为什么必须跟踪：目录 meta 也 pad 到 [base, 2·base)（默认 1–2MB/目录）——「每目录数百字节」
 	// 的旧假设已不成立；若不计入，周期对账（TrueUsage → 卷池校准）会把刚记的目录字节**改回去**
 	// （账本与磁盘漂移）。三处维护：目录 meta 写入 +、容器回收 −（列目录时顺带求和，零额外 I/O）、
 	// 挂载扫描 +（Phase 1 已读每个 dir meta blob）。
 	dirPhysTotal int64
+	// snapshotWriteDisabled 在**本进程发生任何写操作**（含容器名规范化）后置位 ⇒ 禁止**异步/
+	// 慢路径**快照落盘（否则它会用陈旧 dirSegs 覆盖刚失效的快照）。
+	// 这是**进程级**闩锁（置位后不复位）：写操作本就会删除快照文件，而该异步写入只发生在
+	// 装配期一次，故语义正确；闩锁置位**之后**才进入写流程的竞态由 snapshotGen 兜（见
+	// writeIndexSnapshot / finalizeSnapshotFile）。
+	snapshotWriteDisabled atomic.Bool
+	// snapshotGen 是快照**代际号**：每次 `invalidateIndexSnapshot` 自增。慢路径写入在提交
+	// （rename）**前**比对代际 ⇒ gzip+GCM+写盘窗口内发生的写操作不会被陈旧快照覆盖（批次 16 P1-2）。
+	snapshotGen atomic.Uint64
 	// dirIDs 是逻辑目录 → 该容器目录 meta 的 dir_id（写新容器 meta 的 parent_dir_id、
 	// 目录移动改写父引用用）。
 	dirIDs map[string]string
@@ -407,7 +445,232 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		fs.gcCancel = cancel
 		fs.startGC(ctx)
 	}
+	fs.runNormalizeNamesAction(opts.NormalizeNames)
 	return fs, nil
+}
+
+// sampleVolumeSampleN 是快照命中后随机采样的容器数量（成本 ≈ N 次 Stat，秒级）。
+const sampleVolumeSampleN = 8
+
+// sampleVerifySnapshot 快照命中后**随机采样**若干容器，校验：
+//  1. 物理位置与逻辑父一致（容器确实在 `dirSegs[父]` 下）；
+//  2. 命名符合确定性机制（`DirNameFor(secret, 父容器, rel)`）。
+//
+// 不一致 ⇒ 告警（提示需配置 `normalize_names: "audit"` 做全量审计），**不阻断挂载**
+// （采样是尽力而为的漂移探测，不是正确性依赖——读取路径本身按 dirSegs 工作）。
+func (s *SecretdataFS) sampleVerifySnapshot(ctx context.Context) {
+	if len(s.secret) == 0 {
+		return
+	}
+	s.mu.RLock()
+	rels := make([]string, 0, len(s.dirSegs))
+	segs := make(map[string]string, len(s.dirSegs))
+	for rel, c := range s.dirSegs {
+		if rel != "" {
+			rels = append(rels, rel)
+		}
+		segs[rel] = c
+	}
+	s.mu.RUnlock()
+	if len(rels) == 0 {
+		return
+	}
+	// 随机采样（map 遍历本身随机；再 shuffle 保证均匀）
+	rand.Shuffle(len(rels), func(i, j int) { rels[i], rels[j] = rels[j], rels[i] })
+	n := min(sampleVolumeSampleN, len(rels))
+	drift, anomalous := 0, 0
+	for _, rel := range rels[:n] {
+		switch s.classifySampleDrift(segs, rel) {
+		case sampleDriftNone:
+		case sampleDriftUnmigrated:
+			drift++
+		case sampleDriftAnomalous:
+			drift++
+			anomalous++
+		}
+	}
+	if drift > 0 {
+		slog.Warn("secretdata: 容器名采样校验：存在未迁移/异常命名（建议低峰期配置 normalize_names=apply 分批收敛）",
+			"sampled", n, "drift", drift, "anomalous", anomalous)
+	}
+}
+
+// sampleDriftKind 是采样校验对单个逻辑目录的判定结果。
+type sampleDriftKind int
+
+const (
+	sampleDriftNone       sampleDriftKind = iota // 命名符合机制
+	sampleDriftUnmigrated                        // 父未迁移 ⇒ 子名必然不同，属**预期态**（Debug）
+	sampleDriftAnomalous                         // 父符合机制而自身不符合 ⇒ 疑似外部直改盘（Warn）
+)
+
+// classifySampleDrift 判定单个逻辑目录的容器命名状态（并输出对应级别日志）。
+//
+// **区分「未迁移」与「异常」**（批次 16 P2-3）：容器名由父容器派生 ⇒ 父不符合机制时子容器名
+// 必然不同（未迁移卷的**预期态**），逐条 Warn 会在每次启动刷满日志、造成告警疲劳；只有
+// 「父符合机制而自身不符合」才是真异常。
+func (s *SecretdataFS) classifySampleDrift(segs map[string]string, rel string) sampleDriftKind {
+	want, err := s.targetContainerPath(segs[parentDirOf(rel)], rel)
+	if err != nil {
+		return sampleDriftNone
+	}
+	cur := segs[rel]
+	if cur == want {
+		return sampleDriftNone
+	}
+	if s.parentContainerCanonical(segs, rel) {
+		slog.Warn("secretdata: 采样发现容器名异常（父符合确定性机制而自身不符合，疑似外部直改盘）",
+			"rel", rel, "current", cur, "expected", want)
+		return sampleDriftAnomalous
+	}
+	slog.Debug("secretdata: 采样发现容器名未迁移（父未迁移 ⇒ 预期态）", "rel", rel, "current", cur)
+	return sampleDriftUnmigrated
+}
+
+// parentContainerCanonical 报告 rel 的**父容器命名**是否符合确定性机制（无父视为符合）。
+func (s *SecretdataFS) parentContainerCanonical(segs map[string]string, rel string) bool {
+	p := parentDirOf(rel)
+	if p == "" {
+		// **顶层**：其容器名由**卷根容器**派生 ⇒ 必须先确认根容器自身合规，否则「未迁移的卷」
+		// 里每个顶层容器都会被误报为"异常/外部直改盘"（批次 16 修复轮 F1，实测误导排查方向）。
+		// 根容器合规性用 (`""`,`""`) 的派生名比对（与创建路径 `createContainerLocked` 同源）。
+		if segs[""] == "" {
+			return true // 无根容器（容器直接落在卷根）⇒ 顶层名可直接判定
+		}
+		wantRoot, err := s.targetContainerPath("", "")
+		return err == nil && segs[""] == wantRoot
+	}
+	pw, err := s.targetContainerPath(segs[parentDirOf(p)], p)
+	return err == nil && segs[p] == pw
+}
+
+// trySnapshotFastPath 尝试「快照快路径」（不列举容器树）；命中则做**采样校验**并返回 true。
+// 全量扫描只用于一次性审计/迁移（`normalize_names` 非空 ⇒ allow=false）——
+// 快照不含重复容器组信息，命中会让审计/导出恒为 0。
+func (s *SecretdataFS) trySnapshotFastPath(ctx context.Context, root []syncpkg.Entry, allow bool) bool {
+	if !allow || !s.tryLoadIndexSnapshotFast(ctx, root) {
+		return false
+	}
+	// 快照命中后的**随机采样校验**（用户裁定 2026-11-07）：常态装配保持秒级启动，同时用
+	// 少量采样探测「外部直改盘 / 未迁移容器」造成的命名漂移并告警。
+	s.sampleVerifySnapshot(ctx)
+	return true
+}
+
+// defaultNormalizeTimeout 是装配期运维动作的默认总超时上限（批次 16 P2-1）。
+const defaultNormalizeTimeout = 10 * time.Minute
+
+// normalizeMaxRounds 是「apply」动作在一轮装配内的最大批次数（收敛护栏；正常 ≤2 轮）。
+const normalizeMaxRounds = 200
+
+// runNormalizeNamesAction 按配置执行容器名规范化动作（装配末尾；"" = 不动）。
+// 失败**不阻断装配**（只告警）：审计/迁移是运维动作，卷可用性优先。
+// 整段带**总超时**（NormalizeTimeout），超时即收口为「部分完成 + 可续跑」。
+func (s *SecretdataFS) runNormalizeNamesAction(action string) {
+	timeout := s.opts.NormalizeTimeout
+	if timeout <= 0 {
+		timeout = defaultNormalizeTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "audit":
+		s.runAuditAction(ctx)
+	case "export":
+		s.runExportAction(ctx)
+	case "cleanup-empty":
+		s.runCleanupEmptyAction(ctx)
+	case "apply":
+		s.runApplyAction(ctx)
+	}
+}
+
+// runApplyAction 循环**分批迁移直到收敛**（批次 16 P2-5）：`NormalizeMaxMoves` 是每轮上限，
+// 原先只跑一轮 ⇒ 需人工多次重启才能迁完全量容器。循环以「本轮 moved==0」或超时/出错收口，
+// 每轮幂等且失败即提交已完成部分（可续跑）。
+func (s *SecretdataFS) runApplyAction(ctx context.Context) {
+	// 审计**只做一次**（批次 16 修复轮 F3）：重复容器组在迁移期间不变 ⇒ 每轮重算会让
+	// 「分批迁移」退化成 O(轮数 × 全量审计 + 解密）。
+	blocked, berr := s.normalizeBlockedRels(ctx)
+	if berr != nil {
+		slog.Error("secretdata: 容器名规范化前置审计失败（本轮跳过）", "error", berr)
+		return
+	}
+	totalMoved, rounds := 0, 0
+	for rounds < normalizeMaxRounds {
+		moved, skipped, err := s.normalizeContainerNamesWithBlocked(ctx, false, blocked)
+		totalMoved += moved
+		rounds++
+		if err != nil {
+			slog.Error("secretdata: 容器名规范化失败（已迁移部分保持确定性名，可重跑续跑）",
+				"error", err, "moved_total", totalMoved, "rounds", rounds)
+			return
+		}
+		if moved == 0 {
+			slog.Warn("secretdata: 容器名规范化完成", "moved", totalMoved, "skipped", skipped, "rounds", rounds)
+			return
+		}
+		if ctx.Err() != nil {
+			slog.Warn("secretdata: 容器名规范化超时收口（可重启续跑）",
+				"moved_total", totalMoved, "rounds", rounds, "error", ctx.Err())
+			return
+		}
+	}
+	slog.Warn("secretdata: 容器名规范化达到单次装配轮次上限（可重启续跑）",
+		"moved_total", totalMoved, "rounds", rounds)
+}
+
+// runAuditAction 执行重复容器审计 + 待迁移规模 dry-run（只读）。
+func (s *SecretdataFS) runAuditAction(ctx context.Context) {
+	conflicts, err := s.AuditDuplicateContainers(ctx)
+	if err != nil {
+		slog.Error("secretdata: 重复容器审计失败", "error", err)
+		return
+	}
+	conflicted := 0
+	for _, c := range conflicts {
+		if c.Conflicted {
+			conflicted++
+		}
+	}
+	slog.Warn("secretdata: 重复容器审计完成", "groups", len(conflicts), "conflicted", conflicted)
+	if pending, already, derr := s.NormalizeContainerNames(ctx, true); derr != nil {
+		slog.Error("secretdata: 容器名 dry-run 失败", "error", derr)
+	} else {
+		slog.Warn("secretdata: 容器名规范化 dry-run（audit）", "pending_migrate", pending, "already_deterministic", already)
+	}
+	for _, c := range conflicts {
+		slog.Warn("secretdata: 重复容器组", "rel", c.Rel, "canonical", c.Canonical,
+			"others", c.Others, "conflicted", c.Conflicted, "details", c.Details)
+	}
+}
+
+// runCleanupEmptyAction 清理**空**落选容器（安全约束见 CleanupEmptyDuplicateContainers）。
+// 证据（目录 meta 解密 JSON）写 `NormalizeExportDir`（同 export 的隔离结构）。
+func (s *SecretdataFS) runCleanupEmptyAction(ctx context.Context) {
+	evidence := strings.TrimSpace(s.opts.NormalizeExportDir)
+	removed, skipped, err := s.CleanupEmptyDuplicateContainers(ctx, evidence, false)
+	if err != nil {
+		slog.Error("secretdata: 空落选容器清理失败", "error", err)
+		return
+	}
+	slog.Warn("secretdata: 空落选容器清理完成",
+		"removed", removed, "skipped_has_files", skipped, "evidence_dir", evidence)
+}
+
+// runExportAction 把重复容器组的落选容器解码导出到本地（供人工核对争议内容）。
+func (s *SecretdataFS) runExportAction(ctx context.Context) {
+	dst := strings.TrimSpace(s.opts.NormalizeExportDir)
+	if dst == "" {
+		dst = "dup-export"
+	}
+	files, bytesOut, err := s.ExportDuplicateContainers(ctx, dst)
+	if err != nil {
+		slog.Error("secretdata: 重复容器导出失败", "dst", dst, "error", err)
+		return
+	}
+	slog.Warn("secretdata: 重复容器导出完成（落选容器数据已解码到本地，供人工核对）",
+		"dst", dst, "files", files, "bytes", bytesOut)
 }
 
 // backend 是 ExternalBackend 实现。
@@ -1882,14 +2145,23 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	// **快照优先**：命中时跳过容器树列举（292 个容器 = 292 次外部 `ls`，实测占启动
 	// 192s 中的 181s）。健全性由「卷根顶层目录集合 + 抽样 Stat」保障；本进程任何写操作
 	// 都会删除快照（见 invalidateIndexSnapshot），因此只在「外部直改盘」时才可能陈旧。
-	if s.tryLoadIndexSnapshotFast(ctx, root) {
+	//
+	// **例外**（2026-11-07）：配置了 `normalize_names`（audit/apply）时**必须全量扫描**——
+	// 快照不含「重复容器组」信息（dupGroups 由扫描阶段填充）⇒ 命中快照会让审计恒报 0 组
+	// （实测：groups=0 但待迁移 625 个容器，掩盖了真实重复）。
+	// **两条快照路径都必须让路**（2026-11-07 实测踩坑）：`tryLoadIndexSnapshotFast`（不列举
+	// 容器树）与 `tryLoadIndexSnapshot`（先列举再套快照）**都**会跳过扫描 ⇒ 必须一并短路，
+	// 否则审计/导出仍拿到空 dupGroups（实测：导出 files=0）。
+	allowSnapshot := s.opts.NormalizeNames == ""
+	if s.trySnapshotFastPath(ctx, root, allowSnapshot) {
 		return nil
 	}
 	containers, cerr := s.dirContainers(ctx, root)
 	if cerr != nil {
 		return fmt.Errorf("secretdata: 扫描容器树失败（拒绝空视图挂载）: %w", cerr)
 	}
-	if s.tryLoadIndexSnapshot(ctx, containers) {
+	if allowSnapshot && s.tryLoadIndexSnapshot(ctx, containers) {
+		s.sampleVerifySnapshot(ctx)
 		return nil
 	}
 	s.resetIndex()
@@ -2304,6 +2576,8 @@ func dirMetaTable(scans []dirScan) map[string]*dirMeta {
 // 父引用断裂（parent 缺失/未解析）→ fail-closed 跳过该容器（含文件 meta 时记日志）。
 func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[string]*dirMeta, scans []dirScan) []dirRes {
 	res := make([]dirRes, len(scans))
+	// byRel：逻辑路径 → 声明它的容器索引（>1 即重复容器）；rels：每个 scan 的逻辑路径。
+	byRel := make(map[string][]int, len(scans))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, sc := range scans {
@@ -2318,7 +2592,42 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 			}
 			continue
 		}
-		res[i] = dirRes{container: sc.container, rel: rel, ok: true}
+		byRel[rel] = append(byRel[rel], i)
+	}
+	// **重复容器处理**（2026-11-06 实测线上缺陷）：同一逻辑路径被多个容器声明时，原实现
+	// `s.dirSegs[rel] = sc.container` **静默覆盖** ⇒ 映射与物理不一致（实测 jav 卷：
+	// `ContainerAAAAAA` 与 `ContainerBBBBBB` 都声明同一目录，覆盖后嵌套校验拿旧容器校验新容器 ⇒
+	// 卷拒绝挂载）。此处**确定性选权威容器**，其余标记忽略（**数据保留不删**）并显著告警。
+	s.registerCanonicalContainers(scans, byRel, res)
+	return res
+}
+
+// dupContainerGroup 是**同一逻辑路径存在多个容器**的记录（装配期登记）。
+//   - canonical：权威容器（已登记进 dirSegs，其文件被加载）；
+//   - others：落选容器（**数据保留、未加载**）——迁移/清理前必须先审计其中是否有
+//     权威容器不存在的内容（有则需人工确认，见 AuditDuplicateContainers）。
+type dupContainerGroup struct {
+	rel       string
+	canonical string
+	others    []string
+}
+
+// registerCanonicalContainers 为每个逻辑路径登记**唯一权威容器**（重复容器：选权威 + 告警，
+// 其余容器数据保留但不加载）。拆出以控认知复杂度。
+func (s *SecretdataFS) registerCanonicalContainers(scans []dirScan, byRel map[string][]int, res []dirRes) {
+	for rel, idxs := range byRel {
+		keep := pickCanonicalContainer(scans, idxs)
+		sc := scans[keep]
+		if len(idxs) > 1 {
+			others := make([]string, 0, len(idxs)-1)
+			for _, i := range idxs {
+				if i != keep {
+					others = append(others, scans[i].container)
+				}
+			}
+			s.dupGroups = append(s.dupGroups, dupContainerGroup{rel: rel, canonical: sc.container, others: others})
+		}
+		res[keep] = dirRes{container: sc.container, rel: rel, ok: true}
 		s.dirPhysTotal += sc.dirPhys // 挂载时重建目录 meta 真值累计（Phase 1 已读 blob）
 		s.dirSegs[rel] = sc.container
 		s.dirIDs[rel] = sc.dm.DirID
@@ -2327,8 +2636,635 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 			s.dirs[rel] = struct{}{}
 			s.dirParents[rel] = parentDirOf(rel)
 		}
+		warnIgnoredContainers(rel, scans, idxs, keep)
 	}
-	return res
+}
+
+// warnIgnoredContainers 对同一逻辑路径的**落选容器**逐条告警（数据保留、暂不挂载）。
+func warnIgnoredContainers(rel string, scans []dirScan, idxs []int, keep int) {
+	for _, i := range idxs {
+		if i == keep {
+			continue
+		}
+		slog.Warn("secretdata: 同一逻辑目录存在**多个容器**（重复容器）——保留权威容器，"+
+			"其余容器数据保留但暂不挂载（请核对后清理）",
+			"rel", rel, "keep", scans[keep].container, "ignored", scans[i].container,
+			"keep_mtime", scans[keep].dm.MTime, "ignored_mtime", scans[i].dm.MTime)
+	}
+}
+
+// NormalizeContainerNames 把容器**物理名**规范化为 `DirNameFor` 派生名（一次性迁移，
+// **幂等、可中断续跑**）。
+//
+// 背景（2026-11-06）：容器名原为随机（`shardseal.RandDirName`）⇒ 同一逻辑目录可能被创建
+// 两次得到两个容器（重复容器，会导致装配期映射冲突、卷拒绝挂载）。新代码已改用**确定性命名**
+// 从机制上杜绝新增重复；本方法把**历史随机名容器逐个移动**到确定性名下，使机制对全卷生效
+// （同逻辑目录 ⇒ 恒同名 ⇒ 天然唯一）。
+//
+// 关键性质：
+//   - **逻辑不受影响**：容器解析走 `DirID`/`ParentDirID`（逻辑引用）与目录扫描（物理结构），
+//     **不依赖物理段名** ⇒ 改名安全（物理父子结构不变即可）。
+//   - **自顶向下**：子容器目标名依赖父容器路径 ⇒ 按逻辑深度升序处理，父先改名。
+//   - **幂等**：已是确定性名 ⇒ 跳过；中断后重跑自然续跑（每步独立完成）。
+//   - 卷根容器（rel=""）**不迁移**（只有一个根，不构成重复；且更敏感）。
+//
+// dryRun=true 只统计/打印计划（不移动、不改内存映射）。
+func (s *SecretdataFS) NormalizeContainerNames(ctx context.Context, dryRun bool) (moved, skipped int, err error) {
+	if len(s.secret) == 0 {
+		return 0, 0, fmt.Errorf("secretdata: 规范化容器名需要非空密钥")
+	}
+	// **迁移前置检查**（用户要求 2026-11-06）：重复容器组内若有**争议内容**
+	// （落选容器含权威容器没有的逻辑文件）⇒ 该组**跳过**（等人工确认），只迁移其余容器。
+	blocked, berr := s.normalizeBlockedRels(ctx)
+	if berr != nil {
+		return 0, 0, berr
+	}
+	return s.normalizeContainerNamesWithBlocked(ctx, dryRun, blocked)
+}
+
+// normalizeContainerNamesWithBlocked 是规范化的主流程（blocked 由调用方提供）。
+//
+// **为什么把 blocked 作为参数**（批次 16 修复轮 F3）：`normalizeBlockedRels` 是一次完整审计
+// （逐容器列举 + 解密文件 meta），而分批迁移需要多轮调用 —— 每轮重算会让总成本退化为
+// O(轮数 × 审计)。重复容器组在迁移期间**不变**（只重命名权威容器，落选容器不动）⇒ 复用安全。
+func (s *SecretdataFS) normalizeContainerNamesWithBlocked(ctx context.Context, dryRun bool,
+	blocked map[string]bool) (moved, skipped int, err error) {
+	s.mu.RLock()
+	segs := make(map[string]string, len(s.dirSegs))
+	maps.Copy(segs, s.dirSegs)
+	s.mu.RUnlock()
+
+	rels := sortedRelsByDepth(segs)
+	newSegs := make(map[string]string, len(rels))
+	moved, skipped, merr := s.normalizeAllRels(ctx, rels, segs, newSegs, blocked, dryRun)
+	if merr != nil {
+		// **失败也要失效快照**（已改名部分 ⇒ 物理已变）：否则下次启动命中陈旧快照
+		// （记录迁移前的 dirSegs）⇒ 采样校验恒报漂移。
+		if moved > 0 && !dryRun {
+			s.commitPartialMoves(newSegs)
+		}
+		return moved, skipped, merr
+	}
+	if dryRun {
+		return moved, skipped, nil
+	}
+	s.mu.Lock()
+	maps.Copy(s.dirSegs, newSegs)
+	s.mu.Unlock()
+	s.invalidateIndexSnapshot() // 物理路径已变 ⇒ 快照失效
+	return moved, skipped, nil
+}
+
+// normalizeOneRel 处理单个逻辑目录的容器名规范化（拆出以控认知复杂度）。
+// 返回 (本次移动数, 本次跳过数, error)；同时更新 newSegs[rel]。
+func (s *SecretdataFS) normalizeOneRel(ctx context.Context, rel string, segs, newSegs map[string]string,
+	blocked map[string]bool, dryRun bool) (int, int, error) {
+	if blocked[rel] {
+		return 0, 1, nil
+	}
+	pc := segmentOf(segs, newSegs, parentDirOf(rel))
+	want, derr := s.targetContainerPath(pc, rel)
+	if derr != nil {
+		return 0, 0, derr
+	}
+	// **当前实际路径必须用「父的当前路径 + 自身 basename」拼接**（2026-11-07 实测缺陷）：
+	// 父在本次迁移中可能已改名，而 `segs[rel]` 记录的是**扫描时**的完整旧路径 ⇒ 直接用它会
+	// 指向已不存在的旧父下的路径（实测报 `not found: file does not exist`）。
+	cur := path.Join(pc, path.Base(segs[rel]))
+	switch {
+	case segs[rel] == "":
+		return 0, 0, nil // 该逻辑路径无容器（异常态）⇒ 跳过
+	case cur == want:
+		newSegs[rel] = want
+		return 0, 1, nil
+	case dryRun:
+		slog.Info("[dry-run] 规范化容器名", "rel", rel, "from", cur, "to", want)
+		newSegs[rel] = want
+		return 1, 0, nil
+	}
+	didMove, rerr := s.moveContainerIdempotent(ctx, rel, cur, want)
+	if rerr != nil {
+		return 0, 0, rerr
+	}
+	// **同步索引条目的容器路径**（批次 16 P1-1）：容器已物理改名（含「由对端完成」的情形），
+	// 而索引条目的 `e.dirSeg` 是 blob 定位依据 ⇒ 不同步会让同进程内的读/删指向已不存在的旧
+	// 路径（读失败），并让 GC 的引用标记全部落空（退化为逐容器解密重读）。
+	// 深度升序保证父先于子 ⇒ 每次 rebase 只影响「本容器及其尚未迁移的后代」，语义正确。
+	s.rebaseAfterContainerMove(cur, want)
+	newSegs[rel] = want
+	if didMove {
+		return 1, 0, nil
+	}
+	return 0, 1, nil
+}
+
+// moveContainerIdempotent 把容器从 cur 移到 want；**目标已存在视为已完成**（幂等续跑）。
+// 返回 (是否真的移动, error)。
+// defaultNormalizeMoveInterval 是相邻容器 rename 的默认最小间隔（限速，防外部限流）。
+const defaultNormalizeMoveInterval = 250 * time.Millisecond
+
+// maxContainerMoveBackoff 是容器改名失败退避的**上限**（指数放大后封顶）。
+const maxContainerMoveBackoff = 30 * time.Second
+
+// containerMoveRetryInterval 是容器改名失败后的**基础退避**（逐轮指数放大，见 moveContainerIdempotent）。
+// 迁移会连续做数百次 rename，易触发外部限流（百度 31034）⇒ 必须退避重试而非直接放弃。
+const containerMoveRetryInterval = 2 * time.Second
+
+// moveContainerIdempotent 把容器从 cur 移到 want；**目标已存在视为已完成**（幂等续跑）；
+// 失败时**退避重试**（限流是暂时的）。
+// 返回 (是否真的移动, error)。
+func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, want string) (bool, error) {
+	// **指数退避**（批次 16 P2-4）：外部限流（实测百度 31034）持续时间远长于线性 3 次（≈6s）
+	// 的总退避 ⇒ 提为 5 次、2s→4s→8s→16s（封顶 maxContainerMoveBackoff），提高限流下收敛率。
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if rerr := s.inner.Rename(ctx, cur, want); rerr == nil {
+			return true, nil
+		} else {
+			lastErr = rerr
+		}
+		moved, decided := s.containerMovedByPeer(ctx, cur, want)
+		if decided && moved {
+			slog.Info("secretdata: 容器名已是目标（幂等跳过，可能由另一卷实例完成）", "rel", rel, "target", want)
+			return false, nil
+		}
+		if attempt == maxAttempts {
+			break
+		}
+		base := s.opts.ContainerMoveRetryBase
+		if base <= 0 {
+			base = containerMoveRetryInterval
+		}
+		delay := min(time.Duration(1<<(attempt-1))*base, maxContainerMoveBackoff)
+		slog.Warn("secretdata: 容器改名失败，退避后重试（可能外部限流）",
+			"rel", rel, "attempt", attempt, "max_attempts", maxAttempts, "delay", delay, "error", lastErr)
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return false, fmt.Errorf("secretdata: 规范化容器名失败（%s → %s）: %w", cur, want, lastErr)
+}
+
+// containerMovedByPeer 判定「本次 rename 失败」是否属于**已由他人完成**的幂等情形：
+// 必须**父目录列举**确认「源已不在 + 目标已在」。
+//
+// **不能用 `Stat(want)==nil` 单独判定**（2026-11-07 实测踩坑）：底层 `Stat` 对目录的语义
+// 宽松（父存在即可能返回成功）⇒ 会把**从未执行的改名**误判为「目标已存在」⇒ 迁移静默
+// 不生效（实测：`moved=0 skipped=628` 但容器名仍是随机的，采样校验 8/8 漂移）。
+// 返回 (是否已由他人完成, 是否得出确定结论)。**listInner 失败（如限流）⇒ decided=false**
+// —— 调用方据此退避重试，而不是误报「改名失败」（实测 2026-11-07：迁移末尾报假错误）。
+func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want string) (moved, decided bool) {
+	parent := parentDirOf(cur)
+	if parentDirOf(want) != parent {
+		return false, true // 父不同 ⇒ 明确不是「同一名字的幂等」情形
+	}
+	ents, err := s.listInner(ctx, parent)
+	if err != nil {
+		return false, false // 无法判定 ⇒ 交调用方重试
+	}
+	var hasCur, hasWant bool
+	curBase, wantBase := path.Base(cur), path.Base(want)
+	for _, e := range ents {
+		if !e.IsDir {
+			continue
+		}
+		if e.Name == curBase {
+			hasCur = true
+		}
+		if e.Name == wantBase {
+			hasWant = true
+		}
+	}
+	return !hasCur && hasWant, true
+}
+
+// normalizeAllRels 遍历逻辑目录执行改名（分批上限 + 限速；拆出以控认知复杂度）。
+func (s *SecretdataFS) normalizeAllRels(ctx context.Context, rels []string, segs, newSegs map[string]string,
+	blocked map[string]bool, dryRun bool) (moved, skipped int, err error) {
+	limit := s.opts.NormalizeMaxMoves
+	interval := s.opts.NormalizeMoveInterval
+	if interval <= 0 {
+		interval = defaultNormalizeMoveInterval
+	}
+	for _, rel := range rels {
+		// **分批上限**（2026-11-07）：迁移需数百次 rename，易触发外部限流 ⇒ 单次装配只迁 N 个，
+		// 多次重启收敛（幂等）。达到上限即收口（已改名部分仍会失效快照）。
+		if limit > 0 && moved >= limit {
+			slog.Info("secretdata: 达到单次迁移上限，剩余容器留待下次启动续跑",
+				"moved", moved, "limit", limit)
+			return moved, skipped, nil
+		}
+		m, sk, rerr := s.normalizeOneRel(ctx, rel, segs, newSegs, blocked, dryRun)
+		moved += m
+		skipped += sk
+		if m > 0 && !dryRun {
+			// **限速**：相邻 rename 之间留间隔，降低触发外部限流的概率。
+			select {
+			case <-ctx.Done():
+				return moved, skipped, ctx.Err()
+			case <-time.After(interval):
+			}
+		}
+		if rerr != nil {
+			return moved, skipped, rerr
+		}
+	}
+	return moved, skipped, nil
+}
+
+// rebaseAfterContainerMove 在容器改名后同步 `dirSegs` 与**索引条目的 `e.dirSeg`**。
+//
+// **为什么必须**（批次 16 P1-1）：索引条目持有容器路径（blob 定位依据），只更新 `dirSegs` 会让
+// 文件读/删指向已搬走的旧路径 ⇒ 读失败；GC 的 `gcMarkIndex` 也会按陈旧路径登记引用 ⇒ 新容器下
+// 所有 blob 都"不在索引" ⇒ GC 退化为逐容器解密重读（写锁内、scrypt、分钟级）。
+// 既有 `rebaseContainerPathsLocked` 的注释恰好记录了同一故障模式（目录移动未 rebase ⇒ 读失败）。
+func (s *SecretdataFS) rebaseAfterContainerMove(oldC, newC string) {
+	if oldC == "" || newC == "" || oldC == newC {
+		return
+	}
+	s.mu.Lock()
+	s.rebaseContainerPathsLocked(oldC, newC)
+	s.mu.Unlock()
+}
+
+// commitPartialMoves 写回**已完成的**部分迁移并失效快照（失败/中断/达上限路径统一收口）。
+func (s *SecretdataFS) commitPartialMoves(newSegs map[string]string) {
+	if len(newSegs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	maps.Copy(s.dirSegs, newSegs)
+	s.mu.Unlock()
+	s.invalidateSnapshotAfterPartialMove()
+}
+
+// invalidateSnapshotAfterPartialMove 在**迁移中途失败**时也须使快照失效（2026-11-07 实测
+// 缺陷）：迁移已改名部分容器（物理已变），若因失败提前 return 而不失效快照，下次启动会命中
+// **陈旧快照**（记录迁移前的 dirSegs）⇒ 采样校验恒报漂移、甚至读到已不存在的路径。
+func (s *SecretdataFS) invalidateSnapshotAfterPartialMove() {
+	s.invalidateIndexSnapshot()
+}
+
+// normalizeBlockedRels 返回因「重复容器争议内容」需跳过规范化的逻辑路径集合。
+func (s *SecretdataFS) normalizeBlockedRels(ctx context.Context) (map[string]bool, error) {
+	conflicts, err := s.AuditDuplicateContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	blocked := make(map[string]bool, len(conflicts))
+	for _, c := range conflicts {
+		if !c.Conflicted {
+			continue
+		}
+		blocked[c.Rel] = true
+		slog.Warn("secretdata: 重复容器组存在**争议内容**，跳过该组的容器名规范化（等人工确认）",
+			"rel", c.Rel, "canonical", c.Canonical, "others", c.Others, "details", c.Details)
+	}
+	return blocked, nil
+}
+
+// sortedRelsByDepth 按逻辑深度升序（父先）返回非根 rel（同深度按字典序，确定性）。
+func sortedRelsByDepth(segs map[string]string) []string {
+	rels := make([]string, 0, len(segs))
+	for rel := range segs {
+		if rel != "" {
+			rels = append(rels, rel)
+		}
+	}
+	sort.Slice(rels, func(i, j int) bool {
+		di, dj := strings.Count(rels[i], "/"), strings.Count(rels[j], "/")
+		if di != dj {
+			return di < dj
+		}
+		return rels[i] < rels[j]
+	})
+	return rels
+}
+
+// segmentOf 返回 rel 的当前容器路径：优先已迁移的新路径，否则原路径。
+func segmentOf(segs, newSegs map[string]string, rel string) string {
+	if np, ok := newSegs[rel]; ok {
+		return np
+	}
+	return segs[rel]
+}
+
+// targetContainerPath 计算 rel 在父容器 pc 下的**确定性**目标容器路径。
+func (s *SecretdataFS) targetContainerPath(pc, rel string) (string, error) {
+	base, err := shardseal.DirNameFor(s.secret, pc, rel)
+	if err != nil {
+		return "", err
+	}
+	return path.Join(pc, base), nil
+}
+
+// DupContainerConflict 是一条**重复容器**的审计结论（供人工确认，然后才允许迁移/清理）。
+type DupContainerConflict struct {
+	// Rel 是逻辑目录路径。
+	Rel string
+	// Canonical 是权威容器（当前已登记并加载其文件）。
+	Canonical string
+	// Others 是落选容器（数据保留、未加载）。
+	Others []string
+	// Conflicted=true 表示**落选容器存在权威容器没有的内容**（有争议）⇒ 禁止自动迁移/清理，
+	// 必须人工核对后再处理。
+	Conflicted bool
+	// CanonicalItems / OtherItems 是各容器的直接物理条目名（目录项 + blob 项，排序）。
+	// 供人工比对定位差异。
+	CanonicalItems []string
+	OtherItems     map[string][]string
+	// Details 是人类可读的差异说明（谁多出哪些条目）。
+	Details []string
+}
+
+// dupGroupsSnapshot 返回重复容器组的快照（测试/审计用；只读）。
+func (s *SecretdataFS) dupGroupsSnapshot() []dupContainerGroup {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]dupContainerGroup, len(s.dupGroups))
+	for i, g := range s.dupGroups {
+		g.others = append([]string(nil), g.others...) // 深拷贝：避免调用方误改污染内部状态
+		out[i] = g
+	}
+	return out
+}
+
+// AuditDuplicateContainers 审计全部重复容器组：列出各候选容器的**直接物理条目**并标注差异。
+//
+// **为什么必须先审计**（用户要求 2026-11-06）：落选容器**数据保留但未加载**，无法从索引判断
+// 它是否含权威容器没有的内容（可能是在途/旧版本写入）。若直接迁移/清理可能丢数据
+// ⇒ 有争议的组**只记录、等人工确认**。
+//
+// 判据（**保守但按逻辑内容**，批次 16 P1-5 修正）：落选容器子树内存在权威容器子树**没有的
+// **逻辑文件名**（解密 meta 取 `Original.Name`）⇒ Conflicted=true。
+//
+// 为什么不能按**物理条目名**比对：历史子容器名是**随机**的（正是本机制要治理的问题本身）⇒
+// 用物理名比对时「含 ≥2 个子容器的重复组」必然判争议 ⇒ **最需要迁移的嵌套重复组被永久跳过**，
+// 与设计目标相悖。物理条目名仍保留在 `CanonicalItems`/`OtherItems` 供人工排查，但**不参与判据**。
+//
+// 取舍：不区分「同名文件的版本差异」（落选容器的数据始终保留、不被删除，版本差异不阻断迁移）。
+func (s *SecretdataFS) AuditDuplicateContainers(ctx context.Context) ([]DupContainerConflict, error) {
+	s.mu.RLock()
+	groups := make([]dupContainerGroup, len(s.dupGroups))
+	copy(groups, s.dupGroups)
+	s.mu.RUnlock()
+	if len(groups) == 0 {
+		return nil, nil
+	}
+	out := make([]DupContainerConflict, 0, len(groups))
+	for _, g := range groups {
+		c, err := s.auditOneGroup(ctx, g)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// auditOneGroup 审计单个重复容器组（拆出以控认知复杂度）。
+func (s *SecretdataFS) auditOneGroup(ctx context.Context, g dupContainerGroup) (DupContainerConflict, error) {
+	c := DupContainerConflict{
+		Rel: g.rel, Canonical: g.canonical, Others: g.others,
+		OtherItems: make(map[string][]string, len(g.others)),
+	}
+	items, err := s.containerEntries(ctx, g.canonical)
+	if err != nil {
+		return c, fmt.Errorf("secretdata: 审计权威容器 %s 失败: %w", g.canonical, err)
+	}
+	c.CanonicalItems = items
+	have, herr := s.containerLogicalFiles(ctx, g.canonical)
+	if herr != nil {
+		// 权威容器自身不可读 ⇒ 无法比对 ⇒ 保守判争议（不静默放过）
+		c.Conflicted = true
+		c.Details = append(c.Details, fmt.Sprintf("权威容器 %s 内容不可读（无法比对）: %v", g.canonical, herr))
+	}
+	for _, o := range g.others {
+		oitems, oerr := s.containerEntries(ctx, o)
+		if oerr != nil {
+			return c, fmt.Errorf("secretdata: 审计落选容器 %s 失败: %w", o, oerr)
+		}
+		c.OtherItems[o] = oitems
+		files, ferr := s.containerLogicalFiles(ctx, o)
+		if ferr != nil {
+			c.Conflicted = true
+			c.Details = append(c.Details, fmt.Sprintf("落选容器 %s 内容不可读（无法比对，需人工确认）: %v", o, ferr))
+			continue
+		}
+		extra := missingFrom(have, keysOf(files))
+		if len(extra) > 0 {
+			c.Conflicted = true
+			c.Details = append(c.Details, fmt.Sprintf("落选容器 %s 含权威容器没有的**文件** %d 项: %v",
+				o, len(extra), trimList(extra, 5)))
+		}
+		// 物理条目差异只作**人工排查参考**（不参与判据；子容器名随机属正常）
+		c.Details = append(c.Details, fmt.Sprintf(
+			"落选容器 %s 物理条目 %d 项（权威 %d 项；子容器名随机属正常，仅供排查）",
+			o, len(oitems), len(items)))
+	}
+	return c, nil
+}
+
+// keysOf 返回集合的键（用于差集比对；顺序由调用方排序/截断）。
+func keysOf(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// containerLogicalFiles 递归收集容器子树内全部文件的**逻辑路径**（相对容器根）集合：
+// 目录段取自各子容器 dir meta 的 `Name`，文件名取自文件 meta 的 `Original.Name`。
+//
+// 为什么用「逻辑路径」而不是「物理条目名」（批次 16 P1-5）：历史**子容器名是随机**的（正是本
+// 机制要治理的问题本身）⇒ 按物理名比对时「含 ≥2 子容器的重复组」必然判争议、永久跳过迁移。
+// 为什么还要带**目录段**（修复轮 F5）：只用 basename 时「不同子目录下的同名文件」会互相掩盖
+// ⇒ 漏报真实的内容差异。
+func (s *SecretdataFS) containerLogicalFiles(ctx context.Context, root string) (map[string]struct{}, error) {
+	return s.collectLogicalFiles(ctx, root, "", 0)
+}
+
+// collectLogicalFiles 递归收集逻辑路径集合（logicalPrefix = 当前容器的逻辑路径前缀）。
+func (s *SecretdataFS) collectLogicalFiles(ctx context.Context, container, logicalPrefix string, depth int) (map[string]struct{}, error) {
+	if depth > maxContainerDepth {
+		return nil, fmt.Errorf("secretdata: 容器树递归超过深度上限 %d（容器 %q）", maxContainerDepth, container)
+	}
+	ents, err := s.listInner(ctx, container)
+	if err != nil {
+		return nil, fmt.Errorf("列举容器 %q 失败: %w", container, err)
+	}
+	out, subs, cerr := s.collectContainerLocalFiles(ctx, container, ents, logicalPrefix)
+	if cerr != nil {
+		return nil, cerr
+	}
+	for _, sub := range subs {
+		subFiles, serr := s.collectSubContainerLogicalFiles(ctx, container, sub, logicalPrefix, depth)
+		if serr != nil {
+			return nil, serr
+		}
+		for k := range subFiles {
+			out[k] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+// collectContainerLocalFiles 处理**单个容器自身**的条目：返回「逻辑文件路径集合」与「子容器名列表」。
+func (s *SecretdataFS) collectContainerLocalFiles(ctx context.Context, container string,
+	ents []syncpkg.Entry, logicalPrefix string) (map[string]struct{}, []string, error) {
+	out := map[string]struct{}{}
+	var subs []string
+	for _, e := range ents {
+		if e.IsDir {
+			subs = append(subs, e.Name)
+			continue
+		}
+		if shardseal.ClassifyName(e.Name) != shardseal.KindFileMeta {
+			continue
+		}
+		name, merr := s.logicalFileName(ctx, path.Join(container, e.Name))
+		if merr != nil {
+			return nil, nil, merr
+		}
+		if name != "" {
+			out[path.Join(logicalPrefix, name)] = struct{}{}
+		}
+	}
+	return out, subs, nil
+}
+
+// logicalFileName 解密单个文件 meta 并返回其**逻辑文件名**（不可读 ⇒ error）。
+func (s *SecretdataFS) logicalFileName(ctx context.Context, blobKey string) (string, error) {
+	mm, _, merr := s.readFileMetaFast(ctx, blobKey)
+	if merr != nil {
+		return "", fmt.Errorf("解密文件 meta %q 失败: %w", blobKey, merr)
+	}
+	if mm == nil {
+		return "", nil
+	}
+	return mm.Original.Name, nil
+}
+
+// collectSubContainerLogicalFiles 读取子容器的**目录 meta 逻辑名**后递归收集其逻辑文件路径。
+func (s *SecretdataFS) collectSubContainerLogicalFiles(ctx context.Context, parentContainer, sub,
+	logicalPrefix string, depth int) (map[string]struct{}, error) {
+	subC := path.Join(parentContainer, sub)
+	dm, _, _, found, derr := s.scanContainerDirMeta(ctx, subC)
+	if derr != nil {
+		return nil, fmt.Errorf("读取子容器 %q 目录 meta 失败: %w", subC, derr)
+	}
+	if !found || dm == nil {
+		return nil, fmt.Errorf("子容器 %q 缺少可解密的目录 meta", subC)
+	}
+	return s.collectLogicalFiles(ctx, subC, path.Join(logicalPrefix, dm.Name), depth+1)
+}
+
+// missingFrom 返回 items 中不在 have 里的元素（顺序保持）。
+func missingFrom(have map[string]struct{}, items []string) []string {
+	var extra []string
+	for _, it := range items {
+		if _, ok := have[it]; !ok {
+			extra = append(extra, it)
+		}
+	}
+	return extra
+}
+
+// containerEntries 列出容器目录的直接条目名（排序；不含子项内部）。
+func (s *SecretdataFS) containerEntries(ctx context.Context, container string) ([]string, error) {
+	ents, err := s.inner.ListDir(ctx, container)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		name := e.Name
+		if name == "" {
+			name = path.Base(strings.TrimSuffix(e.Path, "/"))
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// trimList 截断列表用于日志（避免超长输出）。
+func trimList(in []string, n int) []string {
+	if len(in) <= n {
+		return in
+	}
+	return append(append([]string{}, in[:n]...), fmt.Sprintf("…共 %d 项", len(in)))
+}
+
+// pickCanonicalContainer 在同一逻辑路径的多个容器中确定**权威者**（确定性，可复现）。
+//
+// 判据优先级（2026-11-06 实测校准）：
+//  1. **子容器数量多**——数据更全，这是最强判据：实测「写子目录**不会**更新父容器 meta」
+//     ⇒ 父 meta 的 mtime 在重复容器场景下**常常相同**（复制/并发创建），仅靠 mtime 会
+//     选错 ⇒ 选到子容器不在其下的那个 ⇒ 子容器校验失败 ⇒ 卷仍然起不来；
+//  2. 目录 meta mtime 新者优先（同子容器数时）；
+//  3. DirID 字典序（稳定，避免扫描顺序影响结果）。
+func pickCanonicalContainer(scans []dirScan, idxs []int) int {
+	subs := subContainerCounts(scans)
+	best := idxs[0]
+	for _, i := range idxs[1:] {
+		if containerScoreOf(scans, subs, i).betterThan(containerScoreOf(scans, subs, best)) {
+			best = i
+		}
+	}
+	return best
+}
+
+// containerScore 是权威性排序键（逐项比较，越大越权威）。
+type containerScore struct {
+	subs     int   // 物理子容器数（数据完整性代理指标）
+	hasFiles bool  // **含文件 meta**（2026-11-07 新增：空容器 vs 有数据容器，必须后者胜）
+	mtime    int64 // 目录 meta mtime（纳秒）
+	dirID    string
+}
+
+// betterThan 报告 a 是否比 b 更权威（子容器数 → **有文件** → mtime → DirID）。
+//
+// **`hasFiles` 必须在 mtime 之前**（2026-11-07 实测缺陷）：重复容器常由「复制目录 meta」形成，
+// 两者的 mtime 与 DirID **完全相同**（同一个 meta），仅靠它们会按扫描顺序任选 ⇒ 可能选中
+// **空容器**为权威、把**有数据的容器**当落选（数据虽保留不删，但**不加载** ⇒ 用户看不到文件）。
+func (a containerScore) betterThan(b containerScore) bool {
+	if a.subs != b.subs {
+		return a.subs > b.subs
+	}
+	if a.hasFiles != b.hasFiles {
+		return a.hasFiles
+	}
+	if a.mtime != b.mtime {
+		return a.mtime > b.mtime
+	}
+	return a.dirID < b.dirID
+}
+
+// containerScoreOf 计算单个候选的排序键。
+func containerScoreOf(scans []dirScan, subs map[string]int, i int) containerScore {
+	return containerScore{
+		subs:     subs[scans[i].container],
+		hasFiles: scans[i].hasFiles,
+		mtime:    dirMetaMTime(scans[i].dm.MTime),
+		dirID:    scans[i].dm.DirID,
+	}
+}
+
+// subContainerCounts 统计每个容器物理直接子项（容器）数量。
+func subContainerCounts(scans []dirScan) map[string]int {
+	counts := make(map[string]int, len(scans))
+	for i := range scans {
+		counts[parentDirOf(scans[i].container)]++
+	}
+	return counts
 }
 
 // loadAllFileMetas Phase 3：各容器文件 meta 并行解密登记索引。
@@ -2778,7 +3714,11 @@ func (s *SecretdataFS) ensureContainer(ctx context.Context, dirPath string, mtim
 // 仍在卷根（顶层）——逻辑树根无父容器。**旧扁平布局不支持、无兼容**：加载侧校验卷根容器唯一
 // （`validateNestedContainers`），违反即 fail-closed 拒绝挂载。
 func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, parentContainer, parentID string, mtime int64) (string, string, string, int64, error) {
-	c, cerr := shardseal.RandDirName()
+	// **确定性容器名**（2026-11-06 修复「重复容器」）：原为 RandDirName（随机）⇒ 同一逻辑目录
+	// 被创建两次（中断重试/并发/缓存丢失）会得到两个容器、同时声明同一逻辑路径 ⇒ 装配期
+	// dirSegs 静默覆盖 ⇒ 卷拒绝挂载。确定性派生使重复创建天然幂等（同名复用）。
+	// 详见 shardseal.DirNameFor 注释。
+	c, cerr := shardseal.DirNameFor(s.secret, parentContainer, dirPath)
 	if cerr != nil {
 		return "", "", "", 0, cerr
 	}

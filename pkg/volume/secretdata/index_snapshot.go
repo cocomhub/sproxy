@@ -273,6 +273,14 @@ func (s *SecretdataFS) writeIndexSnapshot(snap *indexSnapshot) {
 	if p == "" {
 		return
 	}
+	// **本进程已发生写/迁移 ⇒ 放弃落盘**（2026-11-07 实测竞态）：装配期快照写入是**异步**
+	// goroutine，而「容器名规范化」等写动作在其后**同步**执行并删快照 ⇒ 异步写入随后又把
+	// **迁移前**的 dirSegs 写回 ⇒ 下次启动载入陈旧名字（实测：采样校验 8/8 全漂移）。
+	if s.snapshotWriteDisabled.Load() {
+		slog.Debug("secretdata: 索引快照落盘已抑制（本进程发生过写操作）")
+		return
+	}
+	gen := s.snapshotGen.Load() // 代际快照：提交前比对（见 finalizeSnapshotFile）
 	raw, jerr := json.Marshal(snap)
 	if jerr != nil {
 		slog.Warn("secretdata: 索引快照序列化失败（忽略）", "error", jerr)
@@ -314,12 +322,32 @@ func (s *SecretdataFS) writeIndexSnapshot(snap *indexSnapshot) {
 		slog.Warn("secretdata: 索引快照写入失败（忽略）", "path", p, "error", werr)
 		return
 	}
-	if rerr := os.Rename(tmp, p); rerr != nil {
-		_ = os.Remove(tmp)
-		slog.Warn("secretdata: 索引快照落盘失败（忽略）", "path", p, "error", rerr)
-		return
+	if !s.finalizeSnapshotFile(tmp, p, gen) {
+		return // 已放弃提交（窗口内发生过写操作 / rename 失败）
 	}
 	slog.Info("secretdata: 索引快照已更新", "path", p, "entries", len(snap.Entries), "containers", len(snap.Containers))
+}
+
+// finalizeSnapshotFile 提交快照文件（tmp → p），**提交前重新校验代际**：
+// 调用方在进入落盘流程时捕获 gen，此处若发现 `s.snapshotGen` 已变化（窗口内发生了写操作并删除了
+// 快照）则放弃提交并清理 tmp。
+//
+// **为什么必须在 rename 前再查一次**（批次 16 P1-2）：入口处的 `snapshotSuppressed` 检查与
+// `os.Rename` 之间隔着 marshal + gzip + AES-GCM + 写盘（数十 MB、秒级窗口）——窗口内落下的
+// 写/迁移无法阻止陈旧快照被写回，下次启动即载入陈旧索引（已删文件“复活”、新文件“不可见”）。
+func (s *SecretdataFS) finalizeSnapshotFile(tmp, p string, gen uint64) bool {
+	if cur := s.snapshotGen.Load(); cur != gen {
+		_ = os.Remove(tmp)
+		slog.Warn("secretdata: 索引快照提交前发现代际已变化（窗口内发生过写操作）⇒ 放弃落盘，避免陈旧索引覆盖",
+			"path", p, "gen", gen, "current_gen", cur)
+		return false
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		slog.Warn("secretdata: 索引快照落盘失败（忽略）", "path", p, "error", err)
+		return false
+	}
+	return true
 }
 
 // invalidateIndexSnapshot 使索引快照失效（**写路径必须调用**）。
@@ -332,6 +360,8 @@ func (s *SecretdataFS) invalidateIndexSnapshot() {
 	if s.opts.IndexSnapshotPath == "" {
 		return
 	}
+	s.snapshotWriteDisabled.Store(true) // 抑制装配期**异步**落盘（进程级闩锁，见字段注释）
+	s.snapshotGen.Add(1)                // 代际自增 ⇒ 在途的慢路径写入提交前会放弃
 	if err := os.Remove(s.opts.IndexSnapshotPath); err == nil {
 		slog.Debug("secretdata: 索引快照已失效（写操作后需重建）")
 	}
@@ -394,7 +424,12 @@ func (s *SecretdataFS) tryLoadIndexSnapshotFast(ctx context.Context, root []sync
 	// 旧格式（未压缩）命中后后台重写为 gzip 格式：下次启动解密量降一个数量级。
 	if !snap.isGzip {
 		containers := append([]string(nil), snap.Containers...)
-		go func() { s.writeIndexSnapshot(s.buildIndexSnapshot(containers)) }()
+		go func() {
+			if s.snapshotWriteDisabled.Load() {
+				return
+			}
+			s.writeIndexSnapshot(s.buildIndexSnapshot(containers))
+		}()
 	}
 	return true
 }

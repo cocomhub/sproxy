@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,6 +178,12 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 		SpanCacheBytes:     vcExtraByteSize(v, "span_cache_bytes"),
 		IndexSnapshotPath:  vcExtraStr(v, "index_snapshot_path"),
 		MetaCacheDir:       vcExtraStr(v, "meta_cache_dir"),
+		// normalize_names：""/"audit"/"apply"（默认空 = 不动；见 Options 注释）
+		NormalizeNames:        vcExtraStr(v, "normalize_names"),
+		NormalizeExportDir:    vcExtraStr(v, "normalize_export_dir"),
+		NormalizeMaxMoves:     vcExtraInt(v, "normalize_max_moves"),
+		NormalizeMoveInterval: vcExtraDuration(v, "normalize_move_interval"),
+		NormalizeTimeout:      vcExtraDuration(v, "normalize_timeout"),
 	}
 }
 
@@ -363,6 +370,30 @@ func vcExtraByteSize(v volume.Volume, key string) sizex.ByteSize {
 //   - 整数纳秒（JSON/YAML 数字，YAML 整数为 int / int64）。
 //
 // 非法/缺省/非正数返回 0（Options.GCInterval 0 = 默认禁用后台 GC，调用方显式 fs.GC()）。
+// vcExtraInt 读取整型 extra（缺省/非法返回 0，调用方以 0 传默认）。
+func vcExtraInt(v volume.Volume, key string) int {
+	raw, ok := v.Extra[key]
+	if !ok {
+		return 0
+	}
+	switch n := raw.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(n))
+		if err != nil {
+			return 0
+		}
+		return parsed
+	default:
+		return 0
+	}
+}
+
 func vcExtraDuration(v volume.Volume, key string) time.Duration {
 	raw, ok := v.Extra[key]
 	if !ok {

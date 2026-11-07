@@ -342,5 +342,59 @@ func randomLowerAlnum(n int) (string, error) {
 	return string(b), nil
 }
 
+// dirNameLen 是**确定性**目录容器名的长度（落在 RandDirName 的 5..30 区间内，外观一致）。
+const dirNameLen = 16
+
+// DirNameFor 按 (卷密钥, 父容器, 逻辑目录路径) **确定性派生**容器目录名。
+//
+// **为什么必须确定性**（2026-11-06 实测线上缺陷）：容器名原为 `RandDirName()`（随机），
+// 同一逻辑目录被创建两次（中断后重试 / 并发写 / 索引缓存丢失）会得到**两个不同容器**，
+// 二者都声明同一逻辑路径 ⇒ 装配期 `dirSegs[rel]` 被**静默覆盖** ⇒ 嵌套校验拿错映射 ⇒
+// 卷拒绝挂载（实测 jav 卷 `ContainerAAAAAA` 与 `ContainerBBBBBB` 同时声明同一目录，导致
+// "容器未嵌套在逻辑父目录容器内" 而无法启动）。确定性派生让「重复创建」天然幂等
+// （同名 ⇒ 复用/覆盖），从机制上杜绝重复容器。
+//
+// 匿名性：以**卷密钥**作 HMAC key ⇒ 无密钥者无法枚举或关联容器名（与随机名等价）；
+// 不同卷（不同密钥）派生不同名 ⇒ 跨卷不可关联；同卷同路径恒同名（这正是幂等所需）。
+func DirNameFor(secret []byte, parentContainer, dirPath string) (string, error) {
+	if len(secret) == 0 {
+		return "", fmt.Errorf("shardseal: DirNameFor 需要非空密钥")
+	}
+	mac := hmac.New(sha256.New, secret)
+	// 域分隔：前缀 + NUL + 父容器 + NUL + 逻辑路径。父容器名与逻辑路径都**不含 NUL**
+	// （容器名是 alnum；路径被 ValidateFilePath 拒绝空字节）⇒ 拼接无歧义。
+	_, _ = mac.Write([]byte("sproxy/dir-name/v1" + string([]byte{0})))
+	_, _ = mac.Write([]byte(parentContainer))
+	_, _ = mac.Write([]byte(string([]byte{0})))
+	_, _ = mac.Write([]byte(dirPath))
+	return alnumFromBytes(mac.Sum(nil), dirNameLen), nil
+}
+
+// alnumFromBytes 把字节流映射为 n 字符名（字符域与 randomLowerAlnum 一致）。
+//
+// **拒绝采样**消除取模偏置（256 % 36 ≠ 0 ⇒ 直接取模会让前 4 个字符略偏高）；空输入返回空串
+// （不 panic，调用方以长度校验兜底）。
+func alnumFromBytes(b []byte, n int) string {
+	if n <= 0 || len(b) == 0 {
+		return ""
+	}
+	limit := 256 - 256%len(dirAlnumCharset)
+	out := make([]byte, 0, n)
+	// **尝试上限**（修复轮 F6）：若输入字节全落在被拒区间（退化/恶意输入），纯拒绝采样会**永不
+	// 收敛**（死循环）。故设上限，超出后用带（极轻）偏置的取模补齐——宁可轻微偏置，绝不挂起。
+	maxDraws := 8*n + 64
+	for i := 0; len(out) < n && i < maxDraws; i++ {
+		v := int(b[i%len(b)])
+		if v >= limit {
+			continue // 拒绝采样
+		}
+		out = append(out, dirAlnumCharset[v%len(dirAlnumCharset)])
+	}
+	for i := 0; len(out) < n; i++ {
+		out = append(out, dirAlnumCharset[int(b[i%len(b)])%len(dirAlnumCharset)])
+	}
+	return string(out)
+}
+
 // toBase64 编码字节段（供 meta 存 salt 等）。
 func toBase64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
