@@ -134,3 +134,17 @@ func ResumeScope(ctx context.Context, svc *audit.Service, volume, targetPath str
 	}
 	return ResumeScopeByID(ctx, svc, UploadScopeID(volume, targetPath))
 }
+
+// nopRecorder 是不落盘的空 WAL 实现（未装配 audit 时使用；内核要求 Recorder 非 nil）。
+// **语义**：不做任何记录 ⇒ 不提供跨进程续传能力，但流程与错误语义完全一致。
+type nopRecorder struct{}
+
+func (nopRecorder) Stage(context.Context, string, map[string]any) error { return nil }
+func (nopRecorder) PartDone(context.Context, int, string) error         { return nil }
+func (nopRecorder) MarkDone(context.Context) error                      { return nil }
+
+// NopRecorder 返回空 WAL 实现（供未装配 pkg/audit 的场景使用）。
+func NopRecorder() Recorder { return nopRecorder{} }
+
+// 编译期断言：空 WAL 满足内核契约。
+var _ Recorder = NopRecorder()

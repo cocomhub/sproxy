@@ -44,6 +44,7 @@ type rapidPlan struct {
 	Offset      int64    // 随机片段起始偏移
 	DataLength  int64    // 随机片段实际长度
 	DataTime    int64    // 参与偏移计算的当前时间（unix 秒；同一时刻重算结果一致）
+	Size        int64    // 文件总大小（rapidupload length 参数）
 	BlockSize   int64    // 分块大小（决定 blocks list）
 	BlocksList  []string // 每块 md5（hex）
 }
@@ -125,6 +126,7 @@ func planRapid(localPath string, uk, dataTime int64) (*rapidPlan, error) {
 		Offset:      offset,
 		DataLength:  dataLength,
 		DataTime:    dataTime,
+		Size:        lfc.Length,
 		BlockSize:   blockSize,
 		BlocksList:  append([]string(nil), lfc.BlocksList...),
 	}, nil
