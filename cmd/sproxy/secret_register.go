@@ -789,27 +789,3 @@ func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Vol
 	log.Info("secretdata 卷补装完成（config 声明，推迟装配）", "volume", v.Name)
 	return nil
 }
-
-// vcExtraInt 读取整型 extra（缺省/非法返回 0，调用方以 0 传默认）。
-func vcExtraInt(v volume.Volume, key string) int {
-	raw, ok := v.Extra[key]
-	if !ok {
-		return 0
-	}
-	switch n := raw.(type) {
-	case int:
-		return n
-	case int64:
-		return int(n)
-	case float64:
-		return int(n)
-	case string:
-		parsed, err := strconv.Atoi(strings.TrimSpace(n))
-		if err != nil {
-			return 0
-		}
-		return parsed
-	default:
-		return 0
-	}
-}
