@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -332,5 +333,74 @@ func TestContainerMovedByPeer_RequiresListing(t *testing.T) {
 	// 父不同 ⇒ 不属于该情形
 	if sfs.containerMovedByPeer(ctx, path.Join(parent, "x"), path.Join("other", "y")) {
 		t.Fatal("父不同不得判为同一名字的幂等")
+	}
+}
+
+// TestNormalizeContainerNames_RebasesChildPath 钉住**子路径必须以「父的当前路径」重算**：
+// 父在本次迁移中改名后，`segs[rel]`（扫描时的完整旧路径）指向已不存在的旧父 ⇒ 若直接
+// 用它做 rename 源，会报 `not found: file does not exist`（实测 2026-11-07，深层目录必现）。
+func TestNormalizeContainerNames_RebasesChildPath(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	// 三层深目录（父必须先于子改名，子源路径才需要重算）
+	if merr := sfs.MakeDir(ctx, "L1/L2/L3"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	// 人为把全部容器改成「随机名」模拟历史遗留——**必须自底向上**（先深后浅）：否则父改名后
+	// 子的旧完整路径立刻失效，改名会静默失败（夹具失真，测不出 rebase 缺陷）。
+	sfs.mu.Lock()
+	type rc struct{ rel, c string }
+	var list []rc
+	for rel, c := range sfs.dirSegs {
+		if rel != "" {
+			list = append(list, rc{rel, c})
+		}
+	}
+	sort.Slice(list, func(i, j int) bool { return strings.Count(list[i].rel, "/") > strings.Count(list[j].rel, "/") })
+	for _, it := range list {
+		if rerr := os.Rename(filepath.Join(root, filepath.FromSlash(it.c)), filepath.Join(root, filepath.FromSlash(it.c+"X"))); rerr != nil {
+			sfs.mu.Unlock()
+			t.Fatalf("夹具改名失败 %s: %v", it.rel, rerr)
+		}
+		sfs.dirSegs[it.rel] = it.c + "X"
+	}
+	sfs.mu.Unlock()
+
+	moved, _, err := sfs.NormalizeContainerNames(ctx, false)
+	if err != nil {
+		t.Fatalf("深层目录迁移必须成功（子路径需按父的当前路径重算），got: %v", err)
+	}
+	if moved == 0 {
+		t.Fatal("应有容器被迁移")
+	}
+	// 三个层级都必须被迁移（夹具自底向上改名后，父改名会 rebase 子路径）
+	sfs.mu.RLock()
+	l1, l2, l3 := sfs.dirSegs["L1"], sfs.dirSegs["L1/L2"], sfs.dirSegs["L1/L2/L3"]
+	sfs.mu.RUnlock()
+	for _, c := range []string{l1, l2, l3} {
+		if strings.HasSuffix(c, "X") {
+			t.Fatalf("容器 %q 未被迁移（子路径 rebase 失效）", c)
+		}
+	}
+	// 迁移后重启仍可读（验证物理结构自洽）
+	sfs2 := newNormalizeFS(t, root)
+	sfs2.mu.RLock()
+	_, hasL3 := sfs2.dirSegs["L1/L2/L3"]
+	segs := sfs2.dirSegs
+	sfs2.mu.RUnlock()
+	if !hasL3 {
+		t.Fatal("迁移后 L1/L2/L3 必须仍被识别")
+	}
+	for rel, c := range segs {
+		if rel == "" {
+			continue
+		}
+		pc := segs[parentDirOf(rel)]
+		want, _ := sfs2.targetContainerPath(pc, rel)
+		if c != want {
+			t.Fatalf("rel=%s 未规范化：got %s want %s", rel, c, want)
+		}
 	}
 }

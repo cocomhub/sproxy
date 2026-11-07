@@ -2609,9 +2609,12 @@ func (s *SecretdataFS) normalizeOneRel(ctx context.Context, rel string, segs, ne
 	if derr != nil {
 		return 0, 0, derr
 	}
-	cur := segmentOf(segs, newSegs, rel)
+	// **当前实际路径必须用「父的当前路径 + 自身 basename」拼接**（2026-11-07 实测缺陷）：
+	// 父在本次迁移中可能已改名，而 `segs[rel]` 记录的是**扫描时**的完整旧路径 ⇒ 直接用它会
+	// 指向已不存在的旧父下的路径（实测报 `not found: file does not exist`）。
+	cur := path.Join(pc, path.Base(segs[rel]))
 	switch {
-	case cur == "":
+	case segs[rel] == "":
 		return 0, 0, nil // 该逻辑路径无容器（异常态）⇒ 跳过
 	case cur == want:
 		newSegs[rel] = want
