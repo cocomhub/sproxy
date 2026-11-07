@@ -75,7 +75,6 @@ func TestUCAdapter_Plan_SplitsByUploadBlock(t *testing.T) {
 		{"10MiB", 10 << 20, []int64{bs, bs, 2 << 20}},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			a := newUCAdapter(nil, nil, "d/x.bin", "", "d/x.bin", nil, false, nil)
