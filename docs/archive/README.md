@@ -28,3 +28,7 @@ SPDX-License-Identifier: Apache-2.0
 ## 统一卷模型（2026-10-28）
 
 - [unified-volume-model.md](./unified-volume-model.md) — 按用途封装的本地卷 + 唯一取卷入口（StorageVolume/VolumeView）的决策与踩坑
+
+## 下载续传与弱网（2026-11）
+
+- [download-resume-weak-network.md](./download-resume-weak-network.md) — 弱网大文件下载失败三根因（整请求 Timeout / `--resume` 空操作 / CLI 刷 Usage）与 sidecar 续传口径

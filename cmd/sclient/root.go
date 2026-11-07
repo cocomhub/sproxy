@@ -121,6 +121,12 @@ func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "sclient",
 		Short: "文件上传下载客户端",
+		// 运行期错误只打印错误本身：由 main 统一输出一行 `sclient: <err>`，
+		// 不再向 stderr 转储 Usage/help（开源 CLI 惯例）。Usage 的展示交给
+		// 显式 `--help`；此前每个命令的 RunE 报错都会附带完整用法清单，
+		// 观感与脚本消费都很差（issue：`sclient download` 失败刷屏 help）。
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			return rootPreRunE(cmd, &currentDir, cliState)
 		},

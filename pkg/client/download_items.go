@@ -84,7 +84,7 @@ func (c *FileClient) DownloadItems(ctx context.Context, items []DownloadItem, op
 			if local == "" {
 				local = filepath.Base(item.RemotePath)
 			}
-			if err := c.downloadTo(egCtx, item.RemotePath, local, item.Kind); err != nil {
+			if err := c.downloadTo(egCtx, item.RemotePath, local, item.Kind, false); err != nil {
 				wrapped := fmt.Errorf("下载 %s 失败: %w", item.RemotePath, err)
 				mu.Lock()
 				errs = append(errs, wrapped)

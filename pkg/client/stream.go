@@ -25,7 +25,8 @@ func (c *FileClient) OpenDownload(ctx context.Context, filename string) (io.Read
 	query := url.Values{"filename": {filename}}
 	c.appendVolumeQuery(query)
 	urlPath := "/download?" + query.Encode()
-	resp, err := c.doRequest(ctx, "GET", urlPath, nil, nil)
+	// 长时流式读取（pkg/sync 镜像/转存读面）同样跳过整请求 Timeout。
+	resp, err := c.doRequest(WithNoClientTimeout(ctx), "GET", urlPath, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}

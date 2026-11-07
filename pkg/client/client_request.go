@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tempclean"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
 // 直连模式下拼接 serverURL + urlPath 构造完整 URL。
@@ -138,6 +139,12 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 	if c.tunnelClient != nil {
 		if c.initError != nil {
 			return nil, c.initError
+		}
+		// 长时流式请求（下载等）标记跳过隧道 HTTPClient 的整请求 Timeout——
+		// WithTunnel 把 c.httpClient.Timeout（默认 300s）传给了 tunnel.NewClient，
+		// 对弱网大文件下载会中途掐断（decrypt stream: unexpected EOF）。
+		if noClientTimeoutFrom(req.Context()) {
+			req = req.WithContext(tunnel.WithNoTimeout(req.Context()))
 		}
 		resp, err := c.tunnelClient.Do(req)
 		return closeBodyIfErr(resp, err)

@@ -35,7 +35,7 @@ func NewCmdDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.
 			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine(errFmtInitClientPrint, err)
+				// 不再在此打印：RunE 返回的错误由 main 单点打印（避免重复刷屏）。
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -107,7 +107,6 @@ func runChunkedDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 	stats := NewTransferStats()
 	fileStart := time.Now()
 	if err := svc.ChunkedDownload(cmd.Context(), filename, outputPath, chunkOpts...); err != nil {
-		ios.WriteErrLine("分块下载失败: %v", err)
 		return fmt.Errorf("分块下载失败: %w", err)
 	}
 	stats.SetChunkSuccessRate(totalChunksOr(filename, svc), 0)
@@ -118,12 +117,19 @@ func runChunkedDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileC
 }
 
 // runPlainDownload 执行普通下载；--decrypt 时下载后 E2EE 解密回写。
+// --resume（默认启用）时走 DownloadResumable：失败保留断点与 sidecar，重入/重试可续传。
 func runPlainDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, filename, outputPath string) error {
 	stats := NewTransferStats()
 	fileStart := time.Now()
-	if err := svc.Download(cmd.Context(), filename, outputPath); err != nil {
-		ios.WriteErrLine("下载失败: %v", err)
-		return fmt.Errorf("下载失败: %w", err)
+	resume, _ := cmd.Flags().GetBool("resume")
+	var dlErr error
+	if resume {
+		dlErr = svc.DownloadResumable(cmd.Context(), filename, outputPath)
+	} else {
+		dlErr = svc.Download(cmd.Context(), filename, outputPath)
+	}
+	if dlErr != nil {
+		return fmt.Errorf("下载失败: %w", dlErr)
 	}
 	// 客户端 E2EE：下载后解密（解密写回 outputPath）。
 	if decrypt, _ := cmd.Flags().GetBool("decrypt"); decrypt {
