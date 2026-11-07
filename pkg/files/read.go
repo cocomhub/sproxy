@@ -361,6 +361,11 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 	if of.Checksum != "" {
 		w.Header().Set(headerFileChecksum, of.Checksum)
+		// 强校验器 ETag（sha256 的 quoted 形式）：使 `Range` 请求可带 **If-Range** ——
+		// 远端文件在两次续传请求之间被替换时，http.ServeContent 因校验器不匹配而回
+		// 200 全量（而不是返回新文件的错位区间），客户端据此重置到零重下，绝不把
+		// 不同文件的字节拼到一个输出里。无 checksum 时仅退化为 Last-Modified 比较。
+		w.Header().Set("ETag", `"`+of.Checksum+`"`)
 	}
 	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", of.Info.ModTime().UnixNano()))
 

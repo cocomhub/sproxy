@@ -365,6 +365,13 @@ func buildServerConfig(cmd *cobra.Command) (*server.Config, error) {
 }
 
 // createHTTPServer 根据配置创建 *http.Server。
+//
+// WriteTimeout 是**整响应挂钟**上限，直接用作 http.Server.WriteTimeout 会掐断长时流式
+// 响应（大文件下载、/tunnel 隧道会话、SSE、S3/WebDAV GET）——弱网下必然触发，客户端
+// 表现为 `decrypt stream: read chunk: unexpected EOF`。故经 WithSlidingWriteDeadline
+// 把语义变为「单次写入的停滞窗口」（grace = 配置值）：持续有写进展即可超过该时长，
+// grace 内无进展仍被切断（保留停滞保护）。cfg.ServerTimeouts.Write<=0（默认，无超时）
+// 时该包装为空操作。
 func createHTTPServer(cfg *server.Config, handler http.Handler) *http.Server {
 	maxHeaderBytes := cfg.MaxHeaderBytes
 	if maxHeaderBytes <= 0 {
@@ -372,7 +379,7 @@ func createHTTPServer(cfg *server.Config, handler http.Handler) *http.Server {
 	}
 	return &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           handler,
+		Handler:           server.WithSlidingWriteDeadline(handler, cfg.ServerTimeouts.Write),
 		ReadTimeout:       cfg.ServerTimeouts.Read,
 		WriteTimeout:      cfg.ServerTimeouts.Write,
 		IdleTimeout:       cfg.ServerTimeouts.Idle,

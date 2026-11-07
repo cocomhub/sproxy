@@ -158,7 +158,6 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().Bool("chunked", false, "启用分块上传/下载模式")
 	root.PersistentFlags().Int64("chunk-size", 0, "分块大小 (默认 4MB)")
 	root.PersistentFlags().Int("concurrency", 0, "上传/下载并发数 (默认 4)")
-	root.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
 	root.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
 	// 审查 M-1：--insecure 双语义——HTTP 直连面（WithInsecureTLS）无 loopback 限制
 	// （既有）；xfer tcp+tls 面（buildXferClientTLSConfig）**仅限 loopback hub**

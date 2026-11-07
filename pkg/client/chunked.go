@@ -133,6 +133,11 @@ type downloadChunkParams struct {
 	// Resume 是下载续传跟踪器（nil = 未启用续传）：每成功写入一块后标记完成，
 	// 使 sidecar 位图可用于跨调用断点续传。
 	Resume *downloadResume
+	// ExpectChecksum 是本轮下载期望的远端整文件 sha256（空 = 未知）：每个分块响应都
+	// 携带 X-File-Checksum，与期望不符 ⇒ 文件在传输中被换，立即中止并由上层从零重下。
+	ExpectChecksum string
+	// Changed 是「远端文件已变化」共享标记（所有分块共用）：置位后中止整轮下载。
+	Changed *atomic.Bool
 }
 
 // tryResumeResult 是 tryResumeSession 的返回值类型，用于替代三返回值模式。
@@ -1113,11 +1118,16 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		}
 	}()
 
+	// 「远端文件已变化」共享标记：任一分块发现整文件校验器与期望不符即置位并中止整轮
+	// 下载，由上层（downloadTo）丢弃断点从零重下（绝不拼接不同文件的分块）。
+	changed := &atomic.Bool{}
+
 	// 并行下载 + 失败补拉（2026-10-23 抽离，降 gocognit）。
 	if err := c.runChunkedDownload(ctx, runChunkedArgs{
 		filename: filename, kind: params.kind, chunkSize: chunkSize, fileSize: fileSize,
 		totalChunks: totalChunks, concurrency: params.concurrency,
 		outFile: outFile, cancel: cancel, resume: resume,
+		expectChecksum: expectedChecksum, changed: changed,
 	}); err != nil {
 		if resume != nil {
 			resume.save()
@@ -1128,11 +1138,12 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	}
 
 	// **完整性兑底（2026-10-23）**：外部卷无 X-File-Checksum 时旧行为静默放过损坏文件。
+	// 校验不过 ⇒ 已收内容不属于同一文件（换文件/错位/损坏）⇒ 标记后由 downloadTo 从零重下。
 	if err := c.verifyChunkedOutput(outputPath, fileSize, expectedChecksum); err != nil {
 		cancel()
 		os.Remove(outputPath)
 		removeDownloadResumeState(outputPath)
-		return err
+		return fmt.Errorf("%w: %w", errRemoteFileChanged, err)
 	}
 
 	if resume != nil {
@@ -1224,15 +1235,17 @@ func (c *FileClient) prepareChunkedDownload(ctx context.Context, filename, outpu
 
 // runChunkedArgs 是 runChunkedDownload 的参数结构体（S107：参数收敛）。
 type runChunkedArgs struct {
-	filename    string
-	kind        string
-	chunkSize   int64
-	fileSize    int64
-	totalChunks int
-	concurrency int
-	outFile     *os.File
-	cancel      context.CancelFunc
-	resume      *downloadResume
+	filename       string
+	kind           string
+	chunkSize      int64
+	fileSize       int64
+	totalChunks    int
+	concurrency    int
+	outFile        *os.File
+	cancel         context.CancelFunc
+	resume         *downloadResume
+	expectChecksum string
+	changed        *atomic.Bool
 }
 
 // runChunkedDownload 并发下载全部分块，并对首轮失败的块串行补拉（2026-10-23 抽离，
@@ -1274,12 +1287,17 @@ func (c *FileClient) runChunkedDownload(ctx context.Context, a runChunkedArgs) e
 				Mu:        &mu,
 				Progress:  &progress,
 				Cancel:    a.cancel, Done: ctx.Done(),
-				Failed: &failed,
-				Resume: a.resume,
+				Failed:         &failed,
+				Resume:         a.resume,
+				ExpectChecksum: a.expectChecksum,
+				Changed:        a.changed,
 			})
 		}(i)
 	}
 	wg.Wait()
+	if a.changed != nil && a.changed.Load() {
+		return fmt.Errorf("%w: 分块下载期间远端文件已变化", errRemoteFileChanged)
+	}
 	if ctx.Err() != nil {
 		return fmt.Errorf("分块下载失败: %w", ctx.Err())
 	}
@@ -1287,6 +1305,7 @@ func (c *FileClient) runChunkedDownload(ctx context.Context, a runChunkedArgs) e
 		filename: a.filename, kind: a.kind, chunkSize: a.chunkSize, fileSize: a.fileSize,
 		totalChunks: a.totalChunks, outFile: a.outFile, mu: &mu, progress: &progress,
 		failed: &failed, cancel: a.cancel, resume: a.resume,
+		expectChecksum: a.expectChecksum, changed: a.changed,
 	})
 }
 
@@ -1415,6 +1434,15 @@ func (c *FileClient) streamOneChunk(ctx context.Context, p downloadChunkParams, 
 	if chunkDownloadDone(p.Done) {
 		return false
 	}
+	// 整文件校验器不一致 ⇒ 远端文件在传输中已换：当前分块坐标属于另一个文件，
+	// 立即中止（置位共享标记 + 取消），由上层丢弃断点从零重下（绝不拼接）。
+	if cs := resp.Header.Get(headerFileChecksum); cs != "" && p.ExpectChecksum != "" && cs != p.ExpectChecksum {
+		if p.Changed != nil {
+			p.Changed.Store(true)
+		}
+		p.Cancel()
+		return false
+	}
 
 	hasher := sha256.New()
 	total, cerr := copyChunkStream(p, resp.Body, offset, length, hasher)
@@ -1484,17 +1512,19 @@ func (c *FileClient) commitChunkProgress(p downloadChunkParams, n int64) {
 
 // retryFailedChunksArgs 是 retryFailedChunks 的参数结构体（S107：参数收敛）。
 type retryFailedChunksArgs struct {
-	filename    string
-	kind        string
-	chunkSize   int64
-	fileSize    int64
-	totalChunks int
-	outFile     *os.File
-	mu          *sync.Mutex
-	progress    *int64
-	failed      *sync.Map
-	cancel      context.CancelFunc
-	resume      *downloadResume
+	filename       string
+	kind           string
+	chunkSize      int64
+	fileSize       int64
+	totalChunks    int
+	outFile        *os.File
+	mu             *sync.Mutex
+	progress       *int64
+	failed         *sync.Map
+	cancel         context.CancelFunc
+	resume         *downloadResume
+	expectChecksum string
+	changed        *atomic.Bool
 }
 
 // retryFailedChunks 串行补拉首轮失败的 chunk（2026-10-23，外部卷稳定性）。
@@ -1522,6 +1552,7 @@ func (c *FileClient) retryFailedChunks(ctx context.Context, a retryFailedChunksA
 			ChunkSize: a.chunkSize, FileSize: a.fileSize,
 			OutFile: a.outFile, Mu: a.mu, Progress: a.progress,
 			Cancel: a.cancel, Done: ctx.Done(), Resume: a.resume,
+			ExpectChecksum: a.expectChecksum, Changed: a.changed,
 		}
 		urlPath := c.buildChunkURL(p)
 		offset := int64(idx) * a.chunkSize

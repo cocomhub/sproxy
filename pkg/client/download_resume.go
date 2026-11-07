@@ -6,7 +6,9 @@ package client
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -38,6 +40,14 @@ const (
 	downloadResumeChunkFlush = 16
 )
 
+// errRemoteFileChanged 表示「续传/下载期间远端文件已变化」：已收字节不再可信，
+// 调用方应**丢弃断点从零重下**（downloadTo 会重试一次；仍失败则报错）。
+// 触发场景：① 续传 sidecar 身份与当前远端不一致（loadStreamResume/loadChunkResume 已在
+// 拉取前拦住，静默从零）；② `If-Range` 校验失败导致服务端回 200/内容变化（下辖校验）；
+// ③ 整文件 sha256 校验失败（既可能是换文件，也可能是损坏/错位——两者都不得当成
+// 续传成功，宁可重下一次）。
+var errRemoteFileChanged = errors.New("远端文件已变化（续传断点不可用）")
+
 // downloadResumeState 是下载断点续传 sidecar 的持久化结构。
 type downloadResumeState struct {
 	Version int `json:"version"`
@@ -61,7 +71,11 @@ type downloadResumeState struct {
 func downloadResumePath(outputPath string) string { return outputPath + downloadResumeSuffix }
 
 // downloadResumeMatches 判断 sidecar 是否与当前远端同一文件、同一分块策略。
-// checksum/mtime 为空（远端未提供）时跳过对应比较；chunkSize 必须精确匹配。
+//
+// **必须有强校验器才能续传**（用户 2026-11-07 要求）：只比 filename/size 不足以证明
+// 「同一个文件」（同名同大小内容替换是最常见的场景）⇒ 无 checksum 且无 mtime 时一律
+// 判为不匹配，从零下载。checksum 存在时必须以它为准；无 checksum 时退回 mtime。
+// chunkSize 必须精确匹配（分块策略不同不能复用位图）。
 func (st *downloadResumeState) downloadResumeMatches(filename, kind string, size int64, checksum string, mtime, chunkSize int64) bool {
 	if st == nil || st.Version != downloadResumeVersion {
 		return false
@@ -69,13 +83,28 @@ func (st *downloadResumeState) downloadResumeMatches(filename, kind string, size
 	if st.Filename != filename || st.Kind != kind || st.Size != size || st.ChunkSize != chunkSize {
 		return false
 	}
-	if checksum != "" && st.Checksum != checksum {
+	if checksum != "" {
+		// 远端有 checksum：sidecar 必须同样有且相等（缺失/不同 ⇒ 换文件）。
+		return st.Checksum == checksum
+	}
+	if mtime == 0 || st.MTime == 0 {
+		// 无任何强校验器（无 checksum 且无 mtime）⇒ 无法确认同一文件，拒用断点。
 		return false
 	}
-	if mtime != 0 && st.MTime != 0 && st.MTime != mtime {
-		return false
+	return st.MTime == mtime
+}
+
+// httpValidator 返回用于 `If-Range` 的强校验器：优先 checksum（与 /download 的 ETag
+// `"<sha256>"` 同形），否则退回 mtime 的 HTTP 日期（服务端 Last-Modified 口径，秒级）。
+// 两者都不可用时返回空串（调用方不发 If-Range）。
+func httpValidator(checksum string, mtime int64) string {
+	if checksum != "" {
+		return `"` + checksum + `"`
 	}
-	return true
+	if mtime > 0 {
+		return time.Unix(0, mtime).UTC().Format(http.TimeFormat)
+	}
+	return ""
 }
 
 // loadDownloadResumeState 读取 sidecar；缺失/损坏/版本不符返回 (nil,false)。

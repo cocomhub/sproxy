@@ -91,3 +91,38 @@ SPDX-License-Identifier: Apache-2.0
 未包 `limitResponseWriter`；外部卷 `serveExternalChunk` 已包）⇒ 开启 `rate_limit.bandwidth`
 时整文件下载受限、分块下载不受限（公平性缺口）。现已让本地分块路径同样经
 `limitResponseWriter`（TDD：注入 spy limiter 断言被咨询），与整文件 /download 一致。
+
+## 续传身份校验加固 + 移除 `--resume`（2026-11-07，用户明示）
+
+用户要求：**必须确保是同一个文件才能续传**（etag/sha256/大小/mtime），文件变化则**从零下载**；
+并且**移除 `--resume` flag**（无需传入，续传恒开启）。
+
+### 服务端提供的能力（客户端依赖）
+
+- `GET /download` 现在返回强校验器 `ETag: "<整文件 sha256>"`（与既有 `X-File-Checksum` 同源）。
+  `http.ServeContent` 据此支持 **`If-Range`**：续传请求带的校验器与当前文件不符时回 **200 全量**，
+  而不是返回新文件的错位区间 —— 这是「换文件不拼接」的服务端侧根基。
+- `GET /download/chunk` 每个分块响应同时带整文件 `X-File-Checksum` + `ETag`，客户端可在传输
+  中途发现「文件已换」并立即中止。
+- 契约测试：`pkg/server/download_identity_test.go`（随机端口 httptest 端到端）断言 ETag、
+  `Range+匹配 If-Range ⇒ 206`、`Range+不匹配 If-Range ⇒ 200 全量`、无 If-Range 仍 206（零回归）。
+
+### 客户端行为
+
+- **严格身份匹配**：续传前必须 `filename/kind/size/checksum/mtime/chunk_size` 全部吻合；
+  checksum 存在时以它为准，**无 checksum 且无 mtime ⇒ 拒绝续传**（无法证明同一文件，从零下载）。
+- 单流 Range 请求携带 `If-Range: "<sha256>"`（无 checksum 时退回 mtime 的 HTTP 日期）；
+  响应 200 ⇒ 重置偏移到零重写。
+- 收尾整文件校验失败（换文件/错位/损坏）⇒ 丢弃断点，**从零重下一次**（只一次，避免死循环）；
+  分块路径同样（含分块中途 `X-File-Checksum` 变化即中止）。
+- **移除 `--resume`**（`download` 局部 + root 持久 flag）：`download` 恒走 `DownloadResumable`，
+  分块恒 `WithChunkedResume(true)`。`upload` 保留自己的 `--resume`（可显式关闭）。
+
+### 验证
+
+- TDD 新增：严格匹配表驱动、`httpValidator`、`If-Range` 实际发出、
+  「校验失败 ⇒ 从零重下且成功（共 2 次 GET）」、「始终不符 ⇒ 只重下一次即报错」、
+  「无强校验器不发 Range、从零下载」、分块 `X-File-Checksum` 变化即中止。
+- **变异验证（5 处全部命中）**：客户端不发 If-Range / 放宽身份匹配 / 去掉从零重下 /
+  去掉分块中途校验 / 服务端不返回 ETag ⇒ 对应测试必红。
+- 服务端契约测试用 `httptest`（127.0.0.1 **随机端口**）走真实 HTTP 栈。

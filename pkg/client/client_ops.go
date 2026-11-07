@@ -330,9 +330,24 @@ type remoteFileMeta struct {
 }
 
 // downloadTo 是 Download / DownloadResumable / DownloadCloudArchive 的公共实现。
+// downloadTo 是 Download / DownloadResumable / DownloadCloudArchive 的公共实现：执行一次
+// downloadOnce；若判定「远端文件已变化（续传断点不可用）」，丢弃断点从零**重下一次**
+// （只一次，避免死循环）。
+func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind string, resume bool) error {
+	err := c.downloadOnce(ctx, filename, outputPath, kind, resume)
+	if errors.Is(err, errRemoteFileChanged) {
+		// 用户要求（2026-11-07）：文件变化则从零下载，绝不把不同文件的字节拼到一个输出里。
+		c.logger.WarnContext(ctx, "远端文件已变化：丢弃断点，从零重新下载",
+			"file_name", outputPath, "error", err.Error())
+		return c.downloadOnce(ctx, filename, outputPath, kind, resume)
+	}
+	return err
+}
+
+// downloadOnce 是单次下载执行：预取远端身份，大文件走分块下载，否则单流（续传）下载。
 // 大文件（超过自动分块阈值）优先走分块下载（断点续传/并发/逐块校验语义），
 // 普通小文件走全量 /download（resume=true 时走 Range 单流续传）。
-func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind string, resume bool) error {
+func (c *FileClient) downloadOnce(ctx context.Context, filename, outputPath, kind string, resume bool) error {
 	if containsPathTraversal(filename) {
 		return fmt.Errorf("filename 不能包含路径穿越符 '..'")
 	}
@@ -405,9 +420,11 @@ func (c *FileClient) resumableStreamDownload(ctx context.Context, filename, outp
 		err := c.streamOnce(ctx, filename, outputPath, kind, rm, rs)
 		if err == nil {
 			if verr := c.verifyStreamedDownload(outputPath, rm); verr != nil {
+				// 校验不过 = 收到的不是「同一文件的完整内容」（换文件/错位/损坏）⇒
+				// 丢弃断点，交给 downloadTo 从零重下一次（绝不当作续传成功）。
 				os.Remove(outputPath)
 				removeDownloadResumeState(outputPath)
-				return verr
+				return fmt.Errorf("%w: %w", errRemoteFileChanged, verr)
 			}
 			c.restoreResumeMTime(outputPath, rm)
 			rs.finish()
@@ -422,8 +439,9 @@ func (c *FileClient) resumableStreamDownload(ctx context.Context, filename, outp
 			"attempt", attempt+1, "offset", rs.offset(), "error", err.Error())
 	}
 	// 保留已收内容 + sidecar，便于下一次调用（或用户重跑）继续。
+	// 续传恒开启（无 --resume flag）⇒ 再次执行同一命令即自动从断点续传（身份不一致则从零）。
 	rs.save()
-	return fmt.Errorf("下载失败（已保留断点，可用 --resume 续传）: %w", lastErr)
+	return fmt.Errorf("下载失败（已保留断点；再次执行同一命令会自动续传）: %w", lastErr)
 }
 
 // verifyOrResetIfComplete 处理「文件已收满」快路径（强杀在收尾/落盘前）：直接按大小+
@@ -453,6 +471,12 @@ func (c *FileClient) streamOnce(ctx context.Context, filename, outputPath, kind 
 	headers := make(http.Header)
 	if h := downloadRangeHeader(offset); h != "" {
 		headers.Set("Range", h)
+		// **If-Range 强校验**：带上断点所属文件的校验器（ETag/Last-Modified）。服务端若
+		// 发现文件已换 ⇒ 回 200 全量（而非返回新文件的错位区间）⇒ 下方按 200 重置
+		// 到零重写，绝不拼接不同文件的字节（用户要求，2026-11-07）。
+		if v := httpValidator(rm.Checksum, rm.MTime); v != "" {
+			headers.Set("If-Range", v)
+		}
 	}
 	resp, err := c.doRequest(WithNoClientTimeout(ctx), "GET", c.downloadURLPath(filename, kind), nil, headers)
 	if err != nil {

@@ -35,7 +35,9 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | `--chunked` | false | 启用分块上传/下载模式（>100 MiB 下载自动启用） |
 | `--chunk-size` | 0（用 4MB） | 分块大小（字节） |
 | `--concurrency` | 0（用 4） | 上传/下载并发数 |
-| `--resume` | false（`download`/`upload` 命令默认 true） | 断点续传：失败保留已收内容 + sidecar，重入时单流用 `Range`、分块跳过已完成块继续 |
+
+> **下载续传恒开启**（无 `--resume` flag）：失败自动保留断点与 sidecar，重入自动续传；
+> 但仅在能证明「同一个文件」时续传（见下文 download）。`upload` 仍保留 `--resume`（可显式关闭）。
 
 ### 输出
 
@@ -245,7 +247,7 @@ sclient upload --chunked --concurrency 8 large.bin
 
 - 自动判断是否启用分块上传（>100 MiB）
 - 文件路径中的目录结构会被保留：`sclient upload dir/file.txt` → 服务端 `dir/file.txt`
-- 支持 `--chunked` 强制开启分块、`--chunk-size`、`--concurrency`、`--resume`
+- 支持 `--chunked` 强制开启分块、`--chunk-size`、`--concurrency`（`upload` 另有 `--resume`）
 - 完成后输出传输统计行：`耗时 | 速率 | 文件数 [分块成功率]`；`--json` 时输出 `stats` 对象（file_count/total_bytes/elapsed_ns/avg_rate_bps/files）
 
 ### download
@@ -257,11 +259,17 @@ sclient download --chunked --concurrency 8 large.bin
 
 - 默认走 `GET /download`（支持标准 Range header）
 - `--chunked` 启用并发分块下载（走 `/download/chunk`）；超过 100 MiB 自动启用
-- **断点续传（`--resume`，默认启用）**：弱网中断时**保留**已收内容与同目录 sidecar
+- **断点续传恒开启**（无 `--resume` flag）：弱网中断时**保留**已收内容与同目录 sidecar
   `<输出文件>.sproxy-resume.json`（记录远端身份 + 已收偏移/分块位图）；单次调用内自动退避重试，
   重入（重跑命令）时单流用 `Range: bytes=<offset>-`、分块跳过已完成块继续。下载成功即删除 sidecar。
-  远端文件已变（size/checksum/mtime/chunk_size 不匹配）⇒ 丢弃陈旧断点从头下载（绝不拼接不同文件）。
-  单流下载与分块下载均跳过 HTTP 客户端整请求超时（默认 300s），避免弱网大文件被中途掐断。
+- **同一个文件才能续传**（服务端提供 `ETag` = 整文件 sha256，响应头 `X-File-Checksum` 同源）：
+  续传前比对 `filename/kind/size/checksum/mtime/chunk_size`，任一不符即丢弃断点**从零重下**；
+  无 checksum 且无 mtime 时无法证明同一文件 ⇒ 同样从零下载。单流 Range 请求会带
+  `If-Range: "<sha256>"`，服务端发现文件已换则回 `200` 全量（而非错位区间），客户端据此重置到零；
+  分块响应带整文件 `X-File-Checksum`，中途发现变化即中止。收尾校验失败时自动从零重下一次
+  （只一次，避免死循环）。绝不把不同文件的字节拼到一个输出里。
+- 单流与分块下载均跳过 HTTP 客户端整请求超时（默认 300s），避免弱网大文件被中途掐断；
+  服务端侧 `server_timeouts.write` 按「单次写入停滞窗口」生效，长下载不会被整响应挂钟上限掐断。
 - 不指定 output 时使用原文件名
 - 完成后输出传输统计行：`耗时 | 速率 | 文件数 [分块成功率]`；`--json` 时输出 `stats` 对象
 

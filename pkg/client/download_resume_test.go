@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -630,5 +631,302 @@ func TestDownloadResumable_CompleteButNotFinalized(t *testing.T) {
 	}
 	if _, serr := os.Stat(downloadResumePath(out)); !os.IsNotExist(serr) {
 		t.Fatalf("成功收尾应删除 sidecar")
+	}
+}
+
+// ---- 远端身份校验（etag/sha256）与「换文件即从零重下」回归（2026-11-07）----
+//
+// 用户要求：必须确保是**同一个文件**才能续传（etag/sha256/大小/mtime 任一不符即从零），
+// 绝不把不同文件的字节拼到一个输出里。
+
+// TestDownloadResumeMatches_RequiresStrongValidator：只比 filename/size 不足以证明「同一
+// 文件」（同名同大小内容替换是最常见场景）⇒ 无 checksum 且无 mtime 时必须拒绝续传；
+// checksum 存在时以它为准。
+func TestDownloadResumeMatches_RequiresStrongValidator(t *testing.T) {
+	t.Parallel()
+	mk := func(checksum string, mtime int64) downloadResumeState {
+		return downloadResumeState{
+			Version: downloadResumeVersion, Filename: "a.bin", Size: 100, Checksum: checksum, MTime: mtime,
+		}
+	}
+	cases := []struct {
+		name     string
+		st       downloadResumeState
+		checksum string
+		mtime    int64
+		want     bool
+	}{
+		{name: "checksum 相同 ⇒ 续传", st: mk("abc", 7), checksum: "abc", mtime: 7, want: true},
+		{name: "checksum 不同（换文件）⇒ 不续传", st: mk("abc", 7), checksum: "def", mtime: 7, want: false},
+		{name: "远端有 checksum、sidecar 无 ⇒ 不续传", st: mk("", 7), checksum: "abc", mtime: 7, want: false},
+		{name: "无 checksum 无 mtime ⇒ 不续传（无法证明同一文件）", st: mk("", 0), want: false},
+		{name: "远端无 checksum 但 mtime 相同 ⇒ 续传", st: mk("", testResumeMTime), mtime: testResumeMTime, want: true},
+		{name: "远端无 checksum 且 mtime 不同 ⇒ 不续传", st: mk("", testResumeMTime), mtime: testResumeMTime + 1, want: false},
+		{
+			name:     "size 不同 ⇒ 不续传",
+			st:       downloadResumeState{Version: downloadResumeVersion, Filename: "a.bin", Size: 101, Checksum: "abc"},
+			checksum: "abc", mtime: 7, want: false,
+		},
+		{
+			name:     "filename 不同 ⇒ 不续传",
+			st:       downloadResumeState{Version: downloadResumeVersion, Filename: "b.bin", Size: 100, Checksum: "abc"},
+			checksum: "abc", mtime: 7, want: false,
+		},
+		{
+			name:     "sidecar 版本不符 ⇒ 不续传",
+			st:       downloadResumeState{Version: downloadResumeVersion + 1, Filename: "a.bin", Size: 100, Checksum: "abc"},
+			checksum: "abc", mtime: 7, want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.st.downloadResumeMatches("a.bin", "", 100, tc.checksum, tc.mtime, 0); got != tc.want {
+				t.Fatalf("downloadResumeMatches=%v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHTTPValidator：If-Range 校验器优先 checksum（与服务端 ETag `"<sha256>"` 同形），
+// 缺 checksum 时退回 mtime 的 HTTP 日期；两者皆无 ⇒ 空串（不发 If-Range）。
+func TestHTTPValidator(t *testing.T) {
+	t.Parallel()
+	if got := httpValidator("abc", testResumeMTime); got != `"abc"` {
+		t.Fatalf("checksum 应生成 quoted ETag，got %q", got)
+	}
+	want := time.Unix(0, testResumeMTime).UTC().Format(http.TimeFormat)
+	if got := httpValidator("", testResumeMTime); got != want {
+		t.Fatalf("mtime 应生成 HTTP 日期 %q，got %q", want, got)
+	}
+	if got := httpValidator("", 0); got != "" {
+		t.Fatalf("无强校验器应返回空串，got %q", got)
+	}
+}
+
+// TestDownloadResumable_SendsIfRange：存在断点时，Range 请求必须带 If-Range（校验器为
+// 断点所属文件的 checksum ETag），使服务端能在文件已换时回 200 全量而非错位区间。
+func TestDownloadResumable_SendsIfRange(t *testing.T) {
+	t.Parallel()
+	content := resumeTestContent(3000)
+	sum := sha256hex(content)
+	var mu sync.Mutex
+	var ifRanges []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, _ *http.Request) {
+		writeResumeHead(w, content, sum)
+	})
+	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ifRanges = append(ifRanges, r.Header.Get("If-Range"))
+		mu.Unlock()
+		serveRangeContent(w, r, content, sum)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	out := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(out, content[:1000], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := downloadResumeState{
+		Version: downloadResumeVersion, Filename: "f.bin", Size: int64(len(content)),
+		Checksum: sum, MTime: testResumeMTime, Offset: 1000,
+	}
+	if err := writeDownloadResumeState(out, &st); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+	if err := c.DownloadResumable(t.Context(), "f.bin", out); err != nil {
+		t.Fatalf("DownloadResumable: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ifRanges) == 0 {
+		t.Fatal("续传请求未发出")
+	}
+	if want := `"` + sum + `"`; ifRanges[0] != want {
+		t.Fatalf("If-Range 应为 checksum ETag %q，got %q", want, ifRanges[0])
+	}
+}
+
+// TestDownloadResumable_VerifyFailureRestartsFromZeroOnce：续传期间服务端内容被换成
+// 另一份（整文件校验不过）⇒ 丢弃断点**从零重下**；重下拿到正确内容即成功。
+// 同时锁定「只重下一次」（不会无限循环）。
+func TestDownloadResumable_VerifyFailureRestartsFromZeroOnce(t *testing.T) {
+	t.Parallel()
+	want := resumeTestContent(3000)
+	wantSum := sha256hex(want)
+	other := resumeTestContent(3000)
+	other[0] ^= 0xFF // 同长不同内容 ⇒ 校验必失败
+	var gets atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, _ *http.Request) {
+		writeResumeHead(w, want, wantSum)
+	})
+	mux.HandleFunc("GET /download", func(w http.ResponseWriter, _ *http.Request) {
+		body := want
+		if gets.Add(1) == 1 {
+			// 首轮：服务端实际给出「另一个文件」的字节（换文件/被篡改），校验必然失败。
+			body = other
+		}
+		w.Header().Set("X-File-Checksum", wantSum)
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	out := filepath.Join(t.TempDir(), "f.bin")
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+	if err := c.DownloadResumable(t.Context(), "f.bin", out); err != nil {
+		t.Fatalf("校验失败后应从零重下并成功，实测: %v", err)
+	}
+	got, rerr := os.ReadFile(out)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("重下内容不符：got %d bytes sha=%s，want sha=%s", len(got), sha256hex(got), wantSum)
+	}
+	if n := gets.Load(); n != 2 {
+		t.Fatalf("应恰好重下 1 次（共 2 次 GET），实际 %d 次", n)
+	}
+	if _, serr := os.Stat(downloadResumePath(out)); !os.IsNotExist(serr) {
+		t.Fatalf("成功后应删除 sidecar，stat err=%v", serr)
+	}
+}
+
+// TestDownloadResumable_VerifyFailureStopsAfterOneRestart：内容始终不符 ⇒ 只重下一次
+// 即报错（绝不无限重下），且错误可被 errors.Is(errRemoteFileChanged) 识别。
+func TestDownloadResumable_VerifyFailureStopsAfterOneRestart(t *testing.T) {
+	t.Parallel()
+	want := resumeTestContent(2000)
+	wantSum := sha256hex(want)
+	other := resumeTestContent(2000)
+	other[7] ^= 0xFF
+	var gets atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, _ *http.Request) {
+		writeResumeHead(w, want, wantSum)
+	})
+	mux.HandleFunc("GET /download", func(w http.ResponseWriter, _ *http.Request) {
+		gets.Add(1)
+		w.Header().Set("X-File-Checksum", wantSum)
+		w.Header().Set("Content-Length", strconv.Itoa(len(other)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(other)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	out := filepath.Join(t.TempDir(), "f.bin")
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+	err := c.DownloadResumable(t.Context(), "f.bin", out)
+	if err == nil {
+		t.Fatal("内容始终不符应报错")
+	}
+	if !errors.Is(err, errRemoteFileChanged) {
+		t.Fatalf("错误应可识别为 errRemoteFileChanged，实测: %v", err)
+	}
+	if n := gets.Load(); n != 2 {
+		t.Fatalf("应只重下 1 次（共 2 次 GET），实际 %d 次", n)
+	}
+}
+
+// TestDownloadResumable_NoStrongValidatorStartsFromZero：远端未提供 checksum 与 mtime 时
+// 无法证明「同一文件」⇒ 即使本地有断点也必须从零下载（不发 Range）。
+func TestDownloadResumable_NoStrongValidatorStartsFromZero(t *testing.T) {
+	t.Parallel()
+	content := resumeTestContent(2048)
+	var mu sync.Mutex
+	var ranges []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-File-Size", strconv.Itoa(len(content))) // 无 checksum、无 mtime
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ranges = append(ranges, r.Header.Get("Range"))
+		mu.Unlock()
+		serveRangeContent(w, r, content, "")
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	out := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(out, content[:512], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := downloadResumeState{
+		Version: downloadResumeVersion, Filename: "f.bin", Size: int64(len(content)), Offset: 512,
+	}
+	if err := writeDownloadResumeState(out, &st); err != nil {
+		t.Fatal(err)
+	}
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+	if err := c.DownloadResumable(t.Context(), "f.bin", out); err != nil {
+		t.Fatalf("DownloadResumable: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, rg := range ranges {
+		if rg != "" {
+			t.Fatalf("无强校验器时不得续传（不应发 Range），实际 Range=%q", rg)
+		}
+	}
+	got, rerr := os.ReadFile(out)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("应从零重下完整内容：got %d bytes want %d", len(got), len(content))
+	}
+}
+
+// TestChunkedDownload_RemoteChecksumChangedAborts：任一分块响应带出的整文件
+// X-File-Checksum 与期望不符 ⇒ 立即中止并报 errRemoteFileChanged（由 downloadTo 从零重下）。
+func TestChunkedDownload_RemoteChecksumChangedAborts(t *testing.T) {
+	t.Parallel()
+	content := resumeTestContent(3000)
+	sum := sha256hex(content)
+	otherSum := sha256hex(resumeTestContent(999))
+	const chunkSize = 1000
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, _ *http.Request) {
+		writeResumeHead(w, content, sum)
+	})
+	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
+		start, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+		length, _ := strconv.ParseInt(r.URL.Query().Get("length"), 10, 64)
+		end := min(start+length, int64(len(content)))
+		body := content[start:end]
+		chunkHash := sha256.Sum256(body)
+		w.Header().Set("X-Chunk-Checksum", hex.EncodeToString(chunkHash[:]))
+		// 整文件校验器换成另一个文件 ⇒ 客户端必须中止而非拼接。
+		w.Header().Set("X-File-Checksum", otherSum)
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	out := filepath.Join(t.TempDir(), "f.bin")
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+	err := c.ChunkedDownload(t.Context(), "f.bin", out, WithChunkedChunkSize(chunkSize), WithChunkedResume(true))
+	if err == nil {
+		t.Fatal("整文件校验器变化应中止分块下载")
+	}
+	if !errors.Is(err, errRemoteFileChanged) {
+		t.Fatalf("错误应可识别为 errRemoteFileChanged，实测: %v", err)
 	}
 }

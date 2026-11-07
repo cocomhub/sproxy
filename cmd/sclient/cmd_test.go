@@ -71,7 +71,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 func TestRootCmd_PersistentFlags(t *testing.T) {
 	// 验证 persistent flags 已注册
 	cmd := NewRootCmd()
-	flagNames := []string{"config", "server", "output", "verbose", "chunked", "chunk-size", "concurrency", "resume"}
+	flagNames := []string{"config", "server", "output", "verbose", "chunked", "chunk-size", "concurrency"}
 	for _, name := range flagNames {
 		f := cmd.PersistentFlags().Lookup(name)
 		if f == nil {
@@ -126,7 +126,7 @@ func TestDownloadCmd(t *testing.T) {
 	if err := cmd.Args(cmd, []string{"file.txt"}); err != nil {
 		t.Errorf("download with 1 arg should be ok: %v", err)
 	}
-	flagNames := []string{"chunked", "chunk-size", "concurrency", "resume"}
+	flagNames := []string{"chunked", "chunk-size", "concurrency"}
 	for _, name := range flagNames {
 		f := cmd.Flags().Lookup(name)
 		if f == nil {
