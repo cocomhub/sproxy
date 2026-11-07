@@ -670,3 +670,39 @@ func TestF5_LogicalFilesUsePathQualifiedKeys(t *testing.T) {
 		t.Fatalf("键应为带目录段的逻辑路径 sub/f.bin，got %v", files)
 	}
 }
+
+// TestD1_PeerMoveCountsAsDoneWhenSourceGone 钉住**「源已消失 ⇒ 移动已完成」**（2026-11-07 实测缺陷）：
+// 远端目录列举**最终一致** ⇒ rename 已成功、源已消失，但父目录列举在若干秒内仍可能看不到目标。
+// 若要求「目标必须已可见」才对，迁移会在**已成功**的容器上判定失败并中止
+// （实测：同一条深层路径连续多轮失败，且目标 mtime 已是本次 rename 的时间）。
+func TestD1_PeerMoveCountsAsDoneWhenSourceGone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	// 情形 1（**关键**）：列举里**既无源也无目标**（目标尚未可见 —— 远端列举最终一致）
+	// ⇒ 源已消失这一强信号必须判「已完成」，否则迁移会在已成功的容器上中止。
+	parent := "P"
+	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "Unrelated")); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	moved, decided := sfs.containerMovedByPeer(ctx, path.Join(parent, "GoneName"), path.Join(parent, "WantName"))
+	if !decided || !moved {
+		t.Fatalf("源已消失（目标暂未可见）应判「已完成」（decided=%v moved=%v）", decided, moved)
+	}
+	// 情形 2：源已消失且目标已可见 ⇒ 同样「已完成」
+	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "WantName")); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	if m2, d2 := sfs.containerMovedByPeer(ctx, path.Join(parent, "GoneName"), path.Join(parent, "WantName")); !d2 || !m2 {
+		t.Fatalf("源已消失且目标可见应判「已完成」（decided=%v moved=%v）", d2, m2)
+	}
+	// 反向：源仍在 ⇒ 未完成
+	if merr := sfs.inner.MakeDir(ctx, path.Join(parent, "StillThere")); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	moved2, decided2 := sfs.containerMovedByPeer(ctx, path.Join(parent, "StillThere"), path.Join(parent, "WantName"))
+	if !decided2 || moved2 {
+		t.Fatalf("源仍在应判「未完成」（decided=%v moved=%v）", decided2, moved2)
+	}
+}

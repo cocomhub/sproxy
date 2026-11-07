@@ -3185,7 +3185,19 @@ func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want strin
 			hasWant = true
 		}
 	}
-	return !hasCur && hasWant, true
+	// **源已不在 ⇒ 移动实际已完成**（2026-11-07 实测缺陷修复）：远端目录列举**最终一致**
+	// （实测百度网盘：rename 已成功、源已消失，但父目录列举在若干秒内仍可能看不到目标）
+	// ⇒ 若要求「目标必须已可见」才对，迁移会在**已成功**的容器上判定为失败并中止
+	// （实测：同一条深层路径连续多轮失败，且目标 mtime 已是本次 rename 的时间）。
+	// 判据只依赖**源已消失**这一强信号；目标暂未可见仅告警（下次扫描会看到，幂等）。
+	if !hasCur {
+		if !hasWant {
+			slog.Warn("secretdata: 容器改名后源已消失但目标尚未在列举中可见（远端列举最终一致）⇒ 视为已完成",
+				"from", cur, "to", want)
+		}
+		return true, true
+	}
+	return false, true
 }
 
 // normalizeAllRels 遍历逻辑目录执行改名（分批上限 + 限速；拆出以控认知复杂度）。
