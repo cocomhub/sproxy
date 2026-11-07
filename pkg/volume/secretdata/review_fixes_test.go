@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -334,32 +335,50 @@ func TestP1_4_ExportDoesNotLeakState(t *testing.T) {
 	}
 }
 
-// TestP1_5_ConflictCriterionIgnoresSubContainerPhysicalNames 复现 **P1-5**：争议判据用
+// TestP1_5_ConflictCriterionIgnoresSubContainerPhysicalNames 复现 **P1-5**：争议判据曾用
 // **物理条目名**比对（`containerEntries` + `missingFrom`），而历史子容器名是随机的 ⇒
 // 含子容器的重复组必然被判 `Conflicted=true` ⇒ 最需要迁移的嵌套重复组被**永久跳过**。
 //
-// 夹具：同一 rel 两个容器，落选容器比权威容器多一个**随机名的空子目录**（子容器名天然不同），
-// 两者**文件内容完全一致** ⇒ 应判「无争议」。
+// 夹具：权威与落选子树**内容等价**（相同逻辑目录 + 相同文件），仅落选的子容器**物理名**不同
+// （dir meta 不变）⇒ 必须判「无争议」。（F5 后判据按逻辑路径 key，需子容器 dir meta 可解密。）
 func TestP1_5_ConflictCriterionIgnoresSubContainerPhysicalNames(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	sfs := newNormalizeFS(t, root)
-	if merr := sfs.MakeDir(ctx, "dup/n"); merr != nil {
+	if merr := sfs.MakeDir(ctx, "dup/n/sub"); merr != nil {
 		t.Fatalf("MakeDir: %v", merr)
 	}
-	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "dup/n/f.bin",
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "dup/n/sub/f.bin",
 		bytes.NewReader([]byte("nested-content")), 14, 0); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	sfs.mu.RLock()
 	canonical := sfs.dirSegs["dup/n"]
 	sfs.mu.RUnlock()
-	dupRel := cloneDirMetaContainer(t, root, canonical, "Rnd", true)
-	// 落选容器内塞一个**随机名**子目录（模拟历史随机子容器名；权威侧没有这个物理名）
-	randSub := filepath.Join(root, filepath.FromSlash(dupRel), "zzRandomSubContainer")
-	if merr := os.MkdirAll(randSub, 0o755); merr != nil {
-		t.Fatalf("建随机子目录: %v", merr)
+	dupRel := canonical + "Rnd"
+	if cerr := copyDirTree(filepath.Join(root, filepath.FromSlash(canonical)),
+		filepath.Join(root, filepath.FromSlash(dupRel))); cerr != nil {
+		t.Fatalf("复制容器树: %v", cerr)
+	}
+	// 把落选的**子容器**改成随机物理名（dir meta 不变 ⇒ 逻辑名仍是 sub）
+	ents, derr := os.ReadDir(filepath.Join(root, filepath.FromSlash(dupRel)))
+	if derr != nil {
+		t.Fatalf("读落选容器: %v", derr)
+	}
+	renamed := 0
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		oldP := filepath.Join(root, filepath.FromSlash(dupRel), e.Name())
+		if rerr := os.Rename(oldP, oldP+"RandPhysName"); rerr != nil {
+			t.Fatalf("子容器改名: %v", rerr)
+		}
+		renamed++
+	}
+	if renamed == 0 {
+		t.Fatal("夹具应有子容器")
 	}
 	c, aerr := sfs.auditOneGroup(ctx, dupContainerGroup{
 		rel: "dup/n", canonical: canonical, others: []string{dupRel},
@@ -368,19 +387,42 @@ func TestP1_5_ConflictCriterionIgnoresSubContainerPhysicalNames(t *testing.T) {
 		t.Fatalf("auditOneGroup: %v", aerr)
 	}
 	if c.Conflicted {
-		t.Fatalf("内容等价（仅子容器随机名不同）不得判为争议：%v", c.Details)
+		t.Fatalf("内容等价（仅子容器物理名不同）不得判为争议：%v", c.Details)
 	}
 }
 
-// TestP2_3_SampleDriftClassifiesUnmigratedVsAnomalous 钉住**采样告警降噪**（批次 16 P2-3）：
-// 父未迁移 ⇒ 子名不同属**预期态**（Debug，不计入 anomalous）；父符合机制而自身不符合 ⇒ 真异常。
+// copyDirTree 递归复制目录（夹具用；仅目录与普通文件）。
+func copyDirTree(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	ents, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		s, d := filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())
+		if e.IsDir() {
+			if cerr := copyDirTree(s, d); cerr != nil {
+				return cerr
+			}
+			continue
+		}
+		if cerr := copyFile(s, d); cerr != nil {
+			return cerr
+		}
+	}
+	return nil
+}
+
+// TestP2_3_SampleDriftClassifiesUnmigratedVsAnomalous 钉住**采样告警降噪**（P2-3）：
+// 父未迁移 ⇒ 子名不同属**预期态**（Debug）；父符合机制而自身不符合 ⇒ 真异常（Warn）。
 func TestP2_3_SampleDriftClassifiesUnmigratedVsAnomalous(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	sfs := newNormalizeFS(t, root)
-	// 构造：顶层 a 规范；a/b 规范；a/c 名为随机（父规范 ⇒ 异常）；x 为随机（顶层，无父）
 	segs := map[string]string{}
-	for _, rel := range []string{"a", "a/b", "a/c", "x"} {
+	for _, rel := range []string{"a", "a/b", "a/c"} {
 		p := parentDirOf(rel)
 		pc := ""
 		if p != "" {
@@ -399,31 +441,30 @@ func TestP2_3_SampleDriftClassifiesUnmigratedVsAnomalous(t *testing.T) {
 	if got := sfs.classifySampleDrift(segs, "a/c"); got != sampleDriftAnomalous {
 		t.Fatalf("父规范而自身不合规应判 Anomalous，got %v", got)
 	}
-	// 父（a）改随机 ⇒ a/b 子名必然不同 ⇒ 预期态（未迁移）
-	segs["a"] += "Rand"
+	segs["a"] += "Rand" // 父被改 ⇒ 子名必然不同 ⇒ 预期态
 	if got := sfs.classifySampleDrift(segs, "a/b"); got != sampleDriftUnmigrated {
 		t.Fatalf("父未迁移时子命名差异应判 Unmigrated（降噪），got %v", got)
 	}
 }
 
-// TestP2_4_RetriesUseBoundedExponentialBackoff 钉住**退避重试次数**（批次 16 P2-4）：
-// 限流下应重试 5 次（而非 3 次），且退避指数放大但封顶。
+// TestP2_4_RetriesUseBoundedExponentialBackoff 钉住**退避重试次数**（P2-4）：限流下应重试 5 次，
+// 且退避指数放大但封顶。（退避基数经 `ContainerMoveRetryBase` 注入为 1ms ⇒ 用例不需真实等 30s。）
 func TestP2_4_RetriesUseBoundedExponentialBackoff(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	sfs := newNormalizeFS(t, root)
+	sfs.opts.ContainerMoveRetryBase = time.Millisecond
 	if merr := sfs.MakeDir(ctx, "r1"); merr != nil {
 		t.Fatalf("MakeDir: %v", merr)
 	}
-	sfs.mu.RLock()
-	cur := sfs.dirSegs["r1"]
-	sfs.mu.RUnlock()
 	legacyRenameContainer(t, sfs, root, "r1")
 	flaky := &countingFailRenameFS{FS: sfs.inner}
 	sfs.inner = flaky
-	_, err := sfs.moveContainerIdempotent(ctx, "r1", sfs.dirSegs["r1"], cur)
-	if err == nil {
+	sfs.mu.RLock()
+	cur := sfs.dirSegs["r1"]
+	sfs.mu.RUnlock()
+	if _, err := sfs.moveContainerIdempotent(ctx, "r1", cur, cur+"Want"); err == nil {
 		t.Fatal("始终失败应返回错误")
 	}
 	if flaky.attempts != 5 {
@@ -445,8 +486,7 @@ func (f *countingFailRenameFS) Rename(_ context.Context, _, _ string) error {
 	return os.ErrDeadlineExceeded
 }
 
-// TestP2_5_ApplyConvergesInOneRun 钉住**分批迁移在一次装配内收敛**（批次 16 P2-5）：
-// `NormalizeMaxMoves` 是每轮上限，原先只跑一轮 ⇒ 需人工多次重启；现应循环到 moved==0。
+// TestP2_5_ApplyConvergesInOneRun 钉住**分批迁移在一次装配内收敛**（P2-5）。
 func TestP2_5_ApplyConvergesInOneRun(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -477,8 +517,7 @@ func TestP2_5_ApplyConvergesInOneRun(t *testing.T) {
 	}
 }
 
-// TestP2_7_DupGroupsSnapshotDeepCopies 钉住 **P2-7**：快照的 `others` 必须是深拷贝
-// （否则调用方误改会污染内部状态）。
+// TestP2_7_DupGroupsSnapshotDeepCopies 钉住 **P2-7**：快照的 `others` 必须是深拷贝。
 func TestP2_7_DupGroupsSnapshotDeepCopies(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -493,5 +532,141 @@ func TestP2_7_DupGroupsSnapshotDeepCopies(t *testing.T) {
 	sfs.mu.RUnlock()
 	if internal != "O1" {
 		t.Fatalf("快照未深拷贝 ⇒ 内部状态被污染: %s", internal)
+	}
+}
+
+// TestF1_TopLevelDriftDependsOnRootContainer 钉住**修复轮 F1**：顶层容器名由**卷根容器**派生 ⇒
+// 根容器自身不合规（未迁移的卷）时，顶层命名差异属**预期态**（Debug），不得误报「疑似外部直改盘」。
+func TestF1_TopLevelDriftDependsOnRootContainer(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	segs := map[string]string{"": ""}
+	want, err := sfs.targetContainerPath("", "x")
+	if err != nil {
+		t.Fatalf("targetContainerPath: %v", err)
+	}
+	segs["x"] = want + "Rand"
+	if got := sfs.classifySampleDrift(segs, "x"); got != sampleDriftAnomalous {
+		t.Fatalf("无根容器时顶层命名不符应判 Anomalous，got %v", got)
+	}
+	segs[""] = "LegacyRootContainer"
+	if got := sfs.classifySampleDrift(segs, "x"); got != sampleDriftUnmigrated {
+		t.Fatalf("根容器不合规时顶层差异应判 Unmigrated（降噪），got %v", got)
+	}
+}
+
+// TestF2_ExportRollbackPreservesConcurrentAccounting 钉住**修复轮 F2**：导出临时注册必须按
+// **增量**回滚 —— 绝对值还原会覆盖并发写者的用量更新（lost update）。
+func TestF2_ExportRollbackPreservesConcurrentAccounting(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	reg := sfs.beginExportTempRegistration("some/container")
+	reg.seal()
+	const concurrent = 4096
+	sfs.mu.Lock()
+	sfs.usage += concurrent // 模拟导出期间另一个写路径新增用量
+	sfs.mu.Unlock()
+	reg.rollback()
+	sfs.mu.RLock()
+	got := sfs.usage
+	sfs.mu.RUnlock()
+	if got != concurrent {
+		t.Fatalf("回滚覆盖了并发写者的用量增量：got %d，期望 %d", got, concurrent)
+	}
+}
+
+// countingListFS 统计 ListDir 调用次数（验证审计只做一次）。
+type countingListFS struct {
+	syncpkg.FS
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *countingListFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	return f.FS.ListDir(ctx, p)
+}
+
+func (f *countingListFS) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// TestF3_ApplyAuditsOnceAcrossRounds 钉住**修复轮 F3**：`apply` 分批多轮时审计**只做一次**
+// ⇒ 总列举次数不随轮数线性增长。
+func TestF3_ApplyAuditsOnceAcrossRounds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	seed := mountReviewFS(t, root, filepath.Join(t.TempDir(), "seed.enc"))
+	if merr := seed.MakeDir(ctx, "dup/z"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	seed.mu.RLock()
+	canonical := seed.dirSegs["dup/z"]
+	seed.mu.RUnlock()
+	cloneDirMetaContainer(t, root, canonical, "Rnd", false)
+
+	sfs := mountReviewFS(t, root, filepath.Join(t.TempDir(), "s.enc"))
+	rels := []string{"k1", "k2", "k3", "k4"} // 4 轮（maxMoves=1）
+	for _, rel := range rels {
+		if merr := sfs.MakeDir(ctx, rel); merr != nil {
+			t.Fatalf("MakeDir(%s): %v", rel, merr)
+		}
+		legacyRenameContainer(t, sfs, root, rel)
+	}
+	counter := &countingListFS{FS: sfs.inner}
+	sfs.inner = counter
+	sfs.opts.NormalizeMaxMoves = 1
+	sfs.opts.NormalizeMoveInterval = time.Millisecond
+	before := counter.count()
+	sfs.runApplyAction(ctx)
+	delta := counter.count() - before
+	if delta > 10 {
+		t.Fatalf("审计疑似每轮重算：ListDir 调用 %d 次（期望一次性审计 ≤10）", delta)
+	}
+	for _, rel := range rels {
+		sfs.mu.RLock()
+		got := sfs.dirSegs[rel]
+		pc := sfs.dirSegs[parentDirOf(rel)]
+		sfs.mu.RUnlock()
+		want, err := sfs.targetContainerPath(pc, rel)
+		if err != nil {
+			t.Fatalf("targetContainerPath: %v", err)
+		}
+		if got != want {
+			t.Fatalf("apply 未收敛：%s = %s，期望 %s", rel, got, want)
+		}
+	}
+}
+
+// TestF5_LogicalFilesUsePathQualifiedKeys 钉住**修复轮 F5**：逻辑文件键必须带**目录段**
+// （只用 basename 时「不同子目录下的同名文件」会互相掩盖 ⇒ 漏报内容差异）。
+func TestF5_LogicalFilesUsePathQualifiedKeys(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sfs := newNormalizeFS(t, root)
+	if merr := sfs.MakeDir(ctx, "n/sub"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "n/sub/f.bin",
+		bytes.NewReader([]byte("nested")), 6, 0); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	sfs.mu.RLock()
+	rootContainer := sfs.dirSegs["n"]
+	sfs.mu.RUnlock()
+	files, err := sfs.containerLogicalFiles(ctx, rootContainer)
+	if err != nil {
+		t.Fatalf("containerLogicalFiles: %v", err)
+	}
+	if _, ok := files["sub/f.bin"]; !ok {
+		t.Fatalf("键应为带目录段的逻辑路径 sub/f.bin，got %v", files)
 	}
 }

@@ -380,12 +380,18 @@ func alnumFromBytes(b []byte, n int) string {
 	}
 	limit := 256 - 256%len(dirAlnumCharset)
 	out := make([]byte, 0, n)
-	for i := 0; len(out) < n; i++ {
+	// **尝试上限**（修复轮 F6）：若输入字节全落在被拒区间（退化/恶意输入），纯拒绝采样会**永不
+	// 收敛**（死循环）。故设上限，超出后用带（极轻）偏置的取模补齐——宁可轻微偏置，绝不挂起。
+	maxDraws := 8*n + 64
+	for i := 0; len(out) < n && i < maxDraws; i++ {
 		v := int(b[i%len(b)])
 		if v >= limit {
 			continue // 拒绝采样
 		}
 		out = append(out, dirAlnumCharset[v%len(dirAlnumCharset)])
+	}
+	for i := 0; len(out) < n; i++ {
+		out = append(out, dirAlnumCharset[int(b[i%len(b)])%len(dirAlnumCharset)])
 	}
 	return string(out)
 }

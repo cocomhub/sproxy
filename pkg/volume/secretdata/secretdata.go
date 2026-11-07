@@ -162,6 +162,9 @@ type Options struct {
 	// （0 = defaultNormalizeTimeout）。超时即收口为「部分完成 + 可续跑」（迁移幂等），
 	// 避免外部限流/超大卷把挂载阻塞到不可控时长（批次 16 P2-1）。
 	NormalizeTimeout time.Duration
+	// ContainerMoveRetryBase 是容器改名失败**指数退避的基数**（0 ⇒ containerMoveRetryInterval）。
+	// 仅为测试缩短等待而暴露（生产不设，走默认）。
+	ContainerMoveRetryBase time.Duration
 
 	// MetaCacheDir 是装配期 meta blob 的**本机磁盘密文缓存**目录（空 = 禁用，默认零回归）。
 	// 外部卷每读一个 meta 都要起一次下载 CLI 并落随机临时目录（Close 即删）⇒ 每次重启
@@ -528,7 +531,14 @@ func (s *SecretdataFS) classifySampleDrift(segs map[string]string, rel string) s
 func (s *SecretdataFS) parentContainerCanonical(segs map[string]string, rel string) bool {
 	p := parentDirOf(rel)
 	if p == "" {
-		return true
+		// **顶层**：其容器名由**卷根容器**派生 ⇒ 必须先确认根容器自身合规，否则「未迁移的卷」
+		// 里每个顶层容器都会被误报为"异常/外部直改盘"（批次 16 修复轮 F1，实测误导排查方向）。
+		// 根容器合规性用 (`""`,`""`) 的派生名比对（与创建路径 `createContainerLocked` 同源）。
+		if segs[""] == "" {
+			return true // 无根容器（容器直接落在卷根）⇒ 顶层名可直接判定
+		}
+		wantRoot, err := s.targetContainerPath("", "")
+		return err == nil && segs[""] == wantRoot
 	}
 	pw, err := s.targetContainerPath(segs[parentDirOf(p)], p)
 	return err == nil && segs[p] == pw
@@ -579,9 +589,16 @@ func (s *SecretdataFS) runNormalizeNamesAction(action string) {
 // 原先只跑一轮 ⇒ 需人工多次重启才能迁完全量容器。循环以「本轮 moved==0」或超时/出错收口，
 // 每轮幂等且失败即提交已完成部分（可续跑）。
 func (s *SecretdataFS) runApplyAction(ctx context.Context) {
+	// 审计**只做一次**（批次 16 修复轮 F3）：重复容器组在迁移期间不变 ⇒ 每轮重算会让
+	// 「分批迁移」退化成 O(轮数 × 全量审计 + 解密）。
+	blocked, berr := s.normalizeBlockedRels(ctx)
+	if berr != nil {
+		slog.Error("secretdata: 容器名规范化前置审计失败（本轮跳过）", "error", berr)
+		return
+	}
 	totalMoved, rounds := 0, 0
 	for rounds < normalizeMaxRounds {
-		moved, skipped, err := s.NormalizeContainerNames(ctx, false)
+		moved, skipped, err := s.normalizeContainerNamesWithBlocked(ctx, false, blocked)
 		totalMoved += moved
 		rounds++
 		if err != nil {
@@ -2657,11 +2674,21 @@ func (s *SecretdataFS) NormalizeContainerNames(ctx context.Context, dryRun bool)
 		return 0, 0, fmt.Errorf("secretdata: 规范化容器名需要非空密钥")
 	}
 	// **迁移前置检查**（用户要求 2026-11-06）：重复容器组内若有**争议内容**
-	// （落选容器含权威容器没有的条目）⇒ 该组**跳过**（等人工确认），只迁移其余容器。
+	// （落选容器含权威容器没有的逻辑文件）⇒ 该组**跳过**（等人工确认），只迁移其余容器。
 	blocked, berr := s.normalizeBlockedRels(ctx)
 	if berr != nil {
 		return 0, 0, berr
 	}
+	return s.normalizeContainerNamesWithBlocked(ctx, dryRun, blocked)
+}
+
+// normalizeContainerNamesWithBlocked 是规范化的主流程（blocked 由调用方提供）。
+//
+// **为什么把 blocked 作为参数**（批次 16 修复轮 F3）：`normalizeBlockedRels` 是一次完整审计
+// （逐容器列举 + 解密文件 meta），而分批迁移需要多轮调用 —— 每轮重算会让总成本退化为
+// O(轮数 × 审计)。重复容器组在迁移期间**不变**（只重命名权威容器，落选容器不动）⇒ 复用安全。
+func (s *SecretdataFS) normalizeContainerNamesWithBlocked(ctx context.Context, dryRun bool,
+	blocked map[string]bool) (moved, skipped int, err error) {
 	s.mu.RLock()
 	segs := make(map[string]string, len(s.dirSegs))
 	maps.Copy(segs, s.dirSegs)
@@ -2765,7 +2792,11 @@ func (s *SecretdataFS) moveContainerIdempotent(ctx context.Context, rel, cur, wa
 		if attempt == maxAttempts {
 			break
 		}
-		delay := min(time.Duration(1<<(attempt-1))*containerMoveRetryInterval, maxContainerMoveBackoff)
+		base := s.opts.ContainerMoveRetryBase
+		if base <= 0 {
+			base = containerMoveRetryInterval
+		}
+		delay := min(time.Duration(1<<(attempt-1))*base, maxContainerMoveBackoff)
 		slog.Warn("secretdata: 容器改名失败，退避后重试（可能外部限流）",
 			"rel", rel, "attempt", attempt, "max_attempts", maxAttempts, "delay", delay, "error", lastErr)
 		select {
@@ -3047,47 +3078,90 @@ func keysOf(set map[string]struct{}) []string {
 	return out
 }
 
-// containerLogicalFiles 递归收集容器子树内全部文件 meta 的**逻辑文件名**（解密取 Original.Name）。
-// 用逻辑名而非物理名 ⇒ 随机子容器名不影响比对（批次 16 P1-5）。
+// containerLogicalFiles 递归收集容器子树内全部文件的**逻辑路径**（相对容器根）集合：
+// 目录段取自各子容器 dir meta 的 `Name`，文件名取自文件 meta 的 `Original.Name`。
+//
+// 为什么用「逻辑路径」而不是「物理条目名」（批次 16 P1-5）：历史**子容器名是随机**的（正是本
+// 机制要治理的问题本身）⇒ 按物理名比对时「含 ≥2 子容器的重复组」必然判争议、永久跳过迁移。
+// 为什么还要带**目录段**（修复轮 F5）：只用 basename 时「不同子目录下的同名文件」会互相掩盖
+// ⇒ 漏报真实的内容差异。
 func (s *SecretdataFS) containerLogicalFiles(ctx context.Context, root string) (map[string]struct{}, error) {
-	nodes, err := s.collectContainerTree(ctx, root)
-	if err != nil {
-		return nil, err
+	return s.collectLogicalFiles(ctx, root, "", 0)
+}
+
+// collectLogicalFiles 递归收集逻辑路径集合（logicalPrefix = 当前容器的逻辑路径前缀）。
+func (s *SecretdataFS) collectLogicalFiles(ctx context.Context, container, logicalPrefix string, depth int) (map[string]struct{}, error) {
+	if depth > maxContainerDepth {
+		return nil, fmt.Errorf("secretdata: 容器树递归超过深度上限 %d（容器 %q）", maxContainerDepth, container)
 	}
-	out := map[string]struct{}{}
-	for _, n := range nodes {
-		names, lerr := s.logicalFilesInContainer(ctx, n.container)
-		if lerr != nil {
-			return nil, lerr
+	ents, err := s.listInner(ctx, container)
+	if err != nil {
+		return nil, fmt.Errorf("列举容器 %q 失败: %w", container, err)
+	}
+	out, subs, cerr := s.collectContainerLocalFiles(ctx, container, ents, logicalPrefix)
+	if cerr != nil {
+		return nil, cerr
+	}
+	for _, sub := range subs {
+		subFiles, serr := s.collectSubContainerLogicalFiles(ctx, container, sub, logicalPrefix, depth)
+		if serr != nil {
+			return nil, serr
 		}
-		for _, name := range names {
-			out[name] = struct{}{}
+		for k := range subFiles {
+			out[k] = struct{}{}
 		}
 	}
 	return out, nil
 }
 
-// logicalFilesInContainer 收集**单个**容器内全部文件 meta 的逻辑文件名（解密取 Original.Name）。
-func (s *SecretdataFS) logicalFilesInContainer(ctx context.Context, container string) ([]string, error) {
-	ents, err := s.listInner(ctx, container)
-	if err != nil {
-		return nil, fmt.Errorf("列举容器 %q 失败: %w", container, err)
-	}
-	var out []string
+// collectContainerLocalFiles 处理**单个容器自身**的条目：返回「逻辑文件路径集合」与「子容器名列表」。
+func (s *SecretdataFS) collectContainerLocalFiles(ctx context.Context, container string,
+	ents []syncpkg.Entry, logicalPrefix string) (map[string]struct{}, []string, error) {
+	out := map[string]struct{}{}
+	var subs []string
 	for _, e := range ents {
-		if e.IsDir || shardseal.ClassifyName(e.Name) != shardseal.KindFileMeta {
+		if e.IsDir {
+			subs = append(subs, e.Name)
 			continue
 		}
-		blobKey := path.Join(container, e.Name)
-		mm, _, merr := s.readFileMetaFast(ctx, blobKey)
-		if merr != nil {
-			return nil, fmt.Errorf("解密文件 meta %q 失败: %w", blobKey, merr)
+		if shardseal.ClassifyName(e.Name) != shardseal.KindFileMeta {
+			continue
 		}
-		if mm != nil {
-			out = append(out, mm.Original.Name)
+		name, merr := s.logicalFileName(ctx, path.Join(container, e.Name))
+		if merr != nil {
+			return nil, nil, merr
+		}
+		if name != "" {
+			out[path.Join(logicalPrefix, name)] = struct{}{}
 		}
 	}
-	return out, nil
+	return out, subs, nil
+}
+
+// logicalFileName 解密单个文件 meta 并返回其**逻辑文件名**（不可读 ⇒ error）。
+func (s *SecretdataFS) logicalFileName(ctx context.Context, blobKey string) (string, error) {
+	mm, _, merr := s.readFileMetaFast(ctx, blobKey)
+	if merr != nil {
+		return "", fmt.Errorf("解密文件 meta %q 失败: %w", blobKey, merr)
+	}
+	if mm == nil {
+		return "", nil
+	}
+	return mm.Original.Name, nil
+}
+
+// collectSubContainerLogicalFiles 读取子容器的**目录 meta 逻辑名**后递归收集其逻辑文件路径。
+func (s *SecretdataFS) collectSubContainerLogicalFiles(ctx context.Context, parentContainer, sub,
+	logicalPrefix string, depth int) (map[string]struct{}, error) {
+	subC := path.Join(parentContainer, sub)
+	dm, _, _, found, derr := s.scanContainerDirMeta(ctx, subC)
+	if derr != nil {
+		return nil, fmt.Errorf("读取子容器 %q 目录 meta 失败: %w", subC, derr)
+	}
+	if !found || dm == nil {
+		return nil, fmt.Errorf("子容器 %q 缺少可解密的目录 meta", subC)
+	}
+	return s.collectLogicalFiles(ctx, subC, path.Join(logicalPrefix, dm.Name), depth+1)
 }
 
 // missingFrom 返回 items 中不在 have 里的元素（顺序保持）。

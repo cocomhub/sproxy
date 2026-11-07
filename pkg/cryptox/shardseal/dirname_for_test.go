@@ -116,3 +116,14 @@ func TestP3_1_AlnumFromBytesGuardAndDistribution(t *testing.T) {
 		t.Fatalf("拒绝采样后应近似均匀（极差 ≤1），got min=%d max=%d", mn, mx)
 	}
 }
+
+// TestF6_AlnumFromBytesTerminatesOnDegenerateInput 钉住**修复轮 F6**：输入字节全落在被拒区间
+// （退化/恶意输入）时必须有**尝试上限**并兜底返回，绝不因纯拒绝采样而死循环。
+// （红态验证：去掉兜底循环后用 `go test -timeout 30s` 运行本用例 ⇒ 超时失败。）
+func TestF6_AlnumFromBytesTerminatesOnDegenerateInput(t *testing.T) {
+	t.Parallel()
+	got := alnumFromBytes([]byte{255, 255, 255, 255}, 8)
+	if len(got) != 8 {
+		t.Fatalf("退化输入应兜底返回 8 字符（不得死循环），got %q", got)
+	}
+}

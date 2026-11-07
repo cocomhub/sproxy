@@ -336,10 +336,10 @@ func (s *SecretdataFS) writeIndexSnapshot(snap *indexSnapshot) {
 // `os.Rename` 之间隔着 marshal + gzip + AES-GCM + 写盘（数十 MB、秒级窗口）——窗口内落下的
 // 写/迁移无法阻止陈旧快照被写回，下次启动即载入陈旧索引（已删文件“复活”、新文件“不可见”）。
 func (s *SecretdataFS) finalizeSnapshotFile(tmp, p string, gen uint64) bool {
-	if s.snapshotGen.Load() != gen {
+	if cur := s.snapshotGen.Load(); cur != gen {
 		_ = os.Remove(tmp)
 		slog.Warn("secretdata: 索引快照提交前发现代际已变化（窗口内发生过写操作）⇒ 放弃落盘，避免陈旧索引覆盖",
-			"path", p, "gen", gen, "current_gen", s.snapshotGen.Load())
+			"path", p, "gen", gen, "current_gen", cur)
 		return false
 	}
 	if err := os.Rename(tmp, p); err != nil {

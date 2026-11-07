@@ -28,8 +28,14 @@ import (
 	"strings"
 )
 
-// dupExportTempPrefix 是导出期间临时注册的伪逻辑路径前缀（与真实 rel 隔离，导出后清理）。
-const dupExportTempPrefix = "__dup_export__/"
+// dupExportRoot 是导出期间临时注册的**顶层命名空间**（与真实 rel 隔离；导出后整体清理）。
+//
+// 为什么需要独立的根常量（批次 16 修复轮 F2）：回滚只按 `dupExportTempPrefix`（带尾斜杠）
+// 前缀清理会漏掉**顶层键本身** `__dup_export__`（它没有尾斜杠）⇒ `ListDir("/")` 残留幻影目录。
+const dupExportRoot = "__dup_export__"
+
+// dupExportTempPrefix 是导出期间临时注册的伪逻辑路径前缀（根 + "/"）。
+const dupExportTempPrefix = dupExportRoot + "/"
 
 // ExportDuplicateContainers 把所有**重复容器组**的落选容器递归解码导出到 dstRoot。
 //
@@ -117,6 +123,7 @@ func (s *SecretdataFS) exportOneContainer(ctx context.Context, groupRel, contain
 	if err := s.loadContainerFileMetas(ctx, container, reg.tmpRel); err != nil {
 		return 0, 0, err
 	}
+	reg.seal()                                   // 采集 after 基线（增量回滚的前提）
 	reg.keysAdded = s.indexKeysUnder(reg.tmpRel) // 一次性收集：遍历 + 回滚共用（避免二次全索引扫描）
 
 	// **同名隔离**：<dstRoot>/<逻辑目录>/<落选容器标识>/<容器内相对路径>/<文件名>
@@ -152,12 +159,14 @@ type exportTempReg struct {
 	tmpRel    string
 	keysAdded []string
 
-	prevSeg    string
-	hadSeg     bool
-	usage      int64
-	version    int64
-	dirsBefore map[string]struct{}
-	poolBefore map[string]int64
+	prevSeg string
+	hadSeg  bool
+	// 注册**前**（before）与注册**后**（after，seal 时采集）的快照。回滚按**增量**撤销，
+	// 而不是写回绝对值——`ExportDuplicateContainers` 是**导出 API**，若在活跃卷上被调用，
+	// 绝对值还原会**覆盖并发写者**的用量/版本/引用更新（lost update，批次 16 修复轮 F2）。
+	usageBefore, usageAfter     int64
+	versionBefore, versionAfter int64
+	poolBefore, poolAfter       map[string]int64
 }
 
 // beginExportTempRegistration 建立临时注册并返回回滚句柄（调用方 defer rollback）。
@@ -167,17 +176,32 @@ func (s *SecretdataFS) beginExportTempRegistration(container string) *exportTemp
 	r.prevSeg, r.hadSeg = s.dirSegs[r.tmpRel]
 	s.dirSegs[r.tmpRel] = container
 	s.dirs[r.tmpRel] = struct{}{}
-	r.usage, r.version = s.usage, s.volVersion
-	r.dirsBefore = make(map[string]struct{}, len(s.dirs))
-	for k := range s.dirs {
-		r.dirsBefore[k] = struct{}{}
-	}
+	r.usageBefore, r.versionBefore = s.usage, s.volVersion
 	r.poolBefore = make(map[string]int64, len(s.dedupPool))
 	for k, v := range s.dedupPool {
 		r.poolBefore[k] = v.refs
 	}
+	// 未 seal 前 after==before（load 失败时回滚为无操作）
+	r.usageAfter, r.versionAfter = r.usageBefore, r.versionBefore
+	r.poolAfter = r.poolBefore
 	s.mu.Unlock()
 	return r
+}
+
+// seal 在临时注册（`loadContainerFileMetas`）完成后采集 after 基线；回滚按 (after-before)
+// 增量撤销，保证并发写者的更新不被覆盖。
+func (r *exportTempReg) seal() {
+	if r == nil {
+		return
+	}
+	s := r.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.usageAfter, r.versionAfter = s.usage, s.volVersion
+	r.poolAfter = make(map[string]int64, len(s.dedupPool))
+	for k, v := range s.dedupPool {
+		r.poolAfter[k] = v.refs
+	}
 }
 
 // rollback 撤销临时注册的全部副作用（幂等：可安全重复调用）。
@@ -196,23 +220,38 @@ func (r *exportTempReg) rollback() {
 	} else {
 		delete(s.dirSegs, r.tmpRel)
 	}
+	// 只清**本模块命名空间**下的目录键（前缀精确匹配 ⇒ 并发写者新建的目录不受影响）
 	for k := range s.dirs {
-		if _, ok := r.dirsBefore[k]; !ok {
+		if k == dupExportRoot || strings.HasPrefix(k, dupExportTempPrefix) {
 			delete(s.dirs, k)
 		}
 	}
-	delete(s.dirs, r.tmpRel) // tmpRel 在快照前已加入 ⇒ 差集不含它，需显式删除
-	s.usage = r.usage
-	s.volVersion = r.version
-	for k := range s.dedupPool {
-		if _, ok := r.poolBefore[k]; !ok {
-			delete(s.dedupPool, k)
-		}
+	delete(s.dirs, r.tmpRel)
+	// 用量/版本：按**增量**撤销（并发增量保留）
+	s.usage -= r.usageAfter - r.usageBefore
+	if s.usage < 0 {
+		s.usage = 0
 	}
-	for k, refs := range r.poolBefore {
-		if blk, ok := s.dedupPool[k]; ok {
-			blk.refs = refs
+	if s.volVersion == r.versionAfter {
+		s.volVersion = r.versionBefore // 期间无他人改版本才回滚（CAS 语义）
+	}
+	r.rollbackDedupPoolLocked()
+}
+
+// rollbackDedupPoolLocked 只撤销「导出自身造成的变化」：按 after 值比对 ⇒ 并发 +1 保留。
+// 调用方持 s.mu。
+func (r *exportTempReg) rollbackDedupPoolLocked() {
+	s := r.s
+	for k, after := range r.poolAfter {
+		blk, ok := s.dedupPool[k]
+		if !ok || blk.refs != after {
+			continue
 		}
+		if before, existed := r.poolBefore[k]; existed {
+			blk.refs = before
+			continue
+		}
+		delete(s.dedupPool, k)
 	}
 }
 
